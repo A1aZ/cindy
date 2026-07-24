@@ -1744,13 +1744,18 @@ function handleAgentIslandSessionClosedAfterCleanup(sessionId: string): void {
   }
 }
 
-function handleAgentIslandSessionStopped(sessionId: string): void {
-  if (!shouldNotifyAgentIslandForSession(sessionId)) return;
+function handleAgentIslandSessionStopped(
+  session: { id: string; getCurrentTurnId?: () => string | null },
+): void {
+  if (!shouldNotifyAgentIslandForSession(session.id)) return;
   try {
-    getAgentIslandService()?.handleSessionStopped(sessionId);
+    getAgentIslandService()?.handleSessionStopped(
+      session.id,
+      session.getCurrentTurnId?.() ?? null,
+    );
   } catch (error) {
     log.warn('Agent Island session stop update failed before provider abort', {
-      sessionId,
+      sessionId: session.id,
       error: error instanceof Error ? error.message : String(error),
     });
   }
@@ -1787,6 +1792,18 @@ function notifyAgentIslandUserPrompt(
       sessionId: session.id,
       source: options.source,
       clientId: options.clientId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+function dispatchAgentIslandUserPrompt(sessionId: string): void {
+  if (!shouldNotifyAgentIslandForSession(sessionId)) return;
+  try {
+    getAgentIslandService()?.handleUserPromptDispatching(sessionId);
+  } catch (error) {
+    log.warn('Agent Island prompt dispatch boundary update failed', {
+      sessionId,
       error: error instanceof Error ? error.message : String(error),
     });
   }
@@ -1916,6 +1933,16 @@ export function installDesktopInteractionListener(
     // 且不走 onEvent —— 在这把在飞 assistant 文本落库,等价于 renderer 老逻辑在
     // ask_user_question / plan_review case 里的 mid-turn assistant 抢救(只入队、不阻塞)。
     await waitForReleasedOutput(session.id);
+    if (
+      agentIslandInteractionEpoch !== null &&
+      shouldNotifyAgentIslandForSession(session.id) &&
+      getAgentIslandService()?.isInteractionCurrent(
+        session.id,
+        agentIslandInteractionEpoch,
+      ) === false
+    ) {
+      return defaultDecisionForPending(req.kind, 'stale_turn');
+    }
     flushAssistantBlock(session.id);
     // F1-a Phase 5: ask_user / plan_review 的消息本身也收口 main 单点落库(单 persistId,
     // 修 F1 重复),persistId 盖进 payload 让 renderer 用同一 id 建气泡 + answered 回写命中。
@@ -4284,6 +4311,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
             // (jump/resume 分支是既有 session 重建,不在此发,见 wakeKind:'resumed' 分支。)
             broadcastSessionCreated(session.id);
           },
+          onDispatching: () => dispatchAgentIslandUserPrompt(session.id),
         });
         if (createdPreviewStarted) {
           if (sendResult.accepted) {
@@ -4454,7 +4482,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
           const sendResult = await sendUserMessageWithAwaitedGitBaseline(
             live,
             message,
-            { planMode: false, onAccepted: persistUserMessage },
+            {
+              planMode: false,
+              onAccepted: persistUserMessage,
+              onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
+            },
           );
           if (userPromptPreviewStarted) {
             if (sendResult.accepted) {
@@ -4538,7 +4570,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
         const sendResult = await sendUserMessageWithAwaitedGitBaseline(
           session,
           message,
-          { planMode: false, onAccepted: persistUserMessage },
+          {
+            planMode: false,
+            onAccepted: persistUserMessage,
+            onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
+          },
         );
         if (userPromptPreviewStarted) {
           if (sendResult.accepted) {
@@ -5655,6 +5691,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     previewUserPrompt: (session, content, options) => {
       notifyAgentIslandUserPrompt(session, content, options);
     },
+    dispatchUserPromptPreview: (sessionId) => {
+      dispatchAgentIslandUserPrompt(sessionId);
+    },
     commitUserPromptPreview: (sessionId, clientId) => {
       commitAgentIslandUserPrompt(sessionId, clientId);
     },
@@ -5850,7 +5889,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       markWorkerManualInterruptIfKnown(sessionId, 'input_stop');
       const sess = maker.getSession(sessionId);
       if (!sess) return;
-      handleAgentIslandSessionStopped(sessionId);
+      handleAgentIslandSessionStopped(sess);
       cancelReleasedOutput(sessionId);
       await sess.abort();
       cleanupPendingInteractionsForSession(sessionId, 'session_aborted');
@@ -6557,7 +6596,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     silentStopAutoResumeGuard.noteSessionReset(sessionId);
     const sess = maker.getSession(sessionId);
     if (!sess) return;
-    handleAgentIslandSessionStopped(sessionId);
+    handleAgentIslandSessionStopped(sess);
     // 用户 Stop 当前 turn → 若该会话有 active goal,先暂停目标(置 paused + 停续跑 + detach
     // 监听),**再** abort。这样 abort 产生的终止事件到来时目标已暂停、监听已摘,不会被误判成
     // 续跑(原本依赖 error 文案正则判 paused/blocked,不可靠)。null-safe;无 active goal 时 no-op。

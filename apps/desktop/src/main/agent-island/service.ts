@@ -226,6 +226,8 @@ export class AgentIslandService {
   private readonly mutedCompletionSoundSessionIds = new Set<string>();
   private readonly stoppedSessionIds = new Set<string>();
   private readonly replacementTurnPendingSessionIds = new Set<string>();
+  private readonly replacementTurnDispatchingSessionIds = new Set<string>();
+  private readonly stoppedProviderTurnIdBySession = new Map<string, string>();
   private readonly interactionEpochBySession = new Map<string, number>();
   private interactionEpochSequence = 0;
   private readonly sessionHadAttentionAtRunStart = new Map<string, boolean>();
@@ -235,6 +237,7 @@ export class AgentIslandService {
     interactionEpoch: { existed: boolean; value: number };
     wasStopped: boolean;
     wasReplacementTurnPending: boolean;
+    wasReplacementTurnDispatching: boolean;
   }>();
   private readonly deferredCompletions = new Map<string, { event: AgentEvent; suppressAttention: boolean }>();
   private readonly deferredRemoteAuthErrors = new Map<string, {
@@ -544,6 +547,8 @@ export class AgentIslandService {
     this.mutedCompletionSoundSessionIds.clear();
     this.stoppedSessionIds.clear();
     this.replacementTurnPendingSessionIds.clear();
+    this.replacementTurnDispatchingSessionIds.clear();
+    this.stoppedProviderTurnIdBySession.clear();
     this.interactionEpochBySession.clear();
     this.sessionHadAttentionAtRunStart.clear();
     this.userPromptRollbackTokens.clear();
@@ -584,17 +589,33 @@ export class AgentIslandService {
 
   handleAgentEvent(meta: AgentIslandSessionMeta, event: AgentEvent): void {
     const hydrated = this.hydrateMeta(meta);
+    const providerTurnId = providerTurnIdFromAgentEvent(event);
+    const replacementPending =
+      this.replacementTurnPendingSessionIds.has(hydrated.sessionId);
+    const stoppedProviderTurnId =
+      this.stoppedProviderTurnIdBySession.get(hydrated.sessionId);
+    if (isCompletionDoneEvent(event) && providerTurnId && stoppedProviderTurnId) {
+      if (providerTurnId === stoppedProviderTurnId) return;
+      // A different provider turn id proves this terminal event belongs to the
+      // replacement even if its running status has not reached Desktop yet.
+      this.stoppedProviderTurnIdBySession.delete(hydrated.sessionId);
+      if (replacementPending) {
+        this.replacementTurnPendingSessionIds.delete(hydrated.sessionId);
+        this.replacementTurnDispatchingSessionIds.delete(hydrated.sessionId);
+      }
+    }
     // Stop is applied synchronously by the main-process abort path. A provider
     // cancellation that arrives inside that boundary is only its terminal tail.
     // Outside a Stop/replacement boundary, cancellation can also be the sole
     // terminal event (for example Codex permission tightening), so it must close
     // the visible run without treating it as a successful completion.
     if (isCancelledTerminalEvent(event)) {
+      if (this.stoppedSessionIds.has(hydrated.sessionId)) return;
       if (
-        this.stoppedSessionIds.has(hydrated.sessionId) ||
-        this.replacementTurnPendingSessionIds.has(hydrated.sessionId)
+        this.replacementTurnPendingSessionIds.has(hydrated.sessionId) &&
+        !this.replacementTurnDispatchingSessionIds.has(hydrated.sessionId)
       ) return;
-      this.handleSessionStopped(hydrated.sessionId);
+      this.handleSessionStopped(hydrated.sessionId, providerTurnId);
       return;
     }
     // Provider aborts can drain ordinary status/done events after the user has
@@ -608,6 +629,7 @@ export class AgentIslandService {
       if (isCompletionDoneEvent(event)) return;
       if (isRunningStatusEvent(event)) {
         this.replacementTurnPendingSessionIds.delete(hydrated.sessionId);
+        this.replacementTurnDispatchingSessionIds.delete(hydrated.sessionId);
       }
     }
     if (this.deferredRemoteAuthErrors.has(hydrated.sessionId)) {
@@ -709,12 +731,20 @@ export class AgentIslandService {
     const receivedAt = Date.now();
     const hydrated = this.hydrateMeta(meta);
     const previousInteractionEpoch = this.interactionEpochBySession.get(hydrated.sessionId);
-    this.advanceInteractionEpoch(hydrated.sessionId);
     const wasStopped = this.stoppedSessionIds.has(hydrated.sessionId);
     const wasReplacementTurnPending = this.replacementTurnPendingSessionIds.has(hydrated.sessionId);
+    const wasReplacementTurnDispatching =
+      this.replacementTurnDispatchingSessionIds.has(hydrated.sessionId);
+    const deferInteractionEpochUntilDispatch = wasStopped || wasReplacementTurnPending;
+    if (!deferInteractionEpochUntilDispatch) {
+      this.advanceInteractionEpoch(hydrated.sessionId);
+    }
     if (wasStopped) {
       this.stoppedSessionIds.delete(hydrated.sessionId);
       this.replacementTurnPendingSessionIds.add(hydrated.sessionId);
+    }
+    if (deferInteractionEpochUntilDispatch) {
+      this.replacementTurnDispatchingSessionIds.delete(hydrated.sessionId);
     }
     const rollbackKey = this.userPromptRollbackKey(hydrated.sessionId, debugMeta.clientId);
     if (rollbackKey) {
@@ -728,6 +758,7 @@ export class AgentIslandService {
           : { existed: true, value: previousInteractionEpoch },
         wasStopped,
         wasReplacementTurnPending,
+        wasReplacementTurnDispatching,
       });
     }
     this.clearCompletedSilencedRunForNewActivity(hydrated.sessionId);
@@ -743,6 +774,11 @@ export class AgentIslandService {
       }
       if (!wasReplacementTurnPending) {
         this.replacementTurnPendingSessionIds.delete(hydrated.sessionId);
+      }
+      if (wasReplacementTurnDispatching) {
+        this.replacementTurnDispatchingSessionIds.add(hydrated.sessionId);
+      } else {
+        this.replacementTurnDispatchingSessionIds.delete(hydrated.sessionId);
       }
       this.restoreInteractionEpoch(hydrated.sessionId, previousInteractionEpoch);
       return;
@@ -774,6 +810,11 @@ export class AgentIslandService {
     else this.stoppedSessionIds.delete(sessionId);
     if (snapshot.wasReplacementTurnPending) this.replacementTurnPendingSessionIds.add(sessionId);
     else this.replacementTurnPendingSessionIds.delete(sessionId);
+    if (snapshot.wasReplacementTurnDispatching) {
+      this.replacementTurnDispatchingSessionIds.add(sessionId);
+    } else {
+      this.replacementTurnDispatchingSessionIds.delete(sessionId);
+    }
     this.restoreInteractionEpoch(
       sessionId,
       snapshot.interactionEpoch.existed ? snapshot.interactionEpoch.value : undefined,
@@ -792,14 +833,35 @@ export class AgentIslandService {
     return this.advanceInteractionEpoch(sessionId);
   }
 
+  /**
+   * Advances the replacement turn's interaction boundary at the last
+   * synchronous point before Session invokes vendor code. A callback from the
+   * stopped turn that began while the replacement was only previewed keeps the
+   * older epoch; a callback from the dispatched replacement captures the new
+   * one even if its running status has not reached Desktop yet.
+   */
+  handleUserPromptDispatching(sessionId: string): void {
+    if (!this.replacementTurnPendingSessionIds.has(sessionId)) return;
+    this.advanceInteractionEpoch(sessionId);
+    this.replacementTurnDispatchingSessionIds.add(sessionId);
+  }
+
+  isInteractionCurrent(sessionId: string, interactionEpoch: number): boolean {
+    if (this.interactionEpochBySession.get(sessionId) !== interactionEpoch) return false;
+    if (this.stoppedSessionIds.has(sessionId)) return false;
+    return (
+      !this.replacementTurnPendingSessionIds.has(sessionId) ||
+      this.replacementTurnDispatchingSessionIds.has(sessionId)
+    );
+  }
+
   handleInteractionRequest(
     meta: AgentIslandSessionMeta,
     request: InteractionRequest,
     interactionEpoch: number,
   ): void {
     const hydrated = this.hydrateMeta(meta);
-    if (this.interactionEpochBySession.get(hydrated.sessionId) !== interactionEpoch) return;
-    if (this.stoppedSessionIds.has(hydrated.sessionId)) return;
+    if (!this.isInteractionCurrent(hydrated.sessionId, interactionEpoch)) return;
     if (request.kind === 'permission') {
       this.permissionRequests.set(request.requestId, { sessionId: hydrated.sessionId, request });
     }
@@ -862,6 +924,8 @@ export class AgentIslandService {
   handleSessionClosed(sessionId: string): void {
     this.stoppedSessionIds.delete(sessionId);
     this.replacementTurnPendingSessionIds.delete(sessionId);
+    this.replacementTurnDispatchingSessionIds.delete(sessionId);
+    this.stoppedProviderTurnIdBySession.delete(sessionId);
     this.interactionEpochBySession.delete(sessionId);
     this.clearSilencedRunForSession(sessionId);
     this.sessionHadAttentionAtRunStart.delete(sessionId);
@@ -883,10 +947,14 @@ export class AgentIslandService {
    * arrive. A stopped turn is neither a success nor an error, so it leaves no
    * completion card, unread attention, or completion sound behind.
    */
-  handleSessionStopped(sessionId: string): void {
+  handleSessionStopped(sessionId: string, providerTurnId: string | null = null): void {
     this.advanceInteractionEpoch(sessionId);
+    if (providerTurnId) {
+      this.stoppedProviderTurnIdBySession.set(sessionId, providerTurnId);
+    }
     this.stoppedSessionIds.add(sessionId);
     this.replacementTurnPendingSessionIds.delete(sessionId);
+    this.replacementTurnDispatchingSessionIds.delete(sessionId);
     this.clearSilencedRunForSession(sessionId);
     this.sessionHadAttentionAtRunStart.delete(sessionId);
     for (const key of this.userPromptRollbackTokens.keys()) {
@@ -1967,6 +2035,15 @@ function isRunningStatusEvent(event: AgentEvent): boolean {
   if (event.type !== 'status') return false;
   const data = event.data as { isRunning?: unknown } | undefined;
   return data?.isRunning === true;
+}
+
+function providerTurnIdFromAgentEvent(event: AgentEvent): string | null {
+  if (!event.data || typeof event.data !== 'object' || Array.isArray(event.data)) return null;
+  const data = event.data as { turnId?: unknown; raw?: unknown };
+  if (typeof data.turnId === 'string' && data.turnId) return data.turnId;
+  if (!data.raw || typeof data.raw !== 'object' || Array.isArray(data.raw)) return null;
+  const rawId = (data.raw as { id?: unknown }).id;
+  return typeof rawId === 'string' && rawId ? rawId : null;
 }
 
 function isRemoteDaemonClosedErrorEvent(event: AgentEvent): boolean {

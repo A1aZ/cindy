@@ -298,7 +298,10 @@ function ensureInstances(): { store: SlackHookStore; manager: HookControlManager
       abortSession: async (sessionId) => {
         const session = getMaker().getSession(sessionId);
         if (!session) return;
-        getAgentIslandService()?.handleSessionStopped(sessionId);
+        getAgentIslandService()?.handleSessionStopped(
+          sessionId,
+          session.getCurrentTurnId?.() ?? null,
+        );
         cancelReleasedOutput(sessionId);
         await session.abort();
       },

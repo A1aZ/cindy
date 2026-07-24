@@ -134,13 +134,16 @@ describe('maker:event hot path ordering', () => {
     expect(abortContext).toContain('isTerminalTurnErrorEvent(event)');
   });
 
-  it('isolates Agent Island interaction updates after renderer delivery', () => {
+  it('rejects stale Agent Island interactions before renderer delivery', () => {
     const interactionListenerSource = extractInstallDesktopInteractionListenerSource();
     const epochCaptureIndex = interactionListenerSource.indexOf(
       'getAgentIslandService()?.captureInteractionEpoch(session.id)',
     );
     const releaseBoundaryIndex = interactionListenerSource.indexOf(
       'await waitForReleasedOutput(session.id);',
+    );
+    const currentEpochCheckIndex = interactionListenerSource.indexOf(
+      'getAgentIslandService()?.isInteractionCurrent(',
     );
     const flushIndex = interactionListenerSource.indexOf('flushAssistantBlock(session.id);');
     const broadcastIndex = interactionListenerSource.indexOf('broadcastToAllWindows(MAKER_PUSH.INTERACTION_REQUEST');
@@ -150,7 +153,8 @@ describe('maker:event hot path ordering', () => {
     expect(epochCaptureIndex).toBeGreaterThanOrEqual(0);
     expect(releaseBoundaryIndex).toBeGreaterThan(epochCaptureIndex);
     expect(releaseBoundaryIndex).toBeGreaterThanOrEqual(0);
-    expect(flushIndex).toBeGreaterThan(releaseBoundaryIndex);
+    expect(currentEpochCheckIndex).toBeGreaterThan(releaseBoundaryIndex);
+    expect(flushIndex).toBeGreaterThan(currentEpochCheckIndex);
     expect(broadcastIndex).toBeGreaterThan(flushIndex);
     expect(broadcastIndex).toBeGreaterThanOrEqual(0);
     expect(pendingIndex).toBeGreaterThan(broadcastIndex);
@@ -222,7 +226,7 @@ describe('maker:event hot path ordering', () => {
     const hookAbortEnd = hookControlSource.indexOf('\n      // session.archive', hookAbortStart);
     const hookAbortSource = hookControlSource.slice(hookAbortStart, hookAbortEnd);
 
-    expect(source).toContain('function handleAgentIslandSessionStopped(sessionId: string): void');
+    expect(source).toContain('function handleAgentIslandSessionStopped(');
     expect(coordinatorAbortStart).toBeGreaterThanOrEqual(0);
     expect(coordinatorAbortEnd).toBeGreaterThan(coordinatorAbortStart);
     expectOrder(
@@ -233,11 +237,11 @@ describe('maker:event hot path ordering', () => {
     expectOrder(
       coordinatorAbortSource,
       'if (!sess) return;',
-      'handleAgentIslandSessionStopped(sessionId);',
+      'handleAgentIslandSessionStopped(sess);',
     );
     expectOrder(
       coordinatorAbortSource,
-      'handleAgentIslandSessionStopped(sessionId);',
+      'handleAgentIslandSessionStopped(sess);',
       'await sess.abort();',
     );
     expect(directAbortStart).toBeGreaterThanOrEqual(0);
@@ -250,11 +254,11 @@ describe('maker:event hot path ordering', () => {
     expectOrder(
       directAbortSource,
       'if (!sess) return;',
-      'handleAgentIslandSessionStopped(sessionId);',
+      'handleAgentIslandSessionStopped(sess);',
     );
     expectOrder(
       directAbortSource,
-      'handleAgentIslandSessionStopped(sessionId);',
+      'handleAgentIslandSessionStopped(sess);',
       'await sess.abort();',
     );
     expect(hookAbortStart).toBeGreaterThanOrEqual(0);
@@ -267,16 +271,16 @@ describe('maker:event hot path ordering', () => {
     expectOrder(
       hookAbortSource,
       'if (!session) return;',
-      'getAgentIslandService()?.handleSessionStopped(sessionId);',
+      'getAgentIslandService()?.handleSessionStopped(',
     );
     expectOrder(
       hookAbortSource,
-      'getAgentIslandService()?.handleSessionStopped(sessionId);',
+      'getAgentIslandService()?.handleSessionStopped(',
       'cancelReleasedOutput(sessionId);',
     );
     expectOrder(
       hookAbortSource,
-      'getAgentIslandService()?.handleSessionStopped(sessionId);',
+      'getAgentIslandService()?.handleSessionStopped(',
       'await session.abort();',
     );
   });

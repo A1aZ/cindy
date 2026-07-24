@@ -4128,6 +4128,10 @@ export class CodexAgent extends BaseAgent {
         }
       },
 
+      getCurrentTurnId() {
+        return currentTurnId;
+      },
+
       async close() {
         if (closed) return;
         closed = true;

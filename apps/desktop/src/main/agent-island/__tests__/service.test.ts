@@ -185,11 +185,15 @@ function doneEvent(): AgentEvent {
   };
 }
 
-function cancelledDoneEvent(): AgentEvent {
+function cancelledDoneEvent(turnId?: string): AgentEvent {
   return {
     type: 'done',
     source: 'codex',
-    data: { type: 'codex/event/task_complete', cancelled: true },
+    data: {
+      type: 'codex/event/task_complete',
+      cancelled: true,
+      ...(turnId ? { raw: { id: turnId } } : {}),
+    },
   };
 }
 
@@ -1904,6 +1908,7 @@ describe('AgentIslandService native publishing', () => {
     service.handleUserPrompt(meta, 'first turn');
     service.handleSessionStopped(meta.sessionId);
     service.handleUserPrompt(meta, 'replacement turn');
+    service.handleUserPromptDispatching(meta.sessionId);
 
     handleInteractionRequestForTest(service,
       meta,
@@ -1971,6 +1976,34 @@ describe('AgentIslandService native publishing', () => {
     expect(resolver).not.toHaveBeenCalled();
   });
 
+  it('rejects an old interaction that enters after replacement preview but before dispatch', async () => {
+    const { AgentIslandService } = await import('../service.js');
+    const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {
+      void state;
+      void frameOrFrames;
+      return true;
+    });
+    const service = new AgentIslandService({
+      getMainWindow: () => null,
+      nativeHost: { failed: false, publish },
+    });
+    const meta = { sessionId: 'preview-race-interaction', agentKind: 'claude-code' as const };
+    syncEnabledForTest(service, publish);
+    service.handleUserPrompt(meta, 'first turn');
+    service.handleSessionStopped(meta.sessionId);
+    service.handleUserPrompt(meta, 'replacement turn');
+
+    const staleEpoch = service.captureInteractionEpoch(meta.sessionId);
+    expect(service.isInteractionCurrent(meta.sessionId, staleEpoch)).toBe(false);
+
+    service.handleUserPromptDispatching(meta.sessionId);
+    expect(service.isInteractionCurrent(meta.sessionId, staleEpoch)).toBe(false);
+    expect(service.isInteractionCurrent(
+      meta.sessionId,
+      service.captureInteractionEpoch(meta.sessionId),
+    )).toBe(true);
+  });
+
   it('restores stop-tail suppression when a replacement prompt preview rolls back', async () => {
     const { AgentIslandService } = await import('../service.js');
     const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {
@@ -2010,7 +2043,7 @@ describe('AgentIslandService native publishing', () => {
     expect(publish.mock.calls.at(-1)?.[0].sessions).toEqual([]);
   });
 
-  it('ignores a stale cancelled terminal event after a replacement turn starts', async () => {
+  it('ignores a stale cancelled terminal event before a replacement turn dispatches', async () => {
     const { AgentIslandService } = await import('../service.js');
     const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {
       void state;
@@ -2033,17 +2066,92 @@ describe('AgentIslandService native publishing', () => {
     });
     const meta = { sessionId: 'codex-stop', agentKind: 'codex' as const };
     service.handleUserPrompt(meta, 'run tests');
-    service.handleSessionStopped(meta.sessionId);
+    service.handleAgentEvent(meta, {
+      type: 'status',
+      source: 'codex',
+      data: { isRunning: true, status: 'Generating...', turnId: 'turn-stopped' },
+    });
+    service.handleSessionStopped(meta.sessionId, 'turn-stopped');
     service.handleUserPrompt(meta, 'replacement turn');
     playSound.mockClear();
 
-    service.handleAgentEvent(meta, cancelledDoneEvent());
+    service.handleAgentEvent(meta, cancelledDoneEvent('turn-stopped'));
 
     expect(playSound).not.toHaveBeenCalled();
     expect(publish.mock.calls.at(-1)?.[0].sessions[0]).toMatchObject({
       sessionId: meta.sessionId,
       phase: 'running',
     });
+  });
+
+  it('ignores an identified stopped-turn cancellation after the replacement is running', async () => {
+    const { AgentIslandService } = await import('../service.js');
+    const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {
+      void state;
+      void frameOrFrames;
+      return true;
+    });
+    const playSound = vi.fn<(sound: AgentIslandSoundChoice) => boolean>(() => true);
+    const service = new AgentIslandService({
+      getMainWindow: () => null,
+      nativeHost: { failed: false, publish, playSound },
+    });
+    syncEnabledForTest(service, publish);
+    const meta = { sessionId: 'codex-running-replacement', agentKind: 'codex' as const };
+    service.handleUserPrompt(meta, 'first turn');
+    service.handleAgentEvent(meta, {
+      type: 'status',
+      source: 'codex',
+      data: { isRunning: true, status: 'Generating...', turnId: 'turn-stopped' },
+    });
+    service.handleSessionStopped(meta.sessionId, 'turn-stopped');
+    service.handleUserPrompt(meta, 'replacement turn');
+    service.handleUserPromptDispatching(meta.sessionId);
+    service.handleAgentEvent(meta, {
+      type: 'status',
+      source: 'codex',
+      data: { isRunning: true, status: 'Generating...', turnId: 'turn-replacement' },
+    });
+    playSound.mockClear();
+
+    service.handleAgentEvent(meta, cancelledDoneEvent('turn-stopped'));
+
+    expect(playSound).not.toHaveBeenCalled();
+    expect(publish.mock.calls.at(-1)?.[0].sessions[0]).toMatchObject({
+      sessionId: meta.sessionId,
+      phase: 'running',
+    });
+  });
+
+  it('removes a replacement turn cancelled after its vendor dispatch boundary', async () => {
+    const { AgentIslandService } = await import('../service.js');
+    const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {
+      void state;
+      void frameOrFrames;
+      return true;
+    });
+    const playSound = vi.fn<(sound: AgentIslandSoundChoice) => boolean>(() => true);
+    const service = new AgentIslandService({
+      getMainWindow: () => null,
+      nativeHost: { failed: false, publish, playSound },
+    });
+    syncEnabledForTest(service, publish);
+    const meta = { sessionId: 'codex-replacement-cancelled', agentKind: 'codex' as const };
+    service.handleUserPrompt(meta, 'first turn');
+    service.handleAgentEvent(meta, {
+      type: 'status',
+      source: 'codex',
+      data: { isRunning: true, status: 'Generating...', turnId: 'turn-stopped' },
+    });
+    service.handleSessionStopped(meta.sessionId, 'turn-stopped');
+    service.handleUserPrompt(meta, 'replacement turn');
+    service.handleUserPromptDispatching(meta.sessionId);
+    playSound.mockClear();
+
+    service.handleAgentEvent(meta, cancelledDoneEvent('turn-replacement'));
+
+    expect(playSound).not.toHaveBeenCalled();
+    expect(publish.mock.calls.at(-1)?.[0].sessions).toEqual([]);
   });
 
   it('clears silenced-run bookkeeping when a session is stopped', async () => {

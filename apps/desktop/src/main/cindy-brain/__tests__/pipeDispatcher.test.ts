@@ -258,7 +258,7 @@ describe('长任务续命(hold / release / tool-progress)', () => {
     await vi.waitFor(() => expect(h.sent).toHaveLength(1));
     const callId = h.sent[0].callId;
 
-    h.dispatcher.holdCall(callId, 5_000); // deadline = 5000 + 60_000 余量
+    h.dispatcher.holdCall('art', callId, 5_000); // deadline = 5000 + 60_000 余量
     vi.advanceTimersByTime(64_999);
     expect(h.dispatcher.pendingCount()).toBe(1);
     vi.advanceTimersByTime(1);
@@ -271,15 +271,15 @@ describe('长任务续命(hold / release / tool-progress)', () => {
     await vi.waitFor(() => expect(h.sent).toHaveLength(1));
     const callId = h.sent[0].callId;
 
-    h.dispatcher.holdCall(callId, 600_000);
-    h.dispatcher.holdCall(callId, 600_000);
+    h.dispatcher.holdCall('art', callId, 600_000);
+    h.dispatcher.holdCall('art', callId, 600_000);
     vi.advanceTimersByTime(10_000);
 
-    h.dispatcher.releaseCall(callId); // 还有一单在途:不收
+    h.dispatcher.releaseCall('art', callId); // 还有一单在途:不收
     vi.advanceTimersByTime(120_000);  // t=130_000,若已收(70_000 到点)早超了
     expect(h.dispatcher.pendingCount()).toBe(1);
 
-    h.dispatcher.releaseCall(callId); // 全部收工:收到 now + 60_000 余量
+    h.dispatcher.releaseCall('art', callId); // 全部收工:收到 now + 60_000 余量
     vi.advanceTimersByTime(59_999);
     expect(h.dispatcher.pendingCount()).toBe(1);
     vi.advanceTimersByTime(1);
@@ -314,7 +314,7 @@ describe('长任务续命(hold / release / tool-progress)', () => {
     expect(h.sent).toHaveLength(1);
     const callId = h.sent[0].callId;
 
-    h.dispatcher.holdCall(callId, 10 * 3600_000); // 10 小时预算 → 钳到 30 分钟
+    h.dispatcher.holdCall('art', callId, 10 * 3600_000); // 10 小时预算 → 钳到 30 分钟
     vi.advanceTimersByTime(30 * 60_000 - 1);
     expect(h.dispatcher.pendingCount()).toBe(1);
     vi.advanceTimersByTime(1);
@@ -322,7 +322,7 @@ describe('长任务续命(hold / release / tool-progress)', () => {
 
     // 已收卷:心跳拒;hold 静默无害。
     expect(h.dispatcher.handleToolProgress('art', { callId }).accepted).toBe(false);
-    h.dispatcher.holdCall(callId, 1000);
+    h.dispatcher.holdCall('art', callId, 1000);
     expect(h.dispatcher.pendingCount()).toBe(0);
   });
 
@@ -332,7 +332,7 @@ describe('长任务续命(hold / release / tool-progress)', () => {
     await vi.waitFor(() => expect(h.sent).toHaveLength(1));
     const callId = h.sent[0].callId;
 
-    h.dispatcher.holdCall(callId, 600_000);
+    h.dispatcher.holdCall('art', callId, 600_000);
     vi.advanceTimersByTime(200_000);
     const outcome = h.dispatcher.handleToolResult('art', {
       type: 'tool-result',
@@ -342,6 +342,35 @@ describe('长任务续命(hold / release / tool-progress)', () => {
     });
     expect(outcome.accepted).toBe(true);
     await expect(p).resolves.toEqual({ ok: true, result: { url: 'cindy-media://blobs/v.mp4' } });
+  });
+
+  it('hold/release 验身:冒用别人在途的 callId 不能续命、不能收短、不污染计数', async () => {
+    const h = makeHarness({ timeoutMs: 1000 });
+    const p = h.dispatcher.callGhostTool(CALL);
+    await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+    const callId = h.sent[0].callId;
+
+    // 冒名 hold:不生效,窗口仍按基础档到点。
+    h.dispatcher.holdCall('evil-ghost', callId, 600_000);
+    // 真主人 hold 后,冒名 release 也收不走(计数未被污染)。
+    h.dispatcher.holdCall('art', callId, 600_000);
+    h.dispatcher.releaseCall('evil-ghost', callId);
+    vi.advanceTimersByTime(200_000); // 若冒名 release 生效,60s 余量早已到点
+    expect(h.dispatcher.pendingCount()).toBe(1);
+
+    h.dispatcher.releaseCall('art', callId);
+    vi.advanceTimersByTime(60_000);
+    await expect(p).resolves.toMatchObject({ ok: false, errorCode: 'TIMEOUT' });
+  });
+
+  it('注入超大 timeoutMs 被钳到天花板,初始窗口不越界', async () => {
+    const h = makeHarness({ timeoutMs: 2 * 3600_000 }); // 2 小时 → 钳到 30 分钟
+    const p = h.dispatcher.callGhostTool(CALL);
+    expect(h.sent).toHaveLength(1);
+    vi.advanceTimersByTime(30 * 60_000 - 1);
+    expect(h.dispatcher.pendingCount()).toBe(1);
+    vi.advanceTimersByTime(1);
+    await expect(p).resolves.toMatchObject({ ok: false, errorCode: 'TIMEOUT' });
   });
 });
 

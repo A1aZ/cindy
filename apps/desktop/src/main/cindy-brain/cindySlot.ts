@@ -99,11 +99,12 @@ export interface CindySlotDeps {
   /**
    * 管子续命挂钩(pipeDispatcher.holdCall/releaseCall 接线):tool-call
    * 触发的同步视频代办开始时 hold(budgetMs = 这单的轮询预算),结束时
-   * release——署名单在途期间管子不再按 330s 掐掉。可选依赖:不注入
-   * (纯测试环境)等同不续命。
+   * release——署名单在途期间管子不再按 330s 掐掉。ghostId = 主机反查的
+   * 代办发起方,派发器按它配对验身(冒用别人的 callId 不生效)。可选
+   * 依赖:不注入(纯测试环境)等同不续命。
    */
-  holdPipeCall?(callId: string, budgetMs: number): void;
-  releasePipeCall?(callId: string): void;
+  holdPipeCall?(ghostId: string, callId: string, budgetMs: number): void;
+  releasePipeCall?(ghostId: string, callId: string): void;
   /**
    * 视频型号预期耗时(秒;video registry 登记值)。hold 预算与异步受理
    * 返回的 expectedSeconds 共用。未注入/查无该型号 → null(用缺省)。
@@ -446,11 +447,11 @@ export class GhostCindySlot {
       // 图片秒级完成,330s 基础窗口足够,不 hold)。
       const holdBudgetMs = expectedSeconds !== null ? expectedSeconds * 3 * 1000 : 0;
       const shouldHold = holdBudgetMs > 0 && callId !== 'unattributed';
-      if (shouldHold) this.deps.holdPipeCall?.(callId, holdBudgetMs);
+      if (shouldHold) this.deps.holdPipeCall?.(ghostId, callId, holdBudgetMs);
       try {
         return { ok: true, ...(await runExec()) };
       } finally {
-        if (shouldHold) this.deps.releasePipeCall?.(callId);
+        if (shouldHold) this.deps.releasePipeCall?.(ghostId, callId);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

@@ -149,8 +149,9 @@ export class GhostPipeDispatcher {
     });
   }
 
+  /** 基础超时档(注入值钳到天花板内,保证初始 deadline 不越过绝对上限)。 */
   private baseTimeoutMs(): number {
-    return this.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    return Math.min(this.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS, GHOST_PIPE_CALL_MAX_TOTAL_MS);
   }
 
   /** 按 entry.deadlineAt 重挂超时闹钟(旧闹钟一并清掉)。 */
@@ -181,19 +182,23 @@ export class GhostPipeDispatcher {
   private extendDeadline(callId: string, entry: PendingCall, targetAt: number): void {
     const cap = entry.startedAt + GHOST_PIPE_CALL_MAX_TOTAL_MS;
     const next = Math.min(Math.max(targetAt, entry.deadlineAt), cap);
-    if (next === entry.deadlineAt) return;
+    // <=:双保险守住"只延不缩"——即使 deadline 因注入值异常已在 cap 之上,
+    // 也绝不反向收短(baseTimeoutMs 的钳制让这理论上不会发生)。
+    if (next <= entry.deadlineAt) return;
     entry.deadlineAt = next;
     this.armTimer(callId, entry);
   }
 
   /**
    * 代办 hold:主机自己正为该卷干活(cindy 槽署名代办)时替它续命。
+   * ghostId = 主机反查的代办发起方身份——与交卷/心跳同纪律配对校验,
+   * 沙箱填错/冒用别人在途的 callId 不能续命他人的卷、也不污染其计数。
    * budgetMs = 这单代办自身的预算(如视频 expected×3);窗口延到
-   * now + budget + 交卷余量。查无此卷(未署名/已收卷)静默忽略。
+   * now + budget + 交卷余量。查无此卷/不是它的卷,静默忽略。
    */
-  holdCall(callId: string, budgetMs: number): void {
+  holdCall(ghostId: string, callId: string, budgetMs: number): void {
     const entry = this.pending.get(callId);
-    if (!entry) return;
+    if (!entry || entry.ghostId !== ghostId) return;
     entry.holds += 1;
     this.extendDeadline(callId, entry, Date.now() + budgetMs + HOLD_SETTLE_GRACE_MS);
   }
@@ -201,10 +206,11 @@ export class GhostPipeDispatcher {
   /**
    * 代办收工:hold 计数归零时把窗口收回(不短于插件本来的基础窗口,并留
    * 交卷余量)——不让 16 分钟的 hold 在任务 3 分钟完成后继续吊着失败面。
+   * 验身同 holdCall(冒名 release 不能提前收短别人的窗口)。
    */
-  releaseCall(callId: string): void {
+  releaseCall(ghostId: string, callId: string): void {
     const entry = this.pending.get(callId);
-    if (!entry) return;
+    if (!entry || entry.ghostId !== ghostId) return;
     entry.holds = Math.max(0, entry.holds - 1);
     if (entry.holds > 0) return;
     const target = Math.max(entry.startedAt + this.baseTimeoutMs(), Date.now() + HOLD_SETTLE_GRACE_MS);

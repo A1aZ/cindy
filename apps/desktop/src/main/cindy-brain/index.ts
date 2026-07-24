@@ -1397,8 +1397,9 @@ export function getGhostCindySlot(): GhostCindySlot {
       getInflightLimit: (ghostId) => readGhostCindyInflightLimit(ghostId),
       // 管子续命挂钩:同步视频代办(署名单)在途期间替 tool-call 续命,
       // 免得分钟级生成被管子 330s 基础窗口掐掉(任务后台继续烧钱、结果作废)。
-      holdPipeCall: (callId, budgetMs) => getGhostPipeDispatcher().holdCall(callId, budgetMs),
-      releasePipeCall: (callId) => getGhostPipeDispatcher().releaseCall(callId),
+      // ghostId 由派发器配对验身:冒用他人在途 callId 不能续命/收短别人的卷。
+      holdPipeCall: (ghostId, callId, budgetMs) => getGhostPipeDispatcher().holdCall(ghostId, callId, budgetMs),
+      releasePipeCall: (ghostId, callId) => getGhostPipeDispatcher().releaseCall(ghostId, callId),
       // 视频型号预期耗时(registry 登记值;hold 预算与异步受理返回共用)。
       // registry 缺席/型号查无 → null,cindySlot 用自己的缺省。
       videoExpectedSeconds: (model) => {

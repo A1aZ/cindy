@@ -498,8 +498,8 @@ describe('管子续命挂钩(同步视频代办 hold/release)', () => {
       callId: 'call-9',
     });
     expect(r).toMatchObject({ ok: true });
-    expect(holdPipeCall).toHaveBeenCalledWith('call-9', 900_000);
-    expect(releasePipeCall).toHaveBeenCalledWith('call-9');
+    expect(holdPipeCall).toHaveBeenCalledWith('art', 'call-9', 900_000);
+    expect(releasePipeCall).toHaveBeenCalledWith('art', 'call-9');
   });
 
   it('生成失败同样 release;未署名(无 callId)与图片代办不 hold', async () => {
@@ -519,8 +519,8 @@ describe('管子续命挂钩(同步视频代办 hold/release)', () => {
       callId: 'call-f',
     });
     expect(failed).toMatchObject({ ok: false });
-    expect(holdPipeCall).toHaveBeenCalledWith('call-f', 120 * 3 * 1000); // 未注入 expected → 缺省 120s
-    expect(releasePipeCall).toHaveBeenCalledWith('call-f');
+    expect(holdPipeCall).toHaveBeenCalledWith('art', 'call-f', 120 * 3 * 1000); // 未注入 expected → 缺省 120s
+    expect(releasePipeCall).toHaveBeenCalledWith('art', 'call-f');
 
     holdPipeCall.mockClear();
     await slot.handleModelRequest('art', { type: 'cindy-request', kind: 'gen_video', prompt: 'x' });

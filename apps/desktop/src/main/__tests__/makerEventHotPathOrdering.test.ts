@@ -201,6 +201,34 @@ describe('maker:event hot path ordering', () => {
     expect(closeSessionHandler).not.toContain('handleSessionClosed');
   });
 
+  it('marks Agent Island stopped before provider abort tails can arrive', () => {
+    const coordinatorAbortStart = source.indexOf('abortSession: async (sessionId) => {');
+    const coordinatorAbortEnd = source.indexOf('\n    isTurnRunning:', coordinatorAbortStart);
+    const coordinatorAbortSource = source.slice(coordinatorAbortStart, coordinatorAbortEnd);
+    const directAbortStart = source.indexOf('ipcMain.handle(MAKER_INVOKE.ABORT_SESSION');
+    const directAbortEnd = source.indexOf(
+      '\n  ipcMain.handle(MAKER_INVOKE.CLOSE_SESSION',
+      directAbortStart,
+    );
+    const directAbortSource = source.slice(directAbortStart, directAbortEnd);
+
+    expect(source).toContain('function handleAgentIslandSessionStopped(sessionId: string): void');
+    expect(coordinatorAbortStart).toBeGreaterThanOrEqual(0);
+    expect(coordinatorAbortEnd).toBeGreaterThan(coordinatorAbortStart);
+    expectOrder(
+      coordinatorAbortSource,
+      'handleAgentIslandSessionStopped(sessionId);',
+      'await sess.abort();',
+    );
+    expect(directAbortStart).toBeGreaterThanOrEqual(0);
+    expect(directAbortEnd).toBeGreaterThan(directAbortStart);
+    expectOrder(
+      directAbortSource,
+      'handleAgentIslandSessionStopped(sessionId);',
+      'await sess.abort();',
+    );
+  });
+
   it('keeps Codex subscription value out of real session cost totals', () => {
     const wireSessionSource = extractWireSessionSource();
     const codexDoneIndex = wireSessionSource.indexOf("event.type === 'done' && event.source === 'codex'");

@@ -1739,6 +1739,18 @@ function handleAgentIslandSessionClosedAfterCleanup(sessionId: string): void {
   }
 }
 
+function handleAgentIslandSessionStopped(sessionId: string): void {
+  if (!shouldNotifyAgentIslandForSession(sessionId)) return;
+  try {
+    getAgentIslandService()?.handleSessionStopped(sessionId);
+  } catch (error) {
+    log.warn('Agent Island session stop update failed before provider abort', {
+      sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 function shouldNotifyAgentIslandForSession(sessionId: string): boolean {
   return shouldNotifyAgentIslandForSessionByPolicy(
     AGENT_ISLAND_DISPLAY_CONFIG,
@@ -5827,6 +5839,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       steerToAgentAccepted(sessionId, message, sendOpts),
     abortSession: async (sessionId) => {
       markWorkerManualInterruptIfKnown(sessionId, 'input_stop');
+      handleAgentIslandSessionStopped(sessionId);
       const sess = maker.getSession(sessionId);
       if (!sess) return;
       cancelReleasedOutput(sessionId);
@@ -6533,6 +6546,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     if (typeof sessionId !== 'string') throwIpcError('INVALID_PARAMS', 'sessionId required');
     markWorkerManualInterruptIfKnown(sessionId, 'abort_session');
     silentStopAutoResumeGuard.noteSessionReset(sessionId);
+    handleAgentIslandSessionStopped(sessionId);
     const sess = maker.getSession(sessionId);
     if (!sess) return;
     // 用户 Stop 当前 turn → 若该会话有 active goal,先暂停目标(置 paused + 停续跑 + detach

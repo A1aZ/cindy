@@ -172,6 +172,14 @@ function doneEvent(): AgentEvent {
   };
 }
 
+function cancelledDoneEvent(): AgentEvent {
+  return {
+    type: 'done',
+    source: 'codex',
+    data: { type: 'codex/event/task_complete', cancelled: true },
+  };
+}
+
 function textEvent(text: string, isFinal = false): AgentEvent {
   return {
     type: 'text',
@@ -1712,6 +1720,133 @@ describe('AgentIslandService native publishing', () => {
 
     expect(playSound).toHaveBeenNthCalledWith(1, customSound('start.wav'));
     expect(playSound).toHaveBeenNthCalledWith(2, customSound('complete.wav'));
+  });
+
+  it('removes user-stopped sessions and ignores provider completion tails without playing completion sound', async () => {
+    const { AgentIslandService } = await import('../service.js');
+    const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {
+      void state;
+      void frameOrFrames;
+      return true;
+    });
+    const playSound = vi.fn<(sound: AgentIslandSoundChoice) => boolean>(() => true);
+    const service = new AgentIslandService({
+      getMainWindow: () => null,
+      nativeHost: { failed: false, publish, playSound },
+    });
+    syncEnabledForTest(service, publish);
+    service.setSoundSettings({
+      enabled: true,
+      sounds: {
+        ...DEFAULT_AGENT_ISLAND_SOUND_SETTINGS.sounds,
+        start: customSound('start.wav'),
+        complete: customSound('complete.wav'),
+      },
+    });
+
+    service.handleUserPrompt({ sessionId: 'codex-stop', agentKind: 'codex' }, 'run tests');
+    service.handleUserPrompt({ sessionId: 'claude-stop', agentKind: 'claude-code' }, 'run tests');
+    playSound.mockClear();
+
+    service.handleSessionStopped('codex-stop');
+    service.handleAgentEvent(
+      { sessionId: 'codex-stop', agentKind: 'codex' },
+      cancelledDoneEvent(),
+    );
+    service.handleSessionStopped('claude-stop');
+    service.handleAgentEvent(
+      { sessionId: 'claude-stop', agentKind: 'claude-code' },
+      { type: 'status', source: 'claude-code', data: { isRunning: false, status: 'Done' } },
+    );
+    service.handleAgentEvent(
+      { sessionId: 'claude-stop', agentKind: 'claude-code' },
+      { type: 'done', source: 'claude-code', data: { reason: 'turn_interrupted' } },
+    );
+
+    expect(playSound).not.toHaveBeenCalled();
+    expect(publish.mock.calls.at(-1)?.[0].sessions).toEqual([]);
+
+    service.handleUserPrompt({ sessionId: 'claude-stop', agentKind: 'claude-code' }, 'run again');
+    service.handleAgentEvent(
+      { sessionId: 'claude-stop', agentKind: 'claude-code' },
+      doneEvent(),
+    );
+
+    expect(playSound).toHaveBeenCalledWith(customSound('complete.wav'));
+    expect(publish.mock.calls.at(-1)?.[0].sessions[0]).toMatchObject({
+      sessionId: 'claude-stop',
+      phase: 'completed',
+    });
+  });
+
+  it('restores stop-tail suppression when a replacement prompt preview rolls back', async () => {
+    const { AgentIslandService } = await import('../service.js');
+    const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {
+      void state;
+      void frameOrFrames;
+      return true;
+    });
+    const playSound = vi.fn<(sound: AgentIslandSoundChoice) => boolean>(() => true);
+    const service = new AgentIslandService({
+      getMainWindow: () => null,
+      nativeHost: { failed: false, publish, playSound },
+    });
+    syncEnabledForTest(service, publish);
+    service.setSoundSettings({
+      enabled: true,
+      sounds: {
+        ...DEFAULT_AGENT_ISLAND_SOUND_SETTINGS.sounds,
+        start: customSound('start.wav'),
+        complete: customSound('complete.wav'),
+      },
+    });
+    const meta = { sessionId: 'rollback-stop', agentKind: 'claude-code' as const };
+    service.handleUserPrompt(meta, 'run tests');
+    service.handleSessionStopped(meta.sessionId);
+    playSound.mockClear();
+
+    service.handleUserPrompt(meta, 'retry', { clientId: 'retry-client' });
+    service.rollbackUserPrompt(meta.sessionId, 'retry-client');
+    service.handleAgentEvent(
+      meta,
+      { type: 'status', source: 'claude-code', data: { isRunning: false, status: 'Done' } },
+    );
+
+    expect(playSound).not.toHaveBeenCalled();
+    expect(publish.mock.calls.at(-1)?.[0].sessions).toEqual([]);
+  });
+
+  it('treats an explicit cancelled terminal event as stopped without a prior main-process signal', async () => {
+    const { AgentIslandService } = await import('../service.js');
+    const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {
+      void state;
+      void frameOrFrames;
+      return true;
+    });
+    const playSound = vi.fn<(sound: AgentIslandSoundChoice) => boolean>(() => true);
+    const service = new AgentIslandService({
+      getMainWindow: () => null,
+      nativeHost: { failed: false, publish, playSound },
+    });
+    syncEnabledForTest(service, publish);
+    service.setSoundSettings({
+      enabled: true,
+      sounds: {
+        ...DEFAULT_AGENT_ISLAND_SOUND_SETTINGS.sounds,
+        start: customSound('start.wav'),
+        complete: customSound('complete.wav'),
+      },
+    });
+    service.handleUserPrompt({ sessionId: 'codex-stop', agentKind: 'codex' }, 'run tests');
+    playSound.mockClear();
+
+    service.handleAgentEvent(
+      { sessionId: 'codex-stop', agentKind: 'codex' },
+      cancelledDoneEvent(),
+    );
+
+    expect(playSound).not.toHaveBeenCalled();
+    expect(publish.mock.calls.at(-1)?.[0].sessions).toEqual([]);
   });
 
   it('plays the completion sound when the completed visible session is smart-suppressed', async () => {

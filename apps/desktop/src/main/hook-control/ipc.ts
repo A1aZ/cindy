@@ -298,10 +298,17 @@ function ensureInstances(): { store: SlackHookStore; manager: HookControlManager
       abortSession: async (sessionId) => {
         const session = getMaker().getSession(sessionId);
         if (!session) return;
-        getAgentIslandService()?.handleSessionStopped(
-          sessionId,
-          session.getCurrentTurnId?.() ?? null,
-        );
+        try {
+          getAgentIslandService()?.handleSessionStopped(
+            sessionId,
+            session.getCurrentTurnId?.() ?? null,
+          );
+        } catch (error) {
+          log.warn('Agent Island session stop update failed before hook provider abort', {
+            sessionId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
         cancelReleasedOutput(sessionId);
         await session.abort();
       },

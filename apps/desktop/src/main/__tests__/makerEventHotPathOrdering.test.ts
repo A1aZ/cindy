@@ -278,6 +278,9 @@ describe('maker:event hot path ordering', () => {
       'getAgentIslandService()?.handleSessionStopped(',
       'cancelReleasedOutput(sessionId);',
     );
+    expect(hookAbortSource).toContain(
+      "log.warn('Agent Island session stop update failed before hook provider abort'",
+    );
     expectOrder(
       hookAbortSource,
       'getAgentIslandService()?.handleSessionStopped(',

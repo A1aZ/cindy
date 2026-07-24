@@ -4555,7 +4555,9 @@ export default function SessionScreen() {
     return maker.input.setEditLock(sessionId, clientId, locked)
       .then(applyProjection)
       .catch((err) => {
-        setError(formatRemoteError(err));
+        if (queueEditingRef.current?.clientId === clientId) {
+          setError(formatRemoteError(err));
+        }
         throw err;
       });
   }, [applyProjection, maker, sessionId]);

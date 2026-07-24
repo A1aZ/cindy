@@ -223,7 +223,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const [familyId, setFamilyIdState] = useState<string>(getStoredFamilyId);
   // 跟踪系统色偏好, 让 fallbackFromType 在 OS theme 变化时也能正确刷新。
   const [systemPrefersDark, setSystemPrefersDark] = useState<boolean>(() =>
-    typeof window === 'undefined' ? false : window.matchMedia(PREFERS_DARK_QUERY).matches,
+    typeof window === 'undefined' || typeof window.matchMedia !== 'function'
+      ? false
+      : window.matchMedia(PREFERS_DARK_QUERY).matches,
   );
 
   const setTheme = useCallback((next: Theme) => {
@@ -267,6 +269,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   // OS 色偏好变化: 在 system 模式下重新 apply, 同时同步 systemPrefersDark
   // 让 fallbackFromType 刷新。非 system 模式只同步 state, 不动 DOM。
   useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
     const mediaQuery = window.matchMedia(PREFERS_DARK_QUERY);
     const handleChange = () => {
       setSystemPrefersDark(mediaQuery.matches);

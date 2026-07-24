@@ -1147,7 +1147,7 @@ const makeStyles = (colors: ThemeColors) =>
     width: LOGIN_TEXT_LINK.width,
   },
   resendLinkText: {
-    color: colors.login.controlText,
+    color: colors.login.linkText,
     fontSize: LOGIN_TEXT_LINK.font,
     fontWeight: fontWeight.regular,
     textDecorationLine: 'underline',

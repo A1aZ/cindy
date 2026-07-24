@@ -487,12 +487,18 @@ export class GhostCindySlot {
     }
   }
 
-  /** 新 job 入表前按意识淘汰最旧的完成记录,保住每意识条数上限。 */
+  /**
+   * 新 job 入表前按意识淘汰最旧的完成记录,保住每意识条数上限。
+   * 在途 running(含本单即将占用的名额)都会落成完成记录,一并计入预留,
+   * 上限在任何并发时序下都不被突破。
+   */
   private evictSettledJobs(ghostId: string): void {
-    const settled = [...this.jobs.entries()]
-      .filter(([, j]) => j.ghostId === ghostId && j.status !== 'running')
+    const entries = [...this.jobs.entries()].filter(([, j]) => j.ghostId === ghostId);
+    const running = entries.filter(([, j]) => j.status === 'running').length;
+    const settled = entries
+      .filter(([, j]) => j.status !== 'running')
       .sort((a, b) => (a[1].doneAt ?? 0) - (b[1].doneAt ?? 0));
-    const excess = settled.length - (MAX_SETTLED_JOBS_PER_GHOST - 1);
+    const excess = settled.length - (MAX_SETTLED_JOBS_PER_GHOST - running - 1);
     for (let i = 0; i < excess; i++) {
       this.jobs.delete(settled[i][0]);
     }

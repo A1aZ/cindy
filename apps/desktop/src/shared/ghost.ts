@@ -3211,8 +3211,10 @@ export type GhostModelTier = (typeof GHOST_MODEL_TIERS)[number];
 
 /**
  * 异步代办(mode:'submit')完成结果的保留时长(毫秒,30 分钟):完成后
- * 过期即清,query_job 查无此单。任务表在内存(主进程重启即丢),意识须
- * 把"查无此单"当作可重新提交的正常失败面。
+ * 过期即清,query_job 查无此单。TTL 之外还有每意识完成记录条数上限
+ * (cindySlot 的 settled-job eviction):快速提交循环下最旧的完成记录会
+ * 在 TTL 未到时被提前淘汰。任务表在内存(主进程重启即丢),意识须把
+ * "查无此单"当作可重新提交的正常失败面。
  */
 export const GHOST_CINDY_JOB_TTL_MS = 30 * 60_000;
 

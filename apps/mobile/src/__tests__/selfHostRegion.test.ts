@@ -8,6 +8,7 @@ import {
   regionEnvOverrides,
   formatSelfHostReleaseCommand,
   assertRegionOssComplete,
+  missingSelfhostBakeFields,
   resolveIosInstallEntryMode,
   stripSelfHostRegionEnv,
 } from '../../scripts/lib/self-host-region.mjs';
@@ -275,6 +276,30 @@ describe('assertRegionOssComplete', () => {
     expect(() => assertRegionOssComplete(VALID.cn)).not.toThrow();
     const partial = { ...VALID.cn, oss: { cdnBaseUrl: 'https://x/y', bucket: '', prefix: 'p', ossRegion: '' } };
     expect(() => assertRegionOssComplete(partial)).toThrow(/bucket, ossRegion/);
+  });
+});
+
+describe('missingSelfhostBakeFields(selfhost prebuild 硬校验字段自查)', () => {
+  it('tapdb 齐全 → cn/global 均无缺失', () => {
+    const v = clone();
+    expect(missingSelfhostBakeFields(v.cn)).toEqual([]);
+    expect(missingSelfhostBakeFields(v.global)).toEqual([]);
+  });
+  it('tapdb 留空 → 逐项点名(全区域一致,dev 也不例外)', () => {
+    const v = clone();
+    expect(missingSelfhostBakeFields(v.dev)).toEqual(['tapdb.clientId', 'tapdb.clientToken']);
+    v.cn.tapdb.clientToken = ' ';
+    expect(missingSelfhostBakeFields(v.cn)).toEqual(['tapdb.clientToken']);
+  });
+  it('global 缺 google → 点名 google.*;cn 不要求 google', () => {
+    const v = clone();
+    v.global.google = { webClientId: '', iosClientId: '', iosUrlScheme: '' };
+    expect(missingSelfhostBakeFields(v.global)).toEqual([
+      'google.webClientId',
+      'google.iosClientId',
+      'google.iosUrlScheme',
+    ]);
+    expect(missingSelfhostBakeFields(v.cn)).toEqual([]);
   });
 });
 

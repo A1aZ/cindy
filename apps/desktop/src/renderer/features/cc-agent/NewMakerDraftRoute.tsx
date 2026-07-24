@@ -1754,33 +1754,49 @@ export function NewMakerDraftRoute() {
         setPendingGoal(remoteSessionId, { objective, limits });
         // 自动起名:goal 首轮走 GoalController 的 session.send、不经 maker:input:enqueue,
         // 被控端 deviceLinkAutoTitle 不会触发(Codex review #548)—— 与本地分支的
-        // autoNameSession 对位,经隧道生成标题并窄口径写回。fire-and-forget;
-        // 写回前 re-read,仅在会话仍无标题时落盘(用户手动改名 wins)。
+        // autoNameSession 对位:先立即用目标文案截断占位(Codex 式,侧边栏不停留在
+        // 'New Maker'),再经隧道生成智能标题窄口径覆盖。fire-and-forget;
+        // 覆盖前 re-read,仅在标题仍是占位/默认时落盘(用户手动改名 wins)。
         const titleAgentKind = persistedAgentKind === 'codex' ? 'codex' : 'claude-code';
+        const placeholderTitle = objective.replace(/\n/g, ' ').slice(0, 40).trim();
         void (async () => {
           try {
+            // 无文本目标(理论不可达,goal 对话框必填)不起名:被控端旧版本的
+            // maker:generate-title 没有空消息防线,LLM 会把"请提供内容"当标题。
+            if (!placeholderTitle) return;
+            await window.electronAPI.deviceLink.invoke(
+              deviceId,
+              'local-db:sessions:patch-meta',
+              [remoteSessionId, { title: placeholderTitle }],
+            );
             const gen = (await window.electronAPI.deviceLink.invoke(
               deviceId,
               'maker:generate-title',
               [{ message: objective, agentKind: titleAgentKind, sessionId: remoteSessionId }],
             )) as { title: string | null } | null;
-            const title = gen?.title?.trim() || objective.replace(/\n/g, ' ').slice(0, 40).trim();
-            if (!title) return;
+            const title = gen?.title?.trim();
+            if (!title || title === placeholderTitle) return;
             const current = (await window.electronAPI.deviceLink.invoke(
               deviceId,
               'local-db:sessions:get',
               [remoteSessionId],
             )) as { title?: string | null } | null;
             const existingTitle = current?.title?.trim();
-            // 'New Maker' 是 maker:create-session 的默认占位符标题,允许覆写;
+            // 占位标题与 'New Maker'(maker:create-session 的默认占位符)都允许覆写;
             // 用户已手动改过的真实标题则保留(user rename wins)。
-            if (existingTitle && existingTitle !== 'New Maker') return;
+            if (
+              existingTitle &&
+              existingTitle !== 'New Maker' &&
+              existingTitle !== placeholderTitle
+            ) {
+              return;
+            }
             await window.electronAPI.deviceLink.invoke(deviceId, 'local-db:sessions:patch-meta', [
               remoteSessionId,
               { title },
             ]);
           } catch {
-            // 起名失败不影响目标流程,侧边栏保留默认名。
+            // 起名失败不影响目标流程,侧边栏保留占位/默认名。
           }
         })();
         clearComposerDraftAndNotify(NEW_MAKER_DRAFT_KEY);
@@ -1831,7 +1847,7 @@ export function NewMakerDraftRoute() {
       // setGoal 内部 ensureSession(拉起 agent)+ 发首轮(带目标指令)。
       await window.electronAPI.maker.setGoal({ sessionId: newSession.id, objective, limits });
       // 自动起名:/goal 新建的会话不经普通发送路径,scheduleAutoName 漏触发 → 标题会停在默认。
-      // 这里用目标文案补一次,与普通会话同款(宽限期 + 占位 + 不覆盖手动改名)。
+      // 这里用目标文案补一次,与普通会话同款(立即占位 + 智能标题后台覆盖 + 不覆盖手动改名)。
       makerChatStore.autoNameSession(newSession.id, objective, capabilityAgentKind);
       clearComposerDraftAndNotify(NEW_MAKER_DRAFT_KEY);
       resetDraftWorkspaceAfterSend();

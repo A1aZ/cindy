@@ -217,11 +217,31 @@ describe('maker:event hot path ordering', () => {
     expect(coordinatorAbortEnd).toBeGreaterThan(coordinatorAbortStart);
     expectOrder(
       coordinatorAbortSource,
+      'const sess = maker.getSession(sessionId);',
+      'if (!sess) return;',
+    );
+    expectOrder(
+      coordinatorAbortSource,
+      'if (!sess) return;',
+      'handleAgentIslandSessionStopped(sessionId);',
+    );
+    expectOrder(
+      coordinatorAbortSource,
       'handleAgentIslandSessionStopped(sessionId);',
       'await sess.abort();',
     );
     expect(directAbortStart).toBeGreaterThanOrEqual(0);
     expect(directAbortEnd).toBeGreaterThan(directAbortStart);
+    expectOrder(
+      directAbortSource,
+      'const sess = maker.getSession(sessionId);',
+      'if (!sess) return;',
+    );
+    expectOrder(
+      directAbortSource,
+      'if (!sess) return;',
+      'handleAgentIslandSessionStopped(sessionId);',
+    );
     expectOrder(
       directAbortSource,
       'handleAgentIslandSessionStopped(sessionId);',

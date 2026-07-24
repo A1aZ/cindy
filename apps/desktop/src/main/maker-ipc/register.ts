@@ -5839,9 +5839,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       steerToAgentAccepted(sessionId, message, sendOpts),
     abortSession: async (sessionId) => {
       markWorkerManualInterruptIfKnown(sessionId, 'input_stop');
-      handleAgentIslandSessionStopped(sessionId);
       const sess = maker.getSession(sessionId);
       if (!sess) return;
+      handleAgentIslandSessionStopped(sessionId);
       cancelReleasedOutput(sessionId);
       await sess.abort();
       cleanupPendingInteractionsForSession(sessionId, 'session_aborted');
@@ -6546,9 +6546,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     if (typeof sessionId !== 'string') throwIpcError('INVALID_PARAMS', 'sessionId required');
     markWorkerManualInterruptIfKnown(sessionId, 'abort_session');
     silentStopAutoResumeGuard.noteSessionReset(sessionId);
-    handleAgentIslandSessionStopped(sessionId);
     const sess = maker.getSession(sessionId);
     if (!sess) return;
+    handleAgentIslandSessionStopped(sessionId);
     // 用户 Stop 当前 turn → 若该会话有 active goal,先暂停目标(置 paused + 停续跑 + detach
     // 监听),**再** abort。这样 abort 产生的终止事件到来时目标已暂停、监听已摘,不会被误判成
     // 续跑(原本依赖 error 文案正则判 paused/blocked,不可靠)。null-safe;无 active goal 时 no-op。

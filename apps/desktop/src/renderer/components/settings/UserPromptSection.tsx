@@ -31,7 +31,12 @@ export function UserPromptSection() {
     const snapshot = draft;
     setSaving(true);
     try {
-      const decision = await window.electronAPI.contentModeration.reviewUserPrompt(snapshot);
+      const reviewFn = window.electronAPI.contentModeration?.reviewUserPrompt;
+      if (!reviewFn) {
+        toast.error(t('settings.personalization.toast.saveFailed'));
+        return;
+      }
+      const decision = await reviewFn(snapshot);
       if (decision === 'reject') {
         toast.error(t('contentModeration.blocked'));
         return;

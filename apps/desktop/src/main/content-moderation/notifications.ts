@@ -14,14 +14,19 @@ export function broadcastModerationInputBlocked(input: {
   item: AgentInputQueuedMessage;
   reason: 'rejected' | 'cancelled';
 }): void {
+  const files = input.item.files ?? [];
   const payload = {
     sessionId: input.sessionId,
     clientId: input.item.clientId,
     text: input.item.text,
-    files: input.item.files ?? [],
+    files,
     reason: input.reason,
   };
-  tapWindowBroadcast(CONTENT_MODERATION_INPUT_BLOCKED_CHANNEL, payload);
+  // Device-link drops oversized frames for non-maker:event channels.
+  // Strip large blob fields to keep the notification deliverable.
+  const compactFiles = files.map(({ base64: _b, textContent: _t, ...rest }) => rest);
+  const compactPayload = { ...payload, files: compactFiles };
+  tapWindowBroadcast(CONTENT_MODERATION_INPUT_BLOCKED_CHANNEL, compactPayload);
   for (const window of BrowserWindow.getAllWindows()) {
     if (window.isDestroyed()) continue;
     window.webContents.send(CONTENT_MODERATION_INPUT_BLOCKED_CHANNEL, payload);

@@ -81,7 +81,7 @@ export function LegacyMigrationDialog() {
       ((!running && buttonRef.current) || containerRef.current)?.focus();
       return;
     }
-    if (failed && event.key === 'Escape') {
+    if (failed && (event.key === 'Escape' || event.key === 'Enter' || event.key === ' ')) {
       event.preventDefault();
       dismissFailed();
     }

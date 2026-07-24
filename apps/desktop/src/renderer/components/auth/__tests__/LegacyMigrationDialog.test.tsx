@@ -80,16 +80,32 @@ describe('LegacyMigrationDialog states', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
-  it('legacy-failed:Escape 关闭并清 main 态(Enter 不关闭)', async () => {
+  it('legacy-failed:Escape 关闭并清 main 态', async () => {
+    const api = installLegacyMigrationApi('failed');
+    render(<LegacyMigrationDialog />);
+
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(api.confirm).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('legacy-failed:Enter 关闭并清 main 态', async () => {
     const api = installLegacyMigrationApi('failed');
     render(<LegacyMigrationDialog />);
 
     const dialog = await screen.findByRole('dialog');
     fireEvent.keyDown(dialog, { key: 'Enter' });
-    expect(api.confirm).not.toHaveBeenCalled();
-    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(api.confirm).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
 
-    fireEvent.keyDown(dialog, { key: 'Escape' });
+  it('legacy-failed:Space 关闭并清 main 态', async () => {
+    const api = installLegacyMigrationApi('failed');
+    render(<LegacyMigrationDialog />);
+
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.keyDown(dialog, { key: ' ' });
     expect(api.confirm).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('dialog')).toBeNull();
   });

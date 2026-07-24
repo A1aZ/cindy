@@ -129,10 +129,40 @@ describe('makerChatStore auto-name (Codex-style immediate placeholder)', () => {
     });
   });
 
-  it('overwrites the placeholder once the smart title arrives', async () => {
-    vi.mocked(sessionService.get).mockResolvedValue({
-      title: 'first message text',
+  it('does not auto-name a session the user already renamed before the first message', async () => {
+    vi.mocked(sessionService.get).mockResolvedValueOnce({
+      title: '我的自定义标题',
     } as Awaited<ReturnType<typeof sessionService.get>>);
+
+    makerChatStore.autoNameSession(SESSION_ID, 'first message text', 'claude-code');
+    await flushPromises();
+
+    // pre-check 命中用户改名 → 占位与智能标题都不写,连生成请求也不发。
+    expect(generateTitle).not.toHaveBeenCalled();
+    expect(sessionService.update).not.toHaveBeenCalled();
+  });
+
+  it('still auto-names fork-placeholder sessions', async () => {
+    vi.mocked(sessionService.get).mockResolvedValueOnce({
+      title: '[Fork] 源会话标题',
+    } as Awaited<ReturnType<typeof sessionService.get>>);
+
+    makerChatStore.autoNameSession(SESSION_ID, 'first message text', 'claude-code');
+    await flushPromises();
+
+    expect(sessionService.update).toHaveBeenCalledWith(SESSION_ID, {
+      title: 'first message text',
+    });
+  });
+
+  it('overwrites the placeholder once the smart title arrives', async () => {
+    vi.mocked(sessionService.get)
+      .mockResolvedValueOnce({
+        title: 'New Maker',
+      } as Awaited<ReturnType<typeof sessionService.get>>)
+      .mockResolvedValueOnce({
+        title: 'first message text',
+      } as Awaited<ReturnType<typeof sessionService.get>>);
 
     makerChatStore.autoNameSession(SESSION_ID, 'first message text', 'codex');
     await flushPromises();
@@ -151,9 +181,13 @@ describe('makerChatStore auto-name (Codex-style immediate placeholder)', () => {
   });
 
   it('keeps a manual rename over the late smart title', async () => {
-    vi.mocked(sessionService.get).mockResolvedValue({
-      title: '用户手动改的名字',
-    } as Awaited<ReturnType<typeof sessionService.get>>);
+    vi.mocked(sessionService.get)
+      .mockResolvedValueOnce({
+        title: 'New Maker',
+      } as Awaited<ReturnType<typeof sessionService.get>>)
+      .mockResolvedValueOnce({
+        title: '用户手动改的名字',
+      } as Awaited<ReturnType<typeof sessionService.get>>);
 
     makerChatStore.autoNameSession(SESSION_ID, 'first message text', 'claude-code');
     await flushPromises();
@@ -167,8 +201,8 @@ describe('makerChatStore auto-name (Codex-style immediate placeholder)', () => {
   });
 
   it('keeps the placeholder when title generation fails or returns null', async () => {
-    vi.mocked(sessionService.get).mockResolvedValue({
-      title: 'first message text',
+    vi.mocked(sessionService.get).mockResolvedValueOnce({
+      title: 'New Maker',
     } as Awaited<ReturnType<typeof sessionService.get>>);
 
     makerChatStore.autoNameSession(SESSION_ID, 'first message text', 'claude-code');

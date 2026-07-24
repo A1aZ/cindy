@@ -1765,6 +1765,20 @@ export function NewMakerDraftRoute() {
             // 无文本目标(理论不可达,goal 对话框必填)不起名:被控端旧版本的
             // maker:generate-title 没有空消息防线,LLM 会把"请提供内容"当标题。
             if (!placeholderTitle) return;
+            // 覆写守卫:仅当远端标题仍是默认占位时才自动起名(user rename wins,
+            // PR #296 review)。刚 create-session 建出的会话标题必为 'New Maker',
+            // 此检查防御极端 race;读取失败时按默认占位继续,不中断起名。
+            try {
+              const preCheck = (await window.electronAPI.deviceLink.invoke(
+                deviceId,
+                'local-db:sessions:get',
+                [remoteSessionId],
+              )) as { title?: string | null } | null;
+              const preTitle = preCheck?.title?.trim();
+              if (preTitle && preTitle !== 'New Maker') return;
+            } catch {
+              // 读不到当前标题时按"仍是默认占位"继续。
+            }
             // 占位写入失败(旧被控端无此窄口径 / 瞬时通道错误)单独吞掉,不中断
             // 后续智能起名——生成与写回不依赖占位成功(PR #296 review P1)。
             try {
@@ -1782,7 +1796,10 @@ export function NewMakerDraftRoute() {
               [{ message: objective, agentKind: titleAgentKind, sessionId: remoteSessionId }],
             )) as { title: string | null } | null;
             const title = gen?.title?.trim();
-            if (!title || title === placeholderTitle) return;
+            // 智能标题与占位相同也照走写回:占位写入允许失败(上方 catch),
+            // 此时远端仍是 'New Maker',跳过会让标题永久停在默认名(PR #296
+            // review P1);占位已成功时重写同值幂等无害。
+            if (!title) return;
             const current = (await window.electronAPI.deviceLink.invoke(
               deviceId,
               'local-db:sessions:get',

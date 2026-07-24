@@ -5480,12 +5480,19 @@ function scheduleAutoName(
   const fallbackTitle = text.replace(/\s+/g, ' ').trim().slice(0, 40).trimEnd();
   // 纯附件等无文本首条消息起不出有意义的标题,保留默认标题。
   if (!fallbackTitle) return;
-  const titlePromise = window.electronAPI.maker
-    .generateTitle(text, agentKind, sessionId)
-    .then((result) => result.title)
-    .catch(() => null);
   void (async () => {
     try {
+      // 覆写守卫:仅当标题仍是系统占位(默认 'New Maker' / fork 占位)时才自动
+      // 起名。用户可以在发首条消息前就手动改名(空会话也能重命名),此时整条
+      // 链路放弃——占位与智能标题都不写(user rename wins,PR #296 review)。
+      const before = await sessionService.get(sessionId);
+      if (before.title && before.title !== 'New Maker' && !before.title.startsWith('[Fork')) {
+        return;
+      }
+      const titlePromise = window.electronAPI.maker
+        .generateTitle(text, agentKind, sessionId)
+        .then((result) => result.title)
+        .catch(() => null);
       await applyAutoNameTitle(sessionId, fallbackTitle);
       const smart = (await titlePromise)?.trim();
       if (smart && smart !== fallbackTitle) {

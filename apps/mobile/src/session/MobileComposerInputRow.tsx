@@ -85,6 +85,8 @@ export interface MobileComposerInputRowProps {
    * null / undefined 走内容自动增长（现状行为）。
    */
   inputFrameHeight?: number | Animated.Value | null;
+  /** Rich composer replacement for the plain TextInput. */
+  inputElement?: ReactNode;
   inputOverlay?: ReactNode;
   inputRef?: unknown;
   inputStyle?: StyleProp<TextStyle>;
@@ -156,6 +158,7 @@ export function MobileComposerInputRow({
   floatingVoiceButton,
   floatingVoiceButtonStyle,
   inputFrameHeight,
+  inputElement,
   inputOverlay,
   inputRef,
   inputStyle,
@@ -255,11 +258,11 @@ export function MobileComposerInputRow({
             inputFrameHeight != null && { height: inputFrameHeight },
           ]}
         >
-          {onPasteImages && !isExpoGo ? (
+          {inputElement ?? (onPasteImages && !isExpoGo ? (
             <TextInputWrapper onPaste={handleNativePaste} style={styles.pasteWrapper}>
               {textInputElement}
             </TextInputWrapper>
-          ) : textInputElement}
+          ) : textInputElement)}
           {inputOverlay}
         </Animated.View>
         {cardLayout ? null : trailing}

@@ -74,10 +74,12 @@ import { agentAuthGateHint, agentAuthGateVerdict } from '@/session/agentAuthGate
 import { isTransientRemoteError, withTransientRemoteRetry } from '@/device-link/remoteRetry';
 import { useRemoteSyncTask } from '@/device-link/remoteSyncTask';
 import { useMobileMakerTransport } from '@/device-link/useMobileMakerTransport';
+import { createMobileMakerTransport } from '@/device-link/mobileMakerTransport';
 import { startFocusedTopicSubscription } from '@/device-link/focusedTopicSubscription';
 import { useObserve } from '@/observability/observe';
 import { InteractionPanel, type MobilePlanViewerState } from '@/session/InteractionPanel';
 import { MessageRenderer, type MobileMessageDraft } from '@/session/MessageRenderer';
+import { ComposerRichInput, type ComposerRichInputHandle } from '@/session/ComposerRichInput';
 import { InlineQueueSection } from '@/session/InlineQueueSection';
 import { RewindPreviewPanel } from '@/session/RewindPreviewPanel';
 import { BlurBackdrop } from '@/session/BlurBackdrop';
@@ -160,20 +162,45 @@ import {
   detectComposerTrigger,
   filterAtResources,
   filterSlashCommands,
-  insertAtResource,
-  insertSlashCommand,
   mergeSlashCommands,
 } from '@/session/composerPalette';
 import { buildComposerTouchLayout } from '@/session/composerTouchLayout';
-import { flushComposerDraftWrites, readComposerDraft, readComposerDraftSync, saveComposerDraft } from '@/session/composerDraftStore';
+import {
+  flushComposerDraftWrites,
+  readComposerDocumentDraft,
+  readComposerDocumentDraftSync,
+  readComposerDraft,
+  readComposerDraftSync,
+  saveComposerDocumentDraft,
+  saveComposerDraft,
+} from '@/session/composerDraftStore';
+import {
+  appendComposerNode,
+  composerDocumentsEqual,
+  composerDocumentHasContent,
+  composerDocumentFromEncodedMessage,
+  composerDocumentProjectedText,
+  composerDocumentQuotes,
+  emptyComposerDocument,
+  hydrateComposerMessageReferenceBodies,
+  mentionComposerNode,
+  migrateLegacyComposerDraft,
+  normalizeComposerDocument,
+  reconcileComposerProjectedText,
+  replaceComposerTextRange,
+  serializeComposerDocument,
+  sessionLinkComposerNode,
+  slashCommandTextNode,
+  textComposerDocument,
+  type ComposerDocument,
+} from '@/session/composerDocument';
+import { boundAgentReferenceText } from '@cindy/maker-shared/agent-input-projection';
 import {
   appendQuote,
   clearQuotes,
   getQuotes,
   hydrateQuotes,
   resolveOrderedQuoteDraft,
-  setOrderedQuoteDraft,
-  setQuotes,
   truncateQuoteText,
   useSessionQuotes,
 } from '@/session/chatQuoteStore';
@@ -201,6 +228,12 @@ import {
   stopOptionsForProjection,
   type QueueEditTextState,
 } from '@/session/inputProjection';
+import {
+  acquireQueueEditLock,
+  commitQueueEdit,
+  releaseQueueEditLockAfter,
+  type QueueEditLockOwner,
+} from '@/session/queueEditLifecycle';
 import { findErrorTailClientId, isContinuationQueueItem, resolveSessionTailBanner } from '@/session/sessionTailBannerModel';
 import { SessionTailBanner } from '@/session/SessionTailBanner';
 import {
@@ -334,6 +367,7 @@ import {
   prepareMobileQueuedSessionReferences,
   prepareMobileQueuedSessionReferencesForSteer,
 } from '@/session/sessionReferences';
+import { compactSessionMessageLabel, mobileSessionMessageDisplayText } from '@/session/sessionMessageText';
 import { copyMessageText } from '@/session/messageActions';
 import {
   remoteSessionStore,
@@ -457,6 +491,7 @@ const TAIL_RETRY_HIDE_TIMEOUT_MS = 15_000;
 interface QueueEditingState {
   clientId: string;
   stashedDraft: string;
+  stashedDocument: ComposerDocument;
   stashedAttachments: RemoteSerializedAttachment[];
   textState: QueueEditTextState;
 }
@@ -538,21 +573,22 @@ function restoreOutboxItemsToDraft(items: readonly MobileOutboxItem[]): void {
       existingVisibleText,
       existingQuotes,
     );
-    const existingEncodedBody = existingOrderedDraft?.encodedBody
-      ?? formatQuotesForSend(existingQuotes, existingVisibleText);
+    const existingDocument = readComposerDocumentDraftSync(draftSessionId)
+      ?? migrateLegacyComposerDraft(existingVisibleText, existingQuotes, existingOrderedDraft?.encodedBody);
+    const existingEncodedBody = serializeComposerDocument(existingDocument).text;
     const recovery = recoverOutboxItemsToComposerDraft(sessionItems, {
       visibleText: existingVisibleText,
       encodedBody: existingEncodedBody,
       quotes: existingQuotes,
+      document: existingDocument,
     });
     if (recovery.visibleText || recovery.quotes.length > 0) {
       saveComposerDraft(draftSessionId, recovery.visibleText);
-    }
-    if (recovery.quotes.length > 0) {
-      setOrderedQuoteDraft(draftSessionId, recovery.quotes, {
-        encodedBody: recovery.encodedBody,
-        projectedText: recovery.visibleText,
-      });
+      saveComposerDocumentDraft(
+        draftSessionId,
+        recovery.document,
+      );
+      clearQuotes(draftSessionId);
     }
   }
 }
@@ -567,6 +603,7 @@ export default function SessionScreen() {
     deviceName?: string;
     draft?: string;
     focusClientId?: string;
+    focusComposerRequestKey?: string;
     focusRequestKey?: string;
     visualFocusComposer?: string;
     visualOpenSearch?: string;
@@ -583,6 +620,7 @@ export default function SessionScreen() {
   const deviceName = readRouteParam(params.deviceName) ?? deviceId;
   const routeDraft = readRouteParam(params.draft);
   const routeFocusClientId = readRouteParam(params.focusClientId);
+  const routeFocusComposerRequestKey = readRouteParam(params.focusComposerRequestKey);
   const routeFocusRequestKey = readRouteParam(params.focusRequestKey);
   const visualFocusComposer = MOBILE_VISUAL_MOCK_ENABLED && readRouteParam(params.visualFocusComposer) === '1';
   const visualOpenSearch = MOBILE_VISUAL_MOCK_ENABLED && readRouteParam(params.visualOpenSearch) === '1';
@@ -618,17 +656,17 @@ export default function SessionScreen() {
     if (messages.length > 0) markInteractive();
   }, [messages.length, markInteractive]);
   const [draft, setDraft] = useState('');
+  const [composerDocument, setComposerDocumentState] = useState<ComposerDocument>(emptyComposerDocument);
+  const [composerDraftHydrated, setComposerDraftHydrated] = useState(false);
   // chat-text-quote:待随下一条消息发送的选中文字引用(全局 store,消息流选区
   // 按钮 / 文件预览页写入;发送时拼进正文,命中本地命令时保留)。
   const quotes = useSessionQuotes(sessionId);
-  useEffect(() => {
-    if (sessionId) void hydrateQuotes(sessionId);
-  }, [sessionId]);
   // 采集回调必须 memoize:内联箭头每次渲染换新引用,会让 MessageRenderer 的
   // SelectionQuoteContext value 重建,FlatList 里所有可见 MarkdownSelectableText
   // 跟着重渲(打字等无关 state 变化都触发),长转录会话开销明显(review P2)。
   const handleQuoteSelection = useCallback((quote: { text: string }) => {
     appendQuote(sessionId, { text: truncateQuoteText(quote.text) });
+    requestAnimationFrame(() => composerInputRef.current?.focus());
   }, [sessionId]);
   const [composerFocused, setComposerFocused] = useState(false);
   const [composerInputContentHeight, setComposerInputContentHeight] = useState(COMPOSER_INPUT_SINGLE_LINE_CONTENT_HEIGHT);
@@ -709,7 +747,10 @@ export default function SessionScreen() {
       if (uploadLocalId && routeUploadToOutboxRef.current(uploadLocalId, { failed: true })) return;
       setAttachmentError(message);
     },
-    onPicked: () => setContextSheetOpen(false),
+    onPicked: () => {
+      setContextSheetOpen(false);
+      requestAnimationFrame(() => composerInputRef.current?.focus());
+    },
   });
   // 换会话与退屏的 outbox 回收:未派发条目的文字合并回草稿库(用户已「发出」的文字
   // 不能静默蒸发,回来时出现在输入框里),在途上传任务丢弃(与托盘退出语义一致,
@@ -774,6 +815,8 @@ export default function SessionScreen() {
   // 排队编辑保存(update-content RPC)在途 promise:会话切换 cleanup 据此把解锁
   // 排到保存落定之后,防止 device-link 并发下解锁超车、桌面端用旧内容抢先派发。
   const queueEditSaveInFlightRef = useRef<Promise<void> | null>(null);
+  const queueEditLockOwnerRef = useRef<QueueEditLockOwner | null>(null);
+  const queueEditSaveOwnerRef = useRef<QueueEditLockOwner | null>(null);
   // 「已出队、消息尚未回流」的落定中条目:桌面端 drain 会先从 pendingQueue 摘除、
   // 后落库推送,device-link 下两者相隔可感知——此间继续渲染半透明气泡(转圈徽标),
   // 消息回流(clientId 进入 queueHiddenClientIds)或超时后移除,保证「原位变实」
@@ -915,6 +958,7 @@ export default function SessionScreen() {
   }
   const appliedRouteDraftRef = useRef<string | null>(null);
   const draftRef = useRef('');
+  const composerDocumentRef = useRef<ComposerDocument>(emptyComposerDocument());
   // 远程媒体取件队列:屏实例级缓存 + 同 url 去重 + 并发上限(每次取件都让桌面端
   // 真实上传一次 OSS,列表缩略图懒取件后必须收敛)。deps 经 ref 透传保持队列实例稳定;
   // 队列生命周期 = 单个会话:切 sessionId / 退屏时 releaseAll + 补删 + 换新实例
@@ -1054,13 +1098,16 @@ export default function SessionScreen() {
   const voiceSuppressNextPressRef = useRef(false);
   const voiceStopAfterStartRef = useRef(false);
   const finishVoiceRecordingRef = useRef<(() => void) | null>(null);
-  const composerInputRef = useRef<NativeTextInput>(null);
+  const composerInputRef = useRef<ComposerRichInputHandle | null>(null);
   const composerScrollViewRef = useRef<ScrollView>(null);
   const composerScrollEnabledRef = useRef(false);
   const voiceDraftScrollRef = useRef<ScrollView>(null);
   const voiceControllerSessionRef = useRef<MobileVoiceControllerSession | null>(null);
   const voiceDictionaryLearningTrackerRef = useRef<MobileVoiceDictionaryLearningTracker | null>(null);
-  const sendLatestRef = useRef<((options?: { draftOverride?: string }) => Promise<void>) | null>(null);
+  const sendLatestRef = useRef<((options?: {
+    draftOverride?: string;
+    documentOverride?: ComposerDocument;
+  }) => Promise<void>) | null>(null);
   const sendButtonRef = useRef<View>(null);
   const sendButtonFrameRef = useRef<{ height: number; width: number; x: number; y: number } | null>(null);
   const slashLoadSeqRef = useRef(0);
@@ -1078,6 +1125,7 @@ export default function SessionScreen() {
   const autoRetrySyncKeyRef = useRef<string | null>(null);
   const loadedRouteFocusKeyRef = useRef<string | null>(null);
   const appliedRouteFocusKeyRef = useRef<string | null>(null);
+  const appliedRouteComposerFocusKeyRef = useRef<string | null>(null);
   const targetAvailableRef = useRef<boolean | null>(null);
   // 记录已为哪个连接 epoch 触发过 resync;初值 = 首渲染时的 epoch,使首开由 mount effect 单独负责,
   // 这个 epoch effect 只在真正重连(epoch 变化)时再同步,避免首开连环重 sync 导致列表重排跳动。
@@ -1486,10 +1534,9 @@ export default function SessionScreen() {
       : composerRuntimeSummary.modelSummary
     : '';
   const composerSendUnavailableReason = canUseComposer ? null : sessionOperationLayout.composerDisabledReason;
-  // chat-text-quote:排队编辑是「替换原条目内容」语义,send() 不消费引用
-  // (quotesAtSend 置空);布局的可发送判定必须与发送路径一致,否则纯引用 +
-  // 空文本时「保存修改」按钮亮着、点了却被空 payload 守卫拦下什么都不发生。
-  const composerQuoteCount = queueEditing ? 0 : quotes.length;
+  // 引用已是 ComposerDocument 内的 atom；排队编辑同样可能只有引用而没有可见
+  // 文本，因此必须计入 payload，否则「保存修改」会被错误禁用。
+  const composerQuoteCount = composerDocumentQuotes(composerDocument).length;
   // Context 面板是 Modal sheet,不再有内联附件面板 → attachmentPickerOpen 恒 false。
   const composerLayout = useMemo(() => buildSessionComposerLayout({
     attachmentBusy: false,
@@ -1652,6 +1699,12 @@ export default function SessionScreen() {
       Math.abs(currentHeight - nextHeight) < 1 ? currentHeight : nextHeight
     ));
   }, []);
+  const handleComposerRichInputHeight = useCallback((height: number) => {
+    const nextHeight = Math.max(COMPOSER_INPUT_SINGLE_LINE_CONTENT_HEIGHT, Math.ceil(height));
+    setComposerInputContentHeight((currentHeight) => (
+      Math.abs(currentHeight - nextHeight) < 1 ? currentHeight : nextHeight
+    ));
+  }, []);
   const handleComposerInputPressIn = useCallback(() => {
     if (voiceRecordingActiveRef.current || voiceState === 'listening') {
       finishVoiceRecordingRef.current?.();
@@ -1808,12 +1861,36 @@ export default function SessionScreen() {
     [bottomOverlayContentHeight],
   );
 
-  const applyComposerDraft = useCallback((value: string, options?: { persist?: boolean }) => {
-    draftRef.current = value;
-    setDraft(value);
-    voiceDictionaryLearningTrackerRef.current?.inspectDraft(value);
-    if (options?.persist !== false) saveComposerDraft(sessionId, value);
+  const applyComposerDocument = useCallback((
+    value: ComposerDocument,
+    options?: { persist?: boolean },
+  ) => {
+    composerDocumentRef.current = value;
+    setComposerDocumentState(value);
+    const projected = composerDocumentProjectedText(value);
+    draftRef.current = projected;
+    setDraft(projected);
+    voiceDictionaryLearningTrackerRef.current?.inspectDraft(projected);
+    if (options?.persist !== false) {
+      saveComposerDocumentDraft(sessionId, value);
+      // Keep the legacy string mirror during the one-way migration window so
+      // older builds do not turn a rich draft into an empty composer.
+      saveComposerDraft(sessionId, projected);
+    }
   }, [sessionId]);
+
+  const applyComposerDraft = useCallback((value: string, options?: { persist?: boolean }) => {
+    const document = reconcileComposerProjectedText(composerDocumentRef.current, value);
+    applyComposerDocument(document, options);
+  }, [applyComposerDocument]);
+
+  const replaceComposerDraft = useCallback((value: string, options?: { persist?: boolean }) => {
+    applyComposerDocument(textComposerDocument(value), options);
+  }, [applyComposerDocument]);
+
+  const applyRichComposerChange = useCallback((value: ComposerDocument) => {
+    applyComposerDocument(value, queueEditingRef.current ? { persist: false } : undefined);
+  }, [applyComposerDocument]);
 
   const setComposerDraft = useCallback((next: SetStateAction<string>) => {
     const value = typeof next === 'function' ? next(draftRef.current) : next;
@@ -1825,19 +1902,18 @@ export default function SessionScreen() {
     applyComposerDraft(value, queueEditingRef.current ? { persist: false } : undefined);
   }, [applyComposerDraft]);
 
-  const restoreComposerDraft = useCallback((value: string) => {
-    applyComposerDraft(value, { persist: false });
-  }, [applyComposerDraft]);
+  const moveComposerCaretToEnd = useCallback(() => {
+    composerInputRef.current?.setSelectionToEnd();
+  }, []);
 
   useEffect(() => {
     if (!voiceIsListening) return undefined;
     const frame = requestAnimationFrame(() => {
-      const end = draftRef.current.length;
-      composerInputRef.current?.setNativeProps({ selection: { start: end, end } });
+      moveComposerCaretToEnd();
       voiceDraftScrollRef.current?.scrollToEnd({ animated: false });
     });
     return () => cancelAnimationFrame(frame);
-  }, [composerInputContentHeight, composerInputVisibleHeight, draft, voiceIsListening]);
+  }, [composerInputContentHeight, composerInputVisibleHeight, draft, moveComposerCaretToEnd, voiceIsListening]);
 
   useEffect(() => {
     if (voiceIsListening && draft.length > 0) return;
@@ -1899,6 +1975,17 @@ export default function SessionScreen() {
     const editing = queueEditingRef.current;
     if (editing) {
       queueEditingRef.current = null;
+      const currentLockOwner = queueEditLockOwnerRef.current;
+      const idleLockOwner = currentLockOwner?.clientId === editing.clientId
+        ? currentLockOwner
+        : null;
+      const currentSaveOwner = queueEditSaveOwnerRef.current;
+      const saveLockOwner = currentSaveOwner?.clientId === editing.clientId
+        ? currentSaveOwner
+        : null;
+      const lockOwner = saveLockOwner ?? idleLockOwner;
+      if (idleLockOwner) queueEditLockOwnerRef.current = null;
+      if (saveLockOwner) queueEditSaveOwnerRef.current = null;
       // 保存(update-content)在途时,解锁与附件回收都不抢跑:解锁超车会让桌面端
       // 用旧内容抢先派发该行;立即回收则可能删掉桌面端正在物化的 OSS 对象,保存
       // 成功却拿到残缺附件(review P2 两条)。统一排到保存落定之后——保存成功时
@@ -1908,9 +1995,9 @@ export default function SessionScreen() {
       const inFlightSave = queueEditSaveInFlightRef.current;
       const attachmentsSnapshot = [...attachmentsRef.current];
       const finalize = () => {
-        void maker.input.setEditLock(sessionId, editing.clientId, false).catch(() => undefined);
         discardQueueEditTransientAttachmentsRef.current?.(editing, attachmentsSnapshot);
       };
+      if (lockOwner) void releaseQueueEditLockAfter(lockOwner, inFlightSave).catch(() => undefined);
       if (inFlightSave) void inFlightSave.then(finalize, finalize);
       else finalize();
       // 托盘不是 per-session 状态:编辑中切会话若不还原,队列条目的 files 会跟进
@@ -1919,7 +2006,7 @@ export default function SessionScreen() {
       attachmentsRef.current = [...editing.stashedAttachments];
       setAttachments([...editing.stashedAttachments]);
     }
-  }, [maker, sessionId]);
+  }, [sessionId]);
 
   useEffect(() => {
     if (canUseComposer) return;
@@ -1960,21 +2047,88 @@ export default function SessionScreen() {
     const key = `${sessionId}:${routeDraft ?? ''}`;
     if (appliedRouteDraftRef.current === key) return;
     appliedRouteDraftRef.current = key;
+    setComposerDraftHydrated(false);
     let cancelled = false;
     const immediateDraft = readComposerDraftSync(sessionId) ?? routeDraft ?? '';
-    restoreComposerDraft(immediateDraft);
-    void readComposerDraft(sessionId).then((storedDraft) => {
+    const immediateQuotes = getQuotes(sessionId);
+    const immediateOrdered = resolveOrderedQuoteDraft(sessionId, immediateDraft, immediateQuotes);
+    const immediateStoredDocument = readComposerDocumentDraftSync(sessionId);
+    let immediateDocument = immediateStoredDocument
+      ?? migrateLegacyComposerDraft(immediateDraft, immediateQuotes, immediateOrdered?.encodedBody);
+    if (immediateStoredDocument) {
+      for (const quote of immediateQuotes) {
+        immediateDocument = appendComposerNode(immediateDocument, { type: 'quote', quote });
+      }
+    }
+    applyComposerDocument(immediateDocument, { persist: false });
+    const immediateDocumentSnapshot = immediateDocument;
+    // Synchronously consumed quote-store items are already in the first paint.
+    // Clear them before the async hydration window so a concurrent user edit
+    // cannot append the same quote a second time when Promise.all settles.
+    if (immediateQuotes.length > 0) clearQuotes(sessionId);
+    // Memory is the source of truth once quotes were synchronously consumed.
+    // Skipping storage hydration makes it explicit that hydratedQuotes below
+    // can only contain cold-start quotes or quotes arriving after this point.
+    const quoteHydration = immediateQuotes.length > 0
+      ? Promise.resolve()
+      : hydrateQuotes(sessionId);
+
+    void Promise.all([
+      quoteHydration,
+      readComposerDocumentDraft(sessionId),
+      readComposerDraft(sessionId),
+    ]).then(([, storedDocument, storedDraft]) => {
       if (cancelled || appliedRouteDraftRef.current !== key) return;
-      if (draftRef.current !== immediateDraft) return;
-      const nextDraft = storedDraft ?? routeDraft ?? '';
-      restoreComposerDraft(nextDraft);
-      if (nextDraft.length > 0) saveComposerDraft(sessionId, nextDraft);
+      const hydratedQuotes = [...getQuotes(sessionId)];
+      const fallbackText = storedDraft ?? routeDraft ?? '';
+      const ordered = resolveOrderedQuoteDraft(sessionId, fallbackText, hydratedQuotes);
+      let nextDocument: ComposerDocument;
+      let hydratedQuotesIncluded = false;
+      if (storedDocument) {
+        nextDocument = storedDocument;
+        for (const quote of immediateQuotes) {
+          nextDocument = appendComposerNode(nextDocument, { type: 'quote', quote });
+        }
+      } else if (immediateQuotes.length > 0) {
+        nextDocument = migrateLegacyComposerDraft(
+          fallbackText,
+          immediateQuotes,
+          immediateOrdered?.encodedBody,
+        );
+      } else {
+        nextDocument = migrateLegacyComposerDraft(fallbackText, hydratedQuotes, ordered?.encodedBody);
+        hydratedQuotesIncluded = true;
+      }
+      if (!hydratedQuotesIncluded) {
+        for (const quote of hydratedQuotes) {
+          nextDocument = appendComposerNode(nextDocument, { type: 'quote', quote });
+        }
+      }
+      // User typing during AsyncStorage hydration wins. Newly arrived quote
+      // inbox items are still appended to that live document before clearing.
+      if (!composerDocumentsEqual(composerDocumentRef.current, immediateDocumentSnapshot)) {
+        nextDocument = composerDocumentRef.current;
+        for (const quote of hydratedQuotes) {
+          nextDocument = appendComposerNode(nextDocument, { type: 'quote', quote });
+        }
+      }
+      clearQuotes(sessionId);
+      applyComposerDocument(nextDocument);
+      setComposerDraftHydrated(true);
     });
     return () => {
       cancelled = true;
       void flushComposerDraftWrites(sessionId);
     };
-  }, [restoreComposerDraft, routeDraft, sessionId]);
+  }, [applyComposerDocument, routeDraft, sessionId]);
+
+  useEffect(() => {
+    if (!composerDraftHydrated || quotes.length === 0) return;
+    let next = composerDocumentRef.current;
+    for (const quote of quotes) next = appendComposerNode(next, { type: 'quote', quote });
+    clearQuotes(sessionId);
+    applyComposerDocument(next, queueEditingRef.current ? { persist: false } : undefined);
+  }, [applyComposerDocument, composerDraftHydrated, quotes, sessionId]);
 
   // 点选意图的有效性跟随草稿前缀与会话:一旦草稿不再以点选的 `/name` 开头
   // (清空、整段替换、改名)或切换了会话,点选立即作废——覆盖「清稿/替换后手输
@@ -2575,6 +2729,7 @@ export default function SessionScreen() {
   // 栈下层保持挂载,返回不会重新 mount,靠 focus 时机领取信箱。
   useFocusEffect(
     useCallback(() => {
+      let composerFocusFrame: number | null = null;
       const pending = drainComposerAttachments(sessionId);
       if (pending.length > 0) {
         setAttachments((current) => {
@@ -2621,8 +2776,18 @@ export default function SessionScreen() {
           })();
         }
       }
-      return undefined;
-    }, [sessionId]),
+      if (
+        canUseComposer
+        && routeFocusComposerRequestKey
+        && appliedRouteComposerFocusKeyRef.current !== routeFocusComposerRequestKey
+      ) {
+        appliedRouteComposerFocusKeyRef.current = routeFocusComposerRequestKey;
+        composerFocusFrame = requestAnimationFrame(() => composerInputRef.current?.focus());
+      }
+      return () => {
+        if (composerFocusFrame !== null) cancelAnimationFrame(composerFocusFrame);
+      };
+    }, [canUseComposer, routeFocusComposerRequestKey, sessionId]),
   );
 
   useFocusEffect(
@@ -3094,12 +3259,36 @@ export default function SessionScreen() {
     pendingSkillSelectionRef.current = command.kind === 'agent-skill'
       ? { name: command.name, sid: sessionId }
       : null;
-    setComposerDraft((current) => insertSlashCommand(current, detectComposerTrigger(current), command));
-  }, [sessionId, setComposerDraft]);
+    const trigger = detectComposerTrigger(draftRef.current);
+    if (trigger.kind !== 'slash') return;
+    const nextDocument = replaceComposerTextRange(
+      composerDocumentRef.current,
+      trigger.from,
+      draftRef.current.length,
+      [slashCommandTextNode(command.name), { type: 'text', text: ' ' }],
+    );
+    applyComposerDocument(
+      nextDocument,
+      queueEditingRef.current ? { persist: false } : undefined,
+    );
+    composerInputRef.current?.applyDocumentAndSetSelectionToEnd(nextDocument);
+  }, [applyComposerDocument, sessionId]);
 
   const selectAtResource = useCallback((item: MobileAtResourceItem) => {
-    setComposerDraft((current) => insertAtResource(current, detectComposerTrigger(current), item));
-  }, [setComposerDraft]);
+    const trigger = detectComposerTrigger(draftRef.current);
+    if (trigger.kind !== 'at') return;
+    const nextDocument = replaceComposerTextRange(
+      composerDocumentRef.current,
+      trigger.from,
+      draftRef.current.length,
+      [mentionComposerNode(item), { type: 'text', text: ' ' }],
+    );
+    applyComposerDocument(
+      nextDocument,
+      queueEditingRef.current ? { persist: false } : undefined,
+    );
+    composerInputRef.current?.applyDocumentAndSetSelectionToEnd(nextDocument);
+  }, [applyComposerDocument]);
 
   const startVoiceRecording = useCallback(async () => {
     if (
@@ -3371,19 +3560,24 @@ export default function SessionScreen() {
     setVoiceState('submitting');
     setVoiceError(null);
     try {
+      // stop() can deliver an empty final transcript through onDraftChanged before
+      // resolving. Capture the rich document first so quote/reference atoms survive.
+      const documentBeforeStop = composerDocumentRef.current;
       const latestDraft = await controller.stop();
       await setAudioModeAsync({ allowsRecording: false }).catch(() => undefined);
       setVoiceState('done');
       requestAnimationFrame(() => {
-        const end = latestDraft.length;
-        composerInputRef.current?.setNativeProps({ selection: { start: end, end } });
+        moveComposerCaretToEnd();
       });
       // chat-text-quote:纯引用(无转写文字、无附件)也要发出去——发送按钮在
       // quote-only 时可见,漏了引用会变成「点发送只停了录音、消息没发」。
-      if (options.sendAfterTranscribe && (latestDraft.trim() || attachments.length > 0 || getQuotes(sessionId).length > 0)) {
+      const latestDocument = latestDraft.trim()
+        ? reconcileComposerProjectedText(documentBeforeStop, latestDraft)
+        : documentBeforeStop;
+      if (options.sendAfterTranscribe && (composerDocumentHasContent(latestDocument) || attachments.length > 0)) {
         const sendLatest = sendLatestRef.current;
         if (!sendLatest) throw new Error(t('session.screen.voiceSenderNotReady'));
-        await sendLatest({ draftOverride: latestDraft });
+        await sendLatest({ documentOverride: latestDocument });
       }
     } catch (err) {
       voiceControllerSessionRef.current = null;
@@ -3394,7 +3588,7 @@ export default function SessionScreen() {
     } finally {
       voiceStopInFlightRef.current = false;
     }
-  }, [attachments.length, t, voiceState]);
+  }, [attachments.length, moveComposerCaretToEnd, t, voiceState]);
 
   const openVoiceSettings = useCallback(() => {
     void Linking.openSettings().catch((err) => {
@@ -3630,6 +3824,9 @@ export default function SessionScreen() {
       ...buildQueuedTextMessage(sessionAtSend, item.text, new Date(), item.clientId, {
         attachments: outboxItemAttachments(item),
         quotesEncoded: item.quotesEncoded,
+        agentReferences: item.agentReferences,
+        pastedTextRanges: item.pastedTextRanges,
+        slashCommandRanges: item.slashCommandRanges,
       }),
       ...(item.sessionRefs && item.sessionRefs.length > 0
         ? { sessionRefs: [...item.sessionRefs] }
@@ -3755,70 +3952,115 @@ export default function SessionScreen() {
 
   const outboxDisplayItems = useMemo(() => outboxItems.map(outboxDisplayItem), [outboxItems]);
 
-  async function send(options: { draftOverride?: string } = {}) {
-    if (voiceState === 'listening' && options.draftOverride === undefined) {
+  async function send(options: {
+    draftOverride?: string;
+    documentOverride?: ComposerDocument;
+  } = {}) {
+    if (
+      voiceState === 'listening' &&
+      options.draftOverride === undefined &&
+      options.documentOverride === undefined
+    ) {
       await finishVoiceRecording({ sendAfterTranscribe: true });
       return;
     }
-    const visibleDraft = options.draftOverride ?? draft;
+    const documentAtSend = options.documentOverride
+      ?? (options.draftOverride === undefined
+        ? composerDocumentRef.current
+        : reconcileComposerProjectedText(composerDocumentRef.current, options.draftOverride));
+    const visibleDraft = composerDocumentProjectedText(documentAtSend);
     const body = visibleDraft.trim();
+    const serializedAtSend = serializeComposerDocument(documentAtSend);
     const queueEditAtSendStart = queueEditingRef.current;
     const queueEditSubmission = queueEditAtSendStart
-      ? resolveQueueEditTextSubmission(queueEditAtSendStart.textState, visibleDraft)
+      ? resolveQueueEditTextSubmission(queueEditAtSendStart.textState, documentAtSend)
       : null;
     const queueEditPreservesEncodedQuotes = queueEditSubmission?.quotesEncoded === true;
-    // chat-text-quote:排队编辑是「替换原条目内容」语义,不注入引用;正常发送把
-    // 引用块前置在正文前(与桌面 ChatInput 的 formatQuotesForSend 对偶)。排队
-    // 引用的可见文本未改时无损复用隐藏 marked body；改过就降级为普通 Markdown。
-    // 命令判定(下方)用 body,命中命令时引用保留在胶囊里不消费。
-    const quotesAtSend = queueEditAtSendStart ? [] : [...getQuotes(sessionId)];
-    // fork / rewind 恢复的交错消息带一份隐藏 ordered body。仅当可见正文与引用
-    // 列表都完全没变时复用，保证「引用 A → 回复 A → 引用 B → 回复 B」默认
-    // 重发不改 prompt 顺序；任一处被编辑就显式失效并安全回落到引用前置格式。
-    const orderedDraftAtSend = queueEditAtSendStart
-      ? null
-      : resolveOrderedQuoteDraft(sessionId, visibleDraft, quotesAtSend);
-    const text = queueEditSubmission?.text
-      ?? orderedDraftAtSend?.encodedBody
-      ?? formatQuotesForSend(quotesAtSend, body);
+    const text = queueEditSubmission?.text ?? serializedAtSend.text;
+    const quotesEncodedAtSend = queueEditSubmission?.quotesEncoded ?? serializedAtSend.quotesEncoded;
+    let agentReferencesAtSend = queueEditSubmission?.agentReferences ?? serializedAtSend.agentReferences;
+    const pastedTextRangesAtSend = queueEditSubmission?.pastedTextRanges ?? serializedAtSend.pastedTextRanges;
+    const slashCommandRangesAtSend = queueEditSubmission?.slashCommandRanges ?? serializedAtSend.slashCommandRanges;
     if (!canUseComposer) {
-      if (options.draftOverride !== undefined) setComposerDraft(options.draftOverride);
+      if (options.documentOverride) applyComposerDocument(options.documentOverride);
+      else if (options.draftOverride !== undefined) setComposerDraft(options.draftOverride);
       return;
     }
-    if ((!text && attachments.length === 0 && pendingUploads.length === 0) || sendInFlightRef.current || sending || !deviceId) return;
+    if (
+      (!text && attachments.length === 0 && pendingUploads.length === 0) ||
+      sendInFlightRef.current ||
+      sending ||
+      !deviceId
+    ) {
+      if (options.documentOverride) applyComposerDocument(options.documentOverride);
+      return;
+    }
     if (!currentSession) {
       setError(t('session.screen.sessionNotFoundResync'));
+      if (options.documentOverride) applyComposerDocument(options.documentOverride);
       return;
     }
     sendInFlightRef.current = true;
     setSending(true);
     setError(null);
+    const outboxEligible = !queueEditAtSendStart;
+    const uploadsInFlight = outboxEligible ? getPendingUploadCount() : 0;
+    const willHaveAttachments = attachmentsRef.current.length > 0 || uploadsInFlight > 0;
+    const earlyLocalCommand = willHaveAttachments ? null : parseMobileLocalSystemCommand(body);
+    const pendingSkillAtSend = pendingSkillSelectionRef.current;
+    const parsedDesktopCommandAtSend = willHaveAttachments
+      ? null
+      : parseMobileDesktopCommand(body, slashCommands);
+    const earlyDesktopCommand =
+      parsedDesktopCommandAtSend
+      && pendingSkillAtSend?.sid === sessionId
+      && pendingSkillAtSend.name === parsedDesktopCommandAtSend.name
+        ? null
+        : parsedDesktopCommandAtSend;
+    const sessionRefsAtSend = outboxEligible && !earlyLocalCommand && !earlyDesktopCommand
+      ? extractMobileSessionReferences(text, remoteSessionStore.getSessionDeviceId)
+      : [];
+    pendingSkillSelectionRef.current = null;
     // 乐观第一拍:点发送立刻清空输入框并跟到底部,不等任何网络往返(enqueue 是
     // device-link 远程调用,弱网下数秒;文字已捕获进 text)。失败时若输入框仍为空
     // 则恢复原文——用户可能在 await 期间又打了字,不能覆盖。
-    const draftBeforeSend = options.draftOverride ?? draft;
-    // chat-text-quote:引用是否已被本次发送消费(乐观第二拍置真)。失败恢复用
-    // 标记而非「store 为空」判断——发送等待期间用户可能新采集了引用,不能覆盖。
-    let quotesConsumed = false;
+    const documentBeforeSend = documentAtSend;
+    // 本地命令只消费命令文本,不消费不可见的 quote atom。其它消息仍整份离开
+    // composer。排队编辑不走命令分流,保存时按整条临时文档处理。
+    const documentAfterOptimisticClear =
+      outboxEligible && (earlyLocalCommand || earlyDesktopCommand)
+        ? normalizeComposerDocument({
+            version: 1,
+            nodes: documentAtSend.nodes.filter((node) => node.type === 'quote'),
+          })
+        : emptyComposerDocument();
     const restoreDraftAfterFailure = () => {
       // 走持久化写回(setComposerDraft 而非 restoreComposerDraft):乐观清空那拍已把
       // 草稿库删除并打了 cleared 标,只回内存的话 remount 后草稿读到 null、原文丢失
       // (codex review R16)。restoreComposerDraft 的 persist:false 语义只适用于
       // 「从草稿库读出来回填」的初始化路径。
-      if (body && draftRef.current.trim().length === 0) setComposerDraft(draftBeforeSend);
-      // 引用与草稿对称恢复:把已消费的快照前置回填(保持原有顺序),等待期间
-      // 新采集的引用跟在后面原样保留;标记复位防止多个失败分支重复回填。
-      if (quotesConsumed) {
-        quotesConsumed = false;
-        const restoredQuotes = [...quotesAtSend, ...getQuotes(sessionId)];
-        if (orderedDraftAtSend) {
-          setOrderedQuoteDraft(sessionId, restoredQuotes, orderedDraftAtSend);
-        } else {
-          setQuotes(sessionId, restoredQuotes);
-        }
+      if (composerDocumentsEqual(composerDocumentRef.current, documentAfterOptimisticClear)) {
+        applyComposerDocument(documentBeforeSend);
       }
     };
-    if (body) setComposerDraft('');
+    if (text) applyComposerDocument(documentAfterOptimisticClear);
+    // A pasted message link is committed to the editor synchronously, while
+    // its readable body is fetched from the source device asynchronously.
+    // The optimistic clear above preserves the existing "tap sends this
+    // snapshot" boundary; await the body on that captured document so a fast
+    // send still carries semantic content without consuming later typing.
+    const hydratedDocumentAtSend = await hydrateComposerMessageReferenceBodies(
+      documentAtSend,
+      resolvePastedSessionLinkLabel,
+    );
+    if (!composerDocumentsEqual(hydratedDocumentAtSend, documentAtSend)) {
+      agentReferencesAtSend = queueEditAtSendStart
+        ? resolveQueueEditTextSubmission(
+            queueEditAtSendStart.textState,
+            hydratedDocumentAtSend,
+          ).agentReferences
+        : serializeComposerDocument(hydratedDocumentAtSend).agentReferences;
+    }
     // 排队编辑保存的编辑态快照:下方 waitForPendingUploads 可能耗时数秒,期间用户
     // 可能点 × 放弃或切换编辑目标——等待结束后以快照与最新 ref 比对,不一致则中止
     // 保存,防止编辑文本被当成一条全新消息发出(PR#709 review P1)。
@@ -3830,17 +4072,10 @@ export default function SessionScreen() {
     // 粘贴占位窗口(uploadsInFlight 计入占位数)同样走本分支:先等占位落定再划归,
     // 见分支内注释——不豁免,否则占位窗口内的发送会经原路径直接 enqueue 超车
     // outbox 在途消息(greptile review P1)。除占位等待外判断与划归全程同步,无竞态窗。
-    const outboxEligible = !queueEditAtSendStart;
-    const uploadsInFlight = outboxEligible ? getPendingUploadCount() : 0;
-    const willHaveAttachments = attachmentsRef.current.length > 0 || uploadsInFlight > 0;
-    const earlyLocalCommand = willHaveAttachments ? null : parseMobileLocalSystemCommand(body);
-    const sessionRefsAtSend = outboxEligible && !earlyLocalCommand
-      ? extractMobileSessionReferences(text, remoteSessionStore.getSessionDeviceId)
-      : [];
     // outboxPumpBusyRef 也算「outbox 在途」:派发起点条目即移出 outbox,enqueue
     // 弱网重试窗内 outbox 可能为空——此时新消息若走原路径会并发 enqueue 超车
     // 在途消息,破坏 FIFO(review P1);计入 pump busy 让它同样进 outbox 排队。
-    if (outboxEligible && !earlyLocalCommand
+    if (outboxEligible && !earlyLocalCommand && !earlyDesktopCommand
       && (uploadsInFlight > 0 || outboxRef.current.length > 0 || outboxPumpBusyRef.current)) {
       try {
         if (!currentSession.workingDir) {
@@ -3875,13 +4110,6 @@ export default function SessionScreen() {
         setAttachments([]);
         attachmentsRef.current = [];
         setAttachmentError(null);
-        // 引用消费(同原乐观二拍口径,按快照身份精确摘除)。outbox 条目删除 / 失败
-        // 不回填——消息与引用都还在气泡里,重试即可,没有「内容蒸发」窗口。
-        if (quotesAtSend.length > 0) {
-          const pendingConsume = new Set(quotesAtSend);
-          const quotesAfterConsume = getQuotes(sessionId).filter((quote) => !pendingConsume.delete(quote));
-          setQuotes(sessionId, quotesAfterConsume);
-        }
         // plan 一次性语义:权限档快照进条目(派发按快照发),chip 立即恢复——
         // 不等附件上传完,与「消息已发出」的乐观语义一致。
         const permissionModeAtSend = permissionModeOrAsk(currentSession.permissionMode);
@@ -3895,8 +4123,11 @@ export default function SessionScreen() {
           clientId: createOutboxClientId(),
           sessionId,
           text,
-          quotesEncoded: quotesAtSend.length > 0,
+          quotesEncoded: quotesEncodedAtSend,
           sessionRefs: sessionRefsAtSend,
+          agentReferences: agentReferencesAtSend,
+          pastedTextRanges: pastedTextRangesAtSend,
+          slashCommandRanges: slashCommandRangesAtSend ?? [],
           permissionModeAtSend,
           readyAttachments,
           readyPreviews,
@@ -3942,13 +4173,16 @@ export default function SessionScreen() {
         if (!original) {
           // 条目已被远端发出/删除(vanish effect 与本次点击竞态):原文不可改,放弃保存。
           setError(t('session.screen.queueMessageGone'));
-          cancelQueueEdit({ unlock: false });
+          cancelQueueEdit();
           return;
         }
         const updatedDraft = {
           ...buildQueuedTextMessage(sessionAtSend, text, new Date(), editingQueueItem.clientId, {
             attachments: sendAttachments,
             quotesEncoded: queueEditPreservesEncodedQuotes,
+            agentReferences: agentReferencesAtSend,
+            pastedTextRanges: pastedTextRangesAtSend,
+            slashCommandRanges: slashCommandRangesAtSend,
           }),
           ...(original.sessionRefs && original.sessionRefs.length > 0
             ? { sessionRefs: [...original.sessionRefs] }
@@ -3967,58 +4201,99 @@ export default function SessionScreen() {
           throw err;
         }
         // 引用解析会跨设备等待；期间用户可能切换或放弃编辑，落库前再次确认仍持有同一行。
+        // (取消 / 切换路径已按 lock owner 排队释放锁,这里不再直发解锁 RPC。)
         if (queueEditingRef.current?.clientId !== editingQueueItem.clientId) {
-          void maker.input.setEditLock(sessionId, editingQueueItem.clientId, false)
-            .catch(() => undefined);
           return;
         }
-        // 保存在途 promise:会话切换 cleanup 据此把解锁排到保存落定之后
-        // (device-link 并发下解锁不许超车 update-content,见 cleanup 注释)。
-        let settleSave: (() => void) | undefined;
-        queueEditSaveInFlightRef.current = new Promise<void>((resolve) => {
-          settleSave = resolve;
-        });
-        try {
-          try {
-            const projection = await maker.input.updateContent(sessionId, editingQueueItem.clientId, updated);
-            applyProjection(projection);
-          } catch (err) {
-            if (
-              isChannelNotAllowedError(err)
-              && text.trim().length > 0
-              && attachmentIdSetsEqual(original.files, sendAttachments)
-              && queuedMessageHasEncodedQuotes(original) === queueEditPreservesEncodedQuotes
-            ) {
-              // 旧被控端无 update-content:附件与 quote metadata 都不变、文本非空时
-              // 才退回 update-text。空文本不降级——旧端 update-text 对空文本静默 no-op,会造成"看似
-              // 保存成功、队列还是旧文案"的假成功(review P2)。降级本身失败(弱网两次
-              // RPC 之间断连)与其余失败分支对称:先还原编辑文本再抛,不许静默丢字
-              // (review P1)。
-              try {
-                const projection = await maker.input.updateText(
-                  sessionId,
-                  editingQueueItem.clientId,
-                  text,
-                  updated.sessionRefs,
-                  updated.trustedSessionReferenceContexts,
-                );
-                applyProjection(projection);
-              } catch (fallbackErr) {
-                restoreDraftAfterFailure();
-                throw fallbackErr;
-              }
-            } else if (isChannelNotAllowedError(err)) {
-              setError(t('session.screen.editQueueUnsupported'));
-              restoreDraftAfterFailure();
-              return;
-            } else {
-              restoreDraftAfterFailure();
-              throw err;
-            }
+        // 保存必须等加锁落定,并在 update-content / update-text 完成后再解锁。
+        // owner 在交给 commitQueueEdit 后由它独占,避免取消 / 卸载重复解锁。
+        const currentLockOwner = queueEditLockOwnerRef.current;
+        const lockOwner = currentLockOwner?.clientId === editingQueueItem.clientId
+          ? currentLockOwner
+          : acquireQueueEditLock(null, editingQueueItem.clientId, setQueueEditLock);
+        queueEditLockOwnerRef.current = null;
+        queueEditSaveOwnerRef.current = lockOwner;
+        let lockReady = false;
+        let editSaved = false;
+        const restoreQueueEditDraftAfterFailure = () => {
+          if (queueEditingRef.current?.clientId === editingQueueItem.clientId) {
+            restoreDraftAfterFailure();
           }
+        };
+        const save = (async () => {
+          await lockOwner.ready;
+          lockReady = true;
+          editSaved = await commitQueueEdit(lockOwner, async () => {
+            try {
+              const projection = await maker.input.updateContent(sessionId, editingQueueItem.clientId, updated);
+              applyProjection(projection);
+            } catch (err) {
+              if (
+                isChannelNotAllowedError(err)
+                && text.trim().length > 0
+                && attachmentIdSetsEqual(original.files, sendAttachments)
+                && queuedMessageHasEncodedQuotes(original) === queueEditPreservesEncodedQuotes
+              ) {
+                // 旧被控端无 update-content:附件与 quote metadata 都不变、文本非空时
+                // 才退回 update-text。空文本不降级——旧端 update-text 对空文本静默 no-op,会造成"看似
+                // 保存成功、队列还是旧文案"的假成功(review P2)。降级本身失败(弱网两次
+                // RPC 之间断连)与其余失败分支对称:先还原编辑文本再抛,不许静默丢字
+                // (review P1)。
+                try {
+                  const projection = await maker.input.updateText(
+                    sessionId,
+                    editingQueueItem.clientId,
+                    text,
+                    updated.sessionRefs,
+                    updated.trustedSessionReferenceContexts,
+                  );
+                  applyProjection(projection);
+                } catch (fallbackErr) {
+                  restoreQueueEditDraftAfterFailure();
+                  throw fallbackErr;
+                }
+              } else if (isChannelNotAllowedError(err)) {
+                setError(t('session.screen.editQueueUnsupported'));
+                restoreQueueEditDraftAfterFailure();
+                return false;
+              } else {
+                restoreQueueEditDraftAfterFailure();
+                throw err;
+              }
+            }
+            return true;
+          });
+        })();
+        queueEditSaveInFlightRef.current = save;
+        try {
+          await save;
+        } catch (err) {
+          restoreQueueEditDraftAfterFailure();
+          if (
+            queueEditSaveOwnerRef.current === lockOwner
+            && queueEditingRef.current?.clientId === editingQueueItem.clientId
+          ) {
+            queueEditSaveOwnerRef.current = null;
+            queueEditLockOwnerRef.current = lockReady
+              ? lockOwner
+              : acquireQueueEditLock(null, editingQueueItem.clientId, setQueueEditLock);
+          }
+          throw err;
         } finally {
-          settleSave?.();
-          queueEditSaveInFlightRef.current = null;
+          if (queueEditSaveInFlightRef.current === save) queueEditSaveInFlightRef.current = null;
+        }
+        if (!editSaved) {
+          if (
+            queueEditSaveOwnerRef.current === lockOwner
+            && queueEditingRef.current?.clientId === editingQueueItem.clientId
+          ) {
+            queueEditSaveOwnerRef.current = null;
+            queueEditLockOwnerRef.current = lockOwner;
+          }
+          return;
+        }
+        if (queueEditSaveOwnerRef.current === lockOwner) {
+          queueEditSaveOwnerRef.current = null;
         }
         // 已保存进队列的附件从相册勾选/预览映射摘除(同正常发送路径的差集清理),
         // 否则恢复 stash 后相册面板仍显示"已附加"角标。
@@ -4029,39 +4304,22 @@ export default function SessionScreen() {
         setAttachmentPreviews((current) => Object.fromEntries(
           Object.entries(current).filter(([attachmentId]) => !savedAttachmentIds.has(attachmentId)),
         ));
-        // 成功:退出编辑态 + 恢复 stash(cancelQueueEdit 会把 stash 写回 composer)。
-        // RPC 在途期间用户可能已切到另一条的编辑(beginQueueEdit 切换路径已解锁并
-        // 回收过本条的编辑现场):此时不动新的编辑会话,只幂等补一次本条的解锁
-        // (review P1)。
+        // 成功:锁已由 commitQueueEdit 释放,退出编辑态并恢复 stash。
         if (queueEditingRef.current?.clientId === editingQueueItem.clientId) {
           cancelQueueEdit();
-        } else {
-          void maker.input.setEditLock(sessionId, editingQueueItem.clientId, false)
-            .then(applyProjection)
-            .catch(() => undefined);
         }
         voiceDictionaryLearningTrackerRef.current?.flush();
         return;
       }
       // 命令判定用 body(不含引用块):带引用时 /context 等本地命令仍生效,且不消费引用。
-      const localSystemCommand = hasAttachments ? null : parseMobileLocalSystemCommand(body);
+      const localSystemCommand = hasAttachments ? null : earlyLocalCommand;
       // desktop 命令(/learn)按名字白名单分流;同名 agent-skill 优先让行(对齐桌面
       // dispatch 语义),清单未加载时白名单兜底拦截。
       // slashCommands 在 palette 打开时含已加载清单(同名 skill 让行);palette
       // 关闭时被清为[],退回白名单。例外:用户从 palette 点选了 agent-skill
       // (pendingSkillSelectionRef 有值)时,即使 slashCommands 已清也应让行——
       // 点选意图明确,不应被白名单覆盖。点选后再次打开 palette 或发送后 ref 清零。
-      const pendingSkill = pendingSkillSelectionRef.current;
-      pendingSkillSelectionRef.current = null;
-      const parsedDesktopCommand = hasAttachments ? null : parseMobileDesktopCommand(body, slashCommands);
-      // 若用户明确点选了同名 skill(且点选发生在当前会话),优先让行。
-      // sid 验证防止跨会话残留:切换会话后 ref 中的旧会话点选不应影响新会话 dispatch。
-      const desktopCommand =
-        parsedDesktopCommand
-        && pendingSkill?.sid === sessionId
-        && pendingSkill.name === parsedDesktopCommand.name
-          ? null
-          : parsedDesktopCommand;
+      const desktopCommand = hasAttachments ? null : earlyDesktopCommand;
       if (!sessionAtSend.workingDir && !localSystemCommand && !desktopCommand) {
         setError(t('session.screen.missingWorkingDir'));
         restoreDraftAfterFailure();
@@ -4129,7 +4387,10 @@ export default function SessionScreen() {
       }
       const queuedDraft = buildQueuedTextMessage(sessionAtSend, text, new Date(), undefined, {
         attachments: sendAttachments,
-        quotesEncoded: quotesAtSend.length > 0,
+        quotesEncoded: quotesEncodedAtSend,
+        agentReferences: agentReferencesAtSend,
+        pastedTextRanges: pastedTextRangesAtSend,
+        slashCommandRanges: slashCommandRangesAtSend,
       });
       let queued: QueuedRemoteMessage;
       try {
@@ -4158,21 +4419,6 @@ export default function SessionScreen() {
       // 标注再编辑真相(矢量笔迹 + 原图副本)不在乐观段清:enqueue 失败回滚恢复
       // 托盘后,标注附件必须还能继续编辑/撤销(review P2);成功收尾按本批精确清。
       setAttachmentError(null);
-      // 引用消费与附件托盘同拍(乐观第二拍):按快照身份精确摘除(store 的条目
-      // 引用稳定),发送等待期间新采集的引用保留——不能整库 clear,否则等待期
-      // 加的引用会被误削且失败恢复只回快照、新引用永久丢失(review P1)。
-      // quotesConsumed 只在确有快照条目被摘除时才置真:等待期间用户若已点 X
-      // 清空引用,store 里已没有快照条目可摘除,此时若仍标记 consumed,发送失败
-      // 回滚会把用户刚清空的引用重新塞回输入区(greptile review P1)。
-      if (quotesAtSend.length > 0) {
-        const pendingConsume = new Set(quotesAtSend);
-        const quotesBeforeConsume = getQuotes(sessionId);
-        const quotesAfterConsume = quotesBeforeConsume.filter((quote) => !pendingConsume.delete(quote));
-        if (quotesAfterConsume.length !== quotesBeforeConsume.length) {
-          setQuotes(sessionId, quotesAfterConsume);
-          quotesConsumed = true;
-        }
-      }
       requestMessageListFollowLatest();
       try {
         // 弱网重试:切基站 / 短暂断连时自动补发,不让用户为一次抖动手动重发。
@@ -4502,10 +4748,13 @@ export default function SessionScreen() {
   };
 
   const setQueueEditLock = useCallback((clientId: string, locked: boolean) => {
-    void maker.input.setEditLock(sessionId, clientId, locked)
+    return maker.input.setEditLock(sessionId, clientId, locked)
       .then(applyProjection)
       .catch((err) => {
-        setError(formatRemoteError(err));
+        if (queueEditingRef.current?.clientId === clientId) {
+          setError(formatRemoteError(err));
+        }
+        throw err;
       });
   }, [applyProjection, maker, sessionId]);
 
@@ -4604,9 +4853,6 @@ export default function SessionScreen() {
     const previous = queueEditingRef.current;
     if (previous?.clientId === item.clientId) return;
     if (previous) {
-      void maker.input.setEditLock(sessionId, previous.clientId, false)
-        .then(applyProjection)
-        .catch(() => undefined);
       discardQueueEditTransientAttachments(previous);
     }
     const textState = createQueueEditTextState(item);
@@ -4614,51 +4860,74 @@ export default function SessionScreen() {
       ? {
           clientId: item.clientId,
           stashedDraft: previous.stashedDraft,
+          stashedDocument: previous.stashedDocument,
           stashedAttachments: previous.stashedAttachments,
           textState,
         }
       : {
           clientId: item.clientId,
           stashedDraft: draftRef.current,
+          stashedDocument: composerDocumentRef.current,
           stashedAttachments: [...attachmentsRef.current],
           textState,
         };
     queueEditingRef.current = next;
     setQueueEditing(next);
     setQueueSelectedClientId(null);
-    setComposerDraft(textState.visibleText);
+    applyComposerDocument(textState.document, { persist: false });
     const files = item.files ? [...item.files] : [];
     attachmentsRef.current = files;
     setAttachments(files);
     setAttachmentError(null);
-    setQueueEditLock(item.clientId, true);
-    composerInputRef.current?.focus();
+    queueEditLockOwnerRef.current = acquireQueueEditLock(
+      queueEditLockOwnerRef.current,
+      item.clientId,
+      setQueueEditLock,
+    );
+    composerInputRef.current?.applyDocumentAndSetSelectionToEnd(textState.document);
   };
 
   /** 放弃排队消息编辑:解锁 + 回收编辑期新增附件 + 恢复进入前的草稿与附件托盘。 */
-  const cancelQueueEdit = useCallback((opts: { unlock?: boolean } = {}) => {
+  const cancelQueueEdit = useCallback(() => {
     const editing = queueEditingRef.current;
     if (!editing) return;
     queueEditingRef.current = null;
     setQueueEditing(null);
-    if (opts.unlock !== false) {
-      void maker.input.setEditLock(sessionId, editing.clientId, false)
-        .then(applyProjection)
+    const currentLockOwner = queueEditLockOwnerRef.current;
+    const idleLockOwner = currentLockOwner?.clientId === editing.clientId
+      ? currentLockOwner
+      : null;
+    const currentSaveOwner = queueEditSaveOwnerRef.current;
+    const saveLockOwner = currentSaveOwner?.clientId === editing.clientId
+      ? currentSaveOwner
+      : null;
+    if (idleLockOwner) queueEditLockOwnerRef.current = null;
+    if (saveLockOwner) queueEditSaveOwnerRef.current = null;
+    const lockOwner = saveLockOwner ?? idleLockOwner;
+    const inFlightSave = saveLockOwner ? queueEditSaveInFlightRef.current : null;
+    if (lockOwner) {
+      void releaseQueueEditLockAfter(lockOwner, inFlightSave)
         .catch(() => undefined);
     }
-    discardQueueEditTransientAttachments(editing);
-    setComposerDraft(editing.stashedDraft);
+    if (inFlightSave) {
+      const attachmentsSnapshot = [...attachmentsRef.current];
+      const discard = () => discardQueueEditTransientAttachments(editing, attachmentsSnapshot);
+      void inFlightSave.then(discard, discard);
+    } else {
+      discardQueueEditTransientAttachments(editing);
+    }
+    applyComposerDocument(editing.stashedDocument);
     attachmentsRef.current = [...editing.stashedAttachments];
     setAttachments([...editing.stashedAttachments]);
-  }, [applyProjection, discardQueueEditTransientAttachments, maker, sessionId, setComposerDraft]);
+  }, [applyComposerDocument, discardQueueEditTransientAttachments]);
 
   // 编辑中的条目从队列消失(被远端发出/删除)→ 原文已不可改,自动退出编辑并恢复
-  // stash。条目已不存在,无锁可解(unlock: false)。
+  // stash。即便加锁请求仍在途也要排队释放,避免留下孤儿锁。
   useEffect(() => {
     const editing = queueEditing;
     if (!editing) return;
     if (!inputProjection.pendingQueue.some((item) => item.clientId === editing.clientId)) {
-      cancelQueueEdit({ unlock: false });
+      cancelQueueEdit();
     }
   }, [cancelQueueEdit, inputProjection.pendingQueue, queueEditing]);
 
@@ -5037,6 +5306,7 @@ export default function SessionScreen() {
       },
     })), { token: auth.getAccessToken() });
     setContextSheetOpen(false);
+    requestAnimationFrame(() => composerInputRef.current?.focus());
   }, [auth, enqueueUploads, pendingMediaAssets]);
   // 勾选态按「映射的附件仍在列表里」现算,附件被单独移除 / 发送清空后角标自动消失。
   const selectedMediaAssetIds = useMemo(() => {
@@ -5608,7 +5878,14 @@ export default function SessionScreen() {
           target.relPath ?? target.absPath,
           target.kind === 'directory' ? 'dir' : 'file',
         );
-        applyComposerDraft(merged, { persist: false });
+        const mergedDocument = readComposerDocumentDraftSync(sessionId);
+        if (mergedDocument) {
+          applyComposerDocument(mergedDocument, { persist: false });
+          composerInputRef.current?.applyDocumentAndSetSelectionToEnd(mergedDocument);
+        } else {
+          applyComposerDraft(merged, { persist: false });
+          composerInputRef.current?.applyDocumentAndSetSelectionToEnd(composerDocumentRef.current);
+        }
         setChipMenuTarget(null);
         return;
       }
@@ -5621,7 +5898,7 @@ export default function SessionScreen() {
         void shareChipFile(target);
         return;
     }
-  }, [applyComposerDraft, deviceId, deviceName, openChatPathTarget, router, sessionId, shareChipFile]);
+  }, [applyComposerDocument, applyComposerDraft, deviceId, deviceName, openChatPathTarget, router, sessionId, shareChipFile]);
 
   // 会话菜单元数据操作(重命名 / 置顶 / 归档 / 删除 / 恢复)乐观写:与首页
   // patchHomeSession 同一写序契约——守卫 / 队列 / 在途登记用 app 级单例
@@ -5721,6 +5998,7 @@ export default function SessionScreen() {
       clientId,
       draftText: draft.text,
       draftQuotes: draft.quotes,
+      draftDocument: draft.document,
       ...(draft.orderedBody ? { draftOrderedBody: draft.orderedBody } : {}),
     });
     try {
@@ -5734,6 +6012,7 @@ export default function SessionScreen() {
         preview,
         draft.quotes,
         draft.orderedBody,
+        draft.document,
       ));
     } catch (err) {
       if (rewindRequestSeqRef.current !== seq) return;
@@ -5742,6 +6021,7 @@ export default function SessionScreen() {
         clientId,
         draftText: draft.text,
         draftQuotes: draft.quotes,
+        draftDocument: draft.document,
         ...(draft.orderedBody ? { draftOrderedBody: draft.orderedBody } : {}),
         errorText: formatRemoteError(err),
       });
@@ -5751,22 +6031,21 @@ export default function SessionScreen() {
     }
   }, [maker, messageActionBusy, sessionId]);
 
-  const forkAtMessage = useCallback(async (clientId: string, draft?: MobileMessageDraft) => {
+  const performForkAtMessage = useCallback(async (clientId: string, draft?: MobileMessageDraft) => {
     if (!deviceId || messageActionBusy) return;
     setMessageActionBusy(clientId);
     setError(null);
     try {
       const forked = await maker.fork(sessionId, clientId);
       remoteSessionStore.upsertDeviceSession(deviceId, deviceName, forked);
-      saveComposerDraft(forked.id, draft?.text);
-      if (draft?.orderedBody && draft.quotes.length > 0) {
-        setOrderedQuoteDraft(forked.id, draft.quotes, {
-          encodedBody: draft.orderedBody,
-          projectedText: draft.text,
-        });
-      } else {
-        setQuotes(forked.id, draft?.quotes ?? []);
-      }
+      const forkDocument = draft?.document ?? migrateLegacyComposerDraft(
+        draft?.text,
+        draft?.quotes ?? [],
+        draft?.orderedBody,
+      );
+      saveComposerDocumentDraft(forked.id, forkDocument);
+      saveComposerDraft(forked.id, composerDocumentProjectedText(forkDocument));
+      clearQuotes(forked.id);
       router.push({
         pathname: '/sessions/[sessionId]',
         params: { sessionId: forked.id, deviceId, deviceName },
@@ -5777,6 +6056,18 @@ export default function SessionScreen() {
       setMessageActionBusy(null);
     }
   }, [deviceId, deviceName, maker, messageActionBusy, router, sessionId]);
+
+  const forkAtMessage = useCallback((clientId: string, draft?: MobileMessageDraft) => {
+    if (!deviceId || messageActionBusy) return;
+    Alert.alert(
+      '从这里开启一个新对话？',
+      '系统会根据这里的对话上下文创建一个独立的新对话。原对话不会改变，之后两边的消息互不影响。',
+      [
+        { text: '取消', style: 'cancel' },
+        { text: '开启新对话', onPress: () => void performForkAtMessage(clientId, draft) },
+      ],
+    );
+  }, [deviceId, messageActionBusy, performForkAtMessage]);
 
   const openForkOrigin = useCallback(() => {
     const parentSessionId = currentSession?.parentSessionId;
@@ -5846,12 +6137,86 @@ export default function SessionScreen() {
     void copyMessageText(buildMobileSessionMessageDeepLink(sessionId, clientId));
   }, [sessionId]);
 
+  const resolvePastedSessionLinkLabel = useCallback(async (href: string) => {
+    const target = parseSessionDeepLinkUrl(href);
+    if (!target) return null;
+    const targetSession = remoteSessionStore.getSessions().find((item) => (
+      item.id === target.sessionId
+    ));
+    const targetDeviceId = targetSession?.canonicalDeviceId
+      ?? targetSession?.deviceLinkDeviceId
+      ?? remoteSessionStore.getSessionDeviceId(target.sessionId);
+    const targetMaker = targetDeviceId
+      ? (targetDeviceId === deviceId
+          ? maker
+          : createMobileMakerTransport({ deviceId: targetDeviceId, invoke }))
+      : null;
+
+    try {
+      if (target.messageClientId) {
+        let targetMessage = remoteSessionStore.getMessages(target.sessionId).find((message) => (
+          message.clientId === target.messageClientId || message.id === target.messageClientId
+        ));
+        if (!targetMessage && targetMaker && targetDeviceId) {
+          await openLink(targetDeviceId);
+          const around = await targetMaker.aroundMessagesByClientId(
+            target.sessionId,
+            target.messageClientId,
+            { radius: 1 },
+          );
+          remoteSessionStore.mergeMessages(target.sessionId, around);
+          targetMessage = around.find((message) => (
+            message.clientId === target.messageClientId || message.id === target.messageClientId
+          ));
+        }
+        const text = targetMessage ? mobileSessionMessageDisplayText(targetMessage) : null;
+        if (!text) return null;
+        const bounded = boundAgentReferenceText(text);
+        return {
+          label: compactSessionMessageLabel(text),
+          agentText: bounded.text,
+          ...(bounded.truncated ? { agentTextTruncated: true } : {}),
+        };
+      }
+
+      const knownTitle = targetSession?.title?.trim();
+      if (knownTitle) return { label: compactSessionMessageLabel(knownTitle) };
+      if (!targetMaker || !targetDeviceId) return null;
+      await openLink(targetDeviceId);
+      const fresh = await targetMaker.getSession(target.sessionId);
+      const title = fresh.title?.trim();
+      return title ? { label: compactSessionMessageLabel(title) } : null;
+    } catch {
+      return null;
+    }
+  }, [deviceId, invoke, maker, openLink]);
+
+  const addMessageToComposer = useCallback((clientId: string) => {
+    if (!sessionId || !canUseComposer) return;
+    const target = messages.find((message) => (
+      message.clientId === clientId || message.id === clientId
+    ));
+    const summary = target ? mobileSessionMessageDisplayText(target) : null;
+    const bounded = summary ? boundAgentReferenceText(summary) : null;
+    const node = sessionLinkComposerNode({
+      href: buildMobileSessionMessageDeepLink(sessionId, clientId),
+      label: compactSessionMessageLabel(summary ?? clientId),
+      titled: true,
+      ...(bounded?.text ? { agentText: bounded.text } : {}),
+      ...(bounded?.truncated ? { agentTextTruncated: true } : {}),
+    });
+    const editor = composerInputRef.current;
+    if (editor) editor.insertNode(node);
+    else applyComposerDocument(appendComposerNode(composerDocumentRef.current, node));
+    requestAnimationFrame(() => composerInputRef.current?.focus());
+  }, [applyComposerDocument, canUseComposer, messages, sessionId]);
+
   const deleteMessage = useCallback((clientId: string) => {
     if (!deviceId || messageActionBusy) return;
     Alert.alert(t('session.screen.deleteMessageTitle'), t('session.screen.deleteMessageBody'), [
       { text: t('session.common.cancel'), style: 'cancel' },
       {
-        text: t('session.common.delete'),
+        text: t('session.screen.deleteMessageAction'),
         style: 'destructive',
         onPress: () => {
           void (async () => {
@@ -5909,15 +6274,12 @@ export default function SessionScreen() {
         }
         return;
       }
-      setComposerDraft(state.draftText);
-      if (state.draftOrderedBody && state.draftQuotes.length > 0) {
-        setOrderedQuoteDraft(sessionId, state.draftQuotes, {
-          encodedBody: state.draftOrderedBody,
-          projectedText: state.draftText,
-        });
-      } else {
-        setQuotes(sessionId, state.draftQuotes);
-      }
+      applyComposerDocument(state.draftDocument ?? migrateLegacyComposerDraft(
+        state.draftText,
+        state.draftQuotes,
+        state.draftOrderedBody,
+      ));
+      clearQuotes(sessionId);
       setRewindState({ kind: 'idle' });
       await syncSession({ replaceMessages: true });
     } catch (err) {
@@ -5928,13 +6290,14 @@ export default function SessionScreen() {
         clientId: state.clientId,
         draftText: state.draftText,
         draftQuotes: state.draftQuotes,
+        ...(state.draftDocument ? { draftDocument: state.draftDocument } : {}),
         ...(state.draftOrderedBody ? { draftOrderedBody: state.draftOrderedBody } : {}),
         errorText: formatRemoteError(err),
       });
     } finally {
       if (rewindRequestSeqRef.current === seq) setMessageActionBusy(null);
     }
-  }, [deviceId, maker, messageActionBusy, rewindState, sessionId, syncSession]);
+  }, [applyComposerDocument, deviceId, maker, messageActionBusy, rewindState, sessionId, syncSession]);
 
   return (
     <View style={styles.safeArea} testID="session.screen">
@@ -6278,6 +6641,7 @@ export default function SessionScreen() {
                     items={renderItems}
                     loadingEarlier={loadingEarlier}
                     onCopyMessageLink={copyMessageLink}
+                    onAddMessageToComposer={canUseComposer ? addMessageToComposer : undefined}
                     onDeleteMessage={collaborationReadOnlyReason ? undefined : deleteMessage}
                     onForkMessage={collaborationReadOnlyReason ? undefined : forkAtMessage}
                     onLoadEarlier={loadEarlierMessages}
@@ -6285,9 +6649,9 @@ export default function SessionScreen() {
                     onOpenSessionLink={openSessionLink}
                     onPreviewRewind={collaborationReadOnlyReason ? undefined : previewRewindAtMessage}
                     // chat-text-quote:选中消息文字 → 引用进本会话草稿(截断后写
-                    // chatQuoteStore,composer 胶囊即时刷新)。协同只读态不启用;
+                    // chatQuoteStore,composer 胶囊即时刷新)。Composer 不可用态不启用;
                     // 回调已 memoize,保持 SelectionQuoteContext value 稳定。
-                    onQuoteSelection={collaborationReadOnlyReason ? undefined : handleQuoteSelection}
+                    onQuoteSelection={canUseComposer ? handleQuoteSelection : undefined}
                     onReadTextFilePreview={maker.fs.readTextFilePreview}
                     onReleaseRemoteMedia={releaseRemoteMedia}
                     onResolveRemoteMedia={resolveRemoteMedia}
@@ -6591,18 +6955,6 @@ export default function SessionScreen() {
                   </Text>
                 ) : null}
 
-                {/* chat-text-quote:「N 处引用」胶囊。放 composerSurface 之外、
-                    ScrollView 之内——不挂 accessoryAbove(那个插槽仅 cardActive
-                    渲染,引用要求未聚焦也可见)。 */}
-                {quotes.length > 0 ? (
-                  <QuoteCapsule
-                    onClear={() => clearQuotes(sessionId)}
-                    quotes={quotes}
-                    testIDPrefix="session.quoteCapsule"
-                    variant="composer"
-                  />
-                ) : null}
-
                 <View style={[
                   styles.composerSurface,
                   compactComposer && !composerCardActive && styles.composerSurfaceCompact,
@@ -6620,8 +6972,44 @@ export default function SessionScreen() {
                     floatingVoiceButtonStyle={composerFloatingVoiceButtonStyle}
                     cursorColor={colors.inputCaret}
                     inputFrameHeight={composerResize.frameHeight}
+                    inputElement={(
+                      <ComposerRichInput
+                        ref={composerInputRef}
+                        accessibilityHint={composerLayout.input.disabledReason ?? undefined}
+                        accessibilityLabel="输入远程消息"
+                        document={composerDocument}
+                        editable={!composerLayout.input.disabled}
+                        height={composerInputVisibleHeight}
+                        hidden={voiceIsListening}
+                        maxHeight={composerResize.inputMaxHeight}
+                        onBlur={() => {
+                          setComposerFocused(false);
+                          setComposerVoiceHoldArmed(false);
+                        }}
+                        onChangeDocument={applyRichComposerChange}
+                        onFocus={() => {
+                          setComposerFocused(true);
+                          handleComposerInputPressIn();
+                        }}
+                        onHeightChange={handleComposerRichInputHeight}
+                        onPasteImages={(uris) => void addPastedImageAttachments(uris)}
+                        onPasteImagesLoading={beginPastePlaceholders}
+                        onPasteImagesLoadFailed={failPastePlaceholders}
+                        placeholder={voiceIsListening ? '' : composerLayout.input.placeholder}
+                        resolveSessionLinkLabel={resolvePastedSessionLinkLabel}
+                        testID="session.composerRichInput"
+                        theme={{
+                          background: colors.chatCodeSurface,
+                          border: colors.border,
+                          chip: colors.surfaceChip,
+                          focus: colors.inputCaret,
+                          placeholder: colors.textTertiary,
+                          text: colors.textPrimary,
+                          textSecondary: colors.textSecondary,
+                        }}
+                      />
+                    )}
                     inputOverlay={renderComposerInputOverlay()}
-                    inputRef={composerInputRef}
                     inputStyle={[styles.sessionComposerInput, voiceIsListening && styles.inputVoiceHidden]}
                     inputTestID="session.composerInput"
                     leading={renderComposerCollapsedAttachmentBadge()}

@@ -66,6 +66,7 @@
     "sessionDeviceNotFound": "未找到这个会话所属的电脑,请确认对应设备已连接后重试。",
     "deleteMessageTitle": "删除本条对话？",
     "deleteMessageBody": "用户消息只删除本条；AI 消息会删除上一次用户输入之后产生的整轮输出。之后的对话继续保留。下次发送时，AI 上下文会从剩余记录重建。",
+    "deleteMessageAction": "删除本条对话",
     "readingCapabilities": "正在读取 {{agent}} 运行能力…",
     "editingQueueMessageNumbered": "正在编辑第 {{index}} 条排队消息",
     "editingQueueMessage": "正在编辑排队消息",

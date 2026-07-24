@@ -14,6 +14,7 @@ import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { Folder, MessageSquarePlus, Mic, Pen, TriangleAlert, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import type { AgentInputReference } from '@cindy/maker-shared/agent-input-projection';
 import { requiresFullAccessConfirmation } from '@cindy/maker-shared/permission-mode';
 import { ImageLightbox } from '@/components/chat/ImageLightbox';
 import { TextLightbox } from '@/components/chat/TextLightbox';
@@ -56,6 +57,11 @@ import {
   type BrowserCommentDraftItem,
 } from '@/lib/browserComments';
 import { formatMentionRef } from '@/lib/mentionRefFormat';
+import {
+  parseProjectDeepLinkHref,
+  parseSessionDeepLinkHref,
+  projectDisplayName,
+} from '@/lib/deepLink';
 import { isGlobalDropIntercepted } from '@/lib/globalDropIntercept';
 import { shouldOpenTextLightbox } from '@/lib/filePreview';
 import {
@@ -114,6 +120,7 @@ import {
 import type { PastedTextRange, SlashCommandRange } from '@/lib/imageRef';
 import {
   pastedSessionChipAttrs,
+  resolveSessionMessageReferencesForSend,
   serializeSessionChipText,
   resolveSessionChipTitles,
 } from './sessionLinkPaste';
@@ -151,7 +158,7 @@ import { useConnectedSource } from '@/hooks/useConnectedSource';
 import { useProviders } from '@/hooks/useProviders';
 import { useDeviceProviders } from '@/hooks/useDeviceProviders';
 import { effectiveSourceIdForModel, sourcesForModel } from '@cindy/model-providers';
-import { deriveModelsFromProviders, resolveFastSupported } from '@/lib/providerModels';
+import { deriveModelsFromProviders, filterChatBridgedCodexProviders, resolveFastSupported } from '@/lib/providerModels';
 import {
   getProviderModelEffort,
   setProviderModelChoice,
@@ -250,6 +257,8 @@ interface ChatInputProps {
       providerId?: string | null;
       /** chat-text-quote:message 开头的 blockquote 为引用功能拼接产出。 */
       quotesEncoded?: boolean;
+      /** Ordered semantic projection metadata for session/project/message chips. */
+      agentReferences?: AgentInputReference[];
       /** Local display ranges for sent long-paste chips; never added to Agent text. */
       pastedTextRanges?: PastedTextRange[];
       /** Exact local display ranges for slash commands confirmed by this composer. */
@@ -652,6 +661,7 @@ function serializeEditorContent(editor: Editor): {
   text: string;
   mentions: MentionedResource[];
   hasQuotes: boolean;
+  agentReferences: AgentInputReference[];
   pastedTextRanges: PastedTextRange[];
   slashCommandRanges: SlashCommandRange[];
 } {
@@ -683,6 +693,7 @@ function serializeEditorContent(editor: Editor): {
     }
     if (pNode.type.name !== 'paragraph') return;
     let buf = '';
+    let bufAgentReferences: AgentInputReference[] = [];
     let bufPastedTextRanges: PastedTextRange[] = [];
     let bufSlashCommandRanges: SlashCommandRange[] = [];
     let emittedInlineSegment = false;
@@ -691,10 +702,12 @@ function serializeEditorContent(editor: Editor): {
       blocks.push({
         kind: 'text',
         text: buf,
+        ...(bufAgentReferences.length > 0 ? { agentReferences: bufAgentReferences } : {}),
         ...(bufPastedTextRanges.length > 0 ? { pastedTextRanges: bufPastedTextRanges } : {}),
         ...(bufSlashCommandRanges.length > 0 ? { slashCommandRanges: bufSlashCommandRanges } : {}),
       });
       buf = '';
+      bufAgentReferences = [];
       bufPastedTextRanges = [];
       bufSlashCommandRanges = [];
       emittedInlineSegment = true;
@@ -718,11 +731,48 @@ function serializeEditorContent(editor: Editor): {
         } else if (attrs.kind === 'session') {
           // 会话深链 chip:有标题 → `[标题](href)`(消息侧 / 手机端 markdown
           // 链路显式 label 优先),标题未解析 → 裸 href。
-          buf += serializeSessionChipText(attrs);
+          const wire = serializeSessionChipText(attrs);
+          const start = buf.length;
+          buf += wire;
+          const target = parseSessionDeepLinkHref(attrs.path);
+          if (target?.messageClientId) {
+            bufAgentReferences.push({
+              kind: 'message',
+              start,
+              end: buf.length,
+              href: attrs.path,
+              sessionId: target.sessionId,
+              messageClientId: target.messageClientId,
+              ...(attrs.agentText ? { text: attrs.agentText } : {}),
+              ...(attrs.agentTextTruncated ? { truncated: true } : {}),
+            });
+          } else if (target) {
+            bufAgentReferences.push({
+              kind: 'session',
+              start,
+              end: buf.length,
+              href: attrs.path,
+              sessionId: target.sessionId,
+              ...(attrs.titled && attrs.label ? { title: attrs.label } : {}),
+            });
+          }
         } else if (attrs.kind === 'project') {
           // 项目深链 chip:同 session 的取舍——显式标题走 markdown 形式,
           // 目录名占位是 href 可推导的,裸 href 即可(消息侧自行取 basename)。
-          buf += serializeProjectChipText(attrs);
+          const wire = serializeProjectChipText(attrs);
+          const start = buf.length;
+          buf += wire;
+          const target = parseProjectDeepLinkHref(attrs.path);
+          if (target) {
+            bufAgentReferences.push({
+              kind: 'project',
+              start,
+              end: buf.length,
+              href: attrs.path,
+              name: attrs.label || projectDisplayName(target.workingDir),
+              workingDir: target.workingDir,
+            });
+          }
         } else if (attrs.kind === 'dir') {
           // 含空格的 path 用 `@"..."` 引号形式序列化（formatMentionRef），否则
           // 下游 `@\S+` 切词会从空格处把 chip 截断。dir 的尾 `/` 一并纳入引号内，
@@ -1390,16 +1440,25 @@ export function ChatInput({
   const localProviders = useProviders();
   const remoteProviders = useDeviceProviders(deviceLinkDeviceId);
   const providers = deviceLinkDeviceId ? remoteProviders.providers : localProviders.providers;
+  const sendProviders = filterChatBridgedCodexProviders(
+    providers,
+    currentModelAgentKind ?? 'codex',
+    !!remoteHostId,
+  );
 
   // 空態(设计 Q7NYAD「ChatInput 空态 · 模型选择器」):当前模型一个已连接来源都没有 →
-  // 模型选择器 trigger 化成「连接来源」CTA、Send 禁用。「有没有来源」走统一判定 hook
-  // useConnectedSource —— 与 ModelSelector trigger / send 门禁同一条规则,不再各算(避免漂移)。
+  // 模型选择器 trigger 化成「连接来源」CTA、Send 禁用。useConnectedSource 仅用于
+  // loading 态判定；实际「有没有可发送来源」独立走 sendProviders（已过滤 SSH remote
+  // 排除项），两者职责分离以保留 remote guard。
   // providersLoading 期间不判,避免有缓存的老用户首帧闪 CTA / 禁用态(规则 7)。
-  const { hasConnectedSource, loading: providersLoading } = useConnectedSource(
+  const { loading: providersLoading } = useConnectedSource(
     currentModelAgentKind,
     activeModel,
   );
-  const noConnectedSource = !!currentModelAgentKind && !providersLoading && !hasConnectedSource;
+  const hasConnectedSendSource = currentModelAgentKind
+    ? sourcesForModel(sendProviders, activeModel, currentModelAgentKind, { onlyConnected: true }).length > 0
+    : false;
+  const noConnectedSource = !!currentModelAgentKind && !providersLoading && !hasConnectedSendSource;
 
   // 会话显式选中的来源已断开(如外部删除订阅 OAuth 凭证):trigger 显示「已断开」错误态 +
   // Send 禁用,不再静默回退默认来源图标(否则界面显示 XD、main 懒创建却按 DB 里的来源报
@@ -1435,11 +1494,11 @@ export function ChatInput({
   const sendProviderId = useMemo<string | null>(() => {
     const kind = currentModelAgentKind;
     if (!kind || !activeProviderId) return null;
-    return effectiveSourceIdForModel(providers, activeProviderId, activeModel, kind) ===
+    return effectiveSourceIdForModel(sendProviders, activeProviderId, activeModel, kind) ===
       activeProviderId
       ? activeProviderId
       : null;
-  }, [providers, currentModelAgentKind, activeProviderId, activeModel]);
+  }, [sendProviders, currentModelAgentKind, activeProviderId, activeModel]);
 
   // 模型预设采用「全局默认 + 已创建会话保护」:
   //   - 本地草稿 / 已创建会话的**非选中行**都读写 providerModelMemory,所以同一
@@ -3349,10 +3408,20 @@ export function ChatInput({
       if (!editor) return;
       if (disabled) return;
       if (dispatchSendInFlightRef.current) return;
+      dispatchSendInFlightRef.current = true;
+      setSendDispatchInFlight(true);
+      try {
+        await resolveSessionMessageReferencesForSend(editor);
+      } finally {
+        dispatchSendInFlightRef.current = false;
+        setSendDispatchInFlight(false);
+      }
+      if (editor.isDestroyed) return;
       const {
         text: editorText,
         mentions,
         hasQuotes,
+        agentReferences,
         pastedTextRanges,
         slashCommandRanges,
       } = serializeEditorContent(editor);
@@ -3451,6 +3520,7 @@ export function ChatInput({
             deliveryMode,
             providerId: sendProviderId,
             ...(hasQuotes ? { quotesEncoded: true } : {}),
+            ...(agentReferences.length > 0 ? { agentReferences } : {}),
             ...(pastedTextRanges.length > 0 ? { pastedTextRanges } : {}),
             slashCommandRanges,
             ...(usedGhost ? { onAccepted: markRecentPluginUsage } : {}),
@@ -5274,6 +5344,9 @@ export function ChatInput({
                     // SSH 远程会话隐藏订阅直连模型(chatgpt/ / xai/):bridge 只挂在本地 compat-proxy,
                     // 远程模式走 remoteEndpoint 不经翻译,选了必失败。
                     excludeSubscriptionDirect={!!remoteHostId}
+                    // 同理隐藏 openai-chat 桥接的 Codex 供应商(DeepSeek / Kimi / GLM 等):
+                    // Responses→Chat 桥只挂在本地 codex-proxy,SSH 远程走 daemon 不经它。
+                    excludeChatBridgedCodex={!!remoteHostId}
                     dense={effectiveDenseToolbar}
                     // 意图期显示用户在浏览态选中的来源(null = flat 退化行,跟随默认路由)。
                     currentProviderId={activeProviderId}

@@ -296,7 +296,12 @@ export default function RemoteFilePreviewScreen() {
     const merged = mergePathIntoComposerDraft(sessionId, item.relPath);
     router.navigate({
       pathname: '/sessions/[sessionId]',
-      params: { sessionId, deviceId, draft: merged },
+      params: {
+        sessionId,
+        deviceId,
+        draft: merged,
+        focusComposerRequestKey: String(Date.now()),
+      },
     });
   }, [deviceId, router, sessionId]);
 
@@ -373,7 +378,11 @@ export default function RemoteFilePreviewScreen() {
                 });
                 router.navigate({
                   pathname: '/sessions/[sessionId]',
-                  params: { sessionId, deviceId },
+                  params: {
+                    sessionId,
+                    deviceId,
+                    focusComposerRequestKey: String(Date.now()),
+                  },
                 });
               }}
               readTextFile={readTextFile}

@@ -1816,7 +1816,7 @@ describe('AgentIslandService native publishing', () => {
     expect(publish.mock.calls.at(-1)?.[0].sessions).toEqual([]);
   });
 
-  it('treats an explicit cancelled terminal event as stopped without a prior main-process signal', async () => {
+  it('ignores a stale cancelled terminal event after a replacement turn starts', async () => {
     const { AgentIslandService } = await import('../service.js');
     const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {
       void state;
@@ -1837,16 +1837,55 @@ describe('AgentIslandService native publishing', () => {
         complete: customSound('complete.wav'),
       },
     });
-    service.handleUserPrompt({ sessionId: 'codex-stop', agentKind: 'codex' }, 'run tests');
+    const meta = { sessionId: 'codex-stop', agentKind: 'codex' as const };
+    service.handleUserPrompt(meta, 'run tests');
+    service.handleSessionStopped(meta.sessionId);
+    service.handleUserPrompt(meta, 'replacement turn');
     playSound.mockClear();
 
-    service.handleAgentEvent(
-      { sessionId: 'codex-stop', agentKind: 'codex' },
-      cancelledDoneEvent(),
-    );
+    service.handleAgentEvent(meta, cancelledDoneEvent());
 
     expect(playSound).not.toHaveBeenCalled();
-    expect(publish.mock.calls.at(-1)?.[0].sessions).toEqual([]);
+    expect(publish.mock.calls.at(-1)?.[0].sessions[0]).toMatchObject({
+      sessionId: meta.sessionId,
+      phase: 'running',
+    });
+  });
+
+  it('clears silenced-run bookkeeping when a session is stopped', async () => {
+    const { AgentIslandService } = await import('../service.js');
+    const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {
+      void state;
+      void frameOrFrames;
+      return true;
+    });
+    const playSound = vi.fn<(sound: AgentIslandSoundChoice) => boolean>(() => true);
+    const service = new AgentIslandService({
+      getMainWindow: () => null,
+      nativeHost: { failed: false, publish, playSound },
+    });
+    syncEnabledForTest(service, publish);
+    service.setSoundSettings({
+      enabled: true,
+      sounds: {
+        ...DEFAULT_AGENT_ISLAND_SOUND_SETTINGS.sounds,
+        start: customSound('start.wav'),
+      },
+    });
+    const meta = { sessionId: 'silenced-stop', agentKind: 'claude-code' as const };
+    service.handleScheduleEvent({
+      type: 'silenced',
+      scheduleId: 'schedule-1',
+      runId: 'run-1',
+      sessionId: meta.sessionId,
+    });
+    service.handleUserPrompt(meta, 'scheduled run');
+    service.handleSessionStopped(meta.sessionId);
+    playSound.mockClear();
+
+    service.handleUserPrompt(meta, 'manual replacement');
+
+    expect(playSound).toHaveBeenCalledWith(customSound('start.wav'));
   });
 
   it('plays the completion sound when the completed visible session is smart-suppressed', async () => {

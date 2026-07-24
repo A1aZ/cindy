@@ -577,10 +577,10 @@ export class AgentIslandService {
 
   handleAgentEvent(meta: AgentIslandSessionMeta, event: AgentEvent): void {
     const hydrated = this.hydrateMeta(meta);
-    if (isCancelledTerminalEvent(event)) {
-      this.handleSessionStopped(hydrated.sessionId);
-      return;
-    }
+    // Stop is applied synchronously by the main-process abort path. A provider
+    // cancellation is only its terminal tail and may arrive after a replacement
+    // turn has already started, so it must never stop or complete by session id.
+    if (isCancelledTerminalEvent(event)) return;
     // Provider aborts can drain ordinary status/done events after the user has
     // already stopped the turn. Keep those tails from recreating a completed
     // island entry; the next accepted user prompt is the only restart boundary.
@@ -798,6 +798,7 @@ export class AgentIslandService {
 
   handleSessionClosed(sessionId: string): void {
     this.stoppedSessionIds.delete(sessionId);
+    this.clearSilencedRunForSession(sessionId);
     this.sessionHadAttentionAtRunStart.delete(sessionId);
     for (const key of this.userPromptRollbackTokens.keys()) {
       if (key.startsWith(`${sessionId}:`)) {
@@ -819,6 +820,7 @@ export class AgentIslandService {
    */
   handleSessionStopped(sessionId: string): void {
     this.stoppedSessionIds.add(sessionId);
+    this.clearSilencedRunForSession(sessionId);
     this.sessionHadAttentionAtRunStart.delete(sessionId);
     for (const key of this.userPromptRollbackTokens.keys()) {
       if (key.startsWith(`${sessionId}:`)) {
@@ -1027,6 +1029,11 @@ export class AgentIslandService {
     const runId = this.silencedSessionRunIds.get(sessionId);
     if (!runId || !this.silencedRunClearTimers.has(runId)) return;
     this.clearSilencedScheduleRun(runId);
+  }
+
+  private clearSilencedRunForSession(sessionId: string): void {
+    const runId = this.silencedSessionRunIds.get(sessionId);
+    if (runId) this.clearSilencedScheduleRun(runId);
   }
 
   private clearSilencedScheduleRun(runId: string): void {

@@ -2282,6 +2282,7 @@ function normalizeModerationInputFiles(value: unknown): RemoteSerializedAttachme
     if (!id || !name || !path || ext === null || mimeType === null || size === null || !category) {
       continue;
     }
+    if (path.startsWith('clipboard://')) continue;
     normalized.push({
       id,
       name,

@@ -2043,4 +2043,46 @@ describe('引用调和(2026-07-18 首页重渲染风暴修复)', () => {
     });
     clearComposerDraft(sessionId);
   });
+
+  it('过滤 desktop-only clipboard:// 附件，不放入 mobile composer', () => {
+    const sessionId = 's-moderation-clipboard';
+    remoteSessionStore.setViewedSessionId(sessionId);
+    remoteSessionStore.appendMessage(sessionId, {
+      ...message('client-clip', sessionId),
+      role: 'user',
+      content: 'pasted input',
+    });
+
+    remoteSessionStore.applyRemotePush('dev-1', 'content-moderation:input-blocked', {
+      sessionId,
+      clientId: 'client-clip',
+      text: 'pasted input',
+      reason: 'rejected',
+      files: [
+        {
+          id: 'clip-1',
+          name: 'clipboard.png',
+          path: 'clipboard://tmp/paste-001.png',
+          ext: '.png',
+          size: 100,
+          category: 'image',
+          mimeType: 'image/png',
+        },
+        {
+          id: 'real-1',
+          name: 'photo.jpg',
+          path: 'xd-attachment://real-1',
+          ext: '.jpg',
+          size: 200,
+          category: 'image',
+          mimeType: 'image/jpeg',
+        },
+      ],
+    });
+
+    const attachments = drainComposerAttachments(sessionId);
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0]).toMatchObject({ id: 'real-1' });
+    clearComposerDraft(sessionId);
+  });
 });

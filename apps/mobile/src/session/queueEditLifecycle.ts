@@ -18,8 +18,10 @@ export function acquireQueueEditLock(
   callback?: QueueEditLockCallback,
 ): QueueEditLockOwner {
   if (owner?.clientId === clientId) return owner;
-  const previousRelease = owner ? releaseQueueEditLock(owner) : Promise.resolve();
-  const ready = previousRelease.then(async () => {
+  const previousSettled = owner
+    ? releaseQueueEditLock(owner).catch(() => undefined)
+    : Promise.resolve();
+  const ready = previousSettled.then(async () => {
     await callback?.(clientId, true);
   });
   // 锁错误仍由后续 commit / release 读取；先挂观察者避免用户停留在编辑态时出现未处理拒绝。

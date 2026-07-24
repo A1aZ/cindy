@@ -202,6 +202,20 @@ describe('queueEditLifecycle', () => {
     expect(calls).toEqual(['lock', 'update', 'unlock']);
   });
 
+  it('continues acquiring a new lock after the previous unlock fails', async () => {
+    const calls: string[] = [];
+    const setLock = async (clientId: string, locked: boolean) => {
+      calls.push(`${clientId}:${locked ? 'lock' : 'unlock'}`);
+      if (clientId === 'q-1' && !locked) throw new Error('unlock failed');
+    };
+    const first = acquireQueueEditLock(null, 'q-1', setLock);
+    await first.ready;
+    const second = acquireQueueEditLock(first, 'q-2', setLock);
+
+    await expect(second.ready).resolves.toBeUndefined();
+    expect(calls).toEqual(['q-1:lock', 'q-1:unlock', 'q-2:lock']);
+  });
+
   it('retries an unlock that failed while the save was finishing', async () => {
     let unlockAttempts = 0;
     const calls: string[] = [];

@@ -196,7 +196,7 @@ export interface LoginSkinColors {
   sloganInk: string;
   /** wave4 双背景渐变的品牌红基色(跨模式同值;层 opacity 见 loginGradients) */
   gradientTint: string;
-  /** 主钮/圆钮 pressed 叠层(亮黑 50% / 暗黑 10%;figma white_button Pressd) */
+  /** 主钮/圆钮 pressed 叠层(亮黑 50% / 暗黑 10%;figma white_button Pressed) */
   overlayButtonPressed: string;
   /** 浅底控件(方式行/返回钮)pressed 叠层(两模式黑 8%) */
   overlayControlPressed: string;

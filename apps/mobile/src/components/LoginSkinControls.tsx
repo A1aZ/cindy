@@ -36,7 +36,7 @@ import { fontWeight, loginSizes, radius, type ThemeColors } from '@/theme/tokens
  *
  * 态系(design.md §2,移动无 hover):
  *  - pressed = 叠遮罩不改布局:主钮/圆钮亮色叠黑 50% / 暗色叠黑 10%(figma
- *    white_button Pressd)、浅底控件(方式行/tabs/返回钮)两模式叠黑 8%(§2.2)——
+ *    white_button Pressed)、浅底控件(方式行/tabs/返回钮)两模式叠黑 8%(§2.2)——
  *    overlay View 挂在内容之上,pointerEvents 穿透;
  *  - disabled = login.disabledButtonOverlay 白 70% 叠层 + 边 controlBorderDisabled
  *    + 文字 opacity 0.8(两模式同构,DESIGN.md §16.5 disabled 特例);

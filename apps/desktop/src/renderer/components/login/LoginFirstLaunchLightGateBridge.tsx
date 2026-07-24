@@ -18,10 +18,10 @@ import { endLoginFirstLaunchLightGate } from '@/hooks/useTheme';
  * `endLoginFirstLaunchLightGate` 内部幂等(`firstLaunchLightSession !== true` 即 return),
  * 与 `LoginPage` 卸载双触发也不冲突。
  *
- * 设计取舍:不在 bootstrap(`initLoginFirstLaunchLightGate`)里同步感知主进程会话——
- * bootstrap 早在任何渲染前执行,此时 auth 尚未 initialize,Electron renderer→main 的
- * 会话查询是异步 IPC,拿不到同步结果;改为在认证恢复完成的确定时机事后清理,时序
- * 最确定、侵入最小。门激活期间 `applyThemeClass` 已恒按亮色解析,清理只解除强制。
+ * 设计取舍:bootstrap 已通过 `authHasPersistedSessionHintSync` 尽量避免误判,
+ * 但本桥仍作为线索缺失/失败时的兜底清理路径——在认证恢复完成的确定时机事后
+ * 清理,时序最确定、侵入最小。门激活期间 `applyThemeClass` 已恒按亮色解析,
+ * 清理只解除强制。
  */
 export function LoginFirstLaunchLightGateBridge({
   authResolved,

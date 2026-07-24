@@ -110,7 +110,10 @@ function timedSignal(deadlineMs: number, callerSignal?: AbortSignal): TimedSigna
 async function sleep(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
   await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', abort);
+      resolve();
+    }, ms);
     const abort = () => {
       clearTimeout(timer);
       reject(new DOMException('Aborted', 'AbortError'));

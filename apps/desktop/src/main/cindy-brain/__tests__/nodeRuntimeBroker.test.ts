@@ -350,6 +350,71 @@ describe('nodeRuntimeBroker · 启动瞬时失败重试(2026-07-24)', () => {
     await expect(pending).resolves.toMatchObject({ ok: false, errorCode: 'PROCESS_START_FAILED' });
     expect(spawnCount).toBe(1);
   });
+
+  it('destroyAll 后到达的请求不拉新进程(首次尝试即短路)', async () => {
+    const ghost = fakeGhost();
+    const spawnProcess = vi.fn();
+    const broker = new GhostNodeRuntimeBroker({
+      getGhost: () => ghost,
+      spawnProcess,
+    });
+
+    broker.destroyAll();
+    const result = await broker.handleRequest('node-ghost', rpcRequest());
+    expect(result).toMatchObject({ ok: false, errorCode: 'PROCESS_START_FAILED' });
+    expect(spawnProcess).not.toHaveBeenCalled();
+  });
+
+  it('stop(ghostId) 取消在途重试:退避中不再拉新进程', async () => {
+    vi.useFakeTimers();
+    const ghost = fakeGhost();
+    let spawnCount = 0;
+    const broker = new GhostNodeRuntimeBroker({
+      getGhost: () => ghost,
+      spawnProcess: () => {
+        spawnCount += 1;
+        return epermFailingProcess() as unknown as NodeWorkerProcess;
+      },
+    });
+
+    const pending = broker.handleRequest('node-ghost', rpcRequest());
+    await vi.advanceTimersByTimeAsync(50);
+    broker.stop('node-ghost');
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(pending).resolves.toMatchObject({ ok: false, errorCode: 'PROCESS_START_FAILED' });
+    expect(spawnCount).toBe(1);
+  });
+
+  it('诊断行不泄露绝对路径', async () => {
+    vi.useFakeTimers();
+    const ghost = fakeGhost();
+    const pushes: Array<Record<string, unknown>> = [];
+    const broker = new GhostNodeRuntimeBroker({
+      getGhost: () => ghost,
+      sendToGhost: (_id, payload) => pushes.push(payload as unknown as Record<string, unknown>),
+      spawnProcess: () => {
+        const failing = new FakeNodeProcess(undefined, false);
+        queueMicrotask(() => {
+          failing.stderr.write(
+            "Error: EPERM: operation not permitted, open 'C:\\Users\\dev\\AppData\\Local\\cindy\\.vite\\build\\nodeRuntimeWorkerProcess.js'\n",
+          );
+          failing.emit('exit', 1, null);
+        });
+        return failing as unknown as NodeWorkerProcess;
+      },
+    });
+
+    const pending = broker.handleRequest('node-ghost', rpcRequest());
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = await pending;
+    expect((result as { message?: string }).message).toContain('EPERM');
+    expect((result as { message?: string }).message).not.toContain('C:\\Users');
+    expect((result as { message?: string }).message).not.toContain('AppData');
+    const crashed = pushes.find((p) => p.state === 'crashed') as { message?: string };
+    expect(crashed.message).toContain('EPERM');
+    expect(crashed.message).not.toContain('C:\\Users');
+    broker.destroyAll();
+  });
 });
 
 describe('nodeRuntimeBroker · 权限与协议', () => {

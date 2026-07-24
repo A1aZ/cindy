@@ -180,7 +180,14 @@ function startupStderrHint(text: string): string | null {
     .filter(Boolean);
   if (lines.length === 0) return null;
   const line = lines.find((candidate) => /error/i.test(candidate)) ?? lines[0];
-  return line.slice(0, 240);
+  return sanitizePathsInHint(line.slice(0, 240));
+}
+
+function sanitizePathsInHint(hint: string): string {
+  const basename = (p: string) => p.split(/[/\\]/).pop() ?? p;
+  return hint
+    .replace(/[A-Z]:[/\\][^\s'")\]]*/g, basename)
+    .replace(/\/(?:Users|home|tmp|var|opt|app|usr|Library|nix)\/[^\s'")\]]*/gi, basename);
 }
 
 type UtilityFork = typeof utilityProcess.fork;
@@ -729,6 +736,7 @@ export class GhostNodeRuntimeBroker {
 
   /** 停用、更新或卸载一个插件时立即停止其名下**全部** Node 进程。 */
   stop(ghostId: string): void {
+    this.stoppedGhosts.add(ghostId);
     for (const [key, entry] of [...this.workers]) {
       if (entry.ghost.manifest.id === ghostId) this.stopWorker(key, entry);
     }
@@ -771,6 +779,9 @@ export class GhostNodeRuntimeBroker {
   /** 同 key 在途启动去重:重试退避窗口内的并发请求共享同一次启动,不双开进程。 */
   private readonly startingWorkers = new Map<string, Promise<WorkerEntry>>();
 
+  /** stop(ghostId) 置入:在途重试检测到后立即中止,不继续拉新进程。 */
+  private readonly stoppedGhosts = new Set<string>();
+
   /** destroyAll(主机退出)后置真:退避中的重试不得再拉新进程。 */
   private destroyed = false;
 
@@ -780,6 +791,7 @@ export class GhostNodeRuntimeBroker {
     if (inflight) return inflight;
     const existing = this.workers.get(key);
     if (existing) return existing;
+    this.stoppedGhosts.delete(ghost.manifest.id);
     const starting = this.startWorkerWithRetry(ghost, entryRel, key);
     this.startingWorkers.set(key, starting);
     try {
@@ -794,16 +806,20 @@ export class GhostNodeRuntimeBroker {
     entryRel: string,
     key: string,
   ): Promise<WorkerEntry> {
+    if (this.destroyed || this.stoppedGhosts.has(ghost.manifest.id)) {
+      throw new WorkerStartError('Node 工作进程启动已取消', false, true);
+    }
     this.sendStatus(ghost, 'starting', undefined, entryRel);
     let current = ghost;
     let lastError = new Error('Node 工作进程启动失败');
     for (let attempt = 1; attempt <= WORKER_START_ATTEMPTS; attempt++) {
       if (attempt > 1) {
         await this.delay(WORKER_START_RETRY_DELAYS_MS[attempt - 2] ?? 750);
-        // 退避期间插件可能被停用/卸载/更新,主机也可能正在退出:现查现用;
-        // 已停用/已收摊就不再拉进程,也不补发状态事件。
+        // 退避期间插件可能被停用/卸载/更新/停止,主机也可能正在退出:
+        // 现查现用;已停用/已收摊/已停止就不再拉进程,也不补发状态事件。
+        if (this.destroyed || this.stoppedGhosts.has(ghost.manifest.id)) throw lastError;
         const fresh = this.deps.getGhost(ghost.manifest.id);
-        if (this.destroyed || !fresh?.enabled) throw lastError;
+        if (!fresh?.enabled) throw lastError;
         current = fresh;
       }
       try {
@@ -821,7 +837,7 @@ export class GhostNodeRuntimeBroker {
       }
     }
     if (!(lastError instanceof WorkerStartError) || !lastError.silent) {
-      this.sendStatus(ghost, 'crashed', lastError.message, entryRel);
+      this.sendStatus(current, 'crashed', lastError.message, entryRel);
     }
     throw lastError;
   }

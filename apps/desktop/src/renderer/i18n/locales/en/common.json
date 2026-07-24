@@ -808,7 +808,7 @@
       },
       "fastActivation": {
         "label": "Fast voice activation",
-        "hint": "Keeps the microphone ready briefly after use so recording starts sooner after pressing the shortcut or button; usually about 100 ms faster. The microphone is released automatically after 30 minutes of no use.",
+        "hint": "Keeps the microphone ready briefly after use so recording starts sooner after pressing the shortcut or button; usually about 100 ms faster. The microphone is released automatically after 30 minutes of no use, and immediately when the system sleeps or the screen locks.",
         "ariaLabel": "Toggle fast voice activation"
       },
       "refinement": {

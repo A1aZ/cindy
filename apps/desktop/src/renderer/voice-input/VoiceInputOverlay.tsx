@@ -648,7 +648,15 @@ export function VoiceInputOverlay() {
     t('settings.voiceInput.microphone.errors.fallbackToAuto')
   ), [t]);
 
+  // 这个 overlay 订阅的是全部语音设置,但只有这两项与采集设备有关。语言、润色等
+  // 变更同样会走到这里,如果不过滤,一次无关设置改动就会在保活窗口已经到期释放后
+  // 重新打开麦克风,让隐私指示灯毫无理由地重新亮起。
+  const lastKeepAliveConfigRef = useRef<string | null>(null);
+
   const prewarmFastActivationIfEnabled = useCallback((settings: ReturnType<typeof getVoiceInputSettings>) => {
+    const configKey = `${settings.fastActivationEnabled ? 'on' : 'off'}|${settings.microphoneDeviceId ?? ''}`;
+    if (lastKeepAliveConfigRef.current === configKey) return;
+    lastKeepAliveConfigRef.current = configKey;
     if (!settings.fastActivationEnabled) {
       void disposeKeepAliveVoiceInputMicrophone('setting_disabled').catch(() => undefined);
       return;

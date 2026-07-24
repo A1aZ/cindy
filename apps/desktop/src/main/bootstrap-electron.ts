@@ -235,6 +235,7 @@ import {
   installPowerEventDiagnostics,
   installWindowResponsivenessDiagnostics,
 } from './powerWakeDiagnostics';
+import { installVoiceInputPowerRelease } from './voice-input/powerReleaseNotifier';
 import { reapClaudeOrphansSync } from './claude-orphan-reaper';
 import { initAppBadgeService, clearAllSessionAttention } from './appBadgeService';
 import { initNotificationService } from './notificationService';
@@ -5481,6 +5482,18 @@ app.on('ready', async () => {
   // 睡醒白屏取证:suspend/resume/lock/unlock 全部落日志,给 renderer 侧
   // render-watchdog 的漂移/无帧日志提供时间锚点。
   installPowerEventDiagnostics({ powerMonitor });
+
+  // 挂起/锁屏时通知 renderer 释放语音输入的保活麦克风(用户已离开,再占着采集
+  // 设备只剩隐私指示灯常亮和 idle-sleep assertion 的代价)。
+  installVoiceInputPowerRelease({
+    powerMonitor,
+    broadcast: (channel, payload) => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (win.isDestroyed()) continue;
+        win.webContents.send(channel, payload);
+      }
+    },
+  });
 
   // ── System resume: refresh tokens after sleep/hibernate ──
   powerMonitor.on('resume', () => {

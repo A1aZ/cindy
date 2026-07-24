@@ -79,7 +79,13 @@ let benchmarkFixturePromise: Promise<BenchmarkFixtureAudio | null> | null = null
 let keepAliveSession: KeepAliveMicSession | null = null;
 let keepAliveSessionPromise: Promise<KeepAliveMicSession> | null = null;
 let keepAliveDeviceChangeListening = false;
+let keepAlivePowerReleaseListening = false;
 let keepAliveIdleDisposeTimer: number | undefined;
+// Absolute expiry of the current idle window, kept separately from the timer
+// handle. Callers that merely re-assert the keep-alive intent (component mount,
+// unrelated settings changes) clear and re-arm the timer, and must land on the
+// original deadline instead of restarting the countdown.
+let keepAliveIdleDeadlineAt: number | undefined;
 
 function isSpecificMicrophoneDeviceId(deviceId?: string): deviceId is string {
   return Boolean(deviceId && deviceId !== 'default');
@@ -284,6 +290,25 @@ function ensureKeepAliveDeviceChangeListener(): void {
   });
 }
 
+/**
+ * Release the warm microphone when the machine suspends or the screen locks.
+ *
+ * Both mean the user walked away, so holding the capture device buys no
+ * latency while still lighting the OS privacy indicator and holding an
+ * idle-sleep assertion through coreaudiod. Mirrors the devicechange listener
+ * above: one process-wide subscription, installed lazily with the first
+ * keep-alive session, never torn down.
+ */
+function ensureKeepAlivePowerReleaseListener(): void {
+  if (keepAlivePowerReleaseListening) return;
+  const subscribe = window.electronAPI?.voiceInput?.onPowerStateChange;
+  if (typeof subscribe !== 'function') return;
+  keepAlivePowerReleaseListening = true;
+  subscribe((payload) => {
+    void disposeKeepAliveVoiceInputMicrophone(payload.reason);
+  });
+}
+
 class KeepAliveMicSession {
   readonly key: KeepAliveSessionKey;
   readonly options: KeepAliveSessionOptions;
@@ -297,6 +322,7 @@ class KeepAliveMicSession {
   private disposed = false;
   private active = false;
   private staleAfterActiveDeviceChange = false;
+  private sinkConnected = false;
 
   constructor(options: KeepAliveSessionOptions) {
     this.options = options;
@@ -307,6 +333,7 @@ class KeepAliveMicSession {
     if (this.disposed) throw new Error('Keep-alive microphone session was disposed.');
     if (this.context && this.stream && this.worklet) return;
     ensureKeepAliveDeviceChangeListener();
+    ensureKeepAlivePowerReleaseListener();
     await assertSelectedMicrophoneAvailable(this.options.deviceId);
 
     const sharedState = await prewarmVoiceInputAudio(this.options.workletUrl);
@@ -344,15 +371,40 @@ class KeepAliveMicSession {
     this.worklet.port.postMessage({ type: 'setActive', active: false, reset: true });
     this.source.connect(this.worklet);
     this.worklet.connect(this.sink);
-    this.sink.connect(this.context.destination);
+    // The sink stays detached until activation; see attachOutputPath.
     if (this.context.state !== 'running') {
       await this.context.resume();
     }
   }
 
+  /**
+   * Attach the capture graph to the context destination.
+   *
+   * AudioWorklet.process() only runs while the node has a live path to the
+   * destination, so the graph must be attached before PCM can flow. Leaving it
+   * attached while merely warm is what made a keep-alive microphone also hold a
+   * CoreAudio *output* stream — and, through coreaudiod, an idle-sleep
+   * assertion — for the whole window. Dictation needs the input path only, so
+   * the output path now follows activation rather than session lifetime.
+   */
+  private attachOutputPath(): void {
+    if (!this.context || !this.sink || this.sinkConnected) return;
+    this.sink.connect(this.context.destination);
+    this.sinkConnected = true;
+  }
+
+  private detachOutputPath(): void {
+    if (!this.sink || !this.sinkConnected) return;
+    this.sink.disconnect();
+    this.sinkConnected = false;
+  }
+
   activate(activation: KeepAliveActivation): void {
     this.activation = activation;
     this.active = true;
+    // Attach before arming the worklet so the first active render quantum
+    // already has a live path; the worklet drops audio until setActive lands.
+    this.attachOutputPath();
     this.worklet?.port.postMessage({ type: 'setActive', active: true, reset: true });
     activation.onStateChange?.('keep_alive_activated', {
       tracks: this.stream?.getAudioTracks().map((track) => this.describeTrack(track)),
@@ -362,6 +414,7 @@ class KeepAliveMicSession {
 
   deactivate(): void {
     this.worklet?.port.postMessage({ type: 'setActive', active: false, reset: true });
+    this.detachOutputPath();
     this.activation = undefined;
     this.active = false;
   }
@@ -399,6 +452,7 @@ class KeepAliveMicSession {
     this.sink?.disconnect();
     this.source?.disconnect();
     this.stream?.getTracks().forEach((track) => track.stop());
+    this.sinkConnected = false;
     this.worklet = undefined;
     this.sink = undefined;
     this.source = undefined;
@@ -452,8 +506,11 @@ async function getOrCreateKeepAliveSession(options: KeepAliveSessionOptions): Pr
     await keepAliveSessionPromise.catch(() => undefined);
   }
   if (keepAliveSession) {
+    // A different device/profile is a fresh warm-up, not a continuation of the
+    // previous idle window.
     await keepAliveSession.dispose('replaced');
     keepAliveSession = null;
+    keepAliveIdleDeadlineAt = undefined;
   }
   const session = new KeepAliveMicSession(options);
   keepAliveSession = session;
@@ -471,8 +528,12 @@ async function getOrCreateKeepAliveSession(options: KeepAliveSessionOptions): Pr
 
 export async function prewarmVoiceInputMicrophone(options: WebMicAudioEngineOptions): Promise<void> {
   const session = await getOrCreateKeepAliveSession(normalizeKeepAliveOptions(options));
+  // Prewarm can land mid-dictation: another ChatInput mounts, or a settings
+  // change fires while the overlay is recording. Deactivating there would cut
+  // the live PCM stream, and stop() already owns re-arming the idle window.
+  if (session.isActive()) return;
   session.deactivate();
-  scheduleKeepAliveIdleDispose(session, 'idle_timeout_after_prewarm');
+  scheduleKeepAliveIdleDispose(session, 'idle_timeout_after_prewarm', { refresh: false });
 }
 
 export async function prewarmVoiceInputMicrophoneWithAutomaticFallback(
@@ -496,6 +557,7 @@ export async function prewarmVoiceInputMicrophoneWithAutomaticFallback(
 
 export async function disposeKeepAliveVoiceInputMicrophone(reason = 'dispose'): Promise<void> {
   clearKeepAliveIdleDisposeTimer();
+  keepAliveIdleDeadlineAt = undefined;
   const session = keepAliveSession;
   keepAliveSession = null;
   keepAliveSessionPromise = null;
@@ -518,18 +580,37 @@ function clearKeepAliveIdleDisposeTimer(): void {
   keepAliveIdleDisposeTimer = undefined;
 }
 
-function scheduleKeepAliveIdleDispose(session: KeepAliveMicSession, reason: string): void {
+/**
+ * Arm the bounded idle window that releases the warm microphone.
+ *
+ * `refresh` separates real dictation from bookkeeping. The user-facing copy
+ * promises release after 30 minutes of *no use*, so only a finished recording
+ * may restart the countdown. Prewarm runs on every ChatInput/overlay mount and
+ * on unrelated voice settings changes; letting those extend the deadline kept
+ * the microphone — and the OS privacy indicator — on forever on a machine the
+ * user was simply working in.
+ */
+function scheduleKeepAliveIdleDispose(
+  session: KeepAliveMicSession,
+  reason: string,
+  { refresh }: { refresh: boolean },
+): void {
   clearKeepAliveIdleDisposeTimer();
-  // Fast activation intentionally keeps the MediaStream warm only for a bounded
-  // idle window. This preserves the next-use latency win without leaving the
-  // OS microphone indicator on indefinitely after the user stops dictating.
+  const now = Date.now();
+  if (refresh || keepAliveIdleDeadlineAt === undefined || keepAliveIdleDeadlineAt <= now) {
+    keepAliveIdleDeadlineAt = now + KEEP_ALIVE_MIC_IDLE_TTL_MS;
+  }
+  const deadlineAt = keepAliveIdleDeadlineAt;
   keepAliveIdleDisposeTimer = window.setTimeout(() => {
     keepAliveIdleDisposeTimer = undefined;
+    // A recording that started before the deadline keeps the session; stop()
+    // re-arms with refresh so the full window starts after the user is done.
     if (keepAliveSession !== session || session.isActive()) return;
+    keepAliveIdleDeadlineAt = undefined;
     keepAliveSession = null;
     keepAliveSessionPromise = null;
     void session.dispose(reason);
-  }, KEEP_ALIVE_MIC_IDLE_TTL_MS);
+  }, Math.max(0, deadlineAt - now));
 }
 
 /**
@@ -717,7 +798,9 @@ export class WebMicAudioEngine {
       if (session?.isStaleAfterDeviceChange()) {
         await disposeKeepAliveVoiceInputMicrophone('devicechange_after_recording');
       } else if (session) {
-        scheduleKeepAliveIdleDispose(session, 'idle_timeout_after_recording');
+        // Real use just ended — this is the only event allowed to restart the
+        // full 30-minute window the settings copy promises.
+        scheduleKeepAliveIdleDispose(session, 'idle_timeout_after_recording', { refresh: true });
       }
       this.keepAliveSession = undefined;
       this.usingKeepAliveSession = false;

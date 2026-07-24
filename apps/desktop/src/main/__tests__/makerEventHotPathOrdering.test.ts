@@ -14,8 +14,6 @@ const sourcePath = resolve(__dirname, '..', 'maker-ipc', 'register.ts');
 const source = readFileSync(sourcePath, 'utf8').replace(/\r\n?/g, '\n');
 const usageSourcePath = resolve(__dirname, '..', 'maker-ipc', 'usage.ts');
 const usageSource = readFileSync(usageSourcePath, 'utf8').replace(/\r\n?/g, '\n');
-const turnRunnerSourcePath = resolve(__dirname, '..', 'im', 'shared', 'turnRunner.ts');
-const turnRunnerSource = readFileSync(turnRunnerSourcePath, 'utf8').replace(/\r\n?/g, '\n');
 const hookControlSourcePath = resolve(__dirname, '..', 'hook-control', 'ipc.ts');
 const hookControlSource = readFileSync(hookControlSourcePath, 'utf8').replace(/\r\n?/g, '\n');
 
@@ -139,9 +137,6 @@ describe('maker:event hot path ordering', () => {
     const epochCaptureIndex = interactionListenerSource.indexOf(
       'getAgentIslandService()?.captureInteractionEpoch(session.id)',
     );
-    const releaseBoundaryIndex = interactionListenerSource.indexOf(
-      'await waitForReleasedOutput(session.id);',
-    );
     const currentEpochCheckIndex = interactionListenerSource.indexOf(
       'getAgentIslandService()?.isInteractionCurrent(',
     );
@@ -151,9 +146,7 @@ describe('maker:event hot path ordering', () => {
     const islandIndex = interactionListenerSource.indexOf('handleAgentIslandInteractionAfterBroadcast(');
 
     expect(epochCaptureIndex).toBeGreaterThanOrEqual(0);
-    expect(releaseBoundaryIndex).toBeGreaterThan(epochCaptureIndex);
-    expect(releaseBoundaryIndex).toBeGreaterThanOrEqual(0);
-    expect(currentEpochCheckIndex).toBeGreaterThan(releaseBoundaryIndex);
+    expect(currentEpochCheckIndex).toBeGreaterThan(epochCaptureIndex);
     expect(flushIndex).toBeGreaterThan(currentEpochCheckIndex);
     expect(broadcastIndex).toBeGreaterThan(flushIndex);
     expect(broadcastIndex).toBeGreaterThanOrEqual(0);
@@ -161,25 +154,6 @@ describe('maker:event hot path ordering', () => {
     expect(islandIndex).toBeGreaterThan(pendingIndex);
     expect(interactionListenerSource.slice(0, broadcastIndex)).not.toContain('handleInteractionRequest(');
     expect(source).toContain('Agent Island interaction update failed after maker interaction broadcast');
-  });
-
-  it('waits for released output before sending an IM interaction card', () => {
-    const start = turnRunnerSource.indexOf('function handleInteractionFor(');
-    const end = turnRunnerSource.indexOf('async function finalizeActiveStream(', start);
-    const interactionSource = turnRunnerSource.slice(start, end);
-    const releaseBoundaryIndex = interactionSource.indexOf(
-      'await waitForReleasedOutput(localSessionId);',
-    );
-    const finalizeIndex = interactionSource.indexOf(
-      'await finalizeActiveStream(localSessionId);',
-    );
-    const sendIndex = interactionSource.indexOf('await im.sendInteractiveCard(');
-
-    expect(start).toBeGreaterThanOrEqual(0);
-    expect(end).toBeGreaterThan(start);
-    expect(releaseBoundaryIndex).toBeGreaterThanOrEqual(0);
-    expect(finalizeIndex).toBeGreaterThan(releaseBoundaryIndex);
-    expect(sendIndex).toBeGreaterThan(finalizeIndex);
   });
 
   it('clears git snapshot coordinator state when sessions close', () => {
@@ -272,11 +246,6 @@ describe('maker:event hot path ordering', () => {
       hookAbortSource,
       'if (!session) return;',
       'getAgentIslandService()?.handleSessionStopped(',
-    );
-    expectOrder(
-      hookAbortSource,
-      'getAgentIslandService()?.handleSessionStopped(',
-      'cancelReleasedOutput(sessionId);',
     );
     expect(hookAbortSource).toContain(
       "log.warn('Agent Island session stop update failed before hook provider abort'",

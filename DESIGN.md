@@ -874,7 +874,7 @@ Splash 品牌块字标是另一套素材(`assets/splash/wordmark.png` 白字 DAR
 
 ## 16. Login Flow (登录链路)
 
-> 本节是登录全链路的设计系统规范。权威来源：`docs/login-redesign/` 下 `figma-component-spec.md`（组件 / 色板速查）、`token-decision-table.md`（token / 尺寸决策）、`DESIGN-login.md`（逐屏规格）、`flow-map.md`（状态机）、`acceptance/fidelity-matrix.md`（保真度验收矩阵）。本节不重复抄全表，只钉死设计规则与组件契约，逐参数值以引用的 spec 为准。
+> 本节是登录全链路的设计系统规范。权威来源为 Figma 组件库中的以下设计文档（设计阶段工作文件，不入仓库）：`figma-component-spec`（组件 / 色板速查）、`token-decision-table`（token / 尺寸决策）、`DESIGN-login`（逐屏规格）、`flow-map`（状态机）、`fidelity-matrix`（保真度验收矩阵）。本节不重复抄全表，只钉死设计规则与组件契约，逐参数值以 Figma 组件库及本节色板表为准。
 >
 > **交付状态**：**亮色** as-built 已合并入 main；**深色**规格已定（色值经 Figma 组件库 Dark symbol 逐个核验，见 §16.1 双态表 / §16.5），随**暗色实现 PR** 落地。两模式均受 §2「Light / Dark 双模式交付门槛」约束——非可选愿景。
 >
@@ -888,31 +888,31 @@ Splash 品牌块字标是另一套素材(`assets/splash/wordmark.png` 白字 DAR
 - **品牌红 `#DF0C27` 只用于 Global pill 与字标红元素等品牌 accent，跨模式不变**；**禁止作页面背景**（wave4 改判，见 `token-decision-table §3` 对 `#df0c27` 的语义判定），不渗入面板内部（呼应 §15.10 红色边界）。画布底走 `--login-bg-base`（亮 `#EDEDED` / 深 `#1F1F1E`），红只经 `--login-brand-accent` 消费。错误红 `#D91F37` 同样跨模式不变（语义豁免，呼应 §10 豁免族）。
 - **`--login-*` 调色板双态权威值（注册于 `themes/colors.ts`，light / dark 二态）** —— 下表经 Figma 组件库 Dark symbol 逐个核验（`callback-*` 族深色已 as-built 在库，其余深色随暗色实现 PR 落地）：
 
-| `--login-*` | light | dark | 核验源 |
+| token | light | dark | 核验源 |
 |---|---|---|---|
-| `-panel-bg` | `#FBFBFB` | `#312F2F` | callback-card dark（as-built）|
-| `-panel-border` | `#D4D4D4` | `#434343` | callback-card dark |
-| `-control-bg`（输入框底） | `#EEEEEE` | `#2C2A2A` | figma `Dark_normal` 输入 symbol |
-| `-action-control-bg`（方式行 / 返回钮底） | `#EEEEEE` | `#2A2828` | figma 549:850 / 549:897（暗色与输入框底分化，组件库更新 2026-07-23） |
-| `-back-border`（返回钮描边） | `#FFFFFF` | `#434343` | figma 549:897 |
-| `-control-border` | `#D4D4D4` | `#434343` | figma `Dark_normal` |
-| `-control-border-active`（focus / filled） | `#2A2828` | `#EEEEEE` | figma `Dark_highlight` |
-| `-control-text`（输入填充字，Bold） | `#252222` | `#EEEEEE` | figma Dark 填充 / error 态 |
-| `-control-placeholder`（空态字） | `#D4D4D4` | `#6F6F6F` | figma Dark 空态 |
-| `-title-text` | `#252222` | `#D4D4D4` | callback-title dark |
-| `-secondary-text`（副标题 / 倒计时） | `#6F6F6F` | `#6F6F6F` | 两模式同值 |
-| `-primary-button-bg` | `#2A2828` | `#EEEEEE` | figma `white_button` / callback-cta dark |
-| `-primary-button-border` | `#434343` | `#FFFFFF` | 同上 |
-| `-primary-button-text`（Bold） | `#D4D4D4` | `#2A2828` | 同上 |
-| `-link-text`（重发链接） | `#2A2828` | `#EEEEEE` | figma `dark_重新发送` symbol |
-| `-link-hover` | `#4A4848` | `#A8A8A8` | 推导值（无独立 dark hover symbol），已随暗色实现 PR as-built |
-| `-link-pressed` | `#1A1818` | `#C0BEBE` | 推导值，已随暗色实现 PR as-built |
-| `-disabled-button-overlay` | `rgba(255,255,255,0.7)` | 同 light | figma `white_button` Disable：disabled 两模式同构（见 §16.5） |
-| `-splash-progress-track` / `-fill` | `#D9D9D9` / `#252222` | `#434343` / `#D4D4D4` | 已随暗色实现 PR as-built 核验 |
-| `-loading-ring-track`（loading 环轨道） | `rgba(42,40,40,0.18)` | `rgba(212,212,212,0.18)` | 18% 半透明环轨二态；登录页 LoginLoadingRing 与 Splash 转圈环共用（Splash 侧自暗色实现 PR 起由字面 rgba 收敛至本 token） |
-| `-error-fg` | `#D91F37` | `#D91F37` | 语义豁免不变 |
-| `-brand-accent` / `-pressed` | `#DF0C27` / `#A61629` | 同 light | 品牌红不变 |
-| `-bg-base`（画布底） | `#EDEDED` | `#1F1F1E` | figma 532:585 暗色帧实测；两模式纯平定稿——暗色帧的双红晕层（532:588/589）曾按 1:1 几何落地，2026-07-24 实机走查拍板去除（亮色撤渐变=PR#104 拍板，两条决策相互独立） |
+| `--login-panel-bg` | `#FBFBFB` | `#312F2F` | callback-card dark（as-built）|
+| `--login-panel-border` | `#D4D4D4` | `#434343` | callback-card dark |
+| `--login-control-bg`（输入框底） | `#EEEEEE` | `#2C2A2A` | figma `Dark_normal` 输入 symbol |
+| `--login-action-control-bg`（方式行 / 返回钮底） | `#EEEEEE` | `#2A2828` | figma 549:850 / 549:897（暗色与输入框底分化，组件库更新 2026-07-23） |
+| `--login-back-border`（返回钮描边） | `#FFFFFF` | `#434343` | figma 549:897 |
+| `--login-control-border` | `#D4D4D4` | `#434343` | figma `Dark_normal` |
+| `--login-control-border-active`（focus / filled） | `#2A2828` | `#EEEEEE` | figma `Dark_highlight` |
+| `--login-control-text`（输入填充字，Bold） | `#252222` | `#EEEEEE` | figma Dark 填充 / error 态 |
+| `--login-control-placeholder`（空态字） | `#D4D4D4` | `#6F6F6F` | figma Dark 空态 |
+| `--login-title-text` | `#252222` | `#D4D4D4` | callback-title dark |
+| `--login-secondary-text`（副标题 / 倒计时） | `#6F6F6F` | `#6F6F6F` | 两模式同值 |
+| `--login-primary-button-bg` | `#2A2828` | `#EEEEEE` | figma `white_button` / callback-cta dark |
+| `--login-primary-button-border` | `#434343` | `#FFFFFF` | 同上 |
+| `--login-primary-button-text`（Bold） | `#D4D4D4` | `#2A2828` | 同上 |
+| `--login-link-text`（重发链接） | `#2A2828` | `#EEEEEE` | figma `dark_重新发送` symbol |
+| `--login-link-hover` | `#4A4848` | `#A8A8A8` | 推导值（无独立 dark hover symbol），已随暗色实现 PR as-built |
+| `--login-link-pressed` | `#1A1818` | `#C0BEBE` | 推导值，已随暗色实现 PR as-built |
+| `--login-disabled-button-overlay` | `rgba(255,255,255,0.7)` | 同 light | figma `white_button` Disable：disabled 两模式同构（见 §16.5） |
+| `--login-splash-progress-track` / `--login-splash-progress-fill` | `#D9D9D9` / `#252222` | `#434343` / `#D4D4D4` | 已随暗色实现 PR as-built 核验 |
+| `--login-loading-ring-track`（loading 环轨道） | `rgba(42,40,40,0.18)` | `rgba(212,212,212,0.18)` | 18% 半透明环轨二态；登录页 LoginLoadingRing 与 Splash 转圈环共用（Splash 侧自暗色实现 PR 起由字面 rgba 收敛至本 token） |
+| `--login-error-fg` | `#D91F37` | `#D91F37` | 语义豁免不变 |
+| `--login-brand-accent` / `--login-brand-accent-pressed` | `#DF0C27` / `#A61629` | 同 light | 品牌红不变 |
+| `--login-bg-base`（画布底） | `#EDEDED` | `#1F1F1E` | figma 532:585 暗色帧实测；两模式纯平定稿——暗色帧的双红晕层（532:588/589）曾按 1:1 几何落地，2026-07-24 实机走查拍板去除（亮色撤渐变=PR#104 拍板，两条决策相互独立） |
 
   余下 token（`-control-border-disabled` / `-inverted-button-border` / `-callback-*` 等）的**亮色**值与 callback 族**双态**值见 `token-decision-table §3`、`figma-component-spec §1.1`（注意：这两份外部 spec 只覆盖亮色 + callback 族 dark，**登录主皮 dark 值以本表为权威**，原※推导值已随暗色实现 PR 核验落地，本表即 as-built）；深色反相机制与 3 处组件改动见 §16.5。
 - **社交圆钮深色 = 白圆**：与主按钮共用 `--login-primary-button-bg / -border`，深色自动反相为白圆 `#EEEEEE` + 白边，**圆内图标保持品牌色**（Google 彩 / WeChat 绿 / SSO），非反相（figma `white apple/google/wechat/SSO` symbol 核验）。
@@ -938,13 +938,13 @@ Splash 品牌块字标是另一套素材(`assets/splash/wordmark.png` 白字 DAR
 
 **平台差异**：桌面 = Web renderer（Electron，Win / Mac 同套）；手机 = React Native（iOS / Android，含 phone / pad-portrait / pad-landscape）。两端同参数源、同 token 语义（手机 `loginColors` 与桌面 `LOGIN_COLORS` 同名同值），仅实现宿主不同（RN 用 `StyleSheet` + `Animated`，桌面用 CSS + Tailwind）。
 
-**交互态**：hover（仅桌面）/ pressed（双端）/ disabled / loading 五态。态叠层挂伪元素（桌面 `::after`）/ overlay View（手机），**不动图标 / 文本子节点**；disabled 叠层走 `--login-disabled-button-overlay` token。hover / pressed 叠层**暗色落地前**为 figma 实测 rgba 字面值（亮色 as-built 现状）；**暗色 PR 起 token 化为 `--login-overlay-*` 二态 token**（叠层方向随模式反转，见 §16.5），此后组件内禁止新增字面 rgba 叠层。态系细则见 `design.md §2`。
+**交互态**：hover（仅桌面）/ pressed（双端）/ disabled / loading 五态。态叠层挂伪元素（桌面 `::after`）/ overlay View（手机），**不动图标 / 文本子节点**；disabled 叠层走 `--login-disabled-button-overlay` token。hover / pressed 叠层**暗色落地前**为 figma 实测 rgba 字面值（亮色 as-built 现状）；**暗色 PR 起 token 化为 `--login-overlay-*` 二态 token**（叠层方向随模式反转，见 §16.5），此后组件内禁止新增字面 rgba 叠层。态系细则见 `DESIGN.md §2`。
 
 **常驻动画 compositor-only**：spinner / loading 环动画挂 HTML（桌面）/ `Animated.View`（手机）外层 wrapper，SVG 图形保持静态（呼应 §14.4 + CLAUDE 规则 7）；`prefers-reduced-motion` 直落静止。面板入场 handoff 动画是 §14.4 容器形变的窄变体（双端冻结 420ms 升起 + 渐显，`LOGIN_HANDOFF_TIMINGS.panelMs` / `panelInMs`）。
 
 **Apple「Sign in with Apple」按钮**：iOS HIG 硬性要求使用 Apple 官方按钮样式，**不可皮肤化**——iOS 上 Apple 槽位保持原生 `ASAuthorizationAppleIDButton`，不套 `LoginSocialButton` 皮。这是合规底线，非视觉遗漏。其余社交圆钮（Google / WeChat / SSO）正常上皮。
 
-**i18n**：登录文案走 `react-i18next`（桌面 `common.json` `login.*` 节）/ `loginMessages`（手机），4 语对齐 `zh-CN` / `en` / `ja` / `ko`（呼应 CLAUDE 规则 18；zh-TW 已随 #488 回退对齐主干四语基线——`docs/login-redesign` 旧文与 `check-login-i18n-parity.mjs` 的五语门为回退前遗留，待清理，以本节四语为准）。4 语全部翻准，不留空（空 key 静默回退英文）。
+**i18n**：登录文案走 `react-i18next`（桌面 `common.json` `login.*` 节）/ `loginMessages`（手机），4 语对齐 `zh-CN` / `en` / `ja` / `ko`（呼应 CLAUDE 规则 18；zh-TW 已随 #488 回退对齐主干四语基线——设计阶段旧文（不在仓库内）与 `check-login-i18n-parity.mjs` 的五语门为回退前遗留，待清理，以本节四语为准）。4 语全部翻准，不留空（空 key 静默回退英文）。
 
 ### 16.3 组件定义
 

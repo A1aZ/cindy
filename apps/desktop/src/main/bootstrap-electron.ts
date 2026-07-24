@@ -149,6 +149,12 @@ import { im, feishuIm, startImOrchestrators, startImConnection, stopImConnection
 import * as authManager from './authManager';
 import { createAccountDeletionIpcHandlers } from './accountDeletionIpc';
 import * as profileEdit from './profileEdit';
+import { moderateProfileUpdate } from './content-moderation/profile.js';
+import {
+  moderateUserPrompt,
+  validateUserPromptReviewValue,
+} from './content-moderation/userPrompt.js';
+import { cancelAllReleasedOutputs } from './content-moderation/outputHub.js';
 import { uploadPublicAsset } from './ossPublicUpload';
 import { removeRefs as removeMediaRefs } from './cindy-media/ledger';
 import { installWebviewHardener } from './webview-security';
@@ -2291,6 +2297,7 @@ const createWindow = () => {
 
 let disposeSkillhubAutoSyncAuthListener: (() => void) | null = null;
 let disposeProviderAccessAuthListener: (() => void) | null = null;
+let disposeContentModerationAuthListener: (() => void) | null = null;
 
 const registerIpcHandlers = () => {
   // Find the primary app window, skipping transient utility BrowserWindows like
@@ -3332,6 +3339,12 @@ const registerIpcHandlers = () => {
     accountDeletionHandlers.consumeRestoredNotice(),
   );
 
+  ipcMain.handle('content-moderation:review-user-prompt', async (event, value: unknown) => {
+    assertTrustedAppRendererEvent(event);
+    validateUserPromptReviewValue(value);
+    return moderateUserPrompt(value);
+  });
+
   // ── Profile 编辑 IPC(设置 → 用户卡片编辑;业务体在 profileEdit.ts,
   //    资料直写 auth-server,头像经 oss-server 预签名直传) ──
 
@@ -3361,6 +3374,7 @@ const registerIpcHandlers = () => {
       }
       return result;
     },
+    moderateProfile: (input) => moderateProfileUpdate(input),
     patchProfile: (patch) => authManager.updateServerProfile(patch),
     logWarn: (message, err) => profileEditLog.warn(message, err),
   };
@@ -4024,6 +4038,13 @@ const registerIpcHandlers = () => {
   });
   disposeProviderAccessAuthListener = authManager.onAuthStateChange(() => {
     refreshProviderAccessAfterAuthChange();
+  });
+  let moderationAuthEpoch = authManager.getAuthIdentityEpoch();
+  disposeContentModerationAuthListener = authManager.onAuthStateChange(() => {
+    const nextEpoch = authManager.getAuthIdentityEpoch();
+    if (nextEpoch === moderationAuthEpoch) return;
+    moderationAuthEpoch = nextEpoch;
+    cancelAllReleasedOutputs();
   });
 
   // ── Dialog: 目录选择器（v0.6 新增，与旧 show-open-directory-dialog 并存） ──
@@ -5513,6 +5534,8 @@ onQuit(
   () => {
     disposeProviderAccessAuthListener?.();
     disposeProviderAccessAuthListener = null;
+    disposeContentModerationAuthListener?.();
+    disposeContentModerationAuthListener = null;
   },
   'sync',
 );

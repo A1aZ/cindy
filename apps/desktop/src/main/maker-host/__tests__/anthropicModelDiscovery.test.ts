@@ -137,6 +137,22 @@ describe('mapAnthropicSdkModels', () => {
     });
   });
 
+  it('目录未知且能力缺席时,非 Haiku 新模型先开放 5 档,Haiku 仍保持 0 档', () => {
+    const out = mapAnthropicSdkModels([
+      { value: 'claude-opus-6', displayName: 'Opus 6' },
+      { value: 'claude-haiku-5', displayName: 'Haiku 5' },
+    ]);
+    expect(out[0]).toMatchObject({ hasEffortInfo: false });
+    expect(out[0].model).toMatchObject({
+      efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      defaultEffort: 'high',
+    });
+    expect(out[1].model).toMatchObject({
+      efforts: [],
+      defaultEffort: null,
+    });
+  });
+
   it('过滤别名与非 claude id(规则 10:禁止裸别名进目录);dated id 归一去重', () => {
     const out = mapAnthropicSdkModels([
       { value: 'opus', displayName: 'Opus' },
@@ -199,6 +215,17 @@ describe('mapAnthropicHttpModels', () => {
       contextWindow: 900_000, // max_input_tokens 优先于 1M 规则
       efforts: ['low', 'high', 'max'],
       supportsFastMode: true,
+    });
+  });
+
+  it('HTTP 未知新模型缺 capability 时同样使用 5 档临时基线', () => {
+    const out = mapAnthropicHttpModels([
+      { id: 'claude-sonnet-6', display_name: 'Sonnet 6', type: 'model' },
+    ]);
+    expect(out[0]).toMatchObject({ hasEffortInfo: false });
+    expect(out[0].model).toMatchObject({
+      efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      defaultEffort: 'high',
     });
   });
 

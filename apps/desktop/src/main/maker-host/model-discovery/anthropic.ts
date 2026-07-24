@@ -219,11 +219,17 @@ export interface SdkMappedModel {
   hasFastModeInfo: boolean;
 }
 
-/** 动态通道无能力信息时:产品目录基线优先,未知模型才合成 3 档(haiku 0 档)。 */
+/**
+ * 动态通道无能力信息时:产品目录基线优先；未知非 Haiku 模型按当代旗舰能力合成
+ * 5 档，让新 Opus / Sonnet 上线后无需等客户端目录更新即可使用 xhigh / max。
+ * Haiku 保持 0 档；上游后续明确返回能力时仍会逐字段覆盖此临时基线。
+ */
 function fallbackEffortBaseline(id: string): { efforts: Effort[]; defaultEffort: Effort | null } {
   const catalogBaseline = getCindyModelEffortBaseline(id);
   if (catalogBaseline) return catalogBaseline;
-  const efforts: Effort[] = /haiku/.test(id) ? [] : ['low', 'medium', 'high'];
+  const efforts: Effort[] = /haiku/.test(id)
+    ? []
+    : ['low', 'medium', 'high', 'xhigh', 'max'];
   return { efforts, defaultEffort: pickDefaultEffort(efforts) };
 }
 
@@ -360,8 +366,8 @@ function mergeCapabilitiesWithPrevious(
 /**
  * HTTP `GET /v1/models` 单页条目数组 → 映射结果。纯函数,对响应形状容错:
  * 能力字段(capabilities.efforts / fast_mode)是 Anthropic 侧未固化的扩展,逐字段识别；
- * effort 认不出时按 cindyModelMeta 能力基线合成,目录也没有才回落 3 档
- * (low/medium/high,默认 high),haiku 系例外 0 档。fastMode 未知时先为 false,
+ * effort 认不出时按 cindyModelMeta 能力基线合成,目录也没有才回落当代旗舰 5 档
+ * (low/medium/high/xhigh/max,默认 high),haiku 系例外 0 档。fastMode 未知时先为 false,
  * 合并阶段会保留已明确探测过的旧值。
  */
 export function mapAnthropicHttpModels(raw: unknown): HttpMappedModel[] {

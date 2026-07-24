@@ -1256,7 +1256,7 @@ export class GhostNetworkSlot {
             return { ok: false, message: '媒体/大响应通道正忙(全局同时只处理一单),请稍后重试' };
           }
           if (sniffed.kind === 'unsupported') {
-            return { ok: false, message: `该媒体类型不受总仓支持(${declaredMime}),无法取回` };
+            return { ok: false, message: `该媒体类型不受总仓支持(${declaredMime || 'unknown'}),无法取回` };
           }
           if (sniffed.kind === 'mediaTooLarge') {
             return { ok: false, message: `媒体过大(上限 ${GHOST_FETCH_MEDIA_MAX_BYTES} 字节)——截断的媒体是坏文件,整单拒` };
@@ -1302,7 +1302,7 @@ export class GhostNetworkSlot {
           };
         }
         if (!isTextualContentType(contentType)) {
-          return { ok: false, message: `该媒体类型不受总仓支持(${declaredMime}),无法取回` };
+          return { ok: false, message: `该媒体类型不受总仓支持(${declaredMime || 'unknown'}),无法取回` };
         }
         // 2xx 但内容是文本(如返回 JSON 的"生成中"状态):回落文本形态。
       }

@@ -131,6 +131,10 @@ describe('sniffMediaMime', () => {
     expect(sniffMediaMime(new Uint8Array([0xff, 0xfb, 0x9c, 0x00]))).toBeNull();
   });
 
+  it('recognizes OGG container (audio/ogg)', () => {
+    expect(sniffMediaMime(ascii('OggS', 32))).toBe('audio/ogg');
+  });
+
   it('recognizes WAV, ISO BMFF video/audio, WebM and GLB', () => {
     expect(sniffMediaMime(riff('WAVE', [{ id: 'fmt ', size: 16 }], 10_000))).toBe('audio/wav');
     expect(sniffMediaMime(riff('WAVE', [

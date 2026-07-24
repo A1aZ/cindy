@@ -21,7 +21,8 @@ function sniffIsoBmffMime(bytes: Uint8Array): string | null {
     (((bytes[0] << 24) >>> 0) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]);
   // A normal ftyp box contains size, type, major_brand and minor_version.
   // Reject short or truncated boxes instead of treating arbitrary bytes as brands.
-  if (declaredSize < 16 || declaredSize > bytes.byteLength) return null;
+  // Compatible brands area must be 4-byte aligned to reject malformed/forged sizes.
+  if (declaredSize < 16 || declaredSize > bytes.byteLength || (declaredSize - 16) % 4 !== 0) return null;
   const majorBrand = String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11]);
   const brands = [majorBrand];
   for (let offset = 16; offset + 4 <= declaredSize; offset += 4) {
@@ -128,16 +129,25 @@ function parseId3FrameOffset(bytes: Uint8Array): number | null {
   return 10 + tagSize + footerSize;
 }
 
+/**
+ * Upper bound for ID3 tag size we're willing to probe past. Prevents a forged
+ * tag from causing us to buffer arbitrarily large data just to reach the first
+ * MPEG frame. 2 MiB covers virtually all real-world embedded artwork tags.
+ */
+const MAX_ID3_TAG_BYTES = 2 * 1024 * 1024;
+
 /** Return the byte count needed to inspect the first MPEG frame after ID3. */
 export function additionalMp3BytesNeeded(bytes: Uint8Array): number | null {
   const frameOffset = parseId3FrameOffset(bytes);
-  return frameOffset === null ? null : frameOffset + 4;
+  if (frameOffset === null || frameOffset > MAX_ID3_TAG_BYTES) return null;
+  return frameOffset + 4;
 }
 
 /** Validate an ID3v2 header and require an MPEG frame after the tag. */
 function looksLikeId3v2(bytes: Uint8Array): boolean {
   const frameOffset = parseId3FrameOffset(bytes);
-  return frameOffset !== null && frameOffset + 4 <= bytes.byteLength &&
+  return frameOffset !== null && frameOffset <= MAX_ID3_TAG_BYTES &&
+    frameOffset + 4 <= bytes.byteLength &&
     looksLikeMpegAudioFrame(bytes.subarray(frameOffset));
 }
 
@@ -194,6 +204,7 @@ export function sniffMediaMime(bytes: Uint8Array, declaredMime = ''): string | n
   }
   if (looksLikeWebp(bytes)) return 'image/webp';
   if (looksLikeWav(bytes)) return 'audio/wav';
+  if (bytes.byteLength >= 4 && asciiAt(bytes, 0, 'OggS')) return 'audio/ogg';
   if (looksLikeId3v2(bytes)) return 'audio/mpeg';
   if (looksLikeMpegAudioFrame(bytes)) return 'audio/mpeg';
 

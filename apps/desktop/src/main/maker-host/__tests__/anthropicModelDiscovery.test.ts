@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fsp from 'node:fs/promises';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { BUNDLED_CATALOG, type Catalog } from '@cindy/model-providers';
 
 // 规则 23:测试涉及路径一律用 os.tmpdir() 下的临时目录,收尾清理。
 const TEST_USER_DATA = path.join(os.tmpdir(), `cindy-anthropic-discovery-test-${process.pid}`);
@@ -47,7 +48,11 @@ import {
   resetAnthropicDiscoveryForTest,
   waitForAnthropicDiscoveryIdleForTest,
 } from '../model-discovery/anthropic.js';
-import { getActiveCatalog, setAnthropicDiscoveredModels } from '../active-catalog.js';
+import {
+  getActiveCatalog,
+  setActiveCatalog,
+  setAnthropicDiscoveredModels,
+} from '../active-catalog.js';
 
 function anthropicIds(): string[] {
   const p = getActiveCatalog().providers.find((x) => x.id === 'anthropic');
@@ -61,6 +66,10 @@ function anthropicModel(id: string) {
 
 afterAll(async () => {
   await fsp.rm(TEST_USER_DATA, { recursive: true, force: true });
+});
+
+afterEach(() => {
+  setActiveCatalog(BUNDLED_CATALOG);
 });
 
 describe('mapAnthropicSdkModels', () => {
@@ -129,6 +138,35 @@ describe('mapAnthropicSdkModels', () => {
       ['claude-opus-5', 1_000_000],
       ['claude-opus-4-5', 200_000],
       ['claude-sonnet-4-5', 200_000],
+    ]);
+  });
+
+  it('active v1 元数据缺字段时仍从 bundled v1 取得窗口和 effort', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+    catalog.cindyModelMeta = {
+      version: 1,
+      models: {
+        'claude-sonnet-4-5': { name: 'Remote Sonnet 4.5' },
+      },
+    };
+    setActiveCatalog(catalog);
+
+    const out = mapAnthropicSdkModels([
+      { value: 'claude-sonnet-4-5', displayName: 'Sonnet 4.5' },
+      { value: 'claude-opus-5', displayName: 'Opus 5' },
+    ]);
+
+    expect(out.map(({ model }) => ({
+      id: model.id,
+      contextWindow: model.contextWindow,
+      efforts: model.efforts,
+    }))).toEqual([
+      { id: 'claude-sonnet-4-5', contextWindow: 200_000, efforts: [] },
+      {
+        id: 'claude-opus-5',
+        contextWindow: 1_000_000,
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
     ]);
   });
 

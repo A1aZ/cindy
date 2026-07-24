@@ -279,6 +279,35 @@ describe('anthropic 发现条目的 cindyModelMeta 元数据基线', () => {
     expect(anthropicList().find((m) => m.id === 'claude-unknown')?.name).toBe('Unknown Raw');
   });
 
+  it('远端 v1 元数据不完整时按模型、按字段回落 bundled v1', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+    catalog.cindyModelMeta = {
+      version: 1,
+      models: {
+        // 模拟旧远端只认识展示名，不带 4.5 的窗口与 effort 能力。
+        'claude-sonnet-4-5': { name: 'Remote Sonnet 4.5' },
+      },
+    };
+    setActiveCatalog(catalog);
+    setAnthropicDiscoveredModels([
+      anthro('claude-sonnet-4-5', 'Sonnet Raw', 0),
+      anthro('claude-opus-5', 'Opus Raw', 1),
+    ]);
+
+    expect(anthropicList().find((m) => m.id === 'claude-sonnet-4-5')?.name).toBe('Remote Sonnet 4.5');
+    expect(getCindyModelContextWindow('claude-sonnet-4-5')).toBe(200_000);
+    expect(getCindyModelEffortBaseline('claude-sonnet-4-5')).toEqual({
+      efforts: [],
+      defaultEffort: null,
+    });
+    // 远端完全缺席的 bundled 新模型也必须保留完整能力基线。
+    expect(getCindyModelContextWindow('claude-opus-5')).toBe(1_000_000);
+    expect(getCindyModelEffortBaseline('claude-opus-5')).toEqual({
+      efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      defaultEffort: 'high',
+    });
+  });
+
   it('版本门禁:cindyModelMeta.version !== 1 整段忽略;坏信封安全跳过', () => {
     const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
     catalog.cindyModelMeta = { version: 2, models: { 'claude-fable-5': { name: 'V2 Name' } } };

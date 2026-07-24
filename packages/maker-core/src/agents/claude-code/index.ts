@@ -213,6 +213,13 @@ function clampEffortForClaude(e: Effort): ClaudeSdkEffort {
   return e;
 }
 
+async function applyClaudeEffortFlagSettings(q: Query, effort: ClaudeSdkEffort): Promise<void> {
+  // Claude Code 2.1.219 accepts session-scoped `max` through apply_flag_settings.
+  // The pinned Agent SDK's persisted Settings type still omits `max`, so keep
+  // the compatibility cast isolated at this control-protocol boundary.
+  await q.applyFlagSettings({ effortLevel: effort } as Settings);
+}
+
 function rawMentionText(block: { path: string; kind?: 'file' | 'dir' | 'agent' }): string {
   const suffix = block.kind === 'dir' && !block.path.endsWith('/') ? '/' : '';
   return `@${block.path}${suffix}`;
@@ -2748,10 +2755,9 @@ export class ClaudeCodeAgent extends BaseAgent {
           replayed = true;
           const targetEffort = mutableEffort;
           const sdkEffort = getSdkEffortForModel(mutableModel, targetEffort);
-          const clamped = sdkEffort === 'max' ? 'xhigh' : sdkEffort;
-          if (clamped) {
+          if (sdkEffort) {
             try {
-              await q.applyFlagSettings({ effortLevel: clamped });
+              await applyClaudeEffortFlagSettings(q, sdkEffort);
               log.debug(`${label}: replayed setEffort`, { effort: targetEffort });
             } catch (e) {
               log.warn(`${label}: replay setEffort failed`, { error: String(e) });
@@ -3400,18 +3406,17 @@ export class ClaudeCodeAgent extends BaseAgent {
       },
 
       async setEffort(newEffort: Effort) {
-        // applyFlagSettings 不接受 'max' / 'minimal' —— clamp 同 startSession 时
-        // 'minimal' 降 'low', 'max' 降 'xhigh' (最接近的 runtime 可设值)
+        // maker 的 minimal / ultra 先归一成 Claude 的 low / max；2.1.219 起
+        // applyFlagSettings 可原样接收 max，不能再静默降成 xhigh。
         const sdkEffort = getSdkEffortForModel(mutableModel, newEffort);
-        const clamped = sdkEffort === 'max' ? 'xhigh' : sdkEffort;
         const isControlBlocked = controlRequestsBlocked();
-        log.debug('setEffort', { from: mutableEffort, to: newEffort, sdk: clamped, controlRequestsBlocked: isControlBlocked });
-        if (!clamped) {
+        log.debug('setEffort', { from: mutableEffort, to: newEffort, sdk: sdkEffort, controlRequestsBlocked: isControlBlocked });
+        if (!sdkEffort) {
           mutableEffort = newEffort;
           return;
         }
         if (!isControlBlocked) {
-          await q.applyFlagSettings({ effortLevel: clamped });
+          await applyClaudeEffortFlagSettings(q, sdkEffort);
         }
         mutableEffort = newEffort;
       },

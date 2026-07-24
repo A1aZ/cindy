@@ -266,6 +266,33 @@ function buildCindyModelMetaIndex(meta: unknown): Map<string, CindyModelMetaFiel
   return index;
 }
 
+/**
+ * 远端 v1 元数据允许按模型、按字段增量覆盖 bundled v1。旧远端目录经常只带
+ * 部分新字段或缺少新模型；缺口必须回落 bundled，否则已知 200k 模型会落入
+ * 1M 启发式。非 v1 active 信封仍整段忽略，不能拿 bundled v1 混入未知 schema。
+ */
+function buildEffectiveCindyModelMetaIndex(): Map<string, CindyModelMetaFields> {
+  const bundled = buildCindyModelMetaIndex(BUNDLED_CATALOG.cindyModelMeta);
+  if (!base) return bundled;
+
+  const activeMeta = base.cindyModelMeta;
+  if (
+    !activeMeta ||
+    typeof activeMeta !== 'object' ||
+    Array.isArray(activeMeta) ||
+    (activeMeta as { version?: unknown }).version !== 1
+  ) {
+    return new Map();
+  }
+
+  const effective = new Map<string, CindyModelMetaFields>();
+  for (const [id, fields] of bundled) effective.set(id, { ...fields });
+  for (const [id, fields] of buildCindyModelMetaIndex(activeMeta)) {
+    effective.set(id, { ...effective.get(id), ...fields });
+  }
+  return effective;
+}
+
 export interface CindyModelEffortBaseline {
   efforts: Effort[];
   defaultEffort: Effort | null;
@@ -273,7 +300,7 @@ export interface CindyModelEffortBaseline {
 
 /** 返回当前目录的已知上下文窗口；只供动态发现缺少上游明确值时兜底。 */
 export function getCindyModelContextWindow(modelId: string): number | null {
-  return buildCindyModelMetaIndex((base ?? BUNDLED_CATALOG).cindyModelMeta).get(modelId)?.contextWindow ?? null;
+  return buildEffectiveCindyModelMetaIndex().get(modelId)?.contextWindow ?? null;
 }
 
 /**
@@ -281,7 +308,7 @@ export function getCindyModelContextWindow(modelId: string): number | null {
  * 模型是否存在仍完全由 HTTP / SDK 动态清单决定。
  */
 export function getCindyModelEffortBaseline(modelId: string): CindyModelEffortBaseline | null {
-  const fields = buildCindyModelMetaIndex((base ?? BUNDLED_CATALOG).cindyModelMeta).get(modelId);
+  const fields = buildEffectiveCindyModelMetaIndex().get(modelId);
   if (!fields?.efforts) return null;
   const efforts = [...fields.efforts];
   const defaultEffort =
@@ -376,7 +403,7 @@ function computeMerged(): Catalog {
   // 三层合并:存在性=发现,展示=产品目录,用户 override 永远最高)——订阅通道返回的
   // 家族级名字("Fable")在此归位为产品命名("Fable 5");能力字段仍以发现为准。
   if (anthropicModels.length > 0) {
-    const metaIndex = buildCindyModelMetaIndex(b.cindyModelMeta);
+    const metaIndex = buildEffectiveCindyModelMetaIndex();
     const overlaid = sortModelsByOrder(
       anthropicModels.map((m) => overlayCindyMeta(m, metaIndex.get(m.id))),
     );

@@ -61,7 +61,7 @@ const TEST_MODELS: ModelDescriptor[] = [
     id: 'claude-sonnet-5',
     displayName: 'Claude Sonnet 5',
     contextWindow: 500_000,
-    efforts: ['low', 'medium', 'high'],
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     defaultEffort: 'high',
   },
 ];
@@ -237,6 +237,35 @@ afterEach(async () => {
 });
 
 describe('ClaudeCodeAgent runtime settings during rewind window', () => {
+  it('passes max through when changing effort in a live Sonnet 5 session', async () => {
+    const { handle, firstQuery } = await startRewindableSession();
+
+    await handle.setModel?.('claude-sonnet-5');
+    await handle.setEffort?.('max');
+
+    expect(firstQuery.applyFlagSettings).toHaveBeenLastCalledWith({ effortLevel: 'max' });
+
+    await handle.close();
+  });
+
+  it('replays max without downgrading it when effort changes during query rebuild', async () => {
+    const { handle } = await startRewindableSession();
+    await handle.commitRewindFiles?.('user-uuid-1', 'assistant-uuid-1');
+
+    const secondQuery = createFakeQuery();
+    sdkMock.query.mockImplementationOnce(() => {
+      void handle.setModel?.('claude-sonnet-5');
+      void handle.setEffort?.('max');
+      return secondQuery;
+    });
+
+    await handle.send({ type: 'user', content: 'use max after rewind' });
+
+    expect(secondQuery.applyFlagSettings).toHaveBeenCalledWith({ effortLevel: 'max' });
+
+    await handle.close();
+  });
+
   it('setModel / setEffort / setFastMode / setPermissionMode skip the closed query and apply on rebuild', async () => {
     const { handle, firstQuery } = await startRewindableSession();
 

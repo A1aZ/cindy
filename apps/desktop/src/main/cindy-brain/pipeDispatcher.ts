@@ -169,7 +169,7 @@ export class GhostPipeDispatcher {
         entry.resolve({
           ok: false,
           errorCode: 'TIMEOUT',
-          message: `工具 ${entry.tool} 执行超时(生成类长任务可能仍在后台继续,稍后重试或许能直接取回已完成的结果)`,
+          message: `工具 ${entry.tool} 执行超时(任务可能仍在后台继续,稍后重试或许能直接取回已完成的结果)`,
         });
       }
     }, Math.max(0, entry.deadlineAt - Date.now()));

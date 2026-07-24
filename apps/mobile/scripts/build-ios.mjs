@@ -203,8 +203,8 @@ async function main() {
     else log('  warn: --skip-git-gate,跳过 main/clean/HEAD 校验(仅本地迭代用)');
     if (missingBake.length) {
       throw new Error(
-        `self-host-regions.json 的 ${region.authRegion} 缺少 selfhost 构建必填字段:${missingBake.join(', ')}` +
-          '(prebuild 期 app.config.js 硬校验;tapdb 为包内统计防漏填,global 的 google 为 Google 登录配置)',
+        `self-host-regions.json 的 ${region.authRegion} 缺少 selfhost 构建必填字段: ${missingBake.join(', ')} ` +
+          '(prebuild 期 app.config.js 硬校验; tapdb 为包内统计防漏填, global 的 google 为 Google 登录配置)',
       );
     }
     // 签名描述符预检:提前暴露缺配置(取用值在 buildIpa 内再解析一次)。

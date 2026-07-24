@@ -878,7 +878,7 @@ Splash 品牌块字标是另一套素材(`assets/splash/wordmark.png` 白字 DAR
 >
 > **交付状态**：**亮色** as-built 已合并入 main；**深色**规格已定（色值经 Figma 组件库 Dark symbol 逐个核验，见 §16.1 双态表 / §16.5），随**暗色实现 PR** 落地。两模式均受 §2「Light / Dark 双模式交付门槛」约束——非可选愿景。
 >
-> 本节独立于 §1–§15 默认皮肤与 CINDY 皮肤族——登录页是独立白底 / 深底反色体系，**不消费编辑器主题的 `--surface` / `--text-*` 等 slot**，只走本节定义的 `--login-*` token（注册于 `apps/desktop/src/renderer/themes/colors.ts`，见 §10）。`--login-*` 随基础 light / dark **二态**切换，但**不跟随具体扩展主题**（登录页只认 light / dark 模式；首次亮、后续跟随见 §16.5）。
+> 本节独立于 §1–§15 默认皮肤与 CINDY 皮肤族——登录页是独立白底 / 深底反色体系，**不消费编辑器主题的 `--surface` / `--text-*` 等 slot**，只走本节定义的 `--login-*` token（亮色已注册于 `apps/desktop/src/renderer/themes/colors.ts`，深色二态随暗色实现 PR 补齐；见 §10）。`--login-*` 设计为随基础 light / dark **二态**切换，但**不跟随具体扩展主题**（登录页只认 light / dark 模式；首次亮、后续跟随见 §16.5）。
 
 ### 16.1 视觉风格
 
@@ -886,7 +886,7 @@ Splash 品牌块字标是另一套素材(`assets/splash/wordmark.png` 白字 DAR
 
 - **面板 / 控件走墨黑–米白反色，深色镜像反相**：亮色白面板 `#FBFBFB` + 米白控件 `#EEEEEE` + 墨黑主按钮 `#2A2828`；深色反相为深面板 `#312F2F` + 深控件 `#2C2A2A` + 白主按钮 `#EEEEEE`。**两模式的面板 / 控件底色与文字都不出现纯黑 `#000` 或纯白 `#fff`**（`figma-component-spec §1.1`）；细描边例外——暗色主按钮 / 圆钮的 `#FFFFFF` 白边为 figma `white_button` 实测值，不受此限。
 - **品牌红 `#DF0C27` 只用于 Global pill 与字标红元素等品牌 accent，跨模式不变**；**禁止作页面背景**（wave4 改判，见 `token-decision-table §3` 对 `#df0c27` 的语义判定），不渗入面板内部（呼应 §15.10 红色边界）。画布底走 `--login-bg-base`（亮 `#EDEDED` / 深 `#1F1F1E`），红只经 `--login-brand-accent` 消费。错误红 `#D91F37` 同样跨模式不变（语义豁免，呼应 §10 豁免族）。
-- **`--login-*` 调色板双态权威值（注册于 `apps/desktop/src/renderer/themes/colors.ts`，light / dark 二态）** —— 下表经 Figma 组件库 Dark symbol 逐个核验（`callback-*` 族深色已 as-built 在库，其余深色随暗色实现 PR 落地）：
+- **`--login-*` 调色板双态目标值** —— 下表为暗色实现 PR 的落地目标，经 Figma 组件库 Dark symbol 逐个核验。**当前 as-built 状态**：亮色值已注册于 `apps/desktop/src/renderer/themes/colors.ts`；深色值及部分新增 token（如 `--login-action-control-bg`、`--login-back-border`、`--login-loading-ring-track`）将随暗色实现 PR 补齐注册（`callback-*` 族深色已 as-built 在库）：
 
 | token | light | dark | 核验源 |
 |---|---|---|---|
@@ -919,7 +919,7 @@ Splash 品牌块字标是另一套素材(`assets/splash/wordmark.png` 白字 DAR
 
 ### 16.2 设计规则
 
-**Token 体系**：`--login-*` 全部注册于 `apps/desktop/src/renderer/themes/colors.ts`，组件经 `LOGIN_COLORS`（桌面 `loginDesignTokens.ts`）/ `loginColors`（手机 `theme/tokens.ts`）单点消费。**禁止硬编码 hex pair**（呼应 §10）——`hardcoded-color-audit` 守护全绿才允许合入。`--login-*` 随基础 **light / dark 二态**切换（对齐 `callback-*` 族与 §15 CINDY 皮肤族的双态做法），但**不跟随具体扩展主题**——登录页只认 light / dark 模式，扩展主题不 override `--login-*`（首次亮、后续跟随上次模式见 §16.5）。
+**Token 体系**：`--login-*` 亮色值已注册于 `apps/desktop/src/renderer/themes/colors.ts`；深色二态值及新增 token 将随暗色实现 PR 补齐（目标值见 §16.1 色板表）。组件经 `LOGIN_COLORS`（桌面 `loginDesignTokens.ts`）/ `loginColors`（手机 `theme/tokens.ts`）单点消费。**禁止硬编码 hex pair**（呼应 §10）——`hardcoded-color-audit` 守护全绿才允许合入。`--login-*` 随基础 **light / dark 二态**切换（对齐 `callback-*` 族与 §15 CINDY 皮肤族的双态做法），但**不跟随具体扩展主题**——登录页只认 light / dark 模式，扩展主题不 override `--login-*`（首次亮、后续跟随上次模式见 §16.5）。
 
 **几何 / 布局常量**：固化在两个常量文件，数值权威 = `figma-component-spec §5.1` + `token-decision-table §4`，不按截图目测补值。
 

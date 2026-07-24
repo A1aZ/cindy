@@ -5475,7 +5475,9 @@ function scheduleAutoName(
   // device-link 远程会话由被控端 main 负责基于本机 DB 自动起名，控制端 renderer
   // 不再额外生成标题，避免两端并发覆盖同一 session title。
   if (isRemoteSession(sessionId)) return;
-  const fallbackTitle = text.replace(/\n/g, ' ').slice(0, 40).trim();
+  // 先折叠空白并 trim,再截断——先截断会让"前 40 字符全是空白"的消息(如粘贴
+  // 大段缩进/多行文本)得到空占位,误跳过起名(PR #296 review)。
+  const fallbackTitle = text.replace(/\s+/g, ' ').trim().slice(0, 40).trimEnd();
   // 纯附件等无文本首条消息起不出有意义的标题,保留默认标题。
   if (!fallbackTitle) return;
   const titlePromise = window.electronAPI.maker

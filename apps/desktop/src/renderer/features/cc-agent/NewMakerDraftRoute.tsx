@@ -1758,17 +1758,24 @@ export function NewMakerDraftRoute() {
         // 'New Maker'),再经隧道生成智能标题窄口径覆盖。fire-and-forget;
         // 覆盖前 re-read,仅在标题仍是占位/默认时落盘(用户手动改名 wins)。
         const titleAgentKind = persistedAgentKind === 'codex' ? 'codex' : 'claude-code';
-        const placeholderTitle = objective.replace(/\n/g, ' ').slice(0, 40).trim();
+        // 先折叠空白并 trim 再截断,避免前导空白吃满 40 字符得到空占位(PR #296 review)。
+        const placeholderTitle = objective.replace(/\s+/g, ' ').trim().slice(0, 40).trimEnd();
         void (async () => {
           try {
             // 无文本目标(理论不可达,goal 对话框必填)不起名:被控端旧版本的
             // maker:generate-title 没有空消息防线,LLM 会把"请提供内容"当标题。
             if (!placeholderTitle) return;
-            await window.electronAPI.deviceLink.invoke(
-              deviceId,
-              'local-db:sessions:patch-meta',
-              [remoteSessionId, { title: placeholderTitle }],
-            );
+            // 占位写入失败(旧被控端无此窄口径 / 瞬时通道错误)单独吞掉,不中断
+            // 后续智能起名——生成与写回不依赖占位成功(PR #296 review P1)。
+            try {
+              await window.electronAPI.deviceLink.invoke(
+                deviceId,
+                'local-db:sessions:patch-meta',
+                [remoteSessionId, { title: placeholderTitle }],
+              );
+            } catch {
+              // 占位失败仅暂留默认名,智能标题仍会尝试生成并写回。
+            }
             const gen = (await window.electronAPI.deviceLink.invoke(
               deviceId,
               'maker:generate-title',

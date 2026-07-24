@@ -116,6 +116,19 @@ describe('makerChatStore auto-name (Codex-style immediate placeholder)', () => {
     });
   });
 
+  it('trims leading whitespace before truncating (long indent must not defeat naming)', async () => {
+    makerChatStore.autoNameSession(
+      SESSION_ID,
+      `\n\n${' '.repeat(50)}real message text`,
+      'claude-code',
+    );
+    await flushPromises();
+
+    expect(sessionService.update).toHaveBeenCalledWith(SESSION_ID, {
+      title: 'real message text',
+    });
+  });
+
   it('overwrites the placeholder once the smart title arrives', async () => {
     vi.mocked(sessionService.get).mockResolvedValue({
       title: 'first message text',

@@ -30,8 +30,12 @@ import type {
   AgentInputProjection,
   AgentInputQueuedMessage,
   AgentInputSessionRef,
+  AgentInputReference,
 } from '../../shared/agentInputQueue';
-import { reconcileSessionRefsForText } from '../../shared/agentInputQueue';
+import {
+  getAgentFacingText,
+  reconcileSessionRefsForText,
+} from '../../shared/agentInputQueue';
 import { providerSecretStorageKey } from '../../shared/providerSecrets';
 import { GHOST_HOST_NOTICE_KEYS } from '../../shared/ghost';
 import * as messageService from '@/lib/messageService';
@@ -51,6 +55,7 @@ import {
   remoteProjectsStore,
   requestRemoteReseed,
 } from '@/features/device-link/remoteProjectsStore';
+import { getStickySessionDeviceId } from '@/features/device-link/stickySessionOrigin';
 import {
   noteRemoteSessionSyncCompleted,
   noteRemoteSessionSyncStarted,
@@ -116,6 +121,7 @@ const REMOTE_HEAVY_INBOUND_CHANNELS: ReadonlySet<string> = new Set([
   'maker:input:projection',
   'maker:interaction-request',
   'maker:interaction-dismissed',
+  'content-moderation:output-blocked',
   'local-db:messages:created',
   'usage:message-turn-cost',
   'maker:session-model-pref:changed',
@@ -162,7 +168,11 @@ import {
   parseUserContent,
   stringifyUserContent,
 } from '@/lib/imageRef';
-import { saveDraft as saveComposerDraft, plainTextToTiptapDoc } from '@/lib/composerDraftStore';
+import {
+  getDraft as getComposerDraft,
+  saveDraft as saveComposerDraft,
+  plainTextToTiptapDoc,
+} from '@/lib/composerDraftStore';
 import {
   canStartComposerSteer,
   canStartQueuedSteer,
@@ -188,6 +198,8 @@ export interface ChatMessage {
   clientId: string;
   /** chat-text-quote:开头 blockquote 为引用功能产出(渲染判据),见 imageRef.ts。 */
   quotesEncoded?: boolean;
+  /** Hidden semantic projection metadata for rich user-message references. */
+  agentReferences?: AgentInputReference[];
   /** Local display metadata; the Agent receives `content` without markers. */
   pastedTextRanges?: PastedTextRange[];
   /** Exact slash ranges; empty means the composer confirmed no slash command. */
@@ -3160,6 +3172,7 @@ function initGlobalListeners(): void {
                     retryFiles,
                     retryMentions,
                     {
+                      agentReferences: lastUser?.agentReferences,
                       pastedTextRanges: lastUser?.pastedTextRanges,
                       slashCommandRanges: lastUser?.slashCommandRanges,
                       authRetryPersistOnProjectionError: {
@@ -3610,6 +3623,9 @@ function initGlobalListeners(): void {
         case 'maker:interaction-dismissed':
           handleInteractionDismissedRaw(push.payload);
           break;
+        case 'content-moderation:output-blocked':
+          handleContentModerationOutputBlocked(push.payload);
+          break;
         case 'local-db:messages:created':
           // 远程会话的持久化消息(接管路径)→ 注入 in-memory state(同本机)。
           handleMessageCreatedRaw(push.payload);
@@ -3823,6 +3839,78 @@ function initGlobalListeners(): void {
       });
     },
     'ghosts-user-message-blocked',
+  );
+
+  bindIpc(
+    (cb) => window.electronAPI.contentModeration?.onInputBlocked?.(cb),
+    (raw: unknown) => {
+      const payload = raw as {
+        sessionId?: string;
+        clientId?: string;
+        text?: string;
+        files?: SerializedAttachedFile[];
+        reason?: 'rejected' | 'cancelled';
+      } | null;
+      if (!payload?.sessionId || !payload.clientId || typeof payload.text !== 'string') return;
+
+      setState(payload.sessionId, (state) => ({
+        ...state,
+        messages: state.messages.filter(
+          (message) => !(message.clientId === payload.clientId && message.isPendingPersist),
+        ),
+      }));
+
+      const existing = getComposerDraft(payload.sessionId);
+      const restoredText = plainTextToTiptapDoc(payload.text);
+      const text = existing?.text?.content?.length
+        ? {
+            type: 'doc',
+            content: [
+              ...(restoredText.content ?? []),
+              { type: 'paragraph' },
+              ...existing.text.content,
+            ],
+          }
+        : restoredText;
+
+      const restoredFiles = (payload.files ?? []) as AttachedFile[];
+      const seen = new Set<string>();
+      const attachments = [...restoredFiles, ...(existing?.attachments ?? [])].filter((file) => {
+        const key = file.id || file.url || file.path;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+
+      saveComposerDraft(payload.sessionId, { text, attachments });
+      if (payload.reason === 'rejected') {
+        toast.error(i18n.t('contentModeration.blocked'));
+      }
+    },
+    'content-moderation-input-blocked',
+  );
+
+  const handleContentModerationOutputBlocked = (raw: unknown): void => {
+    const payload = raw as {
+      sessionId?: string;
+      kind?: string;
+      i18nKey?: string;
+    } | null;
+    if (
+      !payload?.sessionId
+      || payload.kind !== 'blocked'
+      || payload.i18nKey !== 'contentModeration.blocked'
+      || !_activeViewSessions.has(payload.sessionId)
+    ) {
+      return;
+    }
+    toast.error(i18n.t('contentModeration.blocked'));
+  };
+
+  bindIpc(
+    (cb) => window.electronAPI.contentModeration?.onOutputBlocked?.(cb),
+    handleContentModerationOutputBlocked,
+    'content-moderation-output-blocked',
   );
 
   // ── 意识改写(订阅槽①):用户消息正文被钩子优化 ──
@@ -5115,6 +5203,7 @@ function buildQueuedMessage(
     vendorOptions?: Record<string, unknown>;
     /** chat-text-quote:text 开头 blockquote 为引用功能拼接产出(渲染判据)。 */
     quotesEncoded?: boolean;
+    agentReferences?: AgentInputReference[];
     pastedTextRanges?: PastedTextRange[];
     slashCommandRanges?: SlashCommandRange[];
     authRetryPersistOnProjectionError?: {
@@ -5146,6 +5235,7 @@ function buildQueuedMessage(
     isStreaming: false,
     createdAt: new Date().toISOString(),
     ...(opts?.quotesEncoded === true && { quotesEncoded: true }),
+    ...(opts?.agentReferences?.length && { agentReferences: opts.agentReferences }),
     ...(opts?.pastedTextRanges?.length && { pastedTextRanges: opts.pastedTextRanges }),
     ...(opts?.slashCommandRanges !== undefined && {
       slashCommandRanges: opts.slashCommandRanges,
@@ -5168,6 +5258,8 @@ function buildQueuedMessage(
     opts?.quotesEncoded === true,
     opts?.pastedTextRanges,
     opts?.slashCommandRanges,
+    [],
+    opts?.agentReferences,
   );
 
   return {
@@ -5182,6 +5274,7 @@ function buildQueuedMessage(
     files: serializedFiles,
     mentions,
     ...(sessionRefs.length > 0 ? { sessionRefs } : {}),
+    agentReferences: opts?.agentReferences,
     chatMessage,
     createOpts,
     userName: currentUserName,
@@ -5193,11 +5286,10 @@ function extractSessionRefs(
   text: string,
   previous?: readonly AgentInputSessionRef[],
 ): NonNullable<AgentInputQueuedMessage['sessionRefs']> {
-  return reconcileSessionRefsForText(
-    text,
-    previous,
-    (sessionId) => remoteProjectsStore.getSessionDeviceId(sessionId),
-  );
+  // 粘滞版归属解析(与 learn/goal/makerTransport 链路对齐):relay 瞬时重连
+  // 会 clear sessionId→deviceId 注册表,裸查表在这个窗口把远程会话错判成
+  // 本地 → 引用解析落到控制端空本地库,内容注入失败。
+  return reconcileSessionRefsForText(text, previous, getStickySessionDeviceId);
 }
 
 function buildCreateOptsForCurrentSession(
@@ -5431,6 +5523,7 @@ type SendMessageOpts = {
   vendorOptions?: Record<string, unknown>;
   /** 本条消息正文前缀含「选中引用」编码块,渲染侧据此启用胶囊化解析。 */
   quotesEncoded?: boolean;
+  agentReferences?: AgentInputReference[];
   pastedTextRanges?: PastedTextRange[];
   slashCommandRanges?: SlashCommandRange[];
   authRetryPersistOnProjectionError?: {
@@ -5548,12 +5641,12 @@ async function sendMessageCore(
     // 用 Claude haiku 起标题:纯 Codex 用户(无 Claude 鉴权)会 oneShot 失败 →
     // fallback 原话,表现为"Codex 会话标题没有智能总结"。current.agentKind 已是
     // maker 格式('claude-code' | 'codex'),直接透传。起名走宽限期 + 后台覆盖。
-    scheduleAutoName(sessionId, text, current.agentKind);
+    scheduleAutoName(sessionId, getAgentFacingText(queued), current.agentKind);
   } else {
     // fork-auto-name: fork 出来的会话带着占位标题 "[Fork] <源标题>"，在用户
     // 于新会话里发出第一句话时按同款流程基于这句话改名（fork 会话天然带历史
     // 消息，isFirstMessage=false 走不到上面的分支）。
-    maybeAutoNameForkedSession(sessionId, text);
+    maybeAutoNameForkedSession(sessionId, getAgentFacingText(queued));
   }
 
   // 视觉连续性: agent 空闲 + 队列为空时, main coordinator 会立即派发这条(见
@@ -5660,6 +5753,7 @@ function steerMessage(
   opts?: {
     vendorOptions?: Record<string, unknown>;
     quotesEncoded?: boolean;
+    agentReferences?: AgentInputReference[];
     pastedTextRanges?: PastedTextRange[];
     slashCommandRanges?: SlashCommandRange[];
   },
@@ -5723,6 +5817,7 @@ function steerMessageCore(
   opts?: {
     vendorOptions?: Record<string, unknown>;
     quotesEncoded?: boolean;
+    agentReferences?: AgentInputReference[];
     pastedTextRanges?: PastedTextRange[];
     slashCommandRanges?: SlashCommandRange[];
   },
@@ -5792,6 +5887,7 @@ async function resendBlockedMessage(
   newText: string,
   opts?: {
     quotesEncoded?: boolean;
+    agentReferences?: AgentInputReference[];
     pastedTextRanges?: PastedTextRange[];
     slashCommandRanges?: SlashCommandRange[];
   },
@@ -5821,9 +5917,15 @@ async function resendBlockedMessage(
         row.workingDir,
         msg.retryFiles,
         msg.retryMentions,
-        opts?.quotesEncoded || opts?.pastedTextRanges?.length || opts?.slashCommandRanges !== undefined
+        opts?.quotesEncoded ||
+        opts?.agentReferences?.length ||
+        opts?.pastedTextRanges?.length ||
+        opts?.slashCommandRanges !== undefined
           ? {
               ...(opts?.quotesEncoded ? { quotesEncoded: true } : {}),
+              ...(opts?.agentReferences?.length
+                ? { agentReferences: opts.agentReferences }
+                : {}),
               ...(opts?.pastedTextRanges?.length ? { pastedTextRanges: opts.pastedTextRanges } : {}),
               ...(opts?.slashCommandRanges !== undefined ? { slashCommandRanges: opts.slashCommandRanges } : {}),
             }
@@ -7302,6 +7404,42 @@ export const makerChatStore = {
   setAskUserDraft,
   setTitleUpdateCallback,
   syncActiveTurnsFromMain,
+  /**
+   * 后台任务快照水合:把 main 的 listSessionBackgroundTasks 结果补进 taskUpdates。
+   * 只补「store 里完全没见过」的任务 —— 事件流是唯一实时源,快照可能落后于刚到
+   * 的终态事件,已存在的条目(无论何状态)绝不用快照的 running 覆盖复活。
+   * 消费方:useBackgroundBashTasks(会话挂载 / reloadMessages 清空 taskUpdates 后)。
+   */
+  seedBackgroundTaskSnapshots: (
+    sessionId: string,
+    tasks: Array<{ taskId: string; taskType?: string; toolUseId?: string; title?: string }>,
+  ): void => {
+    if (!tasks.length) return;
+    setState(sessionId, (s) => {
+      let next = s;
+      for (const t of tasks) {
+        if (!t || typeof t.taskId !== 'string' || !t.taskId) continue;
+        const seen =
+          next.taskUpdates?.has(t.taskId) ||
+          (t.toolUseId ? next.taskUpdates?.has(t.toolUseId) : false);
+        if (seen) continue;
+        next = handleStreamEvent(next, {
+          sessionId,
+          type: 'agent_task_update',
+          source: 'claude-code',
+          data: {
+            provider: 'claude-code',
+            taskId: t.taskId,
+            status: 'running',
+            ...(t.taskType ? { taskType: t.taskType } : {}),
+            ...(t.toolUseId ? { parentToolUseId: t.toolUseId } : {}),
+            ...(t.title ? { title: t.title } : {}),
+          },
+        } as CCAgentStreamEvent);
+      }
+      return next;
+    });
+  },
   /** Exposed for tests only. */
   __teardownGlobalListeners,
   /** Exposed for tests only: 把 stream event 打进真实 store(驱动 getRunningSnapshot 等)。 */
@@ -7826,6 +7964,9 @@ function mapServerMessages(serverMsgs: Message[]): ChatMessage[] {
         ...(parsed.images.length > 0 && { images: parsed.images }),
         ...(parsed.files.length > 0 && { files: parsed.files }),
         ...(parsed.quotesEncoded === true && { quotesEncoded: true }),
+        ...(parsed.agentReferences?.length && {
+          agentReferences: parsed.agentReferences,
+        }),
         ...(parsed.pastedTextRanges?.length && {
           pastedTextRanges: parsed.pastedTextRanges,
         }),

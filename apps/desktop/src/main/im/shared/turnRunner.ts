@@ -50,6 +50,12 @@ import { hasCustomProviderKey } from '../../maker-host/provider-route';
 import { createLogger } from '../../logger';
 import { resolveSafe as resolveXdtImageUrl } from '../../imageCacheStore';
 import { resolveSafe as resolveCindyMediaUrl } from '../../cindy-media/blobStore';
+import {
+  cancelReleasedOutput,
+  onReleasedAgentEvent,
+  waitForReleasedOutput,
+} from '../../content-moderation/outputHub.js';
+import { CONTENT_MODERATION_BLOCKED_MESSAGE } from '../../content-moderation/constants.js';
 
 import { isTerminalAgentErrorEvent } from '@cindy/maker-core';
 import type {
@@ -64,6 +70,7 @@ import type { IMAttachment, InteractiveCardSpec, StreamingTextHandle } from '@ci
 
 import { persistUserMessage } from '../messagePersistence';
 import { bindingStore } from '../binding';
+import { buildImUserMessage } from './inboundMessage';
 import {
   wireSessionToIpcExternal,
   installDesktopInteractionListener,
@@ -164,6 +171,8 @@ interface QueuedSend {
   notified: boolean;
 }
 
+type DetachDrainOutcome = 'rewire' | 'cancelled';
+
 interface SessionState {
   /** Maker session (in-process). */
   makerSession: MakerSession;
@@ -179,6 +188,13 @@ interface SessionState {
   dispatchRetryTimer: ReturnType<typeof setTimeout> | null;
   /** Cleanup fns from session.onEvent / setInteractionListener. */
   unsubscribers: Array<() => void>;
+  /**
+   * Replacement detach waits for the current IM-owned turn to finish before
+   * removing its event listener. New wiring for the same channel/session waits
+   * on this promise instead of reusing the retiring state.
+   */
+  detachDrainPromise: Promise<DetachDrainOutcome> | null;
+  resolveDetachDrain: ((outcome: DetachDrainOutcome) => void) | null;
   /**
    * true = 这个 session 是 desktop 那个 row 被本渠道接管 (C 状态);
    * false = 渠道默认 session (B' 状态)。
@@ -562,7 +578,7 @@ export function createTurnRunner(
 
     const item: QueuedSend = {
       turn,
-      userMessage: buildUserMessage(text, attachments),
+      userMessage: buildImUserMessage(text, attachments, target.attached),
       rowId: row.id,
       text,
       attachments,
@@ -673,6 +689,11 @@ export function createTurnRunner(
       if (normalized.reason === 'SESSION_RUNNING') {
         const i = state.queue.indexOf(item.turn);
         if (i >= 0) state.queue.splice(i, 1);
+        if (state.detachDrainPromise) {
+          await completeTurnCallbackAfterAck(item.turn);
+          finishDeferredDetachIfIdle(state);
+          return;
+        }
         state.sendQueue.unshift(item);
         log.info(
           `SESSION_RUNNING race for session=${rowId.slice(-8)} — requeued at head (pendingSends=${state.sendQueue.length})`,
@@ -746,7 +767,7 @@ export function createTurnRunner(
       previous.setInteractionListener(null);
       state.makerSession = current;
       wireSessionToIpcExternal(current);
-      state.unsubscribers.push(current.onEvent(handleEventFor(sessionId, userId)));
+      state.unsubscribers.push(onReleasedAgentEvent(current, handleEventFor(sessionId, userId)));
       current.setInteractionListener(handleInteractionFor(sessionId, userId, state.scopeKey));
       sessionStates.set(sessionId, state);
     } finally {
@@ -806,7 +827,16 @@ export function createTurnRunner(
 
   async function ensureSessionWired(target: RouteTarget, userId: string): Promise<SessionState> {
     const existing = sessionStates.get(target.row.id);
-    if (existing) return existing;
+    if (existing) {
+      if (existing.detachDrainPromise) {
+        const outcome = await existing.detachDrainPromise;
+        if (outcome === 'cancelled') {
+          throw new Error(`session wiring cancelled during cleanup: ${target.row.id}`);
+        }
+        return ensureSessionWired(target, userId);
+      }
+      return existing;
+    }
     const inFlight = wiringInFlight.get(target.row.id);
     if (inFlight) return inFlight;
 
@@ -949,6 +979,8 @@ export function createTurnRunner(
       sendQueue: [],
       dispatchRetryTimer: null,
       unsubscribers: [],
+      detachDrainPromise: null,
+      resolveDetachDrain: null,
       attached,
       scheduledTranspond: null,
     };
@@ -956,7 +988,7 @@ export function createTurnRunner(
 
     // 注册本渠道自己的 onEvent listener — multi-listener 语义, 跟 desktop 那个
     // (如果存在) 并存。事件 fan-out 给 streamingHandle / 渠道卡片。
-    state.unsubscribers.push(makerSession.onEvent(handleEventFor(row.id, userId)));
+    state.unsubscribers.push(onReleasedAgentEvent(makerSession, handleEventFor(row.id, userId)));
 
     // setInteractionListener 是 single-listener: 这一调会覆盖上方
     // wireSessionToIpcExternal 装上的 desktop 版 — 渠道会话(含接管期间)的
@@ -1220,22 +1252,6 @@ export function createTurnRunner(
     }
   }
 
-  function buildUserMessage(text: string, attachments: IMAttachment[]): UserMessage {
-    if (attachments.length === 0) {
-      return { type: 'user', content: text };
-    }
-    const blocks: import('@cindy/maker-core').UserContentBlock[] = [];
-    if (text) blocks.push({ type: 'text', text });
-    for (const att of attachments) {
-      blocks.push({
-        type: att.kind === 'image' ? 'image' : 'file',
-        path: att.absPath,
-        mimeType: att.mimeType,
-      });
-    }
-    return { type: 'user', content: blocks };
-  }
-
   // ── event routing ───────────────────────────────────────────────────────────
 
   function handleEventFor(localSessionId: string, userId: string) {
@@ -1276,6 +1292,16 @@ export function createTurnRunner(
         case 'tool_result_full':
           return handleToolResultFullEvent(turn, event);
         case 'done':
+          if (
+            event.data
+            && typeof event.data === 'object'
+            && (event.data as { contentModerationBlocked?: unknown }).contentModerationBlocked === true
+          ) {
+            turn.buffer = turn.buffer
+              ? `${turn.buffer}\n\n${CONTENT_MODERATION_BLOCKED_MESSAGE}`
+              : CONTENT_MODERATION_BLOCKED_MESSAGE;
+            turn.streamingHandle?.replace(composeStreamingView(turn));
+          }
           // silent-stop done(上游用空内容静默收尾): 不当普通 done 收口 —
           // 守卫可能自动续跑,续跑轮事件要继续流进本 turn 的卡片,
           // 见 handleSilentStopDone。
@@ -1666,6 +1692,7 @@ export function createTurnRunner(
     } catch {
       /* 忽略失败：派发失败提示不能再阻塞收口。 */
     }
+    if (finishDeferredDetachIfIdle(state)) return;
     // 一条 pre-dispatch failure 不能卡死后面的排队消息 — 继续放行。
     maybeDispatchNextQueued(state, userId);
   }
@@ -1858,6 +1885,7 @@ export function createTurnRunner(
     log.info(
       `turn done for session=...${(state.makerSession.id ?? '').slice(-8)}, queueDepth=${state.queue.length}`,
     );
+    if (finishDeferredDetachIfIdle(state)) return;
     // 收口完成(最终卡片已 finalize)后再派发下一条排队消息 — IM 时间线保持
     // "上一轮输出 → 下一条开始流式"的自然顺序。
     maybeDispatchNextQueued(state, userId);
@@ -1892,6 +1920,7 @@ export function createTurnRunner(
         /* swallow */
       }
     }
+    if (finishDeferredDetachIfIdle(state)) return;
     // error 收口同样要继续放行排队消息 — 一条失败不能卡死后面的队列。
     maybeDispatchNextQueued(state, userId);
   }
@@ -1977,6 +2006,7 @@ export function createTurnRunner(
       // (eventually resolved) interaction card — not into the pre-existing card
       // that sits above it. Without this, the user sees the conclusion stream
       // into a card chronologically older than the "✅ 已选择" patch.
+      await waitForReleasedOutput(localSessionId);
       await finalizeActiveStream(localSessionId);
 
       let messageId: string;
@@ -2087,21 +2117,42 @@ export function createTurnRunner(
   function detachFromSession(sessionId: string): void {
     const state = sessionStates.get(sessionId);
     if (!state?.attached) return;
-    clearPendingSends(state);
-    clearQueuedTurnTimers(state);
-    for (const u of state.unsubscribers) {
-      try {
-        u();
-      } catch {
-        /* swallow */
+    if (state.queue.length > 0) {
+      clearPendingSends(state);
+      if (!state.detachDrainPromise) {
+        state.detachDrainPromise = new Promise<DetachDrainOutcome>((resolve) => {
+          state.resolveDetachDrain = resolve;
+        });
       }
+      log.info(
+        `deferring ${channel} detach until active turn drains session=${sessionId.slice(-8)}`,
+      );
+      return;
     }
-    state.unsubscribers = [];
+    detachSessionStateNow(sessionId, state);
+  }
+
+  function finishDeferredDetachIfIdle(state: SessionState): boolean {
+    if (!state.detachDrainPromise || state.queue.length > 0) return false;
+    detachSessionStateNow(state.makerSession.id, state);
+    return true;
+  }
+
+  function detachSessionStateNow(sessionId: string, state: SessionState): void {
+    sessionStates.delete(sessionId);
+    cleanupSessionState(state);
     // 还原 desktop 版 interaction listener — 接管期间被本渠道版覆盖了,
     // 不还原 desktop renderer 永远收不到 permission 弹窗。
     installDesktopInteractionListener(state.makerSession);
-    sessionStates.delete(sessionId);
+    settleDetachDrain(state, 'rewire');
     log.info(`detached ${channel} hook from session=${sessionId.slice(-8)}`);
+  }
+
+  function settleDetachDrain(state: SessionState, outcome: DetachDrainOutcome): void {
+    const resolveDetachDrain = state.resolveDetachDrain;
+    state.detachDrainPromise = null;
+    state.resolveDetachDrain = null;
+    resolveDetachDrain?.(outcome);
   }
 
   function disposeAllSessions(): Promise<void> {
@@ -2112,7 +2163,9 @@ export function createTurnRunner(
       // queue stays empty; logout must not abort that desktop-owned work.
       const hasImTurnInFlight = state.queue.length > 0;
       cleanupSessionState(state);
+      settleDetachDrain(state, 'cancelled');
       if (hasImTurnInFlight) {
+        cancelReleasedOutput(state.makerSession.id);
         aborts.push(
           state.makerSession.abort().catch((err) => {
             const msg = err instanceof Error ? err.message : String(err);
@@ -2155,6 +2208,7 @@ export function createTurnRunner(
     // 不产生任何事件,不重置的话守卫照样自动续跑,用户喊停后 agent 原地复活。
     // 重置后守卫判 superseded → settle('skip') → 挂起 turn 经现有订阅按 done 收口。
     noteSilentStopSessionReset(state.makerSession.id);
+    cancelReleasedOutput(state.makerSession.id);
     await state.makerSession.abort();
     log.info(
       `!stop aborted turn for session=...${state.makerSession.id.slice(-8)} droppedQueued=${droppedQueued}`,
@@ -2172,6 +2226,7 @@ export function createTurnRunner(
     if (!state) return;
     sessionStates.delete(sessionId);
     cleanupSessionState(state);
+    settleDetachDrain(state, 'cancelled');
     try {
       await state.makerSession.close();
     } catch (err) {
@@ -2185,6 +2240,7 @@ export function createTurnRunner(
     if (!state) return;
     sessionStates.delete(sessionId);
     cleanupSessionState(state);
+    settleDetachDrain(state, 'cancelled');
     log.info(`forgot cached ${channel} session=${sessionId.slice(-8)} after ${reason}`);
   }
 

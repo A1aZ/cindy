@@ -45,6 +45,7 @@ import type {
   MessageAutomationOrigin,
 } from '@/lib/ccAgent.types';
 import type { PastedTextRange, SlashCommandRange } from '@/lib/imageRef';
+import type { AgentInputReference } from '../../../shared/agentInputQueue';
 import type { PersistedSessionReferenceMetadata } from '../../../shared/sessionReferenceMetadata';
 import { buildRewindDraftAttachments } from '@/lib/rewindDraftAttachments';
 import {
@@ -85,6 +86,7 @@ import { findLinkifyMatches } from './userMessageLinkify';
 import { SessionLinkChip } from './SessionLinkChip';
 import { ProjectLinkChip } from './ProjectLinkChip';
 import { buildSessionMessageDeepLink, parseSessionDeepLinkHref } from '@/lib/deepLink';
+import { getStickySessionDeviceId } from '@/features/device-link/stickySessionOrigin';
 import { insertSessionLinkIntoComposer } from '@/lib/composerActionsBus';
 import { MENTION_TOKEN_SPLIT, parseMentionToken } from '@/lib/mentionRefFormat';
 import { parseGhostCommandWord, splitGhostDirective } from '@/cindy-brain/ghostCommand';
@@ -128,6 +130,8 @@ interface UserMessageProps {
   sessionReferences?: PersistedSessionReferenceMetadata[];
   /** chat-text-quote:content 开头 blockquote 为引用功能产出(胶囊化渲染判据)。 */
   quotesEncoded?: boolean;
+  /** Hidden semantic reference ranges; preserved only while visible text is unchanged. */
+  agentReferences?: AgentInputReference[];
   pastedTextRanges?: PastedTextRange[];
   slashCommandRanges?: SlashCommandRange[];
   images?: UserImageItem[];
@@ -656,6 +660,7 @@ export function UserMessage({
   content,
   sessionReferences,
   quotesEncoded,
+  agentReferences,
   pastedTextRanges,
   slashCommandRanges,
   images,
@@ -843,9 +848,13 @@ export function UserMessage({
   const copyText = hasFiles
     ? `${copyBody}\n\n${t('chat.userMessage.attachmentPrefix')}${files!.map((f) => f.name).join(', ')}`
     : copyBody;
+  // 远程会话的消息深链把归属设备冻进 `?device=`(粘滞解析,relay 重连窗口不丢),
+  // 复制/「加入对话」产出的链接在任何时刻发送都能路由回来源设备。
   const messageDeepLink =
     sessionId && messageClientId
-      ? buildSessionMessageDeepLink(sessionId, messageClientId)
+      ? buildSessionMessageDeepLink(sessionId, messageClientId, {
+          deviceId: getStickySessionDeviceId(sessionId),
+        })
       : undefined;
   const handleAddToChat = useCallback(() => {
     if (!sessionId || !messageDeepLink) return;
@@ -1179,6 +1188,7 @@ export function UserMessage({
                 files={files}
                 workingDir={workingDir}
                 quotesEncoded={quotesEncoded}
+                agentReferences={agentReferences}
                 pastedTextRanges={pastedTextRanges}
                 slashCommandRanges={slashCommandRanges}
                 sessionRunning={sessionRunning}
@@ -1194,6 +1204,9 @@ export function UserMessage({
                           submission.text,
                           {
                             ...(submission.quotesEncoded ? { quotesEncoded: true } : {}),
+                            ...(submission.agentReferences?.length
+                              ? { agentReferences: submission.agentReferences }
+                              : {}),
                             ...(submission.pastedTextRanges?.length
                               ? { pastedTextRanges: submission.pastedTextRanges }
                               : {}),

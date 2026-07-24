@@ -37,6 +37,8 @@ export interface SessionDeepLinkTarget {
   sessionId: string;
   /** `?message=<clientId>` 锚点;无锚点 / 锚点值非法时为 null(sessionId 仍有效)。 */
   messageClientId: string | null;
+  /** `?device=<deviceId>` 冻结的会话归属设备;旧格式深链 / 参数值非法时为 null。 */
+  deviceId: string | null;
 }
 
 /**
@@ -63,23 +65,28 @@ export function parseSessionDeepLinkUrl(url: string): SessionDeepLinkTarget | nu
   }
   if (!sessionId) return null;
   let messageClientId: string | null = null;
+  let deviceId: string | null = null;
   if (queryIdx >= 0) {
     const query = noHash.slice(queryIdx + 1);
     for (const pair of query.split('&')) {
       const eqIdx = pair.indexOf('=');
-      if (eqIdx <= 0 || pair.slice(0, eqIdx) !== 'message') continue;
+      if (eqIdx <= 0) continue;
+      const key = pair.slice(0, eqIdx);
+      if (key !== 'message' && key !== 'device') continue;
+      if (key === 'message' ? messageClientId !== null : deviceId !== null) continue;
       const rawValue = pair.slice(eqIdx + 1);
-      if (!rawValue) break;
+      if (!rawValue) continue;
       try {
         const decoded = decodeURIComponent(rawValue);
-        if (decoded) messageClientId = decoded;
+        if (!decoded) continue;
+        if (key === 'message') messageClientId = decoded;
+        else deviceId = decoded;
       } catch {
-        // 锚点编码非法 → 按无锚点处理
+        // 参数编码非法 → 按无该参数处理
       }
-      break;
     }
   }
-  return { sessionId, messageClientId };
+  return { sessionId, messageClientId, deviceId };
 }
 
 /**
@@ -88,11 +95,11 @@ export function parseSessionDeepLinkUrl(url: string): SessionDeepLinkTarget | nu
  * 这里每次调用都新建实例避免共享状态。
  */
 export function createSessionLinkPattern(): RegExp {
-  return new RegExp(
-    `(?:${DEEP_LINK_SCHEME_GROUP})://session/[A-Za-z0-9%~_-]+(?:\\?[A-Za-z0-9%&=~._-]*)?`,
-    'g',
-  );
+  return new RegExp(SESSION_DEEP_LINK_RE_SOURCE, 'g');
 }
+
+export const SESSION_DEEP_LINK_RE_SOURCE =
+  `(?:${DEEP_LINK_SCHEME_GROUP}):\\/\\/session\\/[A-Za-z0-9%~_-]+(?:\\?[A-Za-z0-9%&=~._-]*)?`;
 
 /** 剥掉裸链接匹配尾部粘连的英文标点(句尾 `.` `,` 等),返回修剪后的 URL。 */
 export function trimSessionLinkMatch(match: string): string {
@@ -124,6 +131,40 @@ export function parseProjectDeepLinkUrl(url: string): { workingDir: string } | n
     return null;
   }
   return workingDir ? { workingDir } : null;
+}
+
+export const PROJECT_DEEP_LINK_RE_SOURCE =
+  `(?:${DEEP_LINK_SCHEME_GROUP}):\\/\\/project\\/[A-Za-z0-9%~._!*-]+(?![A-Za-z0-9%~._!*('-])`;
+
+export function createProjectLinkPattern(): RegExp {
+  return new RegExp(PROJECT_DEEP_LINK_RE_SOURCE, 'g');
+}
+
+function isMarkdownEscaped(text: string, index: number): boolean {
+  let backslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && text.charCodeAt(cursor) === 92; cursor -= 1) {
+    backslashes += 1;
+  }
+  return backslashes % 2 === 1;
+}
+
+/** Locate the matching `[` for the `]` in `[label](deep-link)`. */
+export function findMarkdownLabelStart(text: string, closeBracketIndex: number): number {
+  if (isMarkdownEscaped(text, closeBracketIndex)) return -1;
+  let depth = 1;
+  for (let cursor = closeBracketIndex - 1; cursor >= 0; cursor -= 1) {
+    const code = text.charCodeAt(cursor);
+    if (code === 10) return -1;
+    if (code !== 91 && code !== 93) continue;
+    if (isMarkdownEscaped(text, cursor)) continue;
+    if (code === 93) depth += 1;
+    else if (--depth === 0) return cursor;
+  }
+  return -1;
+}
+
+export function unescapeMarkdownLabelBrackets(label: string): string {
+  return label.replace(/\\([[\]])/g, '$1');
 }
 
 /** workingDir 末段目录名(POSIX / Windows 分隔符都认;取不出末段回退原串)。 */

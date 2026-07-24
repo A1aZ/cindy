@@ -9,6 +9,12 @@
  */
 
 import { stripChatQuoteMarkerLines } from '@cindy/maker-shared/chat-quotes';
+import {
+  projectAgentFacingText,
+  type AgentInputReference,
+} from '@cindy/maker-shared/agent-input-projection';
+
+export type { AgentInputReference } from '@cindy/maker-shared/agent-input-projection';
 
 export type AgentInputFileCategory = 'image' | 'pdf' | 'text' | 'office' | 'file';
 
@@ -85,6 +91,7 @@ export interface AgentInputChatMessage {
   images?: Array<AgentInputImageRef | AgentInputFallbackImage>;
   files?: Array<{ name: string; path: string }>;
   quotesEncoded?: boolean;
+  agentReferences?: AgentInputReference[];
   pastedTextRanges?: Array<{ start: number; end: number; display: string }>;
   slashCommandRanges?: Array<{ start: number; end: number }>;
 }
@@ -128,6 +135,8 @@ export interface AgentInputQueuedMessage {
   sessionRefs?: AgentInputSessionRef[];
   trustedSessionReferenceContexts?: AgentInputSessionReferenceContext[];
   sessionReferencesRequireTrustedSnapshot?: boolean;
+  /** Structured Composer references used only for semantic projection. */
+  agentReferences?: AgentInputReference[];
   chatMessage: AgentInputChatMessage;
   createOpts: AgentInputCreateOpts;
   userName?: string;
@@ -218,12 +227,71 @@ export function queuedMessageRetryToken(queued: AgentInputQueuedMessage): string
 export function sanitizeQueuedMessageForPersistence(
   item: AgentInputQueuedMessage,
 ): AgentInputQueuedMessage {
-  if (!item.trustedSessionReferenceContexts) return item;
+  let changed = false;
+  let persistedContent = item.persistedContent;
+  let agentReferences = item.agentReferences;
+
+  const stripMessageBodies = (
+    references: readonly unknown[],
+  ): { references: unknown[]; stripped: boolean } => {
+    let stripped = false;
+    const next = references.map((reference) => {
+      if (!reference || typeof reference !== 'object' || Array.isArray(reference)) {
+        return reference;
+      }
+      const record = reference as Record<string, unknown>;
+      if (
+        record.kind !== 'message'
+        || (!Object.hasOwn(record, 'text') && !Object.hasOwn(record, 'truncated'))
+      ) {
+        return reference;
+      }
+      stripped = true;
+      const sanitized = { ...record };
+      delete sanitized.text;
+      delete sanitized.truncated;
+      return sanitized;
+    });
+    return { references: stripped ? next : [...references], stripped };
+  };
+
+  if (agentReferences) {
+    const topLevel = stripMessageBodies(agentReferences);
+    if (topLevel.stripped) {
+      changed = true;
+      agentReferences = topLevel.references as AgentInputReference[];
+    }
+  }
+  try {
+    const parsed = JSON.parse(persistedContent) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      if (Array.isArray(record.agentReferences)) {
+        const persisted = stripMessageBodies(record.agentReferences);
+        if (persisted.stripped) {
+          changed = true;
+          persistedContent = JSON.stringify({
+            ...record,
+            agentReferences: persisted.references,
+          });
+        }
+      }
+    }
+  } catch {
+    // Historical plain-text queue payloads have no embedded reference bodies.
+  }
+
+  if (!changed && !item.trustedSessionReferenceContexts) return item;
   const sanitized: AgentInputQueuedMessage = {
     ...item,
-    sessionReferencesRequireTrustedSnapshot: true,
+    persistedContent,
+    ...(agentReferences ? { agentReferences } : {}),
+    ...(item.trustedSessionReferenceContexts
+      ? { sessionReferencesRequireTrustedSnapshot: true }
+      : {}),
   };
-  delete sanitized.trustedSessionReferenceContexts;
+  if (!item.agentReferences) delete sanitized.agentReferences;
+  if (item.trustedSessionReferenceContexts) delete sanitized.trustedSessionReferenceContexts;
   return sanitized;
 }
 
@@ -265,6 +333,7 @@ export function updateQueuedMessageText(
       // Arbitrary text edits invalidate presentation offsets. A composer-based
       // queue edit supplies freshly computed metadata through update-content.
       delete nextParsed.pastedTextRanges;
+      delete nextParsed.agentReferences;
       // Preserve the explicit "new renderer metadata" marker while clearing
       // stale offsets. The empty array prevents legacy line-start guessing.
       nextParsed.slashCommandRanges = [];
@@ -297,6 +366,7 @@ export function updateQueuedMessageText(
   }
   if (sessionRefs.length > 0) updated.sessionRefs = sessionRefs;
   else delete updated.sessionRefs;
+  delete updated.agentReferences;
   return updated;
 }
 
@@ -326,6 +396,14 @@ export function updateQueuedMessageContent(
   // (手机编辑器能完整表达附件,undefined / 空数组都表示清空)。
   if (next.files && next.files.length > 0) merged.files = next.files;
   else delete merged.files;
+  // Structured references are tied to offsets in the replacement text.
+  // `next` is the complete composer submission, so stale references from the
+  // old queue item must never survive an edit that removed or reordered chips.
+  if (next.agentReferences && next.agentReferences.length > 0) {
+    merged.agentReferences = next.agentReferences;
+  } else {
+    delete merged.agentReferences;
+  }
   // mentions 语义不同:手机端编辑器(update-content 目前唯一调用方)不能表达
   // mentions,构造的 next 恒不带该字段——undefined 视为「无表达,保留原条目」,
   // 只有显式数组才是权威替换(空数组 = 清空)。否则手机编辑一条桌面排队的
@@ -370,24 +448,34 @@ export function reconcileSessionRefsForText(
     }
     if (!sessionId) continue;
     let messageClientId: string | undefined;
+    let linkDeviceId: string | undefined;
     // 链接常作为句子末尾的一部分出现；句号等标点不属于 query，
     // 否则锚点 clientId 会被解析成 `id.` 而无法命中消息。
     const query = (match[2] ?? '').replace(/[.,;:!?]+$/, '');
     for (const pair of query.split('&')) {
       const eq = pair.indexOf('=');
-      if (eq <= 0 || pair.slice(0, eq) !== 'message') continue;
+      if (eq <= 0) continue;
+      const paramKey = pair.slice(0, eq);
+      if (paramKey !== 'message' && paramKey !== 'device') continue;
+      if (paramKey === 'message' ? messageClientId !== undefined : linkDeviceId !== undefined) {
+        continue;
+      }
       try {
         const decoded = decodeURIComponent(pair.slice(eq + 1));
-        if (decoded) messageClientId = decoded;
+        if (!decoded) continue;
+        if (paramKey === 'message') messageClientId = decoded;
+        else linkDeviceId = decoded;
       } catch {
-        // Invalid anchor: treat it as an unanchored session reference.
+        // Invalid parameter: treat it as absent.
       }
-      break;
     }
     const key = `${sessionId}\u0000${messageClientId ?? ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const deviceId = deviceIdForSession?.(sessionId) ?? hints.get(sessionId);
+    // 深链里冻结的 `?device=`(chip 生成时刻的会话归属)最可信;其次才是
+    // 发送时刻的实时查表与旧 ref 的 device hint——会话归属不会迁移,冻结值
+    // 不受 relay 重连窗口内 sessionId→deviceId 注册表被 clear 的时序影响。
+    const deviceId = linkDeviceId ?? deviceIdForSession?.(sessionId) ?? hints.get(sessionId);
     refs.push({
       sessionId,
       ...(messageClientId ? { messageClientId } : {}),
@@ -417,13 +505,23 @@ export function serializeSessionReferencePayload(
   });
 }
 
+/** Immutable semantic projection shared by Ghost, titles, turn and steer. */
+export function getAgentFacingText(queued: AgentInputQueuedMessage): string {
+  return projectAgentFacingText({
+    text: queued.text,
+    quotesEncoded: queued.chatMessage.quotesEncoded === true,
+    agentReferences: queued.agentReferences,
+  });
+}
+
 export function buildMakerUserMessage(
   queued: AgentInputQueuedMessage,
   sessionReferenceContexts: AgentInputSessionReferenceContext[] = [],
 ): AgentInputMakerMessage {
   const blocks: Array<{ type: string; [k: string]: unknown }> = [];
-  if (queued.text.length > 0) {
-    blocks.push({ type: 'text', text: queued.text });
+  const agentFacingText = getAgentFacingText(queued);
+  if (agentFacingText.length > 0) {
+    blocks.push({ type: 'text', text: agentFacingText });
   }
   for (const m of queued.mentions ?? []) {
     blocks.push({ type: 'mention', name: m.name, path: m.path, kind: m.type });

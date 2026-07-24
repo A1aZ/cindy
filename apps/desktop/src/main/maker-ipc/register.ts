@@ -35,6 +35,7 @@ import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { BrowserWindow, ipcMain } from 'electron';
 import type { AgentMeta } from '../../renderer/lib/ccAgent.types';
 import {
+  getAgentFacingText,
   serializeSessionReferencePayload,
   type AgentInputCreateOpts,
   type AgentInputQueuedMessage,
@@ -122,6 +123,18 @@ import {
 } from '../localDb/orcaTeamStore.js';
 import { messages, orcaTeams, orcaWorkers, sessions } from '../localDb/schema.js';
 import { createLogger } from '../logger.js';
+import { moderateAgentInput } from '../content-moderation/input.js';
+import {
+  broadcastModerationInputBlocked,
+  broadcastModerationOutputBlocked,
+} from '../content-moderation/notifications.js';
+import {
+  cancelReleasedOutput,
+  closeReleasedOutput,
+  onReleasedAgentEvent,
+  waitForReleasedOutput,
+} from '../content-moderation/outputHub.js';
+import { onOutputModerationSignal } from '../content-moderation/signals.js';
 import { desktopClaudeAuthAdapter, desktopCodexAuthAdapter, readClaudeApiKey } from '../maker-host/auth-adapters.js';
 import { prepareSharedProjectSkillLinks } from '../maker-host/shared-global-skills.js';
 import { syncExternalCodexSessionFromDesktop } from '../maker-host/codex-local-sessions.js';
@@ -320,10 +333,12 @@ import {
   type MakerSessionAgentSwitchHandlerDeps,
 } from './sessionAgentSwitchHandler.js';
 import { prependHandoffToUserMessage } from './agentHandoff.js';
+import { hydrateQueuedAgentReferences } from './agentInputReferences.js';
 import { agentHandoffPending } from './agentHandoffPendingSingleton.js';
 import { type MakerSessionCreateOpts, withCreateSessionStderr } from './sessionRequest.js';
 import { persistAndHydrateSessionProvider } from './sessionProviderBootstrap.js';
 import { registerMakerSessionSendHandler } from './sessionSendHandler.js';
+import { registerStopAgentTaskHandler } from './stopAgentTaskHandler.js';
 import { registerStopSessionBackgroundTasksHandler } from './stopSessionBackgroundTasksHandler.js';
 import { registerProviderHandlers } from './providerHandlers.js';
 import { createLocalCliScanDeps, scanLocalCliAuth } from './localCliDetect.js';
@@ -1276,6 +1291,17 @@ export function takePendingInteractionsForSession(
  * 进程级单例 —— register.ts 模块只 load 一次, 此 Set 在 closeSession 时按 id 清理。
  */
 const wiredSessionIds = new Set<string>();
+let moderationOutputSignalWired = false;
+
+function ensureModerationOutputSignalWired(): void {
+  if (moderationOutputSignalWired) return;
+  moderationOutputSignalWired = true;
+  onOutputModerationSignal((signal) => {
+    if (signal.kind === 'blocked') {
+      broadcastModerationOutputBlocked(signal);
+    }
+  });
+}
 
 /**
  * SDK result 事件的 total_cost_usd 是 session 累计 (不是 per-turn) ——
@@ -1869,6 +1895,7 @@ export function installDesktopInteractionListener(
     // F1-a Phase 2: interaction(ask_user / plan_review / permission)是 turn 暂停边界,
     // 且不走 onEvent —— 在这把在飞 assistant 文本落库,等价于 renderer 老逻辑在
     // ask_user_question / plan_review case 里的 mid-turn assistant 抢救(只入队、不阻塞)。
+    await waitForReleasedOutput(session.id);
     flushAssistantBlock(session.id);
     // F1-a Phase 5: ask_user / plan_review 的消息本身也收口 main 单点落库(单 persistId,
     // 修 F1 重复),persistId 盖进 payload 让 renderer 用同一 id 建气泡 + answered 回写命中。
@@ -2062,6 +2089,7 @@ async function handleSilentStopTurnEnd(
 
 export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void {
   if (!session) return;
+  ensureModerationOutputSignalWired();
   if (wiredSessionIds.has(session.id)) return;
   wiredSessionIds.add(session.id);
 
@@ -2072,7 +2100,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
   // 订阅槽①旁听 tap(独立监听,叠加在主转发之外互不干扰):AgentEvent →
   // did-turn-*。资格(用户主会话)与自动化轮次过滤都在 tap 内部,这里零逻辑。
   const ghostSessionTap = createGhostSessionTap(session.id);
-  session.onEvent((event: AgentEvent) => {
+  onReleasedAgentEvent(session, (event: AgentEvent) => {
     ghostSessionTap.handleEvent(
       event as { type: string; data?: unknown; source?: string; turnOrigin?: { kind?: string } },
     );
@@ -2080,7 +2108,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
 
   // 转发事件到所有 window。interaction_dismissed 单独走专用 channel,
   // 让 renderer chat store 不必扫所有 vendor-raw 找它。
-  session.onEvent((event: AgentEvent) => {
+  onReleasedAgentEvent(session, (event: AgentEvent) => {
     const broadcastEvent = redactEventForRenderer(event);
     if (event.type === 'interaction_dismissed') {
       const data = event.data as { requestId?: unknown; reason?: unknown };
@@ -2834,6 +2862,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
   session.onStatusChange((status) => {
     broadcastToAllWindows(MAKER_PUSH.STATUS_CHANGED, { sessionId: session.id, status });
     if (status === 'closed') {
+      closeReleasedOutput(session);
       cleanupPendingInteractionsForSession(session.id, 'session_closed');
       agentInputCoordinatorHolder?.onSessionClosed(session.id);
       // 会话关闭:兑现延迟凭证切换(直接写 route),并唤醒被它挡住的等待者。
@@ -2973,6 +3002,20 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     clearBackgroundActivity: clearClaudeSessionBackgroundActivity,
     noteSessionReset: (sessionId) => silentStopAutoResumeGuard.noteSessionReset(sessionId),
     notifyGoalStop: (sessionId) => goalStopObserver?.(sessionId),
+  });
+
+  // 单个后台任务的精确停止(消息流任务卡 / 状态栏停止按钮)。只停指定 taskId,
+  // 当前 turn 与其他后台任务不受影响 —— 与上面的会话级止损入口互补。
+  registerStopAgentTaskHandler(createElectronIpcHandlerRegistry(), {
+    getLiveSession: (sessionId) => maker.getSession(sessionId) ?? undefined,
+  });
+
+  // 会话仍在运行的后台任务快照(只读)。renderer 挂载 / reloadMessages 清空
+  // taskUpdates 后据此补回存量任务(实时增量仍走 agent_task_update 事件流)。
+  ipcMain.handle(MAKER_INVOKE.LIST_SESSION_BACKGROUND_TASKS, (_e, sessionId: unknown) => {
+    if (typeof sessionId !== 'string') throwIpcError('INVALID_PARAMS', 'sessionId required');
+    const live = maker.getSession(sessionId);
+    return { tasks: live ? live.listBackgroundTasks() : [] };
   });
 
   // workflow 逐 agent 进度树(只读)。从活跃会话拿 workDir + sdkSessionId → 推导 Claude Code
@@ -4903,6 +4946,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       if (sess) {
         try {
           if (sess.isTurnRunning?.()) {
+            cancelReleasedOutput(w.sessionId);
             await sess.abort();
           }
         } catch (err) {
@@ -5050,6 +5094,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     closeWorkerSession: async (sessionId) => {
       const sess = maker.getSession(sessionId);
       if (sess) {
+        cancelReleasedOutput(sessionId);
         await sess.abort();
       }
       await maker.closeSession(sessionId);
@@ -5784,6 +5829,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       markWorkerManualInterruptIfKnown(sessionId, 'input_stop');
       const sess = maker.getSession(sessionId);
       if (!sess) return;
+      cancelReleasedOutput(sessionId);
       await sess.abort();
       cleanupPendingInteractionsForSession(sessionId, 'session_aborted');
     },
@@ -5894,14 +5940,41 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     },
     // 意识拦截钩(订阅槽①):派发/落库前问已装钩子意识;fail-open 由
     // screenGhostUserMessage 内部收敛,快路径(无钩子意识)零开销。
-    screenUserMessage: (sessionId, item) => screenGhostUserMessage(sessionId, item.text),
-    onUserMessageBlocked: (sessionId, item, verdict) =>
+    screenUserMessage: async (sessionId, agentFacingText, item) => {
+      // Run rewrites first: moderation must see the exact text that would be
+      // persisted and dispatched.
+      const ghostVerdict = await screenGhostUserMessage(sessionId, agentFacingText);
+      if (ghostVerdict.action === 'block') return ghostVerdict;
+      const moderationItem = ghostVerdict.action === 'rewrite'
+        ? { ...item, text: ghostVerdict.text }
+        : item;
+      const moderation = await moderateAgentInput(sessionId, moderationItem);
+      if (moderation === 'reject' || moderation === 'cancelled') {
+        return {
+          action: 'block' as const,
+          ghostId: '__content_moderation__',
+          ghostName: '',
+          reason: moderation === 'cancelled' ? 'cancelled' : 'rejected',
+        };
+      }
+      return ghostVerdict;
+    },
+    onUserMessageBlocked: (sessionId, item, verdict) => {
+      if (verdict.ghostId === '__content_moderation__') {
+        broadcastModerationInputBlocked({
+          sessionId,
+          item,
+          reason: verdict.reason === 'cancelled' ? 'cancelled' : 'rejected',
+        });
+        return;
+      }
       broadcastGhostMessageBlocked({
         sessionId,
         clientId: item.clientId,
         text: item.text,
         ...verdict,
-      }),
+      });
+    },
     onUserMessageRewritten: (sessionId, item, info) =>
       broadcastGhostMessageRewritten({ sessionId, clientId: item.clientId, ...info }),
     beforeDispatchUserTurn: (sessionId) => gitSnapshotCoordinator?.onTurnStart(sessionId),
@@ -6228,7 +6301,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     // 恢复先于入队:普通新输入保持 FIFO；「继续任务」由 coordinator 在完整旧队列
     // 恢复后再明确插到队首，避免恢复竞态把它重新压到后面。
     await inputCoordinator.ensureQueueRestored(sid).catch(() => undefined);
-    const queued = (await materializeQueuedOssAttachments(sid, requireQueuedMessage(item))) as AgentInputQueuedMessage;
+    const queuedWithAttachments = (await materializeQueuedOssAttachments(
+      sid,
+      requireQueuedMessage(item),
+    )) as AgentInputQueuedMessage;
+    const queued = await hydrateQueuedAgentReferences(queuedWithAttachments);
     let shouldAutoTitle = false;
     if (isDeviceLinkInvoke() && queued.text.trim()) {
       try {
@@ -6256,7 +6333,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       scheduleEligibleDeviceLinkAutoTitle({
         maker,
         sessionId: sid,
-        text: queued.text,
+        text: getAgentFacingText(queued),
         agentKind: queued.createOpts.agentKind,
       });
     }
@@ -6286,7 +6363,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     const steerOpts = opts && typeof opts === 'object'
       ? opts as { removeFromQueue?: boolean; touchUserSend?: boolean }
       : undefined;
-    const queued = (await materializeQueuedOssAttachments(
+    const queuedWithAttachments = (await materializeQueuedOssAttachments(
       sid,
       requireQueuedMessage(item, {
         // A device-link projection intentionally omits the trusted snapshot.
@@ -6295,6 +6372,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
         allowMissingTrustedContexts: isDeviceLinkInvoke() && steerOpts?.removeFromQueue === true,
       }),
     )) as AgentInputQueuedMessage;
+    const queued = await hydrateQueuedAgentReferences(queuedWithAttachments);
     return inputCoordinator.steer(
       sid,
       queued,
@@ -6389,7 +6467,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     const cid = requireClientId(clientId);
     const remote = isDeviceLinkInvoke();
     const parsed = requireQueuedMessage(item);
-    const queued = (await materializeQueuedOssAttachments(sid, parsed)) as AgentInputQueuedMessage;
+    const queuedWithAttachments = (await materializeQueuedOssAttachments(
+      sid,
+      parsed,
+    )) as AgentInputQueuedMessage;
+    const queued = await hydrateQueuedAgentReferences(queuedWithAttachments);
     // 旧 device-link update-content 调用没有 side-channel sessionRefs；显式
     // 传空数组，避免 updateQueuedMessageContent 从完整文本重新解析控制端坐标。
     const update = remote && parsed.sessionRefs === undefined
@@ -6457,6 +6539,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     // 监听),**再** abort。这样 abort 产生的终止事件到来时目标已暂停、监听已摘,不会被误判成
     // 续跑(原本依赖 error 文案正则判 paused/blocked,不可靠)。null-safe;无 active goal 时 no-op。
     await goalStopObserver?.(sessionId);
+    cancelReleasedOutput(sessionId);
     await sess.abort();
     cleanupPendingInteractionsForSession(sessionId, 'session_aborted');
   });

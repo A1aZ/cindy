@@ -38,6 +38,7 @@ import {
   type PayloadAttachmentLike,
   type SharedMessagePayload,
 } from '@cindy/maker-shared/payload-summary';
+import { i18n } from '@/i18n';
 
 export type MessagePayload = SharedMessagePayload<NormalizedToolDiff, NormalizedToolMedia>;
 
@@ -45,6 +46,7 @@ export {
   buildFilePayload,
   buildMermaidPayload,
   buildPayloadToolDiff,
+  buildTextPayload,
   extractPayloadToolResultMedia,
   formatDiffPayload,
   formatDiffPayloadRows,
@@ -73,7 +75,7 @@ export {
 
 export function buildToolResultPayload(tool: NormalizedRemoteMessage): MessagePayload | null {
   if (!tool.secondaryBody) return null;
-  return buildTextPayload(`${tool.label || 'tool'} 输出`, tool.secondaryBody);
+  return buildTextPayload(i18n.t('message.renderer.toolOutputTitle', { label: tool.label || 'tool' }), tool.secondaryBody);
 }
 
 export function buildDiffPayload(diff: NormalizedToolDiff): MessagePayload {

@@ -39,6 +39,7 @@ import type {
 } from '../../shared/agentInputQueue.js';
 import {
   buildMakerUserMessage,
+  getAgentFacingText,
   projectionRetryText,
   sanitizeQueuedMessageForPersistence,
   updateQueuedMessageContent,
@@ -149,6 +150,7 @@ export interface AgentInputCoordinatorDeps {
    */
   screenUserMessage?: (
     sessionId: string,
+    agentFacingText: string,
     item: AgentInputQueuedMessage,
   ) => Promise<
     | { action: 'allow' }
@@ -1014,7 +1016,7 @@ export class AgentInputCoordinator {
     // marker 已置位,筛查期间并发 steer / drain 被挡;stop / clearSession 竞态
     // 由筛查后的 marker 复查兜底。
     if (!item.bypassGhostHooks && this.deps.screenUserMessage) {
-      const verdict = await this.deps.screenUserMessage(sessionId, item);
+      const verdict = await this.deps.screenUserMessage(sessionId, getAgentFacingText(item), item);
       const cur = this.getState(sessionId);
       if (!cur.steeringQueueClientIds.includes(item.clientId)) {
         // stop/close/clearSession 赢在筛查期间:steer 事务已被取消,静默放弃。
@@ -1039,7 +1041,8 @@ export class AgentInputCoordinator {
         return true;
       }
       if (verdict.action === 'rewrite') {
-        // 与 drain 的 rewrite 同构:JSON-aware 只换 text 字段,附件/引用信封保留。
+        // 与 drain 的 rewrite 同构:JSON-aware 只换 text 字段并保留附件信封；
+        // 整体改写后旧 Composer reference offsets 已失效，必须同步清掉。
         const originalText = item.text;
         const rewritten = updateQueuedMessageText(item, verdict.text);
         Object.assign(item, rewritten);
@@ -1048,6 +1051,7 @@ export class AgentInputCoordinator {
         if (!rewritten.sessionReferencesRequireTrustedSnapshot) {
           delete item.sessionReferencesRequireTrustedSnapshot;
         }
+        delete item.agentReferences;
         this.deps.onUserMessageRewritten?.(sessionId, item, {
           ghostId: verdict.ghostId,
           ghostName: verdict.ghostName,
@@ -1952,7 +1956,7 @@ export class AgentInputCoordinator {
       // 留痕署名后照常派发。activeTurn 已置位,并发 drain 被挡住,询问期间
       // 不会抢发下一条。
       if (!head.bypassGhostHooks && this.deps.screenUserMessage) {
-        const verdict = await this.deps.screenUserMessage(sessionId, head);
+        const verdict = await this.deps.screenUserMessage(sessionId, getAgentFacingText(head), head);
         if (!this.isActiveTurnCurrent(sessionId, active)) return;
         if (verdict.action === 'block') {
           this.getState(sessionId).activeTurn = null;
@@ -1977,6 +1981,7 @@ export class AgentInputCoordinator {
           if (!rewritten.sessionReferencesRequireTrustedSnapshot) {
             delete head.sessionReferencesRequireTrustedSnapshot;
           }
+          delete head.agentReferences;
           this.deps.onUserMessageRewritten?.(sessionId, head, {
             ghostId: verdict.ghostId,
             ghostName: verdict.ghostName,

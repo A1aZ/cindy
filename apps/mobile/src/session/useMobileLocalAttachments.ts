@@ -14,6 +14,7 @@
  *   - 页面卸载时 hook 自动 dispose(在途上传完成后回收 OSS 中转对象)。
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Platform } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -41,10 +42,14 @@ import {
 import {
   buildPastedImageFileName,
   classifyPastedImageUri,
+  isComposerPastedImageUri,
   mimeTypeForPastedImageExt,
   resolvePastedImageAsset,
 } from '@/session/pastedImageAttachment';
-import { registerSentAttachmentThumb } from '@/session/sentAttachmentThumbStore';
+import {
+  getSentAttachmentThumbUri,
+  registerSentAttachmentThumb,
+} from '@/session/sentAttachmentThumbStore';
 import type { RemoteSerializedAttachment } from '@/session/types';
 
 export interface UseMobileLocalAttachmentsOptions {
@@ -73,6 +78,12 @@ export interface UseMobileLocalAttachmentsOptions {
  */
 const PASTE_PLACEHOLDER_TIMEOUT_MS = 60_000;
 
+async function deleteLocalUris(uris: readonly string[]): Promise<void> {
+  await Promise.all(uris.map((uri) => (
+    FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => undefined)
+  )));
+}
+
 export interface UseMobileLocalAttachmentsResult {
   /** 上传中的附件(托盘渲染 pending 卡)。 */
   pendingUploads: readonly PendingLocalAttachmentUpload[];
@@ -89,7 +100,7 @@ export interface UseMobileLocalAttachmentsResult {
   addImages: (source: 'library' | 'camera') => Promise<void>;
   /** 拉起系统文件选择器。 */
   addDocument: () => Promise<void>;
-  /** 输入框长按 Paste 粘贴剪贴板图片(expo-paste-input 上抛 file:// 临时文件)。 */
+  /** 输入框 Paste 粘贴剪贴板图片(ComposerRichInput 落盘的 file:// 临时文件)。 */
   addPastedImages: (uris: string[]) => Promise<void>;
   /** 直接入队已构造好的 candidates(Context 面板批量提交用,调用方自备 token,可传 Promise)。 */
   enqueueUploads: (
@@ -129,8 +140,15 @@ export interface UseMobileLocalAttachmentsResult {
 export function useMobileLocalAttachments(
   options: UseMobileLocalAttachmentsOptions,
 ): UseMobileLocalAttachmentsResult {
+  const { t } = useTranslation();
   const [pendingUploads, setPendingUploads] = useState<readonly PendingLocalAttachmentUpload[]>([]);
   const pickerBusyRef = useRef(false);
+  /** 本 hook 拥有的 WebView 粘贴缓存；注册持久缩略图后或卸载时统一回收。 */
+  const pastedImageLocalUrisRef = useRef(new Set<string>());
+  const cleanupPastedImageLocalUris = async (uris: readonly string[]): Promise<void> => {
+    await deleteLocalUris(uris);
+    for (const uri of uris) pastedImageLocalUrisRef.current.delete(uri);
+  };
   // 粘贴占位卡:按「批次」FIFO 记账(ref 数组是同步真源,state 只存总数供渲染
   // ——与 pendingCount 同理,限额校验不能读滞后一拍的 state)。原生事件不带批次
   // id,但两端的媒体处理都是串行队列(iOS mediaProcessingQueue / Android 单线程
@@ -173,7 +191,7 @@ export function useMobileLocalAttachments(
         pastePlaceholderBatchesRef.current = [];
         setPastePlaceholderCount(0);
         flushPastePlaceholderWaiters();
-        optionsRef.current.onError('粘贴图片处理超时，请重试。');
+        optionsRef.current.onError(t('composer.upload.pasteTimeout'));
       }, PASTE_PLACEHOLDER_TIMEOUT_MS);
     } else {
       flushPastePlaceholderWaiters();
@@ -209,7 +227,7 @@ export function useMobileLocalAttachments(
   const failPastePlaceholders = () => {
     if (pastePlaceholderBatchesRef.current.length === 0) return;
     shiftPastePlaceholderBatch();
-    optionsRef.current.onError('剪贴板图片读取失败，请重新复制后再粘贴。');
+    optionsRef.current.onError(t('composer.upload.clipboardReadFailed'));
   };
 
   const controller = useMemo(() => createMobileLocalAttachmentUploadController({
@@ -224,21 +242,44 @@ export function useMobileLocalAttachments(
       getToken: () => optionsRef.current.getAccessToken(),
     }),
     onPendingChange: setPendingUploads,
-    onUploaded: (attachment, candidate, uploadedUri, localId) => {
+    onUploaded: async (attachment, candidate, uploadedUri, localId, localUris, isActive) => {
       // 发送后气泡的本地缩略图兜底:消息里持久化的是 cindy-oss-attach:// 中转引用,
       // 被控端物化改写前(乐观渲染 / 电脑离线窗口)渲染端没有任何预览路径——把
-      // 实际上传的文件拷进自有目录记映射,气泡用本地图顶上。fire-and-forget,
-      // 失败静默(store 内部兜),绝不挡上传回调主流程。
+      // 实际上传的文件拷进自有目录记映射,气泡用本地图顶上。
+      let deliveredCandidate = candidate;
       if (candidate.kind === 'image') {
-        void registerSentAttachmentThumb(attachment.url ?? attachment.path, uploadedUri || candidate.uri);
+        const ossRef = attachment.url ?? attachment.path;
+        if (candidate.cleanupLocalUris) {
+          // 粘贴源文件需要回收:先等持久缩略图完成接管，才能安全删源文件。
+          await registerSentAttachmentThumb(ossRef, uploadedUri || candidate.uri);
+          const durablePreviewUri = ossRef ? getSentAttachmentThumbUri(ossRef) : null;
+          if (durablePreviewUri) deliveredCandidate = { ...candidate, uri: durablePreviewUri };
+        } else {
+          // 相册 / 相机原有路径不拥有源文件，保持 fire-and-forget，不拉长上传落定时间。
+          void registerSentAttachmentThumb(ossRef, uploadedUri || candidate.uri);
+        }
       }
-      optionsRef.current.onUploaded(attachment, candidate, localId);
+      if (candidate.cleanupLocalUris) {
+        for (const uri of localUris) pastedImageLocalUrisRef.current.add(uri);
+      }
+      if (!isActive()) return;
+      optionsRef.current.onUploaded(attachment, deliveredCandidate, localId);
+      if (candidate.cleanupLocalUris) {
+        // 只有持久缩略图已经接管 composer / sent-message 预览后才删源文件；
+        // 注册失败时保留到页面卸载，不能让已上传附件立刻变成坏图。
+        if (deliveredCandidate.uri !== candidate.uri) {
+          await candidate.cleanupLocalUris(localUris);
+        }
+      }
     },
     onFailed: (err, localId) => optionsRef.current.onError(formatRemoteError(err), { uploadLocalId: localId }),
   }), []);
 
   useEffect(() => () => {
     controller.dispose();
+    const pastedUris = [...pastedImageLocalUrisRef.current];
+    pastedImageLocalUrisRef.current.clear();
+    if (pastedUris.length > 0) void deleteLocalUris(pastedUris);
     if (pastePlaceholderTimerRef.current) {
       clearTimeout(pastePlaceholderTimerRef.current);
       pastePlaceholderTimerRef.current = null;
@@ -260,7 +301,7 @@ export function useMobileLocalAttachments(
       - optionsRef.current.getAttachmentCount()
       - getPendingSlotCount();
     if (remainingSlots <= 0) {
-      optionsRef.current.onError(`最多添加 ${MOBILE_MAX_ATTACHMENTS} 个附件。`);
+      optionsRef.current.onError(t('composer.upload.maxAttachments', { count: MOBILE_MAX_ATTACHMENTS }));
       return null;
     }
     pickerBusyRef.current = true;
@@ -275,7 +316,7 @@ export function useMobileLocalAttachments(
       // iOS 模拟器无相机:不拦截会在原生层直接崩进程(见 isCameraUnavailableOnSimulator)。
       if (source === 'camera'
         && isCameraUnavailableOnSimulator(Platform.OS, FileSystem.documentDirectory)) {
-        optionsRef.current.onError('模拟器没有相机，请用「照片」从相册选择。');
+        optionsRef.current.onError(t('composer.upload.simulatorNoCamera'));
         return;
       }
       const permission = source === 'camera'
@@ -283,8 +324,8 @@ export function useMobileLocalAttachments(
         : await ImagePicker.requestMediaLibraryPermissionsAsync(false);
       if (!permission.granted) {
         optionsRef.current.onError(source === 'camera'
-          ? '相机权限未开启，请在系统设置里允许 Cindy 使用相机。'
-          : '照片权限未开启，请在系统设置里允许 Cindy 访问照片。');
+          ? t('composer.upload.cameraPermission')
+          : t('composer.upload.photoPermission'));
         return;
       }
 
@@ -331,13 +372,13 @@ export function useMobileLocalAttachments(
       const uri = asset?.uri?.trim();
       const name = asset?.name?.trim();
       if (!asset || !uri || !name) {
-        optionsRef.current.onError('没有读取到可上传的文件。');
+        optionsRef.current.onError(t('composer.upload.noFileRead'));
         return;
       }
       // 类型白名单同步校验:不支持的类型即时报错,不进托盘、不触发上传
       // (上传层还有同口径兜底,防 OSS 孤儿)。
       if (!categorizeMobileAttachment(name)) {
-        optionsRef.current.onError('这个本机文件类型暂不支持作为附件发送。');
+        optionsRef.current.onError(t('composer.upload.fileTypeUnsupported'));
         return;
       }
 
@@ -367,18 +408,27 @@ export function useMobileLocalAttachments(
    */
   const addPastedImages = async (uris: string[]): Promise<void> => {
     if (uris.length === 0) return;
+    const ownedUris = uris.filter(isComposerPastedImageUri);
+    for (const uri of ownedUris) pastedImageLocalUrisRef.current.add(uri);
     // 本批 uris 就是最早一批占位卡的兑现:先按 FIFO 出列本批再做限额检查
     //(否则这批会被自己的占位双扣槽位)。出列与下方 enqueue 的 pending 上屏在
     // 同一同步段,React 批处理保证占位卡 → pending 卡之间没有空帧。
     shiftPastePlaceholderBatch();
     const begun = beginPick();
-    if (!begun) return;
+    if (!begun) {
+      void cleanupPastedImageLocalUris(ownedUris);
+      return;
+    }
     try {
       // 同步段就入队,绝不先 await token:粘贴没有 picker modal 遮挡,token 走网络 refresh
       // 的等待窗里用户可直接点发送——任务不在队里的话 waitForIdle 立即返回,刚粘贴的图
       // 会被静默丢弃(#589 用 attachmentBusy 门堵的就是这个,乐观管线用「先入队」替代)。
-      controller.enqueue(uris.slice(0, begun.remainingSlots).map((uri, index) => {
+      const acceptedUris = uris.slice(0, begun.remainingSlots);
+      const rejectedUris = uris.slice(begun.remainingSlots).filter(isComposerPastedImageUri);
+      if (rejectedUris.length > 0) void cleanupPastedImageLocalUris(rejectedUris);
+      controller.enqueue(acceptedUris.map((uri, index) => {
         const classified = classifyPastedImageUri(uri);
+        const ownsLocalFile = isComposerPastedImageUri(uri);
         return {
           kind: 'image' as const,
           uri,
@@ -391,6 +441,7 @@ export function useMobileLocalAttachments(
             const resolved = await resolvePastedImageAsset(uri, index);
             return { uri: resolved.uri, name: resolved.fileName, mimeType: resolved.mimeType };
           },
+          cleanupLocalUris: ownsLocalFile ? cleanupPastedImageLocalUris : undefined,
         };
       }), { token: optionsRef.current.getAccessToken() });
     } catch (err) {

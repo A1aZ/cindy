@@ -65,7 +65,6 @@ import { reclaimLoopbackPort } from './portReclaim.js';
 import { GhostConnectionManager } from './ghostConnections.js';
 import { t } from '../i18n.js';
 import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
-import { requestNodeInstallAuthorization } from './nodeInstallAuthorization.js';
 import {
   FILO_GOOGLE_GHOST_ID,
   migrateFiloGoogleAccounts,
@@ -585,6 +584,7 @@ export function getGhostNodeRuntimeBroker(): GhostNodeRuntimeBroker {
   if (!nodeRuntimeBrokerSingleton) {
     nodeRuntimeBrokerSingleton = new GhostNodeRuntimeBroker({
       getGhost: (id) => getGhostManager().list().find((g) => g.manifest.id === id) ?? null,
+      readSecret: (ghostId, secretKey) => readGhostSecret(ghostId, secretKey),
       sendToGhost: (ghostId, payload) => {
         sendToGhostLogic(ghostId, payload);
       },
@@ -1837,24 +1837,27 @@ export function registerGhostIpc(): void {
       ghostKv.write(ghostId, value);
     },
   });
-  // /secrets 只写通道(user 凭证一律由意识 settingsHtml 收单入库——宿主
-  // 凭证渲染 2026-07-13 整体退役):现查在装清单拿收单键集(意识更新后立即
-  // 以新清单为准,不吃分区 handler 闭包里的旧快照);login-email 派生凭证
-  // 没有收单动作,不在键集内。保险库真身 = providerSecretStore(safeStorage
-  // 键名与官方别名同一套)。卸下后的残留请求查无此意识,统一 404。
+  // /secrets 只写通道(network user 与 node.secretBindings 凭证一律由意识
+  // settingsHtml 收单入库——宿主凭证渲染 2026-07-13 整体退役):现查在装
+  // 清单拿收单键集(意识更新后立即以新清单为准,不吃分区 handler 闭包里的
+  // 旧快照);login-email 派生凭证没有收单动作,不在键集内。保险库真身 =
+  // providerSecretStore(safeStorage 键名与官方别名同一套)。卸下后的残留
+  // 请求查无此意识,统一 404。
   setGhostSecretsHandler(async ({ ghostId, method, pathname, readBodyText }) => {
     const ghost = findAvailableGhost(ghostId);
     if (!ghost) return { status: 404 };
-    const secretDecls = ghost.manifest.network?.secrets ?? [];
-    const userSecretKeys = secretDecls
+    const networkSecretDecls = ghost.manifest.network?.secrets ?? [];
+    const nodeSecretDecls = ghost.manifest.node?.secretBindings ?? [];
+    const userSecretKeys = networkSecretDecls
       // login-email(派生)与 oauth(主机托管授权)都没有"用户填值"这回事,
       // 不进 /secrets 收单键集(oauth 的 client 凭证走 /oauth 端点)。
       .filter((s) => s.source !== 'login-email' && s.source !== 'oauth')
-      .map((s) => s.key);
+      .map((s) => s.key)
+      .concat(nodeSecretDecls.map((s) => s.key));
     // login-email 派生身份:GET 状态回查附 identity(= 当前登录邮箱,设置页
     // 只读展示"用的是哪个身份")。回给意识不算新增泄露面——装入确认框已
     // 披露"将使用你的登录邮箱",且注入时它自己的服务端本就可见。写/删 405。
-    const identitySecretKeys = secretDecls
+    const identitySecretKeys = networkSecretDecls
       .filter((s) => s.source === 'login-email')
       .map((s) => s.key);
     return handleGhostSecretsRequest({
@@ -1874,7 +1877,10 @@ export function registerGhostIpc(): void {
       // 入库成功 → 主机代言 tips("凭证「xxx」已保存",带意识身份头);
       // 文案里的名字用清单声明的 label(给用户看的名称),兜底裸 key。
       onStored: (secretKey) => {
-        const label = secretDecls.find((s) => s.key === secretKey)?.label ?? secretKey;
+        const label =
+          networkSecretDecls.find((s) => s.key === secretKey)?.label ??
+          nodeSecretDecls.find((s) => s.key === secretKey)?.label ??
+          secretKey;
         broadcastGhostHostNotice(ghostId, { textKey: 'secretSaved', textArgs: { name: label } });
       },
       log,
@@ -2530,9 +2536,8 @@ export function registerGhostIpc(): void {
     }
     rejectReservedGhostId(probe.manifest.id);
     rejectUnauthorizedTokenBroker(probe.manifest);
-    if (!(await requestNodeInstallAuthorization(event.sender, probe.manifest, 'install'))) {
-      return { canceled: true };
-    }
+    // Node 高风险提示在 renderer 装入确认卡的权限清单里如实展示;
+    // 2026-07-24 Lizi 定案:不再追加 Main 原生二次确认弹窗。
     const enable = installOpts.enable === true;
     return {
       ghost: await installAndDock(manager, lizFilePath, {
@@ -2565,9 +2570,6 @@ export function registerGhostIpc(): void {
     }
     rejectReservedGhostId(inspected.manifest.id);
     rejectUnauthorizedTokenBroker(inspected.manifest);
-    if (!(await requestNodeInstallAuthorization(event.sender, inspected.manifest, 'update'))) {
-      return { canceled: true };
-    }
     const previousGhost = manager.list().find((g) => g.manifest.id === inspected.manifest.id);
     runtime.stop(inspected.manifest.id);
     getGhostNodeRuntimeBroker().stop(inspected.manifest.id);

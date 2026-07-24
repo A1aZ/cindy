@@ -37,13 +37,13 @@ export function MarkdownFileReader({
   targetLine?: number | null;
   testID?: string;
 }) {
-  const { t } = useTranslation();
+  const { i18n } = useTranslation();
   const { colors } = useTheme();
   const quoteEnabled = !!onQuoteSelection;
-  // 菜单项在渲染时构造(而非模块常量):label 走 i18n;依赖 t 使语言切换后随重渲更新。
+  // 菜单项在渲染时构造(而非模块常量):label 走 i18n;依赖 language 使语言切换后随重渲更新。
   const quoteMenuItems = useMemo(
     () => [{ key: 'xdtQuote', label: selectionQuoteMenuLabel() }],
-    [t],
+    [i18n.language],
   );
   const html = useMemo(() => buildSelectableMarkdownHtml(markdown, {
     borderColor: colors.border,

@@ -2,7 +2,10 @@ import { readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
-import { mergeCodexAccountUsageSnapshot } from '@/hooks/useAccountUsage';
+import {
+  mergeCodexAccountUsageSnapshot,
+  splitCodexAccountUsagePayload,
+} from '@/hooks/useAccountUsage';
 
 describe('mergeCodexAccountUsageSnapshot', () => {
   it('preserves the last known credit balance when a later snapshot omits credits', () => {
@@ -196,7 +199,7 @@ describe('mergeCodexAccountUsageSnapshot', () => {
     const hookSource = readFileSync(new URL('../hooks/useAccountUsage.ts', import.meta.url), 'utf8');
 
     expect(mainSource).toContain("USAGE_CODEX_ACCOUNT_CHANGED = 'usage:codex-account-changed'");
-    expect(mainSource).toContain('broadcastCodexAccountUsage(next);');
+    expect(mainSource).toContain('broadcastCodexAccountUsage(payload);');
     expect(mainSource).toContain('isCodexZeroWindowFallback(incoming)');
     expect(mainSource).toContain('isCodexWindowlessFallback(incoming)');
     expect(mainSource).toContain('broadcastCodexAccountUsage(null);');
@@ -204,6 +207,44 @@ describe('mergeCodexAccountUsageSnapshot', () => {
     expect(preloadSource).toContain('onCodexAccountChanged: fanOutMakerUsageCodexAccount');
     expect(hookSource).toContain('api.onCodexAccountChanged');
     expect(hookSource).toContain('options: { clearOnNull?: boolean } = {}');
-    expect(hookSource).toContain("applyCodexAccountUsageSnapshot(persisted, setSnapshot, { clearOnNull: false })");
+    expect(hookSource).toContain('() => setSnapshot(selectCodexSlot(quotaSource))');
+    // 按来源分槽: 两个数据源不得互相覆盖(main / renderer 双份实现同口径)
+    expect(mainSource).toContain('function splitPersistedCodexAccountUsage(');
+    expect(mainSource).toContain("incoming.source === 'openai-web'");
+    expect(hookSource).toContain('function splitCodexAccountUsagePayload(');
+  });
+});
+
+describe('splitCodexAccountUsagePayload', () => {
+  it('routes combined payloads into per-source slots', () => {
+    const parts = splitCodexAccountUsagePayload({
+      limitId: 'codex',
+      primary: { usedPercent: 82 },
+      source: 'codex-app-server',
+      webSnapshot: { primary: { usedPercent: 0 }, source: 'openai-web' },
+    } as never);
+    expect(parts.appServer?.primary?.usedPercent).toBe(82);
+    expect((parts.appServer as { webSnapshot?: unknown } | undefined)?.webSnapshot)
+      .toBeUndefined();
+    expect(parts.web?.primary?.usedPercent).toBe(0);
+  });
+
+  it('routes bare snapshots by their source field (per-turn events vs WHAM)', () => {
+    expect(splitCodexAccountUsagePayload({
+      primary: { usedPercent: 40 },
+      source: 'codex-app-server',
+    }).appServer?.primary?.usedPercent).toBe(40);
+    expect(splitCodexAccountUsagePayload({
+      primary: { usedPercent: 5 },
+      source: 'openai-web',
+    }).web?.primary?.usedPercent).toBe(5);
+  });
+
+  it('does not fabricate an app slot from a web-only combined payload', () => {
+    const parts = splitCodexAccountUsagePayload({
+      webSnapshot: { primary: { usedPercent: 5 }, source: 'openai-web' },
+    } as never);
+    expect(parts.appServer).toBeUndefined();
+    expect(parts.web?.primary?.usedPercent).toBe(5);
   });
 });

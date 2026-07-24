@@ -876,7 +876,7 @@ Splash 品牌块字标是另一套素材(`assets/splash/wordmark.png` 白字 DAR
 
 > 本节是登录全链路的设计系统规范。权威来源为 Figma 组件库中的以下设计文档（设计阶段工作文件，不入仓库）：`figma-component-spec`（组件 / 色板速查）、`token-decision-table`（token / 尺寸决策）、`DESIGN-login`（逐屏规格）、`flow-map`（状态机）、`fidelity-matrix`（保真度验收矩阵）。本节不重复抄全表，只钉死设计规则与组件契约，逐参数值以 Figma 组件库及本节色板表为准。
 >
-> **交付状态**：**亮色** as-built 已合并入 main；**深色**规格已定（色值经 Figma 组件库 Dark symbol 逐个核验，见 §16.1 双态表 / §16.5），随**暗色实现 PR** 落地。两模式均受 §2「Light / Dark 双模式交付门槛」约束——非可选愿景。
+> **交付状态**：**亮色**与**深色**均已全端落地（深色随 PR #235 合入 main，色值经 Figma 组件库 Dark symbol 逐个核验，见 §16.1 双态表 / §16.5）。两模式均受 §2「Light / Dark 双模式交付门槛」约束——非可选愿景。
 >
 > 本节独立于 §1–§15 默认皮肤与 CINDY 皮肤族——登录页是独立白底 / 深底反色体系，**不消费编辑器主题的 `--surface` / `--text-*` 等 slot**，只走本节定义的 `--login-*` token（light / dark 二态已注册于 `apps/desktop/src/renderer/themes/colors.ts`；见 §10）。`--login-*` 随基础 light / dark **二态**切换，但**不跟随具体扩展主题**（登录页只认 light / dark 模式；首次亮、后续跟随见 §16.5）。
 
@@ -987,7 +987,7 @@ Splash 品牌块字标是另一套素材(`assets/splash/wordmark.png` 白字 DAR
 
 ### 16.5 深色模式与主题跟随
 
-> 深色受 §2「Light / Dark 双模式交付门槛」约束，是**必须交付**的另一模式，非可选愿景。深色色值已经 Figma 组件库 Dark symbol 逐个核验（见 §16.1 双态表），随**暗色实现 PR** 落地（独立于已合并的亮色版本）。落地机制如下。
+> 深色受 §2「Light / Dark 双模式交付门槛」约束，是**必须交付**的另一模式，非可选愿景。深色色值经 Figma 组件库 Dark symbol 逐个核验（见 §16.1 双态表），已随 PR #235 全端落地。落地机制如下。
 
 **深色 = 黑白反色在深底的镜像**：面板 / 控件深底、主按钮与社交圆钮反相白、文字反相米白，几何 / 布局 / props / 状态机 / i18n **零改动**——只换色值。
 
@@ -1000,7 +1000,7 @@ Splash 品牌块字标是另一套素材(`assets/splash/wordmark.png` 白字 DAR
 
 **disabled 态特例**：主按钮 disabled **两模式同构**——深底 `#2A2828`（独立 token `--login-disabled-button-bg`，**不随** `--login-primary-button-bg` 反相；组件需 disabled 分支切换底/字）+ 白 70% 叠层（`--login-disabled-button-overlay`）+ 边 `#B4B4B4` + 文字 `#D4D4D4`（`--login-disabled-button-text`）opacity 0.8（figma `white_button` Disable 态核验：深色 disabled 不反相为白底，仍走亮色同款灰态）。
 
-**双模式门槛覆盖**：深色须覆盖亮色全部态——控件 default / hover(桌) / focus / filled / active / pressed / disabled / loading / error，全部 11 屏，桌面 Win / Mac + 手机 iOS / Android（phone / pad）两端同 token 同值；`scripts/__fixtures__/login-fidelity/`（随暗色实现 PR 新增）补深色 fixture，checker 跑深色矩阵。色值以设计稿为唯一基准，1:1 还原，不引入设计稿之外的验收标准。
+**双模式门槛覆盖**：深色须覆盖亮色全部态——控件 default / hover(桌) / focus / filled / active / pressed / disabled / loading / error，全部 11 屏，桌面 Win / Mac + 手机 iOS / Android（phone / pad）两端同 token 同值；`scripts/__fixtures__/login-fidelity/`（待后续补充，当前不存在于仓库中）补深色 fixture，checker 跑深色矩阵。色值以设计稿为唯一基准，1:1 还原，不引入设计稿之外的验收标准。
 
 **主题跟随（产品逻辑）**：用户**首次**打开 Cindy → **亮色**登录界面（默认）；**第二次起** → 登录界面跟随用户上一次使用的 **light / dark 模式**（登录页只认 light / dark，不随具体扩展主题，见 §16.2）。这需要持久化「上次登录模式」+ 首次默认逻辑，超出纯 token 补范围，是一段状态逻辑，在暗色实现 PR 内一并落地。
 

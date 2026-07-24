@@ -964,9 +964,10 @@ const r = await cindy.send({ type: 'cindy-request', kind: 'gen_image', prompt: '
 //   后台继续;用 { kind:'query_job', jobId } 轮询:进行中 { ok:true,
 //   status:'running', elapsedSeconds },完成 { ok:true, status:'done', url,
 //   hash, ext, model, modelLabel }(取件字段与同步返回同形),失败
-//   { ok:false, message }。完成结果保留 30 分钟,过期或应用重启后查无此单
-//   (按可重新提交处理);后台在途上限 2 单。建议把插件工具拆成"提交生成 +
-//   查询结果"两个,让 AI 自己掌握轮询节奏。
+//   { ok:false, message }。完成结果保留 30 分钟(每意识最多缓存 16 单完成
+//   记录,超出淘汰最旧),过期或应用重启后查无此单(按可重新提交处理);
+//   后台在途上限 2 单。建议把插件工具拆成"提交生成 + 查询结果"两个,
+//   让 AI 自己掌握轮询节奏。
 // 选型两个可选参数,规则:
 //   tier:'draft'(快省草稿)| 'standard'(默认)| 'best'(最好)——只表达档位
 //     意图,具体用哪个模型由主机决定。这是你唯一该主动用的选型参数。

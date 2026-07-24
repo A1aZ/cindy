@@ -134,6 +134,13 @@ const DEFAULT_VIDEO_EXPECTED_SECONDS = 120;
 /** 异步任务号长度上限(主机铸 UUID 量级;超长视为沙箱乱填)。 */
 const MAX_JOB_ID_LEN = 64;
 
+/**
+ * 每意识完成态(done/failed)任务记录保留上限:TTL 之外的第二道闸——
+ * 快速失败/快速完成的 submit 循环不受 running 在途闸限制,没有条数上限
+ * 就能在 TTL 窗口内堆记录。超出即淘汰最旧,正常插件(一次 1–2 单)碰不到。
+ */
+const MAX_SETTLED_JOBS_PER_GHOST = 16;
+
 /** 异步代办任务(mode:'submit')的在途/完成记录。内存表:主进程重启即丢,
  *  query_job 对丢失单统一回"查无此任务",意识按可重新提交处理。 */
 interface CindyAsyncJob {
@@ -411,6 +418,7 @@ export class GhostCindySlot {
             message: `后台任务已达上限(${GHOST_CINDY_MAX_ASYNC_JOBS} 单):先用 query_job 取回已完成的,或等在途任务结束`,
           };
         }
+        this.evictSettledJobs(ghostId);
         const jobId = randomUUID();
         const job: CindyAsyncJob = { ghostId, verb: info.verb, startedAt: Date.now(), status: 'running' };
         this.jobs.set(jobId, job);
@@ -476,6 +484,17 @@ export class GhostCindySlot {
       if (job.status !== 'running' && now - (job.doneAt ?? 0) > GHOST_CINDY_JOB_TTL_MS) {
         this.jobs.delete(jobId);
       }
+    }
+  }
+
+  /** 新 job 入表前按意识淘汰最旧的完成记录,保住每意识条数上限。 */
+  private evictSettledJobs(ghostId: string): void {
+    const settled = [...this.jobs.entries()]
+      .filter(([, j]) => j.ghostId === ghostId && j.status !== 'running')
+      .sort((a, b) => (a[1].doneAt ?? 0) - (b[1].doneAt ?? 0));
+    const excess = settled.length - (MAX_SETTLED_JOBS_PER_GHOST - 1);
+    for (let i = 0; i < excess; i++) {
+      this.jobs.delete(settled[i][0]);
     }
   }
 

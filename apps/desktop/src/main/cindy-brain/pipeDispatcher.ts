@@ -195,6 +195,12 @@ export class GhostPipeDispatcher {
    * 沙箱填错/冒用别人在途的 callId 不能续命他人的卷、也不污染其计数。
    * budgetMs = 这单代办自身的预算(如视频 expected×3);窗口延到
    * now + budget + 交卷余量。查无此卷/不是它的卷,静默忽略。
+   *
+   * 已知边界:callId 归因是插件自报的(记账同契约),同一意识自己的两个
+   * 并发调用互填 callId 主机无从分辨(沙箱内部并发,主机没有"正在处理哪
+   * 份卷"的会话状态)。错配只伤它自己:错署名的调用不获续命照常超时,
+   * 被错挂的调用最多被延长;release 收窗下限是基础窗口(见 releaseCall),
+   * 不会把任何卷收到无续命机制时的行为之下。
    */
   holdCall(ghostId: string, callId: string, budgetMs: number): void {
     const entry = this.pending.get(callId);

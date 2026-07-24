@@ -647,6 +647,33 @@ describe('异步任务(mode:submit / query_job)', () => {
     ).toMatchObject({ ok: false });
   });
 
+  it('完成态记录按意识限额淘汰最旧(快速失败循环不无限堆表)', async () => {
+    const { slot } = makeSlot({
+      generateVideo: vi.fn(async () => {
+        throw new Error('立即失败');
+      }),
+    } as Partial<CindySlotDeps>);
+
+    const jobIds: string[] = [];
+    for (let i = 0; i < 20; i++) {
+      const r = await slot.handleModelRequest('art', SUBMIT_REQ);
+      expect(r).toMatchObject({ ok: true, status: 'running' });
+      jobIds.push((r as { jobId: string }).jobId);
+      // 让后台链落定(失败出 running 态),下一单才不会被在途闸拦。
+      await vi.waitFor(async () => {
+        const q = await slot.handleModelRequest('art', { type: 'cindy-request', kind: 'query_job', jobId: jobIds[i] });
+        expect(q).toMatchObject({ ok: false });
+      });
+    }
+
+    // 最早的记录已被限额淘汰(话术与过期一致:查无此任务)。
+    const oldest = await slot.handleModelRequest('art', { type: 'cindy-request', kind: 'query_job', jobId: jobIds[0] });
+    expect((oldest as { message: string }).message).toContain('查无此任务');
+    // 最近完成的仍在保留窗内可查(失败原因原样返回)。
+    const latest = await slot.handleModelRequest('art', { type: 'cindy-request', kind: 'query_job', jobId: jobIds[19] });
+    expect((latest as { message: string }).message).toContain('立即失败');
+  });
+
   it('完成结果过 TTL 清理 → 查无此任务', async () => {
     vi.useFakeTimers();
     try {

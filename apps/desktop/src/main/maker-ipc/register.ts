@@ -1690,10 +1690,15 @@ function isRemoteAuthRetryErrorEvent(
 function handleAgentIslandInteractionAfterBroadcast(
   session: { id: string; agentKind?: unknown; workDir?: unknown; workspaceKind?: unknown },
   request: InteractionRequest,
+  interactionEpoch: number | null,
 ): void {
-  if (!shouldNotifyAgentIslandForSession(session.id)) return;
+  if (interactionEpoch === null || !shouldNotifyAgentIslandForSession(session.id)) return;
   try {
-    getAgentIslandService()?.handleInteractionRequest(sessionMetaForIsland(session), request);
+    getAgentIslandService()?.handleInteractionRequest(
+      sessionMetaForIsland(session),
+      request,
+      interactionEpoch,
+    );
   } catch (error) {
     log.warn('Agent Island interaction update failed after maker interaction broadcast', {
       sessionId: session.id,
@@ -1904,6 +1909,9 @@ export function installDesktopInteractionListener(
   session: { id: string; setInteractionListener: (l: ((req: InteractionRequest) => Promise<InteractionDecision>) | null) => void },
 ): void {
   session.setInteractionListener(async (req: InteractionRequest) => {
+    const agentIslandInteractionEpoch = shouldNotifyAgentIslandForSession(session.id)
+      ? getAgentIslandService()?.captureInteractionEpoch(session.id) ?? null
+      : null;
     // F1-a Phase 2: interaction(ask_user / plan_review / permission)是 turn 暂停边界,
     // 且不走 onEvent —— 在这把在飞 assistant 文本落库,等价于 renderer 老逻辑在
     // ask_user_question / plan_review case 里的 mid-turn assistant 抢救(只入队、不阻塞)。
@@ -1941,6 +1949,7 @@ export function installDesktopInteractionListener(
       handleAgentIslandInteractionAfterBroadcast(
         session as { id: string; agentKind?: unknown; workDir?: unknown; workspaceKind?: unknown },
         req,
+        agentIslandInteractionEpoch,
       );
     });
   });

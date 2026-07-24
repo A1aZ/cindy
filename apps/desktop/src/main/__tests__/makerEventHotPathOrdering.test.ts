@@ -16,6 +16,8 @@ const usageSourcePath = resolve(__dirname, '..', 'maker-ipc', 'usage.ts');
 const usageSource = readFileSync(usageSourcePath, 'utf8').replace(/\r\n?/g, '\n');
 const turnRunnerSourcePath = resolve(__dirname, '..', 'im', 'shared', 'turnRunner.ts');
 const turnRunnerSource = readFileSync(turnRunnerSourcePath, 'utf8').replace(/\r\n?/g, '\n');
+const hookControlSourcePath = resolve(__dirname, '..', 'hook-control', 'ipc.ts');
+const hookControlSource = readFileSync(hookControlSourcePath, 'utf8').replace(/\r\n?/g, '\n');
 
 describe('maker:event hot path ordering', () => {
   it('broadcasts EVENT before usage/context/island/idle side effects', () => {
@@ -134,6 +136,9 @@ describe('maker:event hot path ordering', () => {
 
   it('isolates Agent Island interaction updates after renderer delivery', () => {
     const interactionListenerSource = extractInstallDesktopInteractionListenerSource();
+    const epochCaptureIndex = interactionListenerSource.indexOf(
+      'getAgentIslandService()?.captureInteractionEpoch(session.id)',
+    );
     const releaseBoundaryIndex = interactionListenerSource.indexOf(
       'await waitForReleasedOutput(session.id);',
     );
@@ -142,6 +147,8 @@ describe('maker:event hot path ordering', () => {
     const pendingIndex = interactionListenerSource.indexOf('pendingInteractionResolvers.set(req.requestId, entry);');
     const islandIndex = interactionListenerSource.indexOf('handleAgentIslandInteractionAfterBroadcast(');
 
+    expect(epochCaptureIndex).toBeGreaterThanOrEqual(0);
+    expect(releaseBoundaryIndex).toBeGreaterThan(epochCaptureIndex);
     expect(releaseBoundaryIndex).toBeGreaterThanOrEqual(0);
     expect(flushIndex).toBeGreaterThan(releaseBoundaryIndex);
     expect(broadcastIndex).toBeGreaterThan(flushIndex);
@@ -211,6 +218,9 @@ describe('maker:event hot path ordering', () => {
       directAbortStart,
     );
     const directAbortSource = source.slice(directAbortStart, directAbortEnd);
+    const hookAbortStart = hookControlSource.indexOf('abortSession: async (sessionId) => {');
+    const hookAbortEnd = hookControlSource.indexOf('\n      // session.archive', hookAbortStart);
+    const hookAbortSource = hookControlSource.slice(hookAbortStart, hookAbortEnd);
 
     expect(source).toContain('function handleAgentIslandSessionStopped(sessionId: string): void');
     expect(coordinatorAbortStart).toBeGreaterThanOrEqual(0);
@@ -246,6 +256,28 @@ describe('maker:event hot path ordering', () => {
       directAbortSource,
       'handleAgentIslandSessionStopped(sessionId);',
       'await sess.abort();',
+    );
+    expect(hookAbortStart).toBeGreaterThanOrEqual(0);
+    expect(hookAbortEnd).toBeGreaterThan(hookAbortStart);
+    expectOrder(
+      hookAbortSource,
+      'const session = getMaker().getSession(sessionId);',
+      'if (!session) return;',
+    );
+    expectOrder(
+      hookAbortSource,
+      'if (!session) return;',
+      'getAgentIslandService()?.handleSessionStopped(sessionId);',
+    );
+    expectOrder(
+      hookAbortSource,
+      'getAgentIslandService()?.handleSessionStopped(sessionId);',
+      'cancelReleasedOutput(sessionId);',
+    );
+    expectOrder(
+      hookAbortSource,
+      'getAgentIslandService()?.handleSessionStopped(sessionId);',
+      'await session.abort();',
     );
   });
 

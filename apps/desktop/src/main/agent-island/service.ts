@@ -226,10 +226,13 @@ export class AgentIslandService {
   private readonly mutedCompletionSoundSessionIds = new Set<string>();
   private readonly stoppedSessionIds = new Set<string>();
   private readonly replacementTurnPendingSessionIds = new Set<string>();
+  private readonly interactionEpochBySession = new Map<string, number>();
+  private interactionEpochSequence = 0;
   private readonly sessionHadAttentionAtRunStart = new Map<string, boolean>();
   private readonly userPromptRollbackTokens = new Map<string, {
     state: AgentIslandUserPromptRollbackToken;
     attention: { existed: boolean; value: boolean };
+    interactionEpoch: { existed: boolean; value: number };
     wasStopped: boolean;
     wasReplacementTurnPending: boolean;
   }>();
@@ -541,6 +544,7 @@ export class AgentIslandService {
     this.mutedCompletionSoundSessionIds.clear();
     this.stoppedSessionIds.clear();
     this.replacementTurnPendingSessionIds.clear();
+    this.interactionEpochBySession.clear();
     this.sessionHadAttentionAtRunStart.clear();
     this.userPromptRollbackTokens.clear();
     this.deferredCompletions.clear();
@@ -581,9 +585,18 @@ export class AgentIslandService {
   handleAgentEvent(meta: AgentIslandSessionMeta, event: AgentEvent): void {
     const hydrated = this.hydrateMeta(meta);
     // Stop is applied synchronously by the main-process abort path. A provider
-    // cancellation is only its terminal tail and may arrive after a replacement
-    // turn has already started, so it must never stop or complete by session id.
-    if (isCancelledTerminalEvent(event)) return;
+    // cancellation that arrives inside that boundary is only its terminal tail.
+    // Outside a Stop/replacement boundary, cancellation can also be the sole
+    // terminal event (for example Codex permission tightening), so it must close
+    // the visible run without treating it as a successful completion.
+    if (isCancelledTerminalEvent(event)) {
+      if (
+        this.stoppedSessionIds.has(hydrated.sessionId) ||
+        this.replacementTurnPendingSessionIds.has(hydrated.sessionId)
+      ) return;
+      this.handleSessionStopped(hydrated.sessionId);
+      return;
+    }
     // Provider aborts can drain ordinary status/done events after the user has
     // already stopped the turn. Keep those tails from recreating a completed
     // island entry until a replacement prompt begins the restart handshake.
@@ -695,6 +708,8 @@ export class AgentIslandService {
   handleUserPrompt(meta: AgentIslandSessionMeta, prompt: string, debugMeta: AgentIslandUserPromptDebugMeta = {}): void {
     const receivedAt = Date.now();
     const hydrated = this.hydrateMeta(meta);
+    const previousInteractionEpoch = this.interactionEpochBySession.get(hydrated.sessionId);
+    this.advanceInteractionEpoch(hydrated.sessionId);
     const wasStopped = this.stoppedSessionIds.has(hydrated.sessionId);
     const wasReplacementTurnPending = this.replacementTurnPendingSessionIds.has(hydrated.sessionId);
     if (wasStopped) {
@@ -708,6 +723,9 @@ export class AgentIslandService {
         attention: this.sessionHadAttentionAtRunStart.has(hydrated.sessionId)
           ? { existed: true, value: this.sessionHadAttentionAtRunStart.get(hydrated.sessionId) ?? false }
           : { existed: false, value: false },
+        interactionEpoch: previousInteractionEpoch === undefined
+          ? { existed: false, value: 0 }
+          : { existed: true, value: previousInteractionEpoch },
         wasStopped,
         wasReplacementTurnPending,
       });
@@ -726,6 +744,7 @@ export class AgentIslandService {
       if (!wasReplacementTurnPending) {
         this.replacementTurnPendingSessionIds.delete(hydrated.sessionId);
       }
+      this.restoreInteractionEpoch(hydrated.sessionId, previousInteractionEpoch);
       return;
     }
     this.ensureMetadata(hydrated.sessionId);
@@ -755,11 +774,31 @@ export class AgentIslandService {
     else this.stoppedSessionIds.delete(sessionId);
     if (snapshot.wasReplacementTurnPending) this.replacementTurnPendingSessionIds.add(sessionId);
     else this.replacementTurnPendingSessionIds.delete(sessionId);
+    this.restoreInteractionEpoch(
+      sessionId,
+      snapshot.interactionEpoch.existed ? snapshot.interactionEpoch.value : undefined,
+    );
     this.publish();
   }
 
-  handleInteractionRequest(meta: AgentIslandSessionMeta, request: InteractionRequest): void {
+  /**
+   * Captures the user-turn boundary before interaction delivery crosses async
+   * output-release work. A prompt/Stop that wins that race advances the epoch,
+   * allowing delayed requests from the previous turn to be rejected precisely.
+   */
+  captureInteractionEpoch(sessionId: string): number {
+    const current = this.interactionEpochBySession.get(sessionId);
+    if (current !== undefined) return current;
+    return this.advanceInteractionEpoch(sessionId);
+  }
+
+  handleInteractionRequest(
+    meta: AgentIslandSessionMeta,
+    request: InteractionRequest,
+    interactionEpoch: number,
+  ): void {
     const hydrated = this.hydrateMeta(meta);
+    if (this.interactionEpochBySession.get(hydrated.sessionId) !== interactionEpoch) return;
     if (this.stoppedSessionIds.has(hydrated.sessionId)) return;
     if (request.kind === 'permission') {
       this.permissionRequests.set(request.requestId, { sessionId: hydrated.sessionId, request });
@@ -823,6 +862,7 @@ export class AgentIslandService {
   handleSessionClosed(sessionId: string): void {
     this.stoppedSessionIds.delete(sessionId);
     this.replacementTurnPendingSessionIds.delete(sessionId);
+    this.interactionEpochBySession.delete(sessionId);
     this.clearSilencedRunForSession(sessionId);
     this.sessionHadAttentionAtRunStart.delete(sessionId);
     for (const key of this.userPromptRollbackTokens.keys()) {
@@ -844,6 +884,7 @@ export class AgentIslandService {
    * completion card, unread attention, or completion sound behind.
    */
   handleSessionStopped(sessionId: string): void {
+    this.advanceInteractionEpoch(sessionId);
     this.stoppedSessionIds.add(sessionId);
     this.replacementTurnPendingSessionIds.delete(sessionId);
     this.clearSilencedRunForSession(sessionId);
@@ -859,6 +900,20 @@ export class AgentIslandService {
     const hadSession = this.state.sessions.has(sessionId);
     removeAgentIslandSession(this.state, sessionId);
     if (hadSession) this.publish();
+  }
+
+  private advanceInteractionEpoch(sessionId: string): number {
+    this.interactionEpochSequence += 1;
+    this.interactionEpochBySession.set(sessionId, this.interactionEpochSequence);
+    return this.interactionEpochSequence;
+  }
+
+  private restoreInteractionEpoch(sessionId: string, epoch: number | undefined): void {
+    if (epoch === undefined) {
+      this.interactionEpochBySession.delete(sessionId);
+      return;
+    }
+    this.interactionEpochBySession.set(sessionId, epoch);
   }
 
   /**

@@ -120,8 +120,8 @@ describe('mobile session composer desktop-first surface', () => {
     // + 号打开可拖动 Context 面板(附件 / 计划模式 / 目标模式收在面板内)。
     expect(source).toContain('testID="session.contextSheet"');
     expect(attachmentButtonSource).toContain('setContextSheetOpen(true)');
-    expect(source).toContain('<ContextSheetGroup label="模式">');
-    expect(source).toContain('<ContextSheetGroup label="添加">');
+    expect(source).toContain("<ContextSheetGroup label={t('session.common.groupMode')}>");
+    expect(source).toContain("<ContextSheetGroup label={t('session.common.groupAdd')}>");
     expect(source).not.toContain('testID="session.attachmentPathPanel"');
     expect(source).not.toContain('被控电脑上的文件路径');
     expect(source).toContain('testID="session.composerActivityStatus"');
@@ -546,7 +546,7 @@ describe('mobile session composer desktop-first surface', () => {
     expect(voiceSource.indexOf('isMobileRealtimeAudioAvailable()')).toBeLessThan(
       voiceSource.indexOf('requestRecordingPermissionsAsync()'),
     );
-    expect(voiceSource).toContain('MOBILE_VOICE_REALTIME_AUDIO_UNAVAILABLE_ERROR');
+    expect(voiceSource).toContain('mobileVoiceRealtimeAudioUnavailableError()');
     expect(voiceSource).toContain('const latestDraft = await controller.stop();');
     expect(voiceSource).toContain('await sendLatest({ draftOverride: latestDraft });');
     expect(composerInputSource).toContain('inputTestID="session.composerInput"');

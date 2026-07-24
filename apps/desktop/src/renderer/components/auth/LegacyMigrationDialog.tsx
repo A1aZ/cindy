@@ -15,8 +15,8 @@ type LegacyMigrationPhase = 'confirm' | 'running' | 'done' | 'failed' | null;
  *  - running:说明保留不变,按钮进 loading(文案居中 + 右侧 compositor-only
  *    Spinner,禁用;confirm/running 期间无任何关闭监听,天然拦截);
  *  - failed:同一张卡换失败文案,无按钮(figma 567:819/567:776),点击页面
- *    任意处或按 Escape 关闭(main 侧同步清态——设计稿删除按钮后必须保留
- *    等价的解除路径,否则迁移失败会把用户永久锁在此屏);
+ *    任意处或按 Escape/Enter/Space 关闭(main 侧同步清态——设计稿删除按钮
+ *    后必须保留等价的解除路径,否则迁移失败会把用户永久锁在此屏);
  *  - done:直接关闭,登录流程继续(有意不做完成确认,遵循既有行为)。
  *
  * 视觉参数权威:figma CINDY 文件「迁移旧版本数据_white/_dark」六帧
@@ -57,7 +57,7 @@ export function LegacyMigrationDialog() {
   const running = phase === 'running';
   // confirm/running 期间唯一可聚焦元素;Tab/Shift+Tab 一律圈回按钮(最小
   // focus trap——迁移期间禁止键盘走出本屏触达底层 UI)。failed 无按钮,
-  // 焦点圈到容器自身,点击任意处或 Escape 在容器上关闭。
+  // 焦点圈到容器自身,点击任意处或 Escape/Enter/Space 关闭。
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
 

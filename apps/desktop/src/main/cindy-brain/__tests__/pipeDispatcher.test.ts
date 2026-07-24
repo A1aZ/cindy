@@ -248,6 +248,103 @@ describe('超时与收卷', () => {
   });
 });
 
+describe('长任务续命(hold / release / tool-progress)', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('holdCall 把窗口延到代办预算 + 交卷余量;原基础窗口过点不超时', async () => {
+    const h = makeHarness({ timeoutMs: 1000 });
+    const p = h.dispatcher.callGhostTool(CALL);
+    await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+    const callId = h.sent[0].callId;
+
+    h.dispatcher.holdCall(callId, 5_000); // deadline = 5000 + 60_000 余量
+    vi.advanceTimersByTime(64_999);
+    expect(h.dispatcher.pendingCount()).toBe(1);
+    vi.advanceTimersByTime(1);
+    await expect(p).resolves.toMatchObject({ ok: false, errorCode: 'TIMEOUT' });
+  });
+
+  it('releaseCall 收回长 hold(不短于基础窗口 + 交卷余量);多单代办计数归零才收', async () => {
+    const h = makeHarness({ timeoutMs: 1000 });
+    const p = h.dispatcher.callGhostTool(CALL);
+    await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+    const callId = h.sent[0].callId;
+
+    h.dispatcher.holdCall(callId, 600_000);
+    h.dispatcher.holdCall(callId, 600_000);
+    vi.advanceTimersByTime(10_000);
+
+    h.dispatcher.releaseCall(callId); // 还有一单在途:不收
+    vi.advanceTimersByTime(120_000);  // t=130_000,若已收(70_000 到点)早超了
+    expect(h.dispatcher.pendingCount()).toBe(1);
+
+    h.dispatcher.releaseCall(callId); // 全部收工:收到 now + 60_000 余量
+    vi.advanceTimersByTime(59_999);
+    expect(h.dispatcher.pendingCount()).toBe(1);
+    vi.advanceTimersByTime(1);
+    await expect(p).resolves.toMatchObject({ ok: false, errorCode: 'TIMEOUT' });
+  });
+
+  it('tool-progress 心跳每次续满一个基础档;验身与配对同交卷纪律', async () => {
+    const h = makeHarness({ timeoutMs: 1000 });
+    const p = h.dispatcher.callGhostTool(CALL);
+    await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+    const callId = h.sent[0].callId;
+
+    vi.advanceTimersByTime(800);
+    // 冒名心跳:拒,且不影响窗口。
+    expect(h.dispatcher.handleToolProgress('evil-ghost', { callId }).accepted).toBe(false);
+    // 载荷非法 / 查无 callId:拒不炸。
+    expect(h.dispatcher.handleToolProgress('art', {}).accepted).toBe(false);
+    expect(h.dispatcher.handleToolProgress('art', { callId: 'ghost-town' }).accepted).toBe(false);
+
+    expect(h.dispatcher.handleToolProgress('art', { callId }).accepted).toBe(true); // t=800 → 续到 1800
+    vi.advanceTimersByTime(999);
+    expect(h.dispatcher.pendingCount()).toBe(1);
+    vi.advanceTimersByTime(1);
+    await expect(p).resolves.toMatchObject({ ok: false, errorCode: 'TIMEOUT' });
+  });
+
+  it('续命从派发起算不越过 30 分钟天花板;超时后 hold/心跳皆无效', async () => {
+    const h = makeHarness({ timeoutMs: 1000 });
+    const p = h.dispatcher.callGhostTool(CALL);
+    // 天花板从派发时刻起算:这里不用 vi.waitFor(fake timers 下它会偷偷
+    // advance 虚拟时钟,把绝对边界打偏);running 态派发是同步完成的。
+    expect(h.sent).toHaveLength(1);
+    const callId = h.sent[0].callId;
+
+    h.dispatcher.holdCall(callId, 10 * 3600_000); // 10 小时预算 → 钳到 30 分钟
+    vi.advanceTimersByTime(30 * 60_000 - 1);
+    expect(h.dispatcher.pendingCount()).toBe(1);
+    vi.advanceTimersByTime(1);
+    await expect(p).resolves.toMatchObject({ ok: false, errorCode: 'TIMEOUT' });
+
+    // 已收卷:心跳拒;hold 静默无害。
+    expect(h.dispatcher.handleToolProgress('art', { callId }).accepted).toBe(false);
+    h.dispatcher.holdCall(callId, 1000);
+    expect(h.dispatcher.pendingCount()).toBe(0);
+  });
+
+  it('hold 期间正常交卷照常 resolve', async () => {
+    const h = makeHarness({ timeoutMs: 1000 });
+    const p = h.dispatcher.callGhostTool(CALL);
+    await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+    const callId = h.sent[0].callId;
+
+    h.dispatcher.holdCall(callId, 600_000);
+    vi.advanceTimersByTime(200_000);
+    const outcome = h.dispatcher.handleToolResult('art', {
+      type: 'tool-result',
+      callId,
+      ok: true,
+      result: { url: 'cindy-media://blobs/v.mp4' },
+    });
+    expect(outcome.accepted).toBe(true);
+    await expect(p).resolves.toEqual({ ok: true, result: { url: 'cindy-media://blobs/v.mp4' } });
+  });
+});
+
 describe('预铸 callId(卡槽③贯通)', () => {
   it('传入 callId 时下行载荷使用同一值;交卷按它配对', async () => {
     const h = makeHarness();

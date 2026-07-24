@@ -3321,10 +3321,6 @@ export type GhostPipeModelResult =
        */
       width?: number;
       height?: number;
-      /** 异步任务号(仅 query_job 完成分支带回;同步代办缺省)。 */
-      jobId?: string;
-      /** 异步任务完成态(仅 query_job 完成分支带回)。 */
-      status?: 'done';
     }
   | {
       ok: true;
@@ -3335,6 +3331,20 @@ export type GhostPipeModelResult =
       expectedSeconds?: number;
       /** 已耗时(秒;仅 query_job 返回)。 */
       elapsedSeconds?: number;
+    }
+  | {
+      /**
+       * query_job 完成态(独立成员,jobId/status 必填):`'status' in r`
+       * 即可与同步成功分支可靠判别。取件字段与同步成功分支同形。
+       */
+      ok: true;
+      jobId: string;
+      status: 'done';
+      url: string;
+      hash: string;
+      ext: string;
+      model: string;
+      modelLabel: string;
     }
   | { ok: false; message: string };
 

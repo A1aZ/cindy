@@ -212,6 +212,12 @@ describe('mergeCodexAccountUsageSnapshot', () => {
     expect(mainSource).toContain('function splitPersistedCodexAccountUsage(');
     expect(mainSource).toContain("incoming.source === 'openai-web'");
     expect(hookSource).toContain('function splitCodexAccountUsagePayload(');
+    // CLI turn 事件后不再拉 getAccount 触发 WHAM 刷新 (CLI chip 不显示 web 槽,
+    // 白耗后台请求; review 反馈) —— bridge 槽保鲜走 main 的 bridge turn-done
+    // 触发 + mount 读 + 悬念期催刷
+    expect(hookSource).not.toContain('refreshWebUsage');
+    // web-only 组合 payload 上浮归属字段, WHAM reader 的 accountId 归属判断不失配
+    expect(mainSource).toContain('accountId: web.accountId');
   });
 });
 

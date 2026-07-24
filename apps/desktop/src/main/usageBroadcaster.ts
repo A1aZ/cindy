@@ -316,11 +316,18 @@ function hasCodexSnapshotContent(snapshot: RateLimitSnapshot | null | undefined)
 
 /** 两槽 → 组合 payload;两槽全空 → null。 */
 function buildCodexAccountUsagePayload(): CodexAccountUsagePayload | null {
-  if (!codexAppServerUsageSnapshot && !codexWebAccountUsageSnapshot) return null;
-  return {
-    ...(codexAppServerUsageSnapshot ?? {}),
-    webSnapshot: codexWebAccountUsageSnapshot ?? null,
-  };
+  const app = codexAppServerUsageSnapshot;
+  const web = codexWebAccountUsageSnapshot;
+  if (!app && !web) return null;
+  if (!app && web) {
+    // web-only: 顶层无 CLI 数据, 但归属字段必须上浮 —— WHAM reader 用顶层
+    // accountId 判断缓存归属(codexAccountUsageRefresh), 缺失会被当成账号失配,
+    // 每次读都清缓存 + 强刷(bridge-only 用户 warm-start 永远拿 null)。
+    // accountId / updatedAt 不算「内容」(hasCodexSnapshotContent), 归槽水合
+    // 不会据此伪造出 app 槽。
+    return { accountId: web.accountId, updatedAt: web.updatedAt, webSnapshot: web };
+  }
+  return { ...(app as RateLimitSnapshot), webSnapshot: web ?? null };
 }
 
 /**

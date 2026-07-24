@@ -98,6 +98,9 @@ describe('codex account usage source slots', () => {
     const payload = await broadcaster.readCodexAccountUsageSnapshot();
     expect(payload?.primary).toBeUndefined();
     expect(payload?.webSnapshot?.limitId).toBe('codex_bengalfox');
+    // web-only payload 必须上浮归属字段: WHAM reader 用顶层 accountId 判缓存归属,
+    // 缺失会被当成账号失配, 每次读都清缓存 + 强刷 (review 反馈)。
+    expect(payload?.accountId).toBe('acc-1');
   });
 
   it('hydrates a legacy app-server row into the top-level slot', async () => {

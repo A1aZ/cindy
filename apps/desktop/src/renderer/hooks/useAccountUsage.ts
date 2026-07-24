@@ -299,32 +299,15 @@ export function useAccountUsage(
       electronAPI?: {
         maker?: {
           onEvent?: (cb: (data: unknown) => void) => () => void;
-          usage?: {
-            getAccount?: (agentKind: 'claude-code' | 'codex') => Promise<unknown | null>;
-          };
         };
       };
     }).electronAPI?.maker;
     if (!api?.onEvent) return;
     let cancelled = false;
-    // turn 事件后顺带拉一次组合快照(触发 main 的 WHAM 后台刷新, 供 bridge 槽
-    // 保鲜)。分槽后这不会再覆盖刚收到的 app-server 数据 —— WHAM 结果只落 web 槽。
-    const refreshWebUsage = (): void => {
-      const getAccount = api.usage?.getAccount;
-      if (!getAccount) return;
-      void getAccount('codex')
-        .then((persisted) => {
-          if (cancelled) return;
-          applyCodexAccountUsageSnapshot(
-            persisted,
-            () => setSnapshot(selectCodexSlot(quotaSource)),
-            { clearOnNull: false },
-          );
-        })
-        .catch(() => {
-          /* Best-effort refresh; keep the last reliable snapshot. */
-        });
-    };
+    // 注: 这里不再在 turn 事件后拉 getAccount 触发 WHAM 刷新 —— CLI chip 只显示
+    // app-server 槽, WHAM 刷新帮不上它, 白耗后台请求(旧行为还会把 WHAM 桶合并
+    // 进单槽缓存, 正是「turn 刚结束数据被顶掉」的来源)。bridge 槽的保鲜由
+    // main 的 bridge turn-done 触发 + mount 读 + 悬念期催刷负责。
     const unsubscribe = api.onEvent((data: unknown) => {
       if (cancelled) return;
       const payload = data as {
@@ -339,7 +322,6 @@ export function useAccountUsage(
         payload.event.data,
         () => setSnapshot(selectCodexSlot(quotaSource)),
       );
-      refreshWebUsage();
     });
     return () => {
       cancelled = true;

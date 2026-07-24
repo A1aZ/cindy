@@ -15,9 +15,9 @@
 export const LOGIN_STAGE_WIDTH = 1819;
 export const LOGIN_STAGE_HEIGHT = 2098;
 
-/** demo desktopScale 逐字移植:min(1, h/2098, (w-24)/680)。 */
+/** demo desktopScale 逐字移植:min(1, h/LOGIN_STAGE_HEIGHT, (w-24)/680)。 */
 export function desktopScale(w: number, h: number): { scale: number } {
-  const heightFit = h / 2098;
+  const heightFit = h / LOGIN_STAGE_HEIGHT;
   const panelGuard = (w - 24) / 680; // 唯一宽度介入:极端窄高组合下保障 680 宽功能面板不被裁
   return { scale: Math.min(1, heightFit, panelGuard) };
 }
@@ -62,15 +62,15 @@ export interface PanelPlacement {
 export function panelPlacement(w: number, h: number, groupY: number): PanelPlacement {
   const { scale: brandScale } = desktopScale(w, h);
   const panelHeight = 560 * PANEL_FIXED_SCALE; // 登录整体组高 560(figma §5.1)
-  const anchorCenterY = h / 2 + (groupY + 280 - 2098 / 2) * brandScale;
-  const brandBottomY = h / 2 + (1209 - 2098 / 2) * brandScale;
+  const anchorCenterY = h / 2 + (groupY + 280 - LOGIN_STAGE_HEIGHT / 2) * brandScale;
+  const brandBottomY = h / 2 + (1209 - LOGIN_STAGE_HEIGHT / 2) * brandScale;
   let topY = anchorCenterY - panelHeight / 2;
   topY = Math.max(topY, brandBottomY + 24);
   topY = Math.min(topY, h - 24 - panelHeight);
   topY = Math.max(topY, 24);
   return {
     scale: PANEL_FIXED_SCALE,
-    centerX: w / 2 + (910 - 1819 / 2) * PANEL_FIXED_SCALE,
+    centerX: w / 2 + (910 - LOGIN_STAGE_WIDTH / 2) * PANEL_FIXED_SCALE,
     topY,
   };
 }
@@ -95,8 +95,8 @@ export interface BrandPlacement {
 export function brandPlacement(w: number, h: number): BrandPlacement {
   const { scale: base } = desktopScale(w, h);
   const { topY: panelTop } = panelPlacement(w, h, 1229);
-  const blockTop = h / 2 + (275 - 2098 / 2) * base;
-  const blockBottom = h / 2 + (1209 - 2098 / 2) * base;
+  const blockTop = h / 2 + (275 - LOGIN_STAGE_HEIGHT / 2) * base;
+  const blockBottom = h / 2 + (1209 - LOGIN_STAGE_HEIGHT / 2) * base;
   const limit = panelTop - 12;
   const overflow = blockBottom - limit;
   if (overflow <= 0) return { scale: base, translateY: 0 };
@@ -104,6 +104,6 @@ export function brandPlacement(w: number, h: number): BrandPlacement {
   if (overflow <= maxShift) return { scale: base, translateY: -overflow };
   // 压缩档:块高(934 设计px)恰好塞进 [12, limit];画布仍中心缩放,位移把块顶放到 12。
   const scale2 = Math.max(limit - 12, 0) / 934;
-  const blockTop2 = h / 2 + (275 - 2098 / 2) * scale2;
+  const blockTop2 = h / 2 + (275 - LOGIN_STAGE_HEIGHT / 2) * scale2;
   return { scale: scale2, translateY: 12 - blockTop2 };
 }

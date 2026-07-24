@@ -9,7 +9,7 @@ import { LOGIN_GROUP } from './loginDesignTokens';
  * PR2b 所有权拆分(implementation-plan Step 3b WHAT2):品牌视觉层(白底体系背景
  * 渐变/立绘/字标/Slogan)已整体迁入 `LoginBrandStage`(App 级 overlay,唯一渲染者);
  * 本组件只承载 LoginPage 唯一拥有的白色输入面板与第三方圆钮行(children),
- * 与品牌层共用同一 desktopScale 公式,保证 1819×2098 坐标系逐像素对齐。
+ * 面板恒定 0.5 缩放,垂直锚点/避让计算引用 desktopScale 来映射品牌坐标系。
  *
  * - 面板恒定 0.5 缩放(用户拍板 2026-07-23,design.md §11):文字/输入框在任何窗口
  *   保持设计标准大小;垂直锚点跟随品牌层 desktopScale 画布 + 品牌避让/视口 clamp

@@ -414,3 +414,19 @@ test("desktop .env allowlists local moderation dev overrides without replacing e
 		XDT_ENDPOINT_MANIFEST_FILE: "C:\\explicit\\endpoint.json",
 	});
 });
+
+test("desktop .env overrides respect explicit empty-string env values", () => {
+	const env = {
+		XDT_CONTENT_MODERATION: "",
+	};
+	applyDesktopDevEnvOverrides(
+		["XDT_CONTENT_MODERATION=1", "XDT_ENDPOINT_MANIFEST_FILE=/some/path"].join(
+			"\n",
+		),
+		env,
+	);
+	assert.deepEqual(env, {
+		XDT_CONTENT_MODERATION: "",
+		XDT_ENDPOINT_MANIFEST_FILE: "/some/path",
+	});
+});

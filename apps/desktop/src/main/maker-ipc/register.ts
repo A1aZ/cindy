@@ -5925,10 +5925,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     },
     // 意识拦截钩(订阅槽①):派发/落库前问已装钩子意识;fail-open 由
     // screenGhostUserMessage 内部收敛,快路径(无钩子意识)零开销。
-    screenUserMessage: async (sessionId, item) => {
+    screenUserMessage: async (sessionId, agentFacingText, item) => {
       // Run rewrites first: moderation must see the exact text that would be
       // persisted and dispatched.
-      const ghostVerdict = await screenGhostUserMessage(sessionId, item.text);
+      const ghostVerdict = await screenGhostUserMessage(sessionId, agentFacingText);
       if (ghostVerdict.action === 'block') return ghostVerdict;
       const moderationItem = ghostVerdict.action === 'rewrite'
         ? { ...item, text: ghostVerdict.text }

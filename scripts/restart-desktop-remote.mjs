@@ -165,7 +165,7 @@ function readEnvValue(content, key) {
  */
 export function applyDesktopDevEnvOverrides(content, env = process.env) {
   for (const key of ['XDT_CONTENT_MODERATION', 'XDT_ENDPOINT_MANIFEST_FILE']) {
-    if (env[key]) continue;
+    if (key in env) continue;
     const value = readEnvValue(content, key);
     if (value) env[key] = value;
   }

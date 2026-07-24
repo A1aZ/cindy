@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Building2, Copy, Pencil } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -36,6 +36,9 @@ export function UserProfileCard() {
   const [orgLogoError, setOrgLogoError] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const { t } = useTranslation();
+  // aria-label(动作)会覆盖子文本作为可访问名称;可见的 ID 文本经 aria-describedby
+  // 暴露给辅助技术,让读屏用户复制前也能核对 ID。
+  const userIdDescriptionId = useId();
 
   // 换头像(服务端资料更新)后给新地址重试的机会,
   // 不让一次历史加载失败永远钉死在首字母兜底上。
@@ -164,15 +167,16 @@ export function UserProfileCard() {
           type="button"
           onClick={() => void handleCopyUserId()}
           aria-label={t('settings.userProfile.copyUserId.action')}
+          aria-describedby={userIdDescriptionId}
           title={t('settings.userProfile.copyUserId.action')}
           className={cn(
-            '-ml-1.5 mt-0.5 flex min-w-0 max-w-full cursor-pointer items-center gap-1 rounded-md px-1.5 py-0.5 text-left',
+            '-ml-1.5 mt-0.5 flex min-w-0 max-w-full cursor-pointer items-center gap-1 rounded-full px-1.5 py-0.5 text-left',
             'text-12 text-[var(--text-tertiary)] transition-colors',
             'hover:bg-[var(--settings-profile-avatar-bg)] hover:text-[var(--text-secondary)]',
             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring-soft)]',
           )}
         >
-          <span className="min-w-0 truncate">
+          <span id={userIdDescriptionId} className="min-w-0 truncate">
             {t('settings.userProfile.copyUserId.display', { id: abbreviateUserId(user.id) })}
           </span>
           <Copy aria-hidden="true" size={11} className="shrink-0" />

@@ -101,6 +101,14 @@ describe('UserProfileCard copy user ID', () => {
     });
     expect(idButton.className).toContain('cursor-pointer');
     expect(idButton.className).toContain('hover:bg-[var(--settings-profile-avatar-bg)]');
+    // 交互件圆角走 pill 档(DESIGN.md Border Radius Scale,无 6px 档)。
+    expect(idButton.className).toContain('rounded-full');
+    // 可见 ID 经 aria-describedby 暴露给辅助技术(aria-label 只承载动作名)。
+    const describedById = idButton.getAttribute('aria-describedby');
+    expect(describedById).toBeTruthy();
+    expect(document.getElementById(describedById!)?.textContent).toBe(
+      'settings.userProfile.copyUserId.display:user-123',
+    );
 
     fireEvent.click(idButton);
 

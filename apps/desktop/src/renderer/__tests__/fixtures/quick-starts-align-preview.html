@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>PR #350 - Quick Starts Align Preview</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a1a; color: #e0e0e0; padding: 40px; }
+h2 { font-size: 14px; color: #888; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+.demo { margin-bottom: 60px; }
+.container { width: 100%; max-width: 1220px; margin: 0 auto; display: flex; flex-direction: column; align-items: flex-start; }
+.input-box { width: 100%; height: 56px; border-radius: 12px; border: 1px solid #3a3a3a; background: #2a2a2a; display: flex; align-items: center; padding: 0 16px; color: #666; font-size: 14px; }
+.quick-starts-title { font-size: 14px; font-weight: 500; color: #888; margin-top: 42px; margin-bottom: 10px; padding: 0 2px; }
+.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; width: 100%; }
+.card { border-radius: 12px; border: 1px solid #3a3a3a; background: #252525; padding: 16px; min-height: 100px; display: flex; flex-direction: column; gap: 8px; }
+.card-icon { width: 24px; height: 24px; border-radius: 6px; background: #3a3a3a; }
+.card-title { font-size: 13px; font-weight: 500; color: #ddd; }
+.card-desc { font-size: 12px; color: #888; line-height: 1.4; }
+
+/* Before: capped at 800px */
+.cards-before { max-width: 800px; }
+
+/* Guide lines */
+.guide { position: relative; }
+.guide::before, .guide::after { content: ''; position: absolute; top: 0; bottom: 0; width: 1px; background: #ff4444; opacity: 0.6; }
+.guide::before { left: 0; }
+.guide::after { right: 0; }
+.guide-after::before, .guide-after::after { background: #44ff44; }
+
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-left: 8px; }
+.badge-before { background: #ff4444; color: #fff; }
+.badge-after { background: #44ff44; color: #000; }
+.misalign-note { font-size: 12px; color: #ff8888; margin-top: 8px; padding-left: 2px; }
+.align-note { font-size: 12px; color: #88ff88; margin-top: 8px; padding-left: 2px; }
+</style>
+</head>
+<body>
+
+<div class="demo">
+<h2>Before <span class="badge badge-before">maxWidth: 800px</span></h2>
+<div class="container guide">
+  <div class="input-box">Ask anything or @ a specific agent...</div>
+  <div class="quick-starts-title">Quick Start</div>
+  <div class="cards cards-before">
+    <div class="card"><div class="card-icon"></div><div class="card-title">Write code</div><div class="card-desc">Generate clean, tested code</div></div>
+    <div class="card"><div class="card-icon"></div><div class="card-title">Debug</div><div class="card-desc">Find and fix issues</div></div>
+    <div class="card"><div class="card-icon"></div><div class="card-title">Explain</div><div class="card-desc">Understand complex code</div></div>
+    <div class="card"><div class="card-icon"></div><div class="card-title">Refactor</div><div class="card-desc">Improve structure</div></div>
+  </div>
+  <div class="misalign-note">Cards right edge stops at 800px while input stretches full width</div>
+</div>
+</div>
+
+<div class="demo">
+<h2>After <span class="badge badge-after">w-full (follows parent inputWidth)</span></h2>
+<div class="container guide guide-after">
+  <div class="input-box">Ask anything or @ a specific agent...</div>
+  <div class="quick-starts-title">Quick Start</div>
+  <div class="cards">
+    <div class="card"><div class="card-icon"></div><div class="card-title">Write code</div><div class="card-desc">Generate clean, tested code</div></div>
+    <div class="card"><div class="card-icon"></div><div class="card-title">Debug</div><div class="card-desc">Find and fix issues</div></div>
+    <div class="card"><div class="card-icon"></div><div class="card-title">Explain</div><div class="card-desc">Understand complex code</div></div>
+    <div class="card"><div class="card-icon"></div><div class="card-title">Refactor</div><div class="card-desc">Improve structure</div></div>
+  </div>
+  <div class="align-note">Cards align flush with input box edges</div>
+</div>
+</div>
+
+</body>
+</html>

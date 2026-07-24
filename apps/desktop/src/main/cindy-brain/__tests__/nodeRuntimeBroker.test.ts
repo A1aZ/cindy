@@ -385,11 +385,12 @@ describe('nodeRuntimeBroker · 启动瞬时失败重试(2026-07-24)', () => {
     expect(spawnCount).toBe(1);
   });
 
-  it('stop 后新请求仍被阻拦;startResident 清除停止标记后恢复', async () => {
+  it('stop 期间上层禁用阻拦请求;重新启用后 resident 由 startResident 恢复', async () => {
     const ghost = fakeGhost({ lifecycle: 'resident' });
+    let enabled = true;
     let spawnCount = 0;
     const broker = new GhostNodeRuntimeBroker({
-      getGhost: () => ghost,
+      getGhost: () => (enabled ? ghost : null),
       spawnProcess: () => {
         spawnCount += 1;
         return makeAutoReplyProcess() as unknown as NodeWorkerProcess;
@@ -397,14 +398,41 @@ describe('nodeRuntimeBroker · 启动瞬时失败重试(2026-07-24)', () => {
     });
 
     broker.stop('node-ghost');
+    enabled = false;
     const blocked = await broker.handleRequest('node-ghost', rpcRequest());
-    expect(blocked).toMatchObject({ ok: false, errorCode: 'PROCESS_START_FAILED' });
+    expect(blocked).toMatchObject({ ok: false, errorCode: 'PERMISSION_DENIED' });
     expect(spawnCount).toBe(0);
 
+    enabled = true;
     await broker.startResident(ghost);
     expect(spawnCount).toBe(1);
     const ok = await broker.handleRequest('node-ghost', rpcRequest());
     expect(ok).toMatchObject({ ok: true });
+    broker.destroyAll();
+  });
+
+  it('按需插件 stop 后:上层重新启用时 handleRequest 自动恢复', async () => {
+    const ghost = fakeGhost();
+    let enabled = true;
+    let spawnCount = 0;
+    const broker = new GhostNodeRuntimeBroker({
+      getGhost: () => (enabled ? ghost : null),
+      spawnProcess: () => {
+        spawnCount += 1;
+        return makeAutoReplyProcess() as unknown as NodeWorkerProcess;
+      },
+    });
+
+    broker.stop('node-ghost');
+    enabled = false;
+    const blocked = await broker.handleRequest('node-ghost', rpcRequest());
+    expect(blocked).toMatchObject({ ok: false, errorCode: 'PERMISSION_DENIED' });
+    expect(spawnCount).toBe(0);
+
+    enabled = true;
+    const ok = await broker.handleRequest('node-ghost', rpcRequest());
+    expect(ok).toMatchObject({ ok: true });
+    expect(spawnCount).toBe(1);
     broker.destroyAll();
   });
 

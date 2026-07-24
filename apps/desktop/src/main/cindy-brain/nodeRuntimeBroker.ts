@@ -407,6 +407,9 @@ export class GhostNodeRuntimeBroker {
     if (!ghost?.enabled || !ghost.manifest.slots.includes('node') || !ghost.manifest.node) {
       return errorResult('PERMISSION_DENIED', '插件未申请本地 Node 权限，或当前未启用');
     }
+    // getGhost 确认插件当前已启用——这是按需插件的"后更新/重启边界",
+    // 清除 stop() 留下的停止标记,使按需进程可以恢复启动。
+    this.stoppedGhosts.delete(ghostId);
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
       return errorResult('INVALID_REQUEST', 'node-request 载荷必须是对象');
     }
@@ -874,6 +877,10 @@ export class GhostNodeRuntimeBroker {
         if (this.destroyed || this.stoppedGhosts.has(ghost.manifest.id)) throw lastError;
         const fresh = this.deps.getGhost(ghost.manifest.id);
         if (!fresh?.enabled) throw lastError;
+        // 跨更新边界时重验入口:新 manifest 可能已不再申报该 entry。
+        if (!fresh.manifest.node) throw lastError;
+        const declaredEntries = [fresh.manifest.node.entry, ...(fresh.manifest.node.entries ?? [])];
+        if (!declaredEntries.includes(entryRel)) throw lastError;
         current = fresh;
       }
       try {

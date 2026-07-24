@@ -27,8 +27,8 @@ Cindy 是一个开源、开箱即用的 AI Agent。她把多套 Harness、模型
 
 Cindy 运行在你自己的电脑上，使用你本地的文件和已登录的应用。首批兼容
 **Claude Code** 与 **Codex** 两套 Agent Harness——更多 Harness 正在接入，自研
-Harness 也在酝酿。模型与 Harness 自由组合、同一任务中随时切换（远程与 Orca
-协同会话暂不支持），工作现场、记忆、Skill 和工具始终连续；一个任务还可以由不同 Harness × 模型组合的多个 agent
+Harness 也在酝酿。模型与 Harness 自由组合、同一任务中随时切换，工作现场、记忆、
+Skill 和工具始终连续；一个任务还可以由不同 Harness × 模型组合的多个 agent
 规划、并行执行、独立 review。她能操作浏览器、电脑和手机，并支持从 IM 和
 定时任务派活。
 

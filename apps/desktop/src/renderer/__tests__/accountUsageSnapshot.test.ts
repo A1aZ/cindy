@@ -216,9 +216,12 @@ describe('mergeCodexAccountUsageSnapshot', () => {
     // 白耗后台请求; review 反馈) —— bridge 槽保鲜走 main 的 bridge turn-done
     // 触发 + mount 读 + 悬念期催刷
     expect(hookSource).not.toContain('refreshWebUsage');
-    // module 常驻订阅: chip 全部卸载期间的换号清空广播不丢 (与 claude hook 同语义)
+    // module 常驻订阅: chip 全部卸载期间的换号清空广播不丢 (与 claude hook 同语义)。
+    // 只在 codex 会话安装 —— 非 codex 会话没有可残留的缓存, 常驻监听白耗 (review 反馈)
     expect(hookSource).toContain('function ensureModuleSubscription(');
-    expect(hookSource).toContain('ensureModuleSubscription();');
+    expect(hookSource).toContain("if (vendorKey === 'codex') ensureModuleSubscription();");
+    // main 侧持久化水合拒绝数组等畸形 webSnapshot (review 反馈)
+    expect(mainSource).toContain('!Array.isArray(webSnapshot)');
     // web-only 组合 payload 上浮归属字段, WHAM reader 的 accountId 归属判断不失配
     expect(mainSource).toContain('accountId: web.accountId');
   });

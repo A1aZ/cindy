@@ -213,11 +213,22 @@ function clampEffortForClaude(e: Effort): ClaudeSdkEffort {
   return e;
 }
 
-async function applyClaudeEffortFlagSettings(q: Query, effort: ClaudeSdkEffort): Promise<void> {
+async function applyClaudeEffortFlagSettings(
+  q: Query,
+  effort: ClaudeSdkEffort,
+  maxFallback: Exclude<ClaudeSdkEffort, 'max'>,
+): Promise<ClaudeSdkEffort> {
   // Claude Code 2.1.219 accepts session-scoped `max` through apply_flag_settings.
-  // The pinned Agent SDK's persisted Settings type still omits `max`, so keep
-  // the compatibility cast isolated at this control-protocol boundary.
-  await q.applyFlagSettings({ effortLevel: effort } as Settings);
+  // Linux may still use an older system binary, so retry only a rejected `max`
+  // with the best lower effort supported by the selected model.
+  try {
+    await q.applyFlagSettings({ effortLevel: effort } as Settings);
+    return effort;
+  } catch (error) {
+    if (effort !== 'max') throw error;
+    await q.applyFlagSettings({ effortLevel: maxFallback } as Settings);
+    return maxFallback;
+  }
 }
 
 function rawMentionText(block: { path: string; kind?: 'file' | 'dir' | 'agent' }): string {
@@ -489,6 +500,16 @@ export class ClaudeCodeAgent extends BaseAgent {
     const descriptor = this.capabilities.availableModels.find((m) => m.id === model);
     if (descriptor && descriptor.efforts.length === 0) return undefined;
     return clampEffortForClaude(effort);
+  }
+
+  private sdkMaxEffortFallbackForModel(model: string): Exclude<ClaudeSdkEffort, 'max'> {
+    const descriptor = this.capabilities.availableModels.find((m) => m.id === model);
+    if (!descriptor) return 'xhigh';
+    const supported = new Set(descriptor.efforts.map(clampEffortForClaude));
+    for (const candidate of ['xhigh', 'high', 'medium', 'low'] as const) {
+      if (supported.has(candidate)) return candidate;
+    }
+    return 'high';
   }
 
   /**
@@ -1089,6 +1110,8 @@ export class ClaudeCodeAgent extends BaseAgent {
     const enableFileCheckpointing = this.capabilities.rewind.supported;
     const getSdkEffortForModel = (model: string, effort: Effort) =>
       this.sdkEffortForModel(model, effort);
+    const getSdkMaxEffortFallbackForModel = (model: string) =>
+      this.sdkMaxEffortFallbackForModel(model);
 
     // memoryOverride 闭包以前抽过 getter, buildSettings 接管后直接读 this.memoryOverride。
 
@@ -2757,8 +2780,16 @@ export class ClaudeCodeAgent extends BaseAgent {
           const sdkEffort = getSdkEffortForModel(mutableModel, targetEffort);
           if (sdkEffort) {
             try {
-              await applyClaudeEffortFlagSettings(q, sdkEffort);
-              log.debug(`${label}: replayed setEffort`, { effort: targetEffort });
+              const appliedEffort = await applyClaudeEffortFlagSettings(
+                q,
+                sdkEffort,
+                getSdkMaxEffortFallbackForModel(mutableModel),
+              );
+              log.debug(`${label}: replayed setEffort`, {
+                effort: targetEffort,
+                sdk: appliedEffort,
+                downgraded: appliedEffort !== sdkEffort,
+              });
             } catch (e) {
               log.warn(`${label}: replay setEffort failed`, { error: String(e) });
             }
@@ -3416,7 +3447,18 @@ export class ClaudeCodeAgent extends BaseAgent {
           return;
         }
         if (!isControlBlocked) {
-          await applyClaudeEffortFlagSettings(q, sdkEffort);
+          const appliedEffort = await applyClaudeEffortFlagSettings(
+            q,
+            sdkEffort,
+            getSdkMaxEffortFallbackForModel(mutableModel),
+          );
+          if (appliedEffort !== sdkEffort) {
+            log.warn('setEffort: runtime rejected max; applied model-compatible fallback', {
+              model: mutableModel,
+              requested: sdkEffort,
+              applied: appliedEffort,
+            });
+          }
         }
         mutableEffort = newEffort;
       },

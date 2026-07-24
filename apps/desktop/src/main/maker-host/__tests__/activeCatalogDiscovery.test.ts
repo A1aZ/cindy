@@ -324,4 +324,18 @@ describe('anthropic 发现条目的 cindyModelMeta 元数据基线', () => {
     expect(getCindyModelEffortBaseline('claude-fable-5')).toBeNull();
     expect(getCindyModelContextWindow('claude-fable-5')).toBeNull();
   });
+
+  it('active 目录未携带 cindyModelMeta 时回落 bundled v1 基线', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+    delete catalog.cindyModelMeta;
+    setActiveCatalog(catalog);
+    setAnthropicDiscoveredModels([anthro('claude-fable-5', 'Fable Raw', 0)]);
+
+    expect(anthropicList()[0]?.name).toBe('Fable 5');
+    expect(getCindyModelContextWindow('claude-fable-5')).toBe(1_000_000);
+    expect(getCindyModelEffortBaseline('claude-fable-5')).toEqual({
+      efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      defaultEffort: 'high',
+    });
+  });
 });

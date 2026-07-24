@@ -54,7 +54,7 @@ const TEST_MODELS: ModelDescriptor[] = [
     id: 'claude-opus-4-6',
     displayName: 'Claude Opus 4.6',
     contextWindow: 1_000_000,
-    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    efforts: ['low', 'medium', 'high', 'max'],
     defaultEffort: 'high',
   },
   {
@@ -244,6 +244,49 @@ describe('ClaudeCodeAgent runtime settings during rewind window', () => {
     await handle.setEffort?.('max');
 
     expect(firstQuery.applyFlagSettings).toHaveBeenLastCalledWith({ effortLevel: 'max' });
+
+    await handle.close();
+  });
+
+  it('falls back to the model-supported xhigh when an older runtime rejects max', async () => {
+    const { handle, firstQuery } = await startRewindableSession();
+    firstQuery.applyFlagSettings
+      .mockRejectedValueOnce(new Error('invalid effortLevel: max'))
+      .mockResolvedValueOnce(undefined);
+
+    await handle.setModel?.('claude-sonnet-5');
+    await expect(handle.setEffort?.('max')).resolves.toBeUndefined();
+
+    expect(firstQuery.applyFlagSettings.mock.calls.slice(-2)).toEqual([
+      [{ effortLevel: 'max' }],
+      [{ effortLevel: 'xhigh' }],
+    ]);
+
+    await handle.close();
+  });
+
+  it('falls back to high when the selected model does not support xhigh', async () => {
+    const { handle, firstQuery } = await startRewindableSession();
+    firstQuery.applyFlagSettings
+      .mockRejectedValueOnce(new Error('invalid effortLevel: max'))
+      .mockResolvedValueOnce(undefined);
+
+    await expect(handle.setEffort?.('max')).resolves.toBeUndefined();
+
+    expect(firstQuery.applyFlagSettings.mock.calls.slice(-2)).toEqual([
+      [{ effortLevel: 'max' }],
+      [{ effortLevel: 'high' }],
+    ]);
+
+    await handle.close();
+  });
+
+  it('does not retry failures for non-max effort levels', async () => {
+    const { handle, firstQuery } = await startRewindableSession();
+    firstQuery.applyFlagSettings.mockRejectedValueOnce(new Error('transport failed'));
+
+    await expect(handle.setEffort?.('high')).rejects.toThrow('transport failed');
+    expect(firstQuery.applyFlagSettings).toHaveBeenCalledTimes(1);
 
     await handle.close();
   });

@@ -109,6 +109,8 @@ const VALID_EFFORTS: ReadonlySet<string> = new Set([
 type Effort = CatalogModel['efforts'][number];
 /** base + custom + discovered augment 的合并缓存;null = 待重算(惰性)。 */
 let merged: Catalog | null = null;
+/** bundled + active v1 `cindyModelMeta` 的合并索引；目录变化时与 merged 一起失效。 */
+let effectiveCindyModelMetaIndex: Map<string, CindyModelMetaFields> | null = null;
 
 /**
  * 目录修订号。所有会改变 getActiveCatalog() 结果的写入都必须经过 markChanged，
@@ -121,6 +123,7 @@ let changedListener: ((nextRevision: number) => void) | null = null;
 
 function markChanged(): void {
   merged = null;
+  effectiveCindyModelMetaIndex = null;
   revision += 1;
   changedListener?.(revision);
 }
@@ -272,8 +275,13 @@ function buildCindyModelMetaIndex(meta: unknown): Map<string, CindyModelMetaFiel
  * 1M 启发式。非 v1 active 信封仍整段忽略，不能拿 bundled v1 混入未知 schema。
  */
 function buildEffectiveCindyModelMetaIndex(): Map<string, CindyModelMetaFields> {
+  if (effectiveCindyModelMetaIndex) return effectiveCindyModelMetaIndex;
+
   const bundled = buildCindyModelMetaIndex(BUNDLED_CATALOG.cindyModelMeta);
-  if (!base) return bundled;
+  if (!base || base.cindyModelMeta === undefined) {
+    effectiveCindyModelMetaIndex = bundled;
+    return effectiveCindyModelMetaIndex;
+  }
 
   const activeMeta = base.cindyModelMeta;
   if (
@@ -282,7 +290,8 @@ function buildEffectiveCindyModelMetaIndex(): Map<string, CindyModelMetaFields> 
     Array.isArray(activeMeta) ||
     (activeMeta as { version?: unknown }).version !== 1
   ) {
-    return new Map();
+    effectiveCindyModelMetaIndex = new Map();
+    return effectiveCindyModelMetaIndex;
   }
 
   const effective = new Map<string, CindyModelMetaFields>();
@@ -290,7 +299,8 @@ function buildEffectiveCindyModelMetaIndex(): Map<string, CindyModelMetaFields> 
   for (const [id, fields] of buildCindyModelMetaIndex(activeMeta)) {
     effective.set(id, { ...effective.get(id), ...fields });
   }
-  return effective;
+  effectiveCindyModelMetaIndex = effective;
+  return effectiveCindyModelMetaIndex;
 }
 
 export interface CindyModelEffortBaseline {

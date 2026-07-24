@@ -1,3 +1,6 @@
+import { homedir } from 'node:os';
+import path from 'node:path';
+
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BrowserWindow } from 'electron';
 import { SESSION_ACTIVITY_CHANNEL } from '@cindy/device-link';
@@ -1458,7 +1461,9 @@ describe('AgentIslandService native publishing', () => {
         source: 'claude-code',
         data: {
           toolUseId: 'tool-1',
-          fullText: `EPERM: operation not permitted, open '${process.env.HOME}/Desktop/blocked.txt'`,
+          // path.join(homedir(), …):PROTECTED_PATHS 用宿主分隔符构建,
+          // 拼 '${HOME}/…' 在 Windows 上永远不命中(正/反斜杠不一致)。
+          fullText: `EPERM: operation not permitted, open '${path.join(homedir(), 'Desktop', 'blocked.txt')}'`,
         },
       };
 
@@ -1498,7 +1503,7 @@ describe('AgentIslandService native publishing', () => {
           source: 'claude-code',
           data: {
             toolUseId: 'tool-1',
-            fullText: `EPERM: operation not permitted, open '${process.env.HOME}/Documents/blocked.txt'`,
+            fullText: `EPERM: operation not permitted, open '${path.join(homedir(), 'Documents', 'blocked.txt')}'`,
             isError: true,
           },
         },
@@ -1532,7 +1537,7 @@ describe('AgentIslandService native publishing', () => {
           source: 'codex',
           data: {
             toolUseId: 'tool-1',
-            fullText: `Log excerpt: EPERM under '${process.env.HOME}/Desktop/blocked.txt'`,
+            fullText: `Log excerpt: EPERM under '${path.join(homedir(), 'Desktop', 'blocked.txt')}'`,
             isError: false,
           },
         },
@@ -1562,7 +1567,7 @@ describe('AgentIslandService native publishing', () => {
           source: 'claude-code',
           data: {
             toolUseId: 'tool-1',
-            fullText: `EPERM: operation not permitted, open '${process.env.HOME}/Desktop/blocked.txt'`,
+            fullText: `EPERM: operation not permitted, open '${path.join(homedir(), 'Desktop', 'blocked.txt')}'`,
             isError: true,
           },
         },

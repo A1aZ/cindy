@@ -121,6 +121,7 @@ describe('ClaudeCodeAgent model capabilities', () => {
 
   it('falls back to the legacy hardcoded chain when window is unknown', () => {
     // 目录外模型 / 未传窗口的老调用方(title-one-shot)行为不变
+    expect(toSdkModelString('claude-opus-5')).toBe('claude-opus-5[1m]');
     expect(toSdkModelString('claude-sonnet-5')).toBe('claude-sonnet-5[1m]');
     expect(toSdkModelString('codex/gpt-5.5')).toBe('codex/gpt-5.5');
     expect(toSdkModelString('totally-unknown-model')).toBe('totally-unknown-model');

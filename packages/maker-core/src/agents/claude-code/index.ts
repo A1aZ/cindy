@@ -124,6 +124,7 @@ export function toSdkModelString(model: string, contextWindow?: number | null): 
 
 /** 目录窗口未知时的兜底映射链(与窗口规则引入前一致;haiku 日期重写已移除,见函数头)。 */
 function legacyToSdkModelString(model: string): string {
+  if (model === 'claude-opus-5') return 'claude-opus-5[1m]';
   if (model.includes('opus-4-8')) return 'claude-opus-4-8[1m]';
   if (model.includes('opus-4-7')) return 'claude-opus-4-7[1m]';
   if (model.includes('opus-4-6')) return 'claude-opus-4-6[1m]';

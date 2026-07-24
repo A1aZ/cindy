@@ -12,6 +12,7 @@ import { BUNDLED_CATALOG, type Catalog, type CatalogModel } from '@cindy/model-p
 
 import {
   getActiveCatalog,
+  getCindyModelContextWindow,
   getCindyModelEffortBaseline,
   setActiveCatalog,
   setAnthropicDiscoveredModels,
@@ -274,6 +275,7 @@ describe('anthropic 发现条目的 cindyModelMeta 元数据基线', () => {
       efforts: ['max'],
       defaultEffort: 'max',
     });
+    expect(getCindyModelContextWindow('claude-known')).toBe(123);
     expect(anthropicList().find((m) => m.id === 'claude-unknown')?.name).toBe('Unknown Raw');
   });
 
@@ -284,11 +286,13 @@ describe('anthropic 发现条目的 cindyModelMeta 元数据基线', () => {
     setAnthropicDiscoveredModels([anthro('claude-fable-5', 'Fable', 0)]);
     expect(anthropicList()[0]?.name).toBe('Fable');
     expect(getCindyModelEffortBaseline('claude-fable-5')).toBeNull();
+    expect(getCindyModelContextWindow('claude-fable-5')).toBeNull();
 
     catalog.cindyModelMeta = 'not-an-object';
     setActiveCatalog(JSON.parse(JSON.stringify(catalog)) as Catalog);
     setAnthropicDiscoveredModels([anthro('claude-fable-5', 'Fable', 0)]);
     expect(anthropicList()[0]?.name).toBe('Fable');
     expect(getCindyModelEffortBaseline('claude-fable-5')).toBeNull();
+    expect(getCindyModelContextWindow('claude-fable-5')).toBeNull();
   });
 });

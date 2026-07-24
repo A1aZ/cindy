@@ -30,9 +30,10 @@
  * 作废一切在途写回,并让新账号拉取不被旧 single-flight 吞掉。磁盘缓存写删经同一
  * 串行队列 + 原子 rename,保证登出删缓存不会被较早的 SDK 持久化反向覆盖。
  *
- * contextWindow 规则(Anthropic 无任何动态通道下发窗口,2026-07-19 与 Lizi 定案):
- *   HTTP 响应带 max_input_tokens 用之;否则默认 1M,仅 id 含 "haiku" 例外 200k。
- *   猜错 1M 的后果是该模型请求被拒(带 [1m] 后缀),由会话报错 + usage 校准暴露。
+ * contextWindow 规则:
+ *   HTTP 响应带 max_input_tokens 用之;否则读取当前 cindyModelMeta 的已知窗口；
+ *   目录未知时默认 1M,仅 id 含 "haiku" 例外 200k。这样已知旧模型不会被错误提升到
+ *   1M,未来新模型仍可在目录更新前按当代默认工作。
  *
  * 磁盘缓存:`<userData>/model-discovery/anthropic-models.json`
  * ({ fetchedAt, models, explicitEffortModelIds, explicitFastModeModelIds });只缓存动态获取的
@@ -48,6 +49,7 @@ import type { CatalogModel, Effort } from '@cindy/model-providers';
 import { createLogger } from '../../logger.js';
 import {
   getActiveCatalog,
+  getCindyModelContextWindow,
   getCindyModelEffortBaseline,
   setAnthropicDiscoveredModels,
 } from '../active-catalog.js';
@@ -102,9 +104,11 @@ function normalizeModelId(raw: string): string {
   return raw.replace(/-20\d{6}$/, '');
 }
 
-/** contextWindow 规则:默认 1M,仅 haiku 系例外 200k(定案见文件头)。 */
+/** contextWindow 规则:HTTP 明示 > 目录已知值 > 未知模型启发式(默认 1M,Haiku 200k)。 */
 function contextWindowFor(id: string, explicit?: number): number {
   if (typeof explicit === 'number' && explicit > 0) return explicit;
+  const catalogWindow = getCindyModelContextWindow(id);
+  if (catalogWindow !== null) return catalogWindow;
   return /haiku/.test(id) ? 200_000 : 1_000_000;
 }
 

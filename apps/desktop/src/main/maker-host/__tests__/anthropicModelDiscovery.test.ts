@@ -3,7 +3,8 @@
  *
  * 覆盖:SDK ModelInfo 映射(别名过滤 / dated id 归一 / 能力字段在场 = 权威、全缺席 =
  * 未知按确定性默认合成 / haiku 默认收起)、HTTP /v1/models 映射(能力字段容错 / haiku
- * 例外 / max_input_tokens 优先 / dated 去重)、contextWindow 规则(默认 1M,haiku 200k)、
+ * 例外 / max_input_tokens 优先 / dated 去重)、contextWindow 规则(HTTP 明示 > 目录 >
+ * 默认 1M / haiku 200k)、
  * SDK 捕获入口的登录态门控与合并纪律(登出不注入 / 无能力信息保留已精化条目 /
  * HTTP 明说窗口不被 SDK 打回猜测值 / 磁盘缓存恢复 explicitWindows)。
  * HTTP 拉取的网络路径不在此测(登录态 + fetch 依赖,行为由代码注释契约覆盖)。
@@ -118,6 +119,19 @@ describe('mapAnthropicSdkModels', () => {
     expect(out[1].model).toMatchObject({ efforts: [], defaultEnabled: false });
   });
 
+  it('SDK 未下发窗口时使用目录中的官方窗口', () => {
+    const out = mapAnthropicSdkModels([
+      { value: 'claude-opus-5', displayName: 'Opus 5' },
+      { value: 'claude-opus-4-5', displayName: 'Opus 4.5' },
+      { value: 'claude-sonnet-4-5', displayName: 'Sonnet 4.5' },
+    ]);
+    expect(out.map(({ model }) => [model.id, model.contextWindow])).toEqual([
+      ['claude-opus-5', 1_000_000],
+      ['claude-opus-4-5', 200_000],
+      ['claude-sonnet-4-5', 200_000],
+    ]);
+  });
+
   it('supportsEffort=true 但缺档位清单:使用目录基线,不解读为不可调', () => {
     const out = mapAnthropicSdkModels([
       { value: 'claude-opus-4-8', displayName: 'Opus', supportsEffort: true },
@@ -216,6 +230,19 @@ describe('mapAnthropicHttpModels', () => {
       efforts: ['low', 'high', 'max'],
       supportsFastMode: true,
     });
+  });
+
+  it('HTTP 未下发 max_input_tokens 时使用目录中的官方窗口', () => {
+    const out = mapAnthropicHttpModels([
+      { id: 'claude-opus-5', display_name: 'Opus 5', type: 'model' },
+      { id: 'claude-opus-4-5', display_name: 'Opus 4.5', type: 'model' },
+      { id: 'claude-sonnet-4-5', display_name: 'Sonnet 4.5', type: 'model' },
+    ]);
+    expect(out.map(({ model }) => [model.id, model.contextWindow])).toEqual([
+      ['claude-opus-5', 1_000_000],
+      ['claude-opus-4-5', 200_000],
+      ['claude-sonnet-4-5', 200_000],
+    ]);
   });
 
   it('HTTP 未知新模型缺 capability 时同样使用 5 档临时基线', () => {

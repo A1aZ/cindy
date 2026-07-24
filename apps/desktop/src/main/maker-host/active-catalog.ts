@@ -211,9 +211,10 @@ function projectCodexModelsToClaude(p: Provider): Provider {
 const DYNAMIC_LIST_PROVIDER_IDS: ReadonlySet<string> = new Set(['anthropic', 'openai', 'xd']);
 
 /**
- * cindyModelMeta 里客户端认识的字段子集。展示字段直接覆盖发现条目；effort 字段只在
- * Anthropic 动态通道**没有能力信息**时作为基线，由 model-discovery/anthropic 消费。
- * 上游显式能力始终优先，meta 不在 active catalog overlay 阶段改写能力。
+ * cindyModelMeta 里客户端认识的字段子集。展示字段直接覆盖发现条目；context / effort
+ * 字段只在 Anthropic 动态通道**没有能力信息**时作为基线，由
+ * model-discovery/anthropic 消费。上游显式能力始终优先，meta 不在 active catalog
+ * overlay 阶段改写能力。
  */
 interface CindyModelMetaFields {
   name?: string;
@@ -221,6 +222,7 @@ interface CindyModelMetaFields {
   description?: string;
   sortOrder?: number;
   defaultEnabled?: boolean;
+  contextWindow?: number;
   efforts?: Effort[];
   defaultEffort?: Effort | null;
 }
@@ -247,6 +249,9 @@ function buildCindyModelMetaIndex(meta: unknown): Map<string, CindyModelMetaFiel
     if (typeof e.description === 'string' && e.description.length > 0) fields.description = e.description;
     if (typeof e.sortOrder === 'number' && Number.isFinite(e.sortOrder)) fields.sortOrder = e.sortOrder;
     if (typeof e.defaultEnabled === 'boolean') fields.defaultEnabled = e.defaultEnabled;
+    if (typeof e.contextWindow === 'number' && Number.isFinite(e.contextWindow) && e.contextWindow > 0) {
+      fields.contextWindow = e.contextWindow;
+    }
     if (Array.isArray(e.efforts)) {
       const efforts = e.efforts.filter((value): value is Effort =>
         typeof value === 'string' && VALID_EFFORTS.has(value));
@@ -264,6 +269,11 @@ function buildCindyModelMetaIndex(meta: unknown): Map<string, CindyModelMetaFiel
 export interface CindyModelEffortBaseline {
   efforts: Effort[];
   defaultEffort: Effort | null;
+}
+
+/** 返回当前目录的已知上下文窗口；只供动态发现缺少上游明确值时兜底。 */
+export function getCindyModelContextWindow(modelId: string): number | null {
+  return buildCindyModelMetaIndex((base ?? BUNDLED_CATALOG).cindyModelMeta).get(modelId)?.contextWindow ?? null;
 }
 
 /**

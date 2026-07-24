@@ -2154,6 +2154,33 @@ describe('AgentIslandService native publishing', () => {
     expect(publish.mock.calls.at(-1)?.[0].sessions).toEqual([]);
   });
 
+  it('clears an older provider turn id when a later stop cannot identify its turn', async () => {
+    const { AgentIslandService } = await import('../service.js');
+    const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {
+      void state;
+      void frameOrFrames;
+      return true;
+    });
+    const playSound = vi.fn<(sound: AgentIslandSoundChoice) => boolean>(() => true);
+    const service = new AgentIslandService({
+      getMainWindow: () => null,
+      nativeHost: { failed: false, publish, playSound },
+    });
+    syncEnabledForTest(service, publish);
+    const meta = { sessionId: 'codex-stop-without-turn-id', agentKind: 'codex' as const };
+    service.handleUserPrompt(meta, 'first turn');
+    service.handleSessionStopped(meta.sessionId, 'turn-from-earlier-stop');
+    service.handleSessionStopped(meta.sessionId);
+    service.handleUserPrompt(meta, 'replacement turn');
+    service.handleUserPromptDispatching(meta.sessionId);
+    playSound.mockClear();
+
+    service.handleAgentEvent(meta, cancelledDoneEvent('turn-from-earlier-stop'));
+
+    expect(playSound).not.toHaveBeenCalled();
+    expect(publish.mock.calls.at(-1)?.[0].sessions).toEqual([]);
+  });
+
   it('clears silenced-run bookkeeping when a session is stopped', async () => {
     const { AgentIslandService } = await import('../service.js');
     const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {

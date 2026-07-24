@@ -949,6 +949,7 @@ export class AgentIslandService {
    */
   handleSessionStopped(sessionId: string, providerTurnId: string | null = null): void {
     this.advanceInteractionEpoch(sessionId);
+    this.stoppedProviderTurnIdBySession.delete(sessionId);
     if (providerTurnId) {
       this.stoppedProviderTurnIdBySession.set(sessionId, providerTurnId);
     }

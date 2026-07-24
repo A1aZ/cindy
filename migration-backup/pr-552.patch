@@ -1,0 +1,4480 @@
+diff --git a/apps/desktop/package.json b/apps/desktop/package.json
+index 7de90cef5ce9e2f048b3da57c601f4ef8a45b0bf..30fc837fca771b6a09f84a63ec9ccd8292158519 100644
+--- a/apps/desktop/package.json
++++ b/apps/desktop/package.json
+@@ -71,6 +71,7 @@
+     "@lezer/highlight": "^1.2.3",
+     "@cindy/anthropic-compat-proxy": "workspace:*",
+     "@cindy/anthropic-responses-bridge": "workspace:*",
++    "@cindy/responses-chat-bridge": "workspace:*",
+     "@cindy/browser-control-runtime": "workspace:*",
+     "@cindy/device-link": "workspace:*",
+     "@cindy/embedding-client": "workspace:*",
+diff --git a/apps/desktop/src/main/device-link/__tests__/providerListProjection.test.ts b/apps/desktop/src/main/device-link/__tests__/providerListProjection.test.ts
+index 60deac06259d8d208c6a7448a30148fb3b87ca7f..686a26d1e31e484663cc6e19dbfc91e681890815 100644
+--- a/apps/desktop/src/main/device-link/__tests__/providerListProjection.test.ts
++++ b/apps/desktop/src/main/device-link/__tests__/providerListProjection.test.ts
+@@ -92,6 +92,18 @@ describe('projectInvokeResultForTunnel — maker:provider:list 投影', () => {
+     expect(routing.codex).toEqual({});
+   });
+ 
++  it('只保留 openai-chat 兼容展示标记，仍不泄漏执行细节', () => {
++    const provider = xdProviderWithFullRouting() as ReturnType<typeof xdProviderWithFullRouting> & {
++      routing: { codex: Record<string, unknown>; 'claude-code': Record<string, unknown> };
++    };
++    provider.routing.codex.wireProtocol = 'openai-chat';
++    const { providers } = project({ providers: [provider] });
++    const routing = providers[0].routing as Record<string, Record<string, unknown>>;
++    expect(routing.codex).toEqual({ wireProtocol: 'openai-chat' });
++    expect(routing.codex).not.toHaveProperty('upstream');
++    expect(routing.codex).not.toHaveProperty('authStrategy');
++  });
++
+   it('models[agent] 原样透传（Fast 显隐数据源:per-provider supportsFastMode）', () => {
+     const { providers } = project({ providers: [xdProviderWithFullRouting()] });
+     const models = providers[0].models as Record<string, { id: string; supportsFastMode?: boolean }[]>;
+diff --git a/apps/desktop/src/main/device-link/dispatch.ts b/apps/desktop/src/main/device-link/dispatch.ts
+index 5b01bcab9fcbb2e729d5e1de49e1ab464e8c70b3..4a88d177609ff78355c26fd1fab8ab63fde5a2d4 100644
+--- a/apps/desktop/src/main/device-link/dispatch.ts
++++ b/apps/desktop/src/main/device-link/dispatch.ts
+@@ -182,9 +182,9 @@ async function persistRemoteSetting(channel: string, args: unknown[], result: un
+ }
+ 
+ /**
+- * routing 投影:剥掉每个 agent 路由的**全部执行细节**(upstream / authStrategy / headerDelete /
+- * headerOverride / modelIdRewrite / adapter,含自定义供应商 endpoint),只保留 agent 键 + 空对象
+- * 以维持 ProviderView.routing 的形状。
++ * routing 投影:剥掉每个 agent 路由的执行细节(upstream / authStrategy / headerDelete /
++ * headerOverride / modelIdRewrite / adapter,含自定义供应商 endpoint),只保留可选
++ * `wireProtocol:'openai-chat'` 展示标记，让手机区分 Cindy 桥接来源。
+  *
+  * 历史上这里曾保留 `routing.supportsFastMode` 给控制端做 Fast 显隐;现 Fast 能力已收归
+  * per-(provider, agent) 的 `models[agent].supportsFastMode`(唯一真相),控制端直接从隧道带来的
+@@ -192,10 +192,17 @@ async function persistRemoteSetting(channel: string, args: unknown[], result: un
+  */
+ function projectRoutingForDisplay(
+   routing: unknown,
+-): Record<string, Record<string, never>> | undefined {
++): Record<string, { wireProtocol?: 'openai-chat' }> | undefined {
+   if (!routing || typeof routing !== 'object' || Array.isArray(routing)) return undefined;
+-  const out: Record<string, Record<string, never>> = {};
+-  for (const agent of Object.keys(routing as Record<string, unknown>)) out[agent] = {};
++  const out: Record<string, { wireProtocol?: 'openai-chat' }> = {};
++  for (const [agent, value] of Object.entries(routing as Record<string, unknown>)) {
++    const route = value && typeof value === 'object' && !Array.isArray(value)
++      ? value as Record<string, unknown>
++      : null;
++    // 只暴露控制端需要展示的「Cindy 桥接」标记。原生协议缺省不回传；endpoint、鉴权、
++    // headers、adapter 等执行字段仍全部留在被控端。
++    out[agent] = route?.wireProtocol === 'openai-chat' ? { wireProtocol: 'openai-chat' } : {};
++  }
+   return out;
+ }
+ 
+diff --git a/apps/desktop/src/main/maker-host/__tests__/custom-provider-store.test.ts b/apps/desktop/src/main/maker-host/__tests__/custom-provider-store.test.ts
+index ccc406176ff15c98b5724242a64340debff0f7ae..20765521f688eef50f3255c47228abf980828aea 100644
+--- a/apps/desktop/src/main/maker-host/__tests__/custom-provider-store.test.ts
++++ b/apps/desktop/src/main/maker-host/__tests__/custom-provider-store.test.ts
+@@ -178,6 +178,33 @@ describe('custom-provider-store CRUD (per-runtime)', () => {
+     expect(got?.runtimes.codex?.headers).toEqual({ 'X-Org': 'acme' });
+   });
+ 
++  it('round-trips an explicit Chat Completions protocol', async () => {
++    mountDb();
++    await createCustomProvider({
++      ...valid,
++      runtimes: {
++        codex: {
++          ...valid.runtimes.codex!,
++          wireProtocol: 'openai-chat',
++        },
++      },
++    });
++    expect((await getCustomProvider('openrouter'))?.runtimes.codex?.wireProtocol).toBe('openai-chat');
++  });
++
++  it('rejects unsupported protocol/runtime combinations', () => {
++    expect(validateCustomProviderConfig({
++      ...valid,
++      runtimes: {
++        'claude-code': {
++          baseUrl: 'https://v.ai/chat',
++          wireProtocol: 'openai-chat',
++          models: [{ id: 'm', name: 'M' }],
++        },
++      },
++    }).ok).toBe(false);
++  });
++
+   it('update returns null when row absent', async () => {
+     mountDb();
+     expect(await updateCustomProvider('ghost', valid)).toBeNull();
+diff --git a/apps/desktop/src/main/maker-host/__tests__/providerDiagnostics.test.ts b/apps/desktop/src/main/maker-host/__tests__/providerDiagnostics.test.ts
+index 62fc7cef289df75cdc4f4b246c18fe0e238fda8a..94a3786899ca0e45b04fe3b00d05729b5b60a07b 100644
+--- a/apps/desktop/src/main/maker-host/__tests__/providerDiagnostics.test.ts
++++ b/apps/desktop/src/main/maker-host/__tests__/providerDiagnostics.test.ts
+@@ -136,6 +136,25 @@ describe('buildProbeRequest', () => {
+     });
+   });
+ 
++  it('codex Chat bridge wire：/chat/completions 基础流式探测,不强制 tool_choice', () => {
++    const { url, init } = buildProbeRequest({
++      agent: 'codex',
++      baseUrl: 'https://api.deepseek.com/v1',
++      modelId: 'deepseek-chat',
++      wireProtocol: 'openai-chat',
++      apiKey: 'sk-ds',
++    });
++    expect(url).toBe('https://api.deepseek.com/v1/chat/completions');
++    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
++    expect(body.stream).toBe(true);
++    expect(body.stream_options).toEqual({ include_usage: true });
++    expect(body.messages).toEqual([{ role: 'user', content: 'ping' }]);
++    // 不带 tools / 强制 tool_choice —— 思考模型(DeepSeek deepseek-v4-pro)会拒强制工具,
++    // 导致可达端点被误报失败;工具能力交给真实会话验证。
++    expect(body.tools).toBeUndefined();
++    expect(body.tool_choice).toBeUndefined();
++  });
++
+   it('无 key 时不注入鉴权头（端点可能靠自定义 headers 鉴权）', () => {
+     const { init } = buildProbeRequest({
+       agent: 'claude-code',
+@@ -181,6 +200,49 @@ describe('runProviderProbe（注入 fetch，不联网）', () => {
+     );
+     expect(r).toMatchObject({ ok: false, code: 'UPSTREAM_UNREACHABLE' });
+   });
++
++  it('openai-chat 探测:200 text/event-stream → ok', async () => {
++    const r = await runProviderProbe(
++      { agent: 'codex', baseUrl: 'https://x.example', modelId: 'm', apiKey: 'k', wireProtocol: 'openai-chat' },
++      async () => new Response('data: {}\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } }),
++    );
++    expect(r.ok).toBe(true);
++  });
++
++  it('openai-chat 探测:200 SSE 顶层 error 帧 → 分类失败', async () => {
++    const r = await runProviderProbe(
++      { agent: 'codex', baseUrl: 'https://x.example', modelId: 'm', apiKey: 'k', wireProtocol: 'openai-chat' },
++      async () => new Response(
++        'data: {"error":{"type":"server_error","message":"model overloaded"}}\n\n',
++        { status: 200, headers: { 'content-type': 'text/event-stream' } },
++      ),
++    );
++    expect(r).toMatchObject({ ok: false, code: 'UPSTREAM_ERROR', status: 200 });
++  });
++
++  it('openai-chat 探测:200 SSE 无 data 帧 → WIRE_INCOMPATIBLE', async () => {
++    const r = await runProviderProbe(
++      { agent: 'codex', baseUrl: 'https://x.example', modelId: 'm', apiKey: 'k', wireProtocol: 'openai-chat' },
++      async () => new Response(': keepalive\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } }),
++    );
++    expect(r).toMatchObject({ ok: false, code: 'WIRE_INCOMPATIBLE', status: 200 });
++  });
++
++  it('openai-chat 探测:200 但非 SSE(application/json)→ WIRE_INCOMPATIBLE(与真实桥同口径)', async () => {
++    const r = await runProviderProbe(
++      { agent: 'codex', baseUrl: 'https://x.example', modelId: 'm', apiKey: 'k', wireProtocol: 'openai-chat' },
++      async () => new Response('{"choices":[]}', { status: 200, headers: { 'content-type': 'application/json' } }),
++    );
++    expect(r).toMatchObject({ ok: false, code: 'WIRE_INCOMPATIBLE', status: 200 });
++  });
++
++  it('原生 Responses(codex 无 openai-chat)不做 SSE 校验:200 JSON 仍 ok', async () => {
++    const r = await runProviderProbe(
++      { agent: 'codex', baseUrl: 'https://x.example', modelId: 'm', apiKey: 'k' },
++      async () => new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }),
++    );
++    expect(r.ok).toBe(true);
++  });
+ });
+ 
+ describe('resolveSavedProbeSpec / testProviderConnection(saved)', () => {
+@@ -208,6 +270,33 @@ describe('resolveSavedProbeSpec / testProviderConnection(saved)', () => {
+     });
+   });
+ 
++  it('api-key-header + openai-chat 供应商:saved 探测带上 wireProtocol → 打 /chat/completions', async () => {
++    const chatConfig = {
++      id: 'ds-chat',
++      name: 'DeepSeek Chat',
++      runtimes: {
++        codex: {
++          baseUrl: 'https://api.deepseek.com',
++          wireProtocol: 'openai-chat' as const,
++          models: [{ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' }],
++        },
++      },
++    };
++    setCustomProviders([buildUserProvider(chatConfig)]);
++    setDiagnosticsKeyReader(() => 'sk-ds');
++    // resolveSavedProbeSpec 必须回带 wireProtocol，否则 buildProbeRequest 回落原生 /responses。
++    expect(resolveSavedProbeSpec('ds-chat', 'codex').wireProtocol).toBe('openai-chat');
++    let seenUrl = '';
++    await testProviderConnection(
++      { kind: 'saved', providerId: 'ds-chat', agent: 'codex' },
++      async (url) => {
++        seenUrl = String(url);
++        return fakeResponse(200, 'data: [DONE]\n\n');
++      },
++    );
++    expect(seenUrl).toBe('https://api.deepseek.com/chat/completions');
++  });
++
+   it('不存在 / 非 user 供应商 / 无该 runtime → 抛错（handler 映射 INVALID_PARAMS）', () => {
+     setCustomProviders([buildUserProvider(config)]);
+     expect(() => resolveSavedProbeSpec('nope', 'claude-code')).toThrow(/not found/);
+diff --git a/apps/desktop/src/main/maker-host/codex-proxy-host.ts b/apps/desktop/src/main/maker-host/codex-proxy-host.ts
+index dce90cabab47d11ae082b9b7484817b35f0e03dc..93d086d68f3afe20d3bb41a3a39c056a92776b2c 100644
+--- a/apps/desktop/src/main/maker-host/codex-proxy-host.ts
++++ b/apps/desktop/src/main/maker-host/codex-proxy-host.ts
+@@ -31,6 +31,10 @@ import {
+   type RoutingDecision,
+   type RoutingTransform,
+ } from '@cindy/anthropic-compat-proxy';
++import {
++  createResponsesChatHandler,
++  type ChatBridgeCapabilities,
++} from '@cindy/responses-chat-bridge';
+ import fs from 'node:fs';
+ import path from 'node:path';
+ 
+@@ -38,7 +42,10 @@ import { buildCodexGatewayBaseUrl, CODEX_OAUTH_UPSTREAM } from './codex-gateway-
+ import { getActiveCatalog } from './active-catalog.js';
+ import {
+   gatewayDefaultRouteDecision,
++  getSessionRoutingDescriptor,
++  resolveSessionRoute,
+   resolveSessionRouteDecision,
++  buildLocalHandlerHeaders,
+   inferProviderIdForModel,
+   isHostInjectedAuthSession,
+   isUserProviderSession,
+@@ -51,7 +58,7 @@ import {
+ } from './provider-route.js';
+ import { getSessionProvider } from './session-provider-store.js';
+ import { composeResponseObservers } from './claude-rate-limit-headers-observer.js';
+-import { createProviderUpstreamErrorObserver } from './provider-upstream-error-observer.js';
++import { createProviderUpstreamErrorObserver, reportProviderUpstreamError } from './provider-upstream-error-observer.js';
+ import { encryptedStripController, imageGenerationStripController } from './thread-strip-controllers.js';
+ import { createMakerLogger } from './logger-adapter.js';
+ import { readSilentEncryptedRetrySettings } from './silent-encrypted-retry-store.js';
+@@ -169,8 +176,16 @@ function writeTransformedBodyDump(ctx: RequestTransformCtx, body: unknown): void
+   }
+ }
+ 
++function shouldSkipNativeCodexTransforms(ctx: RequestTransformCtx): boolean {
++  const sessionId = sessionIdFromTransformCtx(ctx);
++  if (!sessionId) return false;
++  const protocol = getSessionRoutingDescriptor(sessionId, 'codex')?.wireProtocol ?? 'openai-responses';
++  return protocol === 'openai-chat';
++}
++
+ function createCodexTransform(): RequestTransform {
+-  return createInstructionsInjectionTransform({ registry, logger: log });
++  const inject = createInstructionsInjectionTransform({ registry, logger: log });
++  return (body, ctx) => shouldSkipNativeCodexTransforms(ctx) ? null : inject(body, ctx);
+ }
+ 
+ function sessionIdFromTransformCtx(ctx: RequestTransformCtx): string | undefined {
+@@ -178,6 +193,76 @@ function sessionIdFromTransformCtx(ctx: RequestTransformCtx): string | undefined
+   return threadId ? threadToSession.get(threadId) : undefined;
+ }
+ 
++// 通用 Chat Completions 上游(DeepSeek/GLM/Kimi 等非 OpenAI o-series)的兼容默认。
++// 依据 cc-switch / opencodex 的 per-provider 处理归纳:
++//   - maxTokensField='max_tokens':只有 OpenAI o-series 用 max_completion_tokens,国产厂商用 max_tokens;
++//   - toolCallReasoningPlaceholder:思考模型要求 tool_call assistant 消息带非空 reasoning_content;
++//   - forceAutoToolChoice:思考模型拒绝强制 tool_choice(DeepSeek reasoner)。
++const CHAT_BRIDGE_DEFAULT_CAPABILITIES: ChatBridgeCapabilities = {
++  developerRole: 'system',
++  parallelToolCalls: true,
++  maxTokensField: 'max_tokens',
++  reasoningField: 'none',
++  streamUsage: true,
++  toolCallReasoningPlaceholder: true,
++  forceAutoToolChoice: true,
++};
++
++/**
++ * Chat bridge 上游只收 host 明确构造的 header。绝不把 Codex/ChatGPT 请求 header
++ * 原样透传，防止账号 id、OpenAI OAuth bearer 或内部 session 元数据泄漏给第三方。
++ */
++function createChatBridgeDecision(
++  route: Awaited<ReturnType<typeof resolveSessionRoute>>,
++  instructions: string | undefined,
++): RoutingDecision | null {
++  if (!route || route.routing.wireProtocol !== 'openai-chat') return null;
++  const { headers } = buildLocalHandlerHeaders(route, 'codex');
++  const stripPrefix = route.routing.modelIdRewrite?.stripPrefix;
++  // localHandler 绕过 proxy 的 responseObserver,自定义(user)供应商的上游错误不会被
++  // createProviderUpstreamErrorObserver 看到。这里显式把非 2xx 上游错误喂回同一广播通道,
++  // 让 Chat 桥接会话与透明自定义供应商一样弹结构化 providerError.* 提示。内置来源不广播
++  // (与 observer 的 user-only 语义一致)。
++  const providerId = route.providerId;
++  const onUpstreamError = route.providerSource === 'user'
++    ? ({ status, body }: { status: number; body: string }): void => {
++        reportProviderUpstreamError({ agent: 'codex', providerId, status, bodyText: body });
++      }
++    : undefined;
++  const handler = createResponsesChatHandler({
++    upstreamBase: route.routing.upstream,
++    buildHeaders: async () => headers,
++    rewriteModel: (model: string) => stripPrefix && model.startsWith(stripPrefix)
++      ? model.slice(stripPrefix.length)
++      : model,
++    capabilities: CHAT_BRIDGE_DEFAULT_CAPABILITIES,
++    ...(onUpstreamError ? { onUpstreamError } : {}),
++  }, { logger: log });
++  return {
++    localHandler: ({ rawBody, parsedBody, res }) => {
++      let body = parsedBody;
++      const strippedBody = stripImageGenerationItemsWithoutIdFromBody(rawBody);
++      if (strippedBody) {
++        try {
++          body = JSON.parse(strippedBody.toString('utf8'));
++        } catch {
++          // Keep the already parsed body if the defensive strip result cannot be parsed.
++        }
++      }
++      if (instructions && isPlainObject(body)) {
++        const existing = typeof body.instructions === 'string' ? body.instructions : '';
++        body = {
++          ...body,
++          instructions: existing.includes(instructions)
++            ? existing
++            : [existing, instructions].filter(Boolean).join('\n\n'),
++        };
++      }
++      return handler.handle({ parsedBody: body, res });
++    },
++  };
++}
++
+ function moveInstructionsIntoInput(body: Record<string, unknown>): Record<string, unknown> | null {
+   const instructions = body.instructions;
+   if (typeof instructions !== 'string' || instructions.length === 0) return null;
+@@ -806,6 +891,11 @@ export function createModelRoutingTransform(): RoutingTransform {
+       isUserProviderSession(sessionId) ||
+       isHostInjectedAuthSession(sessionId, 'codex')
+     )) {
++      const selectedRouting = getSessionRoutingDescriptor(sessionId, 'codex', model || undefined);
++      if (selectedRouting?.wireProtocol === 'openai-chat' && ctx.method === 'POST' && model) {
++        return resolveSessionRoute(sessionId, 'codex', model).then((localRoute) =>
++          createChatBridgeDecision(localRoute, threadId ? registry.get(threadId) : undefined));
++      }
+       // model 传给 scope 门(空串 = 控制面 GET,不受范围限制);声明了 modelPrefixes 的
+       // 供应商(如 xai)只捕获自家命名空间的请求,其余回落默认路由。
+       const perSession = resolveSessionRouteDecision(sessionId, 'codex', gatewayKey, model || undefined);
+diff --git a/apps/desktop/src/main/maker-host/custom-provider-store.ts b/apps/desktop/src/main/maker-host/custom-provider-store.ts
+index 6d629aee8c17604628cb632b139639b03705ba3d..038ec554f42fb51cf897f422c2ff50e4a598ca10 100644
+--- a/apps/desktop/src/main/maker-host/custom-provider-store.ts
++++ b/apps/desktop/src/main/maker-host/custom-provider-store.ts
+@@ -76,6 +76,14 @@ function validateRuntime(agent: string, rt: unknown): ValidationResult {
+       return invalid(`runtime '${agent}' model.contextWindow must be a positive number`);
+     }
+   }
++  if (r.wireProtocol !== undefined) {
++    const allowed = agent === 'claude-code'
++      ? ['anthropic-messages']
++      : ['openai-responses', 'openai-chat'];
++    if (typeof r.wireProtocol !== 'string' || !allowed.includes(r.wireProtocol)) {
++      return invalid(`runtime '${agent}' wireProtocol invalid`);
++    }
++  }
+   if (r.headers !== undefined) {
+     if (!r.headers || typeof r.headers !== 'object' || Array.isArray(r.headers)) {
+       return invalid(`runtime '${agent}' headers must be an object`);
+@@ -190,6 +198,7 @@ function normalizeRuntime(rt: CustomProviderRuntimeConfig): CustomProviderRuntim
+   const headers =
+     rt.headers && Object.keys(rt.headers).length > 0 ? { ...rt.headers } : undefined;
+   const out: CustomProviderRuntimeConfig = { baseUrl: rt.baseUrl.trim(), models };
++  if (rt.wireProtocol) out.wireProtocol = rt.wireProtocol;
+   if (headers) out.headers = headers;
+   if (rt.modelsUrl && rt.modelsUrl.trim()) out.modelsUrl = rt.modelsUrl.trim();
+   return out;
+@@ -295,6 +304,12 @@ function parseRuntimes(raw: string): Partial<Record<AgentKind, CustomProviderRun
+       baseUrl: typeof r.baseUrl === 'string' ? r.baseUrl : '',
+       models,
+     };
++    if (
++      typeof r.wireProtocol === 'string' &&
++      (r.wireProtocol === 'anthropic-messages' || r.wireProtocol === 'openai-responses' || r.wireProtocol === 'openai-chat')
++    ) {
++      entry.wireProtocol = r.wireProtocol;
++    }
+     if (r.headers && typeof r.headers === 'object' && !Array.isArray(r.headers)) {
+       entry.headers = r.headers as Record<string, string>;
+     }
+diff --git a/apps/desktop/src/main/maker-host/provider-diagnostics.ts b/apps/desktop/src/main/maker-host/provider-diagnostics.ts
+index b036711769412b8ffb8243a55b65f7682a988b84..b83c2545ac20e6c55a8989594542689500876a5f 100644
+--- a/apps/desktop/src/main/maker-host/provider-diagnostics.ts
++++ b/apps/desktop/src/main/maker-host/provider-diagnostics.ts
+@@ -14,10 +14,11 @@
+  *     provider-route.setCustomProviderKeyReader，host 在 register 时接通）。
+  */
+ 
+-import type { AgentKind } from '@cindy/model-providers';
++import type { AgentKind, ProviderWireProtocol } from '@cindy/model-providers';
+ 
+ import {
+   classifyProviderError,
++  type ProviderErrorClassification,
+   type ProviderErrorCode,
+ } from '../../shared/providerErrors.js';
+ import { getActiveCatalog } from './active-catalog.js';
+@@ -32,6 +33,8 @@ export interface ProviderProbeSpec {
+   agent: AgentKind;
+   baseUrl: string;
+   modelId: string;
++  /** 缺省按 agent 保持历史行为。 */
++  wireProtocol?: ProviderWireProtocol;
+   /** 用户 API key；缺省 = 不注入鉴权头（端点可能靠自定义 headers 鉴权）。 */
+   apiKey?: string | null;
+   /** 附加请求头（自定义供应商的 headers 配置）。 */
+@@ -95,8 +98,28 @@ export function buildProbeRequest(spec: ProviderProbeSpec): { url: string; init:
+       },
+     };
+   }
+-  // codex → OpenAI Responses wire。
++  // codex：原生 Responses 或 Cindy 将承载的 Chat Completions 上游。
+   if (spec.apiKey) headers['authorization'] = `Bearer ${spec.apiKey}`;
++  if (spec.wireProtocol === 'openai-chat') {
++    // 「测试连接」= 验证 endpoint + key + Chat 协议 + 流式可达,**不强制 tool_choice**:
++    // 部分供应商的思考模型(如 DeepSeek deepseek-v4-pro)明确拒绝强制工具调用
++    // (“Thinking mode does not support this tool_choice”),会把可达的端点误报成失败。
++    // 工具调用能力交给真实会话验证(Codex 用 tool_choice:'auto',不强制)。
++    return {
++      url: joinUrl(spec.baseUrl, '/chat/completions'),
++      init: {
++        method: 'POST',
++        headers,
++        body: JSON.stringify({
++          model: spec.modelId,
++          messages: [{ role: 'user', content: 'ping' }],
++          max_tokens: 16,
++          stream: true,
++          stream_options: { include_usage: true },
++        }),
++      },
++    };
++  }
+   return {
+     url: joinUrl(spec.baseUrl, '/responses'),
+     init: {
+@@ -113,6 +136,58 @@ export function buildProbeRequest(spec: ProviderProbeSpec): { url: string; init:
+   };
+ }
+ 
++function isPlainObject(value: unknown): value is Record<string, unknown> {
++  return typeof value === 'object' && value !== null && !Array.isArray(value);
++}
++
++/** Read the first non-empty SSE data frame so 200-streamed provider errors do not pass the probe. */
++async function readFirstSsePayload(res: Response): Promise<string | null> {
++  if (!res.body) return null;
++  const reader = res.body.getReader();
++  const decoder = new TextDecoder();
++  let buffer = '';
++  try {
++    for (;;) {
++      const { done, value } = await reader.read();
++      if (value) buffer += decoder.decode(value, { stream: !done });
++      let start = 0;
++      let newline: number;
++      while ((newline = buffer.indexOf('\n', start)) >= 0) {
++        const line = buffer.slice(start, newline).replace(/\r$/, '');
++        start = newline + 1;
++        if (!line.startsWith('data:')) continue;
++        const payload = line.slice(5).trim();
++        if (payload) return payload;
++      }
++      if (start > 0) buffer = buffer.slice(start);
++      if (buffer.length > MAX_ERROR_BODY_BYTES) return null;
++      if (done) {
++        buffer += decoder.decode();
++        const line = buffer.replace(/\r$/, '');
++        if (!line.startsWith('data:')) return null;
++        return line.slice(5).trim() || null;
++      }
++    }
++  } finally {
++    try {
++      await reader.cancel();
++    } catch {
++      /* no-op */
++    }
++  }
++}
++
++function classifyStreamedError(error: Record<string, unknown>): ProviderErrorClassification {
++  const bodyText = JSON.stringify(error).slice(0, MAX_ERROR_BODY_BYTES);
++  const explicitStatus = typeof error.status === 'number' ? error.status
++    : typeof error.status_code === 'number' ? error.status_code
++      : typeof error.code === 'number' ? error.code
++        : undefined;
++  const type = typeof error.type === 'string' ? error.type.toLowerCase() : '';
++  const inferredStatus = explicitStatus ?? (type.includes('server') || type.includes('overload') ? 503 : 400);
++  return classifyProviderError({ status: inferredStatus, bodyText });
++}
++
+ /** 从 Error（fetch 抛出）提取网络层错误码。 */
+ function networkErrorCode(err: unknown): string {
+   if (err instanceof Error) {
+@@ -140,7 +215,55 @@ export async function runProviderProbe(
+   }
+   const latencyMs = Date.now() - start;
+   if (res.ok) {
+-    // 探测响应体不消费（1 token 响应极小；显式取消防句柄泄漏）。
++    // openai-chat 探测发的是 `stream: true`,真实 Chat 桥现在会拒绝非 SSE 的 2xx 响应
++    // (返回 200 application/json 的伪流式端点)。探测必须同口径校验 content-type,否则
++    // 这类端点会「测试连接」通过、首个真实 Codex 会话却被桥拒 —— 结论自相矛盾。
++    if (spec.wireProtocol === 'openai-chat') {
++      const contentType = res.headers.get('content-type')?.toLowerCase() ?? '';
++      if (!contentType.startsWith('text/event-stream')) {
++        try {
++          await res.body?.cancel();
++        } catch {
++          /* no-op */
++        }
++        return {
++          ok: false,
++          code: 'WIRE_INCOMPATIBLE',
++          status: res.status,
++          latencyMs,
++          detail: `expected text/event-stream, got ${contentType || 'no content-type'}`,
++        };
++      }
++      const firstPayload = await readFirstSsePayload(res);
++      if (!firstPayload) {
++        return {
++          ok: false,
++          code: 'WIRE_INCOMPATIBLE',
++          status: res.status,
++          latencyMs,
++          detail: 'stream ended before the first SSE data frame',
++        };
++      }
++      if (firstPayload !== '[DONE]') {
++        try {
++          const event: unknown = JSON.parse(firstPayload);
++          if (isPlainObject(event) && isPlainObject(event.error)) {
++            const cls = classifyStreamedError(event.error);
++            return { ok: false, code: cls.code, status: res.status, latencyMs, detail: cls.detail };
++          }
++        } catch {
++          return {
++            ok: false,
++            code: 'WIRE_INCOMPATIBLE',
++            status: res.status,
++            latencyMs,
++            detail: 'first SSE data frame is not valid JSON',
++          };
++        }
++      }
++      return { ok: true, latencyMs };
++    }
++    // Non-streaming probes do not need the response body; cancel it to release the connection.
+     try {
+       await res.body?.cancel();
+     } catch {
+@@ -181,6 +304,7 @@ export function resolveSavedProbeSpec(providerId: string, agent: AgentKind): Pro
+       agent,
+       baseUrl: routing.upstream,
+       modelId: model.id,
++      wireProtocol: routing.wireProtocol,
+       apiKey: null,
+       headers: {
+         ...(routing.headerOverride ?? {}),
+@@ -192,6 +316,10 @@ export function resolveSavedProbeSpec(providerId: string, agent: AgentKind): Pro
+     agent,
+     baseUrl: routing.upstream,
+     modelId: model.id,
++    // 与 oauth-token 分支对齐：Chat 桥接供应商（api-key-header + openai-chat）的 saved 探测
++    // 必须带上 wireProtocol，否则 buildProbeRequest 回落到原生 /responses，对 Chat-only 上游
++    // 误报连接失败（真实会话走 resolveSessionRoute 不受影响，探测结论会与真实会话相反）。
++    wireProtocol: routing.wireProtocol,
+     apiKey: keyReader(providerId, agent),
+     headers: routing.headerOverride,
+   };
+diff --git a/apps/desktop/src/main/maker-host/provider-route.ts b/apps/desktop/src/main/maker-host/provider-route.ts
+index eea56c8d0f52d968fe1c6669875e716630d8f5a1..5b73e9fcfffecffb7aa3ad96a5dbbb24f16e3fdf 100644
+--- a/apps/desktop/src/main/maker-host/provider-route.ts
++++ b/apps/desktop/src/main/maker-host/provider-route.ts
+@@ -253,6 +253,81 @@ export function providerRoutingServesWireModel(
+  *                   auto 模式的安全分类器等)不属于订阅直连供应商的服务范围,必须回落默认路由,
+  *                   否则被误送到无法服务它的上游 → 分类器必挂、工具全被拦(issue #886)。
+  */
++export function getSessionRoutingDescriptor(
++  sessionId: string,
++  agent: AgentKind,
++  wireModel?: string,
++): RoutingDescriptor | null {
++  const providerId = getSessionProvider(sessionId);
++  if (!providerId) return null;
++  const routing = getActiveCatalog().providers.find((provider) => provider.id === providerId)?.routing[agent];
++  if (!routing || !routingServesWireModel(routing, wireModel)) return null;
++  return routing;
++}
++
++export interface ResolvedSessionRoute {
++  providerId: string;
++  providerSource: 'builtin' | 'user';
++  routing: RoutingDescriptor;
++  apiKey: string | null;
++  oauthToken: string | null;
++}
++
++/**
++ * 解析会话选定来源的完整运行时素材，供需要本地协议 handler 的路径使用。
++ * 普通透明转发仍走 resolveSessionRouteDecision，避免改变历史返回形态。
++ */
++export async function resolveSessionRoute(
++  sessionId: string,
++  agent: AgentKind,
++  wireModel?: string,
++): Promise<ResolvedSessionRoute | null> {
++  const providerId = getSessionProvider(sessionId);
++  if (!providerId) return null;
++  const provider = getActiveCatalog().providers.find((candidate) => candidate.id === providerId);
++  const routing = provider?.routing[agent];
++  if (!provider || !routing || !routingServesWireModel(routing, wireModel)) return null;
++  const apiKey = provider.source === 'user' ? customProviderKeyReader(providerId, agent) : null;
++  let oauthToken: string | null = null;
++  if (routing.authStrategy === 'oauth-token') oauthToken = oauthTokenReader(providerId);
++  else if (routing.authStrategy === 'provider-oauth-header') {
++    try {
++      oauthToken = await providerOAuthTokenReader(providerId, agent);
++    } catch {
++      oauthToken = null;
++    }
++  }
++  return {
++    providerId,
++    providerSource: provider.source,
++    routing,
++    apiKey,
++    oauthToken,
++  };
++}
++
++/** Build outbound headers for an already resolved local protocol handler. */
++export function buildLocalHandlerHeaders(route: ResolvedSessionRoute, agent: AgentKind): {
++  headers: Record<string, string>;
++  headerDelete: string[];
++} {
++  const headers: Record<string, string> = { ...(route.routing.headerOverride ?? {}) };
++  const headerDelete = new Set(route.routing.headerDelete ?? []);
++  switch (route.routing.authStrategy) {
++    case 'api-key-header':
++      if (route.apiKey) headers.authorization = `Bearer ${route.apiKey}`;
++      break;
++    case 'oauth-token':
++    case 'provider-oauth-header':
++      headers.authorization = `Bearer ${route.oauthToken || MISSING_PROVIDER_OAUTH_TOKEN}`;
++      break;
++    case 'gateway-key':
++    case 'oauth-passthrough':
++      break;
++  }
++  if (agent === 'codex') for (const name of CODEX_ACCOUNT_HEADERS) headerDelete.add(name);
++  return { headers, headerDelete: [...headerDelete] };
++}
+ export function resolveSessionRouteDecision(
+   sessionId: string,
+   agent: AgentKind,
+diff --git a/apps/desktop/src/main/maker-host/provider-upstream-error-observer.ts b/apps/desktop/src/main/maker-host/provider-upstream-error-observer.ts
+index a0493473571a5c6fca5cb7e5cbc49080d9b822ba..2ec0d33687e1532e7c9d05d45173e87ac45bbf51 100644
+--- a/apps/desktop/src/main/maker-host/provider-upstream-error-observer.ts
++++ b/apps/desktop/src/main/maker-host/provider-upstream-error-observer.ts
+@@ -54,6 +54,39 @@ function isCountTokensUrl(url: string): boolean {
+   return url.split('?', 1)[0].endsWith('/count_tokens');
+ }
+ 
++// 桥接 localHandler 路径的节流表：Responses→Chat bridge 不经 proxy responseObserver,
++// 需要一条独立入口把上游错误分类后广播给 renderer(与 observer 同一 broadcaster、同一节流窗口)。
++const bridgeLastEmit = new Map<string, number>();
++
++/**
++ * 直接上报一次自定义供应商上游错误（供 localHandler 桥接路径调用；observer 走
++ * createProviderUpstreamErrorObserver）。分类 + 同 (providerId, code) 30s 节流后广播。
++ * 只应对「会话路由到自定义(user)供应商」的失败调用——与 observer 的 user-only 语义一致。
++ */
++export function reportProviderUpstreamError(params: {
++  agent: AgentKind;
++  providerId: string;
++  status: number;
++  bodyText: string;
++  now?: () => number;
++}): void {
++  const now = params.now ?? Date.now;
++  const cls = classifyProviderError({ status: params.status, bodyText: params.bodyText });
++  const key = `${params.providerId}:${cls.code}`;
++  const t = now();
++  const prev = bridgeLastEmit.get(key);
++  if (prev !== undefined && t - prev < THROTTLE_MS) return;
++  bridgeLastEmit.set(key, t);
++  _broadcast({
++    agent: params.agent,
++    providerId: params.providerId,
++    code: cls.code,
++    retryable: cls.retryable,
++    status: params.status,
++    detail: cls.detail,
++  });
++}
++
+ /** 按 content-encoding 解压错误体（与 proxy 包 debug dump 的解压语义一致；失败回退原文）。 */
+ function decodeBody(buf: Buffer, encoding: string | undefined): string {
+   try {
+diff --git a/apps/desktop/src/main/maker-ipc/providerHandlers.ts b/apps/desktop/src/main/maker-ipc/providerHandlers.ts
+index 8c6fc1c2b75f89c8ead4fffa158d23c5131e77db..7d67f609328456e9a6758a0ebd1142b8db47103e 100644
+--- a/apps/desktop/src/main/maker-ipc/providerHandlers.ts
++++ b/apps/desktop/src/main/maker-ipc/providerHandlers.ts
+@@ -26,7 +26,7 @@ import {
+   updateCustomProvider,
+   validateCustomProviderConfig,
+ } from '../maker-host/custom-provider-store.js';
+-import type { ProviderTestInput, ProviderTestResult } from '../maker-host/provider-diagnostics.js';
++import type { ProviderProbeSpec, ProviderTestInput, ProviderTestResult } from '../maker-host/provider-diagnostics.js';
+ import type {
+   ProviderModelsFetchResult,
+   ProviderModelsFetchSpec,
+@@ -98,12 +98,19 @@ function parseTestInput(input: unknown): ProviderTestInput | null {
+       if (!spec.headers || typeof spec.headers !== 'object' || Array.isArray(spec.headers)) return null;
+       if (Object.values(spec.headers as Record<string, unknown>).some((v) => typeof v !== 'string')) return null;
+     }
++    if (spec.wireProtocol !== undefined) {
++      const allowed = spec.agent === 'claude-code'
++        ? ['anthropic-messages']
++        : ['openai-responses', 'openai-chat'];
++      if (typeof spec.wireProtocol !== 'string' || !allowed.includes(spec.wireProtocol)) return null;
++    }
+     return {
+       kind: 'adhoc',
+       spec: {
+         agent: spec.agent as AgentKind,
+         baseUrl: spec.baseUrl,
+         modelId: spec.modelId,
++        wireProtocol: spec.wireProtocol as ProviderProbeSpec['wireProtocol'],
+         apiKey: (spec.apiKey as string | null | undefined) ?? null,
+         headers: spec.headers as Record<string, string> | undefined,
+       },
+diff --git a/apps/desktop/src/renderer/__tests__/selectVisibleModels.test.ts b/apps/desktop/src/renderer/__tests__/selectVisibleModels.test.ts
+index bf86a58f8f9ab2d0eb617b9d02f0c86c22cf8f8a..b779c995ba58e2f0c353d03dafbf633a8e3b95f6 100644
+--- a/apps/desktop/src/renderer/__tests__/selectVisibleModels.test.ts
++++ b/apps/desktop/src/renderer/__tests__/selectVisibleModels.test.ts
+@@ -13,7 +13,7 @@
+ import { describe, expect, it } from 'vitest';
+ 
+ import type { ModelDescriptor } from '@/hooks/useAgentCapabilities';
+-import { selectVisibleModels } from '@/lib/providerModels';
++import { filterChatBridgedCodexProviders, selectVisibleModels } from '@/lib/providerModels';
+ import type { AgentKind, ProviderView } from '@cindy/model-providers';
+ 
+ /** 被控端 capabilities.availableModels 形态(renderer ModelDescriptor)。 */
+@@ -39,6 +39,25 @@ function provider(id: string, agent: AgentKind, modelIds: string[]): ProviderVie
+   } as unknown as ProviderView;
+ }
+ 
++/** codex 供应商 + 指定 wireProtocol(SSH 远程排除 openai-chat 桥接来源用)。 */
++function codexProvider(id: string, modelIds: string[], wireProtocol: 'openai-responses' | 'openai-chat'): ProviderView {
++  return {
++    id,
++    name: id,
++    agents: ['codex'],
++    routing: { codex: { wireProtocol } },
++    models: {
++      codex: modelIds.map((mid) => ({
++        id: mid,
++        name: mid,
++        contextWindow: 100,
++        efforts: ['high'],
++        defaultEffort: 'high',
++      })),
++    },
++  } as unknown as ProviderView;
++}
++
+ const ids = (ms: ModelDescriptor[]): string[] => ms.map((m) => m.id);
+ 
+ describe('selectVisibleModels — device-link「以被控端为准」', () => {
+@@ -141,3 +160,80 @@ describe('selectVisibleModels — excludeSubscriptionDirect(SSH 远程隐藏订
+     expect(ids(out)).toEqual(['claude-opus-4-8', 'gpt-5.5']);
+   });
+ });
++
++describe('selectVisibleModels — excludeChatBridgedCodex(SSH 远程隐藏 Chat 桥接的 Codex 供应商)', () => {
++  it('true:剔除 wireProtocol=openai-chat 的 codex 供应商模型,保留原生 Responses 供应商', () => {
++    const out = selectVisibleModels({
++      agentKind: 'codex',
++      deviceId: undefined,
++      providers: [
++        codexProvider('deepseek', ['deepseek-chat'], 'openai-chat'),
++        codexProvider('openai', ['gpt-5.5'], 'openai-responses'),
++      ],
++      deviceCcModels: [],
++      deviceCodexModels: [],
++      excludeChatBridgedCodex: true,
++    });
++    // Chat 桥接的 DeepSeek 在 SSH 远程不可用(桥只在本地),原生 Responses 的 gpt-5.5 保留。
++    expect(ids(out)).toEqual(['gpt-5.5']);
++  });
++
++  it('同一 model id 另有原生 Responses 供应商时仍可见(仅剔除桥接来源)', () => {
++    const out = selectVisibleModels({
++      agentKind: 'codex',
++      deviceId: undefined,
++      // 桥接来源在前(first-wins),但被跳过后原生来源仍补上同名模型。
++      providers: [
++        codexProvider('bridged', ['shared'], 'openai-chat'),
++        codexProvider('native', ['shared'], 'openai-responses'),
++      ],
++      deviceCcModels: [],
++      deviceCodexModels: [],
++      excludeChatBridgedCodex: true,
++    });
++    expect(ids(out)).toEqual(['shared']);
++  });
++
++  it('未传(默认)不过滤:Chat 桥接的 codex 模型正常列出', () => {
++    const out = selectVisibleModels({
++      agentKind: 'codex',
++      deviceId: undefined,
++      providers: [codexProvider('deepseek', ['deepseek-chat'], 'openai-chat')],
++      deviceCcModels: [],
++      deviceCodexModels: [],
++    });
++    expect(ids(out)).toEqual(['deepseek-chat']);
++  });
++
++  it('claude-code 列表不受影响(仅作用于 codex 派生)', () => {
++    const out = selectVisibleModels({
++      agentKind: 'claude-code',
++      deviceId: undefined,
++      providers: [provider('anthropic', 'claude-code', ['claude-opus-4-8'])],
++      deviceCcModels: [],
++      deviceCodexModels: [],
++      excludeChatBridgedCodex: true,
++    });
++    expect(ids(out)).toEqual(['claude-opus-4-8']);
++  });
++});
++
++describe('filterChatBridgedCodexProviders — provider source sections', () => {
++  const bridged = { ...codexProvider('bridged', ['deepseek-chat'], 'openai-chat'), connected: true };
++  const native = { ...codexProvider('native', ['gpt-5.5'], 'openai-responses'), connected: true };
++
++  it('SSH exclusion removes bridged Codex sources from section inputs', () => {
++    expect(filterChatBridgedCodexProviders([bridged, native], 'codex', true).map((p) => p.id)).toEqual(['native']);
++  });
++
++  it('does not filter Claude sources or normal local Codex sources', () => {
++    expect(filterChatBridgedCodexProviders([bridged, native], 'codex', false).map((p) => p.id)).toEqual([
++      'bridged',
++      'native',
++    ]);
++    expect(filterChatBridgedCodexProviders([bridged, native], 'claude-code', true).map((p) => p.id)).toEqual([
++      'bridged',
++      'native',
++    ]);
++  });
++});
+diff --git a/apps/desktop/src/renderer/components/new-chat/ChatInput.tsx b/apps/desktop/src/renderer/components/new-chat/ChatInput.tsx
+index ca74e5e2df0c6d4e7fcdb391ec8a3383423ef893..79a54955c060c36aeb338b6cb8d510cea3a523a6 100644
+--- a/apps/desktop/src/renderer/components/new-chat/ChatInput.tsx
++++ b/apps/desktop/src/renderer/components/new-chat/ChatInput.tsx
+@@ -144,7 +144,7 @@ import { useConnectedSource } from '@/hooks/useConnectedSource';
+ import { useProviders } from '@/hooks/useProviders';
+ import { useDeviceProviders } from '@/hooks/useDeviceProviders';
+ import { effectiveSourceIdForModel, sourcesForModel } from '@cindy/model-providers';
+-import { deriveModelsFromProviders, resolveFastSupported } from '@/lib/providerModels';
++import { deriveModelsFromProviders, filterChatBridgedCodexProviders, resolveFastSupported } from '@/lib/providerModels';
+ import {
+   getProviderModelEffort,
+   setProviderModelChoice,
+@@ -1368,16 +1368,24 @@ export function ChatInput({
+   const localProviders = useProviders();
+   const remoteProviders = useDeviceProviders(deviceLinkDeviceId);
+   const providers = deviceLinkDeviceId ? remoteProviders.providers : localProviders.providers;
++  const sendProviders = filterChatBridgedCodexProviders(
++    providers,
++    currentModelAgentKind ?? 'codex',
++    !!remoteHostId,
++  );
+ 
+   // 空態(设计 Q7NYAD「ChatInput 空态 · 模型选择器」):当前模型一个已连接来源都没有 →
+   // 模型选择器 trigger 化成「连接来源」CTA、Send 禁用。「有没有来源」走统一判定 hook
+   // useConnectedSource —— 与 ModelSelector trigger / send 门禁同一条规则,不再各算(避免漂移)。
+   // providersLoading 期间不判,避免有缓存的老用户首帧闪 CTA / 禁用态(规则 7)。
+-  const { hasConnectedSource, loading: providersLoading } = useConnectedSource(
++  const { loading: providersLoading } = useConnectedSource(
+     currentModelAgentKind,
+     activeModel,
+   );
+-  const noConnectedSource = !!currentModelAgentKind && !providersLoading && !hasConnectedSource;
++  const hasConnectedSendSource = currentModelAgentKind
++    ? sourcesForModel(sendProviders, activeModel, currentModelAgentKind, { onlyConnected: true }).length > 0
++    : false;
++  const noConnectedSource = !!currentModelAgentKind && !providersLoading && !hasConnectedSendSource;
+ 
+   // 会话显式选中的来源已断开(如外部删除订阅 OAuth 凭证):trigger 显示「已断开」错误态 +
+   // Send 禁用,不再静默回退默认来源图标(否则界面显示 XD、main 懒创建却按 DB 里的来源报
+@@ -1413,11 +1421,11 @@ export function ChatInput({
+   const sendProviderId = useMemo<string | null>(() => {
+     const kind = currentModelAgentKind;
+     if (!kind || !activeProviderId) return null;
+-    return effectiveSourceIdForModel(providers, activeProviderId, activeModel, kind) ===
++    return effectiveSourceIdForModel(sendProviders, activeProviderId, activeModel, kind) ===
+       activeProviderId
+       ? activeProviderId
+       : null;
+-  }, [providers, currentModelAgentKind, activeProviderId, activeModel]);
++  }, [sendProviders, currentModelAgentKind, activeProviderId, activeModel]);
+ 
+   // 模型预设采用「全局默认 + 已创建会话保护」:
+   //   - 本地草稿 / 已创建会话的**非选中行**都读写 providerModelMemory,所以同一
+@@ -5013,6 +5021,9 @@ export function ChatInput({
+                   // SSH 远程会话隐藏订阅直连模型(chatgpt/ / xai/):bridge 只挂在本地 compat-proxy,
+                   // 远程模式走 remoteEndpoint 不经翻译,选了必失败。
+                   excludeSubscriptionDirect={!!remoteHostId}
++                  // 同理隐藏 openai-chat 桥接的 Codex 供应商(DeepSeek / Kimi / GLM 等):
++                  // Responses→Chat 桥只挂在本地 codex-proxy,SSH 远程走 daemon 不经它。
++                  excludeChatBridgedCodex={!!remoteHostId}
+                   dense={effectiveDenseToolbar}
+                   // 意图期显示用户在浏览态选中的来源(null = flat 退化行,跟随默认路由)。
+                   currentProviderId={activeProviderId}
+diff --git a/apps/desktop/src/renderer/components/new-chat/ModelSelector.tsx b/apps/desktop/src/renderer/components/new-chat/ModelSelector.tsx
+index 6cafd45f0ab04b9097606277646a44d71cf56b9c..6516ae2bf0fdab4f86e45ecc8a6280d5844160c7 100644
+--- a/apps/desktop/src/renderer/components/new-chat/ModelSelector.tsx
++++ b/apps/desktop/src/renderer/components/new-chat/ModelSelector.tsx
+@@ -26,6 +26,7 @@ import { useModelPricing } from '@/hooks/useModelPricing';
+ import { useProviders } from '@/hooks/useProviders';
+ import { useDeviceProviders } from '@/hooks/useDeviceProviders';
+ import {
++  filterChatBridgedCodexProviders,
+   providerMonogram,
+   resolveVisibleModelAgentKind,
+   selectVisibleModels,
+@@ -265,6 +266,12 @@ interface ModelSelectorProps {
+    * 本地 compat-proxy,远程模式不经它,选了必失败(见 selectVisibleModels 同名参数)。
+    */
+   excludeSubscriptionDirect?: boolean;
++  /**
++   * SSH 远程会话(remoteHostId)传 true:隐藏 `wireProtocol: 'openai-chat'` 的 Codex 供应商
++   * (DeepSeek / Kimi / GLM 等)——Responses→Chat 桥只挂在本地 codex-proxy,远程不经它
++   * (见 selectVisibleModels 同名参数)。
++   */
++  excludeChatBridgedCodex?: boolean;
+   /**
+    * device-link 远程切换 in-flight:trigger 置灰 + 禁用点击,直到被控端 echo 回流。
+    * 配合 ChatInput 的乐观显示(chip 已显示目标值)给一个「正在生效」的视觉提示,避免回落默认态的跳变。
+@@ -319,6 +326,8 @@ interface ModelSelectorContentProps {
+   deviceId?: string;
+   /** SSH 远程会话隐藏订阅直连模型(语义同 ModelSelectorProps 同名字段)。 */
+   excludeSubscriptionDirect?: boolean;
++  /** SSH 远程会话隐藏 Chat 桥接的 Codex 供应商模型(语义同 ModelSelectorProps 同名字段)。 */
++  excludeChatBridgedCodex?: boolean;
+   /** 选中后是否自动关闭。Popover 场景传入,内嵌场景不传。 */
+   onDismiss?: () => void;
+   /** 模型信息 / 选项浮层的额外样式。供嵌套在高层级 overlay 中的调用方覆盖默认 z-index。 */
+@@ -368,6 +377,7 @@ export function ModelSelectorContent({
+   vendorKey,
+   deviceId,
+   excludeSubscriptionDirect,
++  excludeChatBridgedCodex,
+   onDismiss,
+   overlayContentClassName,
+   currentProviderId,
+@@ -520,6 +530,7 @@ export function ModelSelectorContent({
+         deviceCcModels: cc.capabilities?.availableModels ?? [],
+         deviceCodexModels: codex.capabilities?.availableModels ?? [],
+         excludeSubscriptionDirect,
++        excludeChatBridgedCodex,
+       }),
+     [
+       agentKind,
+@@ -528,6 +539,7 @@ export function ModelSelectorContent({
+       cc.capabilities,
+       codex.capabilities,
+       excludeSubscriptionDirect,
++      excludeChatBridgedCodex,
+     ],
+   );
+ 
+@@ -576,13 +588,15 @@ export function ModelSelectorContent({
+   // 列出来,切过去后来源解析不到(trigger 无 icon、发送必失败)。行点击语义由
+   // handleRowSelect 的 browsing 分支先行接管(连来源一起交给切换事务)。
+   const sourcesEnabled = !!onProviderChange;
+-  const connected = useMemo(
+-    () =>
+-      sourcesEnabled && currentAgentKind
+-        ? connectedProvidersForAgent(providers, currentAgentKind)
+-        : [],
+-    [sourcesEnabled, providers, currentAgentKind],
+-  );
++  const connected = useMemo(() => {
++    if (!sourcesEnabled || !currentAgentKind) return [];
++    const candidates = connectedProvidersForAgent(providers, currentAgentKind);
++    return filterChatBridgedCodexProviders(
++      candidates,
++      currentAgentKind,
++      excludeChatBridgedCodex === true,
++    );
++  }, [sourcesEnabled, providers, currentAgentKind, excludeChatBridgedCodex]);
+   // 生效来源必须按当前模型收窄。只按 agent 从 connected 里兜底，会在 XD key 缺失但
+   // OpenAI 已连接时拼出「OpenAI 图标 + Opus」这种不存在的路由。
+   const activeSourceId = useMemo(
+@@ -1294,6 +1308,7 @@ export function ModelSelector({
+   vendorKey,
+   deviceId,
+   excludeSubscriptionDirect,
++  excludeChatBridgedCodex,
+   switching = false,
+   disabled = false,
+   dense = false,
+@@ -1350,6 +1365,7 @@ export function ModelSelector({
+         deviceCcModels: cc.capabilities?.availableModels ?? [],
+         deviceCodexModels: codex.capabilities?.availableModels ?? [],
+         excludeSubscriptionDirect,
++        excludeChatBridgedCodex,
+       }),
+     [
+       agentKind,
+@@ -1358,6 +1374,7 @@ export function ModelSelector({
+       cc.capabilities,
+       codex.capabilities,
+       excludeSubscriptionDirect,
++      excludeChatBridgedCodex,
+     ],
+   );
+ 
+@@ -1687,6 +1704,7 @@ export function ModelSelector({
+       vendorKey={vendorKey}
+       deviceId={deviceId}
+       excludeSubscriptionDirect={excludeSubscriptionDirect}
++      excludeChatBridgedCodex={excludeChatBridgedCodex}
+       onDismiss={() => setOpen(false)}
+       currentProviderId={currentProviderId}
+       onProviderChange={onProviderChange}
+diff --git a/apps/desktop/src/renderer/components/settings/AddProviderWizard.tsx b/apps/desktop/src/renderer/components/settings/AddProviderWizard.tsx
+index ed4c34c1f6421c9220fc8f66482d0debd51dc396..a6d6072a3ac85f91184cdbe04e8cfeeb636ce971 100644
+--- a/apps/desktop/src/renderer/components/settings/AddProviderWizard.tsx
++++ b/apps/desktop/src/renderer/components/settings/AddProviderWizard.tsx
+@@ -456,6 +456,7 @@ export function AddProviderWizard({
+         if (agentModels.length === 0) continue;
+         runtimes[agent] = {
+           baseUrl: rt.baseUrl,
++          ...(rt.wireProtocol ? { wireProtocol: rt.wireProtocol } : {}),
+           models: agentModels,
+           ...(rt.headers ? { headers: rt.headers } : {}),
+           ...(rt.modelsUrl ? { modelsUrl: rt.modelsUrl } : {}),
+@@ -733,13 +734,19 @@ export function AddProviderWizard({
+                   }}
+                 />
+               </div>
+-              {/* baseUrl 由预设携带,只读展示(要改走保存后的编辑表单)。 */}
++              {/* baseUrl 由预设携带,只读展示(要改走保存后的编辑表单)。
++                  codex + openai-chat 上游标注「Cindy 桥接」,让用户明确该通道是协议转换而非原生。 */}
+               <div className="flex flex-col gap-1">
+-                {presetAgents.map((agent) => (
+-                  <span key={agent} className="truncate text-12" style={{ color: 'var(--text-tertiary)' }}>
+-                    {AGENT_LABEL[agent]} · {sel.preset.runtimes[agent]?.baseUrl}
+-                  </span>
+-                ))}
++                {presetAgents.map((agent) => {
++                  const rt = sel.preset.runtimes[agent];
++                  const bridged = agent === 'codex' && rt?.wireProtocol === 'openai-chat';
++                  return (
++                    <span key={agent} className="truncate text-12" style={{ color: 'var(--text-tertiary)' }}>
++                      {AGENT_LABEL[agent]} · {rt?.baseUrl}
++                      {bridged ? ` · ${t('settings.providers.wizard.bridgedNote')}` : ''}
++                    </span>
++                  );
++                })}
+               </div>
+               {presetSingleAgentNote && <InfoLine text={presetSingleAgentNote} />}
+               {sel.preset.docsUrl && (
+diff --git a/apps/desktop/src/renderer/components/settings/CustomProviderDialog.tsx b/apps/desktop/src/renderer/components/settings/CustomProviderDialog.tsx
+index 9685d373cf9e63f24982ff614c1321e9624f08fd..13d0fd0f05df8af0d66d9edeaa262c292d75294d 100644
+--- a/apps/desktop/src/renderer/components/settings/CustomProviderDialog.tsx
++++ b/apps/desktop/src/renderer/components/settings/CustomProviderDialog.tsx
+@@ -35,6 +35,7 @@ import type {
+   CustomProviderConfig,
+   ProviderPreset,
+   ProviderRuntimeModelConfig,
++  ProviderWireProtocol,
+ } from '@cindy/model-providers';
+ 
+ const AGENTS: AgentKind[] = ['claude-code', 'codex'];
+@@ -70,6 +71,7 @@ interface HeaderRow {
+ interface RuntimeFields {
+   baseUrl: string;
+   apiKey: string;
++  wireProtocol: ProviderWireProtocol;
+   models: ModelRow[];
+   headers: HeaderRow[];
+   /** 隐藏字段：列模型端点（预设 / 已存配置快照进来），「获取模型列表」用；不在表单展示。 */
+@@ -85,10 +87,11 @@ interface TestState {
+ }
+ const IDLE_TEST: TestState = { status: 'idle' };
+ 
+-function emptyRuntime(): RuntimeFields {
++function emptyRuntime(agent: AgentKind): RuntimeFields {
+   return {
+     baseUrl: '',
+     apiKey: '',
++    wireProtocol: agent === 'claude-code' ? 'anthropic-messages' : 'openai-responses',
+     models: [{ id: '', name: '' }],
+     headers: [{ name: '', value: '' }],
+     modelsUrl: '',
+@@ -97,8 +100,8 @@ function emptyRuntime(): RuntimeFields {
+ 
+ function initRuntimes(initial?: CustomProviderConfig): Record<AgentKind, RuntimeFields> {
+   const out: Record<AgentKind, RuntimeFields> = {
+-    'claude-code': emptyRuntime(),
+-    codex: emptyRuntime(),
++    'claude-code': emptyRuntime('claude-code'),
++    codex: emptyRuntime('codex'),
+   };
+   if (initial) {
+     for (const a of AGENTS) {
+@@ -107,6 +110,7 @@ function initRuntimes(initial?: CustomProviderConfig): Record<AgentKind, Runtime
+       out[a] = {
+         baseUrl: rc.baseUrl,
+         apiKey: '',
++        wireProtocol: rc.wireProtocol ?? (a === 'claude-code' ? 'anthropic-messages' : 'openai-responses'),
+         models: rc.models.length ? rc.models.map((m) => ({ ...m })) : [{ id: '', name: '' }],
+         headers:
+           rc.headers && Object.keys(rc.headers).length > 0
+@@ -359,12 +363,13 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
+       for (const a of AGENTS) {
+         const rc = p.runtimes[a];
+         if (!rc) {
+-          next[a] = emptyRuntime();
++          next[a] = emptyRuntime(a);
+           continue;
+         }
+         next[a] = {
+           baseUrl: rc.baseUrl,
+           apiKey: prev[a].apiKey, // 已填的 key 保留
++          wireProtocol: rc.wireProtocol ?? (a === 'claude-code' ? 'anthropic-messages' : 'openai-responses'),
+           models: rc.models.length ? rc.models.map((m) => ({ ...m })) : [{ id: '', name: '' }],
+           headers:
+             rc.headers && Object.keys(rc.headers).length > 0
+@@ -418,6 +423,18 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
+     [setRtSynced],
+   );
+ 
++  /** 切换协议时保留用户已填写的 endpoint，仅使旧测试结果失效。 */
++  const changeCodexWireProtocol = useCallback(
++    (wireProtocol: 'openai-responses' | 'openai-chat') => {
++      setRtSynced((prev) => ({
++        ...prev,
++        codex: { ...prev.codex, wireProtocol },
++      }));
++      setTest((prev) => ({ ...prev, codex: IDLE_TEST }));
++    },
++    [setRtSynced],
++  );
++
+   const f = rt[activeTab];
+ 
+   /** 测试当前 Tab 的表单值（未保存也能测；key 仅内存透传给 main，不落盘）。 */
+@@ -443,6 +460,7 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
+           agent,
+           baseUrl,
+           modelId: firstModel,
++          wireProtocol: rf.wireProtocol,
+           apiKey: rf.apiKey.trim() || null,
+           ...(Object.keys(headers).length > 0 ? { headers } : {}),
+         },
+@@ -633,6 +651,7 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
+       }
+       runtimes[a] = {
+         baseUrl: rf.baseUrl.trim(),
++        wireProtocol: rf.wireProtocol,
+         models,
+         ...(Object.keys(headers).length > 0 ? { headers } : {}),
+         ...(rf.modelsUrl.trim() ? { modelsUrl: rf.modelsUrl.trim() } : {}),
+@@ -858,6 +877,33 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
+               border: '1px solid var(--settings-theme-card-border)',
+             }}
+           >
++            {activeTab === 'codex' && (
++              <div className="flex flex-col gap-[7px]">
++                <FieldLabel>{t('settings.providers.custom.fields.wireProtocol')}</FieldLabel>
++                <div className="flex gap-1.5">
++                  {(['openai-responses', 'openai-chat'] as const).map((protocol) => (
++                    <button
++                      key={protocol}
++                      type="button"
++                      onClick={() => changeCodexWireProtocol(protocol)}
++                      className={cn(
++                        'rounded-full border px-3 py-1.5 text-12 font-medium transition-colors',
++                        f.wireProtocol === protocol
++                          ? 'border-[var(--settings-input-border-focus)] text-[var(--settings-section-title)]'
++                          : 'border-[var(--settings-input-border)] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]',
++                      )}
++                      style={f.wireProtocol === protocol ? { backgroundColor: 'var(--surface-elevated)' } : undefined}
++                    >
++                      {t(`settings.providers.custom.wireProtocol.${protocol === 'openai-responses' ? 'responses' : 'chat'}`)}
++                    </button>
++                  ))}
++                </div>
++                <span className="text-12 leading-snug text-[var(--text-tertiary)]">
++                  {t(`settings.providers.custom.wireProtocol.${f.wireProtocol === 'openai-chat' ? 'chatHelp' : 'responsesHelp'}`)}
++                </span>
++              </div>
++            )}
++
+             {/* 基础 URL */}
+             <div className="flex flex-col gap-[7px]">
+               <FieldLabel>{t('settings.providers.custom.fields.baseUrl')}</FieldLabel>
+diff --git a/apps/desktop/src/renderer/components/settings/ProvidersSection.tsx b/apps/desktop/src/renderer/components/settings/ProvidersSection.tsx
+index 08e77ef3084f019db055a8e6be0bb02e9f2b91f0..c75434754e2acbd5da70a4d55ee7abf8d7e1dd4e 100644
+--- a/apps/desktop/src/renderer/components/settings/ProvidersSection.tsx
++++ b/apps/desktop/src/renderer/components/settings/ProvidersSection.tsx
+@@ -759,6 +759,7 @@ function providerViewToConfig(p: ProviderView): CustomProviderConfig {
+     const models = p.models[agent] ?? [];
+     runtimes[agent] = {
+       baseUrl: routing?.upstream ?? '',
++      ...(routing?.wireProtocol ? { wireProtocol: routing.wireProtocol } : {}),
+       models: models.map(customProviderModelConfigFromCatalogModel),
+       ...(routing?.headerOverride && Object.keys(routing.headerOverride).length > 0
+         ? { headers: { ...routing.headerOverride } }
+diff --git a/apps/desktop/src/renderer/i18n/locales/en/common.json b/apps/desktop/src/renderer/i18n/locales/en/common.json
+index 1edb617ded9a92ab3ff1b5af0faa53f7993e8749..81e063290d75f9391c151f0d04b12e7674f642b5 100644
+--- a/apps/desktop/src/renderer/i18n/locales/en/common.json
++++ b/apps/desktop/src/renderer/i18n/locales/en/common.json
+@@ -1120,6 +1120,7 @@
+           "name": "Display name",
+           "namePlaceholder": "My AI provider",
+           "protocols": "Runtime",
++          "wireProtocol": "Upstream protocol",
+           "baseUrl": "Base URL",
+           "baseUrlPlaceholder": "https://api.myprovider.com/v1",
+           "apiKey": "API key",
+@@ -1137,11 +1138,17 @@
+           "addHeader": "Add header",
+           "removeRow": "Remove row"
+         },
++        "wireProtocol": {
++          "responses": "OpenAI Responses (native)",
++          "chat": "Chat Completions (Cindy bridge)",
++          "responsesHelp": "The provider supports the Responses API natively, so Cindy forwards its event stream unchanged.",
++          "chatHelp": "For providers that only expose Chat Completions. Cindy converts streaming text and function tool calls; some advanced Responses features are unavailable."
++        },
+         "protocol": {
+           "claude": "Claude Code",
+           "claudeDesc": "Claude Code follows the Anthropic protocol (auth via x-api-key). Enter this source's baseURL, key, and models for Claude Code; leave blank to skip Claude Code for this source.",
+           "codex": "Codex",
+-          "codexDesc": "Codex follows the OpenAI protocol (auth via Bearer). Requires models that support the Responses API. Enter this source's baseURL, key, and models for Codex; leave blank to skip Codex for this source."
++          "codexDesc": "Codex speaks the OpenAI Responses protocol. Choose a native Responses upstream or let Cindy bridge a provider that only supports Chat Completions. Enter this source's base URL, key, and models for Codex; leave blank to skip Codex for this source."
+         },
+         "errors": {
+           "nameRequired": "Display name is required",
+@@ -1272,6 +1279,7 @@
+         "authorizeFailed": "Failed to authorize {{name}}. Please try again",
+         "nameLabel": "Display name",
+         "onlyAgentNote": "This provider only supports {{agent}}",
++        "bridgedNote": "Cindy bridge (Chat Completions)",
+         "docsLink": "View setup docs",
+         "fetching": "Verifying connection and fetching models…",
+         "fetchFailed": "Couldn't fetch the model list — you can finish with the preset's recommended models and refresh later in details",
+diff --git a/apps/desktop/src/renderer/i18n/locales/ja/common.json b/apps/desktop/src/renderer/i18n/locales/ja/common.json
+index aed6694770bcd8daa2f9d50425e1c385696b9edf..80b1fae2f9de82e85143a0d6e4dde773d8e74600 100644
+--- a/apps/desktop/src/renderer/i18n/locales/ja/common.json
++++ b/apps/desktop/src/renderer/i18n/locales/ja/common.json
+@@ -1120,6 +1120,7 @@
+           "name": "表示名",
+           "namePlaceholder": "マイ AI プロバイダー",
+           "protocols": "Runtime",
++          "wireProtocol": "上流プロトコル",
+           "baseUrl": "ベース URL",
+           "baseUrlPlaceholder": "https://api.myprovider.com/v1",
+           "apiKey": "API キー",
+@@ -1137,11 +1138,17 @@
+           "addHeader": "ヘッダーを追加",
+           "removeRow": "この行を削除"
+         },
++        "wireProtocol": {
++          "responses": "OpenAI Responses（ネイティブ）",
++          "chat": "Chat Completions（Cindy ブリッジ）",
++          "responsesHelp": "プロバイダーが Responses API をネイティブ対応しているため、Cindy はイベントストリームをそのまま転送します。",
++          "chatHelp": "Chat Completions のみを提供するプロバイダー向けです。Cindy がストリーミングテキストと関数ツール呼び出しを変換します。一部の高度な Responses 機能は利用できません。"
++        },
+         "protocol": {
+           "claude": "Claude Code",
+           "claudeDesc": "Claude Code は Anthropic プロトコルに従います（x-api-key で認証）。この提供元の Claude Code 用 baseURL・キー・モデルを入力します。空欄にするとこの提供元は Claude Code を提供しません。",
+           "codex": "Codex",
+-          "codexDesc": "Codex は OpenAI プロトコルに従います（Bearer で認証）、Responses API に対応するモデルが必要です。この提供元の Codex 用 baseURL・キー・モデルを入力します。空欄にするとこの提供元は Codex を提供しません。"
++          "codexDesc": "Codex は OpenAI Responses プロトコルを使用します。Responses ネイティブの上流、または Chat Completions のみを提供するプロバイダーを Cindy でブリッジする方式を選べます。この提供元の Codex 用ベース URL・キー・モデルを入力します。空欄にすると Codex では利用しません。"
+         },
+         "errors": {
+           "nameRequired": "表示名を入力してください",
+@@ -1271,6 +1278,7 @@
+         "authorizeFailed": "「{{name}}」の認証に失敗しました。もう一度お試しください",
+         "nameLabel": "表示名",
+         "onlyAgentNote": "このプロバイダーは {{agent}} のみ対応です",
++        "bridgedNote": "Cindy ブリッジ（Chat Completions）",
+         "docsLink": "接続ドキュメントを見る",
+         "fetching": "接続を確認してモデル一覧を取得しています…",
+         "fetchFailed": "モデル一覧を取得できませんでした。プリセットの推奨モデルで追加を完了し、あとで詳細から更新できます",
+diff --git a/apps/desktop/src/renderer/i18n/locales/ko/common.json b/apps/desktop/src/renderer/i18n/locales/ko/common.json
+index 95ef630d0dee96789aad112f2ef0043b419e83eb..5ac121aaa92647c3e2141a90ad062c015a553353 100644
+--- a/apps/desktop/src/renderer/i18n/locales/ko/common.json
++++ b/apps/desktop/src/renderer/i18n/locales/ko/common.json
+@@ -1120,6 +1120,7 @@
+           "name": "표시 이름",
+           "namePlaceholder": "내 AI 제공자",
+           "protocols": "Runtime",
++          "wireProtocol": "업스트림 프로토콜",
+           "baseUrl": "기본 URL",
+           "baseUrlPlaceholder": "https://api.myprovider.com/v1",
+           "apiKey": "API 키",
+@@ -1137,11 +1138,17 @@
+           "addHeader": "헤더 추가",
+           "removeRow": "이 행 삭제"
+         },
++        "wireProtocol": {
++          "responses": "OpenAI Responses(네이티브)",
++          "chat": "Chat Completions(Cindy 브리지)",
++          "responsesHelp": "제공자가 Responses API를 네이티브로 지원하므로 Cindy가 이벤트 스트림을 그대로 전달합니다.",
++          "chatHelp": "Chat Completions만 제공하는 업체용입니다. Cindy가 스트리밍 텍스트와 함수 도구 호출을 변환하며 일부 고급 Responses 기능은 사용할 수 없습니다."
++        },
+         "protocol": {
+           "claude": "Claude Code",
+           "claudeDesc": "Claude Code는 Anthropic 프로토콜을 따릅니다(x-api-key 인증). 이 공급자의 Claude Code용 baseURL・키・모델을 입력하세요. 비워 두면 이 공급자는 Claude Code를 제공하지 않습니다.",
+           "codex": "Codex",
+-          "codexDesc": "Codex는 OpenAI 프로토콜을 따릅니다(Bearer 인증), Responses API를 지원하는 모델이 필요합니다. 이 공급자의 Codex용 baseURL・키・모델을 입력하세요. 비워 두면 이 공급자는 Codex를 제공하지 않습니다."
++          "codexDesc": "Codex는 OpenAI Responses 프로토콜을 사용합니다. Responses를 네이티브로 지원하는 업스트림이나 Chat Completions만 지원하는 제공자를 Cindy로 브리지하는 방식을 선택할 수 있습니다. 이 공급자의 Codex용 기본 URL, 키와 모델을 입력하세요. 비워 두면 Codex에서 사용하지 않습니다."
+         },
+         "errors": {
+           "nameRequired": "표시 이름을 입력하세요",
+@@ -1271,6 +1278,7 @@
+         "authorizeFailed": "{{name}} 인증에 실패했습니다. 다시 시도해 주세요",
+         "nameLabel": "표시 이름",
+         "onlyAgentNote": "이 공급자는 {{agent}}만 지원합니다",
++        "bridgedNote": "Cindy 브리지 (Chat Completions)",
+         "docsLink": "연동 문서 보기",
+         "fetching": "연결을 확인하고 모델 목록을 가져오는 중…",
+         "fetchFailed": "모델 목록을 가져오지 못했습니다. 프리셋 추천 모델로 추가를 완료한 뒤 나중에 상세에서 새로고침할 수 있습니다",
+diff --git a/apps/desktop/src/renderer/i18n/locales/zh-CN/common.json b/apps/desktop/src/renderer/i18n/locales/zh-CN/common.json
+index ffb49ffec8dbc7ecb55e67e5a9e960b7a6cc807b..f9235361011132dbb26a960abf6c16f30a5e1829 100644
+--- a/apps/desktop/src/renderer/i18n/locales/zh-CN/common.json
++++ b/apps/desktop/src/renderer/i18n/locales/zh-CN/common.json
+@@ -1120,6 +1120,7 @@
+           "name": "显示名称",
+           "namePlaceholder": "我的 AI 提供商",
+           "protocols": "Runtime",
++          "wireProtocol": "上游协议",
+           "baseUrl": "基础 URL",
+           "baseUrlPlaceholder": "https://api.myprovider.com/v1",
+           "apiKey": "API 密钥",
+@@ -1137,11 +1138,17 @@
+           "addHeader": "添加请求头",
+           "removeRow": "删除该行"
+         },
++        "wireProtocol": {
++          "responses": "OpenAI Responses（原生）",
++          "chat": "Chat Completions（Cindy 桥接）",
++          "responsesHelp": "供应商原生支持 Responses API，Cindy 透明转发完整事件。",
++          "chatHelp": "适用于仅提供 Chat Completions 的供应商。Cindy 转换流式文本和函数工具调用；部分高级 Responses 能力不可用。"
++        },
+         "protocol": {
+           "claude": "Claude Code",
+           "claudeDesc": "Claude Code 遵循 Anthropic 协议(用 x-api-key 鉴权)。填该来源用于 Claude Code 的 baseURL、密钥与模型,留空则此来源不提供 Claude Code。",
+           "codex": "Codex",
+-          "codexDesc": "Codex 遵循 OpenAI 协议(用 Bearer 鉴权),需要提供支持 Responses API 的模型。填该来源用于 Codex 的 baseURL、密钥与模型,留空则此来源不提供 Codex。"
++          "codexDesc": "Codex 使用 OpenAI Responses 协议。上游可选择原生 Responses，或由 Cindy 桥接仅支持 Chat Completions 的供应商。填该来源用于 Codex 的 baseURL、密钥与模型，留空则此来源不提供 Codex。"
+         },
+         "errors": {
+           "nameRequired": "请填写显示名称",
+@@ -1271,6 +1278,7 @@
+         "authorizeFailed": "「{{name}}」授权失败,请重试",
+         "nameLabel": "显示名称",
+         "onlyAgentNote": "此供应商仅支持 {{agent}}",
++        "bridgedNote": "Cindy 桥接（Chat Completions）",
+         "docsLink": "查看接入文档",
+         "fetching": "正在验证连接并获取模型列表…",
+         "fetchFailed": "模型列表获取失败——可先按预设推荐模型完成添加,稍后在详情里刷新",
+diff --git a/apps/desktop/src/renderer/lib/providerModels.ts b/apps/desktop/src/renderer/lib/providerModels.ts
+index b391b46cd35e81ce285d69e912a17398c5d6a659..8ff1b29b573082474c29a462cc19fc7485a86920 100644
+--- a/apps/desktop/src/renderer/lib/providerModels.ts
++++ b/apps/desktop/src/renderer/lib/providerModels.ts
+@@ -91,14 +91,36 @@ export function providerMonogram(name: string): string {
+   return ch.toUpperCase();
+ }
+ 
+-/** 派生某 agent 的可见模型清单：跨 provider union（数组序）+ 按 id 首见去重。 */
++/** Whether a provider relies on the local Responses-to-Chat handler for Codex. */
++export function isChatBridgedCodexProvider(provider: ProviderView): boolean {
++  return provider.routing?.codex?.wireProtocol === 'openai-chat';
++}
++
++export function filterChatBridgedCodexProviders(
++  providers: ProviderView[],
++  agent: AgentKind,
++  exclude: boolean,
++): ProviderView[] {
++  return exclude && agent === 'codex'
++    ? providers.filter((provider) => !isChatBridgedCodexProvider(provider))
++    : providers;
++}
++
++/**
++ * 派生某 agent 的可见模型清单：跨 provider union（数组序）+ 按 id 首见去重。
++ *
++ * `excludeProvider` 命中的供应商整条跳过（其模型不加入、也不占 seen），这样若同一
++ * model id 另有可路由的供应商提供，仍能由后者补上——用于 SSH 远程排除仅本地可桥接的来源。
++ */
+ export function deriveModelsFromProviders(
+   providers: ProviderView[],
+   agent: AgentKind,
++  opts?: { excludeProvider?: (provider: ProviderView) => boolean },
+ ): ModelDescriptor[] {
+   const seen = new Set<string>();
+   const out: ModelDescriptor[] = [];
+   for (const provider of providersForAgent(providers, agent)) {
++    if (opts?.excludeProvider?.(provider)) continue;
+     for (const m of provider.models[agent] ?? []) {
+       if (seen.has(m.id)) continue;
+       seen.add(m.id);
+@@ -136,12 +158,22 @@ export function selectVisibleModels(params: {
+    * (被控端跑完整 app,其本地 proxy 上 bridge 可用,模型清单本就来自被控端)。
+    */
+   excludeSubscriptionDirect?: boolean;
++  /**
++   * 过滤 `wireProtocol: 'openai-chat'` 的 Codex 供应商(DeepSeek / Kimi / GLM 等):它们的
++   * Responses→Chat 翻译只挂在本地 codex-proxy 的 localHandler 上。SSH 远程会话(remoteHostId)
++   * 必须传 true:远程走 daemon transport、不经本地 proxy,未经桥接的 Chat-only 模型送到远端必失败。
++   * 与 excludeSubscriptionDirect 同由 `!!remoteHostId` 驱动;device-link 远程不受影响(被控端跑完整 app)。
++   */
++  excludeChatBridgedCodex?: boolean;
+ }): ModelDescriptor[] {
+-  const { agentKind, deviceId, providers, deviceCcModels, deviceCodexModels, excludeSubscriptionDirect } = params;
++  const { agentKind, deviceId, providers, deviceCcModels, deviceCodexModels, excludeSubscriptionDirect, excludeChatBridgedCodex } = params;
+   const drop = (list: ModelDescriptor[]): ModelDescriptor[] =>
+     excludeSubscriptionDirect ? list.filter((m) => !isSubscriptionDirectModel(m.id)) : list;
++  const codexDeriveOpts = excludeChatBridgedCodex
++    ? { excludeProvider: isChatBridgedCodexProvider }
++    : undefined;
+   const cc = drop(deviceId ? deviceCcModels : deriveModelsFromProviders(providers, 'claude-code'));
+-  const codex = drop(deviceId ? deviceCodexModels : deriveModelsFromProviders(providers, 'codex'));
++  const codex = drop(deviceId ? deviceCodexModels : deriveModelsFromProviders(providers, 'codex', codexDeriveOpts));
+   if (agentKind === 'claude-code') return cc;
+   if (agentKind === 'codex') return codex;
+   const merged = [...cc];
+diff --git a/apps/desktop/src/renderer/vite-env.d.ts b/apps/desktop/src/renderer/vite-env.d.ts
+index 1200720d7c5f0c6f3d15045dd90dabc9cd1745a4..919f9b0dd29774df252ad9a941dc59dee29e1457 100644
+--- a/apps/desktop/src/renderer/vite-env.d.ts
++++ b/apps/desktop/src/renderer/vite-env.d.ts
+@@ -3305,6 +3305,7 @@ interface ElectronAPI {
+               agent: 'claude-code' | 'codex';
+               baseUrl: string;
+               modelId: string;
++              wireProtocol?: import('@cindy/model-providers').ProviderWireProtocol;
+               apiKey?: string | null;
+               headers?: Record<string, string>;
+             };
+diff --git a/docs/openai-chat-dual-channel-plan.md b/docs/openai-chat-dual-channel-plan.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..50aeccfaf92d189f4f18baace02ca5323252708c
+--- /dev/null
++++ b/docs/openai-chat-dual-channel-plan.md
+@@ -0,0 +1,524 @@
++# OpenAI Chat Completions 厂商双通道实施方案
++
++> 状态：待实施。
++> 范围：当前只落地 Phase 1——把 Codex 的 OpenAI Responses 请求桥接到供应商的 OpenAI Chat Completions 接口；Phase 2 及其它协议按真实需求后续实施。
++> 相关现状：[`subscription-bridge.md`](./subscription-bridge.md) 记录了 Claude Code 侧已有 Anthropic Messages → OpenAI Responses bridge；本文补齐 Codex 访问 Chat-only 上游的方向。
++
++## 1. 目标与最终结论
++
++Cindy 当前内置 API-key 厂商均已具备 OpenAI Chat Completions 基础能力；最大的覆盖缺口是其中不少厂商没有完整 OpenAI Responses API，而 Codex 当前只说 Responses。因此本轮投入产出比最高的方案是：
++
++```mermaid
++flowchart LR
++  CC["Claude Code<br/>Anthropic Messages"]
++  CX["Codex<br/>OpenAI Responses"]
++  PX["Cindy loopback proxy"]
++  AM["Anthropic Messages 上游"]
++  OR["OpenAI Responses 上游"]
++  BR["Responses-to-Chat bridge"]
++  OC["OpenAI Chat Completions 上游"]
++
++  CC --> PX
++  CX --> PX
++  PX -->|"同协议透明直连"| AM
++  PX -->|"同协议透明直连"| OR
++  PX -->|"协议不匹配时才桥接"| BR
++  BR --> OC
++```
++
++实施边界：
++
++1. **不引入第二套常驻代理。** 沿用 Cindy 现有 loopback proxy 和 `RoutingDecision.localHandler`，不整体嵌入 OpenCodex 或 CC Switch。
++2. **不先建设大一统协议中台。** 新增边界明确、零 Electron 依赖的 Responses-to-Chat bridge；内部只为流式状态机使用最小规范化结构。
++3. **数据驱动选协议。** provider/runtime 显式声明 wire protocol，禁止按 `provider.id` 堆条件分支。
++4. **同协议永远优先透明直连。** 原生 Responses 不经过解析或重写；只有 Chat 上游进入 bridge。
++5. **桥接不等于原生完整兼容。** 产品区分“原生支持”“Cindy 桥接支持”“不支持”，并显示已知降级能力。
++6. **Phase 2 后置。** Responses → Anthropic Messages、Gemini Native、多模态、failover 等不阻塞本轮。
++
++## 2. 现状基线
++
++### 2.1 与现有协议桥的关系和隔离边界
++
++Cindy 现有 `packages/anthropic-responses-bridge` 与本计划的新桥是共享代理基础设施的两条**兄弟路径**，不串联，也不是把现有翻译器倒过来使用：
++
++| 维度 | 现有桥 | 本计划新桥 |
++|---|---|---|
++| 客户端 | Claude Code | Codex |
++| 客户端协议 | Anthropic Messages | OpenAI Responses |
++| 上游协议 | OpenAI Responses | OpenAI Chat Completions |
++| 请求方向 | Anthropic → Responses | Responses → Chat |
++| 响应方向 | Responses SSE → Anthropic SSE | Chat SSE → Responses SSE |
++| 挂载点 | Claude loopback proxy | Codex loopback proxy |
++
++两者只共享：
++
++- `packages/anthropic-compat-proxy` 的 loopback server、`RoutingTransform` 和 `RoutingDecision.localHandler`；
++- provider catalog、per-session 来源选择、safeStorage/OAuth token reader、model rewrite、header 策略、统一 logger 和错误分类。
++
++两者明确不共享：
++
++- 请求翻译器和 SSE 状态机；
++- 现有 bridge 的 Responses 最小类型（它只描述该桥自己生成的子集，不是 Codex 输入全集）；
++- `SUBSCRIPTION_DIRECT_MODEL_PREFIXES` / `isSubscriptionDirectModel()` 零计费 gate。是否桥接、是否订阅、是否零计费是三个独立维度；本轮 API-key Chat bridge 不得误记为订阅 0 成本。
++
++实施时不修改现有 `anthropic-responses-bridge` 的 `handler.ts`、`translate-request.ts`、`translate-sse.ts` 核心路径；它们是回归保护对象。若仅为 SSE 分行等稳定工具发现少量重复，先在新包内实现，待两条路径都有实测后再单独评估抽取，避免为了复用扩大现有 Claude Code 桥的回归面。
++
++### 2.2 已有能力
++
++- 两个 runtime 都已经通过 Cindy 本地代理出站：
++  - Claude Code endpoint 由 `packages/maker-core/src/agents/claude-code/env-builder.ts` 和 `apps/desktop/src/main/maker-host/anthropic-compat-proxy-host.ts` 注入；
++  - Codex Responses base URL 由 `apps/desktop/src/main/maker-host/codex-gateway-config.ts` 指向 `apps/desktop/src/main/maker-host/codex-proxy-host.ts`。
++- `packages/anthropic-compat-proxy` 已提供通用路由和 `localHandler` 插槽，能够在同一进程内完成协议转换，不增加额外 HTTP 跳数。
++- `packages/anthropic-responses-bridge` 已验证 local handler 模式可用于流式协议转换，但其方向是 Claude Code 的 Anthropic Messages → Responses 上游。
++- `packages/model-providers` 是 per-runtime 模型、路由和预设的 SSoT。
++- 当前自定义 provider 的 `codex` runtime 默认被解释为原生 Responses，连接探测固定调用 `/responses`，因此 Chat-only 上游无法仅靠补预设安全接入。
++
++### 2.3 厂商目标路由
++
++| Provider | Claude Code | Codex 目标路径 |
++|---|---|---|
++| OpenAI | 现有路径 | 原生 Responses，保持透明直连 |
++| OpenRouter | 现有 Anthropic-compatible runtime | 原生 Responses，保持透明直连 |
++| MiniMax CN / Global | 现有 Anthropic-compatible runtime | 官方 Responses，补 Codex runtime 后透明直连 |
++| DeepSeek | 现有 Anthropic-compatible runtime | Responses → Chat bridge |
++| 智谱 GLM CN / Z.ai Global | 现有 Anthropic-compatible runtime | Responses → Chat bridge |
++| Kimi CN / Global / Kimi Code | 现有 Anthropic-compatible runtime | Responses → Chat bridge |
++| 阿里百炼 Coding Plan | 现有 Anthropic-compatible runtime | Responses → Chat bridge |
++
++该表只决定候选路径，不等于上线准入。Chat 上游必须通过第 7 节的流式工具调用验证矩阵。
++
++## 3. 本轮范围
++
++### 3.1 包含
++
++- Codex Responses 请求 → Chat Completions 请求的确定性转换；
++- Chat Completions SSE → Codex Responses SSE 的逐事件转换；
++- 流式文本、普通 function tools、串行/并行工具调用、usage、取消和错误映射；
++- provider/runtime wire protocol 元数据、校验、持久化和路由；
++- 内置预设补齐 Codex runtime，原生 Responses 与 bridge 路径共存；
++- 自定义 provider 可显式选择 Codex 上游协议；
++- “测试连接”按协议探测，Chat bridge 至少做真实 SSE + tool-call 轻量探针；
++- 四语言文案和原生/桥接/不支持状态展示；
++- macOS、Windows、本地桌面、设备互联手机版控制端的适配和测试；
++- 事件正确性、性能、缓存影响和回滚观测。
++
++### 3.2 不包含
++
++- Codex Responses → Anthropic Messages；
++- Gemini Native 或其它私有协议 Adapter；
++- Responses WebSocket；
++- OpenAI 内置 web search、file search、code interpreter、computer use 的跨协议模拟；
++- 服务端持久 response state 和完整 `previous_response_id` 续接；第一版以 Codex 实际发送的完整 `input` 为准，无法安全重建上下文时显式报不支持；
++- 图片、文档、音频等多模态完整桥接；
++- encrypted/redacted reasoning 无损转换；
++- 完整 prompt cache、structured outputs、vendor server tools 语义模拟；
++- 自动跨供应商 failover、熔断和账号池；
++- 让 SSH 远程工作区通过本机 loopback bridge 出站。
++
++## 4. 核心设计
++
++### 4.1 per-runtime wire protocol
++
++在 `packages/model-providers/src/types.ts` 增加稳定联合类型：
++
++```ts
++export type ProviderWireProtocol =
++  | 'anthropic-messages'
++  | 'openai-responses'
++  | 'openai-chat';
++```
++
++协议必须放在 per-runtime 维度：
++
++- `RoutingDescriptor.wireProtocol`：host 运行期权威；
++- `ProviderPresetRuntime.wireProtocol`：预设数据；
++- `CustomProviderRuntimeConfig.wireProtocol`：用户持久化配置。
++
++兼容存量数据的默认值：
++
++- `claude-code` 缺省为 `anthropic-messages`；
++- `codex` 缺省为 `openai-responses`。
++
++`RoutingDescriptor.adapter` 不作为协议真值；它继续承载同协议内少量无法数据化的 vendor quirk。
++
++校验要求：
++
++- 本轮 `claude-code` 自定义 runtime 只允许 Anthropic-compatible endpoint；
++- `codex` 允许 `openai-responses`、`openai-chat`；
++- catalog、preset 清洗、自定义 store 都验证协议值；
++- `providerViewToConfig`、wizard、DB JSON normalize 不能在创建、编辑、重启后丢字段；
++- device-link 对执行字段做剥离，只保留展示所需的兼容类型。
++
++配置语义遵守 [`configuration-design-principles.md`](./configuration-design-principles.md)：Codex 上游协议是创建自定义端点时必须理解的常规字段，系统默认 Responses；存量用户未设置 override 时行为完全不变，恢复默认即清除 override、重新跟随 Responses 默认。
++
++### 4.2 native fast path 与 bridge path
++
++扩展 Codex per-session 路由，让一个决策点同时取得 runtime、上游、鉴权/header、model rewrite 和 wire protocol。
++
++`apps/desktop/src/main/maker-host/codex-proxy-host.ts:createModelRoutingTransform` 的目标分支：
++
++```text
++codex + openai-responses
++  → 现有 RoutingDecision，透明上游转发
++
++codex + openai-chat
++  → RoutingDecision.localHandler
++  → handler 闭包携带 upstream/auth/model rewrite/capability
++
++其它组合
++  → 明确不支持，不得误投默认上游
++```
++
++不变量：
++
++1. 路由必须基于 proxy 提供的**原始** `parsedBody` 与未改写 model 判定；bridge 命中后不得先跑 xAI/Responses 专用 transform，再转成 Chat；
++2. 路由 scope 与 model rewrite 使用同一判据，防止请求回落默认上游但 body 已被第三方规则改写；
++3. Chat bridge 使用路由阶段的原始 `parsedBody`，在内部按固定顺序执行 Cindy instructions 注入、model rewrite 和协议翻译，避免现有 Responses transforms 重复改写；
++4. 鉴权沿用 safeStorage/generic OAuth reader；bridge config 和日志不含凭证明文；
++5. 第三方 Chat 上游前删除 ChatGPT 专属 header：`chatgpt-account-id`、`openai-beta`、`originator`、`session_id`，以及不属于目标上游的 credential header；
++6. native Responses 不解析、不重排响应事件，确保未来字段自然透传；
++7. bridge 装配失败或协议不支持时 fail-closed 为该 runtime 不可用，不能透传到错误端点或默认网关；
++8. 本轮 wire protocol 缺省值必须让存量 Claude/Codex provider 逐字段保持原行为，只有显式 `openai-chat` 才进入新桥。
++
++### 4.3 新 package：Responses-to-Chat bridge
++
++新增零 Electron 依赖的独立 package，建议结构：
++
++```text
++packages/responses-chat-bridge/
++  src/types.ts
++  src/translate-request.ts
++  src/chat-sse-translator.ts
++  src/handler.ts
++  src/errors.ts
++  src/usage.ts
++  src/__tests__/*
++```
++
++不要把反向转换塞进 `anthropic-responses-bridge`；两者的客户端入口协议、输出事件和产品语义不同。只抽取真正稳定且无方向性的 SSE line reader、安全 JSON helper；首版不要为了复用重构现有 bridge 热路径。
++
++建议配置契约：
++
++```ts
++interface ChatBridgeProviderConfig {
++  upstreamBase: string;
++  buildHeaders(): Promise<Record<string, string>>;
++  rewriteModel(model: string): string;
++  capabilities: {
++    developerRole: boolean;
++    parallelToolCalls: boolean;
++    reasoningField?: 'reasoning_effort' | 'reasoning_content' | 'none';
++    maxTokensField: 'max_tokens' | 'max_completion_tokens' | 'omit';
++    streamUsage: boolean;
++  };
++  onUpstreamError?(info): void | Promise<void>;
++}
++```
++
++capability 保持小而确定的闭合集；vendor 差异不得重新变成 provider-id 条件分支。
++
++### 4.4 请求转换
++
++| Responses | Chat Completions |
++|---|---|
++| `instructions` | `developer` message；上游不支持时确定性降级为首个 `system` message |
++| `input` message | `messages` |
++| assistant `function_call` item | assistant `tool_calls[]` |
++| `function_call_output` | `role: tool` + `tool_call_id` |
++| function `tools` | Chat `tools` |
++| `tool_choice` | Chat `tool_choice` |
++| `parallel_tool_calls` | capability 支持时透传，否则省略并标记降级 |
++| `max_output_tokens` | capability 指定字段或省略 |
++| `reasoning.effort` | capability 指定 vendor 字段；不支持则省略 |
++| `stream` | 强制 `true` |
++| Responses-only store/include/state | 删除，或无法安全降级时拒绝 |
++
++原则：
++
++- 未识别 input item 不得静默丢弃：返回结构化 unsupported-feature，仅记录字段类型而不记录内容；
++- instructions、developer/system 历史消息的相对顺序稳定，不改产品 prompt 前缀；
++- tools 保序并保留 JSON Schema，只对已验证的厂商限制做确定性清洗；
++- assistant 文本与 tool call 可同轮共存；
++- tool result 严格保持 `call_id` 关系；
++- bridge 不维护跨请求会话状态，全部语义来自本次 Responses body。
++
++### 4.5 Chat SSE → Responses 状态机
++
++`ChatSseTranslator` 按 `tool_calls[index]` 维护独立状态，输出 Codex 所需事件：
++
++- response created/in-progress；
++- message output item + content part；
++- `response.output_text.delta`；
++- function-call output item；
++- `response.function_call_arguments.delta` / done；
++- output item done；
++- completed/failed/incomplete；
++- usage。
++
++必须处理：
++
++1. 同一 chunk 多个 tool call；
++2. 并行 tool arguments 交错；
++3. `id`、`name`、arguments 延迟出现；
++4. arguments 被任意 chunk 边界切分；
++5. 空参数、非法或截断 JSON；
++6. 文本和工具调用混合；
++7. `finish_reason=tool_calls|stop|length|content_filter`；
++8. `[DONE]` 前后独立 usage chunk；
++9. 正常 EOF 但缺终态事件；
++10. 用户取消和网络中断。
++
++ID 在单请求内稳定、唯一、可测试；上游没有 tool-call ID 时，以 request/response 标识和 index 确定性生成并持续复用。
++
++性能约束：
++
++- chunk 级增量读取，不缓存完整响应；
++- SSE line scanner 避免 O(n²) buffer 拷贝；
++- per-token 路径不打印正文、不 stringify 大对象、不做同步 I/O；
++- 客户端关闭连接时 abort upstream fetch；
++- 正确处理 `res.write` backpressure，不能无限积压。
++
++### 4.6 错误、usage 与恢复
++
++- fetch/超时转换为 Responses 形态网络错误；
++- 上游 4xx/5xx 保留 HTTP status，并尽量保留原始 message/code；
++- 401/403、429、context overflow、bad request、unsupported feature 与现有 `providerErrors` 分类对齐；
++- `onUpstreamError` 先收口连接态，再返回原错误；回调失败不覆盖原错误；
++- 已开始 SSE 后出错，输出合法 failed/incomplete 终态；无法继续编码时销毁连接，不能伪造 completed；
++- 不做无限重试。首版默认不重试，除非能证明请求尚未被上游接受、不会重复计费或重复工具调用；
++- usage 缺失时不伪造精确数值；可展示“上游未返回”。
++
++## 5. Catalog、预设和 UI
++
++### 5.1 预设数据
++
++更新 `packages/model-providers/catalog/providers.json`：
++
++- OpenRouter：Codex runtime 标记 `openai-responses`，保持现有 endpoint；
++- MiniMax CN/Global：新增官方 Responses runtime；
++- DeepSeek、GLM CN/Global、Kimi CN/Global、Kimi Code、百炼 Coding Plan：新增 `openai-chat` Codex runtime。
++
++具体 endpoint、模型和 quirks 必须在实施时基于最新官方文档及活体探测复核；本文厂商列表是范围，不是静态 endpoint 真值。
++
++### 5.2 自定义供应商
++
++Codex runtime 增加“上游协议”选择：
++
++- OpenAI Responses（推荐、默认、原生）；
++- OpenAI Chat Completions（Cindy 桥接）。
++
++Claude Code tab 继续明确要求 Anthropic-compatible endpoint，本轮不开放 Chat 选项。
++
++### 5.3 展示语义
++
++由 runtime wire protocol 派生：
++
++- native：上游协议与 runtime 一致；
++- bridged：`codex + openai-chat`；
++- unsupported：当前组合没有 Adapter。
++
++UI 使用现有主题 token，不新增颜色；文案走 `zh-CN`、`en`、`ja`、`ko` 四语言。示例：
++
++```text
++Codex · Cindy 桥接
++支持：流式文本、工具调用
++部分高级 Responses 能力不可用
++```
++
++禁止为每个供应商硬编码说明。
++
++## 6. 代码接线范围
++
++1. `packages/model-providers`
++   - wire protocol 类型与缺省；
++   - catalog/preset/custom config 校验；
++   - `buildUserProvider` 带入路由；
++   - registry/device presentation 暴露非敏感 compatibility 信息。
++2. `packages/responses-chat-bridge`
++   - 请求转换、SSE 状态机、handler、错误与 usage。
++3. `apps/desktop/src/main/maker-host`
++   - bridge host adapter，注入 logger/fetch/auth/capability；
++   - Codex routing 命中 `openai-chat` 后返回 local handler；
++   - 保持 native Responses 与 OpenAI/XD/xAI 现有路径字节级不变；
++   - provider diagnostics 按协议探测。
++4. renderer
++   - `AddProviderWizard`、`CustomProviderDialog`、`ProvidersSection` 保留并展示协议；
++   - 四语言 i18n；
++   - 不增加 loading 页或视觉跳变。
++5. device-link/mobile
++   - provider 列表携带只读 native/bridged 标记；
++   - 手机继续选择被控端 providerId，实际转换在被控桌面完成，不复制 bridge 代码。
++
++## 7. 测试与准入
++
++### 7.1 bridge 单测
++
++请求转换：纯文本、instructions、developer/system 降级、assistant text + tool、function output、多工具、tool choice、reasoning/max token capability、unsupported item、model rewrite、不修改输入对象。
++
++SSE 完整 trace：
++
++- 文本 delta；
++- 单工具 arguments 多 chunk；
++- 两个并行工具交错；
++- id/name 延迟；
++- 文本与工具交错；
++- usage 独立 chunk；
++- stop/length/content_filter；
++- malformed JSON；
++- chunk 切在 UTF-8/SSE 分隔符中；
++- EOF 无 `[DONE]`；
++- 网络中断和取消。
++
++断言完整事件顺序，而不只断言最终文本。
++
++handler：URL/header/body、凭证不进日志、上游错误 status/code、错误回调时序、abort、backpressure、并发状态隔离。
++
++### 7.2 provider/host 测试
++
++- protocol 校验和存量缺省兼容；
++- custom provider DB round-trip；
++- preset wizard 和编辑 round-trip；
++- routing matrix：Responses passthrough、Chat local handler、unsupported fail-closed；
++- scope gate/model rewrite/header delete；
++- OpenAI/XD/xAI 现有 snapshot 无回归；
++- Responses probe 与 Chat streaming tool probe；
++- device-link 不泄漏 URL/header/key，只返回展示标记。
++
++### 7.3 每个预设的活体准入
++
++至少验证：
++
++1. 流式文本；
++2. 单工具；
++3. arguments 跨 chunk；
++4. 两个并行工具；
++5. tool result 第二轮；
++6. 文本 + tool；
++7. reasoning 开/关（若声明）；
++8. 401/403；
++9. 429；
++10. context overflow；
++11. 流中断；
++12. 用户取消；
++13. usage；
++14. 长对话连续工具。
++
++未通过 SSE + Agent Tool Calling 最低门槛的厂商不开放 Codex runtime，即使纯文本可用。
++
++### 7.4 性能门禁
++
++协议热路径必须测：
++
++- bridge 额外 TTFT；
++- 每 1,000 SSE event 的转换耗时与峰值内存；
++- 完整工具事件无丢失、无错序；
++- instructions/prompt 顺序与内容前后对比；
++- vendor 有 cache usage 时记录前后；无法等价时明确“不保证 prompt cache”。
++
++本方案不计划修改 maker-core translator/system prompt。若实施中必须触碰，需单独评审并遵守仓库缓存率、性能、返回速度和准确性实测门禁；系统提示词变更仍须先与 Lizi 确认。
++
++## 8. 验证命令
++
++实现阶段按实际 package script 校准，至少运行：
++
++```bash
++node --version
++pnpm --version
++pnpm --filter @lizi/model-providers test
++pnpm --filter @lizi/anthropic-compat-proxy test
++pnpm --filter @lizi/responses-chat-bridge test
++pnpm --filter desktop typecheck
++pnpm --filter desktop test -- <provider/host 定向测试>
++pnpm test:unit
++```
++
++提 PR 前必须在仓库根完整运行并通过 `pnpm test:unit`。活体测试凭证只从 safeStorage/环境读取，禁止写入仓库、fixture、dump 或日志。
++
++## 9. 灰度、观测和回滚
++
++### 9.1 灰度
++
++- bridge 仅由 `wireProtocol: 'openai-chat'` 激活，不提供全局“强制转换”开关；
++- 先开放 1–2 个活体验证最充分的预设，再逐个开放；
++- 远端 catalog 可通过移除 preset 的 Codex runtime 停止新建；已保存自定义 provider 仍由客户端 capability gate 保护。
++
++### 9.2 日志与指标
++
++允许记录：provider id、wire protocol、model、reqId、status、事件计数、耗时、终态和错误分类。
++
++禁止记录：API key、Authorization、完整 prompt、tool 参数正文、模型输出正文。
++
++指标：请求数/成功率、TTFT、总时长、tool-call 失败率、malformed SSE/arguments、unsupported-feature、401/403/429/context overflow、取消率。
++
++### 9.3 回滚
++
++- 数据回滚：移除/禁用对应 preset 的 Codex runtime，不影响 Claude Code；
++- 代码回滚：Codex routing 不再为 `openai-chat` 返回 local handler，native Responses 保持原样；
++- handler 装配失败 fail-closed，不能把 Chat 请求误投 Responses endpoint 或默认网关。
++
++## 10. macOS、Windows、远程连接和手机版
++
++### 10.1 macOS / Windows
++
++- bridge 是 main 进程内 TypeScript/fetch/SSE，不增加本地二进制、Unix socket 或平台专用路径；
++- 继续复用 `127.0.0.1` 随机端口与 proxy dispose 生命周期；
++- Windows 重点验证长 SSE、取消、Electron shutdown in-flight 清理；macOS 验证休眠/唤醒后的失败表现；
++- 性能基线按 Windows 较弱设备设定，禁止同步 I/O 和 per-token 大对象分配。
++
++### 10.2 SSH 远程工作区
++
++远程 Codex 在远端 daemon 执行，本机 loopback bridge 对远端不可达。Phase 1 首版只保证本地桌面会话，以及手机版控制的被控桌面本地会话。
++
++实施 PR 必须：
++
++- 另开 issue 跟踪“远程 Codex Chat bridge”；
++- 在远程工作区隐藏或禁用 bridged provider，避免选中后静默走错上游。
++
++不建议把远端 bridge 部署/bootstrap 混进首期。
++
++### 10.3 设备互联与手机版
++
++手机版是被控桌面的控制端：
++
++- 通过 `maker:provider:list` 获取被控端 provider/model；
++- 选择 provider 后由被控桌面 Codex proxy 执行转换；
++- 手机不新增凭证、不运行 bridge；
++- payload 只携带 native/bridged 展示标记，不携带 base URL、headers 或 routing；
++- 老被控端继续走现有扁平模型 fallback。
++
++## 11. 后续 Phase
++
++### Phase 2：Responses → Anthropic Messages
++
++仅在出现 Anthropic-only 厂商，或某厂商 Anthropic endpoint 的工具/reasoning 质量显著优于 Chat endpoint 时实施。复用 Phase 1 的 Responses 输入解析思路和事件 trace 测试，但新增独立 Anthropic upstream Adapter。
++
++### Phase 3：更多协议与能力
++
++按真实需求增加 Gemini Native、多模态、server tools、持久 response state、failover/circuit breaker。每增加一种协议先补 capability 与完整事件 fixture，不按厂商堆分支。
++
++## 12. PR 拆分
++
++建议分开 review：
++
++1. **PR A：协议元数据**——model-providers 类型、校验、custom round-trip、UI 字段，功能仍关闭；
++2. **PR B：bridge 核心**——新 package 与全量单测，不接生产路由；
++3. **PR C：Codex host 接线**——local handler、鉴权、header、model rewrite、diagnostics 和性能测量；
++4. **PR D：预设与开放**——分批加入厂商 runtime、四语言、device-link/mobile 展示和活体准入结果；
++5. **独立 issue/PR：SSH 远程 bridge**。
++
++每个 PR 都保持 native Responses 路径不变；发现 P0/P1 或事件错序时先停止开放数据，不以厂商特例绕过状态机缺陷。
++
++## 13. 完成定义
++
++Phase 1 只有同时满足以下条件才算完成：
++
++- native Responses 供应商继续透明直连，OpenAI/XD/xAI 行为和性能无回归；
++- Chat-only 供应商完成多轮 Codex 工具工作流，而非只返回文本；
++- 并行工具、分片 arguments、取消、错误和 usage 有完整事件 trace 测试；
++- wire protocol 数据驱动，无 provider-id 路由分支；
++- 自定义 provider 创建/编辑/重启后不丢协议；
++- UI 明确标识 bridge 降级，四语言齐全；
++- 密钥不进入 catalog、DB 明文、日志或仓库；
++- macOS/Windows 分别验证，未实测平台明确标注；
++- SSH 缺口有禁用行为和跟踪 issue，手机版控制端已适配；
++- `pnpm test:unit` 全量通过，PR 风险段附协议正确性和性能实测数据。
+diff --git a/packages/model-providers/catalog/providers.json b/packages/model-providers/catalog/providers.json
+index 6e3710d6fecc70359236e900d71398318fcf3e44..fb083e77ece6a5c9d168ae39089ad8b89ebebaf2 100644
+--- a/packages/model-providers/catalog/providers.json
++++ b/packages/model-providers/catalog/providers.json
+@@ -230,6 +230,21 @@
+             }
+           ],
+           "modelsUrl": "https://api.deepseek.com/models"
++        },
++        "codex": {
++          "baseUrl": "https://api.deepseek.com",
++          "wireProtocol": "openai-chat",
++          "models": [
++            {
++              "id": "deepseek-v4-flash",
++              "name": "DeepSeek V4 Flash"
++            },
++            {
++              "id": "deepseek-v4-pro",
++              "name": "DeepSeek V4 Pro"
++            }
++          ],
++          "modelsUrl": "https://api.deepseek.com/models"
+         }
+       }
+     },
+@@ -251,6 +266,20 @@
+               "name": "GLM-5.1"
+             }
+           ]
++        },
++        "codex": {
++          "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
++          "wireProtocol": "openai-chat",
++          "models": [
++            {
++              "id": "glm-5.2",
++              "name": "GLM-5.2"
++            },
++            {
++              "id": "glm-5.1",
++              "name": "GLM-5.1"
++            }
++          ]
+         }
+       }
+     },
+@@ -272,6 +301,20 @@
+               "name": "GLM-5.1"
+             }
+           ]
++        },
++        "codex": {
++          "baseUrl": "https://api.z.ai/api/paas/v4",
++          "wireProtocol": "openai-chat",
++          "models": [
++            {
++              "id": "glm-5.2",
++              "name": "GLM-5.2"
++            },
++            {
++              "id": "glm-5.1",
++              "name": "GLM-5.1"
++            }
++          ]
+         }
+       }
+     },
+@@ -298,6 +341,25 @@
+             }
+           ],
+           "modelsUrl": "https://api.moonshot.cn/v1/models"
++        },
++        "codex": {
++          "baseUrl": "https://api.moonshot.cn/v1",
++          "wireProtocol": "openai-chat",
++          "models": [
++            {
++              "id": "kimi-k3",
++              "name": "Kimi K3"
++            },
++            {
++              "id": "kimi-k2.7-code",
++              "name": "Kimi K2.7 Code"
++            },
++            {
++              "id": "kimi-k2.6",
++              "name": "Kimi K2.6"
++            }
++          ],
++          "modelsUrl": "https://api.moonshot.cn/v1/models"
+         }
+       }
+     },
+@@ -324,6 +386,25 @@
+             }
+           ],
+           "modelsUrl": "https://api.moonshot.ai/v1/models"
++        },
++        "codex": {
++          "baseUrl": "https://api.moonshot.ai/v1",
++          "wireProtocol": "openai-chat",
++          "models": [
++            {
++              "id": "kimi-k3",
++              "name": "Kimi K3"
++            },
++            {
++              "id": "kimi-k2.7-code",
++              "name": "Kimi K2.7 Code"
++            },
++            {
++              "id": "kimi-k2.6",
++              "name": "Kimi K2.6"
++            }
++          ],
++          "modelsUrl": "https://api.moonshot.ai/v1/models"
+         }
+       }
+     },
+@@ -342,6 +423,28 @@
+             {
+               "id": "kimi-for-coding-highspeed",
+               "name": "Kimi for Coding 高速版"
++            },
++            {
++              "id": "k3",
++              "name": "Kimi K3"
++            }
++          ]
++        },
++        "codex": {
++          "baseUrl": "https://api.kimi.com/coding/v1",
++          "wireProtocol": "openai-chat",
++          "models": [
++            {
++              "id": "kimi-for-coding",
++              "name": "Kimi for Coding"
++            },
++            {
++              "id": "kimi-for-coding-highspeed",
++              "name": "Kimi for Coding 高速版"
++            },
++            {
++              "id": "k3",
++              "name": "Kimi K3"
+             }
+           ]
+         }
+@@ -425,6 +528,25 @@
+       "runtimes": {
+         "claude-code": {
+           "baseUrl": "https://coding.dashscope.aliyuncs.com/apps/anthropic",
++          "modelsUrl": "https://coding.dashscope.aliyuncs.com/v1/models",
++          "models": [
++            {
++              "id": "qwen3.7-plus",
++              "name": "Qwen3.7 Plus"
++            },
++            {
++              "id": "qwen3-coder-next",
++              "name": "Qwen3 Coder Next"
++            },
++            {
++              "id": "qwen3-coder-plus",
++              "name": "Qwen3 Coder Plus"
++            }
++          ]
++        },
++        "codex": {
++          "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
++          "wireProtocol": "openai-chat",
+           "models": [
+             {
+               "id": "qwen3.7-plus",
+diff --git a/packages/model-providers/src/__tests__/catalog.test.ts b/packages/model-providers/src/__tests__/catalog.test.ts
+index 8cbff42b1ca320534d6f11ac5769e485e9103440..6f24e4ec2191a869ace8a2702c69406d044af625 100644
+--- a/packages/model-providers/src/__tests__/catalog.test.ts
++++ b/packages/model-providers/src/__tests__/catalog.test.ts
+@@ -238,6 +238,22 @@ describe('routing modelPrefixes 服务范围契约 (issue #886)', () => {
+   });
+ });
+ 
++describe('routing wireProtocol per-agent 契约', () => {
++  it('parseCatalog 拒绝 claude-code 使用 openai-chat', () => {
++    const bad = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
++    const anthropic = bad.providers.find((p) => p.id === 'anthropic')!;
++    anthropic.routing['claude-code'] = { ...anthropic.routing['claude-code']!, wireProtocol: 'openai-chat' };
++    expect(() => parseCatalog(bad)).toThrow(/openai-chat/);
++  });
++
++  it('parseCatalog 拒绝 codex 使用 anthropic-messages(codex host 只实现 Responses 与本地 Chat 桥)', () => {
++    const bad = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
++    const xai = bad.providers.find((p) => p.id === 'xai')!;
++    xai.routing.codex = { ...xai.routing.codex!, wireProtocol: 'anthropic-messages' };
++    expect(() => parseCatalog(bad)).toThrow(/anthropic-messages/);
++  });
++});
++
+ describe('runtime-injected registry semantics(生产形态:动态清单注入后)', () => {
+   const views = buildRegistry(runtimeCatalog(), { anthropic: true, openai: true, xai: true, xd: true });
+ 
+diff --git a/packages/model-providers/src/__tests__/user-provider.test.ts b/packages/model-providers/src/__tests__/user-provider.test.ts
+index 0162230948110346aca818bbffb65be73e03251d..61881547d3292472700a1ca51d540e03634e6ec6 100644
+--- a/packages/model-providers/src/__tests__/user-provider.test.ts
++++ b/packages/model-providers/src/__tests__/user-provider.test.ts
+@@ -49,6 +49,20 @@ describe('buildUserProvider (per-runtime)', () => {
+     expect(p.routing.codex?.headerOverride).toBeUndefined();
+   });
+ 
++  it('preserves an explicit Chat Completions protocol for Codex routing', () => {
++    const p = buildUserProvider({
++      ...codexOnly,
++      runtimes: {
++        codex: { ...codexOnly.runtimes.codex!, wireProtocol: 'openai-chat' },
++      },
++    });
++    expect(p.routing.codex).toMatchObject({
++      upstream: 'https://openrouter.ai/api/v1',
++      authStrategy: 'api-key-header',
++      wireProtocol: 'openai-chat',
++    });
++  });
++
+   it('maps models per runtime with conservative default metadata', () => {
+     const p = buildUserProvider(codexOnly);
+     const models = p.models.codex ?? [];
+diff --git a/packages/model-providers/src/catalog.ts b/packages/model-providers/src/catalog.ts
+index 005dc9157c9f867cb1f0ddd49e92c702d38e7fb7..f6c9d97753a511d8535196564002449220a7e407 100644
+--- a/packages/model-providers/src/catalog.ts
++++ b/packages/model-providers/src/catalog.ts
+@@ -17,6 +17,11 @@ export { BUNDLED_CATALOG, BUILTIN_PROVIDERS } from './builtin.js';
+ 
+ const AGENT_KINDS: readonly AgentKind[] = ['claude-code', 'codex'];
+ const EFFORTS: readonly Effort[] = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
++const WIRE_PROTOCOLS = ['anthropic-messages', 'openai-responses', 'openai-chat'] as const;
++
++function isWireProtocol(value: unknown): value is (typeof WIRE_PROTOCOLS)[number] {
++  return typeof value === 'string' && (WIRE_PROTOCOLS as readonly string[]).includes(value);
++}
+ 
+ function isAgentKind(v: unknown): v is AgentKind {
+   return typeof v === 'string' && (AGENT_KINDS as readonly string[]).includes(v);
+@@ -108,6 +113,26 @@ function validateProvider(p: Provider): void {
+   for (const agent of p.agents) {
+     const routing = p.routing[agent];
+     assert(routing, `provider '${p.id}' declares agent '${agent}' but no routing[${agent}]`);
++    if (routing.wireProtocol !== undefined) {
++      assert(
++        isWireProtocol(routing.wireProtocol),
++        `provider '${p.id}' routing[${agent}].wireProtocol invalid`,
++      );
++      if (agent === 'claude-code') {
++        assert(
++          routing.wireProtocol !== 'openai-chat',
++          `provider '${p.id}' routing[${agent}] cannot use openai-chat`,
++        );
++      }
++      // Codex host 只实现原生 Responses 与本地 Responses→Chat 桥;anthropic-messages 会掉进
++      // 透明路由、把 Responses body 直发上游 → 确定性 4xx。热更目录里的坏 runtime 在此拦下。
++      if (agent === 'codex') {
++        assert(
++          routing.wireProtocol !== 'anthropic-messages',
++          `provider '${p.id}' routing[${agent}] cannot use anthropic-messages`,
++        );
++      }
++    }
+     // modelPrefixes（路由服务范围）提供了就必须是命名空间前缀形态（`xai/` 这类,以 `/` 结尾）——
+     // 结构上保证 claude-* 等裸 wire model 永远不会命中,防止把 scope 声明成误伤辅助请求的形状。
+     if (routing.modelPrefixes !== undefined) {
+@@ -243,6 +268,9 @@ function isValidPreset(v: unknown): v is ProviderPreset {
+         && (typeof mm.contextWindow !== 'number' || !Number.isFinite(mm.contextWindow) || mm.contextWindow <= 0)
+       ) return false;
+     }
++    if (r.wireProtocol !== undefined && !isWireProtocol(r.wireProtocol)) return false;
++    if (agent === 'claude-code' && r.wireProtocol === 'openai-chat') return false;
++    if (agent === 'codex' && r.wireProtocol === 'anthropic-messages') return false;
+     if (r.headers !== undefined) {
+       if (!r.headers || typeof r.headers !== 'object' || Array.isArray(r.headers)) return false;
+       if (Object.values(r.headers as Record<string, unknown>).some((x) => typeof x !== 'string')) return false;
+diff --git a/packages/model-providers/src/index.ts b/packages/model-providers/src/index.ts
+index 40098a9210c2804c8a41f875c3702156c1c702b3..4910baa31cfd54ca52adb3a662b2b3f0ee4886eb 100644
+--- a/packages/model-providers/src/index.ts
++++ b/packages/model-providers/src/index.ts
+@@ -9,6 +9,7 @@
+ 
+ export type {
+   AgentKind,
++  ProviderWireProtocol,
+   Effort,
+   ProviderSource,
+   AuthMethod,
+diff --git a/packages/model-providers/src/types.ts b/packages/model-providers/src/types.ts
+index dcb6d79c5140aa2a9c4c32f068ee63300717f7c7..90a164346190891115dfa107b612d7e481a9e91c 100644
+--- a/packages/model-providers/src/types.ts
++++ b/packages/model-providers/src/types.ts
+@@ -24,6 +24,12 @@ export type AgentKind = 'claude-code' | 'codex';
+ /** 推理强度档位 —— 与 maker-core Effort 对齐。 */
+ export type Effort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+ 
++/** Provider runtime 上游实际接受的推理 wire protocol。 */
++export type ProviderWireProtocol =
++  | 'anthropic-messages'
++  | 'openai-responses'
++  | 'openai-chat';
++
+ /** 供应商来源：内置 vs 用户自定义（自定义本轮不实现，类型先留位）。 */
+ export type ProviderSource = 'builtin' | 'user';
+ 
+@@ -102,6 +108,11 @@ export interface OAuthProviderDescriptor {
+  * 真实上游 + 鉴权 + model id 还原。加新供应商 = 加这份数据，不改路由器代码。
+  */
+ export interface RoutingDescriptor {
++  /**
++   * 上游 wire protocol。缺省按 agent 保持历史语义：Claude Code = anthropic-messages，
++   * Codex = openai-responses。只有显式 openai-chat 才进入本地 Responses→Chat bridge。
++   */
++  wireProtocol?: ProviderWireProtocol;
+   /** 真实上游 base URL（direct 时是供应商自家；gateway 时是 XD 网关 base）。 */
+   upstream: string;
+   /** 鉴权策略（见 AuthStrategy）。 */
+@@ -313,6 +324,8 @@ export interface ProviderRuntimeModelConfig {
+  * 形状对齐 `CustomProviderRuntimeConfig`：选中预设 = 把这段数据灌进创建表单，用户只补 API key。
+  */
+ export interface ProviderPresetRuntime {
++  /** 上游 wire protocol；缺省由 runtime agent 推导（Codex=Responses，Claude=Messages）。 */
++  wireProtocol?: ProviderWireProtocol;
+   /** 该 runtime 的兼容端点 base URL（cc=Anthropic 兼容 / codex=OpenAI Responses 兼容）。 */
+   baseUrl: string;
+   /** 推荐模型清单（预填进表单，用户可增删改）。 */
+@@ -384,6 +397,8 @@ export interface Catalog {
+  * 两种端点，则两个 runtime 各有独立的 baseURL / 模型 / headers（见 CustomProviderConfig.runtimes）。
+  */
+ export interface CustomProviderRuntimeConfig {
++  /** 上游 wire protocol；缺省由 runtime agent 推导（Codex=Responses，Claude=Messages）。 */
++  wireProtocol?: ProviderWireProtocol;
+   /** 该 runtime 的兼容上游 base URL（cc=Anthropic 端点 / codex=OpenAI 端点）。 */
+   baseUrl: string;
+   /** 用户模型；contextWindow 可由预设带入，缺省时由 `buildUserProvider` 补保守默认。 */
+diff --git a/packages/model-providers/src/user-provider.ts b/packages/model-providers/src/user-provider.ts
+index 8e5f1642d5d2384da5bd7ba4db5ceee7421385c1..cc35ee4375c484694cbee293edc0fda2eec41791 100644
+--- a/packages/model-providers/src/user-provider.ts
++++ b/packages/model-providers/src/user-provider.ts
+@@ -62,14 +62,24 @@ function toCatalogModel(
+   };
+ }
+ 
++function defaultWireProtocol(agent: AgentKind): 'anthropic-messages' | 'openai-responses' {
++  return agent === 'claude-code' ? 'anthropic-messages' : 'openai-responses';
++}
++
+ /** baseUrl + 自定义 headers → 路由描述符（**不含密钥**；OAuth 形态用 oauth-token 策略）。 */
+ function toRouting(
++  agent: AgentKind,
+   baseUrl: string,
+   headers: Record<string, string> | undefined,
+   strategy: 'api-key-header' | 'oauth-token',
+   modelsUrl?: string,
++  wireProtocol?: 'anthropic-messages' | 'openai-responses' | 'openai-chat',
+ ): RoutingDescriptor {
+-  const r: RoutingDescriptor = { upstream: baseUrl, authStrategy: strategy };
++  const r: RoutingDescriptor = {
++    upstream: baseUrl,
++    authStrategy: strategy,
++    ...(wireProtocol && wireProtocol !== defaultWireProtocol(agent) ? { wireProtocol } : {}),
++  };
+   if (headers && Object.keys(headers).length > 0) r.headerOverride = { ...headers };
+   // 列模型端点回带（编辑表单从 routing 重建配置时不丢；路由器不消费本字段）。
+   if (modelsUrl) r.modelsUrl = modelsUrl;
+@@ -92,10 +102,12 @@ export function buildUserProvider(config: CustomProviderConfig): Provider {
+     if (!rt) continue;
+     agents.push(agent);
+     routing[agent] = toRouting(
++      agent,
+       rt.baseUrl,
+       rt.headers,
+       isOAuth ? 'oauth-token' : 'api-key-header',
+       rt.modelsUrl,
++      rt.wireProtocol,
+     );
+     models[agent] = rt.models.map((m) => toCatalogModel(m, config.id, agent));
+   }
+diff --git a/packages/responses-chat-bridge/eslint.config.mjs b/packages/responses-chat-bridge/eslint.config.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ce7f1b51d983bddefe606c0aad1cfb4ffdff3e10
+--- /dev/null
++++ b/packages/responses-chat-bridge/eslint.config.mjs
+@@ -0,0 +1,10 @@
++import js from '@eslint/js';
++import tseslint from 'typescript-eslint';
++
++export default tseslint.config(
++  js.configs.recommended,
++  ...tseslint.configs.recommended,
++  {
++    ignores: ['dist/'],
++  },
++);
+diff --git a/packages/responses-chat-bridge/package.json b/packages/responses-chat-bridge/package.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..ce26a7d87d9f57ee784a74fa968f0152671c53d7
+--- /dev/null
++++ b/packages/responses-chat-bridge/package.json
+@@ -0,0 +1,31 @@
++{
++  "name": "@cindy/responses-chat-bridge",
++  "version": "0.0.0",
++  "private": true,
++  "description": "In-process bridge that translates OpenAI Responses requests and streaming events to and from OpenAI Chat Completions compatible providers.",
++  "type": "module",
++  "main": "./src/index.ts",
++  "types": "./src/index.ts",
++  "exports": {
++    ".": "./src/index.ts"
++  },
++  "scripts": {
++    "build": "tsc --noEmit",
++    "typecheck": "tsc --noEmit",
++    "test": "vitest run",
++    "lint": "eslint src/"
++  },
++  "author": {
++    "name": "Lizi",
++    "email": "jiali@magiclizi.com"
++  },
++  "license": "Apache-2.0",
++  "devDependencies": {
++    "@eslint/js": "^9.0.0",
++    "@types/node": "*",
++    "eslint": "^9.0.0",
++    "typescript": "^5.7.0",
++    "typescript-eslint": "^8.0.0",
++    "vitest": "^3.2.4"
++  }
++}
+diff --git a/packages/responses-chat-bridge/src/__tests__/chat-sse-translator.test.ts b/packages/responses-chat-bridge/src/__tests__/chat-sse-translator.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..4ea5f0d395f9b1bad9df2a5ee995227d67f6d28f
+--- /dev/null
++++ b/packages/responses-chat-bridge/src/__tests__/chat-sse-translator.test.ts
+@@ -0,0 +1,217 @@
++import { describe, expect, it } from 'vitest';
++
++import { ChatSseTranslator } from '../chat-sse-translator.js';
++
++describe('ChatSseTranslator', () => {
++  it('streams text with a valid Responses lifecycle and keeps usage until finish', () => {
++    const translator = new ChatSseTranslator('wire/model');
++    const out = [
++      ...translator.push({ id: 'chatcmpl_1', model: 'real-model', created: 10, choices: [{ delta: { content: 'hello ' } }] }),
++      ...translator.push({ id: 'chatcmpl_1', choices: [{ delta: { content: 'world' }, finish_reason: 'stop' }], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } }),
++      ...translator.push({ id: 'chatcmpl_1', choices: [], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } }),
++      ...translator.finish(),
++    ] as Array<Record<string, unknown>>;
++    expect(out.map((event) => event.type)).toEqual([
++      'response.created',
++      'response.in_progress',
++      'response.output_item.added',
++      'response.content_part.added',
++      'response.output_text.delta',
++      'response.output_text.delta',
++      'response.output_text.done',
++      'response.content_part.done',
++      'response.output_item.done',
++      'response.completed',
++    ]);
++    const completed = out.at(-1) as { response: { model: string; usage: { total_tokens: number } } };
++    expect(completed.response.model).toBe('real-model');
++    expect(completed.response.usage.total_tokens).toBe(5);
++    // 每个 output_text.delta 必须带 item_id(= 对应 message item 的 id),codex 靠它增量渲染;
++    // added 事件的 item.id 与 delta 的 item_id 必须一致。
++    const added = out.find((e) => e.type === 'response.output_item.added') as { item: { id: string } };
++    const deltas = out.filter((e) => e.type === 'response.output_text.delta') as Array<{ item_id: string }>;
++    expect(deltas.length).toBeGreaterThan(0);
++    for (const d of deltas) expect(d.item_id).toBe(added.item.id);
++  });
++
++  it('keeps usage-only chunks available until stream finish', () => {
++    const translator = new ChatSseTranslator('m');
++    translator.push({ id: 'chatcmpl_usage', choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] });
++    translator.push({ id: 'chatcmpl_usage', choices: [], usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 } });
++    const out = translator.finish() as Array<Record<string, unknown>>;
++    const completed = out.at(-1) as { type: string; response: { usage: { total_tokens: number } } };
++    expect(completed.type).toBe('response.completed');
++    expect(completed.response.usage.total_tokens).toBe(3);
++  });
++
++  it('maps reasoning_content to a reasoning summary item that precedes the message', () => {
++    const translator = new ChatSseTranslator('m');
++    const out = [
++      ...translator.push({ id: 'r1', choices: [{ delta: { reasoning_content: 'think ' } }] }),
++      ...translator.push({ id: 'r1', choices: [{ delta: { reasoning_content: 'hard' } }] }),
++      ...translator.push({ id: 'r1', choices: [{ delta: { content: 'answer' }, finish_reason: 'stop' }] }),
++      ...translator.finish(),
++    ] as Array<Record<string, unknown>>;
++    const types = out.map((e) => e.type);
++    // reasoning 事件序列出现,且 reasoning summary 用 summary_index(非 content_index)。
++    expect(types).toContain('response.reasoning_summary_part.added');
++    expect(types).toContain('response.reasoning_summary_text.delta');
++    const rdelta = out.find((e) => e.type === 'response.reasoning_summary_text.delta') as { summary_index: number; item_id: string };
++    expect(rdelta.summary_index).toBe(0);
++    // reasoning 的 output_item.done 必须在 message 的 output_item.added 之前(reasoning precedes message)。
++    const reasoningDoneIdx = out.findIndex((e) => e.type === 'response.output_item.done'
++      && (e as { item?: { type?: string } }).item?.type === 'reasoning');
++    const messageAddedIdx = out.findIndex((e) => e.type === 'response.output_item.added'
++      && (e as { item?: { type?: string } }).item?.type === 'message');
++    expect(reasoningDoneIdx).toBeGreaterThanOrEqual(0);
++    expect(messageAddedIdx).toBeGreaterThan(reasoningDoneIdx);
++    // 终态 output 数组:reasoning 在 message 之前,且 reasoning item 无 status。
++    const completed = out.at(-1) as { response: { output: Array<{ type: string; status?: string }> } };
++    expect(completed.response.output.map((i) => i.type)).toEqual(['reasoning', 'message']);
++    expect(completed.response.output[0].status).toBeUndefined();
++  });
++
++  it('keeps interleaved parallel tool argument streams isolated', () => {
++    const translator = new ChatSseTranslator('m');
++    const out = [
++      ...translator.push({
++        id: 'chatcmpl_tools',
++        choices: [{ delta: { tool_calls: [
++          { index: 0, id: 'call_a', function: { name: 'Bash', arguments: '{"a":' } },
++          { index: 1, id: 'call_b', function: { name: 'Read', arguments: '{"b":' } },
++        ] } }],
++      }),
++      ...translator.push({
++        choices: [{ delta: { tool_calls: [
++          { index: 1, function: { arguments: '2}' } },
++          { index: 0, function: { arguments: '1}' } },
++        ] }, finish_reason: 'tool_calls' }],
++      }),
++      ...translator.finish(),
++    ] as Array<Record<string, unknown>>;
++    const done = out.filter((event) => event.type === 'response.output_item.done') as Array<{
++      item: { call_id: string; arguments: string };
++    }>;
++    expect(done.map((event) => [event.item.call_id, event.item.arguments])).toEqual([
++      ['call_a', '{"a":1}'],
++      ['call_b', '{"b":2}'],
++    ]);
++    expect(out.at(-1)?.type).toBe('response.completed');
++  });
++
++  it('waits for a streamed tool name before emitting the call item', () => {
++    const translator = new ChatSseTranslator('m');
++    const beforeName = translator.push({
++      id: 'chatcmpl_args_first',
++      choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_args_first', function: { arguments: '{"x":' } }] } }],
++    }) as Array<Record<string, unknown>>;
++    expect(beforeName.filter((event) => event.type === 'response.output_item.added')).toEqual([]);
++    expect(beforeName.filter((event) => event.type === 'response.function_call_arguments.delta')).toEqual([]);
++
++    const out = [
++      ...beforeName,
++      ...translator.push({
++        choices: [{ delta: { tool_calls: [{ index: 0, function: { name: 'Bash', arguments: '1}' } }] }, finish_reason: 'tool_calls' }],
++      }),
++      ...translator.finish(),
++    ] as Array<Record<string, unknown>>;
++    const added = out.find((event) => event.type === 'response.output_item.added') as { item: { name: string } };
++    const deltas = out.filter((event) => event.type === 'response.function_call_arguments.delta') as Array<{ delta: string }>;
++    expect(added.item.name).toBe('Bash');
++    expect(deltas.map((event) => event.delta).join('')).toBe('{"x":1}');
++  });
++  it('creates deterministic ids when the provider omits tool call ids', () => {
++    const make = (): unknown[] => {
++      const translator = new ChatSseTranslator('m');
++      return translator.push({
++        id: 'chatcmpl_no_id',
++        choices: [{ delta: { tool_calls: [{ index: 0, function: { name: 'Bash', arguments: '{}' } }] }, finish_reason: 'tool_calls' }],
++      });
++    };
++    const id = (events: unknown[]): string => {
++      const added = (events as Array<Record<string, unknown>>).find((event) => event.type === 'response.output_item.added') as { item: { call_id: string } };
++      return added.item.call_id;
++    };
++    expect(id(make())).toBe(id(make()));
++  });
++
++  it('orders the terminal output array by output index when a tool call precedes text', () => {
++    const translator = new ChatSseTranslator('m');
++    translator.push({
++      id: 'chatcmpl_order',
++      choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_early', function: { name: 'Bash', arguments: '{}' } }] } }],
++    });
++    const out = [
++      ...translator.push({
++        choices: [{ delta: { content: 'trailing text' }, finish_reason: 'stop' }],
++      }),
++      ...translator.finish(),
++    ] as Array<Record<string, unknown>>;
++    const completed = out.at(-1) as { response: { output: Array<{ type: string }> } };
++    // 工具调用先于正文开始 → output 数组必须保持 [function_call, message]（按 outputIndex），
++    // 不能无条件把 message 排前面。
++    expect(completed.response.output.map((item) => item.type)).toEqual(['function_call', 'message']);
++  });
++
++  it('keeps the response id stable when a later chunk introduces an upstream id', () => {
++    const translator = new ChatSseTranslator('m');
++    const out = [
++      ...translator.push({ choices: [{ delta: { content: 'a' } }] }),
++      ...translator.push({ id: 'late_chat_id', choices: [{ delta: { content: 'b' }, finish_reason: 'stop' }] }),
++      ...translator.finish(),
++    ] as Array<Record<string, unknown>>;
++    const created = out.find((event) => event.type === 'response.created') as { response: { id: string } };
++    const completed = out.at(-1) as { response: { id: string } };
++    const deltas = out.filter((event) => event.type === 'response.output_text.delta') as Array<{ response_id: string }>;
++    expect(created.response.id).not.toBe('late_chat_id');
++    expect(completed.response.id).toBe(created.response.id);
++    expect(deltas.every((event) => event.response_id === created.response.id)).toBe(true);
++  });
++
++  it('fails strict finish when the stream lacks a terminal marker', () => {
++    const translator = new ChatSseTranslator('m');
++    translator.push({ id: 'truncated', choices: [{ delta: { content: 'partial' } }] });
++    const out = translator.finish(true) as Array<Record<string, unknown>>;
++    expect(out.at(-1)?.type).toBe('response.failed');
++    expect(out.filter((event) => event.type === 'response.completed')).toEqual([]);
++  });
++
++  it('accepts an explicit DONE marker for strict finish', () => {
++    const translator = new ChatSseTranslator('m');
++    translator.push({ id: 'done', choices: [{ delta: { content: 'ok' } }] });
++    translator.markTerminal();
++    expect((translator.finish(true).at(-1) as { type: string }).type).toBe('response.completed');
++  });
++  it('maps max-length completion to an incomplete terminal response', () => {
++    const translator = new ChatSseTranslator('m');
++    const out = [
++      ...translator.push({ id: 'x', choices: [{ delta: { content: 'partial' }, finish_reason: 'length' }] }),
++      ...translator.finish(),
++    ] as Array<Record<string, unknown>>;
++    expect(out.at(-1)?.type).toBe('response.incomplete');
++    expect((out.at(-1) as { response: { incomplete_details: unknown } }).response.incomplete_details).toEqual({ reason: 'max_output_tokens' });
++  });
++
++  it('emits failed once on a stream error', () => {
++    const translator = new ChatSseTranslator('m');
++    translator.push({ id: 'x', choices: [{ delta: { content: 'partial' } }] });
++    const failed = translator.fail('socket reset') as Array<Record<string, unknown>>;
++    expect(failed.at(-1)?.type).toBe('response.failed');
++    expect(translator.finish()).toEqual([]);
++  });
++
++  it('maps a streamed top-level error frame to a failed response (not empty completed)', () => {
++    const translator = new ChatSseTranslator('m');
++    const out = [
++      ...translator.push({ id: 'e1', choices: [{ delta: { content: 'partial' } }] }),
++      ...translator.push({ error: { message: 'model overloaded', type: 'server_error' } }),
++      ...translator.finish(),
++    ] as Array<Record<string, unknown>>;
++    // 顶层 error 帧 → 终态必须是 failed(带上游 message),不能被 finish() 收成成功空 completed。
++    expect(out.at(-1)?.type).toBe('response.failed');
++    const failed = out.at(-1) as { response: { error: { message: string } } };
++    expect(failed.response.error.message).toBe('model overloaded');
++    // fail() 后 translator 已终结,后续 finish() 不再产出。
++    expect(out.filter((e) => e.type === 'response.completed')).toEqual([]);
++  });
++});
+diff --git a/packages/responses-chat-bridge/src/__tests__/handler.test.ts b/packages/responses-chat-bridge/src/__tests__/handler.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c1fba43cbac65b9a4775a9663127c5b11f6eaf70
+--- /dev/null
++++ b/packages/responses-chat-bridge/src/__tests__/handler.test.ts
+@@ -0,0 +1,201 @@
++import { EventEmitter } from 'node:events';
++
++import { describe, expect, it, vi } from 'vitest';
++
++import { createResponsesChatHandler } from '../handler.js';
++
++class FakeResponse extends EventEmitter {
++  status = 0;
++  headers: Record<string, string> = {};
++  chunks: string[] = [];
++  ended = false;
++  headersSent = false;
++
++  writeHead(status: number, headers: Record<string, string>): this {
++    this.status = status;
++    this.headers = headers;
++    this.headersSent = true;
++    return this;
++  }
++
++  write(chunk: string): boolean {
++    this.chunks.push(chunk);
++    return true;
++  }
++
++  end(chunk?: string): this {
++    if (chunk) this.chunks.push(chunk);
++    this.ended = true;
++    return this;
++  }
++}
++
++function streamResponse(lines: unknown[]): Response {
++  const body = lines.map((line) => `data: ${JSON.stringify(line)}\n\n`).join('') + 'data: [DONE]\n\n';
++  return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
++}
++
++describe('createResponsesChatHandler', () => {
++  it('posts translated Chat request and streams Responses events', async () => {
++    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
++      const body = JSON.parse(String(init?.body));
++      expect(body).toMatchObject({
++        model: 'real-model',
++        messages: [{ role: 'user', content: 'hello' }],
++        stream: true,
++      });
++      expect((init?.headers as Record<string, string>).authorization).toBe('Bearer secret');
++      return streamResponse([
++        { id: 'chat_1', model: 'real-model', choices: [{ delta: { content: 'hi' } }] },
++        { id: 'chat_1', choices: [{ delta: {}, finish_reason: 'stop' }] },
++      ]);
++    }) as typeof fetch;
++    const handler = createResponsesChatHandler({
++      upstreamBase: 'https://provider.example/v1/',
++      buildHeaders: async () => ({ authorization: 'Bearer secret' }),
++      rewriteModel: () => 'real-model',
++    }, { fetchImpl });
++    const res = new FakeResponse();
++    await handler.handle({
++      parsedBody: {
++        model: 'wire/model',
++        input: [{ type: 'message', role: 'user', content: 'hello' }],
++      },
++      res: res as never,
++    });
++    expect(fetchImpl).toHaveBeenCalledWith('https://provider.example/v1/chat/completions', expect.anything());
++    expect(res.status).toBe(200);
++    const wire = res.chunks.join('');
++    expect(wire).toContain('event: response.output_text.delta\n');
++    expect(wire).toContain('event: response.completed\n');
++    expect(wire).toContain('"sequence_number":0');
++    expect(wire).toContain('"sequence_number":1');
++    expect(res.ended).toBe(true);
++  });
++
++  it('accepts a final SSE data event without a trailing newline', async () => {
++    const fetchImpl = vi.fn(async () => new Response(
++      'data: {"id":"chat_tail","choices":[{"delta":{"content":"tail"},"finish_reason":"stop"}]}',
++      { status: 200, headers: { 'content-type': 'text/event-stream' } },
++    )) as typeof fetch;
++    const handler = createResponsesChatHandler({
++      upstreamBase: 'https://provider.example/v1',
++      buildHeaders: async () => ({}),
++    }, { fetchImpl });
++    const res = new FakeResponse();
++    await handler.handle({
++      parsedBody: { model: 'm', input: 'hi' },
++      res: res as never,
++    });
++    expect(res.chunks.join('')).toContain('"delta":"tail"');
++  });
++
++  it('fails a cleanly truncated SSE stream without finish_reason or DONE', async () => {
++    const fetchImpl = vi.fn(async () => new Response(
++      'data: {"id":"chat_partial","choices":[{"delta":{"content":"partial"}}]}\n\n',
++      { status: 200, headers: { 'content-type': 'text/event-stream' } },
++    )) as typeof fetch;
++    const handler = createResponsesChatHandler({
++      upstreamBase: 'https://provider.example/v1',
++      buildHeaders: async () => ({}),
++    }, { fetchImpl });
++    const res = new FakeResponse();
++    await handler.handle({ parsedBody: { model: 'm', input: 'hi' }, res: res as never });
++    const wire = res.chunks.join('');
++    expect(wire).toContain('event: response.failed');
++    expect(wire).not.toContain('event: response.completed');
++  });
++
++  it('accepts DONE as a terminal marker when finish_reason is absent', async () => {
++    const fetchImpl = vi.fn(async () => new Response(
++      'data: {"id":"chat_done","choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n',
++      { status: 200, headers: { 'content-type': 'text/event-stream' } },
++    )) as typeof fetch;
++    const handler = createResponsesChatHandler({
++      upstreamBase: 'https://provider.example/v1',
++      buildHeaders: async () => ({}),
++    }, { fetchImpl });
++    const res = new FakeResponse();
++    await handler.handle({ parsedBody: { model: 'm', input: 'hi' }, res: res as never });
++    expect(res.chunks.join('')).toContain('event: response.completed');
++  });
++
++  it('broadcasts a streamed provider error before failing the Responses stream', async () => {
++    const onUpstreamError = vi.fn(async () => undefined);
++    const handler = createResponsesChatHandler({
++      upstreamBase: 'https://provider.example/v1',
++      buildHeaders: async () => ({ authorization: 'Bearer secret' }),
++      onUpstreamError,
++    }, {
++      fetchImpl: vi.fn(async () => new Response(
++        'data: {"error":{"message":"rate limited","status":429}}\n\ndata: [DONE]\n\n',
++        { status: 200, headers: { 'content-type': 'text/event-stream' } },
++      )) as typeof fetch,
++    });
++    const res = new FakeResponse();
++    await handler.handle({ parsedBody: { model: 'm', input: 'hi' }, res: res as never });
++    expect(onUpstreamError).toHaveBeenCalledWith(expect.objectContaining({ status: 429 }));
++    expect(res.chunks.join('')).toContain('event: response.failed');
++  });
++
++  it('fails a malformed SSE frame instead of silently completing', async () => {
++    const handler = createResponsesChatHandler({
++      upstreamBase: 'https://provider.example/v1',
++      buildHeaders: async () => ({}),
++    }, {
++      fetchImpl: vi.fn(async () => new Response(
++        'data: {"id":"chat_partial","choices":[{"delta":{"content":"partial"}}]}\n\ndata: {not-json}\n\ndata: [DONE]\n\n',
++        { status: 200, headers: { 'content-type': 'text/event-stream' } },
++      )) as typeof fetch,
++    });
++    const res = new FakeResponse();
++    await handler.handle({ parsedBody: { model: 'm', input: 'hi' }, res: res as never });
++    const wire = res.chunks.join('');
++    expect(wire).toContain('event: response.failed');
++    expect(wire).not.toContain('event: response.completed');
++  });
++
++  it('rejects unsupported input before resolving credentials', async () => {
++    const buildHeaders = vi.fn(async () => ({ authorization: 'Bearer secret' }));
++    const handler = createResponsesChatHandler({
++      upstreamBase: 'https://provider.example/v1',
++      buildHeaders,
++    });
++    const res = new FakeResponse();
++    await handler.handle({
++      parsedBody: { model: 'm', input: [{ type: 'computer_call' }] },
++      res: res as never,
++    });
++    expect(res.status).toBe(400);
++    expect(res.chunks.join('')).toContain('unsupported_feature');
++    expect(buildHeaders).not.toHaveBeenCalled();
++  });
++
++  it('runs the provider error callback before returning the original status', async () => {
++    const order: string[] = [];
++    const handler = createResponsesChatHandler({
++      upstreamBase: 'https://provider.example/v1',
++      buildHeaders: async () => ({ authorization: 'Bearer secret' }),
++      onUpstreamError: async ({ status, requestHeaders }) => {
++        expect(status).toBe(429);
++        expect(requestHeaders.authorization).toBe('Bearer secret');
++        order.push('callback');
++      },
++    }, {
++      fetchImpl: vi.fn(async () => new Response('{"error":"slow down"}', { status: 429 })) as typeof fetch,
++    });
++    const res = new FakeResponse();
++    const originalWriteHead = res.writeHead.bind(res);
++    res.writeHead = (status, headers) => {
++      order.push('response');
++      return originalWriteHead(status, headers);
++    };
++    await handler.handle({
++      parsedBody: { model: 'm', input: 'hi' },
++      res: res as never,
++    });
++    expect(order).toEqual(['callback', 'response']);
++    expect(res.status).toBe(429);
++    expect(res.chunks.join('')).toContain('slow down');
++  });
++});
+diff --git a/packages/responses-chat-bridge/src/__tests__/translate-request.test.ts b/packages/responses-chat-bridge/src/__tests__/translate-request.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3416fd870ea7fc8aa0ea760039d5bdf4615a90a7
+--- /dev/null
++++ b/packages/responses-chat-bridge/src/__tests__/translate-request.test.ts
+@@ -0,0 +1,234 @@
++import { describe, expect, it } from 'vitest';
++
++import { translateResponsesRequest } from '../translate-request.js';
++import { UnsupportedResponsesFeatureError, type ResponsesRequest } from '../types.js';
++
++function base(overrides: Partial<ResponsesRequest> = {}): ResponsesRequest {
++  return {
++    model: 'deepseek-chat',
++    input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] }],
++    ...overrides,
++  };
++}
++
++describe('translateResponsesRequest', () => {
++  it('maps instructions, messages, tools and supported tuning fields', () => {
++    const source = base({
++      instructions: 'be concise',
++      tools: [{ type: 'function', name: 'Bash', description: 'run', parameters: { type: 'object' }, strict: true }],
++      tool_choice: { type: 'function', name: 'Bash' },
++      parallel_tool_calls: true,
++      max_output_tokens: 128,
++      reasoning: { effort: 'high' },
++    });
++    const out = translateResponsesRequest(source, {
++      capabilities: {
++        developerRole: 'developer',
++        parallelToolCalls: true,
++        maxTokensField: 'max_completion_tokens',
++        reasoningField: 'reasoning_effort',
++        streamUsage: true,
++      },
++    });
++    expect(out).toEqual({
++      model: 'deepseek-chat',
++      messages: [
++        { role: 'developer', content: 'be concise' },
++        { role: 'user', content: 'hello' },
++      ],
++      stream: true,
++      tools: [{
++        type: 'function',
++        function: { name: 'Bash', description: 'run', parameters: { type: 'object' }, strict: true },
++      }],
++      tool_choice: { type: 'function', function: { name: 'Bash' } },
++      parallel_tool_calls: true,
++      max_completion_tokens: 128,
++      reasoning_effort: 'high',
++      stream_options: { include_usage: true },
++    });
++    expect(source.instructions).toBe('be concise');
++  });
++
++  it('downgrades developer-role input messages per capability (default system), not just instructions', () => {
++    const source = base({
++      instructions: 'top-level dev prompt',
++      input: [
++        { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'mid-conversation dev note' }] },
++        { type: 'message', role: 'user', content: 'hi' },
++      ],
++    });
++    // 默认（未声明 developerRole）→ system：instructions 与 input 里的 developer 消息都降级为 system。
++    const out = translateResponsesRequest(source);
++    expect(out.messages).toEqual([
++      { role: 'system', content: 'top-level dev prompt' },
++      { role: 'system', content: 'mid-conversation dev note' },
++      { role: 'user', content: 'hi' },
++    ]);
++    // 上游原生支持 developer 时（capability 显式声明）保留 developer。
++    const keep = translateResponsesRequest(source, { capabilities: { developerRole: 'developer' } });
++    expect(keep.messages[0]).toEqual({ role: 'developer', content: 'top-level dev prompt' });
++    expect(keep.messages[1]).toEqual({ role: 'developer', content: 'mid-conversation dev note' });
++  });
++
++  it('converts assistant calls and tool outputs while keeping call ids', () => {
++    const out = translateResponsesRequest(base({
++      input: [
++        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'checking' }] },
++        { type: 'function_call', call_id: 'call_1', name: 'Bash', arguments: '{"cmd":"pwd"}' },
++        { type: 'function_call_output', call_id: 'call_1', output: { ok: true } },
++        { type: 'message', role: 'user', content: 'continue' },
++      ],
++    }));
++    expect(out.messages).toEqual([
++      {
++        role: 'assistant',
++        content: 'checking',
++        tool_calls: [{
++          id: 'call_1',
++          type: 'function',
++          function: { name: 'Bash', arguments: '{"cmd":"pwd"}' },
++        }],
++      },
++      { role: 'tool', tool_call_id: 'call_1', content: '{"ok":true}' },
++      { role: 'user', content: 'continue' },
++    ]);
++  });
++
++  it('injects a reasoning_content placeholder on tool-call assistant messages for thinking models', () => {
++    const out = translateResponsesRequest(base({
++      input: [
++        { type: 'function_call', call_id: 'c1', name: 'Bash', arguments: '{}' },
++        { type: 'function_call_output', call_id: 'c1', output: 'ok' },
++        { type: 'message', role: 'user', content: 'next' },
++      ],
++    }), { capabilities: { toolCallReasoningPlaceholder: true } });
++    const assistant = out.messages[0] as { role: string; reasoning_content?: string; tool_calls?: unknown[] };
++    // DeepSeek/Kimi 要求带 tool_calls 的 assistant 携带非空 reasoning_content,否则上游 400。
++    expect(assistant.role).toBe('assistant');
++    expect(assistant.reasoning_content).toBe('tool call');
++    // 未开启该 capability 时不注入(标准 OpenAI 不需要)。
++    const plain = translateResponsesRequest(base({
++      input: [{ type: 'function_call', call_id: 'c1', name: 'Bash', arguments: '{}' }],
++    }));
++    expect((plain.messages[0] as { reasoning_content?: string }).reasoning_content).toBeUndefined();
++  });
++
++  it('normalizes custom tool history and flattens text-like tool output parts', () => {
++    const out = translateResponsesRequest(base({
++      input: [
++        {
++          type: 'custom_tool_call',
++          call_id: 'custom_1',
++          name: 'exec',
++          input: 'console.log(1)',
++        },
++        {
++          type: 'custom_tool_call_output',
++          call_id: 'custom_1',
++          output: [{ type: 'input_text', text: 'done' }, { type: 'input_text', text: 'ok' }],
++        },
++        {
++          type: 'function_call_output',
++          call_id: 'function_1',
++          output: [{ type: 'input_text', text: '{"ok":true}' }],
++        },
++      ],
++    }));
++    expect(out.messages).toEqual([
++      {
++        role: 'assistant',
++        content: null,
++        tool_calls: [{
++          id: 'custom_1',
++          type: 'function',
++          function: { name: 'exec', arguments: '{"input":"console.log(1)"}' },
++        }],
++      },
++      { role: 'tool', tool_call_id: 'custom_1', content: 'done\nok' },
++      { role: 'tool', tool_call_id: 'function_1', content: '{"ok":true}' },
++    ]);
++  });
++
++  it('omits tool_choice/parallel_tool_calls when all tools were dropped (empty-tools guard)', () => {
++    const out = translateResponsesRequest(base({
++      tools: [{ type: 'namespace', name: 'multi_agent_v1' }],
++      tool_choice: 'auto',
++      parallel_tool_calls: true,
++    }));
++    expect(out.tools).toBeUndefined();
++    expect(out.tool_choice).toBeUndefined();
++    expect(out.parallel_tool_calls).toBeUndefined();
++  });
++
++  it('downgrades forced tool_choice to auto for thinking models', () => {
++    const forced = translateResponsesRequest(base({
++      tools: [{ type: 'function', name: 'Bash', parameters: { type: 'object' } }],
++      tool_choice: { type: 'function', name: 'Bash' },
++    }), { capabilities: { forceAutoToolChoice: true } });
++    expect(forced.tool_choice).toBe('auto');
++    const required = translateResponsesRequest(base({
++      tools: [{ type: 'function', name: 'Bash', parameters: { type: 'object' } }],
++      tool_choice: 'required',
++    }), { capabilities: { forceAutoToolChoice: true } });
++    expect(required.tool_choice).toBe('auto');
++    // 不开 forceAutoToolChoice 时保留具名强制。
++    const kept = translateResponsesRequest(base({
++      tools: [{ type: 'function', name: 'Bash', parameters: { type: 'object' } }],
++      tool_choice: { type: 'function', name: 'Bash' },
++    }));
++    expect(kept.tool_choice).toEqual({ type: 'function', function: { name: 'Bash' } });
++  });
++
++  it('normalizes unknown/latest_reminder roles to user and forces function parameters.type=object', () => {
++    const out = translateResponsesRequest(base({
++      input: [
++        { type: 'message', role: 'latest_reminder', content: 'reminder text' },
++        { type: 'message', role: 'user', content: 'hi' },
++      ],
++      tools: [{ type: 'function', name: 'NoParams' }],
++    }));
++    expect(out.messages[0]).toEqual({ role: 'user', content: 'reminder text' });
++    expect(out.tools?.[0].function.parameters).toEqual({ type: 'object', properties: {} });
++  });
++
++  it('ignores replayed reasoning but rejects unknown context-bearing items', () => {
++    expect(translateResponsesRequest(base({
++      input: [
++        { type: 'reasoning', encrypted_content: 'opaque' },
++        { type: 'message', role: 'user', content: 'hi' },
++      ],
++    })).messages).toEqual([{ role: 'user', content: 'hi' }]);
++
++    expect(() => translateResponsesRequest(base({
++      input: [{ type: 'computer_call', id: 'x' }],
++    }))).toThrowError(UnsupportedResponsesFeatureError);
++  });
++
++  it('drops Codex built-in tools (namespace/web_search) but keeps standard function tools', () => {
++    const dropped: Array<[string, number]> = [];
++    const out = translateResponsesRequest(base({
++      tools: [
++        { type: 'function', name: 'Bash', parameters: { type: 'object' } },
++        { type: 'namespace', name: 'multi_agent_v1', tools: [{ type: 'function', name: 'close_agent' }] },
++        { type: 'web_search' },
++      ],
++    }), { onDroppedTool: (type, index) => dropped.push([type, index]) });
++    // 只保留标准 function 工具;Codex 内建工具剥掉(降级),不再让整条请求 fail。
++    expect(out.tools).toEqual([
++      { type: 'function', function: { name: 'Bash', parameters: { type: 'object' } } },
++    ]);
++    expect(dropped).toEqual([['namespace', 1], ['web_search', 2]]);
++  });
++
++  it('omits the tools field entirely when every tool is a dropped built-in', () => {
++    const out = translateResponsesRequest(base({ tools: [{ type: 'namespace', name: 'multi_agent_v1' }] }));
++    expect(out.tools).toBeUndefined();
++  });
++
++  it('still fail-closes on unsupported input content (context must not be silently dropped)', () => {
++    expect(() => translateResponsesRequest(base({
++      input: [{ type: 'message', role: 'user', content: [{ type: 'input_image', image_url: 'x' }] }],
++    }))).toThrow("input content part 'input_image'");
++  });
++});
+diff --git a/packages/responses-chat-bridge/src/chat-sse-translator.ts b/packages/responses-chat-bridge/src/chat-sse-translator.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..53ac53a6b3db202d0396eb6199298e01fd455498
+--- /dev/null
++++ b/packages/responses-chat-bridge/src/chat-sse-translator.ts
+@@ -0,0 +1,467 @@
++import { createHash } from 'node:crypto';
++
++interface ToolState {
++  outputIndex: number;
++  itemId: string;
++  callId: string;
++  name: string;
++  arguments: string;
++  emittedArgumentsLength: number;
++  added: boolean;
++  done: boolean;
++}
++
++interface UsageShape {
++  prompt_tokens?: number;
++  completion_tokens?: number;
++  total_tokens?: number;
++  prompt_tokens_details?: { cached_tokens?: number };
++  completion_tokens_details?: { reasoning_tokens?: number };
++}
++
++function isPlainObject(value: unknown): value is Record<string, unknown> {
++  return typeof value === 'object' && value !== null && !Array.isArray(value);
++}
++
++function stringField(value: unknown): string {
++  return typeof value === 'string' ? value : '';
++}
++
++function numberField(value: unknown): number {
++  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
++}
++
++function deterministicId(prefix: string, responseId: string, index: number): string {
++  const digest = createHash('sha256').update(`${responseId}\0${index}`).digest('hex').slice(0, 24);
++  return `${prefix}_${digest}`;
++}
++
++/**
++ * Chat Completions SSE → OpenAI Responses SSE 状态机。
++ *
++ * tool call 以 Chat 的 `index` 为 identity；id/name/arguments 可以在不同 chunk 抵达，
++ * translator 会为每个 index 独立累积，避免并行工具参数串线。
++ */
++export class ChatSseTranslator {
++  private responseId = '';
++  private model: string;
++  private created = 0;
++  private started = false;
++  private terminal = false;
++  private nextOutputIndex = 0;
++  private messageOutputIndex: number | null = null;
++  private messageItemId = '';
++  private messageStarted = false;
++  private messageDone = false;
++  private text = '';
++  private pendingFinishReason: string | null = null;
++  private sawTerminalMarker = false;
++  // reasoning(思考)通道:DeepSeek/GLM 等 reasoner 在 delta.reasoning_content 里流式吐思考,
++  // 映射成 Responses reasoning summary 事件(reasoner 必须排在 message 之前)。
++  private reasoningOutputIndex: number | null = null;
++  private reasoningItemId = '';
++  private reasoningStarted = false;
++  private reasoningDone = false;
++  private reasoningText = '';
++  private readonly tools = new Map<number, ToolState>();
++  private usage: UsageShape | undefined;
++
++  constructor(model: string) {
++    this.model = model;
++  }
++
++  push(raw: unknown): unknown[] {
++    if (this.terminal || !isPlainObject(raw)) return [];
++    const out: unknown[] = [];
++    const rawId = stringField(raw.id);
++    if (rawId && !this.started) this.responseId = rawId;
++    const rawModel = stringField(raw.model);
++    if (rawModel) this.model = rawModel;
++    const rawCreated = numberField(raw.created);
++    if (rawCreated) this.created = rawCreated;
++    this.ensureStarted(out);
++
++    // 部分 Chat 上游在 `200 text/event-stream` 里用顶层 `error` 帧报错(而非 HTTP 非 2xx)。
++    // 没有 choices,若不识别就只会被当成空帧,最终 finish() 发出"成功但空"的 completed,
++    // Codex 会把失败当成功轮。检测到顶层 error → 直接走 fail() 终态,把错误如实透出。
++    if (isPlainObject(raw.error)) {
++      const message = stringField((raw.error as { message?: unknown }).message)
++        || 'provider returned an error event';
++      for (const event of this.fail(message)) out.push(event);
++      return out;
++    }
++
++    if (isPlainObject(raw.usage)) this.usage = raw.usage as UsageShape;
++    const choices = Array.isArray(raw.choices) ? raw.choices : [];
++    for (const choiceValue of choices) {
++      if (!isPlainObject(choiceValue)) continue;
++      const delta = isPlainObject(choiceValue.delta) ? choiceValue.delta : {};
++      // 思考内容先于正文:reasoner 在 delta.reasoning_content 流式吐思考。
++      const reasoning = stringField(delta.reasoning_content);
++      if (reasoning) {
++        this.ensureReasoning(out);
++        this.reasoningText += reasoning;
++        out.push({
++          type: 'response.reasoning_summary_text.delta',
++          item_id: this.reasoningItemId,
++          output_index: this.reasoningOutputIndex,
++          summary_index: 0,
++          delta: reasoning,
++        });
++      }
++      const content = stringField(delta.content);
++      if (content) {
++        this.ensureMessage(out);
++        this.text += content;
++        out.push({
++          type: 'response.output_text.delta',
++          // item_id 必填:codex 靠它把 delta 绑定到已 added 的 message output_item 做**增量渲染**;
++          // 缺了 codex 无法增量,只能等 output_item.done 的完整 text 一次性渲染(表现为"非流式")。
++          item_id: this.messageItemId,
++          response_id: this.responseId,
++          output_index: this.messageOutputIndex,
++          content_index: 0,
++          delta: content,
++        });
++      }
++      if (Array.isArray(delta.tool_calls)) {
++        for (const toolCall of delta.tool_calls) this.consumeToolDelta(toolCall, out);
++      }
++      const finishReason = typeof choiceValue.finish_reason === 'string' ? choiceValue.finish_reason : null;
++      if (finishReason) {
++        this.pendingFinishReason = finishReason;
++        this.sawTerminalMarker = true;
++      }
++    }
++    return out;
++  }
++
++  /** Mark the upstream SSE stream as having delivered its explicit terminal marker. */
++  markTerminal(): void {
++    this.sawTerminalMarker = true;
++  }
++
++  finish(requireTerminalMarker = false): unknown[] {
++    if (this.terminal) return [];
++    if (requireTerminalMarker && !this.sawTerminalMarker) {
++      return this.fail('upstream SSE stream ended before a terminal marker');
++    }
++    const out: unknown[] = [];
++    this.ensureStarted(out);
++    this.complete(this.pendingFinishReason ?? 'stop', out);
++    return out;
++  }
++
++  fail(message: string): unknown[] {
++    if (this.terminal) return [];
++    const out: unknown[] = [];
++    this.ensureStarted(out);
++    this.closeOpenItems(out);
++    this.terminal = true;
++    out.push({
++      type: 'response.failed',
++      response: this.responseObject('failed', {
++        error: { code: 'upstream_stream_error', message },
++      }),
++    });
++    return out;
++  }
++
++  private ensureStarted(out: unknown[]): void {
++    if (this.started) return;
++    this.started = true;
++    if (!this.responseId) this.responseId = deterministicId('resp', this.model, 0);
++    out.push({ type: 'response.created', response: this.responseObject('in_progress') });
++    out.push({ type: 'response.in_progress', response: this.responseObject('in_progress') });
++  }
++
++  private ensureReasoning(out: unknown[]): void {
++    if (this.reasoningStarted) return;
++    this.reasoningStarted = true;
++    this.reasoningOutputIndex = this.nextOutputIndex++;
++    this.reasoningItemId = deterministicId('rs', this.responseId, this.reasoningOutputIndex);
++    out.push({
++      type: 'response.output_item.added',
++      response_id: this.responseId,
++      output_index: this.reasoningOutputIndex,
++      item: { id: this.reasoningItemId, type: 'reasoning', status: 'in_progress', summary: [] },
++    });
++    out.push({
++      type: 'response.reasoning_summary_part.added',
++      item_id: this.reasoningItemId,
++      output_index: this.reasoningOutputIndex,
++      summary_index: 0,
++      part: { type: 'summary_text', text: '' },
++    });
++  }
++
++  private closeReasoning(out: unknown[]): void {
++    if (!this.reasoningStarted || this.reasoningDone || this.reasoningOutputIndex === null) return;
++    this.reasoningDone = true;
++    out.push({
++      type: 'response.reasoning_summary_text.done',
++      item_id: this.reasoningItemId,
++      output_index: this.reasoningOutputIndex,
++      summary_index: 0,
++      text: this.reasoningText,
++    });
++    out.push({
++      type: 'response.reasoning_summary_part.done',
++      item_id: this.reasoningItemId,
++      output_index: this.reasoningOutputIndex,
++      summary_index: 0,
++      part: { type: 'summary_text', text: this.reasoningText },
++    });
++    // reasoning summary item 完成态刻意不带 status(对齐参考实现)。
++    out.push({
++      type: 'response.output_item.done',
++      response_id: this.responseId,
++      output_index: this.reasoningOutputIndex,
++      item: { id: this.reasoningItemId, type: 'reasoning', summary: [{ type: 'summary_text', text: this.reasoningText }] },
++    });
++  }
++
++  private ensureMessage(out: unknown[]): void {
++    if (this.messageStarted) return;
++    // reasoning 必须在 message 之前完整关闭(参考:reasoning precedes message)。
++    this.closeReasoning(out);
++    this.messageStarted = true;
++    this.messageOutputIndex = this.nextOutputIndex++;
++    this.messageItemId = deterministicId('msg', this.responseId, this.messageOutputIndex);
++    const item = { id: this.messageItemId, type: 'message', status: 'in_progress', role: 'assistant', content: [] };
++    out.push({ type: 'response.output_item.added', response_id: this.responseId, output_index: this.messageOutputIndex, item });
++    out.push({
++      type: 'response.content_part.added',
++      response_id: this.responseId,
++      item_id: this.messageItemId,
++      output_index: this.messageOutputIndex,
++      content_index: 0,
++      part: { type: 'output_text', text: '', annotations: [] },
++    });
++  }
++
++  private consumeToolDelta(raw: unknown, out: unknown[]): void {
++    if (!isPlainObject(raw) || typeof raw.index !== 'number') return;
++    const index = raw.index;
++    let state = this.tools.get(index);
++    if (!state) {
++      const outputIndex = this.nextOutputIndex++;
++      const callId = stringField(raw.id) || deterministicId('call', this.responseId, index);
++      state = {
++        outputIndex,
++        itemId: deterministicId('fc', this.responseId, index),
++        callId,
++        name: '',
++        arguments: '',
++        emittedArgumentsLength: 0,
++        added: false,
++        done: false,
++      };
++      this.tools.set(index, state);
++    }
++    const callId = stringField(raw.id);
++    if (callId) state.callId = callId;
++    const fn = isPlainObject(raw.function) ? raw.function : {};
++    const name = stringField(fn.name);
++    if (name) state.name += name;
++    if (!state.added && state.name) {
++      state.added = true;
++      out.push({
++        type: 'response.output_item.added',
++        response_id: this.responseId,
++        output_index: state.outputIndex,
++        item: {
++          id: state.itemId,
++          type: 'function_call',
++          status: 'in_progress',
++          name: state.name,
++          call_id: state.callId,
++          arguments: '',
++        },
++      });
++      const bufferedArgs = state.arguments.slice(state.emittedArgumentsLength);
++      if (bufferedArgs) {
++        state.emittedArgumentsLength = state.arguments.length;
++        out.push({
++          type: 'response.function_call_arguments.delta',
++          response_id: this.responseId,
++          item_id: state.itemId,
++          output_index: state.outputIndex,
++          delta: bufferedArgs,
++        });
++      }
++    }
++    const args = stringField(fn.arguments);
++    if (args) {
++      state.arguments += args;
++      // Some providers stream argument bytes before the function name. Keep the
++      // bytes buffered so the first output_item.added event has a usable name.
++      if (state.added) {
++        const delta = state.arguments.slice(state.emittedArgumentsLength);
++        state.emittedArgumentsLength = state.arguments.length;
++        out.push({
++          type: 'response.function_call_arguments.delta',
++          response_id: this.responseId,
++          item_id: state.itemId,
++          output_index: state.outputIndex,
++          delta,
++        });
++      }
++    }
++  }
++
++  private closeMessage(out: unknown[]): void {
++    if (!this.messageStarted || this.messageDone || this.messageOutputIndex === null) return;
++    this.messageDone = true;
++    out.push({
++      type: 'response.output_text.done',
++      response_id: this.responseId,
++      item_id: this.messageItemId,
++      output_index: this.messageOutputIndex,
++      content_index: 0,
++      text: this.text,
++    });
++    const content = [{ type: 'output_text', text: this.text, annotations: [] }];
++    out.push({
++      type: 'response.content_part.done',
++      response_id: this.responseId,
++      item_id: this.messageItemId,
++      output_index: this.messageOutputIndex,
++      content_index: 0,
++      part: content[0],
++    });
++    out.push({
++      type: 'response.output_item.done',
++      response_id: this.responseId,
++      output_index: this.messageOutputIndex,
++      item: { id: this.messageItemId, type: 'message', status: 'completed', role: 'assistant', content },
++    });
++  }
++
++  private closeTools(out: unknown[]): void {
++    for (const state of [...this.tools.values()].sort((a, b) => a.outputIndex - b.outputIndex)) {
++      if (state.done) continue;
++      state.done = true;
++      if (!state.added) {
++        state.added = true;
++        out.push({
++          type: 'response.output_item.added',
++          response_id: this.responseId,
++          output_index: state.outputIndex,
++          item: {
++            id: state.itemId,
++            type: 'function_call',
++            status: 'in_progress',
++            name: state.name,
++            call_id: state.callId,
++            arguments: '',
++          },
++        });
++      }
++      out.push({
++        type: 'response.function_call_arguments.done',
++        response_id: this.responseId,
++        item_id: state.itemId,
++        output_index: state.outputIndex,
++        arguments: state.arguments,
++      });
++      out.push({
++        type: 'response.output_item.done',
++        response_id: this.responseId,
++        output_index: state.outputIndex,
++        item: {
++          id: state.itemId,
++          type: 'function_call',
++          status: 'completed',
++          name: state.name,
++          call_id: state.callId,
++          arguments: state.arguments,
++        },
++      });
++    }
++  }
++
++  private closeOpenItems(out: unknown[]): void {
++    // reasoning 先于 message 关闭(顺序不变量);message 若已在 ensureMessage 里关过 reasoning 则 no-op。
++    this.closeReasoning(out);
++    this.closeMessage(out);
++    this.closeTools(out);
++  }
++
++  private complete(reason: string, out: unknown[]): void {
++    if (this.terminal) return;
++    this.closeOpenItems(out);
++    this.terminal = true;
++    const incomplete = reason === 'length' || reason === 'content_filter';
++    out.push({
++      type: incomplete ? 'response.incomplete' : 'response.completed',
++      response: this.responseObject(incomplete ? 'incomplete' : 'completed', incomplete
++        ? { incomplete_details: { reason: reason === 'length' ? 'max_output_tokens' : 'content_filter' } }
++        : {}),
++    });
++  }
++
++  private responseObject(status: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
++    // Responses 协议里 output 数组位置 = output index（item 不带显式 index 字段）。
++    // message 与 function_call 必须**统一按 outputIndex 排序**，不能无条件把 message 排在前面——
++    // 否则模型先发工具调用、后补正文时（agentic 第三方模型常见），回放为下一轮 input 的顺序会颠倒。
++    const items: Array<{ outputIndex: number; item: Record<string, unknown> }> = [];
++    if (this.reasoningDone && this.reasoningOutputIndex !== null) {
++      items.push({
++        outputIndex: this.reasoningOutputIndex,
++        // reasoning summary item 完成态不带 status(对齐参考实现)。
++        item: { id: this.reasoningItemId, type: 'reasoning', summary: [{ type: 'summary_text', text: this.reasoningText }] },
++      });
++    }
++    if (this.messageDone && this.messageOutputIndex !== null) {
++      items.push({
++        outputIndex: this.messageOutputIndex,
++        item: {
++          id: this.messageItemId,
++          type: 'message',
++          status: 'completed',
++          role: 'assistant',
++          content: [{ type: 'output_text', text: this.text, annotations: [] }],
++        },
++      });
++    }
++    for (const state of this.tools.values()) {
++      if (!state.done) continue;
++      items.push({
++        outputIndex: state.outputIndex,
++        item: {
++          id: state.itemId,
++          type: 'function_call',
++          status: 'completed',
++          name: state.name,
++          call_id: state.callId,
++          arguments: state.arguments,
++        },
++      });
++    }
++    const output = items.sort((a, b) => a.outputIndex - b.outputIndex).map((entry) => entry.item);
++    const inputTokens = numberField(this.usage?.prompt_tokens);
++    const outputTokens = numberField(this.usage?.completion_tokens);
++    const usage = this.usage ? {
++      input_tokens: inputTokens,
++      output_tokens: outputTokens,
++      total_tokens: numberField(this.usage.total_tokens) || inputTokens + outputTokens,
++      input_tokens_details: {
++        cached_tokens: numberField(this.usage.prompt_tokens_details?.cached_tokens),
++      },
++      output_tokens_details: {
++        reasoning_tokens: numberField(this.usage.completion_tokens_details?.reasoning_tokens),
++      },
++    } : undefined;
++    return {
++      id: this.responseId,
++      object: 'response',
++      created_at: this.created,
++      status,
++      model: this.model,
++      output,
++      ...(usage ? { usage } : {}),
++      ...extra,
++    };
++  }
++}
+diff --git a/packages/responses-chat-bridge/src/handler.ts b/packages/responses-chat-bridge/src/handler.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ee5abd0f4dbb6c426d8b0d19d07511f8d919f616
+--- /dev/null
++++ b/packages/responses-chat-bridge/src/handler.ts
+@@ -0,0 +1,280 @@
++import type { ServerResponse } from 'node:http';
++
++import { ChatSseTranslator } from './chat-sse-translator.js';
++import { translateResponsesRequest } from './translate-request.js';
++import {
++  UnsupportedResponsesFeatureError,
++  type ChatBridgeLogger,
++  type ChatBridgeProviderConfig,
++  type ResponsesChatBridgeHandler,
++  type ResponsesRequest,
++} from './types.js';
++
++const MAX_ERROR_BODY_CHARS = 16 * 1024;
++const MAX_SSE_BUFFER_CHARS = 1024 * 1024;
++
++function isPlainObject(value: unknown): value is Record<string, unknown> {
++  return typeof value === 'object' && value !== null && !Array.isArray(value);
++}
++
++function writeJson(res: ServerResponse, status: number, body: unknown): void {
++  if (res.headersSent) return;
++  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
++  res.end(JSON.stringify(body));
++}
++
++/**
++ * 写一条 OpenAI Responses SSE 事件。协议要求 **`event: <type>` 行 + `data:` 行**,且 data 里带
++ * 全响应连续递增的 `sequence_number` —— codex app-server 按 `event:` 行分发事件类型,缺了会
++ * 静默丢弃整条流(界面无输出、agent 事件流为空)。sequenceNumber 由 handler 统一维护注入,
++ * 保持 translator 纯净。
++ */
++function writeSse(res: ServerResponse, event: unknown, sequenceNumber: number): void {
++  if (!isPlainObject(event) || typeof event.type !== 'string') return;
++  const payload = { ...event, sequence_number: sequenceNumber };
++  res.write(`event: ${event.type}\ndata: ${JSON.stringify(payload)}\n\n`);
++}
++
++function joinUrl(base: string, path: string): string {
++  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
++  return `${base.replace(/\/+$/, '')}${normalizedPath}`;
++}
++
++function responsesError(status: number, code: string, message: string): Record<string, unknown> {
++  return {
++    error: {
++      type: status === 401 || status === 403 ? 'authentication_error' :
++        status === 429 ? 'rate_limit_error' :
++          status >= 500 ? 'server_error' : 'invalid_request_error',
++      code,
++      message,
++    },
++  };
++}
++
++async function readErrorText(upstream: Response): Promise<string> {
++  try {
++    return (await upstream.text()).slice(0, MAX_ERROR_BODY_CHARS);
++  } catch {
++    return '';
++  }
++}
++
++export interface ResponsesChatHandlerOptions {
++  logger?: ChatBridgeLogger;
++  fetchImpl?: typeof fetch;
++}
++
++/** Create an in-process Responses-to-Chat handler for one resolved provider runtime. */
++export function createResponsesChatHandler(
++  provider: ChatBridgeProviderConfig,
++  opts: ResponsesChatHandlerOptions = {},
++): ResponsesChatBridgeHandler {
++  const log = opts.logger ?? {};
++  const fetchImpl = opts.fetchImpl ?? fetch;
++
++  return {
++    async handle({ parsedBody, res }): Promise<void> {
++      if (!isPlainObject(parsedBody) || typeof parsedBody.model !== 'string') {
++        writeJson(res, 400, responsesError(400, 'invalid_request', 'invalid Responses request body'));
++        return;
++      }
++      const request = parsedBody as ResponsesRequest;
++      const realModel = provider.rewriteModel?.(request.model) ?? request.model;
++      let chatRequest;
++      try {
++        chatRequest = translateResponsesRequest(request, {
++          model: realModel,
++          capabilities: provider.capabilities,
++          onDroppedTool: undefined,
++        });
++      } catch (error) {
++        if (error instanceof UnsupportedResponsesFeatureError) {
++          log.warn?.('responses-chat bridge rejected unsupported feature', {
++            model: request.model,
++            feature: error.feature,
++          });
++          writeJson(res, 400, responsesError(400, 'unsupported_feature', error.message));
++          return;
++        }
++        throw error;
++      }
++
++      let providerHeaders: Record<string, string>;
++      try {
++        providerHeaders = await provider.buildHeaders();
++      } catch (error) {
++        log.error?.('responses-chat bridge auth unavailable', {
++          model: request.model,
++          error: error instanceof Error ? error.message : String(error),
++        });
++        writeJson(res, 502, responsesError(502, 'authentication_unavailable', 'provider authentication is unavailable'));
++        return;
++      }
++
++      const abort = new AbortController();
++      const abortUpstream = (): void => abort.abort();
++      res.once('close', abortUpstream);
++      let upstream: Response;
++      try {
++        upstream = await fetchImpl(joinUrl(provider.upstreamBase, provider.chatCompletionsPath ?? '/chat/completions'), {
++          method: 'POST',
++          headers: {
++            ...providerHeaders,
++            'content-type': 'application/json',
++            accept: 'text/event-stream',
++          },
++          body: JSON.stringify(chatRequest),
++          signal: abort.signal,
++        });
++      } catch (error) {
++        res.off('close', abortUpstream);
++        if (abort.signal.aborted) return;
++        log.warn?.('responses-chat bridge upstream unreachable', {
++          model: request.model,
++          error: error instanceof Error ? error.message : String(error),
++        });
++        writeJson(res, 502, responsesError(502, 'upstream_unreachable', 'provider upstream is unreachable'));
++        return;
++      }
++
++      const reportUpstreamError = async (status: number, body: string): Promise<void> => {
++        if (!provider.onUpstreamError) return;
++        try {
++          await provider.onUpstreamError({ status, body, requestHeaders: providerHeaders });
++        } catch (error) {
++          log.warn?.('responses-chat bridge onUpstreamError failed', {
++            model: request.model,
++            status,
++            error: error instanceof Error ? error.message : String(error),
++          });
++        }
++      };
++
++      if (!upstream.ok || !upstream.body) {
++        const text = await readErrorText(upstream);
++        if (provider.onUpstreamError) {
++          try {
++            await provider.onUpstreamError({
++              status: upstream.status,
++              body: text,
++              requestHeaders: providerHeaders,
++            });
++          } catch (error) {
++            log.warn?.('responses-chat bridge onUpstreamError failed', {
++              model: request.model,
++              status: upstream.status,
++              error: error instanceof Error ? error.message : String(error),
++            });
++          }
++        }
++        res.off('close', abortUpstream);
++        writeJson(
++          res,
++          upstream.status,
++          responsesError(upstream.status, 'upstream_error', text || `provider returned HTTP ${upstream.status}`),
++        );
++        return;
++      }
++
++      const contentType = upstream.headers.get('content-type')?.toLowerCase() ?? '';
++      if (!contentType.startsWith('text/event-stream')) {
++        const text = await readErrorText(upstream);
++        log.warn?.('responses-chat bridge upstream returned non-SSE response', {
++          model: request.model,
++          status: upstream.status,
++          contentType: contentType || 'missing',
++        });
++        res.off('close', abortUpstream);
++        writeJson(
++          res,
++          502,
++          responsesError(502, 'invalid_upstream_response', text || 'provider did not return a streaming SSE response'),
++        );
++        return;
++      }
++
++      res.writeHead(200, {
++        'content-type': 'text/event-stream; charset=utf-8',
++        'cache-control': 'no-cache',
++        connection: 'keep-alive',
++      });
++      const translator = new ChatSseTranslator(request.model);
++      const reader = upstream.body.getReader();
++      const decoder = new TextDecoder();
++      let buffer = '';
++      let streamFailed = false;
++      // 全响应连续递增的 SSE sequence_number（Responses 协议要求）。
++      let seq = 0;
++      const emit = (output: unknown): void => {
++        writeSse(res, output, seq++);
++      };
++      const parseDataPayload = (payload: string): void => {
++        if (!payload) return;
++        if (payload === '[DONE]') {
++          translator.markTerminal();
++          return;
++        }
++        let event: unknown;
++        try {
++          event = JSON.parse(payload);
++        } catch {
++          throw new Error('upstream SSE data frame is malformed');
++        }
++        const streamedError = isPlainObject(event) && isPlainObject(event.error)
++          ? event.error
++          : null;
++        if (streamedError) {
++          const message = typeof streamedError.message === 'string'
++            ? streamedError.message
++            : 'provider returned an error event';
++          void reportUpstreamError(
++            typeof streamedError.status === 'number' ? streamedError.status : 502,
++            JSON.stringify(streamedError).slice(0, MAX_ERROR_BODY_CHARS),
++          );
++          for (const output of translator.fail(message)) emit(output);
++          return;
++        }
++        for (const output of translator.push(event)) emit(output);
++      };
++      try {
++        for (;;) {
++          const { done, value } = await reader.read();
++          if (done) break;
++          buffer += decoder.decode(value, { stream: true });
++          if (buffer.length > MAX_SSE_BUFFER_CHARS && !buffer.includes('\n')) {
++            throw new Error('upstream SSE line exceeds 1 MiB');
++          }
++          let start = 0;
++          let newline: number;
++          while ((newline = buffer.indexOf('\n', start)) >= 0) {
++            const line = buffer.slice(start, newline).replace(/\r$/, '');
++            start = newline + 1;
++            if (!line.startsWith('data:')) continue;
++            parseDataPayload(line.slice(5).trim());
++          }
++          if (start > 0) buffer = buffer.slice(start);
++        }
++        buffer += decoder.decode();
++        if (buffer.trim()) {
++          for (const line of buffer.split(/\r?\n/)) {
++            if (line.startsWith('data:')) parseDataPayload(line.slice(5).trim());
++          }
++        }
++      } catch (error) {
++        if (!abort.signal.aborted) {
++          streamFailed = true;
++          const message = error instanceof Error ? error.message : String(error);
++          log.warn?.('responses-chat bridge stream failed', { model: request.model, error: message });
++          for (const output of translator.fail(message)) emit(output);
++        }
++      } finally {
++        res.off('close', abortUpstream);
++        if (!streamFailed && !abort.signal.aborted) {
++          for (const output of translator.finish(true)) emit(output);
++        }
++        res.end();
++      }
++    },
++  };
++}
+diff --git a/packages/responses-chat-bridge/src/index.ts b/packages/responses-chat-bridge/src/index.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6ab5ae146ca8892f7d28285b2cc3510523eadcda
+--- /dev/null
++++ b/packages/responses-chat-bridge/src/index.ts
+@@ -0,0 +1,14 @@
++export { ChatSseTranslator } from './chat-sse-translator.js';
++export { createResponsesChatHandler, type ResponsesChatHandlerOptions } from './handler.js';
++export { translateResponsesRequest, type TranslateResponsesRequestOptions } from './translate-request.js';
++export {
++  UnsupportedResponsesFeatureError,
++  type ChatBridgeCapabilities,
++  type ChatBridgeHandleArgs,
++  type ChatBridgeLogger,
++  type ChatBridgeProviderConfig,
++  type ChatBridgeUpstreamErrorInfo,
++  type ChatCompletionsRequest,
++  type ResponsesChatBridgeHandler,
++  type ResponsesRequest,
++} from './types.js';
+diff --git a/packages/responses-chat-bridge/src/translate-request.ts b/packages/responses-chat-bridge/src/translate-request.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..196623903a72888caa4c63e9b069ad5976b10342
+--- /dev/null
++++ b/packages/responses-chat-bridge/src/translate-request.ts
+@@ -0,0 +1,312 @@
++import {
++  UnsupportedResponsesFeatureError,
++  type ChatAssistantMessage,
++  type ChatBridgeCapabilities,
++  type ChatDeveloperRole,
++  type ChatCompletionsRequest,
++  type ChatMessage,
++  type ResponsesContentPart,
++  type ResponsesFunctionTool,
++  type ResponsesInputItem,
++  type ResponsesRequest,
++} from './types.js';
++
++function isPlainObject(value: unknown): value is Record<string, unknown> {
++  return typeof value === 'object' && value !== null && !Array.isArray(value);
++}
++
++function stringifyToolOutput(output: unknown): string {
++  if (typeof output === 'string') return output;
++  if (Array.isArray(output)) {
++    const textParts = output.map((part) => {
++      if (typeof part === 'string') return part;
++      if (!isPlainObject(part)) return null;
++      if (typeof part.text === 'string') return part.text;
++      if (typeof part.input_text === 'string') return part.input_text;
++      if (typeof part.output_text === 'string') return part.output_text;
++      return null;
++    });
++    if (textParts.every((part): part is string => part !== null)) return textParts.join('\n');
++  }
++  try {
++    return JSON.stringify(output);
++  } catch {
++    return String(output);
++  }
++}
++
++function customToolArguments(input: unknown): string {
++  if (input == null) return '{}';
++  if (typeof input === 'string') {
++    try {
++      const parsed: unknown = JSON.parse(input);
++      return JSON.stringify(isPlainObject(parsed) ? parsed : { input: parsed });
++    } catch {
++      return JSON.stringify({ input });
++    }
++  }
++  try {
++    return JSON.stringify(isPlainObject(input) ? input : { input });
++  } catch {
++    return JSON.stringify({ input: String(input) });
++  }
++}
++
++function textFromParts(parts: ResponsesContentPart[], itemIndex: number): string {
++  let text = '';
++  for (const part of parts) {
++    if (!isPlainObject(part) || typeof part.type !== 'string') {
++      throw new UnsupportedResponsesFeatureError(`input[${itemIndex}].content`);
++    }
++    if (part.type === 'input_text' || part.type === 'output_text' || part.type === 'text') {
++      if (typeof part.text !== 'string') {
++        throw new UnsupportedResponsesFeatureError(`input[${itemIndex}].content.${part.type}`);
++      }
++      text += part.text;
++      continue;
++    }
++    throw new UnsupportedResponsesFeatureError(`input content part '${part.type}'`);
++  }
++  return text;
++}
++
++function messageContent(item: Extract<ResponsesInputItem, { role: string }>, itemIndex: number): string {
++  if (typeof item.content === 'string') return item.content;
++  if (!Array.isArray(item.content)) {
++    throw new UnsupportedResponsesFeatureError(`input[${itemIndex}].content`);
++  }
++  return textFromParts(item.content, itemIndex);
++}
++
++interface TranslateInputOptions {
++  developerRole: ChatDeveloperRole;
++  /** thinking 模型:为带 tool_calls 但缺 reasoning_content 的 assistant 消息注入占位。 */
++  toolCallReasoningPlaceholder: boolean;
++}
++
++/** cc-switch 的占位口径:kimi/DeepSeek 要求 tool_call assistant 消息带非空 reasoning_content。 */
++const TOOL_CALL_REASONING_PLACEHOLDER = 'tool call';
++
++function flushAssistant(
++  messages: ChatMessage[],
++  pending: ChatAssistantMessage | null,
++  opts: TranslateInputOptions,
++): null {
++  if (!pending) return null;
++  const hasToolCalls = (pending.tool_calls?.length ?? 0) > 0;
++  // 空 assistant(无 content / tool_calls)整条跳过 —— 部分后端(DeepSeek/xAI)拒收空 assistant。
++  if (pending.content == null && !hasToolCalls) return null;
++  if (hasToolCalls && opts.toolCallReasoningPlaceholder && !pending.reasoning_content) {
++    pending.reasoning_content = TOOL_CALL_REASONING_PLACEHOLDER;
++  }
++  messages.push(pending);
++  return null;
++}
++
++/** Responses 角色 → Chat 角色。system/developer 归一到 capability 指定角色;
++ *  user / latest_reminder / 未知一律归 user(不能透传,上游只认 system/user/assistant/tool)。 */
++function normalizeRole(role: string, developerRole: ChatDeveloperRole): 'system' | 'developer' | 'user' {
++  if (role === 'system' || role === 'developer') return developerRole;
++  return 'user';
++}
++
++/**
++ * Responses input 是按时间排序的 item 列表，Chat 则把 assistant 文本和紧随其后的
++ * function_call 合并进同一条 assistant message。其它角色/工具结果会结束该合并段。
++ */
++function translateInput(input: ResponsesRequest['input'], opts: TranslateInputOptions): ChatMessage[] {
++  if (typeof input === 'string') return [{ role: 'user', content: input }];
++  if (!Array.isArray(input)) throw new UnsupportedResponsesFeatureError('input');
++
++  const messages: ChatMessage[] = [];
++  let assistant: ChatAssistantMessage | null = null;
++  for (let index = 0; index < input.length; index += 1) {
++    const item = input[index];
++    if (!isPlainObject(item)) throw new UnsupportedResponsesFeatureError(`input[${index}]`);
++
++    if ('role' in item && typeof item.role === 'string') {
++      const content = messageContent(item as Extract<ResponsesInputItem, { role: string }>, index);
++      if (item.role === 'assistant') {
++        if (!assistant) assistant = { role: 'assistant', content };
++        else if (assistant.content == null) assistant.content = content;
++        else if (content) assistant.content += content;
++      } else {
++        assistant = flushAssistant(messages, assistant, opts);
++        messages.push({ role: normalizeRole(item.role, opts.developerRole), content });
++      }
++      continue;
++    }
++
++    if (item.type === 'custom_tool_call') {
++      if (typeof item.call_id !== 'string' || typeof item.name !== 'string') {
++        throw new UnsupportedResponsesFeatureError(`input[${index}].custom_tool_call`);
++      }
++      assistant ??= { role: 'assistant', content: null, tool_calls: [] };
++      assistant.tool_calls ??= [];
++      assistant.tool_calls.push({
++        id: item.call_id,
++        type: 'function',
++        function: { name: item.name, arguments: customToolArguments(item.input) },
++      });
++      continue;
++    }
++
++    if (item.type === 'custom_tool_call_output') {
++      assistant = flushAssistant(messages, assistant, opts);
++      if (typeof item.call_id !== 'string') {
++        throw new UnsupportedResponsesFeatureError(`input[${index}].custom_tool_call_output`);
++      }
++      messages.push({
++        role: 'tool',
++        tool_call_id: item.call_id,
++        content: stringifyToolOutput(item.output),
++      });
++      continue;
++    }
++
++    if (item.type === 'function_call') {
++      if (typeof item.call_id !== 'string' || typeof item.name !== 'string' || typeof item.arguments !== 'string') {
++        throw new UnsupportedResponsesFeatureError(`input[${index}].function_call`);
++      }
++      assistant ??= { role: 'assistant', content: null, tool_calls: [] };
++      assistant.tool_calls ??= [];
++      assistant.tool_calls.push({
++        id: item.call_id,
++        type: 'function',
++        function: { name: item.name, arguments: item.arguments },
++      });
++      continue;
++    }
++
++    assistant = flushAssistant(messages, assistant, opts);
++    if (item.type === 'function_call_output') {
++      if (typeof item.call_id !== 'string') {
++        throw new UnsupportedResponsesFeatureError(`input[${index}].function_call_output`);
++      }
++      messages.push({
++        role: 'tool',
++        tool_call_id: item.call_id,
++        content: stringifyToolOutput(item.output),
++      });
++      continue;
++    }
++    if (item.type === 'reasoning') {
++      // Responses 会把上一轮 reasoning item 回放进 input。Chat 没有安全的等价输入形态；
++      // reasoning 本身不承载用户/工具上下文，明确丢弃而不是伪造 assistant 文本。
++      continue;
++    }
++    throw new UnsupportedResponsesFeatureError(`input item '${String(item.type)}'`);
++  }
++  flushAssistant(messages, assistant, opts);
++  return messages;
++}
++
++/**
++ * 工具是**能力声明**,不是上下文:Chat Completions 只认标准 `function` 工具,而 Codex 每次
++ * 请求都会注入自己的内建工具(`namespace` 多智能体分组、`local_shell`、`web_search`、
++ * `image_generation` 等)。这些对第三方 Chat 上游无意义,必须**剥掉降级**(与 codex proxy
++ * 的 xAI 兼容层同口径),不能 fail-closed —— 否则 Codex 首轮就带 namespace,整条桥接 100% 不可用。
++ * 被剥掉的类型经 onDropped 回调交给 handler 记 log(no silent caps)。
++ */
++function translateTools(
++  tools: ResponsesRequest['tools'],
++  onDropped?: (type: string, index: number) => void,
++): ChatCompletionsRequest['tools'] {
++  if (!tools?.length) return undefined;
++  const out: NonNullable<ChatCompletionsRequest['tools']> = [];
++  tools.forEach((tool, index) => {
++    if (!isPlainObject(tool) || tool.type !== 'function' || typeof tool.name !== 'string') {
++      onDropped?.(isPlainObject(tool) ? String(tool.type) : typeof tool, index);
++      return;
++    }
++    const functionTool = tool as unknown as ResponsesFunctionTool;
++    out.push({
++      type: 'function' as const,
++      function: {
++        name: functionTool.name,
++        ...(functionTool.description ? { description: functionTool.description } : {}),
++        // Kimi 等要求 root parameters.type 恰为 "object";Codex 偶尔发 null/缺失 → 归一。
++        parameters: normalizeFunctionParameters(functionTool.parameters),
++        ...(typeof functionTool.strict === 'boolean' ? { strict: functionTool.strict } : {}),
++      },
++    });
++  });
++  return out.length > 0 ? out : undefined;
++}
++
++function normalizeFunctionParameters(parameters: unknown): Record<string, unknown> {
++  if (!isPlainObject(parameters)) return { type: 'object', properties: {} };
++  if (parameters.type == null) return { ...parameters, type: 'object' };
++  return parameters;
++}
++
++/**
++ * tool_choice 归一。forceAutoToolChoice(思考模型)时,具名 / required 一律降级为 'auto' ——
++ * DeepSeek reasoner 明确拒绝强制工具(`Thinking mode does not support this tool_choice`)。
++ */
++function translateToolChoice(choice: unknown, forceAuto: boolean): unknown {
++  if (choice === undefined || choice === 'auto' || choice === 'none') return choice;
++  if (choice === 'required') return forceAuto ? 'auto' : choice;
++  if (isPlainObject(choice) && choice.type === 'function' && typeof choice.name === 'string') {
++    return forceAuto ? 'auto' : { type: 'function', function: { name: choice.name } };
++  }
++  throw new UnsupportedResponsesFeatureError('tool_choice');
++}
++
++export interface TranslateResponsesRequestOptions {
++  model?: string;
++  capabilities?: ChatBridgeCapabilities;
++  /** 被剥掉的非 function 工具(Codex 内建 namespace / local_shell 等)回调,供 handler 记 log。 */
++  onDroppedTool?: (type: string, index: number) => void;
++}
++
++/** Convert a Codex Responses request to a streaming Chat Completions request. */
++export function translateResponsesRequest(
++  input: ResponsesRequest,
++  opts: TranslateResponsesRequestOptions = {},
++): ChatCompletionsRequest {
++  if (!input || typeof input.model !== 'string' || input.model.length === 0) {
++    throw new UnsupportedResponsesFeatureError('model');
++  }
++  const capabilities = opts.capabilities ?? {};
++  const developerRole = capabilities.developerRole ?? 'system';
++  const messages = translateInput(input.input, {
++    developerRole,
++    toolCallReasoningPlaceholder: capabilities.toolCallReasoningPlaceholder === true,
++  });
++  if (input.instructions) {
++    messages.unshift({ role: developerRole, content: input.instructions });
++  }
++
++  const out: ChatCompletionsRequest = {
++    model: opts.model ?? input.model,
++    messages,
++    stream: true,
++  };
++  const tools = translateTools(input.tools, opts.onDroppedTool);
++  // 空 tools 时**必须**连 tool_choice / parallel_tool_calls 一起省略:剥掉 Codex 内建工具后
++  // tools 可能变空,而 vLLM / 企业网关在没有 tools 却带 tool_choice 时会 400/503(cc-switch 同款守卫)。
++  if (tools) {
++    out.tools = tools;
++    const toolChoice = translateToolChoice(input.tool_choice, capabilities.forceAutoToolChoice === true);
++    if (toolChoice !== undefined) out.tool_choice = toolChoice;
++    if (capabilities.parallelToolCalls !== false && typeof input.parallel_tool_calls === 'boolean') {
++      out.parallel_tool_calls = input.parallel_tool_calls;
++    }
++  }
++  if (typeof input.max_output_tokens === 'number') {
++    switch (capabilities.maxTokensField ?? 'omit') {
++      case 'max_tokens': out.max_tokens = input.max_output_tokens; break;
++      case 'max_completion_tokens': out.max_completion_tokens = input.max_output_tokens; break;
++      case 'omit': break;
++    }
++  }
++  if (
++    (capabilities.reasoningField ?? 'none') === 'reasoning_effort' &&
++    typeof input.reasoning?.effort === 'string'
++  ) {
++    out.reasoning_effort = input.reasoning.effort;
++  }
++  if (capabilities.streamUsage === true) out.stream_options = { include_usage: true };
++  return out;
++}
+diff --git a/packages/responses-chat-bridge/src/types.ts b/packages/responses-chat-bridge/src/types.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..528f030a991b2cd82c11c026eb0e726e058d6e0d
+--- /dev/null
++++ b/packages/responses-chat-bridge/src/types.ts
+@@ -0,0 +1,186 @@
++/**
++ * OpenAI Responses / Chat Completions 的 bridge 最小公开类型。
++ *
++ * 这里只声明转换器实际读写的字段。Responses 请求来自 Codex，遇到未知 input item
++ * 必须 fail-closed，不能静默删除上下文；其它顶层未知字段由转换器明确忽略。
++ */
++
++import type { ServerResponse } from 'node:http';
++
++export interface ResponsesInputTextPart {
++  type: 'input_text' | 'output_text' | 'text';
++  text: string;
++}
++
++export interface ResponsesInputImagePart {
++  type: 'input_image';
++  image_url?: string;
++  file_id?: string;
++}
++
++export type ResponsesContentPart = ResponsesInputTextPart | ResponsesInputImagePart | {
++  type: string;
++  [key: string]: unknown;
++};
++
++export type ResponsesInputItem =
++  | {
++      type?: 'message';
++      role: 'user' | 'assistant' | 'system' | 'developer';
++      content: string | ResponsesContentPart[];
++    }
++  | {
++      type: 'function_call';
++      call_id: string;
++      name: string;
++      arguments: string;
++    }
++  | {
++      type: 'function_call_output';
++      call_id: string;
++      output: unknown;
++    }
++  | {
++      type: 'reasoning';
++      [key: string]: unknown;
++    }
++  | {
++      type: string;
++      [key: string]: unknown;
++    };
++
++export interface ResponsesFunctionTool {
++  type: 'function';
++  name: string;
++  description?: string;
++  parameters?: Record<string, unknown>;
++  strict?: boolean;
++}
++
++export interface ResponsesRequest {
++  model: string;
++  instructions?: string;
++  input: string | ResponsesInputItem[];
++  tools?: Array<ResponsesFunctionTool | { type: string; [key: string]: unknown }>;
++  tool_choice?: unknown;
++  parallel_tool_calls?: boolean;
++  max_output_tokens?: number;
++  reasoning?: { effort?: string; [key: string]: unknown };
++  stream?: boolean;
++  store?: boolean;
++  [key: string]: unknown;
++}
++
++export interface ChatTextMessage {
++  role: 'system' | 'developer' | 'user';
++  content: string;
++}
++
++export interface ChatAssistantMessage {
++  role: 'assistant';
++  content?: string | null;
++  /** DeepSeek/Kimi/Moonshot 的思考模型要求带 tool_calls 的 assistant 消息携带非空 reasoning_content。 */
++  reasoning_content?: string;
++  tool_calls?: Array<{
++    id: string;
++    type: 'function';
++    function: { name: string; arguments: string };
++  }>;
++}
++
++export interface ChatToolMessage {
++  role: 'tool';
++  tool_call_id: string;
++  content: string;
++}
++
++export type ChatMessage = ChatTextMessage | ChatAssistantMessage | ChatToolMessage;
++
++export interface ChatCompletionsRequest {
++  model: string;
++  messages: ChatMessage[];
++  tools?: Array<{
++    type: 'function';
++    function: {
++      name: string;
++      description?: string;
++      parameters: Record<string, unknown>;
++      strict?: boolean;
++    };
++  }>;
++  tool_choice?: unknown;
++  parallel_tool_calls?: boolean;
++  max_tokens?: number;
++  max_completion_tokens?: number;
++  reasoning_effort?: string;
++  stream: true;
++  stream_options?: { include_usage: true };
++}
++
++export type ChatDeveloperRole = 'developer' | 'system';
++export type ChatMaxTokensField = 'max_tokens' | 'max_completion_tokens' | 'omit';
++export type ChatReasoningField = 'reasoning_effort' | 'none';
++
++/** 同协议族内的上游差异，全部由数据表达（对齐 cc-switch / opencodex 的 per-provider 处理）。 */
++export interface ChatBridgeCapabilities {
++  developerRole?: ChatDeveloperRole;
++  parallelToolCalls?: boolean;
++  maxTokensField?: ChatMaxTokensField;
++  reasoningField?: ChatReasoningField;
++  streamUsage?: boolean;
++  /**
++   * thinking 模型(DeepSeek/Kimi/Moonshot)要求每个带 tool_calls 的 assistant 消息携带非空
++   * reasoning_content,否则上游报 `reasoning_content is missing in assistant tool call message`。
++   * 开启后为缺失的 tool_call assistant 消息注入占位文本。
++   */
++  toolCallReasoningPlaceholder?: boolean;
++  /**
++   * reasoning 模型拒绝强制 tool_choice(如 DeepSeek `Thinking mode does not support this tool_choice`)。
++   * 开启后把具名 / required 的 tool_choice 降级为 'auto'。
++   */
++  forceAutoToolChoice?: boolean;
++}
++
++export interface ChatBridgeLogger {
++  debug?: (msg: string, meta?: Record<string, unknown>) => void;
++  info?: (msg: string, meta?: Record<string, unknown>) => void;
++  warn?: (msg: string, meta?: Record<string, unknown>) => void;
++  error?: (msg: string, meta?: Record<string, unknown>) => void;
++}
++
++export interface ChatBridgeUpstreamErrorInfo {
++  status: number;
++  body: string;
++  /** 可能含凭证，只能用于内存态关联，禁止写日志。 */
++  requestHeaders: Readonly<Record<string, string>>;
++}
++
++export interface ChatBridgeProviderConfig {
++  upstreamBase: string;
++  /** 缺省 `/chat/completions`；少数厂商可显式覆盖。 */
++  chatCompletionsPath?: string;
++  buildHeaders: () => Promise<Record<string, string>>;
++  /** 把 wire model 改成上游真实 model；缺省原样。 */
++  rewriteModel?: (model: string) => string;
++  capabilities?: ChatBridgeCapabilities;
++  onUpstreamError?: (info: ChatBridgeUpstreamErrorInfo) => void | Promise<void>;
++}
++
++export interface ChatBridgeHandleArgs {
++  parsedBody: unknown;
++  res: ServerResponse;
++}
++
++export interface ResponsesChatBridgeHandler {
++  handle(args: ChatBridgeHandleArgs): Promise<void>;
++}
++
++export class UnsupportedResponsesFeatureError extends Error {
++  readonly feature: string;
++
++  constructor(feature: string) {
++    super(`Responses feature is not supported by the Chat Completions bridge: ${feature}`);
++    this.name = 'UnsupportedResponsesFeatureError';
++    this.feature = feature;
++  }
++}
+diff --git a/packages/responses-chat-bridge/tsconfig.json b/packages/responses-chat-bridge/tsconfig.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..fefb71da01f97fbe47d46974121f6d005dc21ea4
+--- /dev/null
++++ b/packages/responses-chat-bridge/tsconfig.json
+@@ -0,0 +1,17 @@
++{
++  "compilerOptions": {
++    "target": "ESNext",
++    "module": "ESNext",
++    "moduleResolution": "bundler",
++    "strict": true,
++    "esModuleInterop": true,
++    "skipLibCheck": true,
++    "forceConsistentCasingInFileNames": true,
++    "resolveJsonModule": true,
++    "isolatedModules": true,
++    "noEmit": true,
++    "sourceMap": true,
++    "baseUrl": "."
++  },
++  "include": ["src/**/*"]
++}
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 37022db4734993790afd4afd9c3bbe45133163e8..37ca90c38f52855b5d43f38a35f6c94f0665a471 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -99,6 +99,9 @@ importers:
+       '@cindy/remote-file-service':
+         specifier: workspace:*
+         version: link:../../packages/remote-file-service
++      '@cindy/responses-chat-bridge':
++        specifier: workspace:*
++        version: link:../../packages/responses-chat-bridge
+       '@cindy/slack-hook-protocol':
+         specifier: workspace:*
+         version: link:../../cindy-protocol/packages/slack-hook-protocol
+@@ -1222,6 +1225,27 @@ importers:
+         specifier: ^3.2.4
+         version: 3.2.7(@types/debug@4.1.13)(@types/node@25.9.5)(jiti@2.7.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(terser@5.49.0)(tsx@4.23.1)(yaml@2.9.0)
+ 
++  packages/responses-chat-bridge:
++    devDependencies:
++      '@eslint/js':
++        specifier: ^9.0.0
++        version: 9.39.5
++      '@types/node':
++        specifier: '*'
++        version: 25.9.5
++      eslint:
++        specifier: ^9.0.0
++        version: 9.39.5(jiti@2.7.0)
++      typescript:
++        specifier: ^5.7.0
++        version: 5.9.3
++      typescript-eslint:
++        specifier: ^8.0.0
++        version: 8.64.0(eslint@9.39.5(jiti@2.7.0))(typescript@5.9.3)
++      vitest:
++        specifier: ^3.2.4
++        version: 3.2.7(@types/debug@4.1.13)(@types/node@25.9.5)(jiti@2.7.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(terser@5.49.0)(tsx@4.23.1)(yaml@2.9.0)
++
+   packages/voice-input-core:
+     devDependencies:
+       '@eslint/js':
+diff --git a/scripts/test-workspaces.config.mjs b/scripts/test-workspaces.config.mjs
+index 0d68a3296748655b6e49ea96a4102c875544dc6c..ca53b3024467cacbac2de02a76f189534bb31039 100644
+--- a/scripts/test-workspaces.config.mjs
++++ b/scripts/test-workspaces.config.mjs
+@@ -103,6 +103,7 @@ export default {
+     requiredUnitWorkspace('mobile', 'apps/mobile'),
+     requiredUnitWorkspace('@cindy/anthropic-compat-proxy', 'packages/anthropic-compat-proxy'),
+     requiredUnitWorkspace('@cindy/anthropic-responses-bridge', 'packages/anthropic-responses-bridge'),
++    requiredUnitWorkspace('@cindy/responses-chat-bridge', 'packages/responses-chat-bridge'),
+     requiredUnitWorkspace('@cindy/auth-client', 'packages/auth-client'),
+     requiredUnitWorkspace('@cindy/browser-control-runtime', 'packages/browser-control-runtime'),
+     requiredUnitWorkspace('cindy-tools', 'packages/cindy-tools'),

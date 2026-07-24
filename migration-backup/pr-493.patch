@@ -1,0 +1,672 @@
+diff --git a/apps/mobile/app/sessions/[sessionId].tsx b/apps/mobile/app/sessions/[sessionId].tsx
+index 15d77efa1f8afb1c33636aaaf9004099fbd689e7..2d40ed4ba47e6931e90ca751f90f7ffbaa90924e 100644
+--- a/apps/mobile/app/sessions/[sessionId].tsx
++++ b/apps/mobile/app/sessions/[sessionId].tsx
+@@ -193,6 +193,12 @@ import {
+   stopOptionsForProjection,
+   type QueueEditTextState,
+ } from '@/session/inputProjection';
++import {
++  acquireQueueEditLock,
++  commitQueueEdit,
++  releaseQueueEditLockAfter,
++  type QueueEditLockOwner,
++} from '@/session/queueEditLifecycle';
+ import { findErrorTailClientId, isContinuationQueueItem, resolveSessionTailBanner } from '@/session/sessionTailBannerModel';
+ import { SessionTailBanner } from '@/session/SessionTailBanner';
+ import {
+@@ -757,6 +763,8 @@ export default function SessionScreen() {
+   // 排队编辑保存(update-content RPC)在途 promise:会话切换 cleanup 据此把解锁
+   // 排到保存落定之后,防止 device-link 并发下解锁超车、桌面端用旧内容抢先派发。
+   const queueEditSaveInFlightRef = useRef<Promise<void> | null>(null);
++  const queueEditLockOwnerRef = useRef<QueueEditLockOwner | null>(null);
++  const queueEditSaveOwnerRef = useRef<QueueEditLockOwner | null>(null);
+   // 「已出队、消息尚未回流」的落定中条目:桌面端 drain 会先从 pendingQueue 摘除、
+   // 后落库推送,device-link 下两者相隔可感知——此间继续渲染半透明气泡(转圈徽标),
+   // 消息回流(clientId 进入 queueHiddenClientIds)或超时后移除,保证「原位变实」
+@@ -1799,6 +1807,17 @@ export default function SessionScreen() {
+     const editing = queueEditingRef.current;
+     if (editing) {
+       queueEditingRef.current = null;
++      const currentLockOwner = queueEditLockOwnerRef.current;
++      const idleLockOwner = currentLockOwner?.clientId === editing.clientId
++        ? currentLockOwner
++        : null;
++      const currentSaveOwner = queueEditSaveOwnerRef.current;
++      const saveLockOwner = currentSaveOwner?.clientId === editing.clientId
++        ? currentSaveOwner
++        : null;
++      const lockOwner = saveLockOwner ?? idleLockOwner;
++      if (idleLockOwner) queueEditLockOwnerRef.current = null;
++      if (saveLockOwner) queueEditSaveOwnerRef.current = null;
+       // 保存(update-content)在途时,解锁与附件回收都不抢跑:解锁超车会让桌面端
+       // 用旧内容抢先派发该行;立即回收则可能删掉桌面端正在物化的 OSS 对象,保存
+       // 成功却拿到残缺附件(review P2 两条)。统一排到保存落定之后——保存成功时
+@@ -1808,9 +1827,9 @@ export default function SessionScreen() {
+       const inFlightSave = queueEditSaveInFlightRef.current;
+       const attachmentsSnapshot = [...attachmentsRef.current];
+       const finalize = () => {
+-        void maker.input.setEditLock(sessionId, editing.clientId, false).catch(() => undefined);
+         discardQueueEditTransientAttachmentsRef.current?.(editing, attachmentsSnapshot);
+       };
++      if (lockOwner) void releaseQueueEditLockAfter(lockOwner, inFlightSave).catch(() => undefined);
+       if (inFlightSave) void inFlightSave.then(finalize, finalize);
+       else finalize();
+       // 托盘不是 per-session 状态:编辑中切会话若不还原,队列条目的 files 会跟进
+@@ -1819,7 +1838,7 @@ export default function SessionScreen() {
+       attachmentsRef.current = [...editing.stashedAttachments];
+       setAttachments([...editing.stashedAttachments]);
+     }
+-  }, [maker, sessionId]);
++  }, [sessionId]);
+ 
+   useEffect(() => {
+     if (canUseComposer) return;
+@@ -3729,54 +3748,96 @@ export default function SessionScreen() {
+         if (!original) {
+           // 条目已被远端发出/删除(vanish effect 与本次点击竞态):原文不可改,放弃保存。
+           setError('这条排队消息已不在队列里,修改未保存。');
+-          cancelQueueEdit({ unlock: false });
++          cancelQueueEdit();
+           return;
+         }
+         const updated = buildQueuedTextMessage(sessionAtSend, text, new Date(), editingQueueItem.clientId, {
+           attachments: sendAttachments,
+           quotesEncoded: queueEditPreservesEncodedQuotes,
+         });
+-        // 保存在途 promise:会话切换 cleanup 据此把解锁排到保存落定之后
+-        // (device-link 并发下解锁不许超车 update-content,见 cleanup 注释)。
+-        let settleSave: (() => void) | undefined;
+-        queueEditSaveInFlightRef.current = new Promise<void>((resolve) => {
+-          settleSave = resolve;
+-        });
+-        try {
+-          try {
+-            const projection = await maker.input.updateContent(sessionId, editingQueueItem.clientId, updated);
+-            applyProjection(projection);
+-          } catch (err) {
+-            if (
+-              isChannelNotAllowedError(err)
+-              && text.trim().length > 0
+-              && attachmentIdSetsEqual(original.files, sendAttachments)
+-              && queuedMessageHasEncodedQuotes(original) === queueEditPreservesEncodedQuotes
+-            ) {
+-              // 旧被控端无 update-content:附件与 quote metadata 都不变、文本非空时
+-              // 才退回 update-text。空文本不降级——旧端 update-text 对空文本静默 no-op,会造成"看似
+-              // 保存成功、队列还是旧文案"的假成功(review P2)。降级本身失败(弱网两次
+-              // RPC 之间断连)与其余失败分支对称:先还原编辑文本再抛,不许静默丢字
+-              // (review P1)。
+-              try {
+-                const projection = await maker.input.updateText(sessionId, editingQueueItem.clientId, text);
+-                applyProjection(projection);
+-              } catch (fallbackErr) {
+-                restoreDraftAfterFailure();
+-                throw fallbackErr;
++        // 保存必须等加锁落定,并在 update-content / update-text 完成后再解锁。
++        // owner 在交给 commitQueueEdit 后由它独占,避免取消 / 卸载重复解锁。
++        const currentLockOwner = queueEditLockOwnerRef.current;
++        const lockOwner = currentLockOwner?.clientId === editingQueueItem.clientId
++          ? currentLockOwner
++          : acquireQueueEditLock(null, editingQueueItem.clientId, setQueueEditLock);
++        queueEditLockOwnerRef.current = null;
++        queueEditSaveOwnerRef.current = lockOwner;
++        let lockReady = false;
++        let editSaved = false;
++        const restoreQueueEditDraftAfterFailure = () => {
++          if (queueEditingRef.current?.clientId === editingQueueItem.clientId) {
++            restoreDraftAfterFailure();
++          }
++        };
++        const save = (async () => {
++          await lockOwner.ready;
++          lockReady = true;
++          editSaved = await commitQueueEdit(lockOwner, async () => {
++            try {
++              const projection = await maker.input.updateContent(sessionId, editingQueueItem.clientId, updated);
++              applyProjection(projection);
++            } catch (err) {
++              if (
++                isChannelNotAllowedError(err)
++                && text.trim().length > 0
++                && attachmentIdSetsEqual(original.files, sendAttachments)
++                && queuedMessageHasEncodedQuotes(original) === queueEditPreservesEncodedQuotes
++              ) {
++                // 旧被控端无 update-content:附件与 quote metadata 都不变、文本非空时
++                // 才退回 update-text。空文本不降级——旧端 update-text 对空文本静默 no-op,会造成"看似
++                // 保存成功、队列还是旧文案"的假成功(review P2)。降级本身失败(弱网两次
++                // RPC 之间断连)与其余失败分支对称:先还原编辑文本再抛,不许静默丢字
++                // (review P1)。
++                try {
++                  const projection = await maker.input.updateText(sessionId, editingQueueItem.clientId, text);
++                  applyProjection(projection);
++                } catch (fallbackErr) {
++                  restoreQueueEditDraftAfterFailure();
++                  throw fallbackErr;
++                }
++              } else if (isChannelNotAllowedError(err)) {
++                setError('电脑端版本过旧,还不支持安全修改排队引用、附件或清空文本。请升级电脑端,或仅修改普通文字。');
++                restoreQueueEditDraftAfterFailure();
++                return false;
++              } else {
++                restoreQueueEditDraftAfterFailure();
++                throw err;
+               }
+-            } else if (isChannelNotAllowedError(err)) {
+-              setError('电脑端版本过旧,还不支持安全修改排队引用、附件或清空文本。请升级电脑端,或仅修改普通文字。');
+-              restoreDraftAfterFailure();
+-              return;
+-            } else {
+-              restoreDraftAfterFailure();
+-              throw err;
+             }
++            return true;
++          });
++        })();
++        queueEditSaveInFlightRef.current = save;
++        try {
++          await save;
++        } catch (err) {
++          restoreQueueEditDraftAfterFailure();
++          if (
++            queueEditSaveOwnerRef.current === lockOwner
++            && queueEditingRef.current?.clientId === editingQueueItem.clientId
++          ) {
++            queueEditSaveOwnerRef.current = null;
++            queueEditLockOwnerRef.current = lockReady
++              ? lockOwner
++              : acquireQueueEditLock(null, editingQueueItem.clientId, setQueueEditLock);
+           }
++          throw err;
+         } finally {
+-          settleSave?.();
+-          queueEditSaveInFlightRef.current = null;
++          if (queueEditSaveInFlightRef.current === save) queueEditSaveInFlightRef.current = null;
++        }
++        if (!editSaved) {
++          if (
++            queueEditSaveOwnerRef.current === lockOwner
++            && queueEditingRef.current?.clientId === editingQueueItem.clientId
++          ) {
++            queueEditSaveOwnerRef.current = null;
++            queueEditLockOwnerRef.current = lockOwner;
++          }
++          return;
++        }
++        if (queueEditSaveOwnerRef.current === lockOwner) {
++          queueEditSaveOwnerRef.current = null;
+         }
+         // 已保存进队列的附件从相册勾选/预览映射摘除(同正常发送路径的差集清理),
+         // 否则恢复 stash 后相册面板仍显示"已附加"角标。
+@@ -3787,16 +3848,9 @@ export default function SessionScreen() {
+         setAttachmentPreviews((current) => Object.fromEntries(
+           Object.entries(current).filter(([attachmentId]) => !savedAttachmentIds.has(attachmentId)),
+         ));
+-        // 成功:退出编辑态 + 恢复 stash(cancelQueueEdit 会把 stash 写回 composer)。
+-        // RPC 在途期间用户可能已切到另一条的编辑(beginQueueEdit 切换路径已解锁并
+-        // 回收过本条的编辑现场):此时不动新的编辑会话,只幂等补一次本条的解锁
+-        // (review P1)。
++        // 成功:锁已由 commitQueueEdit 释放,退出编辑态并恢复 stash。
+         if (queueEditingRef.current?.clientId === editingQueueItem.clientId) {
+           cancelQueueEdit();
+-        } else {
+-          void maker.input.setEditLock(sessionId, editingQueueItem.clientId, false)
+-            .then(applyProjection)
+-            .catch(() => undefined);
+         }
+         voiceDictionaryLearningTrackerRef.current?.flush();
+         return;
+@@ -4240,10 +4294,11 @@ export default function SessionScreen() {
+   };
+ 
+   const setQueueEditLock = useCallback((clientId: string, locked: boolean) => {
+-    void maker.input.setEditLock(sessionId, clientId, locked)
++    return maker.input.setEditLock(sessionId, clientId, locked)
+       .then(applyProjection)
+       .catch((err) => {
+         setError(formatRemoteError(err));
++        throw err;
+       });
+   }, [applyProjection, maker, sessionId]);
+ 
+@@ -4342,9 +4397,6 @@ export default function SessionScreen() {
+     const previous = queueEditingRef.current;
+     if (previous?.clientId === item.clientId) return;
+     if (previous) {
+-      void maker.input.setEditLock(sessionId, previous.clientId, false)
+-        .then(applyProjection)
+-        .catch(() => undefined);
+       discardQueueEditTransientAttachments(previous);
+     }
+     const textState = createQueueEditTextState(item);
+@@ -4369,34 +4421,55 @@ export default function SessionScreen() {
+     attachmentsRef.current = files;
+     setAttachments(files);
+     setAttachmentError(null);
+-    setQueueEditLock(item.clientId, true);
++    queueEditLockOwnerRef.current = acquireQueueEditLock(
++      queueEditLockOwnerRef.current,
++      item.clientId,
++      setQueueEditLock,
++    );
+     composerInputRef.current?.focus();
+   };
+ 
+   /** 放弃排队消息编辑:解锁 + 回收编辑期新增附件 + 恢复进入前的草稿与附件托盘。 */
+-  const cancelQueueEdit = useCallback((opts: { unlock?: boolean } = {}) => {
++  const cancelQueueEdit = useCallback(() => {
+     const editing = queueEditingRef.current;
+     if (!editing) return;
+     queueEditingRef.current = null;
+     setQueueEditing(null);
+-    if (opts.unlock !== false) {
+-      void maker.input.setEditLock(sessionId, editing.clientId, false)
+-        .then(applyProjection)
++    const currentLockOwner = queueEditLockOwnerRef.current;
++    const idleLockOwner = currentLockOwner?.clientId === editing.clientId
++      ? currentLockOwner
++      : null;
++    const currentSaveOwner = queueEditSaveOwnerRef.current;
++    const saveLockOwner = currentSaveOwner?.clientId === editing.clientId
++      ? currentSaveOwner
++      : null;
++    if (idleLockOwner) queueEditLockOwnerRef.current = null;
++    if (saveLockOwner) queueEditSaveOwnerRef.current = null;
++    const lockOwner = saveLockOwner ?? idleLockOwner;
++    const inFlightSave = saveLockOwner ? queueEditSaveInFlightRef.current : null;
++    if (lockOwner) {
++      void releaseQueueEditLockAfter(lockOwner, inFlightSave)
+         .catch(() => undefined);
+     }
+-    discardQueueEditTransientAttachments(editing);
++    if (inFlightSave) {
++      const attachmentsSnapshot = [...attachmentsRef.current];
++      const discard = () => discardQueueEditTransientAttachments(editing, attachmentsSnapshot);
++      void inFlightSave.then(discard, discard);
++    } else {
++      discardQueueEditTransientAttachments(editing);
++    }
+     setComposerDraft(editing.stashedDraft);
+     attachmentsRef.current = [...editing.stashedAttachments];
+     setAttachments([...editing.stashedAttachments]);
+-  }, [applyProjection, discardQueueEditTransientAttachments, maker, sessionId, setComposerDraft]);
++  }, [discardQueueEditTransientAttachments, setComposerDraft]);
+ 
+   // 编辑中的条目从队列消失(被远端发出/删除)→ 原文已不可改,自动退出编辑并恢复
+-  // stash。条目已不存在,无锁可解(unlock: false)。
++  // stash。即便加锁请求仍在途也要排队释放,避免留下孤儿锁。
+   useEffect(() => {
+     const editing = queueEditing;
+     if (!editing) return;
+     if (!inputProjection.pendingQueue.some((item) => item.clientId === editing.clientId)) {
+-      cancelQueueEdit({ unlock: false });
++      cancelQueueEdit();
+     }
+   }, [cancelQueueEdit, inputProjection.pendingQueue, queueEditing]);
+ 
+diff --git a/apps/mobile/e2e/maestro/queue.yaml b/apps/mobile/e2e/maestro/queue.yaml
+index c12008f4014eaec9cc9d48a80740e70dec7857cd..d926eb3f8cf7d465075628f820c2c4ec4fe3f4af 100644
+--- a/apps/mobile/e2e/maestro/queue.yaml
++++ b/apps/mobile/e2e/maestro/queue.yaml
+@@ -19,6 +19,55 @@ appId: ${APP_ID}
+     visible:
+       id: "session.queueEditBar"
+     timeout: 10000
++- tapOn:
++    id: "session.composerInput"
++- eraseText
++- inputText: "First queue edit"
++- hideKeyboard
++- tapOn:
++    id: "session.sendButton"
++- extendedWaitUntil:
++    notVisible:
++      id: "session.queueEditBar"
++    timeout: 10000
++- tapOn:
++    id: "queue.inline.bubble.1"
++- extendedWaitUntil:
++    visible:
++      id: "queue.inline.actions.1"
++    timeout: 10000
++- tapOn:
++    id: "queue.inline.edit.1"
++- extendedWaitUntil:
++    visible:
++      id: "session.queueEditBar"
++    timeout: 10000
++- tapOn:
++    id: "session.composerInput"
++- eraseText
++- inputText: "Second queue edit"
++- hideKeyboard
++- tapOn:
++    id: "session.sendButton"
++- extendedWaitUntil:
++    visible: "Second queue edit"
++    timeout: 10000
++- extendedWaitUntil:
++    notVisible:
++      id: "session.queueEditBar"
++    timeout: 10000
++- tapOn:
++    id: "queue.inline.bubble.1"
++- extendedWaitUntil:
++    visible:
++      id: "queue.inline.actions.1"
++    timeout: 10000
++- tapOn:
++    id: "queue.inline.edit.1"
++- extendedWaitUntil:
++    visible:
++      id: "session.queueEditBar"
++    timeout: 10000
+ - tapOn:
+     id: "session.queueEditCancel"
+ - extendedWaitUntil:
+diff --git a/apps/mobile/src/__tests__/queueEditLifecycle.test.ts b/apps/mobile/src/__tests__/queueEditLifecycle.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2a938730b9b504d14fd0838548fb7abd791cd2f3
+--- /dev/null
++++ b/apps/mobile/src/__tests__/queueEditLifecycle.test.ts
+@@ -0,0 +1,221 @@
++import { describe, expect, it } from 'vitest';
++import {
++  acquireQueueEditLock,
++  commitQueueEdit,
++  releaseQueueEditLock,
++  releaseQueueEditLockAfter,
++} from '@/session/queueEditLifecycle';
++
++function deferred(): { promise: Promise<void>; resolve(): void } {
++  let resolve!: () => void;
++  const promise = new Promise<void>((done) => {
++    resolve = done;
++  });
++  return { promise, resolve };
++}
++
++describe('queueEditLifecycle', () => {
++  it('waits for the remote edit lock before updating and releasing it', async () => {
++    const lockReady = deferred();
++    const calls: string[] = [];
++    const owner = acquireQueueEditLock(null, 'q-1', async (_clientId, locked) => {
++      calls.push(locked ? 'lock' : 'unlock');
++      if (locked) await lockReady.promise;
++    });
++
++    const committed = commitQueueEdit(owner, () => {
++      calls.push('update');
++      return true;
++    });
++    await Promise.resolve();
++    expect(calls).toEqual(['lock']);
++
++    lockReady.resolve();
++    await committed;
++    expect(calls).toEqual(['lock', 'update', 'unlock']);
++  });
++
++  it('supports editing the same queued message twice without retaining the first lock', async () => {
++    const calls: string[] = [];
++    const setLock = (clientId: string, locked: boolean) => {
++      calls.push(`${clientId}:${locked ? 'lock' : 'unlock'}`);
++    };
++
++    const first = acquireQueueEditLock(null, 'q-1', setLock);
++    await commitQueueEdit(first, () => {
++      calls.push('first:update');
++      return true;
++    });
++    const second = acquireQueueEditLock(null, 'q-1', setLock);
++    await commitQueueEdit(second, () => {
++      calls.push('second:update');
++      return true;
++    });
++
++    expect(calls).toEqual([
++      'q-1:lock',
++      'first:update',
++      'q-1:unlock',
++      'q-1:lock',
++      'second:update',
++      'q-1:unlock',
++    ]);
++  });
++
++  it('waits for a pending lock request before a fast cancel releases it', async () => {
++    const lockReady = deferred();
++    const calls: string[] = [];
++    const owner = acquireQueueEditLock(null, 'q-1', async (_clientId, locked) => {
++      calls.push(locked ? 'lock' : 'unlock');
++      if (locked) await lockReady.promise;
++    });
++
++    const released = releaseQueueEditLock(owner);
++    await Promise.resolve();
++    expect(calls).toEqual(['lock']);
++
++    lockReady.resolve();
++    await released;
++    expect(calls).toEqual(['lock', 'unlock']);
++  });
++
++  it('does not update when the remote lock request fails', async () => {
++    const lockError = new Error('lock failed');
++    const calls: string[] = [];
++    const owner = acquireQueueEditLock(null, 'q-1', async (_clientId, locked) => {
++      calls.push(locked ? 'lock' : 'unlock');
++      if (locked) throw lockError;
++    });
++
++    await expect(commitQueueEdit(owner, () => {
++      calls.push('update');
++      return true;
++    })).rejects.toBe(lockError);
++    expect(calls).toEqual(['lock']);
++
++    await expect(releaseQueueEditLock(owner)).resolves.toBeUndefined();
++    expect(calls).toEqual(['lock', 'unlock']);
++  });
++
++  it('rejects the save when releasing the remote lock fails', async () => {
++    const unlockError = new Error('unlock failed');
++    const calls: string[] = [];
++    const owner = acquireQueueEditLock(null, 'q-1', async (_clientId, locked) => {
++      calls.push(locked ? 'lock' : 'unlock');
++      if (!locked) throw unlockError;
++    });
++
++    await expect(commitQueueEdit(owner, () => {
++      calls.push('update');
++      return true;
++    })).rejects.toBe(unlockError);
++    expect(calls).toEqual(['lock', 'update', 'unlock']);
++  });
++
++  it('keeps the lock when the queued message update fails', async () => {
++    const updateError = new Error('update failed');
++    const calls: string[] = [];
++    const owner = acquireQueueEditLock(null, 'q-1', (_clientId, locked) => {
++      calls.push(locked ? 'lock' : 'unlock');
++    });
++
++    await expect(commitQueueEdit(owner, () => {
++      calls.push('update');
++      throw updateError;
++    })).rejects.toBe(updateError);
++    expect(calls).toEqual(['lock', 'update']);
++
++    await releaseQueueEditLock(owner);
++    expect(calls).toEqual(['lock', 'update', 'unlock']);
++  });
++
++  it('keeps the lock when the queued message update is declined', async () => {
++    const calls: string[] = [];
++    const owner = acquireQueueEditLock(null, 'q-1', (_clientId, locked) => {
++      calls.push(locked ? 'lock' : 'unlock');
++    });
++
++    await expect(commitQueueEdit(owner, () => {
++      calls.push('update');
++      return false;
++    })).resolves.toBe(false);
++    expect(calls).toEqual(['lock', 'update']);
++
++    await releaseQueueEditLock(owner);
++    expect(calls).toEqual(['lock', 'update', 'unlock']);
++  });
++
++  it('continues switching messages after a failed lock is compensated', async () => {
++    const calls: string[] = [];
++    const setLock = async (clientId: string, locked: boolean) => {
++      calls.push(`${clientId}:${locked ? 'lock' : 'unlock'}`);
++      if (clientId === 'q-1' && locked) throw new Error('lock failed');
++    };
++    const first = acquireQueueEditLock(null, 'q-1', setLock);
++    const second = acquireQueueEditLock(first, 'q-2', setLock);
++
++    await expect(second.ready).resolves.toBeUndefined();
++    expect(calls).toEqual(['q-1:lock', 'q-1:unlock', 'q-2:lock']);
++  });
++
++  it('releases a failed save after cancel waits for it to settle', async () => {
++    let rejectUpdate!: (error: Error) => void;
++    const update = new Promise<boolean>((_resolve, reject) => {
++      rejectUpdate = reject;
++    });
++    const updateStarted = deferred();
++    const calls: string[] = [];
++    const owner = acquireQueueEditLock(null, 'q-1', (_clientId, locked) => {
++      calls.push(locked ? 'lock' : 'unlock');
++    });
++    const save = commitQueueEdit(owner, () => {
++      calls.push('update');
++      updateStarted.resolve();
++      return update;
++    });
++    const release = releaseQueueEditLockAfter(owner, save);
++
++    await updateStarted.promise;
++    expect(calls).toEqual(['lock', 'update']);
++
++    const updateError = new Error('update failed');
++    rejectUpdate(updateError);
++    await expect(save).rejects.toBe(updateError);
++    await expect(release).resolves.toBeUndefined();
++    expect(calls).toEqual(['lock', 'update', 'unlock']);
++  });
++
++  it('coalesces save and cleanup unlocks after a successful update', async () => {
++    const calls: string[] = [];
++    const owner = acquireQueueEditLock(null, 'q-1', (_clientId, locked) => {
++      calls.push(locked ? 'lock' : 'unlock');
++    });
++    const save = commitQueueEdit(owner, () => {
++      calls.push('update');
++      return true;
++    });
++
++    await Promise.all([
++      save,
++      releaseQueueEditLockAfter(owner, save),
++    ]);
++    expect(calls).toEqual(['lock', 'update', 'unlock']);
++  });
++
++  it('retries an unlock that failed while the save was finishing', async () => {
++    let unlockAttempts = 0;
++    const calls: string[] = [];
++    const owner = acquireQueueEditLock(null, 'q-1', (_clientId, locked) => {
++      calls.push(locked ? 'lock' : 'unlock');
++      if (!locked && unlockAttempts++ === 0) throw new Error('unlock failed');
++    });
++    const save = commitQueueEdit(owner, () => {
++      calls.push('update');
++      return true;
++    });
++
++    await expect(releaseQueueEditLockAfter(owner, save)).resolves.toBeUndefined();
++    await expect(save).rejects.toThrow('unlock failed');
++    expect(calls).toEqual(['lock', 'update', 'unlock', 'unlock']);
++  });
++});
+diff --git a/apps/mobile/src/session/queueEditLifecycle.ts b/apps/mobile/src/session/queueEditLifecycle.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7b33f4d417a776bb12599be766fa3aeda3233cd8
+--- /dev/null
++++ b/apps/mobile/src/session/queueEditLifecycle.ts
+@@ -0,0 +1,74 @@
++export type QueueEditLockCallback = (clientId: string, locked: boolean) => void | Promise<void>;
++
++/** 持有一次队列编辑锁的远程调用与完成状态。 */
++export interface QueueEditLockOwner {
++  callback?: QueueEditLockCallback;
++  clientId: string;
++  ready: Promise<void>;
++}
++
++const releasePromises = new WeakMap<QueueEditLockOwner, Promise<void>>();
++
++/**
++ * 先释放上一条消息的锁，再申请当前消息的锁，避免远程请求乱序留下孤儿锁。
++ */
++export function acquireQueueEditLock(
++  owner: QueueEditLockOwner | null,
++  clientId: string,
++  callback?: QueueEditLockCallback,
++): QueueEditLockOwner {
++  if (owner?.clientId === clientId) return owner;
++  const previousRelease = owner ? releaseQueueEditLock(owner) : Promise.resolve();
++  const ready = previousRelease.then(async () => {
++    await callback?.(clientId, true);
++  });
++  // 锁错误仍由后续 commit / release 读取；先挂观察者避免用户停留在编辑态时出现未处理拒绝。
++  void ready.catch(() => undefined);
++  return { callback, clientId, ready };
++}
++
++/** 申请锁的请求结束后再幂等释放；失败后允许后续调用重试解锁。 */
++export function releaseQueueEditLock(owner: QueueEditLockOwner): Promise<void> {
++  const current = releasePromises.get(owner);
++  if (current) return current;
++  const release = (async () => {
++    try {
++      await owner.ready;
++    } catch {
++      // 远端可能已落锁但响应丢失，仍需补偿解锁；原加锁错误已由调用方展示。
++    }
++    await owner.callback?.(owner.clientId, false);
++  })();
++  releasePromises.set(owner, release);
++  void release.catch(() => {
++    if (releasePromises.get(owner) === release) releasePromises.delete(owner);
++  });
++  return release;
++}
++
++/** 保存落定后再释放，避免取消或卸载让解锁请求超车更新。 */
++export async function releaseQueueEditLockAfter(
++  owner: QueueEditLockOwner,
++  pending: Promise<unknown> | null,
++): Promise<void> {
++  if (pending) {
++    try {
++      await pending;
++    } catch {
++      // 保存失败仍需释放；原始错误由保存调用方处理。
++    }
++  }
++  await releaseQueueEditLock(owner);
++}
++
++/** 保存必须夹在加锁与解锁之间；只有确认更新成功才允许释放锁。 */
++export async function commitQueueEdit(
++  owner: QueueEditLockOwner,
++  update: () => boolean | Promise<boolean>,
++): Promise<boolean> {
++  await owner.ready;
++  const updated = await update();
++  if (!updated) return false;
++  await releaseQueueEditLock(owner);
++  return true;
++}

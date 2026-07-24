@@ -371,11 +371,11 @@ const WAKE_BACKGROUND_TASK_TYPES: ReadonlySet<string> = new Set(['local_agent', 
 // (见 apps/desktop/src/main/maker-host/catalog-to-descriptors.ts)。
 
 const CLAUDE_EFFORTS: EffortDescriptor[] = [
-  { id: 'low',    displayName: 'Low',    description: 'Fast responses with minimal reasoning' },
-  { id: 'medium', displayName: 'Medium', description: 'Balanced reasoning depth' },
-  { id: 'high',   displayName: 'High',   description: 'Deeper reasoning for harder tasks' },
-  { id: 'xhigh',  displayName: 'Extra',  description: 'Extended reasoning (Opus only)' },
-  { id: 'max',    displayName: 'Max',    description: 'Maximum reasoning budget' },
+  { id: 'low',    displayName: 'Low',        description: 'Most efficient, with lower token use' },
+  { id: 'medium', displayName: 'Medium',     description: 'Balanced capability and token use' },
+  { id: 'high',   displayName: 'High',       description: 'High capability for complex work' },
+  { id: 'xhigh',  displayName: 'Extra High', description: 'Extended capability for long-horizon work' },
+  { id: 'max',    displayName: 'Max',        description: 'Maximum capability with unconstrained token use' },
 ];
 
 // 注: plan 不再作为权限档暴露 —— 计划模式已独立成 Capabilities.planMode 一级开关

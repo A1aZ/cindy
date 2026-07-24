@@ -166,16 +166,87 @@ describe('anthropic 发现条目的 cindyModelMeta 元数据基线', () => {
     setAnthropicDiscoveredModels([]);
   });
 
-  it('基线覆盖名字与排序:上游家族级命名("Fable")归位产品命名("Fable 5"),按 meta sortOrder 重排', () => {
-    setActiveCatalog(BUNDLED_CATALOG); // bundled cindyModelMeta:claude-fable-5 → "Fable 5" (sortOrder 0)
+  it('基线统一 Anthropic 名字与排序,新模型不透传 Claude 前缀', () => {
+    setActiveCatalog(BUNDLED_CATALOG);
     setAnthropicDiscoveredModels([
-      anthro('claude-opus-4-8', 'Opus', 0),
-      anthro('claude-fable-5', 'Fable', 1),
+      anthro('claude-opus-5', 'Claude Opus 5', 0),
+      anthro('claude-sonnet-5', 'Claude Sonnet 5', 1),
+      anthro('claude-fable-5', 'Claude Fable 5', 2),
+      anthro('claude-opus-4-8', 'Claude Opus 4.8', 3),
+      anthro('claude-opus-4-7', 'Claude Opus 4.7', 4),
+      anthro('claude-sonnet-4-6', 'Claude Sonnet 4.6', 5),
+      anthro('claude-opus-4-6', 'Claude Opus 4.6', 6),
+      anthro('claude-opus-4-5', 'Claude Opus 4.5', 7),
+      anthro('claude-haiku-4-5', 'Claude Haiku 4.5', 8),
+      anthro('claude-sonnet-4-5', 'Claude Sonnet 4.5', 9),
     ]);
     expect(anthropicList().map((m) => [m.id, m.name])).toEqual([
+      ['claude-opus-5', 'Opus 5'],
       ['claude-fable-5', 'Fable 5'],
       ['claude-opus-4-8', 'Opus 4.8'],
+      ['claude-opus-4-7', 'Opus 4.7'],
+      ['claude-opus-4-6', 'Opus 4.6'],
+      ['claude-opus-4-5', 'Opus 4.5'],
+      ['claude-sonnet-5', 'Sonnet 5'],
+      ['claude-sonnet-4-6', 'Sonnet 4.6'],
+      ['claude-sonnet-4-5', 'Sonnet 4.5'],
+      ['claude-haiku-4-5', 'Haiku 4.5'],
     ]);
+    expect(Object.fromEntries([
+      'claude-fable-5',
+      'claude-opus-5',
+      'claude-opus-4-8',
+      'claude-opus-4-7',
+      'claude-opus-4-6',
+      'claude-opus-4-5',
+      'claude-sonnet-5',
+      'claude-sonnet-4-6',
+      'claude-sonnet-4-5',
+      'claude-haiku-4-5',
+    ].map((id) => [id, getCindyModelEffortBaseline(id)]))).toEqual({
+      'claude-fable-5': {
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultEffort: 'high',
+      },
+      'claude-opus-5': {
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultEffort: 'high',
+      },
+      'claude-opus-4-8': {
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultEffort: 'high',
+      },
+      'claude-opus-4-7': {
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultEffort: 'high',
+      },
+      'claude-opus-4-6': {
+        efforts: ['low', 'medium', 'high', 'max'],
+        defaultEffort: 'high',
+      },
+      'claude-opus-4-5': {
+        efforts: ['low', 'medium', 'high'],
+        defaultEffort: 'high',
+      },
+      'claude-sonnet-5': {
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultEffort: 'high',
+      },
+      'claude-sonnet-4-6': {
+        efforts: ['low', 'medium', 'high', 'max'],
+        defaultEffort: 'high',
+      },
+      'claude-sonnet-4-5': {
+        efforts: [],
+        defaultEffort: null,
+      },
+      'claude-haiku-4-5': {
+        efforts: [],
+        defaultEffort: null,
+      },
+    });
+    expect(anthropicList().find((m) => m.id === 'claude-opus-4-5')?.defaultEnabled).toBe(false);
+    expect(anthropicList().find((m) => m.id === 'claude-sonnet-4-5')?.defaultEnabled).toBe(false);
   });
 
   it('active overlay 不覆盖能力;发现模块可单独读取 effort 基线', () => {

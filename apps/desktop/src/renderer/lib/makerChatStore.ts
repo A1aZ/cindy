@@ -30,8 +30,12 @@ import type {
   AgentInputProjection,
   AgentInputQueuedMessage,
   AgentInputSessionRef,
+  AgentInputReference,
 } from '../../shared/agentInputQueue';
-import { reconcileSessionRefsForText } from '../../shared/agentInputQueue';
+import {
+  getAgentFacingText,
+  reconcileSessionRefsForText,
+} from '../../shared/agentInputQueue';
 import { providerSecretStorageKey } from '../../shared/providerSecrets';
 import { GHOST_HOST_NOTICE_KEYS } from '../../shared/ghost';
 import * as messageService from '@/lib/messageService';
@@ -193,6 +197,8 @@ export interface ChatMessage {
   clientId: string;
   /** chat-text-quote:开头 blockquote 为引用功能产出(渲染判据),见 imageRef.ts。 */
   quotesEncoded?: boolean;
+  /** Hidden semantic projection metadata for rich user-message references. */
+  agentReferences?: AgentInputReference[];
   /** Local display metadata; the Agent receives `content` without markers. */
   pastedTextRanges?: PastedTextRange[];
   /** Exact slash ranges; empty means the composer confirmed no slash command. */
@@ -3165,6 +3171,7 @@ function initGlobalListeners(): void {
                     retryFiles,
                     retryMentions,
                     {
+                      agentReferences: lastUser?.agentReferences,
                       pastedTextRanges: lastUser?.pastedTextRanges,
                       slashCommandRanges: lastUser?.slashCommandRanges,
                       authRetryPersistOnProjectionError: {
@@ -5195,6 +5202,7 @@ function buildQueuedMessage(
     vendorOptions?: Record<string, unknown>;
     /** chat-text-quote:text 开头 blockquote 为引用功能拼接产出(渲染判据)。 */
     quotesEncoded?: boolean;
+    agentReferences?: AgentInputReference[];
     pastedTextRanges?: PastedTextRange[];
     slashCommandRanges?: SlashCommandRange[];
     authRetryPersistOnProjectionError?: {
@@ -5226,6 +5234,7 @@ function buildQueuedMessage(
     isStreaming: false,
     createdAt: new Date().toISOString(),
     ...(opts?.quotesEncoded === true && { quotesEncoded: true }),
+    ...(opts?.agentReferences?.length && { agentReferences: opts.agentReferences }),
     ...(opts?.pastedTextRanges?.length && { pastedTextRanges: opts.pastedTextRanges }),
     ...(opts?.slashCommandRanges !== undefined && {
       slashCommandRanges: opts.slashCommandRanges,
@@ -5248,6 +5257,8 @@ function buildQueuedMessage(
     opts?.quotesEncoded === true,
     opts?.pastedTextRanges,
     opts?.slashCommandRanges,
+    [],
+    opts?.agentReferences,
   );
 
   return {
@@ -5262,6 +5273,7 @@ function buildQueuedMessage(
     files: serializedFiles,
     mentions,
     ...(sessionRefs.length > 0 ? { sessionRefs } : {}),
+    agentReferences: opts?.agentReferences,
     chatMessage,
     createOpts,
     userName: currentUserName,
@@ -5511,6 +5523,7 @@ type SendMessageOpts = {
   vendorOptions?: Record<string, unknown>;
   /** 本条消息正文前缀含「选中引用」编码块,渲染侧据此启用胶囊化解析。 */
   quotesEncoded?: boolean;
+  agentReferences?: AgentInputReference[];
   pastedTextRanges?: PastedTextRange[];
   slashCommandRanges?: SlashCommandRange[];
   authRetryPersistOnProjectionError?: {
@@ -5628,12 +5641,12 @@ async function sendMessageCore(
     // 用 Claude haiku 起标题:纯 Codex 用户(无 Claude 鉴权)会 oneShot 失败 →
     // fallback 原话,表现为"Codex 会话标题没有智能总结"。current.agentKind 已是
     // maker 格式('claude-code' | 'codex'),直接透传。起名走宽限期 + 后台覆盖。
-    scheduleAutoName(sessionId, text, current.agentKind);
+    scheduleAutoName(sessionId, getAgentFacingText(queued), current.agentKind);
   } else {
     // fork-auto-name: fork 出来的会话带着占位标题 "[Fork] <源标题>"，在用户
     // 于新会话里发出第一句话时按同款流程基于这句话改名（fork 会话天然带历史
     // 消息，isFirstMessage=false 走不到上面的分支）。
-    maybeAutoNameForkedSession(sessionId, text);
+    maybeAutoNameForkedSession(sessionId, getAgentFacingText(queued));
   }
 
   // 视觉连续性: agent 空闲 + 队列为空时, main coordinator 会立即派发这条(见
@@ -5740,6 +5753,7 @@ function steerMessage(
   opts?: {
     vendorOptions?: Record<string, unknown>;
     quotesEncoded?: boolean;
+    agentReferences?: AgentInputReference[];
     pastedTextRanges?: PastedTextRange[];
     slashCommandRanges?: SlashCommandRange[];
   },
@@ -5803,6 +5817,7 @@ function steerMessageCore(
   opts?: {
     vendorOptions?: Record<string, unknown>;
     quotesEncoded?: boolean;
+    agentReferences?: AgentInputReference[];
     pastedTextRanges?: PastedTextRange[];
     slashCommandRanges?: SlashCommandRange[];
   },
@@ -5872,6 +5887,7 @@ async function resendBlockedMessage(
   newText: string,
   opts?: {
     quotesEncoded?: boolean;
+    agentReferences?: AgentInputReference[];
     pastedTextRanges?: PastedTextRange[];
     slashCommandRanges?: SlashCommandRange[];
   },
@@ -5901,9 +5917,15 @@ async function resendBlockedMessage(
         row.workingDir,
         msg.retryFiles,
         msg.retryMentions,
-        opts?.quotesEncoded || opts?.pastedTextRanges?.length || opts?.slashCommandRanges !== undefined
+        opts?.quotesEncoded ||
+        opts?.agentReferences?.length ||
+        opts?.pastedTextRanges?.length ||
+        opts?.slashCommandRanges !== undefined
           ? {
               ...(opts?.quotesEncoded ? { quotesEncoded: true } : {}),
+              ...(opts?.agentReferences?.length
+                ? { agentReferences: opts.agentReferences }
+                : {}),
               ...(opts?.pastedTextRanges?.length ? { pastedTextRanges: opts.pastedTextRanges } : {}),
               ...(opts?.slashCommandRanges !== undefined ? { slashCommandRanges: opts.slashCommandRanges } : {}),
             }
@@ -7906,6 +7928,9 @@ function mapServerMessages(serverMsgs: Message[]): ChatMessage[] {
         ...(parsed.images.length > 0 && { images: parsed.images }),
         ...(parsed.files.length > 0 && { files: parsed.files }),
         ...(parsed.quotesEncoded === true && { quotesEncoded: true }),
+        ...(parsed.agentReferences?.length && {
+          agentReferences: parsed.agentReferences,
+        }),
         ...(parsed.pastedTextRanges?.length && {
           pastedTextRanges: parsed.pastedTextRanges,
         }),

@@ -35,6 +35,7 @@ import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { BrowserWindow, ipcMain } from 'electron';
 import type { AgentMeta } from '../../renderer/lib/ccAgent.types';
 import {
+  getAgentFacingText,
   serializeSessionReferencePayload,
   type AgentInputCreateOpts,
   type AgentInputQueuedMessage,
@@ -332,6 +333,7 @@ import {
   type MakerSessionAgentSwitchHandlerDeps,
 } from './sessionAgentSwitchHandler.js';
 import { prependHandoffToUserMessage } from './agentHandoff.js';
+import { hydrateQueuedAgentReferences } from './agentInputReferences.js';
 import { agentHandoffPending } from './agentHandoffPendingSingleton.js';
 import { type MakerSessionCreateOpts, withCreateSessionStderr } from './sessionRequest.js';
 import { persistAndHydrateSessionProvider } from './sessionProviderBootstrap.js';
@@ -6284,7 +6286,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     // 恢复先于入队:普通新输入保持 FIFO；「继续任务」由 coordinator 在完整旧队列
     // 恢复后再明确插到队首，避免恢复竞态把它重新压到后面。
     await inputCoordinator.ensureQueueRestored(sid).catch(() => undefined);
-    const queued = (await materializeQueuedOssAttachments(sid, requireQueuedMessage(item))) as AgentInputQueuedMessage;
+    const queuedWithAttachments = (await materializeQueuedOssAttachments(
+      sid,
+      requireQueuedMessage(item),
+    )) as AgentInputQueuedMessage;
+    const queued = await hydrateQueuedAgentReferences(queuedWithAttachments);
     let shouldAutoTitle = false;
     if (isDeviceLinkInvoke() && queued.text.trim()) {
       try {
@@ -6312,7 +6318,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       scheduleEligibleDeviceLinkAutoTitle({
         maker,
         sessionId: sid,
-        text: queued.text,
+        text: getAgentFacingText(queued),
         agentKind: queued.createOpts.agentKind,
       });
     }
@@ -6342,7 +6348,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     const steerOpts = opts && typeof opts === 'object'
       ? opts as { removeFromQueue?: boolean; touchUserSend?: boolean }
       : undefined;
-    const queued = (await materializeQueuedOssAttachments(
+    const queuedWithAttachments = (await materializeQueuedOssAttachments(
       sid,
       requireQueuedMessage(item, {
         // A device-link projection intentionally omits the trusted snapshot.
@@ -6351,6 +6357,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
         allowMissingTrustedContexts: isDeviceLinkInvoke() && steerOpts?.removeFromQueue === true,
       }),
     )) as AgentInputQueuedMessage;
+    const queued = await hydrateQueuedAgentReferences(queuedWithAttachments);
     return inputCoordinator.steer(
       sid,
       queued,
@@ -6445,7 +6452,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     const cid = requireClientId(clientId);
     const remote = isDeviceLinkInvoke();
     const parsed = requireQueuedMessage(item);
-    const queued = (await materializeQueuedOssAttachments(sid, parsed)) as AgentInputQueuedMessage;
+    const queuedWithAttachments = (await materializeQueuedOssAttachments(
+      sid,
+      parsed,
+    )) as AgentInputQueuedMessage;
+    const queued = await hydrateQueuedAgentReferences(queuedWithAttachments);
     // 旧 device-link update-content 调用没有 side-channel sessionRefs；显式
     // 传空数组，避免 updateQueuedMessageContent 从完整文本重新解析控制端坐标。
     const update = remote && parsed.sessionRefs === undefined

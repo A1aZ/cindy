@@ -64,6 +64,15 @@ describe('resolveContextSheetMediaAssetForUpload', () => {
     expect(imageManipulator.manipulate).not.toHaveBeenCalled();
   });
 
+  it('Android 非 ERR_UNABLE_TO_LOAD 错误继续抛出,不延后真实故障', async () => {
+    const failure = Object.assign(new Error('Media library internal failure'), {
+      code: 'ERR_INTERNAL',
+    });
+    mediaLibrary.getAssetInfoAsync.mockRejectedValue(failure);
+
+    await expect(resolveContextSheetMediaAssetForUpload(asset())).rejects.toBe(failure);
+  });
+
   it('正常路径优先使用 full info 的 localUri 与尺寸', async () => {
     mediaLibrary.getAssetInfoAsync.mockResolvedValue({
       localUri: 'file:///storage/emulated/0/Pictures/Screenshot.png',

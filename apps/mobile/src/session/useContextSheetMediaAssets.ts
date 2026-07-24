@@ -169,6 +169,14 @@ const HEIC_JPEG_COMPRESS = 0.9;
  * race 超时后系统下载仍在后台继续,用户重试时大概率已就位,重试即成功。
  */
 const ASSET_INFO_TIMEOUT_MS = 60_000;
+const ANDROID_ASSET_INFO_FALLBACK_ERROR_CODE = 'ERR_UNABLE_TO_LOAD';
+
+function isAndroidAssetInfoFallbackError(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'code' in error
+    && error.code === ANDROID_ASSET_INFO_FALLBACK_ERROR_CODE;
+}
 
 async function getAssetInfoWithTimeout(assetId: string): Promise<MediaLibrary.AssetInfo> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -192,8 +200,9 @@ async function getAssetInfoWithTimeout(assetId: string): Promise<MediaLibrary.As
  * 把相册资产解析成可上传的 file:// 信息。iOS 的 ph:// 不是文件路径,
  * 必须经 getAssetInfoAsync 换 localUri(带 iCloud 下载超时兜底);iOS 拿不到
  * localUri 时直接报错——ph:// 喂给原生上传层只会变成下游玄学失败,就地把
- * 「照片没就位」说清楚;Android 的 full info 可能因未授予媒体位置权限失败,
- * 此时回退列表查询已返回的 content:// 与尺寸(原生上传可读),不为普通附件扩大权限。
+ * 「照片没就位」说清楚;Android 的 full info 可能因未授予媒体位置权限返回
+ * ERR_UNABLE_TO_LOAD,此时回退列表查询已返回的 content:// 与尺寸(原生上传可读),
+ * 不为普通附件扩大权限;其它错误继续抛出,避免把真实故障延后到下游。
  * HEIC / HEIF(iOS 相机默认格式)在这里就地转成 JPEG——附件类型白名单与模型图像
  * 接口都只认 jpeg/png/gif/webp,直接放行 HEIC 会在链路下游变成不可用附件。
  * 转 JPEG 的同一次 manipulate 里顺带把长边压到上传上限(见 mobileImagePreprocess),
@@ -206,7 +215,7 @@ export async function resolveContextSheetMediaAssetForUpload(
   try {
     info = await getAssetInfoWithTimeout(asset.id);
   } catch (error) {
-    if (Platform.OS !== 'android') throw error;
+    if (Platform.OS !== 'android' || !isAndroidAssetInfoFallbackError(error)) throw error;
   }
   const localUri = info?.localUri?.trim();
   if (!localUri && Platform.OS === 'ios') {

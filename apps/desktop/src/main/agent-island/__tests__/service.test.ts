@@ -1769,12 +1769,75 @@ describe('AgentIslandService native publishing', () => {
     service.handleUserPrompt({ sessionId: 'claude-stop', agentKind: 'claude-code' }, 'run again');
     service.handleAgentEvent(
       { sessionId: 'claude-stop', agentKind: 'claude-code' },
-      doneEvent(),
+      { type: 'status', source: 'claude-code', data: { isRunning: true, status: 'Thinking...' } },
+    );
+    service.handleAgentEvent(
+      { sessionId: 'claude-stop', agentKind: 'claude-code' },
+      { type: 'status', source: 'claude-code', data: { isRunning: false, status: 'Done' } },
     );
 
     expect(playSound).toHaveBeenCalledWith(customSound('complete.wav'));
     expect(publish.mock.calls.at(-1)?.[0].sessions[0]).toMatchObject({
       sessionId: 'claude-stop',
+      phase: 'completed',
+    });
+  });
+
+  it('keeps a replacement turn running while ordinary completion tails from the stopped turn drain', async () => {
+    const { AgentIslandService } = await import('../service.js');
+    const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {
+      void state;
+      void frameOrFrames;
+      return true;
+    });
+    const playSound = vi.fn<(sound: AgentIslandSoundChoice) => boolean>(() => true);
+    const service = new AgentIslandService({
+      getMainWindow: () => null,
+      nativeHost: { failed: false, publish, playSound },
+    });
+    syncEnabledForTest(service, publish);
+    service.setSoundSettings({
+      enabled: true,
+      sounds: {
+        ...DEFAULT_AGENT_ISLAND_SOUND_SETTINGS.sounds,
+        start: customSound('start.wav'),
+        complete: customSound('complete.wav'),
+      },
+    });
+    const meta = { sessionId: 'claude-replacement', agentKind: 'claude-code' as const };
+    service.handleUserPrompt(meta, 'first turn');
+    service.handleSessionStopped(meta.sessionId);
+    service.handleUserPrompt(meta, 'replacement turn');
+    playSound.mockClear();
+
+    service.handleAgentEvent(
+      meta,
+      { type: 'status', source: 'claude-code', data: { isRunning: false, status: 'Done' } },
+    );
+    service.handleAgentEvent(
+      meta,
+      { type: 'done', source: 'claude-code', data: { reason: 'turn_interrupted' } },
+    );
+
+    expect(playSound).not.toHaveBeenCalled();
+    expect(publish.mock.calls.at(-1)?.[0].sessions[0]).toMatchObject({
+      sessionId: meta.sessionId,
+      phase: 'running',
+    });
+
+    service.handleAgentEvent(
+      meta,
+      { type: 'status', source: 'claude-code', data: { isRunning: true, status: 'Thinking...' } },
+    );
+    service.handleAgentEvent(
+      meta,
+      { type: 'status', source: 'claude-code', data: { isRunning: false, status: 'Done' } },
+    );
+
+    expect(playSound).toHaveBeenCalledTimes(1);
+    expect(playSound).toHaveBeenCalledWith(customSound('complete.wav'));
+    expect(publish.mock.calls.at(-1)?.[0].sessions[0]).toMatchObject({
+      sessionId: meta.sessionId,
       phase: 'completed',
     });
   });

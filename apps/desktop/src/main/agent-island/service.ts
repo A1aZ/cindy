@@ -225,11 +225,13 @@ export class AgentIslandService {
   private readonly silencedRunClearTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly mutedCompletionSoundSessionIds = new Set<string>();
   private readonly stoppedSessionIds = new Set<string>();
+  private readonly replacementTurnPendingSessionIds = new Set<string>();
   private readonly sessionHadAttentionAtRunStart = new Map<string, boolean>();
   private readonly userPromptRollbackTokens = new Map<string, {
     state: AgentIslandUserPromptRollbackToken;
     attention: { existed: boolean; value: boolean };
     wasStopped: boolean;
+    wasReplacementTurnPending: boolean;
   }>();
   private readonly deferredCompletions = new Map<string, { event: AgentEvent; suppressAttention: boolean }>();
   private readonly deferredRemoteAuthErrors = new Map<string, {
@@ -538,6 +540,7 @@ export class AgentIslandService {
     this.silencedRunHadAttention.clear();
     this.mutedCompletionSoundSessionIds.clear();
     this.stoppedSessionIds.clear();
+    this.replacementTurnPendingSessionIds.clear();
     this.sessionHadAttentionAtRunStart.clear();
     this.userPromptRollbackTokens.clear();
     this.deferredCompletions.clear();
@@ -583,8 +586,17 @@ export class AgentIslandService {
     if (isCancelledTerminalEvent(event)) return;
     // Provider aborts can drain ordinary status/done events after the user has
     // already stopped the turn. Keep those tails from recreating a completed
-    // island entry; the next accepted user prompt is the only restart boundary.
+    // island entry until a replacement prompt begins the restart handshake.
     if (this.stoppedSessionIds.has(hydrated.sessionId)) return;
+    // Claude Code queues a new turn's running status behind any remaining
+    // completion tail from the interrupted turn. Keep completion suppressed
+    // after the replacement prompt until that FIFO start marker arrives.
+    if (this.replacementTurnPendingSessionIds.has(hydrated.sessionId)) {
+      if (isCompletionDoneEvent(event)) return;
+      if (isRunningStatusEvent(event)) {
+        this.replacementTurnPendingSessionIds.delete(hydrated.sessionId);
+      }
+    }
     if (this.deferredRemoteAuthErrors.has(hydrated.sessionId)) {
       // The failed turn's status Done/done tail is bookkeeping, not a user-visible
       // completion. A running status proves the replacement turn was accepted.
@@ -684,7 +696,11 @@ export class AgentIslandService {
     const receivedAt = Date.now();
     const hydrated = this.hydrateMeta(meta);
     const wasStopped = this.stoppedSessionIds.has(hydrated.sessionId);
-    this.stoppedSessionIds.delete(hydrated.sessionId);
+    const wasReplacementTurnPending = this.replacementTurnPendingSessionIds.has(hydrated.sessionId);
+    if (wasStopped) {
+      this.stoppedSessionIds.delete(hydrated.sessionId);
+      this.replacementTurnPendingSessionIds.add(hydrated.sessionId);
+    }
     const rollbackKey = this.userPromptRollbackKey(hydrated.sessionId, debugMeta.clientId);
     if (rollbackKey) {
       this.userPromptRollbackTokens.set(rollbackKey, {
@@ -693,6 +709,7 @@ export class AgentIslandService {
           ? { existed: true, value: this.sessionHadAttentionAtRunStart.get(hydrated.sessionId) ?? false }
           : { existed: false, value: false },
         wasStopped,
+        wasReplacementTurnPending,
       });
     }
     this.clearCompletedSilencedRunForNewActivity(hydrated.sessionId);
@@ -703,6 +720,12 @@ export class AgentIslandService {
     const changed = applyAgentIslandUserPrompt(this.state, hydrated, prompt, receivedAt);
     if (!changed) {
       if (rollbackKey) this.userPromptRollbackTokens.delete(rollbackKey);
+      if (wasStopped) {
+        this.stoppedSessionIds.add(hydrated.sessionId);
+      }
+      if (!wasReplacementTurnPending) {
+        this.replacementTurnPendingSessionIds.delete(hydrated.sessionId);
+      }
       return;
     }
     this.ensureMetadata(hydrated.sessionId);
@@ -728,15 +751,19 @@ export class AgentIslandService {
     } else {
       this.sessionHadAttentionAtRunStart.delete(sessionId);
     }
-    if (snapshot.wasStopped) {
-      this.stoppedSessionIds.add(sessionId);
-    }
+    if (snapshot.wasStopped) this.stoppedSessionIds.add(sessionId);
+    else this.stoppedSessionIds.delete(sessionId);
+    if (snapshot.wasReplacementTurnPending) this.replacementTurnPendingSessionIds.add(sessionId);
+    else this.replacementTurnPendingSessionIds.delete(sessionId);
     this.publish();
   }
 
   handleInteractionRequest(meta: AgentIslandSessionMeta, request: InteractionRequest): void {
     const hydrated = this.hydrateMeta(meta);
-    if (this.stoppedSessionIds.has(hydrated.sessionId)) return;
+    if (
+      this.stoppedSessionIds.has(hydrated.sessionId) ||
+      this.replacementTurnPendingSessionIds.has(hydrated.sessionId)
+    ) return;
     if (request.kind === 'permission') {
       this.permissionRequests.set(request.requestId, { sessionId: hydrated.sessionId, request });
     }
@@ -798,6 +825,7 @@ export class AgentIslandService {
 
   handleSessionClosed(sessionId: string): void {
     this.stoppedSessionIds.delete(sessionId);
+    this.replacementTurnPendingSessionIds.delete(sessionId);
     this.clearSilencedRunForSession(sessionId);
     this.sessionHadAttentionAtRunStart.delete(sessionId);
     for (const key of this.userPromptRollbackTokens.keys()) {
@@ -820,6 +848,7 @@ export class AgentIslandService {
    */
   handleSessionStopped(sessionId: string): void {
     this.stoppedSessionIds.add(sessionId);
+    this.replacementTurnPendingSessionIds.delete(sessionId);
     this.clearSilencedRunForSession(sessionId);
     this.sessionHadAttentionAtRunStart.delete(sessionId);
     for (const key of this.userPromptRollbackTokens.keys()) {

@@ -173,13 +173,13 @@ export function AskUserQuestionPrompt({
   const snapshotButtons = useCallback(() => {
     // Capture a static copy of the current button bar's DOM via a frozen JSX snapshot.
     // This uses the current values at call time, not reactive state.
-    const btnClass = 'rounded-[9999px] px-[20px] py-[8px] text-13 font-medium';
-    const skipClass = cn(btnClass, 'border border-[var(--confirm-btn-secondary-border)] bg-transparent text-[var(--confirm-btn-secondary-text)] transition-colors hover:bg-[var(--confirm-btn-secondary-hover)]');
+    const btnClass = 'rounded-[9999px] px-[20px] py-[8px] text-13 font-medium pointer-events-none';
+    const skipClass = cn(btnClass, 'border border-[var(--confirm-btn-secondary-border)] bg-transparent text-[var(--confirm-btn-secondary-text)]');
     const showNext = isMultiSelect || (existingAnswer !== undefined && !isMultiSelect) || isLastQuestion;
     const nextDisabled = isMultiSelect
       ? selectedLabels.size === 0 && !customInput.trim()
       : existingAnswer === undefined;
-    const nextClass = cn(btnClass, nextDisabled ? 'cursor-not-allowed border border-[var(--border-default)] bg-transparent text-[var(--text-disabled-tertiary)] opacity-50' : 'border border-[var(--confirm-btn-secondary-border)] bg-transparent text-[var(--confirm-btn-secondary-text)] transition-colors hover:bg-[var(--confirm-btn-secondary-hover)]');
+    const nextClass = cn(btnClass, nextDisabled ? 'cursor-not-allowed border border-[var(--border-default)] bg-transparent text-[var(--text-disabled-tertiary)] opacity-50' : 'border border-[var(--confirm-btn-secondary-border)] bg-transparent text-[var(--confirm-btn-secondary-text)]');
 
     buttonsSnapshotRef.current = (
       <>

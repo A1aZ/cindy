@@ -192,8 +192,9 @@ function startupStderrHint(text: string): string | null {
 function sanitizePathsInHint(hint: string): string {
   const basename = (p: string) => p.split(/[/\\]/).pop() ?? p;
   return hint
+    .replace(/(['"])((?:[A-Z]:[/\\]|\/)[^'"]+)\1/g, (_, q, p) => `${q}${basename(p)}${q}`)
     .replace(/[A-Z]:[/\\][^\s'")\]]*/g, basename)
-    .replace(/\/(?:Users|home|tmp|var|opt|app|usr|Library|nix)\/[^\s'")\]]*/gi, basename);
+    .replace(/\/(?:[^\s/'")\]]+\/)+[^\s'")\]]*/g, basename);
 }
 
 type UtilityFork = typeof utilityProcess.fork;
@@ -391,8 +392,10 @@ export class GhostNodeRuntimeBroker {
     return 'off';
   }
 
-  /** resident 档在插件启用/启动时调用；按需档保持零进程。常驻只覆盖主入口。 */
+  /** resident 档在插件启用/启动时调用；按需档保持零进程。常驻只覆盖主入口。
+   *  同时也是 stop() 的对称点:上层完成更新/重启后调用此方法,清除停止标记。 */
   async startResident(ghost: InstalledGhost): Promise<void> {
+    this.stoppedGhosts.delete(ghost.manifest.id);
     if (!ghost.enabled || ghost.manifest.node?.lifecycle !== 'resident') return;
     const entry = await this.ensureWorker(ghost, ghost.manifest.node.entry);
     if (ghost.manifest.node.protocol === 'mcp-stdio') await this.ensureMcpInitialized(entry);
@@ -843,7 +846,6 @@ export class GhostNodeRuntimeBroker {
     if (inflight) return inflight;
     const existing = this.workers.get(key);
     if (existing) return existing;
-    this.stoppedGhosts.delete(ghost.manifest.id);
     const starting = this.startWorkerWithRetry(ghost, entryRel, key);
     this.startingWorkers.set(key, starting);
     try {
@@ -929,6 +931,11 @@ export class GhostNodeRuntimeBroker {
       stopping: false,
     };
     this.workers.set(key, entry);
+    if (this.destroyed || this.stoppedGhosts.has(ghost.manifest.id)) {
+      this.workers.delete(key);
+      try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      throw new WorkerStartError('Node 工作进程启动已取消', false, true);
+    }
     // 代启子进程的控制帧入口(childSpawn):帧形状严格把关,资格在 handle 里查。
     child.onControl?.((message) => this.handleWorkerControl(entry, message));
     child.stdout.on('data', (chunk) => this.handleStdout(entry, chunk));
@@ -968,15 +975,18 @@ export class GhostNodeRuntimeBroker {
           // 落地窗口,诊断行(如杀软拦截的 EPERM)才截得到。
           const drainTimer = this.setTimer(() => {
             settle(() => {
-              const hint = startupStderrHint(entry.startupStderr);
-              reject(
-                new WorkerStartError(
-                  `Node 工作进程启动前退出(code=${code}, signal=${signal ?? 'none'})${hint ? `:${hint}` : ''}`,
-                  // 被 stop(停用/卸载/更新)收掉的启动不重试,状态也已由 'stopped' 播报。
-                  !entry.stopping,
-                  entry.stopping,
-                ),
-              );
+              if (entry.stopping) {
+                reject(new WorkerStartError('Node 工作进程启动已取消', false, true));
+              } else {
+                const hint = startupStderrHint(entry.startupStderr);
+                reject(
+                  new WorkerStartError(
+                    `Node 工作进程启动前退出(code=${code}, signal=${signal ?? 'none'})${hint ? `:${hint}` : ''}`,
+                    true,
+                    false,
+                  ),
+                );
+              }
             });
           }, 10);
           drainTimer.unref?.();

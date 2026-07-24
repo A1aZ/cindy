@@ -385,6 +385,29 @@ describe('nodeRuntimeBroker · 启动瞬时失败重试(2026-07-24)', () => {
     expect(spawnCount).toBe(1);
   });
 
+  it('stop 后新请求仍被阻拦;startResident 清除停止标记后恢复', async () => {
+    const ghost = fakeGhost({ lifecycle: 'resident' });
+    let spawnCount = 0;
+    const broker = new GhostNodeRuntimeBroker({
+      getGhost: () => ghost,
+      spawnProcess: () => {
+        spawnCount += 1;
+        return makeAutoReplyProcess() as unknown as NodeWorkerProcess;
+      },
+    });
+
+    broker.stop('node-ghost');
+    const blocked = await broker.handleRequest('node-ghost', rpcRequest());
+    expect(blocked).toMatchObject({ ok: false, errorCode: 'PROCESS_START_FAILED' });
+    expect(spawnCount).toBe(0);
+
+    await broker.startResident(ghost);
+    expect(spawnCount).toBe(1);
+    const ok = await broker.handleRequest('node-ghost', rpcRequest());
+    expect(ok).toMatchObject({ ok: true });
+    broker.destroyAll();
+  });
+
   it('诊断行不泄露绝对路径', async () => {
     vi.useFakeTimers();
     const ghost = fakeGhost();

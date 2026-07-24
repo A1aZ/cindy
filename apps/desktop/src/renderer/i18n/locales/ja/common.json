@@ -2211,13 +2211,53 @@
         "installedExpand": "インストール済みプラグインをさらに {{count}} 件表示",
         "installedCollapse": "追加のインストール済みプラグインを隠す",
         "allTitle": "すべてのプラグイン",
+        "filterAll": "すべて",
+        "filtersAria": "提供元でプラグインを絞り込む",
+        "origin": {
+          "public": "公開",
+          "organization": "チーム共有",
+          "local": "ローカル"
+        },
         "emptyFiltered": "一致するプラグインがありません",
         "useAction": "使用",
         "useAria": "{{name}} を使用"
       },
+      "market": {
+        "scopeAria": "プラグインの提供元を絞り込む",
+        "scope": {
+          "all": "すべて",
+          "public": "公開",
+          "organization": "組織",
+          "personal": "個人",
+          "local": "ローカル"
+        },
+        "install": "インストール",
+        "details": "詳細",
+        "update": "マーケットから更新",
+        "installed": "インストール済み",
+        "conflict": "プラグイン ID の競合",
+        "unavailable": "プラグインマーケットを一時的に利用できません。インストール済みプラグインは引き続き利用できます。",
+        "authenticationRequired": "プラグインマーケットを表示するには Cindy にログインしてください。",
+        "notConfigured": "この環境ではプラグインマーケットが設定されていません。インストール済みプラグインは引き続き利用できます。",
+        "errors": {
+          "generic": "プラグインマーケットの操作に失敗しました。もう一度お試しください。",
+          "invalidRequest": "プラグインのリクエストが無効です。",
+          "notFound": "このプラグインは利用できなくなりました。マーケットを更新して、もう一度お試しください。",
+          "conflict": "インストール済みまたはマーケットの別のプラグインが同じプラグイン ID を使用しています。",
+          "stateChanged": "操作中にアカウント、プラグイン、またはリリースが変更されました。最新の状態を確認して、もう一度お試しください。",
+          "accessDenied": "このプラグイン操作は許可されていないか、キャンセルされました。",
+          "notConfigured": "この環境ではプラグインマーケットを利用できません。",
+          "invalidPackage": "このプラグインパッケージは無効か、現在の Cindy バージョンではサポートされていません。"
+        },
+        "securityTitle": "インストールと権限",
+        "securityDescription": "メインプロセスでサイズと SHA-256、プラグインマニフェストを検証してからアトミックにインストールします。権限を確認して有効にするまで、新規プラグインは無効のままです。",
+        "noPermissions": "このプラグインは追加機能を宣言していません。",
+        "installConfirmTitle": "「{{name}}」をインストールしますか？",
+        "installConfirmDescription": "パッケージの整合性とマニフェスト互換性を確認し、無効の状態でインストールします。設定を確認してから有効にできます。"
+      },
       "install": "プラグインをインストール…",
       "empty": "まだプラグインがインストールされていません",
-      "emptyHint": "右上の「プラグインをインストール…」から .cindy ファイルを選択してください",
+      "emptyHint": "マーケットからインストールするか、上のメニューから .cindy ファイルを読み込めます",
       "disabledTag": "無効",
       "projectDisabledTag": "このプロジェクトでは無効",
       "projectSwitchLockedTip": "このプラグインはグローバルで無効です。先に「グローバル」ビューで有効にしてください",
@@ -2779,7 +2819,7 @@
     },
     "ssoOrgTitle": "企業 SSO サインイン",
     "ssoOrgSubtitle": "企業 ID、組織 slug、または確認済みドメインを入力してシングルサインオンに進みます",
-    "ssoOrgPlaceholder": "企業 ID、組織 slug、または確認済みドメイン",
+    "ssoOrgPlaceholder": "企業 ID、slug、またはドメイン",
     "ssoOrgHint": "企業のログイン識別子が不明な場合は、管理者にお問い合わせください",
     "ssoOrgDetected": "「{{org}}」のシングルサインオン方法を選択してください",
     "ssoVerificationTitle": "企業 ID を確認",
@@ -6983,11 +7023,11 @@
     "dialogs": {
       "subscription": {
         "title": "サブスクリプションプランを選択",
-        "description": "サーバーで現在設定されているプランのみ表示します。プランを選択すると支払い方法が表示されます。"
+        "description": "サーバーで公開中のサブスクリプションプランを表示します。購入できないプランには状態を表示します。"
       },
       "topup": {
         "title": "クレジットを購入",
-        "description": "サーバーで現在設定されているクレジット商品のみ表示します。商品を選択すると支払い方法が表示されます。"
+        "description": "サーバーで公開中のクレジット商品を表示します。購入できない商品には状態を表示します。"
       }
     },
     "eyebrow": "アカウントと使用量",
@@ -6996,7 +7036,7 @@
     "steps": {
       "offer": {
         "title": "プランを選択",
-        "description": "現在購入できるチャージとサブスクリプションのみ表示します。"
+        "description": "サーバーで公開中のチャージとサブスクリプションを表示します。"
       },
       "channel": {
         "title": "支払い方法を選択",
@@ -7020,8 +7060,12 @@
     "catalog": {
       "errorTitle": "プランを取得できません",
       "errorDescription": "接続を確認して再試行してください。ローカルの代替プランは表示しません。",
-      "emptyTitle": "利用可能なプランはありません",
-      "emptyDescription": "購入可能なプランと支払い方法がまだ設定されていません。"
+      "emptyTitle": "プランはまだありません",
+      "emptyDescription": "サーバーで公開中のプランはまだありません。",
+      "unavailableReasons": {
+        "OFFER_COMING_SOON": "近日提供",
+        "NO_AVAILABLE_PAYMENT_CHANNEL": "利用可能な支払い方法なし"
+      }
     },
     "offerKinds": {
       "topup": "クレジットチャージ",

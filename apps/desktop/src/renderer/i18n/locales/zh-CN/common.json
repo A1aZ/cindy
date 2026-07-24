@@ -2062,12 +2062,14 @@
       },
       "tips": {
         "cindy": "Cindy 是官方提供的共享机器人:无需申请任何凭证,连接 Slack 后 @Cindy 即可直接派活。",
-        "personal": "个人机器人用你自己申请的凭证接入飞书 / Discord:机器人完全归你,需要自行创建应用并填写配置。"
+        "personal": "个人机器人用你自己申请的凭证接入飞书 / Discord:机器人完全归你,需要自行创建应用并填写配置。",
+        "personalFeishuOnly": "个人机器人用你自己申请的凭证接入飞书:机器人完全归你,需要自行创建应用并填写配置。"
       },
       "defaults": {
         "title": "新会话配置",
         "description": "从飞书、Slack 或 Discord 发起新会话时，会使用这里的 Agent 和模型配置。修改后只影响新会话；已有 Discord 私聊请发送 /new 才会应用新配置。",
         "localDescription": "从飞书或 Discord 发起新会话时，会使用这里的 Agent 和模型配置。修改后只影响新会话；已有 Discord 私聊请发送 /new 才会应用新配置。",
+        "feishuOnlyDescription": "从飞书发起新会话时，会使用这里的 Agent 和模型配置。修改后只影响新会话。",
         "agentLabel": "Agent",
         "modelLabel": "模型配置",
         "loading": "正在读取新会话配置…",
@@ -3958,7 +3960,8 @@
       "provider": {
         "claude": "Claude Code",
         "codex": "Codex",
-        "workflow": "Workflow"
+        "workflow": "Workflow",
+        "shell": "后台命令"
       },
       "status": {
         "running": "运行中",
@@ -3966,6 +3969,7 @@
         "failed": "失败",
         "stopped": "已停止"
       },
+      "stop": "停止该任务",
       "tokens": "{{count}} tokens",
       "toolUses_one": "{{count}} 次工具调用",
       "toolUses_other": "{{count}} 次工具调用",
@@ -4049,8 +4053,11 @@
     },
     "backgroundActivity": {
       "status": "后台子任务运行中，模型用量仍在消耗…",
+      "bashStatus_one": "后台任务运行中（{{count}} 个）…",
+      "bashStatus_other": "后台任务运行中（{{count}} 个）…",
       "stopAll": "全部停止",
       "stopAllTitle": "关闭该会话的后台进程，停止全部后台子任务（会话可继续使用）",
+      "stopBashTitle": "停止该会话仍在运行的后台任务（不关闭会话进程）",
       "stopping": "停止中…"
     },
     "interruptedBanner": {

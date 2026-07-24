@@ -216,6 +216,9 @@ describe('mergeCodexAccountUsageSnapshot', () => {
     // 白耗后台请求; review 反馈) —— bridge 槽保鲜走 main 的 bridge turn-done
     // 触发 + mount 读 + 悬念期催刷
     expect(hookSource).not.toContain('refreshWebUsage');
+    // module 常驻订阅: chip 全部卸载期间的换号清空广播不丢 (与 claude hook 同语义)
+    expect(hookSource).toContain('function ensureModuleSubscription(');
+    expect(hookSource).toContain('ensureModuleSubscription();');
     // web-only 组合 payload 上浮归属字段, WHAM reader 的 accountId 归属判断不失配
     expect(mainSource).toContain('accountId: web.accountId');
   });
@@ -246,11 +249,28 @@ describe('splitCodexAccountUsagePayload', () => {
     }).web?.primary?.usedPercent).toBe(5);
   });
 
-  it('does not fabricate an app slot from a web-only combined payload', () => {
-    const parts = splitCodexAccountUsagePayload({
+  it('treats combined payloads as authoritative: empty slots clear explicitly', () => {
+    // web-only 组合 payload: app 槽显式清空(null), 不是「未携带」—— 否则换号 /
+    // 切形态后旧 app 槽数据一直挂着 (review 反馈)
+    const webOnly = splitCodexAccountUsagePayload({
+      accountId: 'acc-2',
       webSnapshot: { primary: { usedPercent: 5 }, source: 'openai-web' },
     } as never);
-    expect(parts.appServer).toBeUndefined();
-    expect(parts.web?.primary?.usedPercent).toBe(5);
+    expect(webOnly.appServer).toBeNull();
+    expect(webOnly.web?.primary?.usedPercent).toBe(5);
+    // app-only 组合 payload (webSnapshot: null): web 槽显式清空
+    const appOnly = splitCodexAccountUsagePayload({
+      primary: { usedPercent: 82 },
+      source: 'codex-app-server',
+      webSnapshot: null,
+    } as never);
+    expect(appOnly.appServer?.primary?.usedPercent).toBe(82);
+    expect(appOnly.web).toBeNull();
+    // 裸快照是增量: 只携带自己的槽, 另一个槽键缺失(保留现值)
+    const bare = splitCodexAccountUsagePayload({
+      primary: { usedPercent: 40 },
+      source: 'codex-app-server',
+    });
+    expect('web' in bare).toBe(false);
   });
 });

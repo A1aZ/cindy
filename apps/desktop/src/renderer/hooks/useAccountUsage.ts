@@ -171,24 +171,25 @@ function hasCodexSnapshotContent(snapshot: RateLimitSnapshot | null | undefined)
 }
 
 /**
- * 入站 payload → 两槽增量(纯函数, 供单测)。三种形状:
- *   - 组合 payload(带 webSnapshot 键, 来自 IPC read / usage push): 顶层归 app 槽
- *     (有内容才算), webSnapshot 归 web 槽;
- *   - 单快照(per-turn account_usage 事件 / 旧格式): 按 source 归槽 ——
- *     openai-web → web, 其余 → app。
- * 返回 undefined 的槽表示本次 payload 不携带该槽信息(保留现值)。
+ * 入站 payload → 两槽更新(纯函数, 供单测)。三种形状:
+ *   - 组合 payload(带 webSnapshot 键, 来自 IPC read / usage push): 是 main 侧
+ *     **两槽的权威全量** —— 顶层有内容归 app 槽、无内容 = app 槽显式清空(null);
+ *     webSnapshot 同理。不清会让换号 / 切形态后旧槽数据一直挂着(review 反馈)。
+ *   - 单快照(per-turn account_usage 事件 / 旧格式): 增量, 按 source 只更新
+ *     自己的槽 —— openai-web → web, 其余 → app。
+ * 语义: 键缺失 = 本次不携带该槽信息(保留现值); 键为 null = 显式清空。
  */
 export function splitCodexAccountUsagePayload(incoming: RateLimitSnapshot): {
-  appServer?: RateLimitSnapshot;
-  web?: RateLimitSnapshot;
+  appServer?: RateLimitSnapshot | null;
+  web?: RateLimitSnapshot | null;
 } {
   if ('webSnapshot' in incoming) {
     const { webSnapshot, ...rest } = incoming as RateLimitSnapshot & {
       webSnapshot?: unknown;
     };
     return {
-      ...(hasCodexSnapshotContent(rest) ? { appServer: rest } : {}),
-      ...(isRateLimitSnapshot(webSnapshot) ? { web: webSnapshot } : {}),
+      appServer: hasCodexSnapshotContent(rest) ? rest : null,
+      web: isRateLimitSnapshot(webSnapshot) ? webSnapshot : null,
     };
   }
   if (incoming.source === 'openai-web') return { web: incoming };
@@ -208,19 +209,40 @@ function applyCodexAccountUsageSnapshot(
   }
   if (!isRateLimitSnapshot(incoming)) return;
   const parts = splitCodexAccountUsagePayload(incoming);
-  if (parts.appServer) {
+  // 键存在即生效: 快照 → 槽内 merge; null → 显式清空(组合 payload 是权威全量,
+  // 见 splitCodexAccountUsagePayload); 键缺失 → 保留现值(裸快照只带自己的槽)。
+  if ('appServer' in parts) {
     lastCodexAccountUsage = {
       ...lastCodexAccountUsage,
-      appServer: mergeCodexAccountUsageSnapshot(lastCodexAccountUsage.appServer, parts.appServer),
+      appServer: parts.appServer
+        ? mergeCodexAccountUsageSnapshot(lastCodexAccountUsage.appServer, parts.appServer)
+        : null,
     };
   }
-  if (parts.web) {
+  if ('web' in parts) {
     lastCodexAccountUsage = {
       ...lastCodexAccountUsage,
-      web: mergeCodexAccountUsageSnapshot(lastCodexAccountUsage.web, parts.web),
+      web: parts.web
+        ? mergeCodexAccountUsageSnapshot(lastCodexAccountUsage.web, parts.web)
+        : null,
     };
   }
   onApplied();
+}
+
+// module 级常驻订阅 —— 与组件生命周期解耦: 所有 codex chip 卸载期间发生登出 /
+// 换号时, main 的 null / 新 payload 广播也要同步进 module 缓存, 否则下次 mount
+// 的 useState initializer 会先 seed 旧账号槽数据闪一帧。幂等安装, 随 renderer
+// 进程存活, 不退订(与 useClaudeSubscriptionUsage 的常驻语义一致)。
+let moduleSubscriptionInstalled = false;
+function ensureModuleSubscription(): void {
+  if (moduleSubscriptionInstalled) return;
+  const api = readUsageApi();
+  if (!api?.onCodexAccountChanged) return;
+  moduleSubscriptionInstalled = true;
+  api.onCodexAccountChanged((payload: unknown) => {
+    applyCodexAccountUsageSnapshot(payload, () => {});
+  });
 }
 
 /**
@@ -242,6 +264,8 @@ export function useAccountUsage(
   vendorKey: 'cc' | 'codex' | undefined,
   quotaSource: CodexQuotaSource = 'app-server',
 ): RateLimitSnapshot | null {
+  // 幂等; 首个实例装上 module 常驻订阅, 保证卸载窗口内的广播(尤其换号清空)不丢。
+  ensureModuleSubscription();
   const [snapshot, setSnapshot] = useState<RateLimitSnapshot | null>(() =>
     vendorKey === 'codex' ? selectCodexSlot(quotaSource) : null,
   );

@@ -263,6 +263,95 @@ describe('nodeRuntimeBroker · 进程生命周期', () => {
   });
 });
 
+describe('nodeRuntimeBroker · 启动瞬时失败重试(2026-07-24)', () => {
+  /** 就绪前即崩的假进程:Windows 杀软扫描刚写入的引导产物时的真实形态。 */
+  function epermFailingProcess(): FakeNodeProcess {
+    const failing = new FakeNodeProcess(undefined, false);
+    queueMicrotask(() => {
+      failing.stderr.write(
+        "node:fs:560\nError: EPERM: operation not permitted, open 'C:\\app\\.vite\\build\\nodeRuntimeWorkerProcess.js'\n",
+      );
+      failing.emit('exit', 1, null);
+    });
+    return failing;
+  }
+
+  it('就绪前退出自动重试,第二次成功;并发请求共享同一次启动,不发假 crashed', async () => {
+    vi.useFakeTimers();
+    const ghost = fakeGhost();
+    const pushes: Array<Record<string, unknown>> = [];
+    let spawnCount = 0;
+    const broker = new GhostNodeRuntimeBroker({
+      getGhost: () => ghost,
+      sendToGhost: (_id, payload) => pushes.push(payload as unknown as Record<string, unknown>),
+      spawnProcess: () => {
+        spawnCount += 1;
+        const child = spawnCount === 1 ? epermFailingProcess() : makeAutoReplyProcess();
+        return child as unknown as NodeWorkerProcess;
+      },
+    });
+
+    const first = broker.handleRequest('node-ghost', rpcRequest('first'));
+    const second = broker.handleRequest('node-ghost', rpcRequest('second'));
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(first).resolves.toMatchObject({ ok: true, result: { method: 'first' } });
+    await expect(second).resolves.toMatchObject({ ok: true, result: { method: 'second' } });
+    expect(spawnCount).toBe(2);
+    const states = pushes.filter((p) => p.name === 'node-status').map((p) => p.state);
+    expect(states).toEqual(['starting', 'running']);
+    broker.destroyAll();
+  });
+
+  it('连续失败耗尽重试:失败消息与 crashed 状态都带 stderr 诊断行,crashed 只发一次', async () => {
+    vi.useFakeTimers();
+    const ghost = fakeGhost();
+    const pushes: Array<Record<string, unknown>> = [];
+    let spawnCount = 0;
+    const broker = new GhostNodeRuntimeBroker({
+      getGhost: () => ghost,
+      sendToGhost: (_id, payload) => pushes.push(payload as unknown as Record<string, unknown>),
+      spawnProcess: () => {
+        spawnCount += 1;
+        return epermFailingProcess() as unknown as NodeWorkerProcess;
+      },
+    });
+
+    const pending = broker.handleRequest('node-ghost', rpcRequest());
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = await pending;
+    expect(result).toMatchObject({ ok: false, errorCode: 'PROCESS_START_FAILED' });
+    expect((result as { message?: string }).message).toContain('启动前退出');
+    expect((result as { message?: string }).message).toContain('EPERM');
+    expect(spawnCount).toBe(3);
+    const states = pushes.filter((p) => p.name === 'node-status').map((p) => p.state);
+    expect(states).toEqual(['starting', 'crashed']);
+    const crashed = pushes.find((p) => p.state === 'crashed') as { message?: string };
+    expect(crashed.message).toContain('EPERM');
+    expect(broker.stateOf('node-ghost')).toBe('off');
+  });
+
+  it('重试退避期间插件被停用:不再拉新进程', async () => {
+    vi.useFakeTimers();
+    const ghost = fakeGhost();
+    let enabled = true;
+    let spawnCount = 0;
+    const broker = new GhostNodeRuntimeBroker({
+      getGhost: () => (enabled ? ghost : null),
+      spawnProcess: () => {
+        spawnCount += 1;
+        return epermFailingProcess() as unknown as NodeWorkerProcess;
+      },
+    });
+
+    const pending = broker.handleRequest('node-ghost', rpcRequest());
+    await vi.advanceTimersByTimeAsync(50); // 第一次尝试已失败,退避中
+    enabled = false;
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(pending).resolves.toMatchObject({ ok: false, errorCode: 'PROCESS_START_FAILED' });
+    expect(spawnCount).toBe(1);
+  });
+});
+
 describe('nodeRuntimeBroker · 权限与协议', () => {
   it('没声明 node 槽时拒绝且不启动进程', async () => {
     const ghost = fakeGhost();

@@ -23,14 +23,18 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key, i18n: { language: 'zh-CN' } }),
 }));
 
-vi.mock('@/hooks/useCodexAuth', () => ({
-  useCodexAuth: () => ({
-    state: { kind: 'authenticated', authSource: 'oauth' },
-    triggerLogin,
-    cancelLogin,
-    logout: vi.fn(),
-  }),
-}));
+vi.mock('@/hooks/useCodexAuth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/hooks/useCodexAuth')>();
+  return {
+    ...actual,
+    useCodexAuth: () => ({
+      state: { kind: 'authenticated', authSource: 'oauth' },
+      triggerLogin,
+      cancelLogin,
+      logout: vi.fn(),
+    }),
+  };
+});
 
 vi.mock('@/lib/toast', () => ({
   toast: { error: vi.fn(), success: vi.fn() },

@@ -1,0 +1,2000 @@
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  Check,
+  CornerDownLeft,
+  Maximize2,
+  Minimize2,
+  Minus,
+  Pencil,
+  Plus,
+  Square,
+} from 'lucide-react-native';
+import {
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  View,
+  useWindowDimensions,
+  type StyleProp,
+  type ViewStyle,
+} from 'react-native';
+import { Text, TextInput } from '@/components/AppText';
+import { formatRemoteError } from '@/device-link/remoteStatus';
+import { useMobileMakerTransport } from '@/device-link/useMobileMakerTransport';
+import {
+  answerKey,
+  buildAskQuestionReviewPresentation,
+  buildAskUserQuestionDecision,
+  buildMobilePermissionCardState,
+  buildPendingInteractionQueuePresentation,
+  buildPermissionDecision,
+  buildPermissionReviewPresentation,
+  buildPlanReviewEvidencePresentation,
+  buildInteractionResolveActionPresentation,
+  buildPlanReviewDecision,
+  canStartInteractionResolve,
+  encodeMultiSelectAnswer,
+  resolveInteractionResilient,
+  isPlanReviewResolveBusy,
+  interactionKind,
+  normalizeAskQuestions,
+  planReviewFilePath,
+  planReviewPlan,
+  readRequestId,
+  selectionFromAnswer,
+  sessionScopedPermissionSuggestions,
+  sortPendingInteractions,
+  type AskQuestion,
+  type PermissionReviewPresentation,
+  type PlanReviewEvidencePresentation,
+} from '@/session/interactionModel';
+import {
+  clearAskUserDraft,
+  clearPlanReviewDraft,
+  readAskUserDraft,
+  readPlanReviewDraft,
+  saveAskUserDraft,
+  savePlanReviewDraft,
+} from '@/session/interactionDraftStore';
+import {
+  buildInteractionTouchLayout,
+  type InteractionTouchLayout,
+} from '@/session/interactionTouchLayout';
+import { remoteSessionStore } from '@/session/remoteSessionStore';
+import type { PendingInteraction } from '@/session/types';
+import { fontWeight, iconStroke, lineHeight, monoFont, useTheme, useThemedStyles, type ThemeColors } from '@/theme';
+import { iconSize, radius, spacing, typeScale } from '@/theme/tokens';
+import { contentToPreview } from '@/utils/contentPreview';
+
+const PLAN_PREVIEW_LINE_HEIGHT = 20;
+
+export type MobilePlanViewerState = 'half' | 'expanded' | 'minimized' | 'edit';
+type RestorablePlanViewerState = Exclude<MobilePlanViewerState, 'minimized'>;
+
+export function InteractionPanel({
+  safeAreaBottomInset = 0,
+  deviceId,
+  fillAvailableHeight = false,
+  sessionId,
+  interactions,
+  activeRequestId: controlledActiveRequestId,
+  onActiveRequestIdChange,
+  planViewerState,
+  onPlanViewerStateChange,
+  onError,
+  readOnlyReason,
+}: {
+  safeAreaBottomInset?: number;
+  deviceId: string;
+  fillAvailableHeight?: boolean;
+  sessionId: string;
+  interactions: PendingInteraction[];
+  activeRequestId?: string | null;
+  onActiveRequestIdChange?(requestId: string | null): void;
+  planViewerState?: MobilePlanViewerState;
+  onPlanViewerStateChange?(state: MobilePlanViewerState): void;
+  readOnlyReason?: string | null;
+  onError(message: string | null): void;
+}) {
+  const styles = useThemedStyles(makeStyles);
+  const sortedInteractions = useMemo(
+    () => sortPendingInteractions(interactions),
+    [interactions],
+  );
+  const [localActiveRequestId, setLocalActiveRequestId] = useState<string | null>(null);
+  const activeRequestId = controlledActiveRequestId !== undefined
+    ? controlledActiveRequestId
+    : localActiveRequestId;
+  const setActiveRequestId = (requestId: string | null) => {
+    if (controlledActiveRequestId !== undefined) onActiveRequestIdChange?.(requestId);
+    else setLocalActiveRequestId(requestId);
+  };
+  const fallbackInteraction = sortedInteractions[0] ?? null;
+  const activeInteraction = useMemo(() => {
+    if (!activeRequestId) return fallbackInteraction;
+    return sortedInteractions.find((item) => readRequestId(item) === activeRequestId) ?? fallbackInteraction;
+  }, [activeRequestId, fallbackInteraction, sortedInteractions]);
+  const { width: screenWidth } = useWindowDimensions();
+  useEffect(() => {
+    if (!activeRequestId) return;
+    if (!sortedInteractions.some((item) => readRequestId(item) === activeRequestId)) {
+      setActiveRequestId(null);
+    }
+  }, [activeRequestId, sortedInteractions]);
+  if (!activeInteraction) return null;
+  const kind = interactionKind(activeInteraction);
+  const queuePresentation = buildPendingInteractionQueuePresentation(sortedInteractions, {
+    maxVisible: sortedInteractions.length || 1,
+    readOnly: !!readOnlyReason,
+  });
+  const activeRequestIdForPresentation = readRequestId(activeInteraction);
+  const selectedQueueItem = queuePresentation.items.find((item) => item.requestId === activeRequestIdForPresentation)
+    ?? queuePresentation.active;
+  const activeQueuePresentation = {
+    ...queuePresentation,
+    active: selectedQueueItem,
+    items: queuePresentation.items.map((item) => ({
+      ...item,
+      active: item.requestId === activeRequestIdForPresentation,
+    })),
+    title: selectedQueueItem?.title ?? queuePresentation.title,
+  };
+  const touchLayout = buildInteractionTouchLayout({
+    actionCount: resolveActionCount(kind),
+    screenWidth,
+  });
+  const rootLayoutStyle = {
+    gap: touchLayout.rootGap,
+    paddingBottom: Math.max(spacing.sm, safeAreaBottomInset),
+    paddingHorizontal: touchLayout.rootPaddingHorizontal,
+  };
+  const cardLayoutStyle = {
+    gap: touchLayout.cardGap,
+    padding: touchLayout.cardPadding,
+  };
+  if (readOnlyReason) {
+    return (
+      <View style={[styles.root, fillAvailableHeight && styles.rootFill, rootLayoutStyle]} testID="interaction.panel">
+        <PendingTaskHeader
+          onSelectRequest={setActiveRequestId}
+          presentation={activeQueuePresentation}
+          touchLayout={touchLayout}
+        />
+        <View style={[styles.card, cardLayoutStyle]} testID="interaction.readOnlyCard">
+          <Text style={styles.kind}>待确认</Text>
+          <Text style={styles.cardTitle}>电脑端正在等待确认</Text>
+          <Text style={styles.body}>{readOnlyReason}</Text>
+        </View>
+      </View>
+    );
+  }
+  return (
+    <View style={[styles.root, fillAvailableHeight && styles.rootFill, rootLayoutStyle]} testID="interaction.panel">
+      <PendingTaskHeader
+        onSelectRequest={setActiveRequestId}
+        presentation={activeQueuePresentation}
+        touchLayout={touchLayout}
+      />
+      <InteractionItem
+        key={readRequestId(activeInteraction) ?? `${interactionKind(activeInteraction)}-${JSON.stringify(activeInteraction.request)}`}
+        deviceId={deviceId}
+        sessionId={sessionId}
+        item={activeInteraction}
+        planViewerState={planViewerState}
+        onPlanViewerStateChange={onPlanViewerStateChange}
+        onError={onError}
+        touchLayout={touchLayout}
+      />
+    </View>
+  );
+}
+
+function resolveActionCount(kind: string): number {
+  if (kind === 'permission') return 3;
+  if (kind === 'plan_review') return 3;
+  if (kind === 'ask_user_question') return 3;
+  return 1;
+}
+
+type InteractionStyles = ReturnType<typeof makeStyles>;
+
+function cardStyle(styles: InteractionStyles, touchLayout: InteractionTouchLayout): StyleProp<ViewStyle> {
+  return [
+    styles.card,
+    {
+      gap: touchLayout.cardGap,
+      padding: touchLayout.cardPadding,
+    },
+  ];
+}
+
+function actionsStyle(styles: InteractionStyles, touchLayout: InteractionTouchLayout): StyleProp<ViewStyle> {
+  return [
+    styles.actions,
+    {
+      gap: touchLayout.actionGap,
+    },
+  ];
+}
+
+function resolveButtonLayoutStyle(
+  touchLayout: InteractionTouchLayout,
+  variant: 'primary' | 'secondary' | 'inline',
+): StyleProp<ViewStyle> {
+  return {
+    minHeight: touchLayout.actionButtonMinHeight,
+    minWidth: variant === 'inline' ? touchLayout.inlineButtonMinWidth : touchLayout.actionButtonMinWidth,
+  };
+}
+
+function PendingTaskHeader({
+  onSelectRequest,
+  presentation,
+  touchLayout,
+}: {
+  onSelectRequest(requestId: string | null): void;
+  presentation: ReturnType<typeof buildPendingInteractionQueuePresentation>;
+  touchLayout: InteractionTouchLayout;
+}) {
+  const styles = useThemedStyles(makeStyles);
+  const activeIndex = Math.max(0, presentation.items.findIndex((item) => item.active));
+  const nextItem = presentation.items.length > 1
+    ? presentation.items[(activeIndex + 1) % presentation.items.length]
+    : null;
+  return (
+    <View style={styles.taskHeaderWrap} testID="interaction.panelHeader">
+      <View
+        style={[
+          styles.taskHeader,
+          {
+            gap: touchLayout.taskHeaderGap,
+            minHeight: touchLayout.taskHeaderMinHeight,
+          },
+        ]}
+      >
+        <View style={styles.taskHeaderText}>
+          <Text style={styles.taskEyebrow}>待处理请求</Text>
+          <Text numberOfLines={1} style={styles.taskTitle}>{presentation.title}</Text>
+        </View>
+        {presentation.totalCount > 1 ? (
+          <InteractionTouchButton
+            accessibilityLabel={nextItem ? `切换到${nextItem.positionLabel}待处理请求: ${nextItem.label}` : '切换待处理请求'}
+            disabled={!nextItem?.requestId}
+            onPress={() => onSelectRequest(nextItem?.requestId ?? null)}
+            style={[styles.taskCountPill, { minHeight: touchLayout.taskCountPillMinHeight }]}
+            testID="interaction.queuePreview.next"
+          >
+            <Text style={styles.taskCountText}>
+              ‹ {activeIndex + 1}/{presentation.totalCount} ›
+            </Text>
+          </InteractionTouchButton>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
+function InteractionItem({
+  deviceId,
+  sessionId,
+  item,
+  planViewerState,
+  onPlanViewerStateChange,
+  onError,
+  touchLayout,
+}: {
+  deviceId: string;
+  sessionId: string;
+  item: PendingInteraction;
+  planViewerState?: MobilePlanViewerState;
+  onPlanViewerStateChange?(state: MobilePlanViewerState): void;
+  onError(message: string | null): void;
+  touchLayout: InteractionTouchLayout;
+}) {
+  const maker = useMobileMakerTransport(deviceId);
+  const [busy, setBusy] = useState(false);
+  const submittingRequestIdRef = useRef<string | null>(null);
+  const requestId = readRequestId(item);
+  const kind = interactionKind(item);
+
+  const submitDecision = async (decision: Record<string, unknown>) => {
+    if (!canStartInteractionResolve({ requestId, submittingRequestId: submittingRequestIdRef.current })) return;
+    const currentRequestId = requestId;
+    if (!currentRequestId) return;
+    submittingRequestIdRef.current = currentRequestId;
+    setBusy(true);
+    onError(null);
+    // 乐观 dismiss:点批准 / 拒绝当帧撤卡,不让用户盯着 busy 卡等网络往返
+    //(agent 每次要权限都要点,弱网下是最高频的「卡住感」来源)。store 侧同时
+    // 登记在途抑制,防权威快照 / push 重放在被控端确认前把同卡灌回闪回;保留
+    // item 快照,真失败时原卡复原供重试。
+    const itemSnapshot = item;
+    remoteSessionStore.beginOptimisticInteractionDismiss(sessionId, currentRequestId);
+    try {
+      await resolveInteractionResilient(maker, sessionId, currentRequestId, decision);
+      if (kind === 'plan_review') clearPlanReviewDraft(currentRequestId);
+      remoteSessionStore.settleOptimisticInteractionDismiss(sessionId, currentRequestId, { kind: 'confirmed' });
+    } catch (err) {
+      // resolveInteractionResilient 已带弱网重试 + pending 列表权威分辨,走到
+      // 这里就是决定确未生效:复原卡片 + 报错。
+      remoteSessionStore.settleOptimisticInteractionDismiss(sessionId, currentRequestId, {
+        kind: 'restore',
+        item: itemSnapshot,
+      });
+      onError(formatRemoteError(err));
+    } finally {
+      if (submittingRequestIdRef.current === currentRequestId) {
+        submittingRequestIdRef.current = null;
+      }
+      setBusy(false);
+    }
+  };
+
+  if (!requestId) {
+    return (
+      <UnsupportedCard
+        kind={kind}
+        message="这个远程交互缺少 requestId，无法回传决定。"
+        request={item.request}
+        touchLayout={touchLayout}
+      />
+    );
+  }
+
+  if (kind === 'permission') {
+    return (
+      <PermissionCard
+        busy={busy}
+        item={item}
+        onDecision={(decision) => void submitDecision(decision)}
+        touchLayout={touchLayout}
+      />
+    );
+  }
+  if (kind === 'ask_user_question') {
+    return (
+      <AskUserQuestionCard
+        busy={busy}
+        item={item}
+        onDecision={(decision) => void submitDecision(decision)}
+        touchLayout={touchLayout}
+      />
+    );
+  }
+  if (kind === 'plan_review') {
+    return (
+      <PlanReviewCard
+        busy={busy}
+        item={item}
+        onDecision={(decision) => void submitDecision(decision)}
+        viewerState={planViewerState}
+        onViewerStateChange={onPlanViewerStateChange}
+        touchLayout={touchLayout}
+      />
+    );
+  }
+  if (kind === 'issue_confirm') {
+    return (
+      <UnsupportedCard
+        kind={kind}
+        message="Issue 提交确认只在电脑端处理。请回到桌面端确认或取消提交。"
+        request={item.request}
+        touchLayout={touchLayout}
+      />
+    );
+  }
+  return (
+    <UnsupportedCard
+      kind={kind}
+      message="手机版暂不支持这个远程交互类型。"
+      request={item.request}
+      touchLayout={touchLayout}
+    />
+  );
+}
+
+function PermissionCard({
+  busy,
+  item,
+  onDecision,
+  touchLayout,
+}: {
+  busy: boolean;
+  item: PendingInteraction;
+  onDecision(decision: Record<string, unknown>): void;
+  touchLayout: InteractionTouchLayout;
+}) {
+  const styles = useThemedStyles(makeStyles);
+  const presentation = useMemo(() => buildPermissionReviewPresentation(item.request), [item.request]);
+  const suggestions = sessionScopedPermissionSuggestions(item.request.suggestions);
+  const requestId = readRequestId(item);
+  const [armedDecision, setArmedDecision] = useState<'allow-once' | 'always-allow' | null>(null);
+  const permissionState = buildMobilePermissionCardState({ armedDecision, presentation });
+  const requestDecision = (
+    action: 'allow-once' | 'always-allow',
+    decision: Record<string, unknown>,
+  ) => {
+    if (permissionState.isHighRisk && armedDecision !== action) {
+      setArmedDecision(action);
+      return;
+    }
+    onDecision(decision);
+  };
+
+  return (
+    <View style={cardStyle(styles, touchLayout)} testID="interaction.permission.card">
+      <View style={styles.compactCardHeader}>
+        <Text style={styles.kind}>权限确认</Text>
+        <Text numberOfLines={1} style={styles.compactCardTitle}>{permissionState.title}</Text>
+      </View>
+      <PermissionEvidence
+        armed={!!armedDecision}
+        presentation={presentation}
+        riskWarningText={permissionState.riskWarningText}
+        touchLayout={touchLayout}
+      />
+      <View style={actionsStyle(styles, touchLayout)}>
+        <ResolveButton
+          accessibilityLabel="拒绝权限请求"
+          busy={busy}
+          label="拒绝"
+          onPress={() => onDecision(buildPermissionDecision('deny', { reason: 'User denied' }))}
+          requestId={requestId}
+          touchStyle={resolveButtonLayoutStyle(touchLayout, 'secondary')}
+          testID="interaction.permission.denyButton"
+          variant="secondary"
+        />
+        {permissionState.canShowAlwaysAllow ? (
+          <ResolveButton
+            accessibilityLabel="本会话总是允许权限请求"
+            armed={armedDecision === 'always-allow'}
+            busy={busy}
+            confirmLabel="确认本会话允许"
+            label="本会话总是允许"
+            onPress={() => requestDecision(
+              'always-allow',
+              buildPermissionDecision('allow', { permissionUpdates: suggestions }),
+            )}
+            requestId={requestId}
+            touchStyle={resolveButtonLayoutStyle(touchLayout, 'secondary')}
+            testID="interaction.permission.alwaysAllowButton"
+            variant="secondary"
+          />
+        ) : null}
+        <ResolveButton
+          accessibilityLabel="允许一次权限请求"
+          armed={armedDecision === 'allow-once'}
+          busy={busy}
+          confirmLabel="确认允许一次"
+          label="允许一次"
+          onPress={() => requestDecision('allow-once', buildPermissionDecision('allow'))}
+          requestId={requestId}
+          touchStyle={resolveButtonLayoutStyle(touchLayout, 'primary')}
+          testID="interaction.permission.allowOnceButton"
+          variant="primary"
+        />
+      </View>
+    </View>
+  );
+}
+
+function PermissionEvidence({
+  armed,
+  presentation,
+  riskWarningText,
+  touchLayout,
+}: {
+  armed: boolean;
+  presentation: PermissionReviewPresentation;
+  riskWarningText: string | null;
+  touchLayout: InteractionTouchLayout;
+}) {
+  const styles = useThemedStyles(makeStyles);
+  return (
+    <View
+      style={[
+        styles.permissionEvidence,
+        {
+          gap: touchLayout.cardGap,
+          paddingHorizontal: touchLayout.cardPadding,
+        },
+      ]}
+      testID="interaction.permission.decisionSummary"
+    >
+      <View style={styles.permissionEvidenceHeader}>
+        <View style={styles.permissionEvidenceTitleWrap}>
+          <Text style={styles.permissionEvidenceTitle}>{presentation.summary.title}</Text>
+          <Text style={styles.permissionEvidenceDetail}>{presentation.summary.detail}</Text>
+        </View>
+        <Text numberOfLines={1} style={styles.permissionToolPill}>
+          {presentation.toolName}
+        </Text>
+      </View>
+      {presentation.description ? (
+        <Text style={styles.permissionDescription}>{presentation.description}</Text>
+      ) : null}
+      {riskWarningText ? (
+        <View
+          style={[styles.permissionRiskRow, armed && styles.permissionRiskRowArmed]}
+          testID="interaction.permission.riskWarning"
+        >
+          <Text style={styles.permissionRiskLabel}>高风险</Text>
+          <Text style={styles.permissionRiskText}>{riskWarningText}</Text>
+        </View>
+      ) : null}
+      <ScrollView style={styles.permissionCodeBlock} nestedScrollEnabled>
+        <Text selectable style={styles.codeText}>{presentation.code}</Text>
+      </ScrollView>
+    </View>
+  );
+}
+
+function AskUserQuestionCard({
+  busy,
+  item,
+  onDecision,
+  touchLayout,
+}: {
+  busy: boolean;
+  item: PendingInteraction;
+  onDecision(decision: Record<string, unknown>): void;
+  touchLayout: InteractionTouchLayout;
+}) {
+  const styles = useThemedStyles(makeStyles);
+  const { colors } = useTheme();
+  const requestId = readRequestId(item) ?? '';
+  const questions = useMemo(() => normalizeAskQuestions(item.request.questions), [item.request.questions]);
+  const draftCompletedRef = useRef(false);
+  const skipNextQuestionSyncRef = useRef(false);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [selectedLabels, setSelectedLabels] = useState<Set<string>>(new Set());
+  const [customInput, setCustomInput] = useState('');
+  const [showCustomInput, setShowCustomInput] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+  const presentation = useMemo(() => buildAskQuestionReviewPresentation({
+    currentIndex,
+    questions,
+  }), [currentIndex, questions]);
+  const current = presentation.current;
+
+  useEffect(() => {
+    draftCompletedRef.current = false;
+    const draft = readAskUserDraft(requestId);
+    skipNextQuestionSyncRef.current = !!draft;
+    setCurrentIndex(Math.min(draft?.currentIndex ?? 0, Math.max(0, questions.length - 1)));
+    setAnswers(draft?.answers ?? {});
+    setSelectedLabels(new Set(draft?.selectedLabels ?? []));
+    setCustomInput(draft?.customInput ?? '');
+    setShowCustomInput(draft?.showCustomInput ?? false);
+    setCollapsed(false);
+  }, [questions.length, requestId]);
+
+  useEffect(() => {
+    if (!current) return;
+    if (skipNextQuestionSyncRef.current) {
+      skipNextQuestionSyncRef.current = false;
+      return;
+    }
+    const next = selectionFromAnswer(current, answers[answerKey(current)]);
+    setSelectedLabels(next.selectedLabels);
+    setCustomInput(next.customInput);
+    setShowCustomInput(next.showCustomInput);
+  }, [answers, current]);
+
+  useEffect(() => {
+    if (!requestId || draftCompletedRef.current) return;
+    saveAskUserDraft(requestId, {
+      answers,
+      currentIndex,
+      customInput,
+      selectedLabels: [...selectedLabels],
+      showCustomInput,
+    });
+  }, [answers, currentIndex, customInput, requestId, selectedLabels, showCustomInput]);
+
+  if (questions.length === 0) {
+    return (
+      <View style={cardStyle(styles, touchLayout)} testID="interaction.ask.card">
+        <Text style={styles.kind}>等待回答</Text>
+        <Text style={styles.askQuestion} testID="interaction.ask.question">{presentation.title}</Text>
+        <Text style={styles.askMetaCaption}>{presentation.summary.detail}</Text>
+        <View style={actionsStyle(styles, touchLayout)}>
+          <ResolveButton
+            accessibilityLabel="继续远程提问"
+            busy={busy}
+            label="继续"
+            onPress={() => {
+              draftCompletedRef.current = true;
+              clearAskUserDraft(requestId);
+              onDecision(buildAskUserQuestionDecision({}));
+            }}
+            requestId={requestId}
+            touchStyle={resolveButtonLayoutStyle(touchLayout, 'primary')}
+            testID="interaction.ask.continueButton"
+            variant="primary"
+          />
+        </View>
+      </View>
+    );
+  }
+  if (!current) return null;
+
+  const isLast = currentIndex === questions.length - 1;
+  const options = current.options ?? [];
+  const isMulti = current.multiSelect === true;
+  const currentAnswerKey = answerKey(current);
+  const existingAnswer = answers[currentAnswerKey];
+  const trimmedCustomInput = customInput.trim();
+  const customModeActive = showCustomInput || options.length === 0;
+  const canSubmitMulti = selectedLabels.size > 0 || trimmedCustomInput.length > 0;
+  const singleAnswer = customModeActive ? trimmedCustomInput : existingAnswer;
+  const canSubmitSingle = !isMulti && (singleAnswer ?? '').trim().length > 0;
+  const optionsCaption = options.length > 0 ? `${options.length} 个选项` : '自由输入';
+  const metaCaption = `${optionsCaption} · ${isMulti ? '多选' : '单选'} · 支持其他回答`;
+
+  const advance = (answer: string) => {
+    const nextAnswers = { ...answers, [currentAnswerKey]: answer };
+    setAnswers(nextAnswers);
+    if (isLast) {
+      draftCompletedRef.current = true;
+      clearAskUserDraft(requestId);
+      onDecision(buildAskUserQuestionDecision(nextAnswers));
+    } else {
+      setCurrentIndex((idx) => Math.min(idx + 1, questions.length - 1));
+    }
+  };
+
+  const clearCurrentAnswer = () => {
+    setAnswers((prev) => {
+      const next = { ...prev };
+      delete next[currentAnswerKey];
+      return next;
+    });
+  };
+
+  const submitMulti = () => {
+    if (!canSubmitMulti) return;
+    advance(encodeMultiSelectAnswer(options, selectedLabels, customInput));
+  };
+
+  const submitSingle = () => {
+    if (!canSubmitSingle || singleAnswer === undefined) return;
+    advance(singleAnswer);
+  };
+
+  const toggleLabel = (label: string) => {
+    if (!isMulti) {
+      setShowCustomInput(false);
+      setCustomInput('');
+      setSelectedLabels(new Set([label]));
+      setAnswers((prev) => ({ ...prev, [currentAnswerKey]: label }));
+      return;
+    }
+    setSelectedLabels((prev) => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
+  };
+
+  if (collapsed) {
+    return (
+      <InteractionTouchButton
+        accessibilityLabel="展开问题卡片"
+        onPress={() => setCollapsed(false)}
+        style={[cardStyle(styles, touchLayout), styles.collapsedInteractionBar]}
+        testID="interaction.ask.collapsedCard"
+      >
+        <View style={styles.collapsedInteractionText}>
+          <Text style={styles.collapsedInteractionLabel}>等待回答</Text>
+          <Text numberOfLines={1} style={styles.collapsedInteractionTitle}>{presentation.title}</Text>
+        </View>
+        <View style={styles.compactHeaderActions}>
+          {questions.length > 1 ? (
+            <Text style={styles.collapsedInteractionMeta}>
+              {currentIndex + 1} / {questions.length}
+            </Text>
+          ) : null}
+          <View style={styles.iconControl}>
+            <Plus color={colors.textSecondary} size={iconSize.md} strokeWidth={iconStroke.regular} />
+          </View>
+        </View>
+      </InteractionTouchButton>
+    );
+  }
+
+  return (
+    <View style={cardStyle(styles, touchLayout)} testID="interaction.ask.card">
+      <View style={styles.compactCardHeader}>
+        <Text style={styles.askHeaderKind}>等待回答</Text>
+        <View style={styles.compactHeaderActions}>
+          <Text style={styles.pageText}>{presentation.pageLabel}</Text>
+          <InteractionTouchButton
+            accessibilityLabel="收起问题卡片"
+            busy={busy}
+            onPress={() => setCollapsed(true)}
+            style={styles.iconControl}
+            testID="interaction.ask.collapseButton"
+          >
+            <Minus color={colors.textSecondary} size={iconSize.md} strokeWidth={iconStroke.regular} />
+          </InteractionTouchButton>
+        </View>
+      </View>
+      <Text style={styles.askQuestion} testID="interaction.ask.question">{presentation.title}</Text>
+      <Text style={styles.askMetaCaption}>{metaCaption}</Text>
+
+      {options.length > 0 ? (
+        <View style={styles.optionList}>
+          {options.map((option, index) => {
+            const selected = isMulti
+              ? selectedLabels.has(option.label)
+              : existingAnswer === option.label;
+            return (
+              <InteractionTouchButton
+                accessibilityLabel={`选择回答 ${option.label}`}
+                accessibilityHint={busy ? '正在把决定回传到电脑端，请不要重复提交。' : undefined}
+                disabled={busy}
+                key={option.label}
+                onPress={() => toggleLabel(option.label)}
+                selected={selected}
+                style={[
+                  styles.optionRow,
+                  {
+                    gap: touchLayout.actionGap,
+                    minHeight: touchLayout.optionRowMinHeight,
+                    paddingHorizontal: touchLayout.cardPadding,
+                  },
+                  selected && styles.optionRowSelected,
+                ]}
+                testID={`interaction.ask.option.${index + 1}`}
+              >
+                {isMulti ? (
+                  <View style={styles.optionCheckbox} testID={selected ? 'interaction.ask.checkbox.checked' : 'interaction.ask.checkbox'}>
+                    <Square
+                      color={selected ? colors.textPrimary : colors.borderStrong}
+                      size={iconSize.xl}
+                      strokeWidth={iconStroke.regular}
+                    />
+                    {selected ? (
+                      <Check
+                        color={colors.textPrimary}
+                        size={iconSize.sm}
+                        strokeWidth={iconStroke.bold}
+                        style={styles.optionCheckboxMark}
+                      />
+                    ) : null}
+                  </View>
+                ) : null}
+                <View style={styles.optionCopy}>
+                  <Text style={styles.optionTitle}>{option.label}</Text>
+                  {option.description ? <Text style={styles.optionDescription}>{option.description}</Text> : null}
+                </View>
+              </InteractionTouchButton>
+            );
+          })}
+          {showCustomInput ? (
+            <View style={[
+              styles.customInputRow,
+              { gap: touchLayout.actionGap },
+              touchLayout.stackInlineInputRows && styles.customInputRowStacked,
+            ]}>
+              <TextInput
+                accessibilityLabel="输入自定义回答"
+                autoFocus
+                onChangeText={setCustomInput}
+                placeholder="输入其他回答"
+                placeholderTextColor={colors.textTertiary}
+                style={styles.inlineInput}
+                testID="interaction.ask.customInput"
+                value={customInput}
+              />
+            </View>
+          ) : (
+            <InteractionTouchButton
+              accessibilityLabel="输入其他回答"
+              disabled={busy}
+              onPress={() => {
+                if (!isMulti) {
+                  skipNextQuestionSyncRef.current = true;
+                  clearCurrentAnswer();
+                  setSelectedLabels(new Set());
+                }
+                setShowCustomInput(true);
+              }}
+              style={[
+                styles.optionRow,
+                {
+                  gap: touchLayout.actionGap,
+                  minHeight: touchLayout.optionRowMinHeight,
+                  paddingHorizontal: touchLayout.cardPadding,
+                },
+              ]}
+              testID="interaction.ask.showCustomButton"
+            >
+              <Text style={styles.optionCustom}>输入其他回答...</Text>
+            </InteractionTouchButton>
+          )}
+        </View>
+      ) : (
+        <View style={[
+          styles.customInputRow,
+          { gap: touchLayout.actionGap },
+          touchLayout.stackInlineInputRows && styles.customInputRowStacked,
+        ]}>
+          <TextInput
+            accessibilityLabel="输入回答"
+            autoFocus
+            onChangeText={setCustomInput}
+            placeholder="输入回答"
+            placeholderTextColor={colors.textTertiary}
+            style={styles.inlineInput}
+            testID="interaction.ask.textInput"
+            value={customInput}
+          />
+        </View>
+      )}
+
+      <View style={actionsStyle(styles, touchLayout)}>
+        {currentIndex > 0 ? (
+          <InteractionTouchButton
+            accessibilityLabel="上一步"
+            disabled={busy}
+            onPress={() => setCurrentIndex((idx) => Math.max(0, idx - 1))}
+            style={[
+              styles.secondaryButton,
+              resolveButtonLayoutStyle(touchLayout, 'secondary'),
+            ]}
+            testID="interaction.ask.previousButton"
+          >
+            <Text style={styles.secondaryText}>上一步</Text>
+          </InteractionTouchButton>
+        ) : null}
+        <ResolveButton
+          accessibilityLabel="跳过问题"
+          busy={busy}
+          label="跳过"
+          onPress={() => advance('')}
+          requestId={requestId}
+          touchStyle={resolveButtonLayoutStyle(touchLayout, 'secondary')}
+          testID="interaction.ask.skipButton"
+          variant="secondary"
+        />
+        {isMulti ? (
+          <ResolveButton
+            accessibilityLabel={isLast ? '提交回答' : '下一步'}
+            busy={busy}
+            invalidReason={!canSubmitMulti ? '选择或输入回答后才能继续。' : null}
+            label={isLast ? '提交' : '下一步'}
+            onPress={submitMulti}
+            requestId={requestId}
+            touchStyle={resolveButtonLayoutStyle(touchLayout, 'primary')}
+            testID="interaction.ask.submitButton"
+            variant="primary"
+          />
+        ) : (
+          <ResolveButton
+            accessibilityLabel={isLast ? '提交回答' : '下一步'}
+            busy={busy}
+            invalidReason={!canSubmitSingle ? '选择或输入回答后才能继续。' : null}
+            label={isLast ? '提交' : '下一步'}
+            onPress={submitSingle}
+            requestId={requestId}
+            touchStyle={resolveButtonLayoutStyle(touchLayout, 'primary')}
+            testID="interaction.ask.submitButton"
+            variant="primary"
+          />
+        )}
+      </View>
+    </View>
+  );
+}
+
+function PlanReviewCard({
+  busy,
+  item,
+  onDecision,
+  viewerState: controlledViewerState,
+  onViewerStateChange,
+  touchLayout,
+}: {
+  busy: boolean;
+  item: PendingInteraction;
+  onDecision(decision: Record<string, unknown>): void;
+  viewerState?: MobilePlanViewerState;
+  onViewerStateChange?(state: MobilePlanViewerState): void;
+  touchLayout: InteractionTouchLayout;
+}) {
+  const styles = useThemedStyles(makeStyles);
+  const { colors } = useTheme();
+  const requestId = readRequestId(item) ?? '';
+  const [planText, setPlanText] = useState(() =>
+    readPlanReviewDraft(requestId)?.planText ?? planReviewPlan(item.request)
+  );
+  const [localViewerState, setLocalViewerState] = useState<MobilePlanViewerState>('half');
+  const [lastExpandedState, setLastExpandedState] = useState<RestorablePlanViewerState>('half');
+  const [feedback, setFeedback] = useState(() => readPlanReviewDraft(requestId)?.feedback ?? '');
+  const [feedbackOpen, setFeedbackOpen] = useState(() => readPlanReviewDraft(requestId)?.feedbackOpen ?? false);
+  const [activeOutlineId, setActiveOutlineId] = useState<string | null>(null);
+  const previewScrollRef = useRef<ScrollView | null>(null);
+  const skipNextPlanDraftSaveRef = useRef(false);
+  const filePath = planReviewFilePath(item.request);
+  const originalPlan = planReviewPlan(item.request);
+  const viewerStateControlled = controlledViewerState !== undefined;
+  const viewerState = controlledViewerState ?? localViewerState;
+  const evidence = useMemo(() => buildPlanReviewEvidencePresentation({
+    edited: planText !== originalPlan,
+    filePath,
+    maxOutlineItems: 8,
+    plan: planText,
+  }), [filePath, originalPlan, planText]);
+  const isEdit = viewerState === 'edit';
+  const isMinimized = viewerState === 'minimized';
+  const expandedPlan = viewerState === 'expanded' || viewerState === 'edit';
+  const fillAvailableHeight = expandedPlan && !isMinimized;
+  const planViewportHeight = expandedPlan
+    ? touchLayout.planPreviewFullMinHeight
+    : touchLayout.planPreviewMaxHeight;
+  const resolveBusy = isPlanReviewResolveBusy({ busy });
+
+  useEffect(() => {
+    skipNextPlanDraftSaveRef.current = true;
+    const draft = readPlanReviewDraft(requestId);
+    setPlanText(draft?.planText ?? planReviewPlan(item.request));
+    setFeedback(draft?.feedback ?? '');
+    setFeedbackOpen(draft?.feedbackOpen ?? false);
+    if (!viewerStateControlled) setLocalViewerState('half');
+    setLastExpandedState('half');
+    setActiveOutlineId(null);
+  }, [requestId, item.request, viewerStateControlled]);
+
+  useEffect(() => {
+    if (!requestId) return;
+    if (skipNextPlanDraftSaveRef.current) {
+      skipNextPlanDraftSaveRef.current = false;
+      return;
+    }
+    savePlanReviewDraft(requestId, { feedback, feedbackOpen, planText });
+  }, [feedback, feedbackOpen, planText, requestId]);
+
+  const updateViewerState = (next: MobilePlanViewerState) => {
+    if (viewerStateControlled) onViewerStateChange?.(next);
+    else setLocalViewerState(next);
+    if (next !== 'minimized') setLastExpandedState(next);
+  };
+
+  const jumpToOutline = (entry: PlanReviewEvidencePresentation['outlineItems'][number]) => {
+    setActiveOutlineId(entry.id);
+    if (viewerState === 'minimized') updateViewerState(lastExpandedState);
+    previewScrollRef.current?.scrollTo({
+      y: Math.max(0, (entry.line - 1) * PLAN_PREVIEW_LINE_HEIGHT),
+      animated: true,
+    });
+  };
+
+  const denyWithFeedback = () => {
+    const trimmed = feedback.trim();
+    if (!trimmed || resolveBusy) return;
+    onDecision(buildPlanReviewDecision(false, planText, trimmed));
+  };
+
+  const approvePlan = () => {
+    if (resolveBusy) return;
+    onDecision(buildPlanReviewDecision(true, planText));
+  };
+
+  return (
+    <View
+      style={[
+        styles.planReviewStack,
+        fillAvailableHeight && styles.planReviewStackFullHeight,
+        { gap: touchLayout.cardGap },
+      ]}
+      testID="interaction.plan.card"
+    >
+      <View
+        style={[
+          styles.planViewerCard,
+          isMinimized && styles.planViewerCardMinimized,
+          fillAvailableHeight && styles.planViewerCardFullHeight,
+        ]}
+        testID="interaction.plan.viewerCard"
+      >
+        {isMinimized ? (
+          <InteractionTouchButton
+            accessibilityLabel="展开计划"
+            disabled={resolveBusy}
+            onPress={() => updateViewerState(lastExpandedState)}
+            style={styles.planMinimizedBar}
+            testID="interaction.plan.expandButton"
+          >
+            <Text numberOfLines={1} style={styles.planMinimizedTitle}>审阅 Claude 的计划</Text>
+            <View style={styles.iconControl}>
+              <Plus color={colors.textSecondary} size={iconSize.md} strokeWidth={iconStroke.regular} />
+            </View>
+          </InteractionTouchButton>
+        ) : (
+          <>
+            <View style={styles.planViewerHeader}>
+              <View style={styles.planViewerTitleWrap}>
+                <Text numberOfLines={1} style={styles.planViewerTitle}>审阅 Claude 的计划</Text>
+                <Text numberOfLines={1} style={styles.planViewerHint}>
+                  {isEdit ? '使用编辑模式调整计划' : '选中章节即可跳转浏览'}
+                </Text>
+              </View>
+              <View style={styles.planToolbar}>
+                <InteractionTouchButton
+                  accessibilityLabel={isEdit ? '退出计划编辑' : '编辑计划'}
+                  disabled={resolveBusy}
+                  onPress={() => updateViewerState(isEdit ? 'expanded' : 'edit')}
+                  selected={isEdit}
+                  style={[styles.planToolbarButton, isEdit && styles.planToolbarButtonActive]}
+                  testID="interaction.plan.editTab"
+                >
+                  <Pencil color={colors.textSecondary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+                </InteractionTouchButton>
+                <InteractionTouchButton
+                  accessibilityLabel="收起计划"
+                  disabled={resolveBusy}
+                  onPress={() => updateViewerState('minimized')}
+                  style={styles.planToolbarButton}
+                  testID="interaction.plan.minimizeButton"
+                >
+                  <Minus color={colors.textSecondary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+                </InteractionTouchButton>
+                <InteractionTouchButton
+                  accessibilityLabel={viewerState === 'half' ? '展开计划浏览区' : '切换到半屏计划'}
+                  disabled={resolveBusy}
+                  onPress={() => updateViewerState(viewerState === 'half' ? 'expanded' : 'half')}
+                  selected={expandedPlan}
+                  style={[styles.planToolbarButton, expandedPlan && styles.planToolbarButtonActive]}
+                  testID="interaction.plan.sizeButton"
+                >
+                  {expandedPlan ? (
+                    <Minimize2 color={colors.textSecondary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+                  ) : (
+                    <Maximize2 color={colors.textSecondary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+                  )}
+                </InteractionTouchButton>
+              </View>
+            </View>
+            <View
+              style={[
+                styles.planViewerBody,
+                fillAvailableHeight && styles.planViewerBodyFullHeight,
+                {
+                  gap: touchLayout.cardGap,
+                  paddingHorizontal: touchLayout.cardPadding,
+                  paddingVertical: touchLayout.cardPadding,
+                },
+              ]}
+            >
+              {isEdit ? (
+                <TextInput
+                  accessibilityLabel="计划编辑器"
+                  multiline
+                  onChangeText={setPlanText}
+                  placeholder="编辑计划"
+                  placeholderTextColor={colors.textTertiary}
+                  style={[
+                    styles.planEditor,
+                    fillAvailableHeight
+                      ? styles.planEditorFullHeight
+                      : { minHeight: planViewportHeight },
+                  ]}
+                  testID="interaction.plan.editor"
+                  value={planText}
+                />
+              ) : (
+                <>
+                  {evidence.outlineItems.length > 0 ? (
+                    <ScrollView
+                      horizontal
+                      nestedScrollEnabled
+                      showsHorizontalScrollIndicator={false}
+                      style={styles.planOutlineScroll}
+                      testID="interaction.plan.outline"
+                    >
+                      <View style={styles.planOutlineRow}>
+                        <Text style={styles.planOutlineLabel}>目录</Text>
+                        {evidence.outlineItems.map((entry) => {
+                          const active = entry.id === activeOutlineId;
+                          return (
+                            <InteractionTouchButton
+                              accessibilityLabel={`跳到计划章节 ${entry.title}`}
+                              key={entry.id}
+                              onPress={() => jumpToOutline(entry)}
+                              selected={active}
+                              style={[
+                                styles.planOutlineChip,
+                                active && styles.planOutlineChipActive,
+                              ]}
+                              testID="interaction.plan.outlineItem"
+                            >
+                              <Text
+                                numberOfLines={1}
+                                style={[
+                                  styles.planOutlineChipText,
+                                  active && styles.planOutlineChipTextActive,
+                                ]}
+                                testID={active ? 'interaction.plan.outlineTarget' : undefined}
+                              >
+                                {entry.title}
+                              </Text>
+                            </InteractionTouchButton>
+                          );
+                        })}
+                        {evidence.outlineOverflowCount > 0 ? (
+                          <Text style={styles.planOutlineMore} testID="interaction.plan.outlineMore">
+                            +{evidence.outlineOverflowCount}
+                          </Text>
+                        ) : null}
+                      </View>
+                    </ScrollView>
+                  ) : null}
+                  <ScrollView
+                    ref={previewScrollRef}
+                    style={[
+                      styles.planPreview,
+                      fillAvailableHeight
+                        ? styles.planPreviewFullHeight
+                        : { height: planViewportHeight },
+                    ]}
+                    nestedScrollEnabled
+                    testID="interaction.plan.preview"
+                  >
+                    <Text selectable style={styles.planText}>{planText || '计划内容为空。'}</Text>
+                  </ScrollView>
+                </>
+              )}
+            </View>
+          </>
+        )}
+      </View>
+
+      <View
+        style={[
+          styles.planActionCard,
+          {
+            paddingHorizontal: touchLayout.cardPadding,
+          },
+        ]}
+        testID="interaction.plan.actionCard"
+      >
+        <InteractionTouchButton
+          accessibilityLabel="批准执行计划"
+          busy={resolveBusy}
+          disabled={resolveBusy}
+          onPress={approvePlan}
+          style={styles.planApproveRow}
+          testID="interaction.plan.approveButton"
+        >
+          <View style={styles.planApproveIcon}>
+            <Check color={colors.ctaText} size={iconSize.sm} strokeWidth={iconStroke.bold} />
+          </View>
+          <Text numberOfLines={1} style={styles.planApproveText}>批准 Claude 的计划并开始编码</Text>
+          <CornerDownLeft color={colors.textTertiary} size={iconSize.md} strokeWidth={iconStroke.regular} />
+        </InteractionTouchButton>
+
+        {feedbackOpen ? (
+          <View style={styles.planFeedbackEditorRow}>
+            <Pencil color={colors.textSecondary} size={iconSize.md} strokeWidth={iconStroke.regular} />
+            <TextInput
+              accessibilityLabel="计划反馈"
+              multiline
+              onChangeText={setFeedback}
+              placeholder="告诉 Claude 应该怎么做"
+              placeholderTextColor={colors.textTertiary}
+              style={styles.planFeedbackInput}
+              testID="interaction.plan.feedbackInput"
+              value={feedback}
+            />
+            <InteractionTouchButton
+              accessibilityHint={feedback.trim().length === 0 ? '输入反馈后才能提交。' : undefined}
+              accessibilityLabel="提交计划反馈"
+              busy={resolveBusy}
+              disabled={feedback.trim().length === 0 || resolveBusy}
+              onPress={denyWithFeedback}
+              style={styles.planFeedbackSubmitButton}
+              testID="interaction.plan.submitFeedbackButton"
+            >
+              <CornerDownLeft
+                color={feedback.trim() ? colors.textPrimary : colors.textTertiary}
+                size={iconSize.md}
+                strokeWidth={iconStroke.regular}
+              />
+            </InteractionTouchButton>
+          </View>
+        ) : (
+          <InteractionTouchButton
+            accessibilityLabel="反馈修改计划"
+            busy={resolveBusy}
+            disabled={resolveBusy}
+            onPress={() => setFeedbackOpen(true)}
+            style={styles.planFeedbackRow}
+            testID="interaction.plan.feedbackButton"
+          >
+            <Pencil color={colors.textSecondary} size={iconSize.md} strokeWidth={iconStroke.regular} />
+            <Text numberOfLines={1} style={styles.planFeedbackPlaceholder}>告诉 Claude 应该怎么做</Text>
+          </InteractionTouchButton>
+        )}
+      </View>
+    </View>
+  );
+}
+
+function UnsupportedCard({
+  kind,
+  message,
+  request,
+  touchLayout,
+}: {
+  kind: string;
+  message: string;
+  request: PendingInteraction['request'];
+  touchLayout: InteractionTouchLayout;
+}) {
+  const styles = useThemedStyles(makeStyles);
+  return (
+    <View style={cardStyle(styles, touchLayout)} testID="interaction.unsupported.card">
+      <Text style={styles.kind}>暂不支持</Text>
+      <Text style={styles.cardTitle}>{message}</Text>
+      <Text style={styles.body} numberOfLines={6}>{contentToPreview(request)}</Text>
+    </View>
+  );
+}
+
+function ResolveButton({
+  accessibilityLabel,
+  armed,
+  busy,
+  confirmLabel,
+  invalidReason,
+  label,
+  onPress,
+  requestId,
+  touchStyle,
+  testID,
+  variant,
+}: {
+  accessibilityLabel: string;
+  armed?: boolean;
+  busy: boolean;
+  confirmLabel?: string;
+  invalidReason?: string | null;
+  label: string;
+  onPress(): void;
+  requestId: string | null;
+  touchStyle?: StyleProp<ViewStyle>;
+  testID: string;
+  variant: 'primary' | 'secondary' | 'inline';
+}) {
+  const styles = useThemedStyles(makeStyles);
+  const presentation = buildInteractionResolveActionPresentation({
+    armed,
+    busy,
+    confirmLabel,
+    invalidReason,
+    label,
+    requestId,
+  });
+  const buttonStyle = variant === 'primary'
+    ? styles.primaryButton
+    : variant === 'secondary'
+      ? styles.secondaryButton
+      : styles.inlineButton;
+  const disabledButtonStyle = variant === 'primary' && presentation.disabled
+    ? styles.primaryButtonDisabled
+    : null;
+  const textStyle = variant === 'primary'
+    ? styles.primaryText
+    : variant === 'secondary'
+      ? styles.secondaryText
+      : styles.inlineButtonText;
+  const disabledTextStyle = variant === 'primary' && presentation.disabled
+    ? styles.primaryTextDisabled
+    : null;
+
+  return (
+    <InteractionTouchButton
+      accessibilityLabel={accessibilityLabel}
+      accessibilityHint={presentation.disabledReason ?? undefined}
+      busy={busy}
+      disabled={presentation.disabled}
+      onPress={onPress}
+      style={[buttonStyle, disabledButtonStyle, touchStyle]}
+      testID={testID}
+    >
+      <Text style={[textStyle, disabledTextStyle]}>{presentation.label}</Text>
+    </InteractionTouchButton>
+  );
+}
+
+function InteractionTouchButton({
+  accessibilityHint,
+  accessibilityLabel,
+  busy = false,
+  children,
+  disabled = false,
+  onPress,
+  selected = false,
+  style,
+  testID,
+}: {
+  accessibilityHint?: string;
+  accessibilityLabel: string;
+  busy?: boolean;
+  children: ReactNode;
+  disabled?: boolean;
+  onPress?: () => void;
+  selected?: boolean;
+  style?: StyleProp<ViewStyle>;
+  testID?: string;
+}) {
+  const styles = useThemedStyles(makeStyles);
+  const interactionDisabled = disabled || busy || !onPress;
+  return (
+    <Pressable
+      accessibilityHint={accessibilityHint}
+      accessibilityLabel={accessibilityLabel}
+      accessibilityRole="button"
+      accessibilityState={{
+        busy,
+        disabled: interactionDisabled,
+        selected,
+      }}
+      disabled={interactionDisabled}
+      onPress={interactionDisabled ? undefined : onPress}
+      style={({ pressed }) => [
+        style,
+        pressed && styles.pressed,
+        interactionDisabled && styles.disabled,
+      ]}
+      testID={testID}
+    >
+      {children}
+    </Pressable>
+  );
+}
+
+const makeStyles = (colors: ThemeColors) => StyleSheet.create({
+  root: {
+    borderBottomColor: colors.border,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    gap: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+  },
+  rootFill: {
+    flex: 1,
+    minHeight: 0,
+  },
+  taskHeaderWrap: {
+    gap: spacing.xs,
+  },
+  taskHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.md,
+    minHeight: 44,
+  },
+  taskHeaderText: {
+    alignItems: 'baseline',
+    flex: 1,
+    flexDirection: 'row',
+    gap: spacing.sm,
+    minWidth: 0,
+  },
+  taskEyebrow: {
+    color: colors.textTertiary,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+    textTransform: 'uppercase',
+  },
+  taskTitle: {
+    color: colors.textPrimary,
+    flex: 1,
+    fontSize: typeScale.body,
+    fontWeight: fontWeight.medium,
+    minWidth: 0,
+  },
+  taskCountPill: {
+    alignItems: 'center',
+    borderColor: colors.border,
+    borderRadius: radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: spacing.md,
+  },
+  taskCountText: {
+    color: colors.textPrimary,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+  },
+  card: {
+    backgroundColor: colors.surfaceElevated,
+    borderColor: colors.border,
+    borderRadius: radius.container,
+    borderWidth: StyleSheet.hairlineWidth,
+    gap: spacing.sm,
+    padding: spacing.md,
+  },
+  compactCardHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+    minHeight: 44,
+  },
+  compactCardTitleWrap: {
+    alignItems: 'baseline',
+    flex: 1,
+    flexDirection: 'row',
+    gap: spacing.sm,
+    minWidth: 0,
+  },
+  compactHeaderActions: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+    flexShrink: 0,
+  },
+  kind: {
+    color: colors.textTertiary,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+    textTransform: 'uppercase',
+  },
+  pageText: {
+    color: colors.textTertiary,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+    flexShrink: 0,
+  },
+  cardTitle: {
+    color: colors.textPrimary,
+    fontSize: typeScale.body,
+    fontWeight: fontWeight.medium,
+    lineHeight: lineHeight.body,
+  },
+  compactCardTitle: {
+    color: colors.textPrimary,
+    flex: 1,
+    fontSize: typeScale.body,
+    fontWeight: fontWeight.medium,
+    lineHeight: lineHeight.body,
+    minWidth: 0,
+  },
+  iconControl: {
+    alignItems: 'center',
+    borderRadius: radius.pill,
+    height: 44,
+    justifyContent: 'center',
+    width: 44,
+  },
+  collapsedInteractionBar: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 44,
+    paddingVertical: 0,
+  },
+  collapsedInteractionText: {
+    alignItems: 'baseline',
+    flex: 1,
+    flexDirection: 'row',
+    gap: spacing.md,
+    minWidth: 0,
+  },
+  collapsedInteractionLabel: {
+    color: colors.textTertiary,
+    flexShrink: 0,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+  },
+  collapsedInteractionTitle: {
+    color: colors.textPrimary,
+    flexShrink: 1,
+    fontSize: typeScale.body,
+    fontWeight: fontWeight.medium,
+    minWidth: 0,
+  },
+  collapsedInteractionMeta: {
+    color: colors.textTertiary,
+    flexShrink: 0,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.regular,
+  },
+  body: {
+    color: colors.textSecondary,
+    fontSize: typeScale.caption,
+    lineHeight: lineHeight.caption,
+  },
+  askHeaderKind: {
+    color: colors.textTertiary,
+    flex: 1,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+    textTransform: 'uppercase',
+  },
+  askQuestion: {
+    color: colors.textPrimary,
+    fontSize: typeScale.body,
+    fontWeight: fontWeight.medium,
+    lineHeight: lineHeight.body,
+  },
+  askMetaCaption: {
+    color: colors.textTertiary,
+    fontSize: typeScale.caption,
+    lineHeight: lineHeight.caption,
+  },
+  permissionEvidence: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: radius.container,
+    borderWidth: StyleSheet.hairlineWidth,
+    gap: spacing.xs,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  permissionEvidenceHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+    justifyContent: 'space-between',
+  },
+  permissionEvidenceTitleWrap: {
+    flex: 1,
+    gap: 2,
+    minWidth: 0,
+  },
+  permissionEvidenceTitle: {
+    color: colors.textPrimary,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+    lineHeight: lineHeight.caption,
+  },
+  permissionEvidenceDetail: {
+    color: colors.textSecondary,
+    fontSize: typeScale.caption,
+    lineHeight: lineHeight.caption,
+  },
+  permissionToolPill: {
+    backgroundColor: colors.surfaceChip,
+    borderRadius: radius.pill,
+    color: colors.textSecondary,
+    flexShrink: 1,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+    maxWidth: 112,
+    overflow: 'hidden',
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+  },
+  permissionDescription: {
+    borderTopColor: colors.border,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    color: colors.textSecondary,
+    fontSize: typeScale.caption,
+    lineHeight: lineHeight.caption,
+    paddingTop: spacing.sm,
+  },
+  permissionRiskRow: {
+    borderColor: colors.borderStrong,
+    borderRadius: radius.container,
+    borderWidth: StyleSheet.hairlineWidth,
+    gap: spacing.xs,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  permissionRiskRowArmed: {
+    backgroundColor: colors.surfaceChip,
+    borderColor: colors.borderStrong,
+  },
+  permissionRiskLabel: {
+    color: colors.textPrimary,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+  },
+  permissionRiskText: {
+    color: colors.textSecondary,
+    fontSize: typeScale.caption,
+    lineHeight: lineHeight.caption,
+  },
+  permissionCodeBlock: {
+    backgroundColor: colors.surfaceElevated,
+    borderColor: colors.border,
+    borderRadius: radius.container,
+    borderWidth: StyleSheet.hairlineWidth,
+    maxHeight: 112,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  codeText: {
+    color: colors.textPrimary,
+    fontFamily: monoFont,
+    fontSize: typeScale.caption,
+    lineHeight: lineHeight.caption,
+  },
+  optionList: {
+    borderColor: colors.border,
+    borderRadius: radius.container,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+  },
+  optionRow: {
+    alignItems: 'center',
+    borderBottomColor: colors.border,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: spacing.sm,
+    minHeight: 52,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  optionRowSelected: {
+    backgroundColor: colors.surfaceChip,
+  },
+  optionCheckbox: {
+    alignItems: 'center',
+    height: 24,
+    justifyContent: 'center',
+    width: 24,
+  },
+  optionCheckboxMark: {
+    position: 'absolute',
+  },
+  optionCopy: { flex: 1, minWidth: 0 },
+  optionTitle: {
+    color: colors.textPrimary,
+    fontSize: typeScale.body,
+    fontWeight: fontWeight.medium,
+  },
+  optionDescription: {
+    color: colors.textSecondary,
+    fontSize: typeScale.caption,
+    lineHeight: lineHeight.caption,
+    marginTop: spacing.xs,
+  },
+  optionCustom: {
+    color: colors.textSecondary,
+    flex: 1,
+    fontSize: typeScale.body,
+    fontStyle: 'italic',
+  },
+  customInputRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+    padding: spacing.sm,
+  },
+  customInputRowStacked: {
+    alignItems: 'stretch',
+    flexDirection: 'column',
+  },
+  inlineInput: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: radius.container,
+    borderWidth: StyleSheet.hairlineWidth,
+    color: colors.textPrimary,
+    flex: 1,
+    fontSize: typeScale.body,
+    minHeight: 44,
+    paddingHorizontal: spacing.md,
+  },
+  inlineInputWide: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: radius.container,
+    borderWidth: StyleSheet.hairlineWidth,
+    color: colors.textPrimary,
+    fontSize: typeScale.body,
+    minHeight: 44,
+    paddingHorizontal: spacing.md,
+  },
+  inlineButton: {
+    backgroundColor: colors.cta,
+    borderRadius: radius.pill,
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: spacing.lg,
+  },
+  inlineButtonText: {
+    color: colors.ctaText,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+  },
+  planReviewStack: {
+    width: '100%',
+  },
+  planReviewStackFullHeight: {
+    flexBasis: 0,
+    flexGrow: 1,
+    flexShrink: 1,
+    minHeight: 0,
+  },
+  planViewerCard: {
+    backgroundColor: colors.surfaceElevated,
+    borderColor: colors.border,
+    borderRadius: radius.container,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+  },
+  planViewerCardFullHeight: {
+    flexBasis: 0,
+    flexGrow: 1,
+    flexShrink: 1,
+    minHeight: 0,
+  },
+  planViewerCardMinimized: {
+    minHeight: 44,
+  },
+  planMinimizedBar: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 44,
+    paddingLeft: spacing.lg,
+    paddingRight: spacing.xs,
+  },
+  planMinimizedTitle: {
+    color: colors.textPrimary,
+    flex: 1,
+    fontSize: typeScale.body,
+    fontWeight: fontWeight.medium,
+    minWidth: 0,
+  },
+  planViewerHeader: {
+    alignItems: 'center',
+    borderBottomColor: colors.border,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 44,
+    paddingLeft: spacing.lg,
+    paddingRight: spacing.xs,
+  },
+  planViewerTitleWrap: {
+    alignItems: 'baseline',
+    flex: 1,
+    flexDirection: 'row',
+    gap: spacing.sm,
+    minWidth: 0,
+  },
+  planViewerTitle: {
+    color: colors.textPrimary,
+    flexShrink: 0,
+    fontSize: typeScale.body,
+    fontWeight: fontWeight.medium,
+  },
+  planViewerHint: {
+    color: colors.textTertiary,
+    flex: 1,
+    fontSize: typeScale.caption,
+    minWidth: 0,
+  },
+  planToolbar: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    flexShrink: 0,
+    gap: spacing.xs,
+  },
+  planToolbarButton: {
+    alignItems: 'center',
+    borderRadius: radius.pill,
+    height: 44,
+    justifyContent: 'center',
+    width: 44,
+  },
+  planToolbarButtonActive: {
+    backgroundColor: colors.surfaceChip,
+  },
+  planViewerBody: {
+    backgroundColor: colors.surfaceElevated,
+  },
+  planViewerBodyFullHeight: {
+    flexBasis: 0,
+    flexGrow: 1,
+    flexShrink: 1,
+    minHeight: 0,
+  },
+  planOutlineScroll: {
+    maxHeight: 44,
+  },
+  planOutlineRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+    paddingRight: spacing.md,
+  },
+  planOutlineLabel: {
+    color: colors.textTertiary,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+    paddingHorizontal: spacing.xs,
+  },
+  planOutlineChip: {
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    justifyContent: 'center',
+    minHeight: 44,
+    maxWidth: 168,
+    paddingHorizontal: spacing.md,
+  },
+  planOutlineChipActive: {
+    backgroundColor: colors.cta,
+    borderColor: colors.cta,
+  },
+  planOutlineChipText: {
+    color: colors.textSecondary,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+    maxWidth: 144,
+  },
+  planOutlineChipTextActive: {
+    color: colors.ctaText,
+  },
+  planOutlineMore: {
+    color: colors.textTertiary,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+    paddingHorizontal: spacing.sm,
+  },
+  planPreview: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: radius.container,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  planPreviewFullHeight: {
+    flexBasis: 0,
+    flexGrow: 1,
+    flexShrink: 1,
+    minHeight: 0,
+  },
+  planText: {
+    color: colors.textPrimary,
+    fontSize: typeScale.caption,
+    lineHeight: lineHeight.code,
+  },
+  planEditor: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: radius.container,
+    borderWidth: StyleSheet.hairlineWidth,
+    color: colors.textPrimary,
+    fontSize: typeScale.caption,
+    lineHeight: lineHeight.code,
+    minHeight: 176,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    textAlignVertical: 'top',
+  },
+  planEditorFullHeight: {
+    flexBasis: 0,
+    flexGrow: 1,
+    flexShrink: 1,
+    minHeight: 0,
+  },
+  planActionCard: {
+    backgroundColor: colors.surfaceElevated,
+    borderColor: colors.border,
+    borderRadius: radius.container,
+    borderWidth: StyleSheet.hairlineWidth,
+    flexShrink: 0,
+    overflow: 'hidden',
+  },
+  planApproveRow: {
+    alignItems: 'center',
+    borderBottomColor: colors.border,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: spacing.sm,
+    minHeight: 52,
+    paddingVertical: spacing.md,
+  },
+  planApproveIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.cta,
+    borderRadius: radius.pill,
+    height: 20,
+    justifyContent: 'center',
+    width: 20,
+  },
+  planApproveText: {
+    color: colors.textPrimary,
+    flex: 1,
+    fontSize: typeScale.body,
+    fontWeight: fontWeight.regular,
+    minWidth: 0,
+  },
+  planFeedbackRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.sm,
+    minHeight: 52,
+    paddingVertical: spacing.md,
+  },
+  planFeedbackPlaceholder: {
+    color: colors.textTertiary,
+    flex: 1,
+    fontSize: typeScale.body,
+    minWidth: 0,
+  },
+  planFeedbackEditorRow: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    gap: spacing.sm,
+    minHeight: 52,
+    paddingVertical: spacing.md,
+  },
+  planFeedbackInput: {
+    color: colors.textPrimary,
+    flex: 1,
+    fontSize: typeScale.body,
+    lineHeight: lineHeight.body,
+    maxHeight: 132,
+    minHeight: 44,
+    padding: 0,
+    textAlignVertical: 'top',
+  },
+  planFeedbackSubmitButton: {
+    alignItems: 'center',
+    borderRadius: radius.pill,
+    height: 44,
+    justifyContent: 'center',
+    width: 44,
+  },
+  actions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    justifyContent: 'flex-end',
+  },
+  primaryButton: {
+    alignItems: 'center',
+    backgroundColor: colors.cta,
+    borderRadius: radius.pill,
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: spacing.lg,
+  },
+  primaryButtonDisabled: {
+    backgroundColor: colors.surfaceChip,
+  },
+  primaryText: {
+    color: colors.ctaText,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+  },
+  primaryTextDisabled: {
+    color: colors.textTertiary,
+  },
+  secondaryButton: {
+    alignItems: 'center',
+    borderColor: colors.borderStrong,
+    borderRadius: radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: spacing.lg,
+  },
+  secondaryText: {
+    color: colors.textPrimary,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+  },
+  pressed: {
+    opacity: 0.72,
+  },
+  disabled: {
+    opacity: 0.45,
+  },
+});

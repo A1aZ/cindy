@@ -1,0 +1,113 @@
+/**
+ * 自定义供应商 OAuth 形态（用户自行扩展订阅授权供应商）单测：
+ *   - buildUserProvider：oauth 配置 → auth 透传 + 路由策略 oauth-token（apiKey 形态不变）；
+ *   - validateCustomProviderConfig：oauth 描述符校验（必填 / https / 端口）与 apiKey 互斥；
+ *   - provider-service：oauth 形态 user 供应商连接态 = genericOAuthConnected（不再恒 true）。
+ */
+
+import { describe, it, expect } from 'vitest';
+
+import { buildUserProvider, type CustomProviderConfig } from '@cindy/model-providers';
+
+import { mergeDiscoveredModelsIntoConfig, validateCustomProviderConfig } from '../custom-provider-store.js';
+import { createProviderService } from '../provider-service.js';
+
+const OAUTH = {
+  authorizeUrl: 'https://auth.acme.example/authorize',
+  tokenUrl: 'https://auth.acme.example/token',
+  clientId: 'c1',
+  scopes: 'openid',
+};
+
+const BASE: CustomProviderConfig = {
+  id: 'acme-sub',
+  name: 'Acme Sub',
+  auth: { method: 'oauth', oauth: OAUTH },
+  runtimes: {
+    'claude-code': { baseUrl: 'https://api.acme.example/anthropic', models: [{ id: 'm1', name: 'M1' }] },
+  },
+};
+
+describe('buildUserProvider oauth 形态', () => {
+  it('auth 透传 + 路由 oauth-token；apiKey 形态保持 api-key-header', () => {
+    const p = buildUserProvider(BASE);
+    expect(p.auth).toEqual({ method: 'oauth', oauth: OAUTH });
+    expect(p.routing['claude-code']?.authStrategy).toBe('oauth-token');
+
+    const plain = buildUserProvider({ ...BASE, auth: undefined });
+    expect(plain.auth).toEqual({ method: 'apiKey' });
+    expect(plain.routing['claude-code']?.authStrategy).toBe('api-key-header');
+  });
+});
+
+describe('validateCustomProviderConfig auth 段', () => {
+  it('完整 oauth 配置通过；缺字段 / http 端点 / 非法端口拒绝', () => {
+    expect(validateCustomProviderConfig(BASE).ok).toBe(true);
+    const bad = (oauth: object) =>
+      validateCustomProviderConfig({ ...BASE, auth: { method: 'oauth', oauth } });
+    expect(bad({ ...OAUTH, clientId: '' }).ok).toBe(false);
+    expect(bad({ ...OAUTH, tokenUrl: 'http://auth.acme.example/token' }).ok).toBe(false);
+    expect(bad({ ...OAUTH, redirectPort: 70000 }).ok).toBe(false);
+  });
+
+  it('apiKey method 不允许携带 oauth 描述符；非法 method 拒绝', () => {
+    expect(validateCustomProviderConfig({ ...BASE, auth: { method: 'apiKey', oauth: OAUTH } }).ok).toBe(false);
+    expect(validateCustomProviderConfig({ ...BASE, auth: { method: 'weird' } }).ok).toBe(false);
+    expect(validateCustomProviderConfig({ ...BASE, auth: { method: 'apiKey' } }).ok).toBe(true);
+  });
+
+  it('OAuth 形态模型可留空（授权后自动发现填充，用户免手填）', () => {
+    const noModels = {
+      ...BASE,
+      runtimes: { 'claude-code': { baseUrl: 'https://api.acme.example/anthropic', models: [] } },
+    };
+    expect(validateCustomProviderConfig(noModels).ok).toBe(true);
+  });
+});
+
+describe('mergeDiscoveredModelsIntoConfig（发现结果持久化的 additions-only 合并）', () => {
+  it('只追加新 id，已有条目 first-wins；无新增返回 null；runtime 未配置返回 null', () => {
+    const merged = mergeDiscoveredModelsIntoConfig(BASE, 'claude-code', [
+      { id: 'm1', name: 'OVERRIDE-IGNORED' },
+      { id: 'm2', name: 'M2' },
+      { id: '', name: 'bad' },
+    ]);
+    expect(merged?.runtimes['claude-code']?.models).toEqual([
+      { id: 'm1', name: 'M1' },
+      { id: 'm2', name: 'M2' },
+    ]);
+    // 原配置不被就地修改（纯函数）。
+    expect(BASE.runtimes['claude-code']?.models).toEqual([{ id: 'm1', name: 'M1' }]);
+
+    expect(mergeDiscoveredModelsIntoConfig(BASE, 'claude-code', [{ id: 'm1', name: 'M1' }])).toBeNull();
+    expect(mergeDiscoveredModelsIntoConfig(BASE, 'codex', [{ id: 'x', name: 'X' }])).toBeNull();
+  });
+});
+
+describe('provider-service 连接态', () => {
+  it('oauth 形态 user 供应商连接态 = genericOAuthConnected；apiKey 形态恒 true', async () => {
+    const catalog = {
+      version: 't',
+      providers: [
+        buildUserProvider(BASE),
+        buildUserProvider({ ...BASE, id: 'plain', auth: undefined }),
+      ],
+    };
+    const svc = createProviderService({
+      getCatalog: () => catalog,
+      connection: { xd: () => false, anthropic: () => false, openai: () => false, xai: () => false },
+      genericOAuthConnected: (id) => id === 'acme-sub',
+    });
+    const views = await svc.listProviders();
+    expect(views.find((v) => v.id === 'acme-sub')?.connected).toBe(true);
+    expect(views.find((v) => v.id === 'plain')?.connected).toBe(true);
+
+    const svcLoggedOut = createProviderService({
+      getCatalog: () => catalog,
+      connection: { xd: () => false, anthropic: () => false, openai: () => false, xai: () => false },
+      genericOAuthConnected: () => false,
+    });
+    const views2 = await svcLoggedOut.listProviders();
+    expect(views2.find((v) => v.id === 'acme-sub')?.connected).toBe(false);
+  });
+});

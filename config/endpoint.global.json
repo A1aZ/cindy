@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "authApiBaseUrl": "https://auth.cindy.app",
+  "deviceLinkApiBaseUrl": "https://device-link.cindy.app",
+  "oauthBrokerApiBaseUrl": "https://oauth-broker.cindy.app",
+  "ossApiBaseUrl": "https://oss.cindy.app",
+  "heartbeatUrl": "https://heartbeat.cindy.app",
+  "telegramHookWsUrl": "",
+  "slackHookWsUrl": "wss://slack-hook.cindy.app",
+  "websiteUrl": "https://cindy.app",
+  "modelAccessApiBaseUrl": "https://model-access.cindy.app",
+  "voiceApiBaseUrl": "https://voice.cindy.app",
+  "githubApiBaseUrl": "https://github.cindy.app",
+  "skillhubApiBaseUrl": "https://xd-skillhub.cindy.app",
+  "cdnBaseUrl": "https://hotfix.cindy.app/cindy",
+  "mobileUpdateBaseUrl": "https://mobile-update.cindy.app",
+  "review": "0.1.0"
+}

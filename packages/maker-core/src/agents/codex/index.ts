@@ -1,0 +1,4672 @@
+/**
+ * CodexAgent — 路线 A 完整版 (Phase 1+2+3+4 全打通)。
+ *
+ * Transport: 自家 AppServerHost (shared codex app-server 子进程 + JSON-RPC NDJSON),
+ * 完全取代 @openai/codex-sdk。
+ *
+ * 能力清单 (vs Phase 1):
+ *  - ✅ 基础对话: thread/start + turn/start + turn/interrupt + 7 类 notification 翻译
+ *  - ✅ Resume:    thread/resume (Phase 3) — archive→unarchive 真续聊, 不开新 thread
+ *  - ✅ Approval:  setRequestHandler 接 commandExecution / fileChange RequestApproval
+ *                  → dispatchInteraction (复用 Claude 那条 PermissionPrompt 通道)
+ *  - ✅ 运行时切:  setModel / setEffort / setPermissionMode 都生效, 下一 turn 自动透传
+ *  - ✅ Fork:      thread/fork + optional thread/rollback → 新 thread_id
+ *  - ✅ oneShot:   走 host 临时 thread (起标题), Phase 4 删 SDK dep 后唯一通路
+ *
+ * 输出契约:
+ *  - 不在 AgentSessionHandle 上加 codex-only 方法
+ *  - 事件流只 emit 已存在的 AgentEvent type union 成员
+ *  - renderer 不感知 thread_id / app-server 任何概念
+ */
+
+import os from 'node:os';
+import path from 'node:path';
+import { promises as fs } from 'node:fs';
+
+import {
+  BaseAgent,
+  OneShotError,
+  AgentNotAuthenticatedError,
+  type AgentSessionHandle,
+  type AgentDeps,
+  type StartSessionOptions,
+  type OneShotOptions,
+  type SendOptions,
+} from '../base-agent.js';
+import type { AgentCredentialMode } from '../../interfaces/auth-adapter.js';
+import type {
+  Capabilities,
+  EffortDescriptor,
+  PermissionModeDescriptor,
+} from '../../types/capabilities.js';
+import type {
+  AgentEvent,
+  ForkSdkSessionOptions,
+  ForkSdkSessionResult,
+  InteractionDecision,
+  InteractionRequest,
+  InteractionResolver,
+  UsageSnapshot,
+} from '../../types/events.js';
+import type { AuthState, Effort, PermissionMode, UserMessage } from '../../types/common.js';
+import type {
+  AgentBuiltinCommand,
+  ListAgentSkillsOptions,
+  ListAgentSkillsResult,
+} from '../../types/palette.js';
+import type {
+  ListCustomizationsOptions,
+  ListCustomizationsResult,
+} from '../../types/customizations.js';
+import type {
+  MemoryStatus,
+  MemorySetResult,
+  MemoryResetResult,
+} from '../../types/memory.js';
+import type {
+  AccountRateLimitsResponse,
+  ConsumeAccountRateLimitResetCreditParams,
+  ConsumeAccountRateLimitResetCreditResponse,
+} from '../../types/account-rate-limits.js';
+import { createAsyncQueue, type AsyncQueue } from '../shared/async-queue.js';
+import { UsageTracker } from '../shared/usage-tracker.js';
+import { getDefaultImageResizer } from '../shared/image-resizer.js';
+import { pickTurnStartStatus, type OneShotState } from '../shared/turn-start-phrases.js';
+import { buildCodexEnv } from './env-builder.js';
+import { scanCodexCustomizations } from './customization-scanner.js';
+import { commandExecutionDisplayInput } from './command-display.js';
+import {
+  newCodexRuntimeState,
+  translateErrorNotification,
+  translateItemNotification,
+  translateReasoningSummaryTextDelta,
+  translateReasoningSummaryPartAdded,
+  translateReasoningTextDelta,
+  translateAccountRateLimitsUpdated,
+  translatePlanUpdatedNotification,
+  extractRolloutUpdatePlanFunctionCallEvent,
+  type CodexRuntimeState,
+} from './translator.js';
+import { AppServerHost, type ThreadEventHandlers, type ThreadSubscription } from './app-server/host.js';
+import { createStdioTransport } from './app-server/stdioTransport.js';
+import { CodexInteractionBroker } from './interaction-broker.js';
+import { SYSTEM_PROMPT_APPEND as MAKER_CODEX_SYSTEM_PROMPT_APPEND } from './system-prompt-append.js';
+import { MAKER_MEMORY_RULES } from '../../memory/system-prompt.js';
+import { MemoryFlushController } from '../../memory/flush-controller.js';
+import { CODEX_AGENT_COMMANDS } from './commands.js';
+import {
+  canReuseCodexHostForCredentialMode,
+  resolveAgentCredentialMode,
+  resolveEffectiveCredentialModeFromAuthSource,
+} from '../credential-mode.js';
+import {
+  Method,
+  type AskForApproval,
+  type ApprovalDecision,
+  type CodexModelListResponse,
+  type CommandExecutionRequestApprovalParams,
+  type CommandExecutionRequestApprovalResponse,
+  type DynamicToolCallParams,
+  type DynamicToolCallResponse,
+  type DynamicToolSpec,
+  type FileChangeRequestApprovalParams,
+  type FileChangeRequestApprovalResponse,
+  type McpServerElicitationRequestParams,
+  type CollaborationModeParam,
+  type McpServerElicitationRequestResponse,
+  type PermissionsRequestApprovalParams,
+  type PermissionsRequestApprovalResponse,
+  type ServerRequestResolvedNotification,
+  type SandboxMode,
+  type SandboxPolicy,
+  type ServiceTier,
+  type SkillMetadata,
+  type SkillsListResponse,
+  type ThreadForkParams,
+  type ThreadForkResponse,
+  type ThreadRollbackParams,
+  type ThreadRollbackResponse,
+  type ThreadResumeParams,
+  type ThreadResumeResponse,
+  type ThreadSettingsUpdateParams,
+  type ThreadSettingsUpdateResponse,
+  type ThreadStartParams,
+  type ThreadStartResponse,
+  type ToolRequestUserInputParams,
+  type ToolRequestUserInputQuestion,
+  type ToolRequestUserInputResponse,
+  type TokenUsageBreakdown,
+  type TurnPlanUpdatedNotification,
+  type TurnStartParams,
+  type TurnStartResponse,
+  type UserInput,
+} from './app-server/protocol.js';
+
+type CodexEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+
+/**
+ * item.type → chip status 文案 (对齐 claude-code 6 类). null = 该 item 不触发 chip 切换
+ * (imageView/plan/userMessage/hookPrompt 等是 completed-only 或 UI 不暴露的 item)。
+ */
+function statusTextForItem(item: { type?: string; command?: string; tool?: string }): string | null {
+  switch (item.type) {
+    case 'reasoning':            return 'Thinking...';
+    case 'agentMessage':         return 'Generating...';
+    case 'commandExecution': {
+      // command 首词在 Windows 下可能是 `"C:\\...\\powershell.exe"` 完整路径带引号 —
+      // 直接拿会刷出超长 chip。剥引号 → 取 basename → 去 .exe 后缀, 显示 `powershell running...`。
+      const firstToken = (item.command ?? '').trim().split(/\s+/)[0] ?? '';
+      const unquoted = firstToken.replace(/^["']|["']$/g, '');
+      const basename = unquoted.split(/[\\/]/).pop() || '';
+      const head = basename.replace(/\.exe$/i, '') || 'shell';
+      return `${head} running...`;
+    }
+    case 'fileChange':           return 'Editing files...';
+    case 'mcpToolCall':          return `${item.tool ?? 'mcp'} running...`;
+    case 'dynamicToolCall':      return `${item.tool ?? 'tool'} running...`;
+    case 'collabAgentToolCall':  return `${item.tool ?? 'agent'} running...`;
+    case 'webSearch':            return 'Searching web...';
+    case 'imageGeneration':      return 'Generating image...';
+    case 'contextCompaction':    return 'Compacting...';
+    default:                     return null;
+  }
+}
+
+/**
+ * maker Effort → Codex GPT 可透传档。
+ *
+ * 只把 'minimal' 收敛到 'low'(Codex 无 minimal 档); max / ultra 直接透传,
+ * 不再静默降级为 xhigh(issue #352)。某模型是否真支持 max/ultra 由目录 efforts
+ * 与 UI/reconcile 门控保证——只有声明支持的模型才会走到这里传 max/ultra。
+ */
+function clampEffortForCodex(e: Effort): CodexEffort {
+  if (e === 'minimal') return 'low';
+  return e;
+}
+
+function normalizeTailTurnsToDrop(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 0;
+  return Math.max(0, Math.floor(value));
+}
+
+function prefixId(value: string | undefined): string | undefined {
+  return value ? value.slice(0, 8) : undefined;
+}
+
+function isRemoteLikePath(p: string): boolean {
+  return p.startsWith('/') && process.platform === 'win32';
+}
+
+function isReasoningPayload(payload: unknown): boolean {
+  return Boolean(
+    payload &&
+    typeof payload === 'object' &&
+    !Array.isArray(payload) &&
+    (payload as Record<string, unknown>).type === 'reasoning',
+  );
+}
+
+function isImageGenerationPayloadWithoutId(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  const record = payload as Record<string, unknown>;
+  const type = record.type;
+  if (typeof type !== 'string') return false;
+  if (!type.startsWith('image_generation') && !type.startsWith('imageGeneration')) return false;
+  const id = record.id;
+  return typeof id !== 'string' || id.trim().length === 0;
+}
+
+function hasUnsafeForkRolloutPayload(line: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(line);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+    const payload = (parsed as Record<string, unknown>).payload;
+    return isReasoningPayload(payload) || isImageGenerationPayloadWithoutId(payload);
+  } catch {
+    return false;
+  }
+}
+
+function buildCodexDeveloperInstructions(parts: {
+  makerMemoryRules?: string;
+  runtimeSystemPrompt?: string;
+  makerMemoryIndex?: string;
+  userPrompt?: string;
+}): string {
+  return [
+    MAKER_CODEX_SYSTEM_PROMPT_APPEND,
+    parts.makerMemoryRules,
+    parts.runtimeSystemPrompt,
+    parts.makerMemoryIndex,
+    parts.userPrompt,
+  ]
+    .filter((s): s is string => !!s && s.trim().length > 0)
+    .join('\n\n');
+}
+
+/**
+ * Build the host-map key for a (potentially remote) session.
+ *
+ * The CodexAgent keeps one `AppServerHost` per "target" — local spawn vs
+ * each distinct remote ssh host. Reusing a host across sessions in the same
+ * target is load-bearing: the codex app-server caches initialize state +
+ * keeps a single thread namespace per process, so two sessions on the same
+ * remoteHostId MUST land on the same host instance.
+ *
+ * Empty / undefined / null / falsy remoteHostId → 'local' (a missing remote
+ * id is always interpreted as "run on this machine", never as a sentinel
+ * remote alias).
+ *
+ * Exported as a module-level pure function so the routing rule has unit
+ * coverage independent of the CodexAgent class (which is otherwise hard to
+ * instantiate without full host deps).
+ */
+export function hostKey(remoteHostId?: string | null): string {
+  return remoteHostId ? `remote:${remoteHostId}` : 'local';
+}
+
+/**
+ * maker permissionMode → app-server { approvalPolicy, sandbox }。
+ *
+ * Phase 2 起 'ask' 走 'on-request' — server 真发 CommandExecutionRequestApproval,
+ * 我们 setRequestHandler 接住转 dispatchInteraction → UI 弹 PermissionPrompt。
+ */
+type CodexPermissionConfig = {
+  approvalPolicy: AskForApproval;
+  sandbox: SandboxMode;
+};
+function mapPermissionToCodex(permissionMode?: string): CodexPermissionConfig {
+  // 严格 kebab-case (v2.rs serde rename_all="kebab-case"), camelCase 会被 server -32600 reject
+  switch (permissionMode) {
+    case 'bypassPermissions':
+      return { approvalPolicy: 'never', sandbox: 'danger-full-access' };
+    case 'auto':
+      // Codex 原生 untrusted 策略就是它的 Auto-review:可信命令集自动执行，
+      // 非可信命令升级给用户确认。保持 workspace sandbox，绝不等同 Full access。
+      return { approvalPolicy: 'untrusted', sandbox: 'workspace-write' };
+    default:
+      return { approvalPolicy: 'on-request', sandbox: 'workspace-write' };
+  }
+}
+
+/**
+ * SandboxMode (thread/start 用 kebab enum) → SandboxPolicy (turn/start 用 tag union)。
+ * 两者**字段名 + 类型都不一样**, 是 Codex 协议的不对称设计 — turn/start 接 SandboxPolicy
+ * 让 server 能在 turn 中途切换更细粒度的沙盒配置。
+ *
+ * 简单映射: 各模式取默认值 (server 端字段都有 #[serde(default)], 省略即可)。
+ *
+ * extraWritableRoots: 仅 workspaceWrite 模式生效, 把 workspace 之外的额外路径加进
+ * 可写白名单, 让 apply_patch 不被 "writing outside of the project" 预检拦掉。
+ * 当前用途: 把 <CODEX_HOME>/memories/ 加进去, 让 codex 自家 MemoryTool 的写入流程
+ * (model 用 apply_patch 改 memory_summary.md / MEMORY.md) 不撞预检。
+ */
+function sandboxModeToPolicy(mode: SandboxMode, extraWritableRoots: string[] = []): SandboxPolicy {
+  switch (mode) {
+    case 'danger-full-access':
+      return { type: 'dangerFullAccess' };
+    case 'read-only':
+      return { type: 'readOnly' };
+    case 'workspace-write':
+      return {
+        type: 'workspaceWrite',
+        ...(extraWritableRoots.length > 0 ? { writableRoots: extraWritableRoots } : {}),
+      };
+  }
+}
+
+/** maker InteractionDecision.behavior → Codex ApprovalDecision (camelCase serde)。 */
+function mapBehaviorToApproval(behavior: 'allow' | 'deny'): ApprovalDecision {
+  return behavior === 'allow' ? 'accept' : 'decline';
+}
+
+const ASK_USER_DYNAMIC_TOOL_NAMESPACE = 'cindy';
+const LEGACY_ASK_USER_DYNAMIC_TOOL_NAMESPACE = 'xdt_maker';
+const ASK_USER_DYNAMIC_TOOL_NAME = 'ask_user_question';
+const MAX_REQUEST_USER_INPUT_QUESTIONS = 3;
+const MAX_REQUEST_USER_INPUT_OPTIONS = 10;
+const MAX_REQUEST_USER_INPUT_TEXT_CHARS = 1_000;
+const MAX_REQUEST_USER_INPUT_ANSWER_CHARS = 2_000;
+const DISABLE_ASK_USER_DYNAMIC_TOOL_FALLBACK = process.env.XDT_CODEX_DISABLE_ASK_USER_DYNAMIC_TOOL === '1';
+// xAI rejects Codex namespace dynamic tools in its Responses `tools[]` schema.
+const CODEX_DYNAMIC_TOOL_UNSUPPORTED_PROVIDER_IDS = new Set(['xai']);
+
+const ASK_USER_DYNAMIC_TOOL: DynamicToolSpec = {
+  namespace: ASK_USER_DYNAMIC_TOOL_NAMESPACE,
+  name: ASK_USER_DYNAMIC_TOOL_NAME,
+  description: [
+    'Use this tool instead of listing choices or asking in prose when the user asks to choose, pick a direction, select an approach, or narrow options before you continue.',
+    'Use it for product preferences, game/design/business directions, business judgments, and choices between materially different approaches.',
+    'Use it when the next useful step depends on the user selecting among options, even if you could provide a generic list yourself.',
+    'Ask 1 to 3 short questions in a single call when those questions are independent; do not make several back-to-back calls for independent clarification questions.',
+    'Use a later follow-up call only when the next question depends on the user answer to an earlier question.',
+    'Do not use it for routine implementation details; choose a reasonable default.',
+    'This tool does not replace authorization for destructive or external actions.',
+  ].join(' '),
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['questions'],
+    properties: {
+      questions: {
+        type: 'array',
+        description: 'One to three short user-facing questions to ask together. Bundle independent choices into this array instead of calling the tool repeatedly.',
+        minItems: 1,
+        maxItems: MAX_REQUEST_USER_INPUT_QUESTIONS,
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['question'],
+          properties: {
+            id: { type: 'string', description: 'Stable answer key for this question.' },
+            header: { type: 'string', description: 'Short label shown above the question.' },
+            question: { type: 'string', description: 'Clear question text for the user.' },
+            options: {
+              type: 'array',
+              description: 'Optional single-select answer choices. Omit when free-form input is needed.',
+              maxItems: MAX_REQUEST_USER_INPUT_OPTIONS,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['label'],
+                properties: {
+                  label: { type: 'string', description: 'Short option label returned as the answer.' },
+                  description: { type: 'string', description: 'Brief explanation of when this option is appropriate.' },
+                },
+              },
+            },
+            isOther: { type: 'boolean', description: 'Whether the user may provide a free-form answer outside the listed options.' },
+          },
+        },
+      },
+    },
+  },
+};
+
+interface ActiveToolContext {
+  type: 'mcpToolCall' | 'dynamicToolCall';
+  turnId?: string | null;
+  server?: string | null;
+  namespace?: string | null;
+  tool?: string | null;
+}
+
+function isAskUserDynamicTool(params: Pick<DynamicToolCallParams, 'namespace' | 'tool'>): boolean {
+  return (
+    (params.namespace === ASK_USER_DYNAMIC_TOOL_NAMESPACE ||
+      params.namespace === LEGACY_ASK_USER_DYNAMIC_TOOL_NAMESPACE) &&
+    params.tool === ASK_USER_DYNAMIC_TOOL_NAME
+  );
+}
+
+function shouldRegisterAskUserDynamicTool(opts: Pick<StartSessionOptions, 'model' | 'providerId'>): boolean {
+  if (DISABLE_ASK_USER_DYNAMIC_TOOL_FALLBACK) return false;
+  const providerId = typeof opts.providerId === 'string' ? opts.providerId.trim() : '';
+  if (CODEX_DYNAMIC_TOOL_UNSUPPORTED_PROVIDER_IDS.has(providerId)) return false;
+  if (!providerId && opts.model.startsWith('xai/')) return false;
+  return true;
+}
+
+function truncateUserInputText(value: string): string {
+  return value.length > MAX_REQUEST_USER_INPUT_TEXT_CHARS
+    ? value.slice(0, MAX_REQUEST_USER_INPUT_TEXT_CHARS)
+    : value;
+}
+
+function truncateAnswerText(value: string): string {
+  return value.length > MAX_REQUEST_USER_INPUT_ANSWER_CHARS
+    ? value.slice(0, MAX_REQUEST_USER_INPUT_ANSWER_CHARS)
+    : value;
+}
+
+function emptyUserInputResponse(questions: readonly Pick<ToolRequestUserInputQuestion, 'id'>[]): ToolRequestUserInputResponse {
+  const answers: ToolRequestUserInputResponse['answers'] = {};
+  for (const q of questions) {
+    if (q.id) answers[q.id] = { answers: [] };
+  }
+  return { answers };
+}
+
+function normalizeRequestUserInputQuestions(
+  questions: readonly ToolRequestUserInputQuestion[],
+): ToolRequestUserInputQuestion[] {
+  return questions.slice(0, MAX_REQUEST_USER_INPUT_QUESTIONS).map((q, index) => ({
+    id: q.id || `question-${index + 1}`,
+    header: truncateUserInputText(q.header || ''),
+    question: truncateUserInputText(q.question || q.header || `Question ${index + 1}`),
+    isOther: q.isOther === true,
+    isSecret: q.isSecret === true,
+    options: Array.isArray(q.options)
+      ? q.options.slice(0, MAX_REQUEST_USER_INPUT_OPTIONS).map((option) => ({
+          label: truncateUserInputText(option.label || ''),
+          description: truncateUserInputText(option.description || ''),
+        })).filter((option) => option.label.trim().length > 0)
+      : null,
+  }));
+}
+
+function normalizeDynamicAskUserQuestions(args: unknown): ToolRequestUserInputQuestion[] {
+  const input = args && typeof args === 'object' ? args as { questions?: unknown } : {};
+  const rawQuestions = Array.isArray(input.questions) ? input.questions : [];
+  const questions: ToolRequestUserInputQuestion[] = rawQuestions.map((raw, index) => {
+    const q = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+    const rawOptions = Array.isArray(q.options) ? q.options : null;
+    return {
+      id: typeof q.id === 'string' && q.id.trim() ? q.id : `question-${index + 1}`,
+      header: typeof q.header === 'string' ? q.header : '',
+      question: typeof q.question === 'string' ? q.question : '',
+      isOther: q.isOther === true,
+      // Dynamic fallback is a business-choice tool. It must not collect secrets.
+      isSecret: false,
+      options: rawOptions
+        ? rawOptions.map((rawOption) => {
+            const option = rawOption && typeof rawOption === 'object'
+              ? rawOption as Record<string, unknown>
+              : {};
+            return {
+              label: typeof option.label === 'string' ? option.label : '',
+              description: typeof option.description === 'string' ? option.description : '',
+            };
+          })
+        : null,
+    };
+  });
+  return normalizeRequestUserInputQuestions(questions);
+}
+
+function questionsToAskUserItems(questions: readonly ToolRequestUserInputQuestion[]) {
+  return questions.map((q) => ({
+    question: q.question,
+    header: q.header || undefined,
+    options: q.options?.map((option) => ({
+      label: option.label,
+      description: option.description || undefined,
+    })),
+    multiSelect: false,
+  }));
+}
+
+function responseFromAskUserAnswers(
+  questions: readonly ToolRequestUserInputQuestion[],
+  answers: Record<string, string>,
+): ToolRequestUserInputResponse {
+  const out: ToolRequestUserInputResponse['answers'] = {};
+  for (const q of questions) {
+    const raw = answers[q.question] ?? answers[q.header] ?? answers[q.id] ?? '';
+    if (!raw) {
+      out[q.id] = { answers: [] };
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        out[q.id] = { answers: parsed.filter((v): v is string => typeof v === 'string').map(truncateAnswerText) };
+        continue;
+      }
+    } catch {
+      // Single-select answers are plain labels, not JSON.
+    }
+    out[q.id] = { answers: [truncateAnswerText(raw)] };
+  }
+  return { answers: out };
+}
+
+function responseFromPermissionDecision(
+  questions: readonly ToolRequestUserInputQuestion[],
+  decision: Extract<InteractionDecision, { kind: 'permission' }>,
+): ToolRequestUserInputResponse {
+  if (decision.behavior === 'deny') return emptyUserInputResponse(questions);
+  const out: ToolRequestUserInputResponse['answers'] = {};
+  for (const q of questions) {
+    const positiveOption = q.options?.find((option) =>
+      /^(allow|approve|accept|yes|continue|confirm)$/i.test(option.label.trim()),
+    );
+    const option = positiveOption?.label ?? q.options?.[0]?.label ?? 'allow';
+    out[q.id] = { answers: [option] };
+  }
+  return { answers: out };
+}
+
+function dynamicToolResponseFromUserInput(response: ToolRequestUserInputResponse): DynamicToolCallResponse {
+  return {
+    success: true,
+    contentItems: [{ type: 'inputText', text: JSON.stringify(response.answers) }],
+  };
+}
+
+function normalizeServiceTier(serviceTier: ServiceTier | null | undefined): ServiceTier | null | undefined {
+  return serviceTier === 'priority' ? 'fast' : serviceTier;
+}
+
+function isFastServiceTier(serviceTier: ServiceTier | null | undefined): boolean {
+  return normalizeServiceTier(serviceTier) === 'fast';
+}
+
+function skillDescription(skill: SkillMetadata): string | undefined {
+  return (
+    skill.interface?.shortDescription?.trim() ||
+    skill.shortDescription?.trim() ||
+    skill.description?.trim() ||
+    undefined
+  );
+}
+
+function parseLeadingSlashToken(text: string): { name: string; rest: string } | null {
+  const match = text.match(/^\/([^\s/]+)(?:\s+([\s\S]*))?$/);
+  if (!match?.[1]) return null;
+  return { name: match[1], rest: match[2] ?? '' };
+}
+
+// 插话 (steer) 时 turn/steer RPC 的 ack 有界等待上限。AppServerClient.request
+// 本身没有超时, app-server 卡死时裸 await 会永久挂起 → coordinator steering marker
+// 永久残留 → 后续插话点击被静默吞掉。正常情况下 ack 是毫秒级, 10s 足够宽裕。
+const STEER_ACK_TIMEOUT_MS = 10_000;
+
+// 权限收紧 fail-safe 的 turn/interrupt RPC ack 有界等待上限。没有超时的话,
+// app-server / 连接无响应时该 RPC 永久悬挂 —— 既不走重试、也不透出失败提示,
+// 免审 turn 将无声继续跑 (review #969 第六轮 Greptile P1)。取值与 steer 同款 10s。
+const TIGHTEN_INTERRUPT_ACK_TIMEOUT_MS = 10_000;
+
+// 计划批准后自动发起实施 turn 的固定输入 — 与官方 TUI 逐字一致
+// (codex-rs/tui/src/chatwidget/plan_implementation.rs 的
+// PLAN_IMPLEMENTATION_CODING_MESSAGE), 模型对这句有训练分布上的既有理解。
+const PLAN_IMPLEMENTATION_MESSAGE = 'Implement the plan.';
+const SYSTEM_PLAN_REVIEW_DISMISSAL_REASONS = new Set([
+  'no_listener_attached',
+  'no_interaction_resolver',
+  'interaction_resolver_error',
+  'user_rejected',
+]);
+
+// ── 能力声明 (Phase 3 全开) ──────────────────────────────────────────────────
+
+// 模型清单 SSoT 已迁至目录 packages/model-providers/catalog/providers.json。
+// availableModels 起始为空,由 host 从 BUNDLED_CATALOG 派生后经 capabilityAdditions 注入
+// (见 apps/desktop/src/main/maker-host/catalog-to-descriptors.ts)。
+
+const CODEX_EFFORTS: EffortDescriptor[] = [
+  { id: 'low', displayName: 'Low', description: 'Fast responses with minimal reasoning' },
+  { id: 'medium', displayName: 'Medium', description: 'Balanced reasoning depth' },
+  { id: 'high', displayName: 'High', description: 'Deeper reasoning for harder tasks' },
+  { id: 'xhigh', displayName: 'Extra', description: 'Extended reasoning budget' },
+  // max/ultra 仅部分模型支持(如 GPT-5.6 Sol);实际是否可选由该模型目录 efforts 决定,
+  // 这里只提供 agent 级档名/描述兜底(桌面 i18n effortLevels.* 优先)。
+  { id: 'max', displayName: 'Max', description: 'Very high reasoning budget (model-dependent)' },
+  { id: 'ultra', displayName: 'Ultra', description: 'Maximum reasoning budget (model-dependent)' },
+];
+
+const CODEX_PERMISSION_MODES: PermissionModeDescriptor[] = [
+  { id: 'ask', displayName: 'Default permissions', description: '工作区内可读写,需要更多权限时询问' },
+  { id: 'auto', displayName: 'Auto-review', description: '可信命令自动执行,非可信命令询问' },
+  { id: 'bypassPermissions', displayName: 'Full access', description: '可改任意文件、跑联网命令,免询问;风险高' },
+];
+
+const CAPABILITIES: Capabilities = {
+  // Phase 3: turn/start 透传 model 即可 — server 接受 per-turn override
+  switchModel: { supported: true },
+  availableModels: [],
+  hasFastMode: true,
+  effort: { supported: true },
+  effortLevels: CODEX_EFFORTS,
+  reasoningDisplay: ['off', 'summarized'],
+  permissionModes: CODEX_PERMISSION_MODES,
+  setPermissionModeMidSession: { supported: true },
+  // 计划模式一级开关: app-server experimental collaborationMode ({ mode:'plan' }) +
+  // plan item 捕获 → plan_review 审批 → 批准后自动发起实施 turn (对齐官方 TUI 流程)。
+  planMode: { supported: true },
+  multimodal: {
+    text: { supported: true },
+    image: { supported: true },
+    file: { supported: true },
+  },
+  // Phase 3: thread/fork 已实现 (uuidMap 空, Codex 没有 message uuid 概念但不影响 fork 本身)
+  fork: { supported: true },
+  // Codex app-server 支持 thread/rollback 裁剪对话 turn；它不做文件回滚。
+  // 产品的“代码 + 对话”回退由 Git rollback 负责代码部分，再调用此能力裁剪对话。
+  rewind: { supported: true },
+  abort: { supported: true },
+  sameTurnSteer: { supported: true },
+  memory: {
+    supported: { supported: true },
+    displayName: '记忆 (实验性)',
+    description: '从聊天中生成新记忆并在新对话中召回 (Codex Feature::MemoryTool, 默认关)',
+    stage: 'experimental',
+    defaultEnabled: false,
+    resettable: true,
+    // experimentalFeature/enablement/set 是 in-memory 进程级覆盖, server 自动 reload_user_config
+    // 通知所有 live thread, 真正立即生效
+    setEnabledMidSession: { supported: true },
+  },
+  // Codex developerInstructions 在 thread/start 一次性装配, 中途无法 hot-reload。
+  // 要中途生效得改成 per-turn input prefix (每 turn 多 100-200 tokens), 团队讨论后
+  // 否决了这个 token 代价。首版 capability=false, UI 在 Codex session 上不渲染入口。
+  // 未来若 Codex 协议支持 mid-session systemPrompt 更新, 可重开此项。
+  extraDirs: {
+    supported: false,
+    reason: 'sdk-missing',
+    message: 'Codex developerInstructions 是 thread/start 一次性装配, 中途无法修改',
+  },
+};
+
+// ── UserMessage → app-server UserInput[] ─────────────────────────────────────
+
+function stripFileUrl(raw: string): string {
+  return raw.startsWith('file://') ? raw.slice('file://'.length) : raw;
+}
+
+function basenameForMention(rawPath: string): string {
+  const pathWithoutScheme = stripFileUrl(rawPath);
+  // CodeQL flags regex-based separator trimming on user-controlled paths as a
+  // potential slow-regex sink. Path mention labels only need simple separator
+  // handling, so keep this branch deterministic and allocation-light.
+  let end = pathWithoutScheme.length;
+  while (end > 0 && isPathSeparator(pathWithoutScheme.charCodeAt(end - 1))) {
+    end -= 1;
+  }
+  const trimmed = pathWithoutScheme.slice(0, end);
+  const lastPosixSlash = trimmed.lastIndexOf('/');
+  const lastWinSlash = trimmed.lastIndexOf('\\');
+  const lastSlash = Math.max(lastPosixSlash, lastWinSlash);
+  return (lastSlash >= 0 ? trimmed.slice(lastSlash + 1) : trimmed) || trimmed || 'file';
+}
+
+function isPathSeparator(code: number): boolean {
+  return code === 47 || code === 92; // '/' or '\'
+}
+
+function isAsciiLetter(code: number): boolean {
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function isWindowsPath(rawPath: string): boolean {
+  return (
+    (
+      rawPath.length >= 3 &&
+      isAsciiLetter(rawPath.charCodeAt(0)) &&
+      rawPath.charCodeAt(1) === 58 &&
+      isPathSeparator(rawPath.charCodeAt(2))
+    ) ||
+    rawPath.startsWith('\\\\')
+  );
+}
+
+function resolveMentionPath(rawPath: string, workingDir?: string): string {
+  const stripped = stripFileUrl(rawPath);
+  if (!workingDir) return stripped;
+  if (isWindowsPath(stripped) || path.posix.isAbsolute(stripped)) return stripped;
+  if (isWindowsPath(workingDir)) return path.win32.resolve(workingDir, stripped);
+  if (path.posix.isAbsolute(workingDir)) return path.posix.resolve(workingDir, stripped);
+  return path.resolve(workingDir, stripped);
+}
+
+function isToolMentionPath(mentionPath: string): boolean {
+  return mentionPath.startsWith('app://') || mentionPath.startsWith('plugin://');
+}
+
+interface ReferencedPath {
+  kind: 'file' | 'dir';
+  label: string;
+  path: string;
+}
+
+const FILES_MENTIONED_HEADER = '# Files mentioned by the user:';
+const DIRECTORIES_MENTIONED_HEADER = '# Directories mentioned by the user:';
+const USER_REQUEST_HEADER = '## My request for Codex:';
+
+function referencedPathForBlock(
+  rawPath: string,
+  workingDir: string | undefined,
+  kind: 'file' | 'dir' | 'agent' | undefined,
+): ReferencedPath {
+  const resolved = resolveMentionPath(rawPath, workingDir);
+  return {
+    kind: kind === 'dir' ? 'dir' : 'file',
+    label: basenameForMention(resolved),
+    path: resolved,
+  };
+}
+
+function appendReferencedPathSection(lines: string[], header: string, refs: ReferencedPath[]): void {
+  if (refs.length === 0) return;
+  if (lines.length > 0) lines.push('');
+  lines.push(header, '');
+  for (const ref of refs) {
+    lines.push(`## ${ref.label}: ${ref.path}`, '');
+  }
+  lines.pop();
+}
+
+function formatReferencedPathsForCodex(refs: ReferencedPath[], requestText: string): string {
+  const lines: string[] = [];
+  appendReferencedPathSection(lines, FILES_MENTIONED_HEADER, refs.filter((ref) => ref.kind === 'file'));
+  appendReferencedPathSection(lines, DIRECTORIES_MENTIONED_HEADER, refs.filter((ref) => ref.kind === 'dir'));
+
+  if (requestText.length > 0) {
+    if (lines.length > 0) lines.push('');
+    lines.push(USER_REQUEST_HEADER, requestText);
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * 把 UserMessage content 转成 codex app-server 的 UserInput 数组。
+ *
+ * Async 而非 sync —— LocalImage 的 path 会先经过 image-resizer 透明替换为缩好的
+ * 缓存副本路径(命中走缓存近乎 0ms, miss 后台 sharp 处理 ~200-500ms), codex
+ * Rust 端读到的就是缩好的文件, 显著节省 vision token。
+ *
+ * 远程 http(s):// 图片不动 (resizer 不抓远程图)。失败安全降级回原 path。
+ */
+export async function toAppServerInput(
+  content: UserMessage['content'],
+  workingDir?: string,
+): Promise<UserInput[]> {
+  if (typeof content === 'string') {
+    return [{ type: 'text', text: content }];
+  }
+
+  const resizer = getDefaultImageResizer();
+  // 同 turn 多张本地图并发缩, semaphore 在 resizer 内部控并发上限
+  const localImageJobs = new Map<number, Promise<string>>();
+  content.forEach((block, idx) => {
+    if (block.type !== 'image') return;
+    const raw = block.path;
+    if (raw.startsWith('http://') || raw.startsWith('https://')) return;
+    localImageJobs.set(idx, resizer.process(stripFileUrl(raw)));
+  });
+  const resizedPaths = new Map<number, string>();
+  for (const [idx, p] of localImageJobs) {
+    resizedPaths.set(idx, await p);
+  }
+
+  type PlannedInput = UserInput | { type: 'referencedPathsPreamble' } | { type: 'requestText'; text: string };
+  const inputs: UserInput[] = [];
+  const plannedInputs: PlannedInput[] = [];
+  const referencedPaths: ReferencedPath[] = [];
+  const requestTexts: string[] = [];
+  let preambleInserted = false;
+
+  const insertPreambleOnce = (): void => {
+    if (preambleInserted) return;
+    plannedInputs.push({ type: 'referencedPathsPreamble' });
+    preambleInserted = true;
+  };
+
+  content.forEach((block, idx) => {
+    if (block.type === 'text') {
+      requestTexts.push(block.text);
+      insertPreambleOnce();
+      plannedInputs.push({ type: 'requestText', text: block.text });
+    } else if (block.type === 'image') {
+      // 协议两个变体 (v2.rs UserInput):
+      //   - Image { url: string }       — 远程 http(s):// URL, server fetch
+      //   - LocalImage { path: string } — 本地绝对路径, server 自己读 (path 不带 file:// 前缀!)
+      // 桌面端附件 99% 是本地图, 走 LocalImage; 只在 path 是 http(s):// 时走 Image。
+      const raw = block.path;
+      if (raw.startsWith('http://') || raw.startsWith('https://')) {
+        plannedInputs.push({ type: 'image', url: raw });
+      } else {
+        // 去掉可能带的 file:// 前缀, server 期望裸路径 (PathBuf)。
+        // 优先用 resizer 缩好的副本, miss 时降级回原 path。
+        const finalPath = resizedPaths.get(idx) ?? stripFileUrl(raw);
+        plannedInputs.push({ type: 'localImage', path: finalPath });
+      }
+    } else if (block.type === 'file') {
+      referencedPaths.push(referencedPathForBlock(block.path, workingDir, 'file'));
+      insertPreambleOnce();
+    } else if (block.type === 'mention') {
+      if (!block.kind && isToolMentionPath(block.path)) {
+        plannedInputs.push({ type: 'mention', name: block.name || basenameForMention(block.path), path: block.path });
+      } else {
+        referencedPaths.push(referencedPathForBlock(block.path, workingDir, block.kind));
+        insertPreambleOnce();
+      }
+    }
+  });
+  if (referencedPaths.length > 0) {
+    const preamble = formatReferencedPathsForCodex(referencedPaths, requestTexts.join('\n'));
+    for (const item of plannedInputs) {
+      if (item.type === 'referencedPathsPreamble') {
+        inputs.push({ type: 'text', text: preamble });
+      } else if (item.type === 'requestText') {
+        // Text is already folded into the Desktop-style request section.
+      } else {
+        inputs.push(item);
+      }
+    }
+  } else {
+    for (const item of plannedInputs) {
+      if (item.type === 'referencedPathsPreamble') {
+        // No path references: keep the previous per-block text behavior below.
+      } else if (item.type === 'requestText') {
+        inputs.push({ type: 'text', text: item.text });
+      } else {
+        inputs.push(item);
+      }
+    }
+  }
+  if (inputs.length === 0) inputs.push({ type: 'text', text: '' });
+  return inputs;
+}
+
+// ── Agent 实现 ────────────────────────────────────────────────────────────────
+
+export class CodexAgent extends BaseAgent {
+  readonly kind = 'codex' as const;
+  readonly capabilities: Capabilities;
+
+  /**
+   * Hosts keyed by target — `'local'` 或 `remote:<remoteHostId>`。每个 target
+   * 一个 AppServerHost (= 一个 codex app-server, 本地 spawn / 远端 daemon-bridged
+   * 都对应自己的)。
+   *
+   * 为什么不是单 host: 用户可能同时开本地 session 和 ssh 远端 session, 两条路
+   * 走不同 transport (StdioTransport vs SshDaemonTransport), 没法共用一个 host。
+   * "1 agent N host" 是 codex 端做不到 "1 server N transport" 的必然后果。
+   */
+  private hosts = new Map<string, AppServerHost>();
+
+  /**
+   * getHost() 的 in-flight Promise 去重, per target — 创建过程含 3 个 await
+   * (auth.getState / buildCodexEnv / prepareCodexExtraSpawnConfig), 不去重则
+   * 启动期间并发 (skillHubScanner / startSession / IPC list) 各看到 hosts.get(...)=undefined,
+   * 各自 spawn 一个 codex app-server 子进程, 第二个会覆盖 hosts.set(...), 第一个变孤儿。
+   */
+  private hostPromises = new Map<string, {
+    promise: Promise<AppServerHost>;
+    credentialMode: AgentCredentialMode | undefined;
+    credentialModeResolved: boolean;
+    generation: number;
+  }>();
+
+  /**
+   * 本地 app-server 的 spawn-time 凭证形态(超集归一化后的实际 spawn 形态)。
+   *
+   * 方案 A(2026-07)后的复用语义:oauth-bearer spawn 是「订阅超集 host」——proxy 按
+   * 请求/会话换网关 key,gateway-key 会话可直接复用它(见 canReuseCodexHostForCredentialMode),
+   * 订阅与 API 会话得以并行,不再因来源切换重建 host。反向仍然重建:env-key spawn 的
+   * 进程服务不了订阅会话。createHost 对本地 gateway-key 诉求做超集归一化(有 OAuth 时
+   * 升格为 oauth-bearer spawn),登记的就是归一化后的形态。
+   */
+  private hostCredentialModes = new Map<string, AgentCredentialMode | undefined>();
+  /**
+   * createHost 时从(本来就要做的)auth.getState 推出的归一化凭证形态。
+   * hostCredentialModes 登记实际 spawn 形态 —— getHost 快路径对实际形态与诉求
+   * 做逐字比较(implicit-implicit / 同显式),零 IO;本表只在快路径
+   * 不等、需要跨形态仲裁时参与 canReuseCodexHostForCredentialMode 比较(review P2:
+   * 归一化解析含 fs,不允许进无条件路径)。
+   */
+  private hostEffectiveCredentialModes = new Map<string, AgentCredentialMode | undefined>();
+
+  /**
+   * target host 的生命周期版本。只在 agent 主动替换/销毁 host 时递增。
+   * transport error 的同对象自愈不递增,保留现有 session 内恢复能力。
+   */
+  private hostGenerations = new Map<string, number>();
+
+  /**
+   * createHost 调用计数 —— 按 host key 诊断 in-flight 去重是否生效。
+   * 正常每个 host key 的生命周期内每次 dispose 之间应该恰好 +1; 出现 >1 说明 hostPromise 去重失效
+   * (旧 bug: 会 spawn 多个 codex app-server 子进程, 前面的变孤儿)。
+   */
+  private createHostSeqByKey = new Map<string, number>();
+
+  /**
+   * thread/start|resume 已开始但尚未 subscribeThread 的会话绑定计数。
+   *
+   * activeSubscriptions 只能覆盖已订阅的 session;这个 lease 补上 thread 创建成功到订阅
+   * 建立前的短窗口,避免 credential switch 在中途 retire host 造成新会话 stale。
+   */
+  private hostSessionBindingLeases = new Map<string, number>();
+
+  /**
+   * 本地 host 凭证形态切换锁。
+   *
+   * 切换期间旧 host 还在 map 里,但已经进入 draining 状态;同 key 的新 getHost 必须先等
+   * 当前切换完成,不能继续把新 session 挂到即将 retire 的旧 host 上。
+   */
+  private hostCredentialModeSwitches = new Map<string, Promise<void>>();
+
+  /**
+   * app-server 启动时返回的 $CODEX_HOME 绝对路径 (InitializeResponse.codexHome)。
+   * 用来推 codex 自家 memory 数据目录 (<CODEX_HOME>/memories/), 进而把它加进 turn/start
+   * 的 sandboxPolicy.workspaceWrite.writableRoots, 让 codex 内置 MemoryTool 写
+   * memory_summary.md / MEMORY.md 时不被 "writing outside of the project" 预检拦掉。
+   *
+   * 启动时由 ensureStarted() 返回值填; dispose 后清零, 下次 host 重建再填。
+   */
+  private codexHome: string | null = null;
+
+  /**
+   * 各 app-server host 已 push 的 memoryOverride 值。
+   *
+   * memoryOverride 是 host 端的意图, app-server 是另一个进程, 不会自动同步; 必须主动
+   * RPC (experimentalFeature/enablement/set) 推过去。本字段按 host key 记录
+   * "上次 push 的值是什么", 让 ensureMemoryOverridePushed 可以判断 "需不需要再 push"。
+   *
+   * 重置时机:
+   *  - host 重建/dispose: server 重启会丢内存 enablement, 清掉对应 key 让下次 ensure 再 push
+   *  - setMemory 后立即 RPC 同步所有 live host; 无 live host 时在下一次 startSession ensure 时补齐
+   */
+  private memoryOverridePushedByHost = new Map<string, boolean | undefined>();
+  constructor(deps: AgentDeps) {
+    super(deps);
+    this.capabilities = this.buildCapabilities(CAPABILITIES);
+  }
+
+  /**
+   * Agent 内置 command —— 见 ./commands.ts。当前 codex 白名单为空,
+   * 内置 slash 全走 app-server skills/list 归 'agent-skill' 类目。
+   */
+  override listAgentCommands(): AgentBuiltinCommand[] {
+    return CODEX_AGENT_COMMANDS;
+  }
+
+  /**
+   * Skill 扫描 —— 与老 listSlashCommands 共享同一套 listSkillsForCwd / 未授权静默处理,
+   * 只是包成新的 AgentSkillCommand 形状(kind='agent-skill')。
+   */
+  override async listAgentSkills(opts: ListAgentSkillsOptions): Promise<ListAgentSkillsResult> {
+    try {
+      const { skills, errors } = await this.listSkillsForCwd(opts.workingDir, opts.forceReload ?? false);
+      const out: ListAgentSkillsResult = {
+        skills: skills
+          .filter((skill) => skill.enabled)
+          .map((skill) => ({
+            kind: 'agent-skill' as const,
+            name: skill.name,
+            description: skillDescription(skill),
+            source: 'skill' as const,
+            path: skill.path,
+            scope: skill.scope,
+            enabled: skill.enabled,
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name)),
+      };
+      if (errors.length > 0) out.errors = errors;
+      return out;
+    } catch (err) {
+      if (err instanceof AgentNotAuthenticatedError) {
+        return { skills: [] };
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Codex customization 入口 —— 纯文件系统扫描，不触发 app-server。
+   *
+   * 扫描 ~/.agents/skills/ + ~/.codex/skills/ + project skill dirs。
+   * 用于 SkillHub 管理页面（快速发现磁盘上的 skill）。
+   * 运行时技能列表（command palette）走 listAgentSkills → RPC，不受影响。
+   */
+  async listCustomizations(opts: ListCustomizationsOptions): Promise<ListCustomizationsResult> {
+    return scanCodexCustomizations(opts);
+  }
+
+  private async listSkillsForCwd(
+    workingDir: string,
+    forceReload: boolean,
+  ): Promise<{ skills: SkillMetadata[]; errors: Array<{ path?: string; message: string }> }> {
+    const { host } = await this.getUtilityHost();
+    const response = await host.request<SkillsListResponse>(Method.SkillsList, {
+      cwds: [workingDir],
+      forceReload,
+      perCwdExtraUserRoots: null,
+    });
+    const entry = response.data.find((item) => item.cwd === workingDir) ?? response.data[0];
+    return {
+      skills: entry?.skills ?? [],
+      errors: (entry?.errors ?? []).map((err) => ({ path: err.path, message: err.message })),
+    };
+  }
+
+  /**
+   * 懒创建 host (但 spawn 由 ensureStarted 触发)。
+   *
+   * **Auth gate**: 第一次创建前先 `auth.getState()`,未授权直接抛
+   * `AgentNotAuthenticatedError` — 不让 codex app-server 子进程在 "未登录" 状态下
+   * 起来 (起来后 auth.json 即使写好也读不到,会导致首 turn 401)。
+   *
+   * 复合检查: 已经有 host 时不重复 getState — host 存在即说明之前授权过且 dispose
+   * 钩子还没触发(logout 时会 dispose 清掉)。这样热路径 (每次 send) 不会多一次 fs 读。
+   */
+  private canReuseHostCredentialMode(
+    currentMode: AgentCredentialMode | undefined,
+    requestedMode: AgentCredentialMode | undefined,
+  ): boolean {
+    // 语义在 credential-mode.ts:两侧都是归一化后的形态,同族即复用;codex 额外放宽
+    // 「oauth-bearer 超集 host 服务 gateway-key 会话」(方案 A,proxy 按请求换网关 key)。
+    // 解析不出形态(undefined)保持保守语义要求重建,不把意图不明的会话挂到显式凭证进程上。
+    return canReuseCodexHostForCredentialMode(currentMode, requestedMode);
+  }
+
+  private canReuseHostForCredentialRequest(
+    host: AppServerHost,
+    currentMode: AgentCredentialMode | undefined,
+    requestedMode: AgentCredentialMode | undefined,
+  ): boolean {
+    if (!this.canReuseHostCredentialMode(currentMode, requestedMode)) return false;
+    // provider-oauth(如 xAI)的真实鉴权和 model rewrite 都在 loopback proxy 内完成。
+    // 如果当前 host 是 proxy 不可用时退化启动的直连 gateway host, family 虽然可复用,
+    // 但请求会绕过 proxy 而误路由;必须重建或由 active-session gate fail closed。
+    if (requestedMode === 'provider-oauth' && !host.isCodexProxyActive()) return false;
+    // 超集复用(oauth-bearer host 承载 gateway-key 会话)同样硬依赖 proxy:换网关 key
+    // 发生在 proxy 路由层,退化直连的 oauth host 上 key 会话会带 OAuth token 直打网关 → 401。
+    if (
+      requestedMode === 'gateway-key' &&
+      currentMode === 'oauth-bearer' &&
+      !host.isCodexProxyActive()
+    ) return false;
+    return true;
+  }
+
+  /**
+   * oauth 超集 host 复用 gateway-key 诉求前，单独验证网关凭证仍然可用。
+   * host 自己通过 OAuth auth gate 只能证明订阅身份有效，不能替代 API Key 校验；
+   * 否则缺 key 的 XD 会话会被错误挂载，直到首个请求才以 401 失败。
+   */
+  private async assertSupersetRequestedCredentialAvailable(
+    currentMode: AgentCredentialMode | undefined,
+    requestedMode: AgentCredentialMode | undefined,
+  ): Promise<void> {
+    if (currentMode !== 'oauth-bearer' || requestedMode !== 'gateway-key') return;
+    const state = await this.deps.auth.getState({ credentialMode: 'gateway-key' });
+    if (!state.authenticated) {
+      throw new AgentNotAuthenticatedError(
+        'codex',
+        `codex gateway credentials unavailable: ${state.errorReason ?? 'no_credentials'}`,
+      );
+    }
+  }
+
+  /**
+   * 归一化本地会话的凭证形态:显式指定原样返回;未指定(providerId=null 的会话)则读
+   * auth fallback 的 authSource 推出它实际会用的钥匙形态。返回值只用于 host 复用比较
+   * 与登记,**不**改变 spawn 时传给 adapter 的 authOptions(spawn 行为字节级不变)。
+   */
+  private async resolveEffectiveLocalCredentialMode(
+    requested: AgentCredentialMode | undefined,
+  ): Promise<AgentCredentialMode | undefined> {
+    if (requested) return requested;
+    try {
+      const state = await this.deps.auth.getState();
+      const resolved = resolveEffectiveCredentialModeFromAuthSource(undefined, state.authSource);
+      if (resolved) {
+        // 只在跨形态仲裁时才会走到这里(懒解析),频率低;debug 级避免刷日志。
+        this.deps.logger.debug('codex getHost: implicit credential mode resolved from auth fallback', {
+          authSource: state.authSource,
+          resolved,
+        });
+      } else {
+        this.deps.logger.warn('codex getHost: implicit credential mode unresolved; keeping legacy strict comparison', {
+          authenticated: state.authenticated,
+          errorReason: state.errorReason,
+        });
+      }
+      return resolved;
+    } catch (error) {
+      this.deps.logger.warn('codex getHost: implicit credential mode resolution failed; keeping legacy strict comparison', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return undefined;
+    }
+  }
+
+  private bumpHostGeneration(key: string): number {
+    const next = (this.hostGenerations.get(key) ?? 0) + 1;
+    this.hostGenerations.set(key, next);
+    return next;
+  }
+
+  private acquireHostSessionBindingLease(key: string): () => void {
+    this.hostSessionBindingLeases.set(key, (this.hostSessionBindingLeases.get(key) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = (this.hostSessionBindingLeases.get(key) ?? 1) - 1;
+      if (next <= 0) this.hostSessionBindingLeases.delete(key);
+      else this.hostSessionBindingLeases.set(key, next);
+    };
+  }
+
+  private hostActiveUseCount(
+    key: string,
+    host: AppServerHost,
+    opts: { ignoreBindingLeases?: number } = {},
+  ): number {
+    const bindingLeases = Math.max(
+      0,
+      (this.hostSessionBindingLeases.get(key) ?? 0) - (opts.ignoreBindingLeases ?? 0),
+    );
+    return host.activeSubscriptions + bindingLeases;
+  }
+
+  private async shutdownHostForCredentialModeChange(
+    key: string,
+    host: AppServerHost,
+    fromMode: AgentCredentialMode | undefined,
+    toMode: AgentCredentialMode | undefined,
+    opts: { ignoreBindingLeases?: number } = {},
+  ): Promise<void> {
+    while (true) {
+      const previous = this.hostCredentialModeSwitches.get(key);
+      if (!previous) break;
+      await previous.catch(() => undefined);
+    }
+    const run = this.shutdownHostForCredentialModeChangeUnlocked(key, host, fromMode, toMode, opts);
+    this.hostCredentialModeSwitches.set(key, run);
+    try {
+      await run;
+    } finally {
+      if (this.hostCredentialModeSwitches.get(key) === run) {
+        this.hostCredentialModeSwitches.delete(key);
+      }
+    }
+  }
+
+  private async waitForHostCredentialModeSwitch(key: string): Promise<void> {
+    while (true) {
+      const switching = this.hostCredentialModeSwitches.get(key);
+      if (!switching) return;
+      await switching.catch(() => undefined);
+    }
+  }
+
+  async beginLocalHostCredentialChange(
+    reason = 'CodexAgent local credential state changed',
+  ): Promise<{
+    assertIdle(): void;
+    finalize(): Promise<void>;
+    release(): void;
+  }> {
+    const key = hostKey();
+    await this.waitForHostCredentialModeSwitch(key);
+
+    let releaseSwitch!: () => void;
+    const switchPromise = new Promise<void>((resolve) => {
+      releaseSwitch = resolve;
+    });
+    this.hostCredentialModeSwitches.set(key, switchPromise);
+    let released = false;
+
+    const cleanup = (): void => {
+      if (released) return;
+      released = true;
+      if (this.hostCredentialModeSwitches.get(key) === switchPromise) {
+        this.hostCredentialModeSwitches.delete(key);
+      }
+      releaseSwitch();
+    };
+
+    const activeUseCount = (): number => {
+      const host = this.hosts.get(key);
+      return host
+        ? this.hostActiveUseCount(key, host)
+        : (this.hostSessionBindingLeases.get(key) ?? 0);
+    };
+
+    return {
+      assertIdle: () => {
+        const count = activeUseCount();
+        if (count > 0) {
+          throw new Error(
+            `Cannot restart local Codex host while ${count} active Codex session(s) are attached`,
+          );
+        }
+      },
+      finalize: async () => {
+        if (released) return;
+        try {
+          await this.disposeLocalHostForCredentialChangeUnlocked(key, reason);
+        } finally {
+          cleanup();
+        }
+      },
+      release: cleanup,
+    };
+  }
+
+  private async shutdownHostForCredentialModeChangeUnlocked(
+    key: string,
+    host: AppServerHost,
+    fromMode: AgentCredentialMode | undefined,
+    toMode: AgentCredentialMode | undefined,
+    opts: { ignoreBindingLeases?: number } = {},
+  ): Promise<void> {
+    if (this.hosts.get(key) !== host) return;
+    const currentMode = this.hostCredentialModes.get(key);
+    // 仲裁用归一化形态(登记于 createHost,零额外 IO);缺失时回退原始形态。
+    const currentEffective = this.hostEffectiveCredentialModes.get(key) ?? currentMode;
+    if (this.canReuseHostForCredentialRequest(host, currentEffective, toMode)) return;
+
+    let activeUseCount = this.hostActiveUseCount(key, host, opts);
+    const coordinator = this.deps.prepareCodexLocalCredentialModeSwitch;
+    if (coordinator) {
+      await coordinator({
+        fromMode: currentMode,
+        fromModeEffective: currentEffective,
+        toMode,
+        activeSubscriptions: activeUseCount,
+      });
+      if (this.hosts.get(key) !== host) return;
+      activeUseCount = this.hostActiveUseCount(key, host, opts);
+      if (activeUseCount > 0) {
+        throw new Error(
+          `Cannot switch Codex credential mode; active Codex session(s) still attached after coordination: ${activeUseCount}`,
+        );
+      }
+    } else if (activeUseCount > 0) {
+      throw new Error(
+        `Cannot switch Codex credential mode while ${activeUseCount} active Codex session(s) are attached`,
+      );
+    }
+
+    this.deps.logger.info('codex createHost: credential mode changed, restarting local app-server', {
+      key,
+      fromMode: currentMode ?? fromMode ?? 'fallback',
+      fromModeEffective: currentEffective ?? 'unresolved',
+      toMode: toMode ?? 'fallback',
+    });
+    this.hosts.delete(key);
+    this.hostCredentialModes.delete(key);
+    this.hostEffectiveCredentialModes.delete(key);
+    this.memoryOverridePushedByHost.delete(key);
+    this.bumpHostGeneration(key);
+    if (key === hostKey()) this.codexHome = null;
+    this.createHostSeqByKey.delete(key);
+    try {
+      await host.retire('CodexAgent credential mode changed');
+    } catch (error) {
+      this.deps.logger.warn('codex host shutdown after credential mode change failed', {
+        key,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async getHost(
+    remoteHostId?: string,
+    credentialMode?: AgentCredentialMode,
+    opts: { ignoreBindingLeases?: number } = {},
+  ): Promise<AppServerHost> {
+    const key = hostKey(remoteHostId);
+    // spawnMode = 调用方原始诉求(undefined 保持 adapter fallback,spawn 行为不变)。
+    // 复用判定分两级(review P2:归一化解析走 getState、含 reconcile/fs,不允许进
+    // 无条件路径):
+    //   快路径:原始诉求与登记的原始形态逐字相等(implicit-implicit / 同显式)→
+    //           直接复用,零 IO,与本次改动前的行为完全一致;
+    //   仲裁路径:快路径不等时,才把隐式诉求懒解析成归一化形态(同一次 getHost 内
+    //           memo,显式诉求无需解析),与登记的归一化形态(createHost 时零额外
+    //           IO 推出)做 canReuseCodexHostForCredentialMode 同族比较。
+    const spawnMode = remoteHostId ? undefined : credentialMode;
+    let requestedEffectiveMemo: { value: AgentCredentialMode | undefined } | null =
+      remoteHostId || credentialMode ? { value: spawnMode } : null;
+    const resolveRequestedEffective = async (): Promise<AgentCredentialMode | undefined> => {
+      if (!requestedEffectiveMemo) {
+        requestedEffectiveMemo = { value: await this.resolveEffectiveLocalCredentialMode(undefined) };
+      }
+      return requestedEffectiveMemo.value;
+    };
+    const canReuseRegistered = async (
+      host: AppServerHost,
+      registeredRaw: AgentCredentialMode | undefined,
+      registeredEffective: AgentCredentialMode | undefined,
+    ): Promise<boolean> => {
+      if (registeredRaw === spawnMode) {
+        return spawnMode !== 'provider-oauth' || host.isCodexProxyActive();
+      }
+      const requested = await resolveRequestedEffective();
+      const current = registeredEffective ?? registeredRaw;
+      if (!this.canReuseHostForCredentialRequest(host, current, requested)) return false;
+      await this.assertSupersetRequestedCredentialAvailable(current, requested);
+      return true;
+    };
+    while (true) {
+      if (!remoteHostId) await this.waitForHostCredentialModeSwitch(key);
+
+      const existing = this.hosts.get(key);
+      if (existing) {
+        const currentMode = this.hostCredentialModes.get(key);
+        const currentEffective = this.hostEffectiveCredentialModes.get(key);
+        if (remoteHostId || (await canReuseRegistered(existing, currentMode, currentEffective))) {
+          return existing;
+        }
+        await this.shutdownHostForCredentialModeChange(
+          key,
+          existing,
+          currentMode,
+          await resolveRequestedEffective(),
+          opts,
+        );
+        continue;
+      }
+
+      const inflight = this.hostPromises.get(key);
+      if (inflight) {
+        // inflight 的归一化形态要等 createHost 内 getState 完成才知道,这里按
+        // undefined(保守)参与仲裁:跨形态请求会走重建,与改动前语义一致。
+        // in-flight host 还不知道 codexProxyActive。provider-oauth 只复用同为 provider-oauth
+        // 的 in-flight host(该路径 proxy 不可用会 fatal reject);不挂到 gateway/oauth 启动中的
+        // host 上,避免它最终退化成 non-proxy 直连进程。
+        const mayReuseInflight = !(spawnMode === 'provider-oauth' && inflight.credentialMode !== 'provider-oauth');
+        // gateway-key 冷启动可能在 createHost 内升格成 oauth-bearer。若并发的订阅
+        // 会话恰好在 auth fallback 尚未返回时进来，先等同一个 in-flight host 定型，
+        // 再按注册后的实际形态仲裁；不能提前 supersede，避免无意义双 spawn。
+        const mayResolveAsOauthSuperset =
+          !inflight.credentialModeResolved &&
+          spawnMode === 'oauth-bearer' &&
+          inflight.credentialMode === 'gateway-key';
+        if (remoteHostId || mayResolveAsOauthSuperset || (mayReuseInflight && (
+          inflight.credentialMode === spawnMode ||
+          this.canReuseHostCredentialMode(inflight.credentialMode, await resolveRequestedEffective())
+        ))) {
+          if (remoteHostId) return inflight.promise;
+          let inflightHost: AppServerHost;
+          try {
+            inflightHost = await inflight.promise;
+          } catch (error) {
+            if (!mayResolveAsOauthSuperset) throw error;
+            // 订阅请求只是在等待 gateway-key 冷启动完成凭据校验、确认它是否会
+            // 升格成 OAuth 超集 host；若该校验自身失败(缺 key / key 过期),不能把
+            // gateway 的失败传染给凭据有效的订阅会话。failed promise 的 finally
+            // 已清掉 hostPromises，重新仲裁会独立创建 oauth-bearer host。
+            this.deps.logger.warn('codex getHost: unresolved gateway inflight failed; retrying OAuth host independently', {
+              error: error instanceof Error ? error.message : String(error),
+            });
+            continue;
+          }
+          const registeredRaw = this.hostCredentialModes.get(key) ?? inflight.credentialMode;
+          const registeredEffective = this.hostEffectiveCredentialModes.get(key);
+          if (await canReuseRegistered(inflightHost, registeredRaw, registeredEffective)) {
+            return inflightHost;
+          }
+          continue;
+        }
+        const requestedEffective = await resolveRequestedEffective();
+        const currentInflight = this.hostPromises.get(key);
+        if (currentInflight?.promise === inflight.promise) {
+          this.hostPromises.delete(key);
+        }
+        inflight.promise.then(
+          async (inflightHost) => {
+            if (this.hosts.get(key) === inflightHost) {
+              await this.shutdownHostForCredentialModeChange(
+                key,
+                inflightHost,
+                inflight.credentialMode,
+                requestedEffective,
+                opts,
+              );
+              return;
+            }
+            await inflightHost.retire('CodexAgent credential mode changed while host was starting');
+          },
+          () => undefined,
+        ).catch(() => undefined);
+      }
+
+      const generation = this.bumpHostGeneration(key);
+      // 超集归一化发生在 createHost 内(gateway-key → oauth-bearer);通过回调同步
+      // in-flight 登记,让并发的 oauth-bearer 诉求命中复用而不是 supersede 重建。
+      let inflightEntry: {
+        promise: Promise<AppServerHost>;
+        credentialMode: AgentCredentialMode | undefined;
+        credentialModeResolved: boolean;
+        generation: number;
+      } | null = null;
+      const promise = this.createHost(remoteHostId, key, spawnMode, generation, (resolvedMode) => {
+        if (inflightEntry) {
+          inflightEntry.credentialMode = resolvedMode;
+          inflightEntry.credentialModeResolved = true;
+        }
+      }).finally(() => {
+        // 成功: this.hosts 已赋值, 后续走快路径; 失败: 清掉 promise 让下次调用能重试
+        const current = this.hostPromises.get(key);
+        if (current?.promise === promise) this.hostPromises.delete(key);
+      });
+      inflightEntry = {
+        promise,
+        credentialMode: spawnMode,
+        credentialModeResolved: remoteHostId !== undefined || spawnMode !== 'gateway-key',
+        generation,
+      };
+      this.hostPromises.set(key, inflightEntry);
+      return promise;
+    }
+  }
+
+  private async getUtilityHost(): Promise<{ key: string; host: AppServerHost }> {
+    const key = hostKey();
+    await this.waitForHostCredentialModeSwitch(key);
+    const existing = this.hosts.get(key);
+    if (existing) return { key, host: existing };
+    const inflight = this.hostPromises.get(key);
+    if (inflight) return { key, host: await inflight.promise };
+    const host = await this.getHost();
+    return { key, host };
+  }
+
+  /** Start the local OAuth host used by non-model account control-plane RPCs. */
+  private async getStartedAccountHost(): Promise<AppServerHost> {
+    const host = await this.getHost(undefined, 'oauth-bearer');
+    const init = await host.ensureStarted();
+    if (init.codexHome) this.codexHome = init.codexHome;
+    return host;
+  }
+
+  /**
+   * 向本地 app-server 实时读取完整模型清单并交给宿主。
+   *
+   * 不能只读 `models_cache.json`：OAuth 登录前会按账号边界删掉旧 cache，而登录 CLI
+   * 成功时未必已经触发模型注册表刷新。`model/list` 是官方 app-server 的权威读取面，
+   * 同时也是 cache ready barrier；分页全部读完后才一次性交给宿主，避免 UI 看到半份目录。
+   */
+  override async refreshLocalModels(): Promise<boolean> {
+    const { key, host } = await this.getUtilityHost();
+    const init = await host.ensureStarted();
+    if (init.codexHome) this.codexHome = init.codexHome;
+
+    const models: CodexModelListResponse['data'] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | null = null;
+    do {
+      const page: CodexModelListResponse = await host.request<CodexModelListResponse>(Method.ModelList, {
+        cursor,
+        limit: 100,
+        includeHidden: false,
+      });
+      models.push(...(Array.isArray(page.data) ? page.data : []));
+      const next: string | null = typeof page.nextCursor === 'string' && page.nextCursor.length > 0
+        ? page.nextCursor
+        : null;
+      if (next && seenCursors.has(next)) {
+        throw new Error(`Codex app-server model/list repeated cursor: ${next}`);
+      }
+      if (next) seenCursors.add(next);
+      cursor = next;
+    } while (cursor !== null);
+
+    // Auth 切换 / logout 可能在分页请求期间 retire 旧 host。旧账号的迟到响应绝不能
+    // 覆盖新账号目录；只有仍登记为当前 local host 的结果才允许交给宿主。
+    if (this.hosts.get(key) !== host || !this.deps.onCodexLocalModelsListed) return false;
+    await this.deps.onCodexLocalModelsListed(models);
+    return true;
+  }
+
+  /** Read ChatGPT subscription windows and banked reset credits via app-server RPC. */
+  override async readAccountRateLimits(): Promise<AccountRateLimitsResponse> {
+    // This RPC is credential-specific, unlike model/list or memory utilities. Requiring
+    // oauth-bearer prevents a gateway/provider host from reading or mutating the wrong
+    // account context; getHost refuses to replace a differently-authenticated active host.
+    const host = await this.getStartedAccountHost();
+    return await host.request<AccountRateLimitsResponse>(Method.AccountRateLimitsRead, undefined);
+  }
+
+  /** Consume one reset credit on the non-model app-server control plane. */
+  override async consumeAccountRateLimitResetCredit(
+    params: ConsumeAccountRateLimitResetCreditParams,
+  ): Promise<ConsumeAccountRateLimitResetCreditResponse> {
+    const host = await this.getStartedAccountHost();
+    return await host.request<ConsumeAccountRateLimitResetCreditResponse>(
+      Method.AccountRateLimitResetCreditConsume,
+      params,
+    );
+  }
+
+  private async createHost(
+    remoteHostId: string | undefined,
+    key: string,
+    credentialMode: AgentCredentialMode | undefined,
+    generation: number,
+    onSpawnCredentialModeResolved?: (mode: AgentCredentialMode | undefined) => void,
+  ): Promise<AppServerHost> {
+    const seq = (this.createHostSeqByKey.get(key) ?? 0) + 1;
+    this.createHostSeqByKey.set(key, seq);
+    // 诊断日志: 正常每次 dispose 之间 seq 只应该出现一次。出现 seq>=2 或 hadHost=true
+    // = in-flight 去重失效, 多个 codex app-server 子进程被 spawn, 前面的会变孤儿。
+    // 正常路径走 info, 异常路径才升级到 error, 避免首次启动刷 ERROR 误导排查。
+    const hadHost = this.hosts.has(key);
+    const abnormal = seq > 1 || hadHost;
+    const level = abnormal ? 'error' : 'info';
+    this.deps.logger[level]('codex createHost: spawning app-server', {
+      seq,
+      hadHost,
+      key,
+      credentialMode: credentialMode ?? 'fallback',
+      generation,
+    });
+    const assertCurrentGeneration = (stage: string): void => {
+      if ((this.hostGenerations.get(key) ?? 0) === generation) return;
+      throw new Error(`Codex app-server host creation was superseded before ${stage}`);
+    };
+    // 方案 A(订阅超集 spawn):本地 gateway-key 诉求且 auth fallback 实际持有 OAuth 时,
+    // 升格为 oauth-bearer spawn。超集进程经 proxy 按会话换网关 key(XD/骨折计费不变),
+    // 同时还能服务订阅会话 —— 订阅/API 会话真正并行,不再因来源切换重建 host 排队。
+    let spawnCredentialMode = credentialMode;
+    let requestedGatewayState: AuthState | null = null;
+    if (!remoteHostId && credentialMode === 'gateway-key') {
+      // 即使升格为 OAuth spawn,API 会话的出口仍依赖 gateway key,必须先验证原诉求。
+      requestedGatewayState = await this.deps.auth.getState({ credentialMode: 'gateway-key' });
+      assertCurrentGeneration('gateway credential validation');
+      if (!requestedGatewayState.authenticated) {
+        throw new AgentNotAuthenticatedError(
+          'codex',
+          `codex gateway credentials unavailable: ${requestedGatewayState.errorReason ?? 'no_credentials'}`,
+        );
+      }
+      try {
+        const fallbackState = await this.deps.auth.getState();
+        if (fallbackState.authenticated && fallbackState.authSource === 'oauth') {
+          spawnCredentialMode = 'oauth-bearer';
+          this.deps.logger.info('codex createHost: upgrading gateway-key spawn to oauth superset host', { key });
+        }
+      } catch (error) {
+        this.deps.logger.warn('codex createHost: superset spawn resolution failed; keeping gateway-key spawn', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      assertCurrentGeneration('superset spawn resolution');
+    }
+
+    // 超集升格硬依赖 proxy。proxy 不可用时降级回原 gateway-key spawn 重来一轮;
+    // 降级后 upgraded=false,循环至多跑两轮必收敛。
+    let effectiveMode: AgentCredentialMode | undefined;
+    let env: Record<string, string> = {};
+    let extraArgs: string[] = [];
+    let codexProxyActive = false;
+    for (;;) {
+      const upgradedToSuperset = spawnCredentialMode !== credentialMode;
+      onSpawnCredentialModeResolved?.(spawnCredentialMode);
+      const authOptions = spawnCredentialMode ? { credentialMode: spawnCredentialMode } : undefined;
+      const state =
+        spawnCredentialMode === 'gateway-key' && requestedGatewayState
+          ? requestedGatewayState
+          : await this.deps.auth.getState(authOptions);
+      assertCurrentGeneration('auth');
+      if (!state.authenticated) {
+        throw new AgentNotAuthenticatedError('codex', `codex not authenticated: ${state.errorReason ?? 'no_credentials'}`);
+      }
+      effectiveMode =
+        spawnCredentialMode ?? resolveEffectiveCredentialModeFromAuthSource(undefined, state.authSource);
+      env = await buildCodexEnv(this.deps.auth, this.deps.runtimeConfig, authOptions);
+      assertCurrentGeneration('env');
+
+      extraArgs = [];
+      codexProxyActive = false;
+      if (this.deps.prepareCodexExtraSpawnConfig) {
+        try {
+          const cfg = await this.deps.prepareCodexExtraSpawnConfig(
+            this.deps.mcpProviders ?? [],
+            { remoteHostId, credentialMode: spawnCredentialMode },
+          );
+          assertCurrentGeneration('spawn config');
+          Object.assign(env, cfg.extraEnv);
+          extraArgs = cfg.extraArgs;
+          codexProxyActive = cfg.codexProxyActive === true && !remoteHostId;
+          this.deps.logger.info('codex MCP bridge ready', {
+            providers: this.deps.mcpProviders?.length ?? 0,
+            extraArgsCount: extraArgs.length,
+            codexProxyActive,
+          });
+        } catch (e) {
+          const isFatalSpawnConfigError =
+            (typeof e === 'object' && e !== null &&
+              (e as { codexSpawnConfigFatal?: unknown }).codexSpawnConfigFatal === true);
+          if (isFatalSpawnConfigError && upgradedToSuperset) {
+            this.deps.logger.warn('codex createHost: superset spawn hit fatal proxy error; downgrading to gateway-key spawn', {
+              key,
+              message: (e as Error).message,
+            });
+            spawnCredentialMode = credentialMode;
+            continue;
+          }
+          this.deps.logger.error(
+            isFatalSpawnConfigError
+              ? 'codex MCP bridge prep failed with fatal spawn config error'
+              : 'codex MCP bridge prep failed, continuing without lizi MCP',
+            { message: (e as Error).message },
+          );
+          if (isFatalSpawnConfigError) throw e;
+        }
+      }
+      if (upgradedToSuperset && !codexProxyActive) {
+        this.deps.logger.warn('codex createHost: superset spawn lacks loopback proxy; downgrading to gateway-key spawn', { key });
+        spawnCredentialMode = credentialMode;
+        continue;
+      }
+      break;
+    }
+    assertCurrentGeneration('transport');
+
+    // 选 transport: 本地 → StdioTransport (spawn codex app-server)
+    //               远端 → host 注入的 getRemoteCodexTransport (SSH+daemon+proxy+ws)
+    // 注意: 远端路径下 env/extraArgs/buildCodexEnv 不参与 — 远端 daemon 由远端用户的
+    // ~/.codex 配置驱动, 我们走 daemon control socket 拿到的协议 channel, 不在本地起
+    // 进程, 所以本地的 env / -c overrides 没有意义。MCP 桥接 (lizi_*) 暂不支持远端,
+    // 远端 session 只能用 codex 自带 + 远端用户配置的 MCP。
+    let createTransport: () => import('./app-server/transport.js').Transport;
+    if (remoteHostId) {
+      if (!this.deps.getRemoteCodexTransport) {
+        throw new Error(
+          `codex remote session requested (remoteHostId=${remoteHostId}) but host did not provide getRemoteCodexTransport`,
+        );
+      }
+      const provider = this.deps.getRemoteCodexTransport;
+      createTransport = () => provider(remoteHostId);
+    } else {
+      const binaryPath = this.deps.binaryPath;
+      createTransport = () => createStdioTransport({
+        binaryPath,
+        env,
+        extraArgs,
+      });
+    }
+
+    const host = new AppServerHost({
+      createTransport,
+      logger: this.deps.logger,
+      // 自报名只进 codex app-server 的 userAgent 展示串,无门控消费
+      // (2026-07-17 随品牌翻转改 cindy;上游 gating 走 originator,与此无关)。
+      clientInfo: { name: 'cindy', version: '0.0.0' },
+      codexProxyActive,
+      // app-server 对失败 RPC 返回 cloudRequirements + Auth/relogin 结构化错误时,当前 host
+      // 持有的 token 已不可用。stderr 与工具输出只做诊断,绝不驱动鉴权状态。保留 host 只会
+      // 持续撞鉴权失败; auth.invalidate 会触发 logout + 通知 UI 重登。延后到 microtask
+      // 防止在 JSON-RPC response 分发回调里同步收割自己。远端也走同一结构化协议路径。
+      onAuthInvalidated: (reason) => {
+        this.deps.logger.warn('codex auth invalidated', {
+          reason,
+          key,
+          localAuthWillInvalidate: key === hostKey(),
+        });
+        Promise.resolve()
+          .then(async () => {
+            if (key === hostKey()) {
+              try {
+                await this.deps.auth.invalidate?.(reason);
+              } catch (e) {
+                this.deps.logger.error('auth.invalidate threw', { message: (e as Error).message });
+              }
+            }
+            // 防御兜底: 只收掉报错的 host key。远端 daemon 的 auth 失效不应该扩散到
+            // local host 或其它 remote host,否则无关会话会绕过 Session.close 变 stale。
+            try {
+              await this.retireHostKey(key, `CodexAgent auth invalidated: ${reason}`, {
+                failIfActive: false,
+                logPrefix: 'codex auth invalidated',
+              });
+            } catch { /* no-op */ }
+          })
+          .catch(() => undefined);
+      },
+    });
+    try {
+      assertCurrentGeneration('registration');
+    } catch (error) {
+      await host.retire('CodexAgent host creation superseded');
+      throw error;
+    }
+    this.hosts.set(key, host);
+    // 登记超集归一化后的实际 spawn 形态,供后续复用仲裁。
+    this.hostCredentialModes.set(key, spawnCredentialMode);
+    this.hostEffectiveCredentialModes.set(key, effectiveMode);
+    return host;
+  }
+
+  /**
+   * Phase 4: oneShot 也走 host (临时 thread, 跑完 release subscription, server 端 thread state
+   * 自然 GC)。不再依赖 @openai/codex-sdk。
+   *
+   * 用 gpt-5.4-mini + tmpdir + sandbox readOnly + approvalPolicy never (起标题不能弹审批)。
+   *
+   * 失败语义: 跟 claude-code/oneShot 对齐, 抛 OneShotError (timeout/malformed),
+   * 调用方按 reason 决定 catch/swallow。OneShotOptions 中 model/maxTokens 字段当前忽略
+   * (Codex host 协议没暴露 max_tokens; model 走 thread/start 那已是默认 mini), signal 接通。
+   */
+  async oneShot(prompt: string, opts?: OneShotOptions): Promise<string> {
+    const log = this.deps.logger.child('codex/oneShot');
+    const timeoutMs = opts?.timeoutMs ?? 30_000;
+    // OneShotOptions.maxTokens 在 Codex 协议层就没暴露 (protocol.ts ThreadStartParams /
+    // TurnStartParams 都没 max_tokens 字段) —— 静默忽略, 但调用方传了就 warn 一下,
+    // 避免未来加新 oneShot 场景时 "我设了上限怎么没生效" 的隐性 bug。
+    if (opts?.maxTokens !== undefined) {
+      log.warn(`maxTokens=${opts.maxTokens} ignored — Codex host protocol does not expose max_tokens`);
+    }
+    let subscription: { release: () => void } | null = null;
+    try {
+      const { host } = await this.getUtilityHost();
+      await host.ensureStarted();
+
+      // 创建临时 thread (跟主 session 共享 server 但 thread state 隔离)
+      const startResp = await host.request<ThreadStartResponse>(Method.ThreadStart, {
+        cwd: os.tmpdir(),
+        model: opts?.model ?? 'gpt-5.4-mini',
+        approvalPolicy: 'never',
+        sandbox: 'read-only', // kebab-case (v2.rs SandboxMode)
+      } as ThreadStartParams);
+      const threadId = startResp.thread.id;
+
+      // 等首条 agentMessage.completed 文本; 出 error 通知用 sentinel object 区分超时/正常
+      type OneShotResult = { kind: 'text'; text: string } | { kind: 'empty' } | { kind: 'error'; message: string };
+      let resolve: (r: OneShotResult) => void = () => {};
+      const result = new Promise<OneShotResult>((res) => {
+        resolve = res;
+      });
+      let currentTurnId: string | null = null;
+      let resolved = false;
+
+      subscription = host.subscribeThread(threadId, {
+        turnStarted: (params) => {
+          currentTurnId = params.turn.id;
+        },
+        itemCompleted: (params) => {
+          if (resolved) return;
+          const item = params.item as { type?: string; text?: string };
+          if (item.type === 'agentMessage' && typeof item.text === 'string') {
+            resolved = true;
+            resolve({ kind: 'text', text: item.text.trim() });
+          }
+        },
+        turnCompleted: () => {
+          if (!resolved) {
+            resolved = true;
+            resolve({ kind: 'empty' });
+          }
+        },
+        error: (params) => {
+          if (resolved) return;
+          // willRetry=true 是 codex server 可自愈的暂时错误(transient blip /
+          // "Reconnecting... N/5"),server 会自动重连重试,不应中断 turn — 与主
+          // 会话 error handler、translator 及 protocol.ts ErrorNotification 注释
+          // 一致。忽略它,继续等 agentMessage / turnCompleted / 自家超时,否则像
+          // 起标题这种短任务会被一次上游抖动直接打成 OneShotError。
+          if (params.willRetry === true) {
+            log.debug('oneShot transient error (will retry), ignored', {
+              message: params.error?.message,
+            });
+            return;
+          }
+          resolved = true;
+          log.warn('oneShot error notification', { message: params.error?.message });
+          resolve({ kind: 'error', message: params.error?.message ?? 'unknown codex error' });
+        },
+      });
+
+      await host.request(Method.TurnStart, {
+        threadId,
+        input: [{ type: 'text', text: prompt }],
+      } as TurnStartParams);
+
+      // 自家超时 sentinel (kind 'timeout'), 走外部 signal 也走同一通道
+      const timeoutP = new Promise<OneShotResult>((res) => {
+        const t = setTimeout(() => res({ kind: 'error', message: '__TIMEOUT__' }), timeoutMs);
+        opts?.signal?.addEventListener('abort', () => {
+          clearTimeout(t);
+          res({ kind: 'error', message: '__ABORTED__' });
+        });
+      });
+      const r = await Promise.race([result, timeoutP]);
+
+      // 如果 turn 没结束就拿到结果, 主动 interrupt 避免 server 继续算
+      if (r.kind === 'text' && currentTurnId) {
+        host.request(Method.TurnInterrupt, { threadId, turnId: currentTurnId }).catch(() => undefined);
+      }
+
+      if (r.kind === 'text') {
+        if (!r.text) throw new OneShotError('malformed', 'Empty agentMessage from codex');
+        return r.text;
+      }
+      if (r.kind === 'empty') {
+        throw new OneShotError('malformed', 'Codex turn completed without agentMessage');
+      }
+      // r.kind === 'error'
+      if (r.message === '__TIMEOUT__') {
+        throw new OneShotError('timeout', `Codex oneShot timed out after ${timeoutMs}ms`);
+      }
+      if (r.message === '__ABORTED__') {
+        // 外部 abort 不归类成 OneShotError (跟 claude 端一致)。Claude 端走 SDK 抛 web 标准
+        // AbortError (DOMException), 这里手动 abort 也用同款类型, 让调用方一律靠
+        // err.name === 'AbortError' 或 signal.aborted 判断, 不用区分 agent。
+        throw new DOMException('aborted', 'AbortError');
+      }
+      throw new OneShotError('malformed', `Codex error: ${r.message}`);
+    } catch (err) {
+      if (err instanceof OneShotError) {
+        log.error('oneShot failed', { reason: err.reason, error: err.message });
+        throw err;
+      }
+      log.error('oneShot failed', { error: String(err) });
+      // 网络/host 启动等未分类失败统一归 'network' (跟 claude 端 mapAnthropicError 一致)
+      throw new OneShotError('network', err instanceof Error ? err.message : String(err));
+    } finally {
+      try { subscription?.release(); } catch { /* no-op */ }
+    }
+  }
+
+  async startSession(opts: StartSessionOptions): Promise<AgentSessionHandle> {
+    // scope 带完整 s:<sessionId> 前缀 → host logger 落盘时提取 business sessionId,
+    // 路由到 sessions/<id>/<date>.ndjson (logger.ts extractSessionId / sessionAgentSlot)。
+    const sid = opts.sessionId ?? '';
+    const log = this.deps.logger.child(sid ? `s:${sid}/codex` : 'codex');
+
+    log.info('startSession', {
+      model: opts.model,
+      providerId: opts.providerId ?? null,
+      effort: opts.effort ?? 'default',
+      fastMode: opts.fastMode ?? 'default',
+      workDir: opts.workingDir,
+      resume: opts.resumeSessionId ?? 'new',
+      remoteHostId: opts.remoteHostId ?? null,
+      mcpProvidersCount: this.deps.mcpProviders?.length ?? 0,
+    });
+
+    // extraDirs 仅 Claude 支持; Codex capability=false, 这里收到非空数组只 debug 一行
+    // 留痕, 不影响主流程 (UI 应该不会让用户在 Codex session 上设, 这是兜底)。
+    if (opts.extraDirs && opts.extraDirs.length > 0) {
+      log.debug('startSession: extraDirs ignored (codex capability=false)', {
+        count: opts.extraDirs.length,
+      });
+    }
+
+    // ── Maker Memory: 启动时预拉 MEMORY.md 索引 + 写入规范段 ────────────────
+    // thread/start 仍把 developerInstructions 写入新 thread; thread/resume 在非 proxy
+    // 路径只在 host 明确告知历史未含产品 prompt 时补发一次,避免常规 resume 重复堆积。
+    // proxy active 时两条路径都用同一份构建结果登记到 registry。跟 userPrompt 同语义 — 启动时快照,跨 session 不实时同步。
+    let makerMemoryRules = '';
+    let makerMemoryIndex = '';
+    let memoryFlushController: MemoryFlushController | null = null;
+    // opts.makerMemoryEnabled 优先 (per-session, renderer 透传); fallback 到 runtimeConfig。
+    const makerMemoryFlag =
+      opts.makerMemoryEnabled ?? this.deps.runtimeConfig.makerMemoryEnabled ?? false;
+    const makerMemory = this.deps.makerMemory;
+    const makerMemoryEnabled = makerMemoryFlag === true && !!makerMemory;
+    // This per-session injection flag must not mutate the shared manager.
+    if (makerMemoryEnabled && makerMemory) {
+      try {
+        const store = await makerMemory.getStore(opts.workingDir);
+        makerMemoryRules = MAKER_MEMORY_RULES;
+        makerMemoryIndex = await store.getIndex();
+        memoryFlushController = new MemoryFlushController({
+          logger: log.child('memory-flush'),
+          workdir: opts.workingDir,
+          agentKind: 'codex',
+        });
+        log.debug('maker memory loaded for session', {
+          rulesBytes: makerMemoryRules.length,
+          indexBytes: makerMemoryIndex.length,
+        });
+      } catch (e) {
+        log.warn('maker memory load failed at session start (skipping injection)', {
+          error: String(e),
+        });
+      }
+    }
+
+    const eventQueue: AsyncQueue<AgentEvent> = createAsyncQueue<AgentEvent>();
+    const usageTracker = new UsageTracker();
+    const translatorRt: CodexRuntimeState = newCodexRuntimeState();
+
+    let sdkSessionId: string | undefined;
+    let currentTurnId: string | null = null;
+    let isTurnInFlight = false;
+    let isTurnStartPending = false;
+    type TurnCompletedParams = Parameters<NonNullable<ThreadEventHandlers['turnCompleted']>>[0];
+    // 正常完成的 turn 也必须保留墓碑:app-server 允许 turn/completed 早于仍在
+    // 后台收尾的 item 事件到达。没有这层墓碑时,currentTurnId 已清空,迟到 item
+    // 会重新发出 running status,而该 turn 的 done 已消费完,会话将永久假忙。
+    // turn id 在同一 thread 内唯一;墓碑随 session handle 释放,不跨 session 泄漏。
+    const completedTurnIds = new Set<string>();
+    const terminalErroredTurnIds = new Set<string>();
+    const deferredTerminalTurnCompletions = new Map<string, TurnCompletedParams>();
+    // 最近一次 thread/tokenUsage/updated 的 last 增量 + contextWindow,
+    // 缓存供 turn end 日志读取 (协议本身不在 turn/completed 里带 usage)。
+    let lastTurnTokenUsage: TokenUsageBreakdown | null = null;
+    let lastModelContextWindow: number | null = null;
+    let closed = false;
+    let subscriptionInvalidatedByTransport = false;
+    let subscription: ThreadSubscription | null = null;
+    let interactionResolver: InteractionResolver | null = null;
+    let stopRolloutPlanFallback: (() => void) | null = null;
+    const seenRolloutPlanCallIds = new Set<string>();
+    const latestPlanByTurn = new Map<string, TurnPlanUpdatedNotification['params']['plan']>();
+    // 当前 session 的 one-shot tip 状态 (turn-start status 用):
+    //  - displayed: id → 已展示次数 (≥ 该 tip 的 guarantees.length 时退出抽样池)
+    //  - pity:      id → 自上次展示以来候选轮次 (pickTurnStartStatus 内部自增 / 触发保底)
+    // /clear 等价于开新 session → 重建 handle → 状态自然清零, 无需额外重置。
+    const oneShotTipState: OneShotState = { displayed: new Map(), pity: new Map() };
+
+    /** Phase 3: mutable 配置, 下一个 turn/start 透传; resume 时也透传一次。 */
+    let mutableModel = opts.model;
+    let mutableEffort: Effort = opts.effort ?? 'high';
+    let mutablePermissionMode: PermissionMode = opts.permissionMode ?? 'ask';
+    // 计划模式(与 permissionMode 正交, **一次性选择**): mutablePlanMode 是 UI 勾选的
+    // "武装"态 —— send 消耗它并立即 emit plan_mode_changed(false) 让勾选熄灭;
+    // 本轮「计划 → 审阅 → 修订/批准」循环由 planCycleActive 承载:
+    // 修订 turn 保持 plan, 批准/取消/计划轮空跑(没产出计划)/turn 失败都会结束循环。
+    let mutablePlanMode = opts.planMode === true;
+    let planCycleActive = false;
+    let currentTurnPlanModeActive = false;
+    let pendingTurnStartPlanMode: boolean | null = null;
+    // collaborationMode 是 sticky 语义 — 线程一旦进过 plan, 退出后必须持续显式发
+    // default 复位, 否则 server 端停留在 plan 模式。
+    let threadTouchedPlanMode = false;
+    let planModeDefaultMarkerNeeded = false;
+    // 当前 plan turn 流出的 proposed plan 文本 (plan item / <proposed_plan> 块)。
+    let proposedPlanText: string | null = null;
+    // plan_review requestId 去重序号 (同一 turn 理论上只有一个 plan item, 防御性加序号)。
+    let planReviewSeq = 0;
+    // Undefined = 不覆盖 app-server/config 默认; null = explicit standard; 'fast' = Fast mode.
+    let mutableServiceTier: ServiceTier | null | undefined =
+      opts.fastMode === undefined ? undefined : opts.fastMode ? 'fast' : null;
+    const vo: Record<string, unknown> = { ...(opts.vendorOptions ?? {}) };
+    const credentialMode = opts.remoteHostId
+      ? undefined
+      : resolveAgentCredentialMode({
+          agentKind: 'codex',
+          providerId: opts.providerId,
+          model: opts.model,
+        });
+    const currentHostKey = hostKey(opts.remoteHostId);
+    let releaseHostBindingLease: (() => void) | null = null;
+    const acquireHostBindingLeaseIfNeeded = (): void => {
+      if (opts.remoteHostId || releaseHostBindingLease) return;
+      releaseHostBindingLease = this.acquireHostSessionBindingLease(currentHostKey);
+    };
+    const releaseHostBindingLeaseIfNeeded = (): void => {
+      const release = releaseHostBindingLease;
+      releaseHostBindingLease = null;
+      release?.();
+    };
+    const getSessionHost = async (): Promise<AppServerHost> => {
+      if (opts.remoteHostId) return await this.getHost(opts.remoteHostId, credentialMode);
+      // 本地会话先等已有 credential switch 完成，再占用 startup reservation。否则
+      // session 已拿到旧 host、但尚未 thread/start 订阅时，credential 切换看不到它。
+      await this.waitForHostCredentialModeSwitch(currentHostKey);
+      acquireHostBindingLeaseIfNeeded();
+      return await this.getHost(opts.remoteHostId, credentialMode, { ignoreBindingLeases: 1 });
+    };
+    const host = await getSessionHost().catch((error) => {
+      releaseHostBindingLeaseIfNeeded();
+      throw error;
+    });
+    const hostGeneration = this.hostGenerations.get(currentHostKey) ?? 0;
+    const capturedHostWasRegistered = this.hosts.get(currentHostKey) === host;
+    const connectionId = host.getConnectionId();
+    const isCurrentHost = (): boolean => {
+      const currentHost = this.hosts.get(currentHostKey);
+      if ((this.hostGenerations.get(currentHostKey) ?? 0) !== hostGeneration) return false;
+      return capturedHostWasRegistered ? currentHost === host : currentHost === undefined;
+    };
+    const staleHostError = (operation: string): Error =>
+      new Error(`Codex session expired because its app-server was replaced before ${operation}; restart the session`);
+    const assertCurrentHost = (operation: string): void => {
+      if (isCurrentHost()) return;
+      log.warn('codex session handle rejected after app-server replacement', {
+        operation,
+        hostKey: currentHostKey,
+        credentialMode: credentialMode ?? 'fallback',
+      });
+      throw staleHostError(operation);
+    };
+    const skipIfStaleHost = (operation: string): boolean => {
+      if (isCurrentHost()) return false;
+      log.warn('codex session handle ignored after app-server replacement', {
+        operation,
+        hostKey: currentHostKey,
+        credentialMode: credentialMode ?? 'fallback',
+      });
+      return true;
+    };
+    let initResp: Awaited<ReturnType<AppServerHost['ensureStarted']>>;
+    try {
+      assertCurrentHost('initialize');
+      initResp = await host.ensureStarted();
+      assertCurrentHost('initialize');
+    } catch (error) {
+      releaseHostBindingLeaseIfNeeded();
+      throw error;
+    }
+    if (initResp.codexHome) this.codexHome = initResp.codexHome;
+    // 闭包 capture 一次, 整个 session 复用 — codexHome 是 server 进程级常量, host 不变就不变。
+    // memories 目录是 codex 自家私域 (<CODEX_HOME>/memories/), 永远塞进 writableRoots,
+    // 即使用户当前没开 memories: 写权限多给一个固定子目录开销可忽略, 还能避免"开关 memories
+    // 后第一个 turn 之内写入失败"的 race。
+    // 关键: codexHome 可能是 remote Linux 路径(/root/.xdt-server/...) — 此时必须
+    // 用 posix join, 否则 Windows 上 path.join 会拼出反斜杠分隔符, daemon 反序列化
+    // writable_roots (AbsolutePathBuf) 时 Path::is_absolute() = false → 报
+    // "AbsolutePathBuf deserialized without a base path" -32600。
+    // 判断: 以 '/' 开头视为 posix, 其它走平台默认 (Windows 本地 codex daemon)。
+    const joinCodexHome = (sub: string) =>
+      this.codexHome?.startsWith('/')
+        ? `${this.codexHome.replace(/\/+$/, '')}/${sub}`
+        : path.join(this.codexHome ?? '', sub);
+    const codexExtraWritableRoots = this.codexHome ? [joinCodexHome('memories')] : [];
+    // Codex same-turn 插话走 `turn/steer` 方法，不走
+    // `experimentalFeature/enablement/set`。这里特意不 push `{ steer: true }`:
+    // 2026-06 实测当前内置 app-server 的 enablement 白名单没有 `steer`，
+    // 强行写入会让整次 enablement/set 失败，并连带破坏 memory override 热更新。
+    // memory 覆盖只在 host 起来后能 push (RPC); 第一次 startSession 触发, 后续 setMemory 自己 push。
+    // 失败 → warn + 继续, 不让 memory 配置阻塞主对话。
+    assertCurrentHost('memory override');
+    if (!opts.remoteHostId) {
+      await this.ensureMemoryOverridePushed(host, currentHostKey).catch((e) => {
+        log.warn('ensureMemoryOverridePushed failed, continuing without memory override', {
+          error: e instanceof Error ? e.message : String(e),
+        });
+      });
+    }
+
+    const registerCodexMcpContext = (threadId: string): void => {
+      if (!sid || opts.remoteHostId) return;
+      try {
+        const register = this.deps.registerCodexMcpThreadContext;
+        if (!register) return;
+        register({
+          threadId,
+          sessionId: sid,
+          workingDir: opts.workingDir,
+          vendorOptions: vo,
+        });
+        log.debug('codex MCP thread context registered', {
+          threadId: prefixId(threadId),
+          sessionId: prefixId(sid),
+          orcaRole: typeof vo.orcaRole === 'string' ? vo.orcaRole : undefined,
+          workerId: typeof vo.orcaWorkerId === 'string' ? prefixId(vo.orcaWorkerId) : undefined,
+        });
+      } catch (e) {
+        log.warn('registerCodexMcpThreadContext threw', { error: String(e) });
+      }
+    };
+    const unregisterCodexMcpContext = (threadId: string): void => {
+      if (!sid || opts.remoteHostId) return;
+      try {
+        const unregister = this.deps.unregisterCodexMcpThreadContext;
+        if (!unregister) return;
+        unregister(threadId);
+        log.debug('codex MCP thread context unregistered', {
+          threadId: prefixId(threadId),
+        });
+      } catch (e) {
+        log.warn('unregisterCodexMcpThreadContext threw', { error: String(e) });
+      }
+    };
+    function currentApprovalConfig(): CodexPermissionConfig {
+      return mapPermissionToCodex(mutablePermissionMode);
+    }
+
+    /**
+     * 计划模式的 turn/start collaborationMode 装配:
+     *  - 开启 → mode:'plan' + developer_instructions:null (server 注入官方内置 plan 指令);
+     *  - 关闭但线程进过 plan → 持续发 mode:'default' 复位 (sticky 语义, 见 protocol.ts)。
+     *    首个退出 default turn 用 developer_instructions:null, 让 app-server 注入
+     *    官方 Default Mode marker 覆盖历史里的 Plan Mode marker; 之后用 ''
+     *    避免重复注入, 与从未进过 plan 的线程行为保持接近;
+     *  - 常规线程 → undefined, turn 参数与旧版逐字节一致 (不影响既有会话)。
+     * settings.model / reasoning_effort 必须带当前 mutable 值 — collaborationMode
+     * 对 model/effort 有覆盖优先级, 缺省会把用户的模型选择顶掉。
+     */
+    function collaborationModeForTurn(
+      planThisTurn: boolean,
+      continuePlanCycleThisTurn = planCycleActive,
+    ): CollaborationModeParam | undefined {
+      // 只由「本 turn 意图(per-send 快照/消耗武装态的结果) + 进行中的循环」驱动,
+      // **不**读武装态 mutablePlanMode —— 排队普通消息(快照 false)派发时武装态
+      // 可能为 true(用户为未来消息重新勾选), 不能影响本 turn 的线上参数。
+      if (planThisTurn || continuePlanCycleThisTurn) {
+        return {
+          mode: 'plan',
+          settings: {
+            model: mutableModel,
+            reasoning_effort: clampEffortForCodex(mutableEffort),
+            developer_instructions: null,
+          },
+        };
+      }
+      if (threadTouchedPlanMode) {
+        const developerInstructions = planModeDefaultMarkerNeeded ? null : '';
+        return {
+          mode: 'default',
+          settings: {
+            model: mutableModel,
+            reasoning_effort: clampEffortForCodex(mutableEffort),
+            developer_instructions: developerInstructions,
+          },
+        };
+      }
+      return undefined;
+    }
+
+    const toTurnInput = async (content: UserMessage['content']): Promise<UserInput[]> => {
+      if (typeof content !== 'string') return toAppServerInput(content, opts.workingDir);
+
+      const slash = parseLeadingSlashToken(content.trim());
+      if (!slash) return toAppServerInput(content, opts.workingDir);
+
+      try {
+        const { skills } = await this.listSkillsForCwd(opts.workingDir, false);
+        const skill = skills.find(
+          (item) => item.enabled && item.name.toLowerCase() === slash.name.toLowerCase(),
+        );
+        if (!skill) return toAppServerInput(content, opts.workingDir);
+
+        const inputs: UserInput[] = [{ type: 'skill', name: skill.name, path: skill.path }];
+        const prompt = slash.rest.trim() || skill.interface?.defaultPrompt?.trim() || '';
+        if (prompt) inputs.push({ type: 'text', text: prompt });
+        return inputs;
+      } catch (err) {
+        log.warn('failed to resolve leading slash as Codex skill, sending literal text', {
+          name: slash.name,
+          error: String(err),
+        });
+        return toAppServerInput(content, opts.workingDir);
+      }
+    };
+
+    const hostUsesCodexProxy = host.isCodexProxyActive();
+    const isCodexProxyChannelReady = (): boolean =>
+      hostUsesCodexProxy && typeof this.deps.registerCodexSystemPromptForThread === 'function';
+
+    let registeredDeveloperInstructions = '';
+    const registerCodexDeveloperInstructions = (threadId: string, text: string): void => {
+      if (!text) return;
+      registeredDeveloperInstructions = text;
+      const register = this.deps.registerCodexSystemPromptForThread;
+      if (!register) return;
+      register({ sessionId: sid, threadId, text });
+    };
+
+    // ── thread/start 或 thread/resume ────────────────────────────────────────
+    // 防御: resumeSessionId 偶尔会是上次失败 session 残留的占位 ('<failed>' / '<pending>')
+    // 或非 UUID 格式 — server 直接 -32600 invalid thread id, 整个 session 起不来。
+    // 看到不像 UUID 就走新 thread/start, 不让 ghost id 阻塞用户。
+    const isLikelyValidThreadId = (id: string | undefined): id is string =>
+      typeof id === 'string' && id.length > 0 && !id.startsWith('<') && /^[0-9a-fA-F-]+$/.test(id);
+    if (opts.resumeSessionId && !isLikelyValidThreadId(opts.resumeSessionId)) {
+      log.warn('resumeSessionId looks invalid, falling back to thread/start', {
+        resumeSessionId: opts.resumeSessionId,
+      });
+    }
+    let threadId: string;
+    let codexProductPromptDelivery: AgentSessionHandle['codexProductPromptDelivery'];
+
+    const collaborationModeFromText = (text: string): 'plan' | 'default' | null => {
+      const match = /<collaboration_mode>\s*#\s*(Plan|Default)\s+Mode/i.exec(text);
+      if (!match) return null;
+      return match[1]?.toLowerCase() === 'plan' ? 'plan' : 'default';
+    };
+
+    const textFromResponsesItem = (value: unknown): string[] => {
+      if (!value || typeof value !== 'object') return [];
+      if (Array.isArray(value)) return value.flatMap(textFromResponsesItem);
+      const record = value as Record<string, unknown>;
+      const texts: string[] = [];
+      if (typeof record.text === 'string') texts.push(record.text);
+      if (Array.isArray(record.content)) texts.push(...record.content.flatMap(textFromResponsesItem));
+      return texts;
+    };
+
+    const threadHistoryNeedsDefaultModeMarker = (thread: unknown): boolean => {
+      if (!thread || typeof thread !== 'object') return false;
+      const turns = (thread as { turns?: unknown }).turns;
+      if (!Array.isArray(turns)) return false;
+      // Codex 0.142.5 thread/resume includes turns[].items. Only collaboration
+      // markers are authoritative here: ordinary non-Plan-Mode Codex turns can
+      // also persist native `type:'plan'` items.
+      let latestCollaborationMode: 'plan' | 'default' | null = null;
+      for (const turn of turns) {
+        if (!turn || typeof turn !== 'object') continue;
+        const items = (turn as { items?: unknown }).items;
+        if (!Array.isArray(items)) continue;
+        for (const item of items) {
+          if (!item || typeof item !== 'object') continue;
+          for (const text of textFromResponsesItem(item)) {
+            latestCollaborationMode = collaborationModeFromText(text) ?? latestCollaborationMode;
+          }
+        }
+      }
+      return latestCollaborationMode === 'plan';
+    };
+
+    /**
+     * 会话中途把单个设置 (serviceTier / model / effort) 立即推给 app-server,
+     * 写入后续 turn 的 sticky context — 不必等下一个 turn/start 携带 (与官方
+     * Codex Desktop 的 thread/settings/update 通道对齐; experimentalApi 已恒开,
+     * 0.142.0 实测支持)。
+     *
+     * - 门: 只在 thread 已 start (threadId 就绪) 且会话未关时发; thread/start 前的
+     *   设置由首个 thread/start 携带, 不需要这条。
+     * - **串行化**: 用 promise 链把多条 update 排队顺序发 (前一条 ack 后再发下一条)。
+     *   renderer 单次切换会并发触发 setModel/setEffort/setFastMode, 若并发发送, server
+     *   回带的 thread/settings/updated 通知会乱序到达, reconcile 出现中间态闪现 (实测过
+     *   null→fast→default)。串行后 server 按序处理、通知按序回, 最终态一次到位。
+     * - serviceTier 双 Option: 调用方传 'fast' (开) / null (清空); 不传该 key = 不变。
+     * - **失败吞错**: settings/update 失败绝不抛 — turn/start 携带仍是兜底, 会话不受
+     *   影响。server 回 ack 后真正状态经 thread/settings/updated 通知回带 (见 handlers)。
+     *
+     * 返回入队任务的 promise (链已 catch, 永不 reject), 调用方可 await 到本次发送完成。
+     */
+    let settingsUpdateChain: Promise<void> = Promise.resolve();
+    const pushThreadSettings = (patch: Omit<ThreadSettingsUpdateParams, 'threadId'>): Promise<void> => {
+      if (!threadId || closed) return Promise.resolve();
+      const run = settingsUpdateChain.then(async () => {
+        if (!threadId || closed) return; // 排到队头时再校验一次 (期间可能已 close)
+        if (skipIfStaleHost('thread/settings/update')) return;
+        try {
+          await host.request<ThreadSettingsUpdateResponse>(Method.ThreadSettingsUpdate, {
+            threadId,
+            ...patch,
+          });
+        } catch (e) {
+          log.warn('thread/settings/update failed (turn/start carry remains fallback)', {
+            threadId,
+            patchKeys: Object.keys(patch),
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      });
+      settingsUpdateChain = run;
+      return run;
+    };
+    if (opts.resumeSessionId && isLikelyValidThreadId(opts.resumeSessionId)) {
+      // Phase 3: thread/resume 真接通, 不再 fallback 到 thread/start
+      if (this.deps.prepareCodexResumeSession) {
+        try {
+          await this.deps.prepareCodexResumeSession(opts.resumeSessionId);
+        } catch (e) {
+          log.warn('prepareCodexResumeSession failed, continuing to thread/resume', {
+            resumeSessionId: opts.resumeSessionId,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+      const { approvalPolicy, sandbox } = currentApprovalConfig();
+      const developerInstructions = buildCodexDeveloperInstructions({
+        makerMemoryRules,
+        runtimeSystemPrompt: this.deps.runtimeConfig.systemPrompt,
+        makerMemoryIndex,
+        userPrompt: opts.userPrompt,
+      });
+      const useProxyChannel = isCodexProxyChannelReady();
+      const params: ThreadResumeParams = {
+        threadId: opts.resumeSessionId,
+        cwd: opts.workingDir,
+        approvalPolicy,
+        sandbox,
+        ...(mutableModel && mutableModel !== 'gpt-5' ? { model: mutableModel } : {}),
+        ...(mutableServiceTier !== undefined ? { serviceTier: mutableServiceTier } : {}),
+        ...(developerInstructions && !useProxyChannel && opts.codexHistoryHasProductPrompt !== true
+          ? { developerInstructions }
+          : {}),
+      };
+      try {
+        acquireHostBindingLeaseIfNeeded();
+        assertCurrentHost('thread/resume');
+        const resp = await host.request<ThreadResumeResponse>(Method.ThreadResume, params);
+        assertCurrentHost('thread/resume');
+        if (Object.hasOwn(resp, 'serviceTier')) {
+          mutableServiceTier = normalizeServiceTier(resp.serviceTier) ?? null;
+        }
+        threadId = resp.thread.id;
+        if (useProxyChannel) {
+          registerCodexDeveloperInstructions(threadId, developerInstructions);
+          codexProductPromptDelivery = { threadId, historyHasProductPrompt: false };
+        } else if (developerInstructions && opts.codexHistoryHasProductPrompt !== true) {
+          codexProductPromptDelivery = { threadId, historyHasProductPrompt: true };
+        }
+        sdkSessionId = threadId;
+        // Resumed app-server threads may have sticky collaborationMode='plan' from
+        // a previous handle whose plan cycle ended without a follow-up turn. Since
+        // that sticky state lives server-side, conservatively send mode:'default'
+        // on future normal turns after any successful resume.
+        threadTouchedPlanMode = true;
+        planModeDefaultMarkerNeeded = threadHistoryNeedsDefaultModeMarker(resp.thread);
+        log.info('thread/resume ok', { threadId, model: resp.model, serviceTier: mutableServiceTier ?? null });
+      } catch (e) {
+        releaseHostBindingLeaseIfNeeded();
+        log.error('thread/resume failed', { error: String(e), resumeSessionId: opts.resumeSessionId });
+        const message = `Failed to resume Codex thread: ${String(e)}`;
+        eventQueue.push({
+          type: 'error',
+          data: { message, isTerminal: true },
+          source: 'codex',
+        });
+        eventQueue.end();
+        throw new Error(message);
+      }
+    } else {
+      const { approvalPolicy, sandbox } = currentApprovalConfig();
+      // developerInstructions 五段拼接 (协议见 thread/start.developerInstructions):
+      //   [2] MAKER_CODEX_SYSTEM_PROMPT_APPEND — maker engine (system-prompt-append.md)
+      //   [3] makerMemoryRules                 — maker memory 写入规范 (条件式)
+      //   [4] runtimeConfig.systemPrompt       — host runtime (host 维护的 .md)
+      //   [5] makerMemoryIndex                 — 当前 workdir MEMORY.md 内容 (条件式,
+      //                                          紧邻 userPrompt 高优先级, 启动时快照)
+      //   [6] opts.userPrompt                  — per-call 用户级 (renderer 本地 storage,
+      //                                          每次 startSession 透传, 优先级最高)
+      // 跟 claude-code 六段语义对齐。空段被 .filter 跳过,
+      // 内容为空时不发送 developerInstructions 字段。
+      const developerInstructions = buildCodexDeveloperInstructions({
+        makerMemoryRules,
+        runtimeSystemPrompt: this.deps.runtimeConfig.systemPrompt,
+        makerMemoryIndex,
+        userPrompt: opts.userPrompt,
+      });
+      const useProxyChannel = isCodexProxyChannelReady();
+      const params: ThreadStartParams = {
+        cwd: opts.workingDir,
+        approvalPolicy,
+        sandbox,
+        ...(shouldRegisterAskUserDynamicTool(opts) ? { dynamicTools: [ASK_USER_DYNAMIC_TOOL] } : {}),
+        ...(mutableModel && mutableModel !== 'gpt-5' ? { model: mutableModel } : {}),
+        ...(mutableServiceTier !== undefined ? { serviceTier: mutableServiceTier } : {}),
+        ...(developerInstructions && !useProxyChannel ? { developerInstructions } : {}),
+      };
+      try {
+        acquireHostBindingLeaseIfNeeded();
+        assertCurrentHost('thread/start');
+        const resp = await host.request<ThreadStartResponse>(Method.ThreadStart, params);
+        assertCurrentHost('thread/start');
+        if (Object.hasOwn(resp, 'serviceTier')) {
+          mutableServiceTier = normalizeServiceTier(resp.serviceTier) ?? null;
+        }
+        threadId = resp.thread.id;
+        if (useProxyChannel) {
+          registerCodexDeveloperInstructions(threadId, developerInstructions);
+          codexProductPromptDelivery = { threadId, historyHasProductPrompt: false };
+        } else if (developerInstructions) {
+          codexProductPromptDelivery = { threadId, historyHasProductPrompt: true };
+        }
+        sdkSessionId = threadId;
+        log.info('thread/start ok', { threadId, model: resp.model, serviceTier: mutableServiceTier ?? null });
+      } catch (e) {
+        releaseHostBindingLeaseIfNeeded();
+        log.error('thread/start failed', { error: String(e) });
+        const message = `Failed to start Codex thread: ${String(e)}`;
+        eventQueue.push({
+          type: 'error',
+          data: { message, isTerminal: true },
+          source: 'codex',
+        });
+        eventQueue.end();
+        throw new Error(message);
+      }
+    }
+
+    // ── dispatchInteraction + pendingApprovals (Claude 同款 dismissAllPending 模式) ──
+    //
+    // 为什么需要 pendingApprovals Map: server 发来 ServerRequest, 我们 await
+    // dispatchInteraction(...) 等用户点 PermissionPrompt。期间用户在另一处 UI
+    // 切了 permissionMode → setPermissionMode 应该把所有挂起的请求按新 mode
+    // 自动 resolve (allow/deny), 同时 emit interaction_dismissed 让 dialog 自动关。
+    // 不维护 pending Map 的话, 切 mode 不影响挂起 dialog → UX bug。
+    interface PendingEntry {
+      resolve: (decision: ApprovalDecision) => void;
+      kind: 'commandExecution' | 'fileChange' | 'mcpServerElicitation';
+      settled: boolean;
+      /** prompt-each-time 高风险审批: 宽松模式也必须弹 UI, dismissAllPending('allow') 不得放行 */
+      forcePrompt?: boolean;
+    }
+    const pendingApprovals = new Map<string, PendingEntry>();
+    const userInputBroker = new CodexInteractionBroker<ToolRequestUserInputResponse>();
+    const dynamicToolBroker = new CodexInteractionBroker<DynamicToolCallResponse>();
+    const activeToolContexts = new Map<string, ActiveToolContext>();
+    registerCodexMcpContext(threadId);
+    let mcpElicitationSeq = 0;
+
+    const codexSessionApprovalSuggestions = () =>
+      this.createSessionPermissionUpdates({ type: 'codexSessionApproval' });
+
+    const mapPermissionDecisionToApproval = (
+      decision: Extract<InteractionDecision, { kind: 'permission' }>,
+    ): ApprovalDecision => {
+      if (decision.behavior === 'allow' && this.permissionDecisionRequestsSessionApproval(decision)) {
+        return 'acceptForSession';
+      }
+      return mapBehaviorToApproval(decision.behavior);
+    };
+
+    function defaultInteractionDecision(req: InteractionRequest, reason: string): InteractionDecision {
+      if (req.kind === 'ask_user_question') {
+        return { kind: 'ask_user_question', answers: {} };
+      }
+      if (req.kind === 'plan_review') {
+        // dismissed: 系统性 deny(无 resolver / resolver 抛错), reason 是系统代码,
+        // 绝不能被 plan 修订循环当成用户反馈发起修订 turn。
+        return { kind: 'plan_review', behavior: 'deny', reason, dismissed: true };
+      }
+      return { kind: 'permission', behavior: 'deny', reason };
+    }
+
+    async function dispatchInteraction(req: InteractionRequest): Promise<InteractionDecision> {
+      if (!interactionResolver) {
+        log.warn('dispatchInteraction without resolver — defaulting to deny', { kind: req.kind, requestId: req.requestId });
+        return defaultInteractionDecision(req, 'no_interaction_resolver');
+      }
+      try {
+        return await interactionResolver(req);
+      } catch (e) {
+        log.error('interactionResolver threw → deny', { kind: req.kind, message: (e as Error).message });
+        return defaultInteractionDecision(req, 'interaction_resolver_error');
+      }
+    }
+
+    /**
+     * 计划模式审批闭环 (对齐官方 TUI plan_implementation 流程, 全部代码驱动):
+     * plan turn 结束 → 把捕获的 proposed plan 发给用户审批 (plan_review, 复用
+     * Claude 同款 PlanViewerCard/PlanActionCard UI) →
+     *   - 批准: 退出计划模式 (emit plan_mode_changed 让 host 回写持久化), 下一
+     *     turn 经 collaborationMode default 复位, 并自动发起实施 turn
+     *     ("Implement the plan.", 用户编辑过计划时附修订版全文);
+     *   - 反馈: 保持计划模式, 把反馈作为下一 plan turn 的输入让模型修订计划
+     *     (Claude 的 deny+reason 在同 turn 内回给模型; codex turn 已结束, 只能开新 turn);
+     *   - 取消 / 无反馈的 deny (会话关闭 / 交互被 dismiss): 结束本轮循环, 下一条
+     *     消息回到常规模式(想再规划需重新勾选), 不发起任何新 turn。
+     */
+    async function runPlanReviewFlow(plan: string, turnId: string): Promise<void> {
+      planReviewSeq += 1;
+      const requestId = `codex-plan-review:${turnId}:${planReviewSeq}`;
+      const emitPlanFollowUpStartFailure = (kind: 'implementation' | 'revision', error: unknown): void => {
+        log.warn(`plan ${kind} turn failed to start`, { error: String(error) });
+        // If handle.send throws before it can emit its own terminal event (for
+        // example a stale-host assertion before turn/start), main still needs a
+        // terminal signal to release the resolved plan_review busy boundary and
+        // re-check queued composer messages.
+        eventQueue.push({
+          type: 'error',
+          data: { message: `plan ${kind} turn failed to start: ${String(error)}`, isTerminal: true },
+          source: 'codex',
+        });
+        eventQueue.push({
+          type: 'status',
+          data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
+          source: 'codex',
+        });
+      };
+      log.debug('plan review ▶ dispatch', { turnId, planChars: plan.length });
+      const decision = await dispatchInteraction({ kind: 'plan_review', requestId, plan });
+      if (closed) return;
+      if (decision.kind !== 'plan_review') {
+        log.warn('plan review got mismatched decision', { decKind: decision.kind });
+        return;
+      }
+      if (decision.behavior === 'allow') {
+        planCycleActive = false;
+        // 兜底: 审阅期间用户又重新勾选了计划模式 → 尊重批准语义, 一并消耗掉。
+        if (mutablePlanMode) {
+          mutablePlanMode = false;
+          eventQueue.push({ type: 'plan_mode_changed', data: { enabled: false }, source: 'codex' });
+        }
+        const edited = decision.editedPlan?.trim();
+        const message = edited && edited !== plan.trim()
+          ? `${PLAN_IMPLEMENTATION_MESSAGE} Follow this revised plan:\n\n${edited}`
+          : PLAN_IMPLEMENTATION_MESSAGE;
+        log.debug('plan review ◀ approved — starting implementation turn', { turnId, edited: Boolean(edited && edited !== plan.trim()) });
+        try {
+          await handle.send({ type: 'user', content: message });
+        } catch (e) {
+          emitPlanFollowUpStartFailure('implementation', e);
+        }
+        return;
+      }
+      const feedback = decision.reason?.trim();
+      // 系统性 dismissal(abort/close/mode 切换等自动 deny)或无反馈 → 结束本轮循环,
+      // 绝不把系统 reason 当用户反馈发修订 turn。
+      if (decision.dismissed || !feedback || SYSTEM_PLAN_REVIEW_DISMISSAL_REASONS.has(feedback)) {
+        // 一次性语义: 取消/系统 dismissal 同样结束本轮循环 —— 下一条消息回到常规模式,
+        // 想再规划需重新勾选。
+        planCycleActive = false;
+        log.debug('plan review ◀ dismissed — plan cycle ends', {
+          turnId,
+          dismissed: decision.dismissed === true,
+          reason: decision.reason ?? null,
+        });
+        return;
+      }
+      log.debug('plan review ◀ revision requested — starting plan revision turn', { turnId });
+      try {
+        await handle.send({ type: 'user', content: feedback });
+      } catch (e) {
+        planCycleActive = false;
+        proposedPlanText = null;
+        emitPlanFollowUpStartFailure('revision', e);
+      }
+    }
+
+    /**
+     * 用 Promise.race 把"用户点按钮"和"外部 dismissAllPending 强制 resolve"两条路统一成
+     * 一个 Promise<ApprovalDecision>。dispatchInteraction 完成时若 entry 还没 settled
+     * 就走用户决策; settled=true 说明 dismissAllPending 已经替它做了决定, 用户后续点了也吞掉。
+     */
+    function awaitApprovalDecision(
+      requestId: string,
+      kind: 'commandExecution' | 'fileChange' | 'mcpServerElicitation',
+      req: InteractionRequest,
+      opts?: { forcePrompt?: boolean },
+    ): Promise<ApprovalDecision> {
+      // 只有用户显式选择 Full access 才自动放行审批请求。Auto-review 由 app-server
+      // 的 untrusted 策略先筛可信命令；它仍发出的非可信审批必须交给用户，不能代答。
+      // 例外: forcePrompt(prompt-each-time 高风险 MCP inner tool, 如 contacts delete/merge/
+      // 系统回写)在任何模式下都必须拿到用户的逐次确认, 宽松模式不代答。
+      if (
+        !opts?.forcePrompt &&
+        mutablePermissionMode === 'bypassPermissions'
+      ) {
+        return Promise.resolve('accept');
+      }
+      return new Promise<ApprovalDecision>((resolve) => {
+        const entry: PendingEntry = { resolve, kind, settled: false, forcePrompt: opts?.forcePrompt === true };
+        pendingApprovals.set(requestId, entry);
+        const finalize = (d: ApprovalDecision) => {
+          if (entry.settled) return;
+          entry.settled = true;
+          pendingApprovals.delete(requestId);
+          resolve(d);
+        };
+        dispatchInteraction(req)
+          .then((decision) => {
+            if (decision.kind !== 'permission') {
+              log.warn('unexpected non-permission decision → decline', { kind: decision.kind });
+              finalize('decline');
+              return;
+            }
+            finalize(mapPermissionDecisionToApproval(decision));
+          })
+          .catch((e) => {
+            log.error('dispatchInteraction threw → decline', { requestId, message: (e as Error).message });
+            finalize('decline');
+          });
+      });
+    }
+
+    /**
+     * 强制 resolve 所有挂起的 approval, emit interaction_dismissed 让 UI 关 dialog。
+     * 调用场景: setPermissionMode 切换 / close session。
+     *   - resolveAs='allow' (mode 切到 bypass): codex decision='accept'
+     *   - resolveAs='deny'  (mode 切到 ask/auto 或 close): codex decision='decline'
+     */
+    function dismissAllPending(reason: string, resolveAs: 'allow' | 'deny'): void {
+      if (pendingApprovals.size === 0) return;
+      const entries = Array.from(pendingApprovals.entries());
+      for (const [requestId, entry] of entries) {
+        if (entry.settled) continue;
+        entry.settled = true;
+        pendingApprovals.delete(requestId);
+        // forcePrompt(prompt-each-time 高风险审批)不接受"切到宽松模式"的批量放行——
+        // 没拿到用户对这一次调用的明确确认就 fail-closed 拒绝, 与 awaitApprovalDecision
+        // 里宽松模式仍强制弹 UI 的语义一致。
+        const effectiveResolveAs: 'allow' | 'deny' =
+          resolveAs === 'allow' && entry.forcePrompt === true ? 'deny' : resolveAs;
+        entry.resolve(effectiveResolveAs === 'allow' ? 'accept' : 'decline');
+        eventQueue.push({
+          type: 'interaction_dismissed',
+          data: { requestId, reason, resolvedAs: effectiveResolveAs },
+          source: 'codex',
+        });
+      }
+    }
+
+    const cancelledDynamicToolResponse = (reason: string): DynamicToolCallResponse => ({
+      contentItems: [{ type: 'inputText', text: `Request cancelled: ${reason}` }],
+      success: false,
+    });
+
+    function dismissPendingUserInput(
+      reason: string,
+      predicate: (meta: { threadId?: string; turnId?: string | null }) => boolean,
+    ): void {
+      const dismissed = new Set<string>();
+      const cancelledUserInput = userInputBroker.cancelWhere(
+        predicate,
+        { answers: {} },
+      );
+      const cancelledDynamicTools = dynamicToolBroker.cancelWhere(
+        predicate,
+        cancelledDynamicToolResponse(reason),
+      );
+      for (const meta of [...cancelledUserInput, ...cancelledDynamicTools]) {
+        const requestId = String(meta.requestId);
+        if (dismissed.has(requestId)) continue;
+        dismissed.add(requestId);
+        eventQueue.push({
+          type: 'interaction_dismissed',
+          data: { requestId, reason, resolvedAs: 'deny' },
+          source: 'codex',
+        });
+      }
+    }
+
+    function dismissPendingUserInputForTurn(turnId: string, reason: string): void {
+      dismissPendingUserInput(reason, (meta) => meta.turnId === turnId);
+    }
+
+    function dismissAllPendingUserInput(reason: string): void {
+      dismissPendingUserInput(reason, (meta) => meta.threadId === threadId);
+    }
+
+    /**
+     * 权限收紧 (bypass → ask/auto) 的 fail-safe 中断: Full access turn 在 server 侧是
+     * approvalPolicy=never + danger-full-access, turn 内 server 不再发审批请求,
+     * 本地 awaitApprovalDecision 无从拦截 —— 中断该 turn 是唯一能立即兑现
+     * 「从现在起要问我」的机制。语义与用户手动 stop 一致 (interrupted 不算失败)。
+     *
+     * 两个触发点共用:
+     *   - setPermissionMode: turn id 已知 (currentTurnId) 时立即中断;
+     *   - turn/start 在飞 (isTurnStartPending, id 未回) 时置 pendingTightenInterrupt,
+     *     由 handleTurnStartResp / turnStarted 通知在拿到 id 的瞬间补中断 ——
+     *     那次 turn/start 已携带旧的宽松策略发出, 不补会以 never 免审跑到结束。
+     */
+    let pendingTightenInterrupt = false;
+    /**
+     * 最近一次 send 的 turn 是否以宽松策略 (approvalPolicy=never) 发射 (覆盖
+     * 在飞与运行中两个阶段)。收紧时只有免审发射的 turn 才需要中断 —— ask 策略
+     * 发射的 turn 审批请求照常流经本地、收紧即时生效, 即使期间 UI 短暂切过
+     * 宽松档也不得误杀 (review #969 第三轮)。
+     */
+    let turnLaunchedUnattended = false;
+    /**
+     * turn/start RPC 响应回来之前就已收到终态 (turnCompleted) 的 turn 墓碑。
+     * 收紧补中断是 fire-and-forget: turnStarted 通知先到 → 立即中断 → server 的
+     * turnCompleted(interrupted) 可能仍抢在 RPC 响应之前到达; handleTurnStartResp
+     * 若无此墓碑会把已终结的 turn 重新置为运行中, 会话永远卡在 running
+     * (review #969 第四轮 Codex P2)。send 入口清空 (每个 send 周期独立)。
+     */
+    const turnsCompletedBeforeStartResp = new Set<string>();
+    async function interruptTurnForPermissionTighten(turnId: string): Promise<void> {
+      if (closed) return;
+      if (skipIfStaleHost('turn/interrupt')) return;
+      dismissPendingUserInputForTurn(turnId, 'turn_interrupted');
+      // 每次尝试都设有界超时: app-server / 连接无响应时该 RPC 会永久悬挂, 没有
+      // 超时就既不会走重试、也不会透出失败提示, 免审 turn 将无声继续跑
+      // (review #969 第六轮 Greptile P1)。超时后迟到的 settle 结果静默吞掉。
+      const requestInterruptWithTimeout = (): Promise<void> =>
+        new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            reject(new Error(`turn/interrupt did not acknowledge within ${TIGHTEN_INTERRUPT_ACK_TIMEOUT_MS}ms`));
+          }, TIGHTEN_INTERRUPT_ACK_TIMEOUT_MS);
+          host.request(Method.TurnInterrupt, { threadId, turnId }).then(
+            () => {
+              clearTimeout(timer);
+              resolve();
+            },
+            (err) => {
+              clearTimeout(timer);
+              reject(err instanceof Error ? err : new Error(String(err)));
+            },
+          );
+        });
+      try {
+        await requestInterruptWithTimeout();
+      } catch (e) {
+        // 这次 RPC 是收紧 fail-safe 的唯一执行手段, 失败不能静默: 重试一次,
+        // 仍失败则透出非终态 error —— UI 已按 ask 展示, 但免审 turn 还在跑,
+        // 用户需要知情并可手动 stop (review #969 第五轮 Codex P2)。
+        log.warn('turn/interrupt on permission tighten threw — retrying once', { error: String(e) });
+        try {
+          await requestInterruptWithTimeout();
+        } catch (retryErr) {
+          log.error('turn/interrupt on permission tighten failed after retry', { error: String(retryErr) });
+          eventQueue.push({
+            type: 'error',
+            data: {
+              // reason 是 renderer i18n 的稳定 key (ERROR_REASON_I18N_KEYS, 规则 18);
+              // message 仅作非 renderer 消费方 (IM / orca) 的英文兜底。
+              reason: 'permission-tighten-interrupt-failed',
+              message:
+                'Failed to stop the running task while tightening permissions; it may keep running without approval prompts until it finishes. Stop it manually if needed.',
+              isTerminal: false,
+            },
+            source: 'codex',
+          });
+        }
+      }
+    }
+
+    // ── ServerRequest handlers (Phase 2 approval, Phase 5 dismiss-on-mode-change) ──
+    const commandExecutionApproval = async (
+      params: CommandExecutionRequestApprovalParams,
+    ): Promise<CommandExecutionRequestApprovalResponse> => {
+      // requestId: approvalId 优先 (zsh-exec-bridge 多 callback 场景); 否则用 itemId
+      const requestId = params.approvalId ?? params.itemId;
+      const decision = await awaitApprovalDecision(requestId, 'commandExecution', {
+        kind: 'permission',
+        requestId,
+        toolName: 'exec',
+        input: commandExecutionDisplayInput(params.command ?? '', params.cwd ?? ''),
+        title: 'Allow Codex to run this command?',
+        description: params.reason ?? undefined,
+        suggestions: commandSupportsAcceptForSession(params) ? codexSessionApprovalSuggestions() : undefined,
+        metadata: params.reason ? { reason: params.reason } : undefined,
+      });
+      return { decision };
+    };
+
+    const fileChangeApproval = async (
+      params: FileChangeRequestApprovalParams,
+    ): Promise<FileChangeRequestApprovalResponse> => {
+      const requestId = params.itemId;
+      const decision = await awaitApprovalDecision(requestId, 'fileChange', {
+        kind: 'permission',
+        requestId,
+        toolName: 'file_change',
+        input: { grantRoot: params.grantRoot ?? null },
+        title: 'Allow Codex to change files?',
+        description: params.reason ?? undefined,
+        suggestions: codexSessionApprovalSuggestions(),
+        metadata: params.reason ? { reason: params.reason } : undefined,
+      });
+      return { decision };
+    };
+
+    function recordFromUnknown(value: unknown): Record<string, unknown> | null {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+      return value as Record<string, unknown>;
+    }
+
+    function stringFromMeta(meta: Record<string, unknown> | null, key: string): string | undefined {
+      const value = meta?.[key];
+      return typeof value === 'string' && value.trim() ? value : undefined;
+    }
+
+    function commandSupportsAcceptForSession(params: CommandExecutionRequestApprovalParams): boolean {
+      const availableDecisions = params.availableDecisions;
+      return !Array.isArray(availableDecisions) || availableDecisions.includes('acceptForSession');
+    }
+
+    function metaContainsSessionPersist(meta: Record<string, unknown> | null): boolean {
+      const persist = meta?.persist;
+      return persist === 'session' || (Array.isArray(persist) && persist.includes('session'));
+    }
+
+    function mcpElicitationMeta(params: McpServerElicitationRequestParams): Record<string, unknown> | null {
+      if (params.mode !== 'form') return null;
+      return recordFromUnknown(params._meta);
+    }
+
+    function isMcpToolApprovalElicitation(params: McpServerElicitationRequestParams): boolean {
+      return stringFromMeta(mcpElicitationMeta(params), 'codex_approval_kind') === 'mcp_tool_call';
+    }
+
+    function mcpElicitationAllowsSession(params: McpServerElicitationRequestParams): boolean {
+      return metaContainsSessionPersist(mcpElicitationMeta(params));
+    }
+
+    function mcpElicitationPermissionInput(params: McpServerElicitationRequestParams): Record<string, unknown> {
+      const meta = mcpElicitationMeta(params);
+      const input: Record<string, unknown> = {
+        serverName: params.serverName,
+        message: params.message,
+      };
+      const toolName = stringFromMeta(meta, 'tool_name');
+      const toolTitle = stringFromMeta(meta, 'tool_title');
+      const toolDescription = stringFromMeta(meta, 'tool_description');
+      if (toolName) input.toolName = toolName;
+      if (toolTitle) input.toolTitle = toolTitle;
+      if (toolDescription) input.toolDescription = toolDescription;
+      if (meta?.tool_params_display != null) input.toolParamsDisplay = meta.tool_params_display;
+      if (meta?.tool_params != null) input.toolParams = meta.tool_params;
+      return input;
+    }
+
+    function mcpToolApprovalContext(params: McpServerElicitationRequestParams) {
+      const meta = mcpElicitationMeta(params);
+      const toolName = stringFromMeta(meta, 'tool_name');
+      return {
+        serverName: params.serverName,
+        ...(toolName ? { toolName } : {}),
+        ...(meta?.tool_params != null ? { toolParams: meta.tool_params } : {}),
+      };
+    }
+
+    function mcpInnerToolName(params: McpServerElicitationRequestParams): string | undefined {
+      const context = mcpToolApprovalContext(params);
+      return stringFromMeta(recordFromUnknown(context.toolParams), 'name');
+    }
+
+    const mcpToolApprovalPolicy = (params: McpServerElicitationRequestParams) => {
+      const classifier = this.deps.getMcpToolApprovalPolicy;
+      if (!classifier) return 'prompt' as const;
+      try {
+        const policy = classifier(mcpToolApprovalContext(params));
+        if (policy === 'auto-approve' || policy === 'prompt' || policy === 'prompt-each-time') {
+          return policy;
+        }
+        log.error('invalid MCP approval policy -> prompt each time', {
+          serverName: params.serverName,
+          policy,
+        });
+      } catch (error) {
+        log.error('MCP approval policy threw -> prompt each time', {
+          serverName: params.serverName,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return 'prompt-each-time' as const;
+    };
+
+    const mcpServerElicitation = async (
+      params: McpServerElicitationRequestParams,
+    ): Promise<McpServerElicitationRequestResponse> => {
+      if (!isMcpToolApprovalElicitation(params)) {
+        log.warn('unsupported MCP server elicitation -> decline', {
+          serverName: params.serverName,
+          mode: params.mode,
+        });
+        return { action: 'decline', content: null, _meta: null };
+      }
+
+      // Host policy 可在 outer call_tool 的 metadata 中识别渐进式 server 的
+      // inner action。查询继续静默，高风险 action 逐次确认且不得持久化授权。
+      const approvalPolicy = mcpToolApprovalPolicy(params);
+      if (approvalPolicy === 'auto-approve') {
+        log.debug('mcp elicitation auto-approved by host policy', {
+          serverName: params.serverName,
+          mode: params.mode,
+          toolName: stringFromMeta(mcpElicitationMeta(params), 'tool_name'),
+          innerToolName: mcpInnerToolName(params),
+        });
+        return { action: 'accept', content: null, _meta: null };
+      }
+
+      const meta = mcpElicitationMeta(params);
+      const toolTitle = stringFromMeta(meta, 'tool_title');
+      const innerToolName = mcpInnerToolName(params);
+      const requestId = `mcp-elicitation:${params.serverName}:${params.turnId ?? params.threadId}:${++mcpElicitationSeq}`;
+      const decision = await awaitApprovalDecision(
+        requestId,
+        'mcpServerElicitation',
+        {
+          kind: 'permission',
+          requestId,
+          toolName: `mcp:${params.serverName}`,
+          input: mcpElicitationPermissionInput(params),
+          title: `Allow Codex to use ${innerToolName ?? toolTitle ?? params.serverName}?`,
+          description: params.message,
+          suggestions:
+            approvalPolicy !== 'prompt-each-time' && mcpElicitationAllowsSession(params)
+              ? codexSessionApprovalSuggestions()
+              : undefined,
+        },
+        // prompt-each-time:Full access 也必须逐次弹 UI,否则高风险 inner tool
+        // (contacts delete/merge/系统回写)会被 awaitApprovalDecision 首分支静默放行。
+        { forcePrompt: approvalPolicy === 'prompt-each-time' },
+      );
+
+      if (decision === 'accept') {
+        return { action: 'accept', content: null, _meta: null };
+      }
+      if (decision === 'acceptForSession') {
+        return approvalPolicy === 'prompt-each-time'
+          ? { action: 'accept', content: null, _meta: null }
+          : { action: 'accept', content: null, _meta: { persist: 'session' } };
+      }
+      if (decision === 'cancel') {
+        return { action: 'cancel', content: null, _meta: null };
+      }
+      return { action: 'decline', content: null, _meta: null };
+    };
+
+    const permissionsApproval = async (
+      params: PermissionsRequestApprovalParams,
+    ): Promise<PermissionsRequestApprovalResponse> => {
+      const requestId = params.itemId ?? params.turnId;
+      const decision = await awaitApprovalDecision(requestId, 'commandExecution', {
+        kind: 'permission',
+        requestId,
+        toolName: 'permissions',
+        input: { permissions: params.permissions },
+        title: 'Allow Codex to use these permissions?',
+        description: params.reason ?? undefined,
+        suggestions: codexSessionApprovalSuggestions(),
+        metadata: params.reason ? { reason: params.reason } : undefined,
+      });
+      if (decision === 'accept') {
+        return { permissions: params.permissions as Record<string, unknown>, scope: 'turn' };
+      }
+      if (decision === 'acceptForSession') {
+        return { permissions: params.permissions as Record<string, unknown>, scope: 'session' };
+      }
+      return { permissions: {}, scope: 'turn' };
+    };
+
+    function activeToolContextFromItem(
+      item: unknown,
+      turnId?: string | null,
+    ): { id: string; ctx: ActiveToolContext } | null {
+      if (!item || typeof item !== 'object') return null;
+      const rec = item as Record<string, unknown>;
+      const id = typeof rec.id === 'string' ? rec.id : '';
+      if (!id) return null;
+      if (rec.type === 'mcpToolCall') {
+        return {
+          id,
+          ctx: {
+            type: 'mcpToolCall',
+            turnId,
+            server: typeof rec.server === 'string' ? rec.server : null,
+            tool: typeof rec.tool === 'string' ? rec.tool : null,
+          },
+        };
+      }
+      if (rec.type === 'dynamicToolCall') {
+        return {
+          id,
+          ctx: {
+            type: 'dynamicToolCall',
+            turnId,
+            namespace: typeof rec.namespace === 'string' ? rec.namespace : null,
+            tool: typeof rec.tool === 'string' ? rec.tool : null,
+          },
+        };
+      }
+      return null;
+    }
+
+    function noteActiveToolContext(item: unknown, turnId?: string | null): void {
+      const active = activeToolContextFromItem(item, turnId);
+      if (!active) return;
+      activeToolContexts.set(active.id, active.ctx);
+    }
+
+    function clearActiveToolContextsForTurn(turnId: string): void {
+      for (const [itemId, ctx] of activeToolContexts) {
+        if (ctx.turnId === turnId) activeToolContexts.delete(itemId);
+      }
+    }
+
+    function classifyUserInputRequest(params: ToolRequestUserInputParams): 'ask_user_question' | 'permission' {
+      const ctx = activeToolContexts.get(params.itemId);
+      if (!ctx) return 'ask_user_question';
+      if (ctx.type === 'mcpToolCall') return 'permission';
+      if (ctx.type === 'dynamicToolCall') {
+        return isAskUserDynamicTool({ namespace: ctx.namespace ?? '', tool: ctx.tool ?? '' })
+          ? 'ask_user_question'
+          : 'permission';
+      }
+      return 'ask_user_question';
+    }
+
+    async function askUserViaInteraction(
+      requestId: string,
+      questions: ToolRequestUserInputQuestion[],
+    ): Promise<ToolRequestUserInputResponse> {
+      if (questions.some((q) => q.isSecret)) {
+        log.warn('requestUserInput secret question refused', {
+          requestId,
+          questionCount: questions.length,
+        });
+        return emptyUserInputResponse(questions);
+      }
+      const decision = await dispatchInteraction({
+        kind: 'ask_user_question',
+        requestId,
+        questions: questionsToAskUserItems(questions),
+      });
+      if (decision.kind !== 'ask_user_question') {
+        log.warn('requestUserInput got mismatched ask decision', { requestId, decKind: decision.kind });
+        return emptyUserInputResponse(questions);
+      }
+      return responseFromAskUserAnswers(questions, decision.answers);
+    }
+
+    async function requestUserInputAsPermission(
+      requestId: string,
+      params: ToolRequestUserInputParams,
+      questions: ToolRequestUserInputQuestion[],
+    ): Promise<ToolRequestUserInputResponse> {
+      const ctx = activeToolContexts.get(params.itemId);
+      const toolName = ctx?.type === 'mcpToolCall'
+        ? `mcp:${ctx.server ?? 'unknown'}:${ctx.tool ?? 'unknown'}`
+        : ctx?.type === 'dynamicToolCall'
+          ? `dynamic:${ctx.namespace ? `${ctx.namespace}:` : ''}${ctx.tool ?? 'unknown'}`
+          : 'request_user_input';
+      const decision = await dispatchInteraction({
+        kind: 'permission',
+        requestId,
+        toolName,
+        input: {
+          itemId: params.itemId,
+          questions: questions.map((q) => ({
+            id: q.id,
+            header: q.header,
+            question: q.question,
+            options: q.options,
+          })),
+        },
+        title: 'Allow this tool to ask for user input?',
+        description: questions.map((q) => q.question).filter(Boolean).join('\n'),
+        metadata: {
+          threadId: params.threadId,
+          turnId: params.turnId,
+          itemId: params.itemId,
+          userInputKind: 'tool_side_effect',
+        },
+      });
+      if (decision.kind !== 'permission') {
+        log.warn('requestUserInput permission got mismatched decision', { requestId, decKind: decision.kind });
+        return emptyUserInputResponse(questions);
+      }
+      return responseFromPermissionDecision(questions, decision);
+    }
+
+    const requestUserInput = async (
+      params: ToolRequestUserInputParams,
+      meta: { requestId: string | number },
+    ): Promise<ToolRequestUserInputResponse> => {
+      const requestId = String(meta.requestId);
+      const questions = normalizeRequestUserInputQuestions(params.questions);
+      if (questions.length === 0) return { answers: {} };
+      const kind = classifyUserInputRequest(params);
+      log.debug('native requestUserInput received', {
+        requestId,
+        threadId: params.threadId,
+        turnId: params.turnId,
+        itemId: params.itemId,
+        kind,
+        questionCount: questions.length,
+      });
+      return userInputBroker.track(
+        {
+          kind: 'request_user_input',
+          connectionId,
+          requestId: meta.requestId,
+          threadId: params.threadId,
+          turnId: params.turnId,
+          itemId: params.itemId,
+        },
+        async (settle) => {
+          const response = kind === 'permission'
+            ? await requestUserInputAsPermission(requestId, params, questions)
+            : await askUserViaInteraction(requestId, questions);
+          settle(response);
+        },
+      );
+    };
+
+    const dynamicToolCall = async (
+      params: DynamicToolCallParams,
+      meta: { requestId: string | number },
+    ): Promise<DynamicToolCallResponse> => {
+      if (!isAskUserDynamicTool(params)) {
+        return {
+          contentItems: [{ type: 'inputText', text: `Unsupported dynamic tool: ${params.tool}` }],
+          success: false,
+        };
+      }
+      const requestId = String(meta.requestId);
+      const questions = normalizeDynamicAskUserQuestions(params.arguments);
+      if (questions.length === 0) {
+        return {
+          contentItems: [{ type: 'inputText', text: 'No valid questions were provided.' }],
+          success: false,
+        };
+      }
+      return dynamicToolBroker.track(
+        {
+          kind: 'dynamic_tool',
+          connectionId,
+          requestId: meta.requestId,
+          threadId: params.threadId,
+          turnId: params.turnId,
+          itemId: params.callId,
+        },
+        async (settle) => {
+          const response = await askUserViaInteraction(requestId, questions);
+          settle(dynamicToolResponseFromUserInput(response));
+        },
+      );
+    };
+
+    function handleServerRequestResolved(params: ServerRequestResolvedNotification['params']): void {
+      const requestId = String(params.requestId);
+      const userInputCancelled = userInputBroker.cancel(
+        { connectionId, requestId: params.requestId },
+        { answers: {} },
+      );
+      const dynamicCancelled = dynamicToolBroker.cancel(
+        { connectionId, requestId: params.requestId },
+        {
+          contentItems: [{ type: 'inputText', text: 'Request was resolved before user input was submitted.' }],
+          success: false,
+        },
+      );
+      if (userInputCancelled || dynamicCancelled) {
+        eventQueue.push({
+          type: 'interaction_dismissed',
+          data: { requestId, reason: 'server_request_resolved', resolvedAs: 'deny' },
+          source: 'codex',
+        });
+      }
+    }
+
+    // ── status 文案: 对齐 claude-code 6 类 chip 文案 ────────────────────────
+    // claude-code 由 SDK 直接广播 status 文案 (Generating / Thinking / Compacting / <tool> running / Done);
+    // codex 协议没这层 — 必须自己从 item.* lifecycle + thread/status/changed 推断。
+    // 实现策略: 每次切换语义化阶段 push 一次, 不在 delta 里 push (会刷成风暴);
+    // 由 renderer 显示最新一条, react batch 自然消化中间抖动。
+    function pushStatus(text: string): void {
+      eventQueue.push({
+        type: 'status',
+        data: { status: text, ...usageTracker.snapshot(), isRunning: true },
+        source: 'codex',
+      });
+    }
+
+    function pushItemStatus(item: { type?: string; command?: string; tool?: string }): void {
+      const text = statusTextForItem(item);
+      if (text) pushStatus(text);
+    }
+
+    function rejectIfCancelled(sendOpts: SendOptions | undefined, action: string): void {
+      if (sendOpts?.signal?.aborted) {
+        throw new Error(`Codex ${action} cancelled before acceptance`);
+      }
+    }
+
+    function rejectClosedOrCancelledSend(sendOpts: SendOptions | undefined, stage: string): boolean {
+      rejectIfCancelled(sendOpts, 'send');
+      if (!closed) return false;
+      log.warn('send called on closed session', { stage });
+      if (sendOpts?.throwOnStartFailure || sendOpts?.signal) {
+        throw new Error(`Codex send cannot be accepted: session is closed ${stage}`);
+      }
+      return true;
+    }
+
+    function isLocalAcceptBoundaryError(err: unknown): boolean {
+      const text = err instanceof Error ? err.message : String(err);
+      return /Codex send (?:cancelled|cannot be accepted)/i.test(text);
+    }
+
+    const shouldIgnoreStaleTurnEvent =(turnId: string | null | undefined): boolean => {
+      if (!turnId) return false;
+      if (completedTurnIds.has(turnId)) return true;
+      if (terminalErroredTurnIds.has(turnId)) return true;
+      return currentTurnId !== null && turnId !== currentTurnId;
+    };
+
+    const stopActiveRolloutPlanFallback = (): void => {
+      const stop = stopRolloutPlanFallback;
+      stopRolloutPlanFallback = null;
+      try { stop?.(); } catch { /* no-op */ }
+    };
+
+    const startRolloutPlanFallback = (turnId: string): void => {
+      stopActiveRolloutPlanFallback();
+      seenRolloutPlanCallIds.clear();
+
+      let stopped = false;
+      let timer: ReturnType<typeof setInterval> | null = null;
+      let rolloutPath = '';
+      let offset = 0;
+      let remainder = '';
+
+      const scanText = (text: string, allowFallbackTurnId: boolean): void => {
+        const lines = `${remainder}${text}`.split(/\r?\n/);
+        remainder = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let entry: unknown;
+          try {
+            entry = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          const parsed = extractRolloutUpdatePlanFunctionCallEvent(
+            entry,
+            allowFallbackTurnId ? turnId : undefined,
+            { requireTurnId: true },
+          );
+          if (!parsed) continue;
+          if (parsed.turnId && shouldIgnoreStaleTurnEvent(parsed.turnId)) continue;
+          if (parsed.turnId && parsed.turnId !== turnId) continue;
+          if (parsed.callId) {
+            if (seenRolloutPlanCallIds.has(parsed.callId)) {
+              continue;
+            }
+            seenRolloutPlanCallIds.add(parsed.callId);
+          }
+          const input = parsed.event.data as { input?: { plan?: unknown } };
+          if (parsed.turnId && Array.isArray(input.input?.plan)) {
+            latestPlanByTurn.set(
+              parsed.turnId,
+              input.input.plan as TurnPlanUpdatedNotification['params']['plan'],
+            );
+          }
+          eventQueue.push(parsed.event);
+        }
+      };
+
+      const poll = async (allowFallbackTurnId: boolean): Promise<void> => {
+        if (stopped || !rolloutPath) return;
+        let stat: Awaited<ReturnType<typeof fs.stat>>;
+        try {
+          stat = await fs.stat(rolloutPath);
+        } catch {
+          return;
+        }
+        if (stat.size < offset) {
+          offset = 0;
+          remainder = '';
+        }
+        if (stat.size === offset) return;
+
+        const length = stat.size - offset;
+        const buffer = Buffer.alloc(length);
+        let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+        try {
+          handle = await fs.open(rolloutPath, 'r');
+          const read = await handle.read(buffer, 0, length, offset);
+          offset += read.bytesRead;
+          scanText(buffer.subarray(0, read.bytesRead).toString('utf8'), allowFallbackTurnId);
+        } catch (e) {
+          log.debug('rollout plan fallback poll failed', { error: String(e), threadId, turnId });
+        } finally {
+          try { await handle?.close(); } catch { /* no-op */ }
+        }
+      };
+
+      stopRolloutPlanFallback = () => {
+        if (timer) clearInterval(timer);
+        stopped = true;
+      };
+
+      void (async () => {
+        try {
+          rolloutPath = await this.findRolloutPath(threadId);
+        } catch (e) {
+          log.debug('rollout plan fallback disabled: rollout path unavailable', {
+            error: String(e),
+            threadId,
+            turnId,
+          });
+          return;
+        }
+        if (stopped) return;
+        await poll(false);
+        if (stopped) return;
+        timer = setInterval(() => void poll(true), 500);
+      })();
+    };
+
+    const flushDeferredTerminalTurnCompletionsIfIdle = (): void => {
+      if (isTurnStartPending || currentTurnId !== null) return;
+      for (const [turnId, params] of Array.from(deferredTerminalTurnCompletions.entries())) {
+        if (!deferredTerminalTurnCompletions.has(turnId)) continue;
+        deferredTerminalTurnCompletions.delete(turnId);
+        handleTurnCompleted(params);
+      }
+    };
+
+    /**
+     * 计划模式下拦截 plan item (proposed plan / <proposed_plan> 块): 记录最新文本,
+     * 不进 translator —— 计划内容由 turn 结束后的 plan_review 卡片呈现, 不再渲染
+     * update_plan 工具行 (避免同一份计划在聊天里出现两次)。
+     * 非计划模式不拦截; 普通 Codex turn 也可能产生原生 plan item。
+     */
+    function interceptProposedPlanItem(item: unknown): boolean {
+      if (!currentTurnPlanModeActive) return false;
+      const candidate = item as { type?: unknown; text?: unknown } | null | undefined;
+      if (!candidate || candidate.type !== 'plan') return false;
+      if (typeof candidate.text === 'string') proposedPlanText = candidate.text;
+      return true;
+    }
+
+    function handleTurnCompleted(params: TurnCompletedParams): void {
+      const turn = params.turn;
+      // turn/start RPC 响应未回时就收到终态 → 记墓碑, 阻止稍后到达的
+      // handleTurnStartResp / 乱序 turnStarted 把已终结的 turn 重新置活。
+      if (isTurnStartPending) turnsCompletedBeforeStartResp.add(turn.id);
+      const isTerminalErroredTurn = terminalErroredTurnIds.has(turn.id);
+      if (isTerminalErroredTurn && isTurnStartPending && currentTurnId !== turn.id) {
+        deferredTerminalTurnCompletions.set(turn.id, params);
+        return;
+      }
+      // turn/completed 可能重复投递。只允许第一次进入 usage / UI / done 收口;
+      // 同一个墓碑也负责拦截该 turn 随后迟到的 item / reasoning / started 事件。
+      if (completedTurnIds.has(turn.id)) return;
+      completedTurnIds.add(turn.id);
+      const suppressTerminalUi = terminalErroredTurnIds.has(turn.id);
+      deferredTerminalTurnCompletions.delete(turn.id);
+      if (currentTurnId === turn.id || currentTurnId === null) {
+        stopActiveRolloutPlanFallback();
+      }
+      dismissPendingUserInputForTurn(turn.id, `turn_${turn.status}`);
+      clearActiveToolContextsForTurn(turn.id);
+      const overlapsActiveTurn = suppressTerminalUi && currentTurnId !== null && currentTurnId !== turn.id;
+      if (overlapsActiveTurn) return;
+      const completedTurnWasPlanMode = currentTurnPlanModeActive;
+      if (currentTurnId === turn.id || currentTurnId === null) {
+        isTurnInFlight = false;
+        currentTurnId = null;
+        currentTurnPlanModeActive = false;
+      }
+      const lastSnap = usageTracker.snapshot();
+      // turn 桶快照 — endTurn 会清掉 turn 桶, 必须在调用前先取出来
+      const preTurnEndCacheStats = usageTracker.getCacheStats();
+      // 真实 per-turn 用量 (tokenUsage/updated 逐次累加的 turn 桶) — done 事件的
+      // usage 用它, 不用 contextTokens 降级值 (那是整个上下文快照, 不是本 turn 增量)。
+      // 必须在 endTurn 之前取: endTurn 会用降级 aggregate 覆盖后 reset。
+      const realTurnUsage = usageTracker.getTurnUsage();
+      usageTracker.endTurn({
+        inputTokens: lastSnap.contextTokens ?? 0,
+        outputTokens: 0,
+      });
+
+      const endSnap = usageTracker.snapshot();
+      const sessionCacheStats = usageTracker.getCacheStats().session;
+      const formatBucket = (b: typeof preTurnEndCacheStats.turn) => ({
+        hitRate: b.hitRate === null ? 'n/a' : `${(b.hitRate * 100).toFixed(1)}%`,
+        read: b.read,
+        create: b.create,
+        uncached: b.uncachedInput,
+        apiCalls: b.apiCalls,
+      });
+      log.debug('SDK ◀ turn end', {
+        turnId: turn.id,
+        status: turn.status,
+        startedAt: turn.startedAt ?? null,
+        completedAt: turn.completedAt ?? null,
+        durationMs: turn.durationMs ?? null,
+        serviceTier: mutableServiceTier ?? null,
+        fastMode: isFastServiceTier(mutableServiceTier),
+        // 本 turn 增量 (来自最近一次 thread/tokenUsage/updated 的 last)
+        inputTokens: lastTurnTokenUsage?.inputTokens ?? null,
+        cachedInputTokens: lastTurnTokenUsage?.cachedInputTokens ?? null,
+        outputTokens: lastTurnTokenUsage?.outputTokens ?? null,
+        reasoningOutputTokens: lastTurnTokenUsage?.reasoningOutputTokens ?? null,
+        contextWindow: lastModelContextWindow,
+        cumulative: endSnap,
+        // cache 命中率 — 排查第三方 proxy 透传问题用,
+        // 公式与代码见 UsageTracker.getCacheStats() 注释。
+        cacheStats: {
+          turn: formatBucket(preTurnEndCacheStats.turn),
+          session: formatBucket(sessionCacheStats),
+        },
+      });
+
+      if (suppressTerminalUi) {
+        latestPlanByTurn.delete(turn.id);
+        flushDeferredTerminalTurnCompletionsIfIdle();
+        return;
+      }
+
+      if (turn.status === 'failed' || turn.status === 'interrupted') {
+        // 失败 / 中断的 plan turn 不发审批 — 半截计划没有审批意义, 循环就此结束。
+        proposedPlanText = null;
+        planCycleActive = false;
+        currentTurnPlanModeActive = false;
+        if (turn.error?.message) {
+          eventQueue.push({
+            type: 'error',
+            data: { message: turn.error.message, isTerminal: true },
+            source: 'codex',
+          });
+        } else if (turn.status === 'failed') {
+          // failed turn 缺 error detail 时也必须推 terminal error —— 否则 renderer
+          // 的 state.error 不置位, running→stopped 的通知链路把这次失败当正常完成
+          // (桌面/飞书通知显示"已完成")。序列与上面"有 message"的分支同构(error→done)。
+          // reason 是稳定 key, renderer 按它走 i18n 文案(规则 18); message 仅作
+          // 非 renderer 消费方(IM/orca)的兜底。interrupted(用户主动停)不算失败, 不补。
+          eventQueue.push({
+            type: 'error',
+            data: {
+              message: '任务执行失败（模型未返回错误详情）。',
+              isTerminal: true,
+              reason: 'turn-failed',
+            },
+            source: 'codex',
+          });
+        }
+        eventQueue.push({
+          type: 'done',
+          data: { type: 'codex/event/task_complete', cancelled: turn.status === 'interrupted', raw: turn },
+          source: 'codex',
+        });
+        latestPlanByTurn.delete(turn.id);
+        flushDeferredTerminalTurnCompletionsIfIdle();
+        return;
+      }
+
+      eventQueue.push({
+        type: 'status',
+        data: { status: 'Done', ...endSnap, isRunning: false },
+        source: 'codex',
+      });
+      // 真实 per-turn 用量 (host 的 today chip / daily_model_usage 记账消费):
+      //   promptTokens     = 本 turn 未命中缓存的输入 (不再是 contextTokens 上下文快照)
+      //   completionTokens = 本 turn 输出+推理合并 (ingest 时已合并, 拆不回, 总量正确)
+      //   reasoningTokens  = 0 (已并入 completionTokens, 消费方求和口径不变)
+      //   cachedTokens     = 本 turn 命中缓存的输入
+      // 契约: 本 payload **永远是 per-turn 增量语义**, 消费方 (today chip /
+      // daily_model_usage 记账) 直接累加, 不做任何 delta 化。整个 turn 没收到
+      // tokenUsage/updated 时就是全 0 (该 turn 不记账) — 不退回 contextTokens:
+      // 在直接累加的消费方手里, 上下文快照会被当成一笔巨额输入, 高估远糟于漏记。
+      const codexDoneUsage = {
+        promptTokens: realTurnUsage.input,
+        completionTokens: realTurnUsage.output,
+        reasoningTokens: 0,
+        cachedTokens: realTurnUsage.cacheRead,
+      };
+      eventQueue.push({
+        type: 'done',
+        data: {
+          type: 'codex/event/task_complete',
+          usage: codexDoneUsage,
+          raw: turn,
+          plan: latestPlanByTurn.get(turn.id) ?? null,
+        },
+        source: 'codex',
+      });
+      latestPlanByTurn.delete(turn.id);
+      // 计划模式: plan turn 正常收尾且产出了 proposed plan → 发起审批闭环。
+      // 放在 done 之后 (AsyncQueue FIFO), renderer 先做完 turn 收尾再挂 plan 卡片。
+      // 空跑(模型没产出 <proposed_plan>, 例如直接回答了问题) → 循环结束,
+      // 下一 turn 经 threadTouchedPlanMode 复位 default。
+      const planForReview = proposedPlanText?.trim();
+      proposedPlanText = null;
+      if (completedTurnWasPlanMode && planCycleActive) {
+        if (planForReview) {
+          void runPlanReviewFlow(planForReview, turn.id);
+        } else {
+          log.debug('plan turn produced no proposed plan — plan cycle ends', { turnId: turn.id });
+          planCycleActive = false;
+        }
+      }
+      flushDeferredTerminalTurnCompletionsIfIdle();
+    }
+
+    // ── subscribeThread: notification 路由 + approval handlers ─────────────
+    const handlers: ThreadEventHandlers = {
+      threadStarted: (params) => {
+        const sid = params.thread?.id;
+        if (sid && sid !== sdkSessionId) sdkSessionId = sid;
+        if (sdkSessionId) {
+          eventQueue.push({ type: 'session_id', data: sdkSessionId, source: 'codex' });
+        }
+      },
+      turnStarted: (params) => {
+        // terminal error 已经为该 turn 收口时，晚到的 start 只能忽略，等待 completed 做清理。
+        if (shouldIgnoreStaleTurnEvent(params.turn.id)) return;
+        // 终态已先到的 turn (墓碑) 不得被乱序晚到的 started 重新置活。
+        if (turnsCompletedBeforeStartResp.has(params.turn.id)) return;
+        const wasSameTurn = currentTurnId === params.turn.id;
+        currentTurnId = params.turn.id;
+        isTurnInFlight = true;
+        // turn/start 在飞期间权限被收紧 (turnStarted 通知可能先于 turn/start resp
+        // 到达) → 拿到 id 立即补中断, 与 handleTurnStartResp 互斥消费同一标记。
+        if (pendingTightenInterrupt) {
+          pendingTightenInterrupt = false;
+          void interruptTurnForPermissionTighten(params.turn.id);
+        }
+        if (!wasSameTurn) currentTurnPlanModeActive = pendingTurnStartPlanMode ?? planCycleActive;
+        // 新 turn 开始 → 丢弃上一 turn 未消费的 proposed plan (正常路径已在
+        // handleTurnCompleted 清空, 这里防御 stale)。
+        proposedPlanText = null;
+        terminalErroredTurnIds.delete(params.turn.id);
+        // Reset auth retry-loop dedupe key — 让下一个 turn 重新可以 emit 第一条
+        // auth error。详见 translator.translateErrorNotification dedupe 逻辑。
+        translatorRt.lastAuthErrorKey = null;
+        // 网络类 retry-loop 透出状态同理:新 turn 重新计数,可再透出一条。
+        translatorRt.networkRetryNotice = null;
+        log.debug('SDK ▶ turn start', {
+          turnId: params.turn.id,
+          model: mutableModel,
+          effort: mutableEffort,
+          permissionMode: mutablePermissionMode,
+          serviceTier: mutableServiceTier ?? null,
+          fastMode: isFastServiceTier(mutableServiceTier),
+        });
+      },
+      tokenUsageUpdated: (params) => {
+        if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
+        const last = params.tokenUsage?.last;
+        if (!last) return;
+        lastTurnTokenUsage = last;
+        lastModelContextWindow = params.tokenUsage?.modelContextWindow ?? null;
+        usageTracker.setContextWindow(lastModelContextWindow ?? 0);
+        const cached = last.cachedInputTokens ?? 0;
+        const totalInput = last.inputTokens ?? 0;
+        const uncachedInput = Math.max(0, totalInput - cached);
+        const totalOutput = (last.outputTokens ?? 0) + (last.reasoningOutputTokens ?? 0);
+        usageTracker.ingestApiCallUsage({
+          inputTokens: uncachedInput,
+          outputTokens: totalOutput,
+          cacheReadTokens: cached,
+          cacheCreateTokens: 0,
+        });
+        // Maker Memory flush 观察 (A 轻版: 只打日志). makerMemoryEnabled 关时 controller 为 null。
+        if (memoryFlushController) {
+          const snap = usageTracker.snapshot();
+          memoryFlushController.onUsageUpdate(snap.contextTokens, snap.contextWindow);
+        }
+      },
+      turnCompleted: (params) => {
+        handleTurnCompleted(params);
+      },
+      itemStarted: (params) => {
+        if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
+        if (interceptProposedPlanItem(params.item)) return;
+        noteActiveToolContext(params.item, params.turnId);
+        pushItemStatus(params.item);
+        translateItemNotification('started', params, eventQueue, {
+          rt: translatorRt,
+          log,
+          ...(memoryFlushController
+            ? { onCompactBoundary: () => memoryFlushController?.onCompactBoundary() }
+            : {}),
+        });
+      },
+      itemUpdated: (params) => {
+        if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
+        if (interceptProposedPlanItem(params.item)) return;
+        noteActiveToolContext(params.item, params.turnId);
+        translateItemNotification('updated', params, eventQueue, {
+          rt: translatorRt,
+          log,
+          ...(memoryFlushController
+            ? { onCompactBoundary: () => memoryFlushController?.onCompactBoundary() }
+            : {}),
+        });
+      },
+      itemCompleted: (params) => {
+        if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
+        if (interceptProposedPlanItem(params.item)) return;
+        noteActiveToolContext(params.item, params.turnId);
+        translateItemNotification('completed', params, eventQueue, {
+          rt: translatorRt,
+          log,
+          ...(memoryFlushController
+            ? { onCompactBoundary: () => memoryFlushController?.onCompactBoundary() }
+            : {}),
+        });
+        // item 完成后, 若 turn 仍在跑, 先回到 'Generating...' 兜底 — 下一条 item 起来会再覆盖。
+        // turn/completed 在 turn 结束时会 push 'Done' 终态, 不需要在这里特判。
+        if (isTurnInFlight) pushStatus('Generating...');
+      },
+      turnPlanUpdated: (params) => {
+        if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
+        latestPlanByTurn.set(params.turnId, params.plan);
+        translatePlanUpdatedNotification(params, eventQueue);
+      },
+      reasoningSummaryTextDelta: (params) => {
+        if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
+        translateReasoningSummaryTextDelta(params, eventQueue, { rt: translatorRt, log });
+      },
+      reasoningSummaryPartAdded: (params) => {
+        if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
+        translateReasoningSummaryPartAdded(params, eventQueue, { rt: translatorRt, log });
+      },
+      reasoningTextDelta: (params) => {
+        if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
+        translateReasoningTextDelta(params, eventQueue, { rt: translatorRt, log });
+      },
+      accountRateLimitsUpdated: (params) =>
+        translateAccountRateLimitsUpdated(params, eventQueue, { rt: translatorRt, log }),
+      threadStatusChanged: (params) => {
+        // Idle / NotLoaded / SystemError 由 turn/completed + error 主导, 这里不重复 emit。
+        // 只把 Active.activeFlags 翻成 "Waiting on approval/input..." status 文案。
+        if (!isTurnInFlight) return;
+        if (params.status.type !== 'active') return;
+        const flags = params.status.activeFlags;
+        if (flags.includes('waitingOnApproval')) pushStatus('Waiting on approval...');
+        else if (flags.includes('waitingOnUserInput')) pushStatus('Waiting on input...');
+      },
+      threadSettingsUpdated: (params) => {
+        // server 端权威设置快照 (响应我们的 thread/settings/update, 或 server 自身降级)。
+        // 把本地 mutable 三态对齐 server 真相 —— 最关键是 serviceTier: 模型不支持 fast
+        // 时 server 会把它降级, 这里第一时间感知, getFastMode() 立刻反映正确值, 不必等
+        // 某个 turn 的响应推断。通知恒带完整 ThreadSettings, 故 serviceTier 总是 present。
+        const s = params.threadSettings;
+        const before = mutableServiceTier ?? null;
+        mutableServiceTier = normalizeServiceTier(s.serviceTier) ?? null;
+        if (typeof s.model === 'string' && s.model) mutableModel = s.model;
+        // ReasoningEffort 的 'none' 不属于 Effort; 排除后其余值都是合法 Effort, 无需 cast。
+        if (s.effort && s.effort !== 'none') mutableEffort = s.effort;
+        if (before !== (mutableServiceTier ?? null)) {
+          log.debug('thread/settings/updated reconciled serviceTier', {
+            threadId: params.threadId,
+            from: before,
+            to: mutableServiceTier ?? null,
+            fastMode: isFastServiceTier(mutableServiceTier),
+          });
+        }
+      },
+      error: (params) => {
+        if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
+        const isTerminalError = params.willRetry !== true;
+        const isTransportError = params.scope === 'transport';
+        if (isTransportError) {
+          subscriptionInvalidatedByTransport = true;
+          dismissAllPendingUserInput('transport_error');
+          activeToolContexts.clear();
+        }
+        const targetsPendingTurn = isTurnStartPending && currentTurnId === null && Boolean(params.turnId);
+        const targetsCurrentTurn =
+          params.turnId === currentTurnId || (params.turnId === '' && isTurnInFlight) || targetsPendingTurn;
+        if (isTerminalError && isTransportError && !targetsCurrentTurn) {
+          translateErrorNotification(params, eventQueue, { rt: translatorRt, log });
+          return;
+        }
+        if (isTerminalError && !targetsCurrentTurn) {
+          log.warn('stale codex terminal error ignored', {
+            errorTurnId: params.turnId,
+            currentTurnId,
+            isTurnInFlight,
+          });
+          return;
+        }
+        const wasTurnRunning = isTurnInFlight || targetsPendingTurn;
+        translateErrorNotification(params, eventQueue, { rt: translatorRt, log });
+        // 与 translator 的 terminal 判定保持一致：willRetry=false 或缺省都视为终态。
+        if (!isTerminalError) return;
+        const terminalTurnId = params.turnId || currentTurnId;
+        if (terminalTurnId) {
+          terminalErroredTurnIds.add(terminalTurnId);
+          dismissPendingUserInputForTurn(terminalTurnId, 'turn_failed');
+          clearActiveToolContextsForTurn(terminalTurnId);
+        }
+        stopActiveRolloutPlanFallback();
+        isTurnInFlight = false;
+        currentTurnId = null;
+        if (!wasTurnRunning) return;
+        eventQueue.push({
+          type: 'status',
+          data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
+          source: 'codex',
+        });
+      },
+      commandExecutionApproval,
+      fileChangeApproval,
+      mcpServerElicitation,
+      permissionsApproval,
+      serverRequestResolved: handleServerRequestResolved,
+      requestUserInput,
+      dynamicToolCall,
+    };
+    try {
+      assertCurrentHost('thread subscription');
+      subscription = host.subscribeThread(threadId, handlers);
+    } finally {
+      releaseHostBindingLeaseIfNeeded();
+    }
+
+    function resubscribeAfterTransportErrorIfNeeded(): void {
+      if (!subscriptionInvalidatedByTransport) return;
+      assertCurrentHost('resubscribe');
+      subscription = host.subscribeThread(threadId, handlers);
+      subscriptionInvalidatedByTransport = false;
+    }
+
+    // ── AgentSessionHandle ──────────────────────────────────────────────────
+    const handle: AgentSessionHandle = {
+      get id() { return sdkSessionId ?? '<pending>'; },
+      agentKind: 'codex',
+      get model() { return mutableModel; },
+      get codexProxyActive() { return hostUsesCodexProxy; },
+      get codexProductPromptDelivery() { return codexProductPromptDelivery; },
+
+      async send(message: UserMessage, sendOpts?: SendOptions) {
+        if (rejectClosedOrCancelledSend(sendOpts, 'before start')) {
+          return;
+        }
+        assertCurrentHost('turn/start');
+        resubscribeAfterTransportErrorIfNeeded();
+        // 新 turn 总是携带当前 (可能已收紧的) 策略, 上一轮残留的延迟中断标记
+        // 不得误伤本 turn (典型: 上次 turn/start 终失败, 标记未被 id 到达点消费)。
+        pendingTightenInterrupt = false;
+        // 上一 send 周期的墓碑一并清空 (仅用于拦本周期内抢跑的终态)。
+        turnsCompletedBeforeStartResp.clear();
+        isTurnStartPending = true;
+        usageTracker.beginTurn();
+        log.debug('send ▶ user message', {
+          model: mutableModel,
+          effort: mutableEffort,
+          permissionMode: mutablePermissionMode,
+          serviceTier: mutableServiceTier ?? null,
+          threadId,
+          logTitle: sendOpts?.logTitle,
+        });
+        // turn-start status: 抽样 recurring + one-shot 引导 (含阶梯 pity 保底)。
+        // 命中 one-shot 时推进展示次数, 并清 pity 计数让下一档保底独立累计。
+        const turnStartPick = pickTurnStartStatus(sendOpts?.userName, oneShotTipState);
+        if (turnStartPick.oneShotId) {
+          const id = turnStartPick.oneShotId;
+          oneShotTipState.displayed.set(id, (oneShotTipState.displayed.get(id) ?? 0) + 1);
+          oneShotTipState.pity.delete(id);
+        }
+        eventQueue.push({
+          type: 'status',
+          data: {
+            status: turnStartPick.text,
+            ...usageTracker.snapshot(),
+            isRunning: true,
+          },
+          source: 'codex',
+        });
+
+        // Phase 3: 把 mutable 配置每 turn 透传 — server 接受 per-turn 覆盖。
+        // **关键**: turn/start 的 sandbox 字段是 sandboxPolicy: SandboxPolicy (tag union),
+        // 不是 thread/start 的 sandbox: SandboxMode (kebab enum)。写错 server 直接忽略,
+        // mid-session 切 mode 不生效 — 这是已经踩过的坑 (v2.rs:5778)。
+        // effort 同理: 协议层只能在 turn/start 透传 (v2.rs:5800), thread/start 不接;
+        // 用户在 session 创建时选的 effort 也是靠 first turn/start 这里传过去才生效。
+        const { approvalPolicy, sandbox } = currentApprovalConfig();
+        // 记录本 turn 的发射策略: 只有免审 (never) 发射的 turn 在收紧时需要中断。
+        turnLaunchedUnattended = approvalPolicy === 'never';
+        let turnInput: TurnStartParams['input'];
+        try {
+          turnInput = await toTurnInput(message.content);
+        } catch (e) {
+          isTurnStartPending = false;
+          flushDeferredTerminalTurnCompletionsIfIdle();
+          throw e;
+        }
+        if (rejectClosedOrCancelledSend(sendOpts, 'after input preparation')) {
+          isTurnStartPending = false;
+          flushDeferredTerminalTurnCompletionsIfIdle();
+          return;
+        }
+        assertCurrentHost('turn/start');
+        // 本条消息的计划意图:sendOpts.planMode 是点击发送瞬间的快照(排队行透传),
+        // 权威于 agent 当前武装态;undefined 走旧语义(消耗武装态)。一次性语义:
+        // 消耗时 emit plan_mode_changed 让 UI 勾选熄灭;显式 false(排队普通消息后
+        // 用户重新勾选)不消耗武装态。修订 turn 由 runPlanReviewFlow 内部 send
+        // (无 planMode 快照), planCycleActive 仍在 → 继续携带 plan。
+        const explicitNormalTurn = sendOpts?.planMode === false;
+        const requestedPlanTurn = sendOpts?.planMode ?? mutablePlanMode;
+        const continuePlanCycleThisTurn = planCycleActive && !explicitNormalTurn;
+        if (requestedPlanTurn) {
+          planCycleActive = true;
+          if (mutablePlanMode && sendOpts?.planMode !== false) {
+            mutablePlanMode = false;
+            eventQueue.push({ type: 'plan_mode_changed', data: { enabled: false }, source: 'codex' });
+          }
+        }
+        // sticky 语义要求进过 plan 的线程后续持续复位, 见 collaborationModeForTurn。
+        const collaborationMode = collaborationModeForTurn(requestedPlanTurn, continuePlanCycleThisTurn);
+        const turnStartsInPlanMode = collaborationMode?.mode === 'plan';
+        const turnParams: TurnStartParams = {
+          threadId,
+          input: turnInput,
+          approvalPolicy,
+          sandboxPolicy: sandboxModeToPolicy(sandbox, codexExtraWritableRoots),
+          effort: clampEffortForCodex(mutableEffort),
+          // 强制 reasoning summary='auto' — 不依赖用户 ~/.codex/config.toml 写没写
+          // model_reasoning_summary, 让 thinking 文本在所有用户机器上一致流式出。
+          // (v2.rs:5801-5803 turn/start 的 summary 会 override server config)
+          summary: 'auto',
+          ...(mutableModel && mutableModel !== 'gpt-5' ? { model: mutableModel } : {}),
+          ...(mutableServiceTier !== undefined ? { serviceTier: mutableServiceTier } : {}),
+          ...(collaborationMode ? { collaborationMode } : {}),
+        };
+        const markCollaborationModeAccepted = (): void => {
+          if (turnParams.collaborationMode?.mode === 'plan') {
+            threadTouchedPlanMode = true;
+            planModeDefaultMarkerNeeded = true;
+            return;
+          }
+          if (turnParams.collaborationMode?.mode === 'default') {
+            threadTouchedPlanMode = true;
+            if (turnParams.collaborationMode.settings.developer_instructions === null) {
+              planModeDefaultMarkerNeeded = false;
+            }
+          }
+        };
+        pendingTurnStartPlanMode = turnStartsInPlanMode;
+        // turn/start 失败若是 "thread not found" — 通常 daemon 重启 (sync auth /
+        // OOM / 服务器 reboot / 我们主动 pkill) 导致 in-memory thread state 丢失,
+        // 但 disk rollout 还在。自动 thread/resume hydrate 回 daemon 然后重 turn/start,
+        // 用户体验:透明续聊, 不感知 daemon 重启过。
+        //
+        // 只动 error path, happy path 完全不变 (规则 19: 不影响 cache hit /
+        // 性能 / 准确性 4 指标)。重试只发生在 "thread not found" 字符串匹配时,
+        // 普通 LLM 错误 / 超时 / auth 失败照原路径报错。
+        const handleTurnStartResp = (resp: TurnStartResponse): void => {
+          if (resp.turn?.id) {
+            // 墓碑: 该 turn 的终态已抢在本响应之前到达 (典型: 收紧补中断后
+            // turnCompleted(interrupted) 先回), 不得重新置活, 否则会话卡 running。
+            const alreadyCompleted = turnsCompletedBeforeStartResp.has(resp.turn.id);
+            if (!alreadyCompleted && !terminalErroredTurnIds.has(resp.turn.id)) {
+              currentTurnId = resp.turn.id;
+              isTurnInFlight = true;
+              currentTurnPlanModeActive = turnStartsInPlanMode;
+              pendingTurnStartPlanMode = null;
+              startRolloutPlanFallback(resp.turn.id);
+            }
+            // turn/start 在飞期间权限被收紧 → 本 turn 携带的还是旧宽松策略,
+            // 拿到 id 立即补中断 (fire-and-forget, 失败仅 warn); turn 已终结则
+            // 收紧目的已达成, 消费标记即可, 不再发无意义的 interrupt。
+            if (pendingTightenInterrupt) {
+              pendingTightenInterrupt = false;
+              if (!alreadyCompleted) void interruptTurnForPermissionTighten(resp.turn.id);
+            }
+          }
+          if (Object.hasOwn(resp, 'serviceTier')) {
+            mutableServiceTier = normalizeServiceTier(resp.serviceTier) ?? null;
+            log.debug('turn/start response serviceTier', {
+              turnId: resp.turn?.id ?? null,
+              serviceTier: mutableServiceTier,
+              fastMode: isFastServiceTier(mutableServiceTier),
+              note: 'serviceTier returned by app-server turn/start response',
+            });
+          }
+        };
+        let finalErr: unknown = null;
+        try {
+          const resp = await host.request<TurnStartResponse>(Method.TurnStart, turnParams);
+          markCollaborationModeAccepted();
+          if (rejectClosedOrCancelledSend(sendOpts, 'after turn/start')) {
+            return;
+          }
+          handleTurnStartResp(resp);
+        } catch (e) {
+          if (isLocalAcceptBoundaryError(e)) {
+            throw e;
+          }
+          if (/thread not found/i.test(String(e))) {
+            log.info('turn/start hit "thread not found" — daemon likely restarted, attempting thread/resume + retry', {
+              threadId,
+            });
+            try {
+              // **必须先重 subscribe**: daemon 重启会触发 transport error →
+              // host.shutdown() 清空 this.subscribers Map (host.ts:373), 原 subscription
+              // 失效。如果不重 subscribe, thread/resume + turn/start retry RPC 都会成功,
+              // 但 daemon 推回的 turnStarted / agentMessage / 任何 notification routing
+              // 找不到 handler 全部 silent drop, UI 永远转圈 (currentTurnId 从未被 set,
+              // isTurnInFlight 永远 false, token 流也没人消费)。
+              // 用同一个 handlers 对象 re-subscribe (host.subscribers.set 覆盖语义),
+              // 顶层 startSession 拿到的原 subscription 句柄仍能正确清理当前 entry,
+              // 无需在这里管理新返回的 subscription 句柄。
+              assertCurrentHost('thread/resume retry subscribe');
+              host.subscribeThread(threadId, handlers);
+              const resumeParams: ThreadResumeParams = {
+                threadId,
+                cwd: opts.workingDir,
+                approvalPolicy,
+                sandbox,
+                ...(mutableModel && mutableModel !== 'gpt-5' ? { model: mutableModel } : {}),
+                ...(mutableServiceTier !== undefined ? { serviceTier: mutableServiceTier } : {}),
+              };
+              const resumeResp = await host.request<ThreadResumeResponse>(Method.ThreadResume, resumeParams);
+              if (collaborationMode?.mode === 'default') {
+                planModeDefaultMarkerNeeded = threadHistoryNeedsDefaultModeMarker(resumeResp.thread);
+                if (turnParams.collaborationMode?.mode === 'default') {
+                  turnParams.collaborationMode.settings.developer_instructions = planModeDefaultMarkerNeeded ? null : '';
+                }
+              }
+              log.info('thread/resume after stale daemon ok, retrying turn/start', { threadId });
+              const resp = await host.request<TurnStartResponse>(Method.TurnStart, turnParams);
+              markCollaborationModeAccepted();
+              if (rejectClosedOrCancelledSend(sendOpts, 'after turn/start retry')) {
+                return;
+              }
+              handleTurnStartResp(resp);
+            } catch (retryErr) {
+              if (isLocalAcceptBoundaryError(retryErr)) throw retryErr;
+              log.error('thread/resume + retry turn/start failed', {
+                originalError: String(e),
+                retryError: String(retryErr),
+              });
+              finalErr = retryErr;
+            }
+          } else {
+            finalErr = e;
+          }
+        } finally {
+          isTurnStartPending = false;
+          pendingTurnStartPlanMode = null;
+          flushDeferredTerminalTurnCompletionsIfIdle();
+        }
+        if (finalErr) {
+          // 计划模式: turn 从未启动就终失败 → 结束半开循环(与 turnCompleted 的
+          // failed 分支同语义), 否则 planCycleActive 泄漏, 下一条常规消息仍会
+          // 携带 collaborationMode plan(勾选与 chip 早已熄灭, 行为与 UI 脱节)。
+          if (planCycleActive) {
+            planCycleActive = false;
+            proposedPlanText = null;
+            currentTurnPlanModeActive = false;
+            log.debug('turn/start failed during plan cycle — plan cycle ends');
+          }
+          log.error('turn/start failed', { error: String(finalErr) });
+          eventQueue.push({
+            type: 'error',
+            data: { message: `turn/start failed: ${String(finalErr)}`, isTerminal: true },
+            source: 'codex',
+          });
+          eventQueue.push({
+            type: 'status',
+            data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
+            source: 'codex',
+          });
+          if (sendOpts?.throwOnStartFailure) {
+            throw new Error(`Codex turn/start failed: ${String(finalErr)}`);
+          }
+        }
+        if (rejectClosedOrCancelledSend(sendOpts, 'before resolving send')) {
+          return;
+        }
+      },
+
+      async steer(message: UserMessage, sendOpts?: SendOptions) {
+        rejectIfCancelled(sendOpts, 'steer');
+        assertCurrentHost('turn/steer');
+        if (closed) {
+          log.warn('steer called on closed session');
+          throw new Error('No active Codex turn to steer: session is closed');
+        }
+        const steeredTurnId = currentTurnId;
+        if (!isTurnInFlight || !steeredTurnId) {
+          throw new Error('No active Codex turn to steer');
+        }
+        // Validate content before steering. `toTurnInput` can touch local
+        // files/images; if that fails, leaving the current turn untouched is
+        // better than sending a broken 插话.
+        const input = await toTurnInput(message.content);
+        rejectIfCancelled(sendOpts, 'steer');
+        if (closed) {
+          throw new Error('No active Codex turn to steer: session is closed');
+        }
+        if (!isTurnInFlight || currentTurnId !== steeredTurnId) {
+          // Conversion can take long enough for a fast turn to finish. Do not
+          // silently route a stale 插话 into a later turn; renderer keeps the
+          // original queue/composer content and can retry through the normal path.
+          throw new Error('No active Codex turn to steer');
+        }
+        // 同轮注入(2026-07-12 产品决策,与 Claude 对齐):turn/steer 把消息追加进
+        // in-flight turn,不打断当前工作,模型在下一个工具调用边界消化这条输入
+        // (与 Codex 官方 CLI 排队消息 "submitted after next tool call" 同语义)。
+        // 需要真打断的用户自己点 Stop。挂起的审批 / user-input 不 dismiss——turn
+        // 没有被打断,它们仍然有效。
+        // (历史:2026-06 曾以「模型继续旧工具计划」为由改成 interrupt+follow-up,
+        // 那正是注入语义的预期行为,现按统一产品决策回归注入。)
+        // expectedTurnId 是 stale-client 防线:server 端 turn 已结束时报
+        // "no active turn to steer" 而不是伪装成功,coordinator 按 NO_ACTIVE_TURN
+        // fallback 成普通派发,消息不丢。
+        log.debug('steer ▶ inject into active turn', {
+          threadId,
+          turnId: steeredTurnId,
+        });
+        // turn/steer 的 ack 没有内建超时 (AppServerClient.request 会一直挂等);
+        // app-server 卡死 / 不回包时裸 await 会让 steer promise 永久 pending,
+        // coordinator 的 steering marker 随之永久残留 —— 后续所有插话点击被静默
+        // 吞掉、队列 drain 冻结 (2026-06 用户反馈"插话没反应"的根因之一)。
+        // 这里给 ack 加有界等待; abort (Stop / close) 复用 rejectIfCancelled
+        // 同款取消文案。
+        // ⚠️ turn/steer 是 content-bearing RPC(消息本体随请求送出),与旧
+        // turn/interrupt(幂等控制信号)不同,超时后请求无法撤回、结果不确定
+        // (review #939 P1):RPC 迟到成功时消息其实已注入当前 turn,而上层已按
+        // 失败处理。超时错误 message 携带 'did not acknowledge' 特征,coordinator
+        // 据此把该行保留为**暂停队列**交用户决策、不自动重派,堵住"已注入 +
+        // turn 结束后队列再发一遍"的重复消费;这里同时给在飞 RPC 挂
+        // late-resolution 观察,迟到结果留日志现场。
+        assertCurrentHost('turn/steer');
+        const steerRpc = host.request(Method.TurnSteer, {
+          threadId,
+          input,
+          expectedTurnId: steeredTurnId,
+        });
+        let ackSettled = false;
+        try {
+          await new Promise<void>((resolve, reject) => {
+            const onAbort = () => {
+              cleanup();
+              // post-send abort(review #939 第二轮 P2):RPC 已发出,Stop/close
+              // 赢在 ack 返回前时结果同样不确定——server 仍可能迟到接受注入。
+              // coordinator 的 Stop 语义已把队列置为暂停保留 / 显式清空的用户
+              // 可控态,这里留 warn 现场 + 交给下方 late-resolution 观察器,
+              // 文案保留 'cancelled before acceptance' 前缀(测试与日志兼容)。
+              log.warn('turn/steer aborted while request in flight; delivery uncertain', {
+                threadId,
+                turnId: steeredTurnId,
+              });
+              reject(new Error('Codex steer cancelled before acceptance; delivery uncertain (request already dispatched)'));
+            };
+            const timer = setTimeout(() => {
+              cleanup();
+              reject(new Error(`Codex turn/steer did not acknowledge within ${STEER_ACK_TIMEOUT_MS}ms`));
+            }, STEER_ACK_TIMEOUT_MS);
+            const cleanup = () => {
+              clearTimeout(timer);
+              sendOpts?.signal?.removeEventListener('abort', onAbort);
+            };
+            if (sendOpts?.signal?.aborted) {
+              onAbort();
+              return;
+            }
+            sendOpts?.signal?.addEventListener('abort', onAbort, { once: true });
+            steerRpc.then(
+              () => {
+                cleanup();
+                resolve();
+              },
+              (err) => {
+                cleanup();
+                reject(err instanceof Error ? err : new Error(String(err)));
+              },
+            );
+          });
+          ackSettled = true;
+        } finally {
+          if (!ackSettled) {
+            // 超时 / abort 后请求仍在飞:迟到成功说明消息已注入但上层已按失败
+            // 处理(队列行被暂停保留),留 warn 现场供排查;迟到失败静默吞掉,
+            // 防 unhandled rejection。
+            steerRpc.then(
+              () => {
+                log.warn('turn/steer acknowledged after local timeout/abort; message may already be injected', {
+                  threadId,
+                  turnId: steeredTurnId,
+                });
+              },
+              () => {},
+            );
+          }
+        }
+        // ack 成功 = server 已确认接受注入,消息已进入该 turn 的输入(即使本地
+        // 已先收到 turn 终态事件,ack 与终态乱序)。这里必须按**已投递**成功返回
+        // (review #939 第二轮 P1)——此前按 NO_ACTIVE_TURN 抛出会让 coordinator
+        // fallback 把同一条消息再作为普通 turn 重发,模型消费两次。turn 已死时
+        // "steer activeTurn 等不到终态事件"的收口责任在 coordinator 侧:它在
+        // accepted 落库后自查 isTurnRunning,已终结则立即合成收口,队列不冻结。
+        if (!isTurnInFlight || currentTurnId !== steeredTurnId) {
+          log.info('turn/steer acknowledged after local turn end; treated as delivered', {
+            threadId,
+            turnId: steeredTurnId,
+          });
+        }
+      },
+
+      async abort() {
+        if (closed || !currentTurnId) return;
+        if (skipIfStaleHost('turn/interrupt')) return;
+        dismissPendingUserInputForTurn(currentTurnId, 'turn_interrupted');
+        try {
+          await host.request(Method.TurnInterrupt, { threadId, turnId: currentTurnId });
+        } catch (e) {
+          log.warn('turn/interrupt threw', { error: String(e) });
+        }
+      },
+
+      async close() {
+        if (closed) return;
+        closed = true;
+        unregisterCodexMcpContext(threadId);
+        // 把挂起的 approval 强制 deny + emit interaction_dismissed (UI 关 dialog),
+        // 否则 server 那边没回 response 会卡; UI 上的 PermissionPrompt 也会留尸
+        try { dismissAllPending('session_closed', 'deny'); } catch (e) { log.warn('dismissAllPending threw', { error: String(e) }); }
+        try { dismissAllPendingUserInput('session_closed'); } catch (e) { log.warn('dismissAllPendingUserInput threw', { error: String(e) }); }
+        try { stopActiveRolloutPlanFallback(); } catch (e) { log.warn('stop rollout plan fallback threw', { error: String(e) }); }
+        try { subscription?.release(); } catch (e) { log.warn('release threw', { error: String(e) }); }
+        try { eventQueue.end(); } catch (e) { log.warn('eventQueue.end threw', { error: String(e) }); }
+      },
+
+      events(): AsyncIterable<AgentEvent> {
+        return eventQueue;
+      },
+
+      getUsageSnapshot(): UsageSnapshot {
+        return usageTracker.snapshot();
+      },
+
+      setInteractionResolver(resolver: InteractionResolver) {
+        interactionResolver = resolver;
+      },
+
+      // ── Phase 3: 运行时切换 (下一 turn 才生效, 内部已是 mutable 闭包) ──
+      async setModel(newModel: string) {
+        if (newModel === mutableModel) return; // 去重: 值没变不重推 (renderer 单次切换会全量重调 set*)
+        log.debug('setModel', { from: mutableModel, to: newModel });
+        mutableModel = newModel;
+        // thread 已启动 → 立即经 thread/settings/update 推给 server (sticky); 未启动则由
+        // 首个 thread/start 携带。沿用 turn/start 的 'gpt-5'=server 默认哨兵约定 (省略),
+        // 避免把占位 model id 发给 server。失败时 turn/start 透传仍是兜底。
+        if (newModel && newModel !== 'gpt-5') await pushThreadSettings({ model: newModel });
+      },
+
+      async setEffort(newEffort: Effort) {
+        if (newEffort === mutableEffort) return; // 去重: 值没变不重推
+        const clamped = clampEffortForCodex(newEffort);
+        log.debug('setEffort', { from: mutableEffort, to: newEffort, clamped });
+        mutableEffort = newEffort;
+        // thread 已启动 → 立即经 thread/settings/update 生效; 未启动由首个 turn/start
+        // 携带 (TurnStartParams.effort, v2.rs:5800)。发 clamp 后的值, 与 turn/start 一致。
+        await pushThreadSettings({ effort: clamped });
+      },
+
+      async setPermissionMode(newMode: PermissionMode) {
+        log.debug('setPermissionMode', { from: mutablePermissionMode, to: newMode });
+        // 只有显式 Full access 是宽松 mode → 挂起的 ask 自动 allow; 其它 mode → deny。
+        // 与 Claude 的 dismissAllPending 行为对齐 (apps/desktop/src/main/agentManager.ts
+        // 老逻辑同款), UI 上挂着的 PermissionPrompt 自动关。
+        const moreOpen = newMode === 'bypassPermissions';
+        dismissAllPending(`permission_mode_changed_to_${newMode}`, moreOpen ? 'allow' : 'deny');
+        const wasOpen = mutablePermissionMode === 'bypassPermissions';
+        mutablePermissionMode = newMode;
+        // 下一 turn 通过 TurnStartParams.approvalPolicy + sandbox 透传。
+        //
+        // 收紧兜底 (bypass → ask/auto): 见 interruptTurnForPermissionTighten 顶注。
+        // turn id 已知 → 立即中断; turn/start 在飞 (id 未回) → 置标记, 由
+        // handleTurnStartResp / turnStarted 在拿到 id 的瞬间补中断。放宽则清标记
+        // (收紧后又切回宽松档, 在飞的 turn 无需再中断)。
+        if (moreOpen) {
+          pendingTightenInterrupt = false;
+        } else if (wasOpen && !closed && turnLaunchedUnattended) {
+          // 只中断免审 (never) 发射的 turn; ask 策略发射的 turn 审批请求照常
+          // 流经本地、收紧即时生效, 期间 UI 短暂切过宽松档不构成中断理由。
+          if (currentTurnId !== null) {
+            await interruptTurnForPermissionTighten(currentTurnId);
+          } else if (isTurnStartPending) {
+            pendingTightenInterrupt = true;
+          }
+        }
+      },
+
+      async setPlanMode(enabled: boolean) {
+        if (mutablePlanMode === enabled) return;
+        mutablePlanMode = enabled;
+        log.debug('setPlanMode', { enabled });
+        // 下一 turn 经 turn/start.collaborationMode 生效 (与 permissionMode 同款
+        // "下一 turn 透传"语义); 中途关闭时挂起的 plan_review 由用户自行处理。
+      },
+
+      getPlanMode() {
+        return mutablePlanMode;
+      },
+
+      async setFastMode(enabled: boolean) {
+        // 去重以"fast 是否开启"为准: undefined(未覆盖) / null / 'default' 都视为未开,
+        // 重复关 fast 或重复开 fast 不重推 (renderer 单次切换会全量重调 set*)。
+        if (isFastServiceTier(mutableServiceTier) === enabled) return;
+        const next: ServiceTier | null = enabled ? 'fast' : null;
+        log.debug('setFastMode', { from: mutableServiceTier ?? null, to: next });
+        mutableServiceTier = next;
+        // thread 已启动 → 立即经 thread/settings/update 生效 (serviceTier 双 Option:
+        // 'fast'=开 / null=清空 standard); 未启动则由首个 thread/start 携带。server 端
+        // 若因模型不支持 fast 而降级, 会经 thread/settings/updated 通知回带, handlers
+        // 里把 mutableServiceTier 对齐到权威值。失败时 turn/start 透传仍是兜底。
+        await pushThreadSettings({ serviceTier: next });
+      },
+
+      async setVendorOptions(patch: Record<string, unknown>) {
+        // Keep the same vendorOptions object so active MCP handlers and the
+        // host bridge see runtime Orca role/workflow updates by reference.
+        Object.assign(vo, patch);
+        registerCodexMcpContext(threadId);
+        log.debug('setVendorOptions', {
+          patchKeys: Object.keys(patch),
+        });
+      },
+
+      getFastMode() {
+        return isFastServiceTier(mutableServiceTier);
+      },
+
+      async previewRewindFiles() {
+        // Codex 的 thread/rollback 只裁剪对话上下文，不提供文件 checkpoint dry-run。
+        // 代码回退由产品层 Git rollback 负责；单独点 Rewind 时 UI 会显示“无文件改动”。
+        return {
+          canRewind: true,
+          filesChanged: [],
+          insertions: 0,
+          deletions: 0,
+        };
+      },
+
+      async commitRewindFiles(_userUuid, _priorAssistantUuid, rewindOpts) {
+        const tailTurnsToDrop = normalizeTailTurnsToDrop(rewindOpts?.tailTurnsToDrop);
+        if (tailTurnsToDrop <= 0) {
+          log.warn('commitRewindFiles called without tailTurnsToDrop; skipping thread/rollback', {
+            threadId,
+          });
+          return { sdkSessionId: threadId };
+        }
+        log.info('commitRewindFiles ▶ thread/rollback', {
+          threadId,
+          tailTurnsToDrop,
+        });
+        assertCurrentHost('thread/rollback');
+        const rollbackResp = await host.request<ThreadRollbackResponse>(
+          Method.ThreadRollback,
+          { threadId, numTurns: tailTurnsToDrop } as ThreadRollbackParams,
+        );
+        const previousThreadId = threadId;
+        const nextThreadId = rollbackResp.thread.id || previousThreadId;
+        if (nextThreadId !== previousThreadId) {
+          try {
+            subscription?.release();
+          } catch {
+            // no-op: stale subscription cleanup should not fail a successful rollback.
+          }
+          unregisterCodexMcpContext(previousThreadId);
+          threadId = nextThreadId;
+          sdkSessionId = nextThreadId;
+          subscription = host.subscribeThread(threadId, handlers);
+          registerCodexMcpContext(threadId);
+          registerCodexDeveloperInstructions(threadId, registeredDeveloperInstructions);
+          eventQueue.push({ type: 'session_id', data: sdkSessionId, source: 'codex' });
+        } else {
+          sdkSessionId = threadId;
+        }
+        currentTurnId = null;
+        isTurnInFlight = false;
+        log.info('commitRewindFiles ◀ thread/rollback done', {
+          threadId,
+          tailTurnsToDrop,
+        });
+        return sdkSessionId ? { sdkSessionId } : {};
+      },
+
+      isTurnRunning() {
+        return isTurnInFlight;
+      },
+    };
+
+    return handle;
+  }
+
+  /**
+   * Phase 3: thread/fork — Codex 协议层 fork 当前 thread 成新 thread。
+   *
+   * 与 Claude 不同:
+   *  - Claude fork 可 truncate 到指定 message uuid (sdkForkSession upToMessageId)
+   *  - Codex 协议没有 message uuid 概念; 精确 fork 需要先 fork latest,
+   *    再对新 thread 调 thread/rollback 从尾部移除 N 个 turn
+   *
+   * opts.upToMessageId 在 Codex 这里被忽略。uuidMap 返回空 — Codex agentMeta 不存
+   * message uuid, maker 那边也找不到东西可 remap, 不会 break。
+   */
+  private async findRolloutPath(threadId: string, preferredPath?: string): Promise<string> {
+    if (preferredPath && !isRemoteLikePath(preferredPath)) {
+      try {
+        const stat = await fs.stat(preferredPath);
+        if (stat.isFile()) return preferredPath;
+      } catch {
+        // Fall through to the normal CODEX_HOME scan when preparation only
+        // returned a stale state-db pointer.
+      }
+    }
+    const codexHome = this.codexHome;
+    if (!codexHome || isRemoteLikePath(codexHome)) {
+      throw new Error('Codex rollout path is unavailable for this session');
+    }
+
+    const roots = [
+      path.join(codexHome, 'sessions'),
+      path.join(codexHome, 'archived_sessions'),
+    ];
+    let bestPath = '';
+    let bestMtimeMs = -1;
+
+    const visit = async (dir: string): Promise<void> => {
+      let entries: Array<import('node:fs').Dirent>;
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          await visit(full);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        if (!entry.name.startsWith('rollout-') || !entry.name.endsWith(`${threadId}.jsonl`)) continue;
+        const stat = await fs.stat(full);
+        if (stat.mtimeMs > bestMtimeMs) {
+          bestPath = full;
+          bestMtimeMs = stat.mtimeMs;
+        }
+      }
+    };
+
+    for (const root of roots) {
+      await visit(root);
+    }
+    if (!bestPath) {
+      throw new Error(`Codex rollout not found for thread ${threadId}`);
+    }
+    return bestPath;
+  }
+
+  private async createSafeForkRolloutCopy(threadId: string, preferredPath?: string): Promise<string> {
+    const sourcePath = await this.findRolloutPath(threadId, preferredPath);
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'xdt-codex-fork-'));
+    const copyPath = path.join(tempDir, path.basename(sourcePath));
+    const text = await fs.readFile(sourcePath, 'utf8');
+    const out = text
+      .split(/\r?\n/)
+      .filter((line) => !line.trim() || !hasUnsafeForkRolloutPayload(line))
+      .join('\n');
+    await fs.writeFile(copyPath, out.endsWith('\n') || out.length === 0 ? out : `${out}\n`, 'utf8');
+    return copyPath;
+  }
+
+  async forkSdkSession(opts: ForkSdkSessionOptions): Promise<ForkSdkSessionResult> {
+    const log = this.deps.logger.child('codex/fork');
+    const tailTurnsToDrop = normalizeTailTurnsToDrop(opts.tailTurnsToDrop);
+    let stripCopyPath: string | undefined;
+    log.info('forkSdkSession ▶', {
+      sourceSdkSessionId: opts.sourceSdkSessionId,
+      upToMessageId: opts.upToMessageId,
+      tailTurnsToDrop,
+      stripEncryptedReasoning: opts.stripEncryptedReasoning === true,
+      note: 'Codex 精确 fork: thread/fork 后按需 thread/rollback 新 thread 尾部 turn',
+    });
+    try {
+      const { host } = await this.getUtilityHost();
+      await host.ensureStarted();
+      // Imported Codex threads may still live under another CODEX_HOME. Resume
+      // already asks the desktop host to link/adopt their state and rollout;
+      // fork must cross the same preparation boundary before thread/fork or the
+      // utility app-server cannot resolve a freshly imported thread.
+      const preparedRolloutResult = await this.deps.prepareCodexResumeSession?.(opts.sourceSdkSessionId);
+      const preparedRolloutPath = typeof preparedRolloutResult === 'string'
+        ? preparedRolloutResult
+        : undefined;
+      // 选项名沿用历史语义;安全副本同时会丢弃会让 Responses fork/retry 失败的坏历史 payload。
+      if (opts.stripEncryptedReasoning) {
+        stripCopyPath = await this.createSafeForkRolloutCopy(
+          opts.sourceSdkSessionId,
+          preparedRolloutPath,
+        );
+      }
+      const params: ThreadForkParams = {
+        threadId: opts.sourceSdkSessionId,
+        persistExtendedHistory: true,
+        ...(stripCopyPath ? { path: stripCopyPath } : {}),
+        ...(opts.workingDir ? { cwd: opts.workingDir } : {}),
+      };
+      const resp = await host.request<ThreadForkResponse>(Method.ThreadFork, params);
+      let newSdkSessionId = resp.thread.id;
+      if (tailTurnsToDrop > 0) {
+        const rollbackParams: ThreadRollbackParams = {
+          threadId: newSdkSessionId,
+          numTurns: tailTurnsToDrop,
+        };
+        const rollbackResp = await host.request<ThreadRollbackResponse>(
+          Method.ThreadRollback,
+          rollbackParams,
+        );
+        newSdkSessionId = rollbackResp.thread.id || newSdkSessionId;
+      }
+      log.info('forkSdkSession ◀', { newSdkSessionId, tailTurnsToDrop });
+      return { newSdkSessionId, uuidMap: new Map() };
+    } finally {
+      if (stripCopyPath) {
+        await fs.rm(path.dirname(stripCopyPath), { recursive: true, force: true }).catch((err) => {
+          log.warn('strip encrypted rollout temp cleanup failed', {
+            path: stripCopyPath,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
+    }
+  }
+
+  /**
+   * app.before-quit 调一次, 杀所有 codex app-server 子进程 (本地 spawn + 远端
+   * SSH-bridged 各一份)。Windows 不会随父进程死, 必须显式收割。幂等。
+   */
+  async dispose(): Promise<void> {
+    this.deps.logger.error('codex dispose called', {
+      hostCount: this.hosts.size,
+      inflightCount: this.hostPromises.size,
+      createHostSeqByKey: Object.fromEntries(this.createHostSeqByKey),
+    });
+    // 如果有正在创建中的 host (logout 撞上启动期 in-flight getHost), 等它出来再 shutdown,
+    // 否则刚 spawn 出来的子进程没人收 → 孤儿。await 失败说明创建本身炸了, 没东西可收。
+    //
+    // **before-quit 兜底**: hostPromise 卡住 (auth.getState hang / prepareCodexExtraSpawnConfig
+    // hang) 时不能让 dispose 跟着卡到 lifecycle 6s 超时, 否则 SIGTERM 永远发不出。安全性:
+    // hostPromise resolve 之前真正的 child spawn 还没发生 (start() 在 ensureStarted
+    // 里才调, app-server/host.ts), 所以超时跳过 host.shutdown 不会留孤儿子进程。
+    if (this.hostPromises.size > 0) {
+      const inflightSnapshot = Array.from(this.hostPromises.values()).map((entry) => entry.promise);
+      for (const key of this.hostPromises.keys()) {
+        this.bumpHostGeneration(key);
+      }
+      try {
+        await Promise.race([
+          Promise.allSettled(inflightSnapshot),
+          new Promise<void>((_, reject) =>
+            setTimeout(() => reject(new Error('hostPromise timeout in dispose (1500ms)')), 1500),
+          ),
+        ]);
+      } catch (e) {
+        this.deps.logger.warn('codex dispose: hostPromise await skipped', {
+          message: (e as Error).message,
+        });
+      }
+    }
+    const hostsSnapshot = Array.from(this.hosts.values());
+    for (const key of this.hosts.keys()) {
+      this.hostGenerations.set(key, (this.hostGenerations.get(key) ?? 0) + 1);
+    }
+    this.hosts.clear();
+    this.hostPromises.clear();
+    this.hostCredentialModes.clear();
+    this.hostEffectiveCredentialModes.clear();
+    this.hostSessionBindingLeases.clear();
+    this.hostCredentialModeSwitches.clear();
+    // 进程重启后 server 端 in-memory enablement 会丢, 重置 push flag 让下次 ensure 再 push 一次
+    this.memoryOverridePushedByHost.clear();
+    // codexHome 也跟着 host 走: 下次 ensureStarted() 会用新 server 的返回值重新填,
+    // 防止用户中途切 CODEX_HOME (改 auth / 重登) 后这边还拿着老路径。
+    this.codexHome = null;
+    if (hostsSnapshot.length > 0) {
+      // 并发 shutdown — 互不依赖, 一起更快收完。失败不阻断其他。
+      await Promise.allSettled(
+        hostsSnapshot.map((h) => h.retire('CodexAgent.dispose()')),
+      );
+    }
+    // dispose 完毕 → 重置 seq, 下次 createHost 重新从 1 开始计数 (logout/切账号场景)
+    this.createHostSeqByKey.clear();
+  }
+
+  /**
+   * 本地 Codex 凭证状态变化时只重置 local app-server。
+   *
+   * 远端 host 使用 remote daemon / remote 用户配置；本地 key、OAuth 或 proxy 注入状态变化
+   * 不应该 retire `remote:*` host，否则远端 session 会绕过 Session.close 留下 stale 状态。
+   */
+  async disposeLocalHostForCredentialChange(reason = 'CodexAgent local credential state changed'): Promise<void> {
+    const switchGuard = await this.beginLocalHostCredentialChange(reason);
+    await switchGuard.finalize();
+  }
+
+  /**
+   * 本地 Codex OAuth/logout 失效时强制收掉 local host。
+   *
+   * 这条路径说明当前 local host 持有的凭证已经不可用，不能因为仍有订阅就继续保留；
+   * 但仍然只处理 local key，不能扩散到 remote host。
+   */
+  async forceDisposeLocalHostForAuthChange(reason = 'CodexAgent local auth changed'): Promise<void> {
+    await this.retireHostKey(hostKey(), reason, {
+      failIfActive: false,
+      logPrefix: 'codex local auth restart',
+    });
+  }
+
+  private async disposeLocalHostForCredentialChangeUnlocked(key: string, reason: string): Promise<void> {
+    await this.retireHostKey(key, reason, {
+      failIfActive: true,
+      logPrefix: 'codex local credential restart',
+    });
+  }
+
+  private async retireHostKey(
+    key: string,
+    reason: string,
+    opts: { failIfActive: boolean; logPrefix: string },
+  ): Promise<void> {
+    const inflight = this.hostPromises.get(key);
+    if (inflight) {
+      this.bumpHostGeneration(key);
+      this.hostPromises.delete(key);
+      try {
+        await Promise.race([
+          inflight.promise.catch(() => undefined),
+          new Promise<void>((_, reject) =>
+            setTimeout(() => reject(new Error('local hostPromise timeout in credential restart (1500ms)')), 1500),
+          ),
+        ]);
+      } catch (e) {
+        this.deps.logger.warn(`${opts.logPrefix}: hostPromise await skipped`, {
+          message: (e as Error).message,
+        });
+      }
+    }
+
+    const host = this.hosts.get(key);
+    const activeUseCount = host
+      ? this.hostActiveUseCount(key, host)
+      : (this.hostSessionBindingLeases.get(key) ?? 0);
+    if (opts.failIfActive && activeUseCount > 0) {
+      throw new Error(
+        `Cannot restart local Codex host while ${activeUseCount} active Codex session(s) are attached`,
+      );
+    }
+    if (!opts.failIfActive && activeUseCount > 0) {
+      this.deps.logger.warn(`${opts.logPrefix}: retiring host with active sessions`, {
+        key,
+        activeUseCount,
+      });
+      // 强杀 host 不走 Session.close —— 先把终态 transport error 广播给订阅者,
+      // 让每个 session 自己收口 turn 状态 (isTurnInFlight→false + 补发 isRunning:false)。
+      // 不广播的话上层 busy 判定永久 stale:输入排队不派发、Stop 的 abort 锁解不开、
+      // 凭证切换 busy 重试风暴 (2026-07-19 auth app_session_terminated 实排)。
+      host?.notifySubscribersOfForcedRetire(reason);
+    }
+
+    this.hosts.delete(key);
+    this.hostPromises.delete(key);
+    this.hostCredentialModes.delete(key);
+    this.hostEffectiveCredentialModes.delete(key);
+    this.hostSessionBindingLeases.delete(key);
+    this.memoryOverridePushedByHost.delete(key);
+    if (key === hostKey()) this.codexHome = null;
+    this.createHostSeqByKey.delete(key);
+    this.bumpHostGeneration(key);
+    if (!host) return;
+    try {
+      await host.retire(reason);
+    } catch (error) {
+      this.deps.logger.warn(`${opts.logPrefix}: host shutdown failed`, {
+        key,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  // ── Memory 实现 ────────────────────────────────────────────────────────
+  // 范围: codex Feature::MemoryTool ("memories", 实验性, 默认关)。
+  // 控制走 experimentalFeature/enablement/set (in-memory 进程级 + 自动热重载所有 live thread),
+  // 不写 config.toml 文件; 数据落 <CODEX_HOME>/memories/ + state_*.sqlite。
+
+  async getMemoryStatus(): Promise<MemoryStatus> {
+    // config/read 返回的 effective config 已经把 in-memory enablement 合并进去了
+    // (config_processor.rs:99-110), 所以 setMemory 后立刻 read 也能看到新值
+    try {
+      const { key, host } = await this.getUtilityHost();
+      // app-server 重启后 in-memory enablement 会丢, server 端回到 config.toml 默认值 (memories=false);
+      // 读之前先把 maker 端持久化的 memoryOverride 同步过去, 否则 Settings 界面显示的是 server 默认值,
+      // 不是用户上次保存的设置。ensureMemoryOverridePushed 内部用 memoryOverridePushed 去重, 已 push 是 no-op。
+      await host.ensureStarted();
+      await this.ensureMemoryOverridePushed(host, key).catch((e) => {
+        this.deps.logger.warn('codex.getMemoryStatus: ensureMemoryOverridePushed failed', {
+          error: e instanceof Error ? e.message : String(e),
+        });
+      });
+      type ConfigReadResp = { config?: { features?: { memories?: boolean } } };
+      const resp = await host.request<ConfigReadResp>(Method.ConfigRead, { includeLayers: false });
+      const enabled = resp.config?.features?.memories ?? false;
+      return {
+        enabled,
+        // memoryOverride 没设过时 enabled 来自 config.toml + server 默认, 算 'user-config';
+        // host 显式覆盖过算 'host-runtime'
+        source: this.memoryOverride === undefined ? 'user-config' : 'host-runtime',
+      };
+    } catch (err) {
+      if (err instanceof AgentNotAuthenticatedError) {
+        // 未授权 → host 起不来, 报推断值 (codex 默认 false)
+        return {
+          enabled: this.memoryOverride ?? false,
+          source: this.memoryOverride === undefined ? 'agent-default' : 'host-runtime',
+        };
+      }
+      throw err;
+    }
+  }
+
+  async setMemory(enabled: boolean): Promise<MemorySetResult> {
+    const log = this.deps.logger.child('codex/setMemory');
+    log.info('setMemory ▶', { from: this.memoryOverride, to: enabled });
+    this.memoryOverride = enabled;
+    // 立即 push, 让所有 live thread 通过 server 端 reload_user_config 拿到新值
+    try {
+      if (this.hosts.size === 0) {
+        log.info('setMemory ◀ no live app-server, will apply on next session');
+        return { effective: 'next-session' };
+      }
+      await Promise.all(Array.from(this.hosts.entries()).filter(([key]) => !key.startsWith('remote:')).map(async ([key, host]) => {
+        // Remote hosts do not receive Maker Memory, so their native setting is
+        // owned by the target rather than this local manager.
+        await host.request(Method.ExperimentalFeatureEnablementSet, {
+          enablement: { memories: enabled },
+        });
+        this.memoryOverridePushedByHost.set(key, enabled);
+        return key;
+      }));
+      log.info('setMemory ◀ pushed to app-server, hot-reloaded all live threads');
+      return { effective: 'immediate' };
+    } catch (err) {
+      if (err instanceof AgentNotAuthenticatedError) {
+        // 未授权 → host 起不来, 但 memoryOverride 已记下, 等下次 ensure (startSession 触发) 再 push
+        log.warn('setMemory: not authenticated, deferring push to next session');
+        this.memoryOverridePushedByHost.clear();
+        return { effective: 'next-session' };
+      }
+      // server 端 RPC 失败 → 把 push flag 重置, 下次 ensure 再试
+      this.memoryOverridePushedByHost.clear();
+      throw err;
+    }
+  }
+
+  async resetMemory(): Promise<MemoryResetResult> {
+    const log = this.deps.logger.child('codex/resetMemory');
+    log.info('resetMemory ▶');
+    const { host } = await this.getUtilityHost();
+    // server 端清 <CODEX_HOME>/memories/ 目录 + state_*.sqlite 的 memory stage 数据;
+    // 不影响各 thread 的 memory_mode (用户随后改 thread/memoryMode/set 才动那个)
+    await host.request(Method.MemoryReset, {});
+    log.info('resetMemory ◀ ok');
+    // server 不返回数量统计, removedEntries / removedBytes 留 undefined
+    return {};
+  }
+
+  /**
+   * memoryOverride 同步到 app-server。
+   *
+   * 调用时机:
+   *  - 每次 startSession 调一次 (在 host.ensureStarted 之后)
+   *  - 内部已用 memoryOverridePushed 去重, 已 push 同样的值就 no-op
+   *
+   * 失败语义: 抛错由调用方决定。startSession 那边会 catch + warn + 继续, 不让
+   * memory 配置 block 主对话流。
+   */
+  private async ensureMemoryOverridePushed(host: AppServerHost, key: string): Promise<void> {
+    if (this.memoryOverride === undefined) return; // 没设 override 不动 server, 让 server 走自带配置
+    if (this.memoryOverridePushedByHost.get(key) === this.memoryOverride) return; // 已 push 同值, no-op
+    await host.request(Method.ExperimentalFeatureEnablementSet, {
+      enablement: { memories: this.memoryOverride },
+    });
+    this.memoryOverridePushedByHost.set(key, this.memoryOverride);
+    this.deps.logger.info('codex: memoryOverride pushed to app-server', {
+      memories: this.memoryOverride,
+    });
+  }
+}

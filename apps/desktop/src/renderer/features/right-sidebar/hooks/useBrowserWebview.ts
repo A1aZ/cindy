@@ -1,0 +1,344 @@
+/**
+ * useBrowserWebview —— web-browser plugin 的 webview API hook。
+ *
+ * 给定 tabId,从模块级 BrowserWebviewPool 取 / 创建对应的 wrapper + webview 实例,
+ * 返回:
+ *   - `wrapper`: webview 外层 DOM 节点;caller 应在自己的 body slot 里用
+ *     `useLayoutEffect` + `slot.appendChild(wrapper)` 挂上,return cleanup 时
+ *     把 wrapper 挪回 pool 的停车区(`pool.acquire().wrapper.parentNode = pool.container`)。
+ *   - 命令式 actions:`navigate / reload / goBack / goForward / stop`
+ *   - 反应式 state:`url / title / favicon / isLoading / canGoBack / canGoForward`,
+ *     变更触发 React re-render
+ *
+ * webview 事件监听是 hook 内部挂的(对齐 Codex desktop `main-cC-d0ezP.js:48823-48848`
+ * IAB webview 在主进程监听的事件子集):
+ *   - `page-title-updated` / `page-favicon-updated` —— 标题 / 图标
+ *   - `did-navigate` / `did-navigate-in-page` —— URL 同步
+ *   - `did-redirect-navigation` —— 不写入 state;中间态不是已提交导航
+ *   - `did-start-loading` / `did-stop-loading` —— loading 状态
+ *   - `did-fail-load` —— 404 / 网络错误 / SSL 错误,UI 停 loading
+ *   - `dom-ready` —— attach 后 nav 状态刷新点
+ *   - `audio-state-changed` —— guest 播放音频时翻 isAudible(用于 tab pill 喇叭图标)
+ *   - `render-process-gone` / `unresponsive` —— guest 崩溃 / 卡死,UI 显示崩溃 banner
+ *
+ * 切 tab 时(useBrowserWebview 在另一个 tabId 重新调用):pool.acquire 返回不同
+ * entry,本 hook 的内部 ref 自动指向新 entry,旧 entry 的 listener 在 effect
+ * cleanup 时取消(不释放 entry —— 那是用户关 tab 时 plugin 显式 pool.release 的事)。
+ */
+
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { WebviewTag } from 'electron';
+
+import { browserWebviewPool } from '../lib/browserWebviewPool';
+import { reportRsbBrowserTab } from '../lib/rsbBrowserBridge';
+
+/** 2 秒内最多允许 12 次 renderer 主动导航;网页自身导航不计入。 */
+export const BROWSER_NAVIGATION_FUSE_LIMIT = 12;
+export const BROWSER_NAVIGATION_FUSE_WINDOW_MS = 2_000;
+
+function normalizeNavigationUrl(url: string): string {
+  try {
+    return new URL(url).href;
+  } catch {
+    return url;
+  }
+}
+
+function isSameNavigationUrl(a: string, b: string): boolean {
+  return normalizeNavigationUrl(a) === normalizeNavigationUrl(b);
+}
+
+export interface UseBrowserWebviewResult {
+  /** webview 外层 wrapper DOM;caller appendChild 到自己的 body slot。 */
+  wrapper: HTMLDivElement | null;
+  /** 当前页面 URL(`did-navigate` / `did-navigate-in-page` 同步)。 */
+  url: string;
+  /** 当前页面 title(`page-title-updated`)。 */
+  title: string;
+  /** 当前页面 favicon URL,无则空串(`page-favicon-updated`)。 */
+  favicon: string;
+  /** 正在加载中(`did-start-loading` 翻 true,`did-stop-loading` 翻 false)。 */
+  isLoading: boolean;
+  /** webview 导航历史里有"上一页"。 */
+  canGoBack: boolean;
+  /** webview 导航历史里有"下一页"。 */
+  canGoForward: boolean;
+  /** 当前 guest 是否在发声(`audio-state-changed`)。tab pill 据此画喇叭图标,
+   *  对齐 Codex `main-cC-d0ezP.js:48434`。 */
+  isAudible: boolean;
+  /** guest renderer 进程已崩溃 / 卡死(`render-process-gone` / `unresponsive`),
+   *  BrowserTabBody 据此渲染 crash banner。null = 正常,非 null 是崩溃原因码。
+   *  reload 后清回 null(由 did-start-loading 触发)。 */
+  crash: { reason: string } | null;
+
+  /** 加载新 URL(URL bar 输入或外部跳转入口)。 */
+  navigate: (url: string) => void;
+  /** 重新加载当前页。 */
+  reload: () => void;
+  /** 上一页。 */
+  goBack: () => void;
+  /** 下一页。 */
+  goForward: () => void;
+  /** 停止当前加载(loading 时给 abort 按钮用)。 */
+  stop: () => void;
+}
+
+export function useBrowserWebview(tabId: string, sessionId?: string): UseBrowserWebviewResult {
+  // pool entry 引用 + 反应式 state。entry 本身在 pool 模块管;hook 只观察。
+  const [wrapper, setWrapper] = useState<HTMLDivElement | null>(null);
+  const [url, setUrl] = useState('');
+  const [title, setTitle] = useState('');
+  const [favicon, setFavicon] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [canGoBack, setCanGoBack] = useState(false);
+  const [canGoForward, setCanGoForward] = useState(false);
+  const [isAudible, setIsAudible] = useState(false);
+  const [crash, setCrash] = useState<{ reason: string } | null>(null);
+  // webview ref —— actions 用,避免 stale closure。
+  const webviewRef = useRef<WebviewTag | null>(null);
+  const urlRef = useRef('');
+  const suppressStaleUrlRef = useRef<{ targetUrl: string; staleUrl: string } | null>(null);
+  const navigationAttemptsRef = useRef<number[]>([]);
+  const navigationFuseTrippedRef = useRef(false);
+  const setObservedUrl = useCallback((nextUrl: string) => {
+    const suppress = suppressStaleUrlRef.current;
+    if (suppress) {
+      if (
+        isSameNavigationUrl(nextUrl, suppress.staleUrl) &&
+        !isSameNavigationUrl(nextUrl, suppress.targetUrl)
+      ) {
+        suppressStaleUrlRef.current = null;
+        return;
+      }
+      suppressStaleUrlRef.current = null;
+    }
+    urlRef.current = nextUrl;
+    setUrl(nextUrl);
+  }, []);
+
+  useEffect(() => {
+    const entry = browserWebviewPool.acquire(tabId);
+    webviewRef.current = entry.webview;
+    setWrapper(entry.wrapper);
+
+    // canGoBack/Forward 不是 event 字段,得在每次导航后主动查 —— webview API
+    // 提供 `canGoBack()` / `canGoForward()` 同步方法。
+    const refreshNav = () => {
+      try {
+        setCanGoBack(entry.webview.canGoBack());
+        setCanGoForward(entry.webview.canGoForward());
+      } catch {
+        // webContents 未 attach 时调用会抛,忽略。
+      }
+    };
+
+    const onTitle = (e: Electron.PageTitleUpdatedEvent) => setTitle(e.title);
+    const onFavicon = (e: Electron.PageFaviconUpdatedEvent) => {
+      setFavicon(e.favicons[0] ?? '');
+    };
+    const onDidNavigate = (e: Electron.DidNavigateEvent) => {
+      setObservedUrl(e.url);
+      refreshNav();
+    };
+    const onDidNavigateInPage = (e: Electron.DidNavigateInPageEvent) => {
+      setObservedUrl(e.url);
+      refreshNav();
+    };
+    const onStartLoading = () => {
+      setIsLoading(true);
+      // 任何主动导航 / reload 都视为崩溃后的恢复 — 清掉 crash banner。
+      // navigation-loop 是主动熔断,必须等用户点 banner 的重新加载才解除。
+      setCrash((prev) => (prev?.reason === 'navigation-loop' ? prev : null));
+    };
+    const onStopLoading = () => {
+      setIsLoading(false);
+      refreshNav();
+    };
+    // dom-ready:guest 页 DOM 已 attach,此时 webContents 可调用 API。我们:
+    //   1. 刷新 nav state(canGoBack/Forward 拿到首次 attach 后的准值)。
+    //   2. **上报 webContentsId 给 main 端 TabRegistry**(规则 1 解耦:business
+    //      在 main 侧,这里只搬运)。`getWebContentsId()` 只在 attach 之后才
+    //      valid —— 在 dom-ready 之前调返回无效 id。
+    //      sessionId 没传(老 callsite 兼容)时跳过上报,降级到"只能用 RSB UI、
+    //      不接 backend"。Phase 3 backend 上线前所有 callsite 都会补上。
+    //   对齐 Codex `main-cC-d0ezP.js:48842` 监听点(他们也用 dom-ready 做 attach 后初始化)。
+    const onDomReady = () => {
+      refreshNav();
+      if (!sessionId) return;
+      try {
+        const webContentsId = entry.webview.getWebContentsId();
+        void reportRsbBrowserTab({ sessionId, tabId, webContentsId });
+      } catch {
+        // pre-attach edge case (getWebContentsId throws before attach completes);
+        // a subsequent did-navigate will not re-fire dom-ready, so we lose this
+        // attach window. The next pool acquire / mount will retry. Don't block
+        // the hook on a webContentsId we can't get.
+      }
+    };
+    // did-fail-load:404 / 网络错误 / SSL 错误,Electron 不会自动停 loading 态;
+    // 显式翻 isLoading=false,UI 才能从"加载中"复位。errorCode -3 = ABORTED。
+    // 如果 ABORTED 发生在还没收到真实导航事件时,要把 URL 从乐观 target
+    // 回滚到 webview 实际 URL,否则 beforeunload 选择留在原页会把地址栏和持久化
+    // 状态留在未真正加载的目标地址。
+    const onFailLoad = (e: Electron.DidFailLoadEvent) => {
+      if (e.errorCode === -3) {
+        const suppress = suppressStaleUrlRef.current;
+        if (suppress) {
+          suppressStaleUrlRef.current = null;
+          try {
+            const currentUrl = entry.webview.getURL?.();
+            if (currentUrl) setObservedUrl(currentUrl);
+          } catch {
+            setObservedUrl(suppress.staleUrl);
+          }
+        }
+        setIsLoading(false);
+        refreshNav();
+        return;
+      }
+      setIsLoading(false);
+      refreshNav();
+    };
+    // did-redirect-navigation 只代表尚未提交的中间态。不能把它写入持久化 URL:
+    // BrowserTabBody 会把持久化 state 当成重启恢复目标,若 React render 落后一帧,
+    // authorize ↔ callback 这类跨 origin 重定向会被旧 state 反向 loadURL,
+    // 形成 ERR_ABORTED 导航反馈环。最终 URL 统一等 did-navigate。
+    const onRedirect = () => undefined;
+    // audio-state-changed:guest 开始 / 停止发声(`<video>` / `<audio>` 播放)。
+    // event.audible 是布尔。对齐 Codex `main-cC-d0ezP.js:48434` 的 isAudible 同步。
+    // Electron WebviewTag typing 没声明此 DOM event 的具名 interface(只 webContents 端
+    // 有 `WebContentsAudioStateChangedEventParams`),所以用 unknown + 字段读出。
+    const onAudioState = (e: Event) => {
+      const audible = (e as unknown as { audible?: boolean }).audible;
+      setIsAudible(audible === true);
+    };
+    // render-process-gone:guest renderer 进程崩 / 杀掉。details.reason 给原因码
+    // (crashed / killed / oom / launch-failed 等)。UI 据此显示 crash banner。
+    const onRenderProcessGone = (e: Electron.RenderProcessGoneEvent) => {
+      setIsLoading(false);
+      setIsAudible(false);
+      setCrash({ reason: e.details.reason });
+    };
+    // unresponsive:guest renderer 卡死(主线程长时间不响应)。当成软崩处理 ——
+    // 也显示 crash banner,但 reason='unresponsive'(UI 可分支显示"卡死"vs"崩溃")。
+    // 反向 responsive 事件 → 自动恢复(清 crash)。
+    // 这两个 webview tag 事件 Electron typings 没声明,用通用 Event。
+    const onUnresponsive = () => setCrash({ reason: 'unresponsive' });
+    const onResponsive = () => {
+      setCrash((prev) => (prev?.reason === 'unresponsive' ? null : prev));
+    };
+
+    entry.webview.addEventListener('page-title-updated', onTitle);
+    entry.webview.addEventListener('page-favicon-updated', onFavicon);
+    entry.webview.addEventListener('did-navigate', onDidNavigate);
+    entry.webview.addEventListener('did-navigate-in-page', onDidNavigateInPage);
+    entry.webview.addEventListener('did-redirect-navigation', onRedirect);
+    entry.webview.addEventListener('did-start-loading', onStartLoading);
+    entry.webview.addEventListener('did-stop-loading', onStopLoading);
+    entry.webview.addEventListener('dom-ready', onDomReady);
+    entry.webview.addEventListener('did-fail-load', onFailLoad);
+    entry.webview.addEventListener('audio-state-changed', onAudioState);
+    entry.webview.addEventListener('render-process-gone', onRenderProcessGone);
+    entry.webview.addEventListener('unresponsive', onUnresponsive);
+    entry.webview.addEventListener('responsive', onResponsive);
+
+    // 初次挂上来 —— 如果 webview 已经载过(切回旧 tab),把当前 URL 同步进 state。
+    try {
+      const currentUrl = entry.webview.getURL?.();
+      if (currentUrl) setObservedUrl(currentUrl);
+    } catch {
+      // 还没 attach,getURL 抛,忽略。
+    }
+    refreshNav();
+
+    return () => {
+      entry.webview.removeEventListener('page-title-updated', onTitle);
+      entry.webview.removeEventListener('page-favicon-updated', onFavicon);
+      entry.webview.removeEventListener('did-navigate', onDidNavigate);
+      entry.webview.removeEventListener('did-navigate-in-page', onDidNavigateInPage);
+      entry.webview.removeEventListener('did-redirect-navigation', onRedirect);
+      entry.webview.removeEventListener('did-start-loading', onStartLoading);
+      entry.webview.removeEventListener('did-stop-loading', onStopLoading);
+      entry.webview.removeEventListener('dom-ready', onDomReady);
+      entry.webview.removeEventListener('did-fail-load', onFailLoad);
+      entry.webview.removeEventListener('audio-state-changed', onAudioState);
+      entry.webview.removeEventListener('render-process-gone', onRenderProcessGone);
+      entry.webview.removeEventListener('unresponsive', onUnresponsive);
+      entry.webview.removeEventListener('responsive', onResponsive);
+      // **不**释放 pool entry —— webview DOM 节点继续保活,切回该 tab 时可直接
+      // 复用。释放是 plugin 在用户主动关闭 tab 时显式调 pool.release(tabId)。
+    };
+  }, [tabId, sessionId, setObservedUrl]);
+
+  const navigate = useCallback((nextUrl: string) => {
+    const wv = webviewRef.current;
+    if (navigationFuseTrippedRef.current) return;
+    const now = Date.now();
+    const attempts = navigationAttemptsRef.current.filter(
+      (at) => now - at < BROWSER_NAVIGATION_FUSE_WINDOW_MS,
+    );
+    if (attempts.length >= BROWSER_NAVIGATION_FUSE_LIMIT) {
+      // 熔断立即拒绝本次 navigate,不再把被拒绝调用计入 attempts。
+      navigationAttemptsRef.current = [];
+      navigationFuseTrippedRef.current = true;
+      suppressStaleUrlRef.current = null;
+      try {
+        wv?.stop();
+      } catch {
+        // guest 可能正处于 detach / crash,熔断本身仍然成立。
+      }
+      setIsLoading(false);
+      setCrash({ reason: 'navigation-loop' });
+      return;
+    }
+    attempts.push(now);
+    navigationAttemptsRef.current = attempts;
+    let staleUrl = urlRef.current || 'about:blank';
+    try {
+      staleUrl = wv?.getURL?.() || staleUrl;
+    } catch {
+      // getURL can throw before attach; fall back to the last observed URL.
+    }
+    if (!isSameNavigationUrl(staleUrl, nextUrl)) {
+      suppressStaleUrlRef.current = { targetUrl: nextUrl, staleUrl };
+    }
+    urlRef.current = nextUrl;
+    setUrl(nextUrl);
+    setIsLoading(true);
+    if (!wv) return;
+    try {
+      wv.loadURL(nextUrl);
+    } catch {
+      // loadURL 在 webContents 未 attach 时抛;Electron webview 的 attach 在
+      // wrapper 进入 visible DOM 后才完成 —— 这种情况下退回 setAttribute('src')
+      // 让 webview 自己 attach 后加载。
+      wv.setAttribute('src', nextUrl);
+    }
+  }, []);
+  const reload = useCallback(() => {
+    navigationAttemptsRef.current = [];
+    navigationFuseTrippedRef.current = false;
+    setCrash(null);
+    webviewRef.current?.reload();
+  }, []);
+  const goBack = useCallback(() => webviewRef.current?.goBack(), []);
+  const goForward = useCallback(() => webviewRef.current?.goForward(), []);
+  const stop = useCallback(() => webviewRef.current?.stop(), []);
+
+  return {
+    wrapper,
+    url,
+    title,
+    favicon,
+    isLoading,
+    canGoBack,
+    canGoForward,
+    isAudible,
+    crash,
+    navigate,
+    reload,
+    goBack,
+    goForward,
+    stop,
+  };
+}

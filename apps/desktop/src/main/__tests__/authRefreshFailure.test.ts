@@ -1,0 +1,436 @@
+/**
+ * Refresh-token 失效判定回归测试。
+ *
+ * 守护的核心契约:冷启动 `initialize()` 与运行时 `refresh()` 只能在「确定性凭据失效」时
+ * 删除本地 refresh token;429 限流 / 5xx / 断网 / 无识别码的失败必须保留 token,否则一次
+ * 冷启动撞上服务端限流(本仓库新加的 auth 限流)或网络抖动就会把有效用户永久登出。
+ */
+
+import { describe, expect, it, vi } from 'vitest';
+import {
+  DEFINITIVE_REFRESH_FAILURE_CODES,
+  getRefreshTokenReplacementCandidate,
+  isDefinitiveRefreshFailure,
+  resolveRefreshFailureAction,
+  resolveSessionExpiredReason,
+  runRefreshWithReplacementRetry,
+  runRefreshWithTransientRetry,
+  type RefreshFailureInfo,
+  type RefreshFetchResult,
+} from '../authRefreshFailure';
+
+describe('resolveSessionExpiredReason', () => {
+  it('确定性失效码映射到对应展示分类', () => {
+    expect(resolveSessionExpiredReason('INVALID_REFRESH_TOKEN')).toBe('replaced-elsewhere');
+    expect(resolveSessionExpiredReason('REFRESH_TOKEN_EXPIRED')).toBe('expired');
+    expect(resolveSessionExpiredReason('DEVICE_MISMATCH')).toBe('device-mismatch');
+    expect(resolveSessionExpiredReason('MEMBERSHIP_DISABLED')).toBe('account-unavailable');
+  });
+
+  it('未识别码 / 缺省一律 unknown,走通用文案', () => {
+    expect(resolveSessionExpiredReason(undefined)).toBe('unknown');
+    expect(resolveSessionExpiredReason('RATE_LIMITED')).toBe('unknown');
+    expect(resolveSessionExpiredReason('SOME_FUTURE_CODE')).toBe('unknown');
+  });
+});
+
+describe('isDefinitiveRefreshFailure', () => {
+  it('成功响应不删除 token', () => {
+    expect(isDefinitiveRefreshFailure({ ok: true, data: { accessToken: 'a' } })).toBe(false);
+  });
+
+  it('确定性凭据失效码 → 删除 token', () => {
+    for (const code of [
+      'REFRESH_TOKEN_EXPIRED',
+      'INVALID_REFRESH_TOKEN',
+      'DEVICE_MISMATCH',
+      'MEMBERSHIP_DISABLED',
+    ]) {
+      expect(isDefinitiveRefreshFailure({ ok: false, data: { error: { code } } })).toBe(true);
+    }
+  });
+
+  it('429 限流(RATE_LIMITED)→ 瞬时失败,保留 token', () => {
+    expect(
+      isDefinitiveRefreshFailure({ ok: false, data: { error: { code: 'RATE_LIMITED' } } }),
+    ).toBe(false);
+  });
+
+  it('5xx / 无识别码的失败 → 保留 token', () => {
+    expect(isDefinitiveRefreshFailure({ ok: false, data: { error: {} } })).toBe(false);
+    expect(isDefinitiveRefreshFailure({ ok: false, data: {} })).toBe(false);
+    expect(isDefinitiveRefreshFailure({ ok: false, data: { message: 'Bad Gateway' } })).toBe(false);
+  });
+
+  it('断网(apiFetch 返回 data:null,status:0)→ 保留 token', () => {
+    expect(isDefinitiveRefreshFailure({ ok: false, data: null })).toBe(false);
+  });
+
+  it('未知 4xx 错误码 → 保留 token(保守:宁可保留也不误删)', () => {
+    expect(
+      isDefinitiveRefreshFailure({ ok: false, data: { error: { code: 'SOME_OTHER_ERROR' } } }),
+    ).toBe(false);
+  });
+
+  it('确定性错误码集合保持冻结(防止误增删改变删除语义)', () => {
+    expect([...DEFINITIVE_REFRESH_FAILURE_CODES].sort()).toEqual([
+      'DEVICE_MISMATCH',
+      'INVALID_REFRESH_TOKEN',
+      'MEMBERSHIP_DISABLED',
+      'REFRESH_TOKEN_EXPIRED',
+    ]);
+  });
+});
+
+describe('refresh token replacement detection', () => {
+  const invalidToken: RefreshFetchResult<unknown> = {
+    ok: false,
+    status: 401,
+    data: { error: { code: 'INVALID_REFRESH_TOKEN' } },
+  };
+  const rateLimited: RefreshFetchResult<unknown> = {
+    ok: false,
+    status: 429,
+    data: { error: { code: 'RATE_LIMITED' } },
+  };
+  const expiredToken: RefreshFetchResult<unknown> = {
+    ok: false,
+    status: 401,
+    data: { error: { code: 'REFRESH_TOKEN_EXPIRED' } },
+  };
+  const deviceMismatch: RefreshFetchResult<unknown> = {
+    ok: false,
+    status: 401,
+    data: { error: { code: 'DEVICE_MISMATCH' } },
+  };
+  const membershipDisabled: RefreshFetchResult<unknown> = {
+    ok: false,
+    status: 403,
+    data: { error: { code: 'MEMBERSHIP_DISABLED' } },
+  };
+
+  it('磁盘 token 与请求 token 不同 → 返回替换候选', () => {
+    expect(getRefreshTokenReplacementCandidate('rt-old', 'rt-new')).toBe('rt-new');
+  });
+
+  it('磁盘 token 缺失或相同 → 没有替换候选', () => {
+    expect(getRefreshTokenReplacementCandidate('rt-old', null)).toBeNull();
+    expect(getRefreshTokenReplacementCandidate('rt-old', '')).toBeNull();
+    expect(getRefreshTokenReplacementCandidate('rt-old', 'rt-old')).toBeNull();
+  });
+
+  it('确定性失败且磁盘已有新 token → 用新 token 重试,不清登录态', () => {
+    expect(resolveRefreshFailureAction(invalidToken, 'rt-old', 'rt-new')).toEqual({
+      kind: 'replacement-retry',
+      refreshToken: 'rt-new',
+    });
+  });
+
+  it('只有 INVALID_REFRESH_TOKEN 可触发替换重试,其余确定性失败直接清登录态', () => {
+    expect(resolveRefreshFailureAction(expiredToken, 'rt-old', 'rt-new')).toEqual({
+      kind: 'definitive-failure',
+    });
+    expect(resolveRefreshFailureAction(deviceMismatch, 'rt-old', 'rt-new')).toEqual({
+      kind: 'definitive-failure',
+    });
+    expect(resolveRefreshFailureAction(membershipDisabled, 'rt-old', 'rt-new')).toEqual({
+      kind: 'definitive-failure',
+    });
+  });
+
+  it('确定性失败且磁盘 token 未变化 → 清登录态', () => {
+    expect(resolveRefreshFailureAction(invalidToken, 'rt-old', 'rt-old')).toEqual({
+      kind: 'definitive-failure',
+    });
+  });
+
+  it('非确定性失败即使磁盘 token 未变化 → 仍按瞬时失败处理', () => {
+    expect(resolveRefreshFailureAction(rateLimited, 'rt-old', 'rt-old')).toEqual({
+      kind: 'transient-failure',
+    });
+  });
+
+  it('旧 token 确定性失败但磁盘已有新 token → 换新 token 刷新成功', async () => {
+    const okResult: RefreshFetchResult<unknown> = {
+      ok: true,
+      status: 200,
+      data: { accessToken: 'a', refreshToken: 'rt-newer' },
+    };
+    const doRefresh = vi.fn(async (refreshToken: string) =>
+      refreshToken === 'rt-new' ? okResult : invalidToken,
+    );
+    const replacements: Array<{ replacementRetry: number; status: number; code?: string }> = [];
+
+    const result = await runRefreshWithReplacementRetry('rt-old', {
+      doRefresh,
+      readLatestStoredToken: () => 'rt-new',
+      onReplacementRetry: ({ replacementRetry, status, code }) =>
+        replacements.push({ replacementRetry, status, code }),
+    });
+
+    expect(result).toMatchObject({
+      result: okResult,
+      attempts: 2,
+      requestedToken: 'rt-new',
+      replacementRetries: 1,
+      replacementRetryExhausted: false,
+    });
+    expect(result.failureAction).toBeUndefined();
+    expect(doRefresh).toHaveBeenNthCalledWith(1, 'rt-old');
+    expect(doRefresh).toHaveBeenNthCalledWith(2, 'rt-new');
+    expect(replacements).toEqual([
+      { replacementRetry: 1, status: 401, code: 'INVALID_REFRESH_TOKEN' },
+    ]);
+  });
+
+  it('旧 token 失败但新 token 稍后才落盘 → 延迟重读后再用新 token 刷新', async () => {
+    const okResult: RefreshFetchResult<unknown> = {
+      ok: true,
+      status: 200,
+      data: { accessToken: 'a', refreshToken: 'rt-newer' },
+    };
+    const doRefresh = vi.fn(async (refreshToken: string) =>
+      refreshToken === 'rt-new' ? okResult : invalidToken,
+    );
+    const latestTokens = ['rt-old', 'rt-new'];
+    const sleepCalls: number[] = [];
+    const rechecks: Array<{ delayMs: number; status: number; code?: string }> = [];
+
+    const result = await runRefreshWithReplacementRetry('rt-old', {
+      doRefresh,
+      readLatestStoredToken: () => latestTokens.shift() ?? 'rt-new',
+      replacementRecheck: {
+        delaysMs: [10],
+        sleep: (ms) => (sleepCalls.push(ms), Promise.resolve()),
+        onBeforeRecheck: ({ delayMs, status, code }) => rechecks.push({ delayMs, status, code }),
+      },
+    });
+
+    expect(result).toMatchObject({
+      result: okResult,
+      attempts: 2,
+      requestedToken: 'rt-new',
+      replacementRetries: 1,
+      replacementRetryExhausted: false,
+    });
+    expect(doRefresh).toHaveBeenNthCalledWith(1, 'rt-old');
+    expect(doRefresh).toHaveBeenNthCalledWith(2, 'rt-new');
+    expect(sleepCalls).toEqual([10]);
+    expect(rechecks).toEqual([{ delayMs: 10, status: 401, code: 'INVALID_REFRESH_TOKEN' }]);
+  });
+
+  it('DEVICE_MISMATCH 不做延迟重读或替换重试', async () => {
+    const doRefresh = vi.fn(async () => deviceMismatch);
+    const sleep = vi.fn(async () => {});
+
+    const result = await runRefreshWithReplacementRetry('rt-old', {
+      doRefresh,
+      readLatestStoredToken: () => 'rt-new',
+      replacementRecheck: {
+        delaysMs: [10],
+        sleep,
+      },
+    });
+
+    expect(result).toMatchObject({
+      result: deviceMismatch,
+      attempts: 1,
+      requestedToken: 'rt-old',
+      replacementRetries: 0,
+      replacementRetryExhausted: false,
+      failureAction: { kind: 'definitive-failure' },
+    });
+    expect(sleep).not.toHaveBeenCalled();
+    expect(doRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('替换重试耗尽时返回 replacement-retry,调用方不应清登录态', async () => {
+    const doRefresh = vi.fn(async () => invalidToken);
+    const latestTokens = ['rt-new-1', 'rt-new-2'];
+
+    const result = await runRefreshWithReplacementRetry('rt-old', {
+      doRefresh,
+      readLatestStoredToken: () => latestTokens.shift() ?? 'rt-new-2',
+      maxReplacementRetries: 1,
+    });
+
+    expect(result).toMatchObject({
+      result: invalidToken,
+      attempts: 2,
+      requestedToken: 'rt-new-1',
+      replacementRetries: 1,
+      replacementRetryExhausted: true,
+      failureAction: { kind: 'replacement-retry', refreshToken: 'rt-new-2' },
+    });
+    expect(doRefresh).toHaveBeenNthCalledWith(1, 'rt-old');
+    expect(doRefresh).toHaveBeenNthCalledWith(2, 'rt-new-1');
+  });
+});
+
+describe('runRefreshWithTransientRetry', () => {
+  const okResult: RefreshFetchResult<unknown> = {
+    ok: true,
+    status: 200,
+    data: { accessToken: 'a' },
+  };
+  const rateLimited: RefreshFetchResult<unknown> = {
+    ok: false,
+    status: 429,
+    data: { error: { code: 'RATE_LIMITED' } },
+  };
+  const offline: RefreshFetchResult<unknown> = { ok: false, status: 0, data: null };
+  const invalidToken: RefreshFetchResult<unknown> = {
+    ok: false,
+    status: 401,
+    data: { error: { code: 'INVALID_REFRESH_TOKEN' } },
+  };
+  /** 立即 resolve 的注入 sleep,记录每次退避时长。 */
+  const makeSleep = () => {
+    const calls: number[] = [];
+    return { calls, sleep: (ms: number) => (calls.push(ms), Promise.resolve()) };
+  };
+
+  it('首次成功 → 不重试、不退避', async () => {
+    const doRefresh = vi.fn().mockResolvedValue(okResult);
+    const { calls, sleep } = makeSleep();
+    const { result, attempts } = await runRefreshWithTransientRetry(doRefresh, { sleep });
+    expect(result).toBe(okResult);
+    expect(attempts).toBe(1);
+    expect(doRefresh).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual([]);
+  });
+
+  it('瞬时失败(429)后成功 → 退避 rateLimitDelayMs(默认 60s)后重试', async () => {
+    const doRefresh = vi.fn().mockResolvedValueOnce(rateLimited).mockResolvedValueOnce(okResult);
+    const { calls, sleep } = makeSleep();
+    const failures: RefreshFailureInfo[] = [];
+    const { result, attempts } = await runRefreshWithTransientRetry(doRefresh, {
+      sleep,
+      onFailure: (info) => failures.push(info),
+    });
+    expect(result).toBe(okResult);
+    expect(attempts).toBe(2);
+    expect(calls).toEqual([60_000]);
+    expect(failures).toEqual([
+      { attempt: 1, status: 429, code: 'RATE_LIMITED', definitive: false, willRetry: true },
+    ]);
+  });
+
+  it('确定性凭据失效 → 立即返回,不重试', async () => {
+    const doRefresh = vi.fn().mockResolvedValue(invalidToken);
+    const { calls, sleep } = makeSleep();
+    const failures: RefreshFailureInfo[] = [];
+    const { result, attempts } = await runRefreshWithTransientRetry(doRefresh, {
+      sleep,
+      onFailure: (info) => failures.push(info),
+    });
+    expect(result).toBe(invalidToken);
+    expect(attempts).toBe(1);
+    expect(doRefresh).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual([]);
+    expect(failures).toEqual([
+      {
+        attempt: 1,
+        status: 401,
+        code: 'INVALID_REFRESH_TOKEN',
+        definitive: true,
+        willRetry: false,
+      },
+    ]);
+  });
+
+  it('持续瞬时失败(断网)→ 耗尽重试次数后返回最后一次结果', async () => {
+    const doRefresh = vi.fn().mockResolvedValue(offline);
+    const { calls, sleep } = makeSleep();
+    const failures: RefreshFailureInfo[] = [];
+    const { result, attempts } = await runRefreshWithTransientRetry(doRefresh, {
+      sleep,
+      onFailure: (info) => failures.push(info),
+    });
+    expect(result).toBe(offline);
+    expect(attempts).toBe(3);
+    expect(doRefresh).toHaveBeenCalledTimes(3);
+    expect(calls).toEqual([1000, 2000]);
+    expect(failures.map((f) => f.willRetry)).toEqual([true, true, false]);
+    expect(failures.every((f) => !f.definitive && f.status === 0 && f.code === undefined)).toBe(
+      true,
+    );
+  });
+
+  it('重试中途遇到确定性失效 → 停止重试返回该结果', async () => {
+    const doRefresh = vi.fn().mockResolvedValueOnce(offline).mockResolvedValueOnce(invalidToken);
+    const { calls, sleep } = makeSleep();
+    const { result, attempts } = await runRefreshWithTransientRetry(doRefresh, { sleep });
+    expect(result).toBe(invalidToken);
+    expect(attempts).toBe(2);
+    expect(doRefresh).toHaveBeenCalledTimes(2);
+    expect(calls).toEqual([1000]);
+  });
+
+  it('自定义退避序列决定最大请求数', async () => {
+    const serverError: RefreshFetchResult<unknown> = { ok: false, status: 502, data: null };
+    const doRefresh = vi.fn().mockResolvedValue(serverError);
+    const { calls, sleep } = makeSleep();
+    const { attempts } = await runRefreshWithTransientRetry(doRefresh, {
+      sleep,
+      retryDelaysMs: [10],
+    });
+    expect(attempts).toBe(2);
+    expect(doRefresh).toHaveBeenCalledTimes(2);
+    expect(calls).toEqual([10]);
+  });
+
+  it('429 使用 rateLimitDelayMs 退避而非短退避', async () => {
+    const doRefresh = vi.fn().mockResolvedValueOnce(rateLimited).mockResolvedValueOnce(okResult);
+    const { calls, sleep } = makeSleep();
+    const { result, attempts } = await runRefreshWithTransientRetry(doRefresh, {
+      sleep,
+      rateLimitDelayMs: 60_000,
+    });
+    expect(result).toBe(okResult);
+    expect(attempts).toBe(2);
+    expect(calls).toEqual([60_000]);
+  });
+
+  it('非 429 瞬时失败仍使用 retryDelaysMs 短退避', async () => {
+    const doRefresh = vi.fn().mockResolvedValueOnce(offline).mockResolvedValueOnce(okResult);
+    const { calls, sleep } = makeSleep();
+    const { result, attempts } = await runRefreshWithTransientRetry(doRefresh, {
+      sleep,
+      rateLimitDelayMs: 60_000,
+    });
+    expect(result).toBe(okResult);
+    expect(attempts).toBe(2);
+    expect(calls).toEqual([1000]);
+  });
+
+  it('rateLimitDelayMs:0 时 429 立即返回不重试(冷启动路径)', async () => {
+    const doRefresh = vi.fn().mockResolvedValueOnce(rateLimited).mockResolvedValueOnce(okResult);
+    const { calls, sleep } = makeSleep();
+    const failures: RefreshFailureInfo[] = [];
+    const { result, attempts } = await runRefreshWithTransientRetry(doRefresh, {
+      sleep,
+      rateLimitDelayMs: 0,
+      onFailure: (info) => failures.push(info),
+    });
+    expect(result).toBe(rateLimited);
+    expect(attempts).toBe(1);
+    expect(doRefresh).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual([]);
+    expect(failures).toEqual([
+      { attempt: 1, status: 429, code: 'RATE_LIMITED', definitive: false, willRetry: false },
+    ]);
+  });
+
+  it('rateLimitDelayMs:0 时非 429 瞬时失败仍正常重试', async () => {
+    const doRefresh = vi.fn().mockResolvedValueOnce(offline).mockResolvedValueOnce(okResult);
+    const { calls, sleep } = makeSleep();
+    const { result, attempts } = await runRefreshWithTransientRetry(doRefresh, {
+      sleep,
+      rateLimitDelayMs: 0,
+    });
+    expect(result).toBe(okResult);
+    expect(attempts).toBe(2);
+    expect(calls).toEqual([1000]);
+  });
+});

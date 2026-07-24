@@ -1,0 +1,144 @@
+/**
+ * hook-control/defaults.ts
+ * ---------------------------------------------------------------------------
+ * Hook 新会话的 agent / model / effort / permissionMode / providerId 合成
+ * (取值链的桌面端末段):
+ *
+ *   server 显式值(用户在 Slack 按工作目录设置的偏好) > 桌面端 IM 新会话
+ *   默认值(草稿, 建 session 那一刻实时读) > 当前可用模型清单的首项 >
+ *   草稿裸值(没有任何可用模型时的兼容兜底)
+ *
+ * 与 im/defaultSessionSettings 同一默认值数据源(readImDefaultSettings),
+ * 语义是「Slack 里开的会话与桌面端新开会话行为一致」。显式值非法(模型不在
+ * 可用清单 / effort 不被该模型支持)时静默回落并记日志 —— server 侧渲染按钮
+ * 的清单本就来自本机实时供应商目录, 非法值只出现在
+ * "偏好过期"(模型下架 / agent 换代)的窗口里。
+ *
+ * permissionMode 例外: IM 草稿默认没有权限概念, 取值链是「显式且该 agent
+ * 支持 > 'bypassPermissions'」—— bypass 是 hook 无人值守的历史默认, 非法
+ * 收紧值回落 bypass 而非更严档(server 侧渲染/校准已双保险, 走到这里只剩
+ * 极小的"偏好过期"窗口)。
+ *
+ * 纯函数 + 注入依赖(规则 14), Electron / maker 绑定在 session-runner 组装。
+ */
+
+import type { Effort } from '@cindy/maker-core';
+
+/** 依赖注入面: IM 默认值 + 各 agent 当前可用模型清单。 */
+export interface HookDefaultsDeps {
+  readDefaults: () => {
+    agentKind: 'claude-code' | 'codex';
+    agents: Record<
+      'claude-code' | 'codex',
+      { providerId: string | null; model: string; effort: string }
+    >;
+  };
+  getModels: (agentKind: 'claude-code' | 'codex') => Array<{
+    id: string;
+    efforts: readonly string[];
+    defaultEffort: string | null;
+  }>;
+  /** 该 agent 支持的权限档 id 清单(capabilities.permissionModes)。 */
+  getPermissionModes: (agentKind: 'claude-code' | 'codex') => readonly string[];
+  log: { warn(msg: string): void };
+}
+
+export interface ResolvedHookSessionConfig {
+  agentKind: 'claude-code' | 'codex';
+  model: string;
+  effort: Effort | undefined;
+  permissionMode: string;
+  /**
+   * 草稿默认的来源(供应商)id, 未设置为 null。这里只透传设置值不校验连接态 ——
+   * 供应商目录是异步接口, 本函数保持纯同步; session-runner 会在同一份实时
+   * 目录快照里把最终模型解析到具体已连接来源。
+   */
+  providerId: string | null;
+}
+
+const AGENT_KINDS = new Set(['claude-code', 'codex']);
+
+/**
+ * 合成新 hook 会话的 agent/model/effort。
+ * overrides 来自 dispatch options(server 侧个人习惯), 任一为 null = 未指定。
+ */
+export function resolveHookSessionConfig(
+  deps: HookDefaultsDeps,
+  overrides: {
+    agentKind: string | null;
+    model: string | null;
+    effort: string | null;
+    permissionMode: string | null;
+  },
+): ResolvedHookSessionConfig {
+  const defaults = deps.readDefaults();
+
+  // 1. agent: 显式合法值 > 草稿默认
+  const agentKind: 'claude-code' | 'codex' =
+    overrides.agentKind !== null && AGENT_KINDS.has(overrides.agentKind)
+      ? (overrides.agentKind as 'claude-code' | 'codex')
+      : defaults.agentKind;
+
+  const models = deps.getModels(agentKind);
+  const findModel = (id: string) => models.find((m) => m.id === id);
+
+  // 2. model:显式且在可用清单 > 草稿默认(在清单) > 清单第一个 > 草稿默认裸值。
+  // getModels 来自本次执行实时读取的 provider 目录；目录读取失败时 session-runner 会改用
+  // maker capabilities，因此走到这里的非空清单就是可执行真相，失效 override 必须降级。
+  let model: string;
+  if (overrides.model !== null && findModel(overrides.model)) {
+    model = overrides.model;
+  } else {
+    if (overrides.model !== null) {
+      deps.log.warn(
+        `hook override model '${overrides.model}' not available for ${agentKind}, falling back to desktop default`,
+      );
+    }
+    const draft = defaults.agents[agentKind]?.model;
+    if (draft && findModel(draft)) {
+      model = draft;
+    } else {
+      model = models[0]?.id ?? draft ?? '';
+    }
+  }
+
+  // 3. effort: 显式且该模型支持 > 草稿默认(该模型支持) > 模型默认档 > 不传
+  const descriptor = findModel(model);
+  let effort: string | undefined;
+  if (descriptor === undefined || descriptor.efforts.length === 0) {
+    effort = undefined; // descriptor 暂缺或模型不支持调档, 不传由 agent/backend 处理
+  } else if (overrides.effort !== null && descriptor.efforts.includes(overrides.effort)) {
+    effort = overrides.effort;
+  } else {
+    if (overrides.effort !== null) {
+      deps.log.warn(
+        `hook override effort '${overrides.effort}' not supported by ${model}, falling back`,
+      );
+    }
+    const draftEffort = defaults.agents[agentKind]?.effort;
+    if (draftEffort && descriptor.efforts.includes(draftEffort)) {
+      effort = draftEffort;
+    } else {
+      effort = descriptor.defaultEffort ?? descriptor.efforts[0];
+    }
+  }
+
+  // 4. providerId: 草稿默认(与 agentKind 同组), 无 override 通道(hook 协议
+  //    v1 的 dispatch options 不携带来源字段); 空白串归一成 null
+  const draftProviderId = defaults.agents[agentKind]?.providerId;
+  const providerId = draftProviderId?.trim() ? draftProviderId.trim() : null;
+
+  // 5. permissionMode: 显式且该 agent 支持 > bypass(hook 无人值守历史默认)
+  let permissionMode = 'bypassPermissions';
+  if (overrides.permissionMode !== null) {
+    if (deps.getPermissionModes(agentKind).includes(overrides.permissionMode)) {
+      permissionMode = overrides.permissionMode;
+    } else {
+      deps.log.warn(
+        `hook override permissionMode '${overrides.permissionMode}' not supported by ${agentKind}, falling back to bypassPermissions`,
+      );
+    }
+  }
+
+  return { agentKind, model, effort: effort as Effort | undefined, permissionMode, providerId };
+}

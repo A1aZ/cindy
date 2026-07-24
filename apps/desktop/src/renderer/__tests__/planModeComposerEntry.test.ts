@@ -1,0 +1,244 @@
+// @vitest-environment jsdom
+
+/**
+ * planModeComposerEntry.test.tsx
+ * ---------------------------------------------------------------------------
+ * issue #475 — 计划模式一级入口的 DOM 级渲染断言:
+ *   - ExtraDirsButton:「计划模式」菜单项与「新建目标」同级;点击回调 toggle;
+ *     勾选态 aria-checked;codex(无引用目录能力)也能只凭 planMode 渲染「+」按钮
+ *   - PlanModeIndicator:激活 chip 文案 + 退出按钮;disabled 时隐藏退出按钮
+ *   - PlanActionCard:取消收敛为次级动作(仅 Esc,无独立行)与 ⏎ 去重
+ *     (编辑反馈时批准行 ⏎ 隐藏,反馈 ⏎ 仅在有文字时出现且可点击发送)
+ */
+
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createElement } from 'react';
+
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({
+    t: (key: string) => key,
+  }),
+}));
+
+// ExtraDirsButton 的目录添加确认弹窗依赖 Provider;本测试只覆盖菜单项渲染,mock 掉。
+vi.mock('@/components/ui/confirm-dialog-provider', () => ({
+  useConfirmDialog: () => ({ confirm: async () => true }),
+}));
+
+vi.mock('@/components/chat/MarkdownRenderer', () => ({
+  MarkdownRenderer: () => null,
+}));
+
+import { ExtraDirsButton } from '@/components/new-chat/ExtraDirsButton';
+import { PlanActionCard } from '@/components/new-chat/PlanActionCard';
+import { PlanModeIndicator } from '@/components/new-chat/PlanModeIndicator';
+import { PlanViewerCard } from '@/components/new-chat/PlanViewerCard';
+import type { InstalledGhost } from '../../shared/ghost';
+
+const installedPlugin: InstalledGhost = {
+  manifest: {
+    schemaVersion: 2,
+    id: 'cindy-art',
+    name: 'Cindy Art',
+    version: '1.0.0',
+    kind: 'chip',
+    entry: 'main.js',
+    slots: ['tool'],
+    tools: [{ name: 'draw', description: 'Draw.' }],
+    command: 'art',
+  },
+  dir: '/tmp/cindy-art',
+  enabled: true,
+};
+
+const installedMermaidPlugin: InstalledGhost = {
+  manifest: {
+    schemaVersion: 2,
+    id: 'cindy-mermaid',
+    name: 'Mermaid',
+    version: '1.0.0',
+    kind: 'chip',
+    entry: 'main.js',
+    slots: ['tool'],
+    tools: [{ name: 'render', description: 'Render a Mermaid diagram.' }],
+    command: 'mermaid',
+  },
+  dir: '/tmp/cindy-mermaid',
+  enabled: true,
+};
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
+
+describe('ExtraDirsButton 计划模式菜单项', () => {
+  it('codex 只凭 planMode 也渲染「+」入口, 菜单里出现计划模式 toggle', () => {
+    const onToggle = vi.fn();
+    render(
+      createElement(ExtraDirsButton, {
+        extraDirs: [],
+        agentKind: 'codex',
+        onChange: () => {},
+        planMode: { enabled: false, onToggle },
+      }),
+    );
+    const trigger = screen.getByLabelText('extraDirs.menuAria');
+    fireEvent.click(trigger);
+
+    const item = screen.getByRole('menuitemcheckbox', { name: /planMode\.menuItem/ });
+    expect(item.getAttribute('aria-checked')).toBe('false');
+    fireEvent.click(item);
+    expect(onToggle).toHaveBeenCalledWith(true);
+  });
+
+  it('开启态菜单项 aria-checked=true, 再点回调 false; 与新建目标同级共存', () => {
+    const onToggle = vi.fn();
+    const onNewGoal = vi.fn();
+    render(
+      createElement(ExtraDirsButton, {
+        extraDirs: [],
+        agentKind: 'cc',
+        onChange: () => {},
+        onNewGoal,
+        planMode: { enabled: true, onToggle },
+      }),
+    );
+    fireEvent.click(screen.getByLabelText('extraDirs.menuAria'));
+
+    // 新建目标与计划模式同级出现在同一菜单
+    expect(screen.getByText('goal.newGoalMenuItem')).toBeTruthy();
+    const item = screen.getByRole('menuitemcheckbox', { name: /planMode\.menuItem/ });
+    expect(item.getAttribute('aria-checked')).toBe('true');
+    fireEvent.click(item);
+    expect(onToggle).toHaveBeenCalledWith(false);
+  });
+
+  it('没有任何入口(codex 无 planMode 无 onNewGoal)时保持不渲染', () => {
+    const { container } = render(
+      createElement(ExtraDirsButton, {
+        extraDirs: [],
+        agentKind: 'codex',
+        onChange: () => {},
+      }),
+    );
+    expect(container.firstChild).toBeNull();
+  });
+
+  it('展示所有已安装 Plugin，并把可用项交给 composer 放置', () => {
+    const onPluginSelect = vi.fn();
+    render(
+      createElement(ExtraDirsButton, {
+        extraDirs: [],
+        agentKind: 'codex',
+        onChange: () => {},
+        plugins: [installedPlugin],
+        onPluginSelect,
+      }),
+    );
+
+    fireEvent.click(screen.getByLabelText('extraDirs.menuAria'));
+    expect(screen.getByText('extraDirs.pluginsTitle')).toBeTruthy();
+    const pluginRow = screen.getByRole('button', { name: 'Cindy Art' });
+    expect(pluginRow.querySelector('span')?.className).toContain('size-5');
+    fireEvent.click(pluginRow);
+    expect(onPluginSelect).toHaveBeenCalledWith(installedPlugin);
+  });
+
+  it('复用 Plugin 页的功能兜底图标，避免无包内头像时入口不一致', () => {
+    render(
+      createElement(ExtraDirsButton, {
+        extraDirs: [],
+        agentKind: 'codex',
+        onChange: () => {},
+        plugins: [installedMermaidPlugin],
+        onPluginSelect: vi.fn(),
+      }),
+    );
+
+    fireEvent.click(screen.getByLabelText('extraDirs.menuAria'));
+    const pluginRow = screen.getByRole('button', { name: 'Mermaid' });
+    expect(pluginRow.querySelector('svg.lucide-workflow')).toBeTruthy();
+    expect(pluginRow.querySelector('svg.lucide-package')).toBeNull();
+  });
+});
+
+describe('PlanModeIndicator 激活 chip', () => {
+  it('渲染标题与提示, 点 X 触发退出', () => {
+    const onExit = vi.fn();
+    render(createElement(PlanModeIndicator, { onExit }));
+    expect(screen.getByText('planMode.indicator.title')).toBeTruthy();
+    expect(screen.getByText('planMode.indicator.hint')).toBeTruthy();
+    fireEvent.click(screen.getByLabelText('planMode.exit'));
+    expect(onExit).toHaveBeenCalledTimes(1);
+  });
+
+  it('disabled 时隐藏退出按钮', () => {
+    render(createElement(PlanModeIndicator, { onExit: () => {}, disabled: true }));
+    expect(screen.queryByLabelText('planMode.exit')).toBeNull();
+  });
+});
+
+describe('PlanActionCard 取消(Esc)与 ⏎ 去重', () => {
+  it('取消是次级动作:不渲染独立取消行, Esc(非编辑态)触发 onCancel', () => {
+    const onCancel = vi.fn();
+    render(createElement(PlanActionCard, { requestId: 'pr-2', onRespond: vi.fn(), onCancel }));
+    // 不与批准/反馈同级 —— 卡片里没有取消行文案
+    expect(screen.queryByText('newChat.planReview.cancel')).toBeNull();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onCancel).toHaveBeenCalledWith('pr-2');
+  });
+
+  it('编辑反馈时批准行 ⏎ 隐藏; 反馈 ⏎ 仅在有文字时出现且点击即发送', () => {
+    const onRespond = vi.fn();
+    const { container } = render(
+      createElement(PlanActionCard, { requestId: 'pr-4', onRespond, onCancel: vi.fn() }),
+    );
+    // 初始:只有批准行一个 ⏎(lucide corner-down-left)
+    const enterIcons = () => container.querySelectorAll('svg.lucide-corner-down-left');
+    expect(enterIcons()).toHaveLength(1);
+
+    // 进入反馈编辑:批准行 ⏎ 隐藏,空文本时无发送 ⏎ → 0 个
+    fireEvent.click(screen.getByText('newChat.planReview.feedbackPlaceholder'));
+    expect(enterIcons()).toHaveLength(0);
+
+    // 输入文字 → 发送 ⏎ 出现(全程唯一),点击即提交反馈
+    const textarea = screen.getByPlaceholderText('newChat.planReview.feedbackPlaceholder');
+    fireEvent.change(textarea, { target: { value: '再加一步测试' } });
+    expect(enterIcons()).toHaveLength(1);
+    fireEvent.click(screen.getByLabelText('newChat.planReview.submitFeedbackAria'));
+    expect(onRespond).toHaveBeenCalledWith('pr-4', false, '再加一步测试');
+  });
+
+  it('工具条取消按钮聚焦时 Enter 触发取消, 不触发全局批准', () => {
+    const onCancel = vi.fn();
+    const onRespond = vi.fn();
+    render(
+      createElement(
+        'div',
+        {},
+        createElement(PlanViewerCard, {
+          pending: {
+            requestId: 'pr-5',
+            plan: '# Plan\n\n1. Do it',
+            planFilePath: '/repo/plan.md',
+          },
+          viewerState: 'expanded',
+          workingDir: '/repo',
+          lastExpandedState: 'expanded',
+          onStateChange: vi.fn(),
+          onCancel,
+        }),
+        createElement(PlanActionCard, { requestId: 'pr-5', onRespond, onCancel }),
+      ),
+    );
+
+    const cancelButton = screen.getByLabelText('newChat.planReview.cancel (Esc)');
+    fireEvent.keyDown(cancelButton, { key: 'Enter' });
+    fireEvent.click(cancelButton);
+
+    expect(onRespond).not.toHaveBeenCalled();
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+});

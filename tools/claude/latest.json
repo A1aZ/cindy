@@ -1,0 +1,126 @@
+{
+  "name": "@anthropic-ai/claude-code",
+  "version": "2.1.215",
+  "author": {
+    "name": "Anthropic",
+    "email": "support@anthropic.com"
+  },
+  "license": "SEE LICENSE IN README.md",
+  "_id": "@anthropic-ai/claude-code@2.1.215",
+  "maintainers": [
+    {
+      "name": "zak-anthropic",
+      "email": "zak@anthropic.com"
+    },
+    {
+      "name": "dylanc-anthropic",
+      "email": "dylanc@anthropic.com"
+    },
+    {
+      "name": "benjmann",
+      "email": "ben@anthropic.com"
+    },
+    {
+      "name": "nikhil-anthropic",
+      "email": "nikhil@anthropic.com"
+    },
+    {
+      "name": "ejlangev-ant",
+      "email": "ethan.langevin@anthropic.com"
+    },
+    {
+      "name": "jv-anthropic",
+      "email": "jv@anthropic.com"
+    },
+    {
+      "name": "ollie-ant-2025",
+      "email": "ollie@anthropic.com"
+    },
+    {
+      "name": "packy-anthropic",
+      "email": "packy@anthropic.com"
+    },
+    {
+      "name": "noahz-anthropic",
+      "email": "noahz@anthropic.com"
+    },
+    {
+      "name": "sbidasaria",
+      "email": "sbidasaria@anthropic.com"
+    },
+    {
+      "name": "wolffiex",
+      "email": "wolffiex@anthropic.com"
+    },
+    {
+      "name": "felixrieseberg-anthropic",
+      "email": "f@anthropic.com"
+    },
+    {
+      "name": "joan-anthropic",
+      "email": "joan@anthropic.com"
+    }
+  ],
+  "homepage": "https://github.com/anthropics/claude-code",
+  "bugs": {
+    "url": "https://github.com/anthropics/claude-code/issues"
+  },
+  "bin": {
+    "claude": "bin/claude.exe"
+  },
+  "dist": {
+    "shasum": "c349d13afa43e6cf6f147f36bec121dc9824ed89",
+    "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.215.tgz",
+    "fileCount": 7,
+    "integrity": "sha512-lsWBvyMyBqg/rOZ06o/HEhlpOzHsH8IBf9RH4u5gzizQ1LWS/oXAh5nqWNUu3hn2d8QkyYg0aseNzMDlGD+3qg==",
+    "signatures": [
+      {
+        "sig": "MEUCIDMhAnHnwQOkVShX93Vrlg1V0yWFmKoxXZEO2vaxoF2JAiEAiIPDb+5n1XvwFBJcQP3COvZVkZ8qfqzEFP0W4VmUOjk=",
+        "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"
+      }
+    ],
+    "unpackedSize": 165282
+  },
+  "type": "module",
+  "_from": "file:staged-npm/anthropic-ai-claude-code-2.1.215.tgz",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "runtimeAssets": {
+    "linux-x64": {
+      "url": "https://downloads.claude.ai/claude-code-releases/2.1.215/linux-x64/claude",
+      "sha256": "c1efffaaf370aa187cb6a09dd93d4e511c646899b0078476f83791b664bde7fe",
+      "size": 265239536
+    }
+  },
+  "scripts": {
+    "prepare": "node -e \"if (!process.env.AUTHORIZED) { console.error('ERROR: Direct publishing is not allowed.\\nPlease see the release workflow documentation to publish this package.'); process.exit(1); }\"",
+    "postinstall": "node install.cjs"
+  },
+  "_npmUser": {
+    "name": "wolffiex",
+    "email": "wolffiex@anthropic.com"
+  },
+  "_resolved": "/home/runner/work/claude-cli-internal/claude-cli-internal/staged-npm/anthropic-ai-claude-code-2.1.215.tgz",
+  "_integrity": "sha512-lsWBvyMyBqg/rOZ06o/HEhlpOzHsH8IBf9RH4u5gzizQ1LWS/oXAh5nqWNUu3hn2d8QkyYg0aseNzMDlGD+3qg==",
+  "_npmVersion": "11.16.0",
+  "description": "Use Claude, Anthropic's AI assistant, right from your terminal. Claude can understand your codebase, edit files, run terminal commands, and handle entire workflows for you.",
+  "directories": {},
+  "_nodeVersion": "24.18.0",
+  "dependencies": {},
+  "_hasShrinkwrap": false,
+  "optionalDependencies": {
+    "@anthropic-ai/claude-code-linux-x64": "2.1.215",
+    "@anthropic-ai/claude-code-win32-x64": "2.1.215",
+    "@anthropic-ai/claude-code-darwin-x64": "2.1.215",
+    "@anthropic-ai/claude-code-linux-arm64": "2.1.215",
+    "@anthropic-ai/claude-code-win32-arm64": "2.1.215",
+    "@anthropic-ai/claude-code-darwin-arm64": "2.1.215",
+    "@anthropic-ai/claude-code-linux-x64-musl": "2.1.215",
+    "@anthropic-ai/claude-code-linux-arm64-musl": "2.1.215"
+  },
+  "_npmOperationalInternal": {
+    "tmp": "tmp/claude-code_2.1.215_1784422417038_0.7779043961753329",
+    "host": "s3://npm-registry-packages-npm-production"
+  }
+}

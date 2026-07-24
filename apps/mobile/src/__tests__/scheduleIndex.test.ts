@@ -1,0 +1,339 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { MobileMakerTransport } from '@/device-link/mobileMakerTransport';
+import {
+  loadSessionScheduleIndex,
+  loadSessionScheduleIndexThrottled,
+  replaceSessionScheduleIndexEntries,
+  resetScheduleIndexThrottleForTesting,
+  SCHEDULE_INDEX_THROTTLE_TTL_MS,
+} from '@/session/scheduleIndex';
+import type { RemoteSessionScheduleInfo } from '@/session/sessionList';
+
+function makerWithSchedules(
+  listRuns: (scheduleId: string, limit?: number) => Promise<unknown>,
+): Pick<MobileMakerTransport, 'schedule'> {
+  return {
+    schedule: {
+      list: async () => [
+        { id: 'sched-1', name: '巡检', status: 'active' },
+        { id: 'broken', name: '失败任务', status: 'active' },
+      ],
+      listRuns,
+    },
+  } as unknown as Pick<MobileMakerTransport, 'schedule'>;
+}
+
+describe('scheduleIndex', () => {
+  it('loads schedule unread and running metadata without failing the whole index on one bad schedule', async () => {
+    const listRuns = vi.fn(async (scheduleId: string) => {
+      if (scheduleId === 'broken') throw new Error('remote schedule runs unavailable');
+      return [
+        {
+          id: 'run-unread',
+          scheduleId: 'sched-1',
+          sessionId: 'session-1',
+          status: 'success',
+          firedAt: Date.parse('2026-01-01T00:01:00.000Z'),
+        },
+        {
+          id: 'run-running',
+          scheduleId: 'sched-1',
+          sessionId: 'session-1',
+          status: 'running',
+          firedAt: Date.parse('2026-01-01T00:02:00.000Z'),
+        },
+      ];
+    });
+
+    const index = await loadSessionScheduleIndex(makerWithSchedules(listRuns));
+
+    expect(listRuns).toHaveBeenCalledWith('sched-1', 50);
+    expect(listRuns).toHaveBeenCalledWith('broken', 50);
+    expect(index.get('session-1')).toMatchObject({
+      allSchedulesStopped: false,
+      running: true,
+      scheduleId: 'sched-1',
+      scheduleName: '巡检',
+      unreadCount: 1,
+      unreadRunIds: ['run-unread'],
+    });
+  });
+
+  it('only stops a multi-schedule session when every known binding is paused or expired', async () => {
+    const maker = {
+      schedule: {
+        list: async () => [
+          {
+            id: 'active-without-run',
+            name: '仍在运行',
+            status: 'active',
+            targetSessionId: 'session-mixed',
+          },
+          {
+            id: 'paused',
+            name: '已暂停',
+            status: 'paused',
+            targetSessionId: 'session-mixed',
+          },
+          {
+            id: 'expired',
+            name: '已过期',
+            status: 'expired',
+            targetSessionId: 'session-stopped',
+          },
+          {
+            id: 'paused-stopped',
+            name: '也已暂停',
+            status: 'paused',
+            targetSessionId: 'session-stopped',
+          },
+        ],
+        listRuns: async (scheduleId: string) => {
+          if (scheduleId === 'paused') {
+            return [{
+              id: 'run-paused',
+              scheduleId,
+              sessionId: 'session-mixed',
+              status: 'success',
+              firedAt: 200,
+            }];
+          }
+          if (scheduleId === 'expired') {
+            return [{
+              id: 'run-expired',
+              scheduleId,
+              sessionId: 'session-stopped',
+              status: 'success',
+              firedAt: 100,
+            }];
+          }
+          if (scheduleId === 'paused-stopped') {
+            return [{
+              id: 'run-paused-stopped',
+              scheduleId,
+              sessionId: 'session-stopped',
+              status: 'success',
+              firedAt: 200,
+            }];
+          }
+          return [];
+        },
+      },
+    } as unknown as Pick<MobileMakerTransport, 'schedule'>;
+
+    const index = await loadSessionScheduleIndex(maker);
+
+    expect(index.get('session-mixed')).toMatchObject({
+      scheduleStatus: 'paused',
+      allSchedulesStopped: false,
+    });
+    expect(index.get('session-stopped')).toMatchObject({
+      scheduleStatus: 'paused',
+      allSchedulesStopped: true,
+    });
+  });
+
+  it('indexes targetSessionId bindings before their first run', async () => {
+    const maker = {
+      schedule: {
+        list: async () => [
+          {
+            id: 'paused-no-run',
+            name: '等待恢复',
+            status: 'paused',
+            targetSessionId: 'session-paused-no-run',
+          },
+          {
+            id: 'active-no-run',
+            name: '等待首次执行',
+            status: 'active',
+            targetSessionId: 'session-active-no-run',
+          },
+        ],
+        listRuns: async () => [],
+      },
+    } as unknown as Pick<MobileMakerTransport, 'schedule'>;
+
+    const index = await loadSessionScheduleIndex(maker);
+
+    expect(index.get('session-paused-no-run')).toMatchObject({
+      scheduleId: 'paused-no-run',
+      scheduleName: '等待恢复',
+      scheduleStatus: 'paused',
+      allSchedulesStopped: true,
+      unreadRunIds: [],
+      unreadCount: 0,
+      running: false,
+      latestRunAt: 0,
+    });
+    expect(index.get('session-active-no-run')).toMatchObject({
+      scheduleId: 'active-no-run',
+      scheduleStatus: 'active',
+      allSchedulesStopped: false,
+    });
+  });
+
+  it('ignores historical runs after a schedule is rebound to another session', async () => {
+    const maker = {
+      schedule: {
+        list: async () => [
+          {
+            id: 'rebound-active',
+            name: '已改绑任务',
+            status: 'active',
+            targetSessionId: 'session-new',
+          },
+          {
+            id: 'paused-old',
+            name: '旧会话暂停任务',
+            status: 'paused',
+            targetSessionId: 'session-old',
+          },
+        ],
+        listRuns: async (scheduleId: string) => scheduleId === 'rebound-active'
+          ? [{
+              id: 'historical-run',
+              scheduleId,
+              sessionId: 'session-old',
+              status: 'success',
+              firedAt: 200,
+            }]
+          : [],
+      },
+    } as unknown as Pick<MobileMakerTransport, 'schedule'>;
+
+    const index = await loadSessionScheduleIndex(maker);
+
+    expect(index.get('session-old')).toMatchObject({
+      scheduleId: 'paused-old',
+      scheduleStatus: 'paused',
+      allSchedulesStopped: true,
+      unreadCount: 0,
+    });
+    expect(index.get('session-new')).toMatchObject({
+      scheduleId: 'rebound-active',
+      scheduleStatus: 'active',
+      allSchedulesStopped: false,
+      unreadCount: 0,
+    });
+  });
+
+  it('replaces only entries for the refreshed device sessions', () => {
+    const current = new Map([
+      ['session-1', { scheduleId: 'old', scheduleName: 'Old', allSchedulesStopped: false, unreadRunIds: ['old-run'], unreadCount: 1, running: false, latestRunAt: 1 }],
+      ['other-device-session', { scheduleId: 'keep', scheduleName: 'Keep', allSchedulesStopped: false, unreadRunIds: ['keep-run'], unreadCount: 1, running: false, latestRunAt: 1 }],
+    ]);
+    const next = new Map([
+      ['session-1', { scheduleId: 'new', scheduleName: 'New', allSchedulesStopped: false, unreadRunIds: [], unreadCount: 0, running: true, latestRunAt: 2 }],
+      ['outside-refreshed-window', { scheduleId: 'ignored', scheduleName: 'Ignored', allSchedulesStopped: false, unreadRunIds: ['ignored'], unreadCount: 1, running: false, latestRunAt: 2 }],
+    ]);
+
+    const merged = replaceSessionScheduleIndexEntries(current, ['session-1', 'session-2'], next);
+
+    expect(merged.get('session-1')).toMatchObject({ running: true, scheduleId: 'new' });
+    expect(merged.get('other-device-session')).toMatchObject({ scheduleId: 'keep' });
+    expect(merged.has('outside-refreshed-window')).toBe(false);
+  });
+
+  it('keeps the existing map reference when a refresh is value-equivalent', () => {
+    const current = new Map<string, RemoteSessionScheduleInfo>([
+      ['session-1', { scheduleId: 'sched-1', scheduleName: 'Daily', scheduleStatus: 'active', allSchedulesStopped: false, unreadRunIds: ['run-1'], unreadCount: 1, running: true, latestRunAt: 2 }],
+      ['other-device-session', { scheduleId: 'keep', scheduleName: 'Keep', scheduleStatus: 'active', allSchedulesStopped: false, unreadRunIds: [], unreadCount: 0, running: false, latestRunAt: 1 }],
+    ]);
+    const next = new Map<string, RemoteSessionScheduleInfo>([
+      ['session-1', { scheduleId: 'sched-1', scheduleName: 'Daily', scheduleStatus: 'active', allSchedulesStopped: false, unreadRunIds: ['run-1'], unreadCount: 1, running: true, latestRunAt: 2 }],
+    ]);
+
+    const merged = replaceSessionScheduleIndexEntries(current, ['session-1'], next);
+
+    expect(merged).toBe(current);
+  });
+
+  it('updates the map when only schedule status changes', () => {
+    const current = new Map<string, RemoteSessionScheduleInfo>([
+      ['session-1', { scheduleId: 'sched-1', scheduleName: 'Daily', scheduleStatus: 'active', allSchedulesStopped: false, unreadRunIds: [], unreadCount: 0, running: false, latestRunAt: 2 }],
+    ]);
+    const next = new Map<string, RemoteSessionScheduleInfo>([
+      ['session-1', { scheduleId: 'sched-1', scheduleName: 'Daily', scheduleStatus: 'paused', allSchedulesStopped: true, unreadRunIds: [], unreadCount: 0, running: false, latestRunAt: 2 }],
+    ]);
+
+    const merged = replaceSessionScheduleIndexEntries(current, ['session-1'], next);
+
+    expect(merged).not.toBe(current);
+    expect(merged.get('session-1')?.scheduleStatus).toBe('paused');
+    expect(merged.get('session-1')?.allSchedulesStopped).toBe(true);
+  });
+});
+
+describe('loadSessionScheduleIndexThrottled (单飞 + TTL 节流)', () => {
+  it('TTL 内的重复触发复用同一在途/已完成 promise,不重复加载', async () => {
+    resetScheduleIndexThrottleForTesting();
+    const load = vi.fn(async () => new Map<string, RemoteSessionScheduleInfo>());
+    let clock = 1000;
+    const now = () => clock;
+    const first = loadSessionScheduleIndexThrottled('dev-1', load, { now });
+    clock += 5_000;
+    const second = loadSessionScheduleIndexThrottled('dev-1', load, { now });
+    expect(second).toBe(first);
+    expect(load).toHaveBeenCalledTimes(1);
+    await first;
+  });
+
+  it('TTL 过期后重新加载;不同 key 互不影响', async () => {
+    resetScheduleIndexThrottleForTesting();
+    const load = vi.fn(async () => new Map<string, RemoteSessionScheduleInfo>());
+    let clock = 1000;
+    const now = () => clock;
+    await loadSessionScheduleIndexThrottled('dev-1', load, { now });
+    clock += SCHEDULE_INDEX_THROTTLE_TTL_MS + 1;
+    await loadSessionScheduleIndexThrottled('dev-1', load, { now });
+    expect(load).toHaveBeenCalledTimes(2);
+    await loadSessionScheduleIndexThrottled('dev-2', load, { now });
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+
+  it('force 绕过 TTL 立即重拉', async () => {
+    resetScheduleIndexThrottleForTesting();
+    const load = vi.fn(async () => new Map<string, RemoteSessionScheduleInfo>());
+    const now = () => 1000;
+    await loadSessionScheduleIndexThrottled('dev-1', load, { now });
+    await loadSessionScheduleIndexThrottled('dev-1', load, { now, force: true });
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('失败不占坑:reject 后下一次触发正常重试', async () => {
+    resetScheduleIndexThrottleForTesting();
+    const load = vi.fn()
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce(new Map<string, RemoteSessionScheduleInfo>());
+    const now = () => 1000;
+    await expect(loadSessionScheduleIndexThrottled('dev-1', load, { now })).rejects.toThrow('boom');
+    // reject 清坑是微任务,先让它落地。
+    await Promise.resolve();
+    await expect(loadSessionScheduleIndexThrottled('dev-1', load, { now })).resolves.toBeInstanceOf(Map);
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('listRuns 串行执行(同一时刻最多一个在途,不挤占 device-link 管道)', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const maker = {
+      schedule: {
+        list: async () => [
+          { id: 'sched-1', name: 'a', status: 'active' },
+          { id: 'sched-2', name: 'b', status: 'active' },
+          { id: 'sched-3', name: 'c', status: 'active' },
+        ],
+        listRuns: async () => {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await Promise.resolve();
+          inFlight -= 1;
+          return [];
+        },
+      },
+    } as unknown as Pick<MobileMakerTransport, 'schedule'>;
+    await loadSessionScheduleIndex(maker);
+    expect(maxInFlight).toBe(1);
+  });
+});

@@ -1,0 +1,197 @@
+/**
+ * lifecycle.test.ts
+ * ---------------------------------------------------------------------------
+ * 单测覆盖 runQuitDisposers 的三阶段编排语义:
+ *   - sync 串行, 抛错不影响后续
+ *   - async 并发, 整体超时兜底
+ *   - post-async 串行, 必须晚于 async (用于 db close 这种依赖 async 产物的清理)
+ *
+ * installQuitHandler 只覆盖不触发真实退出的异常分支；真实 process / app 信号路径仍走集成验证。
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// lifecycle.ts 里 import { app } from 'electron' —— 用最小 stub 喂给它。
+// 真实退出路径 (信号 / before-quit) 不在本文件覆盖。
+vi.mock('electron', () => ({
+  app: {
+    on: vi.fn(),
+    isReady: () => false,
+    quit: vi.fn(),
+    exit: vi.fn(),
+  },
+}));
+
+const mocks = vi.hoisted(() => ({
+  logger: {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+  disableDevTerminalMirror: vi.fn(),
+}));
+
+vi.mock('../logger', async () => {
+  const actual = await vi.importActual<typeof import('../logger')>('../logger');
+  return {
+    ...actual,
+    createLogger: () => mocks.logger,
+    disableDevTerminalMirror: mocks.disableDevTerminalMirror,
+  };
+});
+
+// 因为 registry 是 module-level state, 每个用例需要 reset。简单做法: 用
+// vi.resetModules + 动态 import, 拿一份全新的 module 实例。
+async function freshLifecycle() {
+  vi.resetModules();
+  return import('../lifecycle');
+}
+
+type ProcessEventName =
+  | 'SIGINT'
+  | 'SIGTERM'
+  | 'exit'
+  | 'uncaughtException'
+  | 'unhandledRejection';
+
+function snapshotProcessListeners(events: ProcessEventName[]) {
+  const before = new Map(events.map((event) => [event, new Set(process.listeners(event))]));
+
+  return {
+    added(event: ProcessEventName) {
+      const previous = before.get(event) ?? new Set();
+      return process.listeners(event).filter((listener) => !previous.has(listener));
+    },
+    restore() {
+      for (const event of events) {
+        const previous = before.get(event) ?? new Set();
+        for (const listener of process.listeners(event)) {
+          if (!previous.has(listener)) {
+            process.removeListener(event, listener);
+          }
+        }
+      }
+    },
+  };
+}
+
+describe('runQuitDisposers', () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('runs sync → async → post-async in order', async () => {
+    const { onQuit, runQuitDisposers } = await freshLifecycle();
+    const log: string[] = [];
+
+    onQuit('a-sync', () => { log.push('a-sync'); }, 'sync');
+    onQuit('b-async', async () => {
+      await new Promise((r) => setTimeout(r, 10));
+      log.push('b-async');
+    }, 'async');
+    onQuit('c-post', async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      log.push('c-post');
+    }, 'post-async');
+
+    await runQuitDisposers(1000);
+
+    expect(log).toEqual(['a-sync', 'b-async', 'c-post']);
+  });
+
+  it('sync disposer that throws does not block subsequent disposers', async () => {
+    const { onQuit, runQuitDisposers } = await freshLifecycle();
+    const log: string[] = [];
+
+    onQuit('throws', () => { throw new Error('boom'); }, 'sync');
+    onQuit('after', () => { log.push('after'); }, 'sync');
+
+    await runQuitDisposers(1000);
+
+    expect(log).toEqual(['after']);
+  });
+
+  it('async disposers run concurrently', async () => {
+    const { onQuit, runQuitDisposers } = await freshLifecycle();
+    const start = Date.now();
+
+    onQuit('one', () => new Promise<void>((r) => setTimeout(r, 50)), 'async');
+    onQuit('two', () => new Promise<void>((r) => setTimeout(r, 50)), 'async');
+
+    await runQuitDisposers(1000);
+
+    // 并发跑应当 ~50ms, 串行会是 ~100ms。给点余量, < 90ms 即视为并发。
+    expect(Date.now() - start).toBeLessThan(90);
+  });
+
+  it('async phase honors timeout — post-async still runs after timeout', async () => {
+    const { onQuit, runQuitDisposers } = await freshLifecycle();
+    let postRan = false;
+
+    // 永不 resolve 的 async disposer
+    onQuit('hang', () => new Promise(() => { /* never */ }), 'async');
+    onQuit('post', () => { postRan = true; }, 'post-async');
+
+    const start = Date.now();
+    await runQuitDisposers(50);
+    const elapsed = Date.now() - start;
+
+    expect(postRan).toBe(true);
+    // 超时 50ms, 实际不应远超 (无其它阻塞)
+    expect(elapsed).toBeLessThan(200);
+  });
+
+  it('rejected async disposer does not break the chain', async () => {
+    const { onQuit, runQuitDisposers } = await freshLifecycle();
+    let postRan = false;
+
+    onQuit('rejects', async () => { throw new Error('async-boom'); }, 'async');
+    onQuit('ok', async () => { /* fine */ }, 'async');
+    onQuit('post', () => { postRan = true; }, 'post-async');
+
+    await runQuitDisposers(500);
+
+    expect(postRan).toBe(true);
+  });
+});
+
+describe('installQuitHandler', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('disables terminal mirroring before logging broken stdio errors once', async () => {
+    const snapshot = snapshotProcessListeners([
+      'SIGINT',
+      'SIGTERM',
+      'exit',
+      'uncaughtException',
+      'unhandledRejection',
+    ]);
+
+    try {
+      const { installQuitHandler } = await freshLifecycle();
+      installQuitHandler();
+
+      const [handleUncaughtException] = snapshot.added('uncaughtException');
+      expect(handleUncaughtException).toBeTypeOf('function');
+
+      const err = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+      handleUncaughtException(err, 'uncaughtException');
+      handleUncaughtException(err, 'uncaughtException');
+
+      expect(mocks.disableDevTerminalMirror).toHaveBeenCalledTimes(2);
+      expect(mocks.logger.warn).toHaveBeenCalledTimes(1);
+      expect(mocks.logger.warn).toHaveBeenCalledWith(
+        'disabled dev terminal log mirror after broken stdio',
+        err,
+      );
+    } finally {
+      snapshot.restore();
+    }
+  });
+});

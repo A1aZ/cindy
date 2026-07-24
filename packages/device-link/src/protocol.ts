@@ -1,0 +1,155 @@
+/**
+ * device-link 客户端完整协议(desktop / mobile 共享)。
+ *
+ * relay 能理解的信封、连接层 payload 与错误码来自 cindy-protocol submodule；
+ * 本文件只补充 relay 不解析的端到端隧道 payload、客户端本地错误与 REST 视图。
+ */
+import {
+  MAX_FRAME_BYTES,
+  NOTIFY_BODY_MAX_LENGTH,
+  NOTIFY_COLLAPSE_ID_MAX_LENGTH,
+  NOTIFY_DEEP_LINK_MAX_LENGTH,
+  NOTIFY_TITLE_MAX_LENGTH,
+  PROTOCOL_VERSION,
+  SERVER_CAPABILITY_NOTIFY,
+  type DeviceInfo,
+  type Envelope,
+  type EnvelopeKind,
+  type HelloAckPayload,
+  type HelloPayload,
+  type NotifyCategory,
+  type NotifyPayload,
+  type PresenceSetPayload,
+  type PresenceSnapshot,
+  type RelayErrorCode,
+  type RelayErrorPayload,
+} from '@cindy/device-link-protocol';
+
+export {
+  MAX_FRAME_BYTES,
+  NOTIFY_BODY_MAX_LENGTH,
+  NOTIFY_COLLAPSE_ID_MAX_LENGTH,
+  NOTIFY_DEEP_LINK_MAX_LENGTH,
+  NOTIFY_TITLE_MAX_LENGTH,
+  PROTOCOL_VERSION,
+  SERVER_CAPABILITY_NOTIFY,
+};
+export type {
+  DeviceInfo,
+  Envelope,
+  EnvelopeKind,
+  HelloAckPayload,
+  HelloPayload,
+  NotifyCategory,
+  NotifyPayload,
+  PresenceSetPayload,
+  PresenceSnapshot,
+  RelayErrorCode,
+  RelayErrorPayload,
+};
+
+// ─── 错误码 ───────────────────────────────────────────────────────────────────
+
+/**
+ * device-link 全链路错误码。
+ * 前 6 个与 server relay 的 RelayErrorCode 对应;后面是 client / 被控端本地产生。
+ */
+export type DeviceLinkErrorCode = RelayErrorCode
+  | 'CHANNEL_NOT_ALLOWED' // channel 不在远程调用白名单
+  | 'ACCESS_REVOKED' // 被控端已撤销该控制端的访问权限(逐设备黑名单,被控端本地强制)
+  | 'INVOKE_TIMEOUT' // 控制端等待 invoke-result 超时
+  | 'LINK_NOT_OPEN' // 控制链路未建立
+  | 'NOT_CONNECTED' // 本端尚未连上 relay
+  | 'MEDIA_FETCH_FAILED' // 入方向媒体取件失败(被控端解析本机媒体 / 上传 OSS 中转出错)
+  | 'VOICE_TRANSCRIBE_FAILED' // 出方向手机语音转写失败(被控端下载音频 / ASR 出错)
+  | 'VOICE_CREDENTIAL_SYNC_FAILED' // 手机语音云端 ASR/refine 临时 credential 同步失败(历史,新桌面已不再返回)
+  | 'VOICE_CREDENTIAL_SYNC_REMOVED' // 穿透 credential 同步能力已下线:手机语音改走 Cindy 官方托管服务,旧手机据此提示升级
+  | 'VOICE_DICTIONARY_LEARNING_FAILED'; // 手机语音词典学习 evidence 回写失败
+
+/** 带结构化错误码的异常,贯穿 client / host 两层 */
+export class DeviceLinkError extends Error {
+  /**
+   * true = 该错误击中的是一条**已发出**的 in-flight 请求(断连时被 failAllPending
+   * 批量 reject):请求帧可能已送达对端,只是响应丢了。控制端的自动重试逻辑必须
+   * 区分它与「发送前本地拒绝」(未置位)——对非幂等操作(如 enqueue)盲重前者
+   * 会造成对端重复执行。
+   */
+  inFlight?: boolean;
+
+  constructor(
+    public readonly code: DeviceLinkErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'DeviceLinkError';
+  }
+}
+
+/** 判定错误是否击中 in-flight 请求(见 DeviceLinkError.inFlight)。 */
+export function isInFlightDeviceLinkError(err: unknown): boolean {
+  return err instanceof DeviceLinkError && err.inFlight === true;
+}
+
+// ─── 连接层 payload ───────────────────────────────────────────────────────────
+
+// ─── 隧道层 payload ───────────────────────────────────────────────────────────
+
+export interface LinkOpenPayload {
+  controllerName: string;
+  protocolVersion: number;
+  appVersion: string;
+}
+
+export interface LinkAcceptPayload {
+  appVersion: string;
+  /** 被控端 allowlist 的指纹,便于控制端探测版本差异 */
+  allowlistHash: string;
+}
+
+export type LinkCloseReason = 'user' | 'toggle-off' | 'shutdown' | 'revoked';
+
+export interface LinkClosePayload {
+  reason: LinkCloseReason;
+}
+
+/** 控制端 → 被控端:执行一次 IPC invoke */
+export interface InvokePayload {
+  channel: string;
+  args: unknown[];
+}
+
+/**
+ * 被控端 → 控制端:invoke 执行结果。
+ * error.message 透传被控端 throwIpcError 的 `[CODE] message` 编码,
+ * 控制端 renderer 继续用现有 extractIpcError 解码,错误协议全链路免改。
+ */
+export type InvokeResultPayload =
+  | { ok: true; result: unknown }
+  | {
+      ok: false;
+      error: { code: DeviceLinkErrorCode | 'IPC_ERROR'; message: string };
+    };
+
+/** 被控端 → 控制端:广播转发(MAKER_PUSH.* / local-db 推送) */
+export interface PushPayload {
+  channel: string;
+  payload: unknown;
+}
+
+// ─── REST 管理面(GET /api/device-link/devices)────────────────────────────────
+
+/** server REST 返回的设备视图(apps/server/src/routes/deviceLink.ts 对应) */
+export interface DeviceView {
+  deviceId: string;
+  name: string;
+  selfName?: string | null;
+  deviceInfo?: DeviceInfo | null;
+  platform: string | null;
+  appVersion: string | null;
+  /** ISO 字符串;从未上线过的离线设备可能为 null */
+  lastSeenAt: string | null;
+  online: boolean;
+  busy: boolean;
+  remoteControlEnabled: boolean;
+  isSelf: boolean;
+}

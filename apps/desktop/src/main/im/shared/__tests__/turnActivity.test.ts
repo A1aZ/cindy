@@ -1,0 +1,159 @@
+/** Live work preview parity and replay-safety tests for remote channels. */
+import { describe, expect, it } from 'vitest';
+
+import {
+  createTurnActivity,
+  formatThinkingStep,
+  formatToolStep,
+  markActivityWriting,
+  MAX_VISIBLE_STEPS,
+  pushThinkingStep,
+  pushToolStep,
+  renderActivity,
+} from '../turnActivity';
+
+describe('formatToolStep — shared friendly wording', () => {
+  it('humanizes files, searches, commands and Codex file changes', () => {
+    expect(formatToolStep('Read', { file_path: '/a/b/slackRelay.ts' })).toBe(
+      '读取 slackRelay.ts',
+    );
+    expect(formatToolStep('Grep', { pattern: 'recordRoute' })).toBe('搜索 recordRoute');
+    expect(formatToolStep('exec', {
+      command: 'pnpm test',
+      commandActions: [{ type: 'unknown' }],
+    })).toBe('运行测试');
+    expect(formatToolStep('file_change', {
+      changes: [{ path: '/repo/src/app.ts', kind: { type: 'update' }, diff: '-a\n+b' }],
+    })).toBe('编辑 app.ts');
+  });
+
+  it('keeps only the friendly title in the compact row', () => {
+    expect(formatToolStep('Bash', {
+      command: 'rg -n useMemo src',
+      description: '搜索 useMemo 的使用位置',
+    })).toBe('搜索 useMemo 的使用位置');
+    expect(formatToolStep('mcp__lizi_feishu__read_by_url', {})).toBe(
+      '调用 lizi_feishu · read by url',
+    );
+  });
+});
+
+describe('thinking activity', () => {
+  it('removes paired markdown markers for Slack and collapses whitespace', () => {
+    expect(formatThinkingStep('**检查实现**\n\n读取 `app.ts`')).toBe('检查实现 读取 app.ts');
+    expect(formatThinkingStep('**正在检查')).toBe('正在检查');
+  });
+
+  it('updates one row across deltas/final instead of adding raw stream rows', () => {
+    const activity = createTurnActivity(0);
+    expect(pushThinkingStep(activity, {
+      stage: 'start',
+      blockId: 'thinking-1',
+      startedAt: 0,
+    })).toBe(false);
+    pushThinkingStep(activity, { stage: 'delta', blockId: 'thinking-1', text: '**检查' });
+    pushThinkingStep(activity, { stage: 'delta', blockId: 'thinking-1', text: '实现**' });
+    pushThinkingStep(activity, {
+      stage: 'final',
+      blockId: 'thinking-1',
+      text: '**检查实现**',
+    });
+
+    expect(activity.totalSteps).toBe(1);
+    expect(activity.recentSteps).toEqual([
+      { key: 'thinking:thinking-1', kind: 'thinking', label: '检查实现' },
+    ]);
+  });
+
+  it('does not expose redacted thinking', () => {
+    const activity = createTurnActivity(0);
+    expect(pushThinkingStep(activity, { stage: 'redacted', blockId: 'secret' })).toBe(false);
+    expect(activity.totalSteps).toBe(0);
+  });
+});
+
+describe('rolling window and replay de-duplication', () => {
+  it('keeps the latest five unique activities while retaining the total', () => {
+    const activity = createTurnActivity(0);
+    for (let index = 1; index <= MAX_VISIBLE_STEPS + 3; index += 1) {
+      pushToolStep(activity, 'Grep', { pattern: `p${index}` }, `tool-${index}`);
+    }
+    expect(activity.totalSteps).toBe(MAX_VISIBLE_STEPS + 3);
+    expect(activity.recentSteps).toHaveLength(MAX_VISIBLE_STEPS);
+    expect(activity.recentSteps[0]?.label).toBe('搜索 p4');
+    expect(activity.recentSteps.at(-1)?.label).toBe(`搜索 p${MAX_VISIBLE_STEPS + 3}`);
+  });
+
+  it('ignores a repeated tool_use id even after its row rolled out', () => {
+    const activity = createTurnActivity(0);
+    pushToolStep(activity, 'Read', { file_path: '/repo/a.ts' }, 'read-a');
+    for (let index = 0; index < MAX_VISIBLE_STEPS; index += 1) {
+      pushToolStep(activity, 'Grep', { pattern: `p${index}` }, `grep-${index}`);
+    }
+    markActivityWriting(activity);
+    expect(pushToolStep(activity, 'Read', { file_path: '/repo/a.ts' }, 'read-a')).toBe(false);
+    expect(activity.totalSteps).toBe(MAX_VISIBLE_STEPS + 1);
+    expect(activity.recentSteps.some((step) => step.label === '读取 a.ts')).toBe(false);
+    expect(activity.writing).toBe(true);
+  });
+
+  it('keeps writing active when a replayed thought has already rolled out', () => {
+    const activity = createTurnActivity(0);
+    pushThinkingStep(activity, { stage: 'delta', blockId: 'old-thought', text: '先检查状态' });
+    for (let index = 0; index < MAX_VISIBLE_STEPS; index += 1) {
+      pushToolStep(activity, 'Grep', { pattern: `p${index}` }, `grep-${index}`);
+    }
+    markActivityWriting(activity);
+
+    expect(pushThinkingStep(activity, {
+      stage: 'final',
+      blockId: 'old-thought',
+      text: '先检查状态，再继续处理',
+    })).toBe(false);
+    expect(activity.writing).toBe(true);
+    expect(activity.recentSteps.some((step) => step.kind === 'thinking')).toBe(false);
+  });
+
+  it('keeps replay bookkeeping out of the serializable card state', () => {
+    const activity = createTurnActivity(0);
+    pushThinkingStep(activity, { stage: 'final', blockId: 't1', text: '检查状态' });
+    pushToolStep(activity, 'Read', { file_path: '/repo/a.ts' }, 'read-a');
+
+    expect(Object.keys(activity).sort()).toEqual([
+      'recentSteps',
+      'startedAt',
+      'totalSteps',
+      'writing',
+    ]);
+    expect(JSON.parse(JSON.stringify(activity))).toEqual(activity);
+  });
+});
+
+describe('renderActivity', () => {
+  it('renders the current activity without a redundant writing row', () => {
+    const activity = createTurnActivity(0);
+    pushThinkingStep(activity, { stage: 'final', blockId: 't1', text: '确认调用链' });
+    pushToolStep(activity, 'Read', { file_path: '/x/relay.ts' }, 'read-1');
+    expect(renderActivity(activity, 42_000).split('\n')).toEqual([
+      '⚙️ 工作中 · 2 项 · 42s',
+      '> ✓ ✦ 确认调用链',
+      '> ▸ 读取 relay.ts',
+    ]);
+
+    markActivityWriting(activity);
+    const writingView = renderActivity(activity, 90_000);
+    expect(writingView).toContain('⚙️ 工作中 · 2 项 · 1m30s');
+    expect(writingView).toContain('> ✓ 读取 relay.ts');
+    expect(writingView).not.toContain('正在书写回复');
+
+    // A later tool becomes current even though earlier progress text exists.
+    pushToolStep(activity, 'Bash', { command: 'pnpm test' }, 'test-1');
+    expect(renderActivity(activity, 91_000)).toContain('> ▸ 运行测试');
+  });
+
+  it('emits no chrome for a text-only quick answer', () => {
+    const activity = createTurnActivity(0);
+    markActivityWriting(activity);
+    expect(renderActivity(activity, 1_000)).toBe('');
+  });
+});

@@ -1,0 +1,88 @@
+import { describe, expect, it } from 'vitest';
+import {
+  compareVersions,
+  evaluateBundleUpdate,
+  parseLatestRelease,
+  preferredInstallUrl,
+} from './bundleUpdate';
+
+const VALID = {
+  version: '1.2.0',
+  buildNumber: '2026070101',
+  runtimeVersion: 'rtv-new',
+  installUrl: 'https://npkg.example.com/install/42',
+  itmsUrl: 'itms-services://?action=download-manifest&url=https%3A%2F%2Fx%2Fplist%2F42',
+};
+
+describe('parseLatestRelease', () => {
+  it('接受完整记录', () => {
+    expect(parseLatestRelease(VALID)?.runtimeVersion).toBe('rtv-new');
+  });
+  it('缺 runtimeVersion 或安装地址 → null', () => {
+    expect(parseLatestRelease({ ...VALID, runtimeVersion: '' })).toBeNull();
+    expect(parseLatestRelease({ ...VALID, installUrl: '', itmsUrl: '' })).toBeNull();
+  });
+  it('非对象 → null', () => {
+    expect(parseLatestRelease(null)).toBeNull();
+    expect(parseLatestRelease('x')).toBeNull();
+  });
+});
+
+describe('compareVersions', () => {
+  it('语义化比较', () => {
+    expect(compareVersions('1.0.0', '1.0.1')).toBe(-1);
+    expect(compareVersions('1.2.0', '1.2.0')).toBe(0);
+    expect(compareVersions('2.0', '1.9.9')).toBe(1);
+  });
+});
+
+describe('evaluateBundleUpdate', () => {
+  it('runtimeVersion 相同 → 无整包更新(交给 JS OTA)', () => {
+    const r = evaluateBundleUpdate({ currentRuntimeVersion: 'rtv-new', currentVersion: '1.1.0', latest: VALID });
+    expect(r.needsUpdate).toBe(false);
+    expect(r.target).toBeNull();
+  });
+
+  it('runtimeVersion 不同 → 需要整包更新', () => {
+    const r = evaluateBundleUpdate({ currentRuntimeVersion: 'rtv-old', currentVersion: '1.1.0', latest: VALID });
+    expect(r.needsUpdate).toBe(true);
+    expect(r.forced).toBe(false);
+    expect(r.target?.itmsUrl).toBe(VALID.itmsUrl);
+  });
+
+  it('minVersion 高于当前 → 强制', () => {
+    const r = evaluateBundleUpdate({
+      currentRuntimeVersion: 'rtv-old',
+      currentVersion: '1.0.0',
+      latest: { ...VALID, minVersion: '1.2.0' },
+    });
+    expect(r.needsUpdate).toBe(true);
+    expect(r.forced).toBe(true);
+  });
+
+  it('minVersion 不高于当前 → 不强制', () => {
+    const r = evaluateBundleUpdate({
+      currentRuntimeVersion: 'rtv-old',
+      currentVersion: '1.2.0',
+      latest: { ...VALID, minVersion: '1.2.0' },
+    });
+    expect(r.forced).toBe(false);
+  });
+
+  it('拿不到当前 runtimeVersion(dev / 未启用)→ 无更新', () => {
+    expect(evaluateBundleUpdate({ currentRuntimeVersion: null, currentVersion: '1.0.0', latest: VALID }).needsUpdate).toBe(false);
+    expect(evaluateBundleUpdate({ currentRuntimeVersion: '', currentVersion: '1.0.0', latest: VALID }).needsUpdate).toBe(false);
+  });
+
+  it('/latest 无效 → 无更新', () => {
+    expect(evaluateBundleUpdate({ currentRuntimeVersion: 'rtv-old', currentVersion: '1.0.0', latest: {} }).needsUpdate).toBe(false);
+  });
+});
+
+describe('preferredInstallUrl', () => {
+  it('优先 itms,回退 installUrl', () => {
+    expect(preferredInstallUrl(VALID)).toBe(VALID.itmsUrl);
+    expect(preferredInstallUrl({ installUrl: 'https://web' })).toBe('https://web');
+    expect(preferredInstallUrl({})).toBeNull();
+  });
+});

@@ -1,0 +1,1141 @@
+import { describe, expect, it, beforeEach, vi } from 'vitest';
+
+import type { AgentEvent, SessionSendResult } from '@cindy/maker-core';
+
+import { GoalController, decideNextGoalState, deriveObjectiveFromAnswers, questionsLookLikeGoalClarification, type TurnOutcome, type GoalCounters } from '../controller';
+import { buildContinuationDirective, buildFirstTurnDirective } from '../directive';
+import type {
+  AccountLimitInfo,
+  GoalCompletionSummary,
+  GoalControllerDeps,
+  GoalLimits,
+  GoalState,
+  GoalStatusUpdate,
+  GoalStorageLike,
+  SessionLike,
+} from '../types';
+
+// ── decideNextGoalState (pure) ───────────────────────────────────────────────
+
+const BASE: GoalCounters = {
+  status: 'active',
+  turnsUsed: 0,
+  tokensUsed: 0,
+  noProgressStreak: 0,
+  budgetTokens: null,
+  maxTurns: null,
+  noProgressLimit: null,
+};
+
+function outcome(partial: Partial<TurnOutcome>): TurnOutcome {
+  return {
+    origin: 'goal',
+    sawToolUse: true,
+    tokensThisTurn: 0,
+    verdict: null,
+    errored: false,
+    ...partial,
+  };
+}
+
+describe('decideNextGoalState', () => {
+  it('pauses when a non-goal (user) turn finishes', () => {
+    const d = decideNextGoalState(BASE, outcome({ origin: 'other' }));
+    expect(d.status).toBe('paused');
+    expect(d.shouldFire).toBe(false);
+    expect(d.turnsUsed).toBe(0); // user turn does not count toward goal turns
+  });
+
+  it('blocks on a terminal error', () => {
+    const d = decideNextGoalState(BASE, outcome({ errored: true, errorMessage: 'boom' }));
+    expect(d.status).toBe('blocked');
+    expect(d.shouldFire).toBe(false);
+    expect(d.lastReason).toContain('boom');
+  });
+
+  it('pauses (not blocks) when the turn was aborted by the user', () => {
+    const d = decideNextGoalState(BASE, outcome({ errored: true, errorMessage: 'AbortError: aborted' }));
+    expect(d.status).toBe('paused');
+    expect(d.shouldFire).toBe(false);
+  });
+
+  it('marks usageLimited (not blocked) on a usage-limit error', () => {
+    const d = decideNextGoalState(BASE, outcome({ errored: true, errorKind: 'usage_limit', errorMessage: 'rate limit' }));
+    expect(d.status).toBe('usageLimited');
+    expect(d.shouldFire).toBe(false);
+  });
+
+  it('completes on a complete verdict', () => {
+    const d = decideNextGoalState(BASE, outcome({ verdict: { status: 'complete', reason: 'done' } }));
+    expect(d.status).toBe('complete');
+    expect(d.shouldFire).toBe(false);
+  });
+
+  it('blocks on a blocked verdict', () => {
+    const d = decideNextGoalState(BASE, outcome({ verdict: { status: 'blocked', reason: 'need key' } }));
+    expect(d.status).toBe('blocked');
+    expect(d.shouldFire).toBe(false);
+  });
+
+  it('continues + fires on a continue verdict', () => {
+    const d = decideNextGoalState(BASE, outcome({ verdict: { status: 'continue', reason: 'wip' } }));
+    expect(d.status).toBe('active');
+    expect(d.shouldFire).toBe(true);
+    expect(d.turnsUsed).toBe(1);
+  });
+
+  it('treats a missing verdict as continue', () => {
+    const d = decideNextGoalState(BASE, outcome({ verdict: null }));
+    expect(d.status).toBe('active');
+    expect(d.shouldFire).toBe(true);
+  });
+
+  // ── token budget guard (仅设了预算时生效) ──
+  it('stops at the token budget when budgetTokens is set', () => {
+    const prev: GoalCounters = { ...BASE, tokensUsed: 900, budgetTokens: 1000 };
+    const d = decideNextGoalState(prev, outcome({ verdict: { status: 'continue', reason: '' }, tokensThisTurn: 150 }));
+    expect(d.tokensUsed).toBe(1050);
+    expect(d.status).toBe('budgetLimited');
+    expect(d.shouldFire).toBe(false);
+    expect(d.lastReason).toContain('token budget');
+  });
+
+  it('never hits budgetLimited when budgetTokens is null', () => {
+    const prev: GoalCounters = { ...BASE, tokensUsed: 5_000_000, budgetTokens: null };
+    const d = decideNextGoalState(prev, outcome({ verdict: { status: 'continue', reason: '' }, tokensThisTurn: 9_999_999 }));
+    expect(d.status).toBe('active');
+    expect(d.shouldFire).toBe(true);
+  });
+
+  // ── max turns guard (仅设了 maxTurns 时生效) ──
+  it('stops at max turns when maxTurns is set', () => {
+    const prev: GoalCounters = { ...BASE, turnsUsed: 9, maxTurns: 10 };
+    const d = decideNextGoalState(prev, outcome({ verdict: { status: 'continue', reason: '' } }));
+    expect(d.turnsUsed).toBe(10);
+    expect(d.status).toBe('budgetLimited');
+    expect(d.lastReason).toContain('max turns');
+  });
+
+  it('has no turn cap when maxTurns is null — continues past arbitrarily many turns', () => {
+    const prev: GoalCounters = { ...BASE, turnsUsed: 999, maxTurns: null };
+    const d = decideNextGoalState(prev, outcome({ verdict: { status: 'continue', reason: '' } }));
+    expect(d.turnsUsed).toBe(1000);
+    expect(d.status).toBe('active');
+    expect(d.shouldFire).toBe(true);
+  });
+
+  // ── empty-turn (noProgress) guard (仅设了 noProgressLimit 时生效) ──
+  it('increments no-progress streak on empty turns and pauses at noProgressLimit', () => {
+    const prev: GoalCounters = { ...BASE, noProgressStreak: 2, noProgressLimit: 3 };
+    const d = decideNextGoalState(prev, outcome({ sawToolUse: false, verdict: { status: 'continue', reason: '' } }));
+    expect(d.noProgressStreak).toBe(3);
+    expect(d.status).toBe('paused');
+    expect(d.shouldFire).toBe(false);
+  });
+
+  it('resets no-progress streak when a turn uses tools', () => {
+    const prev: GoalCounters = { ...BASE, noProgressStreak: 2, noProgressLimit: 3 };
+    const d = decideNextGoalState(prev, outcome({ sawToolUse: true, verdict: { status: 'continue', reason: '' } }));
+    expect(d.noProgressStreak).toBe(0);
+    expect(d.status).toBe('active');
+  });
+
+  it('never pauses on empty turns when noProgressLimit is null', () => {
+    const prev: GoalCounters = { ...BASE, noProgressStreak: 50, noProgressLimit: null };
+    const d = decideNextGoalState(prev, outcome({ sawToolUse: false, verdict: { status: 'continue', reason: '' } }));
+    expect(d.status).toBe('active');
+    expect(d.shouldFire).toBe(true);
+  });
+});
+
+// ── deriveObjectiveFromAnswers (pure, Option B) ──────────────────────────────
+describe('deriveObjectiveFromAnswers', () => {
+  it('returns the single answer for a clean single-question single-select', () => {
+    expect(deriveObjectiveFromAnswers({ '你想做什么?': '整理工作环境' })).toBe('整理工作环境');
+  });
+  it('returns null for multiple questions (ambiguous)', () => {
+    expect(deriveObjectiveFromAnswers({ q1: 'a', q2: 'b' })).toBeNull();
+  });
+  it('returns null when all answers are empty / skipped', () => {
+    expect(deriveObjectiveFromAnswers({ q1: '   ', q2: '' })).toBeNull();
+    expect(deriveObjectiveFromAnswers({})).toBeNull();
+  });
+  it('returns null for a multi-select (JSON array) answer', () => {
+    expect(deriveObjectiveFromAnswers({ q: '["a","b"]' })).toBeNull();
+  });
+  it('handles null / non-object', () => {
+    expect(deriveObjectiveFromAnswers(null)).toBeNull();
+    expect(deriveObjectiveFromAnswers(undefined)).toBeNull();
+  });
+});
+
+// ── questionsLookLikeGoalClarification (pure, Option B 确定性标记) ─────────────
+describe('questionsLookLikeGoalClarification', () => {
+  it('is true when some option label equals the current objective verbatim', () => {
+    expect(
+      questionsLookLikeGoalClarification(
+        [{ options: [{ label: '想想' }, { label: '整理工作环境' }] }],
+        '想想',
+      ),
+    ).toBe(true);
+  });
+  it('matches with surrounding whitespace trimmed on both sides', () => {
+    expect(questionsLookLikeGoalClarification([{ options: [{ label: '  想想 ' }] }], ' 想想 ')).toBe(true);
+  });
+  it('is false for an arbitrary work question (no verbatim-goal option)', () => {
+    expect(
+      questionsLookLikeGoalClarification(
+        [{ options: [{ label: 'staging' }, { label: 'prod' }] }],
+        '修复登录 bug',
+      ),
+    ).toBe(false);
+  });
+  it('is false for missing / empty questions or empty objective', () => {
+    expect(questionsLookLikeGoalClarification(undefined, '想想')).toBe(false);
+    expect(questionsLookLikeGoalClarification([], '想想')).toBe(false);
+    expect(questionsLookLikeGoalClarification([{ options: [{ label: '想想' }] }], '   ')).toBe(false);
+    expect(questionsLookLikeGoalClarification([{}], '想想')).toBe(false);
+  });
+});
+
+// ── GoalController (integration with fakes) ──────────────────────────────────
+
+class FakeSession implements SessionLike {
+  readonly id: string;
+  readonly agentKind: SessionLike['agentKind'];
+  readonly sends: Array<{ content: string; originKind?: string }> = [];
+  private listener: ((event: AgentEvent) => void) | null = null;
+  running = false;
+
+  constructor(id: string, agentKind: SessionLike['agentKind'] = 'claude-code') {
+    this.id = id;
+    this.agentKind = agentKind;
+  }
+
+  async send(
+    message: { type: 'user'; content: string } | string,
+    opts?: { origin?: { kind?: string } },
+  ): Promise<SessionSendResult> {
+    const content = typeof message === 'string' ? message : message.content;
+    this.sends.push({ content, originKind: opts?.origin?.kind });
+    return { accepted: true };
+  }
+
+  onEvent(listener: (event: AgentEvent) => void): () => void {
+    this.listener = listener;
+    return () => {
+      if (this.listener === listener) this.listener = null;
+    };
+  }
+
+  isTurnRunning(): boolean {
+    return this.running;
+  }
+
+  async abort(): Promise<void> {
+    this.running = false;
+    this.emit({
+      type: 'error',
+      data: { isTerminal: true, message: 'AbortError: aborted' },
+      source: 'claude-code',
+      turnOrigin: { kind: 'goal' },
+    } as never);
+  }
+
+  emit(event: AgentEvent): void {
+    this.listener?.(event);
+  }
+
+  /** 模拟一整轮 goal turn:可选 tool_use → text(含裁决) → status(tokens) → done(origin)。 */
+  emitGoalTurn(opts: { toolUse?: boolean; verdictJson?: string; tokens?: number; origin?: 'goal' | 'user' }): void {
+    const originKind = opts.origin ?? 'goal';
+    if (opts.toolUse) {
+      this.emit({ type: 'tool_use', data: { name: 'Bash' } });
+    }
+    if (opts.verdictJson) {
+      this.emit({ type: 'text', data: { text: opts.verdictJson, isFinal: true } });
+    }
+    this.emit({ type: 'status', data: { isRunning: false, tokenUsage: opts.tokens ?? 0 } });
+    this.emit({ type: 'done', data: {}, turnOrigin: { kind: originKind } as never });
+  }
+
+  /** 模拟一轮以终止型 error 收尾的 goal turn(turnOrigin 同 done,见 session.ts:524)。 */
+  emitErrorTurn(data: Record<string, unknown>): void {
+    this.emit({
+      type: 'error',
+      data: { isTerminal: true, ...data },
+      source: 'claude-code',
+      turnOrigin: { kind: 'goal' },
+    } as never);
+  }
+}
+
+class FakeStorage implements GoalStorageLike {
+  private rows = new Map<string, GoalState>();
+  async get(sessionId: string): Promise<GoalState | null> {
+    return this.rows.get(sessionId) ?? null;
+  }
+  async upsert(state: GoalState): Promise<void> {
+    this.rows.set(state.sessionId, { ...state });
+  }
+  async update(sessionId: string, patch: Partial<GoalState>): Promise<GoalState | null> {
+    const existing = this.rows.get(sessionId);
+    if (!existing) return null;
+    const next = { ...existing, ...patch };
+    this.rows.set(sessionId, next);
+    return { ...next };
+  }
+  async clear(sessionId: string): Promise<void> {
+    this.rows.delete(sessionId);
+  }
+  async listActive(): Promise<GoalState[]> {
+    return [...this.rows.values()].filter((s) => s.status === 'active');
+  }
+  async listUsageLimited(): Promise<GoalState[]> {
+    return [...this.rows.values()].filter((s) => s.status === 'usageLimited');
+  }
+
+  async set(state: GoalState): Promise<void> {
+    this.rows.set(state.sessionId, { ...state });
+  }
+}
+
+// 让 finalizeTurn(async)→ scheduleContinuation(setTimeout 0)→ fireTurn(async)整条链 drain。
+const tick = () => new Promise((r) => setTimeout(r, 10));
+
+const DEFAULT_LIMITS: GoalLimits = { maxTurns: 20, budgetTokens: null, noProgressLimit: 3 };
+
+function makeController(depOverrides: Partial<GoalControllerDeps> = {}) {
+  const storage = new FakeStorage();
+  const session = new FakeSession('s1');
+  const updates: GoalStatusUpdate[] = [];
+  const completions: Array<{ sessionId: string; summary: GoalCompletionSummary }> = [];
+  const persistedLimits: GoalLimits[] = [];
+  const notices: Array<{ sessionId: string; kind: string }> = [];
+  const userMessages: Array<{ sessionId: string; content: string; updated?: boolean }> = [];
+  // 可变:测试按需设置"账号是否受限 + resetAt"。
+  let accountLimit: AccountLimitInfo | null = null;
+  const deps: GoalControllerDeps = {
+    storage,
+    getSession: (id) => (id === 's1' ? session : undefined),
+    ensureSession: async (id) => (id === 's1' ? session : undefined),
+    isSessionInTurn: () => false,
+    emitStatus: (u) => updates.push(u),
+    getDefaults: () => ({ ...DEFAULT_LIMITS }),
+    persistGoalSettingsOverride: (l) => persistedLimits.push(l),
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    now: () => 1000,
+    continuationDebounceMs: 0,
+    persistGoalCompletion: async (sessionId, summary) => {
+      completions.push({ sessionId, summary });
+    },
+    getAccountLimit: async () => accountLimit,
+    persistGoalNotice: async (sessionId, kind) => {
+      notices.push({ sessionId, kind });
+    },
+    persistUserMessage: async (sessionId, content, opts) => {
+      userMessages.push({ sessionId, content, updated: opts?.goalObjective?.updated });
+    },
+    ...depOverrides,
+  };
+  const controller = new GoalController(deps);
+  return {
+    controller,
+    storage,
+    session,
+    updates,
+    completions,
+    persistedLimits,
+    notices,
+    userMessages,
+    setAccountLimit: (v: AccountLimitInfo | null) => {
+      accountLimit = v;
+    },
+  };
+}
+
+function seededGoal(partial: Partial<GoalState> = {}): GoalState {
+  return {
+    sessionId: 's1',
+    objective: 'old objective',
+    status: 'active',
+    budgetTokens: null,
+    maxTurns: null,
+    noProgressLimit: null,
+    turnsUsed: 0,
+    tokensUsed: 0,
+    noProgressStreak: 0,
+    usageResetAt: null,
+    lastReason: null,
+    agentKind: 'claude-code',
+    startedAt: 100,
+    updatedAt: 100,
+    ...partial,
+  };
+}
+
+function startGoal(h: ReturnType<typeof makeController>, objective = 'make tests pass'): Promise<GoalState | null> {
+  return h.controller.setGoal({ sessionId: 's1', objective, agentKind: 'claude-code' });
+}
+
+describe('GoalController', () => {
+  let h: ReturnType<typeof makeController>;
+  beforeEach(() => {
+    h = makeController();
+  });
+
+  // ── setGoal / updateGoal ──
+  it('setGoal creates a new goal directly with default limits and fires the first turn', async () => {
+    await h.controller.setGoal({ sessionId: 's1', objective: 'ship the feature' });
+    const st = await h.storage.get('s1');
+    expect(st?.status).toBe('active');
+    expect(st?.objective).toBe('ship the feature');
+    expect(st?.turnsUsed).toBe(0);
+    expect(st?.maxTurns).toBe(DEFAULT_LIMITS.maxTurns);
+    expect(st?.budgetTokens).toBe(DEFAULT_LIMITS.budgetTokens);
+    expect(st?.noProgressLimit).toBe(DEFAULT_LIMITS.noProgressLimit);
+    expect(h.session.sends).toHaveLength(1);
+    expect(h.session.sends[0].content).toContain('[Goal] Work autonomously toward this goal');
+    expect(h.session.sends[0].content).toContain('ship the feature');
+    expect(h.session.sends[0].content).toContain('goal_status');
+    expect(h.session.sends[0].content).not.toContain('goal_setup');
+    expect(h.persistedLimits).toHaveLength(0);
+  });
+
+  it('applies a deferred agent switch before Goal sends and uses the refreshed live session', async () => {
+    const oldSession = new FakeSession('s1', 'claude-code');
+    const switchedSession = new FakeSession('s1', 'codex');
+    let live = oldSession;
+    const applyPendingAgentSwitch = vi.fn(async () => {
+      live = switchedSession;
+    });
+    const local = makeController({
+      getSession: () => live,
+      ensureSession: async () => live,
+      applyPendingAgentSwitch,
+    });
+
+    await local.controller.setGoal({
+      sessionId: 's1',
+      objective: 'continue on the selected engine',
+      agentKind: 'claude-code',
+    });
+
+    expect(applyPendingAgentSwitch).toHaveBeenCalledWith('s1');
+    expect(oldSession.sends).toHaveLength(0);
+    expect(switchedSession.sends).toHaveLength(1);
+    expect(switchedSession.sends[0].originKind).toBe('goal');
+  });
+
+  it('migrates the Goal listener to the switched session so the new engine turn can finalize (reviewer P1)', async () => {
+    const oldSession = new FakeSession('s1', 'claude-code');
+    const switchedSession = new FakeSession('s1', 'codex');
+    let live: FakeSession = oldSession;
+    // deferred switch commit:关旧 live session + spawn 目标引擎 → maker.getSession 换新对象。
+    const applyPendingAgentSwitch = vi.fn(async () => {
+      live = switchedSession;
+    });
+    const local = makeController({
+      getSession: () => live,
+      ensureSession: async () => live,
+      applyPendingAgentSwitch,
+    });
+
+    // setGoal 先在 oldSession 上挂 listener,首轮 fireTurn 落实切换 → listener 必须迁到 switchedSession。
+    await local.controller.setGoal({
+      sessionId: 's1',
+      objective: 'finish on the new engine',
+      agentKind: 'claude-code',
+    });
+    expect(switchedSession.sends).toHaveLength(1);
+
+    // 旧引擎已关闭并 detach:往旧 session 发终止事件不应再推进目标(否则说明 listener 没迁走)。
+    oldSession.emitGoalTurn({
+      toolUse: true,
+      verdictJson: '```json\n{"goal_status":"complete","reason":"stale"}\n```',
+      tokens: 7,
+    });
+    await tick();
+    expect(local.completions).toHaveLength(0);
+    expect(await local.storage.get('s1')).not.toBeNull();
+
+    // 新引擎 turn 的 done 事件必须进 finalizeTurn → 目标正常收口,不再永远卡在 active。
+    switchedSession.emitGoalTurn({
+      toolUse: true,
+      verdictJson: '```json\n{"goal_status":"complete","reason":"green"}\n```',
+      tokens: 42,
+    });
+    await tick();
+    expect(local.completions).toHaveLength(1);
+    expect(local.completions[0].summary.reason).toBe('green');
+    expect(await local.storage.get('s1')).toBeNull();
+  });
+
+  it('aborts the git baseline when a goal continuation send is not accepted', async () => {
+    const order: string[] = [];
+    const beforeDispatchUserTurn = vi.fn(async () => {
+      order.push('baseline');
+    });
+    const onUndispatchedUserTurn = vi.fn(() => {
+      order.push('abort');
+    });
+    const local = makeController({
+      beforeDispatchUserTurn,
+      onUndispatchedUserTurn,
+    });
+    vi.spyOn(local.session, 'send').mockImplementation(async (
+      message: Parameters<FakeSession['send']>[0],
+      opts: Parameters<FakeSession['send']>[1],
+    ): Promise<SessionSendResult> => {
+      const content = typeof message === 'string' ? message : message.content;
+      local.session.sends.push({ content, originKind: opts?.origin?.kind });
+      order.push('send');
+      return { accepted: false, reason: 'cancelled-before-dispatch' };
+    });
+
+    await local.controller.setGoal({ sessionId: 's1', objective: 'ship the feature' });
+
+    expect(order).toEqual(['baseline', 'send', 'abort']);
+    expect(beforeDispatchUserTurn).toHaveBeenCalledWith('s1');
+    expect(onUndispatchedUserTurn).toHaveBeenCalledWith('s1');
+    expect(local.session.sends).toHaveLength(1);
+  });
+
+  it('setGoal create resolves agentKind from the ensured (resumed) session for a dormant Codex session (no claude-code fallback)', async () => {
+    // reviewer #354:重启后 dormant —— getSession 返回空,ensureSession 才把 Codex 会话 resume 出来。
+    // /goal 命令与 setGoal IPC 都可能不带 agentKind,必须从活化后的会话推导,否则会错存成 claude-code
+    // → getAccountLimit 读错账号配额快照。
+    const storage = new FakeStorage();
+    const codexSession = new FakeSession('s1', 'codex');
+    const deps: GoalControllerDeps = {
+      storage,
+      getSession: () => undefined, // dormant:此刻没有 live session
+      ensureSession: async () => codexSession, // resume 出真正的 Codex 会话
+      isSessionInTurn: () => false,
+      emitStatus: () => {},
+      getDefaults: () => ({ ...DEFAULT_LIMITS }),
+      persistGoalSettingsOverride: () => {},
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      now: () => 1000,
+      continuationDebounceMs: 0,
+      persistGoalCompletion: async () => {},
+      getAccountLimit: async () => null,
+      persistGoalNotice: async () => {},
+      persistUserMessage: async () => {},
+    };
+    const controller = new GoalController(deps);
+    await controller.setGoal({ sessionId: 's1', objective: '修一修' }); // 不带 agentKind
+    expect((await storage.get('s1'))?.agentKind).toBe('codex');
+  });
+
+  it('setGoal edits an existing goal directly, preserves counters/start, resets streak, and fires continuation', async () => {
+    await h.storage.set(seededGoal({
+      objective: 'previous objective',
+      maxTurns: 10,
+      budgetTokens: 1000,
+      noProgressLimit: 3,
+      turnsUsed: 3,
+      tokensUsed: 400,
+      noProgressStreak: 2,
+      startedAt: 123,
+      status: 'paused',
+      usageResetAt: 999,
+    }));
+    await h.controller.setGoal({ sessionId: 's1', objective: 'new objective' });
+    const st = await h.storage.get('s1');
+    expect(st?.objective).toBe('new objective');
+    expect(st?.status).toBe('active');
+    expect(st?.maxTurns).toBe(10);
+    expect(st?.budgetTokens).toBe(1000);
+    expect(st?.noProgressLimit).toBe(3);
+    expect(st?.turnsUsed).toBe(3);
+    expect(st?.tokensUsed).toBe(400);
+    expect(st?.startedAt).toBe(123);
+    expect(st?.noProgressStreak).toBe(0);
+    expect(st?.usageResetAt).toBeNull();
+    expect(h.session.sends).toHaveLength(1);
+    expect(h.session.sends[0].content).toContain('new objective');
+    expect(h.session.sends[0].content).toContain('[Goal] Continue working toward this goal');
+    expect(h.persistedLimits).toHaveLength(0);
+  });
+
+  it('buildFirstTurnDirective tells the agent to use AskUserQuestion when concerned, mentions the budget, and keeps a blocked fallback', () => {
+    const text = buildFirstTurnDirective('do the thing', { maxTurns: 20 });
+    expect(text).toContain('AskUserQuestion');
+    expect(text).toContain('20 turns'); // tells the model the current budget so it can judge it
+    expect(text).toContain('"goal_status":"blocked"');
+    expect(text).toContain('goal_status'); // verdict contract still present
+    expect(text).not.toContain('goal_assessment'); // no custom block anymore
+  });
+
+  it('buildFirstTurnDirective omits the budget line when maxTurns is null', () => {
+    const text = buildFirstTurnDirective('do the thing', { maxTurns: null });
+    expect(text).toContain('AskUserQuestion');
+    expect(text).not.toContain('turn budget');
+  });
+
+  it('buildFirstTurnDirective routes a vague goal to AskUserQuestion and reserves blocked for danger/credential', () => {
+    const text = buildFirstTurnDirective('think about it', { maxTurns: null });
+    // 含糊/开放目标 → 用 AskUserQuestion 确认(而非默默猜或 stall)
+    expect(text).toContain('AskUserQuestion');
+    expect(text.toLowerCase()).toContain('vague');
+    // blocked 仅保留给危险 / 不可逆 / 凭证 / 权限,不因"含糊"就 blocked
+    expect(text).toContain('credential');
+    expect(text).toContain('never a reason to block');
+  });
+
+  it('首轮裁决块模板带 refined_objective 字段;续轮不带', () => {
+    // 关键:refined_objective 必须长在"end with EXACTLY this block"的模板里,模型才会可靠带上。
+    const first = buildFirstTurnDirective('think about it', { maxTurns: null });
+    expect(first).toContain('"refined_objective"');
+    const cont = buildContinuationDirective('think about it', null);
+    expect(cont).not.toContain('refined_objective');
+    expect(cont).toContain('goal_status'); // 续轮仍有裁决块
+  });
+
+  it('updateGoal changes objective on an active goal without changing counters or firing an extra turn', async () => {
+    await h.storage.set(seededGoal({ status: 'active', objective: 'old objective', turnsUsed: 2, tokensUsed: 100 }));
+    await h.controller.updateGoal('s1', { objective: 'updated objective' });
+    const st = await h.storage.get('s1');
+    expect(st?.objective).toBe('updated objective');
+    expect(st?.status).toBe('active');
+    expect(st?.turnsUsed).toBe(2);
+    expect(st?.tokensUsed).toBe(100);
+    expect(h.session.sends).toHaveLength(0);
+  });
+
+  it('updateGoal resumes a paused goal when the objective changes', async () => {
+    await h.storage.set(seededGoal({
+      status: 'paused',
+      objective: 'old objective',
+      turnsUsed: 2,
+      tokensUsed: 100,
+      noProgressStreak: 2,
+      lastReason: 'paused',
+    }));
+    await h.controller.updateGoal('s1', { objective: 'updated objective' });
+    const st = await h.storage.get('s1');
+    expect(st?.objective).toBe('updated objective');
+    expect(st?.status).toBe('active');
+    expect(st?.turnsUsed).toBe(2);
+    expect(st?.tokensUsed).toBe(100);
+    expect(st?.noProgressStreak).toBe(0);
+    expect(st?.lastReason).toBeNull();
+    expect(h.session.sends).toHaveLength(1);
+    expect(h.session.sends[0].content).toContain('[Goal] Continue working toward this goal');
+    expect(h.session.sends[0].content).toContain('updated objective');
+  });
+
+  it('updateGoal does not resume a paused goal when only limits change', async () => {
+    await h.storage.set(seededGoal({ status: 'paused', objective: 'same objective', maxTurns: 5 }));
+    await h.controller.updateGoal('s1', { maxTurns: 8 });
+    await tick();
+    const st = await h.storage.get('s1');
+    expect(st?.status).toBe('paused');
+    expect(st?.maxTurns).toBe(8);
+    expect(h.session.sends).toHaveLength(0);
+  });
+
+  it('updateGoal resumes a usageLimited goal when the objective changes', async () => {
+    await h.storage.set(seededGoal({
+      status: 'usageLimited',
+      objective: 'old objective',
+      usageResetAt: 5_000,
+      noProgressStreak: 2,
+      lastReason: 'usage limit reached',
+    }));
+    await h.controller.updateGoal('s1', { objective: 'updated after usage limit' });
+    const st = await h.storage.get('s1');
+    expect(st?.objective).toBe('updated after usage limit');
+    expect(st?.status).toBe('active');
+    expect(st?.usageResetAt).toBeNull();
+    expect(st?.noProgressStreak).toBe(0);
+    expect(st?.lastReason).toBeNull();
+    expect(h.session.sends).toHaveLength(1);
+    expect(h.session.sends[0].content).toContain('updated after usage limit');
+  });
+
+  // ── active-goal lifecycle ──
+  it('setGoal persists active state and fires the first turn (goal origin)', async () => {
+    await startGoal(h);
+    expect((await h.storage.get('s1'))?.status).toBe('active');
+    expect(h.session.sends).toHaveLength(1);
+    expect(h.session.sends[0].originKind).toBe('goal');
+    expect(h.session.sends[0].content).toContain('make tests pass');
+    expect(h.session.sends[0].content).toContain('goal_status');
+  });
+
+  it('does not drop the first turn when the session is busy at creation — retries until idle and still fires as a FIRST turn', async () => {
+    // 新建会话后 agent 可能仍在 spawn/init,isTurnRunning() 瞬时为真。
+    h.session.running = true;
+    await startGoal(h, 'think about it');
+    // 首轮撞 busy:不发送,但已重排重试(旧实现会直接丢弃首轮 → 目标卡死)。
+    await tick(); // 重试 tick:仍 busy → 再次重排,不发送
+    expect(h.session.sends).toHaveLength(0);
+    expect((await h.storage.get('s1'))?.status).toBe('active');
+    expect((await h.storage.get('s1'))?.turnsUsed).toBe(0);
+    // 会话空闲后,重试应发出首轮(buildFirstTurnDirective:含 AskUserQuestion 约定),而非续轮。
+    h.session.running = false;
+    await tick();
+    expect(h.session.sends).toHaveLength(1);
+    expect(h.session.sends[0].content).toContain('[Goal] Work autonomously toward this goal');
+    expect(h.session.sends[0].content).toContain('AskUserQuestion');
+    expect(h.session.sends[0].content).not.toContain('[Goal] Continue working toward this goal');
+    // #3 回归:目标文案只在创建时落一次,busy 重试重发首轮不得重复落库。
+    expect(h.userMessages.filter((m) => m.content === 'think about it').length).toBe(1);
+  });
+
+  it('continues to a second turn when the verdict is continue', async () => {
+    await startGoal(h);
+    h.session.emitGoalTurn({ toolUse: true, verdictJson: '```json\n{"goal_status":"continue","reason":"wip"}\n```', tokens: 100 });
+    await tick();
+    expect(h.session.sends).toHaveLength(2);
+    expect((await h.storage.get('s1'))?.turnsUsed).toBe(1);
+    expect((await h.storage.get('s1'))?.tokensUsed).toBe(100);
+  });
+
+  it('rewrites the objective when a goal turn reports refined_objective, persists an updated marker, and continues with the new goal', async () => {
+    await startGoal(h, 'think about it');
+    const sendsAfterFirst = h.session.sends.length; // 首轮已发
+    h.session.emitGoalTurn({
+      toolUse: true,
+      verdictJson:
+        '```json\n{"goal_status":"continue","reason":"clarified with user","refined_objective":"梳理当前工作:列出待办并标注优先级"}\n```',
+      tokens: 50,
+    });
+    await tick();
+    const st = await h.storage.get('s1');
+    expect(st?.objective).toBe('梳理当前工作:列出待办并标注优先级'); // 目标被确定性改写
+    expect(st?.status).toBe('active');
+    expect(st?.turnsUsed).toBe(1);
+    // 落了一条「目标已更新」标记(updated:true),内容是改写后的目标
+    expect(
+      h.userMessages.some((m) => m.updated === true && m.content === '梳理当前工作:列出待办并标注优先级'),
+    ).toBe(true);
+    // 续轮已发,且用的是改写后的目标
+    expect(h.session.sends.length).toBe(sendsAfterFirst + 1);
+    expect(h.session.sends.at(-1)?.content).toContain('梳理当前工作:列出待办并标注优先级');
+  });
+
+  it('does not let refined_objective overwrite a goal already clarified instantly by Option B (no double change)', async () => {
+    await startGoal(h, '想想');
+    // B 即时改写:这次 AskUserQuestion 的选项含原目标「想想」verbatim → 确认是目标澄清问题。
+    await h.controller.applyClarificationAnswer('s1', { q: '整理工作环境' }, [
+      { options: [{ label: '想想' }, { label: '整理工作环境' }] },
+    ]);
+    expect((await h.storage.get('s1'))?.objective).toBe('整理工作环境');
+    const markersAfterB = h.userMessages.filter((m) => m.updated === true).length;
+    // 回合末模型又回报了一个不同的 refined_objective → 因 B 已澄清,C 不再改写(避免二次跳变)。
+    h.session.emitGoalTurn({
+      toolUse: true,
+      verdictJson:
+        '```json\n{"goal_status":"continue","reason":"x","refined_objective":"整理并归档所有 worktree"}\n```',
+      tokens: 10,
+    });
+    await tick();
+    expect((await h.storage.get('s1'))?.objective).toBe('整理工作环境'); // 仍是 B 的值,未被 C 覆盖
+    expect(h.userMessages.filter((m) => m.updated === true).length).toBe(markersAfterB); // 无新增标记
+  });
+
+  it('does not rewrite the objective when refined_objective equals the current goal', async () => {
+    await startGoal(h, 'ship the feature');
+    const markersBefore = h.userMessages.filter((m) => m.updated === true).length;
+    h.session.emitGoalTurn({
+      toolUse: true,
+      verdictJson: '```json\n{"goal_status":"continue","reason":"no change","refined_objective":"ship the feature"}\n```',
+      tokens: 10,
+    });
+    await tick();
+    expect((await h.storage.get('s1'))?.objective).toBe('ship the feature');
+    // 相同目标 → 不落额外的更新标记
+    expect(h.userMessages.filter((m) => m.updated === true).length).toBe(markersBefore);
+  });
+
+  it('enforces a per-goal maxTurns set at activation', async () => {
+    await startGoal(h);
+    await h.controller.updateGoal('s1', { maxTurns: 1 });
+    // 第一轮 continue → turnsUsed 到 1 == maxTurns 1 → budgetLimited,不再续
+    h.session.emitGoalTurn({ toolUse: true, verdictJson: '```json\n{"goal_status":"continue","reason":"wip"}\n```' });
+    await tick();
+    expect((await h.storage.get('s1'))?.status).toBe('budgetLimited');
+    expect(h.session.sends).toHaveLength(1); // 无续轮
+  });
+
+  it('Codex goal turn counts per-turn done.data.usage, not the cumulative status snapshot, against the token budget', async () => {
+    await startGoal(h);
+    // 模拟 Codex 一轮:status 带"累积上下文快照"(大),done 带 per-turn 真实量(小)。
+    h.session.emit({ type: 'tool_use', data: { name: 'Bash' } } as never);
+    h.session.emit({ type: 'text', data: { text: '```json\n{"goal_status":"continue","reason":"wip"}\n```', isFinal: true } } as never);
+    h.session.emit({ type: 'status', data: { status: 'Done', isRunning: false, tokenUsage: 100000 } } as never);
+    h.session.emit({
+      type: 'done',
+      data: { type: 'codex/event/task_complete', usage: { promptTokens: 200, completionTokens: 50, reasoningTokens: 0, cachedTokens: 10 } },
+      turnOrigin: { kind: 'goal' },
+    } as never);
+    await tick();
+    // 取 per-turn 的 200+50=250,而不是 status 的 100000 累积快照。
+    expect((await h.storage.get('s1'))?.tokensUsed).toBe(250);
+  });
+
+  it('Claude goal turn (no per-turn usage on done) keeps the per-turn status.tokenUsage', async () => {
+    await startGoal(h);
+    h.session.emit({ type: 'tool_use', data: { name: 'Bash' } } as never);
+    h.session.emit({ type: 'text', data: { text: '```json\n{"goal_status":"continue","reason":"wip"}\n```', isFinal: true } } as never);
+    h.session.emit({ type: 'status', data: { status: 'Done', isRunning: false, tokenUsage: 777 } } as never);
+    // Claude done.data 是 SDKResultMessage(无 promptTokens/completionTokens)→ 不覆盖,沿用 status。
+    h.session.emit({ type: 'done', data: { usage: { input_tokens: 700, output_tokens: 77 } }, turnOrigin: { kind: 'goal' } } as never);
+    await tick();
+    expect((await h.storage.get('s1'))?.tokensUsed).toBe(777);
+  });
+
+  it('on complete: persists a completion record, clears the row, emits null, no continuation', async () => {
+    await startGoal(h);
+    h.session.emitGoalTurn({ toolUse: true, verdictJson: '```json\n{"goal_status":"complete","reason":"green"}\n```', tokens: 42 });
+    await tick();
+    expect(await h.storage.get('s1')).toBeNull();
+    expect(h.completions).toHaveLength(1);
+    expect(h.completions[0]).toMatchObject({ sessionId: 's1' });
+    expect(h.completions[0].summary.turnsUsed).toBe(1);
+    expect(h.completions[0].summary.tokensUsed).toBe(42);
+    expect(h.completions[0].summary.reason).toBe('green');
+    expect(h.updates.at(-1)).toEqual({ sessionId: 's1', goal: null });
+    expect(h.session.sends).toHaveLength(1); // no continuation
+  });
+
+  it('pauseGoal pauses an active goal, preserves counters, and stops continuation', async () => {
+    await startGoal(h);
+    h.session.emitGoalTurn({ toolUse: true, verdictJson: '```json\n{"goal_status":"continue","reason":"wip"}\n```', tokens: 50 });
+    await tick();
+    await h.controller.pauseGoal('s1');
+    const st = await h.storage.get('s1');
+    expect(st?.status).toBe('paused');
+    expect(st?.turnsUsed).toBe(1);
+    expect(st?.tokensUsed).toBe(50);
+    const sendsAfterPause = h.session.sends.length;
+    h.session.emitGoalTurn({ toolUse: true, verdictJson: '```json\n{"goal_status":"continue","reason":"x"}\n```' });
+    await tick();
+    expect(h.session.sends.length).toBe(sendsAfterPause);
+  });
+
+  it('resumeGoal resumes a paused goal: preserves counters, fires a continuation', async () => {
+    await startGoal(h);
+    h.session.emitGoalTurn({ verdictJson: '```json\n{"goal_status":"continue","reason":""}\n```', tokens: 30 });
+    await tick();
+    await h.controller.pauseGoal('s1');
+    const sendsBeforeResume = h.session.sends.length;
+    await h.controller.resumeGoal('s1');
+    const st = await h.storage.get('s1');
+    expect(st?.status).toBe('active');
+    expect(st?.turnsUsed).toBe(1);
+    expect(st?.tokensUsed).toBe(30);
+    expect(st?.noProgressStreak).toBe(0);
+    expect(h.session.sends.length).toBe(sendsBeforeResume + 1);
+  });
+
+  it('resumeGoal is a no-op for a non-paused/blocked goal (e.g. active)', async () => {
+    await startGoal(h);
+    const sends = h.session.sends.length;
+    await h.controller.resumeGoal('s1');
+    expect(h.session.sends.length).toBe(sends);
+  });
+
+  it('resumeOnOpen activates a dormant active goal (attach + fire) when the conversation is opened', async () => {
+    // 模拟重启后 dormant:有 active 目标行,但没挂 listener、没 fire。
+    await h.storage.set(seededGoal({ status: 'active', objective: 'keep going', turnsUsed: 0 }));
+    expect(h.session.sends).toHaveLength(0);
+    await h.controller.resumeOnOpen('s1');
+    expect(h.session.sends.length).toBeGreaterThanOrEqual(1); // 已活化并续了一轮
+    expect(h.session.sends.at(-1)?.content).toContain('keep going');
+  });
+
+  it('resumeOnOpen is a no-op for non-active goals and for goals already being managed', async () => {
+    // paused → 不自动续(走手动 resume)
+    await h.storage.set(seededGoal({ status: 'paused', objective: 'p' }));
+    await h.controller.resumeOnOpen('s1');
+    expect(h.session.sends).toHaveLength(0);
+    // active 且已在管(setGoal 已挂 listener + 发首轮)→ resumeOnOpen 不重复 fire
+    const h2 = makeController();
+    await h2.controller.setGoal({ sessionId: 's1', objective: 'managed' });
+    const n = h2.session.sends.length;
+    await h2.controller.resumeOnOpen('s1');
+    expect(h2.session.sends.length).toBe(n);
+  });
+
+  it('maybeContinueActiveGoal fires only when an active goal is attached and idle', async () => {
+    await h.controller.maybeContinueActiveGoal('s1'); // 无 goal → no-op
+    expect(h.session.sends).toHaveLength(0);
+    await startGoal(h);
+    const before = h.session.sends.length;
+    await h.controller.maybeContinueActiveGoal('s1');
+    await tick();
+    expect(h.session.sends.length).toBe(before + 1);
+    await h.controller.pauseGoal('s1');
+    const afterPause = h.session.sends.length;
+    await h.controller.maybeContinueActiveGoal('s1');
+    await tick();
+    expect(h.session.sends.length).toBe(afterPause);
+  });
+
+  it('pauses when a user-origin turn finishes mid-goal', async () => {
+    await startGoal(h);
+    h.session.emitGoalTurn({ origin: 'user', toolUse: true, verdictJson: '' });
+    await tick();
+    expect((await h.storage.get('s1'))?.status).toBe('paused');
+    expect(h.session.sends).toHaveLength(1);
+  });
+
+  // ── applyClarificationAnswer(Option B:答完卡片即时改写目标)──
+  it('applyClarificationAnswer rewrites the objective on the first turn, persists an updated marker, and emits', async () => {
+    await h.storage.set(seededGoal({ status: 'active', objective: '想想', turnsUsed: 0 }));
+    await h.controller.applyClarificationAnswer('s1', { '你想让我做什么?': '整理工作环境' }, [
+      { options: [{ label: '想想' }, { label: '整理工作环境' }] },
+    ]);
+    const st = await h.storage.get('s1');
+    expect(st?.objective).toBe('整理工作环境');
+    expect(h.userMessages.some((m) => m.updated === true && m.content === '整理工作环境')).toBe(true);
+    expect(h.updates.at(-1)?.goal?.objective).toBe('整理工作环境');
+  });
+
+  it('applyClarificationAnswer does NOT rewrite for an arbitrary first-turn work question (no verbatim-goal option)', async () => {
+    // reviewer #354:模型首轮问个普通工作问题(选项是环境名,不含原目标 verbatim)→ 不得被当成目标改写。
+    await h.storage.set(seededGoal({ status: 'active', objective: '修复登录 bug', turnsUsed: 0 }));
+    await h.controller.applyClarificationAnswer('s1', { '用哪个环境?': 'staging' }, [
+      { options: [{ label: 'staging' }, { label: 'prod' }] },
+    ]);
+    expect((await h.storage.get('s1'))?.objective).toBe('修复登录 bug');
+    expect(h.userMessages.some((m) => m.updated === true)).toBe(false);
+    // 标记未被消耗:后续真正的目标澄清问题仍能改写。
+    await h.controller.applyClarificationAnswer('s1', { q: '整理登录模块测试' }, [
+      { options: [{ label: '修复登录 bug' }, { label: '整理登录模块测试' }] },
+    ]);
+    expect((await h.storage.get('s1'))?.objective).toBe('整理登录模块测试');
+  });
+
+  it('applyClarificationAnswer does NOT rewrite once the goal has run a turn (turnsUsed>0)', async () => {
+    await h.storage.set(seededGoal({ status: 'active', objective: '原目标', turnsUsed: 2 }));
+    await h.controller.applyClarificationAnswer('s1', { q: '一个中途的回答' }, [
+      { options: [{ label: '原目标' }, { label: '一个中途的回答' }] },
+    ]);
+    expect((await h.storage.get('s1'))?.objective).toBe('原目标');
+    expect(h.userMessages.some((m) => m.updated === true)).toBe(false);
+  });
+
+  it('applyClarificationAnswer is a no-op when the answer equals the current objective (keep-as-is)', async () => {
+    await h.storage.set(seededGoal({ status: 'active', objective: '想想', turnsUsed: 0 }));
+    await h.controller.applyClarificationAnswer('s1', { q: '想想' }, [
+      { options: [{ label: '想想' }, { label: '整理一下' }] },
+    ]);
+    expect((await h.storage.get('s1'))?.objective).toBe('想想');
+    expect(h.userMessages.some((m) => m.updated === true)).toBe(false);
+  });
+
+  it('applyClarificationAnswer rewrites only ONCE per goal (a second ask on the first turn cannot overwrite)', async () => {
+    await h.storage.set(seededGoal({ status: 'active', objective: '想想', turnsUsed: 0 }));
+    await h.controller.applyClarificationAnswer('s1', { q1: '整理工作环境' }, [
+      { options: [{ label: '想想' }, { label: '整理工作环境' }] },
+    ]);
+    expect((await h.storage.get('s1'))?.objective).toBe('整理工作环境');
+    // 同一轮里模型又问了一个工作型问题 → 不得再覆盖目标(clarificationApplied 已封)
+    await h.controller.applyClarificationAnswer('s1', { q2: '/some/dir' }, [
+      { options: [{ label: '/some/dir' }, { label: '/other' }] },
+    ]);
+    expect((await h.storage.get('s1'))?.objective).toBe('整理工作环境');
+    // setGoal 新建/编辑会重置闸门 → 可再次澄清
+    await h.controller.setGoal({ sessionId: 's1', objective: '新目标' });
+    await h.controller.applyClarificationAnswer('s1', { q: '具体化的新目标' }, [
+      { options: [{ label: '新目标' }, { label: '具体化的新目标' }] },
+    ]);
+    expect((await h.storage.get('s1'))?.objective).toBe('具体化的新目标');
+  });
+
+  it('applyClarificationAnswer is a no-op for a non-active goal', async () => {
+    await h.storage.set(seededGoal({ status: 'paused', objective: '原目标', turnsUsed: 0 }));
+    await h.controller.applyClarificationAnswer('s1', { q: '新方向' }, [
+      { options: [{ label: '原目标' }, { label: '新方向' }] },
+    ]);
+    expect((await h.storage.get('s1'))?.objective).toBe('原目标');
+  });
+
+  it('clearGoal removes the row and emits a null goal', async () => {
+    await startGoal(h);
+    await h.controller.clearGoal('s1');
+    expect(await h.storage.get('s1')).toBeNull();
+    expect(h.updates.at(-1)).toEqual({ sessionId: 's1', goal: null });
+  });
+
+  // ── updateGoal(纯代码改目标 / 上限,不写默认 override) ──
+  it('updateGoal resumes a budgetLimited max-turns goal when the new maxTurns allows more turns', async () => {
+    await h.storage.set(seededGoal({ status: 'budgetLimited', turnsUsed: 5, maxTurns: 5, lastReason: 'max turns reached' }));
+    const updated = await h.controller.updateGoal('s1', { maxTurns: 6 });
+    await tick();
+    expect(updated?.status).toBe('active');
+    expect((await h.storage.get('s1'))?.maxTurns).toBe(6);
+    expect(h.session.sends).toHaveLength(1);
+    expect(h.session.sends[0].content).toContain('[Goal] Continue working toward this goal');
+    expect(h.persistedLimits).toHaveLength(0);
+  });
+
+  it('updateGoal resumes a budgetLimited token-budget goal when the new budget allows more tokens', async () => {
+    await h.storage.set(seededGoal({ status: 'budgetLimited', tokensUsed: 1000, budgetTokens: 1000, lastReason: 'token budget reached' }));
+    await h.controller.updateGoal('s1', { budgetTokens: 1200 });
+    await tick();
+    const st = await h.storage.get('s1');
+    expect(st?.status).toBe('active');
+    expect(st?.budgetTokens).toBe(1200);
+    expect(h.session.sends).toHaveLength(1);
+  });
+
+  it('updateGoal keeps a budgetLimited goal stopped when only the objective changes and limits are still exceeded', async () => {
+    await h.storage.set(seededGoal({
+      status: 'budgetLimited',
+      objective: 'old objective',
+      turnsUsed: 5,
+      maxTurns: 5,
+      lastReason: 'max turns reached',
+    }));
+    await h.controller.updateGoal('s1', { objective: 'new objective' });
+    await tick();
+    const st = await h.storage.get('s1');
+    expect(st?.objective).toBe('new objective');
+    expect(st?.status).toBe('budgetLimited');
+    expect(h.session.sends).toHaveLength(0);
+  });
+
+  it('updateGoal changes active limits without firing an extra turn', async () => {
+    await h.storage.set(seededGoal({ status: 'active', maxTurns: 5 }));
+    await h.controller.updateGoal('s1', { maxTurns: 9, budgetTokens: null });
+    await tick();
+    const st = await h.storage.get('s1');
+    expect(st?.status).toBe('active');
+    expect(st?.maxTurns).toBe(9);
+    expect(st?.budgetTokens).toBeNull();
+    expect(h.session.sends).toHaveLength(0);
+  });
+
+  it('updateGoal transitions an active goal to budgetLimited (and stops it) when maxTurns is lowered below turnsUsed', async () => {
+    // reviewer #354:把安全上限调到已被当前用量超过 → 立即停,不允许再多跑一轮。
+    await h.storage.set(seededGoal({ status: 'active', maxTurns: 10, turnsUsed: 5 }));
+    const sendsBefore = h.session.sends.length;
+    const res = await h.controller.updateGoal('s1', { maxTurns: 3 });
+    await tick();
+    expect(res?.status).toBe('budgetLimited');
+    expect((await h.storage.get('s1'))?.status).toBe('budgetLimited');
+    expect(h.session.sends.length).toBe(sendsBefore); // 不触发新一轮
+  });
+
+  it('updateGoal transitions to budgetLimited when budgetTokens is lowered below tokensUsed', async () => {
+    await h.storage.set(seededGoal({ status: 'active', budgetTokens: 5000, tokensUsed: 3000 }));
+    const res = await h.controller.updateGoal('s1', { budgetTokens: 1000 });
+    expect(res?.status).toBe('budgetLimited');
+  });
+
+  it('updateGoal keeps the goal active when the lowered limit still exceeds current usage', async () => {
+    await h.storage.set(seededGoal({ status: 'active', maxTurns: 20, turnsUsed: 5 }));
+    const res = await h.controller.updateGoal('s1', { maxTurns: 10 });
+    expect(res?.status).toBe('active');
+  });
+
+  it('fireTurn preflight stops at budgetLimited instead of sending when the goal is already over a lowered budget', async () => {
+    // active 但 turnsUsed 已超 maxTurns(模拟限额被调小后调度链仍触达 fireTurn);经 setGoal 编辑路径
+    // 触达 fireTurn —— preflight 预算守卫应拦下、不发轮(reviewer #354)。
+    await h.storage.set(seededGoal({ status: 'active', maxTurns: 3, turnsUsed: 5 }));
+    const sendsBefore = h.session.sends.length;
+    await h.controller.setGoal({ sessionId: 's1', objective: '继续推进' });
+    await tick();
+    expect((await h.storage.get('s1'))?.status).toBe('budgetLimited');
+    expect(h.session.sends.length).toBe(sendsBefore);
+  });
+
+  it('updateGoal updates objective and limits in the same patch without changing counters', async () => {
+    await h.storage.set(seededGoal({ status: 'active', objective: 'old', turnsUsed: 4, tokensUsed: 700, startedAt: 333 }));
+    await h.controller.updateGoal('s1', { objective: 'new combined objective', maxTurns: 12, budgetTokens: null });
+    const st = await h.storage.get('s1');
+    expect(st?.objective).toBe('new combined objective');
+    expect(st?.maxTurns).toBe(12);
+    expect(st?.budgetTokens).toBeNull();
+    expect(st?.turnsUsed).toBe(4);
+    expect(st?.tokensUsed).toBe(700);
+    expect(st?.startedAt).toBe(333);
+    expect(h.session.sends).toHaveLength(0);
+  });
+
+  it('updateGoal does not auto-resume usageLimited or blocked goals', async () => {
+    await h.storage.set(seededGoal({ status: 'usageLimited', budgetTokens: 100, tokensUsed: 100, usageResetAt: 5000 }));
+    await h.controller.updateGoal('s1', { budgetTokens: 200 });
+    await tick();
+    expect((await h.storage.get('s1'))?.status).toBe('usageLimited');
+    expect(h.session.sends).toHaveLength(0);
+    await h.storage.set(seededGoal({ status: 'blocked', maxTurns: 1, turnsUsed: 1 }));
+    await h.controller.updateGoal('s1', { maxTurns: 3 });
+    await tick();
+    expect((await h.storage.get('s1'))?.status).toBe('blocked');
+    expect(h.session.sends).toHaveLength(0);
+  });
+
+  it('updateGoal rejects illegal values', async () => {
+    await h.storage.set(seededGoal());
+    await expect(h.controller.updateGoal('s1', { maxTurns: 0 })).rejects.toThrow('positive number');
+    await expect(h.controller.updateGoal('s1', { budgetTokens: Number.NaN })).rejects.toThrow('positive number');
+    await expect(h.controller.updateGoal('s1', { objective: '   ' })).rejects.toThrow('objective must not be empty');
+  });
+
+  it('updateGoal accepts null as no limit and can unblock budgetLimited', async () => {
+    await h.storage.set(seededGoal({ status: 'budgetLimited', turnsUsed: 5, maxTurns: 5, tokensUsed: 1000, budgetTokens: 1000 }));
+    await h.controller.updateGoal('s1', { maxTurns: null, budgetTokens: null });
+    await tick();
+    const st = await h.storage.get('s1');
+    expect(st?.status).toBe('active');
+    expect(st?.maxTurns).toBeNull();
+    expect(st?.budgetTokens).toBeNull();
+    expect(h.session.sends).toHaveLength(1);
+  });
+
+  // ── usageLimited(账号用量受限)──
+  it('reactive: a usage-limit turn error → usageLimited with resetAt, no continuation', async () => {
+    h.setAccountLimit({ limited: true, resetAtMs: 3_601_000 }); // 远未来 → 不在测试窗口自动续
+    await startGoal(h);
+    h.session.emitErrorTurn({ sdkError: 'rate_limit', message: 'rate limit reached' });
+    await tick();
+    const st = await h.storage.get('s1');
+    expect(st?.status).toBe('usageLimited');
+    expect(st?.usageResetAt).toBe(3_601_000);
+    expect(h.session.sends).toHaveLength(1); // 无续轮
+  });
+
+  it('proactive: a would-be-continue turn flips to usageLimited when the account is limited', async () => {
+    h.setAccountLimit({ limited: true, resetAtMs: 3_601_000 });
+    await startGoal(h);
+    h.session.emitGoalTurn({ toolUse: true, verdictJson: '```json\n{"goal_status":"continue","reason":"wip"}\n```' });
+    await tick();
+    const st = await h.storage.get('s1');
+    expect(st?.status).toBe('usageLimited');
+    expect(h.session.sends).toHaveLength(1); // 本应续跑,但被改判,不续
+  });
+
+  it('auto-resumes at resetAt: posts a usage-resumed notice and continues', async () => {
+    h.setAccountLimit({ limited: true, resetAtMs: 1000 }); // == now → delay 0,tick 内触发
+    await startGoal(h);
+    h.session.emitErrorTurn({ sdkError: 'rate_limit' });
+    await tick(); // usageLimited → schedule(delay 0) → autoResume → resumeGoal
+    expect(h.notices).toEqual([{ sessionId: 's1', kind: 'usage-resumed' }]);
+    const st = await h.storage.get('s1');
+    expect(st?.status).toBe('active');
+    expect(st?.usageResetAt).toBeNull(); // resume 清掉
+    expect(h.session.sends.length).toBeGreaterThanOrEqual(2); // 自动续了一轮
+  });
+
+  it('resumeGoal recovers a usageLimited goal (manual), preserving counts', async () => {
+    h.setAccountLimit({ limited: true, resetAtMs: 3_601_000 });
+    await startGoal(h);
+    h.session.emitErrorTurn({ sdkError: 'rate_limit' });
+    await tick();
+    expect((await h.storage.get('s1'))?.status).toBe('usageLimited');
+    const before = h.session.sends.length;
+    await h.controller.resumeGoal('s1');
+    const st = await h.storage.get('s1');
+    expect(st?.status).toBe('active');
+    expect(st?.usageResetAt).toBeNull();
+    expect(h.session.sends.length).toBe(before + 1);
+  });
+
+});

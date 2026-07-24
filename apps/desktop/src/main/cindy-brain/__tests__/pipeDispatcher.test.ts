@@ -1,0 +1,275 @@
+/**
+ * pipeDispatcher.test.ts — 管子工具派发器单测(纯 DI,无 Electron)。
+ * 覆盖:资格审错误分类、按需拉起、callId 配对交卷、交卷验身(不能替别人
+ * 交卷)、超时作废、崩溃/熄灯收卷。
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+import { GhostPipeDispatcher, type PipeDispatcherDeps } from '../pipeDispatcher';
+import type { GhostPipeToolCall, InstalledGhost } from '../../../shared/ghost';
+import type { GhostRuntimeState } from '../runtime/GhostRuntime';
+
+function fakeGhost(overrides: Partial<InstalledGhost> = {}): InstalledGhost {
+  return {
+    manifest: {
+      schemaVersion: 2,
+      id: 'art',
+      name: '画图',
+      version: '1.0.0',
+      kind: 'chip',
+      entry: 'main.js',
+      slots: ['tool', 'model', 'panel'],
+      tools: [{ name: 'gen_image', description: '生成图片' }],
+    },
+    dir: '/fake/brain/art',
+    enabled: true,
+    ...overrides,
+  } as InstalledGhost;
+}
+
+interface Harness {
+  dispatcher: GhostPipeDispatcher;
+  deps: {
+    getGhost: ReturnType<typeof vi.fn>;
+    runtimeStateOf: ReturnType<typeof vi.fn>;
+    spawn: ReturnType<typeof vi.fn>;
+    sendToGhost: ReturnType<typeof vi.fn>;
+  };
+  sent: GhostPipeToolCall[];
+}
+
+function makeHarness(opts: {
+  ghost?: InstalledGhost | null;
+  state?: GhostRuntimeState;
+  timeoutMs?: number;
+} = {}): Harness {
+  const sent: GhostPipeToolCall[] = [];
+  const deps = {
+    getGhost: vi.fn(() => (opts.ghost === undefined ? fakeGhost() : opts.ghost)),
+    runtimeStateOf: vi.fn(() => opts.state ?? 'running'),
+    spawn: vi.fn(async () => ({ ok: true as const })),
+    sendToGhost: vi.fn((_id: string, payload: GhostPipeToolCall) => {
+      sent.push(payload);
+      return true;
+    }),
+  };
+  const dispatcher = new GhostPipeDispatcher({
+    ...deps,
+    timeoutMs: opts.timeoutMs,
+  } as unknown as PipeDispatcherDeps);
+  return { dispatcher, deps, sent };
+}
+
+const CALL = { ghostId: 'art', tool: 'gen_image', args: { prompt: '一只猫' } };
+
+describe('资格审(结构化错误分类)', () => {
+  it('未装入 → GHOST_NOT_FOUND', async () => {
+    const h = makeHarness({ ghost: null });
+    const r = await h.dispatcher.callGhostTool(CALL);
+    expect(r).toMatchObject({ ok: false, errorCode: 'GHOST_NOT_FOUND' });
+  });
+
+  it('沉睡 → GHOST_ASLEEP', async () => {
+    const h = makeHarness({ ghost: fakeGhost({ enabled: false }) });
+    const r = await h.dispatcher.callGhostTool(CALL);
+    expect(r).toMatchObject({ ok: false, errorCode: 'GHOST_ASLEEP' });
+  });
+
+  it('工具未声明 → TOOL_NOT_FOUND', async () => {
+    const h = makeHarness();
+    const r = await h.dispatcher.callGhostTool({ ...CALL, tool: 'nope' });
+    expect(r).toMatchObject({ ok: false, errorCode: 'TOOL_NOT_FOUND' });
+  });
+
+  it('熔断中 → GHOST_CRASHED,不尝试拉起', async () => {
+    const h = makeHarness({ state: 'fused' });
+    const r = await h.dispatcher.callGhostTool(CALL);
+    expect(r).toMatchObject({ ok: false, errorCode: 'GHOST_CRASHED' });
+    expect(h.deps.spawn).not.toHaveBeenCalled();
+  });
+});
+
+describe('按需拉起', () => {
+  it('off 状态先 spawn 再派发', async () => {
+    const h = makeHarness({ state: 'off' });
+    const p = h.dispatcher.callGhostTool(CALL);
+    await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+    expect(h.deps.spawn).toHaveBeenCalledTimes(1);
+    h.dispatcher.handleToolResult('art', {
+      type: 'tool-result',
+      callId: h.sent[0].callId,
+      ok: true,
+      result: { done: 1 },
+    });
+    await expect(p).resolves.toMatchObject({ ok: true });
+  });
+
+  it('拉起失败 → GHOST_CRASHED', async () => {
+    const h = makeHarness({ state: 'off' });
+    h.deps.spawn.mockResolvedValue({ ok: false, reason: '入口加载失败' });
+    const r = await h.dispatcher.callGhostTool(CALL);
+    expect(r).toMatchObject({ ok: false, errorCode: 'GHOST_CRASHED' });
+  });
+
+  it('电子脑离线(send 失败)→ GHOST_CRASHED 立即收卷', async () => {
+    const h = makeHarness();
+    h.deps.sendToGhost.mockReturnValue(false);
+    const r = await h.dispatcher.callGhostTool(CALL);
+    expect(r).toMatchObject({ ok: false, errorCode: 'GHOST_CRASHED' });
+    expect(h.dispatcher.pendingCount()).toBe(0);
+  });
+});
+
+describe('配对交卷', () => {
+  it('happy path:交卷 resolve 原始 result', async () => {
+    const h = makeHarness();
+    const p = h.dispatcher.callGhostTool(CALL);
+    await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+    expect(h.sent[0]).toMatchObject({ type: 'tool-call', tool: 'gen_image', args: { prompt: '一只猫' } });
+    const outcome = h.dispatcher.handleToolResult('art', {
+      type: 'tool-result',
+      callId: h.sent[0].callId,
+      ok: true,
+      result: { url: 'cindy-media://blobs/x.png' },
+    });
+    expect(outcome.accepted).toBe(true);
+    await expect(p).resolves.toEqual({ ok: true, result: { url: 'cindy-media://blobs/x.png' } });
+    expect(h.dispatcher.pendingCount()).toBe(0);
+  });
+
+  it('意识侧报错 → INTERNAL 透传 message', async () => {
+    const h = makeHarness();
+    const p = h.dispatcher.callGhostTool(CALL);
+    await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+    h.dispatcher.handleToolResult('art', {
+      type: 'tool-result',
+      callId: h.sent[0].callId,
+      ok: false,
+      message: '画布爆炸',
+    });
+    await expect(p).resolves.toMatchObject({ ok: false, errorCode: 'INTERNAL', message: '画布爆炸' });
+  });
+
+  it('透传合法插件业务错误码，但不允许覆盖主机错误码', async () => {
+    const h = makeHarness();
+    const business = h.dispatcher.callGhostTool(CALL);
+    await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+    h.dispatcher.handleToolResult('art', {
+      type: 'tool-result',
+      callId: h.sent[0].callId,
+      ok: false,
+      errorCode: 'CONFIRM_REQUIRED',
+      message: '请确认',
+    });
+    await expect(business).resolves.toMatchObject({ ok: false, errorCode: 'CONFIRM_REQUIRED' });
+
+    const reserved = h.dispatcher.callGhostTool(CALL);
+    await vi.waitFor(() => expect(h.sent).toHaveLength(2));
+    h.dispatcher.handleToolResult('art', {
+      type: 'tool-result',
+      callId: h.sent[1].callId,
+      ok: false,
+      errorCode: 'GHOST_CRASHED',
+      message: '伪造主机错误',
+    });
+    await expect(reserved).resolves.toMatchObject({ ok: false, errorCode: 'INTERNAL' });
+  });
+
+  it('别的意识拿到 callId 也交不了卷(验身)', async () => {
+    const h = makeHarness();
+    const p = h.dispatcher.callGhostTool(CALL);
+    await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+    const outcome = h.dispatcher.handleToolResult('evil-ghost', {
+      type: 'tool-result',
+      callId: h.sent[0].callId,
+      ok: true,
+      result: { hijacked: true },
+    });
+    expect(outcome.accepted).toBe(false);
+    // 原调用仍在等真主人交卷。
+    expect(h.dispatcher.pendingCount()).toBe(1);
+    h.dispatcher.handleToolResult('art', {
+      type: 'tool-result',
+      callId: h.sent[0].callId,
+      ok: true,
+      result: 'real',
+    });
+    await expect(p).resolves.toEqual({ ok: true, result: 'real' });
+  });
+
+  it('载荷形状不合法 / 不存在的 callId → 拒收不炸', () => {
+    const h = makeHarness();
+    expect(h.dispatcher.handleToolResult('art', { type: 'tool-result' }).accepted).toBe(false);
+    expect(
+      h.dispatcher.handleToolResult('art', { type: 'tool-result', callId: 'ghost-town', ok: true }).accepted,
+    ).toBe(false);
+  });
+});
+
+describe('超时与收卷', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('超时 → TIMEOUT,迟到卷子作废', async () => {
+    const h = makeHarness({ timeoutMs: 1000 });
+    const p = h.dispatcher.callGhostTool(CALL);
+    await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+    vi.advanceTimersByTime(1001);
+    await expect(p).resolves.toMatchObject({ ok: false, errorCode: 'TIMEOUT' });
+    const late = h.dispatcher.handleToolResult('art', {
+      type: 'tool-result',
+      callId: h.sent[0].callId,
+      ok: true,
+      result: 'too late',
+    });
+    expect(late.accepted).toBe(false);
+  });
+
+  it('崩溃收卷 → GHOST_CRASHED;熄灯收卷 → GHOST_ASLEEP;只收本意识的', async () => {
+    const h = makeHarness();
+    const p1 = h.dispatcher.callGhostTool(CALL);
+    const p2 = h.dispatcher.callGhostTool(CALL);
+    await vi.waitFor(() => expect(h.sent).toHaveLength(2));
+    expect(h.dispatcher.pendingCount()).toBe(2);
+
+    h.dispatcher.onRuntimeState('other-ghost', 'crashed');
+    expect(h.dispatcher.pendingCount()).toBe(2);
+
+    h.dispatcher.onRuntimeState('art', 'crashed');
+    await expect(p1).resolves.toMatchObject({ ok: false, errorCode: 'GHOST_CRASHED' });
+    await expect(p2).resolves.toMatchObject({ ok: false, errorCode: 'GHOST_CRASHED' });
+    expect(h.dispatcher.pendingCount()).toBe(0);
+
+    const p3 = h.dispatcher.callGhostTool(CALL);
+    await vi.waitFor(() => expect(h.sent).toHaveLength(3));
+    h.dispatcher.onRuntimeState('art', 'off');
+    await expect(p3).resolves.toMatchObject({ ok: false, errorCode: 'GHOST_ASLEEP' });
+  });
+});
+
+describe('预铸 callId(卡槽③贯通)', () => {
+  it('传入 callId 时下行载荷使用同一值;交卷按它配对', async () => {
+    const h = makeHarness();
+    const p = h.dispatcher.callGhostTool({ ...CALL, callId: 'pre-minted-id' });
+    await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+    expect(h.sent[0].callId).toBe('pre-minted-id');
+
+    const outcome = h.dispatcher.handleToolResult('art', {
+      type: 'tool-result',
+      callId: 'pre-minted-id',
+      ok: true,
+      result: { done: true },
+    });
+    expect(outcome.accepted).toBe(true);
+    await expect(p).resolves.toEqual({ ok: true, result: { done: true } });
+  });
+
+  it('空串 callId 回落自铸', async () => {
+    const h = makeHarness();
+    void h.dispatcher.callGhostTool({ ...CALL, callId: '' });
+    await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+    expect(h.sent[0].callId).not.toBe('');
+    expect(h.sent[0].callId.length).toBeGreaterThan(10);
+  });
+});

@@ -1,0 +1,24 @@
+/**
+ * 网络类错误识别 — 判断 agent/daemon 报错 message 是否是"网络不可达 / 上游
+ * 暂时不可用"这类与用户操作无关、重试可能自愈的错误。
+ *
+ * 消费方:
+ *  - codex translator(translateErrorNotification):willRetry=true 的网络类错误
+ *    在同 turn 内持续出现时透出一条非终止提示,让用户知道 daemon 卡在自动重试
+ *    (否则 turn 只是无限转圈,用户无感知也无从干预)。
+ *  - renderer ErrorBanner 有一份**语义一致**的同名判定
+ *    (apps/desktop/src/renderer/utils/networkError.ts,不跨 bundle 共享代码,
+ *    与 401 pattern 的两端一致性同款惯例),用于把原始英文报错换成友好文案。
+ *    修改 pattern 时两处同步。
+ *
+ * pattern 说明:HTTP 网关侧 502/503/504(数字带词边界,避免误伤长数字)、
+ * 网关标准短语、Node 网络 errno(ECONNREFUSED 等)、undici/fetch 失败短语、
+ * AggregateError(Node 并发连接尝试全失败的聚合错误,几乎只出现在网络场景)、
+ * Anthropic SDK 的 APIConnectionTimeoutError / APIConnectionError 原文
+ * ("Request timed out" / "Connection error",SDK 重试耗尽后透传成终止型 turn error)。
+ */
+export function isNetworkishErrorMessage(message: string): boolean {
+  return /\b50[234]\b|Bad Gateway|Service Unavailable|Gateway Time-?out|upstream unreachable|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|ENETUNREACH|EHOSTUNREACH|EPIPE|EAI_AGAIN|fetch failed|network error|socket hang up|AggregateError|Request timed out|Connection error/i.test(
+    message,
+  );
+}

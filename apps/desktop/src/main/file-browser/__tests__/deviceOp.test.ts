@@ -1,0 +1,457 @@
+/**
+ * device-op 单测:device-link 远程文件浏览的被控端执行层。
+ * 覆盖——
+ *   1. 参数/guard 拒绝(workdir 收敛是安全边界,必须有回归)
+ *   2. 本地 op 全套(fixture 目录真实 fs;返回形状与本地 IPC handler 一致)
+ *   3. readFile oversize → 结构化 OVERSIZE(不裸炸帧限)
+ *   4. 嵌套:workdir 非本地目录 + 会话表带 remoteHostId → SSH 二跳透传
+ *   5. watch 订阅生命周期:onFsWatchSubscribed → 真实 fs 变更 → push 出口收到事件
+ */
+
+import { mkdtemp, mkdir, rm, writeFile as fsWriteFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import os from 'node:os';
+import path from 'node:path';
+import { gzipSync, gunzipSync } from 'node:zlib';
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const pushSpy = vi.fn();
+const guardMock = vi.fn(async (_dir: string) => true);
+const sshRequestMock = vi.fn();
+const dbRowsMock = vi.fn((): Array<{ remoteHostId: string | null }> => []);
+
+vi.mock('electron', () => ({
+  ipcMain: { handle: vi.fn() },
+}));
+const uploadMock = vi.fn(async (p: string) => ({ key: `oss/${p.split('/').pop()}`, size: 4, contentType: 'text/plain' }));
+vi.mock('../../device-link/mediaTransfer.js', () => ({
+  uploadLocalFile: (p: string) => uploadMock(p),
+}));
+vi.mock('../../device-link/remote-workdir-guard.js', () => ({
+  isRemoteWorkingDirAllowed: (dir: string) => guardMock(dir),
+}));
+vi.mock('../../device-link/dispatch.js', () => ({
+  pushToTopicSubscribers: (channel: string, payload: unknown) => pushSpy(channel, payload),
+}));
+vi.mock('../../device-link/subscriptions.js', () => ({
+  setTopicsSubscribedListener: vi.fn(),
+  setTopicsReleasedListener: vi.fn(),
+}));
+vi.mock('../../localDb/client/current.js', () => ({
+  getDbClient: () => ({
+    drizzle: {
+      select: () => ({
+        from: () => ({
+          where: () => ({ limit: async () => dbRowsMock() }),
+        }),
+      }),
+      // 端点判定改用 selectDistinct(歧义检测需要全部 host),where 直接可 await。
+      selectDistinct: () => ({
+        from: () => ({
+          where: async () => dbRowsMock(),
+        }),
+      }),
+    },
+  }),
+}));
+vi.mock('../../maker-host/runtime-configs.js', () => ({
+  getRipgrepBinaryPath: () => '/nonexistent/rg',
+}));
+vi.mock('../remote-deps.js', () => ({
+  getRemoteFileBrowser: () => ({
+    request: sshRequestMock,
+    onHostEvent: vi.fn(() => () => {}),
+    onHostConnected: vi.fn(() => () => {}),
+  }),
+}));
+
+import { __deviceOpTesting } from '../device-op.js';
+
+const { handleRemoteOp, onFsWatchSubscribed, onFsWatchReleased } = __deviceOpTesting;
+
+describe('file-browser device-op', () => {
+  let workdir: string;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    guardMock.mockResolvedValue(true);
+    dbRowsMock.mockReturnValue([]);
+    workdir = await mkdtemp(path.join(os.tmpdir(), 'device-op-'));
+    await mkdir(path.join(workdir, 'src'));
+    await fsWriteFile(path.join(workdir, '.gitignore'), 'ignored/\n', 'utf8');
+    await fsWriteFile(path.join(workdir, 'src', 'a.ts'), 'export const a = 1;\n', 'utf8');
+  });
+
+  afterEach(async () => {
+    onFsWatchReleased(workdir);
+    await rm(workdir, { recursive: true, force: true });
+  });
+
+  it('rejects invalid args and guard-denied workdir', async () => {
+    expect(await handleRemoteOp({ op: 'listDir', workdir: '' })).toMatchObject({ ok: false });
+    guardMock.mockResolvedValue(false);
+    await expect(handleRemoteOp({ op: 'listDir', workdir })).rejects.toThrow(/not allowed/);
+    expect(guardMock).toHaveBeenCalledWith(workdir);
+  });
+
+  it('local listDir / readFile / stat match local handler shapes', async () => {
+    const entries = (await handleRemoteOp({ op: 'listDir', workdir })) as Array<{ name: string }>;
+    expect(entries.map((e) => e.name)).toContain('src');
+
+    const read = (await handleRemoteOp({ op: 'readFile', workdir, relPath: 'src/a.ts' })) as {
+      ok: true;
+      data: { content: string };
+    };
+    expect(read.ok).toBe(true);
+    expect(read.data.content).toBe('export const a = 1;\n');
+
+    const stat = (await handleRemoteOp({ op: 'stat', workdir, relPath: 'src/a.ts' })) as {
+      type: string;
+    };
+    expect(stat.type).toBe('file');
+  });
+
+  it('local write path ops work end to end', async () => {
+    await handleRemoteOp({ op: 'writeFile', workdir, relPath: 'src/a.ts', content: 'changed\n' });
+    const read = (await handleRemoteOp({ op: 'readFile', workdir, relPath: 'src/a.ts' })) as {
+      data: { content: string };
+    };
+    expect(read.data.content).toBe('changed\n');
+
+    expect(await handleRemoteOp({ op: 'createFolder', workdir, relPath: 'docs' })).toMatchObject({
+      ok: true,
+    });
+    expect(await handleRemoteOp({ op: 'createFile', workdir, relPath: 'docs/x.md' })).toMatchObject({
+      ok: true,
+    });
+    expect(
+      await handleRemoteOp({ op: 'renameEntry', workdir, fromRel: 'docs/x.md', toRel: 'docs/y.md' }),
+    ).toMatchObject({ ok: true });
+    expect(await handleRemoteOp({ op: 'deleteEntry', workdir, relPath: 'docs/y.md' })).toMatchObject({
+      ok: true,
+    });
+  });
+
+  it('exportFile two-phase: start/status lifecycle and traversal rejection', async () => {
+    await fsWriteFile(path.join(workdir, 'docs', 'x.md'), 'big\n', 'utf8').catch(async () => {
+      await mkdir(path.join(workdir, 'docs'), { recursive: true });
+      await fsWriteFile(path.join(workdir, 'docs', 'x.md'), 'big\n', 'utf8');
+    });
+    const start = (await handleRemoteOp({ op: 'exportFileStart', workdir, relPath: 'docs/x.md' })) as {
+      ok: boolean;
+      transferId?: string;
+    };
+    expect(start.ok).toBe(true);
+    expect(start.transferId).toBeTruthy();
+    expect(uploadMock).toHaveBeenCalledTimes(1);
+    // uploadMock 同步 resolve → 下一轮 status 即 done,并带回 key。
+    await new Promise((r) => setTimeout(r, 10));
+    const st = (await handleRemoteOp({
+      op: 'exportFileStatus',
+      workdir,
+      transferId: start.transferId,
+    })) as { ok: boolean; state?: string; key?: string };
+    expect(st.ok).toBe(true);
+    expect(st.state).toBe('done');
+    expect(st.key).toContain('x.md');
+    // 幂等:终态回包可能在 relay 上丢失,控制端重查同 id 必须仍拿到 done/key
+    // (读到即删会让重查得到 unknown → 整次取回作废、大文件从头重传)。
+    const again = (await handleRemoteOp({
+      op: 'exportFileStatus',
+      workdir,
+      transferId: start.transferId,
+    })) as { ok: boolean; state?: string; key?: string };
+    expect(again.ok).toBe(true);
+    expect(again.state).toBe('done');
+    expect(again.key).toContain('x.md');
+
+    const esc = (await handleRemoteOp({
+      op: 'exportFileStart',
+      workdir,
+      relPath: '../outside.txt',
+    })) as { ok: boolean };
+    expect(esc.ok).toBe(false);
+    expect(uploadMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('oversize readFile returns structured OVERSIZE with stat (never a raw frame blowup)', async () => {
+    await fsWriteFile(path.join(workdir, 'big.txt'), 'x'.repeat(1_900_000), 'utf8');
+    const res = (await handleRemoteOp({ op: 'readFile', workdir, relPath: 'big.txt' })) as {
+      ok: false;
+      code: string;
+      stat: { size: number };
+    };
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe('OVERSIZE');
+    expect(res.stat.size).toBe(1_900_000);
+  });
+
+  it('oversize precheck measures serialized UTF-8 bytes, not UTF-16 chars (CJK regression)', async () => {
+    // 70 万个中文字符 = 2.1MB UTF-8;core readFile 按 2MiB 字节截断后仅 ~70 万
+    // 码元——字符数判据会放行,序列化后必超 2MiB 帧限。必须按字节判为 OVERSIZE。
+    await fsWriteFile(path.join(workdir, 'cjk.txt'), '中'.repeat(700_000), 'utf8');
+    const res = (await handleRemoteOp({ op: 'readFile', workdir, relPath: 'cjk.txt' })) as {
+      ok: false;
+      code: string;
+      stat: { size: number };
+    };
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe('OVERSIZE');
+    expect(res.stat.size).toBe(2_100_000);
+  });
+
+  it('mid-size ASCII file stays readable (old char-count limit was over-conservative)', async () => {
+    // 1.5M ASCII 字符序列化后 ~1.5MB,离 2MiB 帧限有余量,应正常返回内容。
+    await fsWriteFile(path.join(workdir, 'mid.txt'), 'y'.repeat(1_500_000), 'utf8');
+    const res = (await handleRemoteOp({ op: 'readFile', workdir, relPath: 'mid.txt' })) as {
+      ok: true;
+      data: { content: string };
+    };
+    expect(res.ok).toBe(true);
+    expect(res.data.content.length).toBe(1_500_000);
+  });
+
+  it('nested: non-local workdir with SSH session rows forwards to the SSH route', async () => {
+    const sshWorkdir = '/remote/home/user/proj';
+    dbRowsMock.mockReturnValue([{ remoteHostId: 'host-1' }]);
+    sshRequestMock.mockResolvedValue({ entries: [{ name: 'r.ts' }] });
+
+    const entries = (await handleRemoteOp({ op: 'listDir', workdir: sshWorkdir })) as Array<{
+      name: string;
+    }>;
+    expect(entries.map((e) => e.name)).toEqual(['r.ts']);
+    expect(sshRequestMock).toHaveBeenCalledWith('host-1', 'listDir', {
+      workdir: sshWorkdir,
+      relPath: '',
+      hideMetaFiles: true,
+      docMode: undefined,
+    });
+  });
+
+  it('ambiguous: workdir belonging to multiple SSH hosts is rejected, not guessed', async () => {
+    dbRowsMock.mockReturnValue([{ remoteHostId: 'host-1' }, { remoteHostId: 'host-2' }]);
+    // throw(而非 resolve {ok:false}):经 invoke error 信封让控制端 reject,
+    // 命中 renderer 既有 catch/loadError 通路(与 SSH 通道错误形态对齐)。
+    await expect(
+      handleRemoteOp({ op: 'listDir', workdir: '/remote/home/user/proj' }),
+    ).rejects.toThrow(/ambiguous/);
+    expect(sshRequestMock).not.toHaveBeenCalled();
+  });
+
+  it('ambiguous: workdir that exists locally AND has SSH session rows is rejected', async () => {
+    // workdir 是真实本地目录(beforeEach 建的),同时会话表里有 SSH 归属——
+    // 静默选本地(旧行为)会把读写落在错误机器,必须显式拒绝。
+    dbRowsMock.mockReturnValue([{ remoteHostId: 'host-1' }]);
+    await expect(handleRemoteOp({ op: 'listDir', workdir })).rejects.toThrow(/ambiguous/);
+  });
+
+  it('watch: subscribe starts local watch and pushes fileTree events to topic subscribers', async () => {
+    await onFsWatchSubscribed(workdir);
+    await new Promise((r) => setTimeout(r, 100));
+    await fsWriteFile(path.join(workdir, 'src', 'watched.ts'), 'w\n', 'utf8');
+    await vi.waitFor(
+      () => {
+        const hit = pushSpy.mock.calls.find(
+          ([channel, payload]) =>
+            channel === 'maker:file-browser:event' &&
+            (payload as { relPath?: string }).relPath === 'src/watched.ts',
+        );
+        if (!hit) throw new Error('no push yet');
+      },
+      { timeout: 3000, interval: 50 },
+    );
+    const [, payload] = pushSpy.mock.calls.find(
+      ([, p]) => (p as { relPath?: string }).relPath === 'src/watched.ts',
+    )!;
+    expect((payload as { workdir: string }).workdir).toBe(workdir);
+    onFsWatchReleased(workdir);
+  });
+
+  it('watch: guard-denied workdir never starts watching', async () => {
+    guardMock.mockResolvedValue(false);
+    await onFsWatchSubscribed(workdir);
+    await fsWriteFile(path.join(workdir, 'src', 'nope.ts'), 'n\n', 'utf8');
+    await new Promise((r) => setTimeout(r, 250));
+    expect(pushSpy).not.toHaveBeenCalled();
+  });
+
+  // ── gzip(应用层压缩)────────────────────────────────────────────────────
+
+  it('caps op advertises gzip; unknown op stays a deterministic negative signal', async () => {
+    // caps 与 workdir 无关,guard 之前处理——guard 拒绝也不影响探测。
+    expect(await handleRemoteOp({ op: 'caps', workdir })).toEqual({ ok: true, gzip: true });
+    // 控制端把 unknown op 当"老端不支持压缩"的确定性负信号,形状不能漂。
+    expect(await handleRemoteOp({ op: 'nope', workdir })).toEqual({
+      ok: false,
+      message: 'unknown op: nope',
+    });
+  });
+
+  it('writeFile accepts contentGz (gzip+base64) and lands the plaintext on disk', async () => {
+    const original = '# 标题\n' + '正文内容 body text\n'.repeat(5000);
+    const contentGz = gzipSync(Buffer.from(original, 'utf8')).toString('base64');
+    const res = (await handleRemoteOp({ op: 'writeFile', workdir, relPath: 'src/a.ts', contentGz })) as {
+      ok: boolean;
+    };
+    expect(res.ok).toBe(true);
+    const read = (await handleRemoteOp({ op: 'readFile', workdir, relPath: 'src/a.ts' })) as {
+      data: { content: string };
+    };
+    expect(read.data.content).toBe(original);
+  });
+
+  it('writeFile rejects decompression bombs (contentGz expanding past the decoded cap)', async () => {
+    // 10MB 全零 gzip 后只有 ~10KB,轻松过帧限;解压侧必须按 maxOutputLength
+    // 拒绝,不允许在被控端无界膨胀分配(gzip 可 1000:1)。
+    const bombGz = gzipSync(Buffer.alloc(10 * 1024 * 1024)).toString('base64');
+    const res = (await handleRemoteOp({
+      op: 'writeFile',
+      workdir,
+      relPath: 'src/a.ts',
+      contentGz: bombGz,
+    })) as { ok: boolean; message?: string };
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain('invalid contentGz');
+    const read = (await handleRemoteOp({ op: 'readFile', workdir, relPath: 'src/a.ts' })) as {
+      data: { content: string };
+    };
+    expect(read.data.content).toBe('export const a = 1;\n');
+  });
+
+  it('writeFile rejects corrupted contentGz without touching the file', async () => {
+    const res = (await handleRemoteOp({
+      op: 'writeFile',
+      workdir,
+      relPath: 'src/a.ts',
+      contentGz: 'not-a-gzip-stream',
+    })) as { ok: boolean; message?: string };
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain('invalid contentGz');
+    const read = (await handleRemoteOp({ op: 'readFile', workdir, relPath: 'src/a.ts' })) as {
+      data: { content: string };
+    };
+    expect(read.data.content).toBe('export const a = 1;\n');
+  });
+
+  it('readFile + acceptGzip lifts the CJK oversize cliff (gzip-encoded roundtrip)', async () => {
+    // 1.95MB CJK:低于 core readFile 的 2MiB 截断线(全量读回),但明文 JSON
+    // 字节超 1.8MB 帧预算(不带 acceptGzip 会判 OVERSIZE)。带 acceptGzip 后
+    // 应改走 gzip 编码返回,解码等于原文——可编辑上限提升的核心回归。
+    const original = '中'.repeat(650_000);
+    await fsWriteFile(path.join(workdir, 'cjk.txt'), original, 'utf8');
+    const res = (await handleRemoteOp({
+      op: 'readFile',
+      workdir,
+      relPath: 'cjk.txt',
+      acceptGzip: true,
+    })) as { ok: true; data: { content: string; contentEncoding?: string } };
+    expect(res.ok).toBe(true);
+    expect(res.data.contentEncoding).toBe('gzip');
+    expect(gunzipSync(Buffer.from(res.data.content, 'base64')).toString('utf8')).toBe(original);
+  });
+
+  it('readFile + acceptGzip keeps small files plaintext (no needless encoding)', async () => {
+    const res = (await handleRemoteOp({
+      op: 'readFile',
+      workdir,
+      relPath: 'src/a.ts',
+      acceptGzip: true,
+    })) as { ok: true; data: { content: string; contentEncoding?: string } };
+    expect(res.ok).toBe(true);
+    expect(res.data.contentEncoding).toBeUndefined();
+    expect(res.data.content).toBe('export const a = 1;\n');
+  });
+
+  it('readFile + acceptGzip still returns OVERSIZE for incompressible oversize content', async () => {
+    // base64 随机内容 ≈ 6bit/char 熵,gzip 压不动;编码后仍超预算必须维持
+    // OVERSIZE 占位语义,绝不裸炸帧限。
+    const incompressible = randomBytes(1_500_000).toString('base64').slice(0, 1_950_000);
+    await fsWriteFile(path.join(workdir, 'noise.txt'), incompressible, 'utf8');
+    const res = (await handleRemoteOp({
+      op: 'readFile',
+      workdir,
+      relPath: 'noise.txt',
+      acceptGzip: true,
+    })) as { ok: false; code: string };
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe('OVERSIZE');
+  });
+
+  it('nested SSH: contentGz is decoded before the two-hop forward (daemon sees plaintext)', async () => {
+    const sshWorkdir = '/remote/home/user/proj';
+    dbRowsMock.mockReturnValue([{ remoteHostId: 'host-1' }]);
+    sshRequestMock.mockResolvedValue({ size: 4, mtimeMs: 1 });
+    const original = 'ssh 二跳明文 payload\n'.repeat(100);
+    const contentGz = gzipSync(Buffer.from(original, 'utf8')).toString('base64');
+    const res = (await handleRemoteOp({
+      op: 'writeFile',
+      workdir: sshWorkdir,
+      relPath: 'a.md',
+      contentGz,
+    })) as { ok: boolean };
+    expect(res.ok).toBe(true);
+    expect(sshRequestMock).toHaveBeenCalledWith('host-1', 'writeFile', {
+      workdir: sshWorkdir,
+      relPath: 'a.md',
+      content: original,
+    });
+  });
+
+  describe('thumbnail op(手机网格缩略图)', () => {
+    // 1x1 红色 PNG(有效可解码的最小图片)。
+    const TINY_PNG = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    );
+
+    it('local: 图片返回 webp base64 + 尺寸/stat 元数据', async () => {
+      await fsWriteFile(path.join(workdir, 'src', 'tiny.png'), TINY_PNG);
+      const res = (await handleRemoteOp({ op: 'thumbnail', workdir, relPath: 'src/tiny.png' })) as {
+        ok: boolean;
+        dataBase64?: string;
+        mimeType?: string;
+        width?: number;
+        height?: number;
+        size?: number;
+        mtimeMs?: number;
+        code?: string;
+      };
+      expect(res.ok).toBe(true);
+      expect(res.mimeType).toBe('image/webp');
+      expect((res.dataBase64 ?? '').length).toBeGreaterThan(0);
+      expect(res.width).toBe(1);
+      expect(res.height).toBe(1);
+      expect(res.size).toBe(TINY_PNG.byteLength);
+      expect(res.mtimeMs).toBeGreaterThan(0);
+    });
+
+    it('local: 非图片内容结构化失败(THUMB_FAILED),不 throw', async () => {
+      const res = (await handleRemoteOp({ op: 'thumbnail', workdir, relPath: 'src/a.ts' })) as {
+        ok: boolean;
+        code?: string;
+      };
+      expect(res.ok).toBe(false);
+      expect(res.code).toBe('THUMB_FAILED');
+    });
+
+    it('local: 路径穿越被拒绝', async () => {
+      const res = (await handleRemoteOp({ op: 'thumbnail', workdir, relPath: '../outside.png' })) as {
+        ok: boolean;
+      };
+      expect(res.ok).toBe(false);
+    });
+
+    it('nested SSH: 返回 THUMB_UNSUPPORTED,不发起二跳', async () => {
+      dbRowsMock.mockReturnValue([{ remoteHostId: 'host-1' }]);
+      const res = (await handleRemoteOp({
+        op: 'thumbnail',
+        workdir: '/remote/home/user/proj',
+        relPath: 'a.png',
+      })) as { ok: boolean; code?: string };
+      expect(res.ok).toBe(false);
+      expect(res.code).toBe('THUMB_UNSUPPORTED');
+      expect(sshRequestMock).not.toHaveBeenCalled();
+    });
+  });
+});

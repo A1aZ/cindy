@@ -1,0 +1,792 @@
+export interface InteractionRequestLike {
+  kind?: string;
+  requestId?: string;
+  [key: string]: unknown;
+}
+
+export interface PendingInteractionLike {
+  request: InteractionRequestLike;
+  persistId?: string;
+}
+
+export interface AskQuestion {
+  question: string;
+  header?: string;
+  options?: Array<{ label: string; description?: string }>;
+  multiSelect?: boolean;
+}
+
+export interface IssueDraft {
+  title: string;
+  body: string;
+  type: 'bug' | 'feature';
+}
+
+export interface IssueEnv {
+  appVersion: string;
+  platform: string;
+  arch: string;
+  osVersion?: string;
+}
+
+export interface IssueConfirmPayload {
+  draft: IssueDraft;
+  env: IssueEnv;
+}
+
+export interface PermissionReviewPresentation {
+  canAlwaysAllow: boolean;
+  code: string;
+  description: string | null;
+  riskSummary: string | null;
+  summary: InteractionDecisionSummary;
+  title: string;
+  toolName: string;
+}
+
+export interface AskQuestionReviewPresentation {
+  allowsCustomAnswer: boolean;
+  current: AskQuestion | null;
+  currentIndex: number;
+  currentNumber: number;
+  header: string | null;
+  multiSelect: boolean;
+  optionCount: number;
+  pageLabel: string;
+  summary: InteractionDecisionSummary;
+  title: string;
+  totalCount: number;
+}
+
+export interface IssueConfirmReviewPresentation {
+  bodyCharCount: number;
+  canSubmit: boolean;
+  envLabel: string;
+  issueTypeLabel: string;
+  summary: InteractionDecisionSummary;
+  titleCharCount: number;
+}
+
+export interface PlanOutlineItem {
+  id: string;
+  title: string;
+  level: 1 | 2 | 3;
+  line: number;
+  preview: string;
+}
+
+export interface PlanReviewEvidencePresentation {
+  compactPath: string | null;
+  fileName: string | null;
+  filePath: string | null;
+  hasPlanText: boolean;
+  outlineItems: PlanOutlineItem[];
+  outlineOverflowCount: number;
+  outlineTotalCount: number;
+  summary: InteractionDecisionSummary;
+}
+
+export interface InteractionDecisionSummary {
+  title: string;
+  detail: string;
+}
+
+export interface InteractionResolveActionPresentation {
+  disabled: boolean;
+  disabledReason: string | null;
+  label: string;
+}
+
+export interface PendingInteractionQueueItemPresentation {
+  active: boolean;
+  kind: string;
+  label: string;
+  positionLabel: string;
+  requestId: string | null;
+  title: string;
+}
+
+export interface PendingInteractionQueuePresentation {
+  active: PendingInteractionQueueItemPresentation | null;
+  countLabel: string;
+  hint: string;
+  items: PendingInteractionQueueItemPresentation[];
+  overflowCount: number;
+  readOnly: boolean;
+  title: string;
+  totalCount: number;
+}
+
+export function buildInteractionResolveActionPresentation(input: {
+  armed?: boolean;
+  busy?: boolean;
+  busyLabel?: string;
+  confirmLabel?: string;
+  invalidReason?: string | null;
+  label: string;
+  readOnlyReason?: string | null;
+  requestId?: string | null;
+}): InteractionResolveActionPresentation {
+  if (input.readOnlyReason) {
+    return {
+      disabled: true,
+      disabledReason: input.readOnlyReason,
+      label: input.label,
+    };
+  }
+  if (!input.requestId) {
+    return {
+      disabled: true,
+      disabledReason: '这个远程交互缺少 requestId，无法回传决定。',
+      label: input.label,
+    };
+  }
+  if (input.busy) {
+    return {
+      disabled: true,
+      disabledReason: '正在把决定回传到电脑端，请不要重复提交。',
+      label: input.busyLabel ?? '提交中',
+    };
+  }
+  if (input.invalidReason) {
+    return {
+      disabled: true,
+      disabledReason: input.invalidReason,
+      label: input.label,
+    };
+  }
+  return {
+    disabled: false,
+    disabledReason: null,
+    label: input.armed && input.confirmLabel ? input.confirmLabel : input.label,
+  };
+}
+
+export function canStartInteractionResolve(input: {
+  requestId?: string | null;
+  submittingRequestId?: string | null;
+}): boolean {
+  return !!input.requestId && input.submittingRequestId !== input.requestId;
+}
+
+export function buildPermissionDecisionSummary(input: {
+  toolName: string;
+  riskSummary: string | null;
+  canAlwaysAllow: boolean;
+}): InteractionDecisionSummary {
+  if (input.riskSummary) {
+    return {
+      title: '高风险授权需要二次确认',
+      detail: '先核对命令内容，再点一次确认允许；不确定就拒绝。',
+    };
+  }
+  if (input.canAlwaysAllow) {
+    return {
+      title: '可以只允许一次，也可以本会话总是允许',
+      detail: `工具: ${input.toolName}`,
+    };
+  }
+  return {
+    title: '允许后电脑端会继续执行',
+    detail: `工具: ${input.toolName}`,
+  };
+}
+
+export function buildPermissionReviewPresentation(
+  request: InteractionRequestLike,
+): PermissionReviewPresentation {
+  const toolName = permissionToolName(request);
+  const input = permissionInput(request);
+  const riskSummary = permissionRiskSummary(request);
+  const canAlwaysAllow = sessionScopedPermissionSuggestions(request.suggestions).length > 0;
+
+  return {
+    canAlwaysAllow,
+    code: formatPermissionInput(toolName, input),
+    description: permissionDescription(request),
+    riskSummary,
+    summary: buildPermissionDecisionSummary({ toolName, riskSummary, canAlwaysAllow }),
+    title: permissionTitle(request),
+    toolName,
+  };
+}
+
+export function buildAskQuestionProgressSummary(input: {
+  currentIndex: number;
+  total: number;
+  multiSelect: boolean;
+}): InteractionDecisionSummary {
+  const total = Math.max(1, input.total);
+  const current = Math.min(Math.max(0, input.currentIndex), total - 1) + 1;
+  return {
+    title: `第 ${current}/${total} 个问题`,
+    detail: input.multiSelect ? '可多选，也可以输入其他回答。' : '选择一个回答，或输入其他回答。',
+  };
+}
+
+export function buildAskQuestionReviewPresentation(input: {
+  currentIndex: number;
+  questions: readonly AskQuestion[];
+}): AskQuestionReviewPresentation {
+  const totalCount = input.questions.length;
+  if (totalCount === 0) {
+    return {
+      allowsCustomAnswer: false,
+      current: null,
+      currentIndex: 0,
+      currentNumber: 0,
+      header: null,
+      multiSelect: false,
+      optionCount: 0,
+      pageLabel: '0/0',
+      summary: {
+        title: '没有具体问题',
+        detail: '可以提交空回答让电脑端继续。',
+      },
+      title: 'Agent 正在等待确认',
+      totalCount: 0,
+    };
+  }
+
+  const currentIndex = Math.min(Math.max(0, input.currentIndex), totalCount - 1);
+  const current = input.questions[currentIndex] ?? null;
+  const multiSelect = current?.multiSelect === true;
+  const optionCount = current?.options?.length ?? 0;
+  const currentNumber = currentIndex + 1;
+
+  return {
+    allowsCustomAnswer: true,
+    current,
+    currentIndex,
+    currentNumber,
+    header: current?.header?.trim() || null,
+    multiSelect,
+    optionCount,
+    pageLabel: `${currentNumber}/${totalCount}`,
+    summary: buildAskQuestionProgressSummary({
+      currentIndex,
+      total: totalCount,
+      multiSelect,
+    }),
+    title: current?.question || 'Agent 正在等待确认',
+    totalCount,
+  };
+}
+
+export function buildPlanReviewDecisionSummary(input: {
+  outlineCount: number;
+  hasFilePath: boolean;
+  edited: boolean;
+}): InteractionDecisionSummary {
+  const outline = input.outlineCount > 0 ? `${input.outlineCount} 个章节` : '无章节目录';
+  const file = input.hasFilePath ? '有计划文件' : '无计划文件路径';
+  return {
+    title: input.edited ? '已编辑计划，批准后按当前版本执行' : '批准后电脑端会按计划继续执行',
+    detail: `${outline} · ${file}`,
+  };
+}
+
+export function buildPlanReviewEvidencePresentation(input: {
+  edited: boolean;
+  filePath?: string | null;
+  maxOutlineItems?: number;
+  plan: string;
+}): PlanReviewEvidencePresentation {
+  const outline = extractPlanOutline(input.plan);
+  const maxOutlineItems = Math.max(0, Math.floor(input.maxOutlineItems ?? 3));
+  const filePath = input.filePath?.trim() || null;
+  const outlineItems = maxOutlineItems === 0 ? [] : outline.slice(0, maxOutlineItems);
+
+  return {
+    compactPath: filePath ? compactPlanReviewPath(filePath) : null,
+    fileName: filePath ? basenameFromPath(filePath) : null,
+    filePath,
+    hasPlanText: input.plan.trim().length > 0,
+    outlineItems,
+    outlineOverflowCount: Math.max(0, outline.length - outlineItems.length),
+    outlineTotalCount: outline.length,
+    summary: buildPlanReviewDecisionSummary({
+      edited: input.edited,
+      hasFilePath: !!filePath,
+      outlineCount: outline.length,
+    }),
+  };
+}
+
+export function buildIssueConfirmDecisionSummary(input: {
+  type: IssueDraft['type'];
+  canSubmit: boolean;
+}): InteractionDecisionSummary {
+  return {
+    title: input.canSubmit ? '草稿完整，可以确认提交' : '补齐标题和正文后才能提交',
+    detail: input.type === 'bug' ? '类型: Bug' : '类型: Feature',
+  };
+}
+
+export function buildIssueConfirmReviewPresentation(input: {
+  draft: IssueDraft;
+  env: IssueEnv;
+  uiLanguage?: string;
+}): IssueConfirmReviewPresentation {
+  const title = input.draft.title.trim();
+  const body = input.draft.body.trim();
+  const canSubmit = title.length > 0 && body.length > 0;
+  const envParts = [
+    input.env.appVersion,
+    input.env.platform,
+    input.env.arch,
+    input.env.osVersion,
+    input.uiLanguage,
+  ].filter((part): part is string => typeof part === 'string' && part.trim().length > 0);
+
+  return {
+    bodyCharCount: body.length,
+    canSubmit,
+    envLabel: envParts.join(' / '),
+    issueTypeLabel: input.draft.type === 'bug' ? 'Bug' : 'Feature',
+    summary: buildIssueConfirmDecisionSummary({
+      type: input.draft.type,
+      canSubmit,
+    }),
+    titleCharCount: title.length,
+  };
+}
+
+export function interactionKind(item: PendingInteractionLike): string {
+  return typeof item.request.kind === 'string' ? item.request.kind : 'interaction';
+}
+
+export function interactionDisplayTitle(kind: string): string {
+  if (kind === 'plan_review') return '需要确认执行计划';
+  if (kind === 'permission') return '需要授权电脑端操作';
+  if (kind === 'ask_user_question') return '需要回答 Agent 问题';
+  if (kind === 'issue_confirm') return '需要确认 Issue 内容';
+  return '需要处理远程请求';
+}
+
+export function interactionDisplayHint(kind: string, readOnly = false): string {
+  if (readOnly) return '协作只读模式，仅展示电脑端请求。';
+  if (kind === 'plan_review') return '先看计划，必要时反馈修改，确认后电脑端才继续执行。';
+  if (kind === 'permission') return '只把本次决定回传给当前电脑端会话。';
+  if (kind === 'ask_user_question') return '回答会保存草稿,提交后电脑端继续。';
+  if (kind === 'issue_confirm') return '确认标题和正文后再提交。';
+  return '手机版会按桌面端的请求顺序处理。';
+}
+
+export function interactionKindLabel(kind: string): string {
+  if (kind === 'plan_review') return '计划';
+  if (kind === 'permission') return '授权';
+  if (kind === 'ask_user_question') return '问题';
+  if (kind === 'issue_confirm') return 'Issue';
+  return '请求';
+}
+
+export function buildPendingInteractionQueuePresentation(
+  interactions: readonly PendingInteractionLike[],
+  options: {
+    maxVisible?: number;
+    readOnly?: boolean;
+  } = {},
+): PendingInteractionQueuePresentation {
+  const sorted = sortPendingInteractions(interactions);
+  const totalCount = sorted.length;
+  const maxVisible = Math.max(1, options.maxVisible ?? 4);
+  const readOnly = options.readOnly === true;
+  const items = sorted.slice(0, maxVisible).map((item, index) => {
+    const kind = interactionKind(item);
+    return {
+      active: index === 0,
+      kind,
+      label: interactionKindLabel(kind),
+      positionLabel: interactionPositionLabel(index),
+      requestId: readRequestId(item),
+      title: interactionDisplayTitle(kind),
+    };
+  });
+  const active = items[0] ?? null;
+  const activeKind = active?.kind ?? 'interaction';
+
+  return {
+    active,
+    countLabel: totalCount > 1 ? `${totalCount} 个` : '当前',
+    hint: interactionDisplayHint(activeKind, readOnly),
+    items,
+    overflowCount: Math.max(0, totalCount - items.length),
+    readOnly,
+    title: active ? active.title : '没有待处理请求',
+    totalCount,
+  };
+}
+
+const INTERACTION_PRIORITY: Record<string, number> = {
+  plan_review: 0,
+  permission: 1,
+  ask_user_question: 2,
+  issue_confirm: 3,
+};
+
+export function interactionPriority(item: PendingInteractionLike): number {
+  return INTERACTION_PRIORITY[interactionKind(item)] ?? 100;
+}
+
+export function sortPendingInteractions(
+  interactions: readonly PendingInteractionLike[],
+): PendingInteractionLike[] {
+  return interactions
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => interactionPriority(a.item) - interactionPriority(b.item) || a.index - b.index)
+    .map(({ item }) => item);
+}
+
+export function selectActivePendingInteraction(
+  interactions: readonly PendingInteractionLike[],
+): PendingInteractionLike | null {
+  return sortPendingInteractions(interactions)[0] ?? null;
+}
+
+export function readRequestId(item: PendingInteractionLike): string | null {
+  const requestId = item.request.requestId;
+  return typeof requestId === 'string' && requestId.length > 0 ? requestId : null;
+}
+
+function interactionPositionLabel(index: number): string {
+  if (index === 0) return '当前';
+  if (index === 1) return '接着';
+  return `第 ${index + 1}`;
+}
+
+export function formatPermissionInput(toolName: string, input: Record<string, unknown>): string {
+  switch (toolName) {
+    case 'Bash':
+      return typeof input.command === 'string' ? input.command : stringifyCompact(input);
+    case 'Read':
+    case 'Edit':
+    case 'Write':
+      return typeof input.file_path === 'string' ? input.file_path : stringifyCompact(input);
+    case 'Glob':
+    case 'Grep':
+      return typeof input.pattern === 'string' ? input.pattern : stringifyCompact(input);
+    default: {
+      const text = stringifyCompact(input);
+      return text.length > 500 ? `${text.slice(0, 500)}...` : text;
+    }
+  }
+}
+
+export function permissionTitle(request: InteractionRequestLike): string {
+  const explicit = readString(request.title);
+  if (explicit) return explicit;
+  const displayName = readString(request.displayName);
+  const toolName = readString(request.toolName) || 'tool';
+  return `允许使用 ${displayName || toolName}?`;
+}
+
+export function permissionDescription(request: InteractionRequestLike): string | null {
+  return readString(request.description);
+}
+
+export function permissionToolName(request: InteractionRequestLike): string {
+  return readString(request.toolName) || 'Tool';
+}
+
+export function permissionInput(request: InteractionRequestLike): Record<string, unknown> {
+  return isRecord(request.input) ? request.input : {};
+}
+
+export function permissionRiskSummary(request: InteractionRequestLike): string | null {
+  const toolName = permissionToolName(request);
+  const input = permissionInput(request);
+  if (toolName !== 'Bash') return null;
+  const command = typeof input.command === 'string' ? input.command.trim() : '';
+  if (!command) return null;
+  if (!isHighRiskShellCommand(command)) return null;
+  return '这个命令可能修改系统、仓库或外部服务状态。允许前请确认你信任当前会话和命令内容。';
+}
+
+export function sessionScopedPermissionSuggestions(suggestions: unknown): unknown[] {
+  if (!Array.isArray(suggestions)) return [];
+  return suggestions.filter((suggestion) =>
+    isRecord(suggestion) && suggestion.destination === 'session'
+  );
+}
+
+export function buildPermissionDecision(
+  behavior: 'allow' | 'deny',
+  opts: {
+    reason?: string;
+    updatedInput?: Record<string, unknown>;
+    permissionUpdates?: unknown[];
+  } = {},
+): Record<string, unknown> {
+  return {
+    kind: 'permission',
+    behavior,
+    updatedInput: opts.updatedInput,
+    reason: opts.reason,
+    permissionUpdates: opts.permissionUpdates && opts.permissionUpdates.length > 0
+      ? opts.permissionUpdates
+      : undefined,
+  };
+}
+
+function isHighRiskShellCommand(command: string): boolean {
+  return /(^|[;&|]\s*)(sudo|rm\s+-[^\n;|&]*r|git\s+reset\s+--hard|git\s+push|curl\b[^\n|]*\|\s*(sh|bash)|wget\b[^\n|]*\|\s*(sh|bash)|chmod\s+-R|chown\s+-R|pkill|killall)\b/i
+    .test(command);
+}
+
+export function normalizeAskQuestions(value: unknown): AskQuestion[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const question = readString(item.question);
+    if (!question) return [];
+    const options = Array.isArray(item.options)
+      ? item.options.flatMap((option) => {
+        if (!isRecord(option)) return [];
+        const label = readString(option.label);
+        if (!label) return [];
+        const description = readString(option.description);
+        return [{ label, ...(description ? { description } : {}) }];
+      })
+      : undefined;
+    return [{
+      question,
+      header: readString(item.header) ?? undefined,
+      options,
+      multiSelect: item.multiSelect === true,
+    }];
+  });
+}
+
+export function answerKey(question: AskQuestion): string {
+  return question.question;
+}
+
+export function encodeMultiSelectAnswer(
+  options: readonly { label: string }[],
+  selectedLabels: ReadonlySet<string>,
+  customInput: string,
+): string {
+  const parts = options
+    .filter((option) => selectedLabels.has(option.label))
+    .map((option) => option.label);
+  const custom = customInput.trim();
+  if (custom) parts.push(custom);
+  return JSON.stringify(parts);
+}
+
+export function selectionFromAnswer(question: AskQuestion, answer: string | undefined): {
+  selectedLabels: Set<string>;
+  customInput: string;
+  showCustomInput: boolean;
+} {
+  const options = question.options ?? [];
+  const optionLabels = new Set(options.map((option) => option.label));
+  if (!answer) {
+    return { selectedLabels: new Set(), customInput: '', showCustomInput: false };
+  }
+  if (question.multiSelect) {
+    try {
+      const parsed = JSON.parse(answer);
+      if (Array.isArray(parsed)) {
+        const labels = parsed.filter((item): item is string => typeof item === 'string');
+        const custom = labels.find((label) => !optionLabels.has(label)) ?? '';
+        return {
+          selectedLabels: new Set(labels.filter((label) => optionLabels.has(label))),
+          customInput: custom,
+          showCustomInput: custom.length > 0,
+        };
+      }
+    } catch {
+      return { selectedLabels: new Set(), customInput: '', showCustomInput: false };
+    }
+  }
+  if (!optionLabels.has(answer)) {
+    return { selectedLabels: new Set(), customInput: answer, showCustomInput: true };
+  }
+  return { selectedLabels: new Set([answer]), customInput: '', showCustomInput: false };
+}
+
+export function buildAskUserQuestionDecision(answers: Record<string, string>): Record<string, unknown> {
+  return { kind: 'ask_user_question', answers };
+}
+
+export function planReviewPlan(request: InteractionRequestLike): string {
+  return readString(request.plan) ?? '';
+}
+
+export function planReviewFilePath(request: InteractionRequestLike): string {
+  return readString(request.planFilePath) ?? '';
+}
+
+export function buildPlanReviewDecision(
+  approved: boolean,
+  plan: string,
+  feedback?: string,
+): Record<string, unknown> {
+  const trimmedFeedback = feedback?.trim() ?? '';
+  return {
+    kind: 'plan_review',
+    behavior: approved ? 'allow' : 'deny',
+    editedPlan: approved ? plan : undefined,
+    reason: approved ? undefined : trimmedFeedback || undefined,
+  };
+}
+
+/**
+ * Strip an optional ATX closing sequence from a heading title ("## Title ##" → "Title"):
+ * trailing whitespace, then a '#' run, then the whitespace separating it from the title.
+ *
+ * Linear replacement for `value.replace(/\s+#+\s*$/, '')` — that regex backtracks
+ * polynomially on uncontrolled heading text with long whitespace runs (CodeQL ReDoS). Like
+ * the original, the '#' run is only stripped when it is whitespace-separated from the title,
+ * so text such as "Title##" is preserved.
+ */
+function stripAtxHeadingClosing(value: string): string {
+  const isWs = (ch: string) => /\s/.test(ch);
+  let end = value.length;
+  while (end > 0 && isWs(value[end - 1])) end -= 1;
+  const afterTrailingWs = end;
+  while (end > 0 && value[end - 1] === '#') end -= 1;
+  if (end === afterTrailingWs) return value; // no '#' run → leave for the caller's trim()
+  if (end === 0 || !isWs(value[end - 1])) return value; // '#'s not whitespace-separated → keep
+  while (end > 0 && isWs(value[end - 1])) end -= 1;
+  return value.slice(0, end);
+}
+
+export function extractPlanOutline(markdown: string): PlanOutlineItem[] {
+  const lines = markdown.split(/\r?\n/);
+  const items: PlanOutlineItem[] = [];
+  let fenceMarker: '```' | '~~~' | null = null;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const fence = readFenceMarker(line);
+    if (fenceMarker) {
+      if (fence === fenceMarker) fenceMarker = null;
+      continue;
+    }
+    if (fence) {
+      fenceMarker = fence;
+      continue;
+    }
+
+    // `\s+(\S.*)` (not `\s+(.+)`) keeps the separator and title char-classes disjoint so the
+    // match stays linear — `\s+` vs `.+` overlap on whitespace and CodeQL flags it as a
+    // polynomial ReDoS. The title is trimmed below, so requiring a non-space first char is fine.
+    const match = /^(#{1,3})\s+(\S.*)$/.exec(line);
+    if (!match) continue;
+    const title = stripAtxHeadingClosing(match[2]).trim();
+    if (!title) continue;
+    const lineNumber = index + 1;
+    items.push({
+      id: `plan-heading-${lineNumber}`,
+      title,
+      level: match[1].length as 1 | 2 | 3,
+      line: lineNumber,
+      preview: readHeadingPreview(lines, index + 1),
+    });
+  }
+
+  return items;
+}
+
+export function normalizeIssueConfirm(request: InteractionRequestLike): IssueConfirmPayload | null {
+  if (!isRecord(request.draft)) return null;
+  const title = readString(request.draft.title);
+  const body = readString(request.draft.body);
+  const type = request.draft.type === 'feature' ? 'feature' : request.draft.type === 'bug' ? 'bug' : null;
+  if (!title || !body || !type) return null;
+  const env = isRecord(request.env) ? request.env : {};
+  return {
+    draft: { title, body, type },
+    env: {
+      appVersion: readString(env.appVersion) ?? 'unknown',
+      platform: readString(env.platform) ?? 'unknown',
+      arch: readString(env.arch) ?? 'unknown',
+      osVersion: readString(env.osVersion) ?? undefined,
+    },
+  };
+}
+
+export function buildIssueConfirmDecision(
+  confirmed: true,
+  draft: IssueDraft,
+  uiLanguage?: string,
+): Record<string, unknown>;
+export function buildIssueConfirmDecision(
+  confirmed: false,
+): Record<string, unknown>;
+export function buildIssueConfirmDecision(
+  confirmed: boolean,
+  draft?: IssueDraft,
+  uiLanguage = currentUiLanguage(),
+): Record<string, unknown> {
+  if (!confirmed || !draft) return { confirmed: false };
+  return {
+    confirmed: true,
+    title: draft.title.trim(),
+    body: draft.body.trim(),
+    type: draft.type,
+    uiLanguage,
+  };
+}
+
+export function currentUiLanguage(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().locale || 'zh-CN';
+  } catch {
+    return 'zh-CN';
+  }
+}
+
+function stringifyCompact(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
+
+function readHeadingPreview(lines: string[], startIndex: number): string {
+  let fenceMarker: '```' | '~~~' | null = null;
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const line = lines[index];
+    const fence = readFenceMarker(line);
+    if (fenceMarker) {
+      if (fence === fenceMarker) fenceMarker = null;
+      continue;
+    }
+    if (fence) {
+      fenceMarker = fence;
+      continue;
+    }
+    if (/^#{1,6}\s+/.test(line)) return '';
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    return trimmed.length > 80 ? `${trimmed.slice(0, 80)}...` : trimmed;
+  }
+  return '';
+}
+
+function compactPlanReviewPath(filePath: string): string {
+  const normalized = filePath.trim();
+  if (normalized.length <= 42) return normalized;
+  const name = basenameFromPath(normalized);
+  if (name.length >= 36) return `...${name.slice(-36)}`;
+  return `.../${name}`;
+}
+
+function basenameFromPath(filePath: string): string {
+  const parts = filePath.split(/[\\/]+/).filter(Boolean);
+  return parts[parts.length - 1] ?? filePath;
+}
+
+function readFenceMarker(line: string): '```' | '~~~' | null {
+  const match = /^\s{0,3}(```|~~~)/.exec(line);
+  return match ? match[1] as '```' | '~~~' : null;
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}

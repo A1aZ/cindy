@@ -1,0 +1,696 @@
+/**
+ * device-link 被控端 dispatch 单测:runInvoke 的双层校验(被控开关 + allowlist)
+ * 与 invoke-registry 的 dispatchLocalInvoke。
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+let remoteControlEnabled = true;
+let revokedControllers: string[] = [];
+vi.mock('../device-link/settings-store', () => ({
+  readDeviceLinkSettings: () => ({ remoteControlEnabled, revokedControllers }),
+}));
+vi.mock('../logger', () => ({
+  createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
+}));
+vi.mock('electron', () => ({
+  ipcMain: { handle: vi.fn(), removeHandler: vi.fn() },
+  app: { getVersion: () => '1.0.0' },
+}));
+// media:fetch 拦截走 mediaFetch.fetchLocalMediaToOss;mock 掉避免拉起 OSS/cache-store 真实依赖。
+const fetchLocalMediaToOssMock = vi.hoisted(() => vi.fn());
+vi.mock('../device-link/mediaFetch', () => ({ fetchLocalMediaToOss: fetchLocalMediaToOssMock }));
+const transcribeRemoteVoiceInputMock = vi.hoisted(() => vi.fn());
+vi.mock('../device-link/voiceTranscribe', () => ({ transcribeRemoteVoiceInput: transcribeRemoteVoiceInputMock }));
+const adviseAndRecordVoiceInputDictionaryLearningMock = vi.hoisted(() => vi.fn());
+vi.mock('../voice-input/index.js', () => ({
+  adviseAndRecordVoiceInputDictionaryLearning: adviseAndRecordVoiceInputDictionaryLearningMock,
+}));
+
+import {
+  runInvoke,
+  setRemoteWorkingDirGuard,
+  setRemoteSettingsPersist,
+  handleControllerOffline,
+  __testing as dispatchTesting,
+  type ActiveController,
+} from '../device-link/dispatch';
+import { __testing as registry, dispatchLocalInvoke } from '../device-link/invoke-registry';
+import { getDeviceLinkInvokeContext, isDeviceLinkInvoke } from '../device-link/invoke-context';
+
+beforeEach(() => {
+  remoteControlEnabled = true;
+  revokedControllers = [];
+  registry.reset();
+  dispatchTesting.reset(); // 清订阅 registry / tap / onControllersChanged / activeClient
+  setRemoteWorkingDirGuard(null); // 默认不注入,行为同生产未就绪态(放行)
+  setRemoteSettingsPersist(null);
+  fetchLocalMediaToOssMock.mockReset();
+  transcribeRemoteVoiceInputMock.mockReset();
+  adviseAndRecordVoiceInputDictionaryLearningMock.mockReset();
+});
+
+describe('runInvoke 双层校验', () => {
+  it('开关关闭 → REMOTE_DISABLED', async () => {
+    remoteControlEnabled = false;
+    const r = await runInvoke('ctrl', { channel: 'maker:list-active', args: [] });
+    expect(r).toMatchObject({ ok: false, error: { code: 'REMOTE_DISABLED' } });
+  });
+
+  it('非 allowlist channel → CHANNEL_NOT_ALLOWED', async () => {
+    const r = await runInvoke('ctrl', { channel: 'shell:open-path', args: [] });
+    expect(r).toMatchObject({ ok: false, error: { code: 'CHANNEL_NOT_ALLOWED' } });
+  });
+
+  it('已撤销访问权限的控制端 → ACCESS_REVOKED(早于 allowlist 判定)', async () => {
+    revokedControllers = ['ctrl'];
+    registry.register('maker:list-active', () => ['s']); // 即便 channel 合法也被挡
+    const r = await runInvoke('ctrl', { channel: 'maker:list-active', args: [] });
+    expect(r).toMatchObject({ ok: false, error: { code: 'ACCESS_REVOKED' } });
+  });
+
+  it('黑名单只挡命中的控制端,其它控制端不受影响', async () => {
+    revokedControllers = ['other-ctrl'];
+    registry.register('maker:list-active', () => ['s']);
+    const r = await runInvoke('ctrl', { channel: 'maker:list-active', args: [] });
+    expect(r).toEqual({ ok: true, result: ['s'] });
+  });
+
+  it('allowlist channel:dispatch 到本机 handler 并回传 result', async () => {
+    registry.register('maker:list-active', () => ['session-x']);
+    const r = await runInvoke('ctrl', { channel: 'maker:list-active', args: [] });
+    expect(r).toEqual({ ok: true, result: ['session-x'] });
+  });
+
+  it('远程 invoke 期间给本机 handler 暴露 device-link 上下文,结束后不泄漏', async () => {
+    registry.register('maker:list-active', () => ({
+      active: isDeviceLinkInvoke(),
+      context: getDeviceLinkInvokeContext(),
+    }));
+
+    const r = await runInvoke('ctrl-a', { channel: 'maker:list-active', args: [] });
+
+    expect(r).toEqual({
+      ok: true,
+      result: {
+        active: true,
+        context: { controllerDeviceId: 'ctrl-a', channel: 'maker:list-active' },
+      },
+    });
+    expect(isDeviceLinkInvoke()).toBe(false);
+  });
+
+  it('本机 handler 抛 throwIpcError → IPC_ERROR 透传 [CODE] message', async () => {
+    registry.register('maker:send', () => {
+      const e = new Error('[SESSION_RUNNING] busy');
+      throw e;
+    });
+    const r = await runInvoke('ctrl', { channel: 'maker:send', args: [] });
+    expect(r).toMatchObject({
+      ok: false,
+      error: { code: 'IPC_ERROR', message: '[SESSION_RUNNING] busy' },
+    });
+  });
+
+  it('handler 不存在(未注册)→ IPC_ERROR NOT_FOUND', async () => {
+    const r = await runInvoke('ctrl', { channel: 'maker:create-session', args: [] });
+    expect(r).toMatchObject({ ok: false, error: { code: 'IPC_ERROR' } });
+    expect((r as { error: { message: string } }).error.message).toMatch(/NOT_FOUND/);
+  });
+
+  it('malformed payload → INTERNAL', async () => {
+    const r = await runInvoke('ctrl', undefined);
+    expect(r).toMatchObject({ ok: false, error: { code: 'INTERNAL' } });
+  });
+
+  it('create-session 的 workingDir 不在被控端已知集合 → CHANNEL_NOT_ALLOWED,不落到 handler', async () => {
+    const handler = vi.fn(() => ({ session: { id: 's1' } }));
+    registry.register('maker:create-session', handler as never);
+    setRemoteWorkingDirGuard((dir) => dir === '/allowed/proj');
+
+    const denied = await runInvoke('ctrl', {
+      channel: 'maker:create-session',
+      args: [{ workingDir: '/etc' }],
+    });
+    expect(denied).toMatchObject({ ok: false, error: { code: 'CHANNEL_NOT_ALLOWED' } });
+    expect(handler).not.toHaveBeenCalled();
+
+    const allowed = await runInvoke('ctrl', {
+      channel: 'maker:create-session',
+      args: [{ workingDir: '/allowed/proj' }],
+    });
+    expect(allowed).toMatchObject({ ok: true });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('未注入 workingDir guard 时不阻断 create-session(生产未就绪态放行)', async () => {
+    registry.register('maker:create-session', () => ({ session: { id: 's2' } }));
+    const r = await runInvoke('ctrl', {
+      channel: 'maker:create-session',
+      args: [{ workingDir: '/whatever' }],
+    });
+    expect(r).toMatchObject({ ok: true });
+  });
+});
+
+describe('runInvoke media:fetch 拦截(入方向媒体)', () => {
+  it('device-link:media:fetch → 调 fetchLocalMediaToOss 并回 { ok, result },不落 ipcMain', async () => {
+    fetchLocalMediaToOssMock.mockResolvedValue({ ossKey: 'k', mimeType: 'image/png', size: 10 });
+    const r = await runInvoke('ctrl', {
+      channel: 'device-link:media:fetch',
+      args: [{ url: 'xdt-image://s/x.png' }],
+    });
+    expect(fetchLocalMediaToOssMock).toHaveBeenCalledWith({ url: 'xdt-image://s/x.png' });
+    expect(r).toEqual({ ok: true, result: { ossKey: 'k', mimeType: 'image/png', size: 10 } });
+  });
+
+  it('解析/上传失败 → MEDIA_FETCH_FAILED', async () => {
+    fetchLocalMediaToOssMock.mockRejectedValue(new Error('boom'));
+    const r = await runInvoke('ctrl', { channel: 'device-link:media:fetch', args: [{ url: 'bad' }] });
+    expect(r).toMatchObject({ ok: false, error: { code: 'MEDIA_FETCH_FAILED', message: 'boom' } });
+  });
+
+  it('已撤销控制端 media:fetch → ACCESS_REVOKED,不触发解析', async () => {
+    revokedControllers = ['ctrl'];
+    const r = await runInvoke('ctrl', { channel: 'device-link:media:fetch', args: [{ url: 'x' }] });
+    expect(r).toMatchObject({ ok: false, error: { code: 'ACCESS_REVOKED' } });
+    expect(fetchLocalMediaToOssMock).not.toHaveBeenCalled();
+  });
+
+  it('开关关闭 → REMOTE_DISABLED,不触发解析', async () => {
+    remoteControlEnabled = false;
+    const r = await runInvoke('ctrl', { channel: 'device-link:media:fetch', args: [{ url: 'x' }] });
+    expect(r).toMatchObject({ ok: false, error: { code: 'REMOTE_DISABLED' } });
+    expect(fetchLocalMediaToOssMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('runInvoke voice:transcribe 拦截(手机语音输入)', () => {
+  it('device-link:voice:transcribe → 调 transcribeRemoteVoiceInput 并回文本,不落 ipcMain', async () => {
+    transcribeRemoteVoiceInputMock.mockResolvedValue({
+      text: '移动端语音文本',
+      provider: 'litellm-batch',
+      model: 'elevenlabs/scribe_v2',
+      audioBytes: 1024,
+    });
+    const req = { ossKey: 'cindy/device-link/u/voice.m4a', mimeType: 'audio/mp4' };
+    const r = await runInvoke('ctrl', {
+      channel: 'device-link:voice:transcribe',
+      args: [req],
+    });
+    expect(transcribeRemoteVoiceInputMock).toHaveBeenCalledWith(req);
+    expect(r).toEqual({
+      ok: true,
+      result: {
+        text: '移动端语音文本',
+        provider: 'litellm-batch',
+        model: 'elevenlabs/scribe_v2',
+        audioBytes: 1024,
+      },
+    });
+  });
+
+  it('转写失败 → VOICE_TRANSCRIBE_FAILED', async () => {
+    transcribeRemoteVoiceInputMock.mockRejectedValue(new Error('asr down'));
+    const r = await runInvoke('ctrl', {
+      channel: 'device-link:voice:transcribe',
+      args: [{ ossKey: 'k' }],
+    });
+    expect(r).toMatchObject({ ok: false, error: { code: 'VOICE_TRANSCRIBE_FAILED', message: 'asr down' } });
+  });
+
+  it('已撤销控制端 voice:transcribe → ACCESS_REVOKED,不触发转写', async () => {
+    revokedControllers = ['ctrl'];
+    const r = await runInvoke('ctrl', {
+      channel: 'device-link:voice:transcribe',
+      args: [{ ossKey: 'k' }],
+    });
+    expect(r).toMatchObject({ ok: false, error: { code: 'ACCESS_REVOKED' } });
+    expect(transcribeRemoteVoiceInputMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('runInvoke voice:credential-sync 拦截(能力已下线,保留可读拒绝)', () => {
+  it('device-link:voice:credential-sync → VOICE_CREDENTIAL_SYNC_REMOVED(不再穿透桌面 key)', async () => {
+    const r = await runInvoke('ctrl', {
+      channel: 'device-link:voice:credential-sync',
+      args: [],
+    });
+    expect(r).toMatchObject({
+      ok: false,
+      error: {
+        code: 'VOICE_CREDENTIAL_SYNC_REMOVED',
+        message: '手机语音输入已改用 Cindy 官方语音服务,请升级手机版。',
+      },
+    });
+  });
+
+  it('已撤销控制端 voice:credential-sync → ACCESS_REVOKED(早于能力下线拒绝)', async () => {
+    revokedControllers = ['ctrl'];
+    const r = await runInvoke('ctrl', {
+      channel: 'device-link:voice:credential-sync',
+      args: [],
+    });
+    expect(r).toMatchObject({ ok: false, error: { code: 'ACCESS_REVOKED' } });
+  });
+});
+
+describe('runInvoke voice:dictionary-learning 拦截(手机语音词典学习回写)', () => {
+  it('device-link:voice:dictionary-learning → 调桌面词典学习 advisor 并回写桌面词典', async () => {
+    adviseAndRecordVoiceInputDictionaryLearningMock.mockResolvedValue({
+      ok: true,
+      actions: [{
+        action: 'add_entry',
+        term: 'XDMaker',
+        aliases: ['xd maker'],
+        type: 'product_name',
+        confidence: 'high',
+      }],
+      elapsedMs: 42,
+    });
+    const req = {
+      source: 'mobile',
+      rawTranscriptText: 'xd maker',
+      beforeText: 'XDMaker',
+      afterText: 'XDMaker',
+      context: {
+        uiLanguage: 'zh-CN',
+        sourceLanguage: 'zh-CN',
+        selectionBefore: '配置',
+        selectionAfter: '远程控制',
+      },
+    };
+
+    const r = await runInvoke('ctrl', {
+      channel: 'device-link:voice:dictionary-learning',
+      args: [req],
+    });
+
+    expect(adviseAndRecordVoiceInputDictionaryLearningMock).toHaveBeenCalledWith(
+      {
+        source: 'in_app',
+        rawTranscriptText: 'xd maker',
+        beforeText: 'XDMaker',
+        afterText: 'XDMaker',
+        context: req.context,
+      },
+      {
+        senderId: 'ctrl',
+        sourceLabel: 'mobile',
+      },
+    );
+    expect(r).toEqual({
+      ok: true,
+      result: {
+        ok: true,
+        actions: [{
+          action: 'add_entry',
+          term: 'XDMaker',
+          aliases: ['xd maker'],
+          type: 'product_name',
+          confidence: 'high',
+        }],
+        elapsedMs: 42,
+      },
+    });
+  });
+
+  it('词典学习失败 → VOICE_DICTIONARY_LEARNING_FAILED', async () => {
+    adviseAndRecordVoiceInputDictionaryLearningMock.mockRejectedValue(new Error('advisor down'));
+    const r = await runInvoke('ctrl', {
+      channel: 'device-link:voice:dictionary-learning',
+      args: [{ source: 'mobile', beforeText: 'a', afterText: 'b' }],
+    });
+    expect(r).toMatchObject({
+      ok: false,
+      error: { code: 'VOICE_DICTIONARY_LEARNING_FAILED', message: 'advisor down' },
+    });
+  });
+
+  it('已撤销控制端 voice:dictionary-learning → ACCESS_REVOKED,不触发词典学习', async () => {
+    revokedControllers = ['ctrl'];
+    const r = await runInvoke('ctrl', {
+      channel: 'device-link:voice:dictionary-learning',
+      args: [{ source: 'mobile', beforeText: 'a', afterText: 'b' }],
+    });
+    expect(r).toMatchObject({ ok: false, error: { code: 'ACCESS_REVOKED' } });
+    expect(adviseAndRecordVoiceInputDictionaryLearningMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('dispatchLocalInvoke', () => {
+  it('转发 args 给 handler 并 await 异步结果', async () => {
+    const handler = vi.fn(async (_e: unknown, a: number, b: number) => a + b);
+    registry.register('maker:set-model', handler as never);
+    const result = await dispatchLocalInvoke('maker:set-model', [2, 3]);
+    expect(result).toBe(5);
+    // 合成 event 作为首参
+    expect(handler).toHaveBeenCalledWith(expect.anything(), 2, 3);
+  });
+
+  it('未注册 channel 抛 [NOT_FOUND]', async () => {
+    await expect(dispatchLocalInvoke('nope:channel', [])).rejects.toThrowError(/\[NOT_FOUND\]/);
+  });
+});
+
+// ─── 被控端控制链路生命周期(M5)──────────────────────────────────────────────
+
+import {
+  wireInboundDispatch,
+  setControllersChangedListener,
+  setSubscribedControllersChangedListener,
+  setSessionsSubscribedListener,
+  getActiveControllers,
+  getSubscribedControllers,
+  dropAllControllers,
+} from '../device-link/dispatch';
+import { hasBroadcastTapListener, tapWindowBroadcast } from '../device-link/broadcast-tap';
+import { SESSION_ACTIVITY_CHANNEL, type Envelope } from '@cindy/device-link';
+
+/** 最小 fake client:捕获 onFrame handler,记录出站调用 */
+function makeFakeClient() {
+  let frameHandler: ((env: Envelope) => void) | null = null;
+  const calls = {
+    linkAccept: [] as Array<{ dst: string; requestId: string }>,
+    closed: [] as Array<{ dst: string; reason: string }>,
+    push: [] as Array<{ dst: string; channel: string; payload: unknown }>,
+    invokeResult: [] as Array<{ dst: string; requestId: string; payload: unknown }>,
+  };
+  const client = {
+    onFrame: (cb: (env: Envelope) => void) => {
+      frameHandler = cb;
+      return () => {};
+    },
+    sendLinkAccept: (dst: string, requestId: string) => calls.linkAccept.push({ dst, requestId }),
+    closeLink: (dst: string, reason: string) => calls.closed.push({ dst, reason }),
+    sendPush: (dst: string, channel: string, payload: unknown) =>
+      calls.push.push({ dst, channel, payload }),
+    sendInvokeResult: (dst: string, requestId: string, payload: unknown) =>
+      calls.invokeResult.push({ dst, requestId, payload }),
+  };
+  return {
+    client: client as never,
+    calls,
+    feed: (env: Envelope) => frameHandler?.(env),
+  };
+}
+
+describe('被控端控制链路生命周期', () => {
+  beforeEach(() => {
+    setControllersChangedListener(null);
+    // 清掉可能残留的 controllers:dropAll 需要 client,改用重置 listener 后逐个 close
+  });
+
+  it('link-open(开关开)→ 回 link-accept + 记录控制端名 + 激活 broadcast-tap', () => {
+    remoteControlEnabled = true;
+    const changes: number[] = [];
+    setControllersChangedListener((cs) => changes.push(cs.length));
+    const { client, calls, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+
+    feed({ v: 1, kind: 'link-open', id: 'r1', src: 'ctrl-a', payload: { controllerName: 'MacBook', protocolVersion: 1, appVersion: '1.0.0' } });
+
+    expect(calls.linkAccept).toHaveLength(1);
+    const ctrls = getActiveControllers();
+    expect(ctrls).toEqual([{ deviceId: 'ctrl-a', name: 'MacBook' }]);
+    expect(hasBroadcastTapListener()).toBe(true);
+    expect(changes.at(-1)).toBe(1);
+
+    dropAllControllers(client, 'user');
+    expect(calls.closed).toEqual([{ dst: 'ctrl-a', reason: 'user' }]);
+    expect(getActiveControllers()).toHaveLength(0);
+    expect(hasBroadcastTapListener()).toBe(false);
+  });
+
+  it('link-open(开关关)→ 不 accept、不记录', () => {
+    remoteControlEnabled = false;
+    const { client, calls, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+    feed({ v: 1, kind: 'link-open', id: 'r2', src: 'ctrl-b', payload: { controllerName: 'X', protocolVersion: 1, appVersion: '1' } });
+    expect(calls.linkAccept).toHaveLength(0);
+    expect(getActiveControllers()).toHaveLength(0);
+  });
+
+  it('link-close → 移除控制端,最后一个关闭后停 broadcast-tap', () => {
+    remoteControlEnabled = true;
+    const { client, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+    feed({ v: 1, kind: 'link-open', id: 'r3', src: 'ctrl-c', payload: { controllerName: 'C', protocolVersion: 1, appVersion: '1' } });
+    expect(getActiveControllers()).toHaveLength(1);
+    feed({ v: 1, kind: 'link-close', src: 'ctrl-c', payload: { reason: 'user' } });
+    expect(getActiveControllers()).toHaveLength(0);
+    expect(hasBroadcastTapListener()).toBe(false);
+  });
+});
+
+// ─── 订阅 registry + topic-scoped fan-out + set-* 持久化回流(push 驱动重构)──────
+
+const SUB = 'device-link:subscribe';
+const UNSUB = 'device-link:unsubscribe';
+
+/** feed 一个 subscribe/unsubscribe 控制帧(走 invoke 帧承载)。 */
+function subFrame(src: string, channel: string, topics: string[], controllerName?: string): Envelope {
+  return {
+    v: 1,
+    kind: 'invoke',
+    id: `q-${src}-${topics.join(',')}`,
+    src,
+    payload: { channel, args: [{ topics, ...(controllerName ? { controllerName } : {}) }] },
+  };
+}
+
+describe('被控端订阅 registry + topic 转发', () => {
+  it('subscribe 帧 → 回 invoke-result;sessions topic 只发列表订阅者,不发未订阅的 heavy 事件', () => {
+    remoteControlEnabled = true;
+    const { client, calls, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+
+    feed(subFrame('ctrl-a', SUB, ['sessions'], 'MacA'));
+    expect(calls.invokeResult).toContainEqual({
+      dst: 'ctrl-a',
+      requestId: 'q-ctrl-a-sessions',
+      payload: { ok: true, result: { ok: true } },
+    });
+
+    tapWindowBroadcast('local-db:sessions:created', { sessionId: 's1' });
+    expect(calls.push).toEqual([
+      { dst: 'ctrl-a', channel: 'local-db:sessions:created', payload: { sessionId: 's1' } },
+    ]);
+
+    calls.push.length = 0;
+    tapWindowBroadcast(SESSION_ACTIVITY_CHANNEL, {
+      sessionId: 's1',
+      phase: 'running',
+      compactDetail: 'Editing README',
+    });
+    expect(calls.push).toEqual([
+      {
+        dst: 'ctrl-a',
+        channel: SESSION_ACTIVITY_CHANNEL,
+        payload: { sessionId: 's1', phase: 'running', compactDetail: 'Editing README' },
+      },
+    ]);
+
+    // 只订阅了 sessions → maker:event(session:s1)不转发(bandwidth scoping)
+    calls.push.length = 0;
+    tapWindowBroadcast('maker:event', { sessionId: 's1', event: {} });
+    expect(calls.push).toEqual([]);
+  });
+
+  it('sessions subscribe triggers a current activity replay for late list subscribers', () => {
+    remoteControlEnabled = true;
+    const { client, calls, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+    setSessionsSubscribedListener(() => {
+      tapWindowBroadcast(SESSION_ACTIVITY_CHANNEL, {
+        sessionId: 's1',
+        phase: 'running',
+        compactDetail: 'Running tests',
+      });
+    });
+
+    feed(subFrame('ctrl-a', SUB, ['sessions'], 'MacA'));
+
+    expect(calls.push).toEqual([
+      {
+        dst: 'ctrl-a',
+        channel: SESSION_ACTIVITY_CHANNEL,
+        payload: {
+          sessionId: 's1',
+          phase: 'running',
+          compactDetail: 'Running tests',
+        },
+      },
+    ]);
+  });
+
+  it('订阅 session:<id> → heavy 事件转发 + 横幅亮;纯 sessions 不亮横幅', () => {
+    remoteControlEnabled = true;
+    const changes: ActiveController[][] = [];
+    setControllersChangedListener((cs) => changes.push(cs));
+    const { client, calls, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+
+    feed(subFrame('ctrl-a', SUB, ['sessions']));
+    expect(changes.at(-1)).toEqual([]); // 纯 sessions → 无横幅
+
+    feed(subFrame('ctrl-a', SUB, ['session:s1'], 'MacA'));
+    expect(changes.at(-1)).toEqual([{ deviceId: 'ctrl-a', name: 'MacA' }]); // 横幅亮
+
+    tapWindowBroadcast('maker:event', { sessionId: 's1', event: { t: 1 } });
+    expect(calls.push).toContainEqual({
+      dst: 'ctrl-a',
+      channel: 'maker:event',
+      payload: { sessionId: 's1', event: { t: 1 } },
+    });
+  });
+
+  it('纯 sessions viewer 也进入无人值守更新的远控 busy 集合并触发变更通知', () => {
+    remoteControlEnabled = true;
+    const changes: ActiveController[][] = [];
+    setSubscribedControllersChangedListener((controllers) => changes.push(controllers));
+    const { client, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+
+    feed(subFrame('ctrl-empty', SUB, []));
+    feed(subFrame('ctrl-invalid', SUB, ['*', 'garbage', 'session:', 'fs-watch:']));
+    expect(getSubscribedControllers()).toEqual([]);
+
+    feed(subFrame('ctrl-viewer', SUB, ['sessions'], 'Viewer'));
+
+    expect(getActiveControllers()).toEqual([]);
+    expect(getSubscribedControllers()).toEqual([
+      { deviceId: 'ctrl-viewer', name: 'Viewer' },
+    ]);
+    expect(changes.at(-1)).toEqual([{ deviceId: 'ctrl-viewer', name: 'Viewer' }]);
+  });
+
+  it('多控制端:各只收自己订阅 session 的 push', () => {
+    remoteControlEnabled = true;
+    const { client, calls, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+    feed(subFrame('ctrl-a', SUB, ['session:s1']));
+    feed(subFrame('ctrl-b', SUB, ['session:s2']));
+    tapWindowBroadcast('maker:event', { sessionId: 's1', event: {} });
+    expect(calls.push).toEqual([
+      { dst: 'ctrl-a', channel: 'maker:event', payload: { sessionId: 's1', event: {} } },
+    ]);
+  });
+
+  it('unsubscribe 移除 topic;registry 空后停 tap', () => {
+    remoteControlEnabled = true;
+    const { client, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+    feed(subFrame('ctrl-a', SUB, ['sessions']));
+    expect(hasBroadcastTapListener()).toBe(true);
+    feed(subFrame('ctrl-a', UNSUB, ['sessions']));
+    expect(hasBroadcastTapListener()).toBe(false);
+  });
+
+  it('presence-offline 清掉该控制端订阅(僵尸兜底)', () => {
+    remoteControlEnabled = true;
+    const { client, calls, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+    feed(subFrame('ctrl-a', SUB, ['sessions']));
+    handleControllerOffline('ctrl-a');
+    expect(hasBroadcastTapListener()).toBe(false);
+    tapWindowBroadcast('local-db:sessions:created', { sessionId: 's1' });
+    expect(calls.push).toEqual([]);
+  });
+
+  it('开关关闭 → subscribe 帧回 REMOTE_DISABLED,不记录', () => {
+    remoteControlEnabled = false;
+    const { client, calls, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+    feed(subFrame('ctrl-a', SUB, ['sessions']));
+    expect(calls.invokeResult).toContainEqual({
+      dst: 'ctrl-a',
+      requestId: 'q-ctrl-a-sessions',
+      payload: { ok: false, error: { code: 'REMOTE_DISABLED', message: 'remote control disabled' } },
+    });
+    expect(hasBroadcastTapListener()).toBe(false);
+  });
+});
+
+describe('远程 set-* 持久化回流', () => {
+  it('set-model 成功后注入的 persist 被以 {model} 调用', async () => {
+    const persist = vi.fn();
+    setRemoteSettingsPersist(persist);
+    registry.register('maker:set-model', () => undefined);
+    const r = await runInvoke('ctrl-a', { channel: 'maker:set-model', args: ['sess-1', 'claude-x'] });
+    expect(r).toMatchObject({ ok: true });
+    expect(persist).toHaveBeenCalledWith('sess-1', { model: 'claude-x' });
+  });
+
+  it('set-fast-mode → {fastMode}', async () => {
+    const persist = vi.fn();
+    setRemoteSettingsPersist(persist);
+    registry.register('maker:set-fast-mode', () => undefined);
+    await runInvoke('ctrl-a', { channel: 'maker:set-fast-mode', args: ['sess-1', true] });
+    expect(persist).toHaveBeenCalledWith('sess-1', { fastMode: true });
+  });
+
+  it('set-plan-mode → {planModeEnabled}', async () => {
+    const persist = vi.fn();
+    setRemoteSettingsPersist(persist);
+    registry.register('maker:set-plan-mode', () => undefined);
+    await runInvoke('ctrl-a', { channel: 'maker:set-plan-mode', args: ['sess-1', true] });
+    expect(persist).toHaveBeenCalledWith('sess-1', { planModeEnabled: true });
+  });
+
+  it('set-model 等待注入 persist 完成后才返回 ok', async () => {
+    let resolvePersist!: () => void;
+    let resolved = false;
+    const persist = vi.fn(() => new Promise<void>((resolve) => {
+      resolvePersist = resolve;
+    }));
+    setRemoteSettingsPersist(persist);
+    registry.register('maker:set-model', () => 'runtime-ok');
+
+    const pending = runInvoke('ctrl-a', {
+      channel: 'maker:set-model',
+      args: ['sess-1', 'claude-x'],
+    }).then((result) => {
+      resolved = true;
+      return result;
+    });
+
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(persist).toHaveBeenCalledWith('sess-1', { model: 'claude-x' });
+    expect(resolved).toBe(false);
+
+    resolvePersist();
+    await expect(pending).resolves.toEqual({ ok: true, result: 'runtime-ok' });
+  });
+
+  it('set-fast-mode persist 失败时返回 IPC_ERROR,不报告远程设置成功', async () => {
+    const persist = vi.fn(async () => {
+      throw new Error('db write failed');
+    });
+    setRemoteSettingsPersist(persist);
+    registry.register('maker:set-fast-mode', () => undefined);
+
+    const r = await runInvoke('ctrl-a', {
+      channel: 'maker:set-fast-mode',
+      args: ['sess-1', true],
+    });
+
+    expect(r).toMatchObject({
+      ok: false,
+      error: { code: 'IPC_ERROR', message: 'db write failed' },
+    });
+  });
+
+  it('非 set-* channel 不触发 persist', async () => {
+    const persist = vi.fn();
+    setRemoteSettingsPersist(persist);
+    registry.register('maker:list-active', () => []);
+    await runInvoke('ctrl-a', { channel: 'maker:list-active', args: [] });
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it('未注入 persist 时 set-model 仍正常(no-op 回流)', async () => {
+    registry.register('maker:set-model', () => undefined);
+    const r = await runInvoke('ctrl-a', { channel: 'maker:set-model', args: ['sess-1', 'm'] });
+    expect(r).toMatchObject({ ok: true });
+  });
+});

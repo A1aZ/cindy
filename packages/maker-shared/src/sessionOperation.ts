@@ -1,0 +1,326 @@
+export type ComposerVoiceState =
+  | 'idle'
+  | 'listening'
+  | 'submitting'
+  | 'refining'
+  | 'done'
+  | 'error';
+
+export type SessionComposerSlot = 'missing-session' | 'pending-interaction' | 'read-only' | 'editable';
+export type SessionMessageHistoryMode = 'hidden' | 'collapsed' | 'visible';
+export type SessionComposerDensity = 'compact' | 'expanded';
+export type SessionComposerPrimaryAction = 'none' | 'send' | 'stop';
+
+// Mirrors desktop ccAgent.layout.chatPlaceholder for existing session chat input.
+const DESKTOP_SESSION_CHAT_PLACEHOLDER_ZH_CN = '继续聊一聊...';
+
+export interface SessionComposerLayoutInput {
+  attachmentBusy: boolean;
+  attachmentCount: number;
+  attachmentPickerOpen: boolean;
+  canStop: boolean;
+  draftText: string;
+  queueBusy: boolean;
+  /** 待发送的选中文字引用条数(chat-text-quote)。缺省 0;纯引用无草稿也可发送。 */
+  quoteCount?: number;
+  sendUnavailableReason?: string | null;
+  sending: boolean;
+  voiceState: ComposerVoiceState;
+}
+
+export interface SessionComposerLayout {
+  attachment: {
+    active: boolean;
+    disabled: boolean;
+    disabledReason: string | null;
+    label: string;
+    remove: {
+      disabled: boolean;
+      disabledReason: string | null;
+    };
+  };
+  density: SessionComposerDensity;
+  input: {
+    disabled: boolean;
+    disabledReason: string | null;
+    placeholder: string;
+  };
+  primaryAction: SessionComposerPrimaryAction;
+  send: {
+    disabled: boolean;
+    disabledReason: string | null;
+    label: string;
+    visible: boolean;
+  };
+  stop: {
+    disabled: boolean;
+    disabledReason: string | null;
+    label: string;
+    visible: boolean;
+  };
+  voice: {
+    active: boolean;
+    disabled: boolean;
+    disabledReason: string | null;
+    label: string;
+  };
+  guidanceText: string;
+  statusText: string;
+}
+
+export interface SessionOperationLayoutInput {
+  hasCurrentSession: boolean;
+  hasActivePendingInteraction: boolean;
+  remoteUnavailableReason?: string | null;
+  readOnlyReason?: string | null;
+}
+
+export interface SessionOperationLayout {
+  canUseComposer: boolean;
+  composerDisabledReason: string | null;
+  composerSlot: SessionComposerSlot;
+  messageHistoryMode: SessionMessageHistoryMode;
+  showPendingInteraction: boolean;
+  showQueue: boolean;
+}
+
+export function composerVoiceStateLabel(state: ComposerVoiceState): string {
+  switch (state) {
+    case 'listening':
+      return '正在听';
+    case 'submitting':
+      return '转写中';
+    case 'refining':
+      return '正在润色';
+    case 'error':
+      return '语音出错';
+    default:
+      return '语音';
+  }
+}
+
+function isVoiceInputBusy(state: ComposerVoiceState): boolean {
+  return state === 'listening' || state === 'submitting' || state === 'refining';
+}
+
+function isVoiceInputProcessing(state: ComposerVoiceState): boolean {
+  return state === 'submitting' || state === 'refining';
+}
+
+export function buildSessionComposerLayout(input: SessionComposerLayoutInput): SessionComposerLayout {
+  const hasDraft = input.draftText.trim().length > 0;
+  const hasAttachments = input.attachmentCount > 0;
+  const hasQuotes = (input.quoteCount ?? 0) > 0;
+  const canSend = hasDraft || hasAttachments || hasQuotes;
+  const sendVisible = canSend || input.sending;
+  const stopVisible = input.canStop || input.queueBusy;
+  const sendUnavailableReason = normalizeOptionalReason(input.sendUnavailableReason);
+  const voiceLabel = composerVoiceStateLabel(input.voiceState);
+  const attachmentDisabledReason = buildAttachmentDisabledReason(input);
+  const inputDisabledReason = buildComposerInputDisabledReason(input);
+  return {
+    attachment: {
+      active: input.attachmentPickerOpen || hasAttachments,
+      disabled: attachmentDisabledReason !== null,
+      disabledReason: attachmentDisabledReason,
+      label: hasAttachments ? `附件 ${input.attachmentCount}` : input.attachmentPickerOpen ? '收起附件' : '附件',
+      remove: {
+        disabled: attachmentDisabledReason !== null,
+        disabledReason: attachmentDisabledReason,
+      },
+    },
+    density: shouldUseCompactComposer(input) ? 'compact' : 'expanded',
+    input: {
+      disabled: inputDisabledReason !== null,
+      disabledReason: inputDisabledReason,
+      placeholder: buildComposerPlaceholder({
+        voiceState: input.voiceState,
+      }),
+    },
+    primaryAction: resolveComposerPrimaryAction({
+      canSend,
+      canStop: input.canStop,
+      queueBusy: input.queueBusy,
+      sending: input.sending,
+    }),
+    send: {
+      // attachmentBusy 必须挡发送:附件仍在异步上传时(典型:粘贴图片,无系统
+      // picker 遮挡、UI 完全可交互),抢发会发出不含该附件的消息并把图滞留托盘。
+      disabled: input.sending || input.attachmentBusy || sendUnavailableReason !== null || !canSend,
+      disabledReason: input.sending
+        ? '消息正在发送到电脑端。'
+        : input.attachmentBusy
+          ? '附件上传中，完成后再发送。'
+          : sendUnavailableReason
+            ?? (canSend
+              ? null
+              : '输入文字、添加附件或引用后才能发送。'),
+      label: input.sending ? '发送中' : '发送',
+      visible: sendVisible,
+    },
+    stop: {
+      disabled: input.queueBusy || !input.canStop,
+      disabledReason: input.queueBusy
+        ? '队列操作同步中，暂时不能停止。'
+        : input.canStop
+          ? null
+          : '电脑端当前没有可停止的执行。',
+      label: input.queueBusy ? '处理中' : '停止',
+      visible: stopVisible,
+    },
+    voice: {
+      active: input.voiceState === 'listening',
+      disabled: input.sending || isVoiceInputProcessing(input.voiceState),
+      disabledReason: input.sending
+        ? '消息正在发送到电脑端，完成后再录音。'
+        : isVoiceInputProcessing(input.voiceState) ? '语音正在处理，完成后再录音。' : null,
+      label: voiceLabel,
+    },
+    guidanceText: buildComposerGuidanceText(input),
+    statusText: buildComposerStatusText({
+      attachmentBusy: input.attachmentBusy,
+      attachmentCount: input.attachmentCount,
+      canStop: input.canStop,
+      draftText: input.draftText,
+      queueBusy: input.queueBusy,
+      sending: input.sending,
+      voiceLabel,
+      voiceState: input.voiceState,
+    }),
+  };
+}
+
+function shouldUseCompactComposer(input: SessionComposerLayoutInput): boolean {
+  return (input.voiceState === 'idle' || input.voiceState === 'done' || input.voiceState === 'error')
+    && input.draftText.trim().length === 0
+    && input.attachmentCount === 0
+    && (input.quoteCount ?? 0) === 0
+    && !input.attachmentPickerOpen
+    && !input.attachmentBusy
+    && !input.canStop
+    && !input.queueBusy
+    && !input.sending;
+}
+
+function buildAttachmentDisabledReason(input: SessionComposerLayoutInput): string | null {
+  if (input.attachmentBusy) return '附件处理中，完成后再继续添加。';
+  if (input.sending) return '消息正在发送到电脑端，完成后再调整附件。';
+  return null;
+}
+
+function buildComposerInputDisabledReason(input: SessionComposerLayoutInput): string | null {
+  if (input.sending) return '消息正在发送到电脑端。';
+  return null;
+}
+
+function normalizeOptionalReason(reason: string | null | undefined): string | null {
+  const normalized = reason?.trim();
+  return normalized ? normalized : null;
+}
+
+export function buildSessionOperationLayout(input: SessionOperationLayoutInput): SessionOperationLayout {
+  if (!input.hasCurrentSession) {
+    return {
+      canUseComposer: false,
+      composerDisabledReason: '当前会话还没有同步完成。',
+      composerSlot: 'missing-session',
+      messageHistoryMode: 'hidden',
+      showPendingInteraction: false,
+      showQueue: false,
+    };
+  }
+
+  if (input.remoteUnavailableReason) {
+    return {
+      canUseComposer: false,
+      composerDisabledReason: input.remoteUnavailableReason,
+      composerSlot: 'editable',
+      messageHistoryMode: 'visible',
+      showPendingInteraction: false,
+      showQueue: false,
+    };
+  }
+
+  if (input.hasActivePendingInteraction) {
+    return {
+      canUseComposer: false,
+      composerDisabledReason: '先处理当前授权或提问后才能继续输入。',
+      composerSlot: 'pending-interaction',
+      messageHistoryMode: 'visible',
+      showPendingInteraction: true,
+      showQueue: false,
+    };
+  }
+
+  if (input.readOnlyReason) {
+    return {
+      canUseComposer: false,
+      composerDisabledReason: input.readOnlyReason,
+      composerSlot: 'read-only',
+      messageHistoryMode: 'visible',
+      showPendingInteraction: false,
+      showQueue: true,
+    };
+  }
+
+  return {
+    canUseComposer: true,
+    composerDisabledReason: null,
+    composerSlot: 'editable',
+    messageHistoryMode: 'visible',
+    showPendingInteraction: false,
+    showQueue: true,
+  };
+}
+
+function resolveComposerPrimaryAction(input: {
+  canSend: boolean;
+  canStop: boolean;
+  queueBusy: boolean;
+  sending: boolean;
+}): SessionComposerPrimaryAction {
+  if (input.sending || input.canSend) return 'send';
+  if (input.canStop || input.queueBusy) return 'stop';
+  return 'none';
+}
+
+function buildComposerPlaceholder(input: Pick<SessionComposerLayoutInput, 'voiceState'>): string {
+  if (input.voiceState === 'listening') return '正在听……';
+  if (input.voiceState === 'submitting') return '正在转写语音';
+  if (input.voiceState === 'refining') return '正在润色语音';
+  return DESKTOP_SESSION_CHAT_PLACEHOLDER_ZH_CN;
+}
+
+function buildComposerGuidanceText(input: SessionComposerLayoutInput): string {
+  const hasDraft = input.draftText.trim().length > 0;
+  const hasAttachments = input.attachmentCount > 0;
+  const hasQuotes = (input.quoteCount ?? 0) > 0;
+  if (input.sending) return '消息正在写入桌面端队列，完成前请不要重复发送。';
+  if (input.queueBusy) return '正在同步队列操作，完成后会刷新队列状态。';
+  if (input.voiceState === 'listening' && hasDraft) {
+    return '点发送会结束语音并发送当前文字；点输入框会结束语音并弹出键盘。';
+  }
+  if (input.voiceState === 'listening') return '正在听，文字出现后会显示发送；点输入框可结束语音并弹出键盘。';
+  if (input.voiceState === 'submitting') return '正在转写语音，输入框会暂时锁定。';
+  if (input.voiceState === 'refining') return '正在润色语音，完成后会更新输入框。';
+  if (input.attachmentBusy) return '正在检查或上传附件，完成后会出现在附件列表。';
+  if (input.sendUnavailableReason && (hasDraft || hasAttachments || hasQuotes)) return input.sendUnavailableReason;
+  if (hasAttachments && hasDraft) return `将发送 ${input.attachmentCount} 个附件和输入框里的文字。`;
+  if (hasAttachments) return `将只发送 ${input.attachmentCount} 个附件，也可以补充说明后再发送。`;
+  if (input.attachmentPickerOpen) return '可以添加手机上的照片、截图或文件。';
+  if (hasDraft) return '点发送后会进入桌面端队列，按当前会话设置执行。';
+  if (hasQuotes) return `将发送 ${input.quoteCount} 处引用，也可以补充说明后再发送。`;
+  if (input.canStop) return '电脑端正在执行；可继续排队输入，或点停止保留当前队列。';
+  return '输入文字开始，使用 / 调命令，使用 @ 引用项目资源。';
+}
+
+function buildComposerStatusText(input: Pick<
+  SessionComposerLayoutInput,
+  'attachmentBusy' | 'attachmentCount' | 'canStop' | 'draftText' | 'queueBusy' | 'sending' | 'voiceState'
+> & { voiceLabel: string }): string {
+  if (input.sending) return '正在发送到电脑端';
+  if (input.queueBusy) return '正在处理队列操作';
+  if (isVoiceInputBusy(input.voiceState)) return input.voiceLabel;
+  if (input.attachmentBusy) return '正在处理附件';
+  return '就绪';
+}

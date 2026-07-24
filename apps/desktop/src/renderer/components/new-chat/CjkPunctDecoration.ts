@@ -1,0 +1,146 @@
+/**
+ * Tiptap 扩展 —— 给 chat input 里的 CJK 标点(《》「」『』【】())包一层
+ * 带显式 CJK 字体栈的 inline span。
+ *
+ * 解决的问题
+ * -----------
+ * Chromium 在 contentEditable 里对 Unicode "Common script"字符 (《》「」 等
+ * CJK 标点的 script 属性是 Common,不是 Han) 会按相邻字符的 script 来 itemize:
+ *   - 序列开头 / 紧挨空格 / 紧挨 Latin 字符的 《 → 当作 Latin script,跳过
+ *     字体栈里所有 CJK 字体,命中第一个含 《 字形的 Latin 字体 (Windows 上是
+ *     Segoe UI),渲染成 Latin 比例的窄字形 (~7.5px)
+ *   - 紧挨汉字的 》 → 当作 CJK script,走 PingFang/YaHei 全角 (~15px)
+ *
+ * 同一行里就出现了"《 半角、》 全角"的视觉错乱。lang="zh-CN" 在 contentEditable
+ * 里被 Chromium 忽略,font-family 栈把 CJK 字体提到最前也无效 —— Chromium 的
+ * 这个 itemizer 在 contentEditable 里不老实读 font-family 顺序。
+ *
+ * 唯一能稳定打断这个 itemization 的办法: 把每个 CJK 标点用一个 <span> 包起来,
+ * span 边界强制把 itemization 切开,Chromium 在 span 内部重新 resolve font,
+ * 此时显式 font-family 才生效。
+ *
+ * 边界处理
+ * --------
+ * - IME 组合期 (用户打 pinyin 还没选字): view.composing === true,跳过 decoration
+ *   重算,避免 DOM 抖动打断输入法候选框
+ * - 性能: 用 DecorationSet.map(tr.mapping, tr.doc) 增量映射 —— 只对变化范围内的
+ *   节点重扫,不全文扫
+ * - 不污染源数据: decoration 只是渲染层,doc JSON 里没有 span,copy/paste/save
+ *   拿到的都是纯文本
+ *
+ * 已知 trade-off
+ * --------------
+ * - 光标移到 CJK 标点旁边时 (...|<span>《</span>...) 是 span 边界,Chromium 在
+ *   边界处的光标定位有 quirk,可能要按两下方向键才"穿过"标点。这是 Chromium 限
+ *   制,无解,大多数用户感知不到
+ */
+import { Extension } from '@tiptap/core';
+import { Plugin, PluginKey } from '@tiptap/pm/state';
+import { Decoration, DecorationSet } from '@tiptap/pm/view';
+import type { EditorState, Transaction } from '@tiptap/pm/state';
+import type { Node as PMNode } from '@tiptap/pm/model';
+
+const PLUGIN_KEY = new PluginKey<DecorationSet>('cjkPunctDecoration');
+
+/**
+ * CJK 标点字符集合。覆盖最常用的几个区段,够 chat input 场景用:
+ *   U+3000-303F: CJK Symbols and Punctuation (含 《》「」『』【】 等)
+ *   U+FF00-FFEF: Halfwidth and Fullwidth Forms (含全角 (), !? 等)
+ *
+ * 不包括 ASCII 标点,因为它们 script 已经是 Latin,不会触发 itemization 错乱。
+ */
+const CJK_PUNCT_REGEX = /[\u3000-\u303f\uff00-\uffef]/g;
+
+/**
+ * 显式 CJK 字体栈。
+ *
+ * !! 注意 HarmonyOS Sans SC 的位置 !!
+ * 项目通过 npm 包 harmonyos-sans-sc-webfont-splitted 加载了 HarmonyOS Sans SC
+ * 作为 webfont(全平台都有,不止 Mac/Windows 系统装的)。但实测 HarmonyOS 的
+ * 《 字形被设计成 0.5em 半角宽,跟相邻汉字 1em 全角混排会出现"《 半角、汉字
+ * 全角"的视觉错乱(codemirrorGithubTheme.ts:153 的注释也说过"字符变细变窄")。
+ * 所以这里 HarmonyOS 必须排到 YaHei UI / PingFang 后面,优先让"传统全角风格"
+ * 的 CJK 字体接管 CJK 标点渲染:
+ *   - Mac: PingFang SC 命中,《》 全角一致
+ *   - Windows: PingFang / Hiragino 没装跳过,YaHei UI 命中,《》 全角一致
+ *   - 其他平台: 兜底到 Noto Sans CJK SC / Source Han / HarmonyOS / sans-serif
+ *
+ * 不要把 HarmonyOS 提前 —— 提前会让所有 CJK 标点又走它的半角字形,问题复发。
+ */
+const CJK_FONT_STACK =
+  "'PingFang SC','Hiragino Sans GB'," +
+  "'Microsoft YaHei UI','Microsoft YaHei'," +
+  "'Noto Sans CJK SC','Source Han Sans SC'," +
+  "'HarmonyOS Sans SC',sans-serif";
+
+/**
+ * 扫描整个 doc, 给所有 CJK 标点位置生成 inline decoration。
+ * 用 descendants 遍历所有 text node, 对每个 text node 内的字符做正则匹配。
+ * 注意 from/to 是 doc-level position, 不是 text-node-local offset。
+ */
+function buildDecorations(doc: PMNode): DecorationSet {
+  const decorations: Decoration[] = [];
+
+  doc.descendants((node, pos) => {
+    if (!node.isText || !node.text) return;
+    const text = node.text;
+    CJK_PUNCT_REGEX.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = CJK_PUNCT_REGEX.exec(text)) !== null) {
+      const from = pos + m.index;
+      const to = from + m[0].length;
+      decorations.push(
+        Decoration.inline(from, to, {
+          // inline style 的优先级比 .ProseMirror 的 css 规则高, 强制覆盖
+          style: `font-family:${CJK_FONT_STACK}`,
+        }),
+      );
+    }
+  });
+
+  return DecorationSet.create(doc, decorations);
+}
+
+export const CjkPunctDecoration = Extension.create({
+  name: 'cjkPunctDecoration',
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin<DecorationSet>({
+        key: PLUGIN_KEY,
+        state: {
+          init(_config, state: EditorState) {
+            return buildDecorations(state.doc);
+          },
+          apply(tr: Transaction, old: DecorationSet) {
+            // doc 没变 → decoration 位置不变, 直接复用
+            if (!tr.docChanged) return old;
+            // doc 变了 → 全量重算。
+            // 之前考虑过用 old.map(tr.mapping, tr.doc) 做增量, 但 chat input
+            // 文本量很小 (< 1KB 常见), 全量重扫成本可忽略, 而增量映射要额外
+            // 处理"变化范围内新增/删除的 CJK 标点", 代码复杂度上升不划算。
+            return buildDecorations(tr.doc);
+          },
+        },
+        props: {
+          decorations(state) {
+            return this.getState(state) ?? DecorationSet.empty;
+          },
+        },
+        view() {
+          return {
+            update(view, prevState) {
+              // IME 组合期 (用户打 pinyin 还没回车选字) 不重新计算 decoration,
+              // 避免 DOM 抖动把输入法候选框踢掉。组合结束后 ProseMirror 会发
+              // 一个常规 transaction, apply() 会把 decoration 补上。
+              if (view.composing) return;
+              // composing 期间 doc 也会变, 但 apply() 已经在每次 docChanged
+              // 时重算了, 这里 view.update 是后置 hook, 不需要额外动作。
+              void prevState;
+            },
+          };
+        },
+      }),
+    ];
+  },
+});

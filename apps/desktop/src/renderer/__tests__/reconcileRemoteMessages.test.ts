@@ -1,0 +1,645 @@
+/**
+ * reconcileRemoteMessages.test.ts —— device-link 远程会话消息对账(host-authoritative heal)。
+ *
+ * 被控端实时流走 fire-and-forget push,断连/重启/丢帧会让某轮消息静默丢失,打开的会话首拉后
+ * 只靠 live push 增长、从不补。reconcileRemoteMessages 重拉最近一页 + 合并去重把缺失补回。
+ * 覆盖:远程会话补回缺失 + 去重 + hydrate 权威字段;本机会话 no-op;historyLoaded=false no-op。
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+import type { Message } from '@/lib/ccAgent.types';
+
+vi.mock('@/lib/messageService', () => ({
+  list: vi.fn(async () => []),
+  around: vi.fn(async () => []),
+  create: vi.fn(async () => ({}) as unknown),
+  updateContent: vi.fn(async () => ({}) as unknown),
+}));
+vi.mock('@/lib/sessionService', () => ({
+  get: vi.fn(async () => ({
+    agentKind: 'cc', remoteHostId: null, sdkSessionId: null, fastMode: false,
+    contextTokens: 0, contextWindow: 0, totalCostUsd: 0,
+  })),
+  update: vi.fn(async () => ({})),
+  touchUserSend: vi.fn(async () => ({})),
+}));
+
+import { makerChatStore } from '@/lib/makerChatStore';
+import { remoteProjectsStore } from '@/features/device-link/remoteProjectsStore';
+
+const DEVICE_ID = 'dev-A';
+let n = 0;
+const sid = () => `reconcile-${n++}`;
+type RemotePush = { deviceId: string; channel: string; payload: unknown };
+let remotePush: ((push: RemotePush) => void) | undefined;
+
+function dbMessage(sessionId: string, id: string, content: string, ts: string, role: Message['role'] = 'assistant'): Message {
+  return { id, clientId: `client-${id}`, sessionId, role, content, toolUseId: null, agentMeta: null, createdAt: ts };
+}
+
+function thinkingDbMessage(
+  sessionId: string,
+  id: string,
+  text: string,
+  createdAt: string,
+  durationMs: number,
+  finishedAt: string,
+): Message {
+  return {
+    id,
+    clientId: id,
+    sessionId,
+    role: 'thinking',
+    content: { kind: 'thinking', text, durationMs, finishedAt, isRedacted: false },
+    toolUseId: null,
+    agentMeta: null,
+    createdAt,
+  };
+}
+
+/** 被控端经隧道返回的权威消息列表(local-db:messages:list)。 */
+let remoteList: Message[] = [];
+let remoteListResolver: ((args: unknown[]) => Message[] | Promise<Message[]>) | null = null;
+const invoke = vi.fn(async (_deviceId: string, channel: string, _args: unknown[]) => {
+  if (channel === 'local-db:messages:list') return remoteListResolver?.(_args) ?? remoteList;
+  if (channel === 'local-db:sessions:get') {
+    return { agentKind: 'cc', remoteHostId: null, sdkSessionId: null, fastMode: false, contextTokens: 0, contextWindow: 0, totalCostUsd: 0 };
+  }
+  if (channel === 'maker:input:get-projection') {
+    return { sessionId: _args[0], pendingQueue: [], steeringQueueClientIds: [], queuePaused: false, queueExpanded: false, queueInteractionLocks: [], queueEditLocks: [], queueAbortPending: false, error: null, recovery: null, errorRetryText: null };
+  }
+  return null;
+});
+
+function stubApi(): void {
+  remotePush = undefined;
+  const onNoop = vi.fn(() => vi.fn());
+  vi.stubGlobal('window', {
+    dispatchEvent: vi.fn(),
+    electronAPI: {
+      maker: {
+        input: { getProjection: vi.fn(async (s: string) => ({ sessionId: s, pendingQueue: [], steeringQueueClientIds: [], queuePaused: false, queueExpanded: false, queueInteractionLocks: [], queueEditLocks: [], queueAbortPending: false, error: null, recovery: null, errorRetryText: null })) },
+        getPendingInteractions: vi.fn(async () => []),
+        onEvent: onNoop,
+        onStatusChanged: onNoop,
+        onInputProjection: onNoop,
+        onInteractionRequest: onNoop,
+        onInteractionDismissed: onNoop,
+      },
+      localDb: { messages: { onCreated: onNoop } },
+      onUsageMessageTurnCost: onNoop,
+      deviceLink: {
+        invoke,
+        onRemotePush: (cb: (push: RemotePush) => void) => {
+          remotePush = cb;
+          return vi.fn();
+        },
+      },
+    },
+  });
+}
+
+async function flush(): Promise<void> {
+  for (let i = 0; i < 6; i++) await Promise.resolve();
+}
+
+async function flushMany(count: number): Promise<void> {
+  for (let i = 0; i < count; i++) await Promise.resolve();
+}
+
+// reconcileRemoteMessages can page up to 10 times; keep this above the current microtask count.
+const REMOTE_RECONCILE_FLUSH_TICKS = 60;
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+/** 把会话注册成 deviceId='dev-A' 的远程会话,并完成首拉(historyLoaded=true)。 */
+async function openRemoteWithHistory(s: string, initial: Message[]): Promise<void> {
+  remoteList = initial;
+  remoteProjectsStore.setDeviceSessions(DEVICE_ID, 'Mac A', [{ id: s }] as never);
+  makerChatStore.ensureInitialMessages(s);
+  await flush();
+}
+
+beforeEach(() => {
+  makerChatStore.__teardownGlobalListeners();
+  stubApi();
+  remoteList = [];
+  remoteListResolver = null;
+  invoke.mockClear();
+});
+
+afterEach(() => {
+  // remoteProjectsStore 跨用例持久 → 每用例唯一 sessionId 已隔离;结束清设备分片。
+  makerChatStore.__teardownGlobalListeners();
+  remoteProjectsStore.clear();
+  vi.unstubAllGlobals();
+});
+
+describe('makerChatStore.reconcileRemoteMessages', () => {
+  it('remote stall watchdog only counts heavy session pushes, not lightweight activity', async () => {
+    const s = sid();
+    makerChatStore.initGlobalListeners();
+
+    remotePush?.({
+      deviceId: DEVICE_ID,
+      channel: 'local-db:sessions:activity',
+      payload: {
+        sessionId: s,
+        phase: 'running',
+        compactDetail: 'still running',
+      },
+    });
+
+    expect(makerChatStore.getLastInboundEventAt(s)).toBeUndefined();
+
+    remotePush?.({
+      deviceId: DEVICE_ID,
+      channel: 'maker:event',
+      payload: {
+        sessionId: s,
+        event: {
+          type: 'status',
+          source: 'codex',
+          data: { status: 'Running', isRunning: true },
+        },
+      },
+    });
+
+    expect(makerChatStore.getLastInboundEventAt(s)).toEqual(expect.any(Number));
+  });
+
+  it('remote stall watchdog counts persisted message pushes as heavy inbound traffic', async () => {
+    const s = sid();
+    makerChatStore.initGlobalListeners();
+
+    remotePush?.({
+      deviceId: DEVICE_ID,
+      channel: 'local-db:messages:created',
+      payload: {
+        sessionId: s,
+        message: dbMessage(s, 'heavy-msg', 'persisted push', '2026-06-15T00:00:00.000Z'),
+      },
+    });
+
+    expect(makerChatStore.getLastInboundEventAt(s)).toEqual(expect.any(Number));
+  });
+
+  it('远程会话:对账找不到重叠时替换为权威最新窗口,避免跨断层合并', async () => {
+    const s = sid();
+    await openRemoteWithHistory(s, [
+      dbMessage(s, 'old-cache', 'old cached text', '2026-06-15T00:00:00.000Z'),
+      dbMessage(s, 'cached-future', 'controller clock ahead text', '2026-06-16T00:00:00.000Z'),
+    ]);
+
+    const remoteHistory = Array.from({ length: 550 }, (_, index) =>
+      dbMessage(
+        s,
+        `new-${index}`,
+        `remote ${index}`,
+        new Date(Date.UTC(2026, 5, 15, 1, 0, index)).toISOString(),
+      ),
+    );
+    remoteListResolver = (args) => pageMessages(remoteHistory, args);
+
+    makerChatStore.reconcileRemoteMessages(s);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    const snapshot = makerChatStore.getSnapshot(s);
+    expect(snapshot.messages).toHaveLength(500);
+    expect(snapshot.messages.map((m) => m.clientId)).not.toContain('client-old-cache');
+    expect(snapshot.messages.map((m) => m.clientId)).not.toContain('client-cached-future');
+    expect(snapshot.messages[0]?.clientId).toBe('client-new-50');
+    expect(snapshot.messages.at(-1)?.clientId).toBe('client-new-549');
+    expect(snapshot.oldestMessageId).toBe('new-50');
+    expect(snapshot.hasMoreMessages).toBe(true);
+  });
+
+  it('远程会话:无重叠对账保留分页期间新到的 remote push', async () => {
+    const s = sid();
+    makerChatStore.initGlobalListeners();
+    await openRemoteWithHistory(s, [
+      dbMessage(s, 'old-cache', 'old cached text', '2026-06-15T00:00:00.000Z'),
+    ]);
+
+    const pendingList = deferred<Message[]>();
+    remoteListResolver = () => pendingList.promise;
+
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    remotePush?.({
+      deviceId: DEVICE_ID,
+      channel: 'local-db:messages:created',
+      payload: {
+        sessionId: s,
+        message: dbMessage(s, 'late', 'late push text', '2026-06-15T02:00:00.000Z'),
+      },
+    });
+
+    pendingList.resolve([
+      dbMessage(s, 'new-1', 'remote latest page', '2026-06-15T01:00:00.000Z'),
+    ]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    const ids = makerChatStore.getSnapshot(s).messages.map((m) => m.clientId);
+    expect(ids).toEqual(['client-new-1', 'client-late']);
+    expect(ids).not.toContain('client-old-cache');
+  });
+
+  it('远程会话:重拉合并把 push 丢失的消息补回(去重不重复)', async () => {
+    const s = sid();
+    await openRemoteWithHistory(s, [
+      dbMessage(s, 'u1', 'hi', '2026-06-15T00:00:00.000Z', 'user'),
+      dbMessage(s, 'a1', '在', '2026-06-15T00:00:01.000Z'),
+    ]);
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual(['client-u1', 'client-a1']);
+
+    // 被控端又产生了 a2(控制端 push 丢了)。对账重拉最近页(含 a1+a2)。
+    remoteList = [
+      dbMessage(s, 'u1', 'hi', '2026-06-15T00:00:00.000Z', 'user'),
+      dbMessage(s, 'a1', '在', '2026-06-15T00:00:01.000Z'),
+      dbMessage(s, 'a2', '收到', '2026-06-15T00:00:02.000Z'),
+    ];
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+
+    const ids = makerChatStore.getSnapshot(s).messages.map((m) => m.clientId);
+    expect(ids).toEqual(['client-u1', 'client-a1', 'client-a2']); // a2 补回、a1 不重复、保序
+  });
+
+  it('远程会话:reconcile 命中重复 clientId 时 hydrate DB 权威时间', async () => {
+    const s = sid();
+    makerChatStore.initGlobalListeners();
+    await openRemoteWithHistory(s, []);
+
+    // 控制端收到 live maker:event,但漏掉后续 local-db:messages:created echo。
+    remotePush?.({
+      deviceId: DEVICE_ID,
+      channel: 'maker:event',
+      payload: {
+        sessionId: s,
+        persistId: 'client-a1',
+        event: {
+          type: 'text',
+          source: 'claude-code',
+          data: { text: 'draft', isFinal: true },
+        },
+      },
+    });
+
+    const live = makerChatStore.getSnapshot(s).messages[0];
+    expect(live).toEqual(expect.objectContaining({ clientId: 'client-a1', content: 'draft' }));
+    expect(live?.createdAt).not.toBe('2026-06-15T00:00:05.000Z');
+
+    // 对账重拉到同 clientId 的被控端 DB row;没有新 ID,但仍应 hydrate createdAt/content。
+    remoteList = [dbMessage(s, 'a1', 'persisted', '2026-06-15T00:00:05.000Z')];
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+
+    const messages = makerChatStore.getSnapshot(s).messages;
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toEqual(
+      expect.objectContaining({
+        clientId: 'client-a1',
+        role: 'assistant',
+        content: 'persisted',
+        isStreaming: false,
+        createdAt: '2026-06-15T00:00:05.000Z',
+      }),
+    );
+  });
+
+  it('远程会话:reconcile 用 DB 权威 tool_result 全文覆盖 live summary,即使全文更短', async () => {
+    const s = sid();
+    makerChatStore.initGlobalListeners();
+    await openRemoteWithHistory(s, []);
+
+    // 控制端只收到 live summary,但漏掉后续 tool_result_full push;DB 全文可能更短(如 "ok")。
+    remotePush?.({
+      deviceId: DEVICE_ID,
+      channel: 'maker:event',
+      payload: {
+        sessionId: s,
+        persistId: 'tool-result-1',
+        event: {
+          type: 'tool_result',
+          source: 'claude-code',
+          data: { toolUseIds: ['tool-1'] },
+        },
+        resolvedContent: 'summary',
+      },
+    });
+
+    expect(makerChatStore.getSnapshot(s).messages).toEqual([
+      expect.objectContaining({
+        clientId: 'tool-result-1',
+        role: 'tool_result',
+        content: 'summary',
+      }),
+    ]);
+
+    remoteList = [
+      {
+        ...dbMessage(s, 'tool-result-1', 'ok', '2026-06-15T00:00:06.000Z', 'tool_result'),
+        clientId: 'tool-result-1',
+        toolUseId: 'tool-1',
+      },
+    ];
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+
+    expect(makerChatStore.getSnapshot(s).messages).toEqual([
+      expect.objectContaining({
+        clientId: 'tool-result-1',
+        role: 'tool_result',
+        content: 'ok',
+        toolUseId: 'tool-1',
+        createdAt: '2026-06-15T00:00:06.000Z',
+      }),
+    ]);
+  });
+
+  it('远程会话:初始历史 hydrate 用 DB 全文覆盖 live summary,即使全文更短', async () => {
+    const s = sid();
+    makerChatStore.initGlobalListeners();
+    remoteProjectsStore.setDeviceSessions(DEVICE_ID, 'Mac A', [{ id: s }] as never);
+
+    // 控制端先收到 live summary;首拉历史稍后拿到被控端已更新的短 DB full output。
+    remotePush?.({
+      deviceId: DEVICE_ID,
+      channel: 'maker:event',
+      payload: {
+        sessionId: s,
+        persistId: 'tool-result-1',
+        event: {
+          type: 'tool_result',
+          source: 'claude-code',
+          data: { toolUseIds: ['tool-1'] },
+        },
+        resolvedContent: 'summary',
+      },
+    });
+    expect(makerChatStore.getSnapshot(s).messages).toEqual([
+      expect.objectContaining({
+        clientId: 'tool-result-1',
+        role: 'tool_result',
+        content: 'summary',
+      }),
+    ]);
+
+    remoteList = [
+      {
+        ...dbMessage(s, 'tool-result-1', 'ok', '2026-06-15T00:00:06.000Z', 'tool_result'),
+        clientId: 'tool-result-1',
+        toolUseId: 'tool-1',
+      },
+    ];
+    makerChatStore.ensureInitialMessages(s);
+    await flush();
+
+    expect(makerChatStore.getSnapshot(s).messages).toEqual([
+      expect.objectContaining({
+        clientId: 'tool-result-1',
+        role: 'tool_result',
+        content: 'ok',
+        toolUseId: 'tool-1',
+        createdAt: '2026-06-15T00:00:06.000Z',
+      }),
+    ]);
+  });
+
+  it('远程会话:DB-created echo 回填 thinking 开始时间后重新排序', async () => {
+    const s = sid();
+    makerChatStore.initGlobalListeners();
+    await openRemoteWithHistory(s, []);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-15T00:00:10.000Z'));
+
+    try {
+      remotePush?.({
+        deviceId: DEVICE_ID,
+        channel: 'maker:event',
+        payload: {
+          sessionId: s,
+          persistId: 'assistant-after-thinking',
+          event: {
+            type: 'text',
+            source: 'claude-code',
+            data: { text: 'later assistant text', isFinal: true },
+          },
+        },
+      });
+      remotePush?.({
+        deviceId: DEVICE_ID,
+        channel: 'maker:event',
+        payload: {
+          sessionId: s,
+          event: {
+            type: 'thinking',
+            source: 'claude-code',
+            data: {
+              stage: 'final',
+              blockId: 'thinking-1',
+              text: 'thinking result',
+              durationMs: 5000,
+            },
+          },
+        },
+      });
+
+      expect(makerChatStore.getSnapshot(s).messages.map((message) => message.clientId)).toEqual([
+        'assistant-after-thinking',
+        'thinking-1',
+      ]);
+
+      remotePush?.({
+        deviceId: DEVICE_ID,
+        channel: 'local-db:messages:created',
+        payload: {
+          sessionId: s,
+          message: thinkingDbMessage(
+            s,
+            'thinking-1',
+            'thinking result',
+            '2026-06-15T00:00:09.000Z',
+            5000,
+            '2026-06-15T00:00:05.000Z',
+          ),
+        },
+      });
+
+      const messages = makerChatStore.getSnapshot(s).messages;
+      expect(messages.map((message) => message.clientId)).toEqual([
+        'thinking-1',
+        'assistant-after-thinking',
+      ]);
+      expect(messages[0]).toEqual(
+        expect.objectContaining({
+          clientId: 'thinking-1',
+          role: 'thinking',
+          content: 'thinking result',
+          isStreaming: false,
+          thinkingDurationMs: 5000,
+          createdAt: '2026-06-15T00:00:00.000Z',
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('远程会话:新 DB-created echo 的 thinking 也按回填开始时间排序', async () => {
+    const s = sid();
+    makerChatStore.initGlobalListeners();
+    await openRemoteWithHistory(s, []);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-15T00:00:10.000Z'));
+
+    try {
+      remotePush?.({
+        deviceId: DEVICE_ID,
+        channel: 'maker:event',
+        payload: {
+          sessionId: s,
+          persistId: 'assistant-after-thinking',
+          event: {
+            type: 'text',
+            source: 'claude-code',
+            data: { text: 'later assistant text', isFinal: true },
+          },
+        },
+      });
+
+      expect(makerChatStore.getSnapshot(s).messages.map((message) => message.clientId)).toEqual([
+        'assistant-after-thinking',
+      ]);
+
+      remotePush?.({
+        deviceId: DEVICE_ID,
+        channel: 'local-db:messages:created',
+        payload: {
+          sessionId: s,
+          message: thinkingDbMessage(
+            s,
+            'thinking-1',
+            'thinking result',
+            '2026-06-15T00:00:09.000Z',
+            5000,
+            '2026-06-15T00:00:05.000Z',
+          ),
+        },
+      });
+
+      const messages = makerChatStore.getSnapshot(s).messages;
+      expect(messages.map((message) => message.clientId)).toEqual([
+        'thinking-1',
+        'assistant-after-thinking',
+      ]);
+      expect(messages[0]).toEqual(
+        expect.objectContaining({
+          clientId: 'thinking-1',
+          role: 'thinking',
+          content: 'thinking result',
+          isStreaming: false,
+          thinkingDurationMs: 5000,
+          createdAt: '2026-06-15T00:00:00.000Z',
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('远程会话:reconcile 信任更短的 DB 权威 tool_result 内容', async () => {
+    const s = sid();
+    makerChatStore.initGlobalListeners();
+    await openRemoteWithHistory(s, []);
+
+    remotePush?.({
+      deviceId: DEVICE_ID,
+      channel: 'maker:event',
+      payload: {
+        sessionId: s,
+        persistId: 'tool-result-1',
+        event: {
+          type: 'tool_result',
+          source: 'claude-code',
+          data: { toolUseIds: ['tool-1'] },
+        },
+        resolvedContent: 'verbose summary',
+      },
+    });
+
+    remoteList = [
+      {
+        ...dbMessage(s, 'tool-result-1', 'ok', '2026-06-15T00:00:06.000Z', 'tool_result'),
+        clientId: 'tool-result-1',
+        toolUseId: 'tool-1',
+      },
+    ];
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+
+    expect(makerChatStore.getSnapshot(s).messages).toEqual([
+      expect.objectContaining({
+        clientId: 'tool-result-1',
+        role: 'tool_result',
+        content: 'ok',
+        toolUseId: 'tool-1',
+        createdAt: '2026-06-15T00:00:06.000Z',
+      }),
+    ]);
+  });
+
+  it('无缺失:不换 messages 引用(避免无谓重渲染)', async () => {
+    const s = sid();
+    await openRemoteWithHistory(s, [dbMessage(s, 'a1', 'x', '2026-06-15T00:00:01.000Z')]);
+    const snap1 = makerChatStore.getSnapshot(s);
+    remoteList = [dbMessage(s, 'a1', 'x', '2026-06-15T00:00:01.000Z')]; // 同一条
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    expect(makerChatStore.getSnapshot(s).messages).toBe(snap1.messages); // 引用未变
+  });
+
+  it('本机会话:no-op(不经隧道、不动消息)', async () => {
+    const s = sid();
+    // 不 setDeviceSessions → 本机会话。先用本地空库首拉。
+    makerChatStore.ensureInitialMessages(s);
+    await flush();
+    invoke.mockClear();
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    expect(invoke).not.toHaveBeenCalledWith(DEVICE_ID, 'local-db:messages:list', expect.anything());
+  });
+
+  it('historyLoaded=false:no-op(交给 ensureInitialMessages)', async () => {
+    const s = sid();
+    remoteProjectsStore.setDeviceSessions(DEVICE_ID, 'Mac A', [{ id: s }] as never);
+    // 不调 ensureInitialMessages → historyLoaded 仍 false。
+    invoke.mockClear();
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    expect(invoke).not.toHaveBeenCalledWith(DEVICE_ID, 'local-db:messages:list', expect.anything());
+  });
+});
+
+function pageMessages(all: Message[], args: unknown[]): Message[] {
+  const opts = (args[1] ?? {}) as { limit?: number; before?: string; beforeTs?: number };
+  const limit = typeof opts.limit === 'number' ? opts.limit : 50;
+  let beforeMs = Number.POSITIVE_INFINITY;
+  if (typeof opts.before === 'string') {
+    const beforeRow = all.find((row) => row.id === opts.before);
+    if (beforeRow) beforeMs = new Date(beforeRow.createdAt).getTime();
+  } else if (typeof opts.beforeTs === 'number' && Number.isFinite(opts.beforeTs)) {
+    beforeMs = opts.beforeTs;
+  }
+  return [...all]
+    .filter((row) => new Date(row.createdAt).getTime() < beforeMs)
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .slice(0, limit);
+}

@@ -1,0 +1,657 @@
+#!/usr/bin/env node
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
+const IGNORED_PARTS = new Set([
+	"node_modules",
+	"dist",
+	"build",
+	"release",
+	"coverage",
+	".git",
+	".cache",
+]);
+const NESTED_NON_WORKSPACES = ["apps/desktop/cindy-updater", "tools"];
+const VALID_STATUSES = new Set([
+	"required",
+	"notApplicable",
+	"manual",
+	"external",
+	"deferred",
+]);
+const VALID_COVERAGE_MODES = new Set(["workspace", "allowlist"]);
+
+export function normalizeRelPath(value) {
+	return value.replace(/\\/g, "/");
+}
+
+export function parseWorkspacePatterns(text) {
+	return text
+		.split(/\r?\n/)
+		.map((line) => line.trim().match(/^-\s+["']?([^"']+)["']?$/)?.[1])
+		.filter(Boolean);
+}
+
+export function parseCliOptions(args) {
+	const options = {
+		all: false,
+		tier: "unit",
+		workspaces: [],
+		excludeWorkspaces: [],
+	};
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
+		if (arg === "--all") {
+			options.all = true;
+			continue;
+		}
+		if (arg === "--tier") {
+			const value = args[index + 1];
+			if (!value || value.startsWith("--"))
+				throw new Error("--tier requires a value");
+			options.tier = value;
+			index += 1;
+			continue;
+		}
+		if (arg === "--workspace" || arg === "--exclude-workspace") {
+			const value = args[index + 1];
+			if (!value || value.startsWith("--"))
+				throw new Error(`${arg} requires a value`);
+			const selectors = parseWorkspaceSelectorValue(value);
+			if (selectors.length === 0) throw new Error(`${arg} requires a value`);
+			if (arg === "--workspace") options.workspaces.push(...selectors);
+			else options.excludeWorkspaces.push(...selectors);
+			index += 1;
+			continue;
+		}
+		throw new Error(`Unknown option: ${arg}`);
+	}
+	return options;
+}
+
+export function parseWorkspaceSelectorValue(value) {
+	return value
+		.split(",")
+		.map((part) => part.trim())
+		.filter(Boolean);
+}
+
+export function expandWorkspacePatterns(root = ROOT, patterns) {
+	const workspaces = [];
+	for (const pattern of patterns) {
+		const normalizedPattern = normalizeRelPath(pattern);
+		if (!normalizedPattern.endsWith("/*") || normalizedPattern.slice(0, -2).includes("*"))
+			throw new Error(`Unsupported workspace pattern: ${pattern}`);
+		const base = normalizedPattern.slice(0, -2);
+		const absBase = path.join(root, ...base.split("/"));
+		if (!fs.existsSync(absBase)) continue;
+		for (const entry of fs.readdirSync(absBase, { withFileTypes: true })) {
+			if (!entry.isDirectory()) continue;
+			const cwd = normalizeRelPath(path.join(base, entry.name));
+			if (fs.existsSync(path.join(root, cwd, "package.json")))
+				workspaces.push(cwd);
+		}
+	}
+	return workspaces.sort();
+}
+
+export function isIgnoredFile(file) {
+	const normalized = normalizeRelPath(file);
+	if (
+		NESTED_NON_WORKSPACES.some(
+			(prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`),
+		)
+	)
+		return true;
+	const parts = normalized.split("/");
+	const directoryParts = parts.slice(0, -1);
+	return (
+		parts.some((part) => IGNORED_PARTS.has(part)) ||
+		directoryParts.some((part) => /^generated$/i.test(part))
+	);
+}
+
+export function discoverTestFiles(files) {
+	return files
+		.map(normalizeRelPath)
+		.filter((file) => /\.(test|spec)\.[cm]?[jt]sx?$/.test(file))
+		.filter((file) => !isIgnoredFile(file));
+}
+
+function escapeRegExp(value) {
+	return value.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+}
+
+export function globToRegExp(glob) {
+	const normalized = normalizeRelPath(glob);
+	let source = "";
+	for (let index = 0; index < normalized.length; index += 1) {
+		const char = normalized[index];
+		if (char === "*" && normalized[index + 1] === "*") {
+			if (normalized[index + 2] === "/") {
+				source += "(?:.*/)?";
+				index += 2;
+			} else {
+				source += ".*";
+				index += 1;
+			}
+			continue;
+		}
+		if (char === "*") {
+			source += "[^/]*";
+			continue;
+		}
+		if (char === "{") {
+			const end = normalized.indexOf("}", index);
+			if (end > index) {
+				const options = normalized
+					.slice(index + 1, end)
+					.split(",")
+					.map((part) => escapeRegExp(part.trim()));
+				source += `(?:${options.join("|")})`;
+				index = end;
+				continue;
+			}
+		}
+		source += escapeRegExp(char);
+	}
+	return new RegExp(`^${source}$`);
+}
+
+export function matchesAny(file, patterns = []) {
+	return patterns.some((pattern) =>
+		globToRegExp(normalizeRelPath(pattern)).test(file),
+	);
+}
+
+export function selectFilesForTier(workspace, tierConfig, allFiles) {
+	const prefix = `${normalizeRelPath(workspace.cwd)}/`;
+	const workspaceFiles = discoverTestFiles(allFiles).filter((file) =>
+		file.startsWith(prefix),
+	);
+	return workspaceFiles.filter((file) => {
+		const rel = file.slice(prefix.length);
+		const include = tierConfig?.include?.length
+			? matchesAny(rel, tierConfig.include)
+			: true;
+		const exclude = tierConfig?.exclude?.length
+			? matchesAny(rel, tierConfig.exclude)
+			: false;
+		return include && !exclude;
+	});
+}
+
+export function checkTestFiles(workspace, tier, tierConfig, allFiles) {
+	if (workspace.status !== "required")
+		return { status: "skipped", reason: workspace.reason };
+	if (!isRunnableTier(tierConfig))
+		return {
+			status: "skipped",
+			reason: tierConfig?.reason ?? "tier not required",
+		};
+	const selected = selectFilesForTier(workspace, tierConfig, allFiles);
+	if (selected.length === 0)
+		throw new Error(
+			`No tests selected for runnable tier ${workspace.cwd} ${tier}`,
+		);
+	return { status: "ok", selected };
+}
+
+export function checkIncludeCoverage(workspace, tier, tierConfig, allFiles) {
+	if (!isRunnableTier(tierConfig)) return;
+	const prefix = `${normalizeRelPath(workspace.cwd)}/`;
+	if (tierConfig.coverage === "allowlist") {
+		const selected = selectFilesForTier(workspace, tierConfig, allFiles);
+		for (const pattern of tierConfig.include ?? []) {
+			if (
+				!selected.some((file) =>
+					matchesAny(file.slice(prefix.length), [pattern]),
+				)
+			) {
+				throw new Error(
+					`${workspace.cwd} ${tier} allowlist include matched no tests: ${pattern}`,
+				);
+			}
+		}
+		return;
+	}
+	const workspaceFiles = discoverTestFiles(allFiles).filter((file) =>
+		file.startsWith(prefix),
+	);
+	const selected = new Set(selectFilesForTier(workspace, tierConfig, allFiles));
+	for (const file of workspaceFiles) {
+		const rel = file.slice(prefix.length);
+		if (!selected.has(file) && !matchesAny(rel, tierConfig.exclude ?? [])) {
+			throw new Error(
+				`${file} is not covered by manifest include/exclude for ${workspace.cwd} ${tier}`,
+			);
+		}
+	}
+}
+
+function isRunnableTier(config) {
+	return config?.status === "required" || config?.status === "manual";
+}
+
+export function validateManifestCoverage(workspaceCwds, manifestWorkspaces) {
+	const actual = new Set(workspaceCwds.map(normalizeRelPath));
+	const declared = new Set(
+		manifestWorkspaces.map((item) => normalizeRelPath(item.cwd)),
+	);
+	for (const cwd of actual) {
+		if (!declared.has(cwd))
+			throw new Error(`Manifest is missing pnpm workspace: ${cwd}`);
+	}
+	for (const cwd of declared) {
+		if (!actual.has(cwd))
+			throw new Error(`Manifest declares non-pnpm workspace: ${cwd}`);
+	}
+}
+
+export function validateManifest(manifestWorkspaces) {
+	for (const workspace of manifestWorkspaces) {
+		if (!VALID_STATUSES.has(workspace.status))
+			throw new Error(`${workspace.cwd} has invalid status`);
+		if (workspace.status !== "required" && !workspace.reason)
+			throw new Error(`${workspace.cwd} requires reason`);
+		for (const [tier, config] of Object.entries(workspace.tiers ?? {})) {
+			if (!VALID_STATUSES.has(config.status))
+				throw new Error(`${workspace.cwd} ${tier} has invalid status`);
+			if (
+				config.coverage &&
+				!VALID_COVERAGE_MODES.has(config.coverage)
+			)
+				throw new Error(`${workspace.cwd} ${tier} has invalid coverage mode`);
+			if (
+				isRunnableTier(config) &&
+				config.coverage === "allowlist" &&
+				!config.include?.length
+			)
+				throw new Error(
+					`${workspace.cwd} ${tier} allowlist coverage requires include patterns`,
+				);
+			if (workspace.status !== "required" && isRunnableTier(config))
+				throw new Error(
+					`${workspace.cwd} ${tier} cannot be runnable when workspace status is ${workspace.status}`,
+				);
+			if (config.status !== "required" && !config.reason)
+				throw new Error(`${workspace.cwd} ${tier} requires reason`);
+			if (isRunnableTier(config) && !config.command)
+				throw new Error(`${workspace.cwd} ${tier} requires command`);
+		}
+	}
+}
+
+export function planRuns(manifestWorkspaces, options) {
+	const tier = options.tier ?? "unit";
+	const includeManual = options.explicit !== false;
+	const runs = [];
+	for (const workspace of manifestWorkspaces) {
+		const tierConfig = workspace.tiers?.[tier];
+		if (
+			tierConfig?.status !== "required" &&
+			!(includeManual && tierConfig?.status === "manual")
+		)
+			continue;
+		if (
+			// desktop 的 package test 包含 DB/Electron 相关用例；unit tier 需要走显式 vitest exclude，避免 root unit 入口拖入重型测试。
+			workspace.cwd === "apps/desktop" &&
+			tier === "unit" &&
+			tierConfig.command?.type === "packageScript" &&
+			tierConfig.command.script === "test"
+		) {
+			throw new Error("desktop unit cannot use package test script");
+		}
+		runs.push({ workspace, tier, tierConfig });
+	}
+	return runs;
+}
+
+function workspaceMatchesSelector(workspace, selector) {
+	const normalizedSelector = normalizeRelPath(selector);
+	return (
+		workspace.name === selector ||
+		normalizeRelPath(workspace.cwd) === normalizedSelector
+	);
+}
+
+export function validateWorkspaceSelectors(
+	manifestWorkspaces,
+	selectors,
+	flag,
+) {
+	for (const selector of selectors ?? []) {
+		if (
+			!manifestWorkspaces.some((workspace) =>
+				workspaceMatchesSelector(workspace, selector),
+			)
+		) {
+			throw new Error(`${flag} matched no workspace: ${selector}`);
+		}
+	}
+}
+
+export function filterRunsByWorkspace(runs, options = {}) {
+	const workspaces = options.workspaces ?? [];
+	const excludeWorkspaces = options.excludeWorkspaces ?? [];
+	return runs.filter((run) => {
+		const included =
+			workspaces.length === 0 ||
+			workspaces.some((selector) =>
+				workspaceMatchesSelector(run.workspace, selector),
+			);
+		const excluded = excludeWorkspaces.some((selector) =>
+			workspaceMatchesSelector(run.workspace, selector),
+		);
+		return included && !excluded;
+	});
+}
+
+export function listConfiguredTiers(manifestWorkspaces) {
+	return [
+		...new Set(
+			manifestWorkspaces.flatMap((workspace) =>
+				Object.keys(workspace.tiers ?? {}),
+			),
+		),
+	];
+}
+
+function describeTierStatus(manifestWorkspaces, tier) {
+	const entries = manifestWorkspaces.flatMap((workspace) => {
+		const tierConfig = workspace.tiers?.[tier];
+		if (!tierConfig) return [];
+		const existingScript = tierConfig.existingScript
+			? ` existing script: pnpm --dir ${workspace.cwd} run ${tierConfig.existingScript}.`
+			: "";
+		return [
+			`${workspace.cwd} ${tierConfig.status}.${existingScript} ${tierConfig.reason ?? ""}`.trim(),
+		];
+	});
+	return entries.length ? entries.join(" ") : "Tier is not declared in manifest.";
+}
+
+export function resolvePnpmInvocation(args, env = process.env) {
+	const npmExecPath = env.npmExecPath ?? env.npm_execpath;
+	const execPath = env.execPath ?? process.execPath;
+	if (npmExecPath)
+		return { command: execPath, args: [npmExecPath, ...args], shell: false };
+	const platform = env.platform ?? process.platform;
+	const isWindows = platform === "win32";
+	return { command: "pnpm", args, shell: isWindows };
+}
+
+export function classifyFailure({ stage, exitCode, output }) {
+	if (stage === "preflight") return "PREFLIGHT_FAILED";
+	if (exitCode === 0) return null;
+	if (/No test files found/i.test(output)) return "NO_TESTS_REQUIRED";
+	if (/Failed Suites|Cannot find module|Error: Failed to load/i.test(output))
+		return "TEST_COLLECT_FAILED";
+	if (/FAIL|AssertionError|expected /i.test(output))
+		return "TEST_ASSERTION_FAILED";
+	if (/Test timed out/i.test(output)) return "TEST_TIMEOUT";
+	return "COMMAND_FAILED";
+}
+
+export function buildPnpmArgs(
+	root,
+	workspace,
+	commandSpec,
+	tierConfig = {},
+	selectedFiles = [],
+) {
+	const workspaceAbs = path.join(root, workspace.cwd);
+	if (commandSpec.type === "packageScript")
+		return ["--dir", workspaceAbs, "run", commandSpec.script];
+	if (commandSpec.type === "packageBin") {
+		const workspacePrefix = `${normalizeRelPath(workspace.cwd)}/`;
+		const selectedArgs = tierConfig.include?.length
+			? selectedFiles.map((file) => {
+					const normalized = normalizeRelPath(file);
+					if (!normalized.startsWith(workspacePrefix)) {
+						throw new Error(
+							`Selected test file is outside workspace ${workspace.cwd}: ${file}`,
+						);
+					}
+					return normalized.slice(workspacePrefix.length);
+				})
+			: [];
+		const args = [
+			"--dir",
+			workspaceAbs,
+			"exec",
+			commandSpec.bin,
+			...(commandSpec.args ?? []),
+			...selectedArgs,
+		];
+		for (const pattern of tierConfig.exclude ?? []) {
+			args.push("--exclude", pattern);
+		}
+		return args;
+	}
+	throw new Error(`Unsupported command type: ${commandSpec.type}`);
+}
+
+export function buildPreflightArgs(root, workspace, preflight) {
+	const workspaceAbs = path.join(root, workspace.cwd);
+	if (preflight.type === "packageScript")
+		return ["--dir", workspaceAbs, "run", preflight.script];
+	throw new Error(`Unsupported preflight type: ${preflight.type}`);
+}
+
+export function runCommand(command, args, options = {}) {
+	return new Promise((resolve) => {
+		const child = spawn(command, args, {
+			cwd: options.cwd,
+			shell: options.shell,
+			windowsHide: true,
+		});
+		let output = "";
+		let settled = false;
+		const finish = (result) => {
+			if (settled) return;
+			settled = true;
+			resolve(result);
+		};
+		child.stdout?.on("data", (chunk) => {
+			const text = chunk.toString();
+			output += text;
+			process.stdout.write(chunk);
+		});
+		child.stderr?.on("data", (chunk) => {
+			const text = chunk.toString();
+			output += text;
+			process.stderr.write(chunk);
+		});
+		child.on("error", (error) => {
+			output += error.message;
+			finish({ exitCode: 1, output });
+		});
+		child.on("close", (code) => {
+			finish({ exitCode: code ?? 1, output });
+		});
+	});
+}
+
+export function readAllFiles(root) {
+	const files = [];
+	function visit(absDir) {
+		for (const entry of fs.readdirSync(absDir, { withFileTypes: true })) {
+			const abs = path.join(absDir, entry.name);
+			const rel = normalizeRelPath(path.relative(root, abs));
+			if (isIgnoredFile(rel)) continue;
+			if (entry.isDirectory()) {
+				visit(abs);
+				continue;
+			}
+			if (entry.isFile()) files.push(rel);
+		}
+	}
+	visit(root);
+	return files;
+}
+
+export async function runPlannedTests({
+	root = ROOT,
+	manifest,
+	tier = "unit",
+	all = false,
+	workspaces = [],
+	excludeWorkspaces = [],
+	workspaceCwds,
+	allFiles,
+	runCommandImpl = runCommand,
+}) {
+	const manifestWorkspaces = manifest.workspaces;
+	const actualWorkspaceCwds =
+		workspaceCwds ??
+		expandWorkspacePatterns(
+			root,
+			parseWorkspacePatterns(
+				fs.readFileSync(path.join(root, "pnpm-workspace.yaml"), "utf8"),
+			),
+		);
+	validateManifest(manifestWorkspaces);
+	validateManifestCoverage(actualWorkspaceCwds, manifestWorkspaces);
+	validateWorkspaceSelectors(manifestWorkspaces, workspaces, "--workspace");
+	validateWorkspaceSelectors(
+		manifestWorkspaces,
+		excludeWorkspaces,
+		"--exclude-workspace",
+	);
+	const discoveredFiles = allFiles ?? discoverTestFiles(readAllFiles(root));
+	const tiers = all ? listConfiguredTiers(manifestWorkspaces) : [tier];
+	const results = [];
+	for (const currentTier of tiers) {
+		const runs = filterRunsByWorkspace(
+			planRuns(manifestWorkspaces, {
+				tier: currentTier,
+				explicit: !all,
+			}),
+			{ workspaces, excludeWorkspaces },
+		);
+		if (!all && runs.length === 0) {
+			throw new Error(
+				`No runnable test runs configured for tier ${currentTier}. ${describeTierStatus(manifestWorkspaces, currentTier)}`,
+			);
+		}
+		for (const run of runs) {
+			const fileCheck = checkTestFiles(
+				run.workspace,
+				currentTier,
+				run.tierConfig,
+				discoveredFiles,
+			);
+			checkIncludeCoverage(
+				run.workspace,
+				currentTier,
+				run.tierConfig,
+				discoveredFiles,
+			);
+			const cwd = path.join(root, run.workspace.cwd);
+			let preflightFailed = false;
+			for (const preflight of run.tierConfig.preflight ?? []) {
+				const pnpmArgs = buildPreflightArgs(root, run.workspace, preflight);
+				const invocation = resolvePnpmInvocation(pnpmArgs);
+				const commandResult = await runCommandImpl(
+					invocation.command,
+					invocation.args,
+					{ cwd, shell: invocation.shell },
+				);
+				if (commandResult.exitCode !== 0) {
+					results.push({
+						workspace: run.workspace.cwd,
+						tier: currentTier,
+						stage: "preflight",
+						command: invocation.command,
+						args: invocation.args,
+						exitCode: commandResult.exitCode,
+						output: commandResult.output,
+						failure: classifyFailure({
+							stage: "preflight",
+							exitCode: commandResult.exitCode,
+							output: commandResult.output,
+						}),
+					});
+					preflightFailed = true;
+					break;
+				}
+			}
+			if (preflightFailed) continue;
+			const pnpmArgs = buildPnpmArgs(
+				root,
+				run.workspace,
+				run.tierConfig.command,
+				run.tierConfig,
+				fileCheck.selected,
+			);
+			const invocation = resolvePnpmInvocation(pnpmArgs);
+			const commandResult = await runCommandImpl(
+				invocation.command,
+				invocation.args,
+				{ cwd, shell: invocation.shell },
+			);
+			results.push({
+				workspace: run.workspace.cwd,
+				tier: currentTier,
+				stage: "test",
+				command: invocation.command,
+				args: invocation.args,
+				exitCode: commandResult.exitCode,
+				output: commandResult.output,
+				failure: classifyFailure({
+					stage: "test",
+					exitCode: commandResult.exitCode,
+					output: commandResult.output,
+				}),
+			});
+		}
+	}
+	return results;
+}
+
+export function printSummary(results, manifest) {
+	console.log("\nTest workspace summary\n");
+	for (const result of results) {
+		const status = result.exitCode === 0 ? "PASS" : `FAIL ${result.failure}`;
+		const workspaceCwd = result.workspace?.cwd ?? result.workspace;
+		console.log(`${status} ${workspaceCwd} ${result.tier}`);
+		if (result.command)
+			console.log(`  command: ${[result.command, ...(result.args ?? [])].join(" ")}`);
+	}
+	for (const workspace of manifest.workspaces) {
+		if (workspace.status !== "required")
+			console.log(`SKIP ${workspace.cwd} ${workspace.status}: ${workspace.reason}`);
+		for (const [tier, tierConfig] of Object.entries(workspace.tiers ?? {})) {
+			if (tierConfig.status === "deferred")
+				console.log(`DEFER ${workspace.cwd} ${tier}: ${tierConfig.reason}`);
+		}
+	}
+}
+
+async function main() {
+	const { all, tier, workspaces, excludeWorkspaces } = parseCliOptions(
+		process.argv.slice(2),
+	);
+	const manifest = (await import("./test-workspaces.config.mjs")).default;
+	const results = await runPlannedTests({
+		root: ROOT,
+		manifest,
+		tier,
+		all,
+		workspaces,
+		excludeWorkspaces,
+	});
+	printSummary(results, manifest);
+	if (results.some((result) => result.exitCode !== 0)) process.exitCode = 1;
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+	main().catch((error) => {
+		console.error(error);
+		process.exitCode = 1;
+	});
+}

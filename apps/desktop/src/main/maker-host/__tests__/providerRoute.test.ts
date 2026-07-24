@@ -1,0 +1,334 @@
+import { afterEach, describe, it, expect, vi } from 'vitest';
+
+const { mockGetAppCapabilities } = vi.hoisted(() => ({
+  mockGetAppCapabilities: vi.fn(() => ({ canUseCindyGateway: true })),
+}));
+
+vi.mock('../../appCapabilities.js', () => ({
+  getAppCapabilities: mockGetAppCapabilities,
+}));
+
+import { BUNDLED_CATALOG, buildUserProvider, type AgentKind, type RoutingDescriptor } from '@cindy/model-providers';
+
+import {
+  buildRouteDecision,
+  resolveSessionRouteDecision,
+  inferProviderIdForModel,
+  isUserProviderSession,
+  setCustomProviderKeyReader,
+  setProviderOAuthTokenReader,
+  resolveImplicitProviderOAuthRouteDecision,
+  rewriteImplicitModelIdForRoute,
+  rewriteSessionModelIdForRoute,
+} from '../provider-route.js';
+import { setCustomProviders, setDiscoveredCodexModels, setXdGatewayModels } from '../active-catalog.js';
+import { setSessionProvider, clearSessionProvider } from '../session-provider-store.js';
+import { ANTHROPIC_DIRECT_UPSTREAM } from '../claude-gateway-config.js';
+
+// CODEX_OAUTH_UPSTREAM 不直接 import —— codex-proxy-host.ts 在 import 期触电(app.getPath),
+// 会让本测试在 vitest 无 electron 环境炸。其值稳定(codex-gateway-config.ts),这里以字面量锁定。
+const CODEX_OAUTH_UPSTREAM = 'https://chatgpt.com/backend-api/codex';
+
+/**
+ * no-break 锁定:catalog 描述符经 buildRouteDecision 出来的路由,必须与退役前 decideXxxRoute
+ * 在等价场景下逐字段一致。下面每个 toEqual 的**字面量**就是那条 no-break 基线 —— 任一字段漂移
+ * 都会让现有用户路由被悄悄改掉,这个测试就是那道防线(规则 9/10/11)。
+ */
+function descriptor(providerId: string, agent: AgentKind) {
+  const p = BUNDLED_CATALOG.providers.find((x) => x.id === providerId);
+  if (!p) throw new Error(`missing provider ${providerId}`);
+  const routing = p.routing[agent];
+  if (!routing) throw new Error(`provider ${providerId} has no ${agent} routing`);
+  return routing;
+}
+
+const KEY = 'sk-test-gateway-key';
+
+afterEach(() => {
+  mockGetAppCapabilities.mockReturnValue({ canUseCindyGateway: true });
+  setProviderOAuthTokenReader(() => null);
+  clearSessionProvider('s-xai');
+  clearSessionProvider('s-xai-rewrite');
+  setXdGatewayModels([]);
+});
+
+describe('local mode Cindy gateway gate', () => {
+  it('does not route explicit or implicit XD traffic when the capability is disabled', () => {
+    mockGetAppCapabilities.mockReturnValue({ canUseCindyGateway: false });
+    setSessionProvider('s-local-xd', 'xd');
+    setXdGatewayModels([{ id: 'gpt-local-gate', agents: ['codex'] }]);
+
+    expect(resolveSessionRouteDecision('s-local-xd', 'codex', KEY)).toBeNull();
+    expect(inferProviderIdForModel('gpt-local-gate', 'codex')).toBeNull();
+
+    clearSessionProvider('s-local-xd');
+  });
+});
+
+describe('claude-code: buildRouteDecision no-break 基线', () => {
+  it('Anthropic(oauth-passthrough) == 直连 api.anthropic.com 分支', () => {
+    const fromCatalog = buildRouteDecision(descriptor('anthropic', 'claude-code'), KEY, 'claude-code');
+    expect(fromCatalog).toEqual({ upstreamOverride: ANTHROPIC_DIRECT_UPSTREAM });
+  });
+
+  it('XD(gateway-key) == 换网关 key(x-api-key+authorization),不删 anthropic-beta(fast 经网关透传)', () => {
+    // commit 6024f25cb 起:XD cc 网关路由去掉 headerDelete:['anthropic-beta'] —— anthropic-beta 里
+    // 携带的 fast-mode beta 不再被剥,Claude Code Fast 可经网关透传到上游。故决策里**无 headerDelete**。
+    const fromCatalog = buildRouteDecision(descriptor('xd', 'claude-code'), KEY, 'claude-code');
+    expect(fromCatalog).toEqual({
+      headerOverride: { 'x-api-key': KEY, authorization: `Bearer ${KEY}` },
+    });
+  });
+
+  it('XD 无网关 key → null(passthrough)', () => {
+    expect(buildRouteDecision(descriptor('xd', 'claude-code'), null, 'claude-code')).toBeNull();
+  });
+});
+
+describe('codex: buildRouteDecision no-break 基线', () => {
+  it('OpenAI(oauth-passthrough) == 直连 ChatGPT 后端分支', () => {
+    const fromCatalog = buildRouteDecision(descriptor('openai', 'codex'), KEY, 'codex');
+    expect(fromCatalog).toEqual({ upstreamOverride: CODEX_OAUTH_UPSTREAM });
+  });
+
+  it('XD(gateway-key) == 仅换 authorization Bearer 网关 key 分支(无 x-api-key/无 headerDelete)', () => {
+    const fromCatalog = buildRouteDecision(descriptor('xd', 'codex'), KEY, 'codex');
+    expect(fromCatalog).toEqual({ headerOverride: { authorization: `Bearer ${KEY}` } });
+  });
+
+  it('XD 无网关 key → null(passthrough)', () => {
+    expect(buildRouteDecision(descriptor('xd', 'codex'), null, 'codex')).toBeNull();
+  });
+
+  it('xAI(provider-oauth-header) → 直连 api.x.ai + 覆盖 authorization + 删除 ChatGPT 专属头', () => {
+    const fromCatalog = buildRouteDecision(descriptor('xai', 'codex'), KEY, 'codex', null, 'xai-token');
+    expect(fromCatalog).toEqual({
+      upstreamOverride: 'https://api.x.ai/v1',
+      headerOverride: { authorization: 'Bearer xai-token' },
+      headerDelete: ['chatgpt-account-id', 'openai-beta', 'originator', 'session_id'],
+    });
+  });
+
+  it('xAI 无 token → 哑 token 覆盖 authorization,不透传 OpenAI bearer', () => {
+    const fromCatalog = buildRouteDecision(descriptor('xai', 'codex'), KEY, 'codex');
+    expect(fromCatalog).toEqual(expect.objectContaining({
+      upstreamOverride: 'https://api.x.ai/v1',
+      headerOverride: { authorization: 'Bearer xdt-missing-provider-oauth-token' },
+    }));
+  });
+});
+
+describe('resolveSessionRouteDecision (per-session 选择 → 路由;no-break fallback)', () => {
+  it('未显式选供应商 → null(调用方回落 spawn-aware 默认路由,行为不变)', () => {
+    clearSessionProvider('s-none');
+    expect(resolveSessionRouteDecision('s-none', 'claude-code', KEY)).toBeNull();
+  });
+
+  it('cc 会话选 Anthropic → 直连 api.anthropic.com', () => {
+    setSessionProvider('s-a', 'anthropic');
+    expect(resolveSessionRouteDecision('s-a', 'claude-code', KEY)).toEqual({
+      upstreamOverride: ANTHROPIC_DIRECT_UPSTREAM,
+    });
+  });
+
+  it('cc 会话选 XD → 网关换 key(x-api-key+authorization),不删 anthropic-beta(fast 经网关透传)', () => {
+    setSessionProvider('s-x', 'xd');
+    expect(resolveSessionRouteDecision('s-x', 'claude-code', KEY)).toEqual({
+      headerOverride: { 'x-api-key': KEY, authorization: `Bearer ${KEY}` },
+    });
+  });
+
+  it('codex 会话选 XD → 仅换 authorization Bearer', () => {
+    setSessionProvider('s-xc', 'xd');
+    expect(resolveSessionRouteDecision('s-xc', 'codex', KEY)).toEqual({
+      headerOverride: { authorization: `Bearer ${KEY}` },
+    });
+  });
+
+  it('codex 会话选 xAI → 异步读取 xAI OAuth token 并路由到 api.x.ai', async () => {
+    setSessionProvider('s-xai', 'xai');
+    setProviderOAuthTokenReader((providerId, agent) =>
+      providerId === 'xai' && agent === 'codex' ? Promise.resolve('xai-live-token') : null,
+    );
+    await expect(Promise.resolve(resolveSessionRouteDecision('s-xai', 'codex', KEY))).resolves.toEqual({
+      upstreamOverride: 'https://api.x.ai/v1',
+      headerOverride: { authorization: 'Bearer xai-live-token' },
+      headerDelete: ['chatgpt-account-id', 'openai-beta', 'originator', 'session_id'],
+    });
+    clearSessionProvider('s-xai');
+    setProviderOAuthTokenReader(() => null);
+  });
+
+  it('codex 隐式来源 + xAI model → 按唯一来源推断 provider OAuth 路由', async () => {
+    setProviderOAuthTokenReader((providerId, agent) =>
+      providerId === 'xai' && agent === 'codex' ? Promise.resolve('xai-live-token') : null,
+    );
+    // openai / xd 都是动态清单供应商(2026-07-19 统一重构,bundled 零静态):
+    // 两边各注入 gpt-5.4 恢复被测前提——gpt-5.4 双来源 → 非唯一 → 不做隐式推断。
+    setXdGatewayModels([{ id: 'gpt-5.4', agents: ['codex'] }]);
+    setDiscoveredCodexModels([
+      { id: 'gpt-5.4', name: 'GPT-5.4', contextWindow: 272_000, efforts: [], defaultEffort: null },
+    ]);
+    expect(inferProviderIdForModel('xai/grok-4.3', 'codex')).toBe('xai');
+    expect(inferProviderIdForModel('gpt-5.4', 'codex')).toBeNull();
+    setDiscoveredCodexModels([]);
+    await expect(Promise.resolve(
+      resolveImplicitProviderOAuthRouteDecision('xai/grok-4.3', 'codex', KEY),
+    )).resolves.toEqual({
+      upstreamOverride: 'https://api.x.ai/v1',
+      headerOverride: { authorization: 'Bearer xai-live-token' },
+      headerDelete: ['chatgpt-account-id', 'openai-beta', 'originator', 'session_id'],
+    });
+    setProviderOAuthTokenReader(() => null);
+  });
+
+  it('选的供应商对该 agent 无效(Anthropic 用在 codex)→ null(回落默认)', () => {
+    setSessionProvider('s-mismatch', 'anthropic');
+    expect(resolveSessionRouteDecision('s-mismatch', 'codex', KEY)).toBeNull();
+  });
+
+  it('按 catalog modelIdRewrite 剥 xAI 内部前缀', () => {
+    setSessionProvider('s-xai-rewrite', 'xai');
+    expect(rewriteSessionModelIdForRoute('s-xai-rewrite', 'codex', {
+      model: 'xai/grok-4.3',
+      input: [],
+    })).toEqual({
+      model: 'grok-4.3',
+      input: [],
+    });
+    clearSessionProvider('s-xai-rewrite');
+  });
+
+  it('隐式 xAI model 也按 catalog modelIdRewrite 剥内部前缀', () => {
+    expect(rewriteImplicitModelIdForRoute('codex', {
+      model: 'xai/grok-4.3',
+      input: [],
+    })).toEqual({
+      model: 'grok-4.3',
+      input: [],
+    });
+  });
+});
+
+describe('resolveSessionRouteDecision — modelPrefixes 服务范围门(issue #886)', () => {
+  afterEach(() => {
+    clearSessionProvider('s-scope');
+    setProviderOAuthTokenReader(() => null);
+  });
+
+  it('cc 会话选 xAI + claude-* 辅助请求(权限 auto 分类器等)→ null,回落默认路由', () => {
+    setSessionProvider('s-scope', 'xai');
+    // #886 现场:分类器的 haiku 调用被会话路由拽到 api.x.ai → 必挂 → Bash 全被拦。
+    // scope 门后返回 null,调用方回落 spawn 默认(网关/直连),分类器照常工作。
+    expect(resolveSessionRouteDecision('s-scope', 'claude-code', KEY, 'claude-haiku-4-5-20251001')).toBeNull();
+  });
+
+  it('cc 会话选 xAI + 自家前缀模型 → 正常路由到 api.x.ai', () => {
+    setSessionProvider('s-scope', 'xai');
+    expect(resolveSessionRouteDecision('s-scope', 'claude-code', KEY, 'xai/grok-4.3')).toEqual({
+      upstreamOverride: 'https://api.x.ai/v1',
+    });
+  });
+
+  it('cc 会话选 xAI + 无 wireModel(控制面请求)→ 不受范围限制,正常路由', () => {
+    setSessionProvider('s-scope', 'xai');
+    expect(resolveSessionRouteDecision('s-scope', 'claude-code', KEY)).toEqual({
+      upstreamOverride: 'https://api.x.ai/v1',
+    });
+  });
+
+  it('cc 会话选 OpenAI(ChatGPT 订阅直连)同样只捕获 chatgpt/ 前缀', () => {
+    setSessionProvider('s-scope', 'openai');
+    expect(resolveSessionRouteDecision('s-scope', 'claude-code', KEY, 'claude-haiku-4-5-20251001')).toBeNull();
+    expect(resolveSessionRouteDecision('s-scope', 'claude-code', KEY, 'chatgpt/gpt-5.5')).toEqual({
+      upstreamOverride: CODEX_OAUTH_UPSTREAM,
+    });
+  });
+
+  it('codex 会话选 xAI + 非 xai/ 模型 → null(不把别家模型送到 api.x.ai)', async () => {
+    setSessionProvider('s-scope', 'xai');
+    setProviderOAuthTokenReader(() => Promise.resolve('xai-live-token'));
+    expect(resolveSessionRouteDecision('s-scope', 'codex', KEY, 'gpt-5.5')).toBeNull();
+    // 自家模型不受影响。
+    await expect(Promise.resolve(
+      resolveSessionRouteDecision('s-scope', 'codex', KEY, 'xai/grok-4.3'),
+    )).resolves.toEqual(expect.objectContaining({ upstreamOverride: 'https://api.x.ai/v1' }));
+  });
+
+  it('未声明 modelPrefixes 的供应商(XD/Anthropic/自定义)不受门限制 —— no-break', () => {
+    setSessionProvider('s-scope', 'xd');
+    expect(resolveSessionRouteDecision('s-scope', 'claude-code', KEY, 'claude-haiku-4-5-20251001')).toEqual({
+      headerOverride: { 'x-api-key': KEY, authorization: `Bearer ${KEY}` },
+    });
+    setSessionProvider('s-scope', 'anthropic');
+    expect(resolveSessionRouteDecision('s-scope', 'claude-code', KEY, 'claude-haiku-4-5-20251001')).toEqual({
+      upstreamOverride: ANTHROPIC_DIRECT_UPSTREAM,
+    });
+  });
+});
+
+describe('api-key-header (自定义供应商 buildRouteDecision)', () => {
+  const routing = (headers?: Record<string, string>): RoutingDescriptor => ({
+    upstream: 'https://api.myprovider.com/v1',
+    authStrategy: 'api-key-header',
+    ...(headers ? { headerOverride: headers } : {}),
+  });
+
+  it('cc: 注入 x-api-key + authorization(覆盖 oauth-spawn 泄漏的订阅 Bearer) + upstreamOverride', () => {
+    expect(buildRouteDecision(routing(), KEY, 'claude-code', 'sk-custom')).toEqual({
+      headerOverride: { 'x-api-key': 'sk-custom', authorization: 'Bearer sk-custom' },
+      upstreamOverride: 'https://api.myprovider.com/v1',
+    });
+  });
+
+  it('codex: 注入 authorization Bearer + upstreamOverride', () => {
+    expect(buildRouteDecision(routing(), KEY, 'codex', 'sk-custom')).toEqual({
+      headerOverride: { authorization: 'Bearer sk-custom' },
+      upstreamOverride: 'https://api.myprovider.com/v1',
+    });
+  });
+
+  it('叠加用户自定义 headers；无 key 时仍路由到 baseUrl(让上游决定鉴权)', () => {
+    expect(buildRouteDecision(routing({ 'X-Org': 'acme' }), KEY, 'codex', null)).toEqual({
+      headerOverride: { 'X-Org': 'acme' },
+      upstreamOverride: 'https://api.myprovider.com/v1',
+    });
+  });
+});
+
+describe('resolveSessionRouteDecision — 自定义供应商(resolve 时注入 key)', () => {
+  afterEach(() => {
+    setCustomProviders([]);
+    setCustomProviderKeyReader(() => null);
+    setProviderOAuthTokenReader(() => null);
+    clearSessionProvider('s-user');
+  });
+
+  it('user provider: 读注入 key + 路由到 baseUrl；isUserProviderSession=true', () => {
+    setCustomProviders([
+      buildUserProvider({
+        id: 'openrouter',
+        name: 'OpenRouter',
+        runtimes: {
+          codex: {
+            baseUrl: 'https://openrouter.ai/api/v1',
+            models: [{ id: 'meta/llama-4', name: 'Llama 4' }],
+          },
+        },
+      }),
+    ]);
+    setCustomProviderKeyReader((id, agent) => (id === 'openrouter' && agent === 'codex' ? 'sk-or-123' : null));
+    setSessionProvider('s-user', 'openrouter');
+
+    expect(isUserProviderSession('s-user')).toBe(true);
+    expect(resolveSessionRouteDecision('s-user', 'codex', KEY)).toEqual({
+      headerOverride: { authorization: 'Bearer sk-or-123' },
+      upstreamOverride: 'https://openrouter.ai/api/v1',
+    });
+  });
+
+  it('内置供应商 isUserProviderSession=false', () => {
+    setSessionProvider('s-user', 'xd');
+    expect(isUserProviderSession('s-user')).toBe(false);
+  });
+});

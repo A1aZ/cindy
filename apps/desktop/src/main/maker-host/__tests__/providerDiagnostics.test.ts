@@ -1,0 +1,263 @@
+/**
+ * provider-diagnostics（测试连接探测）+ shared/providerErrors（结构化分类器）单测。
+ *
+ * 覆盖：
+ *   - 分类器对 status / 错误体 pattern / 网络层错误码的确定性归类（规则 9）；
+ *   - buildProbeRequest 的 wire 形状（cc=/v1/messages 双鉴权头；codex=/responses Bearer），
+ *     与 provider-route 的 api-key-header 分支 header 组合对齐；
+ *   - runProviderProbe 注入 fetch 不联网：2xx → ok、4xx → 分类、网络错 → UPSTREAM_UNREACHABLE；
+ *   - resolveSavedProbeSpec 从 active-catalog + 注入 key reader 解析（仅 user 供应商）。
+ */
+
+import { describe, it, expect, afterEach } from 'vitest';
+
+import { BUNDLED_CATALOG, buildUserProvider } from '@cindy/model-providers';
+
+import { classifyProviderError } from '../../../shared/providerErrors.js';
+import {
+  buildProbeRequest,
+  runProviderProbe,
+  resolveSavedProbeSpec,
+  setDiagnosticsKeyReader,
+  setDiagnosticsOAuthTokenReader,
+  testProviderConnection,
+} from '../provider-diagnostics.js';
+import { setCustomProviders } from '../active-catalog.js';
+
+afterEach(() => {
+  setCustomProviders([]);
+  setDiagnosticsKeyReader(() => null);
+});
+
+describe('classifyProviderError', () => {
+  it('按 status 归类明确错误', () => {
+    expect(classifyProviderError({ status: 401 }).code).toBe('AUTH_INVALID');
+    expect(classifyProviderError({ status: 402 }).code).toBe('QUOTA_EXCEEDED');
+    expect(classifyProviderError({ status: 403 }).code).toBe('AUTH_FORBIDDEN');
+    expect(classifyProviderError({ status: 429 })).toMatchObject({ code: 'RATE_LIMITED', retryable: true });
+    expect(classifyProviderError({ status: 529 })).toMatchObject({ code: 'RATE_LIMITED', retryable: true });
+    expect(classifyProviderError({ status: 503 })).toMatchObject({ code: 'UPSTREAM_ERROR', retryable: true });
+  });
+
+  it('404：模型措辞 → MODEL_NOT_FOUND，否则 ENDPOINT_NOT_FOUND', () => {
+    expect(
+      classifyProviderError({ status: 404, bodyText: '{"error":{"message":"model: glm-x not found"}}' }).code,
+    ).toBe('MODEL_NOT_FOUND');
+    expect(classifyProviderError({ status: 404, bodyText: 'no route' }).code).toBe('ENDPOINT_NOT_FOUND');
+  });
+
+  it('400 按错误体 pattern 分流', () => {
+    expect(
+      classifyProviderError({ status: 400, bodyText: 'The model `x` does not exist or you do not have access' }).code,
+    ).toBe('MODEL_NOT_FOUND');
+    expect(classifyProviderError({ status: 400, bodyText: 'prompt is too long: 250000 tokens' }).code).toBe(
+      'CONTEXT_TOO_LONG',
+    );
+    expect(classifyProviderError({ status: 400, bodyText: 'insufficient_quota' }).code).toBe('QUOTA_EXCEEDED');
+    expect(classifyProviderError({ status: 400, bodyText: 'Extra inputs are not permitted' }).code).toBe(
+      'WIRE_INCOMPATIBLE',
+    );
+    expect(classifyProviderError({ status: 400, bodyText: 'something odd' }).code).toBe('UNKNOWN');
+  });
+
+  it('403 命中鉴权措辞归 AUTH_INVALID（部分网关 key 无效报 403）', () => {
+    expect(classifyProviderError({ status: 403, bodyText: 'invalid api key provided' }).code).toBe('AUTH_INVALID');
+  });
+
+  it('网络层错误 → UPSTREAM_UNREACHABLE / TIMEOUT（均可重试）', () => {
+    expect(classifyProviderError({ networkErrorCode: 'ECONNREFUSED' })).toMatchObject({
+      code: 'UPSTREAM_UNREACHABLE',
+      retryable: true,
+    });
+    expect(classifyProviderError({ networkErrorCode: 'TimeoutError' }).code).toBe('TIMEOUT');
+  });
+
+  it('不认识的网络错误码 → UNKNOWN（不误导用户「检查网络」）', () => {
+    expect(classifyProviderError({ networkErrorCode: 'E_WEIRD_CUSTOM' })).toMatchObject({
+      code: 'UNKNOWN',
+      retryable: false,
+    });
+  });
+});
+
+describe('buildProbeRequest', () => {
+  it('cc wire：/v1/messages + anthropic-version + 双鉴权头（与 api-key-header 路由分支对齐）', () => {
+    const { url, init } = buildProbeRequest({
+      agent: 'claude-code',
+      baseUrl: 'https://api.deepseek.com/anthropic/',
+      modelId: 'deepseek-chat',
+      apiKey: 'sk-test',
+      headers: { 'x-custom': '1' },
+    });
+    expect(url).toBe('https://api.deepseek.com/anthropic/v1/messages');
+    const headers = init.headers as Record<string, string>;
+    expect(headers['x-api-key']).toBe('sk-test');
+    expect(headers['authorization']).toBe('Bearer sk-test');
+    expect(headers['anthropic-version']).toBe('2023-06-01');
+    expect(headers['x-custom']).toBe('1');
+    const body = JSON.parse(String(init.body)) as { model: string; max_tokens: number };
+    expect(body.model).toBe('deepseek-chat');
+    expect(body.max_tokens).toBe(1);
+  });
+
+  it('codex wire：/responses + Bearer', () => {
+    const { url, init } = buildProbeRequest({
+      agent: 'codex',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      modelId: 'z-ai/glm-5.2',
+      apiKey: 'sk-or',
+    });
+    expect(url).toBe('https://openrouter.ai/api/v1/responses');
+    const headers = init.headers as Record<string, string>;
+    expect(headers['authorization']).toBe('Bearer sk-or');
+    expect(headers['x-api-key']).toBeUndefined();
+    const body = JSON.parse(String(init.body)) as { model: string; stream: boolean };
+    expect(body.model).toBe('z-ai/glm-5.2');
+    expect(body.stream).toBe(false);
+  });
+
+  it.each([
+    ['minimax-cn', 'https://api.minimaxi.com/v1/responses'],
+    ['minimax-global', 'https://api.minimax.io/v1/responses'],
+  ])('%s 预设拼出官方 Responses 端点', (presetId, expectedUrl) => {
+    const runtime = BUNDLED_CATALOG.presets?.find((preset) => preset.id === presetId)?.runtimes.codex;
+    expect(runtime).toBeDefined();
+    const { url, init } = buildProbeRequest({
+      agent: 'codex',
+      baseUrl: runtime!.baseUrl,
+      modelId: runtime!.models[0]!.id,
+      apiKey: 'sk-test',
+    });
+    expect(url).toBe(expectedUrl);
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      model: 'MiniMax-M3',
+      stream: false,
+      store: false,
+    });
+  });
+
+  it('无 key 时不注入鉴权头（端点可能靠自定义 headers 鉴权）', () => {
+    const { init } = buildProbeRequest({
+      agent: 'claude-code',
+      baseUrl: 'https://x.example',
+      modelId: 'm',
+    });
+    const headers = init.headers as Record<string, string>;
+    expect(headers['x-api-key']).toBeUndefined();
+    expect(headers['authorization']).toBeUndefined();
+  });
+});
+
+function fakeResponse(status: number, body = ''): Response {
+  return new Response(body, { status });
+}
+
+describe('runProviderProbe（注入 fetch，不联网）', () => {
+  it('2xx → ok + latency', async () => {
+    const r = await runProviderProbe(
+      { agent: 'claude-code', baseUrl: 'https://x.example', modelId: 'm', apiKey: 'k' },
+      async () => fakeResponse(200, '{}'),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.latencyMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('401 → AUTH_INVALID + status 透出', async () => {
+    const r = await runProviderProbe(
+      { agent: 'claude-code', baseUrl: 'https://x.example', modelId: 'm' },
+      async () => fakeResponse(401, '{"error":{"type":"authentication_error"}}'),
+    );
+    expect(r).toMatchObject({ ok: false, code: 'AUTH_INVALID', status: 401 });
+  });
+
+  it('fetch 抛网络错 → UPSTREAM_UNREACHABLE', async () => {
+    const err = new Error('fetch failed');
+    (err as Error & { cause?: { code: string } }).cause = { code: 'ECONNREFUSED' };
+    const r = await runProviderProbe(
+      { agent: 'codex', baseUrl: 'https://nope.example', modelId: 'm' },
+      async () => {
+        throw err;
+      },
+    );
+    expect(r).toMatchObject({ ok: false, code: 'UPSTREAM_UNREACHABLE' });
+  });
+});
+
+describe('resolveSavedProbeSpec / testProviderConnection(saved)', () => {
+  const config = {
+    id: 'my-relay',
+    name: 'My Relay',
+    runtimes: {
+      'claude-code': {
+        baseUrl: 'https://relay.example/anthropic',
+        models: [{ id: 'glm-5.2', name: 'GLM' }],
+        headers: { 'x-tenant': 't1' },
+      },
+    },
+  };
+
+  it('从 active-catalog 解析 user 供应商 + 注入 key reader 读 key', () => {
+    setCustomProviders([buildUserProvider(config)]);
+    setDiagnosticsKeyReader((id, agent) => (id === 'my-relay' && agent === 'claude-code' ? 'sk-saved' : null));
+    const spec = resolveSavedProbeSpec('my-relay', 'claude-code');
+    expect(spec).toMatchObject({
+      baseUrl: 'https://relay.example/anthropic',
+      modelId: 'glm-5.2',
+      apiKey: 'sk-saved',
+      headers: { 'x-tenant': 't1' },
+    });
+  });
+
+  it('不存在 / 非 user 供应商 / 无该 runtime → 抛错（handler 映射 INVALID_PARAMS）', () => {
+    setCustomProviders([buildUserProvider(config)]);
+    expect(() => resolveSavedProbeSpec('nope', 'claude-code')).toThrow(/not found/);
+    expect(() => resolveSavedProbeSpec('xd', 'claude-code')).toThrow(/not a custom provider/);
+    expect(() => resolveSavedProbeSpec('my-relay', 'codex')).toThrow(/no runtime/);
+  });
+
+  it('testProviderConnection(saved) 端到端（注入 fetch 断言 URL 与 key）', async () => {
+    setCustomProviders([buildUserProvider(config)]);
+    setDiagnosticsKeyReader(() => 'sk-saved');
+    let seenUrl = '';
+    let seenAuth = '';
+    const r = await testProviderConnection(
+      { kind: 'saved', providerId: 'my-relay', agent: 'claude-code' },
+      async (url, init) => {
+        seenUrl = String(url);
+        seenAuth = (init?.headers as Record<string, string>)['x-api-key'] ?? '';
+        return fakeResponse(200, '{}');
+      },
+    );
+    expect(r.ok).toBe(true);
+    expect(seenUrl).toBe('https://relay.example/anthropic/v1/messages');
+    expect(seenAuth).toBe('sk-saved');
+  });
+
+  it('oauth-token 供应商:探测 token 走 authorization 头,绝不发 x-api-key(与真实路由同口径)', async () => {
+    const oauthConfig = {
+      ...config,
+      id: 'my-sub',
+      auth: {
+        method: 'oauth' as const,
+        oauth: {
+          authorizeUrl: 'https://auth.example/authorize',
+          tokenUrl: 'https://auth.example/token',
+          clientId: 'c1',
+          scopes: 'openid',
+        },
+      },
+    };
+    setCustomProviders([buildUserProvider(oauthConfig)]);
+    setDiagnosticsKeyReader(() => 'sk-should-not-be-used');
+    setDiagnosticsOAuthTokenReader((id) => (id === 'my-sub' ? 'at-77' : null));
+
+    const spec = resolveSavedProbeSpec('my-sub', 'claude-code');
+    expect(spec.apiKey).toBeNull();
+    expect(spec.headers).toMatchObject({ authorization: 'Bearer at-77', 'x-tenant': 't1' });
+
+    const { init } = buildProbeRequest(spec);
+    const headers = init.headers as Record<string, string>;
+    expect(headers['authorization']).toBe('Bearer at-77');
+    expect(headers['x-api-key']).toBeUndefined();
+  });
+});

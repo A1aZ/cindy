@@ -1,0 +1,3837 @@
+/**
+ * CCAgentSessionView
+ * ---------------------------------------------------------------------------
+ * Session view for `/cc-agent/:sessionId`.
+ *
+ * 单一布局: MessageStream (空 / 有消息) + 底部 ChatInput + StatusBar。
+ * 历史上曾有"空 session → NewChatView (logo + 居中输入框)"分支, 2026-05 已移除 ——
+ * 实际命中场景几乎只有 draft route 跳转过程中的一两帧闪烁, 反而成了 UX 噪音;
+ * 真正能创建 worktree session 的入口已经收敛到 NewMakerDraftRoute /cc-agent/new。
+ *
+ * F-CHAT-1: Message sending flow
+ * F-SDK-3:  Running Status Bar data display
+ * F-FP-5:   workingDir read-only display
+ */
+
+import {
+  Profiler,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import type { CSSProperties, ReactNode } from 'react';
+import { useLocation, useNavigate, useOutletContext, useParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+import { useProportionalWidth } from '@/hooks/useProportionalWidth';
+import { setBlockExpanded } from '@/hooks/useExpandedBlockMemory';
+import {
+  Activity,
+  AlertCircle,
+  ArrowDown,
+  ArrowLeft,
+  Brain,
+  Check,
+  CornerUpLeft,
+  Layers,
+  Monitor,
+  Sparkles,
+  Square,
+  X,
+} from 'lucide-react';
+
+import { cn, basename } from '@/lib/utils';
+import { Spinner } from '@/components/ui/spinner';
+import { setRemoteReceiptDisplayReady } from '@/lib/sessionAttentionStore';
+import { shortSessionId } from '@/lib/sessionId';
+import { ChatInput } from '@/components/new-chat/ChatInput';
+import { GoalIndicator } from '@/components/new-chat/GoalIndicator';
+import { sessionsStore } from '@/lib/sessionsStore';
+import { useStopOrcaCollab } from './hooks/useStopOrcaCollab';
+import { CreateWorkerPopover, type CreateWorkerForm } from './CreateWorkerPopover';
+import { createWorkerLabel } from './workerLabel';
+import { TakeoverMask } from '@/components/new-chat/TakeoverMask';
+import { WorktreeCreatingOverlay } from '@/components/new-chat/WorktreeCreatingOverlay';
+import { PermissionPrompt } from '@/components/new-chat/PermissionPrompt';
+import { IssueConfirmCard } from './IssueConfirmCard';
+import { RenameSessionsConfirmCard } from './RenameSessionsConfirmCard';
+import { GhostGrantConfirmCard } from './GhostGrantConfirmCard';
+import { AskUserQuestionPrompt } from '@/components/new-chat/AskUserQuestionPrompt';
+import { PlanViewerCard } from '@/components/new-chat/PlanViewerCard';
+import { PlanActionCard } from '@/components/new-chat/PlanActionCard';
+import { InteractionPromptHost } from '@/components/interaction-portal';
+import { MessageStream } from '@/components/chat/MessageStream';
+import { ErrorBanner } from '@/components/chat/ErrorBanner';
+import {
+  ErrorTailErrorBanner,
+  InterruptedTurnBanner,
+} from '@/components/chat/InterruptedTurnBanner';
+import { useSessionBackgroundActivity } from '@/hooks/useSessionBackgroundActivity';
+import { VendorIcon } from '@/components/sidebar/VendorIcon';
+import {
+  APP_EXIT_INTERRUPTED_REASON,
+  CONTINUE_AFTER_APP_EXIT_PROMPT,
+  CONTINUE_AFTER_ERROR_PROMPT,
+} from '../../../shared/interruptedTurn';
+import { clearInterruptedAttentionIfOwned } from '@/hooks/useInterruptedSessionsAttention';
+import { CredentialSwitchWaitBanner } from '@/components/chat/CredentialSwitchWaitBanner';
+import { UpgradeBanner } from '@/components/chat/UpgradeBanner';
+import { WorktreeRestoreBanner } from '@/components/chat/WorktreeRestoreBanner';
+import { Tip } from '@/components/ui/tooltip';
+import { useConfirmDialog } from '@/components/ui/confirm-dialog-provider';
+import { useSilentEncryptedRetry } from '@/hooks/useSilentEncryptedRetry';
+import { TodaySpendChip } from '@/components/status/TodaySpendChip';
+import { RightSidebarToggle } from '@/components/layout/RightSidebarToggle';
+import { TopRightChipStack, TopRightChipStackProvider } from '@/components/chat/TopRightChipStack';
+import { ChatDisplaySnapshotProvider } from '@/components/chat/ChatDisplaySnapshotContext';
+import { useCCAgentChat } from '@/hooks/useCCAgentChat';
+import { ackErrorRead, useErrorReadAck } from '@/hooks/useErrorReadAck';
+import { useAttachments } from '@/hooks/useAttachments';
+import { useCCSessions } from '@/hooks/useCCSessions';
+import { SessionContentHeaderRegistration } from './SessionContentHeader';
+import { useSessionBinding } from '@/hooks/useSessionBinding';
+import { useVendorAuthGate } from '@/hooks/useVendorAuthGate';
+import { useProviders } from '@/hooks/useProviders';
+import { useDeviceProviders } from '@/hooks/useDeviceProviders';
+import { useAgentCapabilities } from '@/hooks/useAgentCapabilities';
+import { resolveFastSupported } from '@/lib/providerModels';
+import { useRemoteSessionSync } from '@/features/cc-agent/hooks/useRemoteSessionSync';
+import {
+  useDeviceLinkConnectionIssue,
+  useRemoteSessionConnection,
+} from '@/features/cc-agent/hooks/useRemoteSessionConnection';
+import { useRemoteSessionLoading } from '@/features/cc-agent/hooks/useRemoteSessionLoading';
+import { RemoteSessionBanner } from './RemoteSessionBanner';
+import { decideRemoteSessionExit } from './remoteSessionExit';
+import { RemoteSessionLoading } from './RemoteSessionLoading';
+import { ControlledBanner } from '@/features/remote-device/ControlledBanner';
+import { useAnimatedNumber } from '@/hooks/useAnimatedNumber';
+import { loadAllCommands, dispatchCommand, type UnifiedCommand } from '@/lib/slashCommands';
+import * as sessionService from '@/lib/sessionService';
+import { emitRefresh } from '@/lib/sessionsBus';
+import type { Session } from '@/lib/ccAgent.types';
+import { toast } from '@/lib/toast';
+import {
+  decodeRemoteErrorMessage,
+  makerChatStore,
+  type MessageDeliveryMode,
+} from '@/lib/makerChatStore';
+import { getMakerMemoryEnabled } from '@/lib/memorySettingsStore';
+import { useWorktreeCreation, worktreeCreationStore } from '@/lib/worktreeCreationStore';
+import { useWorktreeForSession } from '@/contexts/WorktreeContext';
+import {
+  isOrcaLeadSession,
+  isOrcaWorkerSession,
+  resolveSessionRoute,
+} from '@/lib/orcaSessionIdentity';
+import type { Effort, PermissionMode } from '@/lib/userPreferences.types';
+import type { AttachedFile, MentionedResource } from '@/lib/fileTypes';
+import type { PastedTextRange, SlashCommandRange } from '@/lib/imageRef';
+import { createLogger } from '@/lib/logger';
+import { getModelById, getDefaultModelForVendor, getModelsForVendor } from '@/lib/modelDefinitions';
+import { resolveDisplayContextWindow } from '@/lib/contextWindow';
+import { tryHandleNavigationCommand } from '@/lib/navigationCommands';
+import { extractIpcError } from '@/utils/ipcError';
+import { listActiveRunsForSession } from '@/features/learn/useLearnRun';
+import { subscribeLearnEvents } from '@/features/learn/learnTransport';
+import { getUserPrompt } from '@/lib/userPromptStore';
+import { consumePending, consumePendingGoal } from '@/state/pendingFirstMessage';
+import { setLastWorkingDir } from '@/state/lastWorkingDir';
+import { consumeComposerMentionDrop } from '@/lib/composerDrop';
+import {
+  attachGhostMediaToSession,
+  getGhostMediaUriFromDataTransfer,
+} from '@/cindy-brain/ghostMediaHandover';
+import { isGlobalDropIntercepted } from '@/lib/globalDropIntercept';
+import { getCollaborationStartErrorMessage } from './collaborationErrors';
+import { shouldFallbackVendorModel } from './lib/vendorModelFallback';
+import { createSessionRefreshSequence } from './lib/sessionRefreshSequence';
+import { createSessionSnapshotPatchBuffer } from './lib/sessionSnapshotPatchBuffer';
+import { readPanelCollapsedRecord } from '@/layout/collapsePrefs';
+import {
+  normalizeOrcaDisplayAgentKind,
+  orcaAgentLabel,
+  orcaVendorForAgentKind,
+} from './lib/orcaAgentDisplay';
+import {
+  shouldRevealOrcaWorkersAfterPaint,
+  shouldRevealOrcaWorkersBeforeFirstPaint,
+} from './lib/orcaPassiveReveal';
+import { didOpenOrcaWorkersTab, revealOrcaWorkersWithRetry } from './lib/orcaWorkersRevealRetry';
+import {
+  closeOrcaWorkersTabAfterTeamEnd,
+  ensureOrcaWorkersTab,
+  revealOrcaWorkersTab,
+} from '@/features/right-sidebar/plugins/orca-workers/actions';
+// device-link 跨设备远程控制:远程会话的元数据来自 remoteProjectsStore(本地 DB 没有)。
+import {
+  useRemoteProjectSessions,
+  getSessionDeviceId,
+  remoteProjectsStore,
+} from '@/features/device-link/remoteProjectsStore';
+import {
+  isRemoteSessionActivityActive,
+  useRemoteSessionActivity,
+} from '@/features/device-link/remoteSessionActivityStore';
+import {
+  makeMirrorAccessors,
+  replaceScope,
+  clearScope,
+  type RemoteModelMemorySnapshot,
+} from '@/state/deviceLinkModelMirror';
+import type { ModelMemoryAccessors } from '@/components/new-chat/ModelSelector';
+// 完整对等:context-usage / extra-dirs / orca 等会话级操作按 sessionId 来源路由
+// (本机走本地 maker,远程 device-link 会话走隧道)。
+import {
+  ackInterruptedTurnFor,
+  goalApiFor,
+  makerApiFor,
+  orcaWorkflowsFor,
+} from '@/lib/makerTransport';
+// fork / orca 在被控端建新 session 后,navigate 前先把该设备会话列表重拉进 store(避免 404 破窗)。
+import { refreshRemoteDeviceSessions } from '@/features/device-link/refreshRemoteSessions';
+import {
+  SessionNavigationModeProvider,
+  type SessionNavigationMode,
+} from './embeddedSessionNavigation';
+import {
+  parseConversationSearchJump,
+  type ConversationSearchJump,
+} from '../../../shared/conversationSearchJump';
+
+const log = createLogger('CCAgentSessionView');
+// perf-baseline(与 MessageStream / sidebar 的 perf/session-switch 探针同通道):
+// stream:profile 记录 MessageStream 子树每次 ≥50ms 的 React commit(phase +
+// actualDuration),与 perf/interaction 的 longtask 时长对齐即可判定长任务
+// 是消耗在 React 渲染内还是渲染外(store 监听器 / 布局等)。
+const perfLog = createLogger('perf/session-switch');
+const onStreamProfile = (
+  _id: string,
+  phase: 'mount' | 'update' | 'nested-update',
+  actualDuration: number,
+): void => {
+  if (actualDuration >= 50) {
+    perfLog.debug(`stream:profile phase=${phase} actual=${Math.round(actualDuration)}ms`);
+  }
+};
+
+interface HandoffFromState {
+  kind: 'handoff';
+  dispatcherSessionId: string;
+  dispatcherTitle?: string | null;
+}
+
+interface OrcaWorkersRevealState {
+  leadSessionId: string | null;
+  focusWorkerSessionId: string | null;
+}
+
+function parseHandoffState(state: unknown): HandoffFromState | null {
+  if (!state || typeof state !== 'object') return null;
+  const from = (state as { from?: unknown }).from;
+  if (!from || typeof from !== 'object') return null;
+  const candidate = from as {
+    kind?: unknown;
+    dispatcherSessionId?: unknown;
+    dispatcherTitle?: unknown;
+  };
+  if (candidate.kind !== 'handoff') return null;
+  if (typeof candidate.dispatcherSessionId !== 'string' || !candidate.dispatcherSessionId) {
+    return null;
+  }
+  return {
+    kind: 'handoff',
+    dispatcherSessionId: candidate.dispatcherSessionId,
+    dispatcherTitle:
+      typeof candidate.dispatcherTitle === 'string' ? candidate.dispatcherTitle : null,
+  };
+}
+
+function parseSearchJumpState(state: unknown): ConversationSearchJump | null {
+  if (!state || typeof state !== 'object') return null;
+  return parseConversationSearchJump((state as { searchJump?: unknown }).searchJump);
+}
+
+function parseOrcaWorkersRevealState(state: unknown): OrcaWorkersRevealState | null {
+  if (!state || typeof state !== 'object') return null;
+  const candidate = (state as { orcaWorkersReveal?: unknown }).orcaWorkersReveal;
+  if (!candidate || typeof candidate !== 'object') return null;
+  const focusWorkerSessionId = (candidate as { focusWorkerSessionId?: unknown })
+    .focusWorkerSessionId;
+  const leadSessionId = (candidate as { leadSessionId?: unknown }).leadSessionId;
+  return {
+    leadSessionId: typeof leadSessionId === 'string' && leadSessionId ? leadSessionId : null,
+    focusWorkerSessionId:
+      typeof focusWorkerSessionId === 'string' && focusWorkerSessionId
+        ? focusWorkerSessionId
+        : null,
+  };
+}
+
+interface CCAgentSessionViewProps {
+  sessionIdProp?: string;
+  compact?: boolean;
+  orcaMode?: boolean;
+  /** 在输入区状态栏中央显示被控端 Banner。普通路由自动显示；协同 Lead pane 显式传入。 */
+  showControlledBanner?: boolean;
+  /**
+   * 工具行采用紧凑布局 (flex-wrap 兜底)。
+   * 之前从 orcaMode 派生 — 但 OrcaSplitView 的 toggle layout 下 pane 是满宽的,
+   * 不需要 wrap;只有真正分屏 (split layout) 才需要。所以独立成 prop,
+   * 由 OrcaSplitView 按 layout 决定是否传 true,与 orcaMode (路由/可见性语义)
+   * 解耦。
+   */
+  compactToolbar?: boolean;
+  /**
+   * 在非 ownsRoute 实例中也显示右栏开关按钮(Windows)。
+   * 由 OrcaSplitView 传给 lead 实例,解决协同模式下 ownsRoute=false 导致
+   * RSB toggle 不显示的问题。Mac 端由 MainLayout 浮层处理,不受此影响。
+   */
+  showRsbToggle?: boolean;
+  /**
+   * 本视图当前是否真实可见(挂载 ≠ 可见)。workdir 文件页的聊天 rail 折叠时
+   * 视图仍挂载但宽度为 0,报错 banner 看不见 —— 报错「真实已读」判定
+   * (useErrorReadAck)依赖此标记,不可见时绝不 ack。默认 true。
+   */
+  viewVisible?: boolean;
+  /**
+   * 重型聊天流是否实时消费 makerChatStore snapshot。隐藏的 Orca worker pane
+   * 仍 keep-alive，但这里传 false 避免每批 text delta 触发 Markdown/MessageStream。
+   */
+  chatRealtime?: boolean;
+  /** RSB 协同 tab 注入的消息定位意图；detached 子窗不能依赖主窗 location.state。 */
+  searchJumpProp?: ConversationSearchJump | null;
+  onSearchJumpConsumed?: () => void;
+  /** sidebar 子窗口内嵌视图不拥有 router，所有“打开其它会话”入口必须禁用。 */
+  navigationMode?: SessionNavigationMode;
+  /** 内嵌聊天触发侧栏动作时使用的可见 RSB bucket；消息身份仍由 sessionIdProp 决定。 */
+  sidebarTargetSessionId?: string;
+}
+
+/**
+ * 右栏「在场」声明器 —— 仅由「拥有当前路由的全屏聊天视图」条件挂载（见 ownsRoute
+ * 判据，语义与 SessionContentHeaderRegistration 完全对称）。挂载 → 声明右栏在场，
+ * MainLayout 渲染右栏面板；卸载（切走 / 退化成内嵌实例）→ 撤销在场，面板卸载，
+ * 不会在 doc 模式等界面卡在展开态且无入口关闭。
+ *
+ * 为什么用条件挂载组件而非在 CCAgentSessionView 里无条件跑 effect：
+ * CCAgentSessionView 会被多处内嵌复用（doc rail / 协同 worker 面板），无条件跑会
+ * 让内嵌实例反复 true/false 抖动、或在内嵌实例上误声明在场。条件渲染本组件 =
+ * 条件执行声明，卸载时自动撤销。用 useLayoutEffect 与槽位注册（feature-context）
+ * 同步阶段语义一致，避免一帧闪烁。
+ */
+function RightSidebarAvailabilityRegistration({
+  declare,
+}: {
+  declare: (available: boolean) => void;
+}) {
+  useLayoutEffect(() => {
+    declare(true);
+    return () => declare(false);
+  }, [declare]);
+  return null;
+}
+
+/**
+ * 推当前 sessionId 给 MainLayout(Shell 据此从 store 拉对应桶持久化 tab 列表)。
+ * 与 RightSidebarAvailabilityRegistration 同条件挂(ownsRoute 主实例),unmount 时
+ * 推 null 让 Shell 退回空状态;sessionId 变化时 effect 重跑 declare 新值。
+ */
+function RightSidebarSessionIdRegistration({
+  sessionId,
+  initialCollapsed,
+  writeInitialCollapsedRecord = false,
+  declare,
+}: {
+  sessionId: string;
+  initialCollapsed?: boolean;
+  writeInitialCollapsedRecord?: boolean;
+  declare: (
+    sessionId: string | null,
+    opts?: { initialCollapsed?: boolean; writeInitialCollapsedRecord?: boolean },
+  ) => void;
+}) {
+  useLayoutEffect(() => {
+    declare(sessionId, { initialCollapsed, writeInitialCollapsedRecord });
+    return () => declare(null);
+  }, [sessionId, initialCollapsed, writeInitialCollapsedRecord, declare]);
+  return null;
+}
+
+/**
+ * 同 RightSidebarSessionIdRegistration 形态;推当前 session 的 workingDir 给 MainLayout,
+ * Shell 注入 plugin ctx,file-browser plugin 据此驱动文件树 / 内容预览。
+ * workdir 为空(remote session / 刚加载尚未解析)时推空串,plugin 自己判断渲染占位。
+ */
+function RightSidebarWorkdirRegistration({
+  workdir,
+  remoteHostId,
+  declare,
+}: {
+  workdir: string;
+  /** 非空 = SSH remote 会话(workdir 为远端路径);plugin 据此走远端 file-service。 */
+  remoteHostId: string | null;
+  declare: (workdir: string, remoteHostId?: string | null) => void;
+}) {
+  useLayoutEffect(() => {
+    declare(workdir, remoteHostId);
+    return () => declare('');
+  }, [workdir, remoteHostId, declare]);
+  return null;
+}
+
+/**
+ * /workflows 命中卡片时的短暂描边高亮(模块级单例)。
+ *
+ * 只保留「当前正在高亮的那张卡 + 它的定时器」:起新高亮前先清掉上一次(无论同张还是另一张),
+ * 并把上一张恢复成无 inline boxShadow('' → 回落到样式表)。恢复值恒为 '' 而非「上次读到的
+ * boxShadow」,因此快速连按 /workflows 也不会把高亮值当原值存回去、造成描边永久残留。
+ */
+let activeWorkflowFlash: { el: HTMLElement; timer: ReturnType<typeof setTimeout> } | null = null;
+
+function flashWorkflowCard(el: HTMLElement): void {
+  if (activeWorkflowFlash) {
+    clearTimeout(activeWorkflowFlash.timer);
+    activeWorkflowFlash.el.style.boxShadow = '';
+    activeWorkflowFlash = null;
+  }
+  el.style.transition = 'box-shadow 0.25s ease';
+  el.style.boxShadow = '0 0 0 2px var(--focus-ring)';
+  const timer = setTimeout(() => {
+    el.style.boxShadow = '';
+    if (activeWorkflowFlash?.el === el) activeWorkflowFlash = null;
+  }, 1200);
+  activeWorkflowFlash = { el, timer };
+}
+
+export function CCAgentSessionView({
+  sessionIdProp,
+  compact,
+  orcaMode,
+  showControlledBanner = false,
+  compactToolbar = false,
+  showRsbToggle = false,
+  viewVisible = true,
+  chatRealtime = true,
+  searchJumpProp,
+  onSearchJumpConsumed,
+  navigationMode = 'route-owner',
+  sidebarTargetSessionId,
+}: CCAgentSessionViewProps = {}) {
+  const { t } = useTranslation();
+  const { sessionId: paramSessionId } = useParams<{ sessionId: string }>();
+  const sessionId = sessionIdProp ?? paramSessionId;
+  const navigate = useNavigate();
+  const ownsWindowRoute = navigationMode === 'route-owner';
+  const location = useLocation();
+  // MainLayout 经 Outlet context 下发右栏相关能力(二级路由由 CCAgentFeatureLayout
+  // 透传,否则这里会断链拿不到):
+  //   - rightSidebarCollapsed:折叠态,用于 useProportionalWidth 的 compact 判定;
+  //     真无 Outlet 祖先时兜底 true(折叠态)。
+  //   - onToggleRightSidebar:右栏开关点击回调(切换折叠 + 展开时设宽=主区域一半)。
+  //   - setRightSidebarAvailable:声明右栏「在场」——只有路由主实例(全屏聊天视图)
+  //     该声明,MainLayout 据此渲染右栏面板。
+  // 嵌入实例(OrcaSplitView / workdir-browse rail)经同一条透传链读到这些值,但因
+  // 下方 ownsRoute 判据为 false,既不渲染开关也不声明在场。
+  const outletContext = useOutletContext<{
+    rightSidebarCollapsed?: boolean;
+    onToggleRightSidebar?: () => void;
+    rightSidebarSide?: 'left' | 'right';
+    setRightSidebarAvailable?: (available: boolean) => void;
+    setRightSidebarSessionId?: (
+      sessionId: string | null,
+      opts?: { initialCollapsed?: boolean; writeInitialCollapsedRecord?: boolean },
+    ) => void;
+    setRightSidebarWorkdir?: (workdir: string) => void;
+  } | null>();
+  const rightSidebarCollapsed = outletContext?.rightSidebarCollapsed ?? true;
+  const onToggleRightSidebar = outletContext?.onToggleRightSidebar;
+  // B2b:面板所在侧 —— 折叠态的展开入口要留守面板消失的那一侧(缺省经典右侧)。
+  const rightSidebarSide = outletContext?.rightSidebarSide ?? 'right';
+  const setRightSidebarAvailable = outletContext?.setRightSidebarAvailable;
+  const setRightSidebarSessionId = outletContext?.setRightSidebarSessionId;
+  const setRightSidebarWorkdir = outletContext?.setRightSidebarWorkdir;
+  const { enabled: silentEncryptedRetryEnabled } = useSilentEncryptedRetry();
+  const [forkStripEncryptedRunning, setForkStripEncryptedRunning] = useState(false);
+  // 从 Automations 的 RunHistoryCard 跳过来的 navigate 会带 state.from='automations'，
+  // 在聊天区左上角显示一个返回按钮；点别的 session 入口（不带 state）时按钮自然消失。
+  const navState = location.state as { from?: string } | null;
+  const cameFromAutomations = navState?.from === 'automations';
+  const handoffFrom = useMemo(() => parseHandoffState(location.state), [location.state]);
+  const locationSearchJump = useMemo(() => parseSearchJumpState(location.state), [location.state]);
+  const searchJump = searchJumpProp !== undefined ? searchJumpProp : locationSearchJump;
+  const orcaWorkersReveal = useMemo(() => {
+    const reveal = parseOrcaWorkersRevealState(location.state);
+    return reveal?.leadSessionId && reveal.leadSessionId !== sessionId ? null : reveal;
+  }, [location.state, sessionId]);
+  const [focusedMessageTarget, setFocusedMessageTarget] = useState<{
+    clientId: string;
+    requestId: number;
+  } | null>(null);
+  const requestFocusMessage = useCallback((clientId: string) => {
+    setFocusedMessageTarget((current) => ({
+      clientId,
+      requestId: (current?.requestId ?? 0) + 1,
+    }));
+  }, []);
+  const clearSearchJumpState = useCallback(() => {
+    if (searchJumpProp !== undefined) {
+      onSearchJumpConsumed?.();
+      return;
+    }
+    navigate(`${location.pathname}${location.search}`, {
+      replace: true,
+      state: {
+        ...((location.state as Record<string, unknown> | null) ?? {}),
+        searchJump: undefined,
+      },
+    });
+  }, [
+    location.pathname,
+    location.search,
+    location.state,
+    navigate,
+    onSearchJumpConsumed,
+    searchJumpProp,
+  ]);
+  const [handoffPillDismissed, setHandoffPillDismissed] = useState(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: sessionId 是会话切换重置触发器。
+  useEffect(() => {
+    setHandoffPillDismissed(false);
+    setFocusedMessageTarget(null);
+  }, [sessionId]);
+  // workdir-browse 模式 (右侧 chat rail) 用 compact: true,padding 收到 10/0,
+  // 让窄 rail 里的消息和输入框尽量铺满。
+  const isCompactRail = compact ?? location.pathname.startsWith('/cc-agent/files/');
+  const isOrcaMode = orcaMode ?? location.pathname.startsWith('/cc-agent/orca/');
+  // 路由主实例判据(与 SessionContentHeaderRegistration 同款,见 1259 行):只有
+  // 「全屏聊天视图」这个实例拥有右栏开关 / 声明右栏在场;内嵌复用实例(doc 模式
+  // chat rail / 协同 worker 面板,带 sessionIdProp 或处于 compact/orca 语境)不参与。
+  const ownsRoute = !sessionIdProp && !isCompactRail && !isOrcaMode;
+  const showInlineControlledBanner = ownsRoute || showControlledBanner;
+  // 平台分流:mac 右栏开关放在 ContentHeader 右端(见 ContentHeader.tsx),Windows
+  // 放在下方 chip 栈第一行。两端都靠 ownsRoute 限定只在全屏聊天视图出现。
+  const isMac = window.electronAPI?.platform === 'darwin';
+
+  // messageWidth：消息流容器宽度（视觉边距 50px / compact 20px）
+  // inputWidth：ChatInput / 状态栏 / workingDir 行的宽度（视觉边距 40px / compact 10px）
+  // doc rail 内嵌场景(isCompactRail)恒 compact;主会话不显式传 compact,由 hook
+  // 自身按实测容器宽 `< AUTO_COMPACT_THRESHOLD`(700px)自动切 compact——右栏打开
+  // 把主区压到阈值之下时, padding 50→20 平滑收紧,不臃肿。
+  // 历史 caveat(已不再适用):早期尝试过按 `rightSidebarCollapsed` 布尔即时切 compact,
+  // 右栏 250ms transition 期间 parent 还是 stale 宽度,messageWidth 先扩出去顶过
+  // parent → mx-auto 失效 → padding 被压成 0 → 视觉上消息"先顶到最左再缩回来"。
+  // 现在的方案由 hook 内 ResizeObserver 回调驱动 compact 切换,只在父宽**已经收敛**
+  // 的那一帧切, 该跳变彻底没有触发面。所以这里继续只传 isCompactRail,不要再叠
+  // rightSidebarCollapsed 进来。
+  const { containerRef, messageWidth, inputWidth, inputPad, isCompact } = useProportionalWidth(
+    914,
+    { compact: isCompactRail },
+  );
+  const controlledBannerMaxWidth = getControlledBannerMaxWidth(inputWidth);
+  const { sessions: allSessions, refreshSessions, patchLocal: patchLocalSession } = useCCSessions();
+  // /ctr 接管态: attached=true 时把 ChatInput 替换为 TakeoverMask, 防止 desktop
+  // 用户跟 IM 端 race; permission/ask/plan 三个 prompt 不替换 — 它们是 SDK 反向触
+  // 发, 飞书那边的 setInteractionListener 会接管, 这里渲染保持兜底视觉一致
+  // (实际接管期间 desktop renderer 收不到 INTERACTION_REQUEST 广播)。
+  const sessionBinding = useSessionBinding(sessionId);
+
+  // ---------------------------------------------------------------------------
+  // Session data: always fetch from server on sessionId change (requirement 1).
+  // sessionFromList provides instant rendering from cache while server responds.
+  // ---------------------------------------------------------------------------
+  const [serverSession, setServerSession] = useState<Session | null>(null);
+  const [, bumpSessionPatchVersion] = useState(0);
+  const sessionRefreshSequenceRef = useRef(createSessionRefreshSequence());
+  const sessionSnapshotPatchBufferRef = useRef(createSessionSnapshotPatchBuffer<Session>());
+  // commit 阶段同步切 scope：中断 render 不得提前丢弃旧 session 的在途状态；layout effect
+  // 又会先于 fetch / push 的 passive effect 执行，旧异步闭包在新视图提交后仍无法污染它。
+  useLayoutEffect(() => {
+    sessionRefreshSequenceRef.current.setSession(sessionId ?? null);
+    sessionSnapshotPatchBufferRef.current.setSession(sessionId ?? null);
+  }, [sessionId]);
+  // device-link:远程会话不在本地 DB(allSessions),从 remoteProjectsStore 找;该 store
+  // 响应式,远程元数据(model/title 等)随 listing/push 刷新自动更新。
+  const remoteProjectSessions = useRemoteProjectSessions();
+  const sessionFromList = sessionId
+    ? (allSessions.find((s) => s.id === sessionId) ??
+      remoteProjectSessions.find((s) => s.id === sessionId) ??
+      null)
+    : null;
+  // 切 session 后 effect 才清 state；同步按 id 过滤，避免旧 serverSession 污染新视图或作为 patch base。
+  const currentServerSession = serverSession?.id === sessionId ? serverSession : null;
+  const currentServerSessionRef = useRef<Session | null>(null);
+  useLayoutEffect(() => {
+    currentServerSessionRef.current = currentServerSession;
+    if (currentServerSession && sessionId) {
+      // merge 在 render 中保持纯读取；只在对应完整 snapshot 确实提交后确认该 revision。
+      sessionSnapshotPatchBufferRef.current.acknowledgeCommitted(sessionId, currentServerSession);
+    }
+  }, [currentServerSession, sessionId]);
+  // Prefer server-fetched data; fall back to cached list for instant first paint。初始 GET
+  // 尚未到达时，暂存 patch 也覆盖到 list snapshot 上，但不把不完整 list 提升为 serverSession。
+  // 远程会话 currentServerSession 恒为 null(下方 effect 跳过本地 get),故走 sessionFromList。
+  const sessionBase = currentServerSession ?? sessionFromList ?? null;
+  const session =
+    sessionId && sessionBase
+      ? sessionSnapshotPatchBufferRef.current.merge(sessionId, sessionBase)
+      : null;
+  const isOrcaLeadSessionView = session?.orcaRole === 'lead';
+
+  // worktree-parallel-sessions:订阅当前 session 的 worktree 创建态(creating/failed)。
+  // 触发源:NewMakerDraftRoute 的 worktree 异步创建路径。
+  // 没有创建态时返回 undefined,workingDir chip 行走原 Monitor+basename 显示分支。
+  const worktreeCreation = useWorktreeCreation(sessionId);
+  // worktree meta:当前 session 跑在某个 worktree 里时返回 { baseRepo, name, branch, path };
+  // 否则 null。workingDir chip 用这个把显示从单一 "feat-button-ui" 升级成
+  // "xdt-maker (feat-button-ui)",一眼看出这是 baseRepo xdt-maker 上的 worktree。
+  const worktreeMeta = useWorktreeForSession(sessionId);
+
+  // Fetch fresh session data from server whenever sessionId changes.
+  useEffect(() => {
+    const refreshSequence = sessionRefreshSequenceRef.current;
+    setServerSession(null); // reset so stale data from previous session doesn't linger
+    if (!sessionId) return;
+    // device-link 远程会话:跳过本地 DB get(会 404),元数据走 remoteProjectsStore。
+    if (getSessionDeviceId(sessionId)) return;
+    const requestSequence = refreshSequence.begin(sessionId);
+    if (requestSequence === null) return;
+    sessionService
+      .get(sessionId)
+      .then((s) => {
+        if (!refreshSequence.isLatest(sessionId, requestSequence)) return;
+        setServerSession(sessionSnapshotPatchBufferRef.current.merge(sessionId, s));
+      })
+      .catch(() => {});
+    return () => {
+      refreshSequence.invalidate(sessionId);
+    };
+  }, [sessionId]);
+
+  // device-link streaming tier:进入远程会话时订阅该会话的 `session:<id>` topic → 被控端把该会话
+  // 的实时流(heavy:maker:event/status/input/interaction/messages)经 push 流回 makerChatStore,
+  // 并触发被控端"正在被控"横幅(订阅 session:<id> = 活跃控制)。离开 / 切走时取消订阅(停推流 + 清
+  // 横幅)。listing tier 只订阅 'sessions'(列表,不开横幅),故只有真正打开会话才让对方看到被控。
+  // 解析当前会话所属远程设备 id。store 有 origin 时取 store 值(随 store 变化更新,useMemo 让同设备
+  // 返回同一字符串,避免下游 effect 无谓重跑)。
+  const wasRemoteSessionRef = useRef(false);
+  const lastRemoteDeviceIdRef = useRef<string | undefined>(undefined);
+  const lastRemoteSessionIdRef = useRef<string | undefined>(undefined);
+  const storeRemoteDeviceId = useMemo(
+    () => (sessionId ? getSessionDeviceId(sessionId) : undefined),
+    [sessionId, remoteProjectSessions],
+  );
+  // 切会话:在 render 阶段同步重置粘滞值(不靠 effect,避免新会话首帧误用上个会话的归属)。
+  if (lastRemoteSessionIdRef.current !== sessionId) {
+    lastRemoteSessionIdRef.current = sessionId;
+    lastRemoteDeviceIdRef.current = undefined;
+    wasRemoteSessionRef.current = false;
+  }
+  if (storeRemoteDeviceId !== undefined) lastRemoteDeviceIdRef.current = storeRemoteDeviceId;
+  // 粘滞:本机 relay 瞬时重连会 clear() 掉镜像(含当前会话 origin)。此时回退到最后已知 deviceId,
+  // 让当前远程会话在重连窗口内不被判成"已结束"——视图保留、RemoteSessionBanner 显示「重连中」、
+  // 同步引擎仍绑定该设备(relay 回 online 自动重订阅 + 对账),子组件继续按远程处理。
+  const remoteDeviceId = storeRemoteDeviceId ?? lastRemoteDeviceIdRef.current;
+  // device-link 远程会话:重 topic 订阅(含 WS 重连 / 被控端回在线时重建)+ 消息对账触发
+  // (重连 / presence / turn 结束 / 窗口聚焦 / 手动)。修「控制端丢消息」—— 以被控端为准重新同步。
+  // 本机会话(remoteDeviceId 为 undefined)整体 no-op。resync 供连接 banner 的「重新同步」按钮用。
+  const remoteSync = useRemoteSessionSync(sessionId, remoteDeviceId);
+  // 远程会话连接健康(本机断链重连中 / 被控端离线)→ 顶部 banner 提示 + 手动重新同步。
+  const remoteConn = useRemoteSessionConnection(remoteDeviceId);
+  const remoteLinkIssue = useDeviceLinkConnectionIssue(!!remoteDeviceId);
+  const remoteSessionUnavailable = remoteConn === 'reconnecting' || remoteConn === 'host-offline';
+  // 列表级 activity 在重 topic 的 maker status 之前就可用。远程 turn 正在执行 / 等待
+  // 交互时,session 行天然是 startedAt > endedAt,不能把这个正常在飞窗口误判成
+  // 「应用退出中断」。直接门控首帧,再锁存本次视图,避免 activity 终态与 ended patch
+  // 先后到达时横幅闪现。
+  const remoteSessionActivity = useRemoteSessionActivity(sessionId ?? '');
+  const remoteTurnActive = isRemoteSessionActivityActive(remoteSessionActivity);
+
+  // device-link 远程会话:非选中行镜像**被控端自己的全局模型预设**。先 pull 一次,再订阅
+  // NEW_MAKER_DRAFT_CHANGED 全量回流;本地控制端只显示 / 乐观更新镜像,绝不污染自己的预设。
+  // 选中模型仍走远程 session 的 DB/runtime live 值,所以其它对话改同一模型预设时不会覆盖它。
+  const remoteModelMemoryScopeKey = remoteDeviceId && sessionId ? `session:${sessionId}` : null;
+
+  useEffect(() => {
+    if (!remoteDeviceId || !remoteModelMemoryScopeKey) return;
+    const deviceId = remoteDeviceId;
+    const scopeKey = remoteModelMemoryScopeKey;
+    const agent = session?.agentKind === 'codex' ? 'codex' : 'claude-code';
+    const vendorSlot = agent === 'codex' ? 'codex' : 'claudeCode';
+    let cancelled = false;
+
+    const applySnapshot = (snapshot: RemoteModelMemorySnapshot | undefined) => {
+      if (!cancelled) replaceScope(scopeKey, snapshot);
+    };
+
+    window.electronAPI.deviceLink
+      .invoke(deviceId, 'maker:get-new-maker-defaults', [agent])
+      .then((value) => {
+        const defaults = value as { providerModelMemory?: RemoteModelMemorySnapshot } | null;
+        applySnapshot(defaults?.providerModelMemory);
+      })
+      .catch(() => {
+        // 旧版被控端无该 channel / 离线:保持空镜像,非选中行回落模型默认。
+      });
+
+    const off = window.electronAPI.deviceLink.onRemotePush((push) => {
+      if (push.deviceId !== deviceId || push.channel !== 'maker:new-maker-draft:changed') return;
+      const payload = push.payload as Record<
+        string,
+        { providerModelMemory?: RemoteModelMemorySnapshot } | undefined
+      > | null;
+      applySnapshot(payload?.[vendorSlot]?.providerModelMemory);
+    });
+
+    return () => {
+      cancelled = true;
+      off();
+      clearScope(scopeKey);
+    };
+  }, [remoteDeviceId, remoteModelMemoryScopeKey, session?.agentKind]);
+
+  const remoteModelMemoryOverride = useMemo<ModelMemoryAccessors | undefined>(() => {
+    if (!remoteDeviceId || !remoteModelMemoryScopeKey) return undefined;
+    const deviceId = remoteDeviceId;
+    return makeMirrorAccessors(remoteModelMemoryScopeKey, (agent, providerId, model, patch) => {
+      window.electronAPI.deviceLink
+        .invoke(deviceId, 'maker:apply-new-maker-draft-pref', [
+          {
+            agent,
+            providerId,
+            modelId: model,
+            active: false,
+            ...(patch.markModelChoice !== undefined
+              ? { markModelChoice: patch.markModelChoice }
+              : {}),
+            ...(patch.effort !== undefined ? { effort: patch.effort } : {}),
+            ...(patch.fast !== undefined ? { fast: patch.fast } : {}),
+          },
+        ])
+        .catch(() => {
+          // 旧版被控端 / 离线时仍保留控制端乐观镜像,不回退写本机预设。
+        });
+    });
+  }, [remoteDeviceId, remoteModelMemoryScopeKey]);
+
+  // device-link 边界:正在查看的远程会话 origin 从 remoteProjectsStore 消失 → 优雅退回 /cc-agent,
+  // 避免停留在 session=null 的失效视图。但必须区分"消失"的来因(以 store 真相 + 本机链路状态判定):
+  //   - 本机 relay 瞬时重连(remoteConn==='reconnecting'):origin 是被本机断链 clear() 清掉的,
+  //     不是被控端没了 → **不退回**,保留视图让 banner 显示「重连中」,等 relay 回 online 再判定。
+  //   - relay 在线但 origin 仍没了:会话/设备真没了 →「被控端设备分片是否仍在」区分后退回:
+  //       · 会话被删/归档(分片仍在)→ 静默退回(删除流程自身已导航)。
+  //       · 设备掉线/关被控(整片移除)→ 提示「远程设备已离线」并退回。
+  useEffect(() => {
+    if (!sessionId) return;
+    if (storeRemoteDeviceId !== undefined) {
+      wasRemoteSessionRef.current = true;
+      return;
+    }
+    const dev0 = lastRemoteDeviceIdRef.current;
+    const decision = decideRemoteSessionExit({
+      hasOrigin: false,
+      wasRemote: wasRemoteSessionRef.current,
+      reconnecting: remoteConn === 'reconnecting',
+      deviceStillOnline: dev0 ? remoteProjectsStore.getDeviceIds().includes(dev0) : false,
+    });
+    if (!decision.exit) return;
+    wasRemoteSessionRef.current = false;
+    if (decision.toastOffline) {
+      toast.warning(t('settings.devices.toast.remoteSessionEnded'));
+    }
+    if (!ownsWindowRoute) {
+      log.info('remote session exit ignored by embedded sidebar view', { sessionId });
+      return;
+    }
+    navigate('/cc-agent', { replace: true });
+  }, [sessionId, storeRemoteDeviceId, remoteConn, navigate, ownsWindowRoute, t]);
+
+  // F-COLLAB / 通用 stale 修复: serverSession 只在 sessionId 变化时拉一次, 之后
+  // 永不更新; 而 `session = serverSession ?? sessionFromList`, serverSession 一旦
+  // 拉到就永远盖过 sessionFromList。这导致 main 端 broadcast 的 session patch
+  // (典型: setSessionOrcaRole 改 orcaRole='lead', 或 archive 改 status) 即便 store
+  // 端 patchLocal 已经响应, CCAgentSessionView 内的 serverSession 仍是初次快照,
+  // collabEnabled 等派生状态不会重算 → MCP team 工具触发
+  // 后 ChatInput pill / orcaMode effect 等都不响应。
+  //
+  // 修法: 订阅 sessions:patched 事件, 对应 sessionId 的 patch 同步合并到
+  // serverSession。手动 toggle 路径不依赖本 effect (它走 navigate 触发 remount
+  // 重拉 serverSession), MCP / 飞书等外部触发路径必须靠这条响应链。
+  useEffect(() => {
+    if (!sessionId) return;
+    const sessionsPush = window.electronAPI?.localDb?.sessionsPush;
+    if (!sessionsPush) return;
+    const refreshSequence = sessionRefreshSequenceRef.current;
+    const unsub = sessionsPush.onPatched(({ sessionId: patchedId, patch }) => {
+      if (patchedId !== sessionId || !refreshSequence.isCurrentSession(patchedId)) return;
+      const patchBuffer = sessionSnapshotPatchBufferRef.current;
+      patchBuffer.stage(patchedId, patch);
+      const fullSnapshot = currentServerSessionRef.current;
+      if (fullSnapshot) {
+        // 已有完整 snapshot：patch 比在途 GET 更新，失效旧 GET 后合并全部暂存字段。
+        refreshSequence.invalidate(patchedId);
+        setServerSession((prev) =>
+          patchBuffer.merge(patchedId, prev?.id === patchedId ? prev : fullSnapshot),
+        );
+      } else {
+        // 初始 GET 是当前唯一完整 row，不能因 list snapshot 中途出现而失效。先让派生
+        // session 显示暂存 patch；若 GET 已 setState 尚未 render，functional update 也能合并。
+        bumpSessionPatchVersion((version) => version + 1);
+        setServerSession((prev) =>
+          prev?.id === patchedId ? patchBuffer.merge(patchedId, prev) : prev,
+        );
+      }
+      // 被控端本机:控制端远程切的 fastMode 经 persistSessionFields 广播到这里 → 镜像进 chat
+      // in-memory,让本机打开的 fast 开关也即时跟随(以被控端为准;幂等,不碰本机乐观路径)。
+      makerChatStore.mirrorSessionFields(patchedId, patch);
+    });
+    return unsub;
+  }, [sessionId]);
+
+  // 本机打开中的会话被外部(典型:控制端远程删除)置为 deleted → 主动退出该视图。
+  // 否则会停留在已删会话里、还能继续发消息把它"写活"。仅对 deleted 强制退出;archived
+  // 保持可浏览(与本机归档后仍可看 + 发消息自动恢复的既有语义一致)。本机自删走 navigate
+  // 后视图已卸载,不会触发本 effect。
+  useEffect(() => {
+    if (!sessionId) return;
+    if (session?.status === 'deleted') {
+      makerChatStore.purgeSession(sessionId);
+      if (!ownsWindowRoute) {
+        log.info('deleted session navigation ignored by embedded sidebar view', { sessionId });
+        return;
+      }
+      navigate('/cc-agent', { replace: true });
+    }
+  }, [session?.status, sessionId, navigate, ownsWindowRoute]);
+  const vendorAuthGate = useVendorAuthGate();
+
+  useEffect(() => {
+    if (!sessionId || !searchJump) return;
+    if (searchJump.sessionId !== sessionId) {
+      if (!session) return;
+      if (!isOrcaMode && !isOrcaLeadSessionView) {
+        clearSearchJumpState();
+      }
+      return;
+    }
+    let cancelled = false;
+    const currentState = makerChatStore.getSnapshot(sessionId);
+    const existing = currentState.messages.find(
+      (message) => message.clientId === searchJump.messageClientId,
+    );
+    if (existing) {
+      requestFocusMessage(searchJump.messageClientId);
+      clearSearchJumpState();
+      return;
+    }
+    const loadAround =
+      searchJump.messageIdKind === 'clientId'
+        ? makerChatStore.loadAroundMessageClientId
+        : makerChatStore.loadAroundMessage;
+    void loadAround(sessionId, searchJump.messageId, { radius: 60 })
+      .then((message) => {
+        if (cancelled) return;
+        requestFocusMessage(message?.clientId ?? searchJump.messageClientId);
+        if (!message) {
+          toast.error(t('ccAgent.search.jumpFailed'));
+        }
+        clearSearchJumpState();
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          log.warn('Failed to load search hit context:', err);
+          toast.error(t('ccAgent.search.jumpFailed'));
+          clearSearchJumpState();
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    clearSearchJumpState,
+    isOrcaLeadSessionView,
+    isOrcaMode,
+    requestFocusMessage,
+    searchJump,
+    session,
+    sessionId,
+    t,
+  ]);
+
+  // 选中一个 Worker session 时,如果当前是普通单 session 路由,自动跳到 Lead
+  // 普通路由并用 worker query 作为协同 tab 的初始 hint。doc 模式 (`/cc-agent/files/...`) 下不跳——doc 应该一直
+  // 是 doc,Worker session 就在 chat rail 里正常渲染。
+  useEffect(() => {
+    if (!ownsWindowRoute || !session || !sessionId || isOrcaMode || isCompactRail) return;
+    if (!isOrcaWorkerSession(session)) return;
+    let cancelled = false;
+    void orcaWorkflowsFor(session.id)
+      .getByWorkerSession(session.id)
+      .then((workflow) => {
+        if (!cancelled && workflow) {
+          navigate(`/cc-agent/${workflow.leadSessionId}?worker=${sessionId}`, { replace: true });
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [isOrcaMode, isCompactRail, navigate, ownsWindowRoute, session, sessionId]);
+
+  // F2: controlled folder picker open state
+  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+
+  // ── Full-area drag-and-drop (F-FI-1 enhancement) ──
+  // Attachments are managed here so the entire content area can act as a drop zone.
+  // image-local-cache: pass sessionId so addFiles/addClipboardImage can cache
+  // images into userData/cc-agent/images/{sessionId}/ via IPC.
+  const attachmentState = useAttachments(sessionId);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const dragCounterRef = useRef(0);
+  const resetFullAreaDragState = useCallback(() => {
+    dragCounterRef.current = 0;
+    setIsDragOver(false);
+  }, []);
+
+  // ── Dynamic overlay height for MessageStream bottom padding ──
+  // Callback ref: defensive against overlay DOM swap (e.g. Plan Viewer expand
+  // mounts a different wrapper). A plain `useRef` + `useEffect([])` would leave
+  // the observer bound to the dead node → stale `overlayHeight` → wrong
+  // `bottomPadding` → MessageStream pins to the wrong "bottom".
+  // A setState-based callback ref re-runs the observer effect on every node swap.
+  const [overlayEl, setOverlayEl] = useState<HTMLDivElement | null>(null);
+  const overlayRef = useCallback((node: HTMLDivElement | null) => {
+    setOverlayEl(node);
+  }, []);
+  const [overlayHeight, setOverlayHeight] = useState(200);
+
+  useEffect(() => {
+    if (!overlayEl) return;
+    // Seed with the current height so the first paint after remount uses the
+    // real value (not the stale state from the previous mount).
+    setOverlayHeight(overlayEl.offsetHeight);
+    const ro = new ResizeObserver(() => {
+      // offsetHeight (includes padding) instead of contentRect.height so the
+      // bottom padding fully covers the overlay.
+      setOverlayHeight(overlayEl.offsetHeight);
+    });
+    ro.observe(overlayEl);
+    return () => ro.disconnect();
+  }, [overlayEl]);
+
+  // F-FP-5: 点击 workingDir → 在系统文件管理器里直接打开目录(复用 shell:open-path IPC)。
+  // local only:remote session 的 chip 仅作展示,不响应点击(见下方 remoteHostId 早返 +
+  // 渲染处的条件 onClick)。
+  const handleOpenWorkingDir = useCallback(async () => {
+    const wd = session?.workingDir;
+    if (!wd) return;
+    // remote session 的 workingDir 是远端主机上的路径,本机 openPath 只会打开错误的
+    // 本地同名目录或直接报错。远端文件能力接入前,remote chip 不响应点击(仅作信息
+    // 展示,完整路径 + Host 仍在 hover Tip 里)。
+    if (session?.remoteHostId) return;
+    try {
+      const result = await window.electronAPI.openPath(wd);
+      if (!result.success) toast.error(result.error || t('ccAgent.common.openFolderFailed'));
+    } catch (err) {
+      log.error('[open workingDir]', err);
+      toast.error(t('ccAgent.common.openFolderFailed'));
+    }
+  }, [session?.workingDir, session?.remoteHostId, t]);
+
+  const handleReturnToDispatcher = useCallback(() => {
+    if (!ownsWindowRoute) {
+      log.info('handoff return ignored by embedded sidebar view', { sessionId });
+      return;
+    }
+    const dispatcherSessionId = handoffFrom?.dispatcherSessionId;
+    if (!dispatcherSessionId) return;
+    void resolveSessionRoute(dispatcherSessionId).then((target) => {
+      navigate(target);
+    });
+  }, [handoffFrom?.dispatcherSessionId, navigate, ownsWindowRoute, sessionId]);
+
+  const handleOpenForkOrigin = useCallback(() => {
+    if (!ownsWindowRoute) {
+      log.info('fork origin navigation ignored by embedded sidebar view', { sessionId });
+      return;
+    }
+    if (!session?.parentSessionId || !session.forkedAtMessageId) return;
+    const parentSessionId = session.parentSessionId;
+    const forkedAtMessageId = session.forkedAtMessageId;
+    void resolveSessionRoute(parentSessionId).then((target) => {
+      navigate(target, {
+        state: {
+          searchJump: {
+            kind: 'conversation-search',
+            sessionId: parentSessionId,
+            messageId: forkedAtMessageId,
+            messageIdKind: 'clientId',
+            messageClientId: forkedAtMessageId,
+          },
+        },
+      });
+    });
+  }, [navigate, ownsWindowRoute, session?.forkedAtMessageId, session?.parentSessionId, sessionId]);
+
+  const forkOrigin = useMemo(
+    () =>
+      ownsWindowRoute && session?.parentSessionId && session.forkedAtMessageId
+        ? {
+            parentSessionId: session.parentSessionId,
+            forkedAtMessageId: session.forkedAtMessageId,
+            forkedSessionCreatedAt: session.createdAt,
+          }
+        : null,
+    [ownsWindowRoute, session?.createdAt, session?.forkedAtMessageId, session?.parentSessionId],
+  );
+
+  // F-CMD /help: 拉三源(desktop + agent-builtin + agent-skill) palette 快照,
+  // 供 dispatch 时识别 desktop 命令 + /help 卡片展示完整命令清单。
+  const [allCommands, setAllCommands] = useState<UnifiedCommand[]>([]);
+  const allCommandsRef = useRef(allCommands);
+  allCommandsRef.current = allCommands;
+  // remote session 的 workingDir 是远端主机上的路径:本地 slash skill 扫描 / @ 资源扫描 /
+  // 设置页本地项目上下文都不该消费它(否则会读到本机同名目录的 skills/files)。在远端
+  // 文件 / skills 能力落地前,remote 一律按"无本地 workingDir"处理。
+  const isRemoteSession = !!session?.remoteHostId;
+  useEffect(() => {
+    let cancelled = false;
+    const agentKind = session?.agentKind === 'codex' ? 'codex' : 'claude-code';
+    // remote 传 null:loadAllCommands 退化为 desktop + agent-builtin,不扫本机项目 skills。
+    const wd = isRemoteSession ? null : (session?.workingDir ?? null);
+    // 先同步清空:切换会话(尤其 local→remote)时 loadAllCommands 是异步的,清空可避免
+    // 刷新完成前 getHelpCommandsSnapshot / desktop 命令识别复用上一个项目的本地 skills。
+    setAllCommands([]);
+    // device-link 远程会话:传 remoteDeviceId,让 agent-builtin / agent-skill 从**被控端**该会话读
+    // (与 ChatInput palette 同源)。否则此 cache 取的是控制端命令,maybeDispatchDesktopSlashCommand
+    // 会把被控端 skill/builtin 影子掉的 /clear、/help 等误判成 desktop 命令、在控制端执行。
+    // 本机会话 remoteDeviceId=undefined → 行为不变。desktop 命令始终本地(见 loadAllCommands)。
+    loadAllCommands(agentKind, wd, undefined, remoteDeviceId)
+      .then((cmds) => {
+        if (!cancelled) setAllCommands(cmds);
+      })
+      .catch(() => {
+        if (!cancelled) setAllCommands([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.agentKind, session?.workingDir, isRemoteSession, remoteDeviceId]);
+
+  // Keep lastWorkingDir in sync so Settings can distinguish a real project
+  // scope from「新对话默认值」. Standalone dialogues have an internal runtime
+  // directory too, but it is not a stable project preference scope; caching it
+  // here was the root cause of every new dialogue getting a fresh setting.
+  // Remote workingDir is also not a local project path.
+  useEffect(() => {
+    // Embedded rails and Orca panes share this component but do not own the
+    // active route. They must not overwrite the process-wide project scope
+    // selected by the route-owned conversation.
+    if (!ownsRoute) return;
+    if (session?.workspaceKind === 'project' && session.workingDir && !isRemoteSession) {
+      setLastWorkingDir(session.workingDir);
+      return;
+    }
+    setLastWorkingDir(null);
+  }, [ownsRoute, session?.workingDir, session?.workspaceKind, isRemoteSession]);
+
+  // (订阅 desktop-command-triggered 的 useEffect 在下方 useCCAgentChat 解构出
+  //  insertSystemCard / clearSession 之后才能挂, 见下面 "Desktop slash dispatch
+  //  subscriber" 段。)
+
+  // Pending send: stored when folder picker needs to open mid-send
+  const pendingSendRef = useRef<{
+    message: string;
+    model: string;
+    effort: Effort;
+    permissionMode: PermissionMode;
+    files?: AttachedFile[];
+    mentions?: MentionedResource[];
+    /** 正文前缀含「选中引用」编码块——补选目录后的派发同样要携带,否则该消息持久化后渲染不出胶囊。 */
+    quotesEncoded?: boolean;
+    pastedTextRanges?: PastedTextRange[];
+    slashCommandRanges?: SlashCommandRange[];
+  } | null>(null);
+
+  const handleTitleUpdate = useCallback(() => {
+    refreshSessions();
+  }, [refreshSessions]);
+
+  const {
+    agentSwitchIntent,
+    messages,
+    taskUpdates,
+    agentStatus,
+    isStreaming,
+    isAgentBusy,
+    sendMessage,
+    compactSession,
+    steerMessage,
+    steerQueuedMessage,
+    stopSession,
+    clearSession,
+    clearError,
+    retryLastError,
+    continueAfterSilentStop,
+    errorReason,
+    insertSystemCard,
+    updateSystemCardData,
+    error,
+    errorIsRecoverable,
+    errorRetryText,
+    credentialSwitchWait,
+    continuationInFlightClientId,
+    loadOlderMessages,
+    isLoadingMore,
+    hasMoreMessages,
+    pendingPermission,
+    respondToPermission,
+    pendingAskUser,
+    answerUserQuestion,
+    askUserViewerState,
+    setAskUserViewerState,
+    askUserDraft,
+    setAskUserDraft,
+    pendingPlanReview,
+    respondToPlanReview,
+    cancelPlanReview,
+    planViewerState,
+    setPlanViewerState,
+    pendingIssueConfirm,
+    respondToIssueConfirm,
+    pendingRenameSessionsConfirm,
+    respondToRenameSessionsConfirm,
+    pendingGhostGrantConfirm,
+    respondToGhostGrantConfirm,
+    lastExpandedPlanViewerState,
+    updatePlanContent,
+    historyLoaded,
+    fastMode,
+    setFastMode,
+    resetFastMode,
+    planModeEnabled,
+    setPlanMode,
+    // F-QUEUE-DEFER
+    pendingQueue,
+    steeringQueueClientIds,
+    queuePaused,
+    queueExpanded,
+    setQueueExpanded,
+    resumeQueue,
+    moveQueueItem,
+    setQueueInteractionLock,
+    setQueueEditLock,
+    removeFromQueue,
+    updateQueueItem,
+    chatDisplaySnapshot,
+  } = useCCAgentChat(sessionId, handleTitleUpdate, { chatRealtime });
+  // 展示引擎可乐观跟随 intent；真实 event reducer 仍只读 store.agentKind。
+  const displayAgentKind =
+    agentSwitchIntent?.target ?? (session?.agentKind === 'codex' ? 'codex' : 'claude-code');
+  const isCodex = displayAgentKind === 'codex';
+  // live 供应商目录(含内置 + 自定义,按 agent 挂模型)—— vendor↔model 一致性校验的真源,
+  // 与模型选择器同源(见下方 M35 vendor fallback effect)。本地 IPC 极快返回,有模块级缓存。
+  // device-link 远程会话用被控端经隧道带来的 providers(per-provider,fast 判定与本地同口径)。
+  const { providers: localProviders } = useProviders();
+  const { providers: deviceProviders } = useDeviceProviders(remoteDeviceId);
+  const providers = remoteDeviceId ? deviceProviders : localProviders;
+  // 该会话 agent 的能力(agent 级 hasFastMode + 旧被控端拍平回退用 availableModels);按 remoteDeviceId 作用域。
+  const { capabilities: sessionCaps } = useAgentCapabilities(displayAgentKind, remoteDeviceId);
+  // 报错「真实已读」:终止错误的 ErrorBanner 在本视图内固定展示,视图真实可见 +
+  // 窗口聚焦驻留后经 badge 桥接 ack 灵动岛 / 清红角标。`error` 合并了 recoverable
+  // 错误(agent 仍在跑,不算已读),再用 store 的 terminal 判定过滤;渲染由同一
+  // store 状态驱动,同步读取不会拿到过期值。
+  const hasTerminalErrorForReadAck =
+    Boolean(error) &&
+    !agentStatus?.isRunning &&
+    (sessionId ? makerChatStore.hasSessionTerminalError(sessionId) : false);
+  useErrorReadAck(sessionId, hasTerminalErrorForReadAck, viewVisible);
+
+  // 后台子任务活动:turn 已结束但该会话的 CC 子进程仍在调模型(后台子 agent 持续
+  // 消耗用量)。main 侧按 proxy 活动信号判定并推送;消费点是 RunningStatusBar 的
+  // 后台模式(呼吸 + 「全部停止」);「全部停止」= 关闭常驻子进程(会话可续)。
+  const backgroundActivity = useSessionBackgroundActivity(sessionId);
+  // 与运行态互斥(turn 一开跑 main 即广播熄灭,这里再加一道渲染守卫防瞬时竞态):
+  // 只在「无 turn 在跑」时才把状态栏切到后台子任务模式。
+  const backgroundTasksActive =
+    backgroundActivity.active && !agentStatus.isRunning && !isStreaming && Boolean(sessionId);
+
+  // error-tail-banner:会话尾部停在未忽略的 role='error' 行 → 输入框上方显示
+  // 可操作红条(与 live ErrorBanner 同风格;2026-07-05 产品决策统一——所有尾部
+  // 错误都要有主操作 + 关闭按钮)。两种语义:
+  //   - 中断标记行(reason=app-exit-interrupted,启动扫尾补写)→「继续任务/忽略」
+  //   - 普通失败行(process exited / turn-failed 等,重启后 live 报错只剩历史行)
+  //     →「重试/关闭」
+  // 后面有新消息 = 任务已被推进,判定自然不命中。此时消息流内不重复渲染该行
+  // (MessageStream 对尾部未忽略 error 行返回 null,由本条独家承载)。
+  const errorTailMsg = useMemo(() => {
+    const last = messages.length > 0 ? messages[messages.length - 1] : undefined;
+    return last && last.role === 'error' && !last.errorDismissed ? last : null;
+  }, [messages]);
+  // 队列里已有合成续跑项 = 用户已点过继续/重试、只是尚未被接受落库(排队被挡 /
+  // 凭证切换等待):视为已推进,banner 抑制(review P2)—— 本地 hidden 态在重挂/
+  // 重载后丢失,只看 messages 尾部时旧 error 行仍在,banner 会重现并允许对同一
+  // 错误重复 enqueue 续跑。落库后合成行进 messages 尾部,由尾部判定接管。
+  // 精确匹配两条续跑指令,不用共享前缀:其它 UI trigger(Mivo/图片动作等)排队
+  // 并不推进失败/中断的 turn,前缀匹配会误抑制、让会话失去重试/继续入口(review P2)。
+  const syntheticContinuationQueued = useMemo(
+    () =>
+      pendingQueue.some(
+        (q) => q.text === CONTINUE_AFTER_APP_EXIT_PROMPT || q.text === CONTINUE_AFTER_ERROR_PROMPT,
+      ),
+    [pendingQueue],
+  );
+  // coordinator 在 dispatch 前先把队首移出 pendingQueue。只看 queued 会在
+  // vendor running / durable session ack 尚未回投的窗口误判为「用户取消」，
+  // 让旧横幅重新出现；active marker 把这段交接窗口纳入同一个抑制状态。
+  const syntheticContinuationPending =
+    syntheticContinuationQueued || continuationInFlightClientId !== null;
+  const errorTailKind: 'interrupted' | 'error' =
+    errorTailMsg?.errorReason === APP_EXIT_INTERRUPTED_REASON ? 'interrupted' : 'error';
+  // 普通失败行传给 ErrorBanner 的错误文本:**保持 raw**(只解码 [REMOTE_*]
+  // bracket code,不做 reason→i18n 转换,review P2)—— ErrorBanner 的门控判定
+  // (codex thread not found / 401 / invalid-encrypted 等)靠对原文的正则命中,
+  // i18n 化会让不可重试错误漏过门控;live 报错时 banner 显示的本来也是 raw
+  // message,重载后同文案反而更一致。
+  const errorTailText = useMemo(() => {
+    if (!errorTailMsg || errorTailKind !== 'error') return '';
+    return decodeRemoteErrorMessage(errorTailMsg.content);
+  }, [errorTailKind, errorTailMsg]);
+  // 本地隐藏态:点主按钮后立即隐藏,不等新消息入流(视觉连续性,规则 7)。
+  // 「忽略/关闭」走 store 的乐观 errorDismissed 更新,无需本地态。
+  // 按错误行 clientId 归属(不是 sessionId,review P2):续跑后同一会话再次以
+  // **新的**错误行收尾时,hidden 态不匹配新行,新红条正常浮现。
+  const [errorTailBannerHiddenFor, setErrorTailBannerHiddenFor] = useState<string | null>(null);
+  const errorTailBannerHidden =
+    errorTailBannerHiddenFor !== null && errorTailBannerHiddenFor === errorTailMsg?.clientId;
+  // 抑制交棒(review P2):本地 hidden 态只服务「点击 → enqueue 被接受」的短窗口;
+  // 合成续跑项进入队列或 coordinator dispatch 边界后就释放 hidden 态，由
+  // main projection 接管抑制。排队项被取消 / dispatch 前被 Ghost block 时，
+  // queued 与 in-flight 都消失，旧 error 行的 banner 立即恢复；成功派发则由
+  // 合成消息落库与 session/running 状态继续接管。
+  useEffect(() => {
+    if (syntheticContinuationPending && errorTailBannerHiddenFor !== null) {
+      setErrorTailBannerHiddenFor(null);
+    }
+  }, [syntheticContinuationPending, errorTailBannerHiddenFor]);
+  const handleErrorTailContinue = useCallback(async () => {
+    if (!sessionId || !errorTailMsg) return;
+    setErrorTailBannerHiddenFor(errorTailMsg.clientId);
+    try {
+      // 隐藏的英文续跑指令([UI_ACTION_TRIGGER] 前缀,消息流不渲染)——用户视角
+      // 就是任务继续跑了。transcript 里已有原任务与(可能的)部分进展,模型自查
+      // 进度接着做。send 失败恢复红条让用户能重试。
+      await makerChatStore.sendUiTrigger(
+        sessionId,
+        errorTailKind === 'interrupted'
+          ? CONTINUE_AFTER_APP_EXIT_PROMPT
+          : CONTINUE_AFTER_ERROR_PROMPT,
+      );
+    } catch (err) {
+      setErrorTailBannerHiddenFor(null);
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }, [errorTailKind, errorTailMsg, sessionId]);
+  const handleErrorTailDismiss = useCallback(() => {
+    if (!sessionId || !errorTailMsg) return;
+    // store 乐观置 errorDismissed(banner 即刻熄灭、切会话回来不复现)+ 持久化
+    // (main 侧 merge dismissed:true,不丢 sdkError 等原字段;远程会话仅内存态)。
+    makerChatStore.dismissErrorTailMessage(sessionId, errorTailMsg.clientId);
+  }, [errorTailMsg, sessionId]);
+  // interrupted-turn-resume(简化版):「疑似中断」由 session 行的双时间戳驱动
+  // (startedAt > endedAt 且未被 /clear 越过,见 sessionActiveTurn.ts 文件头),
+  // 不再依赖持久化中断消息行。判定是打开会话时的一次性快照:本窗口 turn 一旦
+  // 跑起来(isRunning)或用户已操作(继续/忽略)即永久熄灭,不追 DB 实时状态。
+  // 旧版本插入的中断行仍走上面的 errorTailMsg 行判定(优先),两者互斥渲染。
+  const [sessionInterruptAcked, setSessionInterruptAcked] = useState(false);
+  useEffect(() => {
+    setSessionInterruptAcked(false);
+  }, [sessionId]);
+  // 与 errorTailBannerHiddenFor 相同的抑制交棒：点击后的本地 latch 只覆盖
+  // enqueue 可见前的短窗口。续跑项进入队列或 coordinator dispatch 边界后由
+  // main projection 抑制横幅；此时释放 latch，用户取消 / dispatch 前拦截后
+  // marker 消失，旧中断横幅会立即恢复。
+  useEffect(() => {
+    if (syntheticContinuationPending && sessionInterruptAcked) {
+      setSessionInterruptAcked(false);
+    }
+  }, [syntheticContinuationPending, sessionInterruptAcked]);
+  // sessionId 必须在 deps 里:running→running 切会话时 isRunning 布尔值不变(true→true),
+  // 只依赖它会漏掉新会话的"跑起来即熄灭"锁存——上面的 reset effect 把 acked 清成 false 后
+  // 没人再置回。此时切入时拉的 session 快照天然 startedAt > endedAt(turn 在飞,ended 未写),
+  // 用户点 stop 的瞬间 isRunning 落 false、ended 落库广播还没到,双时间戳判定短暂成立,
+  // 「应用退出中断」横幅会闪现一帧(假阳性)。带上 sessionId 让每次切换后按新会话当前
+  // isRunning 重新锁存。
+  useEffect(() => {
+    if (agentStatus.isRunning || remoteTurnActive) setSessionInterruptAcked(true);
+  }, [sessionId, agentStatus.isRunning, remoteTurnActive]);
+  const interruptedFromSession = useMemo(() => {
+    if (sessionInterruptAcked || remoteTurnActive) return false;
+    const started = session?.activeTurnStartedAt ?? null;
+    if (!started) return false;
+    const ended = session?.lastTurnEndedAt ?? 0;
+    const cleared = session?.clearedAt ? Date.parse(session.clearedAt) : 0;
+    return started > ended && started > cleared;
+  }, [
+    session?.activeTurnStartedAt,
+    session?.lastTurnEndedAt,
+    session?.clearedAt,
+    sessionInterruptAcked,
+    remoteTurnActive,
+  ]);
+  // 兜底清启动红点:打开会话且中断判定不成立(peer 已忽略 / 续跑已完成 / 用户已
+  // 操作)时,banner 不会 mount、useAckErrorAttention 没有清除时机 —— 这里清掉
+  // useInterruptedSessionsAttention 打的红点(只清 hook 自有的,不误伤任务失败红点)。
+  useEffect(() => {
+    if (sessionId && session && !interruptedFromSession)
+      clearInterruptedAttentionIfOwned(sessionId);
+  }, [sessionId, session, interruptedFromSession]);
+  const handleSessionInterruptContinue = useCallback(async () => {
+    if (!sessionId) return;
+    setSessionInterruptAcked(true);
+    try {
+      // main 侧把续跑项插到队首；durable ack 延后到 vendor dispatch 成功后，
+      // 避免排队取消 / cancelled-before-dispatch 时旧中断提示被提前抹掉。
+      // 续跑 turn 真正启动时会写更新的 started；若再次被 app 退出打断，仍会产生新提示。
+      // 本视图先靠内存 acked 即时熄灭，peer 视图靠 dispatch 后的 ack 广播收敛。
+      await makerChatStore.sendUiTrigger(sessionId, CONTINUE_AFTER_APP_EXIT_PROMPT);
+    } catch (err) {
+      setSessionInterruptAcked(false);
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }, [sessionId]);
+  const handleSessionInterruptDismiss = useCallback(() => {
+    if (!sessionId) return;
+    setSessionInterruptAcked(true);
+    void ackInterruptedTurnFor(sessionId).catch(() => undefined);
+  }, [sessionId]);
+  // device-link 远程会话首屏:历史/元数据经隧道往返(网络),慢网下 historyLoaded=false
+  // 期间消息区空白。仅远程 + 延迟防闪后给「正在从被控端加载」提示(本机会话恒 false)。
+  const showRemoteLoading = useRemoteSessionLoading(remoteDeviceId, historyLoaded);
+  // 远程回执「真实展示」放行 + 本次访问的新鲜度对账。放行表示「视图挂载、真实可见
+  // (viewVisible:rail 收起 / Orca 面板隐藏时为 false,挂载 ≠ 看得见)且历史已渲染」;
+  // 回执真正发出还要求入队之后有一轮 sync 成功完成(sessionAttentionStore 的同步代数
+  // 门槛)。historyLoaded 落地时触发一轮对账,正是给本次访问期间入队的回执提供新鲜代:
+  // 复访(缓存残留)、首拉完成、以及对账失败后 focus / 重连 / turn-end 驱动的后续对账,
+  // 都经同一代数机制自然收敛,无需在视图里区分场景。visible 翻 false 时收回放行,
+  // 期间到达的回执重新挂起,重新可见后放行。
+  useEffect(() => {
+    if (!sessionId || !remoteDeviceId || !historyLoaded || !viewVisible) return undefined;
+    setRemoteReceiptDisplayReady(sessionId, true);
+    void makerChatStore.reconcileRemoteMessages(sessionId).catch(() => undefined);
+    return () => setRemoteReceiptDisplayReady(sessionId, false);
+  }, [historyLoaded, remoteDeviceId, sessionId, viewVisible]);
+  // worktree 创建过程中禁用 ChatInput,防止用户在 worktree 还没就绪时继续派发消息。
+  // 之前是扫 chat messages 找 SystemCard('worktree') status==='creating',现在直接
+  // 读 worktreeCreationStore(已经在上面订阅 worktreeCreation 时拿到)。
+  //
+  // 用户体验优化 (2026-05): worktree 创建有时只要 ~200ms,store 一进一出导致
+  // WorktreeCreatingOverlay 出现 1 帧就消失,视觉上像是闪了一下。这里把"creating"
+  // 视觉态最少撑 1.6s —— 一旦进入 creating, 即便 store 已被 clear(创建完成),
+  // overlay 也至少存在到首次进入后的第 1600ms。底层 store 仍按真实时间 clear,
+  // 不影响 worktreeCreate 完成后的发送链路 (sendMessage 在 store.clear 同 tick
+  // 触发, 走的是 makerChatStore 自己的队列, 不依赖 worktreePreparing)。
+  const rawWorktreeCreating = worktreeCreation?.status === 'creating';
+  const [smoothedWorktreeCreating, setSmoothedWorktreeCreating] = useState(rawWorktreeCreating);
+  // 缓存 branchName: store clear 之后 worktreeCreation 就变 undefined, 拿不到 name 了,
+  // 但 overlay 还需要继续显示 (min-duration 没到), 所以这里把进入 creating 时的 name
+  // 镜像出来, 给 overlay 用。raw 重新回 true 再覆盖。
+  const [smoothedBranchName, setSmoothedBranchName] = useState<string | null>(
+    rawWorktreeCreating ? (worktreeCreation?.name ?? null) : null,
+  );
+  const creatingStartedAtRef = useRef<number | null>(rawWorktreeCreating ? Date.now() : null);
+  useEffect(() => {
+    if (rawWorktreeCreating) {
+      if (creatingStartedAtRef.current === null) {
+        creatingStartedAtRef.current = Date.now();
+      }
+      setSmoothedWorktreeCreating(true);
+      if (worktreeCreation?.name) setSmoothedBranchName(worktreeCreation.name);
+      return;
+    }
+    // raw 已经回 false; 没记录过 start (本会话从未进过 creating) → 直接同步
+    if (creatingStartedAtRef.current === null) {
+      setSmoothedWorktreeCreating(false);
+      setSmoothedBranchName(null);
+      return;
+    }
+    const elapsed = Date.now() - creatingStartedAtRef.current;
+    const MIN_MS = 1600;
+    if (elapsed >= MIN_MS) {
+      setSmoothedWorktreeCreating(false);
+      setSmoothedBranchName(null);
+      creatingStartedAtRef.current = null;
+      return;
+    }
+    const remaining = MIN_MS - elapsed;
+    const timer = setTimeout(() => {
+      setSmoothedWorktreeCreating(false);
+      setSmoothedBranchName(null);
+      creatingStartedAtRef.current = null;
+    }, remaining);
+    return () => clearTimeout(timer);
+  }, [rawWorktreeCreating, worktreeCreation?.name, sessionId]);
+  // 对外仍叫 worktreePreparing — 整段下游逻辑 (handleSend 拦截 / ChatInput.disabled /
+  // overlay 渲染) 全部统一从这一个值读, 保证语义一致 (overlay 在 = 输入禁用)。
+  const worktreePreparing = smoothedWorktreeCreating;
+
+  // ---------------------------------------------------------------------------
+  // F-AUQ-MIN-1 / F-AUQ-MIN-5 验收第 4 条：会话切换后 askUserViewerState 重置为 'expanded'。
+  // makerChatStore 按 sessionId 分片存储，A(minimized)→B→A 回到 A 时如果不重置，
+  // store 里 A 的状态仍是 'minimized'。
+  // setAskUserViewerState 来自 useCCAgentChat，依赖 [sessionId]，与 sessionId 同步变化，
+  // 因此该 effect 实质上只在 sessionId 变更时触发一次（单会话内不会误触发）。
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    if (!sessionId) return;
+    setAskUserViewerState('expanded');
+  }, [sessionId, setAskUserViewerState]);
+
+  // ── F-DIFF-1: Session-wide change panel ──
+  // Aggregate diffs once at this level and pass to both the toggle (for the
+  // ── Desktop slash dispatch subscriber ─────────────────────────────────
+  // 订阅 main 端 DesktopCommandRegistry execute 后的"做 UI 动作"广播 ——
+  // /help → insertSystemCard('help', ...); /clear → clearSession()。
+  // 命令"主权"在 main(决定 /help /clear 是不是 desktop 命令), renderer 只负责
+  // 落实 UI 副作用; 这是 palette refactor 的核心约束: desktop commands 走 main 派发。
+  // 必须放在 useCCAgentChat 解构之后, 才能拿到 insertSystemCard / clearSession。
+  const getHelpCommandsSnapshot = useCallback(async (): Promise<UnifiedCommand[]> => {
+    const cached = allCommandsRef.current;
+    if (cached.length > 0) return cached;
+    const agentKind = session?.agentKind === 'codex' ? 'codex' : 'claude-code';
+    try {
+      // device-link 远程会话同源:传 remoteDeviceId,fallback 快照也从被控端读(见上方 cache effect 说明)。
+      return await loadAllCommands(
+        agentKind,
+        isRemoteSession ? null : (session?.workingDir ?? null),
+        undefined,
+        remoteDeviceId,
+      );
+    } catch {
+      return [];
+    }
+  }, [session?.agentKind, session?.workingDir, isRemoteSession, remoteDeviceId]);
+
+  const insertHelpCard = useCallback(async () => {
+    const commands = await getHelpCommandsSnapshot();
+    insertSystemCard('help', {
+      commands: commands.map((c) => ({
+        name: c.name,
+        description: 'description' in c ? c.description : undefined,
+        // help 卡用 source 区分类目: agent-skill 透传原 source, 其余按 kind 简化
+        source: c.kind === 'agent-skill' ? c.source : c.kind,
+      })),
+    });
+  }, [getHelpCommandsSnapshot, insertSystemCard]);
+
+  useEffect(() => {
+    const unsub = window.electronAPI.maker.onDesktopCommandTriggered((payload) => {
+      if (payload.sessionId && payload.sessionId !== sessionId) return;
+      if (payload.command === 'help') {
+        void insertHelpCard();
+        return;
+      }
+      if (payload.command === 'clear') {
+        clearSession();
+        return;
+      }
+      if (payload.command === 'cmd') {
+        // /cmd 的执行结果由 main 端在 payload.result 里送来; renderer 透传给 CmdCard
+        // 渲染。result 缺失只可能是 main 端代码出 bug, 这里防御性 fallback。
+        insertSystemCard('cmd', (payload.result ?? {}) as Record<string, unknown>);
+        return;
+      }
+      if (payload.command === 'goal') {
+        // /goal 成功(set/cleared)的可视反馈由 GoalIndicator(状态 push 驱动)承担,
+        // 这里只 toast 用法 / 错误,以及一条轻量成功提示。
+        if (payload.error === 'goal-usage') {
+          toast.warning(t('goal.toast.usage'));
+        } else if (payload.error === 'goal-no-session') {
+          toast.warning(t('goal.toast.noSession'));
+        } else if (payload.error === 'goal-failed') {
+          toast.error(t('goal.toast.failed'));
+        } else if (payload.error === 'remote-unsupported') {
+          toast.warning(t('commands.toast.remoteUnsupported'));
+        } else if (payload.goalAction === 'set') {
+          toast.success(t('goal.toast.set'));
+        } else if (payload.goalAction === 'cleared') {
+          toast.success(t('goal.toast.cleared'));
+        }
+        return;
+      }
+      if (payload.command === 'learn') {
+        // /learn 的蒸馏在独立后台 session 跑(learn-host);这里只反馈启动结果。
+        // 进度与"待审查"入口由 learn:event 状态流驱动(审查面板见 features/learn)。
+        if (payload.error === 'learn-usage') {
+          toast.warning(t('learn.toast.usage'));
+        } else if (payload.error === 'learn-busy') {
+          toast.warning(t('learn.toast.busy'));
+        } else if (payload.error === 'learn-failed') {
+          toast.error(t('learn.toast.failed'));
+        } else if (payload.error === 'remote-unsupported') {
+          toast.warning(t('commands.toast.remoteUnsupported'));
+        } else if (payload.learnRunId) {
+          // 状态卡只存 runId,状态本体由卡片内 useLearnRun 订阅 learn:event 实时刷新。
+          insertSystemCard('learn', { runId: payload.learnRunId });
+        }
+        return;
+      }
+      if (payload.command === 'workflows') {
+        // workflow 进度内联在消息流里(Workflow 工具调用 → workflow 进度卡,AgentTaskCard 带
+        // data-workflow-card / data-workflow-session / data-workflow-expandkey)。/workflows 在
+        // **本会话作用域内**定位最近一张 workflow 卡:展开它 → 滚动到视野中央 → 短暂描边高亮;
+        // 无卡时 toast。数据/展现全在本地,不回 SDK(原生 /workflows 在非交互 SDK 模式下不可用)。
+        // 作用域限定:多个 CCAgentSessionView 可能同挂 DOM(Orca split view / workdir 浏览栏),
+        // 全局 querySelectorAll 会选到别的会话的卡,故按 data-workflow-session 限定当前会话。
+        const scopeSelector = sessionId
+          ? `[data-workflow-session="${CSS.escape(sessionId)}"][data-workflow-card]`
+          : '[data-workflow-card]';
+        const cards = document.querySelectorAll<HTMLElement>(scopeSelector);
+        const last = cards.item(cards.length - 1);
+        if (!last) {
+          toast.warning(t('workflows.toast.none'));
+          return;
+        }
+        // 展开卡片:逐 agent 进度树只在展开区渲染,命令语义是「打开并展开最近一张 workflow 卡」。
+        const expandKey = last.getAttribute('data-workflow-expandkey');
+        if (expandKey) setBlockExpanded(expandKey, true);
+        last.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        flashWorkflowCard(last);
+        return;
+      }
+      // 'issue' 命令由下方独立 effect 处理(需要 handleSend,其声明在本 effect 之后)。
+    });
+    return unsub;
+  }, [insertHelpCard, clearSession, insertSystemCard, sessionId, t]);
+
+  // F-COLLAB: 协同模式真实状态。enabled 来自 session.orcaRole === 'lead';
+  // worker(显示用)从 active workflow 的 Worker session 列表查到 agentKind。
+  // 切换协同走 IPC enableOrca / disableOrca,失败时 toast。
+  const [collabWorker, setCollabWorker] = useState<'cc' | 'codex'>('codex');
+  // enableBusy 只盖"开启协同"路径;关闭走 useStopOrcaCollab hook 自己管 busy。
+  const [enableBusy, setEnableBusy] = useState(false);
+  const [createWorkerOpen, setCreateWorkerOpen] = useState(false);
+  const collabEnabled = isOrcaLeadSessionView;
+  const showOrcaLeadIdentityBar = ownsRoute && collabEnabled;
+  const leadAgentKind = normalizeOrcaDisplayAgentKind(session?.agentKind);
+  const leadVendor = orcaVendorForAgentKind(leadAgentKind);
+  const leadPaneLabel = t('orca.split.leadLabel', {
+    agent: orcaAgentLabel(leadAgentKind),
+  });
+  const passiveOrcaWorkersRevealSessionRef = useRef<string | null>(null);
+  const routeWorkerHint = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    const raw = params.get('worker');
+    return {
+      hasWorkerParam: params.has('worker'),
+      workerSessionId: raw && raw !== 'new' ? raw : null,
+    };
+  }, [location.search]);
+  const hasWorkerSearchJump = Boolean(
+    searchJump?.sessionId && sessionId && searchJump.sessionId !== sessionId,
+  );
+  const hasExplicitOrcaWorkersReveal =
+    routeWorkerHint.hasWorkerParam || !!orcaWorkersReveal || hasWorkerSearchJump;
+  const rightSidebarCollapsedRecord = sessionId
+    ? readPanelCollapsedRecord('right-tabs', { sessionId })
+    : null;
+  const shouldFirstFrameRevealOrcaWorkers = shouldRevealOrcaWorkersBeforeFirstPaint({
+    collabEnabled,
+    ownsRoute,
+    isCompactRail,
+    hasExplicitReveal: hasExplicitOrcaWorkersReveal,
+    collapsedRecord: rightSidebarCollapsedRecord,
+    hasSynchronousSessionIdentity: sessionFromList?.orcaRole === 'lead',
+  });
+  // 从 sidebar / deep-link 直接进 lead session 时, URL 停在 /cc-agent/<id>
+  // 普通路由。检测到 lead session 已在协同时,自动确保右侧栏「协同」tab 存在。
+  // worker deep link / 旧 /orca shim 带来的 ?worker= 在这里一次性翻译成 tab state,
+  // 再清掉 URL 参数,主路由保持干净。
+  // 新建 Maker 时 route state 的 orcaWorkersReveal 也在这里消费:必须等新会话成为
+  // 当前右侧栏会话后再 reveal,否则 detached 子窗口只会写后台 collapsed 存档,不会开窗。
+  // 被动切入普通 Orca Lead 路由时,如果该 session 从未记录过右栏折叠态,自动 reveal 一次:
+  // 旧四栏时代开启的协同会话没有 right-sidebar-collapsed:<sessionId> 记录,切入时应展开协同 tab。
+  // 已记录为开/关都尊重用户历史,只 ensure tab 存在,不抢 active tab。
+  // doc rail (isCompactRail) 不在这里打开,由 WorkdirBrowseRoute 的 toggle 布局接管。
+  useEffect(() => {
+    if (!collabEnabled || isCompactRail || !sessionId) return;
+    const shouldRevealForMissingCollapsedRecord =
+      passiveOrcaWorkersRevealSessionRef.current !== sessionId &&
+      shouldRevealOrcaWorkersAfterPaint({
+        collabEnabled,
+        ownsRoute,
+        isCompactRail,
+        hasExplicitReveal: hasExplicitOrcaWorkersReveal,
+        collapsedRecord: rightSidebarCollapsedRecord,
+      });
+    const shouldPassiveRevealWorkersTab =
+      shouldFirstFrameRevealOrcaWorkers || shouldRevealForMissingCollapsedRecord;
+    if (shouldPassiveRevealWorkersTab) {
+      passiveOrcaWorkersRevealSessionRef.current = sessionId;
+    }
+    const shouldRevealWorkersTab = hasExplicitOrcaWorkersReveal || shouldPassiveRevealWorkersTab;
+    const focusWorkerSessionId = hasExplicitOrcaWorkersReveal
+      ? routeWorkerHint.hasWorkerParam
+        ? routeWorkerHint.workerSessionId
+        : (orcaWorkersReveal?.focusWorkerSessionId ??
+          (hasWorkerSearchJump ? searchJump?.sessionId ?? null : null))
+      : null;
+    const workerSearchJump =
+      focusWorkerSessionId && searchJump?.sessionId === focusWorkerSessionId
+        ? searchJump
+        : undefined;
+    let cancelled = false;
+    let retryTimer: number | null = null;
+    const clearConsumedIntent = () => {
+      if (!routeWorkerHint.hasWorkerParam && !orcaWorkersReveal && !workerSearchJump) return;
+      const params = new URLSearchParams(location.search);
+      params.delete('worker');
+      params.delete('workerAgent');
+      const nextSearch = params.toString();
+      navigate(`${location.pathname}${nextSearch ? `?${nextSearch}` : ''}`, {
+        replace: true,
+        state: {
+          ...((location.state as Record<string, unknown> | null) ?? {}),
+          orcaWorkersReveal: undefined,
+          ...(workerSearchJump ? { searchJump: undefined } : {}),
+        },
+      });
+    };
+    const runAction = async (attempt = 0): Promise<void> => {
+      const routeResult = shouldRevealWorkersTab
+        ? await revealOrcaWorkersTab(sessionId, {
+            focusWorkerSessionId,
+            ...(workerSearchJump ? { searchJump: workerSearchJump } : {}),
+            ...(shouldFirstFrameRevealOrcaWorkers ? { animate: false } : {}),
+          })
+        : await ensureOrcaWorkersTab(sessionId).then(() => 'attached' as const);
+      if (cancelled) return;
+      // route state 已属于目标 Lead，但 MainLayout→main 的 context IPC 可能晚一个事件循环。
+      // stale 时保留 intent 并短暂重试；成功后才 CAS 式清 URL/state，避免 detached 丢 hint。
+      if (routeResult === 'stale-context' && shouldRevealWorkersTab) {
+        if (attempt >= 20) {
+          log.warn('orca workers reveal context did not converge', { sessionId });
+          return;
+        }
+        retryTimer = window.setTimeout(() => {
+          retryTimer = null;
+          void runAction(attempt + 1).catch((err) => {
+            log.warn('ensure/reveal orca workers tab failed', err);
+          });
+        }, 50);
+        return;
+      }
+      if (routeResult !== 'attached' && routeResult !== 'routed') return;
+      clearConsumedIntent();
+    };
+    void runAction().catch((err) => {
+      log.warn('ensure/reveal orca workers tab failed', err);
+    });
+    return () => {
+      cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+    };
+  }, [
+    collabEnabled,
+    hasExplicitOrcaWorkersReveal,
+    hasWorkerSearchJump,
+    isCompactRail,
+    location.pathname,
+    location.search,
+    location.state,
+    navigate,
+    orcaWorkersReveal,
+    ownsRoute,
+    rightSidebarCollapsedRecord,
+    routeWorkerHint.hasWorkerParam,
+    routeWorkerHint.workerSessionId,
+    searchJump,
+    sessionId,
+    shouldFirstFrameRevealOrcaWorkers,
+  ]);
+  // Lead 允许 Claude / Codex 本地项目会话走 toggle。Codex 的 MCP bridge 通过
+  // threadId -> business sessionId 映射在工具调用时恢复 per-session ctx。
+  // 远端协同还没有 worker remoteHostId 继承链,继续隐藏入口。
+  // 注意:doc rail (isCompactRail) 也允许显示 toggle —— WorkdirBrowseRoute 已经
+  // 针对 Lead session 接入了 OrcaSplitView toggle 布局,普通 session 必须能从
+  // ChatInput 工具行启用协同变成 Lead,否则 doc 模式下首次开启入口完全没有。
+  // 工具行同时传 denseToolbar=true,协同 pill 自动收成 icon-only,窄 rail 视觉 OK。
+  const allowCollabToggle =
+    !orcaMode &&
+    session?.orcaRole !== 'worker' &&
+    session?.remoteHostId == null &&
+    session?.workspaceKind === 'project' &&
+    !!session?.workingDir;
+  // 把 sessionId 抽出来给 useEffect 用 (linter 偏好稳定的标量依赖)
+  const collabSessionId = sessionId;
+  useEffect(() => {
+    if (!collabSessionId || !collabEnabled) return;
+    let cancelled = false;
+    void orcaWorkflowsFor(collabSessionId)
+      .listWorkersByLead(collabSessionId)
+      .then((workers) => {
+        if (cancelled || workers.length === 0) return;
+        const activeWorker = workers[0]; // MVP: 假设最多 1 个 active Worker
+        const kind: 'cc' | 'codex' = activeWorker.session?.agentKind === 'codex' ? 'codex' : 'cc';
+        setCollabWorker(kind);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [collabSessionId, collabEnabled]);
+
+  // F-COLLAB: "外部触发" 协同状态变化时自动打开协同 tab (典型场景: MCP team
+  // 工具, 未来也覆盖飞书等其它入口)。
+  //
+  // 手动 toggle 路径 (requestEnableCollab / useStopOrcaCollab) 自己已经
+  // 同步打开 tab, effect 触发时 addOrFocusSingletonTab 会幂等聚焦已有 tab。
+  // 用 ref 跟踪 prevCollabEnabled 只在边沿触发;已处于协同中的会话 mount 时由上方
+  // 常驻 tab effect 打开协同 tab,这里不重复处理。
+  // doc rail (isCompactRail) 完全跳过 — WorkdirBrowseRoute 已经按 orcaRole reactive
+  // 自动切到 OrcaSplitView toggle 布局, 不需要 router-level navigate。
+  const prevCollabEnabledRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (prevCollabEnabledRef.current === null) {
+      prevCollabEnabledRef.current = collabEnabled;
+      return;
+    }
+    const prev = prevCollabEnabledRef.current;
+    prevCollabEnabledRef.current = collabEnabled;
+    if (isCompactRail) return;
+    if (!collabSessionId) return;
+
+    // false → true 边沿:外部 MCP/team 刚开启协同，属于新的显式意图；即使该会话
+    // 历史上收起过右栏，也应重新展开并聚焦协同 tab。mount 时 prev=null 已在上方返回。
+    if (!prev && collabEnabled) {
+      void revealOrcaWorkersTab(collabSessionId).catch((err) => {
+        log.warn('revealOrcaWorkersTab after external enable failed', err);
+      });
+      return;
+    }
+
+    // true → false 边沿:关闭协同 tab;兼容 /orca 路由仍在场时, navigate 回单 session 路由。
+    if (prev && !collabEnabled) {
+      void closeOrcaWorkersTabAfterTeamEnd(collabSessionId).catch((err) => {
+        log.warn('closeOrcaWorkersTabAfterTeamEnd failed', err);
+      });
+      if (isOrcaMode && ownsWindowRoute) {
+        navigate(`/cc-agent/${collabSessionId}`, { replace: true });
+      }
+    }
+  }, [collabEnabled, collabSessionId, isCompactRail, isOrcaMode, navigate, ownsWindowRoute]);
+
+  // F-COLLAB: 关闭协同复用 useStopOrcaCollab hook(与 OrcaWorkflowRoute Worker pane × 同一份逻辑)。
+  // navigate 触发条件:仅兼容 orca route 仍在场时需要跳回单 session 路由。
+  // doc 模式 (isCompactRail=true) 下 OrcaSplitView 把 Lead pane 渲染为
+  // <CCAgentSessionView ... orcaMode compact />,orcaMode 这里只是表"在 split-pane 里"的语义标,
+  // 不能当 navigate 判据 —— 否则用户在 doc rail 工具行点协同 pill 关协同会跳出 doc 模式。
+  // disableOrca 后 lead.orcaRole 被清掉,WorkdirBrowseRoute 的 isOrcaLeadSession 自动 fallback
+  // 到单 CCAgentSessionView,留在 doc 模式即可。
+  const { requestStop: requestStopCollab } = useStopOrcaCollab({
+    leadSessionId: collabSessionId,
+    navigateOnSuccess: orcaMode && !isCompactRail,
+  });
+
+  // F-COLLAB: 开启协同 = 调 enableOrca IPC + (普通路由)打开右侧栏协同 tab。
+  // doc 模式 (isCompactRail) 下不 navigate —— 留在 /cc-agent/files/<leadId>,
+  // sessionsStore.forceRefresh 后 lead.orcaRole 翻成 'lead',WorkdirBrowseRoute 的
+  // isOrcaLeadSession 检测到自动把 chat rail 切到 OrcaSplitView toggle 布局。
+  // OrcaSplitView 没拿到 ?worker= 时会 fallback 用 listWorkersByLead 的第一个 worker
+  // (MVP 假设最多 1 个 active Worker),所以 doc 模式不需要往 URL 写 worker search param。
+  const requestEnableCollab = useCallback(
+    async (form: CreateWorkerForm) => {
+      if (!collabSessionId || enableBusy) return;
+      setEnableBusy(true);
+      const previousWorker = collabWorker;
+      let workersTabOpened = false;
+      const revealWorkersTab = !isCompactRail
+        ? revealOrcaWorkersWithRetry({
+            reveal: () => revealOrcaWorkersTab(collabSessionId),
+          })
+            .then((routeResult) => {
+              workersTabOpened = didOpenOrcaWorkersTab(routeResult);
+              if (routeResult === 'stale-context') {
+                log.warn('revealOrcaWorkersTab remained stale after bounded retries', {
+                  sessionId: collabSessionId,
+                });
+              }
+            })
+            .catch((err) => {
+              log.warn('revealOrcaWorkersTab failed before enableOrca', err);
+            })
+        : Promise.resolve();
+      try {
+        const workerAgent = form.agent;
+        const worker: 'cc' | 'codex' = workerAgent === 'codex' ? 'codex' : 'cc';
+        setCollabWorker(worker);
+        setCreateWorkerOpen(false);
+        await makerApiFor(collabSessionId).enableOrca(collabSessionId, {
+          workerAgent,
+          role: form.role,
+          label: createWorkerLabel(form.role, []),
+          model: form.model,
+          effort: form.effort as
+            'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | undefined,
+          fast: form.fast,
+          delegateTask: form.initialTask || undefined,
+        });
+        void sessionsStore.forceRefresh('active');
+        // 远程会话:enableOrca 在被控端起了 worker session,先把该设备会话列表重拉进 store
+        // (注册 worker sessionId),否则 orca split 视图按 ?worker= 加载会 404。
+        const orcaDeviceId = getSessionDeviceId(collabSessionId);
+        if (orcaDeviceId) await refreshRemoteDeviceSessions(orcaDeviceId);
+        await revealWorkersTab;
+      } catch (err) {
+        await revealWorkersTab;
+        if (workersTabOpened) {
+          void closeOrcaWorkersTabAfterTeamEnd(collabSessionId).catch((closeErr) => {
+            log.warn('rollback closeOrcaWorkersTabAfterTeamEnd failed', closeErr);
+          });
+        }
+        setCollabWorker(previousWorker);
+        log.error('enableOrca failed', err);
+        toast.error(
+          getCollaborationStartErrorMessage(err, t, {
+            remoteDevice: Boolean(remoteDeviceId),
+          }),
+        );
+      } finally {
+        setEnableBusy(false);
+      }
+    },
+    [collabSessionId, collabWorker, enableBusy, isCompactRail, remoteDeviceId, t],
+  );
+
+  // "本次会话改动文件列表"已迁移到 RSB review tab(单一入口),原 SessionDiffPanel
+  // 的 session-switch 重置 + Ctrl/Cmd+Shift+D 切换快捷键随之删除。若日后需要"跳到
+  // review tab"的快捷键,应做成 RSB 的统一 tab 焦点切换,不在本变更范围内。
+
+  // Refresh local serverSession after a mutation (model/effort/workingDir change).
+  // 只更新本视图的 serverSession，绝不再"顺手 patch sidebar":
+  // 服务端 GET 拿到的 row 可能落后于刚刚 emitPatch 的乐观值（典型场景：
+  // handleWorkingDirChange 先 refreshServerSession 再 sendMessage —— 后者
+  // 同步 emit { userSendAt: now } 到 sidebar，几十 ms 后 GET 回来的 row 还
+  // 是 userSendAt: null，整段 spread 当 patch 派发会把 sidebar 已设的
+  // userSendAt 擦回 null，session 被错判为草稿。
+  // sidebar 关心的字段（workingDir / userSendAt / title）有各自的精确 emit
+  // 路径，不需要这里的全量同步。
+  const refreshServerSession = useCallback(async () => {
+    if (!sessionId) return;
+    const refreshSequence = sessionRefreshSequenceRef.current;
+    const requestSequence = refreshSequence.begin(sessionId);
+    // 旧 session 的异步 mutation 可能在切换视图后才调用这里；不要让它取消当前 GET。
+    if (requestSequence === null) return;
+    try {
+      const refreshed = await sessionService.get(sessionId);
+      if (refreshSequence.isLatest(sessionId, requestSequence)) {
+        setServerSession(sessionSnapshotPatchBufferRef.current.merge(sessionId, refreshed));
+      }
+    } catch {
+      // 保留当前 snapshot；后续 patch 或 refresh 仍可收敛。
+    }
+  }, [sessionId]);
+
+  const handleWorkingDirChange = useCallback(
+    (newDir: string | null) => {
+      // ChatInput already persists workingDir to server; we just refresh our local copy.
+      refreshServerSession();
+
+      // Auto-continue: if there's a pending send and a valid dir was selected, execute step ③
+      if (newDir && pendingSendRef.current) {
+        const {
+          message,
+          model,
+          effort,
+          permissionMode,
+          files,
+          mentions,
+          quotesEncoded,
+          pastedTextRanges,
+          slashCommandRanges,
+        } = pendingSendRef.current;
+        pendingSendRef.current = null;
+        sendMessage(
+          message,
+          model,
+          effort,
+          permissionMode,
+          newDir,
+          files,
+          mentions,
+          quotesEncoded || pastedTextRanges?.length || slashCommandRanges !== undefined
+            ? {
+                ...(quotesEncoded ? { quotesEncoded: true } : {}),
+                ...(pastedTextRanges?.length ? { pastedTextRanges } : {}),
+                ...(slashCommandRanges !== undefined ? { slashCommandRanges } : {}),
+              }
+            : undefined,
+        );
+      }
+    },
+    [sendMessage, refreshServerSession],
+  );
+
+  const handleFolderPickerOpenChange = useCallback((open: boolean) => {
+    setFolderPickerOpen(open);
+    // If user closed the popover without selecting, clear pending send
+    if (!open) {
+      pendingSendRef.current = null;
+    }
+  }, []);
+
+  // F3: Model switch linkage — 切到不支持 Fast Mode 的模型时自动关闭。
+  // Called AFTER server persist succeeds (ChatInput handles the server-first flow).
+  // 是否支持来自 capabilities.hasFastMode + availableModels[].supportsFastMode, renderer 不再 startsWith 解析 id。
+  const handleModelDidChange = useCallback(
+    (newModelId: string) => {
+      refreshServerSession();
+      // contextWindow 仍取被控端能力(非 per-provider 概念)。
+      const m = getModelById(newModelId, remoteDeviceId);
+      if (sessionId) {
+        makerChatStore.setContextWindow(sessionId, m?.contextWindow);
+      }
+      // fast 支持判定走统一 helper(per-provider,本地 + device-link 同口径);providerId 取该会话选中来源
+      // (session.providerId,device-link 下镜像自被控端持久化值)。切到不支持 fast 的 (来源,模型) → 关掉。
+      const supportsFast = resolveFastSupported({
+        deviceId: remoteDeviceId,
+        deviceProviders,
+        localProviders,
+        capabilities: sessionCaps,
+        providerId: session?.providerId ?? null,
+        modelId: newModelId,
+        agentKind: session?.agentKind === 'codex' ? 'codex' : 'claude-code',
+      });
+      if (!supportsFast) {
+        const currentFastMode = sessionId ? makerChatStore.getSnapshot(sessionId).fastMode : false;
+        if (currentFastMode) {
+          resetFastMode();
+          toast.warning(t('ccAgent.layout.modelSwitchedFastModeOff'));
+        }
+      }
+    },
+    [
+      sessionId,
+      remoteDeviceId,
+      deviceProviders,
+      localProviders,
+      sessionCaps,
+      session?.providerId,
+      session?.agentKind,
+      resetFastMode,
+      refreshServerSession,
+      t,
+    ],
+  );
+
+  // effort 已在 ChatInput 中落库成功；直接 merge 确切值回 SSoT，避免额外 GET
+  // 读取到旧快照后把菜单选中态反向覆盖。ChatInput 不维护第二条 local state。
+  const handleEffortDidChange = useCallback(
+    (newEffort: Effort, sourceSessionId?: string, sourceRemoteDeviceId?: string) => {
+      const targetSessionId = sourceSessionId ?? sessionId;
+      const refreshSequence = sessionRefreshSequenceRef.current;
+      // callback 自身也可能来自旧 render；必须对照最新 committed view 的当前 scope，
+      // 不能只比较旧闭包里的 sessionId。
+      if (!targetSessionId || !refreshSequence.isCurrentSession(targetSessionId)) return;
+      // 远程会话由被控端 sessions:patched 镜像收敛；优先信任操作开始时捕获的稳定
+      // device scope，relay origin 短暂缺失时也不能创建会盖住 remote store 的本地快照。
+      if (sourceRemoteDeviceId || getSessionDeviceId(targetSessionId)) return;
+      const patchBuffer = sessionSnapshotPatchBufferRef.current;
+      patchBuffer.stage(targetSessionId, { effort: newEffort });
+      const fullSnapshot = currentServerSessionRef.current;
+      if (fullSnapshot) {
+        // 已有完整 snapshot 时，任何在途 GET 都早于这个已确认写入，先失效再精确 merge。
+        refreshSequence.invalidate(targetSessionId);
+        setServerSession((prev) =>
+          patchBuffer.merge(targetSessionId, prev?.id === targetSessionId ? prev : fullSnapshot),
+        );
+      } else {
+        // 初始 GET 是唯一完整 row；保留请求并用暂存 effort 覆盖当前 list 派生值。
+        bumpSessionPatchVersion((version) => version + 1);
+        setServerSession((prev) =>
+          prev?.id === targetSessionId ? patchBuffer.merge(targetSessionId, prev) : prev,
+        );
+      }
+    },
+    [sessionId],
+  );
+
+  const handlePermissionModeDidChange = useCallback(() => {
+    refreshServerSession();
+  }, [refreshServerSession]);
+
+  // ─── Extra reference dirs(中途增删) ──────────────────────────────────────
+  // 双 IPC 协调,跟 setModel 同模式:
+  //   1. sessionService.update({ extraDirs }) → 落 DB(持久化)
+  //   2. window.electronAPI.maker.setExtraDirs(sessionId, ...) → 推 closure
+  //      (Claude 下一 turn buildQuery 自动用新值; agent capability=false / session 已 close 时 no-op)
+  //   3. refreshServerSession → 让本视图的 session.extraDirs 同步到最新值
+  // 失败任一只 toast warn,不阻塞;乐观 UI 由 chip 数字角标已经反映。
+  const handleExtraDirsChange = useCallback(
+    async (next: string[]) => {
+      if (!sessionId) return;
+      // device-link 远程会话:被控端 row 不在本机库,sessionService.update 必抛(且 catch return
+      // 会连带阻断后面的 setExtraDirs)。extraDirs 在 REMOTE_PERSIST_FIELDS → 被控端 set-extra-dirs
+      // 经 dispatch persistRemoteSetting 落库 + 广播回流,所以远程只走 runtime 隧道、跳过本机 DB 写
+      // (对齐 set-permission-mode 远程分支);本机会话保持 DB + runtime 双写。
+      if (!getSessionDeviceId(sessionId)) {
+        try {
+          await sessionService.update(sessionId, { extraDirs: next });
+        } catch (err) {
+          log.warn('extraDirs DB update failed', err);
+          toast.error('附加目录保存失败');
+          return;
+        }
+      }
+      try {
+        await makerApiFor(sessionId).setExtraDirs(sessionId, next);
+      } catch (err) {
+        // 运行时推送失败不致命 — 下次 session 重启会从 DB 读新值。
+        log.warn('extraDirs closure push failed (non-fatal)', err);
+      }
+      await refreshServerSession();
+    },
+    [sessionId, refreshServerSession],
+  );
+
+  // /issue 命令的 composer 附件不随命令 payload 走 main IPC 往返 —— AttachedFile 是
+  // renderer 层类型(与 render/main 解耦一致),且发送后 composer 会 clearFiles。故在
+  // dispatch 前于 renderer 侧快照,待 main 广播 DESKTOP_COMMAND_TRIGGERED 回流时由
+  // 下方 issue effect 取用(见 pendingIssueFilesRef 的消费点)。
+  const pendingIssueFilesRef = useRef<AttachedFile[] | undefined>(undefined);
+
+  const maybeDispatchDesktopSlashCommand = useCallback(
+    async (message: string, files?: AttachedFile[]): Promise<boolean> => {
+      const slashMatch = message.match(/^\/(\S+)(?:\s+(.*))?$/s);
+      if (!slashMatch) return false;
+      const cmdName = slashMatch[1].toLowerCase();
+      const args = slashMatch[2] ?? '';
+      const cached = allCommandsRef.current;
+      const commands = cached.length > 0 ? cached : await getHelpCommandsSnapshot();
+      const hit = commands.find((c) => c.name.toLowerCase() === cmdName);
+      if (hit?.kind !== 'desktop') return false;
+      // 仅 /issue 需要携带附件:snapshot 到 ref,DESKTOP_COMMAND_TRIGGERED 回流时消费。
+      // 其它 desktop 命令(/help /clear /cmd ...)不涉及附件,不写 ref。
+      if (hit.name === 'issue') {
+        pendingIssueFilesRef.current = files && files.length > 0 ? files : undefined;
+      }
+      // device-link 远程会话:带上归属设备 id,main 侧 /goal /learn /cmd 据此把业务体
+      // 经隧道路由到被控端执行(纯 UI 命令忽略该字段)。用视图的粘滞 remoteDeviceId
+      // 而非现读快照:origin 注入 / 重连窗口内快照为 undefined,会误走本机路径
+      // (/cmd 拿被控端路径本机 spawn、/goal /learn 在本机产生副作用;Codex review #548)。
+      void dispatchCommand(hit, {
+        ...(sessionId ? { sessionId } : {}),
+        ...(session?.workingDir ? { workingDir: session.workingDir } : {}),
+        ...(args ? { args } : {}),
+        ...(remoteDeviceId ? { deviceId: remoteDeviceId } : {}),
+      });
+      return true;
+    },
+    [getHelpCommandsSnapshot, session?.workingDir, sessionId, remoteDeviceId],
+  );
+
+  const maybeShowContextUsage = useCallback(
+    async (message: string): Promise<boolean> => {
+      if (!/^\/context\s*$/i.test(message.trim())) return false;
+      if (!sessionId) {
+        insertSystemCard('context', { usage: null });
+        return true;
+      }
+      if (session?.agentKind === 'codex') {
+        insertSystemCard('context', {
+          usage: null,
+          error: t('chat.systemCard.context.unsupportedAgent', { agent: 'Codex' }),
+        });
+        return true;
+      }
+      const createOpts = session?.workingDir
+        ? {
+            agentKind: 'claude-code' as const,
+            workingDir: session.workingDir,
+            model: session.model,
+            orcaRole: session.orcaRole ?? null,
+            effort: session.effort,
+            fastMode,
+            permissionMode: session.permissionMode,
+            userPrompt: getUserPrompt(),
+            // device-link executes on the target desktop, so let that runtime
+            // own the setting. SSH still lazy-starts through this process and
+            // must explicitly disable controller-local Cindy Memory.
+            ...(remoteDeviceId
+              ? {}
+              : {
+                  makerMemoryEnabled: session.remoteHostId ? false : getMakerMemoryEnabled(),
+                }),
+            extraDirs: session.extraDirs ?? [],
+            displayReasoning: 'summarized' as const,
+            ...(session.remoteHostId ? { remoteHostId: session.remoteHostId } : {}),
+            ...(session.sdkSessionId ? { resumeSessionId: session.sdkSessionId } : {}),
+          }
+        : undefined;
+      const cardClientId = insertSystemCard('context', { usage: undefined });
+      if (!cardClientId) return true;
+      void makerApiFor(sessionId)
+        .getContextUsage(sessionId, createOpts)
+        .then((usage) => {
+          updateSystemCardData(cardClientId, { usage });
+        })
+        .catch((err) => {
+          const ipcError = extractIpcError(err);
+          updateSystemCardData(cardClientId, {
+            usage: null,
+            error: ipcError?.message || (err instanceof Error ? err.message : String(err)),
+          });
+        });
+      return true;
+    },
+    [fastMode, insertSystemCard, remoteDeviceId, session, sessionId, t, updateSystemCardData],
+  );
+
+  const handleSend = useCallback(
+    async (
+      message: string,
+      model: string,
+      effort: Effort,
+      permissionMode: PermissionMode,
+      files?: AttachedFile[],
+      mentions?: MentionedResource[],
+      opts?: {
+        deliveryMode?: MessageDeliveryMode;
+        quotesEncoded?: boolean;
+        pastedTextRanges?: PastedTextRange[];
+        slashCommandRanges?: SlashCommandRange[];
+      },
+    ) => {
+      const deliveryMode = opts?.deliveryMode ?? 'queue';
+      if (
+        deliveryMode !== 'steer' &&
+        (await tryHandleNavigationCommand(message, {
+          navigate,
+          t,
+          allowNavigation: ownsWindowRoute,
+        }))
+      ) {
+        return;
+      }
+
+      if (deliveryMode !== 'steer' && (await maybeShowContextUsage(message))) {
+        return;
+      }
+
+      // ── Slash command dispatch (palette refactor) ──
+      // 三源 palette 命中:
+      //   - desktop 命令(/help /clear ...) → executeDesktopCommand IPC,
+      //     main 端 registry 跑 execute(), 副作用通过 DESKTOP_COMMAND_TRIGGERED
+      //     广播回 renderer (上面 useEffect 订阅), 不发给 agent。
+      //   - agent-builtin / agent-skill / 没命中任何已知命令 → 走默认 send,
+      //     原文(含前导 `/`)直接送 agent, 由 SDK 自己识别 (/compact 等)。
+      if (deliveryMode !== 'steer' && (await maybeDispatchDesktopSlashCommand(message, files))) {
+        return;
+      }
+
+      // 断线缓存的远程 session 可打开查看,但不可继续发送。返回 false 让 ChatInput 保留草稿。
+      if (remoteSessionUnavailable) return false;
+
+      // ① Agent readiness check. Claude still gates on the shared API Key;
+      // Codex gates on the app's Codex connection state. Both use the same
+      // confirm dialog and settings navigation path as voice input.
+      // device-link:远程会话就绪态以被控端为准(传 remoteDeviceId 走隧道查被控端
+      // maker:agent:status);本地会话 remoteDeviceId 为 undefined → 走本机检查(行为不变)。
+      const { proceed } = await vendorAuthGate.checkAndConfirm(isCodex ? 'codex' : 'cc', {
+        deviceId: remoteDeviceId,
+      });
+      if (!proceed) return false;
+
+      // Popover open → prevent re-entry
+      if (folderPickerOpen) return false;
+      if (worktreePreparing) return false;
+
+      // ② Working directory check
+      if (!session?.workingDir) {
+        pendingSendRef.current = {
+          message,
+          model,
+          effort,
+          permissionMode,
+          files,
+          mentions,
+          ...(opts?.quotesEncoded ? { quotesEncoded: true } : {}),
+          ...(opts?.pastedTextRanges?.length ? { pastedTextRanges: opts.pastedTextRanges } : {}),
+          ...(opts?.slashCommandRanges !== undefined
+            ? { slashCommandRanges: opts.slashCommandRanges }
+            : {}),
+        };
+        setFolderPickerOpen(true);
+        return false;
+      }
+
+      // ③ Auto-unarchive: 在 archived session 中发消息视为"激活"——状态先落库到
+      //    active，sidebar cell 立刻翻新（不再显示 Archive icon、菜单回到标准三件套）。
+      //
+      //    注意：ChatInput 现在会 await onSend，再根据 `result === false` 决定是否
+      //    清空输入框；这个门禁失败或目录缺失时返回 false，就能保留用户已输入内容。
+      //    这里仍采取"乐观本地翻状态 + 后台 PATCH + 广播 refresh"：
+      //      a) 立刻 setServerSession + patchLocal → 本视图瞬时更新
+      //      b) sessionService.update(...) 后台持久化
+      //      c) PATCH 成功后 emitRefresh()，让 sidebar 那个独立 useCCSessions 实例重拉
+      //         —— patchLocal 是 hook 实例级 state 不跨实例，sidebar filter='active'
+      //         的列表里压根没这条 archived session，emitPatch 也无效，必须 refresh。
+      if (sessionId && session?.status === 'archived') {
+        setServerSession((prev) => (prev ? { ...prev, status: 'active' } : prev));
+        patchLocalSession(sessionId, { status: 'active' });
+        sessionService
+          .setStatus(sessionId, 'active')
+          .then(() => emitRefresh())
+          .catch((err) => {
+            log.error('[auto-unarchive on send]', err);
+            // 不回滚 message 已在路上；下次 refresh 由服务端真值兜底
+          });
+      }
+
+      // ④ Execute send — effort + permissionMode came straight from ChatInput (fresh value)
+      const orcaLeadVendorOptions =
+        sessionId && isOrcaLeadSession(session)
+          ? { vendorOptions: { orcaRole: 'lead', orcaLeadSessionId: sessionId } }
+          : undefined;
+      const dispatch = deliveryMode === 'steer' ? steerMessage : sendMessage;
+      return dispatch(message, model, effort, permissionMode, session.workingDir, files, mentions, {
+        ...orcaLeadVendorOptions,
+        ...(opts?.quotesEncoded ? { quotesEncoded: true } : {}),
+        ...(opts?.pastedTextRanges?.length ? { pastedTextRanges: opts.pastedTextRanges } : {}),
+        ...(opts?.slashCommandRanges !== undefined
+          ? { slashCommandRanges: opts.slashCommandRanges }
+          : {}),
+      });
+    },
+    [
+      maybeDispatchDesktopSlashCommand,
+      maybeShowContextUsage,
+      folderPickerOpen,
+      isCodex,
+      ownsWindowRoute,
+      patchLocalSession,
+      sendMessage,
+      steerMessage,
+      navigate,
+      session,
+      sessionId,
+      t,
+      vendorAuthGate,
+      remoteDeviceId,
+      remoteSessionUnavailable,
+      worktreePreparing,
+    ],
+  );
+
+  const handleStopSession = useCallback(() => {
+    if (remoteSessionUnavailable) {
+      toast.warning(t('ccAgent.remoteSession.actionsUnavailable'));
+      return;
+    }
+    stopSession();
+  }, [remoteSessionUnavailable, stopSession, t]);
+
+  // ── Context ring click → confirm → silent compact ──
+  // 仅 Claude 会话开放(codex 协议没有手动 compact 入口,见 codex/translator.ts
+  // contextCompaction 注释)。确认后走 main 侧 silent compact intent:不插入用户
+  // `/compact` 气泡,只等待 SDK 的 compact_boundary 事件渲染分割线。
+  // /issue → 向当前会话注入整理指令,由 agent 对话式收集细节后调 submit_github_issue
+  // 工具提交(提交前 main 弹确认卡片)。独立于上面的 desktop 命令 effect:它依赖
+  // handleSend(声明在前一个 effect 之后),且守卫更严 —— 必须精确命中本视图的
+  // sessionId,防止多视图(orca split / 多窗口)同时挂载时重复发送。
+  useEffect(() => {
+    const unsub = window.electronAPI.maker.onDesktopCommandTriggered((payload) => {
+      if (payload.command !== 'issue') return;
+      if (!payload.sessionId || payload.sessionId !== sessionId || !session) return;
+      const details = payload.args?.trim()
+        ? t('issueAgent.command.detailsPrefix', { details: payload.args.trim() })
+        : '';
+      // 取回该 /issue 命令 dispatch 前 snapshot 的 composer 附件,连同整理指令一起
+      // 发给 agent(取用即清,避免污染下一次 /issue)。见 pendingIssueFilesRef 定义处。
+      const issueFiles = pendingIssueFilesRef.current;
+      pendingIssueFilesRef.current = undefined;
+      void handleSend(
+        t('issueAgent.command.instruction', { details }),
+        session.model,
+        session.effort as Effort,
+        session.permissionMode as PermissionMode,
+        issueFiles,
+      );
+    });
+    return unsub;
+  }, [sessionId, session, handleSend, t]);
+
+  const { confirm: confirmDialog } = useConfirmDialog();
+  // 防双击重入:ConfirmDialogProvider 是队列语义,弹窗 mount 前的连续点击会入队
+  // 多个 confirm,逐个确认就会发多次 compact 请求。in-flight 期间后续点击直接 no-op。
+  const compactRequestInFlightRef = useRef(false);
+  const handleCompactRequest = useCallback(async () => {
+    if (!session) return;
+    if (!session.workingDir) return;
+    if (compactRequestInFlightRef.current) return;
+    compactRequestInFlightRef.current = true;
+    try {
+      const contextWindow = resolveDisplayContextWindow({
+        sdkContextWindow: agentStatus.contextWindow,
+        modelContextWindow: getModelContextWindow(
+          session.model,
+          session.agentKind ?? 'cc',
+          remoteDeviceId,
+        ),
+      });
+      const used = Math.min(agentStatus.contextTokens, contextWindow || Infinity);
+      const pct = contextWindow > 0 ? Math.round((used / contextWindow) * 100) : 0;
+      const ok = await confirmDialog({
+        title: t('ccAgent.layout.contextRing.confirmTitle'),
+        description: t('ccAgent.layout.contextRing.confirmDescription', {
+          used: formatTokenCount(used),
+          total: formatTokenCount(contextWindow),
+          pct,
+        }),
+        confirmText: t('ccAgent.layout.contextRing.confirmAction'),
+        cancelText: t('ccAgent.layout.contextRing.confirmCancel'),
+      });
+      if (!ok) return;
+      await compactSession(
+        session.model,
+        session.effort as Effort,
+        session.permissionMode as PermissionMode,
+        session.workingDir,
+      );
+    } finally {
+      compactRequestInFlightRef.current = false;
+    }
+  }, [
+    agentStatus.contextTokens,
+    agentStatus.contextWindow,
+    compactSession,
+    confirmDialog,
+    remoteDeviceId,
+    session,
+    t,
+  ]);
+
+  const handleBeforeVoiceInputStart = useCallback(async () => {
+    const { proceed } = await vendorAuthGate.checkAndConfirm('codex', { purpose: 'voice-input' });
+    return proceed;
+  }, [vendorAuthGate]);
+
+  // M32: Retry — ErrorBanner 的 retryText 现在只是兼容展示值。真正的
+  // recovery target 由 main coordinator 持有，避免把已发出的文本重新走普通
+  // send 路径并排到队尾。
+  // interrupted-turn-resume:main 判定失败 turn 已有 assistant 产出时,会用隐藏的
+  // 规范化续跑指令(CONTINUE_AFTER_ERROR_PROMPT)替代重发原文;零产出仍重发原文。
+  // 判定与文案都在 main(规则 9),renderer 只发意图。
+  const handleRetry = useCallback(() => {
+    // 点击 Retry 即已读:用户操作了报错 banner,无需等驻留计时。
+    if (sessionId) ackErrorRead(sessionId);
+    retryLastError();
+  }, [retryLastError, sessionId]);
+
+  // silent-stop 耗尽横幅「继续」:同 Retry 计已读,动作走 store(清横幅 + 隐藏续跑指令)。
+  const handleSilentStopContinue = useCallback(() => {
+    if (sessionId) ackErrorRead(sessionId);
+    continueAfterSilentStop();
+  }, [continueAfterSilentStop, sessionId]);
+
+  // 点击 Cancel 关闭报错 banner 同样算已读(操作了 banner 本身)。
+  const handleDismissError = useCallback(() => {
+    if (sessionId) ackErrorRead(sessionId);
+    clearError();
+  }, [clearError, sessionId]);
+
+  const handleForkStripEncrypted = useCallback(async () => {
+    if (!sessionId || session?.agentKind !== 'codex') return;
+    if (!ownsWindowRoute) {
+      log.info('encrypted-session fork ignored by embedded sidebar view', { sessionId });
+      return;
+    }
+    setForkStripEncryptedRunning(true);
+    try {
+      const newSession = await sessionService.forkStripEncrypted(sessionId);
+      await refreshServerSession();
+      // 远程会话:新会话在被控端,先重拉该设备会话列表注册新 sessionId 再 navigate(否则 404)。
+      const deviceId = getSessionDeviceId(sessionId);
+      if (deviceId) await refreshRemoteDeviceSessions(deviceId);
+      navigate(`/cc-agent/${newSession.id}`);
+    } catch (err) {
+      const ipcError = extractIpcError(err);
+      toast.error(
+        ipcError?.code === 'FORK_UNSUPPORTED_HISTORY'
+          ? t('chat.userMessage.forkErrors.unsupportedHistory')
+          : ipcError?.message || (err instanceof Error ? err.message : String(err)),
+      );
+    } finally {
+      setForkStripEncryptedRunning(false);
+    }
+  }, [navigate, ownsWindowRoute, refreshServerSession, session?.agentKind, sessionId, t]);
+
+  // M35: Vendor fallback —— 会话的 model 与它(固定不变的)agent vendor 明确错配时,
+  // 回退到该 vendor 的默认模型。守的是「绕过模型选择器写入 session.model」的脏数据路径
+  // (历史 DB 行 / 上古 model id),选择器主动选择的 happy path 由 provider 逻辑自己保证一致。
+  //
+  // 判定走 **live provider 目录(useProviders,按 agent 维度)**,与选择器同源 —— 不再走
+  // maker-core 冻结快照(getModelsForVendor / getModelById)。后者把 cc/codex 压平 + first-wins
+  // 去重、且不含自定义供应商,造成两类误判:
+  //   - `gpt-5.4` 等两端同名 id 被 cc 抢走 → 在 codex 会话里误判跨 vendor;
+  //   - 自定义(mimo 等)codex 模型冻结表里没有 → 误判非法 → reset 成 gpt(本次修复的 bug)。
+  // 判定语义见 shouldFallbackVendorModel:仅当 model 明确属于另一 vendor 才回退;两端都不认识
+  // (别名 / 脏数据 / 目录未加载的瞬间)一律不动,避免 load race 误杀。cc / codex 统一这一套。
+  const sessionAgentKind = session?.agentKind;
+  const sessionModel = session?.model;
+  useEffect(() => {
+    if (!sessionAgentKind || !sessionModel || !sessionId) return;
+    // device-link 远程会话:vendor↔model 一致性由被控端权威保证。控制端不能替它"纠正"——
+    // 远程模型可能只存在于被控端(本地目录查不到 → 误判跨 vendor),且本地 DB 没有该会话行,
+    // sessionService.update 会写错 / refreshServerSession 对远程是 no-op。直接跳过(规则:host 为准)。
+    if (getSessionDeviceId(sessionId)) return;
+    const agent = isCodex ? 'codex' : 'claude-code';
+    if (!shouldFallbackVendorModel(providers, sessionModel, agent)) return;
+    const defaultModel = getDefaultModelForVendor(isCodex ? 'codex' : 'cc');
+    sessionService
+      .update(sessionId, { model: defaultModel.id })
+      .then(() => refreshServerSession())
+      .catch((err) => log.warn('vendor fallback patch failed:', err));
+  }, [isCodex, providers, refreshServerSession, sessionAgentKind, sessionId, sessionModel]);
+
+  // delayed-create:从 NewMakerDraftRoute 经 navigate 进来的首条消息,在 session
+  // 完全 hydrate(historyLoaded + workingDir 就位)后自动 sendMessage。
+  // 一次性消费 + ref guard,防 StrictMode 双 mount / 重渲染时重复发送。
+  const pendingConsumedRef = useRef(false);
+  useEffect(() => {
+    if (!sessionId || !historyLoaded || !session) return;
+    const workingDir = session.workingDir;
+    if (!workingDir) return;
+    if (pendingConsumedRef.current) return;
+    const pending = consumePending(sessionId);
+    if (!pending) return;
+    pendingConsumedRef.current = true;
+    void (async () => {
+      if (await maybeDispatchDesktopSlashCommand(pending.text, pending.files)) {
+        return;
+      }
+      sendMessage(
+        pending.text,
+        session.model,
+        session.effort as Effort,
+        session.permissionMode as PermissionMode,
+        workingDir,
+        pending.files,
+        pending.mentions,
+        pending.vendorOptions ||
+          pending.quotesEncoded ||
+          pending.pastedTextRanges?.length ||
+          pending.slashCommandRanges !== undefined
+          ? {
+              ...(pending.vendorOptions ? { vendorOptions: pending.vendorOptions } : {}),
+              ...(pending.quotesEncoded ? { quotesEncoded: true } : {}),
+              ...(pending.pastedTextRanges?.length
+                ? { pastedTextRanges: pending.pastedTextRanges }
+                : {}),
+              ...(pending.slashCommandRanges !== undefined
+                ? { slashCommandRanges: pending.slashCommandRanges }
+                : {}),
+            }
+          : undefined,
+      );
+    })();
+  }, [historyLoaded, maybeDispatchDesktopSlashCommand, sendMessage, session, sessionId]);
+
+  // 远程草稿「新建目标」交接:draft route 只建会话 + 登记 pendingGoal,goal 首轮
+  // 在这里起(机制说明见 pendingFirstMessage.ts)。视图引擎的 subscribeHeavy 是
+  // fire-and-forget,mount ≠ 被控端已注册订阅 —— 消费前再显式 await 一次
+  // deviceLink.subscribe(session:<id>)拿注册 ack(refcount 按 windowId 记集合,
+  // 同窗口重复 subscribe 幂等且「总是转发」,await 到 resolve 即被控端登记完成;
+  // 不配对 unsubscribe —— 订阅生命周期归视图引擎,拆多了会把它的订阅一起退掉),
+  // 之后才起 goal 首轮,首条 maker:event/status 推送必有订阅者(Codex review #548 ×2)。
+  // goalApiFor 按会话来源路由,本机会话无订阅语义直接 setGoal。
+  const pendingGoalConsumedRef = useRef(false);
+  useEffect(() => {
+    if (!sessionId || !historyLoaded) return;
+    if (pendingGoalConsumedRef.current) return;
+    const pendingGoal = consumePendingGoal(sessionId);
+    if (!pendingGoal) return;
+    pendingGoalConsumedRef.current = true;
+    void (async () => {
+      try {
+        const deviceId = getSessionDeviceId(sessionId);
+        if (deviceId) {
+          await window.electronAPI.deviceLink.subscribe(deviceId, [`session:${sessionId}`]);
+        }
+        await goalApiFor(sessionId).setGoal({
+          sessionId,
+          objective: pendingGoal.objective,
+          limits: pendingGoal.limits,
+        });
+        toast.success(t('goal.toast.set'));
+      } catch (err) {
+        log.warn('pending goal setGoal failed:', err);
+        toast.error(t('goal.toast.failed'));
+      }
+    })();
+  }, [historyLoaded, sessionId, t]);
+
+  // learn 状态卡恢复:卡片是 ephemeral(不落库),app 重启后从 learn:list-runs
+  // 把仍活跃(进行中 / 待审查)且与本会话相关的 run 重新插卡。注意 makerChatStore
+  // 是模块级常驻的 —— 本视图卸载重挂(切去 SkillHub 再回来)时旧卡仍在 store 里,
+  // 去重由 insertSystemCard 的 learn/runId 幂等保证。启动期 learn-host 可能尚未
+  // 就绪(ready=false)—— 有界重试而非视为"无 run",否则空响应会永久抑制恢复
+  // (Codex review 修正)。
+  const learnCardsRestoredRef = useRef<string | null>(null);
+  // guard key 带上归属设备:远程会话在 origin 注入前跑过一次(路由到本机、天然查不到
+  // run)不该永久抑制恢复 —— 注入后 key 变化重跑,按被控端 learn-host 再对账一次。
+  const learnRestoreKey = sessionId ? `${sessionId}:${remoteDeviceId ?? ''}` : null;
+  useEffect(() => {
+    if (!sessionId || !historyLoaded || !learnRestoreKey) return;
+    if (learnCardsRestoredRef.current === learnRestoreKey) return;
+    let cancelled = false;
+    void (async () => {
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        if (cancelled) return;
+        const { ready, runs } = await listActiveRunsForSession(sessionId);
+        if (ready) {
+          if (cancelled) return;
+          learnCardsRestoredRef.current = learnRestoreKey;
+          for (const run of runs) {
+            insertSystemCard('learn', { runId: run.runId });
+          }
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [historyLoaded, insertSystemCard, sessionId, learnRestoreKey]);
+
+  // learn 卡跟随最新叙述:提案就绪 / 每轮修订刷新(awaiting-review 的
+  // state-changed)时把本会话的 learn 卡移到消息流末尾 —— 卡片是 /learn 发出
+  // 时插入的,蒸馏长输出把用户视线带到底部后,顶部的「查看提案」入口会被
+  // 错过、误以为已装好(Chris 实测反馈)。移动只调位置不换消息对象。
+  useEffect(() => {
+    if (!sessionId) return;
+    // subscribeLearnEvents:本机走 learn:event IPC;device-link 远程会话经
+    // onRemotePush 消费被控端转发的同名事件(learnTransport 内路由)。
+    const off = subscribeLearnEvents(sessionId, (payload) => {
+      if (payload.type !== 'state-changed') return;
+      if (payload.run.status !== 'awaiting-review') return;
+      if (payload.run.sessionId !== sessionId && payload.run.originSessionId !== sessionId) return;
+      makerChatStore.moveLearnCardToEnd(sessionId, payload.run.runId);
+    });
+    return off;
+  }, [sessionId]);
+
+  // session 切换时 reset consumed guard(切到别的 session 后再回来,理论上 pending
+  // 已被消费过、Map 也清掉了,但 ref 复用一份是为了 guard 可重入)。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: sessionId 是会话切换重置触发器。
+  useEffect(() => {
+    pendingConsumedRef.current = false;
+    pendingGoalConsumedRef.current = false;
+  }, [sessionId]);
+
+  // ── Single layout: ChatView ──
+  // 之前还有一条"空 session → NewChatView (logo + 居中输入框)"分支(由
+  // isFirstMessage && historyLoaded && !hasMessages 触发), 2026-05 已移除:
+  //   - 实际命中场景几乎只有 draft route 跳转过程中 setPending → navigate → mount
+  //     这一两帧的闪烁,反而成了 UX 噪音(用户看到"tabs → 没 tabs → 消息流"的三段)
+  //   - worktree 创建入口已经收敛到 NewMakerDraftRoute (/cc-agent/new),session 内
+  //     原本由 WorktreeChipsRow 提供的"在空 session 上开 worktree"路径几乎没人走
+  //   - /clear 之后留在空 ChatView 已经在用,体验没问题,本来就跟"空 session"等价
+  // 现在所有空消息流/有消息流都走同一套布局(全高 scroll container + sticky bottom
+  // overlay),自然消除 view 翻转带来的 layout shift。
+  const workingDirLabel = !session?.workingDir
+    ? '\u00A0'
+    : session.workspaceKind === 'dialogue'
+      ? `${t('ccAgent.layout.dialogueLabel')} ${basename(session.workingDir).slice(0, 8)}`
+      : worktreeMeta
+        ? `${basename(worktreeMeta.baseRepo)} (${worktreeMeta.name})`
+        : basename(session.workingDir);
+  const workingDirChipContent = (
+    <>
+      <Monitor size={12} className="shrink-0 text-[var(--workingdir-icon)]" />
+      {/* Dialogue-mode workdir basename is a UUID; render as
+          "<dialogueLabel> <first-8-chars>" so the chip carries
+          semantic meaning while keeping inter-session distinguishability.
+          Full path stays in the hover tip.
+          Worktree-mode: 走 baseRepo basename + worktree name 的两段式
+          "xdt-maker (feat-button-ui)" —— 单段 basename 只显示 worktree
+          名字,看不出是哪个 repo 的 worktree;两段式让用户一眼定位到 repo,
+          括号里再补 worktree 标识。完整 worktree 绝对路径仍在 hover tip 里。 */}
+      <span className="block min-w-0 truncate text-[12px] font-medium leading-none text-[var(--workingdir-text)]">
+        {workingDirLabel}
+      </span>
+    </>
+  );
+
+  // MessageStream 提成变量:perf/session-switch 的 <Profiler> 是纯诊断,只在 DEV
+  // 包裹(见下方渲染处),生产直接渲染此 el,不引入多余 Profiler fiber。
+  const messageStreamEl = (
+    <MessageStream
+      key={sessionId}
+      sessionId={sessionId}
+      sessionTitle={session?.title ?? null}
+      // 透传 agentKind 让 UserMessage 能按 capabilities.fork / rewind 决定
+      // 消息下方 Fork / Rewind icon 的显示 (Codex rewind=false → 隐藏)。
+      agentKind={session?.agentKind}
+      remoteHostId={session?.remoteHostId ?? null}
+      // text-lightbox-trigger-extension F1/F2: cwd flows from session
+      // owner down through MessageStream → AssistantMessage / UserMessage.
+      // The spec guarantees `session.workingDir` is set; `?? ''` is purely
+      // a TS-narrowing fallback, never expected to fire at runtime.
+      workingDir={session?.workingDir ?? ''}
+      messages={messages}
+      taskUpdates={taskUpdates}
+      isSessionStreaming={isStreaming}
+      onLoadMore={loadOlderMessages}
+      isLoadingMore={isLoadingMore}
+      hasMoreMessages={hasMoreMessages}
+      bottomPadding={overlayHeight}
+      contentWidth={messageWidth}
+      focusMessageClientId={focusedMessageTarget?.clientId ?? null}
+      focusMessageRequestId={focusedMessageTarget?.requestId ?? 0}
+      forkOrigin={forkOrigin}
+      onOpenForkOrigin={handleOpenForkOrigin}
+    />
+  );
+
+  const content = (
+    // Layout: single scroll container (full height) + sticky input overlay at bottom.
+    // FP-7: when the Plan Viewer is expanded/edit, the viewer needs to occupy
+    // the full bottom region — we disable pointer-events-none on the overlay
+    // in that case so the card catches scroll/click events without a wrapper
+    // swap that would flash the layout.
+    <>
+      {/* ContentHeader 注入：仅路由直挂实例（无 sessionIdProp）注册会话标题
+          到右栏顶栏；内嵌实例（workdir-browse chat rail / Orca 面板）不注册，
+          避免覆盖路由主实例的 header。渲染为 null，不影响布局。
+          见 SessionContentHeaderRegistration。 */}
+      {!sessionIdProp && !isCompactRail && !isOrcaMode && session && (
+        <SessionContentHeaderRegistration
+          session={session}
+          remoteSessionUnavailable={remoteSessionUnavailable}
+        />
+      )}
+      {/* 右栏在场声明：与上方 header 注册同一「主实例」判据。仅全屏聊天视图声明，
+          内嵌实例不声明（否则会在 doc rail / 协同面板上误开右栏）。 */}
+      {ownsRoute && setRightSidebarAvailable && (
+        <RightSidebarAvailabilityRegistration declare={setRightSidebarAvailable} />
+      )}
+      {ownsRoute && sessionId && setRightSidebarSessionId && (
+        <RightSidebarSessionIdRegistration
+          sessionId={sessionId}
+          initialCollapsed={shouldFirstFrameRevealOrcaWorkers ? false : undefined}
+          writeInitialCollapsedRecord={shouldFirstFrameRevealOrcaWorkers}
+          declare={setRightSidebarSessionId}
+        />
+      )}
+      {/* workdir 透 plugin ctx;remote session 一并携带 remoteHostId(文件浏览经
+          main 路由到远端 file-service,不再推空串禁用)。session 还没解析时
+          workingDir 为 undefined → 推空串走兜底,不阻塞渲染。 */}
+      {ownsRoute && setRightSidebarWorkdir && (
+        <RightSidebarWorkdirRegistration
+          workdir={session?.workingDir ?? ''}
+          remoteHostId={session?.remoteHostId ?? null}
+          declare={setRightSidebarWorkdir}
+        />
+      )}
+      <section
+        className="relative flex h-full w-full flex-col bg-content-area"
+        aria-label={t('ccAgent.layout.chatDropAreaAria')}
+        onDragEnter={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          dragCounterRef.current += 1;
+          if (dragCounterRef.current === 1) setIsDragOver(true);
+        }}
+        onDragOver={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          e.dataTransfer.dropEffect = 'copy';
+        }}
+        onDragLeave={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          dragCounterRef.current -= 1;
+          if (dragCounterRef.current === 0) setIsDragOver(false);
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          dragCounterRef.current = 0;
+          setIsDragOver(false);
+          // .cindy / .cshare 已被窗口级 capture 接管(装入 / 导入链路),
+          // 只清理拖拽 UI 状态,不当附件消费。
+          if (isGlobalDropIntercepted(e.nativeEvent)) return;
+          if (
+            consumeComposerMentionDrop(e.dataTransfer, {
+              addFileMention: attachmentState.addFileMention,
+              addFolderPath: attachmentState.addFolderPath,
+            })
+          ) {
+            return;
+          }
+          // 意识面板拖来的产物(cindy-ghost:// 媒体地址,不带 files):落在聊天区
+          // 任意位置都算数,与 ChatInput 自己的 onDrop 同一条引渡链路——
+          // main 验归属后图片落图片附件、视频落路径引用的 file 附件(托盘可见)。
+          const ghostMediaUri = getGhostMediaUriFromDataTransfer(e.dataTransfer);
+          if (ghostMediaUri) {
+            if (sessionId) void attachGhostMediaToSession(ghostMediaUri, sessionId, t);
+            return;
+          }
+          if (e.dataTransfer.files.length > 0) {
+            const files: File[] = [];
+            for (let i = 0; i < e.dataTransfer.items.length; i++) {
+              const item = e.dataTransfer.items[i];
+              const entry = item.webkitGetAsEntry?.();
+              const file = e.dataTransfer.files[i];
+              if (!file) continue;
+              if (entry?.isDirectory) {
+                let folderPath = '';
+                try {
+                  folderPath = window.electronAPI.getFilePath(file);
+                } catch {
+                  /* ignore */
+                }
+                if (folderPath) attachmentState.addFolderPath(folderPath);
+              } else {
+                files.push(file);
+              }
+            }
+            if (files.length > 0) {
+              const dt = new DataTransfer();
+              for (const f of files) dt.items.add(f);
+              attachmentState.addFiles(dt.files);
+            }
+          }
+        }}
+      >
+        {showOrcaLeadIdentityBar && (
+          <div className="flex h-8 shrink-0 select-none items-center border-b border-border/40 px-3 text-[11px] font-medium leading-none text-muted-foreground">
+            <span className="min-w-0 flex flex-1 items-center gap-1.5 truncate">
+              <VendorIcon
+                vendor={leadVendor}
+                size={leadVendor === 'cc' ? 14 : 13}
+                className="text-current"
+              />
+              <span className="min-w-0 truncate">{leadPaneLabel}</span>
+            </span>
+          </div>
+        )}
+
+        {/* device-link 远程会话状态 banner:断链重连 / 被控离线时提示 + 重新同步(以被控端为准重拉对账)。
+          suspect-stall(链路在线但本轮久未更新且核实不到被控端)优先 —— 它可能在 connected 时触发,
+          额外给「结束本轮」手动收尾。connected / local 且无 stall 时不渲染。 */}
+        {remoteSync.suspectStall ? (
+          <RemoteSessionBanner
+            status="suspect-stall"
+            onResync={remoteSync.resync}
+            onFinalize={remoteSync.forceFinalize}
+          />
+        ) : remoteConn === 'reconnecting' || remoteConn === 'host-offline' ? (
+          <RemoteSessionBanner
+            status={remoteConn}
+            issue={remoteLinkIssue}
+            onResync={remoteSync.resync}
+          />
+        ) : null}
+
+        {/* 远程会话首屏:等被控端经隧道返回历史/元数据期间的 loading(仅远程、延迟防闪)。 */}
+        {showRemoteLoading && <RemoteSessionLoading />}
+
+        {/* Full-area drop overlay.
+          Keep the event-capture surface for the whole chat area, but leave the
+          actual hint UI to ChatInput so the copy sits inside the composer card
+          instead of floating over old messages. */}
+        {isDragOver && (
+          <div
+            className="pointer-events-none absolute inset-0 z-50"
+            style={{
+              backgroundColor: 'var(--drop-overlay-bg)',
+              border: '2px dashed var(--drop-overlay-border)',
+            }}
+          />
+        )}
+
+        {ownsWindowRoute && handoffFrom && !handoffPillDismissed && (
+          <div className="shrink-0 px-4 pt-3">
+            <div className="mx-auto" style={{ maxWidth: messageWidth ?? 880 }}>
+              <HandoffSourcePill
+                dispatcherSessionId={handoffFrom.dispatcherSessionId}
+                dispatcherTitle={handoffFrom.dispatcherTitle}
+                onReturn={handleReturnToDispatcher}
+                onDismiss={() => setHandoffPillDismissed(true)}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Scroll container — full height, bottom padding reserves space for input overlay.
+           key={sessionId}: force a full remount on session switch so scroll state,
+           refs, and ResizeObservers are fresh — guarantees per-session isolation. */}
+        <div className="relative min-h-0 flex-1">
+          {/* perf/session-switch 探针纯诊断:仅 DEV 用 Profiler 量 MessageStream commit,
+            生产直接渲染 el(见上方 messageStreamEl),不引入多余 Profiler fiber。 */}
+          {import.meta.env.DEV ? (
+            <Profiler id="message-stream" onRender={onStreamProfile}>
+              {messageStreamEl}
+            </Profiler>
+          ) : (
+            messageStreamEl
+          )}
+        </div>
+
+        {/* Input overlay — sticky at bottom with gradient fade.
+           左右 padding 由 useProportionalWidth.inputPad 计算:默认 40,compact
+           rail 为 0。inputWidth = messageWidth + 20,每侧多 10px,正好填满 overlay。 */}
+        <div
+          ref={overlayRef}
+          style={{ left: inputPad, right: inputPad }}
+          className="pointer-events-none absolute bottom-0 flex flex-col items-center"
+        >
+          {/* Gradient mask: transparent → content-area */}
+          <div className="pointer-events-none h-8 w-full">
+            <div className="h-full w-full bg-gradient-to-t from-[hsl(var(--content-area))] to-transparent" />
+          </div>
+
+          {/* Solid background zone */}
+          <div className="pointer-events-auto flex w-full flex-col items-center bg-[hsl(var(--content-area))] pb-5">
+            {/* Running Status Bar (F-SDK-3) — hidden while a plan review is pending (FP-7)。
+              turn 结束但后台子任务仍在调模型时,状态栏保持点亮(shimmer 呼吸)显示
+              后台运行文案 + 右侧「全部停止」入口 —— 替代原独立横幅(Lizi 拍板:
+              不新增信息栏,复用状态栏)。 */}
+            {!pendingPlanReview && (
+              <RunningStatusBar
+                key={sessionId}
+                status={agentStatus.status}
+                tokenUsage={agentStatus.tokenUsage}
+                startedAt={agentStatus.startedAt}
+                visible={agentStatus.isRunning || backgroundTasksActive}
+                inputWidth={inputWidth}
+                sideTaskRunning={agentStatus.sideTaskRunning ?? false}
+                backgroundTasksRunning={backgroundTasksActive}
+                backgroundStopping={backgroundActivity.stopping}
+                onStopBackgroundTasks={() => void backgroundActivity.stopAll()}
+                // 被控端可见性 chip 嵌进状态栏中央槽位,与 thinking / 时间 token 同行
+                // (不再单独占一行)。中央槽位独立于状态栏淡入淡出 → 空闲时仍显示。
+                centerSlot={showInlineControlledBanner ? <ControlledBanner placement="statusbar" /> : null}
+              />
+            )}
+
+            {/* Error display.
+              - agentKind 传到 ErrorBanner 让 codex 401 / Missing bearer 不仅在远端
+                能 hide Retry (走 syncCodexAuth 引导), 本地 codex session 401 也能
+                hide Retry + 显本地 fix 文案 (避免 retry 撞同样的 auth retry-loop)。
+              - remoteHostId / deviceLinkDeviceId 始终标记真实执行端，避免控制端本机
+                认证恢复入口误处理远端错误；SSH 同步按钮仍由 agentKind='codex' 单独门控。 */}
+            {/* 凭证切换等待(非错误):消息保留在队首,挡路的本地 Codex 任务结束后
+              main 自动重发;取消 = 删除队首消息。与下方 ErrorBanner 互斥渲染——
+              等待态由 main 权威维护,error 为空。 */}
+            {credentialSwitchWait && !error && (
+              <CredentialSwitchWaitBanner
+                blockedBySessionIds={credentialSwitchWait.blockedBySessionIds}
+                onCancel={(() => {
+                  // 取消目标 = 等待中的那条消息(clientId 绑定);老被控端缺省时回落队首。
+                  const cancelId = credentialSwitchWait.clientId ?? pendingQueue[0]?.clientId;
+                  return cancelId ? () => removeFromQueue(cancelId) : undefined;
+                })()}
+                style={{ width: inputWidth }}
+                className="py-1"
+              />
+            )}
+
+            {/* error-tail-banner:会话尾部错误行的可操作提示 —— 互斥渲染
+              (live error / 凭证等待优先);会话跑起来即隐藏。两种语义:
+              - 中断标记行 → InterruptedTurnBanner(继续任务/忽略);
+              - 普通失败行 → 直接复用 ErrorBanner(review P2):它已内置
+                thread not found / 401 / invalid-encrypted 等不可重试错误的
+                Retry 门控与恢复路径(同步登录态 / fork 剥离),此前的简化红条
+                一律显示重试会把用户带进同样的失败循环。onRetry 忽略 retryText
+                (typed token),发隐藏续跑指令;onCancel = dismiss 持久化。 */}
+            {errorTailMsg &&
+              !errorTailBannerHidden &&
+              !syntheticContinuationPending &&
+              !error &&
+              !credentialSwitchWait &&
+              !isStreaming &&
+              !agentStatus.isRunning &&
+              sessionId &&
+              (errorTailKind === 'interrupted' ? (
+                <InterruptedTurnBanner
+                  sessionId={sessionId}
+                  onContinue={handleErrorTailContinue}
+                  onDismiss={handleErrorTailDismiss}
+                  viewVisible={viewVisible}
+                  style={{ width: inputWidth }}
+                  className="py-1"
+                />
+              ) : (
+                <ErrorTailErrorBanner
+                  sessionId={sessionId}
+                  errorText={errorTailText}
+                  errorReason={errorTailMsg?.errorReason}
+                  onContinue={handleErrorTailContinue}
+                  onDismiss={handleErrorTailDismiss}
+                  onSilentStopContinue={handleSilentStopContinue}
+                  viewVisible={viewVisible}
+                  agentKind={session?.agentKind}
+                  remoteHostId={session?.remoteHostId ?? undefined}
+                  deviceLinkDeviceId={remoteDeviceId}
+                  modelId={session?.model}
+                  providerId={session?.providerId}
+                  silentEncryptedRetryEnabled={silentEncryptedRetryEnabled}
+                  onForkStripEncrypted={ownsWindowRoute ? handleForkStripEncrypted : undefined}
+                  forkStripEncryptedRunning={forkStripEncryptedRunning}
+                  style={{ width: inputWidth }}
+                  className="py-1"
+                />
+              ))}
+
+            {/* interrupted-turn-resume(简化版):session 双时间戳驱动的中断提示。
+              历史中断行(上方 errorTailMsg 判定)优先;互斥条件与 error-tail 同款。 */}
+            {!errorTailMsg &&
+              interruptedFromSession &&
+              !syntheticContinuationPending &&
+              !error &&
+              !credentialSwitchWait &&
+              !isStreaming &&
+              !agentStatus.isRunning &&
+              sessionId && (
+                <InterruptedTurnBanner
+                  sessionId={sessionId}
+                  onContinue={handleSessionInterruptContinue}
+                  onDismiss={handleSessionInterruptDismiss}
+                  viewVisible={viewVisible}
+                  style={{ width: inputWidth }}
+                  className="py-1"
+                />
+              )}
+
+            {error && (
+              <ErrorBanner
+                error={error}
+                errorReason={errorReason}
+                isRecoverable={errorIsRecoverable}
+                retryText={errorRetryText}
+                onRetry={handleRetry}
+                onSilentStopContinue={handleSilentStopContinue}
+                onCancel={handleDismissError}
+                agentKind={session?.agentKind}
+                remoteHostId={session?.remoteHostId ?? undefined}
+                deviceLinkDeviceId={remoteDeviceId}
+                modelId={session?.model}
+                providerId={session?.providerId}
+                silentEncryptedRetryEnabled={silentEncryptedRetryEnabled}
+                onForkStripEncrypted={ownsWindowRoute ? handleForkStripEncrypted : undefined}
+                forkStripEncryptedRunning={forkStripEncryptedRunning}
+                style={{ width: inputWidth }}
+                className="py-1"
+              />
+            )}
+
+            {/* worktree 恢复横幅(P1):worktree 已被回收(目录缺失、分支还在)时
+              提供一键恢复。组件自查 restore-status,非 restorable 自渲染 null;
+              与 error/streaming 互斥条件从轻——目录缺失是持续状态,不依赖错误出现。 */}
+            {sessionId && !isStreaming && !agentStatus.isRunning && (
+              <WorktreeRestoreBanner
+                sessionId={sessionId}
+                style={{ width: inputWidth }}
+                className="py-1"
+              />
+            )}
+
+            {/* cc-mgr 升级提示 — 仅 cc remote session (cc agentKind + remoteHostId 在场)。
+              session.agentKind 在 sessionService 端是 'cc' / 'codex' (不是 SDK 风格的
+              'claude-code'); 这里判 'cc' 才匹配 cc-mgr 链路的会话。
+              内部会订阅 ccMgrUpgradeStore, 该 host 无 pending 时自渲染 null (零开销)。
+              sessionId 传给 banner 用于 U3 — 升级完成后自动重发该 session 的 last
+              user message (避免用户手动重新输入被中断的消息)。 */}
+            {session?.agentKind === 'cc' && session?.remoteHostId && (
+              <UpgradeBanner
+                hostId={session.remoteHostId}
+                sessionId={session.id}
+                style={{ width: inputWidth }}
+                className="py-1"
+              />
+            )}
+
+            <div
+              className="mx-auto flex flex-col items-center gap-[10px]"
+              style={{ width: inputWidth }}
+            >
+              {/* 被控端可见性:常规情况下 chip 已并入 RunningStatusBar 中央槽位(见上)。
+                plan-review 时 RunningStatusBar 不渲染,这里回退到独占一行的 inline,
+                让被控提示在 plan 卡片上方仍可见。 */}
+              {showInlineControlledBanner && pendingPlanReview && (
+                <ControlledBanner placement="inline" maxWidth={controlledBannerMaxWidth} />
+              )}
+
+              {/* FP-7 / F-PERM-2 / F7.4: mutually exclusive prompts.
+                 Plan review takes precedence — the SDK won't interleave it with
+                 other tool calls, but explicit priority guards against layout
+                 races during state transitions.
+
+                 InteractionPromptHost: 普通模式下行为不变(直接 inline 渲染)。
+                 当外部 (workdir-browse 等窄 rail 场景) 挂了 InteractionPromptSlot
+                 时,卡片会被 portal 出去,这里就显占位。 */}
+              <InteractionPromptHost
+                hasInteraction={
+                  !!(
+                    pendingPlanReview ||
+                    pendingPermission ||
+                    pendingAskUser ||
+                    pendingIssueConfirm ||
+                    pendingRenameSessionsConfirm ||
+                    pendingGhostGrantConfirm
+                  )
+                }
+                placeholder={
+                  <div className="w-full rounded-xl border border-dashed border-[var(--cmd-palette-border)] bg-[hsl(var(--content-area))] px-4 py-3 text-center text-12 text-[var(--cmd-palette-item-meta)]">
+                    {t('ccAgent.layout.waitForReply')}
+                  </div>
+                }
+              >
+                {pendingPlanReview ? (
+                  <>
+                    <PlanViewerCard
+                      pending={pendingPlanReview}
+                      viewerState={planViewerState}
+                      workingDir={session?.workingDir ?? ''}
+                      lastExpandedState={lastExpandedPlanViewerState}
+                      onStateChange={setPlanViewerState}
+                      onPlanContentChange={updatePlanContent}
+                      onCancel={() => cancelPlanReview(pendingPlanReview.requestId)}
+                    />
+                    <PlanActionCard
+                      requestId={pendingPlanReview.requestId}
+                      onRespond={respondToPlanReview}
+                      onCancel={cancelPlanReview}
+                    />
+                  </>
+                ) : pendingPermission ? (
+                  <PermissionPrompt
+                    permission={pendingPermission}
+                    onRespond={respondToPermission}
+                  />
+                ) : pendingAskUser ? (
+                  <AskUserQuestionPrompt
+                    pending={pendingAskUser}
+                    onAnswer={answerUserQuestion}
+                    viewerState={askUserViewerState}
+                    onViewerStateChange={setAskUserViewerState}
+                    draft={askUserDraft}
+                    onDraftChange={setAskUserDraft}
+                  />
+                ) : pendingIssueConfirm ? (
+                  <IssueConfirmCard
+                    pending={pendingIssueConfirm}
+                    onRespond={respondToIssueConfirm}
+                  />
+                ) : pendingRenameSessionsConfirm ? (
+                  <RenameSessionsConfirmCard
+                    pending={pendingRenameSessionsConfirm}
+                    onRespond={respondToRenameSessionsConfirm}
+                  />
+                ) : pendingGhostGrantConfirm ? (
+                  <GhostGrantConfirmCard
+                    key={pendingGhostGrantConfirm.requestId}
+                    pending={pendingGhostGrantConfirm}
+                    onRespond={respondToGhostGrantConfirm}
+                  />
+                ) : null}
+              </InteractionPromptHost>
+              {/* 会话内 /goal 进行中状态条(composer 上方);无 goal 时返回 null 不占位。 */}
+              <GoalIndicator sessionId={sessionId} />
+              {/* 互斥:有任意 pending interaction 时,下方 takeover/overlay/ChatInput
+                 全部静默 — 跟改造前 ternary 链 (Plan ? : Perm ? : Ask ? :
+                 Takeover ? : ChatInput) 的语义一致。
+                 优先级 (高 → 低):
+                   1. attached (远程接管中)  → TakeoverMask  (90px)
+                   2. worktreePreparing      → WorktreeCreatingOverlay (90px, 视觉同款)
+                   3. 默认                    → ChatInput
+                 两个 mask 共用 TakeoverMask 同款外形 (90px h / 12px round / sidebar
+                 border), 切到 ChatInput 时高度变大, 与 takeover 收回回到 ChatInput
+                 的体验一致。 */}
+              {pendingPlanReview ||
+              pendingPermission ||
+              pendingAskUser ||
+              pendingIssueConfirm ||
+              pendingRenameSessionsConfirm ||
+              pendingGhostGrantConfirm ? null : sessionBinding.attached && sessionId ? (
+                <TakeoverMask
+                  sessionId={sessionId}
+                  channel={sessionBinding.identity?.channel ?? 'feishu'}
+                  userId={sessionBinding.identity?.userId ?? null}
+                  displayName={sessionBinding.displayName}
+                />
+              ) : worktreePreparing && smoothedBranchName ? (
+                <WorktreeCreatingOverlay branchName={smoothedBranchName} />
+              ) : (
+                <ChatInput
+                  onSend={handleSend}
+                  onBeforeVoiceInputStart={handleBeforeVoiceInputStart}
+                  sessionId={sessionId}
+                  initialWorkingDir={session?.workingDir}
+                  remoteHostId={session?.remoteHostId ?? null}
+                  deviceLinkDeviceId={remoteDeviceId}
+                  modelMemoryOverride={remoteModelMemoryOverride}
+                  initialModel={session?.model}
+                  initialProviderId={session?.providerId ?? null}
+                  initialEffort={session?.effort}
+                  initialPermissionMode={session?.permissionMode}
+                  planModeEnabled={planModeEnabled}
+                  onPlanModeChange={setPlanMode}
+                  fastMode={fastMode}
+                  onFastModeChange={setFastMode}
+                  onWorkingDirChange={handleWorkingDirChange}
+                  isStreaming={isStreaming}
+                  isAgentBusy={isAgentBusy}
+                  onStop={handleStopSession}
+                  pendingQueue={pendingQueue}
+                  disabled={remoteSessionUnavailable}
+                  queuePaused={queuePaused}
+                  queueExpanded={queueExpanded}
+                  onQueueExpandedChange={setQueueExpanded}
+                  onQueueResume={resumeQueue}
+                  onQueueRemove={removeFromQueue}
+                  onQueueEdit={updateQueueItem}
+                  onQueueSteer={steerQueuedMessage}
+                  onQueueReorder={moveQueueItem}
+                  onQueueInteractionLock={setQueueInteractionLock}
+                  onQueueEditLock={setQueueEditLock}
+                  steeringQueueClientIds={steeringQueueClientIds}
+                  messages={messages}
+                  placeholder={t('ccAgent.layout.chatPlaceholder')}
+                  folderPickerOpen={folderPickerOpen}
+                  onFolderPickerOpenChange={handleFolderPickerOpenChange}
+                  showFolderPicker={false}
+                  onModelDidChange={handleModelDidChange}
+                  onEffortDidChange={handleEffortDidChange}
+                  onPermissionModeDidChange={handlePermissionModeDidChange}
+                  attachmentState={attachmentState}
+                  externalDragOver={isDragOver}
+                  onComposerDropHandled={resetFullAreaDragState}
+                  vendorKey={isCodex ? 'codex' : 'cc'}
+                  extraDirs={session?.extraDirs ?? []}
+                  onExtraDirsChange={handleExtraDirsChange}
+                  compactToolbar={compactToolbar}
+                  // doc rail (isCompactRail) 宽度受限 + 拖宽上限,工具行需要把
+                  // 字号/控件压一档,同时让协同 toggle 只剩 logo。
+                  denseToolbar={isCompactRail}
+                  // doc 模式右栏:不抢焦点,避免 TipTap contenteditable 激活
+                  // Windows 中文 IME 后,Ctrl+Shift+F 等组合键被 OS 层吞掉。
+                  // 详见 ChatInput 的 disableAutofocus prop 注释。
+                  disableAutofocus={isCompactRail}
+                  focusOnStorageKeyChange={ownsRoute}
+                  // F-COLLAB: 协同模式 toggle。在以下场景渲染:
+                  // - 普通主会话视图 (含 doc rail) 的本地 Claude / Codex 项目会话
+                  // 排除 worker 子会话(worker 自己不能再开协同)和远端会话。
+                  // orcaMode 路由下 toggle 也保留显示 — ON 态的 orange pill 本身就是
+                  // 关闭按钮 (点击触发 onChange({enabled:false}),走 requestStopCollab)。
+                  // doc rail 的 denseToolbar=true 会把 pill 收成 icon-only 形态。
+                  collaboration={
+                    allowCollabToggle || (orcaMode && collabEnabled)
+                      ? {
+                          enabled: collabEnabled,
+                          worker: collabWorker,
+                          onChange: (next) => {
+                            // enableBusy 只盖 enable;关闭走 hook 自己的 busy 重入保护。
+                            if (collabEnabled && !next.enabled) {
+                              void requestStopCollab();
+                              return;
+                            }
+                            if (!collabEnabled && next.enabled) {
+                              if (enableBusy) return;
+                              setCollabWorker(next.worker);
+                              setCreateWorkerOpen(true);
+                              return;
+                            }
+                            // 同态切 worker 选择目前先不支持(需销毁重建 Worker),
+                            // mvp 先吃掉这条事件,后续可加 "切换 Worker" 流程。
+                          },
+                          onOpenDetails: () => {
+                            if (enableBusy) return;
+                            setCreateWorkerOpen(true);
+                          },
+                        }
+                      : undefined
+                  }
+                />
+              )}
+
+              {/* F-FP-5: workingDir — always rendered to prevent layout shift
+                worktree-parallel-sessions:worktree 创建过程的反馈(creating/failed)
+                也复用这一行 inline 显示,替换原 Monitor+basename chip。完成后 store
+                自动 clear,UI 回到正常显示。设计参考用户反馈"把这部分的体验逻辑放到
+                chatinput 底部 显示 work dir 的地方"——不再在 chat stream 插 SystemCard。 */}
+              <div
+                className={cn(
+                  'mt-1.5 flex w-full items-center justify-between gap-3 px-1',
+                  !session?.workingDir && !worktreeCreation && 'invisible',
+                )}
+              >
+                {/* Left: workingDir — 点击在系统文件管理器中打开;
+                  click 区域宽度与文本一致(不拉伸到整行) */}
+                {worktreeCreation?.status === 'creating' ? (
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <Spinner size={12} className="text-[var(--workingdir-icon)]" />
+                    <span className="block min-w-0 truncate text-[12px] font-medium leading-none text-[var(--workingdir-text)]">
+                      {t('ccAgent.layout.worktreeCreating', '正在创建 worktree')}{' '}
+                      <code className="font-mono text-[11px] opacity-80">
+                        {worktreeCreation.name}
+                      </code>
+                      …
+                    </span>
+                  </div>
+                ) : worktreeCreation?.status === 'failed' ? (
+                  <Tip text={worktreeCreation.error} mono side="top">
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <AlertCircle size={12} className="shrink-0 text-red-500 dark:text-red-400" />
+                      <span className="block min-w-0 truncate text-[12px] font-medium leading-none text-red-500 dark:text-red-400">
+                        {t('ccAgent.layout.worktreeFailed', 'Worktree 创建失败')}
+                        {' — '}
+                        {worktreeCreation.error}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (sessionId) worktreeCreationStore.clear(sessionId);
+                        }}
+                        className="shrink-0 rounded p-0.5 transition-colors hover:bg-foreground/10"
+                        aria-label={t('common.dismiss', 'Dismiss')}
+                      >
+                        <X size={10} className="text-red-500/70 dark:text-red-400/70" />
+                      </button>
+                    </div>
+                  </Tip>
+                ) : (
+                  <Tip
+                    text={
+                      session?.workingDir ? (
+                        session?.remoteHostId ? (
+                          // 远端 session: Tip 顶部加一行 "Host: <alias>" 让用户在
+                          // 同 workingDir 跨多 host 撞合场景下也能区分。hostId 即
+                          // SSH alias (HostConfig.id), 不需要额外 lookup。
+                          <>
+                            <div>Host: {session.remoteHostId}</div>
+                            <div>{session.workingDir}</div>
+                          </>
+                        ) : (
+                          session.workingDir
+                        )
+                      ) : null
+                    }
+                    mono
+                    side="top"
+                  >
+                    {session?.remoteHostId ? (
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        {workingDirChipContent}
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        className="flex min-w-0 cursor-pointer items-center gap-1.5 text-left transition-opacity active:opacity-60"
+                        onClick={handleOpenWorkingDir}
+                        aria-label={t('ccAgent.layout.openWorkingDirAria')}
+                      >
+                        {workingDirChipContent}
+                      </button>
+                    )}
+                  </Tip>
+                )}
+
+                {/* Right: Context capacity indicator */}
+                <div className="flex shrink-0 items-center gap-3">
+                  {session?.usedProjectContext && (
+                    <Tip text={t('ccAgent.layout.projectContextLoaded')} side="top">
+                      <Brain
+                        size={14}
+                        strokeWidth={1.75}
+                        className="shrink-0 -translate-y-px text-foreground/70"
+                        aria-label={t('ccAgent.layout.projectContextLoaded')}
+                      />
+                    </Tip>
+                  )}
+                  <TodaySpendChip
+                    vendorKey={displayAgentKind === 'codex' ? 'codex' : 'cc'}
+                    modelId={agentSwitchIntent?.model ?? session?.model ?? null}
+                    providerId={
+                      agentSwitchIntent
+                        ? agentSwitchIntent.providerId
+                        : (session?.providerId ?? null)
+                    }
+                    sessionId={sessionId}
+                    sessionInitialCostUsd={session?.totalCostUsd ?? null}
+                    sessionInitialTokens={session?.totalTokenUsage ?? null}
+                    remoteHostId={session?.remoteHostId ?? null}
+                    deviceLinkDeviceId={remoteDeviceId ?? null}
+                  />
+                  <ContextCapacityRing
+                    contextTokens={agentStatus.contextTokens}
+                    model={agentSwitchIntent?.model ?? session?.model ?? ''}
+                    vendorKey={displayAgentKind === 'codex' ? 'codex' : 'cc'}
+                    sdkContextWindow={agentStatus.contextWindow}
+                    deviceId={remoteDeviceId}
+                    onCompact={
+                      // codex 无手动 compact;context 为 0 时压缩无意义 → 两种情况保持纯展示
+                      !isCodex && session != null && agentStatus.contextTokens > 0
+                        ? handleCompactRequest
+                        : undefined
+                    }
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* TopRightChipStack:聊天视图右上 chip 浮层。
+          chip 栈第一行 = 右栏展开入口(仅 Windows 且右栏折叠时;展开态的折叠按钮
+          归属右栏 TabBar;mac 开关在 ContentHeader 右端,故 !isMac 守卫)。
+          MessageStream 内部的 PrevMessageJumpChip 通过 portal 挂入同一栈,自然落到下一行。
+          "本次会话改动文件列表"已迁移到 RSB review tab,不再保留浮动按钮 + 滑入抽屉。 */}
+        <TopRightChipStack>
+          {/* Windows 折叠态的展开入口钉在聊天区靠缝的角上;面板贴右时在右上
+            (本栈第一行),贴左时镜像到左上(下方容器)。 */}
+          {!isMac &&
+            rightSidebarCollapsed &&
+            (ownsRoute || showRsbToggle) &&
+            onToggleRightSidebar &&
+            rightSidebarSide === 'right' && (
+              <RightSidebarToggle
+                collapsed={rightSidebarCollapsed}
+                onToggle={onToggleRightSidebar}
+                side="right"
+              />
+            )}
+        </TopRightChipStack>
+        {/* mac 不渲染本 chip(2026-07-09 Lizi 口径):mac 的折叠 toggle 无论面板贴
+          哪侧都**恒钉窗口右上角**(MainLayout 浮层,与左栏折叠按钮对称);
+          Windows 仅折叠态显示,面板贴左时镜像到聊天区左上角。 */}
+        {!isMac &&
+          rightSidebarCollapsed &&
+          (ownsRoute || showRsbToggle) &&
+          onToggleRightSidebar &&
+          rightSidebarSide === 'left' && (
+            <div className="pointer-events-none absolute left-3 top-3 z-20 flex flex-col items-start gap-2">
+              <RightSidebarToggle
+                collapsed={rightSidebarCollapsed}
+                onToggle={onToggleRightSidebar}
+                side="left"
+              />
+            </div>
+          )}
+      </section>
+    </>
+  );
+
+  return (
+    // isCompact 由 useProportionalWidth 按 effective compact 暴露:doc rail 恒 true,
+    // 主消息流在容器宽 <AUTO_COMPACT_THRESHOLD 时为 true、回到宽态时回 false。
+    // 挂 `chat-rail-compact` 让字号与 padding 同步缩放——doc rail 外层(OrcaSplitView /
+    // WorkdirBrowseRoute)本身也挂这个类,主会话内层再挂一层是冗余但无害(CSS 规则幂等)。
+    <div
+      ref={containerRef}
+      className={cn('relative h-full w-full', isCompact && 'chat-rail-compact')}
+    >
+      {/* TopRightChipStackProvider 必须包住 MessageStream(消费 slot 的后代)
+          与 TopRightChipStack(提供 slot 的容器)二者的共同祖先,context 才
+          能流到。content 内同时包含两者,所以包在外层即可。 */}
+      <SessionNavigationModeProvider
+        mode={navigationMode}
+        sidebarTargetSessionId={sidebarTargetSessionId}
+      >
+        <ChatDisplaySnapshotProvider value={chatDisplaySnapshot}>
+          <TopRightChipStackProvider>{content}</TopRightChipStackProvider>
+        </ChatDisplaySnapshotProvider>
+      </SessionNavigationModeProvider>
+      <CreateWorkerPopover
+        open={createWorkerOpen}
+        onClose={() => setCreateWorkerOpen(false)}
+        onCreate={requestEnableCollab}
+        title={t('orca.createWorker.enableCollabTitle')}
+        submitLabel={t('orca.createWorker.enableCollabSubmit')}
+        deviceId={remoteDeviceId}
+      />
+
+      {/* 来自 Automations 的入口浮动返回按钮：固定在聊天区左上角，
+          上下随 MessageStream 滚动也不动；click 回 /cc-agent/scheduled。
+          z-40：在拖拽 overlay (z-50) 之下，在普通内容之上。 */}
+      {ownsWindowRoute && cameFromAutomations && (
+        <button
+          type="button"
+          onClick={() => navigate('/cc-agent/scheduled')}
+          aria-label={t('ccAgent.layout.backToAutomations')}
+          className={cn(
+            'absolute left-[14px] top-[14px] z-40 inline-flex items-center justify-center',
+            'text-[var(--settings-section-desc)] transition-colors hover:text-foreground',
+          )}
+        >
+          <ArrowLeft size={18} strokeWidth={2} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function HandoffSourcePill({
+  dispatcherSessionId,
+  dispatcherTitle,
+  onReturn,
+  onDismiss,
+}: {
+  dispatcherSessionId: string;
+  dispatcherTitle?: string | null;
+  onReturn: () => void;
+  onDismiss: () => void;
+}) {
+  const { t } = useTranslation();
+  const label = dispatcherTitle?.trim() || shortSessionId(dispatcherSessionId);
+
+  return (
+    <div
+      className={cn(
+        'flex h-10 w-full items-center rounded-[12px] border border-[var(--cmd-palette-border)] bg-[hsl(var(--content-area))]',
+        'text-[13px] leading-none text-[#595959]',
+      )}
+    >
+      <button
+        type="button"
+        onClick={onReturn}
+        className={cn(
+          'flex h-full min-w-0 flex-1 items-center gap-2 px-3 text-left',
+          'transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-foreground',
+        )}
+      >
+        <CornerUpLeft size={14} strokeWidth={2} className="shrink-0" />
+        <span className="min-w-0 truncate">
+          {t('ccAgent.handoff.pill.fromDispatcher', { title: label })}
+        </span>
+      </button>
+      <button
+        type="button"
+        onClick={onDismiss}
+        aria-label={t('ccAgent.handoff.pill.dismissAria')}
+        className={cn(
+          'mr-2 flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px]',
+          'text-[#595959] transition-colors hover:bg-[var(--cmd-palette-bg)] hover:text-foreground',
+          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-foreground',
+        )}
+      >
+        <X size={14} strokeWidth={2} />
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// RunningStatusBar
+// ---------------------------------------------------------------------------
+
+const STATUS_BAR_FADE_MS = 400;
+const STATUS_BAR_CENTER_SLOT_MAX_WIDTH = 420;
+const STATUS_BAR_CENTER_SLOT_WIDTH_RATIO = 0.5;
+
+function getControlledBannerMaxWidth(inputWidth?: number): number {
+  if (inputWidth == null) return STATUS_BAR_CENTER_SLOT_MAX_WIDTH;
+  return Math.max(
+    0,
+    Math.min(
+      (inputWidth - 16) * STATUS_BAR_CENTER_SLOT_WIDTH_RATIO,
+      STATUS_BAR_CENTER_SLOT_MAX_WIDTH,
+    ),
+  );
+}
+
+function RunningStatusBar({
+  status,
+  tokenUsage,
+  startedAt,
+  visible,
+  inputWidth,
+  sideTaskRunning = false,
+  backgroundTasksRunning = false,
+  backgroundStopping = false,
+  onStopBackgroundTasks,
+  centerSlot = null,
+}: {
+  status: string;
+  tokenUsage: number;
+  startedAt: number | null;
+  visible: boolean;
+  inputWidth?: number;
+  /**
+   * 当前是否处于 side-task (mivo MJ 按钮等不走 LLM 的后台任务) 运行态。
+   * true 时隐藏右侧的 elapsed · ↓ tokens 行 —— mivo 不消耗 token, 显示上一轮
+   * 残留数字会误导用户。"Done" check icon 也不显示 (sideTaskRunning 期间永远
+   * 把 status 当成进行中, 即便 status 文案恰好是 "Done")。
+   */
+  sideTaskRunning?: boolean;
+  /**
+   * 后台子任务模式:turn 已结束但该会话 CC 子进程仍在调模型(后台子 agent 持续
+   * 消耗用量)。true 时状态栏保持点亮:左段换 Activity 图标 + 后台运行文案(shimmer
+   * 呼吸沿用),右段把 elapsed / tokens 换成「全部停止」入口 —— 上一轮的残留计时 /
+   * 计数在此语义下都是误导信息。替代原独立横幅(2026-07-13 假停止治理)。
+   */
+  backgroundTasksRunning?: boolean;
+  /** 全停请求在飞(按钮禁用,防连点)。 */
+  backgroundStopping?: boolean;
+  /** 「全部停止」入口(关闭常驻 CC 子进程,会话可续)。 */
+  onStopBackgroundTasks?: () => void;
+  /**
+   * 中央槽位 —— 渲染在左侧状态与右侧 elapsed/tokens 之间、水平居中。
+   * 关键:它**独立于**左右两段的淡入淡出/隐藏(下方 fadeStyle 只作用于左右),
+   * 所以即便 agent 空闲、状态栏整体淡出占位时,这里的内容(被控提示 chip)仍
+   * 持续可见。左右两段只是低优先级信息,窄宽时允许收缩 / 被中央 chip 覆盖。
+   */
+  centerSlot?: ReactNode;
+}) {
+  const { t } = useTranslation();
+  // `showContent` controls whether real content is rendered.
+  // We intentionally NEVER return null — instead we fall back to a fixed-height
+  // placeholder so the overlay's ResizeObserver sees a stable height and
+  // MessageStream's bottomPadding doesn't change, eliminating the layout jump
+  // that was visible when the status bar disappeared.
+  const [showContent, setShowContent] = useState(visible);
+  const [fading, setFading] = useState(false);
+
+  useEffect(() => {
+    if (visible) {
+      setShowContent(true);
+      setFading(false);
+    } else {
+      // Linger 1s at full opacity, then fade, then swap to placeholder
+      const lingerTimer = setTimeout(() => setFading(true), 1000);
+      const hideTimer = setTimeout(() => setShowContent(false), 1000 + STATUS_BAR_FADE_MS);
+      return () => {
+        clearTimeout(lingerTimer);
+        clearTimeout(hideTimer);
+      };
+    }
+  }, [visible]);
+
+  const [elapsed, setElapsed] = useState(0);
+
+  // Local timer (F-SDK-3: render-side setInterval)
+  useEffect(() => {
+    if (!startedAt) {
+      setElapsed(0);
+      return;
+    }
+
+    setElapsed(Math.floor((Date.now() - startedAt) / 1000));
+
+    const interval = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [startedAt]);
+
+  const isHidden = !showContent && !visible;
+
+  // side-task / 后台子任务运行中永远当成进行态 (即便上一轮 LLM 留下的 status 文案
+  // 是 "Done", 此时任务还在跑, 显示 ✓ 完成图标会让用户以为已经做完)。
+  const isDone = status === 'Done' && !sideTaskRunning && !backgroundTasksRunning;
+  // 后台子任务模式的左段文案:上一轮残留的 status(多半是 "Done")在此语义下是
+  // 误导信息,整体替换为后台运行提示。
+  const displayStatus = backgroundTasksRunning ? t('chat.backgroundActivity.status') : status;
+  // F-COMPACT-1: when SDK is auto-summarizing the conversation, give the
+  // status bar a distinct icon so the user can tell "Compacting..." apart
+  // from "Thinking..." — both share the shimmer animation by design, but
+  // the icon answers "what is it doing right now".
+  const isCompacting = typeof status === 'string' && status.toLowerCase().startsWith('compact');
+
+  const minutes = Math.floor(elapsed / 60);
+  const seconds = elapsed % 60;
+  const elapsedText = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+
+  // Animate the token counter so live mid-turn updates (from message_delta in
+  // agentManager) feel like a smoothly-incrementing number, the same way claude
+  // code's CLI status line ticks. The hook re-anchors from the displayed value
+  // on every target change, so rapid updates blend without snap-back.
+  const animatedTokens = useAnimatedNumber(tokenUsage, 400);
+  const tokenText =
+    animatedTokens >= 1000
+      ? `${(animatedTokens / 1000).toFixed(1)}k tokens`
+      : `${animatedTokens} tokens`;
+
+  // 淡入淡出/隐藏占位样式 —— 只作用于左(状态)、右(elapsed/tokens)两段;
+  // 中央槽位(centerSlot)不套此样式,故空闲淡出时其内容(被控提示 chip)仍可见。
+  // visibility:hidden 只隐藏不收高 → 左右两段始终占位,外层高度恒定,overlay 的
+  // ResizeObserver 看到的高度不变,MessageStream 的 bottomPadding 不抖。
+  const fadeStyle: CSSProperties = {
+    visibility: isHidden ? 'hidden' : 'visible',
+    opacity: isHidden ? 0 : fading ? 0 : 1,
+    transition: isHidden ? 'none' : `opacity ${STATUS_BAR_FADE_MS}ms ease-out`,
+    pointerEvents: isHidden ? 'none' : 'auto',
+  };
+  const centerSlotMaxWidth = getControlledBannerMaxWidth(inputWidth);
+
+  // Always render the full DOM structure — never return null or a differently-
+  // shaped placeholder. Height is determined by real content + padding, so it
+  // never changes regardless of visibility state.  The overlay ResizeObserver
+  // therefore sees a stable height and MessageStream's bottomPadding stays put.
+  //
+  // 三段式布局:左(状态)/ 中(centerSlot)/ 右(elapsed·tokens)。
+  // 中央槽位用三列 grid 居中:左右列都是 minmax(0,1fr),中列 minmax(0,auto)。
+  // 中列再用输入框宽度比例 + 明确 maxWidth 封顶,避免长设备名把 banner 撑成超长条;
+  // 同时它仍参与正常文档流,会按 chip 高度撑出原有上下留白。
+  // - 左段 min-w-0(可收缩):status 并非短枚举 —— turn-start 文案带用户名(可含中文长句)、
+  //   claude tool 进度会拼成 `mcp__x__y running...` 长串,窄宽时左段靠 span truncate;
+  // - 右段 justify-self-end + min-w-0:elapsed / token 是低优先级信息,必要时可溢出
+  //   但不会改变中列几何中心;中列 z-10 让 chip 视觉优先。
+  // 外层只管布局 / 宽度 / 高度,恒可见。
+  return (
+    <div
+      className="mx-auto grid select-none grid-cols-[minmax(0,1fr)_minmax(0,auto)_minmax(0,1fr)] items-center px-2 py-[6px]"
+      style={{ width: inputWidth }}
+    >
+      <div
+        className={cn(
+          // min-w-0(非 shrink-0):让内部 status span 的 truncate 真正生效 —— status 可变长
+          // (turn-start 带用户名 / tool 进度长串),窄宽时左段截断而非把右段顶出界。
+          'flex min-w-0 items-center gap-[6px]',
+          // 隐藏时一律摘所有动画类:infinite 动画即便 visibility:hidden 不画也照算
+          // 样式/合成层，长期累积会复刻 0f8fa84 那次 breathing 在 :root 的内存泄漏。
+          // 非隐藏时 done 与 shimmer 区别对待:
+          // - shimmer 是 infinite opacity 呼吸，其 opacity 关键帧会盖过 fadeStyle 的
+          //   inline opacity，使 visible 转 false 后不淡出、一直呼吸到突然消失，故仅
+          //   在真正 visible(运行中)时挂，linger / fade 阶段摘掉让其正常淡出。
+          // - done 是 0.4s 一次性 pop(keyframe 已去掉 opacity、只动 transform)，turn
+          //   结束那一刻(isDone 必伴随 !visible)要弹一下，故保持 !isHidden gate;
+          //   不动 opacity 所以不会盖 fade。
+          isHidden ? '' : isDone ? 'status-bar-done' : visible ? 'status-bar-shimmer' : '',
+        )}
+        style={fadeStyle}
+        aria-hidden={isHidden}
+      >
+        {isDone ? (
+          <Check size={14} className="shrink-0" strokeWidth={2.5} />
+        ) : // 后台子任务模式换 Activity 图标(与 Compacting 换 Layers 同一设计逻辑:
+        // 图标回答"现在在干嘛")。优先于 isCompacting —— 后者按残留 status 文本
+        // 判断,turn 在 compact 阶段结束时会错配出 Layers + 后台文案。
+        backgroundTasksRunning ? (
+          <Activity size={14} className="shrink-0 -translate-y-px" />
+        ) : isCompacting ? (
+          <Layers size={14} className="shrink-0 -translate-y-px" />
+        ) : (
+          // -translate-y-px: lucide Sparkles' visual center sits slightly below
+          // its geometric center (the lower-right tail biases mass downward),
+          // so flex items-center alignment looks off — nudging the icon up 1px
+          // restores optical alignment with the text baseline.
+          <Sparkles size={14} className="shrink-0 -translate-y-px" />
+        )}
+        <span className="truncate text-[13px] font-medium">{displayStatus}</span>
+      </div>
+      {/* 中央槽位(几何真居中):被控提示 chip 等。maxWidth 封顶 + max-w-full 让长设备名
+          在窄宽时收缩,chip 靠自带 max-w-full + 内部 truncate 截断;不套 fadeStyle
+          故空闲淡出时仍持续可见。 */}
+      <div
+        className="z-10 flex min-w-0 max-w-full items-center justify-center px-2"
+        style={{ maxWidth: centerSlotMaxWidth }}
+      >
+        {centerSlot}
+      </div>
+      {/* pen 里右侧是分离的 4 个节点：elapsed / · / arrow-down / tokens，gap 6px。
+          side-task (mivo 等) 运行时只显示 elapsed, 不带 token 行 —— 这类任务不
+          走 LLM, 显示残留 token 计数会误导用户以为也耗了 token。 */}
+      <div
+        className="flex min-w-0 items-center justify-self-end gap-[6px]"
+        style={fadeStyle}
+        aria-hidden={isHidden}
+      >
+        {backgroundTasksRunning ? (
+          // 后台子任务模式:elapsed 是上一轮 turn 的残留计时、tokens 是残留计数,
+          // 都不成立 —— 整段换成「全部停止」入口(原横幅唯一操作,横幅已删)。
+          <button
+            type="button"
+            onClick={onStopBackgroundTasks}
+            disabled={backgroundStopping || !onStopBackgroundTasks}
+            className={cn(
+              'flex shrink-0 items-center gap-1 text-[13px] font-medium',
+              'text-[var(--text-primary)] hover:opacity-70 transition-opacity',
+              'disabled:opacity-50 disabled:cursor-not-allowed',
+            )}
+            title={t('chat.backgroundActivity.stopAllTitle')}
+          >
+            <Square size={12} />
+            {backgroundStopping
+              ? t('chat.backgroundActivity.stopping')
+              : t('chat.backgroundActivity.stopAll')}
+          </button>
+        ) : (
+          <>
+            <span className="text-[13px] font-medium text-[var(--status-bar-meta)]">
+              {elapsedText}
+            </span>
+            {!sideTaskRunning && (
+              <>
+                <span className="text-[13px] font-medium text-[var(--status-bar-meta)]">
+                  &middot;
+                </span>
+                <ArrowDown size={13} className="shrink-0 text-[var(--status-bar-meta)]" />
+                <span className="text-[13px] font-medium text-[var(--status-bar-meta)]">
+                  {tokenText}
+                </span>
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ContextCapacityRing — circular token usage indicator
+// ---------------------------------------------------------------------------
+
+/** Format a token count with K/M suffix: 200000 → "200K", 1000000 → "1M". */
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) {
+    const m = n / 1_000_000;
+    return `${Number.isInteger(m) ? m : m.toFixed(1)}M`;
+  }
+  if (n >= 1_000) {
+    const k = n / 1_000;
+    return `${Number.isInteger(k) ? k : k.toFixed(1)}K`;
+  }
+  return n.toString();
+}
+
+/**
+ * 从 maker capabilities cache 查模型 contextWindow。
+ * 拿不到时返回 undefined，由 display resolver 兜底到 200K。
+ */
+function getModelContextWindow(
+  model: string,
+  vendorKey: 'cc' | 'codex',
+  deviceId?: string,
+): number | undefined {
+  const found = getModelsForVendor(vendorKey, deviceId).find((m) => m.id === model);
+  return found?.contextWindow;
+}
+
+function ContextCapacityRing({
+  contextTokens,
+  model,
+  vendorKey,
+  sdkContextWindow,
+  deviceId,
+  onCompact,
+}: {
+  contextTokens: number;
+  model: string;
+  vendorKey: 'cc' | 'codex';
+  /** SDK-reported context window; 0 = not yet known → use hardcoded fallback. */
+  sdkContextWindow: number;
+  /** device-link 远程会话所属被控端 id;按被控端能力查 contextWindow(本机会话 undefined,行为不变)。 */
+  deviceId?: string;
+  /** 提供时圆环可点击 — 点击后(经用户确认)向 agent 发送 /compact 压缩上下文。 */
+  onCompact?: () => void;
+}) {
+  const { t } = useTranslation();
+  const contextWindow = resolveDisplayContextWindow({
+    sdkContextWindow,
+    modelContextWindow: getModelContextWindow(model, vendorKey, deviceId),
+  });
+  const pct =
+    contextWindow > 0
+      ? Math.min(Math.max(Math.round((contextTokens / contextWindow) * 100), 0), 100)
+      : 0;
+
+  // Ring geometry: outer diameter 20px, strokeWidth 2.5
+  const size = 20;
+  const strokeWidth = 2.5;
+  const radius = (size - strokeWidth) / 2; // 8.75
+  const circumference = 2 * Math.PI * radius;
+  const dashOffset = circumference - (circumference * pct) / 100;
+
+  // Color thresholds per spec
+  const fillColor = pct > 90 ? '#EF4444' : pct > 70 ? '#F59E0B' : 'var(--msg-tool-card-chevron)';
+
+  const usedTokens = Math.min(contextTokens, contextWindow || Infinity);
+  const tooltipText =
+    contextWindow > 0
+      ? `Context — ${formatTokenCount(usedTokens)} / ${formatTokenCount(contextWindow)} (${pct}%)`
+      : 'No context data yet';
+
+  const ringContent = (
+    <>
+      <svg
+        width={size}
+        height={size}
+        viewBox={`0 0 ${size} ${size}`}
+        className="shrink-0"
+        aria-hidden="true"
+        focusable="false"
+      >
+        {/* Track (background circle) */}
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          fill="none"
+          stroke="var(--msg-tool-card-border)"
+          strokeWidth={strokeWidth}
+        />
+        {/* Fill arc — starts at 12 o'clock, sweeps clockwise */}
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          fill="none"
+          stroke={fillColor}
+          strokeWidth={strokeWidth}
+          strokeDasharray={circumference}
+          strokeDashoffset={dashOffset}
+          strokeLinecap="round"
+          transform={`rotate(-90 ${size / 2} ${size / 2})`}
+        />
+      </svg>
+      <span className="text-[12px] font-medium leading-none" style={{ color: fillColor }}>
+        {pct}%
+      </span>
+    </>
+  );
+
+  return (
+    <Tip
+      text={
+        onCompact ? (
+          <>
+            <div>{tooltipText}</div>
+            <div>{t('ccAgent.layout.contextRing.compactHint')}</div>
+          </>
+        ) : vendorKey === 'codex' ? (
+          // codex 协议没有手动 compact 入口(server 侧自动压缩),圆环不可点击;
+          // tooltip 里说明原因,避免用户疑惑为什么 Claude 能点 codex 不能。
+          <>
+            <div>{tooltipText}</div>
+            <div>{t('ccAgent.layout.contextRing.codexAutoHint')}</div>
+          </>
+        ) : (
+          tooltipText
+        )
+      }
+    >
+      {onCompact ? (
+        <button
+          type="button"
+          onClick={onCompact}
+          aria-label={t('ccAgent.layout.contextRing.compactHint')}
+          className="flex shrink-0 cursor-pointer items-center gap-1 transition-opacity hover:opacity-75 active:opacity-60"
+        >
+          {ringContent}
+        </button>
+      ) : (
+        <div className="flex shrink-0 items-center gap-1">{ringContent}</div>
+      )}
+    </Tip>
+  );
+}

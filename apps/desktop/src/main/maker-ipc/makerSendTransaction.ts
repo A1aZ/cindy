@@ -1,0 +1,550 @@
+import type {
+  AgentKind,
+  SessionSendOptions,
+  SessionSendResult,
+  UserMessage,
+} from '@cindy/maker-core';
+
+import {
+  createHostSendFailure,
+  type DesktopMakerSendResult,
+  toCompatibleMakerSendResult,
+  toDesktopSessionDispatchOutcome,
+} from '../maker-host/send-outcome.js';
+import { isCredentialModeSwitchBusyError } from '../maker-host/codex-credential-switch.js';
+import { throwIpcError } from '../utils/ipcValidate.js';
+import {
+  prependHandoffToUserMessage,
+  type HandoffWireMessage,
+} from './agentHandoff.js';
+import type { MakerSessionCreateOpts } from './sessionRequest.js';
+
+type CreateOpts = MakerSessionCreateOpts;
+
+type IpcUserMessage =
+  | string
+  | { type: 'user'; content: string | Array<{ type: string; [k: string]: unknown }> };
+
+type MakerSendOptions = {
+  messageUuid?: string;
+  userName?: string;
+  throwOnStartFailure?: boolean;
+  /**
+   * Direct Continue fallback only: acknowledge the interrupted marker on the
+   * executor after vendor dispatch is irreversible. The executor must own the
+   * timestamp so device-link controller/controlled clock skew cannot corrupt
+   * active_turn_started_at > last_turn_ended_at ordering.
+   */
+  ackInterruptedTurnOnDispatch?: boolean;
+  signal?: AbortSignal;
+  /**
+   * scheduler 排队消息的来源标记(coordinator drain 透传,见 AgentInputSendOpts.origin)。
+   * 打到 sess.send 的 origin(本轮 turnOrigin)并合进落库 user 消息 agentMeta.origin。
+   */
+  origin?: { kind: 'scheduler'; scheduleId: string; scheduleName: string; runId?: string };
+  persistUserMessage?: {
+    clientId?: unknown;
+    content?: unknown;
+    sdkSessionId?: unknown;
+    delivery?: unknown;
+    shouldBroadcast?: unknown;
+    onPersisting?: unknown;
+    onPersisted?: unknown;
+  };
+};
+
+export interface MakerSendTransactionSession {
+  id: string;
+  agentKind: AgentKind;
+  workDir: string;
+  remoteHostId: string | null;
+  isTurnRunning(): boolean;
+  send(message: UserMessage | string, opts?: SessionSendOptions): Promise<SessionSendResult>;
+}
+
+export interface MakerSendTransactionLog {
+  info(message: string, fields?: Record<string, unknown>): void;
+  warn(message: string, fields?: Record<string, unknown>): void;
+}
+
+export interface MakerSendTransactionDeps {
+  getSession(sessionId: string): MakerSendTransactionSession | undefined | null;
+  closeSession(sessionId: string): Promise<void>;
+  getSessionMeta(sessionId: string): Promise<{ title?: string } | null>;
+  ensureRemoteReadyForSessionStart(params: {
+    session?: { agentKind: AgentKind; remoteHostId: string | null } | null;
+    createOpts?: unknown;
+  }): Promise<void>;
+  checkWorkDirExists(
+    sessionId: string,
+    workingDir: string | undefined | null,
+    agentKind: AgentKind | undefined,
+    remoteHostId?: string | null,
+    opts?: { suppressMissingBroadcast?: boolean },
+  ): Promise<boolean>;
+  /**
+   * 读 DB 里既有会话的权威 working_dir(行不存在 → null)。lazy-create /
+   * rehydrate 在 caller 传入的 workingDir 校验失败时用它兜底——输入队列崩溃
+   * 快照等缓存的 createOpts 可能内嵌已被启动 sweep 改写掉的老路径。
+   */
+  readSessionWorkingDirFromDb(sessionId: string): Promise<string | null>;
+  isOrcaMcpHydrated(sessionId: string): boolean;
+  buildCreateOptsWithStderr(opts: CreateOpts): CreateOpts;
+  synthesizeOrcaVendorOptionsFromDb(sessionId: string, opts: CreateOpts): Promise<boolean>;
+  readSessionExtraDirsFromDb(sessionId: string): Promise<string[]>;
+  withRehydrateCloseSuppressed<T>(sessionId: string, fn: () => Promise<T>): Promise<T>;
+  bootstrapSession(opts: CreateOpts): Promise<{
+    session: MakerSendTransactionSession;
+    didInjectOrcaInstructions: boolean;
+    didInjectProjectContext: boolean;
+  }>;
+  markOrcaRoleIfNeeded(sessionId: string, role: 'lead' | 'worker' | null | undefined): Promise<void>;
+  broadcastSessionCreated(sessionId: string): void;
+  prepareSendUserMessage(
+    sessionId: string,
+    message: unknown,
+  ): Promise<IpcUserMessage>;
+  createDbMessage(
+    sessionId: string,
+    message: {
+      clientId: string;
+      role: 'user';
+      content: unknown;
+      agentMeta: Record<string, unknown>;
+      createdAt?: number;
+    },
+    opts?: { shouldBroadcast?: () => boolean },
+  ): Promise<unknown>;
+  beforeDispatchDirectUserTurn?: (sessionId: string) => void | Promise<void>;
+  onUndispatchedDirectUserTurn?: (sessionId: string) => void;
+  ackInterruptedTurnDispatched?: (sessionId: string, endedAt: number) => void | Promise<void>;
+  previewUserPrompt?(
+    session: { id: string; agentKind?: unknown; workDir?: unknown; workspaceKind?: unknown },
+    content: unknown,
+    options: { source: string; clientId?: string },
+  ): void;
+  commitUserPromptPreview?(sessionId: string, clientId: string | undefined): void;
+  rollbackUserPromptPreview?(sessionId: string, clientId: string | undefined, source: string): void;
+  isSessionRunningError(err: unknown): boolean;
+  /**
+   * session-agent-switch:lazy-create 前用 DB 行(真源)校正 createOpts。
+   * 切换后 renderer/队列里可能残留旧 agentKind / 旧 resumeSessionId 的 createOpts,
+   * 用它 spawn 会把消息发回旧引擎且丢交接注入;此钩子读 sessions 行,发现漂移时
+   * 原地覆写 agentKind/model/resumeSessionId/providerId。undefined = 不校正(测试用)。
+   */
+  reconcileCreateOptsWithDb?(sessionId: string, createOpts: CreateOpts): Promise<void>;
+  /**
+   * session-agent-switch:turn 运行中登记的切换意图在**发送时刻**执行(先于
+   * getSession——apply 会 close 旧引擎,随后本事务按 DB 新值 lazy-create 新引擎,
+   * 交接注入走下面的 pending handoff 通道)。apply 内部自查 turn 空闲,仍在跑则
+   * 保留意图本次不动。undefined = 不启用(测试最小 harness)。
+   */
+  applyPendingAgentSwitch?(sessionId: string): Promise<void>;
+  /**
+   * session-agent-switch:pending 交接读取(agentHandoff 注册表)。命中时把交接
+   * 文本前置进 wire payload(不影响 persistUserMessage 落库显示内容),并在
+   * dispatch 跨过不可逆边界(accepted)后 consume;未 accepted / 抛错保留 pending。
+   */
+  peekPendingHandoff?(sessionId: string): Promise<string | null>;
+  consumePendingHandoff?(sessionId: string): void;
+  log: MakerSendTransactionLog;
+}
+
+export interface MakerSendTransaction {
+  sendToAgentAccepted(
+    sessionId: unknown,
+    message: unknown,
+    createOpts?: unknown,
+    sendOpts?: unknown,
+  ): Promise<DesktopMakerSendResult>;
+}
+
+type ResolveSessionResult =
+  | { kind: 'session'; session: MakerSendTransactionSession }
+  | { kind: 'failure'; result: DesktopMakerSendResult };
+
+function readPersistUserMessageOption(sendOpts: MakerSendOptions): {
+  clientId: string;
+  content: unknown;
+  sdkSessionId?: string;
+  delivery?: 'turn' | 'steer';
+  shouldBroadcast?: () => boolean;
+  onPersisting?: () => void;
+  onPersisted?: () => void | Promise<void>;
+} | null {
+  const persist = sendOpts.persistUserMessage;
+  if (!persist || typeof persist.clientId !== 'string') return null;
+  return {
+    clientId: persist.clientId,
+    content: persist.content,
+    ...(typeof persist.sdkSessionId === 'string' ? { sdkSessionId: persist.sdkSessionId } : {}),
+    ...(persist.delivery === 'turn' || persist.delivery === 'steer' ? { delivery: persist.delivery } : {}),
+    ...(typeof persist.shouldBroadcast === 'function'
+      ? { shouldBroadcast: persist.shouldBroadcast as () => boolean }
+      : {}),
+    ...(typeof persist.onPersisting === 'function'
+      ? { onPersisting: persist.onPersisting as () => void }
+      : {}),
+    ...(typeof persist.onPersisted === 'function'
+      ? { onPersisted: persist.onPersisted as () => void | Promise<void> }
+      : {}),
+  };
+}
+
+/**
+ * 普通 maker:send 的产品事务。
+ *
+ * 保持老链路 lazy-create 语义：第一次发送时才 spawn SDK；调用方可带 createOpts，
+ * 让事务在内存里找不到 session 时创建或恢复会话。
+ *
+ * 事务契约：只有返回 accepted=true 才表示 vendor dispatch 已跨过不可逆边界。
+ * lazy-create 失败、cwd 缺失、附件归一化失败、throwOnStartFailure 下的 vendor
+ * turn/start 失败、或输入队列关闭，都必须在 accepted=true 前拒绝或返回
+ * accepted=false，让调用方按未派发状态回滚。不要新增“先 emit error 再静默
+ * return”的路径，除非同步更新 queue / bubble / DB / dispatch 状态协议。
+ */
+export function createMakerSendTransaction(deps: MakerSendTransactionDeps): MakerSendTransaction {
+  async function loadExtraDirsIfNeeded(sessionId: string, opts: CreateOpts, source: 'lazy-create' | 'active-orca-rehydrate'): Promise<void> {
+    if (opts.extraDirs !== undefined) return;
+    try {
+      const row = await deps.readSessionExtraDirsFromDb(sessionId);
+      if (row.length > 0) opts.extraDirs = row;
+    } catch (err) {
+      deps.log.warn(`${source}: read extra_dirs from DB failed (non-fatal)`, {
+        sessionId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * workDir 校验 + DB 权威值兜底。caller 传入的 createOpts.workingDir 可能是
+   * 缓存的陈旧值(典型:输入队列崩溃快照在启动 sweep 改写 DB 之前入的库,
+   * 回放时仍内嵌老路径,2026-07-20 实报)——校验失败时读 DB 行的 working_dir
+   * 重试,通过则就地采纳进 createOpts(后续 bootstrap 用新 cwd spawn)。
+   * 存在兜底候选时首检静默,避免"先弹错误横幅再静默成功"的假错误。
+   */
+  async function ensureWorkDirWithDbFallback(
+    sessionId: string,
+    createOpts: CreateOpts,
+  ): Promise<boolean> {
+    const dbDir = await deps.readSessionWorkingDirFromDb(sessionId).catch(() => null);
+    const fallbackDir = dbDir && dbDir !== createOpts.workingDir ? dbDir : null;
+    const ok = fallbackDir
+      ? await deps.checkWorkDirExists(
+          sessionId,
+          createOpts.workingDir,
+          createOpts.agentKind,
+          createOpts.remoteHostId,
+          { suppressMissingBroadcast: true },
+        )
+      : await deps.checkWorkDirExists(
+          sessionId,
+          createOpts.workingDir,
+          createOpts.agentKind,
+          createOpts.remoteHostId,
+        );
+    if (ok) return true;
+    if (!fallbackDir) return false;
+    const okDb = await deps.checkWorkDirExists(
+      sessionId,
+      fallbackDir,
+      createOpts.agentKind,
+      createOpts.remoteHostId,
+    );
+    if (!okDb) return false;
+    deps.log.info('send: adopted DB working_dir over stale caller createOpts', {
+      sessionId,
+      staleWorkingDir: createOpts.workingDir,
+      workingDir: fallbackDir,
+    });
+    createOpts.workingDir = fallbackDir;
+    return true;
+  }
+
+  async function rehydrateActiveOrcaSession(
+    sessionId: string,
+    createOpts: CreateOpts,
+  ): Promise<ResolveSessionResult> {
+    const okRehydrate = await ensureWorkDirWithDbFallback(sessionId, createOpts);
+    if (!okRehydrate) {
+      return {
+        kind: 'failure',
+        result: toCompatibleMakerSendResult(
+          createHostSendFailure('WORKDIR_MISSING', `working directory is missing for session ${sessionId}`),
+        ),
+      };
+    }
+    await loadExtraDirsIfNeeded(sessionId, createOpts, 'active-orca-rehydrate');
+    try {
+      const session = await deps.withRehydrateCloseSuppressed(sessionId, async () => {
+        await deps.closeSession(sessionId);
+        // close 后重新 bootstrap，避免旧 SDK handle 缺 Orca MCP vendorOptions。
+        const { session: newSess, didInjectOrcaInstructions, didInjectProjectContext } = await deps.bootstrapSession(createOpts);
+        await deps.markOrcaRoleIfNeeded(newSess.id, createOpts.orcaRole);
+        deps.log.info('send: rehydrate active Orca session with MCP vendorOptions', {
+          sessionId,
+          agentKind: createOpts.agentKind,
+          usedOrcaInstructions: didInjectOrcaInstructions,
+          usedProjectContext: didInjectProjectContext,
+          extraDirsCount: createOpts.extraDirs?.length ?? 0,
+        });
+        return newSess;
+      });
+      return { kind: 'session', session };
+    } catch (err) {
+      if (isCredentialModeSwitchBusyError(err)) {
+        // 不映射成 SESSION_RUNNING:那会命中输入协调器的静默无限重试(250ms 一次),
+        // 用户看到消息永远排队(2026-07-03 实报)。CREDENTIAL_SWITCH_BUSY 由协调器
+        // 转成**可见等待态**(队首保留 + 挡路会话 turn 结束自动重发,可从队列删除
+        // 取消);busySessionIds 供事件驱动唤醒与 renderer 展示挡路会话。
+        return {
+          kind: 'failure',
+          result: toCompatibleMakerSendResult(
+            createHostSendFailure('CREDENTIAL_SWITCH_BUSY', err.message, {
+              busySessionIds: err.sessionIds,
+            }),
+          ),
+        };
+      }
+      return {
+        kind: 'failure',
+        result: toCompatibleMakerSendResult(
+          createHostSendFailure('REHYDRATE_FAILED', err instanceof Error ? err.message : 'rehydrate failed'),
+        ),
+      };
+    }
+  }
+
+  async function lazyCreateSession(
+    sessionId: string,
+    createOpts: CreateOpts,
+  ): Promise<ResolveSessionResult> {
+    const okLazy = await ensureWorkDirWithDbFallback(sessionId, createOpts);
+    if (!okLazy) {
+      return {
+        kind: 'failure',
+        result: toCompatibleMakerSendResult(
+          createHostSendFailure('WORKDIR_MISSING', `working directory is missing for session ${sessionId}`),
+        ),
+      };
+    }
+    await deps.synthesizeOrcaVendorOptionsFromDb(sessionId, createOpts);
+    await loadExtraDirsIfNeeded(sessionId, createOpts, 'lazy-create');
+    try {
+      const { session: lazySess, didInjectOrcaInstructions, didInjectProjectContext } = await deps.bootstrapSession(createOpts);
+      await deps.markOrcaRoleIfNeeded(lazySess.id, createOpts.orcaRole);
+      deps.broadcastSessionCreated(lazySess.id);
+      deps.log.info('send: lazy create-session', {
+        sessionId,
+        agentKind: createOpts.agentKind,
+        model: createOpts.model,
+        fastMode: createOpts.fastMode ?? 'default',
+        usedOrcaInstructions: didInjectOrcaInstructions,
+        usedProjectContext: didInjectProjectContext,
+        extraDirsCount: createOpts.extraDirs?.length ?? 0,
+      });
+      return { kind: 'session', session: lazySess };
+    } catch (err) {
+      if (isCredentialModeSwitchBusyError(err)) {
+        // 不映射成 SESSION_RUNNING:那会命中输入协调器的静默无限重试(250ms 一次),
+        // 用户看到消息永远排队(2026-07-03 实报)。CREDENTIAL_SWITCH_BUSY 由协调器
+        // 转成**可见等待态**(队首保留 + 挡路会话 turn 结束自动重发,可从队列删除
+        // 取消);busySessionIds 供事件驱动唤醒与 renderer 展示挡路会话。
+        return {
+          kind: 'failure',
+          result: toCompatibleMakerSendResult(
+            createHostSendFailure('CREDENTIAL_SWITCH_BUSY', err.message, {
+              busySessionIds: err.sessionIds,
+            }),
+          ),
+        };
+      }
+      return {
+        kind: 'failure',
+        result: toCompatibleMakerSendResult(
+          createHostSendFailure('LAZY_CREATE_FAILED', err instanceof Error ? err.message : 'lazy create failed'),
+        ),
+      };
+    }
+  }
+
+  return {
+    async sendToAgentAccepted(sessionId, message, createOpts, sendOpts): Promise<DesktopMakerSendResult> {
+      if (typeof sessionId !== 'string') throwIpcError('INVALID_PARAMS', 'sessionId required');
+      // session-agent-switch:pending 切换在发送时刻生效(用户语义:「消息真正发出
+      // 去时才切」)。必须在 getSession 之前——apply 会 close 旧引擎的 live session,
+      // 让下方走 lazy-create 按 DB 新值 spawn 新引擎。
+      await deps.applyPendingAgentSwitch?.(sessionId);
+      let sess = deps.getSession(sessionId);
+      if (sess?.isTurnRunning()) {
+        throwIpcError('SESSION_RUNNING', `Session ${sessionId} is already running a turn`);
+      }
+      await deps.ensureRemoteReadyForSessionStart({ session: sess, createOpts });
+
+      if (sess) {
+        const ok = await deps.checkWorkDirExists(sessionId, sess.workDir, sess.agentKind, sess.remoteHostId);
+        if (!ok) {
+          return toCompatibleMakerSendResult(
+            createHostSendFailure('WORKDIR_MISSING', `working directory is missing for session ${sessionId}`),
+          );
+        }
+        if (!deps.isOrcaMcpHydrated(sessionId) && createOpts) {
+          const co = deps.buildCreateOptsWithStderr({ ...(createOpts as CreateOpts), id: sessionId });
+          const shouldHydrateOrcaMcp = await deps.synthesizeOrcaVendorOptionsFromDb(sessionId, co);
+          if (shouldHydrateOrcaMcp) {
+            if (sess.isTurnRunning()) {
+              // 仍交给下方统一 running guard 抛 SESSION_RUNNING，避免重复分支。
+              deps.log.warn('send: active Orca session needs MCP rehydrate but turn is running', { sessionId });
+            } else {
+              const rehydrated = await rehydrateActiveOrcaSession(sessionId, co);
+              if (rehydrated.kind === 'failure') return rehydrated.result;
+              sess = rehydrated.session;
+            }
+          }
+        }
+      }
+
+      if (!sess) {
+        if (!createOpts) throwIpcError('NOT_FOUND', `Session ${sessionId} not found and no createOpts provided`);
+        const co = deps.buildCreateOptsWithStderr({ ...(createOpts as CreateOpts), id: sessionId });
+        await deps.reconcileCreateOptsWithDb?.(sessionId, co);
+        const lazy = await lazyCreateSession(sessionId, co);
+        if (lazy.kind === 'failure') return lazy.result;
+        sess = lazy.session;
+      }
+
+      if (sess.isTurnRunning()) {
+        throwIpcError('SESSION_RUNNING', `Session ${sessionId} is already running a turn`);
+      }
+      const normalized = await deps.prepareSendUserMessage(sessionId, message);
+      // session-agent-switch:切换后的首条消息把交接前缀拼进 wire payload。
+      // 落库/显示内容(persistUserMessage.content)不含交接段——display 与 sent 分离。
+      const pendingHandoff = (await deps.peekPendingHandoff?.(sessionId)) ?? null;
+      const outgoing = pendingHandoff
+        ? prependHandoffToUserMessage(normalized as HandoffWireMessage, pendingHandoff)
+        : normalized;
+      const meta = await deps.getSessionMeta(sessionId).catch(() => null);
+      const so = (sendOpts ?? {}) as MakerSendOptions;
+      if (
+        so.ackInterruptedTurnOnDispatch !== undefined &&
+        typeof so.ackInterruptedTurnOnDispatch !== 'boolean'
+      ) {
+        throwIpcError('INVALID_PARAMS', 'ackInterruptedTurnOnDispatch must be a boolean');
+      }
+      const persistUserMessage = readPersistUserMessageOption(so);
+      const directPreDispatchHook = persistUserMessage ? null : deps.beforeDispatchDirectUserTurn;
+      let directPreDispatchHookStarted = false;
+      let userPromptPreviewSessionId: string | null = null;
+      let userPromptPreviewClientId: string | null = null;
+      try {
+        if (directPreDispatchHook) {
+          await directPreDispatchHook(sessionId);
+          directPreDispatchHookStarted = true;
+        }
+        // Capture on the executor immediately before vendor code. sess.send may
+        // synchronously publish the continuation's new started marker before it
+        // resolves, so the old-turn ack must use this strictly earlier value.
+        const interruptedAckAt = so.ackInterruptedTurnOnDispatch
+          ? Math.max(0, Date.now() - 1)
+          : null;
+        const sendResult = await sess.send(outgoing as never, {
+          logTitle: meta?.title,
+          messageUuid: so.messageUuid,
+          userName: so.userName,
+          throwOnStartFailure: so.throwOnStartFailure,
+          signal: so.signal,
+          // scheduler 排队消息:origin 打到本轮 turnOrigin(IM 转播识别自动 turn),
+          // 与 runner 直发路径的 session.send({ origin }) 语义对齐。
+          ...(so.origin ? { origin: so.origin } : {}),
+          // 本条消息的计划意图快照(点击发送/入队瞬间的勾选,排队行透传)。对已
+          // 存活会话是权威——排队期间用户改勾选不影响已排队行,反向也不误消耗
+          // (语义见 maker-core SendOptions.planMode;undefined = 旧的消耗武装态)。
+          ...(typeof (createOpts as { planMode?: unknown } | undefined)?.planMode === 'boolean'
+            ? { planMode: (createOpts as { planMode: boolean }).planMode }
+            : {}),
+          onAccepted: persistUserMessage
+            ? async () => {
+                persistUserMessage.onPersisting?.();
+                deps.previewUserPrompt?.(sess, persistUserMessage.content, {
+                  source: 'maker_send:onPersisting',
+                  clientId: persistUserMessage.clientId,
+                });
+                userPromptPreviewSessionId = sessionId;
+                userPromptPreviewClientId = persistUserMessage.clientId;
+                await deps.createDbMessage(sessionId, {
+                  clientId: persistUserMessage.clientId,
+                  role: 'user',
+                  content: persistUserMessage.content,
+                  agentMeta: {
+                    uuid: so.messageUuid,
+                    sdkSessionId: persistUserMessage.sdkSessionId,
+                    ...(persistUserMessage.delivery ? { delivery: persistUserMessage.delivery } : {}),
+                    // scheduler 排队消息:与 runner 直发路径落库的 agentMeta.origin
+                    // 对齐,renderer 据此渲染"由自动化任务发送"标签。
+                    ...(so.origin ? { origin: so.origin } : {}),
+                  },
+                }, persistUserMessage.shouldBroadcast
+                  ? { shouldBroadcast: persistUserMessage.shouldBroadcast }
+                  : undefined);
+                // onPersisted 里可能挂着排队 orca 消息的 accepted 副作用(置 running /
+                // autoBridgePending), 必须 await 完再放行 turn(同直发路径语义)。
+                await persistUserMessage.onPersisted?.();
+              }
+            : undefined,
+        });
+        if (sendResult.accepted && interruptedAckAt !== null) {
+          try {
+            await deps.ackInterruptedTurnDispatched?.(sessionId, interruptedAckAt);
+          } catch (err) {
+            // Dispatch is irreversible; marker persistence remains best-effort
+            // and cannot turn an accepted send into a renderer-visible failure.
+            deps.log.warn('send: interrupted-turn dispatch ack failed', {
+              sessionId,
+              err: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+        if (pendingHandoff && sendResult.accepted) {
+          // 只有跨过不可逆 dispatch 边界才消费;未派发保留 pending 下次重试。
+          deps.consumePendingHandoff?.(sessionId);
+        }
+        if (userPromptPreviewSessionId && userPromptPreviewClientId) {
+          if (sendResult.accepted) {
+            deps.commitUserPromptPreview?.(userPromptPreviewSessionId, userPromptPreviewClientId);
+          } else {
+            deps.rollbackUserPromptPreview?.(
+              userPromptPreviewSessionId,
+              userPromptPreviewClientId,
+              'maker_send:not-dispatched',
+            );
+          }
+        }
+        if (directPreDispatchHookStarted && !sendResult.accepted) {
+          deps.onUndispatchedDirectUserTurn?.(sessionId);
+        }
+        return toCompatibleMakerSendResult(
+          toDesktopSessionDispatchOutcome(sendResult, {
+            source: 'maker-ipc',
+            context: `SEND/${sessionId}/send`,
+          }),
+        );
+      } catch (err) {
+        if (userPromptPreviewSessionId && userPromptPreviewClientId) {
+          deps.rollbackUserPromptPreview?.(
+            userPromptPreviewSessionId,
+            userPromptPreviewClientId,
+            'maker_send:failed-before-dispatch',
+          );
+        }
+        if (directPreDispatchHookStarted) {
+          deps.onUndispatchedDirectUserTurn?.(sessionId);
+        }
+        if (deps.isSessionRunningError(err)) {
+          throwIpcError('SESSION_RUNNING', `Session ${sessionId} is already running a turn`);
+        }
+        throw err;
+      }
+    },
+  };
+}

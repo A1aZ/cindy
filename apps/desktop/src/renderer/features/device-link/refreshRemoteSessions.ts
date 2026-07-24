@@ -1,0 +1,174 @@
+/**
+ * refreshRemoteDeviceSessions —— 立即(可 await)重拉某被控设备的会话列表(bootstrap / reconcile)。
+ *
+ * 这是「读被控端真相」的一次性按需拉取,**不是**轮询补偿(控制端纯镜像下,稳态增量靠
+ * 被控端 sessions:patched/created push 驱动;本函数只用于「刚在被控端创建了一个会话、要马上
+ * navigate 过去」这类需要先把新 sessionId 注册进 store 才能避免 404 的 bootstrap-before-navigate
+ * 场景:listing tier 首拉、reconnect 重拉、fork / orca worker / 远程新建会话)。
+ *
+ * 用 per-device epoch 防乱序:两次重拉乱序 resolve 时,旧的那次结果被丢弃(只接受最新一次),
+ * 避免旧 snapshot 覆盖新 snapshot(reconcile 规则)。
+ *
+ * 瞬态重试(2026-06 真机实测修复):被控端刚上线那一刻,它宣布「在线/可被控」可能**早于**
+ * 自身 localDb 迁移完成 —— 此时控制端 listing tier 首拉 `local-db:sessions:list` 会撞
+ * 「DbClient not ready」,旧实现静默放弃、永不重试 → 控制端一直显示「设备在、但没有会话」。
+ * 现在对一组**瞬态**错误(DbClient 未就绪 / 本机链路未连 / 目标暂离线 / invoke 超时)做有限退避
+ * 重试,覆盖被控端启动窗口;对**永久**错误(被控开关关 / channel 不允许)立即放弃,不空转。
+ */
+
+import type { Session } from '@/lib/ccAgent.types';
+import { createLogger } from '@/lib/logger';
+import { remoteProjectsStore } from './remoteProjectsStore';
+
+const log = createLogger('device-link-refresh');
+
+/** 与 listing tier 的拉取上限一致(useDeviceLinkRemoteProjects 的 LIST_LIMIT)。 */
+const LIST_LIMIT = 200;
+
+/** 默认重试次数(含首次):退避 250→500→1000→2000→3000ms,总窗口 ~6.75s,覆盖被控端冷启动迁移。 */
+const DEFAULT_MAX_ATTEMPTS = 6;
+
+/** 永久错误标记:命中即立即放弃(被控开关关 / channel 不在白名单)—— 重试也不会变。 */
+const PERMANENT_MARKERS = ['REMOTE_DISABLED', 'CHANNEL_NOT_ALLOWED'] as const;
+
+/**
+ * 「访问已被撤销」标记(被控端逐设备黑名单)。bootstrap 期间被撤销(subscribe 已成功、list 被拒)时,
+ * 这是个**语义性终态**,不能像普通永久错误那样静默 give-up —— 调用方需据此 handleRevoked(移除设备 +
+ * 标记已撤销),否则会继续预取能力并清掉撤销标记,等于无视被控端的明确拒绝。renderer 实际看到的是 main
+ * IPC 层映射后的 `[DEVICE_LINK_ACCESS_REVOKED]`(原始 DeviceLinkError('ACCESS_REVOKED') 经映射而来)。
+ */
+const ACCESS_REVOKED_MARKER = 'DEVICE_LINK_ACCESS_REVOKED';
+/**
+ * 瞬态错误标记:被控端刚上线 DB 未就绪 / 本机链路未连 / 目标暂离线 / invoke 超时 —— 值得退避重试。
+ * ⚠️ 超时码用 DEVICE_LINK_TIMEOUT:invoke 超时的原始 DeviceLinkError('INVOKE_TIMEOUT') 在 main IPC
+ * 层被映射成 `[DEVICE_LINK_TIMEOUT]` 才到 renderer,这里匹配的是 renderer 实际看到的已映射码。
+ */
+const TRANSIENT_MARKERS = ['DbClient not ready', 'NOT_CONNECTED', 'DEVICE_OFFLINE', 'DEVICE_LINK_TIMEOUT'] as const;
+
+/**
+ * 该远程错误是否「瞬态、值得重试」。永久错误优先(命中即不重试);否则仅当命中已知瞬态标记
+ * 才重试,未知错误一律不重试(避免对真正的失败空转)。纯函数,便于单测。
+ */
+export function isTransientRemoteError(message: string): boolean {
+  if (PERMANENT_MARKERS.some((m) => message.includes(m))) return false;
+  return TRANSIENT_MARKERS.some((m) => message.includes(m));
+}
+
+/** 退避:250ms 起指数增长,封顶 3000ms。 */
+function backoffMs(attempt: number): number {
+  return Math.min(250 * 2 ** attempt, 3000);
+}
+
+const realSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+export interface RefreshOptions {
+  /** 注入式 sleep(测试用,默认真实 setTimeout)。 */
+  sleep?: (ms: number) => Promise<void>;
+  /** 最大尝试次数(含首次),默认 DEFAULT_MAX_ATTEMPTS。 */
+  maxAttempts?: number;
+}
+
+/**
+ * 重拉结果:
+ *  - `ok`:成功落地最新快照(或本次被更新一次取代而让位,语义上无需调用方善后);
+ *  - `revoked`:被控端在 bootstrap 期间撤销了访问权限 → 调用方应 handleRevoked;
+ *  - `gave-up`:瞬态重试耗尽 / 永久非撤销错误 → 调用方照常收尾(push / reconnect 会兜底补上)。
+ */
+export type RefreshResult = 'ok' | 'revoked' | 'gave-up';
+
+interface RefreshTask {
+  promise: Promise<RefreshResult>;
+  rerun: boolean;
+  name?: string;
+  opts: RefreshOptions;
+}
+
+const refreshTasks = new Map<string, RefreshTask>();
+
+export async function refreshRemoteDeviceSessions(
+  deviceId: string,
+  name?: string,
+  opts: RefreshOptions = {},
+): Promise<RefreshResult> {
+  const existing = refreshTasks.get(deviceId);
+  if (existing) {
+    existing.rerun = true;
+    existing.name = name ?? existing.name;
+    existing.opts = { ...existing.opts, ...opts };
+    // 先让当前 in-flight snapshot 失效,否则它可能在排队的补跑开始前覆盖 push 带来的新状态。
+    remoteProjectsStore.nextSnapshotEpoch(deviceId);
+    return existing.promise;
+  }
+
+  const task: RefreshTask = {
+    promise: Promise.resolve('gave-up'),
+    rerun: false,
+    name,
+    opts,
+  };
+  task.promise = drainRefreshTask(deviceId, task).finally(() => {
+    if (refreshTasks.get(deviceId) === task) refreshTasks.delete(deviceId);
+  });
+  refreshTasks.set(deviceId, task);
+  return task.promise;
+}
+
+async function drainRefreshTask(deviceId: string, task: RefreshTask): Promise<RefreshResult> {
+  let result: RefreshResult = 'gave-up';
+  do {
+    task.rerun = false;
+    result = await runRefreshRemoteDeviceSessions(deviceId, task.name, task.opts);
+    // revoked 是被控端明确拒绝,不再补跑排队请求。
+    if (result === 'revoked') return result;
+  } while (task.rerun);
+  return result;
+}
+
+async function runRefreshRemoteDeviceSessions(
+  deviceId: string,
+  name?: string,
+  opts: RefreshOptions = {},
+): Promise<RefreshResult> {
+  const sleep = opts.sleep ?? realSleep;
+  const maxAttempts = opts.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+  const deviceName = name ?? remoteProjectsStore.getDeviceName(deviceId) ?? deviceId;
+  const epoch = remoteProjectsStore.nextSnapshotEpoch(deviceId);
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    // 被一次更新的重拉取代(期间又发起了新的 refresh)→ 停手,交给那一次(也避免无谓重试)。
+    if (!remoteProjectsStore.isLatestSnapshotEpoch(deviceId, epoch)) return 'gave-up';
+    try {
+      const list = await window.electronAPI.deviceLink.invoke(deviceId, 'local-db:sessions:list', [
+        LIST_LIMIT,
+        'active',
+        { includePinned: true },
+      ]);
+      // 乱序保护:本次拉取已不是最新一次 → 丢弃,别覆盖更新的结果。
+      if (!remoteProjectsStore.isLatestSnapshotEpoch(deviceId, epoch)) return 'gave-up';
+      if (Array.isArray(list)) {
+        remoteProjectsStore.setDeviceSessions(deviceId, deviceName, list as Session[]);
+      }
+      return 'ok'; // 成功
+    } catch (err) {
+      if (!remoteProjectsStore.isLatestSnapshotEpoch(deviceId, epoch)) return 'gave-up';
+      const message = err instanceof Error ? err.message : String(err);
+      // 访问被撤销:语义性终态,不重试、也不静默 give-up —— 让调用方 handleRevoked(见 ACCESS_REVOKED_MARKER)。
+      if (message.includes(ACCESS_REVOKED_MARKER)) {
+        log.debug(`refreshRemoteDeviceSessions access revoked for ${deviceId.slice(0, 8)}`);
+        return 'revoked';
+      }
+      const canRetry = attempt < maxAttempts - 1 && isTransientRemoteError(message);
+      if (!canRetry) {
+        // 永久错误 / 重试耗尽:放弃(push / 下一次 reconnect 仍会兜底补上,只是慢一拍)。
+        log.debug(`refreshRemoteDeviceSessions gave up for ${deviceId.slice(0, 8)}`, err);
+        return 'gave-up';
+      }
+      log.debug(
+        `refreshRemoteDeviceSessions transient for ${deviceId.slice(0, 8)} (attempt ${attempt + 1}/${maxAttempts}), retrying`,
+        message,
+      );
+      await sleep(backoffMs(attempt));
+    }
+  }
+  return 'gave-up';
+}

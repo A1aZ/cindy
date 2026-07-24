@@ -1,0 +1,98 @@
+import type { PreRunHookRunResult, RunStatus, Schedule } from '../types.js';
+
+export interface ChildRunInput {
+  sessionId?: string;
+  status: RunStatus;
+  resultText?: string;
+  errorMsg?: string;
+}
+
+export interface FireContext {
+  runId: string;
+  firedAt: number;
+  /**
+   * 由 Scheduler 创建并 own 的 AbortSignal。当用户在 UI 上 delete/pause 这条 schedule 时,
+   * Scheduler 会对所有 in-flight 的 runner.fire() 触发 abort。
+   *
+   * Runner 约定:
+   * - 监听 signal.aborted / addEventListener('abort', ...),收到后立刻让底层 agent 停止
+   *   (主 runner: Session.abort();多 session runner: 当前 issue 的 session.abort() + 跳过剩余)。
+   * - 因 abort 而退出的 fire 应抛出 DOMException('aborted', 'AbortError') 或 message 含
+   *   "abort"/"aborted" 的 Error,Scheduler 据此把对应 run 行标 status='aborted'。
+   * - 即便不响应 abort,Scheduler 也只等 5s,过期后 schedule 还是会被 delete/pause —— 但
+   *   in-flight session 会继续烧 token,所以 runner 必须接 abort。
+   */
+  signal: AbortSignal;
+  /**
+   * Runner 拿到 sessionId 时主动上报（在 fire() 完成前）。Scheduler 注入实现，
+   * 内部会立刻 UPDATE schedule_runs.sessionId 并 emit 'session-bound' 事件。
+   *
+   * 对接规则：
+   * - 拿到一个有效（非空）sessionId 后**尽快**调一次；可以多次调，幂等。
+   * - 回调会写存储 + emit 事件，**可能抛异常**，runner 自己包 try/catch（不要让它
+   *   传染上来打断 fire 主流程）。
+   * - 旧实现不传也兼容（optional），那就退回到原行为：completion 时一次性写 sessionId。
+   */
+  onSessionBound?: (sessionId: string) => Promise<void> | void;
+  /**
+   * Runner 在本轮 turn **被会话接受后**（send 被 accept、即将真正执行）调一次,
+   * 上报承载本轮的 sessionId。Scheduler 注入实现,据此落定 sessionId → 本轮 runId
+   * 的反向映射,供"按调用方 session 静默本轮"使用。
+   *
+   * 与 onSessionBound 的区别 / 为什么单独一个回调:
+   * - onSessionBound 在 send **之前**就调(为了让 UI 的 "Open session" 尽早可用)。
+   * - 反向映射若也在 send 之前写,则同一 session 上重叠的两个 run（in-flight 时又被
+   *   runNow / 另一 schedule 撞同 session）里,后一个 run 会在自己的 send 真正被接受前
+   *   就覆盖映射;而它的 send 若被 SESSION_RUNNING 拒,其清理又会把映射删掉,导致仍在
+   *   执行的前一个 run 调静默时解析不到自己（codex review P2）。
+   * - 因此映射只在"turn 已被接受"这一刻写:被拒的 run 永不写、永不污染活跃 run。
+   * - optional;runner 不调则反向映射不落定,"按 session 静默本轮"解析落空(MCP 工具
+   *   退回到显式 runId 路径),不影响其它流程。
+   */
+  onTurnActive?: (sessionId: string) => void;
+  /**
+   * 多 session runner 为每个子任务创建独立 run 记录。
+   * 每条 child run 拥有独立 sessionId，UI 各自显示 "Open session"。
+   * 引擎注入实现，runner 只需提供子任务结果数据。
+   */
+  createChildRun?: (input: ChildRunInput) => Promise<string>;
+  /**
+   * 前置检查结束后立即持久化结果。检查发生在 session / agent 创建之前，不能等
+   * fire() 返回后再保存，否则 fail-closed 的抛错路径会丢失诊断信息。
+   */
+  onPreRunHookCompleted?: (result: PreRunHookRunResult) => Promise<void> | void;
+}
+
+export interface FireResult {
+  sessionId: string;
+  /**
+   * Agent 这一轮 turn 的最终文本（可选）。runner 可选地填入；engine 在
+   * success 分支会一并 update 到 schedule_runs.result_text。
+   */
+  resultText?: string;
+  /**
+   * true = 本轮未真正执行,而是顺延(目标 session 正忙 / 用户正在远程控制礼让)。
+   * engine 据此:撤销本轮预插的 running run(不留可见记录)、不 emit
+   * completed/failed(不亮红点不通知)、不写 lastFiredAt(没真跑),只把
+   * nextFireAt 短延 deferRetryMs 后重试。详见 scheduler.fireOne。
+   */
+  deferred?: boolean;
+  /**
+   * 顺延时距今多久后重试(ms)。engine 设 nextFireAt = finishedAt + deferRetryMs。
+   * deferred=true 时必填(否则 nextFireAt 不前移会导致下个 tick 立刻再触发的忙循环)。
+   */
+  deferRetryMs?: number;
+  /**
+   * true = 本轮被前置检查脚本(preRunHook exit 2)拦截跳过:runner 未启动 agent、
+   * 未消耗 token。engine 据此:把预插的 running run 改成 status='skipped'(带
+   * readAt,生而已读、不通知不亮红点)、emit 'skipped' 事件,并**照常**按 recurring
+   * 语义重排下一次触发(与 deferred 的短延重试不同——跳过就是这一轮的最终结果)。
+   * sessionId 在跳过时为空串：本轮不创建或更新会话，跳过原因通过 resultText 保存。
+   * resultText 可携带跳过原因摘要(脚本 stdout),落进 run 记录供历史回顾。
+   */
+  skipped?: boolean;
+}
+
+export interface ScheduleRunner {
+  fire(schedule: Schedule, ctx: FireContext): Promise<FireResult>;
+}

@@ -1,0 +1,177 @@
+import { describe, expect, it } from 'vitest';
+import {
+  summarizeAccountRateLimits,
+  summarizeCodexRateLimitReset,
+  summarizeContextUsage,
+  summarizeSessionSpend,
+} from '../sessionControls.js';
+
+describe('shared session usage summaries', () => {
+  it('summarizes session spend for shared header and controls surfaces', () => {
+    expect(summarizeSessionSpend({
+      contextTokens: 16000,
+      contextWindow: 200000,
+      totalCostUsd: 0.024,
+      totalTokenUsage: 42000,
+    })).toEqual({
+      available: true,
+      detail: '本会话 $0.02 · 42k tokens · 上下文 16k / 200k · 8%',
+      title: 'Session spend',
+    });
+
+    expect(summarizeSessionSpend(null)).toEqual({
+      available: false,
+      detail: '暂无会话用量',
+      title: 'Session spend',
+    });
+  });
+
+  it('summarizes context usage payloads with graceful fallbacks', () => {
+    expect(summarizeContextUsage(null)).toEqual({
+      title: 'Context usage',
+      detail: '暂无上下文数据',
+      rows: [],
+    });
+
+    expect(summarizeContextUsage({
+      totalTokens: 90000,
+      rawMaxTokens: 200000,
+    })).toMatchObject({
+      title: 'Context usage',
+      detail: '90,000 / 200,000 tokens · 45%',
+    });
+  });
+});
+
+describe('summarizeCodexRateLimitReset', () => {
+  const NOW_MS = Date.UTC(2026, 6, 12, 12, 0, 0);
+  const base = {
+    account: { email: 'pe***@example.com', accountId: '…456789', planType: 'plus' },
+    rateLimits: { primary: { usedPercent: 100, windowMinutes: 300 } },
+    rateLimitsByLimitId: null,
+    rateLimitResetCredits: {
+      availableCount: 2,
+      credits: [{
+        status: 'available' as const,
+        resetType: 'codexRateLimits' as const,
+        grantedAt: Math.floor(NOW_MS / 1000) - 100,
+        expiresAt: Math.floor(NOW_MS / 1000) + 3600,
+        title: 'Full reset',
+        description: null,
+      }],
+    },
+    resetOffer: {
+      idempotencyKey: '018f4ec7-c6d8-7f10-8d43-9f8791d33000',
+      expiresAt: Math.floor(NOW_MS / 1000) + 3600,
+      validUntil: NOW_MS + 60_000,
+    },
+  };
+
+  it('shows account, workspace, count and expiry when an exhausted window can reset', () => {
+    const summary = summarizeCodexRateLimitReset(base, NOW_MS);
+    expect(summary).toMatchObject({ availableCount: 2, shouldPrompt: true, canReset: true });
+    expect(summary?.rows.slice(0, 3)).toEqual([
+      { label: '账号', value: 'pe***@example.com' },
+      { label: 'Workspace', value: '…456789' },
+      { label: '可用重置', value: '2 次' },
+    ]);
+    expect(summary?.rows[3]).toMatchObject({ label: '最早过期' });
+    expect(summary?.rows[3].value).toMatch(/^\d{2}:\d{2}$/);
+  });
+
+  it('does not offer reset before exhaustion and leaves offer expiry to desktop', () => {
+    expect(summarizeCodexRateLimitReset({
+      ...base,
+      rateLimits: { primary: { usedPercent: 99.9 } },
+    }, NOW_MS)).toMatchObject({ shouldPrompt: false, canReset: false });
+    expect(summarizeCodexRateLimitReset({
+      ...base,
+      resetOffer: { ...base.resetOffer, validUntil: NOW_MS },
+    }, NOW_MS)).toMatchObject({ shouldPrompt: true, canReset: true });
+  });
+
+  it('shows exhausted-without-credit but ignores prepaid-credit depletion', () => {
+    expect(summarizeCodexRateLimitReset({
+      ...base,
+      rateLimitResetCredits: { availableCount: 0, credits: [] },
+      resetOffer: null,
+    }, NOW_MS)).toMatchObject({ availableCount: 0, shouldPrompt: true, canReset: false });
+    expect(summarizeCodexRateLimitReset({
+      ...base,
+      rateLimits: {
+        primary: { usedPercent: 100 },
+        rateLimitReachedType: 'workspace_owner_credits_depleted',
+      },
+    }, NOW_MS)).toMatchObject({ shouldPrompt: false, canReset: false });
+  });
+
+  it('omits the reset count when credit availability was not returned', () => {
+    const summary = summarizeCodexRateLimitReset({
+      ...base,
+      rateLimitResetCredits: null,
+      resetOffer: null,
+    }, NOW_MS);
+
+    expect(summary).toMatchObject({ availableCount: 0, shouldPrompt: true, canReset: false });
+    expect(summary?.rows).not.toContainEqual(expect.objectContaining({ label: '可用重置' }));
+  });
+});
+
+describe('summarizeAccountRateLimits', () => {
+  // 2026-07-12 12:00:00 UTC 固定基准,避免用例受运行时钟影响。
+  const NOW_MS = Date.UTC(2026, 6, 12, 12, 0, 0);
+
+  it('renders window rows with labels derived from upstream windowMinutes (5h + weekly)', () => {
+    const sameDayReset = Math.floor(NOW_MS / 1000) + 2 * 60 * 60;
+    const summary = summarizeAccountRateLimits({
+      planType: 'plus',
+      primary: { usedPercent: 40, windowMinutes: 300, resetsAt: sameDayReset },
+      secondary: { usedPercent: 12.5, windowMinutes: 10080 },
+      rateLimitReachedType: null,
+    }, NOW_MS);
+    expect(summary).not.toBeNull();
+    expect(summary!.rows[0]).toEqual({ label: '套餐', value: 'Plus' });
+    expect(summary!.rows[1].label).toBe('5h');
+    expect(summary!.rows[1].value).toContain('剩余 60%');
+    expect(summary!.rows[1].value).toContain('已用 40%');
+    expect(summary!.rows[1].value).toContain('重置');
+    expect(summary!.rows[2]).toEqual({ label: '周', value: '剩余 87.5% · 已用 12.5%' });
+  });
+
+  it('follows upstream window composition instead of assuming 5h exists (weekly-only)', () => {
+    const summary = summarizeAccountRateLimits({
+      primary: { usedPercent: 30, windowMinutes: 10080 },
+      secondary: null,
+    }, NOW_MS);
+    expect(summary!.rows).toEqual([{ label: '周', value: '剩余 70% · 已用 30%' }]);
+  });
+
+  it('falls back to a neutral window label when upstream omits duration and reset', () => {
+    const summary = summarizeAccountRateLimits({
+      primary: { usedPercent: 99.5 },
+    }, NOW_MS);
+    expect(summary!.rows).toEqual([{ label: '限额', value: '剩余 0.5% · 已用 99.5%' }]);
+  });
+
+  it('derives day-scale labels and flags non-credit limit-reached states', () => {
+    const summary = summarizeAccountRateLimits({
+      primary: { usedPercent: 100, windowMinutes: 3 * 24 * 60 },
+      rateLimitReachedType: 'rate_limit_reached',
+    }, NOW_MS);
+    expect(summary!.rows[0].label).toBe('3天');
+    expect(summary!.rows[1]).toEqual({ label: '状态', value: '已触发账号限额' });
+
+    const creditsOnly = summarizeAccountRateLimits({
+      primary: { usedPercent: 10, windowMinutes: 300 },
+      rateLimitReachedType: 'workspace_owner_credits_depleted',
+    }, NOW_MS);
+    expect(creditsOnly!.rows.some((row) => row.label === '状态')).toBe(false);
+  });
+
+  it('returns null for unusable payloads so callers can hide the section', () => {
+    expect(summarizeAccountRateLimits(null, NOW_MS)).toBeNull();
+    expect(summarizeAccountRateLimits('nope', NOW_MS)).toBeNull();
+    expect(summarizeAccountRateLimits({}, NOW_MS)).toBeNull();
+    expect(summarizeAccountRateLimits({ primary: { windowMinutes: 300 } }, NOW_MS)).toBeNull();
+  });
+});

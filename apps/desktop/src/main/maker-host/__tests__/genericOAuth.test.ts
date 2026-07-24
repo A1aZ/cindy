@@ -1,0 +1,433 @@
+/**
+ * generic-oauth Runner + oauth-token 路由分支 + active-catalog 发现模型泛化 merge 单测。
+ *
+ * 覆盖（存储 / fetch / 时钟注入，不联网、不触电 Electron）：
+ *   - blob 缓存读写、has/logout 语义；
+ *   - 临期单飞刷新：refresh_token 交换、登出竞态不回写、并发只刷一次；
+ *   - readCachedGenericOAuthAccessToken 同步返回 + 临期触发后台刷新；
+ *   - discoverGenericOAuthModels 解析 OpenAI /models 形状 + 失败回 null；
+ *   - buildRouteDecision 的 oauth-token 分支（Bearer 覆盖、cc 抹 x-api-key、codex 抹 OpenAI
+ *     账号元数据头、无 token passthrough）；
+ *   - 登录流（回环回调模拟）成功路径 + 凭证落盘失败的登录硬失败 / 刷新保内存态语义；
+ *   - setDiscoveredProviderModels 的 additions-only merge。
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+
+import type { OAuthProviderDescriptor } from '@cindy/model-providers';
+
+import {
+  cancelGenericOAuthLogin,
+  configureGenericOAuth,
+  deriveModelsDiscoveryUrl,
+  hasGenericOAuthLogin,
+  logoutGenericOAuth,
+  readCachedGenericOAuthAccessToken,
+  refreshGenericOAuthIfNeeded,
+  discoverGenericOAuthModels,
+  resetGenericOAuthMemoryCache,
+  runGenericOAuthLogin,
+  type GenericOAuthStorage,
+} from '../generic-oauth.js';
+import {
+  buildRouteDecision,
+  isHostInjectedAuthSession,
+  setOAuthTokenReader,
+  resolveSessionRouteDecision,
+} from '../provider-route.js';
+import {
+  setActiveCatalog,
+  setCustomProviders,
+  setDiscoveredProviderModels,
+  getActiveCatalog,
+} from '../active-catalog.js';
+import { setSessionProvider } from '../session-provider-store.js';
+
+const OAUTH: OAuthProviderDescriptor = {
+  authorizeUrl: 'https://auth.acme.example/oauth2/authorize',
+  tokenUrl: 'https://auth.acme.example/oauth2/token',
+  clientId: 'client-1',
+  scopes: 'openid offline_access',
+  modelsDiscoveryUrl: 'https://api.acme.example/v1/models',
+};
+
+function memStorage(): GenericOAuthStorage & { map: Map<string, string> } {
+  const map = new Map<string, string>();
+  return {
+    map,
+    read: (id) => map.get(id) ?? null,
+    write: (id, v) => {
+      map.set(id, v);
+      return true;
+    },
+    remove: (id) => {
+      map.delete(id);
+    },
+  };
+}
+
+let storage = memStorage();
+let nowMs = 1_000_000;
+let fetchCalls: { url: string; body?: string; headers?: Record<string, string> }[] = [];
+let fetchResponder: (url: string) => Response = () => new Response('{}', { status: 500 });
+
+beforeEach(() => {
+  storage = memStorage();
+  nowMs = 1_000_000;
+  fetchCalls = [];
+  resetGenericOAuthMemoryCache();
+  configureGenericOAuth({
+    storage,
+    now: () => nowMs,
+    fetchImpl: (async (url: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push({
+        url: String(url),
+        body: init?.body ? String(init.body) : undefined,
+        headers: (init?.headers ?? undefined) as Record<string, string> | undefined,
+      });
+      return fetchResponder(String(url));
+    }) as typeof fetch,
+  });
+});
+
+afterEach(() => {
+  resetGenericOAuthMemoryCache();
+  setOAuthTokenReader(() => null);
+});
+
+function seedBlob(providerId: string, blob: Record<string, unknown>): void {
+  storage.map.set(providerId, JSON.stringify(blob));
+  resetGenericOAuthMemoryCache(); // 让下次读走注入 storage
+}
+
+describe('blob 读写 / has / logout', () => {
+  it('无凭证 → has=false、token=null；写入后可读；logout 清空', () => {
+    expect(hasGenericOAuthLogin('acme')).toBe(false);
+    seedBlob('acme', { access_token: 'at-1' });
+    expect(hasGenericOAuthLogin('acme')).toBe(true);
+    expect(readCachedGenericOAuthAccessToken('acme', OAUTH)).toBe('at-1');
+    logoutGenericOAuth('acme');
+    expect(hasGenericOAuthLogin('acme')).toBe(false);
+    expect(storage.map.has('acme')).toBe(false);
+  });
+
+  it('坏 JSON blob 安全兜底为未登录', () => {
+    storage.map.set('acme', 'not-json');
+    resetGenericOAuthMemoryCache();
+    expect(hasGenericOAuthLogin('acme')).toBe(false);
+  });
+});
+
+describe('临期刷新（单飞）', () => {
+  it('临期 + refresh_token → 交换新 token 并落盘', async () => {
+    seedBlob('acme', { access_token: 'old', refresh_token: 'rt-1', expires_at: nowMs + 1_000 });
+    fetchResponder = () =>
+      new Response(JSON.stringify({ access_token: 'new', refresh_token: 'rt-2', expires_in: 3600 }), { status: 200 });
+    await refreshGenericOAuthIfNeeded('acme', OAUTH);
+    expect(readCachedGenericOAuthAccessToken('acme', OAUTH)).toBe('new');
+    expect(fetchCalls[0]?.url).toBe(OAUTH.tokenUrl);
+    expect(fetchCalls[0]?.body).toContain('grant_type=refresh_token');
+    expect(fetchCalls[0]?.body).toContain('refresh_token=rt-1');
+  });
+
+  it('未临期 / 无 refresh_token → 不发请求', async () => {
+    seedBlob('acme', { access_token: 'ok', expires_at: nowMs + 10 * 60_000 });
+    await refreshGenericOAuthIfNeeded('acme', OAUTH);
+    expect(fetchCalls).toHaveLength(0);
+  });
+
+  it('刷新期间登出 → 不回写（撤销登出是禁止的）', async () => {
+    seedBlob('acme', { access_token: 'old', refresh_token: 'rt-1', expires_at: nowMs + 1_000 });
+    fetchResponder = () => {
+      // 刷新响应到达前用户登出。
+      logoutGenericOAuth('acme');
+      return new Response(JSON.stringify({ access_token: 'new', expires_in: 3600 }), { status: 200 });
+    };
+    await refreshGenericOAuthIfNeeded('acme', OAUTH);
+    expect(hasGenericOAuthLogin('acme')).toBe(false);
+  });
+
+  it('readCachedGenericOAuthAccessToken：临期时同步返回旧 token 并后台触发刷新', async () => {
+    seedBlob('acme', { access_token: 'old', refresh_token: 'rt-1', expires_at: nowMs + 1_000 });
+    fetchResponder = () =>
+      new Response(JSON.stringify({ access_token: 'new', expires_in: 3600 }), { status: 200 });
+    expect(readCachedGenericOAuthAccessToken('acme', OAUTH)).toBe('old'); // 不阻塞
+    await refreshGenericOAuthIfNeeded('acme', OAUTH); // 排队等后台那次完成（单飞去重）
+    expect(readCachedGenericOAuthAccessToken('acme', OAUTH)).toBe('new');
+  });
+});
+
+describe('登录流与凭证落盘失败', () => {
+  /** 模拟浏览器授权：解析授权 URL 里的回调地址与 state，回打回环回调（fire-and-forget——
+   *  回调响应要等 succeed()/close() 才写回，await 会与登录流互相等死锁）。 */
+  function autoAuthorize(): void {
+    configureGenericOAuth({
+      openExternal: async (authUrl) => {
+        const u = new URL(authUrl);
+        const redirect = u.searchParams.get('redirect_uri')!;
+        const state = u.searchParams.get('state')!;
+        void fetch(`${redirect}?code=code-1&state=${encodeURIComponent(state)}`).catch(() => {});
+      },
+    });
+  }
+
+  it('成功路径：token 交换后凭证落盘 + 内存可读', async () => {
+    autoAuthorize();
+    fetchResponder = () =>
+      new Response(JSON.stringify({ access_token: 'at-new', refresh_token: 'rt', expires_in: 3600 }), { status: 200 });
+    const res = await runGenericOAuthLogin({ id: 'acme', name: 'Acme' }, OAUTH);
+    expect(res.ok).toBe(true);
+    expect(hasGenericOAuthLogin('acme')).toBe(true);
+    expect(JSON.parse(storage.map.get('acme')!).access_token).toBe('at-new');
+  });
+
+  it('登录时 storage.write 失败 → 硬失败且不留「已连接」内存态（回归：防重启后授权静默丢失）', async () => {
+    autoAuthorize();
+    storage.write = () => false;
+    fetchResponder = () =>
+      new Response(JSON.stringify({ access_token: 'at-new', expires_in: 3600 }), { status: 200 });
+    const res = await runGenericOAuthLogin({ id: 'acme', name: 'Acme' }, OAUTH);
+    expect(res.ok).toBe(false);
+    expect(res.reason).toContain('安全存储');
+    expect(hasGenericOAuthLogin('acme')).toBe(false);
+    expect(storage.map.has('acme')).toBe(false);
+  });
+
+  it('刷新时 storage.write 失败 → 内存态仍更新（会话不断链），盘上保持旧值', async () => {
+    seedBlob('acme', { access_token: 'old', refresh_token: 'rt-1', expires_at: nowMs + 1_000 });
+    storage.write = () => false;
+    fetchResponder = () =>
+      new Response(JSON.stringify({ access_token: 'new', expires_in: 3600 }), { status: 200 });
+    await refreshGenericOAuthIfNeeded('acme', OAUTH);
+    expect(readCachedGenericOAuthAccessToken('acme', OAUTH)).toBe('new'); // 内存态已是新 token
+    expect(JSON.parse(storage.map.get('acme')!).access_token).toBe('old'); // 盘上还是旧值
+  });
+});
+
+describe('discoverGenericOAuthModels', () => {
+  it('解析 {data:[{id}]} 形状并去重', async () => {
+    seedBlob('acme', { access_token: 'at' });
+    fetchResponder = () =>
+      new Response(JSON.stringify({ data: [{ id: 'm-1' }, { id: 'm-2' }, { id: 'm-1' }] }), { status: 200 });
+    const models = await discoverGenericOAuthModels('acme', OAUTH);
+    expect(models).toEqual([
+      { id: 'm-1', name: 'm-1' },
+      { id: 'm-2', name: 'm-2' },
+    ]);
+  });
+
+  it('未登录 / 非 2xx / 坏形状 → null', async () => {
+    expect(await discoverGenericOAuthModels('acme', OAUTH)).toBeNull(); // 未登录
+    seedBlob('acme', { access_token: 'at' });
+    fetchResponder = () => new Response('{}', { status: 401 });
+    expect(await discoverGenericOAuthModels('acme', OAUTH)).toBeNull();
+    fetchResponder = () => new Response('{"weird":true}', { status: 200 });
+    expect(await discoverGenericOAuthModels('acme', OAUTH)).toBeNull();
+  });
+
+  it('cc-wire 发现请求带 anthropic-version(缺失会被 Anthropic 兼容端点 400 拒);codex/缺省不带', async () => {
+    seedBlob('acme', { access_token: 'at' });
+    fetchResponder = () => new Response(JSON.stringify({ data: [{ id: 'm' }] }), { status: 200 });
+    await discoverGenericOAuthModels('acme', OAUTH, undefined, 'claude-code');
+    expect(fetchCalls[0]?.headers).toEqual({
+      authorization: 'Bearer at',
+      'anthropic-version': '2023-06-01',
+    });
+    await discoverGenericOAuthModels('acme', OAUTH, undefined, 'codex');
+    expect(fetchCalls[1]?.headers).toEqual({ authorization: 'Bearer at' });
+    await discoverGenericOAuthModels('acme', OAUTH);
+    expect(fetchCalls[2]?.headers).toEqual({ authorization: 'Bearer at' });
+  });
+
+  it('显式 discoveryUrl 优先于描述符声明；两者皆缺 → null 不发请求', async () => {
+    seedBlob('acme', { access_token: 'at' });
+    fetchResponder = () => new Response(JSON.stringify({ data: [{ id: 'm' }] }), { status: 200 });
+    await discoverGenericOAuthModels('acme', OAUTH, 'https://derived.example/v1/models');
+    expect(fetchCalls[0]?.url).toBe('https://derived.example/v1/models');
+    const { modelsDiscoveryUrl: _omit, ...noDiscovery } = OAUTH;
+    expect(await discoverGenericOAuthModels('acme', noDiscovery)).toBeNull();
+    expect(fetchCalls).toHaveLength(1); // 第二次没发请求
+  });
+});
+
+describe('deriveModelsDiscoveryUrl', () => {
+  it('/vN 结尾只追加 /models，其余追加 /v1/models（尾斜杠归一）', () => {
+    expect(deriveModelsDiscoveryUrl('https://openrouter.ai/api/v1')).toBe('https://openrouter.ai/api/v1/models');
+    expect(deriveModelsDiscoveryUrl('https://api.acme.example/anthropic')).toBe(
+      'https://api.acme.example/anthropic/v1/models',
+    );
+    expect(deriveModelsDiscoveryUrl('https://api.acme.example/')).toBe('https://api.acme.example/v1/models');
+  });
+});
+
+describe('oauth-token 路由分支', () => {
+  const routing = {
+    upstream: 'https://api.acme.example',
+    authStrategy: 'oauth-token' as const,
+    headerDelete: ['anthropic-beta'],
+  };
+
+  it('有 token：Bearer 覆盖 + upstream override；cc 额外抹 x-api-key', () => {
+    const d = buildRouteDecision(routing, null, 'claude-code', null, 'at-9');
+    expect(d).toEqual({
+      headerOverride: { authorization: 'Bearer at-9' },
+      upstreamOverride: 'https://api.acme.example',
+      headerDelete: ['anthropic-beta', 'x-api-key'],
+    });
+    const dc = buildRouteDecision(routing, null, 'codex', null, 'at-9');
+    // codex：描述符自带的删除项保留，并整组追加 OpenAI 账号元数据头
+    // （ChatGPT OAuth spawn 的子进程会带这些头，发往第三方上游前必须抹掉；
+    // 自定义供应商目录条目无法声明 headerDelete，只能靠 oauth-token 分支代码层兜底）。
+    expect(dc?.headerDelete).toEqual(
+      expect.arrayContaining(['anthropic-beta', 'chatgpt-account-id', 'openai-beta', 'originator', 'session_id']),
+    );
+    expect(dc?.headerDelete).toHaveLength(5);
+  });
+
+  it('无 token → 仍路由到本供应商上游并置哑 token（绝不回落默认路由防凭证泄漏）', () => {
+    const d = buildRouteDecision(routing, null, 'claude-code', null, null);
+    expect(d?.upstreamOverride).toBe('https://api.acme.example');
+    expect(d?.headerOverride?.authorization).toBe('Bearer xdt-missing-provider-oauth-token');
+    expect(d?.headerDelete).toContain('x-api-key');
+  });
+
+  it('isHostInjectedAuthSession: oauth-token 会话视为 host 注入鉴权（codex env-key 态不落默认网关）', () => {
+    setActiveCatalog({
+      version: 't',
+      providers: [
+        {
+          id: 'acme',
+          name: 'Acme',
+          source: 'builtin',
+          agents: ['codex'],
+          auth: { method: 'oauth', oauth: OAUTH },
+          routing: { codex: { upstream: 'https://api.acme.example', authStrategy: 'oauth-token' } },
+          models: { codex: [] },
+        },
+      ],
+    });
+    setSessionProvider('sess-ht', 'acme');
+    expect(isHostInjectedAuthSession('sess-ht', 'codex')).toBe(true);
+    expect(isHostInjectedAuthSession('sess-ht', 'claude-code')).toBe(false); // 该 agent 无路由
+    expect(isHostInjectedAuthSession('sess-unknown', 'codex')).toBe(false); // 未选供应商
+  });
+
+  it('resolveSessionRouteDecision 经注入 token reader 走通全链路', async () => {
+    setActiveCatalog({
+      version: 't',
+      providers: [
+        {
+          id: 'acme',
+          name: 'Acme',
+          source: 'builtin',
+          agents: ['claude-code'],
+          auth: { method: 'oauth', oauth: OAUTH },
+          routing: { 'claude-code': routing },
+          models: { 'claude-code': [{ id: 'acme-1', name: 'A1', contextWindow: 1000, efforts: [], defaultEffort: null }] },
+        },
+      ],
+    });
+    setSessionProvider('sess-1', 'acme');
+    setOAuthTokenReader((id) => (id === 'acme' ? 'at-x' : null));
+    // oauth-token 分支同步返回；await 兼容联合返回类型（provider-oauth-header 分支才是 Promise）。
+    const d = await resolveSessionRouteDecision('sess-1', 'claude-code', null);
+    expect(d?.headerOverride?.authorization).toBe('Bearer at-x');
+    expect(d?.upstreamOverride).toBe('https://api.acme.example');
+  });
+});
+
+describe('setDiscoveredProviderModels additions-only merge', () => {
+  it('只补新 id，静态条目 first-wins；空数组清空 discovery', () => {
+    setActiveCatalog({
+      version: 't',
+      providers: [
+        {
+          id: 'acme',
+          name: 'Acme',
+          source: 'builtin',
+          agents: ['claude-code'],
+          auth: { method: 'oauth', oauth: OAUTH },
+          routing: { 'claude-code': { upstream: 'https://api.acme.example', authStrategy: 'oauth-token' } },
+          models: {
+            'claude-code': [{ id: 'static-1', name: 'Static', contextWindow: 1000, efforts: [], defaultEffort: null }],
+          },
+        },
+      ],
+    });
+    setDiscoveredProviderModels('acme', 'claude-code', [
+      { id: 'static-1', name: 'OVERRIDE-IGNORED', contextWindow: 1, efforts: [], defaultEffort: null },
+      { id: 'disc-1', name: 'Discovered', contextWindow: 200_000, efforts: [], defaultEffort: null },
+    ]);
+    const p = getActiveCatalog().providers.find((x) => x.id === 'acme')!;
+    expect(p.models['claude-code']!.map((m) => m.name)).toEqual(['Static', 'Discovered']);
+
+    setDiscoveredProviderModels('acme', 'claude-code', []);
+    const p2 = getActiveCatalog().providers.find((x) => x.id === 'acme')!;
+    expect(p2.models['claude-code']!.map((m) => m.id)).toEqual(['static-1']);
+  });
+
+  it('自定义供应商同样吃到发现 augment（回归：custom 追加须在 augment 之前）', () => {
+    setActiveCatalog({ version: 't', providers: [] });
+    setCustomProviders([
+      {
+        id: 'my-sub',
+        name: 'My Sub',
+        source: 'user',
+        agents: ['claude-code'],
+        auth: { method: 'oauth', oauth: OAUTH },
+        routing: { 'claude-code': { upstream: 'https://api.my.example', authStrategy: 'oauth-token' } },
+        models: { 'claude-code': [] },
+      },
+    ]);
+    setDiscoveredProviderModels('my-sub', 'claude-code', [
+      { id: 'disc-a', name: 'Disc A', contextWindow: 200_000, efforts: [], defaultEffort: null },
+    ]);
+    const p = getActiveCatalog().providers.find((x) => x.id === 'my-sub')!;
+    expect(p.models['claude-code']!.map((m) => m.id)).toEqual(['disc-a']);
+    // 清理进程级单例状态，避免泄漏到其它用例。
+    setDiscoveredProviderModels('my-sub', 'claude-code', []);
+    setCustomProviders([]);
+  });
+});
+
+// ── PR3:generic 裸文本 done 消除(callback-pages-classification 页壳改造点 5)──
+
+describe('close() 回执路径(裸 done 消除)', () => {
+  it('code 已回、exchange 未决时取消 → 浏览器收到品牌化失败页,绝不再收裸文本 done(唯一输出路径断言)', async () => {
+    let callbackResponse: Promise<Response> | null = null;
+    let exchangeStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      exchangeStarted = resolve;
+    });
+    configureGenericOAuth({
+      openExternal: async (authUrl) => {
+        const u = new URL(authUrl);
+        const redirect = u.searchParams.get('redirect_uri')!;
+        const state = u.searchParams.get('state')!;
+        callbackResponse = fetch(`${redirect}?code=code-1&state=${encodeURIComponent(state)}`);
+      },
+      // token exchange 悬挂直到 abort:复现「code 已回、succeed/fail 前流程被终结」
+      fetchImpl: ((_url: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          exchangeStarted();
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError')),
+          );
+        })) as typeof fetch,
+    });
+
+    const login = runGenericOAuthLogin({ id: 'acme', name: 'Acme' }, OAUTH);
+    await started;
+    cancelGenericOAuthLogin('acme');
+    const res = await login;
+    expect(res.ok).toBe(false);
+
+    const body = await (await callbackResponse!).text();
+    expect(body).not.toBe('done');
+    expect(body).not.toContain('>done<');
+    // 唯一输出路径 = shared builder(legacy visual):品牌失败页 + provider 文案
+    expect(body).toContain('data-cindy-oauth-result="error"');
+    expect(body).toContain('<span class="badge"');
+    expect(body).toContain('Acme');
+  });
+});

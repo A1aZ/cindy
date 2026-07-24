@@ -1,0 +1,619 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import type { Message } from '@/lib/ccAgent.types';
+
+vi.mock('@/lib/messageService', () => ({
+  list: vi.fn(async () => []),
+  around: vi.fn(async () => []),
+  create: vi.fn(async () => ({}) as unknown),
+  updateContent: vi.fn(async () => ({}) as unknown),
+}));
+
+vi.mock('@/lib/sessionService', () => ({
+  get: vi.fn(async () => ({
+    agentKind: 'cc',
+    remoteHostId: null,
+    sdkSessionId: null,
+    fastMode: false,
+    contextTokens: 0,
+    contextWindow: 0,
+    totalCostUsd: 0,
+  })),
+  update: vi.fn(async () => ({})),
+  touchUserSend: vi.fn(async () => ({})),
+}));
+
+vi.mock('@/lib/sessionsBus', () => ({
+  emitPatch: vi.fn(),
+}));
+
+vi.mock('@/lib/userPromptStore', () => ({
+  getUserPrompt: () => '',
+}));
+
+vi.mock('@/lib/imageRef', () => ({
+  parseUserContent: vi.fn((c: string) => ({ text: c, images: [], files: [] })),
+  stringifyUserContent: vi.fn((text: string) => text),
+}));
+
+vi.mock('@/lib/composerDraftStore', () => ({
+  saveDraft: vi.fn(),
+  plainTextToTiptapDoc: (s: string) => ({
+    type: 'doc',
+    content: [{ type: 'paragraph', content: [{ type: 'text', text: s }] }],
+  }),
+}));
+
+import { makerChatStore } from '@/lib/makerChatStore';
+import * as messageService from '@/lib/messageService';
+
+const BASE_TIME = new Date('2026-05-20T00:00:00.000Z');
+
+let disposers: Array<() => void> = [];
+let sessionIds: string[] = [];
+
+function sid(label: string): string {
+  const value = `${label}-${Math.random().toString(36).slice(2, 8)}`;
+  sessionIds.push(value);
+  return value;
+}
+
+function enter(sessionId: string): () => void {
+  const dispose = makerChatStore.enterView(sessionId);
+  disposers.push(dispose);
+  return dispose;
+}
+
+function addMessage(sessionId: string): void {
+  makerChatStore.insertSystemCard(sessionId, 'status', { label: sessionId });
+}
+
+function dbMessage(
+  sessionId: string,
+  id: string,
+  content: string,
+  createdAt: string,
+  clientId = `client-${id}`,
+): Message {
+  return {
+    id,
+    clientId,
+    sessionId,
+    role: 'assistant',
+    content,
+    toolUseId: null,
+    agentMeta: null,
+    createdAt,
+  };
+}
+
+function thinkingDbMessage(
+  sessionId: string,
+  id: string,
+  text: string,
+  createdAt: string,
+  durationMs: number,
+  opts: { finishedAt?: number } = {},
+): Message {
+  return {
+    id,
+    clientId: `client-${id}`,
+    sessionId,
+    role: 'thinking',
+    content: { kind: 'thinking', text, durationMs, isRedacted: false, ...opts },
+    toolUseId: null,
+    agentMeta: null,
+    createdAt,
+  };
+}
+
+describe('makerChatStore active view tracking', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(BASE_TIME);
+    disposers = [];
+    sessionIds = [];
+  });
+
+  afterEach(() => {
+    for (const dispose of [...disposers].reverse()) dispose();
+    for (const sessionId of sessionIds) makerChatStore.purgeSession(sessionId);
+    makerChatStore.__teardownGlobalListeners();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('enterView marks a session active and clears lastViewedAt', () => {
+    const sessionId = sid('enter');
+    const dispose = enter(sessionId);
+    dispose();
+    vi.setSystemTime(new Date(BASE_TIME.getTime() + 1_000));
+    const disposeAgain = enter(sessionId);
+
+    expect(makerChatStore.__activeViewTest.getActiveSessionIds()).toContain(sessionId);
+    expect(makerChatStore.__activeViewTest.getLastViewedAt(sessionId)).toBeUndefined();
+
+    disposeAgain();
+  });
+
+  it('leaveView removes a session and records lastViewedAt', () => {
+    const sessionId = sid('leave');
+    const dispose = enter(sessionId);
+
+    vi.setSystemTime(new Date(BASE_TIME.getTime() + 2_000));
+    dispose();
+
+    expect(makerChatStore.__activeViewTest.getActiveSessionIds()).not.toContain(sessionId);
+    expect(makerChatStore.__activeViewTest.getLastViewedAt(sessionId)).toBe(BASE_TIME.getTime() + 2_000);
+  });
+
+  it('keeps two simultaneously mounted Orca panes out of soft eviction', () => {
+    const leadId = sid('lead');
+    const workerId = sid('worker');
+    const disposeLead = enter(leadId);
+    const disposeWorker = enter(workerId);
+    addMessage(leadId);
+    addMessage(workerId);
+
+    vi.advanceTimersByTime(90_000);
+
+    expect(makerChatStore.getSnapshot(leadId).messages).toHaveLength(1);
+    expect(makerChatStore.getSnapshot(workerId).messages).toHaveLength(1);
+
+    disposeWorker();
+    disposeLead();
+  });
+
+  // F3 回归:硬 LRU 回收 (_evictLruIfNeeded,缓存 > MAX_CACHED_SESSIONS 时触发) 必须
+  // 跳过仍被 mounted view 看着的 session —— 多窗/分屏副屏钉的 idle 会话不能因为沉到
+  // LRU 最旧就被 _purgeSession 删掉(否则活 view 变 blank)。与 demote/trim 对齐。
+  it('never hard-evicts an active-view session even when it is the LRU-oldest', () => {
+    // keepId 先建 + 落一条消息(此刻在 MRU),随后不再 touch → 被后续创建挤到 LRU 最旧。
+    const keepId = sid('keep-active');
+    addMessage(keepId);
+    enter(keepId); // 标记为 active-view(模拟副窗钉着它)
+
+    // 创建 25 个(> MAX_CACHED_SESSIONS=20)idle 会话,反复强制触发硬回收。
+    const otherIds: string[] = [];
+    for (let i = 0; i < 25; i++) {
+      const id = sid(`idle-${i}`);
+      otherIds.push(id);
+      addMessage(id);
+    }
+
+    // keepId 虽是 LRU 最旧,但 active-view → 不被回收,消息仍在。
+    expect(makerChatStore.getSnapshot(keepId).messages).toHaveLength(1);
+    // 非空泛验证:回收确实发生了 —— 最早创建的 idle 会话(非 active)已被 purge,
+    // 重新 getSnapshot 只会拿到重建的空 slice。
+    expect(makerChatStore.getSnapshot(otherIds[0]).messages).toHaveLength(0);
+  });
+
+  it('enterView disposer leaves the session', () => {
+    const sessionId = sid('disposer');
+    const dispose = enter(sessionId);
+
+    dispose();
+
+    expect(makerChatStore.__activeViewTest.getActiveSessionIds()).not.toContain(sessionId);
+    expect(makerChatStore.__activeViewTest.getLastViewedAt(sessionId)).toBe(BASE_TIME.getTime());
+  });
+
+  it('leaveView is a no-op for sessions that were never entered', () => {
+    const sessionId = sid('unknown');
+
+    makerChatStore.leaveView(sessionId);
+
+    expect(makerChatStore.__activeViewTest.getActiveSessionIds()).not.toContain(sessionId);
+    expect(makerChatStore.__activeViewTest.getLastViewedAt(sessionId)).toBeUndefined();
+  });
+
+  it('survives the React StrictMode enter-leave-enter sequence', () => {
+    const sessionId = sid('strict');
+    const firstDispose = enter(sessionId);
+    addMessage(sessionId);
+    firstDispose();
+    const secondDispose = enter(sessionId);
+
+    vi.advanceTimersByTime(90_000);
+
+    expect(makerChatStore.__activeViewTest.getActiveSessionIds()).toContain(sessionId);
+    expect(makerChatStore.__activeViewTest.getLastViewedAt(sessionId)).toBeUndefined();
+    expect(makerChatStore.getSnapshot(sessionId).messages).toHaveLength(1);
+
+    secondDispose();
+  });
+
+  it('keeps existing history when loading a search result window', async () => {
+    const sessionId = sid('search-jump');
+    addMessage(sessionId);
+    const localMessage = makerChatStore.getSnapshot(sessionId).messages[0];
+    vi.mocked(messageService.around).mockResolvedValueOnce([
+      dbMessage(sessionId, 'older', 'older search hit', '2026-05-19T00:00:00.000Z'),
+      dbMessage(sessionId, 'hit', 'target search hit', '2026-05-19T00:01:00.000Z'),
+    ]);
+
+    const target = await makerChatStore.loadAroundMessage(sessionId, 'hit', { radius: 60 });
+    const messages = makerChatStore.getSnapshot(sessionId).messages;
+
+    expect(target?.clientId).toBe('client-hit');
+    expect(messages.map((message) => message.clientId)).toEqual([
+      'client-older',
+      'client-hit',
+      localMessage.clientId,
+    ]);
+  });
+
+  it('keeps search result windows in chronological order across jumps', async () => {
+    const sessionId = sid('search-jump-order');
+    vi.mocked(messageService.around).mockResolvedValueOnce([
+      dbMessage(sessionId, 'older', 'older search hit', '2026-05-19T00:00:00.000Z'),
+      dbMessage(sessionId, 'first-hit', 'first target search hit', '2026-05-19T00:01:00.000Z'),
+    ]);
+
+    await makerChatStore.loadAroundMessage(sessionId, 'first-hit', { radius: 60 });
+    expect(makerChatStore.getSnapshot(sessionId).oldestMessageId).toBe('older');
+
+    vi.mocked(messageService.around).mockResolvedValueOnce([
+      dbMessage(sessionId, 'later', 'later search context', '2026-05-19T00:05:00.000Z'),
+      dbMessage(sessionId, 'second-hit', 'second target search hit', '2026-05-19T00:06:00.000Z'),
+    ]);
+
+    const target = await makerChatStore.loadAroundMessage(sessionId, 'second-hit', { radius: 60 });
+    const snapshot = makerChatStore.getSnapshot(sessionId);
+
+    expect(target?.clientId).toBe('client-second-hit');
+    expect(snapshot.messages.map((message) => message.clientId)).toEqual([
+      'client-older',
+      'client-first-hit',
+      'client-later',
+      'client-second-hit',
+    ]);
+    expect(snapshot.oldestMessageId).toBe('older');
+  });
+
+  it('preserves server order for search jump messages with equal timestamps', async () => {
+    const sessionId = sid('search-jump-same-time');
+    vi.mocked(messageService.around).mockResolvedValueOnce([
+      dbMessage(sessionId, '001', 'first same-time message', '2026-05-19T00:00:00.000Z', 'client-z'),
+      dbMessage(sessionId, '002', 'target same-time message', '2026-05-19T00:00:00.000Z', 'client-a'),
+      dbMessage(sessionId, '003', 'third same-time message', '2026-05-19T00:00:00.000Z', 'client-m'),
+    ]);
+
+    const target = await makerChatStore.loadAroundMessage(sessionId, '002', { radius: 60 });
+    const snapshot = makerChatStore.getSnapshot(sessionId);
+
+    expect(target?.clientId).toBe('client-a');
+    expect(snapshot.messages.map((message) => message.clientId)).toEqual([
+      'client-z',
+      'client-a',
+      'client-m',
+    ]);
+  });
+
+  it('preserves the search jump cursor when initial history resolves later', async () => {
+    const sessionId = sid('search-jump-initial-race');
+    vi.stubGlobal('window', {
+      electronAPI: {
+        maker: {
+          input: {
+            getProjection: vi.fn(async () => ({
+              sessionId,
+              pendingQueue: [],
+              steeringQueueClientIds: [],
+              queuePaused: false,
+              queueExpanded: false,
+              queueInteractionLocks: [],
+              queueEditLocks: [],
+              queueAbortPending: false,
+              error: null,
+              recovery: null,
+              errorRetryText: null,
+            })),
+          },
+        },
+      },
+    });
+    let resolveInitialList!: (messages: Message[]) => void;
+    const initialListPromise = new Promise<Message[]>((resolve) => {
+      resolveInitialList = resolve;
+    });
+    vi.mocked(messageService.list).mockReturnValueOnce(initialListPromise);
+    vi.mocked(messageService.around).mockResolvedValueOnce([
+      dbMessage(sessionId, 'older-hit-context', 'older context', '2026-05-19T00:00:00.000Z'),
+      dbMessage(sessionId, 'hit', 'target search hit', '2026-05-19T00:01:00.000Z'),
+    ]);
+
+    makerChatStore.ensureInitialMessages(sessionId);
+    await makerChatStore.loadAroundMessage(sessionId, 'hit', { radius: 60 });
+    expect(makerChatStore.getSnapshot(sessionId).oldestMessageId).toBe('older-hit-context');
+
+    resolveInitialList([
+      dbMessage(sessionId, 'latest-page-oldest', 'latest page oldest', '2026-05-19T00:10:00.000Z'),
+      dbMessage(sessionId, 'latest-page-newest', 'latest page newest', '2026-05-19T00:11:00.000Z'),
+    ]);
+    await initialListPromise;
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const snapshot = makerChatStore.getSnapshot(sessionId);
+    expect(snapshot.messages.map((message) => message.clientId)).toEqual([
+      'client-older-hit-context',
+      'client-hit',
+      'client-latest-page-oldest',
+      'client-latest-page-newest',
+    ]);
+    expect(snapshot.oldestMessageId).toBe('older-hit-context');
+  });
+
+  it('keeps loadOlder history chronological after thinking timestamps are backdated', async () => {
+    const sessionId = sid('older-thinking-order');
+    const finishedAt = Date.parse('2026-05-19T00:10:00.000Z');
+    vi.mocked(messageService.around).mockResolvedValueOnce([
+      thinkingDbMessage(
+        sessionId,
+        'thinking',
+        'thinking across page boundary',
+        '2026-05-19T00:15:00.000Z',
+        5 * 60 * 1000,
+        { finishedAt },
+      ),
+      dbMessage(sessionId, 'current', 'current page message', '2026-05-19T00:11:00.000Z'),
+    ]);
+
+    await makerChatStore.loadAroundMessage(sessionId, 'current', { radius: 60 });
+    expect(makerChatStore.getSnapshot(sessionId).messages.map((message) => message.clientId)).toEqual([
+      'client-thinking',
+      'client-current',
+    ]);
+    expect(makerChatStore.getSnapshot(sessionId).messages[0].createdAt).toBe('2026-05-19T00:05:00.000Z');
+
+    vi.mocked(messageService.list).mockResolvedValueOnce([
+      dbMessage(sessionId, 'older-db-row', 'older DB row, later display time', '2026-05-19T00:08:00.000Z'),
+    ]);
+
+    makerChatStore.loadOlderMessages(sessionId);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const snapshot = makerChatStore.getSnapshot(sessionId);
+    expect(snapshot.messages.map((message) => message.clientId)).toEqual([
+      'client-thinking',
+      'client-older-db-row',
+      'client-current',
+    ]);
+    expect(snapshot.oldestMessageId).toBe('older-db-row');
+    expect(snapshot.hasMoreMessages).toBe(false);
+  });
+
+  // 向上翻页追页回归(2026-07 用户反馈"加载不动"):单页 50 行可能整页都是同一
+  // turn 的工作过程(渲染层折叠后可见高度零增长),loadOlderMessages 需带着
+  // spinner 连续追页,直到页里出现 user 行(可见锚点)或翻完;半程失败要提交
+  // 已拉到的页并保持 hasMoreMessages 可重试。
+  describe('loadOlderMessages visible-anchor backfill paging', () => {
+    /** 生成一整页 50 行(newest-first),行号 newestIdx..newestIdx-49。 */
+    function fullPage(
+      sessionId: string,
+      newestIdx: number,
+      opts: { userAtIdx?: number } = {},
+    ): Message[] {
+      const rows: Message[] = [];
+      for (let i = 0; i < 50; i++) {
+        const idx = newestIdx - i;
+        const iso = new Date(Date.parse('2026-05-01T00:00:00.000Z') + idx * 1000).toISOString();
+        const base = dbMessage(sessionId, `row-${idx}`, `row ${idx}`, iso);
+        rows.push(opts.userAtIdx === idx ? { ...base, role: 'user' } : base);
+      }
+      return rows;
+    }
+
+    /** 追页循环全靠 microtask 链推进,多 flush 几轮保证 10 页内的链条都跑完。 */
+    async function flushPagingLoop(): Promise<void> {
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+    }
+
+    /** 用 loadAroundMessage 播种 oldestMessageId=current + hasMoreMessages=true。 */
+    async function seedSession(sessionId: string): Promise<void> {
+      vi.mocked(messageService.around).mockResolvedValueOnce([
+        dbMessage(sessionId, 'current', 'current message', '2026-05-19T00:00:00.000Z'),
+      ]);
+      await makerChatStore.loadAroundMessage(sessionId, 'current', { radius: 60 });
+      vi.mocked(messageService.list).mockClear();
+    }
+
+    it('keeps paging past user-less full pages and stops at the first page with a user row', async () => {
+      const sessionId = sid('older-backfill-stop-at-user');
+      await seedSession(sessionId);
+
+      // 第 1 页整页无 user 行(模拟长 turn 中段工作过程)→ 继续追;
+      // 第 2 页含 user 行(turn 边界,可见锚点)→ 停,即使整页 50 行 hasMore=true。
+      vi.mocked(messageService.list)
+        .mockResolvedValueOnce(fullPage(sessionId, 999))
+        .mockResolvedValueOnce(fullPage(sessionId, 949, { userAtIdx: 920 }));
+
+      makerChatStore.loadOlderMessages(sessionId);
+      await flushPagingLoop();
+
+      expect(vi.mocked(messageService.list).mock.calls.map((call) => call[1])).toEqual([
+        { limit: 50, before: 'current' },
+        { limit: 50, before: 'row-950' },
+      ]);
+      const snapshot = makerChatStore.getSnapshot(sessionId);
+      expect(snapshot.isLoadingMore).toBe(false);
+      expect(snapshot.hasMoreMessages).toBe(true);
+      expect(snapshot.oldestMessageId).toBe('row-900');
+      expect(snapshot.messages).toHaveLength(101); // current + 两页各 50
+      expect(snapshot.messages[0].clientId).toBe('client-row-900');
+      expect(snapshot.messages.at(-1)?.clientId).toBe('client-current');
+      expect(snapshot.messages.some((m) => m.clientId === 'client-row-920' && m.role === 'user')).toBe(true);
+    });
+
+    it('stops at MAX pages without a user row and still commits collected rows', async () => {
+      const sessionId = sid('older-backfill-page-cap');
+      await seedSession(sessionId);
+
+      // 10 页全是无 user 行的整页(游标停在同一批行也没关系,循环靠页数上限收口)。
+      for (let i = 0; i < 10; i++) {
+        vi.mocked(messageService.list).mockResolvedValueOnce(fullPage(sessionId, 999));
+      }
+
+      makerChatStore.loadOlderMessages(sessionId);
+      await flushPagingLoop();
+
+      expect(vi.mocked(messageService.list)).toHaveBeenCalledTimes(10);
+      const snapshot = makerChatStore.getSnapshot(sessionId);
+      expect(snapshot.isLoadingMore).toBe(false);
+      expect(snapshot.hasMoreMessages).toBe(true); // 没翻完,下次手势继续
+      expect(snapshot.oldestMessageId).toBe('row-950');
+      expect(snapshot.messages).toHaveLength(51); // current + 去重后的 50 行
+    });
+
+    it('commits already-fetched pages when a later page fetch fails', async () => {
+      const sessionId = sid('older-backfill-partial-failure');
+      await seedSession(sessionId);
+
+      vi.mocked(messageService.list)
+        .mockResolvedValueOnce(fullPage(sessionId, 999))
+        .mockRejectedValueOnce(new Error('tunnel dropped'));
+
+      makerChatStore.loadOlderMessages(sessionId);
+      await flushPagingLoop();
+
+      const snapshot = makerChatStore.getSnapshot(sessionId);
+      expect(snapshot.isLoadingMore).toBe(false);
+      // 第 1 页已进 UI(游标推进、内容不丢),失败只终止追页,保持可重试。
+      expect(snapshot.hasMoreMessages).toBe(true);
+      expect(snapshot.oldestMessageId).toBe('row-950');
+      expect(snapshot.messages).toHaveLength(51);
+      expect(snapshot.messages[0].clientId).toBe('client-row-950');
+    });
+
+    it('keeps hasMoreMessages retryable when the first page fetch fails', async () => {
+      const sessionId = sid('older-backfill-first-failure');
+      await seedSession(sessionId);
+
+      vi.mocked(messageService.list).mockRejectedValueOnce(new Error('tunnel dropped'));
+
+      makerChatStore.loadOlderMessages(sessionId);
+      await flushPagingLoop();
+
+      const snapshot = makerChatStore.getSnapshot(sessionId);
+      expect(snapshot.isLoadingMore).toBe(false);
+      expect(snapshot.hasMoreMessages).toBe(true);
+      expect(snapshot.oldestMessageId).toBe('current');
+    });
+
+    // rewind 竞态守卫:追页 in-flight 期间 reloadMessages(rewind commit 后的强制
+    // 重载)把切片清空重置,晚到的翻页窗口必须整体作废——merge 回去会让服务端
+    // 已软删的行复活。守卫走 _messagesEpoch 代际比对。
+    it('discards an in-flight paging window when the session is reloaded mid-flight', async () => {
+      const sessionId = sid('older-backfill-reload-race');
+      // reloadMessages → ensureInitialMessages → reconcilePendingInteractions 需要
+      // window.electronAPI(与"preserves the search jump cursor"测试同款 stub)。
+      vi.stubGlobal('window', {
+        electronAPI: {
+          maker: {
+            input: {
+              getProjection: vi.fn(async () => ({
+                sessionId,
+                pendingQueue: [],
+                steeringQueueClientIds: [],
+                queuePaused: false,
+                queueExpanded: false,
+                queueInteractionLocks: [],
+                queueEditLocks: [],
+                queueAbortPending: false,
+                error: null,
+                recovery: null,
+                errorRetryText: null,
+              })),
+            },
+          },
+        },
+      });
+      await seedSession(sessionId);
+
+      let resolveOlderPage!: (rows: Message[]) => void;
+      const olderPagePromise = new Promise<Message[]>((resolve) => {
+        resolveOlderPage = resolve;
+      });
+      vi.mocked(messageService.list)
+        .mockReturnValueOnce(olderPagePromise) // loadOlderMessages 第 1 页(挂起中)
+        .mockResolvedValueOnce([]); // reloadMessages → ensureInitialMessages(重载后空历史)
+
+      makerChatStore.loadOlderMessages(sessionId);
+      expect(makerChatStore.getSnapshot(sessionId).isLoadingMore).toBe(true);
+
+      makerChatStore.reloadMessages(sessionId);
+      await Promise.resolve();
+
+      // 翻页此刻才返回(短页 → 循环立即收口进入提交),但代际已变 → 作废。
+      resolveOlderPage(fullPage(sessionId, 999).slice(0, 10));
+      await flushPagingLoop();
+
+      const snapshot = makerChatStore.getSnapshot(sessionId);
+      expect(snapshot.isLoadingMore).toBe(false);
+      expect(snapshot.messages).toHaveLength(0); // 旧窗口没有被 merge 回清空后的切片
+      expect(snapshot.oldestMessageId).toBeNull();
+      expect(snapshot.hasMoreMessages).toBe(false);
+    });
+
+    it('keeps legacy single-row removal compatible with an in-flight paging window', async () => {
+      const sessionId = sid('older-backfill-single-delete-compat');
+      await seedSession(sessionId);
+
+      let resolveOlderPage!: (rows: Message[]) => void;
+      vi.mocked(messageService.list).mockReturnValueOnce(
+        new Promise<Message[]>((resolve) => {
+          resolveOlderPage = resolve;
+        }),
+      );
+
+      makerChatStore.loadOlderMessages(sessionId);
+      makerChatStore.removeMessageByClientId(sessionId, 'client-current');
+      resolveOlderPage(fullPage(sessionId, 999).slice(0, 10));
+      await flushPagingLoop();
+
+      const snapshot = makerChatStore.getSnapshot(sessionId);
+      expect(snapshot.messages).toHaveLength(10);
+      expect(snapshot.messages.some((message) => message.clientId === 'client-current')).toBe(false);
+      expect(snapshot.isLoadingMore).toBe(false);
+    });
+
+    it('discards an in-flight paging window after grouped deletion', async () => {
+      const sessionId = sid('older-backfill-group-delete-race');
+      await seedSession(sessionId);
+
+      let resolveOlderPage!: (rows: Message[]) => void;
+      vi.mocked(messageService.list).mockReturnValueOnce(
+        new Promise<Message[]>((resolve) => {
+          resolveOlderPage = resolve;
+        }),
+      );
+
+      makerChatStore.loadOlderMessages(sessionId);
+      makerChatStore.removeMessagesByClientIds(sessionId, ['client-current']);
+      resolveOlderPage(fullPage(sessionId, 999).slice(0, 10));
+      await flushPagingLoop();
+
+      const snapshot = makerChatStore.getSnapshot(sessionId);
+      expect(snapshot.messages).toHaveLength(0);
+      expect(snapshot.isLoadingMore).toBe(false);
+    });
+  });
+
+  // 反向验证：Set 版没破坏原 522b2b31 的 demote 触发条件——session leave 后超过
+  // DEMOTE_IDLE_MS 应被清空 messages（释放内存）。
+  it('demotes a session after it has been left for longer than DEMOTE_IDLE_MS', () => {
+    const sessionId = sid('demote');
+    const dispose = enter(sessionId);
+    addMessage(sessionId);
+    expect(makerChatStore.getSnapshot(sessionId).messages).toHaveLength(1);
+
+    dispose(); // 写 lastViewedAt = BASE_TIME
+    // 推进 90s（>60s DEMOTE_IDLE_MS）让 demote timer 至少跑一次（间隔 30s）。
+    vi.advanceTimersByTime(90_000);
+
+    expect(makerChatStore.getSnapshot(sessionId).messages).toHaveLength(0);
+    expect(makerChatStore.getSnapshot(sessionId).historyLoaded).toBe(false);
+  });
+});

@@ -1,0 +1,253 @@
+/**
+ * main/im/shared/types.ts
+ * ---------------------------------------------------------------------------
+ * IM 业务编排层的渠道适配契约。
+ *
+ * 背景: 飞书 bot 的业务编排(消息路由 / slash 命令 / agent turn / 卡片交互 /
+ * /ctr 接管)逻辑本身是渠道无关的, 历史上却直接 import feishuIm 单例与 feishu
+ * 专属的 sessionRepo / uiText。Slack 渠道接入时把这层抽到 im/shared/, 以
+ * ImChannelAdapter 参数化 —— 同一套编排逻辑挂 feishu / slack 两个 adapter。
+ *
+ * 设计要点:
+ *   - adapter.im 只要求 @cindy/im 的 ChannelIM 能力接口, 不要求具体类;
+ *     可选能力(emoji 回应)用 `im.reactToMessage?.()` 探测, 不另设 caps 开关
+ *   - sessions 命名空间封装"这个渠道的 session 行长什么样"(id 格式 / source
+ *     列值 / 默认 title / workingDir 策略 / 渠道专属列), DB 读写逻辑共用
+ *   - ui 是完整的文案包契约 —— 新渠道必须逐字段提供, 缺字段编译期报错,
+ *     不存在静默回退
+ */
+
+import type { AgentKind, Effort, PermissionMode } from '@cindy/maker-core';
+import type { ChannelIM, IMUnsupportedEntry } from '@cindy/im';
+
+/** 渠道名 — 同时是 sessions.source 列值与 IdentityKey.channel 的值域。 */
+export type ImChannelName = 'feishu' | 'slack' | 'discord';
+
+/**
+ * IM 编排层的产品默认配置(由 main/im/index.ts 产品接线层注入)。
+ * 形状与历史 FeishuOrchestratorConfig 完全一致。
+ */
+export interface ImOrchestratorConfig {
+  /** 该渠道 session 绑定的 maker agent kind。 */
+  agentKind: AgentKind;
+  /** 新建该渠道 session 的默认 model id。 */
+  defaultModel: string;
+  /** 新建该渠道 session 的默认权限模式。 */
+  defaultPermissionMode: PermissionMode;
+  /**
+   * IM 语境下按 model 的 effort 覆盖(选默认 effort 时优先于
+   * ModelDescriptor.defaultEffort;不在表里的 model 走 defaultEffort)。
+   */
+  effortOverrides?: Readonly<Partial<Record<string, Effort>>>;
+}
+
+/**
+ * 渠道的 session 行策略 — sessionRepo 共用 DB 逻辑, 渠道差异收敛到这里。
+ */
+export interface ImSessionNamespace {
+  /** sessions.source 列值。 */
+  source: ImChannelName;
+  /**
+   * 确定性 session id(跨重启稳定)。threadScoped 渠道(slack)把 scopeKey
+   * (thread root ts)编进 id — 每个 thread 一个独立 session;无 thread 渠道
+   * (feishu)忽略 scopeKey, 同一 (botContextId, userId) 恒同一 id。
+   */
+  sessionIdFor(botContextId: string, userId: string, scopeKey?: string): string;
+  /** 新建 session 行的初始 title。 */
+  defaultTitle(userId: string): string;
+  /**
+   * 该渠道会话在侧边栏的归属语义(sessions.workspaceKind 列)。缺省 'project'
+   * (按 workingDir 聚成项目组);'dialogue' 落「对话」分组 —— IM 私聊会话的
+   * workingDir 是 app 托管目录(im-working-dir),不该以它聚成假项目组。
+   */
+  workspaceKind?: 'project' | 'dialogue';
+  /** 该渠道 session 的工作目录(必须已创建好)。 */
+  ensureWorkingDir(botContextId: string): string;
+  /** 渠道专属列(feishu: feishuBotAppId/feishuOpenId;slack: imBotContextId/imUserId)。 */
+  extraInsertColumns(botContextId: string, userId: string): Record<string, unknown>;
+  /**
+   * 非接管会话 oneshot 生成正式标题时的前缀(如 'Slack · ' / '[飞书·DM] ')。
+   *   - threadScoped 渠道(slack): 新 thread 会话的首条消息触发;
+   *   - 非 threadScoped 渠道(feishu/discord): 新上下文(建行 / /new 后)的
+   *     首条消息触发, 标题跟随当前话题。
+   * 缺省时 threadScoped 渠道回落 FBot 前缀, 非 threadScoped 渠道不起名
+   * (保持 defaultTitle)。接管 session 一律沿用 FBot 前缀, 不走这里。
+   */
+  generatedTitlePrefix?: string;
+}
+
+/**
+ * 渠道适配器 — 编排层所有渠道差异的唯一注入点。
+ */
+export interface ImChannelAdapter {
+  channel: ImChannelName;
+  /** 收发能力(@cindy/im ChannelIM 契约)。 */
+  im: ChannelIM;
+  config: ImOrchestratorConfig;
+  ui: ImUiTextPack;
+  sessions: ImSessionNamespace;
+  /** "已收到" ack 的 emoji(feishu: emoji_type 枚举名;slack: emoji 名)。 */
+  processingEmoji: string;
+  /**
+   * thread = session 模型开关(slack: true)。开启后:
+   *   - 入站事件的 scopeKey(thread root ts)参与会话路由与接管 binding
+   *   - 出站回复全部带 threadTs = scopeKey(发进对应 thread)
+   *   - /new 废弃、/exctr 全退、接管走顶层卡片 + thread
+   * 开启时 ui.thread 必须提供(orchestrator 接线期断言)。
+   */
+  threadScoped?: boolean;
+  /**
+   * 非接管 session 的 vendorOptions(注入渠道专属 MCP, 如 send_file_to_user)。
+   * 接管(attached)session 恒为 undefined — 该语义在编排层硬编码, 不走这里。
+   * threadScoped 渠道会收到 scopeKey(thread root ts), 供 MCP 出站定位 thread。
+   */
+  buildVendorOptions(userId: string, scopeKey?: string): Record<string, unknown>;
+}
+
+// ── UI 文案包 ─────────────────────────────────────────────────────────────────
+// 形状与 feishu uiText.ts 的 `ui` 对象逐字段对齐。新渠道必须完整提供。
+
+export interface ImUiTextPack {
+  slash: {
+    new: string;
+    help: string;
+    unknownCommand: (cmd: string) => string;
+    detachedBySlash: string;
+    detachedByRevoke: string;
+    notAttached: string;
+  };
+  agent: {
+    completedNoText: string;
+    runtimeError: (errMsg: string) => string;
+    sendInternalError: (errMsg: string) => string;
+    apiKeyMissing: string;
+    /** 按实际会话路由生成鉴权失败提示；未提供时回退到 apiKeyMissing。 */
+    authMissing?: (details: {
+      agentKind: string;
+      model: string;
+      providerId: string | null;
+      providerLabel: string | null;
+      missing: string | null;
+      /** 接管 desktop session 时为 true；此时 /new 不会重置被接管的会话。 */
+      attached?: boolean;
+    }) => string;
+    controlInProgress: string;
+    credentialBusy: string;
+    queuedNotice: (position: number) => string;
+    /** `!stop` 生效 — 当前 turn 已中止(droppedQueued = 一并丢弃的排队消息数)。 */
+    stopDone: (droppedQueued: number) => string;
+    /** `!stop` 时没有任何在跑/排队的任务 — 轻量提示。 */
+    stopIdle: string;
+    /** 远程控制时转播自动任务(scheduler)turn 的卡片头。name 为空时用通用文案。 */
+    scheduledTaskHeader: (name: string | null) => string;
+    unsupportedOnly: (entries: IMUnsupportedEntry[]) => string;
+    unsupportedNotice: (entries: IMUnsupportedEntry[]) => string;
+  };
+  cards: {
+    permission: {
+      title: (toolName: string) => string;
+      paramsLabel: string;
+      btnAllowOnce: string;
+      btnAllowAlways: string;
+      btnDeny: string;
+      resolvedAllowOnce: string;
+      resolvedAllowAlways: string;
+      resolvedDeny: string;
+    };
+    ask: {
+      title: (header: string) => string;
+      noOptionsHint: string;
+      resolved: (optionLabel: string) => string;
+    };
+    plan: {
+      title: string;
+      btnApprove: string;
+      btnReject: string;
+      resolvedApproved: string;
+      resolvedRejected: string;
+    };
+    model: {
+      title: string;
+      currentLine: (label: string, effort: string | null, description: string) => string;
+      hint: string;
+      /** 每行模型按钮文案:供应商名 + 模型名 (+ effort)。 */
+      optionLabel: (providerName: string, label: string, effort: string | null) => string;
+      resolved: (label: string, effort: string | null) => string;
+      failed: (reason: string) => string;
+    };
+    permissionMode: {
+      title: string;
+      currentLine: (label: string, description: string) => string;
+      hint: string;
+      optionLabel: (label: string) => string;
+      resolved: (label: string) => string;
+      failed: (reason: string) => string;
+      fullAccessConfirmTitle: string;
+      fullAccessConfirmBody: string;
+      btnConfirmFullAccess: string;
+      btnCancelFullAccess: string;
+      fullAccessCancelled: string;
+    };
+    control: {
+      title: string;
+      emptyBody: string;
+      hint: string;
+      attachedSwitchHint: (sessionTitle: string) => string;
+      btnExit: string;
+      resolvedExit: string;
+      sessionPickerTitle: (displayName: string) => string;
+      sessionPickerHint: string;
+      sessionPickerEmptyBody: (displayName: string) => string;
+      btnNew: string;
+      btnBack: string;
+      resolvedSessionPick: (sessionTitle: string, workspaceName: string) => string;
+      resolvedNewSession: (workspaceName: string) => string;
+      attachFailed: (reason: string) => string;
+      sessionBusyOldCardPlaceholder: string;
+      sessionBusyPrompts: ReadonlyArray<(sessionTitle: string) => string>;
+      takeoverLoadingPrompts: ReadonlyArray<(sessionTitle: string) => string>;
+      sessionAttachedOneshotPrompts: ReadonlyArray<string>;
+      newSessionWelcomePrompts: ReadonlyArray<(workspaceName: string) => string>;
+    };
+  };
+  /**
+   * thread = session 模型专属文案 — threadScoped 渠道必须提供
+   * (orchestrator 接线期断言), 非 thread 渠道(feishu)省略。
+   */
+  thread?: {
+    /**
+     * 新 thread 会话的"名片"卡 — bot 在该 thread 第一条回复之前发出,
+     * 向用户解释 thread = 独立会话;标题生成后升级为 sessionHeaderTitled。
+     */
+    sessionHeaderCard: { title: string; body: string };
+    /** 首条消息生成正式标题后, 名片卡的升级形态。 */
+    sessionHeaderTitled: (title: string) => { title: string; body: string };
+    /** /ctr 锚点卡(顶层;选择流程与最终接管会话都在它的 thread 里)。 */
+    controlAnchorCard: { title: string; body: string };
+    /** 选择流程被 🚪 取消后锚点卡的收口文案。 */
+    controlCancelled: string;
+    /** "发起远程控制"按钮(收口卡/欢迎卡上的免打字入口, 常驻可反复按)。 */
+    btnStartControl: string;
+    /** 接管 root 卡标题/正文(顶层消息, 该卡的 thread 即接管会话)。 */
+    takeoverCard: (sessionTitle: string, workspaceName: string) => { title: string; body: string };
+    /** 新建+接管 root 卡。 */
+    takeoverNewSessionCard: (workspaceName: string) => { title: string; body: string };
+    /** root 卡上的退出接管按钮文案。 */
+    btnExitTakeover: string;
+    /**
+     * 点退出按钮后 root 卡的收口卡 — 标题保留曾控制的 session 名
+     * (顶层可追溯这个 thread 控制过谁);title 查不到时省略。
+     */
+    takeoverExited: (sessionTitle: string | null) => { title?: string; body: string };
+    /** 旧接管被新 thread 替换后, 旧锚点/root 卡的收口文案。 */
+    takeoverReplaced: (sessionTitle: string) => string;
+    /** /new 在 thread 模型下的废弃提示。 */
+    newDeprecated: string;
+    /** /model /permission 在 thread 模型下暂不支持的提示。 */
+    perThreadConfigUnsupported: string;
+    /** /exctr 全退完成(count ≥ 1)。 */
+    exctrAllDone: (count: number) => string;
+    /** /exctr 时没有任何接管。 */
+    exctrNothing: string;
+  };
+}

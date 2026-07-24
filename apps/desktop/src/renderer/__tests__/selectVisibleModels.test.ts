@@ -1,0 +1,143 @@
+/**
+ * selectVisibleModels.test.ts
+ * ---------------------------------------------------------------------------
+ * 回归 lib/providerModels.ts:selectVisibleModels —— device-link「以被控端为准」契约。
+ *
+ * 背景:model-providers 重构把 ModelSelector 的模型列表来源从被控端 capabilities 改成了控制端
+ * 本地 provider catalog(deriveModelsFromProviders),无意中破坏了「远程会话列被控端模型」的契约
+ * (控制端自定义供应商 / 版本差异会让 picker 列出被控端跑不了的模型,或漏掉被控端独有模型)。
+ * 本组用例锁死:deviceId 非空 → 只用被控端 caps、完全忽略本地 providers;deviceId 空 → 走本地派生。
+ *
+ * 纯函数 + 仅依赖 @cindy/model-providers 的 providersForAgent,可在 node env 直接测。
+ */
+import { describe, expect, it } from 'vitest';
+
+import type { ModelDescriptor } from '@/hooks/useAgentCapabilities';
+import { selectVisibleModels } from '@/lib/providerModels';
+import type { AgentKind, ProviderView } from '@cindy/model-providers';
+
+/** 被控端 capabilities.availableModels 形态(renderer ModelDescriptor)。 */
+function devModel(id: string): ModelDescriptor {
+  return { id, displayName: id, contextWindow: 100, efforts: ['high'], defaultEffort: 'high' };
+}
+
+/** 最小 ProviderView —— deriveModelsFromProviders 只读 providersForAgent(按 agents 过滤)+ models[agent]。 */
+function provider(id: string, agent: AgentKind, modelIds: string[]): ProviderView {
+  return {
+    id,
+    name: id,
+    agents: [agent],
+    models: {
+      [agent]: modelIds.map((mid) => ({
+        id: mid,
+        name: mid,
+        contextWindow: 100,
+        efforts: ['high'],
+        defaultEffort: 'high',
+      })),
+    },
+  } as unknown as ProviderView;
+}
+
+const ids = (ms: ModelDescriptor[]): string[] => ms.map((m) => m.id);
+
+describe('selectVisibleModels — device-link「以被控端为准」', () => {
+  it('deviceId 非空:用被控端 caps,完全忽略本地 providers(含本地独有模型)', () => {
+    const out = selectVisibleModels({
+      agentKind: 'claude-code',
+      deviceId: 'dev-1',
+      // 本地有一个被控端没有的模型 —— 绝不能出现在远程列表里。
+      providers: [provider('xd', 'claude-code', ['local-only', 'shared'])],
+      deviceCcModels: [devModel('host-only'), devModel('shared')],
+      deviceCodexModels: [],
+    });
+    expect(ids(out)).toEqual(['host-only', 'shared']);
+    expect(ids(out)).not.toContain('local-only');
+  });
+
+  it('deviceId 非空但被控端 caps 尚未到位(空数组):列表为空,不回落本地', () => {
+    // 远程能力 fetch 解析前列表应为空(避免误展示本地模型 → 选到被控端不支持的),而非回落本地 providers。
+    const out = selectVisibleModels({
+      agentKind: 'claude-code',
+      deviceId: 'dev-1',
+      providers: [provider('xd', 'claude-code', ['local-a', 'local-b'])],
+      deviceCcModels: [],
+      deviceCodexModels: [],
+    });
+    expect(out).toEqual([]);
+  });
+
+  it('deviceId 为 undefined(本机会话):从本地 providers 派生,忽略 device 侧入参', () => {
+    const out = selectVisibleModels({
+      agentKind: 'claude-code',
+      deviceId: undefined,
+      providers: [provider('xd', 'claude-code', ['local-a'])],
+      // 本机会话不该读这两个(它们只在 deviceId 非空时生效)。
+      deviceCcModels: [devModel('host-x')],
+      deviceCodexModels: [devModel('host-y')],
+    });
+    expect(ids(out)).toEqual(['local-a']);
+  });
+
+  it('agentKind 锁定 codex:device-link 下只取被控端 codex 模型', () => {
+    const out = selectVisibleModels({
+      agentKind: 'codex',
+      deviceId: 'dev-1',
+      providers: [],
+      deviceCcModels: [devModel('cc-a')],
+      deviceCodexModels: [devModel('cx-a'), devModel('cx-b')],
+    });
+    expect(ids(out)).toEqual(['cx-a', 'cx-b']);
+  });
+
+  it('agentKind 为 null:device-link 下 cc + codex 按 id 首见去重并集(cc 优先)', () => {
+    const out = selectVisibleModels({
+      agentKind: null,
+      deviceId: 'dev-1',
+      providers: [],
+      deviceCcModels: [devModel('shared'), devModel('cc-only')],
+      deviceCodexModels: [devModel('shared'), devModel('cx-only')],
+    });
+    // 'shared' 只出现一次(cc 先见),顺序 = cc 全量 + codex 新增。
+    expect(ids(out)).toEqual(['shared', 'cc-only', 'cx-only']);
+  });
+});
+
+describe('selectVisibleModels — excludeSubscriptionDirect(SSH 远程隐藏订阅直连模型)', () => {
+  it('true:过滤 chatgpt/ 与 xai/ 前缀模型,其余保留(本机 providers 派生路径)', () => {
+    const out = selectVisibleModels({
+      agentKind: 'claude-code',
+      deviceId: undefined,
+      providers: [provider('xd', 'claude-code', ['claude-opus-4-8', 'chatgpt/gpt-5.5', 'xai/grok-4.3', 'gpt-5.5'])],
+      deviceCcModels: [],
+      deviceCodexModels: [],
+      excludeSubscriptionDirect: true,
+    });
+    // 裸 gpt-5.5(真网关)不受影响 —— 只按订阅直连前缀过滤,不误伤同名网关模型。
+    expect(ids(out)).toEqual(['claude-opus-4-8', 'gpt-5.5']);
+  });
+
+  it('未传(默认)不过滤:订阅直连模型正常列出', () => {
+    const out = selectVisibleModels({
+      agentKind: 'claude-code',
+      deviceId: undefined,
+      providers: [provider('xd', 'claude-code', ['chatgpt/gpt-5.5', 'claude-opus-4-8'])],
+      deviceCcModels: [],
+      deviceCodexModels: [],
+    });
+    expect(ids(out)).toEqual(['chatgpt/gpt-5.5', 'claude-opus-4-8']);
+  });
+
+  it('device-link 路径同样生效(deviceId 非空 + excludeSubscriptionDirect)', () => {
+    // 正常 device-link 会话不传本参数;此用例只锁参数与取数路径正交,防未来重构漏掉分支。
+    const out = selectVisibleModels({
+      agentKind: null,
+      deviceId: 'dev-1',
+      providers: [],
+      deviceCcModels: [devModel('chatgpt/gpt-5.5'), devModel('claude-opus-4-8')],
+      deviceCodexModels: [devModel('xai/grok-4.3'), devModel('gpt-5.5')],
+      excludeSubscriptionDirect: true,
+    });
+    expect(ids(out)).toEqual(['claude-opus-4-8', 'gpt-5.5']);
+  });
+});

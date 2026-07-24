@@ -1,0 +1,1030 @@
+import Constants from 'expo-constants';
+import * as Clipboard from 'expo-clipboard';
+import * as Updates from 'expo-updates';
+import { useUpdates } from 'expo-updates';
+import { useRouter } from 'expo-router';
+import { Children, Fragment, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  Image,
+  Linking,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Switch,
+  View,
+} from 'react-native';
+import { Text, TextInput } from '@/components/AppText';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { ChevronDown, ChevronRight, X } from 'lucide-react-native';
+import type { DeviceView } from '@cindy/device-link';
+import { useAuth } from '@/auth/AuthContext';
+import { loginText } from '@/auth/loginMessages';
+import { goBackGuarded } from '@/utils/backGuard';
+import { configureCollapseAnimation } from '@/utils/collapseAnimation';
+import {
+  MainWindowActionButton,
+  MainWindowActionGroup,
+  ScreenHeader,
+  StatusDot,
+} from '@/components/MobilePrimitives';
+import { AUTH_API_BASE_URL, AUTH_REGION, DESKTOP_PACKAGE_VERSION, DEVICE_LINK_API_BASE_URL, IS_OTA_SELFHOST, REVIEW_MODE } from '@/config/env';
+import { useDeviceLink } from '@/device-link/DeviceLinkContext';
+import { buildMobileDeviceName } from '@/device-link/mobileDeviceIdentity';
+import { formatRemoteError } from '@/device-link/remoteStatus';
+import {
+  buildMobileSettingsOverview,
+  type MobileSettingsRow,
+} from '@/settings/mobileSettings';
+import {
+  isPushSupported,
+  markPendingUnregister,
+  readPushEnabled,
+  syncPushRegistration,
+  writePushEnabled,
+} from '@/notifications/pushNotifications';
+import { buildMobileUpdateInfoRows, currentMobileOtaVersion } from '@/settings/updateInfo';
+import { runManualUpdateCheck } from '@/update/manualUpdateCheck';
+import { useBundleUpdatePrompt } from '@/update/useBundleUpdatePrompt';
+import { useCanaryChannelGate } from '@/update/useCanaryChannelGate';
+import { useTheme, useThemedStyles, type ThemeColors } from '@/theme';
+import { fontWeight, iconSize, iconStroke, lineHeight, radius, spacing, typeScale } from '@/theme/tokens';
+
+type UpdatePhase = 'idle' | 'checking' | 'downloading' | 'uptodate' | 'error';
+type SelfDeviceNameSaveOptions = { acceptClosedDraft?: boolean };
+type SelfDeviceNameQueuedWrite =
+  | { kind: 'rename'; name: string; options: SelfDeviceNameSaveOptions }
+  | { kind: 'reset' };
+const SETTINGS_DEVICE_TIMEOUT_MS = 12_000;
+const PRIVACY_POLICY_URL = AUTH_REGION === 'cn'
+  ? 'https://cindy.cn/privacy/'
+  : 'https://cindy.app/privacy/';
+
+export default function SettingsScreen() {
+  const styles = useThemedStyles(makeStyles);
+  const { colors } = useTheme();
+  const router = useRouter();
+  const auth = useAuth();
+  const { status } = useDeviceLink();
+  const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [accountDeletionAvailable, setAccountDeletionAvailable] =
+    useState(false);
+  const [debugExpanded, setDebugExpanded] = useState(false);
+  const [updatePhase, setUpdatePhase] = useState<UpdatePhase>('idle');
+  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const [pushEnabled, setPushEnabled] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushMessage, setPushMessage] = useState<string | null>(null);
+  const updateCheckInFlightRef = useRef(false);
+  const [selfDeviceName, setSelfDeviceName] = useState<string | null>(null);
+  const [selfDeviceNameDraft, setSelfDeviceNameDraft] = useState('');
+  const [selfDeviceNameEditing, setSelfDeviceNameEditing] = useState(false);
+  const [selfDeviceNameSaving, setSelfDeviceNameSaving] = useState(false);
+  const [selfDeviceNameMessage, setSelfDeviceNameMessage] = useState<string | null>(null);
+  const selfDeviceNameDraftRef = useRef('');
+  const selfDeviceNameSaveSeqRef = useRef(0);
+  const selfDeviceNameWriteInFlightRef = useRef(false);
+  const selfDeviceNameCurrentWriteRef = useRef<SelfDeviceNameQueuedWrite | null>(null);
+  const selfDeviceNameQueuedWriteRef = useRef<SelfDeviceNameQueuedWrite | null>(null);
+  const selfDeviceNameRunQueuedWriteRef = useRef<() => void>(() => {});
+
+  const systemDeviceName = buildMobileDeviceName({
+    constantsDeviceName: Constants.deviceName,
+    platform: Platform.OS,
+  });
+  const deviceName = selfDeviceName ?? systemDeviceName;
+  const overview = useMemo(
+    () => buildMobileSettingsOverview({
+      authBaseUrl: AUTH_API_BASE_URL,
+      authRegion: AUTH_REGION,
+      deviceId: auth.deviceId,
+      deviceName,
+      platform: Platform.OS,
+      relayStatus: status,
+      userEmail: auth.user?.email,
+      userId: auth.user?.id,
+      userName: auth.user?.name,
+    }),
+    [auth.deviceId, auth.user?.email, auth.user?.id, auth.user?.name, deviceName, status],
+  );
+
+  const appVersion = Constants.expoConfig?.version ?? '0.0.0';
+  const updatesEnabled = Updates.isEnabled;
+  // 当前运行的 OTA bundle 信息(只读),折进「调试」分组,用于核验热更是否生效。
+  const { currentlyRunning } = useUpdates();
+  const updateInfoRows = useMemo(() => buildMobileUpdateInfoRows(currentlyRunning), [currentlyRunning]);
+  const otaVersion = useMemo(() => currentMobileOtaVersion(currentlyRunning), [currentlyRunning]);
+  const canaryChannel = useCanaryChannelGate(IS_OTA_SELFHOST);
+  // 自建变体的统一入口先查整包;无整包时再由 checkForUpdate 继续查 JS OTA。
+  const { checkNow: checkBundleUpdate } = useBundleUpdatePrompt({
+    auto: false,
+    isCanary: canaryChannel.isCanary,
+  });
+  const updateCheckEnabled = IS_OTA_SELFHOST || updatesEnabled;
+
+  const aboutSection = overview.sections.find((section) => section.id === 'about');
+  const debugSection = overview.sections.find((section) => section.id === 'debug');
+
+  useEffect(() => {
+    if (!auth.isAuthenticated || !auth.deviceId) {
+      setSelfDeviceName(null);
+      return;
+    }
+
+    let cancelled = false;
+    void auth.apiFetch<{ devices: DeviceView[] }>('/api/device-link/devices', {
+      baseUrl: DEVICE_LINK_API_BASE_URL,
+      timeoutMs: SETTINGS_DEVICE_TIMEOUT_MS,
+    })
+      .then((res) => {
+        if (cancelled) return;
+        const self = res.devices.find((device) => device.deviceId === auth.deviceId);
+        setSelfDeviceName(self?.name?.trim() || null);
+      })
+      .catch(() => {
+        if (!cancelled) setSelfDeviceName(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [auth]);
+
+  useEffect(() => {
+    if (!auth.isAuthenticated) {
+      setAccountDeletionAvailable(false);
+      return;
+    }
+    let cancelled = false;
+    setAccountDeletionAvailable(false);
+    void auth
+      .getAccountDeletionAvailability()
+      .then((availability) => {
+        if (!cancelled) {
+          setAccountDeletionAvailable(availability.available);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setAccountDeletionAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [auth.getAccountDeletionAvailability, auth.isAuthenticated]);
+
+  const copyRow = useCallback(async (row: MobileSettingsRow) => {
+    if (!row.copyValue) return;
+    await Clipboard.setStringAsync(row.copyValue);
+    setCopiedRowId(row.id);
+  }, []);
+
+  const openPrivacyPolicy = useCallback(() => {
+    void Linking.openURL(PRIVACY_POLICY_URL).catch(() => undefined);
+  }, []);
+
+  const checkForUpdate = useCallback(async () => {
+    // 审核模式:入口按钮已隐藏,这里再挡一层(状态由代码保证,不依赖 UI 层记得隐藏)。
+    if (REVIEW_MODE || !updateCheckEnabled || updateCheckInFlightRef.current) return;
+    updateCheckInFlightRef.current = true;
+    setUpdateMessage(null);
+    try {
+      const outcome = await runManualUpdateCheck({
+        checkBundleUpdate: IS_OTA_SELFHOST ? checkBundleUpdate : undefined,
+        otaEnabled: updatesEnabled,
+        checkOtaUpdate: () => Updates.checkForUpdateAsync(),
+        fetchOtaUpdate: () => Updates.fetchUpdateAsync(),
+        reload: () => Updates.reloadAsync(),
+        onPhase: (phase) => setUpdatePhase(phase),
+      });
+      if (outcome.kind === 'bundle-update-available') {
+        setUpdatePhase('idle');
+        setUpdateMessage('发现整包更新');
+      } else if (outcome.kind === 'up-to-date') {
+        setUpdatePhase('uptodate');
+        setUpdateMessage('已是最新版本');
+      } else if (outcome.kind === 'ota-unavailable') {
+        setUpdatePhase('uptodate');
+        setUpdateMessage('整包已是最新，当前版本不支持热更新');
+      } else if (outcome.kind === 'reloading') {
+        setUpdatePhase('downloading');
+        setUpdateMessage('更新已下载，正在重启');
+      } else if (outcome.kind === 'busy') {
+        setUpdatePhase('idle');
+      } else {
+        setUpdatePhase('error');
+        setUpdateMessage(outcome.message);
+      }
+    } finally {
+      updateCheckInFlightRef.current = false;
+    }
+  }, [checkBundleUpdate, updateCheckEnabled, updatesEnabled]);
+
+  const updateSelfDeviceNameDraft = useCallback((value: string) => {
+    selfDeviceNameDraftRef.current = value;
+    setSelfDeviceNameMessage(null);
+    setSelfDeviceNameDraft(value);
+  }, []);
+
+  const saveSelfDeviceNameDraft = useCallback(async (rawName: string, options: SelfDeviceNameSaveOptions = {}) => {
+    const name = rawName.trim();
+    if (name.length === 0) {
+      setSelfDeviceNameMessage('设备名称不能为空。');
+      return;
+    }
+    if (!auth.deviceId) {
+      setSelfDeviceNameMessage('设备还在初始化，请稍后再试。');
+      return;
+    }
+    if (selfDeviceNameWriteInFlightRef.current) {
+      if (
+        name === systemDeviceName.trim() &&
+        (selfDeviceNameCurrentWriteRef.current?.kind === 'reset' ||
+          selfDeviceNameQueuedWriteRef.current?.kind === 'reset')
+      ) {
+        return;
+      }
+      if (
+        selfDeviceNameCurrentWriteRef.current?.kind === 'rename' &&
+        selfDeviceNameCurrentWriteRef.current.name === name
+      ) {
+        return;
+      }
+      selfDeviceNameQueuedWriteRef.current = { kind: 'rename', name, options };
+      setSelfDeviceNameMessage('保存中…');
+      return;
+    }
+    if (name === deviceName.trim()) {
+      setSelfDeviceNameMessage(null);
+      return;
+    }
+
+    const seq = selfDeviceNameSaveSeqRef.current + 1;
+    selfDeviceNameSaveSeqRef.current = seq;
+    selfDeviceNameWriteInFlightRef.current = true;
+    selfDeviceNameCurrentWriteRef.current = { kind: 'rename', name, options };
+    setSelfDeviceNameSaving(true);
+    setSelfDeviceNameMessage('保存中…');
+    try {
+      const res = await auth.apiFetch<{ deviceId: string; name: string }>(
+        `/api/device-link/devices/${encodeURIComponent(auth.deviceId)}`,
+        {
+          baseUrl: DEVICE_LINK_API_BASE_URL,
+          body: { name },
+          method: 'PATCH',
+          timeoutMs: SETTINGS_DEVICE_TIMEOUT_MS,
+        },
+      );
+      const draftStillCurrent = options.acceptClosedDraft === true || selfDeviceNameDraftRef.current.trim() === name;
+      if (selfDeviceNameSaveSeqRef.current === seq && draftStillCurrent) {
+        setSelfDeviceName(res.name);
+        setSelfDeviceNameMessage('已保存。');
+      }
+    } catch (err) {
+      if (selfDeviceNameSaveSeqRef.current === seq) setSelfDeviceNameMessage(formatRemoteError(err));
+    } finally {
+      if (selfDeviceNameSaveSeqRef.current === seq) {
+        selfDeviceNameWriteInFlightRef.current = false;
+        selfDeviceNameCurrentWriteRef.current = null;
+        setSelfDeviceNameSaving(false);
+        selfDeviceNameRunQueuedWriteRef.current();
+      }
+    }
+  }, [auth, deviceName, systemDeviceName]);
+
+  const resetSelfDeviceName = useCallback(async () => {
+    if (!auth.deviceId) {
+      setSelfDeviceNameMessage('设备还在初始化，请稍后再试。');
+      return;
+    }
+    if (selfDeviceNameWriteInFlightRef.current) {
+      selfDeviceNameQueuedWriteRef.current = { kind: 'reset' };
+      setSelfDeviceNameMessage('正在恢复默认名称…');
+      return;
+    }
+
+    const seq = selfDeviceNameSaveSeqRef.current + 1;
+    selfDeviceNameSaveSeqRef.current = seq;
+    selfDeviceNameWriteInFlightRef.current = true;
+    selfDeviceNameCurrentWriteRef.current = { kind: 'reset' };
+    setSelfDeviceNameSaving(true);
+    setSelfDeviceNameMessage('正在恢复默认名称…');
+    try {
+      const res = await auth.apiFetch<{ deviceId: string; name: string; manualName?: string | null }>(
+        `/api/device-link/devices/${encodeURIComponent(auth.deviceId)}`,
+        {
+          baseUrl: DEVICE_LINK_API_BASE_URL,
+          body: { name: null },
+          method: 'PATCH',
+          timeoutMs: SETTINGS_DEVICE_TIMEOUT_MS,
+        },
+      );
+      if (selfDeviceNameSaveSeqRef.current === seq) {
+        setSelfDeviceName(res.name);
+        updateSelfDeviceNameDraft(res.name);
+        setSelfDeviceNameMessage('已恢复默认名称。');
+      }
+    } catch (err) {
+      if (selfDeviceNameSaveSeqRef.current === seq) setSelfDeviceNameMessage(formatRemoteError(err));
+    } finally {
+      if (selfDeviceNameSaveSeqRef.current === seq) {
+        selfDeviceNameWriteInFlightRef.current = false;
+        selfDeviceNameCurrentWriteRef.current = null;
+        setSelfDeviceNameSaving(false);
+        selfDeviceNameRunQueuedWriteRef.current();
+      }
+    }
+  }, [auth, updateSelfDeviceNameDraft]);
+
+  selfDeviceNameRunQueuedWriteRef.current = () => {
+    const queued = selfDeviceNameQueuedWriteRef.current;
+    if (!queued) return;
+    selfDeviceNameQueuedWriteRef.current = null;
+    if (queued.kind === 'reset') {
+      void resetSelfDeviceName();
+      return;
+    }
+    void saveSelfDeviceNameDraft(queued.name, queued.options);
+  };
+
+  useEffect(() => {
+    if (!selfDeviceNameEditing) return;
+    const name = selfDeviceNameDraft.trim();
+    if (name.length === 0) {
+      setSelfDeviceNameMessage('设备名称不能为空。');
+      return;
+    }
+    if (name === deviceName.trim()) {
+      return;
+    }
+    if (selfDeviceNameSaving) return;
+    const timer = setTimeout(() => {
+      void saveSelfDeviceNameDraft(name);
+    }, 650);
+    return () => clearTimeout(timer);
+  }, [deviceName, saveSelfDeviceNameDraft, selfDeviceNameDraft, selfDeviceNameEditing, selfDeviceNameSaving]);
+
+  const openSelfDeviceNameEditor = useCallback(() => {
+    updateSelfDeviceNameDraft(deviceName);
+    setSelfDeviceNameMessage(null);
+    setSelfDeviceNameEditing(true);
+  }, [deviceName, updateSelfDeviceNameDraft]);
+
+  const closeSelfDeviceNameEditor = useCallback(() => {
+    const name = selfDeviceNameDraftRef.current.trim();
+    if (name.length === 0) {
+      updateSelfDeviceNameDraft(deviceName);
+      setSelfDeviceNameMessage(null);
+      setSelfDeviceNameEditing(false);
+      return;
+    }
+    if (name !== deviceName.trim()) {
+      void saveSelfDeviceNameDraft(name, { acceptClosedDraft: true });
+    }
+    setSelfDeviceNameEditing(false);
+  }, [deviceName, saveSelfDeviceNameDraft, updateSelfDeviceNameDraft]);
+
+  const logout = useCallback(async () => {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    try {
+      await auth.logout();
+      router.replace('/login');
+    } finally {
+      setLoggingOut(false);
+    }
+  }, [auth, loggingOut, router]);
+
+  const openAccountDeletion = useCallback(() => {
+    router.push('/account-deletion');
+  }, [router]);
+
+  // 任务完成通知开关:开 → 请求系统权限 + 注册 APNs token 到 device-link server;
+  // 关 → 注销 token。开关状态本机持久化,server 注册表是唯一发送依据。
+  useEffect(() => {
+    let cancelled = false;
+    void readPushEnabled().then((enabled) => {
+      if (!cancelled) setPushEnabled(enabled);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const togglePushNotifications = useCallback(async () => {
+    if (pushBusy) return;
+    setPushBusy(true);
+    setPushMessage(null);
+    const next = !pushEnabled;
+    try {
+      if (!next) {
+        // 关闭是用户明确的 opt-out:先落盘生效(离线也不允许开关弹回),
+        // 注销请求失败则排队补偿,下次联网启动自动补上。
+        await writePushEnabled(false);
+        setPushEnabled(false);
+        try {
+          await syncPushRegistration({ enabled: false, apiFetch: auth.apiFetch });
+        } catch {
+          await markPendingUnregister().catch(() => undefined);
+          setPushMessage('已关闭。当前网络下注销未完成,将在下次联网时自动补上。');
+        }
+        return;
+      }
+      const result = await syncPushRegistration({ enabled: true, apiFetch: auth.apiFetch });
+      if (result === 'permission-denied') {
+        setPushMessage('系统通知权限未开启。请到 iOS「设置 → 通知 → Cindy」允许通知后重试。');
+        return; // 权限被拒:开关保持关闭,不落盘
+      }
+      await writePushEnabled(true);
+      setPushEnabled(true);
+    } catch (error) {
+      setPushMessage(formatRemoteError(error));
+    } finally {
+      setPushBusy(false);
+    }
+  }, [auth.apiFetch, pushBusy, pushEnabled]);
+
+  const toggleDebug = useCallback(() => {
+    configureCollapseAnimation();
+    setDebugExpanded((value) => !value);
+  }, []);
+
+  const avatarLabel = (overview.header.name.trim()[0] ?? '?').toUpperCase();
+  const updateBusy = updatePhase === 'checking' || updatePhase === 'downloading';
+  const updateButtonLabel = updatePhase === 'checking' ? '检查中'
+    : updatePhase === 'downloading' ? '更新中'
+    : '检查更新';
+
+  if (selfDeviceNameEditing) {
+    return (
+      <RenameSelfDeviceScreen
+        draft={selfDeviceNameDraft}
+        message={selfDeviceNameMessage}
+        onChangeDraft={updateSelfDeviceNameDraft}
+        onDone={closeSelfDeviceNameEditor}
+        onResetDefault={resetSelfDeviceName}
+      />
+    );
+  }
+
+  return (
+    <SafeAreaView style={styles.safeArea} testID="settings.screen">
+      <ScreenHeader
+        backTestID="settings.backButton"
+        onBack={() => goBackGuarded(router)}
+        title="设置"
+        titleTestID="settings.title"
+      />
+
+      <ScrollView contentContainerStyle={styles.content} testID="settings.scroll">
+        {/* 账号头部:身份 + 连接状态一次性呈现,下面分组不再重复 */}
+        <View style={styles.headerCard} testID="settings.accountHeader">
+          <View style={styles.avatar}>
+            {auth.user?.avatar ? (
+              <Image source={{ uri: auth.user.avatar }} style={styles.avatarImage} />
+            ) : (
+              <Text style={styles.avatarText}>{avatarLabel}</Text>
+            )}
+          </View>
+          <View style={styles.headerTexts}>
+            <Text style={styles.headerName} numberOfLines={1}>{overview.header.name}</Text>
+            {overview.header.email ? (
+              <Text style={styles.headerEmail} numberOfLines={1}>{overview.header.email}</Text>
+            ) : null}
+            <View style={styles.headerStatusRow}>
+              <StatusDot tone={overview.header.relayTone} pulsing={status === 'connecting'} />
+              <Text style={styles.headerStatusText} numberOfLines={1}>
+                {`${overview.header.relayLabel} · ${overview.header.relayDetail}`}
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        {/* 版本:只保留统一检查入口,自建线严格先查整包、无整包再查热更。 */}
+        <SettingsGroup title="版本">
+          {[
+            <View key="version" style={styles.versionRow} testID="settings.version">
+              <View style={styles.versionTexts}>
+                <Text style={styles.rowLabel}>当前版本</Text>
+                <Text style={styles.versionValue} numberOfLines={1}>整包版本 {appVersion}</Text>
+                <Text style={styles.rowDetail} numberOfLines={1} testID="settings.otaVersion">热更版本 {otaVersion}</Text>
+                {/* 二级版本号:自建线打包所配对的桌面产品线版本(0.0.x);仅自建线且已注入时显示 */}
+                {IS_OTA_SELFHOST && DESKTOP_PACKAGE_VERSION ? (
+                  <Text style={styles.rowDetail} numberOfLines={1} testID="settings.desktopVersion">桌面版 {DESKTOP_PACKAGE_VERSION}</Text>
+                ) : null}
+                {updateMessage ? (
+                  <Text style={styles.rowDetail} numberOfLines={2} testID="settings.updateMessage">{updateMessage}</Text>
+                ) : !REVIEW_MODE && !updatesEnabled ? (
+                  <Text style={styles.rowDetail} numberOfLines={1}>开发版，热更不可用</Text>
+                ) : null}
+              </View>
+              {/* 审核模式(清单 review 命中当前二进制版本):隐藏检查更新入口,版本号照常展示 */}
+              {!REVIEW_MODE ? (
+                <MainWindowActionButton
+                  action={{
+                    accessibilityLabel: updateBusy ? '正在检查更新' : '检查更新',
+                    busy: updateBusy,
+                    disabled: !updateCheckEnabled,
+                    label: updateButtonLabel,
+                    onPress: () => void checkForUpdate(),
+                    testID: 'settings.checkUpdateButton',
+                    tone: 'primary',
+                  }}
+                  density="compact"
+                  style={styles.versionButton}
+                />
+              ) : null}
+            </View>,
+          ]}
+        </SettingsGroup>
+
+        {/* 通知:任务完成推送(仅 iOS;Android 待 FCM/厂商通道) */}
+        {isPushSupported() ? (
+          <SettingsGroup title="通知">
+            {[
+              <View key="push-toggle" style={styles.switchRow} testID="settings.pushToggleRow">
+                <View style={styles.switchTexts}>
+                  <Text style={styles.rowLabel}>任务完成通知</Text>
+                  <Text style={styles.hint}>
+                    电脑上的任务完成、出错或需要你回复时,推送到这台手机;完成或需要回复时附带最新回复内容。
+                  </Text>
+                  {pushMessage ? (
+                    <Text style={styles.hint} testID="settings.pushMessage">{pushMessage}</Text>
+                  ) : null}
+                </View>
+                <Switch
+                  accessibilityLabel="任务完成通知"
+                  disabled={pushBusy}
+                  onValueChange={() => void togglePushNotifications()}
+                  testID="settings.pushToggle"
+                  trackColor={{ true: colors.inputCaret }}
+                  value={pushEnabled}
+                />
+              </View>,
+            ]}
+          </SettingsGroup>
+        ) : null}
+
+        {/* 关于这台手机 */}
+        {aboutSection ? (
+          <SettingsGroup title={aboutSection.title}>
+            {aboutSection.rows.map((row) => (
+              row.id === 'about.deviceName' ? (
+                <ActionInfoRow
+                  accessibilityLabel={`修改${row.label}`}
+                  detail={selfDeviceNameMessage ?? row.detail}
+                  key={row.id}
+                  label={row.label}
+                  onPress={openSelfDeviceNameEditor}
+                  testID="settings.selfDeviceNameRow"
+                  value={row.value}
+                />
+              ) : (
+                <InfoRow key={row.id} detail={row.detail} label={row.label} testID={`settings.row.${row.id}`} value={row.value} />
+              )
+            ))}
+          </SettingsGroup>
+        ) : null}
+
+        {/* 调试 / 开发者:默认折叠 */}
+        {debugSection ? (
+          <SettingsGroup
+            onToggle={toggleDebug}
+            title={debugSection.title}
+            titleAccessory={groupChevron(debugExpanded, colors)}
+          >
+            {debugExpanded
+              ? [
+                ...debugSection.rows.map((row) => (
+                  row.copyValue ? (
+                    <CopyRow copied={copiedRowId === row.id} key={row.id} onCopy={copyRow} row={row} />
+                  ) : (
+                    <InfoRow key={row.id} detail={row.detail} label={row.label} testID={`settings.row.${row.id}`} value={row.value} />
+                  )
+                )),
+                ...updateInfoRows.map((row) => (
+                  <InfoRow key={row.id} label={row.label} testID={`settings.updateInfo.${row.id}`} value={row.value} />
+                )),
+              ]
+              : []}
+          </SettingsGroup>
+        ) : null}
+
+        {/* 法律信息:隐私政策始终显示;App 备案号仅国内版显示。 */}
+        <SettingsGroup title="备案信息">
+          <ActionInfoRow
+            accessibilityLabel="打开隐私政策"
+            accessibilityRole="link"
+            key="privacy-policy"
+            label="隐私政策"
+            onPress={openPrivacyPolicy}
+            testID="settings.privacyPolicy"
+            value="查看"
+          />
+          {AUTH_REGION === 'cn' ? (
+            <InfoRow
+              key="app-filing-number"
+              label="App 备案号"
+              testID="settings.appFilingNumber"
+              value="沪ICP备11033765号-89A"
+            />
+          ) : null}
+        </SettingsGroup>
+
+        {/* 账号操作:退出保持明确；注销账号仅保留低调的次要文字入口。 */}
+        <View style={styles.dangerArea} testID="settings.accountActions">
+          <Text style={styles.dangerHint}>
+            退出只会清除这台手机上的登录态和本地远程镜像，不会影响电脑端会话。
+          </Text>
+          <MainWindowActionGroup
+            dangerActions={[
+              {
+                accessibilityLabel: loggingOut ? '正在退出登录' : '退出登录',
+                busy: loggingOut,
+                disabled: loggingOut,
+                label: loggingOut ? '退出中' : '退出登录',
+                onPress: () => void logout(),
+                testID: 'settings.logoutButton',
+                tone: 'danger',
+              },
+            ]}
+            testID="settings.logoutActions"
+          />
+          {accountDeletionAvailable ? (
+            <Pressable
+              accessibilityLabel={loginText('accountDeletionSettingsAction')}
+              accessibilityRole="button"
+              onPress={openAccountDeletion}
+              style={({ pressed }) => [
+                styles.accountDeletionLink,
+                pressed && styles.pressed,
+              ]}
+              testID="settings.deleteAccountButton"
+            >
+              <Text style={styles.accountDeletionLinkText}>
+                {loginText('accountDeletionSettingsAction')}
+              </Text>
+            </Pressable>
+          ) : null}
+        </View>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+/** 可折叠分组标题右侧的展开/收起指示箭头。 */
+function groupChevron(expanded: boolean, colors: ThemeColors): ReactNode {
+  return expanded
+    ? <ChevronDown color={colors.textTertiary} size={iconSize.lg} strokeWidth={iconStroke.regular} />
+    : <ChevronRight color={colors.textTertiary} size={iconSize.lg} strokeWidth={iconStroke.regular} />;
+}
+
+/**
+ * iOS 风格分组:组标题在外侧 gutter,组内一块统一卡片,行间用 inset 分隔线。
+ * 标题可点(onToggle)时承担折叠开关。rows 为空则不渲染卡片(折叠态)。
+ */
+function SettingsGroup({
+  children,
+  onToggle,
+  title,
+  titleAccessory,
+}: {
+  children: ReactNode;
+  onToggle?: () => void;
+  title: string;
+  titleAccessory?: ReactNode;
+}) {
+  const styles = useThemedStyles(makeStyles);
+  // Children.toArray 会丢弃 null/false 并给每个 child 赋稳定 key(沿用元素自身 key),
+  // 比 key={index} 更稳:后续插入/重排调试行时不会让无关行 remount。
+  const rows = Children.toArray(children);
+  return (
+    <View style={styles.group}>
+      {onToggle ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={onToggle}
+          style={({ pressed }) => [styles.groupTitleRow, pressed && styles.pressed]}
+        >
+          <Text style={styles.groupTitle}>{title}</Text>
+          {titleAccessory}
+        </Pressable>
+      ) : (
+        <View style={styles.groupTitleRow}>
+          <Text style={styles.groupTitle}>{title}</Text>
+          {titleAccessory}
+        </View>
+      )}
+      {rows.length > 0 ? (
+        <View style={styles.card}>
+          {rows.map((row, index) => (
+            <Fragment key={isValidElement(row) && row.key != null ? row.key : index}>
+              {index > 0 ? <View style={styles.divider} /> : null}
+              {row}
+            </Fragment>
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+/** 单行信息:标签左、值右;可选 detail 另起一行(较弱)。 */
+function InfoRow({
+  detail,
+  label,
+  testID,
+  value,
+}: {
+  detail?: string;
+  label: string;
+  testID?: string;
+  value: string;
+}) {
+  const styles = useThemedStyles(makeStyles);
+  return (
+    <View style={styles.row} testID={testID}>
+      <View style={styles.rowLine}>
+        <Text style={styles.rowLabel}>{label}</Text>
+        <Text style={styles.rowValue} numberOfLines={1}>{value}</Text>
+      </View>
+      {detail ? <Text style={styles.rowDetail} numberOfLines={2}>{detail}</Text> : null}
+    </View>
+  );
+}
+
+/** 可点击信息行:用于轻量编辑或打开外部信息。 */
+function ActionInfoRow({
+  accessibilityLabel,
+  accessibilityRole = 'button',
+  detail,
+  label,
+  onPress,
+  testID,
+  value,
+}: {
+  accessibilityLabel: string;
+  accessibilityRole?: 'button' | 'link';
+  detail?: string;
+  label: string;
+  onPress(): void;
+  testID?: string;
+  value: string;
+}) {
+  const styles = useThemedStyles(makeStyles);
+  const { colors } = useTheme();
+  return (
+    <Pressable
+      accessibilityLabel={accessibilityLabel}
+      accessibilityRole={accessibilityRole}
+      onPress={onPress}
+      style={({ pressed }) => [styles.row, pressed && styles.pressed]}
+      testID={testID}
+    >
+      <View style={styles.rowLine}>
+        <Text style={styles.rowLabel}>{label}</Text>
+        <Text style={styles.rowValue} numberOfLines={1}>{value}</Text>
+        <ChevronRight color={colors.textTertiary} size={iconSize.lg} strokeWidth={iconStroke.regular} />
+      </View>
+      {detail ? <Text style={styles.rowDetail} numberOfLines={2}>{detail}</Text> : null}
+    </Pressable>
+  );
+}
+
+function RenameSelfDeviceScreen({
+  draft,
+  message,
+  onChangeDraft,
+  onDone,
+  onResetDefault,
+}: {
+  draft: string;
+  message: string | null;
+  onChangeDraft(value: string): void;
+  onDone(): void;
+  onResetDefault(): void;
+}) {
+  const styles = useThemedStyles(makeStyles);
+  const { colors } = useTheme();
+  return (
+    <SafeAreaView style={styles.safeArea} testID="settings.renameSelfDevice.screen">
+      <ScreenHeader
+        backTestID="settings.renameSelfDevice.backButton"
+        onBack={onDone}
+        title="设备名称"
+      />
+      <View style={styles.nameEditorContent}>
+        <View style={styles.nameEditorInputRow}>
+          <TextInput
+            autoFocus
+            maxLength={64}
+            onChangeText={onChangeDraft}
+            onSubmitEditing={onDone}
+            placeholder="本机名称"
+            placeholderTextColor={colors.textTertiary}
+            returnKeyType="done"
+            selectTextOnFocus
+            style={styles.nameEditorInput}
+            testID="settings.renameSelfDevice.input"
+            value={draft}
+          />
+          {draft.length > 0 ? (
+            <Pressable
+              accessibilityLabel="恢复默认本机名称"
+              accessibilityRole="button"
+              hitSlop={8}
+              onPress={onResetDefault}
+              style={({ pressed }) => [styles.nameEditorClearButton, pressed && styles.pressed]}
+              testID="settings.renameSelfDevice.clear"
+            >
+              <X color={colors.surfaceElevated} size={iconSize.sm} strokeWidth={iconStroke.bold} />
+            </Pressable>
+          ) : null}
+        </View>
+        {message ? <Text style={styles.nameEditorMessage} numberOfLines={2}>{message}</Text> : null}
+      </View>
+    </SafeAreaView>
+  );
+}
+
+/** 可复制行(长 ID / URL):标签 + 值堆叠在左,复制按钮在右。 */
+function CopyRow({
+  copied,
+  onCopy,
+  row,
+}: {
+  copied: boolean;
+  onCopy(row: MobileSettingsRow): void;
+  row: MobileSettingsRow;
+}) {
+  const styles = useThemedStyles(makeStyles);
+  return (
+    <View style={styles.copyRow} testID={`settings.row.${row.id}`}>
+      <View style={styles.copyText}>
+        <Text style={styles.copyLabel}>{row.label}</Text>
+        <Text selectable style={styles.copyValue} numberOfLines={2}>{row.value}</Text>
+      </View>
+      {row.copyValue ? (
+        // 自守卫:没有 copyValue 就不渲染复制按钮,避免出现"按了没反应"的死按钮
+        // (调用方虽已先判断,但组件自身也要自洽)。
+        <MainWindowActionButton
+          action={{
+            accessibilityLabel: `复制${row.label}`,
+            label: copied ? '已复制' : '复制',
+            onPress: () => onCopy(row),
+            testID: `settings.copy.${row.id}`,
+          }}
+          density="compact"
+          style={styles.copyButton}
+        />
+      ) : null}
+    </View>
+  );
+}
+
+const makeStyles = (colors: ThemeColors) => StyleSheet.create({
+  safeArea: { backgroundColor: colors.surface, flex: 1 },
+  content: {
+    gap: spacing.xl,
+    paddingBottom: spacing.xxl,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.lg,
+  },
+  // —— 账号头部 ——
+  headerCard: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.md,
+    paddingHorizontal: spacing.xs,
+    paddingVertical: spacing.sm,
+  },
+  avatar: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceElevated,
+    borderColor: colors.border,
+    borderRadius: radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    height: 56,
+    justifyContent: 'center',
+    overflow: 'hidden',
+    width: 56,
+  },
+  avatarImage: { height: 56, width: 56 },
+  avatarText: { color: colors.textPrimary, fontSize: typeScale.title, fontWeight: fontWeight.semibold },
+  headerTexts: { flex: 1, gap: 3, minWidth: 0 },
+  headerName: { color: colors.textPrimary, fontSize: typeScale.title, fontWeight: fontWeight.semibold },
+  headerEmail: { color: colors.textSecondary, fontSize: typeScale.footnote },
+  headerStatusRow: { alignItems: 'center', flexDirection: 'row', gap: spacing.xs, marginTop: 1 },
+  headerStatusText: { color: colors.textSecondary, flex: 1, fontSize: typeScale.footnote, minWidth: 0 },
+  // —— 分组 ——
+  group: { gap: spacing.sm },
+  groupTitleRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+    minHeight: 24,
+    paddingHorizontal: spacing.md,
+  },
+  groupTitle: { color: colors.textTertiary, flex: 1, fontSize: typeScale.footnote, fontWeight: fontWeight.medium },
+  card: {
+    backgroundColor: colors.surfaceElevated,
+    borderColor: colors.border,
+    borderRadius: radius.container,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+  },
+  divider: { backgroundColor: colors.border, height: StyleSheet.hairlineWidth, marginLeft: spacing.lg },
+  // —— 行 ——
+  row: { gap: 3, justifyContent: 'center', minHeight: 52, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
+  rowLine: { alignItems: 'center', flexDirection: 'row', gap: spacing.md },
+  rowLabel: { color: colors.textSecondary, flexShrink: 0, fontSize: typeScale.code },
+  rowValue: { color: colors.textPrimary, flex: 1, fontSize: typeScale.code, textAlign: 'right' },
+  rowDetail: { color: colors.textTertiary, fontSize: typeScale.caption, lineHeight: lineHeight.caption },
+  switchRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.md,
+    minHeight: 52,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+  },
+  switchTexts: { flex: 1, gap: spacing.xs },
+  hint: { color: colors.textSecondary, fontSize: typeScale.caption, lineHeight: lineHeight.caption },
+  // —— 版本行 ——
+  versionRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.md,
+    minHeight: 60,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+  },
+  versionTexts: { flex: 1, gap: 2, minWidth: 0 },
+  versionValue: { color: colors.textPrimary, fontSize: typeScale.body, fontWeight: fontWeight.semibold },
+  versionButton: { flexShrink: 0, minWidth: 84 },
+  // —— 可复制行 ——
+  copyRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.md,
+    minHeight: 60,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+  },
+  copyText: { flex: 1, gap: 2, minWidth: 0 },
+  copyLabel: { color: colors.textTertiary, fontSize: typeScale.caption, fontWeight: fontWeight.medium },
+  copyValue: { color: colors.textPrimary, fontSize: typeScale.footnote, lineHeight: lineHeight.caption },
+  copyButton: { flexShrink: 0, minWidth: 60 },
+  // —— 退出 ——
+  dangerArea: { gap: spacing.md, paddingTop: spacing.sm },
+  dangerHint: { color: colors.textSecondary, fontSize: typeScale.caption, lineHeight: lineHeight.caption, paddingHorizontal: spacing.md },
+  accountDeletionLink: {
+    alignItems: 'center',
+    alignSelf: 'center',
+    justifyContent: 'center',
+    minHeight: 44,
+    paddingHorizontal: spacing.md,
+  },
+  accountDeletionLinkText: {
+    color: colors.textTertiary,
+    fontSize: typeScale.caption,
+    lineHeight: lineHeight.caption,
+  },
+  nameEditorContent: {
+    gap: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.xl,
+  },
+  nameEditorInputRow: {
+    alignItems: 'center',
+    backgroundColor: colors.surfaceElevated,
+    borderRadius: radius.pill,
+    flexDirection: 'row',
+    minHeight: 56,
+    paddingLeft: spacing.lg,
+    paddingRight: spacing.md,
+  },
+  nameEditorInput: {
+    color: colors.textPrimary,
+    flex: 1,
+    fontSize: typeScale.body,
+    lineHeight: lineHeight.body,
+    minWidth: 0,
+    paddingVertical: spacing.md,
+  },
+  nameEditorClearButton: {
+    alignItems: 'center',
+    backgroundColor: colors.textTertiary,
+    borderRadius: radius.pill,
+    height: 22,
+    justifyContent: 'center',
+    width: 22,
+  },
+  nameEditorMessage: {
+    color: colors.textTertiary,
+    fontSize: typeScale.caption,
+    lineHeight: lineHeight.caption,
+    paddingHorizontal: spacing.md,
+  },
+  pressed: { opacity: 0.6 },
+});

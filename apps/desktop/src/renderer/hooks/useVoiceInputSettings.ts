@@ -1,0 +1,300 @@
+import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { DictationDictionaryLearningAction } from '@cindy/voice-input-core';
+
+import { createLogger } from '@/lib/logger';
+import { toast } from '@/lib/toast';
+import { extractIpcError } from '@/utils/ipcError';
+import {
+  DEFAULT_VOICE_INPUT_REFINEMENT_INSTRUCTIONS,
+  MAX_VOICE_INPUT_DICTIONARY_CSV_BYTES,
+  MAX_VOICE_INPUT_DICTIONARY_ALIASES,
+  MAX_VOICE_INPUT_DICTIONARY_CANDIDATES,
+  MAX_VOICE_INPUT_DICTIONARY_ENTRIES,
+  MAX_VOICE_INPUT_DICTIONARY_ENTRY_CHARS,
+  MAX_VOICE_INPUT_REFINEMENT_INSTRUCTIONS_CHARS,
+  buildVoiceInputDictionaryAliasHints,
+  createManualVoiceInputDictionaryEntry,
+  formatVoiceInputDictionary,
+  getDefaultVoiceInputSettings,
+  getNewAutomaticDictionaryEntries,
+  getNewAutomaticDictionaryEntryTexts,
+  mergeVoiceInputDictionaryCsvTerms,
+  normalizeVoiceInputDictionaryEntryText,
+  parseVoiceInputDictionaryCsv,
+  type VoiceInputDataSnapshot,
+  type VoiceInputDictionaryEntry,
+  type VoiceInputDictionaryEntrySource,
+  type VoiceInputDictionaryLearningEvidence,
+  type VoiceInputLanguage,
+  type VoiceInputSettings,
+} from '../../shared/voiceInputData';
+import type { VoiceInputShortcut } from '@/voice-input/shortcut';
+
+export {
+  DEFAULT_VOICE_INPUT_REFINEMENT_INSTRUCTIONS,
+  MAX_VOICE_INPUT_DICTIONARY_CSV_BYTES,
+  MAX_VOICE_INPUT_DICTIONARY_ALIASES,
+  MAX_VOICE_INPUT_DICTIONARY_CANDIDATES,
+  MAX_VOICE_INPUT_DICTIONARY_ENTRIES,
+  MAX_VOICE_INPUT_DICTIONARY_ENTRY_CHARS,
+  MAX_VOICE_INPUT_REFINEMENT_INSTRUCTIONS_CHARS,
+  buildVoiceInputDictionaryAliasHints,
+  createManualVoiceInputDictionaryEntry,
+  formatVoiceInputDictionary,
+  getNewAutomaticDictionaryEntries,
+  getNewAutomaticDictionaryEntryTexts,
+  mergeVoiceInputDictionaryCsvTerms,
+  normalizeVoiceInputDictionaryEntryText,
+  parseVoiceInputDictionaryCsv,
+};
+export type {
+  VoiceInputDictionaryEntry,
+  VoiceInputDictionaryEntrySource,
+  VoiceInputDictionaryLearningEvidence,
+  VoiceInputLanguage,
+  VoiceInputSettings,
+};
+
+const LEGACY_SETTINGS_STORAGE_KEY = 'voiceInput.settings.v1';
+const LEGACY_HISTORY_STORAGE_KEY = 'voiceInput.history.v1';
+const log = createLogger('voice-input-settings');
+
+export function migrateLegacyVoiceInputRendererStorage(): void {
+  try {
+    const settingsRaw = localStorage.getItem(LEGACY_SETTINGS_STORAGE_KEY);
+    const historyRaw = localStorage.getItem(LEGACY_HISTORY_STORAGE_KEY);
+    if (!settingsRaw && !historyRaw) return;
+    window.electronAPI.voiceInput.migrateLegacyRendererData({ settingsRaw, historyRaw });
+    localStorage.removeItem(LEGACY_SETTINGS_STORAGE_KEY);
+    localStorage.removeItem(LEGACY_HISTORY_STORAGE_KEY);
+  } catch (error) {
+    log.warn('legacy renderer voice-input data migration failed:', error instanceof Error ? error.message : String(error));
+  }
+}
+
+export function getVoiceInputSettings(): VoiceInputSettings {
+  try {
+    return window.electronAPI.voiceInput.getDataSnapshot().settings;
+  } catch {
+    return getDefaultVoiceInputSettings(window.electronAPI?.platform);
+  }
+}
+
+export async function recordVoiceInputDictionaryLearningActions(
+  actions: DictationDictionaryLearningAction[],
+): Promise<void> {
+  if (actions.length === 0) return;
+  try {
+    await window.electronAPI.voiceInput.recordDictionaryLearningActions(actions);
+  } catch (error) {
+    log.warn('dictionary learning actions failed:', error instanceof Error ? error.message : String(error));
+  }
+}
+
+export function deleteVoiceInputDictionaryEntries(entryIds: string[]): void {
+  if (entryIds.length === 0) return;
+  void window.electronAPI.voiceInput.deleteDictionaryEntries(entryIds).catch((error) => {
+    log.warn('voice input dictionary delete failed:', error instanceof Error ? error.message : String(error));
+  });
+}
+
+export async function adviseAndRecordVoiceInputDictionaryLearning(
+  evidence: VoiceInputDictionaryLearningEvidence,
+): Promise<void> {
+  const current = getVoiceInputSettings();
+  if (!current.refinementEnabled || !current.autoDictionaryEnabled) return;
+  try {
+    const result = await window.electronAPI.voiceInput.adviseDictionaryLearning({
+      ...evidence,
+      debug: import.meta.env.DEV,
+    });
+    if (!result.ok) {
+      log.warn('dictionary learning advisor failed:', result.error);
+      return;
+    }
+    if (result.actions.length > 0) {
+      log.debug('dictionary learning actions applied:', result.actions.length);
+    }
+  } catch (error) {
+    log.warn('dictionary learning advisor failed:', error instanceof Error ? error.message : String(error));
+  }
+}
+
+/**
+ * Subscribe to the main-owned voice-input data store. The global overlay window
+ * is cached across hide/show, so imperative refs must refresh from main events
+ * instead of holding the initial snapshot forever.
+ */
+export function subscribeVoiceInputSettings(
+  callback: (settings: VoiceInputSettings) => void,
+): () => void {
+  return window.electronAPI.voiceInput.onDataChanged((snapshot: VoiceInputDataSnapshot) => {
+    callback(snapshot.settings);
+  });
+}
+
+export type VoiceInputShortcutUpdateResult =
+  | { ok: true; settings: VoiceInputSettings }
+  | { ok: false; error: string; errorCode?: string };
+
+export async function syncVoiceInputGlobalShortcut(shortcut: VoiceInputShortcut | null): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const result = await window.electronAPI.voiceInput.setGlobalShortcut(shortcut);
+    if (!result.ok) {
+      log.warn('global voice input shortcut sync failed:', result.error);
+    }
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log.warn('global voice input shortcut sync failed:', message);
+    return { ok: false, error: message };
+  }
+}
+
+export function useVoiceInputSettings(): {
+  settings: VoiceInputSettings;
+  setLanguage: (language: VoiceInputLanguage) => void;
+  setMicrophoneDeviceId: (deviceId: string | null) => void;
+  setMuteSystemAudio: (enabled: boolean) => void;
+  setPlayInteractionSound: (enabled: boolean) => void;
+  setFastActivationEnabled: (enabled: boolean) => void;
+  setRefinementEnabled: (enabled: boolean) => void;
+  setRefinementInstructions: (instructions: string) => void;
+  setAutoDictionaryEnabled: (enabled: boolean) => void;
+  setDictionaryEntries: (entries: VoiceInputDictionaryEntry[]) => void;
+  deleteDictionaryEntry: (entryId: string) => void;
+  recordDictionaryLearningActions: (actions: DictationDictionaryLearningAction[]) => void;
+  setShortcut: (shortcut: VoiceInputShortcut | null) => Promise<VoiceInputShortcutUpdateResult>;
+} {
+  const { t } = useTranslation();
+  const [settings, setSettings] = useState<VoiceInputSettings>(getVoiceInputSettings);
+
+  const updateSettings = useCallback((patch: Partial<VoiceInputSettings>) => {
+    const previousShortcut = getVoiceInputSettings().shortcut;
+    void window.electronAPI.voiceInput
+      .updateSettings(patch)
+      .then((next) => {
+        setSettings(next);
+        if (!areVoiceInputShortcutsEqual(previousShortcut, next.shortcut)) {
+          void syncVoiceInputGlobalShortcut(next.shortcut);
+        }
+      })
+      .catch((error) => {
+        log.warn('voice input settings update failed:', error instanceof Error ? error.message : String(error));
+        toast.error(formatVoiceInputPersistenceError(t, error));
+      });
+  }, [t]);
+
+  const setLanguage = useCallback(
+    (language: VoiceInputLanguage) => updateSettings({ language }),
+    [updateSettings],
+  );
+
+  const setMicrophoneDeviceId = useCallback(
+    (microphoneDeviceId: string | null) => updateSettings({ microphoneDeviceId }),
+    [updateSettings],
+  );
+
+  const setMuteSystemAudio = useCallback(
+    (muteSystemAudio: boolean) => updateSettings({ muteSystemAudio }),
+    [updateSettings],
+  );
+
+  const setPlayInteractionSound = useCallback(
+    (playInteractionSound: boolean) => updateSettings({ playInteractionSound }),
+    [updateSettings],
+  );
+
+  const setFastActivationEnabled = useCallback(
+    (fastActivationEnabled: boolean) => updateSettings({ fastActivationEnabled }),
+    [updateSettings],
+  );
+
+  const setRefinementEnabled = useCallback(
+    (refinementEnabled: boolean) => updateSettings({ refinementEnabled }),
+    [updateSettings],
+  );
+
+  const setRefinementInstructions = useCallback(
+    (refinementInstructions: string) => updateSettings({ refinementInstructions }),
+    [updateSettings],
+  );
+
+  const setAutoDictionaryEnabled = useCallback(
+    (autoDictionaryEnabled: boolean) => updateSettings({ autoDictionaryEnabled }),
+    [updateSettings],
+  );
+
+  const setDictionaryEntries = useCallback(
+    (dictionaryEntries: VoiceInputDictionaryEntry[]) => updateSettings({ dictionaryEntries }),
+    [updateSettings],
+  );
+
+  const deleteDictionaryEntry = useCallback((entryId: string) => {
+    void window.electronAPI.voiceInput
+      .deleteDictionaryEntries([entryId])
+      .then(setSettings)
+      .catch((error) => {
+        log.warn('voice input dictionary delete failed:', error instanceof Error ? error.message : String(error));
+        toast.error(formatVoiceInputPersistenceError(t, error));
+      });
+  }, [t]);
+
+  const recordDictionaryLearningActions = useCallback((actions: DictationDictionaryLearningAction[]) => {
+    void recordVoiceInputDictionaryLearningActions(actions);
+  }, []);
+
+  const setShortcut = useCallback(
+    async (shortcut: VoiceInputShortcut | null): Promise<VoiceInputShortcutUpdateResult> => {
+      try {
+        const result = await window.electronAPI.voiceInput.updateShortcutSetting(shortcut);
+        if (!result.ok) log.warn('voice input shortcut setting update failed:', result.error);
+        return result;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log.warn('voice input shortcut setting update failed:', message);
+        return { ok: false, error: message };
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    void syncVoiceInputGlobalShortcut(settings.shortcut);
+  }, [settings.shortcut]);
+
+  useEffect(() => subscribeVoiceInputSettings(setSettings), []);
+
+  return {
+    settings,
+    setLanguage,
+    setMicrophoneDeviceId,
+    setMuteSystemAudio,
+    setPlayInteractionSound,
+    setFastActivationEnabled,
+    setRefinementEnabled,
+    setRefinementInstructions,
+    setAutoDictionaryEnabled,
+    setDictionaryEntries,
+    deleteDictionaryEntry,
+    recordDictionaryLearningActions,
+    setShortcut,
+  };
+}
+
+function formatVoiceInputPersistenceError(
+  t: (key: string, options?: Record<string, unknown>) => string,
+  error: unknown,
+): string {
+  const message =
+    extractIpcError(error)?.message ?? (error instanceof Error ? error.message : String(error));
+  return t('settings.voiceInput.saveFailed', { message });
+}
+
+function areVoiceInputShortcutsEqual(
+  lhs: VoiceInputShortcut | null,
+  rhs: VoiceInputShortcut | null,
+): boolean {
+  return JSON.stringify(lhs) === JSON.stringify(rhs);
+}

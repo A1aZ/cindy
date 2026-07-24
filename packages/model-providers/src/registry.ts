@@ -1,0 +1,172 @@
+/**
+ * 供应商登记表（registry）—— 纯逻辑：合并连接状态、按 agent 算可见性、解析路由素材。
+ *
+ * 连接状态由 host 注入（XD: api_key 是否存在 / Anthropic: 是否有 claude.ai OAuth /
+ * OpenAI: codex 是否 OAuth 登录），本模块不读任何存储。
+ *
+ * SSoT：**目录就是 per-agent 模型清单的唯一来源**。模型按 agent 分组挂在
+ * `Provider.models[agent]` 下；host 从目录派生 maker-core 的 per-agent availableModels
+ * （不再有写死的 CLAUDE_MODELS / CODEX_MODELS）。因此本模块的查询都带 `agent` 维度：
+ *   - 哪些供应商支持某 agent（来源栏可见性）
+ *   - 某 (model, agent) 由哪些供应商提供（source 选择）
+ *   - 解析 (provider, model, agent) → 路由素材（供 host 通用路由器落地）
+ */
+
+import type { Catalog, Provider, CatalogModel, AgentKind, RoutingDescriptor } from './types.js';
+import type { ProviderLogoKind } from './providerBranding.js';
+
+/** 各供应商是否已连接，由 host 注入。 */
+export type ConnectionState = Record<string, boolean>;
+
+/** 供应商 + 连接状态。 */
+export interface ProviderView extends Provider {
+  connected: boolean;
+  /** Non-secret presentation metadata resolved before routing details cross device-link. */
+  logoKind?: ProviderLogoKind;
+}
+
+/** 把目录与连接状态合成 registry。 */
+export function buildRegistry(catalog: Catalog, connected: ConnectionState): ProviderView[] {
+  return catalog.providers.map((p) => ({ ...p, connected: connected[p.id] ?? false }));
+}
+
+/** 该 agent 兼容的所有供应商（不论连接与否）—— 供应商页「可用」列表用。 */
+export function providersForAgent(views: ProviderView[], agent: AgentKind): ProviderView[] {
+  return views.filter((p) => p.agents.includes(agent));
+}
+
+/** 该 agent 已连接的供应商 —— 模型选择器「来源栏」用。 */
+export function connectedProvidersForAgent(views: ProviderView[], agent: AgentKind): ProviderView[] {
+  return views.filter((p) => p.connected && p.agents.includes(agent));
+}
+
+/** 该供应商是否在某 agent 下提供某 model id。 */
+export function providerOffersModel(provider: Provider, modelId: string, agent: AgentKind): boolean {
+  return (provider.models[agent] ?? []).some((m) => m.id === modelId);
+}
+
+/** 取某供应商在某 agent 下的模型元数据（找不到返回 undefined）。 */
+export function getModel(
+  provider: Provider,
+  modelId: string,
+  agent: AgentKind,
+): CatalogModel | undefined {
+  return (provider.models[agent] ?? []).find((m) => m.id === modelId);
+}
+
+/**
+ * 某个模型在某 agent 会话下的「可选来源」：支持该 agent 且提供该模型的供应商。
+ * `onlyConnected` 默认 true（选择器场景）；false 则含未连接（用于"去连接"引导）。
+ * 注意：调用方应只对"对该 agent 有效"的模型（来自 maker-core availableModels）查询。
+ */
+export function sourcesForModel(
+  views: ProviderView[],
+  modelId: string,
+  agent: AgentKind,
+  opts: { onlyConnected?: boolean } = {},
+): ProviderView[] {
+  const onlyConnected = opts.onlyConnected ?? true;
+  return views.filter(
+    (p) =>
+      (!onlyConnected || p.connected) &&
+      p.agents.includes(agent) &&
+      providerOffersModel(p, modelId, agent),
+  );
+}
+
+/**
+ * 某 agent 在已连接来源列表(rail)里的「原生默认来源 id」。
+ * 与模型选择器 activeSourceId 的 nativeDefault 口径一致:
+ *   codex  → 优先 openai,其次 xd,再兜底 rail 首项。
+ *   cc + 其余 → 优先 xd,兜底 rail 首项。
+ * rail 为空(零已连接来源)→ null。
+ */
+export function nativeDefaultSourceId(rail: ProviderView[], agent: AgentKind | null): string | null {
+  if (rail.length === 0) return null;
+  const has = (id: string) => rail.some((p) => p.id === id);
+  if (agent === 'codex') return has('openai') ? 'openai' : has('xd') ? 'xd' : rail[0].id;
+  return has('xd') ? 'xd' : rail[0].id;
+}
+
+/**
+ * 解析某个会话当前 `(agent, model)` 真正可用的来源 id。
+ *
+ * 来源选择必须先收窄到「已连接且确实提供当前模型」的集合，再应用显式选择 / 原生默认：
+ * 否则当 XD key 被清除、但 OpenAI 仍连接时，Claude 会话会把 OpenAI 当成 agent 级兜底，
+ * 拼出「OpenAI 图标 + Opus」这种不可能路由。显式来源失效时返回同模型的默认可用来源；
+ * 当前模型没有任何已连接来源时返回 null。
+ */
+export function effectiveSourceIdForModel(
+  views: ProviderView[],
+  providerId: string | null | undefined,
+  modelId: string,
+  agent: AgentKind,
+): string | null {
+  const sources = sourcesForModel(views, modelId, agent);
+  if (providerId && sources.some((provider) => provider.id === providerId)) return providerId;
+  return nativeDefaultSourceId(sources, agent);
+}
+
+/**
+ * 某 (provider, model, agent) 是否支持 Fast 模式 —— 纯函数,**Fast 能力的唯一真相**。
+ * 直接读该供应商在该 agent 下那个模型条目的 `supportsFastMode`（per-provider，见 CatalogModel）。
+ * 缺省 / 取不到 provider / 该来源不提供此模型 ⇒ false（不显示开关）。
+ *
+ * 实际可用 = `agent.hasFastMode && modelSupportsFastMode(...)`（agent 粗粒度 gate 由调用方叠加）。
+ * 注意：必须传入**具体某个 provider**的条目，不能用跨 provider 拍平去重后的模型（那只保留首个
+ * 供应商的值，遇到 per-provider 分叉会错）。
+ */
+export function modelSupportsFastMode(
+  provider: ProviderView | Provider | undefined,
+  modelId: string,
+  agent: AgentKind,
+): boolean {
+  if (!provider) return false;
+  return !!getModel(provider, modelId, agent)?.supportsFastMode;
+}
+
+/**
+ * 会话维度的 Fast 门控:解析「当前生效来源」后,查该来源下这个模型的 `supportsFastMode`。
+ * 生效来源口径与模型选择器 activeSourceId 一致(显式 providerId 若已连接则用它,否则取该 agent 的
+ * nativeDefaultSourceId)。这样 providerId 为 null(未显式选源)时也能命中真实默认来源
+ * —— 例如 cc 默认源是 xd 网关(见 nativeDefaultSourceId),若该来源把某模型 fast 配为 false
+ * ⇒ 默认不显示,只有用户显式选到 fast 可用的来源(如官方 Anthropic)才显示。
+ */
+export function sessionModelSupportsFastMode(
+  views: ProviderView[],
+  providerId: string | null | undefined,
+  modelId: string,
+  agent: AgentKind,
+): boolean {
+  const sourceId = effectiveSourceIdForModel(views, providerId, modelId, agent);
+  const effective = sourceId ? views.find((provider) => provider.id === sourceId) : undefined;
+  return modelSupportsFastMode(effective, modelId, agent);
+}
+
+/** 路由解析结果（喂给 host 通用路由器）。 */
+export interface ResolvedRoute {
+  provider: ProviderView;
+  model: CatalogModel;
+  routing: RoutingDescriptor;
+}
+
+/**
+ * 解析 `{providerId, modelId, agent}` → 路由素材。
+ * 校验：provider 存在、该 agent ∈ provider.agents、provider 提供该 model、且声明了
+ * 该 agent 的 routing。任一不满足返回 null（调用方走兜底 / 报错）。
+ */
+export function resolveRoute(
+  views: ProviderView[],
+  providerId: string,
+  modelId: string,
+  agent: AgentKind,
+): ResolvedRoute | null {
+  const provider = views.find((p) => p.id === providerId);
+  if (!provider) return null;
+  if (!provider.agents.includes(agent)) return null;
+  const model = getModel(provider, modelId, agent);
+  if (!model) return null;
+  const routing = provider.routing[agent];
+  if (!routing) return null;
+  return { provider, model, routing };
+}

@@ -1,0 +1,192 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { describe, expect, it } from 'vitest';
+
+describe('mobile auth-server login', () => {
+  it('uses native social SDK credentials and exchanges them only with auth-server', () => {
+    const loginSource = readFileSync(
+      resolve(process.cwd(), 'app/(auth)/login.tsx'),
+      'utf8',
+    );
+    const authSource = readFileSync(
+      resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
+      'utf8',
+    );
+    const nativeSource = readFileSync(
+      resolve(process.cwd(), 'src/auth/nativeSocial.ts'),
+      'utf8',
+    );
+
+    expect(loginSource).toMatch(/type:\s*'native-social',\s*provider/);
+    expect(loginSource).toContain('testID: `login.${provider}Button`');
+    expect(loginSource).toContain('<AppleAuthenticationButton');
+    expect(loginSource).toContain(
+      'buttonType={AppleAuthenticationButtonType.SIGN_IN}',
+    );
+    expect(loginSource).toContain('AppleAuthenticationButtonStyle.WHITE');
+    expect(loginSource).toContain('AppleAuthenticationButtonStyle.BLACK');
+    expect(loginSource).toContain('style={styles.appleButton}');
+    expect(loginSource).not.toContain('react-native-webview');
+    expect(authSource).toContain(
+      'client.exchangeNativeSocial(action.provider, credential)',
+    );
+    expect(authSource).toContain("clientType: 'mobile'");
+    expect(nativeSource).toContain("import('expo-apple-authentication')");
+    expect(nativeSource).toContain('Crypto.CryptoDigestAlgorithm.SHA256');
+    expect(nativeSource).toContain(
+      "import('@react-native-google-signin/google-signin')",
+    );
+    expect(nativeSource).toContain('GoogleSignin.configure({');
+    expect(nativeSource).toContain("import('xdt-wechat-login')");
+    expect(nativeSource).toContain('requestWechatAuthCode({');
+    expect(nativeSource).toContain('createNativeWechatLoginTimeout()');
+    expect(nativeSource).toContain('cancelWechatAuthRequest().catch');
+    expect(nativeSource).toContain("AppState.addEventListener('change'");
+    // 社交入口可见性必须镜像 acquire* 的配置前置条件：缺 client ID / app ID 的构建不渲染必然失败的按钮
+    expect(nativeSource).toContain(
+      "if (provider === 'apple') return Platform.OS === 'ios';",
+    );
+    expect(nativeSource).toContain('if (!GOOGLE_WEB_CLIENT_ID) return false;');
+    expect(nativeSource).toContain(
+      '(!!GOOGLE_IOS_CLIENT_ID && !!GOOGLE_IOS_URL_SCHEME)',
+    );
+    expect(nativeSource).toContain(
+      'return !!WECHAT_APP_ID && !!WECHAT_UNIVERSAL_LINK;',
+    );
+    expect(nativeSource).toContain('!GOOGLE_IOS_URL_SCHEME');
+    expect(nativeSource).toMatch(/\|\|\s*!WECHAT_UNIVERSAL_LINK/);
+  });
+
+  it('releases timed-out WeChat requests in both native coordinators', () => {
+    const moduleSource = readFileSync(
+      resolve(process.cwd(), 'modules/xdt-wechat-login/src/index.ts'),
+      'utf8',
+    );
+    const iosSource = readFileSync(
+      resolve(
+        process.cwd(),
+        'modules/xdt-wechat-login/ios/XdtWechatAuthCoordinator.swift',
+      ),
+      'utf8',
+    );
+    const androidSource = readFileSync(
+      resolve(
+        process.cwd(),
+        'modules/xdt-wechat-login/android/src/main/java/com/xdtmaker/wechatlogin/XdtWechatLoginModule.kt',
+      ),
+      'utf8',
+    );
+
+    expect(moduleSource).toContain('cancelWechatAuthRequest(): Promise<void>');
+    expect(iosSource).toContain('func cancel()');
+    expect(androidSource).toContain('fun cancel()');
+  });
+
+  it('keeps SSO in the system browser and completes PKCE through the regional deep link', () => {
+    const authSource = readFileSync(
+      resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
+      'utf8',
+    );
+    const envSource = readFileSync(
+      resolve(process.cwd(), 'src/config/env.ts'),
+      'utf8',
+    );
+
+    expect(authSource).toContain("kind: 'sso'");
+    expect(authSource).toMatch(
+      /WebBrowser\.openAuthSessionAsync\(\s*authUrl,\s*MOBILE_REDIRECT_URL,?\s*\)/,
+    );
+    expect(authSource).toMatch(/setSecureItem\(\s*PENDING_OAUTH_KEY/);
+    expect(authSource).toContain('Linking.addEventListener');
+    expect(authSource).toContain('Linking.getInitialURL()');
+    expect(authSource).toContain(
+      'matchesOAuthCallbackUrl(url, MOBILE_REDIRECT_URL)',
+    );
+    expect(authSource).toContain(
+      'matchesOAuthCallbackUrl(callbackUrl, MOBILE_REDIRECT_URL)',
+    );
+    expect(authSource).toContain('exchangeAuthorizationCode(');
+    // scheme 派生 2026-07-20 起为三区域查表(cn/global/dev),断言仍锚定
+    // 「按区域取回调 scheme」这一形状。
+    expect(envSource).toContain(
+      "{ cn: 'cindycn', global: 'cindy', dev: 'cindydev' }[AUTH_REGION]",
+    );
+  });
+
+  it('keeps account tokens inside membership selection and private tickets off screen', () => {
+    const authSource = readFileSync(
+      resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
+      'utf8',
+    );
+    const loginSource = readFileSync(
+      resolve(process.cwd(), 'app/(auth)/login.tsx'),
+      'utf8',
+    );
+
+    expect(authSource).toContain('pendingLoginTicketRef');
+    expect(authSource).toContain('pendingBindTicketRef');
+    expect(authSource).toContain('pendingSsoVerificationTicketRef');
+    expect(authSource).toContain('pendingAccountTokenRef');
+    expect(authSource).toContain('client.exchangeAccountMembership(');
+    expect(authSource).toContain(
+      'client.selectAccount(ticket, action.accountId)',
+    );
+    expect(authSource).toContain('client.verifyBinding(');
+    expect(loginSource).not.toContain('loginTicket');
+    expect(loginSource).not.toContain('bindTicket');
+    expect(loginSource).not.toContain('verificationTicket');
+    expect(authSource).toContain('client.requestSsoVerificationCode(ticket)');
+    expect(authSource).toContain(
+      'client.verifySsoVerification(ticket, action.code)',
+    );
+    expect(authSource).not.toContain('.logoutAccount(');
+    expect(authSource).not.toContain('.refreshAccount(');
+    expect(authSource).not.toContain(
+      'setSecureItem(LEGACY_ACCOUNT_REFRESH_TOKEN_KEY',
+    );
+
+    const apiFetchStart = authSource.indexOf('const apiFetch = useCallback(');
+    const apiFetchEnd = authSource.indexOf(
+      '\n\n  const value = useMemo',
+      apiFetchStart,
+    );
+    const apiFetchBody = authSource.slice(apiFetchStart, apiFetchEnd);
+    expect(apiFetchBody).toContain('const token = await getAccessToken();');
+    expect(apiFetchBody).not.toContain('pendingAccountTokenRef');
+  });
+
+  it('serializes rotated-token writes and keeps identity on auth-server only', () => {
+    const authSource = readFileSync(
+      resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
+      'utf8',
+    );
+
+    expect(authSource).toContain('serializeRefreshTokenMutation');
+    expect(authSource).toMatch(
+      /const LEGACY_ACCOUNT_REFRESH_TOKEN_KEY\s*=\s*'cindy\.mobile\.auth\.accountRefreshToken';/,
+    );
+    expect(authSource).not.toContain('serializeAccountTokenMutation');
+    expect(authSource).not.toContain('accountRefreshInFlightRef');
+    expect(authSource).toMatch(
+      /if \(authGenerationRef\.current !== generation\)\s+throw authCodeError\('AUTH_FLOW_SUPERSEDED'\)/,
+    );
+    expect(authSource).toMatch(
+      /if \(authGenerationRef\.current !== generation\) return null;\s+setToken\(pair\.accessToken\)/,
+    );
+    // 2026-07 产品 /api/user/me 退役:身份只经 auth-server getMe,防复活。
+    expect(authSource).not.toContain("'/api/user/me'");
+    expect(authSource).toContain("throw authCodeError('AUTH_FLOW_SUPERSEDED')");
+    expect(authSource).toMatch(
+      /code === 'INVALID_LOGIN_TICKET'\s*\|\|\s*code === 'INVALID_BIND_TICKET'/,
+    );
+  });
+
+  it('accepts enterprise ID, organization slug, and verified domains up to the API limit', () => {
+    const loginSource = readFileSync(
+      resolve(process.cwd(), 'app/(auth)/login.tsx'),
+      'utf8',
+    );
+    expect(loginSource).toContain('maxLength={253}');
+    expect(loginSource).toContain("type: 'discover-sso-org'");
+  });
+});

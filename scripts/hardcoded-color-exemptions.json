@@ -1,0 +1,157 @@
+[
+ {
+  "glob": "apps/desktop/src/renderer/themes/builtin/cindy-light.ts",
+  "reason": "CINDY token override(决策表 §3 落值,U8 批准)",
+  "owner": "D2"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/themes/builtin/cindy-dark.ts",
+  "reason": "CINDY token override(决策表 §3 落值,U8 批准)",
+  "owner": "D2"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/themes/__tests__/cindyDecisionData.ts",
+  "reason": "决策数据冻结(含期望 hex/HSL)",
+  "owner": "D2T"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/themes/__tests__/cindyThemes.test.ts",
+  "reason": "D2T 单测期望值与 helper(含 hex)",
+  "owner": "D2T"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/themes/__tests__/tokenRegistry.test.ts",
+  "reason": "D1 注册守卫单测(含 hex 期望)",
+  "owner": "D1"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/cindy-brain/__tests__/ghostPanelTheme.test.ts",
+  "reason": "D1 Ghost 注入单测(含 hex 样例)",
+  "owner": "D1"
+ },
+ {
+  "glob": "docs/design-rules/cindy-design-system.md",
+  "reason": "§15 CINDY 色板/三份红 map 文档示例",
+  "owner": "D2"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/themes/__tests__/cindyCodeBlockContrast.test.ts",
+  "reason": "D2-6 hljs 落档:hljs 主题色数据(LIGHT/DARK)+注释引用 default/CINDY 色",
+  "owner": "D2"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/themes/colors.ts",
+  "reason": "token 注册表:注册值 + 注释引用色(panel-bg/board D1 + status-badge-fg D2)",
+  "owner": "D1+D2"
+ },
+ {
+  "glob": "apps/desktop/src/main/cindy-brain/forge.ts",
+  "reason": "FORGE_GUIDE §5 主题条:意识契约回退值示例 var(--panel-bg, #f7f7f5) 等(D1 同步)",
+  "owner": "D1"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/styles/globals.css",
+  "reason": "D hljs 整改段 [data-theme=cindy-dark] .hljs-section 提亮值 #2573ec + 注释引用 default/CINDY 色",
+  "owner": "D"
+ },
+ {
+  "glob": "apps/desktop/src/main/vibrancyConfig.ts",
+  "reason": "E4D vibrancy 配置(opaqueBg #1f1f1e/#f8f8f6 + 透明底 #00000000)",
+  "owner": "E4D"
+ },
+ {
+  "glob": "apps/desktop/src/main/__tests__/vibrancyConfig.test.ts",
+  "reason": "E4D vibrancy 单测断言(期望 hex)",
+  "owner": "E4D"
+ },
+ {
+  "glob": "apps/desktop/src/main/bootstrap-electron.ts",
+  "reason": "E4D applyWindowVibrancy 配置色(opaqueBg/透明底)+注释",
+  "owner": "E4D"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/themes/builtin/default-light.ts",
+  "reason": "E5D 默认皮肤 Auto Approval palette override(perm-auto-selected-text #417CDD)",
+  "owner": "E5D"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/themes/builtin/default-dark.ts",
+  "reason": "E5D 默认皮肤 Auto Approval palette override(perm-auto-selected-text #417CDD)",
+  "owner": "E5D"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/components/ui/toast/Toast.tsx",
+  "reason": "E5D Toast 四色定稿 hardcode(docs/design-rules/cindy-design-system.md §2 sanctioned,info #417CDD/success #2AAE5B/warning #F3A115/error #D91F37;VARIANT_MAP 已导出供 toastColors 守)",
+  "owner": "E5D"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/__tests__/toastColors.test.ts",
+  "reason": "E5D Toast 四色定稿单测(期望 hex)",
+  "owner": "E5D"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/__tests__/themePermissionColors.test.ts",
+  "reason": "E5D Auto Approval 默认值单测(期望 hex #417CDD)",
+  "owner": "E5D"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/components/splash/SplashScreen.tsx",
+  "reason": "E6/E6-B splash 双模式:进度条双套白黑 alpha(既有值恢复)+ hsl(var()) 双模式取色(膘叔交付,阿梅 E6-B-R PASS)",
+  "owner": "E6"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/__tests__/newMakerCreateAgentVisualContract.test.ts",
+  "reason": "合同测试值守护断言(expect toContain hex),非样式硬编码",
+  "owner": "E2"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/components/new-chat/*.tsx",
+  "reason": "composer-pill fallback var(--composer-pill-*,hex)(lead 裁决 a+fallback,token 已注册 b5d7310,集成收口删)",
+  "owner": "E3-fix"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/features/cc-agent/NewMakerDraftRoute.tsx",
+  "reason": "create-agent 变体 focus/spec 残留 fallback(E2-S)",
+  "owner": "E2"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/components/splash/__tests__/SplashScreen.test.tsx",
+  "reason": "splash v2 断言值守护(expect rgba),非样式硬编码",
+  "owner": "SPLASH-V2"
+ },
+ {
+  "glob": "apps/mobile/src/theme/tokens.ts",
+  "reason": "mobile CINDY token source of truth: palette literals are the governed values, not component hardcoding",
+  "owner": "M1-mobile-align"
+ },
+ {
+  "glob": "apps/mobile/src/__tests__/themeTokens.test.ts",
+  "reason": "mobile token contract tests assert exact governed palette values",
+  "owner": "M1-mobile-align"
+ },
+ {
+  "glob": "apps/mobile/src/__tests__/homeDesktopFirst.test.ts",
+  "reason": "mobile desktop-parity tests assert token/icon migration evidence and expected palette strings",
+  "owner": "M1-mobile-align"
+ },
+ {
+  "glob": "apps/mobile/src/__tests__/mathWebViewHtml.test.ts",
+  "reason": "mobile webview HTML fallback color test mirrors token-derived CINDY surface",
+  "owner": "M1-mobile-align"
+ },
+ {
+  "glob": "apps/mobile/src/session/BlurBackdrop.tsx",
+  "reason": "mobile blur component comments document approved translucent token source values; runtime styles consume tokens",
+  "owner": "M1-mobile-align"
+ },
+ {
+  "glob": "apps/mobile/src/__tests__/typographyTokenDiscipline.test.ts",
+  "reason": "caret 防红回流守护测试:红色字面量是禁止匹配的正则模式与豁免蓝值,非组件硬编码",
+  "owner": "M1-mobile-align"
+ },
+ {
+  "glob": "apps/desktop/src/renderer/components/sidebar/VendorIcon.tsx",
+  "reason": "hsl(var(--sidebar-muted)) 合法 token 消费(规则16 HSL wrap);红胶囊反白重构 2026-07-19 改行形态后入账",
+  "owner": "lead"
+ }
+]

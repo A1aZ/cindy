@@ -1,0 +1,231 @@
+/**
+ * @cindy/im public types
+ * ---------------------------------------------------------------------------
+ * The transport-layer contract between @cindy/im (pure package) and the host
+ * (apps/desktop). Keep this file electron-free; host adapters fulfil the
+ * `IMHost` shape using whatever Electron / Node / browser APIs they need.
+ */
+
+import type { Logger } from './logger.js';
+
+/**
+ * Host-injected capabilities. Hosts must provide encrypted KV storage, an IPC
+ * bridge, and a couple of derived paths. Optionally a logger factory; otherwise
+ * we use the bundled console logger.
+ */
+export interface IMHost {
+  /** Encrypted KV storage (replaces electron.safeStorage). */
+  secrets: {
+    /** Persist `plaintext` under `name`; returns whether it was written. */
+    write(name: string, plaintext: string): boolean;
+    /** Read; missing or unavailable returns null. */
+    read(name: string): string | null;
+    /** Remove (no-op if missing). */
+    remove(name: string): void;
+    /** Whether encryption is currently usable (e.g. Linux without keychain). */
+    isAvailable(): boolean;
+  };
+
+  /** IPC bridge (replaces electron.ipcMain + BrowserWindow). */
+  ipc: {
+    /** Register an `invoke` handler. @cindy/im owns channel names. */
+    handle(
+      channel: string,
+      handler: (payload?: unknown) => Promise<unknown> | unknown,
+    ): void;
+    /** Push to all renderer windows. */
+    broadcast(channel: string, payload: unknown): void;
+  };
+
+  /**
+   * Optional host-owned authenticated-account scope. Transport packages use
+   * this to keep long-running setup flows (credential save / app registration)
+   * inside the same account generation that initiated them, without depending
+   * on a renderer, database, or host lifecycle implementation.
+   */
+  accountScope?: {
+    /** Capture the current opaque account generation; null means logged out. */
+    capture(): unknown | null;
+    /** Whether a previously captured generation still owns the active account. */
+    isCurrent(token: unknown): boolean;
+    /** Run transport-mutating work only while that generation remains active. */
+    run<T>(token: unknown, operation: () => Promise<T>): Promise<T>;
+  };
+
+  /** Filesystem path config; hosts derive these from `app.getPath('userData')`. */
+  paths: {
+    /** Root for downloaded feishu media (images / files). MUST equal the media root the host wires elsewhere (e.g. the xdt-image:// media service) so xdt-image:// URLs resolve consistently across contexts. */
+    feishuMediaDir: string;
+    /** Root for downloaded discord media. Optional — only hosts that wire the discord channel provide it. */
+    discordMediaDir?: string;
+  };
+
+  /**
+   * host 托管的媒体缓存(cindy-media 媒体总仓)。可选——注入后
+   * 入站**图片**改走 host 内容寻址仓(按 token 免重下、全局去重、吃缓存回收
+   * 策略);缺省时回落 `paths.*MediaDir` 的老目录写盘。非图片文件始终走老
+   * 目录(host 侧规则 25 边界:非媒体不进字节仓)。包侧只摸字节和字符串,
+   * 落盘/记账细节全在 host(规则 2)。
+   */
+  media?: IMHostMediaCache;
+
+  httpPostForm(url: string, form: URLSearchParams): Promise<{ status: number; body: unknown }>;
+
+  /** Optional logger factory; default is a console logger. */
+  createLogger?(scope: string): Logger;
+}
+
+// ── Inbound events ────────────────────────────────────────────────────────────
+// p2p only — group_chat / topic_chat events are dropped at wsClient before
+// emitting, so handlers never see them.
+
+/** host 托管媒体缓存回调组(见 IMHost.media)。 */
+export interface IMHostMediaCache {
+  /** 图片字节入 host 总仓;返回仓内绝对路径(喂 agent)+ 渲染 URL(cindy-media://)。 */
+  cacheImage(params: {
+    integration: 'feishu' | 'discord';
+    /** 平台侧稳定 token(feishu image_key / discord attachment id),host 据此免重下。 */
+    token: string;
+    buffer: Uint8Array;
+    mimeType: string;
+  }): Promise<{ absPath: string; url: string }>;
+  /** 按 token 查已缓存图片;未缓存返回 null(调用方去真下载)。 */
+  getCachedImage(
+    integration: 'feishu' | 'discord',
+    token: string,
+  ): Promise<{ absPath: string; url: string; mimeType: string } | null>;
+  /** host 托管媒体 URL(cindy-media://)→ 绝对路径;认不出返回 null(出站上传用)。 */
+  resolveMediaUrl(url: string): string | null;
+}
+
+export interface IMAttachment {
+  kind: 'image' | 'file';
+  /** 下载副本的绝对路径:老目录(`host.paths.*MediaDir`)或 host 媒体总仓内(经 media.cacheImage 提升后)。 */
+  absPath: string;
+  /** Original filename from the IM platform. */
+  originalName: string;
+  /** Detected MIME type. */
+  mimeType: string;
+  /** host 媒体总仓地址(cindy-media://,经 media.cacheImage 提升后才有);host 落库时据此挂会话引用。 */
+  url?: string;
+}
+
+export interface IMUnsupportedEntry {
+  /** Channel-specific machine code (e.g. 'audio', 'media', 'oversize'). */
+  type: string;
+  /** Localised label suitable for showing the user. */
+  label: string;
+}
+
+export interface IMMessageEvent {
+  channelName: string;
+  /** Sender open_id (or channel-equivalent stable user id). */
+  senderId: string;
+  /** Channel-native chat id (feishu chat_id), useful if main wants to persist. */
+  chatId: string;
+  /** Channel context id (feishu app id). */
+  contextId: string;
+  /** Channel message id — host can use to ack via reactions / quote-reply etc. */
+  messageId: string;
+  /** Plain-text payload. */
+  text: string;
+  /** Pre-downloaded attachments. */
+  attachments: IMAttachment[];
+  /**
+   * Items the channel could not deliver to the agent (audio, video, oversized,
+   * unknown msg_type, download failures, etc.). Host decides how to respond:
+   *   - text empty + attachments empty + unsupported non-empty → reply with
+   *     a "🙏 这条消息我没法处理" notice; do NOT invoke the agent
+   *   - mixed (text/attachments + unsupported) → ack the user that some bits
+   *     were skipped, then run the agent with the clean text/attachments
+   * @cindy/im does not auto-format these into the user prompt — that would
+   * pollute the model's input.
+   */
+  unsupported: IMUnsupportedEntry[];
+  /**
+   * Thread root ts(仅 thread 内回复时有值;顶层消息 undefined)。
+   * thread 能力渠道(slack)专用;feishu 恒 undefined。
+   */
+  threadTs?: string;
+  /**
+   * 会话维度键 = threadTs ?? 自身 ts。threadScoped 渠道用它路由
+   * 「thread = 独立 session」;feishu 恒 undefined(整 DM 单会话)。
+   */
+  scopeKey?: string;
+  /** Channel-specific raw event for debug. */
+  raw?: unknown;
+}
+
+export interface IMCardActionEvent {
+  channelName: string;
+  /** open_id of the user who pressed the button. */
+  senderId: string;
+  /** Chat where the card lives (p2p only). */
+  chatId: string;
+  /** messageId of the card; pass to updateInteractiveCard to mutate it. */
+  messageId: string;
+  /** The button id business code put into `button.value.id`. */
+  buttonId: string;
+  /** Remaining fields of the button's value JSON (business-defined payload). */
+  payload: Record<string, unknown>;
+  /** 卡片所在 thread root ts(卡片在 thread 内时有值)。 */
+  threadTs?: string;
+  /** 会话维度键 = threadTs ?? 卡片自身 ts(slack);feishu undefined。 */
+  scopeKey?: string;
+}
+
+export type IMStatus =
+  | { kind: 'idle' }
+  | { kind: 'connecting' }
+  | { kind: 'connected'; appId: string }
+  | { kind: 'conflict'; appId: string }
+  | { kind: 'error'; reason: string };
+
+// ── Outbound spec ─────────────────────────────────────────────────────────────
+// p2p only — outbound APIs always take a single openId: string.
+
+export interface InteractiveCardButton {
+  id: string;
+  label: string;
+  type?: 'primary' | 'default' | 'danger';
+  payload?: Record<string, unknown>;
+}
+
+export interface InteractiveCardSpec {
+  title?: string;
+  /** Markdown body. */
+  body: string;
+  buttons: InteractiveCardButton[];
+}
+
+/** Handle returned by `startStreamingText`; allows throttled append + finalise. */
+export interface StreamingTextHandle {
+  readonly messageId: string;
+  /** Append delta text (@cindy/im throttles internally). */
+  append(delta: string): void;
+  /**
+   * Replace the displayed text wholesale (still throttled). Use when the
+   * caller composes the full view from multiple sources (e.g. thinking +
+   * text) and append-deltas don't fit naturally.
+   */
+  replace(fullText: string): void;
+  /** Replace card with `finalText` and stop throttling. */
+  finalize(finalText: string): Promise<void>;
+  /** Cancel without finalising (still leaves the last rendered text on screen). */
+  close(): void;
+  /**
+   * 投递一张"工具结果带过来的"图片到本 card, 让 finalize 时跟原文里 xdt-image
+   * markdown 链接一起 upload + 拼图。absPath 必须是已经被 host 主进程解析好的
+   * OS 绝对路径 (@cindy/im 包不参与 host-specific xdt-image:// namespace 解析,
+   * 那段路由 desktop main 用 imageCacheStore.resolveSafe 自己做)。
+   *
+   * 可选 — 不实现也合法 (e.g. 单纯 patch markdown 的轻量 handle 不支持图片)。
+   */
+  addExtraImageAbsPath?(absPath: string): void;
+}
+
+export interface SendFileResult {
+  ok: boolean;
+  reason?: 'NOT_FOUND' | 'EMPTY' | 'TOO_LARGE' | 'UPLOAD_FAIL' | 'SEND_FAIL';
+  messageId?: string;
+}

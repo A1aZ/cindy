@@ -1,0 +1,147 @@
+/**
+ * Workflow 进度读取器(逐 agent 树的数据源)
+ * ---------------------------------------------------------------------------
+ * Claude Code SDK 的 dynamic workflow 把内部子 agent 的明细写进磁盘的运行记录
+ * `~/.claude/projects/<slug>/<sdkSessionId>/workflows/wf_*.json`,**不进事件流**
+ * (workflow 在父会话只呈现为单个 local_workflow 任务)。要在 UI 里展示逐 agent 的
+ * 进度树,只能读这个记录文件。
+ *
+ * ⚠️ 稳定性提示:记录文件的目录布局、project-slug 规则、`wf_*.json` schema 都是
+ * Claude Code 的**内部实现、无公开契约**,`claude` 二进制升级后可能变动。因此本模块
+ * **全程防御式**:任一步失败(目录不存在 / 文件损坏 / schema 变化 / 找不到匹配)都返回
+ * null,让上层优雅回退到 workflow 级卡片,绝不抛异常污染主流程。
+ *
+ * 关联锚点:事件流里 local_workflow 任务的 `task_id` === 记录文件顶层的 `taskId`
+ * (实测 2026-07-01 验证)。据此在 workflows 目录里扫描匹配。
+ */
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+
+import type {
+  WorkflowAgentProgress,
+  WorkflowPhaseProgress,
+  WorkflowProgress,
+} from '../../shared/workflow-progress.js';
+
+export type {
+  WorkflowAgentProgress,
+  WorkflowPhaseProgress,
+  WorkflowProgress,
+} from '../../shared/workflow-progress.js';
+
+/**
+ * 复现 Claude Code 的 project-slug 规则:工作目录里每个非字母数字字符 → '-'
+ * (含前导 '/')。实测:
+ *   /Users/alice/Library/Application Support/xdt-maker/dialogues/2026-07-01/<id>
+ *   → -Users-alice-Library-Application-Support-xdt-maker-dialogues-2026-07-01-<id>
+ * 返回该 session 的 workflows 目录绝对路径。
+ */
+export function deriveWorkflowsDir(
+  homeDir: string,
+  workingDir: string,
+  sdkSessionId: string,
+): string {
+  const slug = workingDir.replace(/[^a-zA-Z0-9]/g, '-');
+  const homePath = /^[A-Za-z]:[\\/]/.test(homeDir) || homeDir.startsWith('\\\\')
+    ? path.win32
+    : path.posix;
+  return homePath.join(homeDir, '.claude', 'projects', slug, sdkSessionId, 'workflows');
+}
+
+function asString(v: unknown): string | undefined {
+  return typeof v === 'string' && v.length > 0 ? v : undefined;
+}
+
+function asNumber(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
+/**
+ * 把一份 wf_*.json 记录解析成 WorkflowProgress。schema 不符时尽量宽容:
+ * 缺字段就省略,坏条目就跳过;顶层缺 runId 视为不可用返回 null。
+ */
+export function extractWorkflowProgress(record: unknown): WorkflowProgress | null {
+  if (!record || typeof record !== 'object') return null;
+  const r = record as Record<string, unknown>;
+  const runId = asString(r.runId);
+  if (!runId) return null;
+
+  const phases: WorkflowPhaseProgress[] = [];
+  const agents: WorkflowAgentProgress[] = [];
+  const progress = Array.isArray(r.workflowProgress) ? r.workflowProgress : [];
+  for (const rawEntry of progress) {
+    if (!rawEntry || typeof rawEntry !== 'object') continue;
+    const e = rawEntry as Record<string, unknown>;
+    if (e.type === 'workflow_phase') {
+      const title = asString(e.title);
+      const index = asNumber(e.index);
+      if (title && index != null) phases.push({ index, title });
+    } else if (e.type === 'workflow_agent') {
+      const agentId = asString(e.agentId);
+      const state = asString(e.state);
+      if (!agentId || !state) continue;
+      agents.push({
+        label: asString(e.label) ?? agentId,
+        agentId,
+        state,
+        ...(asString(e.model) ? { model: asString(e.model) } : {}),
+        ...(asString(e.phaseTitle) ? { phaseTitle: asString(e.phaseTitle) } : {}),
+        ...(asNumber(e.attempt) != null ? { attempt: asNumber(e.attempt) } : {}),
+      });
+    }
+  }
+
+  // phases 兜底:workflowProgress 没有 workflow_phase 条目时,退回顶层 phases[]。
+  if (phases.length === 0 && Array.isArray(r.phases)) {
+    r.phases.forEach((p, i) => {
+      if (p && typeof p === 'object') {
+        const title = asString((p as Record<string, unknown>).title);
+        if (title) phases.push({ index: i + 1, title });
+      }
+    });
+  }
+
+  return {
+    runId,
+    ...(asString(r.workflowName) ? { workflowName: asString(r.workflowName) } : {}),
+    status: asString(r.status) ?? 'running',
+    ...(asNumber(r.agentCount) != null ? { agentCount: asNumber(r.agentCount) } : {}),
+    ...(asNumber(r.totalTokens) != null ? { totalTokens: asNumber(r.totalTokens) } : {}),
+    ...(asNumber(r.totalToolCalls) != null ? { totalToolCalls: asNumber(r.totalToolCalls) } : {}),
+    ...(asNumber(r.durationMs) != null ? { durationMs: asNumber(r.durationMs) } : {}),
+    phases,
+    agents,
+  };
+}
+
+/**
+ * 在 session 的 workflows 目录里找到 taskId 匹配的运行记录并解析。
+ * 找不到目录 / 无匹配 / 全部解析失败都返回 null(防御式,永不抛)。
+ *
+ * 说明:一个 session 内 workflow 通常只有个位数,直接扫描 + 解析可接受;后续量大可
+ * 按 taskId 建缓存。
+ */
+export async function readWorkflowProgressByTaskId(
+  workflowsDir: string,
+  taskId: string,
+): Promise<WorkflowProgress | null> {
+  if (!taskId) return null;
+  let entries: string[];
+  try {
+    entries = await fs.readdir(workflowsDir);
+  } catch {
+    return null; // 目录不存在(该 session 没跑过 workflow)等
+  }
+  const files = entries.filter((f) => f.startsWith('wf_') && f.endsWith('.json'));
+  for (const file of files) {
+    try {
+      const raw = await fs.readFile(path.join(workflowsDir, file), 'utf8');
+      const record = JSON.parse(raw) as Record<string, unknown>;
+      if (record?.taskId !== taskId) continue;
+      return extractWorkflowProgress(record);
+    } catch {
+      continue; // 单个文件坏了不影响其它
+    }
+  }
+  return null;
+}

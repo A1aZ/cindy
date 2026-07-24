@@ -1,0 +1,128 @@
+/**
+ * 交互卡乐观 dismiss(批准 / 拒绝点击即撤卡)的 store 行为:
+ *  - beginOptimisticInteractionDismiss:当帧撤卡 + 登记在途抑制;
+ *  - 抑制窗口内权威流(push 重放 applyInteractionRequest / 全量快照
+ *    setPendingInteractions)不得把同一张卡灌回来(防「闪回」);
+ *  - settle confirmed:仅解除抑制(权威流不会再带来这张卡);
+ *  - settle restore:解除抑制并复原原卡(真失败,供用户重试)。
+ */
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { remoteSessionStore } from '@/session/remoteSessionStore';
+import type { PendingInteraction } from '@/session/types';
+
+function interaction(requestId: string): PendingInteraction {
+  return { request: { kind: 'permission', requestId, title: `req-${requestId}` } };
+}
+
+describe('optimistic interaction dismiss', () => {
+  beforeEach(() => {
+    remoteSessionStore.clear();
+  });
+
+  it('begin 当帧撤卡,权威快照与 push 重放在确认前都不能复活它', () => {
+    remoteSessionStore.setPendingInteractions('s1', [interaction('r1'), interaction('r2')]);
+    remoteSessionStore.beginOptimisticInteractionDismiss('s1', 'r1');
+    expect(remoteSessionStore.getPendingInteractions('s1').map((i) => i.request.requestId)).toEqual(['r2']);
+
+    // push 重放(reseed / 迟到事件)带回同一张卡:被抑制。
+    remoteSessionStore.applyInteractionRequest('s1', interaction('r1'));
+    expect(remoteSessionStore.getPendingInteractions('s1').map((i) => i.request.requestId)).toEqual(['r2']);
+
+    // 全量快照仍含这张卡(被控端还没处理完):同样被过滤,其余照常落地。
+    remoteSessionStore.setPendingInteractions('s1', [interaction('r1'), interaction('r2'), interaction('r3')]);
+    expect(remoteSessionStore.getPendingInteractions('s1').map((i) => i.request.requestId)).toEqual(['r2', 'r3']);
+  });
+
+  it('被抑制的 push 重放不能 finalize 当前 assistant 流', () => {
+    vi.useFakeTimers();
+    try {
+      remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+        sessionId: 's1',
+        event: { type: 'text', data: { text: 'hello', isFinal: false } },
+      });
+      vi.runOnlyPendingTimers();
+
+      remoteSessionStore.setPendingInteractions('s1', [interaction('r1')]);
+      remoteSessionStore.beginOptimisticInteractionDismiss('s1', 'r1');
+      remoteSessionStore.applyInteractionRequest('s1', interaction('r1'));
+
+      expect(remoteSessionStore.getMessages('s1')).toMatchObject([{
+        content: 'hello',
+        agentMeta: { isStreaming: true },
+      }]);
+
+      remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+        sessionId: 's1',
+        event: { type: 'text', data: { text: ' world', isFinal: false } },
+      });
+      vi.runOnlyPendingTimers();
+
+      expect(remoteSessionStore.getMessages('s1')).toMatchObject([{
+        content: 'hello world',
+        agentMeta: { isStreaming: true },
+      }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('settle confirmed 转延长抑制:早发晚到的旧快照(仍含该卡)被滤,不闪回', () => {
+    remoteSessionStore.setPendingInteractions('s1', [interaction('r1')]);
+    remoteSessionStore.beginOptimisticInteractionDismiss('s1', 'r1');
+    remoteSessionStore.settleOptimisticInteractionDismiss('s1', 'r1', { kind: 'confirmed' });
+    expect(remoteSessionStore.getPendingInteractions('s1')).toEqual([]);
+
+    // resolve 前发出、resolve 后才返回的慢权威快照:仍含已解决的卡 → 被滤。
+    remoteSessionStore.setPendingInteractions('s1', [interaction('r1'), interaction('r2')]);
+    expect(remoteSessionStore.getPendingInteractions('s1').map((i) => i.request.requestId)).toEqual(['r2']);
+    // push 单卡重放同样被滤。
+    remoteSessionStore.applyInteractionRequest('s1', interaction('r1'));
+    expect(remoteSessionStore.getPendingInteractions('s1').map((i) => i.request.requestId)).toEqual(['r2']);
+  });
+
+  it('延长抑制按「缺席即过期」回收:一轮不含该卡的快照后,同 id 新请求可正常写入', () => {
+    remoteSessionStore.setPendingInteractions('s1', [interaction('r1')]);
+    remoteSessionStore.beginOptimisticInteractionDismiss('s1', 'r1');
+    remoteSessionStore.settleOptimisticInteractionDismiss('s1', 'r1', { kind: 'confirmed' });
+
+    // 被控端确认后的新快照不再含 r1 → 延长抑制条目自然过期。
+    remoteSessionStore.setPendingInteractions('s1', [interaction('r2')]);
+    // 之后同 id 的新请求(如 agent 再次发起同名审批)不受历史影响。
+    remoteSessionStore.applyInteractionRequest('s1', interaction('r1'));
+    expect(remoteSessionStore.getPendingInteractions('s1').map((i) => i.request.requestId).sort()).toEqual(['r1', 'r2']);
+  });
+
+  it('interaction-dismissed push 不提前回收:push 之后晚到的在途旧快照仍被滤', () => {
+    remoteSessionStore.setPendingInteractions('s1', [interaction('r1')]);
+    remoteSessionStore.beginOptimisticInteractionDismiss('s1', 'r1');
+    remoteSessionStore.settleOptimisticInteractionDismiss('s1', 'r1', { kind: 'confirmed' });
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:interaction-dismissed', { sessionId: 's1', requestId: 'r1' });
+
+    // 决定提交前发出的 getPendingInteractions 旧快照晚于 push 返回(仍含已解决的卡):
+    // 若 push 提前回收了抑制条目,这里会闪回(codex review P2)。
+    remoteSessionStore.setPendingInteractions('s1', [interaction('r1'), interaction('r2')]);
+    expect(remoteSessionStore.getPendingInteractions('s1').map((i) => i.request.requestId)).toEqual(['r2']);
+
+    // 之后一轮不含 r1 的快照到达 → 条目按「缺席即过期」正常回收,同 id 新请求不受影响。
+    remoteSessionStore.setPendingInteractions('s1', [interaction('r2')]);
+    remoteSessionStore.applyInteractionRequest('s1', interaction('r1'));
+    expect(remoteSessionStore.getPendingInteractions('s1').map((i) => i.request.requestId).sort()).toEqual(['r1', 'r2']);
+  });
+
+  it('settle restore 复原原卡供重试', () => {
+    const original = interaction('r1');
+    remoteSessionStore.setPendingInteractions('s1', [original]);
+    remoteSessionStore.beginOptimisticInteractionDismiss('s1', 'r1');
+    expect(remoteSessionStore.getPendingInteractions('s1')).toEqual([]);
+
+    remoteSessionStore.settleOptimisticInteractionDismiss('s1', 'r1', { kind: 'restore', item: original });
+    expect(remoteSessionStore.getPendingInteractions('s1').map((i) => i.request.requestId)).toEqual(['r1']);
+  });
+
+  it('抑制按 (sessionId, requestId) 隔离:不影响其它会话的同名 request', () => {
+    remoteSessionStore.setPendingInteractions('s1', [interaction('r1')]);
+    remoteSessionStore.beginOptimisticInteractionDismiss('s1', 'r1');
+    remoteSessionStore.setPendingInteractions('s2', [interaction('r1')]);
+    expect(remoteSessionStore.getPendingInteractions('s2').map((i) => i.request.requestId)).toEqual(['r1']);
+  });
+});

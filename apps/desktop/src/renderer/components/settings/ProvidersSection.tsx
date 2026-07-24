@@ -1,0 +1,1288 @@
+/**
+ * ProvidersSection —— 设置 → 模型供应商页(2026-07 重构:双栏管理)。
+ *
+ * 布局:一张卡片内左右双栏 ——
+ *   - 左栏:扁平供应商列表。Cindy AI(xd)固定置顶(产品自己的服务);其余行只在
+ *     「已连接 / 已添加」后出现;底部「＋ 添加供应商」打开三步向导。未连接的内置
+ *     渠道不再常驻占行 —— 入口在向导目录里,另有「检测建议」组:本机装了
+ *     Claude Code / Codex CLI 时置一条建议行,点击直达该渠道的授权步。
+ *   - 右栏:选中供应商的详情 = 鉴权头部(复用既有各 Row 的连接/断开/授权逻辑,
+ *     **不发明新的连接 IPC**)+ 统一模型可见性列表(UnifiedModelList:并集 +
+ *     单开关同写双 agent,「分别调整」兜底,见该组件头注释)。
+ *
+ * 鉴权通道(与重构前一致):
+ *   - Anthropic: maker.claudeOAuth*;OpenAI: useCodexAuth();xAI: maker.xaiOAuth*。
+ *   - XD 网关: 凭据由 model-access 自动下发(useModelAccessStatus;无手填入口)。
+ *   - 自定义供应商: CRUD IPC + safeStorage 密钥;「刷新模型」= 读回密钥后走
+ *     fetchProviderModels,additions-only 合并进配置(与 OAuth 动态发现同语义)。
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
+import { Check, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
+
+import { cn } from '@/lib/utils';
+import { useProviders } from '@/hooks/useProviders';
+import { isChatGptConnectionConnected, useCodexAuth } from '@/hooks/useCodexAuth';
+import { useApiKey } from '@/hooks/useApiKey';
+import { useModelAccessStatus } from '@/hooks/useModelAccessStatus';
+import { useConfirmDialog } from '@/components/ui/confirm-dialog-provider';
+import { toast } from '@/lib/toast';
+import {
+  appendDiscoveredCustomProviderModels,
+  customProviderModelConfigFromCatalogModel,
+  deleteCustomProvider,
+  readCustomProviderKey,
+  updateCustomProvider,
+} from '@/lib/customProviders';
+import { providerMonogram } from '@/lib/providerModels';
+import { customProviderSubtitleForDisplay, providerSubtitleForDisplay } from '@/lib/providerSubtitle';
+import { CustomProviderDialog } from './CustomProviderDialog';
+import { AddProviderWizard, type WizardEntry } from './AddProviderWizard';
+import { buildUnionRows, UnifiedModelList } from './UnifiedModelList';
+import { AnthropicMark } from '@/components/icons/AnthropicMark';
+import { OpenAIMark } from '@/components/icons/OpenAIMark';
+import { XDIncMark } from '@/components/icons/XDIncMark';
+import { hasProviderLogo, ProviderLogoMark } from '@/components/icons/ProviderLogoMark';
+
+import type { LocalCliDetection } from '../../../shared/localCliDetect';
+import type { CustomProviderConfig, ProviderView } from '@cindy/model-providers';
+
+// ---------------------------------------------------------------------------
+// 工具
+// ---------------------------------------------------------------------------
+
+function providerHasModels(provider: ProviderView): boolean {
+  return provider.agents.some((a) => (provider.models[a]?.length ?? 0) > 0);
+}
+
+/** 供应商行图标(内置品牌 mark / 首字母 monogram)。 */
+function providerIcon(p: ProviderView, size: number): ReactNode {
+  if (hasProviderLogo(p.id, p.routing)) {
+    return <ProviderLogoMark providerId={p.id} routing={p.routing} size={size} />;
+  }
+  return <span className="text-15 font-semibold leading-none">{providerMonogram(p.name)}</span>;
+}
+
+// ---------------------------------------------------------------------------
+// 通用小件(与重构前一致)
+// ---------------------------------------------------------------------------
+
+function ConnectedPill() {
+  const { t } = useTranslation();
+  return (
+    <span
+      className="flex h-[22px] shrink-0 items-center gap-1 rounded-full px-2.5 text-11 font-medium"
+      style={{
+        backgroundColor: 'var(--settings-btn-secondary-bg)',
+        color: 'var(--settings-section-desc)',
+      }}
+    >
+      <Check size={12} strokeWidth={2.5} />
+      {t('settings.providers.pill.connected')}
+    </span>
+  );
+}
+
+/** OpenAI OAuth 仍可恢复但需要用户重新连接；使用中性 chip，避免表现成全局故障。 */
+function ReconnectRequiredPill() {
+  const { t } = useTranslation();
+  return (
+    <span
+      className="flex h-[22px] shrink-0 select-none items-center gap-1 rounded-full px-2.5 text-11 font-medium"
+      style={{
+        backgroundColor: 'var(--settings-btn-secondary-bg)',
+        color: 'var(--settings-section-desc)',
+      }}
+    >
+      <RefreshCw size={11} />
+      {t('settings.providers.openai.reconnectRequired')}
+    </span>
+  );
+}
+
+/** 摘要只展示去重后的模型数，避免把「模型 × Agent」误读成模型数量。 */
+function ModelCountChip({ count }: { count: number }) {
+  const { t } = useTranslation();
+  return (
+    <span
+      className="flex h-[18px] shrink-0 items-center rounded-full px-2 text-11 font-medium tabular-nums"
+      style={{
+        backgroundColor: 'var(--settings-btn-secondary-bg)',
+        color: 'var(--settings-section-desc)',
+      }}
+    >
+      {t('settings.providers.models.modelCount', { count })}
+    </span>
+  );
+}
+
+function PillButton({
+  label,
+  onClick,
+  disabled,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        'flex h-8 shrink-0 items-center justify-center rounded-full px-[14px] text-13 font-medium transition-colors',
+        'border',
+        disabled && 'cursor-not-allowed opacity-60',
+      )}
+      style={{
+        backgroundColor: 'var(--settings-btn-secondary-bg)',
+        borderColor: 'var(--settings-btn-secondary-border)',
+        color: 'var(--settings-btn-secondary-text)',
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+function CustomTag({ label }: { label: string }) {
+  return (
+    <span
+      className="flex h-[18px] shrink-0 items-center rounded-full px-2 text-11 font-medium"
+      style={{ border: '1px solid var(--settings-integration-avatar-border)', color: 'var(--text-tertiary)' }}
+    >
+      {label}
+    </span>
+  );
+}
+
+function RowIconButton({ icon, label, onClick }: { icon: ReactNode; label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      className="flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[var(--surface-hover)]"
+      style={{ color: 'var(--text-tertiary)' }}
+    >
+      {icon}
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 详情头部 —— avatar + 标题(+计数/订阅/自定义 tag)/副标题 + 右侧鉴权操作区。
+// (重构前的 ProviderCell 去掉展开逻辑;模型列表由详情容器统一渲染。)
+// ---------------------------------------------------------------------------
+
+function DetailHeader({
+  icon,
+  title,
+  subtitle,
+  trailing,
+  provider,
+  detail,
+  badge,
+}: {
+  icon: ReactNode;
+  title: string;
+  subtitle: string;
+  trailing: ReactNode;
+  provider?: ProviderView;
+  detail?: ReactNode;
+  badge?: ReactNode;
+}) {
+  const { t } = useTranslation();
+  const hasModels = !!provider && providerHasModels(provider);
+  const modelCount = useMemo(
+    () => (hasModels && provider ? buildUnionRows(provider).length : null),
+    [hasModels, provider],
+  );
+  const subscriptionProduct =
+    provider?.access?.kind === 'subscription' ? provider.access.product : null;
+  // 单 agent 供应商在头部统一说明(行级不再逐条标注,见 UnifiedModelList 头注释)。
+  const singleAgentNote =
+    provider && provider.agents.length === 1
+      ? t('settings.providers.detail.singleAgentNote', {
+          agent: provider.agents[0] === 'claude-code' ? 'Claude Code' : 'Codex',
+        })
+      : null;
+
+  return (
+    <div className={cn('flex flex-col px-5 py-4', detail && 'gap-3')}>
+      <div className="flex items-center gap-3">
+        <div
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg"
+          style={{
+            backgroundColor: 'var(--settings-integration-avatar-bg)',
+            border: '1px solid var(--settings-integration-avatar-border)',
+            color: 'var(--settings-integration-avatar-icon)',
+          }}
+        >
+          {icon}
+        </div>
+
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <div className="flex items-center gap-2">
+            <span
+              className="min-w-0 truncate text-14 font-medium leading-tight"
+              style={{ color: 'var(--settings-section-title)' }}
+            >
+              {title}
+            </span>
+            {modelCount !== null && <ModelCountChip count={modelCount} />}
+            {subscriptionProduct && (
+              <CustomTag
+                label={t('settings.providers.models.subscriptionProduct', {
+                  product: subscriptionProduct,
+                })}
+              />
+            )}
+            {badge}
+          </div>
+          <span
+            className="truncate text-13 leading-tight"
+            style={{ color: 'var(--settings-integration-subtitle)' }}
+          >
+            {subtitle}
+            {singleAgentNote ? ` · ${singleAgentNote}` : ''}
+          </span>
+        </div>
+
+        {trailing}
+      </div>
+
+      {detail}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Anthropic —— OAuth(Claude.ai 订阅),复用 maker.claudeOAuth*。
+// ---------------------------------------------------------------------------
+
+function AnthropicHeader({ provider, onChanged }: { provider?: ProviderView; onChanged: () => void }) {
+  const { t } = useTranslation();
+  const { confirm } = useConfirmDialog();
+  const [busy, setBusy] = useState(false);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const connected = provider?.connected ?? false;
+
+  const handleLogin = useCallback(async () => {
+    setLoggingIn(true);
+    try {
+      const r = await window.electronAPI.maker.claudeOAuthLogin();
+      if (r.ok) {
+        toast.success(t('settings.connections.claude.toast.loggedIn'));
+        onChanged();
+      } else if (r.reason === 'login_cancelled') {
+        /* 用户取消,不弹错 */
+      } else if (r.reason === 'not_a_subscription') {
+        toast.error(t('settings.connections.claude.toast.notSubscription'));
+      } else {
+        toast.error(t('settings.connections.claude.toast.loginFailed'));
+      }
+    } catch {
+      toast.error(t('settings.connections.claude.toast.loginFailed'));
+    } finally {
+      setLoggingIn(false);
+    }
+  }, [onChanged, t]);
+
+  const handleLogout = useCallback(async () => {
+    const confirmed = await confirm({
+      title: t('settings.connections.claude.logoutConfirm.title'),
+      description: t('settings.connections.claude.logoutConfirm.description'),
+      confirmText: t('settings.connections.claude.logoutConfirm.confirm'),
+      cancelText: t('settings.connections.claude.logoutConfirm.cancel'),
+    });
+    if (!confirmed) return;
+    setBusy(true);
+    try {
+      await window.electronAPI.maker.claudeOAuthLogout();
+      toast.success(t('settings.connections.claude.toast.loggedOut'));
+      onChanged();
+    } catch {
+      toast.error(t('settings.connections.claude.toast.logoutFailed'));
+    } finally {
+      setBusy(false);
+    }
+  }, [confirm, onChanged, t]);
+
+  const trailing = connected ? (
+    <div className="flex shrink-0 items-center gap-2.5">
+      <ConnectedPill />
+      <PillButton
+        label={t('settings.providers.button.disconnect')}
+        onClick={() => void handleLogout()}
+        disabled={busy}
+      />
+    </div>
+  ) : (
+    <PillButton
+      label={loggingIn ? t('settings.providers.button.cancel') : t('settings.providers.button.authorize')}
+      onClick={() => {
+        if (loggingIn) {
+          void window.electronAPI.maker.claudeOAuthCancel();
+          setLoggingIn(false);
+        } else {
+          void handleLogin();
+        }
+      }}
+    />
+  );
+
+  return (
+    <DetailHeader
+      icon={<AnthropicMark size={18} />}
+      title={t('settings.providers.anthropic.title')}
+      subtitle={providerSubtitleForDisplay(provider, t('settings.providers.anthropic.modelLabel'), {
+        fallback: t('settings.providers.anthropic.subtitle'),
+      })}
+      trailing={trailing}
+      provider={provider}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI —— OAuth(ChatGPT 订阅 / Codex),复用 useCodexAuth()。
+// ---------------------------------------------------------------------------
+
+function OpenAiHeader({ provider, onChanged }: { provider?: ProviderView; onChanged: () => void }) {
+  const { t } = useTranslation();
+  const { confirm } = useConfirmDialog();
+  const { state, triggerLogin, cancelLogin, logout } = useCodexAuth();
+  const reconnectRequired = state.kind === 'reconnect-required';
+  const loggingIn = state.kind === 'login-pending';
+  const connected = isChatGptConnectionConnected(state, provider?.connected ?? false);
+
+  const handleLogout = useCallback(async () => {
+    const confirmed = await confirm({
+      title: t('settings.connections.codex.logoutConfirm.title'),
+      description: t('settings.connections.codex.logoutConfirm.description'),
+      confirmText: t('settings.connections.codex.logoutConfirm.confirm'),
+      cancelText: t('settings.connections.codex.logoutConfirm.cancel'),
+    });
+    if (!confirmed) return;
+    try {
+      await logout();
+      toast.success(t('settings.connections.codex.toast.loggedOut'));
+    } catch {
+      toast.error(t('settings.connections.codex.toast.logoutFailed'));
+    } finally {
+      onChanged();
+    }
+  }, [confirm, logout, onChanged, t]);
+
+  const handleLogin = useCallback(async () => {
+    const outcome = await triggerLogin();
+    if (outcome === 'authenticated') {
+      onChanged();
+    } else if (outcome === 'failed') {
+      toast.error(t('settings.connections.codex.toast.loginFailed'));
+    }
+  }, [triggerLogin, onChanged, t]);
+
+  const trailing = connected ? (
+    <div className="flex shrink-0 items-center gap-2.5">
+      <ConnectedPill />
+      <PillButton label={t('settings.providers.button.disconnect')} onClick={() => void handleLogout()} />
+    </div>
+  ) : reconnectRequired ? (
+    <div className="flex shrink-0 items-center gap-2.5">
+      <ReconnectRequiredPill />
+      <PillButton label={t('settings.providers.openai.reconnect')} onClick={() => void handleLogin()} />
+    </div>
+  ) : (
+    <PillButton
+      label={loggingIn ? t('settings.providers.openai.cancelConnect') : t('settings.providers.openai.connect')}
+      onClick={() => {
+        if (loggingIn) void cancelLogin();
+        else void handleLogin();
+      }}
+    />
+  );
+
+  return (
+    <DetailHeader
+      icon={<OpenAIMark size={18} />}
+      title={t('settings.providers.openai.title')}
+      subtitle={t('settings.providers.openai.subtitle')}
+      trailing={trailing}
+      provider={provider}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// xAI —— OAuth(SuperGrok 订阅),复用 maker.xaiOAuth*。
+// ---------------------------------------------------------------------------
+
+function XaiHeader({ provider, onChanged }: { provider?: ProviderView; onChanged: () => void }) {
+  const { t } = useTranslation();
+  const { confirm } = useConfirmDialog();
+  const [busy, setBusy] = useState(false);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const connected = provider?.connected ?? false;
+
+  const handleLogin = useCallback(async () => {
+    setLoggingIn(true);
+    try {
+      const r = await window.electronAPI.maker.xaiOAuthLogin();
+      if (r.ok) {
+        toast.success(t('settings.connections.xai.toast.loggedIn'));
+        onChanged();
+      } else if (r.reason === 'login_cancelled') {
+        /* 用户取消,不弹错 */
+      } else {
+        toast.error(t('settings.connections.xai.toast.loginFailed'));
+      }
+    } catch {
+      toast.error(t('settings.connections.xai.toast.loginFailed'));
+    } finally {
+      setLoggingIn(false);
+    }
+  }, [onChanged, t]);
+
+  const handleLogout = useCallback(async () => {
+    const confirmed = await confirm({
+      title: t('settings.connections.xai.logoutConfirm.title'),
+      description: t('settings.connections.xai.logoutConfirm.description'),
+      confirmText: t('settings.connections.xai.logoutConfirm.confirm'),
+      cancelText: t('settings.connections.xai.logoutConfirm.cancel'),
+    });
+    if (!confirmed) return;
+    setBusy(true);
+    try {
+      await window.electronAPI.maker.xaiOAuthLogout();
+      toast.success(t('settings.connections.xai.toast.loggedOut'));
+      onChanged();
+    } catch {
+      toast.error(t('settings.connections.xai.toast.logoutFailed'));
+    } finally {
+      setBusy(false);
+    }
+  }, [confirm, onChanged, t]);
+
+  const trailing = connected ? (
+    <div className="flex shrink-0 items-center gap-2.5">
+      <ConnectedPill />
+      <PillButton
+        label={t('settings.providers.button.disconnect')}
+        onClick={() => void handleLogout()}
+        disabled={busy}
+      />
+    </div>
+  ) : (
+    <PillButton
+      label={loggingIn ? t('settings.providers.button.cancel') : t('settings.providers.button.authorize')}
+      onClick={() => {
+        if (loggingIn) {
+          void window.electronAPI.maker.xaiOAuthCancel();
+          setLoggingIn(false);
+        } else {
+          void handleLogin();
+        }
+      }}
+    />
+  );
+
+  return (
+    <DetailHeader
+      icon={<ProviderLogoMark providerId="xai" size={18} />}
+      title={t('settings.providers.xai.title')}
+      subtitle={providerSubtitleForDisplay(provider, t('settings.providers.xai.modelLabel'), {
+        fallback: t('settings.providers.xai.subtitle'),
+      })}
+      trailing={trailing}
+      provider={provider}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 通用 OAuth —— 目录 auth.oauth 描述符驱动的供应商(非 bespoke 四家)。
+// ---------------------------------------------------------------------------
+
+function GenericOAuthHeader({ provider, onChanged }: { provider: ProviderView; onChanged: () => void }) {
+  const { t } = useTranslation();
+  const { confirm } = useConfirmDialog();
+  const [busy, setBusy] = useState(false);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const connected = provider.connected;
+
+  const handleLogin = useCallback(async () => {
+    setLoggingIn(true);
+    try {
+      const r = await window.electronAPI.maker.providerOAuthLogin(provider.id);
+      if (r.ok) {
+        toast.success(t('settings.providers.genericOAuth.toast.loggedIn', { name: provider.name }));
+        onChanged();
+      } else if (r.reason === 'login_cancelled') {
+        /* 用户取消,不弹错 */
+      } else {
+        toast.error(t('settings.providers.genericOAuth.toast.loginFailed', { name: provider.name }));
+      }
+    } catch {
+      toast.error(t('settings.providers.genericOAuth.toast.loginFailed', { name: provider.name }));
+    } finally {
+      setLoggingIn(false);
+    }
+  }, [onChanged, provider.id, provider.name, t]);
+
+  const handleLogout = useCallback(async () => {
+    const confirmed = await confirm({
+      title: t('settings.providers.genericOAuth.logoutConfirm.title', { name: provider.name }),
+      description: t('settings.providers.genericOAuth.logoutConfirm.description', { name: provider.name }),
+      confirmText: t('settings.providers.genericOAuth.logoutConfirm.confirm'),
+      cancelText: t('settings.providers.genericOAuth.logoutConfirm.cancel'),
+    });
+    if (!confirmed) return;
+    setBusy(true);
+    try {
+      await window.electronAPI.maker.providerOAuthLogout(provider.id);
+      toast.success(t('settings.providers.genericOAuth.toast.loggedOut', { name: provider.name }));
+      onChanged();
+    } catch {
+      toast.error(t('settings.providers.genericOAuth.toast.logoutFailed', { name: provider.name }));
+    } finally {
+      setBusy(false);
+    }
+  }, [confirm, onChanged, provider.id, provider.name, t]);
+
+  const trailing = connected ? (
+    <div className="flex shrink-0 items-center gap-2.5">
+      <ConnectedPill />
+      <PillButton
+        label={t('settings.providers.button.disconnect')}
+        onClick={() => void handleLogout()}
+        disabled={busy}
+      />
+    </div>
+  ) : (
+    <PillButton
+      label={loggingIn ? t('settings.providers.button.cancel') : t('settings.providers.button.authorize')}
+      onClick={() => {
+        if (loggingIn) {
+          void window.electronAPI.maker.providerOAuthCancel(provider.id);
+          setLoggingIn(false);
+        } else {
+          void handleLogin();
+        }
+      }}
+    />
+  );
+
+  return (
+    <DetailHeader
+      icon={providerIcon(provider, 18)}
+      title={provider.name}
+      subtitle={t('settings.providers.genericOAuth.subtitle')}
+      trailing={trailing}
+      provider={provider}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// XD 网关(Cindy AI)—— managed gateway key(useApiKey)。
+// 套餐引导 / 计费展示待服务端接口就绪后单独实现(2026-07-20 决策:本次剥离)。
+// ---------------------------------------------------------------------------
+
+function maskKey(key: string): string {
+  if (key && key.length >= 4) return `sk-••••••${key.slice(-4)}`;
+  return 'sk-••••••••';
+}
+
+function XdGatewayHeader({ provider, onChanged }: { provider?: ProviderView; onChanged: () => void }) {
+  const { t } = useTranslation();
+  const { confirm } = useConfirmDialog();
+  const { key, hasSavedKey, clearKey } = useApiKey();
+  const syncStatus = useModelAccessStatus();
+  const connected = provider?.connected ?? false;
+  const [rotating, setRotating] = useState(false);
+
+  // 凭据一律由服务端自动下发(个人 / 已接入企业),**无手填入口**(2026-07-17 定案)。
+  const serverManaged = syncStatus.state === 'ok' && syncStatus.source === 'server';
+
+  const prevSyncStateRef = useRef(syncStatus.state);
+  useEffect(() => {
+    if (prevSyncStateRef.current === syncStatus.state) return;
+    prevSyncStateRef.current = syncStatus.state;
+    if (syncStatus.state === 'ok') onChanged();
+  }, [syncStatus.state, onChanged]);
+
+  const handleDisconnect = useCallback(async () => {
+    const confirmed = await confirm({
+      title: t('settings.providers.xd.disconnectConfirm.title'),
+      description: t('settings.providers.xd.disconnectConfirm.description'),
+      confirmText: t('settings.providers.button.disconnect'),
+      cancelText: t('settings.connections.codex.logoutConfirm.cancel'),
+    });
+    if (!confirmed) return;
+    const ok = await clearKey();
+    if (ok) onChanged();
+  }, [clearKey, confirm, onChanged, t]);
+
+  const handleRetry = useCallback(() => {
+    void window.electronAPI.modelAccess
+      .retry()
+      .then(() => onChanged())
+      .catch(() => undefined);
+  }, [onChanged]);
+
+  const handleRotate = useCallback(async () => {
+    const confirmed = await confirm({
+      title: t('settings.providers.xd.rotateConfirm.title'),
+      description: t('settings.providers.xd.rotateConfirm.description'),
+      confirmText: t('settings.providers.xd.rotateConfirm.confirm'),
+      cancelText: t('settings.connections.codex.logoutConfirm.cancel'),
+    });
+    if (!confirmed) return;
+    setRotating(true);
+    try {
+      await window.electronAPI.modelAccess.rotate();
+      toast.success(t('settings.providers.xd.rotateSuccess'));
+      onChanged();
+    } catch {
+      toast.error(t('settings.providers.xd.rotateFailed'));
+    } finally {
+      setRotating(false);
+    }
+  }, [confirm, onChanged, t]);
+
+  const trailing = (() => {
+    switch (syncStatus.state) {
+      case 'unsupported':
+        return (
+          <span className="shrink-0 text-12" style={{ color: 'var(--text-tertiary)' }}>
+            {t('settings.providers.xd.sync.unsupported')}
+          </span>
+        );
+      case 'syncing':
+        return (
+          <PillButton label={t('settings.providers.xd.sync.syncing')} onClick={() => undefined} disabled />
+        );
+      case 'ok':
+        if (serverManaged) {
+          return (
+            <div className="flex shrink-0 items-center gap-2.5">
+              <ConnectedPill />
+              <PillButton
+                label={rotating ? t('settings.providers.xd.sync.rotating') : t('settings.providers.xd.sync.rotate')}
+                onClick={() => void handleRotate()}
+                disabled={rotating}
+              />
+            </div>
+          );
+        }
+        break;
+      case 'failed':
+        return (
+          <div className="flex shrink-0 items-center gap-2.5">
+            {connected && <ConnectedPill />}
+            <PillButton label={t('settings.providers.xd.sync.retry')} onClick={handleRetry} />
+          </div>
+        );
+      default:
+        break;
+    }
+    return connected ? (
+      <div className="flex shrink-0 items-center gap-2.5">
+        <ConnectedPill />
+        <PillButton label={t('settings.providers.button.disconnect')} onClick={() => void handleDisconnect()} />
+      </div>
+    ) : (
+      <span className="shrink-0 text-12" style={{ color: 'var(--text-tertiary)' }}>
+        {syncStatus.state === 'disabled'
+          ? t('settings.providers.xd.sync.disabled')
+          : t('settings.providers.xd.sync.autoProvision')}
+      </span>
+    );
+  })();
+
+  const maskedKey = useMemo(() => maskKey(hasSavedKey ? key : ''), [hasSavedKey, key]);
+
+  const detail =
+    connected && syncStatus.state !== 'unsupported' ? (
+      <div className="flex items-center gap-2.5 pl-12">
+        <span
+          className="flex shrink-0 items-center rounded-md px-2 py-1 text-12"
+          style={{
+            backgroundColor: 'var(--surface-chip)',
+            border: '1px solid var(--settings-integration-avatar-border)',
+            color: 'var(--settings-section-desc)',
+          }}
+        >
+          {maskedKey}
+        </span>
+        <div className="flex-1" />
+        {serverManaged && (
+          <button
+            type="button"
+            onClick={handleRetry}
+            className="shrink-0 text-12 transition-colors"
+            style={{ color: 'var(--settings-integration-subtitle)' }}
+          >
+            {t('settings.providers.xd.sync.refresh')}
+          </button>
+        )}
+      </div>
+    ) : undefined;
+
+  return (
+    <DetailHeader
+      icon={<XDIncMark size={18} />}
+      title={t('settings.providers.xd.title')}
+      subtitle={providerSubtitleForDisplay(provider, t('settings.providers.xd.modelLabel'), {
+        suffix: t('settings.providers.xd.billingLabel'),
+        fallback: t('settings.providers.xd.subtitle'),
+      })}
+      trailing={trailing}
+      provider={provider}
+      detail={detail}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 自定义供应商详情头 —— 编辑 / 删除;OAuth 形态另有授权/登出。
+// ---------------------------------------------------------------------------
+
+/** ProviderView → 编辑表单用的 CustomProviderConfig(per-runtime,不含密钥)。 */
+function providerViewToConfig(p: ProviderView): CustomProviderConfig {
+  const runtimes: CustomProviderConfig['runtimes'] = {};
+  for (const agent of p.agents) {
+    const routing = p.routing[agent];
+    const models = p.models[agent] ?? [];
+    runtimes[agent] = {
+      baseUrl: routing?.upstream ?? '',
+      models: models.map(customProviderModelConfigFromCatalogModel),
+      ...(routing?.headerOverride && Object.keys(routing.headerOverride).length > 0
+        ? { headers: { ...routing.headerOverride } }
+        : {}),
+      ...(routing?.modelsUrl ? { modelsUrl: routing.modelsUrl } : {}),
+    };
+  }
+  return {
+    id: p.id,
+    name: p.name,
+    ...(p.auth.method === 'oauth' && p.auth.oauth ? { auth: { method: 'oauth' as const, oauth: p.auth.oauth } } : {}),
+    runtimes,
+  };
+}
+
+function CustomProviderHeader({
+  provider,
+  onEdit,
+  onDelete,
+}: {
+  provider: ProviderView;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const { t } = useTranslation();
+  const [loggingIn, setLoggingIn] = useState(false);
+  const isOAuth = provider.auth.method === 'oauth' && !!provider.auth.oauth;
+  const handleOAuthClick = useCallback(async () => {
+    if (provider.connected) {
+      try {
+        await window.electronAPI.maker.providerOAuthLogout(provider.id);
+        toast.success(t('settings.providers.genericOAuth.toast.loggedOut', { name: provider.name }));
+      } catch {
+        toast.error(t('settings.providers.genericOAuth.toast.logoutFailed', { name: provider.name }));
+      }
+      return;
+    }
+    if (loggingIn) {
+      void window.electronAPI.maker.providerOAuthCancel(provider.id);
+      setLoggingIn(false);
+      return;
+    }
+    setLoggingIn(true);
+    try {
+      const r = await window.electronAPI.maker.providerOAuthLogin(provider.id);
+      if (r.ok) toast.success(t('settings.providers.genericOAuth.toast.loggedIn', { name: provider.name }));
+      else if (r.reason !== 'login_cancelled') {
+        toast.error(t('settings.providers.genericOAuth.toast.loginFailed', { name: provider.name }));
+      }
+    } catch {
+      toast.error(t('settings.providers.genericOAuth.toast.loginFailed', { name: provider.name }));
+    } finally {
+      setLoggingIn(false);
+    }
+  }, [loggingIn, provider.connected, provider.id, provider.name, t]);
+
+  const trailing = (
+    <div className="flex shrink-0 items-center gap-1">
+      {isOAuth && (
+        <PillButton
+          label={
+            provider.connected
+              ? t('settings.providers.button.disconnect')
+              : loggingIn
+                ? t('settings.providers.button.cancel')
+                : t('settings.providers.button.authorize')
+          }
+          onClick={() => void handleOAuthClick()}
+        />
+      )}
+      <RowIconButton
+        icon={<Pencil size={16} />}
+        label={t('settings.providers.custom.editAria')}
+        onClick={onEdit}
+      />
+      <RowIconButton
+        icon={<Trash2 size={16} />}
+        label={t('settings.providers.custom.deleteAria')}
+        onClick={onDelete}
+      />
+    </div>
+  );
+  return (
+    <DetailHeader
+      icon={providerIcon(provider, 18)}
+      title={provider.name}
+      subtitle={customProviderSubtitleForDisplay(provider)}
+      trailing={trailing}
+      provider={provider}
+      badge={<CustomTag label={t('settings.providers.custom.tag')} />}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 左栏列表
+// ---------------------------------------------------------------------------
+
+function ListRow({
+  provider,
+  selected,
+  onSelect,
+}: {
+  provider: ProviderView;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const { t } = useTranslation();
+  const modelCount = useMemo(
+    () => (providerHasModels(provider) ? buildUnionRows(provider).length : null),
+    [provider],
+  );
+  const title = provider.id === 'xd' ? t('settings.providers.xd.title') : provider.name;
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-current={selected}
+      className={cn(
+        'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors',
+        !selected && 'hover:bg-[var(--surface-hover)]',
+      )}
+      style={selected ? { backgroundColor: 'var(--surface-chip)' } : undefined}
+    >
+      <div
+        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
+        style={{
+          backgroundColor: 'var(--settings-integration-avatar-bg)',
+          border: '1px solid var(--settings-integration-avatar-border)',
+          color: 'var(--settings-integration-avatar-icon)',
+        }}
+      >
+        {providerIcon(provider, 14)}
+      </div>
+      <span
+        className="min-w-0 flex-1 truncate text-13 font-medium"
+        style={{ color: 'var(--settings-section-title)' }}
+      >
+        {title}
+      </span>
+      {modelCount !== null && (
+        <span className="shrink-0 text-11 tabular-nums" style={{ color: 'var(--text-tertiary)' }}>
+          {t('settings.providers.models.modelCount', { count: modelCount })}
+        </span>
+      )}
+      <span
+        className="h-1.5 w-1.5 shrink-0 rounded-full"
+        style={{
+          backgroundColor: provider.connected ? 'var(--remote-status-ready)' : 'var(--border-default)',
+        }}
+      />
+    </button>
+  );
+}
+
+/** 检测建议行:本机 CLI 已安装且对应渠道未连接时出现;点击直达向导的授权步。 */
+function SuggestionRow({
+  detection,
+  provider,
+  onClick,
+}: {
+  detection: LocalCliDetection;
+  provider: ProviderView;
+  onClick: () => void;
+}) {
+  const { t } = useTranslation();
+  const cliName = detection.cli === 'claude-cli' ? 'Claude Code CLI' : 'Codex CLI';
+  const title = provider.id === 'xd' ? t('settings.providers.xd.title') : provider.name;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={t(
+        detection.loggedIn
+          ? 'settings.providers.detect.hintLoggedIn'
+          : 'settings.providers.detect.hintInstalled',
+        { cli: cliName },
+      )}
+      className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-[var(--surface-hover)]"
+    >
+      <div
+        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md opacity-70"
+        style={{
+          backgroundColor: 'var(--settings-integration-avatar-bg)',
+          border: '1px solid var(--settings-integration-avatar-border)',
+          color: 'var(--settings-integration-avatar-icon)',
+        }}
+      >
+        {providerIcon(provider, 14)}
+      </div>
+      <span className="min-w-0 flex-1 truncate text-13" style={{ color: 'var(--text-secondary)' }}>
+        {title}
+      </span>
+      <span
+        className="flex h-[22px] shrink-0 items-center rounded-full border px-2.5 text-11 font-medium"
+        style={{
+          borderColor: 'var(--settings-btn-secondary-border)',
+          color: 'var(--text-secondary)',
+        }}
+      >
+        {t('settings.providers.detect.action')}
+      </span>
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Section
+// ---------------------------------------------------------------------------
+
+export function ProvidersSection() {
+  const { t } = useTranslation();
+  const { confirm } = useConfirmDialog();
+  const { providers, loading, refetch } = useProviders();
+  // OpenAI 的 reconnect-required 是 useCodexAuth 独有状态(目录 connected 此时为 false):
+  // 该状态下 OpenAI 行必须留在左栏,否则「重新连接」入口不可达,用户被迫从向导重发现。
+  const codexAuth = useCodexAuth();
+  const openaiReconnectRequired = codexAuth.state.kind === 'reconnect-required';
+
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // 向导:null = 关;{ entry } = 打开(entry 指定直达的供应商,来自检测建议)。
+  const [wizard, setWizard] = useState<null | { entry?: WizardEntry }>(null);
+  // 自定义供应商完整表单(编辑,或从向导「自定义端点」进入新建)。
+  const [dialog, setDialog] = useState<
+    null | { mode: 'create' } | { mode: 'edit'; config: CustomProviderConfig }
+  >(null);
+  const [detections, setDetections] = useState<LocalCliDetection[]>([]);
+  const [refreshingModels, setRefreshingModels] = useState(false);
+
+  // 本机 CLI 扫描:挂载时一次(失败静默空数组;检测建议是增强,不是依赖)。
+  useEffect(() => {
+    let cancelled = false;
+    void window.electronAPI.maker
+      .scanLocalCli()
+      .then((r) => {
+        if (!cancelled) setDetections(r.detections);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const byId = useMemo(() => {
+    const map = new Map<string, ProviderView>();
+    providers.forEach((p) => map.set(p.id, p));
+    return map;
+  }, [providers]);
+
+  // 左栏行集合:xd 置顶;内置/通用 OAuth 渠道只在已连接后占行(未连接的入口在向导
+  // 目录 + 检测建议);自定义供应商保持既有过滤(有模型或 OAuth 形态)。
+  const listProviders = useMemo(() => {
+    const rows: ProviderView[] = [];
+    const xd = byId.get('xd');
+    if (xd) rows.push(xd);
+    for (const p of providers) {
+      if (p.id === 'xd') continue;
+      if (p.source === 'builtin') {
+        // reconnect-required 视同占行:凭证失效 ≠ 用户断开,重连入口必须保留。
+        if (p.connected || (p.id === 'openai' && openaiReconnectRequired)) rows.push(p);
+        continue;
+      }
+      if (p.source === 'user' && (providerHasModels(p) || (p.auth.method === 'oauth' && !!p.auth.oauth))) {
+        rows.push(p);
+      }
+    }
+    return rows;
+  }, [providers, byId, openaiReconnectRequired]);
+
+  // 检测建议:CLI 已安装 + 对应渠道存在于目录 + 未连接,且**未以任何形态占行**
+  // (OpenAI reconnect-required 已在主列表时,不再重复出建议行)。
+  const suggestions = useMemo(() => {
+    const listedIds = new Set(listProviders.map((p) => p.id));
+    return detections
+      .filter((d) => d.installed && !listedIds.has(d.providerId))
+      .map((d) => ({ detection: d, provider: byId.get(d.providerId) }))
+      .filter(
+        (s): s is { detection: LocalCliDetection; provider: ProviderView } =>
+          !!s.provider && !s.provider.connected,
+      );
+  }, [detections, byId, listProviders]);
+
+  // 选中项:默认第一行;所选供应商被删除/消失时回退第一行(不留空详情)。
+  const effectiveSelected = useMemo(() => {
+    if (selectedId && listProviders.some((p) => p.id === selectedId)) {
+      return listProviders.find((p) => p.id === selectedId) ?? null;
+    }
+    return listProviders[0] ?? null;
+  }, [selectedId, listProviders]);
+
+  const handleDelete = useCallback(
+    async (p: ProviderView) => {
+      const ok = await confirm({
+        title: t('settings.providers.custom.deleteConfirm.title'),
+        description: t('settings.providers.custom.deleteConfirm.description', { name: p.name }),
+        confirmText: t('settings.providers.custom.deleteConfirm.confirm'),
+        cancelText: t('settings.providers.custom.deleteConfirm.cancel'),
+      });
+      if (!ok) return;
+      try {
+        await deleteCustomProvider(p.id);
+        toast.success(t('settings.providers.custom.toast.deleted'));
+      } catch {
+        toast.error(t('settings.providers.custom.toast.deleteFailed'));
+      }
+    },
+    [confirm, t],
+  );
+
+  /**
+   * 自定义供应商「刷新模型」:读回各 runtime 密钥 → fetchProviderModels →
+   * additions-only 合并进配置。新增模型默认隐藏,避免刷新扩大用户当前可用模型范围;
+   * 已有模型及其显式可见性不变。
+   */
+  const handleRefreshModels = useCallback(
+    async (p: ProviderView) => {
+      setRefreshingModels(true);
+      try {
+        const config = providerViewToConfig(p);
+        let added = 0;
+        let anyOk = false;
+        for (const agent of p.agents) {
+          const rt = config.runtimes[agent];
+          if (!rt?.baseUrl) continue;
+          const apiKey = await readCustomProviderKey(p.id, agent);
+          const r = await window.electronAPI.maker.fetchProviderModels({
+            agent,
+            baseUrl: rt.baseUrl,
+            modelsUrl: rt.modelsUrl ?? null,
+            apiKey,
+            ...(rt.headers ? { headers: rt.headers } : {}),
+          });
+          if (!r.ok || !r.models) continue;
+          anyOk = true;
+          const merged = appendDiscoveredCustomProviderModels(rt.models, r.models);
+          rt.models = merged.models;
+          added += merged.addedIds.length;
+        }
+        if (!anyOk) {
+          toast.error(t('settings.providers.models.refreshFailed'));
+          return;
+        }
+        if (added > 0) {
+          await updateCustomProvider(config, {});
+          toast.success(t('settings.providers.models.refreshAdded', { count: added }));
+        } else {
+          toast.success(t('settings.providers.models.refreshNoNew'));
+        }
+        refetch();
+      } catch {
+        toast.error(t('settings.providers.models.refreshFailed'));
+      } finally {
+        setRefreshingModels(false);
+      }
+    },
+    [refetch, t],
+  );
+
+  // 详情头部按供应商类型分派(鉴权逻辑与重构前一致)。
+  const renderDetailHeader = (p: ProviderView): ReactNode => {
+    if (p.id === 'xd') return <XdGatewayHeader provider={p} onChanged={refetch} />;
+    if (p.id === 'anthropic') return <AnthropicHeader provider={p} onChanged={refetch} />;
+    if (p.id === 'openai') return <OpenAiHeader provider={p} onChanged={refetch} />;
+    if (p.id === 'xai') return <XaiHeader provider={p} onChanged={refetch} />;
+    if (p.source === 'builtin') return <GenericOAuthHeader provider={p} onChanged={refetch} />;
+    return (
+      <CustomProviderHeader
+        provider={p}
+        onEdit={() => setDialog({ mode: 'edit', config: providerViewToConfig(p) })}
+        onDelete={() => void handleDelete(p)}
+      />
+    );
+  };
+
+  return (
+    <div className="flex flex-col gap-[14px]">
+      <div className="flex flex-col gap-1.5">
+        <h2
+          className="text-18 font-semibold leading-[1.2]"
+          style={{ color: 'var(--settings-section-title)' }}
+        >
+          {t('settings.providers.title')}
+        </h2>
+        <p className="text-13 leading-snug" style={{ color: 'var(--settings-section-desc)' }}>
+          {t('settings.providers.subtitle')}
+        </p>
+      </div>
+
+      {/* 先取数据再渲染卡片(规则 7:首帧即终态高度,不出现连接态翻转的跳变帧)。
+          高度跟随视口(减去标题栏 + 设置页 chrome + section 标题的约 14rem),窗口越大
+          卡片越高、能显示越多模型;min-h 保底小窗口不塌陷。左右栏各自内部滚动。
+          原来写死 560px 会在大窗口下截断模型列表(不随框体撑高)。 */}
+      {!loading && (
+        <div
+          className="flex h-[calc(100vh-14rem)] min-h-[460px] overflow-hidden rounded-xl border"
+          style={{
+            backgroundColor: 'var(--settings-theme-card-bg)',
+            borderColor: 'var(--settings-theme-card-border)',
+          }}
+        >
+          {/* 左栏 */}
+          <div
+            className="flex w-[224px] shrink-0 flex-col border-r"
+            style={{ borderColor: 'var(--settings-theme-card-border)' }}
+          >
+            <div className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto p-2">
+              {listProviders.map((p) => (
+                <ListRow
+                  key={p.id}
+                  provider={p}
+                  selected={effectiveSelected?.id === p.id}
+                  onSelect={() => setSelectedId(p.id)}
+                />
+              ))}
+              {suggestions.length > 0 && (
+                <>
+                  <span
+                    className="px-2.5 pb-1 pt-3 text-11 font-semibold uppercase"
+                    style={{ color: 'var(--text-tertiary)', letterSpacing: '0.4px' }}
+                  >
+                    {t('settings.providers.detect.groupLabel')}
+                  </span>
+                  {suggestions.map((s) => (
+                    <SuggestionRow
+                      key={s.detection.cli}
+                      detection={s.detection}
+                      provider={s.provider}
+                      onClick={() => setWizard({ entry: { kind: 'builtin', providerId: s.provider.id } })}
+                    />
+                  ))}
+                </>
+              )}
+            </div>
+            <div className="border-t p-2" style={{ borderColor: 'var(--settings-theme-card-border)' }}>
+              <button
+                type="button"
+                onClick={() => setWizard({})}
+                className="flex h-9 w-full items-center justify-center gap-1.5 rounded-full border border-dashed text-13 font-medium transition-colors hover:bg-[var(--surface-hover)]"
+                style={{
+                  borderColor: 'var(--settings-btn-secondary-border)',
+                  color: 'var(--settings-section-desc)',
+                }}
+              >
+                <Plus size={15} />
+                {t('settings.providers.addProvider')}
+              </button>
+            </div>
+          </div>
+
+          {/* 右栏详情 */}
+          <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">
+            {effectiveSelected ? (
+              <>
+                {renderDetailHeader(effectiveSelected)}
+                {providerHasModels(effectiveSelected) && (
+                  <>
+                    <div className="border-t" style={{ borderColor: 'var(--settings-theme-card-border)' }} />
+                    <UnifiedModelList
+                      provider={effectiveSelected}
+                      {...(effectiveSelected.source === 'user' && effectiveSelected.auth.method !== 'oauth'
+                        ? {
+                            onRefresh: () => void handleRefreshModels(effectiveSelected),
+                            refreshing: refreshingModels,
+                          }
+                        : {})}
+                    />
+                  </>
+                )}
+                {!providerHasModels(effectiveSelected) && (
+                  <div
+                    className="flex flex-1 items-center justify-center px-8 text-center text-13"
+                    style={{ color: 'var(--text-tertiary)' }}
+                  >
+                    {/* 已连接却无模型(如 Codex 刚登录、models_cache 未生成;或网关清单拉取失败)
+                        不能沿用未连接的「授权后…」文案——那对已连接供应商自相矛盾。 */}
+                    {t(
+                      effectiveSelected.connected
+                        ? 'settings.providers.detail.emptyModelsConnected'
+                        : 'settings.providers.detail.emptyModels',
+                    )}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div
+                className="flex flex-1 items-center justify-center px-8 text-center text-13"
+                style={{ color: 'var(--text-tertiary)' }}
+              >
+                {t('settings.providers.detail.emptyList')}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {wizard && (
+        <AddProviderWizard
+          providers={providers}
+          entry={wizard.entry}
+          onOpenCustomForm={() => {
+            setWizard(null);
+            setDialog({ mode: 'create' });
+          }}
+          onClose={() => setWizard(null)}
+          onDone={(providerId) => {
+            setWizard(null);
+            if (providerId) setSelectedId(providerId);
+            refetch();
+          }}
+        />
+      )}
+
+      {dialog && (
+        <CustomProviderDialog
+          initial={dialog.mode === 'edit' ? dialog.config : undefined}
+          existingIds={providers.map((p) => p.id)}
+          onClose={() => setDialog(null)}
+          onSaved={() => {
+            setDialog(null);
+            refetch();
+          }}
+        />
+      )}
+    </div>
+  );
+}

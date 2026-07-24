@@ -1,0 +1,209 @@
+import { readFileSync } from 'node:fs';
+
+import { describe, expect, it } from 'vitest';
+
+import { mergeCodexAccountUsageSnapshot } from '@/hooks/useAccountUsage';
+
+describe('mergeCodexAccountUsageSnapshot', () => {
+  it('preserves the last known credit balance when a later snapshot omits credits', () => {
+    const previous = {
+      credits: {
+        hasCredits: true,
+        unlimited: false,
+        balance: '12.5',
+      },
+      planType: 'pro',
+    };
+
+    const merged = mergeCodexAccountUsageSnapshot(previous, {
+      primary: { usedPercent: 24 },
+    });
+
+    expect(merged.credits).toEqual(previous.credits);
+    expect(merged.planType).toBe('pro');
+    expect(merged.primary?.usedPercent).toBe(24);
+  });
+
+  it('keeps a previous balance for partial positive credit snapshots', () => {
+    const merged = mergeCodexAccountUsageSnapshot(
+      {
+        credits: {
+          hasCredits: true,
+          unlimited: false,
+          balance: '8',
+        },
+      },
+      {
+        credits: {
+          hasCredits: true,
+          unlimited: false,
+        },
+      },
+    );
+
+    expect(merged.credits?.balance).toBe('8');
+  });
+
+  it('does not keep a stale balance when credits are explicitly depleted', () => {
+    const merged = mergeCodexAccountUsageSnapshot(
+      {
+        credits: {
+          hasCredits: true,
+          unlimited: false,
+          balance: '8',
+        },
+      },
+      {
+        credits: {
+          hasCredits: false,
+          unlimited: false,
+        },
+      },
+    );
+
+    expect(merged.credits?.balance).toBeUndefined();
+    expect(merged.credits?.hasCredits).toBe(false);
+  });
+
+  it('keeps OpenAI web usage windows when app-server later reports zero windows', () => {
+    const merged = mergeCodexAccountUsageSnapshot(
+      {
+        source: 'openai-web',
+        primary: { usedPercent: 19, windowMinutes: 300, resetsAt: 1781425380 },
+        secondary: { usedPercent: 23, windowMinutes: 10080, resetsAt: 1781755297 },
+        credits: { hasCredits: true, unlimited: false, balance: '3545' },
+        planType: 'pro',
+      },
+      {
+        primary: { usedPercent: 0, resetsAt: 1781434172 },
+        secondary: { usedPercent: 0, resetsAt: 1782020972 },
+        credits: { hasCredits: false, unlimited: false, balance: null },
+        planType: null,
+      },
+    );
+
+    expect(merged.primary?.usedPercent).toBe(19);
+    expect(merged.secondary?.usedPercent).toBe(23);
+    expect(merged.credits?.balance).toBe('3545');
+    expect(merged.planType).toBe('pro');
+    expect(merged.source).toBe('openai-web');
+  });
+
+  it('uses fresh app-server windows when a later snapshot reports a reached limit', () => {
+    const merged = mergeCodexAccountUsageSnapshot(
+      {
+        source: 'openai-web',
+        primary: { usedPercent: 19, windowMinutes: 300, resetsAt: 1781425380 },
+        secondary: { usedPercent: 23, windowMinutes: 10080, resetsAt: 1781755297 },
+        credits: { hasCredits: true, unlimited: false, balance: '3545' },
+        planType: 'pro',
+      },
+      {
+        primary: { usedPercent: 100, resetsAt: 1781434172 },
+        secondary: { usedPercent: 100, resetsAt: 1782020972 },
+        rateLimitReachedType: 'rate_limit_reached',
+      },
+    );
+
+    expect(merged.primary?.usedPercent).toBe(100);
+    expect(merged.secondary?.usedPercent).toBe(100);
+    expect(merged.rateLimitReachedType).toBe('rate_limit_reached');
+  });
+
+  it('uses fresh app-server windows when a later snapshot reports normal usage', () => {
+    const merged = mergeCodexAccountUsageSnapshot(
+      {
+        source: 'openai-web',
+        primary: { usedPercent: 19, windowMinutes: 300, resetsAt: 1781425380 },
+        secondary: { usedPercent: 23, windowMinutes: 10080, resetsAt: 1781755297 },
+        credits: { hasCredits: true, unlimited: false, balance: '3545' },
+        planType: 'pro',
+      },
+      {
+        primary: { usedPercent: 27, resetsAt: 1781434172 },
+        secondary: { usedPercent: 31, resetsAt: 1782020972 },
+      },
+    );
+
+    expect(merged.primary?.usedPercent).toBe(27);
+    expect(merged.secondary?.usedPercent).toBe(31);
+    expect(merged.credits?.balance).toBe('3545');
+    expect(merged.source).toBe('codex-app-server');
+  });
+
+  it('keeps previous windows when Codex app-server reports a windowless placeholder', () => {
+    const merged = mergeCodexAccountUsageSnapshot(
+      {
+        source: 'codex-app-server',
+        limitId: 'codex_bengalfox',
+        limitName: 'GPT-5.3-Codex-Spark',
+        primary: { usedPercent: 7, windowMinutes: 300, resetsAt: 1782320161 },
+        secondary: { usedPercent: 32, windowMinutes: 10080, resetsAt: 1782737603 },
+        credits: { hasCredits: false, unlimited: false, balance: null },
+      },
+      {
+        limitId: 'codex',
+        limitName: null,
+        primary: null,
+        secondary: null,
+        credits: null,
+        planType: null,
+        rateLimitReachedType: null,
+      },
+    );
+
+    expect(merged.primary?.usedPercent).toBe(7);
+    expect(merged.secondary?.usedPercent).toBe(32);
+    expect(merged.limitId).toBe('codex');
+    expect(merged.source).toBe('codex-app-server');
+  });
+
+  it('keeps OpenAI web fields when a later app-server placeholder has no windows', () => {
+    const merged = mergeCodexAccountUsageSnapshot(
+      {
+        source: 'openai-web',
+        primary: { usedPercent: 19, windowMinutes: 300, resetsAt: 1781425380 },
+        secondary: { usedPercent: 23, windowMinutes: 10080, resetsAt: 1781755297 },
+        credits: { hasCredits: true, unlimited: false, balance: '3545' },
+        planType: 'pro',
+      },
+      {
+        limitId: 'codex',
+        primary: null,
+        secondary: null,
+        credits: { hasCredits: false, unlimited: false, balance: null },
+        planType: null,
+        rateLimitReachedType: null,
+      },
+    );
+
+    expect(merged.primary?.usedPercent).toBe(19);
+    expect(merged.secondary?.usedPercent).toBe(23);
+    expect(merged.credits?.balance).toBe('3545');
+    expect(merged.planType).toBe('pro');
+    expect(merged.source).toBe('openai-web');
+  });
+
+  it('wires refreshed Codex web snapshots through a renderer IPC channel', () => {
+    const mainSource = readFileSync(
+      new URL('../../main/usageBroadcaster.ts', import.meta.url),
+      'utf8',
+    );
+    const preloadSource = readFileSync(
+      new URL('../../preload/preload.ts', import.meta.url),
+      'utf8',
+    );
+    const hookSource = readFileSync(new URL('../hooks/useAccountUsage.ts', import.meta.url), 'utf8');
+
+    expect(mainSource).toContain("USAGE_CODEX_ACCOUNT_CHANGED = 'usage:codex-account-changed'");
+    expect(mainSource).toContain('broadcastCodexAccountUsage(next);');
+    expect(mainSource).toContain('isCodexZeroWindowFallback(incoming)');
+    expect(mainSource).toContain('isCodexWindowlessFallback(incoming)');
+    expect(mainSource).toContain('broadcastCodexAccountUsage(null);');
+    expect(preloadSource).toContain("createIpcFanOut('usage:codex-account-changed')");
+    expect(preloadSource).toContain('onCodexAccountChanged: fanOutMakerUsageCodexAccount');
+    expect(hookSource).toContain('api.onCodexAccountChanged');
+    expect(hookSource).toContain('options: { clearOnNull?: boolean } = {}');
+    expect(hookSource).toContain("applyCodexAccountUsageSnapshot(persisted, setSnapshot, { clearOnNull: false })");
+  });
+});

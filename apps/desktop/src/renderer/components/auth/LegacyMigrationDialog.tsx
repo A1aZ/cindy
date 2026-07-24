@@ -62,8 +62,8 @@ export function LegacyMigrationDialog() {
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (failed) containerRef.current?.focus();
-  }, [failed]);
+    if (failed || running) containerRef.current?.focus();
+  }, [failed, running]);
 
   if (!open) return null;
 
@@ -78,7 +78,7 @@ export function LegacyMigrationDialog() {
   const onKeyDown = (event: React.KeyboardEvent) => {
     if (event.key === 'Tab') {
       event.preventDefault();
-      (buttonRef.current ?? containerRef.current)?.focus();
+      ((!running && buttonRef.current) || containerRef.current)?.focus();
       return;
     }
     if (failed && event.key === 'Escape') {

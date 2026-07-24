@@ -760,10 +760,7 @@ export class AgentIslandService {
 
   handleInteractionRequest(meta: AgentIslandSessionMeta, request: InteractionRequest): void {
     const hydrated = this.hydrateMeta(meta);
-    if (
-      this.stoppedSessionIds.has(hydrated.sessionId) ||
-      this.replacementTurnPendingSessionIds.has(hydrated.sessionId)
-    ) return;
+    if (this.stoppedSessionIds.has(hydrated.sessionId)) return;
     if (request.kind === 'permission') {
       this.permissionRequests.set(request.requestId, { sessionId: hydrated.sessionId, request });
     }

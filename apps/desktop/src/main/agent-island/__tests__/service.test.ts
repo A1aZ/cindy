@@ -1842,6 +1842,50 @@ describe('AgentIslandService native publishing', () => {
     });
   });
 
+  it('accepts replacement-turn interaction requests before its running status arrives', async () => {
+    const { AgentIslandService } = await import('../service.js');
+    const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {
+      void state;
+      void frameOrFrames;
+      return true;
+    });
+    const service = new AgentIslandService({
+      getMainWindow: () => null,
+      nativeHost: { failed: false, publish },
+    });
+    const resolver = vi.fn(() => true);
+    const meta = { sessionId: 'replacement-interaction', agentKind: 'claude-code' as const };
+    syncEnabledForTest(service, publish);
+    service.setPermissionResolver(resolver);
+    service.handleUserPrompt(meta, 'first turn');
+    service.handleSessionStopped(meta.sessionId);
+    service.handleUserPrompt(meta, 'replacement turn');
+
+    service.handleInteractionRequest(
+      meta,
+      {
+        kind: 'permission',
+        requestId: 'replacement-request',
+        toolName: 'Bash',
+        input: { command: 'pnpm test' },
+      },
+    );
+
+    expect(publish.mock.calls.at(-1)?.[0].sessions[0]).toMatchObject({
+      sessionId: meta.sessionId,
+      phase: 'needs-interaction',
+      permissionAction: { requestId: 'replacement-request' },
+    });
+
+    service.handlePermissionAction({ requestId: 'replacement-request', action: 'allow' });
+
+    expect(resolver).toHaveBeenCalledWith('replacement-request', {
+      kind: 'permission',
+      behavior: 'allow',
+      permissionUpdates: undefined,
+    });
+  });
+
   it('restores stop-tail suppression when a replacement prompt preview rolls back', async () => {
     const { AgentIslandService } = await import('../service.js');
     const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {

@@ -14,7 +14,7 @@ const IDLE_TTL_MS = 30 * 60 * 1000;
 type FakeTrack = MediaStreamTrack & { stopped: boolean };
 
 function createFakeTrack(): FakeTrack {
-  return {
+  const track = {
     label: 'keep-alive microphone',
     enabled: true,
     muted: false,
@@ -23,10 +23,12 @@ function createFakeTrack(): FakeTrack {
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
     getSettings: () => ({ deviceId: 'default' }),
-    stop() {
-      this.stopped = true;
-    },
-  } as unknown as FakeTrack;
+    stop: (): void => undefined,
+  };
+  track.stop = (): void => {
+    track.stopped = true;
+  };
+  return track as unknown as FakeTrack;
 }
 
 /**
@@ -40,21 +42,23 @@ describe('keep-alive microphone idle window', () => {
   let sink: { connect: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn>; gain: { value: number } };
   let destination: object;
   let powerCallback: PowerCallback | undefined;
+  let getUserMedia: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     vi.useFakeTimers();
     track = createFakeTrack();
     powerCallback = undefined;
+    getUserMedia = vi.fn(async () => ({
+      getAudioTracks: () => [track],
+      getTracks: () => [track],
+    }));
     sink = { connect: vi.fn(), disconnect: vi.fn(), gain: { value: 1 } };
     destination = { connect: vi.fn(), disconnect: vi.fn() };
 
     vi.stubGlobal('navigator', {
       mediaDevices: {
         enumerateDevices: vi.fn(async () => [{ kind: 'audioinput', deviceId: 'default' }]),
-        getUserMedia: vi.fn(async () => ({
-          getAudioTracks: () => [track],
-          getTracks: () => [track],
-        })),
+        getUserMedia,
         addEventListener: vi.fn(),
       },
     });
@@ -154,6 +158,50 @@ describe('keep-alive microphone idle window', () => {
     powerCallback?.({ reason: 'screen_locked' });
     await vi.advanceTimersByTimeAsync(0);
 
+    expect(track.stopped).toBe(true);
+  });
+
+  it('stops a stream that arrives after the session was released mid-startup', async () => {
+    let resolveStream: (value: unknown) => void = () => undefined;
+    getUserMedia.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveStream = resolve;
+    }));
+
+    const prewarming = mod.prewarmVoiceInputMicrophone({ workletUrl: WORKLET_URL });
+    // Let start() reach the pending getUserMedia await.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(powerCallback).toBeDefined();
+
+    // Screen locks while the device handshake is still in flight: dispose()
+    // cannot stop a track that does not exist yet.
+    powerCallback?.({ reason: 'screen_locked' });
+    await vi.advanceTimersByTimeAsync(0);
+
+    resolveStream({ getAudioTracks: () => [track], getTracks: () => [track] });
+    await prewarming;
+
+    // The late stream must not survive as an unreachable live microphone.
+    expect(track.stopped).toBe(true);
+  });
+
+  it('keeps an in-flight recording when the microphone config changes', async () => {
+    const engine = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: true,
+      onInterrupted: vi.fn(),
+    });
+    await engine.start();
+    expect(track.stopped).toBe(false);
+
+    // The user switches microphone in settings while still dictating. Rebuilding
+    // the session now would stop the very track they are speaking into.
+    await mod.prewarmVoiceInputMicrophone({ workletUrl: WORKLET_URL, deviceId: 'another-device' });
+
+    expect(track.stopped).toBe(false);
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+
+    // The new config is honoured once dictation actually ends.
+    await engine.stop();
     expect(track.stopped).toBe(true);
   });
 

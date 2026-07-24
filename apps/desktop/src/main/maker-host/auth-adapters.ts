@@ -59,6 +59,11 @@ import { claudeUpstreamEndpoint } from './runtime-configs.js';
 import { getProviderSecretStore } from '../secrets/providerSecretStore.js';
 import { getAppCapabilities } from '../appCapabilities.js';
 import {
+  getActiveAppSession,
+  isAppSessionBoundaryPending,
+  type ActiveAppSession,
+} from '../appSessionState.js';
+import {
   bindNativeProviderAuth,
   claimDetectedNativeProviderAuth,
   isNativeProviderAuthBound,
@@ -630,8 +635,11 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
    */
   private reconcileWithSystemCodex(): Promise<void> {
     if (this.pendingReconcile) return this.pendingReconcile;
+    // 发起时刻固定会话快照:reconcile 是异步的,期间可能发生账号切换;绑定自愈
+    // 只允许写给「发起时与完成时都是同一个已提交会话」的 owner(见 claim 内校验)。
+    const sessionAtStart = getActiveAppSession();
     const run = this.runReconcileWithSystemCodex()
-      .then(() => this.claimDetectedCodexOAuthBinding())
+      .then(() => this.claimDetectedCodexOAuthBinding(sessionAtStart))
       .finally(() => {
         if (this.pendingReconcile === run) this.pendingReconcile = null;
       });
@@ -652,8 +660,21 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
    * 安全边界不变:已有归属(含别的账号)/ legacyClaimOwner 是别的账号 / durable
    * disconnect 抑制中,一律不写(见 claimDetectedNativeProviderAuth),换账号继续
    * fail-closed。写失败只记日志,不让 reconcile 链路抛穿。
+   *
+   * 会话边界防护(review P1):claim 在异步 reconcile 完成后执行,期间可能发生账号
+   * 切换。只在「发起时与完成时是同一个已提交会话(owner + generation 均未变)、且
+   * 没有会话边界切换在途」时才允许写入;否则放弃本轮 —— 新会话自己的下一次
+   * reconcile 会带着自己的快照重试,自愈不丢,只是绝不把 A 时代发起的认领写到 B 名下。
    */
-  private claimDetectedCodexOAuthBinding(): void {
+  private claimDetectedCodexOAuthBinding(sessionAtStart: ActiveAppSession): void {
+    const session = getActiveAppSession();
+    if (isAppSessionBoundaryPending()) return;
+    if (
+      session.generation !== sessionAtStart.generation ||
+      session.dataOwnerId !== sessionAtStart.dataOwnerId
+    ) {
+      return;
+    }
     if (this.oauthInvalidatedReason) return;
     const authPath = path.join(this.codexHome, 'auth.json');
     if (shouldSuppressLocalCodexAuth(this.codexHome, authPath)) return;

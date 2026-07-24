@@ -157,6 +157,24 @@ describe('codex OAuth binding auto-claim on reconcile', () => {
     expect(fs.existsSync(bindingFile)).toBe(false);
   });
 
+  it('drops the claim when the app session switches owners during an in-flight reconcile', async () => {
+    // review P1:claim 只允许写给「reconcile 发起时」的会话;在途期间切换账号必须放弃,
+    // 绝不把 A 时代发起的认领写到 B 名下。B 自己的下一次 reconcile 会按 B 的规则重试。
+    const { bindingFile } = fixture();
+    h.dataOwnerId = 'owner-a';
+    const { DesktopCodexAuthAdapter } = await import('../auth-adapters.js');
+    const adapter = new DesktopCodexAuthAdapter();
+
+    // getState 的同步段捕获 sessionAtStart(owner-a);首个 await 挂起后切到 owner-b。
+    const statePromise = adapter.getState();
+    h.dataOwnerId = 'owner-b';
+    await expect(statePromise).resolves.toEqual({
+      authenticated: false,
+      errorReason: 'oauth_not_bound',
+    });
+    expect(fs.existsSync(bindingFile)).toBe(false);
+  });
+
   it('keeps pre-session behavior without writing any binding when no owner is committed', async () => {
     const { bindingFile } = fixture();
     const { DesktopCodexAuthAdapter } = await import('../auth-adapters.js');

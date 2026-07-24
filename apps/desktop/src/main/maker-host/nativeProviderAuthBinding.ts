@@ -93,8 +93,11 @@ export function claimDetectedNativeProviderAuth(
   const owner = getActiveAppSession().dataOwnerId;
   if (!owner) return false;
   const bindings = readBindings();
-  if (bindings[provider]) return false;
-  if (bindings.legacyClaimOwner && bindings.legacyClaimOwner !== owner) return false;
+  // Key-presence, not truthiness: a corrupted/empty-string slot must count as
+  // "claimed by unknown" and fail closed, never as re-claimable (matches
+  // unbindNativeProviderAuth's `in` pattern).
+  if (provider in bindings) return false;
+  if ('legacyClaimOwner' in bindings && bindings.legacyClaimOwner !== owner) return false;
   if (!hasCredential()) return false;
   writeBindings({ ...bindings, [provider]: owner });
   return true;

@@ -102,4 +102,15 @@ describe('claimDetectedNativeProviderAuth', () => {
     expect(claimDetectedNativeProviderAuth('openai', () => false)).toBe(false);
     expect(fs.existsSync(bindingFile)).toBe(false);
   });
+
+  it('treats corrupted falsy slot values as claimed-by-unknown and fails closed', () => {
+    // 键存在但值为假(损坏 / 异常写入):按「归属不明」拒绝,绝不重认领。
+    fs.mkdirSync(userDataDir, { recursive: true });
+    fs.writeFileSync(bindingFile, JSON.stringify({ openai: '' }));
+    expect(claimDetectedNativeProviderAuth('openai', () => true)).toBe(false);
+
+    fs.writeFileSync(bindingFile, JSON.stringify({ legacyClaimOwner: '' }));
+    expect(claimDetectedNativeProviderAuth('openai', () => true)).toBe(false);
+    expect(JSON.parse(fs.readFileSync(bindingFile, 'utf8'))).toEqual({ legacyClaimOwner: '' });
+  });
 });

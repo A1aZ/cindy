@@ -63,7 +63,7 @@ import { buildExportOptionsPlist, resolveIosSigningEnv } from './lib/ios-local.m
 import { clearBundlerCache } from './lib/bundler-cache.mjs';
 import { readEmbeddedRuntimeVersionFromIpa } from './lib/embedded-runtime.mjs';
 import { loadEndpointManifestBaseUrl, mobileClientBuildEnv } from '../../../scripts/shared/client-endpoint-build-env.mjs';
-import { SELF_HOST_REGIONS, loadSelfHostRegions, missingSelfhostBakeFields, stripSelfHostRegionEnv } from './lib/self-host-region.mjs';
+import { SELF_HOST_REGIONS, loadSelfHostRegions, missingSelfHostBakeFields, stripSelfHostRegionEnv } from './lib/self-host-region.mjs';
 
 const MOBILE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const NPX = process.platform === 'win32' ? 'npx.cmd' : 'npx';
@@ -195,7 +195,7 @@ async function main() {
 
   // selfhost 烘焙必填字段(prebuild 期 app.config.js 硬校验)提前自查:dry-run 只预告,
   // --execute 在 prebuild 白跑数分钟之前 fail-fast。
-  const missingBake = missingSelfhostBakeFields(region);
+  const missingBake = missingSelfHostBakeFields(region);
 
   // git 闸门只管真构建:dry-run 纯本地(不做 origin/main 远端比对,分支/离线可跑)。
   if (args.execute) {

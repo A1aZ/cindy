@@ -257,7 +257,7 @@ export function resolveSelfHostRegion(args, options = {}) {
  * apps/mobile/app.config.js 的 loadRegionBuildConfig 为准,此处只查非空,格式校验
  * (google client id 后缀 / iosUrlScheme 反写)仍由 app.config.js 把关。
  */
-export function missingSelfhostBakeFields(regionConfig) {
+export function missingSelfHostBakeFields(regionConfig) {
   const missing = [];
   const tapdb = regionConfig?.tapdb ?? {};
   for (const key of REQUIRED_TAPDB_KEYS) {

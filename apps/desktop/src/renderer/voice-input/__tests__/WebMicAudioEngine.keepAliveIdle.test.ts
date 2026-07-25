@@ -297,6 +297,27 @@ describe('keep-alive microphone idle window', () => {
     expect(getUserMedia).toHaveBeenCalledTimes(1);
   });
 
+  it('replaces a prewarm-only session when the config changes mid warm-up', async () => {
+    let resolveStream: (value: unknown) => void = () => undefined;
+    getUserMedia.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveStream = resolve;
+    }));
+
+    const first = mod.prewarmVoiceInputMicrophone({ workletUrl: WORKLET_URL });
+    await vi.advanceTimersByTimeAsync(0);
+
+    // No recording is waiting on this background warm-up, so a config change
+    // must actually swap it. Deferring here would strand the old device until
+    // the idle timeout while the new one never gets warmed at all.
+    const second = mod.prewarmVoiceInputMicrophone({ workletUrl: WORKLET_URL, deviceId: 'default' });
+
+    resolveStream({ getAudioTracks: () => [track], getTracks: () => [track] });
+    await first;
+    await second;
+
+    expect(getUserMedia).toHaveBeenCalledTimes(2);
+  });
+
   it('shares one startup between concurrent callers', async () => {
     let resolveStream: (value: unknown) => void = () => undefined;
     getUserMedia.mockImplementationOnce(() => new Promise((resolve) => {

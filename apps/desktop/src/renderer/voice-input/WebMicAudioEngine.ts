@@ -346,6 +346,7 @@ class KeepAliveMicSession {
   private staleAfterActiveDeviceChange = false;
   private sinkConnected = false;
   private startPromise?: Promise<void>;
+  private reservedForRecording = false;
 
   constructor(options: KeepAliveSessionOptions) {
     this.options = options;
@@ -478,6 +479,7 @@ class KeepAliveMicSession {
     this.detachOutputPath();
     this.activation = undefined;
     this.active = false;
+    this.reservedForRecording = false;
   }
 
   drainBufferedAudio(): Promise<void> {
@@ -491,14 +493,28 @@ class KeepAliveMicSession {
   /**
    * Recording, or on its way there.
    *
-   * `active` only flips in activate(), which happens *after* start() resolves.
-   * A concurrent prewarm that only checked `active` would sail past a session a
-   * recording is currently waiting on and hand it to the replace path — the
-   * recording would then activate() a disposed session, report success, and die
-   * on the stall watchdog with no PCM.
+   * `active` only flips in activate(), which happens *after* start() resolves,
+   * so a concurrent prewarm checking `active` alone would sail past a session a
+   * recording is waiting on and hand it to the replace path — the recording
+   * would then activate() a disposed session and die on the stall watchdog.
+   *
+   * The reservation (not merely "a startup is in flight") is what marks that
+   * window: a *prewarm-only* startup has no recording waiting on it and must
+   * stay replaceable, otherwise a device change during background warm-up would
+   * only mark the session stale and then strand it — nothing would ever call
+   * stop() to finish the deferred swap.
    */
   isBusy(): boolean {
-    return this.active || this.startPromise !== undefined;
+    return this.active || this.reservedForRecording;
+  }
+
+  /** Claim this session for an imminent activate(); see isBusy(). */
+  reserveForRecording(): void {
+    this.reservedForRecording = true;
+  }
+
+  releaseRecordingReservation(): void {
+    this.reservedForRecording = false;
   }
 
   handleDeviceChange(): boolean {
@@ -541,6 +557,7 @@ class KeepAliveMicSession {
     this.source?.disconnect();
     this.stream?.getTracks().forEach((track) => track.stop());
     this.sinkConnected = false;
+    this.reservedForRecording = false;
     this.worklet = undefined;
     this.sink = undefined;
     this.source = undefined;
@@ -580,12 +597,30 @@ class KeepAliveMicSession {
   }
 }
 
-async function getOrCreateKeepAliveSession(options: KeepAliveSessionOptions): Promise<KeepAliveMicSession> {
+/**
+ * `reserveForRecording` marks the session as claimed by an imminent recording
+ * *before* the first await, so a prewarm racing on the same session sees it as
+ * busy and defers instead of replacing it mid-startup. Prewarm itself never
+ * reserves — a background warm-up must stay replaceable when the device changes.
+ */
+async function getOrCreateKeepAliveSession(
+  options: KeepAliveSessionOptions,
+  { reserveForRecording = false }: { reserveForRecording?: boolean } = {},
+): Promise<KeepAliveMicSession> {
   clearKeepAliveIdleDisposeTimer();
   const key = keepAliveKey(options);
   if (keepAliveSession && keepAliveSession.key === key && !keepAliveSession.isStaleAfterDeviceChange()) {
-    await keepAliveSession.start();
-    return keepAliveSession;
+    const existing = keepAliveSession;
+    if (reserveForRecording) existing.reserveForRecording();
+    try {
+      await existing.start();
+    } catch (error) {
+      // Do not leave a reservation on a session that failed to start: nothing
+      // would ever release it, and prewarm could never replace it again.
+      if (reserveForRecording) existing.releaseRecordingReservation();
+      throw error;
+    }
+    return existing;
   }
   if (keepAliveSessionPromise && keepAliveSession?.key === key) {
     return keepAliveSessionPromise;
@@ -601,6 +636,7 @@ async function getOrCreateKeepAliveSession(options: KeepAliveSessionOptions): Pr
     keepAliveIdleDeadlineAt = undefined;
   }
   const session = new KeepAliveMicSession(options);
+  if (reserveForRecording) session.reserveForRecording();
   keepAliveSession = session;
   keepAliveSessionPromise = session.start()
     .then(() => session)
@@ -996,7 +1032,7 @@ export class WebMicAudioEngine {
       chunkMs: this.chunkMs,
       audioProcessing: this.audioProcessing,
       latencyMs: this.latencyMs,
-    });
+    }, { reserveForRecording: true });
     this.keepAliveSession = session;
     this.usingKeepAliveSession = true;
     this.context = session.context;

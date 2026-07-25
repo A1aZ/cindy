@@ -242,6 +242,36 @@ describe('im default settings store', () => {
     expect(migrated3.channels.slack.agents['claude-code'].model).toBe('claude-sonnet-4-8');
   });
 
+  it('does not misidentify a v2 file with partial global as legacy after channel edit', () => {
+    // Simulate: user customizes global, then edits one channel. The on-disk v2
+    // file has a partial `global` override and full root `agents` mirror.
+    // After defaults merge this must NOT trigger legacy migration.
+    const v2Defaults = {
+      schemaVersion: 2,
+      global: IM_DEFAULT_SETTINGS,
+      channels: {
+        feishu: IM_DEFAULT_SETTINGS,
+        discord: IM_DEFAULT_SETTINGS,
+        slack: IM_DEFAULT_SETTINGS,
+      },
+    };
+    const v2FileOverrides = {
+      schemaVersion: 2,
+      global: { agentKind: 'codex' },
+      channels: { feishu: { agentKind: 'codex', agents: { codex: { providerId: 'openai', model: 'gpt-5.5', effort: 'high' } } } },
+      agentKind: 'codex',
+      agents: { 'claude-code': IM_DEFAULT_SETTINGS.agents['claude-code'], codex: { providerId: null, model: IM_DEFAULT_SETTINGS.agents.codex.model, effort: IM_DEFAULT_SETTINGS.agents.codex.effort } },
+    };
+    const merged = { ...v2Defaults, ...v2FileOverrides };
+    const result = __testing.normalizeDocument(merged);
+
+    // Must preserve per-channel data, NOT flatten everything from global
+    expect(result.channels.feishu.agentKind).toBe('codex');
+    expect(result.channels.feishu.agents.codex.providerId).toBe('openai');
+    // Discord should remain at defaults (not overwritten by global's codex)
+    expect(result.channels.discord.agentKind).toBe(IM_DEFAULT_SETTINGS.agentKind);
+  });
+
   it('writes and resets one channel without changing another channel', () => {
     writeImDefaultSettingsPatch({ agentKind: 'codex' }, 'feishu');
     writeImDefaultSettingsPatch(

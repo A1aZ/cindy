@@ -81,22 +81,25 @@ function normalizeDocument(raw: unknown): ImDefaultSettingsDocument {
   //   1. providerId/model/effort at root — v2 never writes these at root.
   //   2. Root agentKind disagrees with global.agentKind — in v2 backward-compat
   //      the root mirror always matches global; a v1 override diverges.
-  //   3. Root agents differs from global.agents — a v1 agents-only override
-  //      (user changed model/provider without switching agent) lands at root
-  //      while global retains defaults.
-  //   4. Root agentKind/agents present without any global — pure v1 input.
+  //   3. Root agentKind/agents present without any global — pure v1 input.
+  //   4. Root agents present without root agentKind, and global.agents equals
+  //      system defaults — a v1 agents-only override (user changed model/provider
+  //      without switching agent) merged over v2 defaults. In a real v2 file the
+  //      global.agents would reflect the user's customization, not defaults.
   const hasLegacyScalarOverrides =
     'providerId' in record || 'model' in record || 'effort' in record;
   const globalRecord = isRecord(record.global) ? record.global : null;
   const rootAgentKindDiverges =
     'agentKind' in record && globalRecord !== null &&
     record.agentKind !== globalRecord.agentKind;
-  const rootAgentsDiverge =
-    'agents' in record && isRecord(record.agents) && globalRecord !== null &&
-    JSON.stringify(record.agents) !== JSON.stringify(globalRecord.agents);
+  const rootAgentsOnlyWithDefaultGlobal =
+    'agents' in record && isRecord(record.agents) &&
+    !('agentKind' in record) && globalRecord !== null &&
+    JSON.stringify(normalizeSettings(globalRecord).agents) ===
+      JSON.stringify(IM_DEFAULT_SETTINGS.agents);
   const hasLegacyAgentFields =
     ('agentKind' in record || 'agents' in record) &&
-    (globalRecord === null || rootAgentKindDiverges || rootAgentsDiverge);
+    (globalRecord === null || rootAgentKindDiverges || rootAgentsOnlyWithDefaultGlobal);
   const hasLegacyRootSettings = hasLegacyScalarOverrides || hasLegacyAgentFields;
 
   // Before schema v2 there was one flat route shared by every IM channel.

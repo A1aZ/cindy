@@ -20,9 +20,12 @@ import JSZip from 'jszip';
 
 import {
   GHOST_MANIFEST_FILE,
+  GHOST_SKILL_MD_MAX_BYTES,
   validateGhostManifest,
   type GhostManifest,
 } from '../../shared/ghost.js';
+import { validateGhostLocaleResourcesInDirectory } from './ghostLocaleFiles.js';
+import { checkSkillMdConsistency } from './skillSlot.js';
 
 /** 与 GhostManager 装入侧同一量级的上限(打包侧提前拦,fail fast)。 */
 const MAX_BASIC_FILES = 256;
@@ -553,12 +556,24 @@ export async function packGhostDir(dir: string): Promise<ForgePackResult> {
     }
     const manifest = v.manifest;
 
-    // 2) 清单声明的入口文件必须真实在场(打包期拦,别等装入后沙箱 404)。
+    // 2) locale 资源必须真实、可解析且完整覆盖已声明字段。与装入侧使用
+    // 同一 validator，避免 Forge 能打包、安装却被拒的契约漂移。
+    const localeValidation = validateGhostLocaleResourcesInDirectory(dir, manifest);
+    if (!localeValidation.ok) {
+      return {
+        ok: false,
+        errorCode: 'MANIFEST_INVALID',
+        message: localeValidation.reason,
+      };
+    }
+
+    // 3) 清单声明的入口文件必须真实在场(打包期拦,别等装入后沙箱 404)。
     const mustExist: string[] = [];
     if (manifest.entry) mustExist.push(manifest.entry);
     if (manifest.node?.entry) mustExist.push(manifest.node.entry);
     if (manifest.panel?.html) mustExist.push(manifest.panel.html);
     if (manifest.settingsHtml) mustExist.push(manifest.settingsHtml);
+    for (const item of manifest.skill?.items ?? []) mustExist.push(`${item.dir}/SKILL.md`);
     for (const rel of mustExist) {
       try {
         const st = await fs.promises.stat(path.join(dir, rel));
@@ -568,17 +583,58 @@ export async function packGhostDir(dir: string): Promise<ForgePackResult> {
       }
     }
 
-    // 3) 收集文件(递归,跳过开发残留),数量/体积设限。
+    // 3.5) skill 槽:SKILL.md frontmatter 与清单声明必须逐字一致。与装入侧
+    // (GhostManager.parse)共用同一裁判,避免"Forge 能打包、安装被拒"的漂移。
+    for (const item of manifest.skill?.items ?? []) {
+      const skillMdPath = path.join(dir, ...item.dir.split('/'), 'SKILL.md');
+      let content: string;
+      try {
+        content = await fs.promises.readFile(skillMdPath, 'utf-8');
+      } catch (err) {
+        return {
+          ok: false,
+          errorCode: 'ENTRY_MISSING',
+          message: `读取 ${item.dir}/SKILL.md 失败:${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+      if (Buffer.byteLength(content, 'utf8') > GHOST_SKILL_MD_MAX_BYTES) {
+        return {
+          ok: false,
+          errorCode: 'MANIFEST_INVALID',
+          message: `${item.dir}/SKILL.md 过大(上限 ${GHOST_SKILL_MD_MAX_BYTES} 字节)`,
+        };
+      }
+      const consistencyError = checkSkillMdConsistency(content, item);
+      if (consistencyError) {
+        return {
+          ok: false,
+          errorCode: 'MANIFEST_INVALID',
+          message: `skill 条目 ${item.dir}:${consistencyError}`,
+        };
+      }
+    }
+
+    // 4) 收集文件(递归,跳过开发残留),数量/体积设限。
     const files: Array<{ rel: string; abs: string }> = [];
     let totalBytes = 0;
     const maxFiles = manifest.node ? MAX_NODE_FILES : MAX_BASIC_FILES;
     const maxTotalBytes = manifest.node ? MAX_NODE_TOTAL_BYTES : MAX_BASIC_TOTAL_BYTES;
+    const seenPackPaths = new Set<string>();
     const walk = async (cur: string, relBase: string): Promise<ForgePackResult | null> => {
       const entries = await fs.promises.readdir(cur, { withFileTypes: true });
       for (const e of entries) {
         if (shouldSkip(e.name)) continue;
         const abs = path.join(cur, e.name);
         const rel = relBase ? `${relBase}/${e.name}` : e.name;
+        const foldedRel = rel.toLowerCase();
+        if (seenPackPaths.has(foldedRel)) {
+          return {
+            ok: false,
+            errorCode: 'MANIFEST_INVALID',
+            message: `源码目录含大小写折叠后重复的路径:${rel}`,
+          };
+        }
+        seenPackPaths.add(foldedRel);
         if (e.isDirectory()) {
           const bad = await walk(abs, rel);
           if (bad) return bad;
@@ -602,7 +658,7 @@ export async function packGhostDir(dir: string): Promise<ForgePackResult> {
     const tooLarge = await walk(dir, '');
     if (tooLarge) return tooLarge;
 
-    // 4) 打包到源码目录自身(2026-07 Lizi 定案:产物跟源码住一起,拿取直观)。
+    // 5) 打包到源码目录自身(2026-07 Lizi 定案:产物跟源码住一起,拿取直观)。
     // 文件收集在写盘之前完成 + shouldSkip 跳过 *.cindy,自身产物不会进包;
     // 同名覆盖:同 id 同版本重打包语义上就是同一个包。
     const zip = new JSZip();
@@ -651,6 +707,11 @@ export const FORGE_GUIDE = `# 意识(Ghost)编写手册
 my-ghost/
 ├── ghost.json    ← 身份卡(必须,zip 根部)
 ├── main.js       ← 电子脑:后台逻辑入口(声明了 tools/cindy 时必须)
+├── locales/      ← 可选:宿主驱动的清单文案翻译(声明 locales 时英文必须存在)
+│   ├── en.json
+│   ├── zh-CN.json
+│   ├── ja.json
+│   └── ko.json
 ├── node/
 │   └── worker.cjs ← 可选:随包 Node/stdio MCP 入口(声明 node 槽时必须,见 §4.12)
 ├── panel.html    ← 面板界面(声明了 panel.html 时必须)
@@ -668,6 +729,12 @@ my-ghost/
   "name": "我的意识",           // 展示名
   "description": "一句话说清这段意识是干嘛的(给人看:装入确认框/详情页)",  // 1–300 字
   "whenToUse": "需要生成图片、插画、配图、修图、P 图、改图时找我",  // 1–300 字,给模型看:进 agent 会话的意识花名册,是"用户不点名时 AI 能不能想起你"的关键。写成场景枚举,可反复调优;缺省时花名册回落用 description
+  "locales": {                 // 可选:插件只跟随宿主语言;不支持/缺失语言固定回退 en
+    "en": "locales/en.json",
+    "zh-CN": "locales/zh-CN.json",
+    "ja": "locales/ja.json",
+    "ko": "locales/ko.json"
+  },
   "version": "1.0.0",
   "entry": "main.js",          // 电子脑入口(kind 字段已无需填写:意识只有芯片一种形态,缺省即 chip;写了也只认 "chip")
   "launch": "on-demand",       // 可选:电子脑启动模式。on-demand(缺省)=被需要才拉起;resident=唤醒即常驻(确认框会如实标注"常驻运行",绝大多数意识不需要,仅订阅型/需秒响应的场景用)
@@ -686,23 +753,81 @@ my-ghost/
   // top/bottom 暂未支持(排期中)
   // panel.systemButtons(可选,仅停靠形态):标准头系统按钮开关,缺省全开、
   // 声明 false 逐个关闭。当前一批:maximize(撑满内容区)、detach(在独立
-  // 窗口中打开)。标题条本体恒由主机绘制、关不掉;未知键拒装;
-  // position:"tab" 时声明本字段拒装
-  "settingsHtml": "settings.html",  // 可选:设置页「自定义设置区」自绘界面(见 §4.8;声明了用户填的凭证时必填——凭证收单界面,见 §4.7)
+  // 窗口中打开)、minimize(最小化为浮动气泡)。标题条本体恒由主机绘制、
+  // 关不掉;未知键拒装;position:"tab" 时声明本字段拒装
+  "settingsHtml": "settings.html",  // 可选:设置页「自定义设置区」自绘界面(见 §4.8;声明了用户填的凭证时仍必填,用于长期管理/替换/清除;调用前缺失时主机也会在统一 Setup 卡内联收单,见 §4.7)
   "settingsHeight": 360             // 可选:固定高度 px(160–800);缺省 = 随内容自适应(矮内容真收矮,高至 800);内容会动态增减时才声明,避免抖动
 }
 \`\`\`
 
-十三个卡槽:\`tool\`(注册工具给 AI)、\`cindy\`(请 Cindy 本体代办:出图/改图)、\`agent\`(让
+### 2.1 本地化资源(locales)
+
+插件语言**只跟随 Cindy 宿主当前语言**。不要读取 \`navigator.language\`、操作系统语言或
+浏览器偏好，也不要在插件内保存另一份语言选择。宿主当前支持
+\`zh-CN / en / ja / ko\`；插件没提供宿主当前语言时固定使用英文，因此只要声明
+\`locales\` 就必须提供 \`en\`。
+
+每个 locale JSON 完整覆盖清单中已有的可本地化字段；工具按稳定的 tool name 对齐，
+协议键、工具名和参数名不翻译：
+
+\`\`\`json
+{
+  "name": "My Plugin",
+  "description": "What this plugin does.",
+  "whenToUse": "Use it when ...",
+  "tools": {
+    "do_thing": {
+      "description": "Do the task and return the result.",
+      "parameters": {
+        "/properties/query": {
+          "title": "Query",
+          "description": "Describe what to search for."
+        }
+      }
+    }
+  },
+  "panel": { "title": "Plugin panel" },
+  "network": {
+    "secrets": {
+      "api_key": { "label": "API key", "hint": "Create one in account settings." }
+    },
+    "connections": {
+      "instance": { "label": "Service instance", "hint": "Enter the instance URL and token." }
+    }
+  },
+  "node": {
+    "secretBindings": {
+      "worker_key": { "label": "Worker key", "hint": "Used only by the local worker." }
+    }
+  },
+  "setup": {
+    "kv": {
+      "default_repo": { "label": "Default repository" }
+    }
+  }
+}
+\`\`\`
+
+若原清单声明了 \`description\`、\`whenToUse\`、\`tools\`、\`panel.title\`、
+\`network.secrets / connections\`、\`node.secretBindings\` 或 \`setup\` 的 kv 标签，
+每个 locale 文件都必须完整提供对应文案；凭证、连接、Node 凭证和 kv 项按稳定 key 对齐。
+工具参数 schema 中已有的 \`title / description\` 用 JSON Pointer 对齐（如
+\`/properties/query\`；根节点用空字符串 \`""\`），参数名、类型、枚举和协议结构不翻译。
+缺译、未知 key、多余字段、文件缺失、路径大小写与磁盘不一致、无效 JSON 或单文件超过
+64KB 都会在 Forge 打包期、内置播种期与安装期拒绝。清单列表、详情页、Panel 标题、
+安装/配置提示和 Agent 工具目录都消费同一份本地化结果。
+
+十四个卡槽:\`tool\`(注册工具给 AI)、\`cindy\`(请 Cindy 本体代办:出图/改图)、\`agent\`(让
 当前 Agent 开始一个普通用户回合,见 §4.11)、\`panel\`(常驻
 面板)、\`card\`(聊天卡片:自绘工具调用的过程与结果,见 §4.5)、\`subscribe\`(旁听会话
 事件 + 拦截用户消息,见 §4.6)、\`network\`(访问自带服务的域名白名单 HTTP,主机代发,
 见 §4.7)、\`notify\`(弹系统轻提示,主机画壳带你的身份头,见 §4.9)、\`fs\`(请主机
 代写文件:私有数据目录/会话工作目录/过户目录三档,见 §4.10)、\`node\`(运行随包
 Node 工作进程或 stdio MCP,见 §4.12)、\`session-context\`(派活时主机把当前会话的
-可信 session_id / workdir 注入 args,见 §4.13)、\`pick\`(请主机弹系统选文件夹窗口,
+可信 session_id / workdir / 只读状态注入 args,见 §4.13)、\`pick\`(请主机弹系统选文件夹窗口,
 用户亲选即授权,见 §4.14)、\`preview\`(请主机在右侧栏内置浏览器打开白名单网站的
-预览标签,见 §4.15)。
+预览标签,见 §4.15)、\`skill\`(捆绑 Agent Skills:随包 SKILL.md 技能,启用后
+Claude Code 与 Codex 都能发现,见 §4.16)。
 
 **agent 能力详单**:在 \`slots\` 加 \`"agent"\`，默认只允许在用户真实点击你的
 聊天卡片后发起一次 Agent 回合；这一档不写配套字段。若确实需要没有当次点击也能
@@ -744,6 +869,18 @@ node 详单**不接受** \`command\` / \`args\` / \`shell\` / \`env\` 或其它�
 }
 \`\`\`
 
+**skill 详单**(声明 skill 槽时必写,详见 §4.16):
+
+\`\`\`json
+"skill": {
+  "items": [{                       // 1–4 条
+    "dir": "skills/my-skill",       // 包内技能目录,内必须有 SKILL.md
+    "name": "my-skill",             // 硬规则:与 SKILL.md frontmatter name 逐字一致;小写字母/数字加单连字符分段(禁首尾/连续连字符),≤64
+    "description": "……"             // 硬规则:与 SKILL.md frontmatter description 逐字一致(确认框展示的就是 Agent 读到的),1–1024 字
+  }]
+}
+\`\`\`
+
 **cindy 能力详单**:声明"这个意识被允许点主机代办菜单上的哪些菜"——只有类目和
 动作,**没有任何具体模型/供应商信息**(选型权在主机与用户,意识只表达意图)。
 类目与动作:\`image\`(\`generate\`=出图 / \`edit\`=改图)、\`video\`(\`generate\`=
@@ -759,9 +896,9 @@ node 详单**不接受** \`command\` / \`args\` / \`shell\` / \`env\` 或其它�
   "secrets": [{                                     // 可选 0–4 条:需要用户填的凭证(你只声明名字和注入位置,值用户填、主机保管)
     "key": "api_token",                             // 小写字母开头,小写/数字/下划线,1–32
     "label": "Example API Token",                   // 给用户看的名称(设置页/确认框)
-    "source": "user",                               // 可选:凭证值来源。"user"(缺省)=用户在你的 settingsHtml 里填(声明 user 凭证必须同时声明 settingsHtml,见 §4.7);"login-email"=主机登录邮箱自动派生(用户不填;声明它时不允许再写 url,见 §4.7);"oauth"=主机托管 OAuth 授权,值 = 授权换来的 access token(必须同时声明 oauth 详单,见 §4.7 与下方 oauth 字段)
-    "hint": "在控制台生成后粘贴",                     // 可选提示(建议写进你的 settingsHtml 提示文案)
-    "url": "https://example.com/settings/keys",     // 可选:控制台地址(仅 https)。settingsHtml 里可用 <a href> 逐字引用它,点击经主机转系统浏览器打开(见 §4.8「外链」);也供确认框等宿主 UI 引用
+    "source": "user",                               // 可选:凭证值来源。"user"(缺省)=用户可在调用前的主机 Setup 卡内填写,也可在你的 settingsHtml 里长期管理/替换/清除(当前仍要求同时声明 settingsHtml,见 §4.7);"login-email"=主机登录邮箱自动派生(用户不填;声明它时不允许再写 url,见 §4.7);"oauth"=主机托管 OAuth 授权,值 = 授权换来的 access token(必须同时声明 oauth 详单,见 §4.7 与下方 oauth 字段)
+    "hint": "在控制台生成后粘贴",                     // 可选提示(主机 Setup 卡与 settingsHtml 都会用到)
+    "url": "https://example.com/settings/keys",     // 可选:控制台/申请地址(仅 https)。调用前缺凭证时,主机 Setup 卡会在输入框旁展示本地化的「获取凭证」入口；settingsHtml 也可用 <a href> 逐字引用它,点击经主机转系统浏览器打开(见 §4.8「外链」)
     "inject": {                                     // 必填:这条凭证怎么进请求
       "header": "Authorization",                    // 注入的请求头名(Host/Cookie 等协议关键头禁用)
       "format": "Bearer {value}",                   // 恰含一个 {value} 占位,其余静态文本
@@ -801,8 +938,10 @@ node 详单**不接受** \`command\` / \`args\` / \`shell\` / \`env\` 或其它�
 \`\`\`
 
 **setup 就绪声明**(可选,顶层字段):回答"这段意识**用之前必须配好什么**"。用户在
-插件页点「使用」时,主机按它做前置检查,没配齐就弹窗引导去你的设置页——检查全在
-主机代码里执行,你只声明需求,不用写任何检查逻辑,也不要在电子脑里自己重复检查。
+插件页点「使用」或 Agent 调用你的工具时,主机按它做前置检查；没配齐就用统一设置卡
+引导用户完成配置：普通 user Secret 直接在卡内填写，OAuth 在卡内发起授权，KV 与连接等
+复杂配置再进入插件详情页。配齐后继续原调用。检查、字段绑定、保存状态和恢复都在主机
+代码里执行,你只声明需求,不用写卡片回调或检查逻辑,也不要在电子脑里自己重复检查。
 
 \`\`\`json
 "setup": {
@@ -997,12 +1136,13 @@ const r = await cindy.send({ type: 'cindy-request', kind: 'gen_image', prompt: '
 
 ## 4.1 宿主公开上下文(request,无需卡槽)
 
-电子脑需要按宿主构建身份选择公开配置时,走只读 request。当前只暴露
-\`region: 'cn' | 'global'\`,不含登录态、路径、设备信息或凭证:
+电子脑需要按宿主构建身份或当前语言选择公开配置/界面文案时,走只读 request。当前只暴露
+\`region: 'cn' | 'global'\` 与 \`locale: 'zh-CN' | 'en' | 'ja' | 'ko'\`,
+不含登录态、路径、设备信息或凭证:
 
 \`\`\`js
 const r = await cindy.request({ kind: 'app-context' });
-// → { ok:true, context:{ region:'cn'|'global' } }
+// → { ok:true, context:{ region:'cn'|'global', locale:'zh-CN'|'en'|'ja'|'ko' } }
 \`\`\`
 
 \`settingsHtml\` / panel 没有 preload 桥,读取同一份上下文走同源只读端点:
@@ -1010,12 +1150,20 @@ const r = await cindy.request({ kind: 'app-context' });
 \`\`\`js
 const r = await (await fetch('/app-context')).json();
 const region = r.context.region;
+const locale = r.context.locale;
 \`\`\`
 
 region 只适合选择**已在 manifest 声明过**的公开配置。例如 broker OAuth
 可在 \`clientIdAlternatives\` 列出备用 ID,再由 settingsHtml 把选中的
 \`clientId\` 放进 \`/oauth/<key>/connect\` body;主机会做清单白名单复验。
 不要用 region 推断用户位置、语言或数据归属。
+
+\`locale\` 是插件语言的唯一事实来源。设置页、panel 和电子脑都只使用它；
+不要读取 \`navigator.language\`。宿主切换语言时，运行中的电子脑会收到
+\`{ type:'host-context-changed', ok:true, context:{ region, locale } }\`，可用
+\`BroadcastChannel\` 通知同插件的设置页/panel 重新读取 \`/app-context\` 并换文案。
+未运行的插件会在下次启动或页面重新装载时直接读到新语言。插件自身不支持该 locale 时
+必须选英文资源。
 
 ## 4.5 聊天卡片(card 槽,海报模式)
 
@@ -1370,8 +1518,14 @@ const r = await cindy.fetch({
 \`node.secretBindings\` 是唯一允许把对应凭证交给 Node Worker 的显式例外，
 并会在安装权限清单单独披露(见 §4.12.1)。
 
-**收单一律由你的 settingsHtml 负责**(宿主不渲染凭证输入框,声明 user 凭证必须
-同时声明 settingsHtml,校验强制):你在 settingsHtml 里画输入框收单,值经
+**调用前缺失的普通 user Secret 由主机统一 Setup 卡收单**：主机只根据你声明的
+\`label\` / \`hint\` 生成密码输入，不把值交给 Agent 或你的代码；提交后直接写保险库并
+重新检查 setup，全部满足才继续原工具调用。你不要声明表单字段 id、Action id 或聊天卡
+回调，也不要让用户把 key 发进聊天。同一 \`anyOf\` 组声明了多种合法配置方式时，
+主机会完整展示所有选项供用户选择，不会只取第一项；选项较多时统一卡片正文内部滚动。
+
+**settingsHtml 仍负责详情页里的长期管理**(当前声明 user 凭证仍必须同时声明
+settingsHtml,校验强制):你在 settingsHtml 里画输入框供用户主动添加、替换或清除，值经
 \`fetch('/secrets/<key>', { method:'PUT', body: JSON.stringify({ value }) })\`
 **一次性交给主机保险库**(204 即入库),\`fetch('/secrets')\` 只能查回
 \`[{key, saved, tail?}]\` 状态、**永远拿不回值**(tail 是主机截存的**尾 4 位
@@ -1380,7 +1534,7 @@ tail 也能画来写),DELETE 清除。红线:收单即交,不许把 key 落进 /
 BroadcastChannel、日志或任何自存路径(review 必查)。凭证只会注入到它
 \`inject.hosts\` 声明的域名请求,重定向出域也不会跟着走。用户没填时 cindy.fetch
 返回结构化错误,把 message 原样告诉用户即可(里面带了去哪填的指引)。
-入库成功(204)时主机会自动弹一条「凭证已保存」的系统提示(带你的身份头,
+无论走 Setup 卡还是 settingsHtml，入库成功时主机会自动弹一条「凭证已保存」的系统提示(带你的身份头,
 文案跟随用户语言;无需声明 notify 槽)——设置页里画个就地的轻反馈即可,
 不用自己想办法做全局提示。
 (历史字段 \`input\` 已退役:遗留 \`"input":"ghost"\` 可被接受并忽略,
@@ -1656,8 +1810,9 @@ await fetch('/kv', { method: 'PUT', body: JSON.stringify({ style: 'anime', autoR
 - **卸下意识时清除,沉睡保留**;更新版本保留;
 - 设置页与电子脑/面板同源,改完参数可用 \`BroadcastChannel\` 通知对方热生效
   (同一意识的面板/设置页/电子脑共用频道名,消息自带 type 字段区分来源);
-- **不要在 /kv 里存任何密钥/token 明文**——凭证一律走 network.secrets 声明 +
-  settingsHtml 收单 + /secrets 只写通道入库(§4.7),这是 review 红线;
+- **不要在 /kv 里存任何密钥/token 明文**——凭证一律走 network.secrets 声明，
+  调用前可由主机 Setup 卡内联入库，详情页管理走 settingsHtml + /secrets 只写通道
+  (§4.7)，这是 review 红线;
 - \`/kv\` 与 \`/secrets\`、\`/oauth\`、\`/wake\`、\`/gallery\`、\`/media/\`、\`/preview/\`、\`/__boot__\`
   一样是主机保留路径,安装目录里的同名文件会被遮蔽,起名避开。
 
@@ -1684,6 +1839,10 @@ $('#save').onclick = async () => {
   new BroadcastChannel('my-ghost').postMessage({ type: 'settings-changed' });
 };
 \`\`\`
+
+\`BroadcastChannel\` 只用于让你自己的 panel / 电子脑热更新。聊天里的统一设置卡不监听
+这个事件,也不需要你写任何完成回调；\`/oauth\`、\`/kv\`、\`/secrets\`、
+\`/connections\` 保存成功后,主机会重新读取真实状态并自动更新卡片、继续原工具调用。
 
 ## 4.9 系统提示(notify 槽)
 
@@ -2051,9 +2210,9 @@ const maker = require('@taptap/maker'); // 之后它的自启动全部走了正�
 cindy.onHostMessage(async (msg) => {
   if (msg.type !== 'tool-call') return;
   const ctx = msg.args.session_context;
-  // ctx = { session_id, workdir, workdir_is_local }
-  if (ctx?.workdir_is_local && ctx.workdir) {
-    // 只有 workdir_is_local === true 才能把 workdir 当本机路径交给 Node 侧
+  // ctx = { session_id, workdir, workdir_is_local, workdir_is_read_only }
+  if (ctx?.workdir_is_local && !ctx.workdir_is_read_only && ctx.workdir) {
+    // 只有本地且非只读时才能把 workdir 交给 Node 侧修改
     await cindy.node.request({ method: 'project/build', params: { dir: ctx.workdir } });
   }
 });
@@ -2066,6 +2225,8 @@ cindy.onHostMessage(async (msg) => {
 - \`workdir_is_local\` 是安全核心:会话跑在 SSH 远程工作区(或主机证明不了是本地)
   时为 \`false\`,此时 \`workdir\` 是远端路径,**绝不能**当本机路径读写——同名本机
   目录可能存在,写下去就是事故;
+- \`workdir_is_read_only\` 来自宿主对会话 permission / plan 状态的统一裁决;
+  为 \`true\` 时只允许检查、列举等只读操作,不得初始化、构建或以其它方式修改 workdir;
 - 这只是"位置信息",不是文件访问权:读写仍走 fs 槽 / node 槽各自的守门;
 - 未声明本槽的插件,args 里永远没有 \`session_context\` 字段。
 
@@ -2121,6 +2282,43 @@ if (!opened.ok) console.warn(opened.errorCode, opened.message);
   知道页面是谁开的;
 - 标签开在用户自己的右侧栏浏览器里,关不关、看不看由用户决定。
 
+## 4.16 捆绑 Agent Skills(skill 槽)
+
+想让插件"自带一份教 Agent 怎么用好自己的说明书"(或任何领域技能),把技能目录
+随包携带并声明 \`skill\` 槽 + \`skill.items\` 详单(见 §2)。装入且启用后,主机把
+每个技能目录链接进共享技能根 \`~/.agents/skills/<插件id>--<技能name>\`(Windows 用
+junction),Claude Code 与 Codex 都能自动发现——不复制字节,插件更新技能跟着更新,
+停用/卸载即撤链。
+
+目录形态(每条 item 一个目录,内必须有 SKILL.md):
+
+\`\`\`
+my-ghost/
+  ghost.json
+  main.js
+  skills/
+    my-skill/
+      SKILL.md        ← frontmatter 必须有 name + description
+      reference.md    ← 可选:技能附带的其它文件一并随链接可见
+\`\`\`
+
+SKILL.md 硬规则(打包与装入双侧强制,任一不满足直接拒):
+
+- frontmatter 的 \`name\` / \`description\` 必须与 \`skill.items\` 声明**逐字一致**
+  ——装入确认框展示的是清单声明,Agent 读到的是 SKILL.md,两者必须是同一份事实;
+- \`name\`:小写字母/数字加单连字符分段(禁首尾/连续连字符),≤64 字符;
+- SKILL.md 单文件 ≤64KB;items 最多 4 条。
+
+信任与作用域(如实告知用户,也请作者自重):
+
+- 技能指令由**主 Agent 以用户全部权限执行**,对所有项目、所有会话生效,
+  **不受插件沙箱约束**——这是十四个卡槽里信任面最高的能力,装入确认框会把
+  每个技能置顶逐条列出;
+- 技能跟随插件的**全局**启用状态:仅在某个工作目录停用插件**不会**隐藏技能,
+  只有全局停用或卸载才撤链(本期只有全局作用域);
+- \`skill.items\` 的字段不参与 locales 本地化(必须与 SKILL.md 逐字一致,而
+  SKILL.md 只有一份)。
+
 ## 5. 面板(panel.html/css/js)
 
 - 显示形态由 \`panel.position\` 决定:\`left\`(缺省)= 停靠主聊天窗左侧的常驻
@@ -2133,13 +2331,15 @@ if (!opened.ok) console.warn(opened.errorCode, opened.message);
   拒装。两种形态的面板代码完全一样(同一 panel.html,供片/主题/媒体规则不变),
   只是宿主容器不同;页签形态请把界面做成自适应宽度;
 - 停靠形态的**标题条(标准头)由主机绘制**:标题(\`panel.title\`)+ 一批系统
-  按钮(当前:「撑满内容区」与「在独立窗口中打开」——用户可把你的面板抽进
-  自己的 OS 窗口,关窗/合并即回停靠原位,面板代码零感知;后续新增的系统按钮
+  按钮(当前:「撑满内容区」、「在独立窗口中打开」——用户可把你的面板抽进
+  自己的 OS 窗口,关窗/合并即回停靠原位——以及「最小化为浮动气泡」——用户
+  可把面板收成一枚可拖动的圆形气泡悬浮在主窗最上层,点击气泡即回停靠原位,
+  气泡位置与最小化状态重启保留;三者面板代码全程零感知;后续新增的系统按钮
   也长在这里)。你的 panel.html 只画标题条以下的部分,**不要自己再画一条
   标题栏**。不想要某颗系统按钮时在身份卡声明
-  \`"systemButtons": { "maximize": false, "detach": false }\` 逐个关闭(缺省
-  全开;标题条本体关不掉;未知键拒装;\`position:"tab"\` 没有标准头,声明本
-  字段拒装);
+  \`"systemButtons": { "maximize": false, "detach": false, "minimize": false }\`
+  逐个关闭(缺省全开;标题条本体关不掉;未知键拒装;\`position:"tab"\` 没有
+  标准头,声明本字段拒装);
 - 与电子脑同源,用 \`BroadcastChannel('<自定名>')\` 通信(电子脑发,面板收);
 - 取自己的媒体:\`cindy-ghost://<id>/media/<指纹><后缀>\`(主机查账验归属,别人的图 404);
 - 重启回放:\`fetch('cindy-ghost://<id>/gallery')\` 返回本意识作品清单 \`[{src, caption}]\`;
@@ -2180,8 +2380,9 @@ if (!opened.ok) console.warn(opened.errorCode, opened.message);
   WebSocket)与直接读写磁盘永远不存在,声明了槽也一样——槽给的是"请主机
   代办"的资格,不是能力本身;
 - 保险库里的凭证明文永不进沙箱:network 槽的 key 由主机保管注入,你的代码
-  读不回(settingsHtml 收单时明文只在录入瞬间路过你的页面,经 /secrets 交给
-  主机即焚,之后同样拿不到;状态回查最多附尾 4 位指纹,重建不出值);
+  读不回(主机 Setup 卡直接交保险库；settingsHtml 收单时明文只在录入瞬间路过
+  你的页面,经 /secrets 交给主机即焚,之后同样拿不到;状态回查最多附尾 4 位
+  指纹,重建不出值);
 - 只经手字符串(指纹/地址),拿不到任何磁盘路径;
 - 改图只能改本意识自己生成的媒体(主机查账,越权统一 404/拒绝);
 - 崩溃只影响自己的面板(错误接管态),反复崩会被熔断。

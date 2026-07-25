@@ -36,6 +36,7 @@ import {
   markDesktopDevStartupFailed,
   markDesktopDevWindowReady,
 } from './devStartupStatus';
+import { prewarmMacComputerPermissionGuideHelper } from './computer-permission-guide/MacComputerPermissionGuideNativeHost.js';
 
 const PROCESS_STARTED_AT_MS = Date.now();
 // Official Linux binaries total hundreds of MB. Keep one shared deadline for
@@ -51,6 +52,18 @@ if (
   app.commandLine.appendSwitch('password-store', 'basic');
   safeStorage.setUsePlainTextEncryption(true);
 }
+
+// TapTap Maker 等站点的 WASM 多线程引擎依赖 SharedArrayBuffer。Chromium 把 SAB 锁在
+// crossOriginIsolated(COOP/COEP 响应头)之后,而 Electron 不实现 COOP 进程隔离——
+// 即便站点响应头正确,BrowserWindow / `<webview>` 里 crossOriginIsolated 恒为 false,
+// SAB 拿不到,RSB 内置浏览器里这类站点直接报"缺少运行时支持"(Electron 41.2.0 实测,
+// 真 Chrome 同页面为 true)。这里用 Chromium 官方 feature 开关无条件恢复 SAB 构造器,
+// TapTap Maker 桌面端(xdt-maker.exe)、VS Code 同款做法。风险面是向所有网页内容放开
+// 高精度共享内存计时器(Spectre 类),缓解依赖远程内容只跑在 webview-security.ts 强制
+// 加固的 webview 里(sandbox + webSecurity + 隔离分区,无 Node)。注意 appendSwitch
+// 同 key 后写覆盖前写:如需再加其他
+// enable-features,必须合并进同一次调用的逗号分隔值,不能另起一行。
+app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
 
 // agentManager 已在 vendor 大扫除时退役。app 退出 / 崩溃路径走 maker.shutdown()
 // 一刀切 — 它内部按 (Layer 1) 关所有 session → (Layer 2) dispose 所有 agent (Codex
@@ -250,6 +263,7 @@ import {
 } from './windowFocusClassifier.js';
 import { assertTrustedAppRendererEvent } from './security/trustedAppRenderer.js';
 import { initHeartbeatService } from './heartbeatService';
+import { initAnalyticsSettingsService, noteAuthColdStartState } from './analyticsSettingsService';
 import { WindowManualDragController } from './windowManualDrag';
 // 设备互联(跨设备远程控制): relay 连接 host + 开关/设备列表 IPC
 import { initDeviceLinkService, releaseDeviceLinkOwnershipBeforeLogout } from './device-link';
@@ -289,6 +303,7 @@ import {
   resetHookControlOwnerBoundary,
   disposeHookControl,
 } from './hook-control';
+import { startAccountIntegrationsAfterOwnerDbReady } from './accountIntegrationStartup';
 import { registerSkillhubIpc } from './skillhub/registerIpc';
 import { SkillhubMarketService } from './skillhub/marketService';
 import { skillhubAutoSyncService } from './skillhub/autoSyncService';
@@ -550,11 +565,14 @@ import { registerLayoutIpc } from './layout/index.js';
 import {
   getGhostManager,
   isGhostAvailableForActiveSession,
+  refreshGhostLocalization,
   registerGhostIpc,
   setGhostsChangedObserver,
   suspendAllGhosts,
   waitForGhostMutations,
 } from './cindy-brain/index.js';
+import { getGhostSetupChangeBus } from './cindy-brain/ghostSetupChangeBus.js';
+import { getGhostSetupInteractionBridge } from './cindy-brain/ghostSetupInteractionBridge.js';
 import { registerPluginMarketIpc } from './plugin-market/registerIpc.js';
 import { findCindyFileInArgv } from './cindy-brain/argv.js';
 import { handleIncomingCindyFile } from './cindy-brain/openFileInstall.js';
@@ -821,8 +839,9 @@ async function teardownAuthAccountBoundary(reason: string): Promise<void> {
   // the auth-change activation pass after the new boundary is committed.
   await waitForGhostMutations();
   suspendAllGhosts();
-  // Personal IM channels have the same DB boundary. Relogin restarts them via
-  // app:ready-for-bot after the new DbClient is ready.
+  // Personal IM channels have the same DB boundary. Relogin restarts them from
+  // the next owner DB-ready callback; app:ready-for-bot remains a compatibility
+  // retry after the new DbClient is ready.
   try {
     await stopImConnection(reason);
   } catch (err) {
@@ -1498,6 +1517,7 @@ ipcMain.handle('app-menu:set-locale', (_event, locale: unknown): { ok: true } =>
   );
   setSelectionContextMenuLocale(currentApplicationMenuLocale);
   setMainLocale(currentApplicationMenuLocale);
+  refreshGhostLocalization();
   const mainWindow = mainWindowRef && !mainWindowRef.isDestroyed() ? mainWindowRef : null;
   if (mainWindow) {
     installApplicationMenu(mainWindow, currentApplicationMenuLocale);
@@ -1798,7 +1818,21 @@ app.on('browser-window-focus', (_event, win) => {
     clearTimeout(appFocusSyncTimer);
     appFocusSyncTimer = null;
   }
-  syncAppFocusState(isAppContentWindow(win));
+  const focusedAppContent = isAppContentWindow(win);
+  syncAppFocusState(focusedAppContent);
+  if (focusedAppContent) {
+    // OAuth and system settings may complete outside Cindy. Focus is a
+    // metadata-only fallback wake-up: each pending plugin is re-assessed, but
+    // no stored value crosses the change bus.
+    const pendingGhostIds = new Set(
+      (getGhostSetupInteractionBridge()?.pendingSnapshots() ?? []).map(
+        ({ request }) => request.ghost.id,
+      ),
+    );
+    for (const ghostId of pendingGhostIds) {
+      getGhostSetupChangeBus().wake(ghostId, { source: 'focus' });
+    }
+  }
 });
 
 app.on('browser-window-blur', () => {
@@ -3203,6 +3237,13 @@ const registerIpcHandlers = () => {
     cancelCodexAuthModeChange();
   };
 
+  const notifyProviderKeyChanged = (providerId: string): void => {
+    getGhostSetupChangeBus().emitAll({
+      source: 'host_config',
+      ref: `provider:${providerId}`,
+    });
+  };
+
   ipcMain.handle(
     'safe-storage-store',
     async (_event: Electron.IpcMainInvokeEvent, key: string, value: string): Promise<boolean> => {
@@ -3228,7 +3269,10 @@ const registerIpcHandlers = () => {
           if (restartResult.ok) {
             // 手填 XD key 保存成功:来源标记翻 manual(endpoint 回落编译期常量,
             // 与 model-access 自动下发的 endpoint 解耦,见 credentialsStore 注释)。
-            if (key === 'api_key') noteManualXdKeySaved();
+            if (key === 'api_key') {
+              noteManualXdKeySaved();
+              notifyProviderKeyChanged('xd');
+            }
             return true;
           }
           if (hadPrevious && previousContent !== null)
@@ -3313,7 +3357,10 @@ const registerIpcHandlers = () => {
           return { success: false, error: 'codex_restart_failed' };
         }
         // 手填 XD key 被删除(断开):清来源标记,endpoint 回落编译期常量。
-        if (key === 'api_key') noteManualXdKeyRemoved();
+        if (key === 'api_key') {
+          noteManualXdKeyRemoved();
+          notifyProviderKeyChanged('xd');
+        }
         return { success: true };
       } catch (err: unknown) {
         console.error('[safe-storage-remove]', err);
@@ -3340,6 +3387,15 @@ const registerIpcHandlers = () => {
         recordDesktopDevAuthStartupResult(state, pendingCompletion, () =>
           authManager.getAuthState(),
         );
+      }
+      // 使用统计同意闸的一次性存量迁移:只认冷启动恢复出来的登录态。内部有 guard,
+      // 多个窗口各自 initialize 只会评估一次(见 analyticsSettingsService)。
+      // 埋点是 best-effort:再包一层 catch,任何异常都不得让这次认证被判失败
+      // (那会让用户被归一成未登录)。
+      try {
+        noteAuthColdStartState(state, pendingCompletion);
+      } catch (analyticsErr) {
+        console.warn('[analytics] cold-start consent migration failed', analyticsErr);
       }
       return state;
     } catch (err) {
@@ -5375,22 +5431,23 @@ app.on('ready', async () => {
           error: err instanceof Error ? err.message : String(err),
         });
       }
-      // Hook ingress has the same hard dependency on the current owner's DB as
-      // the personal IM channel. Activate it from this authoritative Main-side
-      // readiness point instead of relying only on the renderer's later
-      // fire-and-forget app:ready-for-bot signal. That signal can be lost during
-      // cold-start auto-login or an owner remount, leaving an enabled Hook
-      // permanently disconnected until the user toggles it.
-      try {
-        startHookControlAccount();
-      } catch (err) {
-        // Hook is an optional account integration. A damaged config or endpoint
-        // must not roll back an otherwise healthy owner DB; the renderer's
-        // compatibility signal below provides a later retry.
-        dbClientLog.warn('hook-control activation after owner DB ready failed (non-fatal)', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
+      // Hook and personal IM both require the current owner's DbClient. Start
+      // them from this authoritative Main-side readiness point instead of
+      // relying only on the renderer's later fire-and-forget
+      // app:ready-for-bot signal. That signal can be lost during cold-start
+      // auto-login or an owner remount, leaving a saved Feishu bot disconnected
+      // and unable to claim the owner from its first p2p message.
+      startAccountIntegrationsAfterOwnerDbReady(userId, {
+        isOwnerCurrent: (ownerId) =>
+          isLocalDbOwnerCurrent(
+            authManager.getAuthState(),
+            ownerId,
+            isAppSessionBoundaryPending(),
+          ),
+        startHookControlAccount,
+        startImConnection,
+        log: dbClientLog,
+      });
       attemptStartScheduler();
       attemptStartEmbeddingHost();
       // 旧「资料本地覆写」方案退役(2026-07)的一次性清理:清当前账号名下的
@@ -5530,12 +5587,11 @@ app.on('ready', async () => {
   im.registerIpc();
   // 挂业务 orchestrator: 订阅 feishuIm.onMessage / .onCardAction。orchestrator
   // 必须在 createWindow 前挂好,避免 renderer 起来后第一波 IPC / event 找不到
-  // handler。FeishuBot 的 WS 长连接此处不启动 —— 由 renderer 在用户登录 +
-  // localDb 就绪后通过 'app:ready-for-bot' IPC 触发(见下方 handler)。
+  // handler。FeishuBot 的 WS 长连接必须等当前用户 localDb ready 后再启动。
   startImOrchestrators();
   // Renderer → main 的 "应用真正就绪" 兼容信号。LocalDbGate 在
-  // localDb.ensureReady 成功之后调一次。Hook 已在 localDb onReady 的 Main
-  // 权威时点激活，这里保留幂等兜底；FeishuBot 仍由本信号启动。
+  // localDb.ensureReady 成功之后调一次。Hook 与 FeishuBot 已在 localDb onReady
+  // 的 Main 权威时点激活，这里为旧时序与瞬时失败保留幂等重试。
   ipcMain.handle('app:ready-for-bot', (event) => {
     assertTrustedAppRendererEvent(event);
     startHookControlAccount();
@@ -5545,8 +5601,17 @@ app.on('ready', async () => {
   // 强制引用避免 tree-shaking 干掉 feishuIm（imHost 已通过 im 间接持有，但 main/im 也直接用它）
   void feishuIm;
   // 端点清单已就绪、IPC 已注册,此后 second-instance / activate 允许按需建窗。
+  // 使用统计(TapDB)的同意闸:必须在 createWindow **之前**注册。renderer 的
+  // tapdbClient 一挂载就 invoke analytics:settings-get 来决定是否初始化 SDK,
+  // handler 还没注册的话那次 invoke 会 reject,而它是 fail closed 的 —— 已同意
+  // 的用户会一直不上报,直到手动去设置里拨一下开关。
+  initAnalyticsSettingsService();
   startupWindowCreationAllowed = true;
   createWindow();
+  // 预热仅服务 dev macOS，延迟执行避免和启动关键路径争用 CPU；失败由入口内部吞掉。
+  setTimeout(() => {
+    prewarmMacComputerPermissionGuideHelper();
+  }, 3_000);
   initUpdateService();
   // 在线人数心跳:App 启动即上报,内部走 deviceId / userId 兜底,登录前后都活
   initHeartbeatService();

@@ -1,4 +1,5 @@
 import { findSplitChildByPanelKind, insertRootSplitPane, type Layout } from './layoutTree';
+import { DEFAULT_LOCALE, SUPPORTED_LOCALES, type SupportedLocale } from './locale';
 
 /**
  * 意识(Ghost,.cindy 文件)的清单数据模型与校验 —— main / renderer 共用。
@@ -55,7 +56,7 @@ export function parseGhostPartition(partition: unknown): string | null {
 const GHOST_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 /**
- * 八个卡槽(意识能力的全部出口,docs/dev-rules/plugin-security-and-authoring.md)。
+ * 十四个卡槽(意识能力的全部出口,docs/dev-rules/plugin-security-and-authoring.md)。
  * 'cindy' = 请 Cindy 本体代办(借主机自带 AI 能力干活;2026-07-11 Lizi 定案
  * 由 'model' 更名——本质是 Cindy 在干活,与选模型无关;旧名在校验层作
  * 静默别名兼容,已装老包不消失)。
@@ -71,7 +72,8 @@ const GHOST_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
  * 字节永远由主机落盘,沙箱本身仍无 fs——本槽是"申请主机代写"的资格,
  * 不是文件系统访问权。
  * 'session-context' = 会话上下文(2026-07-23):agent 派活(tool-call)时,主机把
- * 当次会话的可信 {session_id, workdir, workdir_is_local} 注入 args.session_context。
+ * 当次会话的可信 {session_id, workdir, workdir_is_local, workdir_is_read_only}
+ * 注入 args.session_context。
  * 只注入宿主认证过的事实,插件与 agent 自报的同名字段一律被剥除;远程工作区
  * (workdir 不在本机)时 workdir_is_local=false,插件不得把它当本机路径用。
  * 'pick' = 目录选择(2026-07-23):插件经管子申请主机弹**系统级**选文件夹窗口,
@@ -81,6 +83,13 @@ const GHOST_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
  * 'preview' = 面板预览(2026-07-23):插件经管子申请在右侧栏内置浏览器里打开
  * 一个网址标签页。网址范围装入时在 preview.hosts 白名单里定死(同 network
  * 域名白名单语法),运行期主机逐次校验,范围外一律拒——防钓鱼是结构性的。
+ * 'skill' = 捆绑 Agent Skills(2026-07-25):插件随包携带 SKILL.md 技能目录,
+ * 装入且启用后由主机链接进共享技能根 ~/.agents/skills/<id>--<name>(win32 用
+ * junction),Claude Code 与 Codex 都能发现。信任面与其它槽完全不同量级:技能
+ * 指令由主 Agent 以**用户全部权限**执行、对所有项目与会话生效、不受插件沙箱
+ * 约束,也不随"某工作目录停用本插件"而隐藏——仅全局停用/卸载才撤链。因此
+ * manifest 全声明式(items 的 name/description 必须与 SKILL.md frontmatter 逐字
+ * 一致,打包与装入双侧强制),装入确认框逐条列出并置于清单最上部。
  */
 export const GHOST_SLOTS = [
   'subscribe',
@@ -96,6 +105,7 @@ export const GHOST_SLOTS = [
   'session-context',
   'pick',
   'preview',
+  'skill',
 ] as const;
 export type GhostSlot = (typeof GHOST_SLOTS)[number];
 
@@ -319,12 +329,12 @@ export interface GhostPanelDecl {
   defaultFraction?: number;
   /**
    * 标准头系统按钮开关(2026-07-25):缺省全开,声明 false 逐个关闭。
-   * 当前一批:maximize =「撑满内容区」、detach =「在独立窗口中打开」。
-   * 标准头本体(标题条)恒由主机绘制、不可关——可配置的只是系统按钮;
-   * 'tab' 形态没有标准头,声明本字段拒装。未知键按规则 9 收词明确拒绝,
-   * 新按钮上线时在这里扩键。
+   * 当前一批:maximize =「撑满内容区」、detach =「在独立窗口中打开」、
+   * minimize =「最小化为浮动气泡」。标准头本体(标题条)恒由主机绘制、
+   * 不可关——可配置的只是系统按钮;'tab' 形态没有标准头,声明本字段拒装。
+   * 未知键按规则 9 收词明确拒绝,新按钮上线时在这里扩键。
    */
-  systemButtons?: { maximize?: boolean; detach?: boolean };
+  systemButtons?: { maximize?: boolean; detach?: boolean; minimize?: boolean };
 }
 
 /**
@@ -644,16 +654,16 @@ export const GHOST_SECRET_SOURCES = ['user', 'login-email', 'oauth'] as const;
 export type GhostSecretSource = (typeof GHOST_SECRET_SOURCES)[number];
 
 /**
- * 凭证收单(2026-07-13 两次定案,当天收敛):user 凭证的收单**一律**由意识
- * settingsHtml 自绘——经协议 `/secrets` 只写通道一次性入库,存入后意识拿不回
- * 明文,保管(safeStorage)与注入(主机代发时)由主机独占。安全模型弱化点
- * 仅一处:录入瞬间明文经过意识页面(用户主动敲进它的输入框),装入确认框
- * 如实告知。**宿主渲染凭证输入行已整体退役**(基座不再为意识特设凭证 UI,
- * Lizi 定案):清单里遗留的 `input: "ghost"` 接受并忽略(与现状同义),
- * `input: "host"` 直接拒绝;声明 user 凭证必须同时声明 settingsHtml。
+ * user 凭证有两条 Host 受控收单路径:
+ * - 调用前缺失时，Setup Runtime 根据本声明生成统一 inline_form；
+ * - 详情页由 settingsHtml 经 `/secrets` 只写通道长期管理、替换和清除。
+ *
+ * 两条路径都只把明文一次性交给 Main 保险库，插件运行时只能获得 Host 注入后的
+ * 请求，读不回原值。历史 `input` 字段仍退役：`input: "ghost"` 仅兼容接受并忽略，
+ * `input: "host"` 拒绝；当前仍要求 user 凭证同时声明 settingsHtml 作为管理入口。
  */
 
-/** 凭证声明:只有名字与说明——值由用户在该意识设置区填入主机保险库。 */
+/** 凭证声明：Host 用名字与说明生成 Setup 字段，值只写入主机保险库。 */
 export interface GhostSecretDecl {
   /** 凭证键(意识内唯一):小写字母开头,允许小写/数字/下划线,1–32。 */
   key: string;
@@ -751,6 +761,41 @@ export const GHOST_PREVIEW_LOOPBACK_HOSTS: ReadonlySet<string> = new Set([
   '[::1]',
 ]);
 
+/** skill 槽:单插件最多捆绑的 Agent Skill 数(范围越小越好,同 preview 精神)。 */
+export const GHOST_SKILL_MAX_ITEMS = 4;
+/** skill 槽:SKILL.md 单文件字节上限。打包与装入两侧共用,避免契约漂移。 */
+export const GHOST_SKILL_MD_MAX_BYTES = 64 * 1024;
+/** skill 槽:技能 name 长度上限(链接目录名的一半,克制)。 */
+export const GHOST_SKILL_NAME_MAX_CHARS = 64;
+/**
+ * skill 槽:技能 name 形状——小写字母/数字,连字符仅作单段分隔(禁首尾与连续
+ * 连字符)。比 learn-host 的 SKILL_NAME_RE 更严:意识 id 允许含 `--`
+ * (GHOST_ID_RE),共享技能根的链接名是 `<id>--<name>`,只有 name 侧禁 `--`,
+ * 按"最后一个 `--`"拆分才唯一,不同插件才不可能撞出同一个链接名。
+ */
+export const GHOST_SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/** skill 槽单条技能声明(全声明式:确认框展示的就是这里的字段)。 */
+export interface GhostSkillItem {
+  /** 包内技能目录(安全相对路径,目录内必须有 SKILL.md)。 */
+  dir: string;
+  /**
+   * 技能名。必须与 SKILL.md frontmatter 的 name 逐字一致(打包与装入双侧
+   * 强制)——确认框里用户看到的,必须就是 Agent 实际读到的。
+   */
+  name: string;
+  /** 技能说明。必须与 SKILL.md frontmatter 的 description 逐字一致(同上)。 */
+  description: string;
+}
+
+/**
+ * skill 槽详单(与 slots 含 'skill' 严格成对——有槽必有详单:捆绑了什么技能
+ * 是本能力的全部知情面,不允许"先装后说")。装入确认框逐条展示。
+ */
+export interface GhostSkillNeeds {
+  items: GhostSkillItem[];
+}
+
 /**
  * preview 槽运行期 URL 守门(纯函数,主机侧调用):
  * - 只收 https;http 仅放行 loopback(localhost / 127.0.0.1 / [::1])——本地
@@ -823,6 +868,19 @@ export const GHOST_NETWORK_FORBIDDEN_INJECT_HEADERS: readonly string[] = [
 export const GHOST_SETUP_MAX_GROUPS = 8;
 /** 每个需求组内 anyOf 条目上限。 */
 export const GHOST_SETUP_MAX_ITEMS_PER_GROUP = 8;
+/** 一张 setup 卡最多需要覆盖 manifest 合法声明的全部可操作条目。 */
+export const GHOST_SETUP_MAX_STEPS =
+  GHOST_SETUP_MAX_GROUPS * GHOST_SETUP_MAX_ITEMS_PER_GROUP;
+/**
+ * Host-owned setup providers may append requirements that do not exist in the
+ * plugin manifest (for example, a shared client capability). Reserve a bounded
+ * number of steps for those Core-owned requirements so a maximally valid
+ * manifest still crosses the Main → Renderer interaction boundary intact.
+ */
+export const GHOST_SETUP_MAX_HOST_STEPS = 8;
+/** setup interaction/plan transport capacity, including Host-owned steps. */
+export const GHOST_SETUP_MAX_INTERACTION_STEPS =
+  GHOST_SETUP_MAX_STEPS + GHOST_SETUP_MAX_HOST_STEPS;
 /** setup kv 引用的键名形状(意识 /kv 顶层键;点号仅作普通字符,不做路径下钻)。 */
 export const GHOST_SETUP_KV_KEY_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 
@@ -867,6 +925,140 @@ export interface GhostSetupStatus {
   reauth: GhostSetupStatusItem[];
 }
 
+/** Setup Runtime 暴露给 Agent / Renderer 的需求类型；不包含任何配置值。 */
+export type GhostSetupRequirementKind =
+  | 'oauth'
+  | 'secret'
+  | 'connection'
+  | 'plugin_config'
+  | 'client_config';
+
+/** Host 对单条 requirement 的权威判定。 */
+export type GhostSetupRequirementState = 'missing' | 'expired' | 'satisfied';
+
+/** Setup Runtime 允许 Agent 选择、但只能由 Host 执行的动作。 */
+export type GhostSetupActionKind =
+  | 'oauth_connect'
+  | 'open_plugin_settings'
+  | 'manage_connection'
+  | 'open_client_settings'
+  | 'inline_form';
+
+/** Secret 输入沿用 /secrets 的字符上限；值本身永远不进入 Shared DTO。 */
+export const GHOST_SECRET_VALUE_MAX_CHARS = 4096;
+
+export interface GhostSetupInlineSecretField {
+  /** v1 只支持单字段，固定 id 防止 Renderer/Agent 构造任意存储键。 */
+  id: 'value';
+  type: 'secret';
+  label: string;
+  description?: string;
+  placeholder?: string;
+  /**
+   * Host 从 manifest 的 network.secrets[].url 生成的辅助入口。
+   * 仅供可信 Desktop UI 展示；MCP 边界会剥离，Agent 不能提供或改写 URL。
+   */
+  externalLink?: {
+    url: string;
+  };
+  required: true;
+  maxLength: number;
+}
+
+export type GhostSetupAllowedAction =
+  | {
+      /** Host 生成的动作引用；执行时必须按最新 assessment 再校验，不能直接当执行参数。 */
+      id: string;
+      kind: Exclude<GhostSetupActionKind, 'inline_form'>;
+    }
+  | {
+      /** Host 生成的散列动作引用；不编码或暴露 Secret storage key。 */
+      id: string;
+      kind: 'inline_form';
+      form: {
+        /** v1 仅支持一个 Secret 字段。 */
+        fields: [GhostSetupInlineSecretField];
+      };
+    };
+
+export interface GhostSetupAssessmentItem {
+  /** requirement 的稳定关联引用；不携带配置值，也不是可执行能力。 */
+  ref: string;
+  kind: GhostSetupRequirementKind;
+  label: string;
+  description?: string;
+  state: GhostSetupRequirementState;
+  actions: GhostSetupAllowedAction[];
+}
+
+export interface GhostSetupAssessmentGroup {
+  id: string;
+  mode: 'any_of';
+  items: GhostSetupAssessmentItem[];
+}
+
+/**
+ * Setup Runtime 的完整判定结果。groups 之间 all-of，组内 any-of；
+ * revision 由 Host 变更总线维护，用于丢弃过期卡片更新。
+ */
+export interface GhostSetupAssessment {
+  state: 'ready' | 'required';
+  revision: number;
+  groups: GhostSetupAssessmentGroup[];
+}
+
+/** Agent 可选提供的展示编排；身份、Action 和完成状态仍由 Host 决定。 */
+export interface GhostSetupPlan {
+  assessmentRevision: number;
+  intro?: string;
+  steps: Array<{
+    id: string;
+    requirementRefs: string[];
+    title: string;
+    description: string;
+    actionId: string;
+  }>;
+}
+
+export type GhostSetupStepPhase =
+  | 'pending'
+  | 'action_running'
+  | 'waiting_external'
+  | 'verifying'
+  | 'satisfied'
+  | 'failed'
+  | 'cancelled';
+
+/**
+ * Setup 卡片跨进程／跨设备传输的稳定错误码。
+ *
+ * Main 可以保留内部错误详情用于诊断，但 interaction snapshot 只携带这些
+ * 与 locale 无关的 code；每个 Renderer 按自己的语言映射可操作文案。
+ */
+export const GHOST_SETUP_ERROR_CODES = [
+  'ACTION_FAILED',
+  'ACTION_STALE',
+  'AUTH_CANCELLED',
+  'AUTH_FAILED',
+  'INLINE_INVALID',
+  'INLINE_UNAVAILABLE',
+  'SAVE_FAILED',
+  'WINDOW_CLOSED',
+  'TARGET_UNAVAILABLE',
+  'ASSESSMENT_FAILED',
+  'TIMEOUT',
+] as const;
+
+export type GhostSetupErrorCode = (typeof GHOST_SETUP_ERROR_CODES)[number];
+
+/** 不可信 interaction payload 的稳定 Setup 错误码守卫。 */
+export function isGhostSetupErrorCode(value: unknown): value is GhostSetupErrorCode {
+  return (
+    typeof value === 'string' &&
+    (GHOST_SETUP_ERROR_CODES as readonly string[]).includes(value)
+  );
+}
+
 /** ghost.json 清单(不变量由 validateGhostManifest 保证)。 */
 export interface GhostManifest {
   /** 清单格式版本,恒 2(v1 声明型已于 2026-07-12 移除,无存量不留兼容)。 */
@@ -879,6 +1071,16 @@ export interface GhostManifest {
   version: string;
   /** 作者展示名(仅展示用)。 */
   author?: string;
+  /**
+   * 本地化资源路径。声明后必须至少提供英文；宿主按当前应用语言读取，
+   * 当前语言未提供时固定回退英文。路径均位于插件安装目录内。
+   */
+  locales?: Partial<Record<SupportedLocale, string>> & { en: string };
+  /**
+   * 宿主解析清单后附加的当前语言，只用于运行时视图与 webview 刷新。
+   * 不属于 ghost.json 作者字段；validateGhostManifest 会忽略包内同名输入。
+   */
+  resolvedLocale?: SupportedLocale;
   /**
    * 意识自我介绍(1–300 字,仅展示用):这段意识是干嘛
    * 的、给谁用。装入确认框与详情页展示;与 tools[].description(给 AI 看的
@@ -914,8 +1116,9 @@ export interface GhostManifest {
   /**
    * 设置页「自定义设置区」界面入口(可选;安装目录内相对路径,意识自绘)。
    * 与面板同款沙箱 webview 渲染(零桥、分区断网、CSP 'self'),主题 token
-   * 由主机灌入。凭证输入**不**走这里(必须 network.secrets 声明、主机渲染,
-   * 意识摸不到明文);自定义参数持久化走同源 `fetch('/kv')`。
+   * 由主机灌入。调用前缺失的 user Secret 可由 Host Setup 卡收单；详情页仍可
+   * 通过同源只写 `/secrets` 管理、替换和清除。自定义参数持久化走 `/kv`，
+   * Secret 不得写入 `/kv`。
    */
   settingsHtml?: string;
   /**
@@ -955,6 +1158,12 @@ export interface GhostManifest {
    */
   preview?: GhostPreviewNeeds;
   /**
+   * skill 槽详单(与 slots 含 'skill' 严格成对):随包捆绑的 Agent Skills 清单。
+   * 启用时主机链接进共享技能根,Claude Code 与 Codex 双端可见;字段不参与
+   * 本地化(必须与 SKILL.md 逐字一致,见 GhostSkillItem)。
+   */
+  skill?: GhostSkillNeeds;
+  /**
    * 就绪声明(使用前置检查,见 GhostSetupDecl 块注释):作者声明「用之前
    * 必须配好什么」,宿主点「使用」时确定性检查并引导配置。缺省 = 启发式
    * (声明过凭证/连接的意识任一项就绪即 ready)。
@@ -976,6 +1185,35 @@ export interface GhostManifest {
   /** 面板声明;没有面板的意识(如纯工具意识)可省略。 */
   panel?: GhostPanelDecl;
 }
+
+/**
+ * 单个插件 locale 文件的 manifest 文案。协议键、工具名和参数名不翻译；
+ * tools 以稳定 tool name 对齐，避免数组顺序变化导致翻译错位。
+ */
+export interface GhostManifestLocaleResource {
+  name: string;
+  description?: string;
+  whenToUse?: string;
+  tools?: Record<string, {
+    description: string;
+    /** JSON Pointer → 该参数 schema 节点已有的 title / description 翻译。 */
+    parameters?: Record<string, { title?: string; description?: string }>;
+  }>;
+  panel?: { title: string };
+  network?: {
+    secrets?: Record<string, { label: string; hint?: string }>;
+    connections?: Record<string, { label: string; hint?: string }>;
+  };
+  node?: {
+    secretBindings?: Record<string, { label: string; hint?: string }>;
+  };
+  setup?: {
+    kv?: Record<string, { label: string }>;
+  };
+}
+
+/** 单个插件 locale JSON 的字节上限。Forge 与装入侧共用，避免两端契约漂移。 */
+export const GHOST_LOCALE_MAX_BYTES = 64 * 1024;
 
 /** 已装入主机的意识(清单 + 安装位置 + 启用态)。 */
 export interface InstalledGhost {
@@ -1042,6 +1280,8 @@ export function ghostContentKeys(manifest: GhostManifest): string[] {
     else if (slot === 'network') keys.push('slotNetwork');
     else if (slot === 'notify') keys.push('slotNotify');
     else if (slot === 'fs') keys.push('slotFs');
+    // skill 是信任面最高的内容(给主 Agent 灌指令),详情页必须如实露出。
+    else if (slot === 'skill') keys.push('slotSkill');
     // 'panel' 槽已由 manifest.panel 覆盖,不重复
   }
   return keys;
@@ -1103,7 +1343,7 @@ export interface GhostPermissionItem {
   /** 稳定键:更新 diff 按它对齐(内容变化视为移除+新增,如面板换边)。 */
   key: string;
   /** 图标分组(renderer 按 kind 选图标)。 */
-  kind: 'cindy' | 'agent' | 'node' | 'tool' | 'command' | 'panel' | 'code' | 'subscribe' | 'card' | 'network' | 'notify' | 'fs' | 'session-context' | 'pick' | 'preview';
+  kind: 'cindy' | 'agent' | 'node' | 'tool' | 'command' | 'panel' | 'code' | 'subscribe' | 'card' | 'network' | 'notify' | 'fs' | 'session-context' | 'pick' | 'preview' | 'skill';
   /** i18n key 后缀,消费方拼 `settings.ghosts.perm.<labelKey>`。 */
   labelKey: string;
   /** i18n 插值参数(工具名、指令名、面板标题等)。 */
@@ -1206,6 +1446,20 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
         detailKey: 'nodeChildSpawnDetail',
       });
     }
+  }
+  // skill 槽:技能指令由主 Agent 以用户全部权限执行、全项目生效、不受沙箱
+  // 约束——信任面仅次于拦截钩子,逐条 unshift 到清单上部(倒序遍历保持声明
+  // 顺序)。key 用 name 稳定对齐更新 diff;detail = 作者声明的 description
+  // 原样展示(装入/打包校验已保证与 SKILL.md 逐字一致)。
+  for (const skillItem of [...(manifest.skill?.items ?? [])].reverse()) {
+    items.unshift({
+      key: `skill:${skillItem.name}`,
+      kind: 'skill',
+      labelKey: 'skill',
+      labelArgs: { name: skillItem.name },
+      detailKey: 'skillDetail',
+      detail: skillItem.description,
+    });
   }
   // 多连接声明:逐条列"可连接你添加的 <连接类型>"——地址是用户后来自己加的
   // (且每次新增都过主机受信确认弹窗),装入时只能告知形态,不能列出具体域名。
@@ -1397,11 +1651,27 @@ export function diffGhostPermissionItems(
   const nextItems = ghostPermissionItems(next);
   const prevKeys = new Set(prevItems.map((i) => i.key));
   const nextKeys = new Set(nextItems.map((i) => i.key));
-  return {
-    added: nextItems.filter((i) => !prevKeys.has(i.key)),
-    removed: prevItems.filter((i) => !nextKeys.has(i.key)),
-    unchanged: nextItems.filter((i) => prevKeys.has(i.key)),
-  };
+  const prevDetailByKey = new Map(prevItems.map((i) => [i.key, i.detail ?? '']));
+  const added: GhostPermissionItem[] = [];
+  const removed: GhostPermissionItem[] = [];
+  const unchanged: GhostPermissionItem[] = [];
+  for (const item of nextItems) {
+    if (!prevKeys.has(item.key)) {
+      added.push(item);
+    } else if ((item.detail ?? '') !== prevDetailByKey.get(item.key)) {
+      added.push(item);
+    } else {
+      unchanged.push(item);
+    }
+  }
+  for (const item of prevItems) {
+    if (!nextKeys.has(item.key)) {
+      removed.push(item);
+    } else if ((item.detail ?? '') !== (nextItems.find((n) => n.key === item.key)?.detail ?? '')) {
+      removed.push(item);
+    }
+  }
+  return { added, removed, unchanged };
 }
 
 /**
@@ -1493,6 +1763,514 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+/** 当前宿主语言在插件未提供时固定回退英文。 */
+export function ghostLocalePathFor(
+  manifest: GhostManifest,
+  locale: string | undefined | null,
+): string | null {
+  if (!manifest.locales) return null;
+  const supported = (SUPPORTED_LOCALES as readonly string[]).includes(locale ?? '')
+    ? locale as SupportedLocale
+    : DEFAULT_LOCALE;
+  return manifest.locales[supported] ?? manifest.locales[DEFAULT_LOCALE] ?? null;
+}
+
+/** 把当前宿主语言附到运行时清单视图；不支持的输入固定归一到英文。 */
+export function withGhostResolvedLocale(
+  manifest: GhostManifest,
+  locale: string | undefined | null,
+): GhostManifest {
+  const resolvedLocale = (SUPPORTED_LOCALES as readonly string[]).includes(locale ?? '')
+    ? locale as SupportedLocale
+    : DEFAULT_LOCALE;
+  return { ...manifest, resolvedLocale };
+}
+
+type GhostSchemaLocaleText = { title?: string; description?: string };
+type GhostSchemaLocaleShape = { title: boolean; description: boolean };
+
+const GHOST_SCHEMA_MAP_KEYWORDS = [
+  'properties', 'patternProperties', '$defs', 'definitions', 'dependentSchemas',
+] as const;
+const GHOST_SCHEMA_SINGLE_KEYWORDS = [
+  'additionalProperties', 'unevaluatedProperties', 'propertyNames', 'items',
+  'contains', 'not', 'if', 'then', 'else',
+] as const;
+const GHOST_SCHEMA_ARRAY_KEYWORDS = ['allOf', 'anyOf', 'oneOf', 'prefixItems'] as const;
+
+function ghostJsonPointerChild(pointer: string, segment: string | number): string {
+  const escaped = String(segment).replace(/~/g, '~0').replace(/\//g, '~1');
+  return `${pointer}/${escaped}`;
+}
+
+/** 收集 JSON Schema 节点中已有的 title / description，以 JSON Pointer 稳定寻址。 */
+function collectGhostSchemaLocaleShape(
+  schema: unknown,
+  pointer = '',
+  result: Record<string, GhostSchemaLocaleShape> = {},
+): Record<string, GhostSchemaLocaleShape> {
+  if (!isPlainObject(schema)) return result;
+  const title = typeof schema.title === 'string';
+  const description = typeof schema.description === 'string';
+  if (title || description) result[pointer] = { title, description };
+  for (const keyword of GHOST_SCHEMA_MAP_KEYWORDS) {
+    const children = schema[keyword];
+    if (!isPlainObject(children)) continue;
+    for (const [key, child] of Object.entries(children)) {
+      collectGhostSchemaLocaleShape(child, ghostJsonPointerChild(ghostJsonPointerChild(pointer, keyword), key), result);
+    }
+  }
+  for (const keyword of GHOST_SCHEMA_SINGLE_KEYWORDS) {
+    collectGhostSchemaLocaleShape(schema[keyword], ghostJsonPointerChild(pointer, keyword), result);
+  }
+  for (const keyword of GHOST_SCHEMA_ARRAY_KEYWORDS) {
+    const children = schema[keyword];
+    if (!Array.isArray(children)) continue;
+    children.forEach((child, index) => {
+      collectGhostSchemaLocaleShape(child, ghostJsonPointerChild(ghostJsonPointerChild(pointer, keyword), index), result);
+    });
+  }
+  return result;
+}
+
+function resolveGhostSchemaLocale(
+  schema: Record<string, unknown>,
+  localized: Record<string, GhostSchemaLocaleText>,
+  pointer = '',
+): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...schema };
+  const text = localized[pointer];
+  if (text?.title !== undefined) result.title = text.title;
+  if (text?.description !== undefined) result.description = text.description;
+  for (const keyword of GHOST_SCHEMA_MAP_KEYWORDS) {
+    const children = schema[keyword];
+    if (!isPlainObject(children)) continue;
+    result[keyword] = Object.fromEntries(
+      Object.entries(children).map(([key, child]) => [
+        key,
+        isPlainObject(child)
+          ? resolveGhostSchemaLocale(
+              child,
+              localized,
+              ghostJsonPointerChild(ghostJsonPointerChild(pointer, keyword), key),
+            )
+          : child,
+      ]),
+    );
+  }
+  for (const keyword of GHOST_SCHEMA_SINGLE_KEYWORDS) {
+    const child = schema[keyword];
+    if (!isPlainObject(child)) continue;
+    result[keyword] = resolveGhostSchemaLocale(child, localized, ghostJsonPointerChild(pointer, keyword));
+  }
+  for (const keyword of GHOST_SCHEMA_ARRAY_KEYWORDS) {
+    const children = schema[keyword];
+    if (!Array.isArray(children)) continue;
+    result[keyword] = children.map((child, index) => (
+      isPlainObject(child)
+        ? resolveGhostSchemaLocale(
+            child,
+            localized,
+            ghostJsonPointerChild(ghostJsonPointerChild(pointer, keyword), index),
+          )
+        : child
+    ));
+  }
+  return result;
+}
+
+/**
+ * 校验 locale 文件，并要求它完整覆盖原 manifest 已声明的可本地化字段。
+ * 缺译拒装，避免支持语言中静默混入另一种语言。
+ */
+export function validateGhostManifestLocaleResource(
+  raw: unknown,
+  manifest: GhostManifest,
+): { ok: true; resource: GhostManifestLocaleResource } | { ok: false; reason: string } {
+  if (!isPlainObject(raw)) return { ok: false, reason: 'locale 文件必须是对象' };
+  const allowedTopLevelFields = new Set([
+    'name', 'description', 'whenToUse', 'tools', 'panel', 'network', 'node', 'setup',
+  ]);
+  const unknownTopLevelField = Object.keys(raw).find((field) => !allowedTopLevelFields.has(field));
+  if (unknownTopLevelField) {
+    return { ok: false, reason: `locale 含未知字段 ${JSON.stringify(unknownTopLevelField)}` };
+  }
+  if (typeof raw.name !== 'string' || raw.name.trim().length === 0 || raw.name.length > 64) {
+    return { ok: false, reason: 'locale.name 必须是 1–64 字符的非空字符串' };
+  }
+  const optionalText = (
+    field: 'description' | 'whenToUse',
+    max: number,
+  ): string | undefined | { error: string } => {
+    const expected = manifest[field] !== undefined;
+    const value = raw[field];
+    if (!expected) {
+      if (value !== undefined) return { error: `locale.${field} 不应存在：原 manifest 未声明该字段` };
+      return undefined;
+    }
+    if (typeof value !== 'string' || value.trim().length === 0 || value.length > max) {
+      return { error: `locale.${field} 必须是 1–${max} 字符的非空字符串` };
+    }
+    return value;
+  };
+  const description = optionalText('description', 300);
+  if (isPlainObject(description) && typeof description.error === 'string') {
+    return { ok: false, reason: description.error };
+  }
+  const whenToUse = optionalText('whenToUse', 300);
+  if (isPlainObject(whenToUse) && typeof whenToUse.error === 'string') {
+    return { ok: false, reason: whenToUse.error };
+  }
+
+  let tools: GhostManifestLocaleResource['tools'];
+  if (manifest.tools !== undefined) {
+    if (!isPlainObject(raw.tools)) {
+      return { ok: false, reason: 'locale.tools 必须按 tool name 提供完整对象' };
+    }
+    const expectedNames = new Set(manifest.tools.map((tool) => tool.name));
+    const actualNames = Object.keys(raw.tools);
+    const unknown = actualNames.find((name) => !expectedNames.has(name));
+    if (unknown) return { ok: false, reason: `locale.tools 含未知工具 ${JSON.stringify(unknown)}` };
+    tools = {};
+    for (const tool of manifest.tools) {
+      const localized = raw.tools[tool.name];
+      if (!isPlainObject(localized)) {
+        return { ok: false, reason: `locale.tools 缺少 ${JSON.stringify(tool.name)}` };
+      }
+      const unknownToolField = Object.keys(localized).find(
+        (field) => field !== 'description' && field !== 'parameters',
+      );
+      if (unknownToolField) {
+        return {
+          ok: false,
+          reason: `locale.tools[${JSON.stringify(tool.name)}] 含未知字段 ${JSON.stringify(unknownToolField)}`,
+        };
+      }
+      if (
+        typeof localized.description !== 'string' ||
+        localized.description.trim().length === 0 ||
+        localized.description.length > 1024
+      ) {
+        return {
+          ok: false,
+          reason: `locale.tools[${JSON.stringify(tool.name)}].description 必须是 1–1024 字符的非空字符串`,
+        };
+      }
+      const parameterShape = collectGhostSchemaLocaleShape(tool.parameters);
+      const parameterPointers = Object.keys(parameterShape);
+      let parameters: Record<string, GhostSchemaLocaleText> | undefined;
+      if (parameterPointers.length > 0) {
+        if (!isPlainObject(localized.parameters)) {
+          return {
+            ok: false,
+            reason: `locale.tools[${JSON.stringify(tool.name)}].parameters 必须按 JSON Pointer 完整提供参数文案`,
+          };
+        }
+        const expectedPointers = new Set(parameterPointers);
+        const unknownPointer = Object.keys(localized.parameters).find((pointer) => !expectedPointers.has(pointer));
+        if (unknownPointer) {
+          return {
+            ok: false,
+            reason: `locale.tools[${JSON.stringify(tool.name)}].parameters 含未知路径 ${JSON.stringify(unknownPointer)}`,
+          };
+        }
+        parameters = {};
+        for (const pointer of parameterPointers) {
+          const shape = parameterShape[pointer];
+          const localizedText = localized.parameters[pointer];
+          if (!isPlainObject(localizedText)) {
+            return {
+              ok: false,
+              reason: `locale.tools[${JSON.stringify(tool.name)}].parameters 缺少 ${JSON.stringify(pointer)}`,
+            };
+          }
+          const allowedFields = new Set([
+            ...(shape.title ? ['title'] : []),
+            ...(shape.description ? ['description'] : []),
+          ]);
+          const unknownField = Object.keys(localizedText).find((field) => !allowedFields.has(field));
+          if (unknownField) {
+            return {
+              ok: false,
+              reason: `locale.tools[${JSON.stringify(tool.name)}].parameters[${JSON.stringify(pointer)}] 含未知字段 ${JSON.stringify(unknownField)}`,
+            };
+          }
+          if (
+            shape.title &&
+            (typeof localizedText.title !== 'string' || localizedText.title.trim().length === 0 || localizedText.title.length > 256)
+          ) {
+            return {
+              ok: false,
+              reason: `locale.tools[${JSON.stringify(tool.name)}].parameters[${JSON.stringify(pointer)}].title 必须是 1–256 字符的非空字符串`,
+            };
+          }
+          if (
+            shape.description &&
+            (
+              typeof localizedText.description !== 'string' ||
+              localizedText.description.trim().length === 0 ||
+              localizedText.description.length > 1024
+            )
+          ) {
+            return {
+              ok: false,
+              reason: `locale.tools[${JSON.stringify(tool.name)}].parameters[${JSON.stringify(pointer)}].description 必须是 1–1024 字符的非空字符串`,
+            };
+          }
+          parameters[pointer] = {
+            ...(typeof localizedText.title === 'string' ? { title: localizedText.title } : {}),
+            ...(typeof localizedText.description === 'string' ? { description: localizedText.description } : {}),
+          };
+        }
+      } else if (localized.parameters !== undefined) {
+        return {
+          ok: false,
+          reason: `locale.tools[${JSON.stringify(tool.name)}].parameters 不应存在：原参数 schema 没有 title / description`,
+        };
+      }
+      tools[tool.name] = {
+        description: localized.description,
+        ...(parameters !== undefined ? { parameters } : {}),
+      };
+    }
+  } else if (raw.tools !== undefined) {
+    return { ok: false, reason: 'locale.tools 不应存在：原 manifest 未声明工具' };
+  }
+
+  let panel: GhostManifestLocaleResource['panel'];
+  if (manifest.panel?.title !== undefined) {
+    if (!isPlainObject(raw.panel)) {
+      return { ok: false, reason: 'locale.panel 必须提供 panel.title' };
+    }
+    const unknownPanelField = Object.keys(raw.panel).find((field) => field !== 'title');
+    if (unknownPanelField) {
+      return { ok: false, reason: `locale.panel 含未知字段 ${JSON.stringify(unknownPanelField)}` };
+    }
+    if (typeof raw.panel.title !== 'string' || raw.panel.title.trim().length === 0 || raw.panel.title.length > 64) {
+      return { ok: false, reason: 'locale.panel.title 必须是 1–64 字符的非空字符串' };
+    }
+    panel = { title: raw.panel.title };
+  } else if (raw.panel !== undefined) {
+    return { ok: false, reason: 'locale.panel 不应存在：原 manifest 未声明 panel.title' };
+  }
+
+  const validateLocalizedLabels = (
+    rawValue: unknown,
+    fieldPath: string,
+    declarations: ReadonlyArray<{ key: string; hint?: string }>,
+  ): { ok: true; labels?: Record<string, { label: string; hint?: string }> } | { ok: false; reason: string } => {
+    if (declarations.length === 0) {
+      if (rawValue !== undefined) {
+        return { ok: false, reason: `${fieldPath} 不应存在：原 manifest 未声明对应项目` };
+      }
+      return { ok: true };
+    }
+    if (!isPlainObject(rawValue)) {
+      return { ok: false, reason: `${fieldPath} 必须按稳定 key 提供完整对象` };
+    }
+    const expectedKeys = new Set(declarations.map((declaration) => declaration.key));
+    const unknownKey = Object.keys(rawValue).find((key) => !expectedKeys.has(key));
+    if (unknownKey) {
+      return { ok: false, reason: `${fieldPath} 含未知 key ${JSON.stringify(unknownKey)}` };
+    }
+    const labels: Record<string, { label: string; hint?: string }> = {};
+    for (const declaration of declarations) {
+      const localized = rawValue[declaration.key];
+      if (!isPlainObject(localized)) {
+        return { ok: false, reason: `${fieldPath} 缺少 ${JSON.stringify(declaration.key)}` };
+      }
+      const allowedFields = declaration.hint !== undefined ? new Set(['label', 'hint']) : new Set(['label']);
+      const unknownField = Object.keys(localized).find((field) => !allowedFields.has(field));
+      if (unknownField) {
+        return {
+          ok: false,
+          reason: `${fieldPath}[${JSON.stringify(declaration.key)}] 含未知字段 ${JSON.stringify(unknownField)}`,
+        };
+      }
+      if (typeof localized.label !== 'string' || localized.label.trim().length === 0 || localized.label.length > 64) {
+        return {
+          ok: false,
+          reason: `${fieldPath}[${JSON.stringify(declaration.key)}].label 必须是 1–64 字符的非空字符串`,
+        };
+      }
+      if (
+        declaration.hint !== undefined &&
+        (typeof localized.hint !== 'string' || localized.hint.trim().length === 0 || localized.hint.length > 200)
+      ) {
+        return {
+          ok: false,
+          reason: `${fieldPath}[${JSON.stringify(declaration.key)}].hint 必须是 1–200 字符的非空字符串`,
+        };
+      }
+      labels[declaration.key] = {
+        label: localized.label,
+        ...(typeof localized.hint === 'string' ? { hint: localized.hint } : {}),
+      };
+    }
+    return { ok: true, labels };
+  };
+
+  const secretDecls = manifest.network?.secrets ?? [];
+  const connectionDecls = manifest.network?.connections ?? [];
+  let network: GhostManifestLocaleResource['network'];
+  if (secretDecls.length > 0 || connectionDecls.length > 0) {
+    if (!isPlainObject(raw.network)) {
+      return { ok: false, reason: 'locale.network 必须完整覆盖凭证与连接展示文案' };
+    }
+    const unknownNetworkField = Object.keys(raw.network).find(
+      (field) => field !== 'secrets' && field !== 'connections',
+    );
+    if (unknownNetworkField) {
+      return { ok: false, reason: `locale.network 含未知字段 ${JSON.stringify(unknownNetworkField)}` };
+    }
+    const secrets = validateLocalizedLabels(raw.network.secrets, 'locale.network.secrets', secretDecls);
+    if (!secrets.ok) return secrets;
+    const connections = validateLocalizedLabels(raw.network.connections, 'locale.network.connections', connectionDecls);
+    if (!connections.ok) return connections;
+    network = {
+      ...(secrets.labels !== undefined ? { secrets: secrets.labels } : {}),
+      ...(connections.labels !== undefined ? { connections: connections.labels } : {}),
+    };
+  } else if (raw.network !== undefined) {
+    return { ok: false, reason: 'locale.network 不应存在：原 manifest 未声明凭证或连接' };
+  }
+
+  const nodeSecretDecls = manifest.node?.secretBindings ?? [];
+  let node: GhostManifestLocaleResource['node'];
+  if (nodeSecretDecls.length > 0) {
+    if (!isPlainObject(raw.node)) {
+      return { ok: false, reason: 'locale.node 必须完整覆盖 Node 凭证展示文案' };
+    }
+    const unknownNodeField = Object.keys(raw.node).find((field) => field !== 'secretBindings');
+    if (unknownNodeField) {
+      return { ok: false, reason: `locale.node 含未知字段 ${JSON.stringify(unknownNodeField)}` };
+    }
+    const secretBindings = validateLocalizedLabels(
+      raw.node.secretBindings,
+      'locale.node.secretBindings',
+      nodeSecretDecls,
+    );
+    if (!secretBindings.ok) return secretBindings;
+    node = { secretBindings: secretBindings.labels! };
+  } else if (raw.node !== undefined) {
+    return { ok: false, reason: 'locale.node 不应存在：原 manifest 未声明 node.secretBindings' };
+  }
+
+  const setupKvDecls = new Map<string, { key: string }>();
+  for (const group of manifest.setup?.requires ?? []) {
+    for (const requirement of group.anyOf) {
+      if (requirement.kind === 'kv') setupKvDecls.set(requirement.key, { key: requirement.key });
+    }
+  }
+  let setup: GhostManifestLocaleResource['setup'];
+  if (setupKvDecls.size > 0) {
+    if (!isPlainObject(raw.setup)) {
+      return { ok: false, reason: 'locale.setup 必须完整覆盖 setup kv 展示文案' };
+    }
+    const unknownSetupField = Object.keys(raw.setup).find((field) => field !== 'kv');
+    if (unknownSetupField) {
+      return { ok: false, reason: `locale.setup 含未知字段 ${JSON.stringify(unknownSetupField)}` };
+    }
+    const kv = validateLocalizedLabels(raw.setup.kv, 'locale.setup.kv', [...setupKvDecls.values()]);
+    if (!kv.ok) return kv;
+    setup = {
+      kv: Object.fromEntries(
+        Object.entries(kv.labels!).map(([key, localized]) => [key, { label: localized.label }]),
+      ),
+    };
+  } else if (raw.setup !== undefined) {
+    return { ok: false, reason: 'locale.setup 不应存在：原 manifest 未声明 setup kv 项' };
+  }
+
+  return {
+    ok: true,
+    resource: {
+      name: raw.name,
+      ...(typeof description === 'string' ? { description } : {}),
+      ...(typeof whenToUse === 'string' ? { whenToUse } : {}),
+      ...(tools !== undefined ? { tools } : {}),
+      ...(panel !== undefined ? { panel } : {}),
+      ...(network !== undefined ? { network } : {}),
+      ...(node !== undefined ? { node } : {}),
+      ...(setup !== undefined ? { setup } : {}),
+    },
+  };
+}
+
+/** 用已校验的 locale 资源生成宿主与 Agent 消费的本地化 manifest 视图。 */
+export function resolveGhostManifestLocale(
+  manifest: GhostManifest,
+  resource: GhostManifestLocaleResource,
+): GhostManifest {
+  return {
+    ...manifest,
+    name: resource.name,
+    ...(resource.description !== undefined ? { description: resource.description } : {}),
+    ...(resource.whenToUse !== undefined ? { whenToUse: resource.whenToUse } : {}),
+    ...(manifest.tools !== undefined && resource.tools !== undefined
+      ? {
+          tools: manifest.tools.map((tool) => ({
+            ...tool,
+            description: resource.tools![tool.name].description,
+            ...(tool.parameters !== undefined && resource.tools![tool.name].parameters !== undefined
+              ? { parameters: resolveGhostSchemaLocale(tool.parameters, resource.tools![tool.name].parameters!) }
+              : {}),
+          })),
+        }
+      : {}),
+    ...(manifest.panel !== undefined && resource.panel !== undefined
+      ? { panel: { ...manifest.panel, title: resource.panel.title } }
+      : {}),
+    ...(manifest.network !== undefined && resource.network !== undefined
+      ? {
+          network: {
+            ...manifest.network,
+            ...(manifest.network.secrets !== undefined && resource.network.secrets !== undefined
+              ? {
+                  secrets: manifest.network.secrets.map((secret) => ({
+                    ...secret,
+                    ...resource.network!.secrets![secret.key],
+                  })),
+                }
+              : {}),
+            ...(manifest.network.connections !== undefined && resource.network.connections !== undefined
+              ? {
+                  connections: manifest.network.connections.map((connection) => ({
+                    ...connection,
+                    ...resource.network!.connections![connection.key],
+                  })),
+                }
+              : {}),
+          },
+        }
+      : {}),
+    ...(manifest.node !== undefined && resource.node?.secretBindings !== undefined
+      ? {
+          node: {
+            ...manifest.node,
+            secretBindings: manifest.node.secretBindings?.map((binding) => ({
+              ...binding,
+              ...resource.node!.secretBindings![binding.key],
+            })),
+          },
+        }
+      : {}),
+    ...(manifest.setup !== undefined && resource.setup?.kv !== undefined
+      ? {
+          setup: {
+            requires: manifest.setup.requires.map((group) => ({
+              anyOf: group.anyOf.map((requirement) => (
+                requirement.kind === 'kv'
+                  ? { ...requirement, label: resource.setup!.kv![requirement.key].label }
+                  : requirement
+              )),
+            })),
+          },
+        }
+      : {}),
+  };
+}
+
 /**
  * 校验一份解析后的 ghost.json。宽进严出:忽略未知字段(向前兼容),
  * 已知字段全部严格检查;任何不合格都给出人类可读 reason。
@@ -1522,6 +2300,60 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
     (typeof raw.author !== 'string' || raw.author.trim().length === 0 || raw.author.length > 64)
   ) {
     return { ok: false, reason: 'author 必须是 1–64 字符的非空字符串' };
+  }
+  let locales: GhostManifest['locales'];
+  if (raw.locales !== undefined) {
+    if (!isPlainObject(raw.locales)) {
+      return { ok: false, reason: 'locales 必须是语言到 locale JSON 路径的对象' };
+    }
+    const unknownLocale = Object.keys(raw.locales).find(
+      (locale) => !(SUPPORTED_LOCALES as readonly string[]).includes(locale),
+    );
+    if (unknownLocale) {
+      return {
+        ok: false,
+        reason: `locales 含宿主不支持的语言 ${JSON.stringify(unknownLocale)}(可用:${SUPPORTED_LOCALES.join(' / ')})`,
+      };
+    }
+    if (raw.locales.en === undefined) {
+      return { ok: false, reason: 'locales 必须提供 en，作为所有不支持语言的固定回退' };
+    }
+    const normalized: Partial<Record<SupportedLocale, string>> = {};
+    const seenPaths = new Set<string>();
+    const nonLocalePaths = [
+      GHOST_MANIFEST_FILE,
+      raw.entry,
+      raw.icon,
+      raw.settingsHtml,
+      isPlainObject(raw.panel) ? raw.panel.html : undefined,
+      isPlainObject(raw.node) ? raw.node.entry : undefined,
+      ...(isPlainObject(raw.node) && Array.isArray(raw.node.entries) ? raw.node.entries : []),
+    ].filter((value): value is string => typeof value === 'string');
+    const nonLocalePathFolds = new Set(nonLocalePaths.map((value) => value.toLowerCase()));
+    for (const locale of SUPPORTED_LOCALES) {
+      const localePath = raw.locales[locale];
+      if (localePath === undefined) continue;
+      if (
+        typeof localePath !== 'string' ||
+        !isSafeGhostRelativePath(localePath) ||
+        !localePath.toLowerCase().endsWith('.json')
+      ) {
+        return { ok: false, reason: `locales.${locale} 必须是安装目录内以 .json 结尾的安全相对路径` };
+      }
+      const normalizedLocalePath = localePath.toLowerCase();
+      if (nonLocalePathFolds.has(normalizedLocalePath)) {
+        return {
+          ok: false,
+          reason: `locales.${locale} 路径 ${JSON.stringify(localePath)} 与插件其他声明文件大小写折叠后冲突`,
+        };
+      }
+      if (seenPaths.has(normalizedLocalePath)) {
+        return { ok: false, reason: `locales 含重复路径 ${JSON.stringify(localePath)}` };
+      }
+      seenPaths.add(normalizedLocalePath);
+      normalized[locale] = localePath;
+    }
+    locales = normalized as GhostManifest['locales'];
   }
   if (
     raw.description !== undefined &&
@@ -1580,7 +2412,7 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
         return { ok: false, reason: 'panel.systemButtons 必须是对象(如 { "maximize": false })' };
       }
       // 收词明确拒绝未知键(规则 9):新系统按钮上线时在白名单里扩键。
-      const knownButtons = ['maximize', 'detach'];
+      const knownButtons = ['maximize', 'detach', 'minimize'];
       for (const key of Object.keys(sb)) {
         if (!knownButtons.includes(key)) {
           return { ok: false, reason: `panel.systemButtons 只认 ${knownButtons.join(' / ')},未知键:${key}` };
@@ -1591,9 +2423,11 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
       }
       const maximize = (sb as Record<string, unknown>).maximize;
       const detach = (sb as Record<string, unknown>).detach;
+      const minimize = (sb as Record<string, unknown>).minimize;
       systemButtons = {
         ...(typeof maximize === 'boolean' ? { maximize } : {}),
         ...(typeof detach === 'boolean' ? { detach } : {}),
+        ...(typeof minimize === 'boolean' ? { minimize } : {}),
       };
     }
     let position: GhostPanelPosition | undefined;
@@ -2130,6 +2964,79 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
     return { ok: false, reason: 'slots 声明了 "preview" 但缺少 preview 详单(hosts 域名白名单必填)' };
   }
 
+  // skill 槽详单:与 slots 含 'skill' **严格成对**(有槽必有详单——捆绑了什么
+  // 技能是本能力的全部知情面)。name/description 与 SKILL.md 的逐字一致性在
+  // 打包(packGhostDir)与装入(GhostManager.parse)两侧另行强制,这里只管
+  // 声明本身的形状。name/dir 大小写折叠去重:win32 文件系统折叠大小写,
+  // 共享技能根的链接名不允许折叠后相撞。
+  let skill: GhostSkillNeeds | undefined;
+  if (raw.skill !== undefined) {
+    if (!isPlainObject(raw.skill)) {
+      return { ok: false, reason: 'skill 详单必须是对象(如 { "items": [{ "dir": "skills/foo", "name": "foo", "description": "..." }] })' };
+    }
+    if (!slots.includes('skill')) {
+      return { ok: false, reason: '声明了 skill 详单但 slots 未包含 "skill"' };
+    }
+    const skillRaw = raw.skill as Record<string, unknown>;
+    const unknownSkillField = Object.keys(skillRaw).find((key) => key !== 'items');
+    if (unknownSkillField !== undefined) {
+      return { ok: false, reason: `skill 含不允许的字段 ${JSON.stringify(unknownSkillField)}` };
+    }
+    if (!Array.isArray(skillRaw.items) || skillRaw.items.length === 0) {
+      return { ok: false, reason: 'skill.items 必须是非空数组(随包捆绑的技能清单)' };
+    }
+    if (skillRaw.items.length > GHOST_SKILL_MAX_ITEMS) {
+      return { ok: false, reason: `skill.items 最多 ${GHOST_SKILL_MAX_ITEMS} 条` };
+    }
+    const skillItems: GhostSkillItem[] = [];
+    const seenSkillNames = new Set<string>();
+    const seenSkillDirs = new Set<string>();
+    for (const item of skillRaw.items) {
+      if (!isPlainObject(item)) {
+        return { ok: false, reason: 'skill.items 每项必须是对象({ dir, name, description })' };
+      }
+      const itemRaw = item as Record<string, unknown>;
+      const unknownItemField = Object.keys(itemRaw).find(
+        (key) => key !== 'dir' && key !== 'name' && key !== 'description',
+      );
+      if (unknownItemField !== undefined) {
+        return { ok: false, reason: `skill.items 条目含不允许的字段 ${JSON.stringify(unknownItemField)}` };
+      }
+      if (!isSafeGhostRelativePath(itemRaw.dir)) {
+        return { ok: false, reason: `skill.items[].dir 必须是包内安全相对路径(如 "skills/foo"),得到 ${JSON.stringify(itemRaw.dir)}` };
+      }
+      if (
+        typeof itemRaw.name !== 'string' ||
+        itemRaw.name.length > GHOST_SKILL_NAME_MAX_CHARS ||
+        !GHOST_SKILL_NAME_RE.test(itemRaw.name)
+      ) {
+        return { ok: false, reason: `skill.items[].name 必须是小写字母/数字加单连字符分段(禁首尾/连续连字符)、长度 1–${GHOST_SKILL_NAME_MAX_CHARS},得到 ${JSON.stringify(itemRaw.name)}` };
+      }
+      if (
+        typeof itemRaw.description !== 'string' ||
+        itemRaw.description.trim().length === 0 ||
+        itemRaw.description.length > 1024
+      ) {
+        return { ok: false, reason: 'skill.items[].description 必须是 1–1024 字符的非空字符串' };
+      }
+      const nameFold = itemRaw.name.toLowerCase();
+      if (seenSkillNames.has(nameFold)) {
+        return { ok: false, reason: `skill.items 含重复 name ${JSON.stringify(itemRaw.name)}` };
+      }
+      seenSkillNames.add(nameFold);
+      const dirFold = itemRaw.dir.toLowerCase();
+      if (seenSkillDirs.has(dirFold)) {
+        return { ok: false, reason: `skill.items 含重复 dir ${JSON.stringify(itemRaw.dir)}` };
+      }
+      seenSkillDirs.add(dirFold);
+      skillItems.push({ dir: itemRaw.dir, name: itemRaw.name, description: itemRaw.description });
+    }
+    skill = { items: skillItems };
+  }
+  if (slots.includes('skill') && skill === undefined) {
+    return { ok: false, reason: 'slots 声明了 "skill" 但缺少 skill 详单(items 技能清单必填)' };
+  }
+
   // 订阅槽详单(卡槽①):与 slots 含 'subscribe' 成对(有详单必有槽;有槽
   // 无详单允许装入但零事件,同 cindy 语义)。硬规则:声明了 hooks(拦截)
   // 必须 launch:'resident'——要挡路就得常驻在场,每条消息等冷启动不可接受。
@@ -2260,13 +3167,13 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
           if (s.source === 'login-email') source = 'login-email';
           if (s.source === 'oauth') source = 'oauth';
         }
-        // 输入面字段已退役(2026-07-13 宿主凭证渲染整体退役):user 凭证
-        // 一律意识 settingsHtml 收单。遗留 `input: "ghost"` 接受并忽略
-        // (与现状同义、不落清单);其余值(含 'host')一律拒。
+        // 旧 input 字段已退役：Setup Runtime 直接从 Secret 声明生成 Host 表单，
+        // settingsHtml 继续提供详情页管理。遗留 `input: "ghost"` 接受并忽略
+        // (不落清单)；其余值(含 'host')一律拒。
         if (s.input !== undefined && s.input !== 'ghost') {
           return {
             ok: false,
-            reason: 'network.secrets[].input 已退役:宿主收单不存在,用户填写的凭证一律由意识 settingsHtml 收单(删掉 input 字段即可;唯一可接受的遗留值是 "ghost")',
+            reason: 'network.secrets[].input 已退役:Setup 表单直接从 Secret 声明生成,详情页由 settingsHtml 管理(删掉 input 字段即可;唯一可接受的遗留值是 "ghost")',
           };
         }
         // login-email:值取自主机登录态派生,用户不填、没有输入面,
@@ -2281,7 +3188,7 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
         if (!loginDerived && raw.settingsHtml === undefined) {
           return {
             ok: false,
-            reason: 'network.secrets 声明了用户填写的凭证时必须同时声明 settingsHtml(凭证由意识设置界面收单,没有界面就没人收单;宿主渲染输入行已退役)',
+            reason: 'network.secrets 声明了用户填写的凭证时必须同时声明 settingsHtml(调用前可由 Host Setup 卡收单,settingsHtml 仍是长期管理/替换/清除入口)',
           };
         }
         if (loginDerived && s.url !== undefined) {
@@ -2984,6 +3891,7 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
       version: raw.version,
       kind: 'chip',
       ...(raw.author !== undefined ? { author: raw.author as string } : {}),
+      ...(locales !== undefined ? { locales } : {}),
       ...(raw.description !== undefined ? { description: raw.description as string } : {}),
       ...(raw.whenToUse !== undefined ? { whenToUse: raw.whenToUse as string } : {}),
       ...(raw.icon !== undefined ? { icon: raw.icon as string } : {}),
@@ -3000,6 +3908,7 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
       ...(subscribe !== undefined ? { subscribe } : {}),
       ...(network !== undefined ? { network } : {}),
       ...(preview !== undefined ? { preview } : {}),
+      ...(skill !== undefined ? { skill } : {}),
       ...(setup !== undefined ? { setup } : {}),
       ...(raw.command !== undefined ? { command: raw.command as string } : {}),
       ...(keywords !== undefined ? { keywords } : {}),
@@ -3017,7 +3926,7 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
  *
  * 上行(电子脑 → 主机,cindy.send(payload) = ipcRenderer.invoke):
  *   - tool-result:交卷。
- *   - host-request:读取宿主公开上下文。目前只支持 app-context(region),
+ *   - host-request:读取宿主公开上下文。目前只支持 app-context(region + locale),
  *     无需声明卡槽、无用户数据与凭证内容。
  *   - cindy-request(旧名 model-request 兼容):cindy 槽代办(意识请 Cindy 本体干活;invoke 的返回值即结果,
  *     无需另配对)。gen_image / edit_image;须声明 'cindy' 卡槽与能力详单。
@@ -3183,38 +4092,56 @@ export type GhostPipeNodeResult =
  * session-context 槽注入到 tool-call args.session_context 的形态(主机铸造,
  * snake_case 与 dir_deposit / save_deposit 同风格)。
  *
- * workdir_is_local 是本注入的安全核心:只有主机能证明「该会话不是远程工作区
+ * workdir_is_local 是本注入的位置安全核心:只有主机能证明「该会话不是远程工作区
  * (sessions.remoteHostId 为空)」时才为 true;证明不了(远程会话 / 查无会话 /
  * 无 sessionId 语境)一律 false——插件此时**不得**把 workdir 当本机路径交给
  * Node 侧读写(fail closed,见 docs/dev-rules/plugin-security-and-authoring.md §6)。
+ * workdir_is_read_only 则由同一份会话 permission / plan 状态铸造;为 true 时
+ * 插件不得修改当前 workdir。证明不了会话状态时同样 fail closed 为 true。
  */
 export interface GhostSessionContextInjected {
   session_id: string | null;
   workdir: string | null;
   workdir_is_local: boolean;
+  workdir_is_read_only: boolean;
 }
 
 /**
  * session-context 注入体推导(纯函数;main 侧查会话快照后调用):
- * - 无 sessionId 语境 / 查无会话:回落 ALS workdir 且恒 workdir_is_local=false
- *   (证明不了就不许当本机路径,fail closed);
+ * - 无 sessionId 语境 / 查无会话:回落 ALS workdir,但恒 workdir_is_local=false
+ *   且 workdir_is_read_only=true(证明不了就不许当本机路径或修改,fail closed);
  * - 有快照:workdir 取会话真身,只有 remoteHostId 为空且 workdir 非空才算本地。
  */
 export function deriveGhostSessionContext(
   sessionId: string | null,
   fallbackWorkdir: string | null,
-  snapshot: { workingDir: string | null; remoteHostId: string | null } | null,
+  snapshot: {
+    workingDir: string | null;
+    remoteHostId: string | null;
+    workdirIsReadOnly: boolean;
+  } | null,
 ): GhostSessionContextInjected {
   if (!sessionId) {
-    return { session_id: null, workdir: fallbackWorkdir, workdir_is_local: false };
+    return {
+      session_id: null,
+      workdir: fallbackWorkdir,
+      workdir_is_local: false,
+      workdir_is_read_only: true,
+    };
   }
   if (!snapshot) {
-    return { session_id: sessionId, workdir: fallbackWorkdir, workdir_is_local: false };
+    return {
+      session_id: sessionId,
+      workdir: fallbackWorkdir,
+      workdir_is_local: false,
+      workdir_is_read_only: true,
+    };
   }
   return {
     session_id: sessionId,
     workdir: snapshot.workingDir,
     workdir_is_local: snapshot.remoteHostId === null && snapshot.workingDir !== null,
+    workdir_is_read_only: snapshot.workdirIsReadOnly,
   };
 }
 
@@ -3306,6 +4233,8 @@ export interface GhostAppContextResult {
   ok: true;
   context: {
     region: GhostAppRegion;
+    /** 当前宿主应用语言；插件只使用本值，不读取 navigator.language。 */
+    locale: SupportedLocale;
   };
 }
 

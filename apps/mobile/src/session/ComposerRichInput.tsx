@@ -362,6 +362,11 @@ export const ComposerRichInput = forwardRef<ComposerRichInputHandle, ComposerRic
         accessibilityHint={accessibilityHint}
         accessibilityLabel={accessibilityLabel}
         allowFileAccess={false}
+        // iOS 给 WKWebView 里的可编辑区域挂一条系统表单导航条(上一项 / 下一项 /
+        // 完成),iOS 26 起画成键盘上方的独立浮动胶囊。composer 只有这一个字段,
+        // 前后导航恒为禁用态,整条对用户没有任何价值却占掉一行。RN TextInput
+        // 没有这条,所以只有会话页这个富文本输入框会出现。
+        hideKeyboardAccessoryView
         javaScriptEnabled
         keyboardDisplayRequiresUserAction={false}
         onMessage={handleMessage}

@@ -436,6 +436,25 @@ describe('keep-alive microphone idle window', () => {
     expect(track.stopped).toBe(false);
   });
 
+  it('releases a direct capture stream on a power event', async () => {
+    const onInterrupted = vi.fn();
+    // fast activation off: this capture never touches the keep-alive session,
+    // so only the direct-engine registry can close it on suspend/lock.
+    const engine = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: false,
+      onInterrupted,
+    });
+    await engine.start();
+    expect(powerCallback).toBeDefined();
+
+    powerCallback?.({ reason: 'system_suspend' });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onInterrupted).toHaveBeenCalled();
+    expect(track.stopped).toBe(true);
+  });
+
   it('shares one startup between concurrent callers', async () => {
     let resolveStream: (value: unknown) => void = () => undefined;
     getUserMedia.mockImplementationOnce(() => new Promise((resolve) => {

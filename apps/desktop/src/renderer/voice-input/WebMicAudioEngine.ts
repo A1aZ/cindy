@@ -131,6 +131,20 @@ const DO_NOT_REBUILD_REASONS: ReadonlySet<string> = new Set([
  */
 let powerReleaseGeneration = 0;
 
+/**
+ * Engines capturing outside the keep-alive session (fast activation off, or a
+ * cold fallback). A power release only tears down the module-level keep-alive
+ * session, so without this registry those streams would keep the microphone —
+ * and the privacy indicator — open until the user comes back.
+ */
+const liveDirectCaptureEngines = new Set<WebMicAudioEngine>();
+
+function releaseDirectCaptureEngines(reason: string): void {
+  for (const engine of [...liveDirectCaptureEngines]) {
+    engine.releaseForPowerEvent(reason);
+  }
+}
+
 export function currentPowerReleaseGeneration(): number {
   return powerReleaseGeneration;
 }
@@ -385,6 +399,7 @@ function ensureKeepAlivePowerReleaseListener(): void {
   // so one lock event would fan out to N stale callbacks.
   keepAlivePowerReleaseUnsubscribe = subscribe((payload) => {
     powerReleaseGeneration += 1;
+    releaseDirectCaptureEngines(payload.reason);
     void disposeKeepAliveVoiceInputMicrophone(payload.reason);
   });
 }
@@ -1036,6 +1051,10 @@ export class WebMicAudioEngine {
     this.interrupted = false;
     this.ready = false;
     this.lastAudioFrameAt = Date.now();
+    // Also needed on this path: with fast activation off no keep-alive session
+    // is ever created, so this would otherwise be the only capture in the
+    // renderer and nothing would subscribe to power releases.
+    ensureKeepAlivePowerReleaseListener();
 
     const audio = buildMediaConstraints({
       deviceId: this.deviceId,
@@ -1116,6 +1135,7 @@ export class WebMicAudioEngine {
         sampleRate: this.context.sampleRate,
       });
       this.ready = true;
+      liveDirectCaptureEngines.add(this);
       this.startWatchdog();
       void this.playBenchmarkFixture(benchmarkFixture);
       return;
@@ -1133,10 +1153,23 @@ export class WebMicAudioEngine {
       sampleRate: this.context.sampleRate,
     });
     this.ready = true;
+    liveDirectCaptureEngines.add(this);
     this.startWatchdog();
   }
 
+  /**
+   * Suspend / lock reached us while capturing outside the keep-alive session.
+   * Interrupt the caller so it cancels its ASR run, then close the stream —
+   * the keep-alive release path cannot see this one.
+   */
+  releaseForPowerEvent(reason: string): void {
+    this.onStateChange?.('direct_capture_power_release', { reason });
+    this.interrupt('Microphone input stopped unexpectedly. Please try again.');
+    void this.stop();
+  }
+
   async stop(): Promise<void> {
+    liveDirectCaptureEngines.delete(this);
     this.stopped = true;
     this.ready = false;
     this.clearWatchdog();

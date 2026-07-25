@@ -79,16 +79,24 @@ function normalizeDocument(raw: unknown): ImDefaultSettingsDocument {
   //
   // Signals that root-level fields came from a v1 persisted file:
   //   1. providerId/model/effort at root — v2 never writes these at root.
-  //   2. Root agentKind/agents present without a user-written global — either
-  //      global is absent (pure v1 input) or root agentKind disagrees with
-  //      global.agentKind (v1 override merged over v2 defaults).
+  //   2. Root agentKind disagrees with global.agentKind — in v2 backward-compat
+  //      the root mirror always matches global; a v1 override diverges.
+  //   3. Root agents differs from global.agents — a v1 agents-only override
+  //      (user changed model/provider without switching agent) lands at root
+  //      while global retains defaults.
+  //   4. Root agentKind/agents present without any global — pure v1 input.
   const hasLegacyScalarOverrides =
     'providerId' in record || 'model' in record || 'effort' in record;
   const globalRecord = isRecord(record.global) ? record.global : null;
+  const rootAgentKindDiverges =
+    'agentKind' in record && globalRecord !== null &&
+    record.agentKind !== globalRecord.agentKind;
+  const rootAgentsDiverge =
+    'agents' in record && isRecord(record.agents) && globalRecord !== null &&
+    JSON.stringify(record.agents) !== JSON.stringify(globalRecord.agents);
   const hasLegacyAgentFields =
     ('agentKind' in record || 'agents' in record) &&
-    (globalRecord === null ||
-      ('agentKind' in record && record.agentKind !== globalRecord.agentKind));
+    (globalRecord === null || rootAgentKindDiverges || rootAgentsDiverge);
   const hasLegacyRootSettings = hasLegacyScalarOverrides || hasLegacyAgentFields;
 
   // Before schema v2 there was one flat route shared by every IM channel.

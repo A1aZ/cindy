@@ -227,6 +227,19 @@ describe('im default settings store', () => {
     expect(migrated2.global.agentKind).toBe('codex');
     expect(migrated2.channels.feishu.agentKind).toBe('codex');
     expect(migrated2.channels.discord.agentKind).toBe('codex');
+
+    // Case 3: v1 file with only agents (user changed model/provider, kept default agent)
+    const v1AgentsOnly = {
+      agents: {
+        'claude-code': { providerId: 'anthropic', model: 'claude-sonnet-4-8', effort: 'high' },
+      },
+    };
+    const merged3 = { ...v2Defaults, ...v1AgentsOnly };
+    const migrated3 = __testing.normalizeDocument(merged3);
+    expect(migrated3.global.agents['claude-code'].model).toBe('claude-sonnet-4-8');
+    expect(migrated3.global.agents['claude-code'].providerId).toBe('anthropic');
+    expect(migrated3.channels.feishu.agents['claude-code'].model).toBe('claude-sonnet-4-8');
+    expect(migrated3.channels.slack.agents['claude-code'].model).toBe('claude-sonnet-4-8');
   });
 
   it('writes and resets one channel without changing another channel', () => {

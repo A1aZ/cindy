@@ -124,7 +124,7 @@ async function resolveNewSessionConfig(
 
   const resolved = resolveHookSessionConfig(
     {
-      readDefaults: () => readImDefaultSettings(),
+      readDefaults: () => readImDefaultSettings('slack'),
       getModels: (agentKind) =>
         providers
           ? visibleModelUnion(providers, agentKind, (providerId, model) =>

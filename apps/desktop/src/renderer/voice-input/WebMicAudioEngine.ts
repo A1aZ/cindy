@@ -1199,14 +1199,6 @@ export class WebMicAudioEngine {
   }
 
   /**
-   * Final gate before this engine becomes discoverable by the power callback.
-   *
-   * Everything built above (stream, context nodes, worklet) exists but is not
-   * registered yet, so a release that landed during startup would otherwise
-   * leave it running for the whole suspend. Tear it down and report the same
-   * cancellation the keep-alive path uses.
-   */
-  /**
    * Await one direct-startup step, letting an in-flight power release win.
    *
    * Mirrors KeepAliveMicSession.awaitStartupStep: the raw error would send the
@@ -1239,6 +1231,11 @@ export class WebMicAudioEngine {
     }
   }
 
+  /**
+   * Check for a release at the synchronous points no await can cover: right
+   * before opening the device, and right before flipping `ready` (which is what
+   * makes the release path treat this engine as an interruptible recording).
+   */
   private assertNoPowerReleaseDuringStartup(generationAtStart: number): void {
     if (currentPowerReleaseGeneration() === generationAtStart) return;
     throw powerReleaseCancellation();

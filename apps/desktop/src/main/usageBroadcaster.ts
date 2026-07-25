@@ -418,16 +418,24 @@ export function splitPersistedCodexAccountUsage(parsed: Record<string, unknown>)
 } {
   if ('webSnapshot' in parsed) {
     const { webSnapshot, appServerBuckets, ...rest } = parsed as CodexAccountUsagePayload;
+    // 新格式带桶表 → 直接水合; 只有顶层(分桶前写入的行)→ 下面按其 limitId 归桶。
+    const buckets = isPlainRecord(appServerBuckets)
+      ? sanitizeCodexBuckets(appServerBuckets)
+      : {};
+    // 顶层兼容位记录的就是落库时的最近更新桶 —— 水合必须据此恢复, 否则
+    // 「A→B→A」后重启会按对象键序错选 B(覆盖已有键不会移到末尾, review 反馈)。
+    const latestBucketKey = hasCodexSnapshotContent(rest) ? codexLimitBucketKey(rest) : null;
+    // 但这个键必须在桶表里真的存在。本仓写入路径两者恒一致(顶层就是从桶表取
+    // 的), 外部/损坏/跨版本行却可能给出桶表里没有的键 —— 那样
+    // currentCodexAppServerSnapshot() 直接返 null, app-server 配额会一直空到
+    // 下一次推送(review 反馈)。顶层快照本身就是那个桶的内容, 补种回去即可。
+    // codexLimitBucketKey 已把 __proto__ 等危险键映射成缺省桶, 补种不会污染原型。
+    if (latestBucketKey && !Object.prototype.hasOwnProperty.call(buckets, latestBucketKey)) {
+      buckets[latestBucketKey] = rest as RateLimitSnapshot;
+    }
     return {
-      // 新格式带桶表 → 直接水合; 只有顶层(分桶前写入的行)→ 按其 limitId 归桶。
-      appServerBuckets: isPlainRecord(appServerBuckets)
-        ? sanitizeCodexBuckets(appServerBuckets)
-        : hasCodexSnapshotContent(rest)
-          ? { [codexLimitBucketKey(rest)]: rest }
-          : {},
-      // 顶层兼容位记录的就是落库时的最近更新桶 —— 水合必须据此恢复, 否则
-      // 「A→B→A」后重启会按对象键序错选 B(覆盖已有键不会移到末尾, review 反馈)。
-      latestBucketKey: hasCodexSnapshotContent(rest) ? codexLimitBucketKey(rest) : null,
+      appServerBuckets: buckets,
+      latestBucketKey,
       // 拒绝数组等畸形持久化值(与 renderer 的 isRateLimitSnapshot 守卫同口径),
       // 否则损坏行会被当有效快照再次广播 + 回写。
       web: isPlainRecord(webSnapshot) ? (webSnapshot as RateLimitSnapshot) : null,

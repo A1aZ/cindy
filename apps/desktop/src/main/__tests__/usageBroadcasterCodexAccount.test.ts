@@ -303,6 +303,44 @@ describe('codex bucket edge cases (review follow-up)', () => {
     const payload = await broadcaster.readCodexAccountUsageSnapshot();
     expect(Object.keys(payload?.appServerBuckets ?? {})).toEqual(['codex']);
   });
+
+  // 本仓写入路径不会产出这种行(顶层就是从桶表取的), 但外部 / 损坏 / 跨版本行
+  // 可能给出桶表里没有的最近桶键。旧实现会让 currentCodexAppServerSnapshot()
+  // 返 null —— app-server 配额一直空到下一次推送(review 反馈)。
+  it('re-seeds the latest bucket when a persisted row references a missing key', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    mocks.queryOne.mockResolvedValue({
+      snapshot: JSON.stringify({
+        ...BUCKET_A,
+        webSnapshot: null,
+        // 顶层是 codex, 桶表却只有无 ID 更新建出来的缺省桶
+        appServerBuckets: { __default__: { ...BUCKET_B, limitId: undefined } },
+      }),
+    });
+
+    const payload = await broadcaster.readCodexAccountUsageSnapshot();
+    // 顶层配额没有消失, 且它自己的桶被补种回桶表
+    expect(payload?.limitId).toBe('codex');
+    expect(payload?.primary?.usedPercent).toBe(40);
+    expect(Object.keys(payload?.appServerBuckets ?? {}).sort()).toEqual(['__default__', 'codex']);
+  });
+
+  it('keeps hydration safe when the missing latest key is prototype-polluting', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    mocks.queryOne.mockResolvedValue({
+      snapshot: JSON.stringify({
+        ...BUCKET_A,
+        limitId: '__proto__',
+        webSnapshot: null,
+        appServerBuckets: {},
+      }),
+    });
+
+    const payload = await broadcaster.readCodexAccountUsageSnapshot();
+    // 危险 limitId 早在 codexLimitBucketKey 就被映射成缺省桶, 补种不污染原型
+    expect(Object.keys(payload?.appServerBuckets ?? {})).toEqual(['__default__']);
+    expect(({} as Record<string, unknown>).primary).toBeUndefined();
+  });
 });
 
 describe('codex stale bucket pruning', () => {

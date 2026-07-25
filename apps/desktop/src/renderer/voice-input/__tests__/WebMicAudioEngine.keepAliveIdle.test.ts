@@ -416,6 +416,54 @@ describe('keep-alive microphone idle window', () => {
     expect(sink.disconnect).toHaveBeenCalled();
   });
 
+  it('falls through to the cold path when a non-power release cancels startup', async () => {
+    let resolveStream: (value: unknown) => void = () => undefined;
+    getUserMedia.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveStream = resolve;
+    }));
+
+    const engine = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: true,
+      onInterrupted: vi.fn(),
+    });
+    const starting = engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Turning the setting off also releases the session — but the user is still
+    // here and still dictating, so this must not abandon the attempt the way a
+    // suspend/lock does.
+    await mod.disposeKeepAliveVoiceInputMicrophone('setting_disabled');
+    resolveStream({ getAudioTracks: () => [track], getTracks: () => [track] });
+
+    await starting;
+    expect(getUserMedia).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not dispose a stale session another engine still holds', async () => {
+    const engineA = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: true,
+      onInterrupted: vi.fn(),
+    });
+    const engineB = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: true,
+      onInterrupted: vi.fn(),
+    });
+    await engineA.start();
+    await engineB.start();
+
+    // Config changes mid-recording only mark the session stale.
+    await mod.prewarmVoiceInputMicrophone({ workletUrl: WORKLET_URL, deviceId: 'another-device' });
+
+    await engineA.stop();
+    expect(track.stopped).toBe(false);
+
+    await engineB.stop();
+    expect(track.stopped).toBe(true);
+  });
+
   it('shares one startup between concurrent callers', async () => {
     let resolveStream: (value: unknown) => void = () => undefined;
     getUserMedia.mockImplementationOnce(() => new Promise((resolve) => {

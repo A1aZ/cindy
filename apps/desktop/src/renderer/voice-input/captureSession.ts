@@ -1,7 +1,7 @@
 import { createLogger } from '@/lib/logger';
 import {
   WebMicAudioEngine,
-  isKeepAliveSessionDisposedError,
+  isPowerReleaseCancellation,
   isSelectedMicrophoneUnavailableError,
   type PcmChunk,
 } from './WebMicAudioEngine';
@@ -135,7 +135,7 @@ export async function startVoiceInputCaptureSession(
     // Suspend/lock cancelling startup is the user walking away on purpose, not
     // a failure worth an error surface. Report it as cancellation so callers
     // clean up quietly instead of showing an internal message.
-    if (isKeepAliveSessionDisposedError(error)) {
+    if (isPowerReleaseCancellation(error)) {
       log.debug(message(options.label, 'microphone start cancelled by power release'));
       return {
         ok: false,

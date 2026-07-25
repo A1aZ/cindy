@@ -73,15 +73,32 @@ export class VoiceInputSelectedMicrophoneUnavailableError extends Error {
  * quietly instead of logging a warning for something the user asked for.
  */
 export class KeepAliveSessionDisposedError extends Error {
-  constructor() {
-    super('Keep-alive microphone session was disposed.');
+  readonly reason: string;
+
+  constructor(reason: string) {
+    super(`Keep-alive microphone session was disposed (${reason}).`);
     this.name = 'KeepAliveSessionDisposedError';
+    this.reason = reason;
   }
 }
 
 export function isKeepAliveSessionDisposedError(error: unknown): boolean {
   if (error instanceof KeepAliveSessionDisposedError) return true;
   return readErrorString(error, 'name') === 'KeepAliveSessionDisposedError';
+}
+
+/**
+ * Reasons that mean "the user walked away", as opposed to "the setup changed".
+ * Only these justify abandoning a start attempt silently; a devicechange or a
+ * disabled setting must still fall through to the cold path so the dictation
+ * the user is in the middle of keeps working.
+ */
+const POWER_RELEASE_REASONS: ReadonlySet<string> = new Set(['system_suspend', 'screen_locked']);
+
+export function isPowerReleaseCancellation(error: unknown): boolean {
+  if (!isKeepAliveSessionDisposedError(error)) return false;
+  const reason = readErrorString(error, 'reason');
+  return reason !== undefined && POWER_RELEASE_REASONS.has(reason);
 }
 
 const AUDIO_FRAME_WATCHDOG_INTERVAL_MS = 1000;
@@ -254,7 +271,7 @@ function normalizeMicrophoneStartError(error: unknown, deviceId?: string): Error
  * `instanceof Error` in this realm. Read the standard fields structurally so a
  * stale selected microphone still takes the automatic fallback path.
  */
-function readErrorString(error: unknown, key: 'name' | 'message'): string | undefined {
+function readErrorString(error: unknown, key: 'name' | 'message' | 'reason'): string | undefined {
   if (typeof error !== 'object' || error === null) return undefined;
   const value = (error as Record<string, unknown>)[key];
   return typeof value === 'string' ? value : undefined;
@@ -346,6 +363,10 @@ class KeepAliveMicSession {
   private staleAfterActiveDeviceChange = false;
   private sinkConnected = false;
   private startPromise?: Promise<void>;
+  // Why this session was released, so a start attempt interrupted by it can
+  // tell "user walked away" (suspend/lock) from "setup changed" (devicechange,
+  // setting turned off) — only the former may abandon the attempt silently.
+  private disposedReason = 'dispose';
   // Counted, not boolean: two engines (overlay + ChatInput) can share one
   // session, and a flag would let whichever finishes first clear the other's
   // claim — handing the still-live session to a replacing prewarm.
@@ -367,7 +388,7 @@ class KeepAliveMicSession {
    * then gets overwritten by `this.stream` and is never stopped.
    */
   start(): Promise<void> {
-    if (this.disposed) return Promise.reject(new KeepAliveSessionDisposedError());
+    if (this.disposed) return Promise.reject(new KeepAliveSessionDisposedError(this.disposedReason));
     if (this.context && this.stream && this.worklet) return Promise.resolve();
     this.startPromise ??= this.startInternal().finally(() => {
       this.startPromise = undefined;
@@ -390,11 +411,11 @@ class KeepAliveMicSession {
   private async awaitStartupStep<T>(step: Promise<T>): Promise<T> {
     try {
       const value = await step;
-      if (this.disposed) throw new KeepAliveSessionDisposedError();
+      if (this.disposed) throw new KeepAliveSessionDisposedError(this.disposedReason);
       return value;
     } catch (error) {
       if (this.disposed && !isKeepAliveSessionDisposedError(error)) {
-        throw new KeepAliveSessionDisposedError();
+        throw new KeepAliveSessionDisposedError(this.disposedReason);
       }
       throw error;
     }
@@ -426,7 +447,7 @@ class KeepAliveMicSession {
       // sends start() down the cold fallback path, which reopens the microphone
       // after the suspend/lock event has already passed — with nothing left to
       // close it.
-      if (this.disposed) throw new KeepAliveSessionDisposedError();
+      if (this.disposed) throw new KeepAliveSessionDisposedError(this.disposedReason);
       throw normalizeMicrophoneStartError(error, this.options.deviceId);
     }
     // dispose() ran while getUserMedia was in flight: it could not stop a track
@@ -434,7 +455,7 @@ class KeepAliveMicSession {
     // indicator on, idle-sleep assertion held, and unreachable from any session.
     if (this.disposed) {
       stream.getTracks().forEach((track) => track.stop());
-      throw new KeepAliveSessionDisposedError();
+      throw new KeepAliveSessionDisposedError(this.disposedReason);
     }
     this.stream = stream;
     this.stream.getAudioTracks().forEach((track) => this.watchTrack(track));
@@ -497,7 +518,7 @@ class KeepAliveMicSession {
   activate(activation: KeepAliveActivation): void {
     // Defence in depth: a disposed session has no stream or worklet left, so
     // activating it would look like a successful start that never emits audio.
-    if (this.disposed) throw new KeepAliveSessionDisposedError();
+    if (this.disposed) throw new KeepAliveSessionDisposedError(this.disposedReason);
     this.activation = activation;
     this.active = true;
     // Attach before arming the worklet so the first active render quantum
@@ -596,6 +617,7 @@ class KeepAliveMicSession {
   async dispose(reason = 'dispose'): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.disposedReason = reason;
     const activation = this.activation;
     const wasActive = this.active;
     activation?.onStateChange?.('keep_alive_disposed', { reason });
@@ -696,15 +718,18 @@ async function getOrCreateKeepAliveSession(
     });
   }
   if (keepAliveSessionPromise) {
-    let releasedWhileQueued = false;
+    let releasedReason: string | undefined;
     await keepAliveSessionPromise.catch((error: unknown) => {
-      releasedWhileQueued = isKeepAliveSessionDisposedError(error);
+      if (isKeepAliveSessionDisposedError(error)) {
+        releasedReason = readErrorString(error, 'reason') ?? 'dispose';
+      }
     });
-    // The in-flight session we were queued behind was torn down by a power
-    // release. Building a replacement now would open the microphone *after*
-    // that one-shot event, with nothing left to close it until the idle
-    // timeout — exactly the leak the release exists to prevent.
-    if (releasedWhileQueued) throw new KeepAliveSessionDisposedError();
+    // The in-flight session we were queued behind was torn down. Propagate the
+    // original reason so callers can still tell a power release (build nothing,
+    // the one-shot event has passed) from a setup change (fall through and
+    // rebuild). Building a replacement after a power release would open the
+    // microphone with nothing left to close it until the idle timeout.
+    if (releasedReason !== undefined) throw new KeepAliveSessionDisposedError(releasedReason);
   }
   if (keepAliveSession) {
     // A different device/profile is a fresh warm-up, not a continuation of the
@@ -923,12 +948,12 @@ export class WebMicAudioEngine {
         return;
       } catch (error) {
         if (isSelectedMicrophoneUnavailableError(error)) throw error;
-        // Startup was cancelled by a power release, not by a broken keep-alive
-        // path. Falling through to the cold getUserMedia() below would open a
-        // brand-new stream after the suspend/lock event has already passed —
-        // nothing would be left to close it, so the mic would stay live through
-        // the lock. Surface the cancellation instead.
-        if (isKeepAliveSessionDisposedError(error)) throw error;
+        // Only a *power* release ends the attempt. Falling through to the cold
+        // getUserMedia() below after a suspend/lock would open a brand-new
+        // stream once that one-shot event has passed, with nothing left to
+        // close it. Other releases (devicechange, setting turned off) must keep
+        // falling through — the user is still here and still dictating.
+        if (isPowerReleaseCancellation(error)) throw error;
         this.onStateChange?.('keep_alive_unavailable', {
           error: error instanceof Error ? error.message : String(error),
         });
@@ -1050,15 +1075,18 @@ export class WebMicAudioEngine {
       // that while another engine is still recording would starve it of audio
       // and trip its stall watchdog.
       session?.releaseRecordingReservation();
+      // Everything below tears down shared state, so it may only run for the
+      // last holder. Disposing a stale session while another engine still has a
+      // reservation would stop the very track it is recording from.
       if (session && !session.hasRecordingReservations()) {
         session.deactivate();
-      }
-      if (session?.isStaleAfterDeviceChange()) {
-        await disposeKeepAliveVoiceInputMicrophone('devicechange_after_recording');
-      } else if (session) {
-        // Real use just ended — this is the only event allowed to restart the
-        // full 30-minute window the settings copy promises.
-        scheduleKeepAliveIdleDispose(session, 'idle_timeout_after_recording', { refresh: true });
+        if (session.isStaleAfterDeviceChange()) {
+          await disposeKeepAliveVoiceInputMicrophone('devicechange_after_recording');
+        } else {
+          // Real use just ended — this is the only event allowed to restart the
+          // full 30-minute window the settings copy promises.
+          scheduleKeepAliveIdleDispose(session, 'idle_timeout_after_recording', { refresh: true });
+        }
       }
       this.keepAliveSession = undefined;
       this.usingKeepAliveSession = false;

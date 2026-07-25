@@ -436,6 +436,32 @@ describe('keep-alive microphone idle window', () => {
     expect(track.stopped).toBe(false);
   });
 
+  it('aborts a direct startup interrupted by a power release', async () => {
+    let resolveStream: (value: unknown) => void = () => undefined;
+    getUserMedia.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveStream = resolve;
+    }));
+
+    const engine = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: false,
+      onInterrupted: vi.fn(),
+    });
+    const starting = engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(powerCallback).toBeDefined();
+
+    // The lock lands while the device handshake is still pending, so this
+    // engine is not in the registry yet and the one-shot callback cannot see
+    // it. Startup must abort itself rather than come up after the event.
+    powerCallback?.({ reason: 'screen_locked' });
+    await vi.advanceTimersByTimeAsync(0);
+    resolveStream({ getAudioTracks: () => [track], getTracks: () => [track] });
+
+    await expect(starting).rejects.toThrow(/disposed/i);
+    expect(track.stopped).toBe(true);
+  });
+
   it('releases a direct capture stream on a power event', async () => {
     const onInterrupted = vi.fn();
     // fast activation off: this capture never touches the keep-alive session,

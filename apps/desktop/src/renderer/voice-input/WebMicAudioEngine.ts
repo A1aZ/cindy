@@ -1055,6 +1055,10 @@ export class WebMicAudioEngine {
     // is ever created, so this would otherwise be the only capture in the
     // renderer and nothing would subscribe to power releases.
     ensureKeepAlivePowerReleaseListener();
+    // The registry below only covers engines that finished starting. A release
+    // landing mid-startup would not see this one, so snapshot the generation
+    // and re-check at each point where a live device could survive.
+    const powerGenerationAtStart = currentPowerReleaseGeneration();
 
     const audio = buildMediaConstraints({
       deviceId: this.deviceId,
@@ -1078,7 +1082,14 @@ export class WebMicAudioEngine {
       throw normalizeMicrophoneStartError(error, this.deviceId);
     });
 
-    this.stream = await streamPromise;
+    const directStream = await streamPromise;
+    if (currentPowerReleaseGeneration() !== powerGenerationAtStart) {
+      // Suspend/lock won the race with the device handshake. Nothing has this
+      // stream registered yet, so it would stay live for the whole sleep.
+      directStream.getTracks().forEach((track) => track.stop());
+      throw powerReleaseCancellation();
+    }
+    this.stream = directStream;
     this.stream.getAudioTracks().forEach((track) => this.watchTrack(track));
     this.onStateChange?.('stream_started', {
       tracks: this.stream.getAudioTracks().map((track) => ({
@@ -1134,6 +1145,7 @@ export class WebMicAudioEngine {
         state: this.context.state,
         sampleRate: this.context.sampleRate,
       });
+      this.assertNoPowerReleaseDuringStartup(powerGenerationAtStart);
       this.ready = true;
       liveDirectCaptureEngines.add(this);
       this.startWatchdog();
@@ -1152,9 +1164,28 @@ export class WebMicAudioEngine {
       state: this.context.state,
       sampleRate: this.context.sampleRate,
     });
+    this.assertNoPowerReleaseDuringStartup(powerGenerationAtStart);
     this.ready = true;
     liveDirectCaptureEngines.add(this);
     this.startWatchdog();
+  }
+
+  /**
+   * Final gate before this engine becomes discoverable by the power callback.
+   *
+   * Everything built above (stream, context nodes, worklet) exists but is not
+   * registered yet, so a release that landed during startup would otherwise
+   * leave it running for the whole suspend. Tear it down and report the same
+   * cancellation the keep-alive path uses.
+   */
+  private assertNoPowerReleaseDuringStartup(generationAtStart: number): void {
+    if (currentPowerReleaseGeneration() === generationAtStart) return;
+    this.stream?.getTracks().forEach((track) => track.stop());
+    this.worklet?.disconnect();
+    this.processor?.disconnect();
+    this.sink?.disconnect();
+    this.source?.disconnect();
+    throw powerReleaseCancellation();
   }
 
   /**
@@ -1165,7 +1196,14 @@ export class WebMicAudioEngine {
   releaseForPowerEvent(reason: string): void {
     this.onStateChange?.('direct_capture_power_release', { reason });
     this.interrupt('Microphone input stopped unexpectedly. Please try again.');
-    void this.stop();
+    void this.stop().catch((error: unknown) => {
+      // Detached on purpose (the power callback must not await teardown), so an
+      // AudioContext.close() failure here would otherwise surface as an
+      // unhandled rejection.
+      this.onStateChange?.('direct_capture_power_release_stop_failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 
   async stop(): Promise<void> {

@@ -80,7 +80,7 @@ interface CodexAccountUsageSlots {
 
 let lastCodexAccountUsage: CodexAccountUsageSlots = {
   appServer: null,
-  appServerBuckets: {},
+  appServerBuckets: Object.create(null) as Record<string, RateLimitSnapshot>,
   web: null,
 };
 
@@ -168,6 +168,26 @@ function sanitizeCodexBuckets(raw: Record<string, unknown>): Record<string, Rate
   return out;
 }
 
+
+/** 空桶表 —— 与 sanitize 同为 null 原型, 保持「桶表永不挂原型链」的不变量。 */
+function emptyBucketTable(): Record<string, RateLimitSnapshot> {
+  return Object.create(null) as Record<string, RateLimitSnapshot>;
+}
+
+/**
+ * 增量写入一个桶并返回**新的 null 原型**桶表。不能用对象字面量 spread ——
+ * 那会把 sanitize 建立的 null 原型换回 Object.prototype(review 反馈)。
+ */
+function withCodexBucket(
+  buckets: Record<string, RateLimitSnapshot>,
+  key: string,
+  incoming: RateLimitSnapshot,
+): Record<string, RateLimitSnapshot> {
+  const next = emptyBucketTable();
+  for (const [existingKey, bucket] of Object.entries(buckets)) next[existingKey] = bucket;
+  next[key] = mergeCodexAccountUsageSnapshot(buckets[key] ?? null, incoming);
+  return next;
+}
 
 export function mergeCodexAccountUsageSnapshot(
   previous: RateLimitSnapshot | null,
@@ -291,7 +311,7 @@ function applyCodexAccountUsageSnapshot(
 ): void {
   if (incoming === null) {
     if (options.clearOnNull === false) return;
-    lastCodexAccountUsage = { appServer: null, appServerBuckets: {}, web: null };
+    lastCodexAccountUsage = { appServer: null, appServerBuckets: emptyBucketTable(), web: null };
     onApplied();
     return;
   }
@@ -315,16 +335,14 @@ function applyCodexAccountUsageSnapshot(
       // 桶表: 组合 payload 带全量 → 覆盖; 裸 turn 事件 → 只更新自己那个桶
       // (同桶 merge, 跨桶隔离, 与 main 同口径)。
       appServerBuckets: 'appServerBuckets' in parts
-        ? parts.appServerBuckets ?? {}
+        ? parts.appServerBuckets ?? emptyBucketTable()
         : parts.appServer
-          ? {
-              ...lastCodexAccountUsage.appServerBuckets,
-              [codexLimitBucketKey(parts.appServer)]: mergeCodexAccountUsageSnapshot(
-                lastCodexAccountUsage.appServerBuckets[codexLimitBucketKey(parts.appServer)] ?? null,
-                parts.appServer,
-              ),
-            }
-          : {},
+          ? withCodexBucket(
+              lastCodexAccountUsage.appServerBuckets,
+              codexLimitBucketKey(parts.appServer),
+              parts.appServer,
+            )
+          : emptyBucketTable(),
     };
   }
   if ('web' in parts) {

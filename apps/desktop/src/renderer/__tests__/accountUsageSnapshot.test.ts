@@ -529,3 +529,16 @@ describe('nextCodexBucketStaleAtMs', () => {
     expect(nextCodexBucketStaleAtMs({ z: partial }, NOW)).toBeNull();
   });
 });
+
+describe('bucket table keeps a null prototype across incremental updates', () => {
+  it('never re-attaches Object.prototype when merging a turn event bucket', () => {
+    // sanitize 建立 null 原型后, 增量写入若用对象字面量 spread 会把原型换回来,
+    // 削弱防御(review 反馈)。这里用源码断言锁定实现选择。
+    const hookSource = readFileSync(new URL('../hooks/useAccountUsage.ts', import.meta.url), 'utf8');
+    expect(hookSource).toContain('function emptyBucketTable(');
+    expect(hookSource).toContain('function withCodexBucket(');
+    // 增量分支不得再出现桶表字面量 spread
+    expect(hookSource).not.toContain('...lastCodexAccountUsage.appServerBuckets,');
+    expect(hookSource).not.toContain('appServerBuckets: {}');
+  });
+});

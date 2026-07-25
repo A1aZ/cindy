@@ -232,6 +232,45 @@ describe('keep-alive microphone idle window', () => {
     expect(track.stopped).toBe(true);
   });
 
+  it('rejects startup when a release lands during context resume', async () => {
+    let resolveResume: () => void = () => undefined;
+    const pool = await import('../audioContextPool');
+    vi.mocked(pool.prewarmVoiceInputAudio).mockResolvedValue({
+      context: {
+        currentTime: 0,
+        // A suspended shared context makes startup await resume() — the last
+        // await before the session reports success.
+        state: 'suspended',
+        destination,
+        createGain: vi.fn(() => sink),
+        createMediaStreamSource: vi.fn(() => ({ connect: vi.fn(), disconnect: vi.fn() })),
+        resume: vi.fn(() => new Promise<void>((resolve) => {
+          resolveResume = () => resolve();
+        })),
+      } as unknown as AudioContext,
+      workletReady: Promise.resolve(),
+      workletUrl: WORKLET_URL,
+    });
+
+    const engine = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: true,
+      onInterrupted: vi.fn(),
+    });
+    const starting = engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(powerCallback).toBeDefined();
+
+    powerCallback?.({ reason: 'system_suspend' });
+    await vi.advanceTimersByTimeAsync(0);
+    resolveResume();
+
+    // Reporting success here would hand the caller a session whose nodes were
+    // already torn down: it emits no PCM and dies on the stall watchdog.
+    await expect(starting).rejects.toThrow(/disposed/i);
+    expect(track.stopped).toBe(true);
+  });
+
   it('shares one startup between concurrent callers', async () => {
     let resolveStream: (value: unknown) => void = () => undefined;
     getUserMedia.mockImplementationOnce(() => new Promise((resolve) => {

@@ -423,6 +423,11 @@ class KeepAliveMicSession {
     // The sink stays detached until activation; see attachOutputPath.
     if (this.context.state !== 'running') {
       await this.context.resume();
+      // Last await of startup. A release landing here has already stopped the
+      // track and torn down every node built above, so returning success would
+      // hand the caller a session that can never emit PCM — it would arm its
+      // watchdog and surface a bogus "microphone stalled" failure instead.
+      if (this.disposed) throw new KeepAliveSessionDisposedError();
     }
   }
 

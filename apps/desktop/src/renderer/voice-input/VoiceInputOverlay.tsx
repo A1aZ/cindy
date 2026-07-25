@@ -828,6 +828,12 @@ export function VoiceInputOverlay() {
         cancelStartedRun(startResultPromise);
         suppressedStartErrorAttemptsRef.current.delete(attemptId);
         await restoreSystemAudioForRecording();
+        // setVoiceState('listening') already ran, and this path owns no engine
+        // or run, so no later cancel/state event will arrive to clear it.
+        // Leaving it would strand the overlay in 'listening' — where the
+        // stateRef.current === 'listening' guard silently swallows every
+        // subsequent shortcut press.
+        await closeOverlayAndReset();
         return;
       }
       log.warn('global microphone start failed:', captureStart.error);
@@ -882,6 +888,7 @@ export function VoiceInputOverlay() {
     cancelStartedRun,
     clearErrorCloseTimer,
     closeOverlay,
+    closeOverlayAndReset,
     createStartReadyState,
     failRecording,
     formatMicrophoneFallbackMessage,

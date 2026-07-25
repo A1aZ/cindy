@@ -28,6 +28,16 @@
 
 import { useEffect, useState } from 'react';
 
+import {
+  CODEX_DEFAULT_LIMIT_BUCKET,
+  GENERIC_BUCKET_KEYS,
+  UNSAFE_BUCKET_KEYS,
+  codexLimitBucketKey,
+  isCodexBucketStale,
+} from '../../shared/codexUsageBuckets';
+
+export { CODEX_DEFAULT_LIMIT_BUCKET, codexLimitBucketKey, isCodexBucketStale };
+
 export interface RateLimitWindow {
   usedPercent: number;
   windowMinutes?: number | null;
@@ -58,9 +68,6 @@ export interface RateLimitSnapshot {
 /** chip 选槽依据: Codex CLI 会话消耗 app-server 报告的配额, chatgpt/ bridge 消耗 WHAM 报告的配额。 */
 export type CodexQuotaSource = 'app-server' | 'openai-web';
 
-/** 桶表的缺省键(与 main 的 CODEX_DEFAULT_LIMIT_BUCKET 同值)。 */
-export const CODEX_DEFAULT_LIMIT_BUCKET = '__default__';
-
 interface CodexAccountUsageSlots {
   /** app-server 展示快照 = 最近更新的桶(冷启动 / 未知会话桶时的兜底)。 */
   appServer: RateLimitSnapshot | null;
@@ -74,16 +81,6 @@ let lastCodexAccountUsage: CodexAccountUsageSlots = {
   appServerBuckets: {},
   web: null,
 };
-
-/** 用作对象键会污染原型链的保留名 —— 一律回退缺省桶。 */
-const UNSAFE_BUCKET_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-
-/** 快照 → 桶键(与 main codexLimitBucketKey 同口径)。 */
-export function codexLimitBucketKey(snapshot: RateLimitSnapshot | null | undefined): string {
-  const limitId = snapshot?.limitId;
-  if (typeof limitId !== 'string' || limitId.length === 0) return CODEX_DEFAULT_LIMIT_BUCKET;
-  return UNSAFE_BUCKET_KEYS.has(limitId) ? CODEX_DEFAULT_LIMIT_BUCKET : limitId;
-}
 
 /** 模型 id / 桶名 → 可比较 token(小写, 去非字母数字)。 */
 function normalizeModelToken(value: string | null | undefined): string {
@@ -132,7 +129,7 @@ export function matchCodexBucketForModel(
  * matchCodexBucketForModel): 账号可能同时有主配额桶与模型专属促销桶
  * (codex_bengalfox / GPT-5.3-Codex-Spark), 不选桶就会显示别的模型的配额
  * (2026-07-25 用户实报: gpt-5.6-sol 会话显示 Spark 桶的「8天 剩余 100%」)。
- * 匹配不到(桶表为空 / 无通用桶)→ 回退最近更新桶, 与旧行为一致。
+ * 匹配不到 → 不显示 app-server 配额(见函数体注释); 仅桶表为空时用顶层兼容位。
  */
 function selectCodexSlot(
   quotaSource: CodexQuotaSource,
@@ -184,28 +181,6 @@ function sanitizeCodexBuckets(raw: Record<string, unknown>): Record<string, Rate
   return out;
 }
 
-/** 通用(非模型专属)桶的稳定标识 —— 只认桶键, 不看易丢失的 limitName。 */
-const GENERIC_BUCKET_KEYS = new Set(['codex', CODEX_DEFAULT_LIMIT_BUCKET]);
-
-/** 窗口全部过期且超过宽限 = 陈旧桶(促销结束 / 服务端已停推该 limitId)。 */
-const STALE_BUCKET_GRACE_MS = 60 * 60 * 1000;
-
-export function isCodexBucketStale(
-  bucket: RateLimitSnapshot | null | undefined,
-  nowMs: number,
-): boolean {
-  if (!bucket) return true;
-  const windows = [bucket.primary, bucket.secondary].filter(
-    (w): w is RateLimitWindow => Boolean(w),
-  );
-  if (windows.length === 0) return false;
-  const resets = windows
-    .map((w) => w.resetsAt)
-    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0);
-  if (resets.length === 0) return false;
-  // 全部窗口都已过点且超过宽限(宽限给正常窗口翻转留出等新快照的时间)。
-  return Math.max(...resets) * 1000 + STALE_BUCKET_GRACE_MS < nowMs;
-}
 
 export function mergeCodexAccountUsageSnapshot(
   previous: RateLimitSnapshot | null,

@@ -476,8 +476,17 @@ describe('bucket selection safety (review follow-up)', () => {
   });
 
   it('does not treat window-less or reset-less buckets as stale', () => {
-    expect(isCodexBucketStale({ limitId: 'codex' }, NOW)).toBe(false);
-    expect(isCodexBucketStale({ limitId: 'codex', primary: { usedPercent: 5 } }, NOW)).toBe(false);
+    const windowless = { limitId: 'codex' };
+    const resetless = { limitId: 'codex', primary: { usedPercent: 5 } };
+    expect(isCodexBucketStale(windowless, NOW)).toBe(false);
+    expect(isCodexBucketStale(resetless, NOW)).toBe(false);
+    // 只有部分窗口带 resetsAt 时不得判陈旧(review 反馈): 缺时间戳的周窗口可能仍有效
+    const partialTimestamps = {
+      limitId: 'codex_bengalfox',
+      primary: { usedPercent: 100, resetsAt: 1_700_000_000 },
+      secondary: { usedPercent: 40 },
+    };
+    expect(isCodexBucketStale(partialTimestamps, NOW)).toBe(false);
   });
 
   it('keeps identity metadata when a later partial snapshot omits it', () => {

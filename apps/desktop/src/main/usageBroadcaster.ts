@@ -33,6 +33,13 @@ import {
 } from '../shared/claudeSubscriptionUsage';
 import type { AgentKind } from '@cindy/maker-core';
 
+import {
+  CODEX_DEFAULT_LIMIT_BUCKET,
+  UNSAFE_BUCKET_KEYS,
+  codexLimitBucketKey,
+  isCodexBucketStale,
+} from '../shared/codexUsageBuckets';
+
 import { createLogger } from './logger';
 import type { RegionalMoney } from '../shared/regionalMoney.js';
 
@@ -304,9 +311,6 @@ export async function readAgentTodayUsage(agentKind: AgentKind): Promise<AgentTo
 // 广播给所有 subscriber 再各自包 sessionId(见 app-server host.routeNotification)。
 // 详见 useAccountUsage.matchCodexBucketForModel。
 
-/** 桶表的缺省键: 快照没带 limitId 时用它(单桶账号 / 老 app-server)。 */
-export const CODEX_DEFAULT_LIMIT_BUCKET = '__default__';
-
 /**
  * 组合 payload:
  *   - 顶层 = app-server **最近更新的**桶(旧消费者与冷启动兜底, 形状不变);
@@ -326,33 +330,6 @@ let codexAppServerBuckets: Record<string, RateLimitSnapshot> = {};
 /** 最近更新的 app-server 桶键 —— 顶层兼容位取它。 */
 let codexAppServerLatestBucketKey: string | null = null;
 let codexWebAccountUsageSnapshot: RateLimitSnapshot | null = null;
-
-/** 用作对象键会污染原型链的保留名 —— 一律回退缺省桶。 */
-const UNSAFE_BUCKET_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-
-/** 快照 → 桶键。limitId 缺失 / 为危险保留名时归缺省桶。 */
-export function codexLimitBucketKey(snapshot: RateLimitSnapshot | null | undefined): string {
-  const limitId = snapshot?.limitId;
-  if (typeof limitId !== 'string' || limitId.length === 0) return CODEX_DEFAULT_LIMIT_BUCKET;
-  return UNSAFE_BUCKET_KEYS.has(limitId) ? CODEX_DEFAULT_LIMIT_BUCKET : limitId;
-}
-
-/** 陈旧桶宽限: 窗口全部过点超过它, 视为服务端已停推该 limitId(促销结束等)。 */
-const STALE_BUCKET_GRACE_MS = 24 * 60 * 60 * 1000;
-
-/** 窗口全部过期且超宽限 = 陈旧桶。无窗口 / 无 resetsAt 不判陈旧(信息不足)。 */
-export function isCodexBucketStale(
-  bucket: RateLimitSnapshot | null | undefined,
-  nowMs: number,
-): boolean {
-  if (!bucket) return true;
-  const resets = [bucket.primary, bucket.secondary]
-    .filter((w): w is RateLimitWindow => Boolean(w))
-    .map((w) => w.resetsAt)
-    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0);
-  if (resets.length === 0) return false;
-  return Math.max(...resets) * 1000 + STALE_BUCKET_GRACE_MS < nowMs;
-}
 
 /**
  * 剪掉陈旧桶(保留最近更新桶本身, 它是顶层兼容位的来源)。桶表持久化且纯累加,

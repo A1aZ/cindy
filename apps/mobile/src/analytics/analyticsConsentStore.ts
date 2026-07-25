@@ -215,32 +215,23 @@ export async function clearAnalyticsEnabledOverride(): Promise<void> {
  * Mobile 没有游客模式:登出后 NavigationGate 会把所有路由重定向到 /login,设置页
  * 从此不可达。如果保留同意,用户就处在「还在被统计、却再也关不掉」的状态。
  *
- * 但不能顺手把整条记录删掉:用户显式关过统计(enabled=false)时,那是一个独立于
- * 「这次登录同意过没有」的长期选择。整条删掉的话,下次登录重新同意就会按默认值
- * 恢复采集,等于静默推翻了用户此前的 opt-out。
+ * 两个「不能删」:
+ *  - 不能删 enabled override:用户显式关过统计(enabled=false)时,那是独立于
+ *    「这次登录同意过没有」的长期选择,删掉等于静默推翻此前的 opt-out。
+ *  - 也不能在没有 override 时把整条记录删干净:盘上有没有记录是存量迁移的唯一
+ *    判定依据。删成「首次安装形态」后,下一个走企业 SSO 登录(协议门豁免、从未
+ *    同意)的账号在下次冷启动会被 migrateExistingLoginAsConsented 当成存量用户,
+ *    静默写回 consent:true。撤销必须留下 `{ consent: false }` 墓碑。
  */
 export async function clearAnalyticsConsent(): Promise<void> {
   await hydrateAnalyticsConsent();
-  // 删除分支也必须进同一条队列,否则会与并发的开关写入互相覆盖。
-  const run = mutationQueue.then(async () => {
-    if (state.enabledOverride !== null) {
-      const next: InternalState = { consent: false, enabledOverride: state.enabledOverride };
-      await AsyncStorage.setItem(STORAGE_KEY, serialize(next));
-      state = next;
-      hasStoredRecord = true;
-      hydrated = true;
-      notifyListeners();
-      return;
-    }
-    // 没有 override 要留,整条记录可以删干净(回到「首次安装」形态)。
-    await AsyncStorage.removeItem(STORAGE_KEY);
-    state = { ...EMPTY };
-    hasStoredRecord = false;
-    hydrated = true;
-    notifyListeners();
+  await commit((current) => {
+    if (current.consent) return { ...current, consent: false };
+    // consent 本来就是 false,但盘上还没有任何记录(例如 SSO 用户从未过协议门):
+    // 登出证明这台设备已经有过使用痕迹,同样要留墓碑堵住存量误判。
+    if (hasStoredRecord === false) return { ...current };
+    return null;
   });
-  mutationQueue = run.catch(() => undefined);
-  await run;
 }
 
 /**

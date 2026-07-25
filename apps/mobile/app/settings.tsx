@@ -93,6 +93,9 @@ export default function SettingsScreen() {
   const [analyticsEnabled, setAnalyticsEnabledState] = useState(true);
   const [analyticsCustomized, setAnalyticsCustomized] = useState(false);
   const [analyticsBusy, setAnalyticsBusy] = useState(false);
+  // hydration 完成前开关必须禁用:此时显示的是 fail-closed 默认值,可能与盘上
+  // 相反;放行点击会让 toggleAnalytics 对着真值取反,做出与所见相反的动作。
+  const [analyticsReady, setAnalyticsReady] = useState(false);
   const [analyticsMessage, setAnalyticsMessage] = useState<string | null>(null);
   const updateCheckInFlightRef = useRef(false);
   const [selfDeviceName, setSelfDeviceName] = useState<string | null>(null);
@@ -444,7 +447,14 @@ export default function SettingsScreen() {
       setAnalyticsEnabledState(snapshot.enabled);
       setAnalyticsCustomized(snapshot.enabledCustomized);
     };
-    void hydrateAnalyticsConsent().then(sync).catch(() => undefined);
+    void hydrateAnalyticsConsent()
+      .then(sync)
+      .catch(() => undefined)
+      // 读失败也放开:store 已 fail closed 到已 hydrate 的默认态,此后的交互
+      // 操作的是真值,不再有「对陈旧显示取反」的问题。
+      .finally(() => {
+        if (!cancelled) setAnalyticsReady(true);
+      });
     const unsubscribe = subscribeAnalyticsConsent(sync);
     return () => {
       cancelled = true;
@@ -737,7 +747,7 @@ export default function SettingsScreen() {
             </View>
             <Switch
               accessibilityLabel={t('settings.legal.analytics')}
-              disabled={analyticsBusy}
+              disabled={analyticsBusy || !analyticsReady}
               onValueChange={() => void toggleAnalytics()}
               testID="settings.analyticsToggle"
               trackColor={{ true: colors.inputCaret }}

@@ -163,7 +163,31 @@ describe('mobile analytics consent store', () => {
     await clearAnalyticsConsent();
 
     expect(isAnalyticsAllowed()).toBe(false);
-    expect(asyncStore.has(KEY)).toBe(false);
+    // 必须留下 { consent: false } 墓碑而不是删除记录:删成「首次安装形态」后,
+    // 下一个走 SSO 登录(从未同意)的账号会在下次冷启动被存量迁移误判成已同意。
+    expect(stored()).toEqual({ consent: false });
+  });
+
+  it('never migrates again after a logout revoked consent — even via SSO next launch', async () => {
+    // 账号 A 同意(没动过开关)→ 登出撤销 → 账号 B 走企业 SSO 登录 → 冷启动。
+    // 迁移判定依据是「盘上有没有记录」,墓碑必须挡住这次误判。
+    await acceptPrivacyConsent();
+    await clearAnalyticsConsent();
+
+    await expect(migrateExistingLoginAsConsented()).resolves.toBe(false);
+    expect(isAnalyticsAllowed()).toBe(false);
+  });
+
+  it('leaves a tombstone even when a never-consented (SSO) user logs out', async () => {
+    // 从未过协议门的 SSO 用户登出:盘上本没有记录,也要写下墓碑,
+    // 否则这台设备下次冷启动仍会命中「无记录 + 已登录 → 存量迁移」。
+    await hydrateAnalyticsConsent();
+    expect(isAnalyticsAllowed()).toBe(false);
+
+    await clearAnalyticsConsent();
+
+    expect(stored()).toEqual({ consent: false });
+    await expect(migrateExistingLoginAsConsented()).resolves.toBe(false);
   });
 
   it('keeps an explicit opt-out across logout', async () => {

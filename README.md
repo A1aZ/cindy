@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  ⬇️ <a href="https://cindy.app/#download">International download</a> | <a href="https://cindy.cn/#download">Mainland China download</a>
+  ⬇️ <a href="https://cindy.app/download/">International download</a> | <a href="https://cindy.cn/download/">Mainland China download</a>
 </p>
 
 

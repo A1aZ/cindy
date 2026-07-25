@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { nextCodexBucketStaleAtMs, selectCodexUsageForModel } from '../codexUsageBuckets';
+import {
+  nextCodexBucketStaleAtMs,
+  resolveCodexBucketTable,
+  selectCodexUsageForModel,
+} from '../codexUsageBuckets';
 import {
   summarizeAccountRateLimits,
   summarizeCodexRateLimitReset,
@@ -308,5 +312,32 @@ describe('overlapping bucket names', () => {
       nowMs: NOW,
     });
     expect(picked).toBe(SPARK);
+  });
+});
+
+describe('resolveCodexBucketTable (selector / timer must agree)', () => {
+  const NOW = 1_785_000_000_000;
+  const future = Math.floor((NOW + 3 * 24 * 60 * 60 * 1000) / 1000);
+  const MAIN = { limitId: 'codex', primary: { usedPercent: 40, resetsAt: future } };
+
+  it('falls back past an empty authoritative table (not just null/undefined)', () => {
+    // `a ?? b` 会把 {} 当有效表 —— 选桶与定时器就此漂移(review 反馈)
+    const table = resolveCodexBucketTable({ byLimitId: {}, appServerBuckets: { codex: MAIN } });
+    expect(table).not.toBeNull();
+    expect(Object.keys(table ?? {})).toEqual(['codex']);
+  });
+
+  it('keeps selector and expiry timer consistent for an empty authoritative table', () => {
+    const input = { byLimitId: {}, appServerBuckets: { codex: MAIN } };
+    const picked = selectCodexUsageForModel({ ...input, modelId: 'gpt-5.6-sol', nowMs: NOW });
+    const staleAt = nextCodexBucketStaleAtMs(resolveCodexBucketTable(input), NOW);
+    expect(picked).toBe(MAIN);
+    expect(staleAt).toBe(future * 1000 + 24 * 60 * 60 * 1000);
+  });
+
+  it('returns null when neither table is usable', () => {
+    expect(resolveCodexBucketTable({ byLimitId: {}, appServerBuckets: {} })).toBeNull();
+    expect(resolveCodexBucketTable({ byLimitId: null, appServerBuckets: undefined })).toBeNull();
+    expect(resolveCodexBucketTable({ byLimitId: [], appServerBuckets: 'nope' })).toBeNull();
   });
 });

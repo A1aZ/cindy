@@ -49,6 +49,7 @@ import { writeClipboardText } from '@/session/messageActions';
 import { normalizeExtraDirs } from '@/session/newSession';
 import {
   nextCodexBucketStaleAtMs,
+  resolveCodexBucketTable,
   selectCodexUsageForModel,
 } from '@cindy/maker-shared/codex-usage-buckets';
 import {
@@ -425,10 +426,8 @@ export function SessionMenuSheet({
   useEffect(() => {
     if (!visible) return undefined;
     const now = Date.now();
-    const staleAt = nextCodexBucketStaleAtMs(
-      quotaBucketTables.byLimitId ?? quotaBucketTables.appServerBuckets,
-      now,
-    );
+    // 与选桶共用同一套桶表解析(空表也要回退, 不能用 ?? —— review 反馈)。
+    const staleAt = nextCodexBucketStaleAtMs(resolveCodexBucketTable(quotaBucketTables), now);
     if (staleAt === null) return undefined;
     const timer = setTimeout(
       () => setQuotaStaleTick((tick) => tick + 1),

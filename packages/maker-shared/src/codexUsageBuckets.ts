@@ -161,9 +161,24 @@ export function selectCodexUsageForModel(input: {
   nowMs?: number;
 }): unknown {
   const nowMs = input.nowMs ?? Date.now();
-  const buckets = readBucketTable(input.byLimitId) ?? readBucketTable(input.appServerBuckets);
+  const buckets = resolveCodexBucketTable(input);
   if (!buckets) return input.fallback ?? null;
   return matchCodexBucketForModel(buckets, input.modelId, nowMs);
+}
+
+/**
+ * 解析出**实际生效**的桶表: 权威 rateLimitsByLimitId 优先, 空表 / 畸形则回退
+ * appServerBuckets, 都不可用 → null。
+ *
+ * 选桶与「到点重选」定时器必须共用它 —— 用 `a ?? b` 只挡 null/undefined,
+ * 空对象 `{}` 会被当成有效表, 于是选桶回退到了 appServerBuckets 而定时器却按
+ * 空表算出「无需定时」, 面板跨过失效时刻不会重选(review 反馈)。
+ */
+export function resolveCodexBucketTable(input: {
+  byLimitId?: unknown;
+  appServerBuckets?: unknown;
+}): Record<string, BucketSnapshotLike> | null {
+  return readBucketTable(input.byLimitId) ?? readBucketTable(input.appServerBuckets);
 }
 
 /**

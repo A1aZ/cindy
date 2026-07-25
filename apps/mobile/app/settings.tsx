@@ -22,6 +22,7 @@ import type { DeviceView } from '@cindy/device-link';
 import { useAuth } from '@/auth/AuthContext';
 import { loginText } from '@/auth/loginMessages';
 import {
+  clearAnalyticsEnabledOverride,
   getAnalyticsConsentState,
   hydrateAnalyticsConsent,
   setAnalyticsEnabled,
@@ -90,6 +91,7 @@ export default function SettingsScreen() {
   const [pushMessage, setPushMessage] = useState<string | null>(null);
   // 使用统计(TapDB)开关。真相在 analyticsConsentStore,这里只是视图态。
   const [analyticsEnabled, setAnalyticsEnabledState] = useState(true);
+  const [analyticsCustomized, setAnalyticsCustomized] = useState(false);
   const [analyticsBusy, setAnalyticsBusy] = useState(false);
   const [analyticsMessage, setAnalyticsMessage] = useState<string | null>(null);
   const updateCheckInFlightRef = useRef(false);
@@ -437,7 +439,10 @@ export default function SettingsScreen() {
   useEffect(() => {
     let cancelled = false;
     const sync = () => {
-      if (!cancelled) setAnalyticsEnabledState(getAnalyticsConsentState().enabled);
+      if (cancelled) return;
+      const snapshot = getAnalyticsConsentState();
+      setAnalyticsEnabledState(snapshot.enabled);
+      setAnalyticsCustomized(snapshot.enabledCustomized);
     };
     void hydrateAnalyticsConsent().then(sync).catch(() => undefined);
     const unsubscribe = subscribeAnalyticsConsent(sync);
@@ -496,14 +501,34 @@ export default function SettingsScreen() {
     if (analyticsBusy) return;
     setAnalyticsBusy(true);
     setAnalyticsMessage(null);
-    const next = !getAnalyticsConsentState().enabled;
     try {
+      // 必须先 hydrate 再取反:AsyncStorage 读慢时 getAnalyticsConsentState() 返回的
+      // 是 fail-closed 默认值,直接取反会算错方向,对着一个陈旧值执行 stop/start。
+      await hydrateAnalyticsConsent();
+      const next = !getAnalyticsConsentState().enabled;
       if (!next) await stopMobileTapdbReporting();
       await setAnalyticsEnabled(next);
       if (next) await initMobileTapdb();
     } catch {
       // 只可能是本机存储异常(无服务端往返)。开关值由 store 回推,保持落盘前的
       // 真值;这里显式告诉用户没存住,而不是让它看起来「点了没反应」。
+      setAnalyticsMessage(t('settings.legal.analyticsSaveFailed'));
+    } finally {
+      setAnalyticsBusy(false);
+    }
+  }, [analyticsBusy, t]);
+
+  /* 恢复默认:只删掉开关 override 让它重新跟随版本默认值,同意事实不动
+     (configuration-and-overrides §4)。仅在用户显式拨过开关时出现。 */
+  const resetAnalytics = useCallback(async () => {
+    if (analyticsBusy) return;
+    setAnalyticsBusy(true);
+    setAnalyticsMessage(null);
+    try {
+      await clearAnalyticsEnabledOverride();
+      if (getAnalyticsConsentState().enabled) await initMobileTapdb();
+      else await stopMobileTapdbReporting();
+    } catch {
       setAnalyticsMessage(t('settings.legal.analyticsSaveFailed'));
     } finally {
       setAnalyticsBusy(false);
@@ -708,6 +733,16 @@ export default function SettingsScreen() {
               value={analyticsEnabled}
             />
           </View>
+          {analyticsCustomized ? (
+            <ActionInfoRow
+              accessibilityLabel={t('settings.legal.analyticsReset')}
+              key="analytics-reset"
+              label={t('settings.legal.analyticsReset')}
+              onPress={() => void resetAnalytics()}
+              testID="settings.analyticsReset"
+              value={t('settings.legal.analyticsResetAction')}
+            />
+          ) : null}
           <ActionInfoRow
             accessibilityLabel={t('settings.legal.openPrivacyPolicy')}
             accessibilityRole="link"

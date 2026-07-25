@@ -177,18 +177,40 @@ export async function setAnalyticsEnabled(enabled: boolean): Promise<void> {
 }
 
 /**
- * 登出时清除同意记录。
+ * 「恢复默认」:只删掉 enabled override,同意事实保留。
+ *
+ * 有了 override 语义之后这个入口是必须的——用户把开关拨回当前默认值时写入的是一个
+ * 显式值,从此不再跟随未来的默认值变化(configuration-and-overrides §4)。
+ */
+export async function clearAnalyticsEnabledOverride(): Promise<void> {
+  await hydrateAnalyticsConsent();
+  if (state.enabledOverride === null) return;
+  await commit({ ...state, enabledOverride: null });
+}
+
+/**
+ * 登出时撤销同意 —— **只清 consent,保留 enabled override**。
  *
  * Mobile 没有游客模式:登出后 NavigationGate 会把所有路由重定向到 /login,设置页
- * 从此不可达。如果保留同意,用户就处在「还在被统计、却再也关不掉」的状态。清除后
- * 下次登录会重新经过登录页的协议门,与首次安装一致。
+ * 从此不可达。如果保留同意,用户就处在「还在被统计、却再也关不掉」的状态。
+ *
+ * 但不能顺手把整条记录删掉:用户显式关过统计(enabled=false)时,那是一个独立于
+ * 「这次登录同意过没有」的长期选择。整条删掉的话,下次登录重新同意就会按默认值
+ * 恢复采集,等于静默推翻了用户此前的 opt-out。
  */
 export async function clearAnalyticsConsent(): Promise<void> {
-  await AsyncStorage.removeItem(STORAGE_KEY);
-  state = { ...EMPTY };
-  hasStoredRecord = false;
-  hydrated = true;
-  notifyListeners();
+  await hydrateAnalyticsConsent();
+  const next: InternalState = { consent: false, enabledOverride: state.enabledOverride };
+  if (next.enabledOverride === null) {
+    // 没有 override 要留,整条记录可以删干净(回到「首次安装」形态)。
+    await AsyncStorage.removeItem(STORAGE_KEY);
+    state = { ...EMPTY };
+    hasStoredRecord = false;
+    hydrated = true;
+    notifyListeners();
+    return;
+  }
+  await commit(next);
 }
 
 /**

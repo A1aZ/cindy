@@ -3359,7 +3359,13 @@ const registerIpcHandlers = () => {
       }
       // 使用统计同意闸的一次性存量迁移:只认冷启动恢复出来的登录态。内部有 guard,
       // 多个窗口各自 initialize 只会评估一次(见 analyticsSettingsService)。
-      noteAuthColdStartState(state, pendingCompletion);
+      // 埋点是 best-effort:再包一层 catch,任何异常都不得让这次认证被判失败
+      // (那会让用户被归一成未登录)。
+      try {
+        noteAuthColdStartState(state, pendingCompletion);
+      } catch (analyticsErr) {
+        console.warn('[analytics] cold-start consent migration failed', analyticsErr);
+      }
       return state;
     } catch (err) {
       if (!app.isPackaged) {

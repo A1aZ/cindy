@@ -22,6 +22,7 @@ import {
   __testing,
   acceptPrivacyConsent,
   clearAnalyticsConsent,
+  clearAnalyticsEnabledOverride,
   getAnalyticsConsentState,
   hydrateAnalyticsConsent,
   isAnalyticsAllowed,
@@ -163,5 +164,42 @@ describe('mobile analytics consent store', () => {
 
     expect(isAnalyticsAllowed()).toBe(false);
     expect(asyncStore.has(KEY)).toBe(false);
+  });
+
+  it('keeps an explicit opt-out across logout', async () => {
+    // 撤销同意 ≠ 撤销用户对统计的长期选择。整条删掉的话,下次登录重新同意就会按
+    // 默认值恢复采集,等于静默推翻了此前的 opt-out。
+    await acceptPrivacyConsent();
+    await setAnalyticsEnabled(false);
+
+    await clearAnalyticsConsent();
+
+    expect(getAnalyticsConsentState()).toEqual({
+      consent: false,
+      enabled: false,
+      enabledCustomized: true,
+    });
+    expect(stored()).toEqual({ consent: false, enabled: false });
+
+    // 重新登录并同意后,仍然不上报。
+    await acceptPrivacyConsent();
+    expect(isAnalyticsAllowed()).toBe(false);
+  });
+
+  it('restores default-following when the override is cleared', async () => {
+    await acceptPrivacyConsent();
+    await setAnalyticsEnabled(false);
+    expect(getAnalyticsConsentState().enabledCustomized).toBe(true);
+
+    await clearAnalyticsEnabledOverride();
+
+    // 拨回 true 会写入一个显式 true,从此跟不上未来的默认值变化;恢复默认必须是
+    // 「删掉 override」而不是「写入当前默认值」。
+    expect(stored()).toEqual({ consent: true });
+    expect(getAnalyticsConsentState()).toEqual({
+      consent: true,
+      enabled: true,
+      enabledCustomized: false,
+    });
   });
 });

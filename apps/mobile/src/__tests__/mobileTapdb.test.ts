@@ -147,6 +147,41 @@ describe('mobile TapDB analytics', () => {
     expect(initializeTapdb).not.toHaveBeenCalled();
   });
 
+  it('refuses to bind a user once consent has been revoked, even after a successful init', async () => {
+    // 账号 A 同意 → SDK 已 init(initPromise 永久 resolved)→ 登出撤销同意 →
+    // 账号 B 走企业 SSO 登录(SSO 被协议门豁免,B 从没同意过)。直接复用缓存的
+    // { ok: true } 会给一个从未同意的用户绑定账号标识。
+    vi.stubEnv('EXPO_PUBLIC_TAPTAP_CLIENT_ID', 'client-id');
+    vi.stubEnv('EXPO_PUBLIC_TAPTAP_CLIENT_TOKEN', 'client-token');
+    const tapdb = await importMobileTapdb();
+    const consentStore = await import('@/analytics/analyticsConsentStore');
+
+    await tapdb.setTapdbUser('user-a');
+    expect(setTapdbUserId).toHaveBeenCalledWith('user-a');
+
+    await consentStore.clearAnalyticsConsent();
+    setTapdbUserId.mockClear();
+
+    await tapdb.setTapdbUser('user-b-via-sso');
+
+    expect(setTapdbUserId).not.toHaveBeenCalled();
+  });
+
+  it('stops binding users once the toggle is switched off', async () => {
+    vi.stubEnv('EXPO_PUBLIC_TAPTAP_CLIENT_ID', 'client-id');
+    vi.stubEnv('EXPO_PUBLIC_TAPTAP_CLIENT_TOKEN', 'client-token');
+    const tapdb = await importMobileTapdb();
+    const consentStore = await import('@/analytics/analyticsConsentStore');
+
+    await tapdb.setTapdbUser('user-1');
+    await consentStore.setAnalyticsEnabled(false);
+    setTapdbUserId.mockClear();
+
+    await tapdb.setTapdbUser('user-1');
+
+    expect(setTapdbUserId).not.toHaveBeenCalled();
+  });
+
   it('initializes on the retry that follows consent (failure is not cached)', async () => {
     asyncStore.clear();
     vi.stubEnv('EXPO_PUBLIC_TAPTAP_CLIENT_ID', 'client-id');

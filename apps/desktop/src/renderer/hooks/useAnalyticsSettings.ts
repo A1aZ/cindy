@@ -3,6 +3,8 @@ import { useCallback, useEffect, useState } from 'react';
 export interface AnalyticsSettingsState {
   privacyConsentAccepted: boolean;
   analyticsEnabled: boolean;
+  /** 用户是否显式设置过开关;false = 跟随当前默认值。 */
+  analyticsEnabledCustomized: boolean;
   /** allowed = 已同意隐私政策 && 统计开关开启。 */
   allowed: boolean;
   loading: boolean;
@@ -11,6 +13,7 @@ export interface AnalyticsSettingsState {
 const INITIAL: AnalyticsSettingsState = {
   privacyConsentAccepted: false,
   analyticsEnabled: true,
+  analyticsEnabledCustomized: false,
   allowed: false,
   loading: true,
 };
@@ -19,6 +22,7 @@ function normalize(payload: AnalyticsSettingsPayload): AnalyticsSettingsState {
   return {
     privacyConsentAccepted: payload.privacyConsentAccepted === true,
     analyticsEnabled: payload.analyticsEnabled === true,
+    analyticsEnabledCustomized: payload.analyticsEnabledCustomized === true,
     allowed: payload.allowed === true,
     loading: false,
   };
@@ -33,6 +37,7 @@ function normalize(payload: AnalyticsSettingsPayload): AnalyticsSettingsState {
 export function useAnalyticsSettings(): {
   state: AnalyticsSettingsState;
   setAnalyticsEnabled: (enabled: boolean) => Promise<void>;
+  resetAnalyticsEnabled: () => Promise<void>;
 } {
   const [state, setState] = useState<AnalyticsSettingsState>(INITIAL);
 
@@ -60,5 +65,10 @@ export function useAnalyticsSettings(): {
     setState(normalize(payload));
   }, []);
 
-  return { state, setAnalyticsEnabled };
+  const resetAnalyticsEnabled = useCallback(async () => {
+    const payload = await window.electronAPI.resetAnalyticsEnabled();
+    setState(normalize(payload));
+  }, []);
+
+  return { state, setAnalyticsEnabled, resetAnalyticsEnabled };
 }

@@ -126,6 +126,24 @@ export function migrateExistingLoginAsConsented(isSignedIn: boolean): boolean {
   return true;
 }
 
+/** enabled 是否被用户显式设置过(即盘上有这条 override)。 */
+export function isAnalyticsEnabledCustomized(): boolean {
+  return store.readState().customizedKeys.includes('analyticsEnabled');
+}
+
+/**
+ * 「恢复默认」:只删掉 enabled override,保留同意这个事实。
+ *
+ * 有了 override 语义之后这个入口是必须的 —— 用户把开关拨回当前默认值时写入的是
+ * 一个显式 true,从此不再跟随未来的默认值变化(configuration-and-overrides §4)。
+ * 传入默认值且不带 preserveDefaults,writePatch 会把这条 override 删除。
+ */
+export function clearAnalyticsEnabledOverride(): AnalyticsSettings {
+  store.writePatch({ analyticsEnabled: DEFAULTS.analyticsEnabled });
+  log.info('analytics enabled override cleared');
+  return store.read();
+}
+
 /** 仅用于测试与显式的本机数据清理;会让用户回到「未同意」。 */
 export function resetAnalyticsSettings(): AnalyticsSettings {
   return store.reset();

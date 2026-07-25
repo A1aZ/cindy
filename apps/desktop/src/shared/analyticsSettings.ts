@@ -10,6 +10,8 @@ export interface AnalyticsSettingsPayload {
   privacyConsentAccepted: boolean;
   /** 同意之后的统计开关(opt-out),默认开启。 */
   analyticsEnabled: boolean;
+  /** 用户是否显式设置过开关(盘上有 override)。false = 跟随当前默认值。 */
+  analyticsEnabledCustomized: boolean;
   /** 是否允许初始化 TapDB / 继续上报 = privacyConsentAccepted && analyticsEnabled。 */
   allowed: boolean;
 }

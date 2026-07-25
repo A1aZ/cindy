@@ -218,8 +218,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const [initialized, setInitialized] = useState(false);
-  /** 使用统计同意闸的存量迁移只在冷启动评估一次(见下方 tapdb effect)。 */
-  const coldStartConsentEvaluated = useRef(false);
   const [isBusy, setIsBusy] = useState(false);
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const deviceIdRef = useRef<string | null>(null);
@@ -584,6 +582,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         } catch {
           // transient:保留降级会话,由下方自愈 effect 自动补刷 token。
         }
+        // 使用统计同意闸的一次性存量迁移。放在这里而不是下面的 tapdb effect 里,
+        // 有两个原因:
+        //  1. 判定必须等 refresh 结束——只看 effect 首次触发时的 user,会漏掉
+        //     「有 refresh token 但本地 profile 缺失、靠 refresh 才拿回用户」的
+        //     存量用户,他们的迁移窗口会被提前关死。
+        //  2. 必须 await。迁移写 AsyncStorage 是异步的,而 effect 里的
+        //     setTapdbUser() 是 fire-and-forget:两者并发时后者几乎必然读到
+        //     consent:false 拿到 not_consented,且此后不再重试,整次启动都不上报。
+        // 迁移只认冷启动恢复出来的登录态:登录页的协议门豁免企业 SSO,那些用户
+        // 从没点过「同意」,不能被这里推定。
+        if (!cancelled && userRef.current) {
+          await migrateExistingLoginAsConsented().catch(() => undefined);
+        }
       } finally {
         if (!cancelled) {
           setIsBusy(false);
@@ -651,16 +662,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [accessToken, applyUser, initialized, refresh, user]);
 
+  // 存量同意迁移已在冷启动流程里 await 完成(见上方 initialize),这里只负责绑定
+  // 账号标识 —— initialized 变 true 时迁移必然已经落盘。
   useEffect(() => {
     if (!initialized) return;
-    // 使用统计同意闸的一次性存量迁移:只认**冷启动恢复出来的**登录态。
-    // 登录页的协议门豁免企业 SSO 入口,走 SSO 的用户从没点过「同意」;如果这里
-    // 改成"任何时候看到登录就算同意",新的 SSO 登录会被误判。冷启动恢复的会话
-    // 则是本次改动之前就存在的,属于产品拍板(2026-07-25)的"不再二次打扰"范围。
-    if (!coldStartConsentEvaluated.current) {
-      coldStartConsentEvaluated.current = true;
-      if (user?.id) void migrateExistingLoginAsConsented().catch(() => undefined);
-    }
     if (user?.id) void setTapdbUser(user.id);
     else void clearTapdbUser();
   }, [initialized, user?.id]);

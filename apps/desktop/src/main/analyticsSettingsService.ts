@@ -17,7 +17,9 @@ import { BrowserWindow, ipcMain } from 'electron';
 import * as authManager from './authManager';
 import {
   acceptPrivacyConsent,
+  clearAnalyticsEnabledOverride,
   isAnalyticsAllowed,
+  isAnalyticsEnabledCustomized,
   migrateExistingLoginAsConsented,
   readAnalyticsSettings,
   setAnalyticsEnabled,
@@ -58,6 +60,7 @@ export function analyticsSettingsPayload(): AnalyticsSettingsPayload {
   return {
     privacyConsentAccepted: value.privacyConsentAccepted,
     analyticsEnabled: value.analyticsEnabled,
+    analyticsEnabledCustomized: isAnalyticsEnabledCustomized(),
     allowed: isAnalyticsAllowed(),
   };
 }
@@ -85,6 +88,21 @@ function broadcastSettingsChange(): void {
  * 迁移本身还有第二道闸:store 里已经有 override 时一律跳过(见
  * analytics-settings-store.migrateExistingLoginAsConsented)。
  */
+/**
+ * 迁移是 best-effort 的埋点工作,**绝不能把登录拖下水**。
+ *
+ * 调用点在 `auth:initialize` 的 try 块里:userData 只读或写满时 writePatch 会同步
+ * 抛出,那个异常会让一次本来成功的认证被判失败,renderer 直接把用户归一成未登录。
+ * 写不进去就写不进去,下次冷启动还有机会;登录不能因此断。
+ */
+function migrateOrLog(): void {
+  try {
+    if (migrateExistingLoginAsConsented(true)) broadcastSettingsChange();
+  } catch (err) {
+    log.warn('existing-login consent migration failed (non-fatal)', err);
+  }
+}
+
 export function noteAuthColdStartState(
   state: { isAuthenticated: boolean },
   pendingCompletion: Promise<{ isAuthenticated: boolean }> | null,
@@ -94,7 +112,7 @@ export function noteAuthColdStartState(
   const signedIn = state.isAuthenticated || authManager.isLocalMode();
   if (signedIn) {
     migrationEvaluated = true;
-    if (migrateExistingLoginAsConsented(true)) broadcastSettingsChange();
+    migrateOrLog();
     return;
   }
 
@@ -106,7 +124,7 @@ export function noteAuthColdStartState(
         if (migrationEvaluated) return;
         migrationEvaluated = true;
         const finalSignedIn = finalState.isAuthenticated || authManager.isLocalMode();
-        if (finalSignedIn && migrateExistingLoginAsConsented(true)) broadcastSettingsChange();
+        if (finalSignedIn) migrateOrLog();
       })
       .catch(() => {
         migrationEvaluated = true;
@@ -135,6 +153,18 @@ export function initAnalyticsSettingsService(): void {
     // payload 只信运行时校验过的布尔;非布尔一律当关闭处理(fail closed)。
     const enabled = rawEnabled === true;
     writeOrThrowIpcError(() => setAnalyticsEnabled(enabled), 'write analytics setting failed');
+    broadcastSettingsChange();
+    return analyticsSettingsPayload();
+  });
+
+  // 「恢复默认」= 删掉 enabled override 跟随当前默认值,同意事实不动
+  // (configuration-and-overrides §4)。
+  ipcMain.handle('analytics:settings-reset-enabled', (event) => {
+    assertTrustedAppRendererEvent(event);
+    writeOrThrowIpcError(
+      () => clearAnalyticsEnabledOverride(),
+      'clear analytics enabled override failed',
+    );
     broadcastSettingsChange();
     return analyticsSettingsPayload();
   });

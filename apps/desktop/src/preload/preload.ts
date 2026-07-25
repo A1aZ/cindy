@@ -1276,6 +1276,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('analytics:settings-get'),
   setAnalyticsEnabled: (enabled: boolean): Promise<AnalyticsSettingsPayload> =>
     ipcRenderer.invoke('analytics:settings-set-enabled', enabled === true),
+  /** 恢复默认:删掉开关 override,同意事实保留。 */
+  resetAnalyticsEnabled: (): Promise<AnalyticsSettingsPayload> =>
+    ipcRenderer.invoke('analytics:settings-reset-enabled'),
   /** 登录页协议门放行时调用一次(含游客);幂等。 */
   acceptPrivacyConsent: (): Promise<AnalyticsSettingsPayload> =>
     ipcRenderer.invoke('analytics:consent-accept'),
@@ -1283,13 +1286,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
     callback: (payload: AnalyticsSettingsPayload) => void,
   ): (() => void) =>
     fanOutAnalyticsSettingsChange((payload) => {
+      // 三个字段全部逐个校验后才放行:preload 是边界,不能只认 allowed 就把整个
+      // 对象 cast 过去 —— 形状漂移或收到意外消息时,renderer 会拿到隐式 falsy 值。
+      if (!payload || typeof payload !== 'object') return;
+      const raw = payload as Record<string, unknown>;
       if (
-        payload &&
-        typeof payload === 'object' &&
-        typeof (payload as { allowed?: unknown }).allowed === 'boolean'
+        typeof raw.allowed !== 'boolean' ||
+        typeof raw.privacyConsentAccepted !== 'boolean' ||
+        typeof raw.analyticsEnabled !== 'boolean' ||
+        typeof raw.analyticsEnabledCustomized !== 'boolean'
       ) {
-        callback(payload as AnalyticsSettingsPayload);
+        return;
       }
+      callback({
+        privacyConsentAccepted: raw.privacyConsentAccepted,
+        analyticsEnabled: raw.analyticsEnabled,
+        analyticsEnabledCustomized: raw.analyticsEnabledCustomized,
+        allowed: raw.allowed,
+      });
     }),
 
   // Slack 官方 MCP(slackOfficial)已于 2026-07-15 退役(能力迁入内置意识 cindy-slack);

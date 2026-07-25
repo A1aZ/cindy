@@ -88,16 +88,31 @@ function startInit(): Promise<MobileTapdbInitStatus> {
   return initPromise;
 }
 
-export async function setTapdbUser(userId: string): Promise<void> {
+/**
+ * 每次用到 SDK 之前都要重新问一遍同意闸,不能只信 `initPromise` 的缓存结果。
+ *
+ * 反例:账号 A 同意过 → SDK 已 init(initPromise 永久 resolved)→ 登出撤销同意 →
+ * 账号 B 走企业 SSO 登录(SSO 被协议门豁免,B 从没同意过)。若直接复用缓存的
+ * `{ ok: true }`,就会给一个从未同意的用户绑定账号标识并上报。
+ */
+async function ensureReportingAllowed(): Promise<boolean> {
+  await hydrateAnalyticsConsent();
+  if (!isAnalyticsAllowed()) return false;
   const status = await initMobileTapdb();
-  if (!status.ok) return;
+  return status.ok;
+}
+
+export async function setTapdbUser(userId: string): Promise<void> {
+  if (!(await ensureReportingAllowed())) return;
   await setTapdbUserId(userId).catch(() => undefined);
 }
 
 export async function clearTapdbUser(): Promise<void> {
-  // 只对已经 init 的实例有意义。未同意时 initMobileTapdb 返回 not_consented,
-  // 这里直接跳过——不会因为一次登出把 SDK 拉起来。
-  const status = await initMobileTapdb();
+  // 只对已经 init 的实例有意义;没 init 过就没什么可解绑的,更不该为了一次登出
+  // 把 SDK 拉起来。这里不用 ensureReportingAllowed:解绑是"减少"而非"开始"采集,
+  // 撤销同意后仍然应该允许执行。
+  if (!initPromise) return;
+  const status = await initPromise;
   if (!status.ok) return;
   await clearNativeTapdbUser().catch(() => undefined);
 }

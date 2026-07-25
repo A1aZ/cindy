@@ -120,6 +120,19 @@ describe('cold-start consent migration', () => {
     expect(migrateExistingLoginAsConsented).toHaveBeenCalledTimes(1);
   });
 
+  it('never lets a failing migration break authentication', async () => {
+    // 调用点在 auth:initialize 的 try 块里。userData 只读或写满时 writePatch 会同步
+    // 抛出,若不吞掉,一次本来成功的认证会被判失败,renderer 直接把用户归一成未登录。
+    // 埋点写不进去就算了,登录不能断。
+    migrateExistingLoginAsConsented.mockImplementation(() => {
+      throw new Error('EROFS: read-only file system');
+    });
+    const service = await importService();
+
+    expect(() => service.noteAuthColdStartState({ isAuthenticated: true }, null)).not.toThrow();
+    expect(migrateExistingLoginAsConsented).toHaveBeenCalledTimes(1);
+  });
+
   it('closes the migration window when the pending cold start rejects', async () => {
     const service = await importService();
 

@@ -319,12 +319,13 @@ function AutoUpdateToggleRow() {
  * 关掉即时生效(main 广播 → tapdbClient 走 SDK optOutTracking,连 autoTrack 的
  * 自动事件也会停),不需要重启。
  *
- * 没有「恢复默认」按钮:开关本身的默认值就是开启,再叠一个 reset 只会让语义变糊;
- * 而同意状态是事实记录、不是配置项,不该被「恢复默认」清掉。
+ * 「恢复默认」只删掉开关这条 override,让它重新跟随版本默认值;同意状态是事实记录、
+ * 不是配置项,不会被它清掉(configuration-and-overrides §4)。没有这个入口的话,
+ * 用户把开关拨回当前默认值写入的是一个显式 true,此后再也跟不上默认值的变化。
  */
 function AnalyticsToggleRow() {
   const { t } = useTranslation();
-  const { state, setAnalyticsEnabled } = useAnalyticsSettings();
+  const { state, setAnalyticsEnabled, resetAnalyticsEnabled } = useAnalyticsSettings();
   const [saving, setSaving] = useState(false);
 
   const handleToggle = async (next: boolean) => {
@@ -343,6 +344,18 @@ function AnalyticsToggleRow() {
     }
   };
 
+  const handleReset = async () => {
+    setSaving(true);
+    try {
+      await resetAnalyticsEnabled();
+      toast.success(t('settings.defaults.restored'));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t('settings.defaults.restoreFailed'));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="flex flex-col gap-1.5 px-[18px] py-4">
       <div className="flex items-center justify-between gap-3">
@@ -355,6 +368,11 @@ function AnalyticsToggleRow() {
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          <DefaultOverrideControls
+            isCustomized={state.analyticsEnabledCustomized}
+            disabled={state.loading || saving}
+            onReset={handleReset}
+          />
           <Switch
             checked={state.analyticsEnabled}
             disabled={state.loading || saving}

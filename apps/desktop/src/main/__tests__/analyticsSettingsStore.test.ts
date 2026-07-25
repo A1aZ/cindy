@@ -160,6 +160,34 @@ describe('analytics settings store', () => {
     expect(store.isAnalyticsAllowed()).toBe(false);
   });
 
+  it('clears only the enabled override on reset, keeping the consent fact', async () => {
+    const store = await importStore();
+    store.acceptPrivacyConsent();
+    store.setAnalyticsEnabled(false);
+    expect(store.isAnalyticsEnabledCustomized()).toBe(true);
+
+    store.clearAnalyticsEnabledOverride();
+
+    // 拨回 true 会写入一个显式 true,此后跟不上未来的默认值变化;恢复默认必须是
+    // 「删掉 override」而不是「写入当前默认值」。
+    expect(store.isAnalyticsEnabledCustomized()).toBe(false);
+    expect(JSON.parse(fs.readFileSync(settingsFile(), 'utf-8'))).toEqual({
+      privacyConsentAccepted: true,
+    });
+    expect(store.isAnalyticsAllowed()).toBe(true);
+  });
+
+  it('tracks whether the toggle was explicitly set', async () => {
+    const store = await importStore();
+    store.acceptPrivacyConsent();
+
+    // 同意 ≠ 动过开关。
+    expect(store.isAnalyticsEnabledCustomized()).toBe(false);
+
+    store.setAnalyticsEnabled(true);
+    expect(store.isAnalyticsEnabledCustomized()).toBe(true);
+  });
+
   it('refuses to migrate when a record exists but carries no overrides', async () => {
     fs.writeFileSync(settingsFile(), '{}', 'utf-8');
     const store = await importStore();

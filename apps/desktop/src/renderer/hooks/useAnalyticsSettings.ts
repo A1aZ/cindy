@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 export interface AnalyticsSettingsState {
   privacyConsentAccepted: boolean;
@@ -40,6 +40,12 @@ export function useAnalyticsSettings(): {
   resetAnalyticsEnabled: () => Promise<void>;
 } {
   const [state, setState] = useState<AnalyticsSettingsState>(INITIAL);
+  /**
+   * 每收到一次广播 +1。写操作的 IPC 响应回来时比对这个计数:
+   * 期间若有更新的广播(例如另一个窗口又改了一次),这份旧响应就不能再写进 state,
+   * 否则设置页会显示成过期的开关值,与实际生效的隐私选择不一致。
+   */
+  const broadcastCountRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -60,6 +66,7 @@ export function useAnalyticsSettings(): {
     const unsubscribe = window.electronAPI.onAnalyticsSettingsChange((payload) => {
       if (cancelled) return;
       sawBroadcast = true;
+      broadcastCountRef.current += 1;
       setState(normalize(payload));
     });
     return () => {
@@ -69,12 +76,17 @@ export function useAnalyticsSettings(): {
   }, []);
 
   const setAnalyticsEnabled = useCallback(async (enabled: boolean) => {
+    const at = broadcastCountRef.current;
     const payload = await window.electronAPI.setAnalyticsEnabled(enabled);
+    // 期间来过更新的广播 → 那份状态比这个响应新,丢弃本次结果。
+    if (broadcastCountRef.current !== at) return;
     setState(normalize(payload));
   }, []);
 
   const resetAnalyticsEnabled = useCallback(async () => {
+    const at = broadcastCountRef.current;
     const payload = await window.electronAPI.resetAnalyticsEnabled();
+    if (broadcastCountRef.current !== at) return;
     setState(normalize(payload));
   }, []);
 

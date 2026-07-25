@@ -66,6 +66,11 @@ let reportingAllowed = false;
  * guard 同时看这两个值,才能既 fail closed 又不把重试吃掉。
  */
 let sdkAppliedAllowed: boolean | null = null;
+/** init/opt-in 之后的启动上报(superProperties + app_start)是否已完成。 */
+let startupReported = false;
+let optOutRetryTimer: ReturnType<typeof setTimeout> | null = null;
+const OPT_OUT_MAX_ATTEMPTS = 4;
+const OPT_OUT_RETRY_BASE_MS = 1_000;
 /** 每收到一次广播 +1;用于丢弃 IPC 往返期间已经过期的初始快照。 */
 let settingsEpoch = 0;
 let currentUserId: string | null = null;
@@ -137,11 +142,11 @@ export function initTapdb(): void {
   // 一条带 deviceId 的 beacon。这里改由 reportPageHide 统一把关。
   try {
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) return;
-      reportPageHide();
+      if (document.hidden) reportPageHide();
+      else reportPageShow();
     });
   } catch (err) {
-    log.error('page_hide subscription failed (non-fatal)', err);
+    log.error('page visibility subscription failed (non-fatal)', err);
   }
 
   // 同意 / 开关变化即时生效,不必等下次冷启动。
@@ -188,6 +193,20 @@ function reportPageHide(): void {
   }
 }
 
+/**
+ * page_show 上报。不带 SDK 的 pageProperties(#url / #title / #referrer 在 Electron
+ * 里只是本地路径和窗口标题),并补上 SDK 原本会打的 timeEvent,保持时长口径。
+ */
+function reportPageShow(): void {
+  if (!sdkInitialized || !reportingAllowed) return;
+  try {
+    TapDBAPI.track('page_show');
+    TapDBAPI.timeEvent('page_hide');
+  } catch (err) {
+    log.error('page_show report failed (non-fatal)', err);
+  }
+}
+
 /** 把 main 的结论落到 SDK:首次放行 → init;关闭 → opt-out;重新放行 → opt-in。 */
 function applyReportingAllowed(next: boolean): void {
   // 只有「用户意图」和「SDK 已应用状态」都已经等于目标值时才可以早返回。
@@ -213,11 +232,7 @@ function applyReportingAllowed(next: boolean): void {
       // page_show 与我们所有主动上报都会被挡下。
       // page_hide 不在此列 —— SDK 的 beacon 路径没有这道闸,所以我们没有开启
       // autoTrack.pageHide,改由 reportPageHide 自己守闸(见 initTapdb)。
-      TapDBAPI.optOutTracking();
-      sdkAppliedAllowed = false;
-      lastActiveDate = null;
-      lastSetUserDate = null;
-      log.info('reporting disabled (opt-out)');
+      applySdkOptOut();
       return;
     }
 
@@ -225,24 +240,68 @@ function applyReportingAllowed(next: boolean): void {
       // initSdk 自己在成功后置 sdkInitialized;失败时保持未初始化,下次广播重试。
       initSdk();
       if (!sdkInitialized) return;
-      reportingAllowed = true;
-      sdkAppliedAllowed = true;
-      return;
+    } else {
+      // 已 init 过、中途被关掉:重新放行要恢复 opt_tracking。
+      TapDBAPI.optInTracking();
     }
-
-    // 已 init 过、中途被关掉:重新放行要恢复 opt_tracking 与 superProperties
-    // (optOutTracking 把它们清空了)。
-    TapDBAPI.optInTracking();
-    applySuperProperties();
+    // 后置步骤(superProperties + app_start)可能自己抛。它成功与否单独记账,
+    // 否则 sdkInitialized 一置 true 就被当成整体成功,漏掉的属性和 app_start
+    // 事件在本进程内再也补不回来。
     reportingAllowed = true;
-    sdkAppliedAllowed = true;
-    reportActive('app_start');
-    log.info('reporting re-enabled (opt-in)');
+    runStartupReport();
+    sdkAppliedAllowed = startupReported ? true : null;
+    if (startupReported) log.info('reporting enabled');
   } catch (err) {
     // sdkAppliedAllowed 没提交 = 下一次同值广播不会被 guard 挡掉,会重新尝试。
     // 关闭方向上 reportingAllowed 已经是 false,期间我们自己一条都不会发。
     log.error('apply analytics permission failed; will retry on next change', err);
   }
+}
+
+/**
+ * 把 opt-out 真正落到 SDK,失败则自行重排重试。
+ *
+ * 不能只靠「下次广播时重试」:main 只在设置变更时广播,用户不会再动一次开关,
+ * 于是 SDK 内部的采集标志一直是开的 —— 它自己安装的 PageLifeCycle 监听器会继续
+ * 发 page_show。这里显式排重试,直到 SDK 侧确实关掉。
+ */
+function applySdkOptOut(attempt = 0): void {
+  try {
+    // enableTracking 与 optOutTracking 是两个独立标志,_isCollectData() 要求两者
+    // 同时为真。两个都关,任何一个写成功都能挡住 SDK 的自动事件。
+    TapDBAPI.enableTracking(false);
+    TapDBAPI.optOutTracking();
+    sdkAppliedAllowed = false;
+    lastActiveDate = null;
+    lastSetUserDate = null;
+    startupReported = false;
+    if (optOutRetryTimer !== null) {
+      clearTimeout(optOutRetryTimer);
+      optOutRetryTimer = null;
+    }
+    log.info('reporting disabled (opt-out)');
+  } catch (err) {
+    log.error(`opt-out failed (attempt ${attempt + 1}); scheduling retry`, err);
+    if (attempt + 1 >= OPT_OUT_MAX_ATTEMPTS || optOutRetryTimer !== null) return;
+    optOutRetryTimer = setTimeout(() => {
+      optOutRetryTimer = null;
+      // 期间用户可能又把统计打开了,那就不该再关。
+      if (reportingAllowed) return;
+      applySdkOptOut(attempt + 1);
+    }, OPT_OUT_RETRY_BASE_MS * 2 ** attempt);
+  }
+}
+
+/**
+ * init / opt-in 之后的启动上报:super properties + 一次 app_start。
+ * 单独记账,失败时 startupReported 保持 false,下次广播会重来(不会重复 init)。
+ */
+function runStartupReport(): void {
+  applySuperProperties();
+  reportActive('app_start');
+  // SDK 的 autoTrack.pageShow 已关,首次的 page_show / timeEvent 由我们补。
+  reportPageShow();
+  startupReported = true;
 }
 
 function initSdk(): void {
@@ -257,13 +316,15 @@ function initSdk(): void {
       // init 时自动上报一个 device_login 事件。TapDB 后台用 device_login 认定
       // "新增设备"指标 — pvEvent / page_view 都不算数,必须开这个。
       isInitDeviceLogin: true,
-      // 自动采集页面展示,用于会话时长统计。
-      // pageHide 必须保持 false:SDK 的 trackPageHideEvent 走 trackWithBeacon,
-      // 那条路径没有 _isCollectData() 闸,opt-out 之后依然会发。我们自己监听
-      // visibilitychange 并在 reportPageHide 里守闸(时长仍由 SDK 在
-      // trackPageShowEvent 里打的 timeEvent(page_hide) 计算,口径不变)。
+      // 两个自动采集都关掉,page_show / page_hide 全部由本模块自己发:
+      //  - pageHide:SDK 的 trackPageHideEvent 走 trackWithBeacon,那条路径没有
+      //    _isCollectData() 闸,opt-out 之后依然会发
+      //  - pageShow:SDK 会附带 _.info.pageProperties(),即 #url / #url_path /
+      //    #title / #referrer。在 Electron 里这些是本地 file:// 路径和窗口标题,
+      //    对统计没有价值,却是实打实的额外采集面
+      // 会话时长口径不变:我们自己在 reportPageShow 里补 timeEvent('page_hide')。
       autoTrack: {
-        pageShow: true,
+        pageShow: false,
         pageHide: false,
       },
     });
@@ -275,8 +336,6 @@ function initSdk(): void {
     TapDBAPI.optInTracking();
 
     sdkInitialized = true;
-    applySuperProperties();
-    reportActive('app_start');
     log.info(`initialized, appId=${TAPDB_CONFIG.appId}`);
   } catch (err) {
     // SDK 自身崩溃绝不能影响主流程
@@ -339,6 +398,11 @@ export const __testing = {
     sdkInitialized = false;
     reportingAllowed = false;
     sdkAppliedAllowed = null;
+    startupReported = false;
+    if (optOutRetryTimer !== null) {
+      clearTimeout(optOutRetryTimer);
+      optOutRetryTimer = null;
+    }
     settingsEpoch = 0;
     currentUserId = null;
     lastActiveDate = null;

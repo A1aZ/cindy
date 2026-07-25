@@ -22,19 +22,30 @@ vi.mock('../security/trustedAppRenderer.js', () => ({
 }));
 
 const isLocalMode = vi.fn(() => false);
+const isAuthenticated = vi.fn(() => false);
+let authListener: (() => void) | null = null;
 vi.mock('../authManager', () => ({
   isLocalMode: () => isLocalMode(),
-  getAuthState: () => ({ isAuthenticated: false }),
-  onAuthStateChange: () => () => {},
+  getAuthState: () => ({ isAuthenticated: isAuthenticated() }),
+  onAuthStateChange: (listener: () => void) => {
+    authListener = listener;
+    return () => {
+      authListener = null;
+    };
+  },
 }));
 
 const migrateExistingLoginAsConsented = vi.fn((_signedIn: boolean) => true);
+const revokePrivacyConsent = vi.fn(() => true);
 vi.mock('../analytics-settings-store', () => ({
   migrateExistingLoginAsConsented: (signedIn: boolean) =>
     migrateExistingLoginAsConsented(signedIn),
+  revokePrivacyConsent: () => revokePrivacyConsent(),
   acceptPrivacyConsent: vi.fn(),
   setAnalyticsEnabled: vi.fn(),
+  clearAnalyticsEnabledOverride: vi.fn(),
   isAnalyticsAllowed: () => false,
+  isAnalyticsEnabledCustomized: () => false,
   readAnalyticsSettings: () => ({ privacyConsentAccepted: false, analyticsEnabled: true }),
 }));
 
@@ -45,8 +56,12 @@ async function importService() {
 
 beforeEach(() => {
   isLocalMode.mockReturnValue(false);
+  isAuthenticated.mockReturnValue(false);
+  authListener = null;
   migrateExistingLoginAsConsented.mockClear();
   migrateExistingLoginAsConsented.mockReturnValue(true);
+  revokePrivacyConsent.mockClear();
+  revokePrivacyConsent.mockReturnValue(true);
 });
 
 afterEach(() => {
@@ -131,6 +146,53 @@ describe('cold-start consent migration', () => {
 
     expect(() => service.noteAuthColdStartState({ isAuthenticated: true }, null)).not.toThrow();
     expect(migrateExistingLoginAsConsented).toHaveBeenCalledTimes(1);
+  });
+
+  it('revokes consent when a session ends', async () => {
+    // 登出后设置页不可达,而 tapdbClient 仍挂着;下一个用户还可能走协议门豁免的
+    // 企业 SSO 登录,拿上一位用户的同意把新账号绑上去。
+    isAuthenticated.mockReturnValue(true);
+    const service = await importService();
+    service.initAnalyticsSettingsService();
+
+    isAuthenticated.mockReturnValue(false);
+    authListener?.();
+
+    expect(revokePrivacyConsent).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not revoke on a cold start that was never signed in', async () => {
+    const service = await importService();
+    service.initAnalyticsSettingsService();
+
+    authListener?.();
+
+    expect(revokePrivacyConsent).not.toHaveBeenCalled();
+  });
+
+  it('revokes only once per session boundary', async () => {
+    isAuthenticated.mockReturnValue(true);
+    const service = await importService();
+    service.initAnalyticsSettingsService();
+
+    isAuthenticated.mockReturnValue(false);
+    authListener?.();
+    authListener?.();
+    authListener?.();
+
+    expect(revokePrivacyConsent).toHaveBeenCalledTimes(1);
+  });
+
+  it('never lets a revoke failure break the logout flow', async () => {
+    revokePrivacyConsent.mockImplementation(() => {
+      throw new Error('EROFS: read-only file system');
+    });
+    isAuthenticated.mockReturnValue(true);
+    const service = await importService();
+    service.initAnalyticsSettingsService();
+
+    isAuthenticated.mockReturnValue(false);
+    expect(() => authListener?.()).not.toThrow();
   });
 
   it('closes the migration window when the pending cold start rejects', async () => {

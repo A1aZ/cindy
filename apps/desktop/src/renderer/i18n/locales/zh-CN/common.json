@@ -651,6 +651,7 @@
       "analyticsEnabledToast": "已开启使用统计",
       "analyticsDisabledToast": "已关闭使用统计",
       "analyticsSaveFailed": "保存使用统计设置失败",
+      "analyticsConsentRequired": "你尚未同意《隐私政策》，因此当前不会上报任何统计信息。",
       "debugLogLabel": "Debug 日志",
       "debugLogDescription": "开启后输出全量调试日志：main/maker logger 抬到 debug 级，新建的 Claude Code 会话额外输出 API 请求 URL/状态/耗时、Node 层 DNS/TCP/TLS 握手时序，以及 SDK 内部信息。日志量较大,定位问题后请关闭。dev 模式下始终开启。",
       "social": {

@@ -651,6 +651,7 @@
       "analyticsEnabledToast": "사용 통계를 켰습니다",
       "analyticsDisabledToast": "사용 통계를 껐습니다",
       "analyticsSaveFailed": "사용 통계 설정을 저장하지 못했습니다",
+      "analyticsConsentRequired": "개인정보 처리방침에 동의하지 않았으므로 현재 통계 정보를 전혀 전송하지 않습니다.",
       "debugLogLabel": "디버그 로그",
       "debugLogDescription": "활성화하면 전체 디버그 로그를 출력합니다: main/maker logger가 debug 레벨로 올라가며, 새 Claude Code 세션은 API 요청 URL/상태/지연 시간, Node 레벨 DNS/TCP/TLS 핸드셰이크 타이밍 및 SDK 내부 정보도 출력합니다. 로그 양이 많으므로 문제 해결 후에는 꺼주세요. dev 모드에서는 항상 켜져 있습니다.",
       "social": {

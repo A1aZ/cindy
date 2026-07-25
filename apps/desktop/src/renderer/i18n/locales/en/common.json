@@ -651,6 +651,7 @@
       "analyticsEnabledToast": "Usage statistics enabled",
       "analyticsDisabledToast": "Usage statistics disabled",
       "analyticsSaveFailed": "Failed to save usage statistics settings",
+      "analyticsConsentRequired": "You haven't accepted the Privacy Policy, so nothing is being reported right now.",
       "debugLogLabel": "Debug logs",
       "debugLogDescription": "When enabled, emits verbose debug logs: main/maker logger raised to debug level; new Claude Code sessions also log API request URL/status/latency, Node-level DNS/TCP/TLS handshake timing, and SDK internals. Output is large — turn off after troubleshooting. Always on in dev mode.",
       "social": {

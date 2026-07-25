@@ -369,16 +369,25 @@ function AnalyticsToggleRow() {
           <p className="text-12 leading-[1.4] text-[var(--settings-section-sublabel)] opacity-70">
             {t('settings.about.analyticsDescription')}
           </p>
+          {/* 没同意过隐私政策时(企业 SSO 入口被协议门豁免),开关拨到哪都不会采集。
+              这里如实说明原因,而不是让它显示成「开」却什么都不发。 */}
+          {!state.loading && !state.privacyConsentAccepted ? (
+            <p className="text-12 leading-[1.4] text-[var(--settings-section-sublabel)] opacity-70">
+              {t('settings.about.analyticsConsentRequired')}
+            </p>
+          ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <DefaultOverrideControls
             isCustomized={state.analyticsEnabledCustomized}
-            disabled={state.loading || saving}
+            disabled={state.loading || saving || !state.privacyConsentAccepted}
             onReset={handleReset}
           />
+          {/* checked 用 allowed 而不是 analyticsEnabled:后者只是开关 override,
+              未同意时它是 true 但实际一个字节都不会发,显示成「开」属于误导。 */}
           <Switch
-            checked={state.analyticsEnabled}
-            disabled={state.loading || saving}
+            checked={state.allowed}
+            disabled={state.loading || saving || !state.privacyConsentAccepted}
             onCheckedChange={handleToggle}
             aria-label={t('settings.about.analyticsLabel')}
           />

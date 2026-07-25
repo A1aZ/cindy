@@ -194,6 +194,43 @@ describe('analytics settings store', () => {
     expect(store.isAnalyticsAllowed()).toBe(true);
   });
 
+  it('revokes consent at the session boundary but keeps the opt-out override', async () => {
+    // 登出后设置页不可达,而 tapdbClient 仍挂着;更关键的是下一个用户可能走
+    // 协议门豁免的企业 SSO 登录,auth 监听器会拿上一位用户的同意把新账号绑上去。
+    const store = await importStore();
+    store.acceptPrivacyConsent();
+    store.setAnalyticsEnabled(false);
+
+    expect(store.revokePrivacyConsent()).toBe(true);
+
+    expect(store.readAnalyticsSettings()).toEqual({
+      privacyConsentAccepted: false,
+      analyticsEnabled: false,
+    });
+    expect(store.isAnalyticsAllowed()).toBe(false);
+    // 显式 opt-out 是独立于「这次登录同意过没有」的长期选择,不能被一起抹掉。
+    expect(store.isAnalyticsEnabledCustomized()).toBe(true);
+  });
+
+  it('revoking is a no-op when there was no consent to begin with', async () => {
+    const store = await importStore();
+
+    expect(store.revokePrivacyConsent()).toBe(false);
+    expect(store.isAnalyticsAllowed()).toBe(false);
+  });
+
+  it('leaves a record behind after revocation so migration cannot resurrect consent', async () => {
+    // 撤销后盘上必须留痕(privacyConsentAccepted: false),否则下次冷启动会命中
+    // 「无记录 + 已登录 → 存量迁移」,把一个刚被撤销的同意又推定回来。
+    const store = await importStore();
+    store.acceptPrivacyConsent();
+    store.revokePrivacyConsent();
+
+    const reloaded = await importStore();
+    expect(reloaded.migrateExistingLoginAsConsented(true)).toBe(false);
+    expect(reloaded.isAnalyticsAllowed()).toBe(false);
+  });
+
   it('tracks whether the toggle was explicitly set', async () => {
     const store = await importStore();
     store.acceptPrivacyConsent();

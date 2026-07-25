@@ -22,6 +22,7 @@ import {
   isAnalyticsEnabledCustomized,
   migrateExistingLoginAsConsented,
   readAnalyticsSettings,
+  revokePrivacyConsent,
   setAnalyticsEnabled,
 } from './analytics-settings-store';
 import { createLogger } from './logger';
@@ -38,6 +39,9 @@ const log = createLogger('analytics-settings');
 let ipcRegistered = false;
 /** 存量迁移只评估一次;评估过就不再看任何后续登录。 */
 let migrationEvaluated = false;
+/** 本进程内是否出现过登录/本地模式会话 —— 用于识别「会话结束」这一次转变。 */
+let hadSession = false;
+let unsubscribeAuth: (() => void) | null = null;
 
 /**
  * 落盘失败翻译成统一 IPC 错误协议。
@@ -140,6 +144,26 @@ export function noteAuthColdStartState(
   migrationEvaluated = true;
 }
 
+/**
+ * 会话边界撤销同意。由 auth 状态订阅驱动:只在「曾经是登录/本地模式 → 现在不是」
+ * 的那一次转变上触发,不会误伤冷启动时本来就未登录的情形。
+ */
+function handleAuthStateForConsent(): void {
+  const signedIn = authManager.getAuthState().isAuthenticated || authManager.isLocalMode();
+  if (signedIn) {
+    hadSession = true;
+    return;
+  }
+  if (!hadSession) return;
+  hadSession = false;
+  try {
+    if (revokePrivacyConsent()) broadcastSettingsChange();
+  } catch (err) {
+    // 撤销失败不能影响登出流程本身。
+    log.warn('revoke consent at session boundary failed (non-fatal)', err);
+  }
+}
+
 export function initAnalyticsSettingsService(): void {
   if (ipcRegistered) {
     log.warn('initAnalyticsSettingsService called twice, ignoring');
@@ -180,8 +204,16 @@ export function initAnalyticsSettingsService(): void {
     return analyticsSettingsPayload();
   });
 
+  // 会话边界撤销同意(登出 / 退出本地模式)。
+  handleAuthStateForConsent();
+  unsubscribeAuth = authManager.onAuthStateChange(() => {
+    handleAuthStateForConsent();
+  });
+
   onQuit('analytics-settings', () => {
     ipcRegistered = false;
+    unsubscribeAuth?.();
+    unsubscribeAuth = null;
   });
 }
 

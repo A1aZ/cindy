@@ -18,10 +18,12 @@ const tapdb = vi.hoisted(() => ({
   setSuperProperties: vi.fn(),
   pvEvent: vi.fn(),
   track: vi.fn(),
+  timeEvent: vi.fn(),
   setUser: vi.fn(),
   logout: vi.fn(),
   optInTracking: vi.fn(),
   optOutTracking: vi.fn(),
+  enableTracking: vi.fn(),
 }));
 
 vi.mock('@/vendor/tapdb/tapdb.esm.min.js', () => ({ default: tapdb }));
@@ -78,6 +80,11 @@ async function importClient() {
  */
 function hidePage(): void {
   Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+  visibilityHandlers.at(-1)?.();
+}
+
+function showPage(): void {
+  Object.defineProperty(document, 'hidden', { configurable: true, value: false });
   visibilityHandlers.at(-1)?.();
 }
 
@@ -208,7 +215,10 @@ describe('TapDB consent gate', () => {
   // 的 trackPageHideEvent() 正是用它。若开着 autoTrack.pageHide,用户关掉统计后
   // 每次切走窗口仍会发出一条带 deviceId 的 beacon。
 
-  it('never enables the SDK-side auto page-hide beacon', async () => {
+  it('never lets the SDK auto-track page events', async () => {
+    // pageHide 走 trackWithBeacon(无采集闸);pageShow 会附带 #url / #url_path /
+    // #title / #referrer —— 在 Electron 里就是本地 file:// 路径和窗口标题。两个都关,
+    // 由本模块自己发。
     installElectronApi(ALLOWED);
     const client = await importClient();
 
@@ -216,8 +226,24 @@ describe('TapDB consent gate', () => {
     await flush();
 
     expect(tapdb.init).toHaveBeenCalledWith(
-      expect.objectContaining({ autoTrack: { pageShow: true, pageHide: false } }),
+      expect.objectContaining({ autoTrack: { pageShow: false, pageHide: false } }),
     );
+  });
+
+  it('reports page_show without page properties and keeps the duration timer', async () => {
+    installElectronApi(ALLOWED);
+    const client = await importClient();
+
+    client.initTapdb();
+    await flush();
+    tapdb.track.mockClear();
+    tapdb.timeEvent.mockClear();
+
+    showPage();
+
+    // 只传事件名,不传 SDK 的 pageProperties;timeEvent 补上 SDK 原本会打的时长锚点。
+    expect(tapdb.track).toHaveBeenCalledWith('page_show');
+    expect(tapdb.timeEvent).toHaveBeenCalledWith('page_hide');
   });
 
   it('reports page_hide itself while allowed', async () => {
@@ -281,6 +307,32 @@ describe('TapDB consent gate', () => {
     expect(tapdb.optInTracking).not.toHaveBeenCalled();
   });
 
+  it('retries the opt-out on its own timer when the SDK call throws', async () => {
+    // main 只在设置变更时广播,用户不会再拨一次开关 —— 只靠「下次广播重试」等于
+    // 永不重试,SDK 内部的采集标志会一直开着。这里必须自己排重试。
+    vi.useFakeTimers();
+    try {
+      installElectronApi(ALLOWED);
+      const client = await importClient();
+
+      client.initTapdb();
+      await vi.advanceTimersByTimeAsync(0);
+      tapdb.optOutTracking.mockImplementation(() => {
+        throw new Error('localStorage unavailable');
+      });
+
+      settingsListener?.({ privacyConsentAccepted: true, analyticsEnabled: false, allowed: false });
+      expect(tapdb.optOutTracking).toHaveBeenCalledTimes(1);
+
+      // 没有任何新广播,仅靠内部定时器就该重试
+      tapdb.optOutTracking.mockReset();
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(tapdb.optOutTracking).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('retries the opt-out when the SDK call throws', async () => {
     // optOutTracking 可能抛(比如它依赖的 localStorage 不可用)。如果在调用之前就把
     // reportingAllowed 改成 false,后续每个 allowed:false 的快照都会被 guard 早返回、
@@ -341,6 +393,29 @@ describe('TapDB consent gate', () => {
     authListener?.({ isAuthenticated: true, user: { id: 'user-2' } });
 
     expect(tapdb.setUser).not.toHaveBeenCalled();
+  });
+
+  it('retries the startup report when a post-init step throws', async () => {
+    // init 成功但 setSuperProperties / app_start 抛出时,不能因为 sdkInitialized
+    // 已置 true 就当整体成功 —— 否则后续同值广播被 guard 早返回,漏掉的属性和
+    // app_start 在本进程内再也补不回来。
+    installElectronApi(ALLOWED);
+    tapdb.setSuperProperties.mockImplementationOnce(() => {
+      throw new Error('super properties rejected');
+    });
+    const client = await importClient();
+
+    client.initTapdb();
+    await flush();
+    expect(tapdb.init).toHaveBeenCalledTimes(1);
+    expect(tapdb.pvEvent).not.toHaveBeenCalled();
+
+    // 同值广播必须能重来一次(而且不重复 init)
+    settingsListener?.(ALLOWED);
+
+    expect(tapdb.init).toHaveBeenCalledTimes(1);
+    expect(tapdb.setSuperProperties).toHaveBeenCalledTimes(2);
+    expect(tapdb.pvEvent).toHaveBeenCalledWith({ '#tag': 'app_start' });
   });
 
   it('fails closed when the settings read rejects', async () => {

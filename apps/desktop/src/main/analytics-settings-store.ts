@@ -188,6 +188,29 @@ export function clearAnalyticsEnabledOverride(): AnalyticsSettings {
   return store.read();
 }
 
+/**
+ * 会话边界(登出 / 退出本地模式)撤销同意 —— **只清 consent,保留 enabled override**。
+ *
+ * 登出后设置页不可达,而 tapdbClient 仍挂在主窗口上;不撤销的话,设备级事件会继续
+ * 在登录页上发。更关键的是:下一个用户可能走**协议门豁免的企业 SSO** 登录,auth
+ * 监听器会拿上一位用户的同意把新账号绑上去。
+ *
+ * 保留 enabled override 的理由同 mobile:那是独立于「这次登录同意过没有」的长期
+ * 选择,整条清掉会让下次同意后按默认值恢复采集,静默推翻用户此前的 opt-out。
+ */
+export function revokePrivacyConsent(): boolean {
+  probeRecordOnce();
+  const current = store.read();
+  if (!current.privacyConsentAccepted) return false;
+  // preserveDefaults 是必须的:false 恰好等于默认值,不保留的话 writePatch 会把这条
+  // override 删掉 —— 若此时也没有 enabled override,整个文件会被清空。那样下次冷启动
+  // 探针读到 'none',「无记录 + 已登录」又会把刚撤销的同意推定回来。这里要留下一块
+  // 墓碑(与 mobile 同口径)。
+  store.writePatch({ privacyConsentAccepted: false }, { preserveDefaults: true });
+  log.info('privacy consent revoked at session boundary');
+  return true;
+}
+
 /** 仅用于测试与显式的本机数据清理;会让用户回到「未同意」。 */
 export function resetAnalyticsSettings(): AnalyticsSettings {
   const value = store.reset();

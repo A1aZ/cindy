@@ -22,6 +22,19 @@ const dialogueSectionSource = readFileSync(
   'utf8',
 );
 
+const dateGroupedSectionSource = readFileSync(
+  resolve(
+    __dirname,
+    '..',
+    'features',
+    'cc-agent',
+    'sidebar',
+    'sections',
+    'DateGroupedSessionsSection.tsx',
+  ),
+  'utf8',
+);
+
 const newMakerDraftRouteSource = readFileSync(
   resolve(__dirname, '..', 'features', 'cc-agent', 'NewMakerDraftRoute.tsx'),
   'utf8',
@@ -47,11 +60,16 @@ describe('Dialogue sidebar section', () => {
   });
 
   it('shows loading instead of the empty state until the initial session fetch settles', () => {
-    expect(sidebarSource).toContain('isLoading={isLoadingSessions}');
+    expect(sidebarSource.match(/isLoading=\{isLoadingSessions\}/g)).toHaveLength(2);
     expect(dialogueSectionSource).toContain('isLoading: boolean');
     expect(dialogueSectionSource).toContain("'ccAgent.sidebar.loadingDialogues'");
     expect(dialogueSectionSource).toMatch(
       /isLoading\s*\?\s*'ccAgent\.sidebar\.loadingDialogues'\s*:\s*'ccAgent\.sidebar\.noDialogues'/,
+    );
+    expect(dateGroupedSectionSource).toContain('isLoading: boolean');
+    expect(dateGroupedSectionSource).toContain('!isLoading');
+    expect(dateGroupedSectionSource).toMatch(
+      /isLoading\s*\?\s*'ccAgent\.sidebar\.loadingDialogues'\s*:\s*'ccAgent\.sidebar\.dateGroup\.empty'/,
     );
   });
 

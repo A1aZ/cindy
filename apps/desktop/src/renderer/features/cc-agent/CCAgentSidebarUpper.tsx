@@ -2224,6 +2224,7 @@ function ExpandedView({
         {filter.groupBy === 'date' ? (
           <DateGroupedSessionsSection
             sessions={visibleDateSessions}
+            isLoading={isLoadingSessions}
             allKnownProjects={projectUniverse.projects}
             filter={filter}
             activeSessionId={activeSessionId}

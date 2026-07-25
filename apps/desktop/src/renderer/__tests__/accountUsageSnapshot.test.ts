@@ -542,3 +542,18 @@ describe('bucket table keeps a null prototype across incremental updates', () =>
     expect(hookSource).not.toContain('appServerBuckets: {}');
   });
 });
+
+describe('renderer sparse update bucket routing', () => {
+  it('routes id-less sparse updates to the latest bucket, mirroring main', () => {
+    // main 侧已按 app-server 契约把缺 limitId 的稀疏更新并入最近观察到的桶;
+    // renderer 增量路径若仍按缺省桶归类, 模型专属窗口会被当通用桶暴露给其它
+    // 会话(review 反馈)。这里锁定实现选择。
+    const hookSource = readFileSync(new URL('../hooks/useAccountUsage.ts', import.meta.url), 'utf8');
+    expect(hookSource).toContain('let lastCodexAppServerBucketKey: string | null = null;');
+    expect(hookSource).toContain('function resolveIncrementalBucketKey(');
+    expect(hookSource).toContain('return lastCodexAppServerBucketKey ?? codexLimitBucketKey(incoming);');
+    // 增量分支必须走 resolveIncrementalBucketKey, 不能直接用 codexLimitBucketKey
+    expect(hookSource).toContain('resolveIncrementalBucketKey(parts.appServer),');
+    expect(hookSource).not.toContain('codexLimitBucketKey(parts.appServer),\n              parts.appServer,');
+  });
+});

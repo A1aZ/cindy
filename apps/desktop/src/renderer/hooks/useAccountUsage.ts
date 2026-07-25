@@ -90,6 +90,20 @@ let lastCodexAccountUsage: CodexAccountUsageSlots = {
 };
 
 /**
+ * 最近观察到的 app-server 桶键 —— 稀疏更新缺 limitId 时并入它(与 main 的
+ * codexAppServerLatestBucketKey 同口径)。account/rateLimits/updated 契约:
+ * "merge available values into the most recent read response"; 直接按缺省桶
+ * 归类会把模型专属窗口暴露成通用桶(review 反馈)。
+ */
+let lastCodexAppServerBucketKey: string | null = null;
+
+/** 稀疏更新的落桶键: 带 limitId 用它自己的桶; 缺失则并入最近观察到的桶。 */
+function resolveIncrementalBucketKey(incoming: RateLimitSnapshot): string {
+  if (incoming.limitId) return codexLimitBucketKey(incoming);
+  return lastCodexAppServerBucketKey ?? codexLimitBucketKey(incoming);
+}
+
+/**
  * 选槽 + 选桶。app-server 形态下按**当前会话模型**匹配桶(见
  * matchCodexBucketForModel): 账号可能同时有主配额桶与模型专属促销桶
  * (codex_bengalfox / GPT-5.3-Codex-Spark), 不选桶就会显示别的模型的配额
@@ -290,6 +304,7 @@ function applyCodexAccountUsageSnapshot(
   if (incoming === null) {
     if (options.clearOnNull === false) return;
     lastCodexAccountUsage = { appServer: null, appServerBuckets: emptyBucketTable(), web: null };
+    lastCodexAppServerBucketKey = null;
     onApplied();
     return;
   }
@@ -298,6 +313,14 @@ function applyCodexAccountUsageSnapshot(
   // 键存在即生效: 快照 → 槽内 merge; null → 显式清空(组合 payload 是权威全量,
   // 见 splitCodexAccountUsagePayload); 键缺失 → 保留现值(裸快照只带自己的槽)。
   if ('appServer' in parts) {
+    if ('appServerBuckets' in parts) {
+      // 权威全量: 顶层兼容位就是 main 记录的最近更新桶。
+      lastCodexAppServerBucketKey = parts.appServer
+        ? codexLimitBucketKey(parts.appServer)
+        : null;
+    } else if (parts.appServer) {
+      lastCodexAppServerBucketKey = resolveIncrementalBucketKey(parts.appServer);
+    }
     // 组合 payload 是 main 的权威全量: 顶层直接替换。跨桶 merge 会造出
     // 「B 的 limitId + A 的窗口」杂交体(windowless 兜底会保留旧窗口),
     // 冷启动会话回退顶层时就显示错桶数据(review 反馈)。
@@ -317,7 +340,7 @@ function applyCodexAccountUsageSnapshot(
         : parts.appServer
           ? withCodexBucket(
               lastCodexAccountUsage.appServerBuckets,
-              codexLimitBucketKey(parts.appServer),
+              resolveIncrementalBucketKey(parts.appServer),
               parts.appServer,
             )
           : emptyBucketTable(),

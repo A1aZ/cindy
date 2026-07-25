@@ -2440,7 +2440,7 @@ describe('ghost · skill 槽(捆绑 Agent Skills,2026-07-25)', () => {
     const item = (dir: string) => withSkill({ items: [{ dir, name: 'foo', description: 'x' }] });
     expect(item('../evil').ok).toBe(false);
     expect(item('/abs/path').ok).toBe(false);
-    expect(item('skills\foo').ok).toBe(false);
+    expect(item('skills\\foo').ok).toBe(false);
     expect(item('skills/./foo').ok).toBe(false);
     expect(item('').ok).toBe(false);
     expect(item('skills/foo').ok).toBe(true);
@@ -2510,7 +2510,7 @@ describe('ghost · skill 槽(捆绑 Agent Skills,2026-07-25)', () => {
     expect(ghostContentKeys(r.manifest)).toContain('slotSkill');
   });
 
-  it('更新 diff:技能增删可见,不变项不进 diff', () => {
+  it('更新 diff：技能增删可见,不变项不进 diff', () => {
     const v1 = withSkill({
       items: [{ dir: 'skills/alpha', name: 'alpha', description: '技能 A' }],
     });
@@ -2525,5 +2525,20 @@ describe('ghost · skill 槽(捆绑 Agent Skills,2026-07-25)', () => {
     const diff = diffGhostPermissionItems(v1.manifest, v2.manifest);
     expect(diff.added.map((i) => i.key)).toContain('skill:beta');
     expect(diff.removed.map((i) => i.key)).not.toContain('skill:alpha');
+  });
+
+  it('更新 diff：同名技能改 description 视为权限变更(added+removed)', () => {
+    const v1 = withSkill({
+      items: [{ dir: 'skills/alpha', name: 'alpha', description: '旧描述' }],
+    });
+    const v2 = withSkill({
+      items: [{ dir: 'skills/alpha', name: 'alpha', description: '新描述' }],
+    });
+    expect(v1.ok && v2.ok).toBe(true);
+    if (!v1.ok || !v2.ok) return;
+    const diff = diffGhostPermissionItems(v1.manifest, v2.manifest);
+    expect(diff.added.map((i) => i.key)).toContain('skill:alpha');
+    expect(diff.removed.map((i) => i.key)).toContain('skill:alpha');
+    expect(diff.unchanged.map((i) => i.key)).not.toContain('skill:alpha');
   });
 });

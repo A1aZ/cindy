@@ -1502,11 +1502,27 @@ export function diffGhostPermissionItems(
   const nextItems = ghostPermissionItems(next);
   const prevKeys = new Set(prevItems.map((i) => i.key));
   const nextKeys = new Set(nextItems.map((i) => i.key));
-  return {
-    added: nextItems.filter((i) => !prevKeys.has(i.key)),
-    removed: prevItems.filter((i) => !nextKeys.has(i.key)),
-    unchanged: nextItems.filter((i) => prevKeys.has(i.key)),
-  };
+  const prevDetailByKey = new Map(prevItems.map((i) => [i.key, i.detail ?? '']));
+  const added: GhostPermissionItem[] = [];
+  const removed: GhostPermissionItem[] = [];
+  const unchanged: GhostPermissionItem[] = [];
+  for (const item of nextItems) {
+    if (!prevKeys.has(item.key)) {
+      added.push(item);
+    } else if ((item.detail ?? '') !== prevDetailByKey.get(item.key)) {
+      added.push(item);
+    } else {
+      unchanged.push(item);
+    }
+  }
+  for (const item of prevItems) {
+    if (!nextKeys.has(item.key)) {
+      removed.push(item);
+    } else if ((item.detail ?? '') !== (nextItems.find((n) => n.key === item.key)?.detail ?? '')) {
+      removed.push(item);
+    }
+  }
+  return { added, removed, unchanged };
 }
 
 /**

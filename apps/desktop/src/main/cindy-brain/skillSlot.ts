@@ -63,7 +63,7 @@ export function checkSkillMdConsistency(content: string, item: GhostSkillItem): 
   if (fmName !== item.name) {
     return `SKILL.md frontmatter name ${JSON.stringify(fmName)} 与清单声明 ${JSON.stringify(item.name)} 不一致(装入确认框展示的必须就是 Agent 读到的)`;
   }
-  if (fmDescription !== item.description.trim()) {
+  if (fmDescription !== item.description) {
     return 'SKILL.md frontmatter description 与清单声明不一致(装入确认框展示的必须就是 Agent 读到的)';
   }
   return null;
@@ -107,8 +107,11 @@ async function realPathOrNull(value: string): Promise<string | null> {
   }
 }
 
-/** 断链回收判据:目标路径带 `cindy-brain` 段即视为 ghost 形态(跨 owner 通用)。 */
-function targetLooksGhostManaged(target: string): boolean {
+/** 断链回收判据:链接名符合 `<id>--<name>` ghost 命名且目标路径带 `cindy-brain`
+ *  段才视为 ghost 托管(跨 owner 通用)。两条同时满足才动手,避免误伤用户创建
+ *  的恰巧含该路径段的外来链接。 */
+function targetLooksGhostManaged(target: string, linkName: string): boolean {
+  if (!linkName.includes('--')) return false;
   return target
     .split(/[\\/]/)
     .some((segment) => segment.toLowerCase() === 'cindy-brain');
@@ -126,7 +129,9 @@ export async function reconcileGhostSkillLinks(
   let changed = false;
 
   const { sharedSkillsDir } = sharedGlobalSkillsPaths(opts.homeDir);
-  const brainRootCompare = normalizeForCompare(opts.brainRoot);
+  // realpath 兼容 brainRoot 或其祖先是 symlink 的场景(relocated home dir)——
+  // 活链接 realpath 后必须与归一化的物理根比较才可靠。resolve 失败退化到词法。
+  const brainRootCompare = (await realPathOrNull(opts.brainRoot)) ?? normalizeForCompare(opts.brainRoot);
 
   try {
     await fsp.mkdir(sharedSkillsDir, { recursive: true });
@@ -135,9 +140,9 @@ export async function reconcileGhostSkillLinks(
     return { changed, actions, warnings };
   }
 
-  // —— 期望态:linkName → 目标绝对路径。按 id+name 排序保证确定性;撞名
+  // —— 期望态:linkName → { target, item }。按 id+name 排序保证确定性;撞名
   //    first-wins + warn 兜底(name 正则已保证结构上不可能,防御纵深)。
-  const desired = new Map<string, string>();
+  const desired = new Map<string, { target: string; item: GhostSkillItem }>();
   const eligible = opts.ghosts
     .filter((g) => g.enabled && g.manifest.slots.includes('skill') && g.manifest.skill)
     .sort((a, b) => a.manifest.id.localeCompare(b.manifest.id));
@@ -151,7 +156,10 @@ export async function reconcileGhostSkillLinks(
         warnings.push(`技能链接名冲突 ${linkName},保留先到者`);
         continue;
       }
-      desired.set(linkName, path.join(opts.brainRoot, ghost.manifest.id, ...item.dir.split('/')));
+      desired.set(linkName, {
+        target: path.join(opts.brainRoot, ghost.manifest.id, ...item.dir.split('/')),
+        item,
+      });
     }
   }
 
@@ -173,8 +181,8 @@ export async function reconcileGhostSkillLinks(
     if (real !== null) {
       // 活链接:目标在当前 brainRoot 内才归我们管;他 owner / 外来链接不碰。
       if (!isSameOrInside(real, brainRootCompare)) continue;
-      const wantTarget = desired.get(entName);
-      if (wantTarget !== undefined && real === normalizeForCompare(wantTarget)) {
+      const want = desired.get(entName);
+      if (want !== undefined && real === normalizeForCompare(want.target)) {
         managedLive.set(entName, real);
       } else {
         toRemove.push(entName);
@@ -191,7 +199,7 @@ export async function reconcileGhostSkillLinks(
     const absTarget = path.isAbsolute(rawTarget)
       ? rawTarget
       : path.resolve(sharedSkillsDir, rawTarget);
-    if (targetLooksGhostManaged(absTarget)) toRemove.push(entName);
+    if (targetLooksGhostManaged(absTarget, entName)) toRemove.push(entName);
   }
 
   // —— 删除步:先撤旧再建新,防"改目标"落进冲突分支。
@@ -208,18 +216,26 @@ export async function reconcileGhostSkillLinks(
     }
   }
 
-  // —— 创建步:目标须存在且含 SKILL.md(容忍更新备份窗口的瞬时缺失,skip+warn
-  //    等下一轮自愈);占位者非本 owner 托管链接一律不覆盖。
-  for (const [linkName, target] of desired) {
+  // —— 创建步:目标须存在、含 SKILL.md 且内容与 manifest 一致(容忍更新备份
+  //    窗口的瞬时缺失,skip+warn 等下一轮自愈);占位者非本 owner 托管链接不覆盖。
+  for (const [linkName, { target, item }] of desired) {
     if (managedLive.has(linkName)) {
       actions.push({ linkName, op: 'kept' });
       continue;
     }
+    const skillMdPath = path.join(target, 'SKILL.md');
+    let skillMdContent: string;
     try {
-      await fsp.stat(path.join(target, 'SKILL.md'));
+      skillMdContent = await fsp.readFile(skillMdPath, 'utf8');
     } catch {
       actions.push({ linkName, op: 'skipped', reason: 'target-missing-skill-md' });
       warnings.push(`技能目录缺失或无 SKILL.md,暂不挂链:${target}`);
+      continue;
+    }
+    const consistencyErr = checkSkillMdConsistency(skillMdContent, item);
+    if (consistencyErr !== null) {
+      actions.push({ linkName, op: 'skipped', reason: 'skill-md-inconsistent' });
+      warnings.push(`${linkName} SKILL.md 一致性不通过,暂不挂链:${consistencyErr}`);
       continue;
     }
     const linkPath = path.join(sharedSkillsDir, linkName);
@@ -244,17 +260,16 @@ export async function reconcileGhostSkillLinks(
     }
   }
 
-  // —— 扇出:`.agents` 新条目 → `.claude`;我们撤链留下的 `.claude` 悬空兼容
-  //    链接(目标在受管根内)也由它回收。失败不阻断(下一轮/既有触发点重跑)。
-  if (changed) {
-    try {
-      const fanout = await prepareSharedGlobalSkillLinks(
-        opts.homeDir !== undefined ? { homeDir: opts.homeDir } : {},
-      );
-      warnings.push(...fanout.warnings);
-    } catch (err) {
-      warnings.push(`共享技能链接扇出失败:${(err as Error).message}`);
-    }
+  // —— 扇出:`.agents` 条目 → `.claude` 兼容链接;撤链留下的 `.claude` 悬空
+  //    兼容链接(目标在受管根内)也由它回收。每次对账都跑(兼容链接可能独立
+  //    缺失——canonical 正常但 .claude 侧被删或上次扇出失败);幂等、失败不阻断。
+  try {
+    const fanout = await prepareSharedGlobalSkillLinks(
+      opts.homeDir !== undefined ? { homeDir: opts.homeDir } : {},
+    );
+    warnings.push(...fanout.warnings);
+  } catch (err) {
+    warnings.push(`共享技能链接扇出失败:${(err as Error).message}`);
   }
 
   return { changed, actions, warnings };

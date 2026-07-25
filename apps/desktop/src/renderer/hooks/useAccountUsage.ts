@@ -36,9 +36,16 @@ import {
   codexLimitBucketKey,
   isCodexBucketStale,
   matchCodexBucketForModel,
+  nextCodexBucketStaleAtMs,
 } from '@cindy/maker-shared/codex-usage-buckets';
 
-export { CODEX_DEFAULT_LIMIT_BUCKET, codexLimitBucketKey, isCodexBucketStale, matchCodexBucketForModel };
+export {
+  CODEX_DEFAULT_LIMIT_BUCKET,
+  codexLimitBucketKey,
+  isCodexBucketStale,
+  matchCodexBucketForModel,
+  nextCodexBucketStaleAtMs,
+};
 
 export interface RateLimitWindow {
   usedPercent: number;
@@ -83,33 +90,6 @@ let lastCodexAccountUsage: CodexAccountUsageSlots = {
   appServerBuckets: Object.create(null) as Record<string, RateLimitSnapshot>,
   web: null,
 };
-
-/**
- * 桶表中最近一个「由有效转为陈旧」的时刻(ms);没有可预期的转变 → null。
- * 陈旧判定只在选桶时求值, chip 常驻挂载时不会自己重算 —— 用它安排一次定时
- * 重选, 否则促销桶过期后会一直挂在界面上(review 反馈)。
- */
-export function nextCodexBucketStaleAtMs(
-  buckets: Record<string, RateLimitSnapshot>,
-  nowMs: number,
-): number | null {
-  let soonest: number | null = null;
-  for (const bucket of Object.values(buckets ?? {})) {
-    if (isCodexBucketStale(bucket, nowMs)) continue;
-    const windows = [bucket.primary, bucket.secondary].filter(
-      (w): w is RateLimitWindow => Boolean(w),
-    );
-    if (windows.length === 0) continue;
-    const resets = windows
-      .map((w) => w.resetsAt)
-      .filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0);
-    // 与 isCodexBucketStale 同口径: 有窗口缺时间戳就永不进入陈旧, 无需定时。
-    if (resets.length !== windows.length) continue;
-    const staleAt = Math.max(...resets) * 1000 + STALE_BUCKET_GRACE_MS;
-    if (staleAt > nowMs && (soonest === null || staleAt < soonest)) soonest = staleAt;
-  }
-  return soonest;
-}
 
 /**
  * 选槽 + 选桶。app-server 形态下按**当前会话模型**匹配桶(见

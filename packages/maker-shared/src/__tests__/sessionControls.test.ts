@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { selectCodexUsageForModel } from '../codexUsageBuckets';
+import { nextCodexBucketStaleAtMs, selectCodexUsageForModel } from '../codexUsageBuckets';
 import {
   summarizeAccountRateLimits,
   summarizeCodexRateLimitReset,
@@ -237,5 +237,40 @@ describe('selectCodexUsageForModel (per-model bucket selection)', () => {
       nowMs: NOW,
     });
     expect(picked).toBe(MAIN);
+  });
+});
+
+describe('generic bucket alias priority', () => {
+  const NOW = 1_785_000_000_000;
+  const future = Math.floor((NOW + 3 * 24 * 60 * 60 * 1000) / 1000);
+
+  it('prefers the explicit codex bucket over the legacy __default__ alias', () => {
+    // 旧快照没带 limitId → 落到 __default__; 之后真正的 codex 通知新建第二个通用桶。
+    // 按插入序查找会一直返回旧的缺省桶(review 反馈)。
+    const legacyDefault = { primary: { usedPercent: 5, resetsAt: future } };
+    const currentCodex = { limitId: 'codex', primary: { usedPercent: 71, resetsAt: future } };
+    const picked = selectCodexUsageForModel({
+      byLimitId: { __default__: legacyDefault, codex: currentCodex },
+      modelId: 'gpt-5.6-sol',
+      nowMs: NOW,
+    });
+    expect(picked).toBe(currentCodex);
+  });
+
+  it('still uses the default alias when no explicit codex bucket exists', () => {
+    const legacyDefault = { primary: { usedPercent: 5, resetsAt: future } };
+    const picked = selectCodexUsageForModel({
+      byLimitId: { __default__: legacyDefault },
+      modelId: 'gpt-5.6-sol',
+      nowMs: NOW,
+    });
+    expect(picked).toBe(legacyDefault);
+  });
+
+  it('computes the next stale moment from an unknown-shaped bucket table', () => {
+    const table = { codex: { limitId: 'codex', primary: { usedPercent: 10, resetsAt: future } } };
+    expect(nextCodexBucketStaleAtMs(table, NOW)).toBe(future * 1000 + 24 * 60 * 60 * 1000);
+    expect(nextCodexBucketStaleAtMs(null, NOW)).toBeNull();
+    expect(nextCodexBucketStaleAtMs({}, NOW)).toBeNull();
   });
 });

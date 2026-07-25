@@ -47,7 +47,10 @@ import type { MobileCodexRateLimitsResult } from '@cindy/maker-shared/device-lin
 import { computeContextSheetSnapHeights, type ContextSheetSnap } from '@/session/contextSheetModel';
 import { writeClipboardText } from '@/session/messageActions';
 import { normalizeExtraDirs } from '@/session/newSession';
-import { selectCodexUsageForModel } from '@cindy/maker-shared/codex-usage-buckets';
+import {
+  nextCodexBucketStaleAtMs,
+  selectCodexUsageForModel,
+} from '@cindy/maker-shared/codex-usage-buckets';
 import {
   summarizeAccountRateLimits,
   summarizeCodexRateLimitReset,
@@ -412,6 +415,28 @@ export function SessionMenuSheet({
   const spend = summarizeSessionSpend(session);
   const usage = summarizeContextUsage(contextUsage);
   // 账号限额行:窗口构成完全跟随被控端上游接口返回(不假设 5h/周),解析不出内容 → null 不渲染。
+  // 陈旧判定依赖当前时间: 重开面板要重算, 面板长开跨过失效时刻也要重算
+  // (与 desktop 的定时重选同口径; review 反馈)。
+  const [quotaStaleTick, setQuotaStaleTick] = useState(0);
+  const quotaBucketTables = useMemo(() => ({
+    byLimitId: codexRateLimits?.rateLimitsByLimitId,
+    appServerBuckets: (accountUsage as { appServerBuckets?: unknown } | null)?.appServerBuckets,
+  }), [accountUsage, codexRateLimits]);
+  useEffect(() => {
+    if (!visible) return undefined;
+    const now = Date.now();
+    const staleAt = nextCodexBucketStaleAtMs(
+      quotaBucketTables.byLimitId ?? quotaBucketTables.appServerBuckets,
+      now,
+    );
+    if (staleAt === null) return undefined;
+    const timer = setTimeout(
+      () => setQuotaStaleTick((tick) => tick + 1),
+      Math.min(Math.max(staleAt - now, 0) + 1_000, 6 * 60 * 60 * 1000),
+    );
+    return () => clearTimeout(timer);
+  }, [visible, quotaBucketTables, quotaStaleTick]);
+
   const accountLimits = useMemo(() => {
     const now = Date.now();
     // 账号可能同时有主配额桶与模型专属促销桶(如 GPT-5.3-Codex-Spark), 上游每次
@@ -419,13 +444,14 @@ export function SessionMenuSheet({
     // (desktop 同源问题见 useAccountUsage.matchCodexBucketForModel)。
     const scoped = selectCodexUsageForModel({
       fallback: accountUsage,
-      byLimitId: codexRateLimits?.rateLimitsByLimitId,
-      appServerBuckets: (accountUsage as { appServerBuckets?: unknown } | null)?.appServerBuckets,
+      byLimitId: quotaBucketTables.byLimitId,
+      appServerBuckets: quotaBucketTables.appServerBuckets,
       modelId: session.model,
       nowMs: now,
     });
     return summarizeAccountRateLimits(scoped, now);
-  }, [accountUsage, codexRateLimits, session.model]);
+    // visible / quotaStaleTick 进依赖: 重开与到点失效都要按当前时间重选。
+  }, [accountUsage, quotaBucketTables, session.model, visible, quotaStaleTick]);
   const resetSummary = useMemo(
     () => summarizeCodexRateLimitReset(codexRateLimits, Date.now()),
     [codexRateLimits],

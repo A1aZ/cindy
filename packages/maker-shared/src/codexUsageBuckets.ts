@@ -20,11 +20,19 @@ export const UNSAFE_BUCKET_KEYS: ReadonlySet<string> = new Set([
   'prototype',
 ]);
 
-/** 通用(非模型专属)桶的稳定标识 —— 只认桶键, 不看易在部分通知里丢失的 limitName。 */
-export const GENERIC_BUCKET_KEYS: ReadonlySet<string> = new Set([
+/**
+ * 通用(非模型专属)桶的稳定标识 —— 只认桶键, 不看易在部分通知里丢失的 limitName。
+ * **按优先级排列**: 显式 'codex' 优先于缺省桶别名 —— 旧快照没带 limitId 时会
+ * 落到 '__default__', 之后真正的 'codex' 通知会新建第二个通用桶; 按插入序查找
+ * 会一直命中旧的缺省桶并显示陈旧百分比(review 反馈)。
+ */
+export const GENERIC_BUCKET_KEYS_BY_PRIORITY: readonly string[] = [
   'codex',
   CODEX_DEFAULT_LIMIT_BUCKET,
-]);
+];
+
+/** 集合形式(成员判定用);优先级查找请用 GENERIC_BUCKET_KEYS_BY_PRIORITY。 */
+export const GENERIC_BUCKET_KEYS: ReadonlySet<string> = new Set(GENERIC_BUCKET_KEYS_BY_PRIORITY);
 
 /**
  * 陈旧桶宽限: 窗口全部过点超过它, 视为服务端已停推该 limitId(促销结束等)。
@@ -119,8 +127,12 @@ export function matchCodexBucketForModel<T extends BucketSnapshotLike>(
       if (name && (name === model || model.includes(name))) return bucket;
     }
   }
-  const generic = entries.find(([key]) => GENERIC_BUCKET_KEYS.has(key));
-  return generic ? generic[1] : null;
+  // 按优先级取通用桶(不能靠 entries 的插入序, 见 GENERIC_BUCKET_KEYS_BY_PRIORITY)。
+  for (const key of GENERIC_BUCKET_KEYS_BY_PRIORITY) {
+    const hit = entries.find(([entryKey]) => entryKey === key);
+    if (hit) return hit[1];
+  }
+  return null;
 }
 
 /**
@@ -142,6 +154,34 @@ export function selectCodexUsageForModel(input: {
   const buckets = readBucketTable(input.byLimitId) ?? readBucketTable(input.appServerBuckets);
   if (!buckets) return input.fallback ?? null;
   return matchCodexBucketForModel(buckets, input.modelId, nowMs);
+}
+
+/**
+ * 桶表中最近一个「由有效转为陈旧」的时刻(ms);没有可预期的转变 → null。
+ * 陈旧判定只在选桶时求值, 界面常驻时不会自己重算 —— desktop chip 与 mobile
+ * 用量面板都用它安排一次到点重选, 否则过期促销桶会一直挂着(review 反馈)。
+ */
+export function nextCodexBucketStaleAtMs(buckets: unknown, nowMs: number): number | null {
+  const table = readBucketTable(buckets);
+  if (!table) return null;
+  let soonest: number | null = null;
+  for (const bucket of Object.values(table)) {
+    if (isCodexBucketStale(bucket, nowMs)) continue;
+    const windows = [bucket.primary, bucket.secondary].filter(
+      (window): window is BucketWindowLike => Boolean(window),
+    );
+    if (windows.length === 0) continue;
+    const resets = windows
+      .map((window) => window.resetsAt)
+      .filter((value): value is number => typeof value === 'number'
+        && Number.isFinite(value)
+        && value > 0);
+    // 与 isCodexBucketStale 同口径: 有窗口缺时间戳就永不进入陈旧, 无需定时。
+    if (resets.length !== windows.length) continue;
+    const staleAt = Math.max(...resets) * 1000 + STALE_BUCKET_GRACE_MS;
+    if (staleAt > nowMs && (soonest === null || staleAt < soonest)) soonest = staleAt;
+  }
+  return soonest;
 }
 
 /** unknown → 桶表(丢弃非对象条目与危险键);不是可用桶表 → null。 */

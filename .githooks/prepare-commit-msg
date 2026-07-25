@@ -8,8 +8,10 @@
 #
 # Why a hook is needed: Git has no option that signs commits off automatically.
 # format.signOff only affects git format-patch / git am, and commit.signoff does
-# not exist. Unsigned commits are rejected by the dco CI check
-# (scripts/check-dco.mjs), and fixing them afterwards means rewriting commits.
+# not exist. Unsigned commits are rejected by the DCO check on every pull request
+# (the DCO GitHub App, configured in .github/dco.yml), and fixing them afterwards
+# means rewriting commits. scripts/check-dco.mjs is the local pre-commit
+# self-check for the same rules; the App's check is the authority.
 
 MSG_FILE="$1"
 MSG_SOURCE="$2"

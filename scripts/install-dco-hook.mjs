@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // 本地 DCO 签名 hook 安装器：把仓库里的 .githooks/prepare-commit-msg 复制进当前仓库的
-// hooks 目录，让此后每次 `git commit`（含 agent 自动提交）都自动追加与 commit author
-// 一致的 Signed-off-by trailer，避免 PR 被 DCO 门禁（scripts/check-dco.mjs）拦下后返工。
+// hooks 目录，让此后每次 `git commit`（含 agent 自动提交）都自动追加 Signed-off-by
+// trailer——签的是 commit 的 committer，与原生 `git commit -s` 一致。这样可以避免 PR 被
+// DCO check（DCO GitHub App，配置见 .github/dco.yml）拦下后返工；本地提交前的自查是
+// scripts/check-dco.mjs，PR 上的权威结论则以 App 的 check 为准。
 //
 // 用法：
 //   pnpm dco:install-hook                      安装 hook（已存在且被改过时会拒绝，见下）

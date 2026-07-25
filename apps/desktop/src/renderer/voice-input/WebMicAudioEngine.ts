@@ -93,7 +93,47 @@ export function isKeepAliveSessionDisposedError(error: unknown): boolean {
  * disabled setting must still fall through to the cold path so the dictation
  * the user is in the middle of keeps working.
  */
-const POWER_RELEASE_REASONS: ReadonlySet<string> = new Set(['system_suspend', 'screen_locked']);
+const POWER_RELEASE_REASONS: ReadonlySet<string> = new Set([
+  'system_suspend',
+  'screen_locked',
+  // Synthesised by callers that detected a release via the generation counter
+  // rather than by catching a session error (see powerReleaseCancellation).
+  'power_release',
+]);
+
+/**
+ * Cancellation for a caller that noticed a power release through
+ * currentPowerReleaseGeneration() — by then no in-flight session error carries
+ * the reason any more, but the attempt must still be abandoned rather than
+ * reopening a device after the one-shot event.
+ */
+export function powerReleaseCancellation(): KeepAliveSessionDisposedError {
+  return new KeepAliveSessionDisposedError('power_release');
+}
+
+/**
+ * Reasons after which a queued replacement must NOT be built: the user either
+ * walked away or turned the feature off. Other reasons (devicechange) still
+ * want a rebuild with the new setup.
+ */
+const DO_NOT_REBUILD_REASONS: ReadonlySet<string> = new Set([
+  'system_suspend',
+  'screen_locked',
+  'power_release',
+  'setting_disabled',
+  'hmr',
+]);
+
+/**
+ * Bumped on every power-triggered release. Lets a caller that was awaiting
+ * something else notice a release happened in between, even when no session
+ * error carries the reason any more.
+ */
+let powerReleaseGeneration = 0;
+
+export function currentPowerReleaseGeneration(): number {
+  return powerReleaseGeneration;
+}
 
 export function isPowerReleaseCancellation(error: unknown): boolean {
   if (!isKeepAliveSessionDisposedError(error)) return false;
@@ -344,6 +384,7 @@ function ensureKeepAlivePowerReleaseListener(): void {
   // live subscription (the flag resets with the module, the listener does not),
   // so one lock event would fan out to N stale callbacks.
   keepAlivePowerReleaseUnsubscribe = subscribe((payload) => {
+    powerReleaseGeneration += 1;
     void disposeKeepAliveVoiceInputMicrophone(payload.reason);
   });
 }
@@ -519,6 +560,15 @@ class KeepAliveMicSession {
     // Defence in depth: a disposed session has no stream or worklet left, so
     // activating it would look like a successful start that never emits audio.
     if (this.disposed) throw new KeepAliveSessionDisposedError(this.disposedReason);
+    // One session carries exactly one PCM callback, so two simultaneous
+    // recordings cannot share it — the second would silently steal the first's
+    // audio. The product keeps dictation mutually exclusive (overlay and
+    // ChatInput guard on their own 'listening' state), so this is a broken
+    // invariant rather than a case to support: fail loudly instead of
+    // swapping the callback behind the first recording's back.
+    if (this.active) {
+      throw new Error('Keep-alive microphone session is already recording.');
+    }
     this.activation = activation;
     this.active = true;
     // Attach before arming the worklet so the first active render quantum
@@ -729,7 +779,9 @@ async function getOrCreateKeepAliveSession(
     // the one-shot event has passed) from a setup change (fall through and
     // rebuild). Building a replacement after a power release would open the
     // microphone with nothing left to close it until the idle timeout.
-    if (releasedReason !== undefined) throw new KeepAliveSessionDisposedError(releasedReason);
+    if (releasedReason !== undefined && DO_NOT_REBUILD_REASONS.has(releasedReason)) {
+      throw new KeepAliveSessionDisposedError(releasedReason);
+    }
   }
   if (keepAliveSession) {
     // A different device/profile is a fresh warm-up, not a continuation of the
@@ -805,6 +857,16 @@ export async function prewarmVoiceInputMicrophoneWithAutomaticFallback(
 }
 
 export async function disposeKeepAliveVoiceInputMicrophone(reason = 'dispose'): Promise<void> {
+  // Turning the setting off, or a devicechange, must not throw away dictation
+  // the user is in the middle of — that would turn a preference tweak into a
+  // discarded recording. Mark it for replacement instead; stop() disposes it as
+  // soon as the user is done. Power releases still take effect immediately:
+  // there the user has already walked away.
+  const active = keepAliveSession;
+  if (active?.isActive() && !POWER_RELEASE_REASONS.has(reason)) {
+    active.markStaleForReplacement();
+    return;
+  }
   clearKeepAliveIdleDisposeTimer();
   keepAliveIdleDeadlineAt = undefined;
   const session = keepAliveSession;
@@ -866,7 +928,18 @@ function scheduleKeepAliveIdleDispose(
   if (keepAliveSession !== session) return;
   clearKeepAliveIdleDisposeTimer();
   const now = keepAliveMonotonicNow();
-  if (refresh || keepAliveIdleDeadlineAt === undefined || keepAliveIdleDeadlineAt <= now) {
+  if (!refresh && keepAliveIdleDeadlineAt !== undefined && keepAliveIdleDeadlineAt <= now) {
+    // The window already elapsed; the timer just has not fired yet (renderer
+    // timers are throttled in background windows). A bookkeeping call must not
+    // resurrect it into another full window — release now, which is what the
+    // overdue timer was about to do anyway.
+    keepAliveIdleDeadlineAt = undefined;
+    keepAliveSession = null;
+    keepAliveSessionPromise = null;
+    void session.dispose('idle_timeout_expired');
+    return;
+  }
+  if (refresh || keepAliveIdleDeadlineAt === undefined) {
     keepAliveIdleDeadlineAt = now + KEEP_ALIVE_MIC_IDLE_TTL_MS;
   }
   const deadlineAt = keepAliveIdleDeadlineAt;

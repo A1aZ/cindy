@@ -391,31 +391,6 @@ describe('keep-alive microphone idle window', () => {
     expect(getUserMedia).not.toHaveBeenCalled();
   });
 
-  it('keeps a shared session live while another engine still holds it', async () => {
-    const engineA = new mod.WebMicAudioEngine({
-      workletUrl: WORKLET_URL,
-      keepAlive: true,
-      onInterrupted: vi.fn(),
-    });
-    const engineB = new mod.WebMicAudioEngine({
-      workletUrl: WORKLET_URL,
-      keepAlive: true,
-      onInterrupted: vi.fn(),
-    });
-    await engineA.start();
-    await engineB.start();
-
-    await engineA.stop();
-
-    // deactivate() would clear the shared PCM callback and detach the output
-    // path, starving the engine that is still recording.
-    expect(sink.disconnect).not.toHaveBeenCalled();
-    expect(track.stopped).toBe(false);
-
-    await engineB.stop();
-    expect(sink.disconnect).toHaveBeenCalled();
-  });
-
   it('falls through to the cold path when a non-power release cancels startup', async () => {
     let resolveStream: (value: unknown) => void = () => undefined;
     getUserMedia.mockImplementationOnce(() => new Promise((resolve) => {
@@ -440,7 +415,7 @@ describe('keep-alive microphone idle window', () => {
     expect(getUserMedia).toHaveBeenCalledTimes(2);
   });
 
-  it('does not dispose a stale session another engine still holds', async () => {
+  it('does not let a second recording steal the keep-alive session', async () => {
     const engineA = new mod.WebMicAudioEngine({
       workletUrl: WORKLET_URL,
       keepAlive: true,
@@ -452,16 +427,13 @@ describe('keep-alive microphone idle window', () => {
       onInterrupted: vi.fn(),
     });
     await engineA.start();
+
+    // A session carries exactly one PCM callback. B must not take it over — it
+    // falls back to its own cold stream instead, leaving A's audio flowing.
     await engineB.start();
 
-    // Config changes mid-recording only mark the session stale.
-    await mod.prewarmVoiceInputMicrophone({ workletUrl: WORKLET_URL, deviceId: 'another-device' });
-
-    await engineA.stop();
+    expect(getUserMedia).toHaveBeenCalledTimes(2);
     expect(track.stopped).toBe(false);
-
-    await engineB.stop();
-    expect(track.stopped).toBe(true);
   });
 
   it('shares one startup between concurrent callers', async () => {

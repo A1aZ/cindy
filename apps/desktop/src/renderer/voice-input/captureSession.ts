@@ -1,8 +1,10 @@
 import { createLogger } from '@/lib/logger';
 import {
   WebMicAudioEngine,
+  currentPowerReleaseGeneration,
   isPowerReleaseCancellation,
   isSelectedMicrophoneUnavailableError,
+  powerReleaseCancellation,
   type PcmChunk,
 } from './WebMicAudioEngine';
 import { createVoiceInputAudioProfile } from './audioProfile';
@@ -102,6 +104,7 @@ export async function startVoiceInputCaptureSession(
 
   engine = createEngine(options.deviceId);
   options.setEngine(engine);
+  const powerGenerationAtStart = currentPowerReleaseGeneration();
 
   const startEngineWithAutomaticFallback = async (): Promise<void> => {
     try {
@@ -120,6 +123,13 @@ export async function startVoiceInputCaptureSession(
           stopError instanceof Error ? stopError.message : String(stopError),
         );
       });
+      // A release can land during the stop() above, and by then no session error
+      // carries the power reason any more — the check below would only see the
+      // earlier device error and happily open the default microphone after the
+      // one-shot event.
+      if (currentPowerReleaseGeneration() !== powerGenerationAtStart) {
+        throw powerReleaseCancellation();
+      }
       engine = createEngine(undefined);
       options.setEngine(engine);
       await engine.start();

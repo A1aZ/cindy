@@ -232,6 +232,32 @@ describe('keep-alive microphone idle window', () => {
     expect(track.stopped).toBe(true);
   });
 
+  it('shares one startup between concurrent callers', async () => {
+    let resolveStream: (value: unknown) => void = () => undefined;
+    getUserMedia.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveStream = resolve;
+    }));
+
+    // A recording start and a prewarm reach the same session while it is still
+    // coming up. Each one re-entering start() would open a second MediaStream;
+    // the first would then be overwritten by `this.stream` and never stopped.
+    const engine = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: true,
+      onInterrupted: vi.fn(),
+    });
+    const starting = engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const prewarming = mod.prewarmVoiceInputMicrophone({ workletUrl: WORKLET_URL });
+    await vi.advanceTimersByTimeAsync(0);
+
+    resolveStream({ getAudioTracks: () => [track], getTracks: () => [track] });
+    await starting;
+    await prewarming;
+
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps the audio output path detached while merely warm', async () => {
     await mod.prewarmVoiceInputMicrophone({ workletUrl: WORKLET_URL });
 

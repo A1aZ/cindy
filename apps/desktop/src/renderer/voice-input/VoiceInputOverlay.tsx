@@ -819,6 +819,17 @@ export function VoiceInputOverlay() {
       elapsedMs,
     });
     if (!captureStart.ok) {
+      // 电源释放(锁屏/挂起)取消了启动:走与「启动尝试已失效」相同的静默清理,
+      // 不把内部错误消息推到 UI —— 用户是主动离开,不是遇到故障。
+      if (captureStart.cancelled) {
+        log.debug('global microphone start cancelled by power release');
+        resolveStartReadyState(attemptId, { ok: false, error: captureStart.error });
+        startAttemptIdRef.current += 1;
+        cancelStartedRun(startResultPromise);
+        suppressedStartErrorAttemptsRef.current.delete(attemptId);
+        await restoreSystemAudioForRecording();
+        return;
+      }
       log.warn('global microphone start failed:', captureStart.error);
       resolveStartReadyState(attemptId, { ok: false, error: captureStart.error });
       startAttemptIdRef.current += 1;

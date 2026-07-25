@@ -98,10 +98,11 @@ let keepAliveSessionPromise: Promise<KeepAliveMicSession> | null = null;
 let keepAliveDeviceChangeListening = false;
 let keepAlivePowerReleaseListening = false;
 let keepAliveIdleDisposeTimer: number | undefined;
-// Absolute expiry of the current idle window, kept separately from the timer
-// handle. Callers that merely re-assert the keep-alive intent (component mount,
-// unrelated settings changes) clear and re-arm the timer, and must land on the
-// original deadline instead of restarting the countdown.
+// Expiry of the current idle window, on the monotonic clock read by
+// keepAliveMonotonicNow() (performance.now(), not wall time). Kept separately
+// from the timer handle: callers that merely re-assert the keep-alive intent
+// (component mount, unrelated settings changes) clear and re-arm the timer, and
+// must land on the original deadline instead of restarting the countdown.
 let keepAliveIdleDeadlineAt: number | undefined;
 
 function isSpecificMicrophoneDeviceId(deviceId?: string): deviceId is string {
@@ -340,15 +341,33 @@ class KeepAliveMicSession {
   private active = false;
   private staleAfterActiveDeviceChange = false;
   private sinkConnected = false;
+  private startPromise?: Promise<void>;
 
   constructor(options: KeepAliveSessionOptions) {
     this.options = options;
     this.key = keepAliveKey(options);
   }
 
-  async start(): Promise<void> {
-    if (this.disposed) throw new KeepAliveSessionDisposedError();
-    if (this.context && this.stream && this.worklet) return;
+  /**
+   * Idempotent for concurrent callers.
+   *
+   * A recording start and a prewarm can both reach this session while it is
+   * still coming up (getOrCreateKeepAliveSession awaits `start()` directly when
+   * the session already exists). The early-return below only fires once stream
+   * *and* worklet exist, so without a shared in-flight promise the second call
+   * re-runs the whole sequence and opens a second MediaStream — the first one
+   * then gets overwritten by `this.stream` and is never stopped.
+   */
+  start(): Promise<void> {
+    if (this.disposed) return Promise.reject(new KeepAliveSessionDisposedError());
+    if (this.context && this.stream && this.worklet) return Promise.resolve();
+    this.startPromise ??= this.startInternal().finally(() => {
+      this.startPromise = undefined;
+    });
+    return this.startPromise;
+  }
+
+  private async startInternal(): Promise<void> {
     ensureKeepAliveDeviceChangeListener();
     ensureKeepAlivePowerReleaseListener();
     await assertSelectedMicrophoneAvailable(this.options.deviceId);
@@ -592,6 +611,11 @@ export async function prewarmVoiceInputMicrophone(options: WebMicAudioEngineOpti
     if (isKeepAliveSessionDisposedError(error)) return;
     throw error;
   }
+  // Re-check after the await: a recording start racing on the *same*
+  // keepAliveSessionPromise can resolve first and activate() this session.
+  // Deactivating it here would send setActive=false, drop the PCM callback and
+  // detach the output path while the UI still shows recording in progress.
+  if (session.isActive()) return;
   session.deactivate();
   scheduleKeepAliveIdleDispose(session, 'idle_timeout_after_prewarm', { refresh: false });
 }

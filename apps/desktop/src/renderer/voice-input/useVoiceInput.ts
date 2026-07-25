@@ -1242,6 +1242,22 @@ export function useVoiceInput(
       elapsedMs,
     });
     if (!captureStart.ok) {
+      // 电源释放(锁屏/挂起)取消了启动:静默回收,不显示错误态 —— 用户是主动
+      // 离开,内部的 disposed 消息不该出现在界面上。
+      if (captureStart.cancelled) {
+        log.debug('microphone start cancelled by power release');
+        resolveStartReadyState(attemptId, { ok: false, error: captureStart.error });
+        invalidateStartAttempt();
+        void startResultPromise.then((result) => {
+          if (result.ok) {
+            void window.electronAPI.voiceInput.cancel({ runId: result.runId });
+          }
+        });
+        await restoreSystemAudioForRecording();
+        setVoiceState('idle');
+        restoreEditorFocusAfterVoiceInput();
+        return;
+      }
       log.warn('microphone start failed:', captureStart.error);
       resolveStartReadyState(attemptId, { ok: false, error: captureStart.error });
       invalidateStartAttempt();

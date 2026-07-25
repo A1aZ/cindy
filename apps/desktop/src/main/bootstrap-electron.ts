@@ -5564,6 +5564,11 @@ app.on('ready', async () => {
   // 强制引用避免 tree-shaking 干掉 feishuIm（imHost 已通过 im 间接持有，但 main/im 也直接用它）
   void feishuIm;
   // 端点清单已就绪、IPC 已注册,此后 second-instance / activate 允许按需建窗。
+  // 使用统计(TapDB)的同意闸:必须在 createWindow **之前**注册。renderer 的
+  // tapdbClient 一挂载就 invoke analytics:settings-get 来决定是否初始化 SDK,
+  // handler 还没注册的话那次 invoke 会 reject,而它是 fail closed 的 —— 已同意
+  // 的用户会一直不上报,直到手动去设置里拨一下开关。
+  initAnalyticsSettingsService();
   startupWindowCreationAllowed = true;
   createWindow();
   // 预热仅服务 dev macOS，延迟执行避免和启动关键路径争用 CPU；失败由入口内部吞掉。
@@ -5571,9 +5576,6 @@ app.on('ready', async () => {
     prewarmMacComputerPermissionGuideHelper();
   }, 3_000);
   initUpdateService();
-  // 使用统计(TapDB)的同意闸:必须在 initHeartbeatService 之前注册,renderer 的
-  // tapdbClient 一挂载就会 invoke analytics:settings-get 决定是否初始化 SDK。
-  initAnalyticsSettingsService();
   // 在线人数心跳:App 启动即上报,内部走 deviceId / userId 兜底,登录前后都活
   initHeartbeatService();
   // 设备互联(跨设备远程控制):登录后连 relay,登出即断;开关与设备列表 IPC 一并注册

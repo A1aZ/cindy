@@ -2,13 +2,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const asyncStore = vi.hoisted(() => new Map<string, string>());
 const getItem = vi.hoisted(() => vi.fn(async (key: string) => asyncStore.get(key) ?? null));
+const setItem = vi.hoisted(() =>
+  vi.fn(async (key: string, value: string) => {
+    asyncStore.set(key, value);
+  }),
+);
 
 vi.mock('@react-native-async-storage/async-storage', () => ({
   default: {
     getItem,
-    setItem: vi.fn(async (key: string, value: string) => {
-      asyncStore.set(key, value);
-    }),
+    setItem,
     removeItem: vi.fn(async (key: string) => {
       asyncStore.delete(key);
     }),
@@ -18,26 +21,39 @@ vi.mock('@react-native-async-storage/async-storage', () => ({
 import {
   __testing,
   acceptPrivacyConsent,
+  clearAnalyticsConsent,
   getAnalyticsConsentState,
   hydrateAnalyticsConsent,
   isAnalyticsAllowed,
   migrateExistingLoginAsConsented,
   setAnalyticsEnabled,
+  subscribeAnalyticsConsent,
 } from '@/analytics/analyticsConsentStore';
 
 const KEY = __testing.storageKey;
+
+function stored(): Record<string, unknown> {
+  return JSON.parse(asyncStore.get(KEY) ?? '{}');
+}
 
 beforeEach(async () => {
   await __testing.resetMemory();
   asyncStore.clear();
   getItem.mockImplementation(async (key: string) => asyncStore.get(key) ?? null);
+  setItem.mockImplementation(async (key: string, value: string) => {
+    asyncStore.set(key, value);
+  });
 });
 
 describe('mobile analytics consent store', () => {
   it('starts unconsented on a fresh install', async () => {
     await hydrateAnalyticsConsent();
 
-    expect(getAnalyticsConsentState()).toEqual({ consent: false, enabled: true });
+    expect(getAnalyticsConsentState()).toEqual({
+      consent: false,
+      enabled: true,
+      enabledCustomized: false,
+    });
     expect(isAnalyticsAllowed()).toBe(false);
   });
 
@@ -50,18 +66,50 @@ describe('mobile analytics consent store', () => {
     await acceptPrivacyConsent();
 
     expect(isAnalyticsAllowed()).toBe(true);
-    expect(JSON.parse(asyncStore.get(KEY) ?? '{}')).toEqual({ consent: true, enabled: true });
+    expect(stored()).toEqual({ consent: true });
   });
 
-  it('keeps consent but blocks reporting when the toggle is off', async () => {
+  it('records consent without fabricating an enabled override', async () => {
+    // 同意 ≠ 显式打开过开关。盘上不写 enabled,将来改默认值才能触达这些用户。
+    await acceptPrivacyConsent();
+
+    expect(stored()).not.toHaveProperty('enabled');
+    expect(getAnalyticsConsentState().enabledCustomized).toBe(false);
+    expect(getAnalyticsConsentState().enabled).toBe(true);
+  });
+
+  it('writes an override once the user actually touches the toggle', async () => {
     await acceptPrivacyConsent();
     await setAnalyticsEnabled(false);
 
-    expect(getAnalyticsConsentState()).toEqual({ consent: true, enabled: false });
+    expect(stored()).toEqual({ consent: true, enabled: false });
+    expect(getAnalyticsConsentState()).toEqual({
+      consent: true,
+      enabled: false,
+      enabledCustomized: true,
+    });
     expect(isAnalyticsAllowed()).toBe(false);
 
     await setAnalyticsEnabled(true);
+    expect(stored()).toEqual({ consent: true, enabled: true });
     expect(isAnalyticsAllowed()).toBe(true);
+  });
+
+  it('does not publish the new state when persistence fails', async () => {
+    await acceptPrivacyConsent();
+    setItem.mockRejectedValueOnce(new Error('storage full'));
+    const seen: boolean[] = [];
+    const unsubscribe = subscribeAnalyticsConsent(() => {
+      seen.push(true);
+    });
+
+    await expect(setAnalyticsEnabled(false)).rejects.toThrow('storage full');
+
+    // 关键:内存状态不能先于落盘改掉。否则设置页会显示「已关闭」,重启后却又回到
+    // 开启,而调用方 await 抛出后连停止上报都不会执行。
+    expect(getAnalyticsConsentState().enabled).toBe(true);
+    expect(seen).toHaveLength(0);
+    unsubscribe();
   });
 
   it('migrates an existing signed-in user when the device has no record yet', async () => {
@@ -74,7 +122,7 @@ describe('mobile analytics consent store', () => {
     asyncStore.set(KEY, JSON.stringify({ consent: false, enabled: false }));
 
     await expect(migrateExistingLoginAsConsented()).resolves.toBe(false);
-    expect(getAnalyticsConsentState()).toEqual({ consent: false, enabled: false });
+    expect(isAnalyticsAllowed()).toBe(false);
   });
 
   it('does not migrate twice', async () => {
@@ -82,9 +130,15 @@ describe('mobile analytics consent store', () => {
     await expect(migrateExistingLoginAsConsented()).resolves.toBe(false);
   });
 
-  it('treats a corrupted record as unconsented and refuses to migrate it', async () => {
-    // 损坏 ≠ 不存在:不能让一次坏数据触发「视为已同意」的存量推定。
-    asyncStore.set(KEY, '{not json');
+  it.each([
+    ['corrupted json', '{not json'],
+    ['a bare literal', 'true'],
+    ['a number', '42'],
+    ['an array', '[{"consent":true}]'],
+  ])('treats %s as an existing record, not a missing one', async (_label, raw) => {
+    // 存在但非法 ≠ 不存在。当成不存在就会触发存量推定,把一份坏掉的显式 opt-out
+    // 静默翻回「已同意」。
+    asyncStore.set(KEY, raw);
 
     await hydrateAnalyticsConsent();
     expect(isAnalyticsAllowed()).toBe(false);
@@ -99,5 +153,15 @@ describe('mobile analytics consent store', () => {
     expect(isAnalyticsAllowed()).toBe(false);
     // 读失败时不确定本机有没有记录,不得据此推定为存量用户。
     await expect(migrateExistingLoginAsConsented()).resolves.toBe(false);
+  });
+
+  it('clears consent on logout so the next launch starts unconsented', async () => {
+    await acceptPrivacyConsent();
+    expect(isAnalyticsAllowed()).toBe(true);
+
+    await clearAnalyticsConsent();
+
+    expect(isAnalyticsAllowed()).toBe(false);
+    expect(asyncStore.has(KEY)).toBe(false);
   });
 });

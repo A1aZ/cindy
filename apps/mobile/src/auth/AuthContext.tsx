@@ -59,8 +59,11 @@ import {
   getSecureItem,
   setSecureItem,
 } from '@/auth/secureStorage';
-import { clearTapdbUser, setTapdbUser } from '@/analytics/mobileTapdb';
-import { migrateExistingLoginAsConsented } from '@/analytics/analyticsConsentStore';
+import { clearTapdbUser, setTapdbUser, stopMobileTapdbReporting } from '@/analytics/mobileTapdb';
+import {
+  clearAnalyticsConsent,
+  migrateExistingLoginAsConsented,
+} from '@/analytics/analyticsConsentStore';
 import { unregisterPushTokenBestEffort } from '@/notifications/pushNotifications';
 import { resetAgentCapabilitiesCache } from '@/session/agentCapabilitiesCache';
 import { resetComposerPaletteCache } from '@/session/composerPaletteCache';
@@ -995,6 +998,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     resetComposerPaletteCache();
     resetAgentCapabilitiesCache();
     await clearCanaryChannel().catch(() => undefined);
+    // 使用统计的同意记录也随登出清除。手机端没有游客模式:登出后 NavigationGate 会
+    // 把所有路由重定向到 /login,设置页里的统计开关从此不可达。保留同意会让用户处在
+    // 「还在被统计、却再也关不掉」的状态;清掉之后,下次登录会重新过登录页的协议门。
+    await stopMobileTapdbReporting().catch(() => undefined);
+    await clearAnalyticsConsent().catch(() => undefined);
     await serializeRefreshTokenMutation(() =>
       deleteSecureItem(REFRESH_TOKEN_KEY).catch(() => undefined),
     );

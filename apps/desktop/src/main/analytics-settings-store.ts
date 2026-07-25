@@ -16,6 +16,7 @@
  */
 
 import { app } from 'electron';
+import fs from 'node:fs';
 import path from 'node:path';
 
 import { desktopMakerLogger } from './maker-host/logger-adapter.js';
@@ -113,6 +114,11 @@ export function setAnalyticsEnabled(analyticsEnabled: boolean): AnalyticsSetting
  */
 export function migrateExistingLoginAsConsented(isSignedIn: boolean): boolean {
   if (!isSignedIn) return false;
+  // 必须**先看盘再 readState**:createOverrideSettingsFile 读到损坏 JSON 会把文件
+  // 直接删掉并返回 isCustomized=false。若只看 isCustomized,一份损坏的记录——包括
+  // 原本是显式 opt-out 的那种——会被当成「从没有过记录」,于是下一次冷启动就把采集
+  // 静默重新打开。损坏 ≠ 不存在:只要盘上有过文件,一律不迁移(与 mobile 同口径)。
+  if (fs.existsSync(settingsFilePath())) return false;
   const state = store.readState();
   if (state.isCustomized) return false;
   store.writePatch({ privacyConsentAccepted: true });

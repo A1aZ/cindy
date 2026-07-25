@@ -21,9 +21,11 @@
  *   - import 触发 initTapdb(主视图启动时,见 renderer/index.tsx)——它只挂闸、
  *     订阅信号,不碰 SDK
  *   - main 回报 allowed=true 才 init SDK,并立即上报 page_view (#tag=app_start)
- *   - autoTrack 接管 page_show / page_hide
+ *   - autoTrack 接管 page_show;page_hide 由本模块自己发(SDK 的 beacon 路径没有
+ *     采集闸,详见 initTapdb 内 visibilitychange 处的注释)
  *   - 运行期用户在设置里关掉统计 → optOutTracking():SDK 内部 _isCollectData()
- *     变 false,连 autoTrack 的自动事件也会停,且状态持久化在 localStorage
+ *     变 false,主动上报与 page_show 全部停止,且状态持久化在 localStorage;
+ *     page_hide 由 reportPageHide 自行守闸
  *   - 重新打开 → optInTracking() 并补一次 app_start
  *
  * Overlay 窗口(voice-input-overlay / voice-input-dictionary-toast)不引入此模块,
@@ -52,6 +54,8 @@ let gateMounted = false;
 let sdkInitialized = false;
 /** main 侧最近一次结论:是否允许上报。fail closed,默认 false。 */
 let reportingAllowed = false;
+/** 每收到一次广播 +1;用于丢弃 IPC 往返期间已经过期的初始快照。 */
+let settingsEpoch = 0;
 let currentUserId: string | null = null;
 let lastActiveDate: string | null = null;
 let lastSetUserDate: string | null = null;
@@ -115,9 +119,23 @@ export function initTapdb(): void {
     log.error('daily active subscription failed (non-fatal)', err);
   }
 
+  // page_hide 由本模块自己发,不走 SDK 的 autoTrack —— SDK 的 trackPageHideEvent
+  // 内部用 trackWithBeacon,而那个方法**没有** _isCollectData() 闸(见 vendored
+  // tapdb.esm.min.js)。沿用 SDK 自动上报的话,用户关掉统计后每次切走窗口仍会发出
+  // 一条带 deviceId 的 beacon。这里改由 reportPageHide 统一把关。
+  try {
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) return;
+      reportPageHide();
+    });
+  } catch (err) {
+    log.error('page_hide subscription failed (non-fatal)', err);
+  }
+
   // 同意 / 开关变化即时生效,不必等下次冷启动。
   try {
     window.electronAPI.onAnalyticsSettingsChange((payload) => {
+      settingsEpoch += 1;
       applyReportingAllowed(payload.allowed === true);
     });
   } catch (err) {
@@ -125,14 +143,37 @@ export function initTapdb(): void {
   }
 
   // 初始结论。读失败一律 fail closed(保持不上报),不做乐观兜底。
+  const epochAtRead = settingsEpoch;
   void window.electronAPI
     .getAnalyticsSettings()
     .then((payload) => {
+      // IPC 往返期间用户可能已经关掉开关,而广播先一步到达。那条广播比这个快照
+      // 新,不能被这里的旧结果覆盖 —— 否则 optInTracking() 会把刚关掉的上报又打开。
+      if (epochAtRead !== settingsEpoch) {
+        log.info('stale initial settings snapshot discarded');
+        return;
+      }
       applyReportingAllowed(payload.allowed === true);
     })
     .catch((err) => {
+      // 冷启动早期 main 侧 handler 可能还没注册完(渲染进程先跑到这里)。这时候
+      // 不能永久放弃:后续 analytics:settings-change 广播仍会把结论送来,而用户
+      // 「已同意」的情况下 main 在任何一次设置变更时都会重播状态。
       log.error('analytics settings read failed; reporting stays disabled', err);
     });
+}
+
+/**
+ * page_hide 上报。SDK 的 beacon 路径绕过 _isCollectData(),所以闸必须由我们自己守:
+ * 未初始化或未放行时一个字节都不发。
+ */
+function reportPageHide(): void {
+  if (!sdkInitialized || !reportingAllowed) return;
+  try {
+    TapDBAPI.track('page_hide');
+  } catch (err) {
+    log.error('page_hide report failed (non-fatal)', err);
+  }
 }
 
 /** 把 main 的结论落到 SDK:首次放行 → init;关闭 → opt-out;重新放行 → opt-in。 */
@@ -148,8 +189,10 @@ function applyReportingAllowed(next: boolean): void {
         return;
       }
       // optOutTracking 清掉 superProperties / accountId,并把 opt_tracking 写成
-      // false(持久化在 localStorage)。此后 _isCollectData() 恒 false,连 autoTrack
-      // 的 page_show / page_hide 都不再发出。
+      // false(持久化在 localStorage)。此后 _isCollectData() 恒 false,SDK 的
+      // page_show 与我们所有主动上报都会被挡下。
+      // page_hide 不在此列 —— SDK 的 beacon 路径没有这道闸,所以我们没有开启
+      // autoTrack.pageHide,改由 reportPageHide 自己守闸(见 initTapdb)。
       TapDBAPI.optOutTracking();
       lastActiveDate = null;
       lastSetUserDate = null;
@@ -185,10 +228,14 @@ function initSdk(): void {
       // init 时自动上报一个 device_login 事件。TapDB 后台用 device_login 认定
       // "新增设备"指标 — pvEvent / page_view 都不算数,必须开这个。
       isInitDeviceLogin: true,
-      // 自动采集页面展示/隐藏,用于会话时长统计
+      // 自动采集页面展示,用于会话时长统计。
+      // pageHide 必须保持 false:SDK 的 trackPageHideEvent 走 trackWithBeacon,
+      // 那条路径没有 _isCollectData() 闸,opt-out 之后依然会发。我们自己监听
+      // visibilitychange 并在 reportPageHide 里守闸(时长仍由 SDK 在
+      // trackPageShowEvent 里打的 timeEvent(page_hide) 计算,口径不变)。
       autoTrack: {
         pageShow: true,
-        pageHide: true,
+        pageHide: false,
       },
     });
 
@@ -262,6 +309,7 @@ export const __testing = {
     gateMounted = false;
     sdkInitialized = false;
     reportingAllowed = false;
+    settingsEpoch = 0;
     currentUserId = null;
     lastActiveDate = null;
     lastSetUserDate = null;

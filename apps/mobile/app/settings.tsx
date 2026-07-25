@@ -91,6 +91,7 @@ export default function SettingsScreen() {
   // 使用统计(TapDB)开关。真相在 analyticsConsentStore,这里只是视图态。
   const [analyticsEnabled, setAnalyticsEnabledState] = useState(true);
   const [analyticsBusy, setAnalyticsBusy] = useState(false);
+  const [analyticsMessage, setAnalyticsMessage] = useState<string | null>(null);
   const updateCheckInFlightRef = useRef(false);
   const [selfDeviceName, setSelfDeviceName] = useState<string | null>(null);
   const [selfDeviceNameDraft, setSelfDeviceNameDraft] = useState('');
@@ -487,22 +488,27 @@ export default function SettingsScreen() {
   /* ── 使用统计(TapDB)开关 ──
      语义是 opt-out:用户在登录页同意《隐私政策》后默认开启,这里随时可关。
      关闭后立即解绑账号标识、不再主动上报;原生 SDK 不支持反初始化,本次进程内
-     已初始化的实例要到下次冷启动才彻底不再初始化(见 analytics/mobileTapdb)。 */
+     已初始化的实例要到下次冷启动才彻底不再初始化(见 analytics/mobileTapdb)。
+
+     关闭路径**先停上报再落盘**:写盘失败时本次运行已经不再上报(偏安全的一侧),
+     而开关值不变,如实反映「重启后仍是开启」。 */
   const toggleAnalytics = useCallback(async () => {
     if (analyticsBusy) return;
     setAnalyticsBusy(true);
+    setAnalyticsMessage(null);
+    const next = !getAnalyticsConsentState().enabled;
     try {
-      const next = !getAnalyticsConsentState().enabled;
+      if (!next) await stopMobileTapdbReporting();
       await setAnalyticsEnabled(next);
       if (next) await initMobileTapdb();
-      else await stopMobileTapdbReporting();
     } catch {
-      // 落盘失败时状态由 store 的订阅回推,这里不额外提示(与 push 开关不同:
-      // 本开关没有服务端往返,失败只可能是本机存储异常)。
+      // 只可能是本机存储异常(无服务端往返)。开关值由 store 回推,保持落盘前的
+      // 真值;这里显式告诉用户没存住,而不是让它看起来「点了没反应」。
+      setAnalyticsMessage(t('settings.legal.analyticsSaveFailed'));
     } finally {
       setAnalyticsBusy(false);
     }
-  }, [analyticsBusy]);
+  }, [analyticsBusy, t]);
 
   const avatarLabel = (overview.header.name.trim()[0] ?? '?').toUpperCase();
   const updateBusy = updatePhase === 'checking' || updatePhase === 'downloading';
@@ -689,6 +695,9 @@ export default function SettingsScreen() {
             <View style={styles.switchTexts}>
               <Text style={styles.rowLabel}>{t('settings.legal.analytics')}</Text>
               <Text style={styles.hint}>{t('settings.legal.analyticsHint')}</Text>
+              {analyticsMessage ? (
+                <Text style={styles.hint} testID="settings.analyticsMessage">{analyticsMessage}</Text>
+              ) : null}
             </View>
             <Switch
               accessibilityLabel={t('settings.legal.analytics')}

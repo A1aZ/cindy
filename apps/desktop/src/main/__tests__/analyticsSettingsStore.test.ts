@@ -148,4 +148,23 @@ describe('analytics settings store', () => {
 
     expect(store.isAnalyticsAllowed()).toBe(false);
   });
+
+  it('refuses to migrate a corrupted record — damaged is not the same as absent', async () => {
+    // createOverrideSettingsFile 读到坏 JSON 会把文件删掉并返回 isCustomized=false。
+    // 只看 isCustomized 的话,一份损坏的记录(可能原本就是显式 opt-out)会被当成
+    // 「从没有过记录」,于是这次冷启动就把采集静默重新打开。
+    fs.writeFileSync(settingsFile(), '{not json', 'utf-8');
+    const store = await importStore();
+
+    expect(store.migrateExistingLoginAsConsented(true)).toBe(false);
+    expect(store.isAnalyticsAllowed()).toBe(false);
+  });
+
+  it('refuses to migrate when a record exists but carries no overrides', async () => {
+    fs.writeFileSync(settingsFile(), '{}', 'utf-8');
+    const store = await importStore();
+
+    expect(store.migrateExistingLoginAsConsented(true)).toBe(false);
+    expect(store.isAnalyticsAllowed()).toBe(false);
+  });
 });

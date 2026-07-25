@@ -25,6 +25,7 @@ import {
 import { createLogger } from './logger';
 import { onQuit } from './lifecycle';
 import { assertTrustedAppRendererEvent } from './security/trustedAppRenderer.js';
+import { throwIpcError } from './utils/ipcValidate.js';
 import {
   ANALYTICS_SETTINGS_CHANGE_CHANNEL,
   type AnalyticsSettingsPayload,
@@ -35,6 +36,22 @@ const log = createLogger('analytics-settings');
 let ipcRegistered = false;
 /** 存量迁移只评估一次;评估过就不再看任何后续登录。 */
 let migrationEvaluated = false;
+
+/**
+ * 落盘失败翻译成统一 IPC 错误协议。
+ *
+ * 直接把 fs 异常抛过进程边界会让 renderer 拿到(并 toast 出)内部绝对路径,
+ * 违反 electron-security-and-process-boundaries.md §5「不把堆栈、内部路径原样
+ * 返回 Renderer」。真实原因只留在 main 侧日志里。
+ */
+function writeOrThrowIpcError(write: () => void, context: string): void {
+  try {
+    write();
+  } catch (err) {
+    log.error(context, err);
+    throwIpcError('INTERNAL', '保存使用统计设置失败');
+  }
+}
 
 export function analyticsSettingsPayload(): AnalyticsSettingsPayload {
   const value = readAnalyticsSettings();
@@ -117,14 +134,14 @@ export function initAnalyticsSettingsService(): void {
     assertTrustedAppRendererEvent(event);
     // payload 只信运行时校验过的布尔;非布尔一律当关闭处理(fail closed)。
     const enabled = rawEnabled === true;
-    setAnalyticsEnabled(enabled);
+    writeOrThrowIpcError(() => setAnalyticsEnabled(enabled), 'write analytics setting failed');
     broadcastSettingsChange();
     return analyticsSettingsPayload();
   });
 
   ipcMain.handle('analytics:consent-accept', (event) => {
     assertTrustedAppRendererEvent(event);
-    acceptPrivacyConsent();
+    writeOrThrowIpcError(() => acceptPrivacyConsent(), 'record privacy consent failed');
     broadcastSettingsChange();
     return analyticsSettingsPayload();
   });

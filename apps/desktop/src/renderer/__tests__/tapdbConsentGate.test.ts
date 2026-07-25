@@ -11,12 +11,13 @@
  * 违反 TapTap 自己的合规要求。这里把「不许 init」钉成回归测试。
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const tapdb = vi.hoisted(() => ({
   init: vi.fn(),
   setSuperProperties: vi.fn(),
   pvEvent: vi.fn(),
+  track: vi.fn(),
   setUser: vi.fn(),
   logout: vi.fn(),
   optInTracking: vi.fn(),
@@ -38,6 +39,8 @@ type SettingsPayload = {
 let settingsListener: ((payload: SettingsPayload) => void) | null = null;
 let authListener: ((state: unknown) => void) | null = null;
 let getAnalyticsSettings: () => Promise<SettingsPayload>;
+/** 本文件内注册过的 visibilitychange 回调(见 hidePage)。 */
+const visibilityHandlers: Array<() => void> = [];
 
 function installElectronApi(initial: SettingsPayload): void {
   getAnalyticsSettings = vi.fn(async () => initial);
@@ -66,6 +69,18 @@ async function importClient() {
   return import('../analytics/tapdbClient');
 }
 
+/**
+ * 模拟窗口被切到后台。
+ *
+ * 不用 dispatchEvent:jsdom 的 document 在用例之间共享,而每次 importClient 都会
+ * 再注册一个 visibilitychange 监听器,广播会把前面用例残留的监听器一起打起来。
+ * 这里只调用**本用例**注册的那一个。
+ */
+function hidePage(): void {
+  Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+  visibilityHandlers.at(-1)?.();
+}
+
 /** 让 initTapdb 内部那条 getAnalyticsSettings().then(...) 跑完。 */
 async function flush(): Promise<void> {
   await Promise.resolve();
@@ -87,7 +102,20 @@ const ALLOWED: SettingsPayload = {
 beforeEach(() => {
   settingsListener = null;
   authListener = null;
+  visibilityHandlers.length = 0;
   Object.values(tapdb).forEach((fn) => fn.mockReset());
+  vi.spyOn(document, 'addEventListener').mockImplementation(((
+    type: string,
+    handler: EventListenerOrEventListenerObject,
+  ) => {
+    if (type === 'visibilitychange' && typeof handler === 'function') {
+      visibilityHandlers.push(() => handler(new Event('visibilitychange')));
+    }
+  }) as typeof document.addEventListener);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe('TapDB consent gate', () => {
@@ -172,6 +200,85 @@ describe('TapDB consent gate', () => {
       '#app_version': '9.9.9',
       '#platform': 'darwin',
     });
+  });
+
+  // ── page_hide 不能走 SDK 的 beacon 路径 ──────────────────────────────────
+  //
+  // vendored SDK 的 trackWithBeacon() 没有 _isCollectData() 闸,而 PageLifeCycle
+  // 的 trackPageHideEvent() 正是用它。若开着 autoTrack.pageHide,用户关掉统计后
+  // 每次切走窗口仍会发出一条带 deviceId 的 beacon。
+
+  it('never enables the SDK-side auto page-hide beacon', async () => {
+    installElectronApi(ALLOWED);
+    const client = await importClient();
+
+    client.initTapdb();
+    await flush();
+
+    expect(tapdb.init).toHaveBeenCalledWith(
+      expect.objectContaining({ autoTrack: { pageShow: true, pageHide: false } }),
+    );
+  });
+
+  it('reports page_hide itself while allowed', async () => {
+    installElectronApi(ALLOWED);
+    const client = await importClient();
+
+    client.initTapdb();
+    await flush();
+    hidePage();
+
+    expect(tapdb.track).toHaveBeenCalledWith('page_hide');
+  });
+
+  it('does not report page_hide after opting out', async () => {
+    installElectronApi(ALLOWED);
+    const client = await importClient();
+
+    client.initTapdb();
+    await flush();
+    settingsListener?.({ privacyConsentAccepted: true, analyticsEnabled: false, allowed: false });
+    tapdb.track.mockClear();
+
+    hidePage();
+
+    expect(tapdb.track).not.toHaveBeenCalled();
+  });
+
+  it('does not report page_hide while unconsented', async () => {
+    installElectronApi(DENIED);
+    const client = await importClient();
+
+    client.initTapdb();
+    await flush();
+    hidePage();
+
+    expect(tapdb.track).not.toHaveBeenCalled();
+  });
+
+  it('discards an initial snapshot that lost the race to a newer broadcast', async () => {
+    // getAnalyticsSettings 的 IPC 往返期间用户关掉了开关,关闭广播先到。那条广播
+    // 比初始快照新,旧快照不能把 optInTracking() 又打开。
+    let resolveRead: (payload: SettingsPayload) => void = () => {};
+    installElectronApi(ALLOWED);
+    (window as unknown as { electronAPI: { getAnalyticsSettings: unknown } }).electronAPI
+      .getAnalyticsSettings = vi.fn(
+        () =>
+          new Promise<SettingsPayload>((resolve) => {
+            resolveRead = resolve;
+          }),
+      );
+    const client = await importClient();
+
+    client.initTapdb();
+    await flush();
+
+    settingsListener?.({ privacyConsentAccepted: true, analyticsEnabled: false, allowed: false });
+    resolveRead(ALLOWED);
+    await flush();
+
+    expect(tapdb.init).not.toHaveBeenCalled();
+    expect(tapdb.optInTracking).not.toHaveBeenCalled();
   });
 
   it('fails closed when the settings read rejects', async () => {

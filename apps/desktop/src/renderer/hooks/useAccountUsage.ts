@@ -30,9 +30,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
   CODEX_DEFAULT_LIMIT_BUCKET,
-  GENERIC_BUCKET_KEYS,
   UNSAFE_BUCKET_KEYS,
-  STALE_BUCKET_GRACE_MS,
   codexLimitBucketKey,
   isCodexBucketStale,
   matchCodexBucketForModel,

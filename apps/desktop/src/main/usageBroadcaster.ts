@@ -34,7 +34,6 @@ import {
 import type { AgentKind } from '@cindy/maker-core';
 
 import {
-  CODEX_DEFAULT_LIMIT_BUCKET,
   UNSAFE_BUCKET_KEYS,
   codexLimitBucketKey,
   isCodexBucketStale,

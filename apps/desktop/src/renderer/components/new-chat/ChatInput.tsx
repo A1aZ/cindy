@@ -4814,12 +4814,13 @@ export function ChatInput({
     voiceInput.state === 'submitting' ||
     voiceInput.state === 'refining',
   );
-  // Send / Stop 双槽语义:
+  // Send / Stop 双槽语义 (voice busy = voiceInput.isBusy = listening|submitting|refining,
+  // 判定为何用 isBusy 而不是 isListening 见下方第三段):
   // - 主槽 (最右, 永远占位, sendButtonRef 钉在这里):
   //     · 发送瞬间 (inflight=true) → Stop  (Send 原位被替换, 不抖左侧 layout)
-  //     · streaming idle (无内容 / 无 voice) → Stop  (取代 Send 占主槽)
-  //     · 其它 (idle / streaming+canSend / voice listening) → Send
-  // - 次槽 (语音按钮左边, 即本组最左; 仅 streaming+(canSend||listening)+!inflight 时出现): Stop
+  //     · streaming idle (无内容 且 无 voice busy) → Stop  (取代 Send 占主槽)
+  //     · 其它 (idle / streaming+canSend / voice busy) → Send
+  // - 次槽 (语音按钮左边, 即本组最左; 仅 streaming+(canSend||voice busy)+!inflight 时出现): Stop
   // 设计意图: Send 是最显眼的主行动按钮, 应当永远在最右; streaming idle 时由 Stop 顶替
   // Send 主槽 (原位替换, 不抖); streaming 中用户输入下一条要送入 PendingQueue 时, Send 回
   // 到主槽, Stop 退到次槽. sendDispatchInFlight 锁次槽, 避免 send 瞬间主槽 Send→Stop 切换

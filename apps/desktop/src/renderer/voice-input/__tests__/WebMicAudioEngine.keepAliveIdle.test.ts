@@ -318,6 +318,33 @@ describe('keep-alive microphone idle window', () => {
     expect(getUserMedia).toHaveBeenCalledTimes(2);
   });
 
+  it('reports cancellation when getUserMedia rejects after a release', async () => {
+    let rejectStream: (error: unknown) => void = () => undefined;
+    getUserMedia.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      rejectStream = reject;
+    }));
+
+    const engine = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: true,
+      onInterrupted: vi.fn(),
+    });
+    const starting = engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(powerCallback).toBeDefined();
+
+    powerCallback?.({ reason: 'system_suspend' });
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Suspending the machine typically makes the pending request reject rather
+    // than resolve. That must still read as cancellation, not as a device
+    // failure worth retrying with a fresh cold stream.
+    rejectStream(Object.assign(new Error('The request is not allowed'), { name: 'AbortError' }));
+
+    await expect(starting).rejects.toThrow(/disposed/i);
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+  });
+
   it('shares one startup between concurrent callers', async () => {
     let resolveStream: (value: unknown) => void = () => undefined;
     getUserMedia.mockImplementationOnce(() => new Promise((resolve) => {

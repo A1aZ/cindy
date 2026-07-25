@@ -390,6 +390,13 @@ class KeepAliveMicSession {
         video: false,
       });
     } catch (error) {
+      // A release that won this race takes priority over the device error.
+      // Suspending a machine commonly makes the pending getUserMedia reject
+      // (AbortError / NotReadableError); reporting that as an ordinary failure
+      // sends start() down the cold fallback path, which reopens the microphone
+      // after the suspend/lock event has already passed — with nothing left to
+      // close it.
+      if (this.disposed) throw new KeepAliveSessionDisposedError();
       throw normalizeMicrophoneStartError(error, this.options.deviceId);
     }
     // dispose() ran while getUserMedia was in flight: it could not stop a track
@@ -622,7 +629,12 @@ async function getOrCreateKeepAliveSession(
     }
     return existing;
   }
-  if (keepAliveSessionPromise && keepAliveSession?.key === key) {
+  const joining = keepAliveSession;
+  if (keepAliveSessionPromise && joining && joining.key === key) {
+    // Joining an in-flight startup still has to claim it: without the
+    // reservation a later prewarm would read isBusy() as false and dispose the
+    // session out from under the recording that is waiting on this promise.
+    if (reserveForRecording) joining.reserveForRecording();
     return keepAliveSessionPromise;
   }
   if (keepAliveSessionPromise) {

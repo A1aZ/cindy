@@ -271,6 +271,32 @@ describe('keep-alive microphone idle window', () => {
     expect(track.stopped).toBe(true);
   });
 
+  it('does not replace a session a recording is still starting on', async () => {
+    let resolveStream: (value: unknown) => void = () => undefined;
+    getUserMedia.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveStream = resolve;
+    }));
+
+    const engine = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: true,
+      onInterrupted: vi.fn(),
+    });
+    const starting = engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The recording has not reached activate() yet, so the session is not
+    // "active" — but it is being started *for* that recording. A prewarm with a
+    // different device must not send it down the replace path.
+    await mod.prewarmVoiceInputMicrophone({ workletUrl: WORKLET_URL, deviceId: 'another-device' });
+
+    resolveStream({ getAudioTracks: () => [track], getTracks: () => [track] });
+    await starting;
+
+    expect(track.stopped).toBe(false);
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+  });
+
   it('shares one startup between concurrent callers', async () => {
     let resolveStream: (value: unknown) => void = () => undefined;
     getUserMedia.mockImplementationOnce(() => new Promise((resolve) => {

@@ -97,6 +97,7 @@ let keepAliveSession: KeepAliveMicSession | null = null;
 let keepAliveSessionPromise: Promise<KeepAliveMicSession> | null = null;
 let keepAliveDeviceChangeListening = false;
 let keepAlivePowerReleaseListening = false;
+let keepAlivePowerReleaseUnsubscribe: (() => void) | undefined;
 let keepAliveIdleDisposeTimer: number | undefined;
 // Expiry of the current idle window, on the monotonic clock read by
 // keepAliveMonotonicNow() (performance.now(), not wall time). Kept separately
@@ -322,7 +323,10 @@ function ensureKeepAlivePowerReleaseListener(): void {
   const subscribe = window.electronAPI?.voiceInput?.onPowerStateChange;
   if (typeof subscribe !== 'function') return;
   keepAlivePowerReleaseListening = true;
-  subscribe((payload) => {
+  // Keep the unsubscribe: without it every dev HMR reload would add another
+  // live subscription (the flag resets with the module, the listener does not),
+  // so one lock event would fan out to N stale callbacks.
+  keepAlivePowerReleaseUnsubscribe = subscribe((payload) => {
     void disposeKeepAliveVoiceInputMicrophone(payload.reason);
   });
 }
@@ -454,6 +458,9 @@ class KeepAliveMicSession {
   }
 
   activate(activation: KeepAliveActivation): void {
+    // Defence in depth: a disposed session has no stream or worklet left, so
+    // activating it would look like a successful start that never emits audio.
+    if (this.disposed) throw new KeepAliveSessionDisposedError();
     this.activation = activation;
     this.active = true;
     // Attach before arming the worklet so the first active render quantum
@@ -479,6 +486,19 @@ class KeepAliveMicSession {
 
   isActive(): boolean {
     return this.active;
+  }
+
+  /**
+   * Recording, or on its way there.
+   *
+   * `active` only flips in activate(), which happens *after* start() resolves.
+   * A concurrent prewarm that only checked `active` would sail past a session a
+   * recording is currently waiting on and hand it to the replace path — the
+   * recording would then activate() a disposed session, report success, and die
+   * on the stall watchdog with no PCM.
+   */
+  isBusy(): boolean {
+    return this.active || this.startPromise !== undefined;
   }
 
   handleDeviceChange(): boolean {
@@ -602,7 +622,7 @@ export async function prewarmVoiceInputMicrophone(options: WebMicAudioEngineOpti
   // getOrCreateKeepAliveSession, whose replace path would dispose the very
   // track the user is speaking into when the device/profile changed. stop()
   // already owns both re-arming the idle window and honouring the new config.
-  if (keepAliveSession?.isActive()) {
+  if (keepAliveSession?.isBusy()) {
     if (keepAliveSession.key !== keepAliveKey(normalized)) {
       keepAliveSession.markStaleForReplacement();
     }
@@ -1253,6 +1273,9 @@ function flushWorkletBufferedAudio(worklet?: AudioWorkletNode): Promise<void> {
 
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
+    keepAlivePowerReleaseUnsubscribe?.();
+    keepAlivePowerReleaseUnsubscribe = undefined;
+    keepAlivePowerReleaseListening = false;
     void disposeKeepAliveVoiceInputMicrophone('hmr');
   });
 }

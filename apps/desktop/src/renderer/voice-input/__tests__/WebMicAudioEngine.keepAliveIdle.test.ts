@@ -468,6 +468,49 @@ describe('keep-alive microphone idle window', () => {
     expect(getUserMedia).not.toHaveBeenCalled();
   });
 
+  it('does not report an error when a release hits a still-starting capture', async () => {
+    let resolvePool: (value: unknown) => void = () => undefined;
+    const pool = await import('../audioContextPool');
+    vi.mocked(pool.prewarmVoiceInputAudio).mockReturnValue(
+      new Promise((resolve) => {
+        resolvePool = resolve as (value: unknown) => void;
+      }) as ReturnType<typeof pool.prewarmVoiceInputAudio>,
+    );
+    const onInterrupted = vi.fn();
+
+    const engine = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: false,
+      onInterrupted,
+    });
+    const starting = engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    powerCallback?.({ reason: 'screen_locked' });
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The device must be closed, but a capture that never reached `ready` has
+    // to surface as a silent cancellation: both UIs route onInterrupted to
+    // their active-recording failure path, and that error would outlive the
+    // cancellation that follows.
+    expect(track.stopped).toBe(true);
+    expect(onInterrupted).not.toHaveBeenCalled();
+
+    resolvePool({
+      context: {
+        currentTime: 0,
+        state: 'running',
+        destination,
+        createGain: vi.fn(() => sink),
+        createMediaStreamSource: vi.fn(() => ({ connect: vi.fn(), disconnect: vi.fn() })),
+        resume: vi.fn(async () => undefined),
+      },
+      workletReady: Promise.resolve(),
+      workletUrl: WORKLET_URL,
+    });
+    await expect(starting).rejects.toThrow(/disposed/i);
+  });
+
   it('can release a stream acquired before context warmup settles', async () => {
     let resolvePool: (value: unknown) => void = () => undefined;
     const pool = await import('../audioContextPool');
@@ -557,8 +600,8 @@ describe('keep-alive microphone idle window', () => {
       onInterrupted: vi.fn(),
     });
 
-    // The device is already open by the time this step fails, and the engine
-    // never made it into the registry — the failure path has to close it.
+    // The device is already open by the time this step fails. Whether or not
+    // the engine reached the registry, the failure path has to close it.
     await expect(engine.start()).rejects.toThrow(/resume failed/i);
     expect(track.stopped).toBe(true);
   });

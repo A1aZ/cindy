@@ -1079,6 +1079,10 @@ export class WebMicAudioEngine {
       assertSelectedMicrophoneAvailable(this.deviceId),
       powerGenerationAtStart,
     );
+    // The enumeration above passed its own check, but a release can land in the
+    // gap before we ask for the device. Without this the request would be made
+    // after the one-shot event and only be closed once it resolves.
+    this.assertNoPowerReleaseDuringStartup(powerGenerationAtStart);
     const streamPromise = this.awaitDirectStartupStep(
       navigator.mediaDevices.getUserMedia({
         audio,
@@ -1182,11 +1186,10 @@ export class WebMicAudioEngine {
       this.ready = true;
       this.startWatchdog();
     } catch (error) {
-      // Everything acquired above — the device, the audio nodes, and a
-      // non-shared AudioContext — has no owner yet: this engine is not in
-      // liveDirectCaptureEngines, and callers treat a power cancellation as
-      // silent, so stop() would never run. Tear it down here instead of
-      // leaking a live microphone for the rest of the session.
+      // Callers treat a power cancellation as silent, so they will never call
+      // stop() themselves. Do it here: it closes the device and the non-shared
+      // AudioContext, clears the track listeners, and removes this engine from
+      // liveDirectCaptureEngines (which it joined right after acquisition).
       await this.stop().catch(() => undefined);
       if (currentPowerReleaseGeneration() !== powerGenerationAtStart) {
         throw powerReleaseCancellation();
@@ -1248,7 +1251,15 @@ export class WebMicAudioEngine {
    */
   releaseForPowerEvent(reason: string): void {
     this.onStateChange?.('direct_capture_power_release', { reason });
-    this.interrupt('Microphone input stopped unexpectedly. Please try again.');
+    // Only a capture that actually reached `ready` is a live recording worth
+    // interrupting. One still starting up is registered (so its device can be
+    // closed here) but must surface as a *silent* cancellation through
+    // start()'s generation check — both UIs wire onInterrupted to their
+    // active-recording failure path, and that visible error cannot be undone
+    // by the cancellation that follows.
+    if (this.ready) {
+      this.interrupt('Microphone input stopped unexpectedly. Please try again.');
+    }
     void this.stop().catch((error: unknown) => {
       // Detached on purpose (the power callback must not await teardown), so an
       // AudioContext.close() failure here would otherwise surface as an

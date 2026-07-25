@@ -436,6 +436,35 @@ describe('keep-alive microphone idle window', () => {
     expect(track.stopped).toBe(false);
   });
 
+  it('stops the direct stream when a later startup step fails', async () => {
+    const pool = await import('../audioContextPool');
+    vi.mocked(pool.prewarmVoiceInputAudio).mockResolvedValue({
+      context: {
+        currentTime: 0,
+        state: 'suspended',
+        destination,
+        createGain: vi.fn(() => sink),
+        createMediaStreamSource: vi.fn(() => ({ connect: vi.fn(), disconnect: vi.fn() })),
+        resume: vi.fn(async () => {
+          throw new Error('resume failed');
+        }),
+      } as unknown as AudioContext,
+      workletReady: Promise.resolve(),
+      workletUrl: WORKLET_URL,
+    });
+
+    const engine = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: false,
+      onInterrupted: vi.fn(),
+    });
+
+    // The device is already open by the time this step fails, and the engine
+    // never made it into the registry — the failure path has to close it.
+    await expect(engine.start()).rejects.toThrow(/resume failed/i);
+    expect(track.stopped).toBe(true);
+  });
+
   it('aborts a direct startup interrupted by a power release', async () => {
     let resolveStream: (value: unknown) => void = () => undefined;
     getUserMedia.mockImplementationOnce(() => new Promise((resolve) => {

@@ -1083,61 +1083,77 @@ export class WebMicAudioEngine {
     });
 
     const directStream = await streamPromise;
-    if (currentPowerReleaseGeneration() !== powerGenerationAtStart) {
-      // Suspend/lock won the race with the device handshake. Nothing has this
-      // stream registered yet, so it would stay live for the whole sleep.
-      directStream.getTracks().forEach((track) => track.stop());
-      throw powerReleaseCancellation();
-    }
+    // Assigned before the guarded section so the cleanup below can reach it.
     this.stream = directStream;
-    this.stream.getAudioTracks().forEach((track) => this.watchTrack(track));
-    this.onStateChange?.('stream_started', {
-      tracks: this.stream.getAudioTracks().map((track) => ({
-        label: track.label,
-        enabled: track.enabled,
-        muted: track.muted,
-        readyState: track.readyState,
-        settings: track.getSettings(),
-      })),
-    });
+    try {
+      this.assertNoPowerReleaseDuringStartup(powerGenerationAtStart);
+      this.stream.getAudioTracks().forEach((track) => this.watchTrack(track));
+      this.onStateChange?.('stream_started', {
+        tracks: this.stream.getAudioTracks().map((track) => ({
+          label: track.label,
+          enabled: track.enabled,
+          muted: track.muted,
+          readyState: track.readyState,
+          settings: track.getSettings(),
+        })),
+      });
 
-    const sharedState = await sharedContextPromise;
-    if (sharedState) {
-      this.context = sharedState.context;
-      this.usingSharedContext = true;
-      this.onStateChange?.('shared_audio_context_used', {
+      const sharedState = await sharedContextPromise;
+      if (sharedState) {
+        this.context = sharedState.context;
+        this.usingSharedContext = true;
+        this.onStateChange?.('shared_audio_context_used', {
+          state: this.context.state,
+          sampleRate: this.context.sampleRate,
+        });
+      } else {
+        this.context = new AudioContext();
+        this.usingSharedContext = false;
+      }
+      this.context.onstatechange = () => {
+        this.onStateChange?.('context_state_changed', {
+          state: this.context?.state,
+          sampleRate: this.context?.sampleRate,
+        });
+        if (this.ready && !this.stopped && this.context?.state !== 'running') {
+          this.interrupt(`Microphone audio context stopped (${this.context?.state ?? 'unknown'}). Please try again.`);
+        }
+      };
+      this.onStateChange?.('context_created', {
         state: this.context.state,
         sampleRate: this.context.sampleRate,
       });
-    } else {
-      this.context = new AudioContext();
-      this.usingSharedContext = false;
-    }
-    this.context.onstatechange = () => {
-      this.onStateChange?.('context_state_changed', {
-        state: this.context?.state,
-        sampleRate: this.context?.sampleRate,
-      });
-      if (this.ready && !this.stopped && this.context?.state !== 'running') {
-        this.interrupt(`Microphone audio context stopped (${this.context?.state ?? 'unknown'}). Please try again.`);
-      }
-    };
-    this.onStateChange?.('context_created', {
-      state: this.context.state,
-      sampleRate: this.context.sampleRate,
-    });
 
-    // Benchmark mode still starts the real MediaStream above so the measurement
-    // includes OS microphone permission/device startup. Only the bytes sent to
-    // ASR are replaced with deterministic fixture audio, keeping latency A/B
-    // runs comparable without asking a human to repeat the exact same phrase.
-    const benchmarkFixture = await benchmarkFixturePromise;
-    if (benchmarkFixture) {
-      this.onStateChange?.('benchmark_fixture_ready', {
-        path: benchmarkFixture.path,
-        sourceSampleRate: benchmarkFixture.sampleRate,
-        durationMs: Math.round(benchmarkFixture.durationMs),
-      });
+      // Benchmark mode still starts the real MediaStream above so the measurement
+      // includes OS microphone permission/device startup. Only the bytes sent to
+      // ASR are replaced with deterministic fixture audio, keeping latency A/B
+      // runs comparable without asking a human to repeat the exact same phrase.
+      const benchmarkFixture = await benchmarkFixturePromise;
+      if (benchmarkFixture) {
+        this.onStateChange?.('benchmark_fixture_ready', {
+          path: benchmarkFixture.path,
+          sourceSampleRate: benchmarkFixture.sampleRate,
+          durationMs: Math.round(benchmarkFixture.durationMs),
+        });
+        if (this.context.state !== 'running') {
+          await this.context.resume();
+        }
+        this.onStateChange?.('context_ready', {
+          state: this.context.state,
+          sampleRate: this.context.sampleRate,
+        });
+        this.assertNoPowerReleaseDuringStartup(powerGenerationAtStart);
+        this.ready = true;
+        liveDirectCaptureEngines.add(this);
+        this.startWatchdog();
+        void this.playBenchmarkFixture(benchmarkFixture);
+        return;
+      }
+
+      this.sink = this.context.createGain();
+      this.sink.gain.value = 0;
+      this.source = this.context.createMediaStreamSource(this.stream);
+      await this.connectProcessor();
       if (this.context.state !== 'running') {
         await this.context.resume();
       }
@@ -1149,25 +1165,18 @@ export class WebMicAudioEngine {
       this.ready = true;
       liveDirectCaptureEngines.add(this);
       this.startWatchdog();
-      void this.playBenchmarkFixture(benchmarkFixture);
-      return;
+    } catch (error) {
+      // Everything acquired above — the device, the audio nodes, and a
+      // non-shared AudioContext — has no owner yet: this engine is not in
+      // liveDirectCaptureEngines, and callers treat a power cancellation as
+      // silent, so stop() would never run. Tear it down here instead of
+      // leaking a live microphone for the rest of the session.
+      await this.stop().catch(() => undefined);
+      if (currentPowerReleaseGeneration() !== powerGenerationAtStart) {
+        throw powerReleaseCancellation();
+      }
+      throw error;
     }
-
-    this.sink = this.context.createGain();
-    this.sink.gain.value = 0;
-    this.source = this.context.createMediaStreamSource(this.stream);
-    await this.connectProcessor();
-    if (this.context.state !== 'running') {
-      await this.context.resume();
-    }
-    this.onStateChange?.('context_ready', {
-      state: this.context.state,
-      sampleRate: this.context.sampleRate,
-    });
-    this.assertNoPowerReleaseDuringStartup(powerGenerationAtStart);
-    this.ready = true;
-    liveDirectCaptureEngines.add(this);
-    this.startWatchdog();
   }
 
   /**
@@ -1180,11 +1189,6 @@ export class WebMicAudioEngine {
    */
   private assertNoPowerReleaseDuringStartup(generationAtStart: number): void {
     if (currentPowerReleaseGeneration() === generationAtStart) return;
-    this.stream?.getTracks().forEach((track) => track.stop());
-    this.worklet?.disconnect();
-    this.processor?.disconnect();
-    this.sink?.disconnect();
-    this.source?.disconnect();
     throw powerReleaseCancellation();
   }
 

@@ -345,6 +345,52 @@ describe('keep-alive microphone idle window', () => {
     expect(getUserMedia).toHaveBeenCalledTimes(1);
   });
 
+  it('interrupts an active recording when a power release disposes the session', async () => {
+    const onInterrupted = vi.fn();
+    const engine = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: true,
+      onInterrupted,
+    });
+    await engine.start();
+
+    powerCallback?.({ reason: 'system_suspend' });
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Without this the renderer stays in 'listening' and main keeps owning the
+    // ASR run until the audio watchdog fires — which during suspend does not
+    // happen until the machine wakes up.
+    expect(onInterrupted).toHaveBeenCalledTimes(1);
+    expect(track.stopped).toBe(true);
+  });
+
+  it('reports cancellation when the shared context fails after a release', async () => {
+    let rejectPool: (error: unknown) => void = () => undefined;
+    const pool = await import('../audioContextPool');
+    vi.mocked(pool.prewarmVoiceInputAudio).mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectPool = reject;
+      }) as ReturnType<typeof pool.prewarmVoiceInputAudio>,
+    );
+
+    const engine = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: true,
+      onInterrupted: vi.fn(),
+    });
+    const starting = engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(powerCallback).toBeDefined();
+
+    powerCallback?.({ reason: 'screen_locked' });
+    await vi.advanceTimersByTimeAsync(0);
+    // Suspend can make AudioContext/worklet init reject too, not just resolve.
+    rejectPool(new Error('AudioContext unavailable'));
+
+    await expect(starting).rejects.toThrow(/disposed/i);
+    expect(getUserMedia).not.toHaveBeenCalled();
+  });
+
   it('shares one startup between concurrent callers', async () => {
     let resolveStream: (value: unknown) => void = () => undefined;
     getUserMedia.mockImplementationOnce(() => new Promise((resolve) => {

@@ -346,7 +346,10 @@ class KeepAliveMicSession {
   private staleAfterActiveDeviceChange = false;
   private sinkConnected = false;
   private startPromise?: Promise<void>;
-  private reservedForRecording = false;
+  // Counted, not boolean: two engines (overlay + ChatInput) can share one
+  // session, and a flag would let whichever finishes first clear the other's
+  // claim — handing the still-live session to a replacing prewarm.
+  private recordingReservations = 0;
 
   constructor(options: KeepAliveSessionOptions) {
     this.options = options;
@@ -372,16 +375,39 @@ class KeepAliveMicSession {
     return this.startPromise;
   }
 
+  /**
+   * Await one startup step, letting an in-flight release win either outcome.
+   *
+   * Both outcomes matter. On success we must not keep building on a session
+   * that was torn down mid-await. On failure the raw error would send start()
+   * into the cold fallback path, which reopens the microphone after the power
+   * event with nothing left to close it — suspend routinely makes these
+   * promises reject rather than resolve.
+   *
+   * Steps whose resolved value needs cleanup (getUserMedia) handle disposal
+   * inline instead, so the stream can be stopped before throwing.
+   */
+  private async awaitStartupStep<T>(step: Promise<T>): Promise<T> {
+    try {
+      const value = await step;
+      if (this.disposed) throw new KeepAliveSessionDisposedError();
+      return value;
+    } catch (error) {
+      if (this.disposed && !isKeepAliveSessionDisposedError(error)) {
+        throw new KeepAliveSessionDisposedError();
+      }
+      throw error;
+    }
+  }
+
   private async startInternal(): Promise<void> {
     ensureKeepAliveDeviceChangeListener();
     ensureKeepAlivePowerReleaseListener();
     await assertSelectedMicrophoneAvailable(this.options.deviceId);
 
-    const sharedState = await prewarmVoiceInputAudio(this.options.workletUrl);
-    // A release (suspend/lock/setting off) can land while the awaits above are
-    // pending. dispose() has already dropped the global reference by then, so
-    // bailing here avoids opening a device nothing would be able to close.
-    if (this.disposed) throw new KeepAliveSessionDisposedError();
+    // A release (suspend/lock/setting off) can land while this is pending, in
+    // which case bailing out avoids opening a device nothing could then close.
+    const sharedState = await this.awaitStartupStep(prewarmVoiceInputAudio(this.options.workletUrl));
     this.context = sharedState.context;
     let stream: MediaStream;
     try {
@@ -434,12 +460,11 @@ class KeepAliveMicSession {
     this.worklet.connect(this.sink);
     // The sink stays detached until activation; see attachOutputPath.
     if (this.context.state !== 'running') {
-      await this.context.resume();
       // Last await of startup. A release landing here has already stopped the
-      // track and torn down every node built above, so returning success would
+      // track and torn down every node built above, so reporting success would
       // hand the caller a session that can never emit PCM — it would arm its
       // watchdog and surface a bogus "microphone stalled" failure instead.
-      if (this.disposed) throw new KeepAliveSessionDisposedError();
+      await this.awaitStartupStep(this.context.resume());
     }
   }
 
@@ -486,7 +511,9 @@ class KeepAliveMicSession {
     this.detachOutputPath();
     this.activation = undefined;
     this.active = false;
-    this.reservedForRecording = false;
+    // Reservations are released by whoever took them (see stop()), not here:
+    // deactivate() is also called by prewarm on an idle session, and by one of
+    // several engines that may share this one.
   }
 
   drainBufferedAudio(): Promise<void> {
@@ -512,16 +539,22 @@ class KeepAliveMicSession {
    * stop() to finish the deferred swap.
    */
   isBusy(): boolean {
-    return this.active || this.reservedForRecording;
+    return this.active || this.recordingReservations > 0;
   }
 
-  /** Claim this session for an imminent activate(); see isBusy(). */
+  /**
+   * Claim this session for an imminent activate(); see isBusy().
+   *
+   * Paired with releaseRecordingReservation(): the engine claims it inside
+   * getOrCreateKeepAliveSession (before the first await) and releases it in
+   * stop(), or on any startup path that fails after claiming.
+   */
   reserveForRecording(): void {
-    this.reservedForRecording = true;
+    this.recordingReservations += 1;
   }
 
   releaseRecordingReservation(): void {
-    this.reservedForRecording = false;
+    this.recordingReservations = Math.max(0, this.recordingReservations - 1);
   }
 
   handleDeviceChange(): boolean {
@@ -554,9 +587,19 @@ class KeepAliveMicSession {
   async dispose(reason = 'dispose'): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
-    this.activation?.onStateChange?.('keep_alive_disposed', { reason });
+    const activation = this.activation;
+    const wasActive = this.active;
+    activation?.onStateChange?.('keep_alive_disposed', { reason });
     this.activation = undefined;
     this.active = false;
+    // A forced release during live dictation (suspend / lock / device removal)
+    // must reach the engine. Without this the renderer stays in `listening` and
+    // main keeps owning the ASR run until the audio watchdog fires — and during
+    // suspend the watchdog does not run at all, so the run would stay live for
+    // the entire sleep.
+    if (wasActive) {
+      activation?.onInterrupted?.('Microphone input stopped unexpectedly. Please try again.');
+    }
     this.trackCleanup.splice(0).forEach((cleanup) => cleanup());
     this.worklet?.port.close();
     this.worklet?.disconnect();
@@ -564,7 +607,7 @@ class KeepAliveMicSession {
     this.source?.disconnect();
     this.stream?.getTracks().forEach((track) => track.stop());
     this.sinkConnected = false;
-    this.reservedForRecording = false;
+    this.recordingReservations = 0;
     this.worklet = undefined;
     this.sink = undefined;
     this.source = undefined;
@@ -634,8 +677,14 @@ async function getOrCreateKeepAliveSession(
     // Joining an in-flight startup still has to claim it: without the
     // reservation a later prewarm would read isBusy() as false and dispose the
     // session out from under the recording that is waiting on this promise.
-    if (reserveForRecording) joining.reserveForRecording();
-    return keepAliveSessionPromise;
+    if (!reserveForRecording) return keepAliveSessionPromise;
+    joining.reserveForRecording();
+    // stop() only runs for a startup that succeeded, so a rejected join has to
+    // drop its own claim here or the session stays busy forever.
+    return keepAliveSessionPromise.catch((error: unknown) => {
+      joining.releaseRecordingReservation();
+      throw error;
+    });
   }
   if (keepAliveSessionPromise) {
     await keepAliveSessionPromise.catch(() => undefined);
@@ -654,6 +703,7 @@ async function getOrCreateKeepAliveSession(
     .then(() => session)
     .catch((error) => {
       if (keepAliveSession === session) keepAliveSession = null;
+      if (reserveForRecording) session.releaseRecordingReservation();
       throw error;
     })
     .finally(() => {
@@ -977,6 +1027,9 @@ export class WebMicAudioEngine {
     this.clearWatchdog();
     if (this.usingKeepAliveSession) {
       const session = this.keepAliveSession;
+      // Release the claim taken in startKeepAlive before deactivating: another
+      // engine may still hold its own reservation on this shared session.
+      session?.releaseRecordingReservation();
       session?.deactivate();
       if (session?.isStaleAfterDeviceChange()) {
         await disposeKeepAliveVoiceInputMicrophone('devicechange_after_recording');
@@ -1045,19 +1098,32 @@ export class WebMicAudioEngine {
       audioProcessing: this.audioProcessing,
       latencyMs: this.latencyMs,
     }, { reserveForRecording: true });
-    this.keepAliveSession = session;
-    this.usingKeepAliveSession = true;
-    this.context = session.context;
-    this.stream = session.stream;
-    clearKeepAliveIdleDisposeTimer();
-    session.activate({
-      callback: (chunk) => {
-        this.lastAudioFrameAt = Date.now();
-        this.pcmCallback(chunk);
-      },
-      onStateChange: this.onStateChange,
-      onInterrupted: (message) => this.interrupt(message),
-    });
+    try {
+      this.keepAliveSession = session;
+      this.usingKeepAliveSession = true;
+      this.context = session.context;
+      this.stream = session.stream;
+      clearKeepAliveIdleDisposeTimer();
+      session.activate({
+        callback: (chunk) => {
+          this.lastAudioFrameAt = Date.now();
+          this.pcmCallback(chunk);
+        },
+        onStateChange: this.onStateChange,
+        onInterrupted: (message) => this.interrupt(message),
+      });
+    } catch (error) {
+      // activate() rejects a session disposed between the await above and here.
+      // stop() will never run for this engine, so the claim has to be dropped
+      // now — otherwise the session stays "busy" forever and no prewarm could
+      // ever replace it.
+      session.releaseRecordingReservation();
+      this.keepAliveSession = undefined;
+      this.usingKeepAliveSession = false;
+      this.context = undefined;
+      this.stream = undefined;
+      throw error;
+    }
     this.onStateChange?.('keep_alive_microphone_started', {
       chunkMs: this.chunkMs,
       contextState: this.context?.state,

@@ -235,7 +235,10 @@ import {
   installPowerEventDiagnostics,
   installWindowResponsivenessDiagnostics,
 } from './powerWakeDiagnostics';
-import { installVoiceInputPowerRelease } from './voice-input/powerReleaseNotifier';
+import {
+  broadcastVoiceInputPowerState,
+  installVoiceInputPowerRelease,
+} from './voice-input/powerReleaseNotifier';
 import { reapClaudeOrphansSync } from './claude-orphan-reaper';
 import { initAppBadgeService, clearAllSessionAttention } from './appBadgeService';
 import { initNotificationService } from './notificationService';
@@ -764,6 +767,7 @@ const authBoundaryLog = createLogger('auth-boundary');
 // 主窗 renderer 加载失败可观测性 + dev 启动看门狗(见 renderer-boot-guard.ts 顶部注释)。
 const rendererGuardLog = createLogger('renderer-guard');
 const updatePresentationLog = createLogger('update-presentation');
+const voicePowerBroadcastLog = createLogger('voice-input-power');
 let rendererBootGuard: RendererBootGuard | null = null;
 
 const lifecycleDbClientManager = createLifecycleDbClientManager({
@@ -5488,10 +5492,12 @@ app.on('ready', async () => {
   installVoiceInputPowerRelease({
     powerMonitor,
     broadcast: (channel, payload) => {
-      for (const win of BrowserWindow.getAllWindows()) {
-        if (win.isDestroyed()) continue;
-        win.webContents.send(channel, payload);
-      }
+      broadcastVoiceInputPowerState(
+        BrowserWindow.getAllWindows(),
+        channel,
+        payload,
+        voicePowerBroadcastLog,
+      );
     },
   });
 

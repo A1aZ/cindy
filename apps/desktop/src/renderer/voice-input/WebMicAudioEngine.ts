@@ -403,7 +403,11 @@ class KeepAliveMicSession {
   private async startInternal(): Promise<void> {
     ensureKeepAliveDeviceChangeListener();
     ensureKeepAlivePowerReleaseListener();
-    await assertSelectedMicrophoneAvailable(this.options.deviceId);
+    // Also guarded: if a release lands while enumerating and the device then
+    // reads as absent, the raw VoiceInputSelectedMicrophoneUnavailableError
+    // would send prewarm/capture down their automatic-fallback paths and open
+    // the *default* microphone after the power event.
+    await this.awaitStartupStep(assertSelectedMicrophoneAvailable(this.options.deviceId));
 
     // A release (suspend/lock/setting off) can land while this is pending, in
     // which case bailing out avoids opening a device nothing could then close.
@@ -557,6 +561,11 @@ class KeepAliveMicSession {
     this.recordingReservations = Math.max(0, this.recordingReservations - 1);
   }
 
+  /** Someone other than the caller still needs this session live. */
+  hasRecordingReservations(): boolean {
+    return this.recordingReservations > 0;
+  }
+
   handleDeviceChange(): boolean {
     if (!this.active) return false;
     this.staleAfterActiveDeviceChange = true;
@@ -687,7 +696,15 @@ async function getOrCreateKeepAliveSession(
     });
   }
   if (keepAliveSessionPromise) {
-    await keepAliveSessionPromise.catch(() => undefined);
+    let releasedWhileQueued = false;
+    await keepAliveSessionPromise.catch((error: unknown) => {
+      releasedWhileQueued = isKeepAliveSessionDisposedError(error);
+    });
+    // The in-flight session we were queued behind was torn down by a power
+    // release. Building a replacement now would open the microphone *after*
+    // that one-shot event, with nothing left to close it until the idle
+    // timeout — exactly the leak the release exists to prevent.
+    if (releasedWhileQueued) throw new KeepAliveSessionDisposedError();
   }
   if (keepAliveSession) {
     // A different device/profile is a fresh warm-up, not a continuation of the
@@ -1027,10 +1044,15 @@ export class WebMicAudioEngine {
     this.clearWatchdog();
     if (this.usingKeepAliveSession) {
       const session = this.keepAliveSession;
-      // Release the claim taken in startKeepAlive before deactivating: another
-      // engine may still hold its own reservation on this shared session.
+      // Drop the claim taken in startKeepAlive, then only tear the session down
+      // if nobody else still holds one. deactivate() clears the shared PCM
+      // callback, sends setActive=false and detaches the output path — doing
+      // that while another engine is still recording would starve it of audio
+      // and trip its stall watchdog.
       session?.releaseRecordingReservation();
-      session?.deactivate();
+      if (session && !session.hasRecordingReservations()) {
+        session.deactivate();
+      }
       if (session?.isStaleAfterDeviceChange()) {
         await disposeKeepAliveVoiceInputMicrophone('devicechange_after_recording');
       } else if (session) {

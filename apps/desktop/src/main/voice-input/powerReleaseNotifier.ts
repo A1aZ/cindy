@@ -40,6 +40,35 @@ export interface VoiceInputPowerReleaseDeps {
  * Windows 为工作站锁定),但「用户已离开」的判断在两端一致,因此同样处理。
  * Linux 不触发 lock-screen,不影响 suspend 路径。
  */
+/** 广播目标窗口的最小结构面(用结构类型,避免这里依赖 Electron)。 */
+export interface VoicePowerBroadcastWindow {
+  isDestroyed(): boolean;
+  webContents: { send(channel: string, payload: unknown): void };
+}
+
+/**
+ * 逐窗发送,单窗失败不影响其余窗口。
+ *
+ * 窗口可能在 isDestroyed() 与 send() 之间被销毁而抛错。这是一次性事件:循环一旦
+ * 中断,后面的窗口(可能正是持有麦克风的那个)就永远收不到释放信号,只能等 idle
+ * 超时。容错写法与 appBadgeService 的广播保持一致。
+ */
+export function broadcastVoiceInputPowerState(
+  windows: readonly VoicePowerBroadcastWindow[],
+  channel: string,
+  payload: VoiceInputPowerStatePayload,
+  logger?: Pick<typeof log, 'warn'>,
+): void {
+  for (const win of windows) {
+    if (win.isDestroyed()) continue;
+    try {
+      win.webContents.send(channel, payload);
+    } catch (err) {
+      (logger ?? log).warn('broadcast voice input power release failed:', err);
+    }
+  }
+}
+
 export function installVoiceInputPowerRelease(deps: VoiceInputPowerReleaseDeps): void {
   const logger = deps.logger ?? log;
   const emit = (reason: VoiceInputPowerReleaseReason): void => {

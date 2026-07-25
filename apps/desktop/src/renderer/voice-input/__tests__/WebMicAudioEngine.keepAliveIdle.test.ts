@@ -391,6 +391,31 @@ describe('keep-alive microphone idle window', () => {
     expect(getUserMedia).not.toHaveBeenCalled();
   });
 
+  it('keeps a shared session live while another engine still holds it', async () => {
+    const engineA = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: true,
+      onInterrupted: vi.fn(),
+    });
+    const engineB = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: true,
+      onInterrupted: vi.fn(),
+    });
+    await engineA.start();
+    await engineB.start();
+
+    await engineA.stop();
+
+    // deactivate() would clear the shared PCM callback and detach the output
+    // path, starving the engine that is still recording.
+    expect(sink.disconnect).not.toHaveBeenCalled();
+    expect(track.stopped).toBe(false);
+
+    await engineB.stop();
+    expect(sink.disconnect).toHaveBeenCalled();
+  });
+
   it('shares one startup between concurrent callers', async () => {
     let resolveStream: (value: unknown) => void = () => undefined;
     getUserMedia.mockImplementationOnce(() => new Promise((resolve) => {

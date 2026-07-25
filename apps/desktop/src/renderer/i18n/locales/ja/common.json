@@ -647,7 +647,7 @@
       "autoUpdateDisabledToast": "アイドル時の更新インストールを無効にしました",
       "autoUpdateSaveFailed": "自動更新設定を保存できませんでした",
       "analyticsLabel": "利用統計",
-      "analyticsDescription": "Cindy の起動状況や継続利用状況の把握に使います。送信するのはデバイスの機種名、OS バージョン、アプリバージョン、デバイス識別子、およびログイン後はアカウント ID のみで、会話内容・ファイル・プロンプトは一切含みません。オフにすると送信は直ちに停止します。",
+      "analyticsDescription": "Cindy の起動状況や継続利用状況の把握に使います。送信するのはデバイスの機種名、OS バージョン、アプリバージョン、デバイス識別子などのデバイス・利用環境情報と、ログイン後はアカウント ID で、会話内容・ファイル・プロンプトは一切含みません。オフにすると送信は直ちに停止します。",
       "analyticsEnabledToast": "利用統計を有効にしました",
       "analyticsDisabledToast": "利用統計を無効にしました",
       "analyticsSaveFailed": "利用統計の設定を保存できませんでした",

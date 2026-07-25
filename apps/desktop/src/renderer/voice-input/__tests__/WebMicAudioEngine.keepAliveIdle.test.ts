@@ -436,6 +436,80 @@ describe('keep-alive microphone idle window', () => {
     expect(track.stopped).toBe(false);
   });
 
+  it('does not open the microphone when enumeration outlives a power release', async () => {
+    let resolveEnumerate: (value: unknown) => void = () => undefined;
+    vi.stubGlobal('navigator', {
+      mediaDevices: {
+        enumerateDevices: vi.fn(() => new Promise((resolve) => {
+          resolveEnumerate = resolve;
+        })),
+        getUserMedia,
+        addEventListener: vi.fn(),
+      },
+    });
+
+    const engine = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: false,
+      deviceId: 'specific-device',
+      onInterrupted: vi.fn(),
+    });
+    const starting = engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(powerCallback).toBeDefined();
+
+    powerCallback?.({ reason: 'screen_locked' });
+    await vi.advanceTimersByTimeAsync(0);
+    // Enumeration succeeds *after* the release, reporting the device as present.
+    resolveEnumerate([{ kind: 'audioinput', deviceId: 'specific-device' }]);
+
+    await expect(starting).rejects.toThrow(/disposed/i);
+    // The one-shot event has passed; nothing may reopen the device now.
+    expect(getUserMedia).not.toHaveBeenCalled();
+  });
+
+  it('can release a stream acquired before context warmup settles', async () => {
+    let resolvePool: (value: unknown) => void = () => undefined;
+    const pool = await import('../audioContextPool');
+    vi.mocked(pool.prewarmVoiceInputAudio).mockReturnValue(
+      new Promise((resolve) => {
+        resolvePool = resolve as (value: unknown) => void;
+      }) as ReturnType<typeof pool.prewarmVoiceInputAudio>,
+    );
+
+    const engine = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: false,
+      onInterrupted: vi.fn(),
+    });
+    const starting = engine.start();
+    // getUserMedia has resolved; the shared context warmup is still pending and
+    // could stay that way for the whole suspend.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(powerCallback).toBeDefined();
+
+    powerCallback?.({ reason: 'system_suspend' });
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The device is already open, so the release must reach it now rather than
+    // waiting for warmup to settle.
+    expect(track.stopped).toBe(true);
+
+    resolvePool({
+      context: {
+        currentTime: 0,
+        state: 'running',
+        destination,
+        createGain: vi.fn(() => sink),
+        createMediaStreamSource: vi.fn(() => ({ connect: vi.fn(), disconnect: vi.fn() })),
+        resume: vi.fn(async () => undefined),
+      },
+      workletReady: Promise.resolve(),
+      workletUrl: WORKLET_URL,
+    });
+    await starting.catch(() => undefined);
+  });
+
   it('reports cancellation when direct getUserMedia rejects after a release', async () => {
     let rejectStream: (error: unknown) => void = () => undefined;
     getUserMedia.mockImplementationOnce(() => new Promise((_resolve, reject) => {

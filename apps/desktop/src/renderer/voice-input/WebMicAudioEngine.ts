@@ -386,8 +386,9 @@ function ensureKeepAliveDeviceChangeListener(): void {
  * Both mean the user walked away, so holding the capture device buys no
  * latency while still lighting the OS privacy indicator and holding an
  * idle-sleep assertion through coreaudiod. Mirrors the devicechange listener
- * above: one process-wide subscription, installed lazily with the first
- * keep-alive session, never torn down.
+ * above: one process-wide subscription, never torn down. Installed lazily by
+ * whichever capture starts first — the keep-alive session *or* a direct
+ * (keepAlive: false) capture, which relies on it just as much.
  */
 function ensureKeepAlivePowerReleaseListener(): void {
   if (keepAlivePowerReleaseListening) return;
@@ -1084,6 +1085,7 @@ export class WebMicAudioEngine {
         video: false,
       }),
       powerGenerationAtStart,
+      (stream) => stream.getTracks().forEach((track) => track.stop()),
     ).catch((error) => {
       // A release that won this race takes priority: suspend routinely makes
       // the pending request reject (AbortError / NotReadableError), and
@@ -1096,6 +1098,11 @@ export class WebMicAudioEngine {
     const directStream = await streamPromise;
     // Assigned before the guarded section so the cleanup below can reach it.
     this.stream = directStream;
+    // Registered immediately, not at the end of startup: every await below
+    // (context warmup, worklet module, resume) can stay pending for the whole
+    // suspend, and the power callback can only traverse this registry. Failure
+    // paths remove it again through stop().
+    liveDirectCaptureEngines.add(this);
     try {
       this.assertNoPowerReleaseDuringStartup(powerGenerationAtStart);
       this.stream.getAudioTracks().forEach((track) => this.watchTrack(track));
@@ -1155,7 +1162,6 @@ export class WebMicAudioEngine {
         });
         this.assertNoPowerReleaseDuringStartup(powerGenerationAtStart);
         this.ready = true;
-        liveDirectCaptureEngines.add(this);
         this.startWatchdog();
         void this.playBenchmarkFixture(benchmarkFixture);
         return;
@@ -1174,7 +1180,6 @@ export class WebMicAudioEngine {
       });
       this.assertNoPowerReleaseDuringStartup(powerGenerationAtStart);
       this.ready = true;
-      liveDirectCaptureEngines.add(this);
       this.startWatchdog();
     } catch (error) {
       // Everything acquired above — the device, the audio nodes, and a
@@ -1205,9 +1210,21 @@ export class WebMicAudioEngine {
    * caller down its device-failure paths (error surface, or automatic fallback
    * to the default microphone) after the one-shot event has already passed.
    */
-  private async awaitDirectStartupStep<T>(step: Promise<T>, generationAtStart: number): Promise<T> {
+  private async awaitDirectStartupStep<T>(
+    step: Promise<T>,
+    generationAtStart: number,
+    disposeValue?: (value: T) => void,
+  ): Promise<T> {
     try {
-      return await step;
+      const value = await step;
+      // Fulfilled awaits matter as much as rejected ones: a successful device
+      // enumeration would otherwise let us call getUserMedia *after* the
+      // one-shot release, reopening the microphone while the user is away.
+      if (currentPowerReleaseGeneration() !== generationAtStart) {
+        disposeValue?.(value);
+        throw powerReleaseCancellation();
+      }
+      return value;
     } catch (error) {
       if (
         currentPowerReleaseGeneration() !== generationAtStart &&

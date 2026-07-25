@@ -89,13 +89,19 @@ function normalizeDocument(raw: unknown): ImDefaultSettingsDocument {
   const hasLegacyScalarOverrides =
     'providerId' in record || 'model' in record || 'effort' in record;
   const globalRecord = isRecord(record.global) ? record.global : null;
+  const normalizedGlobal = globalRecord ? normalizeSettings(globalRecord) : null;
+  // In v2, the root agentKind mirror always equals normalizedGlobal.agentKind.
+  // A divergence means a v1 override's agentKind sits at root while global
+  // retains the defaults value. Normalize global before comparing so a partial
+  // v2 global (with agents but no agentKind) falls back to the default agentKind
+  // and doesn't spuriously diverge.
   const rootAgentKindDiverges =
-    'agentKind' in record && globalRecord !== null &&
-    record.agentKind !== globalRecord.agentKind;
+    'agentKind' in record && normalizedGlobal !== null &&
+    record.agentKind !== normalizedGlobal.agentKind;
   const rootAgentsOnlyWithDefaultGlobal =
     'agents' in record && isRecord(record.agents) &&
-    !('agentKind' in record) && globalRecord !== null &&
-    JSON.stringify(normalizeSettings(globalRecord).agents) ===
+    !('agentKind' in record) && normalizedGlobal !== null &&
+    JSON.stringify(normalizedGlobal.agents) ===
       JSON.stringify(IM_DEFAULT_SETTINGS.agents);
   const hasLegacyAgentFields =
     ('agentKind' in record || 'agents' in record) &&

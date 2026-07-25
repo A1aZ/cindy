@@ -37,12 +37,14 @@ const LOG_FORMAT = ['%H', '%P', '%an', '%ae', '%cn', '%ce', '%B'].join(FIELD_SEP
 // - 捕获值不 trim（见 validateCommit）：App 拿原样捕获去比，`Alice ` 不等于 `Alice`。
 const SIGN_OFF_LINE = /^Signed-off-by: (.*) <(.*)>\s*$/i;
 
-// 机器人与 GitHub Web UI 代签的提交无法代替本人作出 DCO 声明，因此豁免而非放行：
-// dependabot 等 bot 用 `<name>[bot]@users.noreply.github.com`，Web UI 用 web-flow。
+// bot 地址的形状特征：dependabot 等用 `<name>[bot]@users.noreply.github.com`，
+// GitHub Web UI 用 web-flow 的 noreply@github.com。
 //
-// 只认邮箱，不认 author name 后缀。App 那边判定的是 GitHub 账号类型
-// （`author.type === "Bot"`），改不了；而 `git config user.name` 谁都能设成 `Foo[bot]`，
-// 按 name 豁免等于给本地检查开一个一步就能绕过的后门，且方向是「本地绿、PR 红」。
+// **这只用于在失败输出里提示，不用于豁免。** App 判定 bot 的依据是 GitHub 账号类型
+// （`author.type === "Bot"`），离线拿不到也伪造不了；而 author 邮箱谁都能设成
+// `999999+not-a-real-account[bot]@users.noreply.github.com`。按邮箱豁免就等于给本地检查
+// 留一个可伪造的后门，方向还是最坏的那种——「本地绿、PR 红」。所以本地一律检查，
+// 只在输出里说明「若它真是 bot，PR 上的 App 会豁免」。
 const BOT_EMAILS = new Set(['noreply@github.com']);
 const BOT_EMAIL_SUFFIX = '[bot]@users.noreply.github.com';
 
@@ -70,7 +72,8 @@ export function normalizeName(name) {
 //   user.email 时自动生成的 `user@hostname` 会被拒）。
 // 无法逐条复刻 validator，取舍上刻意偏严：宁可本地误报，也不要放行一个 App 会拒的地址，
 // 那才会变成「本地绿、PR 红」。含方括号的 bot 邮箱（dependabot 等）同样不符合 atext，
-// 但 bot 提交在 exemptReason 就被豁免，走不到这里。
+// 于是这类提交在本地会被报出来——而 App 因为账号是 Bot 直接跳过。结论不同但方向安全
+// （本地红、PR 绿），失败输出里会说明这一点。
 const ATEXT = "[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]";
 const DOMAIN_LABEL = '[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?';
 const EMAIL_LOCAL_PART = new RegExp(`^${ATEXT}+(?:\\.${ATEXT}+)*$`);
@@ -109,17 +112,20 @@ export function parseSignOffs(message) {
   return signOffs;
 }
 
-export function isBotIdentity(name, email) {
+/** 只判断「地址长得像 bot」，供失败输出提示用；不构成豁免，理由见上面的注释。 */
+export function looksLikeBotAddress(email) {
   const normalizedEmail = normalizeEmail(email);
   return BOT_EMAILS.has(normalizedEmail) || normalizedEmail.endsWith(BOT_EMAIL_SUFFIX);
 }
 
-/** 返回豁免原因，不豁免则返回 null。 */
+/**
+ * 返回豁免原因，不豁免则返回 null。
+ *
+ * 只有 merge commit 能离线可靠判定（父提交数量），所以只豁免它。bot 提交交给 App 按账号
+ * 类型豁免——本地宁可多报一条，也不放过一个可伪造的身份。
+ */
 export function exemptReason(commit) {
   if (commit.parents.length > 1) return 'merge commit';
-  if (isBotIdentity(commit.authorName, commit.authorEmail)) {
-    return `bot 提交（${commit.authorName || commit.authorEmail}）`;
-  }
   return null;
 }
 
@@ -280,6 +286,13 @@ function reportFailures({ failures, start }) {
   for (const { commit, errors } of failures) {
     console.error(`- ${shortSha(commit.sha)} ${subjectOf(commit)}`);
     for (const error of errors) console.error(`  ${error}`);
+    // 地址像 bot 时给一句解释，免得有人以为门禁在为难 dependabot：真 bot 由 App 按 GitHub
+    // 账号类型豁免，而账号类型离线取不到，所以本地照常报。
+    if (looksLikeBotAddress(commit.authorEmail)) {
+      console.error('  This looks like a bot address. Bot commits are exempt on the pull request,');
+      console.error('  where the DCO App can check the GitHub account type — this check cannot,');
+      console.error('  so it reports them rather than trusting a forgeable address.');
+    }
   }
   // 用完整 sha：短 sha 在大仓里可能歧义，让复制粘贴的命令直接失败。
   console.error('\nHow to fix, on your pull request branch:');
@@ -311,7 +324,7 @@ function main() {
     process.exit(1);
   }
 
-  const exemptNote = exempted.length > 0 ? `, ${exempted.length} exempt (merge/bot)` : '';
+  const exemptNote = exempted.length > 0 ? `, ${exempted.length} exempt (merge commits)` : '';
   console.log(
     `DCO check passed: ${checked} ${checked === 1 ? 'commit' : 'commits'} signed off${exemptNote} ` +
       `— range ${shortSha(start)}..${shortSha(head)} (base ${baseRef}).`

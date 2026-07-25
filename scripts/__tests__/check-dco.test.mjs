@@ -1,6 +1,6 @@
 // check-dco.test.mjs — DCO 门禁的判定契约与端到端行为。
 //
-// 纯函数部分断言判定规则（签名解析、author 比对、merge/bot 豁免、git log 解析）；
+// 纯函数部分断言判定规则（签名解析、author 比对、merge 豁免、git log 解析）；
 // 端到端部分在 os.tmpdir 里造一个真 git 仓库，跑 CLI 与 prepare-commit-msg hook——
 // 格式串、范围解析、hook 里的 sh/sed 写错都只能在真 git 上暴露。
 
@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   exemptReason,
-  isBotIdentity,
+  looksLikeBotAddress,
   looksLikeEmail,
   parseGitLog,
   parseSignOffs,
@@ -210,8 +210,8 @@ test('looksLikeEmail rejects everything validator.isEmail would reject', () => {
     '@example.com',
     'alice@',
     '',
-    // 方括号同样不在 atext 内，validator 也拒；bot 提交在 exemptReason 就被豁免，
-    // 根本走不到这里，所以拒绝它不影响 dependabot 等的 PR。
+    // 方括号同样不在 atext 内，validator 也拒。bot 地址不再被本地豁免（账号类型离线
+    // 判不了），所以这类提交会在这里失败——方向安全：本地红、PR 绿，失败输出里有解释。
     '49699333+dependabot[bot]@users.noreply.github.com',
     // 长度上限（validator 同样拒）：local part > 64、单个域名 label > 63、域名 > 254。
     `${'a'.repeat(65)}@example.com`,
@@ -231,37 +231,37 @@ test('looksLikeEmail rejects everything validator.isEmail would reject', () => {
   assert.equal(looksLikeEmail(`a${at254}`), false, '255 就该拒');
 });
 
-test('merge commits and bot commits are exempt, humans are not', () => {
+test('only merge commits are exempt — bot status is not decidable offline', () => {
+  // 父提交数量是唯一能离线可靠判定的豁免依据。
   assert.equal(exemptReason(commitFixture({ parents: ['a'.repeat(40), 'b'.repeat(40)] })), 'merge commit');
   assert.equal(exemptReason(commitFixture()), null);
 
-  assert.ok(isBotIdentity('dependabot[bot]', '49699333+dependabot[bot]@users.noreply.github.com'));
-  assert.ok(isBotIdentity('GitHub', 'noreply@github.com'));
-  // 普通用户的 noreply 邮箱不是 bot，不能借此绕过签名。
-  assert.equal(isBotIdentity('Contributor', '12345+contributor@users.noreply.github.com'), false);
+  // author 邮箱同样是自由填写的：`999999+not-a-real-account[bot]@users.noreply.github.com`
+  // 谁都能设，而 App 认的是 GitHub 账号类型。按邮箱豁免就是一个可伪造的后门，
+  // 方向还是最坏的「本地绿、PR 红」，所以这里一律不豁免。
+  for (const email of [
+    '49699333+dependabot[bot]@users.noreply.github.com',
+    '999999+not-a-real-account[bot]@users.noreply.github.com',
+    'noreply@github.com',
+  ]) {
+    assert.equal(
+      exemptReason(
+        commitFixture({ authorEmail: email, committerEmail: email, message: 'chore: unsigned\n' })
+      ),
+      null,
+      `${email} 不该被豁免`
+    );
+  }
 
-  // 只认邮箱：author name 谁都能设成 Foo[bot]，按 name 豁免等于一步就能绕过本地检查，
-  // 而 App 判定的是不可伪造的 GitHub 账号类型 —— 那会造成「本地绿、PR 红」。
-  assert.equal(isBotIdentity('Sneaky[bot]', 'human@example.com'), false);
-  assert.equal(
-    exemptReason(
-      commitFixture({
-        authorName: 'Sneaky[bot]',
-        committerName: 'Sneaky[bot]',
-        authorEmail: 'human@example.com',
-        committerEmail: 'human@example.com',
-      })
-    ),
-    null
-  );
+  // 只保留「看起来像 bot 地址」这个判断，用途仅限失败输出里的解释。
+  assert.ok(looksLikeBotAddress('49699333+dependabot[bot]@users.noreply.github.com'));
+  assert.ok(looksLikeBotAddress('noreply@github.com'));
+  assert.equal(looksLikeBotAddress('12345+contributor@users.noreply.github.com'), false);
+  assert.equal(looksLikeBotAddress('human@example.com'), false);
 });
 
-test('bot commits stay exempt even though their address fails the email check', () => {
-  // 两处改动的交叉点：收紧邮箱形状后 dependabot 的地址不再合格，但豁免必须先生效，
-  // 否则 dependabot 的 PR 会因为邮箱形状被判失败。
+test('a bot-looking unsigned commit is reported, with an explanation', () => {
   const botEmail = '49699333+dependabot[bot]@users.noreply.github.com';
-  assert.equal(looksLikeEmail(botEmail), false);
-
   const result = validateCommits([
     commitFixture({
       authorName: 'dependabot[bot]',
@@ -271,9 +271,13 @@ test('bot commits stay exempt even though their address fails the email check', 
       message: 'chore(deps): bump something\n',
     }),
   ]);
-  assert.equal(result.failures.length, 0);
-  assert.equal(result.checked, 0);
-  assert.equal(result.exempted.length, 1);
+  // 不再豁免：算进 checked 并报为失败。
+  assert.equal(result.exempted.length, 0);
+  assert.equal(result.checked, 1);
+  assert.equal(result.failures.length, 1);
+  // 这类地址不合 atext，所以先在邮箱形状上失败——App 那边则因为账号是 Bot 直接跳过，
+  // 两者结论不同但方向安全（本地红、PR 绿）。
+  assert.match(result.failures[0].errors[0], /not a valid email address|No Signed-off-by/);
 });
 
 test('validateCommits separates failures from exemptions', () => {

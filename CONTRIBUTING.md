@@ -101,8 +101,9 @@ On behalf of 原作者 <原作者邮箱>, I, 你的名字 <你的邮箱>, hereby
 Signed-off-by: 你的名字 <你的邮箱>
 ```
 
-注意 `pnpm check:dco` 只认直接签名、不识别 remediation commit（刻意保守：本地通过则
-PR 上必过，反之不然）。用了 remediation 就以 PR 上的 DCO check 结论为准。
+注意 `pnpm check:dco` 刻意比 PR 上的门禁保守：它只认直接签名、不识别 remediation
+commit，也不豁免 bot 提交（bot 身份取决于 GitHub 账号类型，本地判不了）。因此本地通过则
+PR 上必过，反之不然——用了 remediation、或范围里含 bot 提交时，以 PR 上的 DCO check 为准。
 
 `git commit` 本身没有「自动签名」的配置项（`format.signOff` 只作用于
 `git format-patch` / `git am`）。想一次配好，可以装上本仓的 prepare-commit-msg hook——

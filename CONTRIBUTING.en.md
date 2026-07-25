@@ -125,10 +125,12 @@ On behalf of Author Name <author@email>, I, Your Name <your@email>, hereby add m
 Signed-off-by: Your Name <your@email>
 ```
 
-Note that `pnpm check:dco` only recognises direct sign-offs, not remediation
-commits — deliberately conservative, so passing locally implies passing on the
-pull request but not the other way round. When using remediation, the DCO check
-on the pull request is the authority.
+Note that `pnpm check:dco` is deliberately more conservative than the gate on the
+pull request: it only recognises direct sign-offs (not remediation commits) and it
+does not exempt bot commits, since bot status depends on the GitHub account type
+and cannot be determined offline. Passing locally therefore implies passing on the
+pull request, but not the other way round — when using remediation, or when the
+range contains bot commits, the DCO check on the pull request is the authority.
 
 Git has no configuration option that signs commits off automatically
 (`format.signOff` only affects `git format-patch` / `git am`). To set it up once,

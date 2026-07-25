@@ -38,8 +38,8 @@ models your way: sign in to the official Cindy service (usage deducted
 transparently), authorize the **Claude Code / Codex Coding Plan** you already
 pay for and keep using it inside Cindy — no duplicate bill — connect your own
 API keys, or use local models.
-See [cindy.app](https://cindy.app/#pricing) for service details, pricing,
-and downloads.
+See [cindy.app](https://cindy.app) for service details,
+[pricing](https://cindy.app/#pricing), and [downloads](https://cindy.app/download/).
 
 ## Yours to shape
 

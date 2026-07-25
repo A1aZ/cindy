@@ -3,10 +3,17 @@
  *
  * 走 main 进程 `maker:file-browser:list-all`(ripgrep `--files` honor .gitignore)。
  * 缓存策略:
+ *  - **惰性拉取**:`options.enabled=false`(筛选框为空)时不发 IPC —— 索引只服务
+ *    文件名筛选,用户没在筛选时拉全量清单纯属浪费。2026-07 实测:切会话即拉的
+ *    旧行为一天打满 30000-cap 扫描 68 次,大 workdir 场景是会话切换卡顿的主要
+ *    renderer 侧成本。enabled 翻 true(用户输入首字符)才启动首次拉取,
+ *    FilterResultList 的 isLoading 占位天然承接这段等待。
  *  - 模块级 Map<workdir, Snapshot> singleton —— 跨 component 实例共享(同 workdir
  *    不同 file-browser tab 共享一份索引,省一次 rg 子进程开销)。
- *  - 30 秒内同 workdir 直接命中缓存,不重发 IPC。
- *  - hook 暴露 `refresh()`,文件树点刷新按钮时调用 → 强制重新拉。
+ *  - 30 秒内同 workdir 直接命中缓存,不重发 IPC;打满 cap 的截断快照放宽到
+ *    5 分钟 —— 重扫也不会更完整,却是最贵的一种扫描。
+ *  - hook 暴露 `refresh()`,文件树点刷新按钮时调用 → 强制失效;正在筛选才立即
+ *    重拉,否则留给下次 enabled 时自然拉新。
  *
  * 性能:大型 monorepo 实测 rg --files < 500ms / 数万文件,前端只持有路径字符串
  * 数组,5w 路径 × ~80 bytes ≈ 4MB,可接受。
@@ -21,6 +28,13 @@ const log = createLogger('useProjectFileList');
 
 /** 缓存有效期 ms。超过就重新拉 —— 配合文件树点刷新可以手动 invalidate。 */
 const CACHE_TTL_MS = 30_000;
+
+/**
+ * 打满 cap 的截断快照的缓存有效期。截断意味着 rg 扫到上限被 kill,重扫一遍
+ * 结果同样不完整,但扫描本身却是最贵的(30000 条收集 + IPC + 前端建索引)。
+ * 手动 refresh() 不受此 TTL 影响,仍然立即失效。
+ */
+const TRUNCATED_CACHE_TTL_MS = 5 * 60_000;
 
 export interface ProjectFileListState {
   files: readonly string[];
@@ -43,7 +57,8 @@ const cache = new Map<string, Snapshot>();
 const inflight = new Map<string, Promise<void>>();
 
 function isStale(snap: Snapshot, now: number): boolean {
-  return now - snap.fetchedAt > CACHE_TTL_MS;
+  const ttl = snap.truncated ? TRUNCATED_CACHE_TTL_MS : CACHE_TTL_MS;
+  return now - snap.fetchedAt > ttl;
 }
 
 async function fetchOnce(
@@ -80,6 +95,15 @@ async function fetchOnce(
   }
 }
 
+export interface UseProjectFileListOptions {
+  /**
+   * false = 用户当前没在筛选(筛选框为空),不发 IPC、不跑 rg;有缓存(含过期)
+   * 就静态展示,没有就空数组。翻回 true(输入首字符)时按缓存新鲜度决定是否
+   * 拉取。默认 true 保持旧语义。
+   */
+  enabled?: boolean;
+}
+
 /**
  * @param remoteHostId 非空 = SSH remote 会话:索引在远端 daemon 内跑远端 rg;
  *   远端无 rg 时返回空 + error(筛选面板显示"未索引"占位)。cache key 对远程
@@ -91,9 +115,11 @@ export function useProjectFileList(
   workdir: string,
   remoteHostId: string | null = null,
   deviceId: string | null = null,
+  options?: UseProjectFileListOptions,
 ): ProjectFileListState & {
   refresh: () => void;
 } {
+  const enabled = options?.enabled ?? true;
   const cacheKey = deviceId
     ? `dev:${deviceId}|${workdir}`
     : remoteHostId
@@ -103,7 +129,7 @@ export function useProjectFileList(
   const [state, setState] = useState<ProjectFileListState>(() => ({
     files: initial?.files ?? [],
     truncated: initial?.truncated ?? false,
-    isLoading: !initial,
+    isLoading: enabled && !initial,
     error: null,
   }));
   // 用 ref 防止 useEffect deps 漂移导致重复 fetch(workdir 不变情况下)。
@@ -152,6 +178,19 @@ export function useProjectFileList(
       setState({ files: [], truncated: false, isLoading: false, error: null });
       return;
     }
+    if (!enabled) {
+      // 惰性模式:不发 IPC。有缓存(哪怕 stale)静态展示,没有就空。
+      const snap = cache.get(cacheKey);
+      setState({
+        files: snap?.files ?? [],
+        truncated: snap?.truncated ?? false,
+        isLoading: false,
+        error: null,
+      });
+      // 清防重 ref:翻回 enabled 后 stale 缓存才能触发重拉。
+      if (lastFetchedWorkdirRef.current === cacheKey) lastFetchedWorkdirRef.current = null;
+      return;
+    }
     const snap = cache.get(cacheKey);
     const now = Date.now();
     if (snap && !isStale(snap, now)) {
@@ -168,14 +207,19 @@ export function useProjectFileList(
     if (lastFetchedWorkdirRef.current === cacheKey) return;
     lastFetchedWorkdirRef.current = cacheKey;
     doFetch(workdir, cacheKey);
-  }, [workdir, cacheKey, doFetch]);
+  }, [workdir, cacheKey, doFetch, enabled]);
 
   const refresh = useCallback(() => {
     if (!workdir) return;
     cache.delete(cacheKey);
+    if (!enabled) {
+      // 树刷新时用户并没在筛选:只失效缓存,不触发扫描 —— 下次 enabled 自然拉新。
+      lastFetchedWorkdirRef.current = null;
+      return;
+    }
     lastFetchedWorkdirRef.current = cacheKey;
     doFetch(workdir, cacheKey);
-  }, [workdir, cacheKey, doFetch]);
+  }, [workdir, cacheKey, doFetch, enabled]);
 
   return { ...state, refresh };
 }

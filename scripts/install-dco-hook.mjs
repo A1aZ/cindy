@@ -43,12 +43,24 @@ export function resolveHooksDir(cwd = process.cwd()) {
 }
 
 /**
+ * 所有权判定：文件开头两行（shebang + marker 注释）必须与源文件完全一致。
+ *
+ * 刻意不只查「文件里含 marker」——开发者把本仓逻辑手动合并进自己的 hook 时，那段注释
+ * 也会被一起复制进去，于是含 marker 但内容不同，会被误判成「本仓装的旧版本」而整份
+ * 覆盖，抹掉开发者原有的 hook 行为。按开头两行判断则这类复合 hook 一律算 foreign。
+ */
+function isOwnedByThisRepo(content, expectedContent) {
+  const head = (text) => text.split(/\r?\n/).slice(0, 2).join('\n');
+  return head(content) === head(expectedContent);
+}
+
+/**
  * 返回 `installed`（与源文件一致）/ `outdated`（本仓装的旧版本，可覆盖）/
- * `foreign`（别人的 hook，不覆盖）/ `missing`（没有）。
+ * `foreign`（别人的 hook 或含本仓逻辑的复合 hook，不覆盖）/ `missing`（没有）。
  */
 export function classifyHook(existingContent, expectedContent = readHookSource()) {
   if (existingContent === null) return 'missing';
-  if (!existingContent.includes(HOOK_MARKER)) return 'foreign';
+  if (!isOwnedByThisRepo(existingContent, expectedContent)) return 'foreign';
   return existingContent === expectedContent ? 'installed' : 'outdated';
 }
 
@@ -93,8 +105,9 @@ function main() {
   if (state === 'foreign') {
     console.error(`A ${HOOK_NAME} hook not managed by this repository already exists:`);
     console.error(`  ${hookPath}`);
-    console.error(`Leaving it untouched. Merge the logic from ${HOOK_SOURCE_PATH} into it,`);
-    console.error('or use `git config core.hooksPath .githooks` instead.');
+    console.error(`Leaving it untouched. Either merge the logic from ${HOOK_SOURCE_PATH} into it`);
+    console.error('— this installer will then keep its hands off that file, so you have to keep');
+    console.error('the merged copy up to date yourself — or use `git config core.hooksPath .githooks`.');
     process.exit(1);
   }
 

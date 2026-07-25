@@ -6,11 +6,14 @@
 // 只检查 PR 引入的新 commit（merge-base..head），不追溯仓库历史，因此对 DCO 生效前
 // 的既有提交无影响。只读 git 元数据，不访问网络、不读任何私有配置或凭证。
 //
-// CI 用法（由 .github/workflows/dco.yml 调用）：
-//   GITHUB_EVENT_PATH  pull_request 事件 payload，取 base.sha 与 head.sha
+// PR 上的权威门禁是 DCO GitHub App 的 check（配置见 .github/dco.yml），本脚本是提交前
+// 的本地自查，判定刻意与 App 对齐或更严，好让本地通过一定意味着 App 通过。
+//
 // 本地用法：
 //   pnpm check:dco                                  校验 origin/main..HEAD
 //   node scripts/check-dco.mjs --base <ref> --head <ref>
+// 在 pull_request 事件下运行时（GITHUB_EVENT_PATH 存在）自动从 payload 取
+// base.sha 与 head.sha 作为范围。
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -45,13 +48,18 @@ export function normalizeName(name) {
   return String(name ?? '').trim().toLowerCase();
 }
 
-/**
- * DCO App 用 validator.isEmail 拒掉不像邮箱的地址（默认要求 TLD，所以 git 在未配
- * user.email 时自动生成的 `user@hostname` 会被拒）。这里做形状近似，避免本地放行、
- * PR 上却被 App 拦下。
- */
+// 邮箱形状：对齐 DCO App 用的 validator.isEmail 的主要规则——local part 不允许连续点
+// 或首尾点，域名不允许下划线、必须有字母 TLD（所以 git 未配 user.email 时自动生成的
+// `user@hostname` 会被拒）。这里无法逐条复刻 validator，取舍上刻意偏严：宁可本地误报，
+// 也不要放行一个 App 会拒的地址（那才会变成「本地绿、PR 红」）。
+const EMAIL_LOCAL_PART = /^[^\s@.]+(?:\.[^\s@.]+)*$/;
+const EMAIL_DOMAIN = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/;
+
 export function looksLikeEmail(email) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email ?? '').trim());
+  const value = String(email ?? '').trim();
+  const at = value.lastIndexOf('@');
+  if (at <= 0 || at === value.length - 1) return false;
+  return EMAIL_LOCAL_PART.test(value.slice(0, at)) && EMAIL_DOMAIN.test(value.slice(at + 1));
 }
 
 /** 提取 message 里所有 Signed-off-by 行。 */
@@ -83,13 +91,16 @@ export function exemptReason(commit) {
 }
 
 /**
- * 返回错误列表；空列表即通过。判定刻意对齐 DCO App（dcoapp/app 的 lib/dco.js）：
- * 签名的 name 必须落在 {author.name, committer.name}、email 必须落在
- * {author.email, committer.email}，两者都要满足。**只查 email 会让本脚本比 PR 上的
- * 门禁宽松，出现「本地绿、CI 红」**——那是最糟的偏差方向，所以 name 也一起查。
+ * 返回错误列表；空列表即通过。判定与 DCO App（dcoapp/app 的 lib/dco.js）对齐，两处
+ * 刻意更严——偏严只会「本地红、PR 绿」，偏宽才会「本地绿、PR 红」，后者才是要避免的：
  *
- * 本脚本不识别 remediation commit（App 侧由 .github/dco.yml 开启）：那是刻意的保守，
- * 本地通过一定意味着 App 通过，反之不然。面向贡献者的文案统一用英文。
+ * 1. 签名必须整体匹配 author 或 committer 这一个身份。App 是把 name 与 email 拆成两个
+ *    集合分别判断，于是 author=Alice<a@x>、committer=Bob<b@x> 时 `Alice <b@x>` 也能过，
+ *    尽管这个身份并不存在——这里按 name+email 成对比较。
+ * 2. 邮箱形状见 looksLikeEmail。
+ *
+ * 本脚本同样不识别 remediation commit（App 侧由 .github/dco.yml 开启），也是同一取舍。
+ * 面向贡献者的文案统一用英文。
  */
 export function validateCommit(commit) {
   const signOffs = parseSignOffs(commit.message);
@@ -97,25 +108,30 @@ export function validateCommit(commit) {
     return ['No Signed-off-by trailer.'];
   }
 
+  // 与 App 一致：只看 author.email（缺失时回落 committer.email）。改成「两者都非法才
+  // 失败」会比 App 宽松，反而制造本地绿、PR 红。
   const email = commit.authorEmail || commit.committerEmail;
   if (!looksLikeEmail(email)) {
     return [`${email} is not a valid email address.`];
   }
 
-  const names = new Set([commit.authorName, commit.committerName].map(normalizeName));
-  const emails = new Set([commit.authorEmail, commit.committerEmail].map(normalizeEmail));
-  if (
-    signOffs.some(
-      (signOff) => names.has(normalizeName(signOff.name)) && emails.has(normalizeEmail(signOff.email))
-    )
-  ) {
-    return [];
-  }
+  const identities = [
+    { name: normalizeName(commit.authorName), email: normalizeEmail(commit.authorEmail) },
+    { name: normalizeName(commit.committerName), email: normalizeEmail(commit.committerEmail) },
+  ];
+  const matches = (signOff) =>
+    identities.some(
+      (identity) =>
+        identity.name === normalizeName(signOff.name) &&
+        identity.email === normalizeEmail(signOff.email)
+    );
+  if (signOffs.some(matches)) return [];
 
   const got = signOffs.map((signOff) => `"${signOff.name} <${signOff.email}>"`).join(', ');
   return [
-    `Expected a sign-off from "${commit.authorName} <${commit.authorEmail}>", got ${got}. ` +
-      'Both the name and the address have to match the commit author or committer.',
+    `Expected a sign-off from "${commit.authorName} <${commit.authorEmail}>" or ` +
+      `"${commit.committerName} <${commit.committerEmail}>", got ${got}. ` +
+      'The name and the address have to match one of them as a whole.',
   ];
 }
 
@@ -230,9 +246,10 @@ function reportFailures({ failures, start }) {
     console.error(`- ${shortSha(commit.sha)} ${subjectOf(commit)}`);
     for (const error of errors) console.error(`  ${error}`);
   }
+  // 用完整 sha：短 sha 在大仓里可能歧义，让复制粘贴的命令直接失败。
   console.error('\nHow to fix, on your pull request branch:');
   console.error('  most recent commit only:  git commit --amend -s --no-edit');
-  console.error(`  several commits:          git rebase --signoff ${shortSha(start)}`);
+  console.error(`  several commits:          git rebase --signoff ${start}`);
   console.error('  then update the PR:       git push --force-with-lease');
   console.error('\nTo stop forgetting, commit with `git commit -s`, or install the hook shipped');
   console.error('with this repository once: `pnpm dco:install-hook` (.githooks/prepare-commit-msg).');

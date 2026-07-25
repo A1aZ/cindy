@@ -19,10 +19,14 @@ case "$MSG_SOURCE" in
   merge) exit 0 ;;
 esac
 
-# Use the author ident rather than user.email: the check compares the sign-off
-# against the commit author, so temporary overrides (GIT_AUTHOR_EMAIL, -c
-# user.email) have to be honoured too.
-IDENT=$(git var GIT_AUTHOR_IDENT) || exit 0
+# Use the COMMITTER ident, exactly like `git commit -s` does. A sign-off is a
+# statement by whoever runs the commit, so it must never be generated from the
+# author ident: with `git commit --author=...`, or while cherry-picking or
+# rebasing somebody else's patch, the author is a different person and signing
+# on their behalf would forge their DCO certification. The check accepts a
+# sign-off matching either the author or the committer, so using the committer
+# ident still passes.
+IDENT=$(git var GIT_COMMITTER_IDENT) || exit 0
 SIGNOFF=$(printf '%s\n' "$IDENT" | sed -n 's/^\(.*>\).*$/\1/p')
 [ -n "$SIGNOFF" ] || exit 0
 

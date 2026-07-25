@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import {
   exemptReason,
   isBotIdentity,
+  looksLikeEmail,
   parseGitLog,
   parseSignOffs,
   validateCommit,
@@ -99,19 +100,15 @@ test('validateCommit rejects a missing or mismatched sign-off', () => {
 });
 
 test('validateCommit matches the DCO App on names and address shape', () => {
-  // App 的判定是 name ∈ {author.name, committer.name} 且 email ∈ {…emails}。只查
-  // email 会比 PR 门禁宽松，导致本地绿、CI 红。
+  // 只查 email 会比 PR 门禁宽松，导致本地绿、CI 红。
   const wrongName = validateCommit(
     commitFixture({ message: `feat: x\n\nSigned-off-by: Someone Else <${AUTHOR.email}>\n` })
   );
   assert.equal(wrongName.length, 1);
-  assert.match(wrongName[0], /both the name and the address/i);
+  assert.match(wrongName[0], /match one of them as a whole/i);
 
-  // App 用 validator.isEmail 拒掉没有 TLD 的地址，例如 git 在未配 user.email 时
-  // 自动生成的 user@hostname。
   const badEmail = validateCommit(
     commitFixture({
-      authorName: 'Contributor',
       authorEmail: 'contributor@localhost',
       committerEmail: 'contributor@localhost',
       message: 'feat: x\n\nSigned-off-by: Contributor <contributor@localhost>\n',
@@ -119,6 +116,65 @@ test('validateCommit matches the DCO App on names and address shape', () => {
   );
   assert.equal(badEmail.length, 1);
   assert.match(badEmail[0], /not a valid email address/);
+});
+
+test('a sign-off has to match one identity as a whole, not a mix of two', () => {
+  // author=Alice<alice@>、committer=Bob<bob@> 时，`Alice <bob@…>` 谁都不是。App 把
+  // name 与 email 拆成两个集合，会放过这种组合；本地刻意更严（偏严只会本地红、PR 绿）。
+  const crossed = validateCommit(
+    commitFixture({
+      authorName: 'Alice',
+      authorEmail: 'alice@example.com',
+      committerName: 'Bob',
+      committerEmail: 'bob@example.com',
+      message: 'feat: x\n\nSigned-off-by: Alice <bob@example.com>\n',
+    })
+  );
+  assert.equal(crossed.length, 1);
+  assert.match(crossed[0], /match one of them as a whole/i);
+
+  // 同一组身份下，author 与 committer 各自的完整签名都要接受。
+  for (const signOff of ['Alice <alice@example.com>', 'Bob <bob@example.com>']) {
+    assert.deepEqual(
+      validateCommit(
+        commitFixture({
+          authorName: 'Alice',
+          authorEmail: 'alice@example.com',
+          committerName: 'Bob',
+          committerEmail: 'bob@example.com',
+          message: `feat: x\n\nSigned-off-by: ${signOff}\n`,
+        })
+      ),
+      []
+    );
+  }
+});
+
+test('looksLikeEmail rejects everything validator.isEmail would reject', () => {
+  for (const good of [
+    'contributor@example.com',
+    'first.last@sub.example.co.uk',
+    'user+tag@example.io',
+    '49699333+dependabot[bot]@users.noreply.github.com',
+  ]) {
+    assert.equal(looksLikeEmail(good), true, `should accept ${good}`);
+  }
+  // 放行任何一个 App 会拒的地址就会变成「本地绿、PR 红」。
+  for (const bad of [
+    'alice..smith@example.com',
+    '.alice@example.com',
+    'alice.@example.com',
+    'alice@example..com',
+    'alice@exam_ple.com',
+    'contributor@localhost',
+    'contributor@example',
+    'no-at-sign.example.com',
+    '@example.com',
+    'alice@',
+    '',
+  ]) {
+    assert.equal(looksLikeEmail(bad), false, `should reject ${bad}`);
+  }
 });
 
 test('merge commits and bot commits are exempt, humans are not', () => {
@@ -176,16 +232,30 @@ test('parseGitLog keeps multi-line messages and parent lists intact', () => {
 });
 
 test('classifyHook only overwrites hooks this repo installed', () => {
+  const source = readHookSource();
+  const ownHead = source.split('\n').slice(0, 2).join('\n');
+
   assert.equal(classifyHook(null), 'missing');
   assert.equal(classifyHook('#!/bin/sh\necho unrelated\n'), 'foreign');
-  assert.equal(classifyHook(`#!/bin/sh\n# ${HOOK_MARKER}\nold body\n`), 'outdated');
-  assert.equal(classifyHook(readHookSource()), 'installed');
+  assert.equal(classifyHook(source), 'installed');
+  // 本仓装过的旧版本：开头两行相同、正文不同 → 可安全更新。
+  assert.equal(classifyHook(`${ownHead}\nold body\n`), 'outdated');
+
+  // 关键回归：开发者把本仓逻辑合并进自己的 hook 后，文件里也含 marker。只查
+  // 「含 marker」会把它判成 outdated 并整份覆盖，抹掉开发者原有的 hook 行为。
+  const composite = ['#!/bin/sh', 'echo "my own hook"', ...source.split('\n').slice(1)].join('\n');
+  assert.ok(composite.includes(HOOK_MARKER));
+  assert.equal(classifyHook(composite), 'foreign');
 });
 
 test('the hook source is a POSIX sh script that pins its trailer behaviour', () => {
   const source = readHookSource();
   assert.match(source, /^#!\/bin\/sh\n/);
   assert.ok(source.includes(HOOK_MARKER), 'hook 必须带 marker，否则安装器无法认领它');
+  // 必须签 committer：签 author 会在 --author / cherry-pick / rebase 他人 patch 时
+  // 伪造别人的 DCO 声明。native `git commit -s` 同样用 committer。
+  assert.match(source, /GIT_COMMITTER_IDENT/);
+  assert.doesNotMatch(source, /GIT_AUTHOR_IDENT/);
   // 这两个开关的默认值可被开发者的 trailer.ifExists / trailer.ifMissing 配置改掉，
   // 配成 doNothing 时 hook 会在已有他人签名的提交上静默漏签，必须显式钉住。
   assert.match(source, /--if-exists addIfDifferent/);
@@ -291,6 +361,43 @@ test('installed hook signs off subsequent commits automatically', { skip: !canRu
   assert.match(thirdMessage, new RegExp(`Signed-off-by: ${AUTHOR.name} <${AUTHOR.email}>`));
   repo.run(['git', 'config', '--unset', 'trailer.ifExists']);
 
+  assert.equal(repo.checkDco(['--base', 'main']).code, 0);
+});
+
+test('hook signs off the committer, never the overridden author', { skip: !canRunGitFixture }, (t) => {
+  const repo = createRepo();
+  t.after(() => fs.rmSync(repo.dir, { recursive: true, force: true }));
+
+  repo.commit('history.txt', 'chore: pre-DCO history');
+  repo.run(['git', 'checkout', '--quiet', '-b', 'feature']);
+  repo.run(['node', INSTALL_HOOK]);
+
+  // 用 --author 假冒他人：hook 绝不能替 Alice 签名，那是伪造她的 DCO 声明。
+  fs.writeFileSync(path.join(repo.dir, 'feature.txt'), 'feature\n');
+  repo.run(['git', 'add', 'feature.txt']);
+  repo.run([
+    'git',
+    'commit',
+    '--quiet',
+    '--author=Alice <alice@example.com>',
+    '-m',
+    'feat: committed on behalf of Alice',
+  ]);
+
+  const message = repo.run(['git', 'log', '-1', '--format=%B']);
+  assert.match(message, new RegExp(`Signed-off-by: ${AUTHOR.name} <${AUTHOR.email}>`));
+  assert.doesNotMatch(message, /Signed-off-by: Alice/);
+
+  // 与原生 `git commit -s` 的结果一致。
+  fs.writeFileSync(path.join(repo.dir, 'native.txt'), 'native\n');
+  repo.run(['git', 'add', 'native.txt']);
+  repo.run(['git', 'commit', '--quiet', '-s', '--author=Alice <alice@example.com>', '-m', 'feat: native -s']);
+  assert.match(
+    repo.run(['git', 'log', '-1', '--format=%B']),
+    new RegExp(`Signed-off-by: ${AUTHOR.name} <${AUTHOR.email}>`)
+  );
+
+  // committer 的签名同样满足门禁（App 与本脚本都接受 author 或 committer）。
   assert.equal(repo.checkDco(['--base', 'main']).code, 0);
 });
 

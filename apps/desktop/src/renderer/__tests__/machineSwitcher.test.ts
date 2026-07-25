@@ -422,6 +422,20 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
     ).toBe(false);
   });
 
+  it('明确选择已有权威 shard 的设备时，不等待独立的设备清单重试', () => {
+    expect(
+      shouldWaitForRemoteSessionBootstrap({
+        selectedMachineId: ['dev-a'],
+        deviceListSettled: false,
+        devices: connecting,
+        syncedDevices: [
+          { deviceId: 'dev-a', deviceName: 'Mac A', sessionCount: 0, connected: false },
+        ],
+        bootstrapFailedDeviceIds: noBootstrapFailures,
+      }),
+    ).toBe(false);
+  });
+
   it('设备清单请求失败但已结算 → 不把未知设备列表当成永久加载', () => {
     expect(
       shouldWaitForRemoteSessionBootstrap({

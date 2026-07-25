@@ -158,6 +158,7 @@ export function useDeviceLinkRemoteProjects(): void {
       if (result === 'gave-up' && !remoteProjectsStore.hasDevice(deviceId)) {
         // 永久错误（如旧被控端 CHANNEL_NOT_ALLOWED）或瞬态重试耗尽：不是权威空列表，
         // 但本轮 bootstrap 已有终态，不能让「所有」侧边栏永久停在 loading。
+        // superseded 表示断连 / 清理使请求失效，必须等重连，不能误记成终态失败。
         remoteProjectsStore.markBootstrapFailed(deviceId);
       }
       // 预取被控端能力(model/effort/fast/permission/fork/rewind),使首次打开远程会话时

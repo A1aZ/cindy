@@ -75,9 +75,18 @@ export function shouldWaitForRemoteSessionBootstrap({
       ? null
       : new Set(selectedMachineId.filter((id) => id !== MACHINE_LOCAL));
   if (selectedRemoteIds?.size === 0) return false;
-  if (!deviceListSettled) return true;
 
   const syncedIds = new Set(syncedDevices.map((device) => device.deviceId));
+  // 明确选择的远端设备若都已有权威 shard（包括 0 会话），设备目录的独立重试不应
+  // 把已知作用域重新挡回 loading；「所有」仍必须等目录结算，才能知道完整远端集合。
+  if (
+    selectedRemoteIds !== null &&
+    [...selectedRemoteIds].every((deviceId) => syncedIds.has(deviceId))
+  ) {
+    return false;
+  }
+  if (!deviceListSettled) return true;
+
   return devices.some(
     (device) =>
       device.status === 'connecting' &&

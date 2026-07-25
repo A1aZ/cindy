@@ -514,12 +514,15 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
 });
 
 describe('shouldShowSelectedMachineConnectingPlaceholder', () => {
+  const noBootstrapFailures = new Set<string>();
+
   it('在线可控但尚未同步会话 → 显示连接中占位', () => {
     expect(
       shouldShowSelectedMachineConnectingPlaceholder({
         rawSelection: ['dev-a'],
         devices: [{ deviceId: 'dev-a', name: 'Mac A', status: 'connecting' }],
         syncedDevices: [],
+        bootstrapFailedDeviceIds: noBootstrapFailures,
       }),
     ).toBe(true);
   });
@@ -532,6 +535,7 @@ describe('shouldShowSelectedMachineConnectingPlaceholder', () => {
         syncedDevices: [
           { deviceId: 'dev-a', deviceName: 'Mac A', sessionCount: 2, connected: false },
         ],
+        bootstrapFailedDeviceIds: noBootstrapFailures,
       }),
     ).toBe(false);
   });
@@ -544,8 +548,20 @@ describe('shouldShowSelectedMachineConnectingPlaceholder', () => {
         syncedDevices: [
           { deviceId: 'dev-a', deviceName: 'Mac A', sessionCount: 0, connected: false },
         ],
+        bootstrapFailedDeviceIds: noBootstrapFailures,
       }),
     ).toBe(true);
+  });
+
+  it('选中设备的 bootstrap 已终态失败 → 停止连接中占位并进入真实空态', () => {
+    expect(
+      shouldShowSelectedMachineConnectingPlaceholder({
+        rawSelection: ['dev-a'],
+        devices: [{ deviceId: 'dev-a', name: 'Mac A', status: 'connecting' }],
+        syncedDevices: [],
+        bootstrapFailedDeviceIds: new Set(['dev-a']),
+      }),
+    ).toBe(false);
   });
 
   it('多选:全是连接中且无缓存 → 占位;混入本机或已连接设备 → 不占位', () => {
@@ -558,6 +574,7 @@ describe('shouldShowSelectedMachineConnectingPlaceholder', () => {
         rawSelection: ['dev-a'],
         devices,
         syncedDevices: [],
+        bootstrapFailedDeviceIds: noBootstrapFailures,
       }),
     ).toBe(true);
     expect(
@@ -565,6 +582,7 @@ describe('shouldShowSelectedMachineConnectingPlaceholder', () => {
         rawSelection: ['dev-a', 'dev-b'],
         devices,
         syncedDevices: [],
+        bootstrapFailedDeviceIds: noBootstrapFailures,
       }),
     ).toBe(false);
     expect(
@@ -572,6 +590,7 @@ describe('shouldShowSelectedMachineConnectingPlaceholder', () => {
         rawSelection: ['local', 'dev-a'],
         devices,
         syncedDevices: [],
+        bootstrapFailedDeviceIds: noBootstrapFailures,
       }),
     ).toBe(false);
   });

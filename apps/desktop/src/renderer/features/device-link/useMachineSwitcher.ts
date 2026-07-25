@@ -47,6 +47,7 @@ export interface SelectedMachineConnectingInput {
   rawSelection: MachineSelection;
   devices: readonly SwitcherDevice[];
   syncedDevices: readonly RemoteDeviceSummary[];
+  bootstrapFailedDeviceIds: ReadonlySet<string>;
 }
 
 export interface RemoteSessionBootstrapLoadingInput {
@@ -96,12 +97,14 @@ export function shouldShowSelectedMachineConnectingPlaceholder({
   rawSelection,
   devices,
   syncedDevices,
+  bootstrapFailedDeviceIds,
 }: SelectedMachineConnectingInput): boolean {
   const effective = normalizeSelectedMachineId(rawSelection, selectableDeviceIds(devices));
   if (effective === MACHINE_ALL || effective.includes(MACHINE_LOCAL)) return false;
   for (const deviceId of effective) {
     const selectedDevice = devices.find((d) => d.deviceId === deviceId);
     if (selectedDevice?.status !== 'connecting') return false;
+    if (bootstrapFailedDeviceIds.has(deviceId)) return false;
     const cachedSessionCount =
       syncedDevices.find((d) => d.deviceId === deviceId)?.sessionCount ?? 0;
     if (cachedSessionCount > 0) return false;
@@ -148,10 +151,12 @@ export function useSelectedMachineConnecting(): boolean {
   const raw = useSelectedMachineId();
   const devices = useSwitcherDevices();
   const synced = useRemoteDevices();
+  const bootstrapFailedDeviceIds = useRemoteBootstrapFailedDeviceIds();
   return shouldShowSelectedMachineConnectingPlaceholder({
     rawSelection: raw,
     devices,
     syncedDevices: synced,
+    bootstrapFailedDeviceIds,
   });
 }
 

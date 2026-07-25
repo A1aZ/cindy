@@ -22,7 +22,11 @@
  */
 
 import { useCallback, useMemo, useSyncExternalStore } from 'react';
-import { useRemoteDevices, type RemoteDeviceSummary } from './remoteProjectsStore';
+import {
+  useRemoteBootstrapFailedDeviceIds,
+  useRemoteDevices,
+  type RemoteDeviceSummary,
+} from './remoteProjectsStore';
 import { revokedDevicesStore } from './revokedDevicesStore';
 import {
   useDeviceLinkDeviceList,
@@ -50,6 +54,7 @@ export interface RemoteSessionBootstrapLoadingInput {
   deviceListSettled: boolean;
   devices: readonly SwitcherDevice[];
   syncedDevices: readonly RemoteDeviceSummary[];
+  bootstrapFailedDeviceIds: ReadonlySet<string>;
 }
 
 /**
@@ -62,6 +67,7 @@ export function shouldWaitForRemoteSessionBootstrap({
   deviceListSettled,
   devices,
   syncedDevices,
+  bootstrapFailedDeviceIds,
 }: RemoteSessionBootstrapLoadingInput): boolean {
   const selectedRemoteIds =
     selectedMachineId === MACHINE_ALL
@@ -75,6 +81,7 @@ export function shouldWaitForRemoteSessionBootstrap({
     (device) =>
       device.status === 'connecting' &&
       !syncedIds.has(device.deviceId) &&
+      !bootstrapFailedDeviceIds.has(device.deviceId) &&
       (selectedRemoteIds === null || selectedRemoteIds.has(device.deviceId)),
   );
 }
@@ -159,6 +166,7 @@ export function useRemoteSessionBootstrapLoading(
   const deviceListSettled = useDeviceLinkDeviceListSettled();
   const devices = useSwitcherDevices();
   const synced = useRemoteDevices();
+  const bootstrapFailedDeviceIds = useRemoteBootstrapFailedDeviceIds();
   return useMemo(
     () =>
       shouldWaitForRemoteSessionBootstrap({
@@ -166,8 +174,9 @@ export function useRemoteSessionBootstrapLoading(
         deviceListSettled,
         devices,
         syncedDevices: synced,
+        bootstrapFailedDeviceIds,
       }),
-    [selectedMachineId, deviceListSettled, devices, synced],
+    [selectedMachineId, deviceListSettled, devices, synced, bootstrapFailedDeviceIds],
   );
 }
 

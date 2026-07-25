@@ -385,6 +385,7 @@ describe('normalizeSelectedMachineId 配合可选中集(连接中可保留,被�
 
 describe('shouldWaitForRemoteSessionBootstrap', () => {
   const connecting = [{ deviceId: 'dev-a', name: 'Mac A', status: 'connecting' as const }];
+  const noBootstrapFailures = new Set<string>();
 
   it('所有机器:设备清单或在线远端首快照未落地 → 保持加载态', () => {
     expect(
@@ -393,6 +394,7 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
         deviceListSettled: false,
         devices: [],
         syncedDevices: [],
+        bootstrapFailedDeviceIds: noBootstrapFailures,
       }),
     ).toBe(true);
     expect(
@@ -401,6 +403,7 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
         deviceListSettled: true,
         devices: connecting,
         syncedDevices: [],
+        bootstrapFailedDeviceIds: noBootstrapFailures,
       }),
     ).toBe(true);
   });
@@ -414,6 +417,7 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
         syncedDevices: [
           { deviceId: 'dev-a', deviceName: 'Mac A', sessionCount: 0, connected: false },
         ],
+        bootstrapFailedDeviceIds: noBootstrapFailures,
       }),
     ).toBe(false);
   });
@@ -425,6 +429,7 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
         deviceListSettled: true,
         devices: [],
         syncedDevices: [],
+        bootstrapFailedDeviceIds: noBootstrapFailures,
       }),
     ).toBe(false);
   });
@@ -436,6 +441,7 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
         deviceListSettled: false,
         devices: [],
         syncedDevices: [],
+        bootstrapFailedDeviceIds: noBootstrapFailures,
       }),
     ).toBe(false);
     expect(
@@ -444,6 +450,7 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
         deviceListSettled: true,
         devices: connecting,
         syncedDevices: [],
+        bootstrapFailedDeviceIds: noBootstrapFailures,
       }),
     ).toBe(false);
     expect(
@@ -452,6 +459,7 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
         deviceListSettled: true,
         devices: connecting,
         syncedDevices: [],
+        bootstrapFailedDeviceIds: noBootstrapFailures,
       }),
     ).toBe(true);
   });
@@ -463,6 +471,7 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
         deviceListSettled: true,
         devices: [{ deviceId: 'dev-a', name: 'Mac A', status: 'rejected' }],
         syncedDevices: [],
+        bootstrapFailedDeviceIds: noBootstrapFailures,
       }),
     ).toBe(false);
     expect(
@@ -473,8 +482,34 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
         syncedDevices: [
           { deviceId: 'dev-a', deviceName: 'Mac A', sessionCount: 2, connected: false },
         ],
+        bootstrapFailedDeviceIds: noBootstrapFailures,
       }),
     ).toBe(false);
+  });
+
+  it('bootstrap 终态失败的连接中设备不再无限 loading；其它未结算设备仍继续等待', () => {
+    const devices = [
+      { deviceId: 'dev-a', name: 'Mac A', status: 'connecting' as const },
+      { deviceId: 'dev-b', name: 'Mac B', status: 'connecting' as const },
+    ];
+    expect(
+      shouldWaitForRemoteSessionBootstrap({
+        selectedMachineId: ['dev-a'],
+        deviceListSettled: true,
+        devices,
+        syncedDevices: [],
+        bootstrapFailedDeviceIds: new Set(['dev-a']),
+      }),
+    ).toBe(false);
+    expect(
+      shouldWaitForRemoteSessionBootstrap({
+        selectedMachineId: MACHINE_ALL,
+        deviceListSettled: true,
+        devices,
+        syncedDevices: [],
+        bootstrapFailedDeviceIds: new Set(['dev-a']),
+      }),
+    ).toBe(true);
   });
 });
 

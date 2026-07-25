@@ -60,7 +60,13 @@ describe('Dialogue sidebar section', () => {
   });
 
   it('shows loading instead of the empty state until the initial session fetch settles', () => {
-    expect(sidebarSource.match(/isLoading=\{isLoadingSessions\}/g)).toHaveLength(2);
+    expect(sidebarSource.match(/isLoading=\{isLoadingSidebarSessions\}/g)).toHaveLength(2);
+    expect(sidebarSource).toContain(
+      'useRemoteSessionBootstrapLoading(selectedMachineId)',
+    );
+    expect(sidebarSource).toContain(
+      'sessionsHook.isLoading || remoteSessionBootstrapLoading',
+    );
     expect(dialogueSectionSource).toContain('isLoading: boolean');
     expect(dialogueSectionSource).toContain("'ccAgent.sidebar.loadingDialogues'");
     expect(dialogueSectionSource).toMatch(

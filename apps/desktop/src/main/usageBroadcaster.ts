@@ -291,16 +291,52 @@ export async function readAgentTodayUsage(agentKind: AgentKind): Promise<AgentTo
 // 「8天 剩余 100%」—— WHAM 的 Spark 桶窗口顶掉了 app-server 的主配额窗口)。
 // 分槽后各源只更新自己的槽, 消费方按会话形态选槽(CLI → 顶层, bridge →
 // webSnapshot), payload 形状对旧消费者(mobile 防御解析)加性兼容。
+//
+// **同源内还要按 limitId 再分桶**(2026-07-25 用户复报: 用 gpt-5.6-sol 的会话里
+// chip 仍显示「8天 剩余 100%」, 持久化 app 槽是 codex_bengalfox /
+// GPT-5.3-Codex-Spark 的 7 天窗口)。app-server 的 account/rateLimits/updated 每次
+// 只推**一个**桶(带 limitId, 即该 turn 实际消耗的桶); 用过 Spark 类模型专属桶后,
+// 它会覆盖主配额桶并挂在全局缓存上, 之后所有 Codex 会话的 chip 都读到它。
+// 桶表按 limitId 隔离, 同桶才 merge; renderer 按「本会话最近一次 turn 报告的
+// limitId」选桶(见 useAccountUsage)。
 
-/** 组合 payload: 顶层 = codex-app-server 槽(CLI 权威), webSnapshot = WHAM 槽。 */
+/** 桶表的缺省键: 快照没带 limitId 时用它(单桶账号 / 老 app-server)。 */
+export const CODEX_DEFAULT_LIMIT_BUCKET = '__default__';
+
+/**
+ * 组合 payload:
+ *   - 顶层 = app-server **最近更新的**桶(旧消费者与冷启动兜底, 形状不变);
+ *   - appServerBuckets = app-server 全部桶(按 limitId), renderer 据会话选桶;
+ *   - webSnapshot = WHAM 槽。
+ * 后两者都是加性字段, 旧消费者(mobile 防御解析)忽略即退化为原行为。
+ */
 export interface CodexAccountUsagePayload extends RateLimitSnapshot {
   webSnapshot?: RateLimitSnapshot | null;
+  appServerBuckets?: Record<string, RateLimitSnapshot> | null;
 }
 
 let codexAccountUsageOwner: string | null = null;
 let codexAccountUsageLoaded = false;
-let codexAppServerUsageSnapshot: RateLimitSnapshot | null = null;
+/** app-server 桶表: limitId → 该桶最近快照(同桶 merge, 跨桶隔离)。 */
+let codexAppServerBuckets: Record<string, RateLimitSnapshot> = {};
+/** 最近更新的 app-server 桶键 —— 顶层兼容位取它。 */
+let codexAppServerLatestBucketKey: string | null = null;
 let codexWebAccountUsageSnapshot: RateLimitSnapshot | null = null;
+
+/** 快照 → 桶键。limitId 缺失时归缺省桶。 */
+export function codexLimitBucketKey(snapshot: RateLimitSnapshot | null | undefined): string {
+  const limitId = snapshot?.limitId;
+  return typeof limitId === 'string' && limitId.length > 0 ? limitId : CODEX_DEFAULT_LIMIT_BUCKET;
+}
+
+/** 当前 app-server 展示快照(最近更新桶);无桶 → null。 */
+function currentCodexAppServerSnapshot(): RateLimitSnapshot | null {
+  if (codexAppServerLatestBucketKey) {
+    return codexAppServerBuckets[codexAppServerLatestBucketKey] ?? null;
+  }
+  const keys = Object.keys(codexAppServerBuckets);
+  return keys.length > 0 ? codexAppServerBuckets[keys[keys.length - 1]] ?? null : null;
+}
 
 function currentAccountUsageOwner(): string | null {
   try {
@@ -315,7 +351,8 @@ function resetCodexAccountUsageCacheIfOwnerChanged(): void {
   if (owner === codexAccountUsageOwner) return;
   codexAccountUsageOwner = owner;
   codexAccountUsageLoaded = false;
-  codexAppServerUsageSnapshot = null;
+  codexAppServerBuckets = {};
+  codexAppServerLatestBucketKey = null;
   codexWebAccountUsageSnapshot = null;
 }
 
@@ -334,8 +371,11 @@ function hasCodexSnapshotContent(snapshot: RateLimitSnapshot | null | undefined)
 
 /** 两槽 → 组合 payload;两槽全空 → null。 */
 function buildCodexAccountUsagePayload(): CodexAccountUsagePayload | null {
-  const app = codexAppServerUsageSnapshot;
+  const app = currentCodexAppServerSnapshot();
   const web = codexWebAccountUsageSnapshot;
+  const buckets = Object.keys(codexAppServerBuckets).length > 0
+    ? codexAppServerBuckets
+    : null;
   if (!app && !web) return null;
   if (!app && web) {
     // web-only: 顶层无 CLI 数据, 但归属字段必须上浮 —— WHAM reader 用顶层
@@ -345,7 +385,11 @@ function buildCodexAccountUsagePayload(): CodexAccountUsagePayload | null {
     // 不会据此伪造出 app 槽。
     return { accountId: web.accountId, updatedAt: web.updatedAt, webSnapshot: web };
   }
-  return { ...(app as RateLimitSnapshot), webSnapshot: web ?? null };
+  return {
+    ...(app as RateLimitSnapshot),
+    webSnapshot: web ?? null,
+    appServerBuckets: buckets,
+  };
 }
 
 /**
@@ -353,23 +397,44 @@ function buildCodexAccountUsagePayload(): CodexAccountUsagePayload | null {
  * 归入对应槽(旧行可能是被 WHAM 污染过的单槽杂交体, 归 web 槽即自然隔离)。
  */
 export function splitPersistedCodexAccountUsage(parsed: Record<string, unknown>): {
-  appServer: RateLimitSnapshot | null;
+  appServerBuckets: Record<string, RateLimitSnapshot>;
   web: RateLimitSnapshot | null;
 } {
   if ('webSnapshot' in parsed) {
-    const { webSnapshot, ...rest } = parsed as CodexAccountUsagePayload;
+    const { webSnapshot, appServerBuckets, ...rest } = parsed as CodexAccountUsagePayload;
     return {
-      appServer: hasCodexSnapshotContent(rest) ? rest : null,
+      // 新格式带桶表 → 直接水合; 只有顶层(分桶前写入的行)→ 按其 limitId 归桶。
+      appServerBuckets: isPlainRecord(appServerBuckets)
+        ? sanitizeCodexBuckets(appServerBuckets)
+        : hasCodexSnapshotContent(rest)
+          ? { [codexLimitBucketKey(rest)]: rest }
+          : {},
       // 拒绝数组等畸形持久化值(与 renderer 的 isRateLimitSnapshot 守卫同口径),
       // 否则损坏行会被当有效快照再次广播 + 回写。
-      web: webSnapshot && typeof webSnapshot === 'object' && !Array.isArray(webSnapshot)
-        ? webSnapshot
-        : null,
+      web: isPlainRecord(webSnapshot) ? (webSnapshot as RateLimitSnapshot) : null,
     };
   }
   const legacy = parsed as RateLimitSnapshot;
-  if (legacy.source === 'openai-web') return { appServer: null, web: legacy };
-  return { appServer: hasCodexSnapshotContent(legacy) ? legacy : null, web: null };
+  if (legacy.source === 'openai-web') return { appServerBuckets: {}, web: legacy };
+  return {
+    appServerBuckets: hasCodexSnapshotContent(legacy)
+      ? { [codexLimitBucketKey(legacy)]: legacy }
+      : {},
+    web: null,
+  };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** 桶表水合守卫: 丢掉非对象条目, 不让损坏行被当有效快照广播 / 回写。 */
+function sanitizeCodexBuckets(raw: Record<string, unknown>): Record<string, RateLimitSnapshot> {
+  const out: Record<string, RateLimitSnapshot> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (isPlainRecord(value)) out[key] = value as RateLimitSnapshot;
+  }
+  return out;
 }
 
 function mergeCodexAccountUsageSnapshot(
@@ -453,7 +518,8 @@ async function ensureCodexAccountUsageLoaded(): Promise<void> {
     const parsed = JSON.parse(row.snapshot);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       const slots = splitPersistedCodexAccountUsage(parsed as Record<string, unknown>);
-      codexAppServerUsageSnapshot = slots.appServer;
+      codexAppServerBuckets = slots.appServerBuckets;
+      codexAppServerLatestBucketKey = null; // 水合后无「最近」信息, 取表内最后一个
       codexWebAccountUsageSnapshot = slots.web;
     }
   } catch (err) {
@@ -477,10 +543,17 @@ export async function recordCodexAccountUsageSnapshot(snapshot: unknown): Promis
       incoming,
     );
   } else {
-    codexAppServerUsageSnapshot = mergeCodexAccountUsageSnapshot(
-      codexAppServerUsageSnapshot,
-      incoming,
-    );
+    // 同 limitId 桶内 merge(保留 windowless / 部分字段兜底语义), 跨桶隔离 ——
+    // Spark 类模型专属桶不得覆盖主配额桶(见本节头注释)。
+    const bucketKey = codexLimitBucketKey(incoming);
+    codexAppServerBuckets = {
+      ...codexAppServerBuckets,
+      [bucketKey]: mergeCodexAccountUsageSnapshot(
+        codexAppServerBuckets[bucketKey] ?? null,
+        incoming,
+      ),
+    };
+    codexAppServerLatestBucketKey = bucketKey;
   }
   const payload = buildCodexAccountUsagePayload();
   broadcastCodexAccountUsage(payload);
@@ -505,7 +578,8 @@ export async function recordCodexAccountUsageSnapshot(snapshot: unknown): Promis
 export async function clearCodexAccountUsageSnapshot(): Promise<void> {
   resetCodexAccountUsageCacheIfOwnerChanged();
   codexAccountUsageLoaded = true;
-  codexAppServerUsageSnapshot = null;
+  codexAppServerBuckets = {};
+  codexAppServerLatestBucketKey = null;
   codexWebAccountUsageSnapshot = null;
   broadcastCodexAccountUsage(null);
 

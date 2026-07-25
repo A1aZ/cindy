@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import {
+  CODEX_DEFAULT_LIMIT_BUCKET,
+  codexLimitBucketKey,
   mergeCodexAccountUsageSnapshot,
   splitCodexAccountUsagePayload,
 } from '@/hooks/useAccountUsage';
@@ -207,7 +209,7 @@ describe('mergeCodexAccountUsageSnapshot', () => {
     expect(preloadSource).toContain('onCodexAccountChanged: fanOutMakerUsageCodexAccount');
     expect(hookSource).toContain('api.onCodexAccountChanged');
     expect(hookSource).toContain('options: { clearOnNull?: boolean } = {}');
-    expect(hookSource).toContain('() => setSnapshot(selectCodexSlot(quotaSource))');
+    expect(hookSource).toContain('selectCodexSlot(quotaSource');
     // 按来源分槽: 两个数据源不得互相覆盖(main / renderer 双份实现同口径)
     expect(mainSource).toContain('function splitPersistedCodexAccountUsage(');
     expect(mainSource).toContain("incoming.source === 'openai-web'");
@@ -320,5 +322,56 @@ describe('module subscription install (behavior)', () => {
     } finally {
       (globalThis as { window?: unknown }).window = previousWindow;
     }
+  });
+});
+
+describe('codex limit bucket isolation', () => {
+  // 2026-07-25 用户实报: gpt-5.6-sol 会话的 chip 显示 codex_bengalfox /
+  // GPT-5.3-Codex-Spark 桶的「8天 剩余 100%」。app-server 每次只推一个桶,
+  // 不按 limitId 隔离就会串桶。
+  const SPARK_BUCKET = {
+    limitId: 'codex_bengalfox',
+    limitName: 'GPT-5.3-Codex-Spark',
+    primary: { usedPercent: 0, windowMinutes: 10080, resetsAt: 1785548762 },
+    source: 'codex-app-server',
+  };
+  const MAIN_BUCKET = {
+    limitId: 'codex',
+    primary: { usedPercent: 63, windowMinutes: 300, resetsAt: 1785440000 },
+    secondary: { usedPercent: 41, windowMinutes: 10080, resetsAt: 1785900000 },
+    source: 'codex-app-server',
+  };
+
+  it('derives a stable bucket key, defaulting when limitId is absent', () => {
+    expect(codexLimitBucketKey(SPARK_BUCKET)).toBe('codex_bengalfox');
+    expect(codexLimitBucketKey(MAIN_BUCKET)).toBe('codex');
+    expect(codexLimitBucketKey({ primary: { usedPercent: 3 } })).toBe(CODEX_DEFAULT_LIMIT_BUCKET);
+    expect(codexLimitBucketKey(null)).toBe(CODEX_DEFAULT_LIMIT_BUCKET);
+    expect(codexLimitBucketKey({ limitId: '' })).toBe(CODEX_DEFAULT_LIMIT_BUCKET);
+  });
+
+  it('keeps a combined payload bucket table separate from the top-level slot', () => {
+    const parts = splitCodexAccountUsagePayload({
+      ...MAIN_BUCKET,
+      appServerBuckets: {
+        codex: MAIN_BUCKET,
+        codex_bengalfox: SPARK_BUCKET,
+      },
+      webSnapshot: null,
+    } as never);
+    expect(parts.appServer?.limitId).toBe('codex');
+    expect(Object.keys(parts.appServerBuckets ?? {}).sort()).toEqual(['codex', 'codex_bengalfox']);
+    // Spark 桶原样保留在表里, 不与主桶合并成杂交体
+    expect(parts.appServerBuckets?.codex_bengalfox?.primary?.usedPercent).toBe(0);
+    expect(parts.appServerBuckets?.codex?.primary?.usedPercent).toBe(63);
+  });
+
+  it('drops malformed bucket entries instead of caching them', () => {
+    const parts = splitCodexAccountUsagePayload({
+      ...MAIN_BUCKET,
+      appServerBuckets: { codex: MAIN_BUCKET, broken: [], alsoBroken: 'nope' },
+      webSnapshot: null,
+    } as never);
+    expect(Object.keys(parts.appServerBuckets ?? {})).toEqual(['codex']);
   });
 });

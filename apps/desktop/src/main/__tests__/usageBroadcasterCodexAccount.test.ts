@@ -148,3 +148,92 @@ describe('codex account usage source slots', () => {
     expect(await broadcaster.readCodexAccountUsageSnapshot()).toBeNull();
   });
 });
+
+describe('codex app-server limit buckets', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mocks.queryOne.mockReset().mockResolvedValue(null);
+    mocks.exec.mockReset().mockResolvedValue(undefined);
+    mocks.getCurrentUserId.mockReturnValue('user-1');
+  });
+
+  // 2026-07-25 用户实报的真实污染行: app 槽被模型专属促销桶(Spark)占据,
+  // 于是 gpt-5.6-sol 会话的 chip 显示「8天 剩余 100%」。
+  const SPARK_BUCKET = {
+    limitId: 'codex_bengalfox',
+    limitName: 'GPT-5.3-Codex-Spark',
+    primary: { usedPercent: 0, windowDurationMins: 10_080, resetsAt: 1_785_548_762, windowMinutes: 10_080 },
+    secondary: null,
+    source: 'codex-app-server',
+  };
+
+  it('keeps different limit buckets isolated instead of overwriting each other', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    await broadcaster.recordCodexAccountUsageSnapshot(APP_SERVER_SNAPSHOT);
+    await broadcaster.recordCodexAccountUsageSnapshot(SPARK_BUCKET);
+
+    const payload = await broadcaster.readCodexAccountUsageSnapshot();
+    // 顶层 = 最近更新桶(兼容位), 但主桶数据必须完整活在桶表里
+    expect(payload?.limitId).toBe('codex_bengalfox');
+    expect(payload?.appServerBuckets?.codex?.primary?.usedPercent).toBe(82);
+    expect(payload?.appServerBuckets?.codex?.secondary?.usedPercent).toBe(55);
+    expect(payload?.appServerBuckets?.codex_bengalfox?.primary?.usedPercent).toBe(0);
+    // 跨桶不得合并成杂交体: Spark 桶没有 secondary, 不该继承主桶的
+    expect(payload?.appServerBuckets?.codex_bengalfox?.secondary ?? null).toBeNull();
+  });
+
+  it('merges repeated updates within the same bucket', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    await broadcaster.recordCodexAccountUsageSnapshot(APP_SERVER_SNAPSHOT);
+    await broadcaster.recordCodexAccountUsageSnapshot({
+      ...APP_SERVER_SNAPSHOT,
+      primary: { usedPercent: 91, windowMinutes: 300, resetsAt: 1_800_000_000 },
+    });
+
+    const payload = await broadcaster.readCodexAccountUsageSnapshot();
+    expect(Object.keys(payload?.appServerBuckets ?? {})).toEqual(['codex']);
+    expect(payload?.appServerBuckets?.codex?.primary?.usedPercent).toBe(91);
+  });
+
+  it('hydrates a pre-bucket persisted row into its matching bucket', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    // 分槽版(有 webSnapshot 键、无 appServerBuckets)写下的行 —— 顶层是 Spark 桶
+    mocks.queryOne.mockResolvedValue({
+      snapshot: JSON.stringify({ ...SPARK_BUCKET, webSnapshot: null }),
+    });
+
+    const payload = await broadcaster.readCodexAccountUsageSnapshot();
+    expect(payload?.appServerBuckets?.codex_bengalfox?.limitName).toBe('GPT-5.3-Codex-Spark');
+    // 主桶此时未知: 表里只有 Spark 桶, 主桶会在下一个 turn 事件到达时建立
+    expect(Object.keys(payload?.appServerBuckets ?? {})).toEqual(['codex_bengalfox']);
+  });
+
+  it('round-trips the bucket table through persistence', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    await broadcaster.recordCodexAccountUsageSnapshot(APP_SERVER_SNAPSHOT);
+    await broadcaster.recordCodexAccountUsageSnapshot(SPARK_BUCKET);
+    const lastExecParams = (mocks.exec.mock.calls.at(-1) as unknown[] | undefined)?.[1] as unknown[];
+    const persistedJson = lastExecParams[1] as string;
+
+    vi.resetModules();
+    const rehydrated = await import('../usageBroadcaster');
+    mocks.queryOne.mockResolvedValue({ snapshot: persistedJson });
+    const payload = await rehydrated.readCodexAccountUsageSnapshot();
+    expect(payload?.appServerBuckets?.codex?.primary?.usedPercent).toBe(82);
+    expect(payload?.appServerBuckets?.codex_bengalfox?.primary?.usedPercent).toBe(0);
+  });
+
+  it('drops malformed bucket entries on hydration', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    mocks.queryOne.mockResolvedValue({
+      snapshot: JSON.stringify({
+        ...APP_SERVER_SNAPSHOT,
+        webSnapshot: null,
+        appServerBuckets: { codex: APP_SERVER_SNAPSHOT, broken: [], alsoBroken: 'nope' },
+      }),
+    });
+
+    const payload = await broadcaster.readCodexAccountUsageSnapshot();
+    expect(Object.keys(payload?.appServerBuckets ?? {})).toEqual(['codex']);
+  });
+});

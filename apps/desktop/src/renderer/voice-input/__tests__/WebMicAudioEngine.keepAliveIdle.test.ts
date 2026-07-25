@@ -184,6 +184,33 @@ describe('keep-alive microphone idle window', () => {
     expect(track.stopped).toBe(true);
   });
 
+  it('does not fall back to a cold stream when startup is cancelled by a power release', async () => {
+    let resolveStream: (value: unknown) => void = () => undefined;
+    getUserMedia.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveStream = resolve;
+    }));
+
+    const engine = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: true,
+      onInterrupted: vi.fn(),
+    });
+    const starting = engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(powerCallback).toBeDefined();
+
+    powerCallback?.({ reason: 'screen_locked' });
+    await vi.advanceTimersByTimeAsync(0);
+    resolveStream({ getAudioTracks: () => [track], getTracks: () => [track] });
+
+    // The release must surface as cancellation. Treating it as "keep-alive
+    // unavailable" would fall through to the cold getUserMedia() path and open
+    // a second stream *after* the lock event — with nothing left to close it.
+    await expect(starting).rejects.toThrow(/disposed/i);
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(track.stopped).toBe(true);
+  });
+
   it('keeps an in-flight recording when the microphone config changes', async () => {
     const engine = new mod.WebMicAudioEngine({
       workletUrl: WORKLET_URL,

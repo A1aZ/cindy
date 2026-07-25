@@ -641,6 +641,21 @@ function clearKeepAliveIdleDisposeTimer(): void {
 }
 
 /**
+ * Monotonic clock for the idle deadline.
+ *
+ * The deadline is an absolute timestamp that prewarm keeps re-arming the timer
+ * against, so a wall-clock jump backwards (NTP correction, manual change, DST
+ * tooling) would silently stretch the remaining window and hold the microphone
+ * past the 30 minutes the settings copy promises. performance.now() is immune
+ * to that; Date.now() is only a fallback for environments without it.
+ */
+function keepAliveMonotonicNow(): number {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now();
+}
+
+/**
  * Arm the bounded idle window that releases the warm microphone.
  *
  * `refresh` separates real dictation from bookkeeping. The user-facing copy
@@ -661,7 +676,7 @@ function scheduleKeepAliveIdleDispose(
   // session's countdown and leave a deadline that outlives its owner.
   if (keepAliveSession !== session) return;
   clearKeepAliveIdleDisposeTimer();
-  const now = Date.now();
+  const now = keepAliveMonotonicNow();
   if (refresh || keepAliveIdleDeadlineAt === undefined || keepAliveIdleDeadlineAt <= now) {
     keepAliveIdleDeadlineAt = now + KEEP_ALIVE_MIC_IDLE_TTL_MS;
   }
@@ -744,6 +759,12 @@ export class WebMicAudioEngine {
         return;
       } catch (error) {
         if (isSelectedMicrophoneUnavailableError(error)) throw error;
+        // Startup was cancelled by a power release, not by a broken keep-alive
+        // path. Falling through to the cold getUserMedia() below would open a
+        // brand-new stream after the suspend/lock event has already passed —
+        // nothing would be left to close it, so the mic would stay live through
+        // the lock. Surface the cancellation instead.
+        if (isKeepAliveSessionDisposedError(error)) throw error;
         this.onStateChange?.('keep_alive_unavailable', {
           error: error instanceof Error ? error.message : String(error),
         });

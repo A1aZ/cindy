@@ -1,0 +1,282 @@
+#!/usr/bin/env node
+// DCO（Developer Certificate of Origin）门禁：校验一段 commit 范围里每个非豁免 commit
+// 都带有与其 author（或 committer）一致的 Signed-off-by trailer。DCO 全文见仓库根
+// 的 DCO 文件，贡献者侧说明见 CONTRIBUTING.md「贡献的许可与署名（DCO）」。
+//
+// 只检查 PR 引入的新 commit（merge-base..head），不追溯仓库历史，因此对 DCO 生效前
+// 的既有提交无影响。只读 git 元数据，不访问网络、不读任何私有配置或凭证。
+//
+// CI 用法（由 .github/workflows/dco.yml 调用）：
+//   GITHUB_EVENT_PATH  pull_request 事件 payload，取 base.sha 与 head.sha
+// 本地用法：
+//   pnpm check:dco                                  校验 origin/main..HEAD
+//   node scripts/check-dco.mjs --base <ref> --head <ref>
+
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+
+import { isSignOffHookInstalled } from './install-dco-hook.mjs';
+
+// git log 的字段/记录分隔符：用 ASCII 控制字符，避免与 commit message 内容碰撞。
+const FIELD_SEP = '\u001f';
+const RECORD_SEP = '\u001e';
+const LOG_FORMAT = ['%H', '%P', '%an', '%ae', '%cn', '%ce', '%B'].join(FIELD_SEP) + RECORD_SEP;
+
+// `git commit -s` 生成的行。逐行匹配而不强求在 message 末尾：trailer 之后常见还有
+// Co-authored-by 等其他 trailer。
+const SIGN_OFF_LINE = /^\s*Signed-off-by:\s*(.*?)\s*<([^<>]+)>\s*$/i;
+
+// 机器人与 GitHub Web UI 代签的提交无法代替本人作出 DCO 声明，因此豁免而非放行：
+// dependabot 等 bot 用 `<name>[bot]@users.noreply.github.com`，Web UI 用 web-flow。
+const BOT_EMAILS = new Set(['noreply@github.com']);
+const BOT_EMAIL_SUFFIX = '[bot]@users.noreply.github.com';
+
+const DEFAULT_BASE_CANDIDATES = ['origin/main', 'main'];
+
+const git = (args, options = {}) =>
+  execFileSync('git', args, { encoding: 'utf8', ...options }).trim();
+
+export function normalizeEmail(email) {
+  return String(email ?? '').trim().toLowerCase();
+}
+
+export function normalizeName(name) {
+  return String(name ?? '').trim().toLowerCase();
+}
+
+/**
+ * DCO App 用 validator.isEmail 拒掉不像邮箱的地址（默认要求 TLD，所以 git 在未配
+ * user.email 时自动生成的 `user@hostname` 会被拒）。这里做形状近似，避免本地放行、
+ * PR 上却被 App 拦下。
+ */
+export function looksLikeEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email ?? '').trim());
+}
+
+/** 提取 message 里所有 Signed-off-by 行。 */
+export function parseSignOffs(message) {
+  const signOffs = [];
+  for (const line of String(message ?? '').split(/\r?\n/)) {
+    const match = SIGN_OFF_LINE.exec(line);
+    if (match) signOffs.push({ name: match[1].trim(), email: match[2].trim() });
+  }
+  return signOffs;
+}
+
+export function isBotIdentity(name, email) {
+  const normalizedEmail = normalizeEmail(email);
+  return (
+    String(name ?? '').trim().endsWith('[bot]') ||
+    BOT_EMAILS.has(normalizedEmail) ||
+    normalizedEmail.endsWith(BOT_EMAIL_SUFFIX)
+  );
+}
+
+/** 返回豁免原因，不豁免则返回 null。 */
+export function exemptReason(commit) {
+  if (commit.parents.length > 1) return 'merge commit';
+  if (isBotIdentity(commit.authorName, commit.authorEmail)) {
+    return `bot 提交（${commit.authorName || commit.authorEmail}）`;
+  }
+  return null;
+}
+
+/**
+ * 返回错误列表；空列表即通过。判定刻意对齐 DCO App（dcoapp/app 的 lib/dco.js）：
+ * 签名的 name 必须落在 {author.name, committer.name}、email 必须落在
+ * {author.email, committer.email}，两者都要满足。**只查 email 会让本脚本比 PR 上的
+ * 门禁宽松，出现「本地绿、CI 红」**——那是最糟的偏差方向，所以 name 也一起查。
+ *
+ * 本脚本不识别 remediation commit（App 侧由 .github/dco.yml 开启）：那是刻意的保守，
+ * 本地通过一定意味着 App 通过，反之不然。面向贡献者的文案统一用英文。
+ */
+export function validateCommit(commit) {
+  const signOffs = parseSignOffs(commit.message);
+  if (signOffs.length === 0) {
+    return ['No Signed-off-by trailer.'];
+  }
+
+  const email = commit.authorEmail || commit.committerEmail;
+  if (!looksLikeEmail(email)) {
+    return [`${email} is not a valid email address.`];
+  }
+
+  const names = new Set([commit.authorName, commit.committerName].map(normalizeName));
+  const emails = new Set([commit.authorEmail, commit.committerEmail].map(normalizeEmail));
+  if (
+    signOffs.some(
+      (signOff) => names.has(normalizeName(signOff.name)) && emails.has(normalizeEmail(signOff.email))
+    )
+  ) {
+    return [];
+  }
+
+  const got = signOffs.map((signOff) => `"${signOff.name} <${signOff.email}>"`).join(', ');
+  return [
+    `Expected a sign-off from "${commit.authorName} <${commit.authorEmail}>", got ${got}. ` +
+      'Both the name and the address have to match the commit author or committer.',
+  ];
+}
+
+export function validateCommits(commits) {
+  const failures = [];
+  const exempted = [];
+  let checked = 0;
+
+  for (const commit of commits) {
+    const reason = exemptReason(commit);
+    if (reason) {
+      exempted.push({ commit, reason });
+      continue;
+    }
+    checked += 1;
+    const errors = validateCommit(commit);
+    if (errors.length > 0) failures.push({ commit, errors });
+  }
+
+  return { failures, exempted, checked };
+}
+
+export function parseGitLog(stdout) {
+  return String(stdout)
+    .split(RECORD_SEP)
+    .map((record) => record.replace(/^\r?\n/, ''))
+    .filter((record) => record.trim() !== '')
+    .map((record) => {
+      const [sha, parents, authorName, authorEmail, committerName, committerEmail, message] =
+        record.split(FIELD_SEP);
+      return {
+        sha: (sha ?? '').trim(),
+        parents: (parents ?? '').trim() ? parents.trim().split(/\s+/) : [],
+        authorName: authorName ?? '',
+        authorEmail: authorEmail ?? '',
+        committerName: committerName ?? '',
+        committerEmail: committerEmail ?? '',
+        message: message ?? '',
+      };
+    });
+}
+
+export function shortSha(sha) {
+  return String(sha ?? '').slice(0, 8);
+}
+
+export function subjectOf(commit) {
+  return String(commit.message ?? '').split(/\r?\n/, 1)[0].trim();
+}
+
+function readArg(name) {
+  const index = process.argv.indexOf(name);
+  return index !== -1 ? process.argv[index + 1] : undefined;
+}
+
+function revParse(ref) {
+  try {
+    return git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch {
+    return null;
+  }
+}
+
+/** 解析待校验范围。返回的 start 是排除端点（start..head）。 */
+function resolveRange() {
+  const explicitBase = readArg('--base');
+  const explicitHead = readArg('--head');
+  const eventPath = process.env.GITHUB_EVENT_PATH;
+
+  let base = explicitBase;
+  let head = explicitHead ?? 'HEAD';
+
+  if (!base && eventPath) {
+    const event = JSON.parse(readFileSync(eventPath, 'utf8'));
+    const pr = event.pull_request;
+    if (!pr) throw new Error('Event payload has no pull_request; check the workflow trigger.');
+    base = pr.base?.sha;
+    head = explicitHead ?? pr.head?.sha ?? 'HEAD';
+    if (!base) throw new Error('Event payload is missing pull_request.base.sha.');
+  }
+
+  if (!base) {
+    base = DEFAULT_BASE_CANDIDATES.find((candidate) => revParse(candidate));
+    if (!base) {
+      throw new Error(
+        `No default base ref found (${DEFAULT_BASE_CANDIDATES.join(' / ')}); pass --base <ref>.`
+      );
+    }
+  }
+
+  const baseSha = revParse(base);
+  if (!baseSha) throw new Error(`Cannot resolve base ref: ${base} (fetch it first if missing).`);
+  const headSha = revParse(head);
+  if (!headSha) throw new Error(`Cannot resolve head ref: ${head}.`);
+
+  // 用 merge-base 而不是 base 本身：base 分支在 PR 开着期间会前进，直接用
+  // base.sha..head 会把 base 侧的他人提交也算进来，造成误报。
+  let start = baseSha;
+  try {
+    start = git(['merge-base', baseSha, headSha]);
+  } catch {
+    // 没有共同祖先（例如孤立分支）时退回 base 本身。
+  }
+
+  return { start, head: headSha, baseRef: base };
+}
+
+function reportFailures({ failures, start }) {
+  const plural = failures.length === 1 ? 'commit' : 'commits';
+  console.error(`DCO check failed: ${failures.length} ${plural} without a valid Signed-off-by.\n`);
+  for (const { commit, errors } of failures) {
+    console.error(`- ${shortSha(commit.sha)} ${subjectOf(commit)}`);
+    for (const error of errors) console.error(`  ${error}`);
+  }
+  console.error('\nHow to fix, on your pull request branch:');
+  console.error('  most recent commit only:  git commit --amend -s --no-edit');
+  console.error(`  several commits:          git rebase --signoff ${shortSha(start)}`);
+  console.error('  then update the PR:       git push --force-with-lease');
+  console.error('\nTo stop forgetting, commit with `git commit -s`, or install the hook shipped');
+  console.error('with this repository once: `pnpm dco:install-hook` (.githooks/prepare-commit-msg).');
+  console.error('The DCO file at the repository root states what the sign-off certifies;');
+  console.error('CONTRIBUTING.en.md explains the requirement in full.');
+}
+
+function main() {
+  const { start, head, baseRef } = resolveRange();
+  const stdout = execFileSync('git', ['log', `--format=${LOG_FORMAT}`, `${start}..${head}`], {
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  const commits = parseGitLog(stdout);
+
+  if (commits.length === 0) {
+    console.log(`No new commits in ${shortSha(start)}..${shortSha(head)}; nothing to check.`);
+    return;
+  }
+
+  const { failures, exempted, checked } = validateCommits(commits);
+  if (failures.length > 0) {
+    reportFailures({ failures, start });
+    process.exit(1);
+  }
+
+  const exemptNote = exempted.length > 0 ? `, ${exempted.length} exempt (merge/bot)` : '';
+  console.log(
+    `DCO check passed: ${checked} ${checked === 1 ? 'commit' : 'commits'} signed off${exemptNote} ` +
+      `— range ${shortSha(start)}..${shortSha(head)} (base ${baseRef}).`
+  );
+
+  if (!process.env.GITHUB_EVENT_PATH && !isSignOffHookInstalled()) {
+    console.log('Tip: `pnpm dco:install-hook` signs off local commits automatically.');
+  }
+}
+
+// 仅作为入口执行时运行；被 import 时只导出纯函数，便于单测。
+const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isDirectRun) {
+  try {
+    main();
+  } catch (error) {
+    console.error(String(error?.message ?? error));
+    process.exit(1);
+  }
+}

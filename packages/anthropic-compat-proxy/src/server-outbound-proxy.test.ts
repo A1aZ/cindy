@@ -110,15 +110,18 @@ describe('anthropic-compat-proxy outbound proxy wiring', () => {
   });
 
   it('falls back to direct connection when the resolver throws or returns unsupported urls', async () => {
+    // `.invalid` 的系统 DNS 失败在 Windows 上可能等待数十秒；0.0.0.0 不是
+    // loopback bypass 目标，但连接未监听高端口会立即失败，稳定验证 fail-open。
+    const failOpenUpstream = 'http://0.0.0.0:65535';
     const warns: string[] = [];
     proxy = await createAnthropicCompatProxy({
-      upstream: 'http://upstream.invalid:8080',
+      upstream: failOpenUpstream,
       transformRequest: [],
       resolveOutboundProxy: () => { throw new Error('resolver boom'); },
       logger: { warn: (msg) => { warns.push(msg); } },
     });
 
-    // 直连假域必然失败,但必须是 502(fail-open 走到了直连),而非 resolver 异常炸链路。
+    // 直连必然失败,但必须是 502(fail-open 走到了直连),而非 resolver 异常炸链路。
     const res = await fetch(`${proxy.url}/v1/messages`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -131,7 +134,7 @@ describe('anthropic-compat-proxy outbound proxy wiring', () => {
 
     const warns2: string[] = [];
     proxy = await createAnthropicCompatProxy({
-      upstream: 'http://upstream.invalid:8080',
+      upstream: failOpenUpstream,
       transformRequest: [],
       resolveOutboundProxy: () => 'socks5://127.0.0.1:1080',
       logger: { warn: (msg) => { warns2.push(msg); } },

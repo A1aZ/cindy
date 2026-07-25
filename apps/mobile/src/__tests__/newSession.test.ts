@@ -736,6 +736,7 @@ describe('new session composer surface', () => {
 
   it('uses the shared mobile composer row rather than a separate input implementation', () => {
     const newSource = readFileSync(resolve(process.cwd(), 'app/sessions/new.tsx'), 'utf8');
+    const normalizedNewSource = newSource.replace(/\r\n/g, '\n');
     const sessionSource = readFileSync(resolve(process.cwd(), 'app/sessions/[sessionId].tsx'), 'utf8');
     const sharedSource = readFileSync(resolve(process.cwd(), 'src/session/MobileComposerInputRow.tsx'), 'utf8');
     const newComposerStart = newSource.indexOf('<MobileComposerInputRow');
@@ -871,7 +872,7 @@ describe('new session composer surface', () => {
     );
     expect(newSource).toContain('getPermission: getRecordingPermissionsAsync');
     expect(newSource).toContain("isAppActive: () => AppState.currentState === 'active'");
-    expect(newSource).toContain(
+    expect(normalizedNewSource).toContain(
       "voicePermissionRequestSeqRef.current !== permissionRequestSeq\n"
       + "        || AppState.currentState !== 'active'\n"
       + "      ) return;\n"

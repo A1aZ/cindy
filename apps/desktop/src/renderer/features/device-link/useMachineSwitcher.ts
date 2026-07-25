@@ -24,7 +24,10 @@
 import { useCallback, useMemo, useSyncExternalStore } from 'react';
 import { useRemoteDevices, type RemoteDeviceSummary } from './remoteProjectsStore';
 import { revokedDevicesStore } from './revokedDevicesStore';
-import { useDeviceLinkDeviceList } from './useDeviceLinkDeviceList';
+import {
+  useDeviceLinkDeviceList,
+  useDeviceLinkDeviceListSettled,
+} from './useDeviceLinkDeviceList';
 import { buildSwitcherDevices, selectableDeviceIds, type SwitcherDevice } from './switcherDevices';
 import {
   MACHINE_ALL,
@@ -44,7 +47,7 @@ export interface SelectedMachineConnectingInput {
 
 export interface RemoteSessionBootstrapLoadingInput {
   selectedMachineId: MachineSelection;
-  devicesLoaded: boolean;
+  deviceListSettled: boolean;
   devices: readonly SwitcherDevice[];
   syncedDevices: readonly RemoteDeviceSummary[];
 }
@@ -56,7 +59,7 @@ export interface RemoteSessionBootstrapLoadingInput {
  */
 export function shouldWaitForRemoteSessionBootstrap({
   selectedMachineId,
-  devicesLoaded,
+  deviceListSettled,
   devices,
   syncedDevices,
 }: RemoteSessionBootstrapLoadingInput): boolean {
@@ -65,7 +68,7 @@ export function shouldWaitForRemoteSessionBootstrap({
       ? null
       : new Set(selectedMachineId.filter((id) => id !== MACHINE_LOCAL));
   if (selectedRemoteIds?.size === 0) return false;
-  if (!devicesLoaded) return true;
+  if (!deviceListSettled) return true;
 
   const syncedIds = new Set(syncedDevices.map((device) => device.deviceId));
   return devices.some(
@@ -153,18 +156,18 @@ export function useSelectedMachineConnecting(): boolean {
 export function useRemoteSessionBootstrapLoading(
   selectedMachineId: MachineSelection,
 ): boolean {
-  const fullList = useDeviceLinkDeviceList();
+  const deviceListSettled = useDeviceLinkDeviceListSettled();
   const devices = useSwitcherDevices();
   const synced = useRemoteDevices();
   return useMemo(
     () =>
       shouldWaitForRemoteSessionBootstrap({
         selectedMachineId,
-        devicesLoaded: fullList !== null,
+        deviceListSettled,
         devices,
         syncedDevices: synced,
       }),
-    [selectedMachineId, fullList, devices, synced],
+    [selectedMachineId, deviceListSettled, devices, synced],
   );
 }
 

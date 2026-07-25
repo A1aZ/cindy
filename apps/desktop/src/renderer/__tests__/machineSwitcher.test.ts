@@ -390,7 +390,7 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
     expect(
       shouldWaitForRemoteSessionBootstrap({
         selectedMachineId: MACHINE_ALL,
-        devicesLoaded: false,
+        deviceListSettled: false,
         devices: [],
         syncedDevices: [],
       }),
@@ -398,7 +398,7 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
     expect(
       shouldWaitForRemoteSessionBootstrap({
         selectedMachineId: MACHINE_ALL,
-        devicesLoaded: true,
+        deviceListSettled: true,
         devices: connecting,
         syncedDevices: [],
       }),
@@ -409,7 +409,7 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
     expect(
       shouldWaitForRemoteSessionBootstrap({
         selectedMachineId: MACHINE_ALL,
-        devicesLoaded: true,
+        deviceListSettled: true,
         devices: connecting,
         syncedDevices: [
           { deviceId: 'dev-a', deviceName: 'Mac A', sessionCount: 0, connected: false },
@@ -418,11 +418,22 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
     ).toBe(false);
   });
 
+  it('设备清单请求失败但已结算 → 不把未知设备列表当成永久加载', () => {
+    expect(
+      shouldWaitForRemoteSessionBootstrap({
+        selectedMachineId: MACHINE_ALL,
+        deviceListSettled: true,
+        devices: [],
+        syncedDevices: [],
+      }),
+    ).toBe(false);
+  });
+
   it('仅本机不等待远端；混合选择只等待作用域内尚未同步的远端设备', () => {
     expect(
       shouldWaitForRemoteSessionBootstrap({
         selectedMachineId: [MACHINE_LOCAL],
-        devicesLoaded: false,
+        deviceListSettled: false,
         devices: [],
         syncedDevices: [],
       }),
@@ -430,7 +441,7 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
     expect(
       shouldWaitForRemoteSessionBootstrap({
         selectedMachineId: [MACHINE_LOCAL, 'dev-b'],
-        devicesLoaded: true,
+        deviceListSettled: true,
         devices: connecting,
         syncedDevices: [],
       }),
@@ -438,7 +449,7 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
     expect(
       shouldWaitForRemoteSessionBootstrap({
         selectedMachineId: [MACHINE_LOCAL, 'dev-a'],
-        devicesLoaded: true,
+        deviceListSettled: true,
         devices: connecting,
         syncedDevices: [],
       }),
@@ -449,7 +460,7 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
     expect(
       shouldWaitForRemoteSessionBootstrap({
         selectedMachineId: MACHINE_ALL,
-        devicesLoaded: true,
+        deviceListSettled: true,
         devices: [{ deviceId: 'dev-a', name: 'Mac A', status: 'rejected' }],
         syncedDevices: [],
       }),
@@ -457,7 +468,7 @@ describe('shouldWaitForRemoteSessionBootstrap', () => {
     expect(
       shouldWaitForRemoteSessionBootstrap({
         selectedMachineId: MACHINE_ALL,
-        devicesLoaded: true,
+        deviceListSettled: true,
         devices: connecting,
         syncedDevices: [
           { deviceId: 'dev-a', deviceName: 'Mac A', sessionCount: 2, connected: false },

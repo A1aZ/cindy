@@ -97,6 +97,14 @@ let lastCodexAccountUsage: CodexAccountUsageSlots = {
  */
 let lastCodexAppServerBucketKey: string | null = null;
 
+/**
+ * 桶表代号 —— app-server 桶表每次被替换时 +1, 供陈旧重选定时器判断「该重算下
+ * 一个到期时刻了」。不能拿 snapshot 当这个信号: 变化的桶不是当前选中桶时
+ * snapshot 不变(漏重算), 反过来 snapshot 变了也不必然意味着桶表变了(白重排
+ * 定时器, review 反馈)。
+ */
+let codexBucketTableGeneration = 0;
+
 /** 稀疏更新的落桶键: 带 limitId 用它自己的桶; 缺失则并入最近观察到的桶。 */
 function resolveIncrementalBucketKey(incoming: RateLimitSnapshot): string {
   if (incoming.limitId) return codexLimitBucketKey(incoming);
@@ -305,6 +313,7 @@ function applyCodexAccountUsageSnapshot(
     if (options.clearOnNull === false) return;
     lastCodexAccountUsage = { appServer: null, appServerBuckets: emptyBucketTable(), web: null };
     lastCodexAppServerBucketKey = null;
+    codexBucketTableGeneration += 1;
     onApplied();
     return;
   }
@@ -345,6 +354,7 @@ function applyCodexAccountUsageSnapshot(
             )
           : emptyBucketTable(),
     };
+    codexBucketTableGeneration += 1;
   }
   if ('web' in parts) {
     lastCodexAccountUsage = {
@@ -404,8 +414,12 @@ export function useAccountUsage(
   // push);回调经 ref 读最新模型。模型变化时由下方 reselect effect 立即重选。
   const modelIdRef = useRef(modelId);
   modelIdRef.current = modelId;
+  // 桶表代号进 state 才能当定时器依赖; 桶表没变时 setState 同值被 React bail
+  // out, 不会多一次渲染。
+  const [bucketGeneration, setBucketGeneration] = useState(codexBucketTableGeneration);
   const reselect = useCallback(() => {
     setSnapshot(selectCodexSlot(quotaSource, modelIdRef.current));
+    setBucketGeneration(codexBucketTableGeneration);
   }, [quotaSource]);
 
   // Codex rate limits 是账号级数据, 不是 session 级数据。切回 Codex session /
@@ -429,7 +443,9 @@ export function useAccountUsage(
       setStaleTick((tick) => tick + 1);
     }, delay);
     return () => window.clearTimeout(timer);
-  }, [vendorKey, quotaSource, reselect, snapshot, staleTick]);
+    // bucketGeneration: 桶表变了要重算到期时刻; staleTick: 本次到点后要接着排
+    // 下一个桶的到期时刻(纯时间驱动, 期间没有新 payload)。
+  }, [vendorKey, quotaSource, reselect, bucketGeneration, staleTick]);
 
   useEffect(() => {
     if (vendorKey !== 'codex') return;

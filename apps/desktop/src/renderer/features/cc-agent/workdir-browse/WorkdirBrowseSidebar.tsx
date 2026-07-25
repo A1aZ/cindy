@@ -224,9 +224,10 @@ export function WorkdirBrowseSidebar({
   // 项目级文件名扁平列表(走 ripgrep --files honor .gitignore),给"筛选文件"用。
   // 模块级 cache 跨 doc 模式 / RSB plugin 共享同一份索引;tree refresh 时同步 invalidate。
   // enabled 惰性拉取:query 为空(FilterResultList 不显示)时不扫描 —— 切会话
-  // 不再为用不上的索引付 rg + IPC + 建索引的主线程成本。
+  // 不再为用不上的索引付 rg + IPC + 建索引的主线程成本。trim 与 filterFiles
+  // 的匹配语义对齐:纯空格 query 结果必为空,不值得为它扫描。
   const projectFiles = useProjectFileList(workdir, remoteHostId, deviceId, {
-    enabled: filterQuery !== '',
+    enabled: filterQuery.trim() !== '',
   });
   const filteredFiles = useMemo(
     () => filterFiles(filterQuery, projectFiles.files),

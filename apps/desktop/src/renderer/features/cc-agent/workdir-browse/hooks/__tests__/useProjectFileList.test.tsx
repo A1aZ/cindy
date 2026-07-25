@@ -137,4 +137,61 @@ describe('useProjectFileList', () => {
     });
     await waitFor(() => expect(mocks.listAllFiles).toHaveBeenCalledTimes(2));
   });
+
+  it('error token(如 RG_UNAVAILABLE)随缓存保留:enabled 翻转 + 缓存命中后不丢', async () => {
+    mocks.listAllFiles.mockResolvedValue({ files: [], truncated: false, elapsedMs: 5, error: 'RG_UNAVAILABLE' });
+    const { result, rerender } = renderList({ workdir: '/remote', enabled: true });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.error).toBe('RG_UNAVAILABLE');
+
+    // 清空筛选(enabled=false)再输入(enabled=true,缓存 30s 内命中):error 必须
+    // 还原,否则空 files + null error 会把"未索引"占位显示成"无匹配"。
+    rerender({ workdir: '/remote', enabled: false });
+    expect(result.current.error).toBe('RG_UNAVAILABLE');
+    rerender({ workdir: '/remote', enabled: true });
+    expect(mocks.listAllFiles).toHaveBeenCalledTimes(1); // 缓存命中,无新 IPC
+    expect(result.current.error).toBe('RG_UNAVAILABLE');
+    expect(result.current.files).toEqual([]);
+  });
+
+  it('disabled refresh 清空 state:重新 enabled 拉取期间不闪 stale 结果', async () => {
+    const { result, rerender } = renderList({ workdir: '/repo', enabled: true });
+    await waitFor(() => expect(result.current.files.length).toBe(2));
+
+    rerender({ workdir: '/repo', enabled: false });
+    act(() => {
+      result.current.refresh();
+    });
+    // FilterResultList 只在 files 为空时显示"正在索引"占位,refresh 后必须清空。
+    expect(result.current.files).toEqual([]);
+
+    rerender({ workdir: '/repo', enabled: true });
+    await waitFor(() => expect(mocks.listAllFiles).toHaveBeenCalledTimes(2));
+  });
+
+  it('refresh 期间完成的在途请求不得把旧快照写回缓存', async () => {
+    let resolveFetch!: (v: { files: string[]; truncated: boolean; elapsedMs: number }) => void;
+    mocks.listAllFiles.mockImplementationOnce(
+      () => new Promise((done) => { resolveFetch = done; }),
+    );
+    const { result, rerender } = renderList({ workdir: '/repo', enabled: true });
+    expect(mocks.listAllFiles).toHaveBeenCalledTimes(1);
+
+    // 拉取尚未完成时用户清空筛选并点了树刷新(失效缓存)。
+    rerender({ workdir: '/repo', enabled: false });
+    act(() => {
+      result.current.refresh();
+    });
+    // 在途请求此刻才完成:结果已因失效代数不匹配而不进缓存。
+    await act(async () => {
+      resolveFetch(listResult(['stale.ts']));
+      await Promise.resolve();
+    });
+
+    // 重新 enabled:缓存里没有可复用的快照 → 必须重新拉,而不是复用 stale.ts。
+    mocks.listAllFiles.mockResolvedValue(listResult(['fresh.ts']));
+    rerender({ workdir: '/repo', enabled: true });
+    await waitFor(() => expect(result.current.files).toEqual(['fresh.ts']));
+    expect(mocks.listAllFiles).toHaveBeenCalledTimes(2);
+  });
 });

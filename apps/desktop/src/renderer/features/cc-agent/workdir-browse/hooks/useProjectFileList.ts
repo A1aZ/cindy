@@ -50,11 +50,25 @@ interface Snapshot {
   files: readonly string[];
   truncated: boolean;
   fetchedAt: number;
+  /**
+   * 上次拉取的 error token(如 'RG_UNAVAILABLE':远端无 rg,files 为空但拉取
+   * "成功")。必须随快照缓存并在命中时还原 —— 否则空 files + null error 会让
+   * FilterResultList 的"未索引/失败"占位退化成误导性的"无匹配"。
+   */
+  error: string | null;
 }
 
 // Module-level singleton cache —— 同 workdir 跨 component 实例 / 跨 RSB tab 共享。
 const cache = new Map<string, Snapshot>();
 const inflight = new Map<string, Promise<void>>();
+// 失效代数:refresh 失效缓存时递增。fetchOnce 只在"启动以来没有新的失效"时才
+// 把结果写回缓存 —— 防止 refresh 删掉缓存后,在途请求完成又把旧快照写回,
+// 让下次筛选把刷新前的数据当成新鲜缓存。
+const invalidationGen = new Map<string, number>();
+
+function bumpInvalidation(cacheKey: string): void {
+  invalidationGen.set(cacheKey, (invalidationGen.get(cacheKey) ?? 0) + 1);
+}
 
 function isStale(snap: Snapshot, now: number): boolean {
   const ttl = snap.truncated ? TRUNCATED_CACHE_TTL_MS : CACHE_TTL_MS;
@@ -71,18 +85,23 @@ async function fetchOnce(
   if (!ipc) {
     // 未挂 preload / SSR — 直接给空数组兜底。
     return {
-      snap: { files: [], truncated: false, fetchedAt: Date.now() },
+      snap: { files: [], truncated: false, fetchedAt: Date.now(), error: 'fileBrowser IPC not available' },
       error: 'fileBrowser IPC not available',
     };
   }
+  const genAtStart = invalidationGen.get(cacheKey) ?? 0;
   try {
     const res = await fileBrowserApiFor(deviceId).listAllFiles({ workdir, remoteHostId });
     const snap: Snapshot = {
       files: res.files,
       truncated: res.truncated,
       fetchedAt: Date.now(),
+      error: res.error ?? null,
     };
-    cache.set(cacheKey, snap);
+    // 启动以来发生过 refresh 失效 → 这份结果已过期,只用于本次展示,不进缓存。
+    if ((invalidationGen.get(cacheKey) ?? 0) === genAtStart) {
+      cache.set(cacheKey, snap);
+    }
     return { snap, error: res.error ?? null };
   } catch (err) {
     log.error('listAllFiles failed', { workdir, err });
@@ -90,6 +109,7 @@ async function fetchOnce(
       files: cache.get(cacheKey)?.files ?? [],
       truncated: false,
       fetchedAt: Date.now(),
+      error: String(err),
     };
     return { snap, error: String(err) };
   }
@@ -130,7 +150,7 @@ export function useProjectFileList(
     files: initial?.files ?? [],
     truncated: initial?.truncated ?? false,
     isLoading: enabled && !initial,
-    error: null,
+    error: initial?.error ?? null,
   }));
   // 用 ref 防止 useEffect deps 漂移导致重复 fetch(workdir 不变情况下)。
   const lastFetchedWorkdirRef = useRef<string | null>(null);
@@ -167,7 +187,7 @@ export function useProjectFileList(
           files: fresh?.files ?? [],
           truncated: fresh?.truncated ?? false,
           isLoading: false,
-          error: null,
+          error: fresh?.error ?? null,
         });
       });
     }
@@ -185,7 +205,7 @@ export function useProjectFileList(
         files: snap?.files ?? [],
         truncated: snap?.truncated ?? false,
         isLoading: false,
-        error: null,
+        error: snap?.error ?? null,
       });
       // 清防重 ref:翻回 enabled 后 stale 缓存才能触发重拉。
       if (lastFetchedWorkdirRef.current === cacheKey) lastFetchedWorkdirRef.current = null;
@@ -194,12 +214,13 @@ export function useProjectFileList(
     const snap = cache.get(cacheKey);
     const now = Date.now();
     if (snap && !isStale(snap, now)) {
-      // cache hit & fresh:同步上 snapshot,跳过 IPC。
+      // cache hit & fresh:同步上 snapshot(含上次的 error token —— 空 files +
+      // 丢失 error 会把"未索引"占位误显示成"无匹配"),跳过 IPC。
       setState({
         files: snap.files,
         truncated: snap.truncated,
         isLoading: false,
-        error: null,
+        error: snap.error,
       });
       lastFetchedWorkdirRef.current = cacheKey;
       return;
@@ -212,8 +233,14 @@ export function useProjectFileList(
   const refresh = useCallback(() => {
     if (!workdir) return;
     cache.delete(cacheKey);
+    // 同时递增失效代数:refresh 时可能仍有在途请求,不 bump 的话它完成后会把
+    // 刷新前的旧快照写回缓存,下次筛选被当成新鲜数据。
+    bumpInvalidation(cacheKey);
     if (!enabled) {
       // 树刷新时用户并没在筛选:只失效缓存,不触发扫描 —— 下次 enabled 自然拉新。
+      // state 一并清空:留着旧 files 会让下次 doFetch 的 isLoading 期间闪 stale
+      // 结果(FilterResultList 只在 files 为空时才显示"正在索引"占位)。
+      setState({ files: [], truncated: false, isLoading: false, error: null });
       lastFetchedWorkdirRef.current = null;
       return;
     }
@@ -228,4 +255,5 @@ export function useProjectFileList(
 export function _resetProjectFileListCache(): void {
   cache.clear();
   inflight.clear();
+  invalidationGen.clear();
 }

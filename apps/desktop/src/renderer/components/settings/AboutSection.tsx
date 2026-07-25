@@ -337,8 +337,11 @@ function AnalyticsToggleRow() {
           ? t('settings.about.analyticsEnabledToast')
           : t('settings.about.analyticsDisabledToast'),
       );
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('settings.about.analyticsSaveFailed'));
+    } catch {
+      // 不透传 err.message:main 侧的 IPC 错误串是英文技术串(`[INTERNAL] ...`),
+      // 直接 toast 出去会让非中文用户看到不可读的内部信息。错误码只用于分支,
+      // 展示一律走本地化文案。
+      toast.error(t('settings.about.analyticsSaveFailed'));
     } finally {
       setSaving(false);
     }
@@ -349,8 +352,8 @@ function AnalyticsToggleRow() {
     try {
       await resetAnalyticsEnabled();
       toast.success(t('settings.defaults.restored'));
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('settings.defaults.restoreFailed'));
+    } catch {
+      toast.error(t('settings.defaults.restoreFailed'));
     } finally {
       setSaving(false);
     }

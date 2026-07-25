@@ -64,16 +64,58 @@ const store = createOverrideSettingsFile<AnalyticsSettings>({
   label: 'analytics',
 });
 
+/**
+ * 本机是否曾经有过记录 —— 存量迁移的唯一依据。
+ *
+ * 为什么不能在迁移时才 `existsSync`:renderer 挂载后第一件事就是
+ * `analytics:settings-get`,它早于 `auth:initialize`。而 createOverrideSettingsFile
+ * 读到坏 JSON 会**把文件删掉**并缓存一个未自定义的默认态。等到迁移真正执行时,
+ * 盘上已经什么都没有了,一份损坏的记录(可能原本就是显式 opt-out)就会被判成
+ * 「从没有过」,进而被静默迁移成「已同意 + 默认开启」。
+ *
+ * 所以在任何 store 读写之前先做一次只读探针,把结论钉在内存里:
+ *   none    = 确实没有记录(新装)
+ *   valid   = 有一份能解析的记录
+ *   invalid = 有记录但内容非法(损坏 / 被改坏)——按 fail closed 处理,不可迁移
+ */
+type RecordProbe = 'none' | 'valid' | 'invalid';
+let recordProbe: RecordProbe | null = null;
+
+function probeRecordOnce(): RecordProbe {
+  if (recordProbe !== null) return recordProbe;
+  let probed: RecordProbe;
+  try {
+    const file = settingsFilePath();
+    if (!fs.existsSync(file)) {
+      probed = 'none';
+    } else {
+      const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      probed = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? 'valid' : 'invalid';
+    }
+  } catch {
+    // 读不出来 / 解析失败都算「存在但非法」,绝不当成「没有记录」。
+    probed = 'invalid';
+  }
+  recordProbe = probed;
+  if (probed !== 'none') {
+    log.info('analytics settings record probed', { probe: probed });
+  }
+  return probed;
+}
+
 export function readAnalyticsSettings(): AnalyticsSettings {
+  probeRecordOnce();
   return store.read();
 }
 
 export function readAnalyticsSettingsState(): OverrideSettingsState<AnalyticsSettings> {
+  probeRecordOnce();
   return store.readState();
 }
 
 /** 有效上报条件:同意在先,开关在后。任一为 false 都不得上报。 */
 export function isAnalyticsAllowed(): boolean {
+  probeRecordOnce();
   const value = store.read();
   return value.privacyConsentAccepted && value.analyticsEnabled;
 }
@@ -86,6 +128,7 @@ export function isAnalyticsAllowed(): boolean {
  * 因此走 SSO 的用户不会到达这里,也就不会被采集——这是刻意的。
  */
 export function acceptPrivacyConsent(): AnalyticsSettings {
+  probeRecordOnce();
   const current = store.read();
   if (current.privacyConsentAccepted) return current;
   // preserveDefaults 无关:true ≠ 默认值 false,override 会被保留。
@@ -95,6 +138,7 @@ export function acceptPrivacyConsent(): AnalyticsSettings {
 }
 
 export function setAnalyticsEnabled(analyticsEnabled: boolean): AnalyticsSettings {
+  probeRecordOnce();
   // preserveDefaults:analyticsEnabled 的默认值就是 true,不保留的话「用户主动打开」
   // 会被当成「未自定义」而删除 override。这里要留痕,否则无法区分「没碰过」和
   // 「关掉后又打开」——后者在合规问询时是需要能自证的。
@@ -114,11 +158,9 @@ export function setAnalyticsEnabled(analyticsEnabled: boolean): AnalyticsSetting
  */
 export function migrateExistingLoginAsConsented(isSignedIn: boolean): boolean {
   if (!isSignedIn) return false;
-  // 必须**先看盘再 readState**:createOverrideSettingsFile 读到损坏 JSON 会把文件
-  // 直接删掉并返回 isCustomized=false。若只看 isCustomized,一份损坏的记录——包括
-  // 原本是显式 opt-out 的那种——会被当成「从没有过记录」,于是下一次冷启动就把采集
-  // 静默重新打开。损坏 ≠ 不存在:只要盘上有过文件,一律不迁移(与 mobile 同口径)。
-  if (fs.existsSync(settingsFilePath())) return false;
+  // 只认探针结论,不在这里 existsSync —— 到这一步时,更早的 settings-get 可能已经把
+  // 一份损坏的记录删掉了(见 probeRecordOnce 的注释)。损坏 ≠ 不存在。
+  if (probeRecordOnce() !== 'none') return false;
   const state = store.readState();
   if (state.isCustomized) return false;
   store.writePatch({ privacyConsentAccepted: true });
@@ -128,6 +170,7 @@ export function migrateExistingLoginAsConsented(isSignedIn: boolean): boolean {
 
 /** enabled 是否被用户显式设置过(即盘上有这条 override)。 */
 export function isAnalyticsEnabledCustomized(): boolean {
+  probeRecordOnce();
   return store.readState().customizedKeys.includes('analyticsEnabled');
 }
 
@@ -139,6 +182,7 @@ export function isAnalyticsEnabledCustomized(): boolean {
  * 传入默认值且不带 preserveDefaults,writePatch 会把这条 override 删除。
  */
 export function clearAnalyticsEnabledOverride(): AnalyticsSettings {
+  probeRecordOnce();
   store.writePatch({ analyticsEnabled: DEFAULTS.analyticsEnabled });
   log.info('analytics enabled override cleared');
   return store.read();
@@ -146,7 +190,16 @@ export function clearAnalyticsEnabledOverride(): AnalyticsSettings {
 
 /** 仅用于测试与显式的本机数据清理;会让用户回到「未同意」。 */
 export function resetAnalyticsSettings(): AnalyticsSettings {
-  return store.reset();
+  const value = store.reset();
+  recordProbe = 'none';
+  return value;
 }
 
-export const __testing = { normalize, DEFAULTS };
+export const __testing = {
+  normalize,
+  DEFAULTS,
+  resetProbe(): void {
+    recordProbe = null;
+  },
+  probe: () => recordProbe,
+};

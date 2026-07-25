@@ -28,7 +28,7 @@ import {
   setAnalyticsEnabled,
   subscribeAnalyticsConsent,
 } from '@/analytics/analyticsConsentStore';
-import { initMobileTapdb, stopMobileTapdbReporting } from '@/analytics/mobileTapdb';
+import { initMobileTapdb, setTapdbUser, stopMobileTapdbReporting } from '@/analytics/mobileTapdb';
 import { SUPPORTED_LOCALES, type LocalePreference } from '@/i18n';
 import { useLocale } from '@/i18n/useLocale';
 import { goBackGuarded } from '@/utils/backGuard';
@@ -497,6 +497,17 @@ export default function SettingsScreen() {
 
      关闭路径**先停上报再落盘**:写盘失败时本次运行已经不再上报(偏安全的一侧),
      而开关值不变,如实反映「重启后仍是开启」。 */
+  /* 重新开启统计时必须**重新绑定当前账号**。关闭路径已经调过 clearNativeTapdbUser(),
+     而 AuthContext 里负责绑定的 effect 依赖 [initialized, user?.id] —— 拨开关不会
+     让这两个值变化,所以它不会再跑。不补这一下的话,账号维度的用量会一直空到下次
+     重启或下一次登录态变化。 */
+  const resumeAnalyticsReporting = useCallback(async () => {
+    const status = await initMobileTapdb();
+    if (!status.ok) return;
+    const userId = auth.user?.id;
+    if (userId) await setTapdbUser(userId);
+  }, [auth.user?.id]);
+
   const toggleAnalytics = useCallback(async () => {
     if (analyticsBusy) return;
     setAnalyticsBusy(true);
@@ -508,7 +519,7 @@ export default function SettingsScreen() {
       const next = !getAnalyticsConsentState().enabled;
       if (!next) await stopMobileTapdbReporting();
       await setAnalyticsEnabled(next);
-      if (next) await initMobileTapdb();
+      if (next) await resumeAnalyticsReporting();
     } catch {
       // 只可能是本机存储异常(无服务端往返)。开关值由 store 回推,保持落盘前的
       // 真值;这里显式告诉用户没存住,而不是让它看起来「点了没反应」。
@@ -516,7 +527,7 @@ export default function SettingsScreen() {
     } finally {
       setAnalyticsBusy(false);
     }
-  }, [analyticsBusy, t]);
+  }, [analyticsBusy, resumeAnalyticsReporting, t]);
 
   /* 恢复默认:只删掉开关 override 让它重新跟随版本默认值,同意事实不动
      (configuration-and-overrides §4)。仅在用户显式拨过开关时出现。 */
@@ -526,14 +537,14 @@ export default function SettingsScreen() {
     setAnalyticsMessage(null);
     try {
       await clearAnalyticsEnabledOverride();
-      if (getAnalyticsConsentState().enabled) await initMobileTapdb();
+      if (getAnalyticsConsentState().enabled) await resumeAnalyticsReporting();
       else await stopMobileTapdbReporting();
     } catch {
       setAnalyticsMessage(t('settings.legal.analyticsSaveFailed'));
     } finally {
       setAnalyticsBusy(false);
     }
-  }, [analyticsBusy, t]);
+  }, [analyticsBusy, resumeAnalyticsReporting, t]);
 
   const avatarLabel = (overview.header.name.trim()[0] ?? '?').toUpperCase();
   const updateBusy = updatePhase === 'checking' || updatePhase === 'downloading';

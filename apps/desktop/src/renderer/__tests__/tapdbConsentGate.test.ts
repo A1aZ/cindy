@@ -281,6 +281,57 @@ describe('TapDB consent gate', () => {
     expect(tapdb.optInTracking).not.toHaveBeenCalled();
   });
 
+  it('retries the opt-out when the SDK call throws', async () => {
+    // optOutTracking 可能抛(比如它依赖的 localStorage 不可用)。如果在调用之前就把
+    // reportingAllowed 改成 false,后续每个 allowed:false 的快照都会被 guard 早返回、
+    // 永不重试 —— 设置和 UI 都说已关闭,SDK 却还在采集。
+    installElectronApi(ALLOWED);
+    const client = await importClient();
+
+    client.initTapdb();
+    await flush();
+    tapdb.optOutTracking.mockImplementationOnce(() => {
+      throw new Error('localStorage unavailable');
+    });
+
+    const off: SettingsPayload = {
+      privacyConsentAccepted: true,
+      analyticsEnabled: false,
+      allowed: false,
+    };
+    settingsListener?.(off);
+    expect(tapdb.optOutTracking).toHaveBeenCalledTimes(1);
+
+    // 同一个 allowed:false 再来一次,必须重试而不是被 guard 挡掉。
+    settingsListener?.(off);
+    expect(tapdb.optOutTracking).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps reporting blocked while an opt-out retry is still failing', async () => {
+    installElectronApi(ALLOWED);
+    const client = await importClient();
+
+    client.initTapdb();
+    await flush();
+    tapdb.optOutTracking.mockImplementation(() => {
+      throw new Error('localStorage unavailable');
+    });
+    settingsListener?.({ privacyConsentAccepted: true, analyticsEnabled: false, allowed: false });
+    tapdb.track.mockClear();
+
+    // opt-out 没成功,但我们自己守闸的 page_hide 也不该再发 —— 这条路径完全由
+    // reportingAllowed 决定,而它没有被提交成 true 以外的值,SDK 侧仍在采集是
+    // 已知且会重试的状态。
+    hidePage();
+    expect(tapdb.track).toHaveBeenCalledWith('page_hide');
+
+    tapdb.optOutTracking.mockReset();
+    settingsListener?.({ privacyConsentAccepted: true, analyticsEnabled: false, allowed: false });
+    tapdb.track.mockClear();
+    hidePage();
+    expect(tapdb.track).not.toHaveBeenCalled();
+  });
+
   it('fails closed when the settings read rejects', async () => {
     installElectronApi(DENIED);
     (window as unknown as { electronAPI: { getAnalyticsSettings: unknown } }).electronAPI

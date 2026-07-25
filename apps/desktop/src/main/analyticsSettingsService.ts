@@ -45,13 +45,17 @@ let migrationEvaluated = false;
  * 直接把 fs 异常抛过进程边界会让 renderer 拿到(并 toast 出)内部绝对路径,
  * 违反 electron-security-and-process-boundaries.md §5「不把堆栈、内部路径原样
  * 返回 Renderer」。真实原因只留在 main 侧日志里。
+ *
+ * message 刻意用英文技术串:它只是给日志和调试看的,**不面向用户**。renderer 拿到
+ * 的是稳定的 `code`,由它自己映射到当前语言的 i18n 文案(否则英/日/韩用户会看到
+ * 一句中文错误)。
  */
 function writeOrThrowIpcError(write: () => void, context: string): void {
   try {
     write();
   } catch (err) {
     log.error(context, err);
-    throwIpcError('INTERNAL', '保存使用统计设置失败');
+    throwIpcError('INTERNAL', 'failed to persist analytics settings');
   }
 }
 

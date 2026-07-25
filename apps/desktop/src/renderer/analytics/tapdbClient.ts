@@ -180,11 +180,15 @@ function reportPageHide(): void {
 function applyReportingAllowed(next: boolean): void {
   // 状态没变且不存在"该 init 却还没 init"的落差时,直接返回。
   if (next === reportingAllowed && (!next || sdkInitialized)) return;
-  reportingAllowed = next;
 
+  // ⚠️ 不要在这里就把 reportingAllowed 改掉。SDK 调用可能抛(比如 optOutTracking
+  // 依赖的 localStorage 不可用),一旦提前提交状态,后续每个 allowed:false 的快照
+  // 都会在上面那道 guard 早返回、永不重试 —— 设置和 UI 都说已关闭,SDK 却还在采集。
+  // 只有 SDK 侧真正做完,才认这次状态转移。
   try {
     if (!next) {
       if (!sdkInitialized) {
+        reportingAllowed = false;
         log.info('reporting not allowed; TapDB stays uninitialized');
         return;
       }
@@ -194,6 +198,7 @@ function applyReportingAllowed(next: boolean): void {
       // page_hide 不在此列 —— SDK 的 beacon 路径没有这道闸,所以我们没有开启
       // autoTrack.pageHide,改由 reportPageHide 自己守闸(见 initTapdb)。
       TapDBAPI.optOutTracking();
+      reportingAllowed = false;
       lastActiveDate = null;
       lastSetUserDate = null;
       log.info('reporting disabled (opt-out)');
@@ -201,7 +206,9 @@ function applyReportingAllowed(next: boolean): void {
     }
 
     if (!sdkInitialized) {
+      // initSdk 自己在成功后置 sdkInitialized;失败时保持未初始化,下次广播重试。
       initSdk();
+      reportingAllowed = sdkInitialized;
       return;
     }
 
@@ -209,10 +216,12 @@ function applyReportingAllowed(next: boolean): void {
     // (optOutTracking 把它们清空了)。
     TapDBAPI.optInTracking();
     applySuperProperties();
+    reportingAllowed = true;
     reportActive('app_start');
     log.info('reporting re-enabled (opt-in)');
   } catch (err) {
-    log.error('apply analytics permission failed (non-fatal)', err);
+    // 状态没提交 = 下一次同值广播不会被 guard 挡掉,会重新尝试。
+    log.error('apply analytics permission failed; will retry on next change', err);
   }
 }
 

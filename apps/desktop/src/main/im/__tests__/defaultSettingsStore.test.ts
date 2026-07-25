@@ -198,6 +198,37 @@ describe('im default settings store', () => {
     expect(migrated.channels.slack).toEqual(migrated.global);
   });
 
+  it('detects legacy files even when v2 defaults are merged in by createOverrideSettingsFile', () => {
+    // createOverrideSettingsFile calls normalize({ ...defaults(), ...overrides }).
+    // For a v1 file the overrides are flat route fields; defaults inject
+    // schemaVersion/global/channels. Legacy detection must still trigger.
+    const v2Defaults = {
+      schemaVersion: 2,
+      global: IM_DEFAULT_SETTINGS,
+      channels: {
+        feishu: IM_DEFAULT_SETTINGS,
+        discord: IM_DEFAULT_SETTINGS,
+        slack: IM_DEFAULT_SETTINGS,
+      },
+    };
+
+    // Case 1: v1 file with scalar fields (providerId/model/effort)
+    const v1WithScalars = { agentKind: 'codex', providerId: 'openai', model: 'gpt-5.5', effort: 'high' };
+    const merged1 = { ...v2Defaults, ...v1WithScalars };
+    const migrated1 = __testing.normalizeDocument(merged1);
+    expect(migrated1.global.agentKind).toBe('codex');
+    expect(migrated1.global.agents.codex.providerId).toBe('openai');
+    expect(migrated1.channels.feishu).toEqual(migrated1.global);
+
+    // Case 2: v1 file with only agentKind (no scalar fields)
+    const v1AgentOnly = { agentKind: 'codex' };
+    const merged2 = { ...v2Defaults, ...v1AgentOnly };
+    const migrated2 = __testing.normalizeDocument(merged2);
+    expect(migrated2.global.agentKind).toBe('codex');
+    expect(migrated2.channels.feishu.agentKind).toBe('codex');
+    expect(migrated2.channels.discord.agentKind).toBe('codex');
+  });
+
   it('writes and resets one channel without changing another channel', () => {
     writeImDefaultSettingsPatch({ agentKind: 'codex' }, 'feishu');
     writeImDefaultSettingsPatch(

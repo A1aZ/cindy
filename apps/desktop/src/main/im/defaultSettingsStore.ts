@@ -73,14 +73,23 @@ function normalizeSettings(raw: unknown): ImDefaultSettings {
 
 function normalizeDocument(raw: unknown): ImDefaultSettingsDocument {
   const record = isRecord(raw) ? raw : {};
-  const isVersioned = 'schemaVersion' in record;
-  const hasLegacyRootSettings =
-    !isVersioned &&
-    ('agentKind' in record ||
-      'agents' in record ||
-      'providerId' in record ||
-      'model' in record ||
-      'effort' in record);
+
+  // Detect legacy v1 overrides even after createOverrideSettingsFile merges
+  // them with v2 defaults (which injects schemaVersion/global/channels).
+  //
+  // Signals that root-level fields came from a v1 persisted file:
+  //   1. providerId/model/effort at root — v2 never writes these at root.
+  //   2. Root agentKind/agents present without a user-written global — either
+  //      global is absent (pure v1 input) or root agentKind disagrees with
+  //      global.agentKind (v1 override merged over v2 defaults).
+  const hasLegacyScalarOverrides =
+    'providerId' in record || 'model' in record || 'effort' in record;
+  const globalRecord = isRecord(record.global) ? record.global : null;
+  const hasLegacyAgentFields =
+    ('agentKind' in record || 'agents' in record) &&
+    (globalRecord === null ||
+      ('agentKind' in record && record.agentKind !== globalRecord.agentKind));
+  const hasLegacyRootSettings = hasLegacyScalarOverrides || hasLegacyAgentFields;
 
   // Before schema v2 there was one flat route shared by every IM channel.
   // A legacy file is unambiguous user customization, so seed every channel

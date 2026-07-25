@@ -105,6 +105,7 @@ function normalizeModelToken(value: string | null | undefined): string {
  *
  * 规则(按序):
  *   1. 桶的 limitName 命中当前模型(如 'GPT-5.3-Codex-Spark' ↔ gpt-5.3-codex-spark);
+ *      精确匹配优先, 其次取最长匹配(重叠桶名下 'GPT-5.3-Codex' 不得抢走 Spark 会话);
  *   2. 通用桶 —— 由**稳定桶键**(limitId 'codex' / 缺省桶)识别, 不能靠「没有
  *      limitName」判断: limitName 可选, 同桶 merge 遇到省略该字段的部分通知会把它
  *      抹成 undefined, 模型专属桶会伪装成通用桶;
@@ -122,10 +123,19 @@ export function matchCodexBucketForModel<T extends BucketSnapshotLike>(
   if (entries.length === 0) return null;
   const model = normalizeModelToken(modelId);
   if (model) {
+    // 精确匹配优先; 否则取**最长**的 substring 匹配 —— 桶顺序反映更新 / 持久化
+    // 顺序, 按首个匹配返回会让 'GPT-5.3-Codex' 抢走本属于 'GPT-5.3-Codex-Spark'
+    // 的会话, 通用名 'Codex' 更会命中所有 codex/* 模型(review 反馈)。
+    let longest: { bucket: T; length: number } | null = null;
     for (const [, bucket] of entries) {
       const name = normalizeModelToken(bucket.limitName);
-      if (name && (name === model || model.includes(name))) return bucket;
+      if (!name) continue;
+      if (name === model) return bucket;
+      if (model.includes(name) && (longest === null || name.length > longest.length)) {
+        longest = { bucket, length: name.length };
+      }
     }
+    if (longest) return longest.bucket;
   }
   // 按优先级取通用桶(不能靠 entries 的插入序, 见 GENERIC_BUCKET_KEYS_BY_PRIORITY)。
   for (const key of GENERIC_BUCKET_KEYS_BY_PRIORITY) {

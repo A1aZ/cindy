@@ -570,7 +570,17 @@ export async function recordCodexAccountUsageSnapshot(snapshot: unknown): Promis
   } else {
     // 同 limitId 桶内 merge(保留 windowless / 部分字段兜底语义), 跨桶隔离 ——
     // Spark 类模型专属桶不得覆盖主配额桶(见本节头注释)。
-    const bucketKey = codexLimitBucketKey(incoming);
+    //
+    // account/rateLimits/updated 是**稀疏滚动更新**(app-server 0.144 契约原文:
+    // "Clients should merge available values into the most recent
+    // account/rateLimits/read response or refetch that snapshot. Nullable account
+    // metadata may be unavailable in a rolling update and does not clear a
+    // previously observed value.")。因此缺 limitId 时不能当作「缺省桶」新建 ——
+    // 那会把模型专属窗口塞进通用桶、显示给所有会话(review 反馈)。按契约并入
+    // 最近观察到的桶; 尚无任何桶时才落缺省桶(此时无歧义)。
+    const bucketKey = incoming.limitId
+      ? codexLimitBucketKey(incoming)
+      : codexAppServerLatestBucketKey ?? codexLimitBucketKey(incoming);
     codexAppServerBuckets = {
       ...codexAppServerBuckets,
       [bucketKey]: mergeCodexAccountUsageSnapshot(

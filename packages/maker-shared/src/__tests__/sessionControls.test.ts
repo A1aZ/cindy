@@ -274,3 +274,39 @@ describe('generic bucket alias priority', () => {
     expect(nextCodexBucketStaleAtMs({}, NOW)).toBeNull();
   });
 });
+
+describe('overlapping bucket names', () => {
+  const NOW = 1_785_000_000_000;
+  const future = Math.floor((NOW + 3 * 24 * 60 * 60 * 1000) / 1000);
+  const BASE = { limitId: 'codex_base', limitName: 'GPT-5.3-Codex', primary: { usedPercent: 20, resetsAt: future } };
+  const SPARK = { limitId: 'codex_bengalfox', limitName: 'GPT-5.3-Codex-Spark', primary: { usedPercent: 0, resetsAt: future } };
+
+  it('prefers the longest matching bucket name over insertion order', () => {
+    // 'GPT-5.3-Codex' 先插入时不得抢走 Spark 会话(review 反馈)
+    const picked = selectCodexUsageForModel({
+      byLimitId: { codex_base: BASE, codex_bengalfox: SPARK },
+      modelId: 'gpt-5.3-codex-spark',
+      nowMs: NOW,
+    });
+    expect(picked).toBe(SPARK);
+  });
+
+  it('prefers an exact name match even when a longer name also matches', () => {
+    const picked = selectCodexUsageForModel({
+      byLimitId: { codex_bengalfox: SPARK, codex_base: BASE },
+      modelId: 'gpt-5.3-codex',
+      nowMs: NOW,
+    });
+    expect(picked).toBe(BASE);
+  });
+
+  it('does not let a broad name capture unrelated specialized models', () => {
+    const broad = { limitId: 'codex_broad', limitName: 'Codex', primary: { usedPercent: 12, resetsAt: future } };
+    const picked = selectCodexUsageForModel({
+      byLimitId: { codex_broad: broad, codex_bengalfox: SPARK },
+      modelId: 'gpt-5.3-codex-spark',
+      nowMs: NOW,
+    });
+    expect(picked).toBe(SPARK);
+  });
+});

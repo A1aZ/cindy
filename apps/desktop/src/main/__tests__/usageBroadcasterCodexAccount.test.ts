@@ -345,3 +345,46 @@ describe('codex stale bucket pruning', () => {
     expect(Object.keys(payload?.appServerBuckets ?? {})).toEqual(['codex']);
   });
 });
+
+describe('sparse rate-limit updates without a limitId', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mocks.queryOne.mockReset().mockResolvedValue(null);
+    mocks.exec.mockReset().mockResolvedValue(undefined);
+    mocks.getCurrentUserId.mockReturnValue('user-1');
+  });
+
+  const SPARK = {
+    limitId: 'codex_bengalfox',
+    limitName: 'GPT-5.3-Codex-Spark',
+    primary: { usedPercent: 0, windowMinutes: 10_080, resetsAt: 4_100_000_000 },
+    source: 'codex-app-server',
+  };
+
+  it('merges an id-less sparse update into the most recent bucket, not the default one', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    await broadcaster.recordCodexAccountUsageSnapshot(SPARK);
+    // app-server 契约: 稀疏更新缺 limitId 时合并进最近一次结果, 不得另建缺省桶
+    await broadcaster.recordCodexAccountUsageSnapshot({
+      primary: { usedPercent: 14, windowMinutes: 10_080, resetsAt: 4_100_000_000 },
+      source: 'codex-app-server',
+    });
+
+    const payload = await broadcaster.readCodexAccountUsageSnapshot();
+    expect(Object.keys(payload?.appServerBuckets ?? {})).toEqual(['codex_bengalfox']);
+    expect(payload?.appServerBuckets?.codex_bengalfox?.primary?.usedPercent).toBe(14);
+    // 身份元数据不被稀疏更新清除
+    expect(payload?.appServerBuckets?.codex_bengalfox?.limitName).toBe('GPT-5.3-Codex-Spark');
+  });
+
+  it('falls back to the default bucket when nothing has been observed yet', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    await broadcaster.recordCodexAccountUsageSnapshot({
+      primary: { usedPercent: 9, windowMinutes: 300, resetsAt: 4_100_000_000 },
+      source: 'codex-app-server',
+    });
+
+    const payload = await broadcaster.readCodexAccountUsageSnapshot();
+    expect(Object.keys(payload?.appServerBuckets ?? {})).toEqual(['__default__']);
+  });
+});

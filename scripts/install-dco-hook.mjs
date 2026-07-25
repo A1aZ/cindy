@@ -155,7 +155,9 @@ function main() {
     console.error(`${hookPath} came from this repository but no longer matches ${HOOK_SOURCE_PATH}.`);
     console.error('It is either an older version of the hook, or a copy you have edited since.');
     console.error('Not overwriting it. Compare first, then decide:');
-    console.error(`  diff ${hookPath} ${join(REPO_ROOT, HOOK_SOURCE_PATH)}`);
+    // 用 git diff 而不是 diff(1)：git 本来就是本仓的前置依赖，而 diff 在部分 Windows
+    // 环境里没有。
+    console.error(`  git diff --no-index ${hookPath} ${join(REPO_ROOT, HOOK_SOURCE_PATH)}`);
     console.error('  node scripts/install-dco-hook.mjs --force   # overwrite with this repo\'s version');
     process.exit(1);
   }

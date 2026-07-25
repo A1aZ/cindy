@@ -26,9 +26,16 @@ const FIELD_SEP = '\u001f';
 const RECORD_SEP = '\u001e';
 const LOG_FORMAT = ['%H', '%P', '%an', '%ae', '%cn', '%ce', '%B'].join(FIELD_SEP) + RECORD_SEP;
 
-// `git commit -s` 生成的行。逐行匹配而不强求在 message 末尾：trailer 之后常见还有
-// Co-authored-by 等其他 trailer。
-const SIGN_OFF_LINE = /^\s*Signed-off-by:\s*(.*?)\s*<([^<>]+)>\s*$/i;
+// 与 DCO App 的匹配器逐字对齐（dcoapp/app 的 `lib/dco.js`：
+// `/^Signed-off-by: (.*) <(.*)>\s*$/gim`）。逐行匹配而不强求在 message 末尾：trailer
+// 之后常见还有 Co-authored-by 等其他 trailer。
+//
+// 刻意不放宽这三处，它们都会造成「本地绿、PR 红」：
+// - 不允许行首空白：App 的 `^Signed-off-by:` 锚在行首，缩进过的行在它眼里根本不是签名。
+// - `Signed-off-by:` 后只允许一个空格：写两个空格时 App 会把多出来的空格算进 name，
+//   于是 name 与 author 比不上。
+// - 捕获值不 trim（见 validateCommit）：App 拿原样捕获去比，`Alice ` 不等于 `Alice`。
+const SIGN_OFF_LINE = /^Signed-off-by: (.*) <(.*)>\s*$/i;
 
 // 机器人与 GitHub Web UI 代签的提交无法代替本人作出 DCO 声明，因此豁免而非放行：
 // dependabot 等 bot 用 `<name>[bot]@users.noreply.github.com`，Web UI 用 web-flow。
@@ -89,12 +96,15 @@ export function looksLikeEmail(email) {
   return EMAIL_LOCAL_PART.test(localPart) && EMAIL_DOMAIN.test(domain);
 }
 
-/** 提取 message 里所有 Signed-off-by 行。 */
+/**
+ * 提取 message 里所有 Signed-off-by 行。捕获值原样保留、不 trim——App 也不 trim，
+ * 多出来的空白会让它与 author 比对失败，这里跟着一起失败才不会「本地绿、PR 红」。
+ */
 export function parseSignOffs(message) {
   const signOffs = [];
   for (const line of String(message ?? '').split(/\r?\n/)) {
     const match = SIGN_OFF_LINE.exec(line);
-    if (match) signOffs.push({ name: match[1].trim(), email: match[2].trim() });
+    if (match) signOffs.push({ name: match[1], email: match[2] });
   }
   return signOffs;
 }
@@ -142,11 +152,13 @@ export function validateCommit(commit) {
     { name: normalizeName(commit.authorName), email: normalizeEmail(commit.authorEmail) },
     { name: normalizeName(commit.committerName), email: normalizeEmail(commit.committerEmail) },
   ];
+  // 签名侧只 lowercase、不 trim（App 亦然）；commit 侧 trim 是安全的，git ident 本身
+  // 不带前后空白。两边处理方式刻意不同，正是为了让「Alice 」这种写法在本地也失败。
   const matches = (signOff) =>
     identities.some(
       (identity) =>
-        identity.name === normalizeName(signOff.name) &&
-        identity.email === normalizeEmail(signOff.email)
+        identity.name === String(signOff.name).toLowerCase() &&
+        identity.email === String(signOff.email).toLowerCase()
     );
   if (signOffs.some(matches)) return [];
 

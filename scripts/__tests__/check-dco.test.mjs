@@ -57,10 +57,11 @@ test('parseSignOffs picks up every sign-off line and ignores other trailers', ()
       'fix: something',
       '',
       'Co-authored-by: Someone <someone@example.com>',
-      'signed-off-by:  Lower Case  <lower@example.com> ',
+      'signed-off-by: Lower Case <lower@example.com> ',
       'Signed-off-by: Contributor <contributor@example.com>',
     ].join('\n')
   );
+  // 大小写不敏感、`>` 后的尾随空白允许（App 的 `\s*$` 亦然）。
   assert.deepEqual(signOffs, [
     { name: 'Lower Case', email: 'lower@example.com' },
     { name: 'Contributor', email: 'contributor@example.com' },
@@ -68,6 +69,34 @@ test('parseSignOffs picks up every sign-off line and ignores other trailers', ()
   assert.deepEqual(parseSignOffs('docs: no trailer here'), []);
   // 「提到」sign-off 不等于签署：正文里的散句不构成 trailer 行。
   assert.deepEqual(parseSignOffs('chore: mention Signed-off-by: nobody in prose'), []);
+});
+
+test('sign-off parsing stays as strict as the App on line shape', () => {
+  // App 的匹配器锚在行首，缩进过的「签名」在它眼里不存在 —— 本地必须一样看不见它，
+  // 否则就是本地绿、PR 红。
+  assert.deepEqual(parseSignOffs(` Signed-off-by: ${AUTHOR.name} <${AUTHOR.email}>`), []);
+  assert.deepEqual(parseSignOffs(`\tSigned-off-by: ${AUTHOR.name} <${AUTHOR.email}>`), []);
+
+  // 冒号后写两个空格：App 会把多出来的空格算进 name，于是与 author 比不上。这里同样
+  // 要判失败 —— 解析得到的 name 带前导空格，比对时不 trim。
+  const twoSpaces = parseSignOffs(`Signed-off-by:  ${AUTHOR.name} <${AUTHOR.email}>`);
+  assert.deepEqual(twoSpaces, [{ name: ` ${AUTHOR.name}`, email: AUTHOR.email }]);
+  const rejected = validateCommit(
+    commitFixture({ message: `feat: x\n\nSigned-off-by:  ${AUTHOR.name} <${AUTHOR.email}>\n` })
+  );
+  assert.equal(rejected.length, 1);
+  assert.match(rejected[0], /match one of them as a whole/i);
+
+  // name 尾部多空格同理。
+  assert.equal(
+    validateCommit(
+      commitFixture({ message: `feat: x\n\nSigned-off-by: ${AUTHOR.name}  <${AUTHOR.email}>\n` })
+    ).length,
+    1
+  );
+
+  // 规范写法必须通过，别把严格做成一刀切。
+  assert.deepEqual(validateCommit(commitFixture({ message: signedOff() })), []);
 });
 
 const signedOff = (subject = 'feat: x') =>

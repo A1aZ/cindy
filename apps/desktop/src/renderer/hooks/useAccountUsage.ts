@@ -26,12 +26,13 @@
  * useSessionSpend 同惯例 (它也 inline { sessionId, totalCostUsd })。
  */
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
   CODEX_DEFAULT_LIMIT_BUCKET,
   GENERIC_BUCKET_KEYS,
   UNSAFE_BUCKET_KEYS,
+  STALE_BUCKET_GRACE_MS,
   codexLimitBucketKey,
   isCodexBucketStale,
 } from '../../shared/codexUsageBuckets';
@@ -122,6 +123,33 @@ export function matchCodexBucketForModel(
   }
   const generic = entries.find(([key]) => GENERIC_BUCKET_KEYS.has(key));
   return generic ? generic[1] : null;
+}
+
+/**
+ * 桶表中最近一个「由有效转为陈旧」的时刻(ms);没有可预期的转变 → null。
+ * 陈旧判定只在选桶时求值, chip 常驻挂载时不会自己重算 —— 用它安排一次定时
+ * 重选, 否则促销桶过期后会一直挂在界面上(review 反馈)。
+ */
+export function nextCodexBucketStaleAtMs(
+  buckets: Record<string, RateLimitSnapshot>,
+  nowMs: number,
+): number | null {
+  let soonest: number | null = null;
+  for (const bucket of Object.values(buckets ?? {})) {
+    if (isCodexBucketStale(bucket, nowMs)) continue;
+    const windows = [bucket.primary, bucket.secondary].filter(
+      (w): w is RateLimitWindow => Boolean(w),
+    );
+    if (windows.length === 0) continue;
+    const resets = windows
+      .map((w) => w.resetsAt)
+      .filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0);
+    // 与 isCodexBucketStale 同口径: 有窗口缺时间戳就永不进入陈旧, 无需定时。
+    if (resets.length !== windows.length) continue;
+    const staleAt = Math.max(...resets) * 1000 + STALE_BUCKET_GRACE_MS;
+    if (staleAt > nowMs && (soonest === null || staleAt < soonest)) soonest = staleAt;
+  }
+  return soonest;
 }
 
 /**
@@ -394,12 +422,36 @@ export function useAccountUsage(
   const [snapshot, setSnapshot] = useState<RateLimitSnapshot | null>(() =>
     vendorKey === 'codex' ? selectCodexSlot(quotaSource, modelId) : null,
   );
+  // 订阅 effect 不把 modelId 放进依赖(切模型不该重装 IPC 订阅, 重装窗口还会漏
+  // push);回调经 ref 读最新模型。模型变化时由下方 reselect effect 立即重选。
+  const modelIdRef = useRef(modelId);
+  modelIdRef.current = modelId;
+  const reselect = useCallback(() => {
+    setSnapshot(selectCodexSlot(quotaSource, modelIdRef.current));
+  }, [quotaSource]);
 
   // Codex rate limits 是账号级数据, 不是 session 级数据。切回 Codex session /
   // 切模型时按新模型重新选桶(桶表已在缓存里, 无需等下一次 push)。
   useEffect(() => {
     setSnapshot(vendorKey === 'codex' ? selectCodexSlot(quotaSource, modelId) : null);
   }, [sessionId, vendorKey, quotaSource, modelId]);
+
+  // 陈旧转变是纯时间驱动的: 没有新 payload 时也要在到点那一刻重选一次, 否则
+  // 常驻挂载的 chip 会一直显示已过期的促销桶(review 反馈)。
+  const [staleTick, setStaleTick] = useState(0);
+  useEffect(() => {
+    if (vendorKey !== 'codex' || quotaSource !== 'app-server') return undefined;
+    const now = Date.now();
+    const staleAt = nextCodexBucketStaleAtMs(lastCodexAccountUsage.appServerBuckets, now);
+    if (staleAt === null) return undefined;
+    // setTimeout 上限 ~24.8 天, 超出就分段等待(到期再重算)。
+    const delay = Math.min(Math.max(staleAt - now, 0) + 1_000, 6 * 60 * 60 * 1000);
+    const timer = window.setTimeout(() => {
+      reselect();
+      setStaleTick((tick) => tick + 1);
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [vendorKey, quotaSource, reselect, snapshot, staleTick]);
 
   useEffect(() => {
     if (vendorKey !== 'codex') return;
@@ -413,7 +465,7 @@ export function useAccountUsage(
         if (cancelled) return;
         applyCodexAccountUsageSnapshot(
           persisted,
-          () => setSnapshot(selectCodexSlot(quotaSource, modelId)),
+          reselect,
           { clearOnNull: false },
         );
       })
@@ -424,7 +476,7 @@ export function useAccountUsage(
     return () => {
       cancelled = true;
     };
-  }, [vendorKey, quotaSource, modelId]);
+  }, [vendorKey, quotaSource, reselect]);
 
   useEffect(() => {
     if (vendorKey !== 'codex') return;
@@ -434,13 +486,13 @@ export function useAccountUsage(
     let cancelled = false;
     const unsubscribe = api.onCodexAccountChanged((payload: unknown) => {
       if (cancelled) return;
-      applyCodexAccountUsageSnapshot(payload, () => setSnapshot(selectCodexSlot(quotaSource, modelId)));
+      applyCodexAccountUsageSnapshot(payload, reselect);
     });
     return () => {
       cancelled = true;
       unsubscribe();
     };
-  }, [vendorKey, quotaSource, modelId]);
+  }, [vendorKey, quotaSource, reselect]);
 
   useEffect(() => {
     if (vendorKey !== 'codex' || !sessionId) return;
@@ -469,16 +521,13 @@ export function useAccountUsage(
       if (!payload.event.data) return;
       // 只更新桶表(事件带 limitId, 进它自己的桶); **不**据此判会话归属 ——
       // 这是账号级 fan-out 事件(见 matchCodexBucketForModel 注释)。
-      applyCodexAccountUsageSnapshot(
-        payload.event.data,
-        () => setSnapshot(selectCodexSlot(quotaSource, modelId)),
-      );
+      applyCodexAccountUsageSnapshot(payload.event.data, reselect);
     });
     return () => {
       cancelled = true;
       unsubscribe();
     };
-  }, [sessionId, vendorKey, quotaSource, modelId]);
+  }, [sessionId, vendorKey, quotaSource, reselect]);
 
   return snapshot;
 }

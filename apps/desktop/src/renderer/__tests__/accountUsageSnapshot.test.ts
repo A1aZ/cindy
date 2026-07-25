@@ -6,6 +6,7 @@ import {
   CODEX_DEFAULT_LIMIT_BUCKET,
   codexLimitBucketKey,
   isCodexBucketStale,
+  nextCodexBucketStaleAtMs,
   matchCodexBucketForModel,
   mergeCodexAccountUsageSnapshot,
   splitCodexAccountUsagePayload,
@@ -495,5 +496,36 @@ describe('bucket selection safety (review follow-up)', () => {
     });
     expect(merged.limitId).toBe('codex_bengalfox');
     expect(merged.limitName).toBe('GPT-5.3-Codex-Spark');
+  });
+});
+
+describe('nextCodexBucketStaleAtMs', () => {
+  const NOW = 1_785_000_000_000;
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const resetsAtSec = (offsetMs: number) => Math.floor((NOW + offsetMs) / 1000);
+
+  it('returns the soonest upcoming stale moment (reset + 24h grace)', () => {
+    const soon = { limitId: 'codex_bengalfox', primary: { usedPercent: 0, resetsAt: resetsAtSec(60_000) } };
+    const later = { limitId: 'codex', primary: { usedPercent: 30, resetsAt: resetsAtSec(10 * 60_000) } };
+    const staleAt = nextCodexBucketStaleAtMs({ a: soon, b: later }, NOW);
+    expect(staleAt).toBe(resetsAtSec(60_000) * 1000 + DAY_MS);
+  });
+
+  it('ignores already-stale buckets and reset-less windows', () => {
+    const alreadyStale = { limitId: 'x', primary: { usedPercent: 0, resetsAt: resetsAtSec(-3 * DAY_MS) } };
+    const resetless = { limitId: 'y', primary: { usedPercent: 10 } };
+    expect(nextCodexBucketStaleAtMs({ a: alreadyStale }, NOW)).toBeNull();
+    expect(nextCodexBucketStaleAtMs({ b: resetless }, NOW)).toBeNull();
+    expect(nextCodexBucketStaleAtMs({}, NOW)).toBeNull();
+  });
+
+  it('skips buckets where only some windows carry a timestamp', () => {
+    // 与 isCodexBucketStale 同口径: 这类桶永不进入陈旧, 不需要定时重选
+    const partial = {
+      limitId: 'z',
+      primary: { usedPercent: 10, resetsAt: resetsAtSec(60_000) },
+      secondary: { usedPercent: 20 },
+    };
+    expect(nextCodexBucketStaleAtMs({ z: partial }, NOW)).toBeNull();
   });
 });

@@ -47,6 +47,7 @@ import type { MobileCodexRateLimitsResult } from '@cindy/maker-shared/device-lin
 import { computeContextSheetSnapHeights, type ContextSheetSnap } from '@/session/contextSheetModel';
 import { writeClipboardText } from '@/session/messageActions';
 import { normalizeExtraDirs } from '@/session/newSession';
+import { selectCodexUsageForModel } from '@cindy/maker-shared/codex-usage-buckets';
 import {
   summarizeAccountRateLimits,
   summarizeCodexRateLimitReset,
@@ -411,10 +412,20 @@ export function SessionMenuSheet({
   const spend = summarizeSessionSpend(session);
   const usage = summarizeContextUsage(contextUsage);
   // 账号限额行:窗口构成完全跟随被控端上游接口返回(不假设 5h/周),解析不出内容 → null 不渲染。
-  const accountLimits = useMemo(
-    () => summarizeAccountRateLimits(accountUsage, Date.now()),
-    [accountUsage],
-  );
+  const accountLimits = useMemo(() => {
+    const now = Date.now();
+    // 账号可能同时有主配额桶与模型专属促销桶(如 GPT-5.3-Codex-Spark), 上游每次
+    // 只报一个桶 —— 必须按**本会话模型**选桶, 否则会显示别的模型的额度
+    // (desktop 同源问题见 useAccountUsage.matchCodexBucketForModel)。
+    const scoped = selectCodexUsageForModel({
+      fallback: accountUsage,
+      byLimitId: codexRateLimits?.rateLimitsByLimitId,
+      appServerBuckets: (accountUsage as { appServerBuckets?: unknown } | null)?.appServerBuckets,
+      modelId: session.model,
+      nowMs: now,
+    });
+    return summarizeAccountRateLimits(scoped, now);
+  }, [accountUsage, codexRateLimits, session.model]);
   const resetSummary = useMemo(
     () => summarizeCodexRateLimitReset(codexRateLimits, Date.now()),
     [codexRateLimits],

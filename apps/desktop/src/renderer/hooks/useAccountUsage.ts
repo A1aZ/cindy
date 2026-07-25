@@ -35,9 +35,10 @@ import {
   STALE_BUCKET_GRACE_MS,
   codexLimitBucketKey,
   isCodexBucketStale,
-} from '../../shared/codexUsageBuckets';
+  matchCodexBucketForModel,
+} from '@cindy/maker-shared/codex-usage-buckets';
 
-export { CODEX_DEFAULT_LIMIT_BUCKET, codexLimitBucketKey, isCodexBucketStale };
+export { CODEX_DEFAULT_LIMIT_BUCKET, codexLimitBucketKey, isCodexBucketStale, matchCodexBucketForModel };
 
 export interface RateLimitWindow {
   usedPercent: number;
@@ -82,48 +83,6 @@ let lastCodexAccountUsage: CodexAccountUsageSlots = {
   appServerBuckets: {},
   web: null,
 };
-
-/** 模型 id / 桶名 → 可比较 token(小写, 去非字母数字)。 */
-function normalizeModelToken(value: string | null | undefined): string {
-  return typeof value === 'string' ? value.toLowerCase().replace(/[^a-z0-9]/g, '') : '';
-}
-
-/**
- * 按**当前会话模型**选桶。
- *
- * 不能用「本会话收到的 account_usage 事件」判归属: 该 notification 是账号级的,
- * host 把同一条 fan-out 给所有 subscriber 再各自包上 sessionId(见 app-server
- * host.routeNotification), 拿它当会话事实等于把任意会话触发的桶串给所有会话 ——
- * 正是本 PR 要修的现象(review 反馈)。
- *
- * 规则(按序):
- *   1. 桶的 limitName 命中当前模型(如 'GPT-5.3-Codex-Spark' ↔ gpt-5.3-codex-spark);
- *   2. 通用桶 —— 由**稳定桶键**(limitId 'codex' / 缺省桶)识别, 不能靠「没有
- *      limitName」判断: limitName 可选, 同桶 merge 遇到省略该字段的部分通知会把它
- *      抹成 undefined, 模型专属桶会伪装成通用桶(review 反馈);
- *   3. 都没有 → null。**绝不**退而求其次选一个已知属于别的模型的桶 —— 那正是
- *      用户实报的错误现象(review 反馈)。
- * 陈旧桶(窗口全部过期超宽限, 如促销结束后服务端停推)不参与匹配。
- */
-export function matchCodexBucketForModel(
-  buckets: Record<string, RateLimitSnapshot>,
-  modelId: string | null | undefined,
-  nowMs: number = Date.now(),
-): RateLimitSnapshot | null {
-  const entries = Object.entries(buckets ?? {}).filter(
-    ([, bucket]) => !isCodexBucketStale(bucket, nowMs),
-  );
-  if (entries.length === 0) return null;
-  const model = normalizeModelToken(modelId);
-  if (model) {
-    for (const [, bucket] of entries) {
-      const name = normalizeModelToken(bucket.limitName);
-      if (name && (name === model || model.includes(name))) return bucket;
-    }
-  }
-  const generic = entries.find(([key]) => GENERIC_BUCKET_KEYS.has(key));
-  return generic ? generic[1] : null;
-}
 
 /**
  * 桶表中最近一个「由有效转为陈旧」的时刻(ms);没有可预期的转变 → null。

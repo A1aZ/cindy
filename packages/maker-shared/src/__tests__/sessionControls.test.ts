@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { selectCodexUsageForModel } from '../codexUsageBuckets';
 import {
   summarizeAccountRateLimits,
   summarizeCodexRateLimitReset,
@@ -173,5 +174,68 @@ describe('summarizeAccountRateLimits', () => {
     expect(summarizeAccountRateLimits('nope', NOW_MS)).toBeNull();
     expect(summarizeAccountRateLimits({}, NOW_MS)).toBeNull();
     expect(summarizeAccountRateLimits({ primary: { windowMinutes: 300 } }, NOW_MS)).toBeNull();
+  });
+});
+
+describe('selectCodexUsageForModel (per-model bucket selection)', () => {
+  // 与 desktop 同源的问题: 账号同时有主配额桶与模型专属促销桶时, 手机端的
+  // 用量详情不能显示别的模型的桶(PR #379 / issue #382)。
+  const NOW = 1_785_000_000_000;
+  const future = Math.floor((NOW + 3 * 24 * 60 * 60 * 1000) / 1000);
+  const MAIN = { limitId: 'codex', primary: { usedPercent: 63, resetsAt: future } };
+  const SPARK = {
+    limitId: 'codex_bengalfox',
+    limitName: 'GPT-5.3-Codex-Spark',
+    primary: { usedPercent: 0, windowMinutes: 10_080, resetsAt: future },
+  };
+
+  it('picks the generic bucket for an unrelated model', () => {
+    const picked = selectCodexUsageForModel({
+      fallback: SPARK,
+      byLimitId: { codex: MAIN, codex_bengalfox: SPARK },
+      modelId: 'gpt-5.6-sol',
+      nowMs: NOW,
+    });
+    expect(picked).toBe(MAIN);
+  });
+
+  it('picks the model-scoped bucket when the model matches', () => {
+    const picked = selectCodexUsageForModel({
+      fallback: MAIN,
+      byLimitId: { codex: MAIN, codex_bengalfox: SPARK },
+      modelId: 'gpt-5.3-codex-spark',
+      nowMs: NOW,
+    });
+    expect(picked).toBe(SPARK);
+  });
+
+  it('falls back to appServerBuckets when the authoritative table is absent', () => {
+    const picked = selectCodexUsageForModel({
+      fallback: SPARK,
+      byLimitId: null,
+      appServerBuckets: { codex: MAIN, codex_bengalfox: SPARK },
+      modelId: 'gpt-5.6-sol',
+      nowMs: NOW,
+    });
+    expect(picked).toBe(MAIN);
+  });
+
+  it('returns null instead of another model bucket when nothing matches', () => {
+    const picked = selectCodexUsageForModel({
+      fallback: SPARK,
+      byLimitId: { codex_bengalfox: SPARK },
+      modelId: 'gpt-5.6-sol',
+      nowMs: NOW,
+    });
+    expect(picked).toBeNull();
+  });
+
+  it('keeps the legacy top-level snapshot when no bucket table is available', () => {
+    const picked = selectCodexUsageForModel({
+      fallback: MAIN,
+      modelId: 'gpt-5.6-sol',
+      nowMs: NOW,
+    });
+    expect(picked).toBe(MAIN);
   });
 });

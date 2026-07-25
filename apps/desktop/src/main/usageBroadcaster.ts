@@ -38,7 +38,7 @@ import {
   UNSAFE_BUCKET_KEYS,
   codexLimitBucketKey,
   isCodexBucketStale,
-} from '../shared/codexUsageBuckets';
+} from '@cindy/maker-shared/codex-usage-buckets';
 
 import { createLogger } from './logger';
 import type { RegionalMoney } from '../shared/regionalMoney.js';

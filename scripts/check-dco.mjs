@@ -35,7 +35,11 @@ const SIGN_OFF_LINE = /^\s*Signed-off-by:\s*(.*?)\s*<([^<>]+)>\s*$/i;
 const BOT_EMAILS = new Set(['noreply@github.com']);
 const BOT_EMAIL_SUFFIX = '[bot]@users.noreply.github.com';
 
-const DEFAULT_BASE_CANDIDATES = ['origin/main', 'main'];
+// 本地默认基准。upstream/main 排在前面：从 fork 干活时 origin/main 可能领先于上游，
+// 拿它当基准会把 fork 自己那些未签名的提交排除在范围外，而 PR 的真实 base 是上游。
+// 这只是本地自查的启发式——真实 base 以 PR 上的 DCO check 为准，所以通过时会把实际用的
+// 基准打印出来。
+const DEFAULT_BASE_CANDIDATES = ['upstream/main', 'origin/main', 'main'];
 
 const git = (args, options = {}) =>
   execFileSync('git', args, { encoding: 'utf8', ...options }).trim();
@@ -60,12 +64,22 @@ const ATEXT = "[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]";
 const DOMAIN_LABEL = '[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?';
 const EMAIL_LOCAL_PART = new RegExp(`^${ATEXT}+(?:\\.${ATEXT}+)*$`);
 const EMAIL_DOMAIN = new RegExp(`^${DOMAIN_LABEL}(?:\\.${DOMAIN_LABEL})*\\.[A-Za-z]{2,}$`);
+// validator.isEmail 的长度上限，超出即拒。
+const MAX_LOCAL_PART = 64;
+const MAX_DOMAIN = 254;
+const MAX_DOMAIN_LABEL = 63;
 
 export function looksLikeEmail(email) {
   const value = String(email ?? '').trim();
   const at = value.lastIndexOf('@');
   if (at <= 0 || at === value.length - 1) return false;
-  return EMAIL_LOCAL_PART.test(value.slice(0, at)) && EMAIL_DOMAIN.test(value.slice(at + 1));
+
+  const localPart = value.slice(0, at);
+  const domain = value.slice(at + 1);
+  if (localPart.length > MAX_LOCAL_PART || domain.length > MAX_DOMAIN) return false;
+  if (domain.split('.').some((label) => label.length > MAX_DOMAIN_LABEL)) return false;
+
+  return EMAIL_LOCAL_PART.test(localPart) && EMAIL_DOMAIN.test(domain);
 }
 
 /** 提取 message 里所有 Signed-off-by 行。 */

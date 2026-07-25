@@ -28,6 +28,7 @@ import {
   classifyHook,
   readHookSource,
   resolveHooksDir,
+  resolveHooksPathFrom,
 } from '../install-dco-hook.mjs';
 
 const ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -182,9 +183,16 @@ test('looksLikeEmail rejects everything validator.isEmail would reject', () => {
     // 方括号同样不在 atext 内，validator 也拒；bot 提交在 exemptReason 就被豁免，
     // 根本走不到这里，所以拒绝它不影响 dependabot 等的 PR。
     '49699333+dependabot[bot]@users.noreply.github.com',
+    // 长度上限（validator 同样拒）：local part > 64、单个域名 label > 63、域名 > 254。
+    `${'a'.repeat(65)}@example.com`,
+    `a@${'b'.repeat(64)}.com`,
+    `a@${`${'b'.repeat(60)}.`.repeat(5)}com`,
   ]) {
     assert.equal(looksLikeEmail(bad), false, `should reject ${bad}`);
   }
+  // 恰好在上限上要放行，别把边界一起误杀。
+  assert.equal(looksLikeEmail(`${'a'.repeat(64)}@example.com`), true);
+  assert.equal(looksLikeEmail(`a@${'b'.repeat(63)}.com`), true);
 });
 
 test('merge commits and bot commits are exempt, humans are not', () => {
@@ -280,6 +288,18 @@ test('classifyHook never marks a changed hook as safe to overwrite', () => {
 
   // 旧版本 hook 与「被本人改过」在磁盘上分辨不出来，一律 modified 而非可覆盖状态。
   assert.equal(classifyHook(`${source.split('\n').slice(0, 2).join('\n')}\nold body\n`), 'modified');
+});
+
+test('legacy hooks-path fallback resolves against the caller cwd', () => {
+  // git < 2.31 的回落分支。--git-path 的相对路径基准是执行 git 时的 cwd；用仓库根去解析
+  // 会向上多走几级，把 hook 装进别的仓库。CI 上的 git 走不到这个分支，所以直接断言纯函数。
+  assert.equal(
+    resolveHooksPathFrom(path.join('..', '..', '.git', 'hooks'), '/repo/apps/desktop'),
+    path.resolve('/repo/.git/hooks')
+  );
+  assert.equal(resolveHooksPathFrom(path.join('.git', 'hooks'), '/repo'), path.resolve('/repo/.git/hooks'));
+  // 已经是绝对路径时原样返回。
+  assert.equal(resolveHooksPathFrom(path.resolve('/abs/.git/hooks'), '/anywhere'), path.resolve('/abs/.git/hooks'));
 });
 
 test('the hook source is a POSIX sh script that pins its trailer behaviour', () => {
@@ -444,8 +464,14 @@ test('installer refuses to clobber an edited hook without --force', { skip: !can
   const hookPath = path.join(repo.dir, '.git', 'hooks', HOOK_NAME);
   assert.equal(fs.readFileSync(hookPath, 'utf8'), readHookSource());
 
-  // resolveHooksDir 必须给出绝对路径（旧版 git 走 --git-path + toplevel 回落）。
-  assert.equal(path.isAbsolute(resolveHooksDir(repo.dir)), true);
+  // resolveHooksDir 必须给出绝对路径，且从子目录调用时也要落在本仓库的 hooks 目录。
+  // 回落分支（旧版 git）解析相对路径的基准必须是调用时的 cwd：拿仓库根去解析会向上多走
+  // 几级，写进隔壁仓库的 .git/hooks。
+  const expectedHooksDir = path.join(repo.dir, '.git', 'hooks');
+  assert.equal(resolveHooksDir(repo.dir), expectedHooksDir);
+  const subDir = path.join(repo.dir, 'nested', 'deeper');
+  fs.mkdirSync(subDir, { recursive: true });
+  assert.equal(resolveHooksDir(subDir), expectedHooksDir);
 
   // 装完之后开发者又追加了自己的逻辑。
   const edited = `${readHookSource()}\necho "my own extra step"\n`;

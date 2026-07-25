@@ -39,13 +39,25 @@ export function readHookSource() {
  * --path-format 要 git 2.31+，旧版 git 上直接失败会让安装器不可用，所以回落成
  * 「相对路径 + 仓库顶层」自己拼绝对路径。
  */
+/**
+ * 把 `git rev-parse --git-path hooks` 的返回值化成绝对路径。
+ *
+ * 关键点：它给的相对路径是相对于**执行 git 时的 cwd**，不是仓库根。从子目录调用时返回的
+ * 是形如 `../../.git/hooks` 的路径，若拿仓库根去解析就会向上多走几级，把 hook 写进隔壁
+ * 或上层仓库的 .git/hooks——所以基准必须是同一个 cwd。单独抽出来是为了能直接断言这点：
+ * 走到这个分支需要 git < 2.31，CI 上跑不到。
+ */
+export function resolveHooksPathFrom(hooksPath, cwd) {
+  return isAbsolute(hooksPath) ? hooksPath : resolve(cwd, hooksPath);
+}
+
 export function resolveHooksDir(cwd = process.cwd()) {
   const git = (args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
   try {
     return git(['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
   } catch {
-    const hooksPath = git(['rev-parse', '--git-path', 'hooks']);
-    return isAbsolute(hooksPath) ? hooksPath : resolve(git(['rev-parse', '--show-toplevel']), hooksPath);
+    // --path-format 要 git 2.31+，旧版回落到这里。
+    return resolveHooksPathFrom(git(['rev-parse', '--git-path', 'hooks']), cwd);
   }
 }
 

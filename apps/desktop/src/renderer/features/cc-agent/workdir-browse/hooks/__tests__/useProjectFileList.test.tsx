@@ -169,6 +169,29 @@ describe('useProjectFileList', () => {
     await waitFor(() => expect(mocks.listAllFiles).toHaveBeenCalledTimes(2));
   });
 
+  it('enabled=true 的 refresh 作废在途请求并发起新扫描,最终展示新快照', async () => {
+    let resolveOld!: (v: { files: string[]; truncated: boolean; elapsedMs: number }) => void;
+    mocks.listAllFiles.mockImplementationOnce(
+      () => new Promise((done) => { resolveOld = done; }),
+    );
+    const { result } = renderList({ workdir: '/repo', enabled: true });
+    expect(mocks.listAllFiles).toHaveBeenCalledTimes(1);
+
+    // 旧请求未完成时点刷新:必须发起第二次扫描(不 piggyback 已失效请求)。
+    mocks.listAllFiles.mockResolvedValue(listResult(['fresh.ts']));
+    act(() => {
+      result.current.refresh();
+    });
+    expect(mocks.listAllFiles).toHaveBeenCalledTimes(2);
+
+    // 旧请求此刻才完成:其结果不得覆盖 state,最终展示的是新快照。
+    await act(async () => {
+      resolveOld(listResult(['stale.ts']));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(result.current.files).toEqual(['fresh.ts']));
+  });
+
   it('refresh 期间完成的在途请求不得把旧快照写回缓存', async () => {
     let resolveFetch!: (v: { files: string[]; truncated: boolean; elapsedMs: number }) => void;
     mocks.listAllFiles.mockImplementationOnce(

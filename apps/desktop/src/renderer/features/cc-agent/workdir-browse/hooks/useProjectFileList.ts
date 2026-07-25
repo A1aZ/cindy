@@ -163,12 +163,16 @@ export function useProjectFileList(
 
   const doFetch = useCallback((wd: string, key: string) => {
     setState((prev) => ({ ...prev, isLoading: true }));
+    // 捕获发起时的失效代数:期间发生 refresh 时丢弃本回调的 setState —— 刷新后
+    // 的新请求会带最新数据,旧数据闪现一帧再被覆盖是可感知的视觉抖动。
+    const genAtStart = invalidationGen.get(key) ?? 0;
     // dedupe 并发 fetch:同 (端点, workdir) 在 inflight 中就 piggyback。
     let p = inflight.get(key);
     if (!p) {
-      p = (async () => {
+      const started = (async () => {
         const { snap, error } = await fetchOnce(wd, remoteHostId, deviceId, key);
         if (cacheKeyRef.current !== key) return; // 端点/目录已切换:丢弃过期结果
+        if ((invalidationGen.get(key) ?? 0) !== genAtStart) return; // 已被 refresh 失效
         setState({
           files: snap.files,
           truncated: snap.truncated,
@@ -176,12 +180,18 @@ export function useProjectFileList(
           error,
         });
       })();
-      inflight.set(key, p);
-      p.finally(() => inflight.delete(key));
+      p = started;
+      inflight.set(key, started);
+      // 只清理自己:refresh 可能已把 inflight 换成了新请求,无条件 delete 会把
+      // 新请求的 entry 误删,让后续并发 doFetch 重复 spawn rg。
+      started.finally(() => {
+        if (inflight.get(key) === started) inflight.delete(key);
+      });
     } else {
       // 已有 inflight:等同一个 promise 完后从 cache 取最新值。
       void p.then(() => {
         if (cacheKeyRef.current !== key) return; // 端点/目录已切换:丢弃过期结果
+        if ((invalidationGen.get(key) ?? 0) !== genAtStart) return; // 已被 refresh 失效
         const fresh = cache.get(key);
         setState({
           files: fresh?.files ?? [],
@@ -236,6 +246,9 @@ export function useProjectFileList(
     // 同时递增失效代数:refresh 时可能仍有在途请求,不 bump 的话它完成后会把
     // 刷新前的旧快照写回缓存,下次筛选被当成新鲜数据。
     bumpInvalidation(cacheKey);
+    // 在途请求也一并作废:留在 inflight 里会被紧随的 doFetch piggyback,用户
+    // 看到旧数据闪现后变空,且永远拿不到刷新后的新快照。
+    inflight.delete(cacheKey);
     if (!enabled) {
       // 树刷新时用户并没在筛选:只失效缓存,不触发扫描 —— 下次 enabled 自然拉新。
       // state 一并清空:留着旧 files 会让下次 doFetch 的 isLoading 期间闪 stale

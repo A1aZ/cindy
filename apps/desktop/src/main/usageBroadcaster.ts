@@ -297,8 +297,12 @@ export async function readAgentTodayUsage(agentKind: AgentKind): Promise<AgentTo
 // GPT-5.3-Codex-Spark 的 7 天窗口)。app-server 的 account/rateLimits/updated 每次
 // 只推**一个**桶(带 limitId, 即该 turn 实际消耗的桶); 用过 Spark 类模型专属桶后,
 // 它会覆盖主配额桶并挂在全局缓存上, 之后所有 Codex 会话的 chip 都读到它。
-// 桶表按 limitId 隔离, 同桶才 merge; renderer 按「本会话最近一次 turn 报告的
-// limitId」选桶(见 useAccountUsage)。
+// 桶表按 limitId 隔离, 同桶才 merge。renderer 按**当前会话模型**匹配桶
+// (limitName 命中模型 → 该桶; 否则通用桶, 由稳定桶键 'codex'/缺省桶识别;
+// 都不匹配 → 不显示 app-server 配额, 绝不退到别的模型的桶)——
+// **不能**用 account_usage 事件判会话归属: 它是账号级 fan-out, host 把同一条
+// 广播给所有 subscriber 再各自包 sessionId(见 app-server host.routeNotification)。
+// 详见 useAccountUsage.matchCodexBucketForModel。
 
 /** 桶表的缺省键: 快照没带 limitId 时用它(单桶账号 / 老 app-server)。 */
 export const CODEX_DEFAULT_LIMIT_BUCKET = '__default__';
@@ -331,6 +335,36 @@ export function codexLimitBucketKey(snapshot: RateLimitSnapshot | null | undefin
   const limitId = snapshot?.limitId;
   if (typeof limitId !== 'string' || limitId.length === 0) return CODEX_DEFAULT_LIMIT_BUCKET;
   return UNSAFE_BUCKET_KEYS.has(limitId) ? CODEX_DEFAULT_LIMIT_BUCKET : limitId;
+}
+
+/** 陈旧桶宽限: 窗口全部过点超过它, 视为服务端已停推该 limitId(促销结束等)。 */
+const STALE_BUCKET_GRACE_MS = 24 * 60 * 60 * 1000;
+
+/** 窗口全部过期且超宽限 = 陈旧桶。无窗口 / 无 resetsAt 不判陈旧(信息不足)。 */
+export function isCodexBucketStale(
+  bucket: RateLimitSnapshot | null | undefined,
+  nowMs: number,
+): boolean {
+  if (!bucket) return true;
+  const resets = [bucket.primary, bucket.secondary]
+    .filter((w): w is RateLimitWindow => Boolean(w))
+    .map((w) => w.resetsAt)
+    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0);
+  if (resets.length === 0) return false;
+  return Math.max(...resets) * 1000 + STALE_BUCKET_GRACE_MS < nowMs;
+}
+
+/**
+ * 剪掉陈旧桶(保留最近更新桶本身, 它是顶层兼容位的来源)。桶表持久化且纯累加,
+ * 不剪枝会让促销结束后的旧桶永远留着并被模型匹配选中(review 反馈)。
+ */
+function pruneStaleCodexBuckets(nowMs: number): void {
+  const next: Record<string, RateLimitSnapshot> = {};
+  for (const [key, bucket] of Object.entries(codexAppServerBuckets)) {
+    if (key !== codexAppServerLatestBucketKey && isCodexBucketStale(bucket, nowMs)) continue;
+    next[key] = bucket;
+  }
+  codexAppServerBuckets = next;
 }
 
 /** 当前 app-server 展示快照(最近更新桶);无桶 → null。 */
@@ -485,6 +519,9 @@ function mergeCodexAccountUsageSnapshot(
     planType: keepPreviousWebFields ? previous.planType : incoming.planType ?? previous.planType,
     credits,
     source: keepPreviousWebFields ? previous.source : incoming.source ?? 'codex-app-server',
+    // 身份元数据不可被部分通知抹掉(limitName 丢失会让模型专属桶伪装成通用桶)。
+    limitId: incoming.limitId ?? previous.limitId,
+    limitName: incoming.limitName ?? previous.limitName,
     updatedAt: incoming.updatedAt ?? previous.updatedAt,
     accountId: incoming.accountId ?? previous.accountId,
   };
@@ -566,6 +603,7 @@ export async function recordCodexAccountUsageSnapshot(snapshot: unknown): Promis
       ),
     };
     codexAppServerLatestBucketKey = bucketKey;
+    pruneStaleCodexBuckets(Date.now());
   }
   const payload = buildCodexAccountUsagePayload();
   broadcastCodexAccountUsage(payload);

@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CODEX_DEFAULT_LIMIT_BUCKET,
   codexLimitBucketKey,
+  isCodexBucketStale,
   matchCodexBucketForModel,
   mergeCodexAccountUsageSnapshot,
   splitCodexAccountUsagePayload,
@@ -373,7 +374,13 @@ describe('codex limit bucket isolation', () => {
       appServerBuckets: { codex: MAIN_BUCKET, broken: [], alsoBroken: 'nope' },
       webSnapshot: null,
     } as never);
-    expect(Object.keys(parts.appServerBuckets ?? {})).toEqual(['codex']);
+    const table = parts.appServerBuckets ?? {};
+    expect(Object.keys(table)).toEqual(['codex']);
+    // Object.keys 看不到原型污染 —— 显式断言注入值没经原型链泄漏出来。
+    // sanitize 用 null 原型对象兜底, 顺带断言全局 Object.prototype 未被污染。
+    expect((table as Record<string, unknown>).limitId).toBeUndefined();
+    expect(Object.getPrototypeOf(table)).toBeNull();
+    expect(({} as Record<string, unknown>).limitId).toBeUndefined();
   });
 });
 
@@ -429,5 +436,55 @@ describe('bucket key safety and authoritative top-level slot', () => {
       webSnapshot: null,
     } as never);
     expect(Object.keys(parts.appServerBuckets ?? {})).toEqual(['codex']);
+  });
+});
+
+describe('bucket selection safety (review follow-up)', () => {
+  const SPARK = {
+    limitId: 'codex_bengalfox',
+    limitName: 'GPT-5.3-Codex-Spark',
+    primary: { usedPercent: 0, windowMinutes: 10_080, resetsAt: 4_100_000_000 },
+  };
+  const MAIN = {
+    limitId: 'codex',
+    primary: { usedPercent: 63, windowMinutes: 300, resetsAt: 4_100_000_000 },
+  };
+  const NOW = 1_785_000_000_000;
+
+  it('returns null rather than a mismatched model bucket', () => {
+    // 旧格式水合只有 Spark 桶时, gpt-5.6-sol 必须什么都不显示, 而不是显示 Spark
+    expect(matchCodexBucketForModel({ codex_bengalfox: SPARK }, 'gpt-5.6-sol', NOW)).toBeNull();
+  });
+
+  it('identifies the generic bucket by its stable key, not by a missing limitName', () => {
+    // 同桶 merge 遇到省略 limitName 的部分通知 → 名字丢了, 但它仍是 Spark 桶
+    const namelessSpark = { ...SPARK, limitName: undefined };
+    const buckets = { codex_bengalfox: namelessSpark, codex: MAIN };
+    expect(matchCodexBucketForModel(buckets, 'gpt-5.6-sol', NOW)).toBe(MAIN);
+  });
+
+  it('skips stale buckets whose windows all expired long ago', () => {
+    const expiredSpark = {
+      ...SPARK,
+      primary: { usedPercent: 0, windowMinutes: 10_080, resetsAt: 1_700_000_000 },
+    };
+    expect(isCodexBucketStale(expiredSpark, NOW)).toBe(true);
+    expect(isCodexBucketStale(MAIN, NOW)).toBe(false);
+    // 促销结束后的过期 Spark 桶不再被同名模型选中
+    expect(matchCodexBucketForModel({ codex_bengalfox: expiredSpark }, 'gpt-5.3-codex-spark', NOW))
+      .toBeNull();
+  });
+
+  it('does not treat window-less or reset-less buckets as stale', () => {
+    expect(isCodexBucketStale({ limitId: 'codex' }, NOW)).toBe(false);
+    expect(isCodexBucketStale({ limitId: 'codex', primary: { usedPercent: 5 } }, NOW)).toBe(false);
+  });
+
+  it('keeps identity metadata when a later partial snapshot omits it', () => {
+    const merged = mergeCodexAccountUsageSnapshot(SPARK, {
+      primary: { usedPercent: 12, windowMinutes: 10_080, resetsAt: 4_100_000_000 },
+    });
+    expect(merged.limitId).toBe('codex_bengalfox');
+    expect(merged.limitName).toBe('GPT-5.3-Codex-Spark');
   });
 });

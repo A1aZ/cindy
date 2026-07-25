@@ -98,24 +98,33 @@ function normalizeModelToken(value: string | null | undefined): string {
  * host.routeNotification), 拿它当会话事实等于把任意会话触发的桶串给所有会话 ——
  * 正是本 PR 要修的现象(review 反馈)。
  *
- * 规则: 桶的 limitName 命中当前模型(如 'GPT-5.3-Codex-Spark' ↔ gpt-5.3-codex-spark)
- * → 选它; 否则选通用桶(没有模型专属 limitName 的那个); 都没有 → null, 由调用方
- * 回退最近更新桶。
+ * 规则(按序):
+ *   1. 桶的 limitName 命中当前模型(如 'GPT-5.3-Codex-Spark' ↔ gpt-5.3-codex-spark);
+ *   2. 通用桶 —— 由**稳定桶键**(limitId 'codex' / 缺省桶)识别, 不能靠「没有
+ *      limitName」判断: limitName 可选, 同桶 merge 遇到省略该字段的部分通知会把它
+ *      抹成 undefined, 模型专属桶会伪装成通用桶(review 反馈);
+ *   3. 都没有 → null。**绝不**退而求其次选一个已知属于别的模型的桶 —— 那正是
+ *      用户实报的错误现象(review 反馈)。
+ * 陈旧桶(窗口全部过期超宽限, 如促销结束后服务端停推)不参与匹配。
  */
 export function matchCodexBucketForModel(
   buckets: Record<string, RateLimitSnapshot>,
   modelId: string | null | undefined,
+  nowMs: number = Date.now(),
 ): RateLimitSnapshot | null {
-  const entries = Object.values(buckets ?? {});
+  const entries = Object.entries(buckets ?? {}).filter(
+    ([, bucket]) => !isCodexBucketStale(bucket, nowMs),
+  );
   if (entries.length === 0) return null;
   const model = normalizeModelToken(modelId);
   if (model) {
-    for (const bucket of entries) {
+    for (const [, bucket] of entries) {
       const name = normalizeModelToken(bucket.limitName);
       if (name && (name === model || model.includes(name))) return bucket;
     }
   }
-  return entries.find((bucket) => !normalizeModelToken(bucket.limitName)) ?? null;
+  const generic = entries.find(([key]) => GENERIC_BUCKET_KEYS.has(key));
+  return generic ? generic[1] : null;
 }
 
 /**
@@ -130,8 +139,12 @@ function selectCodexSlot(
   modelId?: string | null,
 ): RateLimitSnapshot | null {
   if (quotaSource === 'openai-web') return lastCodexAccountUsage.web;
-  return matchCodexBucketForModel(lastCodexAccountUsage.appServerBuckets, modelId)
-    ?? lastCodexAccountUsage.appServer;
+  const buckets = lastCodexAccountUsage.appServerBuckets;
+  // 桶表已建立: 选桶结果就是最终答案 —— 匹配不到宁可不显示 app-server 配额,
+  // 也不回退顶层兼容位(它可能正是别的模型的桶, review 反馈)。
+  if (Object.keys(buckets).length > 0) return matchCodexBucketForModel(buckets, modelId);
+  // 桶表为空(旧 main / 尚无 app-server 数据): 保持旧行为用顶层兼容位。
+  return lastCodexAccountUsage.appServer;
 }
 
 function readUsageApi(): {
@@ -158,13 +171,40 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-/** 桶表守卫: 丢掉非对象条目(畸形 payload 不得进缓存, 与 main sanitize 同口径)。 */
+/**
+ * 桶表守卫: 丢掉非对象条目与原型污染键(畸形 payload 不得进缓存, 与 main
+ * sanitize 同口径)。用 null 原型对象兜底 —— 即便上游再加键也碰不到 Object.prototype。
+ */
 function sanitizeCodexBuckets(raw: Record<string, unknown>): Record<string, RateLimitSnapshot> {
-  const out: Record<string, RateLimitSnapshot> = {};
+  const out: Record<string, RateLimitSnapshot> = Object.create(null);
   for (const [key, value] of Object.entries(raw)) {
+    if (UNSAFE_BUCKET_KEYS.has(key)) continue;
     if (isRateLimitSnapshot(value)) out[key] = value;
   }
   return out;
+}
+
+/** 通用(非模型专属)桶的稳定标识 —— 只认桶键, 不看易丢失的 limitName。 */
+const GENERIC_BUCKET_KEYS = new Set(['codex', CODEX_DEFAULT_LIMIT_BUCKET]);
+
+/** 窗口全部过期且超过宽限 = 陈旧桶(促销结束 / 服务端已停推该 limitId)。 */
+const STALE_BUCKET_GRACE_MS = 60 * 60 * 1000;
+
+export function isCodexBucketStale(
+  bucket: RateLimitSnapshot | null | undefined,
+  nowMs: number,
+): boolean {
+  if (!bucket) return true;
+  const windows = [bucket.primary, bucket.secondary].filter(
+    (w): w is RateLimitWindow => Boolean(w),
+  );
+  if (windows.length === 0) return false;
+  const resets = windows
+    .map((w) => w.resetsAt)
+    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0);
+  if (resets.length === 0) return false;
+  // 全部窗口都已过点且超过宽限(宽限给正常窗口翻转留出等新快照的时间)。
+  return Math.max(...resets) * 1000 + STALE_BUCKET_GRACE_MS < nowMs;
 }
 
 export function mergeCodexAccountUsageSnapshot(
@@ -203,6 +243,10 @@ export function mergeCodexAccountUsageSnapshot(
     planType: keepPreviousWebFields ? previous.planType : incoming.planType ?? previous.planType,
     credits,
     source: keepPreviousWebFields ? previous.source : incoming.source ?? 'codex-app-server',
+    // 身份元数据不可被部分通知抹掉 —— limitName 丢失会让模型专属桶伪装成通用桶
+    // (通用桶判定虽已改用桶键, 但 label / 模型匹配仍依赖它; review 反馈)。
+    limitId: incoming.limitId ?? previous.limitId,
+    limitName: incoming.limitName ?? previous.limitName,
     updatedAt: incoming.updatedAt ?? previous.updatedAt,
     accountId: incoming.accountId ?? previous.accountId,
   };

@@ -304,3 +304,44 @@ describe('codex bucket edge cases (review follow-up)', () => {
     expect(Object.keys(payload?.appServerBuckets ?? {})).toEqual(['codex']);
   });
 });
+
+describe('codex stale bucket pruning', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mocks.queryOne.mockReset().mockResolvedValue(null);
+    mocks.exec.mockReset().mockResolvedValue(undefined);
+    mocks.getCurrentUserId.mockReturnValue('user-1');
+  });
+
+  it('prunes buckets whose windows expired long ago, keeping the latest one', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    // 促销早已结束的 Spark 桶(窗口过点远超宽限)
+    await broadcaster.recordCodexAccountUsageSnapshot({
+      limitId: 'codex_bengalfox',
+      limitName: 'GPT-5.3-Codex-Spark',
+      primary: { usedPercent: 0, windowMinutes: 10_080, resetsAt: 1_600_000_000 },
+      source: 'codex-app-server',
+    });
+    // 新的通用桶事件到来 → 触发剪枝
+    await broadcaster.recordCodexAccountUsageSnapshot({
+      limitId: 'codex',
+      primary: { usedPercent: 51, windowMinutes: 300, resetsAt: 4_100_000_000 },
+      source: 'codex-app-server',
+    });
+
+    const payload = await broadcaster.readCodexAccountUsageSnapshot();
+    expect(Object.keys(payload?.appServerBuckets ?? {})).toEqual(['codex']);
+  });
+
+  it('never prunes the latest bucket even if its window looks expired', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    await broadcaster.recordCodexAccountUsageSnapshot({
+      limitId: 'codex',
+      primary: { usedPercent: 51, windowMinutes: 300, resetsAt: 1_600_000_000 },
+      source: 'codex-app-server',
+    });
+
+    const payload = await broadcaster.readCodexAccountUsageSnapshot();
+    expect(Object.keys(payload?.appServerBuckets ?? {})).toEqual(['codex']);
+  });
+});

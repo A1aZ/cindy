@@ -73,12 +73,14 @@ function normalizeSettings(raw: unknown): ImDefaultSettings {
 
 function normalizeDocument(raw: unknown): ImDefaultSettingsDocument {
   const record = isRecord(raw) ? raw : {};
+  const isVersioned = 'schemaVersion' in record;
   const hasLegacyRootSettings =
-    'agentKind' in record ||
-    'agents' in record ||
-    'providerId' in record ||
-    'model' in record ||
-    'effort' in record;
+    !isVersioned &&
+    ('agentKind' in record ||
+      'agents' in record ||
+      'providerId' in record ||
+      'model' in record ||
+      'effort' in record);
 
   // Before schema v2 there was one flat route shared by every IM channel.
   // A legacy file is unambiguous user customization, so seed every channel
@@ -241,7 +243,7 @@ function documentOverrides(
   next: ImDefaultSettingsDocument,
   defaults: ImDefaultSettingsDocument,
 ): Record<string, unknown> {
-  const overrides: Record<string, unknown> = { schemaVersion: SETTINGS_SCHEMA_VERSION };
+  const overrides: Record<string, unknown> = {};
   const global = settingsOverrides(next.global, defaults.global);
   if (Object.keys(global).length > 0) overrides.global = global;
 
@@ -251,6 +253,19 @@ function documentOverrides(
     if (Object.keys(channelOverrides).length > 0) channels[channel] = channelOverrides;
   }
   if (Object.keys(channels).length > 0) overrides.channels = channels;
+
+  if (Object.keys(overrides).length === 0) return overrides;
+
+  // Write schemaVersion only when there are actual overrides, so that the
+  // "empty overrides → reset()" cleanup path in createOverrideSettingsFile works.
+  overrides.schemaVersion = SETTINGS_SCHEMA_VERSION;
+
+  // Preserve flat legacy fields so that an older app version (pre-v2) reading
+  // this file still picks up the global route instead of falling back to
+  // system defaults.
+  overrides.agentKind = next.global.agentKind;
+  overrides.agents = next.global.agents;
+
   return overrides;
 }
 

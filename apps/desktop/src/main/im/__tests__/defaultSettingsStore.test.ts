@@ -86,18 +86,20 @@ describe('im default settings store', () => {
       },
     });
 
-    expect(JSON.parse(fs.readFileSync(settingsFile(), 'utf-8'))).toEqual({
-      schemaVersion: 2,
-      global: {
-        agents: {
-          codex: {
-            providerId: 'openai',
-            model: 'gpt-5.5',
-            effort: 'high',
-          },
+    const persisted = JSON.parse(fs.readFileSync(settingsFile(), 'utf-8'));
+    expect(persisted.schemaVersion).toBe(2);
+    expect(persisted.global).toEqual({
+      agents: {
+        codex: {
+          providerId: 'openai',
+          model: 'gpt-5.5',
+          effort: 'high',
         },
       },
     });
+    // Legacy flat fields preserved for old app versions
+    expect(persisted.agentKind).toBe(IM_DEFAULT_SETTINGS.agentKind);
+    expect(persisted.agents).toBeDefined();
   });
 
   it('preserves existing agent overrides when another agent is updated', () => {
@@ -121,21 +123,34 @@ describe('im default settings store', () => {
       },
     });
 
-    expect(JSON.parse(fs.readFileSync(settingsFile(), 'utf-8'))).toEqual({
-      schemaVersion: 2,
-      global: {
-        agents: {
-          'claude-code': {
-            providerId: 'anthropic',
-            model: 'claude-sonnet-4-8',
-            effort: 'xhigh',
-          },
-          codex: {
-            providerId: 'openai',
-            model: 'gpt-5.5',
-            effort: 'high',
-          },
+    const persisted = JSON.parse(fs.readFileSync(settingsFile(), 'utf-8'));
+    expect(persisted.schemaVersion).toBe(2);
+    expect(persisted.global).toEqual({
+      agents: {
+        'claude-code': {
+          providerId: 'anthropic',
+          model: 'claude-sonnet-4-8',
+          effort: 'xhigh',
         },
+        codex: {
+          providerId: 'openai',
+          model: 'gpt-5.5',
+          effort: 'high',
+        },
+      },
+    });
+    // Legacy flat fields mirror global route for backward compatibility
+    expect(persisted.agentKind).toBe(IM_DEFAULT_SETTINGS.agentKind);
+    expect(persisted.agents).toEqual({
+      'claude-code': {
+        providerId: 'anthropic',
+        model: 'claude-sonnet-4-8',
+        effort: 'xhigh',
+      },
+      codex: {
+        providerId: 'openai',
+        model: 'gpt-5.5',
+        effort: 'high',
       },
     });
   });
@@ -157,10 +172,10 @@ describe('im default settings store', () => {
 
     scopeMocks.owner = 'cloud-a';
     expect(readImDefaultSettings().agentKind).toBe('codex');
-    expect(JSON.parse(fs.readFileSync(settingsFile(), 'utf-8'))).toEqual({
-      schemaVersion: 2,
-      global: { agentKind: 'codex' },
-    });
+    const persisted = JSON.parse(fs.readFileSync(settingsFile(), 'utf-8'));
+    expect(persisted.schemaVersion).toBe(2);
+    expect(persisted.global).toEqual({ agentKind: 'codex' });
+    expect(persisted.agentKind).toBe('codex');
   });
 
   it('migrates a legacy global override into independent channel routes', () => {

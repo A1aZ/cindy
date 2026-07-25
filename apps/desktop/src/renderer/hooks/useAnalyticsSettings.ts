@@ -43,16 +43,24 @@ export function useAnalyticsSettings(): {
 
   useEffect(() => {
     let cancelled = false;
+    // IPC 往返期间用户可能已经拨了开关,而广播先一步到达。那条广播比初始快照新,
+    // 不能被这里的旧结果覆盖 —— 否则设置页会显示成与实际隐私选择相反的状态。
+    let sawBroadcast = false;
     void window.electronAPI
       .getAnalyticsSettings()
       .then((payload) => {
-        if (!cancelled) setState(normalize(payload));
+        if (cancelled || sawBroadcast) return;
+        setState(normalize(payload));
       })
       .catch(() => {
-        if (!cancelled) setState((current) => ({ ...current, loading: false }));
+        if (!cancelled && !sawBroadcast) {
+          setState((current) => ({ ...current, loading: false }));
+        }
       });
     const unsubscribe = window.electronAPI.onAnalyticsSettingsChange((payload) => {
-      if (!cancelled) setState(normalize(payload));
+      if (cancelled) return;
+      sawBroadcast = true;
+      setState(normalize(payload));
     });
     return () => {
       cancelled = true;

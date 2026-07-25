@@ -186,6 +186,32 @@ describe('mobile analytics consent store', () => {
     expect(isAnalyticsAllowed()).toBe(false);
   });
 
+  it('serializes concurrent writes instead of letting them overwrite each other', async () => {
+    // 设置页拨开关 / 恢复默认 / 登出清理可能并发进入。若不串行化,各自基于入队时的
+    // 旧 state 计算 next,最后完成的那个会把别人的结果覆盖掉 —— 下次冷启动可能恢复
+    // 出已经被清除的同意,重新允许上报。
+    await acceptPrivacyConsent();
+
+    // 同时发起:关闭开关 + 登出撤销同意
+    await Promise.all([setAnalyticsEnabled(false), clearAnalyticsConsent()]);
+
+    // 两个意图都必须保留:同意已撤销,且显式 opt-out 没被覆盖。
+    expect(stored()).toEqual({ consent: false, enabled: false });
+    expect(getAnalyticsConsentState()).toEqual({
+      consent: false,
+      enabled: false,
+      enabledCustomized: true,
+    });
+    expect(isAnalyticsAllowed()).toBe(false);
+  });
+
+  it('re-checks the record state after queueing so migration cannot double-write', async () => {
+    // 迁移与「用户刚在登录页同意」并发时,排队期间记录可能已经建立。
+    await Promise.all([migrateExistingLoginAsConsented(), acceptPrivacyConsent()]);
+
+    expect(stored()).toEqual({ consent: true });
+  });
+
   it('restores default-following when the override is cleared', async () => {
     await acceptPrivacyConsent();
     await setAnalyticsEnabled(false);

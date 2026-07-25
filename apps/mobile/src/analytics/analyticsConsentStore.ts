@@ -98,17 +98,37 @@ function serialize(value: InternalState): string {
 }
 
 /**
- * 先落盘,成功后才改内存并通知。
+ * 所有写入串行执行的队列。
+ *
+ * 设置页拨开关 / 恢复默认 / 登出清理可能并发进入(例如用户点完开关立刻登出)。
+ * 不串行化的话,几个调用方会各自基于**进入时**的旧 state 计算 next,异步写入交错,
+ * 最后一个完成的把别人的结果覆盖掉 —— 下次冷启动可能恢复出已经被清除的同意,
+ * 或者错误的开关值,进而重新允许上报。
+ */
+let mutationQueue: Promise<void> = Promise.resolve();
+
+/**
+ * 先落盘,成功后才改内存并通知;整个过程在队列内串行。
+ *
+ * `update` 在队列里执行,拿到的是**当前最新**的 state,不是调用方入队时的快照。
+ * 返回 null 表示无需写入。
  *
  * 顺序不能反:关闭统计时若先改内存再落盘,写盘失败会让设置页显示「已关闭」、
  * 而重启后又变回开启,并且调用方 await 抛出后连停止上报都不会执行。
  */
-async function commit(next: InternalState): Promise<void> {
-  await AsyncStorage.setItem(STORAGE_KEY, serialize(next));
-  state = next;
-  hasStoredRecord = true;
-  hydrated = true;
-  notifyListeners();
+function commit(update: (current: InternalState) => InternalState | null): Promise<void> {
+  const run = mutationQueue.then(async () => {
+    const next = update(state);
+    if (next === null) return;
+    await AsyncStorage.setItem(STORAGE_KEY, serialize(next));
+    state = next;
+    hasStoredRecord = true;
+    hydrated = true;
+    notifyListeners();
+  });
+  // 队列本身不能被一次失败卡死;失败由调用方通过返回的 promise 感知。
+  mutationQueue = run.catch(() => undefined);
+  return run;
 }
 
 /** 冷启动调用一次;读失败一律 fail closed 到「未同意」。 */
@@ -166,14 +186,14 @@ export function subscribeAnalyticsConsent(listener: () => void): () => void {
  */
 export async function acceptPrivacyConsent(): Promise<void> {
   await hydrateAnalyticsConsent();
-  if (state.consent) return;
-  await commit({ ...state, consent: true });
+  await commit((current) => (current.consent ? null : { ...current, consent: true }));
 }
 
 export async function setAnalyticsEnabled(enabled: boolean): Promise<void> {
   await hydrateAnalyticsConsent();
-  if (state.enabledOverride === enabled) return;
-  await commit({ ...state, enabledOverride: enabled });
+  await commit((current) =>
+    current.enabledOverride === enabled ? null : { ...current, enabledOverride: enabled },
+  );
 }
 
 /**
@@ -184,8 +204,9 @@ export async function setAnalyticsEnabled(enabled: boolean): Promise<void> {
  */
 export async function clearAnalyticsEnabledOverride(): Promise<void> {
   await hydrateAnalyticsConsent();
-  if (state.enabledOverride === null) return;
-  await commit({ ...state, enabledOverride: null });
+  await commit((current) =>
+    current.enabledOverride === null ? null : { ...current, enabledOverride: null },
+  );
 }
 
 /**
@@ -200,17 +221,26 @@ export async function clearAnalyticsEnabledOverride(): Promise<void> {
  */
 export async function clearAnalyticsConsent(): Promise<void> {
   await hydrateAnalyticsConsent();
-  const next: InternalState = { consent: false, enabledOverride: state.enabledOverride };
-  if (next.enabledOverride === null) {
+  // 删除分支也必须进同一条队列,否则会与并发的开关写入互相覆盖。
+  const run = mutationQueue.then(async () => {
+    if (state.enabledOverride !== null) {
+      const next: InternalState = { consent: false, enabledOverride: state.enabledOverride };
+      await AsyncStorage.setItem(STORAGE_KEY, serialize(next));
+      state = next;
+      hasStoredRecord = true;
+      hydrated = true;
+      notifyListeners();
+      return;
+    }
     // 没有 override 要留,整条记录可以删干净(回到「首次安装」形态)。
     await AsyncStorage.removeItem(STORAGE_KEY);
     state = { ...EMPTY };
     hasStoredRecord = false;
     hydrated = true;
     notifyListeners();
-    return;
-  }
-  await commit(next);
+  });
+  mutationQueue = run.catch(() => undefined);
+  await run;
 }
 
 /**
@@ -225,17 +255,25 @@ export async function clearAnalyticsConsent(): Promise<void> {
 export async function migrateExistingLoginAsConsented(): Promise<boolean> {
   await hydrateAnalyticsConsent();
   if (hasStoredRecord !== false) return false;
-  await commit({ ...state, consent: true });
-  return true;
+  let migrated = false;
+  await commit((current) => {
+    // 入队后再复核一次:排队期间可能已经有别的写入建立了记录。
+    if (hasStoredRecord !== false) return null;
+    migrated = true;
+    return { ...current, consent: true };
+  });
+  return migrated;
 }
 
 export const __testing = {
   storageKey: STORAGE_KEY,
   async resetMemory(): Promise<void> {
+    await mutationQueue.catch(() => undefined);
     state = { ...EMPTY };
     hasStoredRecord = null;
     hydrated = false;
     hydratePromise = null;
+    mutationQueue = Promise.resolve();
     listeners.clear();
   },
 };

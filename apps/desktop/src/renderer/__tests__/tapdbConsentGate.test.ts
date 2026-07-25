@@ -307,7 +307,26 @@ describe('TapDB consent gate', () => {
     expect(tapdb.optOutTracking).toHaveBeenCalledTimes(2);
   });
 
-  it('keeps reporting blocked while an opt-out retry is still failing', async () => {
+  it('stops our own reporting immediately even if the SDK opt-out throws', async () => {
+    // fail closed:用户已经表达了关闭意图,本模块主动发起的上报必须**立刻**停,
+    // 不能等 SDK 侧同步成功。SDK 内部还在采集是另一回事,靠后续广播重试。
+    installElectronApi(ALLOWED);
+    const client = await importClient();
+
+    client.initTapdb();
+    await flush();
+    tapdb.optOutTracking.mockImplementation(() => {
+      throw new Error('localStorage unavailable');
+    });
+
+    settingsListener?.({ privacyConsentAccepted: true, analyticsEnabled: false, allowed: false });
+    tapdb.track.mockClear();
+    hidePage();
+
+    expect(tapdb.track).not.toHaveBeenCalled();
+  });
+
+  it('does not bind users after a failed opt-out either', async () => {
     installElectronApi(ALLOWED);
     const client = await importClient();
 
@@ -317,19 +336,11 @@ describe('TapDB consent gate', () => {
       throw new Error('localStorage unavailable');
     });
     settingsListener?.({ privacyConsentAccepted: true, analyticsEnabled: false, allowed: false });
-    tapdb.track.mockClear();
+    tapdb.setUser.mockClear();
 
-    // opt-out 没成功,但我们自己守闸的 page_hide 也不该再发 —— 这条路径完全由
-    // reportingAllowed 决定,而它没有被提交成 true 以外的值,SDK 侧仍在采集是
-    // 已知且会重试的状态。
-    hidePage();
-    expect(tapdb.track).toHaveBeenCalledWith('page_hide');
+    authListener?.({ isAuthenticated: true, user: { id: 'user-2' } });
 
-    tapdb.optOutTracking.mockReset();
-    settingsListener?.({ privacyConsentAccepted: true, analyticsEnabled: false, allowed: false });
-    tapdb.track.mockClear();
-    hidePage();
-    expect(tapdb.track).not.toHaveBeenCalled();
+    expect(tapdb.setUser).not.toHaveBeenCalled();
   });
 
   it('fails closed when the settings read rejects', async () => {

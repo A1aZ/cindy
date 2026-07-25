@@ -52,8 +52,20 @@ const TAPDB_CONFIG = {
 let gateMounted = false;
 /** SDK 是否已经 init。init 不可逆,关闭统计走 optOutTracking。 */
 let sdkInitialized = false;
-/** main 侧最近一次结论:是否允许上报。fail closed,默认 false。 */
+/**
+ * 我们自己的闸:用户意图。所有由本模块主动发起的上报(app_start / daily_active /
+ * setUser / page_hide)都看它。关闭是**立即生效**的,不等 SDK 侧同步成功。
+ */
 let reportingAllowed = false;
+/**
+ * SDK 侧已经成功应用到的状态;null = 还没应用过任何状态。
+ *
+ * 与 reportingAllowed 分开,是因为两者会短暂不一致:optOutTracking() 可能抛
+ * (比如它依赖的 localStorage 不可用)。这时用户意图已经是「关」(reportingAllowed
+ * 立刻置 false,我们自己的上报全停),但 SDK 内部仍在采集,需要靠后续广播重试。
+ * guard 同时看这两个值,才能既 fail closed 又不把重试吃掉。
+ */
+let sdkAppliedAllowed: boolean | null = null;
 /** 每收到一次广播 +1;用于丢弃 IPC 往返期间已经过期的初始快照。 */
 let settingsEpoch = 0;
 let currentUserId: string | null = null;
@@ -178,17 +190,21 @@ function reportPageHide(): void {
 
 /** 把 main 的结论落到 SDK:首次放行 → init;关闭 → opt-out;重新放行 → opt-in。 */
 function applyReportingAllowed(next: boolean): void {
-  // 状态没变且不存在"该 init 却还没 init"的落差时,直接返回。
-  if (next === reportingAllowed && (!next || sdkInitialized)) return;
+  // 只有「用户意图」和「SDK 已应用状态」都已经等于目标值时才可以早返回。
+  // 单看 reportingAllowed 会把 SDK 侧失败后的重试吃掉;单看 sdkAppliedAllowed 又
+  // 会在每次同值广播上重复做无用功。
+  if (next === reportingAllowed && next === sdkAppliedAllowed && (!next || sdkInitialized)) {
+    return;
+  }
 
-  // ⚠️ 不要在这里就把 reportingAllowed 改掉。SDK 调用可能抛(比如 optOutTracking
-  // 依赖的 localStorage 不可用),一旦提前提交状态,后续每个 allowed:false 的快照
-  // 都会在上面那道 guard 早返回、永不重试 —— 设置和 UI 都说已关闭,SDK 却还在采集。
-  // 只有 SDK 侧真正做完,才认这次状态转移。
+  // 关闭是用户的明确意图:**先立刻停掉我们自己的上报**,再去管 SDK。这一步不放在
+  // try 里,因为它不可能失败,也绝不该因为后面 SDK 抛异常而回退(fail closed)。
+  if (!next) reportingAllowed = false;
+
   try {
     if (!next) {
       if (!sdkInitialized) {
-        reportingAllowed = false;
+        sdkAppliedAllowed = false;
         log.info('reporting not allowed; TapDB stays uninitialized');
         return;
       }
@@ -198,7 +214,7 @@ function applyReportingAllowed(next: boolean): void {
       // page_hide 不在此列 —— SDK 的 beacon 路径没有这道闸,所以我们没有开启
       // autoTrack.pageHide,改由 reportPageHide 自己守闸(见 initTapdb)。
       TapDBAPI.optOutTracking();
-      reportingAllowed = false;
+      sdkAppliedAllowed = false;
       lastActiveDate = null;
       lastSetUserDate = null;
       log.info('reporting disabled (opt-out)');
@@ -208,7 +224,9 @@ function applyReportingAllowed(next: boolean): void {
     if (!sdkInitialized) {
       // initSdk 自己在成功后置 sdkInitialized;失败时保持未初始化,下次广播重试。
       initSdk();
-      reportingAllowed = sdkInitialized;
+      if (!sdkInitialized) return;
+      reportingAllowed = true;
+      sdkAppliedAllowed = true;
       return;
     }
 
@@ -217,10 +235,12 @@ function applyReportingAllowed(next: boolean): void {
     TapDBAPI.optInTracking();
     applySuperProperties();
     reportingAllowed = true;
+    sdkAppliedAllowed = true;
     reportActive('app_start');
     log.info('reporting re-enabled (opt-in)');
   } catch (err) {
-    // 状态没提交 = 下一次同值广播不会被 guard 挡掉,会重新尝试。
+    // sdkAppliedAllowed 没提交 = 下一次同值广播不会被 guard 挡掉,会重新尝试。
+    // 关闭方向上 reportingAllowed 已经是 false,期间我们自己一条都不会发。
     log.error('apply analytics permission failed; will retry on next change', err);
   }
 }
@@ -318,6 +338,7 @@ export const __testing = {
     gateMounted = false;
     sdkInitialized = false;
     reportingAllowed = false;
+    sdkAppliedAllowed = null;
     settingsEpoch = 0;
     currentUserId = null;
     lastActiveDate = null;

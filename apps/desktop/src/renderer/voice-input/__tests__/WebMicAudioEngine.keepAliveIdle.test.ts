@@ -632,6 +632,31 @@ describe('keep-alive microphone idle window', () => {
     expect(track.stopped).toBe(true);
   });
 
+  it('stops a direct stream that arrives after an HMR swap', async () => {
+    let resolveStream: (value: unknown) => void = () => undefined;
+    getUserMedia.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveStream = resolve;
+    }));
+
+    const engine = new mod.WebMicAudioEngine({
+      workletUrl: WORKLET_URL,
+      keepAlive: false,
+      onInterrupted: vi.fn(),
+    });
+    const starting = engine.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Vite swaps the module while the device handshake is still pending. The
+    // engine has not reached the registry, so releasing the registry alone
+    // would let the stream arrive afterwards and open the microphone inside a
+    // module whose power listener is already gone.
+    await mod.disposeVoiceInputAudioModuleForHmr();
+    resolveStream({ getAudioTracks: () => [track], getTracks: () => [track] });
+
+    await expect(starting).rejects.toThrow(/disposed/i);
+    expect(track.stopped).toBe(true);
+  });
+
   it('releases a direct capture stream on a power event', async () => {
     const onInterrupted = vi.fn();
     // fast activation off: this capture never touches the keep-alive session,

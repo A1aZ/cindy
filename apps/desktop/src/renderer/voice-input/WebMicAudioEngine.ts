@@ -149,6 +149,31 @@ export function currentPowerReleaseGeneration(): number {
   return powerReleaseGeneration;
 }
 
+/**
+ * Tear down everything this module instance owns, for the HMR swap.
+ *
+ * Bumping the generation first is what covers acquisitions that are still
+ * awaiting enumeration or getUserMedia: they have not reached
+ * liveDirectCaptureEngines yet, so releasing the registry alone would let them
+ * resolve afterwards and register into this *disposed* module's set — where the
+ * replacement module's power listener can never reach them, leaving the
+ * microphone open across a later suspend.
+ *
+ * Exported for the tests; the dev-only `import.meta.hot` block below is the
+ * real caller.
+ */
+export function disposeVoiceInputAudioModuleForHmr(): Promise<void> {
+  powerReleaseGeneration += 1;
+  keepAlivePowerReleaseUnsubscribe?.();
+  keepAlivePowerReleaseUnsubscribe = undefined;
+  keepAlivePowerReleaseListening = false;
+  // React Fast Refresh can keep the component and its engine ref alive across
+  // the swap, and the new module instance has an empty registry — so without
+  // this the old direct stream stays live with nothing able to reach it.
+  releaseDirectCaptureEngines('hmr');
+  return disposeKeepAliveVoiceInputMicrophone('hmr');
+}
+
 export function isPowerReleaseCancellation(error: unknown): boolean {
   if (!isKeepAliveSessionDisposedError(error)) return false;
   const reason = readErrorString(error, 'reason');
@@ -1642,13 +1667,6 @@ function flushWorkletBufferedAudio(worklet?: AudioWorkletNode): Promise<void> {
 
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
-    keepAlivePowerReleaseUnsubscribe?.();
-    keepAlivePowerReleaseUnsubscribe = undefined;
-    keepAlivePowerReleaseListening = false;
-    // React Fast Refresh can keep the component and its engine ref alive across
-    // the swap, and the new module instance has an empty registry — so without
-    // this the old direct stream stays live with nothing able to reach it.
-    releaseDirectCaptureEngines('hmr');
-    void disposeKeepAliveVoiceInputMicrophone('hmr');
+    void disposeVoiceInputAudioModuleForHmr();
   });
 }

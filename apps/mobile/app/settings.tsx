@@ -21,6 +21,13 @@ import { useTranslation } from 'react-i18next';
 import type { DeviceView } from '@cindy/device-link';
 import { useAuth } from '@/auth/AuthContext';
 import { loginText } from '@/auth/loginMessages';
+import {
+  getAnalyticsConsentState,
+  hydrateAnalyticsConsent,
+  setAnalyticsEnabled,
+  subscribeAnalyticsConsent,
+} from '@/analytics/analyticsConsentStore';
+import { initMobileTapdb, stopMobileTapdbReporting } from '@/analytics/mobileTapdb';
 import { SUPPORTED_LOCALES, type LocalePreference } from '@/i18n';
 import { useLocale } from '@/i18n/useLocale';
 import { goBackGuarded } from '@/utils/backGuard';
@@ -81,6 +88,9 @@ export default function SettingsScreen() {
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
   const [pushMessage, setPushMessage] = useState<string | null>(null);
+  // 使用统计(TapDB)开关。真相在 analyticsConsentStore,这里只是视图态。
+  const [analyticsEnabled, setAnalyticsEnabledState] = useState(true);
+  const [analyticsBusy, setAnalyticsBusy] = useState(false);
   const updateCheckInFlightRef = useRef(false);
   const [selfDeviceName, setSelfDeviceName] = useState<string | null>(null);
   const [selfDeviceNameDraft, setSelfDeviceNameDraft] = useState('');
@@ -422,6 +432,20 @@ export default function SettingsScreen() {
     };
   }, []);
 
+  // 使用统计开关的当前值。store 是本机唯一真相,订阅它以免多个入口写入后本页陈旧。
+  useEffect(() => {
+    let cancelled = false;
+    const sync = () => {
+      if (!cancelled) setAnalyticsEnabledState(getAnalyticsConsentState().enabled);
+    };
+    void hydrateAnalyticsConsent().then(sync).catch(() => undefined);
+    const unsubscribe = subscribeAnalyticsConsent(sync);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
+
   const togglePushNotifications = useCallback(async () => {
     if (pushBusy) return;
     setPushBusy(true);
@@ -459,6 +483,26 @@ export default function SettingsScreen() {
     configureCollapseAnimation();
     setDebugExpanded((value) => !value);
   }, []);
+
+  /* ── 使用统计(TapDB)开关 ──
+     语义是 opt-out:用户在登录页同意《隐私政策》后默认开启,这里随时可关。
+     关闭后立即解绑账号标识、不再主动上报;原生 SDK 不支持反初始化,本次进程内
+     已初始化的实例要到下次冷启动才彻底不再初始化(见 analytics/mobileTapdb)。 */
+  const toggleAnalytics = useCallback(async () => {
+    if (analyticsBusy) return;
+    setAnalyticsBusy(true);
+    try {
+      const next = !getAnalyticsConsentState().enabled;
+      await setAnalyticsEnabled(next);
+      if (next) await initMobileTapdb();
+      else await stopMobileTapdbReporting();
+    } catch {
+      // 落盘失败时状态由 store 的订阅回推,这里不额外提示(与 push 开关不同:
+      // 本开关没有服务端往返,失败只可能是本机存储异常)。
+    } finally {
+      setAnalyticsBusy(false);
+    }
+  }, [analyticsBusy]);
 
   const avatarLabel = (overview.header.name.trim()[0] ?? '?').toUpperCase();
   const updateBusy = updatePhase === 'checking' || updatePhase === 'downloading';
@@ -638,8 +682,23 @@ export default function SettingsScreen() {
         ) : null}
 
         {/* 法律信息:隐私政策/用户协议始终显示(链接区域分流走 legalLinks 单点);
+            使用统计开关与它们同组(合规要求关闭途径可被找到);
             App 备案号仅国内版显示。 */}
         <SettingsGroup title={t('settings.legal.sectionTitle')}>
+          <View key="analytics-toggle" style={styles.switchRow} testID="settings.analyticsToggleRow">
+            <View style={styles.switchTexts}>
+              <Text style={styles.rowLabel}>{t('settings.legal.analytics')}</Text>
+              <Text style={styles.hint}>{t('settings.legal.analyticsHint')}</Text>
+            </View>
+            <Switch
+              accessibilityLabel={t('settings.legal.analytics')}
+              disabled={analyticsBusy}
+              onValueChange={() => void toggleAnalytics()}
+              testID="settings.analyticsToggle"
+              trackColor={{ true: colors.inputCaret }}
+              value={analyticsEnabled}
+            />
+          </View>
           <ActionInfoRow
             accessibilityLabel={t('settings.legal.openPrivacyPolicy')}
             accessibilityRole="link"

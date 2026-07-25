@@ -18,6 +18,7 @@ import { toast } from '@/lib/toast';
 import { Switch } from '@/components/ui/switch';
 import { useExperimentalFlag } from '@/hooks/useExperimentalFeatures';
 import { useAutoUpdateSettings } from '@/hooks/useAutoUpdateSettings';
+import { useAnalyticsSettings } from '@/hooks/useAnalyticsSettings';
 import { DefaultOverrideControls } from './DefaultOverrideControls';
 import { StorageManagementCard } from './StorageManagementCard';
 import { CURRENT_CINDY_REGION } from '../../../shared/brandRegion';
@@ -122,6 +123,8 @@ export function AboutSection() {
           </>
         )}
         <AutoUpdateToggleRow />
+        <Divider />
+        <AnalyticsToggleRow />
         <Divider />
         <InfoRow
           label={t('settings.about.claudeCodeVersionLabel')}
@@ -302,6 +305,61 @@ function AutoUpdateToggleRow() {
             disabled={disabled}
             onCheckedChange={handleToggle}
             aria-label={t('settings.about.autoUpdateLabel')}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 使用统计(TapDB)开关。
+ *
+ * 语义是 opt-out:用户在登录页同意《隐私政策》后默认开启,这里可以随时关掉。
+ * 关掉即时生效(main 广播 → tapdbClient 走 SDK optOutTracking,连 autoTrack 的
+ * 自动事件也会停),不需要重启。
+ *
+ * 没有「恢复默认」按钮:开关本身的默认值就是开启,再叠一个 reset 只会让语义变糊;
+ * 而同意状态是事实记录、不是配置项,不该被「恢复默认」清掉。
+ */
+function AnalyticsToggleRow() {
+  const { t } = useTranslation();
+  const { state, setAnalyticsEnabled } = useAnalyticsSettings();
+  const [saving, setSaving] = useState(false);
+
+  const handleToggle = async (next: boolean) => {
+    setSaving(true);
+    try {
+      await setAnalyticsEnabled(next);
+      toast.success(
+        next
+          ? t('settings.about.analyticsEnabledToast')
+          : t('settings.about.analyticsDisabledToast'),
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t('settings.about.analyticsSaveFailed'));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-1.5 px-[18px] py-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-col gap-1">
+          <span className="text-13 text-[var(--settings-section-sublabel)]">
+            {t('settings.about.analyticsLabel')}
+          </span>
+          <p className="text-12 leading-[1.4] text-[var(--settings-section-sublabel)] opacity-70">
+            {t('settings.about.analyticsDescription')}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Switch
+            checked={state.analyticsEnabled}
+            disabled={state.loading || saving}
+            onCheckedChange={handleToggle}
+            aria-label={t('settings.about.analyticsLabel')}
           />
         </div>
       </div>

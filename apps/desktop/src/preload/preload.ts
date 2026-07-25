@@ -24,6 +24,10 @@ import {
   WINDOW_BEHAVIOR_WINDOWS_CLOSE_BEHAVIOR_SHOWN_CHANNEL,
   type WindowsCloseBehavior,
 } from '../shared/windowBehavior';
+import {
+  ANALYTICS_SETTINGS_CHANGE_CHANNEL,
+  type AnalyticsSettingsPayload,
+} from '../shared/analyticsSettings';
 import { SELECTION_CONTEXT_MENU_ADD_TO_CHAT_CHANNEL } from '../shared/selectionContextMenu';
 import { SESSION_ATTENTION_CLEARED_CHANNEL } from '../shared/sessionAttention';
 import { VOICE_INPUT_POWER_STATE_CHANNEL } from '../shared/voiceInputPowerIpc';
@@ -269,6 +273,8 @@ const fanOutAppUpdateProgress = createIpcFanOut('app-update-progress');
 const fanOutAuthStateChange = createIpcFanOut('auth:state-change');
 const fanOutAuthSessionExpired = createIpcFanOut('auth:session-expired');
 const fanOutTapdbDailyActive = createIpcFanOut('tapdb:daily-active');
+// 使用统计(TapDB)的同意状态 / 开关变化;renderer 据此即时 init 或 opt-out
+const fanOutAnalyticsSettingsChange = createIpcFanOut(ANALYTICS_SETTINGS_CHANGE_CHANNEL);
 const fanOutFullscreenChange = createIpcFanOut('fullscreen-change');
 const fanOutApplicationMenuCommand = createIpcFanOut('app-menu:command');
 // 首登轻量数据迁移(mToc)弹窗阶段推送(confirm / running / done / failed)
@@ -1260,6 +1266,29 @@ contextBridge.exposeInMainWorld('electronAPI', {
         typeof (payload as { date?: unknown }).date === 'string'
       ) {
         callback(payload as { date: string });
+      }
+    }),
+
+  // ── 使用统计(TapDB)同意闸 ──
+  // 真相在 main(<userData>/analytics-settings.json);renderer 只读结论、只提交
+  // 用户动作,不自己落盘。allowed = 已同意隐私政策 && 统计开关开启。
+  getAnalyticsSettings: (): Promise<AnalyticsSettingsPayload> =>
+    ipcRenderer.invoke('analytics:settings-get'),
+  setAnalyticsEnabled: (enabled: boolean): Promise<AnalyticsSettingsPayload> =>
+    ipcRenderer.invoke('analytics:settings-set-enabled', enabled === true),
+  /** 登录页协议门放行时调用一次(含游客);幂等。 */
+  acceptPrivacyConsent: (): Promise<AnalyticsSettingsPayload> =>
+    ipcRenderer.invoke('analytics:consent-accept'),
+  onAnalyticsSettingsChange: (
+    callback: (payload: AnalyticsSettingsPayload) => void,
+  ): (() => void) =>
+    fanOutAnalyticsSettingsChange((payload) => {
+      if (
+        payload &&
+        typeof payload === 'object' &&
+        typeof (payload as { allowed?: unknown }).allowed === 'boolean'
+      ) {
+        callback(payload as AnalyticsSettingsPayload);
       }
     }),
 

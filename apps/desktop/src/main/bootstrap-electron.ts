@@ -263,6 +263,7 @@ import {
 } from './windowFocusClassifier.js';
 import { assertTrustedAppRendererEvent } from './security/trustedAppRenderer.js';
 import { initHeartbeatService } from './heartbeatService';
+import { initAnalyticsSettingsService, noteAuthColdStartState } from './analyticsSettingsService';
 import { WindowManualDragController } from './windowManualDrag';
 // 设备互联(跨设备远程控制): relay 连接 host + 开关/设备列表 IPC
 import { initDeviceLinkService, releaseDeviceLinkOwnershipBeforeLogout } from './device-link';
@@ -3356,6 +3357,9 @@ const registerIpcHandlers = () => {
           authManager.getAuthState(),
         );
       }
+      // 使用统计同意闸的一次性存量迁移:只认冷启动恢复出来的登录态。内部有 guard,
+      // 多个窗口各自 initialize 只会评估一次(见 analyticsSettingsService)。
+      noteAuthColdStartState(state, pendingCompletion);
       return state;
     } catch (err) {
       if (!app.isPackaged) {
@@ -5567,6 +5571,9 @@ app.on('ready', async () => {
     prewarmMacComputerPermissionGuideHelper();
   }, 3_000);
   initUpdateService();
+  // 使用统计(TapDB)的同意闸:必须在 initHeartbeatService 之前注册,renderer 的
+  // tapdbClient 一挂载就会 invoke analytics:settings-get 决定是否初始化 SDK。
+  initAnalyticsSettingsService();
   // 在线人数心跳:App 启动即上报,内部走 deviceId / userId 兜底,登录前后都活
   initHeartbeatService();
   // 设备互联(跨设备远程控制):登录后连 relay,登出即断;开关与设备列表 IPC 一并注册

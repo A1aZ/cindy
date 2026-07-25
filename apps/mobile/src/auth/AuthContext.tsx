@@ -60,6 +60,7 @@ import {
   setSecureItem,
 } from '@/auth/secureStorage';
 import { clearTapdbUser, setTapdbUser } from '@/analytics/mobileTapdb';
+import { migrateExistingLoginAsConsented } from '@/analytics/analyticsConsentStore';
 import { unregisterPushTokenBestEffort } from '@/notifications/pushNotifications';
 import { resetAgentCapabilitiesCache } from '@/session/agentCapabilitiesCache';
 import { resetComposerPaletteCache } from '@/session/composerPaletteCache';
@@ -214,6 +215,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const [initialized, setInitialized] = useState(false);
+  /** 使用统计同意闸的存量迁移只在冷启动评估一次(见下方 tapdb effect)。 */
+  const coldStartConsentEvaluated = useRef(false);
   const [isBusy, setIsBusy] = useState(false);
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const deviceIdRef = useRef<string | null>(null);
@@ -647,6 +650,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!initialized) return;
+    // 使用统计同意闸的一次性存量迁移:只认**冷启动恢复出来的**登录态。
+    // 登录页的协议门豁免企业 SSO 入口,走 SSO 的用户从没点过「同意」;如果这里
+    // 改成"任何时候看到登录就算同意",新的 SSO 登录会被误判。冷启动恢复的会话
+    // 则是本次改动之前就存在的,属于产品拍板(2026-07-25)的"不再二次打扰"范围。
+    if (!coldStartConsentEvaluated.current) {
+      coldStartConsentEvaluated.current = true;
+      if (user?.id) void migrateExistingLoginAsConsented().catch(() => undefined);
+    }
     if (user?.id) void setTapdbUser(user.id);
     else void clearTapdbUser();
   }, [initialized, user?.id]);

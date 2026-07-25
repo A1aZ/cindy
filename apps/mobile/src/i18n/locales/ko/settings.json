@@ -88,7 +88,9 @@
     "view": "보기",
     "openPrivacyPolicy": "개인정보 처리방침 열기",
     "openUserAgreement": "이용약관 열기",
-    "appFilingNumber": "앱 등록 번호"
+    "appFilingNumber": "앱 등록 번호",
+    "analytics": "사용 통계",
+    "analyticsHint": "Cindy의 실행 및 지속 사용 현황을 파악하는 데 사용합니다. 기기 모델, OS 버전, 앱 버전, 기기 식별자만 전송하며 대화 내용, 파일, 프롬프트는 전혀 포함하지 않습니다."
   },
   "account": {
     "logoutHint": "로그아웃하면 이 휴대폰의 로그인 상태와 로컬 원격 미러만 삭제됩니다. 컴퓨터의 세션에는 영향이 없습니다.",

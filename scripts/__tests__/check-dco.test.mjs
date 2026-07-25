@@ -26,6 +26,7 @@ import {
   HOOK_NAME,
   HOOK_SOURCE_PATH,
   classifyHook,
+  isExecutable,
   readHookSource,
   resolveHooksDir,
   resolveHooksPathFrom,
@@ -187,12 +188,18 @@ test('looksLikeEmail rejects everything validator.isEmail would reject', () => {
     `${'a'.repeat(65)}@example.com`,
     `a@${'b'.repeat(64)}.com`,
     `a@${`${'b'.repeat(60)}.`.repeat(5)}com`,
+    // 各段都合规、整体仍超 254：整体上限必须单独查一遍。
+    `${'a'.repeat(64)}@${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(61)}.com`,
   ]) {
     assert.equal(looksLikeEmail(bad), false, `should reject ${bad}`);
   }
   // 恰好在上限上要放行，别把边界一起误杀。
   assert.equal(looksLikeEmail(`${'a'.repeat(64)}@example.com`), true);
   assert.equal(looksLikeEmail(`a@${'b'.repeat(63)}.com`), true);
+  const at254 = `${'a'.repeat(64)}@${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(57)}.com`;
+  assert.equal(at254.length, 254, '这个用例的意义就在于长度恰好是 254');
+  assert.equal(looksLikeEmail(at254), true);
+  assert.equal(looksLikeEmail(`a${at254}`), false, '255 就该拒');
 });
 
 test('merge commits and bot commits are exempt, humans are not', () => {
@@ -203,6 +210,21 @@ test('merge commits and bot commits are exempt, humans are not', () => {
   assert.ok(isBotIdentity('GitHub', 'noreply@github.com'));
   // 普通用户的 noreply 邮箱不是 bot，不能借此绕过签名。
   assert.equal(isBotIdentity('Contributor', '12345+contributor@users.noreply.github.com'), false);
+
+  // 只认邮箱：author name 谁都能设成 Foo[bot]，按 name 豁免等于一步就能绕过本地检查，
+  // 而 App 判定的是不可伪造的 GitHub 账号类型 —— 那会造成「本地绿、PR 红」。
+  assert.equal(isBotIdentity('Sneaky[bot]', 'human@example.com'), false);
+  assert.equal(
+    exemptReason(
+      commitFixture({
+        authorName: 'Sneaky[bot]',
+        committerName: 'Sneaky[bot]',
+        authorEmail: 'human@example.com',
+        committerEmail: 'human@example.com',
+      })
+    ),
+    null
+  );
 });
 
 test('bot commits stay exempt even though their address fails the email check', () => {
@@ -491,6 +513,37 @@ test('installer refuses to clobber an edited hook without --force', { skip: !can
   // 显式 --force 才覆盖。
   repo.run(['node', INSTALL_HOOK, '--force']);
   assert.equal(fs.readFileSync(hookPath, 'utf8'), readHookSource());
+});
+
+test('installer restores a lost executable bit', { skip: !canRunGitFixture }, (t) => {
+  const repo = createRepo();
+  t.after(() => fs.rmSync(repo.dir, { recursive: true, force: true }));
+
+  repo.commit('history.txt', 'chore: pre-DCO history');
+  repo.run(['git', 'checkout', '--quiet', '-b', 'feature']);
+  repo.run(['node', INSTALL_HOOK]);
+  const hookPath = path.join(repo.dir, '.git', 'hooks', HOOK_NAME);
+
+  // 内容逐字一致但不可执行（手动复制、备份恢复、chmod 0644）：git 会静默忽略这个 hook，
+  // 提交照样不带签名，而只看内容的安装器会报「已是最新」把人骗过去。
+  fs.chmodSync(hookPath, 0o644);
+  assert.equal(isExecutable(hookPath), false);
+  assert.equal(classifyHook(fs.readFileSync(hookPath, 'utf8')), 'installed');
+
+  // --check 要点出这个状态，而不是笼统报 installed。
+  assert.match(repo.run(['node', INSTALL_HOOK, '--check']), /NOT executable/);
+
+  const output = repo.run(['node', INSTALL_HOOK]);
+  assert.match(output, /Restored the executable bit/);
+  assert.equal(isExecutable(hookPath), true);
+
+  // 修好之后 hook 真的生效（没有 -s 也自动补签）。
+  repo.commit('feature.txt', 'feat: work committed without -s');
+  assert.match(
+    repo.run(['git', 'log', '-1', '--format=%B']),
+    new RegExp(`Signed-off-by: ${AUTHOR.name} <${AUTHOR.email}>`)
+  );
+  assert.equal(repo.checkDco(['--base', 'main']).code, 0);
 });
 
 test('hook keeps the native `commit -s` layout for interactive commits', { skip: !canRunGitFixture }, (t) => {

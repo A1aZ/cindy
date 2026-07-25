@@ -18,7 +18,7 @@
 // hook 是纯本地便利设施：不改远端、不改 core.hooksPath，删掉已安装的文件即卸载。
 
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -35,13 +35,6 @@ export function readHookSource() {
 }
 
 /**
- * hooks 目录：走 `git rev-parse --git-path hooks`，因此自动尊重已设置的
- * core.hooksPath；多 worktree 共享 common dir，装一次全部 worktree 生效。
- *
- * --path-format 要 git 2.31+，旧版 git 上直接失败会让安装器不可用，所以回落成
- * 「相对路径 + 仓库顶层」自己拼绝对路径。
- */
-/**
  * 把 `git rev-parse --git-path hooks` 的返回值化成绝对路径。
  *
  * 关键点：它给的相对路径是相对于**执行 git 时的 cwd**，不是仓库根。从子目录调用时返回的
@@ -53,6 +46,11 @@ export function resolveHooksPathFrom(hooksPath, cwd) {
   return isAbsolute(hooksPath) ? hooksPath : resolve(cwd, hooksPath);
 }
 
+/**
+ * hooks 目录：走 `git rev-parse --git-path hooks`，因此自动尊重已设置的 core.hooksPath；
+ * 多 worktree 共享 common dir，装一次全部 worktree 生效。--path-format 要 git 2.31+，
+ * 旧版回落到 resolveHooksPathFrom。
+ */
 export function resolveHooksDir(cwd = process.cwd()) {
   const git = (args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
   try {
@@ -88,6 +86,15 @@ export function readHook(hookPath) {
   }
 }
 
+/** git 只执行带 owner 执行位的 hook；缺了它内容再对也不会生效。 */
+export function isExecutable(hookPath) {
+  try {
+    return (statSync(hookPath).mode & 0o100) !== 0;
+  } catch {
+    return false;
+  }
+}
+
 /** 供 check-dco.mjs 在本地校验通过后决定是否提示安装。探测失败一律当「已装」处理，不打扰。 */
 export function isSignOffHookInstalled(cwd = process.cwd()) {
   try {
@@ -108,9 +115,11 @@ function main() {
 
   // --check 只报告，不写文件、不因状态失败：调用方要的是事实，不是门禁。
   if (checkOnly) {
+    const executableNote =
+      state === 'installed' && !isExecutable(hookPath) ? ', but NOT executable — Git will ignore it' : '';
     const label = {
-      installed: `installed, matching ${HOOK_SOURCE_PATH}`,
-      modified: 'present but differs from this repo\'s version (older, or edited locally)',
+      installed: `installed, matching ${HOOK_SOURCE_PATH}${executableNote}`,
+      modified: "present but differs from this repo's version (older, or edited locally)",
       missing: 'not installed',
       foreign: 'a different prepare-commit-msg hook is present; not taken over',
     }[state];
@@ -119,6 +128,14 @@ function main() {
   }
 
   if (state === 'installed') {
+    // 内容一致但丢了可执行位（手动复制、备份恢复、chmod 0644 都会这样）时 git 会直接
+    // 忽略这个 hook，提交照样不带签名——而安装器如果只看内容就会报「已是最新」，把人骗过去。
+    if (!isExecutable(hookPath)) {
+      chmodSync(hookPath, 0o755);
+      console.log(`Restored the executable bit on ${hookPath}`);
+      console.log('(Git silently ignores hooks that are not executable, so commits were unsigned.)');
+      return;
+    }
     console.log(`DCO sign-off hook already up to date: ${hookPath}`);
     return;
   }

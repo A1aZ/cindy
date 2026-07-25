@@ -32,6 +32,10 @@ const SIGN_OFF_LINE = /^\s*Signed-off-by:\s*(.*?)\s*<([^<>]+)>\s*$/i;
 
 // 机器人与 GitHub Web UI 代签的提交无法代替本人作出 DCO 声明，因此豁免而非放行：
 // dependabot 等 bot 用 `<name>[bot]@users.noreply.github.com`，Web UI 用 web-flow。
+//
+// 只认邮箱，不认 author name 后缀。App 那边判定的是 GitHub 账号类型
+// （`author.type === "Bot"`），改不了；而 `git config user.name` 谁都能设成 `Foo[bot]`，
+// 按 name 豁免等于给本地检查开一个一步就能绕过的后门，且方向是「本地绿、PR 红」。
 const BOT_EMAILS = new Set(['noreply@github.com']);
 const BOT_EMAIL_SUFFIX = '[bot]@users.noreply.github.com';
 
@@ -64,13 +68,16 @@ const ATEXT = "[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]";
 const DOMAIN_LABEL = '[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?';
 const EMAIL_LOCAL_PART = new RegExp(`^${ATEXT}+(?:\\.${ATEXT}+)*$`);
 const EMAIL_DOMAIN = new RegExp(`^${DOMAIN_LABEL}(?:\\.${DOMAIN_LABEL})*\\.[A-Za-z]{2,}$`);
-// validator.isEmail 的长度上限，超出即拒。
+// validator.isEmail 的长度上限，超出即拒。整体上限单独存在：local part 与 domain 各自
+// 合规、加起来仍可能超过 254。
+const MAX_TOTAL = 254;
 const MAX_LOCAL_PART = 64;
 const MAX_DOMAIN = 254;
 const MAX_DOMAIN_LABEL = 63;
 
 export function looksLikeEmail(email) {
   const value = String(email ?? '').trim();
+  if (value.length > MAX_TOTAL) return false;
   const at = value.lastIndexOf('@');
   if (at <= 0 || at === value.length - 1) return false;
 
@@ -94,11 +101,7 @@ export function parseSignOffs(message) {
 
 export function isBotIdentity(name, email) {
   const normalizedEmail = normalizeEmail(email);
-  return (
-    String(name ?? '').trim().endsWith('[bot]') ||
-    BOT_EMAILS.has(normalizedEmail) ||
-    normalizedEmail.endsWith(BOT_EMAIL_SUFFIX)
-  );
+  return BOT_EMAILS.has(normalizedEmail) || normalizedEmail.endsWith(BOT_EMAIL_SUFFIX);
 }
 
 /** 返回豁免原因，不豁免则返回 null。 */

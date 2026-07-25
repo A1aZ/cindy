@@ -212,6 +212,50 @@ describe('useProjectFileList', () => {
     expect(second.result.current.isLoading).toBe(false);
   });
 
+  it('另一实例 refresh 时,在途实例不卡 loading,追上新请求的结果', async () => {
+    let resolveOld!: (v: { files: string[]; truncated: boolean; elapsedMs: number }) => void;
+    mocks.listAllFiles.mockImplementationOnce(
+      () => new Promise((done) => { resolveOld = done; }),
+    );
+    // X 发起请求(pending);Y 共享同一 cacheKey。
+    const x = renderList({ workdir: '/repo', enabled: true });
+    const y = renderList({ workdir: '/repo', enabled: true });
+    expect(mocks.listAllFiles).toHaveBeenCalledTimes(1);
+
+    // Y 触发 refresh:作废在途请求并发起新扫描。
+    mocks.listAllFiles.mockResolvedValue(listResult(['fresh.ts']));
+    act(() => {
+      y.result.current.refresh();
+    });
+    expect(mocks.listAllFiles).toHaveBeenCalledTimes(2);
+
+    // 旧请求此刻完成:X 的回调因失效代数不匹配不能直接丢弃 —— 必须追上新请求,
+    // 否则 X 永久停在 isLoading(没有其它回调会再喂它)。
+    await act(async () => {
+      resolveOld(listResult(['stale.ts']));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(x.result.current.isLoading).toBe(false));
+    expect(x.result.current.files).toEqual(['fresh.ts']);
+    await waitFor(() => expect(y.result.current.files).toEqual(['fresh.ts']));
+  });
+
+  it('拉取失败回退缓存时保留 truncated 标志', async () => {
+    mocks.listAllFiles.mockResolvedValue(listResult(['a.ts'], true));
+    const { result, rerender } = renderList({ workdir: '/big', enabled: true });
+    await waitFor(() => expect(result.current.truncated).toBe(true));
+
+    // truncated 快照 5 分钟 TTL 过期后重拉失败:回退缓存 files 时"结果过多"
+    // 标志不能静默消失 —— 列表仍是截断的。
+    rerender({ workdir: '/big', enabled: false });
+    vi.setSystemTime(new Date('2026-07-25T12:06:00Z'));
+    mocks.listAllFiles.mockRejectedValueOnce(new Error('boom'));
+    rerender({ workdir: '/big', enabled: true });
+    await waitFor(() => expect(result.current.error).toContain('boom'));
+    expect(result.current.files).toEqual(['a.ts']);
+    expect(result.current.truncated).toBe(true);
+  });
+
   it('refresh 期间完成的在途请求不得把旧快照写回缓存', async () => {
     let resolveFetch!: (v: { files: string[]; truncated: boolean; elapsedMs: number }) => void;
     mocks.listAllFiles.mockImplementationOnce(

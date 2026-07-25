@@ -108,9 +108,12 @@ async function fetchOnce(
     return { snap, error: res.error ?? null };
   } catch (err) {
     log.error('listAllFiles failed', { workdir, err });
+    // 回退复用缓存时 truncated 一并保留:截断快照拉取失败后丢标志会让
+    // "结果过多"提示静默消失,列表却仍是截断的。
+    const cached = cache.get(cacheKey);
     const snap: Snapshot = {
-      files: cache.get(cacheKey)?.files ?? [],
-      truncated: false,
+      files: cached?.files ?? [],
+      truncated: cached?.truncated ?? false,
       fetchedAt: Date.now(),
       error: String(err),
     };
@@ -163,6 +166,12 @@ export function useProjectFileList(
   useEffect(() => {
     cacheKeyRef.current = cacheKey;
   }, [cacheKey]);
+  // 异步回调里读最新 enabled:失效后的"追新"只在用户仍在筛选时进行,
+  // 否则会在 enabled=false 时发起违背惰性原则的扫描。
+  const enabledRef = useRef(enabled);
+  useEffect(() => {
+    enabledRef.current = enabled;
+  }, [enabled]);
 
   const doFetch = useCallback((wd: string, key: string) => {
     setState((prev) => ({ ...prev, isLoading: true }));
@@ -185,7 +194,21 @@ export function useProjectFileList(
     }
     void p.then(({ snap, error }) => {
       if (cacheKeyRef.current !== key) return; // 端点/目录已切换:丢弃过期结果
-      if ((invalidationGen.get(key) ?? 0) !== genAtStart) return; // 已被 refresh 失效
+      if ((invalidationGen.get(key) ?? 0) !== genAtStart) {
+        // 期间被 refresh 失效。不能只丢弃:refresh 可能来自共享同一份缓存的
+        // 另一个实例(doc sidebar / RSB 同 workdir),本实例已置 isLoading 且
+        // 没有别的回调会再喂它 —— 直接 return 会永久卡在加载态。
+        if (enabledRef.current) {
+          // 仍在筛选:重新走 doFetch 追上刷新后的新请求(有 inflight 就
+          // piggyback,已完成则命中新缓存路径重新捕获代数)。
+          doFetch(wd, key);
+        } else {
+          // 已退出筛选:追新会发起违背惰性原则的扫描,只防御性退出 loading
+          // (disabled effect 通常已把 state 置为缓存/空)。
+          setState((prev) => (prev.isLoading ? { ...prev, isLoading: false } : prev));
+        }
+        return;
+      }
       setState({
         files: snap.files,
         truncated: snap.truncated,

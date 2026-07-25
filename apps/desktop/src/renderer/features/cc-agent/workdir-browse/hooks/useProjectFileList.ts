@@ -60,7 +60,10 @@ interface Snapshot {
 
 // Module-level singleton cache —— 同 workdir 跨 component 实例 / 跨 RSB tab 共享。
 const cache = new Map<string, Snapshot>();
-const inflight = new Map<string, Promise<void>>();
+// inflight 携带结果本身:piggyback 方直接消费 promise 的解析值,不从 cache 回读
+// —— fetch 失败(catch 分支)或被 refresh 失效(gen 不匹配)时都不写 cache,回读
+// 会拿到空快照,把搭车方的 UI 置空、丢掉 error。
+const inflight = new Map<string, Promise<{ snap: Snapshot; error: string | null }>>();
 // 失效代数:refresh 失效缓存时递增。fetchOnce 只在"启动以来没有新的失效"时才
 // 把结果写回缓存 —— 防止 refresh 删掉缓存后,在途请求完成又把旧快照写回,
 // 让下次筛选把刷新前的数据当成新鲜缓存。
@@ -166,41 +169,30 @@ export function useProjectFileList(
     // 捕获发起时的失效代数:期间发生 refresh 时丢弃本回调的 setState —— 刷新后
     // 的新请求会带最新数据,旧数据闪现一帧再被覆盖是可感知的视觉抖动。
     const genAtStart = invalidationGen.get(key) ?? 0;
-    // dedupe 并发 fetch:同 (端点, workdir) 在 inflight 中就 piggyback。
+    // dedupe 并发 fetch:同 (端点, workdir) 在 inflight 中就 piggyback。发起方与
+    // 搭车方消费同一个解析值(fetchOnce 内部全兜底,永不 reject),不从 cache
+    // 回读 —— fetch 失败或被 refresh 失效时结果不进 cache,回读会拿到空快照。
     let p = inflight.get(key);
     if (!p) {
-      const started = (async () => {
-        const { snap, error } = await fetchOnce(wd, remoteHostId, deviceId, key);
-        if (cacheKeyRef.current !== key) return; // 端点/目录已切换:丢弃过期结果
-        if ((invalidationGen.get(key) ?? 0) !== genAtStart) return; // 已被 refresh 失效
-        setState({
-          files: snap.files,
-          truncated: snap.truncated,
-          isLoading: false,
-          error,
-        });
-      })();
+      const started = fetchOnce(wd, remoteHostId, deviceId, key);
       p = started;
       inflight.set(key, started);
       // 只清理自己:refresh 可能已把 inflight 换成了新请求,无条件 delete 会把
       // 新请求的 entry 误删,让后续并发 doFetch 重复 spawn rg。
-      started.finally(() => {
+      void started.finally(() => {
         if (inflight.get(key) === started) inflight.delete(key);
       });
-    } else {
-      // 已有 inflight:等同一个 promise 完后从 cache 取最新值。
-      void p.then(() => {
-        if (cacheKeyRef.current !== key) return; // 端点/目录已切换:丢弃过期结果
-        if ((invalidationGen.get(key) ?? 0) !== genAtStart) return; // 已被 refresh 失效
-        const fresh = cache.get(key);
-        setState({
-          files: fresh?.files ?? [],
-          truncated: fresh?.truncated ?? false,
-          isLoading: false,
-          error: fresh?.error ?? null,
-        });
-      });
     }
+    void p.then(({ snap, error }) => {
+      if (cacheKeyRef.current !== key) return; // 端点/目录已切换:丢弃过期结果
+      if ((invalidationGen.get(key) ?? 0) !== genAtStart) return; // 已被 refresh 失效
+      setState({
+        files: snap.files,
+        truncated: snap.truncated,
+        isLoading: false,
+        error,
+      });
+    });
   }, [remoteHostId, deviceId]);
 
   useEffect(() => {

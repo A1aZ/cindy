@@ -192,6 +192,26 @@ describe('useProjectFileList', () => {
     await waitFor(() => expect(result.current.files).toEqual(['fresh.ts']));
   });
 
+  it('piggyback 消费 inflight 的解析值:fetch 失败(不写缓存)时搭车方同样拿到 error', async () => {
+    let rejectFetch!: (err: Error) => void;
+    mocks.listAllFiles.mockImplementationOnce(
+      () => new Promise((_done, fail) => { rejectFetch = fail; }),
+    );
+    const first = renderList({ workdir: '/repo', enabled: true });
+    // 第二个实例在第一个 pending 时挂载:走 piggyback,不发新 IPC。
+    const second = renderList({ workdir: '/repo', enabled: true });
+    expect(mocks.listAllFiles).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      rejectFetch(new Error('boom'));
+      await Promise.resolve();
+    });
+    // 失败结果不进缓存,搭车方必须从 inflight 解析值拿到 error,而不是回读空缓存。
+    await waitFor(() => expect(first.result.current.error).toContain('boom'));
+    await waitFor(() => expect(second.result.current.error).toContain('boom'));
+    expect(second.result.current.isLoading).toBe(false);
+  });
+
   it('refresh 期间完成的在途请求不得把旧快照写回缓存', async () => {
     let resolveFetch!: (v: { files: string[]; truncated: boolean; elapsedMs: number }) => void;
     mocks.listAllFiles.mockImplementationOnce(

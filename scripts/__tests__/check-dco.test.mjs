@@ -323,7 +323,10 @@ test('parseGitLog keeps multi-line messages and parent lists intact', () => {
 test('classifyHook never marks a changed hook as safe to overwrite', () => {
   const source = readHookSource();
 
+  // 不传 expectedContent 时按源文件判定；missing 分支不读磁盘（懒求值，见实现注释——
+  // 「没读文件」这件事从外部观测需要 mock fs，不值当，这里只钉行为契约）。
   assert.equal(classifyHook(null), 'missing');
+  assert.equal(classifyHook(null, 'anything'), 'missing');
   assert.equal(classifyHook(source), 'installed');
   assert.equal(classifyHook('#!/bin/sh\necho unrelated\n'), 'foreign');
 

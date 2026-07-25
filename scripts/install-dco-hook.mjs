@@ -71,9 +71,12 @@ export function resolveHooksDir(cwd = process.cwd()) {
  * 几行或 marker 位置来认领它们的判定，都会在某一种组合上误判并整份覆盖，抹掉开发者的
  * 逻辑。所以这里一律要求显式 --force 才覆盖。
  */
-export function classifyHook(existingContent, expectedContent = readHookSource()) {
+export function classifyHook(existingContent, expectedContent) {
+  // 先判 missing 再取源文件：默认参数会在调用时就求值，那样 `classifyHook(null)` 也要读一次
+  // 磁盘，还把「没装 hook」这个判断绑到源文件可读上。
   if (existingContent === null) return 'missing';
-  if (existingContent === expectedContent) return 'installed';
+  const expected = expectedContent ?? readHookSource();
+  if (existingContent === expected) return 'installed';
   return existingContent.includes(HOOK_MARKER) ? 'modified' : 'foreign';
 }
 

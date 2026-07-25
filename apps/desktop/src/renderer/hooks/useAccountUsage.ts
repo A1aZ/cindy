@@ -26,7 +26,7 @@
  * useSessionSpend 同惯例 (它也 inline { sessionId, totalCostUsd })。
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 export interface RateLimitWindow {
   usedPercent: number;
@@ -75,29 +75,63 @@ let lastCodexAccountUsage: CodexAccountUsageSlots = {
   web: null,
 };
 
+/** 用作对象键会污染原型链的保留名 —— 一律回退缺省桶。 */
+const UNSAFE_BUCKET_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
 /** 快照 → 桶键(与 main codexLimitBucketKey 同口径)。 */
 export function codexLimitBucketKey(snapshot: RateLimitSnapshot | null | undefined): string {
   const limitId = snapshot?.limitId;
-  return typeof limitId === 'string' && limitId.length > 0 ? limitId : CODEX_DEFAULT_LIMIT_BUCKET;
+  if (typeof limitId !== 'string' || limitId.length === 0) return CODEX_DEFAULT_LIMIT_BUCKET;
+  return UNSAFE_BUCKET_KEYS.has(limitId) ? CODEX_DEFAULT_LIMIT_BUCKET : limitId;
+}
+
+/** 模型 id / 桶名 → 可比较 token(小写, 去非字母数字)。 */
+function normalizeModelToken(value: string | null | undefined): string {
+  return typeof value === 'string' ? value.toLowerCase().replace(/[^a-z0-9]/g, '') : '';
 }
 
 /**
- * 选槽 + 选桶。app-server 形态下优先取「本会话最近一次 turn 报告的桶」——
- * app-server 每次只推一个桶, 用过模型专属桶(如 GPT-5.3-Codex-Spark /
- * codex_bengalfox)后它会留在全局缓存里, 不按会话选桶就会串到别的会话
+ * 按**当前会话模型**选桶。
+ *
+ * 不能用「本会话收到的 account_usage 事件」判归属: 该 notification 是账号级的,
+ * host 把同一条 fan-out 给所有 subscriber 再各自包上 sessionId(见 app-server
+ * host.routeNotification), 拿它当会话事实等于把任意会话触发的桶串给所有会话 ——
+ * 正是本 PR 要修的现象(review 反馈)。
+ *
+ * 规则: 桶的 limitName 命中当前模型(如 'GPT-5.3-Codex-Spark' ↔ gpt-5.3-codex-spark)
+ * → 选它; 否则选通用桶(没有模型专属 limitName 的那个); 都没有 → null, 由调用方
+ * 回退最近更新桶。
+ */
+export function matchCodexBucketForModel(
+  buckets: Record<string, RateLimitSnapshot>,
+  modelId: string | null | undefined,
+): RateLimitSnapshot | null {
+  const entries = Object.values(buckets ?? {});
+  if (entries.length === 0) return null;
+  const model = normalizeModelToken(modelId);
+  if (model) {
+    for (const bucket of entries) {
+      const name = normalizeModelToken(bucket.limitName);
+      if (name && (name === model || model.includes(name))) return bucket;
+    }
+  }
+  return entries.find((bucket) => !normalizeModelToken(bucket.limitName)) ?? null;
+}
+
+/**
+ * 选槽 + 选桶。app-server 形态下按**当前会话模型**匹配桶(见
+ * matchCodexBucketForModel): 账号可能同时有主配额桶与模型专属促销桶
+ * (codex_bengalfox / GPT-5.3-Codex-Spark), 不选桶就会显示别的模型的配额
  * (2026-07-25 用户实报: gpt-5.6-sol 会话显示 Spark 桶的「8天 剩余 100%」)。
- * 会话桶未知(冷启动 / 尚未收到 turn 事件)→ 回退最近更新桶, 与旧行为一致。
+ * 匹配不到(桶表为空 / 无通用桶)→ 回退最近更新桶, 与旧行为一致。
  */
 function selectCodexSlot(
   quotaSource: CodexQuotaSource,
-  sessionBucketKey?: string | null,
+  modelId?: string | null,
 ): RateLimitSnapshot | null {
   if (quotaSource === 'openai-web') return lastCodexAccountUsage.web;
-  if (sessionBucketKey) {
-    const scoped = lastCodexAccountUsage.appServerBuckets[sessionBucketKey];
-    if (scoped) return scoped;
-  }
-  return lastCodexAccountUsage.appServer;
+  return matchCodexBucketForModel(lastCodexAccountUsage.appServerBuckets, modelId)
+    ?? lastCodexAccountUsage.appServer;
 }
 
 function readUsageApi(): {
@@ -260,8 +294,14 @@ function applyCodexAccountUsageSnapshot(
   // 键存在即生效: 快照 → 槽内 merge; null → 显式清空(组合 payload 是权威全量,
   // 见 splitCodexAccountUsagePayload); 键缺失 → 保留现值(裸快照只带自己的槽)。
   if ('appServer' in parts) {
+    // 组合 payload 是 main 的权威全量: 顶层直接替换。跨桶 merge 会造出
+    // 「B 的 limitId + A 的窗口」杂交体(windowless 兜底会保留旧窗口),
+    // 冷启动会话回退顶层时就显示错桶数据(review 反馈)。
+    const isAuthoritative = 'appServerBuckets' in parts;
     const nextAppServer = parts.appServer
-      ? mergeCodexAccountUsageSnapshot(lastCodexAccountUsage.appServer, parts.appServer)
+      ? isAuthoritative
+        ? parts.appServer
+        : mergeCodexAccountUsageSnapshot(lastCodexAccountUsage.appServer, parts.appServer)
       : null;
     lastCodexAccountUsage = {
       ...lastCodexAccountUsage,
@@ -325,26 +365,22 @@ export function useAccountUsage(
   sessionId: string | undefined,
   vendorKey: 'cc' | 'codex' | undefined,
   quotaSource: CodexQuotaSource = 'app-server',
+  /** 当前会话模型 —— app-server 形态下据它匹配限额桶(见 matchCodexBucketForModel)。 */
+  modelId?: string | null,
 ): RateLimitSnapshot | null {
   // 幂等; 首个 codex 实例装上 module 常驻订阅, 保证之后卸载窗口内的广播(尤其
   // 换号清空)不丢。非 codex 会话不装 —— 从没有 codex chip 消费过就没有可残留
   // 的缓存, 常驻监听纯属白耗(review 反馈)。
   if (vendorKey === 'codex') ensureModuleSubscription();
-  // 本会话最近一次 turn 事件报告的限额桶(app-server 每次只推一个桶)。账号级
-  // 桶表是全局共享的, 但「这个会话在消耗哪个桶」是会话级事实 —— 不按会话选桶,
-  // 用过 Spark 类模型专属桶的会话会把它串给所有其它 Codex 会话。
-  const sessionBucketKeyRef = useRef<string | null>(null);
   const [snapshot, setSnapshot] = useState<RateLimitSnapshot | null>(() =>
-    vendorKey === 'codex' ? selectCodexSlot(quotaSource) : null,
+    vendorKey === 'codex' ? selectCodexSlot(quotaSource, modelId) : null,
   );
 
-  // Codex rate limits 是账号级数据, 不是 session 级数据。切回 Codex session 时
-  // 直接复用最近一次快照, 等 host replay/下一次 push 再覆盖。切会话时清掉上个
-  // 会话的桶归属(新会话的桶由它自己的 turn 事件确立, 未知时回退最近更新桶)。
+  // Codex rate limits 是账号级数据, 不是 session 级数据。切回 Codex session /
+  // 切模型时按新模型重新选桶(桶表已在缓存里, 无需等下一次 push)。
   useEffect(() => {
-    sessionBucketKeyRef.current = null;
-    setSnapshot(vendorKey === 'codex' ? selectCodexSlot(quotaSource) : null);
-  }, [sessionId, vendorKey, quotaSource]);
+    setSnapshot(vendorKey === 'codex' ? selectCodexSlot(quotaSource, modelId) : null);
+  }, [sessionId, vendorKey, quotaSource, modelId]);
 
   useEffect(() => {
     if (vendorKey !== 'codex') return;
@@ -358,7 +394,7 @@ export function useAccountUsage(
         if (cancelled) return;
         applyCodexAccountUsageSnapshot(
           persisted,
-          () => setSnapshot(selectCodexSlot(quotaSource, sessionBucketKeyRef.current)),
+          () => setSnapshot(selectCodexSlot(quotaSource, modelId)),
           { clearOnNull: false },
         );
       })
@@ -369,7 +405,7 @@ export function useAccountUsage(
     return () => {
       cancelled = true;
     };
-  }, [vendorKey, quotaSource]);
+  }, [vendorKey, quotaSource, modelId]);
 
   useEffect(() => {
     if (vendorKey !== 'codex') return;
@@ -379,16 +415,13 @@ export function useAccountUsage(
     let cancelled = false;
     const unsubscribe = api.onCodexAccountChanged((payload: unknown) => {
       if (cancelled) return;
-      applyCodexAccountUsageSnapshot(
-        payload,
-        () => setSnapshot(selectCodexSlot(quotaSource, sessionBucketKeyRef.current)),
-      );
+      applyCodexAccountUsageSnapshot(payload, () => setSnapshot(selectCodexSlot(quotaSource, modelId)));
     });
     return () => {
       cancelled = true;
       unsubscribe();
     };
-  }, [vendorKey, quotaSource]);
+  }, [vendorKey, quotaSource, modelId]);
 
   useEffect(() => {
     if (vendorKey !== 'codex' || !sessionId) return;
@@ -415,20 +448,18 @@ export function useAccountUsage(
       if (payload.event?.type !== 'account_usage') return;
       if (payload.event.source !== 'codex') return;
       if (!payload.event.data) return;
-      // 本会话的桶归属以它自己的 turn 事件为准。ref 供后续 push / warm-start
-      // 复用; 本次直接用局部 bucketKey 选桶并 setSnapshot(重渲染由它触发)。
-      const bucketKey = codexLimitBucketKey(payload.event.data);
-      sessionBucketKeyRef.current = bucketKey;
+      // 只更新桶表(事件带 limitId, 进它自己的桶); **不**据此判会话归属 ——
+      // 这是账号级 fan-out 事件(见 matchCodexBucketForModel 注释)。
       applyCodexAccountUsageSnapshot(
         payload.event.data,
-        () => setSnapshot(selectCodexSlot(quotaSource, bucketKey)),
+        () => setSnapshot(selectCodexSlot(quotaSource, modelId)),
       );
     });
     return () => {
       cancelled = true;
       unsubscribe();
     };
-  }, [sessionId, vendorKey, quotaSource]);
+  }, [sessionId, vendorKey, quotaSource, modelId]);
 
   return snapshot;
 }

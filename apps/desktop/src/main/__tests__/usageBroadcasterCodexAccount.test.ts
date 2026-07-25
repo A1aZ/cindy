@@ -237,3 +237,70 @@ describe('codex app-server limit buckets', () => {
     expect(Object.keys(payload?.appServerBuckets ?? {})).toEqual(['codex']);
   });
 });
+
+describe('codex bucket edge cases (review follow-up)', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mocks.queryOne.mockReset().mockResolvedValue(null);
+    mocks.exec.mockReset().mockResolvedValue(undefined);
+    mocks.getCurrentUserId.mockReturnValue('user-1');
+  });
+
+  const BUCKET_A = {
+    limitId: 'codex',
+    primary: { usedPercent: 40, windowMinutes: 300, resetsAt: 1_800_000_000 },
+    source: 'codex-app-server',
+  };
+  const BUCKET_B = {
+    limitId: 'codex_bengalfox',
+    limitName: 'GPT-5.3-Codex-Spark',
+    primary: { usedPercent: 0, windowMinutes: 10_080, resetsAt: 1_785_548_762 },
+    source: 'codex-app-server',
+  };
+
+  it('restores the latest bucket after A → B → A across a restart', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    await broadcaster.recordCodexAccountUsageSnapshot(BUCKET_A);
+    await broadcaster.recordCodexAccountUsageSnapshot(BUCKET_B);
+    await broadcaster.recordCodexAccountUsageSnapshot({
+      ...BUCKET_A,
+      primary: { usedPercent: 58, windowMinutes: 300, resetsAt: 1_800_000_000 },
+    });
+    const lastExecParams = (mocks.exec.mock.calls.at(-1) as unknown[] | undefined)?.[1] as unknown[];
+    const persistedJson = lastExecParams[1] as string;
+
+    vi.resetModules();
+    const rehydrated = await import('../usageBroadcaster');
+    mocks.queryOne.mockResolvedValue({ snapshot: persistedJson });
+    const payload = await rehydrated.readCodexAccountUsageSnapshot();
+    // 覆盖已有键不会把它移到对象末尾 —— 顶层兼容位必须仍是最近更新的 A
+    expect(payload?.limitId).toBe('codex');
+    expect(payload?.primary?.usedPercent).toBe(58);
+  });
+
+  it('never uses prototype-polluting limitIds as bucket keys', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    await broadcaster.recordCodexAccountUsageSnapshot({
+      ...BUCKET_A,
+      limitId: '__proto__',
+    });
+
+    const payload = await broadcaster.readCodexAccountUsageSnapshot();
+    expect(Object.keys(payload?.appServerBuckets ?? {})).toEqual(['__default__']);
+    expect(({} as Record<string, unknown>).primary).toBeUndefined();
+  });
+
+  it('drops prototype-polluting keys when hydrating a bucket table', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    mocks.queryOne.mockResolvedValue({
+      snapshot: JSON.stringify({
+        ...BUCKET_A,
+        webSnapshot: null,
+        appServerBuckets: { codex: BUCKET_A, __proto__: BUCKET_B },
+      }),
+    });
+
+    const payload = await broadcaster.readCodexAccountUsageSnapshot();
+    expect(Object.keys(payload?.appServerBuckets ?? {})).toEqual(['codex']);
+  });
+});

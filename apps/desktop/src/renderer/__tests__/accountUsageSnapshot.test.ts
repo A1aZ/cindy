@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CODEX_DEFAULT_LIMIT_BUCKET,
   codexLimitBucketKey,
+  matchCodexBucketForModel,
   mergeCodexAccountUsageSnapshot,
   splitCodexAccountUsagePayload,
 } from '@/hooks/useAccountUsage';
@@ -370,6 +371,61 @@ describe('codex limit bucket isolation', () => {
     const parts = splitCodexAccountUsagePayload({
       ...MAIN_BUCKET,
       appServerBuckets: { codex: MAIN_BUCKET, broken: [], alsoBroken: 'nope' },
+      webSnapshot: null,
+    } as never);
+    expect(Object.keys(parts.appServerBuckets ?? {})).toEqual(['codex']);
+  });
+});
+
+describe('matchCodexBucketForModel', () => {
+  // 会话归属**不能**用 account_usage 事件判定(账号级 fan-out, 见 hook 注释),
+  // 必须按当前会话模型匹配桶。
+  const MAIN = { limitId: 'codex', primary: { usedPercent: 63 } };
+  const SPARK = {
+    limitId: 'codex_bengalfox',
+    limitName: 'GPT-5.3-Codex-Spark',
+    primary: { usedPercent: 0 },
+  };
+  const buckets = { codex: MAIN, codex_bengalfox: SPARK };
+
+  it('matches a model-scoped bucket by its limitName', () => {
+    expect(matchCodexBucketForModel(buckets, 'gpt-5.3-codex-spark')).toBe(SPARK);
+    expect(matchCodexBucketForModel(buckets, 'GPT-5.3-Codex-Spark')).toBe(SPARK);
+  });
+
+  it('falls back to the generic bucket for unrelated models', () => {
+    // 用户实报场景: gpt-5.6-sol 绝不能拿到 Spark 桶
+    expect(matchCodexBucketForModel(buckets, 'gpt-5.6-sol')).toBe(MAIN);
+    expect(matchCodexBucketForModel(buckets, 'gpt-5.4')).toBe(MAIN);
+    expect(matchCodexBucketForModel(buckets, null)).toBe(MAIN);
+  });
+
+  it('returns null when no generic bucket exists (caller falls back)', () => {
+    expect(matchCodexBucketForModel({ codex_bengalfox: SPARK }, 'gpt-5.6-sol')).toBeNull();
+    expect(matchCodexBucketForModel({}, 'gpt-5.6-sol')).toBeNull();
+  });
+});
+
+describe('bucket key safety and authoritative top-level slot', () => {
+  it('never returns prototype-polluting bucket keys', () => {
+    expect(codexLimitBucketKey({ limitId: '__proto__' })).toBe(CODEX_DEFAULT_LIMIT_BUCKET);
+    expect(codexLimitBucketKey({ limitId: 'constructor' })).toBe(CODEX_DEFAULT_LIMIT_BUCKET);
+    expect(codexLimitBucketKey({ limitId: 'prototype' })).toBe(CODEX_DEFAULT_LIMIT_BUCKET);
+  });
+
+  it('marks combined payloads authoritative so the top-level slot is replaced, not merged', () => {
+    // 跨桶 merge 会造出「B 的 limitId + A 的窗口」杂交体(windowless 兜底保留旧窗口),
+    // 冷启动会话回退顶层时显示错桶数据(review 反馈)。组合 payload 必须直接替换。
+    const hookSource = readFileSync(new URL('../hooks/useAccountUsage.ts', import.meta.url), 'utf8');
+    expect(hookSource).toContain("const isAuthoritative = 'appServerBuckets' in parts;");
+    expect(hookSource).toContain('? parts.appServer');
+  });
+
+  it('drops prototype-polluting keys from a combined payload bucket table', () => {
+    const parts = splitCodexAccountUsagePayload({
+      limitId: 'codex',
+      primary: { usedPercent: 5 },
+      appServerBuckets: { codex: { limitId: 'codex' }, __proto__: { limitId: 'evil' } },
       webSnapshot: null,
     } as never);
     expect(Object.keys(parts.appServerBuckets ?? {})).toEqual(['codex']);

@@ -323,10 +323,14 @@ let codexAppServerBuckets: Record<string, RateLimitSnapshot> = {};
 let codexAppServerLatestBucketKey: string | null = null;
 let codexWebAccountUsageSnapshot: RateLimitSnapshot | null = null;
 
-/** 快照 → 桶键。limitId 缺失时归缺省桶。 */
+/** 用作对象键会污染原型链的保留名 —— 一律回退缺省桶。 */
+const UNSAFE_BUCKET_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/** 快照 → 桶键。limitId 缺失 / 为危险保留名时归缺省桶。 */
 export function codexLimitBucketKey(snapshot: RateLimitSnapshot | null | undefined): string {
   const limitId = snapshot?.limitId;
-  return typeof limitId === 'string' && limitId.length > 0 ? limitId : CODEX_DEFAULT_LIMIT_BUCKET;
+  if (typeof limitId !== 'string' || limitId.length === 0) return CODEX_DEFAULT_LIMIT_BUCKET;
+  return UNSAFE_BUCKET_KEYS.has(limitId) ? CODEX_DEFAULT_LIMIT_BUCKET : limitId;
 }
 
 /** 当前 app-server 展示快照(最近更新桶);无桶 → null。 */
@@ -398,6 +402,8 @@ function buildCodexAccountUsagePayload(): CodexAccountUsagePayload | null {
  */
 export function splitPersistedCodexAccountUsage(parsed: Record<string, unknown>): {
   appServerBuckets: Record<string, RateLimitSnapshot>;
+  /** 落库时的最近更新桶键(顶层兼容位派生);未知 → null。 */
+  latestBucketKey: string | null;
   web: RateLimitSnapshot | null;
 } {
   if ('webSnapshot' in parsed) {
@@ -409,17 +415,22 @@ export function splitPersistedCodexAccountUsage(parsed: Record<string, unknown>)
         : hasCodexSnapshotContent(rest)
           ? { [codexLimitBucketKey(rest)]: rest }
           : {},
+      // 顶层兼容位记录的就是落库时的最近更新桶 —— 水合必须据此恢复, 否则
+      // 「A→B→A」后重启会按对象键序错选 B(覆盖已有键不会移到末尾, review 反馈)。
+      latestBucketKey: hasCodexSnapshotContent(rest) ? codexLimitBucketKey(rest) : null,
       // 拒绝数组等畸形持久化值(与 renderer 的 isRateLimitSnapshot 守卫同口径),
       // 否则损坏行会被当有效快照再次广播 + 回写。
       web: isPlainRecord(webSnapshot) ? (webSnapshot as RateLimitSnapshot) : null,
     };
   }
   const legacy = parsed as RateLimitSnapshot;
-  if (legacy.source === 'openai-web') return { appServerBuckets: {}, web: legacy };
+  if (legacy.source === 'openai-web') {
+    return { appServerBuckets: {}, latestBucketKey: null, web: legacy };
+  }
+  const hasContent = hasCodexSnapshotContent(legacy);
   return {
-    appServerBuckets: hasCodexSnapshotContent(legacy)
-      ? { [codexLimitBucketKey(legacy)]: legacy }
-      : {},
+    appServerBuckets: hasContent ? { [codexLimitBucketKey(legacy)]: legacy } : {},
+    latestBucketKey: hasContent ? codexLimitBucketKey(legacy) : null,
     web: null,
   };
 }
@@ -432,6 +443,7 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 function sanitizeCodexBuckets(raw: Record<string, unknown>): Record<string, RateLimitSnapshot> {
   const out: Record<string, RateLimitSnapshot> = {};
   for (const [key, value] of Object.entries(raw)) {
+    if (UNSAFE_BUCKET_KEYS.has(key)) continue;
     if (isPlainRecord(value)) out[key] = value as RateLimitSnapshot;
   }
   return out;
@@ -519,7 +531,7 @@ async function ensureCodexAccountUsageLoaded(): Promise<void> {
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       const slots = splitPersistedCodexAccountUsage(parsed as Record<string, unknown>);
       codexAppServerBuckets = slots.appServerBuckets;
-      codexAppServerLatestBucketKey = null; // 水合后无「最近」信息, 取表内最后一个
+      codexAppServerLatestBucketKey = slots.latestBucketKey;
       codexWebAccountUsageSnapshot = slots.web;
     }
   } catch (err) {

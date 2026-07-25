@@ -543,7 +543,14 @@ export async function loadAnthropicModelsFromDiskCache(): Promise<void> {
         Array.isArray((m as CatalogModel).efforts),
     );
     if (valid.length === 0) return;
-    const validIds = new Set(valid.map((model) => model.id));
+    // Cache versions before explicitWindows did not distinguish an HTTP-declared
+    // window from the mapper's old fallback. Recompute only non-explicit windows
+    // so catalog corrections take effect immediately after an app upgrade.
+    const normalized = valid.map((model) => ({
+      ...model,
+      contextWindow: contextWindowFor(model.id, explicitWindows.get(model.id)),
+    }));
+    const validIds = new Set(normalized.map((model) => model.id));
     const restoreIds = (value: unknown): Set<string> => {
       const restored = new Set<string>();
       if (Array.isArray(value)) {
@@ -562,13 +569,13 @@ export async function loadAnthropicModelsFromDiskCache(): Promise<void> {
       (raw as { explicitFastModeModelIds?: unknown }).explicitFastModeModelIds,
     );
     await applyModels(
-      valid,
+      normalized,
       false,
       generation,
       restoredExplicitEffortIds,
       restoredExplicitFastModeIds,
     );
-    log.info(`anthropic models loaded from disk cache: ${valid.length}`);
+    log.info(`anthropic models loaded from disk cache: ${normalized.length}`);
   } catch {
     /* 缓存缺失 / 损坏:等动态通道,不影响启动 */
   }

@@ -12,6 +12,7 @@ import {
   privateBinaryPath,
   runtimeInstallRoot,
   runtimeVersionMatchesPin,
+  systemRuntimeVersionSupportsPin,
 } from '../linux-runtime-fallback';
 
 const tempDirs: string[] = [];
@@ -47,6 +48,16 @@ describe('runtimeVersionMatchesPin', () => {
   it('rejects empty or unparsable version output', () => {
     expect(runtimeVersionMatchesPin('claude-code', '')).toBe(false);
     expect(runtimeVersionMatchesPin('codex', 'development build')).toBe(false);
+  });
+});
+
+describe('systemRuntimeVersionSupportsPin', () => {
+  it('accepts the pinned or newer Claude runtime and rejects older or prerelease-equivalent builds', () => {
+    expect(systemRuntimeVersionSupportsPin('claude-code', '2.1.219 (Claude Code)')).toBe(true);
+    expect(systemRuntimeVersionSupportsPin('claude-code', '2.2.0 (Claude Code)')).toBe(true);
+    expect(systemRuntimeVersionSupportsPin('claude-code', '2.1.218 (Claude Code)')).toBe(false);
+    expect(systemRuntimeVersionSupportsPin('claude-code', '2.1.219-beta.1')).toBe(false);
+    expect(systemRuntimeVersionSupportsPin('claude-code', '2.2.0-beta.1')).toBe(false);
   });
 });
 

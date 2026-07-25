@@ -281,6 +281,20 @@ describe('ClaudeCodeAgent runtime settings during rewind window', () => {
     await handle.close();
   });
 
+  it('does not retry max when applyFlagSettings fails at the transport layer', async () => {
+    const { handle, firstQuery } = await startRewindableSession();
+    firstQuery.applyFlagSettings.mockRejectedValueOnce(
+      new Error('ProcessTransport is not ready for writing'),
+    );
+
+    await expect(handle.setEffort?.('max')).rejects.toThrow(
+      'ProcessTransport is not ready for writing',
+    );
+    expect(firstQuery.applyFlagSettings).toHaveBeenCalledTimes(1);
+
+    await handle.close();
+  });
+
   it('does not retry failures for non-max effort levels', async () => {
     const { handle, firstQuery } = await startRewindableSession();
     firstQuery.applyFlagSettings.mockRejectedValueOnce(new Error('transport failed'));

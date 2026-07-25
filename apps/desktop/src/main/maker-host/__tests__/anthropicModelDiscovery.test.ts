@@ -704,6 +704,35 @@ describe('noteAnthropicSdkSupportedModels(登录态门控 + 合并纪律)', () =
     expect(persisted.explicitFastModeModelIds).toEqual(['claude-fable-5']);
   });
 
+  it('磁盘缓存会按当前目录修正未明确声明的旧窗口', async () => {
+    const cacheDir = path.join(TEST_USER_DATA, 'model-discovery');
+    await fsp.mkdir(cacheDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(cacheDir, 'anthropic-models.json'),
+      JSON.stringify({
+        fetchedAt: '2026-07-19T00:00:00.000Z',
+        models: [
+          {
+            id: 'claude-sonnet-4-5',
+            name: 'Sonnet 4.5',
+            group: 'anthropic',
+            sortOrder: 0,
+            contextWindow: 1_000_000,
+            efforts: [],
+            defaultEffort: null,
+            supportsFastMode: false,
+            status: 'active',
+          },
+        ],
+      }),
+      'utf-8',
+    );
+
+    await loadAnthropicModelsFromDiskCache();
+
+    expect(anthropicModel('claude-sonnet-4-5')?.contextWindow).toBe(200_000);
+  });
+
   it('磁盘缓存恢复 explicitWindows:重启后 SDK 捕获不把 HTTP 明说窗口打回猜测值(review P2 回归)', async () => {
     const cacheDir = path.join(TEST_USER_DATA, 'model-discovery');
     await fsp.mkdir(cacheDir, { recursive: true });

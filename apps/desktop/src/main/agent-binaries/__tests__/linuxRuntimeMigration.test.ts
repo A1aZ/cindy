@@ -65,4 +65,44 @@ describe('legacy managed binary migration', () => {
     expect(fs.readFileSync(result.binaryPath, 'utf8')).toContain('2.1.219');
     expect(downloadMock).not.toHaveBeenCalled();
   });
+
+  it('installs the pin instead of selecting an older system Claude runtime', async () => {
+    const systemClaude = '/usr/local/bin/claude';
+    execFileMock.mockImplementation((
+      command: string,
+      _args: string[],
+      _options: unknown,
+      callback: (error: Error | null, stdout: string, stderr: string) => void,
+    ) => {
+      if (command === '/bin/sh') {
+        callback(null, `${systemClaude}\n`, '');
+        return;
+      }
+      callback(
+        null,
+        command === systemClaude
+          ? '2.1.218 (Claude Code)\n'
+          : '2.1.219 (Claude Code)\n',
+        '',
+      );
+    });
+    downloadMock.mockImplementationOnce(async ({ targetPath }: { targetPath: string }) => {
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      fs.writeFileSync(targetPath, '#!/bin/sh\necho "2.1.219 (Claude Code)"\n', { mode: 0o755 });
+      return {
+        path: targetPath,
+        size: fs.statSync(targetPath).size,
+        sha256: 'test',
+        fromCache: false,
+        durationMs: 0,
+        resumedFromBytes: 0,
+      };
+    });
+
+    const result = await fallback.prepareLinuxRuntimeFallback('claude-code');
+
+    expect(result).toMatchObject({ ready: true, installed: true, source: 'installed' });
+    expect(result.binaryPath).toBe(fallback.privateBinaryPath(tempDir, 'claude-code'));
+    expect(downloadMock).toHaveBeenCalledOnce();
+  });
 });

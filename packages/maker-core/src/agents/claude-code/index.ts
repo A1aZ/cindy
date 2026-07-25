@@ -213,19 +213,32 @@ function clampEffortForClaude(e: Effort): ClaudeSdkEffort {
   return e;
 }
 
+function isUnsupportedClaudeEffortError(error: unknown): boolean {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : '';
+  return (
+    /effort(?:Level|[ _-]level)/i.test(message) &&
+    /\b(?:invalid|unsupported|not supported|unknown|unrecognized)\b/i.test(message)
+  );
+}
+
 async function applyClaudeEffortFlagSettings(
   q: Query,
   effort: ClaudeSdkEffort,
   maxFallback: Exclude<ClaudeSdkEffort, 'max'>,
 ): Promise<ClaudeSdkEffort> {
   // Claude Code 2.1.219 accepts session-scoped `max` through apply_flag_settings.
-  // Linux may still use an older system binary, so retry only a rejected `max`
-  // with the best lower effort supported by the selected model.
+  // Only an explicit effort-level rejection is compatibility evidence; transport
+  // and process failures must keep their original failure semantics.
   try {
     await q.applyFlagSettings({ effortLevel: effort } as Settings);
     return effort;
   } catch (error) {
-    if (effort !== 'max') throw error;
+    if (effort !== 'max' || !isUnsupportedClaudeEffortError(error)) throw error;
     await q.applyFlagSettings({ effortLevel: maxFallback } as Settings);
     return maxFallback;
   }

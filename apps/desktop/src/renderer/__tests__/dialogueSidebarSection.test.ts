@@ -43,7 +43,16 @@ describe('Dialogue sidebar section', () => {
 
   it('keeps the Dialogue section visible when it has no sessions', () => {
     expect(dialogueSectionSource).not.toMatch(/sessions\.length\s*===\s*0\)\s*return\s+null/);
-    expect(dialogueSectionSource).toContain("t('ccAgent.sidebar.noDialogues')");
+    expect(dialogueSectionSource).toContain("'ccAgent.sidebar.noDialogues'");
+  });
+
+  it('shows loading instead of the empty state until the initial session fetch settles', () => {
+    expect(sidebarSource).toContain('isLoading={isLoadingSessions}');
+    expect(dialogueSectionSource).toContain('isLoading: boolean');
+    expect(dialogueSectionSource).toContain("'ccAgent.sidebar.loadingDialogues'");
+    expect(dialogueSectionSource).toMatch(
+      /isLoading\s*\?\s*'ccAgent\.sidebar\.loadingDialogues'\s*:\s*'ccAgent\.sidebar\.noDialogues'/,
+    );
   });
 
   it('has a Dialogue-owned runtime sort setting instead of using project manual order or renderer storage', () => {

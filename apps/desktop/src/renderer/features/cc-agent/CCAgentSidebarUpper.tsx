@@ -2277,6 +2277,7 @@ function ExpandedView({
             />
             <DialogueSection
               sessions={visibleDialogues}
+              isLoading={isLoadingSessions}
               activeSessionId={activeSessionId}
               runningSessionIds={displayRunningSessionIds}
               attachedSessionIds={attachedSessionIds}

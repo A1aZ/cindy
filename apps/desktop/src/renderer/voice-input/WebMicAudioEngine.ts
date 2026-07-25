@@ -1074,11 +1074,22 @@ export class WebMicAudioEngine {
     const benchmarkFixturePromise = BENCHMARK_FIXTURE_ENABLED
       ? prewarmVoiceInputBenchmarkFixture().catch(() => null)
       : Promise.resolve(null);
-    await assertSelectedMicrophoneAvailable(this.deviceId);
-    const streamPromise = navigator.mediaDevices.getUserMedia({
-      audio,
-      video: false,
-    }).catch((error) => {
+    await this.awaitDirectStartupStep(
+      assertSelectedMicrophoneAvailable(this.deviceId),
+      powerGenerationAtStart,
+    );
+    const streamPromise = this.awaitDirectStartupStep(
+      navigator.mediaDevices.getUserMedia({
+        audio,
+        video: false,
+      }),
+      powerGenerationAtStart,
+    ).catch((error) => {
+      // A release that won this race takes priority: suspend routinely makes
+      // the pending request reject (AbortError / NotReadableError), and
+      // reporting that as a device failure would make captureSession show an
+      // error instead of following its silent power-cancellation path.
+      if (isPowerReleaseCancellation(error)) throw error;
       throw normalizeMicrophoneStartError(error, this.deviceId);
     });
 
@@ -1187,6 +1198,27 @@ export class WebMicAudioEngine {
    * leave it running for the whole suspend. Tear it down and report the same
    * cancellation the keep-alive path uses.
    */
+  /**
+   * Await one direct-startup step, letting an in-flight power release win.
+   *
+   * Mirrors KeepAliveMicSession.awaitStartupStep: the raw error would send the
+   * caller down its device-failure paths (error surface, or automatic fallback
+   * to the default microphone) after the one-shot event has already passed.
+   */
+  private async awaitDirectStartupStep<T>(step: Promise<T>, generationAtStart: number): Promise<T> {
+    try {
+      return await step;
+    } catch (error) {
+      if (
+        currentPowerReleaseGeneration() !== generationAtStart &&
+        !isPowerReleaseCancellation(error)
+      ) {
+        throw powerReleaseCancellation();
+      }
+      throw error;
+    }
+  }
+
   private assertNoPowerReleaseDuringStartup(generationAtStart: number): void {
     if (currentPowerReleaseGeneration() === generationAtStart) return;
     throw powerReleaseCancellation();
@@ -1588,6 +1620,10 @@ if (import.meta.hot) {
     keepAlivePowerReleaseUnsubscribe?.();
     keepAlivePowerReleaseUnsubscribe = undefined;
     keepAlivePowerReleaseListening = false;
+    // React Fast Refresh can keep the component and its engine ref alive across
+    // the swap, and the new module instance has an empty registry — so without
+    // this the old direct stream stays live with nothing able to reach it.
+    releaseDirectCaptureEngines('hmr');
     void disposeKeepAliveVoiceInputMicrophone('hmr');
   });
 }

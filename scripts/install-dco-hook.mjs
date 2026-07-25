@@ -4,8 +4,9 @@
 // 一致的 Signed-off-by trailer，避免 PR 被 DCO 门禁（scripts/check-dco.mjs）拦下后返工。
 //
 // 用法：
-//   pnpm dco:install-hook                      安装或更新 hook
+//   pnpm dco:install-hook                      安装 hook（已存在且被改过时会拒绝，见下）
 //   node scripts/install-dco-hook.mjs --check  只报告状态，不写文件
+//   node scripts/install-dco-hook.mjs --force  覆盖一份源自本仓但已被改动的 hook
 //
 // hook 的正本是 .githooks/prepare-commit-msg（普通 shell 脚本，可直接 review 与
 // shellcheck）；本脚本只负责复制、判断能否安全覆盖，不生成脚本内容。想跳过安装器的
@@ -16,7 +17,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -34,34 +35,34 @@ export function readHookSource() {
 /**
  * hooks 目录：走 `git rev-parse --git-path hooks`，因此自动尊重已设置的
  * core.hooksPath；多 worktree 共享 common dir，装一次全部 worktree 生效。
+ *
+ * --path-format 要 git 2.31+，旧版 git 上直接失败会让安装器不可用，所以回落成
+ * 「相对路径 + 仓库顶层」自己拼绝对路径。
  */
 export function resolveHooksDir(cwd = process.cwd()) {
-  return execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-path', 'hooks'], {
-    cwd,
-    encoding: 'utf8',
-  }).trim();
+  const git = (args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  try {
+    return git(['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+  } catch {
+    const hooksPath = git(['rev-parse', '--git-path', 'hooks']);
+    return isAbsolute(hooksPath) ? hooksPath : resolve(git(['rev-parse', '--show-toplevel']), hooksPath);
+  }
 }
 
 /**
- * 所有权判定：文件开头两行（shebang + marker 注释）必须与源文件完全一致。
+ * 返回 `missing`（没有）/ `installed`（内容与源文件逐字一致）/ `modified`（认得出源自本仓，
+ * 但内容已经不同）/ `foreign`（完全不是本仓的东西）。
  *
- * 刻意不只查「文件里含 marker」——开发者把本仓逻辑手动合并进自己的 hook 时，那段注释
- * 也会被一起复制进去，于是含 marker 但内容不同，会被误判成「本仓装的旧版本」而整份
- * 覆盖，抹掉开发者原有的 hook 行为。按开头两行判断则这类复合 hook 一律算 foreign。
- */
-function isOwnedByThisRepo(content, expectedContent) {
-  const head = (text) => text.split(/\r?\n/).slice(0, 2).join('\n');
-  return head(content) === head(expectedContent);
-}
-
-/**
- * 返回 `installed`（与源文件一致）/ `outdated`（本仓装的旧版本，可覆盖）/
- * `foreign`（别人的 hook 或含本仓逻辑的复合 hook，不覆盖）/ `missing`（没有）。
+ * 只有 `installed` 与 `missing` 允许无条件写入。刻意不去区分「本仓装的旧版本」与「装完
+ * 之后被人改过」——这两者在磁盘上无法可靠分辨：无论是把本仓逻辑合并进自己的 hook，还是
+ * 在本仓装好的 hook 后面追加几行，得到的都是「像本仓的、但不等于源文件」。任何试图靠开头
+ * 几行或 marker 位置来认领它们的判定，都会在某一种组合上误判并整份覆盖，抹掉开发者的
+ * 逻辑。所以这里一律要求显式 --force 才覆盖。
  */
 export function classifyHook(existingContent, expectedContent = readHookSource()) {
   if (existingContent === null) return 'missing';
-  if (!isOwnedByThisRepo(existingContent, expectedContent)) return 'foreign';
-  return existingContent === expectedContent ? 'installed' : 'outdated';
+  if (existingContent === expectedContent) return 'installed';
+  return existingContent.includes(HOOK_MARKER) ? 'modified' : 'foreign';
 }
 
 export function readHook(hookPath) {
@@ -85,6 +86,7 @@ export function isSignOffHookInstalled(cwd = process.cwd()) {
 
 function main() {
   const checkOnly = process.argv.includes('--check');
+  const force = process.argv.includes('--force');
   const hooksDir = resolveHooksDir();
   const hookPath = join(hooksDir, HOOK_NAME);
   const source = readHookSource();
@@ -94,7 +96,7 @@ function main() {
   if (checkOnly) {
     const label = {
       installed: `installed, matching ${HOOK_SOURCE_PATH}`,
-      outdated: 'installed but outdated — reinstall to update',
+      modified: 'present but differs from this repo\'s version (older, or edited locally)',
       missing: 'not installed',
       foreign: 'a different prepare-commit-msg hook is present; not taken over',
     }[state];
@@ -102,24 +104,35 @@ function main() {
     return;
   }
 
-  if (state === 'foreign') {
-    console.error(`A ${HOOK_NAME} hook not managed by this repository already exists:`);
-    console.error(`  ${hookPath}`);
-    console.error(`Leaving it untouched. Either merge the logic from ${HOOK_SOURCE_PATH} into it`);
-    console.error('— this installer will then keep its hands off that file, so you have to keep');
-    console.error('the merged copy up to date yourself — or use `git config core.hooksPath .githooks`.');
-    process.exit(1);
-  }
-
   if (state === 'installed') {
     console.log(`DCO sign-off hook already up to date: ${hookPath}`);
     return;
   }
 
+  if (state === 'foreign') {
+    console.error(`A ${HOOK_NAME} hook not managed by this repository already exists:`);
+    console.error(`  ${hookPath}`);
+    console.error(`Leaving it untouched. Either merge the logic from ${HOOK_SOURCE_PATH} into it`);
+    console.error('— this installer will then keep its hands off that file, so you own keeping the');
+    console.error('merged copy in sync — or use `git config core.hooksPath .githooks` instead.');
+    process.exit(1);
+  }
+
+  // modified：可能是本仓的旧版本，也可能是装完之后你自己加过东西。磁盘上分辨不出来，
+  // 所以不猜，要求显式 --force——猜错的代价是删掉别人的 hook 逻辑。
+  if (state === 'modified' && !force) {
+    console.error(`${hookPath} came from this repository but no longer matches ${HOOK_SOURCE_PATH}.`);
+    console.error('It is either an older version of the hook, or a copy you have edited since.');
+    console.error('Not overwriting it. Compare first, then decide:');
+    console.error(`  diff ${hookPath} ${join(REPO_ROOT, HOOK_SOURCE_PATH)}`);
+    console.error('  node scripts/install-dco-hook.mjs --force   # overwrite with this repo\'s version');
+    process.exit(1);
+  }
+
   mkdirSync(hooksDir, { recursive: true });
   writeFileSync(hookPath, source, 'utf8');
   chmodSync(hookPath, 0o755);
-  console.log(`${state === 'outdated' ? 'Updated' : 'Installed'} DCO sign-off hook: ${hookPath}`);
+  console.log(`${state === 'modified' ? 'Overwrote' : 'Installed'} DCO sign-off hook: ${hookPath}`);
   console.log(
     `Copied from ${HOOK_SOURCE_PATH}. git commit will now append Signed-off-by; ` +
       'delete the installed file to uninstall.'

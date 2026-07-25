@@ -48,12 +48,18 @@ export function normalizeName(name) {
   return String(name ?? '').trim().toLowerCase();
 }
 
-// 邮箱形状：对齐 DCO App 用的 validator.isEmail 的主要规则——local part 不允许连续点
-// 或首尾点，域名不允许下划线、必须有字母 TLD（所以 git 未配 user.email 时自动生成的
-// `user@hostname` 会被拒）。这里无法逐条复刻 validator，取舍上刻意偏严：宁可本地误报，
-// 也不要放行一个 App 会拒的地址（那才会变成「本地绿、PR 红」）。
-const EMAIL_LOCAL_PART = /^[^\s@.]+(?:\.[^\s@.]+)*$/;
-const EMAIL_DOMAIN = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/;
+// 邮箱形状：对齐 DCO App 用的 validator.isEmail 的默认规则。
+// - local part 限定为 RFC 5322 的 atext 字符集，点分隔且不允许连续点或首尾点。
+//   注意 atext 不含括号、方括号、引号等，所以 `a(b)@x.com` 会被拒——validator 也拒。
+// - 域名每个 label 不能以连字符开头或结尾，不允许下划线，且必须有字母 TLD（于是 git 未配
+//   user.email 时自动生成的 `user@hostname` 会被拒）。
+// 无法逐条复刻 validator，取舍上刻意偏严：宁可本地误报，也不要放行一个 App 会拒的地址，
+// 那才会变成「本地绿、PR 红」。含方括号的 bot 邮箱（dependabot 等）同样不符合 atext，
+// 但 bot 提交在 exemptReason 就被豁免，走不到这里。
+const ATEXT = "[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]";
+const DOMAIN_LABEL = '[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?';
+const EMAIL_LOCAL_PART = new RegExp(`^${ATEXT}+(?:\\.${ATEXT}+)*$`);
+const EMAIL_DOMAIN = new RegExp(`^${DOMAIN_LABEL}(?:\\.${DOMAIN_LABEL})*\\.[A-Za-z]{2,}$`);
 
 export function looksLikeEmail(email) {
   const value = String(email ?? '').trim();

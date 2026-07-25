@@ -27,6 +27,7 @@ import {
   HOOK_SOURCE_PATH,
   classifyHook,
   readHookSource,
+  resolveHooksDir,
 } from '../install-dco-hook.mjs';
 
 const ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -155,7 +156,8 @@ test('looksLikeEmail rejects everything validator.isEmail would reject', () => {
     'contributor@example.com',
     'first.last@sub.example.co.uk',
     'user+tag@example.io',
-    '49699333+dependabot[bot]@users.noreply.github.com',
+    "o'brien@example.com",
+    'a-b@my-host.example.com',
   ]) {
     assert.equal(looksLikeEmail(good), true, `should accept ${good}`);
   }
@@ -166,12 +168,20 @@ test('looksLikeEmail rejects everything validator.isEmail would reject', () => {
     'alice.@example.com',
     'alice@example..com',
     'alice@exam_ple.com',
+    'alice@-foo.com', // 域名 label 不能以连字符开头
+    'alice@foo-.com', // 也不能以连字符结尾
+    'a(b)@example.com', // 括号不在 atext 内
+    'a<b>@example.com',
+    'a b@example.com',
     'contributor@localhost',
     'contributor@example',
     'no-at-sign.example.com',
     '@example.com',
     'alice@',
     '',
+    // 方括号同样不在 atext 内，validator 也拒；bot 提交在 exemptReason 就被豁免，
+    // 根本走不到这里，所以拒绝它不影响 dependabot 等的 PR。
+    '49699333+dependabot[bot]@users.noreply.github.com',
   ]) {
     assert.equal(looksLikeEmail(bad), false, `should reject ${bad}`);
   }
@@ -185,6 +195,26 @@ test('merge commits and bot commits are exempt, humans are not', () => {
   assert.ok(isBotIdentity('GitHub', 'noreply@github.com'));
   // 普通用户的 noreply 邮箱不是 bot，不能借此绕过签名。
   assert.equal(isBotIdentity('Contributor', '12345+contributor@users.noreply.github.com'), false);
+});
+
+test('bot commits stay exempt even though their address fails the email check', () => {
+  // 两处改动的交叉点：收紧邮箱形状后 dependabot 的地址不再合格，但豁免必须先生效，
+  // 否则 dependabot 的 PR 会因为邮箱形状被判失败。
+  const botEmail = '49699333+dependabot[bot]@users.noreply.github.com';
+  assert.equal(looksLikeEmail(botEmail), false);
+
+  const result = validateCommits([
+    commitFixture({
+      authorName: 'dependabot[bot]',
+      authorEmail: botEmail,
+      committerName: 'dependabot[bot]',
+      committerEmail: botEmail,
+      message: 'chore(deps): bump something\n',
+    }),
+  ]);
+  assert.equal(result.failures.length, 0);
+  assert.equal(result.checked, 0);
+  assert.equal(result.exempted.length, 1);
 });
 
 test('validateCommits separates failures from exemptions', () => {
@@ -231,21 +261,25 @@ test('parseGitLog keeps multi-line messages and parent lists intact', () => {
   assert.deepEqual(validateCommit(commits[1]), []);
 });
 
-test('classifyHook only overwrites hooks this repo installed', () => {
+test('classifyHook never marks a changed hook as safe to overwrite', () => {
   const source = readHookSource();
-  const ownHead = source.split('\n').slice(0, 2).join('\n');
 
   assert.equal(classifyHook(null), 'missing');
-  assert.equal(classifyHook('#!/bin/sh\necho unrelated\n'), 'foreign');
   assert.equal(classifyHook(source), 'installed');
-  // 本仓装过的旧版本：开头两行相同、正文不同 → 可安全更新。
-  assert.equal(classifyHook(`${ownHead}\nold body\n`), 'outdated');
+  assert.equal(classifyHook('#!/bin/sh\necho unrelated\n'), 'foreign');
 
-  // 关键回归：开发者把本仓逻辑合并进自己的 hook 后，文件里也含 marker。只查
-  // 「含 marker」会把它判成 outdated 并整份覆盖，抹掉开发者原有的 hook 行为。
-  const composite = ['#!/bin/sh', 'echo "my own hook"', ...source.split('\n').slice(1)].join('\n');
-  assert.ok(composite.includes(HOOK_MARKER));
-  assert.equal(classifyHook(composite), 'foreign');
+  // 复合 hook 有两种来法，两者都不能被当成「可以直接覆盖」：
+  // 1. 把本仓逻辑合并进自己的 hook（我们的注释在文件中间）
+  const merged = ['#!/bin/sh', 'echo "my own hook"', ...source.split('\n').slice(1)].join('\n');
+  // 2. 在本仓装好的 hook 后面追加自己的逻辑（开头几行仍是我们的）
+  const appended = `${source}\necho custom\n`;
+  for (const composite of [merged, appended]) {
+    assert.ok(composite.includes(HOOK_MARKER));
+    assert.equal(classifyHook(composite), 'modified');
+  }
+
+  // 旧版本 hook 与「被本人改过」在磁盘上分辨不出来，一律 modified 而非可覆盖状态。
+  assert.equal(classifyHook(`${source.split('\n').slice(0, 2).join('\n')}\nold body\n`), 'modified');
 });
 
 test('the hook source is a POSIX sh script that pins its trailer behaviour', () => {
@@ -399,6 +433,38 @@ test('hook signs off the committer, never the overridden author', { skip: !canRu
 
   // committer 的签名同样满足门禁（App 与本脚本都接受 author 或 committer）。
   assert.equal(repo.checkDco(['--base', 'main']).code, 0);
+});
+
+test('installer refuses to clobber an edited hook without --force', { skip: !canRunGitFixture }, (t) => {
+  const repo = createRepo();
+  t.after(() => fs.rmSync(repo.dir, { recursive: true, force: true }));
+
+  repo.commit('history.txt', 'chore: pre-DCO history');
+  repo.run(['node', INSTALL_HOOK]);
+  const hookPath = path.join(repo.dir, '.git', 'hooks', HOOK_NAME);
+  assert.equal(fs.readFileSync(hookPath, 'utf8'), readHookSource());
+
+  // resolveHooksDir 必须给出绝对路径（旧版 git 走 --git-path + toplevel 回落）。
+  assert.equal(path.isAbsolute(resolveHooksDir(repo.dir)), true);
+
+  // 装完之后开发者又追加了自己的逻辑。
+  const edited = `${readHookSource()}\necho "my own extra step"\n`;
+  fs.writeFileSync(hookPath, edited);
+
+  let refused;
+  try {
+    repo.run(['node', INSTALL_HOOK], { stdio: ['ignore', 'pipe', 'pipe'] });
+    refused = null;
+  } catch (error) {
+    refused = `${error.stdout ?? ''}${error.stderr ?? ''}`;
+  }
+  assert.ok(refused, '没有 --force 时必须失败退出');
+  assert.match(refused, /Not overwriting it/);
+  assert.equal(fs.readFileSync(hookPath, 'utf8'), edited, '拒绝时绝不能改动文件');
+
+  // 显式 --force 才覆盖。
+  repo.run(['node', INSTALL_HOOK, '--force']);
+  assert.equal(fs.readFileSync(hookPath, 'utf8'), readHookSource());
 });
 
 test('hook keeps the native `commit -s` layout for interactive commits', { skip: !canRunGitFixture }, (t) => {

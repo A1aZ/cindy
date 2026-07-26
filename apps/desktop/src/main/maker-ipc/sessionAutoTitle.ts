@@ -305,6 +305,11 @@ async function runUnsynchronized(
       err: err instanceof Error ? err.message : String(err),
     });
   }
+  // 模型没结果 → 标题此刻已经是**用户第一条消息的原话**(截断版),会话已经起过名,
+  // `done` 为真。这不是"瞬时失败被标记完成":智能标题只是锦上添花,占位本身就是
+  // 本 PR 的主行为(Codex 式即时占位)。此处若返回 false,下一条消息会把标题改成
+  // 第二句话 —— 标题就不再对应会话的开头了,那才是 bug。真正的瞬时失败是"占位也
+  // 没写进去",那时 placeholderLive 为 false,照旧可重试。
   if (!generated) return { applied: placeholderLive, done: placeholderLive };
   if (manuallyRenamed.has(request.sessionId)) {
     return { applied: placeholderLive, done: true };
@@ -319,6 +324,8 @@ async function runUnsynchronized(
       err: err instanceof Error ? err.message : String(err),
     });
   }
+  // 同上:智能标题没写进去但占位活着 → 会话仍有一个来自用户原话的标题,不必再起。
+  // 两段都没写进去才是真失败,applied/done 皆为 false,下一条带文字的消息重试。
   const applied = smartPersisted || placeholderLive;
   return { applied, done: applied };
 }

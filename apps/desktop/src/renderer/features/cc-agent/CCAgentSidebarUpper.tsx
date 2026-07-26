@@ -1259,6 +1259,10 @@ function ExpandedView({
     () => new Map([...sessions, ...remoteProjectSessions].map((session) => [session.id, session])),
     [sessions, remoteProjectSessions],
   );
+  // 与 sessionsRef 同理:行级 handler 只在「点击那一刻」查表,不该因为表换了引用就
+  // 重建自身 —— 否则 SessionItem 的 memo 会被整表打穿(SessionItem.tsx 不变量第 3 条)。
+  const sessionsByIdRef = useRef(sessionsById);
+  sessionsByIdRef.current = sessionsById;
   const selectedSessions = useMemo(
     () =>
       [...selectedSessionIds]
@@ -1428,7 +1432,7 @@ function ExpandedView({
       clearSystemSessionAttention(id);
       if (id === activeSessionId) return; // No duplicate navigate.
       if (import.meta.env.DEV) perfLog.debug(`sidebar:click sid=${id}`); // 纯诊断,生产剔除
-      const target = sessions.find((s) => s.id === id);
+      const target = sessionsRef.current.find((s) => s.id === id);
       navigate(await resolveSessionRoute(id, target));
     },
     [
@@ -1436,7 +1440,6 @@ function ExpandedView({
       navigate,
       clearNotification,
       markAutomationSessionRunsRead,
-      sessions,
       selectedSessionIds.size,
       selectionAnchorSessionId,
     ],
@@ -1584,13 +1587,15 @@ function ExpandedView({
   /* ---- Rename handler ---- */
   const handleRename = useCallback(
     async (sessionId: string, newTitle: string) => {
-      const session = sessionsById.get(sessionId);
+      const session = sessionsByIdRef.current.get(sessionId);
       if (isRemoteSessionWriteBlocked(session)) {
         toast.warning(t('ccAgent.remoteSession.actionsUnavailable'));
         return;
       }
       // 取旧值用于失败回滚，乐观先 patch（不刷整列表，列表顺序保持稳定）
-      const oldTitle = sessions.find((s) => s.id === sessionId)?.title;
+      // 保持读 sessions(而非 sessionsById):后者含 remoteProjectSessions,换源会连带
+      // 改变远程会话的回滚行为,不在本次修复范围内。
+      const oldTitle = sessionsRef.current.find((s) => s.id === sessionId)?.title;
       patchLocal(sessionId, { title: newTitle });
       try {
         // 远程会话:patch-meta 经隧道写被控端 → 广播 sessions:patched → applyPatch 更新远程分片(纯镜像)。
@@ -1601,7 +1606,7 @@ function ExpandedView({
         if (oldTitle !== undefined) patchLocal(sessionId, { title: oldTitle });
       }
     },
-    [sessions, sessionsById, patchLocal, t],
+    [patchLocal, t],
   );
 
   const handleProjectAliasChange = useCallback(
@@ -1620,12 +1625,13 @@ function ExpandedView({
   /* ---- Pin / Unpin handler ---- */
   const handleTogglePin = useCallback(
     async (sessionId: string, currentlyPinned: boolean) => {
-      const session = sessionsById.get(sessionId);
+      const session = sessionsByIdRef.current.get(sessionId);
       if (isRemoteSessionWriteBlocked(session)) {
         toast.warning(t('ccAgent.remoteSession.actionsUnavailable'));
         return;
       }
-      const oldPinnedAt = sessions.find((s) => s.id === sessionId)?.pinnedAt ?? null;
+      // 同 handleRename:回滚值刻意仍读 sessions,不换成 sessionsById。
+      const oldPinnedAt = sessionsRef.current.find((s) => s.id === sessionId)?.pinnedAt ?? null;
       const newPinnedAt = currentlyPinned ? null : new Date().toISOString();
       patchLocal(sessionId, { pinnedAt: newPinnedAt });
       // pin / re-pin 时把它顶到 manualPinnedOrder 首位，否则带着老 rank 会卡回原位。
@@ -1640,7 +1646,7 @@ function ExpandedView({
         patchLocal(sessionId, { pinnedAt: oldPinnedAt });
       }
     },
-    [filter, patchLocal, sessions, sessionsById, t],
+    [filter, patchLocal, t],
   );
 
   const handleToggleProjectPin = useCallback(
@@ -1658,7 +1664,7 @@ function ExpandedView({
 
   const handleMoveSession = useCallback(
     async (sessionId: string, target: SessionMoveTarget) => {
-      const session = sessionsById.get(sessionId);
+      const session = sessionsByIdRef.current.get(sessionId);
       if (!session) return;
       if (session.remoteHostId || session.deviceLinkDeviceId) {
         toast.warning(t('ccAgent.sidebar.sessionMenu.moveToProjectRemoteUnsupported'));
@@ -1738,7 +1744,7 @@ function ExpandedView({
         );
       }
     },
-    [collapse, effectiveRunningSessionIds, patchLocal, sessionsById, t],
+    [collapse, effectiveRunningSessionIds, patchLocal, t],
   );
 
   /* ---- Delete / Archive / Unarchive action handlers ----
@@ -1759,7 +1765,7 @@ function ExpandedView({
 
   const handleActionClick = useCallback(
     async (sessionId: string, action: 'delete' | 'archive' | 'archive-now' | 'unarchive') => {
-      const session = sessionsById.get(sessionId);
+      const session = sessionsByIdRef.current.get(sessionId);
       if (isRemoteSessionWriteBlocked(session)) {
         toast.warning(t('ccAgent.remoteSession.actionsUnavailable'));
         return;
@@ -1813,7 +1819,6 @@ function ExpandedView({
       viewedSessionId,
       runningSessionIds,
       runSessionAction,
-      sessionsById,
       unarchiveSession,
       t,
     ],

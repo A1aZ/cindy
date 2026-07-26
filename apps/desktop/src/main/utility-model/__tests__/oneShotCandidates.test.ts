@@ -362,6 +362,44 @@ describe('utility one-shot candidates', () => {
     );
   });
 
+  it('keeps base URL userinfo/query when applying an exact provider request path', async () => {
+    activeCatalog.mockReturnValue({
+      providers: [{
+        id: 'exact-path-query',
+        name: 'Exact Path Query',
+        source: 'user',
+        agents: ['codex'],
+        auth: { method: 'none' },
+        routing: {
+          codex: {
+            upstream: 'https://user:pass@custom.example/api?tenant=alpha',
+            requestPath: '/infer?stream=1&mode=fast',
+            authStrategy: 'none',
+          },
+        },
+        models: {
+          codex: [{ id: 'local-model', name: 'Local Model', contextWindow: 100_000 }],
+        },
+      }],
+    } as never);
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      text: async () => 'data: {"type":"response.output_text.delta","delta":"ok"}\ndata: [DONE]\n',
+    } as never);
+
+    const result = await requestUtilityText(makerMock(false), 'generate', {
+      providerId: 'exact-path-query',
+      agentKind: 'codex',
+      model: 'local-model',
+    });
+
+    expect(result).toMatchObject({ ok: true, providerId: 'exact-path-query' });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://user:pass@custom.example/api/infer?tenant=alpha&stream=1&mode=fast',
+      expect.anything(),
+    );
+  });
+
   it('does not fall back to XD after an explicitly selected custom provider returns 401', async () => {
     activeCatalog.mockReturnValue({
       providers: [{

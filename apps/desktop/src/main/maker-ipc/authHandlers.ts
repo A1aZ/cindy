@@ -37,6 +37,31 @@ function stripAnsi(value: string): string {
 }
 
 /**
+ * CLI 会把 URL 嵌在自然语言里，句末标点不属于验证地址。成对括号仍可能是 URL
+ * 路径的一部分，只移除没有对应左括号的尾部闭合符。
+ */
+function trimTrailingUrlPunctuation(value: string): string {
+  let candidate = value.replace(/[.,;:!?]+$/g, '');
+  const pairs = [
+    ['(', ')'],
+    ['[', ']'],
+    ['{', '}'],
+  ] as const;
+
+  while (candidate.length > 0) {
+    const pair = pairs.find(([, close]) => candidate.endsWith(close));
+    if (!pair) break;
+    const [open, close] = pair;
+    const openCount = candidate.split(open).length - 1;
+    const closeCount = candidate.split(close).length - 1;
+    if (closeCount <= openCount) break;
+    candidate = candidate.slice(0, -1).replace(/[.,;:!?]+$/g, '');
+  }
+
+  return candidate;
+}
+
+/**
  * 从 `codex login --device-auth` 的渐进输出提取验证页与一次性代码。
  * 输入可以是不完整的多 chunk 累积文本；两项没齐时返回 null。
  */
@@ -44,9 +69,9 @@ export function parseCodexDeviceCodeProgress(text: string): CodexDeviceCodeProgr
   const clean = stripAnsi(text);
   const codeMatch = clean.match(/\b[A-Z0-9]{4,8}(?:-[A-Z0-9]{4,8})+\b/);
   if (!codeMatch) return null;
-  for (const match of clean.matchAll(/https:\/\/[^\s]+/gi)) {
+  for (const match of clean.matchAll(/https:\/\/[^\s<>"']+/gi)) {
     try {
-      const url = new URL(match[0]);
+      const url = new URL(trimTrailingUrlPunctuation(match[0]));
       if (url.protocol === 'https:' && url.hostname === 'auth.openai.com') {
         return { verificationUrl: url.toString(), userCode: codeMatch[0] };
       }

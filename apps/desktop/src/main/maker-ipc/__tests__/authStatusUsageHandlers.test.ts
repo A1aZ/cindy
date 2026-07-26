@@ -400,6 +400,28 @@ describe('parseCodexDeviceCodeProgress', () => {
       userCode: 'ABCD-EFGH',
     });
   });
+
+  it.each([
+    ['period', 'Open https://auth.openai.com/codex/device. Code ABCD-EFGH'],
+    ['comma', 'Open https://auth.openai.com/codex/device, then enter ABCD-EFGH'],
+    ['closing parenthesis', '(https://auth.openai.com/codex/device) Code ABCD-EFGH'],
+  ])('strips trailing prose punctuation from the verification URL (%s)', (_label, text) => {
+    expect(parseCodexDeviceCodeProgress(text)).toEqual({
+      verificationUrl: 'https://auth.openai.com/codex/device',
+      userCode: 'ABCD-EFGH',
+    });
+  });
+
+  it('keeps balanced parentheses that are part of the verification URL', () => {
+    expect(
+      parseCodexDeviceCodeProgress(
+        'Open https://auth.openai.com/codex/device(test) and enter ABCD-EFGH',
+      ),
+    ).toEqual({
+      verificationUrl: 'https://auth.openai.com/codex/device(test)',
+      userCode: 'ABCD-EFGH',
+    });
+  });
 });
 
 describe('maker status IPC handlers', () => {

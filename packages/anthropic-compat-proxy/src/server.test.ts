@@ -624,6 +624,31 @@ describe('anthropic-compat-proxy routingTransform', () => {
     expect(custom.paths).toEqual(['/base/tenant/acme/infer?stream=1']);
   });
 
+  it.each([
+    '//evil.example/infer',
+    '/infer#fragment',
+    '/infer\r\nx-injected: yes',
+  ])('rejects an unsafe path override before contacting the upstream: %j', async (pathOverride) => {
+    const custom = await startFakeUpstream((_i, _b, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+    upstreamClose = custom.close;
+
+    proxy = await createAnthropicCompatProxy({
+      upstream: `${custom.url}/base`,
+      transformRequest: [],
+      routingTransform: () => ({ pathOverride }),
+    });
+
+    const result = await post(proxy.url, { model: 'custom-model' });
+    expect(result.status).toBe(502);
+    expect(JSON.parse(result.text)).toEqual({
+      error: { type: 'proxy_error', message: 'selected request path invalid' },
+    });
+    expect(custom.paths).toHaveLength(0);
+  });
+
   it('runs a local handler without resolving an unavailable default upstream', async () => {
     proxy = await createAnthropicCompatProxy({
       upstream: () => '',

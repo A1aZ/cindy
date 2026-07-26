@@ -12,7 +12,18 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Check, ChevronDown, Eye, EyeOff, Plug, Plus, RefreshCw, Sparkles, Trash2, X } from 'lucide-react';
+import {
+  Check,
+  ChevronDown,
+  Eye,
+  EyeOff,
+  Plug,
+  Plus,
+  RefreshCw,
+  Sparkles,
+  Trash2,
+  X,
+} from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 import { toast } from '@/lib/toast';
@@ -30,17 +41,14 @@ import {
 } from '@/lib/customProviders';
 import { uniqueCustomProviderId } from '@/lib/customProviderId';
 import {
+  areProviderRequestUrlsAllowed,
   providerConnectionTestRequestSignature,
   providerModelFetchRequestSignature,
   stripCredentialHeaders,
   type CustomProviderAuthMode,
 } from '@/lib/providerModelFetch';
 
-import {
-  isLoopbackProviderUrl,
-  isProviderRequestPath,
-  sortPresetsForLocale,
-} from '@cindy/model-providers';
+import { isProviderRequestPath, sortPresetsForLocale } from '@cindy/model-providers';
 import type {
   AgentKind,
   CustomProviderConfig,
@@ -53,18 +61,19 @@ const AGENTS: AgentKind[] = ['claude-code', 'codex'];
 
 const VISIBLE_AGENTS: AgentKind[] = AGENTS;
 
-const TAB_META: Record<AgentKind, { Mark: typeof ClaudeMark; labelKey: string; helpKey: string }> = {
-  'claude-code': {
-    Mark: ClaudeMark,
-    labelKey: 'settings.providers.custom.protocol.claude',
-    helpKey: 'settings.providers.custom.protocol.claudeDesc',
-  },
-  codex: {
-    Mark: CodexMark,
-    labelKey: 'settings.providers.custom.protocol.codex',
-    helpKey: 'settings.providers.custom.protocol.codexDesc',
-  },
-};
+const TAB_META: Record<AgentKind, { Mark: typeof ClaudeMark; labelKey: string; helpKey: string }> =
+  {
+    'claude-code': {
+      Mark: ClaudeMark,
+      labelKey: 'settings.providers.custom.protocol.claude',
+      helpKey: 'settings.providers.custom.protocol.claudeDesc',
+    },
+    codex: {
+      Mark: CodexMark,
+      labelKey: 'settings.providers.custom.protocol.codex',
+      helpKey: 'settings.providers.custom.protocol.codexDesc',
+    },
+  };
 
 interface CustomProviderDialogProps {
   initial?: CustomProviderConfig;
@@ -124,7 +133,8 @@ function initRuntimes(initial?: CustomProviderConfig): Record<AgentKind, Runtime
         baseUrl: rc.baseUrl,
         requestPath: rc.requestPath ?? '',
         apiKey: '',
-        wireProtocol: rc.wireProtocol ?? (a === 'claude-code' ? 'anthropic-messages' : 'openai-responses'),
+        wireProtocol:
+          rc.wireProtocol ?? (a === 'claude-code' ? 'anthropic-messages' : 'openai-responses'),
         models: rc.models.length ? rc.models.map((m) => ({ ...m })) : [{ id: '', name: '' }],
         headers:
           rc.headers && Object.keys(rc.headers).length > 0
@@ -272,7 +282,12 @@ function PresetDropdown({
 
 // ── 主组件 ─────────────────────────────────────────────────────────────────
 
-export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }: CustomProviderDialogProps) {
+export function CustomProviderDialog({
+  initial,
+  existingIds,
+  onSaved,
+  onClose,
+}: CustomProviderDialogProps) {
   const { t, i18n } = useTranslation();
   const editing = !!initial;
   const initialOAuth = initial?.auth?.method === 'oauth' ? initial.auth.oauth : undefined;
@@ -283,7 +298,10 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
     () => (initial && VISIBLE_AGENTS.find((a) => initial.runtimes[a])) || 'claude-code',
   );
   const [showKey, setShowKey] = useState(false);
-  const [hasKey, setHasKey] = useState<Record<AgentKind, boolean>>({ 'claude-code': false, codex: false });
+  const [hasKey, setHasKey] = useState<Record<AgentKind, boolean>>({
+    'claude-code': false,
+    codex: false,
+  });
   const [saving, setSaving] = useState(false);
   // 鉴权形态：API key（默认）/ OAuth / 无鉴权（本机或受信自托管代理）。
   const [authMode, setAuthModeState] = useState<CustomProviderAuthMode>(
@@ -369,37 +387,41 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
   }, [editing, i18n.language]);
 
   /** 应用预设：预填显示名 + 各 runtime 的 baseUrl / 模型 / headers（创建时快照，之后与预设脱钩）。 */
-  const applyPreset = useCallback((p: ProviderPreset) => {
-    setAppliedPreset(p.id);
-    setName(p.name);
-    setAuthMode(p.authMethod ?? 'apiKey');
-    setRtSynced((prev) => {
-      const next = { ...prev };
-      for (const a of AGENTS) {
-        const rc = p.runtimes[a];
-        if (!rc) {
-          next[a] = emptyRuntime(a);
-          continue;
+  const applyPreset = useCallback(
+    (p: ProviderPreset) => {
+      setAppliedPreset(p.id);
+      setName(p.name);
+      setAuthMode(p.authMethod ?? 'apiKey');
+      setRtSynced((prev) => {
+        const next = { ...prev };
+        for (const a of AGENTS) {
+          const rc = p.runtimes[a];
+          if (!rc) {
+            next[a] = emptyRuntime(a);
+            continue;
+          }
+          next[a] = {
+            baseUrl: rc.baseUrl,
+            requestPath: rc.requestPath ?? '',
+            apiKey: prev[a].apiKey, // 已填的 key 保留
+            wireProtocol:
+              rc.wireProtocol ?? (a === 'claude-code' ? 'anthropic-messages' : 'openai-responses'),
+            models: rc.models.length ? rc.models.map((m) => ({ ...m })) : [{ id: '', name: '' }],
+            headers:
+              rc.headers && Object.keys(rc.headers).length > 0
+                ? Object.entries(rc.headers).map(([n, v]) => ({ name: n, value: v }))
+                : [{ name: '', value: '' }],
+            modelsUrl: rc.modelsUrl ?? '',
+          };
         }
-        next[a] = {
-          baseUrl: rc.baseUrl,
-          requestPath: rc.requestPath ?? '',
-          apiKey: prev[a].apiKey, // 已填的 key 保留
-          wireProtocol: rc.wireProtocol ?? (a === 'claude-code' ? 'anthropic-messages' : 'openai-responses'),
-          models: rc.models.length ? rc.models.map((m) => ({ ...m })) : [{ id: '', name: '' }],
-          headers:
-            rc.headers && Object.keys(rc.headers).length > 0
-              ? Object.entries(rc.headers).map(([n, v]) => ({ name: n, value: v }))
-              : [{ name: '', value: '' }],
-          modelsUrl: rc.modelsUrl ?? '',
-        };
-      }
-      return next;
-    });
-    setTest({ 'claude-code': IDLE_TEST, codex: IDLE_TEST });
-    const first = AGENTS.find((a) => p.runtimes[a]);
-    if (first) setActiveTab(first);
-  }, [setRtSynced]);
+        return next;
+      });
+      setTest({ 'claude-code': IDLE_TEST, codex: IDLE_TEST });
+      const first = AGENTS.find((a) => p.runtimes[a]);
+      if (first) setActiveTab(first);
+    },
+    [setRtSynced],
+  );
 
   // 编辑态：回填各已配置 runtime 的已存明文密钥（用户本机自己的 key）——
   // 让密钥框「能看」(eye 显形 / 可核对)，而非空白遮罩；据此点亮「已保存」徽标。
@@ -464,6 +486,10 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
       toast.error(t('settings.providers.custom.test.needFields'));
       return;
     }
+    if (!areProviderRequestUrlsAllowed(authMode, baseUrl)) {
+      toast.error(t('settings.providers.custom.errors.baseUrlInvalid'));
+      return;
+    }
     const headers: Record<string, string> = {};
     for (const h of rf.headers) {
       const n = h.name.trim();
@@ -486,9 +512,10 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
         },
       });
       if (
-        providerConnectionTestRequestSignature(rtRef.current[agent], authModeRef.current)
-        !== requestSig
-      ) return;
+        providerConnectionTestRequestSignature(rtRef.current[agent], authModeRef.current) !==
+        requestSig
+      )
+        return;
       setTest((prev) => ({
         ...prev,
         [agent]: result.ok
@@ -497,9 +524,10 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
       }));
     } catch (e) {
       if (
-        providerConnectionTestRequestSignature(rtRef.current[agent], authModeRef.current)
-        !== requestSig
-      ) return;
+        providerConnectionTestRequestSignature(rtRef.current[agent], authModeRef.current) !==
+        requestSig
+      )
+        return;
       const ipc = extractIpcError(e);
       setTest((prev) => ({ ...prev, [agent]: { status: 'fail', code: 'UNKNOWN' } }));
       if (ipc?.message) toast.error(ipc.message);
@@ -518,6 +546,10 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
     const baseUrl = rf.baseUrl.trim();
     if (!baseUrl) {
       toast.error(t('settings.providers.custom.fetch.needBaseUrl'));
+      return;
+    }
+    if (!areProviderRequestUrlsAllowed(authMode, baseUrl, rf.modelsUrl)) {
+      toast.error(t('settings.providers.custom.errors.baseUrlInvalid'));
       return;
     }
     const headers: Record<string, string> = {};
@@ -540,7 +572,8 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
       });
       if (
         providerModelFetchRequestSignature(rtRef.current[agent], authModeRef.current) !== requestSig
-      ) return; // 过期响应，静默丢弃
+      )
+        return; // 过期响应，静默丢弃
       if (result.ok && result.models && result.models.length > 0) {
         // 用**响应到达时**的最新表单行构建弹层（rtRef），不是请求发出时的 rf 快照。
         const current = rtRef.current[agent].models
@@ -563,9 +596,7 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
             return {
               id: m.id,
               name: cur?.name || m.name,
-              ...(cur?.contextWindow !== undefined
-                ? { contextWindow: cur.contextWindow }
-                : {}),
+              ...(cur?.contextWindow !== undefined ? { contextWindow: cur.contextWindow } : {}),
               ...(cur?.defaultEnabled === false ? { defaultEnabled: false } : {}),
             };
           }),
@@ -580,7 +611,8 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
     } catch (e) {
       if (
         providerModelFetchRequestSignature(rtRef.current[agent], authModeRef.current) !== requestSig
-      ) return; // 过期失败同样静默
+      )
+        return; // 过期失败同样静默
       const ipc = extractIpcError(e);
       toast.error(ipc?.message ?? t('settings.providers.custom.fetch.failed'));
     } finally {
@@ -657,13 +689,7 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
         toast.error(t('settings.providers.custom.errors.baseUrlInvalid'));
         return;
       }
-      if (
-        authMode === 'none'
-        && (
-          !isLoopbackProviderUrl(rf.baseUrl.trim())
-          || (rf.modelsUrl.trim() && !isLoopbackProviderUrl(rf.modelsUrl.trim()))
-        )
-      ) {
+      if (!areProviderRequestUrlsAllowed(authMode, rf.baseUrl, rf.modelsUrl)) {
         setActiveTab(a);
         toast.error(t('settings.providers.custom.errors.baseUrlInvalid'));
         return;
@@ -729,12 +755,12 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
           ? oauthFields.deviceAuthorizationUrl.trim()
           : oauthFields.authorizeUrl.trim();
       if (
-        !flowUrl
-        || !tokenUrl
-        || !clientId
-        || !scopes
-        || !httpsOk(flowUrl)
-        || !httpsOk(tokenUrl)
+        !flowUrl ||
+        !tokenUrl ||
+        !clientId ||
+        !scopes ||
+        !httpsOk(flowUrl) ||
+        !httpsOk(tokenUrl)
       ) {
         toast.error(t('settings.providers.custom.errors.oauthInvalid'));
         return;
@@ -784,7 +810,12 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
       editing && initial
         ? initial.id
         : uniqueCustomProviderId(trimmedName, new Set(existingIds ?? []));
-    const config: CustomProviderConfig = { id, name: trimmedName, ...(auth ? { auth } : {}), runtimes };
+    const config: CustomProviderConfig = {
+      id,
+      name: trimmedName,
+      ...(auth ? { auth } : {}),
+      runtimes,
+    };
     setSaving(true);
     try {
       if (editing) {
@@ -898,7 +929,9 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
                       ? 'border-[var(--settings-input-border-focus)] text-[var(--settings-section-title)]'
                       : 'border-[var(--settings-input-border)] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]',
                   )}
-                  style={authMode === m ? { backgroundColor: 'var(--surface-elevated)' } : undefined}
+                  style={
+                    authMode === m ? { backgroundColor: 'var(--surface-elevated)' } : undefined
+                  }
                 >
                   {t(`settings.providers.custom.authMode.${m}`)}
                 </button>
@@ -937,9 +970,7 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
                 {(
                   [
                     [
-                      oauthFlow === 'device-code'
-                        ? 'deviceAuthorizationUrl'
-                        : 'authorizeUrl',
+                      oauthFlow === 'device-code' ? 'deviceAuthorizationUrl' : 'authorizeUrl',
                       oauthFlow === 'device-code'
                         ? 'https://auth.example.com/oauth2/device'
                         : 'https://auth.example.com/oauth2/authorize',
@@ -950,7 +981,9 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
                   ] as const
                 ).map(([field, ph]) => (
                   <div key={field} className="flex flex-col gap-[7px]">
-                    <FieldLabel>{t(`settings.providers.custom.authMode.fields.${field}`)}</FieldLabel>
+                    <FieldLabel>
+                      {t(`settings.providers.custom.authMode.fields.${field}`)}
+                    </FieldLabel>
                     <TextInput
                       value={oauthFields[field]}
                       onChange={(v) => setOauthFields((prev) => ({ ...prev, [field]: v }))}
@@ -1041,14 +1074,22 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
                           ? 'border-[var(--settings-input-border-focus)] text-[var(--settings-section-title)]'
                           : 'border-[var(--settings-input-border)] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]',
                       )}
-                      style={f.wireProtocol === protocol ? { backgroundColor: 'var(--surface-elevated)' } : undefined}
+                      style={
+                        f.wireProtocol === protocol
+                          ? { backgroundColor: 'var(--surface-elevated)' }
+                          : undefined
+                      }
                     >
-                      {t(`settings.providers.custom.wireProtocol.${protocol === 'openai-responses' ? 'responses' : 'chat'}`)}
+                      {t(
+                        `settings.providers.custom.wireProtocol.${protocol === 'openai-responses' ? 'responses' : 'chat'}`,
+                      )}
                     </button>
                   ))}
                 </div>
                 <span className="text-12 leading-snug text-[var(--text-tertiary)]">
-                  {t(`settings.providers.custom.wireProtocol.${f.wireProtocol === 'openai-chat' ? 'chatHelp' : 'responsesHelp'}`)}
+                  {t(
+                    `settings.providers.custom.wireProtocol.${f.wireProtocol === 'openai-chat' ? 'chatHelp' : 'responsesHelp'}`,
+                  )}
                 </span>
               </div>
             )}
@@ -1084,43 +1125,45 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
 
             {/* API 密钥（OAuth 形态隐藏——鉴权走 Runner 的 Bearer，不收集 key） */}
             {authMode === 'apiKey' && (
-            <div className="flex flex-col gap-[7px]">
-              <div className="flex items-center gap-2">
-                <FieldLabel>{t('settings.providers.custom.fields.apiKey')}</FieldLabel>
-                {/* 已存密钥时给明确徽标 —— 编辑态字段是遮罩空白(留空=不改),无徽标会让人误以为没存上。 */}
-                {hasKey[activeTab] && (
-                  <span
-                    className="flex items-center gap-1 rounded-full px-2 py-0.5 text-11 font-medium"
-                    style={{
-                      backgroundColor: 'var(--settings-btn-secondary-bg)',
-                      color: 'var(--settings-section-desc)',
-                    }}
-                  >
-                    <Check size={11} strokeWidth={2.5} />
-                    {t('settings.providers.custom.fields.apiKeySaved')}
-                  </span>
-                )}
+              <div className="flex flex-col gap-[7px]">
+                <div className="flex items-center gap-2">
+                  <FieldLabel>{t('settings.providers.custom.fields.apiKey')}</FieldLabel>
+                  {/* 已存密钥时给明确徽标 —— 编辑态字段是遮罩空白(留空=不改),无徽标会让人误以为没存上。 */}
+                  {hasKey[activeTab] && (
+                    <span
+                      className="flex items-center gap-1 rounded-full px-2 py-0.5 text-11 font-medium"
+                      style={{
+                        backgroundColor: 'var(--settings-btn-secondary-bg)',
+                        color: 'var(--settings-section-desc)',
+                      }}
+                    >
+                      <Check size={11} strokeWidth={2.5} />
+                      {t('settings.providers.custom.fields.apiKeySaved')}
+                    </span>
+                  )}
+                </div>
+                <TextInput
+                  value={f.apiKey}
+                  onChange={(v) => patch(activeTab, (x) => ({ ...x, apiKey: v }))}
+                  placeholder={keyPlaceholder}
+                  type={showKey ? 'text' : 'password'}
+                  trailing={
+                    <button
+                      type="button"
+                      onClick={() => setShowKey((v) => !v)}
+                      className="absolute right-[12px] top-1/2 -translate-y-1/2 text-[var(--settings-eye-icon)] transition-colors hover:text-[var(--settings-eye-icon-hover)]"
+                      aria-label={
+                        showKey ? t('settings.apiKey.hideKey') : t('settings.apiKey.showKey')
+                      }
+                    >
+                      {showKey ? <Eye size={16} /> : <EyeOff size={16} />}
+                    </button>
+                  }
+                />
+                <span className="text-12 text-[var(--text-tertiary)]">
+                  {t('settings.providers.custom.fields.apiKeyHelp')}
+                </span>
               </div>
-              <TextInput
-                value={f.apiKey}
-                onChange={(v) => patch(activeTab, (x) => ({ ...x, apiKey: v }))}
-                placeholder={keyPlaceholder}
-                type={showKey ? 'text' : 'password'}
-                trailing={
-                  <button
-                    type="button"
-                    onClick={() => setShowKey((v) => !v)}
-                    className="absolute right-[12px] top-1/2 -translate-y-1/2 text-[var(--settings-eye-icon)] transition-colors hover:text-[var(--settings-eye-icon-hover)]"
-                    aria-label={showKey ? t('settings.apiKey.hideKey') : t('settings.apiKey.showKey')}
-                  >
-                    {showKey ? <Eye size={16} /> : <EyeOff size={16} />}
-                  </button>
-                }
-              />
-              <span className="text-12 text-[var(--text-tertiary)]">
-                {t('settings.providers.custom.fields.apiKeyHelp')}
-              </span>
-            </div>
             )}
 
             {/* OAuth 形态:模型清单授权成功后自动发现（与内置订阅统一）,模型 / 请求头
@@ -1145,172 +1188,186 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
             )}
 
             {(authMode !== 'oauth' || showAdvanced) && (
-            <>
-            {/* 模型 */}
-            <div className="flex flex-col gap-2">
-              <FieldLabel>{t('settings.providers.custom.fields.models')}</FieldLabel>
-              {f.models.map((m, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <div className="flex-1">
-                    <TextInput
-                      value={m.id}
-                      onChange={(v) =>
-                        patch(activeTab, (x) => ({
-                          ...x,
-                          models: x.models.map((y, j) => (
-                            j === i ? replaceCustomProviderModelId(y, v) : y
-                          )),
-                        }))
-                      }
-                      placeholder={t('settings.providers.custom.fields.modelIdPlaceholder')}
-                    />
-                  </div>
-                  <div className="flex-1">
-                    <TextInput
-                      value={m.name}
-                      onChange={(v) =>
-                        patch(activeTab, (x) => ({
-                          ...x,
-                          models: x.models.map((y, j) => (j === i ? { ...y, name: v } : y)),
-                        }))
-                      }
-                      placeholder={t('settings.providers.custom.fields.modelNamePlaceholder')}
-                    />
-                  </div>
+              <>
+                {/* 模型 */}
+                <div className="flex flex-col gap-2">
+                  <FieldLabel>{t('settings.providers.custom.fields.models')}</FieldLabel>
+                  {f.models.map((m, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <div className="flex-1">
+                        <TextInput
+                          value={m.id}
+                          onChange={(v) =>
+                            patch(activeTab, (x) => ({
+                              ...x,
+                              models: x.models.map((y, j) =>
+                                j === i ? replaceCustomProviderModelId(y, v) : y,
+                              ),
+                            }))
+                          }
+                          placeholder={t('settings.providers.custom.fields.modelIdPlaceholder')}
+                        />
+                      </div>
+                      <div className="flex-1">
+                        <TextInput
+                          value={m.name}
+                          onChange={(v) =>
+                            patch(activeTab, (x) => ({
+                              ...x,
+                              models: x.models.map((y, j) => (j === i ? { ...y, name: v } : y)),
+                            }))
+                          }
+                          placeholder={t('settings.providers.custom.fields.modelNamePlaceholder')}
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          patch(activeTab, (x) => ({
+                            ...x,
+                            models: x.models.filter((_, j) => j !== i),
+                          }))
+                        }
+                        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover)]"
+                        aria-label={t('settings.providers.custom.fields.removeRow')}
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  ))}
                   <button
                     type="button"
                     onClick={() =>
-                      patch(activeTab, (x) => ({ ...x, models: x.models.filter((_, j) => j !== i) }))
+                      patch(activeTab, (x) => ({
+                        ...x,
+                        models: [...x.models, { id: '', name: '' }],
+                      }))
                     }
-                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover)]"
-                    aria-label={t('settings.providers.custom.fields.removeRow')}
+                    className="flex items-center gap-1.5 self-start py-0.5 text-13 font-medium text-[var(--settings-section-title)]"
                   >
-                    <Trash2 size={16} />
+                    <Plus size={14} className="text-[var(--settings-section-desc)]" />
+                    {t('settings.providers.custom.fields.addModel')}
                   </button>
                 </div>
-              ))}
-              <button
-                type="button"
-                onClick={() => patch(activeTab, (x) => ({ ...x, models: [...x.models, { id: '', name: '' }] }))}
-                className="flex items-center gap-1.5 self-start py-0.5 text-13 font-medium text-[var(--settings-section-title)]"
-              >
-                <Plus size={14} className="text-[var(--settings-section-desc)]" />
-                {t('settings.providers.custom.fields.addModel')}
-              </button>
-            </div>
 
-            {/* 请求头（可选） */}
-            <div className="flex flex-col gap-2">
-              <FieldLabel>{t('settings.providers.custom.fields.headers')}</FieldLabel>
-              {f.headers.map((h, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <div className="flex-1">
-                    <TextInput
-                      value={h.name}
-                      onChange={(v) =>
-                        patch(activeTab, (x) => ({
-                          ...x,
-                          headers: x.headers.map((y, j) => (j === i ? { ...y, name: v } : y)),
-                        }))
-                      }
-                      placeholder={t('settings.providers.custom.fields.headerNamePlaceholder')}
-                    />
-                  </div>
-                  <div className="flex-1">
-                    <TextInput
-                      value={h.value}
-                      onChange={(v) =>
-                        patch(activeTab, (x) => ({
-                          ...x,
-                          headers: x.headers.map((y, j) => (j === i ? { ...y, value: v } : y)),
-                        }))
-                      }
-                      placeholder={t('settings.providers.custom.fields.headerValuePlaceholder')}
-                    />
-                  </div>
+                {/* 请求头（可选） */}
+                <div className="flex flex-col gap-2">
+                  <FieldLabel>{t('settings.providers.custom.fields.headers')}</FieldLabel>
+                  {f.headers.map((h, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <div className="flex-1">
+                        <TextInput
+                          value={h.name}
+                          onChange={(v) =>
+                            patch(activeTab, (x) => ({
+                              ...x,
+                              headers: x.headers.map((y, j) => (j === i ? { ...y, name: v } : y)),
+                            }))
+                          }
+                          placeholder={t('settings.providers.custom.fields.headerNamePlaceholder')}
+                        />
+                      </div>
+                      <div className="flex-1">
+                        <TextInput
+                          value={h.value}
+                          onChange={(v) =>
+                            patch(activeTab, (x) => ({
+                              ...x,
+                              headers: x.headers.map((y, j) => (j === i ? { ...y, value: v } : y)),
+                            }))
+                          }
+                          placeholder={t('settings.providers.custom.fields.headerValuePlaceholder')}
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          patch(activeTab, (x) => ({
+                            ...x,
+                            headers: x.headers.filter((_, j) => j !== i),
+                          }))
+                        }
+                        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover)]"
+                        aria-label={t('settings.providers.custom.fields.removeRow')}
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  ))}
                   <button
                     type="button"
                     onClick={() =>
-                      patch(activeTab, (x) => ({ ...x, headers: x.headers.filter((_, j) => j !== i) }))
+                      patch(activeTab, (x) => ({
+                        ...x,
+                        headers: [...x.headers, { name: '', value: '' }],
+                      }))
                     }
-                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover)]"
-                    aria-label={t('settings.providers.custom.fields.removeRow')}
+                    className="flex items-center gap-1.5 self-start py-0.5 text-13 font-medium text-[var(--settings-section-title)]"
                   >
-                    <Trash2 size={16} />
+                    <Plus size={14} className="text-[var(--settings-section-desc)]" />
+                    {t('settings.providers.custom.fields.addHeader')}
                   </button>
                 </div>
-              ))}
-              <button
-                type="button"
-                onClick={() => patch(activeTab, (x) => ({ ...x, headers: [...x.headers, { name: '', value: '' }] }))}
-                className="flex items-center gap-1.5 self-start py-0.5 text-13 font-medium text-[var(--settings-section-title)]"
-              >
-                <Plus size={14} className="text-[var(--settings-section-desc)]" />
-                {t('settings.providers.custom.fields.addHeader')}
-              </button>
-            </div>
-            </>
+              </>
             )}
 
             {/* 测试连接：用当前 Tab 表单值发最小探测请求（与真实会话同路由口径，未保存也能测）。
                 OAuth 形态隐藏——登录前无凭证可测，保存并授权后可在供应商行验证。 */}
             {authMode !== 'oauth' && (
-            <div className="flex min-h-[32px] flex-wrap items-center gap-2.5">
-              <button
-                type="button"
-                onClick={() => void handleTest()}
-                disabled={test[activeTab].status === 'testing'}
-                className={cn(
-                  'inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-12 font-medium transition-colors active:scale-[0.98]',
-                  'border-[var(--settings-input-border)] text-[var(--settings-section-title)] hover:bg-[var(--surface-hover)]',
-                  test[activeTab].status === 'testing' && 'cursor-not-allowed opacity-60',
-                )}
-              >
-                {test[activeTab].status === 'testing' ? (
-                  <Spinner size={13} />
-                ) : (
-                  <Plug size={13} />
-                )}
-                {test[activeTab].status === 'testing'
-                  ? t('settings.providers.custom.test.testing')
-                  : t('settings.providers.custom.test.button')}
-              </button>
-              {/* 获取模型列表：GET 该供应商的列模型端点，成功后开勾选弹层填进上方模型行。
+              <div className="flex min-h-[32px] flex-wrap items-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => void handleTest()}
+                  disabled={test[activeTab].status === 'testing'}
+                  className={cn(
+                    'inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-12 font-medium transition-colors active:scale-[0.98]',
+                    'border-[var(--settings-input-border)] text-[var(--settings-section-title)] hover:bg-[var(--surface-hover)]',
+                    test[activeTab].status === 'testing' && 'cursor-not-allowed opacity-60',
+                  )}
+                >
+                  {test[activeTab].status === 'testing' ? (
+                    <Spinner size={13} />
+                  ) : (
+                    <Plug size={13} />
+                  )}
+                  {test[activeTab].status === 'testing'
+                    ? t('settings.providers.custom.test.testing')
+                    : t('settings.providers.custom.test.button')}
+                </button>
+                {/* 获取模型列表：GET 该供应商的列模型端点，成功后开勾选弹层填进上方模型行。
                   disabled 用 anyFetching（单飞）：另一 Tab 在途时本 Tab 也不许发起。 */}
-              <button
-                type="button"
-                onClick={() => void handleFetchModels()}
-                disabled={anyFetching}
-                className={cn(
-                  'inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-12 font-medium transition-colors active:scale-[0.98]',
-                  'border-[var(--settings-input-border)] text-[var(--settings-section-title)] hover:bg-[var(--surface-hover)]',
-                  anyFetching && 'cursor-not-allowed opacity-60',
+                <button
+                  type="button"
+                  onClick={() => void handleFetchModels()}
+                  disabled={anyFetching}
+                  className={cn(
+                    'inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-12 font-medium transition-colors active:scale-[0.98]',
+                    'border-[var(--settings-input-border)] text-[var(--settings-section-title)] hover:bg-[var(--surface-hover)]',
+                    anyFetching && 'cursor-not-allowed opacity-60',
+                  )}
+                >
+                  {fetchingModels[activeTab] ? <Spinner size={13} /> : <RefreshCw size={13} />}
+                  {fetchingModels[activeTab]
+                    ? t('settings.providers.custom.fetch.fetching')
+                    : t('settings.providers.custom.fetch.button')}
+                </button>
+                {test[activeTab].status === 'ok' && (
+                  <span
+                    className="flex items-center gap-1 text-12"
+                    style={{ color: 'var(--remote-status-ready)' }}
+                  >
+                    <Check size={13} strokeWidth={2.5} />
+                    {t('settings.providers.custom.test.ok', { ms: test[activeTab].latencyMs ?? 0 })}
+                  </span>
                 )}
-              >
-                {fetchingModels[activeTab] ? (
-                  <Spinner size={13} />
-                ) : (
-                  <RefreshCw size={13} />
+                {test[activeTab].status === 'fail' && (
+                  <span className="text-12 text-[var(--error-fg)]">
+                    {t(`providerError.${test[activeTab].code ?? 'UNKNOWN'}`)}
+                  </span>
                 )}
-                {fetchingModels[activeTab]
-                  ? t('settings.providers.custom.fetch.fetching')
-                  : t('settings.providers.custom.fetch.button')}
-              </button>
-              {test[activeTab].status === 'ok' && (
-                <span className="flex items-center gap-1 text-12" style={{ color: 'var(--remote-status-ready)' }}>
-                  <Check size={13} strokeWidth={2.5} />
-                  {t('settings.providers.custom.test.ok', { ms: test[activeTab].latencyMs ?? 0 })}
-                </span>
-              )}
-              {test[activeTab].status === 'fail' && (
-                <span className="text-12 text-[var(--error-fg)]">
-                  {t(`providerError.${test[activeTab].code ?? 'UNKNOWN'}`)}
-                </span>
-              )}
-            </div>
+              </div>
             )}
           </div>
-
         </div>
 
         {/* Footer */}
@@ -1363,7 +1420,12 @@ function ModelPickerOverlay({
   onClose,
 }: {
   picker: { agent: AgentKind; models: ModelRow[]; selected: Set<string>; query: string };
-  onChange: (next: { agent: AgentKind; models: ModelRow[]; selected: Set<string>; query: string }) => void;
+  onChange: (next: {
+    agent: AgentKind;
+    models: ModelRow[];
+    selected: Set<string>;
+    query: string;
+  }) => void;
   onConfirm: () => void;
   onClose: () => void;
 }) {
@@ -1485,7 +1547,9 @@ function ModelPickerOverlay({
                     {m.name}
                   </span>
                   {m.name !== m.id && (
-                    <span className="max-w-[45%] truncate text-11 text-[var(--text-tertiary)]">{m.id}</span>
+                    <span className="max-w-[45%] truncate text-11 text-[var(--text-tertiary)]">
+                      {m.id}
+                    </span>
                   )}
                 </button>
               );

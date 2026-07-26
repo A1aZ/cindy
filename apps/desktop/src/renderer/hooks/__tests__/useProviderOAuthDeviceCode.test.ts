@@ -60,7 +60,7 @@ describe('useProviderOAuthDeviceCode', () => {
     });
   });
 
-  it('unsubscribes and cancels the old provider on switch and unmount', () => {
+  it('unsubscribes without cancelling a login observed from another view', () => {
     const { rerender, unmount } = renderHook(
       ({ providerId }) => useProviderOAuthDeviceCode(providerId),
       { initialProps: { providerId: 'provider-a' as string | null } },
@@ -68,10 +68,28 @@ describe('useProviderOAuthDeviceCode', () => {
 
     rerender({ providerId: 'provider-b' });
     expect(unsubscribe).toHaveBeenCalledTimes(1);
-    expect(cancel).toHaveBeenNthCalledWith(1, 'provider-a');
+    expect(cancel).not.toHaveBeenCalled();
 
     unmount();
     expect(unsubscribe).toHaveBeenCalledTimes(2);
-    expect(cancel).toHaveBeenNthCalledWith(2, 'provider-b');
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it('cancels only a login started by this hook when its provider is switched', () => {
+    const { result, rerender, unmount } = renderHook(
+      ({ providerId }) => useProviderOAuthDeviceCode(providerId),
+      { initialProps: { providerId: 'provider-a' as string | null } },
+    );
+
+    result.current.beginOwnedLogin();
+    rerender({ providerId: 'provider-b' });
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(cancel).toHaveBeenCalledWith('provider-a');
+
+    result.current.beginOwnedLogin();
+    const finish = result.current.beginOwnedLogin();
+    finish();
+    unmount();
+    expect(cancel).toHaveBeenCalledOnce();
   });
 });

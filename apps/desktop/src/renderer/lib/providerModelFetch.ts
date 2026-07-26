@@ -1,3 +1,5 @@
+import { isLoopbackProviderUrl } from '@cindy/model-providers';
+
 export type CustomProviderAuthMode = 'apiKey' | 'oauth' | 'none';
 
 export interface ProviderModelFetchSignatureFields {
@@ -19,6 +21,22 @@ export function stripCredentialHeaders(headers: Record<string, string>): Record<
       const normalized = name.toLowerCase();
       return normalized !== 'authorization' && normalized !== 'x-api-key';
     }),
+  );
+}
+
+/**
+ * 无鉴权请求在任何「落盘前」动作里也必须保持 loopback-only。测试连接和模型发现会直接
+ * 使用尚未保存的表单值，不能只依赖保存时与 main store 的最终校验。
+ */
+export function areProviderRequestUrlsAllowed(
+  authMode: CustomProviderAuthMode,
+  baseUrl: string,
+  modelsUrl?: string,
+): boolean {
+  if (authMode !== 'none') return true;
+  return (
+    isLoopbackProviderUrl(baseUrl.trim()) &&
+    (!modelsUrl?.trim() || isLoopbackProviderUrl(modelsUrl.trim()))
   );
 }
 

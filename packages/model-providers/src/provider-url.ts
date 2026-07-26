@@ -15,6 +15,7 @@ export function isProviderRequestPath(value: unknown): value is string {
     && !value.includes('#')
     && !value.includes('\\')
     && !/[^\u0021-\u007e]/.test(value)
+    && !/%(?![0-9A-Fa-f]{2})/.test(value)
   );
 }
 

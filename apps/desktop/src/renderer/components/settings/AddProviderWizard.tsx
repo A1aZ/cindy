@@ -259,25 +259,23 @@ export function AddProviderWizard({
   // 预设表单态
   const [name, setName] = useState('');
   const [apiKey, setApiKey] = useState('');
-  const [runtimeBaseUrls, setRuntimeBaseUrls] = useState<
-    Partial<Record<AgentKind, string>>
-  >({});
+  const [runtimeBaseUrls, setRuntimeBaseUrls] = useState<Partial<Record<AgentKind, string>>>({});
   const [saving, setSaving] = useState(false);
   const [loggingIn, setLoggingIn] = useState(false);
   const genericDeviceProviderId =
-    sel?.kind === 'oauth'
-    && sel.provider.auth.oauth?.flow === 'device-code'
+    sel?.kind === 'oauth' && sel.provider.auth.oauth?.flow === 'device-code'
       ? sel.provider.id
       : null;
-  const {
-    deviceCode: genericDeviceCode,
-    clearDeviceCode: clearGenericDeviceCode,
-  } = useProviderOAuthDeviceCode(genericDeviceProviderId);
+  const { deviceCode: genericDeviceCode, clearDeviceCode: clearGenericDeviceCode } =
+    useProviderOAuthDeviceCode(genericDeviceProviderId);
   // Step 3 拉取态
   const [step, setStep] = useState<1 | 2 | 3>(entryProvider ? 2 : 1);
   const [fetchState, setFetchState] = useState<
-    { status: 'idle' } | { status: 'fetching' } | { status: 'done'; failed: boolean }
+    | { status: 'idle' }
+    | { status: 'fetching' }
+    | { status: 'done'; failed: boolean; empty: boolean }
   >({ status: 'idle' });
+  const [manualModelIds, setManualModelIds] = useState<Partial<Record<AgentKind, string>>>({});
   /**
    * 勾选清单:id → { name, checked, recommended, agents }。Map 保序(推荐在前,拉取新增在后)。
    * agents = 该模型归属的 runtime:预设推荐模型归属「预设里列出它的那些 runtime」;拉取新增
@@ -336,19 +334,23 @@ export function AddProviderWizard({
 
   const pickOauth = useCallback((provider: ProviderView) => {
     fetchSeqRef.current += 1;
+    setManualModelIds({});
     setSel({ kind: 'oauth', provider });
     setStep(2);
   }, []);
   const pickPreset = useCallback(
     (preset: ProviderPreset) => {
       fetchSeqRef.current += 1;
+      setManualModelIds({});
       setSel({ kind: 'preset', preset });
       setName(presetDisplayName(preset, i18n.language));
       setApiKey('');
       setRuntimeBaseUrls(
         Object.fromEntries(
-          (Object.keys(preset.runtimes) as AgentKind[])
-            .map((agent) => [agent, preset.runtimes[agent]?.baseUrl ?? '']),
+          (Object.keys(preset.runtimes) as AgentKind[]).map((agent) => [
+            agent,
+            preset.runtimes[agent]?.baseUrl ?? '',
+          ]),
         ) as Partial<Record<AgentKind, string>>,
       );
       setStep(2);
@@ -377,49 +379,52 @@ export function AddProviderWizard({
   const openaiLoginStartedRef = useRef(false);
 
   // ── OAuth 授权(复用既有鉴权流;成功即完成,无第 3 步)────────────────────
-  const handleAuthorize = useCallback(async (
-    mode: 'browser' | 'device-code' = 'browser',
-  ) => {
-    if (!sel || sel.kind !== 'oauth') return;
-    const id = sel.provider.id;
-    clearGenericDeviceCode();
-    setLoggingIn(true);
-    try {
-      let ok = false;
-      if (id === 'anthropic') {
-        const r = await window.electronAPI.maker.claudeOAuthLogin();
-        ok = r.ok;
-        if (!r.ok && r.reason === 'not_a_subscription') {
-          toast.error(t('settings.connections.claude.toast.notSubscription'));
-          return;
+  const handleAuthorize = useCallback(
+    async (mode: 'browser' | 'device-code' = 'browser') => {
+      if (!sel || sel.kind !== 'oauth') return;
+      const id = sel.provider.id;
+      clearGenericDeviceCode();
+      setLoggingIn(true);
+      try {
+        let ok = false;
+        if (id === 'anthropic') {
+          const r = await window.electronAPI.maker.claudeOAuthLogin();
+          ok = r.ok;
+          if (!r.ok && r.reason === 'not_a_subscription') {
+            toast.error(t('settings.connections.claude.toast.notSubscription'));
+            return;
+          }
+          if (!r.ok && r.reason === 'login_cancelled') return;
+        } else if (id === 'openai') {
+          openaiLoginStartedRef.current = true;
+          const outcome = await codexAuth.triggerLogin(mode);
+          ok = outcome === 'authenticated';
+          if (outcome === 'cancelled') return;
+        } else if (id === 'xai') {
+          const r = await window.electronAPI.maker.xaiOAuthLogin();
+          ok = r.ok;
+          if (!r.ok && r.reason === 'login_cancelled') return;
+        } else {
+          const r = await window.electronAPI.maker.providerOAuthLogin(id);
+          ok = r.ok;
+          if (!r.ok && r.reason === 'login_cancelled') return;
         }
-        if (!r.ok && r.reason === 'login_cancelled') return;
-      } else if (id === 'openai') {
-        openaiLoginStartedRef.current = true;
-        const outcome = await codexAuth.triggerLogin(mode);
-        ok = outcome === 'authenticated';
-        if (outcome === 'cancelled') return;
-      } else if (id === 'xai') {
-        const r = await window.electronAPI.maker.xaiOAuthLogin();
-        ok = r.ok;
-        if (!r.ok && r.reason === 'login_cancelled') return;
-      } else {
-        const r = await window.electronAPI.maker.providerOAuthLogin(id);
-        ok = r.ok;
-        if (!r.ok && r.reason === 'login_cancelled') return;
-      }
-      if (ok) {
-        toast.success(t('settings.providers.wizard.authorizedToast', { name: sel.provider.name }));
-        onDone(id);
-      } else {
+        if (ok) {
+          toast.success(
+            t('settings.providers.wizard.authorizedToast', { name: sel.provider.name }),
+          );
+          onDone(id);
+        } else {
+          toast.error(t('settings.providers.wizard.authorizeFailed', { name: sel.provider.name }));
+        }
+      } catch {
         toast.error(t('settings.providers.wizard.authorizeFailed', { name: sel.provider.name }));
+      } finally {
+        setLoggingIn(false);
       }
-    } catch {
-      toast.error(t('settings.providers.wizard.authorizeFailed', { name: sel.provider.name }));
-    } finally {
-      setLoggingIn(false);
-    }
-  }, [sel, clearGenericDeviceCode, codexAuth, onDone, t]);
+    },
+    [sel, clearGenericDeviceCode, codexAuth, onDone, t],
+  );
 
   /**
    * 取消进行中的 OAuth(与详情头的行为对称):等待授权期间点按钮 / 关弹窗 / 返回
@@ -491,10 +496,7 @@ export function AddProviderWizard({
     for (const agent of agents) {
       const modelsUrl = preset.runtimes[agent]?.modelsUrl;
       if (!modelsUrl) continue;
-      discoveryAgentsByUrl.set(modelsUrl, [
-        ...(discoveryAgentsByUrl.get(modelsUrl) ?? []),
-        agent,
-      ]);
+      discoveryAgentsByUrl.set(modelsUrl, [...(discoveryAgentsByUrl.get(modelsUrl) ?? []), agent]);
     }
     const splitDiscoveryUrls = new Set(
       [...discoveryAgentsByUrl.entries()]
@@ -536,8 +538,7 @@ export function AddProviderWizard({
       const next = new Map(prev);
       for (const { agent, models } of results) {
         const modelsUrl = preset.runtimes[agent]?.modelsUrl;
-        const preservePresetOwnership =
-          !!modelsUrl && splitDiscoveryUrls.has(modelsUrl);
+        const preservePresetOwnership = !!modelsUrl && splitDiscoveryUrls.has(modelsUrl);
         for (const m of models) {
           const existing = next.get(m.id);
           if (existing) {
@@ -552,8 +553,49 @@ export function AddProviderWizard({
       return next;
     });
     // 全部端点都失败才算失败(单端失败仍可按另一端 + 预设推荐完成)。
-    setFetchState({ status: 'done', failed: !results.some((r) => r.ok) });
+    setFetchState({
+      status: 'done',
+      failed: !results.some((r) => r.ok),
+      empty: !results.some((r) => r.models.length > 0),
+    });
   }, [sel, apiKey, runtimeBaseUrls]);
+
+  /**
+   * 零推荐模型的本机代理（例如 LiteLLM）若 `/models` 不可用或返回空清单，仍允许用户
+   * 按 runtime 手填真实模型 ID。归属必须精确到当前 agent，不能把一个 ID 猜测性复制到
+   * 双 runtime；同一 ID 分别加入两端时才合并归属。
+   */
+  const addManualModel = useCallback(
+    (agent: AgentKind) => {
+      if (!sel || sel.kind !== 'preset' || !sel.preset.runtimes[agent]) return;
+      const id = manualModelIds[agent]?.trim() ?? '';
+      if (!id) return;
+      setPicks((prev) => {
+        const next = new Map(prev);
+        const existing = next.get(id);
+        next.set(
+          id,
+          existing
+            ? {
+                ...existing,
+                checked: true,
+                agents: existing.agents.includes(agent)
+                  ? existing.agents
+                  : [...existing.agents, agent],
+              }
+            : {
+                name: id,
+                checked: true,
+                recommended: false,
+                agents: [agent],
+              },
+        );
+        return next;
+      });
+      setManualModelIds((prev) => ({ ...prev, [agent]: '' }));
+    },
+    [sel, manualModelIds],
+  );
 
   // ── 完成创建(预设)────────────────────────────────────────────────────
   const handleFinish = useCallback(async () => {
@@ -665,27 +707,33 @@ export function AddProviderWizard({
       : undefined;
 
   const checkedCount = [...picks.values()].filter((v) => v.checked).length;
+  const presetHasRecommendedModels =
+    sel?.kind === 'preset' &&
+    presetAgents.some((agent) => (sel.preset.runtimes[agent]?.models.length ?? 0) > 0);
+  const showManualModelFallback =
+    sel?.kind === 'preset' &&
+    fetchState.status === 'done' &&
+    (fetchState.failed || fetchState.empty) &&
+    !presetHasRecommendedModels;
   const presetNeedsApiKey = sel?.kind === 'preset' && sel.preset.authMethod !== 'none';
   const presetBaseUrlsValid =
-    sel?.kind === 'preset'
-    && presetAgents.every((agent) => {
+    sel?.kind === 'preset' &&
+    presetAgents.every((agent) => {
       const value = runtimeBaseUrls[agent]?.trim() || sel.preset.runtimes[agent]?.baseUrl || '';
       if (sel.preset.authMethod === 'none') return isLoopbackProviderUrl(value);
       try {
         const url = new URL(value);
         return (
-          (url.protocol === 'http:' || url.protocol === 'https:')
-          && !url.username
-          && !url.password
+          (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password
         );
       } catch {
         return false;
       }
     });
   const presetCanContinue =
-    sel?.kind === 'preset'
-    && presetBaseUrlsValid
-    && (!presetNeedsApiKey || apiKey.trim().length > 0);
+    sel?.kind === 'preset' &&
+    presetBaseUrlsValid &&
+    (!presetNeedsApiKey || apiKey.trim().length > 0);
 
   return (
     <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-[var(--overlay-modal)]">
@@ -968,9 +1016,7 @@ export function AddProviderWizard({
                   </button>
                 )}
               </div>
-              {openAiDeviceLoginPending && (
-                <OAuthDeviceCodeCard deviceCode={openAiDeviceCode} />
-              )}
+              {openAiDeviceLoginPending && <OAuthDeviceCodeCard deviceCode={openAiDeviceCode} />}
               {genericDeviceProviderId && loggingIn && (
                 <OAuthDeviceCodeCard deviceCode={genericDeviceCode} />
               )}
@@ -1096,76 +1142,134 @@ export function AddProviderWizard({
                   {fetchState.status === 'done' && fetchState.failed && (
                     <InfoLine text={t('settings.providers.wizard.fetchFailed')} />
                   )}
-                  <div
-                    className="flex flex-col overflow-hidden rounded-xl border"
-                    style={{ borderColor: 'var(--border-default)' }}
-                  >
-                    {[...picks.entries()].map(([id, v], i) => (
-                      <button
-                        key={id}
-                        type="button"
-                        onClick={() =>
-                          setPicks((prev) => {
-                            const next = new Map(prev);
-                            const cur = next.get(id);
-                            if (cur) next.set(id, { ...cur, checked: !cur.checked });
-                            return next;
-                          })
-                        }
-                        className={cn(
-                          'flex items-center gap-2.5 px-3.5 py-2.5 text-left transition-colors hover:bg-[var(--surface-hover)]',
-                          i > 0 && 'border-t',
-                        )}
-                        style={{ borderColor: 'var(--border-default)' }}
-                      >
-                        <span
-                          className="flex h-4 w-4 shrink-0 items-center justify-center rounded border"
-                          style={
-                            v.checked
-                              ? {
-                                  backgroundColor: 'var(--accent-cta-bg)',
-                                  borderColor: 'var(--accent-cta-bg)',
-                                  color: 'var(--surface-on-card)',
-                                }
-                              : { borderColor: 'var(--text-tertiary)' }
+                  {picks.size > 0 && (
+                    <div
+                      className="flex flex-col overflow-hidden rounded-xl border"
+                      style={{ borderColor: 'var(--border-default)' }}
+                    >
+                      {[...picks.entries()].map(([id, v], i) => (
+                        <button
+                          key={id}
+                          type="button"
+                          onClick={() =>
+                            setPicks((prev) => {
+                              const next = new Map(prev);
+                              const cur = next.get(id);
+                              if (cur) next.set(id, { ...cur, checked: !cur.checked });
+                              return next;
+                            })
                           }
+                          className={cn(
+                            'flex items-center gap-2.5 px-3.5 py-2.5 text-left transition-colors hover:bg-[var(--surface-hover)]',
+                            i > 0 && 'border-t',
+                          )}
+                          style={{ borderColor: 'var(--border-default)' }}
                         >
-                          {v.checked && <Check size={11} strokeWidth={3} />}
-                        </span>
-                        <span
-                          className="min-w-0 flex-1 truncate text-13"
-                          style={{ color: 'var(--settings-section-title)' }}
-                        >
-                          {v.name}
-                        </span>
-                        {/* 双 runtime 预设里单端归属的模型,标注能力事实(与管理页同措辞)。 */}
-                        {presetAgents.length > 1 && v.agents.length === 1 && (
                           <span
-                            className="shrink-0 text-12"
-                            style={{ color: 'var(--text-tertiary)' }}
+                            className="flex h-4 w-4 shrink-0 items-center justify-center rounded border"
+                            style={
+                              v.checked
+                                ? {
+                                    backgroundColor: 'var(--accent-cta-bg)',
+                                    borderColor: 'var(--accent-cta-bg)',
+                                    color: 'var(--surface-on-card)',
+                                  }
+                                : { borderColor: 'var(--text-tertiary)' }
+                            }
                           >
-                            {t('settings.providers.models.capabilityNote', {
-                              agent:
-                                AGENT_LABEL[
-                                  v.agents[0] === 'claude-code' ? 'codex' : 'claude-code'
-                                ],
+                            {v.checked && <Check size={11} strokeWidth={3} />}
+                          </span>
+                          <span
+                            className="min-w-0 flex-1 truncate text-13"
+                            style={{ color: 'var(--settings-section-title)' }}
+                          >
+                            {v.name}
+                          </span>
+                          {/* 双 runtime 预设里单端归属的模型,标注能力事实(与管理页同措辞)。 */}
+                          {presetAgents.length > 1 && v.agents.length === 1 && (
+                            <span
+                              className="shrink-0 text-12"
+                              style={{ color: 'var(--text-tertiary)' }}
+                            >
+                              {t('settings.providers.models.capabilityNote', {
+                                agent:
+                                  AGENT_LABEL[
+                                    v.agents[0] === 'claude-code' ? 'codex' : 'claude-code'
+                                  ],
+                              })}
+                            </span>
+                          )}
+                          {v.recommended && (
+                            <span
+                              className="flex h-[18px] shrink-0 items-center rounded-full px-2 text-11 font-medium"
+                              style={{
+                                backgroundColor: 'var(--surface-chip)',
+                                color: 'var(--text-secondary)',
+                              }}
+                            >
+                              {t('settings.providers.wizard.recommended')}
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {showManualModelFallback && (
+                    <div
+                      className="flex flex-col gap-3 rounded-xl border p-3.5"
+                      style={{ borderColor: 'var(--border-default)' }}
+                    >
+                      <InfoLine text={t('settings.providers.wizard.manualModelHint')} />
+                      {presetAgents.map((agent) => (
+                        <label key={agent} className="flex flex-col gap-1.5">
+                          <span
+                            className="text-12 font-medium"
+                            style={{ color: 'var(--text-secondary)' }}
+                          >
+                            {t('settings.providers.wizard.manualModelLabel', {
+                              agent: AGENT_LABEL[agent],
                             })}
                           </span>
-                        )}
-                        {v.recommended && (
-                          <span
-                            className="flex h-[18px] shrink-0 items-center rounded-full px-2 text-11 font-medium"
-                            style={{
-                              backgroundColor: 'var(--surface-chip)',
-                              color: 'var(--text-secondary)',
-                            }}
-                          >
-                            {t('settings.providers.wizard.recommended')}
+                          <span className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              value={manualModelIds[agent] ?? ''}
+                              onChange={(event) =>
+                                setManualModelIds((prev) => ({
+                                  ...prev,
+                                  [agent]: event.target.value,
+                                }))
+                              }
+                              onKeyDown={(event) => {
+                                if (event.key !== 'Enter') return;
+                                event.preventDefault();
+                                addManualModel(agent);
+                              }}
+                              placeholder={t('settings.providers.wizard.manualModelPlaceholder')}
+                              className="h-9 min-w-0 flex-1 rounded-full border px-4 font-mono text-12 outline-none focus:ring-2 focus:ring-[var(--focus-ring)]"
+                              style={{
+                                borderColor: 'var(--border-default)',
+                                backgroundColor: 'var(--surface-elevated)',
+                                color: 'var(--settings-section-title)',
+                              }}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => addManualModel(agent)}
+                              disabled={!manualModelIds[agent]?.trim()}
+                              className="flex h-9 shrink-0 items-center justify-center rounded-full border px-4 text-12 font-medium transition-colors hover:bg-[var(--surface-hover)] disabled:opacity-50"
+                              style={{
+                                borderColor: 'var(--settings-btn-secondary-border)',
+                                color: 'var(--settings-btn-secondary-text)',
+                              }}
+                            >
+                              {t('settings.providers.wizard.addManualModel')}
+                            </button>
                           </span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
+                        </label>
+                      ))}
+                    </div>
+                  )}
                   <p className="text-11 leading-snug" style={{ color: 'var(--text-tertiary)' }}>
                     {t('settings.providers.wizard.modelsHint')}
                   </p>

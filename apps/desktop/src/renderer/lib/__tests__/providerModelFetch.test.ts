@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  areProviderRequestUrlsAllowed,
   providerConnectionTestRequestSignature,
   providerModelFetchRequestSignature,
 } from '../providerModelFetch';
@@ -69,18 +70,49 @@ describe('providerConnectionTestRequestSignature', () => {
 
   it('invalidates a probe when request path, protocol, model, or auth changes', () => {
     const original = providerConnectionTestRequestSignature(connectionFields, 'apiKey');
-    expect(providerConnectionTestRequestSignature(
-      { ...connectionFields, requestPath: '/chat/completions' },
-      'apiKey',
-    )).not.toBe(original);
-    expect(providerConnectionTestRequestSignature(
-      { ...connectionFields, wireProtocol: 'openai-chat' },
-      'apiKey',
-    )).not.toBe(original);
-    expect(providerConnectionTestRequestSignature(
-      { ...connectionFields, models: [{ id: 'model-c' }] },
-      'apiKey',
-    )).not.toBe(original);
+    expect(
+      providerConnectionTestRequestSignature(
+        { ...connectionFields, requestPath: '/chat/completions' },
+        'apiKey',
+      ),
+    ).not.toBe(original);
+    expect(
+      providerConnectionTestRequestSignature(
+        { ...connectionFields, wireProtocol: 'openai-chat' },
+        'apiKey',
+      ),
+    ).not.toBe(original);
+    expect(
+      providerConnectionTestRequestSignature(
+        { ...connectionFields, models: [{ id: 'model-c' }] },
+        'apiKey',
+      ),
+    ).not.toBe(original);
     expect(providerConnectionTestRequestSignature(connectionFields, 'none')).not.toBe(original);
+  });
+});
+
+describe('areProviderRequestUrlsAllowed', () => {
+  it('keeps unsaved no-auth probes and model discovery on loopback', () => {
+    expect(
+      areProviderRequestUrlsAllowed(
+        'none',
+        'http://127.0.0.1:4000/v1',
+        'http://localhost:4000/v1/models',
+      ),
+    ).toBe(true);
+    expect(areProviderRequestUrlsAllowed('none', 'https://proxy.example/v1')).toBe(false);
+    expect(
+      areProviderRequestUrlsAllowed(
+        'none',
+        'http://localhost:4000/v1',
+        'https://models.example/v1/models',
+      ),
+    ).toBe(false);
+  });
+
+  it('does not apply the loopback restriction to authenticated requests', () => {
+    expect(areProviderRequestUrlsAllowed('apiKey', 'https://api.example/v1')).toBe(true);
+    expect(areProviderRequestUrlsAllowed('oauth', 'https://api.example/v1')).toBe(true);
   });
 });

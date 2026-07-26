@@ -76,7 +76,7 @@ const liteLlmPreset = {
       baseUrl: 'http://127.0.0.1:4000/v1',
       baseUrlEditable: true,
       requestPath: '/tenant/acme/infer',
-      models: [{ id: 'local-model', name: 'Local model' }],
+      models: [],
     },
   },
 };
@@ -229,22 +229,24 @@ describe('AddProviderWizard — preset 直达', () => {
     );
   });
 
-  it('LiteLLM:无需 API key，可改本机端点，并以 none 鉴权保存', async () => {
+  it('LiteLLM:模型发现失败时可手填模型 ID，并以 none 鉴权保存', async () => {
     renderWizard('litellm');
 
-    await waitFor(() =>
-      expect(screen.getByDisplayValue('LiteLLM Proxy')).not.toBeNull(),
-    );
+    await waitFor(() => expect(screen.getByDisplayValue('LiteLLM Proxy')).not.toBeNull());
     expect(screen.queryByPlaceholderText('sk-…')).toBeNull();
     expect(screen.getByText('settings.providers.wizard.noAuthNote')).not.toBeNull();
 
     const endpoint = screen.getByDisplayValue('http://127.0.0.1:4000/v1');
     fireEvent.change(endpoint, { target: { value: 'http://localhost:4100/v1' } });
-    const next = screen.getByText('settings.providers.wizard.next').closest('button') as HTMLButtonElement;
+    const next = screen
+      .getByText('settings.providers.wizard.next')
+      .closest('button') as HTMLButtonElement;
     expect(next.disabled).toBe(false);
     fireEvent.click(next);
 
-    await waitFor(() => expect(screen.getByText('Local model')).not.toBeNull());
+    const manualModel = await screen.findByPlaceholderText(
+      'settings.providers.wizard.manualModelPlaceholder',
+    );
     expect(window.electronAPI.maker.fetchProviderModels).toHaveBeenCalledWith(
       expect.objectContaining({
         agent: 'codex',
@@ -252,6 +254,9 @@ describe('AddProviderWizard — preset 直达', () => {
         apiKey: null,
       }),
     );
+    fireEvent.change(manualModel, { target: { value: 'local-model' } });
+    fireEvent.click(screen.getByText('settings.providers.wizard.addManualModel'));
+    expect(screen.getByText('local-model')).not.toBeNull();
     fireEvent.click(screen.getByText('settings.providers.wizard.finish'));
 
     await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
@@ -262,6 +267,7 @@ describe('AddProviderWizard — preset 直达', () => {
           codex: expect.objectContaining({
             baseUrl: 'http://localhost:4100/v1',
             requestPath: '/tenant/acme/infer',
+            models: [{ id: 'local-model', name: 'local-model' }],
           }),
         },
       }),
@@ -287,10 +293,8 @@ describe('AddProviderWizard — preset 直达', () => {
 
     await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
     const config = vi.mocked(createCustomProvider).mock.calls[0][0];
-    expect(config.runtimes['claude-code']?.models.map((model) => model.id))
-      .toEqual(['minimax-m3']);
-    expect(config.runtimes.codex?.models.map((model) => model.id))
-      .toEqual(['glm-5.2']);
+    expect(config.runtimes['claude-code']?.models.map((model) => model.id)).toEqual(['minimax-m3']);
+    expect(config.runtimes.codex?.models.map((model) => model.id)).toEqual(['glm-5.2']);
   });
 
   it('presetId 不存在 → 回落目录第一步', async () => {

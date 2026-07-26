@@ -37,6 +37,9 @@ describe('model mark semantics', () => {
     expect(firstPath(<ProviderMark providerId="xai" />)).toBe(
       firstPath(<ProviderLogoMark providerId="xai" />),
     );
+    expect(
+      firstPath(<ProviderMark providerId="renamed-kimi" name="My Kimi" logoKind="moonshot" />),
+    ).toBe(firstPath(<ProviderLogoMark providerId="renamed-kimi" logoKind="moonshot" />));
     expect(firstPath(<ModelIconMark icon="claude" providerId="xd" />)).toBe(anthropicPath);
     expect(firstPath(<ModelIconMark icon="openai" providerId="xd" />)).toBe(openaiPath);
 

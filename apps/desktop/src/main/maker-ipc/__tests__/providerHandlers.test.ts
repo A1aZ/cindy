@@ -315,6 +315,66 @@ describe('provider:custom:* CRUD handlers', () => {
     expect((await listCustomProviders())[0]?.auth).toEqual(oauthConfig.auth);
   });
 
+  it('serializes provider updates so a failed write restores credentials before the next edit', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    const calls: string[] = [];
+    let removalCount = 0;
+    const removeOAuthCredentials = vi.fn(() => {
+      removalCount += 1;
+      calls.push(`remove-${removalCount}`);
+      return () => {
+        calls.push(`restore-${removalCount}`);
+        if (removalCount === 1) raw!.exec('DROP TRIGGER fail_first_custom_provider_update');
+        return true;
+      };
+    });
+    registerProviderHandlers(harness, makeDeps({ removeOAuthCredentials }));
+    const oauthConfig: CustomProviderConfig = {
+      ...validConfig,
+      auth: {
+        method: 'oauth',
+        oauth: {
+          authorizeUrl: 'https://auth.example/authorize',
+          tokenUrl: 'https://auth.example/token',
+          clientId: 'desktop',
+          scopes: 'openid',
+        },
+      },
+    };
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, oauthConfig);
+    raw!.exec(`
+      CREATE TRIGGER fail_first_custom_provider_update
+      BEFORE UPDATE ON custom_providers
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated first write failure');
+      END
+    `);
+
+    const first = harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+      ...oauthConfig,
+      auth: {
+        method: 'oauth',
+        oauth: { ...oauthConfig.auth!.oauth, clientId: 'failed-client' },
+      },
+    });
+    const second = harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+      ...oauthConfig,
+      auth: {
+        method: 'oauth',
+        oauth: { ...oauthConfig.auth!.oauth, clientId: 'winning-client' },
+      },
+    });
+
+    await expect(first).rejects.toThrow(/simulated first write failure/);
+    await expect(second).resolves.toEqual({ ok: true });
+    expect(calls).toEqual(['remove-1', 'restore-1', 'remove-2']);
+    const savedAuth = (await listCustomProviders())[0]?.auth;
+    expect(savedAuth?.method === 'oauth' ? savedAuth.oauth.clientId : undefined).toBe(
+      'winning-client',
+    );
+  });
+
   it('deletes (idempotent) + broadcasts; bad providerId → INVALID_PARAMS', async () => {
     mountDb();
     const harness = new IpcHarness();

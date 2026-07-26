@@ -339,6 +339,47 @@ describe('maker auth IPC handlers', () => {
     });
   });
 
+  it('finishes Codex logout cleanup before starting a login queued during logout', async () => {
+    const harness = new IpcHarness();
+    let finishLogout!: () => void;
+    let finishFinalization!: () => void;
+    const logoutAgent = vi.fn(() => new Promise<void>((resolve) => {
+      finishLogout = resolve;
+    }));
+    const onCodexAuthChange = vi.fn(() => new Promise<void>((resolve) => {
+      finishFinalization = resolve;
+    }));
+    const triggerAgentLogin = vi.fn().mockResolvedValue({
+      authenticated: false,
+      errorReason: 'login_cancelled',
+    });
+
+    registerMakerAuthHandlers(
+      harness,
+      createMakerStub({ logoutAgent, triggerAgentLogin }),
+      vi.fn(),
+      () => null,
+      onCodexAuthChange,
+    );
+
+    const logout = harness.invoke(MAKER_INVOKE.AUTH_LOGOUT, 'codex');
+    await vi.waitFor(() => expect(logoutAgent).toHaveBeenCalledOnce());
+    const login = harness.invoke(MAKER_INVOKE.AUTH_TRIGGER_LOGIN, 'codex');
+    expect(triggerAgentLogin).not.toHaveBeenCalled();
+
+    finishLogout();
+    await vi.waitFor(() => expect(onCodexAuthChange).toHaveBeenCalledOnce());
+    expect(triggerAgentLogin).not.toHaveBeenCalled();
+
+    finishFinalization();
+    await expect(logout).resolves.toBeUndefined();
+    await expect(login).resolves.toEqual({
+      authenticated: false,
+      errorReason: 'login_cancelled',
+    });
+    expect(triggerAgentLogin).toHaveBeenCalledOnce();
+  });
+
   it('encodes logout persistence failures as an IPC INTERNAL error without broadcasting success', async () => {
     const harness = new IpcHarness();
     const broadcast = vi.fn();

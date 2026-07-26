@@ -101,6 +101,7 @@ export function registerMakerAuthHandlers(
   ) => void | Promise<void>,
 ): void {
   const mutationGeneration = new Map<AgentKind, number>();
+  const logoutFinalizations = new Map<AgentKind, Promise<void>>();
   const beginMutation = (kind: AgentKind): number => {
     const generation = (mutationGeneration.get(kind) ?? 0) + 1;
     mutationGeneration.set(kind, generation);
@@ -124,6 +125,10 @@ export function registerMakerAuthHandlers(
     async (_e, agentKind: unknown, rawOptions?: unknown): Promise<AuthState> => {
       const kind = requireAgentKind(agentKind);
       const mode = requireLoginMode(kind, rawOptions);
+      // Adapter 会把注销期间到达的登录排在 CLI logout 后面；这里还必须等主进程完成
+      // credential bridge / model snapshot 的注销收尾，再建立新的 mutation generation。
+      // 否则新登录会提前作废旧 generation，导致注销回调被跳过。
+      await logoutFinalizations.get(kind)?.catch(() => undefined);
       const generation = beginMutation(kind);
       const isCurrent = (): boolean => isMutationCurrent(kind, generation);
       const progressText = { stdout: '', stderr: '', other: '' };
@@ -186,15 +191,25 @@ export function registerMakerAuthHandlers(
     const kind = requireAgentKind(agentKind);
     const generation = beginMutation(kind);
     const isCurrent = (): boolean => isMutationCurrent(kind, generation);
+    const finalization = (async (): Promise<void> => {
+      try {
+        await maker.logoutAgent(kind);
+      } catch (err) {
+        throwIpcError('INTERNAL', err instanceof Error ? err.message : String(err));
+      }
+      if (!isCurrent()) return;
+      if (kind === 'codex') await onCodexAuthChange?.(false, false, isCurrent);
+      if (!isCurrent()) return;
+      broadcast(MAKER_PUSH.AUTH_STATE_CHANGED, { agentKind: kind, authenticated: false });
+    })();
+    logoutFinalizations.set(kind, finalization);
     try {
-      await maker.logoutAgent(kind);
-    } catch (err) {
-      throwIpcError('INTERNAL', err instanceof Error ? err.message : String(err));
+      await finalization;
+    } finally {
+      if (logoutFinalizations.get(kind) === finalization) {
+        logoutFinalizations.delete(kind);
+      }
     }
-    if (!isCurrent()) return;
-    if (kind === 'codex') await onCodexAuthChange?.(false, false, isCurrent);
-    if (!isCurrent()) return;
-    broadcast(MAKER_PUSH.AUTH_STATE_CHANGED, { agentKind: kind, authenticated: false });
   });
 }
 

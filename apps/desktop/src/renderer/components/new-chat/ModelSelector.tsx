@@ -53,6 +53,7 @@ import {
   visibleModelUnion,
   type ProviderView,
 } from '@cindy/model-providers';
+import { isProviderLogoKind } from '@cindy/model-providers/branding';
 import { getModelPriceQuote } from '../../../shared/modelPriceQuote';
 import type { ModelPricingCatalog } from '../../../shared/regionalMoney';
 import { buildProviderSections } from './sourceSwitch';
@@ -117,7 +118,7 @@ export function ProviderMark({
 }) {
   const common = cn(withMargin && 'mr-1.5', 'shrink-0', colorClass);
   const markSize = dense ? 12.3 : 13;
-  if (logoKind || hasProviderLogo(providerId, routing)) {
+  if (isProviderLogoKind(logoKind) || hasProviderLogo(providerId, routing)) {
     return (
       <ProviderLogoMark
         providerId={providerId}

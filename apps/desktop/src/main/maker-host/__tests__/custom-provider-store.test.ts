@@ -107,6 +107,21 @@ describe('validateCustomProviderConfig (per-runtime)', () => {
     expect(
       validateCustomProviderConfig({
         ...valid,
+        runtimes: {
+          codex: {
+            baseUrl: 'https://user:secret@x/v1',
+            models: [{ id: 'm', name: 'M' }],
+          },
+        },
+      }),
+    ).toEqual({
+      ok: false,
+      code: 'INVALID_PARAMS',
+      message: "runtime 'codex' baseUrl must not contain embedded credentials",
+    });
+    expect(
+      validateCustomProviderConfig({
+        ...valid,
         runtimes: { codex: { baseUrl: 'https://x/v1', models: [{ id: '', name: 'y' }] } },
       }).ok,
     ).toBe(false);

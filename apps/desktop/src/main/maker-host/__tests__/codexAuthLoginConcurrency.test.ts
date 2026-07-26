@@ -211,4 +211,36 @@ describe('DesktopCodexAuthAdapter login single-flight', () => {
     });
     expect(runTriggerLogin).toHaveBeenCalledOnce();
   });
+
+  it('lets a repeated logout cancel a login queued behind the active logout', async () => {
+    const { DesktopCodexAuthAdapter } = await import('../auth-adapters.js');
+    const adapter = Object.create(DesktopCodexAuthAdapter.prototype) as InstanceType<
+      typeof DesktopCodexAuthAdapter
+    >;
+    let finishLogout!: () => void;
+    const logoutOperation = new Promise<void>((resolve) => {
+      finishLogout = resolve;
+    });
+    Object.defineProperty(adapter, 'logoutOperation', {
+      configurable: true,
+      writable: true,
+      value: logoutOperation,
+    });
+    const runTriggerLogin = vi.fn(async (): Promise<AuthState> => ({
+      authenticated: true,
+      authSource: 'oauth',
+    }));
+    Object.defineProperty(adapter, 'runTriggerLogin', {
+      configurable: true,
+      value: runTriggerLogin,
+    });
+
+    const queuedLogin = adapter.triggerLogin({ mode: 'device-code' });
+    const repeatedLogout = adapter.logout();
+    expect(repeatedLogout).toBe(logoutOperation);
+
+    finishLogout();
+    await expect(queuedLogin).resolves.toMatchObject({ errorReason: 'login_cancelled' });
+    expect(runTriggerLogin).not.toHaveBeenCalled();
+  });
 });

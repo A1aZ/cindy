@@ -199,14 +199,32 @@ export function registerProviderHandlers(
   registry: IpcHandlerRegistry,
   deps: ProviderHandlerDeps,
 ): void {
-  const oauthMutationGeneration = new Map<string, number>();
-  const beginOAuthMutation = (providerId: string): number => {
-    const generation = (oauthMutationGeneration.get(providerId) ?? 0) + 1;
+  const oauthMutationGeneration = new Map<string, symbol>();
+  const beginOAuthMutation = (providerId: string): symbol => {
+    // Unique token avoids ABA when a completed entry is deleted and the same provider starts again.
+    const generation = Symbol(providerId);
     oauthMutationGeneration.set(providerId, generation);
     return generation;
   };
-  const isOAuthMutationCurrent = (providerId: string, generation: number): boolean =>
+  const isOAuthMutationCurrent = (providerId: string, generation: symbol): boolean =>
     oauthMutationGeneration.get(providerId) === generation;
+  const finishOAuthMutation = (providerId: string, generation: symbol): void => {
+    if (isOAuthMutationCurrent(providerId, generation)) {
+      oauthMutationGeneration.delete(providerId);
+    }
+  };
+  const providerConfigMutationCounts = new Map<string, number>();
+  const beginProviderConfigMutation = (providerId: string): void => {
+    providerConfigMutationCounts.set(
+      providerId,
+      (providerConfigMutationCounts.get(providerId) ?? 0) + 1,
+    );
+  };
+  const finishProviderConfigMutation = (providerId: string): void => {
+    const remaining = (providerConfigMutationCounts.get(providerId) ?? 1) - 1;
+    if (remaining <= 0) providerConfigMutationCounts.delete(providerId);
+    else providerConfigMutationCounts.set(providerId, remaining);
+  };
 
   // 只读聚合：loadCatalog 永不抛（最差回退内置目录），故无需 throwIpcError 包裹。
   registry.handle(
@@ -242,43 +260,56 @@ export function registerProviderHandlers(
     const v = validateCustomProviderConfig(input);
     if (!v.ok) throwIpcError(v.code, v.message);
     const config = input as CustomProviderConfig;
-    const previous = await getCustomProvider(config.id);
-    if (!previous) throwIpcError('NOT_FOUND', `custom provider '${config.id}' not found`);
-    // 即便 OAuth 描述符没变，runtime / model 编辑也必须让旧登录尾部的自动发现失效，
-    // 否则旧 endpoint 的迟到结果可能合并进刚保存的新配置。
-    beginOAuthMutation(config.id);
-    const shouldResetOAuth =
-      config.auth?.method !== 'oauth'
-      || oauthDescriptorSignature(previous) !== oauthDescriptorSignature(config);
-    // 先阻止在途 flow 写回，再改描述符；否则旧 flow 可能在 clear 后迟到落一枚旧 token。
-    if (shouldResetOAuth) deps.oauthCancel(config.id);
-    // 旧 client / endpoint 下签发的 token 不能沿用到新 OAuth 描述符；切到 API key /
-    // 无鉴权时也清掉不再可达的 blob。删除失败时必须在配置变更前中止，避免重启后
-    // 旧 token 被新 client / endpoint 重新激活。
-    if (shouldResetOAuth) {
-      if (!deps.clearOAuthCredentials(config.id)) {
-        throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
+    beginProviderConfigMutation(config.id);
+    let generation: symbol | null = null;
+    try {
+      const previous = await getCustomProvider(config.id);
+      if (!previous) throwIpcError('NOT_FOUND', `custom provider '${config.id}' not found`);
+      // 即便 OAuth 描述符没变，runtime / model 编辑也必须让旧登录尾部的自动发现失效，
+      // 否则旧 endpoint 的迟到结果可能合并进刚保存的新配置。
+      generation = beginOAuthMutation(config.id);
+      const shouldResetOAuth =
+        config.auth?.method !== 'oauth'
+        || oauthDescriptorSignature(previous) !== oauthDescriptorSignature(config);
+      // 先阻止在途 flow 写回，再改描述符；否则旧 flow 可能在 clear 后迟到落一枚旧 token。
+      if (shouldResetOAuth) deps.oauthCancel(config.id);
+      // 旧 client / endpoint 下签发的 token 不能沿用到新 OAuth 描述符；切到 API key /
+      // 无鉴权时也清掉不再可达的 blob。删除失败时必须在配置变更前中止，避免重启后
+      // 旧 token 被新 client / endpoint 重新激活。
+      if (shouldResetOAuth) {
+        if (!deps.clearOAuthCredentials(config.id)) {
+          throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
+        }
       }
+      const updated = await updateCustomProvider(config.id, config);
+      if (!updated) throwIpcError('NOT_FOUND', `custom provider '${config.id}' not found`);
+      await afterChange();
+      return { ok: true };
+    } finally {
+      if (generation !== null) finishOAuthMutation(config.id, generation);
+      finishProviderConfigMutation(config.id);
     }
-    const updated = await updateCustomProvider(config.id, config);
-    if (!updated) throwIpcError('NOT_FOUND', `custom provider '${config.id}' not found`);
-    await afterChange();
-    return { ok: true };
   });
 
   registry.handle(MAKER_INVOKE.PROVIDER_CUSTOM_DELETE, async (_event, providerId: unknown) => {
     if (typeof providerId !== 'string' || providerId.length === 0) {
       throwIpcError('INVALID_PARAMS', 'providerId required');
     }
-    beginOAuthMutation(providerId);
-    deps.oauthCancel(providerId);
-    // OAuth 形态自定义供应商的凭证 blob 一并清掉（apiKey 形态无 blob，幂等无害）。
-    if (!deps.clearOAuthCredentials(providerId)) {
-      throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
+    beginProviderConfigMutation(providerId);
+    const generation = beginOAuthMutation(providerId);
+    try {
+      deps.oauthCancel(providerId);
+      // OAuth 形态自定义供应商的凭证 blob 一并清掉（apiKey 形态无 blob，幂等无害）。
+      if (!deps.clearOAuthCredentials(providerId)) {
+        throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
+      }
+      await deleteCustomProvider(providerId);
+      await afterChange();
+      return { ok: true };
+    } finally {
+      finishOAuthMutation(providerId, generation);
+      finishProviderConfigMutation(providerId);
     }
-    await deleteCustomProvider(providerId);
-    await afterChange();
-    return { ok: true };
   });
 
   // 只读：目录 presets 段（创建对话框「从模板创建」消费）。
@@ -327,6 +358,11 @@ export function registerProviderHandlers(
   }
   registry.handle(MAKER_INVOKE.PROVIDER_OAUTH_LOGIN, async (_event, providerId: unknown) => {
     const id = requireProviderId(providerId);
+    // 更新事务从旧配置读取、写库到 refresh 完成前是一个整体。期间拒绝新登录，避免 runner
+    // 读取旧描述符后在新配置生效时写回旧 client / endpoint 签发的 token。
+    if (providerConfigMutationCounts.has(id)) {
+      return { ok: false, reason: 'provider_update_in_progress' };
+    }
     const generation = beginOAuthMutation(id);
     try {
       const result = await deps.oauthLogin(id, () => isOAuthMutationCurrent(id, generation));
@@ -335,20 +371,31 @@ export function registerProviderHandlers(
         : { ok: false, reason: 'login_superseded' };
     } catch (err) {
       throwIpcError('INVALID_PARAMS', err instanceof Error ? err.message : String(err));
+    } finally {
+      finishOAuthMutation(id, generation);
     }
   });
   registry.handle(MAKER_INVOKE.PROVIDER_OAUTH_LOGOUT, async (_event, providerId: unknown) => {
     const id = requireProviderId(providerId);
-    beginOAuthMutation(id);
-    deps.oauthCancel(id);
-    await deps.oauthLogout(id);
-    await afterChange();
-    return { ok: true };
+    const generation = beginOAuthMutation(id);
+    try {
+      deps.oauthCancel(id);
+      await deps.oauthLogout(id);
+      await afterChange();
+      return { ok: true };
+    } finally {
+      finishOAuthMutation(id, generation);
+    }
   });
   registry.handle(MAKER_INVOKE.PROVIDER_OAUTH_CANCEL, async (_event, providerId: unknown) => {
     const id = requireProviderId(providerId);
-    beginOAuthMutation(id);
-    deps.oauthCancel(id);
-    return { ok: true };
+    const generation = beginOAuthMutation(id);
+    try {
+      deps.oauthCancel(id);
+      return { ok: true };
+    } finally {
+      // Cancel is synchronous; retaining arbitrary renderer-supplied ids here would grow the map forever.
+      finishOAuthMutation(id, generation);
+    }
   });
 }

@@ -18,9 +18,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function cloneToolCallExtraContent(value: unknown): ChatToolCallExtraContent | undefined {
   if (!isPlainObject(value)) return undefined;
+  const { google, ...rest } = value;
   return {
-    ...value,
-    ...(isPlainObject(value.google) ? { google: { ...value.google } } : {}),
+    ...rest,
+    ...(isPlainObject(google) ? { google: { ...google } } : {}),
   };
 }
 

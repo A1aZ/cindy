@@ -92,6 +92,27 @@ describe('createResponsesChatHandler', () => {
     );
   });
 
+  it.each([
+    ['an invalid upstream base URL', 'ftp://provider.example/v1', '/chat/completions'],
+    ['an invalid chat path', 'https://provider.example/v1', '//attacker.example/chat'],
+  ])('reports %s as configuration failure before fetching', async (_case, upstreamBase, chatCompletionsPath) => {
+    const fetchImpl = vi.fn() as unknown as typeof fetch;
+    const buildHeaders = vi.fn(async () => ({ authorization: 'Bearer secret' }));
+    const handler = createResponsesChatHandler({
+      upstreamBase,
+      chatCompletionsPath,
+      buildHeaders,
+    }, { fetchImpl });
+    const res = new FakeResponse();
+
+    await handler.handle({ parsedBody: { model: 'm', input: 'hi' }, res: res as never });
+
+    expect(res.status).toBe(502);
+    expect(res.chunks.join('')).toContain('invalid_upstream_config');
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(buildHeaders).not.toHaveBeenCalled();
+  });
+
   it('accepts a final SSE data event without a trailing newline', async () => {
     const fetchImpl = vi.fn(async () => new Response(
       'data: {"id":"chat_tail","choices":[{"delta":{"content":"tail"},"finish_reason":"stop"}]}',

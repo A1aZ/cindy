@@ -25,8 +25,10 @@ describe('DesktopCodexAuthAdapter login single-flight', () => {
     const browserRun = new Promise<AuthState>((resolve) => {
       finishBrowser = resolve;
     });
+    let browserOptions: AuthLoginOptions | undefined;
     const runTriggerLogin = vi.fn((opts?: AuthLoginOptions): Promise<AuthState> => {
       const mode: AgentLoginMode = opts?.mode ?? 'browser';
+      if (mode === 'browser') browserOptions = opts;
       return mode === 'browser'
         ? browserRun
         : Promise.resolve({ authenticated: true, authSource: 'oauth' });
@@ -37,13 +39,22 @@ describe('DesktopCodexAuthAdapter login single-flight', () => {
     });
     const cancelLogin = vi.spyOn(adapter, 'cancelLogin').mockImplementation(() => {});
 
-    const firstBrowser = adapter.triggerLogin({ mode: 'browser' });
-    const duplicateBrowser = adapter.triggerLogin({ mode: 'browser' });
+    const firstProgress = vi.fn();
+    const duplicateProgress = vi.fn();
+    const firstBrowser = adapter.triggerLogin({ mode: 'browser', onProgress: firstProgress });
+    const duplicateBrowser = adapter.triggerLogin({ mode: 'browser', onProgress: duplicateProgress });
+    browserOptions?.onProgress?.('stdout:Authorize at https://example.com/device');
     const deviceCode = adapter.triggerLogin({ mode: 'device-code' });
 
     expect(duplicateBrowser).toBe(firstBrowser);
+    expect(firstProgress).toHaveBeenCalledOnce();
+    expect(duplicateProgress).toHaveBeenCalledOnce();
     expect(runTriggerLogin).toHaveBeenCalledTimes(1);
     expect(cancelLogin).toHaveBeenCalledOnce();
+    expect(
+      (adapter as unknown as { pendingLogin: { mode: AgentLoginMode; promise: Promise<AuthState> } })
+        .pendingLogin,
+    ).toMatchObject({ mode: 'device-code', promise: deviceCode });
 
     finishBrowser({ authenticated: false, errorReason: 'login_cancelled' });
     await expect(firstBrowser).resolves.toMatchObject({ errorReason: 'login_cancelled' });
@@ -51,6 +62,43 @@ describe('DesktopCodexAuthAdapter login single-flight', () => {
       authenticated: true,
       authSource: 'oauth',
     });
-    expect(runTriggerLogin).toHaveBeenNthCalledWith(2, { mode: 'device-code' });
+    expect(runTriggerLogin).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      mode: 'device-code',
+      onProgress: expect.any(Function),
+    }));
+  });
+
+  it('lets a later logout-style cancellation cancel a queued mode switch before it starts', async () => {
+    const { DesktopCodexAuthAdapter } = await import('../auth-adapters.js');
+    const adapter = Object.create(DesktopCodexAuthAdapter.prototype) as InstanceType<
+      typeof DesktopCodexAuthAdapter
+    >;
+    let finishBrowser!: (state: AuthState) => void;
+    const browserRun = new Promise<AuthState>((resolve) => {
+      finishBrowser = resolve;
+    });
+    const runTriggerLogin = vi.fn((opts?: AuthLoginOptions): Promise<AuthState> =>
+      (opts?.mode ?? 'browser') === 'browser'
+        ? browserRun
+        : Promise.resolve({ authenticated: true, authSource: 'oauth' }),
+    );
+    Object.defineProperty(adapter, 'runTriggerLogin', {
+      configurable: true,
+      value: runTriggerLogin,
+    });
+    Object.defineProperty(adapter, 'loginCancellationOpen', {
+      configurable: true,
+      writable: true,
+      value: true,
+    });
+
+    const browser = adapter.triggerLogin({ mode: 'browser' });
+    const deviceCode = adapter.triggerLogin({ mode: 'device-code' });
+    adapter.cancelLogin();
+    finishBrowser({ authenticated: false, errorReason: 'login_cancelled' });
+
+    await expect(browser).resolves.toMatchObject({ errorReason: 'login_cancelled' });
+    await expect(deviceCode).resolves.toMatchObject({ errorReason: 'login_cancelled' });
+    expect(runTriggerLogin).toHaveBeenCalledTimes(1);
   });
 });

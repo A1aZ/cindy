@@ -30,6 +30,7 @@ import {
 } from '@/lib/customProviders';
 import { uniqueCustomProviderId } from '@/lib/customProviderId';
 import {
+  providerConnectionTestRequestSignature,
   providerModelFetchRequestSignature,
   stripCredentialHeaders,
   type CustomProviderAuthMode,
@@ -430,6 +431,7 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
   const patch = useCallback(
     (agent: AgentKind, fn: (f: RuntimeFields) => RuntimeFields) => {
       setRtSynced((prev) => ({ ...prev, [agent]: fn(prev[agent]) }));
+      setTest((prev) => ({ ...prev, [agent]: IDLE_TEST }));
     },
     [setRtSynced],
   );
@@ -464,6 +466,7 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
       if (n) headers[n] = h.value.trim();
     }
     const requestHeaders = authMode === 'none' ? stripCredentialHeaders(headers) : headers;
+    const requestSig = providerConnectionTestRequestSignature(rf, authMode);
     setTest((prev) => ({ ...prev, [agent]: { status: 'testing' } }));
     try {
       const result = await window.electronAPI.maker.testProviderConnection({
@@ -478,6 +481,10 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
           ...(Object.keys(requestHeaders).length > 0 ? { headers: requestHeaders } : {}),
         },
       });
+      if (
+        providerConnectionTestRequestSignature(rtRef.current[agent], authModeRef.current)
+        !== requestSig
+      ) return;
       setTest((prev) => ({
         ...prev,
         [agent]: result.ok
@@ -485,6 +492,10 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
           : { status: 'fail', code: result.code ?? 'UNKNOWN' },
       }));
     } catch (e) {
+      if (
+        providerConnectionTestRequestSignature(rtRef.current[agent], authModeRef.current)
+        !== requestSig
+      ) return;
       const ipc = extractIpcError(e);
       setTest((prev) => ({ ...prev, [agent]: { status: 'fail', code: 'UNKNOWN' } }));
       if (ipc?.message) toast.error(ipc.message);
@@ -862,7 +873,10 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
                 <button
                   key={m}
                   type="button"
-                  onClick={() => setAuthMode(m)}
+                  onClick={() => {
+                    setAuthMode(m);
+                    setTest({ 'claude-code': IDLE_TEST, codex: IDLE_TEST });
+                  }}
                   className={cn(
                     'rounded-full border px-3 py-1.5 text-12 font-medium transition-colors',
                     authMode === m

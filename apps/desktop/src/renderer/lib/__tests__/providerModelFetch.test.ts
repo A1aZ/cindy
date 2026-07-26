@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { providerModelFetchRequestSignature } from '../providerModelFetch';
+import {
+  providerConnectionTestRequestSignature,
+  providerModelFetchRequestSignature,
+} from '../providerModelFetch';
 
 const fields = {
   baseUrl: ' https://api.example/v1 ',
@@ -54,5 +57,30 @@ describe('providerModelFetchRequestSignature', () => {
     expect(providerModelFetchRequestSignature(fields, 'none')).not.toBe(
       providerModelFetchRequestSignature(changedEffectiveHeader, 'none'),
     );
+  });
+});
+
+describe('providerConnectionTestRequestSignature', () => {
+  const connectionFields = {
+    ...fields,
+    wireProtocol: 'openai-responses',
+    models: [{ id: ' model-a ' }, { id: 'model-b' }],
+  };
+
+  it('invalidates a probe when request path, protocol, model, or auth changes', () => {
+    const original = providerConnectionTestRequestSignature(connectionFields, 'apiKey');
+    expect(providerConnectionTestRequestSignature(
+      { ...connectionFields, requestPath: '/chat/completions' },
+      'apiKey',
+    )).not.toBe(original);
+    expect(providerConnectionTestRequestSignature(
+      { ...connectionFields, wireProtocol: 'openai-chat' },
+      'apiKey',
+    )).not.toBe(original);
+    expect(providerConnectionTestRequestSignature(
+      { ...connectionFields, models: [{ id: 'model-c' }] },
+      'apiKey',
+    )).not.toBe(original);
+    expect(providerConnectionTestRequestSignature(connectionFields, 'none')).not.toBe(original);
   });
 });

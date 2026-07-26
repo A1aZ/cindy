@@ -521,10 +521,21 @@ export class DesktopClaudeAuthAdapter implements AuthAdapter {
 // ═════════════════════════════════════════════════════════════════════════════
 
 /** Codex AuthAdapter —— OAuth 子进程登录 + auth.json 读状态; getAuthEnv 仅注入 CODEX_HOME。 */
+type PendingCodexLogin = {
+  mode: AgentLoginMode;
+  promise: Promise<AuthState>;
+  progressListeners: Set<NonNullable<AuthLoginOptions['onProgress']>>;
+  progressHistory: string[];
+  progressHistoryChars: number;
+  cancelled: boolean;
+};
+
+const MAX_COALESCED_LOGIN_PROGRESS_CHARS = 64 * 1024;
+
 export class DesktopCodexAuthAdapter implements AuthAdapter {
   private currentLoginProc: ChildProcess | null = null;
   /** 同模式重复点击共用流程；切换登录模式时先取消旧流程再串行启动新流程。 */
-  private pendingLogin: { mode: AgentLoginMode; promise: Promise<AuthState> } | null = null;
+  private pendingLogin: PendingCodexLogin | null = null;
   private loginAborted = false;
   /** 只在 CLI 尚未成功退出时接受取消；进入凭证 finalize 后成功线性化，迟到取消不再翻转结果。 */
   private loginCancellationOpen = false;
@@ -975,18 +986,73 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
   triggerLogin(opts?: AuthLoginOptions): Promise<AuthState> {
     const mode = opts?.mode ?? 'browser';
     if (this.pendingLogin) {
-      if (this.pendingLogin.mode === mode) return this.pendingLogin.promise;
+      if (this.pendingLogin.mode === mode) {
+        if (opts?.onProgress && !this.pendingLogin.progressListeners.has(opts.onProgress)) {
+          this.pendingLogin.progressListeners.add(opts.onProgress);
+          for (const message of this.pendingLogin.progressHistory) {
+            try {
+              opts.onProgress(message);
+            } catch {
+              /* 一个 IPC listener 失败不能阻断其它窗口或登录流程。 */
+            }
+          }
+        }
+        return this.pendingLogin.promise;
+      }
       const previous = this.pendingLogin.promise;
       this.cancelLogin();
-      return previous.catch(() => undefined).then(() => this.triggerLogin(opts));
+      return this.startTrackedLogin(opts, previous);
     }
-    const run = this.runTriggerLogin(opts).finally(() => {
-      if (this.pendingLogin?.promise === run) {
-        this.pendingLogin = null;
-        this.loginCancellationOpen = false;
+    return this.startTrackedLogin(opts);
+  }
+
+  private startTrackedLogin(
+    opts?: AuthLoginOptions,
+    waitFor?: Promise<AuthState>,
+  ): Promise<AuthState> {
+    const mode = opts?.mode ?? 'browser';
+    const operation: PendingCodexLogin = {
+      mode,
+      promise: null as unknown as Promise<AuthState>,
+      progressListeners: new Set(opts?.onProgress ? [opts.onProgress] : []),
+      progressHistory: [],
+      progressHistoryChars: 0,
+      cancelled: false,
+    };
+    const emitProgress = (message: string): void => {
+      operation.progressHistory.push(message);
+      operation.progressHistoryChars += message.length;
+      while (
+        operation.progressHistoryChars > MAX_COALESCED_LOGIN_PROGRESS_CHARS
+        && operation.progressHistory.length > 1
+      ) {
+        operation.progressHistoryChars -= operation.progressHistory.shift()?.length ?? 0;
       }
+      for (const listener of operation.progressListeners) {
+        try {
+          listener(message);
+        } catch {
+          /* 一个 IPC listener 失败不能阻断其它窗口或登录流程。 */
+        }
+      }
+    };
+    let run!: Promise<AuthState>;
+    const start = (): Promise<AuthState> => {
+      if (operation.cancelled) {
+        return Promise.resolve({ authenticated: false, errorReason: 'login_cancelled' });
+      }
+      return this.runTriggerLogin({ ...opts, mode, onProgress: emitProgress });
+    };
+    const execution = waitFor
+      ? waitFor.catch(() => undefined).then(start)
+      : start();
+    run = execution.finally(() => {
+      if (this.pendingLogin?.promise !== run) return;
+      this.pendingLogin = null;
+      this.loginCancellationOpen = false;
     });
-    this.pendingLogin = { mode, promise: run };
+    operation.promise = run;
+    this.pendingLogin = operation;
     return run;
   }
 
@@ -1151,7 +1217,9 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
   /** Codex OAuth 子进程 abort —— 用户在浏览器授权流半路反悔时调。 */
   cancelLogin(): void {
     // 设置 abort 标志覆盖 assets prepare 阶段；CLI 成功 exit 后取消窗口已关闭。
-    if (!this.pendingLogin || !this.loginCancellationOpen) return;
+    if (!this.pendingLogin) return;
+    this.pendingLogin.cancelled = true;
+    if (!this.loginCancellationOpen) return;
     this.loginAborted = true;
     if (this.currentLoginProc) terminateCodexLoginProcess(this.currentLoginProc);
   }

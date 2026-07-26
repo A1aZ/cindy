@@ -217,6 +217,24 @@ describe('regionHint 归一化与 locale 排序', () => {
     );
   });
 
+  it('智谱与 Z.AI Coding Plan 使用同一厂商分组并按 locale 排区域顺序', () => {
+    const presets = sanitizePresets([
+      mk('zai-coding-plan-global', 'global'),
+      mk('zhipu-coding-plan-cn', 'cn'),
+      mk('volcengine-coding-plan'),
+    ]);
+    expect(sortPresetsForLocale(presets, 'zh-CN').map((p) => p.id)).toEqual([
+      'volcengine-coding-plan',
+      'zhipu-coding-plan-cn',
+      'zai-coding-plan-global',
+    ]);
+    expect(sortPresetsForLocale(presets, 'en').map((p) => p.id)).toEqual([
+      'volcengine-coding-plan',
+      'zai-coding-plan-global',
+      'zhipu-coding-plan-cn',
+    ]);
+  });
+
   it('内置目录的双端点厂商 cn/global 各有一条', () => {
     const presets = BUNDLED_CATALOG.presets ?? [];
     for (const vendor of ['zhipu-glm', 'moonshot-kimi', 'minimax']) {
@@ -377,6 +395,7 @@ describe('官方渠道预设契约', () => {
     expect(liteLlm?.runtimes.codex).toEqual(expect.objectContaining({
       baseUrl: 'http://127.0.0.1:4000/v1',
       baseUrlEditable: true,
+      models: [],
     }));
   });
 

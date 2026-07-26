@@ -18,6 +18,34 @@ export function isProviderRequestPath(value: unknown): value is string {
 }
 
 /**
+ * 无鉴权本机代理的 URL 边界。只接受真正的 loopback 主机，避免把 `auth:none`
+ * 配置改成远端地址后让应用静默向第三方发送提示词。
+ */
+export function isLoopbackProviderUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0) return false;
+  try {
+    const url = new URL(value);
+    if (
+      (url.protocol !== 'http:' && url.protocol !== 'https:')
+      || url.username
+      || url.password
+    ) {
+      return false;
+    }
+    const hostname = url.hostname.toLowerCase();
+    if (hostname === 'localhost' || hostname === '[::1]') return true;
+    const octets = hostname.split('.');
+    return (
+      octets.length === 4
+      && octets[0] === '127'
+      && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 把已验证的精确推理路径追加到 base URL，同时保留 base query。
  * requestPath 自带的 query 追加在 base query 后，fragment 一律不进入请求。
  */

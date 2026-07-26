@@ -30,7 +30,11 @@ import { useProviderOAuthDeviceCode } from '@/hooks/useProviderOAuthDeviceCode';
 import { hasProviderLogo, ProviderLogoMark } from '@/components/icons/ProviderLogoMark';
 import { OAuthDeviceCodeCard } from './OAuthDeviceCodeCard';
 
-import { presetDisplayName, sortPresetsForLocale } from '@cindy/model-providers';
+import {
+  isLoopbackProviderUrl,
+  presetDisplayName,
+  sortPresetsForLocale,
+} from '@cindy/model-providers';
 import type {
   AgentKind,
   CustomProviderConfig,
@@ -635,6 +639,7 @@ export function AddProviderWizard({
     sel?.kind === 'preset'
     && presetAgents.every((agent) => {
       const value = runtimeBaseUrls[agent]?.trim() || sel.preset.runtimes[agent]?.baseUrl || '';
+      if (sel.preset.authMethod === 'none') return isLoopbackProviderUrl(value);
       try {
         const url = new URL(value);
         return url.protocol === 'http:' || url.protocol === 'https:';

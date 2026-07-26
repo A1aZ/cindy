@@ -22,6 +22,7 @@ import type {
 } from '@cindy/model-providers';
 import {
   findReservedOAuthExtraParam,
+  isLoopbackProviderUrl,
   isProviderRequestPath,
 } from '@cindy/model-providers';
 
@@ -262,6 +263,20 @@ export function validateCustomProviderConfig(config: unknown): ValidationResult 
     if (!VALID_AGENTS.includes(k as AgentKind)) return invalid(`invalid runtime '${k}'`);
     const r = validateRuntime(k, rts[k]);
     if (!r.ok) return r;
+  }
+  if ((c.auth as { method?: unknown } | undefined)?.method === 'none') {
+    for (const k of keys) {
+      const runtime = rts[k] as Record<string, unknown>;
+      if (!isLoopbackProviderUrl(runtime.baseUrl)) {
+        return invalid(`runtime '${k}' baseUrl must be loopback when auth method is none`);
+      }
+      if (
+        runtime.modelsUrl !== undefined
+        && !isLoopbackProviderUrl(runtime.modelsUrl)
+      ) {
+        return invalid(`runtime '${k}' modelsUrl must be loopback when auth method is none`);
+      }
+    }
   }
   return { ok: true };
 }

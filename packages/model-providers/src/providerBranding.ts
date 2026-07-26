@@ -39,6 +39,19 @@ export const PROVIDER_LOGO_PATHS = {
 
 export type ProviderLogoKind = keyof typeof PROVIDER_LOGO_PATHS | 'anthropic' | 'openai' | 'xd';
 
+/** Device-link 等运行时边界不能信任静态 union；未知未来值应安全回退。 */
+export function isProviderLogoKind(value: unknown): value is ProviderLogoKind {
+  return (
+    value === 'anthropic'
+    || value === 'openai'
+    || value === 'xd'
+    || (
+      typeof value === 'string'
+      && Object.prototype.hasOwnProperty.call(PROVIDER_LOGO_PATHS, value)
+    )
+  );
+}
+
 export type ProviderLogoRouting = Readonly<
   Record<string, { readonly upstream: string } | undefined>
 >;
@@ -94,10 +107,11 @@ const PROVIDER_LOGO_KIND_BY_HOST: readonly (readonly [string, ProviderLogoKind])
   ['volces.com', 'volcengine'],
   ['cloud.tencent.com', 'tencentcloud'],
   ['opencode.ai', 'opencode'],
-  ['vercel.sh', 'vercel'],
+  ['ai-gateway.vercel.sh', 'vercel'],
 ];
 
 function hostMatches(hostname: string, brandHost: string): boolean {
+  if (brandHost === 'ai-gateway.vercel.sh') return hostname === brandHost;
   return hostname === brandHost || hostname.endsWith(`.${brandHost}`);
 }
 

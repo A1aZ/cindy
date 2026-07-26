@@ -148,6 +148,21 @@ describe('projectInvokeResultForTunnel — maker:provider:list 投影', () => {
     expect(JSON.stringify(providers[0])).not.toContain('secret');
   });
 
+  it('新 logo kind 不发给独立更新的旧版 mobile，避免旧路径表索引 undefined', () => {
+    const { providers } = project({
+      providers: [{
+        ...xdProviderWithFullRouting(),
+        id: 'my-renamed-vercel-provider',
+        routing: {
+          codex: { upstream: 'https://ai-gateway.vercel.sh/v1' },
+        },
+      }],
+    });
+
+    expect(providers[0]).not.toHaveProperty('logoKind');
+    expect(providers[0].routing).toEqual({ codex: {} });
+  });
+
   it('混合品牌 routing 不产生 logoKind,也不透传伪造值', () => {
     const { providers } = project({
       providers: [{

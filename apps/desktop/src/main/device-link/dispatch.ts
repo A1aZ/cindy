@@ -42,6 +42,7 @@ import {
 import type { MobileVoiceDictionaryLearningRequest } from '@cindy/maker-shared/device-link-contract';
 import {
   resolveProviderLogoKind,
+  type ProviderLogoKind,
   type ProviderLogoRouting,
 } from '@cindy/model-providers/branding';
 import { app } from 'electron';
@@ -64,6 +65,24 @@ import {
 } from './remote-workdir-guard';
 
 const log = createLogger('device-link-dispatch');
+
+/**
+ * 老版本 mobile 只认识 #527 之前已发布的 logo kind。新 mark 可由同版本客户端按
+ * provider id 自行解析，但不能作为新 wire enum 发给独立更新的旧控制端。
+ */
+const LEGACY_DEVICE_LINK_LOGO_KINDS: ReadonlySet<ProviderLogoKind> = new Set([
+  'anthropic',
+  'openai',
+  'xd',
+  'xai',
+  'openrouter',
+  'deepseek',
+  'zhipu',
+  'zai',
+  'moonshot',
+  'minimax',
+  'alibaba',
+]);
 
 /** 控制端名展示上限,挡掉远端塞超长字符串撑爆被控端状态条 */
 const MAX_CONTROLLER_NAME_LEN = 64;
@@ -232,7 +251,9 @@ function projectInvokeResultForTunnel(channel: string, result: unknown): unknown
       : null;
     // Never trust/pass through an arbitrary pre-existing value: only shared resolver output crosses.
     delete rest.logoKind;
-    if (logoKind) rest.logoKind = logoKind;
+    if (logoKind && LEGACY_DEVICE_LINK_LOGO_KINDS.has(logoKind)) {
+      rest.logoKind = logoKind;
+    }
     rest.routing = projectRoutingForDisplay(p.routing);
     return rest;
   });

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { appendProviderRequestPath, isProviderRequestPath } from '../provider-url.js';
+import {
+  appendProviderRequestPath,
+  isLoopbackProviderUrl,
+  isProviderRequestPath,
+} from '../provider-url.js';
 
 describe('isProviderRequestPath', () => {
   it('accepts an encoded same-origin path with query parameters', () => {
@@ -17,6 +21,27 @@ describe('isProviderRequestPath', () => {
     'responses',
   ])('rejects an unsafe or unescaped request path: %j', (requestPath) => {
     expect(isProviderRequestPath(requestPath)).toBe(false);
+  });
+});
+
+describe('isLoopbackProviderUrl', () => {
+  it.each([
+    'http://localhost:4000/v1',
+    'https://127.0.0.1/v1',
+    'http://127.42.0.7:4000/v1',
+    'http://[::1]:4000/v1',
+  ])('accepts a loopback provider URL: %s', (url) => {
+    expect(isLoopbackProviderUrl(url)).toBe(true);
+  });
+
+  it.each([
+    'https://litellm.example/v1',
+    'http://localhost.evil.example/v1',
+    'http://128.0.0.1/v1',
+    'http://user:pass@localhost:4000/v1',
+    'ftp://127.0.0.1/v1',
+  ])('rejects a non-loopback or unsafe provider URL: %s', (url) => {
+    expect(isLoopbackProviderUrl(url)).toBe(false);
   });
 });
 

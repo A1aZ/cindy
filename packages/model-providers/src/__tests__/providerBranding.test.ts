@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { BUNDLED_CATALOG } from '../catalog.js';
 import {
   hasProviderLogo,
+  isProviderLogoKind,
   PROVIDER_LOGO_PATHS,
   resolveProviderLogoKind,
 } from '../providerBranding.js';
@@ -27,6 +28,24 @@ describe('provider branding', () => {
   it('uses a dedicated xAI mark', () => {
     expect(resolveProviderLogoKind('xai')).toBe('xai');
     expect(PROVIDER_LOGO_PATHS.xai).not.toBe(PROVIDER_LOGO_PATHS.openrouter);
+  });
+
+  it('only infers Vercel branding from the exact AI Gateway host', () => {
+    expect(resolveProviderLogoKind('renamed', {
+      codex: { upstream: 'https://ai-gateway.vercel.sh/v1' },
+    })).toBe('vercel');
+    expect(resolveProviderLogoKind('renamed', {
+      codex: { upstream: 'https://my-openrouter-proxy.vercel.sh/v1' },
+    })).toBeNull();
+    expect(resolveProviderLogoKind('renamed', {
+      codex: { upstream: 'https://tenant.ai-gateway.vercel.sh/v1' },
+    })).toBeNull();
+  });
+
+  it('guards runtime logo values before indexing shared paths', () => {
+    expect(isProviderLogoKind('vercel')).toBe(true);
+    expect(isProviderLogoKind('future-brand')).toBe(false);
+    expect(isProviderLogoKind(null)).toBe(false);
   });
 
   it('keeps preset branding after a user-facing provider id changes', () => {

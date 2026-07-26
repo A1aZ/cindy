@@ -616,12 +616,7 @@
         "codex": {
           "baseUrl": "http://127.0.0.1:4000/v1",
           "baseUrlEditable": true,
-          "models": [
-            {
-              "id": "gpt-3.5-turbo",
-              "name": "LiteLLM configured model"
-            }
-          ]
+          "models": []
         }
       }
     },

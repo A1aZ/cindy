@@ -35,7 +35,11 @@ import {
   type CustomProviderAuthMode,
 } from '@/lib/providerModelFetch';
 
-import { isProviderRequestPath, sortPresetsForLocale } from '@cindy/model-providers';
+import {
+  isLoopbackProviderUrl,
+  isProviderRequestPath,
+  sortPresetsForLocale,
+} from '@cindy/model-providers';
 import type {
   AgentKind,
   CustomProviderConfig,
@@ -638,6 +642,17 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
           return;
         }
       } catch {
+        setActiveTab(a);
+        toast.error(t('settings.providers.custom.errors.baseUrlInvalid'));
+        return;
+      }
+      if (
+        authMode === 'none'
+        && (
+          !isLoopbackProviderUrl(rf.baseUrl.trim())
+          || (rf.modelsUrl.trim() && !isLoopbackProviderUrl(rf.modelsUrl.trim()))
+        )
+      ) {
         setActiveTab(a);
         toast.error(t('settings.providers.custom.errors.baseUrlInvalid'));
         return;

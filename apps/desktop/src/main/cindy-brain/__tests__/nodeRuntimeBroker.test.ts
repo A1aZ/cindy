@@ -520,12 +520,115 @@ describe('nodeRuntimeBroker · 意外死亡诊断(2026-07-26)', () => {
     child.stderr.write('compiling scene 1...\n');
     await vi.advanceTimersByTimeAsync(6_000);
     child.emit('exit', 1, null);
+    await vi.advanceTimersByTimeAsync(20);
 
     const result = await pending;
     expect(result).toMatchObject({ ok: false, errorCode: 'PROCESS_EXITED' });
     const message = (result as { message?: string }).message ?? '';
     expect(message).toContain('code=1');
     expect(message).not.toContain('compiling scene 1');
+  });
+
+  it('exit 前的 drain 窗口:stderr 在 exit 后到达仍可截获', async () => {
+    vi.useFakeTimers();
+    const ghost = fakeGhost();
+    const child = new FakeNodeProcess();
+    const broker = new GhostNodeRuntimeBroker({
+      getGhost: () => ghost,
+      spawnProcess: () => child as unknown as NodeWorkerProcess,
+    });
+
+    const pending = broker.handleRequest('node-ghost', rpcRequest('slow'));
+    await vi.advanceTimersByTimeAsync(10);
+    child.emit('exit', 1, null);
+    // stderr 晚于 exit 到达(管道中的最后一段)
+    child.stderr.write('Error: EACCES permission denied\n');
+    await vi.advanceTimersByTimeAsync(20);
+
+    const result = await pending;
+    const message = (result as { message?: string }).message ?? '';
+    expect(message).toContain('EACCES permission denied');
+  });
+
+  it('含空格的 Windows 路径被完整收敛为文件名', async () => {
+    const ghost = fakeGhost();
+    const child = new FakeNodeProcess();
+    const warn = vi.fn();
+    const broker = new GhostNodeRuntimeBroker({
+      getGhost: () => ghost,
+      spawnProcess: () => child as unknown as NodeWorkerProcess,
+      log: { info: vi.fn(), warn },
+    });
+
+    const pending = broker.handleRequest('node-ghost', rpcRequest('slow'));
+    await vi.waitFor(() => expect(child.received).toHaveLength(1));
+    child.stderr.write(
+      'Error: Cannot find module\n' +
+        '    at C:\\Users\\Jane Doe\\AppData\\Roaming\\cindy\\plugins\\demo\\worker.cjs:12\n',
+    );
+    await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+    child.emit('exit', 1, null);
+
+    const result = await pending;
+    const message = (result as { message?: string }).message ?? '';
+    expect(message).toContain('Cannot find module');
+    expect(message).not.toContain('Jane Doe');
+    expect(message).not.toContain('AppData');
+  });
+
+  it('陈旧段不被后续良性 chunk 携带进回看窗口', async () => {
+    vi.useFakeTimers();
+    const ghost = fakeGhost();
+    const child = new FakeNodeProcess();
+    const broker = new GhostNodeRuntimeBroker({
+      getGhost: () => ghost,
+      spawnProcess: () => child as unknown as NodeWorkerProcess,
+    });
+
+    const pending = broker.handleRequest('node-ghost', rpcRequest('slow'));
+    await vi.advanceTimersByTimeAsync(10);
+    // 10 秒前写入一条错误日志
+    child.stderr.write('Error: old failure from initialization\n');
+    await vi.advanceTimersByTimeAsync(10_000);
+    // 紧邻退出前写入一条良性日志
+    child.stderr.write('heartbeat ok\n');
+    await vi.advanceTimersByTimeAsync(100);
+    child.emit('exit', 1, null);
+    await vi.advanceTimersByTimeAsync(20);
+
+    const result = await pending;
+    const message = (result as { message?: string }).message ?? '';
+    // 只有"heartbeat ok"在窗口内,选取的诊断行不应含旧错误
+    expect(message).not.toContain('old failure from initialization');
+  });
+
+  it('凭证值出现在 stderr 诊断行中时被脱敏', async () => {
+    const ghost = fakeGhost();
+    // secretBindings 绑定到所有方法(包括 slow)
+    ghost.manifest.node!.secretBindings = [
+      { key: 'api_key', label: 'API Key', methods: ['slow'] },
+    ];
+    const child = new FakeNodeProcess();
+    const readSecret = vi.fn(() => 'sk-secret-token-12345');
+    const warn = vi.fn();
+    const broker = new GhostNodeRuntimeBroker({
+      getGhost: () => ghost,
+      readSecret,
+      spawnProcess: () => child as unknown as NodeWorkerProcess,
+      log: { info: vi.fn(), warn },
+    });
+
+    // 发一个带凭证的请求并保持 pending(不回复)
+    const pending = broker.handleRequest('node-ghost', rpcRequest('slow'));
+    await vi.waitFor(() => expect(child.received).toHaveLength(1));
+    child.stderr.write('Error: auth failed with token sk-secret-token-12345\n');
+    await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+    child.emit('exit', 1, null);
+
+    const result = await pending;
+    const message = (result as { message?: string }).message ?? '';
+    expect(message).toContain('[REDACTED]');
+    expect(message).not.toContain('sk-secret-token-12345');
   });
 });
 

@@ -152,10 +152,10 @@ interface WorkerEntry {
   startupPhase: boolean;
   /** 启动期 stderr 头部截存,失败时提取一行诊断拼进错误消息(如杀软拦截的 EPERM)。 */
   startupStderr: string;
-  /** stderr 尾部滚动截存,进程意外死亡时提取一行诊断拼进错误消息(如加载期抛错)。 */
-  recentStderr: string;
-  /** 尾部截存最后一次进账的时刻(this.now() 口径);0 = 从未收到 stderr。 */
-  recentStderrAt: number;
+  /** stderr 尾部按段带时间戳截存,退出时只取回看窗口内的段拼接诊断。 */
+  stderrSegments: Array<{ text: string; at: number }>;
+  /** stderr 也可能把多字节字符切在两个 Buffer 之间,与 stdout 同理需流式解码。 */
+  stderrDecoder: StringDecoder;
   /** stdout 的 UTF-8 字节可能把一个汉字切在两个 chunk 之间，必须流式解码。 */
   stdoutDecoder: StringDecoder;
   stdoutBuffer: string;
@@ -167,6 +167,8 @@ interface WorkerEntry {
   hardKillTimer: NodeJS.Timeout | null;
   mcpInitPromise: Promise<void> | null;
   stopping: boolean;
+  /** 曾发给本 worker 的凭证值(用于退出诊断脱敏);set 保证 O(1) 去重。 */
+  exposedSecretValues: Set<string>;
 }
 
 class NodeRpcError extends Error {
@@ -208,7 +210,9 @@ function sanitizePathsInHint(hint: string): string {
   const basename = (p: string) => p.split(/[/\\]/).pop() ?? p;
   return hint
     .replace(/(['"])((?:[A-Z]:[/\\]|\/)[^'"]+)\1/g, (_, q, p) => `${q}${basename(p)}${q}`)
-    .replace(/[A-Z]:[/\\][^\s'")\]]*/g, basename)
+    // Windows 路径可含空格(如 C:\Users\Jane Doe\AppData\...),所以不把 \s 加
+    // 入排除集;用 newline、引号、括号、方括号做终止符。
+    .replace(/[A-Z]:[/\\][^'")\]\n]*/g, basename)
     .replace(/\/(?:[^\s/'")\]]+\/)+[^\s'")\]]*/g, basename);
 }
 
@@ -548,6 +552,11 @@ export class GhostNodeRuntimeBroker {
         await this.ensureMcpInitialized(entry);
         if (entry.pending.size >= MAX_PENDING_REQUESTS) {
           return errorResult('RATE_LIMITED', '这个插件同时等待的 Node 请求太多');
+        }
+      }
+      if (hostSecrets) {
+        for (const v of Object.values(hostSecrets)) {
+          if (v.length >= 6) entry.exposedSecretValues.add(v);
         }
       }
       const pendingResult = this.sendRpc(
@@ -950,8 +959,8 @@ export class GhostNodeRuntimeBroker {
       child,
       startupPhase: true,
       startupStderr: '',
-      recentStderr: '',
-      recentStderrAt: 0,
+      stderrSegments: [],
+      stderrDecoder: new StringDecoder('utf8'),
       stdoutDecoder: new StringDecoder('utf8'),
       stdoutBuffer: '',
       nextId: 1,
@@ -961,6 +970,7 @@ export class GhostNodeRuntimeBroker {
       hardKillTimer: null,
       mcpInitPromise: null,
       stopping: false,
+      exposedSecretValues: new Set(),
     };
     this.workers.set(key, entry);
     if (this.destroyed || this.stoppedGhosts.has(ghost.manifest.id)) {
@@ -972,13 +982,18 @@ export class GhostNodeRuntimeBroker {
     child.onControl?.((message) => this.handleWorkerControl(entry, message));
     child.stdout.on('data', (chunk) => this.handleStdout(entry, chunk));
     child.stderr.on('data', (chunk) => {
+      const decoded = entry.stderrDecoder.write(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
       if (entry.startupPhase && entry.startupStderr.length < STARTUP_STDERR_CAP) {
-        entry.startupStderr = (entry.startupStderr + String(chunk)).slice(0, STARTUP_STDERR_CAP);
+        entry.startupStderr = (entry.startupStderr + decoded).slice(0, STARTUP_STDERR_CAP);
       }
-      // 启动诊断在最前面、死因诊断在最后面,所以两份截存方向相反,不能共用。
-      entry.recentStderr = (entry.recentStderr + String(chunk)).slice(-EXIT_STDERR_CAP);
-      entry.recentStderrAt = this.now();
-      const text = String(chunk).trim().slice(0, 4_096);
+      // 按段带时间戳截存,退出时只取回看窗口内的段,不让老日志被新 chunk 携带。
+      entry.stderrSegments.push({ text: decoded, at: this.now() });
+      // 总量控制:丢弃最老的段直到总字节 <= EXIT_STDERR_CAP。
+      let total = entry.stderrSegments.reduce((sum, s) => sum + s.text.length, 0);
+      while (total > EXIT_STDERR_CAP && entry.stderrSegments.length > 1) {
+        total -= entry.stderrSegments.shift()!.text.length;
+      }
+      const text = decoded.trim().slice(0, 4_096);
       if (text) this.deps.log?.warn('ghost node stderr', { ghostId: ghost.manifest.id, text });
       // stderr 是手册钦定的日志口——构建刷日志就是活着的证据,给续命请求重置沉默窗口。
       this.renewPendingOnActivity(entry);
@@ -1278,6 +1293,19 @@ export class GhostNodeRuntimeBroker {
     this.clearIdleTimer(entry);
     // worker 意外死亡:孩子级联收掉,不留孤儿(silent——收件人已经不在了)。
     for (const child of [...entry.children.values()]) this.stopChild(entry, child, true);
+    // stderr 管道字节可能晚于 exit 事件到达:给在途 chunk 一个极短的落地窗口,
+    // 与启动期退出路径(line ~1011)保持一致。
+    const drainTimer = this.setTimer(() => this.settleExit(entry, code, signal, error), 10);
+    drainTimer.unref?.();
+  }
+
+  private settleExit(
+    entry: WorkerEntry,
+    code: number | null,
+    signal: string | null,
+    error: Error | null,
+  ): void {
+    const ghostId = entry.ghost.manifest.id;
     const exitHint = this.exitStderrHint(entry);
     const detail = `${error?.message ?? `code=${code}, signal=${signal ?? 'none'}`}${
       exitHint ? `:${exitHint}` : ''
@@ -1299,12 +1327,24 @@ export class GhostNodeRuntimeBroker {
    * 意外死亡时的 stderr 诊断行:补上 startupStderr 那条路截不到的"就绪之后才崩"
    * (插件模块加载期抛错最典型)。绝对路径已由 stderrHint 收敛为文件名。
    * 主动 stop 不参与——那是预期内的收摊,拼诊断只会把无关日志说成死因;陈旧
-   * 尾部同理,只认紧邻退出的那一段。
+   * 段同理,只认回看窗口内的段。
    */
   private exitStderrHint(entry: WorkerEntry): string | null {
-    if (entry.stopping || !entry.recentStderr) return null;
-    if (this.now() - entry.recentStderrAt > EXIT_STDERR_LOOKBACK_MS) return null;
-    return stderrHint(entry.recentStderr);
+    if (entry.stopping) return null;
+    const now = this.now();
+    const recent = entry.stderrSegments
+      .filter((seg) => now - seg.at <= EXIT_STDERR_LOOKBACK_MS)
+      .map((seg) => seg.text)
+      .join('');
+    if (!recent) return null;
+    return stderrHint(this.redactSecrets(entry, recent));
+  }
+
+  private redactSecrets(entry: WorkerEntry, text: string): string {
+    for (const secret of entry.exposedSecretValues) {
+      if (text.includes(secret)) text = text.replaceAll(secret, '[REDACTED]');
+    }
+    return text;
   }
 
   private scheduleIdleStop(entry: WorkerEntry): void {

@@ -28,11 +28,22 @@ describe('isProviderRequestPath', () => {
     '/café',
     '/foo%2',
     '/%ZZ',
+    '/./infer',
+    '/../infer',
+    '/%2e/infer',
+    '/%2E%2e/infer',
+    '/.%2e/infer',
+    '/%2e./infer',
     '/模型',
     '/v1\\messages',
     'responses',
   ])('rejects an unsafe or unescaped request path: %j', (requestPath) => {
     expect(isProviderRequestPath(requestPath)).toBe(false);
+  });
+
+  it('does not treat dot-like query values as path segments', () => {
+    expect(isProviderRequestPath('/infer?next=../other')).toBe(true);
+    expect(isProviderRequestPath('/infer?next=%2e%2e')).toBe(true);
   });
 });
 

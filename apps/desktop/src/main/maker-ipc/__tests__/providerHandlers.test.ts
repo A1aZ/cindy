@@ -511,4 +511,79 @@ describe('provider:oauth mutation ordering', () => {
     finishLogin({ ok: true });
     await expect(login).resolves.toEqual({ ok: false, reason: 'login_superseded' });
   });
+
+  it('rejects a new login until provider update and catalog refresh fully settle', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    let finishRefresh!: () => void;
+    const blockedRefresh = new Promise<void>((resolve) => {
+      finishRefresh = resolve;
+    });
+    const refreshCatalog = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockReturnValueOnce(blockedRefresh);
+    const oauthLogin = vi.fn(async () => ({ ok: true }));
+    registerProviderHandlers(harness, makeDeps({ refreshCatalog, oauthLogin }));
+    const oauthConfig: CustomProviderConfig = {
+      ...validConfig,
+      auth: {
+        method: 'oauth',
+        oauth: {
+          authorizeUrl: 'https://auth.example/authorize',
+          tokenUrl: 'https://auth.example/token',
+          clientId: 'desktop',
+          scopes: 'openid',
+        },
+      },
+    };
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, oauthConfig);
+
+    const update = harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+      ...oauthConfig,
+      name: 'Updated while refresh is blocked',
+    });
+    await vi.waitFor(() => expect(refreshCatalog).toHaveBeenCalledTimes(2));
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_OAUTH_LOGIN, oauthConfig.id),
+    ).resolves.toEqual({ ok: false, reason: 'provider_update_in_progress' });
+    expect(oauthLogin).not.toHaveBeenCalled();
+
+    finishRefresh();
+    await expect(update).resolves.toEqual({ ok: true });
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_OAUTH_LOGIN, oauthConfig.id),
+    ).resolves.toEqual({ ok: true });
+    expect(oauthLogin).toHaveBeenCalledOnce();
+  });
+
+  it('cleans mutation entries without reviving an older login generation', async () => {
+    const harness = new IpcHarness();
+    const pending: Array<{
+      isCurrent: () => boolean;
+      finish: (result: { ok: boolean }) => void;
+    }> = [];
+    const oauthLogin = vi.fn(
+      async (_providerId: string, isCurrent: () => boolean): Promise<{ ok: boolean }> =>
+        new Promise((resolve) => {
+          pending.push({ isCurrent, finish: resolve });
+        }),
+    );
+    registerProviderHandlers(harness, makeDeps({ oauthLogin }));
+
+    const first = harness.invoke(MAKER_INVOKE.PROVIDER_OAUTH_LOGIN, 'openrouter');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    await harness.invoke(MAKER_INVOKE.PROVIDER_OAUTH_CANCEL, 'openrouter');
+    expect(pending[0].isCurrent()).toBe(false);
+
+    const second = harness.invoke(MAKER_INVOKE.PROVIDER_OAUTH_LOGIN, 'openrouter');
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    expect(pending[0].isCurrent()).toBe(false);
+    expect(pending[1].isCurrent()).toBe(true);
+
+    pending[0].finish({ ok: true });
+    pending[1].finish({ ok: true });
+    await expect(first).resolves.toEqual({ ok: false, reason: 'login_superseded' });
+    await expect(second).resolves.toEqual({ ok: true });
+  });
 });

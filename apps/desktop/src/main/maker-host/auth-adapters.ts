@@ -1040,7 +1040,6 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
         }
       }
     };
-    let run!: Promise<AuthState>;
     const start = (): Promise<AuthState> => {
       if (operation.cancelled) {
         return Promise.resolve({ authenticated: false, errorReason: 'login_cancelled' });
@@ -1050,7 +1049,7 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
     const execution = waitFor
       ? waitFor.catch(() => undefined).then(start)
       : start();
-    run = execution.finally(() => {
+    const run = execution.finally(() => {
       if (this.pendingLogin?.promise !== run) return;
       this.pendingLogin = null;
       this.loginCancellationOpen = false;
@@ -1229,9 +1228,13 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
   }
 
   logout(opts?: { preserveInvalidatedReason?: boolean }): Promise<void> {
-    if (this.logoutOperation) return this.logoutOperation;
-    let run!: Promise<void>;
-    run = this.runLogout(opts).finally(() => {
+    if (this.logoutOperation) {
+      // 登录可能在第一次 logout 之后排队、等待同一个 barrier。后来的 logout 仍代表更新的
+      // 用户意图，必须把这份 queued login 标成 cancelled，不能只复用旧 Promise 后让它启动。
+      this.cancelLogin();
+      return this.logoutOperation;
+    }
+    const run = this.runLogout(opts).finally(() => {
       if (this.logoutOperation === run) this.logoutOperation = null;
     });
     this.logoutOperation = run;

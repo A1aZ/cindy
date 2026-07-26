@@ -157,6 +157,24 @@ describe('runSessionAutoTitle — 用户一个字没写(合成描述)', () => {
     ]);
   });
 
+  it('已有合成占位时,再来一条纯附件消息不改标题(与本机路径一致)', async () => {
+    const deps = makeDeps();
+
+    await runSessionAutoTitle(
+      { sessionId: 's1', text: '设计稿-v3.png', agentKind: 'codex', isUserText: false },
+      deps,
+    );
+    const result = await runSessionAutoTitle(
+      { sessionId: 's1', text: '截图2.png', agentKind: 'codex', isUserText: false },
+      deps,
+    );
+
+    // 否则每贴一张图标题就换一次文件名。
+    expect(result).toEqual({ applied: false, done: false });
+    expect(persistCalls(deps)).toEqual([['设计稿-v3.png', 'New Maker']]);
+    expect(deps.generateTitle).not.toHaveBeenCalled();
+  });
+
   it('用户文字占位写失败时保留归属,后续消息仍认得出 DB 里的合成标题', async () => {
     const persistTitle = vi
       .fn()

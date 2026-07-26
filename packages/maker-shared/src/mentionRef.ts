@@ -1,32 +1,21 @@
 /**
- * mentionRefFormat.ts
+ * mentionRef.ts —— inline `@mention` token 的**识别侧**(切词 + 解析)。
  * ---------------------------------------------------------------------------
- * Inline `@mention` 文本序列化 / 解析的单一真源。
+ * composer 里的 mention chip 发送时被序列化成纯文本 `@<path>`,path 含空格 / 引号
+ * 时用 `@"<path>"` 引号形式(见 ChatInput.serializeEditorContent →
+ * `renderer/lib/mentionRefFormat.formatMentionRef`)。
  *
- * 背景：composer 里的 mention chip 在发送时被序列化成纯文本 `@<path>`（见
- * ChatInput.serializeEditorContent），这段文本既持久化用于消息气泡回显，也作为
- * text block 发给 agent。旧实现直接拼 `@${path}`，当 path 含空格时（如
- * `参考-Smack Studio 角色编辑器.md`）下游用 `@\S+` 切词只能吃到第一个空格前的部分，
- * chip 被从空格处截断。
+ * 自动起名要在 main 侧判断"用户有没有真正打字":mention chip 是点选出来的资源,
+ * 不是散文,判定前必须把这些 token 剔除。`apps/desktop/src/shared` 按依赖方向不能
+ * 反向 import renderer,所以识别侧放在共享包里。
  *
- * 解决办法沿用 maker-core 已有的 `@"..."` 引号约定（见 claude-code/index.ts 的
- * quotedMentionText / hasMentionText）：path 含空格 / 引号时用双引号包裹并转义内部
- * 引号。这样 agent 与气泡渲染都能把整条 path 当成一个 token。
+ * **为什么只放识别侧、不把序列化一起搬过来**:序列化的转义规则(只转义 `"`、
+ * 不转义 `\`)与 maker-core 的 `quotedMentionText` 逐字节对齐,并有单测锁定 Windows
+ * 含空格路径的确切产物(`@"C:\Users\My Documents\file.md"`)。动它就是改 agent 看到
+ * 的 prompt 文本,按 `docs/dev-rules/maker-core-and-agent-behavior.md` §3 需要实测
+ * 四项数据指标,不该由一个自动起名的改动顺带承担。因此序列化留在原处不动,这里只
+ * 镜像与之对称的识别逻辑;两边的转义约定改动时必须一起改。
  */
-
-/** path 是否需要加引号才能在 `@\S+` 切词里存活（含空白或引号即需要）。 */
-export function mentionRefNeedsQuoting(path: string): boolean {
-  return /\s/.test(path) || path.includes('"');
-}
-
-/**
- * 把 mention path 格式化成跟在 `@` 后面的文本：需要时用双引号包裹并把内部 `"`
- * 转义成 `\"`。与 maker-core 的 quotedMentionText 保持一致，确保 agent 不会因
- * 格式不符而重复注入引用。
- */
-export function formatMentionRef(path: string): string {
-  return mentionRefNeedsQuoting(path) ? `"${path.replace(/"/g, '\\"')}"` : path;
-}
 
 /**
  * 切词正则：同时识别引号形式 `@"a b.md"` 与裸形式 `@a.md`，配合 String.split
@@ -40,9 +29,9 @@ export const MENTION_TOKEN_SPLIT = /(@"(?:\\.|[^"\\])*"|@\S+)/;
  * 解析一个以 `@` 开头的 mention token，取出干净的 path 引用（去引号、反转义）。
  * @returns ref 为不含 `@` 与外层引号的原始 path；quoted 标识是否来自引号形式。
  *
- * 反转义必须与 formatMentionRef 严格对称：序列化只把 `"` 转义成 `\"`，所以这里
- * 只能把 `\"` 还原成 `"`，**不能**把 `\` 当通用转义前缀。否则 Windows 含空格路径
- * （如 `C:\Users\My Documents\file.md`，会被加引号）里的反斜杠会被吞掉，得到
+ * 反转义与序列化侧严格对称：序列化只把 `"` 转义成 `\"`，所以这里只还原 `\"`,
+ * **不能**把 `\` 当通用转义前缀 —— 否则 Windows 含空格路径（如
+ * `C:\Users\My Documents\file.md`，会被加引号）里的反斜杠会被吞掉，得到
  * `C:UsersMy Documentsfile.md` 这种静默损坏的路径。
  */
 export function parseMentionToken(token: string): { ref: string; quoted: boolean } {

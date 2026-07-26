@@ -6600,10 +6600,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       try {
         shouldAutoTitle = await isSessionAutoTitleEligible(sid);
       } catch (err) {
-        log.warn('[device-link] auto-title eligibility check failed', {
+        // 这一步只是省一次无谓调度的**廉价预检**,权威资格判定在
+        // runSessionAutoTitle 内部(它自己也做重试安全的处理)。读不到时按"要起名"
+        // 放行,否则一次 DB 抖动就会让单轮对话的标题永久停在 New Maker(review P1)。
+        log.warn('[device-link] auto-title precheck failed (scheduling anyway)', {
           sessionId: sid,
           err: err instanceof Error ? err.message : String(err),
         });
+        shouldAutoTitle = true;
       }
     }
 

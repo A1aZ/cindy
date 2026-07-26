@@ -155,6 +155,13 @@ async function runUnsynchronized(
   const placeholder = normalizeAutoTitle(seedText);
   if (!placeholder) return { applied: false, done: false };
 
+  // 已经有合成占位、这次又是无用户文字的输入(又贴了一张图)→ 保留最初那个标题。
+  // 否则每贴一次附件标题就换一次文件名;desktop 本机路径也是这么处理的(补起名
+  // 只在 isUserText=true 时触发),两条路径必须一致(review P1)。
+  if (request.isUserText === false && remembered) {
+    return { applied: false, done: false };
+  }
+
   // 1) 立即占位。失败(用户抢先改名 / 写库异常)不中断后续智能起名。
   let placeholderPersisted = false;
   try {

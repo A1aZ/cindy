@@ -173,7 +173,7 @@ interface WorkerEntry {
   /** 曾发给本 worker 的凭证明文(退出诊断脱敏用;settleExit 后立即清空)。 */
   exposedSecretValues: Set<string>;
   /** exit 后 stderr drain 用:非 null 表示进程已退出、正在等待管道排空。 */
-  exitDrain: { code: number | null; signal: string | null; error: Error | null; timer: NodeJS.Timeout } | null;
+  exitDrain: { code: number | null; signal: string | null; error: Error | null; timer: NodeJS.Timeout; exitedAt: number } | null;
 }
 
 class NodeRpcError extends Error {
@@ -203,11 +203,11 @@ class WorkerStartError extends Error {
 /** 从 stderr 里挑最有诊断价值的一行(优先含 error 的行),截短拼进失败消息。 */
 function stderrHint(text: string): string | null {
   const lines = text
-    .split(/\r?\n/)
+    .split(/\r?\n|\r/)
     .map((line) => line.trim())
     .filter(Boolean);
   if (lines.length === 0) return null;
-  const line = lines.find((candidate) => /error/i.test(candidate)) ?? lines[0];
+  const line = lines.find((candidate) => /error/i.test(candidate)) ?? lines[lines.length - 1];
   return sanitizePathsInHint(line.slice(0, 240));
 }
 
@@ -847,6 +847,7 @@ export class GhostNodeRuntimeBroker {
       pending.reject(new NodeRpcError('exit', 'Node 工作进程已停止'));
     }
     entry.pending.clear();
+    entry.exposedSecretValues.clear();
     try {
       entry.child.kill('SIGTERM');
       entry.hardKillTimer = this.setTimer(() => {
@@ -995,14 +996,19 @@ export class GhostNodeRuntimeBroker {
       // 按段带时间戳截存,退出时只取回看窗口内的段,不让老日志被新 chunk 携带。
       entry.stderrSegments.push({ text: decoded, at: this.now() });
       entry.stderrTotalChars += decoded.length;
-      // 总量控制:保留尾部 EXIT_STDERR_CAP 字符。
-      while (entry.stderrTotalChars > EXIT_STDERR_CAP && entry.stderrSegments.length > 1) {
-        entry.stderrTotalChars -= entry.stderrSegments.shift()!.text.length;
-      }
-      if (entry.stderrTotalChars > EXIT_STDERR_CAP && entry.stderrSegments.length === 1) {
-        const seg = entry.stderrSegments[0];
-        const trimmed = seg.text.length - EXIT_STDERR_CAP;
-        seg.text = seg.text.slice(trimmed);
+      // 总量控制:保留尾部 EXIT_STDERR_CAP 字符——部分裁剪最老段的头部。
+      if (entry.stderrTotalChars > EXIT_STDERR_CAP) {
+        let excess = entry.stderrTotalChars - EXIT_STDERR_CAP;
+        while (excess > 0 && entry.stderrSegments.length > 0) {
+          const oldest = entry.stderrSegments[0];
+          if (excess >= oldest.text.length) {
+            entry.stderrSegments.shift();
+            excess -= oldest.text.length;
+          } else {
+            oldest.text = oldest.text.slice(excess);
+            excess = 0;
+          }
+        }
         entry.stderrTotalChars = EXIT_STDERR_CAP;
       }
       const text = decoded.trim().slice(0, 4_096);
@@ -1315,7 +1321,7 @@ export class GhostNodeRuntimeBroker {
     const settle = () => this.settleExit(entry, code, signal, error);
     const timer = this.setTimer(settle, 500);
     timer.unref?.();
-    entry.exitDrain = { code, signal, error, timer };
+    entry.exitDrain = { code, signal, error, timer, exitedAt: this.now() };
     entry.child.stderr.once?.('end', settle);
   }
 
@@ -1326,15 +1332,17 @@ export class GhostNodeRuntimeBroker {
     error: Error | null,
   ): void {
     if (!entry.exitDrain) return;
+    const exitedAt = entry.exitDrain.exitedAt;
     this.clearTimer(entry.exitDrain.timer);
     entry.exitDrain = null;
     // flush stderrDecoder 残留字节(多字节字符被切在最后一个 chunk 边界时)
     const tail = entry.stderrDecoder.end();
     if (tail) {
       entry.stderrSegments.push({ text: tail, at: this.now() });
+      entry.stderrTotalChars += tail.length;
     }
     const ghostId = entry.ghost.manifest.id;
-    const exitHint = this.exitStderrHint(entry);
+    const exitHint = this.exitStderrHint(entry, exitedAt);
     const detail = `${error?.message ?? `code=${code}, signal=${signal ?? 'none'}`}${
       exitHint ? `:${exitHint}` : ''
     }`;
@@ -1362,11 +1370,12 @@ export class GhostNodeRuntimeBroker {
    * 主动 stop 不参与——那是预期内的收摊,拼诊断只会把无关日志说成死因;陈旧
    * 段同理,只认回看窗口内的段。
    */
-  private exitStderrHint(entry: WorkerEntry): string | null {
+  private exitStderrHint(entry: WorkerEntry, exitedAt: number): string | null {
     if (entry.stopping) return null;
-    const now = this.now();
+    // 以退出时刻为锚点(而非结算时刻),避免兜底定时器延迟导致回看窗口偏移。
+    // drain 期间到达的 chunk 时间戳 >= exitedAt,自然在窗口内。
     const recent = entry.stderrSegments
-      .filter((seg) => now - seg.at <= EXIT_STDERR_LOOKBACK_MS)
+      .filter((seg) => exitedAt - seg.at <= EXIT_STDERR_LOOKBACK_MS)
       .map((seg) => seg.text)
       .join('');
     if (!recent) return null;
@@ -1374,7 +1383,9 @@ export class GhostNodeRuntimeBroker {
   }
 
   private redactSecrets(entry: WorkerEntry, text: string): string {
-    for (const secret of entry.exposedSecretValues) {
+    if (!entry.exposedSecretValues.size) return text;
+    const sorted = [...entry.exposedSecretValues].sort((a, b) => b.length - a.length);
+    for (const secret of sorted) {
       if (text.includes(secret)) text = text.replaceAll(secret, '[REDACTED]');
     }
     return text;

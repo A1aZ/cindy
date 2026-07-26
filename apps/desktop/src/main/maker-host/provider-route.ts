@@ -96,6 +96,18 @@ function withoutClientAuthHeaders(
   );
 }
 
+function normalizeLegacyClientAuthHeaders(
+  headers: Record<string, string> | undefined,
+): Record<string, string> {
+  const normalized: Record<string, string> = {};
+  const clientAuthHeaders = new Set(CLIENT_AUTH_HEADERS);
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    const lower = name.toLowerCase();
+    normalized[clientAuthHeaders.has(lower) ? lower : name] = value;
+  }
+  return normalized;
+}
+
 function hasHeader(headers: Record<string, string> | undefined, expectedName: string): boolean {
   return Object.keys(headers ?? {}).some((name) => name.toLowerCase() === expectedName);
 }
@@ -200,7 +212,7 @@ export function buildRouteDecision(
       const hasLegacyCredential = hasLegacyAuthorization || hasLegacyApiKey;
       const headerOverride = apiKey || !hasLegacyCredential
         ? withoutClientAuthHeaders(routing.headerOverride)
-        : { ...(routing.headerOverride ?? {}) };
+        : normalizeLegacyClientAuthHeaders(routing.headerOverride);
       if (apiKey) {
         if (agent === 'claude-code') {
           // cc 子进程在 oauth-spawn 下会带订阅的 `authorization: Bearer <Claude token>`——必须连它一起

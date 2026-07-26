@@ -316,7 +316,7 @@ describe('api-key-header (自定义供应商 buildRouteDecision)', () => {
         null,
       ),
     ).toEqual({
-      headerOverride: { Authorization: 'Bearer legacy', 'X-Tenant': 'tenant-a' },
+      headerOverride: { authorization: 'Bearer legacy', 'X-Tenant': 'tenant-a' },
       upstreamOverride: 'https://api.myprovider.com/v1',
       headerDelete: CODEX_ACCOUNT_HEADER_DELETE,
     });
@@ -332,7 +332,7 @@ describe('api-key-header (自定义供应商 buildRouteDecision)', () => {
       ),
     ).toEqual({
       headerOverride: {
-        'X-API-Key': 'legacy-key',
+        'x-api-key': 'legacy-key',
         authorization: 'Bearer cindy-missing-custom-provider-api-key',
       },
       upstreamOverride: 'https://api.myprovider.com/v1',
@@ -350,7 +350,7 @@ describe('api-key-header (自定义供应商 buildRouteDecision)', () => {
       ),
     ).toEqual({
       headerOverride: {
-        Authorization: 'Bearer legacy',
+        authorization: 'Bearer legacy',
         'x-api-key': 'cindy-missing-custom-provider-api-key',
       },
       upstreamOverride: 'https://api.myprovider.com/v1',
@@ -421,7 +421,7 @@ describe('api-key-header (自定义供应商 buildRouteDecision)', () => {
       }, 'codex'),
     ).toMatchObject({
       headers: {
-        Authorization: 'Bearer legacy',
+        authorization: 'Bearer legacy',
         'X-Tenant': 'tenant-a',
       },
     });

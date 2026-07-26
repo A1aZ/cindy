@@ -337,6 +337,7 @@ export function registerProviderHandlers(
   registry.handle(MAKER_INVOKE.PROVIDER_OAUTH_LOGOUT, async (_event, providerId: unknown) => {
     const id = requireProviderId(providerId);
     beginOAuthMutation(id);
+    deps.oauthCancel(id);
     await deps.oauthLogout(id);
     await afterChange();
     return { ok: true };

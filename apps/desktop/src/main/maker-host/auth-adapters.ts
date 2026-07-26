@@ -536,6 +536,8 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
   private currentLoginProc: ChildProcess | null = null;
   /** 同模式重复点击共用流程；切换登录模式时先取消旧流程再串行启动新流程。 */
   private pendingLogin: PendingCodexLogin | null = null;
+  /** logout 全流程的线性化点；其间新登录排队到凭证清理和解绑全部完成之后。 */
+  private logoutOperation: Promise<void> | null = null;
   private loginAborted = false;
   /** 只在 CLI 尚未成功退出时接受取消；进入凭证 finalize 后成功线性化，迟到取消不再翻转结果。 */
   private loginCancellationOpen = false;
@@ -1003,12 +1005,12 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
       this.cancelLogin();
       return this.startTrackedLogin(opts, previous);
     }
-    return this.startTrackedLogin(opts);
+    return this.startTrackedLogin(opts, this.logoutOperation ?? undefined);
   }
 
   private startTrackedLogin(
     opts?: AuthLoginOptions,
-    waitFor?: Promise<AuthState>,
+    waitFor?: Promise<unknown>,
   ): Promise<AuthState> {
     const mode = opts?.mode ?? 'browser';
     const operation: PendingCodexLogin = {
@@ -1224,7 +1226,17 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
     if (this.currentLoginProc) terminateCodexLoginProcess(this.currentLoginProc);
   }
 
-  async logout(opts?: { preserveInvalidatedReason?: boolean }): Promise<void> {
+  logout(opts?: { preserveInvalidatedReason?: boolean }): Promise<void> {
+    if (this.logoutOperation) return this.logoutOperation;
+    let run!: Promise<void>;
+    run = this.runLogout(opts).finally(() => {
+      if (this.logoutOperation === run) this.logoutOperation = null;
+    });
+    this.logoutOperation = run;
+    return run;
+  }
+
+  private async runLogout(opts?: { preserveInvalidatedReason?: boolean }): Promise<void> {
     this.ensureInvalidationMarkerLoaded();
     // 登出与在途登录串行：先取消并等它完全收口，防迟到的 auth.json 在登出后复活账号。
     const pendingLogin = this.pendingLogin?.promise;

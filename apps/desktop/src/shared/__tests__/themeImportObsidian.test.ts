@@ -71,6 +71,47 @@ describe('theme-import · CSS 规则扫描', () => {
     expect(() => collectCssRules('} .a { --x: 1; }')).not.toThrow();
     expect(collectCssRules('} .a { --x: 1; }').map((r) => r.selector)).toContain('.a');
   });
+
+  // 回归:块深度曾按裸字符数,字符串里的大括号会让边界错位,把后面的主题块整段吞掉。
+  it('字符串字面量里的大括号不算块边界', () => {
+    const css = `
+      .theme-dark::before { content: "{"; --a: 1; }
+      .theme-light { --background-primary: #ffffff; }
+    `;
+    const selectors = collectCssRules(css).map((r) => r.selector);
+    expect(selectors).toContain('.theme-light');
+    const light = collectCssRules(css).find((r) => r.selector === '.theme-light');
+    expect(light?.body).toContain('--background-primary');
+  });
+
+  it('单引号与右大括号字符串同样不破坏边界', () => {
+    const css = `
+      .x { content: '}'; }
+      .theme-dark { --background-primary: #101010; }
+    `;
+    const dark = collectCssRules(css).find((r) => r.selector === '.theme-dark');
+    expect(dark?.body).toContain('--background-primary');
+  });
+
+  it('选择器属性值里的大括号也不破坏边界', () => {
+    const css = `
+      [data-x="{"] { --a: 1; }
+      .theme-dark { --background-primary: #101010; }
+    `;
+    const dark = collectCssRules(css).find((r) => r.selector === '.theme-dark');
+    expect(dark?.body).toContain('--background-primary');
+  });
+
+  it('带大括号的 data URL 不吞掉后续主题块（端到端）', () => {
+    const css = `
+      .cm-line { background-image: url("data:image/svg+xml,%3Csvg%3E{}%3C/svg%3E"); }
+      .theme-dark { --background-primary: #1e1e1e; --text-normal: #dcddde; }
+      .theme-light { --background-primary: #ffffff; --text-normal: #222222; }
+    `;
+    const result = convertObsidianTheme(css, 'Braced');
+    expect(result).not.toBeNull();
+    expect(result!.themes.map((t) => t.type).sort()).toEqual(['dark', 'light']);
+  });
 });
 
 describe('theme-import · var() 解引用', () => {

@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { dialog, type BrowserWindow } from 'electron';
 
+import { isLocalThemeId, LOCAL_THEME_SUFFIX } from '../../shared/local-themes';
 import {
   convertObsidianTheme,
   convertVsCodeTheme,
@@ -44,20 +45,38 @@ function normalizeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** 已被占用的 family 键（含隐式的"每文件自成家族"那一类）。 */
-function usedFamilyIds(): Set<string> {
+/**
+ * 已被占用的家族键，**含隐式的「每文件自成家族」那一类**。
+ *
+ * renderer 侧 `buildLocalFamilies()` 的分组键是 `family ?? theme.id`（都带
+ * `-local` 后缀）。所以判重必须把两类都算进来：只收显式 `family` 的话，用户已有
+ * 一个 id 为 `minimal` 的旧本地主题时，导入同名双态主题会拿到 family `minimal`
+ * → 分组键 `minimal-local` 与旧主题撞车 → 同类型变体只保留先加载的那个，新导入
+ * 的方案在「导入成功」提示之后仍然看不见。
+ */
+function usedFamilyKeys(): Set<string> {
   const used = new Set<string>();
   const payload = loadLocalThemesSync();
   if (!payload.success) return used;
   for (const theme of payload.themes) {
-    if (theme.family) used.add(theme.family);
+    if (theme.family) {
+      used.add(theme.family);
+      continue;
+    }
+    // 候选键 candidate 落盘后的分组键是 `${candidate}-local`，因此这里要存
+    // 「id 去掉 -local 后缀」的形态才能对上。
+    used.add(
+      isLocalThemeId(theme.id)
+        ? theme.id.slice(0, -LOCAL_THEME_SUFFIX.length)
+        : theme.id,
+    );
   }
   return used;
 }
 
 /**
- * 给双态产物挑一个未占用的 family 键。重复导入同一个主题时会拿到
- * `minimal` / `minimal-2`，两组产物各自成家族、都能在设置里看到。
+ * 挑一个未占用的家族键。重复导入同一个主题时会拿到 `minimal` / `minimal-2`，
+ * 两组产物各自成家族、都能在设置里看到。
  */
 function pickFamilyId(slug: string, used: Set<string>): string {
   for (let i = 1; i <= FAMILY_SUFFIX_LIMIT; i += 1) {
@@ -105,29 +124,45 @@ function convert(filePath: string, content: string): ThemeConversionResult | nul
   return convertObsidianTheme(content, name);
 }
 
+/**
+ * 回滚已落盘的产物。双态导入写到一半失败时必须清干净:否则 UI 报「导入失败」而
+ * 目录里留着一个孤立的单态主题,刷新后它会冒出来,用户重试又生成一份,越攒越乱。
+ * best-effort——删不掉只 warn,不把回滚失败盖掉原始错误。
+ */
+async function rollbackWritten(written: ImportedThemeFile[]): Promise<void> {
+  for (const item of written) {
+    try {
+      await fs.promises.unlink(item.path);
+    } catch (error) {
+      log.warn(`Failed to roll back '${item.path}': ${normalizeError(error)}`);
+    }
+  }
+}
+
 async function writeConverted(
   themes: ConvertedTheme[],
 ): Promise<{ written: ImportedThemeFile[]; error?: string }> {
   const pair = themes.length > 1;
-  const familyId = pair
-    ? pickFamilyId(themeFamilyId(themes[0].name), usedFamilyIds())
-    : null;
+  // 单产物也要走同一套判重:它落盘后的分组键同样是 `${id}-local`,直接用裸 slug
+  // 会撞上已有主题的显式 family。
+  const familyKey = pickFamilyId(themeFamilyId(themes[0].name), usedFamilyKeys());
   const written: ImportedThemeFile[] = [];
   for (const theme of themes) {
-    const slug = themeFamilyId(theme.name);
-    const baseId = pair ? `${familyId ?? slug}-${theme.type}` : slug;
+    const baseId = pair ? `${familyKey}-${theme.type}` : familyKey;
     const result = await writeLocalTheme({
       baseId,
       theme: {
         id: baseId,
         name: theme.name,
         type: theme.type,
-        ...(familyId ? { family: familyId } : {}),
+        // 单产物不写 family:它本来就自成家族,写了反而会把后续同名导入吸进来。
+        ...(pair ? { family: familyKey } : {}),
         colors: theme.colors,
       },
     });
     if (!result.success) {
-      return { written, error: result.error };
+      await rollbackWritten(written);
+      return { written: [], error: result.error };
     }
     written.push({
       path: result.path,

@@ -163,6 +163,79 @@ describe('外部主题导入（main 侧编排）', () => {
     );
   });
 
+  // 回归:family 判重曾只看显式 family 字段,漏了「无 family 的旧主题各自成家族」
+  // 那一类,导致新导入的家族与旧主题撞键、变体被静默隐藏。
+  it('已有同名旧本地主题（无 family）时，导入的家族键让位，不与之合并', async () => {
+    const dir = path.join(home, '.cindy', 'themes');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'minimal.json'),
+      JSON.stringify({ id: 'minimal', name: 'Old Minimal', type: 'dark', colors: {} }),
+      'utf8',
+    );
+    pickFile(writeSource('Minimal/theme.css', OBSIDIAN_THEME));
+
+    const result = await importExternalTheme();
+
+    expect(result.success).toBe(true);
+    if (!result.success || result.canceled) throw new Error('expected written result');
+    const loaded = loadLocalThemesSync();
+    // 旧主题隐式家族键是 `minimal`，所以导入的两个产物必须让位到 `minimal-2`。
+    const families = new Set(
+      loaded.themes.filter((t) => t.family).map((t) => t.family),
+    );
+    expect(families).toEqual(new Set(['minimal-2']));
+    // 旧主题原样保留。
+    expect(loaded.themes.find((t) => t.id === 'minimal-local')?.name).toBe('Old Minimal');
+    // 双态产物都在，没有被吸进旧主题的家族。
+    expect(loaded.themes.filter((t) => t.family === 'minimal-2')).toHaveLength(2);
+  });
+
+  it('单产物同样走家族判重（不与已有显式 family 撞键）', async () => {
+    const dir = path.join(home, '.cindy', 'themes');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'other.json'),
+      JSON.stringify({
+        id: 'other',
+        name: 'Other',
+        type: 'light',
+        family: 'one-dark-pro',
+        colors: {},
+      }),
+      'utf8',
+    );
+    pickFile(writeSource('OneDark-Pro.json', VSCODE_THEME));
+
+    const result = await importExternalTheme();
+
+    expect(result.success).toBe(true);
+    if (!result.success || result.canceled) throw new Error('expected written result');
+    // 已有主题占了 `one-dark-pro` 这个家族键，单产物必须让位。
+    expect(result.written[0].id).toBe('one-dark-pro-2');
+  });
+
+  // 回归:双态写到一半失败时若不回滚,目录里会留下一个孤立单态主题,与 UI 的
+  // 「导入失败」提示矛盾,刷新后还会冒出来。
+  it('双态导入第二个文件写失败时回滚第一个，不留孤立产物', async () => {
+    pickFile(writeSource('Minimal/theme.css', OBSIDIAN_THEME));
+    const realWriteFile = fs.promises.writeFile;
+    let calls = 0;
+    vi.spyOn(fs.promises, 'writeFile').mockImplementation(async (...args) => {
+      calls += 1;
+      if (calls === 2) throw new Error('ENOSPC: simulated disk full');
+      return realWriteFile(...(args as Parameters<typeof realWriteFile>));
+    });
+
+    const result = await importExternalTheme();
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error('expected failure');
+    expect(result.error).toContain('ENOSPC');
+    // 关键:第一个产物已被回滚，目录干净。
+    expect(loadLocalThemesSync().themes).toEqual([]);
+  });
+
   it('manifest.json 里的名字优先于目录名', async () => {
     const source = writeSource('some-folder/theme.css', OBSIDIAN_THEME);
     fs.writeFileSync(

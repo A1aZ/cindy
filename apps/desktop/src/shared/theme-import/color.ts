@@ -73,16 +73,23 @@ export function hslToRgb(h: number, s: number, l: number): Rgb {
   };
 }
 
-function parseNumberList(body: string): number[] | null {
+/** 单个数值分量；`percent` 必须记住——rgb() 的百分号通道与原值量纲不同。 */
+interface NumericComponent {
+  value: number;
+  percent: boolean;
+}
+
+function parseNumberList(body: string): NumericComponent[] | null {
   const parts = body
     .split(/[,/\s]+/)
     .map((p) => p.trim())
     .filter((p) => p.length > 0);
   if (parts.length < 3) return null;
-  return parts.slice(0, 4).map((p) => {
-    if (p.endsWith('%')) return Number.parseFloat(p.slice(0, -1));
-    return Number.parseFloat(p);
-  });
+  return parts.slice(0, 4).map((p) => (
+    p.endsWith('%')
+      ? { value: Number.parseFloat(p.slice(0, -1)), percent: true }
+      : { value: Number.parseFloat(p), percent: false }
+  ));
 }
 
 function parseFunctional(raw: string): Rgb | null {
@@ -90,13 +97,20 @@ function parseFunctional(raw: string): Rgb | null {
   if (!m) return null;
   const fn = m[1].toLowerCase();
   const nums = parseNumberList(m[2]);
-  if (!nums || nums.some((n) => !Number.isFinite(n))) return null;
+  if (!nums || nums.some((n) => !Number.isFinite(n.value))) return null;
   if (fn.startsWith('rgb')) {
-    // rgb() 的百分号形态少见但合法；这里按原值处理即可（0-255 与 0-100 混用时
-    // 也不会崩，只是取近似——源主题几乎不用百分号 rgb）。
-    return { r: clamp255(nums[0]), g: clamp255(nums[1]), b: clamp255(nums[2]) };
+    // 百分号通道是 0-100% 映射到 0-255，不能当原值用：`rgb(100%, 0%, 0%)`
+    // 是纯红，按原值会解析成 {r:100} 这个几乎全黑的暗红。
+    const channel = ({ value, percent }: NumericComponent): number =>
+      clamp255(percent ? (value * 255) / 100 : value);
+    return { r: channel(nums[0]), g: channel(nums[1]), b: channel(nums[2]) };
   }
-  return hslToRgb(nums[0], clamp01(nums[1] / 100), clamp01(nums[2] / 100));
+  // hsl()：色相是角度（无单位），饱和度与亮度按百分比取值。
+  return hslToRgb(
+    nums[0].value,
+    clamp01(nums[1].value / 100),
+    clamp01(nums[2].value / 100),
+  );
 }
 
 /**

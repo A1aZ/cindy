@@ -27,6 +27,17 @@ describe('theme-import 颜色解析', () => {
     expect(parseCssColor(input)).toEqual(expected);
   });
 
+  // 回归:百分号通道是 0-100% → 0-255，不能当原值用（`rgb(100%,0%,0%)` 是纯红，
+  // 按原值会解析成 {r:100} 这个几乎全黑的暗红）。
+  it.each([
+    ['rgb(100%, 0%, 0%)', { r: 255, g: 0, b: 0 }],
+    ['rgb(0%, 100%, 0%)', { r: 0, g: 255, b: 0 }],
+    ['rgb(50%, 50%, 50%)', { r: 128, g: 128, b: 128 }],
+    ['rgba(100%, 100%, 100%, 0.5)', { r: 255, g: 255, b: 255 }],
+  ])('解析百分号通道 %s', (input, expected) => {
+    expect(parseCssColor(input)).toEqual(expected);
+  });
+
   it('解析 hsl()（Obsidian 主题常用 hsl(var(--accent-h) ...) 展开后的形态）', () => {
     expect(parseCssColor('hsl(0, 0%, 100%)')).toEqual({ r: 255, g: 255, b: 255 });
     expect(parseCssColor('hsl(0, 0%, 0%)')).toEqual({ r: 0, g: 0, b: 0 });

@@ -73,8 +73,51 @@ export function stripJsonComments(input: string): string {
     }
     out += c;
   }
-  // 尾逗号:`,` 后面只有空白就跟着 } 或 ]。
-  return out.replace(/,(\s*[}\]])/g, '$1');
+  // 尾逗号必须在注释剥完之后、且带字符串感知地删(`, // 注释\n}` 这种要先没了
+  // 注释才看得出是尾逗号)。此前用一条全局 replace(/,(\s*[}\]])/g) 处理,那个
+  // 正则不认字符串边界,会把 JSON 值里合法的 `, }` 一起吃掉
+  // (`{"a": "x, }y"}` 被改成 `{"a": "x}y"}`)。
+  return stripTrailingCommas(out);
+}
+
+/** 删掉 `}` / `]` 前的尾逗号；字符串字面量内的逗号原样保留。 */
+function stripTrailingCommas(input: string): string {
+  let out = '';
+  let inString = false;
+  for (let i = 0; i < input.length; i += 1) {
+    const c = input[i];
+    if (inString) {
+      out += c;
+      if (c === '\\') {
+        if (i + 1 < input.length) {
+          out += input[i + 1];
+          i += 1;
+        }
+        continue;
+      }
+      if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+      out += c;
+      continue;
+    }
+    if (c === ',' && isTrailingComma(input, i)) continue;
+    out += c;
+  }
+  return out;
+}
+
+/** `,` 之后跳过空白，若紧接 `}` 或 `]` 则它是尾逗号。 */
+function isTrailingComma(input: string, commaIndex: number): boolean {
+  for (let j = commaIndex + 1; j < input.length; j += 1) {
+    const c = input[j];
+    if (c === '}' || c === ']') return true;
+    if (!/\s/.test(c)) return false;
+  }
+  // 逗号后只剩空白：JSON 本身已经不合法，交给 JSON.parse 报错。
+  return false;
 }
 
 interface VsCodeTokenColor {

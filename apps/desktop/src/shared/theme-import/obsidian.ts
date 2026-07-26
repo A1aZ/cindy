@@ -74,22 +74,61 @@ export function collectCssRules(source: string): CssRule[] {
   return scanCssRules(stripCssComments(source));
 }
 
+/**
+ * 从 `{` 起找配对的 `}`，返回它的下一个位置（找不到则到末尾）。
+ *
+ * 字符串字面量里的大括号不计入深度——`content: "{"`、带大括号的 data URL 都是
+ * 合法 CSS，按裸字符数深度会把后续 `.theme-light` / `.theme-dark` 规则整段吞掉。
+ */
+function findBlockEnd(source: string, openIndex: number): number {
+  let depth = 1;
+  let quote: string | null = null;
+  let j = openIndex + 1;
+  while (j < source.length && depth > 0) {
+    const c = source[j];
+    if (quote !== null) {
+      if (c === '\\') {
+        j += 2;
+        continue;
+      }
+      if (c === quote) quote = null;
+      j += 1;
+      continue;
+    }
+    if (c === '"' || c === "'") quote = c;
+    else if (c === '{') depth += 1;
+    else if (c === '}') depth -= 1;
+    j += 1;
+  }
+  return j;
+}
+
 function scanCssRules(source: string): CssRule[] {
   const rules: CssRule[] = [];
   let selectorStart = 0;
   let i = 0;
+  let quote: string | null = null;
   while (i < source.length) {
     const ch = source[i];
+    // 选择器里也可能有带引号的片段（`[data-x="{"]`），同样不能把里面的大括号
+    // 当块边界。
+    if (quote !== null) {
+      if (ch === '\\') {
+        i += 2;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      i += 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      i += 1;
+      continue;
+    }
     if (ch === '{') {
       const selector = source.slice(selectorStart, i).trim();
-      // 找配对的右括号。
-      let depth = 1;
-      let j = i + 1;
-      while (j < source.length && depth > 0) {
-        if (source[j] === '{') depth += 1;
-        else if (source[j] === '}') depth -= 1;
-        j += 1;
-      }
+      const j = findBlockEnd(source, i);
       const body = source.slice(i + 1, Math.max(i + 1, j - 1));
       if (selector.startsWith('@')) {
         // at-rule:内部还是完整规则集,递归（注释已在入口剥过，不必重复）。

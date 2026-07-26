@@ -71,6 +71,25 @@ describe('theme-import · jsonc 清理', () => {
       b: 1,
     });
   });
+
+  // 回归:尾逗号处理曾用一条全局 replace(/,(\s*[}\]])/g)，它不认字符串边界，
+  // 会把 JSON 值里合法的 `, }` / `, ]` 一起吃掉。
+  it.each([
+    ['{"a": "x, }y"}', { a: 'x, }y' }],
+    ['{"a": "x, ]y"}', { a: 'x, ]y' }],
+    ['{"a": "trailing, ", "b": 1}', { a: 'trailing, ', b: 1 }],
+    ['{"a": "多个,  }  ]  逗号"}', { a: '多个,  }  ]  逗号' }],
+  ])('不删字符串字面量里的 %s', (input, expected) => {
+    expect(JSON.parse(stripJsonComments(input))).toEqual(expected);
+  });
+
+  it('尾逗号后跟行注释时仍能识别（注释先剥、再判尾逗号）', () => {
+    const input = `{
+      "a": 1, // 说明
+      "b": [1, 2,], /* 块注释 */
+    }`;
+    expect(JSON.parse(stripJsonComments(input))).toEqual({ a: 1, b: [1, 2] });
+  });
 });
 
 describe('theme-import · VSCode 主题识别', () => {

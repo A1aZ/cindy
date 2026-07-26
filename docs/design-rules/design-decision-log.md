@@ -14,10 +14,11 @@
 
 - **07-26** 外部主题导入(VSCode / Obsidian)落地,同批引入 Markdown 文字色 token。
   两条关键决策:
-  ① **转换模板不新设计,取自已有的人工移植成果**。`themes/builtin/` 下 7 个从
+  ① **转换模板不新设计,取自已有的人工移植成果**。
+  `apps/desktop/src/renderer/themes/builtin/` 下 7 个从
   VSCode 移植的社区主题,`colors` 的 key 集合逐字相同(91 个 token = 35 个 Tier1
   slot + 56 个 alias/singleton),值全部由同一组 13 个色板角色派生;
-  `shared/theme-import/palette.ts` 就是那套派生规则的代码化,并以这些主题自身做
+  `apps/desktop/src/shared/theme-import/palette.ts` 就是那套派生规则的代码化,并以这些主题自身做
   golden 对照(喂入其手写色板常量应重现其 colors)。选 allow-list(只产出这 91 个
   key)而非"先大量产出再过滤",因为这 7 个主题本来就没碰豁免族,照抄 key 列表即
   自动守住 §10/§16 边界。

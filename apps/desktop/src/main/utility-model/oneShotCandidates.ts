@@ -262,7 +262,7 @@ async function requestExplicitProviderText(
     };
   }
 
-  if (provider.source !== 'user') {
+  if (provider.id === 'xd' || provider.id === 'anthropic' || provider.id === 'openai' || provider.id === 'xai') {
     return requestBuiltinProviderText(prompt, {
       provider,
       agentKind,

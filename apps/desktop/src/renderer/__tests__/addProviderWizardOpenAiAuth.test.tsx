@@ -259,7 +259,7 @@ describe('AddProviderWizard — OpenAI 授权边界', () => {
 
   it('目录声明 Device Grant 时，添加流程直接展示供应商设备码', async () => {
     providerOAuthLogin.mockImplementation(() => new Promise(() => undefined));
-    render(
+    const { unmount } = render(
       <AddProviderWizard
         providers={[DEVICE_PROVIDER]}
         entry={{ kind: 'builtin', providerId: DEVICE_PROVIDER.id }}
@@ -286,5 +286,9 @@ describe('AddProviderWizard — OpenAI 授权边界', () => {
 
     expect(await screen.findByText('TEST-CODE')).not.toBeNull();
     expect(screen.getByText(/auth\.example\.test/)).not.toBeNull();
+
+    unmount();
+    expect(providerOAuthCancel).toHaveBeenCalledOnce();
+    expect(providerOAuthCancel).toHaveBeenCalledWith(DEVICE_PROVIDER.id);
   });
 });

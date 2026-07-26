@@ -250,6 +250,19 @@ describe('AddProviderWizard — preset 直达', () => {
     expect(vi.mocked(createCustomProvider).mock.calls[0][1]).toEqual({});
   });
 
+  it('LiteLLM:清空可编辑端点后不回退预设地址，也不能继续', async () => {
+    renderWizard('litellm');
+
+    const endpoint = await screen.findByDisplayValue('http://127.0.0.1:4000/v1');
+    fireEvent.change(endpoint, { target: { value: '   ' } });
+
+    const next = screen.getByText('settings.providers.wizard.next')
+      .closest('button') as HTMLButtonElement;
+    expect(next.disabled).toBe(true);
+    expect(window.electronAPI.maker.fetchProviderModels).not.toHaveBeenCalled();
+    expect(createCustomProvider).not.toHaveBeenCalled();
+  });
+
   it('presetId 不存在 → 回落目录第一步', async () => {
     renderWizard('nonexistent');
 

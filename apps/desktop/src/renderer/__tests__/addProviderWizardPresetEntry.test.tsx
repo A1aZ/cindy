@@ -79,6 +79,23 @@ const liteLlmPreset = {
     },
   },
 };
+const openCodePreset = {
+  id: 'opencode-go',
+  name: 'OpenCode Go',
+  runtimes: {
+    'claude-code': {
+      baseUrl: 'https://opencode.ai/zen/go',
+      modelsUrl: 'https://opencode.ai/zen/go/v1/models',
+      models: [{ id: 'minimax-m3', name: 'MiniMax M3' }],
+    },
+    codex: {
+      baseUrl: 'https://opencode.ai/zen/go/v1',
+      wireProtocol: 'openai-chat' as const,
+      modelsUrl: 'https://opencode.ai/zen/go/v1/models',
+      models: [{ id: 'glm-5.2', name: 'GLM-5.2' }],
+    },
+  },
+};
 
 function renderWizard(presetId: string) {
   return render(
@@ -95,7 +112,9 @@ function renderWizard(presetId: string) {
 beforeEach(() => {
   (window as unknown as { electronAPI: unknown }).electronAPI = {
     maker: {
-      listProviderPresets: vi.fn(async () => ({ presets: [deepseekPreset, liteLlmPreset] })),
+      listProviderPresets: vi.fn(async () => ({
+        presets: [deepseekPreset, liteLlmPreset, openCodePreset],
+      })),
       // 列模型失败场景兜底(Greptile P1 回归):官方 API 预设必须靠推荐模型仍可完成。
       fetchProviderModels: vi.fn(async () => ({ ok: false, code: 'NETWORK' })),
     },
@@ -244,6 +263,30 @@ describe('AddProviderWizard — preset 直达', () => {
       }),
     );
     expect(vi.mocked(createCustomProvider).mock.calls[0][1]).toEqual({});
+  });
+
+  it('共享模型目录不会扩大 OpenCode 的逐协议模型归属', async () => {
+    vi.mocked(window.electronAPI.maker.fetchProviderModels).mockResolvedValue({
+      ok: true,
+      models: [
+        { id: 'minimax-m3', name: 'MiniMax M3' },
+        { id: 'glm-5.2', name: 'GLM-5.2' },
+      ],
+    });
+    renderWizard('opencode-go');
+
+    await waitFor(() => expect(screen.getByDisplayValue('OpenCode Go')).not.toBeNull());
+    fireEvent.change(screen.getByPlaceholderText('sk-…'), { target: { value: 'sk-test' } });
+    fireEvent.click(screen.getByText('settings.providers.wizard.next'));
+    await waitFor(() => expect(screen.getByText('MiniMax M3')).not.toBeNull());
+    fireEvent.click(screen.getByText('settings.providers.wizard.finish'));
+
+    await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
+    const config = vi.mocked(createCustomProvider).mock.calls[0][0];
+    expect(config.runtimes['claude-code']?.models.map((model) => model.id))
+      .toEqual(['minimax-m3']);
+    expect(config.runtimes.codex?.models.map((model) => model.id))
+      .toEqual(['glm-5.2']);
   });
 
   it('presetId 不存在 → 回落目录第一步', async () => {

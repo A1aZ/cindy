@@ -484,6 +484,34 @@ export function AddProviderWizard({
     // 并行拉取**每个已配置 runtime** 的列模型端点:双 runtime 预设两端各自发现,
     // 返回结果按「实际返回它的端点」归属合并——某模型两端都返回则归属两端。
     const agents = Object.keys(preset.runtimes) as AgentKind[];
+    // 同一个 modelsUrl 被多个 runtime 共用、但预设模型集合不同，说明该端点返回的是
+    // 跨协议总目录（OpenCode Go 即如此），响应本身无法判定模型属于 Messages 还是 Chat。
+    // 这类端点只能用于确认预设已有模型，不能扩大其 agent 归属或加入无法分类的新模型。
+    const discoveryAgentsByUrl = new Map<string, AgentKind[]>();
+    for (const agent of agents) {
+      const modelsUrl = preset.runtimes[agent]?.modelsUrl;
+      if (!modelsUrl) continue;
+      discoveryAgentsByUrl.set(modelsUrl, [
+        ...(discoveryAgentsByUrl.get(modelsUrl) ?? []),
+        agent,
+      ]);
+    }
+    const splitDiscoveryUrls = new Set(
+      [...discoveryAgentsByUrl.entries()]
+        .filter(([, owners]) => {
+          if (owners.length < 2) return false;
+          const modelSets = new Set(
+            owners.map((agent) =>
+              (preset.runtimes[agent]?.models ?? [])
+                .map((model) => model.id)
+                .sort()
+                .join('\u0000'),
+            ),
+          );
+          return modelSets.size > 1;
+        })
+        .map(([modelsUrl]) => modelsUrl),
+    );
     const results = await Promise.all(
       agents.map(async (agent) => {
         const rt = preset.runtimes[agent];
@@ -507,13 +535,16 @@ export function AddProviderWizard({
     setPicks((prev) => {
       const next = new Map(prev);
       for (const { agent, models } of results) {
+        const modelsUrl = preset.runtimes[agent]?.modelsUrl;
+        const preservePresetOwnership =
+          !!modelsUrl && splitDiscoveryUrls.has(modelsUrl);
         for (const m of models) {
           const existing = next.get(m.id);
           if (existing) {
-            if (!existing.agents.includes(agent)) {
+            if (!preservePresetOwnership && !existing.agents.includes(agent)) {
               next.set(m.id, { ...existing, agents: [...existing.agents, agent] });
             }
-          } else {
+          } else if (!preservePresetOwnership) {
             next.set(m.id, { name: m.name, checked: false, recommended: false, agents: [agent] });
           }
         }

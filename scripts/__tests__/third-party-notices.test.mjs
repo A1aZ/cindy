@@ -199,6 +199,19 @@ test("desktop resources include both open-source and restricted disclosures", ()
     read("apps/desktop/resources/THIRD-PARTY-NOTICES.txt"),
     /Lobe Icons SVG paths \(vendored\).*Copyright \(c\) 2023 LobeHub/s,
   );
+  assert.match(
+    read("apps/desktop/resources/THIRD-PARTY-NOTICES.txt"),
+    /LiteLLM mascot SVG path \(adapted\).*Copyright \(c\) 2026 Berri AI/s,
+  );
+  for (const platform of ["ios", "android"]) {
+    const mobileNotice = read(
+      `docs/legal/notices/mobile-${platform}.txt`,
+    );
+    assert.match(
+      mobileNotice,
+      /LiteLLM mascot SVG path \(adapted\).*Copyright \(c\) 2026 Berri AI/s,
+    );
+  }
   assert.ok(
     fs.existsSync(
       path.join(repoRoot, "apps/desktop/cindy-updater/src-tauri/Cargo.lock"),

@@ -581,6 +581,25 @@ function bundledComponent(component) {
   return { ecosystem: "bundled", ...component };
 }
 
+function buildProviderBrandingEntries() {
+  return [
+    bundledComponent({
+      name: "Lobe Icons SVG paths (vendored)",
+      version: "5.14.0",
+      license: "MIT",
+      url: "https://github.com/lobehub/lobe-icons/tree/v5.14.0",
+      licenseText: MIT_TEXT("MIT License\n\nCopyright (c) 2023 LobeHub"),
+    }),
+    bundledComponent({
+      name: "LiteLLM mascot SVG path (adapted)",
+      version: "adapted",
+      license: "MIT",
+      url: "https://github.com/BerriAI/litellm-docs/blob/main/static/img/logo.svg",
+      licenseText: MIT_TEXT("MIT License\n\nCopyright (c) 2026 Berri AI"),
+    }),
+  ];
+}
+
 function readBundledLicense(relativePath) {
   return normalizeNoticeText(
     fs.readFileSync(path.join(REPO_ROOT, relativePath), "utf8"),
@@ -769,16 +788,8 @@ function buildDesktopCommonEntries(apacheText, sharpPackageNames) {
     }),
   );
 
-  // ProviderLogoMark 中随桌面包分发的 xAI / 智谱 SVG 路径。
-  entries.push(
-    bundledComponent({
-      name: "Lobe Icons SVG paths (vendored)",
-      version: "5.14.0",
-      license: "MIT",
-      url: "https://github.com/lobehub/lobe-icons/tree/v5.14.0",
-      licenseText: MIT_TEXT("MIT License\n\nCopyright (c) 2023 LobeHub"),
-    }),
-  );
+  // ProviderLogoMark / MobileProviderMark 共享的上游 SVG path，桌面与移动端均随包分发。
+  entries.push(...buildProviderBrandingEntries());
 
   return entries;
 }
@@ -813,6 +824,7 @@ function buildWindowsEntries() {
 
 function buildMobileEntries(apacheText, platform) {
   const entries = [
+    ...buildProviderBrandingEntries(),
     bundledComponent({
       name: "JetBrains Mono fonts",
       version: "bundled",

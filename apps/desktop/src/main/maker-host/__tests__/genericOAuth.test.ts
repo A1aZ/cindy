@@ -100,7 +100,9 @@ beforeEach(() => {
     openExternal: async (url) => {
       openedUrls.push(url);
     },
-    sleep: async () => undefined,
+    sleep: async (ms) => {
+      nowMs += ms;
+    },
   });
 });
 
@@ -278,6 +280,37 @@ describe('登录流与凭证落盘失败', () => {
     expect(JSON.parse(persisted).access_token).toBe('device-access');
     expect(persisted).not.toContain('secret-device-code');
     expect(persisted).not.toContain('ABCD-EFGH');
+  });
+
+  it('Device Grant：持续 pending 时按注入时钟到期，不会无限轮询', async () => {
+    let tokenPolls = 0;
+    fetchResponder = (url) => {
+      if (url === DEVICE_OAUTH.deviceAuthorizationUrl) {
+        return new Response(
+          JSON.stringify({
+            device_code: 'secret-device-code',
+            user_code: 'ABCD-EFGH',
+            verification_uri: 'https://auth.acme.example/device',
+            expires_in: 2,
+            interval: 1,
+          }),
+          { status: 200 },
+        );
+      }
+      tokenPolls += 1;
+      return new Response(JSON.stringify({ error: 'authorization_pending' }), { status: 400 });
+    };
+
+    const result = await runGenericOAuthLogin(
+      { id: 'device', name: 'Device Provider' },
+      DEVICE_OAUTH,
+      { onProgress: () => undefined },
+    );
+
+    expect(result).toEqual({ ok: false, reason: 'device_code_expired' });
+    expect(tokenPolls).toBe(2);
+    expect(nowMs).toBe(1_002_000);
+    expect(storage.map.has('device')).toBe(false);
   });
 
   it('Device Grant：进度回调后取消，不再轮询或写入凭证', async () => {

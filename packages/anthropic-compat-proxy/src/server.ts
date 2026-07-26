@@ -251,6 +251,19 @@ function respondRoutingFailure(
   res.destroy(err instanceof Error ? err : new Error(String(err)));
 }
 
+/** 路由层是最后的信任边界；任何调用方给出的路径覆盖都必须保持同源且不可注入 header。 */
+function isSafePathOverride(value: unknown): value is string {
+  return (
+    typeof value === 'string'
+    && value.length > 1
+    && value.length <= 2_048
+    && value.startsWith('/')
+    && !value.startsWith('//')
+    && !value.includes('#')
+    && !/[\r\n]/.test(value)
+  );
+}
+
 function isPromiseLike<T>(value: unknown): value is PromiseLike<T> {
   return typeof value === 'object' && value !== null && typeof (value as { then?: unknown }).then === 'function';
 }
@@ -998,6 +1011,18 @@ export async function createAnthropicCompatProxy(opts: ProxyOptions): Promise<Pr
     headerDelete?: readonly string[];
     pathOverride?: string;
   } | null => {
+    const pathOverride = decision?.pathOverride;
+    if (pathOverride !== undefined && !isSafePathOverride(pathOverride)) {
+      respondRoutingFailure(
+        res,
+        logger,
+        reqId,
+        502,
+        'selected request path invalid',
+        new Error('routingTransform returned an unsafe pathOverride'),
+      );
+      return null;
+    }
     let overrideTarget: UpstreamTarget | undefined;
     try {
       overrideTarget = decision?.upstreamOverride
@@ -1019,7 +1044,7 @@ export async function createAnthropicCompatProxy(opts: ProxyOptions): Promise<Pr
       overrideTarget,
       headerOverride: decision?.headerOverride,
       headerDelete: decision?.headerDelete,
-      pathOverride: decision?.pathOverride,
+      pathOverride,
     };
   };
 

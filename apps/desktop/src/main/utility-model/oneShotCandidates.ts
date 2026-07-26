@@ -948,5 +948,12 @@ function joinProxyPath(baseUrl: string, suffix: string): string {
 function appendExactProviderPath(baseUrl: string, requestPath: string): string {
   const url = new URL(baseUrl);
   const basePath = url.pathname.replace(/\/+$/, '');
-  return `${url.origin}${basePath}${requestPath}`;
+  const queryIndex = requestPath.indexOf('?');
+  const exactPath = queryIndex === -1 ? requestPath : requestPath.slice(0, queryIndex);
+  const exactQuery = queryIndex === -1 ? '' : requestPath.slice(queryIndex + 1);
+  const baseQuery = url.search.slice(1);
+  url.pathname = `${basePath}${exactPath}`;
+  url.search = [baseQuery, exactQuery].filter(Boolean).join('&');
+  url.hash = '';
+  return url.toString();
 }

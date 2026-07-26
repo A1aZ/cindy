@@ -231,7 +231,7 @@ describe('外部主题导入（main 侧编排）', () => {
 
     expect(result.success).toBe(false);
     if (result.success) throw new Error('expected failure');
-    expect(result.error).toContain('ENOSPC');
+    expect(result.error).toBe('IMPORT_WRITE_ERROR');
     // 关键:第一个产物已被回滚，目录干净。
     expect(loadLocalThemesSync().themes).toEqual([]);
   });

@@ -299,8 +299,7 @@ export function extractVsCodePalette(
   );
   const textTertiary = role(
     'textTertiary',
-    ['editorLineNumber.activeForeground', 'editorHint.foreground'],
-    // secondary 与 disabled 之间那一档(one-dark-pro 手写的 "mid")。
+    ['editorHint.foreground', 'breadcrumb.foreground'],
     () => shade(textSecondary, dark ? -0.16 : 0.16),
   );
 

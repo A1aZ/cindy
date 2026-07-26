@@ -18,7 +18,7 @@
  * `--text-normal` / `--interactive-accent` / `--h1-color` 等长期稳定的公开 API）。
  */
 
-import { isDarkBackground, parseCssColor, shade, type Rgb } from './color';
+import { isDarkBackground, parseCssColor, parseCssColorComposited, shade, type Rgb } from './color';
 import type { MarkdownPalette, ThemePalette, ThemeTypeName } from './palette';
 
 type VarMap = Map<string, string>;
@@ -66,12 +66,14 @@ export function stripCssComments(source: string): string {
   return out;
 }
 
+const MAX_AT_RULE_DEPTH = 8;
+
 /**
  * 极简 CSS 规则扫描:按大括号深度切出 `selector { body }` 对；at-rule
  * (`@media` 等) 的内容递归处理,让包在 media query 里的主题块也能被读到。
  */
 export function collectCssRules(source: string): CssRule[] {
-  return scanCssRules(stripCssComments(source));
+  return scanCssRules(stripCssComments(source), 0);
 }
 
 /**
@@ -103,15 +105,14 @@ function findBlockEnd(source: string, openIndex: number): number {
   return j;
 }
 
-function scanCssRules(source: string): CssRule[] {
+function scanCssRules(source: string, depth: number): CssRule[] {
+  if (depth >= MAX_AT_RULE_DEPTH) return [];
   const rules: CssRule[] = [];
   let selectorStart = 0;
   let i = 0;
   let quote: string | null = null;
   while (i < source.length) {
     const ch = source[i];
-    // 选择器里也可能有带引号的片段（`[data-x="{"]`），同样不能把里面的大括号
-    // 当块边界。
     if (quote !== null) {
       if (ch === '\\') {
         i += 2;
@@ -126,9 +127,6 @@ function scanCssRules(source: string): CssRule[] {
       i += 1;
       continue;
     }
-    // 分号终止的 statement at-rules（`@charset "UTF-8";`、`@import ...;`）——
-    // 它们没有块体，直接跳过并重置 selectorStart，否则它们的文本会粘到下一条
-    // 规则的选择器前面。
     if (ch === ';') {
       const pending = source.slice(selectorStart, i).trim();
       if (pending.startsWith('@')) {
@@ -144,8 +142,7 @@ function scanCssRules(source: string): CssRule[] {
       const j = findBlockEnd(source, i);
       const body = source.slice(i + 1, Math.max(i + 1, j - 1));
       if (selector.startsWith('@')) {
-        // at-rule:内部还是完整规则集,递归（注释已在入口剥过，不必重复）。
-        rules.push(...scanCssRules(body));
+        rules.push(...scanCssRules(body, depth + 1));
       } else if (selector.length > 0) {
         rules.push({ selector, body });
       }
@@ -154,7 +151,6 @@ function scanCssRules(source: string): CssRule[] {
       continue;
     }
     if (ch === '}') {
-      // 落单的右括号（源文件不规范），跳过并重置。
       i += 1;
       selectorStart = i;
       continue;
@@ -224,18 +220,27 @@ interface ModeVars {
 }
 
 function selectorMode(selector: string): ThemeTypeName | 'base' | null {
-  const s = selector.toLowerCase().trim();
-  const hasDark = s.includes('.theme-dark');
-  const hasLight = s.includes('.theme-light');
-  if (hasDark || hasLight) {
-    // 只认 theme class 作用于根元素的选择器（`.theme-dark` / `body.theme-dark`），
-    // 忽略组件级（`.theme-dark .modal`）——后者的变量是局部覆盖，不是全局色板。
-    const isRootLevel = /^(body|html|:root|\*)?\s*\.theme-(dark|light)\s*$/.test(s);
-    if (!isRootLevel) return null;
-    if (hasDark && hasLight) return 'base';
-    return hasDark ? 'dark' : 'light';
+  // 逗号分隔的选择器列表（`.theme-dark, .theme-light { ... }`）拆开逐条判定。
+  const parts = selector.split(',').map((p) => p.toLowerCase().trim()).filter((p) => p.length > 0);
+  if (parts.length === 0) return null;
+  // 多段选择器中只要有一段是根级 theme class 就算;两种都有视为 base。
+  let hasDark = false;
+  let hasLight = false;
+  let hasBase = false;
+  for (const s of parts) {
+    if (/^(body|html|:root|\*)?\s*\.theme-(dark|light)\s*$/.test(s)) {
+      if (s.includes('.theme-dark')) hasDark = true;
+      if (s.includes('.theme-light')) hasLight = true;
+    } else if (/^(:root|html|body|\*)$/.test(s)) {
+      hasBase = true;
+    }
   }
-  if (/^(:root|html|body|\*)\b/.test(s)) return 'base';
+  if (hasDark && hasLight) return 'base';
+  if (hasDark) return 'dark';
+  if (hasLight) return 'light';
+  // 纯根选择器（无 theme class）——但必须是 `:root` / `body` / `html` 自身，
+  // 不能是 `body .modal` 这种后代组合。
+  if (hasBase || (parts.length === 1 && /^(:root|html|body|\*)$/.test(parts[0]))) return 'base';
   return null;
 }
 
@@ -278,14 +283,16 @@ export function collectObsidianVars(source: string): ModeVars[] {
   return out;
 }
 
-/** 取首个能求值成颜色的变量。 */
-function readColor(vars: VarMap, names: string[], unresolved?: string[]): Rgb | null {
+/** 取首个能求值成颜色的变量。`compositeBg` 不为 null 时，半透明值合成到该底色上。 */
+function readColor(vars: VarMap, names: string[], unresolved?: string[], compositeBg?: Rgb | null): Rgb | null {
   for (const name of names) {
     const raw = vars.get(name);
     if (raw === undefined) continue;
-    const rgb = parseCssColor(resolveVarValue(raw, vars));
+    const resolved = resolveVarValue(raw, vars);
+    const rgb = compositeBg
+      ? parseCssColorComposited(resolved, compositeBg)
+      : parseCssColor(resolved);
     if (rgb) return rgb;
-    // 变量存在但求不出颜色（color-mix / 未定义 var / 关键字）——如实记账。
     unresolved?.push(name);
   }
   return null;
@@ -319,11 +326,12 @@ export function extractObsidianPalette({ type, vars }: ModeVars): ObsidianExtrac
     ['--background-secondary', '--background-primary-alt', '--color-base-10'],
     () => step(surface, 0.05),
   );
-  const hover = role(
-    'hover',
-    ['--background-modifier-hover', '--color-base-20'],
-    () => step(surface, 0.08),
-  );
+  const hover = (() => {
+    const hit = readColor(vars, ['--background-modifier-hover', '--color-base-20'], unresolved, surface);
+    if (hit) { resolvedRoles += 1; return hit; }
+    derivedRoles.push('hover');
+    return step(surface, 0.08);
+  })();
   const chip = role(
     'chip',
     ['--background-secondary-alt', '--background-modifier-active-hover', '--color-base-25'],

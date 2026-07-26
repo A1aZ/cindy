@@ -46,8 +46,9 @@ const log = createLogger('settings/AppearanceSection');
 /** main 侧导入失败码 → 专门文案；未列出的码落到通用 importFailed。 */
 const IMPORT_ERROR_KEYS: Record<string, string> = {
   UNSUPPORTED_THEME_FILE: 'settings.appearance.localThemes.importUnsupported',
-  NOT_A_FILE: 'settings.appearance.localThemes.importUnsupported',
+  NOT_A_FILE: 'settings.appearance.localThemes.importNotAFile',
   FILE_TOO_LARGE: 'settings.appearance.localThemes.importTooLarge',
+  IMPORT_WRITE_ERROR: 'settings.appearance.localThemes.importWriteError',
 };
 
 type ThemeOption = 'light' | 'dark' | 'system';
@@ -409,14 +410,15 @@ export function AppearanceSection() {
     const name = result.written[0]?.name ?? '';
     const skipped = result.report.skippedProtected;
     const unresolved = result.report.unresolved.length;
-    // 有东西没跟过来时如实说明,不用一句"成功"盖过去。
-    if (skipped > 0 || unresolved > 0) {
+    const derived = result.report.derivedRoles.length;
+    if (skipped > 0 || unresolved > 0 || derived > 0) {
       toast.success(
         t('settings.appearance.localThemes.importPartial', {
           name,
           themeCount: result.written.length,
           skipped,
           unresolved,
+          derived,
         }),
       );
       return;

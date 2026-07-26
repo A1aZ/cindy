@@ -361,10 +361,12 @@
         "exportSuccess": "已生成 {{file}}，替换示例图片路径并保存后点\"刷新\"即可生效",
         "exportFailed": "导出失败：{{error}}",
         "importSuccess": "已导入 {{name}}（{{themeCount}} 个方案），在上方主题列表里选它即可",
-        "importPartial": "已导入 {{name}}（{{themeCount}} 个方案）。{{skipped}} 项语义配色（危险红、警告橙、焦点蓝等）按规范保持不变，{{unresolved}} 项取值无法识别已跳过",
+        "importPartial": "已导入 {{name}}（{{themeCount}} 个方案）。{{skipped}} 项语义色按规范不变，{{unresolved}} 项取值无法识别，{{derived}} 项由邻近色近似推导",
         "importFailed": "导入失败：{{error}}",
         "importUnsupported": "这个文件不是可识别的 VSCode 或 Obsidian 主题",
+        "importNotAFile": "请选择一个文件，而非文件夹",
         "importTooLarge": "文件太大，无法作为主题导入",
+        "importWriteError": "无法保存主题，请检查磁盘空间与权限",
         "openDirFailed": "打开目录失败：{{error}}",
         "refreshed": "已刷新本地主题"
       },

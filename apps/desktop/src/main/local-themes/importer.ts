@@ -24,6 +24,7 @@ import {
 import type {
   ConvertedTheme,
   ImportedThemeFile,
+  ImportedThemeFileInternal,
   LocalThemeImportResult,
   ThemeConversionResult,
 } from '../../shared/theme-import/types';
@@ -129,7 +130,7 @@ function convert(filePath: string, content: string): ThemeConversionResult | nul
  * 目录里留着一个孤立的单态主题,刷新后它会冒出来,用户重试又生成一份,越攒越乱。
  * best-effort——删不掉只 warn,不把回滚失败盖掉原始错误。
  */
-async function rollbackWritten(written: ImportedThemeFile[]): Promise<void> {
+async function rollbackWritten(written: ImportedThemeFileInternal[]): Promise<void> {
   for (const item of written) {
     try {
       await fs.promises.unlink(item.path);
@@ -141,12 +142,10 @@ async function rollbackWritten(written: ImportedThemeFile[]): Promise<void> {
 
 async function writeConverted(
   themes: ConvertedTheme[],
-): Promise<{ written: ImportedThemeFile[]; error?: string }> {
+): Promise<{ written: ImportedThemeFileInternal[]; error?: string }> {
   const pair = themes.length > 1;
-  // 单产物也要走同一套判重:它落盘后的分组键同样是 `${id}-local`,直接用裸 slug
-  // 会撞上已有主题的显式 family。
   const familyKey = pickFamilyId(themeFamilyId(themes[0].name), usedFamilyKeys());
-  const written: ImportedThemeFile[] = [];
+  const written: ImportedThemeFileInternal[] = [];
   for (const theme of themes) {
     const baseId = pair ? `${familyKey}-${theme.type}` : familyKey;
     const result = await writeLocalTheme({
@@ -155,7 +154,6 @@ async function writeConverted(
         id: baseId,
         name: theme.name,
         type: theme.type,
-        // 单产物不写 family:它本来就自成家族,写了反而会把后续同名导入吸进来。
         ...(pair ? { family: familyKey } : {}),
         colors: theme.colors,
       },
@@ -190,9 +188,9 @@ export async function importExternalTheme(
     const options: Electron.OpenDialogOptions = {
       properties: ['openFile'],
       filters: [
-        { name: 'VSCode / Obsidian Theme', extensions: ['json', 'jsonc', 'css'] },
-        { name: 'VSCode Color Theme', extensions: ['json', 'jsonc'] },
-        { name: 'Obsidian Theme', extensions: ['css'] },
+        { name: 'Theme (*.json, *.jsonc, *.css)', extensions: ['json', 'jsonc', 'css'] },
+        { name: 'VSCode (*.json, *.jsonc)', extensions: ['json', 'jsonc'] },
+        { name: 'Obsidian (*.css)', extensions: ['css'] },
       ],
     };
     const picked = deps.parentWindow
@@ -220,16 +218,17 @@ export async function importExternalTheme(
     const { written, error } = await writeConverted(converted.themes);
     if (error) {
       log.warn(`Failed to write imported theme: ${error}`);
-      return { success: false, error };
+      return { success: false, error: 'IMPORT_WRITE_ERROR' };
     }
     log.info(
       `Imported ${written.length} theme(s) from ${converted.report.source}: `
       + written.map((w) => w.id).join(', '),
     );
+    const safeWritten: ImportedThemeFile[] = written.map(({ id, name, type }) => ({ id, name, type }));
     return {
       success: true,
       canceled: false,
-      written,
+      written: safeWritten,
       report: converted.report,
     };
   } catch (error) {

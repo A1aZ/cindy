@@ -361,10 +361,12 @@
         "exportSuccess": "Created {{file}}. Replace the example image paths, save, then click \"Refresh\".",
         "exportFailed": "Export failed: {{error}}",
         "importSuccess": "Imported {{name}} ({{themeCount}} variant(s)). Pick it in the theme list above.",
-        "importPartial": "Imported {{name}} ({{themeCount}} variant(s)). {{skipped}} semantic colors (danger red, warning orange, focus blue) stay unchanged per spec, and {{unresolved}} values could not be read.",
+        "importPartial": "Imported {{name}} ({{themeCount}} variant(s)). {{skipped}} semantic colors stay unchanged per spec, {{unresolved}} values could not be read, and {{derived}} roles were approximated from nearby colors.",
         "importFailed": "Import failed: {{error}}",
         "importUnsupported": "This file is not a recognizable VSCode or Obsidian theme.",
+        "importNotAFile": "Please select a file, not a folder.",
         "importTooLarge": "File is too large to import as a theme.",
+        "importWriteError": "Could not save the theme. Please check disk space and permissions.",
         "openDirFailed": "Failed to open folder: {{error}}",
         "refreshed": "Local themes refreshed"
       },

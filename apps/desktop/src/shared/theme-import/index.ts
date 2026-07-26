@@ -22,13 +22,17 @@ export { isProtectedToken, stripProtectedTokens } from './protected-tokens';
 /** 色板角色总数——报告里 "命中 N/13" 的分母。 */
 export const PALETTE_ROLE_COUNT = 13;
 
+const WINDOWS_RESERVED_RE = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
+
 function toSlug(name: string): string {
-  const slug = name
+  let slug = name
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
-  return slug.length > 0 ? slug : 'imported-theme';
+  if (slug.length === 0) return 'imported-theme';
+  if (WINDOWS_RESERVED_RE.test(slug)) slug = `theme-${slug}`;
+  return slug;
 }
 
 /**
@@ -93,8 +97,8 @@ export function convertObsidianTheme(
   const themes: ConvertedTheme[] = [];
   const derivedRoles: string[] = [];
   const unresolved: string[] = [];
+  const skippedIds = new Set<string>();
   let resolvedRoles = 0;
-  let skippedProtected = 0;
 
   for (const mode of modes) {
     const extracted = extractObsidianPalette(mode);
@@ -106,9 +110,8 @@ export function convertObsidianTheme(
     );
     const { colors, skipped } = stripProtectedTokens(built);
     themes.push({ name, type: extracted.type, colors });
-    // 多个模式的报告合并：角色命中取最好那一次，缺口与无法解析项取并集。
     resolvedRoles = Math.max(resolvedRoles, extracted.resolvedRoles);
-    skippedProtected = Math.max(skippedProtected, skipped.length);
+    for (const id of skipped) skippedIds.add(id);
     for (const role of extracted.derivedRoles) {
       if (!derivedRoles.includes(role)) derivedRoles.push(role);
     }
@@ -125,7 +128,7 @@ export function convertObsidianTheme(
       resolvedRoles,
       derivedRoles,
       unresolved,
-      skippedProtected,
+      skippedProtected: skippedIds.size,
     },
   };
 }

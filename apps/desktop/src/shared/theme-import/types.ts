@@ -31,13 +31,17 @@ export interface ThemeConversionResult {
   report: ThemeConversionReport;
 }
 
-/** 落盘后的单个产物。 */
+/** 落盘后的单个产物（跨 IPC 返回给 renderer 的部分不含绝对路径）。 */
 export interface ImportedThemeFile {
-  path: string;
   /** 盘上文件名去掉扩展名后的 id（未含 `-local` 后缀）。 */
   id: string;
   name: string;
   type: ThemeTypeName;
+}
+
+/** main 内部用：带文件路径，用于回滚。不跨 IPC。 */
+export interface ImportedThemeFileInternal extends ImportedThemeFile {
+  path: string;
 }
 
 export type LocalThemeImportResult =

@@ -668,10 +668,14 @@ describe('anthropic-compat-proxy routingTransform', () => {
     '/infer\u007fmode',
     '/infer\u0085mode',
     '/café',
+    '/../admin',
+    '/.%2e/admin',
+    '/a<b',
     '/infer%2',
     '/%ZZ',
     '/模型',
     '/v1\\messages',
+    `/${'a'.repeat(2_048)}`,
   ])('rejects an unsafe path override before contacting the upstream: %j', async (pathOverride) => {
     const custom = await startFakeUpstream((_i, _b, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });

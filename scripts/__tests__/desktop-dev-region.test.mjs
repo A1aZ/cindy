@@ -80,6 +80,23 @@ test("remote dev selects the repository manifest matching the region", () => {
   );
 });
 
+test("local dev applies the explicit region to the child environment", () => {
+  const env = {};
+  assert.deepEqual(
+    applyDesktopDevStartupConfig({
+      argv: ["start", "--", "--region=cn"],
+      env,
+      mode: "local",
+    }),
+    {
+      region: "cn",
+      endpointsCdn: false,
+      endpointManifestFile: undefined,
+    },
+  );
+  assert.deepEqual(env, { CINDY_AUTH_REGION: "cn" });
+});
+
 test("--endpoints-cdn keeps the selected region and bypasses the default local manifest", () => {
   assert.deepEqual(
     resolveDesktopDevStartupConfig({

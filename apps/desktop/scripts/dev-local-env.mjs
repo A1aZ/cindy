@@ -13,9 +13,13 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import {
+  applyDesktopDevStartupConfig,
+  stripDesktopDevRegionArgs,
+} from '../../../scripts/shared/desktop-dev-region.mjs';
 import { generateEndpointLocalFile } from '../../../scripts/shared/endpoint-local-file.mjs';
 
-const [command, ...args] = process.argv.slice(2);
+const [command, ...rawArgs] = process.argv.slice(2);
 if (!command) {
   console.error('usage: node scripts/dev-local-env.mjs <command> [args...]');
   process.exit(2);
@@ -23,10 +27,12 @@ if (!command) {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const env = { ...process.env, XDT_DESKTOP_DEV_MODE: 'local' };
+const startupConfig = applyDesktopDevStartupConfig({ argv: rawArgs, env, mode: 'local' });
+const args = stripDesktopDevRegionArgs(rawArgs);
 if (!env.XDT_ENDPOINT_MANIFEST_FILE?.trim()) {
   env.XDT_ENDPOINT_MANIFEST_FILE = generateEndpointLocalFile({
     repoRoot,
-    region: env.CINDY_AUTH_REGION?.trim() || 'global',
+    region: startupConfig.region,
   });
   console.log(`[dev-local-env] endpoint manifest → ${env.XDT_ENDPOINT_MANIFEST_FILE}`);
 }

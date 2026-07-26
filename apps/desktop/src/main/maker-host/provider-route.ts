@@ -86,6 +86,31 @@ const CODEX_ACCOUNT_HEADERS = ['chatgpt-account-id', 'openai-beta', 'originator'
 const CLIENT_AUTH_HEADERS = ['authorization', 'x-api-key'];
 /** 缺少自定义供应商 key 时覆盖 CLI 凭证的哑值：目标上游应 401，但绝不收到订阅 token。 */
 const MISSING_CUSTOM_PROVIDER_API_KEY = 'cindy-missing-custom-provider-api-key';
+const DISABLED_PROVIDER_ROUTE_ERROR = 'provider_route_disabled';
+
+/**
+ * 已迁移但无法安全执行的历史路由必须由 proxy 原地拒绝，不能返回 null：
+ * null 在两个 proxy host 里表示“未命中”，会继续走默认网关/订阅上游。
+ */
+function disabledProviderRouteDecision(providerId: string): RoutingDecision {
+  return {
+    localHandler: async ({ res }) => {
+      const payload = JSON.stringify({
+        type: 'error',
+        error: {
+          type: DISABLED_PROVIDER_ROUTE_ERROR,
+          code: DISABLED_PROVIDER_ROUTE_ERROR,
+          message: `Provider '${providerId}' is disabled; update its endpoint or authentication settings before retrying.`,
+        },
+      });
+      res.writeHead(503, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+      });
+      res.end(payload);
+    },
+  };
+}
 
 function withoutClientAuthHeaders(
   headers: Record<string, string> | undefined,
@@ -432,6 +457,7 @@ export function resolveSessionRouteDecision(
   const provider = getActiveCatalog().providers.find((p) => p.id === providerId);
   const routing = provider?.routing[agent];
   if (!routing) return null;
+  if (routing.disabled) return disabledProviderRouteDecision(providerId);
   if (!routingServesWireModel(routing, wireModel)) return null;
   // 自定义供应商：resolve 时按 provider_key_<id>_<agent> 读出该 runtime 的 API key 注入鉴权头（不在 catalog）。
   const apiKey = provider?.source === 'user' ? customProviderKeyReader(providerId, agent) : null;

@@ -473,6 +473,21 @@ describe('none (无鉴权自定义代理 buildRouteDecision)', () => {
     });
   });
 
+  it('disabled 的历史远程无鉴权路由直接 fail closed', () => {
+    expect(
+      buildRouteDecision(
+        {
+          upstream: 'https://remote.example/v1',
+          authStrategy: 'none',
+          disabled: true,
+        },
+        KEY,
+        'codex',
+        null,
+      ),
+    ).toBeNull();
+  });
+
   it('本地 Chat 桥也剥掉复制配置里残留的鉴权与账号头', () => {
     expect(
       buildLocalHandlerHeaders({

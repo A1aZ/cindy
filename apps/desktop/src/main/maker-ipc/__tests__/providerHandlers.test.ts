@@ -67,7 +67,7 @@ function makeDeps(over: Partial<ProviderHandlerDeps> = {}): ProviderHandlerDeps 
     oauthLogin: vi.fn(async () => ({ ok: true })),
     oauthLogout: vi.fn(async () => {}),
     oauthCancel: vi.fn(() => {}),
-    clearOAuthCredentials: vi.fn(() => true),
+    removeOAuthCredentials: vi.fn(() => () => true),
     scanLocalCli: vi.fn(async () => []),
     ...over,
   };
@@ -171,11 +171,11 @@ describe('provider:custom:* CRUD handlers', () => {
     const harness = new IpcHarness();
     const calls: string[] = [];
     const oauthCancel = vi.fn(() => calls.push('cancel'));
-    const clearOAuthCredentials = vi.fn(() => {
+    const removeOAuthCredentials = vi.fn(() => {
       calls.push('clear');
-      return true;
+      return () => true;
     });
-    const deps = makeDeps({ oauthCancel, clearOAuthCredentials });
+    const deps = makeDeps({ oauthCancel, removeOAuthCredentials });
     registerProviderHandlers(harness, deps);
     const oauth = {
       authorizeUrl: 'https://auth.example/authorize',
@@ -196,7 +196,7 @@ describe('provider:custom:* CRUD handlers', () => {
       ...oauthConfig,
       name: 'OpenRouter renamed',
     });
-    expect(clearOAuthCredentials).not.toHaveBeenCalled();
+    expect(removeOAuthCredentials).not.toHaveBeenCalled();
     expect(oauthCancel).not.toHaveBeenCalled();
 
     await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
@@ -211,7 +211,7 @@ describe('provider:custom:* CRUD handlers', () => {
     });
     expect(calls).toEqual(['cancel', 'clear']);
     expect(oauthCancel).toHaveBeenCalledWith('openrouter');
-    expect(clearOAuthCredentials).toHaveBeenCalledWith('openrouter');
+    expect(removeOAuthCredentials).toHaveBeenCalledWith('openrouter');
   });
 
   it('rejects unknown recursive OAuth fields at the IPC validation boundary', async () => {
@@ -250,7 +250,7 @@ describe('provider:custom:* CRUD handlers', () => {
         },
       },
     };
-    const deps = makeDeps({ clearOAuthCredentials: vi.fn(() => false) });
+    const deps = makeDeps({ removeOAuthCredentials: vi.fn(() => null) });
     registerProviderHandlers(harness, deps);
     await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, oauthConfig);
 
@@ -270,15 +270,60 @@ describe('provider:custom:* CRUD handlers', () => {
     expect(deps.refreshCatalog).toHaveBeenCalledTimes(1);
   });
 
+  it('restores OAuth credentials when the config write fails after removal', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    const restore = vi.fn(() => true);
+    const removeOAuthCredentials = vi.fn(() => restore);
+    registerProviderHandlers(harness, makeDeps({ removeOAuthCredentials }));
+    const oauthConfig: CustomProviderConfig = {
+      ...validConfig,
+      auth: {
+        method: 'oauth',
+        oauth: {
+          authorizeUrl: 'https://auth.example/authorize',
+          tokenUrl: 'https://auth.example/token',
+          clientId: 'desktop',
+          scopes: 'openid',
+        },
+      },
+    };
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, oauthConfig);
+    raw!.exec(`
+      CREATE TRIGGER fail_custom_provider_update
+      BEFORE UPDATE ON custom_providers
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated write failure');
+      END
+    `);
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+        ...oauthConfig,
+        auth: {
+          method: 'oauth',
+          oauth: {
+            ...oauthConfig.auth!.oauth,
+            clientId: 'replacement-client',
+          },
+        },
+      }),
+    ).rejects.toThrow(/simulated write failure/);
+
+    expect(removeOAuthCredentials).toHaveBeenCalledWith(oauthConfig.id);
+    expect(restore).toHaveBeenCalledOnce();
+    expect((await listCustomProviders())[0]?.auth).toEqual(oauthConfig.auth);
+  });
+
   it('deletes (idempotent) + broadcasts; bad providerId → INVALID_PARAMS', async () => {
     mountDb();
     const harness = new IpcHarness();
     const calls: string[] = [];
     const deps = makeDeps({
       oauthCancel: vi.fn(() => calls.push('cancel')),
-      clearOAuthCredentials: vi.fn(() => {
+      removeOAuthCredentials: vi.fn(() => {
         calls.push('clear');
-        return true;
+        return () => true;
       }),
     });
     registerProviderHandlers(harness, deps);
@@ -297,7 +342,7 @@ describe('provider:custom:* CRUD handlers', () => {
   it('does not delete a provider when OAuth credential removal fails', async () => {
     mountDb();
     const harness = new IpcHarness();
-    const deps = makeDeps({ clearOAuthCredentials: vi.fn(() => false) });
+    const deps = makeDeps({ removeOAuthCredentials: vi.fn(() => null) });
     registerProviderHandlers(harness, deps);
     await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, validConfig);
 
@@ -468,10 +513,16 @@ describe('provider:oauth mutation ordering', () => {
   it('invalidates post-login work when the provider is edited before discovery finishes', async () => {
     mountDb();
     const harness = new IpcHarness();
-    let finishLogin!: (result: { ok: boolean }) => void;
+    let finishLogin!: (result: {
+      ok: boolean;
+      rollbackCredentials?: () => boolean;
+    }) => void;
     let loginIsCurrent!: () => boolean;
     const oauthLogin = vi.fn(
-      async (_providerId: string, isCurrent: () => boolean): Promise<{ ok: boolean }> => {
+      async (
+        _providerId: string,
+        isCurrent: () => boolean,
+      ): Promise<{ ok: boolean; rollbackCredentials?: () => boolean }> => {
         loginIsCurrent = isCurrent;
         return new Promise((resolve) => {
           finishLogin = resolve;
@@ -508,8 +559,10 @@ describe('provider:oauth mutation ordering', () => {
     });
     expect(loginIsCurrent()).toBe(false);
 
-    finishLogin({ ok: true });
-    await expect(login).resolves.toEqual({ ok: false, reason: 'login_superseded' });
+    const rollbackCredentials = vi.fn(() => true);
+    finishLogin({ ok: true, rollbackCredentials });
+    await expect(login).resolves.toEqual({ ok: false, reason: 'login_cancelled' });
+    expect(rollbackCredentials).toHaveBeenCalledOnce();
   });
 
   it('rejects a new login until provider update and catalog refresh fully settle', async () => {
@@ -561,10 +614,16 @@ describe('provider:oauth mutation ordering', () => {
     const harness = new IpcHarness();
     const pending: Array<{
       isCurrent: () => boolean;
-      finish: (result: { ok: boolean }) => void;
+      finish: (result: {
+        ok: boolean;
+        rollbackCredentials?: () => boolean;
+      }) => void;
     }> = [];
     const oauthLogin = vi.fn(
-      async (_providerId: string, isCurrent: () => boolean): Promise<{ ok: boolean }> =>
+      async (
+        _providerId: string,
+        isCurrent: () => boolean,
+      ): Promise<{ ok: boolean; rollbackCredentials?: () => boolean }> =>
         new Promise((resolve) => {
           pending.push({ isCurrent, finish: resolve });
         }),
@@ -581,9 +640,11 @@ describe('provider:oauth mutation ordering', () => {
     expect(pending[0].isCurrent()).toBe(false);
     expect(pending[1].isCurrent()).toBe(true);
 
-    pending[0].finish({ ok: true });
+    const rollbackCredentials = vi.fn(() => true);
+    pending[0].finish({ ok: true, rollbackCredentials });
     pending[1].finish({ ok: true });
-    await expect(first).resolves.toEqual({ ok: false, reason: 'login_superseded' });
+    await expect(first).resolves.toEqual({ ok: false, reason: 'login_cancelled' });
     await expect(second).resolves.toEqual({ ok: true });
+    expect(rollbackCredentials).toHaveBeenCalledOnce();
   });
 });

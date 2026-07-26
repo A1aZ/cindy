@@ -426,6 +426,21 @@ describe('resolveRoute(运行时注入 fixture)', () => {
     expect(resolveRoute(views, 'nope', 'claude-opus-4-8', 'claude-code')).toBeNull();
   });
 
+  it('rejects a disabled route even when provider, model, and agent match', () => {
+    const disabledViews = views.map((provider) =>
+      provider.id === 'xai'
+        ? {
+            ...provider,
+            routing: {
+              ...provider.routing,
+              codex: { ...provider.routing.codex!, disabled: true },
+            },
+          }
+        : provider,
+    );
+    expect(resolveRoute(disabledViews, 'xai', 'xai/grok-4.3', 'codex')).toBeNull();
+  });
+
   it('动态供应商未注入清单时不解析路由(无可用性证明不路由)', () => {
     const bare = buildRegistry(BUNDLED_CATALOG, { xd: true, anthropic: true, openai: true, xai: true });
     expect(resolveRoute(bare, 'anthropic', 'claude-opus-4-8', 'claude-code')).toBeNull();

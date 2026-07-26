@@ -130,6 +130,7 @@ export function buildRouteDecision(
   // routing 只会命中其一，共用一个参数无歧义。
   oauthToken?: string | null,
 ): RoutingDecision | null {
+  if (routing.disabled) return null;
   switch (routing.authStrategy) {
     case 'none': {
       // 本机 / 自托管无鉴权代理：仍固定路由到所选 upstream，但显式剥掉子进程自带的
@@ -280,6 +281,7 @@ export function gatewayDefaultRouteDecision(
  * wireModel 为空 = 控制面请求(如 codex `GET /models`,无 body.model),不受范围限制。
  */
 function routingServesWireModel(routing: RoutingDescriptor, wireModel: string | undefined): boolean {
+  if (routing.disabled) return false;
   if (!routing.modelPrefixes?.length) return true;
   if (!wireModel) return true;
   return routing.modelPrefixes.some((prefix) => wireModel.startsWith(prefix));
@@ -456,7 +458,7 @@ function providersForModel(modelId: string, agent: AgentKind) {
   return getActiveCatalog().providers.filter((provider) =>
     (provider.id !== 'xd' || getAppCapabilities().canUseCindyGateway) &&
     provider.agents.includes(agent) &&
-    Boolean(provider.routing[agent]) &&
+    Boolean(provider.routing[agent] && !provider.routing[agent]?.disabled) &&
     (provider.models[agent] ?? []).some((model) => model.id === modelId),
   );
 }

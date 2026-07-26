@@ -258,7 +258,7 @@ describe('custom-provider-store CRUD (per-runtime)', () => {
     expect((await getCustomProvider('openrouter'))?.runtimes.codex?.wireProtocol).toBe('openai-chat');
   });
 
-  it('loads legacy remote auth:none records as fail-closed apiKey configs without deleting them', async () => {
+  it('preserves legacy remote auth:none records for repair without deleting them', async () => {
     mountDb();
     raw!.prepare(
       `INSERT INTO custom_providers
@@ -278,7 +278,7 @@ describe('custom-provider-store CRUD (per-runtime)', () => {
 
     const [loaded] = await listCustomProviders();
     expect(loaded.id).toBe('legacy-no-auth');
-    expect(loaded.auth).toBeUndefined();
+    expect(loaded.auth).toEqual({ method: 'none' });
     expect(loaded.runtimes.codex?.baseUrl).toBe('https://remote.example/v1');
     expect(raw!.prepare('SELECT auth FROM custom_providers WHERE id = ?').get('legacy-no-auth'))
       .toEqual({ auth: JSON.stringify({ method: 'none' }) });

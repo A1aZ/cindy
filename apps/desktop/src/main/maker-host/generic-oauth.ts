@@ -175,6 +175,23 @@ export function logoutGenericOAuth(providerId: string): boolean {
 }
 
 /**
+ * 可回滚地删除凭证。配置写入与 safeStorage 无法组成同一个数据库事务，因此调用方在
+ * 配置提交失败时必须用返回的闭包恢复旧 blob；成功提交后直接丢弃闭包即可。
+ */
+export function removeGenericOAuthCredentialsReversibly(
+  providerId: string,
+): (() => boolean) | null {
+  const previous = readBlob(providerId);
+  if (!logoutGenericOAuth(providerId)) return null;
+  return () => {
+    if (!previous) return true;
+    const restored = io.storage.write(providerId, JSON.stringify(previous));
+    if (restored) blobCache.set(providerId, previous);
+    return restored;
+  };
+}
+
+/**
  * 清空全部内存缓存。生产用于「账号切换清空本机密钥」后失效缓存
  * （providerSecretStore 的 secretsClearedListener 接线），测试用于切换注入 storage。
  */
@@ -455,6 +472,11 @@ export interface GenericOAuthDeviceCodeProgress {
 
 export interface GenericOAuthLoginOptions {
   onProgress?: (progress: GenericOAuthDeviceCodeProgress) => void;
+  /**
+   * 凭证成功落盘后交出一次竞态安全的回滚闭包。只有当前凭证仍是本次登录写入的 blob
+   * 时才删除；若后续登录/刷新已换新则 no-op，避免迟到取消误删新凭证。
+   */
+  onCredentialPersisted?: (rollback: () => boolean) => void;
 }
 
 // 同一时刻每个 provider 只允许一个登录流。
@@ -685,12 +707,18 @@ export async function runGenericOAuthLogin(
 
     // 落盘前最后检查：已取消的登录绝不写凭证（同 grok）。
     if (abort.signal.aborted) throw new Error('login_cancelled');
-    if (!writeBlob(provider.id, blobFromTokenResponse(tok))) {
+    const persistedBlob = blobFromTokenResponse(tok);
+    if (!writeBlob(provider.id, persistedBlob)) {
       // 落盘失败必须硬失败并回滚内存态:否则 UI 显示已连接、路由能用,重启/刷新后
       // 授权静默消失(safeStorage 不可用或 .enc 写不进磁盘的机器上尤其致命)。
       blobCache.set(provider.id, null);
       throw new Error('凭证写入本机安全存储失败,请检查系统钥匙串/加密服务后重试');
     }
+    const persistedRaw = JSON.stringify(persistedBlob);
+    options?.onCredentialPersisted?.(() => {
+      if (io.storage.read(provider.id) !== persistedRaw) return true;
+      return logoutGenericOAuth(provider.id);
+    });
     listener?.succeed(provider.name);
     log.info('generic oauth login success', { providerId: provider.id, scope: tok.scope });
     return { ok: true };

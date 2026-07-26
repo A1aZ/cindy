@@ -398,6 +398,7 @@ import {
   deriveModelsDiscoveryUrl,
   discoverGenericOAuthModels,
   logoutGenericOAuth,
+  removeGenericOAuthCredentialsReversibly,
   runGenericOAuthLogin,
 } from '../maker-host/generic-oauth.js';
 import {
@@ -3415,6 +3416,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       const provider = getActiveCatalog().providers.find((p) => p.id === providerId);
       const oauth = provider?.auth.oauth;
       if (!provider || !oauth) throw new Error(`provider '${providerId}' has no oauth descriptor`);
+      let rollbackCredentials: (() => boolean) | undefined;
       const result = await runGenericOAuthLogin(
         { id: provider.id, name: provider.name },
         oauth,
@@ -3424,6 +3426,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
               providerId,
               ...progress,
             }),
+          onCredentialPersisted: (rollback) => {
+            rollbackCredentials = rollback;
+          },
         },
       );
       if (result.ok && isCurrent()) {
@@ -3479,7 +3484,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
         }
         if (isCurrent()) broadcastToAllWindows(MAKER_PUSH.PROVIDER_CHANGED, {});
       }
-      return result;
+      return {
+        ...result,
+        ...(rollbackCredentials ? { rollbackCredentials } : {}),
+      };
     },
     oauthLogout: async (providerId) => {
       if (!logoutGenericOAuth(providerId)) {
@@ -3487,7 +3495,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       }
     },
     oauthCancel: (providerId) => cancelGenericOAuthLogin(providerId),
-    clearOAuthCredentials: (providerId) => logoutGenericOAuth(providerId),
+    removeOAuthCredentials: (providerId) =>
+      removeGenericOAuthCredentialsReversibly(providerId),
   });
 
   // 自定义 MCP 服务器 CRUD —— CRUD 成功后刷新两个 agent 的 mcpProviders 数组

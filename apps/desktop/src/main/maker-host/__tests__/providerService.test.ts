@@ -71,4 +71,34 @@ describe('createProviderService', () => {
       (await svc.listProviders()).find((provider) => provider.id === noAuthProvider.id)?.connected,
     ).toBe(true);
   });
+
+  it('keeps a disabled legacy no-auth provider disconnected', async () => {
+    const base = BUNDLED_CATALOG.providers[0];
+    const disabledProvider = {
+      ...base,
+      id: 'legacy-remote-no-auth',
+      name: 'Legacy remote no-auth',
+      auth: { method: 'none' as const },
+      routing: Object.fromEntries(
+        Object.entries(base.routing).map(([agent, routing]) => [
+          agent,
+          routing ? { ...routing, disabled: true } : routing,
+        ]),
+      ),
+    };
+    const svc = createProviderService({
+      getCatalog: () => ({
+        version: 'disabled-no-auth-test',
+        providers: [disabledProvider],
+      }),
+      connection: {
+        xd: () => false,
+        anthropic: () => false,
+        openai: () => false,
+        xai: () => false,
+      },
+    });
+
+    expect((await svc.listProviders())[0]?.connected).toBe(false);
+  });
 });

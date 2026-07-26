@@ -167,6 +167,6 @@ export function resolveRoute(
   const model = getModel(provider, modelId, agent);
   if (!model) return null;
   const routing = provider.routing[agent];
-  if (!routing) return null;
+  if (!routing || routing.disabled) return null;
   return { provider, model, routing };
 }

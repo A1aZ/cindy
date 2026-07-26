@@ -475,15 +475,13 @@ function parseRuntimes(raw: string): Partial<Record<AgentKind, CustomProviderRun
 function rowToConfig(row: typeof customProviders.$inferSelect): CustomProviderConfig {
   const auth = parseAuth(row.auth);
   const runtimes = parseRuntimes(row.runtimes);
-  // #527 之前保存的远程 auth:none 记录不能因升级绕过新边界。加载时把它降级成
-  // 历史默认的 apiKey 形态（auth 字段缺省），使目录保持可见/可编辑，但路由在用户
-  // 补 key 或改回 loopback 前 fail-closed；不静默删除用户配置。
-  const safeAuth =
-    validateNoAuthLoopbackBoundary(auth, runtimes).ok ? auth : undefined;
+  // #527 之前保存的远程 auth:none 记录保留原始表单数据，供设置页展示和修复。
+  // buildUserProvider 会把不满足当前 loopback 边界的 runtime 标成 disabled；路由解析
+  // 一律拒绝 disabled 描述符，因此不会把历史远程 endpoint 重新解释成 API-key 路由。
   return {
     id: row.id,
     name: row.name,
-    ...(safeAuth ? { auth: safeAuth } : {}),
+    ...(auth ? { auth } : {}),
     runtimes,
   };
 }

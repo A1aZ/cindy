@@ -22,6 +22,7 @@ import {
   deriveModelsDiscoveryUrl,
   hasGenericOAuthLogin,
   logoutGenericOAuth,
+  removeGenericOAuthCredentialsReversibly,
   readCachedGenericOAuthAccessToken,
   refreshGenericOAuthIfNeeded,
   discoverGenericOAuthModels,
@@ -134,6 +135,18 @@ describe('blob 读写 / has / logout', () => {
     expect(hasGenericOAuthLogin('acme')).toBe(false);
   });
 
+  it('可回滚删除会在配置写失败后恢复原 OAuth blob', () => {
+    seedBlob('acme', { access_token: 'at-1', refresh_token: 'rt-1' });
+
+    const restore = removeGenericOAuthCredentialsReversibly('acme');
+    expect(restore).not.toBeNull();
+    expect(storage.map.has('acme')).toBe(false);
+    expect(restore?.()).toBe(true);
+
+    resetGenericOAuthMemoryCache();
+    expect(readCachedGenericOAuthAccessToken('acme', OAUTH)).toBe('at-1');
+  });
+
   it('凭证删除失败时保留当前登录态并返回失败', () => {
     seedBlob('acme', { access_token: 'at-1' });
     storage.remove = () => false;
@@ -204,6 +217,25 @@ describe('登录流与凭证落盘失败', () => {
     expect(res.ok).toBe(true);
     expect(hasGenericOAuthLogin('acme')).toBe(true);
     expect(JSON.parse(storage.map.get('acme')!).access_token).toBe('at-new');
+  });
+
+  it('迟到取消只回滚本次登录写入的凭证，不误删更新的 blob', async () => {
+    autoAuthorize();
+    fetchResponder = () =>
+      new Response(JSON.stringify({ access_token: 'at-new', expires_in: 3600 }), { status: 200 });
+    let rollback: (() => boolean) | undefined;
+
+    const res = await runGenericOAuthLogin(
+      { id: 'acme', name: 'Acme' },
+      OAUTH,
+      { onCredentialPersisted: (fn) => { rollback = fn; } },
+    );
+    expect(res.ok).toBe(true);
+    expect(rollback).toBeTypeOf('function');
+
+    storage.map.set('acme', JSON.stringify({ access_token: 'newer-login' }));
+    expect(rollback?.()).toBe(true);
+    expect(JSON.parse(storage.map.get('acme')!).access_token).toBe('newer-login');
   });
 
   it('登录时 storage.write 失败 → 硬失败且不留「已连接」内存态（回归：防重启后授权静默丢失）', async () => {

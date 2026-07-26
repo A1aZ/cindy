@@ -101,11 +101,17 @@ export interface ProviderHandlerDeps {
   oauthLogin(
     providerId: string,
     isCurrent: () => boolean,
-  ): Promise<{ ok: boolean; reason?: string }>;
+  ): Promise<{
+    ok: boolean;
+    reason?: string;
+    rollbackCredentials?: () => boolean;
+  }>;
   oauthLogout(providerId: string): Promise<void>;
   oauthCancel(providerId: string): void;
-  /** 删除自定义供应商时清理其 OAuth 凭证 blob；false 表示持久删除失败。 */
-  clearOAuthCredentials(providerId: string): boolean;
+  /**
+   * 可回滚地移除 OAuth 凭证。null 表示持久删除失败；返回闭包供配置写失败时恢复旧 blob。
+   */
+  removeOAuthCredentials(providerId: string): (() => boolean) | null;
   /**
    * 本机 agent CLI 安装 / 登录态扫描(生产 = scanLocalCliAuth(createLocalCliScanDeps());
    * 单测注入 stub 不碰真实 home)。只 stat 不读内容(规则 23)。
@@ -276,12 +282,25 @@ export function registerProviderHandlers(
       // 旧 client / endpoint 下签发的 token 不能沿用到新 OAuth 描述符；切到 API key /
       // 无鉴权时也清掉不再可达的 blob。删除失败时必须在配置变更前中止，避免重启后
       // 旧 token 被新 client / endpoint 重新激活。
+      let restoreOAuthCredentials: (() => boolean) | null = null;
       if (shouldResetOAuth) {
-        if (!deps.clearOAuthCredentials(config.id)) {
+        restoreOAuthCredentials = deps.removeOAuthCredentials(config.id);
+        if (!restoreOAuthCredentials) {
           throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
         }
       }
-      const updated = await updateCustomProvider(config.id, config);
+      let updated: CustomProviderConfig | null;
+      try {
+        updated = await updateCustomProvider(config.id, config);
+      } catch (err) {
+        if (restoreOAuthCredentials && !restoreOAuthCredentials()) {
+          throwIpcError(
+            'INTERNAL',
+            'provider update failed and existing OAuth credentials could not be restored',
+          );
+        }
+        throw err;
+      }
       if (!updated) throwIpcError('NOT_FOUND', `custom provider '${config.id}' not found`);
       await afterChange();
       return { ok: true };
@@ -300,10 +319,21 @@ export function registerProviderHandlers(
     try {
       deps.oauthCancel(providerId);
       // OAuth 形态自定义供应商的凭证 blob 一并清掉（apiKey 形态无 blob，幂等无害）。
-      if (!deps.clearOAuthCredentials(providerId)) {
+      const restoreOAuthCredentials = deps.removeOAuthCredentials(providerId);
+      if (!restoreOAuthCredentials) {
         throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
       }
-      await deleteCustomProvider(providerId);
+      try {
+        await deleteCustomProvider(providerId);
+      } catch (err) {
+        if (!restoreOAuthCredentials()) {
+          throwIpcError(
+            'INTERNAL',
+            'provider deletion failed and existing OAuth credentials could not be restored',
+          );
+        }
+        throw err;
+      }
       await afterChange();
       return { ok: true };
     } finally {
@@ -366,9 +396,13 @@ export function registerProviderHandlers(
     const generation = beginOAuthMutation(id);
     try {
       const result = await deps.oauthLogin(id, () => isOAuthMutationCurrent(id, generation));
-      return isOAuthMutationCurrent(id, generation)
-        ? result
-        : { ok: false, reason: 'login_superseded' };
+      if (isOAuthMutationCurrent(id, generation)) {
+        return { ok: result.ok, ...(result.reason ? { reason: result.reason } : {}) };
+      }
+      if (result.ok && result.rollbackCredentials && !result.rollbackCredentials()) {
+        throw new Error('failed to remove credentials from cancelled OAuth login');
+      }
+      return { ok: false, reason: 'login_cancelled' };
     } catch (err) {
       throwIpcError('INVALID_PARAMS', err instanceof Error ? err.message : String(err));
     } finally {

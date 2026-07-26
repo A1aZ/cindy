@@ -12,7 +12,7 @@
  * （测试用 `setCurrentDbClient` 注入内存 db，见 __tests__）。
  */
 
-import { asc, eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 
 import type {
   AgentKind,
@@ -497,10 +497,47 @@ export async function updateCustomProvider(
       name: c.name,
       runtimes: JSON.stringify(c.runtimes),
       auth: c.auth ? JSON.stringify(c.auth) : null,
-      updatedAt: now,
+      updatedAt: Math.max(now, existing.updatedAt + 1),
     })
     .where(eq(customProviders.id, id));
   return c;
+}
+
+/**
+ * 仅当配置仍与调用方读取的快照一致时更新。供 OAuth 登录后的异步模型发现使用：
+ * 用户若在网络请求期间编辑了供应商，旧结果不能覆盖新配置。
+ */
+export async function updateCustomProviderIfUnchanged(
+  id: string,
+  expected: CustomProviderConfig,
+  config: CustomProviderConfig,
+  now: number = Date.now(),
+): Promise<boolean> {
+  const expectedConfig = normalizeConfig({ ...expected, id });
+  const nextConfig = normalizeConfig({ ...config, id });
+  const db = getDbClient().drizzle;
+  const existing = await db.select().from(customProviders).where(eq(customProviders.id, id)).get();
+  if (!existing) return false;
+  const expectedRuntimes = JSON.stringify(expectedConfig.runtimes);
+  const expectedAuth = expectedConfig.auth ? JSON.stringify(expectedConfig.auth) : null;
+  if (
+    existing.name !== expectedConfig.name
+    || existing.runtimes !== expectedRuntimes
+    || existing.auth !== expectedAuth
+  ) return false;
+  const result = await db
+    .update(customProviders)
+    .set({
+      name: nextConfig.name,
+      runtimes: JSON.stringify(nextConfig.runtimes),
+      auth: nextConfig.auth ? JSON.stringify(nextConfig.auth) : null,
+      updatedAt: Math.max(now, existing.updatedAt + 1),
+    })
+    .where(and(
+      eq(customProviders.id, id),
+      eq(customProviders.updatedAt, existing.updatedAt),
+    ));
+  return result.changes === 1;
 }
 
 /** 删除（幂等：不存在也不报错）。 */

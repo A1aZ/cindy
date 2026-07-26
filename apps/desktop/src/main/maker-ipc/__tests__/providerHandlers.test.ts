@@ -371,3 +371,52 @@ describe('provider:models-fetch handler', () => {
     expect(deps.fetchModels).not.toHaveBeenCalled();
   });
 });
+
+describe('provider:oauth mutation ordering', () => {
+  it('invalidates post-login work when the provider is edited before discovery finishes', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    let finishLogin!: (result: { ok: boolean }) => void;
+    let loginIsCurrent!: () => boolean;
+    const oauthLogin = vi.fn(
+      async (_providerId: string, isCurrent: () => boolean): Promise<{ ok: boolean }> => {
+        loginIsCurrent = isCurrent;
+        return new Promise((resolve) => {
+          finishLogin = resolve;
+        });
+      },
+    );
+    registerProviderHandlers(harness, makeDeps({ oauthLogin }));
+    const oauthConfig: CustomProviderConfig = {
+      ...validConfig,
+      auth: {
+        method: 'oauth',
+        oauth: {
+          authorizeUrl: 'https://auth.example/authorize',
+          tokenUrl: 'https://auth.example/token',
+          clientId: 'desktop',
+          scopes: 'openid models.read',
+        },
+      },
+    };
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, oauthConfig);
+
+    const login = harness.invoke(MAKER_INVOKE.PROVIDER_OAUTH_LOGIN, oauthConfig.id);
+    await vi.waitFor(() => expect(oauthLogin).toHaveBeenCalledOnce());
+    expect(loginIsCurrent()).toBe(true);
+
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+      ...oauthConfig,
+      runtimes: {
+        codex: {
+          ...oauthConfig.runtimes.codex,
+          baseUrl: 'https://new-endpoint.example/v1',
+        },
+      },
+    });
+    expect(loginIsCurrent()).toBe(false);
+
+    finishLogin({ ok: true });
+    await expect(login).resolves.toEqual({ ok: true });
+  });
+});

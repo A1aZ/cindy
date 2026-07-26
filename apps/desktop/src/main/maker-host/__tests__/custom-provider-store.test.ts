@@ -15,6 +15,7 @@ import {
   getCustomProvider,
   listCustomProviders,
   updateCustomProvider,
+  updateCustomProviderIfUnchanged,
   validateCustomProviderConfig,
 } from '../custom-provider-store.js';
 import type { CustomProviderConfig } from '@cindy/model-providers';
@@ -180,6 +181,43 @@ describe('custom-provider-store CRUD (per-runtime)', () => {
     await deleteCustomProvider('openrouter');
     expect(await listCustomProviders()).toEqual([]);
     expect(await getCustomProvider('openrouter')).toBeNull();
+  });
+
+  it('applies discovered models only while the saved provider still matches its snapshot', async () => {
+    mountDb();
+    await createCustomProvider(valid, 1_000);
+    const snapshot = await getCustomProvider('openrouter');
+    expect(snapshot).not.toBeNull();
+    const discovered = {
+      ...snapshot!,
+      runtimes: {
+        ...snapshot!.runtimes,
+        codex: {
+          ...snapshot!.runtimes.codex!,
+          models: [
+            ...snapshot!.runtimes.codex!.models,
+            { id: 'new-model', name: 'New model' },
+          ],
+        },
+      },
+    };
+
+    expect(
+      await updateCustomProviderIfUnchanged('openrouter', snapshot!, discovered, 1_000),
+    ).toBe(true);
+    expect((await getCustomProvider('openrouter'))?.runtimes.codex?.models).toHaveLength(2);
+
+    await updateCustomProvider('openrouter', {
+      ...valid,
+      name: 'Edited in another window',
+    }, 1_000);
+    expect(
+      await updateCustomProviderIfUnchanged('openrouter', discovered, {
+        ...discovered,
+        name: 'Stale discovery write',
+      }, 1_000),
+    ).toBe(false);
+    expect((await getCustomProvider('openrouter'))?.name).toBe('Edited in another window');
   });
 
   it('round-trips headers + dedupes models on normalize', async () => {

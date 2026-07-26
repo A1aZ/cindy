@@ -450,9 +450,9 @@ import { createWorkerTurnStartSequencer } from './workerTurnStartSequencer.js';
 import { createBusinessSessionId } from '../sessionIds.js';
 import { forkSessionAtMessage } from '../maker-orchestration/fork.js';
 import {
-  isDeviceLinkAutoTitleEligible,
-  scheduleEligibleDeviceLinkAutoTitle,
-} from './deviceLinkAutoTitle.js';
+  isSessionAutoTitleEligible,
+  scheduleSessionAutoTitle,
+} from './sessionAutoTitle.js';
 import {
   SILENT_STOP_RESUME_PROMPT,
   SilentStopAutoResumeGuard,
@@ -6598,7 +6598,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     let shouldAutoTitle = false;
     if (isDeviceLinkInvoke() && autoTitleSeed) {
       try {
-        shouldAutoTitle = await isDeviceLinkAutoTitleEligible(sid);
+        shouldAutoTitle = await isSessionAutoTitleEligible(sid);
       } catch (err) {
         log.warn('[device-link] auto-title eligibility check failed', {
           sessionId: sid,
@@ -6619,8 +6619,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       resumeRestorePausedQueue: true,
     });
     if (shouldAutoTitle && autoTitleSeed) {
-      scheduleEligibleDeviceLinkAutoTitle({
-        maker,
+      scheduleSessionAutoTitle({
         sessionId: sid,
         text: autoTitleSeed.text,
         agentKind: queued.createOpts.agentKind,

@@ -352,6 +352,11 @@ const actions = {
     // 的 epoch 立即失效,且下次 bootstrap 拿到更高 epoch,不会与断连前在途的 epoch 撞值。即使尚未建
     // shard(首拉未完成就被移除)也要 bump,否则在途首拉 await 回来仍能通过 isLatestSnapshotEpoch 加回。
     snapshotEpoch.set(deviceId, (snapshotEpoch.get(deviceId) ?? 0) + 1);
+    // 标题预览随分片一起丢弃:撤销授权 / 关闭控制后该设备的会话已不在视图里,
+    // 留着会在下次重新接入时把边界前的旧预览顶回一个仍是默认标题的会话上。
+    for (const session of shards.get(deviceId)?.sessions ?? []) {
+      pendingTitlePreview.delete(session.id);
+    }
     const shardDeleted = shards.delete(deviceId);
     const failureCleared = setBootstrapFailed(deviceId, false);
     if (shardDeleted) recompute();
@@ -363,6 +368,9 @@ const actions = {
     // 所有设备 epoch 无条件**自增**(不 clear-to-0,见 snapshotEpoch 注释的 ABA):清空时在途
     // 首拉立即失效;下一轮 bootstrap 拿到更高 epoch,不会与清空前的 epoch 撞值把陈旧 snapshot 盖回。
     for (const [k, v] of snapshotEpoch) snapshotEpoch.set(k, v + 1);
+    // 登出 / device-link stopped 是明确的生命周期边界:预览是本次会话期的临时
+    // 显示态,跨过边界后不该复活(也避免长期留存用户输入的文本)。
+    pendingTitlePreview.clear();
     const failureChanged = bootstrapFailedDeviceIds.size > 0;
     if (failureChanged) bootstrapFailedDeviceIds = new Set();
     if (shards.size === 0) {

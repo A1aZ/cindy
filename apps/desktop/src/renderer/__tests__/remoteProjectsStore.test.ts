@@ -337,6 +337,27 @@ describe('remoteProjectsStore pending title preview', () => {
     expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('帮我排查登录失败');
   });
 
+  it('drops previews for a removed device (revoke / stop control)', () => {
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
+    remoteProjectsStore.setPendingTitlePreview('s1', '帮我排查登录失败');
+
+    remoteProjectsStore.removeDevice('dev-B');
+    // 重新接入后权威标题仍是默认占位 —— 边界前的旧预览不得复活。
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
+
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('New Maker');
+  });
+
+  it('drops previews on clear() (logout / device-link stopped)', () => {
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
+    remoteProjectsStore.setPendingTitlePreview('s1', '帮我排查登录失败');
+
+    remoteProjectsStore.clear();
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
+
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('New Maker');
+  });
+
   it('ignores empty previews and keeps the snapshot reference stable on repeat calls', () => {
     remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
     remoteProjectsStore.setPendingTitlePreview('s1', '   ');

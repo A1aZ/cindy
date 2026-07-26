@@ -31,6 +31,11 @@ import {
 import { createLogger } from '../logger.js';
 
 import { MAKER_INVOKE } from './channels.js';
+import {
+  runSessionAutoTitle,
+  type SessionAutoTitleRequest,
+  type SessionAutoTitleResult,
+} from './sessionAutoTitle.js';
 
 const log = createLogger('maker-ipc/title');
 
@@ -209,6 +214,16 @@ export function registerMakerTitleIpc(): void {
       { sessionId }: { sessionId: string },
     ): Promise<{ title: string | null }> => {
       return { title: await regenerateMakerSessionTitle(sessionId) };
+    },
+  );
+  // 自动起名:renderer 只负责给素材,占位/条件写/归属表全在 main(单一真相源)。
+  ipcMain.handle(
+    MAKER_INVOKE.AUTO_TITLE,
+    async (
+      _event: Electron.IpcMainInvokeEvent,
+      request: SessionAutoTitleRequest,
+    ): Promise<SessionAutoTitleResult> => {
+      return runSessionAutoTitle(request);
     },
   );
 }

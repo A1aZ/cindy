@@ -20,6 +20,7 @@ describe('isProviderRequestPath', () => {
     '/infer\tmode',
     '/infer\u0000mode',
     '/模型',
+    '/v1\\messages',
     'responses',
   ])('rejects an unsafe or unescaped request path: %j', (requestPath) => {
     expect(isProviderRequestPath(requestPath)).toBe(false);

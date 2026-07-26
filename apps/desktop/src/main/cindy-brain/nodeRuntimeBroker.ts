@@ -216,7 +216,7 @@ function stderrHint(text: string, preferLast = false): string | null {
     ? lines.findLast((candidate) => /error/i.test(candidate))
     : lines.find((candidate) => /error/i.test(candidate));
   const line = errorLine ?? fallback;
-  return sanitizePathsInHint(line.slice(0, 240));
+  return sanitizePathsInHint(line).slice(0, 240);
 }
 
 function sanitizePathsInHint(hint: string): string {

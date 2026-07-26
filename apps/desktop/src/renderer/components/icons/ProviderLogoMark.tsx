@@ -7,6 +7,7 @@
 
 import {
   hasProviderLogo,
+  isProviderLogoKind,
   PROVIDER_LOGO_PATHS,
   resolveProviderLogoKind,
   type ProviderLogoKind,
@@ -37,7 +38,9 @@ export function ProviderLogoMark({
   size = 14,
   className,
 }: ProviderLogoMarkProps) {
-  const kind = logoKind ?? resolveProviderLogoKind(providerId, routing);
+  const kind = isProviderLogoKind(logoKind)
+    ? logoKind
+    : resolveProviderLogoKind(providerId, routing);
   if (!kind) return null;
   if (kind === 'anthropic') return <AnthropicMark size={size} className={className} />;
   if (kind === 'openai') return <OpenAIMark size={size} className={className} />;

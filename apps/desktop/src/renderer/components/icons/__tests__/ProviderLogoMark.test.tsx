@@ -73,4 +73,12 @@ describe('ProviderLogoMark', () => {
       render(<ProviderLogoMark providerId="future-provider" />).container.firstChild,
     ).toBeNull();
   });
+
+  it('ignores an unknown projected logo kind and falls back to provider identity', () => {
+    const mark = render(
+      <ProviderLogoMark providerId="xai" logoKind={'future-brand' as never} />,
+    );
+    expect(mark.container.querySelector('svg')).not.toBeNull();
+    expect(mark.container.querySelector('path')).not.toBeNull();
+  });
 });

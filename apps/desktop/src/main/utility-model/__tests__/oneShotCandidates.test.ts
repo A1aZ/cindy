@@ -622,6 +622,51 @@ describe('utility one-shot candidates', () => {
     expect(init.headers['anthropic-version']).toBeUndefined();
   });
 
+  it('routes a descriptor-backed no-auth builtin through the generic utility transport', async () => {
+    activeCatalog.mockReturnValue({
+      providers: [{
+        id: 'catalog-local',
+        name: 'Catalog Local',
+        source: 'builtin',
+        agents: ['codex'],
+        auth: { method: 'none' },
+        routing: {
+          codex: {
+            upstream: 'http://127.0.0.1:4000/v1',
+            wireProtocol: 'openai-chat',
+            authStrategy: 'none',
+          },
+        },
+        models: {
+          codex: [{ id: 'catalog-model', name: 'Catalog Model', contextWindow: 100_000 }],
+        },
+      }],
+    } as never);
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      text: async () => JSON.stringify({
+        choices: [{ message: { content: 'catalog result' } }],
+      }),
+    } as never);
+
+    const result = await requestUtilityText(makerMock(false), 'generate', {
+      providerId: 'catalog-local',
+      agentKind: 'codex',
+      model: 'catalog-model',
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      text: 'catalog result',
+      providerId: 'catalog-local',
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:4000/v1/chat/completions',
+      expect.anything(),
+    );
+    expect(readCustomKey).not.toHaveBeenCalled();
+  });
+
   it('can infer a unique custom provider when an older caller omits providerId', async () => {
     activeCatalog.mockReturnValue({
       providers: [{

@@ -23,6 +23,9 @@ export function isProviderRequestPath(value: unknown): value is string {
     && !value.includes('#')
     && !value.includes('\\')
     && !/[^\u0021-\u007e]/.test(value)
+    // Keep byte-for-byte parity between WHATWG URL setters and transparent http.request paths.
+    // Characters outside RFC 3986 path/query delimiters must be percent-encoded by the caller.
+    && /^\/[A-Za-z0-9\-._~%!$&()*+,;=:@/?]*$/.test(value)
     && !/%(?![0-9A-Fa-f]{2})/.test(value)
     && !hasDotSegment
   );

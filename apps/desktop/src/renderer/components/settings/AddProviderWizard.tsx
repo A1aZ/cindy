@@ -68,6 +68,16 @@ const AGENT_LABEL: Record<AgentKind, string> = {
   codex: 'Codex',
 };
 
+function resolveRuntimeBaseUrl(
+  editedUrls: Partial<Record<AgentKind, string>>,
+  agent: AgentKind,
+  fallback: string,
+): string {
+  return Object.prototype.hasOwnProperty.call(editedUrls, agent)
+    ? (editedUrls[agent] ?? '').trim()
+    : fallback;
+}
+
 /**
  * bespoke OAuth 渠道的官方 API 预设——授权步「改用 API Key 接入」的替代路径
  * (API 用户没有订阅,OAuth 授权对其是错误路径)。
@@ -266,8 +276,11 @@ export function AddProviderWizard({
     sel?.kind === 'oauth' && sel.provider.auth.oauth?.flow === 'device-code'
       ? sel.provider.id
       : null;
-  const { deviceCode: genericDeviceCode, clearDeviceCode: clearGenericDeviceCode } =
-    useProviderOAuthDeviceCode(genericDeviceProviderId);
+  const {
+    deviceCode: genericDeviceCode,
+    clearDeviceCode: clearGenericDeviceCode,
+    beginOwnedLogin: beginGenericOwnedLogin,
+  } = useProviderOAuthDeviceCode(genericDeviceProviderId);
   // Step 3 拉取态
   const [step, setStep] = useState<1 | 2 | 3>(entryProvider ? 2 : 1);
   const [fetchState, setFetchState] = useState<
@@ -405,9 +418,14 @@ export function AddProviderWizard({
           ok = r.ok;
           if (!r.ok && r.reason === 'login_cancelled') return;
         } else {
-          const r = await window.electronAPI.maker.providerOAuthLogin(id);
-          ok = r.ok;
-          if (!r.ok && r.reason === 'login_cancelled') return;
+          const finishOwnedLogin = beginGenericOwnedLogin();
+          try {
+            const r = await window.electronAPI.maker.providerOAuthLogin(id);
+            ok = r.ok;
+            if (!r.ok && r.reason === 'login_cancelled') return;
+          } finally {
+            finishOwnedLogin();
+          }
         }
         if (ok) {
           toast.success(
@@ -423,7 +441,7 @@ export function AddProviderWizard({
         setLoggingIn(false);
       }
     },
-    [sel, clearGenericDeviceCode, codexAuth, onDone, t],
+    [sel, clearGenericDeviceCode, beginGenericOwnedLogin, codexAuth, onDone, t],
   );
 
   /**
@@ -521,7 +539,7 @@ export function AddProviderWizard({
         try {
           const r = await window.electronAPI.maker.fetchProviderModels({
             agent,
-            baseUrl: runtimeBaseUrls[agent]?.trim() || rt.baseUrl,
+            baseUrl: resolveRuntimeBaseUrl(runtimeBaseUrls, agent, rt.baseUrl),
             modelsUrl: rt.modelsUrl ?? null,
             apiKey: apiKey.trim() || null,
             ...(rt.headers ? { headers: rt.headers } : {}),
@@ -636,7 +654,7 @@ export function AddProviderWizard({
           });
         if (agentModels.length === 0) continue;
         runtimes[agent] = {
-          baseUrl: runtimeBaseUrls[agent]?.trim() || rt.baseUrl,
+          baseUrl: resolveRuntimeBaseUrl(runtimeBaseUrls, agent, rt.baseUrl),
           ...(rt.requestPath ? { requestPath: rt.requestPath } : {}),
           ...(rt.wireProtocol ? { wireProtocol: rt.wireProtocol } : {}),
           models: agentModels,
@@ -719,7 +737,10 @@ export function AddProviderWizard({
   const presetBaseUrlsValid =
     sel?.kind === 'preset' &&
     presetAgents.every((agent) => {
-      const value = runtimeBaseUrls[agent]?.trim() || sel.preset.runtimes[agent]?.baseUrl || '';
+      const runtime = sel.preset.runtimes[agent];
+      const value = runtime
+        ? resolveRuntimeBaseUrl(runtimeBaseUrls, agent, runtime.baseUrl)
+        : '';
       if (sel.preset.authMethod === 'none') return isLoopbackProviderUrl(value);
       try {
         const url = new URL(value);

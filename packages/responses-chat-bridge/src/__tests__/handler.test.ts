@@ -98,8 +98,12 @@ describe('createResponsesChatHandler', () => {
     ['a raw non-ASCII chat path', 'https://provider.example/v1', '/café'],
     ['a control character in the chat path', 'https://provider.example/v1', '/chat\u007f'],
     ['a backslash in the chat path', 'https://provider.example/v1', '/v1\\chat'],
+    ['a dot segment in the chat path', 'https://provider.example/v1', '/../admin'],
+    ['an encoded dot segment in the chat path', 'https://provider.example/v1', '/%2e%2e/admin'],
+    ['a WHATWG-normalized character in the chat path', 'https://provider.example/v1', '/a<b'],
     ['an incomplete percent escape', 'https://provider.example/v1', '/chat%2'],
     ['an invalid percent escape', 'https://provider.example/v1', '/%ZZ'],
+    ['an oversized chat path', 'https://provider.example/v1', `/${'a'.repeat(2_048)}`],
   ])('reports %s as configuration failure before fetching', async (_case, upstreamBase, chatCompletionsPath) => {
     const fetchImpl = vi.fn() as unknown as typeof fetch;
     const buildHeaders = vi.fn(async () => ({ authorization: 'Bearer secret' }));

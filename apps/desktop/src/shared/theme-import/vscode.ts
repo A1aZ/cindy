@@ -173,12 +173,13 @@ function scopeList(scope: string | string[] | undefined): string[] {
     .filter((s) => s.length > 0);
 }
 
-/** 取某个 TextMate scope 的前景色（前缀匹配，取首个命中）。 */
+/** 取某个 TextMate scope 的前景色（反向扫描——VSCode 是 last-match-wins）。 */
 function tokenColorFor(theme: VsCodeThemeJson, wanted: string): Rgb | null {
-  for (const entry of theme.tokenColors ?? []) {
-    const fg = entry.settings?.foreground;
+  const entries = theme.tokenColors ?? [];
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const fg = entries[i].settings?.foreground;
     if (typeof fg !== 'string') continue;
-    for (const scope of scopeList(entry.scope)) {
+    for (const scope of scopeList(entries[i].scope)) {
       if (scope === wanted || scope.startsWith(`${wanted}.`)) {
         const rgb = parseCssColor(fg);
         if (rgb) return rgb;
@@ -271,6 +272,7 @@ export function extractVsCodePalette(
     'chip',
     ['list.activeSelectionBackground', 'editorGroupHeader.tabsBackground', 'badge.background'],
     () => step(hover, 0.04),
+    surfaceHit,
   );
   const border = role(
     'border',

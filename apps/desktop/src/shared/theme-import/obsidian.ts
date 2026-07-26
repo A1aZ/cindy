@@ -105,6 +105,15 @@ function findBlockEnd(source: string, openIndex: number): number {
   return j;
 }
 
+const SKIP_AT_RULE_RE = /^@(supports|font-face|keyframes|layer|counter-style|page)\b/i;
+const PRINT_MEDIA_RE = /^@media\b[^{]*\bprint\b/i;
+
+function shouldRecurseAtRule(selector: string): boolean {
+  if (SKIP_AT_RULE_RE.test(selector)) return false;
+  if (PRINT_MEDIA_RE.test(selector)) return false;
+  return true;
+}
+
 function scanCssRules(source: string, depth: number): CssRule[] {
   if (depth >= MAX_AT_RULE_DEPTH) return [];
   const rules: CssRule[] = [];
@@ -142,7 +151,13 @@ function scanCssRules(source: string, depth: number): CssRule[] {
       const j = findBlockEnd(source, i);
       const body = source.slice(i + 1, Math.max(i + 1, j - 1));
       if (selector.startsWith('@')) {
-        rules.push(...scanCssRules(body, depth + 1));
+        // 只递归进"总是生效"的 at-rule 块：`@media` 无条件或
+        // `prefers-color-scheme` 条件(已在 selectorMode 层判断)。
+        // 跳过 `@media print`、`@media (max-width:…)`、`@supports` 等
+        // 条件块——它们的变量不一定生效，提取会产出错误配色。
+        if (shouldRecurseAtRule(selector)) {
+          rules.push(...scanCssRules(body, depth + 1));
+        }
       } else if (selector.length > 0) {
         rules.push({ selector, body });
       }
@@ -160,12 +175,17 @@ function scanCssRules(source: string, depth: number): CssRule[] {
   return rules;
 }
 
-/** 抽一个 declaration block 里的自定义属性。 */
-function collectCustomProps(body: string, into: VarMap): void {
+/** 抽一个 declaration block 里的自定义属性。`!important` 声明锁定变量不被后续普通声明覆盖。 */
+function collectCustomProps(body: string, into: VarMap, locked?: Set<string>): void {
   for (const m of body.matchAll(/(--[A-Za-z0-9_-]+)\s*:\s*([^;]+)(?:;|$)/g)) {
     const name = m[1].trim();
-    const value = m[2].replace(/!important/gi, '').trim();
-    if (value.length > 0) into.set(name, value);
+    const rawValue = m[2].trim();
+    const isImportant = /!important\s*$/i.test(rawValue);
+    const value = rawValue.replace(/!important/gi, '').trim();
+    if (value.length === 0) continue;
+    if (locked?.has(name) && !isImportant) continue;
+    into.set(name, value);
+    if (isImportant) locked?.add(name);
   }
 }
 
@@ -249,14 +269,21 @@ export function collectObsidianVars(source: string): ModeVars[] {
   const base: VarMap = new Map();
   const dark: VarMap = new Map();
   const light: VarMap = new Map();
+  const baseLocked = new Set<string>();
+  const darkLocked = new Set<string>();
+  const lightLocked = new Set<string>();
   for (const rule of collectCssRules(source)) {
     const mode = selectorMode(rule.selector);
     if (mode === null) continue;
     if (mode === 'base') {
-      collectCustomProps(rule.body, base);
+      collectCustomProps(rule.body, base, baseLocked);
       continue;
     }
-    collectCustomProps(rule.body, mode === 'dark' ? dark : light);
+    collectCustomProps(
+      rule.body,
+      mode === 'dark' ? dark : light,
+      mode === 'dark' ? darkLocked : lightLocked,
+    );
   }
   const out: ModeVars[] = [];
   const merge = (mode: VarMap): VarMap => new Map([...base, ...mode]);

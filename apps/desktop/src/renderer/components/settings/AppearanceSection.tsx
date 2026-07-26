@@ -46,6 +46,7 @@ const log = createLogger('settings/AppearanceSection');
 /** main 侧导入失败码 → 专门文案；未列出的码落到通用 importFailed。 */
 const IMPORT_ERROR_KEYS: Record<string, string> = {
   UNSUPPORTED_THEME_FILE: 'settings.appearance.localThemes.importUnsupported',
+  THEME_USES_INCLUDE: 'settings.appearance.localThemes.importUsesInclude',
   NOT_A_FILE: 'settings.appearance.localThemes.importNotAFile',
   FILE_TOO_LARGE: 'settings.appearance.localThemes.importTooLarge',
   IMPORT_WRITE_ERROR: 'settings.appearance.localThemes.importWriteError',

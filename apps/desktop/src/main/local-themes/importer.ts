@@ -211,8 +211,12 @@ export async function importExternalTheme(
     const content = await fs.promises.readFile(filePath, 'utf8');
 
     const converted = convert(filePath, content);
-    if (!converted || converted.themes.length === 0) {
+    if (!converted) {
       return { success: false, error: 'UNSUPPORTED_THEME_FILE' };
+    }
+    if (converted.themes.length === 0) {
+      const hasInclude = converted.report.unresolved.some((u) => u.startsWith('include:'));
+      return { success: false, error: hasInclude ? 'THEME_USES_INCLUDE' : 'UNSUPPORTED_THEME_FILE' };
     }
 
     const { written, error } = await writeConverted(converted.themes);

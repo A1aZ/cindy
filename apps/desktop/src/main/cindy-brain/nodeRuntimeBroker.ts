@@ -200,14 +200,18 @@ class WorkerStartError extends Error {
   }
 }
 
-/** 从 stderr 里挑最有诊断价值的一行(优先含 error 的行),截短拼进失败消息。 */
-function stderrHint(text: string): string | null {
+/**
+ * 从 stderr 里挑最有诊断价值的一行(优先含 error 的行),截短拼进失败消息。
+ * preferLast: 无 error 关键词时回退到末行(退出诊断)还是首行(启动诊断)。
+ */
+function stderrHint(text: string, preferLast = false): string | null {
   const lines = text
     .split(/\r?\n|\r/)
     .map((line) => line.trim())
     .filter(Boolean);
   if (lines.length === 0) return null;
-  const line = lines.find((candidate) => /error/i.test(candidate)) ?? lines[lines.length - 1];
+  const fallback = preferLast ? lines[lines.length - 1] : lines[0];
+  const line = lines.find((candidate) => /error/i.test(candidate)) ?? fallback;
   return sanitizePathsInHint(line.slice(0, 240));
 }
 
@@ -217,7 +221,10 @@ function sanitizePathsInHint(hint: string): string {
     .replace(/(['"])((?:[A-Za-z]:[/\\]|\\\\[^'"]+|\/)[^'"]+)\1/g, (_, q, p) => `${q}${basename(p)}${q}`)
     .replace(/[A-Za-z]:[/\\][^'")\]\n]*/g, basename)
     .replace(/\\\\[^'")\]\n]*/g, basename)
-    .replace(/\/(?:[^/'")\]\n]+\/)+[^'")\]\n]*/g, basename);
+    // 多段 POSIX 路径(含空格)
+    .replace(/\/(?:[^/'")\]\n]+\/)+[^'")\]\n]*/g, basename)
+    // 单段 POSIX 绝对路径(如 /private、/AcmeSecretMount)
+    .replace(/\/[A-Za-z][A-Za-z0-9._-]*(?=[\s'")\]\n:,]|$)/g, basename);
 }
 
 type UtilityFork = typeof utilityProcess.fork;
@@ -1356,9 +1363,10 @@ export class GhostNodeRuntimeBroker {
     // 重试成功时插件不该看到一次假 crash)。
     if (!entry.stopping && !entry.startupPhase) {
       this.deps.log?.warn('ghost node process exited', { ghostId, entry: entry.entryRel, detail });
-      // 如果 drain 期间已有替代 worker 启动,不发 crashed——消费方会误以为新 worker 崩溃。
+      // 抑制 crashed 广播:替代 worker 已启动(key 被占);或 drain 期间插件被
+      // 主动停止/禁用(ghostId 加入 stoppedGhosts)。
       const key = GhostNodeRuntimeBroker.keyOf(ghostId, entry.entryRel);
-      if (!this.workers.has(key)) {
+      if (!this.workers.has(key) && !this.stoppedGhosts.has(ghostId)) {
         this.sendStatus(entry.ghost, 'crashed', detail, entry.entryRel);
       }
     }
@@ -1379,7 +1387,7 @@ export class GhostNodeRuntimeBroker {
       .map((seg) => seg.text)
       .join('');
     if (!recent) return null;
-    return stderrHint(this.redactSecrets(entry, recent));
+    return stderrHint(this.redactSecrets(entry, recent), true);
   }
 
   private redactSecrets(entry: WorkerEntry, text: string): string {

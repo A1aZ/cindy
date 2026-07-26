@@ -637,7 +637,11 @@ export function AddProviderWizard({
       const value = runtimeBaseUrls[agent]?.trim() || sel.preset.runtimes[agent]?.baseUrl || '';
       try {
         const url = new URL(value);
-        return url.protocol === 'http:' || url.protocol === 'https:';
+        return (
+          (url.protocol === 'http:' || url.protocol === 'https:')
+          && !url.username
+          && !url.password
+        );
       } catch {
         return false;
       }

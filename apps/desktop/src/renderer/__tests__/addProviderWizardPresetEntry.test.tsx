@@ -75,6 +75,7 @@ const liteLlmPreset = {
     codex: {
       baseUrl: 'http://127.0.0.1:4000/v1',
       baseUrlEditable: true,
+      requestPath: '/tenant/acme/infer',
       models: [{ id: 'local-model', name: 'Local model' }],
     },
   },
@@ -239,7 +240,10 @@ describe('AddProviderWizard — preset 直达', () => {
       expect.objectContaining({
         auth: { method: 'none' },
         runtimes: {
-          codex: expect.objectContaining({ baseUrl: 'http://localhost:4100/v1' }),
+          codex: expect.objectContaining({
+            baseUrl: 'http://localhost:4100/v1',
+            requestPath: '/tenant/acme/infer',
+          }),
         },
       }),
     );

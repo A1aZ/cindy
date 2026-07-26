@@ -6,6 +6,7 @@ import {
   accountDeletionStatusSchema,
   accountMembershipSchema,
   authRegionSchema,
+  desktopAuthorizationPollSchema,
   loginMethodSchema,
   loginOutcomeSchema,
   meResponseSchema,
@@ -20,6 +21,7 @@ import {
   type AuthMe,
   type AuthTokenPair,
   type AuthRegion,
+  type DesktopAuthorizationPoll,
   type LoginMethod,
   type LoginOutcome,
   type ProviderConfig,
@@ -65,6 +67,12 @@ export class AuthApiError extends Error {
     this.name = "AuthApiError";
   }
 }
+
+/**
+ * 托管回调轮询的单次请求超时。比默认 15s 长,以兼容服务端可能采用的长轮询
+ * (hold 住请求直到授权完成或 ~20s);短轮询实现下正常毫秒级返回,不受影响。
+ */
+const DESKTOP_AUTHORIZATION_POLL_TIMEOUT_MS = 30_000;
 
 const errorResponseSchema = z.object({
   error: z
@@ -173,6 +181,26 @@ export class CindyAuthClient {
       codeVerifier,
       deviceId: this.options.deviceId,
     });
+  }
+
+  /**
+   * 托管回调链路:取回 auth-server 暂存的一次性授权码(语义见
+   * `desktopAuthorizationPollSchema`)。调用方在系统浏览器授权期间反复轮询,
+   * 拿到 `ok` 后照常走 `exchangeAuthorizationCode` 完成 PKCE 兑换。
+   *
+   * `clientState` 既是 CSRF 校验值也是这里的取回凭据:必须是本次尝试新生成的
+   * 随机值(desktop 侧为 UUID v4),且只留在发起端进程内,不落盘、不进日志。
+   */
+  pollDesktopAuthorization(
+    clientState: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<DesktopAuthorizationPoll> {
+    return this.request(
+      "/api/auth/desktop/callback/poll",
+      desktopAuthorizationPollSchema,
+      { clientState, deviceId: this.options.deviceId },
+      { timeoutMs: DESKTOP_AUTHORIZATION_POLL_TIMEOUT_MS, signal: options.signal },
+    );
   }
 
   exchangeNativeSocial(
@@ -382,7 +410,11 @@ export class CindyAuthClient {
     path: string,
     schema: z.ZodType<T>,
     body?: unknown,
-    requestOptions: { token?: string; timeoutMs?: number } = {},
+    requestOptions: {
+      token?: string;
+      timeoutMs?: number;
+      signal?: AbortSignal;
+    } = {},
   ): Promise<T> {
     const timeoutMs = requestOptions.timeoutMs ?? this.timeoutMs;
     const controller = new AbortController();
@@ -390,6 +422,13 @@ export class CindyAuthClient {
       timeoutMs > 0
         ? setTimeout(() => controller.abort(), timeoutMs)
         : undefined;
+    // 调用方取消(如用户中止浏览器登录)时立刻断掉在途请求,不留悬挂连接。
+    // 手动转发而非 AbortSignal.any():后者在部分 RN/Hermes 运行时尚不可用,
+    // 而本 client 是 desktop 与 mobile 共用的平台中立层。
+    const external = requestOptions.signal;
+    const forwardAbort = () => controller.abort();
+    if (external?.aborted) controller.abort();
+    else external?.addEventListener("abort", forwardAbort, { once: true });
     let response: AuthFetchResponse;
     try {
       response = await this.options.fetch(this.baseUrl + path, {
@@ -401,22 +440,28 @@ export class CindyAuthClient {
             : {}),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        ...(timeoutMs > 0 ? { signal: controller.signal } : {}),
+        ...(timeoutMs > 0 || external ? { signal: controller.signal } : {}),
       });
     } catch (error) {
-      const code =
-        error instanceof Error && error.name === "AbortError"
-          ? "REQUEST_TIMEOUT"
-          : "NETWORK_ERROR";
+      // 外部取消与超时都表现为 AbortError,按来源区分:调用方取消不是超时。
+      const aborted = error instanceof Error && error.name === "AbortError";
+      const code = !aborted
+        ? "NETWORK_ERROR"
+        : external?.aborted
+          ? "REQUEST_ABORTED"
+          : "REQUEST_TIMEOUT";
       throw new AuthApiError(
         code,
         0,
         code === "REQUEST_TIMEOUT"
           ? "Authentication request timed out"
-          : "Authentication network request failed",
+          : code === "REQUEST_ABORTED"
+            ? "Authentication request was cancelled"
+            : "Authentication network request failed",
       );
     } finally {
       if (timer !== undefined) clearTimeout(timer);
+      external?.removeEventListener("abort", forwardAbort);
     }
 
     let data: unknown;

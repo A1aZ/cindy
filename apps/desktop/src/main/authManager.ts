@@ -59,6 +59,7 @@ import {
   renderAuthLoopbackPage,
   type AuthLoopbackDevBridge,
 } from './authLoopbackCallback';
+import { runHostedCallbackPolling } from './authHostedCallback';
 // dev-only 登录 scenario harness(implementation-plan Step 0 WHAT4):静态 import
 // (main 禁运行时动态 import),生产构建由 vite alias 把整模块替换为空 stub
 // (vite.main.config.ts),运行时另有 app.isPackaged guard 双保险。
@@ -455,7 +456,16 @@ export function setAuthSessionTeardown(teardown: AuthSessionTeardown | null): vo
 // 从不同步到服务器,因此登录 / 冷启动不再从服务器拉 key 写本地。新设备 / 新登录
 // 需用户在本机重新填入 key。renderer 侧 useApiKey / useMivoApiKey 同为本地 only。
 
-// ── System-browser OAuth / SSO (RFC 8252 loopback callback) ────────────────
+// ── System-browser OAuth / SSO ─────────────────────────────────────────────
+//
+// 两条回调链路,由端点清单的 authDesktopCallbackUrl 决定走哪条:
+//  - 非空 → 托管回调(hosted):redirect_uri 指向 auth-server 自有域名下的固定
+//    地址,服务端暂存授权码、客户端轮询取回。浏览器全程停在自有域名上,地址栏
+//    与浏览历史里不再出现 127.0.0.1 和授权码,唤起 app 的系统弹框显示的也是域名。
+//  - 空 → RFC 8252 loopback(现状):本机起随机端口 HTTP server 接回调。
+//
+// 清单字段同时充当灰度与回滚开关:服务端侧出问题时清空该字段即可回到 loopback,
+// 客户端不必发版。两条链路共用同一套取消 / 超时预算与返回契约。
 
 const BROWSER_AUTH_TIMEOUT_MS = 5 * 60_000;
 const browserAuthorizationSlot = createAuthBrowserAuthorizationSlot();
@@ -472,13 +482,82 @@ export function registerAuthLoopbackDevBridge(bridge: AuthLoopbackDevBridge): bo
   return authLoopbackDevBridgeSlot.register(bridge);
 }
 
+interface BrowserAuthorizationInput {
+  kind: 'social' | 'sso';
+  providerOrConnectionId: string;
+  codeChallenge: string;
+  state: string;
+}
+
+/** 可被 abort 提前唤醒的等待(轮询间隔用;取消后立即 resolve,不 reject)。 */
+function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    // finish 只可能在 setTimeout 返回之后被调用(最早下一个 tick),此时 timer 已绑定。
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal.addEventListener('abort', finish, { once: true });
+  });
+}
+
+/**
+ * 托管回调链路:打开系统浏览器后轮询 auth-server 取回授权码。
+ *
+ * 这里不起本地监听、也不渲染回调页——结果页由服务端在自有域名下托管。
+ * redirect_uri 原样使用清单值(必须与服务端 allowlist 逐字符一致,不做拼接)。
+ */
+async function openHostedBrowserAuthorization(
+  input: BrowserAuthorizationInput,
+  redirectUri: string,
+  signal: AbortSignal,
+): Promise<{ code: string } | { error: string }> {
+  if (signal.aborted) return { error: 'USER_CANCELLED' };
+
+  const client = createAuthClient();
+  const authUrl = client.buildAuthorizeUrl({ ...input, redirectUri });
+  try {
+    await shell.openExternal(authUrl);
+  } catch (error) {
+    log.warn('open auth URL in system browser failed', error);
+    return { error: 'BROWSER_OPEN_FAILED' };
+  }
+
+  return runHostedCallbackPolling({
+    poll: async () => {
+      try {
+        return await client.pollDesktopAuthorization(input.state, { signal });
+      } catch (error) {
+        // 单次失败不等于登录失败(轮询本身有连续失败预算),但静默会让线上登录
+        // 问题无从排查。取消引发的中断不是故障,不记。错误对象只含固定文案与
+        // 错误码,不含 state / 授权码。
+        if (!signal.aborted) log.warn('hosted auth callback poll failed', error);
+        throw error;
+      }
+    },
+    sleep: (ms) => sleepUnlessAborted(ms, signal),
+    now: () => Date.now(),
+    signal,
+    timeoutMs: BROWSER_AUTH_TIMEOUT_MS,
+  });
+}
+
+/** 按端点清单分流到托管回调或 loopback(语义见本节顶部注释)。 */
 async function openSystemBrowserAuthorization(
-  input: {
-    kind: 'social' | 'sso';
-    providerOrConnectionId: string;
-    codeChallenge: string;
-    state: string;
-  },
+  input: BrowserAuthorizationInput,
+  signal: AbortSignal,
+): Promise<{ code: string } | { error: string }> {
+  const hostedCallbackUrl = getClientEndpoint('authDesktopCallbackUrl');
+  return hostedCallbackUrl
+    ? openHostedBrowserAuthorization(input, hostedCallbackUrl, signal)
+    : openLoopbackBrowserAuthorization(input, signal);
+}
+
+async function openLoopbackBrowserAuthorization(
+  input: BrowserAuthorizationInput,
   signal: AbortSignal,
 ): Promise<{ code: string } | { error: string }> {
   return new Promise((resolve) => {
@@ -1833,6 +1912,12 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
         throw new AuthApiError('CONNECTION_NOT_FOUND', 404, 'SSO connection is unavailable');
       }
       const { codeVerifier, codeChallenge } = generatePKCE();
+      // 托管回调链路里 state 不只防 CSRF,还兼作向 auth-server 取回授权码的凭据。
+      // 仍用 randomUUID:v4 的 122 bit 随机量配合服务端限流已不可爆破,而改动格式
+      // (36 → 43 字符)会同时作用于 loopback 路径,一旦服务端对 client_state 有
+      // 长度或 UUID 格式约束就会打断现网登录——收益不抵风险。要提到 256 bit 需先
+      // 与服务端确认 client_state 的取值约束(见 docs/desktop-login-hosted-callback.md)。
+      // 该值只存在于本进程内存中,不落盘、不进日志。
       const state = crypto.randomUUID();
       loginFlowState = reduceAuthFlow(loginFlowState, {
         type: 'browser-started',

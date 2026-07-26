@@ -434,6 +434,29 @@ export function normalizeAutoTitle(text: string): string {
 /** fork 出来的会话的占位标题前缀("[Fork] …" / "[Fork·已剥离] …")。 */
 const FORK_PLACEHOLDER_TITLE_PREFIX = '[Fork';
 
+let _onUserTitleWritten: ((sessionId: string) => void) | null = null;
+
+/**
+ * 注入「用户手动写过标题」的通知(传 null 清除;由 maker-ipc 的自动起名模块注册)。
+ *
+ * 为什么条件写不够:`persistSessionTitleIfStillDraft` 靠 `WHERE title = 期望值` 实现
+ * user rename wins,但用户把标题改成**与占位逐字相同**的串时这条件仍然成立,随后的
+ * 智能标题会把他刚保存的名字覆盖掉(PR #510 review P1)。`sessions` 表没有「谁写的」
+ * 这一列,所以由改名出口显式说一声,自动起名据此收手。
+ */
+export function setOnUserSessionTitleWritten(fn: ((sessionId: string) => void) | null): void {
+  _onUserTitleWritten = fn;
+}
+
+/** 用户改名出口统一调这个(自动起名自己的写入**不**调)。 */
+function noteUserTitleWritten(sessionId: string): void {
+  try {
+    _onUserTitleWritten?.(sessionId);
+  } catch {
+    // 自动起名是附属功能,通知失败不该影响改名主流程。
+  }
+}
+
 /**
  * 自动标题的资格检查:title 仍是系统占位。系统占位有三种 ——
  *
@@ -911,6 +934,9 @@ export function registerSessionIpc(): void {
       bumpUpdatedAt: !isSettingsOnly,
     });
     await db.update(sessions).set(setObj).where(eq(sessions.id, sid));
+    // 用户手动改名(重命名框 / 侧边栏)走这条:告诉自动起名收手。同值改名不会让
+    // 条件写落空,不显式说一声的话智能标题会把他刚保存的名字盖掉(review P1)。
+    if (typeof p.title === 'string') noteUserTitleWritten(sid);
     // session-git-pr-context:/clear 经此处写 clearedAt——边界之前的消息对用户
     // 不可见,PR 引用同步重算(fire-and-forget,内部按 clearedAt/rewindAt 过滤)。
     if (p.clearedAt !== undefined) {
@@ -1045,6 +1071,8 @@ export async function patchSessionMetaInDb(
   const db = getDbClient().drizzle;
   const setObj = sessionPatchToRow(patch, { bumpUpdatedAt: false });
   await db.update(sessions).set(setObj).where(eq(sessions.id, sessionId));
+  // 控制端远程改名走这条,与本机改名同口径。
+  if (patch.title !== undefined) noteUserTitleWritten(sessionId);
   const row = await selectSessionWithCount(db, sessionId);
   if (!row) throwIpcError('NOT_FOUND', 'Session 不存在');
   const updated = sessionToCamel(row);
@@ -1158,6 +1186,8 @@ export async function renameSessionTitlesInDb(
     });
 
   for (const item of applied) {
+    // 批量改名(MCP 工具)同样是"人给的名字",自动起名不得再覆盖。
+    noteUserTitleWritten(item.sessionId);
     notifyAgentIslandSessionPatch(item.sessionId, {
       title: item.newTitle,
       workingDir: item.workingDir,

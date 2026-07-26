@@ -451,6 +451,7 @@ import { createBusinessSessionId } from '../sessionIds.js';
 import { forkSessionAtMessage } from '../maker-orchestration/fork.js';
 import {
   isSessionAutoTitleEligible,
+  registerSessionAutoTitleHooks,
   scheduleSessionAutoTitle,
 } from './sessionAutoTitle.js';
 import {
@@ -3138,6 +3139,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
   getAgentIslandService()?.setPermissionResolver(resolvePendingPermissionFromAgentIsland);
   sessionTurnActivityTracker.setTurnKeepaliveChangeListener(options.onAnySessionTurnKeepaliveChange ?? null);
   gitSnapshotCoordinator = createGitSnapshotCoordinator(maker);
+  // 接上 DB 改名通知:用户手动改名(含改成与占位逐字相同的串)后自动起名收手。
+  registerSessionAutoTitleHooks();
 
   // device-link busy presence:把「本机是否有 turn 在跑」探针注入 device-link host,
   // 它每 5s 取一次、翻转才上报,让控制端设备列表显示 busy 三态(规则 2:回调注入解耦)。

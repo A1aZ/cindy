@@ -5933,7 +5933,9 @@ function scheduleAutoName(
   // 连描述都合成不出来(既无文字也无可命名附件):保留默认标题,留给下一条消息。
   if (!fallbackTitle) return;
   if (isRemoteSession(sessionId)) {
-    remoteProjectsStore.setPendingTitlePreview(sessionId, fallbackTitle);
+    // 带上 isUserText:合成描述对应「被控端先写占位、之后还要换掉」,要登记成系统
+    // 占位归属;用户文字对应的标题可能就此定稿,登记了会让后续预览一直盖着它。
+    remoteProjectsStore.setPendingTitlePreview(sessionId, fallbackTitle, isUserText);
     return;
   }
   if (autoNameSettled.has(sessionId)) return;
@@ -6312,15 +6314,16 @@ function steerMessageCore(
   // 补起名同样要覆盖 steer:首条是纯附件的会话标题此时是合成占位,而用户完全
   // 可能趁这一轮还在跑就用「插话」写下第一句话。只走普通发送的话,这句话不会
   // 改名,标题会一直停在附件名直到他再排队发一条(PR #510 review P1)。
-  // 素材在入队前推导(此刻 queued 还在手里),但**只有 steer 被受理才改名**:
-  // 同会话已有在飞 steer / Stop 边界 / 输入锁都会让它被拒,拒掉的文本不该改名。
+  // 素材在入队前推导(此刻 queued 还在手里),但**只有输入被受理才改名**:同会话
+  // 已有在飞 steer / Stop 边界 / 输入锁都会让它被拒,拒掉的文本不该改名。
   const autoTitleSeed = deriveAutoTitleSeed(queued, autoTitleFallbackLabels());
   const agentKind = getOrCreateState(sessionId).agentKind;
+  const commitAutoTitle = () => maybeAutoNameUnnamedSession(sessionId, autoTitleSeed, agentKind);
   return makerApiFor(sessionId)
     .input.steer(sessionId, queued, { touchUserSend: true })
     .then(async (ok) => {
       if (ok) {
-        maybeAutoNameUnnamedSession(sessionId, autoTitleSeed, agentKind);
+        commitAutoTitle();
         requestInputProjection(sessionId);
         return true;
       }
@@ -6332,6 +6335,10 @@ function steerMessageCore(
         const latest = await makerApiFor(sessionId).input.getProjection(sessionId);
         applyInputProjection(latest);
         if (latest.pendingQueue.some((q) => q.clientId === queued.clientId)) {
+          // 物化进队列 = 这条输入已被主端接管、日后会派发,与受理同等 —— 起名也要
+          // 跟上,否则纯附件/fork 之后的第一句话恰好在这条不确定路径上不改名
+          // (review P1)。是否真该改名仍由 main 权威判定。
+          commitAutoTitle();
           return true;
         }
       } catch (err) {

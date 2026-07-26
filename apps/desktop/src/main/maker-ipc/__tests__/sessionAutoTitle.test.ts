@@ -18,6 +18,7 @@ vi.mock('../../localDb/ipc/sessions.js', () => ({
   })),
   isUntitledSessionAwaitingAutoTitle: vi.fn(async () => true),
   persistSessionTitleIfStillDraft: vi.fn(async () => true),
+  setOnUserSessionTitleWritten: vi.fn(),
   normalizeAutoTitle: (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 40).trimEnd(),
 }));
 
@@ -27,6 +28,7 @@ vi.mock('../title.js', () => ({
 
 import {
   isSessionAutoTitleEligible,
+  registerSessionAutoTitleHooks,
   runSessionAutoTitle,
   __resetSessionAutoTitleStateForTest,
   type SessionAutoTitleDeps,
@@ -203,6 +205,49 @@ describe('runSessionAutoTitle — 用户一个字没写(合成描述)', () => {
       ['这个报错怎么修', '设计稿-v3.png'],
       ['登录失败排查', '这个报错怎么修'],
     ]);
+  });
+
+  it('用户把标题改成与占位逐字相同的串时,智能标题不得盖掉它', async () => {
+    // 条件写(WHERE title = 期望值)在同值改名下**仍会命中** —— 只靠它挡不住,
+    // 必须认改名出口发来的记号(review P1)。
+    const { setOnUserSessionTitleWritten } = await import('../../localDb/ipc/sessions.js');
+    registerSessionAutoTitleHooks();
+    const notify = vi.mocked(setOnUserSessionTitleWritten).mock.calls.at(-1)?.[0];
+    expect(notify).toBeTypeOf('function');
+
+    const deps = makeDeps({
+      // 模型返回前用户按下了保存(标题与占位一模一样)。
+      generateTitle: vi.fn(async () => {
+        notify?.('s1');
+        return '登录失败排查';
+      }),
+    });
+
+    const result = await runSessionAutoTitle(
+      { sessionId: 's1', text: '帮我排查登录失败', agentKind: 'codex' },
+      deps,
+    );
+
+    // 只写了占位那一次,智能标题没有落笔。
+    expect(persistCalls(deps)).toEqual([['帮我排查登录失败', 'New Maker']]);
+    expect(result).toEqual({ applied: true, done: true });
+  });
+
+  it('用户改过名的会话:后续消息一律不再起名', async () => {
+    const { setOnUserSessionTitleWritten } = await import('../../localDb/ipc/sessions.js');
+    registerSessionAutoTitleHooks();
+    vi.mocked(setOnUserSessionTitleWritten).mock.calls.at(-1)?.[0]?.('s1');
+
+    const deps = makeDeps();
+    const result = await runSessionAutoTitle(
+      { sessionId: 's1', text: '这个报错怎么修', agentKind: 'codex' },
+      deps,
+    );
+
+    expect(deps.persistTitle).not.toHaveBeenCalled();
+    expect(deps.resolveOverwritableTitle).not.toHaveBeenCalled();
+    expect(result).toEqual({ applied: false, done: true });
+    expect(await isSessionAutoTitleEligible('s1')).toBe(false);
   });
 
   it('标题已不是系统占位时,预检顺手回收过期归属', async () => {

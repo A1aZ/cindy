@@ -125,12 +125,23 @@ const FORK_PLACEHOLDER_TITLE_PREFIX = '[Fork';
  * 纯附件的首条消息会让被控端把标题写成文件名 /「图片」这类合成占位。用户随后打下
  * 第一句话时被控端会改名,控制端本该同样即时预览 —— 但那时权威标题已经不是
  * "New Maker",只看默认占位的话预览会被一律拒掉,即时性恰好在这条恢复路径上缺席
- * (review P1)。这里记住"这串是我们自己登记过的系统占位",让它和默认标题同等看待。
+ * (review P1)。这里记住"这串是系统合成的占位",让它和默认标题同等看待。
  *
- * 只认控制端自己预览过、随后被权威标题原样确认的串 —— 它与被控端用同一套归一化
- * 算出,必然逐字相等。用户手动改的名不在其中,`user rename wins` 不受影响。
+ * **归属来自登记时的 isUserText,不靠字符串相等推断**:被控端对合成占位不调标题
+ * 模型,写下的就是占位;而用户文字的占位可能因模型无结果而**就地定稿**,那是一个
+ * 终态标题,绝不能记成系统占位 —— 否则之后每条消息的预览都能盖着它不放,而权威
+ * 侧再也不会发新 patch 来纠正(review P1)。
  */
 const landedSystemTitles = new Map<string, string>();
+
+/**
+ * 已登记但尚未被权威标题确认的**合成**预览(sessionId 集合)。
+ *
+ * 只有它里面的会话,其下一个非默认权威标题才会被记成系统占位。这样也不依赖两端
+ * 算出逐字相同的串:控制端与被控端各用**自己**的语言渲染「图片」/「文件」
+ * (`ccAgent.autoTitle.image/file` 是 i18n 串),跨语种时两串本就不同。
+ */
+const synthesizedPreviewSessions = new Set<string>();
 
 /**
  * 「发送瞬间的标题预览」——控制端本地叠加层,**不写进分片**。
@@ -157,21 +168,30 @@ function isSystemOwnedTitle(session: Pick<Session, 'id' | 'title' | 'parentSessi
   return landedSystemTitles.get(session.id) === session.title;
 }
 
-/** 会话彻底离场(删除 / 归档 / 设备移除 / 整体清空)时回收叠加层两张表。 */
+/** 会话彻底离场(删除 / 归档 / 设备移除 / 整体清空)时回收叠加层三张表。 */
 function dropTitleOverlay(sessionId: string): void {
   pendingTitlePreview.delete(sessionId);
   landedSystemTitles.delete(sessionId);
+  synthesizedPreviewSessions.delete(sessionId);
 }
 
 /** 应用标题预览:权威标题不再是系统占位时让位并回收。 */
 function withPendingTitle(session: Session): Session {
   const preview = pendingTitlePreview.get(session.id);
   if (!preview) return session;
-  if (session.title === preview) {
-    // 预览已被权威标题原样确认 —— 回收预览,但记住这串是系统合成的:纯附件首条
-    // 消息之后,用户打下第一句话时还要能顶替它。
+
+  // 权威标题已经离开默认名 → 被控端对这条**合成**预览的回应到了。它写的是自己
+  // 语言的占位,未必与本端预览逐字相同,所以按登记时的归属认、不按字符串认。
+  if (synthesizedPreviewSessions.has(session.id) && session.title !== DEFAULT_REMOTE_SESSION_TITLE) {
+    synthesizedPreviewSessions.delete(session.id);
     pendingTitlePreview.delete(session.id);
     landedSystemTitles.set(session.id, session.title);
+    return session;
+  }
+  // 用户文字的预览被权威值原样确认 → 只回收预览。**不**记系统占位:被控端的智能
+  // 标题可能就此定稿,那是终态,不能让后续预览一直盖着它。
+  if (session.title === preview) {
+    pendingTitlePreview.delete(session.id);
     return session;
   }
   if (!isSystemOwnedTitle(session)) {
@@ -417,6 +437,7 @@ const actions = {
     // 显示态,跨过边界后不该复活(也避免长期留存用户输入的文本)。
     pendingTitlePreview.clear();
     landedSystemTitles.clear();
+    synthesizedPreviewSessions.clear();
     const failureChanged = bootstrapFailedDeviceIds.size > 0;
     if (failureChanged) bootstrapFailedDeviceIds = new Set();
     if (shards.size === 0) {
@@ -435,10 +456,16 @@ const actions = {
   /**
    * 发送瞬间登记标题预览(见 {@link pendingTitlePreview})。只影响投影层显示,
    * 权威标题仍由被控端写回;被控端标题到达后本条自动失效。
+   *
+   * @param isUserText 这串是用户真正写下的文字(true)还是本地合成的描述(false)。
+   *   合成描述对应「被控端会先写占位、之后还要换掉」,要登记成系统占位归属;用户
+   *   文字对应的标题可能就此定稿,不能登记(见 {@link landedSystemTitles})。
    */
-  setPendingTitlePreview(sessionId: string, title: string): void {
+  setPendingTitlePreview(sessionId: string, title: string, isUserText = true): void {
     const next = title.trim();
     if (!sessionId || !next) return;
+    if (isUserText) synthesizedPreviewSessions.delete(sessionId);
+    else synthesizedPreviewSessions.add(sessionId);
     if (pendingTitlePreview.get(sessionId) === next) return;
     // 权威标题已经不是系统占位(智能标题已落 / 用户改过名)→ 预览本来就不会生效,
     // 直接 no-op,省掉一次「写入 → recompute → withPendingTitle 立刻回收」的空转。
@@ -457,6 +484,7 @@ const actions = {
   __resetPendingTitlePreviewForTest(): void {
     pendingTitlePreview.clear();
     landedSystemTitles.clear();
+    synthesizedPreviewSessions.clear();
   },
 
   /** refresh anti-entropy 用:取某设备当前缓存分片，调用方只读。 */

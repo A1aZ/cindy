@@ -29,6 +29,7 @@ import {
   isUntitledSessionAwaitingAutoTitle,
   normalizeAutoTitle,
   persistSessionTitleIfStillDraft,
+  setOnUserSessionTitleWritten,
   type OverwritableAutoTitleTarget,
 } from '../localDb/ipc/sessions.js';
 import { createLogger } from '../logger.js';
@@ -116,14 +117,38 @@ function enqueuePerSession<T>(sessionId: string, task: () => Promise<T>): Promis
   return next;
 }
 
+/**
+ * 用户手动改过名的会话(本进程内)。
+ *
+ * 条件写只能挡住「标题变了」的改名:用户把标题保存成与占位**逐字相同**的串时
+ * `WHERE title = 期望值` 依然命中,随后的智能标题会盖掉他刚保存的名字
+ * (PR #510 review P1)。`sessions` 表没有「谁写的」这一列,所以由改名出口显式
+ * 通知,这里记下来直接收手。重启后遗忘 —— 那时标题早已不是系统占位,资格检查
+ * 本身就会拦住,不需要持久化。
+ */
+const manuallyRenamed = new Set<string>();
+
+/**
+ * 接上 DB 侧的改名通知。register 时调用一次(测试里按需重复调用是幂等的)。
+ * 放在这里而不是 sessions.ts 自己调,是因为依赖方向只能是 maker-ipc → localDb。
+ */
+export function registerSessionAutoTitleHooks(): void {
+  setOnUserSessionTitleWritten((sessionId) => {
+    manuallyRenamed.add(sessionId);
+    synthesizedPlaceholders.delete(sessionId);
+  });
+}
+
 /** 测试专用:清空归属表与串行队列。 */
 export function __resetSessionAutoTitleStateForTest(): void {
   synthesizedPlaceholders.clear();
+  manuallyRenamed.clear();
   queues.clear();
 }
 
-/** 会话是否还需要自动起名(标题仍是系统占位)。 */
+/** 会话是否还需要自动起名(标题仍是系统占位、且用户没手动改过名)。 */
 export async function isSessionAutoTitleEligible(sessionId: string): Promise<boolean> {
+  if (manuallyRenamed.has(sessionId)) return false;
   const eligible = await isUntitledSessionAwaitingAutoTitle(
     sessionId,
     synthesizedPlaceholders.get(sessionId),
@@ -141,6 +166,10 @@ async function runUnsynchronized(
 ): Promise<SessionAutoTitleResult> {
   const seedText = request.text.trim();
   if (!seedText) return { applied: false, done: false };
+
+  // 用户已经手动给过名字 —— 条件写挡不住"同值改名"(WHERE title = 期望值 仍命中),
+  // 只能靠这条显式记号收手(review P1)。
+  if (manuallyRenamed.has(request.sessionId)) return { applied: false, done: true };
 
   const remembered = synthesizedPlaceholders.get(request.sessionId);
 
@@ -202,6 +231,14 @@ async function runUnsynchronized(
   if (placeholderPersisted) synthesizedPlaceholders.delete(request.sessionId);
 
   // 2) 智能标题覆盖占位。
+  //
+  // 这中间隔着一次模型调用,用户完全来得及在这段时间里改名。改成别的串时条件写
+  // 自然落空;改成与占位**逐字相同**的串时条件写仍会命中,所以每次落笔前都要再
+  // 看一眼这条记号(review P1)。
+  if (manuallyRenamed.has(request.sessionId)) {
+    return { applied: placeholderPersisted, done: true };
+  }
+
   let generated: string | undefined;
   try {
     // agentKind 取 DB 权威值而非入参快照:另一窗口/设备切过 agent 时快照会过期,
@@ -216,6 +253,9 @@ async function runUnsynchronized(
     });
   }
   if (!generated) return { applied: placeholderPersisted, done: placeholderPersisted };
+  if (manuallyRenamed.has(request.sessionId)) {
+    return { applied: placeholderPersisted, done: true };
+  }
 
   let smartPersisted = false;
   try {

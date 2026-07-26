@@ -325,7 +325,7 @@ describe('remoteProjectsStore pending title preview', () => {
     // 纯附件首条消息:被控端把标题写成文件名。用户随后打下第一句话时,控制端同样
     // 要即时顶上 —— 只认默认占位的话,即时性恰好在这条恢复路径上缺席(review P1)。
     remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
-    remoteProjectsStore.setPendingTitlePreview('s1', '设计稿-v3.png');
+    remoteProjectsStore.setPendingTitlePreview('s1', '设计稿-v3.png', false);
     remoteProjectsStore.applyPatch('dev-B', 's1', { title: '设计稿-v3.png' });
     expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('设计稿-v3.png');
 
@@ -364,7 +364,7 @@ describe('remoteProjectsStore pending title preview', () => {
 
   it('drops synthesized-title provenance together with the session (archive / device removal)', () => {
     remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
-    remoteProjectsStore.setPendingTitlePreview('s1', '设计稿-v3.png');
+    remoteProjectsStore.setPendingTitlePreview('s1', '设计稿-v3.png', false);
     remoteProjectsStore.applyPatch('dev-B', 's1', { title: '设计稿-v3.png' });
     remoteProjectsStore.applyPatch('dev-B', 's1', { status: 'archived' });
 
@@ -373,6 +373,32 @@ describe('remoteProjectsStore pending title preview', () => {
     remoteProjectsStore.setPendingTitlePreview('s1', '这个报错怎么修');
 
     expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('设计稿-v3.png');
+  });
+
+  it('does not claim provenance for a prose title that the host settles on', () => {
+    // 首句是用户文字、标题模型无结果时,被控端就地定稿 —— 那是终态标题,不是占位。
+    // 靠"预览与权威值相等"推断归属会把它记成系统占位,之后每条消息的预览都能盖着
+    // 它不放,而权威侧再也不会发新 patch 纠正(review P1)。
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
+    remoteProjectsStore.setPendingTitlePreview('s1', '帮我排查登录失败', true);
+    remoteProjectsStore.applyPatch('dev-B', 's1', { title: '帮我排查登录失败' });
+
+    remoteProjectsStore.setPendingTitlePreview('s1', '第二条消息', true);
+
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('帮我排查登录失败');
+  });
+
+  it('records provenance even when the host localizes the placeholder differently', () => {
+    // 控制端与被控端各用自己的语言渲染「图片」/「文件」,跨语种时两串本就不同。
+    // 归属按登记时的 isUserText 认,不按字符串相等认。
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
+    remoteProjectsStore.setPendingTitlePreview('s1', 'Image', false);
+    remoteProjectsStore.applyPatch('dev-B', 's1', { title: '图片' });
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('图片');
+
+    remoteProjectsStore.setPendingTitlePreview('s1', '这个报错怎么修', true);
+
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('这个报错怎么修');
   });
 
   it('never overrides a title the user already renamed on the controlled device', () => {

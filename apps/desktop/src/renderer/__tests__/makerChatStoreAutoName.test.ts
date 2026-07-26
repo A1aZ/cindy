@@ -237,6 +237,49 @@ describe('makerChatStore auto-name — 本机会话', () => {
     expect(autoTitle).not.toHaveBeenCalled();
   });
 
+  it('插话投递结果不确定但已物化进队列时,照常补起名', async () => {
+    // steer 返回 false 但文本被 coordinator 物化进暂停队列 —— 这条输入已被主端接管、
+    // 日后会派发,与受理同等。不起名的话,纯附件/fork 之后的第一句话恰好在这条
+    // 不确定路径上不改名(review P1)。
+    const steer = vi.fn(async () => false);
+    const getProjection = vi.fn(async () => ({
+      pendingQueue: [{ clientId: capturedClientId }],
+    }));
+    let capturedClientId = '';
+    const w = globalThis as unknown as { window: Record<string, unknown> };
+    w.window = {
+      electronAPI: {
+        maker: {
+          autoTitle,
+          input: {
+            steer: vi.fn(async (_sid: string, queued: { clientId: string }) => {
+              capturedClientId = queued.clientId;
+              return steer();
+            }),
+            getProjection,
+          },
+        },
+      },
+    };
+
+    await makerChatStore.steerMessage(
+      SESSION_ID,
+      '这个报错怎么修',
+      'claude-opus-4-7',
+      'medium',
+      'default',
+      '/tmp/wd',
+    );
+    await flushPromises();
+
+    expect(autoTitle).toHaveBeenCalledWith({
+      sessionId: SESSION_ID,
+      text: '这个报错怎么修',
+      agentKind: 'claude-code',
+      isUserText: true,
+    });
+  });
+
   it('起名对发送主流程零副作用:桥接缺失或同步抛错都不得向上冒泡', () => {
     // 老版本 preload 没有 autoTitle 时,同步调用会 TypeError —— 起名是
     // fire-and-forget,异常若冒回 sendMessageCore 会打断消息入队。
@@ -276,7 +319,7 @@ describe('makerChatStore auto-name — device-link 远程会话', () => {
     makerChatStore.autoNameSession(SESSION_ID, `\n\n${' '.repeat(50)}real message text`, 'codex');
     await flushPromises();
 
-    expect(setPreview).toHaveBeenCalledWith(SESSION_ID, 'real message text');
+    expect(setPreview).toHaveBeenCalledWith(SESSION_ID, 'real message text', true);
     setPreview.mockRestore();
   });
 
@@ -290,7 +333,7 @@ describe('makerChatStore auto-name — device-link 远程会话', () => {
     );
     await flushPromises();
 
-    expect(setPreview).toHaveBeenCalledWith(SESSION_ID, '这个报错怎么修');
+    expect(setPreview).toHaveBeenCalledWith(SESSION_ID, '这个报错怎么修', true);
     expect(autoTitle).not.toHaveBeenCalled();
     expect(sessionService.get).not.toHaveBeenCalled();
     setPreview.mockRestore();

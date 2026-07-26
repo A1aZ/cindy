@@ -80,6 +80,18 @@ const liteLlmPreset = {
     },
   },
 };
+const unsafeNoAuthDiscoveryPreset = {
+  id: 'unsafe-no-auth-discovery',
+  name: 'Unsafe no-auth discovery',
+  authMethod: 'none' as const,
+  runtimes: {
+    codex: {
+      baseUrl: 'http://127.0.0.1:4000/v1',
+      modelsUrl: 'https://remote.example/v1/models',
+      models: [],
+    },
+  },
+};
 const openCodePreset = {
   id: 'opencode-go',
   name: 'OpenCode Go',
@@ -114,7 +126,12 @@ beforeEach(() => {
   (window as unknown as { electronAPI: unknown }).electronAPI = {
     maker: {
       listProviderPresets: vi.fn(async () => ({
-        presets: [deepseekPreset, liteLlmPreset, openCodePreset],
+        presets: [
+          deepseekPreset,
+          liteLlmPreset,
+          unsafeNoAuthDiscoveryPreset,
+          openCodePreset,
+        ],
       })),
       // 列模型失败场景兜底(Greptile P1 回归):官方 API 预设必须靠推荐模型仍可完成。
       fetchProviderModels: vi.fn(async () => ({ ok: false, code: 'NETWORK' })),
@@ -251,6 +268,7 @@ describe('AddProviderWizard — preset 直达', () => {
       expect.objectContaining({
         agent: 'codex',
         baseUrl: 'http://localhost:4100/v1',
+        authMethod: 'none',
         apiKey: null,
       }),
     );
@@ -273,6 +291,18 @@ describe('AddProviderWizard — preset 直达', () => {
       }),
     );
     expect(vi.mocked(createCustomProvider).mock.calls[0][1]).toEqual({});
+  });
+
+  it('none 预设的远端 modelsUrl 会在第二步阻止继续', async () => {
+    renderWizard('unsafe-no-auth-discovery');
+
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Unsafe no-auth discovery')).not.toBeNull(),
+    );
+    const next = screen.getByText('settings.providers.wizard.next')
+      .closest('button') as HTMLButtonElement;
+    expect(next.disabled).toBe(true);
+    expect(window.electronAPI.maker.fetchProviderModels).not.toHaveBeenCalled();
   });
 
   it('共享模型目录不会扩大 OpenCode 的逐协议模型归属', async () => {

@@ -445,6 +445,7 @@ describe('provider:test-connection handler', () => {
         agent: 'claude-code',
         baseUrl: 'https://x.example',
         modelId: 'm',
+        authMethod: 'apiKey',
         requestPath: '/tenant/acme/infer?stream=1',
         apiKey: 'k',
       },
@@ -456,12 +457,32 @@ describe('provider:test-connection handler', () => {
         agent: 'claude-code',
         baseUrl: 'https://x.example',
         modelId: 'm',
+        authMethod: 'apiKey',
         wireProtocol: undefined,
         requestPath: '/tenant/acme/infer?stream=1',
         apiKey: 'k',
         headers: undefined,
       },
     });
+  });
+
+  it('rejects remote no-auth adhoc probes before invoking the network dependency', async () => {
+    const harness = new IpcHarness();
+    const deps = makeDeps();
+    registerProviderHandlers(harness, deps);
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_TEST_CONNECTION, {
+        kind: 'adhoc',
+        spec: {
+          agent: 'codex',
+          baseUrl: 'https://remote.example/v1',
+          modelId: 'm',
+          authMethod: 'none',
+        },
+      }),
+    ).rejects.toThrow(/INVALID_PARAMS/);
+    expect(deps.testConnection).not.toHaveBeenCalled();
   });
 
   it('rejects malformed input with INVALID_PARAMS (bad agent / bad url / missing model)', async () => {
@@ -520,6 +541,7 @@ describe('provider:models-fetch handler', () => {
     const result = await harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_FETCH, {
       agent: 'claude-code',
       baseUrl: 'https://x.example/anthropic',
+      authMethod: 'apiKey',
       modelsUrl: 'https://x.example/v1/models',
       apiKey: 'k',
     });
@@ -527,10 +549,27 @@ describe('provider:models-fetch handler', () => {
     expect(fetchModels).toHaveBeenCalledWith({
       agent: 'claude-code',
       baseUrl: 'https://x.example/anthropic',
+      authMethod: 'apiKey',
       modelsUrl: 'https://x.example/v1/models',
       apiKey: 'k',
       headers: undefined,
     });
+  });
+
+  it('rejects remote no-auth model discovery URLs before invoking fetch', async () => {
+    const harness = new IpcHarness();
+    const deps = makeDeps();
+    registerProviderHandlers(harness, deps);
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_FETCH, {
+        agent: 'codex',
+        authMethod: 'none',
+        baseUrl: 'http://127.0.0.1:4000/v1',
+        modelsUrl: 'https://remote.example/v1/models',
+      }),
+    ).rejects.toThrow(/INVALID_PARAMS/);
+    expect(deps.fetchModels).not.toHaveBeenCalled();
   });
 
   it('rejects malformed input with INVALID_PARAMS (bad agent / bad url / bad modelsUrl / bad headers)', async () => {

@@ -1265,10 +1265,16 @@ export function ProvidersSection() {
         for (const agent of p.agents) {
           const rt = config.runtimes[agent];
           if (!rt?.baseUrl) continue;
-          const apiKey = await readCustomProviderKey(p.id, agent);
+          const authMethod =
+            p.auth.method === 'none' ? 'none'
+              : p.auth.method === 'oauth' ? 'oauth'
+                : 'apiKey';
+          const apiKey =
+            authMethod === 'apiKey' ? await readCustomProviderKey(p.id, agent) : null;
           const r = await window.electronAPI.maker.fetchProviderModels({
             agent,
             baseUrl: rt.baseUrl,
+            authMethod,
             modelsUrl: rt.modelsUrl ?? null,
             apiKey,
             ...(rt.headers ? { headers: rt.headers } : {}),

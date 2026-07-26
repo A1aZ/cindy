@@ -437,6 +437,7 @@ describe('resolveSavedProbeSpec / testProviderConnection(saved)', () => {
         runtimes: {
           'claude-code': {
             ...config.runtimes['claude-code'],
+            baseUrl: 'http://127.0.0.1:4100',
             headers: {
               ...config.runtimes['claude-code'].headers,
               Authorization: 'Bearer must-not-leak',
@@ -451,5 +452,33 @@ describe('resolveSavedProbeSpec / testProviderConnection(saved)', () => {
     const spec = resolveSavedProbeSpec('local-proxy', 'claude-code');
     expect(spec.apiKey).toBeNull();
     expect(spec.headers).toEqual({ 'x-tenant': 't1' });
+  });
+
+  it('拒绝探测已禁用的 saved runtime，绝不进入网络请求', async () => {
+    setCustomProviders([
+      buildUserProvider({
+        id: 'legacy-remote-no-auth',
+        name: 'Legacy remote no-auth',
+        auth: { method: 'none' },
+        runtimes: {
+          codex: {
+            baseUrl: 'https://remote.example/v1',
+            models: [{ id: 'm', name: 'M' }],
+          },
+        },
+      }),
+    ]);
+    let fetchCalled = false;
+
+    await expect(
+      testProviderConnection(
+        { kind: 'saved', providerId: 'legacy-remote-no-auth', agent: 'codex' },
+        async () => {
+          fetchCalled = true;
+          return fakeResponse(200, '{}');
+        },
+      ),
+    ).rejects.toThrow(/disabled/);
+    expect(fetchCalled).toBe(false);
   });
 });

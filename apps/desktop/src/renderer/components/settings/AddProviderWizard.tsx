@@ -540,6 +540,7 @@ export function AddProviderWizard({
           const r = await window.electronAPI.maker.fetchProviderModels({
             agent,
             baseUrl: resolveRuntimeBaseUrl(runtimeBaseUrls, agent, rt.baseUrl),
+            authMethod: preset.authMethod ?? 'apiKey',
             modelsUrl: rt.modelsUrl ?? null,
             apiKey: apiKey.trim() || null,
             ...(rt.headers ? { headers: rt.headers } : {}),
@@ -741,7 +742,12 @@ export function AddProviderWizard({
       const value = runtime
         ? resolveRuntimeBaseUrl(runtimeBaseUrls, agent, runtime.baseUrl)
         : '';
-      if (sel.preset.authMethod === 'none') return isLoopbackProviderUrl(value);
+      if (sel.preset.authMethod === 'none') {
+        return (
+          isLoopbackProviderUrl(value)
+          && (!runtime?.modelsUrl?.trim() || isLoopbackProviderUrl(runtime.modelsUrl.trim()))
+        );
+      }
       try {
         const url = new URL(value);
         return (

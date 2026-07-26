@@ -335,6 +335,20 @@ describe('registry visibility & sources(运行时注入 fixture)', () => {
     expect(connectedProvidersForAgent(views, 'codex').map((p) => p.id)).toEqual(['xd']);
   });
 
+  it('agent selectors and model sources exclude disabled runtimes', () => {
+    const catalog = runtimeCatalog();
+    const xd = catalog.providers.find((provider) => provider.id === 'xd')!;
+    xd.routing.codex = { ...xd.routing.codex!, disabled: true };
+    const disabledViews = buildRegistry(catalog, { xd: true });
+
+    expect(providersForAgent(disabledViews, 'codex').map((provider) => provider.id))
+      .not.toContain('xd');
+    expect(connectedProvidersForAgent(disabledViews, 'codex')).toEqual([]);
+    expect(sourcesForModel(disabledViews, 'gpt-5.5', 'codex')).toEqual([]);
+    expect(connectedProvidersForAgent(disabledViews, 'claude-code').map((provider) => provider.id))
+      .toEqual(['xd']);
+  });
+
   it('providerOffersModel / getModel (agent-scoped)', () => {
     const xd = views.find((p) => p.id === 'xd')!;
     expect(providerOffersModel(xd, 'gpt-5.5', 'codex')).toBe(true);

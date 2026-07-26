@@ -505,6 +505,7 @@ export function CustomProviderDialog({
           agent,
           baseUrl,
           modelId: firstModel,
+          authMethod: authMode,
           wireProtocol: rf.wireProtocol,
           ...(rf.requestPath.trim() ? { requestPath: rf.requestPath.trim() } : {}),
           apiKey: authMode === 'apiKey' ? rf.apiKey.trim() || null : null,
@@ -566,6 +567,7 @@ export function CustomProviderDialog({
       const result = await window.electronAPI.maker.fetchProviderModels({
         agent,
         baseUrl,
+        authMethod: authMode,
         modelsUrl: rf.modelsUrl.trim() || null,
         apiKey: authMode === 'apiKey' ? rf.apiKey.trim() || null : null,
         ...(Object.keys(requestHeaders).length > 0 ? { headers: requestHeaders } : {}),

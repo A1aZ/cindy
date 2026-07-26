@@ -3487,6 +3487,7 @@ interface ElectronAPI {
               agent: 'claude-code' | 'codex';
               baseUrl: string;
               modelId: string;
+              authMethod: 'apiKey' | 'oauth' | 'none';
               wireProtocol?: import('@cindy/model-providers').ProviderWireProtocol;
               requestPath?: string;
               apiKey?: string | null;
@@ -3504,6 +3505,7 @@ interface ElectronAPI {
     fetchProviderModels: (input: {
       agent: 'claude-code' | 'codex';
       baseUrl: string;
+      authMethod: 'apiKey' | 'oauth' | 'none';
       modelsUrl?: string | null;
       apiKey?: string | null;
       headers?: Record<string, string>;

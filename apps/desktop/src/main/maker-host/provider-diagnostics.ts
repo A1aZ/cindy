@@ -16,6 +16,7 @@
 
 import {
   appendProviderRequestPath,
+  isLoopbackProviderUrl,
   type AgentKind,
   type ProviderWireProtocol,
 } from '@cindy/model-providers';
@@ -37,6 +38,8 @@ export interface ProviderProbeSpec {
   agent: AgentKind;
   baseUrl: string;
   modelId: string;
+  /** 表单态鉴权方式；main IPC 用它强制 none 只访问 loopback。 */
+  authMethod?: 'apiKey' | 'oauth' | 'none';
   /** 缺省按 agent 保持历史行为。 */
   wireProtocol?: ProviderWireProtocol;
   /** 非标准推理端点的精确相对路径。 */
@@ -216,6 +219,9 @@ export async function runProviderProbe(
   spec: ProviderProbeSpec,
   fetchImpl: typeof fetch = fetch,
 ): Promise<ProviderTestResult> {
+  if (spec.authMethod === 'none' && !isLoopbackProviderUrl(spec.baseUrl)) {
+    throw new TypeError('no-auth provider probes require a loopback URL');
+  }
   const { url, init } = buildProbeRequest(spec);
   const start = Date.now();
   let res: Response;
@@ -303,6 +309,7 @@ export function resolveSavedProbeSpec(providerId: string, agent: AgentKind): Pro
   if (provider.source !== 'user') throw new Error(`provider '${providerId}' is not a custom provider`);
   const routing = provider.routing[agent];
   if (!routing) throw new Error(`provider '${providerId}' has no runtime for '${agent}'`);
+  if (routing.disabled) throw new Error(`provider '${providerId}' runtime '${agent}' is disabled`);
   const model = (provider.models[agent] ?? [])[0];
   if (!model) throw new Error(`provider '${providerId}' has no models for '${agent}'`);
   // OAuth 形态：探测凭证用 Runner 持有的 access_token（与 oauth-token 路由同源），未登录时

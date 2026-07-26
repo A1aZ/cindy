@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 
-import { BUNDLED_CATALOG } from '@cindy/model-providers';
+import { BUNDLED_CATALOG, connectedProvidersForAgent } from '@cindy/model-providers';
 
 import { createProviderService } from '../provider-service.js';
 
@@ -100,5 +100,33 @@ describe('createProviderService', () => {
     });
 
     expect((await svc.listProviders())[0]?.connected).toBe(false);
+  });
+
+  it('does not promote a disabled runtime when another runtime keeps a no-auth provider connected', async () => {
+    const base = BUNDLED_CATALOG.providers.find((provider) => provider.id === 'xd')!;
+    const mixedProvider = {
+      ...base,
+      id: 'mixed-local-no-auth',
+      name: 'Mixed local no-auth',
+      auth: { method: 'none' as const },
+      routing: {
+        ...base.routing,
+        codex: { ...base.routing.codex!, disabled: true },
+      },
+    };
+    const svc = createProviderService({
+      getCatalog: () => ({ version: 'mixed-runtime-test', providers: [mixedProvider] }),
+      connection: {
+        xd: () => false,
+        anthropic: () => false,
+        openai: () => false,
+        xai: () => false,
+      },
+    });
+
+    const providers = await svc.listProviders();
+    expect(providers[0]?.connected).toBe(true);
+    expect(connectedProvidersForAgent(providers, 'claude-code')).toHaveLength(1);
+    expect(connectedProvidersForAgent(providers, 'codex')).toHaveLength(0);
   });
 });

@@ -306,6 +306,9 @@ const fanOutCorruptionRestored = createIpcFanOut('local-db:corruption-restored')
 // #37: release 端检测到 schema drift 时一次性 toast 提示开发者切回 dev 自动修复
 const fanOutSchemaDriftWarning = createIpcFanOut('local-db:schema-drift-warning');
 const fanOutProjectAliasesChanged = createIpcFanOut('local-db:project-aliases:changed');
+const fanOutSidebarPinnedOrderChanged = createIpcFanOut(
+  'sidebar-settings:pinned-order-changed',
+);
 // Workdir File Browser — push events from chokidar (add/change/unlink/...)
 const fanOutFileBrowserEvent = createIpcFanOut('maker:file-browser:event');
 const fanOutFileBrowserTransfer = createIpcFanOut('maker:file-browser:transfer');
@@ -3248,6 +3251,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   sidebarSettingsSavePinnedOrder: (order: readonly string[]): Promise<void> =>
     ipcRenderer.invoke('sidebar-settings:save-pinned-order', Array.from(order)),
+  sidebarSettingsOnPinnedOrderChanged: (cb: (order: string[]) => void): (() => void) =>
+    fanOutSidebarPinnedOrderChanged((payload) => {
+      if (
+        Array.isArray(payload) &&
+        payload.every((entry): entry is string => typeof entry === 'string')
+      ) {
+        cb(payload);
+      }
+    }),
 
   // ── session 级"终身累计 cost"变化 (per-session, 不是 today-aggregate) ──
   // 今日累计 (Claude USD + Codex token) 已搬到 electronAPI.maker.usage.* (取代老
@@ -3908,8 +3920,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
         label?: string;
         model?: string;
         effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+        fast?: boolean;
+        /** 显式选定的模型来源(标准面板 per-worker 选择);缺省 = 跟随默认路由解析。 */
+        providerId?: string | null;
       },
-    ): Promise<{ workflowId: string; workerSessionId: string; workerId: string }> =>
+      // main handler 实际返回 teamId(见 enableOrcaInternal);此前类型写成 workflowId 是漂移。
+    ): Promise<{ teamId: string; workerSessionId: string; workerId: string }> =>
       ipcRenderer.invoke('maker:session:enable-orca', leadSessionId, opts),
 
     /**

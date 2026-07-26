@@ -155,6 +155,8 @@ interface WorkerEntry {
   startupStderr: string;
   /** stderr 尾部按段带时间戳截存,退出时只取回看窗口内的段拼接诊断。 */
   stderrSegments: Array<{ text: string; at: number }>;
+  /** segments 总字符数(增量维护,避免每次 reduce)。 */
+  stderrTotalChars: number;
   /** stderr 也可能把多字节字符切在两个 Buffer 之间,与 stdout 同理需流式解码。 */
   stderrDecoder: StringDecoder;
   /** stdout 的 UTF-8 字节可能把一个汉字切在两个 chunk 之间，必须流式解码。 */
@@ -962,6 +964,7 @@ export class GhostNodeRuntimeBroker {
       startupPhase: true,
       startupStderr: '',
       stderrSegments: [],
+      stderrTotalChars: 0,
       stderrDecoder: new StringDecoder('utf8'),
       stdoutDecoder: new StringDecoder('utf8'),
       stdoutBuffer: '',
@@ -991,15 +994,16 @@ export class GhostNodeRuntimeBroker {
       }
       // 按段带时间戳截存,退出时只取回看窗口内的段,不让老日志被新 chunk 携带。
       entry.stderrSegments.push({ text: decoded, at: this.now() });
-      // 总量控制:保留尾部 EXIT_STDERR_CAP 字符。先丢弃最老整段,若仍超限则
-      // 裁剪最老段的头部(保留其尾部),确保总量严格不超。
-      let total = entry.stderrSegments.reduce((sum, s) => sum + s.text.length, 0);
-      while (total > EXIT_STDERR_CAP && entry.stderrSegments.length > 1) {
-        total -= entry.stderrSegments.shift()!.text.length;
+      entry.stderrTotalChars += decoded.length;
+      // 总量控制:保留尾部 EXIT_STDERR_CAP 字符。
+      while (entry.stderrTotalChars > EXIT_STDERR_CAP && entry.stderrSegments.length > 1) {
+        entry.stderrTotalChars -= entry.stderrSegments.shift()!.text.length;
       }
-      if (total > EXIT_STDERR_CAP && entry.stderrSegments.length === 1) {
+      if (entry.stderrTotalChars > EXIT_STDERR_CAP && entry.stderrSegments.length === 1) {
         const seg = entry.stderrSegments[0];
-        seg.text = seg.text.slice(seg.text.length - EXIT_STDERR_CAP);
+        const trimmed = seg.text.length - EXIT_STDERR_CAP;
+        seg.text = seg.text.slice(trimmed);
+        entry.stderrTotalChars = EXIT_STDERR_CAP;
       }
       const text = decoded.trim().slice(0, 4_096);
       if (text) this.deps.log?.warn('ghost node stderr', { ghostId: ghost.manifest.id, text });
@@ -1344,7 +1348,11 @@ export class GhostNodeRuntimeBroker {
     // 重试成功时插件不该看到一次假 crash)。
     if (!entry.stopping && !entry.startupPhase) {
       this.deps.log?.warn('ghost node process exited', { ghostId, entry: entry.entryRel, detail });
-      this.sendStatus(entry.ghost, 'crashed', detail, entry.entryRel);
+      // 如果 drain 期间已有替代 worker 启动,不发 crashed——消费方会误以为新 worker 崩溃。
+      const key = GhostNodeRuntimeBroker.keyOf(ghostId, entry.entryRel);
+      if (!this.workers.has(key)) {
+        this.sendStatus(entry.ghost, 'crashed', detail, entry.entryRel);
+      }
     }
   }
 

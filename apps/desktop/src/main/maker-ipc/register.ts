@@ -925,6 +925,8 @@ interface EnableOrcaOptions {
   model?: string;
   effort?: OrcaWorkerEffort;
   fast?: boolean;
+  /** 显式选定的模型来源;语义见 OrcaWorkerCreateParams.providerId。 */
+  providerId?: string | null;
 }
 
 let orcaCollabServiceHolder: OrcaCollabService | null = null;
@@ -4258,6 +4260,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       model: opts.model,
       effort: opts.effort,
       fast: opts.fast,
+      providerId: opts.providerId,
       delegateTask: opts.delegateTask,
     });
     if (!result.ok) throwOrcaServiceFailure(result);
@@ -5152,6 +5155,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       model?: unknown;
       effort?: unknown;
       fast?: unknown;
+      providerId?: unknown;
     };
     const workerAgent: AgentKind = body.workerAgent === 'codex' ? 'codex' : 'claude-code';
     const delegateTask = typeof body.delegateTask === 'string' ? body.delegateTask : undefined;
@@ -5163,6 +5167,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       model: typeof body.model === 'string' ? body.model : undefined,
       effort: typeof body.effort === 'string' ? body.effort as OrcaWorkerEffort : undefined,
       fast: typeof body.fast === 'boolean' ? body.fast : undefined,
+      // 只认非空(trim 后)string 为显式来源;其余(null/空白/缺省/异型)一律按「未显式」处理。
+      providerId: typeof body.providerId === 'string' && body.providerId.trim().length > 0
+        ? body.providerId.trim()
+        : undefined,
     });
   });
 
@@ -5303,6 +5311,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       model,
       effort: typeof b.effort === 'string' ? b.effort as OrcaWorkerEffort : undefined,
       fast: typeof b.fast === 'boolean' ? b.fast : undefined,
+      // 只认非空(trim 后)string 为显式来源;其余(null/空白/缺省/异型)一律按「未显式」处理。
+      providerId: typeof b.providerId === 'string' && b.providerId.trim().length > 0
+        ? b.providerId.trim()
+        : undefined,
       label: label.value,
       initialTask: typeof b.initialTask === 'string' && b.initialTask.length > 0 ? b.initialTask : undefined,
     });
@@ -5517,6 +5529,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
             id: provider.id,
             name: provider.name,
             models: (provider.models['claude-code'] ?? []).map((model) => model.id),
+            // Fast 能力 per-(provider, model):显式来源的 Fast 判定按该来源自己的条目。
+            fastModels: (provider.models['claude-code'] ?? [])
+              .filter((model) => model.supportsFastMode)
+              .map((model) => model.id),
+            // effort 档位同样 per-(provider, model):供 service 按实际路由来源重归一。
+            effortMetaByModel: Object.fromEntries(
+              (provider.models['claude-code'] ?? []).map((model) => [
+                model.id,
+                { efforts: model.efforts, defaultEffort: model.defaultEffort },
+              ]),
+            ),
             requiresExplicitRoute: providerRouteRequiresExplicitSelection(
               provider.routing['claude-code']?.authStrategy,
             ),
@@ -5525,6 +5548,15 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
             id: provider.id,
             name: provider.name,
             models: (provider.models.codex ?? []).map((model) => model.id),
+            fastModels: (provider.models.codex ?? [])
+              .filter((model) => model.supportsFastMode)
+              .map((model) => model.id),
+            effortMetaByModel: Object.fromEntries(
+              (provider.models.codex ?? []).map((model) => [
+                model.id,
+                { efforts: model.efforts, defaultEffort: model.defaultEffort },
+              ]),
+            ),
             requiresExplicitRoute: providerRouteRequiresExplicitSelection(
               provider.routing.codex?.authStrategy,
             ),

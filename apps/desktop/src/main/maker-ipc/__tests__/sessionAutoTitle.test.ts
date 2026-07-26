@@ -11,6 +11,7 @@ vi.mock('../../logger.js', () => ({
 }));
 
 vi.mock('../../localDb/ipc/sessions.js', () => ({
+  getOverwritableAutoTitle: vi.fn(async () => 'New Maker'),
   isUntitledSessionAwaitingAutoTitle: vi.fn(async () => true),
   persistSessionTitleIfStillDraft: vi.fn(async () => true),
   normalizeAutoTitle: (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 40).trimEnd(),
@@ -32,7 +33,7 @@ beforeEach(() => {
 
 function makeDeps(overrides: Partial<SessionAutoTitleDeps> = {}): SessionAutoTitleDeps {
   return {
-    isEligible: vi.fn(async () => true),
+    resolveOverwritableTitle: vi.fn(async (_id: string, placeholder?: string) => placeholder ?? 'New Maker'),
     generateTitle: vi.fn(async () => '登录失败排查'),
     persistTitle: vi.fn(async () => true),
     ...overrides,
@@ -58,7 +59,7 @@ describe('runSessionAutoTitle — 用户写了字', () => {
     expect(result).toEqual({ applied: true, done: true });
     expect(deps.generateTitle).toHaveBeenCalledWith('帮我排查登录失败', 'claude-code', 's1');
     expect(persistCalls(deps)).toEqual([
-      ['帮我排查登录失败', undefined],
+      ['帮我排查登录失败', 'New Maker'],
       ['登录失败排查', '帮我排查登录失败'],
     ]);
   });
@@ -90,7 +91,7 @@ describe('runSessionAutoTitle — 用户写了字', () => {
     );
 
     expect(result).toEqual({ applied: true, done: true });
-    expect(persistCalls(deps)).toEqual([['帮我看下报错', undefined]]);
+    expect(persistCalls(deps)).toEqual([['帮我看下报错', 'New Maker']]);
   });
 
   it('超长首句占位按 40 字截断,覆盖时期望值用截断后的串', async () => {
@@ -102,7 +103,7 @@ describe('runSessionAutoTitle — 用户写了字', () => {
     );
 
     expect(persistCalls(deps)).toEqual([
-      ['排'.repeat(40), undefined],
+      ['排'.repeat(40), 'New Maker'],
       ['登录失败排查', '排'.repeat(40)],
     ]);
   });
@@ -119,7 +120,7 @@ describe('runSessionAutoTitle — 用户一个字没写(合成描述)', () => {
 
     // 合成描述喂给标题模型只会得到「我没有看到用户消息的内容」这类回复。
     expect(deps.generateTitle).not.toHaveBeenCalled();
-    expect(persistCalls(deps)).toEqual([['设计稿-v3.png', undefined]]);
+    expect(persistCalls(deps)).toEqual([['设计稿-v3.png', 'New Maker']]);
     // 还没用用户文字起名 → 未完成,后续消息仍要尝试。
     expect(result).toEqual({ applied: true, done: false });
   });
@@ -134,7 +135,7 @@ describe('runSessionAutoTitle — 用户一个字没写(合成描述)', () => {
     await runSessionAutoTitle({ sessionId: 's1', text: '这个报错怎么修', agentKind: 'codex' }, deps);
 
     expect(persistCalls(deps)).toEqual([
-      ['设计稿-v3.png', undefined],
+      ['设计稿-v3.png', 'New Maker'],
       ['这个报错怎么修', '设计稿-v3.png'],
       ['登录失败排查', '这个报错怎么修'],
     ]);
@@ -150,9 +151,9 @@ describe('runSessionAutoTitle — 用户一个字没写(合成描述)', () => {
     await runSessionAutoTitle({ sessionId: 's1', text: '这个报错怎么修', agentKind: 'codex' }, deps);
 
     expect(persistCalls(deps)).toEqual([
-      ['设计稿-v3.png', undefined],
-      ['这个报错怎么修', undefined],
-      ['登录失败排查', undefined],
+      ['设计稿-v3.png', 'New Maker'],
+      ['这个报错怎么修', 'New Maker'],
+      ['登录失败排查', 'New Maker'],
     ]);
   });
 
@@ -179,7 +180,7 @@ describe('runSessionAutoTitle — 用户一个字没写(合成描述)', () => {
 
 describe('runSessionAutoTitle — 资格与失败语义', () => {
   it('标题已不是系统占位(用户改过名)→ 不写不生成,并标记 done', async () => {
-    const deps = makeDeps({ isEligible: vi.fn(async () => false) });
+    const deps = makeDeps({ resolveOverwritableTitle: vi.fn(async () => null) });
 
     const result = await runSessionAutoTitle(
       { sessionId: 's1', text: '继续说', agentKind: 'codex' },
@@ -193,7 +194,7 @@ describe('runSessionAutoTitle — 资格与失败语义', () => {
 
   it('资格检查失败(DB 抖动)不下结论 —— done=false 让下一条消息重试', async () => {
     const deps = makeDeps({
-      isEligible: vi.fn(async () => {
+      resolveOverwritableTitle: vi.fn(async () => {
         throw new Error('db busy');
       }),
     });
@@ -241,7 +242,7 @@ describe('runSessionAutoTitle — 资格与失败语义', () => {
     );
 
     expect(result).toEqual({ applied: false, done: false });
-    expect(deps.isEligible).not.toHaveBeenCalled();
+    expect(deps.resolveOverwritableTitle).not.toHaveBeenCalled();
     expect(deps.persistTitle).not.toHaveBeenCalled();
   });
 });
@@ -251,9 +252,9 @@ describe('runSessionAutoTitle — 同会话串行', () => {
     const titles: string[] = ['New Maker'];
     const deps: SessionAutoTitleDeps = {
       // 真实条件写语义:仅当当前标题等于期望值时才生效。
-      isEligible: vi.fn(async (_id: string, placeholder?: string) => {
+      resolveOverwritableTitle: vi.fn(async (_id: string, placeholder?: string) => {
         const current = titles[titles.length - 1];
-        return current === 'New Maker' || current === placeholder;
+        return current === 'New Maker' || current === placeholder ? current : null;
       }),
       generateTitle: vi.fn(async () => null),
       persistTitle: vi.fn(async (_id: string, title: string, expected?: string) => {

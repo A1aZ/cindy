@@ -568,23 +568,47 @@ function describeMentions(queued: AgentInputQueuedMessage): string | null {
   return null;
 }
 
-/**
- * 附件:优先用文件名(`需求评审.pdf` 比「文件」信息量大得多);粘贴进来的截图
- * 没有可用文件名时才回落到类别词。
- */
-function describeFiles(
-  queued: AgentInputQueuedMessage,
-  labels: AutoTitleFallbackLabels,
-): string | null {
-  const files = queued.files ?? [];
-  for (const file of files) {
+/** 附件文件名(`需求评审.pdf` 比「文件」信息量大得多)。粘贴的截图没有 → null。 */
+function describeFileName(queued: AgentInputQueuedMessage): string | null {
+  for (const file of queued.files ?? []) {
     const raw = file.originalName || file.name || '';
     const name = collapse(raw.startsWith('clipboard://') ? '' : baseName(raw));
     if (name) return name;
   }
-  const first = files[0];
+  return null;
+}
+
+/** 最后兜底:有附件但一个具体名字都拿不到时,用类别词。 */
+function describeFileCategory(
+  queued: AgentInputQueuedMessage,
+  labels: AutoTitleFallbackLabels,
+): string | null {
+  const first = (queued.files ?? [])[0];
   if (!first) return null;
   return first.category === 'image' ? labels.image : labels.file;
+}
+
+/**
+ * mention chip 在 wire text 里被序列化成 `@<path>` / `@<path>/` / `@<label>`
+ * (见 ChatInput.serializeEditorContent)。这些 token 是用户"点选"出来的资源,
+ * 不是他写的散文 —— 判定「有没有真正的文字」时必须先剔除,否则纯 @mention 消息
+ * 会被当成用户文字发给标题模型,describeMentions 永远走不到(PR #510 review)。
+ *
+ * 只剔除与本条消息 mentions 精确对应的 token:用户手打的 `@某人` 没有对应
+ * mention 条目,会原样保留,不会被误判成无文字。
+ */
+function stripMentionTokens(text: string, queued: AgentInputQueuedMessage): string {
+  let stripped = text;
+  for (const mention of queued.mentions ?? []) {
+    for (const token of [
+      `@${mention.path}/`,
+      `@${mention.path}`,
+      `@${mention.name}`,
+    ]) {
+      if (token.length > 1) stripped = stripped.split(token).join(' ');
+    }
+  }
+  return stripped.trim();
 }
 
 /**
@@ -593,6 +617,9 @@ function describeFiles(
  * 用户写了字 → 原样返回(isUserText=true),照旧走「占位 + 标题模型」。
  * 用户一个字没写(只贴图 / 只拖文件 / 只 @ 一个文件 / 只引用一个会话)→ 用手上
  * 的本地信息合成一句能描述这条消息的话(isUserText=false),只当占位标题用。
+ *
+ * 合成时优先取**具体名字**:附件文件名 → @mention 名 → 被引用会话/项目标题;
+ * 一个都拿不到才回落到「图片」「文件」这类类别词。
  *
  * 都拿不到 → null,调用方保留默认标题。
  */
@@ -605,10 +632,14 @@ export function deriveAutoTitleSeed(
     quotesEncoded: queued.chatMessage.quotesEncoded === true,
     agentReferences: queued.agentReferences,
   });
-  if (literal) return { text: literal, isUserText: true };
+  const prose = stripMentionTokens(literal, queued);
+  if (prose) return { text: prose, isUserText: true };
 
   const described =
-    describeReferences(queued) ?? describeMentions(queued) ?? describeFiles(queued, labels);
+    describeFileName(queued) ??
+    describeMentions(queued) ??
+    describeReferences(queued) ??
+    describeFileCategory(queued, labels);
   return described ? { text: described, isUserText: false } : null;
 }
 

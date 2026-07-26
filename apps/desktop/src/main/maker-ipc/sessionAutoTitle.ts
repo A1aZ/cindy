@@ -25,6 +25,7 @@
 import type { AgentKind } from '@cindy/maker-core';
 
 import {
+  getOverwritableAutoTitle,
   isUntitledSessionAwaitingAutoTitle,
   normalizeAutoTitle,
   persistSessionTitleIfStillDraft,
@@ -60,15 +61,22 @@ export interface SessionAutoTitleResult {
 }
 
 export interface SessionAutoTitleDeps {
-  /** 标题仍是系统占位(默认草稿标题,或传入的合成占位)时才允许起名。 */
-  isEligible: (sessionId: string, synthesizedPlaceholder?: string) => Promise<boolean>;
+  /**
+   * 标题仍是系统占位时返回**当前标题**(草稿默认 / fork 占位 / 上次写的合成占位),
+   * 否则返回 null。返回值直接当条件写的期望值 —— fork 与合成占位都不等于草稿默认,
+   * 猜期望值会让写入落空(PR #510 review)。
+   */
+  resolveOverwritableTitle: (
+    sessionId: string,
+    synthesizedPlaceholder?: string,
+  ) => Promise<string | null>;
   generateTitle: (message: string, agentKind: AgentKind, sessionId?: string) => Promise<string | null>;
   /** 条件写:仅当当前标题等于 expectedTitle 时才落库(默认期望草稿占位)。 */
   persistTitle: (sessionId: string, title: string, expectedTitle?: string) => Promise<boolean>;
 }
 
 const defaultDeps: SessionAutoTitleDeps = {
-  isEligible: isUntitledSessionAwaitingAutoTitle,
+  resolveOverwritableTitle: getOverwritableAutoTitle,
   generateTitle: generateMakerSessionTitle,
   persistTitle: persistSessionTitleIfStillDraft,
 };
@@ -127,9 +135,9 @@ async function runUnsynchronized(
 
   const remembered = synthesizedPlaceholders.get(request.sessionId);
 
-  let eligible: boolean;
+  let overwritable: string | null;
   try {
-    eligible = await deps.isEligible(request.sessionId, remembered);
+    overwritable = await deps.resolveOverwritableTitle(request.sessionId, remembered);
   } catch (err) {
     // 读不到状态属于瞬时失败:不下结论,让下一条消息重试。
     log.warn('auto-title eligibility check failed', {
@@ -138,7 +146,7 @@ async function runUnsynchronized(
     });
     return { applied: false, done: false };
   }
-  if (!eligible) {
+  if (overwritable === null) {
     // 标题已不是系统占位(用户改过名 / 已起过名)→ 回收过期归属,不再尝试。
     synthesizedPlaceholders.delete(request.sessionId);
     return { applied: false, done: true };
@@ -150,7 +158,7 @@ async function runUnsynchronized(
   // 1) 立即占位。失败(用户抢先改名 / 写库异常)不中断后续智能起名。
   let placeholderPersisted = false;
   try {
-    placeholderPersisted = await deps.persistTitle(request.sessionId, placeholder, remembered);
+    placeholderPersisted = await deps.persistTitle(request.sessionId, placeholder, overwritable);
   } catch (err) {
     log.warn('auto-title placeholder write failed (continuing)', {
       sessionId: request.sessionId,
@@ -187,7 +195,7 @@ async function runUnsynchronized(
     smartPersisted = await deps.persistTitle(
       request.sessionId,
       generated,
-      placeholderPersisted ? placeholder : remembered,
+      placeholderPersisted ? placeholder : overwritable,
     );
   } catch (err) {
     log.warn('auto-title smart write failed', {

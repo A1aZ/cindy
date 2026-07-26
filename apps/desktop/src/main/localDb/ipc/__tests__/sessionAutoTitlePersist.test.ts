@@ -39,6 +39,7 @@ vi.mock('../../../maker-host/claude-transcript-relocation.js', () => ({
 }));
 
 import {
+  getOverwritableAutoTitle,
   isUntitledSessionAwaitingAutoTitle,
   normalizeAutoTitle,
   persistSessionTitleIfStillDraft,
@@ -217,5 +218,48 @@ describe('isUntitledSessionAwaitingAutoTitle — 资格', () => {
     createDb('New Maker');
 
     expect(await isUntitledSessionAwaitingAutoTitle('missing')).toBe(false);
+  });
+
+  it('fork 会话的 [Fork 占位仍有资格(带 parentSessionId)', async () => {
+    createDb('[Fork] 源会话标题');
+    h.sqlite!.prepare('UPDATE sessions SET parent_session_id = ? WHERE id = ?').run('src', SESSION_ID);
+
+    expect(await isUntitledSessionAwaitingAutoTitle(SESSION_ID)).toBe(true);
+  });
+
+  it('没有 parentSessionId 的 "[Fork] ..." 是用户自己起的名,无资格', async () => {
+    createDb('[Fork] 用户自己起的名字');
+
+    expect(await isUntitledSessionAwaitingAutoTitle(SESSION_ID)).toBe(false);
+  });
+});
+
+describe('getOverwritableAutoTitle — 返回条件写的期望值', () => {
+  it('返回当前标题本身,而不是草稿默认值', async () => {
+    // fork 与合成占位都不等于草稿默认;猜期望值会让条件写直接落空。
+    createDb('[Fork] 源会话标题');
+    h.sqlite!.prepare('UPDATE sessions SET parent_session_id = ? WHERE id = ?').run('src', SESSION_ID);
+    expect(await getOverwritableAutoTitle(SESSION_ID)).toBe('[Fork] 源会话标题');
+
+    createDb('设计稿-v3.png');
+    expect(await getOverwritableAutoTitle(SESSION_ID, '设计稿-v3.png')).toBe('设计稿-v3.png');
+
+    createDb('New Maker');
+    expect(await getOverwritableAutoTitle(SESSION_ID)).toBe('New Maker');
+  });
+
+  it('用它当期望值就能覆写 fork 占位(端到端条件写)', async () => {
+    createDb('[Fork] 源会话标题');
+    h.sqlite!.prepare('UPDATE sessions SET parent_session_id = ? WHERE id = ?').run('src', SESSION_ID);
+
+    const expected = await getOverwritableAutoTitle(SESSION_ID);
+    expect(await persistSessionTitleIfStillDraft(SESSION_ID, 'fork 后的第一句话', expected!)).toBe(true);
+    expect(currentTitle()).toBe('fork 后的第一句话');
+  });
+
+  it('用户改过名 → null(调用方据此停止尝试)', async () => {
+    createDb('我自己起的名字');
+
+    expect(await getOverwritableAutoTitle(SESSION_ID, '设计稿-v3.png')).toBeNull();
   });
 });

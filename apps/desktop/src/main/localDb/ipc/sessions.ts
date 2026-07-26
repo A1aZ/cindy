@@ -431,26 +431,46 @@ export function normalizeAutoTitle(text: string): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, 40).trimEnd();
 }
 
+/** fork 出来的会话的占位标题前缀("[Fork] …" / "[Fork·已剥离] …")。 */
+const FORK_PLACEHOLDER_TITLE_PREFIX = '[Fork';
+
 /**
- * 远控自动标题的资格检查:title 仍是系统占位。
+ * 自动标题的资格检查:title 仍是系统占位。系统占位有三种 ——
  *
- * 只看标题、不再要求「零消息且无 userSendAt」:首条输入是纯附件(无文本)时会话
- * 已经有消息和 userSendAt,旧口径会让它永久停在 "New Maker"。标题仍是系统占位
- * 本身就等价于「既没被自动起名、也没被用户改名」,足以作为唯一门槛。
+ *   1. `DEFAULT_DRAFT_SESSION_TITLE`:建会话时的默认标题;
+ *   2. fork 占位("[Fork…" 前缀 **且** 有 parentSessionId):fork 会话天然带历史
+ *      消息,要在用户发出第一句话时才被替换。额外要求 parentSessionId,避免用户
+ *      手动改名成 "[Fork] ..." 的普通会话被误判成占位;
+ *   3. `synthesizedPlaceholder`:调用方上次为纯附件消息写入的合成占位(文件名 /
+ *      「图片」等),让「先只贴图、后打字」的会话在用户打字时把标题换成他写的内容。
  *
- * `synthesizedPlaceholder` 是调用方上次为纯附件消息写入的合成占位(文件名 /
- * 「图片」等)。传入后它同样算作可覆盖的系统占位,让「先只贴图、后打字」的会话
- * 在用户打字时把标题换成他写的内容。
+ * 只看标题、不要求「零消息且无 userSendAt」:首条输入是纯附件(无文本)时会话已经
+ * 有消息和 userSendAt,旧口径会让它永久停在 "New Maker"。标题仍是系统占位本身就
+ * 等价于「既没被自动起名、也没被用户改名」,足以作为门槛。
+ */
+export async function getOverwritableAutoTitle(
+  id: string,
+  synthesizedPlaceholder?: string | null,
+): Promise<string | null> {
+  const db = getDbClient().drizzle;
+  const row = await selectSessionWithCount(db, id);
+  if (!row) return null;
+  if (row.title === DEFAULT_DRAFT_SESSION_TITLE) return row.title;
+  if (row.parentSessionId && row.title.startsWith(FORK_PLACEHOLDER_TITLE_PREFIX)) return row.title;
+  if (synthesizedPlaceholder && row.title === synthesizedPlaceholder) return row.title;
+  return null;
+}
+
+/**
+ * 布尔版资格检查(给 enqueue 前的廉价预检用)。真正执行起名的路径用
+ * {@link getOverwritableAutoTitle},因为它还要拿当前标题当条件写的期望值 ——
+ * fork 占位与合成占位都不等于草稿默认值,猜期望值会让写入直接落空。
  */
 export async function isUntitledSessionAwaitingAutoTitle(
   id: string,
   synthesizedPlaceholder?: string | null,
 ): Promise<boolean> {
-  const db = getDbClient().drizzle;
-  const row = await selectSessionWithCount(db, id);
-  if (!row) return false;
-  if (row.title === DEFAULT_DRAFT_SESSION_TITLE) return true;
-  return !!synthesizedPlaceholder && row.title === synthesizedPlaceholder;
+  return (await getOverwritableAutoTitle(id, synthesizedPlaceholder)) !== null;
 }
 
 /**

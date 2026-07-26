@@ -100,16 +100,62 @@ describe('deriveAutoTitleSeed — 用户一个字没写', () => {
     expect(seed).toEqual({ text: 'index.ts', isUserText: false });
   });
 
-  it('mention 优先于附件(更能说明用户在指什么)', () => {
+  it('优先级:文件名 > mention 名 > 引用标题 > 类别词', () => {
+    // 文件名压过 mention 名。
+    expect(
+      deriveAutoTitleSeed(
+        queued({
+          mentions: [{ type: 'dir', name: 'renderer', path: 'src/renderer' }],
+          files: [{ name: '设计稿.png', category: 'image' }],
+        }),
+        LABELS,
+      ),
+    ).toEqual({ text: '设计稿.png', isUserText: false });
+
+    // 附件拿不到文件名(粘贴的截图)时,mention 名压过类别词兜底。
+    expect(
+      deriveAutoTitleSeed(
+        queued({
+          text: '@src/renderer/',
+          mentions: [{ type: 'dir', name: 'renderer', path: 'src/renderer' }],
+          files: [{ name: 'clipboard://x', path: 'clipboard://x', category: 'image' }],
+        }),
+        LABELS,
+      ),
+    ).toEqual({ text: 'renderer', isUserText: false });
+  });
+
+  it('纯 @mention 消息不算用户文字:chip 序列化出的 @token 被剔除', () => {
+    // ChatInput 把 mention chip 序列化成 `@<path>` 进 wire text;若不剔除,这条
+    // 消息会被当成用户散文发给标题模型,describeMentions 永远走不到。
     const seed = deriveAutoTitleSeed(
       queued({
-        mentions: [{ type: 'dir', name: 'renderer', path: 'src/renderer' }],
-        files: [{ name: '截屏.png', category: 'image' }],
+        text: '@src/index.ts',
+        mentions: [{ type: 'file', name: 'index.ts', path: 'src/index.ts' }],
       }),
       LABELS,
     );
 
-    expect(seed).toEqual({ text: 'renderer', isUserText: false });
+    expect(seed).toEqual({ text: 'index.ts', isUserText: false });
+  });
+
+  it('mention 旁边有真正的文字时仍算用户文字', () => {
+    const seed = deriveAutoTitleSeed(
+      queued({
+        text: '@src/index.ts 这里为什么会崩',
+        mentions: [{ type: 'file', name: 'index.ts', path: 'src/index.ts' }],
+      }),
+      LABELS,
+    );
+
+    expect(seed?.isUserText).toBe(true);
+    expect(seed?.text).toBe('这里为什么会崩');
+  });
+
+  it('用户手打的 @xxx(无对应 mention)不被剔除,仍算用户文字', () => {
+    const seed = deriveAutoTitleSeed(queued({ text: '@张三 帮忙看下' }), LABELS);
+
+    expect(seed).toEqual({ text: '@张三 帮忙看下', isUserText: true });
   });
 
   it('什么都没有 → null,调用方保留默认标题', () => {

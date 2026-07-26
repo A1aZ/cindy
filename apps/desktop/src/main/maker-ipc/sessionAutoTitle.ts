@@ -29,6 +29,7 @@ import {
   isUntitledSessionAwaitingAutoTitle,
   normalizeAutoTitle,
   persistSessionTitleIfStillDraft,
+  type OverwritableAutoTitleTarget,
 } from '../localDb/ipc/sessions.js';
 import { createLogger } from '../logger.js';
 
@@ -62,14 +63,14 @@ export interface SessionAutoTitleResult {
 
 export interface SessionAutoTitleDeps {
   /**
-   * 标题仍是系统占位时返回**当前标题**(草稿默认 / fork 占位 / 上次写的合成占位),
-   * 否则返回 null。返回值直接当条件写的期望值 —— fork 与合成占位都不等于草稿默认,
-   * 猜期望值会让写入落空(PR #510 review)。
+   * 标题仍是系统占位时返回覆写目标(当前标题 + 权威 agentKind + 是否裸默认标题),
+   * 否则返回 null。当前标题直接当条件写的期望值 —— fork 与合成占位都不等于草稿
+   * 默认,猜期望值会让写入落空(PR #510 review)。
    */
   resolveOverwritableTitle: (
     sessionId: string,
     synthesizedPlaceholder?: string,
-  ) => Promise<string | null>;
+  ) => Promise<OverwritableAutoTitleTarget | null>;
   generateTitle: (message: string, agentKind: AgentKind, sessionId?: string) => Promise<string | null>;
   /** 条件写:仅当当前标题等于 expectedTitle 时才落库(默认期望草稿占位)。 */
   persistTitle: (sessionId: string, title: string, expectedTitle?: string) => Promise<boolean>;
@@ -135,9 +136,9 @@ async function runUnsynchronized(
 
   const remembered = synthesizedPlaceholders.get(request.sessionId);
 
-  let overwritable: string | null;
+  let target: OverwritableAutoTitleTarget | null;
   try {
-    overwritable = await deps.resolveOverwritableTitle(request.sessionId, remembered);
+    target = await deps.resolveOverwritableTitle(request.sessionId, remembered);
   } catch (err) {
     // 读不到状态属于瞬时失败:不下结论,让下一条消息重试。
     log.warn('auto-title eligibility check failed', {
@@ -146,7 +147,7 @@ async function runUnsynchronized(
     });
     return { applied: false, done: false };
   }
-  if (overwritable === null) {
+  if (target === null) {
     // 标题已不是系统占位(用户改过名 / 已起过名)→ 回收过期归属,不再尝试。
     synthesizedPlaceholders.delete(request.sessionId);
     return { applied: false, done: true };
@@ -155,17 +156,18 @@ async function runUnsynchronized(
   const placeholder = normalizeAutoTitle(seedText);
   if (!placeholder) return { applied: false, done: false };
 
-  // 已经有合成占位、这次又是无用户文字的输入(又贴了一张图)→ 保留最初那个标题。
-  // 否则每贴一次附件标题就换一次文件名;desktop 本机路径也是这么处理的(补起名
-  // 只在 isUserText=true 时触发),两条路径必须一致(review P1)。
-  if (request.isUserText === false && remembered) {
+  // 合成占位只允许覆写「建会话时的裸默认标题」。已经是 fork 占位或上一条附件写下的
+  // 合成占位时一律保留,等用户真正打字再换 —— 否则每贴一张图标题就换一次文件名,
+  // fork 的 "[Fork] …" 也会被文件名顶掉。desktop 本机路径同样只在 isUserText=true
+  // 时补起名,两条路径必须一致(review P1)。
+  if (request.isUserText === false && !target.isDefaultDraftTitle) {
     return { applied: false, done: false };
   }
 
   // 1) 立即占位。失败(用户抢先改名 / 写库异常)不中断后续智能起名。
   let placeholderPersisted = false;
   try {
-    placeholderPersisted = await deps.persistTitle(request.sessionId, placeholder, overwritable);
+    placeholderPersisted = await deps.persistTitle(request.sessionId, placeholder, target.title);
   } catch (err) {
     log.warn('auto-title placeholder write failed (continuing)', {
       sessionId: request.sessionId,
@@ -186,8 +188,10 @@ async function runUnsynchronized(
   // 2) 智能标题覆盖占位。
   let generated: string | undefined;
   try {
+    // agentKind 取 DB 权威值而非入参快照:另一窗口/设备切过 agent 时快照会过期,
+    // 用错 agent 会让标题走错供应商(review P1)。
     generated = (
-      await deps.generateTitle(seedText, request.agentKind, request.sessionId)
+      await deps.generateTitle(seedText, target.agentKind, request.sessionId)
     )?.trim();
   } catch (err) {
     log.warn('auto-title generation failed', {
@@ -202,7 +206,7 @@ async function runUnsynchronized(
     smartPersisted = await deps.persistTitle(
       request.sessionId,
       generated,
-      placeholderPersisted ? placeholder : overwritable,
+      placeholderPersisted ? placeholder : target.title,
     );
   } catch (err) {
     log.warn('auto-title smart write failed', {

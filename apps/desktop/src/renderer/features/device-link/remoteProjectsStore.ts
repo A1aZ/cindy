@@ -273,6 +273,10 @@ const actions = {
     }
     const status = patch.status;
     if (status === 'deleted' || status === 'archived') {
+      // 预览随会话一起离场:留着的话 removeDevice 也回收不到(它只遍历分片里还在的
+      // 会话),之后 unarchive / reseed 会把边界前的旧预览顶回一个仍是默认标题的
+      // 会话上(PR #510 review)。
+      pendingTitlePreview.delete(sessionId);
       shard.sessions = shard.sessions.filter((s) => s.id !== sessionId);
       recompute();
       return;
@@ -394,6 +398,13 @@ const actions = {
     const next = title.trim();
     if (!sessionId || !next) return;
     if (pendingTitlePreview.get(sessionId) === next) return;
+    // 权威标题已经不是默认占位(被控端起过名 / 用户改过名)→ 预览本来就不会生效,
+    // 直接 no-op,省掉一次「写入 → recompute → withPendingTitle 立刻回收」的空转。
+    const known = sessionDeviceIndex.get(sessionId);
+    if (known) {
+      const row = shards.get(known)?.sessions.find((s) => s.id === sessionId);
+      if (row && row.title !== DEFAULT_REMOTE_SESSION_TITLE) return;
+    }
     pendingTitlePreview.set(sessionId, next);
     recompute();
   },

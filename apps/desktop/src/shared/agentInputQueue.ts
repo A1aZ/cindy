@@ -605,14 +605,15 @@ function describeFileCategory(
 function stripMentionTokens(text: string, queued: AgentInputQueuedMessage): string {
   const mentions = queued.mentions ?? [];
   if (mentions.length === 0) return text.trim();
-  // dir chip 的尾 `/` 也在引号内,两种形式都收进来。
+  // 只按 path 匹配:wire token 一律是 `@${formatMentionRef(path)}`(dir 多一个尾
+  // `/`)。不能把 name 也当 token —— 用户同时插了 chip `@src/index.ts` 又在正文里
+  // 手打 `@index.ts` 时会把后者一并删掉,把「有文字」误判成「无文字」。
+  // agent chip 无需特例:它的 path 本身就存的是 name(见 ChatInput 的 chip attrs)。
   const refs = new Set<string>();
   for (const mention of mentions) {
-    if (mention.path) {
-      refs.add(mention.path);
-      refs.add(`${mention.path}/`);
-    }
-    if (mention.name) refs.add(mention.name);
+    if (!mention.path) continue;
+    refs.add(mention.path);
+    refs.add(`${mention.path}/`);
   }
   return text
     .split(MENTION_TOKEN_SPLIT)

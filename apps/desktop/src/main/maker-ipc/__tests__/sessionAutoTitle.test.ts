@@ -11,7 +11,11 @@ vi.mock('../../logger.js', () => ({
 }));
 
 vi.mock('../../localDb/ipc/sessions.js', () => ({
-  getOverwritableAutoTitle: vi.fn(async () => 'New Maker'),
+  getOverwritableAutoTitle: vi.fn(async () => ({
+    title: 'New Maker',
+    agentKind: 'claude-code',
+    isDefaultDraftTitle: true,
+  })),
   isUntitledSessionAwaitingAutoTitle: vi.fn(async () => true),
   persistSessionTitleIfStillDraft: vi.fn(async () => true),
   normalizeAutoTitle: (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 40).trimEnd(),
@@ -33,7 +37,11 @@ beforeEach(() => {
 
 function makeDeps(overrides: Partial<SessionAutoTitleDeps> = {}): SessionAutoTitleDeps {
   return {
-    resolveOverwritableTitle: vi.fn(async (_id: string, placeholder?: string) => placeholder ?? 'New Maker'),
+    resolveOverwritableTitle: vi.fn(async (_id: string, placeholder?: string) => ({
+      title: placeholder ?? 'New Maker',
+      agentKind: 'codex' as const,
+      isDefaultDraftTitle: placeholder === undefined,
+    })),
     generateTitle: vi.fn(async () => '登录失败排查'),
     persistTitle: vi.fn(async () => true),
     ...overrides,
@@ -57,7 +65,8 @@ describe('runSessionAutoTitle — 用户写了字', () => {
     );
 
     expect(result).toEqual({ applied: true, done: true });
-    expect(deps.generateTitle).toHaveBeenCalledWith('帮我排查登录失败', 'claude-code', 's1');
+    // agentKind 取 DB 权威值(mock 返回 codex),而非入参里的 claude-code。
+    expect(deps.generateTitle).toHaveBeenCalledWith('帮我排查登录失败', 'codex', 's1');
     expect(persistCalls(deps)).toEqual([
       ['帮我排查登录失败', 'New Maker'],
       ['登录失败排查', '帮我排查登录失败'],
@@ -175,6 +184,24 @@ describe('runSessionAutoTitle — 用户一个字没写(合成描述)', () => {
     expect(deps.generateTitle).not.toHaveBeenCalled();
   });
 
+  it('fork 占位不被纯附件输入顶掉(远控与本机行为一致)', async () => {
+    const deps = makeDeps({
+      resolveOverwritableTitle: vi.fn(async () => ({
+        title: '[Fork] 源会话标题',
+        agentKind: 'codex' as const,
+        isDefaultDraftTitle: false,
+      })),
+    });
+
+    const result = await runSessionAutoTitle(
+      { sessionId: 's1', text: '设计稿-v3.png', agentKind: 'codex', isUserText: false },
+      deps,
+    );
+
+    expect(result).toEqual({ applied: false, done: false });
+    expect(deps.persistTitle).not.toHaveBeenCalled();
+  });
+
   it('用户文字占位写失败时保留归属,后续消息仍认得出 DB 里的合成标题', async () => {
     const persistTitle = vi
       .fn()
@@ -272,7 +299,12 @@ describe('runSessionAutoTitle — 同会话串行', () => {
       // 真实条件写语义:仅当当前标题等于期望值时才生效。
       resolveOverwritableTitle: vi.fn(async (_id: string, placeholder?: string) => {
         const current = titles[titles.length - 1];
-        return current === 'New Maker' || current === placeholder ? current : null;
+        if (current !== 'New Maker' && current !== placeholder) return null;
+        return {
+          title: current,
+          agentKind: 'codex' as const,
+          isDefaultDraftTitle: current === 'New Maker',
+        };
       }),
       generateTitle: vi.fn(async () => null),
       persistTitle: vi.fn(async (_id: string, title: string, expected?: string) => {

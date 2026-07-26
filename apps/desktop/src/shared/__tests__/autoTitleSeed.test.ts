@@ -165,6 +165,33 @@ describe('deriveAutoTitleSeed — 用户一个字没写', () => {
     expect(seed).toEqual({ text: 'sub dir', isUserText: false });
   });
 
+  it('只按 path 剔除:正文里手打的 @<文件名> 不被误删', () => {
+    // 用户插了 chip @src/index.ts,又在文字里手打了 @index.ts —— 后者是正文,
+    // 若把 mention.name 也当 token 剔除,这条消息会被误判成「没有文字」。
+    const seed = deriveAutoTitleSeed(
+      queued({
+        text: '@src/index.ts 对比一下 @index.ts',
+        mentions: [{ type: 'file', name: 'index.ts', path: 'src/index.ts' }],
+      }),
+      LABELS,
+    );
+
+    expect(seed?.isUserText).toBe(true);
+    expect(seed?.text).toBe('对比一下 @index.ts');
+  });
+
+  it('agent chip 的 path 就存 name,无需额外特例即可剔除', () => {
+    const seed = deriveAutoTitleSeed(
+      queued({
+        text: '@code-reviewer',
+        mentions: [{ type: 'agent', name: 'code-reviewer', path: 'code-reviewer' }],
+      }),
+      LABELS,
+    );
+
+    expect(seed).toEqual({ text: 'code-reviewer', isUserText: false });
+  });
+
   it('mention 旁边有真正的文字时仍算用户文字', () => {
     const seed = deriveAutoTitleSeed(
       queued({

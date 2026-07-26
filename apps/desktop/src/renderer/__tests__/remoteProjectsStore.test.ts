@@ -358,6 +358,29 @@ describe('remoteProjectsStore pending title preview', () => {
     expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('New Maker');
   });
 
+  it('drops the preview when the session leaves the shard (archive / delete)', () => {
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
+    remoteProjectsStore.setPendingTitlePreview('s1', '帮我排查登录失败');
+
+    // 归档移出分片 —— removeDevice 之后也遍历不到它,预览必须在这里回收。
+    remoteProjectsStore.applyPatch('dev-B', 's1', { status: 'archived' });
+    // unarchive / reseed 把同一个仍是默认标题的会话拉回来,旧预览不得复活。
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
+
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('New Maker');
+  });
+
+  it('no-ops when the authoritative title is already set (avoids write/recompute churn)', () => {
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: '登录失败排查' })]);
+    const before = remoteProjectsStore.getMergedRemoteSessions();
+
+    remoteProjectsStore.setPendingTitlePreview('s1', '帮我排查登录失败');
+
+    // 预览本来就不会生效 —— 不写、不 recompute,快照引用保持不变。
+    expect(remoteProjectsStore.getMergedRemoteSessions()).toBe(before);
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('登录失败排查');
+  });
+
   it('ignores empty previews and keeps the snapshot reference stable on repeat calls', () => {
     remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
     remoteProjectsStore.setPendingTitlePreview('s1', '   ');

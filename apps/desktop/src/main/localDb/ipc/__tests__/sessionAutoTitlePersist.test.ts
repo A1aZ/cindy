@@ -234,26 +234,45 @@ describe('isUntitledSessionAwaitingAutoTitle — 资格', () => {
   });
 });
 
-describe('getOverwritableAutoTitle — 返回条件写的期望值', () => {
+describe('getOverwritableAutoTitle — 覆写目标', () => {
   it('返回当前标题本身,而不是草稿默认值', async () => {
     // fork 与合成占位都不等于草稿默认;猜期望值会让条件写直接落空。
     createDb('[Fork] 源会话标题');
     h.sqlite!.prepare('UPDATE sessions SET parent_session_id = ? WHERE id = ?').run('src', SESSION_ID);
-    expect(await getOverwritableAutoTitle(SESSION_ID)).toBe('[Fork] 源会话标题');
+    expect(await getOverwritableAutoTitle(SESSION_ID)).toMatchObject({
+      title: '[Fork] 源会话标题',
+      isDefaultDraftTitle: false,
+    });
 
     createDb('设计稿-v3.png');
-    expect(await getOverwritableAutoTitle(SESSION_ID, '设计稿-v3.png')).toBe('设计稿-v3.png');
+    expect(await getOverwritableAutoTitle(SESSION_ID, '设计稿-v3.png')).toMatchObject({
+      title: '设计稿-v3.png',
+      isDefaultDraftTitle: false,
+    });
 
     createDb('New Maker');
-    expect(await getOverwritableAutoTitle(SESSION_ID)).toBe('New Maker');
+    expect(await getOverwritableAutoTitle(SESSION_ID)).toMatchObject({
+      title: 'New Maker',
+      isDefaultDraftTitle: true,
+    });
+  });
+
+  it('带出 DB 权威 agentKind(调用方快照可能因 agent 切换而过期)', async () => {
+    createDb('New Maker');
+    expect((await getOverwritableAutoTitle(SESSION_ID))?.agentKind).toBe('claude-code');
+
+    h.sqlite!.prepare('UPDATE sessions SET agent_kind = ? WHERE id = ?').run('codex', SESSION_ID);
+    expect((await getOverwritableAutoTitle(SESSION_ID))?.agentKind).toBe('codex');
   });
 
   it('用它当期望值就能覆写 fork 占位(端到端条件写)', async () => {
     createDb('[Fork] 源会话标题');
     h.sqlite!.prepare('UPDATE sessions SET parent_session_id = ? WHERE id = ?').run('src', SESSION_ID);
 
-    const expected = await getOverwritableAutoTitle(SESSION_ID);
-    expect(await persistSessionTitleIfStillDraft(SESSION_ID, 'fork 后的第一句话', expected!)).toBe(true);
+    const target = await getOverwritableAutoTitle(SESSION_ID);
+    expect(
+      await persistSessionTitleIfStillDraft(SESSION_ID, 'fork 后的第一句话', target!.title),
+    ).toBe(true);
     expect(currentTitle()).toBe('fork 后的第一句话');
   });
 

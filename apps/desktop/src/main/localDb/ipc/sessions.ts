@@ -448,17 +448,41 @@ const FORK_PLACEHOLDER_TITLE_PREFIX = '[Fork';
  * 有消息和 userSendAt,旧口径会让它永久停在 "New Maker"。标题仍是系统占位本身就
  * 等价于「既没被自动起名、也没被用户改名」,足以作为门槛。
  */
+export interface OverwritableAutoTitleTarget {
+  /** 当前可覆写的标题 —— 直接用作条件写的期望值。 */
+  title: string;
+  /**
+   * DB 里的权威 agentKind。**不要信调用方快照**:另一个窗口或设备切过 agent 时,
+   * 入队时构建的 createOpts 可能已经过期(lazy-create 的
+   * `reconcileCreateOptsAgainstDb` 处理的正是同一类漂移),用错 agent 会让标题
+   * 走错供应商 —— 纯 Codex / 纯 Claude 用户会因此只拿到 fallback 标题。
+   */
+  agentKind: 'claude-code' | 'codex';
+  /**
+   * 是否仍停在建会话时的裸默认标题。合成占位(纯附件消息)只允许覆写这一种 ——
+   * fork 占位与上一条附件写下的合成占位都要保留到用户真正打字为止。
+   */
+  isDefaultDraftTitle: boolean;
+}
+
 export async function getOverwritableAutoTitle(
   id: string,
   synthesizedPlaceholder?: string | null,
-): Promise<string | null> {
+): Promise<OverwritableAutoTitleTarget | null> {
   const db = getDbClient().drizzle;
   const row = await selectSessionWithCount(db, id);
   if (!row) return null;
-  if (row.title === DEFAULT_DRAFT_SESSION_TITLE) return row.title;
-  if (row.parentSessionId && row.title.startsWith(FORK_PLACEHOLDER_TITLE_PREFIX)) return row.title;
-  if (synthesizedPlaceholder && row.title === synthesizedPlaceholder) return row.title;
-  return null;
+  const agentKind = row.agentKind === 'codex' ? 'codex' : 'claude-code';
+  const overwritable =
+    row.title === DEFAULT_DRAFT_SESSION_TITLE ||
+    (!!row.parentSessionId && row.title.startsWith(FORK_PLACEHOLDER_TITLE_PREFIX)) ||
+    (!!synthesizedPlaceholder && row.title === synthesizedPlaceholder);
+  if (!overwritable) return null;
+  return {
+    title: row.title,
+    agentKind,
+    isDefaultDraftTitle: row.title === DEFAULT_DRAFT_SESSION_TITLE,
+  };
 }
 
 /**

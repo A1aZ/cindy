@@ -467,10 +467,16 @@ export async function persistSessionTitleIfStillDraft(
 ): Promise<boolean> {
   const cleanTitle = normalizeAutoTitle(title);
   if (!cleanTitle || cleanTitle === DEFAULT_DRAFT_SESSION_TITLE) return false;
-  // 期望值与目标值相同 → 无需写入(占位已是最终标题),按成功处理。
-  if (cleanTitle === expectedTitle) return true;
 
   const db = getDbClient().drizzle;
+  // 目标值与期望值相同 → UPDATE 无事可做,但**不能凭期望值直接报成功**:期望值
+  // 可能已经过期(用户在资格检查之后手动改了名),那时库里根本不是这个标题。
+  // 读一次真实标题再回答,避免调用方把"没写成"当成"已写入"(PR #510 review)。
+  if (cleanTitle === expectedTitle) {
+    const current = await selectSessionWithCount(db, sessionId);
+    return !!current && current.title === cleanTitle;
+  }
+
   const setObj = sessionPatchToRow({ title: cleanTitle }, { bumpUpdatedAt: false });
   await db
     .update(sessions)

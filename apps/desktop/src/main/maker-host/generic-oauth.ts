@@ -503,11 +503,10 @@ async function runDeviceCodeGrant(
   abort: AbortController,
   options?: GenericOAuthLoginOptions,
 ): Promise<TokenResponse> {
-  const requestBody = new URLSearchParams({
-    client_id: oauth.clientId,
-    scope: oauth.scopes,
-    ...oauth.extraDeviceParams,
-  });
+  const requestBody = new URLSearchParams(oauth.extraDeviceParams ?? {});
+  // 标准字段永远以描述符为准；即使未来有未经过目录校验的调用方也不能被 extras 覆盖。
+  requestBody.set('client_id', oauth.clientId);
+  requestBody.set('scope', oauth.scopes);
   const authorizationResponse = await io.fetchImpl(oauth.deviceAuthorizationUrl, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -531,7 +530,13 @@ async function runDeviceCodeGrant(
     throw new Error('invalid_device_authorization_response');
   }
 
-  const expiresAt = io.now() + Math.min(expiresInSeconds * 1000, LOGIN_TIMEOUT_MS);
+  const expiresInMs = expiresInSeconds * 1000;
+  if (!Number.isFinite(expiresInMs)) {
+    throw new Error('invalid_device_authorization_response');
+  }
+  // Device Authorization Grant 的有效期由 IdP 的 expires_in 决定；不能用授权码登录的
+  // 五分钟回调超时截断，否则合法的 10–15 分钟设备码会在服务端仍有效时被本地提前判过期。
+  const expiresAt = io.now() + expiresInMs;
   try {
     options?.onProgress?.({
       phase: 'device-code',
@@ -623,16 +628,16 @@ export async function runGenericOAuthLogin(
       const redirectUri = `http://127.0.0.1:${listener!.port}/callback`;
 
       const authUrl = new URL(oauth.authorizeUrl);
-      authUrl.searchParams.append('response_type', 'code');
-      authUrl.searchParams.append('client_id', oauth.clientId);
-      authUrl.searchParams.append('redirect_uri', redirectUri);
-      authUrl.searchParams.append('scope', oauth.scopes);
-      authUrl.searchParams.append('code_challenge', challenge);
-      authUrl.searchParams.append('code_challenge_method', 'S256');
-      authUrl.searchParams.append('state', state);
       for (const [k, v] of Object.entries(oauth.extraAuthParams ?? {})) {
         authUrl.searchParams.append(k, v);
       }
+      authUrl.searchParams.set('response_type', 'code');
+      authUrl.searchParams.set('client_id', oauth.clientId);
+      authUrl.searchParams.set('redirect_uri', redirectUri);
+      authUrl.searchParams.set('scope', oauth.scopes);
+      authUrl.searchParams.set('code_challenge', challenge);
+      authUrl.searchParams.set('code_challenge_method', 'S256');
+      authUrl.searchParams.set('state', state);
 
       // 先注册 code 等待再开浏览器（已授权的浏览器可能在 openExternal 返回前就完成重定向）。
       const codePromise = new Promise<string>((resolve, reject) => {

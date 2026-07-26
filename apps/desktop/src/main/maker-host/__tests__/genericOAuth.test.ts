@@ -267,7 +267,7 @@ describe('登录流与凭证落盘失败', () => {
         phase: 'device-code',
         verificationUrl: 'https://auth.acme.example/device?user_code=ABCD-EFGH',
         userCode: 'ABCD-EFGH',
-        expiresAt: nowMs + 5 * 60_000,
+        expiresAt: nowMs + 10 * 60_000,
       },
     ]);
     expect(waits).toEqual([1_000, 1_000, 6_000]);
@@ -311,6 +311,57 @@ describe('登录流与凭证落盘失败', () => {
     expect(tokenPolls).toBe(2);
     expect(nowMs).toBe(1_002_000);
     expect(storage.map.has('device')).toBe(false);
+  });
+
+  it('Device Grant：标准 client_id/scope 不会被扩展参数覆盖', async () => {
+    fetchResponder = () => new Response('{}', { status: 200 });
+    const result = await runGenericOAuthLogin(
+      { id: 'device', name: 'Device Provider' },
+      {
+        ...DEVICE_OAUTH,
+        extraDeviceParams: {
+          client_id: 'wrong-client',
+          scope: 'wrong-scope',
+          audience: 'models',
+        },
+      },
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'invalid_device_authorization_response',
+    });
+    const body = new URLSearchParams(fetchCalls[0]?.body);
+    expect(body.getAll('client_id')).toEqual(['device-client-1']);
+    expect(body.getAll('scope')).toEqual(['openid offline_access']);
+    expect(body.get('audience')).toBe('models');
+  });
+
+  it('Authorization Code：标准 PKCE 参数不会被扩展参数或端点 query 覆盖', async () => {
+    configureGenericOAuth({
+      openExternal: async (authUrl) => {
+        openedUrls.push(authUrl);
+        cancelGenericOAuthLogin('acme');
+      },
+    });
+    const result = await runGenericOAuthLogin(
+      { id: 'acme', name: 'Acme' },
+      {
+        ...OAUTH,
+        authorizeUrl: `${OAUTH.authorizeUrl}?client_id=endpoint-client`,
+        extraAuthParams: {
+          client_id: 'wrong-client',
+          scope: 'wrong-scope',
+          audience: 'models',
+        },
+      },
+    );
+
+    expect(result).toEqual({ ok: false, reason: 'login_cancelled' });
+    const authUrl = new URL(openedUrls[0]!);
+    expect(authUrl.searchParams.getAll('client_id')).toEqual(['client-1']);
+    expect(authUrl.searchParams.getAll('scope')).toEqual(['openid offline_access']);
+    expect(authUrl.searchParams.get('audience')).toBe('models');
   });
 
   it('Device Grant：进度回调后取消，不再轮询或写入凭证', async () => {

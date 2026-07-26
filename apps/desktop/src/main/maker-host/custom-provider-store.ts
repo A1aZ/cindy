@@ -20,6 +20,10 @@ import type {
   CustomProviderRuntimeConfig,
   OAuthProviderDescriptor,
 } from '@cindy/model-providers';
+import {
+  findReservedOAuthExtraParam,
+  isProviderRequestPath,
+} from '@cindy/model-providers';
 
 import { getDbClient } from '../localDb/client/current.js';
 import { customProviders } from '../localDb/schema.js';
@@ -49,7 +53,11 @@ function validateRuntime(agent: string, rt: unknown): ValidationResult {
   }
   try {
     const u = new URL(r.baseUrl);
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    if (
+      (u.protocol !== 'http:' && u.protocol !== 'https:')
+      || u.username
+      || u.password
+    ) {
       return invalid(`runtime '${agent}' baseUrl must be http(s)`);
     }
   } catch {
@@ -57,15 +65,7 @@ function validateRuntime(agent: string, rt: unknown): ValidationResult {
   }
   if (
     r.requestPath !== undefined
-    && (
-      typeof r.requestPath !== 'string'
-      || r.requestPath.length <= 1
-      || r.requestPath.length > 2_048
-      || !r.requestPath.startsWith('/')
-      || r.requestPath.startsWith('//')
-      || r.requestPath.includes('#')
-      || /[\r\n]/.test(r.requestPath)
-    )
+    && !isProviderRequestPath(r.requestPath)
   ) {
     return invalid(`runtime '${agent}' requestPath invalid`);
   }
@@ -145,6 +145,22 @@ function validateAuthSection(auth: unknown): ValidationResult {
   if (flow !== 'authorization-code' && flow !== 'device-code') {
     return invalid("auth.oauth.flow must be 'authorization-code' | 'device-code'");
   }
+  if (
+    flow === 'authorization-code'
+    && (o.deviceAuthorizationUrl !== undefined || o.extraDeviceParams !== undefined)
+  ) {
+    return invalid('auth.oauth device-code fields not allowed for authorization-code');
+  }
+  if (
+    flow === 'device-code'
+    && (
+      o.authorizeUrl !== undefined
+      || o.extraAuthParams !== undefined
+      || o.redirectPort !== undefined
+    )
+  ) {
+    return invalid('auth.oauth authorization-code fields not allowed for device-code');
+  }
   for (const field of ['tokenUrl', 'clientId', 'scopes'] as const) {
     if (typeof o[field] !== 'string' || (o[field] as string).trim().length === 0) {
       return invalid(`auth.oauth.${field} required`);
@@ -191,6 +207,13 @@ function validateAuthSection(auth: unknown): ValidationResult {
       )
     ) {
       return invalid(`auth.oauth.${field} invalid`);
+    }
+    const collision = findReservedOAuthExtraParam(
+      o[field] as Record<string, unknown>,
+      flow,
+    );
+    if (collision) {
+      return invalid(`auth.oauth.${field} cannot override '${collision}'`);
     }
   }
   if (o.modelsDiscoveryUrl !== undefined) {
@@ -393,15 +416,7 @@ function parseRuntimes(raw: string): Partial<Record<AgentKind, CustomProviderRun
     ) {
       entry.wireProtocol = r.wireProtocol;
     }
-    if (
-      typeof r.requestPath === 'string'
-      && r.requestPath.length > 1
-      && r.requestPath.length <= 2_048
-      && r.requestPath.startsWith('/')
-      && !r.requestPath.startsWith('//')
-      && !r.requestPath.includes('#')
-      && !/[\r\n]/.test(r.requestPath)
-    ) {
+    if (isProviderRequestPath(r.requestPath)) {
       entry.requestPath = r.requestPath;
     }
     if (r.headers && typeof r.headers === 'object' && !Array.isArray(r.headers)) {

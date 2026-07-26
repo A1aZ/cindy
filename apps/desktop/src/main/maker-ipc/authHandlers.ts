@@ -126,7 +126,7 @@ export function registerMakerAuthHandlers(
       const mode = requireLoginMode(kind, rawOptions);
       const generation = beginMutation(kind);
       const isCurrent = (): boolean => isMutationCurrent(kind, generation);
-      let progressText = '';
+      const progressText = { stdout: '', stderr: '', other: '' };
       let emittedDeviceCode = '';
       const result = await maker.triggerAgentLogin(kind, {
         mode,
@@ -135,10 +135,15 @@ export function registerMakerAuthHandlers(
           broadcast(MAKER_PUSH.AUTH_LOGIN_PROGRESS, toLoginProgressPayload(kind, msg, mode));
           if (kind !== 'codex' || mode !== 'device-code') return;
 
-          progressText = (progressText + '\n' + progressDetail(msg)).slice(
+          const stream = progressStream(msg);
+          progressText[stream] = (progressText[stream] + progressDetail(msg)).slice(
             -MAX_LOGIN_PROGRESS_CHARS,
           );
-          const deviceCode = parseCodexDeviceCodeProgress(progressText);
+          // stdout / stderr 是互相独立的字节流，只在两条流之间加分隔；同一流的
+          // data chunk 必须原样拼接，chunk 边界可能恰好落在 URL 或设备码中间。
+          const deviceCode = parseCodexDeviceCodeProgress(
+            [progressText.stdout, progressText.stderr, progressText.other].join('\n'),
+          );
           if (!deviceCode) return;
           const signature = `${deviceCode.verificationUrl}\n${deviceCode.userCode}`;
           if (signature === emittedDeviceCode) return;
@@ -220,6 +225,12 @@ function progressDetail(msg: string): string {
   return stripAnsi(msg);
 }
 
+function progressStream(msg: string): 'stdout' | 'stderr' | 'other' {
+  if (msg.startsWith('stdout:')) return 'stdout';
+  if (msg.startsWith('stderr:')) return 'stderr';
+  return 'other';
+}
+
 function toLoginProgressPayload(
   agentKind: AgentKind,
   msg: string,
@@ -227,10 +238,10 @@ function toLoginProgressPayload(
 ): Record<string, unknown> {
   // Codex CLI 会把 OAuth URL 打到 stdout/stderr，两路都归一成 login-pending。
   if (msg.startsWith('stdout:')) {
-    return { agentKind, phase: 'login-pending', mode, detail: progressDetail(msg) };
+    return { agentKind, phase: 'login-pending', mode, detail: progressDetail(msg).trim() };
   }
   if (msg.startsWith('stderr:')) {
-    return { agentKind, phase: 'login-pending', mode, detail: progressDetail(msg) };
+    return { agentKind, phase: 'login-pending', mode, detail: progressDetail(msg).trim() };
   }
   return { agentKind, phase: stripAnsi(msg), mode };
 }

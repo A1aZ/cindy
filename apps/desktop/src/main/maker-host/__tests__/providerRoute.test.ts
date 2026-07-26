@@ -296,6 +296,20 @@ describe('api-key-header (自定义供应商 buildRouteDecision)', () => {
     });
   });
 
+  it('无 safeStorage key 时保留旧版 header-only 凭证', () => {
+    expect(
+      buildRouteDecision(
+        routing({ Authorization: 'Bearer legacy', 'X-Tenant': 'tenant-a' }),
+        KEY,
+        'codex',
+        null,
+      ),
+    ).toEqual({
+      headerOverride: { Authorization: 'Bearer legacy', 'X-Tenant': 'tenant-a' },
+      upstreamOverride: 'https://api.myprovider.com/v1',
+    });
+  });
+
   it('safeStorage key 始终覆盖复制配置里残留的鉴权头', () => {
     expect(
       buildRouteDecision(

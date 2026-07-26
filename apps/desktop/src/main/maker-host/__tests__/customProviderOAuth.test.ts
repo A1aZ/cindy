@@ -82,6 +82,46 @@ describe('validateCustomProviderConfig auth 段', () => {
     ).toBe(false);
   });
 
+  it('拒绝扩展参数覆盖 OAuth 标准字段', () => {
+    expect(
+      validateCustomProviderConfig({
+        ...BASE,
+        auth: {
+          method: 'oauth',
+          oauth: { ...DEVICE_OAUTH, extraDeviceParams: { client_id: 'other-client' } },
+        },
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateCustomProviderConfig({
+        ...BASE,
+        auth: {
+          method: 'oauth',
+          oauth: { ...OAUTH, extraAuthParams: { state: 'fixed-state' } },
+        },
+      }).ok,
+    ).toBe(false);
+  });
+
+  it('拒绝与 OAuth flow 不兼容的字段和带 userinfo 的上游地址', () => {
+    const bad = (oauth: object) =>
+      validateCustomProviderConfig({ ...BASE, auth: { method: 'oauth', oauth } });
+    expect(bad({ ...OAUTH, deviceAuthorizationUrl: DEVICE_OAUTH.deviceAuthorizationUrl }).ok)
+      .toBe(false);
+    expect(bad({ ...DEVICE_OAUTH, authorizeUrl: OAUTH.authorizeUrl }).ok).toBe(false);
+    expect(
+      validateCustomProviderConfig({
+        ...BASE,
+        runtimes: {
+          'claude-code': {
+            ...BASE.runtimes['claude-code']!,
+            baseUrl: 'https://user:pass@api.acme.example/anthropic',
+          },
+        },
+      }).ok,
+    ).toBe(false);
+  });
+
   it('OAuth 形态模型可留空（授权后自动发现填充，用户免手填）', () => {
     const noModels = {
       ...BASE,

@@ -14,7 +14,13 @@
  * handler body 可脱 Electron 用 IpcHarness + 内存 db 直接 invoke 单测（规则 14）。
  */
 
-import type { AgentKind, CustomProviderConfig, ProviderPreset, ProviderView } from '@cindy/model-providers';
+import {
+  isProviderRequestPath,
+  type AgentKind,
+  type CustomProviderConfig,
+  type ProviderPreset,
+  type ProviderView,
+} from '@cindy/model-providers';
 
 import type { LocalCliDetection } from '../../shared/localCliDetect.js';
 
@@ -125,18 +131,7 @@ function parseTestInput(input: unknown): ProviderTestInput | null {
         : ['openai-responses', 'openai-chat'];
       if (typeof spec.wireProtocol !== 'string' || !allowed.includes(spec.wireProtocol)) return null;
     }
-    if (
-      spec.requestPath !== undefined
-      && (
-        typeof spec.requestPath !== 'string'
-        || spec.requestPath.length <= 1
-        || spec.requestPath.length > 2_048
-        || !spec.requestPath.startsWith('/')
-        || spec.requestPath.startsWith('//')
-        || spec.requestPath.includes('#')
-        || /[\r\n]/.test(spec.requestPath)
-      )
-    ) return null;
+    if (spec.requestPath !== undefined && !isProviderRequestPath(spec.requestPath)) return null;
     return {
       kind: 'adhoc',
       spec: {
@@ -224,14 +219,17 @@ export function registerProviderHandlers(
     if (!v.ok) throwIpcError(v.code, v.message);
     const config = input as CustomProviderConfig;
     const previous = await getCustomProvider(config.id);
+    if (!previous) throwIpcError('NOT_FOUND', `custom provider '${config.id}' not found`);
+    const shouldResetOAuth =
+      config.auth?.method !== 'oauth'
+      || oauthDescriptorSignature(previous) !== oauthDescriptorSignature(config);
+    // 先阻止在途 flow 写回，再改描述符；否则旧 flow 可能在 clear 后迟到落一枚旧 token。
+    if (shouldResetOAuth) deps.oauthCancel(config.id);
     const updated = await updateCustomProvider(config.id, config);
     if (!updated) throwIpcError('NOT_FOUND', `custom provider '${config.id}' not found`);
     // 旧 client / endpoint 下签发的 token 不能沿用到新 OAuth 描述符；切到 API key /
     // 无鉴权时也清掉不再可达的 blob。仅改名称/模型时保留仍匹配的登录态。
-    if (
-      updated.auth?.method !== 'oauth'
-      || oauthDescriptorSignature(previous) !== oauthDescriptorSignature(updated)
-    ) {
+    if (shouldResetOAuth) {
       deps.clearOAuthCredentials(config.id);
     }
     await afterChange();
@@ -242,6 +240,7 @@ export function registerProviderHandlers(
     if (typeof providerId !== 'string' || providerId.length === 0) {
       throwIpcError('INVALID_PARAMS', 'providerId required');
     }
+    deps.oauthCancel(providerId);
     await deleteCustomProvider(providerId);
     // OAuth 形态自定义供应商的凭证 blob 一并清掉（apiKey 形态无 blob，幂等无害）。
     deps.clearOAuthCredentials(providerId);

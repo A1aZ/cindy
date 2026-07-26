@@ -523,8 +523,8 @@ export class DesktopClaudeAuthAdapter implements AuthAdapter {
 /** Codex AuthAdapter —— OAuth 子进程登录 + auth.json 读状态; getAuthEnv 仅注入 CODEX_HOME。 */
 export class DesktopCodexAuthAdapter implements AuthAdapter {
   private currentLoginProc: ChildProcess | null = null;
-  /** 多窗口 / 重复点击共用同一条登录流程，避免两个 codex login 同时写 auth.json。 */
-  private pendingLogin: Promise<AuthState> | null = null;
+  /** 同模式重复点击共用流程；切换登录模式时先取消旧流程再串行启动新流程。 */
+  private pendingLogin: { mode: AgentLoginMode; promise: Promise<AuthState> } | null = null;
   private loginAborted = false;
   /** 只在 CLI 尚未成功退出时接受取消；进入凭证 finalize 后成功线性化，迟到取消不再翻转结果。 */
   private loginCancellationOpen = false;
@@ -973,14 +973,20 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
   }
 
   triggerLogin(opts?: AuthLoginOptions): Promise<AuthState> {
-    if (this.pendingLogin) return this.pendingLogin;
+    const mode = opts?.mode ?? 'browser';
+    if (this.pendingLogin) {
+      if (this.pendingLogin.mode === mode) return this.pendingLogin.promise;
+      const previous = this.pendingLogin.promise;
+      this.cancelLogin();
+      return previous.catch(() => undefined).then(() => this.triggerLogin(opts));
+    }
     const run = this.runTriggerLogin(opts).finally(() => {
-      if (this.pendingLogin === run) {
+      if (this.pendingLogin?.promise === run) {
         this.pendingLogin = null;
         this.loginCancellationOpen = false;
       }
     });
-    this.pendingLogin = run;
+    this.pendingLogin = { mode, promise: run };
     return run;
   }
 
@@ -1030,13 +1036,14 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
 
       const stderrTail: string[] = [];
       proc.stdout?.on('data', (chunk: Buffer) => {
-        opts?.onProgress?.(`stdout:${String(chunk).trim()}`);
+        // data chunk 边界不等于文本边界；保留原始空白，IPC 层会分流累积后解析。
+        opts?.onProgress?.(`stdout:${String(chunk)}`);
       });
       proc.stderr?.on('data', (chunk: Buffer) => {
-        const s = String(chunk).trim();
-        stderrTail.push(s);
+        const raw = String(chunk);
+        stderrTail.push(raw.trim());
         if (stderrTail.length > 5) stderrTail.shift();
-        opts?.onProgress?.(`stderr:${s}`);
+        opts?.onProgress?.(`stderr:${raw}`);
       });
 
       const complete = (state: AuthState): void => {
@@ -1152,7 +1159,7 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
   async logout(opts?: { preserveInvalidatedReason?: boolean }): Promise<void> {
     this.ensureInvalidationMarkerLoaded();
     // 登出与在途登录串行：先取消并等它完全收口，防迟到的 auth.json 在登出后复活账号。
-    const pendingLogin = this.pendingLogin;
+    const pendingLogin = this.pendingLogin?.promise;
     if (pendingLogin) {
       this.cancelLogin();
       await pendingLogin.catch(() => undefined);

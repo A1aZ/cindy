@@ -624,10 +624,31 @@ describe('anthropic-compat-proxy routingTransform', () => {
     expect(custom.paths).toEqual(['/base/tenant/acme/infer?stream=1']);
   });
 
+  it('preserves the upstream base query when applying a path override', async () => {
+    const custom = await startFakeUpstream((_i, _b, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+    upstreamClose = custom.close;
+
+    proxy = await createAnthropicCompatProxy({
+      upstream: `${custom.url}/base?tenant=acme`,
+      transformRequest: [],
+      routingTransform: () => ({ pathOverride: '/infer?stream=1' }),
+    });
+
+    await post(proxy.url, { model: 'custom-model' });
+    expect(custom.paths).toEqual(['/base/infer?tenant=acme&stream=1']);
+  });
+
   it.each([
     '//evil.example/infer',
     '/infer#fragment',
     '/infer\r\nx-injected: yes',
+    '/my path',
+    '/infer\tmode',
+    '/infer\u0000mode',
+    '/模型',
   ])('rejects an unsafe path override before contacting the upstream: %j', async (pathOverride) => {
     const custom = await startFakeUpstream((_i, _b, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });

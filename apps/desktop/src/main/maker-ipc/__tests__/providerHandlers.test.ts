@@ -169,8 +169,10 @@ describe('provider:custom:* CRUD handlers', () => {
   it('clears an OAuth token when its descriptor changes but preserves it for model-only edits', async () => {
     mountDb();
     const harness = new IpcHarness();
-    const clearOAuthCredentials = vi.fn();
-    const deps = makeDeps({ clearOAuthCredentials });
+    const calls: string[] = [];
+    const oauthCancel = vi.fn(() => calls.push('cancel'));
+    const clearOAuthCredentials = vi.fn(() => calls.push('clear'));
+    const deps = makeDeps({ oauthCancel, clearOAuthCredentials });
     registerProviderHandlers(harness, deps);
     const oauth = {
       authorizeUrl: 'https://auth.example/authorize',
@@ -192,6 +194,7 @@ describe('provider:custom:* CRUD handlers', () => {
       name: 'OpenRouter renamed',
     });
     expect(clearOAuthCredentials).not.toHaveBeenCalled();
+    expect(oauthCancel).not.toHaveBeenCalled();
 
     await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
       ...oauthConfig,
@@ -203,19 +206,26 @@ describe('provider:custom:* CRUD handlers', () => {
         },
       },
     });
+    expect(calls).toEqual(['cancel', 'clear']);
+    expect(oauthCancel).toHaveBeenCalledWith('openrouter');
     expect(clearOAuthCredentials).toHaveBeenCalledWith('openrouter');
   });
 
   it('deletes (idempotent) + broadcasts; bad providerId → INVALID_PARAMS', async () => {
     mountDb();
     const harness = new IpcHarness();
-    const deps = makeDeps();
+    const calls: string[] = [];
+    const deps = makeDeps({
+      oauthCancel: vi.fn(() => calls.push('cancel')),
+      clearOAuthCredentials: vi.fn(() => calls.push('clear')),
+    });
     registerProviderHandlers(harness, deps);
     await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, validConfig);
 
     const del = await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_DELETE, 'openrouter');
     expect(del).toEqual({ ok: true });
     expect(await listCustomProviders()).toEqual([]);
+    expect(calls).toEqual(['cancel', 'clear']);
 
     await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_DELETE, '')).rejects.toThrow(
       /INVALID_PARAMS/,
@@ -255,7 +265,7 @@ describe('provider:test-connection handler', () => {
         agent: 'claude-code',
         baseUrl: 'https://x.example',
         modelId: 'm',
-        requestPath: '/custom/messages',
+        requestPath: '/tenant/acme/infer?stream=1',
         apiKey: 'k',
       },
     });
@@ -267,7 +277,7 @@ describe('provider:test-connection handler', () => {
         baseUrl: 'https://x.example',
         modelId: 'm',
         wireProtocol: undefined,
-        requestPath: '/custom/messages',
+        requestPath: '/tenant/acme/infer?stream=1',
         apiKey: 'k',
         headers: undefined,
       },
@@ -285,6 +295,15 @@ describe('provider:test-connection handler', () => {
       { kind: 'adhoc', spec: { agent: 'codex', baseUrl: 'https://x.example', modelId: '' } },
       { kind: 'adhoc', spec: { agent: 'codex', baseUrl: 'https://x.example', modelId: 'm', requestPath: '//evil.example' } },
       { kind: 'adhoc', spec: { agent: 'codex', baseUrl: 'https://x.example', modelId: 'm', requestPath: '/infer#fragment' } },
+      {
+        kind: 'adhoc',
+        spec: {
+          agent: 'codex',
+          baseUrl: 'https://x.example',
+          modelId: 'm',
+          requestPath: '/unescaped path',
+        },
+      },
       { kind: 'saved', providerId: '', agent: 'codex' },
     ];
     for (const input of bad) {

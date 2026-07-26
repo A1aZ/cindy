@@ -29,8 +29,13 @@ import {
   type RuntimeKeys,
 } from '@/lib/customProviders';
 import { uniqueCustomProviderId } from '@/lib/customProviderId';
+import {
+  providerModelFetchRequestSignature,
+  stripCredentialHeaders,
+  type CustomProviderAuthMode,
+} from '@/lib/providerModelFetch';
 
-import { sortPresetsForLocale } from '@cindy/model-providers';
+import { isProviderRequestPath, sortPresetsForLocale } from '@cindy/model-providers';
 import type {
   AgentKind,
   CustomProviderConfig,
@@ -78,15 +83,6 @@ interface RuntimeFields {
   headers: HeaderRow[];
   /** 隐藏字段：列模型端点（预设 / 已存配置快照进来），「获取模型列表」用；不在表单展示。 */
   modelsUrl: string;
-}
-
-function stripCredentialHeaders(headers: Record<string, string>): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(headers).filter(([name]) => {
-      const normalized = name.toLowerCase();
-      return normalized !== 'authorization' && normalized !== 'x-api-key';
-    }),
-  );
 }
 
 /** 每个 runtime Tab 的「测试连接」状态（idle → testing → ok/fail）。 */
@@ -285,13 +281,18 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
   const [hasKey, setHasKey] = useState<Record<AgentKind, boolean>>({ 'claude-code': false, codex: false });
   const [saving, setSaving] = useState(false);
   // 鉴权形态：API key（默认）/ OAuth / 无鉴权（本机或受信自托管代理）。
-  const [authMode, setAuthMode] = useState<'apiKey' | 'oauth' | 'none'>(
+  const [authMode, setAuthModeState] = useState<CustomProviderAuthMode>(
     initial?.auth?.method === 'oauth'
       ? 'oauth'
       : initial?.auth?.method === 'none'
         ? 'none'
         : 'apiKey',
   );
+  const authModeRef = useRef(authMode);
+  const setAuthMode = useCallback((mode: CustomProviderAuthMode) => {
+    authModeRef.current = mode;
+    setAuthModeState(mode);
+  }, []);
   const [oauthFlow, setOauthFlow] = useState<'authorization-code' | 'device-code'>(
     initialOAuth?.flow === 'device-code' ? 'device-code' : 'authorization-code',
   );
@@ -494,19 +495,6 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
   // 勾选弹层（后到的覆盖先开的、确认还会写进另一个 runtime），单飞直接消掉这类竞态。
   const anyFetching = fetchingModels['claude-code'] || fetchingModels.codex;
 
-  /** runtime 里参与拉取请求的字段的规范化签名（过期响应判据：签名变了 = 响应作废）。 */
-  const fetchRequestSignature = (f: RuntimeFields): string =>
-    JSON.stringify({
-      b: f.baseUrl.trim(),
-      p: f.requestPath.trim(),
-      m: f.modelsUrl.trim(),
-      k: f.apiKey.trim(),
-      h: f.headers
-        .map((h) => [h.name.trim(), h.value.trim()])
-        .filter(([n]) => n)
-        .sort((a, b) => (a[0]! < b[0]! ? -1 : a[0]! > b[0]! ? 1 : 0)),
-    });
-
   /** 获取模型列表：用当前 Tab 表单值 GET 列模型端点（key 仅内存透传），成功后开勾选弹层。 */
   const handleFetchModels = useCallback(async () => {
     const agent = activeTab;
@@ -525,7 +513,7 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
     const requestHeaders = authMode === 'none' ? stripCredentialHeaders(headers) : headers;
     // 请求参数签名：响应回来时若该 runtime 的端点/凭证/请求头已被改动，响应按过期丢弃——
     // 不能把旧端点的模型清单当成新端点的填进表单（成功和失败 toast 都不展示）。
-    const requestSig = fetchRequestSignature(rf);
+    const requestSig = providerModelFetchRequestSignature(rf, authMode);
     setFetchingModels((prev) => ({ ...prev, [agent]: true }));
     try {
       const result = await window.electronAPI.maker.fetchProviderModels({
@@ -535,7 +523,9 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
         apiKey: authMode === 'apiKey' ? rf.apiKey.trim() || null : null,
         ...(Object.keys(requestHeaders).length > 0 ? { headers: requestHeaders } : {}),
       });
-      if (fetchRequestSignature(rtRef.current[agent]) !== requestSig) return; // 过期响应，静默丢弃
+      if (
+        providerModelFetchRequestSignature(rtRef.current[agent], authModeRef.current) !== requestSig
+      ) return; // 过期响应，静默丢弃
       if (result.ok && result.models && result.models.length > 0) {
         // 用**响应到达时**的最新表单行构建弹层（rtRef），不是请求发出时的 rf 快照。
         const current = rtRef.current[agent].models
@@ -573,7 +563,9 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
         toast.error(t(`providerError.${result.code ?? 'UNKNOWN'}`));
       }
     } catch (e) {
-      if (fetchRequestSignature(rtRef.current[agent]) !== requestSig) return; // 过期失败同样静默
+      if (
+        providerModelFetchRequestSignature(rtRef.current[agent], authModeRef.current) !== requestSig
+      ) return; // 过期失败同样静默
       const ipc = extractIpcError(e);
       toast.error(ipc?.message ?? t('settings.providers.custom.fetch.failed'));
     } finally {
@@ -659,17 +651,7 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
         }))
         .filter((m) => m.id && m.name);
       const requestPath = rf.requestPath.trim();
-      if (
-        requestPath
-        && (
-          requestPath.length <= 1
-          || requestPath.length > 2_048
-          || !requestPath.startsWith('/')
-          || requestPath.startsWith('//')
-          || requestPath.includes('#')
-          || /[\r\n]/.test(requestPath)
-        )
-      ) {
+      if (requestPath && !isProviderRequestPath(requestPath)) {
         setActiveTab(a);
         toast.error(t('settings.providers.custom.errors.requestPathInvalid'));
         return;

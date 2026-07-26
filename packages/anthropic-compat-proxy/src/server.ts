@@ -103,6 +103,7 @@ interface UpstreamTarget {
   port: number;
   protocol: 'http:' | 'https:';
   basePath: string;  // 上游路径前缀(例 "" 或 "/v1")
+  baseQuery: string; // 不含前导 '?'
 }
 
 /**
@@ -125,6 +126,7 @@ function parseUpstream(upstream: string): UpstreamTarget {
     port: u.port ? Number(u.port) : (u.protocol === 'https:' ? 443 : 80),
     protocol: u.protocol,
     basePath: u.pathname.replace(/\/+$/, ''),  // 去末尾斜杠,防止后面拼出双斜杠
+    baseQuery: u.search.slice(1),
   };
 }
 
@@ -260,7 +262,7 @@ function isSafePathOverride(value: unknown): value is string {
     && value.startsWith('/')
     && !value.startsWith('//')
     && !value.includes('#')
-    && !/[\r\n]/.test(value)
+    && !/[^\u0021-\u00ff]/.test(value)
   );
 }
 
@@ -638,7 +640,13 @@ function forward(
   }
   const reqFn = actualTarget.protocol === 'https:' ? httpsRequest : httpRequest;
   const routedPath = pathOverride ?? path;
-  const upstreamPath = `${actualTarget.basePath}${routedPath.startsWith('/') ? routedPath : '/' + routedPath}`;
+  const queryIndex = routedPath.indexOf('?');
+  const routedPathname = queryIndex === -1 ? routedPath : routedPath.slice(0, queryIndex);
+  const routedQuery = queryIndex === -1 ? '' : routedPath.slice(queryIndex + 1);
+  const upstreamPathname =
+    `${actualTarget.basePath}${routedPathname.startsWith('/') ? routedPathname : '/' + routedPathname}`;
+  const upstreamQuery = [actualTarget.baseQuery, routedQuery].filter(Boolean).join('&');
+  const upstreamPath = upstreamQuery ? `${upstreamPathname}?${upstreamQuery}` : upstreamPathname;
 
   // http.request 会把 options 原样透传给 agent.createConnection → net.connect,
   // 所以 socket 级 connect 选项运行时有效;但 @types/node 的 RequestOptions 没收录

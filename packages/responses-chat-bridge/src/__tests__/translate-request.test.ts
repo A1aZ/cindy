@@ -117,7 +117,16 @@ describe('translateResponsesRequest', () => {
   it('injects the official Gemini thought-signature fallback on only the first call in each step', () => {
     const out = translateResponsesRequest(base({
       input: [
-        { type: 'function_call', call_id: 'c1', name: 'Read', arguments: '{}' },
+        {
+          type: 'function_call',
+          call_id: 'c1',
+          name: 'Read',
+          arguments: '{}',
+          extra_content: {
+            vendor: { cache_key: 'keep-me' },
+            google: { other_extension: 'keep-me-too' },
+          },
+        },
         { type: 'function_call', call_id: 'c2', name: 'Search', arguments: '{}' },
         { type: 'function_call_output', call_id: 'c1', output: 'ok' },
         { type: 'function_call_output', call_id: 'c2', output: 'ok' },
@@ -127,7 +136,11 @@ describe('translateResponsesRequest', () => {
       tool_calls?: Array<{ extra_content?: { google?: { thought_signature?: string } } }>;
     };
     expect(assistant.tool_calls?.[0]?.extra_content).toEqual({
-      google: { thought_signature: 'skip_thought_signature_validator' },
+      vendor: { cache_key: 'keep-me' },
+      google: {
+        other_extension: 'keep-me-too',
+        thought_signature: 'skip_thought_signature_validator',
+      },
     });
     expect(assistant.tool_calls?.[1]?.extra_content).toBeUndefined();
 

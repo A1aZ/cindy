@@ -8,6 +8,11 @@ export interface ProviderModelFetchSignatureFields {
   headers: ReadonlyArray<{ name: string; value: string }>;
 }
 
+export interface ProviderConnectionTestSignatureFields extends ProviderModelFetchSignatureFields {
+  wireProtocol: string;
+  models: ReadonlyArray<{ id: string }>;
+}
+
 export function stripCredentialHeaders(headers: Record<string, string>): Record<string, string> {
   return Object.fromEntries(
     Object.entries(headers).filter(([name]) => {
@@ -38,5 +43,17 @@ export function providerModelFetchRequestSignature(
     modelsUrl: fields.modelsUrl.trim(),
     apiKey: authMode === 'apiKey' ? fields.apiKey.trim() : null,
     headers: Object.entries(effectiveHeaders).sort(([a], [b]) => a.localeCompare(b)),
+  });
+}
+
+/** 测试连接还取决于实际推理协议与首个有效模型；任一变化都必须让旧探测响应失效。 */
+export function providerConnectionTestRequestSignature(
+  fields: ProviderConnectionTestSignatureFields,
+  authMode: CustomProviderAuthMode,
+): string {
+  return JSON.stringify({
+    request: providerModelFetchRequestSignature(fields, authMode),
+    wireProtocol: fields.wireProtocol,
+    modelId: fields.models.map((model) => model.id.trim()).find(Boolean) ?? null,
   });
 }

@@ -44,6 +44,12 @@ function descriptor(providerId: string, agent: AgentKind) {
 }
 
 const KEY = 'sk-test-gateway-key';
+const CODEX_ACCOUNT_HEADER_DELETE = [
+  'chatgpt-account-id',
+  'openai-beta',
+  'originator',
+  'session_id',
+];
 
 afterEach(() => {
   mockGetAppCapabilities.mockReturnValue({ canUseCindyGateway: true });
@@ -286,13 +292,18 @@ describe('api-key-header (自定义供应商 buildRouteDecision)', () => {
     expect(buildRouteDecision(routing(), KEY, 'codex', 'sk-custom')).toEqual({
       headerOverride: { authorization: 'Bearer sk-custom' },
       upstreamOverride: 'https://api.myprovider.com/v1',
+      headerDelete: CODEX_ACCOUNT_HEADER_DELETE,
     });
   });
 
-  it('叠加用户自定义 headers；无 key 时仍路由到 baseUrl(让上游决定鉴权)', () => {
+  it('叠加用户自定义 headers；无 key 时用哑值覆盖 CLI 凭证', () => {
     expect(buildRouteDecision(routing({ 'X-Org': 'acme' }), KEY, 'codex', null)).toEqual({
-      headerOverride: { 'X-Org': 'acme' },
+      headerOverride: {
+        'X-Org': 'acme',
+        authorization: 'Bearer cindy-missing-custom-provider-api-key',
+      },
       upstreamOverride: 'https://api.myprovider.com/v1',
+      headerDelete: CODEX_ACCOUNT_HEADER_DELETE,
     });
   });
 
@@ -306,6 +317,42 @@ describe('api-key-header (自定义供应商 buildRouteDecision)', () => {
       ),
     ).toEqual({
       headerOverride: { Authorization: 'Bearer legacy', 'X-Tenant': 'tenant-a' },
+      upstreamOverride: 'https://api.myprovider.com/v1',
+      headerDelete: CODEX_ACCOUNT_HEADER_DELETE,
+    });
+  });
+
+  it('legacy 只含 x-api-key 时仍覆盖 Codex Authorization', () => {
+    expect(
+      buildRouteDecision(
+        routing({ 'X-API-Key': 'legacy-key' }),
+        KEY,
+        'codex',
+        null,
+      ),
+    ).toEqual({
+      headerOverride: {
+        'X-API-Key': 'legacy-key',
+        authorization: 'Bearer cindy-missing-custom-provider-api-key',
+      },
+      upstreamOverride: 'https://api.myprovider.com/v1',
+      headerDelete: CODEX_ACCOUNT_HEADER_DELETE,
+    });
+  });
+
+  it('legacy 只含 Authorization 时仍覆盖 Claude x-api-key', () => {
+    expect(
+      buildRouteDecision(
+        routing({ Authorization: 'Bearer legacy' }),
+        KEY,
+        'claude-code',
+        null,
+      ),
+    ).toEqual({
+      headerOverride: {
+        Authorization: 'Bearer legacy',
+        'x-api-key': 'cindy-missing-custom-provider-api-key',
+      },
       upstreamOverride: 'https://api.myprovider.com/v1',
     });
   });
@@ -328,6 +375,55 @@ describe('api-key-header (自定义供应商 buildRouteDecision)', () => {
         authorization: 'Bearer sk-current',
       },
       upstreamOverride: 'https://api.myprovider.com/v1',
+      headerDelete: CODEX_ACCOUNT_HEADER_DELETE,
+    });
+  });
+
+  it('缺少 safeStorage 与 legacy key 时用哑值覆盖 CLI 凭证并删除 Codex 账号头', () => {
+    expect(
+      buildRouteDecision(
+        routing({ 'X-Tenant': 'tenant-a' }),
+        KEY,
+        'codex',
+        null,
+      ),
+    ).toEqual({
+      headerOverride: {
+        'X-Tenant': 'tenant-a',
+        authorization: 'Bearer cindy-missing-custom-provider-api-key',
+      },
+      upstreamOverride: 'https://api.myprovider.com/v1',
+      headerDelete: CODEX_ACCOUNT_HEADER_DELETE,
+    });
+  });
+
+  it('本地 Chat bridge 在缺 key 时保留 legacy 凭证，否则注入哑值', () => {
+    const baseRoute = {
+      providerId: 'legacy',
+      providerSource: 'user' as const,
+      routing: routing({ 'X-Tenant': 'tenant-a' }),
+      apiKey: null,
+      oauthToken: null,
+    };
+    expect(buildLocalHandlerHeaders(baseRoute, 'codex')).toMatchObject({
+      headers: {
+        'X-Tenant': 'tenant-a',
+        authorization: 'Bearer cindy-missing-custom-provider-api-key',
+      },
+    });
+    expect(
+      buildLocalHandlerHeaders({
+        ...baseRoute,
+        routing: routing({
+          Authorization: 'Bearer legacy',
+          'X-Tenant': 'tenant-a',
+        }),
+      }, 'codex'),
+    ).toMatchObject({
+      headers: {
+        Authorization: 'Bearer legacy',
+        'X-Tenant': 'tenant-a',
+      },
     });
   });
 });
@@ -428,6 +524,7 @@ describe('resolveSessionRouteDecision — 自定义供应商(resolve 时注入 k
     expect(resolveSessionRouteDecision('s-user', 'codex', KEY)).toEqual({
       headerOverride: { authorization: 'Bearer sk-or-123' },
       upstreamOverride: 'https://openrouter.ai/api/v1',
+      headerDelete: CODEX_ACCOUNT_HEADER_DELETE,
     });
   });
 
@@ -452,10 +549,12 @@ describe('resolveSessionRouteDecision — 自定义供应商(resolve 时注入 k
       headerOverride: { authorization: 'Bearer sk-exact' },
       upstreamOverride: 'https://gateway.example/api',
       pathOverride: '/tenant/acme/infer?stream=1',
+      headerDelete: CODEX_ACCOUNT_HEADER_DELETE,
     });
     expect(resolveSessionRouteDecision('s-user', 'codex', KEY)).toEqual({
       headerOverride: { authorization: 'Bearer sk-exact' },
       upstreamOverride: 'https://gateway.example/api',
+      headerDelete: CODEX_ACCOUNT_HEADER_DELETE,
     });
   });
 

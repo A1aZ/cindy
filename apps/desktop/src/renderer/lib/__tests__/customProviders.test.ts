@@ -168,7 +168,7 @@ describe('custom provider credential lifecycle', () => {
   });
 
   it('removes old runtime keys after switching to no authentication', async () => {
-    const safeStorageRemove = vi.fn(async () => undefined);
+    const safeStorageRemove = vi.fn(async () => ({ success: true }));
     const safeStorageStore = vi.fn();
     vi.stubGlobal('window', {
       electronAPI: {
@@ -192,5 +192,31 @@ describe('custom provider credential lifecycle', () => {
 
     expect(safeStorageRemove).toHaveBeenCalledTimes(2);
     expect(safeStorageStore).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a failed safe-storage removal instead of reporting a clean auth switch', async () => {
+    const safeStorageRemove = vi.fn(async () => ({
+      success: false,
+      error: 'Codex restart failed',
+    }));
+    vi.stubGlobal('window', {
+      electronAPI: {
+        maker: { updateCustomProvider: vi.fn(async () => ({ ok: true })) },
+        safeStorageRemove,
+        safeStorageStore: vi.fn(),
+      },
+    });
+
+    await expect(updateCustomProvider({
+      id: 'local',
+      name: 'Local',
+      auth: { method: 'none' },
+      runtimes: {
+        codex: {
+          baseUrl: 'http://127.0.0.1:4000/v1',
+          models: [{ id: 'local-model', name: 'Local Model' }],
+        },
+      },
+    }, {})).rejects.toThrow('Codex restart failed');
   });
 });

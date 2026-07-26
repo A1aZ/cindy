@@ -11,6 +11,12 @@ describe('isProviderRequestPath', () => {
     expect(isProviderRequestPath('/tenant/acme/my%20path?stream=1')).toBe(true);
   });
 
+  it('accepts the root path for providers whose base URL already names the inference endpoint', () => {
+    expect(isProviderRequestPath('/')).toBe(true);
+    expect(appendProviderRequestPath('https://custom.example/infer', '/'))
+      .toBe('https://custom.example/infer/');
+  });
+
   it.each([
     '//evil.example/infer',
     '/infer#fragment',

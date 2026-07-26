@@ -86,7 +86,10 @@ export interface ProviderHandlerDeps {
    * 通用 OAuth 登录 / 登出 / 取消（生产接 generic-oauth Runner + 目录描述符解析；
    * login 成功后由生产 deps 负责模型发现与 PROVIDER_CHANGED 广播）。
    */
-  oauthLogin(providerId: string): Promise<{ ok: boolean; reason?: string }>;
+  oauthLogin(
+    providerId: string,
+    isCurrent: () => boolean,
+  ): Promise<{ ok: boolean; reason?: string }>;
   oauthLogout(providerId: string): Promise<void>;
   oauthCancel(providerId: string): void;
   /** 删除自定义供应商时清理其 OAuth 凭证 blob（生产 = logoutGenericOAuth；幂等）。 */
@@ -184,6 +187,15 @@ export function registerProviderHandlers(
   registry: IpcHandlerRegistry,
   deps: ProviderHandlerDeps,
 ): void {
+  const oauthMutationGeneration = new Map<string, number>();
+  const beginOAuthMutation = (providerId: string): number => {
+    const generation = (oauthMutationGeneration.get(providerId) ?? 0) + 1;
+    oauthMutationGeneration.set(providerId, generation);
+    return generation;
+  };
+  const isOAuthMutationCurrent = (providerId: string, generation: number): boolean =>
+    oauthMutationGeneration.get(providerId) === generation;
+
   // 只读聚合：loadCatalog 永不抛（最差回退内置目录），故无需 throwIpcError 包裹。
   registry.handle(
     MAKER_INVOKE.PROVIDER_LIST,
@@ -220,6 +232,9 @@ export function registerProviderHandlers(
     const config = input as CustomProviderConfig;
     const previous = await getCustomProvider(config.id);
     if (!previous) throwIpcError('NOT_FOUND', `custom provider '${config.id}' not found`);
+    // 即便 OAuth 描述符没变，runtime / model 编辑也必须让旧登录尾部的自动发现失效，
+    // 否则旧 endpoint 的迟到结果可能合并进刚保存的新配置。
+    beginOAuthMutation(config.id);
     const shouldResetOAuth =
       config.auth?.method !== 'oauth'
       || oauthDescriptorSignature(previous) !== oauthDescriptorSignature(config);
@@ -240,6 +255,7 @@ export function registerProviderHandlers(
     if (typeof providerId !== 'string' || providerId.length === 0) {
       throwIpcError('INVALID_PARAMS', 'providerId required');
     }
+    beginOAuthMutation(providerId);
     deps.oauthCancel(providerId);
     await deleteCustomProvider(providerId);
     // OAuth 形态自定义供应商的凭证 blob 一并清掉（apiKey 形态无 blob，幂等无害）。
@@ -294,19 +310,24 @@ export function registerProviderHandlers(
   }
   registry.handle(MAKER_INVOKE.PROVIDER_OAUTH_LOGIN, async (_event, providerId: unknown) => {
     const id = requireProviderId(providerId);
+    const generation = beginOAuthMutation(id);
     try {
-      return await deps.oauthLogin(id);
+      return await deps.oauthLogin(id, () => isOAuthMutationCurrent(id, generation));
     } catch (err) {
       throwIpcError('INVALID_PARAMS', err instanceof Error ? err.message : String(err));
     }
   });
   registry.handle(MAKER_INVOKE.PROVIDER_OAUTH_LOGOUT, async (_event, providerId: unknown) => {
-    await deps.oauthLogout(requireProviderId(providerId));
+    const id = requireProviderId(providerId);
+    beginOAuthMutation(id);
+    await deps.oauthLogout(id);
     await afterChange();
     return { ok: true };
   });
   registry.handle(MAKER_INVOKE.PROVIDER_OAUTH_CANCEL, async (_event, providerId: unknown) => {
-    deps.oauthCancel(requireProviderId(providerId));
+    const id = requireProviderId(providerId);
+    beginOAuthMutation(id);
+    deps.oauthCancel(id);
     return { ok: true };
   });
 }

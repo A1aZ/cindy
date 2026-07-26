@@ -131,10 +131,11 @@ async function saveKeys(providerId: string, keys: RuntimeKeys): Promise<void> {
 }
 
 async function removeKey(providerId: string, agent: AgentKind): Promise<void> {
-  try {
-    await window.electronAPI.safeStorageRemove(customProviderSecretStorageKey(providerId, agent));
-  } catch {
-    // 配置已先写入且不会再读取这把 key；清理失败只留下不可达的加密孤儿数据。
+  const result = await window.electronAPI.safeStorageRemove(
+    customProviderSecretStorageKey(providerId, agent),
+  );
+  if (!result.success) {
+    throw new Error(result.error || `Failed to remove ${agent} provider credential`);
   }
 }
 

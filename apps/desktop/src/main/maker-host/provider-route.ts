@@ -84,6 +84,8 @@ const MISSING_PROVIDER_OAUTH_TOKEN = 'xdt-missing-provider-oauth-token';
 const CODEX_ACCOUNT_HEADERS = ['chatgpt-account-id', 'openai-beta', 'originator', 'session_id'];
 /** 无鉴权上游永远不能收到 agent 子进程自带的订阅凭证。 */
 const CLIENT_AUTH_HEADERS = ['authorization', 'x-api-key'];
+/** 缺少自定义供应商 key 时覆盖 CLI 凭证的哑值：目标上游应 401，但绝不收到订阅 token。 */
+const MISSING_CUSTOM_PROVIDER_API_KEY = 'cindy-missing-custom-provider-api-key';
 
 function withoutClientAuthHeaders(
   headers: Record<string, string> | undefined,
@@ -92,6 +94,10 @@ function withoutClientAuthHeaders(
   return Object.fromEntries(
     Object.entries(headers ?? {}).filter(([name]) => !blocked.has(name.toLowerCase())),
   );
+}
+
+function hasHeader(headers: Record<string, string> | undefined, expectedName: string): boolean {
+  return Object.keys(headers ?? {}).some((name) => name.toLowerCase() === expectedName);
 }
 
 /**
@@ -189,7 +195,10 @@ export function buildRouteDecision(
       // 新版凭证由 safeStorage 注入；旧版曾把 API key 直接存进 headerOverride。没有迁移到
       // safeStorage 的 key 时保留旧头，避免升级后所有 legacy 自定义供应商静默掉鉴权。
       // 一旦存在安全存储 key，仍先剥掉旧头再覆盖，防旧凭证与新凭证并存。
-      const headerOverride = apiKey
+      const hasLegacyAuthorization = hasHeader(routing.headerOverride, 'authorization');
+      const hasLegacyApiKey = hasHeader(routing.headerOverride, 'x-api-key');
+      const hasLegacyCredential = hasLegacyAuthorization || hasLegacyApiKey;
+      const headerOverride = apiKey || !hasLegacyCredential
         ? withoutClientAuthHeaders(routing.headerOverride)
         : { ...(routing.headerOverride ?? {}) };
       if (apiKey) {
@@ -203,11 +212,23 @@ export function buildRouteDecision(
         } else {
           headerOverride['authorization'] = `Bearer ${apiKey}`;
         }
+      } else {
+        // 未配置 key 时，每一种 agent 原生鉴权头都必须有 legacy 值或哑值覆盖。只保留
+        // x-api-key 会让 Codex Authorization 穿透；只保留 Authorization 也会让 Claude
+        // x-api-key 穿透。
+        if (!hasLegacyAuthorization) {
+          headerOverride.authorization = `Bearer ${MISSING_CUSTOM_PROVIDER_API_KEY}`;
+        }
+        if (agent === 'claude-code' && !hasLegacyApiKey) {
+          headerOverride['x-api-key'] = MISSING_CUSTOM_PROVIDER_API_KEY;
+        }
       }
       const decision: RoutingDecision = {};
       if (Object.keys(headerOverride).length > 0) decision.headerOverride = headerOverride;
       if (routing.upstream) decision.upstreamOverride = routing.upstream;
-      if (routing.headerDelete?.length) decision.headerDelete = routing.headerDelete;
+      const headerDelete = new Set(routing.headerDelete ?? []);
+      if (agent === 'codex') for (const name of CODEX_ACCOUNT_HEADERS) headerDelete.add(name);
+      if (headerDelete.size > 0) decision.headerDelete = [...headerDelete];
       // 自定义供应商必有 upstream → 实际总返回 decision；全空时 passthrough。
       return decision.headerOverride || decision.upstreamOverride || decision.headerDelete
         ? decision
@@ -359,7 +380,16 @@ export function buildLocalHandlerHeaders(route: ResolvedSessionRoute, agent: Age
       for (const name of CLIENT_AUTH_HEADERS) headerDelete.add(name);
       break;
     case 'api-key-header':
-      if (route.apiKey) headers.authorization = `Bearer ${route.apiKey}`;
+      {
+        const decision = buildRouteDecision(
+          route.routing,
+          null,
+          agent,
+          route.apiKey,
+        );
+        Object.assign(headers, decision?.headerOverride ?? {});
+        for (const name of decision?.headerDelete ?? []) headerDelete.add(name);
+      }
       break;
     case 'oauth-token':
     case 'provider-oauth-header':

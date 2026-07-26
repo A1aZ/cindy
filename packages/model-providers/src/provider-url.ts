@@ -6,9 +6,17 @@
  * 空格、控制符和非 ASCII 字符应由用户先做 percent-encoding。
  */
 export function isProviderRequestPath(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const queryIndex = value.indexOf('?');
+  const path = queryIndex === -1 ? value : value.slice(0, queryIndex);
+  const hasDotSegment = path
+    .split('/')
+    .some((segment) => {
+      const normalizedDots = segment.replace(/%2e/gi, '.');
+      return normalizedDots === '.' || normalizedDots === '..';
+    });
   return (
-    typeof value === 'string'
-    && value.length >= 1
+    value.length >= 1
     && value.length <= 2_048
     && value.startsWith('/')
     && !value.startsWith('//')
@@ -16,6 +24,7 @@ export function isProviderRequestPath(value: unknown): value is string {
     && !value.includes('\\')
     && !/[^\u0021-\u007e]/.test(value)
     && !/%(?![0-9A-Fa-f]{2})/.test(value)
+    && !hasDotSegment
   );
 }
 

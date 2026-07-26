@@ -24,6 +24,7 @@
  */
 
 import {
+  contrastRatio,
   toHex,
   toHslTriplet,
   toRgbaString,
@@ -174,6 +175,7 @@ export const TEMPLATE_TOKEN_IDS: readonly string[] = [
 ];
 
 const WHITE: Rgb = { r: 255, g: 255, b: 255 };
+const BLACK: Rgb = { r: 0, g: 0, b: 0 };
 
 /**
  * 把色板展开成 Cindy token map。`type` 决定 22 处 light / dark 分支——取值依据
@@ -211,8 +213,14 @@ export function buildThemeColorsFromPalette(
   const textSecondaryHsl = toHslTriplet(palette.textSecondary);
   const textTertiaryHsl = toHslTriplet(palette.textTertiary);
 
-  /** accent 底上的前景:dark 主题回落到页面底色,light 主题用纯白。 */
-  const onAccent = pick(surface, white);
+  /** accent 底上的前景：优先沿用既有主题的模式惯例（dark=surface, light=white），
+   *  但若对比度不足 3:1（WCAG 最低可读门槛）则按实际对比度选黑/白。 */
+  const defaultOnAccent = pick(palette.surface, WHITE);
+  const MIN_CONTRAST = 3;
+  const onAccent = contrastRatio(palette.accentPrimary, defaultOnAccent) >= MIN_CONTRAST
+    ? pick(surface, white)
+    : (contrastRatio(palette.accentPrimary, WHITE) >= contrastRatio(palette.accentPrimary, BLACK)
+      ? white : toHex(BLACK));
   /** dark 用 accent 提亮档做链接/info,light 用压暗档才够对比度。 */
   const accentReadable = pick(accentSoft, accentDeep);
   /** 链接色:dark 提亮档,light 直接用 primary。 */

@@ -25,20 +25,26 @@ function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
 
-/** 展开 3/4 位简写 hex；返回 6 位（丢弃 alpha——Cindy token 不消费源主题的透明度）。 */
-function expandHex(body: string): string | null {
+/** 展开 3/4/6/8 位 hex，返回 `{ rgb6, alpha }` 对。 */
+function expandHexFull(body: string): { rgb6: string; alpha: number } | null {
   if (body.length === 3 || body.length === 4) {
-    const rgb = body.slice(0, 3);
-    return rgb
-      .split('')
-      .map((c) => c + c)
-      .join('');
+    const rgb = body.slice(0, 3).split('').map((c) => c + c).join('');
+    const a = body.length === 4
+      ? Number.parseInt(body[3] + body[3], 16) / 255
+      : 1;
+    return { rgb6: rgb, alpha: a };
   }
-  if (body.length === 6) return body;
-  // 8 位 = #rrggbbaa：剥离 alpha。VSCode 主题里 border / overlay 类色值大量带
-  // alpha，直接当不透明色用即可（我们的目标 token 都是实色槽位）。
-  if (body.length === 8) return body.slice(0, 6);
+  if (body.length === 6) return { rgb6: body, alpha: 1 };
+  if (body.length === 8) {
+    return { rgb6: body.slice(0, 6), alpha: Number.parseInt(body.slice(6), 16) / 255 };
+  }
   return null;
+}
+
+/** 展开 hex 并剥离 alpha（向后兼容的快捷路径）。 */
+function expandHex(body: string): string | null {
+  const result = expandHexFull(body);
+  return result ? result.rgb6 : null;
 }
 
 function parseHex(raw: string): Rgb | null {
@@ -77,6 +83,24 @@ export function hslToRgb(h: number, s: number, l: number): Rgb {
 interface NumericComponent {
   value: number;
   percent: boolean;
+  unit?: string;
+}
+
+const ANGLE_UNIT_RE = /^([+-]?\d*\.?\d+)(deg|rad|grad|turn)?$/i;
+
+function parseAngleComponent(raw: string): NumericComponent {
+  const m = ANGLE_UNIT_RE.exec(raw);
+  if (!m) return { value: Number.parseFloat(raw), percent: false };
+  return { value: Number.parseFloat(m[1]), percent: false, unit: m[2]?.toLowerCase() };
+}
+
+function angleToDegrees(comp: NumericComponent): number {
+  switch (comp.unit) {
+    case 'rad': return (comp.value * 180) / Math.PI;
+    case 'grad': return (comp.value * 360) / 400;
+    case 'turn': return comp.value * 360;
+    default: return comp.value;
+  }
 }
 
 function parseNumberList(body: string): NumericComponent[] | null {
@@ -88,7 +112,7 @@ function parseNumberList(body: string): NumericComponent[] | null {
   return parts.slice(0, 4).map((p) => (
     p.endsWith('%')
       ? { value: Number.parseFloat(p.slice(0, -1)), percent: true }
-      : { value: Number.parseFloat(p), percent: false }
+      : { value: Number.parseFloat(p), percent: false, unit: ANGLE_UNIT_RE.exec(p)?.[2]?.toLowerCase() }
   ));
 }
 
@@ -105,9 +129,9 @@ function parseFunctional(raw: string): Rgb | null {
       clamp255(percent ? (value * 255) / 100 : value);
     return { r: channel(nums[0]), g: channel(nums[1]), b: channel(nums[2]) };
   }
-  // hsl()：色相是角度（无单位），饱和度与亮度按百分比取值。
+  // hsl()：色相支持 deg/rad/grad/turn，饱和度与亮度按百分比取值。
   return hslToRgb(
-    nums[0].value,
+    angleToDegrees(nums[0]),
     clamp01(nums[1].value / 100),
     clamp01(nums[2].value / 100),
   );
@@ -123,6 +147,63 @@ export function parseCssColor(raw: string | undefined | null): Rgb | null {
   const value = raw.trim();
   if (value.length === 0) return null;
   return parseHex(value) ?? parseFunctional(value);
+}
+
+/** alpha-over 合成：将一个带透明度的前景色合成到不透明底色上，产出实色。 */
+export function compositeOver(fg: Rgb, alpha: number, bg: Rgb): Rgb {
+  const a = clamp01(alpha);
+  return {
+    r: clamp255(fg.r * a + bg.r * (1 - a)),
+    g: clamp255(fg.g * a + bg.g * (1 - a)),
+    b: clamp255(fg.b * a + bg.b * (1 - a)),
+  };
+}
+
+/**
+ * 解析颜色并在有 alpha 时合成到 `over`。用于将半透明覆盖色（如
+ * `#ffffff0a`）转成实色 token 值。`over` 为 null 时退化为 `parseCssColor`。
+ */
+export function parseCssColorComposited(
+  raw: string | undefined | null,
+  over: Rgb | null,
+): Rgb | null {
+  if (typeof raw !== 'string') return null;
+  const value = raw.trim();
+  if (value.length === 0) return null;
+  // 先尝试 hex（可能带 alpha）。
+  const hexMatch = HEX_RE.exec(value);
+  if (hexMatch) {
+    const full = expandHexFull(hexMatch[1]);
+    if (!full) return null;
+    const n = Number.parseInt(full.rgb6, 16);
+    if (!Number.isFinite(n)) return null;
+    const rgb = { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+    if (full.alpha < 1 && over) return compositeOver(rgb, full.alpha, over);
+    return rgb;
+  }
+  // 函数式 rgba/hsla。
+  const fnMatch = /^(rgba?|hsla?)\(([^)]*)\)$/i.exec(value);
+  if (!fnMatch) return null;
+  const fn = fnMatch[1].toLowerCase();
+  const nums = parseNumberList(fnMatch[2]);
+  if (!nums || nums.some((n) => !Number.isFinite(n.value))) return null;
+  let rgb: Rgb;
+  if (fn.startsWith('rgb')) {
+    const channel = ({ value: v, percent }: NumericComponent): number =>
+      clamp255(percent ? (v * 255) / 100 : v);
+    rgb = { r: channel(nums[0]), g: channel(nums[1]), b: channel(nums[2]) };
+  } else {
+    rgb = hslToRgb(
+      angleToDegrees(nums[0]),
+      clamp01(nums[1].value / 100),
+      clamp01(nums[2].value / 100),
+    );
+  }
+  const alpha = nums[3] !== undefined
+    ? clamp01(nums[3].percent ? nums[3].value / 100 : nums[3].value)
+    : 1;
+  if (alpha < 1 && over) return compositeOver(rgb, alpha, over);
+  return rgb;
 }
 
 /** RGB → 小写 6 位 hex（与 colors.ts 既有默认值的书写形态一致）。 */

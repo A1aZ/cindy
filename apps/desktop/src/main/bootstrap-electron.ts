@@ -412,6 +412,7 @@ import {
   writeSilentEncryptedRetryEnabled,
 } from './maker-host/silent-encrypted-retry-store.js';
 import { resolveOwnerScopedSecretStorageKey } from './secrets/providerSecretStore.js';
+import { isRendererAccessibleSafeStorageKey } from '../shared/providerSecrets.js';
 import {
   readCompactionPct,
   readCompactionState,
@@ -419,6 +420,7 @@ import {
   writeCompactionPct,
 } from './maker-host/compaction-settings-store.js';
 import {
+  readSubagentModelSettings,
   readSubagentModelSettingsState,
   resetSubagentModelSettings,
   writeSubagentModelSettingsPatch,
@@ -522,6 +524,7 @@ import {
 import {
   isValidSubagentModelIdInput,
   normalizeSubagentModelId,
+  reconcileSubagentModelSettingsPatch,
   type SubagentModelSettingsPatch,
 } from '../shared/subagentModelSettings.js';
 import { isBrowserOpenablePath } from '../shared/browserOpenableExts.js';
@@ -2502,7 +2505,14 @@ const registerIpcHandlers = () => {
     return subagentModelSettingsWire();
   });
   ipcMain.handle(MAKER_IPC_INVOKE.SUBAGENT_MODEL_SETTINGS_SET, async (_e, patch: unknown) => {
-    writeSubagentModelSettingsPatch(parseSubagentModelSettingsPatch(patch));
+    // 配对一致性按「patch 合并当前存储」判定:有效模型为 null 时来源强制清空,
+    // 同时兜住「清模型漏清来源」与「模型未指定时的 provider-only patch」两类孤儿写入。
+    writeSubagentModelSettingsPatch(
+      reconcileSubagentModelSettingsPatch(
+        parseSubagentModelSettingsPatch(patch),
+        readSubagentModelSettings(),
+      ),
+    );
     return subagentModelSettingsWire();
   });
   ipcMain.handle(MAKER_IPC_INVOKE.SUBAGENT_MODEL_SETTINGS_RESET, async () => {
@@ -3106,6 +3116,8 @@ const registerIpcHandlers = () => {
 
   // safeStorage IPC handlers
   const isValidKey = (key: string): boolean => /^[a-zA-Z0-9_-]+$/.test(key);
+  const isValidRendererKey = (key: string): boolean =>
+    isValidKey(key) && isRendererAccessibleSafeStorageKey(key);
   const resolveSafeStorageFilepath = (key: string): string | null => {
     const scopedKey = resolveOwnerScopedSecretStorageKey(key);
     return scopedKey
@@ -3167,9 +3179,10 @@ const registerIpcHandlers = () => {
 
   ipcMain.handle(
     'safe-storage-store',
-    async (_event: Electron.IpcMainInvokeEvent, key: string, value: string): Promise<boolean> => {
+    async (event: Electron.IpcMainInvokeEvent, key: string, value: string): Promise<boolean> => {
       try {
-        if (!isValidKey(key)) return false;
+        assertTrustedAppRendererEvent(event);
+        if (!isValidRendererKey(key)) return false;
         const filepath = resolveSafeStorageFilepath(key);
         if (!filepath) return false;
         if (!safeStorage.isEncryptionAvailable()) return false;
@@ -3215,9 +3228,10 @@ const registerIpcHandlers = () => {
 
   ipcMain.handle(
     'safe-storage-read',
-    async (_event: Electron.IpcMainInvokeEvent, key: string): Promise<string | null> => {
+    async (event: Electron.IpcMainInvokeEvent, key: string): Promise<string | null> => {
       try {
-        if (!isValidKey(key)) return null;
+        assertTrustedAppRendererEvent(event);
+        if (!isValidRendererKey(key)) return null;
         const filepath = resolveSafeStorageFilepath(key);
         if (!filepath) return null;
         if (!safeStorage.isEncryptionAvailable()) return null;
@@ -3235,11 +3249,12 @@ const registerIpcHandlers = () => {
   ipcMain.handle(
     'safe-storage-remove',
     async (
-      _event: Electron.IpcMainInvokeEvent,
+      event: Electron.IpcMainInvokeEvent,
       key: string,
     ): Promise<{ success: boolean; error?: string }> => {
       try {
-        if (!isValidKey(key)) {
+        assertTrustedAppRendererEvent(event);
+        if (!isValidRendererKey(key)) {
           return { success: false, error: 'invalid key' };
         }
         const filepath = resolveSafeStorageFilepath(key);
@@ -5753,7 +5768,8 @@ function parseSubagentModelSettingsPatch(raw: unknown): SubagentModelSettingsPat
   }
   const input = raw as Record<string, unknown>;
   const patch: SubagentModelSettingsPatch = {};
-  for (const key of ['claudeCode', 'codex'] as const) {
+  // providerId 与 model id 同约束(短标识串),共用同一套校验/归一化。
+  for (const key of ['claudeCode', 'claudeCodeProviderId', 'codex', 'codexProviderId'] as const) {
     if (!(key in input)) continue;
     const value = input[key];
     if (!isValidSubagentModelIdInput(value)) {

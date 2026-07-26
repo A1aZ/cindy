@@ -32,6 +32,10 @@ import { SELECTION_CONTEXT_MENU_ADD_TO_CHAT_CHANNEL } from '../shared/selectionC
 import { SESSION_ATTENTION_CLEARED_CHANNEL } from '../shared/sessionAttention';
 import { VOICE_INPUT_POWER_STATE_CHANNEL } from '../shared/voiceInputPowerIpc';
 import {
+  VOICE_INPUT_TEST_CONNECTION_CHANNEL,
+  type VoiceInputConnectionTestResult,
+} from '../shared/voiceInputConnectionTest';
+import {
   type ApplicationMenuCommand,
   isApplicationMenuCommand,
 } from '../shared/applicationMenuCommands';
@@ -156,12 +160,14 @@ type VoiceInputSettingsUpdateResult =
   | { ok: false; error: string; errorCode?: 'empty' | 'unavailable' | 'unconfirmed' | 'permission' | 'failed' };
 type VoiceInputReadinessWire = {
   ok: boolean;
+  serviceMode: 'cindy' | 'byok';
   provider: VoiceInputProviderKind;
   providerModel: string;
   auth: 'api-key' | 'codex';
   settingsTab: 'api-keys' | 'connections' | 'providers';
   error?: string;
   authErrorReason?: string;
+  failureReason?: 'custom-asr-config-missing' | 'custom-asr-key-missing' | 'codex-realtime-unsupported';
 };
 type VoiceInputModelSelectionWire = {
   serviceMode: 'cindy' | 'byok';
@@ -169,6 +175,15 @@ type VoiceInputModelSelectionWire = {
   asrProvider: VoiceInputProviderKind;
   refinerProvider: VoiceInputRefinerProviderKind;
   refinerModel?: string;
+  asrProviderChain: VoiceInputProviderKind[];
+  asrProviderChainSource: 'default' | 'configured';
+  customAsr?: {
+    protocol: 'openai-realtime' | 'qwen-realtime';
+    websocketUrl: string;
+    model: string;
+  };
+  refinerProviderChain: VoiceInputRefinerProviderKind[];
+  refinerProviderChainSource: 'default' | 'configured';
   configPath: string;
 };
 type VoiceInputModelSelectionResultWire = {
@@ -186,12 +201,20 @@ type VoiceInputModelSelectionResultWire = {
     auth: 'api-key' | 'codex';
   }>;
   readiness: VoiceInputReadinessWire;
+  customAsrApiKeyConfigured: boolean;
 };
 type VoiceInputModelSelectionPatchWire = {
   serviceMode?: 'cindy' | 'byok' | null;
   asrProvider?: string | null;
   refinerProvider?: string | null;
   refinerModel?: string | null;
+  customAsr?: {
+    protocol: 'openai-realtime' | 'qwen-realtime';
+    websocketUrl: string;
+    model: string;
+  } | null;
+  customAsrApiKey?: string | null;
+  refinerProviderChain?: string[] | null;
 };
 type DiscordBotSessionAuthCheckWire = {
   ok: boolean;
@@ -284,6 +307,9 @@ const fanOutCorruptionRestored = createIpcFanOut('local-db:corruption-restored')
 // #37: release 端检测到 schema drift 时一次性 toast 提示开发者切回 dev 自动修复
 const fanOutSchemaDriftWarning = createIpcFanOut('local-db:schema-drift-warning');
 const fanOutProjectAliasesChanged = createIpcFanOut('local-db:project-aliases:changed');
+const fanOutSidebarPinnedOrderChanged = createIpcFanOut(
+  'sidebar-settings:pinned-order-changed',
+);
 // Workdir File Browser — push events from chokidar (add/change/unlink/...)
 const fanOutFileBrowserEvent = createIpcFanOut('maker:file-browser:event');
 const fanOutFileBrowserTransfer = createIpcFanOut('maker:file-browser:transfer');
@@ -975,6 +1001,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('voice-input:mute-system-audio'),
     restoreSystemAudio: (): Promise<{ ok: true } | { ok: false; error: string }> =>
       ipcRenderer.invoke('voice-input:restore-system-audio'),
+    testConnection: (): Promise<VoiceInputConnectionTestResult> =>
+      ipcRenderer.invoke(VOICE_INPUT_TEST_CONNECTION_CHANNEL),
     getReadiness: (): Promise<VoiceInputReadinessWire> => ipcRenderer.invoke('voice-input:get-readiness'),
     getReadinessCached: (): VoiceInputReadinessWire | null =>
       ipcRenderer.sendSync('voice-input:get-readiness-cached'),
@@ -3233,6 +3261,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   sidebarSettingsSavePinnedOrder: (order: readonly string[]): Promise<void> =>
     ipcRenderer.invoke('sidebar-settings:save-pinned-order', Array.from(order)),
+  sidebarSettingsOnPinnedOrderChanged: (cb: (order: string[]) => void): (() => void) =>
+    fanOutSidebarPinnedOrderChanged((payload) => {
+      if (
+        Array.isArray(payload) &&
+        payload.every((entry): entry is string => typeof entry === 'string')
+      ) {
+        cb(payload);
+      }
+    }),
 
   // ── session 级"终身累计 cost"变化 (per-session, 不是 today-aggregate) ──
   // 今日累计 (Claude USD + Codex token) 已搬到 electronAPI.maker.usage.* (取代老
@@ -3890,8 +3927,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
         label?: string;
         model?: string;
         effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+        fast?: boolean;
+        /** 显式选定的模型来源(标准面板 per-worker 选择);缺省 = 跟随默认路由解析。 */
+        providerId?: string | null;
       },
-    ): Promise<{ workflowId: string; workerSessionId: string; workerId: string }> =>
+      // main handler 实际返回 teamId(见 enableOrcaInternal);此前类型写成 workflowId 是漂移。
+    ): Promise<{ teamId: string; workerSessionId: string; workerId: string }> =>
       ipcRenderer.invoke('maker:session:enable-orca', leadSessionId, opts),
 
     /**

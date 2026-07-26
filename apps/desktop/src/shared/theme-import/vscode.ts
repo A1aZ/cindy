@@ -14,11 +14,16 @@
 import {
   isDarkBackground,
   parseCssColor,
+  parseCssColorComposited,
   shade,
   toHex,
   type Rgb,
 } from './color';
 import type { MarkdownPalette, ThemePalette, ThemeTypeName } from './palette';
+
+function stripBom(input: string): string {
+  return input.charCodeAt(0) === 0xFEFF ? input.slice(1) : input;
+}
 
 /** 去掉 jsonc 的注释与尾逗号——VSCode 主题文件普遍带注释。 */
 export function stripJsonComments(input: string): string {
@@ -141,7 +146,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function parseVsCodeThemeJson(raw: string): VsCodeThemeJson | null {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(stripJsonComments(raw));
+    parsed = JSON.parse(stripJsonComments(stripBom(raw)));
   } catch {
     return null;
   }
@@ -208,11 +213,13 @@ export function extractVsCodePalette(
   let resolvedRoles = 0;
 
   /** 按 key 链取首个可解析的色值；全不命中返回 null。 */
-  const pickColor = (keys: string[]): Rgb | null => {
+  const pickColor = (keys: string[], compositeBg?: Rgb | null): Rgb | null => {
     for (const key of keys) {
       const raw = colors[key];
       if (typeof raw !== 'string') continue;
-      const rgb = parseCssColor(raw);
+      const rgb = compositeBg
+        ? parseCssColorComposited(raw, compositeBg)
+        : parseCssColor(raw);
       if (rgb) return rgb;
       unresolved.push(key);
     }
@@ -220,8 +227,8 @@ export function extractVsCodePalette(
   };
 
   /** 命中则计入 resolved，否则用 derive() 推导并计入 derivedRoles。 */
-  const role = (name: string, keys: string[], derive: () => Rgb): Rgb => {
-    const hit = pickColor(keys);
+  const role = (name: string, keys: string[], derive: () => Rgb, compositeBg?: Rgb | null): Rgb => {
+    const hit = pickColor(keys, compositeBg);
     if (hit) {
       resolvedRoles += 1;
       return hit;
@@ -232,7 +239,8 @@ export function extractVsCodePalette(
 
   const surfaceHit = pickColor(['editor.background', 'editorPane.background']);
   if (!surfaceHit) {
-    // 连主背景都没有,判不出这是个可用的颜色主题。
+    // 连主背景都没有,判不出这是个可用的颜色主题。包含 `include` 时背景可能来自
+    // 被继承的主题,此时如实返回 null 让调用方给出继承限制说明,而非报"不支持"。
     return null;
   }
   resolvedRoles += 1;
@@ -257,6 +265,7 @@ export function extractVsCodePalette(
     'hover',
     ['list.hoverBackground', 'toolbar.hoverBackground', 'menu.selectionBackground'],
     () => step(surface, 0.08),
+    surfaceHit,
   );
   const chip = role(
     'chip',

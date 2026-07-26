@@ -126,6 +126,19 @@ function scanCssRules(source: string): CssRule[] {
       i += 1;
       continue;
     }
+    // 分号终止的 statement at-rules（`@charset "UTF-8";`、`@import ...;`）——
+    // 它们没有块体，直接跳过并重置 selectorStart，否则它们的文本会粘到下一条
+    // 规则的选择器前面。
+    if (ch === ';') {
+      const pending = source.slice(selectorStart, i).trim();
+      if (pending.startsWith('@')) {
+        i += 1;
+        selectorStart = i;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
     if (ch === '{') {
       const selector = source.slice(selectorStart, i).trim();
       const j = findBlockEnd(source, i);
@@ -161,10 +174,12 @@ function collectCustomProps(body: string, into: VarMap): void {
 }
 
 const MAX_VAR_DEPTH = 8;
+const MAX_EXPANDED_LENGTH = 100_000;
 
 /**
  * 把值里的 `var(--x)` / `var(--x, fallback)` 递归展开成字面量。
  * 展开后仍含 `var(` 或无法求值时由调用方判定失败。
+ * 长度超过 MAX_EXPANDED_LENGTH 时中止（防恶意主题指数膨胀阻塞主进程）。
  */
 export function resolveVarValue(
   raw: string,
@@ -172,6 +187,7 @@ export function resolveVarValue(
   depth = 0,
 ): string {
   if (depth >= MAX_VAR_DEPTH || !raw.includes('var(')) return raw;
+  if (raw.length > MAX_EXPANDED_LENGTH) return raw;
   let changed = false;
   const replaced = raw.replace(
     /var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,([^()]*(?:\([^()]*\)[^()]*)*))?\)/g,
@@ -188,7 +204,7 @@ export function resolveVarValue(
       return _all;
     },
   );
-  if (!changed) return replaced;
+  if (!changed || replaced.length > MAX_EXPANDED_LENGTH) return replaced;
   return resolveVarValue(replaced, vars, depth + 1);
 }
 
@@ -208,14 +224,18 @@ interface ModeVars {
 }
 
 function selectorMode(selector: string): ThemeTypeName | 'base' | null {
-  const s = selector.toLowerCase();
+  const s = selector.toLowerCase().trim();
   const hasDark = s.includes('.theme-dark');
   const hasLight = s.includes('.theme-light');
-  if (hasDark && hasLight) return 'base';
-  if (hasDark) return 'dark';
-  if (hasLight) return 'light';
-  // 只认根级选择器作为基底，避免把某个组件的局部变量当全局色板。
-  if (/^(:root|html|body|\*)\b/.test(s.trim())) return 'base';
+  if (hasDark || hasLight) {
+    // 只认 theme class 作用于根元素的选择器（`.theme-dark` / `body.theme-dark`），
+    // 忽略组件级（`.theme-dark .modal`）——后者的变量是局部覆盖，不是全局色板。
+    const isRootLevel = /^(body|html|:root|\*)?\s*\.theme-(dark|light)\s*$/.test(s);
+    if (!isRootLevel) return null;
+    if (hasDark && hasLight) return 'base';
+    return hasDark ? 'dark' : 'light';
+  }
+  if (/^(:root|html|body|\*)\b/.test(s)) return 'base';
   return null;
 }
 
@@ -237,12 +257,23 @@ export function collectObsidianVars(source: string): ModeVars[] {
   const merge = (mode: VarMap): VarMap => new Map([...base, ...mode]);
   if (dark.size > 0) out.push({ type: 'dark', vars: merge(dark) });
   if (light.size > 0) out.push({ type: 'light', vars: merge(light) });
+  // base-only fallback：只有根级声明且无显式模式块时，按背景亮度推断类型。
   if (out.length === 0 && base.size > 0) {
     const bg = readColor(base, ['--background-primary', '--color-base-00']);
     out.push({
       type: bg && isDarkBackground(bg) ? 'dark' : 'light',
       vars: base,
     });
+  }
+  // 双态补全：如果只有一个显式模式块而 base 有可用色板，base 作为缺失模式的来源。
+  // 例如 `:root` 定义 light 色板 + `.theme-dark` 覆盖 → 应同时产出 light 变体。
+  if (out.length === 1 && base.size > 0) {
+    const existing = out[0].type;
+    const bg = readColor(base, ['--background-primary', '--color-base-00']);
+    const baseType: ThemeTypeName = bg && isDarkBackground(bg) ? 'dark' : 'light';
+    if (baseType !== existing) {
+      out.push({ type: baseType, vars: base });
+    }
   }
   return out;
 }
@@ -321,8 +352,9 @@ export function extractObsidianPalette({ type, vars }: ModeVars): ObsidianExtrac
   );
   const textDisabled = role(
     'textDisabled',
-    ['--text-selection', '--color-base-40'],
+    ['--color-base-40'],
     // Obsidian 没有 disabled 文字概念,从 faint 再弱一档。
+    // 注意: --text-selection 是选区背景色而非前景色,不能用在这里。
     () => shade(textTertiary, dark ? -0.25 : 0.25),
   );
 
@@ -342,8 +374,8 @@ export function extractObsidianPalette({ type, vars }: ModeVars): ObsidianExtrac
   const elevatedSoft = dark ? elevated : step(elevated, 0.08);
 
   const headings = ['--h1-color', '--h2-color', '--h3-color', '--h4-color', '--h5-color', '--h6-color']
-    .map((name) => readColor(vars, [name]));
-  const strong = readColor(vars, ['--bold-color', '--text-bold']);
+    .map((name) => readColor(vars, [name], unresolved));
+  const strong = readColor(vars, ['--bold-color', '--text-bold'], unresolved);
   const markdown: MarkdownPalette = {
     ...(headings.some(Boolean) ? { headings } : {}),
     ...(strong ? { strong } : {}),

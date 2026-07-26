@@ -59,17 +59,15 @@ function usedFamilyKeys(): Set<string> {
   const payload = loadLocalThemesSync();
   if (!payload.success) return used;
   for (const theme of payload.themes) {
+    // 每个主题的 normalized ID 都要保留：即使有 explicit family，其 ID 被复用
+    // 仍会导致 writeLocalTheme 的文件名冲突或 loader 的 ID 去重丢弃后者。
+    const normalizedId = isLocalThemeId(theme.id)
+      ? theme.id.slice(0, -LOCAL_THEME_SUFFIX.length)
+      : theme.id;
+    used.add(normalizedId);
     if (theme.family) {
       used.add(theme.family);
-      continue;
     }
-    // 候选键 candidate 落盘后的分组键是 `${candidate}-local`，因此这里要存
-    // 「id 去掉 -local 后缀」的形态才能对上。
-    used.add(
-      isLocalThemeId(theme.id)
-        ? theme.id.slice(0, -LOCAL_THEME_SUFFIX.length)
-        : theme.id,
-    );
   }
   return used;
 }
@@ -90,8 +88,10 @@ function pickFamilyId(slug: string, used: Set<string>): string {
 function readObsidianManifestName(filePath: string): string | null {
   try {
     const manifestPath = path.join(path.dirname(filePath), 'manifest.json');
+    // 先 stat 再读：避免巨大文件、特殊设备文件阻塞主进程。
+    const stat = fs.statSync(manifestPath);
+    if (!stat.isFile() || stat.size > MAX_THEME_FILE_BYTES) return null;
     const raw = fs.readFileSync(manifestPath, 'utf8');
-    if (raw.length > MAX_THEME_FILE_BYTES) return null;
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
       const name = (parsed as { name?: unknown }).name;
@@ -235,6 +235,7 @@ export async function importExternalTheme(
   } catch (error) {
     const message = normalizeError(error);
     log.warn(`Theme import failed: ${message}`);
-    return { success: false, error: message };
+    // 只返回稳定错误码，不把含文件系统路径的原始 error.message 透传给 Renderer。
+    return { success: false, error: 'IMPORT_INTERNAL_ERROR' };
   }
 }

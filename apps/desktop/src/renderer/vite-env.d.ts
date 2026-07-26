@@ -15,6 +15,8 @@ type AnalyticsSettingsPayload = import('../shared/analyticsSettings').AnalyticsS
 type RsbWindowCommand = import('../shared/rightSidebarWindow').RsbWindowCommand;
 type VoiceInputPowerStatePayload =
   import('../shared/voiceInputPowerIpc').VoiceInputPowerStatePayload;
+type VoiceInputConnectionTestResult =
+  import('../shared/voiceInputConnectionTest').VoiceInputConnectionTestResult;
 type DesktopLoginAction = import('../shared/authIpc').DesktopLoginAction;
 type DesktopLoginActionResult = import('../shared/authIpc').DesktopLoginActionResult;
 type UtilityTextFailure = import('../shared/utilityTextResult').UtilityTextFailure;
@@ -183,6 +185,13 @@ type VoiceInputModelSelectionResultData = {
     serviceMode: VoiceInputServiceModeData;
     serviceModeConfigured: boolean;
     asrProvider: VoiceInputProviderKindData;
+    asrProviderChain: VoiceInputProviderKindData[];
+    asrProviderChainSource: 'default' | 'configured';
+    customAsr?: {
+      protocol: 'openai-realtime' | 'qwen-realtime';
+      websocketUrl: string;
+      model: string;
+    };
     refinerProvider: VoiceInputRefinerProviderKindData;
     refinerModel?: string;
     /** Effective refiner chain, head first; length 1 = no fallback (BYOK default). */
@@ -209,7 +218,9 @@ type VoiceInputModelSelectionResultData = {
     auth: 'api-key' | 'codex';
     settingsTab: 'api-keys' | 'connections' | 'providers';
     error?: string;
+    failureReason?: 'custom-asr-config-missing' | 'custom-asr-key-missing' | 'codex-realtime-unsupported';
   };
+  customAsrApiKeyConfigured: boolean;
 };
 type LocalThemeOpenDirResult = import('../shared/local-themes').LocalThemeOpenDirResult;
 type LocalThemesResult = import('../shared/local-themes').LocalThemesResult;
@@ -1265,9 +1276,12 @@ interface ElectronAPI {
     openInputMonitoringSettings: () => Promise<VoiceInputGlobalResult>;
     muteSystemAudio: () => Promise<{ ok: true } | { ok: false; error: string }>;
     restoreSystemAudio: () => Promise<{ ok: true } | { ok: false; error: string }>;
+    testConnection: () => Promise<VoiceInputConnectionTestResult>;
     getReadiness: () => Promise<{
       ok: boolean;
+      serviceMode: VoiceInputServiceModeData;
       provider:
+        | 'custom-realtime-asr'
         | 'elevenlabs-scribe-realtime'
         | 'openai-realtime-whisper'
         | 'litellm-gpt-realtime-whisper'
@@ -1279,11 +1293,14 @@ interface ElectronAPI {
       settingsTab: 'api-keys' | 'connections' | 'providers';
       error?: string;
       authErrorReason?: string;
+      failureReason?: 'custom-asr-config-missing' | 'custom-asr-key-missing' | 'codex-realtime-unsupported';
     }>;
     getReadinessCached: () =>
       | {
           ok: boolean;
+          serviceMode: VoiceInputServiceModeData;
           provider:
+            | 'custom-realtime-asr'
             | 'elevenlabs-scribe-realtime'
             | 'openai-realtime-whisper'
             | 'litellm-gpt-realtime-whisper'
@@ -1295,6 +1312,7 @@ interface ElectronAPI {
           settingsTab: 'api-keys' | 'connections' | 'providers';
           error?: string;
           authErrorReason?: string;
+          failureReason?: 'custom-asr-config-missing' | 'custom-asr-key-missing' | 'codex-realtime-unsupported';
         }
       | null;
     getModelSelection: () => Promise<VoiceInputModelSelectionResultData>;
@@ -1303,6 +1321,12 @@ interface ElectronAPI {
       asrProvider?: string | null;
       refinerProvider?: string | null;
       refinerModel?: string | null;
+      customAsr?: {
+        protocol: 'openai-realtime' | 'qwen-realtime';
+        websocketUrl: string;
+        model: string;
+      } | null;
+      customAsrApiKey?: string | null;
       /** BYOK fallback tail; null clears the override (primary runs alone). */
       refinerProviderChain?: string[] | null;
     }) => Promise<VoiceInputModelSelectionResultData>;
@@ -2973,6 +2997,7 @@ interface ElectronAPI {
   // sidebar 偏好(置顶手动顺序)跨 dev / installed 共享;读 sendSync,写 invoke。
   sidebarSettingsLoadPinnedOrderSync: () => string[];
   sidebarSettingsSavePinnedOrder: (order: readonly string[]) => Promise<void>;
+  sidebarSettingsOnPinnedOrderChanged: (cb: (order: string[]) => void) => () => void;
 
   // ── session 级"终身累计 cost"变化 (per-session, 不是 today-aggregate) ──
   // today aggregate 已搬到 electronAPI.maker.usage.* (Claude USD + Codex token 统一)。
@@ -3711,6 +3736,8 @@ interface ElectronAPI {
         model?: string;
         effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
         fast?: boolean;
+        /** 显式选定的模型来源(标准面板 per-worker 选择);缺省 = 跟随默认路由解析。 */
+        providerId?: string | null;
       },
     ) => Promise<{ teamId: string; workerSessionId: string; workerId: string }>;
 

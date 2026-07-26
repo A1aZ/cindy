@@ -47,7 +47,23 @@ export function convertVsCodeTheme(
   const parsed = parseVsCodeThemeJson(raw);
   if (!parsed) return null;
   const extracted = extractVsCodePalette(parsed, fallbackName);
-  if (!extracted) return null;
+  if (!extracted) {
+    // 识别为主题 JSON 但无法抽取色板——可能通过 `include` 继承背景。
+    // 报告继承限制而非静默失败。
+    if (parsed.include) {
+      return {
+        themes: [],
+        report: {
+          source: 'vscode',
+          resolvedRoles: 0,
+          derivedRoles: [],
+          unresolved: [`include:${parsed.include}`],
+          skippedProtected: 0,
+        },
+      };
+    }
+    return null;
+  }
   const built = buildThemeColorsFromPalette(
     extracted.palette,
     extracted.type,

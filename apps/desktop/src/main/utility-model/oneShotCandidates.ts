@@ -215,9 +215,11 @@ async function requestExplicitProviderText(
   // here: that legacy field may belong to another runtime (for example Codex),
   // which would silently turn a Claude request into a Codex request.
   const model = requestedModel || configuredModels[0]?.id || '';
-  const transport: UtilityModelTransport = agentKind === 'codex'
-    ? 'codex-responses'
-    : 'litellm-chat-completions';
+  const selectedRouting = agentKind ? provider?.routing[agentKind] : undefined;
+  const transport: UtilityModelTransport =
+    agentKind === 'codex' && selectedRouting?.wireProtocol !== 'openai-chat'
+      ? 'codex-responses'
+      : 'litellm-chat-completions';
 
   if (!provider || !agentKind || !provider.agents.includes(agentKind)) {
     return {
@@ -271,14 +273,18 @@ async function requestExplicitProviderText(
   }
 
   const routing = provider.routing[agentKind];
-  if (routing?.authStrategy !== 'api-key-header' && routing?.authStrategy !== 'oauth-token') {
+  if (
+    routing?.authStrategy !== 'api-key-header'
+    && routing?.authStrategy !== 'oauth-token'
+    && routing?.authStrategy !== 'none'
+  ) {
     return {
       ok: false,
       reason: 'no_candidate',
       attempts: [{ providerId: provider.id, model, transport, status: 'skipped', reason: 'not_authenticated' }],
     };
   }
-  const authStrategy: 'api-key-header' | 'oauth-token' = routing.authStrategy;
+  const authStrategy: 'api-key-header' | 'oauth-token' | 'none' = routing.authStrategy;
   if (!routing?.upstream) {
     return {
       ok: false,
@@ -287,10 +293,13 @@ async function requestExplicitProviderText(
     };
   }
   const isOAuth = authStrategy === 'oauth-token';
+  const noAuth = authStrategy === 'none';
   const credential = isOAuth
     ? readCachedGenericOAuthAccessToken(provider.id, provider.auth.oauth)
-    : readCustomProviderKey(provider.id, agentKind);
-  if (!credential) {
+    : noAuth
+      ? null
+      : readCustomProviderKey(provider.id, agentKind);
+  if (!noAuth && !credential) {
     return {
       ok: false,
       reason: 'no_candidate',
@@ -320,8 +329,10 @@ async function requestExplicitProviderText(
     execute: (text, requestOpts) => requestCustomProviderText({
       agentKind,
       baseUrl: routing.upstream,
+      requestPath: routing.requestPath,
+      wireProtocol: routing.wireProtocol,
       headers: routing.headerOverride,
-      credential,
+      credential: credential ?? '',
       authStrategy,
       model,
       prompt: text,
@@ -760,9 +771,11 @@ function parseChatCompletionText(raw: string): string {
 async function requestCustomProviderText(input: {
   agentKind: AgentKind;
   baseUrl: string;
+  requestPath?: string;
+  wireProtocol?: 'anthropic-messages' | 'openai-responses' | 'openai-chat';
   headers?: Record<string, string>;
   credential: string;
-  authStrategy: 'api-key-header' | 'oauth-token';
+  authStrategy: 'api-key-header' | 'oauth-token' | 'none';
   model: string;
   prompt: string;
   maxTokens?: number;
@@ -772,30 +785,37 @@ async function requestCustomProviderText(input: {
     ...(input.headers ?? {}),
     'Content-Type': 'application/json',
   };
-  if (input.authStrategy === 'oauth-token') {
-    // OAuth upstreams must not receive an API key left over from a copied
-    // header override; some gateways prefer it over Bearer authentication.
-    // Remove authorization in every casing too, otherwise a copied lowercase
-    // value can coexist with the canonical `Authorization` header below.
-    for (const key of Object.keys(headers)) {
-      const normalized = key.toLowerCase();
-      if (normalized === 'x-api-key' || normalized === 'authorization') delete headers[key];
-    }
+  // Authentication is host-managed for all three custom-provider strategies.
+  // Never let a copied header override coexist with the current safeStorage
+  // credential (or leak one at all for a no-auth provider).
+  for (const key of Object.keys(headers)) {
+    const normalized = key.toLowerCase();
+    if (normalized === 'x-api-key' || normalized === 'authorization') delete headers[key];
   }
   if (input.agentKind === 'codex') {
-    headers.Authorization = `Bearer ${input.credential}`;
+    if (input.authStrategy !== 'none') headers.Authorization = `Bearer ${input.credential}`;
   } else {
-    headers.Authorization = `Bearer ${input.credential}`;
+    if (input.authStrategy !== 'none') headers.Authorization = `Bearer ${input.credential}`;
     if (input.authStrategy === 'api-key-header') {
       headers['x-api-key'] = input.credential;
     }
     headers['anthropic-version'] = headers['anthropic-version'] ?? '2023-06-01';
   }
+  const wire: ProviderWire =
+    input.agentKind === 'claude-code'
+      ? 'anthropic-messages'
+      : input.wireProtocol === 'openai-chat'
+        ? 'chat-completions'
+        : 'responses';
   return requestProviderHttpText({
-    wire: input.agentKind === 'codex' ? 'responses' : 'anthropic-messages',
-    endpoint: input.agentKind === 'codex'
-      ? joinProxyPath(input.baseUrl, '/responses')
-      : joinAnthropicMessagesPath(input.baseUrl),
+    wire,
+    endpoint: input.requestPath
+      ? appendExactProviderPath(input.baseUrl, input.requestPath)
+      : wire === 'responses'
+        ? joinProxyPath(input.baseUrl, '/responses')
+        : wire === 'chat-completions'
+          ? joinProxyPath(input.baseUrl, '/chat/completions')
+          : joinAnthropicMessagesPath(input.baseUrl),
     headers,
     model: input.model,
     prompt: input.prompt,
@@ -922,4 +942,11 @@ function aggregateFailureReason(failedAttempts: UtilityTextAttempt[]): UtilityTe
 
 function joinProxyPath(baseUrl: string, suffix: string): string {
   return appendProviderPath(baseUrl, suffix);
+}
+
+/** Append a validated exact request path without percent-encoding its query. */
+function appendExactProviderPath(baseUrl: string, requestPath: string): string {
+  const url = new URL(baseUrl);
+  const basePath = url.pathname.replace(/\/+$/, '');
+  return `${url.origin}${basePath}${requestPath}`;
 }

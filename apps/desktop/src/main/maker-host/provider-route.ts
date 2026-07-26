@@ -82,6 +82,17 @@ const MISSING_PROVIDER_OAUTH_TOKEN = 'xdt-missing-provider-oauth-token';
  * 在代码层兜底(非 ChatGPT spawn 下这些头不存在,删除为 no-op,无副作用)。
  */
 const CODEX_ACCOUNT_HEADERS = ['chatgpt-account-id', 'openai-beta', 'originator', 'session_id'];
+/** 无鉴权上游永远不能收到 agent 子进程自带的订阅凭证。 */
+const CLIENT_AUTH_HEADERS = ['authorization', 'x-api-key'];
+
+function withoutClientAuthHeaders(
+  headers: Record<string, string> | undefined,
+): Record<string, string> {
+  const blocked = new Set(CLIENT_AUTH_HEADERS);
+  return Object.fromEntries(
+    Object.entries(headers ?? {}).filter(([name]) => !blocked.has(name.toLowerCase())),
+  );
+}
 
 /**
  * 据路由描述符 + 当前网关 key + agent 生成 proxy 路由决策。
@@ -102,13 +113,31 @@ export function buildRouteDecision(
   oauthToken?: string | null,
 ): RoutingDecision | null {
   switch (routing.authStrategy) {
+    case 'none': {
+      // 本机 / 自托管无鉴权代理：仍固定路由到所选 upstream，但显式剥掉子进程自带的
+      // Claude.ai / ChatGPT 凭证与账号元数据。宁可让代理按匿名请求拒绝，也不能泄漏订阅令牌。
+      const headerDelete = new Set([
+        ...(routing.headerDelete ?? []),
+        ...CLIENT_AUTH_HEADERS,
+        ...(agent === 'codex' ? CODEX_ACCOUNT_HEADERS : []),
+      ]);
+      const headerOverride = withoutClientAuthHeaders(routing.headerOverride);
+      return {
+        upstreamOverride: routing.upstream,
+        ...(Object.keys(headerOverride).length > 0
+          ? { headerOverride }
+          : {}),
+        headerDelete: [...headerDelete],
+      };
+    }
+
     case 'oauth-token': {
       // 描述符驱动的通用 OAuth 供应商：上游改到供应商自家端点，鉴权头换成 Runner 持有的
       // access_token。无 token（未登录/已失效）**也不回落 null**——会话是显式选了这家的,
       // 回落会让请求带着子进程自带凭证流向默认网关/别家上游(模型跑错上游 + 凭证泄漏);
       // 与 provider-oauth-header 同口径:置哑 token 仍发往本供应商,宁可上游 401。
       const headerOverride: Record<string, string> = {
-        ...(routing.headerOverride ?? {}),
+        ...withoutClientAuthHeaders(routing.headerOverride),
         authorization: `Bearer ${oauthToken || MISSING_PROVIDER_OAUTH_TOKEN}`,
       };
       const decision: RoutingDecision = { headerOverride };
@@ -130,7 +159,7 @@ export function buildRouteDecision(
       // 直连供应商自家上游,但子进程 bearer 不属于它(例如 Codex 的 OpenAI OAuth 不能打 xAI)。
       // 缺 token 时也覆盖成哑 token,宁可让目标上游 401,也不能把原 bearer 泄漏到别家。
       const headerOverride: Record<string, string> = {
-        ...(routing.headerOverride ?? {}),
+        ...withoutClientAuthHeaders(routing.headerOverride),
         authorization: `Bearer ${oauthToken || MISSING_PROVIDER_OAUTH_TOKEN}`,
       };
       const decision: RoutingDecision = {
@@ -157,7 +186,7 @@ export function buildRouteDecision(
     case 'api-key-header': {
       // 自定义供应商：上游改到 baseUrl，用用户自己的 api key 覆盖鉴权头，叠加用户自定义 headers。
       // key 来自 resolve 时注入的 apiKey（不在 catalog 里）。
-      const headerOverride: Record<string, string> = { ...(routing.headerOverride ?? {}) };
+      const headerOverride = withoutClientAuthHeaders(routing.headerOverride);
       if (apiKey) {
         if (agent === 'claude-code') {
           // cc 子进程在 oauth-spawn 下会带订阅的 `authorization: Bearer <Claude token>`——必须连它一起
@@ -311,9 +340,19 @@ export function buildLocalHandlerHeaders(route: ResolvedSessionRoute, agent: Age
   headers: Record<string, string>;
   headerDelete: string[];
 } {
-  const headers: Record<string, string> = { ...(route.routing.headerOverride ?? {}) };
+  const hostManagedAuth =
+    route.routing.authStrategy === 'none'
+    || route.routing.authStrategy === 'api-key-header'
+    || route.routing.authStrategy === 'oauth-token'
+    || route.routing.authStrategy === 'provider-oauth-header';
+  const headers: Record<string, string> = hostManagedAuth
+    ? withoutClientAuthHeaders(route.routing.headerOverride)
+    : { ...(route.routing.headerOverride ?? {}) };
   const headerDelete = new Set(route.routing.headerDelete ?? []);
   switch (route.routing.authStrategy) {
+    case 'none':
+      for (const name of CLIENT_AUTH_HEADERS) headerDelete.add(name);
+      break;
     case 'api-key-header':
       if (route.apiKey) headers.authorization = `Bearer ${route.apiKey}`;
       break;
@@ -326,6 +365,10 @@ export function buildLocalHandlerHeaders(route: ResolvedSessionRoute, agent: Age
       break;
   }
   if (agent === 'codex') for (const name of CODEX_ACCOUNT_HEADERS) headerDelete.add(name);
+  const normalizedDelete = new Set([...headerDelete].map((name) => name.toLowerCase()));
+  for (const name of Object.keys(headers)) {
+    if (normalizedDelete.has(name.toLowerCase())) delete headers[name];
+  }
   return { headers, headerDelete: [...headerDelete] };
 }
 export function resolveSessionRouteDecision(
@@ -343,17 +386,23 @@ export function resolveSessionRouteDecision(
   if (!routingServesWireModel(routing, wireModel)) return null;
   // 自定义供应商：resolve 时按 provider_key_<id>_<agent> 读出该 runtime 的 API key 注入鉴权头（不在 catalog）。
   const apiKey = provider?.source === 'user' ? customProviderKeyReader(providerId, agent) : null;
+  const withRequestPath = (decision: RoutingDecision | null): RoutingDecision | null =>
+    decision && wireModel && routing.requestPath
+      ? { ...decision, pathOverride: routing.requestPath }
+      : decision;
   // 通用 OAuth 供应商（oauth-token）：从 generic-oauth 内存缓存**同步**读 access_token
   // （临期刷新在后台单飞，不阻塞路由热路径，规则 10）。
   if (routing.authStrategy === 'oauth-token') {
-    return buildRouteDecision(routing, gatewayKey, agent, apiKey, oauthTokenReader(providerId));
+    return withRequestPath(
+      buildRouteDecision(routing, gatewayKey, agent, apiKey, oauthTokenReader(providerId)),
+    );
   }
   if (routing.authStrategy !== 'provider-oauth-header') {
-    return buildRouteDecision(routing, gatewayKey, agent, apiKey);
+    return withRequestPath(buildRouteDecision(routing, gatewayKey, agent, apiKey));
   }
   return Promise.resolve(providerOAuthTokenReader(providerId, agent))
-    .then((token) => buildRouteDecision(routing, gatewayKey, agent, apiKey, token))
-    .catch(() => buildRouteDecision(routing, gatewayKey, agent, apiKey, null));
+    .then((token) => withRequestPath(buildRouteDecision(routing, gatewayKey, agent, apiKey, token)))
+    .catch(() => withRequestPath(buildRouteDecision(routing, gatewayKey, agent, apiKey, null)));
 }
 
 function providersForModel(modelId: string, agent: AgentKind) {
@@ -392,9 +441,13 @@ export function resolveImplicitProviderOAuthRouteDecision(
   const routing = provider?.routing[agent];
   if (!provider || !routing || routing.authStrategy !== 'provider-oauth-header') return null;
   const apiKey = provider.source === 'user' ? customProviderKeyReader(provider.id, agent) : null;
+  const withRequestPath = (decision: RoutingDecision | null): RoutingDecision | null =>
+    decision && routing.requestPath
+      ? { ...decision, pathOverride: routing.requestPath }
+      : decision;
   return Promise.resolve(providerOAuthTokenReader(provider.id, agent))
-    .then((token) => buildRouteDecision(routing, gatewayKey, agent, apiKey, token))
-    .catch(() => buildRouteDecision(routing, gatewayKey, agent, apiKey, null));
+    .then((token) => withRequestPath(buildRouteDecision(routing, gatewayKey, agent, apiKey, token)))
+    .catch(() => withRequestPath(buildRouteDecision(routing, gatewayKey, agent, apiKey, null)));
 }
 
 /**

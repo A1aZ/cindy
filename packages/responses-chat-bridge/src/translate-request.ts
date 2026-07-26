@@ -82,10 +82,14 @@ interface TranslateInputOptions {
   developerRole: ChatDeveloperRole;
   /** thinking 模型:为带 tool_calls 但缺 reasoning_content 的 assistant 消息注入占位。 */
   toolCallReasoningPlaceholder: boolean;
+  /** Gemini 3 OpenAI 兼容层:为每步首个回放 tool call 注入官方允许的签名跳过值。 */
+  googleThoughtSignaturePlaceholder: boolean;
 }
 
 /** cc-switch 的占位口径:kimi/DeepSeek 要求 tool_call assistant 消息带非空 reasoning_content。 */
 const TOOL_CALL_REASONING_PLACEHOLDER = 'tool call';
+/** Google 官方文档允许在无法取得原始签名的注入式 function call 上使用的校验跳过值。 */
+const GOOGLE_THOUGHT_SIGNATURE_PLACEHOLDER = 'skip_thought_signature_validator';
 
 function flushAssistant(
   messages: ChatMessage[],
@@ -98,6 +102,14 @@ function flushAssistant(
   if (pending.content == null && !hasToolCalls) return null;
   if (hasToolCalls && opts.toolCallReasoningPlaceholder && !pending.reasoning_content) {
     pending.reasoning_content = TOOL_CALL_REASONING_PLACEHOLDER;
+  }
+  if (hasToolCalls && opts.googleThoughtSignaturePlaceholder) {
+    const firstCall = pending.tool_calls?.[0];
+    if (firstCall && !firstCall.extra_content?.google?.thought_signature) {
+      firstCall.extra_content = {
+        google: { thought_signature: GOOGLE_THOUGHT_SIGNATURE_PLACEHOLDER },
+      };
+    }
   }
   messages.push(pending);
   return null;
@@ -273,6 +285,7 @@ export function translateResponsesRequest(
   const messages = translateInput(input.input, {
     developerRole,
     toolCallReasoningPlaceholder: capabilities.toolCallReasoningPlaceholder === true,
+    googleThoughtSignaturePlaceholder: capabilities.googleThoughtSignaturePlaceholder === true,
   });
   if (input.instructions) {
     messages.unshift({ role: developerRole, content: input.instructions });

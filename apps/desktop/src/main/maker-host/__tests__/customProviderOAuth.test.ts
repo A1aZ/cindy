@@ -18,6 +18,13 @@ const OAUTH = {
   clientId: 'c1',
   scopes: 'openid',
 };
+const DEVICE_OAUTH = {
+  flow: 'device-code' as const,
+  deviceAuthorizationUrl: 'https://auth.acme.example/device',
+  tokenUrl: 'https://auth.acme.example/token',
+  clientId: 'device-client',
+  scopes: 'openid',
+};
 
 const BASE: CustomProviderConfig = {
   id: 'acme-sub',
@@ -48,12 +55,31 @@ describe('validateCustomProviderConfig auth 段', () => {
     expect(bad({ ...OAUTH, clientId: '' }).ok).toBe(false);
     expect(bad({ ...OAUTH, tokenUrl: 'http://auth.acme.example/token' }).ok).toBe(false);
     expect(bad({ ...OAUTH, redirectPort: 70000 }).ok).toBe(false);
+    expect(
+      validateCustomProviderConfig({
+        ...BASE,
+        auth: { method: 'oauth', oauth: DEVICE_OAUTH },
+      }).ok,
+    ).toBe(true);
+    expect(bad({ ...DEVICE_OAUTH, deviceAuthorizationUrl: 'http://auth.acme.example/device' }).ok)
+      .toBe(false);
+    expect(bad({ ...DEVICE_OAUTH, redirectPort: 9123 }).ok).toBe(false);
   });
 
   it('apiKey method 不允许携带 oauth 描述符；非法 method 拒绝', () => {
     expect(validateCustomProviderConfig({ ...BASE, auth: { method: 'apiKey', oauth: OAUTH } }).ok).toBe(false);
     expect(validateCustomProviderConfig({ ...BASE, auth: { method: 'weird' } }).ok).toBe(false);
     expect(validateCustomProviderConfig({ ...BASE, auth: { method: 'apiKey' } }).ok).toBe(true);
+  });
+
+  it('none method 明确允许无密钥代理，但不允许夹带 OAuth 描述符', () => {
+    expect(validateCustomProviderConfig({ ...BASE, auth: { method: 'none' } }).ok).toBe(true);
+    expect(
+      validateCustomProviderConfig({
+        ...BASE,
+        auth: { method: 'none', oauth: OAUTH },
+      }).ok,
+    ).toBe(false);
   });
 
   it('OAuth 形态模型可留空（授权后自动发现填充，用户免手填）', () => {

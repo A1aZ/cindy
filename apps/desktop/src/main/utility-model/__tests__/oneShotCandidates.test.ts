@@ -270,6 +270,98 @@ describe('utility one-shot candidates', () => {
     });
   });
 
+  it('uses Chat Completions for an explicitly selected openai-chat provider', async () => {
+    activeCatalog.mockReturnValue({
+      providers: [{
+        id: 'chat-only',
+        name: 'Chat Only',
+        source: 'user',
+        agents: ['codex'],
+        auth: { method: 'apiKey' },
+        routing: {
+          codex: {
+            upstream: 'https://chat.example/v1',
+            wireProtocol: 'openai-chat',
+            authStrategy: 'api-key-header',
+          },
+        },
+        models: {
+          codex: [{ id: 'chat-model', name: 'Chat Model', contextWindow: 100_000 }],
+        },
+      }],
+    } as never);
+    readCustomKey.mockReturnValue('chat-secret');
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      text: async () => JSON.stringify({
+        choices: [{ message: { content: 'chat result' } }],
+      }),
+    } as never);
+
+    const result = await requestUtilityText(makerMock(false), 'generate', {
+      providerId: 'chat-only',
+      agentKind: 'codex',
+      model: 'chat-model',
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      text: 'chat result',
+      transport: 'litellm-chat-completions',
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://chat.example/v1/chat/completions',
+      expect.anything(),
+    );
+    expect(JSON.parse(String(vi.mocked(fetchMock).mock.calls[0]?.[1]?.body))).toMatchObject({
+      model: 'chat-model',
+      messages: [{ role: 'user', content: 'generate' }],
+    });
+  });
+
+  it('uses an explicitly configured custom-provider request path', async () => {
+    activeCatalog.mockReturnValue({
+      providers: [{
+        id: 'exact-path',
+        name: 'Exact Path',
+        source: 'user',
+        agents: ['codex'],
+        auth: { method: 'none' },
+        routing: {
+          codex: {
+            upstream: 'http://127.0.0.1:4000',
+            requestPath: '/tenant/acme/infer?stream=1',
+            authStrategy: 'none',
+          },
+        },
+        models: {
+          codex: [{ id: 'local-model', name: 'Local Model', contextWindow: 100_000 }],
+        },
+      }],
+    } as never);
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      text: async () => 'data: {"type":"response.output_text.delta","delta":"ok"}\ndata: [DONE]\n',
+    } as never);
+
+    const result = await requestUtilityText(makerMock(false), 'generate', {
+      providerId: 'exact-path',
+      agentKind: 'codex',
+      model: 'local-model',
+    });
+
+    expect(result).toMatchObject({ ok: true, providerId: 'exact-path' });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:4000/tenant/acme/infer?stream=1',
+      expect.objectContaining({
+        headers: expect.not.objectContaining({
+          Authorization: expect.anything(),
+          'x-api-key': expect.anything(),
+        }),
+      }),
+    );
+  });
+
   it('does not fall back to XD after an explicitly selected custom provider returns 401', async () => {
     activeCatalog.mockReturnValue({
       providers: [{
@@ -315,6 +407,12 @@ describe('utility one-shot candidates', () => {
           'claude-code': {
             upstream: 'https://custom.example/api',
             authStrategy: 'api-key-header',
+            headerOverride: {
+              authorization: 'Bearer stale-lowercase',
+              Authorization: 'Bearer stale-uppercase',
+              'X-API-Key': 'stale-key',
+              'x-tenant': 'tenant-a',
+            },
           },
         },
         models: {
@@ -337,6 +435,10 @@ describe('utility one-shot candidates', () => {
     const init = fetchMock.mock.calls[0]?.[1] as { headers: Record<string, string> };
     expect(init.headers['anthropic-version']).toBe('2023-06-01');
     expect(init.headers['x-api-key']).toBe('custom-secret');
+    expect(init.headers.Authorization).toBe('Bearer custom-secret');
+    expect(init.headers.authorization).toBeUndefined();
+    expect(init.headers['X-API-Key']).toBeUndefined();
+    expect(init.headers['x-tenant']).toBe('tenant-a');
   });
 
   it('uses a generic OAuth token for a custom Claude provider without sending x-api-key', async () => {

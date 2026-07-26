@@ -205,6 +205,33 @@ describe('custom-provider-store CRUD (per-runtime)', () => {
     expect((await getCustomProvider('openrouter'))?.runtimes.codex?.wireProtocol).toBe('openai-chat');
   });
 
+  it('round-trips a validated exact inference request path', async () => {
+    mountDb();
+    await createCustomProvider({
+      ...valid,
+      runtimes: {
+        codex: {
+          ...valid.runtimes.codex!,
+          requestPath: '/tenant/acme/v2/infer?stream=1',
+        },
+      },
+    });
+    expect((await getCustomProvider('openrouter'))?.runtimes.codex?.requestPath)
+      .toBe('/tenant/acme/v2/infer?stream=1');
+  });
+
+  it.each(['//evil.example/infer', '/infer#fragment', '/infer\r\nx: y', 'responses'])(
+    'rejects unsafe or non-path requestPath %s',
+    (requestPath) => {
+      expect(validateCustomProviderConfig({
+        ...valid,
+        runtimes: {
+          codex: { ...valid.runtimes.codex!, requestPath },
+        },
+      }).ok).toBe(false);
+    },
+  );
+
   it('rejects unsupported protocol/runtime combinations', () => {
     expect(validateCustomProviderConfig({
       ...valid,

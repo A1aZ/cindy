@@ -11,6 +11,7 @@ vi.mock('../../appCapabilities.js', () => ({
 import { BUNDLED_CATALOG, buildUserProvider, type AgentKind, type RoutingDescriptor } from '@cindy/model-providers';
 
 import {
+  buildLocalHandlerHeaders,
   buildRouteDecision,
   resolveSessionRouteDecision,
   inferProviderIdForModel,
@@ -294,6 +295,95 @@ describe('api-key-header (自定义供应商 buildRouteDecision)', () => {
       upstreamOverride: 'https://api.myprovider.com/v1',
     });
   });
+
+  it('safeStorage key 始终覆盖复制配置里残留的鉴权头', () => {
+    expect(
+      buildRouteDecision(
+        routing({
+          Authorization: 'Bearer stale',
+          'X-API-Key': 'stale',
+          'X-Tenant': 'tenant-a',
+        }),
+        KEY,
+        'codex',
+        'sk-current',
+      ),
+    ).toEqual({
+      headerOverride: {
+        'X-Tenant': 'tenant-a',
+        authorization: 'Bearer sk-current',
+      },
+      upstreamOverride: 'https://api.myprovider.com/v1',
+    });
+  });
+});
+
+describe('none (无鉴权自定义代理 buildRouteDecision)', () => {
+  const routing: RoutingDescriptor = {
+    upstream: 'http://127.0.0.1:4000/v1',
+    authStrategy: 'none',
+    headerOverride: { 'X-Proxy-Tenant': 'local' },
+  };
+
+  it('cc 固定路由本机代理并删除 Claude CLI 自带的认证头', () => {
+    expect(buildRouteDecision(routing, KEY, 'claude-code', null)).toEqual({
+      upstreamOverride: 'http://127.0.0.1:4000/v1',
+      headerOverride: { 'X-Proxy-Tenant': 'local' },
+      headerDelete: ['authorization', 'x-api-key'],
+    });
+  });
+
+  it('codex 额外删除 ChatGPT 账号元数据，避免订阅身份泄漏', () => {
+    expect(buildRouteDecision(routing, KEY, 'codex', null)).toEqual({
+      upstreamOverride: 'http://127.0.0.1:4000/v1',
+      headerOverride: { 'X-Proxy-Tenant': 'local' },
+      headerDelete: [
+        'authorization',
+        'x-api-key',
+        'chatgpt-account-id',
+        'openai-beta',
+        'originator',
+        'session_id',
+      ],
+    });
+  });
+
+  it('无鉴权透明路由不保留自定义 headers 里的凭证', () => {
+    expect(
+      buildRouteDecision({
+        ...routing,
+        headerOverride: {
+          Authorization: 'Bearer must-not-leak',
+          'X-API-Key': 'must-not-leak',
+          'X-Proxy-Tenant': 'local',
+        },
+      }, KEY, 'codex', null),
+    ).toMatchObject({
+      headerOverride: { 'X-Proxy-Tenant': 'local' },
+    });
+  });
+
+  it('本地 Chat 桥也剥掉复制配置里残留的鉴权与账号头', () => {
+    expect(
+      buildLocalHandlerHeaders({
+        providerId: 'local',
+        providerSource: 'user',
+        routing: {
+          ...routing,
+          headerOverride: {
+            Authorization: 'Bearer must-not-leak',
+            'X-API-Key': 'must-not-leak',
+            'ChatGPT-Account-ID': 'acct',
+            'X-Proxy-Tenant': 'local',
+          },
+        },
+        apiKey: null,
+        oauthToken: null,
+      }, 'codex'),
+    ).toMatchObject({
+      headers: { 'X-Proxy-Tenant': 'local' },
+    });
+  });
 });
 
 describe('resolveSessionRouteDecision — 自定义供应商(resolve 时注入 key)', () => {
@@ -324,6 +414,34 @@ describe('resolveSessionRouteDecision — 自定义供应商(resolve 时注入 k
     expect(resolveSessionRouteDecision('s-user', 'codex', KEY)).toEqual({
       headerOverride: { authorization: 'Bearer sk-or-123' },
       upstreamOverride: 'https://openrouter.ai/api/v1',
+    });
+  });
+
+  it('精确请求路径只覆盖带 model 的推理请求，不改写无 body 的控制面请求', () => {
+    setCustomProviders([
+      buildUserProvider({
+        id: 'exact-path',
+        name: 'Exact Path',
+        runtimes: {
+          codex: {
+            baseUrl: 'https://gateway.example/api',
+            requestPath: '/tenant/acme/infer?stream=1',
+            models: [{ id: 'custom-model', name: 'Custom Model' }],
+          },
+        },
+      }),
+    ]);
+    setCustomProviderKeyReader(() => 'sk-exact');
+    setSessionProvider('s-user', 'exact-path');
+
+    expect(resolveSessionRouteDecision('s-user', 'codex', KEY, 'custom-model')).toEqual({
+      headerOverride: { authorization: 'Bearer sk-exact' },
+      upstreamOverride: 'https://gateway.example/api',
+      pathOverride: '/tenant/acme/infer?stream=1',
+    });
+    expect(resolveSessionRouteDecision('s-user', 'codex', KEY)).toEqual({
+      headerOverride: { authorization: 'Bearer sk-exact' },
+      upstreamOverride: 'https://gateway.example/api',
     });
   });
 

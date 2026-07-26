@@ -604,6 +604,8 @@ function forward(
   clientModel = '',
   // 请求处理层解析好的出站代理;undefined = 直连(与扩展前字节级一致)。
   outboundProxy?: ResolvedOutboundProxy,
+  // 精确推理路径覆盖；省略时沿用客户端原始 path。
+  pathOverride?: string,
 ): void {
   // 客户端已断开(典型:400 缓冲期间断开后走到透明重试)——'close' 已经发过,
   // 下面挂的中断传播 listener 永远不会触发,直接不发起上游请求。
@@ -622,7 +624,8 @@ function forward(
     }
   }
   const reqFn = actualTarget.protocol === 'https:' ? httpsRequest : httpRequest;
-  const upstreamPath = `${actualTarget.basePath}${path.startsWith('/') ? path : '/' + path}`;
+  const routedPath = pathOverride ?? path;
+  const upstreamPath = `${actualTarget.basePath}${routedPath.startsWith('/') ? routedPath : '/' + routedPath}`;
 
   // http.request 会把 options 原样透传给 agent.createConnection → net.connect,
   // 所以 socket 级 connect 选项运行时有效;但 @types/node 的 RequestOptions 没收录
@@ -758,6 +761,7 @@ function forward(
             responseObserver,
             clientModel,
             outboundProxy,
+            pathOverride,
           );
           return;
         }
@@ -992,6 +996,7 @@ export async function createAnthropicCompatProxy(opts: ProxyOptions): Promise<Pr
     overrideTarget?: UpstreamTarget;
     headerOverride?: Record<string, string>;
     headerDelete?: readonly string[];
+    pathOverride?: string;
   } | null => {
     let overrideTarget: UpstreamTarget | undefined;
     try {
@@ -1014,6 +1019,7 @@ export async function createAnthropicCompatProxy(opts: ProxyOptions): Promise<Pr
       overrideTarget,
       headerOverride: decision?.headerOverride,
       headerDelete: decision?.headerDelete,
+      pathOverride: decision?.pathOverride,
     };
   };
 
@@ -1137,6 +1143,7 @@ export async function createAnthropicCompatProxy(opts: ProxyOptions): Promise<Pr
         opts.responseObserver,
         '',
         await resolveOutboundForTarget(route.target, reqId),
+        route.pathOverride,
       );
       return;
     }
@@ -1269,6 +1276,7 @@ export async function createAnthropicCompatProxy(opts: ProxyOptions): Promise<Pr
       opts.responseObserver,
       extractBodyModel(rawBody),
       await resolveOutboundForTarget(route.target, reqId),
+      route.pathOverride,
     );
   });
 

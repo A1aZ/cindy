@@ -25,6 +25,8 @@ export type {
   ProviderRuntimeModelConfig,
   ProviderPreset,
   ProviderPresetRuntime,
+  OAuthAuthorizationCodeDescriptor,
+  OAuthDeviceCodeDescriptor,
   OAuthProviderDescriptor,
 } from './types.js';
 

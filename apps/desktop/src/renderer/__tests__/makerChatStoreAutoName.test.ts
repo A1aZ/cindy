@@ -170,6 +170,52 @@ describe('makerChatStore auto-name — 本机会话', () => {
     expect(autoTitle).not.toHaveBeenCalled();
   });
 
+  it('用「插话」写下第一句话时同样补起名', async () => {
+    // 首条是纯附件的会话标题此时是合成占位;用户完全可能趁这一轮还在跑就用
+    // 插话写下第一句话。只认普通入队的话,标题会一直停在附件名上(review P1)。
+    const steer = vi.fn(async () => true);
+    const w = globalThis as unknown as { window: Record<string, unknown> };
+    w.window = { electronAPI: { maker: { autoTitle, input: { steer } } } };
+
+    await makerChatStore.steerMessage(
+      SESSION_ID,
+      '这个报错怎么修',
+      'claude-opus-4-7',
+      'medium',
+      'default',
+      '/tmp/wd',
+    );
+    await flushPromises();
+
+    expect(steer).toHaveBeenCalled();
+    expect(autoTitle).toHaveBeenCalledWith({
+      sessionId: SESSION_ID,
+      text: '这个报错怎么修',
+      agentKind: 'claude-code',
+      isUserText: true,
+    });
+  });
+
+  it('插话只带附件时不补起名(不把已有占位换成另一个文件名)', async () => {
+    const steer = vi.fn(async () => true);
+    const w = globalThis as unknown as { window: Record<string, unknown> };
+    w.window = { electronAPI: { maker: { autoTitle, input: { steer } } } };
+
+    await makerChatStore.steerMessage(
+      SESSION_ID,
+      '',
+      'claude-opus-4-7',
+      'medium',
+      'default',
+      '/tmp/wd',
+      [{ id: 'f1', name: '设计稿-v3.png', path: '/tmp/设计稿-v3.png', ext: '.png', size: 1, category: 'image', mimeType: 'image/png' }],
+    );
+    await flushPromises();
+
+    expect(steer).toHaveBeenCalled();
+    expect(autoTitle).not.toHaveBeenCalled();
+  });
+
   it('起名对发送主流程零副作用:桥接缺失或同步抛错都不得向上冒泡', () => {
     // 老版本 preload 没有 autoTitle 时,同步调用会 TypeError —— 起名是
     // fire-and-forget,异常若冒回 sendMessageCore 会打断消息入队。

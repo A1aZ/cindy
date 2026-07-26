@@ -569,11 +569,19 @@ function describeMentions(queued: AgentInputQueuedMessage): string | null {
   return null;
 }
 
-/** 附件文件名(`需求评审.pdf` 比「文件」信息量大得多)。粘贴的截图没有 → null。 */
+/**
+ * 附件文件名(`需求评审.pdf` 比「文件」信息量大得多)。
+ *
+ * `clipboard://` 系的附件(粘贴截图、图片查看器「发送到对话」、浏览器注释、插件
+ * 拖入)没有用户可辨认的文件名:useAttachments 等处按 `clipboard-<ts>.png` /
+ * `annotated-<ts>.png` 这类实现名同时填 `name` 与 `originalName`,真实来源只体现在
+ * `path` 的 scheme 上。因此按 **path** 判定,而不是看名字长什么样 —— 否则会拿
+ * `clipboard-1753...png` 当标题(PR #510 review P1)。这类附件跳过,让类别词兜底。
+ */
 function describeFileName(queued: AgentInputQueuedMessage): string | null {
   for (const file of queued.files ?? []) {
-    const raw = file.originalName || file.name || '';
-    const name = collapse(raw.startsWith('clipboard://') ? '' : baseName(raw));
+    if (file.path?.startsWith('clipboard://')) continue;
+    const name = collapse(baseName(file.originalName || file.name || ''));
     if (name) return name;
   }
   return null;
@@ -602,6 +610,40 @@ function describeFileCategory(
  * 只剔除与本条消息 mentions 对应的 token:用户手打的 `@某人` 没有对应 mention
  * 条目,会原样保留,不会被误判成无文字。
  */
+
+/** 至少有一个字母/数字/汉字才算「用户真的写了话」。 */
+const HAS_WORD_CHAR = /[\p{L}\p{N}]/u;
+
+/**
+ * 这些字符出现在 ref 后面时**不能**当作 token 边界 —— 它们本身就可能是路径的一
+ * 部分,把它当边界会在 `@foo` + `.bar` 这类情形下切坏一个更长的真实路径。
+ * 括号刻意不在此列:`(见 @a/b.ts)` 里的 `)` 判成边界才切得干净,而真的带括号的
+ * 文件名会在精确匹配那一步就命中。
+ */
+const REF_CONTINUATION_CHARS = new Set(['.', '/', '\\', '-', '_', '~', '+', '=', '#', '@', '%', '&', '$']);
+
+function isRefBoundary(ch: string): boolean {
+  if (HAS_WORD_CHAR.test(ch)) return false;
+  return !REF_CONTINUATION_CHARS.has(ch);
+}
+
+/**
+ * 裸形式 token 后面紧跟标点(`@src/index.ts,`)时,`@\S+` 会把标点一并吞进同一段,
+ * 精确匹配落空 —— 整条消息于是被当成用户散文,wire token 漏进标题素材
+ * (PR #510 review)。这里退一步做「最长 ref 前缀 + 边界」匹配,返回剩下的尾巴。
+ * 匹配不上返回 null(保持原样,绝不猜)。
+ */
+function splitTrailingAfterRef(ref: string, refs: ReadonlySet<string>): string | null {
+  let matched: string | null = null;
+  for (const candidate of refs) {
+    if (candidate.length >= ref.length) continue;
+    if (!ref.startsWith(candidate)) continue;
+    if (!isRefBoundary(ref.charAt(candidate.length))) continue;
+    if (matched === null || candidate.length > matched.length) matched = candidate;
+  }
+  return matched === null ? null : ref.slice(matched.length);
+}
+
 function stripMentionTokens(text: string, queued: AgentInputQueuedMessage): string {
   const mentions = queued.mentions ?? [];
   if (mentions.length === 0) return text.trim();
@@ -615,13 +657,30 @@ function stripMentionTokens(text: string, queued: AgentInputQueuedMessage): stri
     refs.add(mention.path);
     refs.add(`${mention.path}/`);
   }
-  return text
+  let strippedAny = false;
+  const rest = text
     .split(MENTION_TOKEN_SPLIT)
-    .map((part) =>
-      part.startsWith('@') && refs.has(parseMentionToken(part).ref) ? ' ' : part,
-    )
+    .map((part) => {
+      if (!part.startsWith('@')) return part;
+      const { ref, quoted } = parseMentionToken(part);
+      if (refs.has(ref)) {
+        strippedAny = true;
+        return ' ';
+      }
+      // 引号形式的边界由引号本身界定,tokenizer 已经切干净,不做前缀匹配。
+      if (quoted) return part;
+      const trailing = splitTrailingAfterRef(ref, refs);
+      if (trailing === null) return part;
+      strippedAny = true;
+      return ` ${trailing}`;
+    })
     .join('')
     .trim();
+  // 剔除后只剩标点(`@a/b.ts,` 这种「chip + 一个逗号」)时不算用户文字,否则标题
+  // 会变成一个孤零零的逗号,还会被当成实质内容送进标题模型。仅在确实剔除过
+  // token 时才收紧,不影响没有 mention 的普通消息。
+  if (strippedAny && !HAS_WORD_CHAR.test(rest)) return '';
+  return rest;
 }
 
 /**

@@ -6567,6 +6567,50 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     version: 1,
   }));
 
+  /**
+   * device-link 远控输入的自动起名(入队 / 插话共用)。
+   *
+   * 只对远控调用生效:本机 renderer 自己走 `maker:auto-title`。返回一个 commit 闭包
+   * 而不是直接调度 —— 调度必须发生在输入真正被 coordinator 接受之后,否则输入被拒
+   * 时会留下一个凭空出现的标题。
+   */
+  const prepareDeviceLinkAutoTitle = async (
+    sid: string,
+    queued: AgentInputQueuedMessage,
+  ): Promise<() => void> => {
+    const noop = () => {};
+    if (!isDeviceLinkInvoke()) return noop;
+    // 起名素材:用户写了字就用他的字(可喂标题模型);一个字没写(只贴图 / 只拖
+    // 文件 / 只 @ 一个文件 / 只引用一个会话)就用本地合成的描述,只当占位标题。
+    const seed = deriveAutoTitleSeed(queued, {
+      image: t('ccAgent.autoTitle.image'),
+      file: t('ccAgent.autoTitle.file'),
+    });
+    if (!seed) return noop;
+    let eligible: boolean;
+    try {
+      eligible = await isSessionAutoTitleEligible(sid);
+    } catch (err) {
+      // 这一步只是省一次无谓调度的**廉价预检**,权威资格判定在
+      // runSessionAutoTitle 内部(它自己也做重试安全的处理)。读不到时按"要起名"
+      // 放行,否则一次 DB 抖动就会让单轮对话的标题永久停在 New Maker(review P1)。
+      log.warn('[device-link] auto-title precheck failed (scheduling anyway)', {
+        sessionId: sid,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      eligible = true;
+    }
+    if (!eligible) return noop;
+    return () => {
+      scheduleSessionAutoTitle({
+        sessionId: sid,
+        text: seed.text,
+        agentKind: queued.createOpts.agentKind,
+        isUserText: seed.isUserText,
+      });
+    };
+  };
+
   ipcMain.handle(MAKER_INVOKE.INPUT_GET_PROJECTION, async (_e, sessionId: unknown) => {
     const sid = requireSessionId(sessionId);
     // 崩溃恢复(issue #761):renderer 打开会话首次取 projection 前,先把持久化的
@@ -6589,27 +6633,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       requireQueuedMessage(item),
     )) as AgentInputQueuedMessage;
     const queued = await hydrateQueuedAgentReferences(queuedWithAttachments);
-    // 起名素材:用户写了字就用他的字(可喂标题模型);一个字没写(只贴图 / 只拖
-    // 文件 / 只 @ 一个文件 / 只引用一个会话)就用本地合成的描述,只当占位标题。
-    const autoTitleSeed = deriveAutoTitleSeed(queued, {
-      image: t('ccAgent.autoTitle.image'),
-      file: t('ccAgent.autoTitle.file'),
-    });
-    let shouldAutoTitle = false;
-    if (isDeviceLinkInvoke() && autoTitleSeed) {
-      try {
-        shouldAutoTitle = await isSessionAutoTitleEligible(sid);
-      } catch (err) {
-        // 这一步只是省一次无谓调度的**廉价预检**,权威资格判定在
-        // runSessionAutoTitle 内部(它自己也做重试安全的处理)。读不到时按"要起名"
-        // 放行,否则一次 DB 抖动就会让单轮对话的标题永久停在 New Maker(review P1)。
-        log.warn('[device-link] auto-title precheck failed (scheduling anyway)', {
-          sessionId: sid,
-          err: err instanceof Error ? err.message : String(err),
-        });
-        shouldAutoTitle = true;
-      }
-    }
+    const commitAutoTitle = await prepareDeviceLinkAutoTitle(sid, queued);
 
     // 「继续任务」durable ack 延后到 vendor dispatch 成功（onDispatchedUserTurn）：
     // 排队可取消时旧中断提示必须能恢复；accepted 但仍可能 cancelled-before-dispatch
@@ -6622,14 +6646,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       // enqueue,不带此 flag,恢复暂停语义不变。
       resumeRestorePausedQueue: true,
     });
-    if (shouldAutoTitle && autoTitleSeed) {
-      scheduleSessionAutoTitle({
-        sessionId: sid,
-        text: autoTitleSeed.text,
-        agentKind: queued.createOpts.agentKind,
-        isUserText: autoTitleSeed.isUserText,
-      });
-    }
+    commitAutoTitle();
     return projection;
   });
 
@@ -6666,11 +6683,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       }),
     )) as AgentInputQueuedMessage;
     const queued = await hydrateQueuedAgentReferences(queuedWithAttachments);
-    return inputCoordinator.steer(
+    // 插话也补起名:远控用户完全可能趁这一轮还在跑就写下第一句话,只认入队的话
+    // 标题会一直停在首条纯附件消息的合成占位上(PR #510 review P1)。是否真的该
+    // 改名由 runSessionAutoTitle 权威判定。
+    const commitAutoTitle = await prepareDeviceLinkAutoTitle(sid, queued);
+    const result = inputCoordinator.steer(
       sid,
       queued,
       steerOpts,
     );
+    commitAutoTitle();
+    return result;
   });
 
   ipcMain.handle(MAKER_INVOKE.INPUT_STOP, async (_e, sessionId: unknown, opts?: unknown) => {

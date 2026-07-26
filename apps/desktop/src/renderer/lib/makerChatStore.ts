@@ -6309,6 +6309,14 @@ function steerMessageCore(
     opts,
   );
   touchSessionUserSend(sessionId, workingDir, false);
+  // 补起名同样要覆盖 steer:首条是纯附件的会话标题此时是合成占位,而用户完全
+  // 可能趁这一轮还在跑就用「插话」写下第一句话。只走普通发送的话,这句话不会
+  // 改名,标题会一直停在附件名直到他再排队发一条(PR #510 review P1)。
+  maybeAutoNameUnnamedSession(
+    sessionId,
+    deriveAutoTitleSeed(queued, autoTitleFallbackLabels()),
+    getOrCreateState(sessionId).agentKind,
+  );
   return makerApiFor(sessionId)
     .input.steer(sessionId, queued, { touchUserSend: true })
     .then(async (ok) => {

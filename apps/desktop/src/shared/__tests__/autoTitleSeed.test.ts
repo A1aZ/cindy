@@ -56,13 +56,61 @@ describe('deriveAutoTitleSeed — 用户一个字没写', () => {
     expect(seed).toEqual({ text: '设计稿-v3.png', isUserText: false });
   });
 
-  it('粘贴的截图没有可用文件名 → 回落到「图片」', () => {
+  it('粘贴的截图 → 回落到「图片」,不拿 clipboard-<ts>.png 这种实现名当标题', () => {
+    // 线上形状:useAttachments 给粘贴图同时填 name 与 originalName 为生成名,
+    // 真实来源只体现在 path 的 scheme 上(review P1:此前只看名字,漏掉了它)。
     const seed = deriveAutoTitleSeed(
-      queued({ files: [{ name: 'clipboard://abc', path: 'clipboard://abc', category: 'image' }] }),
+      queued({
+        files: [
+          {
+            name: 'clipboard-1753500000000.png',
+            originalName: 'clipboard-1753500000000.png',
+            path: 'clipboard://paste-1753500000000',
+            category: 'image',
+          },
+        ],
+      }),
       LABELS,
     );
 
     expect(seed).toEqual({ text: '图片', isUserText: false });
+  });
+
+  it('图片查看器 / 浏览器注释等 clipboard:// 同型附件一样只给类别词', () => {
+    expect(
+      deriveAutoTitleSeed(
+        queued({
+          files: [
+            {
+              name: 'annotated-1753500000000.png',
+              originalName: 'annotated-1753500000000.png',
+              path: 'clipboard://lightbox-annotated-1753500000000',
+              category: 'image',
+            },
+          ],
+        }),
+        LABELS,
+      ),
+    ).toEqual({ text: '图片', isUserText: false });
+  });
+
+  it('clipboard 截图与真实文件同时在场时,用真实文件名', () => {
+    const seed = deriveAutoTitleSeed(
+      queued({
+        files: [
+          {
+            name: 'clipboard-1753500000000.png',
+            originalName: 'clipboard-1753500000000.png',
+            path: 'clipboard://paste-1',
+            category: 'image',
+          },
+          { name: '需求评审.pdf', path: '/tmp/需求评审.pdf', category: 'pdf' },
+        ],
+      }),
+      LABELS,
+    );
+
+    expect(seed).toEqual({ text: '需求评审.pdf', isUserText: false });
   });
 
   it('纯 PDF / office / 其他文件 → 用文件名', () => {
@@ -190,6 +238,59 @@ describe('deriveAutoTitleSeed — 用户一个字没写', () => {
     );
 
     expect(seed).toEqual({ text: 'code-reviewer', isUserText: false });
+  });
+
+  it('token 后紧跟标点(`@a/b.ts,`)时仍被剔除,wire token 不漏进标题素材', () => {
+    // `@\S+` 会把标点一并吞进同一段,精确匹配落空 —— 不做边界回退的话这条消息
+    // 会被当成用户散文,标题里出现 `@src/index.ts,`(review)。
+    const seed = deriveAutoTitleSeed(
+      queued({
+        text: '@src/index.ts,这里为什么会崩',
+        mentions: [{ type: 'file', name: 'index.ts', path: 'src/index.ts' }],
+      }),
+      LABELS,
+    );
+
+    expect(seed?.isUserText).toBe(true);
+    expect(seed?.text).toBe(',这里为什么会崩');
+  });
+
+  it('chip 后只跟一个标点 → 不算用户文字,回落到合成描述', () => {
+    const seed = deriveAutoTitleSeed(
+      queued({
+        text: '@src/index.ts。',
+        mentions: [{ type: 'file', name: 'index.ts', path: 'src/index.ts' }],
+      }),
+      LABELS,
+    );
+
+    expect(seed).toEqual({ text: 'index.ts', isUserText: false });
+  });
+
+  it('边界回退不切坏更长的真实路径:`@src/index.tsx` 不被当成 `@src/index.ts` + `x`', () => {
+    const seed = deriveAutoTitleSeed(
+      queued({
+        text: '@src/index.ts 和手打的 @src/index.tsx 有什么区别',
+        mentions: [{ type: 'file', name: 'index.ts', path: 'src/index.ts' }],
+      }),
+      LABELS,
+    );
+
+    expect(seed?.isUserText).toBe(true);
+    expect(seed?.text).toBe('和手打的 @src/index.tsx 有什么区别');
+  });
+
+  it('dir chip 的尾斜杠 + 标点同样被剔除', () => {
+    const seed = deriveAutoTitleSeed(
+      queued({
+        text: '@src/renderer/,还有别的吗',
+        mentions: [{ type: 'dir', name: 'renderer', path: 'src/renderer' }],
+      }),
+      LABELS,
+    );
+
+    expect(seed?.isUserText).toBe(true);
+    expect(seed?.text).toBe(',还有别的吗');
   });
 
   it('mention 旁边有真正的文字时仍算用户文字', () => {

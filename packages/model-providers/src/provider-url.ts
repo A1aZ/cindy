@@ -8,7 +8,7 @@
 export function isProviderRequestPath(value: unknown): value is string {
   return (
     typeof value === 'string'
-    && value.length > 1
+    && value.length >= 1
     && value.length <= 2_048
     && value.startsWith('/')
     && !value.startsWith('//')

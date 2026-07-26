@@ -53,12 +53,11 @@ function validateRuntime(agent: string, rt: unknown): ValidationResult {
   }
   try {
     const u = new URL(r.baseUrl);
-    if (
-      (u.protocol !== 'http:' && u.protocol !== 'https:')
-      || u.username
-      || u.password
-    ) {
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
       return invalid(`runtime '${agent}' baseUrl must be http(s)`);
+    }
+    if (u.username || u.password) {
+      return invalid(`runtime '${agent}' baseUrl must not contain embedded credentials`);
     }
   } catch {
     return invalid(`runtime '${agent}' baseUrl is not a valid URL`);

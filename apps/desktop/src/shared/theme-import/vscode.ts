@@ -173,20 +173,28 @@ function scopeList(scope: string | string[] | undefined): string[] {
     .filter((s) => s.length > 0);
 }
 
-/** 取某个 TextMate scope 的前景色（反向扫描——VSCode 是 last-match-wins）。 */
-function tokenColorFor(theme: VsCodeThemeJson, wanted: string): Rgb | null {
+/**
+ * 取某个 TextMate scope 的前景色（反向扫描——VSCode 是 last-match-wins）。
+ * 精确匹配优先于前缀匹配，避免 `comment.block.documentation` 覆盖 `comment`。
+ * 带 alpha 的颜色合成到 `over` 底色上（同 VSCode 渲染行为）。
+ */
+function tokenColorFor(theme: VsCodeThemeJson, wanted: string, over?: Rgb | null): Rgb | null {
   const entries = theme.tokenColors ?? [];
+  let prefixHit: Rgb | null = null;
   for (let i = entries.length - 1; i >= 0; i -= 1) {
     const fg = entries[i].settings?.foreground;
     if (typeof fg !== 'string') continue;
     for (const scope of scopeList(entries[i].scope)) {
-      if (scope === wanted || scope.startsWith(`${wanted}.`)) {
-        const rgb = parseCssColor(fg);
+      if (scope === wanted) {
+        const rgb = over ? parseCssColorComposited(fg, over) : parseCssColor(fg);
         if (rgb) return rgb;
+      }
+      if (!prefixHit && scope.startsWith(`${wanted}.`)) {
+        prefixHit = over ? parseCssColorComposited(fg, over) : parseCssColor(fg);
       }
     }
   }
-  return null;
+  return prefixHit;
 }
 
 export interface VsCodeExtraction {
@@ -287,7 +295,7 @@ export function extractVsCodePalette(
   );
   // 二级文字优先取注释色——这是 one-dark-pro.ts 注释里记录的人工判断
   // (SECONDARY ← comments),比 descriptionForeground 更贴近"弱化正文"的观感。
-  const commentColor = tokenColorFor(theme, 'comment');
+  const commentColor = tokenColorFor(theme, 'comment', surfaceHit);
   if (commentColor) resolvedRoles += 1;
   const textSecondary = commentColor ?? role(
     'textSecondary',
@@ -317,13 +325,15 @@ export function extractVsCodePalette(
     ],
     () => textPrimary,
   );
-  // soft / deep 是人工挑的品牌色变体,源主题不提供,一律派生。
   const accentSoft = shade(accentPrimary, dark ? 0.22 : -0.28);
+  derivedRoles.push('accentSoft');
   const accentDeep = shade(accentPrimary, dark ? -0.22 : -0.28);
+  derivedRoles.push('accentDeep');
   const elevatedSoft = dark ? elevated : step(elevated, 0.08);
+  derivedRoles.push('elevatedSoft');
 
-  const headingColor = tokenColorFor(theme, 'markup.heading');
-  const boldColor = tokenColorFor(theme, 'markup.bold');
+  const headingColor = tokenColorFor(theme, 'markup.heading', surfaceHit);
+  const boldColor = tokenColorFor(theme, 'markup.bold', surfaceHit);
   const markdown: MarkdownPalette = {
     ...(headingColor ? { headings: Array.from({ length: 6 }, () => headingColor) } : {}),
     ...(boldColor ? { strong: boldColor } : {}),

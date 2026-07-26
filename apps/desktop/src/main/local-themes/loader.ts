@@ -137,14 +137,10 @@ function parseLocalThemeJson(raw: unknown): LocalThemeJson {
 
   const brand = parseBrand(raw.brand);
   // family 只认非空字符串;缺省/空白一律视为"不配对"(每个文件各自成家族),
-  // 保持引入该字段前的行为。renderer 侧拼分组键时会追加 `-local`，所以这里
-  // 要剥掉用户手写的尾部 `-local`，避免变成 `*-local-local`。
-  let family: string | undefined;
-  if (typeof raw.family === 'string' && raw.family.trim().length > 0) {
-    let f = raw.family.trim();
-    if (f.endsWith('-local')) f = f.slice(0, -'-local'.length);
-    family = f.length > 0 ? f : undefined;
-  }
+  // 保持引入该字段前的行为。
+  const family = typeof raw.family === 'string' && raw.family.trim().length > 0
+    ? raw.family.trim()
+    : undefined;
   return {
     id,
     name,

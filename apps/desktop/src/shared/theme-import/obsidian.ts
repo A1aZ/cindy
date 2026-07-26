@@ -105,7 +105,7 @@ function findBlockEnd(source: string, openIndex: number): number {
   return j;
 }
 
-const SKIP_AT_RULE_RE = /^@(supports|font-face|keyframes|layer|counter-style|page)\b/i;
+const SKIP_AT_RULE_RE = /^@(supports|font-face|keyframes|counter-style|page)\b/i;
 const PRINT_MEDIA_RE = /^@media\b[^{]*\bprint\b/i;
 
 function shouldRecurseAtRule(selector: string): boolean {
@@ -151,10 +151,9 @@ function scanCssRules(source: string, depth: number): CssRule[] {
       const j = findBlockEnd(source, i);
       const body = source.slice(i + 1, Math.max(i + 1, j - 1));
       if (selector.startsWith('@')) {
-        // 只递归进"总是生效"的 at-rule 块：`@media` 无条件或
-        // `prefers-color-scheme` 条件(已在 selectorMode 层判断)。
-        // 跳过 `@media print`、`@media (max-width:…)`、`@supports` 等
-        // 条件块——它们的变量不一定生效，提取会产出错误配色。
+        // 跳过 `@media print`、`@supports`、`@keyframes` 等与屏幕显示
+        // 无关的 at-rule。`@media` 的响应式条件（min-width 等）和
+        // `@layer` 仍递归——主题合法地在里面放 `.theme-dark` 变量。
         if (shouldRecurseAtRule(selector)) {
           rules.push(...scanCssRules(body, depth + 1));
         }
@@ -175,9 +174,14 @@ function scanCssRules(source: string, depth: number): CssRule[] {
   return rules;
 }
 
-/** 抽一个 declaration block 里的自定义属性。`!important` 声明锁定变量不被后续普通声明覆盖。 */
+/**
+ * 抽一个 declaration block 里的自定义属性。
+ * `!important` 声明锁定变量不被后续普通声明覆盖。
+ * 跳过嵌套块（CSS nesting `& .child { ... }`）以免把子选择器的声明误收为根级。
+ */
 function collectCustomProps(body: string, into: VarMap, locked?: Set<string>): void {
-  for (const m of body.matchAll(/(--[A-Za-z0-9_-]+)\s*:\s*([^;]+)(?:;|$)/g)) {
+  const flat = stripNestedBlocks(body);
+  for (const m of flat.matchAll(/(--[A-Za-z0-9_-]+)\s*:\s*([^;]+)(?:;|$)/g)) {
     const name = m[1].trim();
     const rawValue = m[2].trim();
     const isImportant = /!important\s*$/i.test(rawValue);
@@ -187,6 +191,18 @@ function collectCustomProps(body: string, into: VarMap, locked?: Set<string>): v
     into.set(name, value);
     if (isImportant) locked?.add(name);
   }
+}
+
+function stripNestedBlocks(body: string): string {
+  let out = '';
+  let depth = 0;
+  for (let i = 0; i < body.length; i += 1) {
+    const c = body[i];
+    if (c === '{') { depth += 1; continue; }
+    if (c === '}') { if (depth > 0) depth -= 1; continue; }
+    if (depth === 0) out += c;
+  }
+  return out;
 }
 
 const MAX_VAR_DEPTH = 8;
@@ -205,15 +221,19 @@ export function resolveVarValue(
   if (depth >= MAX_VAR_DEPTH || !raw.includes('var(')) return raw;
   if (raw.length > MAX_EXPANDED_LENGTH) return raw;
   let changed = false;
+  let budget = MAX_EXPANDED_LENGTH;
   const replaced = raw.replace(
     /var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,([^()]*(?:\([^()]*\)[^()]*)*))?\)/g,
     (_all, name: string, fallback: string | undefined) => {
+      if (budget <= 0) return _all;
       const hit = vars.get(name);
       if (hit !== undefined) {
+        budget -= hit.length;
         changed = true;
         return hit;
       }
       if (fallback !== undefined) {
+        budget -= fallback.length;
         changed = true;
         return fallback.trim();
       }

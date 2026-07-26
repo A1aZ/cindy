@@ -129,14 +129,25 @@ function enqueuePerSession<T>(sessionId: string, task: () => Promise<T>): Promis
 const manuallyRenamed = new Set<string>();
 
 /**
- * 接上 DB 侧的改名通知。register 时调用一次(测试里按需重复调用是幂等的)。
+ * 是否装有启用中的 will-user-message 拦截意识。由 register 注入(避免
+ * maker-ipc → cindy-brain 的额外静态依赖),未注入时按"没有"处理。
+ */
+let isUserMessageScreeningActive: (() => boolean) | null = null;
+
+/**
+ * 接上 DB 侧的改名通知与拦截意识探针。register 时调用一次(重复调用幂等)。
  * 放在这里而不是 sessions.ts 自己调,是因为依赖方向只能是 maker-ipc → localDb。
  */
-export function registerSessionAutoTitleHooks(): void {
+export function registerSessionAutoTitleHooks(hooks?: {
+  isUserMessageScreeningActive?: () => boolean;
+}): void {
   setOnUserSessionTitleWritten((sessionId) => {
     manuallyRenamed.add(sessionId);
     synthesizedPlaceholders.delete(sessionId);
   });
+  if (hooks?.isUserMessageScreeningActive) {
+    isUserMessageScreeningActive = hooks.isUserMessageScreeningActive;
+  }
 }
 
 /** 测试专用:清空归属表与串行队列。 */
@@ -239,6 +250,48 @@ async function runUnsynchronized(
     return { applied: placeholderPersisted, done: true };
   }
 
+  // 占位写入没被确认时重读一次权威标题。`persistSessionTitleIfStillDraft` 的 UPDATE
+  // 与回读是两次 worker RPC:回读那一跳失败时更新其实已经提交,这里却只看到 false。
+  // 不重读的话,智能标题会拿着过期的期望值去写、必然落空,而库里那个已提交的占位
+  // 从未广播出去 —— 侧边栏会一直停在 New Maker 直到下次刷新(review P1)。
+  let expectedForSmart = placeholderPersisted ? placeholder : target.title;
+  let placeholderLive = placeholderPersisted;
+  if (!placeholderPersisted) {
+    try {
+      // 把刚写的串当"已知的系统占位"喂进去:库里若真是它,就能被认出来并当期望值。
+      const latest = await deps.resolveOverwritableTitle(request.sessionId, placeholder);
+      if (latest === null) {
+        // 标题已经不是任何系统占位(用户改了名)→ 不再尝试。
+        return { applied: false, done: true };
+      }
+      expectedForSmart = latest.title;
+      placeholderLive = latest.title === placeholder;
+    } catch (err) {
+      // 读不到就沿用旧期望值:最坏情况是这次智能标题写不进去,下一条消息重试。
+      log.warn('auto-title re-resolve after ambiguous placeholder write failed', {
+        sessionId: request.sessionId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // 装有启用中的 will-user-message 拦截意识时,不把用户原话送去标题模型。
+  //
+  // 拦截在 coordinator 的派发环节才发生,而起名在发送瞬间就跑了 —— 一条本该被
+  // 拦下的消息仍会被送进标题模型这个外部 provider,正好绕开了这个钩子存在的理由
+  // (合规 / 敏感信息);被改写的消息则会拿改写前的原文起名(review P1)。
+  //
+  // 只挡**模型调用**这一步:原话占位是纯本地写库,不外发,而且被拦消息的正文本来
+  // 就以「被拦气泡」原样显示在这个界面上,标题不构成新的暴露面。挡掉之后标题停在
+  // 原话截断版 —— 那正是本 PR 的主行为(Codex 式即时占位),退化是可接受的。
+  //
+  // 这里刻意**不**重新询问钩子本身:同一条消息被问两次会让 Ghost 产生它没预期的
+  // 副作用(计数、日志、二次改写)。要给这类用户恢复智能标题,正解是让
+  // coordinator 在筛查通过后再触发一次起名,那是独立于本 PR 的改动。
+  if (isUserMessageScreeningActive?.()) {
+    return { applied: placeholderLive, done: placeholderLive };
+  }
+
   let generated: string | undefined;
   try {
     // agentKind 取 DB 权威值而非入参快照:另一窗口/设备切过 agent 时快照会过期,
@@ -252,25 +305,21 @@ async function runUnsynchronized(
       err: err instanceof Error ? err.message : String(err),
     });
   }
-  if (!generated) return { applied: placeholderPersisted, done: placeholderPersisted };
+  if (!generated) return { applied: placeholderLive, done: placeholderLive };
   if (manuallyRenamed.has(request.sessionId)) {
-    return { applied: placeholderPersisted, done: true };
+    return { applied: placeholderLive, done: true };
   }
 
   let smartPersisted = false;
   try {
-    smartPersisted = await deps.persistTitle(
-      request.sessionId,
-      generated,
-      placeholderPersisted ? placeholder : target.title,
-    );
+    smartPersisted = await deps.persistTitle(request.sessionId, generated, expectedForSmart);
   } catch (err) {
     log.warn('auto-title smart write failed', {
       sessionId: request.sessionId,
       err: err instanceof Error ? err.message : String(err),
     });
   }
-  const applied = smartPersisted || placeholderPersisted;
+  const applied = smartPersisted || placeholderLive;
   return { applied, done: applied };
 }
 

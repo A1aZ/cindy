@@ -388,16 +388,32 @@ describe('remoteProjectsStore pending title preview', () => {
     expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('帮我排查登录失败');
   });
 
-  it('records provenance even when the host localizes the placeholder differently', () => {
-    // 控制端与被控端各用自己的语言渲染「图片」/「文件」,跨语种时两串本就不同。
-    // 归属按登记时的 isUserText 认,不按字符串相等认。
+  it('never treats a manual rename arriving mid-preview as a synthesized confirmation', () => {
+    // 用户在合成预览在途时手动改了名 —— 那是权威的、他自己起的名字。若把"下一个
+    // 非默认标题"一律当成合成占位登记,之后的预览就能长期顶掉它,而被控端正确地
+    // 拒绝给手动命名的会话改名、不会有 patch 来纠正(review P1)。
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
+    remoteProjectsStore.setPendingTitlePreview('s1', '设计稿-v3.png', false);
+
+    remoteProjectsStore.applyPatch('dev-B', 's1', { title: '我自己起的名字' });
+    remoteProjectsStore.setPendingTitlePreview('s1', '这个报错怎么修', true);
+
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('我自己起的名字');
+  });
+
+  it('跨语种占位登记不上时只丢失即时预览,不影响权威改名', () => {
+    // 已知且刻意接受的降级:两端 UI 语言不同、且首条消息只能回落到 i18n 类别词
+    // (粘贴截图)时,两端算出的串不逐字相等,归属登记不上。表现为后续首句话没有
+    // 即时预览,仍会经隧道往返正常改名 —— 少一次即时性,好过顶掉用户的名字。
     remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
     remoteProjectsStore.setPendingTitlePreview('s1', 'Image', false);
     remoteProjectsStore.applyPatch('dev-B', 's1', { title: '图片' });
-    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('图片');
 
     remoteProjectsStore.setPendingTitlePreview('s1', '这个报错怎么修', true);
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('图片');
 
+    // 权威改名照常到达。
+    remoteProjectsStore.applyPatch('dev-B', 's1', { title: '这个报错怎么修' });
     expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('这个报错怎么修');
   });
 

@@ -657,7 +657,16 @@ function splitTrailingAfterRef(ref: string, refs: ReadonlySet<string>): string |
     if (candidate.length >= ref.length) continue;
     if (!ref.startsWith(candidate)) continue;
     const next = ref.charAt(candidate.length);
-    if (!isRefBoundary(next) && !isScriptChangeBoundary(candidate, next)) continue;
+    // `.` 只在它是 token **最后一个字符**时算边界:`@a/b.ts.`(英文句末)要拆,
+    // 而 `@foo` + `.bar` 这种「更长的真实路径」不能被拆坏(review)。
+    const trailingPeriod = next === '.' && candidate.length + 1 === ref.length;
+    if (
+      !isRefBoundary(next) &&
+      !isScriptChangeBoundary(candidate, next) &&
+      !trailingPeriod
+    ) {
+      continue;
+    }
     if (matched === null || candidate.length > matched.length) matched = candidate;
   }
   return matched === null ? null : ref.slice(matched.length);

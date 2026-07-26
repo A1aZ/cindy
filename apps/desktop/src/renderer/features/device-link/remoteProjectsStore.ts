@@ -137,9 +137,18 @@ const landedSystemTitles = new Map<string, string>();
 /**
  * 已登记但尚未被权威标题确认的**合成**预览(sessionId 集合)。
  *
- * 只有它里面的会话,其下一个非默认权威标题才会被记成系统占位。这样也不依赖两端
- * 算出逐字相同的串:控制端与被控端各用**自己**的语言渲染「图片」/「文件」
- * (`ccAgent.autoTitle.image/file` 是 i18n 串),跨语种时两串本就不同。
+ * 只有它里面的会话,其权威标题被**逐字确认**时才记成系统占位。
+ *
+ * 为什么坚持逐字、不肯认「下一个非默认标题」:那样会把恰好在这个窗口里到达的
+ * **用户手动改名**也当成合成占位登记进来,之后预览就能长期顶掉用户自己起的名字,
+ * 而被控端正确地拒绝给手动命名的会话改名、不会有 patch 来纠正(review P1)。
+ * user rename wins 优先于预览的即时性。
+ *
+ * 代价(已知且刻意接受):两端 UI 语言不同、且首条消息拿不到任何文件名(粘贴截图
+ * 之类只能回落到「图片」/「文件」这类 i18n 串)时,两端算出的占位不逐字相等,归属
+ * 登记不上 —— 表现为那条会话的后续首句话没有即时预览,仍会经隧道往返正常改名。
+ * 少一次即时性,好过顶掉用户的名字。文件名 / mention 名 / 被引用会话标题都不是
+ * i18n 串,两端必然一致,常见路径不受影响。
  */
 const synthesizedPreviewSessions = new Set<string>();
 
@@ -180,20 +189,19 @@ function withPendingTitle(session: Session): Session {
   const preview = pendingTitlePreview.get(session.id);
   if (!preview) return session;
 
-  // 权威标题已经离开默认名 → 被控端对这条**合成**预览的回应到了。它写的是自己
-  // 语言的占位,未必与本端预览逐字相同,所以按登记时的归属认、不按字符串认。
-  if (synthesizedPreviewSessions.has(session.id) && session.title !== DEFAULT_REMOTE_SESSION_TITLE) {
-    synthesizedPreviewSessions.delete(session.id);
-    pendingTitlePreview.delete(session.id);
-    landedSystemTitles.set(session.id, session.title);
-    return session;
-  }
-  // 用户文字的预览被权威值原样确认 → 整个叠加层作废。**不**记系统占位:被控端的
-  // 智能标题可能就此定稿,那是终态,不能让后续预览一直盖着它。更早那条合成占位的
-  // 归属也要一并清掉 —— 留着的话,用户日后手动把标题改回那个串时会被误判成系统
-  // 占位而被预览长期顶替(权威侧正确地拒绝给手动命名的会话改名,没有 patch 来纠正)
-  // (PR #510 review P1)。
   if (session.title === preview) {
+    // 权威标题与本端预览逐字相同 → 确实是被控端对这条预览的回应(不可能是用户
+    // 手动改名"恰好"改成同一串;真撞上了也只是把它当占位,与本机路径同一取舍)。
+    if (synthesizedPreviewSessions.has(session.id)) {
+      // 合成占位:被控端之后还要把它换掉,记下归属,用户打下第一句话时还能顶替。
+      synthesizedPreviewSessions.delete(session.id);
+      pendingTitlePreview.delete(session.id);
+      landedSystemTitles.set(session.id, session.title);
+      return session;
+    }
+    // 用户文字的预览落地 → 整个叠加层作废。**不**记系统占位:被控端的智能标题
+    // 可能就此定稿,那是终态,不能让后续预览一直盖着它。更早那条合成占位的归属也
+    // 一并清掉 —— 留着的话用户日后手动把标题改回那个串会被误判成系统占位。
     dropTitleOverlay(session.id);
     return session;
   }

@@ -267,6 +267,32 @@ describe('deriveAutoTitleSeed — 用户一个字没写', () => {
     expect(seed).toEqual({ text: 'index.ts', isUserText: false });
   });
 
+  it('英文句末的 ASCII 句点也算边界(仅当它是 token 末字符)', () => {
+    const seed = deriveAutoTitleSeed(
+      queued({
+        text: '@src/index.ts.',
+        mentions: [{ type: 'file', name: 'index.ts', path: 'src/index.ts' }],
+      }),
+      LABELS,
+    );
+
+    // 剔除后只剩一个句点 → 不算用户文字,回落到合成描述。
+    expect(seed).toEqual({ text: 'index.ts', isUserText: false });
+  });
+
+  it('句点不在末尾时不算边界,`@foo` + `.bar` 这类更长路径不被切坏', () => {
+    const seed = deriveAutoTitleSeed(
+      queued({
+        text: '@src/foo.bar 看看这个',
+        mentions: [{ type: 'file', name: 'foo', path: 'src/foo' }],
+      }),
+      LABELS,
+    );
+
+    expect(seed?.isUserText).toBe(true);
+    expect(seed?.text).toBe('@src/foo.bar 看看这个');
+  });
+
   it('边界回退不切坏更长的真实路径:`@src/index.tsx` 不被当成 `@src/index.ts` + `x`', () => {
     const seed = deriveAutoTitleSeed(
       queued({

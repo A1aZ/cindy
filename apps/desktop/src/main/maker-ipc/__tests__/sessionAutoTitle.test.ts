@@ -36,6 +36,7 @@ import {
 
 beforeEach(() => {
   __resetSessionAutoTitleStateForTest();
+  registerSessionAutoTitleHooks({ isUserMessageScreeningActive: () => false });
 });
 
 function makeDeps(overrides: Partial<SessionAutoTitleDeps> = {}): SessionAutoTitleDeps {
@@ -233,6 +234,32 @@ describe('runSessionAutoTitle — 用户一个字没写(合成描述)', () => {
     expect(result).toEqual({ applied: true, done: true });
   });
 
+  it('装了 will-user-message 拦截意识时,不把用户原话送去标题模型', async () => {
+    // 拦截发生在 coordinator 的派发环节,而起名在发送瞬间就跑了 —— 一条本该被拦下
+    // 的消息仍会被送进标题模型这个外部 provider,绕开钩子存在的理由(review P1)。
+    registerSessionAutoTitleHooks({ isUserMessageScreeningActive: () => true });
+    const deps = makeDeps();
+
+    const result = await runSessionAutoTitle(
+      { sessionId: 's1', text: '我的身份证号是 xxx', agentKind: 'codex' },
+      deps,
+    );
+
+    expect(deps.generateTitle).not.toHaveBeenCalled();
+    // 原话占位是纯本地写库,照常生效 —— 标题停在 Codex 式的原话截断版。
+    expect(persistCalls(deps)).toEqual([['我的身份证号是 xxx', 'New Maker']]);
+    expect(result).toEqual({ applied: true, done: true });
+  });
+
+  it('没有拦截意识时照常调标题模型(绝大多数用户走这条)', async () => {
+    registerSessionAutoTitleHooks({ isUserMessageScreeningActive: () => false });
+    const deps = makeDeps();
+
+    await runSessionAutoTitle({ sessionId: 's1', text: '帮我排查登录失败', agentKind: 'codex' }, deps);
+
+    expect(deps.generateTitle).toHaveBeenCalled();
+  });
+
   it('用户改过名的会话:后续消息一律不再起名', async () => {
     const { setOnUserSessionTitleWritten } = await import('../../localDb/ipc/sessions.js');
     registerSessionAutoTitleHooks();
@@ -372,7 +399,15 @@ describe('runSessionAutoTitle — 资格与失败语义', () => {
   });
 
   it('两段写入全失败 → done=false,不把会话永久钉在占位上', async () => {
-    const deps = makeDeps({ persistTitle: vi.fn(async () => false) });
+    // 写真没进去 → 库里还是 New Maker(重读也这么说),不能声称已起名。
+    const deps = makeDeps({
+      persistTitle: vi.fn(async () => false),
+      resolveOverwritableTitle: vi.fn(async () => ({
+        title: 'New Maker',
+        agentKind: 'codex' as const,
+        isDefaultDraftTitle: true,
+      })),
+    });
 
     const result = await runSessionAutoTitle(
       { sessionId: 's1', text: '帮我排查登录失败', agentKind: 'codex' },
@@ -380,6 +415,52 @@ describe('runSessionAutoTitle — 资格与失败语义', () => {
     );
 
     expect(result).toEqual({ applied: false, done: false });
+  });
+
+  it('用户文字占位回执丢失时重读权威标题,智能标题按真实值覆写', async () => {
+    // UPDATE 已提交、回读那一跳失败 → 这里只看到 false。不重读的话智能标题会拿着
+    // 过期的期望值去写、必然落空,而已提交的占位从未广播,侧边栏停在 New Maker
+    // 直到下次刷新(review P1)。
+    const titles = ['New Maker', '帮我排查登录失败'];
+    const deps = makeDeps({
+      persistTitle: vi.fn(async () => true).mockRejectedValueOnce(new Error('worker restarted')),
+      resolveOverwritableTitle: vi.fn(async () => ({
+        title: titles.shift() ?? '帮我排查登录失败',
+        agentKind: 'codex' as const,
+        isDefaultDraftTitle: false,
+      })),
+    });
+
+    const result = await runSessionAutoTitle(
+      { sessionId: 's1', text: '帮我排查登录失败', agentKind: 'codex' },
+      deps,
+    );
+
+    // 智能标题的期望值取自重读到的真实标题,而不是入口那次读到的 New Maker。
+    expect(persistCalls(deps)).toEqual([
+      ['帮我排查登录失败', 'New Maker'],
+      ['登录失败排查', '帮我排查登录失败'],
+    ]);
+    expect(result).toEqual({ applied: true, done: true });
+  });
+
+  it('回执丢失后重读发现用户已改名 → 不再尝试', async () => {
+    const titles: Array<null | { title: string }> = [{ title: 'New Maker' }, null];
+    const deps = makeDeps({
+      persistTitle: vi.fn(async () => false),
+      resolveOverwritableTitle: vi.fn(async () => {
+        const next = titles.shift();
+        return next ? { ...next, agentKind: 'codex' as const, isDefaultDraftTitle: true } : null;
+      }),
+    });
+
+    const result = await runSessionAutoTitle(
+      { sessionId: 's1', text: '帮我排查登录失败', agentKind: 'codex' },
+      deps,
+    );
+
+    expect(deps.generateTitle).not.toHaveBeenCalled();
+    expect(result).toEqual({ applied: false, done: true });
   });
 
   it('纯附件输入(无文本)不起名也不写占位', async () => {

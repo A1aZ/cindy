@@ -16,7 +16,7 @@ export function useProviderOAuthDeviceCode(providerId: string | null) {
   useEffect(() => {
     setDeviceCode(null);
     if (!providerId) return undefined;
-    return window.electronAPI.maker.onProviderOAuthProgress((progress) => {
+    const unsubscribe = window.electronAPI.maker.onProviderOAuthProgress((progress) => {
       if (progress.providerId !== providerId || progress.phase !== 'device-code') return;
       setDeviceCode({
         verificationUrl: progress.verificationUrl,
@@ -24,6 +24,10 @@ export function useProviderOAuthDeviceCode(providerId: string | null) {
         expiresAt: progress.expiresAt,
       });
     });
+    return () => {
+      unsubscribe();
+      void window.electronAPI.maker.providerOAuthCancel(providerId).catch(() => undefined);
+    };
   }, [providerId]);
 
   const clearDeviceCode = useCallback(() => setDeviceCode(null), []);

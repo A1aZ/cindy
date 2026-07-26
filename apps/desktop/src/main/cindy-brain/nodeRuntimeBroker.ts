@@ -227,12 +227,12 @@ function sanitizePathsInHint(hint: string): string {
     .replace(/"((?:[A-Za-z]:[/\\]|\\\\[^"]+|\/)[^"]+)"/g, (_, p) => `"${basename(p)}"`)
     // 单引号包裹(内部允许 ")
     .replace(/'((?:[A-Za-z]:[/\\]|\\\\[^']+|\/)[^']+)'/g, (_, p) => `'${basename(p)}'`)
-    .replace(/[A-Za-z]:[/\\][^'")\]\n]*/g, basename)
-    .replace(/\\\\[^'")\]\n]*/g, basename)
+    .replace(/[A-Za-z]:[/\\][^")\]\n]*/g, basename)
+    .replace(/\\\\[^")\]\n]*/g, basename)
     // 多段 POSIX 路径;(?<![:/]) 排除 URL scheme 和连续斜杠
-    .replace(/(?<![:/])\/(?:[^/'")\]\n]+\/)+[^'")\]\n]*/g, basename)
+    .replace(/(?<![:/])\/(?:[^/")\]\n]+\/)+[^")\]\n]*/g, basename)
     // 单段 POSIX 绝对路径(/.ssh、/_private、/123mount 等)
-    .replace(/(?<![:/])\/[^\s/'")\]\n:,][^\s'")\]\n:,]*(?=[\s'")\]\n:,]|$)/g, basename);
+    .replace(/(?<![:/])\/[^\s/")\]\n:,][^\s")\]\n:,]*(?=[\s")\]\n:,]|$)/g, basename);
 }
 
 type UtilityFork = typeof utilityProcess.fork;

@@ -437,11 +437,19 @@ export function registerProviderHandlers(
   registry.handle(MAKER_INVOKE.PROVIDER_OAUTH_LOGOUT, async (_event, providerId: unknown) => {
     const id = requireProviderId(providerId);
     const generation = beginOAuthMutation(id);
+    // Invalidate and stop an active flow immediately, then serialize credential deletion with
+    // config CRUD so a failed earlier update cannot restore a token after this explicit logout.
+    deps.oauthCancel(id);
     try {
-      deps.oauthCancel(id);
-      await deps.oauthLogout(id);
-      await afterChange();
-      return { ok: true };
+      return await withProviderConfigMutation(id, async () => {
+        try {
+          await deps.oauthLogout(id);
+          await afterChange();
+          return { ok: true };
+        } catch (err) {
+          throwIpcError('INTERNAL', err instanceof Error ? err.message : String(err));
+        }
+      });
     } finally {
       finishOAuthMutation(id, generation);
     }

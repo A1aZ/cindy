@@ -539,7 +539,7 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
   /** logout 全流程的线性化点；其间新登录排队到凭证清理和解绑全部完成之后。 */
   private logoutOperation: Promise<void> | null = null;
   private loginAborted = false;
-  /** 只在 CLI 尚未成功退出时接受取消；进入凭证 finalize 后成功线性化，迟到取消不再翻转结果。 */
+  /** CLI 和凭证 finalize 都未收口时接受取消；成功结果返回后才关闭窗口。 */
   private loginCancellationOpen = false;
   /**
    * logout() 成功后回调 —— 由 maker-host 注入本地 Codex host 收割。
@@ -1044,7 +1044,10 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
       if (operation.cancelled) {
         return Promise.resolve({ authenticated: false, errorReason: 'login_cancelled' });
       }
-      return this.runTriggerLogin({ ...opts, mode, onProgress: emitProgress });
+      return this.runTriggerLogin(
+        { ...opts, mode, onProgress: emitProgress },
+        () => operation.cancelled,
+      );
     };
     const execution = waitFor
       ? waitFor.catch(() => undefined).then(start)
@@ -1059,7 +1062,10 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
     return run;
   }
 
-  private async runTriggerLogin(opts?: AuthLoginOptions): Promise<AuthState> {
+  private async runTriggerLogin(
+    opts?: AuthLoginOptions,
+    isCancelled: () => boolean = () => false,
+  ): Promise<AuthState> {
     this.ensureInvalidationMarkerLoaded();
     this.loginAborted = false;
     this.loginCancellationOpen = true;
@@ -1135,8 +1141,7 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
         // cancel 可能重复终止已退出进程，或把成功结果错误翻成 cancelled。
         if (timeout) clearTimeout(timeout);
         if (this.currentLoginProc === proc) this.currentLoginProc = null;
-        const cancelled = this.loginAborted;
-        this.loginCancellationOpen = false;
+        const cancelled = this.loginAborted || isCancelled();
         const exitState = resolveCodexLoginExitState({
           cancelled,
           timedOut,
@@ -1152,7 +1157,10 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
           : timedOut
             ? { authenticated: false, errorReason: 'login_timeout' }
             : undefined;
-        void this.finishSuccessfulCodexLogin(noOAuthFallback).then(complete, (err: unknown) => {
+        void this.finishSuccessfulCodexLogin(
+          noOAuthFallback,
+          () => this.loginAborted || isCancelled(),
+        ).then(complete, (err: unknown) => {
           complete({
             authenticated: false,
             errorReason: `login_finalize_error:${err instanceof Error ? err.message : String(err)}`,
@@ -1167,7 +1175,22 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
     });
   }
 
-  private async finishSuccessfulCodexLogin(noOAuthFallback?: AuthState): Promise<AuthState> {
+  private async finishSuccessfulCodexLogin(
+    noOAuthFallback?: AuthState,
+    isCancelled: () => boolean = () => false,
+  ): Promise<AuthState> {
+    const cancelFinalization = (): Promise<AuthState> | null => {
+      if (!isCancelled()) return null;
+      // The CLI may already have written a valid token. A late Cancel must establish the same
+      // durable disconnected boundary as logout, otherwise the next state read can resurrect it.
+      return this.disconnectCodexOAuth().then(() => ({
+        authenticated: false,
+        errorReason: 'login_cancelled',
+      }));
+    };
+    const cancelledBeforeFinalize = cancelFinalization();
+    if (cancelledBeforeFinalize) return cancelledBeforeFinalize;
+
     // 收紧 auth.json 权限 (fail-soft: 失败只打日志, 不阻塞登录成功)。
     // Win 上 chmod 0o600 在 NTFS 是 no-op,走 icacls；POSIX 用标准 0o600。
     const authPath = path.join(this.codexHome, 'auth.json');
@@ -1185,6 +1208,8 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
     // 先直接校验刚由 CLI 写入的本地文件，再改变 invalidation / reconcile 状态。否则 CLI
     // 即使 exit 0 但没产出 access_token，也会把原来的 token_invalidated 内存态提前清掉。
     const localOAuthState = requireCodexOAuthLoginState(await this.readLocalCodexAuthState());
+    const cancelledAfterLocalRead = cancelFinalization();
+    if (cancelledAfterLocalRead) return cancelledAfterLocalRead;
     if (!localOAuthState.authenticated) return noOAuthFallback ?? localOAuthState;
 
     // 系统文件仍是被判坏 / 被用户主动断开的原凭证时继续 suppress，避免覆盖新登录。
@@ -1199,11 +1224,15 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
     } else {
       await this.reconcileWithSystemCodexAfterLogin();
     }
+    const cancelledAfterReconcile = cancelFinalization();
+    if (cancelledAfterReconcile) return cancelledAfterReconcile;
     // `codex login` 的成功必须由真实 access_token 证明；绝不能被 XD Gateway fallback 冒充。
     bindNativeProviderAuth('openai');
     const state = requireCodexOAuthLoginState(
       await this.readState({ skipReconcile: true, credentialMode: 'oauth-bearer' }),
     );
+    const cancelledAfterStateRead = cancelFinalization();
+    if (cancelledAfterStateRead) return cancelledAfterStateRead;
     if (!state.authenticated) return state;
 
     // 真正拿到 OAuth 后才重启本地 codex host；失败只记日志，不翻转登录结果。
@@ -1214,12 +1243,14 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
         log.warn('onLoginSuccess threw', { error: (e as Error).message });
       }
     }
+    const cancelledAfterHostRestart = cancelFinalization();
+    if (cancelledAfterHostRestart) return cancelledAfterHostRestart;
     return state;
   }
 
   /** Codex OAuth 子进程 abort —— 用户在浏览器授权流半路反悔时调。 */
   cancelLogin(): void {
-    // 设置 abort 标志覆盖 assets prepare 阶段；CLI 成功 exit 后取消窗口已关闭。
+    // 设置 abort 标志覆盖 assets prepare、CLI 和凭证 finalize 阶段。
     if (!this.pendingLogin) return;
     this.pendingLogin.cancelled = true;
     if (!this.loginCancellationOpen) return;
@@ -1249,6 +1280,16 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
       this.cancelLogin();
       await pendingLogin.catch(() => undefined);
     }
+    await this.disconnectCodexOAuth(opts);
+  }
+
+  /**
+   * 建立 durable Codex 断开边界并清理 host/cache。
+   * 调用方负责先处理 pendingLogin；登录 finalize 自身取消时不能等待自己的 Promise。
+   */
+  private async disconnectCodexOAuth(
+    opts?: { preserveInvalidatedReason?: boolean },
+  ): Promise<void> {
     let durableDisconnectCommitted = false;
     if (!opts?.preserveInvalidatedReason) {
       const systemAuthPath = getSystemCodexAuthPath();

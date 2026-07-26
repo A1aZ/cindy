@@ -16,9 +16,40 @@
  * 本文件只放纯逻辑以便单测,Electron / 网络依赖留在 authManager(与
  * `authLoopbackCallback.ts` 已确立的分层一致)。
  */
+import crypto from 'node:crypto';
+
 import type { DesktopAuthorizationPoll } from '@cindy/auth-client';
 
 import type { AuthLoopbackResult } from './authLoopbackCallback';
+
+/**
+ * 本次尝试的两个值:走浏览器的 `client_state` 与只留在进程内的取回凭据 `pollSecret`。
+ *
+ * 为什么要拆成两个:`client_state` 会作为 authorize 的 query 参数进入系统浏览器的
+ * 地址栏与导航历史。若直接拿它当轮询取回凭据,任何能读到浏览历史的扩展或同机进程
+ * 都可以抢先调用那个未鉴权的 poll 接口、把一次性结果消费掉——授权码本身有 PKCE
+ * 兜底换不到 token,但真正的客户端会拿到 `expired`,登录被打断。
+ *
+ * 关系固定为 `client_state = base64url(sha256(pollSecret))`,服务端按同一算法从
+ * pollSecret 还原寄存 key,因此浏览器侧只看得到哈希、看不到原像。
+ */
+export interface DesktopPollCredentials {
+  /** 交给 authorize、会经过浏览器的值。 */
+  clientState: string;
+  /** 只在 main 进程内存里流转的取回凭据。 */
+  pollSecret: string;
+}
+
+/** 由 pollSecret 推导 client_state（与服务端实现必须逐字节一致）。 */
+export function deriveClientStateFromPollSecret(pollSecret: string): string {
+  return crypto.createHash('sha256').update(pollSecret, 'utf8').digest('base64url');
+}
+
+/** 为一次托管回调登录尝试生成凭据对。 */
+export function createDesktopPollCredentials(): DesktopPollCredentials {
+  const pollSecret = crypto.randomBytes(32).toString('base64url');
+  return { pollSecret, clientState: deriveClientStateFromPollSecret(pollSecret) };
+}
 
 /** 授权尚未完成时的轮询间隔(用户正在浏览器里操作,这段最需要低延迟)。 */
 export const HOSTED_CALLBACK_POLL_FAST_INTERVAL_MS = 1_000;

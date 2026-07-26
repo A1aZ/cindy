@@ -108,7 +108,9 @@ function main(): void {
     },
     notes: [
       '每份 HTML 自带 light/dark(prefers-color-scheme),不要按主题拆分。',
-      '语言选择用 authorize 请求带上的 ui_locale;缺省回落 en。',
+      // 与 docs/desktop-login-hosted-callback.md §3.4 保持一致:登录事务在 provider
+      // 回调阶段已被消费,托管回调这一步拿不到 authorize 时传的 ui_locale。
+      '语言按浏览器 Accept-Language 选择(托管回调阶段已取不到 ui_locale);缺省回落 en。',
       '模板随客户端文案变更需重新导出,不要在服务端侧手改 HTML。',
     ],
     pages,

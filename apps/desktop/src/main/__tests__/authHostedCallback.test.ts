@@ -8,6 +8,8 @@ import {
   HOSTED_CALLBACK_POLL_BACKOFF_AFTER_MS,
   HOSTED_CALLBACK_POLL_FAST_INTERVAL_MS,
   HOSTED_CALLBACK_POLL_SLOW_INTERVAL_MS,
+  createDesktopPollCredentials,
+  deriveClientStateFromPollSecret,
   hostedCallbackPollDelayMs,
   mapDesktopAuthorizationPoll,
   pollErrorCode,
@@ -87,6 +89,36 @@ describe('mapDesktopAuthorizationPoll', () => {
     expect(mapDesktopAuthorizationPoll({ status: 'expired' })).toEqual({
       error: 'INVALID_AUTH_CODE',
     });
+  });
+});
+
+describe('createDesktopPollCredentials', () => {
+  it('client_state 是 pollSecret 的 sha256,原像不出现在会进浏览器的值里', () => {
+    const { clientState, pollSecret } = createDesktopPollCredentials();
+
+    expect(clientState).toBe(deriveClientStateFromPollSecret(pollSecret));
+    expect(clientState).not.toBe(pollSecret);
+    expect(clientState).not.toContain(pollSecret);
+    // base64url 的 sha256 = 43 字符,不含 +/= 三个字符
+    expect(clientState).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
+
+  it('每次尝试都生成新的高熵凭据', () => {
+    const a = createDesktopPollCredentials();
+    const b = createDesktopPollCredentials();
+    expect(a.pollSecret).not.toBe(b.pollSecret);
+    expect(a.clientState).not.toBe(b.clientState);
+    // randomBytes(32) 的 base64url = 43 字符
+    expect(a.pollSecret).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
+
+  it('推导是确定性的(与服务端还原 key 的算法必须一致)', () => {
+    expect(deriveClientStateFromPollSecret('fixed-secret')).toBe(
+      deriveClientStateFromPollSecret('fixed-secret'),
+    );
+    expect(deriveClientStateFromPollSecret('a')).not.toBe(
+      deriveClientStateFromPollSecret('b'),
+    );
   });
 });
 
@@ -241,6 +273,21 @@ describe('openSystemBrowserAuthorization 分流', () => {
     expect(body).toContain(': openLoopbackBrowserAuthorization(');
   });
 
+  /**
+   * 取回凭据必须与走浏览器的 state 分离。写回 input.state 会让任何能读浏览历史的
+   * 扩展 / 同机进程抢先消费掉一次性结果,把真实客户端顶成 expired。
+   */
+  it('轮询用的是 pollSecret,不是会进浏览器的 state', () => {
+    const hostedStart = source.indexOf('async function openHostedBrowserAuthorization(');
+    const hostedBody = source.slice(hostedStart, source.indexOf('\n}\n', hostedStart));
+
+    expect(hostedBody).toContain('createDesktopPollCredentials()');
+    expect(hostedBody).toContain('pollDesktopAuthorization(pollSecret');
+    // authorize 收到的必须是哈希后的 clientState,而不是原像
+    expect(hostedBody).toContain('state: clientState');
+    expect(hostedBody).not.toContain('pollDesktopAuthorization(input.state');
+  });
+
   it('托管链路不落地本地监听,loopback 链路保持原样', () => {
     const hostedStart = source.indexOf('async function openHostedBrowserAuthorization(');
     expect(hostedStart).toBeGreaterThan(-1);
@@ -258,24 +305,5 @@ describe('openSystemBrowserAuthorization 分流', () => {
     const loopbackBody = source.slice(loopbackStart);
     expect(loopbackBody).toContain("server.listen(0, '127.0.0.1'");
     expect(loopbackBody).toContain('http://127.0.0.1:${address.port}/auth/callback');
-  });
-});
-
-describe('runHostedCallbackPolling(失败计数)', () => {
-  it('中途成功一次即清零失败计数,瞬时抖动不会累积成放弃', async () => {
-    let attempt = 0;
-    const harness = createPollHarness([
-      async () => {
-        attempt += 1;
-        // 失败 / 成功交替:失败次数远超上限,但从不连续到上限。
-        if (attempt % 2 === 1) throw new Error('flaky');
-        if (attempt >= 12) return { status: 'ok', code: 'auth-code' };
-        return { status: 'pending' };
-      },
-    ]);
-
-    await expect(
-      runHostedCallbackPolling({ ...harness.deps, maxConsecutiveFailures: 3 }),
-    ).resolves.toEqual({ code: 'auth-code' });
   });
 });

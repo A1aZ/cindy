@@ -38,7 +38,8 @@ Firefox 早已按规范放行，只有 Safari 没跟，而 Safari 是 macOS 默�
 ## 2. 目标链路
 
 ```
-① 客户端生成 codeVerifier(PKCE) 与 client_state(256 bit 随机，仅存在于进程内存)
+① 客户端生成 codeVerifier(PKCE) 与 pollSecret(256 bit 随机，仅存在于进程内存)，
+   client_state = base64url(sha256(pollSecret)) —— 只有哈希值会经过浏览器
 ② 打开系统浏览器 → GET <auth>/api/auth/social/<provider>/authorize
      ?redirect_uri=<托管回调地址>&code_challenge=...&client_state=...&ui_locale=...
 ③ 用户在 provider 处授权，provider 回调到 auth-server 既有的 provider 回调路由
@@ -85,8 +86,15 @@ provider 回调路由（`googleCallbackUrl()` 等）与 `callbackShared.ts` 的�
 请求体：
 
 ```jsonc
-{ "clientState": "<客户端生成的随机值>", "deviceId": "<设备 id>" }
+{ "pollSecret": "<只在客户端进程内的取回凭据>", "deviceId": "<设备 id>" }
 ```
+
+**取回凭据是 `pollSecret`,不是 `client_state`。** 两者的关系是
+`client_state = base64url(sha256(pollSecret))`:走浏览器的只有哈希值。若直接拿
+`client_state` 取回,任何能读到浏览器导航历史的扩展或同机进程都能抢先调用这个未鉴权接口
+把一次性结果消费掉——授权码本身受 PKCE 保护换不到 token,但真实客户端会拿到 `expired`,
+登录被打断。两端推导算法必须逐字节一致(客户端
+`apps/desktop/src/main/authHostedCallback.ts`,服务端 `services/desktopCallback.ts`)。
 
 响应体（HTTP 200）：
 
@@ -97,20 +105,20 @@ provider 回调路由（`googleCallbackUrl()` 等）与 `callbackShared.ts` 的�
 { "status": "expired" }                       // 暂存已过 TTL 或已被取走
 ```
 
-**关键约束：未知 `clientState` 必须返回 `pending`，不能返回 `expired` 或 4xx。**
+**关键约束：未知 `pollSecret` 必须返回 `pending`，不能返回 `expired` 或 4xx。**
 客户端从打开浏览器的那一刻就开始轮询，此时用户还没授权完，服务端多半还没有这条记录；
 这时若返回终态，第一次轮询就会把登录判死。
 
-（可选优化：若服务端在 authorize 阶段就为 `client_state` 落一条 pending 记录，则可以在
-TTL 过后如实返回 `expired`，让客户端提前失败而不必干等满 5 分钟。）
+`expired` 只用于两种确定失效的情形：结果已被取走，或授权码已过它自己的 60s TTL
+（寄存记录会带上 `codeExpiresAt`，见 §4）。
 
 其它约定：
 
 - 非 2xx 响应按现有错误格式返回（`{ "error": { "code", "message" } }` 或
   `{ "code", "message" }`），客户端会把 `code` 直接用作可展示的错误码；
-- **限流按 IP**（`rateLimitPerIp`，60s / 300 次），不按 `clientState`：后者是请求体里的
+- **限流按 IP**（`rateLimitPerIp`，60s / 300 次），不按 `pollSecret`：后者是请求体里的
   客户端可控值，仓库规则明确禁止参与限流 key。阈值放宽是因为客户端每秒轮询、单次登录
-  最多 5 分钟，还要容得下同一出口 IP 后的多个用户；防爆破由 `clientState` 的随机量承担；
+  最多 5 分钟，还要容得下同一出口 IP 后的多个用户；防爆破由 `pollSecret` 的随机量承担；
 - `deviceId` 客户端会带上，但服务端**不校验**：托管回调那一步只拿得到 code 与 state
   （登录事务在 provider 回调阶段已消费），服务端无从取得同一次尝试的 deviceId 来比对。
   保留字段只为兼容客户端现有请求体，不构成授权判断；
@@ -155,11 +163,15 @@ hash 由渲染时从模板算出，模板变了自动跟着变。
 - **PKCE 仍是兑换的唯一凭证**：`code_verifier` 只存在于 Desktop main 进程内存中，
   从不出网。单独拿到 code 换不到 token。
 - **相比现状更安全**：授权码不再出现在浏览器地址栏与浏览历史里。
-- **`client_state` 兼作取回凭据**：客户端仍用 `randomUUID()`（v4，122 bit 随机量），
-  配合服务端限流不可爆破，且只存在于进程内存。刻意没有改成更长的随机串——`client_state`
-  是两条链路共用的参数，改格式（36 → 43 字符）会同时作用于 loopback 路径，一旦服务端
-  对它有长度或 UUID 格式约束就会打断现网登录。**若服务端确认 `client_state` 没有格式
-  约束，可以另开一个小改动把它提到 256 bit。** 服务端侧请勿把它写进可被检索的日志。
+- **取回凭据与浏览器可见值分离**：托管链路用 `pollSecret`（256 bit 随机）作取回凭据，
+  只把 `base64url(sha256(pollSecret))` 当作 `client_state` 交给 authorize。浏览器地址栏与
+  导航历史里只有哈希值，读得到历史也无法抢先消费掉一次性结果。loopback 链路的 `state`
+  生成方式未改（仍是 `randomUUID()`），存量路径行为不变。服务端侧请勿把 `pollSecret`
+  写进可被检索的日志。
+- **不会交出注定失败的授权码**：授权码自身 TTL 60s，且从跳转到托管回调**之前**就开始
+  计时。寄存记录活得更久（5 分钟）是为了在码过期后返回终态 `expired`，让用户立刻看到
+  「授权已过期，请重新登录」，而不是拿一个在 `/api/auth/token` 必然撞 `INVALID_AUTH_CODE`
+  的码。
 - **仍然只有一条 wire 变化面**：token 兑换、账号选择、SSO 等其余链路完全未动。
 
 ## 5. 上线与回滚

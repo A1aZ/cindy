@@ -59,7 +59,10 @@ import {
   renderAuthLoopbackPage,
   type AuthLoopbackDevBridge,
 } from './authLoopbackCallback';
-import { runHostedCallbackPolling } from './authHostedCallback';
+import {
+  createDesktopPollCredentials,
+  runHostedCallbackPolling,
+} from './authHostedCallback';
 // dev-only 登录 scenario harness(implementation-plan Step 0 WHAT4):静态 import
 // (main 禁运行时动态 import),生产构建由 vite alias 把整模块替换为空 stub
 // (vite.main.config.ts),运行时另有 app.isPackaged guard 双保险。
@@ -509,6 +512,10 @@ function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
  *
  * 这里不起本地监听、也不渲染回调页——结果页由服务端在自有域名下托管。
  * redirect_uri 原样使用清单值(必须与服务端 allowlist 逐字符一致,不做拼接)。
+ *
+ * 注意本链路**不复用**调用方传进来的 `state`:那个值会进浏览器地址栏与导航历史,
+ * 拿它当取回凭据就能被旁观者抢先消费(见 createDesktopPollCredentials 的说明)。
+ * 这里另生成一对凭据,只把哈希后的 clientState 交给 authorize。
  */
 async function openHostedBrowserAuthorization(
   input: BrowserAuthorizationInput,
@@ -517,8 +524,9 @@ async function openHostedBrowserAuthorization(
 ): Promise<{ code: string } | { error: string }> {
   if (signal.aborted) return { error: 'USER_CANCELLED' };
 
+  const { clientState, pollSecret } = createDesktopPollCredentials();
   const client = createAuthClient();
-  const authUrl = client.buildAuthorizeUrl({ ...input, redirectUri });
+  const authUrl = client.buildAuthorizeUrl({ ...input, state: clientState, redirectUri });
   try {
     await shell.openExternal(authUrl);
   } catch (error) {
@@ -529,7 +537,7 @@ async function openHostedBrowserAuthorization(
   return runHostedCallbackPolling({
     poll: async () => {
       try {
-        return await client.pollDesktopAuthorization(input.state, { signal });
+        return await client.pollDesktopAuthorization(pollSecret, { signal });
       } catch (error) {
         // 单次失败不等于登录失败(轮询本身有连续失败预算),但静默会让线上登录
         // 问题无从排查。取消引发的中断不是故障,不记。错误对象只含固定文案与

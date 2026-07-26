@@ -188,20 +188,27 @@ export class CindyAuthClient {
    * `desktopAuthorizationPollSchema`)。调用方在系统浏览器授权期间反复轮询,
    * 拿到 `ok` 后照常走 `exchangeAuthorizationCode` 完成 PKCE 兑换。
    *
-   * `clientState` 既是 CSRF 校验值也是这里的取回凭据:必须是本次尝试新生成的
-   * 随机值(desktop 侧为 UUID v4),且只留在发起端进程内,不落盘、不进日志。
+   * **取回凭据是 `pollSecret`,不是 `client_state`。** 两者的关系是
+   * `client_state = base64url(sha256(pollSecret))`(见 `deriveDesktopClientState`):
+   * 经过系统浏览器的只有哈希值,原像只留在发起端进程内,不落盘、不进日志。
+   *
+   * 为什么必须分开:`client_state` 会作为 authorize 的 query 参数进入浏览器地址栏
+   * 与导航历史。若直接拿它当取回凭据,任何能读到浏览历史的扩展或同机进程都可以抢先
+   * 调用这个未鉴权接口把一次性结果消费掉——授权码本身受 PKCE 保护换不到 token,但
+   * 真正的客户端会拿到 `expired`,登录被打断。
    */
   pollDesktopAuthorization(
-    clientState: string,
+    pollSecret: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<DesktopAuthorizationPoll> {
     return this.request(
       "/api/auth/desktop/callback/poll",
       desktopAuthorizationPollSchema,
-      { clientState, deviceId: this.options.deviceId },
+      { pollSecret, deviceId: this.options.deviceId },
       { timeoutMs: DESKTOP_AUTHORIZATION_POLL_TIMEOUT_MS, signal: options.signal },
     );
   }
+
 
   exchangeNativeSocial(
     provider: SocialProvider,
@@ -429,71 +436,88 @@ export class CindyAuthClient {
     const forwardAbort = () => controller.abort();
     if (external?.aborted) controller.abort();
     else external?.addEventListener("abort", forwardAbort, { once: true });
-    let response: AuthFetchResponse;
+
+    // 取消转发与超时必须一直保持到**响应体读完**为止。只覆盖 fetch 那一段是不够的:
+    // 响应头已到、body 还在传输或直接卡住时,若此时已摘掉监听器并清掉超时,调用方
+    // 再点取消就断不掉这次请求,轮询会一直挂着。
     try {
-      response = await this.options.fetch(this.baseUrl + path, {
-        method: body === undefined ? "GET" : "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(requestOptions.token
-            ? { Authorization: `Bearer ${requestOptions.token}` }
-            : {}),
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        ...(timeoutMs > 0 || external ? { signal: controller.signal } : {}),
-      });
-    } catch (error) {
-      // 外部取消与超时都表现为 AbortError,按来源区分:调用方取消不是超时。
-      const aborted = error instanceof Error && error.name === "AbortError";
-      const code = !aborted
-        ? "NETWORK_ERROR"
-        : external?.aborted
-          ? "REQUEST_ABORTED"
-          : "REQUEST_TIMEOUT";
-      throw new AuthApiError(
-        code,
-        0,
-        code === "REQUEST_TIMEOUT"
-          ? "Authentication request timed out"
-          : code === "REQUEST_ABORTED"
-            ? "Authentication request was cancelled"
-            : "Authentication network request failed",
-      );
+      let response: AuthFetchResponse;
+      try {
+        response = await this.options.fetch(this.baseUrl + path, {
+          method: body === undefined ? "GET" : "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(requestOptions.token
+              ? { Authorization: `Bearer ${requestOptions.token}` }
+              : {}),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          ...(timeoutMs > 0 || external ? { signal: controller.signal } : {}),
+        });
+      } catch (error) {
+        throw this.describeTransportFailure(error, external);
+      }
+
+      let data: unknown;
+      try {
+        data = await response.json();
+      } catch (error) {
+        // body 读取同样可能因取消/超时中断,此时按传输失败归类而不是"响应非法 JSON"
+        if (error instanceof Error && error.name === "AbortError") {
+          throw this.describeTransportFailure(error, external);
+        }
+        throw new AuthApiError(
+          "INVALID_RESPONSE",
+          response.status,
+          "Authentication server returned invalid JSON",
+        );
+      }
+      if (!response.ok) {
+        const parsed = errorResponseSchema.safeParse(data);
+        const code = parsed.success
+          ? (parsed.data.error?.code ?? parsed.data.code ?? "AUTH_REQUEST_FAILED")
+          : "AUTH_REQUEST_FAILED";
+        const message = parsed.success
+          ? (parsed.data.error?.message ??
+            parsed.data.message ??
+            "Authentication request failed")
+          : "Authentication request failed";
+        throw new AuthApiError(code, response.status, message);
+      }
+      const parsed = schema.safeParse(data);
+      if (!parsed.success) {
+        throw new AuthApiError(
+          "INVALID_RESPONSE",
+          response.status,
+          "Authentication server response did not match the client contract",
+        );
+      }
+      return parsed.data;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       external?.removeEventListener("abort", forwardAbort);
     }
+  }
 
-    let data: unknown;
-    try {
-      data = await response.json();
-    } catch {
-      throw new AuthApiError(
-        "INVALID_RESPONSE",
-        response.status,
-        "Authentication server returned invalid JSON",
-      );
-    }
-    if (!response.ok) {
-      const parsed = errorResponseSchema.safeParse(data);
-      const code = parsed.success
-        ? (parsed.data.error?.code ?? parsed.data.code ?? "AUTH_REQUEST_FAILED")
-        : "AUTH_REQUEST_FAILED";
-      const message = parsed.success
-        ? (parsed.data.error?.message ??
-          parsed.data.message ??
-          "Authentication request failed")
-        : "Authentication request failed";
-      throw new AuthApiError(code, response.status, message);
-    }
-    const parsed = schema.safeParse(data);
-    if (!parsed.success) {
-      throw new AuthApiError(
-        "INVALID_RESPONSE",
-        response.status,
-        "Authentication server response did not match the client contract",
-      );
-    }
-    return parsed.data;
+  /** 传输层中断的归类:调用方取消与超时都表现为 AbortError,按来源区分。 */
+  private describeTransportFailure(
+    error: unknown,
+    external: AbortSignal | undefined,
+  ): AuthApiError {
+    const aborted = error instanceof Error && error.name === "AbortError";
+    const code = !aborted
+      ? "NETWORK_ERROR"
+      : external?.aborted
+        ? "REQUEST_ABORTED"
+        : "REQUEST_TIMEOUT";
+    return new AuthApiError(
+      code,
+      0,
+      code === "REQUEST_TIMEOUT"
+        ? "Authentication request timed out"
+        : code === "REQUEST_ABORTED"
+          ? "Authentication request was cancelled"
+          : "Authentication network request failed",
+    );
   }
 }

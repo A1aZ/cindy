@@ -140,7 +140,8 @@ function formatUpstreamBase(t: UpstreamTarget): string {
   return (
     `${t.protocol}//${t.hostname}` +
     (t.port === defaultPort ? '' : `:${t.port}`) +
-    t.basePath
+    t.basePath +
+    (t.baseQuery ? `?${t.baseQuery}` : '')
   );
 }
 

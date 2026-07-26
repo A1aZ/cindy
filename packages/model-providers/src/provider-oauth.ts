@@ -19,5 +19,5 @@ export function findReservedOAuthExtraParam(
   const reserved = flow === 'device-code'
     ? RESERVED_DEVICE_CODE_PARAMS
     : RESERVED_AUTHORIZATION_CODE_PARAMS;
-  return Object.keys(params).find((key) => reserved.has(key)) ?? null;
+  return Object.keys(params).find((key) => reserved.has(key.toLowerCase())) ?? null;
 }

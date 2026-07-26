@@ -189,7 +189,8 @@ export class CindyAuthClient {
    * 拿到 `ok` 后照常走 `exchangeAuthorizationCode` 完成 PKCE 兑换。
    *
    * **取回凭据是 `pollSecret`,不是 `client_state`。** 两者的关系是
-   * `client_state = base64url(sha256(pollSecret))`(见 `deriveDesktopClientState`):
+   * `client_state = base64url(sha256(pollSecret))`(desktop 侧实现见
+   * apps/desktop/src/main/authHostedCallback.ts 的 deriveClientStateFromPollSecret):
    * 经过系统浏览器的只有哈希值,原像只留在发起端进程内,不落盘、不进日志。
    *
    * 为什么必须分开:`client_state` 会作为 authorize 的 query 参数进入浏览器地址栏
@@ -505,17 +506,21 @@ export class CindyAuthClient {
     external: AbortSignal | undefined,
   ): AuthApiError {
     const aborted = error instanceof Error && error.name === "AbortError";
+    // 调用方主动取消复用既有的 USER_CANCELLED,而不是新造错误码:登录错误码是一份
+    // 跨端 inventory（fixtures/loginScenarios.ts、LoginPage 的具名码表、五语 i18n），
+    // 新增一个只在这里出现的码会让任何把它直接展示的调用方落到 fallback 文案。
+    // USER_CANCELLED 语义完全吻合,且 renderer 已特意把它映射成「不展示错误」。
     const code = !aborted
       ? "NETWORK_ERROR"
       : external?.aborted
-        ? "REQUEST_ABORTED"
+        ? "USER_CANCELLED"
         : "REQUEST_TIMEOUT";
     return new AuthApiError(
       code,
       0,
       code === "REQUEST_TIMEOUT"
         ? "Authentication request timed out"
-        : code === "REQUEST_ABORTED"
+        : code === "USER_CANCELLED"
           ? "Authentication request was cancelled"
           : "Authentication network request failed",
     );

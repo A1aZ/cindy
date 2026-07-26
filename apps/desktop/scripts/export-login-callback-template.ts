@@ -16,6 +16,7 @@
  *   pnpm --filter desktop run export:login-callback-template [-- --out <dir>]
  * 默认输出到 apps/desktop/dist/login-callback-template(dist 已 gitignore)。
  */
+import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -60,6 +61,8 @@ interface ExportedPage {
   htmlLang: string;
   variant: 'success' | 'error';
   file: string;
+  /** 该页内联脚本的 CSP sha256（含引号），供服务端直接拼进 script-src。 */
+  scriptHashes: string[];
 }
 
 function renderPage(
@@ -78,6 +81,32 @@ function renderPage(
   });
 }
 
+/**
+ * 算出页面内联脚本的 CSP sha256（含引号，可直接拼进 script-src）。
+ *
+ * 由**生成方**计算并写进 manifest,消费方(auth-server)直接读取即可,不必再用正则去
+ * 解析 HTML——那既容易与 HTML 解析器的真实行为出入,也会被 CodeQL 的
+ * js/bad-tag-filter 判为「不完整的标签过滤」。这里的边界是我们自己拼出来的,
+ * 与 renderBrandLoginCallbackPage 的模板结构一一对应。
+ */
+function scriptHashesOf(html: string): string[] {
+  const hashes = new Set<string>();
+  const OPEN = '<script>';
+  const CLOSE = '</script>';
+  let cursor = 0;
+  for (;;) {
+    const start = html.indexOf(OPEN, cursor);
+    if (start === -1) break;
+    const bodyStart = start + OPEN.length;
+    const end = html.indexOf(CLOSE, bodyStart);
+    if (end === -1) break;
+    const body = html.slice(bodyStart, end);
+    hashes.add(`'sha256-${createHash('sha256').update(body, 'utf8').digest('base64')}'`);
+    cursor = end + CLOSE.length;
+  }
+  return [...hashes];
+}
+
 function main(): void {
   const outDir = parseOutDir(process.argv.slice(2));
   const pages: ExportedPage[] = [];
@@ -86,13 +115,15 @@ function main(): void {
     mkdirSync(path.join(outDir, lang), { recursive: true });
     for (const variant of ['success', 'error'] as const) {
       const file = path.join(lang, `${variant}.html`);
-      writeFileSync(path.join(outDir, file), renderPage(lang, variant), 'utf8');
+      const html = renderPage(lang, variant);
+      writeFileSync(path.join(outDir, file), html, 'utf8');
       pages.push({
         lang,
         htmlLang: OAUTH_RESULT_HTML_LANG[lang],
         variant,
         // manifest 里统一用 POSIX 分隔符,免得 Windows 导出的清单在服务端对不上。
         file: file.split(path.sep).join('/'),
+        scriptHashes: scriptHashesOf(html),
       });
     }
   }
@@ -112,6 +143,7 @@ function main(): void {
       // 回调阶段已被消费,托管回调这一步拿不到 authorize 时传的 ui_locale。
       '语言按浏览器 Accept-Language 选择(托管回调阶段已取不到 ui_locale);缺省回落 en。',
       '模板随客户端文案变更需重新导出,不要在服务端侧手改 HTML。',
+      'pages[].scriptHashes 直接拼进结果页的 CSP script-src;该内联脚本是布局必需的(整卡等比缩放+水平居中),不要改成 unsafe-inline,也不要自行解析 HTML 重算。',
     ],
     pages,
   };

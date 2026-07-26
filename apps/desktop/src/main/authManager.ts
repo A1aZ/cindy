@@ -496,14 +496,20 @@ interface BrowserAuthorizationInput {
 function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.resolve();
   return new Promise((resolve) => {
-    // finish 只可能在 setTimeout 返回之后被调用(最早下一个 tick),此时 timer 已绑定。
+    // finish 幂等:abort 与 timeout 都可能触发它,重复 resolve 无副作用但仍显式挡掉。
+    let settled = false;
     const finish = () => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       signal.removeEventListener('abort', finish);
       resolve();
     };
     const timer = setTimeout(finish, ms);
     signal.addEventListener('abort', finish, { once: true });
+    // 注册后再查一次。当前 executor 全程同步、abort 插不进来,但这层防御让「将来有人
+    // 在中间加了 await」不会静默退化成「取消要等满一个轮询间隔」。
+    if (signal.aborted) finish();
   });
 }
 

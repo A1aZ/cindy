@@ -149,9 +149,14 @@ loopback 与 mobile 共用的回调路径。两者不一致（如 app 设日语�
 结果页的文案，不影响登录本身，故选择不动共用路径。缺省回落 `en`。
 
 **CSP 与内联脚本**：模板里有一段**布局必需**的内联脚本（整卡等比缩放 + 水平居中）。
-服务端按脚本内容算 sha256 放行（`script-src 'sha256-…'`），而不是放 `'unsafe-inline'`；
-hash 由渲染时从模板算出，模板变了自动跟着变。
-这条不是可选项：早期版本用 `default-src 'none'` 把脚本一并禁掉，结果卡片贴左不缩放、
+CSP 用 `script-src 'sha256-…'` 精确放行它，而不是放 `'unsafe-inline'`。
+
+**hash 由导出方算好写进 `manifest.json` 的 `pages[].scriptHashes`，服务端直接读取拼进
+CSP，不解析 HTML。** 边界由拼出 HTML 的那一方掌握最可靠；早先服务端用正则去抠 script
+标签，既容易与浏览器真实的 HTML 解析行为出入（结束标签的空白与垃圾属性等变体），也会被
+CodeQL 的 `js/bad-tag-filter` 判为不完整的标签过滤。
+
+这条不是可选项：更早的版本用 `default-src 'none'` 把脚本一并禁掉，结果卡片贴左不缩放、
 窄窗口会把 CTA 裁出视口——**HTTP 层完全看不出异常，只有真的截图才发现**。模板里另有
 `<img onerror>` 内联事件（hash 模式管不到），有意继续拦截：立绘是 data URI 不会加载失败，
 那段降级本就是冗余保险。

@@ -102,8 +102,18 @@ function validateOAuthDescriptor(p: Provider): void {
   requireHttpsUrl('tokenUrl');
   if (flow === 'authorization-code') {
     requireHttpsUrl('authorizeUrl');
+    assert(
+      raw.deviceAuthorizationUrl === undefined && raw.extraDeviceParams === undefined,
+      `provider '${p.id}' auth.oauth device-code fields not allowed for authorization-code`,
+    );
   } else {
     requireHttpsUrl('deviceAuthorizationUrl');
+    assert(
+      raw.authorizeUrl === undefined
+        && raw.extraAuthParams === undefined
+        && raw.redirectPort === undefined,
+      `provider '${p.id}' auth.oauth authorization-code fields not allowed for device-code`,
+    );
   }
   if (raw.redirectPort !== undefined) {
     assert(
@@ -181,6 +191,20 @@ function validateProvider(p: Provider): void {
   for (const agent of p.agents) {
     const routing = p.routing[agent];
     assert(routing, `provider '${p.id}' declares agent '${agent}' but no routing[${agent}]`);
+    if (routing.upstream !== undefined) {
+      let valid = false;
+      try {
+        const url = new URL(routing.upstream);
+        valid = (
+          (url.protocol === 'http:' || url.protocol === 'https:')
+          && !url.username
+          && !url.password
+        );
+      } catch {
+        valid = false;
+      }
+      assert(valid, `provider '${p.id}' routing[${agent}].upstream invalid`);
+    }
     if (routing.wireProtocol !== undefined) {
       assert(
         isWireProtocol(routing.wireProtocol),

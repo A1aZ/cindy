@@ -186,7 +186,12 @@ export function buildRouteDecision(
     case 'api-key-header': {
       // 自定义供应商：上游改到 baseUrl，用用户自己的 api key 覆盖鉴权头，叠加用户自定义 headers。
       // key 来自 resolve 时注入的 apiKey（不在 catalog 里）。
-      const headerOverride = withoutClientAuthHeaders(routing.headerOverride);
+      // 新版凭证由 safeStorage 注入；旧版曾把 API key 直接存进 headerOverride。没有迁移到
+      // safeStorage 的 key 时保留旧头，避免升级后所有 legacy 自定义供应商静默掉鉴权。
+      // 一旦存在安全存储 key，仍先剥掉旧头再覆盖，防旧凭证与新凭证并存。
+      const headerOverride = apiKey
+        ? withoutClientAuthHeaders(routing.headerOverride)
+        : { ...(routing.headerOverride ?? {}) };
       if (apiKey) {
         if (agent === 'claude-code') {
           // cc 子进程在 oauth-spawn 下会带订阅的 `authorization: Bearer <Claude token>`——必须连它一起

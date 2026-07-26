@@ -267,7 +267,7 @@ describe('登录流与凭证落盘失败', () => {
         phase: 'device-code',
         verificationUrl: 'https://auth.acme.example/device?user_code=ABCD-EFGH',
         userCode: 'ABCD-EFGH',
-        expiresAt: nowMs + 5 * 60_000,
+        expiresAt: nowMs + 10 * 60_000,
       },
     ]);
     expect(waits).toEqual([1_000, 1_000, 6_000]);

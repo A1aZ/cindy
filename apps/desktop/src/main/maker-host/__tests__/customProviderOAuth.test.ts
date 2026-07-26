@@ -103,6 +103,25 @@ describe('validateCustomProviderConfig auth 段', () => {
     ).toBe(false);
   });
 
+  it('拒绝与 OAuth flow 不兼容的字段和带 userinfo 的上游地址', () => {
+    const bad = (oauth: object) =>
+      validateCustomProviderConfig({ ...BASE, auth: { method: 'oauth', oauth } });
+    expect(bad({ ...OAUTH, deviceAuthorizationUrl: DEVICE_OAUTH.deviceAuthorizationUrl }).ok)
+      .toBe(false);
+    expect(bad({ ...DEVICE_OAUTH, authorizeUrl: OAUTH.authorizeUrl }).ok).toBe(false);
+    expect(
+      validateCustomProviderConfig({
+        ...BASE,
+        runtimes: {
+          'claude-code': {
+            ...BASE.runtimes['claude-code']!,
+            baseUrl: 'https://user:pass@api.acme.example/anthropic',
+          },
+        },
+      }).ok,
+    ).toBe(false);
+  });
+
   it('OAuth 形态模型可留空（授权后自动发现填充，用户免手填）', () => {
     const noModels = {
       ...BASE,

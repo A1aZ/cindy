@@ -343,7 +343,6 @@ describe('utility one-shot candidates', () => {
       ok: true,
       text: async () => 'data: {"type":"response.output_text.delta","delta":"ok"}\ndata: [DONE]\n',
     } as never);
-
     const result = await requestUtilityText(makerMock(false), 'generate', {
       providerId: 'exact-path',
       agentKind: 'codex',
@@ -362,7 +361,7 @@ describe('utility one-shot candidates', () => {
     );
   });
 
-  it('keeps base URL userinfo/query when applying an exact provider request path', async () => {
+  it('rejects base URL userinfo when applying an exact provider request path', async () => {
     activeCatalog.mockReturnValue({
       providers: [{
         id: 'exact-path-query',
@@ -382,10 +381,6 @@ describe('utility one-shot candidates', () => {
         },
       }],
     } as never);
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      text: async () => 'data: {"type":"response.output_text.delta","delta":"ok"}\ndata: [DONE]\n',
-    } as never);
 
     const result = await requestUtilityText(makerMock(false), 'generate', {
       providerId: 'exact-path-query',
@@ -393,10 +388,57 @@ describe('utility one-shot candidates', () => {
       model: 'local-model',
     });
 
-    expect(result).toMatchObject({ ok: true, providerId: 'exact-path-query' });
+    expect(result).toMatchObject({
+      ok: false,
+      attempts: [expect.objectContaining({ providerId: 'exact-path-query', reason: 'request_failed' })],
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('uses a legacy header-only custom-provider credential when safeStorage is empty', async () => {
+    activeCatalog.mockReturnValue({
+      providers: [{
+        id: 'legacy-header',
+        name: 'Legacy Header',
+        source: 'user',
+        agents: ['codex'],
+        auth: { method: 'apiKey' },
+        routing: {
+          codex: {
+            upstream: 'https://custom.example/v1',
+            authStrategy: 'api-key-header',
+            headerOverride: {
+              Authorization: 'Bearer legacy-secret',
+              'X-Tenant': 'tenant-a',
+            },
+          },
+        },
+        models: {
+          codex: [{ id: 'legacy-mini', name: 'Legacy Mini', contextWindow: 100_000 }],
+        },
+      }],
+    } as never);
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      text: async () =>
+        'data: {"type":"response.output_text.delta","delta":"ok"}\ndata: [DONE]\n',
+    } as never);
+
+    const result = await requestUtilityText(makerMock(false), 'generate', {
+      providerId: 'legacy-header',
+      agentKind: 'codex',
+      model: 'legacy-mini',
+    });
+
+    expect(result).toMatchObject({ ok: true, providerId: 'legacy-header' });
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://user:pass@custom.example/api/infer?tenant=alpha&stream=1&mode=fast',
-      expect.anything(),
+      'https://custom.example/v1/responses',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer legacy-secret',
+          'X-Tenant': 'tenant-a',
+        }),
+      }),
     );
   });
 

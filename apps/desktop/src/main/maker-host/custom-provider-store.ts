@@ -53,7 +53,11 @@ function validateRuntime(agent: string, rt: unknown): ValidationResult {
   }
   try {
     const u = new URL(r.baseUrl);
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    if (
+      (u.protocol !== 'http:' && u.protocol !== 'https:')
+      || u.username
+      || u.password
+    ) {
       return invalid(`runtime '${agent}' baseUrl must be http(s)`);
     }
   } catch {
@@ -140,6 +144,22 @@ function validateAuthSection(auth: unknown): ValidationResult {
   const flow = o.flow ?? 'authorization-code';
   if (flow !== 'authorization-code' && flow !== 'device-code') {
     return invalid("auth.oauth.flow must be 'authorization-code' | 'device-code'");
+  }
+  if (
+    flow === 'authorization-code'
+    && (o.deviceAuthorizationUrl !== undefined || o.extraDeviceParams !== undefined)
+  ) {
+    return invalid('auth.oauth device-code fields not allowed for authorization-code');
+  }
+  if (
+    flow === 'device-code'
+    && (
+      o.authorizeUrl !== undefined
+      || o.extraAuthParams !== undefined
+      || o.redirectPort !== undefined
+    )
+  ) {
+    return invalid('auth.oauth authorization-code fields not allowed for device-code');
   }
   for (const field of ['tokenUrl', 'clientId', 'scopes'] as const) {
     if (typeof o[field] !== 'string' || (o[field] as string).trim().length === 0) {

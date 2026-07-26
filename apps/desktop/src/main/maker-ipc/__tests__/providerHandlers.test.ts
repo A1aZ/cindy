@@ -570,6 +570,20 @@ describe('provider:oauth mutation ordering', () => {
     expect(calls).toEqual(['cancel', 'logout']);
   });
 
+  it('encodes credential deletion failures as an IPC INTERNAL error', async () => {
+    const harness = new IpcHarness();
+    registerProviderHandlers(
+      harness,
+      makeDeps({
+        oauthLogout: vi.fn().mockRejectedValue(new Error('safe storage deletion failed')),
+      }),
+    );
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_OAUTH_LOGOUT, 'openrouter'),
+    ).rejects.toMatchObject({ code: 'INTERNAL' });
+  });
+
   it('invalidates post-login work when the provider is edited before discovery finishes', async () => {
     mountDb();
     const harness = new IpcHarness();
@@ -668,6 +682,37 @@ describe('provider:oauth mutation ordering', () => {
       harness.invoke(MAKER_INVOKE.PROVIDER_OAUTH_LOGIN, oauthConfig.id),
     ).resolves.toEqual({ ok: true });
     expect(oauthLogin).toHaveBeenCalledOnce();
+  });
+
+  it('serializes explicit logout behind an in-flight provider update', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    let finishRefresh!: () => void;
+    const blockedRefresh = new Promise<void>((resolve) => {
+      finishRefresh = resolve;
+    });
+    const refreshCatalog = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockReturnValueOnce(blockedRefresh)
+      .mockResolvedValueOnce(undefined);
+    const oauthLogout = vi.fn().mockResolvedValue(undefined);
+    registerProviderHandlers(harness, makeDeps({ refreshCatalog, oauthLogout }));
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, validConfig);
+
+    const update = harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+      ...validConfig,
+      name: 'Update before logout',
+    });
+    await vi.waitFor(() => expect(refreshCatalog).toHaveBeenCalledTimes(2));
+
+    const logout = harness.invoke(MAKER_INVOKE.PROVIDER_OAUTH_LOGOUT, validConfig.id);
+    await Promise.resolve();
+    expect(oauthLogout).not.toHaveBeenCalled();
+
+    finishRefresh();
+    await expect(update).resolves.toEqual({ ok: true });
+    await expect(logout).resolves.toEqual({ ok: true });
+    expect(oauthLogout).toHaveBeenCalledOnce();
   });
 
   it('cleans mutation entries without reviving an older login generation', async () => {

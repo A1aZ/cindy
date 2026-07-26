@@ -15,6 +15,54 @@ vi.mock('electron', () => ({
 vi.mock('@cindy/maker-core', () => ({}));
 
 describe('DesktopCodexAuthAdapter login single-flight', () => {
+  it('rolls back credentials when Cancel arrives during successful-login finalization', async () => {
+    const { DesktopCodexAuthAdapter } = await import('../auth-adapters.js');
+    const adapter = Object.create(DesktopCodexAuthAdapter.prototype) as InstanceType<
+      typeof DesktopCodexAuthAdapter
+    >;
+    let finishLocalRead!: (state: AuthState) => void;
+    const readLocalCodexAuthState = vi.fn(() => new Promise<AuthState>((resolve) => {
+      finishLocalRead = resolve;
+    }));
+    const disconnectCodexOAuth = vi.fn().mockResolvedValue(undefined);
+    const pending = {
+      mode: 'browser' as const,
+      promise: Promise.resolve({ authenticated: false }),
+      progressListeners: new Set(),
+      progressHistory: [],
+      progressHistoryChars: 0,
+      cancelled: false,
+    };
+    Object.defineProperties(adapter, {
+      codexHome: { configurable: true, value: h.userDataDir },
+      readLocalCodexAuthState: { configurable: true, value: readLocalCodexAuthState },
+      disconnectCodexOAuth: { configurable: true, value: disconnectCodexOAuth },
+      pendingLogin: { configurable: true, writable: true, value: pending },
+      loginCancellationOpen: { configurable: true, writable: true, value: true },
+      loginAborted: { configurable: true, writable: true, value: false },
+      currentLoginProc: { configurable: true, writable: true, value: null },
+    });
+    const finishSuccessfulCodexLogin = (
+      adapter as unknown as {
+        finishSuccessfulCodexLogin(
+          fallback: AuthState | undefined,
+          isCancelled: () => boolean,
+        ): Promise<AuthState>;
+      }
+    ).finishSuccessfulCodexLogin.bind(adapter);
+
+    const result = finishSuccessfulCodexLogin(undefined, () => pending.cancelled);
+    await vi.waitFor(() => expect(readLocalCodexAuthState).toHaveBeenCalledOnce());
+    adapter.cancelLogin();
+    finishLocalRead({ authenticated: true, authSource: 'oauth' });
+
+    await expect(result).resolves.toEqual({
+      authenticated: false,
+      errorReason: 'login_cancelled',
+    });
+    expect(disconnectCodexOAuth).toHaveBeenCalledOnce();
+  });
+
   it('coalesces the same mode but cancels and serializes a different mode', async () => {
     const { DesktopCodexAuthAdapter } = await import('../auth-adapters.js');
     const adapter = Object.create(DesktopCodexAuthAdapter.prototype) as InstanceType<
@@ -62,10 +110,14 @@ describe('DesktopCodexAuthAdapter login single-flight', () => {
       authenticated: true,
       authSource: 'oauth',
     });
-    expect(runTriggerLogin).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      mode: 'device-code',
-      onProgress: expect.any(Function),
-    }));
+    expect(runTriggerLogin).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        mode: 'device-code',
+        onProgress: expect.any(Function),
+      }),
+      expect.any(Function),
+    );
   });
 
   it('lets a later logout-style cancellation cancel a queued mode switch before it starts', async () => {

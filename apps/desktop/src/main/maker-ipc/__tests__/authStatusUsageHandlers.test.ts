@@ -244,6 +244,45 @@ describe('maker auth IPC handlers', () => {
     });
   });
 
+  it('invalidates post-login refresh work when Cancel arrives during finalization', async () => {
+    const harness = new IpcHarness();
+    const broadcast = vi.fn();
+    const cancelAgentLogin = vi.fn();
+    let finishRefresh!: (value: boolean) => void;
+    const refreshAgentLocalModels = vi.fn(() => new Promise<boolean>((resolve) => {
+      finishRefresh = resolve;
+    }));
+    const triggerAgentLogin = vi.fn().mockResolvedValue({
+      authenticated: true,
+      authSource: 'oauth',
+    });
+    const onCodexAuthChange = vi.fn().mockResolvedValue(undefined);
+
+    registerMakerAuthHandlers(
+      harness,
+      createMakerStub({ triggerAgentLogin, refreshAgentLocalModels, cancelAgentLogin }),
+      broadcast,
+      () => null,
+      onCodexAuthChange,
+    );
+
+    const login = harness.invoke(MAKER_INVOKE.AUTH_TRIGGER_LOGIN, 'codex');
+    await vi.waitFor(() => expect(refreshAgentLocalModels).toHaveBeenCalledOnce());
+    await harness.invoke(MAKER_INVOKE.AUTH_CANCEL_LOGIN, 'codex');
+    finishRefresh(true);
+
+    await expect(login).resolves.toEqual({
+      authenticated: false,
+      errorReason: 'auth_mutation_superseded',
+    });
+    expect(cancelAgentLogin).toHaveBeenCalledWith('codex');
+    expect(onCodexAuthChange).not.toHaveBeenCalled();
+    expect(broadcast).not.toHaveBeenCalledWith(
+      MAKER_PUSH.AUTH_STATE_CHANGED,
+      expect.objectContaining({ authenticated: true }),
+    );
+  });
+
   it('does not refresh Codex models when login fails', async () => {
     const harness = new IpcHarness();
     const broadcast = vi.fn();
@@ -377,6 +416,41 @@ describe('maker auth IPC handlers', () => {
       authenticated: false,
       errorReason: 'login_cancelled',
     });
+    expect(triggerAgentLogin).toHaveBeenCalledOnce();
+  });
+
+  it('waits for a later logout that supersedes the finalization already being awaited', async () => {
+    const harness = new IpcHarness();
+    const logoutResolvers: Array<() => void> = [];
+    const logoutAgent = vi.fn(() => new Promise<void>((resolve) => {
+      logoutResolvers.push(resolve);
+    }));
+    const triggerAgentLogin = vi.fn().mockResolvedValue({
+      authenticated: false,
+      errorReason: 'login_cancelled',
+    });
+
+    registerMakerAuthHandlers(
+      harness,
+      createMakerStub({ logoutAgent, triggerAgentLogin }),
+      vi.fn(),
+      () => null,
+      vi.fn().mockResolvedValue(undefined),
+    );
+
+    const firstLogout = harness.invoke(MAKER_INVOKE.AUTH_LOGOUT, 'codex');
+    await vi.waitFor(() => expect(logoutAgent).toHaveBeenCalledTimes(1));
+    const login = harness.invoke(MAKER_INVOKE.AUTH_TRIGGER_LOGIN, 'codex');
+    const secondLogout = harness.invoke(MAKER_INVOKE.AUTH_LOGOUT, 'codex');
+    await vi.waitFor(() => expect(logoutAgent).toHaveBeenCalledTimes(2));
+
+    logoutResolvers[0]();
+    await Promise.resolve();
+    expect(triggerAgentLogin).not.toHaveBeenCalled();
+
+    logoutResolvers[1]();
+    await expect(Promise.all([firstLogout, secondLogout])).resolves.toEqual([undefined, undefined]);
+    await expect(login).resolves.toMatchObject({ errorReason: 'login_cancelled' });
     expect(triggerAgentLogin).toHaveBeenCalledOnce();
   });
 

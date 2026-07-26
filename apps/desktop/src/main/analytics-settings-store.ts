@@ -125,7 +125,7 @@ const DEV_REPORTING_ENV = 'XDT_TAPDB_DEV';
 let buildGateLogged = false;
 
 /**
- * 构建 flavor 闸:只有 packaged 构建才允许上报。
+ * 构建 flavor 闸:默认只有 packaged 构建允许上报,dev 可通过 XDT_TAPDB_DEV=1 手动放行。
  *
  * 为什么必须有这道闸:TapDB Web SDK 的设备身份(device_id)写在 renderer 的
  * localStorage 里,而 localStorage 按 **origin + userData 目录** 分家 ——

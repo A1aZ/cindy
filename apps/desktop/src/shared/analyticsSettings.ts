@@ -14,8 +14,9 @@ export interface AnalyticsSettingsPayload {
   analyticsEnabledCustomized: boolean;
   /**
    * 是否允许初始化 TapDB / 继续上报
-   * = 正式构建 && privacyConsentAccepted && analyticsEnabled。
-   * 构建闸的理由见 main/analytics-settings-store.ts 的 isReportingBuild。
+   * = isReportingBuild() && privacyConsentAccepted && analyticsEnabled。
+   * isReportingBuild = packaged 构建,或 dev 下显式 XDT_TAPDB_DEV=1。
+   * 构建闸的理由见 main/analytics-settings-store.ts。
    */
   allowed: boolean;
 }

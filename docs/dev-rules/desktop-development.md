@@ -65,9 +65,9 @@ Agent 自身仍只走 restart 命令，不直接调 human-only 的 `dev:desktop*
 
 ### 使用统计（TapDB）在 dev 下不上报
 
-dev 构建**一律不初始化 TapDB**，与用户是否同意《隐私政策》、统计开关是否打开无关。闸在
+dev 构建**默认不初始化 TapDB**，与用户是否同意《隐私政策》、统计开关是否打开无关。闸在
 main 侧 `analytics-settings-store.ts` 的 `isReportingBuild()`（`app.isPackaged !== true`
-即关），renderer 只消费 `allowed` 这个结论。
+默认关），renderer 只消费 `allowed` 这个结论。
 
 原因：TapDB Web SDK 的设备身份（`device_id`）写在 renderer 的 localStorage 里，而
 localStorage 按 **origin + userData 目录** 分家——dev 的 renderer 从

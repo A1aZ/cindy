@@ -292,6 +292,19 @@ describe('父层 — 行级 handler 的引用稳定性', () => {
     }
   });
 
+  it('handleSessionClick 的 deps 不得含每次点击/切换都变的选择态', () => {
+    // 这三个只在点击那一刻读,却会被 setSelectionAnchorSessionId(每次点击必调)
+    // 和路由切换带着变 —— 留在 deps 里等于每切换一次就整表重画一遍。
+    const source = readFileSync(
+      resolve(__dirname, '..', '..', 'CCAgentSidebarUpper.tsx'),
+      'utf8',
+    );
+    const deps = useCallbackDeps(source, 'handleSessionClick');
+    expect(deps).not.toMatch(/\bactiveSessionId\b/);
+    expect(deps).not.toMatch(/\bselectedSessionIds\b/);
+    expect(deps).not.toMatch(/\bselectionAnchorSessionId\b/);
+  });
+
   it('runningSessionIds 必须 memo 化(否则每渲染 new Set 打穿整表)', () => {
     const source = readFileSync(
       resolve(__dirname, '..', '..', '..', '..', 'hooks', 'useSessionRunningStatus.ts'),

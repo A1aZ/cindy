@@ -1251,6 +1251,16 @@ function ExpandedView({
 
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(() => new Set());
   const [selectionAnchorSessionId, setSelectionAnchorSessionId] = useState<string | null>(null);
+  // 这三个值 handleSessionClick 只在「点击那一刻」读一次。留在它的 deps 里会让
+  // 每次点击(:setSelectionAnchorSessionId 必触发)和每次切换都重建 handler,
+  // 行的 onClick 跟着换引用 → 整表 memo 失效重画一遍(SessionItem.tsx 不变量 #3)。
+  // 经 ref 读还顺带避开闭包陈旧:拿到的是最新值而非渲染时快照。
+  const activeSessionIdRef = useRef(activeSessionId);
+  activeSessionIdRef.current = activeSessionId;
+  const selectedSessionIdsRef = useRef(selectedSessionIds);
+  selectedSessionIdsRef.current = selectedSessionIds;
+  const selectionAnchorSessionIdRef = useRef(selectionAnchorSessionId);
+  selectionAnchorSessionIdRef.current = selectionAnchorSessionId;
   const [bulkActionPending, setBulkActionPending] = useState<BulkSessionAction | null>(null);
   const sidebarScrollRef = useRef<HTMLDivElement>(null);
   // 含远程会话:device-link 远程行也渲染在可选行里,bulk 选择/归档/删除必须能解析到它们
@@ -1385,10 +1395,9 @@ function ExpandedView({
         if (modifiers?.shiftKey) {
           const visibleIds = getVisibleSidebarSessionIds(sidebarScrollRef.current);
           const visibleIdSet = new Set(visibleIds);
+          const anchorSessionId = selectionAnchorSessionIdRef.current;
           const anchor =
-            selectionAnchorSessionId && visibleIds.includes(selectionAnchorSessionId)
-              ? selectionAnchorSessionId
-              : id;
+            anchorSessionId && visibleIds.includes(anchorSessionId) ? anchorSessionId : id;
           const anchorIndex = visibleIds.indexOf(anchor);
           const targetIndex = visibleIds.indexOf(id);
           const rangeIds =
@@ -1422,7 +1431,7 @@ function ExpandedView({
         return;
       }
 
-      if (selectedSessionIds.size > 0) {
+      if (selectedSessionIdsRef.current.size > 0) {
         setSelectedSessionIds(new Set());
       }
       setSelectionAnchorSessionId(id);
@@ -1430,19 +1439,15 @@ function ExpandedView({
       clearNotification(id);
       markAutomationSessionRunsRead(id);
       clearSystemSessionAttention(id);
-      if (id === activeSessionId) return; // No duplicate navigate.
+      if (id === activeSessionIdRef.current) return; // No duplicate navigate.
       if (import.meta.env.DEV) perfLog.debug(`sidebar:click sid=${id}`); // 纯诊断,生产剔除
       const target = sessionsRef.current.find((s) => s.id === id);
       navigate(await resolveSessionRoute(id, target));
     },
-    [
-      activeSessionId,
-      navigate,
-      clearNotification,
-      markAutomationSessionRunsRead,
-      selectedSessionIds.size,
-      selectionAnchorSessionId,
-    ],
+    // deps 只剩三个天然稳定的引用:navigate(router)、clearNotification(空 deps
+    // useCallback)、markAutomationSessionRunsRead(随 scheduleSessionIndex,仅
+    // schedule 真变时换)。至此 onClick 在运行期与切换时都不再换引用。
+    [navigate, clearNotification, markAutomationSessionRunsRead],
   );
 
   /* ---- Project 行内的 + 按钮：对标顶部 "+ New"——预填该 project 的 workingDir 后进 draft 路由 ----

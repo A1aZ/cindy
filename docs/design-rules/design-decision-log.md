@@ -12,6 +12,26 @@
 
 ## 2026-07
 
+- **07-26** 外部主题导入(VSCode / Obsidian)落地,同批引入 Markdown 文字色 token。
+  两条关键决策:
+  ① **转换模板不新设计,取自已有的人工移植成果**。`themes/builtin/` 下 7 个从
+  VSCode 移植的社区主题,`colors` 的 key 集合逐字相同(91 个 token = 35 个 Tier1
+  slot + 56 个 alias/singleton),值全部由同一组 13 个色板角色派生;
+  `shared/theme-import/palette.ts` 就是那套派生规则的代码化,并以这些主题自身做
+  golden 对照(喂入其手写色板常量应重现其 colors)。选 allow-list(只产出这 91 个
+  key)而非"先大量产出再过滤",因为这 7 个主题本来就没碰豁免族,照抄 key 列表即
+  自动守住 §10/§16 边界。
+  ② **`--md-h1-fg`…`--md-h6-fg` / `--md-strong-fg` 默认值定为 `inherit`,不是
+  `var(--text-primary)`**。这些元素在引入 token 前的颜色就是继承来的
+  (`baseComponents` 只给字号字重);若默认接主文字槽,blockquote / tool card /
+  secondary 文字区里的标题与加粗会由弱化色变回主色 —— 那是实打实的观感回退。
+  `inherit` 让全部内置主题渲染结果不变,同时给导入主题(Obsidian `--hN-color` /
+  VSCode `markup.heading`)留出可覆盖槽位。守卫见
+  `themes/__tests__/markdownColorTokens.test.ts`。
+  连带扩展:本地主题 JSON 新增可选 `family` 字段,让 Obsidian 双态 CSS 的两个产物
+  合成一个可跟随 Light/Dark 的家族;无该字段的老主题家族 id 与行为逐字不变。
+  已知取舍:Obsidian 侧是**调色板导入**(只取 CSS 变量,布局/圆角/字体一律丢弃,
+  `color-mix()` 等动态值跳过并计入报告),还原度低于 VSCode 侧,UI 文案如实说明。
 - **07-25(梳理批次 2)** `DESIGN.md §15` 保号重构:小节编号冻结为稳定标识
   (15.9 从未分配;15.13 物理位置移回 15.12 与 15.14 之间),各小节只留现行规范,
   决策史迁入本文件;§10/§11/§14/§15 及 §2/§4/§5 残留中文段英文化(§16 冻结暂缓,

@@ -355,10 +355,16 @@
       "localThemes": {
         "title": "Local themes",
         "export": "Create local copy",
+        "import": "Import VSCode / Obsidian theme",
         "openDir": "Open themes folder",
         "refresh": "Refresh",
         "exportSuccess": "Created {{file}}. Replace the example image paths, save, then click \"Refresh\".",
         "exportFailed": "Export failed: {{error}}",
+        "importSuccess": "Imported {{name}} ({{themeCount}} variant(s)). Pick it in the theme list above.",
+        "importPartial": "Imported {{name}} ({{themeCount}} variant(s)). {{skipped}} semantic colors (danger red, warning orange, focus blue) stay unchanged per spec, and {{unresolved}} values could not be read.",
+        "importFailed": "Import failed: {{error}}",
+        "importUnsupported": "This file is not a recognizable VSCode or Obsidian theme.",
+        "importTooLarge": "File is too large to import as a theme.",
         "openDirFailed": "Failed to open folder: {{error}}",
         "refreshed": "Local themes refreshed"
       },

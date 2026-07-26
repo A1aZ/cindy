@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Sun, Moon, Monitor, ChevronDown, Check, Copy, FolderOpen, RefreshCw } from 'lucide-react';
+import {
+  Sun,
+  Moon,
+  Monitor,
+  ChevronDown,
+  Check,
+  Copy,
+  FolderOpen,
+  Import as ImportIcon,
+  RefreshCw,
+} from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 import { basename, cn } from '@/lib/utils';
@@ -32,6 +42,13 @@ import { Slider } from '@/components/ui/slider';
 import { FontFamilyPicker, type FontPreset } from './FontFamilyPicker';
 
 const log = createLogger('settings/AppearanceSection');
+
+/** main 侧导入失败码 → 专门文案；未列出的码落到通用 importFailed。 */
+const IMPORT_ERROR_KEYS: Record<string, string> = {
+  UNSUPPORTED_THEME_FILE: 'settings.appearance.localThemes.importUnsupported',
+  NOT_A_FILE: 'settings.appearance.localThemes.importUnsupported',
+  FILE_TOO_LARGE: 'settings.appearance.localThemes.importTooLarge',
+};
 
 type ThemeOption = 'light' | 'dark' | 'system';
 
@@ -376,6 +393,42 @@ export function AppearanceSection() {
     );
   }, [familyId, t, theme]);
 
+  const handleImport = useCallback(async () => {
+    const result = await window.electronAPI.localThemes.importExternal();
+    if (!result.success) {
+      const key = IMPORT_ERROR_KEYS[result.error];
+      toast.error(
+        key
+          ? t(key)
+          : t('settings.appearance.localThemes.importFailed', { error: result.error }),
+      );
+      return;
+    }
+    if (result.canceled) return;
+    await refreshLocalThemes();
+    const name = result.written[0]?.name ?? '';
+    const skipped = result.report.skippedProtected;
+    const unresolved = result.report.unresolved.length;
+    // 有东西没跟过来时如实说明,不用一句"成功"盖过去。
+    if (skipped > 0 || unresolved > 0) {
+      toast.success(
+        t('settings.appearance.localThemes.importPartial', {
+          name,
+          themeCount: result.written.length,
+          skipped,
+          unresolved,
+        }),
+      );
+      return;
+    }
+    toast.success(
+      t('settings.appearance.localThemes.importSuccess', {
+        name,
+        themeCount: result.written.length,
+      }),
+    );
+  }, [t]);
+
   const handleOpenDir = useCallback(async () => {
     const result = await window.electronAPI.localThemes.openDir();
     if (!result.success) {
@@ -528,6 +581,11 @@ export function AppearanceSection() {
               icon={Copy}
               label={t('settings.appearance.localThemes.export')}
               onClick={() => { void handleExport(); }}
+            />
+            <LocalThemeIconButton
+              icon={ImportIcon}
+              label={t('settings.appearance.localThemes.import')}
+              onClick={() => { void handleImport(); }}
             />
             <LocalThemeIconButton
               icon={FolderOpen}

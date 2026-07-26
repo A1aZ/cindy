@@ -1,0 +1,314 @@
+/**
+ * VSCode 颜色主题（`*.json` / jsonc）→ Cindy 色板。
+ *
+ * 映射依据是仓库里已有的人工移植记录:`renderer/themes/builtin/one-dark-pro.ts`
+ * 顶部注释逐行写明了 SURFACE ← `editor.background`、ELEVATED ←
+ * `sideBar.background`、HOVER ← `list.hoverBackground`、BORDER ←
+ * `panel.border`、PRIMARY ← `editor.foreground`、SECONDARY ← comment scope、
+ * DISABLED ← `lineNumber.foreground`。本文件把那套判断代码化并补上 fallback 链。
+ *
+ * 源文件没给的角色一律**推导**而非留空(VSCode 自己也是这么干的:主题只写一部分
+ * workbench 色,其余由内建默认派生),并把推导过的角色名放进报告。
+ */
+
+import {
+  isDarkBackground,
+  parseCssColor,
+  shade,
+  toHex,
+  type Rgb,
+} from './color';
+import type { MarkdownPalette, ThemePalette, ThemeTypeName } from './palette';
+
+/** 去掉 jsonc 的注释与尾逗号——VSCode 主题文件普遍带注释。 */
+export function stripJsonComments(input: string): string {
+  let out = '';
+  let inString = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  for (let i = 0; i < input.length; i += 1) {
+    const c = input[i];
+    const next = input[i + 1];
+    if (inLineComment) {
+      if (c === '\n') {
+        inLineComment = false;
+        out += c;
+      }
+      continue;
+    }
+    if (inBlockComment) {
+      if (c === '*' && next === '/') {
+        inBlockComment = false;
+        i += 1;
+      }
+      continue;
+    }
+    if (inString) {
+      out += c;
+      if (c === '\\') {
+        // 转义序列整体透传，避免把 \" 误判成字符串结束。
+        if (next !== undefined) {
+          out += next;
+          i += 1;
+        }
+        continue;
+      }
+      if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+      out += c;
+      continue;
+    }
+    if (c === '/' && next === '/') {
+      inLineComment = true;
+      i += 1;
+      continue;
+    }
+    if (c === '/' && next === '*') {
+      inBlockComment = true;
+      i += 1;
+      continue;
+    }
+    out += c;
+  }
+  // 尾逗号:`,` 后面只有空白就跟着 } 或 ]。
+  return out.replace(/,(\s*[}\]])/g, '$1');
+}
+
+interface VsCodeTokenColor {
+  scope?: string | string[];
+  settings?: { foreground?: string; fontStyle?: string };
+}
+
+interface VsCodeThemeJson {
+  name?: string;
+  type?: string;
+  include?: string;
+  colors?: Record<string, unknown>;
+  tokenColors?: VsCodeTokenColor[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** 解析 VSCode 主题文件；不是主题 JSON 时返回 null（由调用方给出可读报错）。 */
+export function parseVsCodeThemeJson(raw: string): VsCodeThemeJson | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stripJsonComments(raw));
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) return null;
+  const hasColors = isRecord(parsed.colors);
+  const hasTokenColors = Array.isArray(parsed.tokenColors);
+  // `colors` 与 `tokenColors` 都没有 → 不是颜色主题（可能是 snippets / settings）。
+  if (!hasColors && !hasTokenColors) return null;
+  return {
+    ...(typeof parsed.name === 'string' ? { name: parsed.name } : {}),
+    ...(typeof parsed.type === 'string' ? { type: parsed.type } : {}),
+    ...(typeof parsed.include === 'string' ? { include: parsed.include } : {}),
+    ...(hasColors ? { colors: parsed.colors as Record<string, unknown> } : {}),
+    ...(hasTokenColors ? { tokenColors: parsed.tokenColors as VsCodeTokenColor[] } : {}),
+  };
+}
+
+function scopeList(scope: string | string[] | undefined): string[] {
+  if (Array.isArray(scope)) return scope.flatMap((s) => scopeList(s));
+  if (typeof scope !== 'string') return [];
+  return scope
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/** 取某个 TextMate scope 的前景色（前缀匹配，取首个命中）。 */
+function tokenColorFor(theme: VsCodeThemeJson, wanted: string): Rgb | null {
+  for (const entry of theme.tokenColors ?? []) {
+    const fg = entry.settings?.foreground;
+    if (typeof fg !== 'string') continue;
+    for (const scope of scopeList(entry.scope)) {
+      if (scope === wanted || scope.startsWith(`${wanted}.`)) {
+        const rgb = parseCssColor(fg);
+        if (rgb) return rgb;
+      }
+    }
+  }
+  return null;
+}
+
+export interface VsCodeExtraction {
+  palette: ThemePalette;
+  type: ThemeTypeName;
+  name: string;
+  markdown: MarkdownPalette;
+  derivedRoles: string[];
+  resolvedRoles: number;
+  unresolved: string[];
+}
+
+/**
+ * 从 VSCode 主题抽 Cindy 色板。
+ *
+ * `fallbackName` 用于源文件没写 `name` 时（一般传文件名）。
+ */
+export function extractVsCodePalette(
+  theme: VsCodeThemeJson,
+  fallbackName: string,
+): VsCodeExtraction | null {
+  const colors = theme.colors ?? {};
+  const unresolved: string[] = [];
+  const derivedRoles: string[] = [];
+  let resolvedRoles = 0;
+
+  /** 按 key 链取首个可解析的色值；全不命中返回 null。 */
+  const pickColor = (keys: string[]): Rgb | null => {
+    for (const key of keys) {
+      const raw = colors[key];
+      if (typeof raw !== 'string') continue;
+      const rgb = parseCssColor(raw);
+      if (rgb) return rgb;
+      unresolved.push(key);
+    }
+    return null;
+  };
+
+  /** 命中则计入 resolved，否则用 derive() 推导并计入 derivedRoles。 */
+  const role = (name: string, keys: string[], derive: () => Rgb): Rgb => {
+    const hit = pickColor(keys);
+    if (hit) {
+      resolvedRoles += 1;
+      return hit;
+    }
+    derivedRoles.push(name);
+    return derive();
+  };
+
+  const surfaceHit = pickColor(['editor.background', 'editorPane.background']);
+  if (!surfaceHit) {
+    // 连主背景都没有,判不出这是个可用的颜色主题。
+    return null;
+  }
+  resolvedRoles += 1;
+  const surface = surfaceHit;
+
+  const declaredType = theme.type?.toLowerCase();
+  const type: ThemeTypeName = declaredType === 'light' || declaredType === 'dark'
+    ? declaredType
+    : isDarkBackground(surface)
+      ? 'dark'
+      : 'light';
+  const dark = type === 'dark';
+  /** 层级推导方向:暗色主题往亮走一档,亮色主题往暗走一档。 */
+  const step = (base: Rgb, amount: number): Rgb => shade(base, dark ? amount : -amount);
+
+  const elevated = role(
+    'elevated',
+    ['sideBar.background', 'editorWidget.background', 'panel.background', 'activityBar.background'],
+    () => step(surface, 0.05),
+  );
+  const hover = role(
+    'hover',
+    ['list.hoverBackground', 'toolbar.hoverBackground', 'menu.selectionBackground'],
+    () => step(surface, 0.08),
+  );
+  const chip = role(
+    'chip',
+    ['list.activeSelectionBackground', 'editorGroupHeader.tabsBackground', 'badge.background'],
+    () => step(hover, 0.04),
+  );
+  const border = role(
+    'border',
+    ['panel.border', 'editorGroup.border', 'input.border', 'contrastBorder', 'widget.border'],
+    () => step(surface, 0.2),
+  );
+
+  const textPrimary = role(
+    'textPrimary',
+    ['editor.foreground', 'foreground'],
+    () => (dark ? { r: 212, g: 212, b: 212 } : { r: 38, g: 38, b: 38 }),
+  );
+  // 二级文字优先取注释色——这是 one-dark-pro.ts 注释里记录的人工判断
+  // (SECONDARY ← comments),比 descriptionForeground 更贴近"弱化正文"的观感。
+  const commentColor = tokenColorFor(theme, 'comment');
+  if (commentColor) resolvedRoles += 1;
+  const textSecondary = commentColor ?? role(
+    'textSecondary',
+    ['descriptionForeground', 'editorCodeLens.foreground'],
+    () => shade(textPrimary, dark ? -0.28 : 0.28),
+  );
+  const textDisabled = role(
+    'textDisabled',
+    ['editorLineNumber.foreground', 'editorWhitespace.foreground'],
+    () => shade(textSecondary, dark ? -0.35 : 0.35),
+  );
+  const textTertiary = role(
+    'textTertiary',
+    ['editorLineNumber.activeForeground', 'editorHint.foreground'],
+    // secondary 与 disabled 之间那一档(one-dark-pro 手写的 "mid")。
+    () => shade(textSecondary, dark ? -0.16 : 0.16),
+  );
+
+  const accentPrimary = role(
+    'accentPrimary',
+    [
+      'button.background',
+      'focusBorder',
+      'textLink.foreground',
+      'activityBarBadge.background',
+      'progressBar.background',
+      'statusBarItem.remoteBackground',
+    ],
+    () => textPrimary,
+  );
+  // soft / deep 是人工挑的品牌色变体,源主题不提供,一律派生。
+  const accentSoft = shade(accentPrimary, dark ? 0.22 : -0.28);
+  const accentDeep = shade(accentPrimary, dark ? -0.22 : -0.28);
+  const elevatedSoft = dark ? elevated : step(elevated, 0.08);
+
+  const headingColor = tokenColorFor(theme, 'markup.heading');
+  const boldColor = tokenColorFor(theme, 'markup.bold');
+  const markdown: MarkdownPalette = {
+    ...(headingColor ? { headings: Array.from({ length: 6 }, () => headingColor) } : {}),
+    ...(boldColor ? { strong: boldColor } : {}),
+  };
+
+  if (theme.include) {
+    // 我们只读单文件,被 include 的基底主题里的色值拿不到——如实计入报告。
+    unresolved.push(`include:${theme.include}`);
+  }
+
+  return {
+    palette: {
+      surface,
+      elevated,
+      elevatedSoft,
+      hover,
+      chip,
+      border,
+      textPrimary,
+      textSecondary,
+      textTertiary,
+      textDisabled,
+      accentPrimary,
+      accentSoft,
+      accentDeep,
+    },
+    type,
+    name: theme.name?.trim() || fallbackName,
+    markdown,
+    derivedRoles,
+    resolvedRoles,
+    unresolved,
+  };
+}
+
+/** 调试用:把色板打成 hex map（测试断言更易读）。 */
+export function paletteToHex(palette: ThemePalette): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(palette).map(([k, v]) => [k, toHex(v as Rgb)]),
+  );
+}

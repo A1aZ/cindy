@@ -41,6 +41,7 @@ import type {
   LocalThemeWriteRequest,
   LocalThemeWriteResult,
 } from '../shared/local-themes';
+import type { LocalThemeImportResult } from '../shared/theme-import/types';
 import { DEFAULT_LOCALE, SUPPORTED_LOCALES, type SupportedLocale } from '../shared/locale';
 import {
   MODEL_ACCESS_STATUS_CHANNEL,
@@ -717,6 +718,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('local-themes:write', req),
     openDir: (): Promise<LocalThemeOpenDirResult> =>
       ipcRenderer.invoke('local-themes:open-dir'),
+    // 导入 VSCode / Obsidian 主题文件。对话框与读文件都在 main 侧,这里不接受
+    // 任何路径参数。main 侧来源闸拒绝时把 reject 收敛成统一失败结构,让调用方
+    // 只处理一种形态。
+    importExternal: async (): Promise<LocalThemeImportResult> => {
+      try {
+        return (await ipcRenderer.invoke('local-themes:import')) as LocalThemeImportResult;
+      } catch (err) {
+        return { success: false, error: String(err) };
+      }
+    },
   },
 
   // RSB terminal tab(PTY 后端 + xterm.js)

@@ -1,0 +1,335 @@
+/**
+ * Obsidian 主题（`theme.css`）→ Cindy 色板。
+ *
+ * ## 这是"调色板导入",不是主题移植
+ *
+ * Obsidian 主题是任意 CSS:除了 CSS 自定义属性,还大量改选择器、布局、圆角、
+ * 字体。我们**只取颜色变量**,其余一律丢弃——这是设计约束而不是偷懒:Cindy 的
+ * 布局与排版由自己的设计规范(DESIGN.md §3/§5)负责,不接受外部 CSS 接管。
+ *
+ * ## 解析范围
+ *
+ * 从 `.theme-dark{}` / `.theme-light{}` / `body{}` / `:root{}` 里收集自定义属性,
+ * 做 `var()` 解引用(含 `var(--x, fallback)` 与 Obsidian v1 的 `--color-base-NN`
+ * 色阶),再按 Obsidian 官方变量名映射。`color-mix()` 一类无法静态求值的写法会
+ * 跳过并计入报告——不猜值。
+ *
+ * 变量名以 Obsidian 官方 CSS variables 文档为准（`--background-primary` /
+ * `--text-normal` / `--interactive-accent` / `--h1-color` 等长期稳定的公开 API）。
+ */
+
+import { isDarkBackground, parseCssColor, shade, type Rgb } from './color';
+import type { MarkdownPalette, ThemePalette, ThemeTypeName } from './palette';
+
+type VarMap = Map<string, string>;
+
+interface CssRule {
+  selector: string;
+  body: string;
+}
+
+/**
+ * 剥掉 CSS 块注释。必须在切规则之前做:主题文件普遍在规则前写版权/说明注释,
+ * 不剥的话选择器会连着前面那段注释一起被切出来(实测 `body` 变成
+ * "注释文本 + 换行 + body"),根级选择器判定直接失配,整段基底变量丢失。
+ * 字符串字面量里的注释起始符不动。
+ */
+export function stripCssComments(source: string): string {
+  let out = '';
+  let quote: string | null = null;
+  for (let i = 0; i < source.length; i += 1) {
+    const c = source[i];
+    if (quote !== null) {
+      out += c;
+      if (c === '\\') {
+        if (i + 1 < source.length) {
+          out += source[i + 1];
+          i += 1;
+        }
+        continue;
+      }
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      quote = c;
+      out += c;
+      continue;
+    }
+    if (c === '/' && source[i + 1] === '*') {
+      const end = source.indexOf('*/', i + 2);
+      i = end === -1 ? source.length : end + 1;
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+/**
+ * 极简 CSS 规则扫描:按大括号深度切出 `selector { body }` 对；at-rule
+ * (`@media` 等) 的内容递归处理,让包在 media query 里的主题块也能被读到。
+ */
+export function collectCssRules(source: string): CssRule[] {
+  return scanCssRules(stripCssComments(source));
+}
+
+function scanCssRules(source: string): CssRule[] {
+  const rules: CssRule[] = [];
+  let selectorStart = 0;
+  let i = 0;
+  while (i < source.length) {
+    const ch = source[i];
+    if (ch === '{') {
+      const selector = source.slice(selectorStart, i).trim();
+      // 找配对的右括号。
+      let depth = 1;
+      let j = i + 1;
+      while (j < source.length && depth > 0) {
+        if (source[j] === '{') depth += 1;
+        else if (source[j] === '}') depth -= 1;
+        j += 1;
+      }
+      const body = source.slice(i + 1, Math.max(i + 1, j - 1));
+      if (selector.startsWith('@')) {
+        // at-rule:内部还是完整规则集,递归（注释已在入口剥过，不必重复）。
+        rules.push(...scanCssRules(body));
+      } else if (selector.length > 0) {
+        rules.push({ selector, body });
+      }
+      i = j;
+      selectorStart = i;
+      continue;
+    }
+    if (ch === '}') {
+      // 落单的右括号（源文件不规范），跳过并重置。
+      i += 1;
+      selectorStart = i;
+      continue;
+    }
+    i += 1;
+  }
+  return rules;
+}
+
+/** 抽一个 declaration block 里的自定义属性。 */
+function collectCustomProps(body: string, into: VarMap): void {
+  for (const m of body.matchAll(/(--[A-Za-z0-9_-]+)\s*:\s*([^;]+)(?:;|$)/g)) {
+    const name = m[1].trim();
+    const value = m[2].replace(/!important/gi, '').trim();
+    if (value.length > 0) into.set(name, value);
+  }
+}
+
+const MAX_VAR_DEPTH = 8;
+
+/**
+ * 把值里的 `var(--x)` / `var(--x, fallback)` 递归展开成字面量。
+ * 展开后仍含 `var(` 或无法求值时由调用方判定失败。
+ */
+export function resolveVarValue(
+  raw: string,
+  vars: VarMap,
+  depth = 0,
+): string {
+  if (depth >= MAX_VAR_DEPTH || !raw.includes('var(')) return raw;
+  let changed = false;
+  const replaced = raw.replace(
+    /var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,([^()]*(?:\([^()]*\)[^()]*)*))?\)/g,
+    (_all, name: string, fallback: string | undefined) => {
+      const hit = vars.get(name);
+      if (hit !== undefined) {
+        changed = true;
+        return hit;
+      }
+      if (fallback !== undefined) {
+        changed = true;
+        return fallback.trim();
+      }
+      return _all;
+    },
+  );
+  if (!changed) return replaced;
+  return resolveVarValue(replaced, vars, depth + 1);
+}
+
+export interface ObsidianExtraction {
+  palette: ThemePalette;
+  type: ThemeTypeName;
+  markdown: MarkdownPalette;
+  derivedRoles: string[];
+  resolvedRoles: number;
+  unresolved: string[];
+}
+
+/** 按模式聚合出的变量表。 */
+interface ModeVars {
+  type: ThemeTypeName;
+  vars: VarMap;
+}
+
+function selectorMode(selector: string): ThemeTypeName | 'base' | null {
+  const s = selector.toLowerCase();
+  const hasDark = s.includes('.theme-dark');
+  const hasLight = s.includes('.theme-light');
+  if (hasDark && hasLight) return 'base';
+  if (hasDark) return 'dark';
+  if (hasLight) return 'light';
+  // 只认根级选择器作为基底，避免把某个组件的局部变量当全局色板。
+  if (/^(:root|html|body|\*)\b/.test(s.trim())) return 'base';
+  return null;
+}
+
+/** 从整份 CSS 聚合出 light / dark 两套变量表（缺失的模式不返回）。 */
+export function collectObsidianVars(source: string): ModeVars[] {
+  const base: VarMap = new Map();
+  const dark: VarMap = new Map();
+  const light: VarMap = new Map();
+  for (const rule of collectCssRules(source)) {
+    const mode = selectorMode(rule.selector);
+    if (mode === null) continue;
+    if (mode === 'base') {
+      collectCustomProps(rule.body, base);
+      continue;
+    }
+    collectCustomProps(rule.body, mode === 'dark' ? dark : light);
+  }
+  const out: ModeVars[] = [];
+  const merge = (mode: VarMap): VarMap => new Map([...base, ...mode]);
+  if (dark.size > 0) out.push({ type: 'dark', vars: merge(dark) });
+  if (light.size > 0) out.push({ type: 'light', vars: merge(light) });
+  if (out.length === 0 && base.size > 0) {
+    const bg = readColor(base, ['--background-primary', '--color-base-00']);
+    out.push({
+      type: bg && isDarkBackground(bg) ? 'dark' : 'light',
+      vars: base,
+    });
+  }
+  return out;
+}
+
+/** 取首个能求值成颜色的变量。 */
+function readColor(vars: VarMap, names: string[], unresolved?: string[]): Rgb | null {
+  for (const name of names) {
+    const raw = vars.get(name);
+    if (raw === undefined) continue;
+    const rgb = parseCssColor(resolveVarValue(raw, vars));
+    if (rgb) return rgb;
+    // 变量存在但求不出颜色（color-mix / 未定义 var / 关键字）——如实记账。
+    unresolved?.push(name);
+  }
+  return null;
+}
+
+/** 把一套变量表转成 Cindy 色板。背景色都读不到时返回 null。 */
+export function extractObsidianPalette({ type, vars }: ModeVars): ObsidianExtraction | null {
+  const unresolved: string[] = [];
+  const derivedRoles: string[] = [];
+  let resolvedRoles = 0;
+
+  const role = (name: string, names: string[], derive: () => Rgb): Rgb => {
+    const hit = readColor(vars, names, unresolved);
+    if (hit) {
+      resolvedRoles += 1;
+      return hit;
+    }
+    derivedRoles.push(name);
+    return derive();
+  };
+
+  const surface = readColor(vars, ['--background-primary', '--color-base-00'], unresolved);
+  if (!surface) return null;
+  resolvedRoles += 1;
+
+  const dark = type === 'dark';
+  const step = (base: Rgb, amount: number): Rgb => shade(base, dark ? amount : -amount);
+
+  const elevated = role(
+    'elevated',
+    ['--background-secondary', '--background-primary-alt', '--color-base-10'],
+    () => step(surface, 0.05),
+  );
+  const hover = role(
+    'hover',
+    ['--background-modifier-hover', '--color-base-20'],
+    () => step(surface, 0.08),
+  );
+  const chip = role(
+    'chip',
+    ['--background-secondary-alt', '--background-modifier-active-hover', '--color-base-25'],
+    () => step(hover, 0.04),
+  );
+  const border = role(
+    'border',
+    ['--background-modifier-border', '--divider-color', '--color-base-30'],
+    () => step(surface, 0.2),
+  );
+
+  const textPrimary = role(
+    'textPrimary',
+    ['--text-normal', '--color-base-100'],
+    () => (dark ? { r: 212, g: 212, b: 212 } : { r: 38, g: 38, b: 38 }),
+  );
+  const textSecondary = role(
+    'textSecondary',
+    ['--text-muted', '--color-base-70'],
+    () => shade(textPrimary, dark ? -0.28 : 0.28),
+  );
+  const textTertiary = role(
+    'textTertiary',
+    ['--text-faint', '--color-base-50'],
+    () => shade(textSecondary, dark ? -0.16 : 0.16),
+  );
+  const textDisabled = role(
+    'textDisabled',
+    ['--text-selection', '--color-base-40'],
+    // Obsidian 没有 disabled 文字概念,从 faint 再弱一档。
+    () => shade(textTertiary, dark ? -0.25 : 0.25),
+  );
+
+  const accentPrimary = role(
+    'accentPrimary',
+    ['--interactive-accent', '--color-accent', '--text-accent'],
+    () => textPrimary,
+  );
+  const accentSoftHit = readColor(vars, ['--text-accent-hover', '--color-accent-2']);
+  const accentSoft = accentSoftHit ?? shade(accentPrimary, dark ? 0.22 : -0.28);
+  if (accentSoftHit) resolvedRoles += 1;
+  else derivedRoles.push('accentSoft');
+  const accentDeepHit = readColor(vars, ['--interactive-accent-hover', '--color-accent-1']);
+  const accentDeep = accentDeepHit ?? shade(accentPrimary, dark ? -0.22 : -0.28);
+  if (accentDeepHit) resolvedRoles += 1;
+  else derivedRoles.push('accentDeep');
+  const elevatedSoft = dark ? elevated : step(elevated, 0.08);
+
+  const headings = ['--h1-color', '--h2-color', '--h3-color', '--h4-color', '--h5-color', '--h6-color']
+    .map((name) => readColor(vars, [name]));
+  const strong = readColor(vars, ['--bold-color', '--text-bold']);
+  const markdown: MarkdownPalette = {
+    ...(headings.some(Boolean) ? { headings } : {}),
+    ...(strong ? { strong } : {}),
+  };
+
+  return {
+    palette: {
+      surface,
+      elevated,
+      elevatedSoft,
+      hover,
+      chip,
+      border,
+      textPrimary,
+      textSecondary,
+      textTertiary,
+      textDisabled,
+      accentPrimary,
+      accentSoft,
+      accentDeep,
+    },
+    type,
+    markdown,
+    derivedRoles,
+    resolvedRoles,
+    unresolved,
+  };
+}

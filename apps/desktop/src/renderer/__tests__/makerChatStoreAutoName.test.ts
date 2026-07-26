@@ -85,6 +85,7 @@ const flushPromises = async () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  makerChatStore.__resetAutoNameStateForTest();
   const w = globalThis as unknown as { window: Record<string, unknown> };
   w.window = {
     electronAPI: {
@@ -223,5 +224,159 @@ describe('makerChatStore auto-name (Codex-style immediate placeholder)', () => {
 
     expect(generateTitle).not.toHaveBeenCalled();
     expect(sessionService.update).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 首条消息只贴图没打字 → 首条起不出标题,会话停在 "New Maker";补起名必须在
+ * 下一条带文本的消息上把名字补回来,否则会话永久停在默认名。
+ */
+describe('makerChatStore deferred auto-name (image-only first message / fork)', () => {
+  it('names the session from the first later message that carries text', async () => {
+    // 首条纯附件:不起名,也不能把会话标记成「已尝试」。
+    makerChatStore.autoNameSession(SESSION_ID, '', 'claude-code');
+    await flushPromises();
+    expect(sessionService.update).not.toHaveBeenCalled();
+
+    // 第二条带文本 → 补起名(标题仍是 'New Maker')。
+    vi.mocked(sessionService.get).mockResolvedValue({
+      agentKind: 'cc',
+      title: 'New Maker',
+    } as Awaited<ReturnType<typeof sessionService.get>>);
+    makerChatStore.__autoNameUnnamedSessionForTest(SESSION_ID, '这张图里的报错怎么修');
+    await flushPromises();
+
+    expect(sessionService.update).toHaveBeenCalledWith(SESSION_ID, {
+      title: '这张图里的报错怎么修',
+    });
+  });
+
+  it('still covers fork placeholder titles', async () => {
+    vi.mocked(sessionService.get).mockResolvedValue({
+      agentKind: 'codex',
+      parentSessionId: 'source-session',
+      title: '[Fork] 源会话标题',
+    } as Awaited<ReturnType<typeof sessionService.get>>);
+
+    makerChatStore.__autoNameUnnamedSessionForTest(SESSION_ID, 'fork 后的第一句话');
+    await flushPromises();
+
+    expect(sessionService.update).toHaveBeenCalledWith(SESSION_ID, {
+      title: 'fork 后的第一句话',
+    });
+  });
+
+  it('does not treat a user-typed "[Fork] ..." title on a non-fork session as a placeholder', async () => {
+    vi.mocked(sessionService.get).mockResolvedValue({
+      agentKind: 'cc',
+      parentSessionId: null,
+      title: '[Fork] 用户自己起的名字',
+    } as Awaited<ReturnType<typeof sessionService.get>>);
+
+    makerChatStore.__autoNameUnnamedSessionForTest(SESSION_ID, '继续');
+    await flushPromises();
+
+    expect(generateTitle).not.toHaveBeenCalled();
+    expect(sessionService.update).not.toHaveBeenCalled();
+  });
+
+  it('leaves already-named sessions alone', async () => {
+    vi.mocked(sessionService.get).mockResolvedValue({
+      agentKind: 'cc',
+      title: '登录失败排查',
+    } as Awaited<ReturnType<typeof sessionService.get>>);
+
+    makerChatStore.__autoNameUnnamedSessionForTest(SESSION_ID, '继续');
+    await flushPromises();
+
+    expect(generateTitle).not.toHaveBeenCalled();
+    expect(sessionService.update).not.toHaveBeenCalled();
+  });
+
+  it('does not re-name a session that already auto-named on its first message', async () => {
+    vi.mocked(sessionService.get).mockResolvedValue({
+      agentKind: 'cc',
+      title: 'New Maker',
+    } as Awaited<ReturnType<typeof sessionService.get>>);
+
+    makerChatStore.autoNameSession(SESSION_ID, '首条就有文本', 'claude-code');
+    await flushPromises();
+    vi.mocked(sessionService.update).mockClear();
+
+    // 第二条消息:占位可能尚未落库(标题仍读到 'New Maker'),去重集必须挡住重复起名。
+    makerChatStore.__autoNameUnnamedSessionForTest(SESSION_ID, '第二条消息');
+    await flushPromises();
+
+    expect(sessionService.update).not.toHaveBeenCalled();
+  });
+
+  it('skips text-less messages so naming stays deferred', async () => {
+    makerChatStore.__autoNameUnnamedSessionForTest(SESSION_ID, '   ');
+    await flushPromises();
+
+    expect(sessionService.get).not.toHaveBeenCalled();
+    expect(sessionService.update).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 用户一个字没写时,标题用本地合成的描述(文件名 /「图片」/ 被引用会话标题)。
+ * 这类占位绝不能喂给标题模型 —— 模型拿不到实质内容会返回「我没有看到用户消息
+ * 的内容」这类回复,正是线上出过的那个错误标题。
+ */
+describe('makerChatStore synthesized placeholder (no user text)', () => {
+  it('writes the synthesized description without calling the title model', async () => {
+    vi.mocked(sessionService.get).mockResolvedValue({
+      agentKind: 'cc',
+      title: 'New Maker',
+    } as Awaited<ReturnType<typeof sessionService.get>>);
+
+    makerChatStore.autoNameSession(SESSION_ID, '设计稿-v3.png', 'claude-code', false);
+    await flushPromises();
+
+    expect(sessionService.update).toHaveBeenCalledWith(SESSION_ID, { title: '设计稿-v3.png' });
+    expect(generateTitle).not.toHaveBeenCalled();
+  });
+
+  it('lets the first later text message replace the synthesized placeholder', async () => {
+    vi.mocked(sessionService.get).mockResolvedValue({
+      agentKind: 'cc',
+      title: 'New Maker',
+    } as Awaited<ReturnType<typeof sessionService.get>>);
+    makerChatStore.autoNameSession(SESSION_ID, '设计稿-v3.png', 'claude-code', false);
+    await flushPromises();
+    vi.mocked(sessionService.update).mockClear();
+
+    // 会话标题现在是合成占位;用户打字 → 认得出这是自己写的占位,可以覆盖。
+    vi.mocked(sessionService.get).mockResolvedValue({
+      agentKind: 'cc',
+      title: '设计稿-v3.png',
+    } as Awaited<ReturnType<typeof sessionService.get>>);
+    makerChatStore.__autoNameUnnamedSessionForTest(SESSION_ID, '这个报错怎么修');
+    await flushPromises();
+
+    expect(sessionService.update).toHaveBeenCalledWith(SESSION_ID, { title: '这个报错怎么修' });
+    expect(generateTitle).toHaveBeenCalled();
+  });
+
+  it('does not overwrite a manual rename that replaced the synthesized placeholder', async () => {
+    vi.mocked(sessionService.get).mockResolvedValue({
+      agentKind: 'cc',
+      title: 'New Maker',
+    } as Awaited<ReturnType<typeof sessionService.get>>);
+    makerChatStore.autoNameSession(SESSION_ID, '设计稿-v3.png', 'claude-code', false);
+    await flushPromises();
+    vi.mocked(sessionService.update).mockClear();
+
+    // 用户手动改成了别的名字 → 当前标题不再等于我们记住的占位,放弃覆盖。
+    vi.mocked(sessionService.get).mockResolvedValue({
+      agentKind: 'cc',
+      title: '我自己起的名字',
+    } as Awaited<ReturnType<typeof sessionService.get>>);
+    makerChatStore.__autoNameUnnamedSessionForTest(SESSION_ID, '这个报错怎么修');
+    await flushPromises();
+
+    expect(sessionService.update).not.toHaveBeenCalled();
+    expect(generateTitle).not.toHaveBeenCalled();
   });
 });

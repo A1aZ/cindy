@@ -49,6 +49,7 @@ describe('remoteProjectsStore', () => {
   beforeEach(() => {
     setRemoteReseedImpl(null);
     remoteProjectsStore.clear();
+    remoteProjectsStore.__resetPendingTitlePreviewForTest();
   });
 
   it('stamps device-link origin, merges sessions, and registers sessionId→deviceId', () => {
@@ -281,5 +282,69 @@ describe('remoteProjectsStore', () => {
     remoteProjectsStore.renameDevice('dev-B', 'New');
     expect(remoteProjectsStore.getMergedRemoteSessions()).toBe(beforeSameName);
     off();
+  });
+});
+
+/**
+ * 标题预览叠加层:控制端发送瞬间即时显示占位,不等被控端那一次隧道往返;
+ * 分片数据仍是纯镜像(不被本地改写),被控端权威标题一到自动让位。
+ */
+describe('remoteProjectsStore pending title preview', () => {
+  beforeEach(() => {
+    setRemoteReseedImpl(null);
+    remoteProjectsStore.clear();
+    remoteProjectsStore.__resetPendingTitlePreviewForTest();
+  });
+
+  it('shows the preview while the authoritative title is still the default placeholder', () => {
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
+
+    remoteProjectsStore.setPendingTitlePreview('s1', '帮我排查登录失败');
+
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('帮我排查登录失败');
+    // 分片本身没有被改写 —— 纯镜像不变量。
+    expect(remoteProjectsStore.getDeviceSessions('dev-B')[0]?.title).toBe('New Maker');
+  });
+
+  it('yields to the authoritative title as soon as the controlled device writes one', () => {
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
+    remoteProjectsStore.setPendingTitlePreview('s1', '帮我排查登录失败');
+
+    // 被控端回流占位 → 权威值胜出。
+    remoteProjectsStore.applyPatch('dev-B', 's1', { title: '帮我排查登录失败' });
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('帮我排查登录失败');
+
+    // 再回流智能标题 → 预览已回收,不会把它顶回去。
+    remoteProjectsStore.applyPatch('dev-B', 's1', { title: '登录失败排查' });
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('登录失败排查');
+  });
+
+  it('never overrides a title the user already renamed on the controlled device', () => {
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: '我自己起的名字' })]);
+
+    remoteProjectsStore.setPendingTitlePreview('s1', '帮我排查登录失败');
+
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('我自己起的名字');
+  });
+
+  it('survives a snapshot rebuild while the authoritative title stays default', () => {
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
+    remoteProjectsStore.setPendingTitlePreview('s1', '帮我排查登录失败');
+
+    // anti-entropy 重拉:权威标题仍是默认占位 → 预览继续顶着,不闪回 New Maker。
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
+
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('帮我排查登录失败');
+  });
+
+  it('ignores empty previews and keeps the snapshot reference stable on repeat calls', () => {
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
+    remoteProjectsStore.setPendingTitlePreview('s1', '   ');
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('New Maker');
+
+    remoteProjectsStore.setPendingTitlePreview('s1', '帮我排查登录失败');
+    const first = remoteProjectsStore.getMergedRemoteSessions();
+    remoteProjectsStore.setPendingTitlePreview('s1', '帮我排查登录失败');
+    expect(remoteProjectsStore.getMergedRemoteSessions()).toBe(first);
   });
 });

@@ -10,7 +10,10 @@
 
 import { stripChatQuoteMarkerLines } from '@cindy/maker-shared/chat-quotes';
 import {
+  describeAgentInputReference,
   projectAgentFacingText,
+  projectLiteralUserText,
+  readAgentInputReferences,
   type AgentInputReference,
 } from '@cindy/maker-shared/agent-input-projection';
 
@@ -512,6 +515,101 @@ export function getAgentFacingText(queued: AgentInputQueuedMessage): string {
     quotesEncoded: queued.chatMessage.quotesEncoded === true,
     agentReferences: queued.agentReferences,
   });
+}
+
+/**
+ * 无文本消息合成占位标题时用到的本地化类别词。只在拿不到任何具体名字(粘贴的
+ * 截图没有文件名)时兜底,所以只需要这两个。
+ */
+export interface AutoTitleFallbackLabels {
+  /** 「图片」 */
+  image: string;
+  /** 「文件」 */
+  file: string;
+}
+
+export interface AutoTitleSeed {
+  /** 起名素材。 */
+  text: string;
+  /**
+   * true  = 用户真的写了文字(含选中文字引用的正文),可以作为标题模型的输入素材。
+   * false = 本地合成的描述(附件文件名 / @mention 名 / 被引用会话标题)。这类串
+   *         **只能当占位标题,绝不能喂给标题模型** —— 模型拿不到实质内容,会返回
+   *         「我没有看到用户消息的内容」这类回复或硬编一个无关标题。
+   */
+  isUserText: boolean;
+}
+
+/** 路径 basename,兼容 POSIX 与 Windows 分隔符。 */
+function baseName(path: string): string {
+  return path.split(/[\\/]/).pop() ?? '';
+}
+
+function collapse(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+/** 被引用的会话 / 项目 / 消息 —— 手里就有现成的标题或名字,优先用它。 */
+function describeReferences(queued: AgentInputQueuedMessage): string | null {
+  const references = readAgentInputReferences(queued.agentReferences, queued.text);
+  for (const reference of references) {
+    const described = describeAgentInputReference(reference);
+    if (described) return described;
+  }
+  return null;
+}
+
+/** @mention 的文件 / 目录 / agent 名。 */
+function describeMentions(queued: AgentInputQueuedMessage): string | null {
+  for (const mention of queued.mentions ?? []) {
+    const name = collapse(mention.name || baseName(mention.path));
+    if (name) return name;
+  }
+  return null;
+}
+
+/**
+ * 附件:优先用文件名(`需求评审.pdf` 比「文件」信息量大得多);粘贴进来的截图
+ * 没有可用文件名时才回落到类别词。
+ */
+function describeFiles(
+  queued: AgentInputQueuedMessage,
+  labels: AutoTitleFallbackLabels,
+): string | null {
+  const files = queued.files ?? [];
+  for (const file of files) {
+    const raw = file.originalName || file.name || '';
+    const name = collapse(raw.startsWith('clipboard://') ? '' : baseName(raw));
+    if (name) return name;
+  }
+  const first = files[0];
+  if (!first) return null;
+  return first.category === 'image' ? labels.image : labels.file;
+}
+
+/**
+ * 推导会话自动起名的素材。
+ *
+ * 用户写了字 → 原样返回(isUserText=true),照旧走「占位 + 标题模型」。
+ * 用户一个字没写(只贴图 / 只拖文件 / 只 @ 一个文件 / 只引用一个会话)→ 用手上
+ * 的本地信息合成一句能描述这条消息的话(isUserText=false),只当占位标题用。
+ *
+ * 都拿不到 → null,调用方保留默认标题。
+ */
+export function deriveAutoTitleSeed(
+  queued: AgentInputQueuedMessage,
+  labels: AutoTitleFallbackLabels,
+): AutoTitleSeed | null {
+  const literal = projectLiteralUserText({
+    text: queued.text,
+    quotesEncoded: queued.chatMessage.quotesEncoded === true,
+    agentReferences: queued.agentReferences,
+  });
+  if (literal) return { text: literal, isUserText: true };
+
+  const described =
+    describeReferences(queued) ?? describeMentions(queued) ?? describeFiles(queued, labels);
+  return described ? { text: described, isUserText: false } : null;
 }
 
 export function buildMakerUserMessage(

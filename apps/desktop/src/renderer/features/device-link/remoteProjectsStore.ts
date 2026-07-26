@@ -15,6 +15,8 @@
  *      · 增量(`applyPatch`):收到被控端 `local-db:sessions:patched` push 时就地幂等合并;
  *        status=deleted/archived → 移出分片;落到未知 session → 丢弃(后续 snapshot 带最终态)。
  *      · 新建(`requestRemoteReseed`):`sessions:created` push 无 row 数据 → 触发该设备重拉。
+ *    唯一例外是**投影层**的标题预览(`setPendingTitlePreview`):它不写分片、只在权威
+ *    标题仍是默认占位时顶替显示,被控端标题一到就自动让位。分片数据仍是纯镜像。
  *  - **复用本地渲染管线**:每条 session 注入 `deviceLinkDeviceId/Name/ConnectionStatus`
  *    后喂给 `groupSessions`。
  *  - **origin 注册表**:`sessionId → deviceId`(`getSessionDeviceId`),供传输层 / SessionView 用。
@@ -107,6 +109,37 @@ function sameDeviceList(a: RemoteDeviceSummary[], b: RemoteDeviceSummary[]): boo
   return true;
 }
 
+/** 被控端建会话时的默认标题;权威标题仍等于它 = 还没起过名。 */
+const DEFAULT_REMOTE_SESSION_TITLE = 'New Maker';
+
+/**
+ * 「发送瞬间的标题预览」——控制端本地叠加层,**不写进分片**。
+ *
+ * 远程会话的权威标题由被控端写、经 `sessions:patched` 回流,中间隔一次隧道往返,
+ * 这段时间侧边栏会停在 "New Maker"。控制端在发送瞬间就能用同一套推导算出与被控端
+ * 一致的占位串,先在**投影层**顶上,让改名即时可见。
+ *
+ * 为什么这不破坏「分片 = 纯镜像、不做乐观覆盖」原则:
+ *  - 分片里的 session 行一个字节都没被改写,预览只作用于 recompute 的投影;
+ *  - 仅在权威标题仍是默认占位时生效 —— 被控端真实标题(占位或智能标题)一旦到达
+ *    就自动让位并回收条目,不需要显式失效逻辑;snapshot / anti-entropy 重建同理。
+ *
+ * 边界:消息若最终没送达,被控端不会起名,预览会一直顶着(展示的是用户自己刚发的
+ * 内容,不误导);重启后预览不存在,回落到权威的 "New Maker"。
+ */
+const pendingTitlePreview = new Map<string, string>();
+
+/** 应用标题预览:权威标题已不是默认占位时让位并回收。 */
+function withPendingTitle(session: Session): Session {
+  const preview = pendingTitlePreview.get(session.id);
+  if (!preview) return session;
+  if (session.title !== DEFAULT_REMOTE_SESSION_TITLE) {
+    pendingTitlePreview.delete(session.id);
+    return session;
+  }
+  return { ...session, title: preview };
+}
+
 /** 重算扁平快照 + origin 注册表,然后通知订阅者。所有 mutation 走这里。 */
 function recompute(): void {
   sessionDeviceIndex.clear();
@@ -116,7 +149,7 @@ function recompute(): void {
     const flat: Session[] = [];
     for (const shard of shards.values()) {
       for (const s of shard.sessions) {
-        flat.push(s);
+        flat.push(withPendingTitle(s));
         sessionDeviceIndex.set(s.id, shard.deviceId);
       }
     }
@@ -343,6 +376,23 @@ const actions = {
   /** 侧边栏合并点用:当前所有远端会话的扁平列表(引用稳定)。 */
   getMergedRemoteSessions(): Session[] {
     return mergedSnapshot;
+  },
+
+  /**
+   * 发送瞬间登记标题预览(见 {@link pendingTitlePreview})。只影响投影层显示,
+   * 权威标题仍由被控端写回;被控端标题到达后本条自动失效。
+   */
+  setPendingTitlePreview(sessionId: string, title: string): void {
+    const next = title.trim();
+    if (!sessionId || !next) return;
+    if (pendingTitlePreview.get(sessionId) === next) return;
+    pendingTitlePreview.set(sessionId, next);
+    recompute();
+  },
+
+  /** 测试专用:清空标题预览叠加层。 */
+  __resetPendingTitlePreviewForTest(): void {
+    pendingTitlePreview.clear();
   },
 
   /** refresh anti-entropy 用:取某设备当前缓存分片，调用方只读。 */

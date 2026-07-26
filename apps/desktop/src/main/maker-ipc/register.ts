@@ -35,6 +35,7 @@ import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { BrowserWindow, ipcMain } from 'electron';
 import type { AgentMeta } from '../../renderer/lib/ccAgent.types';
 import {
+  deriveAutoTitleSeed,
   getAgentFacingText,
   serializeSessionReferencePayload,
   type AgentInputCreateOpts,
@@ -127,7 +128,6 @@ import {
   broadcastSessionPatched,
   clearSessionContextInDb,
   getSessionRowSnapshot,
-  isUntitledDraftSessionBeforeFirstInput,
   persistSessionFields,
   persistSessionPermissionModeIfAuto,
 } from '../localDb/ipc/sessions.js';
@@ -449,7 +449,10 @@ import { checkRemoteWorkingDir } from '../device-link/remote-workdir-guard.js';
 import { createWorkerTurnStartSequencer } from './workerTurnStartSequencer.js';
 import { createBusinessSessionId } from '../sessionIds.js';
 import { forkSessionAtMessage } from '../maker-orchestration/fork.js';
-import { scheduleEligibleDeviceLinkAutoTitle } from './deviceLinkAutoTitle.js';
+import {
+  isDeviceLinkAutoTitleEligible,
+  scheduleEligibleDeviceLinkAutoTitle,
+} from './deviceLinkAutoTitle.js';
 import {
   SILENT_STOP_RESUME_PROMPT,
   SilentStopAutoResumeGuard,
@@ -6586,10 +6589,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       requireQueuedMessage(item),
     )) as AgentInputQueuedMessage;
     const queued = await hydrateQueuedAgentReferences(queuedWithAttachments);
+    // 起名素材:用户写了字就用他的字(可喂标题模型);一个字没写(只贴图 / 只拖
+    // 文件 / 只 @ 一个文件 / 只引用一个会话)就用本地合成的描述,只当占位标题。
+    const autoTitleSeed = deriveAutoTitleSeed(queued, {
+      image: t('ccAgent.autoTitle.image'),
+      file: t('ccAgent.autoTitle.file'),
+    });
     let shouldAutoTitle = false;
-    if (isDeviceLinkInvoke() && queued.text.trim()) {
+    if (isDeviceLinkInvoke() && autoTitleSeed) {
       try {
-        shouldAutoTitle = await isUntitledDraftSessionBeforeFirstInput(sid);
+        shouldAutoTitle = await isDeviceLinkAutoTitleEligible(sid);
       } catch (err) {
         log.warn('[device-link] auto-title eligibility check failed', {
           sessionId: sid,
@@ -6609,12 +6618,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       // enqueue,不带此 flag,恢复暂停语义不变。
       resumeRestorePausedQueue: true,
     });
-    if (shouldAutoTitle) {
+    if (shouldAutoTitle && autoTitleSeed) {
       scheduleEligibleDeviceLinkAutoTitle({
         maker,
         sessionId: sid,
-        text: getAgentFacingText(queued),
+        text: autoTitleSeed.text,
         agentKind: queued.createOpts.agentKind,
+        isUserText: autoTitleSeed.isUserText,
       });
     }
     return projection;

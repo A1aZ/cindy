@@ -424,38 +424,58 @@ export async function touchUserSendInDb(id: string, atMs?: number): Promise<void
 }
 
 /**
- * 远控首条输入自动标题的资格检查。必须在 enqueue 接受前调用:
- * - title 仍是桌面草稿占位
- * - 还没有 userSendAt
- * - 还没有已落库消息
+ * 自动标题的统一归一化:折叠空白 → trim → 截断 40 字。先 trim 再截断,避免前导
+ * 大量空白吃满长度得到空标题。落库出口与占位覆写方都用它算出同一个串。
  */
-export async function isUntitledDraftSessionBeforeFirstInput(id: string): Promise<boolean> {
-  const db = getDbClient().drizzle;
-  const row = await selectSessionWithCount(db, id);
-  return (
-    !!row &&
-    row.title === DEFAULT_DRAFT_SESSION_TITLE &&
-    row.userSendAt === null &&
-    row.messageCount === 0
-  );
+export function normalizeAutoTitle(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().slice(0, 40).trimEnd();
 }
 
 /**
- * 自动标题落库出口。只在 title 仍是草稿占位时写入，避免后台标题覆盖用户手动改名。
+ * 远控自动标题的资格检查:title 仍是系统占位。
+ *
+ * 只看标题、不再要求「零消息且无 userSendAt」:首条输入是纯附件(无文本)时会话
+ * 已经有消息和 userSendAt,旧口径会让它永久停在 "New Maker"。标题仍是系统占位
+ * 本身就等价于「既没被自动起名、也没被用户改名」,足以作为唯一门槛。
+ *
+ * `synthesizedPlaceholder` 是调用方上次为纯附件消息写入的合成占位(文件名 /
+ * 「图片」等)。传入后它同样算作可覆盖的系统占位,让「先只贴图、后打字」的会话
+ * 在用户打字时把标题换成他写的内容。
+ */
+export async function isUntitledSessionAwaitingAutoTitle(
+  id: string,
+  synthesizedPlaceholder?: string | null,
+): Promise<boolean> {
+  const db = getDbClient().drizzle;
+  const row = await selectSessionWithCount(db, id);
+  if (!row) return false;
+  if (row.title === DEFAULT_DRAFT_SESSION_TITLE) return true;
+  return !!synthesizedPlaceholder && row.title === synthesizedPlaceholder;
+}
+
+/**
+ * 自动标题落库出口。只在 title 仍等于 `expectedTitle` 时写入,避免后台标题覆盖
+ * 用户手动改名。
+ *
+ * `expectedTitle` 默认是草稿占位;远控立即占位链路在写完占位后,用占位串作为
+ * 期望值再写智能标题——用户在等待窗口内手动改名时期望值不匹配,写入被拒绝。
  */
 export async function persistSessionTitleIfStillDraft(
   sessionId: string,
   title: string,
+  expectedTitle: string = DEFAULT_DRAFT_SESSION_TITLE,
 ): Promise<boolean> {
-  const cleanTitle = title.replace(/\s+/g, ' ').trim().slice(0, 40);
+  const cleanTitle = normalizeAutoTitle(title);
   if (!cleanTitle || cleanTitle === DEFAULT_DRAFT_SESSION_TITLE) return false;
+  // 期望值与目标值相同 → 无需写入(占位已是最终标题),按成功处理。
+  if (cleanTitle === expectedTitle) return true;
 
   const db = getDbClient().drizzle;
   const setObj = sessionPatchToRow({ title: cleanTitle }, { bumpUpdatedAt: false });
   await db
     .update(sessions)
     .set(setObj)
-    .where(and(eq(sessions.id, sessionId), eq(sessions.title, DEFAULT_DRAFT_SESSION_TITLE)));
+    .where(and(eq(sessions.id, sessionId), eq(sessions.title, expectedTitle)));
 
   const row = await selectSessionWithCount(db, sessionId);
   if (!row || row.title !== cleanTitle) return false;

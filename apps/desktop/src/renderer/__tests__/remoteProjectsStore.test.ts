@@ -39,6 +39,8 @@ function mk(id: string, partial: Partial<Session> = {}): Session {
     userSendAt: '2026-01-01T00:00:00.000Z',
     status: partial.status ?? 'active',
     agentKind: partial.agentKind ?? 'cc',
+    // fork 占位判据要看它(与被控端 getOverwritableAutoTitle 同一条规则)。
+    parentSessionId: partial.parentSessionId ?? null,
     extraDirs: [],
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
@@ -317,6 +319,60 @@ describe('remoteProjectsStore pending title preview', () => {
     // 再回流智能标题 → 预览已回收,不会把它顶回去。
     remoteProjectsStore.applyPatch('dev-B', 's1', { title: '登录失败排查' });
     expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('登录失败排查');
+  });
+
+  it('previews over a synthesized placeholder the controller itself registered', () => {
+    // 纯附件首条消息:被控端把标题写成文件名。用户随后打下第一句话时,控制端同样
+    // 要即时顶上 —— 只认默认占位的话,即时性恰好在这条恢复路径上缺席(review P1)。
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
+    remoteProjectsStore.setPendingTitlePreview('s1', '设计稿-v3.png');
+    remoteProjectsStore.applyPatch('dev-B', 's1', { title: '设计稿-v3.png' });
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('设计稿-v3.png');
+
+    remoteProjectsStore.setPendingTitlePreview('s1', '这个报错怎么修');
+
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('这个报错怎么修');
+    // 分片仍是纯镜像。
+    expect(remoteProjectsStore.getDeviceSessions('dev-B')[0]?.title).toBe('设计稿-v3.png');
+
+    // 智能标题落地 → 归属作废,后续预览不再生效。
+    remoteProjectsStore.applyPatch('dev-B', 's1', { title: '报错排查' });
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('报错排查');
+    remoteProjectsStore.setPendingTitlePreview('s1', '又一条消息');
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('报错排查');
+  });
+
+  it('previews over a fork placeholder (system-owned, parentSessionId present)', () => {
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [
+      mk('s1', { title: '[Fork] 源会话标题', parentSessionId: 'src-1' }),
+    ]);
+
+    remoteProjectsStore.setPendingTitlePreview('s1', '这个报错怎么修');
+
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('这个报错怎么修');
+  });
+
+  it('treats a user-named "[Fork] ..." session without parentSessionId as manual', () => {
+    // 与被控端 getOverwritableAutoTitle 同一条判据:没有 parentSessionId 就不是
+    // fork 占位,是用户自己起的名。
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: '[Fork] 我自己起的名' })]);
+
+    remoteProjectsStore.setPendingTitlePreview('s1', '这个报错怎么修');
+
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('[Fork] 我自己起的名');
+  });
+
+  it('drops synthesized-title provenance together with the session (archive / device removal)', () => {
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
+    remoteProjectsStore.setPendingTitlePreview('s1', '设计稿-v3.png');
+    remoteProjectsStore.applyPatch('dev-B', 's1', { title: '设计稿-v3.png' });
+    remoteProjectsStore.applyPatch('dev-B', 's1', { status: 'archived' });
+
+    // unarchive 回来:归属已随会话回收,旧的合成标题不再被当成系统占位。
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: '设计稿-v3.png' })]);
+    remoteProjectsStore.setPendingTitlePreview('s1', '这个报错怎么修');
+
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('设计稿-v3.png');
   });
 
   it('never overrides a title the user already renamed on the controlled device', () => {

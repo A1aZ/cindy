@@ -26,6 +26,7 @@ vi.mock('../title.js', () => ({
 }));
 
 import {
+  isSessionAutoTitleEligible,
   runSessionAutoTitle,
   __resetSessionAutoTitleStateForTest,
   type SessionAutoTitleDeps,
@@ -150,8 +151,17 @@ describe('runSessionAutoTitle — 用户一个字没写(合成描述)', () => {
     ]);
   });
 
-  it('合成占位写入失败时不记忆,下一条消息仍按草稿占位覆写', async () => {
-    const deps = makeDeps({ persistTitle: vi.fn(async () => false) });
+  it('合成占位真的没写进去时,下一条消息仍按草稿占位覆写', async () => {
+    // 写失败 → 库里还是 New Maker。归属虽然记下了,但资格判定拿它和**实际标题**比,
+    // 对不上就不生效,期望值仍是草稿占位。
+    const deps = makeDeps({
+      persistTitle: vi.fn(async () => false),
+      resolveOverwritableTitle: vi.fn(async () => ({
+        title: 'New Maker',
+        agentKind: 'codex' as const,
+        isDefaultDraftTitle: true,
+      })),
+    });
 
     await runSessionAutoTitle(
       { sessionId: 's1', text: '设计稿-v3.png', agentKind: 'codex', isUserText: false },
@@ -162,8 +172,57 @@ describe('runSessionAutoTitle — 用户一个字没写(合成描述)', () => {
     expect(persistCalls(deps)).toEqual([
       ['设计稿-v3.png', 'New Maker'],
       ['这个报错怎么修', 'New Maker'],
+      // 用户文字那次也没写进去 → 智能标题的期望值仍是草稿占位。
       ['登录失败排查', 'New Maker'],
     ]);
+  });
+
+  it('占位写入回执丢失(UPDATE 已提交但回读失败)后,用户文字仍能替换它', async () => {
+    // persistSessionTitleIfStillDraft 的 UPDATE 与回读是两次 worker RPC。回读那一跳
+    // 失败时更新其实已经提交,调用方只看到一个异常 —— 归属若按"写成功才记",这条
+    // 合成标题之后会被当成用户手动改的名而永久跳过替换(review P1)。
+    const deps = makeDeps({
+      // 第一次(写合成占位)抛错;之后正常。
+      persistTitle: vi
+        .fn(async () => true)
+        .mockRejectedValueOnce(new Error('db worker restarted')),
+    });
+
+    const first = await runSessionAutoTitle(
+      { sessionId: 's1', text: '设计稿-v3.png', agentKind: 'codex', isUserText: false },
+      deps,
+    );
+    // 写入结果未知 → 不声称已应用,也绝不标记完成。
+    expect(first).toEqual({ applied: false, done: false });
+
+    await runSessionAutoTitle({ sessionId: 's1', text: '这个报错怎么修', agentKind: 'codex' }, deps);
+
+    // 归属仍在 → 资格检查认出库里那个合成标题,用户文字按它当期望值覆写。
+    expect(persistCalls(deps)).toEqual([
+      ['设计稿-v3.png', 'New Maker'],
+      ['这个报错怎么修', '设计稿-v3.png'],
+      ['登录失败排查', '这个报错怎么修'],
+    ]);
+  });
+
+  it('标题已不是系统占位时,预检顺手回收过期归属', async () => {
+    // 预检会短路掉 runSessionAutoTitle,那边的回收走不到 —— 归属会一直留到进程结束,
+    // 里面还存着用户输入过的文件名/文字(review)。
+    const { isUntitledSessionAwaitingAutoTitle } = await import('../../localDb/ipc/sessions.js');
+    const eligible = vi.mocked(isUntitledSessionAwaitingAutoTitle);
+
+    await runSessionAutoTitle(
+      { sessionId: 's1', text: '设计稿-v3.png', agentKind: 'codex', isUserText: false },
+      makeDeps(),
+    );
+    eligible.mockClear();
+    eligible.mockResolvedValueOnce(false);
+    await isSessionAutoTitleEligible('s1');
+
+    // 回收后再问一次:不再带着过期的合成串去问 DB。
+    eligible.mockResolvedValueOnce(true);
+    await isSessionAutoTitleEligible('s1');
+    expect(eligible).toHaveBeenLastCalledWith('s1', undefined);
   });
 
   it('已有合成占位时,再来一条纯附件消息不改标题(与本机路径一致)', async () => {

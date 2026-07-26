@@ -16,7 +16,8 @@
  *        status=deleted/archived → 移出分片;落到未知 session → 丢弃(后续 snapshot 带最终态)。
  *      · 新建(`requestRemoteReseed`):`sessions:created` push 无 row 数据 → 触发该设备重拉。
  *    唯一例外是**投影层**的标题预览(`setPendingTitlePreview`):它不写分片、只在权威
- *    标题仍是默认占位时顶替显示,被控端标题一到就自动让位。分片数据仍是纯镜像。
+ *    标题仍是系统占位(默认名 / fork 占位 / 本端登记过的合成占位)时顶替显示,被控端
+ *    写下真正的标题一到就自动让位。分片数据仍是纯镜像。
  *  - **复用本地渲染管线**:每条 session 注入 `deviceLinkDeviceId/Name/ConnectionStatus`
  *    后喂给 `groupSessions`。
  *  - **origin 注册表**:`sessionId → deviceId`(`getSessionDeviceId`),供传输层 / SessionView 用。
@@ -111,6 +112,25 @@ function sameDeviceList(a: RemoteDeviceSummary[], b: RemoteDeviceSummary[]): boo
 
 /** 被控端建会话时的默认标题;权威标题仍等于它 = 还没起过名。 */
 const DEFAULT_REMOTE_SESSION_TITLE = 'New Maker';
+/**
+ * fork 会话的占位标题前缀("[Fork] …" / "[Fork·已剥离] …",非 i18n 串)。
+ * 与被控端 `localDb/ipc/sessions.ts` 的 FORK_PLACEHOLDER_TITLE_PREFIX 同源;两边
+ * 同样要求带 parentSessionId,免得用户手动改名成 "[Fork] ..." 的普通会话被误判。
+ */
+const FORK_PLACEHOLDER_TITLE_PREFIX = '[Fork';
+
+/**
+ * 已落地成权威标题的**系统合成占位**(sessionId → 标题串)。
+ *
+ * 纯附件的首条消息会让被控端把标题写成文件名 /「图片」这类合成占位。用户随后打下
+ * 第一句话时被控端会改名,控制端本该同样即时预览 —— 但那时权威标题已经不是
+ * "New Maker",只看默认占位的话预览会被一律拒掉,即时性恰好在这条恢复路径上缺席
+ * (review P1)。这里记住"这串是我们自己登记过的系统占位",让它和默认标题同等看待。
+ *
+ * 只认控制端自己预览过、随后被权威标题原样确认的串 —— 它与被控端用同一套归一化
+ * 算出,必然逐字相等。用户手动改的名不在其中,`user rename wins` 不受影响。
+ */
+const landedSystemTitles = new Map<string, string>();
 
 /**
  * 「发送瞬间的标题预览」——控制端本地叠加层,**不写进分片**。
@@ -121,20 +141,41 @@ const DEFAULT_REMOTE_SESSION_TITLE = 'New Maker';
  *
  * 为什么这不破坏「分片 = 纯镜像、不做乐观覆盖」原则:
  *  - 分片里的 session 行一个字节都没被改写,预览只作用于 recompute 的投影;
- *  - 仅在权威标题仍是默认占位时生效 —— 被控端真实标题(占位或智能标题)一旦到达
- *    就自动让位并回收条目,不需要显式失效逻辑;snapshot / anti-entropy 重建同理。
+ *  - 仅在权威标题仍是**系统占位**时生效 —— 被控端写下真正的标题(智能标题或用户
+ *    改名)一旦到达就自动让位并回收条目,不需要显式失效逻辑;snapshot /
+ *    anti-entropy 重建同理。
  *
  * 边界:消息若最终没送达,被控端不会起名,预览会一直顶着(展示的是用户自己刚发的
- * 内容,不误导);重启后预览不存在,回落到权威的 "New Maker"。
+ * 内容,不误导);重启后预览不存在,回落到权威标题。
  */
 const pendingTitlePreview = new Map<string, string>();
 
-/** 应用标题预览:权威标题已不是默认占位时让位并回收。 */
+/** 该标题是否仍属"系统占位"(可被预览顶替)。 */
+function isSystemOwnedTitle(session: Pick<Session, 'id' | 'title' | 'parentSessionId'>): boolean {
+  if (session.title === DEFAULT_REMOTE_SESSION_TITLE) return true;
+  if (session.parentSessionId && session.title.startsWith(FORK_PLACEHOLDER_TITLE_PREFIX)) return true;
+  return landedSystemTitles.get(session.id) === session.title;
+}
+
+/** 会话彻底离场(删除 / 归档 / 设备移除 / 整体清空)时回收叠加层两张表。 */
+function dropTitleOverlay(sessionId: string): void {
+  pendingTitlePreview.delete(sessionId);
+  landedSystemTitles.delete(sessionId);
+}
+
+/** 应用标题预览:权威标题不再是系统占位时让位并回收。 */
 function withPendingTitle(session: Session): Session {
   const preview = pendingTitlePreview.get(session.id);
   if (!preview) return session;
-  if (session.title !== DEFAULT_REMOTE_SESSION_TITLE) {
+  if (session.title === preview) {
+    // 预览已被权威标题原样确认 —— 回收预览,但记住这串是系统合成的:纯附件首条
+    // 消息之后,用户打下第一句话时还要能顶替它。
     pendingTitlePreview.delete(session.id);
+    landedSystemTitles.set(session.id, session.title);
+    return session;
+  }
+  if (!isSystemOwnedTitle(session)) {
+    dropTitleOverlay(session.id);
     return session;
   }
   return { ...session, title: preview };
@@ -273,10 +314,10 @@ const actions = {
     }
     const status = patch.status;
     if (status === 'deleted' || status === 'archived') {
-      // 预览随会话一起离场:留着的话 removeDevice 也回收不到(它只遍历分片里还在的
-      // 会话),之后 unarchive / reseed 会把边界前的旧预览顶回一个仍是默认标题的
+      // 叠加层随会话一起离场:留着的话 removeDevice 也回收不到(它只遍历分片里还在的
+      // 会话),之后 unarchive / reseed 会把边界前的旧预览顶回一个仍是系统占位的
       // 会话上(PR #510 review)。
-      pendingTitlePreview.delete(sessionId);
+      dropTitleOverlay(sessionId);
       shard.sessions = shard.sessions.filter((s) => s.id !== sessionId);
       recompute();
       return;
@@ -356,10 +397,10 @@ const actions = {
     // 的 epoch 立即失效,且下次 bootstrap 拿到更高 epoch,不会与断连前在途的 epoch 撞值。即使尚未建
     // shard(首拉未完成就被移除)也要 bump,否则在途首拉 await 回来仍能通过 isLatestSnapshotEpoch 加回。
     snapshotEpoch.set(deviceId, (snapshotEpoch.get(deviceId) ?? 0) + 1);
-    // 标题预览随分片一起丢弃:撤销授权 / 关闭控制后该设备的会话已不在视图里,
-    // 留着会在下次重新接入时把边界前的旧预览顶回一个仍是默认标题的会话上。
+    // 标题叠加层随分片一起丢弃:撤销授权 / 关闭控制后该设备的会话已不在视图里,
+    // 留着会在下次重新接入时把边界前的旧预览顶回一个仍是系统占位的会话上。
     for (const session of shards.get(deviceId)?.sessions ?? []) {
-      pendingTitlePreview.delete(session.id);
+      dropTitleOverlay(session.id);
     }
     const shardDeleted = shards.delete(deviceId);
     const failureCleared = setBootstrapFailed(deviceId, false);
@@ -372,9 +413,10 @@ const actions = {
     // 所有设备 epoch 无条件**自增**(不 clear-to-0,见 snapshotEpoch 注释的 ABA):清空时在途
     // 首拉立即失效;下一轮 bootstrap 拿到更高 epoch,不会与清空前的 epoch 撞值把陈旧 snapshot 盖回。
     for (const [k, v] of snapshotEpoch) snapshotEpoch.set(k, v + 1);
-    // 登出 / device-link stopped 是明确的生命周期边界:预览是本次会话期的临时
+    // 登出 / device-link stopped 是明确的生命周期边界:叠加层是本次会话期的临时
     // 显示态,跨过边界后不该复活(也避免长期留存用户输入的文本)。
     pendingTitlePreview.clear();
+    landedSystemTitles.clear();
     const failureChanged = bootstrapFailedDeviceIds.size > 0;
     if (failureChanged) bootstrapFailedDeviceIds = new Set();
     if (shards.size === 0) {
@@ -398,12 +440,14 @@ const actions = {
     const next = title.trim();
     if (!sessionId || !next) return;
     if (pendingTitlePreview.get(sessionId) === next) return;
-    // 权威标题已经不是默认占位(被控端起过名 / 用户改过名)→ 预览本来就不会生效,
+    // 权威标题已经不是系统占位(智能标题已落 / 用户改过名)→ 预览本来就不会生效,
     // 直接 no-op,省掉一次「写入 → recompute → withPendingTitle 立刻回收」的空转。
+    // 反过来,合成占位与 fork 占位仍算系统占位:被控端正准备把它们换掉,控制端这
+    // 一步就是要抢在隧道往返之前先顶上(review P1)。
     const known = sessionDeviceIndex.get(sessionId);
     if (known) {
       const row = shards.get(known)?.sessions.find((s) => s.id === sessionId);
-      if (row && row.title !== DEFAULT_REMOTE_SESSION_TITLE) return;
+      if (row && !isSystemOwnedTitle(row)) return;
     }
     pendingTitlePreview.set(sessionId, next);
     recompute();
@@ -412,6 +456,7 @@ const actions = {
   /** 测试专用:清空标题预览叠加层。 */
   __resetPendingTitlePreviewForTest(): void {
     pendingTitlePreview.clear();
+    landedSystemTitles.clear();
   },
 
   /** refresh anti-entropy 用:取某设备当前缓存分片，调用方只读。 */

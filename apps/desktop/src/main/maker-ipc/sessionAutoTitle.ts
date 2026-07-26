@@ -124,7 +124,15 @@ export function __resetSessionAutoTitleStateForTest(): void {
 
 /** 会话是否还需要自动起名(标题仍是系统占位)。 */
 export async function isSessionAutoTitleEligible(sessionId: string): Promise<boolean> {
-  return isUntitledSessionAwaitingAutoTitle(sessionId, synthesizedPlaceholders.get(sessionId));
+  const eligible = await isUntitledSessionAwaitingAutoTitle(
+    sessionId,
+    synthesizedPlaceholders.get(sessionId),
+  );
+  // 不合格 = 标题已不是系统占位(用户改过名 / 已起过名),记着的合成串必然过期。
+  // 这条预检会短路掉 runUnsynchronized,那边的回收走不到,归属会留到进程结束
+  // (review)。抛错时刻意不删:读不出状态属于瞬时失败,不能拿它当作废依据。
+  if (!eligible) synthesizedPlaceholders.delete(sessionId);
+  return eligible;
 }
 
 async function runUnsynchronized(
@@ -176,7 +184,15 @@ async function runUnsynchronized(
   }
 
   if (request.isUserText === false) {
-    if (placeholderPersisted) synthesizedPlaceholders.set(request.sessionId, placeholder);
+    // 不论写入是否**确认**成功都记归属。`persistSessionTitleIfStillDraft` 的 UPDATE
+    // 与回读是两次 worker RPC:回读那一跳失败(worker 重启等)时更新其实已经提交,
+    // 但这里只看到一个 false —— 不记归属的话,下一条文字消息会把库里这个合成标题
+    // 当成用户手动改的名而永久跳过替换(review P1)。
+    //
+    // 无条件记录是安全的:归属只是"这个串是系统合成的"这一条信息,资格判定仍拿它
+    // 与 DB 实际标题比对(getOverwritableAutoTitle)。真没写进去时它压根不匹配,
+    // 不会产生任何效果;标题已被用户改名时下一轮的 null 分支会把它回收掉。
+    synthesizedPlaceholders.set(request.sessionId, placeholder);
     // 还没用用户文字起名 —— 等他打字,别标记完成。
     return { applied: placeholderPersisted, done: false };
   }

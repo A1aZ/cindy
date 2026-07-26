@@ -132,6 +132,40 @@ describe('maker auth IPC handlers', () => {
     });
   });
 
+  it('reassembles URL and code tokens split across arbitrary stdout chunks', async () => {
+    const harness = new IpcHarness();
+    const broadcast = vi.fn();
+    const triggerAgentLogin = vi.fn().mockImplementation(async (
+      _agentKind,
+      options: { mode?: string; onProgress: (msg: string) => void },
+    ) => {
+      options.onProgress('stdout:Open https://auth.openai.com/cod');
+      options.onProgress('stdout:ex/device\nEnter code AB');
+      options.onProgress('stdout:CD-EF');
+      options.onProgress('stdout:GH\n');
+      return { authenticated: false, errorReason: 'login_cancelled' };
+    });
+
+    registerMakerAuthHandlers(
+      harness,
+      createMakerStub({ triggerAgentLogin }),
+      broadcast,
+      () => null,
+    );
+
+    await harness.invoke(MAKER_INVOKE.AUTH_TRIGGER_LOGIN, 'codex', {
+      mode: 'device-code',
+    });
+
+    expect(broadcast).toHaveBeenCalledWith(MAKER_PUSH.AUTH_LOGIN_PROGRESS, {
+      agentKind: 'codex',
+      phase: 'device-code',
+      mode: 'device-code',
+      verificationUrl: 'https://auth.openai.com/codex/device',
+      userCode: 'ABCD-EFGH',
+    });
+  });
+
   it('rejects unsupported login modes before invoking Maker', async () => {
     const harness = new IpcHarness();
     const triggerAgentLogin = vi.fn();

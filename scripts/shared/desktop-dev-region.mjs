@@ -3,7 +3,7 @@ export const DESKTOP_DEV_REGIONS = Object.freeze(["cn", "global", "dev"]);
 
 /**
  * 解析 desktop dev 区域。命令行显式值优先，保留 CINDY_AUTH_REGION 作为
- * CI / 老脚本兼容入口；无配置时仍默认国内版。
+ * CI / 老脚本兼容入口；无配置时默认 Global。
  */
 export function resolveDesktopDevRegion(argv, env = process.env) {
   let cliRegion;
@@ -30,7 +30,7 @@ export function resolveDesktopDevRegion(argv, env = process.env) {
     cliRegion = value;
   }
 
-  const region = (cliRegion ?? env.CINDY_AUTH_REGION?.trim()) || "cn";
+  const region = (cliRegion ?? env.CINDY_AUTH_REGION?.trim()) || "global";
   if (!DESKTOP_DEV_REGIONS.includes(region)) {
     throw new Error(
       `invalid desktop dev region: ${region}; expected cn, global or dev`,

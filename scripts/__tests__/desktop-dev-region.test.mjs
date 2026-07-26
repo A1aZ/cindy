@@ -8,11 +8,11 @@ import {
   stripDesktopDevRegionArgs,
 } from "../shared/desktop-dev-region.mjs";
 
-test("desktop dev region defaults to cn and keeps the legacy env fallback", () => {
-  assert.equal(resolveDesktopDevRegion([], {}), "cn");
+test("desktop dev region defaults to global and keeps the legacy env fallback", () => {
+  assert.equal(resolveDesktopDevRegion([], {}), "global");
   assert.equal(
-    resolveDesktopDevRegion([], { CINDY_AUTH_REGION: "global" }),
-    "global",
+    resolveDesktopDevRegion([], { CINDY_AUTH_REGION: "cn" }),
+    "cn",
   );
 });
 
@@ -42,6 +42,18 @@ test("desktop dev region rejects missing, duplicate, and unsupported values", ()
 });
 
 test("remote dev selects the repository manifest matching the region", () => {
+  assert.deepEqual(
+    resolveDesktopDevStartupConfig({
+      argv: [],
+      env: {},
+      mode: "remote",
+    }),
+    {
+      region: "global",
+      endpointsCdn: false,
+      endpointManifestFile: "config/endpoint.global.json",
+    },
+  );
   assert.deepEqual(
     resolveDesktopDevStartupConfig({
       argv: ["--region=cn"],

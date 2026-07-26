@@ -3,7 +3,7 @@
  * dev-local-env.mjs — dev(local 模式)的端点清单包装。
  *
  * 生成 config/endpoint.local.json(api/auth/device-link 指 localhost,其余抄
- * cn 正本;见 scripts/shared/endpoint-local-file.mjs)并经
+ * 所选 region 正本;见 scripts/shared/endpoint-local-file.mjs)并经
  * XDT_ENDPOINT_MANIFEST_FILE 指给主进程(clientEndpointsService file 模式)。
  * 已显式设置 XDT_ENDPOINT_MANIFEST_FILE 时尊重用户值,不生成不覆盖。
  *
@@ -24,7 +24,10 @@ if (!command) {
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const env = { ...process.env, XDT_DESKTOP_DEV_MODE: 'local' };
 if (!env.XDT_ENDPOINT_MANIFEST_FILE?.trim()) {
-  env.XDT_ENDPOINT_MANIFEST_FILE = generateEndpointLocalFile({ repoRoot });
+  env.XDT_ENDPOINT_MANIFEST_FILE = generateEndpointLocalFile({
+    repoRoot,
+    region: env.CINDY_AUTH_REGION?.trim() || 'global',
+  });
   console.log(`[dev-local-env] endpoint manifest → ${env.XDT_ENDPOINT_MANIFEST_FILE}`);
 }
 

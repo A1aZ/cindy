@@ -12,6 +12,8 @@
  */
 
 import type { Catalog, Provider, CatalogModel, AgentKind, Effort, ProviderPreset } from './types.js';
+import { findReservedOAuthExtraParam } from './provider-oauth.js';
+import { isProviderRequestPath } from './provider-url.js';
 
 export { BUNDLED_CATALOG, BUILTIN_PROVIDERS } from './builtin.js';
 
@@ -29,19 +31,6 @@ function isAgentKind(v: unknown): v is AgentKind {
 
 function isEffort(v: unknown): v is Effort {
   return typeof v === 'string' && (EFFORTS as readonly string[]).includes(v);
-}
-
-/** 精确推理路径必须是同源绝对路径，不能借 `//host` 换出站主机或带 fragment。 */
-function isRequestPath(v: unknown): v is string {
-  return (
-    typeof v === 'string'
-    && v.length > 1
-    && v.length <= 2_048
-    && v.startsWith('/')
-    && !v.startsWith('//')
-    && !v.includes('#')
-    && !/[\r\n]/.test(v)
-  );
 }
 
 function assert(cond: unknown, msg: string): asserts cond {
@@ -136,6 +125,14 @@ function validateOAuthDescriptor(p: Provider): void {
       Object.values(raw[field] as Record<string, unknown>).every((value) => typeof value === 'string'),
       `provider '${p.id}' auth.oauth.${field} invalid`,
     );
+    const collision = findReservedOAuthExtraParam(
+      raw[field] as Record<string, unknown>,
+      flow,
+    );
+    assert(
+      collision === null,
+      `provider '${p.id}' auth.oauth.${field} cannot override '${String(collision)}'`,
+    );
   };
   if (flow === 'authorization-code') validateParams('extraAuthParams');
   else validateParams('extraDeviceParams');
@@ -206,7 +203,7 @@ function validateProvider(p: Provider): void {
     }
     if (routing.requestPath !== undefined) {
       assert(
-        isRequestPath(routing.requestPath),
+        isProviderRequestPath(routing.requestPath),
         `provider '${p.id}' routing[${agent}].requestPath invalid`,
       );
     }
@@ -388,7 +385,7 @@ function normalizePresetRuntimeOptions(p: ProviderPreset): ProviderPreset {
       next = rest;
       changed = true;
     }
-    if (next.requestPath !== undefined && !isRequestPath(next.requestPath)) {
+    if (next.requestPath !== undefined && !isProviderRequestPath(next.requestPath)) {
       const { requestPath: _drop, ...rest } = next;
       next = rest;
       changed = true;

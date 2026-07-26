@@ -20,6 +20,10 @@ import type {
   CustomProviderRuntimeConfig,
   OAuthProviderDescriptor,
 } from '@cindy/model-providers';
+import {
+  findReservedOAuthExtraParam,
+  isProviderRequestPath,
+} from '@cindy/model-providers';
 
 import { getDbClient } from '../localDb/client/current.js';
 import { customProviders } from '../localDb/schema.js';
@@ -57,15 +61,7 @@ function validateRuntime(agent: string, rt: unknown): ValidationResult {
   }
   if (
     r.requestPath !== undefined
-    && (
-      typeof r.requestPath !== 'string'
-      || r.requestPath.length <= 1
-      || r.requestPath.length > 2_048
-      || !r.requestPath.startsWith('/')
-      || r.requestPath.startsWith('//')
-      || r.requestPath.includes('#')
-      || /[\r\n]/.test(r.requestPath)
-    )
+    && !isProviderRequestPath(r.requestPath)
   ) {
     return invalid(`runtime '${agent}' requestPath invalid`);
   }
@@ -191,6 +187,13 @@ function validateAuthSection(auth: unknown): ValidationResult {
       )
     ) {
       return invalid(`auth.oauth.${field} invalid`);
+    }
+    const collision = findReservedOAuthExtraParam(
+      o[field] as Record<string, unknown>,
+      flow,
+    );
+    if (collision) {
+      return invalid(`auth.oauth.${field} cannot override '${collision}'`);
     }
   }
   if (o.modelsDiscoveryUrl !== undefined) {
@@ -393,15 +396,7 @@ function parseRuntimes(raw: string): Partial<Record<AgentKind, CustomProviderRun
     ) {
       entry.wireProtocol = r.wireProtocol;
     }
-    if (
-      typeof r.requestPath === 'string'
-      && r.requestPath.length > 1
-      && r.requestPath.length <= 2_048
-      && r.requestPath.startsWith('/')
-      && !r.requestPath.startsWith('//')
-      && !r.requestPath.includes('#')
-      && !/[\r\n]/.test(r.requestPath)
-    ) {
+    if (isProviderRequestPath(r.requestPath)) {
       entry.requestPath = r.requestPath;
     }
     if (r.headers && typeof r.headers === 'object' && !Array.isArray(r.headers)) {

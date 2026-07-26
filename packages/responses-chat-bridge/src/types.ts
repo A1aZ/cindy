@@ -23,6 +23,14 @@ export type ResponsesContentPart = ResponsesInputTextPart | ResponsesInputImageP
   [key: string]: unknown;
 };
 
+export interface ChatToolCallExtraContent {
+  [key: string]: unknown;
+  google?: {
+    [key: string]: unknown;
+    thought_signature?: string;
+  };
+}
+
 export type ResponsesInputItem =
   | {
       type?: 'message';
@@ -34,6 +42,7 @@ export type ResponsesInputItem =
       call_id: string;
       name: string;
       arguments: string;
+      extra_content?: ChatToolCallExtraContent;
     }
   | {
       type: 'function_call_output';
@@ -86,9 +95,7 @@ export interface ChatAssistantMessage {
     type: 'function';
     function: { name: string; arguments: string };
     /** OpenAI 兼容层的厂商扩展；当前仅用于 Google Gemini thought signature。 */
-    extra_content?: {
-      google?: { thought_signature?: string };
-    };
+    extra_content?: ChatToolCallExtraContent;
   }>;
 }
 

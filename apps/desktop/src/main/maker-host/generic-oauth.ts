@@ -503,11 +503,10 @@ async function runDeviceCodeGrant(
   abort: AbortController,
   options?: GenericOAuthLoginOptions,
 ): Promise<TokenResponse> {
-  const requestBody = new URLSearchParams({
-    client_id: oauth.clientId,
-    scope: oauth.scopes,
-    ...oauth.extraDeviceParams,
-  });
+  const requestBody = new URLSearchParams(oauth.extraDeviceParams ?? {});
+  // 标准字段永远以描述符为准；即使未来有未经过目录校验的调用方也不能被 extras 覆盖。
+  requestBody.set('client_id', oauth.clientId);
+  requestBody.set('scope', oauth.scopes);
   const authorizationResponse = await io.fetchImpl(oauth.deviceAuthorizationUrl, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -623,16 +622,16 @@ export async function runGenericOAuthLogin(
       const redirectUri = `http://127.0.0.1:${listener!.port}/callback`;
 
       const authUrl = new URL(oauth.authorizeUrl);
-      authUrl.searchParams.append('response_type', 'code');
-      authUrl.searchParams.append('client_id', oauth.clientId);
-      authUrl.searchParams.append('redirect_uri', redirectUri);
-      authUrl.searchParams.append('scope', oauth.scopes);
-      authUrl.searchParams.append('code_challenge', challenge);
-      authUrl.searchParams.append('code_challenge_method', 'S256');
-      authUrl.searchParams.append('state', state);
       for (const [k, v] of Object.entries(oauth.extraAuthParams ?? {})) {
         authUrl.searchParams.append(k, v);
       }
+      authUrl.searchParams.set('response_type', 'code');
+      authUrl.searchParams.set('client_id', oauth.clientId);
+      authUrl.searchParams.set('redirect_uri', redirectUri);
+      authUrl.searchParams.set('scope', oauth.scopes);
+      authUrl.searchParams.set('code_challenge', challenge);
+      authUrl.searchParams.set('code_challenge_method', 'S256');
+      authUrl.searchParams.set('state', state);
 
       // 先注册 code 等待再开浏览器（已授权的浏览器可能在 openExternal 返回前就完成重定向）。
       const codePromise = new Promise<string>((resolve, reject) => {

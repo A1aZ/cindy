@@ -448,6 +448,23 @@ describe('provider:models-fetch handler', () => {
 });
 
 describe('provider:oauth mutation ordering', () => {
+  it('cancels an active login before removing OAuth credentials', async () => {
+    const harness = new IpcHarness();
+    const calls: string[] = [];
+    const deps = makeDeps({
+      oauthCancel: vi.fn(() => calls.push('cancel')),
+      oauthLogout: vi.fn(async () => {
+        calls.push('logout');
+      }),
+    });
+    registerProviderHandlers(harness, deps);
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_OAUTH_LOGOUT, 'openrouter'),
+    ).resolves.toEqual({ ok: true });
+    expect(calls).toEqual(['cancel', 'logout']);
+  });
+
   it('invalidates post-login work when the provider is edited before discovery finishes', async () => {
     mountDb();
     const harness = new IpcHarness();

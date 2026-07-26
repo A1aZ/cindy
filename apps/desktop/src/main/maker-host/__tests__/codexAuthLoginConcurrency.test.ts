@@ -101,4 +101,39 @@ describe('DesktopCodexAuthAdapter login single-flight', () => {
     await expect(deviceCode).resolves.toMatchObject({ errorReason: 'login_cancelled' });
     expect(runTriggerLogin).toHaveBeenCalledTimes(1);
   });
+
+  it('queues a new login until an in-flight logout fully settles', async () => {
+    const { DesktopCodexAuthAdapter } = await import('../auth-adapters.js');
+    const adapter = Object.create(DesktopCodexAuthAdapter.prototype) as InstanceType<
+      typeof DesktopCodexAuthAdapter
+    >;
+    let finishLogout!: () => void;
+    const logoutOperation = new Promise<void>((resolve) => {
+      finishLogout = resolve;
+    });
+    Object.defineProperty(adapter, 'logoutOperation', {
+      configurable: true,
+      writable: true,
+      value: logoutOperation,
+    });
+    const runTriggerLogin = vi.fn(async (): Promise<AuthState> => ({
+      authenticated: true,
+      authSource: 'oauth',
+    }));
+    Object.defineProperty(adapter, 'runTriggerLogin', {
+      configurable: true,
+      value: runTriggerLogin,
+    });
+
+    const login = adapter.triggerLogin({ mode: 'device-code' });
+    await Promise.resolve();
+    expect(runTriggerLogin).not.toHaveBeenCalled();
+
+    finishLogout();
+    await expect(login).resolves.toMatchObject({
+      authenticated: true,
+      authSource: 'oauth',
+    });
+    expect(runTriggerLogin).toHaveBeenCalledOnce();
+  });
 });

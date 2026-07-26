@@ -597,7 +597,10 @@ export function buildRemotePluginSetupPresentation(
     if (phase === 'satisfied') satisfiedCount += 1;
 
     // 分组按首次出现顺序保留;groupId 缺失的步骤各自成组,不并进同一个「空组」。
-    const groupId = trimmedOrNull(rawStep.groupId) ?? `${step.id}-group`;
+    // fallback 必须带 index:远端 payload 若重复用同一个 step id(甚至全都缺 id、
+    // 一起落到 `step-${index}` 之外的同名值),只按 step.id 造的 key 会把它们又并
+    // 回一组,与上面这句注释自相矛盾(#540 review)。
+    const groupId = trimmedOrNull(rawStep.groupId) ?? `${step.id}-group-${index}`;
     const existing = groupsById.get(groupId);
     if (existing) {
       existing.steps.push(step);

@@ -695,7 +695,7 @@ describe('interaction shared model', () => {
     expect(presentation.terminal).toBe(true);
     expect(presentation.stepCount).toBe(1);
     expect(presentation.groups).toEqual([{
-      id: 'a-group',
+      id: 'a-group-0',
       anyOf: false,
       steps: [{
         id: 'a',
@@ -714,6 +714,19 @@ describe('interaction shared model', () => {
       requestId: 's1',
       ghost: { id: 'g', name: 'G', iconDataUrl: 'https://example.com/icon.png' },
     }).iconDataUrl).toBeNull();
+
+    // 远端重复用同一个 step id 且都缺 groupId 时,仍必须各自成组——只按 step.id 造
+    // fallback key 会把它们并回一组,与「缺 groupId 各自成组」的语义矛盾(#540 review)。
+    const duplicated = buildRemotePluginSetupPresentation({
+      kind: 'plugin_setup',
+      requestId: 's1',
+      steps: [
+        { id: 'same', title: '第一步' },
+        { id: 'same', title: '第二步' },
+      ],
+    });
+    expect(duplicated.groups.map((g) => g.id)).toEqual(['same-group-0', 'same-group-1']);
+    expect(duplicated.groups.map((g) => g.steps.length)).toEqual([1, 1]);
 
     // 换个 kind 传进来必须返回空投影,而不是从任意 request 上刮字段让误用「看起来正常」。
     expect(buildRemotePluginSetupPresentation({

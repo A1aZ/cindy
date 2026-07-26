@@ -124,6 +124,25 @@ export function createResponsesChatHandler(
         throw error;
       }
 
+      let upstreamUrl: string;
+      try {
+        upstreamUrl = joinUrl(
+          provider.upstreamBase,
+          provider.chatCompletionsPath ?? '/chat/completions',
+        );
+      } catch (error) {
+        log.error?.('responses-chat bridge invalid upstream configuration', {
+          model: request.model,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        writeJson(
+          res,
+          502,
+          responsesError(502, 'invalid_upstream_config', 'provider upstream configuration is invalid'),
+        );
+        return;
+      }
+
       let providerHeaders: Record<string, string>;
       try {
         providerHeaders = await provider.buildHeaders();
@@ -141,7 +160,7 @@ export function createResponsesChatHandler(
       res.once('close', abortUpstream);
       let upstream: Response;
       try {
-        upstream = await fetchImpl(joinUrl(provider.upstreamBase, provider.chatCompletionsPath ?? '/chat/completions'), {
+        upstream = await fetchImpl(upstreamUrl, {
           method: 'POST',
           headers: {
             ...providerHeaders,

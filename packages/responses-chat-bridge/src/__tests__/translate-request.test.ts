@@ -153,6 +153,37 @@ describe('translateResponsesRequest', () => {
     ).toBeUndefined();
   });
 
+  it('drops malformed Google tool-call metadata instead of spreading it as an object', () => {
+    const input = base({
+      input: [{
+        type: 'function_call',
+        call_id: 'c1',
+        name: 'Read',
+        arguments: '{}',
+        extra_content: {
+          vendor: { cache_key: 'keep-me' },
+          google: 'malformed',
+        },
+      }],
+    });
+    const plain = translateResponsesRequest(input);
+    expect(
+      (plain.messages[0] as { tool_calls?: Array<{ extra_content?: unknown }> })
+        .tool_calls?.[0]?.extra_content,
+    ).toEqual({ vendor: { cache_key: 'keep-me' } });
+
+    const gemini = translateResponsesRequest(input, {
+      capabilities: { googleThoughtSignaturePlaceholder: true },
+    });
+    expect(
+      (gemini.messages[0] as { tool_calls?: Array<{ extra_content?: unknown }> })
+        .tool_calls?.[0]?.extra_content,
+    ).toEqual({
+      vendor: { cache_key: 'keep-me' },
+      google: { thought_signature: 'skip_thought_signature_validator' },
+    });
+  });
+
   it('normalizes custom tool history and flattens text-like tool output parts', () => {
     const out = translateResponsesRequest(base({
       input: [

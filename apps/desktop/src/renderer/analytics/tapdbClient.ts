@@ -8,7 +8,13 @@
  *   在 PIPL 与 GDPR 下都属于个人信息;TapTap 自己的合规文档也要求
  *   `if (用户同意隐私协议) { init(...) }`。真相由 main 持有,本模块只消费
  *   `electronAPI.getAnalyticsSettings().allowed` 这个结论:
- *     allowed = 已同意隐私政策 && 使用统计开关开启
+ *     allowed = 正式构建 && 已同意隐私政策 && 使用统计开关开启
+ *
+ * ⚠️ 构建闸(2026-07-26):dev 构建恒 allowed=false,SDK 一律不初始化。dev 的
+ *   renderer 从 `http://localhost:<vite 端口>` 加载、沙箱各有独立 userData,
+ *   localStorage 里的 device_id 每次都是新的,会凭空造出大量"新增设备"污染线上
+ *   口径。理由与逃生口(XDT_TAPDB_DEV=1)见
+ *   main/analytics-settings-store.ts 的 isReportingBuild。
  *
  * 为什么放在 renderer:
  *   TapDB SDK 依赖 `localStorage` / `document` / `window` / `XMLHttpRequest` /

@@ -12,7 +12,11 @@ export interface AnalyticsSettingsPayload {
   analyticsEnabled: boolean;
   /** 用户是否显式设置过开关(盘上有 override)。false = 跟随当前默认值。 */
   analyticsEnabledCustomized: boolean;
-  /** 是否允许初始化 TapDB / 继续上报 = privacyConsentAccepted && analyticsEnabled。 */
+  /**
+   * 是否允许初始化 TapDB / 继续上报
+   * = 正式构建 && privacyConsentAccepted && analyticsEnabled。
+   * 构建闸的理由见 main/analytics-settings-store.ts 的 isReportingBuild。
+   */
   allowed: boolean;
 }
 

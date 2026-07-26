@@ -6687,13 +6687,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     // 标题会一直停在首条纯附件消息的合成占位上(PR #510 review P1)。是否真的该
     // 改名由 runSessionAutoTitle 权威判定。
     const commitAutoTitle = await prepareDeviceLinkAutoTitle(sid, queued);
-    const result = inputCoordinator.steer(
+    // steer 与 enqueue 不同:它会因同会话已有在飞 steer / Stop 边界 / 输入锁而
+    // 返回 false。必须等它落定、受理了才改名 —— 被拒的文本改掉默认名 / 合成占位 /
+    // fork 占位就是凭空改名(review P1)。
+    const accepted = await inputCoordinator.steer(
       sid,
       queued,
       steerOpts,
     );
-    commitAutoTitle();
-    return result;
+    if (accepted) commitAutoTitle();
+    return accepted;
   });
 
   ipcMain.handle(MAKER_INVOKE.INPUT_STOP, async (_e, sessionId: unknown, opts?: unknown) => {

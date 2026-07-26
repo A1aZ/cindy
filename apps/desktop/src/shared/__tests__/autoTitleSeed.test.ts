@@ -306,6 +306,15 @@ describe('deriveAutoTitleSeed — 用户一个字没写', () => {
     expect(seed?.text).toBe('这里为什么会崩');
   });
 
+  it('没有 mention 的消息原样透传,哪怕只有标点/表情', () => {
+    // 「剔除后只剩标点不算文字」只针对剔除残渣。用户亲手打的 `???` 是他消息的
+    // 全部内容,拿它当标题就是所见即所得,这里无权替他判定「这不算话」。
+    expect(deriveAutoTitleSeed(queued({ text: '???' }), LABELS)).toEqual({
+      text: '???',
+      isUserText: true,
+    });
+  });
+
   it('用户手打的 @xxx(无对应 mention)不被剔除,仍算用户文字', () => {
     const seed = deriveAutoTitleSeed(queued({ text: '@张三 帮忙看下' }), LABELS);
 

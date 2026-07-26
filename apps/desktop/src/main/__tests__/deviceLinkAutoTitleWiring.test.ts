@@ -37,18 +37,23 @@ describe('device-link auto-title wiring', () => {
     );
   });
 
-  it('调度发生在输入被 coordinator 接受之后', () => {
-    // 输入被拒时不能留下一个凭空出现的标题 —— commit 必须在 enqueue/steer 之后。
-    for (const [channel, next, accept] of [
-      ['INPUT_ENQUEUE', 'INPUT_COMPACT', 'inputCoordinator.enqueue'],
-      ['INPUT_STEER', 'INPUT_STOP', 'inputCoordinator.steer'],
-    ] as const) {
-      const body = handlerBody(channel, next);
-      const acceptAt = body.indexOf(accept);
-      const commitAt = body.indexOf('commitAutoTitle()');
-      expect(acceptAt).toBeGreaterThan(-1);
-      expect(commitAt).toBeGreaterThan(acceptAt);
-    }
+  it('入队:调度发生在 coordinator 接受之后', () => {
+    // enqueue 是同步的、不会拒绝(重复 clientId 也只是幂等返回),排在它之后即可。
+    const body = handlerBody('INPUT_ENQUEUE', 'INPUT_COMPACT');
+    const acceptAt = body.indexOf('inputCoordinator.enqueue');
+    const commitAt = body.indexOf('commitAutoTitle()');
+    expect(acceptAt).toBeGreaterThan(-1);
+    expect(commitAt).toBeGreaterThan(acceptAt);
+  });
+
+  it('插话:等 steer 落定且受理了才调度', () => {
+    // steer 会因同会话已有在飞 steer / Stop 边界 / 输入锁返回 false。被拒的文本
+    // 改掉默认名 / 合成占位 / fork 占位就是凭空改名(review P1)。
+    const body = handlerBody('INPUT_STEER', 'INPUT_STOP');
+    expect(body).toMatch(/const accepted = await inputCoordinator\.steer\(/);
+    expect(body).toMatch(/if \(accepted\) commitAutoTitle\(\);/);
+    const acceptAt = body.indexOf('await inputCoordinator.steer(');
+    expect(body.indexOf('commitAutoTitle()')).toBeGreaterThan(acceptAt);
   });
 
   it('只对远控调用生效:本机 renderer 走 maker:auto-title,不在这里重复起名', () => {

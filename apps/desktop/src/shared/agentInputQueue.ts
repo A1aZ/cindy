@@ -611,7 +611,11 @@ function describeFileCategory(
  * 条目,会原样保留,不会被误判成无文字。
  */
 
-/** 至少有一个字母/数字/汉字才算「用户真的写了话」。 */
+/**
+ * 是否含字母 / 数字 / 汉字。两处用途都只针对**剔除 token 后的残渣**,不用来判断
+ * 用户原样写下的消息:他真打了 `???` 就该拿 `???` 当标题(所见即所得,与本机
+ * Codex 式即时占位一致),这里无权替他判定「这不算话」。
+ */
 const HAS_WORD_CHAR = /[\p{L}\p{N}]/u;
 
 /**
@@ -677,8 +681,11 @@ function stripMentionTokens(text: string, queued: AgentInputQueuedMessage): stri
     .join('')
     .trim();
   // 剔除后只剩标点(`@a/b.ts,` 这种「chip + 一个逗号」)时不算用户文字,否则标题
-  // 会变成一个孤零零的逗号,还会被当成实质内容送进标题模型。仅在确实剔除过
-  // token 时才收紧,不影响没有 mention 的普通消息。
+  // 会变成一个孤零零的逗号,还会被当成实质内容送进标题模型。
+  //
+  // 刻意只在**确实剔除过 token** 时收紧:没有 mention 的消息一律原样透传,哪怕
+  // 只有标点或表情。那是用户亲手打下的全部内容,拿它当标题是「所见即所得」;
+  // 这里的残渣则从来不是他写的整条消息,两者不能同一把尺子(review)。
   if (strippedAny && !HAS_WORD_CHAR.test(rest)) return '';
   return rest;
 }

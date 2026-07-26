@@ -216,6 +216,27 @@ describe('makerChatStore auto-name — 本机会话', () => {
     expect(autoTitle).not.toHaveBeenCalled();
   });
 
+  it('插话被拒(在飞 steer / Stop 边界 / 输入锁)时不改名', async () => {
+    // 被拒的文本从未被受理,拿它改掉默认名 / 合成占位 / fork 占位就是凭空改名。
+    const steer = vi.fn(async () => false);
+    const getProjection = vi.fn(async () => ({ pendingQueue: [] }));
+    const w = globalThis as unknown as { window: Record<string, unknown> };
+    w.window = { electronAPI: { maker: { autoTitle, input: { steer, getProjection } } } };
+
+    await makerChatStore.steerMessage(
+      SESSION_ID,
+      '这个报错怎么修',
+      'claude-opus-4-7',
+      'medium',
+      'default',
+      '/tmp/wd',
+    );
+    await flushPromises();
+
+    expect(steer).toHaveBeenCalled();
+    expect(autoTitle).not.toHaveBeenCalled();
+  });
+
   it('起名对发送主流程零副作用:桥接缺失或同步抛错都不得向上冒泡', () => {
     // 老版本 preload 没有 autoTitle 时,同步调用会 TypeError —— 起名是
     // fire-and-forget,异常若冒回 sendMessageCore 会打断消息入队。

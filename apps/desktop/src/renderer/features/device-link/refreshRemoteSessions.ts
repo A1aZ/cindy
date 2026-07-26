@@ -83,7 +83,7 @@ export interface RefreshOptions {
 
 /**
  * 重拉结果:
- *  - `ok`:成功落地最新快照(或本次被更新一次取代而让位,语义上无需调用方善后);
+ *  - `ok`:成功落地最新快照;
  *  - `revoked`:被控端在 bootstrap 期间撤销了访问权限 → 调用方应 handleRevoked;
  *  - `superseded`:断连 / 清理等外部状态变化使本次快照失效 → 不是请求失败,等待后续重连;
  *  - `gave-up`:瞬态重试耗尽 / 永久非撤销错误 → 调用方照常收尾(push / reconnect 会兜底补上)。

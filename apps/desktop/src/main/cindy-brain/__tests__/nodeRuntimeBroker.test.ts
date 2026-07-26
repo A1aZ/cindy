@@ -576,6 +576,31 @@ describe('nodeRuntimeBroker · 意外死亡诊断(2026-07-26)', () => {
     expect(message).not.toContain('AppData');
   });
 
+  it('含空格的 POSIX 路径被完整收敛为文件名', async () => {
+    const ghost = fakeGhost();
+    const child = new FakeNodeProcess();
+    const warn = vi.fn();
+    const broker = new GhostNodeRuntimeBroker({
+      getGhost: () => ghost,
+      spawnProcess: () => child as unknown as NodeWorkerProcess,
+      log: { info: vi.fn(), warn },
+    });
+
+    const pending = broker.handleRequest('node-ghost', rpcRequest('slow'));
+    await vi.waitFor(() => expect(child.received).toHaveLength(1));
+    child.stderr.write(
+      'Error: ENOENT /Users/jane/Library/Application Support/Cindy/plugins/demo/worker.cjs\n',
+    );
+    await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+    child.emit('exit', 1, null);
+
+    const result = await pending;
+    const message = (result as { message?: string }).message ?? '';
+    expect(message).toContain('ENOENT');
+    expect(message).not.toContain('Application Support');
+    expect(message).not.toContain('/Users/jane');
+  });
+
   it('陈旧段不被后续良性 chunk 携带进回看窗口', async () => {
     vi.useFakeTimers();
     const ghost = fakeGhost();

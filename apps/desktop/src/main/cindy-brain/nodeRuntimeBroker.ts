@@ -167,8 +167,10 @@ interface WorkerEntry {
   hardKillTimer: NodeJS.Timeout | null;
   mcpInitPromise: Promise<void> | null;
   stopping: boolean;
-  /** 曾发给本 worker 的凭证值(用于退出诊断脱敏);set 保证 O(1) 去重。 */
-  exposedSecretValues: Set<string>;
+  /** 曾发给本 worker 的凭证 key(退出诊断时按 key 临时读取并脱敏)。 */
+  exposedSecretKeys: Set<string>;
+  /** exit 后 stderr drain 用:非 null 表示进程已退出、正在等待管道排空。 */
+  exitDrain: { code: number | null; signal: string | null; error: Error | null; timer: NodeJS.Timeout } | null;
 }
 
 class NodeRpcError extends Error {
@@ -210,10 +212,11 @@ function sanitizePathsInHint(hint: string): string {
   const basename = (p: string) => p.split(/[/\\]/).pop() ?? p;
   return hint
     .replace(/(['"])((?:[A-Z]:[/\\]|\/)[^'"]+)\1/g, (_, q, p) => `${q}${basename(p)}${q}`)
-    // Windows 路径可含空格(如 C:\Users\Jane Doe\AppData\...),所以不把 \s 加
-    // 入排除集;用 newline、引号、括号、方括号做终止符。
+    // Windows/POSIX 路径都可含空格(如 C:\Users\Jane Doe\... 或
+    // /Users/jane/Library/Application Support/...),不把 \s 加入排除集;
+    // 用 newline、引号、括号、方括号做终止符。
     .replace(/[A-Z]:[/\\][^'")\]\n]*/g, basename)
-    .replace(/\/(?:[^\s/'")\]]+\/)+[^\s'")\]]*/g, basename);
+    .replace(/\/(?:[^/'")\]\n]+\/)+[^'")\]\n]*/g, basename);
 }
 
 type UtilityFork = typeof utilityProcess.fork;
@@ -555,9 +558,7 @@ export class GhostNodeRuntimeBroker {
         }
       }
       if (hostSecrets) {
-        for (const v of Object.values(hostSecrets)) {
-          if (v.length >= 6) entry.exposedSecretValues.add(v);
-        }
+        for (const k of Object.keys(hostSecrets)) entry.exposedSecretKeys.add(k);
       }
       const pendingResult = this.sendRpc(
         entry,
@@ -970,7 +971,8 @@ export class GhostNodeRuntimeBroker {
       hardKillTimer: null,
       mcpInitPromise: null,
       stopping: false,
-      exposedSecretValues: new Set(),
+      exposedSecretKeys: new Set(),
+      exitDrain: null,
     };
     this.workers.set(key, entry);
     if (this.destroyed || this.stoppedGhosts.has(ghost.manifest.id)) {
@@ -988,13 +990,26 @@ export class GhostNodeRuntimeBroker {
       }
       // 按段带时间戳截存,退出时只取回看窗口内的段,不让老日志被新 chunk 携带。
       entry.stderrSegments.push({ text: decoded, at: this.now() });
-      // 总量控制:丢弃最老的段直到总字节 <= EXIT_STDERR_CAP。
+      // 总量控制:保留尾部 EXIT_STDERR_CAP 字符。先丢弃最老整段,若仍超限则
+      // 裁剪最老段的头部(保留其尾部),确保总量严格不超。
       let total = entry.stderrSegments.reduce((sum, s) => sum + s.text.length, 0);
       while (total > EXIT_STDERR_CAP && entry.stderrSegments.length > 1) {
         total -= entry.stderrSegments.shift()!.text.length;
       }
+      if (total > EXIT_STDERR_CAP && entry.stderrSegments.length === 1) {
+        const seg = entry.stderrSegments[0];
+        seg.text = seg.text.slice(seg.text.length - EXIT_STDERR_CAP);
+      }
       const text = decoded.trim().slice(0, 4_096);
       if (text) this.deps.log?.warn('ghost node stderr', { ghostId: ghost.manifest.id, text });
+      // 进程已退出、正在 drain 时,每收到新 chunk 就重置 drain 定时器(debounce),
+      // 确保管道完全排空后再提取诊断。
+      if (entry.exitDrain) {
+        this.clearTimer(entry.exitDrain.timer);
+        const d = entry.exitDrain;
+        d.timer = this.setTimer(() => this.settleExit(entry, d.code, d.signal, d.error), 10);
+        d.timer.unref?.();
+      }
       // stderr 是手册钦定的日志口——构建刷日志就是活着的证据,给续命请求重置沉默窗口。
       this.renewPendingOnActivity(entry);
     });
@@ -1293,10 +1308,13 @@ export class GhostNodeRuntimeBroker {
     this.clearIdleTimer(entry);
     // worker 意外死亡:孩子级联收掉,不留孤儿(silent——收件人已经不在了)。
     for (const child of [...entry.children.values()]) this.stopChild(entry, child, true);
-    // stderr 管道字节可能晚于 exit 事件到达:给在途 chunk 一个极短的落地窗口,
-    // 与启动期退出路径(line ~1011)保持一致。
-    const drainTimer = this.setTimer(() => this.settleExit(entry, code, signal, error), 10);
-    drainTimer.unref?.();
+    // 立即冻结所有 pending 请求的超时定时器,防止在 drain 窗口内误报 TIMEOUT。
+    for (const pending of entry.pending.values()) this.clearTimer(pending.timer);
+    // stderr 管道字节可能晚于 exit 事件到达:用 debounce 模式等管道排空——
+    // 每次新 chunk 到达都重置定时器,管道静默 10ms 后 settle。
+    const timer = this.setTimer(() => this.settleExit(entry, code, signal, error), 10);
+    timer.unref?.();
+    entry.exitDrain = { code, signal, error, timer };
   }
 
   private settleExit(
@@ -1341,8 +1359,13 @@ export class GhostNodeRuntimeBroker {
   }
 
   private redactSecrets(entry: WorkerEntry, text: string): string {
-    for (const secret of entry.exposedSecretValues) {
-      if (text.includes(secret)) text = text.replaceAll(secret, '[REDACTED]');
+    if (!entry.exposedSecretKeys.size || !this.deps.readSecret) return text;
+    const ghostId = entry.ghost.manifest.id;
+    for (const key of entry.exposedSecretKeys) {
+      try {
+        const value = this.deps.readSecret(ghostId, key);
+        if (value && text.includes(value)) text = text.replaceAll(value, '[REDACTED]');
+      } catch { /* readSecret 不可用时跳过该 key */ }
     }
     return text;
   }

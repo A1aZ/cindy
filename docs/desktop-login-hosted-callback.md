@@ -1,11 +1,15 @@
 # Desktop 登录托管回调（跨仓契约）
 
-> **状态**：客户端已实现并默认关闭，等待服务端实现后开启
-> **读取时机**：实现 / 评审 auth-server 侧托管回调路由，或调整 desktop 系统浏览器
-> 登录链路之前
+> **状态**：两端均已实现，等待端点清单开启
+> **读取时机**：改动 auth-server 侧托管回调路由、结果展示页模板，或调整 desktop
+> 系统浏览器登录链路之前
 
-本文是客户端仓与 auth-server 仓之间的接口契约。客户端侧代码已随本文一起合入且
-**默认走旧链路**，服务端实现完成后改一行端点清单即可开启。
+本文是客户端仓与 auth-server 仓之间的接口契约，描述**已实现**的形态。
+
+- 客户端：本仓，默认走旧的 loopback 链路（端点清单 `authDesktopCallbackUrl` 为空）
+- 服务端：`xindong/cindy-server` 的 `auth-server`
+
+两端合入后行为不变，填上端点清单字段才切换。
 
 ## 1. 要解决的问题
 
@@ -37,40 +41,44 @@ Firefox 早已按规范放行，只有 Safari 没跟，而 Safari 是 macOS 默�
 ① 客户端生成 codeVerifier(PKCE) 与 client_state(256 bit 随机，仅存在于进程内存)
 ② 打开系统浏览器 → GET <auth>/api/auth/social/<provider>/authorize
      ?redirect_uri=<托管回调地址>&code_challenge=...&client_state=...&ui_locale=...
-③ 用户在 provider 处授权
-④ provider → auth-server 托管回调：auth-server 按 client_state 暂存授权码
-⑤ auth-server 302 到结果展示页（URL 不含 code）
+③ 用户在 provider 处授权，provider 回调到 auth-server 既有的 provider 回调路由
+④ auth-server 照常签发一次性授权码，302 到 redirect_uri —— 也就是托管回调路由
+⑤ 托管回调按 client_state 把授权码寄存进 Redis，302 到结果展示页（URL 不含 code）
 ⑥ 客户端自②起持续轮询 poll 接口，取到 code 后照常 POST /api/auth/token 完成 PKCE 兑换
 ⑦ 用户在展示页点「回到 Cindy」→ cindy://focus/desktop-login
 ```
 
-`redirect_uri` 与 `client_state` 参数客户端**现在就已经在传**（`buildAuthorizeUrl`），
-authorize 接口本身不需要改。
+关键点：`redirect_uri` 是「auth-server 完事后往哪跳」，**不是 provider 的回调地址**。
+provider 回调路由（`googleCallbackUrl()` 等）与 `callbackShared.ts` 的收尾逻辑一行未改，
+托管回调只是多了一个接住自己回跳的新路由。`redirect_uri` 与 `client_state` 参数客户端
+本来就在传（`buildAuthorizeUrl`），authorize 接口也不需要改。
 
-## 3. 服务端需要实现的部分
+## 3. 服务端实现
 
-### 3.1 redirect_uri allowlist
+对应实现在 `auth-server/src/services/desktopCallback.ts` 与
+`auth-server/src/routes/desktopCallback.ts`。
 
-新增一条**精确字符串**：
+### 3.1 redirect_uri 放行
 
-```
-https://auth.cindy.com.cn/api/auth/desktop/callback      # cn
-https://auth.cindy.app/api/auth/desktop/callback         # global
-```
+**不需要新增环境变量、不需要运维配 `REDIRECT_URI_ALLOWLIST`。**
+`isAllowedRedirectUri`（`src/services/sso/transaction.ts`）比照既有的
+`${publicBaseUrl}/console/callback` 先例，对 `${publicBaseUrl}/api/auth/desktop/callback`
+同源恒放行。地址由 `publicBaseUrl` 派生而非取自请求，配错或被构造都不可能命中。
 
-必须是逐字符全等匹配，不要用前缀或通配匹配——那会退化成 open redirect 面。客户端
-把端点清单里的值原样发出，不做任何拼接。
+判定抽成了纯函数 `isDesktopHostedCallbackUri(uri, publicBaseUrl)` 并单独测。
+**这一步不是形式主义**：测试环境的 `PUBLIC_BASE_URL` 是 `http://localhost:3344`，
+任何以它为前缀的地址都会先命中 RFC 8252 的 loopback 例外，所以哪怕把同源放行整条删掉，
+集成测试也照样全绿（已用变异验证确认）。生产是 https 域名，只有这条规则能放行它。
 
 ### 3.2 `GET /api/auth/desktop/callback`
 
-接住 provider 回调：
+接住 auth-server 自己 302 过来的回跳（`?code=…&state=<clientState>` 或 `?error=…`）：
 
-- 校验 `state`（防 CSRF，语义与今天一致）；
-- 按 `client_state` 暂存授权码，**TTL ≤ 5 分钟、一次性消费**（客户端的整体预算就是
-  5 分钟）；
-- 302 到结果展示页，**URL 里不得带 code**，例如
-  `/desktop/login-callback?status=ok&locale=zh-CN`；
-- provider 返回错误时同样按 `client_state` 暂存错误码，再 302 到 `status=error`。
+- 按 `clientState` 把结果寄存进 Redis（key `deskcb:<clientState>`，TTL 5 分钟）；
+- 302 到 `/desktop/login-callback?status=ok|error[&detail=<错误码>]`，**URL 不带 code**；
+- 既无 `code` 也无 `error` 时寄存 `INVALID_AUTH_CODE`——什么都不寄存的话，客户端只能
+  一路轮询到 5 分钟预算耗尽；
+- `state` 缺失或超长直接 400，不写任何寄存。
 
 ### 3.3 `POST /api/auth/desktop/callback/poll`
 
@@ -100,9 +108,14 @@ TTL 过后如实返回 `expired`，让客户端提前失败而不必干等满 5 
 
 - 非 2xx 响应按现有错误格式返回（`{ "error": { "code", "message" } }` 或
   `{ "code", "message" }`），客户端会把 `code` 直接用作可展示的错误码；
-- 建议按 `clientState` 与 `deviceId` 限流；
+- **限流按 IP**（`rateLimitPerIp`，60s / 300 次），不按 `clientState`：后者是请求体里的
+  客户端可控值，仓库规则明确禁止参与限流 key。阈值放宽是因为客户端每秒轮询、单次登录
+  最多 5 分钟，还要容得下同一出口 IP 后的多个用户；防爆破由 `clientState` 的随机量承担；
+- `deviceId` 客户端会带上，但服务端**不校验**：托管回调那一步只拿得到 code 与 state
+  （登录事务在 provider 回调阶段已消费），服务端无从取得同一次尝试的 deviceId 来比对。
+  保留字段只为兼容客户端现有请求体，不构成授权判断；
 - 客户端单次请求超时 30s，**允许长轮询**（hold 住请求直到有结果或 ~20s 返回
-  `pending`）。短轮询实现同样可用：客户端间隔 1s，30s 后退避到 2s。
+  `pending`）。当前实现是短轮询：客户端间隔 1s，30s 后退避到 2s。
 
 ### 3.4 结果展示页
 
@@ -113,12 +126,27 @@ pnpm --filter desktop run export:login-callback-template
 # → apps/desktop/dist/login-callback-template/{zh,en,ja,ko}/{success,error}.html + manifest.json
 ```
 
-- 每份 HTML 自带 light / dark（`prefers-color-scheme`），不要按主题拆分；
-- 失败页含 `{{ERROR_DETAIL}}` 一个占位符，替换错误码前需按 HTML 文本节点转义；无错误
-  码时连同它所在的 `<p class="detail">` 一并删除；
-- 语言按 authorize 请求带上的 `ui_locale` 选，缺省回落 `en`；
-- 页面自包含（立绘已是 data URI），无外链依赖；
+产物原样放进 `auth-server/assets/login-callback/`（已标 `linguist-generated`，GitHub 折叠 diff）。
+
+- 每份 HTML 自带 light / dark（`prefers-color-scheme`），不按主题拆分；
+- 失败页含 `{{ERROR_DETAIL}}` 一个占位符，替换错误码前按 HTML 文本节点转义；无错误码
+  时连同它所在的 `<p class="detail">` 一并删除；
+- 页面自包含（立绘是构建期内嵌的 webp data URI），无外链依赖；
 - 客户端改文案后需重新导出同步，**不要在服务端侧手改 HTML**。
+
+**语言跟随浏览器的 `Accept-Language`，而不是 app 的 UI 语言。** app 语言在 authorize
+时以 `ui_locale` 传入并冻结进登录事务，但事务在 provider 回调阶段就被消费掉了，到托管
+回调这一步已经拿不到；要把它带过来就得改 `callbackShared.ts` 的 302 参数，那会动到
+loopback 与 mobile 共用的回调路径。两者不一致（如 app 设日语、浏览器为中文）只影响这张
+结果页的文案，不影响登录本身，故选择不动共用路径。缺省回落 `en`。
+
+**CSP 与内联脚本**：模板里有一段**布局必需**的内联脚本（整卡等比缩放 + 水平居中）。
+服务端按脚本内容算 sha256 放行（`script-src 'sha256-…'`），而不是放 `'unsafe-inline'`；
+hash 由渲染时从模板算出，模板变了自动跟着变。
+这条不是可选项：早期版本用 `default-src 'none'` 把脚本一并禁掉，结果卡片贴左不缩放、
+窄窗口会把 CTA 裁出视口——**HTTP 层完全看不出异常，只有真的截图才发现**。模板里另有
+`<img onerror>` 内联事件（hash 模式管不到），有意继续拦截：立绘是 data URI 不会加载失败，
+那段降级本就是冗余保险。
 
 ## 4. 安全说明（供评审）
 
@@ -145,13 +173,24 @@ pnpm --filter desktop run export:login-callback-template
 清单在应用启动第一步解析，改动**重启客户端后生效**。服务端侧出任何问题，把该字段清空
 即可回退到 loopback，**客户端不需要发版**。
 
-## 6. 验收清单
+## 6. 验收状态
 
-- [ ] Safari 与 Chrome 各跑一次完整登录：地址栏全程 `https://auth.<域名>/...`，URL 里
-      没有 code，唤起弹框显示的是域名而非 IP
-- [ ] 展示页 light / dark 双模式目检（`docs/design-rules/DESIGN.md` 双模式交付门槛）
+合入前已完成（本地全栈：临时 PostgreSQL 5433 + Redis 6380 + auth-server 3344）：
+
+- [x] 服务端全链路集成测试：authorize → mock IdP → provider 回调 → 托管寄存 → poll →
+      `/api/auth/token` 兑换成功（`desktopHostedCallback.test.ts`）
+- [x] **两端 wire 对齐**：用客户端真实的 `CindyAuthClient` 打本地 auth-server，覆盖
+      pending / ok / 一次性 / error / AbortSignal 取消
+- [x] 结果页 URL 不含授权码（curl 与集成测试双重确认）
+- [x] 未知 `clientState` 返回 `pending`
+- [x] 展示页 light / dark 双模式目检（`docs/design-rules/DESIGN.md` 双模式交付门槛）
+- [x] 内联布局脚本在真实浏览器中执行、卡片正确居中缩放（CSP hash 生效）
+- [x] `detail` HTML 转义，不能注入标签
+
+部署后仍需人工确认：
+
+- [ ] Safari 与 Chrome 各跑一次**真实 provider** 登录：地址栏全程
+      `https://auth.<域名>/...`，唤起弹框显示的是域名而非 IP
 - [ ] 四种语言各看一次（zh / en / ja / ko）
-- [ ] 授权码一次性：同一 `clientState` 第二次 poll 返回 `expired`
-- [ ] 未知 `clientState` 返回 `pending`（见 3.3 关键约束）
 - [ ] 用户中途关闭浏览器：客户端 5 分钟后按取消收场，不报错
 - [ ] 清空清单字段后回退 loopback 仍正常

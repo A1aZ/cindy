@@ -292,6 +292,34 @@ describe('父层 — 行级 handler 的引用稳定性', () => {
     }
   });
 
+  it('deps 里不得出现每渲染重建的 hook 返回对象(filter / collapse)', () => {
+    // useSidebarFilter / useCollapsedProjects 都返回裸对象字面量,每次调用换引用。
+    // 必须依赖到具体成员(filter.promotePin、collapse.expand …),故用 (?!\.) 放行
+    // 成员访问、只拦整个对象。
+    const source = readFileSync(
+      resolve(__dirname, '..', '..', 'CCAgentSidebarUpper.tsx'),
+      'utf8',
+    );
+    for (const name of ROW_HANDLERS) {
+      const deps = useCallbackDeps(source, name);
+      expect(deps, `${name} 的 deps 不得含整个 filter`).not.toMatch(/\bfilter\b(?!\.)/);
+      expect(deps, `${name} 的 deps 不得含整个 collapse`).not.toMatch(/\bcollapse\b(?!\.)/);
+    }
+  });
+
+  it('deps 里不得出现随路由切换而变的 viewedSessionId', () => {
+    const source = readFileSync(
+      resolve(__dirname, '..', '..', 'CCAgentSidebarUpper.tsx'),
+      'utf8',
+    );
+    for (const name of ROW_HANDLERS) {
+      const deps = useCallbackDeps(source, name);
+      expect(deps, `${name} 的 deps 不得含 viewedSessionId`).not.toMatch(
+        /\bviewedSessionId\b/,
+      );
+    }
+  });
+
   it('handleSessionClick 的 deps 不得含每次点击/切换都变的选择态', () => {
     // 这三个只在点击那一刻读,却会被 setSelectionAnchorSessionId(每次点击必调)
     // 和路由切换带着变 —— 留在 deps 里等于每切换一次就整表重画一遍。

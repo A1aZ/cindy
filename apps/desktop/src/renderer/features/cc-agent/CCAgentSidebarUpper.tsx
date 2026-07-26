@@ -1257,6 +1257,9 @@ function ExpandedView({
   // 经 ref 读还顺带避开闭包陈旧:拿到的是最新值而非渲染时快照。
   const activeSessionIdRef = useRef(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
+  // viewedSessionId 同理:handleActionClick 只在触发归档那一刻用它算重定向目标。
+  const viewedSessionIdRef = useRef(viewedSessionId);
+  viewedSessionIdRef.current = viewedSessionId;
   const selectedSessionIdsRef = useRef(selectedSessionIds);
   selectedSessionIdsRef.current = selectedSessionIds;
   const selectionAnchorSessionIdRef = useRef(selectionAnchorSessionId);
@@ -1651,7 +1654,9 @@ function ExpandedView({
         patchLocal(sessionId, { pinnedAt: oldPinnedAt });
       }
     },
-    [filter, patchLocal, t],
+    // 只依赖 filter.promotePin(useCallback 稳定),不要整个 filter ——
+    // useSidebarFilter 每次调用都返回新对象字面量,带上它等于每渲染换引用。
+    [filter.promotePin, patchLocal, t],
   );
 
   const handleToggleProjectPin = useCallback(
@@ -1749,7 +1754,16 @@ function ExpandedView({
         );
       }
     },
-    [collapse, effectiveRunningSessionIds, patchLocal, t],
+    // 同理只依赖用到的三个成员,不要整个 collapse —— useCollapsedProjects 也返回
+    // 新对象字面量。collapsed 是 Set,仅用户手动折叠/展开时换引用,频率可忽略。
+    [
+      collapse.collapsed,
+      collapse.expand,
+      collapse.setCollapsed,
+      effectiveRunningSessionIds,
+      patchLocal,
+      t,
+    ],
   );
 
   /* ---- Delete / Archive / Unarchive action handlers ----
@@ -1805,8 +1819,11 @@ function ExpandedView({
           return;
         }
         // 重定向判定用 viewedSessionId:files 路由下归档「正在浏览的会话」也要
-        // 跳离失效的文件视图(codex review;正常路由下两者恒等)。
-        await runSessionAction(sessionId, 'archive', { activeSessionId: viewedSessionId });
+        // 跳离失效的文件视图(codex review;正常路由下两者恒等)。经 ref 读:它随
+        // 路由切换而变,留在 deps 里会让本 handler 每次切换都重建、打穿整表 memo。
+        await runSessionAction(sessionId, 'archive', {
+          activeSessionId: viewedSessionIdRef.current,
+        });
         return;
       }
       if (action !== 'unarchive') {
@@ -1821,7 +1838,6 @@ function ExpandedView({
       await unarchiveSession(sessionId);
     },
     [
-      viewedSessionId,
       runningSessionIds,
       runSessionAction,
       unarchiveSession,

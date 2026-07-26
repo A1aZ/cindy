@@ -31,6 +31,9 @@ describe('provider branding', () => {
 
   it('keeps preset branding after a user-facing provider id changes', () => {
     for (const preset of BUNDLED_CATALOG.presets ?? []) {
+      // Self-hosted presets can be moved to any host; after the id is renamed there is
+      // intentionally no trustworthy hostname from which to infer the vendor mark.
+      if (Object.values(preset.runtimes).some((runtime) => runtime?.baseUrlEditable)) continue;
       const routing: Record<string, { upstream: string }> = {};
       for (const [agent, runtime] of Object.entries(preset.runtimes)) {
         if (runtime) routing[agent] = { upstream: runtime.baseUrl };

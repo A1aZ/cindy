@@ -33,6 +33,8 @@ describe('ProviderLogoMark', () => {
 
   it('keeps preset-backed provider logos after the user-facing id changes', () => {
     for (const preset of BUNDLED_CATALOG.presets ?? []) {
+      // Editable self-hosted endpoints have no stable vendor hostname after a rename.
+      if (Object.values(preset.runtimes).some((runtime) => runtime?.baseUrlEditable)) continue;
       const routing: Record<string, { upstream: string }> = {};
       for (const [agent, runtime] of Object.entries(preset.runtimes)) {
         if (runtime) routing[agent] = { upstream: runtime.baseUrl };

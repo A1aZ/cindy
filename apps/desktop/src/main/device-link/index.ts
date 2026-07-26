@@ -698,7 +698,11 @@ export async function remoteSubscribe(
   if (!client) throw new Error('[DEVICE_LINK_NOT_CONNECTED] device-link client not initialized');
   return client.invoke(deviceId, {
     channel: DL_SUBSCRIBE_CHANNEL,
-    args: [{ topics, controllerName: deviceName() }],
+    args: [{
+      topics,
+      controllerName: deviceName(),
+      capabilities: [CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2],
+    }],
   });
 }
 

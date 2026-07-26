@@ -25,7 +25,9 @@ describe('useDeviceProviders deviceId-aware cache', () => {
     const invoke = stubDeviceLink();
     const mod = await import('@/hooks/useDeviceProviders');
     await mod.prefetchDeviceProviders('dev-1');
-    expect(invoke).toHaveBeenCalledWith('dev-1', 'maker:provider:list', []);
+    expect(invoke).toHaveBeenCalledWith('dev-1', 'maker:provider:list', [{
+      capabilities: ['provider-logo-kinds-v2'],
+    }]);
   });
 
   it('缓存命中:同设备二次 prefetch 不再发请求', async () => {
@@ -48,8 +50,12 @@ describe('useDeviceProviders deviceId-aware cache', () => {
     const mod = await import('@/hooks/useDeviceProviders');
     await mod.prefetchDeviceProviders('dev-1');
     await mod.prefetchDeviceProviders('dev-2');
-    expect(invoke).toHaveBeenCalledWith('dev-1', 'maker:provider:list', []);
-    expect(invoke).toHaveBeenCalledWith('dev-2', 'maker:provider:list', []);
+    expect(invoke).toHaveBeenCalledWith('dev-1', 'maker:provider:list', [{
+      capabilities: ['provider-logo-kinds-v2'],
+    }]);
+    expect(invoke).toHaveBeenCalledWith('dev-2', 'maker:provider:list', [{
+      capabilities: ['provider-logo-kinds-v2'],
+    }]);
     expect(invoke).toHaveBeenCalledTimes(2);
     // dev-2 已缓存:再 prefetch 不重拉(隔离 + 命中)。
     await mod.prefetchDeviceProviders('dev-2');

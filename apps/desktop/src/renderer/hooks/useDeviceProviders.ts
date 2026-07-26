@@ -13,6 +13,7 @@
  */
 import { useEffect, useState } from 'react';
 
+import { CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2 } from '@cindy/device-link';
 import type { ProviderView } from '@cindy/model-providers';
 
 import { createLogger } from '@/lib/logger';
@@ -73,7 +74,9 @@ async function fetchDeviceProviders(deviceId: string): Promise<ProviderView[]> {
   const dl = getDeviceLink();
   if (!dl) throw new Error('device-link IPC not available');
   const p = (
-    dl.invoke(deviceId, 'maker:provider:list', []) as Promise<{ providers: ProviderView[] }>
+    dl.invoke(deviceId, 'maker:provider:list', [{
+      capabilities: [CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2],
+    }]) as Promise<{ providers: ProviderView[] }>
   )
     .then((res) => {
       const providers = res?.providers ?? [];

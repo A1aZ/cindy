@@ -87,6 +87,8 @@ const LEGACY_DEVICE_LINK_LOGO_KINDS: ReadonlySet<ProviderLogoKind> = new Set([
 
 /** 控制端名展示上限,挡掉远端塞超长字符串撑爆被控端状态条 */
 const MAX_CONTROLLER_NAME_LEN = 64;
+const MAX_CONTROLLER_CAPABILITIES = 32;
+const MAX_CONTROLLER_CAPABILITY_LEN = 80;
 const REMOTE_MESSAGE_CHANNELS: ReadonlySet<string> = new Set([
   'local-db:messages:list',
   'local-db:messages:around',
@@ -101,6 +103,33 @@ const REMOTE_INVOKE_TRUNCATION_SUFFIX = '\n\n[remote content truncated: payload 
 const REMOTE_INVOKE_TRUNCATED_CONTENT = '[remote content truncated: payload too large]';
 const REMOTE_INVOKE_FRAME_SAFETY_BYTES = 1024;
 const textEncoder = new TextEncoder();
+
+/** wire 输入 fail-closed：未知形状视为空能力集，并限制数量/长度避免撑大常驻 registry。 */
+function sanitizeControllerCapabilities(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (
+      typeof item !== 'string'
+      || item.length === 0
+      || item.length > MAX_CONTROLLER_CAPABILITY_LEN
+      || seen.has(item)
+    ) continue;
+    seen.add(item);
+    out.push(item);
+    if (out.length >= MAX_CONTROLLER_CAPABILITIES) break;
+  }
+  return out;
+}
+
+function invokeControllerCapabilities(payload: InvokePayload): string[] {
+  const metadata = payload.args?.[0];
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return [];
+  return sanitizeControllerCapabilities(
+    (metadata as { capabilities?: unknown }).capabilities,
+  );
+}
 
 /** 远控 push 的紧凑重试预算:只在首发超 2MB 后使用,避免大 tool 输出反复打爆 relay 帧。 */
 const REMOTE_PUSH_TEXT_BUDGET_CHARS = 160_000;
@@ -553,7 +582,12 @@ function handleLinkOpen(
       ? payload.controllerName.trim().slice(0, MAX_CONTROLLER_NAME_LEN)
       : src.slice(0, 8);
   // 老控制端无 subscribe 能力:link-open 视作订阅 legacy '*'(全量转发 + 横幅),向后兼容。
-  subscriptions.subscribe(src, [LEGACY_TOPIC], name, payload?.capabilities);
+  subscriptions.subscribe(
+    src,
+    [LEGACY_TOPIC],
+    name,
+    sanitizeControllerCapabilities(payload?.capabilities),
+  );
   syncForwarding();
   client.sendLinkAccept(src, requestId, {
     appVersion: app.getVersion(),
@@ -877,7 +911,7 @@ function handleSubscriptionFrame(src: string, payload: InvokePayload): InvokeRes
   const arg = (payload.args ?? [])[0];
   const o =
     arg && typeof arg === 'object'
-      ? (arg as { topics?: unknown; controllerName?: unknown })
+      ? (arg as { topics?: unknown; controllerName?: unknown; capabilities?: unknown })
       : {};
   const topics = Array.isArray(o.topics)
     ? o.topics.filter(isRemoteSubscriptionTopic)
@@ -890,7 +924,7 @@ function handleSubscriptionFrame(src: string, payload: InvokePayload): InvokeRes
       : undefined;
   const isSub = payload.channel === DL_SUBSCRIBE_CHANNEL;
   if (isSub) {
-    subscriptions.subscribe(src, topics, name);
+    subscriptions.subscribe(src, topics, name, sanitizeControllerCapabilities(o.capabilities));
   } else {
     subscriptions.unsubscribe(src, topics);
   }
@@ -1012,9 +1046,17 @@ export async function runInvoke(
   }
 
   try {
+    const args = payload.args ?? [];
+    const listingCapabilities = payload.channel === 'maker:provider:list'
+      ? invokeControllerCapabilities(payload)
+      : [];
     const result = await runDeviceLinkInvokeContext(
       { controllerDeviceId: src, channel: payload.channel },
-      () => dispatchLocalInvoke(payload.channel, payload.args ?? []),
+      // provider:list 的首参只承载隧道能力协商，不进入本机 IPC handler。
+      () => dispatchLocalInvoke(
+        payload.channel,
+        payload.channel === 'maker:provider:list' ? [] : args,
+      ),
     );
     // 远程 set-* 回流:被控端 set-* runtime-only,补一次 DB 持久化 + 广播 patched,让控制端
     // 镜像收敛到被控端真相(取代控制端乐观覆盖)。本机会话不走这条(走 renderer update)。
@@ -1027,7 +1069,8 @@ export async function runInvoke(
         subscriptions.controllerSupports(
           src,
           CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2,
-        ),
+        )
+        || listingCapabilities.includes(CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2),
       ),
     };
   } catch (err) {
@@ -1111,6 +1154,7 @@ export const __testing = {
   },
   getActiveControllers,
   getSubscribedControllers,
+  controllerSupports: subscriptions.controllerSupports,
   sendInvokeResultSafe,
   projectInvokeResultForTunnel,
   forwardPush,

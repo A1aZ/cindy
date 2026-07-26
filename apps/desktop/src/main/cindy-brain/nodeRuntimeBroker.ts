@@ -173,7 +173,7 @@ interface WorkerEntry {
   /** 曾发给本 worker 的凭证明文(退出诊断脱敏用;settleExit 后立即清空)。 */
   exposedSecretValues: Set<string>;
   /** exit 后 stderr drain 用:非 null 表示进程已退出、正在等待管道排空。 */
-  exitDrain: { code: number | null; signal: string | null; error: Error | null; timer: NodeJS.Timeout; exitedAt: number } | null;
+  exitDrain: { code: number | null; signal: string | null; error: Error | null; timer: NodeJS.Timeout; exitedAt: number; gen: number } | null;
 }
 
 class NodeRpcError extends Error {
@@ -202,7 +202,8 @@ class WorkerStartError extends Error {
 
 /**
  * 从 stderr 里挑最有诊断价值的一行(优先含 error 的行),截短拼进失败消息。
- * preferLast: 无 error 关键词时回退到末行(退出诊断)还是首行(启动诊断)。
+ * preferLast: true 时从末尾向前搜索(退出诊断,最后的 error 行更可能是死因);
+ *             false 时从头向后搜索(启动诊断,首条 error 最相关)。
  */
 function stderrHint(text: string, preferLast = false): string | null {
   const lines = text
@@ -211,7 +212,10 @@ function stderrHint(text: string, preferLast = false): string | null {
     .filter(Boolean);
   if (lines.length === 0) return null;
   const fallback = preferLast ? lines[lines.length - 1] : lines[0];
-  const line = lines.find((candidate) => /error/i.test(candidate)) ?? fallback;
+  const errorLine = preferLast
+    ? lines.findLast((candidate) => /error/i.test(candidate))
+    : lines.find((candidate) => /error/i.test(candidate));
+  const line = errorLine ?? fallback;
   return sanitizePathsInHint(line.slice(0, 240));
 }
 
@@ -884,6 +888,9 @@ export class GhostNodeRuntimeBroker {
   /** stop(ghostId) 置入:在途重试检测到后立即中止,不继续拉新进程。 */
   private readonly stoppedGhosts = new Set<string>();
 
+  /** 每次 handleExit 递增,settleExit 仅在世代未推进时发布 crashed。 */
+  private readonly exitGen = new Map<string, number>();
+
   /** destroyAll(主机退出)后置真:退避中的重试不得再拉新进程。 */
   private destroyed = false;
 
@@ -1325,10 +1332,12 @@ export class GhostNodeRuntimeBroker {
     for (const pending of entry.pending.values()) this.clearTimer(pending.timer);
     // stderr stream 'end' 是权威排空信号——所有管道字节已到达。
     // 定时器仅作为"end 永远不来"的兜底安全网(500ms),不做 debounce。
+    const gen = (this.exitGen.get(key) ?? 0) + 1;
+    this.exitGen.set(key, gen);
     const settle = () => this.settleExit(entry, code, signal, error);
     const timer = this.setTimer(settle, 500);
     timer.unref?.();
-    entry.exitDrain = { code, signal, error, timer, exitedAt: this.now() };
+    entry.exitDrain = { code, signal, error, timer, exitedAt: this.now(), gen };
     entry.child.stderr.once?.('end', settle);
   }
 
@@ -1339,7 +1348,7 @@ export class GhostNodeRuntimeBroker {
     error: Error | null,
   ): void {
     if (!entry.exitDrain) return;
-    const exitedAt = entry.exitDrain.exitedAt;
+    const { exitedAt, gen } = entry.exitDrain;
     this.clearTimer(entry.exitDrain.timer);
     entry.exitDrain = null;
     // flush stderrDecoder 残留字节(多字节字符被切在最后一个 chunk 边界时)
@@ -1363,10 +1372,11 @@ export class GhostNodeRuntimeBroker {
     // 重试成功时插件不该看到一次假 crash)。
     if (!entry.stopping && !entry.startupPhase) {
       this.deps.log?.warn('ghost node process exited', { ghostId, entry: entry.entryRel, detail });
-      // 抑制 crashed 广播:替代 worker 已启动(key 被占);或 drain 期间插件被
-      // 主动停止/禁用(ghostId 加入 stoppedGhosts)。
+      // 抑制 crashed 广播:替代 worker 已启动(key 被占);drain 期间插件被
+      // 主动停止/禁用;或同 key 有更新世代退出(本次已过时)。
       const key = GhostNodeRuntimeBroker.keyOf(ghostId, entry.entryRel);
-      if (!this.workers.has(key) && !this.stoppedGhosts.has(ghostId)) {
+      const isLatest = this.exitGen.get(key) === gen;
+      if (!this.workers.has(key) && !this.stoppedGhosts.has(ghostId) && isLatest) {
         this.sendStatus(entry.ghost, 'crashed', detail, entry.entryRel);
       }
     }

@@ -520,7 +520,8 @@ describe('nodeRuntimeBroker · 意外死亡诊断(2026-07-26)', () => {
     child.stderr.write('compiling scene 1...\n');
     await vi.advanceTimersByTimeAsync(6_000);
     child.emit('exit', 1, null);
-    await vi.advanceTimersByTimeAsync(20);
+    child.stderr.end();
+    await vi.advanceTimersByTimeAsync(10);
 
     const result = await pending;
     expect(result).toMatchObject({ ok: false, errorCode: 'PROCESS_EXITED' });
@@ -543,7 +544,8 @@ describe('nodeRuntimeBroker · 意外死亡诊断(2026-07-26)', () => {
     child.emit('exit', 1, null);
     // stderr 晚于 exit 到达(管道中的最后一段)
     child.stderr.write('Error: EACCES permission denied\n');
-    await vi.advanceTimersByTimeAsync(20);
+    child.stderr.end();
+    await vi.advanceTimersByTimeAsync(10);
 
     const result = await pending;
     const message = (result as { message?: string }).message ?? '';
@@ -619,7 +621,8 @@ describe('nodeRuntimeBroker · 意外死亡诊断(2026-07-26)', () => {
     child.stderr.write('heartbeat ok\n');
     await vi.advanceTimersByTimeAsync(100);
     child.emit('exit', 1, null);
-    await vi.advanceTimersByTimeAsync(20);
+    child.stderr.end();
+    await vi.advanceTimersByTimeAsync(10);
 
     const result = await pending;
     const message = (result as { message?: string }).message ?? '';

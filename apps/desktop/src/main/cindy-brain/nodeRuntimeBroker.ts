@@ -71,6 +71,7 @@ const MCP_PROTOCOL_VERSION = '2025-06-18';
 
 interface NodeWorkerReadable {
   on(event: 'data', listener: (chunk: Buffer | string) => void): this;
+  once?(event: 'end', listener: () => void): this;
 }
 
 interface NodeWorkerWritable {
@@ -167,8 +168,8 @@ interface WorkerEntry {
   hardKillTimer: NodeJS.Timeout | null;
   mcpInitPromise: Promise<void> | null;
   stopping: boolean;
-  /** 曾发给本 worker 的凭证 key(退出诊断时按 key 临时读取并脱敏)。 */
-  exposedSecretKeys: Set<string>;
+  /** 曾发给本 worker 的凭证明文(退出诊断脱敏用;settleExit 后立即清空)。 */
+  exposedSecretValues: Set<string>;
   /** exit 后 stderr drain 用:非 null 表示进程已退出、正在等待管道排空。 */
   exitDrain: { code: number | null; signal: string | null; error: Error | null; timer: NodeJS.Timeout } | null;
 }
@@ -211,11 +212,9 @@ function stderrHint(text: string): string | null {
 function sanitizePathsInHint(hint: string): string {
   const basename = (p: string) => p.split(/[/\\]/).pop() ?? p;
   return hint
-    .replace(/(['"])((?:[A-Z]:[/\\]|\/)[^'"]+)\1/g, (_, q, p) => `${q}${basename(p)}${q}`)
-    // Windows/POSIX 路径都可含空格(如 C:\Users\Jane Doe\... 或
-    // /Users/jane/Library/Application Support/...),不把 \s 加入排除集;
-    // 用 newline、引号、括号、方括号做终止符。
-    .replace(/[A-Z]:[/\\][^'")\]\n]*/g, basename)
+    .replace(/(['"])((?:[A-Za-z]:[/\\]|\\\\[^'"]+|\/)[^'"]+)\1/g, (_, q, p) => `${q}${basename(p)}${q}`)
+    .replace(/[A-Za-z]:[/\\][^'")\]\n]*/g, basename)
+    .replace(/\\\\[^'")\]\n]*/g, basename)
     .replace(/\/(?:[^/'")\]\n]+\/)+[^'")\]\n]*/g, basename);
 }
 
@@ -558,7 +557,9 @@ export class GhostNodeRuntimeBroker {
         }
       }
       if (hostSecrets) {
-        for (const k of Object.keys(hostSecrets)) entry.exposedSecretKeys.add(k);
+        for (const v of Object.values(hostSecrets)) {
+          if (v) entry.exposedSecretValues.add(v);
+        }
       }
       const pendingResult = this.sendRpc(
         entry,
@@ -971,7 +972,7 @@ export class GhostNodeRuntimeBroker {
       hardKillTimer: null,
       mcpInitPromise: null,
       stopping: false,
-      exposedSecretKeys: new Set(),
+      exposedSecretValues: new Set(),
       exitDrain: null,
     };
     this.workers.set(key, entry);
@@ -1310,11 +1311,13 @@ export class GhostNodeRuntimeBroker {
     for (const child of [...entry.children.values()]) this.stopChild(entry, child, true);
     // 立即冻结所有 pending 请求的超时定时器,防止在 drain 窗口内误报 TIMEOUT。
     for (const pending of entry.pending.values()) this.clearTimer(pending.timer);
-    // stderr 管道字节可能晚于 exit 事件到达:用 debounce 模式等管道排空——
-    // 每次新 chunk 到达都重置定时器,管道静默 10ms 后 settle。
-    const timer = this.setTimer(() => this.settleExit(entry, code, signal, error), 10);
+    // stderr 管道字节可能晚于 exit 事件到达——同时监听 stderr stream end(权威
+    // 排空信号)和 debounce 兜底定时器(stream 不发 end 时的安全网)。
+    const settle = () => this.settleExit(entry, code, signal, error);
+    const timer = this.setTimer(settle, 50);
     timer.unref?.();
     entry.exitDrain = { code, signal, error, timer };
+    entry.child.stderr.once?.('end', settle);
   }
 
   private settleExit(
@@ -1323,6 +1326,14 @@ export class GhostNodeRuntimeBroker {
     signal: string | null,
     error: Error | null,
   ): void {
+    if (!entry.exitDrain) return;
+    this.clearTimer(entry.exitDrain.timer);
+    entry.exitDrain = null;
+    // flush stderrDecoder 残留字节(多字节字符被切在最后一个 chunk 边界时)
+    const tail = entry.stderrDecoder.end();
+    if (tail) {
+      entry.stderrSegments.push({ text: tail, at: this.now() });
+    }
     const ghostId = entry.ghost.manifest.id;
     const exitHint = this.exitStderrHint(entry);
     const detail = `${error?.message ?? `code=${code}, signal=${signal ?? 'none'}`}${
@@ -1333,6 +1344,7 @@ export class GhostNodeRuntimeBroker {
       pending.reject(new NodeRpcError('exit', `Node 工作进程已退出(${detail})`));
     }
     entry.pending.clear();
+    entry.exposedSecretValues.clear();
     // 启动期退出不在这里报 crashed:ensureWorker 统一收口(可能还要重试,
     // 重试成功时插件不该看到一次假 crash)。
     if (!entry.stopping && !entry.startupPhase) {
@@ -1359,13 +1371,8 @@ export class GhostNodeRuntimeBroker {
   }
 
   private redactSecrets(entry: WorkerEntry, text: string): string {
-    if (!entry.exposedSecretKeys.size || !this.deps.readSecret) return text;
-    const ghostId = entry.ghost.manifest.id;
-    for (const key of entry.exposedSecretKeys) {
-      try {
-        const value = this.deps.readSecret(ghostId, key);
-        if (value && text.includes(value)) text = text.replaceAll(value, '[REDACTED]');
-      } catch { /* readSecret 不可用时跳过该 key */ }
+    for (const secret of entry.exposedSecretValues) {
+      if (text.includes(secret)) text = text.replaceAll(secret, '[REDACTED]');
     }
     return text;
   }

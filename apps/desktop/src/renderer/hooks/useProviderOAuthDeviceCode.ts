@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 export interface ProviderOAuthDeviceCode {
   verificationUrl: string;
@@ -12,6 +12,7 @@ export interface ProviderOAuthDeviceCode {
  */
 export function useProviderOAuthDeviceCode(providerId: string | null) {
   const [deviceCode, setDeviceCode] = useState<ProviderOAuthDeviceCode | null>(null);
+  const ownedLoginRef = useRef<{ providerId: string; token: symbol } | null>(null);
 
   useEffect(() => {
     setDeviceCode(null);
@@ -26,10 +27,21 @@ export function useProviderOAuthDeviceCode(providerId: string | null) {
     });
     return () => {
       unsubscribe();
-      void window.electronAPI.maker.providerOAuthCancel(providerId).catch(() => undefined);
+      if (ownedLoginRef.current?.providerId === providerId) {
+        ownedLoginRef.current = null;
+        void window.electronAPI.maker.providerOAuthCancel(providerId).catch(() => undefined);
+      }
     };
   }, [providerId]);
 
+  const beginOwnedLogin = useCallback(() => {
+    if (!providerId) return () => undefined;
+    const owned = { providerId, token: Symbol(providerId) };
+    ownedLoginRef.current = owned;
+    return () => {
+      if (ownedLoginRef.current === owned) ownedLoginRef.current = null;
+    };
+  }, [providerId]);
   const clearDeviceCode = useCallback(() => setDeviceCode(null), []);
-  return { deviceCode, clearDeviceCode };
+  return { deviceCode, clearDeviceCode, beginOwnedLogin };
 }

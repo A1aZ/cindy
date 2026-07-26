@@ -42,6 +42,7 @@ function joinUrl(base: string, path: string): string {
     || normalizedPath.includes('#')
     || normalizedPath.includes('\\')
     || /[^\u0021-\u007e]/.test(normalizedPath)
+    || /%(?![0-9A-Fa-f]{2})/.test(normalizedPath)
   ) {
     throw new TypeError('invalid chat completions path');
   }

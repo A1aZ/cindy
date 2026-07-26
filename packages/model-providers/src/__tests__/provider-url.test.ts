@@ -22,6 +22,8 @@ describe('isProviderRequestPath', () => {
     '/infer\u007fmode',
     '/infer\u0085mode',
     '/café',
+    '/foo%2',
+    '/%ZZ',
     '/模型',
     '/v1\\messages',
     'responses',

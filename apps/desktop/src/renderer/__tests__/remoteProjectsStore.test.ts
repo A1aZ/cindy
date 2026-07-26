@@ -401,6 +401,60 @@ describe('remoteProjectsStore pending title preview', () => {
     expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('这个报错怎么修');
   });
 
+  it('drops overlays for sessions a full snapshot no longer contains', () => {
+    // 权威快照整片替换分片:patch 丢失期间被归档的会话就此离场,叠加层若不在这里
+    // 回收,removeDevice 也够不着它,unarchive/reseed 后旧预览会复活(review P1)。
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [
+      mk('s1', { title: 'New Maker' }),
+      mk('s2', { title: 'New Maker' }),
+    ]);
+    remoteProjectsStore.setPendingTitlePreview('s1', '帮我排查登录失败');
+
+    // s1 没在这次快照里回来 → 离场。
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s2', { title: 'New Maker' })]);
+    // unarchive/reseed 把它拉回来,权威标题仍是默认占位。
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [
+      mk('s1', { title: 'New Maker' }),
+      mk('s2', { title: 'New Maker' }),
+    ]);
+
+    expect(
+      remoteProjectsStore.getMergedRemoteSessions().find((s) => s.id === 's1')?.title,
+    ).toBe('New Maker');
+  });
+
+  it('keeps overlays for sessions merged back by a partial anti-entropy window', () => {
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [
+      mk('s1', { title: 'New Maker' }),
+      mk('s2', { title: 'New Maker' }),
+    ]);
+    remoteProjectsStore.setPendingTitlePreview('s1', '帮我排查登录失败');
+
+    // 半窗口 anti-entropy:s1 不在本次窗口内,但 mergeDeviceSessions 会把它并回来。
+    remoteProjectsStore.mergeDeviceSessions('dev-B', 'B', [mk('s2', { title: 'New Maker' })]);
+
+    expect(
+      remoteProjectsStore.getMergedRemoteSessions().find((s) => s.id === 's1')?.title,
+    ).toBe('帮我排查登录失败');
+  });
+
+  it('clears stale synthesized provenance once a prose preview is confirmed', () => {
+    // 合成占位 A 落地后又来了用户文字 B;B 被权威确认时 A 的归属必须一并作废,
+    // 否则用户日后手动把标题改回 A,会被误判成系统占位而被预览长期顶替 —— 权威侧
+    // 正确地拒绝给手动命名的会话改名,不会有 patch 来纠正(review P1)。
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
+    remoteProjectsStore.setPendingTitlePreview('s1', '设计稿-v3.png', false);
+    remoteProjectsStore.applyPatch('dev-B', 's1', { title: '设计稿-v3.png' });
+    remoteProjectsStore.setPendingTitlePreview('s1', '这个报错怎么修', true);
+    remoteProjectsStore.applyPatch('dev-B', 's1', { title: '这个报错怎么修' });
+
+    // 用户手动改回那个合成串。
+    remoteProjectsStore.applyPatch('dev-B', 's1', { title: '设计稿-v3.png' });
+    remoteProjectsStore.setPendingTitlePreview('s1', '又一条消息', true);
+
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('设计稿-v3.png');
+  });
+
   it('never overrides a title the user already renamed on the controlled device', () => {
     remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: '我自己起的名字' })]);
 

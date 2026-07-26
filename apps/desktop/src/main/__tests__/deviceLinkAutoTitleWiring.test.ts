@@ -18,6 +18,10 @@ const registerSource = readFileSync(
   resolve(__dirname, '..', 'maker-ipc', 'register.ts'),
   'utf8',
 ).replace(/\r\n?/g, '\n');
+const sessionsSource = readFileSync(
+  resolve(__dirname, '..', 'localDb', 'ipc', 'sessions.ts'),
+  'utf8',
+).replace(/\r\n?/g, '\n');
 
 function handlerBody(channel: string, nextChannel: string): string {
   const start = registerSource.indexOf(`ipcMain.handle(MAKER_INVOKE.${channel}`);
@@ -63,5 +67,36 @@ describe('device-link auto-title wiring', () => {
     expect(body).toMatch(/if \(!isDeviceLinkInvoke\(\)\) return noop;/);
     // 预检失败按「要起名」放行:一次 DB 抖动不该让标题永久停在 New Maker。
     expect(body).toMatch(/eligible = true;/);
+  });
+});
+
+describe('user rename notification ordering', () => {
+  it('三条改名出口都在写库**之前**记号', () => {
+    // 写库是一次 worker RPC 往返:改名提交与拿到回执之间有真实时间差,期间并发的
+    // 智能标题仍能满足 `WHERE title = 期望值` 把用户刚保存的名字盖掉(review P1)。
+    for (const [note, write] of [
+      // local-db:sessions:update(本机重命名框)
+      ["if (typeof p.title === 'string') noteUserTitleWritten(sid);",
+       'await db.update(sessions).set(setObj).where(eq(sessions.id, sid));'],
+      // patchSessionMetaInDb(device-link 远程改名)
+      ['if (patch.title !== undefined) noteUserTitleWritten(sessionId);',
+       'await db.update(sessions).set(setObj).where(eq(sessions.id, sessionId));'],
+      // renameSessionTitlesInDb(MCP 批量改名)
+      ['for (const change of changes) noteUserTitleWritten(change.sessionId);',
+       "getDbClient()\n    .tx('sessions.renameTitles'"],
+    ] as const) {
+      const noteAt = sessionsSource.indexOf(note);
+      expect(noteAt).toBeGreaterThan(-1);
+      const writeAt = sessionsSource.indexOf(write, noteAt);
+      expect(writeAt).toBeGreaterThan(noteAt);
+    }
+  });
+
+  it('自动起名自己的写入不发改名记号(否则一起名就自我禁用)', () => {
+    const start = sessionsSource.indexOf('export async function persistSessionTitleIfStillDraft');
+    const end = sessionsSource.indexOf('export async function clearSessionContextInDb', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(sessionsSource.slice(start, end)).not.toContain('noteUserTitleWritten');
   });
 });

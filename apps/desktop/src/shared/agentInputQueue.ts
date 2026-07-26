@@ -626,6 +626,20 @@ const HAS_WORD_CHAR = /[\p{L}\p{N}]/u;
  */
 const REF_CONTINUATION_CHARS = new Set(['.', '/', '\\', '-', '_', '~', '+', '=', '#', '@', '%', '&', '$']);
 
+/**
+ * ref 是纯 ASCII 而紧随其后的是非 ASCII 字母时,认边界。
+ *
+ * chip 序列化后面若直接跟正文,中间没有任何分隔符(`@src/index.ts这里为什么会崩`
+ * ——中文用户不打空格,ChatInput 也不会替他补),`@\S+` 会把两者吞成一个 token。
+ * 仓库里的路径几乎全是 ASCII,真含中文的路径会在精确匹配那一步整体命中,所以
+ * 「ASCII 路径 + 紧跟一个汉字/假名」这个形状判成边界是安全的(PR #510 review P1)。
+ */
+function isScriptChangeBoundary(ref: string, next: string): boolean {
+  // eslint-disable-next-line no-control-regex
+  if (!/^[\x00-\x7F]*$/.test(ref)) return false;
+  return /[^\x00-\x7F]/.test(next) && /\p{L}/u.test(next);
+}
+
 function isRefBoundary(ch: string): boolean {
   if (HAS_WORD_CHAR.test(ch)) return false;
   return !REF_CONTINUATION_CHARS.has(ch);
@@ -642,7 +656,8 @@ function splitTrailingAfterRef(ref: string, refs: ReadonlySet<string>): string |
   for (const candidate of refs) {
     if (candidate.length >= ref.length) continue;
     if (!ref.startsWith(candidate)) continue;
-    if (!isRefBoundary(ref.charAt(candidate.length))) continue;
+    const next = ref.charAt(candidate.length);
+    if (!isRefBoundary(next) && !isScriptChangeBoundary(candidate, next)) continue;
     if (matched === null || candidate.length > matched.length) matched = candidate;
   }
   return matched === null ? null : ref.slice(matched.length);

@@ -188,10 +188,13 @@ function withPendingTitle(session: Session): Session {
     landedSystemTitles.set(session.id, session.title);
     return session;
   }
-  // 用户文字的预览被权威值原样确认 → 只回收预览。**不**记系统占位:被控端的智能
-  // 标题可能就此定稿,那是终态,不能让后续预览一直盖着它。
+  // 用户文字的预览被权威值原样确认 → 整个叠加层作废。**不**记系统占位:被控端的
+  // 智能标题可能就此定稿,那是终态,不能让后续预览一直盖着它。更早那条合成占位的
+  // 归属也要一并清掉 —— 留着的话,用户日后手动把标题改回那个串时会被误判成系统
+  // 占位而被预览长期顶替(权威侧正确地拒绝给手动命名的会话改名,没有 patch 来纠正)
+  // (PR #510 review P1)。
   if (session.title === preview) {
-    pendingTitlePreview.delete(session.id);
+    dropTitleOverlay(session.id);
     return session;
   }
   if (!isSystemOwnedTitle(session)) {
@@ -282,6 +285,18 @@ const actions = {
       // 内容不变但设备名可能变了(改名走 renameDevice,不经这里);保持引用不动。
       if (failureCleared) subs.forEach((fn) => fn());
       return;
+    }
+    // 权威快照会整片替换分片:此前在片里、这次没回来的会话(patch 丢失期间被归档 /
+    // 删除)就此离场,它们的叠加层必须在这里回收 —— 之后 removeDevice 只遍历片里
+    // 还在的会话,再也够不着它们,unarchive/reseed 同一个仍是系统占位的会话时旧
+    // 预览会复活(PR #510 review P1)。
+    // mergeDeviceSessions(anti-entropy 半窗口)先把窗口外的会话并回 stamped 才
+    // 调到这里,不会被误判成离场。
+    if (existing) {
+      const kept = new Set(stamped.map((session) => session.id));
+      for (const session of existing.sessions) {
+        if (!kept.has(session.id)) dropTitleOverlay(session.id);
+      }
     }
     shards.set(deviceId, { deviceId, deviceName, connectionStatus, sessions: stamped });
     recompute();

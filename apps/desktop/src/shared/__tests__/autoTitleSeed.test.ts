@@ -293,6 +293,34 @@ describe('deriveAutoTitleSeed — 用户一个字没写', () => {
     expect(seed?.text).toBe(',还有别的吗');
   });
 
+  it('chip 后无分隔符直接接中文正文时也剔除(用户不打空格)', () => {
+    // ChatInput 不会替用户补分隔符,`@\S+` 会把 chip 与正文吞成一个 token。
+    // ref 是纯 ASCII 而紧跟一个汉字 —— 这个形状判成边界,wire token 不进标题素材。
+    const seed = deriveAutoTitleSeed(
+      queued({
+        text: '@src/index.ts这里为什么会崩',
+        mentions: [{ type: 'file', name: 'index.ts', path: 'src/index.ts' }],
+      }),
+      LABELS,
+    );
+
+    expect(seed).toEqual({ text: '这里为什么会崩', isUserText: true });
+  });
+
+  it('脚本切换边界不误伤同为 ASCII 的更长路径', () => {
+    const seed = deriveAutoTitleSeed(
+      queued({
+        text: '@src/index.tsx 有什么区别',
+        mentions: [{ type: 'file', name: 'index.ts', path: 'src/index.ts' }],
+      }),
+      LABELS,
+    );
+
+    // `x` 仍是 ASCII → 不是边界,整个 token 原样保留(它是手打的另一个路径)。
+    expect(seed?.isUserText).toBe(true);
+    expect(seed?.text).toBe('@src/index.tsx 有什么区别');
+  });
+
   it('mention 旁边有真正的文字时仍算用户文字', () => {
     const seed = deriveAutoTitleSeed(
       queued({

@@ -933,10 +933,14 @@ export function registerSessionIpc(): void {
     const setObj = sessionPatchToRow(p as Parameters<typeof sessionPatchToRow>[0], {
       bumpUpdatedAt: !isSettingsOnly,
     });
-    await db.update(sessions).set(setObj).where(eq(sessions.id, sid));
     // 用户手动改名(重命名框 / 侧边栏)走这条:告诉自动起名收手。同值改名不会让
     // 条件写落空,不显式说一声的话智能标题会把他刚保存的名字盖掉(review P1)。
+    // **必须先于 UPDATE**:写库是一次 worker RPC 往返,改名提交与这里拿到回执之间
+    // 有真实时间差,在那期间智能标题仍能满足 `WHERE title = 期望值` 把名字盖掉。
+    // 先记号后写库,代价只是写库失败时该会话本进程内不再自动起名 —— 用户毕竟确实
+    // 按下过保存,这个方向的偏差是安全的。
     if (typeof p.title === 'string') noteUserTitleWritten(sid);
+    await db.update(sessions).set(setObj).where(eq(sessions.id, sid));
     // session-git-pr-context:/clear 经此处写 clearedAt——边界之前的消息对用户
     // 不可见,PR 引用同步重算(fire-and-forget,内部按 clearedAt/rewindAt 过滤)。
     if (p.clearedAt !== undefined) {
@@ -1070,9 +1074,9 @@ export async function patchSessionMetaInDb(
 
   const db = getDbClient().drizzle;
   const setObj = sessionPatchToRow(patch, { bumpUpdatedAt: false });
-  await db.update(sessions).set(setObj).where(eq(sessions.id, sessionId));
-  // 控制端远程改名走这条,与本机改名同口径。
+  // 控制端远程改名走这条,与本机改名同口径(同样先记号后写库)。
   if (patch.title !== undefined) noteUserTitleWritten(sessionId);
+  await db.update(sessions).set(setObj).where(eq(sessions.id, sessionId));
   const row = await selectSessionWithCount(db, sessionId);
   if (!row) throwIpcError('NOT_FOUND', 'Session 不存在');
   const updated = sessionToCamel(row);
@@ -1174,6 +1178,9 @@ export async function renameSessionTitlesInDb(
 
   if (dryRun) return preview;
 
+  // 批量改名(MCP 工具)同样是"人给的名字",自动起名不得再覆盖;与上面两条出口
+  // 一样先记号后写库,不给并发的智能标题留窗口。
+  for (const change of changes) noteUserTitleWritten(change.sessionId);
   const applied = await getDbClient()
     .tx('sessions.renameTitles', { changes })
     .catch((err) => {
@@ -1186,8 +1193,6 @@ export async function renameSessionTitlesInDb(
     });
 
   for (const item of applied) {
-    // 批量改名(MCP 工具)同样是"人给的名字",自动起名不得再覆盖。
-    noteUserTitleWritten(item.sessionId);
     notifyAgentIslandSessionPatch(item.sessionId, {
       title: item.newTitle,
       workingDir: item.workingDir,

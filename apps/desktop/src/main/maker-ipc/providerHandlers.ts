@@ -43,24 +43,36 @@ import type { IpcHandlerRegistry } from './ipcHandlerRegistry.js';
 
 const VALID_AGENTS: readonly string[] = ['claude-code', 'codex'];
 
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalize);
-  if (!value || typeof value !== 'object') return value;
+function sortedStringRecord(value: Record<string, string> | undefined): Record<string, string> | undefined {
+  if (!value) return undefined;
   return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([key, item]) => [key, canonicalize(item)]),
+    Object.entries(value).sort(([a], [b]) => a.localeCompare(b)),
   );
 }
 
 function oauthDescriptorSignature(config: CustomProviderConfig | null): string | null {
   if (config?.auth?.method !== 'oauth') return null;
-  return JSON.stringify(
-    canonicalize({
-      ...config.auth.oauth,
-      flow: config.auth.oauth.flow ?? 'authorization-code',
-    }),
-  );
+  const oauth = config.auth.oauth;
+  const common = {
+    tokenUrl: oauth.tokenUrl,
+    clientId: oauth.clientId,
+    scopes: oauth.scopes,
+    modelsDiscoveryUrl: oauth.modelsDiscoveryUrl,
+  };
+  return oauth.flow === 'device-code'
+    ? JSON.stringify({
+        ...common,
+        flow: 'device-code',
+        deviceAuthorizationUrl: oauth.deviceAuthorizationUrl,
+        extraDeviceParams: sortedStringRecord(oauth.extraDeviceParams),
+      })
+    : JSON.stringify({
+        ...common,
+        flow: 'authorization-code',
+        authorizeUrl: oauth.authorizeUrl,
+        redirectPort: oauth.redirectPort,
+        extraAuthParams: sortedStringRecord(oauth.extraAuthParams),
+      });
 }
 
 export interface ProviderHandlerDeps {
@@ -92,8 +104,8 @@ export interface ProviderHandlerDeps {
   ): Promise<{ ok: boolean; reason?: string }>;
   oauthLogout(providerId: string): Promise<void>;
   oauthCancel(providerId: string): void;
-  /** 删除自定义供应商时清理其 OAuth 凭证 blob（生产 = logoutGenericOAuth；幂等）。 */
-  clearOAuthCredentials(providerId: string): void;
+  /** 删除自定义供应商时清理其 OAuth 凭证 blob；false 表示持久删除失败。 */
+  clearOAuthCredentials(providerId: string): boolean;
   /**
    * 本机 agent CLI 安装 / 登录态扫描(生产 = scanLocalCliAuth(createLocalCliScanDeps());
    * 单测注入 stub 不碰真实 home)。只 stat 不读内容(规则 23)。
@@ -240,13 +252,16 @@ export function registerProviderHandlers(
       || oauthDescriptorSignature(previous) !== oauthDescriptorSignature(config);
     // 先阻止在途 flow 写回，再改描述符；否则旧 flow 可能在 clear 后迟到落一枚旧 token。
     if (shouldResetOAuth) deps.oauthCancel(config.id);
+    // 旧 client / endpoint 下签发的 token 不能沿用到新 OAuth 描述符；切到 API key /
+    // 无鉴权时也清掉不再可达的 blob。删除失败时必须在配置变更前中止，避免重启后
+    // 旧 token 被新 client / endpoint 重新激活。
+    if (shouldResetOAuth) {
+      if (!deps.clearOAuthCredentials(config.id)) {
+        throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
+      }
+    }
     const updated = await updateCustomProvider(config.id, config);
     if (!updated) throwIpcError('NOT_FOUND', `custom provider '${config.id}' not found`);
-    // 旧 client / endpoint 下签发的 token 不能沿用到新 OAuth 描述符；切到 API key /
-    // 无鉴权时也清掉不再可达的 blob。仅改名称/模型时保留仍匹配的登录态。
-    if (shouldResetOAuth) {
-      deps.clearOAuthCredentials(config.id);
-    }
     await afterChange();
     return { ok: true };
   });
@@ -257,9 +272,11 @@ export function registerProviderHandlers(
     }
     beginOAuthMutation(providerId);
     deps.oauthCancel(providerId);
-    await deleteCustomProvider(providerId);
     // OAuth 形态自定义供应商的凭证 blob 一并清掉（apiKey 形态无 blob，幂等无害）。
-    deps.clearOAuthCredentials(providerId);
+    if (!deps.clearOAuthCredentials(providerId)) {
+      throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
+    }
+    await deleteCustomProvider(providerId);
     await afterChange();
     return { ok: true };
   });

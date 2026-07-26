@@ -13,6 +13,12 @@ type PendingCodexLogin = {
 };
 
 let pendingCodexLogin: PendingCodexLogin | null = null;
+let loginGeneration = 0;
+
+const cancelledLoginResult = (): CodexLoginResult => ({
+  authenticated: false,
+  errorReason: 'login_cancelled',
+});
 
 function invokeCodexLogin(mode: 'browser' | 'device-code'): Promise<CodexLoginResult> {
   return mode === 'device-code'
@@ -33,11 +39,14 @@ export function triggerCodexLoginOnce(
     if (pendingCodexLogin.mode === mode) return pendingCodexLogin.promise;
 
     const previous = pendingCodexLogin.promise;
+    const generation = ++loginGeneration;
     void window.electronAPI.maker.auth.cancelLogin('codex').catch(() => undefined);
     let queued!: Promise<CodexLoginResult>;
     queued = previous
       .catch(() => undefined)
-      .then(() => invokeCodexLogin(mode))
+      .then(() =>
+        generation === loginGeneration ? invokeCodexLogin(mode) : cancelledLoginResult(),
+      )
       .finally(() => {
         if (pendingCodexLogin?.promise === queued) pendingCodexLogin = null;
       });
@@ -45,10 +54,17 @@ export function triggerCodexLoginOnce(
     return queued;
   }
 
+  ++loginGeneration;
   let run!: Promise<CodexLoginResult>;
   run = invokeCodexLogin(mode).finally(() => {
     if (pendingCodexLogin?.promise === run) pendingCodexLogin = null;
   });
   pendingCodexLogin = { mode, promise: run };
   return run;
+}
+
+/** 让尚未开始的模式切换失效；main 侧正在运行的登录仍由调用方显式取消。 */
+export function invalidatePendingCodexLogin(): void {
+  ++loginGeneration;
+  pendingCodexLogin = null;
 }

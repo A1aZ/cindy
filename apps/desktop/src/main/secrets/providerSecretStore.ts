@@ -563,15 +563,23 @@ export const genericOAuthSecretIo = {
       return false;
     }
   },
-  remove(providerId: string): void {
+  remove(providerId: string): boolean {
     try {
-      electronSecretIo.remove(providerOAuthStorageKey(providerId));
+      const result = electronSecretIo.remove(providerOAuthStorageKey(providerId));
+      if (!result.success) {
+        log.warn(
+          { providerId, error: result.error ?? 'remove_failed' },
+          'remove generic oauth blob failed',
+        );
+      }
+      return result.success;
     } catch (err) {
-      // 键名校验抛错（非法 id）或底层删除异常:降级记日志,与 read/write 的容错口径一致。
+      // 键名校验抛错（非法 id）或底层删除异常：保留现有登录态并把失败交给调用方。
       log.warn(
         { providerId, err: err instanceof Error ? err.message : String(err) },
         'remove generic oauth blob failed',
       );
+      return false;
     }
   },
 };

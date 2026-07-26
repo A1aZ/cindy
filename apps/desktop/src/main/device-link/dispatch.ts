@@ -131,6 +131,14 @@ function invokeControllerCapabilities(payload: InvokePayload): string[] {
   );
 }
 
+function optionalControllerCapabilities(
+  value: { capabilities?: unknown },
+): string[] | undefined {
+  return Object.prototype.hasOwnProperty.call(value, 'capabilities')
+    ? sanitizeControllerCapabilities(value.capabilities)
+    : undefined;
+}
+
 /** 远控 push 的紧凑重试预算:只在首发超 2MB 后使用,避免大 tool 输出反复打爆 relay 帧。 */
 const REMOTE_PUSH_TEXT_BUDGET_CHARS = 160_000;
 const REMOTE_PUSH_MAX_DEPTH = 8;
@@ -924,7 +932,7 @@ function handleSubscriptionFrame(src: string, payload: InvokePayload): InvokeRes
       : undefined;
   const isSub = payload.channel === DL_SUBSCRIBE_CHANNEL;
   if (isSub) {
-    subscriptions.subscribe(src, topics, name, sanitizeControllerCapabilities(o.capabilities));
+    subscriptions.subscribe(src, topics, name, optionalControllerCapabilities(o));
   } else {
     subscriptions.unsubscribe(src, topics);
   }
@@ -1155,6 +1163,7 @@ export const __testing = {
   getActiveControllers,
   getSubscribedControllers,
   controllerSupports: subscriptions.controllerSupports,
+  optionalControllerCapabilities,
   sendInvokeResultSafe,
   projectInvokeResultForTunnel,
   forwardPush,

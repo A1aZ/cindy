@@ -41,6 +41,16 @@ const projectForCurrentController = (result: unknown) =>
     providers: Record<string, unknown>[];
   };
 
+describe('controller capability metadata', () => {
+  it('distinguishes an absent subscribe field from an explicit empty capability set', () => {
+    expect(__testing.optionalControllerCapabilities({})).toBeUndefined();
+    expect(__testing.optionalControllerCapabilities({ capabilities: [] })).toEqual([]);
+    expect(__testing.optionalControllerCapabilities({
+      capabilities: ['provider-logo-kinds-v2', 42, 'provider-logo-kinds-v2'],
+    })).toEqual(['provider-logo-kinds-v2']);
+  });
+});
+
 /** 一个带完整 routing(含执行机密 + 残留 supportsFastMode)+ per-provider models 的被控端 provider。仿 XD 网关。 */
 function xdProviderWithFullRouting() {
   return {

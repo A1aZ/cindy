@@ -673,7 +673,11 @@ export function AddProviderWizard({
       if (sel.preset.authMethod === 'none') return isLoopbackProviderUrl(value);
       try {
         const url = new URL(value);
-        return url.protocol === 'http:' || url.protocol === 'https:';
+        return (
+          (url.protocol === 'http:' || url.protocol === 'https:')
+          && !url.username
+          && !url.password
+        );
       } catch {
         return false;
       }

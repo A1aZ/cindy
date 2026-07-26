@@ -70,6 +70,7 @@ function memStorage(): GenericOAuthStorage & { map: Map<string, string> } {
     },
     remove: (id) => {
       map.delete(id);
+      return true;
     },
   };
 }
@@ -131,6 +132,14 @@ describe('blob 读写 / has / logout', () => {
     storage.map.set('acme', 'not-json');
     resetGenericOAuthMemoryCache();
     expect(hasGenericOAuthLogin('acme')).toBe(false);
+  });
+
+  it('凭证删除失败时保留当前登录态并返回失败', () => {
+    seedBlob('acme', { access_token: 'at-1' });
+    storage.remove = () => false;
+
+    expect(logoutGenericOAuth('acme')).toBe(false);
+    expect(hasGenericOAuthLogin('acme')).toBe(true);
   });
 });
 

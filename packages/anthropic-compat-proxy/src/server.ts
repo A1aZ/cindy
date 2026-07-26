@@ -258,11 +258,12 @@ function respondRoutingFailure(
 function isSafePathOverride(value: unknown): value is string {
   return (
     typeof value === 'string'
-    && value.length > 1
+    && value.length >= 1
     && value.length <= 2_048
     && value.startsWith('/')
     && !value.startsWith('//')
     && !value.includes('#')
+    && !value.includes('\\')
     && !/[^\u0021-\u00ff]/.test(value)
   );
 }

@@ -388,6 +388,25 @@ describe('remoteProjectsStore pending title preview', () => {
     expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('帮我排查登录失败');
   });
 
+  it('keeps the newer prose preview when an older synthesized patch lands late', () => {
+    // 用户在附件占位回流之前就打了字:旧占位 A 随后才到,它既不等于当前预览 B、
+    // 也不在归属表里,会被当成手动改名而把 B 整个丢掉,侧边栏回退到附件名
+    // 直到下一跳(review P1)。
+    remoteProjectsStore.setDeviceSessions('dev-B', 'B', [mk('s1', { title: 'New Maker' })]);
+    remoteProjectsStore.setPendingTitlePreview('s1', '设计稿-v3.png', false);
+    remoteProjectsStore.setPendingTitlePreview('s1', '这个报错怎么修', true);
+
+    // 迟到的 A 补丁。
+    remoteProjectsStore.applyPatch('dev-B', 's1', { title: '设计稿-v3.png' });
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('这个报错怎么修');
+
+    // 随后 B 的权威补丁到达 → 叠加层整体作废,后续预览不再生效。
+    remoteProjectsStore.applyPatch('dev-B', 's1', { title: '这个报错怎么修' });
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('这个报错怎么修');
+    remoteProjectsStore.setPendingTitlePreview('s1', '又一条消息', true);
+    expect(remoteProjectsStore.getMergedRemoteSessions()[0]?.title).toBe('这个报错怎么修');
+  });
+
   it('never treats a manual rename arriving mid-preview as a synthesized confirmation', () => {
     // 用户在合成预览在途时手动改了名 —— 那是权威的、他自己起的名字。若把"下一个
     // 非默认标题"一律当成合成占位登记,之后的预览就能长期顶掉它,而被控端正确地

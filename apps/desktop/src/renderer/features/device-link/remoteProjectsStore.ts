@@ -487,9 +487,12 @@ const actions = {
   setPendingTitlePreview(sessionId: string, title: string, isUserText = true): void {
     const next = title.trim();
     if (!sessionId || !next) return;
-    if (isUserText) synthesizedPreviewSessions.delete(sessionId);
-    else synthesizedPreviewSessions.add(sessionId);
-    if (pendingTitlePreview.get(sessionId) === next) return;
+    const previous = pendingTitlePreview.get(sessionId);
+    if (previous === next) {
+      // 同一串重复登记:归属状态也不该翻转(纯附件消息重复触发时保持合成归属)。
+      if (!isUserText) synthesizedPreviewSessions.add(sessionId);
+      return;
+    }
     // 权威标题已经不是系统占位(智能标题已落 / 用户改过名)→ 预览本来就不会生效,
     // 直接 no-op,省掉一次「写入 → recompute → withPendingTitle 立刻回收」的空转。
     // 反过来,合成占位与 fork 占位仍算系统占位:被控端正准备把它们换掉,控制端这
@@ -499,6 +502,15 @@ const actions = {
       const row = shards.get(known)?.sessions.find((s) => s.id === sessionId);
       if (row && !isSystemOwnedTitle(row)) return;
     }
+    // 被顶掉的那条**合成**预览可能还在隧道里飞:用户在附件占位回流之前就打了字时,
+    // 旧占位随后才到。它此刻既不等于当前预览、也不在归属表里,会被当成用户手动改名
+    // 而把新预览整个丢掉,侧边栏于是回退到附件名直到下一跳(review P1)。先把它记进
+    // 归属表,认出它是系统占位、让新预览继续顶着。
+    if (previous && synthesizedPreviewSessions.has(sessionId)) {
+      landedSystemTitles.set(sessionId, previous);
+    }
+    if (isUserText) synthesizedPreviewSessions.delete(sessionId);
+    else synthesizedPreviewSessions.add(sessionId);
     pendingTitlePreview.set(sessionId, next);
     recompute();
   },

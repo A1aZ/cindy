@@ -493,6 +493,7 @@ describe('nodeRuntimeBroker · 意外死亡诊断(2026-07-26)', () => {
       expect(warn).toHaveBeenCalledWith('ghost node stderr', expect.anything()),
     );
     child.emit('exit', 1, null);
+    child.stderr.end();
 
     const result = await pending;
     expect(result).toMatchObject({ ok: false, errorCode: 'PROCESS_EXITED' });
@@ -570,6 +571,7 @@ describe('nodeRuntimeBroker · 意外死亡诊断(2026-07-26)', () => {
     );
     await vi.waitFor(() => expect(warn).toHaveBeenCalled());
     child.emit('exit', 1, null);
+    child.stderr.end();
 
     const result = await pending;
     const message = (result as { message?: string }).message ?? '';
@@ -595,6 +597,7 @@ describe('nodeRuntimeBroker · 意外死亡诊断(2026-07-26)', () => {
     );
     await vi.waitFor(() => expect(warn).toHaveBeenCalled());
     child.emit('exit', 1, null);
+    child.stderr.end();
 
     const result = await pending;
     const message = (result as { message?: string }).message ?? '';
@@ -652,6 +655,7 @@ describe('nodeRuntimeBroker · 意外死亡诊断(2026-07-26)', () => {
     child.stderr.write('Error: auth failed with token sk-secret-token-12345\n');
     await vi.waitFor(() => expect(warn).toHaveBeenCalled());
     child.emit('exit', 1, null);
+    child.stderr.end();
 
     const result = await pending;
     const message = (result as { message?: string }).message ?? '';

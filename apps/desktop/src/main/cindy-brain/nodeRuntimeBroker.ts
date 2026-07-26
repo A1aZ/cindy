@@ -225,10 +225,10 @@ function sanitizePathsInHint(hint: string): string {
     .replace(/(['"])((?:[A-Za-z]:[/\\]|\\\\[^'"]+|\/)[^'"]+)\1/g, (_, q, p) => `${q}${basename(p)}${q}`)
     .replace(/[A-Za-z]:[/\\][^'")\]\n]*/g, basename)
     .replace(/\\\\[^'")\]\n]*/g, basename)
-    // 多段 POSIX 路径(含空格)
-    .replace(/\/(?:[^/'")\]\n]+\/)+[^'")\]\n]*/g, basename)
-    // 单段 POSIX 绝对路径(如 /private、/AcmeSecretMount)
-    .replace(/\/[A-Za-z][A-Za-z0-9._-]*(?=[\s'")\]\n:,]|$)/g, basename);
+    // 多段 POSIX 路径(含空格);(?<!:) 排除 URL scheme 后的路径
+    .replace(/(?<!:)\/(?:[^/'")\]\n]+\/)+[^'")\]\n]*/g, basename)
+    // 单段 POSIX 绝对路径(/.ssh、/_private、/123mount 等)
+    .replace(/(?<!:|\/)\/[^\s/'")\]\n:,][^\s'")\]\n:,]*(?=[\s'")\]\n:,]|$)/g, basename);
 }
 
 type UtilityFork = typeof utilityProcess.fork;

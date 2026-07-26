@@ -10,7 +10,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { toast } from '@/lib/toast';
-import { triggerCodexLoginOnce, type CodexLoginResult } from './codexAuthLogin';
+import {
+  invalidatePendingCodexLogin,
+  triggerCodexLoginOnce,
+  type CodexLoginResult,
+} from './codexAuthLogin';
 import { isCodexOAuthReconnectRequired } from './codexAuthRecovery';
 
 export type CodexUiState =
@@ -334,11 +338,13 @@ export function useCodexAuth(options?: { enabled?: boolean }) {
   }, [t, transition]);
 
   const cancelLogin = useCallback(async () => {
+    invalidatePendingCodexLogin();
     await window.electronAPI.maker.auth.cancelLogin(AGENT_KIND).catch(() => undefined);
     transition({ type: 'cancelled' });
   }, [transition]);
 
   const logout = useCallback(async () => {
+    invalidatePendingCodexLogin();
     try {
       await window.electronAPI.maker.auth.logout(AGENT_KIND);
       transition({ type: 'logout-success' });

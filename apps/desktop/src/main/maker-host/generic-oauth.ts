@@ -48,7 +48,7 @@ const DEFAULT_TOKEN_TTL_MS = 60 * 60 * 1000;
 export interface GenericOAuthStorage {
   read(providerId: string): string | null;
   write(providerId: string, value: string): boolean;
-  remove(providerId: string): void;
+  remove(providerId: string): boolean;
 }
 
 interface GenericOAuthIo {
@@ -76,7 +76,7 @@ function sleepWithAbort(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 let io: GenericOAuthIo = {
-  storage: { read: () => null, write: () => false, remove: () => {} },
+  storage: { read: () => null, write: () => false, remove: () => true },
   fetchImpl: fetch,
   openExternal: async () => {
     throw new Error('generic-oauth openExternal not configured');
@@ -165,12 +165,13 @@ export function hasGenericOAuthLogin(providerId: string): boolean {
   return readBlob(providerId) !== null;
 }
 
-/** 登出：清凭证 + 缓存（含 per-provider 刷新链条目，防长期运行下 Map 积累）。 */
-export function logoutGenericOAuth(providerId: string): void {
-  io.storage.remove(providerId);
+/** 登出：持久凭证删除成功后才清缓存，失败时保持登录态并通知调用方。 */
+export function logoutGenericOAuth(providerId: string): boolean {
+  if (!io.storage.remove(providerId)) return false;
   blobCache.set(providerId, null);
   // 链上若有 in-flight 刷新也安全:doRefresh 落盘前会复核 blob 已清则不回写。
   refreshChains.delete(providerId);
+  return true;
 }
 
 /**

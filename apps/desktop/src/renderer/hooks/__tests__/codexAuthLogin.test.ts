@@ -44,4 +44,29 @@ describe('triggerCodexLoginOnce', () => {
     await expect(deviceCode).resolves.toEqual({ authenticated: true });
     expect(triggerLogin).toHaveBeenNthCalledWith(2, 'codex', { mode: 'device-code' });
   });
+
+  it('does not start a queued mode switch after renderer cancellation', async () => {
+    const browser = deferred<{ authenticated: boolean }>();
+    const triggerLogin = vi.fn(() => browser.promise);
+    const cancelLogin = vi.fn(async () => undefined);
+    Object.assign(window, {
+      electronAPI: {
+        maker: { auth: { triggerLogin, cancelLogin } },
+      },
+    });
+    const { invalidatePendingCodexLogin, triggerCodexLoginOnce } =
+      await import('../codexAuthLogin');
+
+    const first = triggerCodexLoginOnce('browser');
+    const queued = triggerCodexLoginOnce('device-code');
+    invalidatePendingCodexLogin();
+    browser.resolve({ authenticated: false });
+
+    await expect(first).resolves.toEqual({ authenticated: false });
+    await expect(queued).resolves.toEqual({
+      authenticated: false,
+      errorReason: 'login_cancelled',
+    });
+    expect(triggerLogin).toHaveBeenCalledTimes(1);
+  });
 });

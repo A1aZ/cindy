@@ -144,6 +144,30 @@ function validateAuthSection(auth: unknown): ValidationResult {
   if (flow !== 'authorization-code' && flow !== 'device-code') {
     return invalid("auth.oauth.flow must be 'authorization-code' | 'device-code'");
   }
+  const allowedFields = new Set(
+    flow === 'device-code'
+      ? [
+          'flow',
+          'tokenUrl',
+          'clientId',
+          'scopes',
+          'modelsDiscoveryUrl',
+          'deviceAuthorizationUrl',
+          'extraDeviceParams',
+        ]
+      : [
+          'flow',
+          'tokenUrl',
+          'clientId',
+          'scopes',
+          'modelsDiscoveryUrl',
+          'authorizeUrl',
+          'redirectPort',
+          'extraAuthParams',
+        ],
+  );
+  const unknownField = Object.keys(o).find((field) => !allowedFields.has(field));
+  if (unknownField) return invalid(`auth.oauth.${unknownField} is not allowed`);
   if (
     flow === 'authorization-code'
     && (o.deviceAuthorizationUrl !== undefined || o.extraDeviceParams !== undefined)

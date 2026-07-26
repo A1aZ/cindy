@@ -3482,7 +3482,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       return result;
     },
     oauthLogout: async (providerId) => {
-      logoutGenericOAuth(providerId);
+      if (!logoutGenericOAuth(providerId)) {
+        throw new Error('failed to remove generic OAuth credentials');
+      }
     },
     oauthCancel: (providerId) => cancelGenericOAuthLogin(providerId),
     clearOAuthCredentials: (providerId) => logoutGenericOAuth(providerId),

@@ -67,7 +67,7 @@ function makeDeps(over: Partial<ProviderHandlerDeps> = {}): ProviderHandlerDeps 
     oauthLogin: vi.fn(async () => ({ ok: true })),
     oauthLogout: vi.fn(async () => {}),
     oauthCancel: vi.fn(() => {}),
-    clearOAuthCredentials: vi.fn(() => {}),
+    clearOAuthCredentials: vi.fn(() => true),
     scanLocalCli: vi.fn(async () => []),
     ...over,
   };
@@ -171,7 +171,10 @@ describe('provider:custom:* CRUD handlers', () => {
     const harness = new IpcHarness();
     const calls: string[] = [];
     const oauthCancel = vi.fn(() => calls.push('cancel'));
-    const clearOAuthCredentials = vi.fn(() => calls.push('clear'));
+    const clearOAuthCredentials = vi.fn(() => {
+      calls.push('clear');
+      return true;
+    });
     const deps = makeDeps({ oauthCancel, clearOAuthCredentials });
     registerProviderHandlers(harness, deps);
     const oauth = {
@@ -211,13 +214,72 @@ describe('provider:custom:* CRUD handlers', () => {
     expect(clearOAuthCredentials).toHaveBeenCalledWith('openrouter');
   });
 
+  it('rejects unknown recursive OAuth fields at the IPC validation boundary', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    registerProviderHandlers(harness, makeDeps());
+    const oauth = {
+      authorizeUrl: 'https://auth.example/authorize',
+      tokenUrl: 'https://auth.example/token',
+      clientId: 'desktop',
+      scopes: 'openid',
+    } as Record<string, unknown>;
+    oauth.unknown = oauth;
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, {
+        ...validConfig,
+        auth: { method: 'oauth', oauth },
+      }),
+    ).rejects.toThrow(/INVALID_PARAMS.*unknown is not allowed/);
+    expect(await listCustomProviders()).toEqual([]);
+  });
+
+  it('keeps the existing config when OAuth credential removal fails', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    const oauthConfig: CustomProviderConfig = {
+      ...validConfig,
+      auth: {
+        method: 'oauth',
+        oauth: {
+          authorizeUrl: 'https://auth.example/authorize',
+          tokenUrl: 'https://auth.example/token',
+          clientId: 'desktop',
+          scopes: 'openid',
+        },
+      },
+    };
+    const deps = makeDeps({ clearOAuthCredentials: vi.fn(() => false) });
+    registerProviderHandlers(harness, deps);
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, oauthConfig);
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+        ...oauthConfig,
+        auth: {
+          method: 'oauth',
+          oauth: {
+            ...oauthConfig.auth!.oauth,
+            clientId: 'replacement-client',
+          },
+        },
+      }),
+    ).rejects.toThrow(/INTERNAL.*failed to remove existing OAuth credentials/);
+    expect((await listCustomProviders())[0]?.auth).toEqual(oauthConfig.auth);
+    expect(deps.refreshCatalog).toHaveBeenCalledTimes(1);
+  });
+
   it('deletes (idempotent) + broadcasts; bad providerId → INVALID_PARAMS', async () => {
     mountDb();
     const harness = new IpcHarness();
     const calls: string[] = [];
     const deps = makeDeps({
       oauthCancel: vi.fn(() => calls.push('cancel')),
-      clearOAuthCredentials: vi.fn(() => calls.push('clear')),
+      clearOAuthCredentials: vi.fn(() => {
+        calls.push('clear');
+        return true;
+      }),
     });
     registerProviderHandlers(harness, deps);
     await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, validConfig);
@@ -230,6 +292,19 @@ describe('provider:custom:* CRUD handlers', () => {
     await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_DELETE, '')).rejects.toThrow(
       /INVALID_PARAMS/,
     );
+  });
+
+  it('does not delete a provider when OAuth credential removal fails', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    const deps = makeDeps({ clearOAuthCredentials: vi.fn(() => false) });
+    registerProviderHandlers(harness, deps);
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, validConfig);
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_DELETE, 'openrouter'),
+    ).rejects.toThrow(/INTERNAL.*failed to remove existing OAuth credentials/);
+    expect(await listCustomProviders()).toHaveLength(1);
   });
 });
 

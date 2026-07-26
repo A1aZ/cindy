@@ -3542,6 +3542,15 @@ interface ElectronAPI {
     providerOAuthLogin: (providerId: string) => Promise<{ ok: boolean; reason?: string }>;
     providerOAuthLogout: (providerId: string) => Promise<{ ok: true }>;
     providerOAuthCancel: (providerId: string) => Promise<{ ok: true }>;
+    onProviderOAuthProgress: (
+      cb: (progress: {
+        providerId: string;
+        phase: 'device-code';
+        verificationUrl: string;
+        userCode: string;
+        expiresAt: number;
+      }) => void,
+    ) => () => void;
     /** 自定义供应商上游错误订阅（返回 off）；code 走 providerError.* i18n。 */
     onProviderUpstreamError: (
       cb: (event: {

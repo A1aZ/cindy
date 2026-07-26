@@ -21,15 +21,21 @@ describe('isProviderRequestPath', () => {
 });
 
 describe('appendProviderRequestPath', () => {
-  it('preserves base userinfo/query and appends the request-path query', () => {
+  it('preserves the base query and appends the request-path query', () => {
     expect(
       appendProviderRequestPath(
-        'https://user:pass@custom.example/api?tenant=alpha',
+        'https://custom.example/api?tenant=alpha',
         '/infer?stream=1&mode=fast',
       ),
     ).toBe(
-      'https://user:pass@custom.example/api/infer?tenant=alpha&stream=1&mode=fast',
+      'https://custom.example/api/infer?tenant=alpha&stream=1&mode=fast',
     );
+  });
+
+  it('rejects base URLs with embedded credentials', () => {
+    expect(() =>
+      appendProviderRequestPath('https://user:pass@custom.example/api', '/infer'),
+    ).toThrow('invalid provider base URL');
   });
 
   it('rejects invalid paths before URL construction', () => {

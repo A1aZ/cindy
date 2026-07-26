@@ -530,7 +530,13 @@ async function runDeviceCodeGrant(
     throw new Error('invalid_device_authorization_response');
   }
 
-  const expiresAt = io.now() + Math.min(expiresInSeconds * 1000, LOGIN_TIMEOUT_MS);
+  const expiresInMs = expiresInSeconds * 1000;
+  if (!Number.isFinite(expiresInMs)) {
+    throw new Error('invalid_device_authorization_response');
+  }
+  // Device Authorization Grant 的有效期由 IdP 的 expires_in 决定；不能用授权码登录的
+  // 五分钟回调超时截断，否则合法的 10–15 分钟设备码会在服务端仍有效时被本地提前判过期。
+  const expiresAt = io.now() + expiresInMs;
   try {
     options?.onProgress?.({
       phase: 'device-code',

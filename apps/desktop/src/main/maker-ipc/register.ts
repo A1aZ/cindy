@@ -3413,7 +3413,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       const provider = getActiveCatalog().providers.find((p) => p.id === providerId);
       const oauth = provider?.auth.oauth;
       if (!provider || !oauth) throw new Error(`provider '${providerId}' has no oauth descriptor`);
-      const result = await runGenericOAuthLogin({ id: provider.id, name: provider.name }, oauth);
+      const result = await runGenericOAuthLogin(
+        { id: provider.id, name: provider.name },
+        oauth,
+        {
+          onProgress: (progress) =>
+            broadcastToAllWindows(MAKER_PUSH.PROVIDER_OAUTH_PROGRESS, {
+              providerId,
+              ...progress,
+            }),
+        },
+      );
       if (result.ok) {
         // 授权成功后按 agent 自动发现模型（与内置订阅体验统一,用户不必手填模型）:
         // 发现端点 = 描述符显式声明 ?? 由该 runtime 的 baseUrl 推导（…/v1/models）。

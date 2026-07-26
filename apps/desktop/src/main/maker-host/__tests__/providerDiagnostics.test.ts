@@ -172,16 +172,25 @@ describe('buildProbeRequest', () => {
     expect(url).toBe('https://gateway.example/api/tenant/acme/infer?stream=1');
   });
 
-  it('preserves base URL credentials/query when applying an exact request path', () => {
+  it('preserves the base query when applying an exact request path', () => {
     const { url } = buildProbeRequest({
       agent: 'codex',
-      baseUrl: 'https://user:pass@gateway.example/api?tenant=alpha',
+      baseUrl: 'https://gateway.example/api?tenant=alpha',
       modelId: 'custom-model',
       requestPath: '/infer?stream=1&mode=fast',
     });
     expect(url).toBe(
-      'https://user:pass@gateway.example/api/infer?tenant=alpha&stream=1&mode=fast',
+      'https://gateway.example/api/infer?tenant=alpha&stream=1&mode=fast',
     );
+  });
+
+  it('rejects base URL credentials when applying an exact request path', () => {
+    expect(() => buildProbeRequest({
+      agent: 'codex',
+      baseUrl: 'https://user:pass@gateway.example/api',
+      modelId: 'custom-model',
+      requestPath: '/infer',
+    })).toThrow('invalid provider base URL');
   });
 
   it('无 key 时不注入鉴权头（端点可能靠自定义 headers 鉴权）', () => {

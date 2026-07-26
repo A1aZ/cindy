@@ -73,6 +73,25 @@ describe('createResponsesChatHandler', () => {
     expect(res.ended).toBe(true);
   });
 
+  it('preserves the upstream base query when applying the chat path', async () => {
+    const fetchImpl = vi.fn(async () =>
+      streamResponse([
+        { id: 'chat_1', choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ]),
+    ) as typeof fetch;
+    const handler = createResponsesChatHandler({
+      upstreamBase: 'https://provider.example/gateway?tenant=acme',
+      chatCompletionsPath: '/infer?stream=1',
+      buildHeaders: async () => ({}),
+    }, { fetchImpl });
+    const res = new FakeResponse();
+    await handler.handle({ parsedBody: { model: 'm', input: 'hi' }, res: res as never });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'https://provider.example/gateway/infer?tenant=acme&stream=1',
+      expect.anything(),
+    );
+  });
+
   it('accepts a final SSE data event without a trailing newline', async () => {
     const fetchImpl = vi.fn(async () => new Response(
       'data: {"id":"chat_tail","choices":[{"delta":{"content":"tail"},"finish_reason":"stop"}]}',

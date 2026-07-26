@@ -18,7 +18,7 @@ export function isProviderRequestPath(value: unknown): value is string {
 }
 
 /**
- * 把已验证的精确推理路径追加到 base URL，同时保留 userinfo 与 base query。
+ * 把已验证的精确推理路径追加到 base URL，同时保留 base query。
  * requestPath 自带的 query 追加在 base query 后，fragment 一律不进入请求。
  */
 export function appendProviderRequestPath(baseUrl: string, requestPath: string): string {
@@ -26,6 +26,13 @@ export function appendProviderRequestPath(baseUrl: string, requestPath: string):
     throw new TypeError('invalid provider request path');
   }
   const url = new URL(baseUrl);
+  if (
+    (url.protocol !== 'http:' && url.protocol !== 'https:')
+    || url.username
+    || url.password
+  ) {
+    throw new TypeError('invalid provider base URL');
+  }
   const basePath = url.pathname.replace(/\/+$/, '');
   const queryIndex = requestPath.indexOf('?');
   const exactPath = queryIndex === -1 ? requestPath : requestPath.slice(0, queryIndex);

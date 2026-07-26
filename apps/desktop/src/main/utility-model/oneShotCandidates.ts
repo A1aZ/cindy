@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { fetch as undiciFetch } from 'undici';
 
 import { toSdkModelString, type AgentKind, type Maker } from '@cindy/maker-core';
+import { appendProviderRequestPath } from '@cindy/model-providers';
 
 import { createLogger } from '../logger.js';
 import { readClaudeApiKey } from '../maker-host/auth-adapters.js';
@@ -299,7 +300,17 @@ async function requestExplicitProviderText(
     : noAuth
       ? null
       : readCustomProviderKey(provider.id, agentKind);
-  if (!noAuth && !credential) {
+  const hasLegacyHeaderCredential = (
+    authStrategy === 'api-key-header'
+    && Object.entries(routing.headerOverride ?? {}).some(([key, value]) => {
+      const normalized = key.toLowerCase();
+      return (
+        (normalized === 'authorization' || normalized === 'x-api-key')
+        && value.trim().length > 0
+      );
+    })
+  );
+  if (!noAuth && !credential && !hasLegacyHeaderCredential) {
     return {
       ok: false,
       reason: 'no_candidate',
@@ -785,20 +796,23 @@ async function requestCustomProviderText(input: {
     ...(input.headers ?? {}),
     'Content-Type': 'application/json',
   };
-  // Authentication is host-managed for all three custom-provider strategies.
-  // Never let a copied header override coexist with the current safeStorage
-  // credential (or leak one at all for a no-auth provider).
-  for (const key of Object.keys(headers)) {
-    const normalized = key.toLowerCase();
-    if (normalized === 'x-api-key' || normalized === 'authorization') delete headers[key];
+  // safeStorage 有当前凭证时覆盖历史 header；没有时仅 api-key 策略允许保留旧版
+  // header-only 配置，以便用户升级后继续可用。OAuth 与 none 仍必须清掉复制进来的凭证头。
+  const preserveLegacyApiKeyHeaders =
+    input.authStrategy === 'api-key-header' && input.credential.length === 0;
+  if (!preserveLegacyApiKeyHeaders) {
+    for (const key of Object.keys(headers)) {
+      const normalized = key.toLowerCase();
+      if (normalized === 'x-api-key' || normalized === 'authorization') delete headers[key];
+    }
   }
-  if (input.agentKind === 'codex') {
-    if (input.authStrategy !== 'none') headers.Authorization = `Bearer ${input.credential}`;
-  } else {
-    if (input.authStrategy !== 'none') headers.Authorization = `Bearer ${input.credential}`;
-    if (input.authStrategy === 'api-key-header') {
+  if (input.credential) {
+    headers.Authorization = `Bearer ${input.credential}`;
+    if (input.agentKind === 'claude-code' && input.authStrategy === 'api-key-header') {
       headers['x-api-key'] = input.credential;
     }
+  }
+  if (input.agentKind === 'claude-code') {
     headers['anthropic-version'] = headers['anthropic-version'] ?? '2023-06-01';
   }
   const wire: ProviderWire =
@@ -810,7 +824,7 @@ async function requestCustomProviderText(input: {
   return requestProviderHttpText({
     wire,
     endpoint: input.requestPath
-      ? appendExactProviderPath(input.baseUrl, input.requestPath)
+      ? appendProviderRequestPath(input.baseUrl, input.requestPath)
       : wire === 'responses'
         ? joinProxyPath(input.baseUrl, '/responses')
         : wire === 'chat-completions'
@@ -942,18 +956,4 @@ function aggregateFailureReason(failedAttempts: UtilityTextAttempt[]): UtilityTe
 
 function joinProxyPath(baseUrl: string, suffix: string): string {
   return appendProviderPath(baseUrl, suffix);
-}
-
-/** Append a validated exact request path without percent-encoding its query. */
-function appendExactProviderPath(baseUrl: string, requestPath: string): string {
-  const url = new URL(baseUrl);
-  const basePath = url.pathname.replace(/\/+$/, '');
-  const queryIndex = requestPath.indexOf('?');
-  const exactPath = queryIndex === -1 ? requestPath : requestPath.slice(0, queryIndex);
-  const exactQuery = queryIndex === -1 ? '' : requestPath.slice(queryIndex + 1);
-  const baseQuery = url.search.slice(1);
-  url.pathname = `${basePath}${exactPath}`;
-  url.search = [baseQuery, exactQuery].filter(Boolean).join('&');
-  url.hash = '';
-  return url.toString();
 }

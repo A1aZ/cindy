@@ -29,6 +29,7 @@ import { useApiKey } from '@/hooks/useApiKey';
 import { useModelAccessStatus } from '@/hooks/useModelAccessStatus';
 import { useConfirmDialog } from '@/components/ui/confirm-dialog-provider';
 import { useSignInToCindy } from '@/hooks/useSignInToCindy';
+import { useProviderOAuthDeviceCode } from '@/hooks/useProviderOAuthDeviceCode';
 import { toast } from '@/lib/toast';
 import {
   appendDiscoveredCustomProviderModels,
@@ -44,6 +45,7 @@ import {
 } from '@/lib/providerSubtitle';
 import { CustomProviderDialog } from './CustomProviderDialog';
 import { AddProviderWizard, type WizardEntry } from './AddProviderWizard';
+import { OAuthDeviceCodeCard } from './OAuthDeviceCodeCard';
 import { buildUnionRows, UnifiedModelList } from './UnifiedModelList';
 import { AnthropicMark } from '@/components/icons/AnthropicMark';
 import { OpenAIMark } from '@/components/icons/OpenAIMark';
@@ -555,8 +557,13 @@ function GenericOAuthHeader({
   const [busy, setBusy] = useState(false);
   const [loggingIn, setLoggingIn] = useState(false);
   const connected = provider.connected;
+  const deviceFlow = provider.auth.oauth?.flow === 'device-code';
+  const { deviceCode, clearDeviceCode } = useProviderOAuthDeviceCode(
+    deviceFlow ? provider.id : null,
+  );
 
   const handleLogin = useCallback(async () => {
+    clearDeviceCode();
     setLoggingIn(true);
     try {
       const r = await window.electronAPI.maker.providerOAuthLogin(provider.id);
@@ -575,7 +582,7 @@ function GenericOAuthHeader({
     } finally {
       setLoggingIn(false);
     }
-  }, [onChanged, provider.id, provider.name, t]);
+  }, [clearDeviceCode, onChanged, provider.id, provider.name, t]);
 
   const handleLogout = useCallback(async () => {
     const confirmed = await confirm({
@@ -611,11 +618,18 @@ function GenericOAuthHeader({
   ) : (
     <PillButton
       label={
-        loggingIn ? t('settings.providers.button.cancel') : t('settings.providers.button.authorize')
+        loggingIn
+          ? t('settings.providers.button.cancel')
+          : t(
+              deviceFlow
+                ? 'settings.providers.wizard.authorizeWithDeviceCode'
+                : 'settings.providers.button.authorize',
+            )
       }
       onClick={() => {
         if (loggingIn) {
           void window.electronAPI.maker.providerOAuthCancel(provider.id);
+          clearDeviceCode();
           setLoggingIn(false);
         } else {
           void handleLogin();
@@ -623,6 +637,8 @@ function GenericOAuthHeader({
       }}
     />
   );
+  const detail =
+    loggingIn && deviceFlow ? <OAuthDeviceCodeCard deviceCode={deviceCode} /> : undefined;
 
   return (
     <DetailHeader
@@ -631,6 +647,7 @@ function GenericOAuthHeader({
       subtitle={t('settings.providers.genericOAuth.subtitle')}
       trailing={trailing}
       provider={provider}
+      detail={detail}
     />
   );
 }
@@ -829,6 +846,10 @@ function CustomProviderHeader({
   const { t } = useTranslation();
   const [loggingIn, setLoggingIn] = useState(false);
   const isOAuth = provider.auth.method === 'oauth' && !!provider.auth.oauth;
+  const deviceFlow = provider.auth.oauth?.flow === 'device-code';
+  const { deviceCode, clearDeviceCode } = useProviderOAuthDeviceCode(
+    deviceFlow ? provider.id : null,
+  );
   const handleOAuthClick = useCallback(async () => {
     if (provider.connected) {
       try {
@@ -845,9 +866,11 @@ function CustomProviderHeader({
     }
     if (loggingIn) {
       void window.electronAPI.maker.providerOAuthCancel(provider.id);
+      clearDeviceCode();
       setLoggingIn(false);
       return;
     }
+    clearDeviceCode();
     setLoggingIn(true);
     try {
       const r = await window.electronAPI.maker.providerOAuthLogin(provider.id);
@@ -863,7 +886,7 @@ function CustomProviderHeader({
     } finally {
       setLoggingIn(false);
     }
-  }, [loggingIn, provider.connected, provider.id, provider.name, t]);
+  }, [clearDeviceCode, loggingIn, provider.connected, provider.id, provider.name, t]);
 
   const trailing = (
     <div className="flex shrink-0 items-center gap-1">
@@ -874,7 +897,11 @@ function CustomProviderHeader({
               ? t('settings.providers.button.disconnect')
               : loggingIn
                 ? t('settings.providers.button.cancel')
-                : t('settings.providers.button.authorize')
+                : t(
+                    deviceFlow
+                      ? 'settings.providers.wizard.authorizeWithDeviceCode'
+                      : 'settings.providers.button.authorize',
+                  )
           }
           onClick={() => void handleOAuthClick()}
         />
@@ -899,6 +926,9 @@ function CustomProviderHeader({
       trailing={trailing}
       provider={provider}
       badge={<CustomTag label={t('settings.providers.custom.tag')} />}
+      detail={
+        loggingIn && deviceFlow ? <OAuthDeviceCodeCard deviceCode={deviceCode} /> : undefined
+      }
     />
   );
 }

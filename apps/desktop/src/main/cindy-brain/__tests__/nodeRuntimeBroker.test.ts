@@ -468,6 +468,67 @@ describe('nodeRuntimeBroker · 启动瞬时失败重试(2026-07-24)', () => {
   });
 });
 
+describe('nodeRuntimeBroker · 意外死亡诊断(2026-07-26)', () => {
+  it('就绪后崩溃:在途请求与 crashed 状态都带临死前的 stderr 诊断行,且不泄露绝对路径', async () => {
+    const ghost = fakeGhost();
+    const child = new FakeNodeProcess(); // 不回 response,保持在途
+    const pushes: Array<Record<string, unknown>> = [];
+    const warn = vi.fn();
+    const broker = new GhostNodeRuntimeBroker({
+      getGhost: () => ghost,
+      sendToGhost: (_id, payload) => pushes.push(payload as unknown as Record<string, unknown>),
+      spawnProcess: () => child as unknown as NodeWorkerProcess,
+      log: { info: vi.fn(), warn },
+    });
+
+    const pending = broker.handleRequest('node-ghost', rpcRequest('slow'));
+    await vi.waitFor(() => expect(child.received).toHaveLength(1));
+    // 引导层先发 ready、后 require 插件入口,所以这类崩溃发生在启动期之后。
+    child.stderr.write(
+      "C:\\Users\\dev\\AppData\\Roaming\\cindy\\plugins\\demo\\node\\worker.cjs:74\n" +
+        "Object.defineProperty(process, 'stdin', {\n       ^\n\n" +
+        'TypeError: Cannot redefine property: stdin\n    at Object.<anonymous>\n',
+    );
+    await vi.waitFor(() =>
+      expect(warn).toHaveBeenCalledWith('ghost node stderr', expect.anything()),
+    );
+    child.emit('exit', 1, null);
+
+    const result = await pending;
+    expect(result).toMatchObject({ ok: false, errorCode: 'PROCESS_EXITED' });
+    const message = (result as { message?: string }).message ?? '';
+    expect(message).toContain('code=1');
+    expect(message).toContain('Cannot redefine property: stdin');
+    expect(message).not.toContain('C:\\Users');
+    expect(message).not.toContain('AppData');
+    const crashed = pushes.find((p) => p.state === 'crashed') as { message?: string };
+    expect(crashed.message).toContain('Cannot redefine property: stdin');
+    expect(crashed.message).not.toContain('C:\\Users');
+  });
+
+  it('陈旧 stderr 不当死因:超过回看窗口只报退出码', async () => {
+    vi.useFakeTimers();
+    const ghost = fakeGhost();
+    const child = new FakeNodeProcess();
+    const broker = new GhostNodeRuntimeBroker({
+      getGhost: () => ghost,
+      spawnProcess: () => child as unknown as NodeWorkerProcess,
+    });
+
+    const pending = broker.handleRequest('node-ghost', rpcRequest('slow'));
+    await vi.advanceTimersByTimeAsync(10);
+    child.stderr.write('compiling scene 1...\n');
+    await vi.advanceTimersByTimeAsync(6_000);
+    child.emit('exit', 1, null);
+
+    const result = await pending;
+    expect(result).toMatchObject({ ok: false, errorCode: 'PROCESS_EXITED' });
+    const message = (result as { message?: string }).message ?? '';
+    expect(message).toContain('code=1');
+    expect(message).not.toContain('compiling scene 1');
+  });
+});
+
 describe('nodeRuntimeBroker · 权限与协议', () => {
   it('没声明 node 槽时拒绝且不启动进程', async () => {
     const ghost = fakeGhost();

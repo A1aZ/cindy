@@ -52,6 +52,17 @@ const WORKER_START_ATTEMPTS = 3;
 const WORKER_START_RETRY_DELAYS_MS = [250, 750] as const;
 /** 启动期 stderr 只留头部这么多字符,够提取一行诊断,不给日志灌洪。 */
 const STARTUP_STDERR_CAP = 4_096;
+/**
+ * 意外死亡诊断(2026-07-26):引导层先发 ready、后 require 插件入口,所以"插件
+ * 模块加载期抛错"这类崩溃落在启动期之后——startupStderr 那条路截不到,在途
+ * 请求只会收到干巴巴的"已退出(code=1)"。真实案例:某插件在 Windows 上
+ * defineProperty(process, 'stdin') 抛 TypeError,主进程日志里有完整栈,插件与
+ * Agent 侧却一无所知,只能翻日志才知道为什么。这里另留 stderr **尾部**——崩溃
+ * 摘要出现在最后,与启动期的头部截存互补。
+ */
+const EXIT_STDERR_CAP = 4_096;
+/** 尾部 stderr 只在紧邻退出时可信;更早的日志与本次死亡无关,拼进错误只会误导。 */
+const EXIT_STDERR_LOOKBACK_MS = 5_000;
 const MAX_REQUEST_TIMEOUT_MS = 120_000;
 const MAX_PENDING_REQUESTS = 32;
 const MAX_REQUEST_BYTES = 256 * 1024;
@@ -141,6 +152,10 @@ interface WorkerEntry {
   startupPhase: boolean;
   /** 启动期 stderr 头部截存,失败时提取一行诊断拼进错误消息(如杀软拦截的 EPERM)。 */
   startupStderr: string;
+  /** stderr 尾部滚动截存,进程意外死亡时提取一行诊断拼进错误消息(如加载期抛错)。 */
+  recentStderr: string;
+  /** 尾部截存最后一次进账的时刻(this.now() 口径);0 = 从未收到 stderr。 */
+  recentStderrAt: number;
   /** stdout 的 UTF-8 字节可能把一个汉字切在两个 chunk 之间，必须流式解码。 */
   stdoutDecoder: StringDecoder;
   stdoutBuffer: string;
@@ -178,8 +193,8 @@ class WorkerStartError extends Error {
   }
 }
 
-/** 从启动期 stderr 里挑最有诊断价值的一行(优先含 error 的行),截短拼进失败消息。 */
-function startupStderrHint(text: string): string | null {
+/** 从 stderr 里挑最有诊断价值的一行(优先含 error 的行),截短拼进失败消息。 */
+function stderrHint(text: string): string | null {
   const lines = text
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -935,6 +950,8 @@ export class GhostNodeRuntimeBroker {
       child,
       startupPhase: true,
       startupStderr: '',
+      recentStderr: '',
+      recentStderrAt: 0,
       stdoutDecoder: new StringDecoder('utf8'),
       stdoutBuffer: '',
       nextId: 1,
@@ -958,6 +975,9 @@ export class GhostNodeRuntimeBroker {
       if (entry.startupPhase && entry.startupStderr.length < STARTUP_STDERR_CAP) {
         entry.startupStderr = (entry.startupStderr + String(chunk)).slice(0, STARTUP_STDERR_CAP);
       }
+      // 启动诊断在最前面、死因诊断在最后面,所以两份截存方向相反,不能共用。
+      entry.recentStderr = (entry.recentStderr + String(chunk)).slice(-EXIT_STDERR_CAP);
+      entry.recentStderrAt = this.now();
       const text = String(chunk).trim().slice(0, 4_096);
       if (text) this.deps.log?.warn('ghost node stderr', { ghostId: ghost.manifest.id, text });
       // stderr 是手册钦定的日志口——构建刷日志就是活着的证据,给续命请求重置沉默窗口。
@@ -993,7 +1013,7 @@ export class GhostNodeRuntimeBroker {
               if (entry.stopping) {
                 reject(new WorkerStartError('Node 工作进程启动已取消', false, true));
               } else {
-                const hint = startupStderrHint(entry.startupStderr);
+                const hint = stderrHint(entry.startupStderr);
                 reject(
                   new WorkerStartError(
                     `Node 工作进程启动前退出(code=${code}, signal=${signal ?? 'none'})${hint ? `:${hint}` : ''}`,
@@ -1258,7 +1278,10 @@ export class GhostNodeRuntimeBroker {
     this.clearIdleTimer(entry);
     // worker 意外死亡:孩子级联收掉,不留孤儿(silent——收件人已经不在了)。
     for (const child of [...entry.children.values()]) this.stopChild(entry, child, true);
-    const detail = error?.message ?? `code=${code}, signal=${signal ?? 'none'}`;
+    const exitHint = this.exitStderrHint(entry);
+    const detail = `${error?.message ?? `code=${code}, signal=${signal ?? 'none'}`}${
+      exitHint ? `:${exitHint}` : ''
+    }`;
     for (const pending of entry.pending.values()) {
       this.clearTimer(pending.timer);
       pending.reject(new NodeRpcError('exit', `Node 工作进程已退出(${detail})`));
@@ -1270,6 +1293,18 @@ export class GhostNodeRuntimeBroker {
       this.deps.log?.warn('ghost node process exited', { ghostId, entry: entry.entryRel, detail });
       this.sendStatus(entry.ghost, 'crashed', detail, entry.entryRel);
     }
+  }
+
+  /**
+   * 意外死亡时的 stderr 诊断行:补上 startupStderr 那条路截不到的"就绪之后才崩"
+   * (插件模块加载期抛错最典型)。绝对路径已由 stderrHint 收敛为文件名。
+   * 主动 stop 不参与——那是预期内的收摊,拼诊断只会把无关日志说成死因;陈旧
+   * 尾部同理,只认紧邻退出的那一段。
+   */
+  private exitStderrHint(entry: WorkerEntry): string | null {
+    if (entry.stopping || !entry.recentStderr) return null;
+    if (this.now() - entry.recentStderrAt > EXIT_STDERR_LOOKBACK_MS) return null;
+    return stderrHint(entry.recentStderr);
   }
 
   private scheduleIdleStop(entry: WorkerEntry): void {

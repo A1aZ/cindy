@@ -177,8 +177,12 @@ function validateProvider(p: Provider): void {
         || p.auth.method === 'apiKey'
         || p.auth.method === 'managed'
         || p.auth.method === 'none'
-      ),
+    ),
     `provider.auth.method invalid for '${p.id}'`,
+  );
+  assert(
+    p.auth.method === 'oauth' || p.auth.oauth === undefined,
+    `provider '${p.id}' auth.oauth not allowed for ${p.auth.method} method`,
   );
   assert(Array.isArray(p.agents) && p.agents.length > 0, `provider.agents missing for '${p.id}'`);
   assert(p.agents.every(isAgentKind), `provider.agents has invalid kind for '${p.id}'`);

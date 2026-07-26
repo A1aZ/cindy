@@ -995,8 +995,9 @@ describe('anthropic-compat-proxy routingTransform', () => {
     let observedEnd = false;
     let transformedReqId: number | null = null;
     let observedCtx: { reqId: number; url: string; status: number; upstreamBase: string } | null = null;
+    const upstreamWithQuery = `${upstream.url}/tenant/acme?region=us`;
     proxy = await createAnthropicCompatProxy({
-      upstream: upstream.url,
+      upstream: upstreamWithQuery,
       transformRequest: [(_body, ctx) => {
         transformedReqId = ctx.reqId;
         return null;
@@ -1024,7 +1025,7 @@ describe('anthropic-compat-proxy routingTransform', () => {
       reqId: transformedReqId,
       url: '/v1/responses',
       status: 200,
-      upstreamBase: upstream.url,
+      upstreamBase: upstreamWithQuery,
     });
     expect(chunks.join('')).toBe(r.text);
     expect(observedEnd).toBe(true);

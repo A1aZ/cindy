@@ -456,6 +456,23 @@ describe('provider OAuth and upstream URL validation', () => {
     expect(() => parseCatalog(deviceCode)).toThrow(/authorization-code fields/);
   });
 
+  it('rejects reserved OAuth extra params case-insensitively', () => {
+    const catalog = oauthCatalog();
+    catalog.providers[0]!.auth.oauth!.extraAuthParams = {
+      Client_Id: 'shadow-client',
+    };
+    expect(() => parseCatalog(catalog)).toThrow(/cannot override 'Client_Id'/);
+  });
+
+  it('rejects an OAuth descriptor on a non-OAuth auth method', () => {
+    const catalog = oauthCatalog();
+    catalog.providers[0]!.auth = {
+      method: 'none',
+      oauth: catalog.providers[0]!.auth.oauth,
+    } as never;
+    expect(() => parseCatalog(catalog)).toThrow(/auth\.oauth not allowed for none method/);
+  });
+
   it('rejects an upstream URL with embedded credentials', () => {
     const catalog = oauthCatalog();
     catalog.providers[0]!.routing.codex!.upstream = 'https://user:pass@api.example/v1';

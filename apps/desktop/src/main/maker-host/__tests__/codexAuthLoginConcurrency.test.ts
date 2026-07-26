@@ -102,6 +102,81 @@ describe('DesktopCodexAuthAdapter login single-flight', () => {
     expect(runTriggerLogin).toHaveBeenCalledTimes(1);
   });
 
+  it('restarts a cancelled same-mode login after the cancelled operation settles', async () => {
+    const { DesktopCodexAuthAdapter } = await import('../auth-adapters.js');
+    const adapter = Object.create(DesktopCodexAuthAdapter.prototype) as InstanceType<
+      typeof DesktopCodexAuthAdapter
+    >;
+    let finishFirst!: (state: AuthState) => void;
+    const firstRun = new Promise<AuthState>((resolve) => {
+      finishFirst = resolve;
+    });
+    const runTriggerLogin = vi.fn()
+      .mockReturnValueOnce(firstRun)
+      .mockResolvedValueOnce({ authenticated: true, authSource: 'oauth' });
+    Object.defineProperty(adapter, 'runTriggerLogin', {
+      configurable: true,
+      value: runTriggerLogin,
+    });
+
+    const first = adapter.triggerLogin({ mode: 'browser' });
+    adapter.cancelLogin();
+    const retry = adapter.triggerLogin({ mode: 'browser' });
+
+    expect(retry).not.toBe(first);
+    expect(runTriggerLogin).toHaveBeenCalledTimes(1);
+    finishFirst({ authenticated: false, errorReason: 'login_cancelled' });
+    await expect(first).resolves.toMatchObject({ errorReason: 'login_cancelled' });
+    await expect(retry).resolves.toMatchObject({
+      authenticated: true,
+      authSource: 'oauth',
+    });
+    expect(runTriggerLogin).toHaveBeenCalledTimes(2);
+  });
+
+  it('queues a mode switch behind both the cancelled login and an active logout', async () => {
+    const { DesktopCodexAuthAdapter } = await import('../auth-adapters.js');
+    const adapter = Object.create(DesktopCodexAuthAdapter.prototype) as InstanceType<
+      typeof DesktopCodexAuthAdapter
+    >;
+    let finishBrowser!: (state: AuthState) => void;
+    const browserRun = new Promise<AuthState>((resolve) => {
+      finishBrowser = resolve;
+    });
+    let finishLogout!: () => void;
+    const logoutOperation = new Promise<void>((resolve) => {
+      finishLogout = resolve;
+    });
+    const runTriggerLogin = vi.fn((opts?: AuthLoginOptions): Promise<AuthState> =>
+      (opts?.mode ?? 'browser') === 'browser'
+        ? browserRun
+        : Promise.resolve({ authenticated: true, authSource: 'oauth' }),
+    );
+    Object.defineProperty(adapter, 'runTriggerLogin', {
+      configurable: true,
+      value: runTriggerLogin,
+    });
+
+    const browser = adapter.triggerLogin({ mode: 'browser' });
+    Object.defineProperty(adapter, 'logoutOperation', {
+      configurable: true,
+      writable: true,
+      value: logoutOperation,
+    });
+    const deviceCode = adapter.triggerLogin({ mode: 'device-code' });
+    finishBrowser({ authenticated: false, errorReason: 'login_cancelled' });
+    await expect(browser).resolves.toMatchObject({ errorReason: 'login_cancelled' });
+    await Promise.resolve();
+    expect(runTriggerLogin).toHaveBeenCalledTimes(1);
+
+    finishLogout();
+    await expect(deviceCode).resolves.toMatchObject({
+      authenticated: true,
+      authSource: 'oauth',
+    });
+    expect(runTriggerLogin).toHaveBeenCalledTimes(2);
+  });
+
   it('queues a new login until an in-flight logout fully settles', async () => {
     const { DesktopCodexAuthAdapter } = await import('../auth-adapters.js');
     const adapter = Object.create(DesktopCodexAuthAdapter.prototype) as InstanceType<

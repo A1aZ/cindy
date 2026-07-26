@@ -329,7 +329,10 @@ export function registerProviderHandlers(
     const id = requireProviderId(providerId);
     const generation = beginOAuthMutation(id);
     try {
-      return await deps.oauthLogin(id, () => isOAuthMutationCurrent(id, generation));
+      const result = await deps.oauthLogin(id, () => isOAuthMutationCurrent(id, generation));
+      return isOAuthMutationCurrent(id, generation)
+        ? result
+        : { ok: false, reason: 'login_superseded' };
     } catch (err) {
       throwIpcError('INVALID_PARAMS', err instanceof Error ? err.message : String(err));
     }

@@ -56,7 +56,16 @@ function stateChangedListener(auth: ReturnType<typeof installAuthApi>) {
 
 function loginProgressListener(auth: ReturnType<typeof installAuthApi>) {
   const calls = auth.onLoginProgress.mock.calls as unknown as Array<
-    [(payload: { agentKind: string; phase: string; detail?: string }) => void]
+    [(
+      payload: {
+        agentKind: string;
+        phase: string;
+        mode?: 'browser' | 'device-code';
+        detail?: string;
+        verificationUrl?: string;
+        userCode?: string;
+      },
+    ) => void]
   >;
   return calls[0][0];
 }
@@ -204,7 +213,7 @@ describe('useCodexAuth lifecycle', () => {
     act(() => {
       loginProgressListener(auth)({ agentKind: 'codex', phase: 'login-pending' });
     });
-    expect(result.current.state).toEqual({ kind: 'login-pending' });
+    expect(result.current.state).toEqual({ kind: 'login-pending', mode: 'browser' });
 
     await act(async () => {
       initialState.resolve({
@@ -215,7 +224,7 @@ describe('useCodexAuth lifecycle', () => {
       await initialState.promise;
     });
 
-    expect(result.current.state).toEqual({ kind: 'login-pending' });
+    expect(result.current.state).toEqual({ kind: 'login-pending', mode: 'browser' });
 
     act(() => {
       stateChangedListener(auth)({
@@ -283,6 +292,52 @@ describe('useCodexAuth lifecycle', () => {
       await expect(secondOutcome).resolves.toBe('authenticated');
     });
     expect(auth.triggerLogin).toHaveBeenCalledWith('codex');
+  });
+
+  it('keeps the device code visible while later waiting output arrives', async () => {
+    const auth = installAuthApi(async () => undefined);
+    const login = deferred<TestAuthState>();
+    auth.triggerLogin.mockImplementation(() => login.promise);
+    const { result } = renderHook(() => useCodexAuth());
+
+    await waitFor(() => expect(result.current.state.kind).toBe('authenticated'));
+    let attempt!: Promise<string>;
+    act(() => {
+      attempt = result.current.triggerLogin('device-code');
+    });
+    await waitFor(() =>
+      expect(auth.triggerLogin).toHaveBeenCalledWith('codex', { mode: 'device-code' }),
+    );
+
+    act(() => {
+      loginProgressListener(auth)({
+        agentKind: 'codex',
+        phase: 'device-code',
+        mode: 'device-code',
+        verificationUrl: 'https://auth.openai.com/codex/device',
+        userCode: 'RUH2-7E2VH',
+      });
+      loginProgressListener(auth)({
+        agentKind: 'codex',
+        phase: 'login-pending',
+        mode: 'device-code',
+        detail: 'Waiting for authorization',
+      });
+    });
+
+    expect(result.current.state).toEqual({
+      kind: 'login-pending',
+      mode: 'device-code',
+      deviceCode: {
+        verificationUrl: 'https://auth.openai.com/codex/device',
+        userCode: 'RUH2-7E2VH',
+      },
+    });
+
+    login.resolve({ authenticated: false, errorReason: 'login_cancelled' });
+    await act(async () => {
+      await expect(attempt).resolves.toBe('cancelled');
+    });
   });
 
   it('does not treat a Cindy AI API key as a connected ChatGPT account', () => {

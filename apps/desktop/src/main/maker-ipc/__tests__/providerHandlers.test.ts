@@ -166,6 +166,46 @@ describe('provider:custom:* CRUD handlers', () => {
     ).rejects.toThrow(/NOT_FOUND/);
   });
 
+  it('clears an OAuth token when its descriptor changes but preserves it for model-only edits', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    const clearOAuthCredentials = vi.fn();
+    const deps = makeDeps({ clearOAuthCredentials });
+    registerProviderHandlers(harness, deps);
+    const oauth = {
+      authorizeUrl: 'https://auth.example/authorize',
+      tokenUrl: 'https://auth.example/token',
+      clientId: 'desktop',
+      scopes: 'openid models.read',
+    };
+    const oauthConfig: CustomProviderConfig = {
+      ...validConfig,
+      auth: {
+        method: 'oauth',
+        oauth,
+      },
+    };
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, oauthConfig);
+
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+      ...oauthConfig,
+      name: 'OpenRouter renamed',
+    });
+    expect(clearOAuthCredentials).not.toHaveBeenCalled();
+
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+      ...oauthConfig,
+      auth: {
+        method: 'oauth',
+        oauth: {
+          ...oauth,
+          tokenUrl: 'https://auth.example/token-v2',
+        },
+      },
+    });
+    expect(clearOAuthCredentials).toHaveBeenCalledWith('openrouter');
+  });
+
   it('deletes (idempotent) + broadcasts; bad providerId → INVALID_PARAMS', async () => {
     mountDb();
     const harness = new IpcHarness();
@@ -211,12 +251,26 @@ describe('provider:test-connection handler', () => {
 
     const result = await harness.invoke(MAKER_INVOKE.PROVIDER_TEST_CONNECTION, {
       kind: 'adhoc',
-      spec: { agent: 'claude-code', baseUrl: 'https://x.example', modelId: 'm', apiKey: 'k' },
+      spec: {
+        agent: 'claude-code',
+        baseUrl: 'https://x.example',
+        modelId: 'm',
+        requestPath: '/custom/messages',
+        apiKey: 'k',
+      },
     });
     expect(result).toMatchObject({ ok: false, code: 'AUTH_INVALID', status: 401 });
     expect(testConnection).toHaveBeenCalledWith({
       kind: 'adhoc',
-      spec: { agent: 'claude-code', baseUrl: 'https://x.example', modelId: 'm', apiKey: 'k', headers: undefined },
+      spec: {
+        agent: 'claude-code',
+        baseUrl: 'https://x.example',
+        modelId: 'm',
+        wireProtocol: undefined,
+        requestPath: '/custom/messages',
+        apiKey: 'k',
+        headers: undefined,
+      },
     });
   });
 
@@ -229,6 +283,8 @@ describe('provider:test-connection handler', () => {
       { kind: 'adhoc', spec: { agent: 'gemini', baseUrl: 'https://x.example', modelId: 'm' } },
       { kind: 'adhoc', spec: { agent: 'codex', baseUrl: 'ftp://x', modelId: 'm' } },
       { kind: 'adhoc', spec: { agent: 'codex', baseUrl: 'https://x.example', modelId: '' } },
+      { kind: 'adhoc', spec: { agent: 'codex', baseUrl: 'https://x.example', modelId: 'm', requestPath: '//evil.example' } },
+      { kind: 'adhoc', spec: { agent: 'codex', baseUrl: 'https://x.example', modelId: 'm', requestPath: '/infer#fragment' } },
       { kind: 'saved', providerId: '', agent: 'codex' },
     ];
     for (const input of bad) {

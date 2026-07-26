@@ -3487,6 +3487,7 @@ interface ElectronAPI {
               baseUrl: string;
               modelId: string;
               wireProtocol?: import('@cindy/model-providers').ProviderWireProtocol;
+              requestPath?: string;
               apiKey?: string | null;
               headers?: Record<string, string>;
             };
@@ -3541,6 +3542,15 @@ interface ElectronAPI {
     providerOAuthLogin: (providerId: string) => Promise<{ ok: boolean; reason?: string }>;
     providerOAuthLogout: (providerId: string) => Promise<{ ok: true }>;
     providerOAuthCancel: (providerId: string) => Promise<{ ok: true }>;
+    onProviderOAuthProgress: (
+      cb: (progress: {
+        providerId: string;
+        phase: 'device-code';
+        verificationUrl: string;
+        userCode: string;
+        expiresAt: number;
+      }) => void,
+    ) => () => void;
     /** 自定义供应商上游错误订阅（返回 off）；code 走 providerError.* i18n。 */
     onProviderUpstreamError: (
       cb: (event: {
@@ -4192,14 +4202,24 @@ interface ElectronAPI {
     /* ── Agent 鉴权 (取代老 codex.auth.*) ── */
     auth: {
       getState: (agentKind: 'claude-code' | 'codex') => Promise<CodexAuthState>;
-      triggerLogin: (agentKind: 'claude-code' | 'codex') => Promise<CodexAuthState>;
+      triggerLogin: (
+        agentKind: 'claude-code' | 'codex',
+        options?: { mode?: 'browser' | 'device-code' },
+      ) => Promise<CodexAuthState>;
       cancelLogin: (agentKind: 'claude-code' | 'codex') => Promise<void>;
       logout: (agentKind: 'claude-code' | 'codex') => Promise<void>;
       onStateChanged: (
         cb: (s: { agentKind: 'claude-code' | 'codex' } & CodexAuthState) => void,
       ) => () => void;
       onLoginProgress: (
-        cb: (p: { agentKind: 'claude-code' | 'codex'; phase: string; detail?: string }) => void,
+        cb: (p: {
+          agentKind: 'claude-code' | 'codex';
+          phase: string;
+          mode?: 'browser' | 'device-code';
+          detail?: string;
+          verificationUrl?: string;
+          userCode?: string;
+        }) => void,
       ) => () => void;
     };
 

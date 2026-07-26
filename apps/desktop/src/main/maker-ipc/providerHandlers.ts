@@ -23,6 +23,7 @@ import {
   createCustomProvider,
   customProviderExists,
   deleteCustomProvider,
+  getCustomProvider,
   updateCustomProvider,
   validateCustomProviderConfig,
 } from '../maker-host/custom-provider-store.js';
@@ -35,6 +36,26 @@ import { MAKER_INVOKE } from './channels.js';
 import type { IpcHandlerRegistry } from './ipcHandlerRegistry.js';
 
 const VALID_AGENTS: readonly string[] = ['claude-code', 'codex'];
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, item]) => [key, canonicalize(item)]),
+  );
+}
+
+function oauthDescriptorSignature(config: CustomProviderConfig | null): string | null {
+  if (config?.auth?.method !== 'oauth') return null;
+  return JSON.stringify(
+    canonicalize({
+      ...config.auth.oauth,
+      flow: config.auth.oauth.flow ?? 'authorization-code',
+    }),
+  );
+}
 
 export interface ProviderHandlerDeps {
   /** 当前供应商视图（含实时连接状态）；见 createDesktopProviderService。 */
@@ -104,6 +125,18 @@ function parseTestInput(input: unknown): ProviderTestInput | null {
         : ['openai-responses', 'openai-chat'];
       if (typeof spec.wireProtocol !== 'string' || !allowed.includes(spec.wireProtocol)) return null;
     }
+    if (
+      spec.requestPath !== undefined
+      && (
+        typeof spec.requestPath !== 'string'
+        || spec.requestPath.length <= 1
+        || spec.requestPath.length > 2_048
+        || !spec.requestPath.startsWith('/')
+        || spec.requestPath.startsWith('//')
+        || spec.requestPath.includes('#')
+        || /[\r\n]/.test(spec.requestPath)
+      )
+    ) return null;
     return {
       kind: 'adhoc',
       spec: {
@@ -111,6 +144,7 @@ function parseTestInput(input: unknown): ProviderTestInput | null {
         baseUrl: spec.baseUrl,
         modelId: spec.modelId,
         wireProtocol: spec.wireProtocol as ProviderProbeSpec['wireProtocol'],
+        requestPath: spec.requestPath as string | undefined,
         apiKey: (spec.apiKey as string | null | undefined) ?? null,
         headers: spec.headers as Record<string, string> | undefined,
       },
@@ -189,8 +223,17 @@ export function registerProviderHandlers(
     const v = validateCustomProviderConfig(input);
     if (!v.ok) throwIpcError(v.code, v.message);
     const config = input as CustomProviderConfig;
+    const previous = await getCustomProvider(config.id);
     const updated = await updateCustomProvider(config.id, config);
     if (!updated) throwIpcError('NOT_FOUND', `custom provider '${config.id}' not found`);
+    // 旧 client / endpoint 下签发的 token 不能沿用到新 OAuth 描述符；切到 API key /
+    // 无鉴权时也清掉不再可达的 blob。仅改名称/模型时保留仍匹配的登录态。
+    if (
+      updated.auth?.method !== 'oauth'
+      || oauthDescriptorSignature(previous) !== oauthDescriptorSignature(updated)
+    ) {
+      deps.clearOAuthCredentials(config.id);
+    }
     await afterChange();
     return { ok: true };
   });

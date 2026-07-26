@@ -26,7 +26,9 @@ import { createCustomProvider, type RuntimeKeys } from '@/lib/customProviders';
 import { uniqueCustomProviderId } from '@/lib/customProviderId';
 import { providerMonogram } from '@/lib/providerModels';
 import { isChatGptConnectionConnected, useCodexAuth } from '@/hooks/useCodexAuth';
+import { useProviderOAuthDeviceCode } from '@/hooks/useProviderOAuthDeviceCode';
 import { hasProviderLogo, ProviderLogoMark } from '@/components/icons/ProviderLogoMark';
+import { OAuthDeviceCodeCard } from './OAuthDeviceCodeCard';
 
 import { presetDisplayName, sortPresetsForLocale } from '@cindy/model-providers';
 import type {
@@ -253,8 +255,20 @@ export function AddProviderWizard({
   // 预设表单态
   const [name, setName] = useState('');
   const [apiKey, setApiKey] = useState('');
+  const [runtimeBaseUrls, setRuntimeBaseUrls] = useState<
+    Partial<Record<AgentKind, string>>
+  >({});
   const [saving, setSaving] = useState(false);
   const [loggingIn, setLoggingIn] = useState(false);
+  const genericDeviceProviderId =
+    sel?.kind === 'oauth'
+    && sel.provider.auth.oauth?.flow === 'device-code'
+      ? sel.provider.id
+      : null;
+  const {
+    deviceCode: genericDeviceCode,
+    clearDeviceCode: clearGenericDeviceCode,
+  } = useProviderOAuthDeviceCode(genericDeviceProviderId);
   // Step 3 拉取态
   const [step, setStep] = useState<1 | 2 | 3>(entryProvider ? 2 : 1);
   const [fetchState, setFetchState] = useState<
@@ -327,6 +341,12 @@ export function AddProviderWizard({
       setSel({ kind: 'preset', preset });
       setName(presetDisplayName(preset, i18n.language));
       setApiKey('');
+      setRuntimeBaseUrls(
+        Object.fromEntries(
+          (Object.keys(preset.runtimes) as AgentKind[])
+            .map((agent) => [agent, preset.runtimes[agent]?.baseUrl ?? '']),
+        ) as Partial<Record<AgentKind, string>>,
+      );
       setStep(2);
     },
     [i18n.language],
@@ -353,9 +373,12 @@ export function AddProviderWizard({
   const openaiLoginStartedRef = useRef(false);
 
   // ── OAuth 授权(复用既有鉴权流;成功即完成,无第 3 步)────────────────────
-  const handleAuthorize = useCallback(async () => {
+  const handleAuthorize = useCallback(async (
+    mode: 'browser' | 'device-code' = 'browser',
+  ) => {
     if (!sel || sel.kind !== 'oauth') return;
     const id = sel.provider.id;
+    clearGenericDeviceCode();
     setLoggingIn(true);
     try {
       let ok = false;
@@ -369,7 +392,7 @@ export function AddProviderWizard({
         if (!r.ok && r.reason === 'login_cancelled') return;
       } else if (id === 'openai') {
         openaiLoginStartedRef.current = true;
-        const outcome = await codexAuth.triggerLogin();
+        const outcome = await codexAuth.triggerLogin(mode);
         ok = outcome === 'authenticated';
         if (outcome === 'cancelled') return;
       } else if (id === 'xai') {
@@ -392,7 +415,7 @@ export function AddProviderWizard({
     } finally {
       setLoggingIn(false);
     }
-  }, [sel, codexAuth, onDone, t]);
+  }, [sel, clearGenericDeviceCode, codexAuth, onDone, t]);
 
   /**
    * 取消进行中的 OAuth(与详情头的行为对称):等待授权期间点按钮 / 关弹窗 / 返回
@@ -405,8 +428,9 @@ export function AddProviderWizard({
     else if (id === 'openai') void codexAuth.cancelLogin();
     else if (id === 'xai') void window.electronAPI.maker.xaiOAuthCancel();
     else void window.electronAPI.maker.providerOAuthCancel(id);
+    clearGenericDeviceCode();
     setLoggingIn(false);
-  }, [sel, codexAuth]);
+  }, [sel, clearGenericDeviceCode, codexAuth]);
 
   /** 关闭向导:授权等待中先取消再关,不留挂起的 login runner。 */
   const handleClose = useCallback(() => {
@@ -463,7 +487,7 @@ export function AddProviderWizard({
         try {
           const r = await window.electronAPI.maker.fetchProviderModels({
             agent,
-            baseUrl: rt.baseUrl,
+            baseUrl: runtimeBaseUrls[agent]?.trim() || rt.baseUrl,
             modelsUrl: rt.modelsUrl ?? null,
             apiKey: apiKey.trim() || null,
             ...(rt.headers ? { headers: rt.headers } : {}),
@@ -494,7 +518,7 @@ export function AddProviderWizard({
     });
     // 全部端点都失败才算失败(单端失败仍可按另一端 + 预设推荐完成)。
     setFetchState({ status: 'done', failed: !results.some((r) => r.ok) });
-  }, [sel, apiKey]);
+  }, [sel, apiKey, runtimeBaseUrls]);
 
   // ── 完成创建(预设)────────────────────────────────────────────────────
   const handleFinish = useCallback(async () => {
@@ -535,21 +559,29 @@ export function AddProviderWizard({
           });
         if (agentModels.length === 0) continue;
         runtimes[agent] = {
-          baseUrl: rt.baseUrl,
+          baseUrl: runtimeBaseUrls[agent]?.trim() || rt.baseUrl,
+          ...(rt.requestPath ? { requestPath: rt.requestPath } : {}),
           ...(rt.wireProtocol ? { wireProtocol: rt.wireProtocol } : {}),
           models: agentModels,
           ...(rt.headers ? { headers: rt.headers } : {}),
           ...(rt.modelsUrl ? { modelsUrl: rt.modelsUrl } : {}),
         };
-        const k = apiKey.trim();
-        if (k) keys[agent] = k;
+        if (preset.authMethod !== 'none') {
+          const k = apiKey.trim();
+          if (k) keys[agent] = k;
+        }
       }
       if (Object.keys(runtimes).length === 0) {
         toast.error(t('settings.providers.wizard.noModelSelected'));
         return;
       }
       await createCustomProvider(
-        { id, name: name.trim() || presetDisplayName(preset, i18n.language), runtimes },
+        {
+          id,
+          name: name.trim() || presetDisplayName(preset, i18n.language),
+          ...(preset.authMethod === 'none' ? { auth: { method: 'none' as const } } : {}),
+          runtimes,
+        },
         keys,
       );
       toast.success(
@@ -563,7 +595,7 @@ export function AddProviderWizard({
     } finally {
       setSaving(false);
     }
-  }, [sel, picks, name, apiKey, providers, onDone, t, i18n.language]);
+  }, [sel, picks, name, apiKey, runtimeBaseUrls, providers, onDone, t, i18n.language]);
 
   // ── 步骤指示(OAuth 路径只有 2 步)─────────────────────────────────────
   const totalSteps = sel?.kind === 'preset' ? 3 : 2;
@@ -586,8 +618,34 @@ export function AddProviderWizard({
           agent: AGENT_LABEL[sel.provider.agents[0]],
         })
       : null;
+  const openAiDeviceLoginPending =
+    sel?.kind === 'oauth' &&
+    sel.provider.id === 'openai' &&
+    loggingIn &&
+    codexAuth.state.kind === 'login-pending' &&
+    codexAuth.state.mode === 'device-code';
+  const openAiDeviceCode =
+    openAiDeviceLoginPending && codexAuth.state.kind === 'login-pending'
+      ? codexAuth.state.deviceCode
+      : undefined;
 
   const checkedCount = [...picks.values()].filter((v) => v.checked).length;
+  const presetNeedsApiKey = sel?.kind === 'preset' && sel.preset.authMethod !== 'none';
+  const presetBaseUrlsValid =
+    sel?.kind === 'preset'
+    && presetAgents.every((agent) => {
+      const value = runtimeBaseUrls[agent]?.trim() || sel.preset.runtimes[agent]?.baseUrl || '';
+      try {
+        const url = new URL(value);
+        return url.protocol === 'http:' || url.protocol === 'https:';
+      } catch {
+        return false;
+      }
+    });
+  const presetCanContinue =
+    sel?.kind === 'preset'
+    && presetBaseUrlsValid
+    && (!presetNeedsApiKey || apiKey.trim().length > 0);
 
   return (
     <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-[var(--overlay-modal)]">
@@ -722,7 +780,11 @@ export function AddProviderWizard({
                           name: presetDisplayName(p, i18n.language),
                         })}
                         name={presetDisplayName(p, i18n.language)}
-                        meta={t('settings.providers.wizard.metaApiKey')}
+                        meta={t(
+                          p.authMethod === 'none'
+                            ? 'settings.providers.wizard.metaNoAuth'
+                            : 'settings.providers.wizard.metaApiKey',
+                        )}
                         onClick={() => pickPreset(p)}
                       />
                     ))}
@@ -786,32 +848,66 @@ export function AddProviderWizard({
                     {sel.provider.name}
                   </span>
                   <span className="text-12" style={{ color: 'var(--text-tertiary)' }}>
-                    {t('settings.providers.wizard.oauthDesc')}
+                    {t(
+                      sel.provider.auth.oauth?.flow === 'device-code'
+                        ? 'settings.providers.wizard.deviceOAuthDesc'
+                        : 'settings.providers.wizard.oauthDesc',
+                    )}
                   </span>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 {/* 等待授权中按钮变「取消」(与详情头对称),不禁用——浏览器流挂起时用户必须能中止重试。 */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (loggingIn) cancelAuthorize();
-                    else void handleAuthorize();
-                  }}
-                  className="flex h-9 items-center justify-center gap-2 rounded-full border px-5 text-13 font-medium transition-colors hover:bg-[var(--surface-hover)]"
-                  style={{
-                    backgroundColor: 'var(--settings-btn-secondary-bg)',
-                    borderColor: 'var(--settings-btn-secondary-border)',
-                    color: 'var(--settings-btn-secondary-text)',
-                  }}
-                >
-                  {loggingIn && <Spinner size={13} />}
-                  {t(
-                    loggingIn
-                      ? 'settings.providers.button.cancel'
-                      : 'settings.providers.button.authorize',
-                  )}
-                </button>
+                {loggingIn ? (
+                  <button
+                    type="button"
+                    onClick={cancelAuthorize}
+                    className="flex h-9 items-center justify-center gap-2 rounded-full border px-5 text-13 font-medium transition-colors hover:bg-[var(--surface-hover)]"
+                    style={{
+                      backgroundColor: 'var(--settings-btn-secondary-bg)',
+                      borderColor: 'var(--settings-btn-secondary-border)',
+                      color: 'var(--settings-btn-secondary-text)',
+                    }}
+                  >
+                    <Spinner size={13} />
+                    {t('settings.providers.button.cancel')}
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => void handleAuthorize('browser')}
+                      className="flex h-9 items-center justify-center rounded-full border px-5 text-13 font-medium transition-colors hover:bg-[var(--surface-hover)]"
+                      style={{
+                        backgroundColor: 'var(--settings-btn-secondary-bg)',
+                        borderColor: 'var(--settings-btn-secondary-border)',
+                        color: 'var(--settings-btn-secondary-text)',
+                      }}
+                    >
+                      {t(
+                        sel.provider.id === 'openai'
+                          ? 'settings.providers.wizard.authorizeInBrowser'
+                          : sel.provider.auth.oauth?.flow === 'device-code'
+                            ? 'settings.providers.wizard.authorizeWithDeviceCode'
+                            : 'settings.providers.button.authorize',
+                      )}
+                    </button>
+                    {sel.provider.id === 'openai' && (
+                      <button
+                        type="button"
+                        onClick={() => void handleAuthorize('device-code')}
+                        className="flex h-9 items-center justify-center rounded-full border px-5 text-13 font-medium transition-colors hover:bg-[var(--surface-hover)]"
+                        style={{
+                          backgroundColor: 'transparent',
+                          borderColor: 'var(--settings-btn-secondary-border)',
+                          color: 'var(--settings-btn-secondary-text)',
+                        }}
+                      >
+                        {t('settings.providers.wizard.authorizeWithDeviceCode')}
+                      </button>
+                    )}
+                  </>
+                )}
                 {/* 替代路径:API 用户没有订阅,OAuth 对其是错误路径——切到该渠道的
                     官方 API 预设表单(填 key),与从目录选预设完全同一条流水线。
                     与「授权」并排的次级描边按钮(White Pill):小灰字形态用户根本
@@ -832,6 +928,12 @@ export function AddProviderWizard({
                   </button>
                 )}
               </div>
+              {openAiDeviceLoginPending && (
+                <OAuthDeviceCodeCard deviceCode={openAiDeviceCode} />
+              )}
+              {genericDeviceProviderId && loggingIn && (
+                <OAuthDeviceCodeCard deviceCode={genericDeviceCode} />
+              )}
               {oauthSingleAgentNote && <InfoLine text={oauthSingleAgentNote} />}
             </div>
           )}
@@ -854,30 +956,64 @@ export function AddProviderWizard({
                   }}
                 />
               </div>
-              <div className="flex flex-col gap-1.5">
-                <label className="text-12 font-medium" style={{ color: 'var(--text-secondary)' }}>
-                  {t('settings.providers.custom.fields.apiKey')}
-                </label>
-                <input
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="sk-…"
-                  autoComplete="off"
-                  className="h-9 rounded-full border px-4 font-mono text-13 outline-none focus:ring-2 focus:ring-[var(--focus-ring)]"
-                  style={{
-                    borderColor: 'var(--border-default)',
-                    backgroundColor: 'var(--surface-elevated)',
-                    color: 'var(--settings-section-title)',
-                  }}
-                />
-              </div>
-              {/* baseUrl 由预设携带,只读展示(要改走保存后的编辑表单)。
-                  codex + openai-chat 上游标注「Cindy 桥接」,让用户明确该通道是协议转换而非原生。 */}
-              <div className="flex flex-col gap-1">
+              {presetNeedsApiKey ? (
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-12 font-medium" style={{ color: 'var(--text-secondary)' }}>
+                    {t('settings.providers.custom.fields.apiKey')}
+                  </label>
+                  <input
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder="sk-…"
+                    autoComplete="off"
+                    className="h-9 rounded-full border px-4 font-mono text-13 outline-none focus:ring-2 focus:ring-[var(--focus-ring)]"
+                    style={{
+                      borderColor: 'var(--border-default)',
+                      backgroundColor: 'var(--surface-elevated)',
+                      color: 'var(--settings-section-title)',
+                    }}
+                  />
+                </div>
+              ) : (
+                <InfoLine text={t('settings.providers.wizard.noAuthNote')} />
+              )}
+              {/* 官方端点默认只读；本机 / 自托管代理预设可编辑。codex + openai-chat
+                  上游标注「Cindy 桥接」，让用户明确该通道是协议转换而非原生。 */}
+              <div className="flex flex-col gap-2">
                 {presetAgents.map((agent) => {
                   const rt = sel.preset.runtimes[agent];
                   const bridged = agent === 'codex' && rt?.wireProtocol === 'openai-chat';
+                  if (rt?.baseUrlEditable) {
+                    return (
+                      <label key={agent} className="flex flex-col gap-1.5">
+                        <span
+                          className="text-12 font-medium"
+                          style={{ color: 'var(--text-secondary)' }}
+                        >
+                          {t('settings.providers.wizard.endpointLabel', {
+                            agent: AGENT_LABEL[agent],
+                          })}
+                        </span>
+                        <input
+                          type="url"
+                          value={runtimeBaseUrls[agent] ?? rt.baseUrl}
+                          onChange={(event) =>
+                            setRuntimeBaseUrls((prev) => ({
+                              ...prev,
+                              [agent]: event.target.value,
+                            }))
+                          }
+                          className="h-9 rounded-full border px-4 font-mono text-12 outline-none focus:ring-2 focus:ring-[var(--focus-ring)]"
+                          style={{
+                            borderColor: 'var(--border-default)',
+                            backgroundColor: 'var(--surface-elevated)',
+                            color: 'var(--settings-section-title)',
+                          }}
+                        />
+                      </label>
+                    );
+                  }
                   return (
                     <span
                       key={agent}
@@ -1041,10 +1177,10 @@ export function AddProviderWizard({
               <button
                 type="button"
                 onClick={() => void startFetch()}
-                disabled={apiKey.trim().length === 0}
+                disabled={!presetCanContinue}
                 className={cn(
                   'flex h-9 items-center justify-center rounded-full px-5 text-13 font-medium transition-opacity',
-                  apiKey.trim().length === 0 ? 'cursor-not-allowed opacity-50' : 'hover:opacity-90',
+                  !presetCanContinue ? 'cursor-not-allowed opacity-50' : 'hover:opacity-90',
                 )}
                 style={{ backgroundColor: 'var(--accent-cta-bg)', color: 'var(--surface-on-card)' }}
               >

@@ -67,6 +67,18 @@ const deepseekPreset = {
   name: 'DeepSeek',
   runtimes: { 'claude-code': { baseUrl: 'https://api.deepseek.com/anthropic', models: [] } },
 };
+const liteLlmPreset = {
+  id: 'litellm',
+  name: 'LiteLLM Proxy',
+  authMethod: 'none' as const,
+  runtimes: {
+    codex: {
+      baseUrl: 'http://127.0.0.1:4000/v1',
+      baseUrlEditable: true,
+      models: [{ id: 'local-model', name: 'Local model' }],
+    },
+  },
+};
 
 function renderWizard(presetId: string) {
   return render(
@@ -83,7 +95,7 @@ function renderWizard(presetId: string) {
 beforeEach(() => {
   (window as unknown as { electronAPI: unknown }).electronAPI = {
     maker: {
-      listProviderPresets: vi.fn(async () => ({ presets: [deepseekPreset] })),
+      listProviderPresets: vi.fn(async () => ({ presets: [deepseekPreset, liteLlmPreset] })),
       // 列模型失败场景兜底(Greptile P1 回归):官方 API 预设必须靠推荐模型仍可完成。
       fetchProviderModels: vi.fn(async () => ({ ok: false, code: 'NETWORK' })),
     },
@@ -195,6 +207,43 @@ describe('AddProviderWizard — preset 直达', () => {
         expect.objectContaining({ id: 'claude-haiku-4-5', contextWindow: 200_000 }),
       ]),
     );
+  });
+
+  it('LiteLLM:无需 API key，可改本机端点，并以 none 鉴权保存', async () => {
+    renderWizard('litellm');
+
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('LiteLLM Proxy')).not.toBeNull(),
+    );
+    expect(screen.queryByPlaceholderText('sk-…')).toBeNull();
+    expect(screen.getByText('settings.providers.wizard.noAuthNote')).not.toBeNull();
+
+    const endpoint = screen.getByDisplayValue('http://127.0.0.1:4000/v1');
+    fireEvent.change(endpoint, { target: { value: 'http://localhost:4100/v1' } });
+    const next = screen.getByText('settings.providers.wizard.next').closest('button') as HTMLButtonElement;
+    expect(next.disabled).toBe(false);
+    fireEvent.click(next);
+
+    await waitFor(() => expect(screen.getByText('Local model')).not.toBeNull());
+    expect(window.electronAPI.maker.fetchProviderModels).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent: 'codex',
+        baseUrl: 'http://localhost:4100/v1',
+        apiKey: null,
+      }),
+    );
+    fireEvent.click(screen.getByText('settings.providers.wizard.finish'));
+
+    await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(createCustomProvider).mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        auth: { method: 'none' },
+        runtimes: {
+          codex: expect.objectContaining({ baseUrl: 'http://localhost:4100/v1' }),
+        },
+      }),
+    );
+    expect(vi.mocked(createCustomProvider).mock.calls[0][1]).toEqual({});
   });
 
   it('presetId 不存在 → 回落目录第一步', async () => {

@@ -21,7 +21,13 @@ import { promises as fsp, existsSync } from 'node:fs';
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import type { AuthAdapter, AuthAdapterOptions, AuthState } from '@cindy/maker-core';
+import type {
+  AgentLoginMode,
+  AuthAdapter,
+  AuthAdapterOptions,
+  AuthLoginOptions,
+  AuthState,
+} from '@cindy/maker-core';
 import { getCachedBinaryStatus, isVettedAgentBinaryPath } from '../agent-binaries/index.js';
 import { createLogger } from '../logger.js';
 import { prepareCodexGlobalSkillsLinks } from './codex-global-skills.js';
@@ -40,6 +46,7 @@ import {
   writeInvalidatedSystemCodexAuthMarker,
 } from './codex-auth-invalidation.js';
 import {
+  codexLoginArgs,
   requireCodexOAuthLoginState,
   resolveCodexLoginCleanupPreflight,
   resolveCodexLoginExitState,
@@ -965,7 +972,7 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
     }
   }
 
-  triggerLogin(opts?: { onProgress?: (msg: string) => void }): Promise<AuthState> {
+  triggerLogin(opts?: AuthLoginOptions): Promise<AuthState> {
     if (this.pendingLogin) return this.pendingLogin;
     const run = this.runTriggerLogin(opts).finally(() => {
       if (this.pendingLogin === run) {
@@ -977,7 +984,7 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
     return run;
   }
 
-  private async runTriggerLogin(opts?: { onProgress?: (msg: string) => void }): Promise<AuthState> {
+  private async runTriggerLogin(opts?: AuthLoginOptions): Promise<AuthState> {
     this.ensureInvalidationMarkerLoaded();
     this.loginAborted = false;
     this.loginCancellationOpen = true;
@@ -1009,7 +1016,8 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
 
     // spawn codex login。POSIX 建独立进程组，取消/超时时连同回调 server 一起收割。
     return new Promise<AuthState>((resolve) => {
-      const proc = spawn(binaryPath, ['login'], {
+      const mode: AgentLoginMode = opts?.mode ?? 'browser';
+      const proc = spawn(binaryPath, codexLoginArgs(mode), {
         env: { ...process.env, CODEX_HOME: this.codexHome },
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',

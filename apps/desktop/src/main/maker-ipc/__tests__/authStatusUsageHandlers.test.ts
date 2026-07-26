@@ -1,6 +1,6 @@
 import type { Maker } from '@cindy/maker-core';
 import { describe, expect, it, vi } from 'vitest';
-import { registerMakerAuthHandlers } from '../authHandlers';
+import { parseCodexDeviceCodeProgress, registerMakerAuthHandlers } from '../authHandlers';
 import { MAKER_INVOKE, MAKER_PUSH } from '../channels';
 import { registerMakerStatusHandlers } from '../statusHandlers';
 import { registerMakerUsageHandlers } from '../usageHandlers';
@@ -37,7 +37,10 @@ describe('maker auth IPC handlers', () => {
     const refreshAgentLocalModels = vi.fn().mockResolvedValue(true);
     const triggerAgentLogin = vi
       .fn()
-      .mockImplementation(async (_agentKind, options: { onProgress: (msg: string) => void }) => {
+      .mockImplementation(async (
+        _agentKind,
+        options: { mode?: string; onProgress: (msg: string) => void },
+      ) => {
         options.onProgress('stdout:https://example.test/oauth');
         options.onProgress('stderr:waiting');
         options.onProgress('done');
@@ -67,16 +70,19 @@ describe('maker auth IPC handlers', () => {
     expect(broadcast).toHaveBeenNthCalledWith(1, MAKER_PUSH.AUTH_LOGIN_PROGRESS, {
       agentKind: 'codex',
       phase: 'login-pending',
+      mode: 'browser',
       detail: 'https://example.test/oauth',
     });
     expect(broadcast).toHaveBeenNthCalledWith(2, MAKER_PUSH.AUTH_LOGIN_PROGRESS, {
       agentKind: 'codex',
       phase: 'login-pending',
+      mode: 'browser',
       detail: 'waiting',
     });
     expect(broadcast).toHaveBeenNthCalledWith(3, MAKER_PUSH.AUTH_LOGIN_PROGRESS, {
       agentKind: 'codex',
       phase: 'done',
+      mode: 'browser',
     });
     expect(broadcast).toHaveBeenNthCalledWith(4, MAKER_PUSH.AUTH_STATE_CHANGED, {
       agentKind: 'codex',
@@ -84,6 +90,67 @@ describe('maker auth IPC handlers', () => {
       authSource: 'oauth',
       identity: { email: 'dev@example.test' },
     });
+    expect(triggerAgentLogin).toHaveBeenCalledWith(
+      'codex',
+      expect.objectContaining({ mode: 'browser' }),
+    );
+  });
+
+  it('extracts a split ANSI-colored Codex device code and emits a structured progress event', async () => {
+    const harness = new IpcHarness();
+    const broadcast = vi.fn();
+    const triggerAgentLogin = vi.fn().mockImplementation(async (
+      _agentKind,
+      options: { mode?: string; onProgress: (msg: string) => void },
+    ) => {
+      options.onProgress('stdout:\u001b[1mhttps://auth.openai.com/codex/device\u001b[0m');
+      options.onProgress('stderr:Enter code \u001b[32mRUH2-7E2VH\u001b[0m');
+      return { authenticated: false, errorReason: 'login_cancelled' };
+    });
+
+    registerMakerAuthHandlers(
+      harness,
+      createMakerStub({ triggerAgentLogin }),
+      broadcast,
+      () => null,
+    );
+
+    await harness.invoke(MAKER_INVOKE.AUTH_TRIGGER_LOGIN, 'codex', {
+      mode: 'device-code',
+    });
+
+    expect(triggerAgentLogin).toHaveBeenCalledWith(
+      'codex',
+      expect.objectContaining({ mode: 'device-code' }),
+    );
+    expect(broadcast).toHaveBeenCalledWith(MAKER_PUSH.AUTH_LOGIN_PROGRESS, {
+      agentKind: 'codex',
+      phase: 'device-code',
+      mode: 'device-code',
+      verificationUrl: 'https://auth.openai.com/codex/device',
+      userCode: 'RUH2-7E2VH',
+    });
+  });
+
+  it('rejects unsupported login modes before invoking Maker', async () => {
+    const harness = new IpcHarness();
+    const triggerAgentLogin = vi.fn();
+    registerMakerAuthHandlers(
+      harness,
+      createMakerStub({ triggerAgentLogin }),
+      vi.fn(),
+      () => null,
+    );
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.AUTH_TRIGGER_LOGIN, 'codex', { mode: 'password' }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    await expect(
+      harness.invoke(MAKER_INVOKE.AUTH_TRIGGER_LOGIN, 'claude-code', {
+        mode: 'device-code',
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    expect(triggerAgentLogin).not.toHaveBeenCalled();
   });
 
   it('keeps login successful and requests disk fallback when live model refresh fails', async () => {
@@ -300,6 +367,38 @@ describe('maker auth IPC handlers', () => {
     const absent = new IpcHarness();
     registerMakerAuthHandlers(absent, createMakerStub({}), vi.fn(), () => null);
     await expect(absent.invoke(MAKER_INVOKE.API_KEY_PRESENT)).resolves.toEqual({ present: false });
+  });
+});
+
+describe('parseCodexDeviceCodeProgress', () => {
+  it('returns null until both the official verification URL and code are present', () => {
+    expect(parseCodexDeviceCodeProgress('https://auth.openai.com/codex/device')).toBeNull();
+    expect(
+      parseCodexDeviceCodeProgress(
+        '\u001b[1mhttps://auth.openai.com/codex/device\u001b[0m\ncode: RUH2-7E2VH',
+      ),
+    ).toEqual({
+      verificationUrl: 'https://auth.openai.com/codex/device',
+      userCode: 'RUH2-7E2VH',
+    });
+  });
+
+  it('does not expose a verification URL from an untrusted host', () => {
+    expect(
+      parseCodexDeviceCodeProgress('https://auth.openai.com.evil.test/device\nRUH2-7E2VH'),
+    ).toBeNull();
+  });
+
+  it('finds the official device page after unrelated URLs in cumulative CLI output', () => {
+    expect(
+      parseCodexDeviceCodeProgress(
+        'Learn more at https://developers.openai.com/codex/auth\n'
+          + 'Open https://auth.openai.com/codex/device and enter ABCD-EFGH',
+      ),
+    ).toEqual({
+      verificationUrl: 'https://auth.openai.com/codex/device',
+      userCode: 'ABCD-EFGH',
+    });
   });
 });
 

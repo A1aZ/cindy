@@ -6,7 +6,8 @@
  *
  * 顺序约定：
  *   - create：先写配置（IPC 在重名 / 非法时 reject，避免误覆盖既有同 id 的 key），成功后存各 runtime 的密钥。
- *   - update：先写配置，成功后仅覆盖**用户填了新密钥**的 runtime（留空 = 不改，遵循设计）。
+ *   - update：先写配置；API key 模式仅覆盖用户填了新密钥的 runtime，切到 OAuth / 无鉴权
+ *     或移除 runtime 时清理不再可达的旧密钥。
  *   - delete：先删配置，再清所有 runtime 的密钥（幂等）。
  */
 
@@ -99,22 +100,34 @@ async function saveKeys(providerId: string, keys: RuntimeKeys): Promise<void> {
   }
 }
 
+async function removeKey(providerId: string, agent: AgentKind): Promise<void> {
+  try {
+    await window.electronAPI.safeStorageRemove(customProviderSecretStorageKey(providerId, agent));
+  } catch {
+    // 配置已先写入且不会再读取这把 key；清理失败只留下不可达的加密孤儿数据。
+  }
+}
+
 /** 新建：先写配置（reject 时不碰密钥），成功后存各 runtime 密钥（非空才存）。 */
 export async function createCustomProvider(
   config: CustomProviderConfig,
   keys: RuntimeKeys,
 ): Promise<void> {
   await window.electronAPI.maker.createCustomProvider(config);
-  await saveKeys(config.id, keys);
+  if (!config.auth || config.auth.method === 'apiKey') await saveKeys(config.id, keys);
 }
 
-/** 编辑：先写配置，成功后仅覆盖填了新密钥的 runtime（留空 = 不改）。 */
+/** 编辑：先写配置，再保存仍有效的新 key，并清理改成非 key 鉴权或已删除 runtime 的旧 key。 */
 export async function updateCustomProvider(
   config: CustomProviderConfig,
   keys: RuntimeKeys,
 ): Promise<void> {
   await window.electronAPI.maker.updateCustomProvider(config);
-  await saveKeys(config.id, keys);
+  const usesApiKey = !config.auth || config.auth.method === 'apiKey';
+  for (const agent of ALL_AGENTS) {
+    if (!usesApiKey || !config.runtimes[agent]) await removeKey(config.id, agent);
+  }
+  if (usesApiKey) await saveKeys(config.id, keys);
 }
 
 /** 删除：先删配置，再清所有 runtime 密钥（幂等，失败忽略）。 */

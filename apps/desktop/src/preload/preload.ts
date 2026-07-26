@@ -444,6 +444,7 @@ const fanOutMakerAuthStateChanged = createIpcFanOut('maker:auth:state-changed');
 const fanOutMakerAuthLoginProgress = createIpcFanOut('maker:auth:login-progress');
 // 自定义供应商增删改广播 → 各 useProviders 实例 refetch（设置页列表 + 对话模型选择器 live 刷新）。
 const fanOutMakerProvidersChanged = createIpcFanOut('maker:provider:changed');
+const fanOutMakerProviderOAuthProgress = createIpcFanOut('maker:provider:oauth:progress');
 // 自定义 MCP 服务器增删改广播 → 设置页 McpServersSection refetch。
 const fanOutMakerMcpChanged = createIpcFanOut('maker:mcp:changed');
 // 自定义供应商上游错误的结构化广播（payload = { agent, providerId, providerName, code, retryable, status }）。
@@ -3618,6 +3619,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
               agent: 'claude-code' | 'codex';
               baseUrl: string;
               modelId: string;
+              wireProtocol?: import('@cindy/model-providers').ProviderWireProtocol;
+              requestPath?: string;
               apiKey?: string | null;
               headers?: Record<string, string>;
             };
@@ -3703,6 +3706,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('maker:provider:oauth:logout', providerId),
     providerOAuthCancel: (providerId: string): Promise<{ ok: true }> =>
       ipcRenderer.invoke('maker:provider:oauth:cancel', providerId),
+    onProviderOAuthProgress: fanOutMakerProviderOAuthProgress,
     /**
      * renderer → main 单向镜像「模型显示/隐藏」override 整张快照(modelVisibilityPrefs)。
      * 让 IM /model 在 main 侧复用同一套可见性过滤,与应用内模型列表逐模型一致。
@@ -4454,8 +4458,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     auth: {
       getState: (agentKind: 'claude-code' | 'codex'): Promise<unknown> =>
         ipcRenderer.invoke('maker:auth:get-state', agentKind),
-      triggerLogin: (agentKind: 'claude-code' | 'codex'): Promise<unknown> =>
-        ipcRenderer.invoke('maker:auth:trigger-login', agentKind),
+      triggerLogin: (
+        agentKind: 'claude-code' | 'codex',
+        options?: { mode?: 'browser' | 'device-code' },
+      ): Promise<unknown> =>
+        ipcRenderer.invoke('maker:auth:trigger-login', agentKind, options),
       cancelLogin: (agentKind: 'claude-code' | 'codex'): Promise<void> =>
         ipcRenderer.invoke('maker:auth:cancel-login', agentKind),
       logout: (agentKind: 'claude-code' | 'codex'): Promise<void> =>

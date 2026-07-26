@@ -3409,7 +3409,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       const provider = getActiveCatalog().providers.find((p) => p.id === providerId);
       const oauth = provider?.auth.oauth;
       if (!provider || !oauth) throw new Error(`provider '${providerId}' has no oauth descriptor`);
-      const result = await runGenericOAuthLogin({ id: provider.id, name: provider.name }, oauth);
+      const result = await runGenericOAuthLogin(
+        { id: provider.id, name: provider.name },
+        oauth,
+        {
+          onProgress: (progress) =>
+            broadcastToAllWindows(MAKER_PUSH.PROVIDER_OAUTH_PROGRESS, {
+              providerId,
+              ...progress,
+            }),
+        },
+      );
       if (result.ok) {
         // 授权成功后按 agent 自动发现模型（与内置订阅体验统一,用户不必手填模型）:
         // 发现端点 = 描述符显式声明 ?? 由该 runtime 的 baseUrl 推导（…/v1/models）。
@@ -5504,14 +5514,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
             name: provider.name,
             models: (provider.models['claude-code'] ?? []).map((model) => model.id),
             requiresExplicitRoute: provider.routing['claude-code']?.authStrategy === 'api-key-header'
-              || provider.routing['claude-code']?.authStrategy === 'oauth-token',
+              || provider.routing['claude-code']?.authStrategy === 'oauth-token'
+              || provider.routing['claude-code']?.authStrategy === 'none',
           })),
           codex: connectedProvidersForAgent(views, 'codex').map((provider) => ({
             id: provider.id,
             name: provider.name,
             models: (provider.models.codex ?? []).map((model) => model.id),
             requiresExplicitRoute: provider.routing.codex?.authStrategy === 'api-key-header'
-              || provider.routing.codex?.authStrategy === 'oauth-token',
+              || provider.routing.codex?.authStrategy === 'oauth-token'
+              || provider.routing.codex?.authStrategy === 'none',
           })),
         },
         resolveDefaultProviderIdForModel: (agent, model) => (

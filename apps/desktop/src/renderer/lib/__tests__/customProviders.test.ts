@@ -1,10 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   appendDiscoveredCustomProviderModels,
+  createCustomProvider,
   customProviderModelConfigFromCatalogModel,
   replaceCustomProviderModelId,
+  updateCustomProvider,
 } from '../customProviders';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('replaceCustomProviderModelId', () => {
   it('drops hidden metadata when the model id changes', () => {
@@ -84,5 +90,58 @@ describe('appendDiscoveredCustomProviderModels', () => {
       ],
       addedIds: ['new'],
     });
+  });
+});
+
+describe('custom provider credential lifecycle', () => {
+  it('never stores supplied API keys for a no-auth provider', async () => {
+    const safeStorageStore = vi.fn();
+    vi.stubGlobal('window', {
+      electronAPI: {
+        maker: { createCustomProvider: vi.fn(async () => ({ ok: true })) },
+        safeStorageStore,
+      },
+    });
+
+    await createCustomProvider({
+      id: 'local',
+      name: 'Local',
+      auth: { method: 'none' },
+      runtimes: {
+        codex: {
+          baseUrl: 'http://127.0.0.1:4000/v1',
+          models: [{ id: 'local-model', name: 'Local Model' }],
+        },
+      },
+    }, { codex: 'must-not-be-stored' });
+
+    expect(safeStorageStore).not.toHaveBeenCalled();
+  });
+
+  it('removes old runtime keys after switching to no authentication', async () => {
+    const safeStorageRemove = vi.fn(async () => undefined);
+    const safeStorageStore = vi.fn();
+    vi.stubGlobal('window', {
+      electronAPI: {
+        maker: { updateCustomProvider: vi.fn(async () => ({ ok: true })) },
+        safeStorageRemove,
+        safeStorageStore,
+      },
+    });
+
+    await updateCustomProvider({
+      id: 'local',
+      name: 'Local',
+      auth: { method: 'none' },
+      runtimes: {
+        codex: {
+          baseUrl: 'http://127.0.0.1:4000/v1',
+          models: [{ id: 'local-model', name: 'Local Model' }],
+        },
+      },
+    }, {});
+
+    expect(safeStorageRemove).toHaveBeenCalledTimes(2);
+    expect(safeStorageStore).not.toHaveBeenCalled();
   });
 });

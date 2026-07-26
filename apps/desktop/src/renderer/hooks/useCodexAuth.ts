@@ -16,7 +16,11 @@ import { isCodexOAuthReconnectRequired } from './codexAuthRecovery';
 export type CodexUiState =
   | { kind: 'loading' }
   | { kind: 'unauthenticated' }
-  | { kind: 'login-pending' }
+  | {
+      kind: 'login-pending';
+      mode: 'browser' | 'device-code';
+      deviceCode?: { verificationUrl: string; userCode: string };
+    }
   | {
       kind: 'authenticated';
       identity?: string;
@@ -44,7 +48,11 @@ type CodexAuthMachineEvent =
   | { type: 'initial-state-failed'; requestedAt: InitialSnapshotRevision }
   | { type: 'observer-disabled' }
   | { type: 'state-changed'; result: CodexLoginResult }
-  | { type: 'login-pending' }
+  | {
+      type: 'login-pending';
+      mode: 'browser' | 'device-code';
+      deviceCode?: { verificationUrl: string; userCode: string };
+    }
   | { type: 'login-progress-error'; message: string }
   | { type: 'login-result'; result: CodexLoginResult }
   | { type: 'login-threw'; message: string }
@@ -176,8 +184,14 @@ function reduceCodexAuthMachine(
       if (next.kind === 'error') return restoreReconnectOr(machine, next);
       return replaceUi(machine, next, 'auth');
     }
-    case 'login-pending':
-      return replaceUi(machine, { kind: 'login-pending' }, 'event');
+    case 'login-pending': {
+      const deviceCode =
+        event.deviceCode ??
+        (machine.ui.kind === 'login-pending' && machine.ui.mode === event.mode
+          ? machine.ui.deviceCode
+          : undefined);
+      return replaceUi(machine, { kind: 'login-pending', mode: event.mode, deviceCode }, 'event');
+    }
     case 'login-progress-error': {
       const next = toCodexUiState({ authenticated: false, errorReason: event.message }, true);
       if (next.kind === 'reconnect-required') return replaceUi(machine, next, 'event');
@@ -253,8 +267,24 @@ export function useCodexAuth(options?: { enabled?: boolean }) {
     if (!enabled) return undefined;
     const off = window.electronAPI.maker.auth.onLoginProgress((progress) => {
       if (progress.agentKind !== AGENT_KIND) return;
-      if (progress.phase === 'login-pending') {
-        transition({ type: 'login-pending' });
+      if (
+        progress.phase === 'device-code' &&
+        progress.verificationUrl &&
+        progress.userCode
+      ) {
+        transition({
+          type: 'login-pending',
+          mode: 'device-code',
+          deviceCode: {
+            verificationUrl: progress.verificationUrl,
+            userCode: progress.userCode,
+          },
+        });
+      } else if (progress.phase === 'login-pending') {
+        transition({
+          type: 'login-pending',
+          mode: progress.mode === 'device-code' ? 'device-code' : 'browser',
+        });
       } else if (progress.phase === 'login-error') {
         transition({ type: 'login-progress-error', message: progress.detail ?? 'unknown' });
       }
@@ -284,10 +314,12 @@ export function useCodexAuth(options?: { enabled?: boolean }) {
     };
   }, [enabled, transition]);
 
-  const triggerLogin = useCallback(async (): Promise<CodexLoginOutcome> => {
-    transition({ type: 'login-pending' });
+  const triggerLogin = useCallback(async (
+    mode: 'browser' | 'device-code' = 'browser',
+  ): Promise<CodexLoginOutcome> => {
+    transition({ type: 'login-pending', mode });
     try {
-      const result = await triggerCodexLoginOnce();
+      const result = await triggerCodexLoginOnce(mode);
       transition({ type: 'login-result', result });
       if (result.authenticated) {
         toast.success(t('logic.toasts.codexConnected'));

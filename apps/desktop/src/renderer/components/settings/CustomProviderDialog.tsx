@@ -71,12 +71,22 @@ interface HeaderRow {
 }
 interface RuntimeFields {
   baseUrl: string;
+  requestPath: string;
   apiKey: string;
   wireProtocol: ProviderWireProtocol;
   models: ModelRow[];
   headers: HeaderRow[];
   /** 隐藏字段：列模型端点（预设 / 已存配置快照进来），「获取模型列表」用；不在表单展示。 */
   modelsUrl: string;
+}
+
+function stripCredentialHeaders(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers).filter(([name]) => {
+      const normalized = name.toLowerCase();
+      return normalized !== 'authorization' && normalized !== 'x-api-key';
+    }),
+  );
 }
 
 /** 每个 runtime Tab 的「测试连接」状态（idle → testing → ok/fail）。 */
@@ -91,6 +101,7 @@ const IDLE_TEST: TestState = { status: 'idle' };
 function emptyRuntime(agent: AgentKind): RuntimeFields {
   return {
     baseUrl: '',
+    requestPath: '',
     apiKey: '',
     wireProtocol: agent === 'claude-code' ? 'anthropic-messages' : 'openai-responses',
     models: [{ id: '', name: '' }],
@@ -110,6 +121,7 @@ function initRuntimes(initial?: CustomProviderConfig): Record<AgentKind, Runtime
       if (!rc) continue;
       out[a] = {
         baseUrl: rc.baseUrl,
+        requestPath: rc.requestPath ?? '',
         apiKey: '',
         wireProtocol: rc.wireProtocol ?? (a === 'claude-code' ? 'anthropic-messages' : 'openai-responses'),
         models: rc.models.length ? rc.models.map((m) => ({ ...m })) : [{ id: '', name: '' }],
@@ -262,6 +274,7 @@ function PresetDropdown({
 export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }: CustomProviderDialogProps) {
   const { t, i18n } = useTranslation();
   const editing = !!initial;
+  const initialOAuth = initial?.auth?.method === 'oauth' ? initial.auth.oauth : undefined;
 
   const [name, setName] = useState(initial?.name ?? '');
   const [rt, setRt] = useState<Record<AgentKind, RuntimeFields>>(() => initRuntimes(initial));
@@ -271,15 +284,25 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
   const [showKey, setShowKey] = useState(false);
   const [hasKey, setHasKey] = useState<Record<AgentKind, boolean>>({ 'claude-code': false, codex: false });
   const [saving, setSaving] = useState(false);
-  // 鉴权形态：apiKey（默认）/ oauth（订阅授权，走通用 OAuth Runner）。
-  const [authMode, setAuthMode] = useState<'apiKey' | 'oauth'>(
-    initial?.auth?.method === 'oauth' ? 'oauth' : 'apiKey',
+  // 鉴权形态：API key（默认）/ OAuth / 无鉴权（本机或受信自托管代理）。
+  const [authMode, setAuthMode] = useState<'apiKey' | 'oauth' | 'none'>(
+    initial?.auth?.method === 'oauth'
+      ? 'oauth'
+      : initial?.auth?.method === 'none'
+        ? 'none'
+        : 'apiKey',
+  );
+  const [oauthFlow, setOauthFlow] = useState<'authorization-code' | 'device-code'>(
+    initialOAuth?.flow === 'device-code' ? 'device-code' : 'authorization-code',
   );
   const [oauthFields, setOauthFields] = useState({
-    authorizeUrl: initial?.auth?.oauth?.authorizeUrl ?? '',
-    tokenUrl: initial?.auth?.oauth?.tokenUrl ?? '',
-    clientId: initial?.auth?.oauth?.clientId ?? '',
-    scopes: initial?.auth?.oauth?.scopes ?? '',
+    authorizeUrl:
+      initialOAuth && initialOAuth.flow !== 'device-code' ? initialOAuth.authorizeUrl : '',
+    deviceAuthorizationUrl:
+      initialOAuth?.flow === 'device-code' ? initialOAuth.deviceAuthorizationUrl : '',
+    tokenUrl: initialOAuth?.tokenUrl ?? '',
+    clientId: initialOAuth?.clientId ?? '',
+    scopes: initialOAuth?.scopes ?? '',
   });
   // OAuth 模式下模型 / 请求头收进默认折叠的「高级配置」——模型授权后自动发现,普通用户无需碰。
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -343,6 +366,7 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
   const applyPreset = useCallback((p: ProviderPreset) => {
     setAppliedPreset(p.id);
     setName(p.name);
+    setAuthMode(p.authMethod ?? 'apiKey');
     setRtSynced((prev) => {
       const next = { ...prev };
       for (const a of AGENTS) {
@@ -353,6 +377,7 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
         }
         next[a] = {
           baseUrl: rc.baseUrl,
+          requestPath: rc.requestPath ?? '',
           apiKey: prev[a].apiKey, // 已填的 key 保留
           wireProtocol: rc.wireProtocol ?? (a === 'claude-code' ? 'anthropic-messages' : 'openai-responses'),
           models: rc.models.length ? rc.models.map((m) => ({ ...m })) : [{ id: '', name: '' }],
@@ -437,6 +462,7 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
       const n = h.name.trim();
       if (n) headers[n] = h.value.trim();
     }
+    const requestHeaders = authMode === 'none' ? stripCredentialHeaders(headers) : headers;
     setTest((prev) => ({ ...prev, [agent]: { status: 'testing' } }));
     try {
       const result = await window.electronAPI.maker.testProviderConnection({
@@ -446,8 +472,9 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
           baseUrl,
           modelId: firstModel,
           wireProtocol: rf.wireProtocol,
-          apiKey: rf.apiKey.trim() || null,
-          ...(Object.keys(headers).length > 0 ? { headers } : {}),
+          ...(rf.requestPath.trim() ? { requestPath: rf.requestPath.trim() } : {}),
+          apiKey: authMode === 'apiKey' ? rf.apiKey.trim() || null : null,
+          ...(Object.keys(requestHeaders).length > 0 ? { headers: requestHeaders } : {}),
         },
       });
       setTest((prev) => ({
@@ -461,7 +488,7 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
       setTest((prev) => ({ ...prev, [agent]: { status: 'fail', code: 'UNKNOWN' } }));
       if (ipc?.message) toast.error(ipc.message);
     }
-  }, [activeTab, rt, t]);
+  }, [activeTab, authMode, rt, t]);
 
   // 拉取单飞：任一 runtime 在途时两个 Tab 的拉取按钮都禁用——两个并发请求会竞争同一个
   // 勾选弹层（后到的覆盖先开的、确认还会写进另一个 runtime），单飞直接消掉这类竞态。
@@ -471,6 +498,7 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
   const fetchRequestSignature = (f: RuntimeFields): string =>
     JSON.stringify({
       b: f.baseUrl.trim(),
+      p: f.requestPath.trim(),
       m: f.modelsUrl.trim(),
       k: f.apiKey.trim(),
       h: f.headers
@@ -494,6 +522,7 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
       const n = h.name.trim();
       if (n) headers[n] = h.value.trim();
     }
+    const requestHeaders = authMode === 'none' ? stripCredentialHeaders(headers) : headers;
     // 请求参数签名：响应回来时若该 runtime 的端点/凭证/请求头已被改动，响应按过期丢弃——
     // 不能把旧端点的模型清单当成新端点的填进表单（成功和失败 toast 都不展示）。
     const requestSig = fetchRequestSignature(rf);
@@ -503,8 +532,8 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
         agent,
         baseUrl,
         modelsUrl: rf.modelsUrl.trim() || null,
-        apiKey: rf.apiKey.trim() || null,
-        ...(Object.keys(headers).length > 0 ? { headers } : {}),
+        apiKey: authMode === 'apiKey' ? rf.apiKey.trim() || null : null,
+        ...(Object.keys(requestHeaders).length > 0 ? { headers: requestHeaders } : {}),
       });
       if (fetchRequestSignature(rtRef.current[agent]) !== requestSig) return; // 过期响应，静默丢弃
       if (result.ok && result.models && result.models.length > 0) {
@@ -550,7 +579,7 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
     } finally {
       setFetchingModels((prev) => ({ ...prev, [agent]: false }));
     }
-  }, [activeTab, rt, fetchingModels, t]);
+  }, [activeTab, authMode, rt, fetchingModels, t]);
 
   /**
    * 勾选弹层确认：勾选集写回该 runtime 的模型行。基于**确认时的最新表单行**合并，
@@ -629,6 +658,22 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
           ...(m.defaultEnabled === false ? { defaultEnabled: false } : {}),
         }))
         .filter((m) => m.id && m.name);
+      const requestPath = rf.requestPath.trim();
+      if (
+        requestPath
+        && (
+          requestPath.length <= 1
+          || requestPath.length > 2_048
+          || !requestPath.startsWith('/')
+          || requestPath.startsWith('//')
+          || requestPath.includes('#')
+          || /[\r\n]/.test(requestPath)
+        )
+      ) {
+        setActiveTab(a);
+        toast.error(t('settings.providers.custom.errors.requestPathInvalid'));
+        return;
+      }
       // OAuth 形态模型可留空——授权成功后自动发现并持久化（与内置订阅统一）。
       if (models.length === 0 && authMode !== 'oauth') {
         setActiveTab(a);
@@ -640,12 +685,14 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
         const n = h.name.trim();
         if (n) headers[n] = h.value.trim();
       }
+      const savedHeaders = authMode === 'none' ? stripCredentialHeaders(headers) : headers;
       const defaultProtocol = a === 'claude-code' ? 'anthropic-messages' : 'openai-responses';
       runtimes[a] = {
         baseUrl: rf.baseUrl.trim(),
+        ...(requestPath ? { requestPath } : {}),
         ...(rf.wireProtocol !== defaultProtocol ? { wireProtocol: rf.wireProtocol } : {}),
         models,
-        ...(Object.keys(headers).length > 0 ? { headers } : {}),
+        ...(Object.keys(savedHeaders).length > 0 ? { headers: savedHeaders } : {}),
         ...(rf.modelsUrl.trim() ? { modelsUrl: rf.modelsUrl.trim() } : {}),
       };
       // OAuth 形态不收集 per-runtime API key（鉴权走 Runner 的 Bearer）。
@@ -658,24 +705,72 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
     // OAuth 形态：四个必填字段 + 端点必须 https（与 main 侧校验同规则，先在表单挡住）。
     let auth: CustomProviderConfig['auth'];
     if (authMode === 'oauth') {
-      const o = {
-        authorizeUrl: oauthFields.authorizeUrl.trim(),
-        tokenUrl: oauthFields.tokenUrl.trim(),
-        clientId: oauthFields.clientId.trim(),
-        scopes: oauthFields.scopes.trim(),
-      };
+      const tokenUrl = oauthFields.tokenUrl.trim();
+      const clientId = oauthFields.clientId.trim();
+      const scopes = oauthFields.scopes.trim();
       const httpsOk = (u: string) => {
         try {
-          return new URL(u).protocol === 'https:';
+          const url = new URL(u);
+          return url.protocol === 'https:' && !url.username && !url.password;
         } catch {
           return false;
         }
       };
-      if (!o.authorizeUrl || !o.tokenUrl || !o.clientId || !o.scopes || !httpsOk(o.authorizeUrl) || !httpsOk(o.tokenUrl)) {
+      const flowUrl =
+        oauthFlow === 'device-code'
+          ? oauthFields.deviceAuthorizationUrl.trim()
+          : oauthFields.authorizeUrl.trim();
+      if (
+        !flowUrl
+        || !tokenUrl
+        || !clientId
+        || !scopes
+        || !httpsOk(flowUrl)
+        || !httpsOk(tokenUrl)
+      ) {
         toast.error(t('settings.providers.custom.errors.oauthInvalid'));
         return;
       }
-      auth = { method: 'oauth', oauth: o };
+      auth = {
+        method: 'oauth',
+        oauth:
+          oauthFlow === 'device-code'
+            ? {
+                ...(initialOAuth?.flow === 'device-code' && initialOAuth.extraDeviceParams
+                  ? { extraDeviceParams: { ...initialOAuth.extraDeviceParams } }
+                  : {}),
+                ...(initialOAuth?.modelsDiscoveryUrl
+                  ? { modelsDiscoveryUrl: initialOAuth.modelsDiscoveryUrl }
+                  : {}),
+                flow: 'device-code',
+                deviceAuthorizationUrl: flowUrl,
+                tokenUrl,
+                clientId,
+                scopes,
+              }
+            : {
+                ...(initialOAuth && initialOAuth.flow !== 'device-code'
+                  ? {
+                      ...(initialOAuth.redirectPort !== undefined
+                        ? { redirectPort: initialOAuth.redirectPort }
+                        : {}),
+                      ...(initialOAuth.extraAuthParams
+                        ? { extraAuthParams: { ...initialOAuth.extraAuthParams } }
+                        : {}),
+                    }
+                  : {}),
+                ...(initialOAuth?.modelsDiscoveryUrl
+                  ? { modelsDiscoveryUrl: initialOAuth.modelsDiscoveryUrl }
+                  : {}),
+                flow: 'authorization-code',
+                authorizeUrl: flowUrl,
+                tokenUrl,
+                clientId,
+                scopes,
+              },
+      };
+    } else if (authMode === 'none') {
+      auth = { method: 'none' };
     }
     const id =
       editing && initial
@@ -699,7 +794,19 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
       toast.error(ipc?.message ?? t('settings.providers.custom.toast.saveFailed'));
       setSaving(false); // 仅失败时复位:弹窗仍在,允许改后重试
     }
-  }, [name, rt, authMode, oauthFields, editing, initial, existingIds, onSaved, t]);
+  }, [
+    name,
+    rt,
+    authMode,
+    oauthFlow,
+    oauthFields,
+    initialOAuth,
+    editing,
+    initial,
+    existingIds,
+    onSaved,
+    t,
+  ]);
 
   const keyPlaceholder = hasKey[activeTab]
     ? t('settings.providers.custom.fields.apiKeyEditPlaceholder')
@@ -765,11 +872,11 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
             />
           </div>
 
-          {/* 鉴权形态：API 密钥（默认）/ OAuth 订阅授权（通用 Runner，凭证本机 safeStorage） */}
+          {/* 鉴权形态：API 密钥 / OAuth / 无鉴权。 */}
           <div className="flex flex-col gap-2">
             <FieldLabel>{t('settings.providers.custom.authMode.label')}</FieldLabel>
-            <div className="flex gap-1.5">
-              {(['apiKey', 'oauth'] as const).map((m) => (
+            <div className="flex flex-wrap gap-1.5">
+              {(['apiKey', 'oauth', 'none'] as const).map((m) => (
                 <button
                   key={m}
                   type="button"
@@ -791,9 +898,41 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
                 <span className="text-12 leading-snug text-[var(--text-tertiary)]">
                   {t('settings.providers.custom.authMode.oauthHelp')}
                 </span>
+                <div className="flex flex-col gap-[7px]">
+                  <FieldLabel>{t('settings.providers.custom.authMode.flowLabel')}</FieldLabel>
+                  <div className="flex gap-1.5">
+                    {(['authorization-code', 'device-code'] as const).map((flow) => (
+                      <button
+                        key={flow}
+                        type="button"
+                        onClick={() => setOauthFlow(flow)}
+                        className={cn(
+                          'rounded-full border px-3 py-1.5 text-12 font-medium transition-colors',
+                          oauthFlow === flow
+                            ? 'border-[var(--settings-input-border-focus)] text-[var(--settings-section-title)]'
+                            : 'border-[var(--settings-input-border)] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]',
+                        )}
+                        style={
+                          oauthFlow === flow
+                            ? { backgroundColor: 'var(--surface-elevated)' }
+                            : undefined
+                        }
+                      >
+                        {t(`settings.providers.custom.authMode.flow.${flow}`)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 {(
                   [
-                    ['authorizeUrl', 'https://auth.example.com/oauth2/authorize'],
+                    [
+                      oauthFlow === 'device-code'
+                        ? 'deviceAuthorizationUrl'
+                        : 'authorizeUrl',
+                      oauthFlow === 'device-code'
+                        ? 'https://auth.example.com/oauth2/device'
+                        : 'https://auth.example.com/oauth2/authorize',
+                    ],
                     ['tokenUrl', 'https://auth.example.com/oauth2/token'],
                     ['clientId', 'client_id'],
                     ['scopes', 'openid offline_access ...'],
@@ -810,10 +949,14 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
                 ))}
               </>
             )}
+            {authMode === 'none' && (
+              <span className="text-12 leading-snug text-[var(--text-tertiary)]">
+                {t('settings.providers.custom.authMode.noneHelp')}
+              </span>
+            )}
           </div>
 
-          {/* Runtime 分段 Tab —— Codex 暂时关闭(VISIBLE_AGENTS 只剩 Claude Code),Tab 栏减少为一个,
-              但仍保留显示。 */}
+          {/* Runtime 分段 Tab：Claude Code 与 Codex 各自维护端点、协议、模型与凭证。 */}
           <div className="flex flex-col gap-2">
             <FieldLabel>{t('settings.providers.custom.fields.protocols')}</FieldLabel>
             <div
@@ -909,6 +1052,25 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
               />
             </div>
 
+            {/* 精确推理路径：给非标准兼容端点使用；留空仍按所选协议推导。 */}
+            <div className="flex flex-col gap-[7px]">
+              <FieldLabel>{t('settings.providers.custom.fields.requestPath')}</FieldLabel>
+              <TextInput
+                value={f.requestPath}
+                onChange={(v) => patch(activeTab, (x) => ({ ...x, requestPath: v }))}
+                placeholder={
+                  activeTab === 'claude-code'
+                    ? '/v1/messages'
+                    : f.wireProtocol === 'openai-chat'
+                      ? '/chat/completions'
+                      : '/responses'
+                }
+              />
+              <span className="text-12 leading-snug text-[var(--text-tertiary)]">
+                {t('settings.providers.custom.fields.requestPathHelp')}
+              </span>
+            </div>
+
             {/* API 密钥（OAuth 形态隐藏——鉴权走 Runner 的 Bearer，不收集 key） */}
             {authMode === 'apiKey' && (
             <div className="flex flex-col gap-[7px]">
@@ -971,7 +1133,7 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
               </div>
             )}
 
-            {(authMode === 'apiKey' || showAdvanced) && (
+            {(authMode !== 'oauth' || showAdvanced) && (
             <>
             {/* 模型 */}
             <div className="flex flex-col gap-2">
@@ -1081,7 +1243,7 @@ export function CustomProviderDialog({ initial, existingIds, onSaved, onClose }:
 
             {/* 测试连接：用当前 Tab 表单值发最小探测请求（与真实会话同路由口径，未保存也能测）。
                 OAuth 形态隐藏——登录前无凭证可测，保存并授权后可在供应商行验证。 */}
-            {authMode === 'apiKey' && (
+            {authMode !== 'oauth' && (
             <div className="flex min-h-[32px] flex-wrap items-center gap-2.5">
               <button
                 type="button"

@@ -336,6 +336,7 @@ export function resolveSavedProbeSpec(providerId: string, agent: AgentKind): Pro
       headers: withoutCredentialHeaders(routing.headerOverride),
     };
   }
+  const apiKey = keyReader(providerId, agent);
   return {
     agent,
     baseUrl: routing.upstream,
@@ -345,8 +346,12 @@ export function resolveSavedProbeSpec(providerId: string, agent: AgentKind): Pro
     // 误报连接失败（真实会话走 resolveSessionRoute 不受影响，探测结论会与真实会话相反）。
     wireProtocol: routing.wireProtocol,
     requestPath: routing.requestPath,
-    apiKey: keyReader(providerId, agent),
-    headers: withoutCredentialHeaders(routing.headerOverride),
+    apiKey,
+    // 与真实会话路由保持 legacy 兼容：safeStorage 已有 key 时清掉旧凭证头，由 apiKey
+    // 重新注入；尚未迁移的 header-only 配置则原样保留，否则“测试连接”会无凭证误报失败。
+    headers: apiKey
+      ? withoutCredentialHeaders(routing.headerOverride)
+      : { ...(routing.headerOverride ?? {}) },
   };
 }
 

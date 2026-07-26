@@ -312,6 +312,23 @@ describe('resolveSavedProbeSpec / testProviderConnection(saved)', () => {
     });
   });
 
+  it('safeStorage 尚无 key 时保留 legacy header-only 凭证', () => {
+    setCustomProviders([buildUserProvider(config)]);
+    setDiagnosticsKeyReader(() => null);
+
+    const spec = resolveSavedProbeSpec('my-relay', 'claude-code');
+    expect(spec.apiKey).toBeNull();
+    expect(spec.headers).toEqual({
+      'x-tenant': 't1',
+      Authorization: 'Bearer stale',
+      'X-API-Key': 'stale',
+    });
+
+    const headers = buildProbeRequest(spec).init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe('Bearer stale');
+    expect(headers['X-API-Key']).toBe('stale');
+  });
+
   it('api-key-header + openai-chat 供应商:saved 探测带上 wireProtocol → 打 /chat/completions', async () => {
     const chatConfig = {
       id: 'ds-chat',

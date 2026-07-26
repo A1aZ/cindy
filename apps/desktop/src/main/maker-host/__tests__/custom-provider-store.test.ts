@@ -220,6 +220,53 @@ describe('custom-provider-store CRUD (per-runtime)', () => {
     expect((await getCustomProvider('openrouter'))?.runtimes.codex?.wireProtocol).toBe('openai-chat');
   });
 
+  it('loads legacy remote auth:none records as fail-closed apiKey configs without deleting them', async () => {
+    mountDb();
+    raw!.prepare(
+      `INSERT INTO custom_providers
+        (id, name, runtimes, auth, sort_order, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 0, 1, 1)`,
+    ).run(
+      'legacy-no-auth',
+      'Legacy no auth',
+      JSON.stringify({
+        codex: {
+          baseUrl: 'https://remote.example/v1',
+          models: [{ id: 'm', name: 'M' }],
+        },
+      }),
+      JSON.stringify({ method: 'none' }),
+    );
+
+    const [loaded] = await listCustomProviders();
+    expect(loaded.id).toBe('legacy-no-auth');
+    expect(loaded.auth).toBeUndefined();
+    expect(loaded.runtimes.codex?.baseUrl).toBe('https://remote.example/v1');
+    expect(raw!.prepare('SELECT auth FROM custom_providers WHERE id = ?').get('legacy-no-auth'))
+      .toEqual({ auth: JSON.stringify({ method: 'none' }) });
+  });
+
+  it('keeps legacy loopback auth:none records enabled when loading', async () => {
+    mountDb();
+    raw!.prepare(
+      `INSERT INTO custom_providers
+        (id, name, runtimes, auth, sort_order, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 0, 1, 1)`,
+    ).run(
+      'legacy-loopback',
+      'Legacy loopback',
+      JSON.stringify({
+        codex: {
+          baseUrl: 'http://127.0.0.1:4000/v1',
+          models: [{ id: 'm', name: 'M' }],
+        },
+      }),
+      JSON.stringify({ method: 'none' }),
+    );
+
+    expect((await getCustomProvider('legacy-loopback'))?.auth).toEqual({ method: 'none' });
+  });
+
   it('round-trips a validated exact inference request path', async () => {
     mountDb();
     await createCustomProvider({

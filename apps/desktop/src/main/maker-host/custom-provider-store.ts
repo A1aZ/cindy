@@ -46,6 +46,23 @@ function invalid(message: string): ValidationResult {
   return { ok: false, code: 'INVALID_PARAMS', message };
 }
 
+function validateNoAuthLoopbackBoundary(
+  auth: CustomProviderConfig['auth'],
+  runtimes: Partial<Record<AgentKind, CustomProviderRuntimeConfig>>,
+): ValidationResult {
+  if (auth?.method !== 'none') return { ok: true };
+  for (const [agent, runtime] of Object.entries(runtimes)) {
+    if (!runtime) continue;
+    if (!isLoopbackProviderUrl(runtime.baseUrl)) {
+      return invalid(`runtime '${agent}' baseUrl must be loopback when auth method is none`);
+    }
+    if (runtime.modelsUrl !== undefined && !isLoopbackProviderUrl(runtime.modelsUrl)) {
+      return invalid(`runtime '${agent}' modelsUrl must be loopback when auth method is none`);
+    }
+  }
+  return { ok: true };
+}
+
 function validateRuntime(agent: string, rt: unknown): ValidationResult {
   if (!rt || typeof rt !== 'object') return invalid(`runtime '${agent}' must be an object`);
   const r = rt as Record<string, unknown>;
@@ -263,21 +280,10 @@ export function validateCustomProviderConfig(config: unknown): ValidationResult 
     const r = validateRuntime(k, rts[k]);
     if (!r.ok) return r;
   }
-  if ((c.auth as { method?: unknown } | undefined)?.method === 'none') {
-    for (const k of keys) {
-      const runtime = rts[k] as Record<string, unknown>;
-      if (!isLoopbackProviderUrl(runtime.baseUrl)) {
-        return invalid(`runtime '${k}' baseUrl must be loopback when auth method is none`);
-      }
-      if (
-        runtime.modelsUrl !== undefined
-        && !isLoopbackProviderUrl(runtime.modelsUrl)
-      ) {
-        return invalid(`runtime '${k}' modelsUrl must be loopback when auth method is none`);
-      }
-    }
-  }
-  return { ok: true };
+  return validateNoAuthLoopbackBoundary(
+    c.auth as CustomProviderConfig['auth'],
+    rts as Partial<Record<AgentKind, CustomProviderRuntimeConfig>>,
+  );
 }
 
 /** 规整单个 runtime（trim baseUrl、去重 models、裁 headers）。 */
@@ -444,7 +450,18 @@ function parseRuntimes(raw: string): Partial<Record<AgentKind, CustomProviderRun
 
 function rowToConfig(row: typeof customProviders.$inferSelect): CustomProviderConfig {
   const auth = parseAuth(row.auth);
-  return { id: row.id, name: row.name, ...(auth ? { auth } : {}), runtimes: parseRuntimes(row.runtimes) };
+  const runtimes = parseRuntimes(row.runtimes);
+  // #527 之前保存的远程 auth:none 记录不能因升级绕过新边界。加载时把它降级成
+  // 历史默认的 apiKey 形态（auth 字段缺省），使目录保持可见/可编辑，但路由在用户
+  // 补 key 或改回 loopback 前 fail-closed；不静默删除用户配置。
+  const safeAuth =
+    validateNoAuthLoopbackBoundary(auth, runtimes).ok ? auth : undefined;
+  return {
+    id: row.id,
+    name: row.name,
+    ...(safeAuth ? { auth: safeAuth } : {}),
+    runtimes,
+  };
 }
 
 /** 列出当前账号的全部自定义供应商（按 sortOrder 升序，再按 createdAt）。 */

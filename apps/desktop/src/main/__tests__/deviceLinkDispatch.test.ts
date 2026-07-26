@@ -451,6 +451,55 @@ describe('被控端控制链路生命周期', () => {
     expect(getActiveControllers()).toHaveLength(0);
   });
 
+  it('link-open capability controls whether provider projection includes new logo kinds', async () => {
+    const { client, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+    registry.register('maker:provider:list', () => ({
+      providers: [{
+        id: 'renamed-vercel',
+        name: 'Team gateway',
+        routing: { codex: { upstream: 'https://ai-gateway.vercel.sh/v1' } },
+      }],
+    }));
+
+    feed({
+      v: 1,
+      kind: 'link-open',
+      id: 'r-cap',
+      src: 'ctrl-cap',
+      payload: {
+        controllerName: 'Current mobile',
+        protocolVersion: 1,
+        appVersion: '2.0.0',
+        capabilities: ['provider-logo-kinds-v2'],
+      },
+    });
+    feed({
+      v: 1,
+      kind: 'link-open',
+      id: 'r-legacy',
+      src: 'ctrl-legacy',
+      payload: {
+        controllerName: 'Legacy mobile',
+        protocolVersion: 1,
+        appVersion: '1.0.0',
+      },
+    });
+
+    const current = await runInvoke('ctrl-cap', { channel: 'maker:provider:list', args: [] });
+    const legacy = await runInvoke('ctrl-legacy', { channel: 'maker:provider:list', args: [] });
+    expect(current).toMatchObject({
+      ok: true,
+      result: { providers: [{ logoKind: 'vercel', routing: { codex: {} } }] },
+    });
+    expect(legacy).toMatchObject({
+      ok: true,
+      result: { providers: [{ routing: { codex: {} } }] },
+    });
+    expect((legacy as { result: { providers: Record<string, unknown>[] } }).result.providers[0])
+      .not.toHaveProperty('logoKind');
+  });
+
   it('link-close → 移除控制端,最后一个关闭后停 broadcast-tap', () => {
     remoteControlEnabled = true;
     const { client, feed } = makeFakeClient();

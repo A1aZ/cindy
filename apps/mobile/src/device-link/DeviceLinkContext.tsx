@@ -3,6 +3,7 @@ import { AppState, Platform } from 'react-native';
 import {
   DeviceLinkClient,
   DeviceLinkError,
+  CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2,
   DL_SUBSCRIBE_CHANNEL,
   DL_UNSUBSCRIBE_CHANNEL,
   FILE_BROWSER_EVENT_CHANNEL,
@@ -662,6 +663,7 @@ async function sendOpenLink(client: DeviceLinkClient, deviceId: string): Promise
     controllerName: mobileDeviceName(),
     protocolVersion: PROTOCOL_VERSION,
     appVersion: Constants.expoConfig?.version ?? '0.0.0',
+    capabilities: [CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2],
   });
 }
 

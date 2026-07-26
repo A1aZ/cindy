@@ -31,6 +31,7 @@ import {
   DL_VOICE_TRANSCRIBE_CHANNEL,
   DL_VOICE_CREDENTIAL_SYNC_CHANNEL,
   DL_VOICE_DICTIONARY_LEARNING_CHANNEL,
+  CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2,
   DeviceLinkError,
   parseFsWatchTopic,
   type Envelope,
@@ -240,7 +241,11 @@ function projectRoutingForDisplay(
  * 正确品牌。Fast 显隐由控制端从隧道带来的 `models[agent].supportsFastMode` 现查。
  * 其它通道原样返回。
  */
-function projectInvokeResultForTunnel(channel: string, result: unknown): unknown {
+function projectInvokeResultForTunnel(
+  channel: string,
+  result: unknown,
+  supportsFullLogoKinds = false,
+): unknown {
   if (channel !== 'maker:provider:list') return result;
   const r = result as { providers?: unknown };
   if (!Array.isArray(r.providers)) return result;
@@ -251,7 +256,10 @@ function projectInvokeResultForTunnel(channel: string, result: unknown): unknown
       : null;
     // Never trust/pass through an arbitrary pre-existing value: only shared resolver output crosses.
     delete rest.logoKind;
-    if (logoKind && LEGACY_DEVICE_LINK_LOGO_KINDS.has(logoKind)) {
+    if (
+      logoKind
+      && (supportsFullLogoKinds || LEGACY_DEVICE_LINK_LOGO_KINDS.has(logoKind))
+    ) {
       rest.logoKind = logoKind;
     }
     rest.routing = projectRoutingForDisplay(p.routing);
@@ -545,7 +553,7 @@ function handleLinkOpen(
       ? payload.controllerName.trim().slice(0, MAX_CONTROLLER_NAME_LEN)
       : src.slice(0, 8);
   // 老控制端无 subscribe 能力:link-open 视作订阅 legacy '*'(全量转发 + 横幅),向后兼容。
-  subscriptions.subscribe(src, [LEGACY_TOPIC], name);
+  subscriptions.subscribe(src, [LEGACY_TOPIC], name, payload?.capabilities);
   syncForwarding();
   client.sendLinkAccept(src, requestId, {
     appVersion: app.getVersion(),
@@ -1011,7 +1019,17 @@ export async function runInvoke(
     // 远程 set-* 回流:被控端 set-* runtime-only,补一次 DB 持久化 + 广播 patched,让控制端
     // 镜像收敛到被控端真相(取代控制端乐观覆盖)。本机会话不走这条(走 renderer update)。
     await persistRemoteSetting(payload.channel, payload.args ?? [], result);
-    return { ok: true, result: projectInvokeResultForTunnel(payload.channel, result) };
+    return {
+      ok: true,
+      result: projectInvokeResultForTunnel(
+        payload.channel,
+        result,
+        subscriptions.controllerSupports(
+          src,
+          CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2,
+        ),
+      ),
+    };
   } catch (err) {
     // 被控端 handler 的 throwIpcError `[CODE] message` 原样透传,
     // 控制端 renderer 继续用 extractIpcError 解码

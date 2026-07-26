@@ -36,6 +36,10 @@ const project = (result: unknown) =>
   __testing.projectInvokeResultForTunnel('maker:provider:list', result) as {
     providers: Record<string, unknown>[];
   };
+const projectForCurrentController = (result: unknown) =>
+  __testing.projectInvokeResultForTunnel('maker:provider:list', result, true) as {
+    providers: Record<string, unknown>[];
+  };
 
 /** 一个带完整 routing(含执行机密 + 残留 supportsFastMode)+ per-provider models 的被控端 provider。仿 XD 网关。 */
 function xdProviderWithFullRouting() {
@@ -160,6 +164,21 @@ describe('projectInvokeResultForTunnel — maker:provider:list 投影', () => {
     });
 
     expect(providers[0]).not.toHaveProperty('logoKind');
+    expect(providers[0].routing).toEqual({ codex: {} });
+  });
+
+  it('声明完整 logo 能力的当前控制端收到新 logo kind', () => {
+    const { providers } = projectForCurrentController({
+      providers: [{
+        ...xdProviderWithFullRouting(),
+        id: 'my-renamed-vercel-provider',
+        routing: {
+          codex: { upstream: 'https://ai-gateway.vercel.sh/v1' },
+        },
+      }],
+    });
+
+    expect(providers[0].logoKind).toBe('vercel');
     expect(providers[0].routing).toEqual({ codex: {} });
   });
 

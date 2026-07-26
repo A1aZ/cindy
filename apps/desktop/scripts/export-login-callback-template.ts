@@ -25,6 +25,7 @@ import { BRAND_NAME } from '@cindy/maker-shared/branding';
 
 import { renderAuthLoopbackPage } from '../src/main/authLoopbackCallback.js';
 import {
+  LOGIN_CALLBACK_LAYOUT_SCRIPT,
   OAUTH_RESULT_HTML_LANG,
   type OAuthResultPageLang,
 } from '../src/main/oauthResultPage.js';
@@ -82,30 +83,15 @@ function renderPage(
 }
 
 /**
- * 算出页面内联脚本的 CSP sha256（含引号，可直接拼进 script-src）。
+ * 结果页内联脚本的 CSP sha256（含引号，可直接拼进 script-src）。
  *
- * 由**生成方**计算并写进 manifest,消费方(auth-server)直接读取即可,不必再用正则去
- * 解析 HTML——那既容易与 HTML 解析器的真实行为出入,也会被 CodeQL 的
- * js/bad-tag-filter 判为「不完整的标签过滤」。这里的边界是我们自己拼出来的,
- * 与 renderBrandLoginCallbackPage 的模板结构一一对应。
+ * 直接对渲染器导出的脚本常量取值,不从渲染完成的 HTML 里反向解析——那既依赖 HTML
+ * 解析细节(结束标签的空白与垃圾属性等变体),也会被 CodeQL 判成「对渲染结果做哈希」。
+ * 常量与模板里实际内联的是同一份文本,所以 hash 必然对得上。
  */
-function scriptHashesOf(html: string): string[] {
-  const hashes = new Set<string>();
-  const OPEN = '<script>';
-  const CLOSE = '</script>';
-  let cursor = 0;
-  for (;;) {
-    const start = html.indexOf(OPEN, cursor);
-    if (start === -1) break;
-    const bodyStart = start + OPEN.length;
-    const end = html.indexOf(CLOSE, bodyStart);
-    if (end === -1) break;
-    const body = html.slice(bodyStart, end);
-    hashes.add(`'sha256-${createHash('sha256').update(body, 'utf8').digest('base64')}'`);
-    cursor = end + CLOSE.length;
-  }
-  return [...hashes];
-}
+const LAYOUT_SCRIPT_HASH = `'sha256-${createHash('sha256')
+  .update(LOGIN_CALLBACK_LAYOUT_SCRIPT, 'utf8')
+  .digest('base64')}'`;
 
 function main(): void {
   const outDir = parseOutDir(process.argv.slice(2));
@@ -123,7 +109,7 @@ function main(): void {
         variant,
         // manifest 里统一用 POSIX 分隔符,免得 Windows 导出的清单在服务端对不上。
         file: file.split(path.sep).join('/'),
-        scriptHashes: scriptHashesOf(html),
+        scriptHashes: [LAYOUT_SCRIPT_HASH],
       });
     }
   }

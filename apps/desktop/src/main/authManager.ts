@@ -1926,12 +1926,14 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
         throw new AuthApiError('CONNECTION_NOT_FOUND', 404, 'SSO connection is unavailable');
       }
       const { codeVerifier, codeChallenge } = generatePKCE();
-      // 托管回调链路里 state 不只防 CSRF,还兼作向 auth-server 取回授权码的凭据。
-      // 仍用 randomUUID:v4 的 122 bit 随机量配合服务端限流已不可爆破,而改动格式
-      // (36 → 43 字符)会同时作用于 loopback 路径,一旦服务端对 client_state 有
-      // 长度或 UUID 格式约束就会打断现网登录——收益不抵风险。要提到 256 bit 需先
-      // 与服务端确认 client_state 的取值约束(见 docs/desktop-login-hosted-callback.md)。
-      // 该值只存在于本进程内存中,不落盘、不进日志。
+      // 这个 state 只服务 loopback 链路:纯 CSRF 校验值,回调回来比对一次即弃。
+      // randomUUID 的 122 bit 随机量对该用途足够,也不动存量 client_state 的格式。
+      //
+      // 托管回调链路**不用它** —— openHostedBrowserAuthorization 会另生成一对
+      // (pollSecret, clientState = base64url(sha256(pollSecret))),把哈希交给
+      // authorize、原像留作取回凭据。原因是这里的值会进浏览器地址栏与导航历史,
+      // 拿它取回就能被旁观者抢先消费(见 createDesktopPollCredentials 的说明)。
+      // 两条链路的值都只存在于本进程内存中,不落盘、不进日志。
       const state = crypto.randomUUID();
       loginFlowState = reduceAuthFlow(loginFlowState, {
         type: 'browser-started',

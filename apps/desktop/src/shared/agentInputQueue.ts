@@ -9,6 +9,7 @@
  */
 
 import { stripChatQuoteMarkerLines } from '@cindy/maker-shared/chat-quotes';
+import { MENTION_TOKEN_SPLIT, parseMentionToken } from '@cindy/maker-shared/mention-ref';
 import {
   describeAgentInputReference,
   projectAgentFacingText,
@@ -589,26 +590,37 @@ function describeFileCategory(
 }
 
 /**
- * mention chip 在 wire text 里被序列化成 `@<path>` / `@<path>/` / `@<label>`
- * (见 ChatInput.serializeEditorContent)。这些 token 是用户"点选"出来的资源,
- * 不是他写的散文 —— 判定「有没有真正的文字」时必须先剔除,否则纯 @mention 消息
- * 会被当成用户文字发给标题模型,describeMentions 永远走不到(PR #510 review)。
+ * mention chip 在 wire text 里被序列化成 `@<path>`,path 含空格 / 引号时是
+ * `@"<path>"`(见 ChatInput.serializeEditorContent → formatMentionRef)。这些
+ * token 是用户"点选"出来的资源,不是他写的散文 —— 判定「有没有真正的文字」时
+ * 必须先剔除,否则纯 @mention 消息会被当成用户文字发给标题模型,
+ * describeMentions 永远走不到(PR #510 review)。
  *
- * 只剔除与本条消息 mentions 精确对应的 token:用户手打的 `@某人` 没有对应
- * mention 条目,会原样保留,不会被误判成无文字。
+ * 用 wire 格式的官方 tokenizer(`MENTION_TOKEN_SPLIT` + `parseMentionToken`)切词
+ * 并按解析出的 ref 匹配,而不是手工拼候选串 —— 手工拼法漏掉了引号形式。
+ *
+ * 只剔除与本条消息 mentions 对应的 token:用户手打的 `@某人` 没有对应 mention
+ * 条目,会原样保留,不会被误判成无文字。
  */
 function stripMentionTokens(text: string, queued: AgentInputQueuedMessage): string {
-  let stripped = text;
-  for (const mention of queued.mentions ?? []) {
-    for (const token of [
-      `@${mention.path}/`,
-      `@${mention.path}`,
-      `@${mention.name}`,
-    ]) {
-      if (token.length > 1) stripped = stripped.split(token).join(' ');
+  const mentions = queued.mentions ?? [];
+  if (mentions.length === 0) return text.trim();
+  // dir chip 的尾 `/` 也在引号内,两种形式都收进来。
+  const refs = new Set<string>();
+  for (const mention of mentions) {
+    if (mention.path) {
+      refs.add(mention.path);
+      refs.add(`${mention.path}/`);
     }
+    if (mention.name) refs.add(mention.name);
   }
-  return stripped.trim();
+  return text
+    .split(MENTION_TOKEN_SPLIT)
+    .map((part) =>
+      part.startsWith('@') && refs.has(parseMentionToken(part).ref) ? ' ' : part,
+    )
+    .join('')
+    .trim();
 }
 
 /**

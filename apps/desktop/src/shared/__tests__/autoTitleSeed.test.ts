@@ -139,6 +139,32 @@ describe('deriveAutoTitleSeed — 用户一个字没写', () => {
     expect(seed).toEqual({ text: 'index.ts', isUserText: false });
   });
 
+  it('path 含空格的 mention 走引号形式 @"..." ,同样被剔除', () => {
+    // ChatInput 对含空格/引号的 path 用 formatMentionRef 加引号序列化;
+    // 只匹配裸形式会漏掉它,导致这条消息被当成用户散文送进标题模型。
+    const seed = deriveAutoTitleSeed(
+      queued({
+        text: '@"my docs/file name.md"',
+        mentions: [{ type: 'file', name: 'file name.md', path: 'my docs/file name.md' }],
+      }),
+      LABELS,
+    );
+
+    expect(seed).toEqual({ text: 'file name.md', isUserText: false });
+  });
+
+  it('dir chip 的引号形式(尾斜杠在引号内)同样被剔除', () => {
+    const seed = deriveAutoTitleSeed(
+      queued({
+        text: '@"my docs/sub dir/"',
+        mentions: [{ type: 'dir', name: 'sub dir', path: 'my docs/sub dir' }],
+      }),
+      LABELS,
+    );
+
+    expect(seed).toEqual({ text: 'sub dir', isUserText: false });
+  });
+
   it('mention 旁边有真正的文字时仍算用户文字', () => {
     const seed = deriveAutoTitleSeed(
       queued({

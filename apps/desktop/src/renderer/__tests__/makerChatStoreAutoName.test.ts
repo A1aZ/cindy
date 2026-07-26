@@ -107,7 +107,11 @@ describe('makerChatStore auto-name — 本机会话', () => {
     await flushPromises();
     autoTitle.mockClear();
 
-    makerChatStore.__autoNameUnnamedSessionForTest(SESSION_ID, '第二条', 'claude-code');
+    makerChatStore.__autoNameUnnamedSessionForTest(
+      SESSION_ID,
+      { text: '第二条', isUserText: true },
+      'claude-code',
+    );
     await flushPromises();
 
     expect(autoTitle).not.toHaveBeenCalled();
@@ -120,7 +124,11 @@ describe('makerChatStore auto-name — 本机会话', () => {
     await flushPromises();
     autoTitle.mockClear();
 
-    makerChatStore.__autoNameUnnamedSessionForTest(SESSION_ID, '这个报错怎么修', 'claude-code');
+    makerChatStore.__autoNameUnnamedSessionForTest(
+      SESSION_ID,
+      { text: '这个报错怎么修', isUserText: true },
+      'claude-code',
+    );
     await flushPromises();
 
     expect(autoTitle).toHaveBeenCalledWith({
@@ -139,14 +147,24 @@ describe('makerChatStore auto-name — 本机会话', () => {
     autoTitle.mockClear();
     autoTitle.mockResolvedValue({ applied: true, done: true });
 
-    makerChatStore.__autoNameUnnamedSessionForTest(SESSION_ID, '第二条', 'claude-code');
+    makerChatStore.__autoNameUnnamedSessionForTest(
+      SESSION_ID,
+      { text: '第二条', isUserText: true },
+      'claude-code',
+    );
     await flushPromises();
 
     expect(autoTitle).toHaveBeenCalledTimes(1);
   });
 
-  it('纯附件的后续消息(无文字)不触发补起名', async () => {
-    makerChatStore.__autoNameUnnamedSessionForTest(SESSION_ID, '   ', 'claude-code');
+  it('后续消息不是用户文字(纯附件 / 纯 @mention)时不补起名', async () => {
+    // 合成描述不该把已有占位换成另一个文件名,更不该被送进标题模型。
+    makerChatStore.__autoNameUnnamedSessionForTest(SESSION_ID, null, 'claude-code');
+    makerChatStore.__autoNameUnnamedSessionForTest(
+      SESSION_ID,
+      { text: '设计稿-v3.png', isUserText: false },
+      'claude-code',
+    );
     await flushPromises();
 
     expect(autoTitle).not.toHaveBeenCalled();
@@ -198,7 +216,11 @@ describe('makerChatStore auto-name — device-link 远程会话', () => {
   it('后续消息也走预览而不是本机 DB(补起名路径同样短路)', async () => {
     const setPreview = vi.spyOn(remoteProjectsStore, 'setPendingTitlePreview');
 
-    makerChatStore.__autoNameUnnamedSessionForTest(SESSION_ID, '这个报错怎么修', 'codex');
+    makerChatStore.__autoNameUnnamedSessionForTest(
+      SESSION_ID,
+      { text: '这个报错怎么修', isUserText: true },
+      'codex',
+    );
     await flushPromises();
 
     expect(setPreview).toHaveBeenCalledWith(SESSION_ID, '这个报错怎么修');

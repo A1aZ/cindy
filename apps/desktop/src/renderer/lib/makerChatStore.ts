@@ -37,8 +37,8 @@ import {
   getAgentFacingText,
   reconcileSessionRefsForText,
   type AutoTitleFallbackLabels,
+  type AutoTitleSeed,
 } from '../../shared/agentInputQueue';
-import { projectLiteralUserText } from '@cindy/maker-shared/agent-input-projection';
 import { providerSecretStorageKey } from '../../shared/providerSecrets';
 import {
   GHOST_HOST_NOTICE_KEYS,
@@ -5965,17 +5965,22 @@ function scheduleAutoName(
  *     "[Fork·已剥离] ..."),天然带历史消息(isFirstMessage=false),走不到普通
  *     首条消息的起名分支。
  *
- * 是否仍是系统占位由 main 判定(它持有 DB 与归属表),这里不再读会话行 —— 远程
- * 会话的行根本不在本机 DB 里,读它只会抛错(PR #510 review)。
+ * 素材同样经 {@link deriveAutoTitleSeed} 推导,与首条消息共用一套口径:直接拿
+ * `projectLiteralUserText` 会把 mention chip 序列化出的 `@<path>` 当成用户散文,
+ * 既违反「合成描述不喂标题模型」的契约,也可能让标题里出现 wire token
+ * (PR #510 review)。
+ *
+ * 只有 `isUserText=true` 才补起名:纯附件的后续消息不该把已有的合成占位换成
+ * 另一个文件名。是否仍是系统占位由 main 判定(它持有 DB 与归属表),这里不再读
+ * 会话行 —— 远程会话的行根本不在本机 DB 里,读它只会抛错。
  */
 function maybeAutoNameUnnamedSession(
   sessionId: string,
-  text: string,
+  seed: AutoTitleSeed | null,
   agentKind: 'claude-code' | 'codex',
 ): void {
-  // 纯附件 send(无文字)不在这里补起名 —— 会话已有合成占位,继续等用户打字。
-  if (!text.trim()) return;
-  scheduleAutoName(sessionId, text, agentKind);
+  if (!seed?.isUserText) return;
+  scheduleAutoName(sessionId, seed.text, agentKind, true);
 }
 
 /**
@@ -6102,26 +6107,21 @@ async function sendMessageCore(
   // Auto-naming (F-CHAT-2) — only fires for the first message in the session,
   // and that is by definition not busy (queue would have been dispatched on a
   // previous turn). Safe to leave outside the isBusy branch.
+  // 首条与补起名共用同一套素材推导:用户没打字时 seed.isUserText=false,
+  // 只写合成占位、不调标题模型。
+  const autoTitleSeed = deriveAutoTitleSeed(queued, autoTitleFallbackLabels());
   if (wasFirst) {
     // 用会话真实 agentKind 起名 — 之前写死 'claude-code',导致 Codex 会话也
     // 用 Claude haiku 起标题:纯 Codex 用户(无 Claude 鉴权)会 oneShot 失败 →
     // fallback 原话,表现为"Codex 会话标题没有智能总结"。current.agentKind 已是
     // maker 格式('claude-code' | 'codex'),直接透传。起名走立即占位 + 后台覆盖。
-    // 用户没打字时 seed.isUserText=false,只写合成占位、不调标题模型。
-    const seed = deriveAutoTitleSeed(queued, autoTitleFallbackLabels());
-    if (seed) scheduleAutoName(sessionId, seed.text, current.agentKind, seed.isUserText);
+    if (autoTitleSeed) {
+      scheduleAutoName(sessionId, autoTitleSeed.text, current.agentKind, autoTitleSeed.isUserText);
+    }
   } else {
     // 补起名:首条是纯附件(只贴图没打字)、标题还是合成占位或默认名的会话,以及
     // fork 出来的占位标题会话,都在第一条带文字的消息上把标题换成用户写的内容。
-    maybeAutoNameUnnamedSession(
-      sessionId,
-      projectLiteralUserText({
-        text: queued.text,
-        quotesEncoded: queued.chatMessage.quotesEncoded === true,
-        agentReferences: queued.agentReferences,
-      }),
-      current.agentKind,
-    );
+    maybeAutoNameUnnamedSession(sessionId, autoTitleSeed, current.agentKind);
   }
 
   // 视觉连续性: agent 空闲 + 队列为空时, main coordinator 会立即派发这条(见

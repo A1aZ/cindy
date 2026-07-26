@@ -212,9 +212,10 @@ function stderrHint(text: string, preferLast = false): string | null {
     .filter(Boolean);
   if (lines.length === 0) return null;
   const fallback = preferLast ? lines[lines.length - 1] : lines[0];
+  const isDiagnostic = (s: string) => /error|fatal|exception|panic|abort/i.test(s);
   const errorLine = preferLast
-    ? lines.findLast((candidate) => /error/i.test(candidate))
-    : lines.find((candidate) => /error/i.test(candidate));
+    ? lines.findLast(isDiagnostic)
+    : lines.find(isDiagnostic);
   const line = errorLine ?? fallback;
   return sanitizePathsInHint(line).slice(0, 240);
 }
@@ -222,13 +223,16 @@ function stderrHint(text: string, preferLast = false): string | null {
 function sanitizePathsInHint(hint: string): string {
   const basename = (p: string) => p.split(/[/\\]/).pop() ?? p;
   return hint
-    .replace(/(['"])((?:[A-Za-z]:[/\\]|\\\\[^'"]+|\/)[^'"]+)\1/g, (_, q, p) => `${q}${basename(p)}${q}`)
+    // 双引号包裹(内部允许 ')
+    .replace(/"((?:[A-Za-z]:[/\\]|\\\\[^"]+|\/)[^"]+)"/g, (_, p) => `"${basename(p)}"`)
+    // 单引号包裹(内部允许 ")
+    .replace(/'((?:[A-Za-z]:[/\\]|\\\\[^']+|\/)[^']+)'/g, (_, p) => `'${basename(p)}'`)
     .replace(/[A-Za-z]:[/\\][^'")\]\n]*/g, basename)
     .replace(/\\\\[^'")\]\n]*/g, basename)
-    // 多段 POSIX 路径(含空格);(?<!:) 排除 URL scheme 后的路径
-    .replace(/(?<!:)\/(?:[^/'")\]\n]+\/)+[^'")\]\n]*/g, basename)
+    // 多段 POSIX 路径;(?<![:/]) 排除 URL scheme 和连续斜杠
+    .replace(/(?<![:/])\/(?:[^/'")\]\n]+\/)+[^'")\]\n]*/g, basename)
     // 单段 POSIX 绝对路径(/.ssh、/_private、/123mount 等)
-    .replace(/(?<!:|\/)\/[^\s/'")\]\n:,][^\s'")\]\n:,]*(?=[\s'")\]\n:,]|$)/g, basename);
+    .replace(/(?<![:/])\/[^\s/'")\]\n:,][^\s'")\]\n:,]*(?=[\s'")\]\n:,]|$)/g, basename);
 }
 
 type UtilityFork = typeof utilityProcess.fork;
@@ -850,6 +854,7 @@ export class GhostNodeRuntimeBroker {
   private stopWorker(key: string, entry: WorkerEntry): void {
     entry.stopping = true;
     this.workers.delete(key);
+    this.exitGen.set(key, (this.exitGen.get(key) ?? 0) + 1);
     this.clearIdleTimer(entry);
     // 级联:先收孩子再收本体,不留孤儿进程。
     for (const child of [...entry.children.values()]) this.stopChild(entry, child, true);

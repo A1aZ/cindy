@@ -153,6 +153,30 @@ describe('translateResponsesRequest', () => {
     ).toBeUndefined();
   });
 
+  it.each([
+    '',
+    '   ',
+    123,
+    { malformed: true },
+  ])('replaces an invalid Gemini thought signature: %j', (thoughtSignature) => {
+    const out = translateResponsesRequest(base({
+      input: [{
+        type: 'function_call',
+        call_id: 'c1',
+        name: 'Read',
+        arguments: '{}',
+        extra_content: {
+          google: { thought_signature: thoughtSignature as string },
+        },
+      }],
+    }), { capabilities: { googleThoughtSignaturePlaceholder: true } });
+    expect(
+      (out.messages[0] as {
+        tool_calls?: Array<{ extra_content?: { google?: { thought_signature?: string } } }>;
+      }).tool_calls?.[0]?.extra_content?.google?.thought_signature,
+    ).toBe('skip_thought_signature_validator');
+  });
+
   it('drops malformed Google tool-call metadata instead of spreading it as an object', () => {
     const input = base({
       input: [{

@@ -115,7 +115,11 @@ function flushAssistant(
   }
   if (hasToolCalls && opts.googleThoughtSignaturePlaceholder) {
     const firstCall = pending.tool_calls?.[0];
-    if (firstCall && !firstCall.extra_content?.google?.thought_signature) {
+    const thoughtSignature = firstCall?.extra_content?.google?.thought_signature;
+    if (
+      firstCall
+      && (typeof thoughtSignature !== 'string' || thoughtSignature.trim().length === 0)
+    ) {
       firstCall.extra_content = {
         ...firstCall.extra_content,
         google: {

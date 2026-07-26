@@ -2,8 +2,8 @@
  * 供应商推理路径的共享边界。
  *
  * 路径最终会原样进入 Node `http(s).request({ path })`，因此除同源约束外，还必须拒绝
- * Node 会以 `ERR_UNESCAPED_CHARACTERS` 同步抛出的字符；空格、控制符和非 Latin-1 字符
- * 应由用户先做 percent-encoding。
+ * 会被 WHATWG URL 重新编码、但透明代理仍按原字节发送的字符。仅允许可打印 ASCII；
+ * 空格、控制符和非 ASCII 字符应由用户先做 percent-encoding。
  */
 export function isProviderRequestPath(value: unknown): value is string {
   return (
@@ -14,7 +14,7 @@ export function isProviderRequestPath(value: unknown): value is string {
     && !value.startsWith('//')
     && !value.includes('#')
     && !value.includes('\\')
-    && !/[^\u0021-\u00ff]/.test(value)
+    && !/[^\u0021-\u007e]/.test(value)
   );
 }
 

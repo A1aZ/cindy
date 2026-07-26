@@ -80,6 +80,7 @@ export function applyDesktopDevStartupConfig(options) {
   const config = resolveDesktopDevStartupConfig(options);
   const env = options.env ?? process.env;
   env.CINDY_AUTH_REGION = config.region;
+  env.VITE_CINDY_AUTH_REGION = config.region;
   if (config.endpointsCdn) env.XDT_ENDPOINTS_CDN = "1";
   if (config.endpointManifestFile) {
     env.XDT_ENDPOINT_MANIFEST_FILE = config.endpointManifestFile;

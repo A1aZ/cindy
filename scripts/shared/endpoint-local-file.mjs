@@ -43,7 +43,27 @@ export function generateEndpointLocalFile({ repoRoot, region = 'global' }) {
   }
   const sourcePath = path.join(repoRoot, 'config', fileName);
   const targetPath = path.join(repoRoot, 'config', 'endpoint.local.json');
-  const source = JSON.parse(fs.readFileSync(sourcePath, 'utf8'));
+  const relativeSourcePath = `config/${fileName}`;
+  let sourceText;
+  try {
+    sourceText = fs.readFileSync(sourcePath, 'utf8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      const devHint =
+        region === 'dev'
+          ? ' Copy config/endpoint.dev.json.example to config/endpoint.dev.json first.'
+          : '';
+      throw new Error(`Missing endpoint manifest ${relativeSourcePath}.${devHint}`);
+    }
+    throw new Error(`Failed to read endpoint manifest ${relativeSourcePath}: ${error.message}`);
+  }
+
+  let source;
+  try {
+    source = JSON.parse(sourceText);
+  } catch (error) {
+    throw new Error(`Invalid JSON in endpoint manifest ${relativeSourcePath}: ${error.message}`);
+  }
   const local = {
     _note:
       '由 scripts/shared/endpoint-local-file.mjs 生成(restart:desktop:local / dev:desktop),' +

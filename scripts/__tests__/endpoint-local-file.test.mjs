@@ -78,11 +78,22 @@ test('幂等:重复生成整文件重写,手改会丢', () => {
   assert.equal(JSON.parse(fs.readFileSync(target, 'utf8')).authApiBaseUrl, 'http://localhost:3344');
 });
 
-test('所选正本缺失 / 非法直接抛错(fail closed,不造半截配置)', () => {
-  assert.throws(() => generateEndpointLocalFile({ repoRoot: makeRepoRoot(undefined) }));
-  assert.throws(() => generateEndpointLocalFile({
-    repoRoot: makeRepoRoot(CN_MANIFEST, 'not-json{{'),
-  }));
+test('所选正本缺失 / 非法时给出明确错误(fail closed,不造半截配置)', () => {
+  assert.throws(
+    () =>
+      generateEndpointLocalFile({
+        repoRoot: makeRepoRoot(undefined),
+        region: 'dev',
+      }),
+    /Missing endpoint manifest config\/endpoint\.dev\.json.*endpoint\.dev\.json\.example/,
+  );
+  assert.throws(
+    () =>
+      generateEndpointLocalFile({
+        repoRoot: makeRepoRoot(CN_MANIFEST, 'not-json{{'),
+      }),
+    /Invalid JSON in endpoint manifest config\/endpoint\.global\.json/,
+  );
   assert.throws(() => generateEndpointLocalFile({
     repoRoot: makeRepoRoot(CN_MANIFEST),
     region: 'us',

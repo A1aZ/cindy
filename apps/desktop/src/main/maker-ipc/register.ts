@@ -333,7 +333,11 @@ import { getAgentIslandService } from '../agent-island/service.js';
 import { createOrcaLifecycleService, ORCA_WORKER_READY_MESSAGE } from './orcaLifecycleService.js';
 import { throwOrcaServiceFailure } from './orcaServiceFailure.js';
 import { createOrcaTeamService, findFocusTargetWorker, type ListWorkerQueuedMessagesResult, type OrcaTeamService, type OrcaWorkerEffort, type WorkerQueuedMessageControlResult } from './orcaTeamService.js';
-import { createOrcaWorkerCreationService, normalizeOrcaWorkerLabel } from './orcaWorkerCreationService.js';
+import {
+  createOrcaWorkerCreationService,
+  normalizeOrcaWorkerLabel,
+  providerRouteRequiresExplicitSelection,
+} from './orcaWorkerCreationService.js';
 import { registerOrcaWorkerControlHandlers } from './orcaWorkerControlHandlers.js';
 import {
   clearOrcaMcpHydrated,
@@ -5513,17 +5517,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
             id: provider.id,
             name: provider.name,
             models: (provider.models['claude-code'] ?? []).map((model) => model.id),
-            requiresExplicitRoute: provider.routing['claude-code']?.authStrategy === 'api-key-header'
-              || provider.routing['claude-code']?.authStrategy === 'oauth-token'
-              || provider.routing['claude-code']?.authStrategy === 'none',
+            requiresExplicitRoute: providerRouteRequiresExplicitSelection(
+              provider.routing['claude-code']?.authStrategy,
+            ),
           })),
           codex: connectedProvidersForAgent(views, 'codex').map((provider) => ({
             id: provider.id,
             name: provider.name,
             models: (provider.models.codex ?? []).map((model) => model.id),
-            requiresExplicitRoute: provider.routing.codex?.authStrategy === 'api-key-header'
-              || provider.routing.codex?.authStrategy === 'oauth-token'
-              || provider.routing.codex?.authStrategy === 'none',
+            requiresExplicitRoute: providerRouteRequiresExplicitSelection(
+              provider.routing.codex?.authStrategy,
+            ),
           })),
         },
         resolveDefaultProviderIdForModel: (agent, model) => (

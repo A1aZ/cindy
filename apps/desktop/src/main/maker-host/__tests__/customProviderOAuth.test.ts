@@ -82,6 +82,27 @@ describe('validateCustomProviderConfig auth 段', () => {
     ).toBe(false);
   });
 
+  it('拒绝扩展参数覆盖 OAuth 标准字段', () => {
+    expect(
+      validateCustomProviderConfig({
+        ...BASE,
+        auth: {
+          method: 'oauth',
+          oauth: { ...DEVICE_OAUTH, extraDeviceParams: { client_id: 'other-client' } },
+        },
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateCustomProviderConfig({
+        ...BASE,
+        auth: {
+          method: 'oauth',
+          oauth: { ...OAUTH, extraAuthParams: { state: 'fixed-state' } },
+        },
+      }).ok,
+    ).toBe(false);
+  });
+
   it('OAuth 形态模型可留空（授权后自动发现填充，用户免手填）', () => {
     const noModels = {
       ...BASE,

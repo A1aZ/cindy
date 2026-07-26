@@ -14,7 +14,11 @@
  *     provider-route.setCustomProviderKeyReader，host 在 register 时接通）。
  */
 
-import type { AgentKind, ProviderWireProtocol } from '@cindy/model-providers';
+import {
+  appendProviderRequestPath,
+  type AgentKind,
+  type ProviderWireProtocol,
+} from '@cindy/model-providers';
 
 import {
   classifyProviderError,
@@ -69,11 +73,6 @@ export function setDiagnosticsKeyReader(reader: KeyReader): void {
   keyReader = reader;
 }
 
-/** 拼 URL：baseUrl 去尾斜杠 + path。 */
-function joinUrl(baseUrl: string, path: string): string {
-  return baseUrl.replace(/\/+$/, '') + path;
-}
-
 function withoutCredentialHeaders(
   headers: Record<string, string> | undefined,
 ): Record<string, string> {
@@ -99,7 +98,7 @@ export function buildProbeRequest(spec: ProviderProbeSpec): { url: string; init:
       headers['authorization'] = `Bearer ${spec.apiKey}`;
     }
     return {
-      url: joinUrl(spec.baseUrl, spec.requestPath ?? '/v1/messages'),
+      url: appendProviderRequestPath(spec.baseUrl, spec.requestPath ?? '/v1/messages'),
       init: {
         method: 'POST',
         headers,
@@ -119,7 +118,7 @@ export function buildProbeRequest(spec: ProviderProbeSpec): { url: string; init:
     // (“Thinking mode does not support this tool_choice”),会把可达的端点误报成失败。
     // 工具调用能力交给真实会话验证(Codex 用 tool_choice:'auto',不强制)。
     return {
-      url: joinUrl(spec.baseUrl, spec.requestPath ?? '/chat/completions'),
+      url: appendProviderRequestPath(spec.baseUrl, spec.requestPath ?? '/chat/completions'),
       init: {
         method: 'POST',
         headers,
@@ -134,7 +133,7 @@ export function buildProbeRequest(spec: ProviderProbeSpec): { url: string; init:
     };
   }
   return {
-    url: joinUrl(spec.baseUrl, spec.requestPath ?? '/responses'),
+    url: appendProviderRequestPath(spec.baseUrl, spec.requestPath ?? '/responses'),
     init: {
       method: 'POST',
       headers,

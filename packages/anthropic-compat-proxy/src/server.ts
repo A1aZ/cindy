@@ -260,7 +260,7 @@ function isSafePathOverride(value: unknown): value is string {
     && value.startsWith('/')
     && !value.startsWith('//')
     && !value.includes('#')
-    && !/[\r\n]/.test(value)
+    && !/[^\u0021-\u00ff]/.test(value)
   );
 }
 

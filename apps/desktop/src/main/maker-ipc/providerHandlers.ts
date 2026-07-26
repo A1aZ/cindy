@@ -14,7 +14,13 @@
  * handler body 可脱 Electron 用 IpcHarness + 内存 db 直接 invoke 单测（规则 14）。
  */
 
-import type { AgentKind, CustomProviderConfig, ProviderPreset, ProviderView } from '@cindy/model-providers';
+import {
+  isProviderRequestPath,
+  type AgentKind,
+  type CustomProviderConfig,
+  type ProviderPreset,
+  type ProviderView,
+} from '@cindy/model-providers';
 
 import type { LocalCliDetection } from '../../shared/localCliDetect.js';
 
@@ -125,18 +131,7 @@ function parseTestInput(input: unknown): ProviderTestInput | null {
         : ['openai-responses', 'openai-chat'];
       if (typeof spec.wireProtocol !== 'string' || !allowed.includes(spec.wireProtocol)) return null;
     }
-    if (
-      spec.requestPath !== undefined
-      && (
-        typeof spec.requestPath !== 'string'
-        || spec.requestPath.length <= 1
-        || spec.requestPath.length > 2_048
-        || !spec.requestPath.startsWith('/')
-        || spec.requestPath.startsWith('//')
-        || spec.requestPath.includes('#')
-        || /[\r\n]/.test(spec.requestPath)
-      )
-    ) return null;
+    if (spec.requestPath !== undefined && !isProviderRequestPath(spec.requestPath)) return null;
     return {
       kind: 'adhoc',
       spec: {

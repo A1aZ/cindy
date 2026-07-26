@@ -255,7 +255,7 @@ describe('provider:test-connection handler', () => {
         agent: 'claude-code',
         baseUrl: 'https://x.example',
         modelId: 'm',
-        requestPath: '/custom/messages',
+        requestPath: '/tenant/acme/infer?stream=1',
         apiKey: 'k',
       },
     });
@@ -267,7 +267,7 @@ describe('provider:test-connection handler', () => {
         baseUrl: 'https://x.example',
         modelId: 'm',
         wireProtocol: undefined,
-        requestPath: '/custom/messages',
+        requestPath: '/tenant/acme/infer?stream=1',
         apiKey: 'k',
         headers: undefined,
       },
@@ -285,6 +285,15 @@ describe('provider:test-connection handler', () => {
       { kind: 'adhoc', spec: { agent: 'codex', baseUrl: 'https://x.example', modelId: '' } },
       { kind: 'adhoc', spec: { agent: 'codex', baseUrl: 'https://x.example', modelId: 'm', requestPath: '//evil.example' } },
       { kind: 'adhoc', spec: { agent: 'codex', baseUrl: 'https://x.example', modelId: 'm', requestPath: '/infer#fragment' } },
+      {
+        kind: 'adhoc',
+        spec: {
+          agent: 'codex',
+          baseUrl: 'https://x.example',
+          modelId: 'm',
+          requestPath: '/unescaped path',
+        },
+      },
       { kind: 'saved', providerId: '', agent: 'codex' },
     ];
     for (const input of bad) {

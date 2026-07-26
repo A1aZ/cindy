@@ -220,7 +220,16 @@ describe('custom-provider-store CRUD (per-runtime)', () => {
       .toBe('/tenant/acme/v2/infer?stream=1');
   });
 
-  it.each(['//evil.example/infer', '/infer#fragment', '/infer\r\nx: y', 'responses'])(
+  it.each([
+    '//evil.example/infer',
+    '/infer#fragment',
+    '/infer\r\nx: y',
+    '/my path',
+    '/infer\tmode',
+    '/infer\u0000mode',
+    '/模型',
+    'responses',
+  ])(
     'rejects unsafe or non-path requestPath %s',
     (requestPath) => {
       expect(validateCustomProviderConfig({

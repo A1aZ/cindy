@@ -5,6 +5,7 @@ import {
   type ChatDeveloperRole,
   type ChatCompletionsRequest,
   type ChatMessage,
+  type ChatToolCallExtraContent,
   type ResponsesContentPart,
   type ResponsesFunctionTool,
   type ResponsesInputItem,
@@ -13,6 +14,14 @@ import {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function cloneToolCallExtraContent(value: unknown): ChatToolCallExtraContent | undefined {
+  if (!isPlainObject(value)) return undefined;
+  return {
+    ...value,
+    ...(isPlainObject(value.google) ? { google: { ...value.google } } : {}),
+  };
 }
 
 function stringifyToolOutput(output: unknown): string {
@@ -107,7 +116,11 @@ function flushAssistant(
     const firstCall = pending.tool_calls?.[0];
     if (firstCall && !firstCall.extra_content?.google?.thought_signature) {
       firstCall.extra_content = {
-        google: { thought_signature: GOOGLE_THOUGHT_SIGNATURE_PLACEHOLDER },
+        ...firstCall.extra_content,
+        google: {
+          ...firstCall.extra_content?.google,
+          thought_signature: GOOGLE_THOUGHT_SIGNATURE_PLACEHOLDER,
+        },
       };
     }
   }
@@ -182,10 +195,12 @@ function translateInput(input: ResponsesRequest['input'], opts: TranslateInputOp
       }
       assistant ??= { role: 'assistant', content: null, tool_calls: [] };
       assistant.tool_calls ??= [];
+      const extraContent = cloneToolCallExtraContent(item.extra_content);
       assistant.tool_calls.push({
         id: item.call_id,
         type: 'function',
         function: { name: item.name, arguments: item.arguments },
+        ...(extraContent ? { extra_content: extraContent } : {}),
       });
       continue;
     }

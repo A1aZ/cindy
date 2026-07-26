@@ -33,8 +33,8 @@ import { useProviderOAuthDeviceCode } from '@/hooks/useProviderOAuthDeviceCode';
 import { toast } from '@/lib/toast';
 import {
   appendDiscoveredCustomProviderModels,
-  customProviderModelConfigFromCatalogModel,
   deleteCustomProvider,
+  providerViewToCustomProviderConfig,
   readCustomProviderKey,
   updateCustomProvider,
 } from '@/lib/customProviders';
@@ -834,35 +834,6 @@ function XdGatewayHeader({
 // 自定义供应商详情头 —— 编辑 / 删除;OAuth 形态另有授权/登出。
 // ---------------------------------------------------------------------------
 
-/** ProviderView → 编辑表单用的 CustomProviderConfig(per-runtime,不含密钥)。 */
-function providerViewToConfig(p: ProviderView): CustomProviderConfig {
-  const runtimes: CustomProviderConfig['runtimes'] = {};
-  for (const agent of p.agents) {
-    const routing = p.routing[agent];
-    const models = p.models[agent] ?? [];
-    runtimes[agent] = {
-      baseUrl: routing?.upstream ?? '',
-      ...(routing?.requestPath ? { requestPath: routing.requestPath } : {}),
-      ...(routing?.wireProtocol ? { wireProtocol: routing.wireProtocol } : {}),
-      models: models.map(customProviderModelConfigFromCatalogModel),
-      ...(routing?.headerOverride && Object.keys(routing.headerOverride).length > 0
-        ? { headers: { ...routing.headerOverride } }
-        : {}),
-      ...(routing?.modelsUrl ? { modelsUrl: routing.modelsUrl } : {}),
-    };
-  }
-  return {
-    id: p.id,
-    name: p.name,
-    ...(p.auth.method === 'oauth' && p.auth.oauth
-      ? { auth: { method: 'oauth' as const, oauth: p.auth.oauth } }
-      : p.auth.method === 'none'
-        ? { auth: { method: 'none' as const } }
-        : {}),
-    runtimes,
-  };
-}
-
 function CustomProviderHeader({
   provider,
   onEdit,
@@ -1284,7 +1255,7 @@ export function ProvidersSection() {
     async (p: ProviderView) => {
       setRefreshingModels(true);
       try {
-        const config = providerViewToConfig(p);
+        const config = providerViewToCustomProviderConfig(p);
         let added = 0;
         let anyOk = false;
         for (const agent of p.agents) {
@@ -1334,7 +1305,7 @@ export function ProvidersSection() {
     return (
       <CustomProviderHeader
         provider={p}
-        onEdit={() => setDialog({ mode: 'edit', config: providerViewToConfig(p) })}
+        onEdit={() => setDialog({ mode: 'edit', config: providerViewToCustomProviderConfig(p) })}
         onDelete={() => void handleDelete(p)}
       />
     );

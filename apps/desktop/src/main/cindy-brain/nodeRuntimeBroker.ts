@@ -1003,16 +1003,11 @@ export class GhostNodeRuntimeBroker {
       }
       const text = decoded.trim().slice(0, 4_096);
       if (text) this.deps.log?.warn('ghost node stderr', { ghostId: ghost.manifest.id, text });
-      // 进程已退出、正在 drain 时,每收到新 chunk 就重置 drain 定时器(debounce),
-      // 确保管道完全排空后再提取诊断。
-      if (entry.exitDrain) {
-        this.clearTimer(entry.exitDrain.timer);
-        const d = entry.exitDrain;
-        d.timer = this.setTimer(() => this.settleExit(entry, d.code, d.signal, d.error), 10);
-        d.timer.unref?.();
+      // 进程已退出后不再续命——定时器已冻结,由 settleExit 统一结算。
+      if (!entry.exitDrain) {
+        // stderr 是手册钦定的日志口——构建刷日志就是活着的证据,给续命请求重置沉默窗口。
+        this.renewPendingOnActivity(entry);
       }
-      // stderr 是手册钦定的日志口——构建刷日志就是活着的证据,给续命请求重置沉默窗口。
-      this.renewPendingOnActivity(entry);
     });
     child.on('exit', (code, signal) => this.handleExit(entry, code, signal, null));
     child.on('error', (error) => this.handleExit(entry, null, null, error));
@@ -1311,10 +1306,10 @@ export class GhostNodeRuntimeBroker {
     for (const child of [...entry.children.values()]) this.stopChild(entry, child, true);
     // 立即冻结所有 pending 请求的超时定时器,防止在 drain 窗口内误报 TIMEOUT。
     for (const pending of entry.pending.values()) this.clearTimer(pending.timer);
-    // stderr 管道字节可能晚于 exit 事件到达——同时监听 stderr stream end(权威
-    // 排空信号)和 debounce 兜底定时器(stream 不发 end 时的安全网)。
+    // stderr stream 'end' 是权威排空信号——所有管道字节已到达。
+    // 定时器仅作为"end 永远不来"的兜底安全网(500ms),不做 debounce。
     const settle = () => this.settleExit(entry, code, signal, error);
-    const timer = this.setTimer(settle, 50);
+    const timer = this.setTimer(settle, 500);
     timer.unref?.();
     entry.exitDrain = { code, signal, error, timer };
     entry.child.stderr.once?.('end', settle);

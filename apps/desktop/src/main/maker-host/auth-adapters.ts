@@ -988,7 +988,7 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
   triggerLogin(opts?: AuthLoginOptions): Promise<AuthState> {
     const mode = opts?.mode ?? 'browser';
     if (this.pendingLogin) {
-      if (this.pendingLogin.mode === mode) {
+      if (this.pendingLogin.mode === mode && !this.pendingLogin.cancelled) {
         if (opts?.onProgress && !this.pendingLogin.progressListeners.has(opts.onProgress)) {
           this.pendingLogin.progressListeners.add(opts.onProgress);
           for (const message of this.pendingLogin.progressHistory) {
@@ -1002,8 +1002,10 @@ export class DesktopCodexAuthAdapter implements AuthAdapter {
         return this.pendingLogin.promise;
       }
       const previous = this.pendingLogin.promise;
-      this.cancelLogin();
-      return this.startTrackedLogin(opts, previous);
+      if (!this.pendingLogin.cancelled) this.cancelLogin();
+      const waits = [previous, ...(this.logoutOperation ? [this.logoutOperation] : [])];
+      const barrier = Promise.all(waits.map((operation) => operation.catch(() => undefined)));
+      return this.startTrackedLogin(opts, barrier);
     }
     return this.startTrackedLogin(opts, this.logoutOperation ?? undefined);
   }

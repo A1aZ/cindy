@@ -40,7 +40,8 @@ function joinUrl(base: string, path: string): string {
   if (
     normalizedPath.startsWith('//')
     || normalizedPath.includes('#')
-    || /[^\u0021-\u00ff]/.test(normalizedPath)
+    || normalizedPath.includes('\\')
+    || /[^\u0021-\u007e]/.test(normalizedPath)
   ) {
     throw new TypeError('invalid chat completions path');
   }

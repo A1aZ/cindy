@@ -95,6 +95,9 @@ describe('createResponsesChatHandler', () => {
   it.each([
     ['an invalid upstream base URL', 'ftp://provider.example/v1', '/chat/completions'],
     ['an invalid chat path', 'https://provider.example/v1', '//attacker.example/chat'],
+    ['a raw non-ASCII chat path', 'https://provider.example/v1', '/café'],
+    ['a control character in the chat path', 'https://provider.example/v1', '/chat\u007f'],
+    ['a backslash in the chat path', 'https://provider.example/v1', '/v1\\chat'],
   ])('reports %s as configuration failure before fetching', async (_case, upstreamBase, chatCompletionsPath) => {
     const fetchImpl = vi.fn() as unknown as typeof fetch;
     const buildHeaders = vi.fn(async () => ({ authorization: 'Bearer secret' }));

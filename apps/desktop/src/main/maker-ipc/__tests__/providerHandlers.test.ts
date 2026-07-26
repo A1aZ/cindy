@@ -509,6 +509,6 @@ describe('provider:oauth mutation ordering', () => {
     expect(loginIsCurrent()).toBe(false);
 
     finishLogin({ ok: true });
-    await expect(login).resolves.toEqual({ ok: true });
+    await expect(login).resolves.toEqual({ ok: false, reason: 'login_superseded' });
   });
 });

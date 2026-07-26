@@ -668,6 +668,8 @@ describe('anthropic-compat-proxy routingTransform', () => {
     '/infer\u007fmode',
     '/infer\u0085mode',
     '/café',
+    '/infer%2',
+    '/%ZZ',
     '/模型',
     '/v1\\messages',
   ])('rejects an unsafe path override before contacting the upstream: %j', async (pathOverride) => {

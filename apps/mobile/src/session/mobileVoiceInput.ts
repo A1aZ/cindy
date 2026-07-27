@@ -24,6 +24,10 @@ export const MOBILE_MAX_VOICE_AUDIO_BYTES = 64 * 1024 * 1024;
 export function mobileVoiceEmptyTranscriptError(): string {
   return i18n.t('composer.voice.emptyTranscript');
 }
+// 连接断了但已识别的文字已经落进输入框:提示要说清「没丢」,否则用户会以为白说了。
+export function mobileVoiceTranscriptKeptError(): string {
+  return i18n.t('composer.voice.transcriptKept');
+}
 export function mobileVoiceMicPermissionError(): string {
   return i18n.t('composer.voice.micPermission');
 }

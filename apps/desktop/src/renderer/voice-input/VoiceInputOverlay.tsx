@@ -374,6 +374,9 @@ export function VoiceInputOverlay() {
 
   const formatVoiceInputError = useCallback((message: string, code?: VoiceInputErrorCode): string => {
     if (code === 'empty_transcript') return t('voiceInputOverlay.emptyTranscript');
+    // Paired with the retained-transcript panel below: the overlay keeps the
+    // text with a copy button, so the message must not read as a total loss.
+    if (code === 'transcript_kept') return t('voiceInputOverlay.transcriptKept');
     return message;
   }, [t]);
 
@@ -1268,7 +1271,12 @@ export function VoiceInputOverlay() {
             // done/refined here; waitForDone still has its timeout fallback.
             break;
           }
-          setError(formatVoiceInputStartError(formattedMessage));
+          // 'transcript_kept' is already the final user-facing sentence. Running
+          // it through the start-error mapper risks swapping in the generic
+          // service-unavailable copy, which would drop the "text was kept" half.
+          setError(event.code === 'transcript_kept'
+            ? formattedMessage
+            : formatVoiceInputStartError(formattedMessage));
           if (recognizedText) {
             pendingPasteTextRef.current = recognizedText;
             setPasteErrorCode('failed');

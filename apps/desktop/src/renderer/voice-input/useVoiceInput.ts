@@ -370,6 +370,9 @@ export function useVoiceInput(
 
   const formatVoiceInputError = useCallback((message: string, code?: VoiceInputErrorCode): string => {
     if (code === 'empty_transcript') return t('voiceInputOverlay.emptyTranscript');
+    // The run failed, but the controller already handed the recognized text to
+    // the composer — say that, or the user assumes the words are gone.
+    if (code === 'transcript_kept') return t('voiceInputOverlay.transcriptKept');
     return message;
   }, [t]);
 

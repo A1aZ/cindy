@@ -8,7 +8,13 @@ export type VoiceInputState =
 
 export type VoiceInputTerminalOutcome = 'success' | 'no_speech' | 'failed' | 'cancelled';
 
-export type VoiceInputErrorCode = 'empty_transcript';
+/**
+ * `transcript_kept` means the run failed (transport drop, flush failure, dead
+ * recovery) but the text recognized before the failure was still handed to the
+ * host through onSubmitted. Hosts should tell the user the session broke
+ * *and* that nothing was lost, rather than showing a bare failure.
+ */
+export type VoiceInputErrorCode = 'empty_transcript' | 'transcript_kept';
 
 export type AsrEvent =
   | { type: 'connected'; at: number }
@@ -198,6 +204,14 @@ export type VoiceTimelineEvent =
   | { type: 'asr_recovery_succeeded'; runId: string; at: number; elapsedMs: number }
   | { type: 'asr_recovery_failed'; runId: string; at: number; elapsedMs: number; reason: string }
   | { type: 'asr_stop_error_ignored'; runId: string; at: number; message: string; textChars: number }
+  | {
+      type: 'transcript_salvaged';
+      runId: string;
+      at: number;
+      text: string;
+      source: 'stable' | 'partial';
+      failureMessage: string;
+    }
   | { type: 'error'; runId: string; at: number; message: string };
 
 export type VoiceInputCallbacks = {

@@ -120,6 +120,10 @@ export class VoiceInputController {
   // event so the next reproduction immediately tells us "session never produced
   // anything" vs "stopped after producing some text".
   private everSawAsrSignal = false;
+  // Whether this run already handed text to the host via onSubmitted. Guards the
+  // failure-path salvage against double insertion: a recovery that rejects after
+  // stop() already submitted would otherwise insert the same transcript twice.
+  private transcriptEmitted = false;
 
   constructor(options: VoiceInputControllerOptions) {
     this.asr = options.asr;
@@ -157,6 +161,7 @@ export class VoiceInputController {
     this.networkRecoveryAttempts = 0;
     this.networkRecoveryInFlight = false;
     this.everSawAsrSignal = false;
+    this.transcriptEmitted = false;
     this.startStallWatchdog();
     this.setState('listening');
     this.logger.record({ type: 'start_clicked', runId: this.runId, at: Date.now() });
@@ -232,6 +237,7 @@ export class VoiceInputController {
       updatedAt: Date.now(),
     };
     const range = this.callbacks.onSubmitted(text, segment);
+    this.transcriptEmitted = true;
     this.logger.record({ type: 'submitted', runId, at: Date.now(), text, source });
 
     if (this.refiner && range) {
@@ -563,8 +569,53 @@ export class VoiceInputController {
     }
     this.stopStallWatchdog();
     this.pendingStableResolvers.splice(0).forEach((resolve) => resolve(undefined));
+    // Salvage before the terminal state: hosts tear the draft down when they see
+    // 'error', so the submitted text has to reach them first.
+    this.salvageTranscript(message);
     this.setState('error', 'failed');
-    this.callbacks.onError?.(message, code);
+    // transcriptEmitted covers both salvage and a stop() that already submitted
+    // before the failure landed (e.g. a recovery rejecting during refinement) —
+    // in both cases the user still has their text and should be told so.
+    this.callbacks.onError?.(message, this.transcriptEmitted ? 'transcript_kept' : code);
+  }
+
+  /**
+   * Hand already-recognized text to the host before entering the error state.
+   *
+   * A socket that dies mid-dictation used to discard everything the user had
+   * said so far: partials only ever existed as a host-side draft, and fail()
+   * never offered them to onSubmitted. The transcript is worth more than the
+   * dead session, so commit it raw — refinement needs the same network that
+   * just failed — and let the host report the failure as 'transcript_kept'.
+   */
+  private salvageTranscript(failureMessage: string): boolean {
+    if (this.transcriptEmitted) return false;
+    const text = normalizeSubmittedText(this.latestStable || this.latestPartial);
+    if (!text) return false;
+    const segment: SpeechSegment = {
+      id: createVoiceInputId(),
+      source: 'mic',
+      status: 'submitted',
+      text,
+      updatedAt: Date.now(),
+    };
+    try {
+      this.callbacks.onSubmitted(text, segment);
+    } catch {
+      // A host that cannot take the text (destroyed window, torn-down editor)
+      // must not also swallow the error report the user is waiting for.
+      return false;
+    }
+    this.transcriptEmitted = true;
+    this.logger.record({
+      type: 'transcript_salvaged',
+      runId: this.runId,
+      at: Date.now(),
+      text,
+      source: this.latestStable ? 'stable' : 'partial',
+      failureMessage,
+    });
+    return true;
   }
 
   private resetStallCounters(): void {

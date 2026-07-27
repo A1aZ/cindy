@@ -24,6 +24,7 @@ import {
   makeMobileRefinerPromptCacheKey,
   MobileLiteLlmTextModelClient,
   mobileVoiceEmptyTranscriptError,
+  mobileVoiceTranscriptKeptError,
   type MobileVoiceDraftInsertion,
 } from '@/session/mobileVoiceInput';
 import { startMobileRealtimeAudio } from '@/session/mobileRealtimeAudio';
@@ -388,7 +389,9 @@ export function createMobileVoiceControllerSession(
       onError(message, code: VoiceInputErrorCode | undefined) {
         const localizedMessage = code === 'empty_transcript'
           ? mobileVoiceEmptyTranscriptError()
-          : redactMobileVoiceCredentialText(message, options.credential);
+          : code === 'transcript_kept'
+            ? mobileVoiceTranscriptKeptError()
+            : redactMobileVoiceCredentialText(message, options.credential);
         controllerError = new Error(localizedMessage);
         options.onError?.(localizedMessage);
       },

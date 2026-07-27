@@ -273,7 +273,9 @@ export function createCardActionHandler(
         const msg = err instanceof Error ? err.message : String(err);
         log.warn(`model:pick route snapshot failed (non-fatal): ${msg}`);
       }
-      const previousProviderId = previousRoute?.providerId ?? getSessionProvider(sessionId);
+      const previousProviderId = previousRoute
+        ? previousRoute.providerId
+        : getSessionProvider(sessionId);
       const restorePersistentRoute = async (reason: string): Promise<void> => {
         if (!previousRoute) return;
         try {

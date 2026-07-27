@@ -32,7 +32,7 @@ const mocks = vi.hoisted(() => ({
   readPermissionMode: vi.fn(async () => 'auto'),
   updatePermissionMode: vi.fn(async () => {}),
   updateModelEffort: vi.fn(async () => {}),
-  getSessionProvider: vi.fn(() => null),
+  getSessionProvider: vi.fn<() => string | null>(() => null),
   setSessionProvider: vi.fn(),
   isSessionInTurn: vi.fn(() => false),
   withSendToSessionLock: vi.fn(
@@ -783,6 +783,38 @@ describe('model:pick 持久化失败', () => {
       'model-card',
       expect.objectContaining({ body: slackUi.cards.model.failed('effort rejected') }),
     );
+  });
+
+  it('回滚时保留 DB 快照中明确清空的 provider', async () => {
+    const live = {
+      agentKind: 'claude-code',
+      remoteHostId: null,
+      model: 'claude-sonnet-4-6',
+      setModel: vi.fn(async () => {}),
+      setEffort: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('effort rejected'))
+        .mockResolvedValue(undefined),
+    };
+    (turnRunner.getMakerSessionById as ReturnType<typeof vi.fn>).mockReturnValue(live);
+    mocks.readModelRouteSnapshot.mockResolvedValueOnce({
+      model: 'claude-sonnet-4-6',
+      effort: 'medium',
+      providerId: null,
+    });
+    mocks.getSessionProvider.mockReturnValueOnce('stale-provider');
+    const im = makeIm();
+
+    await pressModelPick(im);
+
+    expect(mocks.updateModelEffort).toHaveBeenNthCalledWith(
+      2,
+      'sess-target',
+      'claude-sonnet-4-6',
+      'medium',
+      null,
+    );
+    expect(mocks.setSessionProvider).toHaveBeenCalledWith('sess-target', null);
   });
 });
 

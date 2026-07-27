@@ -350,6 +350,66 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     expect(calls).toBeLessThanOrEqual(7);
   });
 
+  it('K. Agent/Task 类调用按 1:1 计入 item 预算,不按普通工具的 4:1 折算', async () => {
+    // review #676（codex）：buildRenderItems 给每个 Agent/Task/Workflow tool_use 出一张
+    // 独立 agent_task 卡（1:1）。按普通工具 4:1 折算会让预算放进约 4 倍的实际渲染量，
+    // 尤其历史里大量是被中断、没有 result 的单行 Task 调用时。
+    const target = serverMessage({
+      id: 'far-away',
+      clientId: 'far-away',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    let page = 0;
+    vi.mocked(listMessagesFor).mockImplementation(async () => {
+      const base = page++;
+      // 每页 100 条「无 result 的 Task 调用」——每条都是一张独立卡。
+      return Array.from({ length: 100 }, (_, i) =>
+        serverMessage({
+          id: `task-${base}-${i}`,
+          clientId: `task-${base}-${i}`,
+          role: 'tool_use',
+          content: JSON.stringify({ toolName: 'Task', input: { description: '子任务' } }),
+          createdAt: new Date(
+            Date.UTC(2026, 6, 25, 12, 0, 0) - (base * 100 + i) * 60_000,
+          ).toISOString(),
+        }),
+      );
+    });
+
+    await makerChatStore.loadAroundMessageClientId(SID, 'far-away', { radius: 60 });
+
+    // 100 张卡/页、600 个 item 预算 → 约 6 页停手；按 4:1 折算会翻到 24 页。
+    const calls = vi.mocked(listMessagesFor).mock.calls.length;
+    expect(calls).toBeGreaterThan(0);
+    expect(calls).toBeLessThanOrEqual(7);
+  });
+
+  it('L. 补齐请求 reject 且切片已被重置时,跳转作废而不是当成可重试失败', async () => {
+    // review #676（codex）：catch 分支原样返回 unavailable，绕过了 epoch 检查。典型场景是
+    // 远程会话在 /clear 期间断链导致 listMessagesFor 抛错——调用方会照常 merge 陈旧的
+    // around 行，把重置刚移除的消息复活；purge 后还会把已删的切片重新 materialize。
+    const target = serverMessage({
+      id: 'stale-on-error',
+      clientId: 'stale-on-error',
+      createdAt: '2026-07-20T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    vi.mocked(listMessagesFor).mockImplementationOnce(async () => {
+      makerChatStore.purgeSession(SID);
+      throw new Error('[REMOTE] relay down');
+    });
+
+    const result = await makerChatStore.loadAroundMessageClientId(SID, 'stale-on-error', {
+      radius: 60,
+    });
+
+    expect(result).toBeNull();
+    expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).not.toContain(
+      'stale-on-error',
+    );
+  });
+
   it('F. 让位时不释放别人的分页锁', async () => {
     // review #676（codex）：让位后 fallback 若写 isLoadingMore:false，就把仍在飞行的
     // loadOlderMessages 的锁提前释放了，下一次滚动/跳转会从同一游标再开一个请求。

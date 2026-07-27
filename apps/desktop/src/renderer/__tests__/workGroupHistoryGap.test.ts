@@ -271,6 +271,41 @@ describe('历史窗口空洞 — 长 thinking', () => {
   });
 });
 
+// ── Scenario A7:长 Agent/Task 的段末要算 result(review #676 codex) ───────────
+
+describe('历史窗口空洞 — 长 Agent/Task', () => {
+  it('A7. 历史里跑了 40 分钟的 Task(无 live update)之后的最终答复不被判成空洞', () => {
+    // agent_task 是独立的渲染分支。没有 live taskUpdates 时（重开会话读历史），
+    // item 的结束时间只能靠 tool_result 的时间戳；只看 toolCall.createdAt 会把它
+    // 当成「开始即结束」，让紧随其后的最终答复落在阈值外。
+    const messages: ChatMessage[] = [
+      mkUser('u1', '2026-07-25T10:00:00.000Z', '派个子 Agent 去调研'),
+      mkAssistant('a0', '2026-07-25T10:00:05.000Z', '我派一个子 Agent 去跑。'),
+      {
+        clientId: 'task1',
+        role: 'tool_use',
+        content: '',
+        toolUseId: 'tu-task1',
+        toolName: 'Task',
+        toolInput: { description: '调研' },
+        createdAt: '2026-07-25T10:00:10.000Z',
+      },
+      mkResult('r1', 'tu-task1', '2026-07-25T10:40:10.000Z'),
+      mkAssistant('a1', '2026-07-25T10:40:40.000Z', '调研结果如下。'),
+    ];
+
+    const { items } = buildRenderItems(messages);
+    // 该调用渲染成独立的 agent_task 卡。
+    expect(items.some((it) => it.type === 'agent_task')).toBe(true);
+
+    const grouped = groupWorkRuns(items, false);
+    const groups = workGroups(grouped);
+    // 进度文字与那张卡应在同一个工作组里，最终答复留在组外。
+    expect(groups).toHaveLength(1);
+    expect(groupContains(groups[0], 'a0')).toBe(true);
+  });
+});
+
 // ── Scenario B:正常连续 turn 不被误切 ───────────────────────────────────────
 
 describe('历史窗口空洞 — 正常 turn 不受影响', () => {

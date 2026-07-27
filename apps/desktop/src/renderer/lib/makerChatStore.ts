@@ -23,6 +23,7 @@
 
 import { redactSensitiveText } from '@cindy/maker-shared/error-redaction';
 import { applyCodexPlanSnapshotOnDone } from '@cindy/maker-shared/message-render';
+import { isAgentTaskToolName } from '@cindy/maker-shared/agent-task';
 import type { MessageRole, Message, MessageAutomationOrigin } from '@/lib/ccAgent.types';
 import type { AttachedFile, MentionedResource, SerializedAttachedFile } from '@/lib/fileTypes';
 import type {
@@ -5217,6 +5218,10 @@ function reloadMessages(sessionId: string): void {
     hasMoreMessages: false,
     oldestMessageId: null,
     isStreaming: false,
+    // 分页锁归本次重置释放:窗口和游标都清了,in-flight 的翻页 / 跳转补齐也已被上面的
+    // bumpMessagesEpoch 作废,锁再留着只会让行首守卫卡住下一次翻页。由这里清而不是
+    // 让被作废的请求代清 —— 它们无法分辨锁是自己那一代的还是重置后新代际的(#676 review)。
+    isLoadingMore: false,
   }));
   ensureInitialMessages(sessionId);
 }
@@ -5618,19 +5623,54 @@ function loadOlderMessages(sessionId: string): void {
  * HISTORY_GAP_SPLIT_MS 守卫兜底,不会再折出跨空洞的假组。
  */
 const JUMP_BACKFILL_MAX_ITEMS = 600;
-/** 工具行折算比:一个 tool_segment 通常吃掉若干 tool_use + tool_result 行。 */
+/** 普通工具行的折算比:一个 tool_segment 通常吃掉若干 tool_use + tool_result 行。 */
 const TOOL_ROWS_PER_ITEM = 4;
 const JUMP_BACKFILL_PAGE_SIZE = 100;
 
-/** 一页行数折算成大致的 render item 数(口径见 JUMP_BACKFILL_MAX_ITEMS)。 */
+/**
+ * 一页行数折算成大致的 render item 数(口径见 JUMP_BACKFILL_MAX_ITEMS)。
+ *
+ * 三档,不能一刀切:
+ *   - Agent / Task / collab / Workflow 类 tool_use —— buildRenderItems 给每个都出一张
+ *     独立的 agent_task 卡,是 1:1。历史里若大量是这类调用(尤其被中断、没有 result 的),
+ *     按普通工具的 4:1 折算会让预算放进 4 倍的实际渲染量(#676 review)。
+ *   - 其余 tool_use / tool_result —— 会被合成 tool_segment,按 TOOL_ROWS_PER_ITEM 折算。
+ *   - 其它角色(user / assistant / thinking 等) —— 各自一个 item,1:1。
+ */
+/** 从持久化行里取 tool_use 的工具名(与 mapServerMessages 同口径:content.toolName)。 */
+function toolNameOfRow(row: Message): string {
+  const raw: unknown = row.content;
+  const parsed: unknown =
+    typeof raw === 'string'
+      ? (() => {
+          try {
+            return JSON.parse(raw);
+          } catch {
+            return null;
+          }
+        })()
+      : raw;
+  if (!parsed || typeof parsed !== 'object') return '';
+  const toolName = (parsed as Record<string, unknown>).toolName;
+  return typeof toolName === 'string' ? toolName : '';
+}
+
 function estimateRenderItemCount(rows: Message[]): number {
-  let toolRows = 0;
-  let otherRows = 0;
+  let plainToolRows = 0;
+  let oneToOneRows = 0;
   for (const row of rows) {
-    if (row.role === 'tool_use' || row.role === 'tool_result') toolRows++;
-    else otherRows++;
+    if (row.role === 'tool_use') {
+      // 工具名在 content.toolName 里(与 mapServerMessages 同口径);拿不到就按普通
+      // 工具折算,宁可低估这一行也不因解析失败放大预算。
+      const toolName = toolNameOfRow(row);
+      if (isAgentTaskToolName(toolName) || toolName === 'Workflow') oneToOneRows++;
+      else plainToolRows++;
+      continue;
+    }
+    if (row.role === 'tool_result') plainToolRows++;
+    else oneToOneRows++;
   }
-  return otherRows + Math.ceil(toolRows / TOOL_ROWS_PER_ITEM);
+  return oneToOneRows + Math.ceil(plainToolRows / TOOL_ROWS_PER_ITEM);
 }
 /**
  * 请求次数安全上限,与行预算分开计。
@@ -5742,17 +5782,23 @@ async function backfillHistoryUntil(
     return 'unavailable';
   } catch (err) {
     log.warn('backfillHistoryUntil failed', { sessionId, err: String(err) });
-    return 'unavailable';
+    // 请求 reject 也可能发生在切片被重置之后(典型:远程会话在 /clear 期间断链,
+    // listMessagesFor 抛错)。这条路径同样不能当成"可重试的失败"交回调用方,否则它会
+    // merge 陈旧的 around 行、把重置刚移除的消息复活,purge 后还会把已删的切片
+    // 重新 materialize 出来(#676 review)。
+    return epochChanged() ? 'cancelled' : 'unavailable';
   } finally {
-    // 任何出口都必须复位 spinner —— 包括 epoch 失效那条:reload / clear 的 setState
-    // 不清 isLoadingMore(见 loadOlderMessages 同款注释),漏复位会让行首守卫把该
-    // 会话的翻页永久卡住。epoch 变了也照复位:setState 作用于当前切片,不复活数据。
+    // 只释放**本代际自己**持有的锁。
     //
-    // 但必须先确认切片还在:setState 走 getOrCreateState,对已被 _purgeSession
-    // 删掉的会话会重新 materialize 一个空 state 并 touch LRU(见 getOrCreateState
-    // 与 hasPendingQueue 的注释),把刚 purge 的会话又塞回 sessions Map。purge 后
-    // 本来就没有 spinner 需要复位,直接跳过。
-    if (sessions.has(sessionId)) {
+    // 两个前置条件都必要:
+    //   - sessions.has:setState 走 getOrCreateState,对已被 _purgeSession 删掉的会话
+    //     会重新 materialize 一个空 state 并 touch LRU(见 getOrCreateState 与
+    //     hasPendingQueue 的注释),把刚 purge 的会话又塞回 sessions Map。
+    //   - epoch 未变:会话被 purge / LRU 驱逐后又以同一 ID 重开时,新代际可能已经开始
+    //     自己的分页并置了 isLoadingMore;旧请求此刻清标志就等于释放别人的锁,让并发
+    //     请求去抢同一个游标(#676 review)。重置路径(reloadMessages / clear)自己会清
+    //     锁,不需要被作废的请求代劳。
+    if (sessions.has(sessionId) && !epochChanged()) {
       setState(sessionId, (s) => (s.isLoadingMore ? { ...s, isLoadingMore: false } : s));
     }
   }

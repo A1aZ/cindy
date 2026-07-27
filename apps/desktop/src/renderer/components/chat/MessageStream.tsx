@@ -299,6 +299,10 @@ type AgentTaskRenderItem = {
   toolCall?: ChatMessage;
   update?: AgentTaskUpdate;
   result?: string;
+  /** 对应 tool_result 的 createdAt(ms)。历史会话没有 live taskUpdates 时,item 的结束
+   *  时间只能靠它 —— 否则跑了半小时以上的 Agent/Task 会让紧随其后的最终答复被空洞守卫
+   *  误判(#676 review)。与 tool_segment 的 resultTsMap 同源。 */
+  resultTsMs?: number;
 };
 type ForkOriginRenderItem = {
   type: 'fork_origin';
@@ -985,10 +989,19 @@ export function buildRenderItems(
           typeof msg.toolUseId === 'string' && msg.toolUseId.length > 0
             ? resultByToolUseId.get(msg.toolUseId)
             : undefined;
+        // 结束时间:主路径按 toolUseId 查,adjacency 兜底取相邻 tool_result 的最新时间。
+        let resultTsMs =
+          typeof msg.toolUseId === 'string' && msg.toolUseId.length > 0
+            ? resultTsByToolUseId.get(msg.toolUseId)
+            : undefined;
         let j = i + 1;
         while (j < messages.length && messages[j].role === 'tool_result') {
           if (result === undefined && !shouldHideToolResult(toolName, messages[j].content)) {
             result = messages[j].content;
+          }
+          const adjacentTs = Date.parse(messages[j].createdAt ?? '');
+          if (Number.isFinite(adjacentTs) && (resultTsMs === undefined || adjacentTs > resultTsMs)) {
+            resultTsMs = adjacentTs;
           }
           j++;
         }
@@ -1002,6 +1015,7 @@ export function buildRenderItems(
           toolCall: msg,
           update,
           ...(result !== undefined && !shouldHideToolResult(toolName, result) ? { result } : {}),
+          ...(resultTsMs !== undefined ? { resultTsMs } : {}),
         });
         i = j;
         continue;
@@ -1390,7 +1404,11 @@ function renderItemEndMs(item: RenderItem): number | null {
     const ms = Date.parse(
       item.update?.updatedAt ?? item.toolCall?.createdAt ?? item.update?.createdAt ?? '',
     );
-    return Number.isFinite(ms) ? ms : renderItemStartMs(item);
+    const liveEnd = Number.isFinite(ms) ? ms : renderItemStartMs(item);
+    // 历史会话没有 live update 时,liveEnd 退化成调用的开始时间;result 时间戳才是
+    // 这张卡真正的结束(与 tool_segment 同口径)。两者取更晚的。
+    if (item.resultTsMs === undefined) return liveEnd;
+    return liveEnd === null ? item.resultTsMs : Math.max(liveEnd, item.resultTsMs);
   }
   if (item.type === 'work_group') {
     for (let i = item.children.length - 1; i >= 0; i--) {

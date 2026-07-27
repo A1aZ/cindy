@@ -28,6 +28,19 @@ export interface CapabilityEntry {
 
 export const CAPABILITIES: readonly CapabilityEntry[] = [
   {
+    key: 'about-cindy',
+    title: `${BRAND_NAME} 自身信息(产品身份 / 开源仓库 / 源码位置)`,
+    oneLiner: `${BRAND_NAME} 是什么产品、谁做的、开不开源、源码在哪、当前 agent 与它的关系。`,
+    detail: [
+      `【是什么】${BRAND_NAME} 是 XD Inc. 出品的开源 AI agent 客户端,官网 https://cindy.app,源码仓库 https://github.com/makecindy/cindy,以 Apache-2.0 开源。它把多种 harness、模型和工具收进同一个 agent,在用户自己的机器上用真实文件和已登录的应用完成工作。`,
+      `【当前 agent 与它的关系】正在跟用户对话的这个 agent 就运行在 ${BRAND_NAME} 客户端里, 由 Claude Code 或 Codex harness 驱动(会话中途可切 harness / 模型, workspace、memory、skill、工具保持连续)。用户问"你是谁 / 你是什么 / 你跑在哪"时以本条为准, 不要用训练数据猜, 也不要只凭工作目录路径或工具名反推。`,
+      `【源码在哪】上面那个 GitHub 仓库放的是 ${BRAND_NAME} 客户端本体:desktop、mobile 及两端共享的 packages, pnpm monorepo。服务端不在该仓库, 也不开源。`,
+      '【用户本机有没有源码】安装版客户端不携带源码, agent 侧无法推断用户是否 clone 过、clone 在哪。需要读改源码时请用户给出本地路径或用工程模式打开该目录, 不要假设某个固定路径存在, 更不要凭工作目录里出现品牌名就断定当前目录是源码仓库。',
+      `【版本号】不在本条目里(它随客户端版本变)。用户想知道装的是哪一版, 引导去 App 内"设置 → 关于"查看; 用 submit_github_issue 提反馈时, 客户端版本 / OS / 界面语言由系统自动附加, 不用 agent 自己填。`,
+      `【模型怎么来】用户可以登录官方 ${BRAND_NAME} 服务(用量透明扣费)、授权自己已经在付费的 Claude Code / Codex Coding Plan 继续在 ${BRAND_NAME} 里用(不重复付费)、接自己的 API key, 或跑本地模型。定价与下载见 https://cindy.app。`,
+    ].join(' '),
+  },
+  {
     key: 'ai-chat',
     title: 'AI 对话',
     oneLiner: '与 Claude Code / Codex agent 实时对话,支持代码执行、工具调用、多模态输入。',

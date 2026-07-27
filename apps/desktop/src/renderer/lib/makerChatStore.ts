@@ -1218,6 +1218,14 @@ function _purgeSession(sessionId: string): void {
   _lastViewedAt.delete(sessionId);
   _lastInboundEventAt.delete(sessionId);
   rendererClearBoundaryBySession.delete(sessionId);
+  // 远程对账的先后次序簿:会话整条消失后不再有意义,随 purge 一起清,避免 Map 随
+  // sessionId 无界增长(#676 review copilot)。
+  //
+  // 这里可以 delete(不像 _messagesEpoch 必须 bump-而-不-delete):清零后若有一次属于旧代际的
+  // in-flight 对账回来,它的 seq 检查会通过(committed 归零),但**代际检查拦得住** ——
+  // purge 上面刚 bump 过 epoch,而 epoch 条目是刻意保留的,所以那次对账照样整体作废。
+  _remoteReconcileStartSeq.delete(sessionId);
+  _remoteReconcileCommit.delete(sessionId);
   const i = _accessOrder.indexOf(sessionId);
   if (i !== -1) _accessOrder.splice(i, 1);
 }
@@ -5059,8 +5067,10 @@ const _historyLoadOrigin = new Map<string, string | undefined>();
  * 追页期间切片已被整体重置,拉回的窗口作废(只复位 spinner,不把可能已软删的行
  * merge 回刚清空的 slice)。追页循环把竞态窗口从 1 次 RTT 拉长到最多 10 次
  * (隧道下可达数秒),这层守卫随之补上(subagent review 记录的既有竞态类别)。
- * purge 时保留条目(bump 而非 delete):删掉会让"捕获 0 → purge → 重建后仍是 0"
- * 的路径误判为未变;条目仅一个 number,不清理无泄漏压力。
+ * purge 时保留条目(bump 而非 delete)是**有意**的:删掉会让"捕获 0 → purge → 重建后仍是 0"
+ * 的路径误判为未变。代价是这张表随本进程见过的 sessionId 单调增长(每条一个 number),
+ * 上界是历史会话数 —— 拿不回来,但也换不掉:删条目就等于放弃这层守卫。相邻的对账次序簿
+ * (_remoteReconcileStartSeq / _remoteReconcileCommit)没有这个约束,已随 purge 清理。
  */
 const _messagesEpoch = new Map<string, number>();
 
@@ -5072,7 +5082,9 @@ const _messagesEpoch = new Map<string, number>();
  * 不 bump 代际。于是"旧的无重叠对账 + 新的有重叠对账"这一对里,旧那次能通过代际比对、
  * 把陈旧的权威重建落地(#676 review codex P1)。序号与代际是两个维度,两道都要过。
  *
- * 只增不删(purge 后重建照样单调,数值不复用);条目仅一个 number,无泄漏压力。
+ * 生命周期:每会话一个 number,随 _purgeSession 一起删(会话整条消失后不再有意义);
+ * demote / trim / clear 这类"会话还在、只是窗口被重置"的路径**不动**它 —— 那些代际由
+ * _messagesEpoch 负责作废,次序簿要继续为 in-flight 的对账保持单调。
  */
 const _remoteReconcileStartSeq = new Map<string, number>();
 

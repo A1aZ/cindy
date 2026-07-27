@@ -631,6 +631,28 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     expect(invoke).not.toHaveBeenCalledWith(DEVICE_ID, 'local-db:messages:list', expect.anything());
   });
 
+  it('远程会话:purge 清掉对账次序簿,但旧代际的对账仍被代际守卫拦下', async () => {
+    // review #676(copilot):次序簿按 sessionId 无界增长,应随 purge 清理。清理后 seq 检查
+    // 会因为 committed 归零而放行,正确性由代际守卫兜住(purge 刚 bump 过 epoch,而 epoch
+    // 条目是刻意保留的)。这里守的就是"清理不会把作废兜底一起清掉"。
+    const s = sid();
+    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
+
+    const pendingList = deferred<Message[]>();
+    remoteListResolver = () => pendingList.promise;
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+
+    // 会话被删除 / 归档 / LRU 驱逐。
+    makerChatStore.purgeSession(s);
+
+    pendingList.resolve([dbMessage(s, 'stale', 'stale authoritative', '2026-06-20T00:00:00.000Z')]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    // 关键:陈旧对账不得把行 merge 进 purge 后重建的空切片。
+    expect(makerChatStore.getSnapshot(s).messages).toHaveLength(0);
+  });
+
   it('远程会话:后启动的对账赢 —— 即使它只 merge、不 bump 代际', async () => {
     // review #676(codex P1):代际守卫只能挡下"新一次对账**也重建了窗口**"的情况。找到重叠的
     // 对账只做加性 merge、不 bump 代际,于是"旧的无重叠对账 + 新的有重叠对账"这一对里,旧那次

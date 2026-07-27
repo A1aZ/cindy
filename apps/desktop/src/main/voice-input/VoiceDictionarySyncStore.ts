@@ -22,6 +22,7 @@
 
 import { app } from 'electron';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -29,6 +30,7 @@ import {
   DEFAULT_TOMBSTONE_TTL_MS,
   createEmptySyncState,
   createHlcClock,
+  dictionaryTermKey,
   findMaxHlc,
   gcTombstones,
   materializeDictionary,
@@ -143,10 +145,34 @@ export class VoiceDictionarySyncStore {
     return this.commit(result.state, result.clock);
   }
 
+  /**
+   * 把状态恢复到某次 mutate 之前。
+   *
+   * 词典写入是两段式的:先改同步状态(sidecar),再把物化结果写进词典文件。第二段
+   * 失败时(磁盘满、重命名被拦)状态会领先于用户看到的内容,而重试往往是 no-op ——
+   * sidecar 里已经有这次操作了,于是 UI 一直停在旧内容直到重启。调用方在第二段
+   * 失败时用这个回滚。
+   */
+  rollbackTo(snapshot: { state: VoiceDictionarySyncState; clock: HlcClock }): void {
+    const current = this.load();
+    this.persist({
+      ...current,
+      state: snapshot.state,
+      clock: { wallMs: snapshot.clock.wallMs, counter: snapshot.clock.counter },
+    });
+  }
+
+  /** 供调用方在 mutate 前留存回滚点。 */
+  snapshotForRollback(): { state: VoiceDictionarySyncState; clock: HlcClock } {
+    const current = this.load();
+    return { state: current.state, clock: this.readClock(current) };
+  }
+
   /** 记录本次物化写进词典文件的主键,供下次降级回收判断删除。 */
   markMaterialized(materialized: MaterializedDictionary): void {
     const current = this.load();
-    const keys = materialized.entries.map((entry) => entry.text.toLocaleLowerCase());
+    // 必须与 CRDT 主键同一套折叠规则(locale 无关),否则回收判断会认错词条。
+    const keys = materialized.entries.map((entry) => dictionaryTermKey(entry.text));
     if (sameKeys(keys, current.lastMaterializedKeys)) return;
     this.persist({ ...current, lastMaterializedKeys: keys });
   }
@@ -256,14 +282,23 @@ function normalizeStoredData(raw: unknown): StoredSyncData {
   };
 }
 
-/** 结构本身能不能被本进程理解(版本号 + 两个必需字段)。 */
+/**
+ * 结构本身能不能被本进程理解(版本号 + 两个必需字段)。
+ *
+ * 入参是未经校验的隧道 payload,所以字典字段必须**排除数组** —— `typeof [] ===
+ * 'object'`,只判 typeof 会让一个数组冒充 records 进到合并逻辑里。
+ */
 function isReadableState(raw: unknown): raw is VoiceDictionarySyncState {
-  if (!raw || typeof raw !== 'object') return false;
+  if (!isPlainObject(raw)) return false;
   const candidate = raw as Partial<VoiceDictionarySyncState>;
   if (candidate.version !== VOICE_DICTIONARY_SYNC_VERSION) return false;
-  if (!candidate.records || typeof candidate.records !== 'object') return false;
-  if (!candidate.suppressed || typeof candidate.suppressed !== 'object') return false;
+  if (!isPlainObject(candidate.records)) return false;
+  if (!isPlainObject(candidate.suppressed)) return false;
   return true;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -290,8 +325,15 @@ function sameKeys(a: ReadonlyArray<string>, b: ReadonlyArray<string>): boolean {
   return a.length === b.length && a.every((key, index) => key === b[index]);
 }
 
+/**
+ * 合并结果与原状态是否等价。
+ *
+ * 用 `isDeepStrictEqual` 而不是 `JSON.stringify` 比较:每收到一帧远端状态都要比一次,
+ * 词典状态可能上百 KB,序列化两份字符串再比对会在 main 线程上制造无谓的 CPU 与 GC
+ * 压力,而深比较可以在第一个差异处就返回。
+ */
 function isSameState(a: VoiceDictionarySyncState, b: VoiceDictionarySyncState): boolean {
-  return a === b || JSON.stringify(a) === JSON.stringify(b);
+  return a === b || isDeepStrictEqual(a, b);
 }
 
 function getDataFilePath(): string {

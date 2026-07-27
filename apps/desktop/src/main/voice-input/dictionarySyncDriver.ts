@@ -15,6 +15,7 @@
  * `device-link:voice:dictionary:get` 主动向在线桌面拉一份只读快照。
  */
 
+import { MAX_FRAME_BYTES } from '@cindy/device-link';
 import type { VoiceDictionarySyncState } from '@cindy/voice-input-core';
 
 import { createLogger } from '../logger.js';
@@ -32,6 +33,15 @@ const BROADCAST_DEBOUNCE_MS = 8_000;
 const BROADCAST_INTERVAL_MS = 30 * 60 * 1000;
 /** 桌面平台白名单:手机(ios/android)不参与 push 同步。 */
 const DESKTOP_PLATFORMS = new Set(['darwin', 'win32', 'linux']);
+/**
+ * 单帧状态的字节上限,留出信封与编码余量。
+ *
+ * relay 对超过 {@link MAX_FRAME_BYTES} 的帧直接拒绝,而 `sendEnvelope` 是抛错的 ——
+ * 词典一旦大到越线,此后每一次广播都抛,同步会永久静默停摆。1000 条词条 × 8 个
+ * 别名 × 120 字符,加上 CRDT 的化身、计数器、墓碑元数据,中文按 3 字节算完全可能
+ * 越线,所以必须在发送前自己把关。
+ */
+const MAX_STATE_FRAME_BYTES = Math.floor(MAX_FRAME_BYTES * 0.9);
 
 export interface DictionarySyncFramePayload {
   /** 帧结构版本;收到不认识的版本直接忽略,不猜着解析。 */
@@ -166,6 +176,7 @@ function broadcastToAllPeers(reason: string): void {
   const peers = transport.listOnlineDesktopDevices();
   if (peers.length === 0) return;
   const payload = buildFrame();
+  if (!payload) return;
   for (const deviceId of peers) {
     try {
       transport.sendState(deviceId, payload);
@@ -180,8 +191,10 @@ function broadcastToAllPeers(reason: string): void {
 
 function sendStateTo(deviceId: string, reason: string): void {
   if (!transport) return;
+  const payload = buildFrame();
+  if (!payload) return;
   try {
-    transport.sendState(deviceId, buildFrame());
+    transport.sendState(deviceId, payload);
   } catch (error) {
     log.warn(`dictionary state push failed (${reason}) to ${deviceId.slice(0, 8)}`, {
       error: error instanceof Error ? error.message : String(error),
@@ -189,8 +202,18 @@ function sendStateTo(deviceId: string, reason: string): void {
   }
 }
 
-function buildFrame(): DictionarySyncFramePayload {
-  return { frameVersion: 1, state: voiceDictionarySyncStore.getState() };
+function buildFrame(): DictionarySyncFramePayload | null {
+  const state = voiceDictionarySyncStore.getState();
+  const payload: DictionarySyncFramePayload = { frameVersion: 1, state };
+  const bytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');
+  if (bytes <= MAX_STATE_FRAME_BYTES) return payload;
+  // 超限:发出去只会被 relay 拒绝并抛错,且此后每次广播都一样。宁可这一轮不发,
+  // 也要让日志把原因说清楚 —— 否则表现是「同步无声无息地不工作了」。
+  log.error(
+    `dictionary state frame is too large to sync (${bytes} bytes > ${MAX_STATE_FRAME_BYTES}); `
+    + 'peers will not receive updates until the dictionary shrinks',
+  );
+  return null;
 }
 
 function isSyncEnabled(): boolean {

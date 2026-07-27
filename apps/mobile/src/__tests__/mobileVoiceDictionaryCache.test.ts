@@ -10,13 +10,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MobileVoiceDictionarySnapshotResult } from '@cindy/maker-shared/device-link-contract';
 
 const storage = new Map<string, string>();
-vi.mock('@/auth/secureStorage', () => ({
-  getSecureItem: async (key: string) => storage.get(key) ?? null,
-  setSecureItem: async (key: string, value: string) => {
-    storage.set(key, value);
-  },
-  deleteSecureItem: async (key: string) => {
-    storage.delete(key);
+vi.mock('@react-native-async-storage/async-storage', () => ({
+  default: {
+    getItem: async (key: string) => storage.get(key) ?? null,
+    setItem: async (key: string, value: string) => {
+      storage.set(key, value);
+    },
+    removeItem: async (key: string) => {
+      storage.delete(key);
+    },
   },
 }));
 
@@ -142,6 +144,37 @@ describe('mobileVoiceDictionaryCache', () => {
 
     // 在途响应即使晚到,也不该让上个账号的词典复活到内存里被润色读走。
     expect(readCachedMobileVoiceDictionary(HOST)).toEqual([]);
+  });
+
+  it('并发刷新多台电脑时 host 索引不丢条目 —— 丢了登出就清理不到', async () => {
+    const hosts = ['d1', 'd2', 'd3', 'd4', 'd5'];
+    await Promise.all(hosts.map((host) => refreshMobileVoiceDictionary(
+      host,
+      async () => ({ ok: true, entries: [{ text: `term-${host}` }] }),
+    )));
+
+    const index = JSON.parse(storage.get('xdt.mobileVoiceDictionary.v1.hosts') ?? '[]') as string[];
+    expect([...index].sort()).toEqual(hosts);
+
+    // 索引完整 → 登出能把每一份快照都删掉。
+    await clearAllMobileVoiceDictionaryCaches();
+    expect([...storage.keys()].filter((key) => key.includes('mobileVoiceDictionary'))).toEqual([]);
+  });
+
+  it('清理期间落盘的写入会自我回收,不在盘上留下上个账号的快照', async () => {
+    let release: (value: MobileVoiceDictionarySnapshotResult) => void = () => {};
+    const pending = new Promise<MobileVoiceDictionarySnapshotResult>((resolve) => {
+      release = resolve;
+    });
+    const inFlight = refreshMobileVoiceDictionary(HOST, () => pending);
+
+    await clearAllMobileVoiceDictionaryCaches();
+    release({ ok: true, entries: [{ text: '上个账号的词' }] });
+    await inFlight;
+
+    expect(readCachedMobileVoiceDictionary(HOST)).toEqual([]);
+    // 关键:落盘发生在清理之后也要被回收,否则下个账号 hydrate 就读回来了。
+    expect([...storage.keys()].filter((key) => key.includes('mobileVoiceDictionary'))).toEqual([]);
   });
 
   it('异常回包被归一化,不会把坏数据塞进润色上下文', async () => {

@@ -5,6 +5,7 @@ import path from 'node:path';
 import {
   addManualEntry,
   deleteTerms,
+  dictionaryTermKey,
   recordLearningEvent,
   renameTerm,
   termKeyFromMaterializedId,
@@ -152,7 +153,7 @@ export class VoiceInputDataStore {
     const previousEntryKeys = new Set(
       current.settings.dictionaryEntries
         .filter((entry) => entry.source === 'automatic')
-        .map((entry) => entry.text.toLocaleLowerCase()),
+        .map((entry) => dictionaryTermKey(entry.text)),
     );
 
     const nextSettings = this.applyDictionaryMutation((state, clock) => {
@@ -180,7 +181,7 @@ export class VoiceInputDataStore {
 
     const newAutomaticEntries = nextSettings.dictionaryEntries
       .filter((entry) => entry.source === 'automatic')
-      .filter((entry) => !previousEntryKeys.has(entry.text.toLocaleLowerCase()))
+      .filter((entry) => !previousEntryKeys.has(dictionaryTermKey(entry.text)))
       .map((entry) => ({ id: entry.id, text: entry.text }));
     return { settings: cloneSettings(nextSettings), newAutomaticEntries };
   }
@@ -206,9 +207,18 @@ export class VoiceInputDataStore {
   private applyDictionaryMutation(
     apply: Parameters<typeof voiceDictionarySyncStore.mutate>[0],
   ): VoiceInputSettings {
+    // 两段写入必须整体成败:同步状态先行、词典文件随后。第二段失败时状态会领先于
+    // 用户看到的内容,而重试通常是 no-op(sidecar 里已经有这次操作),UI 会一直停在
+    // 旧内容直到重启 —— 所以失败就把 sidecar 回滚,让重试真的能重来。
+    const rollbackPoint = voiceDictionarySyncStore.snapshotForRollback();
     const materialized = voiceDictionarySyncStore.mutate(apply);
     if (!materialized) return cloneSettings(this.load().settings);
-    return cloneSettings(this.commitMaterializedDictionary(materialized));
+    try {
+      return cloneSettings(this.commitMaterializedDictionary(materialized));
+    } catch (error) {
+      voiceDictionarySyncStore.rollbackTo(rollbackPoint);
+      throw error;
+    }
   }
 
   private commitMaterializedDictionary(materialized: MaterializedDictionary): VoiceInputSettings {

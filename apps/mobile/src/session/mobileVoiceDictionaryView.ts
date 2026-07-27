@@ -117,7 +117,8 @@ export function buildMobileVoiceDictionaryEntryViews(
   for (const entry of freshest.entries ?? []) {
     const text = entry?.text?.trim();
     if (!text) continue;
-    const key = text.toLocaleLowerCase();
+    // 与桌面 CRDT 主键同一套 locale 无关折叠,避免同一个词在不同语言设备上分裂。
+    const key = text.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
     views.push({

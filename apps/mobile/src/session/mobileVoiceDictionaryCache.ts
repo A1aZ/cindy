@@ -7,9 +7,14 @@
  * 按 host 设备分别缓存并落盘,原因是「桌面此刻不在线」也要能用:润色需要的词典
  * 来自上次成功拉取的结果,而不是每次都必须现拉。拉取失败(桌面离线、老版本被控端
  * 回 CHANNEL_NOT_ALLOWED)一律静默降级到缓存,绝不打断语音输入。
+ *
+ * 落盘走 AsyncStorage 而不是 SecureStore:一份词典快照可能上百 KB,而 SecureStore
+ * 背后是平台钥匙串,大值会被拒绝(且这里刻意吞掉写入错误),结果是缓存只在内存里
+ * 有效、进程一死就没了,说好的离线兜底名存实亡。词典是用户内容不是密钥材料,
+ * SecureStore 留给真正的凭证。
  */
 
-import { deleteSecureItem, getSecureItem, setSecureItem } from '@/auth/secureStorage';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { listMobileVoiceHistoryHosts } from '@/session/mobileVoiceHistoryStore';
 import type {
   MobileVoiceCredentialSyncDictionaryEntry,
@@ -70,7 +75,7 @@ export async function hydrateMobileVoiceDictionary(hostDeviceId: string): Promis
   const host = normalizeHostDeviceId(hostDeviceId);
   if (memoryCache.has(host)) return;
   try {
-    const raw = await getSecureItem(storageKeyForHost(host));
+    const raw = await AsyncStorage.getItem(storageKeyForHost(host));
     if (!raw) return;
     const parsed = JSON.parse(raw) as Partial<CachedDictionary>;
     memoryCache.set(host, {
@@ -117,8 +122,14 @@ export async function refreshMobileVoiceDictionary(
         fetchedAt: Date.now(),
       };
       memoryCache.set(host, next);
-      await setSecureItem(storageKeyForHost(host), JSON.stringify(next)).catch(() => undefined);
+      await AsyncStorage.setItem(storageKeyForHost(host), JSON.stringify(next)).catch(() => undefined);
       await addHostToIndex(host).catch(() => undefined);
+      // 落盘与索引写入都是异步的,清理完全可能发生在这中间 —— 那样这份属于上个
+      // 账号的快照会在删除之后重新出现在盘上。写完再确认一次代际,过期就自己清掉。
+      if (epoch !== cacheEpoch) {
+        memoryCache.delete(host);
+        await AsyncStorage.removeItem(storageKeyForHost(host)).catch(() => undefined);
+      }
     } catch {
       // 桌面离线、老被控端不识别该 channel、隧道抖动 —— 一律沿用现有缓存。
     } finally {
@@ -151,14 +162,14 @@ export async function clearAllMobileVoiceDictionaryCaches(): Promise<void> {
   ]);
   const hosts = [...new Set([...ownHosts, ...historyHosts])];
   await Promise.all(
-    hosts.map((host) => deleteSecureItem(storageKeyForHost(host)).catch(() => undefined)),
+    hosts.map((host) => AsyncStorage.removeItem(storageKeyForHost(host)).catch(() => undefined)),
   );
-  await deleteSecureItem(STORAGE_INDEX_KEY).catch(() => undefined);
+  await AsyncStorage.removeItem(STORAGE_INDEX_KEY).catch(() => undefined);
 }
 
 async function readHostIndex(): Promise<string[]> {
   try {
-    const raw = await getSecureItem(STORAGE_INDEX_KEY);
+    const raw = await AsyncStorage.getItem(STORAGE_INDEX_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
@@ -167,10 +178,25 @@ async function readHostIndex(): Promise<string[]> {
   }
 }
 
-async function addHostToIndex(hostDeviceId: string): Promise<void> {
-  const hosts = await readHostIndex();
-  if (hosts.includes(hostDeviceId)) return;
-  await setSecureItem(STORAGE_INDEX_KEY, JSON.stringify([...hosts, hostDeviceId]));
+/**
+ * 索引写入串行队列。
+ *
+ * 设置页会并发刷新多台在线电脑,每个 `addHostToIndex` 都是 read-modify-write:
+ * 并发时后写的会覆盖先写的,某些 host 的缓存键就不在索引里了。而索引是登出清理
+ * 唯一的枚举来源 —— 漏掉的那份快照删不掉,下一个账号用同一台电脑就会 hydrate 到
+ * 上个账号的词典并发给润色模型。
+ */
+let hostIndexQueue: Promise<void> = Promise.resolve();
+
+function addHostToIndex(hostDeviceId: string): Promise<void> {
+  hostIndexQueue = hostIndexQueue
+    .catch(() => undefined)
+    .then(async () => {
+      const hosts = await readHostIndex();
+      if (hosts.includes(hostDeviceId)) return;
+      await AsyncStorage.setItem(STORAGE_INDEX_KEY, JSON.stringify([...hosts, hostDeviceId]));
+    });
+  return hostIndexQueue;
 }
 
 export function __resetMobileVoiceDictionaryCacheForTests(): void {

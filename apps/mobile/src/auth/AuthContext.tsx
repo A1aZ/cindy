@@ -558,8 +558,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           // 手机语音已只保留官方托管路径:清掉旧版本留下的桌面穿透凭据、
           // 服务模式开关与 BYOK LiteLLM key,防止桌面 key 继续躺在 secure storage。
           clearAllMobileVoiceCredentials().catch(() => undefined),
-          // 同上:词典缓存不含账号身份,冷启动恢复前先抹掉可能属于上个账号的残留。
-          clearAllMobileVoiceDictionaryCaches().catch(() => undefined),
         ]);
         const [storedRefreshToken, cachedUser, storedDeletionReceipt] =
           await Promise.all([

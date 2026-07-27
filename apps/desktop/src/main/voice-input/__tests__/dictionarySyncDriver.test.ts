@@ -24,9 +24,11 @@ vi.mock('../VoiceInputDataStore.js', () => ({
 }));
 
 const syncState = { version: 1 as const, records: {}, suppressed: {} };
+/** 让个别用例把状态换成超大对象,验证帧上限把关。 */
+const stateOverride: { value: unknown } = { value: null };
 vi.mock('../VoiceDictionarySyncStore.js', () => ({
   voiceDictionarySyncStore: {
-    getState: () => syncState,
+    getState: () => stateOverride.value ?? syncState,
     materialize: () => ({
       entries: [
         {
@@ -64,6 +66,7 @@ beforeEach(() => {
   mergeRemoteDictionaryState.mockClear();
   mergeRemoteDictionaryState.mockReturnValue(true);
   onlineDesktops.length = 0;
+  stateOverride.value = null;
   initVoiceDictionarySync({
     sendState: (deviceId, payload) => sendState(deviceId, payload),
     listOnlineDesktopDevices: () => [...onlineDesktops],
@@ -162,6 +165,26 @@ describe('入站', () => {
     });
     expect(() => handleIncomingDictionaryState('peer-1', { frameVersion: 1, state: syncState })).not.toThrow();
     expect(sendState).not.toHaveBeenCalled();
+  });
+});
+
+describe('帧大小上限', () => {
+  it('状态超过 relay 单帧上限时不发送,并留下明确日志', () => {
+    // relay 拒收超限帧且 sendEnvelope 会抛;不自己把关的话,词典一旦长到越线,
+    // 此后每次广播都抛异常,同步会永久静默停摆。
+    const huge: Record<string, unknown> = {};
+    const filler = 'x'.repeat(2_000);
+    for (let index = 0; index < 2_000; index += 1) huge[`term-${index}`] = filler;
+    stateOverride.value = { version: 1, records: huge, suppressed: {} };
+
+    onlineDesktops.push('peer-1');
+    handleDesktopPeerOnline('peer-1');
+    expect(sendState).not.toHaveBeenCalled();
+  });
+
+  it('正常大小的状态照常发送', () => {
+    handleDesktopPeerOnline('peer-1');
+    expect(sendState).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -25,7 +25,14 @@ export function normalizeDictionaryTermText(value: unknown): string {
     .trim();
 }
 
-/** 合并主键。空字符串表示该文本不可用作词条。 */
+/**
+ * 合并主键。空字符串表示该文本不可用作词条。
+ *
+ * **必须用 locale 无关的 `toLowerCase()`**,不能用 `toLocaleLowerCase()`:后者跟随
+ * 设备系统语言,土耳其语 locale 下 `I` 折叠成 `ı`(无点)而英语 locale 折叠成 `i`。
+ * 这个值是 CRDT 记录键和物化 id —— 同一个词在两台不同语言设置的电脑上会落到两条
+ * 互不相干的记录,永远收敛不了。跨设备一致性优先于个别语言的大小写直觉。
+ */
 export function dictionaryTermKey(text: unknown): string {
-  return normalizeDictionaryTermText(text).toLocaleLowerCase();
+  return normalizeDictionaryTermText(text).toLowerCase();
 }

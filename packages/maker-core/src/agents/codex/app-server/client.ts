@@ -87,7 +87,7 @@ export function detectAuthInvalidationReason(error: JsonRpcErrorObject): string 
   //    (config_errors.rs 对 Auth code 附 action=relogin)。
   const hasStructuredAuthSignal =
     (data?.reason === 'cloudRequirements' || data?.reason === 'cloudConfigBundle') &&
-    (data.errorCode === 'Auth' || data.action === 'relogin');
+    (data?.errorCode === 'Auth' || data?.action === 'relogin');
   // 文本兜底 (窄门): 非 cloud-config-bundle 的错误链不带结构化 data, 但 message 仍是
   // app-server 生成的 "failed to load configuration: {err}" 包装; 其中 codex-rs 的
   // "Your access token could not be refreshed ..." 句族只出自永久性 refresh 失败

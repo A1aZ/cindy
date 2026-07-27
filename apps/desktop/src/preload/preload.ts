@@ -1042,6 +1042,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('voice-input:settings:update-shortcut', shortcut),
     deleteDictionaryEntries: (entryIds: string[]): Promise<unknown> =>
       ipcRenderer.invoke('voice-input:dictionary:delete-entries', entryIds),
+    addDictionaryEntry: (text: string): Promise<unknown> =>
+      ipcRenderer.invoke('voice-input:dictionary:add-entry', text),
+    importDictionaryEntries: (texts: string[]): Promise<unknown> =>
+      ipcRenderer.invoke('voice-input:dictionary:import-entries', texts),
+    renameDictionaryEntry: (entryId: string, text: string): Promise<unknown> =>
+      ipcRenderer.invoke('voice-input:dictionary:rename-entry', { entryId, text }),
     recordDictionaryLearningActions: (actions: unknown[]): Promise<unknown> =>
       ipcRenderer.invoke('voice-input:dictionary-learning:record-actions', actions),
     getHistory: (limit?: number): unknown => {
@@ -3672,6 +3678,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     scanLocalCli: (): Promise<{
       detections: import('../shared/localCliDetect').LocalCliDetection[];
     }> => ipcRenderer.invoke('maker:provider:local-cli-scan'),
+    /**
+     * 立即重新发现动态清单（当前只有 anthropic 订阅）。host 只对暂时性失败做有限次退避
+     * 重试、确定性拒绝不重试，所以这是用户在失败态下「立刻再试一次」的入口（同时重开
+     * 一轮退避）；失败归因随结果回传，供 UI 渲染分类文案。
+     */
+    rediscoverModels: (
+      providerId: string,
+    ): Promise<{
+      ok: boolean;
+      failure?: import('@cindy/model-providers').ProviderModelDiscoveryFailureView;
+    }> => ipcRenderer.invoke('maker:provider:models-rediscover', providerId),
     /** 自定义供应商变更广播订阅（返回 off）。 */
     onProvidersChanged: fanOutMakerProvidersChanged,
 

@@ -113,9 +113,12 @@ function safeDecodeUserinfo(value: string): string {
 const SOCKS5_PROTOCOLS = new Set(['socks5:', 'socks5h:', 'socks:']);
 const DEFAULT_SOCKS_PORT = 1080;
 
-// RFC 1929 的 UNAME / PASSWD 都是单字节长度前缀。超长凭证无法表达,按「没有凭证」处理
-// (静默截断会把错误的凭证发给代理,更难排查);代理若要求认证会给出明确的握手错误。
-const SOCKS5_CREDENTIAL_MAX_BYTES = 255;
+/**
+ * RFC 1929 的 UNAME / PASSWD 都是单字节长度前缀。解析这一侧把超长凭证降级成「没有
+ * 凭证」(静默截断会把错误的凭证发给代理,更难排查),代理若要求认证会给出明确的握手
+ * 错误;socks5.ts 的握手侧另有一道 fail-fast,兜住绕过本函数直接构造 target 的调用方。
+ */
+export const SOCKS5_CREDENTIAL_MAX_BYTES = 255;
 
 /**
  * 解析代理地址。接受明文 HTTP 代理(CONNECT 隧道 / 绝对形式都建立在它上面)与 SOCKS5;
@@ -361,12 +364,20 @@ const AGENT_POOL_MAX_ENTRIES = 8;
  * agent 缓存 key。凭证参与 key:同地址不同凭证不能共享连接池。上游协议也参与:
  * https 与 http 上游用的是不同基类的 agent(TLS 包装 vs 裸隧道),不能混用同一个。
  * key 只在进程内做缓存标识,不进日志。
+ *
+ * 用 JSON 数组而不是拼接:字段本身可能含分隔符,拼接会撞车 —— 用户名/密码
+ * `a:b` + `c` 与 `a` + `b:c` 拼出来是同一个 key,第二次查询会复用按第一组凭证建的
+ * agent,用错身份去认证。JSON 编码逐字段带引号与转义,不存在这种歧义。
  */
 export function outboundProxyAgentKey(proxy: OutboundProxyTarget, upstreamProtocol: 'http:' | 'https:'): string {
-  const credential = proxy.kind === 'socks5'
-    ? `${proxy.username ?? ''}:${proxy.password ?? ''}`
-    : (proxy.authHeader ?? '');
-  return `${proxy.kind} ${proxy.url} ${credential} ${upstreamProtocol}`;
+  return JSON.stringify([
+    proxy.kind,
+    proxy.url,
+    proxy.authHeader ?? '',
+    proxy.username ?? '',
+    proxy.password ?? '',
+    upstreamProtocol,
+  ]);
 }
 
 /**

@@ -129,6 +129,23 @@ describe('socks5Connect', () => {
       .rejects.toThrow(/outbound proxy socks5:\/\/127\.0\.0\.1:1 unreachable/);
   });
 
+  it('fails fast on credentials too long for the RFC 1929 length prefix', async () => {
+    // parseOutboundProxyUrl 会把超长凭证降级成无凭证,但 agent 是公开导出的 ——
+    // 宿主自己造 target 时长度会静默溢出成错误的帧(300 → 44),必须挡在发送前。
+    const stub = await startSocks5Stub({ requireAuth: true });
+    await expect(socks5Connect(target(stub.port, { username: 'u'.repeat(256), password: 'p' }), 'x.invalid', 443))
+      .rejects.toThrow(/credentials exceed the RFC 1929 limit of 255 bytes/);
+    await expect(socks5Connect(target(stub.port, { username: 'u', password: 'p'.repeat(256) }), 'x.invalid', 443))
+      .rejects.toThrow(/credentials exceed the RFC 1929 limit of 255 bytes/);
+  });
+
+  it('rejects an auth reply whose subnegotiation version is not 0x01', async () => {
+    // 版本对不上说明流已经错位,status 字节不可信,不能当认证成功继续。
+    const stub = await startSocks5Stub({ requireAuth: true, authReplyVersion: 0x05 });
+    await expect(socks5Connect(target(stub.port, { username: 'u', password: 'p' }), 'x.invalid', 443))
+      .rejects.toThrow(/unexpected auth subnegotiation version 0x05/);
+  });
+
   it('rejects destinations that cannot be encoded instead of sending a truncated one', async () => {
     const stub = await startSocks5Stub();
     await expect(socks5Connect(target(stub.port), `${'a'.repeat(256)}.invalid`, 443))

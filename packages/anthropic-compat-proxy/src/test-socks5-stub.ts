@@ -15,6 +15,8 @@ export interface Socks5StubOptions {
   rejectAllMethods?: boolean;
   /** 认证子协商回非 0 状态。 */
   authShouldFail?: boolean;
+  /** 认证回复的子协商版本字节,默认 0x01(RFC 1929)。用于构造流错位的不合规代理。 */
+  authReplyVersion?: number;
   /** CONNECT 回复码,默认 0x00(成功)。 */
   replyCode?: number;
   /** 成功时把隧道接到本机这个端口;不给则只回复不转发。 */
@@ -90,7 +92,7 @@ export async function startSocks5Stub(options: Socks5StubOptions = {}): Promise<
         const username = (await read((await read(1))[0])).toString('utf8');
         const password = (await read((await read(1))[0])).toString('utf8');
         credentials.push({ username, password });
-        socket.write(Buffer.of(0x01, options.authShouldFail ? 0x01 : 0x00));
+        socket.write(Buffer.of(options.authReplyVersion ?? 0x01, options.authShouldFail ? 0x01 : 0x00));
         if (options.authShouldFail) { socket.end(); return; }
       }
 

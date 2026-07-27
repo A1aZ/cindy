@@ -11,9 +11,11 @@ import {
   formatHostHeader,
   hasProxyEnvConfig,
   isLoopbackHostname,
+  outboundProxyAgentKey,
   parseOutboundProxyUrl,
   redactProxyUrlForLog,
   TunnelingHttpsAgent,
+  type OutboundProxyTarget,
 } from './outbound-proxy.js';
 
 describe('parseOutboundProxyUrl', () => {
@@ -102,6 +104,31 @@ describe('parseOutboundProxyUrl', () => {
     expect(parsed?.hostname).toBe('127.0.0.1');
     // 解不开的按原文进 Basic,不抛 URIError。
     expect(parsed?.authHeader).toBe(`Basic ${Buffer.from('user%GG:pa%ZZss').toString('base64')}`);
+  });
+});
+
+describe('outboundProxyAgentKey', () => {
+  const socks = (username: string, password: string): OutboundProxyTarget => ({
+    kind: 'socks5', url: 'socks5://127.0.0.1:1080', hostname: '127.0.0.1', port: 1080, username, password,
+  });
+
+  it('never collides across credentials that contain the separator', () => {
+    // 回归:拼接式 key 下 `a:b`+`c` 与 `a`+`b:c` 都产生 "a:b:c",第二次查询会复用
+    // 按第一组凭证建的 agent,用错身份去认证。
+    expect(outboundProxyAgentKey(socks('a:b', 'c'), 'https:'))
+      .not.toBe(outboundProxyAgentKey(socks('a', 'b:c'), 'https:'));
+    expect(outboundProxyAgentKey(socks('u', 'p'), 'https:'))
+      .toBe(outboundProxyAgentKey(socks('u', 'p'), 'https:'));
+  });
+
+  it('separates upstream protocols and proxy kinds', () => {
+    expect(outboundProxyAgentKey(socks('u', 'p'), 'http:'))
+      .not.toBe(outboundProxyAgentKey(socks('u', 'p'), 'https:'));
+    const http: OutboundProxyTarget = {
+      kind: 'http', url: 'http://127.0.0.1:1080', hostname: '127.0.0.1', port: 1080,
+    };
+    expect(outboundProxyAgentKey(http, 'https:'))
+      .not.toBe(outboundProxyAgentKey({ ...socks('', ''), username: undefined, password: undefined }, 'https:'));
   });
 });
 

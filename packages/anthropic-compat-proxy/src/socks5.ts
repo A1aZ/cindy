@@ -22,7 +22,7 @@ import { Agent as HttpsAgent, type AgentOptions } from 'node:https';
 import { connect as netConnect, isIPv4, isIPv6, type Socket, type TcpSocketConnectOpts } from 'node:net';
 import type { Duplex } from 'node:stream';
 
-import { formatAuthority, type OutboundProxyTarget } from './outbound-proxy.js';
+import { formatAuthority, SOCKS5_CREDENTIAL_MAX_BYTES, type OutboundProxyTarget } from './outbound-proxy.js';
 
 // 握手整体超时(TCP 连上代理 → CONNECT 回复读完)。与 HTTP 代理 CONNECT 的
 // PROXY_CONNECT_TIMEOUT_MS 对齐:代理通常在本机/局域网,正常毫秒级完成,上限只防
@@ -252,6 +252,12 @@ export async function socks5Connect(
       if (!proxy.username) throw fail('requires username/password authentication but none is configured');
       const user = Buffer.from(proxy.username, 'utf8');
       const pass = Buffer.from(proxy.password ?? '', 'utf8');
+      // UNAME / PASSWD 都是单字节长度前缀。parseOutboundProxyUrl 已把超长凭证降级成
+      // 「无凭证」,但两个 agent 是公开导出的,宿主可以自己造 target —— 那条路上长度
+      // 会静默溢出成错误的帧(300 → 44),把乱码凭证发给代理。fail fast。
+      if (user.length > SOCKS5_CREDENTIAL_MAX_BYTES || pass.length > SOCKS5_CREDENTIAL_MAX_BYTES) {
+        throw fail(`credentials exceed the RFC 1929 limit of ${SOCKS5_CREDENTIAL_MAX_BYTES} bytes`);
+      }
       socket.write(Buffer.concat([
         Buffer.of(USERPASS_SUBNEGOTIATION_VERSION, user.length),
         user,
@@ -259,7 +265,12 @@ export async function socks5Connect(
         pass,
       ]));
       const authReply = await reader.read(2);
-      // 子协商版本按 RFC 1929 恒为 0x01;状态非 0 即失败(不回显任何凭证内容)。
+      // 版本必须是子协商的 0x01。对不上说明流已经错位(代理实现不合规或读串了),
+      // 此时 status 字节也不可信,不能当成认证成功继续往下走。
+      if (authReply[0] !== USERPASS_SUBNEGOTIATION_VERSION) {
+        throw fail(`returned an unexpected auth subnegotiation version 0x${authReply[0].toString(16).padStart(2, '0')}`);
+      }
+      // 状态非 0 即失败(不回显任何凭证内容)。
       if (authReply[1] !== 0x00) throw fail('rejected the username/password credentials');
     } else if (method !== AUTH_NONE) {
       throw fail(`selected unsupported authentication method 0x${method.toString(16).padStart(2, '0')}`);

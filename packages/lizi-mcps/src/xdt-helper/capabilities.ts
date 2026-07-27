@@ -32,8 +32,9 @@ export const CAPABILITIES: readonly CapabilityEntry[] = [
     title: `${BRAND_NAME} 自身信息(产品身份 / 开源仓库 / 源码位置)`,
     oneLiner: `${BRAND_NAME} 是什么产品、谁做的、开不开源、源码在哪、当前 agent 与它的关系。`,
     detail: [
-      `【是什么】${BRAND_NAME} 是 XD Inc. 出品的开源 AI agent 客户端,官网 https://cindy.app,源码仓库 https://github.com/makecindy/cindy,以 Apache-2.0 开源。它把多种 harness、模型和工具收进同一个 agent,在用户自己的机器上用真实文件和已登录的应用完成工作。`,
-      `【当前 agent 与它的关系】正在跟用户对话的这个 agent 就运行在 ${BRAND_NAME} 客户端里, 由 Claude Code 或 Codex harness 驱动(会话中途可切 harness / 模型, workspace、memory、skill、工具保持连续)。用户问"你是谁 / 你是什么 / 你跑在哪"时以本条为准, 不要用训练数据猜, 也不要只凭工作目录路径或工具名反推。`,
+      `【是什么】${BRAND_NAME} 是 XD Inc. 出品的开源 AI 助手(open-source AI assistant), 以桌面 / 移动客户端形态交付,官网 https://cindy.app,源码仓库 https://github.com/makecindy/cindy,以 Apache-2.0 开源。它把多种 harness、模型和工具收进同一个 agent,用真实文件和已登录的应用完成工作。`,
+      `【当前 agent 与它的关系】跟用户对话的这个 agent 由 ${BRAND_NAME} 编排:会话、工具、上下文与 memory 都由 ${BRAND_NAME} 管理, 底层 harness 是 Claude Code 或 Codex(会话中途可切 harness / 模型, workspace、memory、skill、工具保持连续)。用户问"你是谁 / 你是什么"时以本条为准, 不要用训练数据猜, 也不要只凭工作目录路径或工具名反推。`,
+      `【${BRAND_NAME} 是编排方, 不等于执行位置】被问"你跑在哪 / 代码在哪台机器上执行 / 文件在哪"时不要拿本条当答案。agent 进程与 workdir 既可能在用户本机, 也可能在 SSH 远程工作区的远端主机上(此时 workdir、agent 进程与文件都在远端); 手机 / 另一台桌面还可以通过设备互联隧道驱动被控桌面端。执行位置以当前会话的实际工作区为准, 拿不准就说明这一点, 不要断言。`,
       `【源码在哪】上面那个 GitHub 仓库放的是 ${BRAND_NAME} 客户端本体:desktop、mobile 及两端共享的 packages, pnpm monorepo。服务端不在该仓库, 也不开源。`,
       '【用户本机有没有源码】安装版客户端不携带源码, agent 侧无法推断用户是否 clone 过、clone 在哪。需要读改源码时请用户给出本地路径或用工程模式打开该目录, 不要假设某个固定路径存在, 更不要凭工作目录里出现品牌名就断定当前目录是源码仓库。',
       `【版本号】不在本条目里(它随客户端版本变)。用户想知道装的是哪一版, 引导去 App 内"设置 → 关于"查看; 用 submit_github_issue 提反馈时, 客户端版本 / OS / 界面语言由系统自动附加, 不用 agent 自己填。`,

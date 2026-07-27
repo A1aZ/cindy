@@ -7,7 +7,7 @@
  */
 
 import { ipcMain, BrowserWindow } from 'electron';
-import { and, asc, count, eq, lt, gt, desc, isNull, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, eq, lt, gt, gte, desc, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { createId } from '@paralleldrive/cuid2';
 
 import { getDbClient } from '../client/current';
@@ -1490,6 +1490,42 @@ export async function findPendingAgentHandoff(sessionId: string): Promise<string
     .limit(1);
   if (userAfter) return null;
   return handoff;
+}
+
+/**
+ * 查 fork 出的子会话是否还欠一条「来源标记」——返回父会话 id,不欠则 null。
+ *
+ * 判定同样确定性、可从 DB 重建(不需要额外存储位):fork 复制历史时**保留原
+ * createdAt**(见 maker-orchestration/fork.ts),而新会话的 createdAt = fork 时刻,
+ * 所以复制来的行必然早于它;子会话自己发出的第一条 user 消息则不早于它。于是
+ * 「不存在 createdAt >= session.createdAt 的 user 行」⟺ fork 后尚未发送过。
+ *
+ * 已知精度边界:首发失败可能已先落 user 行(与 findPendingAgentHandoff 的 v1
+ * 启发式同款局限),此时重试会丢掉来源标记。来源标记是元信息,丢了不影响正确性,
+ * 不值得为它在 messages 里加一条隐藏边界行——那会让该会话之后再也不能被 fork
+ * (resolveForkNativeSource 见到 context_rebuild 即判 UNSUPPORTED_HISTORY)。
+ */
+export async function findPendingForkOrigin(sessionId: string): Promise<string | null> {
+  const db = getDbClient().drizzle;
+  const [sessRow] = await db
+    .select({ parentSessionId: sessions.parentSessionId, createdAt: sessions.createdAt })
+    .from(sessions)
+    .where(eq(sessions.id, sessionId))
+    .limit(1);
+  if (!sessRow?.parentSessionId) return null;
+  const [userAfterFork] = await db
+    .select({ id: messages.id })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.sessionId, sessionId),
+        eq(messages.role, 'user'),
+        isNull(messages.rewindAt),
+        gte(messages.createdAt, sessRow.createdAt),
+      ),
+    )
+    .limit(1);
+  return userAfterFork ? null : sessRow.parentSessionId;
 }
 
 /**

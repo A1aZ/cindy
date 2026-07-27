@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   buildForkOriginHandoff,
+  composeForkOriginHandoff,
   buildHandoffText,
   createAgentHandoffPendingRegistry,
   extractPlainText,
@@ -160,12 +161,42 @@ describe('buildForkOriginHandoff', () => {
       .toBe(true);
   });
 
+  it('不提分叉点——forkSessionStripEncrypted 的 forkedAtMessageId 为 null,措辞须对两种 fork 都成立', () => {
+    const text = buildForkOriginHandoff('sess-parent-3');
+    expect(text).not.toContain('at one of its messages');
+  });
+
   it('保持极简:不重复 agent-switch 那套摘要/检索指引(fork 的上下文本来就是完整的)', () => {
     const text = buildForkOriginHandoff('sess-parent-2');
     expect(text).not.toContain('search_chat_history');
     expect(text).not.toContain('get_chat_history');
     expect(text).not.toContain('== Work state');
     expect(text.split('\n').filter((line) => line.trim().length > 0)).toHaveLength(3);
+  });
+});
+
+describe('composeForkOriginHandoff', () => {
+  it('无 pending 交接时等价于单独的来源标记', () => {
+    expect(composeForkOriginHandoff('sess-p', null)).toBe(buildForkOriginHandoff('sess-p'));
+  });
+
+  it('在引擎切换边界上 fork:来源标记并入 re-armed 交接,不替换它', () => {
+    // fork 事务会把复制过去的 agent_switch 边界 re-arm 成 consumed:false,
+    // 子会话首发时必须仍拿得到完整跨引擎交接——顶掉它就等于让子会话失忆。
+    const switchHandoff = buildHandoffText([msg('user', '切换前的问题')], {
+      fromLabel: 'Claude Code',
+      toLabel: 'Codex',
+    });
+    const text = composeForkOriginHandoff('sess-p', switchHandoff);
+
+    expect(text).toContain('sess-p');
+    expect(text).toContain('切换前的问题');
+    expect(text).toContain('from here on you (Codex) continue it');
+    // 来源标记在前,交接自带的结束标记统一收尾——不出现两个「以下是用户的新消息」
+    expect(text.indexOf('forked by the user')).toBeLessThan(text.indexOf('Session handoff'));
+    expect(text).not.toContain("== End of fork note");
+    expect(text.trimEnd().endsWith("== End of handoff note; the user's new message follows =="))
+      .toBe(true);
   });
 });
 

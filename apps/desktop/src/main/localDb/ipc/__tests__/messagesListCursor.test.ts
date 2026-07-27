@@ -43,6 +43,7 @@ vi.mock('../../client/current', () => ({
 import {
   findParkedEngineSession,
   findPendingAgentHandoff,
+  findPendingForkOrigin,
   getMessageDeletionTarget,
   markLatestAgentHandoffConsumed,
   readPriorUserRoundCost,
@@ -54,7 +55,9 @@ function createDb(): Database.Database {
   sqlite.exec(`
     CREATE TABLE sessions (
       id TEXT PRIMARY KEY,
-      cleared_at INTEGER
+      cleared_at INTEGER,
+      parent_session_id TEXT,
+      created_at INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE messages (
       id TEXT PRIMARY KEY,
@@ -270,6 +273,59 @@ describe('local-db:messages:list cursor', () => {
     // list/session + one visibility scan (plus the direct storage assertion);
     // never one SQLite query set per SDK segment.
     expect(prepareSpy).toHaveBeenCalledTimes(5);
+  });
+});
+
+describe('findPendingForkOrigin 来源标记重建', () => {
+  const FORK_AT = 5_000;
+
+  function insertForkedSession(sqlite: Database.Database, parent: string | null): void {
+    sqlite
+      .prepare(
+        'INSERT INTO sessions (id, cleared_at, parent_session_id, created_at) VALUES (?, NULL, ?, ?)',
+      )
+      .run('s1', parent, FORK_AT);
+  }
+
+  function insertUserAt(sqlite: Database.Database, createdAt: number, rewindAt: number | null = null): void {
+    sqlite
+      .prepare(
+        `
+      INSERT INTO messages (
+        id, client_id, session_id, role, content, tool_use_id, agent_meta,
+        agent_kind, created_at, rewind_at
+      ) VALUES (?, ?, 's1', 'user', '"q"', NULL, NULL, 'cc', ?, ?)
+    `,
+      )
+      .run(`u-${createdAt}`, `u-${createdAt}`, createdAt, rewindAt);
+  }
+
+  it('fork 后尚未发送:返回父会话 id(重启后同样可重建,不依赖内存态)', async () => {
+    const sqlite = createDb();
+    insertForkedSession(sqlite, 'parent-1');
+    // 复制来的历史保留原 createdAt,必然早于 fork 时刻——不应被当成"已发送"
+    insertUserAt(sqlite, FORK_AT - 1_000);
+    await expect(findPendingForkOrigin('s1')).resolves.toBe('parent-1');
+  });
+
+  it('子会话已发出第一条消息后不再返回', async () => {
+    const sqlite = createDb();
+    insertForkedSession(sqlite, 'parent-1');
+    insertUserAt(sqlite, FORK_AT);
+    await expect(findPendingForkOrigin('s1')).resolves.toBeNull();
+  });
+
+  it('非 fork 会话恒为 null', async () => {
+    const sqlite = createDb();
+    insertForkedSession(sqlite, null);
+    await expect(findPendingForkOrigin('s1')).resolves.toBeNull();
+  });
+
+  it('已 rewind 软删的首发不算已发送', async () => {
+    const sqlite = createDb();
+    insertForkedSession(sqlite, 'parent-1');
+    insertUserAt(sqlite, FORK_AT + 10, FORK_AT + 20);
+    await expect(findPendingForkOrigin('s1')).resolves.toBe('parent-1');
   });
 });
 

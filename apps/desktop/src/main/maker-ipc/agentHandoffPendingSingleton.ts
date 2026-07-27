@@ -19,18 +19,28 @@
 
 import {
   findPendingAgentHandoff,
+  findPendingForkOrigin,
   markLatestAgentHandoffConsumed,
 } from '../localDb/ipc/messages.js';
 import { createLogger } from '../logger.js';
-import { createAgentHandoffPendingRegistry } from './agentHandoff.js';
+import { composeForkOriginHandoff, createAgentHandoffPendingRegistry } from './agentHandoff.js';
 
 const log = createLogger('agent-handoff-pending');
 
-// 查询函数包一层 lambda 在**调用期**解析:单测普遍 vi.mock 了 messages.js 且不含
-// 本导出,模块求值期直接引用会让所有传递 import 本单例的 suite 崩在 mock 缺口上;
-// 调用期访问失败则落进 registry.peek 的 try/catch(按无 pending 处理),两全。
-export const agentHandoffPending = createAgentHandoffPendingRegistry((sessionId) =>
-  findPendingAgentHandoff(sessionId),
+/**
+ * fork 来源标记同样走 DB 重建,不在 fork 时写内存:
+ *  - `parent_session_id` 本就是持久列,重建是确定性的(见 findPendingForkOrigin),
+ *    重启后不丢;
+ *  - 更关键的是**不能**在 fork 时抢先 set 内存态——那会让 peek 命中内存直接返回,
+ *    永远查不到 DB 里那条被 fork 事务 re-arm 成 `consumed: false` 的 agent_switch
+ *    边界,把跨引擎交接整段吞掉。两者在这里组合,谁都不丢。
+ */
+export const agentHandoffPending = createAgentHandoffPendingRegistry(async (sessionId) => {
+  const pending = await findPendingAgentHandoff(sessionId);
+  const forkParentSessionId = await findPendingForkOrigin(sessionId);
+  if (!forkParentSessionId) return pending;
+  return composeForkOriginHandoff(forkParentSessionId, pending);
+},
   (sessionId) => {
     void markLatestAgentHandoffConsumed(sessionId).catch((err) => {
       // accepted 已跨不可逆边界,持久标记失败不能把这次 send 改判失败；内存态

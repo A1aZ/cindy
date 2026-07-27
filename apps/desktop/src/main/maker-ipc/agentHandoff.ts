@@ -430,19 +430,40 @@ function assembleHandoffText(
  * "我是谁、我从哪来" 这一个元信息。agent-switch 那种逐字摘要 + 检索指引在这里
  * 是纯浪费——真需要翻原会话时,history 类工具本来就在工具列表里,不必手把手教。
  *
- * 为什么不写 DB:pending-handoff 的持久化位挂在 agent_switch / context_rebuild
- * 边界行上(见 findPendingAgentHandoff),而 fork 出的新会话没有这两种行。为它
- * 补一条 context_rebuild 会有真实副作用——resolveForkNativeSource 见到该 role 即
- * 判 UNSUPPORTED_HISTORY,等于让这个新会话之后再也不能被 fork。来源标记是
- * nice-to-have 的元信息,丢了不影响正确性(不像交接摘要丢了模型就失忆),因此
- * 只走内存态:fork 完立刻发送的主路径必中,重启后丢失可接受。
+ * 措辞对两种 fork 都成立:消息级 fork 与 forkSessionStripEncrypted(后者
+ * forkedAtMessageId 为 null,不存在"某条消息"),所以只陈述"从哪个会话分叉",
+ * 不提分叉点。
  */
 export function buildForkOriginHandoff(parentSessionId: string): string {
+  return `${forkOriginFactLine(parentSessionId)}\n\n== End of fork note; the user's new message follows ==`;
+}
+
+function forkOriginFactLine(parentSessionId: string): string {
   return (
     `[Session fork · internal context]\n` +
-    `This conversation was forked by the user from another conversation (id: ${parentSessionId}) at one of its messages.\n\n` +
-    `== End of fork note; the user's new message follows ==`
+    `This conversation was forked by the user from another conversation (id: ${parentSessionId}).`
   );
+}
+
+/**
+ * 把来源标记**并进**已有的 pending 交接,而不是替换它。
+ *
+ * 必须组合的原因:在引擎切换后的首条 user 消息上 fork 时,fork 事务会刻意把复制
+ * 过去的 agent_switch 边界重置为 `consumed: false`(见 WorkerThreadTransport 的
+ * sanitizeForkedMessageContent 与 fork.ts 的 resetHandoffBoundaryClientId),让子会话
+ * 首次发送时仍拿得到完整的跨引擎交接。若来源标记直接顶掉它,子会话会在没有切换前
+ * 上下文的情况下起跑——那正是交接机制本身要防的失忆。
+ *
+ * 顺序:来源标记在前(只是"我是谁"的元信息),交接正文在后,由交接自带的结束标记
+ * 统一收尾,避免出现两个"以下是用户的新消息"。
+ */
+export function composeForkOriginHandoff(
+  parentSessionId: string,
+  pendingHandoff: string | null,
+): string {
+  return pendingHandoff
+    ? `${forkOriginFactLine(parentSessionId)}\n\n${pendingHandoff}`
+    : buildForkOriginHandoff(parentSessionId);
 }
 
 /** send 路径的 wire 消息形态(与 makerSendTransaction 的 IpcUserMessage 对齐)。 */

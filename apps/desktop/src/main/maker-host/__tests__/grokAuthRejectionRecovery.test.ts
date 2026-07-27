@@ -214,6 +214,27 @@ describe('recoverGrokAuthAfterRejection', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('superseded 没有真的刷新,不占用冷却窗口', async () => {
+    seedCredentials();
+    const fetchMock = vi.fn(async () =>
+      tokenResponse(200, { access_token: 'fresh-access-token', expires_in: 3600 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    // 在刷新任务进入串行链之前登出:锁内重读拿到 null,直接 superseded,不发请求。
+    const pending = recoverGrokAuthAfterRejection();
+    logoutGrok();
+    await expect(pending).resolves.toBe('superseded');
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // 冷却必须还没被占用 —— 否则紧接着被拒的新 token 最多 60s 内无法自愈。
+    bound = true;
+    seedCredentials({ access_token: 'second-access-token', refresh_token: 'refresh-token-v2' });
+    resetGrokOAuthMemoryCache();
+    await expect(recoverGrokAuthAfterRejection()).resolves.toBe('refreshed');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('未登录 / 未绑定当前数据归属时不碰凭证', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);

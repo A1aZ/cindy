@@ -286,6 +286,7 @@ export function extractVsCodePalette(
     'border',
     ['panel.border', 'editorGroup.border', 'input.border', 'contrastBorder', 'widget.border'],
     () => step(surface, 0.2),
+    surfaceHit,
   );
 
   const textPrimary = role(

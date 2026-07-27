@@ -214,7 +214,8 @@ export function buildThemeColorsFromPalette(
   const textTertiaryHsl = toHslTriplet(palette.textTertiary);
 
   /** accent 底上的前景：优先沿用既有主题的模式惯例（dark=surface, light=white），
-   *  但若对比度不足 3:1（WCAG 最低可读门槛）则按实际对比度选黑/白。 */
+   *  但若对比度不足 3:1 则按实际对比度选黑/白。阈值与既有 builtin 主题行为一致
+   *  （它们在 3:1–4.5:1 区间也使用 white）。 */
   const defaultOnAccent = pick(palette.surface, WHITE);
   const MIN_CONTRAST = 3;
   const onAccent = contrastRatio(palette.accentPrimary, defaultOnAccent) >= MIN_CONTRAST

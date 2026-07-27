@@ -326,12 +326,12 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   }, [familyId, theme, systemPrefersDark]);
 
   const fallbackFromType = useMemo<ThemeType | null>(() => {
+    void localThemeRev;
     const family = tryGetFamily(familyId);
     if (!family) return null;
     const isDarkRequested = theme === 'dark' || (theme === 'system' && systemPrefersDark);
     const requestedType: ThemeType = isDarkRequested ? 'dark' : 'light';
     return family[requestedType] === null ? requestedType : null;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [familyId, theme, systemPrefersDark, localThemeRev]);
 
   return createElement(

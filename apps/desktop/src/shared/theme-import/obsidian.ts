@@ -146,6 +146,7 @@ function scanCssRules(source: string, depth: number): CssRule[] {
         continue;
       }
       i += 1;
+      selectorStart = i;
       continue;
     }
     if (ch === '{') {
@@ -160,17 +161,16 @@ function scanCssRules(source: string, depth: number): CssRule[] {
         rules.push({ selector, body });
         // CSS nesting: `body { &.theme-dark { ... } }` — recurse into the
         // body so nested theme selectors are collected as separate rules.
+        // Works at any depth so at-rule-wrapped nesting is also captured.
         // Only emit children whose resolved selector passes selectorMode()
         // as a root-level theme rule — prevents component-scoped descendants
         // (`.theme-dark .modal { ... }`) from overriding global palette.
-        if (depth === 0) {
-          const nested = scanCssRules(body, depth + 1);
-          for (const child of nested) {
-            if (!NESTED_THEME_SELECTOR_RE.test(child.selector)) continue;
-            const resolved = child.selector.replace(/&/g, selector);
-            if (selectorMode(resolved) !== null) {
-              rules.push({ selector: resolved, body: child.body });
-            }
+        const nested = scanCssRules(body, depth + 1);
+        for (const child of nested) {
+          if (!NESTED_THEME_SELECTOR_RE.test(child.selector)) continue;
+          const resolved = child.selector.replace(/&/g, selector);
+          if (selectorMode(resolved) !== null) {
+            rules.push({ selector: resolved, body: child.body });
           }
         }
       }
@@ -306,6 +306,9 @@ function selectorMode(selector: string): ThemeTypeName | 'base' | null {
     }
   }
   if (hasDark && hasLight) return 'base';
+  // Mixed list containing both a root element and a theme class (e.g.
+  // `:root, .theme-dark`) applies in all modes — classify as base.
+  if ((hasDark || hasLight) && hasBase) return 'base';
   if (hasDark) return 'dark';
   if (hasLight) return 'light';
   // 纯根选择器（无 theme class）——但必须是 `:root` / `body` / `html` 自身，
@@ -336,17 +339,19 @@ export function collectObsidianVars(source: string): ModeVars[] {
     );
   }
   const out: ModeVars[] = [];
-  // Merge base into mode, but base vars locked with !important take precedence.
-  const merge = (mode: VarMap): VarMap => {
+  // Merge base into mode. Base !important wins over non-important mode values,
+  // but a mode-specific !important overrides the base (higher specificity in CSS).
+  const merge = (mode: VarMap, modeLocked: Set<string>): VarMap => {
     const merged = new Map([...base, ...mode]);
     for (const name of baseLocked) {
+      if (modeLocked.has(name)) continue;
       const baseVal = base.get(name);
       if (baseVal !== undefined) merged.set(name, baseVal);
     }
     return merged;
   };
-  if (dark.size > 0) out.push({ type: 'dark', vars: merge(dark) });
-  if (light.size > 0) out.push({ type: 'light', vars: merge(light) });
+  if (dark.size > 0) out.push({ type: 'dark', vars: merge(dark, darkLocked) });
+  if (light.size > 0) out.push({ type: 'light', vars: merge(light, lightLocked) });
   // base-only fallback：只有根级声明且无显式模式块时，按背景亮度推断类型。
   if (out.length === 0 && base.size > 0) {
     const bg = readColor(base, ['--background-primary', '--color-base-00']);
@@ -417,16 +422,18 @@ export function extractObsidianPalette({ type, vars }: ModeVars): ObsidianExtrac
     derivedRoles.push('hover');
     return step(surface, 0.08);
   })();
-  const chip = role(
-    'chip',
-    ['--background-secondary-alt', '--background-modifier-active-hover', '--color-base-25'],
-    () => step(hover, 0.04),
-  );
-  const border = role(
-    'border',
-    ['--background-modifier-border', '--divider-color', '--color-base-30'],
-    () => step(surface, 0.2),
-  );
+  const chip = (() => {
+    const hit = readColor(vars, ['--background-secondary-alt', '--background-modifier-active-hover', '--color-base-25'], unresolved, surface);
+    if (hit) { resolvedRoles += 1; return hit; }
+    derivedRoles.push('chip');
+    return step(hover, 0.04);
+  })();
+  const border = (() => {
+    const hit = readColor(vars, ['--background-modifier-border', '--divider-color', '--color-base-30'], unresolved, surface);
+    if (hit) { resolvedRoles += 1; return hit; }
+    derivedRoles.push('border');
+    return step(surface, 0.2);
+  })();
 
   const textPrimary = (() => {
     const hit = readColor(vars, ['--text-normal', '--color-base-100'], unresolved, surface);

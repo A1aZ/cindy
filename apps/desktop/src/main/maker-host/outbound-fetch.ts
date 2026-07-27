@@ -679,4 +679,12 @@ export function resetOutboundFetchStateForTest(): void {
   routingPool.clear();
   proxyDecisionCache.clear();
   warnedOrigins.clear();
+  // 直连池也要收:它是模块级单例,不重置会跨用例存活(状态不隔离 + 悬挂的空闲连接)。
+  if (directAgent) {
+    const agent = directAgent;
+    directAgent = null;
+    void agent.close().catch(() => {
+      /* no-op */
+    });
+  }
 }

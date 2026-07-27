@@ -1391,8 +1391,12 @@ function renderItemEndMs(item: RenderItem): number | null {
     return Number.isFinite(latest) ? latest : renderItemStartMs(item);
   }
   if (item.type === 'agent_task') {
+    // fallback 顺序:updatedAt → update.createdAt → toolCall.createdAt。
+    // AgentTaskUpdate 可以只有 createdAt 而没有 updatedAt(见 normalizeAgentTaskUpdate),
+    // 那时 update.createdAt 比调用发起时刻更接近任务结束 —— 先取 toolCall.createdAt 会
+    // 低估结束时间,进而误判空洞、低报工作组时长(#676 review)。
     const ms = Date.parse(
-      item.update?.updatedAt ?? item.toolCall?.createdAt ?? item.update?.createdAt ?? '',
+      item.update?.updatedAt ?? item.update?.createdAt ?? item.toolCall?.createdAt ?? '',
     );
     const liveEnd = Number.isFinite(ms) ? ms : renderItemStartMs(item);
     // 历史会话没有 live update 时,liveEnd 退化成调用的开始时间;result 时间戳才是

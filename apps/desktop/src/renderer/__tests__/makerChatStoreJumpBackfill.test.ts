@@ -754,6 +754,35 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     await flushMicrotasks();
   });
 
+  it('W. 已有连续窗口时,退回孤岛不推进游标(否则缺失区间再也拉不回来)', async () => {
+    // review #676（codex）：缺失的区间比孤岛更新。把 oldestMessageId 推到孤岛上之后，
+    // 正常向上翻页只会取比孤岛更老的行，缺失区间永远拉不到；而重试也救不了——窗口已经
+    // 吃满预算，补齐一个请求都不发。游标必须留在连续段的边缘。
+    const seeded = fullPageNewestFirst();
+    const inWindow = seeded[50];
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([inWindow]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce(seeded);
+    await makerChatStore.loadAroundMessageClientId(SID, inWindow.clientId, { radius: 60 });
+    const contiguousCursor = makerChatStore.getSnapshot(SID).oldestMessageId;
+    expect(contiguousCursor).toBeTruthy();
+
+    // 跳到一条远得多的目标：翻完历史仍没命中 → exhausted → 退回 around 孤岛。
+    const farTarget = serverMessage({
+      id: 'far-island',
+      clientId: 'far-island',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([farTarget]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce([
+      serverMessage({ id: 'one', clientId: 'one', createdAt: '2026-07-24T00:00:00.000Z' }),
+    ]);
+    await makerChatStore.loadAroundMessageClientId(SID, 'far-island', { radius: 60 });
+
+    // 孤岛进了窗口，但游标仍在连续段边缘 —— 向上翻页才能填补中间的空档。
+    expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).toContain('far-island');
+    expect(makerChatStore.getSnapshot(SID).oldestMessageId).not.toBe('far-island');
+  });
+
   it('F. 让位时不释放别人的分页锁', async () => {
     // review #676（codex）：让位后 fallback 若写 isLoadingMore:false，就把仍在飞行的
     // loadOlderMessages 的锁提前释放了，下一次滚动/跳转会从同一游标再开一个请求。

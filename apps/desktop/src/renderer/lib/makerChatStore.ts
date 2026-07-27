@@ -1365,6 +1365,11 @@ function _demoteIdleSessions(): void {
     toDemote.push(sessionId);
   }
   for (const sessionId of toDemote) {
+    // 与 reloadMessages / clear / edit-last / grouped-delete / trim 同一规矩:清空窗口
+    // 等于代际重置,必须 bump epoch 作废 in-flight 的翻页 / 跳转补齐,并由本次重置释放
+    // 分页锁。漏 bump 的后果是 in-flight 那一页按 demote 前的游标提交,把一段脱离上下文
+    // 的旧历史 merge 进空切片(或重开后的新切片),最近的消息反而缺席(#676 review)。
+    bumpMessagesEpoch(sessionId);
     setState(sessionId, (s) => ({
       ...s,
       messages: [],
@@ -1372,6 +1377,8 @@ function _demoteIdleSessions(): void {
       historyLoaded: false,
       oldestMessageId: null,
       hasMoreMessages: true,
+      isLoadingMore: false,
+      historyWindowHasIsland: false,
     }));
   }
 }
@@ -5879,18 +5886,25 @@ function commitAroundWindow(
     // 代价只是下一次翻页可能重复取一段(mergeMessages 按 clientId 去重,不会重复显示)。
     if (outcome === 'busy') return { ...s, messages, historyWindowHasIsland: true };
 
-    const oldestMessageId = oldestServerMessageIdForWindow(
-      rows,
-      s.messages,
-      s.oldestMessageId,
-      'oldest-first',
-    );
     return {
       ...s,
       messages,
       historyLoaded: true,
       isFirstMessage: false,
-      oldestMessageId,
+      // 游标:已有连续窗口时**留在它的边缘**,不跟着孤岛前移(#676 review)。
+      //
+      // 退回 around 窗口时,缺失的区间比那座孤岛更新。若把 oldestMessageId 推到孤岛上,
+      // 之后正常的向上翻页只会取比孤岛更老的行 —— 缺失区间再也拉不回来,而重试也救不了
+      // (窗口已经吃满预算,补齐一个请求都不会发)。保留在连续段最老处,向上翻页就会
+      // 一页页填补连续段与孤岛之间的空档。
+      //
+      // 但窗口还没有游标时(会话首次打开就直接跳转,尾部窗口尚未建立)必须用 around 窗口的
+      // 边界播种,否则游标为 null 会让下一次翻页从最新重新开始、把跳转位置顶掉 ——
+      // 既有回归「preserves the search jump cursor when initial history resolves later」
+      // 与「keeps search result windows in chronological order across jumps」守着这条。
+      oldestMessageId:
+        s.oldestMessageId ??
+        oldestServerMessageIdForWindow(rows, s.messages, null, 'oldest-first'),
       // hasMoreMessages 一律置 true,即便 backfill 刚确证"从旧游标往上没有更多"。
       // 原因:走到这里说明马上要 merge 的 around 行比旧游标更早(否则早就 covered
       // 了),窗口最老边界因此前移,旧结论对新边界不成立 —— 而 around 行之上是否还有

@@ -108,7 +108,8 @@ export async function upsertRecentWorkdir(
     // 用 query builder 而不是 client.exec 拼 raw SQL,两个原因:
     //  1. pin(见上):builder 走的是已捕获的 db handle,不会二次解析 DbClient。
     //  2. main 侧的 drizzle 是 createDrizzleProxy 的代理,只把 **query builder** 的终结方法
-    //     (all / get / run / values)转发给 worker RPC。在 db 对象上直接跑 raw SQL
+    //     转发给 worker RPC(完整清单见 drizzleProxy.ts 的 terminalMethods:all / get / run /
+    //     values / execute,以及 then / catch / finally 触发的隐式执行)。在 db 对象上跑 raw SQL
     //     (db.run(sql`...`))不经过 builder,会落进代理内部那个只会抛错的
     //     fakeSqliteClient.prepare(),被 fire-and-forget 的 catch 吞成一条 warn —— 驱逐
     //     100% 静默失败(本 PR 修的就是这个)。子查询的 limit / offset 是 builder 内部的

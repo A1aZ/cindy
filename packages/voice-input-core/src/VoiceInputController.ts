@@ -265,7 +265,12 @@ export class VoiceInputController {
       updatedAt: Date.now(),
     };
     const range = this.callbacks.onSubmitted(text, segment);
-    this.transcriptEmitted = true;
+    // Same acceptance convention as salvageTranscript(): the returned range is
+    // the host's "I took the text" signal, and a host may refuse (mobile stops
+    // writing into the voice insertion once the user has edited it). Marking it
+    // emitted regardless would let a later failure claim transcriptKept for
+    // text that never landed.
+    this.transcriptEmitted = Boolean(range);
     this.logger.record({ type: 'submitted', runId, at: Date.now(), text, source });
 
     if (this.refiner && range) {

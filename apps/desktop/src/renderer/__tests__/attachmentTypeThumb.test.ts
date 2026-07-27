@@ -97,9 +97,20 @@ describe('AttachmentTypeThumb — 缩略图取用契约', () => {
     expect(src).toMatch(/const revalidateSubscribers = new Set<\(\) => void>\(\)/);
     expect(src).toMatch(/if \(focusListenerBound \|\| typeof window === 'undefined'\) return/);
     expect(src).toMatch(/const REVALIDATE_MIN_INTERVAL_MS = [\d_]+/);
-    expect(src).toMatch(/now - lastRevalidateAt < REVALIDATE_MIN_INTERVAL_MS/);
+    expect(src).toMatch(/window\.addEventListener\('focus', requestRevalidate\)/);
     // 卸载要退订,否则订阅集合会随会话切换无限增长。
     expect(src).toMatch(/revalidateSubscribers\.delete\(notify\)/);
+  });
+
+  it('节流带 trailing 补播,不吞掉窗口内的最新一次改动', () => {
+    // 只做 leading 的话:「改一次 → 切回来 → 再改 → 30s 内切回来」第二次改动会被
+    // 整个丢掉,而发送用的是当前内容,卡片就一直描述旧版本。
+    const fn = src.slice(src.indexOf('function requestRevalidate'), src.indexOf('function ensureFocusListener'));
+    expect(fn).toMatch(/if \(trailingTimer\) return;/);
+    expect(fn).toMatch(/trailingTimer = setTimeout\([\s\S]*broadcastRevalidate\(\)/);
+    expect(fn).toMatch(/REVALIDATE_MIN_INTERVAL_MS - elapsed/);
+    // leading 命中时要清掉已排的补播,避免紧接着再播一次。
+    expect(fn).toMatch(/clearTimeout\(trailingTimer\)/);
   });
 
   it('角标标签渲染尺寸不低于 10px(DESIGN.md §3 Micro Label 下限)', () => {

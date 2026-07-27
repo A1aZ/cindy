@@ -55,17 +55,40 @@ const thumbCache = new Map<string, Thumb>();
 const REVALIDATE_MIN_INTERVAL_MS = 30_000;
 const revalidateSubscribers = new Set<() => void>();
 let lastRevalidateAt = 0;
+let trailingTimer: ReturnType<typeof setTimeout> | null = null;
 let focusListenerBound = false;
+
+function broadcastRevalidate(): void {
+  lastRevalidateAt = Date.now();
+  for (const notify of revalidateSubscribers) notify();
+}
+
+/**
+ * 节流是 leading + **trailing**:光掐掉窗口内的事件会把最新一次改动整个吞掉
+ * (改一次 → 切回来 → 再改 → 30s 内切回来,第二次改动就看不见了,而发送用的是
+ * 当前内容)。窗口内的多次 focus 合并成一次尾部补播,既不丢最新状态也不放大 IPC。
+ */
+function requestRevalidate(): void {
+  const elapsed = Date.now() - lastRevalidateAt;
+  if (elapsed >= REVALIDATE_MIN_INTERVAL_MS) {
+    if (trailingTimer) {
+      clearTimeout(trailingTimer);
+      trailingTimer = null;
+    }
+    broadcastRevalidate();
+    return;
+  }
+  if (trailingTimer) return; // 已经排好补播,后续 focus 合并进去
+  trailingTimer = setTimeout(() => {
+    trailingTimer = null;
+    broadcastRevalidate();
+  }, REVALIDATE_MIN_INTERVAL_MS - elapsed);
+}
 
 function ensureFocusListener(): void {
   if (focusListenerBound || typeof window === 'undefined') return;
   focusListenerBound = true;
-  window.addEventListener('focus', () => {
-    const now = Date.now();
-    if (now - lastRevalidateAt < REVALIDATE_MIN_INTERVAL_MS) return;
-    lastRevalidateAt = now;
-    for (const notify of revalidateSubscribers) notify();
-  });
+  window.addEventListener('focus', requestRevalidate);
 }
 
 function rememberThumb(key: string, value: Thumb): void {

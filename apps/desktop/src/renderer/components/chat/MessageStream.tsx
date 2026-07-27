@@ -1189,6 +1189,25 @@ export function buildRenderItems(
 // Work-group pass(buildRenderItems 之后的第二层后处理)
 // ---------------------------------------------------------------------------
 
+/**
+ * 历史窗口空洞的切组阈值。
+ *
+ * 跳转到历史消息(makerChatStore 的 loadAroundMessage /
+ * loadAroundMessageClientId)会把目标附近的窗口 merge 进当前 messages,它与已加载
+ * 的尾部窗口之间可能隔着大段尚未加载的历史。渲染层看到的是两段"相邻"item,中间
+ * 的 user 行(唯一的 turn 边界)全部缺席,于是跨越空洞的所有动作被折成同一个
+ * 「已工作 Xs」:实测出现过一条组吞掉 47 小时、40 条 user 消息的会话,组时长
+ * (末项时间 − 首项时间)也跟着谎报成 2820m。
+ *
+ * 因此除 user 行外,相邻动作间隔超过本阈值也切断工作组。30 分钟:单个 turn 内相邻
+ * 动作(工具调用 / thinking)正常在秒级到分钟级,等长任务最多几十分钟;真被误切也
+ * 只是多出一个折叠条,代价远小于把不相干的两段并成一条并谎报时长。
+ *
+ * 注意这只消除"看起来像丢消息"的渲染症状,空洞本身仍在 messages 里——补齐中间
+ * 历史属于分页/跳转加载的职责,不在本 pass 内解决。
+ */
+const HISTORY_GAP_SPLIT_MS = 30 * 60 * 1000;
+
 /** 完成态 work_group 可合并的子项:tool_segment / agent_task / thinking /
  *  assistant 工作文字。运行态只通过 isWorkActivityItem 收动作,所以不会提前
  *  折叠正在输出的 assistant 文字。 */
@@ -1738,6 +1757,9 @@ function renderWorkGroupChild(
  * 内层组 key 不变;完成态外组另用 `work-summary-*`,避免复用展开记忆。
  * DB prepend 向前合并等场景由 recoverLostAnchorIdx 递归找回锚点。
  *
+ * 窗口空洞:除 user 行外,相邻动作间隔超过 HISTORY_GAP_SPLIT_MS 也切断工作组,
+ * 见该常量注释。
+ *
  * export 仅供单测使用。
  */
 export function groupWorkRuns(items: RenderItem[], isSessionStreaming: boolean): RenderItem[] {
@@ -1757,13 +1779,22 @@ export function groupWorkRuns(items: RenderItem[], isSessionStreaming: boolean):
     currentTurn = [];
   };
 
+  // 无时间戳的 item 不重置锚点:让间隔判定跨过它,继续比对上一个有时间的动作。
+  let prevMs: number | null = null;
+
   for (const it of items) {
     if (it.type === 'message' && it.message.role === 'user') {
       flushTurn(false);
       out.push(it);
+      prevMs = renderItemStartMs(it) ?? prevMs;
       continue;
     }
+    const itemMs = renderItemStartMs(it);
+    if (prevMs !== null && itemMs !== null && itemMs - prevMs > HISTORY_GAP_SPLIT_MS) {
+      flushTurn(false);
+    }
     currentTurn.push(it);
+    prevMs = itemMs ?? prevMs;
   }
   flushTurn(true);
   return out;

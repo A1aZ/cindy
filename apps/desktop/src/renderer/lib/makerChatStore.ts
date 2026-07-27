@@ -5590,6 +5590,90 @@ function loadOlderMessages(sessionId: string): void {
   })();
 }
 
+/**
+ * 跳转补齐的翻页上限。每页 100 行(messages:list 的 MAX_LIMIT),最多 60 页 = 6000 行。
+ * 触顶仍未覆盖目标时退回 around 窗口(见 loadAroundWindow),不无限翻。
+ */
+const JUMP_BACKFILL_MAX_PAGES = 60;
+const JUMP_BACKFILL_PAGE_SIZE = 100;
+
+/**
+ * 把当前窗口从最新连续向上补齐,直到 `covered` 判定命中目标。
+ *
+ * 为什么要补:跳转到历史消息如果只把目标附近的窗口 merge 进来,它与已加载的尾部
+ * 窗口之间会隔着一段没加载的历史——渲染层看到两段"相邻"item,中间的 user 行(唯一
+ * 的 turn 边界)全部缺席,整段被折成一个「已工作 Xs」,用户看到的就是"中间掉了很多
+ * 条消息"(实测一条组吞掉 47 小时、40 条 user 消息)。补齐后窗口始终是"某点 → 最新"
+ * 的连续区间:没有空洞,向下滚也一定能回到最新。
+ *
+ * 用现有 `before` 游标向上翻页实现,不需要给 messages:list 加 `after` 方向,
+ * 因而不触碰 device-link 隧道的跨端 wire protocol。远程会话经 listMessagesFor
+ * 自动走 origin-aware 路由。
+ *
+ * 返回是否已覆盖目标;false = 触顶/翻完/失败,调用方需自行兜底。
+ */
+async function backfillHistoryUntil(
+  sessionId: string,
+  covered: (messages: ChatMessage[]) => boolean,
+): Promise<boolean> {
+  const epochAtStart = _messagesEpoch.get(sessionId) ?? 0;
+  if (covered(getOrCreateState(sessionId).messages)) return true;
+
+  setState(sessionId, (s) => ({ ...s, isLoadingMore: true }));
+  try {
+    for (let page = 0; page < JUMP_BACKFILL_MAX_PAGES; page++) {
+      const state = getOrCreateState(sessionId);
+      // 首页(窗口为空)不带游标 —— messages:list 默认返回最新一页。
+      const opts: { limit: number; before?: string } = { limit: JUMP_BACKFILL_PAGE_SIZE };
+      if (state.oldestMessageId) opts.before = state.oldestMessageId;
+
+      const rows = await listMessagesFor(sessionId, opts);
+      // 代际比对:追页期间 rewind / clear / purge 重置了切片 → 本次窗口作废。
+      if ((_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart) return false;
+      if (rows.length === 0) {
+        setState(sessionId, (s) => ({ ...s, hasMoreMessages: false, isLoadingMore: false }));
+        return false;
+      }
+
+      const mapped = mapServerMessages(rows);
+      const oldestRow = oldestMessageRow(rows, 'newest-first');
+      const hasMore = serverMessagePageHasMore(rows, JUMP_BACKFILL_PAGE_SIZE);
+      let merged: ChatMessage[] = [];
+      setState(sessionId, (s) => {
+        merged = mergeMessages(mapped, s.messages, {}, 'newest-first');
+        return {
+          ...s,
+          messages: merged,
+          historyLoaded: true,
+          isFirstMessage: false,
+          oldestMessageId: oldestRow?.id ?? s.oldestMessageId,
+          hasMoreMessages: hasMore,
+          isLoadingMore: true,
+        };
+      });
+
+      if (covered(merged)) {
+        setState(sessionId, (s) => ({ ...s, isLoadingMore: false }));
+        return true;
+      }
+      if (!hasMore) {
+        // 已翻到历史起点仍没命中:目标不在本会话可见历史里(例如被 rewind 软删)。
+        setState(sessionId, (s) => ({ ...s, isLoadingMore: false }));
+        return false;
+      }
+    }
+    return false;
+  } catch (err) {
+    log.warn('backfillHistoryUntil failed', { sessionId, err: String(err) });
+    return false;
+  } finally {
+    // 任何出口都要复位 spinner,否则行首守卫会让该会话永久无法再翻页。
+    if ((_messagesEpoch.get(sessionId) ?? 0) === epochAtStart) {
+      setState(sessionId, (s) => (s.isLoadingMore ? { ...s, isLoadingMore: false } : s));
+    }
+  }
+}
+
 async function loadAroundMessage(
   sessionId: string,
   messageId: string,
@@ -5602,8 +5686,23 @@ async function loadAroundMessage(
   const mapped = mapServerMessages(rows);
   const targetRow = rows.find((row) => row.id === messageId) ?? null;
   const targetClientId = targetRow?.clientId ?? null;
+
+  // 优先把窗口从最新连续补齐到目标,不留历史空洞(见 backfillHistoryUntil)。
+  // 补不到(超上限 / 翻完 / 失败)则退回 around 窗口 merge:此时窗口仍不连续,
+  // 由渲染层的 HISTORY_GAP_SPLIT_MS 守卫兜底,不至于把两段折成一个工作组。
+  const covered = targetClientId
+    ? await backfillHistoryUntil(sessionId, (messages) =>
+        messages.some((message) => message.clientId === targetClientId),
+      )
+    : false;
+
   setState(sessionId, (s) => {
+    // 两条路径都要 merge:around 返回的是权威行,重复跳转同一条消息时要靠它把本地
+    // 旧内容 hydrate 成最新(典型:tool_result 由 verbose 收敛成权威短内容)。
     const messages = mergeMessages(mapped, s.messages, {}, 'oldest-first');
+    // 已补齐时窗口是"某点 → 最新"的连续区间,游标与 hasMore 由 backfill 维护,
+    // 不能再被 around 窗口的边界回退。
+    if (covered) return { ...s, messages };
     const oldestMessageId = oldestServerMessageIdForWindow(
       rows,
       s.messages,
@@ -5622,7 +5721,11 @@ async function loadAroundMessage(
   });
 
   if (!targetClientId) return null;
-  return mapped.find((message) => message.clientId === targetClientId) ?? null;
+  return (
+    getOrCreateState(sessionId).messages.find(
+      (message) => message.clientId === targetClientId,
+    ) ?? null
+  );
 }
 
 async function loadAroundMessageClientId(
@@ -5634,8 +5737,16 @@ async function loadAroundMessageClientId(
   if (rows.length === 0) return null;
 
   const mapped = mapServerMessages(rows);
+
+  // 同 loadAroundMessage:先连续补齐,避免跳转窗口与尾部窗口之间留下历史空洞。
+  const covered = await backfillHistoryUntil(sessionId, (messages) =>
+    messages.some((message) => message.clientId === clientId),
+  );
+
   setState(sessionId, (s) => {
+    // around 行是权威内容,两条路径都要 merge(重复跳转同一条时负责 hydration)。
     const messages = mergeMessages(mapped, s.messages, {}, 'oldest-first');
+    if (covered) return { ...s, messages };
     const oldestMessageId = oldestServerMessageIdForWindow(
       rows,
       s.messages,
@@ -5653,7 +5764,9 @@ async function loadAroundMessageClientId(
     };
   });
 
-  return mapped.find((message) => message.clientId === clientId) ?? null;
+  return (
+    getOrCreateState(sessionId).messages.find((message) => message.clientId === clientId) ?? null
+  );
 }
 
 function buildQueuedMessage(

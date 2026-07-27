@@ -142,30 +142,46 @@ export async function readFileThumbnail(params: FileThumbnailParams): Promise<st
 
   const task = (async () => {
     await acquireSlot();
+    const native = nativeImage.createThumbnailFromPath(realPath, {
+      width: Math.round(size),
+      height: Math.round(size),
+    });
+
+    // 名额与 in-flight 都跟着**原生 promise**走,不跟着下面那个 race:超时只能让
+    // IPC 早点返回,取消不了已经交给 QuickLook / Shell 的任务(Electron 无此 API)。
+    // 若在超时那一刻就放名额、删 inFlight,系统卡住时每过 4s 就会再放 4 个新任务
+    // 进去,闸门等于没有——真实在飞数必须由原生任务的生命周期决定。
+    void native
+      .then((image) => {
+        // 迟到的结果照样有用:写进缓存,下次挂载直接命中,不用再跑一遍。
+        cacheSet(key, !image || image.isEmpty() ? null : image.toDataURL());
+      })
+      .catch((err) => {
+        // 系统不支持该类型是常态(冷门扩展名),按 debug 记,不刷 warn。
+        // 负结果入缓存:否则每次重挂载都要再花一次昂贵的原生调用去撞同一堵墙。
+        cacheSet(key, null);
+        log.debug('thumbnail unavailable', { ext: path.extname(realPath), error: String(err) });
+      })
+      .finally(() => {
+        releaseSlot();
+        inFlight.delete(key);
+      });
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const image = await Promise.race([
-        nativeImage.createThumbnailFromPath(realPath, {
-          width: Math.round(size),
-          height: Math.round(size),
+        native,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('thumbnail timeout')), TIMEOUT_MS);
         }),
-        new Promise<never>((_resolve, reject) =>
-          setTimeout(() => reject(new Error('thumbnail timeout')), TIMEOUT_MS),
-        ),
       ]);
-      const dataUrl = !image || image.isEmpty() ? null : image.toDataURL();
-      cacheSet(key, dataUrl);
-      return dataUrl;
-    } catch (err) {
-      // 系统不支持该类型是常态(冷门扩展名),按 debug 记,不刷 warn。
-      // 负结果同样入缓存:否则每次重挂载都要再花一次昂贵的原生调用去撞同一堵墙。
-      // 超时不入缓存——那是暂时性的,下次可能成功。
-      const timedOut = err instanceof Error && err.message === 'thumbnail timeout';
-      if (!timedOut) cacheSet(key, null);
-      log.debug('thumbnail unavailable', { ext: path.extname(realPath), error: String(err) });
+      return !image || image.isEmpty() ? null : image.toDataURL();
+    } catch {
+      // 超时或原生失败:本次 IPC 回 null 让卡片先回落图标。task 会以 null 停在
+      // inFlight 里直到原生 settle —— 期间同一文件的重挂载请求复用它,不会再点火。
       return null;
     } finally {
-      releaseSlot();
-      inFlight.delete(key);
+      if (timer) clearTimeout(timer);
     }
   })();
   inFlight.set(key, task);

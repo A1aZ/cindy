@@ -94,16 +94,23 @@ describe('AttachmentTypeThumb — 缩略图取用契约', () => {
     expect(fn).toMatch(/catch \{\s*return false;\s*\}/);
   });
 
-  it('自绘图标的纸面走 token,只有类型角标带内容语义色', () => {
+  it('自绘图标的颜色全部走注册 token,组件里不写死任何 hex', () => {
     // 纸张本体 / 描边 / 正文线必须是 token,否则 Dark 模式会失配。
     expect(src).toMatch(/fill="var\(--surface-elevated\)"/);
     expect(src).toMatch(/stroke="var\(--text-placeholder\)"/);
-    // 角标色是 theme-invariant 的内容语义色,集中在 KIND_ACCENT 一张表里。
-    const accentBlock = src.slice(src.indexOf('const KIND_ACCENT'), src.indexOf('const KIND_LABEL'));
-    expect(accentBlock).toMatch(/pdf: '#D9553F'/);
-    // 表以外不得再散落硬编码色值(角标文字的纯白除外)。
-    const withoutAccent = src.replace(accentBlock, '');
-    const strays = withoutAccent.match(/#[0-9A-Fa-f]{6}/g) ?? [];
-    expect(strays).toEqual(['#FFFFFF']);
+    // 角标色是 theme-invariant 例外族,但同样得走注册 token —— DESIGN.md §10:
+    // 「Never freestyle these semantic colors as hardcoded hex」。
+    const accentBlock = src.slice(src.indexOf('const KIND_ACCENT'), src.indexOf('/** 角标里的短标签'));
+    expect(accentBlock).toMatch(/pdf: 'var\(--file-badge-pdf\)'/);
+    expect(accentBlock).toMatch(/code: 'var\(--file-badge-code\)'/);
+    expect(src).toMatch(/fill="var\(--file-badge-fg\)"/);
+    // 整个组件不得出现硬编码色值(注释里引用取值说明不算,这里只查代码字面量)。
+    const literals = src.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(literals.match(/#[0-9A-Fa-f]{3,8}\b/g) ?? []).toEqual([]);
+  });
+
+  it('角标字重不超过 500(DESIGN.md §3 Weight restraint:No bold)', () => {
+    expect(src).toMatch(/fontWeight="500"/);
+    expect(src).not.toMatch(/fontWeight="[6-9]\d\d"/);
   });
 });

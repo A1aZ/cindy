@@ -38,6 +38,9 @@ vi.mock('../logger', () => ({
 
 import { readFileThumbnail, __clearFileThumbnailCacheForTest } from '../fileThumbnail';
 
+/** 与 fileThumbnail.ts 的 TIMEOUT_MS 对齐(那里是模块私有常量)。 */
+const TIMEOUT_MS = 4000;
+
 function okImage(dataUrl = 'data:image/png;base64,AAA') {
   return { isEmpty: () => false, toDataURL: () => dataUrl };
 }
@@ -127,20 +130,103 @@ describe('readFileThumbnail — 兜底与缓存', () => {
     expect(createThumbnailFromPath).toHaveBeenCalledTimes(1);
   });
 
-  it('超时不入负缓存(是暂时性的,下次可能成功)', async () => {
+  it('超时后名额不放行,直到原生任务真正 settle(否则闸门形同虚设)', async () => {
+    // 超时只让 IPC 早返回,QuickLook/Shell 那边取消不了 —— 若此刻就放名额,
+    // 系统卡住时每过一个超时周期就会再放一批新任务进去。
+    const gates: (() => void)[] = [];
+    let active = 0;
+    let peak = 0;
+    createThumbnailFromPath.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          active += 1;
+          peak = Math.max(peak, active);
+          gates.push(() => {
+            active -= 1;
+            resolve(okImage());
+          });
+        }),
+    );
     vi.useFakeTimers();
     try {
-      createThumbnailFromPath.mockReturnValue(new Promise(() => {}));
-      const first = readFileThumbnail({ path: '/tmp/slow.pdf', size: 80 });
-      await vi.advanceTimersByTimeAsync(5000);
-      await expect(first).resolves.toBeNull();
+      // 5 个不同文件:前 4 个占满名额,第 5 个排队。
+      const calls = Array.from({ length: 5 }, (_, i) =>
+        readFileThumbnail({ path: `/tmp/hang${i}.pdf`, size: 80 }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(peak).toBe(4);
+      // 让前 4 个全部超时:IPC 各自回 null,但原生任务仍挂着。
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS + 100);
+      expect(await Promise.all(calls.slice(0, 4))).toEqual([null, null, null, null]);
+      // 关键断言:名额没被超时释放,排队的第 5 个仍进不来。
+      expect(peak).toBe(4);
+      expect(createThumbnailFromPath).toHaveBeenCalledTimes(4);
+      // 放掉一个原生任务,排队者才拿到名额。
+      gates.shift()?.();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(createThumbnailFromPath).toHaveBeenCalledTimes(5);
+      while (gates.length) {
+        gates.shift()?.();
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      await Promise.all(calls);
     } finally {
       vi.useRealTimers();
     }
-    createThumbnailFromPath.mockResolvedValue(okImage());
-    await expect(readFileThumbnail({ path: '/tmp/slow.pdf', size: 80 })).resolves.toBe(
+  });
+
+  it('超时后迟到的原生结果仍写进缓存,下次挂载直接命中', async () => {
+    let resolveNative: ((v: unknown) => void) | undefined;
+    createThumbnailFromPath.mockReturnValue(
+      new Promise((resolve) => {
+        resolveNative = resolve;
+      }),
+    );
+    vi.useFakeTimers();
+    let first: Promise<string | null>;
+    try {
+      first = readFileThumbnail({ path: '/tmp/late.pdf', size: 80 });
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS + 100);
+      expect(await first).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+    // 原生任务姗姗来迟：结果不该被丢掉。
+    resolveNative?.(okImage());
+    await Promise.resolve();
+    await Promise.resolve();
+    await expect(readFileThumbnail({ path: '/tmp/late.pdf', size: 80 })).resolves.toBe(
       'data:image/png;base64,AAA',
     );
+    expect(createThumbnailFromPath).toHaveBeenCalledTimes(1);
+  });
+
+  it('原生任务卡住期间不重复点火;它真失败后才落负缓存', async () => {
+    let rejectNative: ((e: unknown) => void) | undefined;
+    createThumbnailFromPath.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectNative = reject;
+      }),
+    );
+    vi.useFakeTimers();
+    let first: Promise<string | null>;
+    try {
+      first = readFileThumbnail({ path: '/tmp/slow.pdf', size: 80 });
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS + 100);
+      expect(await first).toBeNull();
+      // 超时只让 IPC 早返回;原生任务还挂着时,同一文件的重挂载请求复用它,
+      // 不会再点一把新火(否则系统卡住时会越积越多)。
+      await expect(readFileThumbnail({ path: '/tmp/slow.pdf', size: 80 })).resolves.toBeNull();
+      expect(createThumbnailFromPath).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+    // 原生任务最终失败 → 落负缓存,后续请求直接命中,仍不重复调用。
+    rejectNative?.(new Error('unsupported'));
+    await Promise.resolve();
+    await Promise.resolve();
+    await expect(readFileThumbnail({ path: '/tmp/slow.pdf', size: 80 })).resolves.toBeNull();
+    expect(createThumbnailFromPath).toHaveBeenCalledTimes(1);
   });
 
   it('同一文件的并发请求合并成一次原生调用', async () => {

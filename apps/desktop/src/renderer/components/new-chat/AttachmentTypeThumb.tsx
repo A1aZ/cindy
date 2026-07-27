@@ -94,13 +94,17 @@ async function looksLikeIconBitmap(dataUrl: string): Promise<boolean> {
 
 type IconKind = 'pdf' | 'doc' | 'sheet' | 'slide' | 'code' | 'text' | 'image' | 'plain';
 
-/** 角标色:同族低饱和,避免在灰调界面里跳出来。 */
+/**
+ * 角标色:走 themes/colors.ts 注册的 file-badge-* token(§10 theme-invariant
+ * 例外族),不在组件里写死 hex —— 否则自定义主题改不动它。取值都按白字 ≥4.5:1
+ * 选过,前景恒用 --file-badge-fg。
+ */
 const KIND_ACCENT: Record<IconKind, string | null> = {
-  pdf: '#D9553F',
-  doc: '#3B72C4',
-  sheet: '#3F9A5C',
-  slide: '#D08A32',
-  code: '#7A63C9',
+  pdf: 'var(--file-badge-pdf)',
+  doc: 'var(--file-badge-doc)',
+  sheet: 'var(--file-badge-sheet)',
+  slide: 'var(--file-badge-slide)',
+  code: 'var(--file-badge-code)',
   text: null,
   image: null,
   plain: null,
@@ -176,14 +180,15 @@ function FileGlyph({ kind }: { kind: IconKind }) {
       {accent && label ? (
         <>
           <rect x="9" y="18.5" width="19" height="11" rx="2.5" fill={accent} />
+          {/* 字重 500 封顶:DESIGN.md §3「Weight restraint — 只有 400 与 500,No bold」。 */}
           <text
             x="18.5"
             y="26.4"
             textAnchor="middle"
             fontSize="7.5"
-            fontWeight="700"
+            fontWeight="500"
             letterSpacing="0.2"
-            fill="#FFFFFF"
+            fill="var(--file-badge-fg)"
           >
             {label}
           </text>

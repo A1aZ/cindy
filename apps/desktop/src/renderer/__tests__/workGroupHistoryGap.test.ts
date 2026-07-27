@@ -174,6 +174,43 @@ describe('历史窗口空洞 — 段内部的空洞', () => {
   });
 });
 
+// ── Scenario A4:长时段 tool_segment 不被误判成空洞(review #676 codex) ────────
+
+describe('历史窗口空洞 — 长任务不被误判', () => {
+  it('A4. 段内每次调用都在阈值内、整段却跨 1 小时时,后续 item 不被切开', () => {
+    // 间隔判定必须用上一个 item 的「结束」时间。用 start 的话,这个跨 1 小时的段
+    // 会让紧随其后的 assistant 正文与「段首」比较 → 差值 = 整段耗时 → 误判空洞,
+    // 把最终答复前的进度文字留在工作组外、时长也退化成段兜底。
+    const messages: ChatMessage[] = [
+      mkUser('u1', '2026-07-25T10:00:00.000Z', '跑一下 CI'),
+      // 进度文字：应当被收进「已工作」组（它不是最终答复）。
+      mkAssistant('a0', '2026-07-25T10:00:00.000Z', '我先把 CI 跑起来。'),
+    ];
+    // 每 20 分钟一次调用（阈值内），共 4 次 → 整段跨 60 分钟。
+    for (let i = 0; i < 4; i++) {
+      const at = new Date(Date.UTC(2026, 6, 25, 10, 0, 30) + i * 20 * 60_000).toISOString();
+      const resultAt = new Date(Date.UTC(2026, 6, 25, 10, 1, 0) + i * 20 * 60_000).toISOString();
+      messages.push(mkTool(`t${i}`, at), mkResult(`r${i}`, `tu-t${i}`, resultAt));
+    }
+    // 段末调用之后 1 分钟就给出最终答复 —— 与「段末」相隔很近,不该被判成空洞。
+    messages.push(mkAssistant('a1', '2026-07-25T11:01:30.000Z', 'CI 全绿。'));
+
+    const { items } = buildRenderItems(messages);
+    // 段内相邻间隔 20 分钟 < 阈值 → 仍是一整段。
+    expect(items.filter((it) => it.type === 'tool_segment')).toHaveLength(1);
+
+    const grouped = groupWorkRuns(items, false);
+    // 整个 turn 是一组：进度文字 + 整段动作都在组内，只有最终答复留在组外。
+    // 用 start 做锚点时这里会被误切成两段，进度文字会变成前一段的「最终答复」而
+    // 跑到组外 —— 这正是要拦住的退化。
+    const groups = workGroups(grouped);
+    expect(groups).toHaveLength(1);
+    expect(groupContains(groups[0], 'a0')).toBe(true);
+    expect(groupContains(groups[0], 't0')).toBe(true);
+    expect(groupContains(groups[0], 't3')).toBe(true);
+  });
+});
+
 // ── Scenario B:正常连续 turn 不被误切 ───────────────────────────────────────
 
 describe('历史窗口空洞 — 正常 turn 不受影响', () => {

@@ -246,7 +246,7 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     await flushMicrotasks();
   });
 
-  it('C. 翻完历史仍没命中时退回 around 窗口,跳转不失败', async () => {
+  it('C. 翻完历史仍没命中时退回 around 窗口,跳转不失败,且仍允许继续向上翻页', async () => {
     const target = serverMessage({
       id: 'orphan',
       clientId: 'orphan',
@@ -265,5 +265,65 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).toContain('orphan');
     // spinner 必须复位,否则行首守卫会让该会话永久无法再翻页。
     expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(false);
+    // review #676（copilot 建议在 fallback 保留 false）——核实后不采纳：fallback 刚
+    // merge 进来的 around 行比旧游标更早，窗口最老边界前移，「从旧游标往上没有更多」
+    // 对新边界不成立；锁成 false 会让这段历史再也翻不动。
+    expect(makerChatStore.getSnapshot(SID).hasMoreMessages).toBe(true);
+  });
+
+  it('F. 让位时不释放别人的分页锁', async () => {
+    // review #676（codex）：让位后 fallback 若写 isLoadingMore:false，就把仍在飞行的
+    // loadOlderMessages 的锁提前释放了，下一次滚动/跳转会从同一游标再开一个请求。
+    const seeded = fullPageNewestFirst();
+    const inWindow = seeded[50];
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([inWindow]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce(seeded);
+    await makerChatStore.loadAroundMessageClientId(SID, inWindow.clientId, { radius: 60 });
+
+    let releasePage: (rows: Message[]) => void = () => {};
+    vi.mocked(listMessagesFor).mockImplementationOnce(
+      () =>
+        new Promise<Message[]>((resolve) => {
+          releasePage = resolve;
+        }),
+    );
+    makerChatStore.loadOlderMessages(SID);
+    await flushMicrotasks();
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(true);
+
+    const older = serverMessage({
+      id: 'older2',
+      clientId: 'older2',
+      createdAt: '2026-07-20T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([older]);
+    await makerChatStore.loadAroundMessageClientId(SID, 'older2', { radius: 60 });
+
+    // 锁仍归原请求持有 —— 跳转的 fallback 不得代为释放。
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(true);
+
+    releasePage([]);
+    await flushMicrotasks();
+    // 原请求自己收尾后才释放。
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(false);
+  });
+
+  it('G. around 请求飞行期间切片被重置时,跳转作废(epoch 在请求前快照)', async () => {
+    // review #676（codex）：epoch 若在 around 请求返回后才快照，就漏掉了这个 await
+    // 自身的竞态窗口，陈旧的 around 行会被当成新代际 merge 回窗口。
+    const target = serverMessage({
+      id: 'stale',
+      clientId: 'stale',
+      createdAt: '2026-07-20T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockImplementationOnce(async () => {
+      makerChatStore.purgeSession(SID);
+      return [target];
+    });
+
+    const result = await makerChatStore.loadAroundMessageClientId(SID, 'stale', { radius: 60 });
+
+    expect(result).toBeNull();
+    expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).not.toContain('stale');
   });
 });

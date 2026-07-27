@@ -1337,6 +1337,36 @@ function renderItemStartMs(item: RenderItem): number | null {
   return null;
 }
 
+/**
+ * item 的结束时间戳 —— 空洞判定必须用它,不能用 start。
+ *
+ * 一个合法连续 turn 里的 tool_segment 本身可能跨半小时以上(段内每次相邻调用都在
+ * 阈值内,所以不会被切段)。若拿下一条 item 的 start 去跟这个段的 **start** 比,
+ * 差值就等于整段耗时,会把正常长任务误判成历史空洞:该切的没切,不该切的切了,
+ * 前面的 assistant 进度文字被留在工作组外,时长也退化成段兜底而非最终答复。
+ */
+function renderItemEndMs(item: RenderItem): number | null {
+  if (item.type === 'tool_segment') {
+    const calls = item.toolCalls;
+    const ms = Date.parse(calls[calls.length - 1]?.createdAt ?? '');
+    return Number.isFinite(ms) ? ms : renderItemStartMs(item);
+  }
+  if (item.type === 'agent_task') {
+    const ms = Date.parse(
+      item.update?.updatedAt ?? item.toolCall?.createdAt ?? item.update?.createdAt ?? '',
+    );
+    return Number.isFinite(ms) ? ms : renderItemStartMs(item);
+  }
+  if (item.type === 'work_group') {
+    for (let i = item.children.length - 1; i >= 0; i--) {
+      const childMs = renderItemEndMs(item.children[i]);
+      if (childMs !== null) return childMs;
+    }
+    return null;
+  }
+  return renderItemStartMs(item);
+}
+
 export function insertForkOriginItem(
   items: RenderItem[],
   forkOrigin: MessageStreamProps['forkOrigin'],
@@ -1799,22 +1829,24 @@ export function groupWorkRuns(items: RenderItem[], isSessionStreaming: boolean):
     currentTurn = [];
   };
 
+  // 锚点用上一个 item 的**结束**时间(见 renderItemEndMs):否则一个正常的长时段
+  // tool_segment 会让紧随其后的 item 被误判成空洞。
   // 无时间戳的 item 不重置锚点:让间隔判定跨过它,继续比对上一个有时间的动作。
-  let prevMs: number | null = null;
+  let prevEndMs: number | null = null;
 
   for (const it of items) {
     if (it.type === 'message' && it.message.role === 'user') {
       flushTurn(false);
       out.push(it);
-      prevMs = renderItemStartMs(it) ?? prevMs;
+      prevEndMs = renderItemEndMs(it) ?? prevEndMs;
       continue;
     }
-    const itemMs = renderItemStartMs(it);
-    if (prevMs !== null && itemMs !== null && itemMs - prevMs > HISTORY_GAP_SPLIT_MS) {
+    const itemStartMs = renderItemStartMs(it);
+    if (prevEndMs !== null && itemStartMs !== null && itemStartMs - prevEndMs > HISTORY_GAP_SPLIT_MS) {
       flushTurn(false);
     }
     currentTurn.push(it);
-    prevMs = itemMs ?? prevMs;
+    prevEndMs = renderItemEndMs(it) ?? prevEndMs;
   }
   flushTurn(true);
   return out;

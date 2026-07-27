@@ -5591,10 +5591,25 @@ function loadOlderMessages(sessionId: string): void {
 }
 
 /**
- * 跳转补齐的翻页上限。每页 100 行(messages:list 的 MAX_LIMIT),最多 60 页 = 6000 行。
+ * 跳转补齐的翻页上限。每页 100 行(messages:list 的 MAX_LIMIT),最多 20 页 = 2000 行。
  * 触顶仍未覆盖目标时退回两个跳转入口原有的 around 窗口 merge,不无限翻。
+ *
+ * 为什么是 2000 而不是更多:MessageStream 的锚定渲染窗口
+ * (visibleRenderItems 的 firstVisibleItemKey 分支)是 `slice(startIdx)` ——
+ * 从锚点一直切到末尾、没有上界。补齐把 messages 变长后,跳转到很早的位置就会
+ * 一次挂载"锚点 → 末尾"的全部 item。按 tool_use + tool_result 合成 tool_segment 的
+ * 实测比例(render item ≈ messages / 5),2000 行 ≈ 400 个 item,是
+ * RENDER_WINDOW_INITIAL_ITEMS(80)与单次 expandWindow 增量(80)的 5 倍量级 ——
+ * 可感知但不冻结;6000 行 ≈ 1200 个 item 就会明显卡顿。
+ *
+ * 这是当前的约束手段,不是终态。彻底的解法是把锚定窗口做成双向有界 + 配套向下
+ * 扩窗(与滚到顶时的 expandWindow 对称),那样补齐规模就不再受渲染体量牵制;它要
+ * 联动改 MessageStream 的 startIdx / windowAtTop / isNearBottom / expandWindow /
+ * handleScroll 五处派生,并且必须实机验证滚动手感,故留作独立改动。
+ * 会话长度超过本上限时跳转仍会退回 around 窗口(窗口不连续),由渲染层的
+ * HISTORY_GAP_SPLIT_MS 守卫兜底,不会再折出跨空洞的假组。
  */
-const JUMP_BACKFILL_MAX_PAGES = 60;
+const JUMP_BACKFILL_MAX_PAGES = 20;
 const JUMP_BACKFILL_PAGE_SIZE = 100;
 
 /**

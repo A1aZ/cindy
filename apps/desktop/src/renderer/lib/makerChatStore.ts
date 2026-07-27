@@ -5770,59 +5770,93 @@ async function backfillHistoryUntil(
   }
 
   setState(sessionId, (s) => ({ ...s, isLoadingMore: true }));
-  // 预算对照**窗口总量**,不是本次跳转的新增量:itemsFetched 每次跳转都从 0 起算,而先前
-  // 跳转 merge 进来的行还留在 s.messages 里。连续几次向更早处跳转,每次各加 600 行,
-  // 锚定的 slice(startIdx) 照样能把挂载树堆到几千(#676 review)。
-  const windowSizeNow = () => getOrCreateState(sessionId).messages.length;
+
+  // 页面**累积到本地**,循环结束才发布一次 state。
+  //
+  // 逐页 setState 的代价:device-link 帧裁剪会把每次响应压到只有几行,于是这个循环可能跑
+  // 接近 80 次,每次都发布一个新的 messages 数组 —— 订阅者被通知 80 次、每次都重建一棵
+  // 越来越大的消息树,还伴随反复的滚动锚定 churn,整体 O(请求数 × 窗口大小)。跳转期间
+  // 用户等的是落点,中间态没有价值(#676 review)。一次性发布还顺带缩小了"半成品窗口被
+  // trim / demote 等逻辑观察到"的窗口。
+  //
+  // 预算对照**窗口总量**(已有窗口 + 本次累积),不是本次跳转的新增量:先前跳转 merge 进来
+  // 的行还留在 s.messages 里,只看新增量会让连续几次深跳各加一整份预算。
+  const baseWindowSize = getOrCreateState(sessionId).messages.length;
+  const collected: Message[] = [];
+  const collectedIds = new Set<string>();
+  let cursorId: string | null = getOrCreateState(sessionId).oldestMessageId;
+  let hasMoreAtEnd = true;
+
+  /** 把累积的页一次性并入窗口。collected 为空时只更新 hasMore 语义。 */
+  const publishCollected = (): void => {
+    if (collected.length === 0) return;
+    const mapped = mapServerMessages(collected);
+    setState(sessionId, (s) => ({
+      ...s,
+      messages: mergeMessages(mapped, s.messages, {}, 'newest-first'),
+      historyLoaded: true,
+      isFirstMessage: false,
+      oldestMessageId: cursorId ?? s.oldestMessageId,
+      hasMoreMessages: hasMoreAtEnd,
+      isLoadingMore: true,
+    }));
+  };
+
   try {
     for (
       let request = 0;
-      request < JUMP_BACKFILL_MAX_REQUESTS && windowSizeNow() < JUMP_BACKFILL_MAX_ITEMS;
+      request < JUMP_BACKFILL_MAX_REQUESTS &&
+      baseWindowSize + collected.length < JUMP_BACKFILL_MAX_ITEMS;
       request++
     ) {
-      const state = getOrCreateState(sessionId);
       // 首页(窗口为空)不带游标 —— messages:list 默认返回最新一页。
       const opts: { limit: number; before?: string } = { limit: JUMP_BACKFILL_PAGE_SIZE };
-      if (state.oldestMessageId) opts.before = state.oldestMessageId;
+      if (cursorId) opts.before = cursorId;
 
       const rows = await listMessagesFor(sessionId, opts);
-      // 代际比对:追页期间 rewind / clear / purge 重置了切片 → 本次跳转整体作废。
+      // 代际比对:追页期间 rewind / clear / purge 重置了切片 → 本次跳转整体作废,
+      // 累积的页一并丢弃(它们属于旧代际)。
       if (epochChanged()) return 'cancelled';
       if (rows.length === 0) {
+        hasMoreAtEnd = false;
+        publishCollected();
         setState(sessionId, (s) => ({ ...s, hasMoreMessages: false }));
         return 'exhausted';
       }
 
-      const mapped = mapServerMessages(rows);
+      // 跨页按 clientId 去重:游标异常(如远端排序不稳)返回重叠页时,不去重会灌多份。
+      for (const row of rows) {
+        if (collectedIds.has(row.clientId)) continue;
+        collectedIds.add(row.clientId);
+        collected.push(row);
+      }
       const oldestRow = oldestMessageRow(rows, 'newest-first');
-      const hasMore = serverMessagePageHasMore(rows, JUMP_BACKFILL_PAGE_SIZE);
-      setState(sessionId, (s) => {
-        return {
-          ...s,
-          messages: mergeMessages(mapped, s.messages, {}, 'newest-first'),
-          historyLoaded: true,
-          isFirstMessage: false,
-          oldestMessageId: oldestRow?.id ?? s.oldestMessageId,
-          hasMoreMessages: hasMore,
-          isLoadingMore: true,
-        };
-      });
+      if (oldestRow) cursorId = oldestRow.id;
+      hasMoreAtEnd = serverMessagePageHasMore(rows, JUMP_BACKFILL_PAGE_SIZE);
 
-      // 只认"本页真的取到了目标" —— merged 里有它可能只是先前 fallback 留下的孤岛。
-      if (rows.some((row) => row.clientId === targetClientId)) return 'covered';
+      // 只认"本页真的取到了目标" —— 窗口里有它可能只是先前 fallback 留下的孤岛。
+      if (rows.some((row) => row.clientId === targetClientId)) {
+        publishCollected();
+        return 'covered';
+      }
       // 已翻到历史起点仍没命中:目标不在本会话可见历史里(例如被 rewind 软删)。
-      // hasMoreMessages 此刻已确证为 false,调用方不得再改回 true。
-      if (!hasMore) return 'exhausted';
+      if (!hasMoreAtEnd) {
+        publishCollected();
+        return 'exhausted';
+      }
     }
-    // 触到 item 预算或请求上限:上方还有历史,hasMore 保持原值让用户继续向上翻。
+    // 触到窗口预算或请求上限:上方还有历史,hasMore 保持 true 让用户继续向上翻。
+    publishCollected();
     return 'unavailable';
   } catch (err) {
     log.warn('backfillHistoryUntil failed', { sessionId, err: String(err) });
-    // 请求 reject 也可能发生在切片被重置之后(典型:远程会话在 /clear 期间断链,
-    // listMessagesFor 抛错)。这条路径同样不能当成"可重试的失败"交回调用方,否则它会
-    // merge 陈旧的 around 行、把重置刚移除的消息复活,purge 后还会把已删的切片
-    // 重新 materialize 出来(#676 review)。
-    return epochChanged() ? 'cancelled' : 'unavailable';
+    // 半程失败:已拉到的页照常提交(与 loadOlderMessages 同口径,游标推进、内容不丢)。
+    // 但请求 reject 也可能发生在切片被重置之后(典型:远程会话在 /clear 期间断链),
+    // 那种情况不能当成"可重试的失败"交回调用方 —— 它会 merge 陈旧的 around 行、把重置
+    // 刚移除的消息复活,purge 后还会把已删的切片重新 materialize 出来(#676 review)。
+    if (epochChanged()) return 'cancelled';
+    publishCollected();
+    return 'unavailable';
   } finally {
     // 只释放**本代际自己**持有的锁。
     //
@@ -5864,8 +5898,12 @@ function commitAroundWindow(
       return {
         ...s,
         messages,
-        // 补齐成功:窗口从最新连续到目标,孤岛标记可以清掉。
-        historyWindowHasIsland: false,
+        // 注意这里**不清**孤岛标记。补齐到达目标只证明"尾部 → 本次目标"连续,不证明更早的
+        // 孤岛都被跨过:先前一次失败的深跳留下孤岛 A,之后跳一个更近的目标 B 并补齐成功,
+        // B↔A 之间的洞和 A 自己的行都还在。清掉唯一的 boolean 会让之后跳回 A 走成员快速
+        // 通道、永不修复(#676 review 给的两孤岛序列)。
+        // 只由窗口整体重建(reloadMessages / clear / demote / trim)清零 —— 代价是出现过
+        // 孤岛的会话每次跳转都会多做一次补齐尝试,方向上是安全的那一侧。
         oldestMessageId: oldestServerMessageIdForWindow(
           rows,
           s.messages,
@@ -5951,7 +5989,15 @@ async function loadAroundMessage(
   // 之前还有一个 microtask 间隙:重置的延续可能正好插在这里,于是 backfill 用旧代际算出
   // 的 covered / exhausted 仍是"有效"的,而切片已经清空。所以 merge 前再校验一次
   // (#676 review)。
-  if (outcome === 'cancelled' || (_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart) return null;
+  //
+  // exhausted 一并作废:一路翻到历史起点都没见到目标 = 权威列表里它已不可见(别的窗口 /
+  // 设备 rewind 或删除,推送还没到本渲染层,所以本地 epoch 没变)。此时 around 快照是陈旧
+  // 的,merge 它会把已删 / 已 rewind 的内容复活并长期留在窗口里(#676 review)。
+  if (
+    outcome === 'cancelled' ||
+    (_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart
+  )
+    return null;
 
   commitAroundWindow(sessionId, rows, mapped, outcome);
 
@@ -5981,7 +6027,16 @@ async function loadAroundMessageClientId(
   // 切片被重置 → 跳转作废,不 merge 旧的 around 行。merge 前再校验一次 epoch:outcome
   // 只反映 backfill 返回那一刻的代际,它 return 之后到这里恢复之间还有一个 microtask
   // 间隙(见 loadAroundMessage 同款注释)。
-  if (outcome === 'cancelled' || (_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart) return null;
+  //
+  // exhausted 同样作废:它意味着一路翻到历史起点都没见到目标,也就是权威列表里它已经
+  // 不可见了(别的窗口 / 设备 rewind 或删除,推送还没到本渲染层,所以本地 epoch 没变)。
+  // 此时 around 快照是陈旧的,merge 它会把已删 / 已 rewind 的内容复活并长期留在窗口里
+  // (#676 review)。宁可跳转失败,不复活权威侧已经没有的行。
+  if (
+    outcome === 'cancelled' ||
+    (_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart
+  )
+    return null;
 
   commitAroundWindow(sessionId, rows, mapped, outcome);
 

@@ -488,8 +488,11 @@ function renderContentWithoutPastedText(
               fileName={fileName}
               workingDir={workingDir}
               onClick={async (e) => {
-                // Capture currentTarget before await — React pools events and
-                // by the time the IPC resolves, currentTarget is null.
+                // Capture currentTarget before the await: `currentTarget` is only
+                // set while the DOM event is being dispatched, so it reads back as
+                // null once the IPC resolves. (Not React event pooling — that was
+                // removed in React 17; this is plain DOM Event semantics.) The
+                // element is needed later to restore focus when the lightbox closes.
                 const chip = e.currentTarget;
                 if (remoteJoin) {
                   // remote:本机 BFS 无意义,join 出远端绝对路径,存在性由

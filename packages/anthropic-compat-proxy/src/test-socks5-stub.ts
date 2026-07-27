@@ -38,8 +38,12 @@ export interface Socks5Stub {
   close: () => Promise<void>;
 }
 
-/** 顺序读辅助 —— SOCKS5 握手是严格的请求/应答往返。 */
-function createReader(socket: Socket): (n: number) => Promise<Buffer> {
+/**
+ * 顺序读辅助 —— SOCKS5 握手是严格的请求/应答往返。握手结束后必须 `release()`:
+ * 否则 'data' listener 还挂着,隧道流量会被无界追加进 buffered(再没有 read 来消费),
+ * 白占内存还可能在用例之间留下隐蔽干扰。
+ */
+function createReader(socket: Socket): { read: (n: number) => Promise<Buffer>; release: () => void } {
   let buffered: Buffer = Buffer.alloc(0);
   let waiter: { need: number; resolve: (b: Buffer) => void; reject: (e: Error) => void } | null = null;
   const settle = (): void => {
@@ -49,10 +53,11 @@ function createReader(socket: Socket): (n: number) => Promise<Buffer> {
     resolve(buffered.subarray(0, need));
     buffered = buffered.subarray(need);
   };
-  socket.on('data', (chunk: Buffer) => {
+  const onData = (chunk: Buffer): void => {
     buffered = buffered.length === 0 ? chunk : Buffer.concat([buffered, chunk]);
     settle();
-  });
+  };
+  socket.on('data', onData);
   const abort = (): void => {
     const pending = waiter;
     waiter = null;
@@ -60,10 +65,20 @@ function createReader(socket: Socket): (n: number) => Promise<Buffer> {
   };
   socket.on('error', abort);
   socket.on('close', abort);
-  return (n: number) => new Promise<Buffer>((resolve, reject) => {
-    waiter = { need: n, resolve, reject };
-    settle();
-  });
+  return {
+    read: (n: number) => new Promise<Buffer>((resolve, reject) => {
+      waiter = { need: n, resolve, reject };
+      settle();
+    }),
+    release(): void {
+      socket.off('data', onData);
+      socket.off('error', abort);
+      socket.off('close', abort);
+      // 握手读多了的字节塞回流里,交给随后的 pipe。与产品侧同理:release 之后流仍是
+      // flowing,调用方必须在同一个同步块里把 socket 接给下一个消费者。
+      if (buffered.length > 0 && !socket.destroyed) socket.unshift(buffered);
+    },
+  };
 }
 
 function formatBoundAddress(kind: Socks5StubOptions['replyAddressType']): Buffer {
@@ -81,7 +96,7 @@ export async function startSocks5Stub(options: Socks5StubOptions = {}): Promise<
   const requests: Array<{ atyp: number; host: string; port: number }> = [];
 
   const server = createNetServer((socket) => {
-    const read = createReader(socket);
+    const { read, release } = createReader(socket);
     void (async () => {
       const greeting = await read(2);
       offeredMethods.push([...await read(greeting[1])]);
@@ -111,6 +126,7 @@ export async function startSocks5Stub(options: Socks5StubOptions = {}): Promise<
       }
       const port = (await read(2)).readUInt16BE(0);
       requests.push({ atyp, host, port });
+      release();  // 握手读完就撤 listener,别把后续字节吞进 buffered
       if (options.closeAfterConnect) { socket.end(); return; }
 
       const replyCode = options.replyCode ?? 0x00;

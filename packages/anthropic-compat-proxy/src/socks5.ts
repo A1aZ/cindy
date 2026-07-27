@@ -262,9 +262,11 @@ export async function socks5Connect(
     if (greeting[0] !== VERSION) throw fail(`is not a SOCKS5 proxy (server version 0x${greeting[0].toString(16)})`);
     const method = greeting[1];
     if (method === AUTH_NONE_ACCEPTABLE) {
-      throw fail(proxy.username
-        ? 'rejected both anonymous and username/password authentication'
-        : 'requires authentication but none is configured');
+      // 0xff 只说明「我们报的方法它一个都不收」,不等于「它要求认证而我们没配」——
+      // 也可能是只支持 GSSAPI 之类本模块不实现的方法。报事实并列出报过什么,别替
+      // 代理下结论,否则排障会被带偏。
+      const offered = methods.map((m) => (m === AUTH_USERPASS ? 'username/password' : 'none')).join(' + ');
+      throw fail(`has no acceptable authentication method (offered ${offered})`);
     }
 
     // ── RFC 1929 用户名/密码认证 ──────────────────────────────────────────

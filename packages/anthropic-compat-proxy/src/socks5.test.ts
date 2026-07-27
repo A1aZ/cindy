@@ -121,9 +121,13 @@ describe('socks5Connect', () => {
     await expect(socks5Connect(target(authFail.port, { username: 'u', password: 'bad' }), 'x.invalid', 443))
       .rejects.toThrow(/rejected the username\/password credentials/);
 
+    // 0xff 只说明「报的方法一个都不收」,报事实并列出报过什么,不替代理下结论。
     const noMethod = await startSocks5Stub({ rejectAllMethods: true });
     await expect(socks5Connect(target(noMethod.port), 'x.invalid', 443))
-      .rejects.toThrow(/requires authentication but none is configured/);
+      .rejects.toThrow(/has no acceptable authentication method \(offered none\)/);
+    const noMethodWithCreds = await startSocks5Stub({ rejectAllMethods: true });
+    await expect(socks5Connect(target(noMethodWithCreds.port, { username: 'u', password: 'p' }), 'x.invalid', 443))
+      .rejects.toThrow(/has no acceptable authentication method \(offered none \+ username\/password\)/);
 
     const refused = await startSocks5Stub({ replyCode: 0x05 });
     await expect(socks5Connect(target(refused.port), 'x.invalid', 443))

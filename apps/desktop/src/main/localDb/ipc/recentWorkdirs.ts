@@ -20,7 +20,7 @@
 import { stat } from 'node:fs/promises';
 
 import { BrowserWindow, ipcMain } from 'electron';
-import { desc, eq } from 'drizzle-orm';
+import { desc, eq, inArray } from 'drizzle-orm';
 
 import { getDbClient } from '../client/current';
 import { recentWorkdirs } from '../schema';
@@ -83,11 +83,13 @@ export async function upsertRecentWorkdir(
   const normalized = normalizeRecentWorkdirPath(path);
   if (!normalized) return;
   try {
-    // 一次拿 client 后复用:getDbClient() 读的是模块级可变 current(账号切换 / client
-    // 重新初始化会 set 或 clear 它),分两次取有可能让 insert 与下面的驱逐落在不同
-    // DbClient 上,或第二次直接抛 "DbClient not ready"。
-    const client = getDbClient();
-    const db = client.drizzle;
+    // 只取一次 drizzle handle,upsert 与驱逐全程复用它 —— 两端必须 pin 在同一个
+    // backend 上。getDbClient() 读的是模块级可变 current(账号切换 / client 重新初始化
+    // 会 set 或 clear 它);而 in-proc fallback client(worker 起不来时装的那个)的
+    // drizzle 是 getter、exec 则在调用时才解析模块全局 getRawDb()。混用「已捕获的
+    // drizzle」和「晚绑定的 exec」时,只要 insert 之后这个 fire-and-forget helper 被挂起
+    // 期间发生账号切换,驱逐就会打到新账号的库上:旧库该裁的没裁,新库反而被裁一行。
+    const db = getDbClient().drizzle;
     await db
       .insert(recentWorkdirs)
       .values({ path: normalized, lastUsedAt: atMs })
@@ -95,28 +97,31 @@ export async function upsertRecentWorkdir(
         target: recentWorkdirs.path,
         set: { lastUsedAt: atMs },
       });
-    // LRU 驱逐:超过 MAX_RECENT_WORKDIRS 时,删掉 lastUsedAt 最旧的多出来的行。
-    // SQLite 不支持直接 DELETE ... ORDER BY LIMIT,用子查询 OFFSET 拿出待删 path。
-    // `LIMIT -1 OFFSET n` 选中第 n+1 行起的**全部**行 —— 一次收敛到上限,不是每次删 1 行:
-    // 稳态下单条 INSERT 最多新增 1 条,自然也只删 1 条;而历史脏数据(驱逐曾长期静默失败,
-    // 用户库涨到 18 行)在下一次 upsert 就一次清到 MAX_RECENT_WORKDIRS,不用等多轮。
-    // 表最多十几行,一次删几行无性能顾虑。
+    // LRU 驱逐:超过 MAX_RECENT_WORKDIRS 的行按 lastUsedAt 从旧到新淘汰。
     //
-    // 必须走 DbClient.exec,不能用 drizzle 的 db.run(sql`...`):main 侧拿到的
-    // drizzle 是 createDrizzleProxy 的代理,只把 **query builder** 的终结方法
-    // (all / get / run / values)转发给 worker RPC。直接在 db 对象上跑 raw SQL 不
-    // 经过 builder,会落进代理内部那个只会抛错的 fakeSqliteClient.prepare(),再被
-    // drizzle 包成 "Failed to run the query '...'" —— 驱逐 100% 静默失败(fire-and-
-    // forget 的 catch 只留一条 warn),表会一直涨过上限。回归见 __tests__/recentWorkdirsLru。
-    await client.exec(
-      `DELETE FROM recent_workdirs
-       WHERE path IN (
-         SELECT path FROM recent_workdirs
-         ORDER BY last_used_at DESC
-         LIMIT -1 OFFSET ?
-       )`,
-      [MAX_RECENT_WORKDIRS],
-    );
+    // 全部用 query builder 表达,不走 raw SQL —— 两个原因:
+    //  1. pin(见上):builder 走的是已捕获的 db,不会二次解析 DbClient。
+    //  2. main 侧的 drizzle 是 createDrizzleProxy 的代理,只把 **query builder** 的终结
+    //     方法(all / get / run / values)转发给 worker RPC。在 db 对象上直接跑 raw SQL
+    //     (db.run(sql`...`))不经过 builder,会落进代理内部那个只会抛错的
+    //     fakeSqliteClient.prepare(),被 drizzle 包成 "Failed to run the query '...'",再被
+    //     下面 fire-and-forget 的 catch 吞成一条 warn —— 驱逐 100% 静默失败,表一直涨过
+    //     上限(本 PR 修的就是这个,回归见 __tests__/recentWorkdirsLru)。
+    //
+    // 不用 `LIMIT -1 OFFSET n` 子查询挑待删行:drizzle 会丢掉 limit(-1) 只留 offset,
+    // SQLite 报 `near "offset": syntax error`。这张表上限十几行,整表取回在 JS 里切更
+    // 直白,也顺带避开了拼 SQL。
+    const ordered = await db
+      .select({ path: recentWorkdirs.path })
+      .from(recentWorkdirs)
+      .orderBy(desc(recentWorkdirs.lastUsedAt));
+    const stale = ordered.slice(MAX_RECENT_WORKDIRS).map((row) => row.path);
+    if (stale.length > 0) {
+      // 一次删掉所有超出上限的行,不是每次删 1 行:稳态下单条 INSERT 最多新增 1 条,
+      // 自然也只删 1 条;而驱逐曾长期静默失败留下的脏数据(本机库涨到 18 行)在下一次
+      // upsert 就一次清到上限,不用等多轮。
+      await db.delete(recentWorkdirs).where(inArray(recentWorkdirs.path, stale));
+    }
   } catch (err) {
     log.warn('[localDb] upsertRecentWorkdir failed', {
       path: normalized,

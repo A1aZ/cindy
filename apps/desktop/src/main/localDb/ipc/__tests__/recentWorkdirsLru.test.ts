@@ -92,7 +92,15 @@ beforeEach(() => {
   const transport = createTransport();
   h.client = {
     drizzle: createDrizzleProxy(() => transport),
-    exec: (text: string, params?: unknown[]) => transport.send('exec', { sql: text, params }),
+    // upsert 与驱逐必须全程留在上面这个**已捕获**的 drizzle handle 上。走 client.exec
+    // 会在 in-proc fallback 下于调用时再解析一次模块全局 getRawDb() —— insert 之后若发生
+    // 账号切换,驱逐就会打到新账号的库。这里故意让 exec 抛错:实现一旦回退去用它,
+    // 下面的用例立刻变红。
+    exec: () => {
+      throw new Error(
+        'client.exec must not be used: eviction has to stay on the pinned drizzle handle',
+      );
+    },
   };
 });
 

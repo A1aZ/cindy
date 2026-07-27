@@ -265,6 +265,28 @@ describe('createAgentHandoffPendingRegistry', () => {
     expect(decorate).toHaveBeenCalledTimes(1);
   });
 
+  it('DB fallback 缓存的值不再 decorate:首发未 accepted 的重试不会拿到两份来源标记', async () => {
+    const query = vi.fn(async () => 'COMPOSED-BY-QUERY');
+    const decorate = vi.fn(async (_sid: string, handoff: string) => `FORK\n\n${handoff}`);
+    const reg = createAgentHandoffPendingRegistry(query, undefined, decorate);
+    expect(await reg.peek('s1')).toBe('COMPOSED-BY-QUERY');
+    // 未 accepted → 未 consume → 重试再 peek，仍是同一份，不叠加
+    expect(await reg.peek('s1')).toBe('COMPOSED-BY-QUERY');
+    expect(decorate).not.toHaveBeenCalled();
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it('set 覆盖 DB 缓存后重新纳入 decorate(切换交接是新塞进来的,尚未组合)', async () => {
+    const reg = createAgentHandoffPendingRegistry(
+      async () => 'COMPOSED-BY-QUERY',
+      undefined,
+      async (_sid: string, handoff: string) => `FORK\n\n${handoff}`,
+    );
+    await reg.peek('s1');
+    reg.set('s1', 'SWITCH-HANDOFF');
+    expect(await reg.peek('s1')).toBe('FORK\n\nSWITCH-HANDOFF');
+  });
+
   it('decorate 失败退回未组合的原值,不吞掉本来该注入的交接', async () => {
     const decorate = vi.fn(async () => {
       throw new Error('db down');
@@ -359,7 +381,7 @@ describe('buildHandoffText 早期原文检索指引', () => {
   it('提供 sessionId 时附带检索指引(两个工具名 + session_ids 定向)', () => {
     const text = buildHandoffText([msg('user', '你好')], { ...opts, sessionId: 'sess-abc' });
     expect(text).toContain('== Retrieving earlier verbatim history (use when needed) ==');
-    expect(text).toContain('This session id: sess-abc');
+    expect(text).toContain('Session id: sess-abc');
     expect(text).toContain('search_chat_history');
     expect(text).toContain('get_chat_history');
     expect(text).toContain('"session_ids":["sess-abc"]');

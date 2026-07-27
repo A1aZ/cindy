@@ -404,7 +404,7 @@ function assembleHandoffText(
     // 两个工具均支持),写死在指引里比让模型自己发现可靠(规则 9)。
     sections.push(
       `== Retrieving earlier verbatim history (use when needed) ==\n` +
-        `This session id: ${opts.sessionId}\n` +
+        `Session id: ${opts.sessionId}\n` +
         `Earlier conversation text beyond the digest above can be retrieved at any time (tools live under cindy_helper's history category):\n` +
         `- By content: search_chat_history, args {"query":"<keywords>","session_ids":["${opts.sessionId}"]}\n` +
         `- By time/role: get_chat_history, args {"session_ids":["${opts.sessionId}"],"roles":["user","assistant"]} (page through with nextCursor when hasMore)\n` +
@@ -514,18 +514,25 @@ export function createAgentHandoffPendingRegistry(
    * 那条路径不经过 DB fallback。fork 出的子会话若在首发前切了引擎,内存里就只有
    * 切换交接,来源标记会被整条跳过。这里对**非 null 的内存值**再过一次组合,把两
    * 者并起来;null(已 consume)不触发,消费语义不变。
+   *
+   * 只对 `set` 进来的值生效:queryPending 的产出已经组合过,再过一遍会让首发未
+   * accepted 的重试拿到两份来源标记(下面的 composedByQuery 就是这道闸)。
    */
   decorateCached?: (sessionId: string, handoff: string) => Promise<string>,
 ): AgentHandoffPendingRegistry {
   const pending = new Map<string, string | null>();
+  /** 值由 queryPending 产出(已含组合结果)的 session,decorate 必须跳过它们。 */
+  const composedByQuery = new Set<string>();
   return {
     set(sessionId, handoff) {
       pending.set(sessionId, handoff);
+      // 外部直接塞进来的交接没经过 queryPending 的组合,重新纳入 decorate 范围。
+      composedByQuery.delete(sessionId);
     },
     async peek(sessionId) {
       if (pending.has(sessionId)) {
         const cached = pending.get(sessionId) ?? null;
-        if (cached === null || !decorateCached) return cached;
+        if (cached === null || !decorateCached || composedByQuery.has(sessionId)) return cached;
         try {
           return await decorateCached(sessionId, cached);
         } catch {
@@ -541,14 +548,17 @@ export function createAgentHandoffPendingRegistry(
         return null;
       }
       pending.set(sessionId, fromDb);
+      composedByQuery.add(sessionId);
       return fromDb;
     },
     consume(sessionId) {
       pending.set(sessionId, null);
+      composedByQuery.delete(sessionId);
       onConsume?.(sessionId);
     },
     clear(sessionId) {
       pending.delete(sessionId);
+      composedByQuery.delete(sessionId);
     },
   };
 }

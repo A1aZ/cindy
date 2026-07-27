@@ -8,8 +8,8 @@
 // 当前 .md 是空的 —— 原有的产品级规则已于 2026-07-16 经 Lizi 确认清空（内部系统 MCP
 // 路由随飞书等迁入意识(Ghost)体系、免责声明随产品对外化、mermaid 渲染规范与实时信息
 // 查询一并移除）。host 层注入口保留：
-//   apps/desktop/src/main/maker-host/host-system-prompt.md  (vendor-neutral；当前只有
-//   一句产品身份锚点，让模型知道自己是 Cindy 及源码位置)
+//   apps/desktop/src/main/maker-host/host-system-prompt.md  (vendor-neutral；当前是两行
+//   产品身份锚点：身份声明 + 源码仓库地址，让模型知道自己是 Cindy 及源码在哪)
 //   apps/desktop/src/main/maker-host/codex-system-prompt.md (Codex host 专属；当前为空——
 //   原「绘图走 codex imagegen」规则已删，画图路由交给意识(Ghost)触发体系)
 // 由 host 通过 runtimeConfig.systemPrompt 注入，跟本常量在 startSession 拼成一段

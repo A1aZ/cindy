@@ -8,8 +8,8 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
 import {
   hasAnySessionInTurn,
   isTerminalTurnErrorEvent,
@@ -156,10 +156,55 @@ describe('窗口可见性广播（装饰动画闸门的兜底信号）', () => {
   });
 
   /**
-   * 凡是关掉了 backgroundThrottling 的窗口都必须装广播，否则它那份闸门形同虚设。
-   * 语音浮窗建窗即 backgroundThrottling:false，且 index.tsx 顶层安装闸门时浮窗视图
-   * 同样经过 —— 漏装的话浮窗的 mic 波形会在看不见时继续跑。
+   * 关掉 backgroundThrottling 的窗口，若其 renderer 装了装饰动画闸门，就必须同时装广播：
+   * 节流关闭 → visibilityState 恒为 visible，又收不到广播 → 两路信号同时失效，闸门形同虚设。
+   *
+   * 不写死清单，而是扫描整个 main 目录。语音浮窗当初就是这么漏掉的（它和主窗一样加载
+   * index.html，闸门在 index.tsx 顶层安装，浮窗视图同样经过）。
+   *
+   * 豁免必须显式登记并写明理由——目的是逼一次判断，而不是让人默默跳过。
    */
+  const BROADCAST_EXEMPT = new Map<string, string>([
+    [
+      'computer-permission-guide/window.ts',
+      // 这两个窗口(guide / backdrop)确实也加载 index.html?view=、也装了闸门，但其视图
+      // (ComputerPermissionGuideWindow.tsx)不含任何常驻装饰动画，装广播纯属空转；且该文件
+      // 的测试 mock 用单 listener Map，多注册一个 did-finish-load 会覆盖既有回调。
+      // 将来这两个视图若引入常驻动画，删掉本豁免即可。
+      '权限引导窗与 backdrop 视图无常驻装饰动画',
+    ],
+  ]);
+
+  it('关闭了 backgroundThrottling 的窗口要么装广播，要么显式登记豁免', () => {
+    const mainDir = resolve(__dirname, '..');
+    const walk = (dir: string, out: string[] = []): string[] => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === 'node_modules' || entry.name === '__tests__') continue;
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full, out);
+        else if (entry.name.endsWith('.ts')) out.push(full);
+      }
+      return out;
+    };
+
+    const offenders: string[] = [];
+    for (const file of walk(mainDir)) {
+      const content = readFileSync(file, 'utf8');
+      if (!/backgroundThrottling:\s*false/.test(content)) continue;
+      const rel = relative(mainDir, file);
+      if (BROADCAST_EXEMPT.has(rel)) continue;
+      if (!content.includes('installWindowHiddenBroadcast')) offenders.push(rel);
+    }
+
+    expect(
+      offenders,
+      '以下文件关闭了 backgroundThrottling 但既没装 installWindowHiddenBroadcast，' +
+        '也没在 BROADCAST_EXEMPT 里登记豁免理由。若该窗口的视图有常驻装饰动画，' +
+        '闸门会静默失效：\n' +
+        offenders.join('\n'),
+    ).toEqual([]);
+  });
+
   it('主窗与语音浮窗都装了广播', () => {
     expect(source).toContain('installWindowHiddenBroadcast(mainWindow);');
 
@@ -169,5 +214,15 @@ describe('窗口可见性广播（装饰动画闸门的兜底信号）', () => {
     ).replace(/\r\n?/g, '\n');
     expect(overlaySource).toMatch(/backgroundThrottling:\s*false/);
     expect(overlaySource).toContain('installWindowHiddenBroadcast(window);');
+  });
+
+  it('豁免清单里的文件确实存在且确实关闭了节流（防止豁免过期后静默失效）', () => {
+    const mainDir = resolve(__dirname, '..');
+    for (const [rel, reason] of BROADCAST_EXEMPT) {
+      const content = readFileSync(resolve(mainDir, rel), 'utf8');
+      expect(content, `${rel} 已不再关闭 backgroundThrottling，${reason} 这条豁免应删除`).toMatch(
+        /backgroundThrottling:\s*false/,
+      );
+    }
   });
 });

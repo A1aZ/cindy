@@ -2204,6 +2204,30 @@ const createWindow = () => {
     }
   });
 
+  // 窗口「对用户不可见」广播 —— Renderer 的装饰动画闸门(hiddenAnimationGate)靠它兜底。
+  //
+  // 为什么不能只靠 Renderer 自己的 document.visibilityState:Electron 明确规定
+  // backgroundThrottling 关闭时,visibilityState 会一直停在 'visible',即使窗口被最小化
+  // 或 hide()。而 setMainWindowBackgroundThrottlingForActiveTurn 恰恰会在有 running turn
+  // 时关掉节流(保住流式输出),于是「挂着 agent 跑 + 切走」这个最需要省电的场景里,
+  // Renderer 侧永远收不到 hidden。已在 Electron 41.2.0 实测复现:throttling=false 时
+  // minimize() / hide() 后 visibilityState 仍为 'visible'。
+  //
+  // 两路信号互补,Renderer 取「或」:本广播不受节流影响、覆盖最小化与 hide;
+  // visibilityState 覆盖 macOS 的窗口遮挡(occlusion)——那个没有对应的 Electron 事件。
+  // Windows 的遮挡两路都覆盖不到(Electron 文档:occlusion 只在 macOS 影响可见性),
+  // 属于已知局限。
+  const emitWindowHidden = (): void => {
+    if (mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+    const hidden = !mainWindow.isVisible() || mainWindow.isMinimized();
+    mainWindow.webContents.send('window-hidden-change', hidden);
+  };
+  // 逐个注册:BrowserWindow.on 是重载签名,传联合类型的事件名匹配不到任何一个重载。
+  mainWindow.on('hide', emitWindowHidden);
+  mainWindow.on('show', emitWindowHidden);
+  mainWindow.on('minimize', emitWindowHidden);
+  mainWindow.on('restore', emitWindowHidden);
+
   // App badge: 用户把任意 XDMaker 窗口点回前台(Dock 点击 / taskbar / alt-tab / 点窗口)即视为
   // 「已查看」,直接清空整个 dock 红点。badge 是 app 级状态,不该依赖当前停在哪个
   // 路由 / 开没开会话 —— 之前清除逻辑寄生在 cc-agent sidebar 且只清 activeSessionId,

@@ -299,6 +299,9 @@ const fanOutTapdbDailyActive = createIpcFanOut('tapdb:daily-active');
 // 使用统计(TapDB)的同意状态 / 开关变化;renderer 据此即时 init 或 opt-out
 const fanOutAnalyticsSettingsChange = createIpcFanOut(ANALYTICS_SETTINGS_CHANGE_CHANNEL);
 const fanOutFullscreenChange = createIpcFanOut('fullscreen-change');
+// 窗口是否对用户不可见(最小化 / hide)。装饰动画闸门用它兜底 —— backgroundThrottling
+// 关闭时 Renderer 的 document.visibilityState 会一直停在 visible,见 main 侧注释。
+const fanOutWindowHiddenChange = createIpcFanOut('window-hidden-change');
 const fanOutApplicationMenuCommand = createIpcFanOut('app-menu:command');
 // 首登轻量数据迁移(mToc)弹窗阶段推送(confirm / running / done / failed)
 const fanOutLegacyMigrationState = createIpcFanOut('legacy-migration:state');
@@ -2740,6 +2743,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Fullscreen state
   onFullscreenChange: fanOutFullscreenChange,
   getFullscreenState: (): Promise<boolean> => ipcRenderer.invoke('get-fullscreen-state'),
+
+  // 窗口对用户不可见(最小化 / hide)——装饰动画闸门用
+  onWindowHiddenChange: fanOutWindowHiddenChange,
 
   // ── Release notes (per-version, fetched from CDN by main) ──
   // Platform is resolved in main via getPlatformKey() to keep the CDN path

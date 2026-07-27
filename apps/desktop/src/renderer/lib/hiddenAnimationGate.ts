@@ -62,6 +62,12 @@ interface GateWindow {
    * visible)」时重装,闸门会一直等不到下一次 hide/minimize 而静默失效。
    */
   __xdtHiddenAnimationGateLastHidden?: boolean;
+  /**
+   * 本闸门暂停过的子文档动画。挂在 window 上而非闭包里,因为隐藏期间新挂载的卡片要在
+   * 自己的 onLoad 里登记进来(见 alignFrameWithGate)——不登记的话恢复路径不会 play 它们,
+   * 卡片动画会永久停住。同时跨重装存活,理由同 LastHidden。
+   */
+  __xdtHiddenAnimationGatePausedAnims?: Set<GateAnimation>;
   /** main 侧窗口可见性广播;非 Electron 宿主(单测 / 纯浏览器)下缺省。 */
   electronAPI?: {
     onWindowHiddenChange?: (callback: (hidden: boolean) => void) => () => void;
@@ -94,9 +100,37 @@ export interface HiddenAnimationGateFrame {
   } | null;
 }
 
-/** 供 GhostToolCard 在卡片 onLoad 时复用:判断一个动画是不是无限循环。 */
+/** 判断一个动画是不是无限循环。 */
 export function isLoopingAnimation(anim: GateAnimation): boolean {
   return anim.effect?.getTiming?.()?.iterations === Infinity;
+}
+
+/** 子文档的最小面:只需要能列出自己的动画。 */
+export interface GateFrameDocument {
+  getAnimations?: () => ArrayLike<GateAnimation>;
+}
+
+/**
+ * 让一个刚加载完的子文档跟上当前闸门状态 —— 供 Ghost 卡片在 iframe onLoad 时调用。
+ *
+ * 窗口可能在这张卡挂载之前就已隐藏,那时闸门的遍历还看不到这个 iframe。**关键是必须把
+ * 暂停的动画登记进闸门的共享集合**:恢复路径只 play 集合里的,漏登记 = 这张卡的动画永久
+ * 停住(窗口切回来也不动)。所以这里不自己维护记账,直接复用 window 上那份。
+ *
+ * 只停无限循环的;有限动画照播 —— 冻在中途帧、恢复时才接着播才是突兀的那种。
+ */
+export function alignFrameWithGate(
+  frameDoc: GateFrameDocument,
+  hostDocument: Pick<Document, 'documentElement'> = document,
+  hostWindow: GateWindow = window as Window & GateWindow,
+): void {
+  if (!hostDocument.documentElement.hasAttribute(HIDDEN_ATTR)) return;
+  const paused = (hostWindow.__xdtHiddenAnimationGatePausedAnims ??= new Set<GateAnimation>());
+  for (const anim of Array.from(frameDoc.getAnimations?.() ?? [])) {
+    if (anim.playState !== 'running' || !isLoopingAnimation(anim)) continue;
+    anim.pause?.();
+    paused.add(anim);
+  }
 }
 
 /**
@@ -159,8 +193,10 @@ export function installHiddenAnimationGate(
   // 见 GateWindow 上该字段的注释);首次安装则按「未隐藏」起步 —— 窗口刚建出来就是
   // 可见的,真隐藏了 main 侧 did-finish-load 的补发会立刻纠正。
   let windowHidden = target.window.__xdtHiddenAnimationGateLastHidden ?? false;
-  // 本闸门暂停过的子文档动画,解冻时只 play 这些,不动意识自己 pause 的。
-  const pausedFrameAnimations = new Set<GateAnimation>();
+  // 本闸门暂停过的子文档动画,解冻时只 play 这些,不动意识自己 pause 的。挂在 window 上
+  // 共享:隐藏期间新挂载的卡片走 alignFrameWithGate 往同一份集合里登记。
+  const pausedFrameAnimations = (target.window.__xdtHiddenAnimationGatePausedAnims ??=
+    new Set<GateAnimation>());
 
   const apply = (): void => {
     const hidden = windowHidden || target.document.visibilityState === 'hidden';

@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import {
+  alignFrameWithGate,
   HIDDEN_ANIMATION_ATTR,
   installHiddenAnimationGate,
   isLoopingAnimation,
@@ -237,9 +238,62 @@ describe('同源子文档（Ghost 卡片 iframe）动画同步', () => {
     );
     // 通配 CSS 会把有限动画一并冻住，必须已经移除。
     expect(src).not.toContain('animation-play-state:paused!important');
-    // 新挂载的卡片自己对齐一次：闸门遍历时它还不存在。
-    expect(src).toContain('document.documentElement.hasAttribute(HIDDEN_ANIMATION_ATTR)');
-    expect(src).toContain('isLoopingAnimation(anim)');
+    // 必须走闸门入口而不是自己 pause —— 自行 pause 不登记会让卡片动画永久停住。
+    expect(src).toContain('alignFrameWithGate(doc);');
+  });
+});
+
+describe('alignFrameWithGate（隐藏期间新挂载的卡片）', () => {
+  function makeAnim(iterations: number, playState = 'running') {
+    return {
+      playState,
+      effect: { getTiming: () => ({ iterations }) },
+      pause() {
+        this.playState = 'paused';
+      },
+      play() {
+        this.playState = 'running';
+      },
+    };
+  }
+  const hostDoc = (hidden: boolean) =>
+    ({
+      documentElement: { hasAttribute: (n: string) => hidden && n === HIDDEN_ANIMATION_ATTR },
+    }) as unknown as Pick<Document, 'documentElement'>;
+
+  it('窗口可见时不动任何动画', () => {
+    const loop = makeAnim(Infinity);
+    const win = {};
+    alignFrameWithGate({ getAnimations: () => [loop] }, hostDoc(false), win);
+    expect(loop.playState).toBe('running');
+  });
+
+  it('窗口已隐藏时暂停循环动画，且登记进闸门的共享恢复集合', () => {
+    const loop = makeAnim(Infinity);
+    const oneShot = makeAnim(1);
+    const win: { __xdtHiddenAnimationGatePausedAnims?: Set<GateAnimation> } = {};
+
+    alignFrameWithGate({ getAnimations: () => [loop, oneShot] }, hostDoc(true), win);
+
+    expect(loop.playState).toBe('paused');
+    expect(oneShot.playState).toBe('running');
+    // 关键：必须登记，否则统一恢复路径不会 play 它，卡片动画永久停住。
+    expect(win.__xdtHiddenAnimationGatePausedAnims?.has(loop as unknown as GateAnimation)).toBe(true);
+  });
+
+  it('登记后能被统一恢复路径播回来（端到端串起 onLoad → 恢复）', () => {
+    const loop = makeAnim(Infinity);
+    const win: { __xdtHiddenAnimationGatePausedAnims?: Set<GateAnimation> } = {};
+
+    alignFrameWithGate({ getAnimations: () => [loop] }, hostDoc(true), win);
+    expect(loop.playState).toBe('paused');
+
+    const doc = {
+      querySelectorAll: () => [{ contentDocument: { getAnimations: () => [loop] } }],
+    } as unknown as HiddenAnimationGateTarget['document'];
+    syncFrameAnimations(doc, false, win.__xdtHiddenAnimationGatePausedAnims!);
+
+    expect(loop.playState).toBe('running');
   });
 });
 

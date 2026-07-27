@@ -52,7 +52,7 @@ import {
   subscribeGhostCards,
 } from '@/cindy-brain/ghostCardStore';
 import { useGhostCardThemeVars } from '@/cindy-brain/useGhostCardThemeVars';
-import { HIDDEN_ANIMATION_ATTR, isLoopingAnimation } from '@/lib/hiddenAnimationGate';
+import { alignFrameWithGate } from '@/lib/hiddenAnimationGate';
 import {
   GHOST_CARD_ACTION_INFLIGHT_MS,
   GHOST_CARD_ACTION_PROMPT_MAX_LEN,
@@ -378,14 +378,10 @@ function GhostCardCanvas({
   const attachClickBridge = useCallback(() => {
     const doc = iframeRef.current?.contentDocument;
     if (!doc) return;
-    // 与宿主的装饰动画闸门对齐一次:窗口可能在本卡挂载之前就已隐藏,那时
-    // hiddenAnimationGate 的遍历还看不到这个 iframe。只停无限循环的,有限动画照播
-    // (冻在中途帧、恢复时接着播才是突兀的那种)。
-    if (document.documentElement.hasAttribute(HIDDEN_ANIMATION_ATTR)) {
-      for (const anim of doc.getAnimations?.() ?? []) {
-        if (anim.playState === 'running' && isLoopingAnimation(anim)) anim.pause();
-      }
-    }
+    // 与宿主的装饰动画闸门对齐一次:窗口可能在本卡挂载之前就已隐藏,那时闸门的遍历
+    // 还看不到这个 iframe。走闸门自己的入口,由它登记进共享的恢复集合 —— 自行 pause
+    // 而不登记的话,窗口切回来时统一恢复路径不会 play 它们,这张卡的动画会永久停住。
+    alignFrameWithGate(doc);
     const imgs = doc.querySelectorAll<HTMLImageElement>('img[src^="cindy-media://"]');
     imgs.forEach((img) => {
       // 量高写回会让 height prop 变化 → effect 重跑,对同一份未重载的文档

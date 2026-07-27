@@ -51,6 +51,7 @@ const {
   initVoiceDictionarySync,
   isDesktopPlatform,
   readDictionaryProjectionForMobile,
+  shouldExchangeDictionaryWith,
   stopVoiceDictionarySync,
 } = await import('../dictionarySyncDriver.js');
 
@@ -82,6 +83,29 @@ describe('设备平台判定', () => {
     expect(isDesktopPlatform('ios')).toBe(false);
     expect(isDesktopPlatform('android')).toBe(false);
     expect(isDesktopPlatform(undefined)).toBe(false);
+  });
+});
+
+describe('对端准入判定', () => {
+  const desktop = { online: true, platform: 'darwin', revoked: false };
+
+  it('在线的未撤销电脑才交换词典', () => {
+    expect(shouldExchangeDictionaryWith(desktop)).toBe(true);
+  });
+
+  it('撤销过的设备一律排除 —— 撤销的意图是不再交换数据,不只是不许操作', () => {
+    expect(shouldExchangeDictionaryWith({ ...desktop, revoked: true })).toBe(false);
+  });
+
+  it('离线设备不发:relay 不暂存离线消息', () => {
+    expect(shouldExchangeDictionaryWith({ ...desktop, online: false })).toBe(false);
+    // 离线 + 已撤销也要挡住,不能靠某一个条件兜底。
+    expect(shouldExchangeDictionaryWith({ online: false, platform: 'darwin', revoked: true })).toBe(false);
+  });
+
+  it('手机不走这条通道', () => {
+    expect(shouldExchangeDictionaryWith({ ...desktop, platform: 'ios' })).toBe(false);
+    expect(shouldExchangeDictionaryWith({ ...desktop, platform: null })).toBe(false);
   });
 });
 

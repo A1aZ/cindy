@@ -214,7 +214,7 @@ export default function SettingsScreen() {
         setDesktopDevices(collectMobileVoiceDictionaryHosts(res.devices));
       })
       .catch(() => {
-        if (!cancelled) return;
+        if (cancelled) return;
         setSelfDeviceName(null);
         setDesktopDevices([]);
       });

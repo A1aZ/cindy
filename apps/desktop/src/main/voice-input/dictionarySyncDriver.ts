@@ -54,6 +54,26 @@ export function isDesktopPlatform(platform: string | undefined | null): boolean 
   return typeof platform === 'string' && DESKTOP_PLATFORMS.has(platform);
 }
 
+/**
+ * 是否与某台设备交换词典。
+ *
+ * 判定收敛成这一个函数,因为它有三个独立入口(presence 上线即发、入站帧受理、
+ * 广播时的对端列表),分散写条件必然漏——最初就漏在 presence 那条上,导致词典
+ * 会推给用户明确撤销过的设备。
+ *
+ * - 必须在线:relay 不暂存离线消息,发了也白发;
+ * - 必须是电脑:手机在后台收不到 push,走主动拉取;
+ * - 撤销过的设备一律排除:撤销的意图是「不再跟这台设备交换数据」,不只是
+ *   「不许它操作我」。
+ */
+export function shouldExchangeDictionaryWith(device: {
+  online: boolean;
+  platform: string | undefined | null;
+  revoked: boolean;
+}): boolean {
+  return device.online && !device.revoked && isDesktopPlatform(device.platform);
+}
+
 export function initVoiceDictionarySync(next: DictionarySyncTransport): void {
   transport = next;
   if (intervalTimer) clearInterval(intervalTimer);

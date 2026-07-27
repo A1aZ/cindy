@@ -70,6 +70,7 @@ import { resetComposerPaletteCache } from '@/session/composerPaletteCache';
 import { clearCachedHomeListSnapshot } from '@/session/mobileHomeListCache';
 import { clearCachedSessionMessages } from '@/session/mobileSessionMessageCache';
 import { clearAllMobileVoiceCredentials } from '@/session/mobileVoiceCredentialStore';
+import { clearAllMobileVoiceDictionaryCaches } from '@/session/mobileVoiceDictionaryCache';
 import { clearAllMobileVoiceInputHistories } from '@/session/mobileVoiceHistoryStore';
 import { visualMockApiFetch, visualMockUser } from '@/debug/visualMock';
 import {
@@ -557,6 +558,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           // 手机语音已只保留官方托管路径:清掉旧版本留下的桌面穿透凭据、
           // 服务模式开关与 BYOK LiteLLM key,防止桌面 key 继续躺在 secure storage。
           clearAllMobileVoiceCredentials().catch(() => undefined),
+          // 同上:词典缓存不含账号身份,冷启动恢复前先抹掉可能属于上个账号的残留。
+          clearAllMobileVoiceDictionaryCaches().catch(() => undefined),
         ]);
         const [storedRefreshToken, cachedUser, storedDeletionReceipt] =
           await Promise.all([
@@ -997,6 +1000,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // 覆盖历史穿透凭据、服务模式与 BYOK key 三类存量存储键(功能已删除)。
     await clearAllMobileVoiceCredentials().catch(() => undefined);
     await clearAllMobileVoiceInputHistories().catch(() => undefined);
+    // 词典缓存按 host 设备分区、不含账号身份:同一台电脑在两个账号下是同一个
+    // deviceId,不清就会让下一个账号读到上一个账号的词条并发给润色模型。
+    await clearAllMobileVoiceDictionaryCaches().catch(() => undefined);
     await clearCachedSessionMessages().catch(() => undefined);
     // 首页设备+会话快照与消息缓存一样属于账号数据,登出必须清掉。
     await clearCachedHomeListSnapshot().catch(() => undefined);

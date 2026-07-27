@@ -7,6 +7,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { MobileVoiceDictionarySnapshotResult } from '@cindy/maker-shared/device-link-contract';
 
 const storage = new Map<string, string>();
 vi.mock('@/auth/secureStorage', () => ({
@@ -19,8 +20,13 @@ vi.mock('@/auth/secureStorage', () => ({
   },
 }));
 
+vi.mock('@/session/mobileVoiceHistoryStore', () => ({
+  listMobileVoiceHistoryHosts: async () => [] as string[],
+}));
+
 const {
   __resetMobileVoiceDictionaryCacheForTests,
+  clearAllMobileVoiceDictionaryCaches,
   hydrateMobileVoiceDictionary,
   readCachedMobileVoiceDictionary,
   refreshMobileVoiceDictionary,
@@ -97,6 +103,45 @@ describe('mobileVoiceDictionaryCache', () => {
 
     expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('Cindy');
     expect(readCachedMobileVoiceDictionary('desktop-2')[0].text).toBe('Orca');
+  });
+
+  it('账号边界清理:抹掉内存与盘上缓存,下一个账号读不到上一个账号的词条', async () => {
+    await refreshMobileVoiceDictionary(HOST, async () => ({
+      ok: true,
+      entries: [{ text: '内部项目代号' }],
+    }));
+    await refreshMobileVoiceDictionary('desktop-2', async () => ({
+      ok: true,
+      entries: [{ text: 'Cindy' }],
+    }));
+    expect(readCachedMobileVoiceDictionary(HOST)).toHaveLength(1);
+
+    await clearAllMobileVoiceDictionaryCaches();
+
+    // 内存清空。
+    expect(readCachedMobileVoiceDictionary(HOST)).toEqual([]);
+    expect(readCachedMobileVoiceDictionary('desktop-2')).toEqual([]);
+    // 盘上也清空 —— 否则下个账号一 hydrate 就把上个账号的词典读回来。
+    await hydrateMobileVoiceDictionary(HOST);
+    await hydrateMobileVoiceDictionary('desktop-2');
+    expect(readCachedMobileVoiceDictionary(HOST)).toEqual([]);
+    expect(readCachedMobileVoiceDictionary('desktop-2')).toEqual([]);
+    expect([...storage.keys()].filter((key) => key.includes('mobileVoiceDictionary'))).toEqual([]);
+  });
+
+  it('清理会丢弃在途请求的结果,不让登出瞬间返回的响应写回缓存', async () => {
+    let release: (value: MobileVoiceDictionarySnapshotResult) => void = () => {};
+    const pending = new Promise<MobileVoiceDictionarySnapshotResult>((resolve) => {
+      release = resolve;
+    });
+    const inFlight = refreshMobileVoiceDictionary(HOST, () => pending);
+
+    await clearAllMobileVoiceDictionaryCaches();
+    release({ ok: true, entries: [{ text: '上个账号的词' }] });
+    await inFlight;
+
+    // 在途响应即使晚到,也不该让上个账号的词典复活到内存里被润色读走。
+    expect(readCachedMobileVoiceDictionary(HOST)).toEqual([]);
   });
 
   it('异常回包被归一化,不会把坏数据塞进润色上下文', async () => {

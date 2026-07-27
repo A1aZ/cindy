@@ -9,13 +9,15 @@
  * 回 CHANNEL_NOT_ALLOWED)一律静默降级到缓存,绝不打断语音输入。
  */
 
-import { getSecureItem, setSecureItem } from '@/auth/secureStorage';
+import { deleteSecureItem, getSecureItem, setSecureItem } from '@/auth/secureStorage';
+import { listMobileVoiceHistoryHosts } from '@/session/mobileVoiceHistoryStore';
 import type {
   MobileVoiceCredentialSyncDictionaryEntry,
   MobileVoiceDictionarySnapshotResult,
 } from '@cindy/maker-shared/device-link-contract';
 
 const STORAGE_KEY_PREFIX = 'xdt.mobileVoiceDictionary.v1';
+const STORAGE_INDEX_KEY = `${STORAGE_KEY_PREFIX}.hosts`;
 /** 与桌面词典上限一致;手机侧只是防御性截断,避免异常大的回包撑爆存储。 */
 const MAX_ENTRIES = 1_000;
 const MAX_ALIASES_PER_ENTRY = 8;
@@ -29,6 +31,13 @@ type CachedDictionary = {
 
 const memoryCache = new Map<string, CachedDictionary>();
 const inFlight = new Map<string, Promise<void>>();
+/**
+ * 缓存代际。账号边界清理时递增,在途请求据此判断自己是否已经过期。
+ *
+ * 只把 inFlight 清空是不够的:那只是丢掉了 Promise 的引用,请求本身还在飞,回来
+ * 时照样会写进内存缓存 —— 于是上个账号的词典在登出之后又被复活。
+ */
+let cacheEpoch = 0;
 
 export function readCachedMobileVoiceDictionary(
   hostDeviceId: string,
@@ -72,6 +81,9 @@ export async function refreshMobileVoiceDictionary(
 ): Promise<void> {
   const host = normalizeHostDeviceId(hostDeviceId);
   if (!host) return;
+  // epoch 必须在第一个 await 之前取:清理可能恰好发生在下面任何一个挂起点上,
+  // 取晚了就会读到清理后的新值,于是这份属于上个账号的响应被判成"仍然有效"。
+  const epoch = cacheEpoch;
   await hydrateMobileVoiceDictionary(host);
 
   const cached = memoryCache.get(host);
@@ -84,12 +96,15 @@ export async function refreshMobileVoiceDictionary(
     try {
       const result = await fetchSnapshot();
       if (!result?.ok) return;
+      // 请求期间发生过账号边界清理:这份数据属于上一个账号,丢弃。
+      if (epoch !== cacheEpoch) return;
       const next: CachedDictionary = {
         entries: normalizeEntries(result.entries),
         fetchedAt: Date.now(),
       };
       memoryCache.set(host, next);
       await setSecureItem(storageKeyForHost(host), JSON.stringify(next)).catch(() => undefined);
+      await addHostToIndex(host).catch(() => undefined);
     } catch {
       // 桌面离线、老被控端不识别该 channel、隧道抖动 —— 一律沿用现有缓存。
     } finally {
@@ -100,7 +115,52 @@ export async function refreshMobileVoiceDictionary(
   return task;
 }
 
+/**
+ * 账号边界清理:退出登录 / 切换账号时抹掉所有词典缓存。
+ *
+ * 缓存键只按 host 设备分区,不含账号身份 —— 同一台电脑在账号 A 和账号 B 下是同
+ * 一个 deviceId。不清理的话,账号 B 会读到账号 A 留下的词条,并经润色上下文发给
+ * 模型,属于跨账号的数据泄漏。与语音凭证、语音历史挂在同一条登出链路上
+ * (`AuthContext` 调用 `clearAllMobileVoiceCredentials` 的地方)。
+ *
+ * 内存与在途请求一并清掉:登出瞬间可能有 refresh 正在返回,只清盘会被它写回来。
+ */
+export async function clearAllMobileVoiceDictionaryCaches(): Promise<void> {
+  cacheEpoch += 1;
+  memoryCache.clear();
+  inFlight.clear();
+  // SecureStore 不能枚举键,只能从可推导的 host 集合尽力清理:本模块自己的索引,
+  // 并集语音历史的 host 索引(用过语音输入的 host 必定拉取过词典)。
+  const [ownHosts, historyHosts] = await Promise.all([
+    readHostIndex(),
+    listMobileVoiceHistoryHosts().catch(() => [] as string[]),
+  ]);
+  const hosts = [...new Set([...ownHosts, ...historyHosts])];
+  await Promise.all(
+    hosts.map((host) => deleteSecureItem(storageKeyForHost(host)).catch(() => undefined)),
+  );
+  await deleteSecureItem(STORAGE_INDEX_KEY).catch(() => undefined);
+}
+
+async function readHostIndex(): Promise<string[]> {
+  try {
+    const raw = await getSecureItem(STORAGE_INDEX_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+async function addHostToIndex(hostDeviceId: string): Promise<void> {
+  const hosts = await readHostIndex();
+  if (hosts.includes(hostDeviceId)) return;
+  await setSecureItem(STORAGE_INDEX_KEY, JSON.stringify([...hosts, hostDeviceId]));
+}
+
 export function __resetMobileVoiceDictionaryCacheForTests(): void {
+  cacheEpoch += 1;
   memoryCache.clear();
   inFlight.clear();
 }

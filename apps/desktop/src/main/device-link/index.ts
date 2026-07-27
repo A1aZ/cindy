@@ -58,8 +58,8 @@ import {
   handleDesktopPeerOnline,
   handleIncomingDictionaryState,
   initVoiceDictionarySync,
-  isDesktopPlatform,
   notifyLocalDictionaryChanged,
+  shouldExchangeDictionaryWith,
   stopVoiceDictionarySync,
 } from '../voice-input/dictionarySyncDriver';
 import { onVoiceInputDictionaryChanged } from '../voice-input/VoiceInputDataStore';
@@ -283,9 +283,17 @@ export function initDeviceLinkService(): void {
     if (available && wasAvailable === false) {
       replayActiveSubscriptions(`presence-online:${snap.deviceId.slice(0, 8)}`, snap.deviceId);
     }
-    // 词典同步只看在线与否 —— push 帧不受对端「允许被控」开关限制,它是自己设备
-    // 之间的数据流动,不是远程控制。
-    if (snap.online && wasOnline !== true && isDesktopPlatform(snap.platform)) {
+    // 词典同步不看「允许被控」开关(push 帧不是控制类帧,这是自己设备之间的数据
+    // 流动),但撤销过的设备必须排除 —— 判定统一走 shouldExchangeDictionaryWith,
+    // 三个入口共用一份条件。
+    if (
+      wasOnline !== true
+      && shouldExchangeDictionaryWith({
+        online: snap.online,
+        platform: snap.platform,
+        revoked: isDeviceRevoked(snap.deviceId),
+      })
+    ) {
       handleDesktopPeerOnline(snap.deviceId);
     }
   });
@@ -336,9 +344,11 @@ export function initDeviceLinkService(): void {
     },
     listOnlineDesktopDevices: () =>
       [...presenceOnlineByDevice.entries()]
-        .filter(([deviceId, online]) => online
-          && isDesktopPlatform(presencePlatformByDevice.get(deviceId))
-          && !isDeviceRevoked(deviceId))
+        .filter(([deviceId, online]) => shouldExchangeDictionaryWith({
+          online,
+          platform: presencePlatformByDevice.get(deviceId),
+          revoked: isDeviceRevoked(deviceId),
+        }))
         .map(([deviceId]) => deviceId),
   });
   if (unsubscribeDictionaryChanged) unsubscribeDictionaryChanged();

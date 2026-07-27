@@ -17,7 +17,7 @@
  *  - upsert 失败仅日志,不抛 —— 这是"用户体验增强"数据,不该挡住 session 创建主流程。
  */
 
-import { stat } from 'node:fs/promises';
+import { realpath, stat } from 'node:fs/promises';
 
 import { BrowserWindow, ipcMain } from 'electron';
 import { desc, eq, sql } from 'drizzle-orm';
@@ -124,8 +124,21 @@ async function dirExists(path: string): Promise<boolean> {
 }
 
 /**
+ * 解析到真实路径再比较, 否则「已知项目内的一个软链」能指到项目外任意目录,
+ * 词法前缀比会把它当成子目录放行(PR #669 review 指出)。解析失败(路径不存在 /
+ * 无权限)时回退原值 —— 这条链路只用于收紧判定, 回退不会放宽已有边界。
+ */
+async function resolveRealPath(p: string): Promise<string> {
+  try {
+    return (await realpath(p)).replace(/\\/g, '/');
+  } catch {
+    return p;
+  }
+}
+
+/**
  * 该目录是否是「用户已经用 Cindy 打开过的项目」—— 即 recent_workdirs 里某条
- * 记录本身或它的子目录(worktree 落在项目内, 同样算已知)。
+ * 记录本身或它的子目录(worktree 落在项目内, 同样算已知), 按 **realpath** 比较。
  *
  * 用途是给 sessions:move 判断「目标是不是用户授权过的目的地」: 只有已知项目
  * 才铸造 IM 绑定的本地移动授权, 攻击者因此拿不到"把 IM 引向任意路径"的能力。
@@ -137,12 +150,14 @@ export async function isKnownRecentWorkdir(candidate: string | null | undefined)
   try {
     const db = getDbClient().drizzle;
     const rows = await db.select({ path: recentWorkdirs.path }).from(recentWorkdirs);
-    return rows.some((row) => {
-      // 表内与入参都已过 normalizeRecentWorkdirPath(posix 形态、无尾斜杠),
-      // 直接按段前缀比即可; Windows 盘符大小写不敏感, 统一小写再比。
-      const base = process.platform === 'win32' ? row.path.toLowerCase() : row.path;
-      const target = process.platform === 'win32' ? normalized.toLowerCase() : normalized;
-      return target === base || target.startsWith(base.endsWith('/') ? base : `${base}/`);
+    if (rows.length === 0) return false;
+    const lower = (v: string): string => (process.platform === 'win32' ? v.toLowerCase() : v);
+    const target = lower(await resolveRealPath(normalized));
+    const bases = await Promise.all(rows.map((row) => resolveRealPath(row.path)));
+    return bases.some((raw) => {
+      // 两侧都已归一(posix 形态、无尾斜杠); Windows 盘符大小写不敏感。
+      const base = lower(raw).replace(/\/+$/, '');
+      return target === base || target.startsWith(`${base}/`);
     });
   } catch (err) {
     log.warn('[localDb] isKnownRecentWorkdir failed', {

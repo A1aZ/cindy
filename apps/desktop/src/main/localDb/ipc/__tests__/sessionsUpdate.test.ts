@@ -343,4 +343,12 @@ describe('local-db:sessions:move handler wiring', () => {
   it('rejects an unknown target kind', async () => {
     await expect(invokeMove('codex-local', { kind: 'nowhere' })).rejects.toThrow(/INVALID_PARAMS/);
   });
+
+  it('rejects a project target whose path normalizes to nothing', async () => {
+    // 放过去会写成 workspaceKind='project' 且 workingDir=null 的不一致状态
+    await expect(invokeMove('codex-local', { kind: 'project', workingDir: '   ' })).rejects.toThrow(
+      /INVALID_PARAMS/,
+    );
+    expect(h.noteHookSessionMoved).not.toHaveBeenCalled();
+  });
 });

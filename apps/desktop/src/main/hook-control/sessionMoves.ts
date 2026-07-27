@@ -16,20 +16,12 @@ import { ownerScopedUserDataPath } from '../appSessionState.js';
 import { createLogger } from '../logger.js';
 import { getClientEndpoint } from '../clientEndpointsService.js';
 import { createHookBindingStore, type HookBindingAuthority } from './bindings.js';
+// 复用 dispatcher 的路径口径: 判定必须与它放行时用的同一套规则, 否则会把该记
+// workspace 的移动记成 local-move(反之亦然)——PR #669 review 指出。
+import { isPathWithin } from './dispatcher.js';
 import { createSlackHookStore } from './store.js';
 
 const log = createLogger('hookSessionMoves');
-
-/** 与 store / dispatcher 同口径的「目录是否落在 base 内」(含相等)。 */
-function within(base: string, target: string): boolean {
-  const norm = (p: string): string => {
-    const s = p.replace(/\\/g, '/').replace(/\/+$/, '');
-    return process.platform === 'win32' ? s.toLowerCase() : s;
-  };
-  const b = norm(base);
-  const t = norm(target);
-  return t === b || t.startsWith(`${b}/`);
-}
 
 /**
  * 目标目录是否仍落在某个工作目录映射内。移进映射内的目录**不该**留下
@@ -44,7 +36,7 @@ function authorityForDir(workingDir: string): HookBindingAuthority {
       log: { info: () => {}, warn: (msg: string) => log.warn(msg) },
     });
     const roots = Object.values(store.get().workspaces);
-    return roots.some((root) => within(root, workingDir)) ? 'workspace' : 'local-move';
+    return roots.some((root) => isPathWithin(root, workingDir)) ? 'workspace' : 'local-move';
   } catch (err) {
     // 读不到配置时按 local-move 记(移动确实发生过); dispatcher 每次仍按当前
     // 映射重判, 目录在映射内时会把它收敛回 workspace。

@@ -4777,7 +4777,13 @@ export function ChatInput({
       addRecentFolder(folderPath);
       try {
         if (sessionId) {
-          await sessionService.update(sessionId, { workingDir: folderPath });
+          // 用户主动给这个对话换工作目录 = 一次移动: 走窄口径 move, 它是 IM 绑定
+          // 「本地移动授权」的唯一铸造入口(通用 update 不铸造), 绑了 Slack /
+          // Telegram 的对话才能在换目录后继续复用原对话。
+          await sessionService.moveToWorkspace(sessionId, {
+            kind: 'project',
+            workingDir: folderPath,
+          });
         }
         // Server succeeded → update UI
         setWorkingDir(folderPath);

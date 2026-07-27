@@ -1046,13 +1046,16 @@ export function registerSessionIpc(): void {
     if (t.kind !== 'project' && t.kind !== 'dialogue') {
       throwIpcError('INVALID_PARAMS', `invalid target.kind: ${String(t.kind)}`);
     }
-    const patch: Record<string, unknown> =
-      t.kind === 'dialogue'
-        ? { workspaceKind: 'dialogue' }
-        : {
-            workspaceKind: 'project',
-            workingDir: normalizeWorkingDirForStorage(requireString(t.workingDir, 'workingDir')),
-          };
+    let patch: Record<string, unknown>;
+    if (t.kind === 'dialogue') {
+      patch = { workspaceKind: 'dialogue' };
+    } else {
+      // 归一化可能返回 null(纯空白等) —— 放过去会写成 project + workingDir=null
+      // 的不一致状态, 这里直接拒绝(PR #669 review 指出)。
+      const normalized = normalizeWorkingDirForStorage(requireString(t.workingDir, 'workingDir'));
+      if (!normalized) throwIpcError('INVALID_PARAMS', 'workingDir must be a usable path');
+      patch = { workspaceKind: 'project', workingDir: normalized };
+    }
 
     const nextDir = typeof patch.workingDir === 'string' ? patch.workingDir : null;
     if (nextDir !== null) {

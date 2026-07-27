@@ -2942,15 +2942,20 @@ struct PillBadge: View {
     )
   }
 
-  /// Width the capsule actually wants, so hardware-notch layout can reserve room
-  /// for it instead of clipping a multi-digit count. Each segment is measured and
-  /// rounded on its own because SwiftUI lays out every `Text` separately.
+  /// Width the hardware-notch layout reserves for the capsule so a multi-digit count is
+  /// never clipped.
+  ///
+  /// This is deliberately a *nominal* width computed from digit counts, not an `NSFont`
+  /// measurement: main computes the carrier width from the very same formula in
+  /// `getAgentIslandCompactBadgeWidth` (`shared/agentIsland.ts`), and the two must agree
+  /// exactly. A measured value here would sit a few points below the TS estimate, and
+  /// every snap comparison against the delivered width would silently miss.
+  /// `nominalCharWidth` is an upper bound on the real advance, so the reserved width is
+  /// always at least what SwiftUI draws — `badge-probe` harness asserts that.
   static func intrinsicWidth(pillSnapshot: AgentIslandPillSnapshot, compact: Bool) -> CGFloat {
     let metrics = metrics(pillSnapshot: pillSnapshot, compact: compact)
-    let font = NSFont.monospacedSystemFont(ofSize: metrics.fontSize, weight: .semibold)
     let segmentsWidth = metrics.segments.reduce(CGFloat(0)) { total, segment in
-      let measured = (segment as NSString).size(withAttributes: [.font: font]).width
-      return total + max(1, ceil(measured + segmentRoundingSlack))
+      total + CGFloat(segment.count) * nominalCharWidth + segmentRoundingSlack
     }
     let spacing = activeTotalSpacing * CGFloat(max(0, metrics.segments.count - 1))
     return max(metrics.minWidth, segmentsWidth + spacing + contentInset * 2)
@@ -2958,9 +2963,11 @@ struct PillBadge: View {
 
   private static let activeTotalSpacing: CGFloat = 1
   private static let contentInset: CGFloat = 2
-  /// Per-segment slack absorbing the sub-point difference between `NSFont` metrics and
-  /// SwiftUI's own text layout. Same convention as `measuredCompactTitleWidth`, and
-  /// mirrored by `AGENT_ISLAND_COMPACT_BADGE_SEGMENT_ROUNDING_SLACK` on the TS side.
+  /// Upper bound for one monospaced 10pt digit (real advance is ~6pt). Mirrors
+  /// `AGENT_ISLAND_COMPACT_BADGE_CHAR_WIDTH_BOUND` on the TS side.
+  private static let nominalCharWidth: CGFloat = 7
+  /// Per-segment rounding slack; SwiftUI lays out and rounds every `Text` run
+  /// separately. Mirrors `AGENT_ISLAND_COMPACT_BADGE_SEGMENT_ROUNDING_SLACK`.
   private static let segmentRoundingSlack: CGFloat = 1
 
   var body: some View {
@@ -5543,11 +5550,14 @@ final class AgentIslandController {
     )
   }
 
-  /// Intrinsic width of the compact count badge for the current snapshot, used to
-  /// keep drag snapping aligned with the reserved default width. Only the hardware
-  /// notch layout reserves room for the badge, so skip the font measurement otherwise.
+  /// Width reserved for the compact count badge in the current snapshot, used to keep
+  /// drag snapping aligned with the reserved default width. Only the centered hardware
+  /// notch layout reserves room for the badge.
   private var compactBadgeWidth: CGFloat {
-    guard model.screenMetrics.hasNotch, model.state.totalCount > 0 else {
+    guard model.hardwareNotchLayoutEnabled,
+      model.screenMetrics.hasNotch,
+      model.state.totalCount > 0
+    else {
       return 0
     }
     return PillBadge.intrinsicWidth(pillSnapshot: model.state.pillSnapshot, compact: true)
@@ -5557,8 +5567,15 @@ final class AgentIslandController {
   /// store the badge-independent basic width instead: the stored scalar must not encode
   /// the current count, otherwise the island keeps a wide preference after the count
   /// drops (and the snap can no longer contract).
+  ///
+  /// Gated on `hardwareNotchLayoutEnabled` as well as `hasNotch`: once the island is
+  /// moved off the notch, the emitted frame uses the plain compact layout and its width
+  /// must be persisted verbatim — rewriting it there would shrink the island mid-move.
   private func persistedCompactContentWidth(_ contentWidth: CGFloat) -> CGFloat {
-    guard !lastLayout.expanded, model.screenMetrics.hasNotch else {
+    guard !lastLayout.expanded,
+      model.hardwareNotchLayoutEnabled,
+      model.screenMetrics.hasNotch
+    else {
       return contentWidth
     }
     let hasSession = model.state.totalCount > 0

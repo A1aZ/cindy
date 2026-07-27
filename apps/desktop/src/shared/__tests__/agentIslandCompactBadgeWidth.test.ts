@@ -15,24 +15,33 @@ import {
 
 /**
  * 灵动岛计数徽标由 native helper(macos-agent-island-helper.swift)绘制,但 carrier
- * 窗口宽度由这里的 TS 计算决定。TS 估宽只要小于 native 实测宽度,native 的预留就会被
- * carrier 宽度 clamp 掉,徽标重新被 `.clipped()` 切掉(见 PR #698 review)。
+ * 窗口宽度由这里的 TS 计算决定,两侧必须算出**完全相同**的徽标宽度:
  *
- * 下表是 `PillBadge.intrinsicWidth(compact: true)` 在本机用 NSHostingView 实测的宽度,
- * 用来锁住「TS 预留 >= native 实测」这个不变量。
+ * - TS 估小 → native 的预留被 carrier 宽度 clamp 掉,徽标被 `.clipped()` 切掉
+ * - 两侧不等 → native 的吸附/持久化归一化拿 main 交付的宽度去比自己的值时永远对不上
+ *   (PR #698 review 里两次踩到)
+ *
+ * 所以 Swift 的 `PillBadge.intrinsicWidth` 不做 NSFont 测量,而是与这里同一套按位数算的
+ * 标称公式。下表的 layoutWidth 就是两侧都应算出的值;renderedWidth 是 SwiftUI 实际绘制
+ * 宽度(NSHostingView 实测),标称值必须能覆盖它。
  */
 const NATIVE_COMPACT_BADGE_WIDTH: Array<{
   label: string;
   pillSnapshot: { activeSessionCount: number; sessionCount: number };
-  nativeWidth: number;
+  /** Swift `PillBadge.intrinsicWidth(compact: true)` 应算出的值,必须与 TS 完全一致。 */
+  layoutWidth: number;
+  /** SwiftUI 实绘宽度,标称宽度必须 >= 它,否则仍会被裁。 */
+  renderedWidth: number;
 }> = [
-  { label: '单会话', pillSnapshot: { activeSessionCount: 0, sessionCount: 1 }, nativeWidth: 22 },
-  { label: '1/2', pillSnapshot: { activeSessionCount: 1, sessionCount: 2 }, nativeWidth: 30 },
-  { label: '9/9', pillSnapshot: { activeSessionCount: 9, sessionCount: 9 }, nativeWidth: 30 },
-  { label: '1/12', pillSnapshot: { activeSessionCount: 1, sessionCount: 12 }, nativeWidth: 36 },
-  { label: '11/12', pillSnapshot: { activeSessionCount: 11, sessionCount: 12 }, nativeWidth: 42 },
-  { label: '99/99', pillSnapshot: { activeSessionCount: 99, sessionCount: 99 }, nativeWidth: 42 },
-  { label: '123/456', pillSnapshot: { activeSessionCount: 123, sessionCount: 456 }, nativeWidth: 54 },
+  { label: '单会话', pillSnapshot: { activeSessionCount: 0, sessionCount: 1 }, layoutWidth: 22, renderedWidth: 22 },
+  { label: '12 个会话', pillSnapshot: { activeSessionCount: 0, sessionCount: 12 }, layoutWidth: 22, renderedWidth: 22 },
+  { label: '1/2', pillSnapshot: { activeSessionCount: 1, sessionCount: 2 }, layoutWidth: 30, renderedWidth: 30 },
+  { label: '9/9', pillSnapshot: { activeSessionCount: 9, sessionCount: 9 }, layoutWidth: 30, renderedWidth: 30 },
+  { label: '1/12', pillSnapshot: { activeSessionCount: 1, sessionCount: 12 }, layoutWidth: 37, renderedWidth: 33 },
+  { label: '11/12', pillSnapshot: { activeSessionCount: 11, sessionCount: 12 }, layoutWidth: 44, renderedWidth: 39 },
+  { label: '10/100', pillSnapshot: { activeSessionCount: 10, sessionCount: 100 }, layoutWidth: 51, renderedWidth: 45 },
+  { label: '99/99', pillSnapshot: { activeSessionCount: 99, sessionCount: 99 }, layoutWidth: 44, renderedWidth: 39 },
+  { label: '123/456', pillSnapshot: { activeSessionCount: 123, sessionCount: 456 }, layoutWidth: 58, renderedWidth: 51 },
 ];
 
 const NOTCH_WIDTHS = [180, 200, 210, 215];
@@ -48,11 +57,18 @@ function trailingInset(side: number): number {
 }
 
 describe('getAgentIslandCompactBadgeWidth', () => {
-  it('保证估宽不低于 native 实测宽度(否则 carrier 会把 native 预留 clamp 掉)', () => {
-    for (const { label, pillSnapshot, nativeWidth } of NATIVE_COMPACT_BADGE_WIDTH) {
-      const estimated = getAgentIslandCompactBadgeWidth(pillSnapshot);
-      expect(estimated, `${label} 估宽 ${estimated} < native ${nativeWidth}`)
-        .toBeGreaterThanOrEqual(nativeWidth);
+  it('与 Swift PillBadge.intrinsicWidth 逐值一致(两侧公式必须同步)', () => {
+    for (const { label, pillSnapshot, layoutWidth } of NATIVE_COMPACT_BADGE_WIDTH) {
+      expect(getAgentIslandCompactBadgeWidth(pillSnapshot), `${label} 与 Swift 侧不一致`)
+        .toBe(layoutWidth);
+    }
+  });
+
+  it('标称宽度覆盖 SwiftUI 实绘宽度(否则徽标仍会被裁)', () => {
+    for (const { label, pillSnapshot, renderedWidth } of NATIVE_COMPACT_BADGE_WIDTH) {
+      const nominal = getAgentIslandCompactBadgeWidth(pillSnapshot);
+      expect(nominal, `${label} 标称 ${nominal} < 实绘 ${renderedWidth}`)
+        .toBeGreaterThanOrEqual(renderedWidth);
     }
   });
 
@@ -72,7 +88,7 @@ describe('getAgentIslandCompactBadgeWidth', () => {
 describe('getAgentIslandDefaultContentWidth: 刻痕机为计数徽标预留宽度', () => {
   it('预留后的侧宽足够容纳 native 徽标(扣掉 trailing inset 仍装得下)', () => {
     for (const notchWidth of NOTCH_WIDTHS) {
-      for (const { label, pillSnapshot, nativeWidth } of NATIVE_COMPACT_BADGE_WIDTH) {
+      for (const { label, pillSnapshot, layoutWidth } of NATIVE_COMPACT_BADGE_WIDTH) {
         const contentWidth = getAgentIslandDefaultContentWidth({
           expanded: false,
           hasSession: true,
@@ -83,8 +99,8 @@ describe('getAgentIslandDefaultContentWidth: 刻痕机为计数徽标预留宽�
         const available = side - trailingInset(side);
         expect(
           available,
-          `notch ${notchWidth} ${label}: 可用 ${available} < 徽标 ${nativeWidth}`,
-        ).toBeGreaterThanOrEqual(nativeWidth);
+          `notch ${notchWidth} ${label}: 可用 ${available} < 徽标 ${layoutWidth}`,
+        ).toBeGreaterThanOrEqual(layoutWidth);
       }
     }
   });
@@ -209,7 +225,7 @@ function nativeCompactContentWidth(input: {
 describe('TS carrier 宽度 → native 宽度链路', () => {
   it('native 拿到的宽度足以完整绘制徽标(carrier 不再 clamp 掉预留)', () => {
     for (const notchWidth of NOTCH_WIDTHS) {
-      for (const { label, pillSnapshot, nativeWidth } of NATIVE_COMPACT_BADGE_WIDTH) {
+      for (const { label, pillSnapshot, layoutWidth } of NATIVE_COMPACT_BADGE_WIDTH) {
         const tsContentWidth = getAgentIslandDefaultContentWidth({
           expanded: false,
           hasSession: true,
@@ -219,21 +235,21 @@ describe('TS carrier 宽度 → native 宽度链路', () => {
         const resolved = nativeCompactContentWidth({
           tsContentWidth,
           notchWidth,
-          nativeBadgeWidth: nativeWidth,
+          nativeBadgeWidth: layoutWidth,
         });
         const side = sideWidth(resolved, notchWidth);
         const available = side - trailingInset(side);
         expect(
           available,
-          `notch ${notchWidth} ${label}: native 解析出 ${resolved},可用 ${available} < 徽标 ${nativeWidth}`,
-        ).toBeGreaterThanOrEqual(nativeWidth);
+          `notch ${notchWidth} ${label}: native 解析出 ${resolved},可用 ${available} < 徽标 ${layoutWidth}`,
+        ).toBeGreaterThanOrEqual(layoutWidth);
       }
     }
   });
 
   it('回归:旧的 TS 宽度(notch + 64)会让 native 预留被 clamp 掉', () => {
     const notchWidth = 200;
-    const nativeBadgeWidth = 42; // 11/12
+    const nativeBadgeWidth = 44; // 11/12
     const legacyTsWidth = notchWidth + AGENT_ISLAND_COMPACT_HARDWARE_ACTIVE_EXTRA_WIDTH;
     const resolved = nativeCompactContentWidth({
       tsContentWidth: legacyTsWidth,

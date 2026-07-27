@@ -2080,6 +2080,32 @@ export function MessageStream({
     [ungroupedRenderItems, isSessionStreaming, forkOrigin],
   );
 
+  /**
+   * TODO(render-window-bidirectional): 锚定分支目前是 `slice(startIdx)` —— 从锚点切到
+   * 末尾、**没有上界**。这是 #676 review 反复指向的根因:补齐 / 跳转让 messages 变长后,
+   * 深跳会一次挂载"锚点 → 末尾"的全部 item。因为它无界,store 侧只能靠"跳转补齐预算"
+   * 间接限制挂载量,而那个预算必须逐一追平 buildRenderItems 的每种 item 展开规则
+   * (agent_task 卡、空洞切段、ghost_card、agent_plan、tool_media…),review 中已发现 5 种
+   * 被低估的路径 —— 是一条追不完的线。
+   *
+   * 决定:把锚定窗口做成双向有界 + 配套向下扩窗,作为紧随其后的独立改动(不塞进本 PR ——
+   * 它要动下面 5 处联动派生,且滚动手感必须实机验证,需要一个完整的实施与验证窗口)。
+   * 之前那套补齐预算是它落地前的过渡兜底,落地后可以大幅放宽甚至移除。
+   *
+   * 实施要点(照此改,别重新推导):
+   *   1. 新增 anchoredForwardItems state 作为锚点向后的 item 上界,锚点变化时重置;
+   *      锚定分支改为 slice(start, start + anchoredForwardItems)。
+   *   2. windowAtTop 现在是 `visible.length === all.length`,加上界后即使 start 已到 0
+   *      也恒为 false → decideUserIntentFillAction 再也走不到 load-from-db。必须改成
+   *      基于 startIdx === 0 判定,因此要把 startIdx 从这个 useMemo 里一并导出。
+   *   3. isNearBottom:窗口未覆盖末尾时 DOM 距底 <100px 会被误判成"贴底",auto-follow 与
+   *      jump-down chip 语义都会错。窗口未覆盖末尾时必须强制判为非贴底。
+   *   4. expandWindow(向上扩)必须同步把上界 +RENDER_WINDOW_GROWTH_ITEMS,否则 start 前移
+   *      而上界不动,会把用户视口下方的内容反向截掉。
+   *   5. handleScroll 已有 distanceFromBottom:距底 <threshold 且窗口未覆盖末尾时扩上界。
+   *      向下扩窗比向上简单 —— 在下方 append 不改变已有内容的滚动偏移,不需要 F-SYNC-2
+   *      那种 delta 补偿。上界扩到覆盖末尾后清除它,此后贴底语义与现状完全一致。
+   */
   const visibleRenderItems = useMemo(() => {
     if (allRenderItems.length === 0) return allRenderItems;
     if (firstVisibleItemKey === null) {

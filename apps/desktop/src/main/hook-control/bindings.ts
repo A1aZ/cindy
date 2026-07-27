@@ -51,6 +51,8 @@ export interface HookBindingEntry {
   authority: HookBindingAuthority | null;
   /** 已登记的移动尚未在渠道里说明过。 */
   noticePending: boolean;
+  /** 该行最后一次写入时刻; set 的 expectedUpdatedAt 用它做乐观并发控制。 */
+  updatedAt: number;
 }
 
 /** set 的可选元信息(整行覆盖写, 省略即清空对应字段)。 */
@@ -58,14 +60,28 @@ export interface HookBindingMeta {
   workingDir?: string | null;
   authority?: HookBindingAuthority | null;
   noticePending?: boolean;
+  /**
+   * 乐观并发控制: 只有当前行的 updatedAt 仍等于该值时才写。dispatcher 的回填
+   * 用它避免抹掉「读取之后、回填之前」落下的移动登记(PR #669 review 指出的
+   * 反向竞态)。省略 = 无条件覆盖。
+   */
+  expectedUpdatedAt?: number;
 }
 
 export interface HookBindingStore {
   get(connectionId: string, externalKey: string): string | null;
   /** 含目录快照与授权状态的绑定视图; 不存在时 null。 */
   getEntry(connectionId: string, externalKey: string): HookBindingEntry | null;
-  /** 整行覆盖写: meta 里省略的字段等于清空, 调用方应显式传当前状态。 */
-  set(connectionId: string, externalKey: string, sessionId: string, meta?: HookBindingMeta): void;
+  /**
+   * 整行覆盖写: meta 里省略的字段等于清空, 调用方应显式传当前状态。
+   * 返回是否真的写入(带 expectedUpdatedAt 且版本已变时返回 false)。
+   */
+  set(
+    connectionId: string,
+    externalKey: string,
+    sessionId: string,
+    meta?: HookBindingMeta,
+  ): boolean;
   /**
    * 登记一次「用户在桌面端把这个会话移到了 workingDir」—— 由窄口径的
    * `local-db:sessions:move` 经 sessionMoves.ts 调用, 是 local-move 授权的唯一
@@ -144,12 +160,20 @@ export function createHookBindingStore(deps: {
         authority:
           row.authority === 'workspace' || row.authority === 'local-move' ? row.authority : null,
         noticePending: row.noticePending === true,
+        updatedAt: typeof row.updatedAt === 'number' ? row.updatedAt : 0,
       };
     },
     set(connectionId, externalKey, sessionId, meta) {
       const data = readAll();
+      if (meta?.expectedUpdatedAt !== undefined) {
+        const current = data[connectionId]?.[externalKey];
+        const currentVersion = typeof current?.updatedAt === 'number' ? current.updatedAt : 0;
+        // 期间被别人写过(典型: 一次移动登记)——放弃本次覆盖, 保住更新的那条
+        if (current !== undefined && currentVersion !== meta.expectedUpdatedAt) return false;
+      }
       (data[connectionId] ??= {})[externalKey] = toRow(sessionId, meta);
       writeAll(data);
+      return true;
     },
     noteSessionMoved(sessionId, workingDir, authority) {
       if (!sessionId || !workingDir) return 0;

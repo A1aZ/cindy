@@ -708,10 +708,21 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
         // 登记过的移动要在渠道里说明一次(说明完就清掉 pending)
         const announceMove = locallyAuthorized && boundEntry?.noticePending === true;
         migrateLegacyBinding(workingDir, authority);
+        /**
+         * 已登记但尚未落库的移动: 绑定记着 local-move + 新目录, 而 session 行
+         * 还停在旧目录(移动的两步之间)。这一轮照常在旧目录跑, 但**不能**把绑定
+         * 收敛回 workspace + 旧目录 —— 那会抹掉刚落下的授权, 等移动写库完成后
+         * 下一条消息就把绑定当撤权删掉(PR #669 review 指出的反向竞态)。
+         */
+        const pendingMoveRegistration =
+          namespacedEntry?.authority === 'local-move' &&
+          namespacedEntry.workingDir != null &&
+          !isSamePath(namespacedEntry.workingDir, workingDir);
         // 快照回填 / 授权收敛: 只在目录、来源或待说明状态变化时落盘,
         // 常规复用不产生写。
         if (
           namespacedEntry !== null &&
+          !pendingMoveRegistration &&
           (namespacedEntry.workingDir === null ||
             !isSamePath(namespacedEntry.workingDir, workingDir) ||
             namespacedEntry.authority !== authority ||
@@ -721,6 +732,9 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
             workingDir,
             authority,
             noticePending: false,
+            // 另一半窗口: 本次 inspect 期间才落下的登记同样不能被覆盖,
+            // 用读到的版本做乐观并发控制(不匹配就放弃这次回填)。
+            expectedUpdatedAt: namespacedEntry.updatedAt,
           });
         }
         if (announceMove) {

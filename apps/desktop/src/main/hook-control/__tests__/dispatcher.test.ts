@@ -40,6 +40,8 @@ const CONFIG: HookConnectionConfig = {
 /** 内存 binding(含目录快照与授权状态, 与文件实现同语义)。 */
 function memoryBindings(): HookBindingStore {
   const map = new Map<string, HookBindingEntry>();
+  // 单调递增版本号,模拟文件实现的 updatedAt(乐观并发控制用)
+  let version = 1;
   const k = (c: string, e: string): string => `${c}|${e}`;
   return {
     get: (c, e) => map.get(k(c, e))?.sessionId ?? null,
@@ -47,13 +49,24 @@ function memoryBindings(): HookBindingStore {
       const row = map.get(k(c, e));
       return row ? { ...row } : null;
     },
-    set: (c, e, s, meta) =>
-      void map.set(k(c, e), {
+    set: (c, e, s, meta) => {
+      const current = map.get(k(c, e));
+      if (
+        meta?.expectedUpdatedAt !== undefined &&
+        current !== undefined &&
+        current.updatedAt !== meta.expectedUpdatedAt
+      ) {
+        return false;
+      }
+      map.set(k(c, e), {
         sessionId: s,
         workingDir: meta?.workingDir ?? null,
         authority: meta?.authority ?? null,
         noticePending: meta?.noticePending === true,
-      }),
+        updatedAt: version++,
+      });
+      return true;
+    },
     noteSessionMoved: (sessionId, workingDir, authority) => {
       let updated = 0;
       for (const [key, row] of map) {
@@ -63,6 +76,7 @@ function memoryBindings(): HookBindingStore {
           workingDir,
           authority,
           noticePending: authority === 'local-move',
+          updatedAt: version++,
         });
         updated += 1;
       }
@@ -467,7 +481,7 @@ describe('dispatcher 核心语义', () => {
     expect(c.last('task.ack')!.payload).toMatchObject({ result: 'accepted', sessionId: first });
     expect(fr.calls[1]).toMatchObject({ isNew: false, sessionId: first, workingDir: MOVED_DIR });
     // 说明已发出, pending 清掉, 授权留下
-    expect(bindings.getEntry('conn-1', 'team-slack:C1:1.1')).toEqual({
+    expect(bindings.getEntry('conn-1', 'team-slack:C1:1.1')).toMatchObject({
       sessionId: first,
       workingDir: MOVED_DIR,
       authority: 'local-move',
@@ -541,6 +555,77 @@ describe('dispatcher 核心语义', () => {
     expect(c.last('turn.end')!.payload.finalText).toBe('第二次');
   });
 
+  it('移动登记已落、会话目录还没落库: 这一轮照常跑旧目录, 但不抹掉登记', async () => {
+    const bindings = memoryBindings();
+    const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
+    const fr = fakeRunner({ sessions });
+    const { d } = makeDispatcher({ runner: fr.runner, bindings });
+    const c = collector();
+    const MOVED_DIR = path.resolve('/repos/another-project');
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    const first = c.last('task.ack')!.payload.sessionId!;
+    sessions[first] = { workingDir: WS_DIR, usable: true };
+    fr.finish();
+    await tick();
+
+    // 移动的两步之间: 授权已登记(新目录), session 行还停在旧目录
+    bindings.noteSessionMoved(first, MOVED_DIR, 'local-move');
+    d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
+    await tick();
+    // 这一轮按 session 的真实目录(仍在映射内)复用
+    expect(fr.calls[1]).toMatchObject({ isNew: false, sessionId: first, workingDir: WS_DIR });
+    // 关键: 登记没有被收敛回 workspace + 旧目录
+    expect(bindings.getEntry('conn-1', 'team-slack:C1:1.1')).toMatchObject({
+      workingDir: MOVED_DIR,
+      authority: 'local-move',
+      noticePending: true,
+    });
+    fr.finish();
+    await tick();
+
+    // 移动写库完成后, 下一条消息跟随到新目录并说明一次
+    sessions[first] = { workingDir: MOVED_DIR, usable: true };
+    d.handleDispatch('conn-1', dispatch({ requestId: 'req-3' }), c.send);
+    await tick();
+    expect(c.last('task.ack')!.payload.sessionId).toBe(first);
+    fr.finish({ finalText: '跟过来了' });
+    await tick();
+    expect(c.last('turn.end')!.payload.finalText).toContain('已被移动到新的工作目录');
+  });
+
+  it('回填期间落下的登记不被覆盖(乐观并发控制)', async () => {
+    const bindings = memoryBindings();
+    const MOVED_DIR = path.resolve('/repos/another-project');
+    const sessions: Record<string, { workingDir: string; usable: boolean }> = {
+      'sess-1': { workingDir: WS_DIR, usable: true },
+    };
+    // inspect 是异步的: 在它 await 期间模拟一次移动登记落盘
+    const runner: HookSessionRunner = {
+      isBusy: () => false,
+      inspect: async (id) => {
+        bindings.noteSessionMoved('sess-1', MOVED_DIR, 'local-move');
+        return sessions[id] ? { ...sessions[id] } : null;
+      },
+      run: async () => ({ status: 'ok', finalText: 'ok', errorMessage: null, durationMs: 1 }),
+    };
+    const { d } = makeDispatcher({ runner, bindings });
+    const c = collector();
+    // 老形态绑定(无快照): 正常复用路径本会回填 workspace + 当前目录
+    bindings.set('conn-1', 'team-slack:C1:1.1', 'sess-1');
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+
+    expect(c.last('task.ack')!.payload.sessionId).toBe('sess-1');
+    // 回填必须让位给 inspect 期间落下的登记
+    expect(bindings.getEntry('conn-1', 'team-slack:C1:1.1')).toMatchObject({
+      workingDir: MOVED_DIR,
+      authority: 'local-move',
+    });
+  });
+
   it('对话移回工作目录映射内: 授权来源复位, 此后映射被改仍按撤权重建', async () => {
     const bindings = memoryBindings();
     const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
@@ -568,7 +653,7 @@ describe('dispatcher 核心语义', () => {
     bindings.noteSessionMoved(first, WS_DIR, 'workspace');
     d.handleDispatch('conn-1', dispatch({ requestId: 'req-3' }), c.send);
     await tick();
-    expect(bindings.getEntry('conn-1', 'team-slack:C1:1.1')).toEqual({
+    expect(bindings.getEntry('conn-1', 'team-slack:C1:1.1')).toMatchObject({
       sessionId: first,
       workingDir: WS_DIR,
       authority: 'workspace',
@@ -636,7 +721,7 @@ describe('dispatcher 核心语义', () => {
     const sessionId = c.last('task.ack')!.payload.sessionId!;
     expect(sessionId).not.toBe('legacy-session');
     expect(fr.calls[0]).toMatchObject({ isNew: true, workingDir: WS_DIR });
-    expect(bindings.getEntry('conn-1', 'team-slack:C1:1.1')).toEqual({
+    expect(bindings.getEntry('conn-1', 'team-slack:C1:1.1')).toMatchObject({
       sessionId,
       workingDir: WS_DIR,
       authority: 'workspace',
@@ -656,7 +741,7 @@ describe('dispatcher 核心语义', () => {
     await tick();
 
     expect(c.last('task.ack')!.payload.sessionId).toBe('legacy-session');
-    expect(bindings.getEntry('conn-1', 'team-slack:C1:1.1')).toEqual({
+    expect(bindings.getEntry('conn-1', 'team-slack:C1:1.1')).toMatchObject({
       sessionId: 'legacy-session',
       workingDir: WS_DIR,
       authority: 'workspace',

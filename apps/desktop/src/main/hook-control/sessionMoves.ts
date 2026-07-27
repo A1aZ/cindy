@@ -14,7 +14,6 @@
 
 import { ownerScopedUserDataPath } from '../appSessionState.js';
 import { createLogger } from '../logger.js';
-import { getClientEndpoint } from '../clientEndpointsService.js';
 import { createHookBindingStore, type HookBindingAuthority } from './bindings.js';
 // 复用 dispatcher 的路径口径: 判定必须与它放行时用的同一套规则, 否则会把该记
 // workspace 的移动记成 local-move(反之亦然)——PR #669 review 指出。
@@ -32,7 +31,9 @@ function authorityForDir(workingDir: string): HookBindingAuthority {
   try {
     const store = createSlackHookStore({
       filePath: ownerScopedUserDataPath('slack-hook.json'),
-      defaultUrl: () => getClientEndpoint('slackHookWsUrl'),
+      // 这里只读 workspaces 映射, 不碰服务器地址 —— 给个空默认值即可,
+      // 免得为一次判定把端点清单模块也拖进 localDb 的静态依赖图。
+      defaultUrl: () => '',
       log: { info: () => {}, warn: (msg: string) => log.warn(msg) },
     });
     const roots = Object.values(store.get().workspaces);

@@ -16,6 +16,7 @@ import type { DbClient } from '../client/DbClient';
 import { sessions, messages } from '../schema';
 import { throwIpcError, requireString, requireObject } from '../../utils/ipcValidate';
 import { assertTrustedAppRendererEvent } from '../../security/trustedAppRenderer.js';
+import { noteHookSessionMoved } from '../../hook-control/sessionMoves.js';
 import { resolveBusinessSessionId } from '../../sessionIds';
 import {
   sessionToCamel,
@@ -1068,8 +1069,7 @@ export function registerSessionIpc(): void {
         !before || normalizeWorkingDirForStorage(before.workingDir) !== nextDir;
       // 目标不在用户已知项目里就不铸造授权(移动本身照常进行)
       if (dirActuallyChanges && (await isKnownRecentWorkdir(nextDir))) {
-        const m = await import('../../hook-control/sessionMoves.js');
-        await m.noteHookSessionMoved(sid, nextDir);
+        await noteHookSessionMoved(sid, nextDir);
       }
     }
     return applySessionUpdate(sid, patch);

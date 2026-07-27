@@ -124,15 +124,17 @@ async function dirExists(path: string): Promise<boolean> {
 }
 
 /**
- * 解析到真实路径再比较, 否则「已知项目内的一个软链」能指到项目外任意目录,
- * 词法前缀比会把它当成子目录放行(PR #669 review 指出)。解析失败(路径不存在 /
- * 无权限)时回退原值 —— 这条链路只用于收紧判定, 回退不会放宽已有边界。
+ * 解析到真实路径, 否则「已知项目内的一个软链」能指到项目外任意目录, 词法前缀比
+ * 会把它当成子目录放行(PR #669 review 指出)。
+ *
+ * 解析失败(不存在 / 断链 / 无权限)返回 null, **不**回退词法路径 —— 回退等于把
+ * 断链软链当成普通子目录, 授权判定必须 fail closed。
  */
-async function resolveRealPath(p: string): Promise<string> {
+async function resolveRealPath(p: string): Promise<string | null> {
   try {
     return (await realpath(p)).replace(/\\/g, '/');
   } catch {
-    return p;
+    return null;
   }
 }
 
@@ -152,9 +154,14 @@ export async function isKnownRecentWorkdir(candidate: string | null | undefined)
     const rows = await db.select({ path: recentWorkdirs.path }).from(recentWorkdirs);
     if (rows.length === 0) return false;
     const lower = (v: string): string => (process.platform === 'win32' ? v.toLowerCase() : v);
-    const target = lower(await resolveRealPath(normalized));
+    const resolvedTarget = await resolveRealPath(normalized);
+    // 目标解析不了 = 不存在 / 断链 / 无权限 -> 不认它是已知项目(fail closed)
+    if (resolvedTarget === null) return false;
+    const target = lower(resolvedTarget);
     const bases = await Promise.all(rows.map((row) => resolveRealPath(row.path)));
     return bases.some((raw) => {
+      // 解析不了的项目条目(目录已被删/移走)不参与判定
+      if (raw === null) return false;
       // 两侧都已归一(posix 形态、无尾斜杠); Windows 盘符大小写不敏感。
       const base = lower(raw).replace(/\/+$/, '');
       return target === base || target.startsWith(`${base}/`);

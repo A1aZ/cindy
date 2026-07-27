@@ -36,7 +36,7 @@ describe('hook binding store', () => {
     });
 
     expect(store.get('conn-1', 'slack:C1:1.1')).toBe('sess-1');
-    expect(store.getEntry('conn-1', 'slack:C1:1.1')).toEqual({
+    expect(store.getEntry('conn-1', 'slack:C1:1.1')).toMatchObject({
       sessionId: 'sess-1',
       workingDir: '/repos/demo',
       authority: 'workspace',
@@ -59,7 +59,7 @@ describe('hook binding store', () => {
       ['conn-a', 'k1'],
       ['conn-b', 'k2'],
     ] as const) {
-      expect(reopened.getEntry(ns, key)).toEqual({
+      expect(reopened.getEntry(ns, key)).toMatchObject({
         sessionId: 'sess-1',
         workingDir: '/repos/moved',
         authority: 'local-move',
@@ -81,7 +81,7 @@ describe('hook binding store', () => {
 
     expect(row['conn-1']['k']).not.toHaveProperty('workingDir');
     expect(row['conn-1']['k']).not.toHaveProperty('authority');
-    expect(makeStore().getEntry('conn-1', 'k')).toEqual({
+    expect(makeStore().getEntry('conn-1', 'k')).toMatchObject({
       sessionId: 'sess-2',
       workingDir: null,
       authority: null,
@@ -98,7 +98,7 @@ describe('hook binding store', () => {
     const store = makeStore();
 
     expect(store.get('conn-1', 'slack:C1:1.1')).toBe('legacy');
-    expect(store.getEntry('conn-1', 'slack:C1:1.1')).toEqual({
+    expect(store.getEntry('conn-1', 'slack:C1:1.1')).toMatchObject({
       sessionId: 'legacy',
       workingDir: null,
       authority: null,

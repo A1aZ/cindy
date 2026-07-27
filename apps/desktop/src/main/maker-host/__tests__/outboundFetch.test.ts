@@ -106,7 +106,7 @@ describe('resolveOutboundDispatcher', () => {
   it('keeps per-path PAC decisions apart on the same origin', async () => {
     // 「/internal 直连、其余走代理」这类 PAC 配置必须逐路径生效。
     resolverState.resolve.mockImplementation(async (target: string) =>
-      target.endsWith('/internal') ? null : 'http://127.0.0.1:7890',
+      new URL(target).pathname === '/internal' ? null : 'http://127.0.0.1:7890',
     );
     const proxied = await resolveOutboundDispatcher('https://api.example.com/public');
     expect(proxied).toBeDefined();
@@ -318,8 +318,10 @@ describe('outboundFetch', () => {
 
   it('follows redirects itself, re-resolving the proxy for every hop', async () => {
     // 首跳走代理;第二跳的目标 host 在快照里是「直连」→ 不能再被塞进代理隧道。
+    // 用 URL.origin 精确比较,不做前缀匹配(前缀匹配会把 oauth.example.com.evil.test
+    // 也算命中,CodeQL 的 incomplete-url-substring-sanitization 正是这个)。
     resolverState.resolve.mockImplementation(async (target: string) =>
-      target.startsWith('https://oauth.example.com') ? 'http://127.0.0.1:7890' : null,
+      new URL(target).origin === 'https://oauth.example.com' ? 'http://127.0.0.1:7890' : null,
     );
     undiciState.fetch
       .mockResolvedValueOnce(redirectResponse(302, 'https://cdn.example.net/final') as never)

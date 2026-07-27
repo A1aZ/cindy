@@ -18,6 +18,15 @@
  *
  * 语义与 loopback proxy host 那两处完全一致:loopback 上游恒直连;代理解析失败
  * fail-open 走直连(不断链路);代理地址只以脱敏形态进日志。
+ *
+ * 已知限制:
+ *   - **需要认证的系统代理不支持**。`session.resolveProxy` 只给 host:port,凭证由
+ *     Chromium 自己的 proxy-auth 挑战(`app.on('login')`)补,Node/undici 这条路没有对接
+ *     口 —— 这类环境下会收到 407。命中 407 会明确告警并提示改用带 userinfo 的
+ *     `HTTPS_PROXY`(env 层支持 Proxy-Authorization)。
+ *   - 直连路径不经 undici(走 `globalThis.fetch`,以保证无代理时行为与改造前逐字节
+ *     一致),所以「直连 URL 重定向到需要代理的 host」不会中途升级成走代理 —— 与改造前
+ *     一致,不是本模块引入。
  */
 
 import type { Agent as NodeHttpAgent } from 'node:http';
@@ -582,13 +591,31 @@ function signalOf(
 const MAX_REDIRECT_HOPS = 20;
 
 /**
+ * 需要认证的系统代理:`session.resolveProxy` 只给 host:port,拿不到凭证 —— Chromium 自己
+ * 靠 `app.on('login')` 那套挑战交互补,而 Node/undici 这条路没有对接口,结果是 407。
+ *
+ * 我们不能凭空拿到系统 keychain 里的代理凭证,所以这里做不到透明支持;能做的是**不静默**:
+ * 命中 407 就明确告警,指出可用带凭证的 `HTTPS_PROXY`(env 层支持 userinfo → 会走
+ * Proxy-Authorization)绕过。这条限制同时登记在模块头与 PR 描述里。
+ */
+function noteProxyAuthRequired(url: string, status: number): void {
+  if (status !== 407) return;
+  const upstream = parseUpstream(url);
+  const origin = upstream ? originOf(upstream) : url;
+  warnOnce(origin, 'requires-authentication', {
+    upstream: origin,
+    hint: 'system proxy demands credentials; set HTTPS_PROXY=http://user:pass@host:port',
+  });
+}
+
+/**
  * 代理路径上**自己**跟随重定向,每一跳都重新解析该 origin 该走什么。
  *
  * 为什么不交给 undici 的 `redirect: 'follow'`:它内部跟随时会一直用同一个 dispatcher,
  * 而第一次访问某个重定向目标时我们的同步快照里通常没有它 —— 那一跳就会被塞进原来的
  * 代理隧道,PAC / NO_PROXY 判定形同虚设(review 2026-07-27 P1)。这里逐跳 `await` 解析,
- * 结论精确;`OriginRoutingDispatcher` 退化为其它入口(outboundUndiciFetch / voice 的
- * 自带 dispatcher)的兜底。
+ * 结论精确;两个 fetch 入口都走它,`OriginRoutingDispatcher` 只剩「调用方自带 dispatcher」
+ * (voice-input 的 keepalive 池)那条路径的兜底。
  *
  * 跳转语义按 fetch 规范的子集:303、以及 301/302 上的非 GET/HEAD → 转 GET 并丢 body;
  * 307/308 原样重放(body 已是 Buffer,可重放);跨 origin 去掉凭证类头。
@@ -617,6 +644,7 @@ async function followRedirectsThroughProxy(
       headers: { get(name: string): string | null };
       body?: { cancel(): Promise<void> } | null;
     };
+    noteProxyAuthRequired(url, res.status);
     const location = res.status >= 300 && res.status < 400 ? res.headers.get('location') : null;
     // 非 3xx,或 3xx 但没有 Location(无从跟随)→ 原样回给调用方。
     if (!location) return res;
@@ -699,7 +727,18 @@ export const outboundUndiciFetch: typeof undiciFetch = async (input, init) => {
   );
   const dispatcher = await resolveOutboundDispatcher(target, { signal });
   if (!dispatcher) return undiciFetch(input, init);
-  return undiciFetch(input, { ...init, dispatcher });
+  const request = await normalizeForUndici(
+    input as Parameters<typeof globalThis.fetch>[0],
+    init as Parameters<typeof globalThis.fetch>[1],
+  );
+  if (request.init.redirect !== 'follow') {
+    return undiciFetch(request.url, { ...request.init, dispatcher } as never);
+  }
+  // 与 outboundFetch 同一套逐跳跟随:让 undici 内部跟随会把重定向那一跳按首跳的
+  // 代理判定发出去(review 2026-07-27 P1)。
+  return (await followRedirectsThroughProxy(request, dispatcher, signal)) as Awaited<
+    ReturnType<typeof undiciFetch>
+  >;
 };
 
 /**

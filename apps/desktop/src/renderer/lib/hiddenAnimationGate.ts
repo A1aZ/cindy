@@ -35,7 +35,14 @@
  * `[data-app-hidden='true']` 段),这里只负责翻这一个属性:声明式覆盖,不遍历
  * `document.getAnimations()`,隐藏期间新挂载的动画也自动纳入。
  */
-const HIDDEN_ATTR = 'data-app-hidden';
+/**
+ * 冻结标记的属性名。单一来源:CSS(globals.css 的冻结清单、GhostToolCard 注入进 srcDoc 的
+ * 规则)与 JS(本模块、iframe 传播、卡片 onLoad 对齐)必须用同一个名字,分散写字面量迟早
+ * 漏改。CSS 侧没法 import 常量,由 hiddenAnimationGate.test.ts 断言两边一致。
+ */
+export const HIDDEN_ANIMATION_ATTR = 'data-app-hidden';
+
+const HIDDEN_ATTR = HIDDEN_ANIMATION_ATTR;
 
 /** 存放 disposer 的槽位:本模块自有的私有约定,不在 lib.dom 的 Window 声明里。 */
 interface GateWindow {

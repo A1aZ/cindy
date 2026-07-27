@@ -43,6 +43,7 @@ import {
 } from './overlayPlacement.js';
 import { voiceInputOverlayPositionStore } from './overlayPositionStore.js';
 import { voiceInputDataStore } from './VoiceInputDataStore.js';
+import { installWindowHiddenBroadcast } from '../windowHiddenBroadcast.js';
 
 const log = createLogger('voice-input-global');
 type GlobalVoiceInputShortcutPhase = 'start' | 'tap' | 'end';
@@ -1269,6 +1270,11 @@ function createOverlayWindow(shortcutInvokedAt: number): BrowserWindow {
 
   overlayWindow = window;
   overlayLoaded = false;
+  // 浮窗建窗即 backgroundThrottling:false(保住麦克风回调调度),它的 Renderer 也装了
+  // 装饰动画闸门(index.tsx 顶层安装,浮窗视图同样经过),但节流关闭会让 visibilityState
+  // 恒为 visible。浮窗 hide 后窗口是缓存复用的、Renderer 仍活着,不广播的话 mic 波形
+  // 这类常驻动画会在看不见的时候继续跑。
+  installWindowHiddenBroadcast(window);
   window.on('show', () => {
     if (!overlayPresentationActive) {
       setImmediate(() => {

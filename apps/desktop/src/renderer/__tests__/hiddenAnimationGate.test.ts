@@ -5,12 +5,13 @@
  * globals.css 的冻结规则做一次静态回归 —— 一次性动画不得被纳入冻结清单。
  */
 
-import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import {
+  HIDDEN_ANIMATION_ATTR,
   installHiddenAnimationGate,
   syncHiddenAttrToFrames,
   type HiddenAnimationGateTarget,
@@ -206,9 +207,11 @@ describe('同源子文档（Ghost 卡片 iframe）传播', () => {
       fileURLToPath(new URL('../components/chat/GhostToolCard.tsx', import.meta.url)),
       'utf8',
     );
-    expect(src).toContain("html[data-app-hidden=\\'true\\'] *{animation-play-state:paused!important}");
+    // 选择器要同时覆盖根元素与后代：意识可以把动画挂在 html/:root 上。
+    expect(src).toContain("html[${HIDDEN_ANIMATION_ATTR}='true'],html[${HIDDEN_ANIMATION_ATTR}='true'] *");
+    expect(src).toContain('animation-play-state:paused!important');
     // 新挂载的卡片要自己对齐一次：闸门遍历时它还不存在。
-    expect(src).toContain("document.documentElement.hasAttribute('data-app-hidden')");
+    expect(src).toContain('document.documentElement.hasAttribute(HIDDEN_ANIMATION_ATTR)');
   });
 });
 
@@ -310,23 +313,30 @@ describe('globals.css 冻结规则', () => {
 
   // 任意值工具类（animate-[spin_2.4s_linear_infinite]）不含 animate-spin 子串，
   // 也不在 globals.css 里，前面那条 CSS 扫描看不见它们 —— 单独扫源码兜住。
+  // 用 Node 自己遍历而不是外部 grep：Windows 上没有 POSIX grep，execFileSync 会
+  // 直接 ENOENT，测试在到达断言前就挂了。
   it('源码里的任意值循环动画工具类都能被冻结清单匹配', () => {
     const rendererDir = fileURLToPath(new URL('..', import.meta.url));
-    const files = execFileSync(
-      'grep',
-      ['-rl', '--include=*.tsx', '--include=*.ts', 'animate-\\[', rendererDir],
-      { encoding: 'utf8' },
-    )
-      .split('\n')
-      .filter(Boolean)
-      .filter((f) => !f.includes('__tests__'));
+
+    const walk = (dir: string, out: string[] = []): string[] => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name === 'node_modules' || entry.name === '__tests__') continue;
+          walk(full, out);
+        } else if (/\.tsx?$/.test(entry.name)) {
+          out.push(full);
+        }
+      }
+      return out;
+    };
 
     const infiniteUtilities: string[] = [];
-    for (const file of files) {
+    for (const file of walk(rendererDir)) {
       const content = readFileSync(file, 'utf8');
       for (const m of content.matchAll(/animate-\[[^\]]*\]/g)) {
         if (m[0].includes('infinite')) {
-          infiniteUtilities.push(`${file.replace(rendererDir, '')}  ${m[0]}`);
+          infiniteUtilities.push(`${relative(rendererDir, file)}  ${m[0]}`);
         }
       }
     }
@@ -338,5 +348,12 @@ describe('globals.css 冻结规则', () => {
         `源码里存在任意值循环动画工具类，但冻结清单没有 [class*='infinite'] 兜底：\n${infiniteUtilities.join('\n')}`,
       ).toBe(true);
     }
+  });
+
+  // 属性名分散在 CSS / gate / GhostToolCard / 测试里，CSS 侧没法 import 常量，
+  // 这里替它把两边钉在一起。
+  it('CSS 冻结清单用的属性名与模块导出的常量一致', () => {
+    expect(HIDDEN_ANIMATION_ATTR).toBe('data-app-hidden');
+    expect(frozenBlock).toContain(`[${HIDDEN_ANIMATION_ATTR}='true']`);
   });
 });

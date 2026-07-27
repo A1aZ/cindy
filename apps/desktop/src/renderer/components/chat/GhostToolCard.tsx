@@ -52,6 +52,7 @@ import {
   subscribeGhostCards,
 } from '@/cindy-brain/ghostCardStore';
 import { useGhostCardThemeVars } from '@/cindy-brain/useGhostCardThemeVars';
+import { HIDDEN_ANIMATION_ATTR } from '@/lib/hiddenAnimationGate';
 import {
   GHOST_CARD_ACTION_INFLIGHT_MS,
   GHOST_CARD_ACTION_PROMPT_MAX_LEN,
@@ -128,8 +129,9 @@ function buildCardSrcDoc(sanitizedHtml: string, themeVars: string): string {
     // 属性由宿主写到本文档的 documentElement 上(CSS 选择器跨不进 iframe,见
     // hiddenAnimationGate 的 iframe 传播)。这里用 * 全量暂停而不是像宿主侧那样列
     // allowlist —— 卡内容是意识现画的,没有可枚举的清单;冻结点落在动画自身取值区间内,
-    // 恢复可见后接着播。
-    '<style>html,body{margin:0;padding:0;overflow:hidden;font-family:system-ui,-apple-system,sans-serif}img{max-width:100%;-webkit-user-drag:none;-webkit-user-select:none;user-select:none}@media (prefers-reduced-motion:reduce){*{animation:none!important}}html[data-app-hidden=\'true\'] *{animation-play-state:paused!important}</style>',
+    // 恢复可见后接着播。选择器要带上 html 自身:意识可以把动画挂在 html/:root 上,
+    // 只写后代选择器会漏掉根元素。
+    `<style>html,body{margin:0;padding:0;overflow:hidden;font-family:system-ui,-apple-system,sans-serif}img{max-width:100%;-webkit-user-drag:none;-webkit-user-select:none;user-select:none}@media (prefers-reduced-motion:reduce){*{animation:none!important}}html[${HIDDEN_ANIMATION_ATTR}='true'],html[${HIDDEN_ANIMATION_ATTR}='true'] *{animation-play-state:paused!important}</style>`,
     '</head><body>',
     sanitizedHtml,
     '</body></html>',
@@ -381,10 +383,10 @@ function GhostCardCanvas({
     // 与宿主的装饰动画闸门对齐一次:窗口可能在本卡挂载之前就已隐藏,那时
     // hiddenAnimationGate 的遍历还看不到这个 iframe。srcDoc 内已内置
     // html[data-app-hidden='true'] 的暂停规则,这里只翻属性。
-    if (document.documentElement.hasAttribute('data-app-hidden')) {
-      doc.documentElement.setAttribute('data-app-hidden', 'true');
+    if (document.documentElement.hasAttribute(HIDDEN_ANIMATION_ATTR)) {
+      doc.documentElement.setAttribute(HIDDEN_ANIMATION_ATTR, 'true');
     } else {
-      doc.documentElement.removeAttribute('data-app-hidden');
+      doc.documentElement.removeAttribute(HIDDEN_ANIMATION_ATTR);
     }
     const imgs = doc.querySelectorAll<HTMLImageElement>('img[src^="cindy-media://"]');
     imgs.forEach((img) => {

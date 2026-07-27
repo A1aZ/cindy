@@ -132,19 +132,42 @@ describe('主 BrowserWindow 后台节流', () => {
 /**
  * 关闭节流会让 Renderer 的 document.visibilityState 一直停在 'visible'(Electron 41.2.0
  * 实测:throttling=false 时 minimize()/hide() 后仍为 visible),所以装饰动画闸门不能只靠
- * visibilityState —— 必须有这条 main 侧广播兜底。两者是同一套机制的两半,一旦这里被删掉,
- * 闸门会在「有 running turn + 窗口隐藏」这个主场景下静默失效,故在此加源码契约守护。
+ * visibilityState —— 必须有 main 侧广播兜底。两者是同一套机制的两半,一旦广播被删掉,
+ * 闸门会在「窗口隐藏 + 节流关闭」这个主场景下静默失效,故在此加源码契约守护。
  */
 describe('窗口可见性广播（装饰动画闸门的兜底信号）', () => {
+  const broadcastSource = readFileSync(
+    resolve(__dirname, '..', 'windowHiddenBroadcast.ts'),
+    'utf8',
+  ).replace(/\r\n?/g, '\n');
+
   it('按 BrowserWindow 显隐事件广播，判据同时覆盖 hide 与最小化', () => {
-    expect(source).toContain("mainWindow.webContents.send('window-hidden-change', hidden);");
-    expect(source).toContain('const hidden = !mainWindow.isVisible() || mainWindow.isMinimized();');
+    expect(broadcastSource).toContain(
+      'const hidden = !win.isVisible() || win.isMinimized();',
+    );
+    expect(broadcastSource).toContain('win.webContents.send(WINDOW_HIDDEN_CHANGE_CHANNEL, hidden);');
     for (const event of ['hide', 'show', 'minimize', 'restore']) {
-      expect(source).toContain(`mainWindow.on('${event}', emitWindowHidden);`);
+      expect(broadcastSource).toContain(`win.on('${event}', emit);`);
     }
   });
 
   it('页面加载完成后补发基线，避免 Renderer 惰性订阅错过隐藏态', () => {
-    expect(source).toContain("mainWindow.webContents.on('did-finish-load', emitWindowHidden);");
+    expect(broadcastSource).toContain("win.webContents.on('did-finish-load', emit);");
+  });
+
+  /**
+   * 凡是关掉了 backgroundThrottling 的窗口都必须装广播，否则它那份闸门形同虚设。
+   * 语音浮窗建窗即 backgroundThrottling:false，且 index.tsx 顶层安装闸门时浮窗视图
+   * 同样经过 —— 漏装的话浮窗的 mic 波形会在看不见时继续跑。
+   */
+  it('主窗与语音浮窗都装了广播', () => {
+    expect(source).toContain('installWindowHiddenBroadcast(mainWindow);');
+
+    const overlaySource = readFileSync(
+      resolve(__dirname, '..', 'voice-input', 'global.ts'),
+      'utf8',
+    ).replace(/\r\n?/g, '\n');
+    expect(overlaySource).toMatch(/backgroundThrottling:\s*false/);
+    expect(overlaySource).toContain('installWindowHiddenBroadcast(window);');
   });
 });

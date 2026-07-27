@@ -37,9 +37,14 @@ const log = createLogger('agent-handoff-pending');
  */
 export const agentHandoffPending = createAgentHandoffPendingRegistry(async (sessionId) => {
   // 两个查询互不依赖,并行发出——这是 send 路径上的一跳,不该串成两个 RTT。
+  // 失败时**独立降级**,两者重要性并不对等:
+  //  - 交接查询失败照旧上抛,由 peek 的 catch 处理(返回 null 且**不缓存**,下次
+  //    send 重查)——把它就地 catch 成 null 反而会被缓存成"确认无 pending",
+  //    等于永久丢掉一段跨引擎交接;
+  //  - 来源标记只是元信息,查失败就降级为无,不该反过来拖累交接。
   const [pending, forkParentSessionId] = await Promise.all([
     findPendingAgentHandoff(sessionId),
-    findPendingForkOrigin(sessionId),
+    findPendingForkOrigin(sessionId).catch(() => null),
   ]);
   if (!forkParentSessionId) return pending;
   return composeForkOriginHandoff(forkParentSessionId, pending);

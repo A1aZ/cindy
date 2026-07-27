@@ -58,9 +58,27 @@ let lastRevalidateAt = 0;
 let trailingTimer: ReturnType<typeof setTimeout> | null = null;
 let focusListenerBound = false;
 
+/** 一批唤醒多少张卡,以及批与批之间的间隔。 */
+const REVALIDATE_BATCH_SIZE = 6;
+const REVALIDATE_BATCH_GAP_MS = 120;
+
+/**
+ * 分批广播:节流只压住了**频率**,压不住**扇出** —— 托盘附件数没有上限,一次性
+ * 唤醒全部订阅者仍会瞬间打出 N 次 IPC(每次都要 realpath + stat)。按 6 张一批、
+ * 隔 120ms 铺开,峰值压到个位数,总时长对用户无感(60 个附件也就 1.2s 内铺完)。
+ */
 function broadcastRevalidate(): void {
   lastRevalidateAt = Date.now();
-  for (const notify of revalidateSubscribers) notify();
+  const queue = [...revalidateSubscribers];
+  const pump = () => {
+    const batch = queue.splice(0, REVALIDATE_BATCH_SIZE);
+    for (const notify of batch) {
+      // 期间可能有卡片卸载:退订过的就别叫了。
+      if (revalidateSubscribers.has(notify)) notify();
+    }
+    if (queue.length > 0) setTimeout(pump, REVALIDATE_BATCH_GAP_MS);
+  };
+  pump();
 }
 
 /**

@@ -144,6 +144,49 @@ describe('readFileThumbnail — 兜底与缓存', () => {
     expect(createThumbnailFromPath).toHaveBeenCalledTimes(1);
   });
 
+  it('负结果只短期缓存,瞬时失败之后还能重试', async () => {
+    // QuickLook / Shell 偶发失败不该把预览永久钉死:超过负结果 TTL 后要重新尝试。
+    createThumbnailFromPath.mockRejectedValueOnce(new Error('transient'));
+    expect((await readFileThumbnail({ path: '/tmp/t.pdf', size: 80 }))?.dataUrl).toBeNull();
+    expect((await readFileThumbnail({ path: '/tmp/t.pdf', size: 80 }))?.dataUrl).toBeNull();
+    expect(createThumbnailFromPath).toHaveBeenCalledTimes(1);
+    // 把时间推过负结果 TTL(60s)。
+    const realNow = Date.now;
+    try {
+      const t0 = realNow();
+      Date.now = () => t0 + 61_000;
+      createThumbnailFromPath.mockResolvedValue(okImage());
+      expect((await readFileThumbnail({ path: '/tmp/t.pdf', size: 80 }))?.dataUrl).toBe(
+        'data:image/png;base64,AAA',
+      );
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it('正结果也有软过期(粗时间戳文件系统上同尺寸改写撞 key 时能自愈)', async () => {
+    expect((await readFileThumbnail({ path: '/tmp/p.pdf', size: 80 }))?.dataUrl).toBe(
+      'data:image/png;base64,AAA',
+    );
+    expect(createThumbnailFromPath).toHaveBeenCalledTimes(1);
+    const realNow = Date.now;
+    try {
+      const t0 = realNow();
+      Date.now = () => t0 + 11 * 60_000;
+      await readFileThumbnail({ path: '/tmp/p.pdf', size: 80 });
+      expect(createThumbnailFromPath).toHaveBeenCalledTimes(2);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it('缓存 key 含 dev/ino:同路径换成另一个 inode 不会吃旧图', async () => {
+    await readFileThumbnail({ path: '/tmp/id.pdf', size: 80 });
+    stat.mockResolvedValue({ isFile: () => true, mtimeMs: 1, size: 10, ino: 2, dev: 1 });
+    await readFileThumbnail({ path: '/tmp/id.pdf', size: 80 });
+    expect(createThumbnailFromPath).toHaveBeenCalledTimes(2);
+  });
+
   it('取图后目标被掉包(dev/ino/mtime 变了)则丢弃结果,不交给 renderer', async () => {
     // createThumbnailFromPath 只吃路径、拿不到 fd,校验用的 stat 和它内部那次 open
     // 绑不到同一文件对象;结果出锅后复验一次身份,变了就不返回也不入缓存。

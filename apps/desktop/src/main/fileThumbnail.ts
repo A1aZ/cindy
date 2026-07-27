@@ -24,7 +24,10 @@ import { createLogger } from './logger';
 
 const log = createLogger('fileThumbnail');
 
-/** 允许的请求边长(CSS px 的整数倍),避免 renderer 传任意值放大资源占用。 */
+/**
+ * 允许的请求边长(px)。只卡区间不要求整数——非整数会在下面统一 Math.round 后再
+ * 进 key 与原生调用;这里的作用是不让 renderer 用一个夸张的尺寸放大资源占用。
+ */
 const MIN_PX = 16;
 const MAX_PX = 512;
 
@@ -34,8 +37,25 @@ const MAX_PX = 512;
  */
 const TIMEOUT_MS = 4000;
 
-/** 缓存条数上限;value 是 40~80px 的 PNG dataURL,单条只有几 KB。 */
-const CACHE_LIMIT = 128;
+/**
+ * 缓存条数上限;value 是 40~80px 的 PNG dataURL,单条只有几 KB,512 条也就几 MB。
+ * 给得宽是为了别让大托盘反复触发驱逐——驱逐后每次焦点复核都要重新跑一遍原生调用。
+ */
+const CACHE_LIMIT = 512;
+
+/**
+ * 缓存条目的软过期。key 里的 mtimeMs 在粗时间戳文件系统(FAT 之类,量化到 2s)上
+ * 分辨不出"同尺寸、同一时间片内的改写",保时间戳的替换工具也一样;正结果给个上限
+ * 让它最终能自愈。
+ */
+const POSITIVE_TTL_MS = 10 * 60_000;
+
+/**
+ * 负结果的过期要短得多:QuickLook / Shell 偶发的瞬时失败不该把预览永久钉死——
+ * 之前那样存成普通 LRU 条目的话,除非文件变化或重启,后续所有挂载与复核都会拿到
+ * null,连原先已经显示出来的预览都会被抹掉。
+ */
+const NEGATIVE_TTL_MS = 60_000;
 
 /**
  * 同时在飞的系统缩略图请求数上限。`Promise.race` 的超时只让 IPC 早返回,**取消不了**
@@ -44,8 +64,14 @@ const CACHE_LIMIT = 128;
  */
 const MAX_CONCURRENT = 4;
 
-/** null = 已知这份文件出不了图(损坏 / 系统不支持),负缓存同样按内容版本失效。 */
-const cache = new Map<string, string | null>();
+interface CacheEntry {
+  /** null = 这份文件出不了图(损坏 / 系统不支持 / 那一次原生调用失败)。 */
+  dataUrl: string | null;
+  /** 写入时刻,配合分级 TTL 判软过期。 */
+  at: number;
+}
+
+const cache = new Map<string, CacheEntry>();
 /** 同 key 在飞的请求:多张卡指向同一文件时只做一次原生调用。 */
 const inFlight = new Map<string, Promise<FileThumbnailResult | null>>();
 
@@ -97,12 +123,17 @@ function releaseSlot(): void {
 }
 
 function cacheGet(key: string): string | null | undefined {
-  if (!cache.has(key)) return undefined;
-  const hit = cache.get(key) ?? null;
+  const hit = cache.get(key);
+  if (!hit) return undefined;
+  const ttl = hit.dataUrl === null ? NEGATIVE_TTL_MS : POSITIVE_TTL_MS;
+  if (Date.now() - hit.at > ttl) {
+    cache.delete(key);
+    return undefined;
+  }
   // 简易 LRU:命中即挪到队尾。
   cache.delete(key);
   cache.set(key, hit);
-  return hit;
+  return hit.dataUrl;
 }
 
 function cacheSet(key: string, value: string | null): void {
@@ -113,7 +144,7 @@ function cacheSet(key: string, value: string | null): void {
     const oldest = cache.keys().next();
     if (!oldest.done) cache.delete(oldest.value);
   }
-  cache.set(key, value);
+  cache.set(key, { dataUrl: value, at: Date.now() });
 }
 
 /** 仅供测试:清空缓存、在飞表与并发闸,避免用例之间互相污染。 */
@@ -176,9 +207,11 @@ export async function readFileThumbnail(
   }
   if (!stat.isFile()) return null;
 
-  // mtime + size 进 key:文件被改写后不会拿到旧缩略图。key 用 realPath,不同软链
-  // 指向同一份文件时天然共享一条缓存。
-  const key = `${realPath}::${stat.mtimeMs}::${stat.size}::${Math.round(size)}`;
+  // 身份(dev/ino) + 版本(mtime/size) 一起进 key:文件被改写或换成另一个 inode 都
+  // 拿不到旧缩略图。key 用 realPath,不同软链指向同一份文件时天然共享一条缓存。
+  // 粗时间戳文件系统(FAT 量化到 2s)上同尺寸改写仍可能撞 key,那一层由
+  // POSITIVE_TTL_MS 的软过期兜底。
+  const key = `${realPath}::${stat.dev}::${stat.ino}::${stat.mtimeMs}::${stat.size}::${Math.round(size)}`;
   const byteSize = stat.size;
   const cached = cacheGet(key);
   if (cached !== undefined) return { dataUrl: cached, byteSize };

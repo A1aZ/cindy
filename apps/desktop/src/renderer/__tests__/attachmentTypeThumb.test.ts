@@ -102,6 +102,17 @@ describe('AttachmentTypeThumb — 缩略图取用契约', () => {
     expect(src).toMatch(/revalidateSubscribers\.delete\(notify\)/);
   });
 
+  it('广播分批铺开,不一次性唤醒全部卡片', () => {
+    // 节流压住的是频率,压不住扇出:托盘附件数没有上限,一次性唤醒所有订阅者仍会
+    // 瞬间打出 N 次 IPC(每次都带 realpath + stat)。
+    const fn = src.slice(src.indexOf('function broadcastRevalidate'), src.indexOf('function requestRevalidate'));
+    expect(src).toMatch(/const REVALIDATE_BATCH_SIZE = \d+/);
+    expect(fn).toMatch(/queue\.splice\(0, REVALIDATE_BATCH_SIZE\)/);
+    expect(fn).toMatch(/setTimeout\(pump, REVALIDATE_BATCH_GAP_MS\)/);
+    // 分批期间卡片可能卸载,叫号前要确认还在订阅集合里。
+    expect(fn).toMatch(/revalidateSubscribers\.has\(notify\)/);
+  });
+
   it('节流带 trailing 补播,不吞掉窗口内的最新一次改动', () => {
     // 只做 leading 的话:「改一次 → 切回来 → 再改 → 30s 内切回来」第二次改动会被
     // 整个丢掉,而发送用的是当前内容,卡片就一直描述旧版本。

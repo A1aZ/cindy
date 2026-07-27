@@ -852,6 +852,45 @@ describe('GoalController', () => {
     expect(h.session.sends.at(-1)?.content).toContain('keep going');
   });
 
+  it('resumeOnOpen 在释放 route 锁前挂 listener，并在会话随即关闭后迁移到重建会话', async () => {
+    const firstSession = new FakeSession('s1', 'claude-code');
+    const recreatedSession = new FakeSession('s1', 'claude-code');
+    let live: FakeSession | undefined = firstSession;
+    let acquireCount = 0;
+    const acquirePendingAgentSwitch = vi.fn(async () => {
+      acquireCount += 1;
+      if (acquireCount === 1) {
+        return () => {
+          // 模拟 resumeOnOpen 释放锁后，queued SET_MODEL 立即关闭刚确保的 session。
+          live = undefined;
+        };
+      }
+      return () => {};
+    });
+    const local = makeController({
+      getSession: () => live,
+      ensureSession: async () => {
+        if (!live) live = recreatedSession;
+        return live;
+      },
+      acquirePendingAgentSwitch,
+    });
+    await local.storage.set(seededGoal({ status: 'active', objective: 'survive rewire' }));
+
+    await local.controller.resumeOnOpen('s1');
+    expect(recreatedSession.sends).toHaveLength(1);
+
+    recreatedSession.emitGoalTurn({
+      toolUse: true,
+      verdictJson: '```json\n{"goal_status":"complete","reason":"rewired"}\n```',
+      tokens: 5,
+    });
+    await tick();
+
+    expect(local.completions).toHaveLength(1);
+    expect(local.completions[0].summary.reason).toBe('rewired');
+  });
+
   it('resumeOnOpen is a no-op for non-active goals and for goals already being managed', async () => {
     // paused → 不自动续(走手动 resume)
     await h.storage.set(seededGoal({ status: 'paused', objective: 'p' }));

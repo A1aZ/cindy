@@ -289,6 +289,19 @@ describe('deferred switch (turn running)', () => {
     });
   });
 
+  it('跨引擎意图淘汰较早的 pending credential switch', async () => {
+    const supersedePendingCredentialSwitch = vi.fn();
+    const { deps, store } = makeDepsWithPending({ supersedePendingCredentialSwitch });
+
+    await performSessionAgentSwitch(deps, validParams);
+
+    expect(supersedePendingCredentialSwitch).toHaveBeenCalledWith('s1');
+    expect(store.get('s1')).toMatchObject({
+      targetAgentKind: 'codex',
+      model: 'gpt-5.5',
+    });
+  });
+
   it('意图制:反复改选只覆盖意图,applyNow 才执行真切换', async () => {
     const { deps, calls, store } = makeDepsWithPending();
     await performSessionAgentSwitch(deps, validParams);

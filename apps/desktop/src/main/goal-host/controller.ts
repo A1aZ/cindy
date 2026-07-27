@@ -599,12 +599,16 @@ export class GoalController {
     let session: SessionLike | undefined;
     try {
       session = await this.deps.ensureSession(sessionId);
+      if (session) {
+        // 锁内先建立 listener 身份。释放后即使 queued SET_MODEL 立刻关闭该 session，
+        // fireTurn 也能凭 unsubscribers 标记把 listener 迁移到重新创建的新 session。
+        this.resetTurn(sessionId);
+        this.attachListener(sessionId);
+      }
     } finally {
       releaseAgentSwitchLock();
     }
     if (!session) return; // 活化失败(如 device-link 远程不可用)→ 留 dormant,下次打开再试
-    this.resetTurn(sessionId);
-    this.attachListener(sessionId);
     this.emit(state);
     if (!this.isBusy(sessionId)) {
       await this.fireTurn(sessionId);

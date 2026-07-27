@@ -643,14 +643,22 @@ export function createTurnRunner(
     );
 
     let releaseAgentSwitchLock = (): void => {};
-    if (deps.acquirePendingAgentSwitch) {
-      agentSwitchCloseSuppressed.add(rowId);
-    }
     try {
       // deferred 切换会关闭旧 session。apply 成功后重新读取 maker 里的 live
       // session 并原地换绑 IM listener,确保当前这条消息发给目标引擎且队列不丢。
-      releaseAgentSwitchLock = (await deps.acquirePendingAgentSwitch?.(rowId)) ?? (() => {});
-      await refreshSessionAfterPendingAgentSwitch(state, rowId, userId);
+      if (deps.acquirePendingAgentSwitch) {
+        agentSwitchCloseSuppressed.add(rowId);
+        try {
+          releaseAgentSwitchLock = await deps.acquirePendingAgentSwitch(rowId);
+          await refreshSessionAfterPendingAgentSwitch(state, rowId, userId);
+        } finally {
+          // 只覆盖 agent switch 关闭旧引擎并换绑新 session 的窗口。刷新完成后的
+          // send 期间若会话被其它路径关闭，必须让全局订阅清掉陈旧 SessionState。
+          agentSwitchCloseSuppressed.delete(rowId);
+        }
+      } else {
+        await refreshSessionAfterPendingAgentSwitch(state, rowId, userId);
+      }
       // session-agent-switch:本路径直发 session.send(不经 makerSendTransaction),
       // 交接注入自己接——切换后首条消息若来自 IM 渠道,新引擎同样需要交接上下文
       // (2026-07-20 审计)。落库(persistUserMessage)仍是渠道原文。
@@ -725,7 +733,6 @@ export function createTurnRunner(
       });
     } finally {
       releaseAgentSwitchLock();
-      agentSwitchCloseSuppressed.delete(rowId);
     }
   }
 

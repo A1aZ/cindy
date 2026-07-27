@@ -593,6 +593,8 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
     }));
     const switchedSession = createSessionHarness(async () => {
       order.push('send');
+      // agent switch 已完成后的关闭不属于切换自己的瞬态 close，必须正常清缓存。
+      emitMakerEvent({ type: 'session:closed', sessionId: 'feishu-session' });
       return {
         accepted: false,
         reason: 'cancelled-before-dispatch',
@@ -637,6 +639,7 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
       expect(switchedSession.send).toHaveBeenCalledTimes(1);
       expect(mocks.wireSessionToIpcExternal).toHaveBeenLastCalledWith(switchedSession.session);
       expect(order).toEqual(['apply', 'send', 'release']);
+      expect(localRunner.getMakerSessionById('feishu-session')).toBeNull();
     } finally {
       localRunner.disposeAllSessions();
     }

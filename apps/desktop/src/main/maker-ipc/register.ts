@@ -4193,6 +4193,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       findParkedEngineSession(sessionId, targetDbKind),
     applyAgentSwitchToDb: applyAgentSwitchToSessionRow,
     setSessionProvider,
+    supersedePendingCredentialSwitch: clearPendingCredentialSwitchForSession,
     insertBoundaryMessage: async (sessionId, content) => {
       const clientId = `agent-switch:${createId()}`;
       await createDbMessage(sessionId, {

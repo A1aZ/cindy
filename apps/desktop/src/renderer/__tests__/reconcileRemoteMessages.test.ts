@@ -671,6 +671,44 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     ]);
   });
 
+  it('远程会话:后启动的对账失败时,先启动那次的结果照样落地(不丢 heal)', async () => {
+    // review #676(codex P1):把作废判据放在启动点等于"后启动者一定会赢",但它可能中途
+    // reject(隧道抖动 / 被控端下线)。那时旧那次已经拉回了有效的缺失窗口,却因为序号被抢走
+    // 而丢弃,新那次又什么都没落地 —— 对账全是 fire-and-forget、空闲会话没有保证的重试,
+    // 被控端的消息会一直缺到下一次聚焦 / 重连 / turn 结束 / 手动重新同步。
+    const s = sid();
+    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
+
+    const oldPage = deferred<Message[]>();
+    let calls = 0;
+    remoteListResolver = () => {
+      calls += 1;
+      // 对账 #1(先启动):首页停在飞行中,回来时带一条 push 丢掉的消息。
+      if (calls === 1) return oldPage.promise;
+      // 对账 #2(后启动):请求失败。
+      return Promise.reject(new Error('tunnel flapped'));
+    };
+
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    makerChatStore.reconcileRemoteMessages(s);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    // 后启动那次什么都没落地。
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual(['client-seed']);
+
+    oldPage.resolve([
+      dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z'),
+      dbMessage(s, 'healed', 'push-dropped row', '2026-06-15T00:01:00.000Z'),
+    ]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    // 关键:先启动那次补回的消息必须进 UI —— 它的结果不该被一个失败的后继作废。
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual([
+      'client-seed',
+      'client-healed',
+    ]);
+  });
+
   it('远程会话:陈旧代际的对账整体作废,不覆盖新窗口也不抢新代际的锁', async () => {
     // review #676(codex P1):CCAgentSessionView 直接发起一次对账,useRemoteSessionSync
     // 又独立 fire-and-forget 排一次,两次可以重叠。旧的那次若不比对代际就落地,会拿着过期的

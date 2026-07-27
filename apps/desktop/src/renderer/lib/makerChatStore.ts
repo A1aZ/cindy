@@ -5065,7 +5065,8 @@ const _historyLoadOrigin = new Map<string, string | undefined>();
 const _messagesEpoch = new Map<string, number>();
 
 /**
- * device-link 远程对账的启动序号(每会话单调递增,latest-wins 单飞)。
+ * device-link 远程对账的启动序号发号器(每会话单调递增)。它只给每次对账一个先后次序,
+ * **不**在启动时作废任何人 —— 作废判据在提交点,见 _remoteReconcileCommittedSeq。
  *
  * 为什么代际号不够:代际只在"窗口被整体重建"时递增,而找到重叠的对账只做加性 merge、
  * 不 bump 代际。于是"旧的无重叠对账 + 新的有重叠对账"这一对里,旧那次能通过代际比对、
@@ -5073,7 +5074,20 @@ const _messagesEpoch = new Map<string, number>();
  *
  * 只增不删(purge 后重建照样单调,数值不复用);条目仅一个 number,无泄漏压力。
  */
-const _remoteReconcileSeq = new Map<string, number>();
+const _remoteReconcileStartSeq = new Map<string, number>();
+
+/**
+ * 已经**成功落地**的对账里最大的那个启动序号。
+ *
+ * 为什么不能在启动时就作废前一次:那等于"后启动者一定会赢",但它可能中途 reject
+ * (隧道抖动 / 被控端下线)。这时旧那次已经拉回了有效的缺失窗口,却因为序号被抢走而丢弃,
+ * 新那次又什么都没落地 —— 对账全是 fire-and-forget、空闲会话没有保证的重试,于是被控端
+ * 的消息一直缺到下一次聚焦 / 重连 / turn 结束 / 手动重新同步(#676 review codex P1)。
+ *
+ * 所以判据放在**提交点**:只有"已经有一次更晚启动的对账成功落地过"才作废本次。
+ * 后启动者成功 → 先启动者作废(latest-wins);后启动者失败 → 先启动者照常落地(不丢 heal)。
+ */
+const _remoteReconcileCommittedSeq = new Map<string, number>();
 
 function bumpMessagesEpoch(sessionId: string): void {
   _messagesEpoch.set(sessionId, (_messagesEpoch.get(sessionId) ?? 0) + 1);
@@ -5493,8 +5507,8 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
   // 因此命中重叠)。这时旧那次仍能通过代际比对,把陈旧的权威重建落地、用过期字段 hydrate
   // 更新的行,还会清掉新那次之后才拿到的分页锁。所以再加一道对账专属的序号:同一会话只有
   // **最后启动**的那次对账允许落地(#676 review codex P1)。
-  const reconcileSeq = (_remoteReconcileSeq.get(sessionId) ?? 0) + 1;
-  _remoteReconcileSeq.set(sessionId, reconcileSeq);
+  const reconcileSeq = (_remoteReconcileStartSeq.get(sessionId) ?? 0) + 1;
+  _remoteReconcileStartSeq.set(sessionId, reconcileSeq);
   // 远程回执新鲜度括号:启动记代、成功完成上报(失败不报)。回执只被「入队之后
   // 才启动且成功完成」的对账放行,见 sessionAttentionStore 的门槛说明。
   const syncToken = noteRemoteSessionSyncStarted(sessionId);
@@ -5538,12 +5552,15 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
       if (collected.length === 0) return;
       // 本次对账整体作废的两种情形:
       //  1. 代际已变:窗口被 rewind / clear / trim / demote / 另一次对账重建过;
-      //  2. 之后又启动了对账:那次读到的是更新的真相,本次的 existingIds 与拉回的行都过期了。
+      //  2. 已经有一次**更晚启动**的对账成功落地过:它读到的是更新的真相,本次的 existingIds
+      //     与拉回的行都过期了。判据刻意放在提交点而不是启动点 —— 后启动那次可能中途 reject,
+      //     那时旧那次拉回的缺失窗口还是有效的,丢掉它等于把这次 heal 整个作废,而对账都是
+      //     fire-and-forget、空闲会话没有保证的重试(#676 review codex P1)。
       // 两种都不能落地(会覆盖新窗口、用过期字段 hydrate 更新的行),更不能 bump 代际去清掉
       // 新代际的分页锁。不上报同步完成,交给下一轮触发。
       if (
         (_messagesEpoch.get(sessionId) ?? 0) !== reconcileEpochAtStart ||
-        _remoteReconcileSeq.get(sessionId) !== reconcileSeq
+        (_remoteReconcileCommittedSeq.get(sessionId) ?? 0) >= reconcileSeq
       ) {
         windowApplied = false;
         return;
@@ -5594,6 +5611,9 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
           isLoadingMore: false,
         };
       });
+      // 真正落地了(没被 isStreaming 守卫丢掉)才记下"这一号已提交" —— 之后再回来的、启动更早
+      // 的那些对账据此作废。被丢掉时不记:什么都没进 UI,不该因此把先启动那次也一起废掉。
+      if (windowApplied) _remoteReconcileCommittedSeq.set(sessionId, reconcileSeq);
     } finally {
       // 消息路径的早返 / 异常都要等交互重建落定;交互失败会让 run reject(替换原结果),
       // 语义正确:本代不完成。

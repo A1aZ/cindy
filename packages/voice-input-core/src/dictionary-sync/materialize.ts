@@ -128,7 +128,12 @@ export function materializeDictionary(
   }
 
   return {
-    entries: sortAndCap(entries, (item) => item.frequency, limits.maxEntries).map(stripKey),
+    entries: sortAndCap(
+      entries,
+      (item) => item.frequency,
+      limits.maxEntries,
+      (item) => (item.source === 'manual' ? 1 : 0),
+    ).map(stripKey),
     candidates: sortAndCap(candidates, (item) => item.evidenceCount, limits.maxCandidates).map(stripKey),
     suppressedTexts: Object.keys(state.suppressed)
       .sort()
@@ -179,14 +184,32 @@ function mergeLiveAliases(
     .map(([, alias]) => ({ text: alias.text, count: alias.count, lastSeenAt: alias.lastSeenAt }));
 }
 
+/**
+ * 排序并裁到上限。
+ *
+ * `readRank`(数值大者优先)只决定**谁被裁掉**,不影响最终展示顺序:多设备合并后
+ * 存活词条可能超过上限,纯按频次裁会让用户手动加的低频词被自动学来的高频词挤掉 ——
+ * 那个词在所有设备上一起消失,而且它频次本来就低,再也涨不回来。手动词条是用户的
+ * 显式意图,必须先保下来;保下来之后仍按频次展示。
+ */
 function sortAndCap<T extends { key: string; updatedAt: number }>(
   items: T[],
   readWeight: (item: T) => number,
   limit: number,
+  readRank: (item: T) => number = () => 0,
 ): T[] {
-  return items
-    .sort((a, b) => readWeight(b) - readWeight(a) || b.updatedAt - a.updatedAt || (a.key < b.key ? -1 : 1))
-    .slice(0, Math.max(0, limit));
+  const byWeight = (a: T, b: T): number =>
+    readWeight(b) - readWeight(a) || b.updatedAt - a.updatedAt || (a.key < b.key ? -1 : 1);
+  const capped = Math.max(0, limit);
+  const ordered = [...items].sort(byWeight);
+  if (ordered.length <= capped) return ordered;
+  const survivors = new Set(
+    [...ordered]
+      .sort((a, b) => readRank(b) - readRank(a) || byWeight(a, b))
+      .slice(0, capped)
+      .map((item) => item.key),
+  );
+  return ordered.filter((item) => survivors.has(item.key));
 }
 
 function stripKey<T extends { key: string }>(item: T): Omit<T, 'key'> {

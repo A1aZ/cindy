@@ -19,6 +19,7 @@ import { throwIpcError } from '../utils/ipcValidate.js';
 import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
 import { voiceDictionarySyncStore } from './VoiceDictionarySyncStore.js';
 import {
+  DEFAULT_DICTIONARY_SYNC_ENABLED,
   MAX_VOICE_INPUT_DICTIONARY_ENTRIES,
   MAX_VOICE_INPUT_DICTIONARY_ENTRY_CHARS,
   compactVoiceInputHistoryIfNeeded,
@@ -41,6 +42,19 @@ let ipcRegistered = false;
 type StoredVoiceInputData = VoiceInputDataSnapshot & {
   version: 1;
   legacyRendererStorageMigrated?: boolean;
+  /**
+   * 这份投影是否由「带同步的版本」写出来的。
+   *
+   * 用来区分两种表面完全一样的情形 —— sidecar 不在、投影里却有词典:
+   *  - **首次迁移**(没有这个标记):存量用户刚升级上来。词典里的频次全是本机积累的,
+   *    整份认领(含频次)才对,丢了就是把用户长期积累的排序权重清零。
+   *  - **sidecar 丢失**(有这个标记):本机曾经同步过。频次里含有别的设备合并进来的
+   *    部分,重新播种会让同一批事件在两个节点桶里各记一遍;而且本机丢了身份历史,
+   *    直接认领会越过对端墓碑把删掉的词复活。
+   *
+   * 靠状态本身分不出这两者(都是空 sidecar + 有内容的投影),必须留一个持久印记。
+   */
+  dictionarySyncInitialized?: boolean;
 };
 
 type LegacyRendererDataPayload = {
@@ -254,7 +268,7 @@ export class VoiceInputDataStore {
       { ...current.settings, ...projectMaterializedDictionary(materialized) },
       process.platform,
     );
-    this.replaceState({ ...current, settings: nextSettings });
+    this.replaceState({ ...current, dictionarySyncInitialized: true, settings: nextSettings });
     voiceDictionarySyncStore.markMaterialized(materialized);
     notifyDictionaryChanged();
     return nextSettings;
@@ -400,7 +414,7 @@ export class VoiceInputDataStore {
           evidenceCount: candidate.evidenceCount,
           aliases: candidate.aliases.map((alias) => ({ text: alias.text, count: alias.count })),
         })),
-      });
+      }, { syncEnabled: settings.dictionarySyncEnabled });
       const materialized = voiceDictionarySyncStore.materialize();
       voiceDictionarySyncStore.markMaterialized(materialized);
       return normalizeVoiceInputSettings(
@@ -425,12 +439,19 @@ export class VoiceInputDataStore {
       const raw = fs.readFileSync(filePath, 'utf-8');
       const parsed = JSON.parse(raw) as unknown;
       const snapshot = normalizeVoiceInputDataSnapshot(parsed, process.platform);
+      const stampedOnDisk = isRecord(parsed) && parsed.dictionarySyncInitialized === true;
       this.state = {
         version: 1,
         legacyRendererStorageMigrated: isRecord(parsed) && parsed.legacyRendererStorageMigrated === true,
+        dictionarySyncInitialized: stampedOnDisk,
         ...snapshot,
       };
-      this.state = this.hydrateDictionaryFromSyncState(this.state);
+      const hydrated = this.hydrateDictionaryFromSyncState(this.state);
+      this.state = hydrated;
+      // 首次迁移刚落下印记时立刻写盘一次。只留在内存里的话,这次启动如果没有任何
+      // 词典写入,盘上的投影就还是「没有印记」—— 下次 sidecar 真丢了会被再次误判成
+      // 首次迁移,于是越过对端墓碑重建,别的设备上删掉的词就复活了。
+      if (hydrated.dictionarySyncInitialized && !stampedOnDisk) this.save(hydrated);
       return this.state;
     } catch (error) {
       const missing = (error as NodeJS.ErrnoException).code === 'ENOENT';
@@ -478,8 +499,9 @@ export class VoiceInputDataStore {
         log.warn('dictionary sync state was written by a newer client, running without sync');
         return state;
       }
-      // 先让 store 判断:sidecar 是丢了(投影里已有词典)还是首次安装(都为空)。
-      if (state.settings.dictionaryEntries.length > 0) {
+      // 先让 store 判断:sidecar 是丢了,还是首次安装 / 首次迁移。
+      // 判据是投影里有没有「本机曾经同步过」的印记 —— 只看状态空不空分不出来。
+      if (state.settings.dictionaryEntries.length > 0 && state.dictionarySyncInitialized) {
         voiceDictionarySyncStore.noteProjectionHasDictionary();
       }
       voiceDictionarySyncStore.reconcile({
@@ -499,12 +521,18 @@ export class VoiceInputDataStore {
           evidenceCount: candidate.evidenceCount,
           aliases: candidate.aliases.map((alias) => ({ text: alias.text, count: alias.count })),
         })),
-      });
+      }, { syncEnabled: state.settings.dictionarySyncEnabled });
       voiceDictionarySyncStore.collectGarbage();
+      // 认领被挂起时(sidecar 丢了、还在等对端墓碑)状态里暂时没有这些词。物化会
+      // 是空的,拿它覆盖 settings 就等于让用户的词典先消失一次;保留文件内容不动。
+      if (voiceDictionarySyncStore.hasPendingRecovery()) return state;
       const materialized = voiceDictionarySyncStore.materialize();
       voiceDictionarySyncStore.markMaterialized(materialized);
       return {
         ...state,
+        // 印记跟着第一次成功物化落下:之后再看到「空 sidecar + 有词典的投影」,
+        // 就能确定是 sidecar 丢了,而不是又一次首次迁移。
+        dictionarySyncInitialized: true,
         settings: normalizeVoiceInputSettings(
           { ...state.settings, ...projectMaterializedDictionary(materialized) },
           process.platform,
@@ -523,6 +551,7 @@ export class VoiceInputDataStore {
     const normalizedState: StoredVoiceInputData = {
       version: 1,
       legacyRendererStorageMigrated: next.legacyRendererStorageMigrated,
+      dictionarySyncInitialized: next.dictionarySyncInitialized,
       settings: normalizeVoiceInputSettings(next.settings, process.platform),
       history: compactVoiceInputHistoryIfNeeded(normalizeVoiceInputHistory(next.history)),
     };
@@ -575,6 +604,36 @@ export type DictionaryChangedListener = (options?: { immediate?: boolean }) => v
 export function onVoiceInputDictionaryChanged(listener: DictionaryChangedListener): () => void {
   dictionaryChangedListeners.add(listener);
   return () => dictionaryChangedListeners.delete(listener);
+}
+
+/** 一次 advice 能提交的动作条数上限。真实模型建议远低于此,超出的一律是异常来源。 */
+const MAX_DICTIONARY_LEARNING_ACTIONS = 32;
+
+/**
+ * 归一化 renderer 提交的学习动作。
+ *
+ * 入参是未经校验的 IPC payload:形状不对的条目直接丢掉,整批也要有条数上限 ——
+ * 这些动作会逐条写进 CRDT 正本,一批脏数据就是一批永久记录。
+ */
+function sanitizeDictionaryLearningActions(input: unknown): DictationDictionaryLearningAction[] {
+  if (!Array.isArray(input)) return [];
+  const actions: DictationDictionaryLearningAction[] = [];
+  for (const candidate of input) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const action = candidate as Partial<DictationDictionaryLearningAction>;
+    if (typeof action.action !== 'string' || typeof action.term !== 'string') continue;
+    const term = action.term.trim();
+    if (!term || term.length > MAX_VOICE_INPUT_DICTIONARY_ENTRY_CHARS) continue;
+    actions.push({
+      ...(action as DictationDictionaryLearningAction),
+      term,
+      aliases: Array.isArray(action.aliases)
+        ? action.aliases.filter((alias): alias is string => typeof alias === 'string')
+        : [],
+    });
+    if (actions.length >= MAX_DICTIONARY_LEARNING_ACTIONS) break;
+  }
+  return actions;
 }
 
 export function registerVoiceInputDataStoreIpc(): void {
@@ -655,9 +714,15 @@ export function registerVoiceInputDataStoreIpc(): void {
     },
   );
 
-  ipcMain.handle('voice-input:dictionary-learning:record-actions', (_event, actions: DictationDictionaryLearningAction[]) => {
+  ipcMain.handle('voice-input:dictionary-learning:record-actions', (event, actions: unknown) => {
     try {
-      return voiceInputDataStore.recordDictionaryLearningActions(actions);
+      // 这个 handler 直接往词典正本里写。没有守卫的话,任意子帧(webview、插件面板)
+      // 都能提交一大批唯一的 add_entry:主进程被同步写盘卡住,sidecar 也被撑过物化
+      // 上限和 relay 单帧上限,同步会因此永久停摆。
+      assertTrustedAppRendererEvent(event);
+      return voiceInputDataStore.recordDictionaryLearningActions(
+        sanitizeDictionaryLearningActions(actions),
+      );
     } catch (error) {
       throwVoiceInputDataStoreIpcError(error);
     }
@@ -807,7 +872,10 @@ function stripDictionaryFields(patch: unknown): Record<string, unknown> {
   delete next.dictionaryCandidates;
   delete next.suppressedAutomaticDictionaryTexts;
   if (typeof next.dictionarySyncEnabled === 'boolean') {
-    next.dictionarySyncEnabledOverride = next.dictionarySyncEnabled;
+    // 选中的值恰好等于当前默认值时,记的是「跟随默认」而不是一条静态 override ——
+    // 否则以后调整默认值带不动这些用户,而他们从没表达过要偏离默认。
+    next.dictionarySyncEnabledOverride =
+      next.dictionarySyncEnabled === DEFAULT_DICTIONARY_SYNC_ENABLED ? null : next.dictionarySyncEnabled;
     delete next.dictionarySyncEnabled;
   } else if (next.dictionarySyncEnabled === null) {
     // 显式传 null = 恢复默认。规则要求「恢复默认」是删除 override 重新跟随版本

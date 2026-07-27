@@ -20,7 +20,7 @@
  */
 
 import { tickHlc, type HlcClock } from './hlc';
-import { deleteTerms, seedTerm, type MutationResult } from './mutate';
+import { deleteTerms, promoteTermToEntry, seedTerm, type MutationResult } from './mutate';
 import { dictionaryTermKey, normalizeDictionaryTermText } from './text';
 import {
   hasDictionaryKey,
@@ -53,6 +53,13 @@ export interface ReconcileInput {
   snapshot: LocalDictionarySnapshot;
   /** 上一次由本模块物化写进该文件的词条主键集合。 */
   lastMaterializedKeys: ReadonlyArray<string>;
+  /**
+   * 是否允许在「只剩墓碑」的键上重建词条。默认 true。
+   *
+   * 降级回收要 true:投影是老客户端刚写下的新证据。sidecar 丢失后的恢复认领要
+   * false —— 本机没有身份历史,越过墓碑重建会让别的设备上删掉的词复活。
+   */
+  allowTombstonedRevival?: boolean;
   nowMs: number;
 }
 
@@ -129,12 +136,23 @@ export function reconcileFromLocalSnapshot(
       count: entry.frequency,
       aliases: entry.aliases,
       nowMs: input.nowMs,
+      allowTombstonedRevival: input.allowTombstonedRevival ?? true,
     });
     if (!result.changed) {
       // 该词条已经在状态里了(典型情形:sidecar 的 lastMaterializedKeys 丢失或损坏,
       // 于是所有词条都被当成「新增」)。存在性本来就已满足,这里必须什么都不做 ——
       // 早先的写法在这里补记一次学习事件,那会让每次启动都给全部词条 +1,反复重启
       // 就是一条缓慢但持续的膨胀曲线。
+      //
+      // 唯一的例外是阶段:状态里还是候选、而文件里已经是正式词条,说明老客户端在
+      // 降级期间把它转正了。只提升阶段,不碰计数 —— 不补这一步,这次转正会在下次
+      // 物化时被写回候选,用户在降级期间做的分类白做。
+      const promoted = promoteTermToEntry(nextState, nextClock, { termKey: key, nowMs: input.nowMs });
+      if (promoted.changed) {
+        nextState = promoted.state;
+        nextClock = promoted.clock;
+        changed = true;
+      }
       continue;
     }
     nextState = result.state;

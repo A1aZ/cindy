@@ -28,6 +28,7 @@ vi.mock('@/session/mobileVoiceHistoryStore', () => ({
 
 const {
   __resetMobileVoiceDictionaryCacheForTests,
+  setMobileVoiceDictionaryAccountScope,
   clearAllMobileVoiceDictionaryCaches,
   hydrateMobileVoiceDictionary,
   readCachedMobileVoiceDictionary,
@@ -39,6 +40,7 @@ const HOST = 'desktop-1';
 beforeEach(() => {
   storage.clear();
   __resetMobileVoiceDictionaryCacheForTests();
+  setMobileVoiceDictionaryAccountScope('');
 });
 
 describe('mobileVoiceDictionaryCache', () => {
@@ -153,7 +155,7 @@ describe('mobileVoiceDictionaryCache', () => {
       async () => ({ ok: true, entries: [{ text: `term-${host}` }] }),
     )));
 
-    const index = JSON.parse(storage.get('xdt.mobileVoiceDictionary.v1.hosts') ?? '[]') as string[];
+    const index = JSON.parse(storage.get('xdt.mobileVoiceDictionary.v2.hosts') ?? '[]') as string[];
     expect([...index].sort()).toEqual(hosts);
 
     // 索引完整 → 登出能把每一份快照都删掉。
@@ -191,5 +193,36 @@ describe('mobileVoiceDictionaryCache', () => {
     expect(readCachedMobileVoiceDictionary(HOST)).toEqual([
       { text: 'Cindy', frequency: 1, aliases: [{ text: 'sindy', count: 1 }] },
     ]);
+  });
+});
+
+describe('账号分区', () => {
+  it('切换账号后读不到上一个账号的快照 —— 即使清理没删干净', async () => {
+    setMobileVoiceDictionaryAccountScope('user-a');
+    await refreshMobileVoiceDictionary(HOST, async () => ({
+      ok: true,
+      entries: [{ text: '内部项目代号' }],
+    }));
+    expect(readCachedMobileVoiceDictionary(HOST)).toHaveLength(1);
+
+    // 故意不调用清理:模拟索引读失败等「没删干净」的现实情况。
+    setMobileVoiceDictionaryAccountScope('user-b');
+    await hydrateMobileVoiceDictionary(HOST);
+    expect(readCachedMobileVoiceDictionary(HOST)).toEqual([]);
+
+    // 切回去仍然读得到自己的那份(分区而不是丢弃)。
+    setMobileVoiceDictionaryAccountScope('user-a');
+    await hydrateMobileVoiceDictionary(HOST);
+    expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('内部项目代号');
+  });
+
+  it('索引读不出来时不删索引 —— 否则剩下的快照永远清不掉', async () => {
+    setMobileVoiceDictionaryAccountScope('user-a');
+    await refreshMobileVoiceDictionary(HOST, async () => ({ ok: true, entries: [{ text: 'Cindy' }] }));
+    // 索引损坏。
+    storage.set('xdt.mobileVoiceDictionary.v2.hosts', '{not json');
+
+    await clearAllMobileVoiceDictionaryCaches();
+    expect(storage.get('xdt.mobileVoiceDictionary.v2.hosts')).toBe('{not json');
   });
 });

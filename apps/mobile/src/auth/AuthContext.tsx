@@ -70,7 +70,10 @@ import { resetComposerPaletteCache } from '@/session/composerPaletteCache';
 import { clearCachedHomeListSnapshot } from '@/session/mobileHomeListCache';
 import { clearCachedSessionMessages } from '@/session/mobileSessionMessageCache';
 import { clearAllMobileVoiceCredentials } from '@/session/mobileVoiceCredentialStore';
-import { clearAllMobileVoiceDictionaryCaches } from '@/session/mobileVoiceDictionaryCache';
+import {
+  clearAllMobileVoiceDictionaryCaches,
+  setMobileVoiceDictionaryAccountScope,
+} from '@/session/mobileVoiceDictionaryCache';
 import { clearAllMobileVoiceInputHistories } from '@/session/mobileVoiceHistoryStore';
 import { visualMockApiFetch, visualMockUser } from '@/debug/visualMock';
 import {
@@ -670,6 +673,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (user?.id) void setTapdbUser(user.id);
     else void clearTapdbUser();
   }, [initialized, user?.id]);
+
+  // 词典缓存的落盘键按账号分区。登出清理是尽力而为的(索引可能读不出来),分区让
+  // 「没删干净」不再等于「下个账号能读到上个账号的词条并发给润色模型」。
+  useEffect(() => {
+    setMobileVoiceDictionaryAccountScope(user?.id ?? '');
+  }, [user?.id]);
 
   const completeOAuthCallback = useCallback(
     (callbackUrl: string): Promise<void> => {

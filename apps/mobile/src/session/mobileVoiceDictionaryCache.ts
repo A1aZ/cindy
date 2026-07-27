@@ -21,8 +21,31 @@ import type {
   MobileVoiceDictionarySnapshotResult,
 } from '@cindy/maker-shared/device-link-contract';
 
-const STORAGE_KEY_PREFIX = 'xdt.mobileVoiceDictionary.v1';
+// v2 起键里带账号:登出清理是尽力而为的(AsyncStorage 不能按前缀枚举,索引也可能
+// 读不出来),只靠清理保证账号隔离等于把用户词条的去向押在一次可能失败的删除上。
+// 键带账号之后,即使某份快照没删掉,下一个账号也读不到它。
+const STORAGE_KEY_PREFIX = 'xdt.mobileVoiceDictionary.v2';
+const LEGACY_STORAGE_KEY_PREFIX = 'xdt.mobileVoiceDictionary.v1';
 const STORAGE_INDEX_KEY = `${STORAGE_KEY_PREFIX}.hosts`;
+const LEGACY_STORAGE_INDEX_KEY = `${LEGACY_STORAGE_KEY_PREFIX}.hosts`;
+
+/**
+ * 当前账号标识。登录/登出时由 AuthContext 设置。
+ *
+ * 空串是合法状态(未登录):此时读写都退回到一个独立分区,不会和任何账号的数据
+ * 互相看见。
+ */
+let accountScope = '';
+
+/** 设置账号分区。切换账号时同时递增代际,丢弃在途请求。 */
+export function setMobileVoiceDictionaryAccountScope(accountId: string): void {
+  const next = typeof accountId === 'string' ? accountId.trim() : '';
+  if (next === accountScope) return;
+  accountScope = next;
+  cacheEpoch += 1;
+  memoryCache.clear();
+  inFlight.clear();
+}
 /** 与桌面词典上限一致;手机侧只是防御性截断,避免异常大的回包撑爆存储。 */
 const MAX_ENTRIES = 1_000;
 const MAX_ALIASES_PER_ENTRY = 8;
@@ -188,21 +211,40 @@ export async function clearAllMobileVoiceDictionaryCaches(): Promise<void> {
     readHostIndex(),
     listMobileVoiceHistoryHosts().catch(() => [] as string[]),
   ]);
-  const hosts = [...new Set([...ownHosts, ...historyHosts])];
+  const hosts = [...new Set([...(ownHosts.hosts ?? []), ...historyHosts])];
   await Promise.all(
-    hosts.map((host) => AsyncStorage.removeItem(storageKeyForHost(host)).catch(() => undefined)),
+    hosts.flatMap((host) => [
+      AsyncStorage.removeItem(storageKeyForHost(host)).catch(() => undefined),
+      // v1 的键不带账号,是真正会被下个账号读到的那一份 —— 一并尽力删掉。
+      AsyncStorage.removeItem(legacyStorageKeyForHost(host)).catch(() => undefined),
+    ]),
   );
-  await AsyncStorage.removeItem(STORAGE_INDEX_KEY).catch(() => undefined);
+  // 索引读失败时**不能**删索引:那等于把「还有哪些快照没删」的唯一线索也丢掉,
+  // 剩下的快照就永远清不掉了。留着,下次登出或下次写入时还有机会补删。
+  if (ownHosts.readable) {
+    await AsyncStorage.removeItem(STORAGE_INDEX_KEY).catch(() => undefined);
+    await AsyncStorage.removeItem(LEGACY_STORAGE_INDEX_KEY).catch(() => undefined);
+  }
 }
 
-async function readHostIndex(): Promise<string[]> {
+/**
+ * 读 host 索引。
+ *
+ * `readable` 区分「索引确实是空的」和「读不出来/坏了」—— 后者当成空列表处理会让
+ * 清理误以为无事可做,还顺手把索引删掉,剩下的快照就此失去唯一的枚举线索。
+ */
+async function readHostIndex(): Promise<{ hosts: string[]; readable: boolean }> {
   try {
     const raw = await AsyncStorage.getItem(STORAGE_INDEX_KEY);
-    if (!raw) return [];
+    if (!raw) return { hosts: [], readable: true };
     const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+    if (!Array.isArray(parsed)) return { hosts: [], readable: false };
+    return {
+      hosts: parsed.filter((item): item is string => typeof item === 'string'),
+      readable: true,
+    };
   } catch {
-    return [];
+    return { hosts: [], readable: false };
   }
 }
 
@@ -220,9 +262,9 @@ function addHostToIndex(hostDeviceId: string): Promise<void> {
   hostIndexQueue = hostIndexQueue
     .catch(() => undefined)
     .then(async () => {
-      const hosts = await readHostIndex();
-      if (hosts.includes(hostDeviceId)) return;
-      await AsyncStorage.setItem(STORAGE_INDEX_KEY, JSON.stringify([...hosts, hostDeviceId]));
+      const index = await readHostIndex();
+      if (index.hosts.includes(hostDeviceId)) return;
+      await AsyncStorage.setItem(STORAGE_INDEX_KEY, JSON.stringify([...index.hosts, hostDeviceId]));
     });
   return hostIndexQueue;
 }
@@ -264,7 +306,11 @@ function readPositiveInt(value: unknown): number {
 }
 
 function storageKeyForHost(hostDeviceId: string): string {
-  return `${STORAGE_KEY_PREFIX}.${hostDeviceId}`;
+  return `${STORAGE_KEY_PREFIX}.${accountScope || 'anonymous'}.${hostDeviceId}`;
+}
+
+function legacyStorageKeyForHost(hostDeviceId: string): string {
+  return `${LEGACY_STORAGE_KEY_PREFIX}.${hostDeviceId}`;
 }
 
 function normalizeHostDeviceId(hostDeviceId: string): string {

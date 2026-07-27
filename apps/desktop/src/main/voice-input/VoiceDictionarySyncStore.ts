@@ -85,6 +85,15 @@ interface StoredSyncData {
 export class VoiceDictionarySyncStore {
   private data: StoredSyncData | null = null;
   private dataOwnerId: string | null = null;
+  /**
+   * sidecar 丢了、但投影里还有词典时,挂起的认领。
+   *
+   * 这种恢复不能立刻做:本机丢掉了全部身份历史,认领会为每个词造出全新化身,而
+   * 别的设备上「删掉某个词」的墓碑指向的是老化身 —— 盖不住新化身,那个词就在合并
+   * 后复活了。所以先挂起,等第一次与对端合并(墓碑到齐)之后再认领,并且认领时
+   * 不越过墓碑。用户在这之前动词典的话就地落地,不能让编辑等一个不知何时到来的对端。
+   */
+  private pendingRecovery: LocalDictionarySnapshot | null = null;
 
   /** 告知本次加载:投影文件里已有词典(用于判断 sidecar 是丢了还是首次安装)。 */
   noteProjectionHasDictionary(): void {
@@ -124,7 +133,10 @@ export class VoiceDictionarySyncStore {
     // 读不懂盘上的 sidecar 时,本机没有可信的同步状态 —— 基于空状态算出来的物化
     // 结果会把用户现有词典覆盖成空。这条路径必须硬失败,由调用方决定怎么办。
     if (current.incompatible) throw new VoiceDictionarySyncUnavailableError();
-    const result = apply(current.state, this.readClock(current));
+    // 挂起的恢复必须先落地:否则这次变更基于一份空状态物化,会把用户词典覆盖成空。
+    this.flushPendingRecovery('local-edit');
+    const base = this.load();
+    const result = apply(base.state, this.readClock(base));
     if (!result.changed) return null;
     return this.commit(result.state, result.clock);
   }
@@ -147,24 +159,64 @@ export class VoiceDictionarySyncStore {
     const clock = maxRemote
       ? observeHlc(this.readClock(current), maxRemote, Date.now())
       : this.readClock(current);
-    return this.commit(merged, clock);
+    const materialized = this.commit(merged, clock);
+    // 对端墓碑已经在本地了,挂起的恢复现在可以安全落地。
+    return this.flushPendingRecovery('merged') ?? materialized;
   }
 
   /**
    * 启动时认领「同步状态之外」对词典文件的改动(只可能来自旧版本客户端)。
    * 文件与上次物化一致时是空操作。
    */
-  reconcile(snapshot: LocalDictionarySnapshot): MaterializedDictionary | null {
+  reconcile(
+    snapshot: LocalDictionarySnapshot,
+    options?: { syncEnabled?: boolean },
+  ): MaterializedDictionary | null {
     const current = this.load();
     // sidecar 丢了但投影还在时(手工删、磁盘坏),这里会拿一份新 nodeId 把投影里
     // 的频次当作**本机**证据重新播种 —— 而那些数字里含有别的设备合并进来的部分。
     // 一旦与那台设备再同步,同一份事件就在两个节点桶里各记一遍,频次凭空翻倍。
     // 这种情形只认领存在性,不认领计数。
-    const seedCounts = !current.lostSidecarWithProjection;
+    // 同步关着就只有本机会写这份词典,认领没有复活风险,不必等对端。
+    if (current.lostSidecarWithProjection && options?.syncEnabled !== false) {
+      // 挂起,等对端墓碑到齐。期间 settings 保留投影文件的内容,用户照常看到词典。
+      this.pendingRecovery = snapshot;
+      log.info('deferred dictionary recovery until peer state is merged', {
+        entries: snapshot.entries.length,
+      });
+      return null;
+    }
+    return this.reconcileNow(snapshot, { recovery: current.lostSidecarWithProjection === true });
+  }
+
+  /**
+   * 落地挂起的恢复认领。合并过对端状态之后调用最安全(墓碑已到齐);本地变更前也
+   * 必须调用 —— 否则 mutate 会基于空状态物化,把词典覆盖成空。
+   */
+  flushPendingRecovery(reason: 'merged' | 'local-edit'): MaterializedDictionary | null {
+    const snapshot = this.pendingRecovery;
+    if (!snapshot) return null;
+    this.pendingRecovery = null;
+    log.info('applying deferred dictionary recovery', { reason, entries: snapshot.entries.length });
+    return this.reconcileNow(snapshot, { recovery: true });
+  }
+
+  hasPendingRecovery(): boolean {
+    return this.pendingRecovery !== null;
+  }
+
+  private reconcileNow(
+    snapshot: LocalDictionarySnapshot,
+    options: { recovery: boolean },
+  ): MaterializedDictionary | null {
+    const current = this.load();
     const result = reconcileFromLocalSnapshot(current.state, this.readClock(current), {
-      snapshot: seedCounts ? snapshot : stripCountsFromSnapshot(snapshot),
+      // 恢复模式只认领存在性:投影里的频次含有从别的设备合并进来的部分,当成本机
+      // 新证据重新播种,再与那台设备同步时同一批事件会在两个节点桶里各记一遍。
+      snapshot: options.recovery ? stripCountsFromSnapshot(snapshot) : snapshot,
       lastMaterializedKeys: current.lastMaterializedKeys,
       nowMs: Date.now(),
+      allowTombstonedRevival: !options.recovery,
     });
     if (!result.changed) return null;
     log.info('reclaimed dictionary edits made by an older client', {
@@ -181,19 +233,27 @@ export class VoiceDictionarySyncStore {
    * sidecar 里已经有这次操作了,于是 UI 一直停在旧内容直到重启。调用方在第二段
    * 失败时用这个回滚。
    */
-  rollbackTo(snapshot: { state: VoiceDictionarySyncState; clock: HlcClock }): void {
+  rollbackTo(snapshot: SyncRollbackPoint): void {
     const current = this.load();
     this.persist({
       ...current,
       state: snapshot.state,
       clock: { wallMs: snapshot.clock.wallMs, counter: snapshot.clock.counter },
+      // key 基线也要一起退。它是下次降级回收判断「哪些词被删了」的唯一依据:留着
+      // 这次失败写下的新基线,回收就会拿它去对照回滚后的状态,把用户看到的那次
+      // 变更反向执行一遍。
+      lastMaterializedKeys: snapshot.lastMaterializedKeys,
     });
   }
 
   /** 供调用方在 mutate 前留存回滚点。 */
-  snapshotForRollback(): { state: VoiceDictionarySyncState; clock: HlcClock } {
+  snapshotForRollback(): SyncRollbackPoint {
     const current = this.load();
-    return { state: current.state, clock: this.readClock(current) };
+    return {
+      state: current.state,
+      clock: this.readClock(current),
+      lastMaterializedKeys: current.lastMaterializedKeys,
+    };
   }
 
   /** 记录本次物化写进词典文件的主键,供下次降级回收判断删除。 */
@@ -260,7 +320,7 @@ export class VoiceDictionarySyncStore {
     try {
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       const tmp = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(next), 'utf-8');
+      fs.writeFileSync(tmp, JSON.stringify(toPersistedShape(next)), 'utf-8');
       fs.renameSync(tmp, filePath);
     } catch (error) {
       // sidecar 是词典的正本,写不下去就不能报告成功:调用方据此回滚并把失败暴露
@@ -275,6 +335,27 @@ export class VoiceDictionarySyncStore {
     }
     this.data = next;
   }
+}
+
+/** mutate 前的回滚点:状态、时钟和 key 基线必须一起进退。 */
+export interface SyncRollbackPoint {
+  state: VoiceDictionarySyncState;
+  clock: HlcClock;
+  lastMaterializedKeys: string[];
+}
+
+/**
+ * 落盘形状。只写稳定字段 —— `incompatible`、`lostSidecarWithProjection` 这些是
+ * **本次加载**的判断结果,写进文件就变成了会被后续进程读回来的持久事实。
+ */
+function toPersistedShape(data: StoredSyncData): Record<string, unknown> {
+  return {
+    version: data.version,
+    nodeId: data.nodeId,
+    clock: data.clock,
+    state: data.state,
+    lastMaterializedKeys: data.lastMaterializedKeys,
+  };
 }
 
 /** 盘上的同步状态来自更新的客户端,本进程不能安全地改它。 */

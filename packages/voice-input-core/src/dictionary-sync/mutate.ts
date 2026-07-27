@@ -125,6 +125,11 @@ export function recordLearningEvent(
 }
 
 export interface SeedTermInput {
+  /**
+   * 允许在「只剩墓碑」的键上重建化身。默认 true(降级回收语义)。
+   * sidecar 恢复认领必须显式传 false —— 见 seedTerm 内的说明。
+   */
+  allowTombstonedRevival?: boolean;
   text: string;
   source: DictionaryTermSource;
   stage: DictionaryStage;
@@ -149,6 +154,37 @@ export interface SeedTermInput {
  * 没有)。已经存在的词条一律不碰 —— 否则合并进来的远端计数会被文件里的数字覆盖
  * 或重复记账,那正是词典频次膨胀的经典成因。
  */
+/**
+ * 把某个词的存活化身提升为正式词条,不动计数。
+ *
+ * stage 是 entry-wins 单调寄存器,提升只会前进不会回退。降级期间老客户端把候选词
+ * 转正时会用到:那个键从没进过 `lastMaterializedKeys`,而状态里已有存活的候选化身,
+ * `seedTerm` 会因此判定「已存在」而放过 —— 不补这一步,转正就在下次物化时被写回候选。
+ */
+export function promoteTermToEntry(
+  state: VoiceDictionarySyncState,
+  clock: HlcClock,
+  input: { termKey: string; nowMs: number },
+): MutationResult {
+  const record = state.records[input.termKey];
+  if (!record) return { state, clock, changed: false };
+  const live = listLiveIncarnations(record);
+  if (live.length === 0 || live.every((item) => item.stage === 'entry')) {
+    return { state, clock, changed: false };
+  }
+
+  const incarnations = copyDictionaryMap(record.incarnations);
+  for (const incarnation of live) {
+    if (incarnation.stage === 'entry') continue;
+    incarnations[incarnation.tag] = { ...incarnation, stage: 'entry', updatedAt: input.nowMs };
+  }
+  return {
+    state: putRecord(state, input.termKey, { ...record, incarnations }),
+    clock,
+    changed: true,
+  };
+}
+
 export function seedTerm(
   state: VoiceDictionarySyncState,
   clock: HlcClock,
@@ -162,6 +198,12 @@ export function seedTerm(
   // 在升级后就凭空消失了。新化身自带新 tag,旧墓碑覆盖不到它。
   const existing = state.records[key];
   if (existing && listLiveIncarnations(existing).length > 0) {
+    return { state, clock, changed: false };
+  }
+  // sidecar 丢失后的恢复认领必须尊重对端墓碑:本机没有身份历史,新化身自带新 tag,
+  // 对端那条删除盖不住它 —— 用户在另一台电脑删掉的词会在合并后复活。降级回收则相反,
+  // 那时投影是老客户端刚写下的新证据,越过墓碑重建才是对的。
+  if (existing && input.allowTombstonedRevival === false) {
     return { state, clock, changed: false };
   }
   if (input.source === 'automatic' && hasDictionaryKey(state.suppressed, key)) {

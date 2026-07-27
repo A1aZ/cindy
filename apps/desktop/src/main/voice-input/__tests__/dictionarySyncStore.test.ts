@@ -9,6 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { VoiceDictionarySyncState } from '@cindy/voice-input-core';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -35,7 +36,7 @@ vi.mock('../../utils/ipcValidate.js', () => ({
 
 const { voiceDictionarySyncStore } = await import('../VoiceDictionarySyncStore.js');
 const { voiceInputDataStore } = await import('../VoiceInputDataStore.js');
-const { createEmptySyncState, createHlcClock, recordLearningEvent } = await import(
+const { createEmptySyncState, createHlcClock, deleteTerms, recordLearningEvent } = await import(
   '@cindy/voice-input-core'
 );
 
@@ -397,10 +398,16 @@ describe('词典同步落盘 —— 第六轮收口', () => {
     fs.rmSync(ownerPath(SYNC_FILE));
     resetStoreCaches();
 
-    const settings = voiceInputDataStore.getSettings();
-    expect(settings.dictionaryEntries.map((e) => e.text)).toEqual(['Cindy']);
-    // 存在性保留,计数不重新播种。
-    expect(settings.dictionaryEntries[0].frequency).toBe(1);
+    // 认领先被挂起(等对端墓碑),此时 UI 照常显示投影文件里的内容。
+    const during = voiceInputDataStore.getSettings();
+    expect(during.dictionaryEntries.map((e) => e.text)).toEqual(['Cindy']);
+    expect(voiceDictionarySyncStore.hasPendingRecovery()).toBe(true);
+
+    // 认领落地之后:存在性保留,计数不重新播种。
+    voiceDictionarySyncStore.flushPendingRecovery('local-edit');
+    const materialized = voiceDictionarySyncStore.materialize();
+    expect(materialized.entries.map((entry) => entry.text)).toEqual(['Cindy']);
+    expect(materialized.entries[0].frequency).toBe(1);
   });
 
   it('导入把已有词条数算进上限,不能对着满词典无限追加', () => {
@@ -430,5 +437,136 @@ describe('词典同步落盘 —— 第六轮收口', () => {
     const raw = JSON.parse(fs.readFileSync(ownerPath(DATA_FILE), 'utf-8')).settings;
     expect(raw.dictionarySyncEnabledOverride).toBeUndefined();
     expect(voiceInputDataStore.getSettings().dictionarySyncEnabled).toBe(true);
+  });
+});
+
+describe('词典同步落盘 —— 第七轮收口', () => {
+  it('sidecar 丢失时挂起认领,等合并过对端再落地,不复活对端删掉的词', () => {
+    writeDictionaryFile({
+      dictionaryEntries: [
+        { id: 'a', text: 'Cindy', source: 'manual', frequency: 3, aliases: [] },
+        { id: 'b', text: 'Orca', source: 'manual', frequency: 2, aliases: [] },
+      ],
+      dictionaryCandidates: [],
+      suppressedAutomaticDictionaryTexts: [],
+    });
+    voiceInputDataStore.getSettings();
+
+    // 对端删掉了 Cindy。先把对端状态留下来,再模拟本机 sidecar 丢失。
+    const peer = JSON.parse(fs.readFileSync(ownerPath(SYNC_FILE), 'utf-8')) as {
+      state: VoiceDictionarySyncState;
+      nodeId: string;
+      clock: { wallMs: number; counter: number };
+    };
+    const peerAfterDelete = deleteTerms(
+      peer.state,
+      { ...peer.clock, nodeId: peer.nodeId },
+      { termKeys: ['cindy'], nowMs: Date.now() + 1_000 },
+    );
+
+    fs.rmSync(ownerPath(SYNC_FILE));
+    resetStoreCaches();
+
+    // 认领被挂起:UI 仍然看得到投影文件里的词典,一个都没少。
+    const duringRecovery = voiceInputDataStore.getSettings();
+    expect(duringRecovery.dictionaryEntries.map((entry) => entry.text).sort()).toEqual([
+      'Cindy',
+      'Orca',
+    ]);
+    expect(voiceDictionarySyncStore.hasPendingRecovery()).toBe(true);
+
+    // 与对端合并 —— 墓碑到齐,挂起的认领这时落地。
+    voiceInputDataStore.mergeRemoteDictionaryState(peerAfterDelete.state);
+    expect(voiceDictionarySyncStore.hasPendingRecovery()).toBe(false);
+
+    const after = voiceInputDataStore.getSettings();
+    // 对端删掉的词不复活,没删的正常认领回来。
+    expect(after.dictionaryEntries.map((entry) => entry.text)).toEqual(['Orca']);
+  });
+
+  it('挂起期间用户编辑词典,认领就地落地,不会被空状态覆盖成空', () => {
+    writeDictionaryFile({
+      dictionaryEntries: [{ id: 'a', text: 'Cindy', source: 'manual', frequency: 3, aliases: [] }],
+      dictionaryCandidates: [],
+      suppressedAutomaticDictionaryTexts: [],
+    });
+    voiceInputDataStore.getSettings();
+    fs.rmSync(ownerPath(SYNC_FILE));
+    resetStoreCaches();
+    voiceInputDataStore.getSettings();
+    expect(voiceDictionarySyncStore.hasPendingRecovery()).toBe(true);
+
+    const settings = voiceInputDataStore.addManualDictionaryEntry('Orca');
+    expect(settings.dictionaryEntries.map((entry) => entry.text).sort()).toEqual(['Cindy', 'Orca']);
+    expect(voiceDictionarySyncStore.hasPendingRecovery()).toBe(false);
+  });
+
+  it('sidecar 只写稳定字段,本次加载的判断结果不落盘', () => {
+    writeDictionaryFile({
+      dictionaryEntries: [{ id: 'a', text: 'Cindy', source: 'manual', frequency: 1, aliases: [] }],
+      dictionaryCandidates: [],
+      suppressedAutomaticDictionaryTexts: [],
+    });
+    voiceInputDataStore.getSettings();
+    voiceInputDataStore.addManualDictionaryEntry('Orca');
+
+    const raw = JSON.parse(fs.readFileSync(ownerPath(SYNC_FILE), 'utf-8')) as Record<string, unknown>;
+    expect(Object.keys(raw).sort()).toEqual([
+      'clock',
+      'lastMaterializedKeys',
+      'nodeId',
+      'state',
+      'version',
+    ]);
+  });
+
+  it('物化登记失败时投影与 key 基线一起回滚', () => {
+    writeDictionaryFile({
+      dictionaryEntries: [{ id: 'a', text: 'Cindy', source: 'manual', frequency: 1, aliases: [] }],
+      dictionaryCandidates: [],
+      suppressedAutomaticDictionaryTexts: [],
+    });
+    voiceInputDataStore.getSettings();
+    const baseline = (
+      JSON.parse(fs.readFileSync(ownerPath(SYNC_FILE), 'utf-8')) as { lastMaterializedKeys: string[] }
+    ).lastMaterializedKeys;
+
+    // 让第二段写入失败。
+    const spy = vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => {
+      throw new Error('EIO');
+    });
+    expect(() => voiceInputDataStore.addManualDictionaryEntry('Orca')).toThrow();
+    spy.mockRestore();
+
+    const after = JSON.parse(fs.readFileSync(ownerPath(SYNC_FILE), 'utf-8')) as {
+      lastMaterializedKeys: string[];
+    };
+    // key 基线必须退回去:留着新基线,下次回收会拿它对照回滚后的状态,把这次变更反向执行。
+    expect(after.lastMaterializedKeys).toEqual(baseline);
+  });
+});
+
+describe('首次迁移与 sidecar 丢失必须分得开', () => {
+  it('首次迁移整份接管频次;之后 sidecar 丢了才按恢复处理', () => {
+    // 1. 存量用户升级:投影里有词典、没有同步印记 → 整份认领,频次原样保留。
+    writeDictionaryFile({
+      dictionaryEntries: [{ id: 'a', text: 'Claude code', source: 'manual', frequency: 4, aliases: [] }],
+      dictionaryCandidates: [],
+      suppressedAutomaticDictionaryTexts: [],
+    });
+    const migrated = voiceInputDataStore.getSettings();
+    expect(migrated.dictionaryEntries[0].frequency).toBe(4);
+    expect(voiceDictionarySyncStore.hasPendingRecovery()).toBe(false);
+    // 印记必须落盘,否则下次 sidecar 丢失会被再次误判成首次迁移。
+    expect(
+      (JSON.parse(fs.readFileSync(ownerPath(DATA_FILE), 'utf-8')) as { dictionarySyncInitialized?: boolean })
+        .dictionarySyncInitialized,
+    ).toBe(true);
+
+    // 2. 同一台机器随后丢了 sidecar:这次是恢复,认领要挂起等对端。
+    fs.rmSync(ownerPath(SYNC_FILE));
+    resetStoreCaches();
+    voiceInputDataStore.getSettings();
+    expect(voiceDictionarySyncStore.hasPendingRecovery()).toBe(true);
   });
 });

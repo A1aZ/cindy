@@ -50,9 +50,9 @@ export async function writeLocalTheme(req: LocalThemeWriteRequest): Promise<Loca
 
     const themeJson = { ...req.theme, id: slot.finalId };
     const filePath = path.join(dir, slot.filename);
-    // Write to a temp path then rename — atomic on most filesystems, and if
-    // the write fails midway the partial temp file is cleaned up below.
-    const tmpPath = `${filePath}.tmp`;
+    // Write to a unique temp path then rename — atomic on most filesystems.
+    // The random suffix prevents races between concurrent writes to the same slot.
+    const tmpPath = `${filePath}.${process.pid}-${Date.now()}.tmp`;
     try {
       await fs.promises.writeFile(tmpPath, `${JSON.stringify(themeJson, null, 2)}\n`, 'utf8');
       await fs.promises.rename(tmpPath, filePath);

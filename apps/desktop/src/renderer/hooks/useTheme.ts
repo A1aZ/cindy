@@ -228,17 +228,18 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       : window.matchMedia(PREFERS_DARK_QUERY).matches,
   );
   // Invalidate memos that depend on family membership when local themes change.
+  // Read latest values from storage to avoid closure staleness races.
   const [localThemeRev, bumpLocalThemeRev] = useReducer((n: number) => n + 1, 0);
   useEffect(() => onLocalThemesChange(() => {
-    // If the active family was removed, fall back before triggering render.
-    if (!tryGetFamily(familyId)) {
+    const currentFamily = getStoredFamilyId();
+    if (!tryGetFamily(currentFamily)) {
       const fallback = DEFAULT_FAMILY_ID;
       setFamilyIdState(fallback);
       try { localStorage.setItem(FAMILY_KEY, fallback); } catch { /* ok */ }
     }
     bumpLocalThemeRev();
-    applyThemeClass(theme, true);
-  }), [theme, familyId]);
+    applyThemeClass(getStoredTheme(), true);
+  }), []);
 
   const setTheme = useCallback((next: Theme) => {
     setThemeState(next);

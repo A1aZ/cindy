@@ -107,10 +107,12 @@ function findBlockEnd(source: string, openIndex: number): number {
 
 const SKIP_AT_RULE_RE = /^@(supports|font-face|keyframes|counter-style|page)\b/i;
 const PRINT_MEDIA_RE = /^@media\b[^{]*\bprint\b/i;
+const VIEWPORT_MEDIA_RE = /^@media\b[^{]*\b(max-width|max-height)\b/i;
 
 function shouldRecurseAtRule(selector: string): boolean {
   if (SKIP_AT_RULE_RE.test(selector)) return false;
   if (PRINT_MEDIA_RE.test(selector)) return false;
+  if (VIEWPORT_MEDIA_RE.test(selector)) return false;
   return true;
 }
 
@@ -168,7 +170,14 @@ function scanCssRules(source: string, depth: number): CssRule[] {
         const nested = scanCssRules(body, depth + 1);
         for (const child of nested) {
           if (!NESTED_THEME_SELECTOR_RE.test(child.selector)) continue;
-          const resolved = child.selector.replace(/&/g, selector);
+          // Expand `&` per comma-separated parent part to avoid generating
+          // invalid selectors like `body, html.theme-dark` from `body, html`.
+          const parentParts = selector.split(',').map((p) => p.trim()).filter(Boolean);
+          const childParts = child.selector.split(',').map((p) => p.trim()).filter(Boolean);
+          const expanded = childParts.flatMap((cp) =>
+            parentParts.map((pp) => cp.replace(/&/g, pp)),
+          );
+          const resolved = expanded.join(', ');
           if (selectorMode(resolved) !== null) {
             rules.push({ selector: resolved, body: child.body });
           }

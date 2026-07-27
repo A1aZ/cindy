@@ -16,7 +16,8 @@
  *
  * ## 为什么用 allow-list
  *
- * 模板**只产出这 91 个 key**。这 7 个主题都没有 override `--login-*`、品牌红、
+ * 模板产出这 91 个基础 key（源主题提供 Markdown 色时额外追加 `md-h1-fg`…
+ * `md-h6-fg` / `md-strong-fg`）。这 7 个主题都没有 override `--login-*`、品牌红、
  * `--destructive`、`--warning-accent`、`--status-bar-accent`、`--focus-ring`、
  * `--diff-*`(DESIGN.md §10 / §16 的语义豁免族),照抄它们的 key 列表就自动守住了
  * 豁免边界——比"先大量产出再过滤"安全。`protected-tokens.ts` 只作为回归断言的

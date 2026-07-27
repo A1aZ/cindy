@@ -308,6 +308,7 @@ export function extractVsCodePalette(
     'textDisabled',
     ['editorLineNumber.foreground', 'editorWhitespace.foreground'],
     () => shade(textSecondary, dark ? -0.35 : 0.35),
+    surfaceHit,
   );
   const textTertiary = role(
     'textTertiary',

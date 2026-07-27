@@ -18,10 +18,23 @@ import { createLogger } from '../logger.js';
 import { forkSessionAtMessage, forkSessionStripEncrypted } from '../maker-orchestration/fork.js';
 import { requireString, throwIpcError } from '../utils/ipcValidate.js';
 import { tapWindowBroadcast } from '../device-link/broadcast-tap.js';
+import type { Session } from '../../renderer/lib/ccAgent.types';
 
+import { buildForkOriginHandoff } from './agentHandoff.js';
+import { agentHandoffPending } from './agentHandoffPendingSingleton.js';
 import { MAKER_INVOKE } from './channels.js';
 
 const log = createLogger('maker-ipc/fork');
+
+/**
+ * 给 fork 出的子会话挂上来源标记,下一次 send 时作为 wire 前缀注入模型。
+ * 业务函数在 maker-orchestration(单向依赖,不能反向 import ipc 层的 registry),
+ * 因此接线统一放在各 IPC 调用点。
+ */
+export function markForkOrigin(session: Pick<Session, 'id' | 'parentSessionId'>): void {
+  if (!session.parentSessionId) return;
+  agentHandoffPending.set(session.id, buildForkOriginHandoff(session.parentSessionId));
+}
 
 /**
  * 广播「新会话已建」给所有窗口 + device-link tap(转发给订阅 `sessions` topic 的控制端)。
@@ -53,6 +66,7 @@ export function registerMakerForkIpc(): void {
       const mid = requireString(messageClientId, 'messageClientId');
       try {
         const session = await forkSessionAtMessage(sid, mid);
+        markForkOrigin(session);
         broadcastSessionCreated(session.id);
         return session;
       } catch (err) {
@@ -92,6 +106,7 @@ export function registerMakerForkIpc(): void {
       const sid = requireString(sourceSessionId, 'sourceSessionId');
       try {
         const session = await forkSessionStripEncrypted(sid);
+        markForkOrigin(session);
         broadcastSessionCreated(session.id);
         return session;
       } catch (err) {

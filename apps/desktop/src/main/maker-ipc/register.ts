@@ -454,6 +454,7 @@ import { checkRemoteWorkingDir } from '../device-link/remote-workdir-guard.js';
 import { createWorkerTurnStartSequencer } from './workerTurnStartSequencer.js';
 import { createBusinessSessionId } from '../sessionIds.js';
 import { forkSessionAtMessage } from '../maker-orchestration/fork.js';
+import { markForkOrigin } from './fork.js';
 import {
   isSessionAutoTitleEligible,
   registerSessionAutoTitleHooks,
@@ -4944,6 +4945,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
         latestAssistant.clientId,
       );
       forkedSessionId = forked.id;
+      markForkOrigin(forked);
       broadcastSessionCreated(forked.id);
     } catch (err) {
       const code = (err as { code?: string }).code;

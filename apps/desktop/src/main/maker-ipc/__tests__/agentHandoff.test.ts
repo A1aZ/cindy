@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  buildForkOriginHandoff,
   buildHandoffText,
   createAgentHandoffPendingRegistry,
   extractPlainText,
@@ -67,8 +68,8 @@ describe('buildHandoffText', () => {
     const text = buildHandoffText([msg('user', '第一个问题'), msg('assistant', '第一个回答')], opts);
     expect(text).toContain('Claude Code');
     expect(text).toContain('Codex');
-    expect(text).toContain('不要向用户提及本段交接说明');
-    expect(text.trimEnd().endsWith('== 交接说明结束,以下是用户的新消息 ==')).toBe(true);
+    expect(text).toContain('Do not mention this handoff note to the user');
+    expect(text.trimEnd().endsWith("== End of handoff note; the user's new message follows ==")).toBe(true);
   });
 
   it('最近轮次逐字保留,更早轮次进单行提要', () => {
@@ -79,13 +80,13 @@ describe('buildHandoffText', () => {
     }
     const text = buildHandoffText(messages, opts);
     // 最近 4 轮(4..7)逐字
-    expect(text).toContain('[用户]\n问题7');
-    expect(text).toContain('[助手]\n回答7');
-    expect(text).toContain('[用户]\n问题4');
+    expect(text).toContain('[User]\n问题7');
+    expect(text).toContain('[Assistant]\n回答7');
+    expect(text).toContain('[User]\n问题4');
     // 更早轮(0..3)在提要区
-    expect(text).toContain('- 用户: 问题0');
-    expect(text).toContain('回应: 回答3');
-    expect(text).not.toContain('[用户]\n问题0');
+    expect(text).toContain('- User: 问题0');
+    expect(text).toContain('Reply: 回答3');
+    expect(text).not.toContain('[User]\n问题0');
   });
 
   it('工具调用渲染为 name + input 摘要,tool_result/thinking 不进正文', () => {
@@ -99,7 +100,7 @@ describe('buildHandoffText', () => {
       ],
       opts,
     );
-    expect(text).toContain('[工具] Read: {"file_path":"/a.ts"}');
+    expect(text).toContain('[Tool] Read: {"file_path":"/a.ts"}');
     expect(text).not.toContain('内心戏');
     expect(text).not.toContain('x'.repeat(200));
   });
@@ -147,6 +148,24 @@ describe('buildHandoffText', () => {
     }
     const text = buildHandoffText(messages, opts);
     expect(text.length).toBeLessThanOrEqual(16_000);
+  });
+});
+
+describe('buildForkOriginHandoff', () => {
+  it('带上父会话 id,并以结束标记收尾(模型不会把它读成用户的话)', () => {
+    const text = buildForkOriginHandoff('sess-parent-1');
+    expect(text).toContain('sess-parent-1');
+    expect(text).toContain('forked by the user from another conversation');
+    expect(text.trimEnd().endsWith("== End of fork note; the user's new message follows =="))
+      .toBe(true);
+  });
+
+  it('保持极简:不重复 agent-switch 那套摘要/检索指引(fork 的上下文本来就是完整的)', () => {
+    const text = buildForkOriginHandoff('sess-parent-2');
+    expect(text).not.toContain('search_chat_history');
+    expect(text).not.toContain('get_chat_history');
+    expect(text).not.toContain('== Work state');
+    expect(text.split('\n').filter((line) => line.trim().length > 0)).toHaveLength(3);
   });
 });
 
@@ -230,7 +249,7 @@ describe('buildHandoffText 工作状态区(社区 handoff packet 口径)', () =>
       ],
       opts,
     );
-    expect(text).toContain('== 工作状态(自动提取)==');
+    expect(text).toContain('== Work state (auto-extracted) ==');
     expect(text).toContain('- /repo/a.ts');
     expect(text).toContain('- /repo/b.ts');
     expect(text).toContain('- /repo/c.ts');
@@ -255,13 +274,13 @@ describe('buildHandoffText 工作状态区(社区 handoff packet 口径)', () =>
 
   it('无工具活动时不渲染工作状态区', () => {
     const text = buildHandoffText([msg('user', '你好'), msg('assistant', '你好!')], opts);
-    expect(text).not.toContain('== 工作状态');
+    expect(text).not.toContain('== Work state');
   });
 
   it('framing 包含「先核对工作区、以工作区为准」纪律', () => {
     const text = buildHandoffText([msg('user', 'q')], opts);
     expect(text).toContain('git status');
-    expect(text).toContain('以工作区现状为准');
+    expect(text).toContain('the workspace always wins');
   });
 });
 
@@ -270,18 +289,20 @@ describe('buildHandoffText 早期原文检索指引', () => {
 
   it('提供 sessionId 时附带检索指引(两个工具名 + session_ids 定向)', () => {
     const text = buildHandoffText([msg('user', '你好')], { ...opts, sessionId: 'sess-abc' });
-    expect(text).toContain('== 早期原文检索(需要时用)==');
-    expect(text).toContain('本会话 id:sess-abc');
+    expect(text).toContain('== Retrieving earlier verbatim history (use when needed) ==');
+    expect(text).toContain('This session id: sess-abc');
     expect(text).toContain('search_chat_history');
     expect(text).toContain('get_chat_history');
     expect(text).toContain('"session_ids":["sess-abc"]');
     // 指引在结束标记之前
-    expect(text.indexOf('早期原文检索')).toBeLessThan(text.indexOf('交接说明结束'));
+    expect(text.indexOf('Retrieving earlier verbatim history')).toBeLessThan(
+      text.indexOf('End of handoff note'),
+    );
   });
 
   it('不提供 sessionId 时不渲染检索指引', () => {
     const text = buildHandoffText([msg('user', '你好')], opts);
-    expect(text).not.toContain('早期原文检索');
+    expect(text).not.toContain('Retrieving earlier verbatim history');
     expect(text).not.toContain('get_chat_history');
   });
 });
@@ -291,14 +312,14 @@ describe('buildHandoffText 增量(delta)模式:切回停泊引擎', () => {
 
   it('framing 为归位续接口径,不用全量交接的"此前由 X 驱动"措辞', () => {
     const text = buildHandoffText([msg('user', '离开期间的问题'), msg('assistant', '回答')], opts);
-    expect(text).toContain('你(Claude Code)此前处理过本会话');
-    expect(text).toContain('切回由你继续');
-    expect(text).toContain('你离开期间发生的进展记录');
-    expect(text).not.toContain('现在起由你(Claude Code)继续');
+    expect(text).toContain('You (Claude Code) worked on this conversation before');
+    expect(text).toContain('now it is switching back to you');
+    expect(text).toContain('a record of what happened while you were away');
+    expect(text).not.toContain('from here on you (Claude Code) continue it');
     // 纪律保留:不向用户提及 + 以工作区为准
-    expect(text).toContain('不要向用户提及本段交接说明');
-    expect(text).toContain('以工作区现状为准');
-    expect(text.trimEnd().endsWith('== 交接说明结束,以下是用户的新消息 ==')).toBe(true);
+    expect(text).toContain('Do not mention this handoff note to the user');
+    expect(text).toContain('the workspace always wins');
+    expect(text.trimEnd().endsWith("== End of handoff note; the user's new message follows ==")).toBe(true);
   });
 
   it('工作状态区按 workStateMessages(全量历史)提取,对话区只含增量', () => {
@@ -312,25 +333,25 @@ describe('buildHandoffText 增量(delta)模式:切回停泊引擎', () => {
     expect(text).toContain('- /repo/early.ts'); // 全量工作状态
     expect(text).toContain('离开期间的问题');
     expect(text).not.toContain('最早的问题'); // 对话区不含水位线之前的内容
-    expect(text).toContain('== 你离开期间的对话记录 ==');
+    expect(text).toContain('== Conversation while you were away ==');
   });
 
   it('空增量(切走后立即切回)显式说明,不留歧义', () => {
     const text = buildHandoffText([], opts);
-    expect(text).toContain('== 你离开期间没有新的对话消息 ==');
+    expect(text).toContain('== No new messages while you were away ==');
   });
 
   it('delta 模式同样附带检索指引(sessionId 提供时)', () => {
     const text = buildHandoffText([msg('user', 'q')], { ...opts, sessionId: 'sess-d1' });
-    expect(text).toContain('== 早期原文检索(需要时用)==');
+    expect(text).toContain('== Retrieving earlier verbatim history (use when needed) ==');
     expect(text).toContain('"session_ids":["sess-d1"]');
   });
 
   it('full 模式(缺省)不受 delta 文案影响', () => {
     const text = buildHandoffText([msg('user', 'q')], { fromLabel: 'Codex', toLabel: 'Claude Code' });
-    expect(text).toContain('现在起由你(Claude Code)继续');
-    expect(text).not.toContain('切回由你继续');
-    expect(text).not.toContain('你离开期间没有新的对话消息');
+    expect(text).toContain('from here on you (Claude Code) continue it');
+    expect(text).not.toContain('now it is switching back to you');
+    expect(text).not.toContain('No new messages while you were away');
   });
 });
 
@@ -348,9 +369,9 @@ describe('buildHandoffText 超限收缩保住首尾', () => {
       sessionId: 'sess-tail',
     });
     expect(text.length).toBeLessThanOrEqual(16_000);
-    expect(text).toContain('== 早期原文检索(需要时用)==');
+    expect(text).toContain('== Retrieving earlier verbatim history (use when needed) ==');
     expect(text).toContain('"session_ids":["sess-tail"]');
-    expect(text.trimEnd().endsWith('== 交接说明结束,以下是用户的新消息 ==')).toBe(true);
+    expect(text.trimEnd().endsWith("== End of handoff note; the user's new message follows ==")).toBe(true);
   });
 
   it('单轮 100 条 tool_use 折叠中部,且硬上限/检索段/结束标记全部存活', () => {
@@ -368,9 +389,9 @@ describe('buildHandoffText 超限收缩保住首尾', () => {
       sessionId: 'sess-tools',
     });
     expect(text.length).toBeLessThanOrEqual(16_000);
-    expect(text).toContain('(中间 60 条工具调用略)');
-    expect(text).toContain('== 早期原文检索(需要时用)==');
+    expect(text).toContain('(60 tool calls omitted)');
+    expect(text).toContain('== Retrieving earlier verbatim history (use when needed) ==');
     expect(text).toContain('"session_ids":["sess-tools"]');
-    expect(text.trimEnd().endsWith('== 交接说明结束,以下是用户的新消息 ==')).toBe(true);
+    expect(text.trimEnd().endsWith("== End of handoff note; the user's new message follows ==")).toBe(true);
   });
 });

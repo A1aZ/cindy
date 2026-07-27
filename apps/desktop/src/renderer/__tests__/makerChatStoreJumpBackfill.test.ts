@@ -316,10 +316,14 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).not.toContain('rewound');
   });
 
-  it('J. 纯文本会话按 1:1 计入 item 预算,不会无限翻到几千个 item', async () => {
-    // review #676（codex）：预算按 DB 行数计时，纯文本对话（每条 user/assistant 各是
-    // 一个 render item）会被严重低估——2000 行就是 2000 个 item，照样冻结渲染。
-    // 现在按 role 折算：非工具行 1:1，所以文本会话会在 600 个 item 左右就停手。
+  it('J. 纯文本会话在预算内停手,不会无限翻到几千行', async () => {
+    // review #676（codex）：早期预算是 2000 行 + 「render item ≈ 行数 / 5」的折算假设，
+    // 而纯文本对话每条 user/assistant 各自就是一个 render item（接近 1:1），2000 行就是
+    // 2000 个 item，照样冻结渲染。
+    // 折算模型后来整个放弃了（口径见 JUMP_BACKFILL_MAX_ITEMS 注释）：现在按**行数**当
+    // render item 数的保守上界、封顶 600 —— 折算必须逐一追平 buildRenderItems 的每种 item
+    // 展开规则，review 中已发现 5 种被低估的路径，是条追不完的线。所以本用例现在守的是
+    // 「纯文本页也会在预算内停手」这个更简单的口径。
     const target = serverMessage({
       id: 'way-back',
       clientId: 'way-back',

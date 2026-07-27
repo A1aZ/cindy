@@ -221,6 +221,25 @@ describe('resolveOutboundDispatcher', () => {
     expect(after).toBeInstanceOf(ProxyAgent);
   });
 
+  it('backfills the snapshot under the path-bearing key so the next hop stops missing', async () => {
+    // wrapper 兜底路径(voice 客户端把它直接交给 undici):未命中时后台补解析,
+    // 必须按「origin + path」写快照,否则查的键永远 miss、永远沿用首跳代理。
+    resolverState.resolve.mockImplementation(async (target: string) =>
+      new URL(target).pathname === '/direct' ? null : 'http://127.0.0.1:7890',
+    );
+    const wrapper = await resolveOutboundDispatcher('https://api.example.com/first');
+    const proxied = pick(wrapper, 'https://api.example.com/first');
+
+    // 第一次访问 /direct:快照还没有 → 本跳沿用首跳出口,并触发后台解析。
+    expect(pick(wrapper, 'https://api.example.com/direct')).toBe(proxied);
+    expect(resolverState.resolve).toHaveBeenCalledWith('https://api.example.com/direct');
+    await vi.waitFor(() => {
+      // 后台解析落盘后,同一路径不再 miss —— 走直连池。
+      expect(pick(wrapper, 'https://api.example.com/direct')).not.toBe(proxied);
+    });
+    expect(pick(wrapper, 'https://api.example.com/direct')).not.toBeInstanceOf(ProxyAgent);
+  });
+
   it('does not close an evicted dispatcher immediately (it may already be in a caller hand)', async () => {
     vi.useFakeTimers();
     try {
@@ -406,6 +425,22 @@ describe('outboundFetch', () => {
     await outboundFetch('https://api.example.com/probe', { method: 'HEAD' });
     const [, head] = undiciState.fetch.mock.calls[1] as unknown as [string, { method: string }];
     expect(head.method).toBe('HEAD');
+  });
+
+  it('does not follow non-redirect 3xx statuses that happen to carry Location', async () => {
+    resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
+    // 304 / 300 在直连路径(globalThis.fetch)是原样返回的;开代理不该把它们吞掉。
+    for (const status of [300, 304]) {
+      undiciState.fetch.mockReset();
+      undiciState.fetch.mockResolvedValue(
+        redirectResponse(status, 'https://elsewhere.example.com/x') as never,
+      );
+      const res = (await outboundFetch('https://api.example.com/thing')) as unknown as {
+        status: number;
+      };
+      expect(undiciState.fetch).toHaveBeenCalledTimes(1);
+      expect(res.status).toBe(status);
+    }
   });
 
   it('replays method and body on 307 and stops after too many hops', async () => {

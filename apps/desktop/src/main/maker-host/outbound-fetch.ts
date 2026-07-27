@@ -522,8 +522,11 @@ function routingDispatcherCtor(): OriginRoutingDispatcherCtor {
       }
       const decision = syncProxyDecision(key);
       if (!decision.known) {
-        // 后台补解析(它会写进快照),本跳沿用首跳出口。
-        void resolveProxyTarget(target).catch(() => undefined);
+        // 后台补解析(它会写进快照),本跳沿用首跳出口。必须拿**带 path 的** URL 去解析
+        // —— 用只有 origin 的 target 会把结论写到 `origin + /` 上,而这里查的是
+        // `origin + path`,那就永远 miss、永远沿用首跳代理(review 2026-07-28 P1)。
+        // key 本身就是「origin + path」,直接拿它当 URL 解,写入与查询保证同键。
+        void resolveProxyTarget(parseUpstream(key) ?? target).catch(() => undefined);
         return this.forProxy(this.primary.proxy, this.primary.protocol);
       }
       if (!decision.target) return getDirectAgent();
@@ -620,6 +623,9 @@ function signalOf(
 /** 与 fetch 规范一致的跳数上限。 */
 const MAX_REDIRECT_HOPS = 20;
 
+/** fetch 规范的 redirect status 集合 —— 只有这几个才跟随。 */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
 /**
  * 需要认证的系统代理:`session.resolveProxy` 只给 host:port,拿不到凭证 —— Chromium 自己
  * 靠 `app.on('login')` 那套挑战交互补,而 Node/undici 这条路没有对接口,结果是 407。
@@ -675,8 +681,11 @@ async function followRedirectsThroughProxy(
       body?: { cancel(): Promise<void> } | null;
     };
     noteProxyAuthRequired(url, res.status);
-    const location = res.status >= 300 && res.status < 400 ? res.headers.get('location') : null;
-    // 非 3xx,或 3xx 但没有 Location(无从跟随)→ 原样回给调用方。
+    const location = REDIRECT_STATUSES.has(res.status) ? res.headers.get('location') : null;
+    // 不是 fetch 定义的重定向状态(如 300 Multiple Choices、304 Not Modified),或没有
+    // Location(无从跟随)→ 原样回给调用方。**不能**按「3xx 且有 Location」就跟随:那会
+    // 让开代理时把 304 / 300 吞掉换成另一个响应,与直连路径行为不一致
+    // (review 2026-07-28 P1)。
     if (!location) return res;
     if (hop >= MAX_REDIRECT_HOPS) {
       await res.body?.cancel().catch(() => undefined);

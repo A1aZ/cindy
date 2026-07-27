@@ -221,3 +221,27 @@ describe('新鲜度判定', () => {
     expect(views.map((view) => view.text)).toEqual(['带向量']);
   });
 });
+
+describe('词条主键', () => {
+  it('与桌面 CRDT 主键同一套归一化 —— 只差空白的两条要合并成一行', () => {
+    const views = buildMobileVoiceDictionaryEntryViews([
+      {
+        entries: [
+          { text: 'Vibe  Coding', frequency: 3 },
+          { text: 'vibe coding', frequency: 1 },
+          { text: ' Vibe Coding ', frequency: 1 },
+        ],
+        fetchedAt: 1_000,
+      },
+    ]);
+    expect(views).toHaveLength(1);
+    expect(views[0].key).toBe('vibe coding');
+  });
+
+  it('归一化之后为空的词条被丢掉,不会产生空 key', () => {
+    const views = buildMobileVoiceDictionaryEntryViews([
+      { entries: [{ text: '   ' }, { text: 'Cindy' }], fetchedAt: 1_000 },
+    ]);
+    expect(views.map((view) => view.text)).toEqual(['Cindy']);
+  });
+});

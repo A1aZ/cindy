@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_TOMBSTONE_TTL_MS,
   addManualEntry,
+  buildStateVersionVector,
   createEmptySyncState,
   createHlcClock,
   deleteTerms,
@@ -22,6 +23,7 @@ import {
   mergeSyncStates,
   recordLearningEvent,
   reconcileFromLocalSnapshot,
+  versionVectorDominates,
   type HlcClock,
   type VoiceDictionarySyncState,
 } from '../dictionary-sync';
@@ -178,5 +180,33 @@ describe('原型链成员名作为词条', () => {
       const entry = materialized.entries.find((item) => item.text === name);
       expect(`${name}=${entry?.frequency}`).toBe(`${name}=${index + 2}`);
     }
+  });
+});
+
+describe('版本向量的键也来自不可信输入', () => {
+  it('返回的是无原型字典 —— nodeId 叫 __proto__ 也不会读到原型链上的值', () => {
+    const state = addManualEntry(createEmptySyncState(), createHlcClock('__proto__', 1_000), {
+      text: 'Cindy',
+      nowMs: 1_000,
+    }).state;
+
+    const vector = buildStateVersionVector(state);
+    expect(Object.getPrototypeOf(vector)).toBeNull();
+    expect(vector['__proto__']).toBeTypeOf('string');
+    // 不存在的原型名键必须是 undefined,否则包含性比较会拿函数去比大小。
+    expect(vector['constructor']).toBeUndefined();
+    expect(vector['toString']).toBeUndefined();
+
+    // 包含性比较在这种 nodeId 下仍然自洽。
+    expect(versionVectorDominates(vector, vector)).toBe(true);
+    expect(versionVectorDominates(buildStateVersionVector(createEmptySyncState()), vector)).toBe(false);
+
+    // 序列化往返保真(投影要经隧道发给手机):`JSON.parse` 把 `__proto__` 建成
+    // own property 而不是走原型 setter,所以这个 nodeId 不会在传输中丢掉。
+    const roundTripped = JSON.parse(JSON.stringify(vector)) as Record<string, string>;
+    expect(Object.keys(roundTripped)).toEqual(['__proto__']);
+    expect(Object.getOwnPropertyDescriptor(roundTripped, '__proto__')?.value).toBe(
+      vector['__proto__'],
+    );
   });
 });

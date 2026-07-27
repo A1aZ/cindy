@@ -7,6 +7,7 @@
  */
 
 import type { DeviceView, PresenceSnapshot } from '@cindy/device-link';
+import { dictionaryTermKey } from '@cindy/voice-input-core';
 import type { MobileVoiceCredentialSyncDictionaryEntry } from '@cindy/maker-shared/device-link-contract';
 
 /** 桌面平台白名单:词典只存在于电脑上,手机之间不互相同步。 */
@@ -160,8 +161,11 @@ export function buildMobileVoiceDictionaryEntryViews(
   for (const entry of freshest.entries ?? []) {
     const text = entry?.text?.trim();
     if (!text) continue;
-    // 与桌面 CRDT 主键同一套 locale 无关折叠,避免同一个词在不同语言设备上分裂。
-    const key = text.toLowerCase();
+    // 直接用桌面 CRDT 那支主键函数,而不是自己 toLowerCase:它还做了空白归一等
+    // 处理,自己写一份迟早会和桌面漂移 —— 那样只差一个空格的两条会在手机上重复
+    // 显示,React key 也跟着不稳。
+    const key = dictionaryTermKey(text);
+    if (!key) continue;
     if (seen.has(key)) continue;
     seen.add(key);
     views.push({

@@ -200,6 +200,8 @@ export default function SettingsScreen() {
   useEffect(() => {
     if (!auth.isAuthenticated || !auth.deviceId) {
       setSelfDeviceName(null);
+      // 登出/未登录才清空电脑列表 —— 拉取失败不清(见下面 catch 的说明)。
+      setDesktopDevices([]);
       return;
     }
 
@@ -218,7 +220,9 @@ export default function SettingsScreen() {
       .catch(() => {
         if (cancelled) return;
         setSelfDeviceName(null);
-        setDesktopDevices([]);
+        // 电脑列表刻意不清空:这只是一次拉取失败(断网、超时),不代表用户没有电脑。
+        // 清掉的话词典页会显示成「还没有电脑」,连带 hydrate/refresh 也没有 host 可
+        // 跑 —— 明明本地还有一份可用的离线缓存。真正该清空的时机是登出。
       });
 
     return () => {

@@ -695,7 +695,7 @@ describe('interaction shared model', () => {
     expect(presentation.terminal).toBe(true);
     expect(presentation.stepCount).toBe(1);
     expect(presentation.groups).toEqual([{
-      id: 'a-group-0',
+      id: 'ungrouped-0',
       anyOf: false,
       steps: [{
         id: 'a',
@@ -725,8 +725,24 @@ describe('interaction shared model', () => {
         { id: 'same', title: '第二步' },
       ],
     });
-    expect(duplicated.groups.map((g) => g.id)).toEqual(['same-group-0', 'same-group-1']);
+    expect(duplicated.groups.map((g) => g.id)).toEqual(['ungrouped-0', 'ungrouped-1']);
     expect(duplicated.groups.map((g) => g.steps.length)).toEqual([1, 1]);
+
+    // 合成身份与被控端真实 groupId 共用命名空间:撞名时绝不能并组,否则两批互不
+    // 相关的要求会被当成「二选一」,用户漏做另一半(#657 review)。
+    const collided = buildRemotePluginSetupPresentation({
+      kind: 'plugin_setup',
+      requestId: 's1',
+      steps: [
+        { id: 'a', title: '无组步骤' },
+        { id: 'b', title: '真实组步骤', groupId: 'ungrouped-0', groupMode: 'any_of' },
+      ],
+    });
+    expect(collided.groups.map((g) => g.steps.map((s) => s.title))).toEqual([['无组步骤'], ['真实组步骤']]);
+    // 展示 id 仍去重,渲染层拿它当 list key。
+    expect(collided.groups.map((g) => g.id)).toEqual(['ungrouped-0', 'ungrouped-0-2']);
+    // 撞名的真实组只有 1 步 → any_of 收敛为 false,不会误显示「任选其一」。
+    expect(collided.groups.map((g) => g.anyOf)).toEqual([false, false]);
 
     // 换个 kind 传进来必须返回空投影,而不是从任意 request 上刮字段让误用「看起来正常」。
     expect(buildRemotePluginSetupPresentation({

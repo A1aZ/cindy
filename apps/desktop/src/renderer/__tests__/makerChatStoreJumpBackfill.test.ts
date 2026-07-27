@@ -877,6 +877,42 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).not.toContain('stale');
   });
 
+  it('Y. 超长裁剪不清孤岛标记(裁剪只保证"最新 200 行",不保证连续)', async () => {
+    // review #676(codex P1):slice(-TRIM_TARGET) 取的是最新 200 行,不等于"连续的最新
+    // 一段"。若先前几次深跳留下多个孤岛、真正连续的尾段不足 200 行,裁剪结果里还夹着孤岛。
+    // 清掉标记会让 canFocusWithoutJumpLoad 把命中孤岛当成已覆盖直接 focus,而从孤岛边界
+    // 往上翻又取不到那段更新的缺失区间 → 洞永久固化。
+    const target = serverMessage({
+      id: 'island-trim',
+      clientId: 'island-trim',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    });
+    // 先制造孤岛(补齐取不到目标 → 退回 around 窗口),同时把窗口灌到超过 TRIM_THRESHOLD。
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    let page = 0;
+    vi.mocked(listMessagesFor).mockImplementation(async () => {
+      const base = page++;
+      return Array.from({ length: 100 }, (_, i) =>
+        serverMessage({
+          id: `trim-${base}-${i}`,
+          clientId: `trim-${base}-${i}`,
+          createdAt: new Date(Date.UTC(2026, 6, 20) - (base * 100 + i) * 60_000).toISOString(),
+        }),
+      );
+    });
+    await makerChatStore.loadAroundMessageClientId(SID, 'island-trim', { radius: 60 });
+    expect(makerChatStore.getSnapshot(SID).historyWindowHasIsland).toBe(true);
+    expect(makerChatStore.getSnapshot(SID).messages.length).toBeGreaterThan(300);
+
+    // 离开视图 → 触发 _trimMessagesIfNeeded。
+    const leave = makerChatStore.enterView(SID);
+    leave();
+
+    expect(makerChatStore.getSnapshot(SID).messages).toHaveLength(200);
+    // 关键:裁剪不清标记 —— 保留的 200 行未必连续。
+    expect(makerChatStore.getSnapshot(SID).historyWindowHasIsland).toBe(true);
+  });
+
   it('X. /clear 清空窗口时一并清掉孤岛标记,不把会话永久钉在"不连续"', async () => {
     // review #676（codex P1）：covered 刻意保留孤岛标记（到达本次目标不证明更早的洞都补
     // 上了），所以标记只能由「窗口整体重建」清零。/clear 清了 messages / 游标 / 锁却漏了

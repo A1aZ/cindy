@@ -551,3 +551,31 @@ describe('历史窗口空洞 — 被卡片取代的调用', () => {
     expect(markerIdx).toBeLessThan(planIdx);
   });
 });
+
+// ── Scenario D:被空洞收尾的工作组时长(review #676 codex P1) ─────────────────
+
+describe('历史窗口空洞 — 被空洞收尾的组的时长', () => {
+  it('D. 空洞前是一次长工具调用且后面没有正文时,时长取 tool_result 而不是发起时刻', () => {
+    // createWorkGroup 只有拿到 nextItem(紧随的 assistant 正文)时才用它当结束时间;
+    // 被空洞切开的组没有 nextItem,回落到 workRunFallbackEndTs。那份 fallback 原来另算
+    // 一套(段取最后一次调用的**发起**时刻),于是一次跑 40 分钟的调用后面接空洞时,
+    // 「已工作」显示成约 0s。
+    const messages: ChatMessage[] = [
+      mkUser('u1', '2026-07-23T16:00:00.000Z', '跑个长任务'),
+      mkTool('t1', '2026-07-23T16:00:10.000Z'),
+      // 40 分钟后才回结果,之后**没有**assistant 正文,直接接空洞。
+      mkResult('r1', 'tu-t1', '2026-07-23T16:40:10.000Z'),
+      // ── 空洞:47 小时 ──
+      mkUser('u2', '2026-07-25T15:00:00.000Z', '继续'),
+      mkAssistant('a2', '2026-07-25T15:00:30.000Z', '好。'),
+    ];
+
+    const { items } = buildRenderItems(messages);
+    const grouped = groupWorkRuns(items, false);
+    const group = workGroups(grouped).find((g) => groupContains(g, 't1'));
+    expect(group?.type).toBe('work_group');
+    const durationMs = group?.type === 'work_group' ? group.durationMs : undefined;
+    // 40 分钟(发起 16:00:10 → 结果 16:40:10)。取发起时刻当结束会得到 0。
+    expect(durationMs).toBe(40 * 60 * 1000);
+  });
+});

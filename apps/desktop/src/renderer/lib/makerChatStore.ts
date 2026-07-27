@@ -1288,9 +1288,15 @@ function _trimMessagesIfNeeded(sessionId: string): void {
       hasMoreMessages: true,
       oldestMessageId: null,
       isLoadingMore: false,
-      // 保留下来的是连续的最新一段,本身没有孤岛;危害只来自 in-flight 请求把 pre-trim
-      // 游标那一页接到它上面,而那已由上面的 bump 作废。
-      historyWindowHasIsland: false,
+      // 孤岛标记**保持原值**:`slice(-TRIM_TARGET)` 只保证"取最新的 200 行",不保证这 200 行
+      // 连续 —— 若先前几次深跳留下多个孤岛、而真正连续的尾段不足 200 行,裁剪结果里就还夹着
+      // 孤岛。清掉标记会让 canFocusWithoutJumpLoad 把命中孤岛当成已覆盖直接 focus,而从孤岛
+      // 边界往上翻又取不到那段更新的缺失区间 → 洞永久固化,直到整会话重载(#676 review)。
+      //
+      // 代价是出现过孤岛的会话在裁剪后仍会多做补齐尝试;方向上是安全的那一侧。
+      // 真正清零只发生在"整窗从最新重建"的路径(reloadMessages / clear / demote / purge)。
+      // 注意游标被清成 null:此时补齐会从最新页重新起翻(见 backfillHistoryUntil 的首页分支),
+      // 恰好能穿过缺失区间自愈。
     };
   });
 }
@@ -5207,9 +5213,24 @@ function ensureInitialMessages(sessionId: string): void {
         // preserves slice invariants).
         messages: mergeMessages(mapped, s.messages, {}, 'newest-first'),
         isFirstMessage: false,
+        // 窗口里掺着跳转孤岛时,**本页的下沿**接管游标,不再取"两者中更老的那个"。
+        //
+        // 序列(#676 review codex P1):会话刚打开就直接深跳,首拉还没回来 → 补齐无从下手、
+        // 退回 around 孤岛并用孤岛下沿播种游标(那时窗口里只有孤岛,只能这么播)。随后首拉
+        // 的最新页落地,若仍保留更老的孤岛游标,缺失区间恰好比它**更新**:普通向上翻页与
+        // 孤岛感知重试都只会请求比孤岛更老的行,那段洞永远拉不回来,除非整会话重载。
+        // 换成最新页下沿后,往上翻会一页页穿过那段洞,补齐也能真正命中目标并自愈。
+        //
+        // 孤岛标记**不清**:洞还在,直到翻页真的把它填上。
         oldestMessageId:
-          oldestServerMessageIdForWindow(merged, s.messages, s.oldestMessageId, 'newest-first') ??
-          oldestId,
+          s.historyWindowHasIsland === true
+            ? oldestId
+            : (oldestServerMessageIdForWindow(
+                merged,
+                s.messages,
+                s.oldestMessageId,
+                'newest-first',
+              ) ?? oldestId),
         hasMoreMessages: hasMore,
       }));
       if (import.meta.env.DEV) {

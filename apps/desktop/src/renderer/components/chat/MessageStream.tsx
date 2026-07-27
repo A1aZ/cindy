@@ -1512,20 +1512,18 @@ function workRunStartTs(it: WorkChildItem): number | null {
 /** run 末子项的结束时间戳估算(无终结正文消息可用时的兜底):
  *  tool_segment 取最后一个 toolCall 的 createdAt(低估最后一次工具执行耗时,
  *  可接受);thinking 取 createdAt + durationMs 与 createdAt 的较大值。 */
+/**
+ * run 末子项的结束时间戳 —— 直接复用 renderItemEndMs,不再自己算一份。
+ *
+ * 原来这里另算一份:tool_segment 取**最后一次调用的发起时刻**、agent_task 取
+ * `updatedAt ?? toolCall.createdAt`,两者都不看 tool_result 时间。于是"一个跑了 40 分钟的
+ * 工具 / Task 之后紧跟一段历史空洞、后面没有 assistant 正文"时,createWorkGroup 拿不到
+ * nextItem、回落到这里,时长显示成约 0s —— 而 renderItemEndMs 明明已经算得出真正的结束
+ * 时间(#676 review codex P1)。两处口径合一,顺带修掉 agent_task 那个把
+ * `toolCall.createdAt` 排在 `update.createdAt` 前面的旧 fallback 顺序。
+ */
 function workRunEndTs(it: WorkChildItem): number | null {
-  if (it.type === 'tool_segment') {
-    return messageTs(it.toolCalls[it.toolCalls.length - 1]);
-  }
-  if (it.type === 'agent_task') {
-    const ms = Date.parse(
-      it.update?.updatedAt ?? it.toolCall?.createdAt ?? it.update?.createdAt ?? '',
-    );
-    return Number.isFinite(ms) ? ms : null;
-  }
-  const base = messageTs(it.message);
-  if (base === null) return null;
-  const dur = it.message.thinkingDurationMs ?? 0;
-  return base + dur;
+  return renderItemEndMs(it);
 }
 
 function workRunFallbackEndTs(run: WorkChildItem[]): number | null {

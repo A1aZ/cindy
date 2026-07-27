@@ -11,7 +11,7 @@
  * 恒等于真实事件数,与同步了多少次、以什么拓扑同步无关。
  */
 
-import { tickHlc, type HlcClock, type HlcTimestamp } from './hlc';
+import { HLC_PREFIX_LENGTH, tickHlc, type HlcClock, type HlcTimestamp } from './hlc';
 import { MATERIALIZED_ID_PREFIX, materializeDictionary, pickDisplayText } from './materialize';
 import { dictionaryTermKey, normalizeDictionaryTermText } from './text';
 import {
@@ -391,6 +391,32 @@ export interface RenameTermInput {
  *  - 改成了另一个词(主键变了):等价于「删掉旧词 + 添加新词」。此时**不写抑制**——
  *    用户是在改名,不是拒绝这个词,否则新写法若日后被自动学习到会被自己的抑制挡住。
  */
+/**
+ * 搬移化身时用的确定性 tag。
+ *
+ * 要同时满足三件事:两台设备算出同一个值(否则合并后两个化身并存、频次翻倍)、
+ * 与原 tag 不同(否则被原键刚打下的墓碑盖住)、以及仍是规范 HLC(定长前缀 + 无点
+ * nodeId,校验与定序都依赖它)。
+ *
+ * 做法是保留原 tag 的墙钟与计数器段(所以它在时间序上仍落在原处,不会把任何设备的
+ * 时钟推向未来),只把 nodeId 段换成一个由「原 tag + 目标键」折叠出来的定长标记 ——
+ * 定长是必须的,否则反复改名会让 tag 越来越长。
+ */
+function deriveMoveTag(sourceTag: HlcTimestamp, targetKey: string): HlcTimestamp {
+  const prefix = sourceTag.slice(0, HLC_PREFIX_LENGTH);
+  return `${prefix}mv${fold36(`${sourceTag}\u0000${targetKey}`)}`;
+}
+
+/** FNV-1a 折叠成定长 base36。只用于派生搬移标记,不参与任何安全判断。 */
+function fold36(input: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(36).padStart(7, '0');
+}
+
 export function renameTerm(
   state: VoiceDictionarySyncState,
   clock: HlcClock,
@@ -406,38 +432,53 @@ export function renameTerm(
   if (live.length === 0) return { state, clock, changed: false };
 
   if (fromKey !== toKey) {
-    // 改名 = 删旧 + 建新,但必须把积累的证据一起搬过去:频次是排序权重,别名更是
-    // 纠错能力本身。改动前的写法是新词条从 1 起、别名清空 —— 用户纠正一个学错的
-    // 写法,反而把这个词学到的东西全丢了。
-    const carriedFrequency = live.reduce((sum, item) => sum + readCounterTotal(item.counters), 0);
-    const carriedAliases = new Map<string, { text: string; count: number }>();
+    // 改名 = 把积累的证据整体**搬**到新键下,而不是「删旧 + 按聚合值新建」。
+    //
+    // 频次是排序权重、别名是纠错能力的主体,不搬过去等于用户纠正一个学错的写法就
+    // 把这个词学到的东西全丢了。但搬的方式很关键:早先是把跨化身求和出来的总频次
+    // 塞进一个全新化身。两台已收敛的电脑各自把同一个词改成同一个新名时,双方都会
+    // 算出同样的总数、各自造一个新化身;合并后两个化身都存活,物化把它们相加 ——
+    // 频次 5 的词变成 10,而其间没有发生任何一次学习。
+    //
+    // 现在把原化身连同它按节点分桶的计数一起搬过去,新 tag 由「原 tag + 目标键」
+    // 确定性派生:两台电脑搬出来的是**同一个**化身(tag 相同、计数相同),合并时
+    // 天然去重,搬多少次都不会涨。
+    //
+    // 不直接复用原 tag,是因为原键上刚给这个 tag 打了墓碑 —— 改回原名时(A→B→A)
+    // 搬回去的化身会被自己那条旧墓碑当场盖住,词条凭空消失。派生保证每次落地的
+    // tag 都是新的,同时仍然可去重。
+    const ticked = tickHlc(clock, input.nowMs);
+    const moved = createDictionaryMap<DictionaryIncarnation>();
     for (const incarnation of live) {
-      for (const [aliasKey, alias] of Object.entries(incarnation.aliases)) {
-        const count = readCounterTotal(alias.counters);
-        const existing = carriedAliases.get(aliasKey);
-        carriedAliases.set(aliasKey, {
-          text: alias.text,
-          count: (existing?.count ?? 0) + count,
-        });
-      }
+      const movedTag = deriveMoveTag(incarnation.tag, toKey);
+      moved[movedTag] = {
+        ...incarnation,
+        tag: movedTag,
+        text: nextText,
+        textStamp: ticked.stamp,
+        source: 'manual',
+        stage: 'entry',
+        updatedAt: input.nowMs,
+      };
     }
 
-    const removed = deleteTerms(state, clock, {
+    // 原键打墓碑。墓碑是记录内部的,不会波及新键下同 tag 的化身。
+    const removed = deleteTerms(state, ticked.clock, {
       termKeys: [fromKey],
       nowMs: input.nowMs,
       suppressAutomatic: false,
     });
-    // 目标词条已存在时 seedTerm 不生效,退回普通手动添加(此时它自己的证据更可信)。
-    const seeded = seedTerm(removed.state, removed.clock, {
-      text: nextText,
-      source: 'manual',
-      stage: 'entry',
-      count: Math.max(1, carriedFrequency),
-      aliases: [...carriedAliases.values()],
-      nowMs: input.nowMs,
-    });
-    if (seeded.changed) return seeded;
-    return addManualEntry(removed.state, removed.clock, { text: nextText, nowMs: input.nowMs });
+
+    // 目标键已有词条时,搬过去的化身与它并存 —— 那是两批各自独立的证据,相加才对。
+    const target = removed.state.records[toKey];
+    return {
+      state: putRecord(removed.state, toKey, {
+        incarnations: { ...copyDictionaryMap(target?.incarnations), ...moved },
+        tombstones: copyDictionaryMap(target?.tombstones),
+      }),
+      clock: removed.clock,
+      changed: true,
+    };
   }
 
   if (live.every((item) => item.text === nextText && item.source === 'manual')) {
@@ -491,6 +532,60 @@ export interface GcOptions {
 
 /** 墓碑默认保留 180 天。 */
 export const DEFAULT_TOMBSTONE_TTL_MS = 180 * 24 * 60 * 60 * 1000;
+
+/**
+ * 自动候选的**权威状态**硬上限。
+ *
+ * 物化只暴露前 200 条候选,但状态里存的是全部 —— 被挤出展示的那些既看不见也删不掉,
+ * 自动学习跑得久一点就单调增长下去,直到整份状态超过 relay 单帧上限,此后每一次
+ * 同步广播都被丢弃(而且不会有任何报错)。
+ *
+ * 上限定得远高于展示上限:正常用户碰不到,只有异常增长才会触发,尽量少动用户数据。
+ */
+export const MAX_AUTOMATIC_CANDIDATE_RECORDS = 2_000;
+
+/**
+ * 裁掉超出硬上限的最弱自动候选(打墓碑,不写抑制)。
+ *
+ * 只动**自动学习的候选**:手动词条是用户的显式意图,正式词条已经被用户看见并接受,
+ * 两者都不在裁剪范围内。不写抑制集合是关键 —— 抑制是永久的,而这些词只是暂时没
+ * 挤进来,日后再被学到应该能正常回来。
+ *
+ * 裁剪会生成墓碑并同步出去,所以判据必须确定性:证据数升序、并列时按主键。两台
+ * 设备各自裁剪出的集合可能不同,合并后是删除的并集 —— 候选是学习的中间态,重新
+ * 学到就会回来,这个代价可以接受;放任状态无界增长则会让同步彻底停摆。
+ */
+export function pruneWeakAutomaticCandidates(
+  state: VoiceDictionarySyncState,
+  clock: HlcClock,
+  options: { maxRecords?: number; nowMs: number },
+): MutationResult {
+  const limit = Math.max(0, options.maxRecords ?? MAX_AUTOMATIC_CANDIDATE_RECORDS);
+  const candidates: Array<{ key: string; weight: number }> = [];
+  for (const [key, record] of Object.entries(state.records)) {
+    const live = listLiveIncarnations(record);
+    if (live.length === 0) continue;
+    // 只要还有任何一个化身是正式词条或手动来源,这个词就不参与裁剪。
+    if (live.some((item) => item.stage === 'entry' || item.source === 'manual')) continue;
+    candidates.push({
+      key,
+      weight: live.reduce((sum, item) => sum + readCounterTotal(item.counters), 0),
+    });
+  }
+  if (candidates.length <= limit) return { state, clock, changed: false };
+
+  const doomed = candidates
+    .sort((a, b) => a.weight - b.weight || (a.key < b.key ? -1 : 1))
+    .slice(0, candidates.length - limit)
+    .map((item) => item.key);
+
+  // suppressAutomatic: false —— 这是容量裁剪,不是「用户不想要这个词」。
+  return deleteTerms(state, clock, {
+    termKeys: doomed,
+    nowMs: options.nowMs,
+    suppressAutomatic: false,
+  });
+}
 
 /**
  * 回收过期墓碑。

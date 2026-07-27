@@ -271,8 +271,14 @@ export class VoiceInputDataStore {
       { ...current.settings, ...projectMaterializedDictionary(materialized) },
       process.platform,
     );
-    this.replaceState({ ...current, dictionarySyncInitialized: true, settings: nextSettings });
+    // 顺序要紧:sidecar(状态 + key 基线)全部写完,最后才写投影并广播。
+    //
+    // 反过来的话,`markMaterialized` 抛错时投影文件已经落盘、UI 也已经更新,而调用方
+    // 的 catch 只回滚 sidecar —— 用户看到「保存失败」,盘上却留着这次改动,重启后
+    // 降级回收还会拿这份投影去对照被回滚的 CRDT,把它当成「旧版本客户端做的改动」
+    // 重新认领回来。现在任一段失败时投影都还没写,回滚后两边一致。
     voiceDictionarySyncStore.markMaterialized(materialized);
+    this.replaceState({ ...current, dictionarySyncInitialized: true, settings: nextSettings });
     notifyDictionaryChanged();
     return nextSettings;
   }
@@ -621,6 +627,18 @@ export function onVoiceInputDictionaryChanged(listener: DictionaryChangedListene
 /** 一次 advice 能提交的动作条数上限。真实模型建议远低于此,超出的一律是异常来源。 */
 const MAX_DICTIONARY_LEARNING_ACTIONS = 32;
 
+/** 归一化待删除的词条 id:丢掉非字符串,并按词典总量上限截断。 */
+function sanitizeDictionaryEntryIds(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const ids: string[] = [];
+  for (const candidate of input) {
+    if (typeof candidate !== 'string' || !candidate) continue;
+    ids.push(candidate);
+    if (ids.length >= MAX_VOICE_INPUT_DICTIONARY_ENTRIES) break;
+  }
+  return ids;
+}
+
 /**
  * 归一化单条动作的别名。
  *
@@ -690,9 +708,13 @@ export function registerVoiceInputDataStoreIpc(): void {
     }
   });
 
-  ipcMain.handle('voice-input:dictionary:delete-entries', (_event, entryIds: string[]): VoiceInputSettings => {
+  ipcMain.handle('voice-input:dictionary:delete-entries', (event, entryIds: unknown): VoiceInputSettings => {
     try {
-      return voiceInputDataStore.deleteDictionaryEntries(entryIds);
+      // 删除现在会写 CRDT 墓碑并传播到用户的每一台电脑,和 add/import/rename 是
+      // 同一级别的写操作 —— 守卫不能只加在新增那几个上。超长数组也要挡:逐条
+      // map 的开销全落在 main 线程。
+      assertTrustedAppRendererEvent(event);
+      return voiceInputDataStore.deleteDictionaryEntries(sanitizeDictionaryEntryIds(entryIds));
     } catch (error) {
       throwVoiceInputDataStoreIpcError(error);
     }
@@ -902,10 +924,14 @@ function stripDictionaryFields(patch: unknown): Record<string, unknown> {
   delete next.dictionaryCandidates;
   delete next.suppressedAutomaticDictionaryTexts;
   if (typeof next.dictionarySyncEnabled === 'boolean') {
-    // 选中的值恰好等于当前默认值时,记的是「跟随默认」而不是一条静态 override ——
-    // 否则以后调整默认值带不动这些用户,而他们从没表达过要偏离默认。
-    next.dictionarySyncEnabledOverride =
-      next.dictionarySyncEnabled === DEFAULT_DICTIONARY_SYNC_ENABLED ? null : next.dictionarySyncEnabled;
+    // 用户在开关上做的每一次显式选择都记成 override,**包括**恰好等于当前默认值的
+    // 那次。规则 §2 要求「已自定义的用户保留自己的选择」:一个曾经关掉、后来又特意
+    // 打开的用户是明确表过态的,如果因为「和今天的默认一样」就把 override 删掉,
+    // 将来默认改成 false 会把他静默关掉。
+    //
+    // 规则 §5 禁止的是**没有用户表达时**把默认值固化回配置(比如 agent 代改),
+    // 不是禁止记录用户的显式选择。清除 override 只由下面的「恢复默认」负责。
+    next.dictionarySyncEnabledOverride = next.dictionarySyncEnabled;
     delete next.dictionarySyncEnabled;
   } else if (next.dictionarySyncEnabled === null) {
     // 显式传 null = 恢复默认。规则要求「恢复默认」是删除 override 重新跟随版本

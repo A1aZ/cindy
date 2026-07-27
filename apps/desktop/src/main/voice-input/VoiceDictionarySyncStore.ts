@@ -39,6 +39,7 @@ import {
   materializeDictionary,
   mergeSyncStates,
   observeHlc,
+  pruneWeakAutomaticCandidates,
   reconcileFromLocalSnapshot,
   type HlcClock,
   type LocalDictionarySnapshot,
@@ -290,15 +291,21 @@ export class VoiceDictionarySyncStore {
     this.persist({ ...current, lastMaterializedKeys: keys });
   }
 
-  /** 回收过期墓碑。启动时跑一次即可,失败不影响功能。 */
+  /** 回收过期墓碑,并裁掉超出硬上限的自动候选。启动时跑一次即可,失败不影响功能。 */
   collectGarbage(): void {
     const current = this.load();
-    const next = gcTombstones(current.state, {
-      nowMs: Date.now(),
-      ttlMs: DEFAULT_TOMBSTONE_TTL_MS,
+    const nowMs = Date.now();
+    const collected = gcTombstones(current.state, { nowMs, ttlMs: DEFAULT_TOMBSTONE_TTL_MS });
+    // 自动候选没有上限的话,状态会随学习单调增长,直到整份状态超过 relay 单帧上限 ——
+    // 此后每一次同步广播都被静默丢弃,而被挤出展示的那些候选用户既看不见也删不掉。
+    const pruned = pruneWeakAutomaticCandidates(collected, this.readClock(current), { nowMs });
+    if (pruned.state === current.state) return;
+    if (pruned.changed) log.info('pruned weak automatic candidates over the authoritative cap');
+    this.persist({
+      ...current,
+      state: pruned.state,
+      clock: { wallMs: pruned.clock.wallMs, counter: pruned.clock.counter },
     });
-    if (next === current.state) return;
-    this.persist({ ...current, state: next });
   }
 
   private commit(state: VoiceDictionarySyncState, clock: HlcClock): MaterializedDictionary {
@@ -308,7 +315,48 @@ export class VoiceDictionarySyncStore {
       state,
       clock: { wallMs: clock.wallMs, counter: clock.counter },
     });
-    return materializeDictionary(state);
+    // 用 persist 之后的状态物化,而不是传进来的那份:persist 会把盘上另一个进程
+    // 刚写下的事件合并进来,拿合并前的状态物化会让投影少掉对方的词条。
+    return materializeDictionary(this.data?.state ?? state);
+  }
+
+  /**
+   * 写盘前把盘上的状态合并进来。
+   *
+   * 同一个 userData 可能被多个进程共用(dev 与正式版共用目录、被动实例)。每个进程
+   * 都把 sidecar 缓存在内存里各写各的,后写的那次会用自己那份过期快照整体覆盖掉
+   * 另一个进程刚记下的事件 —— 词条就这么没了。
+   *
+   * 这里不需要真正的跨进程锁:状态本身是 CRDT,写之前重读一次再合并即可,合并幂等
+   * 且可交换。剩下的窗口(读完到 rename 之间)只会丢掉极短时间内另一进程的写入,
+   * 而不是整份状态,并且下一次任意一侧的写入就会把它带回来。
+   *
+   * **已知精度损失**:共用 sidecar 的进程也共用同一个 nodeId,同一毫秒各自 +1 时
+   * 计数按节点取 max 会塌成一次。给每个进程分配独立 nodeId 能解决,但那样计数桶会
+   * 随启动次数无限增长 —— 频次只是排序权重,少记几次远好过让状态无界膨胀。
+   */
+  private mergeWithOnDiskState(next: StoredSyncData, filePath: string): StoredSyncData {
+    let onDisk: StoredSyncData;
+    try {
+      onDisk = normalizeStoredData(JSON.parse(fs.readFileSync(filePath, 'utf-8')) as unknown);
+    } catch {
+      // 文件不存在(首次写)或读不出来:没有可合并的东西,按原样写。
+      return next;
+    }
+    // 盘上的是更新客户端写的:一个字节都不能碰,让 persist 的调用方拿到失败。
+    if (onDisk.incompatible) return next;
+    const mergedState = mergeSyncStates(next.state, onDisk.state);
+    if (isSameState(mergedState, next.state)) return next;
+    log.info('merged concurrent dictionary state from disk before persisting');
+    const maxOnDisk = findMaxHlc(onDisk.state);
+    const clock = maxOnDisk
+      ? observeHlc(this.readClock(next), maxOnDisk, Date.now())
+      : this.readClock(next);
+    return {
+      ...next,
+      state: mergedState,
+      clock: { wallMs: clock.wallMs, counter: clock.counter },
+    };
   }
 
   private readClock(data: StoredSyncData): HlcClock {
@@ -347,10 +395,11 @@ export class VoiceDictionarySyncStore {
     // 用空状态销毁它。
     if (next.incompatible || this.data?.incompatible) return;
     const filePath = getDataFilePath();
+    const merged = this.mergeWithOnDiskState(next, filePath);
     try {
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       const tmp = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(toPersistedShape(next)), 'utf-8');
+      fs.writeFileSync(tmp, JSON.stringify(toPersistedShape(merged)), 'utf-8');
       fs.renameSync(tmp, filePath);
     } catch (error) {
       // sidecar 是词典的正本,写不下去就不能报告成功:调用方据此回滚并把失败暴露
@@ -360,10 +409,10 @@ export class VoiceDictionarySyncStore {
         error: error instanceof Error ? error.message : String(error),
       });
       // 内存状态仍然提交:本进程后续的合并不能基于过期状态。
-      this.data = next;
+      this.data = merged;
       throw new VoiceDictionarySyncWriteError(error);
     }
-    this.data = next;
+    this.data = merged;
   }
 }
 
@@ -417,16 +466,23 @@ function createInitialData(): StoredSyncData {
   };
 }
 
+/** 外层 wrapper 的结构版本。与 CRDT `state.version` 各自演进,升级时都要照顾到。 */
+const STORED_SYNC_DATA_VERSION = 1;
+
 function normalizeStoredData(raw: unknown): StoredSyncData {
   if (!raw || typeof raw !== 'object') return createInitialData();
   const candidate = raw as Partial<StoredSyncData>;
   const nodeId = typeof candidate.nodeId === 'string' && candidate.nodeId.trim()
     ? candidate.nodeId.trim()
     : randomUUID();
-  const incompatible = isNewerVersion(candidate.state);
+  // 两层版本都要看:外层 wrapper(nodeId / clock / lastMaterializedKeys 这些字段的
+  // 结构版本)和内层 CRDT state 版本是各自演进的。只看内层的话,一个写了
+  // wrapper v2、state 仍是 v1 的更新客户端会被当成可写的 v1 数据,下一次
+  // `toPersistedShape()` 按 v1 序列化就把它的 v2 字段全丢了。
+  const incompatible = isNewerVersion(candidate.state) || isNewerStoredVersion(candidate.version);
   const state = normalizeState(candidate.state);
   return {
-    version: 1,
+    version: STORED_SYNC_DATA_VERSION,
     incompatible,
     nodeId,
     clock: {
@@ -446,6 +502,11 @@ function normalizeStoredData(raw: unknown): StoredSyncData {
  * 只认「版本号明确更高」这一种情况 —— 结构坏了(缺字段、被截断)属于损坏,照常
  * 重建即可;而版本更高是合法数据,必须原样留着。
  */
+/** 外层 wrapper 的版本号是否高于本进程能写的版本。 */
+function isNewerStoredVersion(version: unknown): boolean {
+  return typeof version === 'number' && version > STORED_SYNC_DATA_VERSION;
+}
+
 function isNewerVersion(raw: unknown): boolean {
   if (!raw || typeof raw !== 'object') return false;
   const version = (raw as { version?: unknown }).version;

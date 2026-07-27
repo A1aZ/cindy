@@ -44,7 +44,7 @@ const { voiceDictionarySyncStore } = await import('../VoiceDictionarySyncStore.j
 const { sanitizeDictionaryLearningActions, voiceInputDataStore } = await import(
   '../VoiceInputDataStore.js'
 );
-const { createEmptySyncState, createHlcClock, deleteTerms, recordLearningEvent } = await import(
+const { addManualEntry, createEmptySyncState, createHlcClock, deleteTerms, recordLearningEvent } = await import(
   '@cindy/voice-input-core'
 );
 
@@ -744,5 +744,91 @@ describe('词典同步落盘 —— 第九轮收口', () => {
       expect(action.aliases?.every((alias) => alias.length <= 120)).toBe(true);
       expect(action.term.length).toBeLessThanOrEqual(120);
     }
+  });
+});
+
+describe('词典同步落盘 —— 第十轮收口', () => {
+  it('另一个进程写过盘之后再落盘,不会覆盖掉对方的词条', () => {
+    writeDictionaryFile({
+      dictionaryEntries: [{ id: 'a', text: 'Cindy', source: 'manual', frequency: 1, aliases: [] }],
+      dictionaryCandidates: [],
+      suppressedAutomaticDictionaryTexts: [],
+    });
+    voiceInputDataStore.getSettings();
+
+    // 模拟共享 userData 的另一个进程:它读到同一份 sidecar,加了一个词并写回。
+    const raw = JSON.parse(fs.readFileSync(ownerPath(SYNC_FILE), 'utf-8')) as {
+      state: VoiceDictionarySyncState;
+      nodeId: string;
+      clock: { wallMs: number; counter: number };
+      lastMaterializedKeys: string[];
+      version: number;
+    };
+    const other = addManualEntry(
+      raw.state,
+      { wallMs: raw.clock.wallMs + 1_000, counter: 0, nodeId: 'other-process' },
+      { text: '另一个进程加的词', nowMs: Date.now() },
+    );
+    fs.writeFileSync(
+      ownerPath(SYNC_FILE),
+      JSON.stringify({ ...raw, state: other.state }),
+      'utf-8',
+    );
+
+    // 本进程手上还是旧快照,现在做一次自己的变更。
+    const settings = voiceInputDataStore.addManualDictionaryEntry('本进程加的词');
+
+    // 两边的词都要在 —— 直接覆盖写的话,另一个进程那条就没了。
+    expect(settings.dictionaryEntries.map((entry) => entry.text).sort()).toEqual([
+      'Cindy',
+      'istanbul'.replace('istanbul', '另一个进程加的词'),
+      '本进程加的词',
+    ].sort());
+  });
+
+  it('wrapper 版本更高的 sidecar 一个字节都不碰', () => {
+    fs.mkdirSync(path.dirname(ownerPath(SYNC_FILE)), { recursive: true });
+    const future = JSON.stringify({
+      version: 99,
+      nodeId: 'future-node',
+      clock: { wallMs: 1, counter: 0 },
+      state: { version: 1, records: {}, suppressed: {} },
+      lastMaterializedKeys: [],
+      futureOnlyField: 'must survive',
+    });
+    fs.writeFileSync(ownerPath(SYNC_FILE), future, 'utf-8');
+    writeDictionaryFile({ dictionaryEntries: [] });
+    resetStoreCaches();
+
+    voiceInputDataStore.getSettings();
+    expect(() => voiceInputDataStore.addManualDictionaryEntry('Cindy')).toThrow();
+    expect(fs.readFileSync(ownerPath(SYNC_FILE), 'utf-8')).toBe(future);
+  });
+
+  it('删除词条的 IPC 与新增走同一套守卫', () => {
+    const source = fs.readFileSync(
+      path.join(__dirname, '..', 'VoiceInputDataStore.ts'),
+      'utf-8',
+    );
+    const handler = source.slice(source.indexOf("'voice-input:dictionary:delete-entries'"));
+    const body = handler.slice(0, handler.indexOf('});'));
+    expect(body).toContain('assertTrustedAppRendererEvent');
+    expect(body).toContain('sanitizeDictionaryEntryIds');
+  });
+
+  it('用户显式打开同步会被记成 override,即使它和当前默认值相同', () => {
+    writeDictionaryFile({ dictionaryEntries: [] });
+    voiceInputDataStore.updateSettings({ dictionarySyncEnabled: false });
+    voiceInputDataStore.updateSettings({ dictionarySyncEnabled: true });
+
+    // 曾经关掉、后来特意打开的用户是明确表过态的:以后默认改成 false 不该把他关掉。
+    const raw = JSON.parse(fs.readFileSync(ownerPath(DATA_FILE), 'utf-8')).settings;
+    expect(raw.dictionarySyncEnabledOverride).toBe(true);
+
+    // 只有显式的「恢复默认」才清掉 override。
+    voiceInputDataStore.updateSettings({ dictionarySyncEnabled: null });
+    expect(
+      JSON.parse(fs.readFileSync(ownerPath(DATA_FILE), 'utf-8')).settings.dictionarySyncEnabledOverride,
+    ).toBeUndefined();
   });
 });

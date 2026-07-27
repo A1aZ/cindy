@@ -16,6 +16,8 @@ const WALL_RADIX_LENGTH = 10;
 /** 逻辑计数器段:base36 定长 4 位;同一毫秒内可容纳 36^4 ≈ 168 万次事件。 */
 const COUNTER_RADIX_LENGTH = 4;
 const COUNTER_MAX = 36 ** COUNTER_RADIX_LENGTH - 1;
+/** `<wall36>.<counter36>.` 的长度 —— 定长前缀部分,nodeId 从这之后开始。 */
+export const HLC_PREFIX_LENGTH = WALL_RADIX_LENGTH + 1 + COUNTER_RADIX_LENGTH + 1;
 
 /**
  * 形如 `<wall36>.<counter36>.<nodeId>` 的时间戳。

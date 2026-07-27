@@ -85,11 +85,23 @@ describe('parseChromiumProxyResult', () => {
     expect(parseChromiumProxyResult('DIRECT')).toBe(null);
   });
 
-  it('skips unsupported SOCKS/HTTPS entries and picks the next supported one', () => {
+  it('parses SOCKS5 entries and honors the order the system gave them in', () => {
+    expect(parseChromiumProxyResult('SOCKS5 127.0.0.1:7891')).toBe('socks5://127.0.0.1:7891');
+    // 条目顺序即系统 / PAC 的优先级,不重排。
     expect(parseChromiumProxyResult('SOCKS5 127.0.0.1:7891; PROXY 127.0.0.1:7890; DIRECT'))
+      .toBe('socks5://127.0.0.1:7891');
+    expect(parseChromiumProxyResult('PROXY 127.0.0.1:7890; SOCKS5 127.0.0.1:7891'))
       .toBe('http://127.0.0.1:7890');
+  });
+
+  it('skips unsupported HTTPS/SOCKS(v4) entries and picks the next supported one', () => {
+    expect(parseChromiumProxyResult('HTTPS secure.proxy:443; SOCKS5 127.0.0.1:7891'))
+      .toBe('socks5://127.0.0.1:7891');
     expect(parseChromiumProxyResult('HTTPS secure.proxy:443; DIRECT')).toBe(null);
+    // Chromium 里裸 SOCKS 前缀就是 v4,不支持。
     expect(parseChromiumProxyResult('SOCKS 127.0.0.1:1080')).toBe(null);
+    expect(parseChromiumProxyResult('SOCKS 127.0.0.1:1080; PROXY 127.0.0.1:7890'))
+      .toBe('http://127.0.0.1:7890');
   });
 
   it('tolerates malformed input', () => {

@@ -11,9 +11,9 @@
  *      (包括 NO_PROXY 命中 = 直连,不再落到系统代理 —— 用户显式豁免的域不该被
  *      系统代理接管)。
  *   2. 系统代理(Electron session.resolveProxy):GUI 启动拿不到 shell env 的主场景。
- *      Chromium 按系统设置 / PAC 逐 URL 解析,结果做短 TTL 缓存;只支持 PROXY
- *      (明文 HTTP 代理)条目,HTTPS(TLS-to-proxy)/ SOCKS 条目跳过并继续找下一个
- *      候选,全部不支持则直连(与今天行为一致,fail-open)。
+ *      Chromium 按系统设置 / PAC 逐 URL 解析,结果做短 TTL 缓存;支持 PROXY(明文
+ *      HTTP 代理)与 SOCKS5 条目,HTTPS(TLS-to-proxy)/ SOCKS(=v4)跳过并继续找
+ *      下一个候选,全部不支持则直连(fail-open)。
  *
  * 解析结果变化时记一条 info(每个 origin 只在值变化时记),排查网络问题时 grep
  * "outbound proxy" 即可看到当前生效路径。
@@ -38,8 +38,9 @@ const SYSTEM_PROXY_CACHE_TTL_MS = 30 * 1000;
 
 /**
  * 解析 Chromium resolveProxy 返回的 PAC 结果串(例 "PROXY 127.0.0.1:7890; SOCKS5
- * 127.0.0.1:7891; DIRECT")→ 第一个受支持条目的 http:// 代理地址;DIRECT 或全部
- * 不支持 → null(直连)。导出仅供单测。
+ * 127.0.0.1:7891; DIRECT")→ 第一个受支持条目的代理地址(http:// 或 socks5://);
+ * DIRECT 或全部不支持 → null(直连)。条目顺序即系统 / PAC 给出的优先级,不额外
+ * 重排。导出仅供单测。
  */
 export function parseChromiumProxyResult(result: string): string | null {
   for (const rawEntry of result.split(';')) {
@@ -50,9 +51,11 @@ export function parseChromiumProxyResult(result: string): string | null {
     if (kind === 'DIRECT') return null;
     const hostPort = spaceIdx === -1 ? '' : entry.slice(spaceIdx + 1).trim();
     if (!hostPort) continue;
-    // PROXY = 明文 HTTP 代理(CONNECT 隧道可用)。HTTPS(TLS-to-proxy)与 SOCKS
-    // 系列暂不支持,跳过看下一个候选。
+    // PROXY = 明文 HTTP 代理(CONNECT 隧道可用);SOCKS5 = RFC 1928 隧道,域名交给
+    // 代理端解析(本机 DNS 解不出上游时的唯一出路)。HTTPS(TLS-to-proxy)与裸
+    // SOCKS(Chromium 里就是 v4)不支持,跳过看下一个候选。
     if (kind === 'PROXY') return `http://${hostPort}`;
+    if (kind === 'SOCKS5') return `socks5://${hostPort}`;
   }
   return null;
 }

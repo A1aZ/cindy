@@ -1399,7 +1399,14 @@ function renderItemEndMs(item: RenderItem): number | null {
     }
     return null;
   }
-  return renderItemStartMs(item);
+  // thinking 的 createdAt 是块**开始**的时刻,真正结束要加 thinkingDurationMs
+  // (与 workRunEndTs 同口径)。一个想了半小时以上的 thinking 块后面紧跟工具或正文时,
+  // 只看 createdAt 会把它误判成历史空洞、切开一个本来连续的 turn。
+  const startMs = renderItemStartMs(item);
+  if (startMs !== null && item.type === 'message' && item.message.role === 'thinking') {
+    return startMs + (item.message.thinkingDurationMs ?? 0);
+  }
+  return startMs;
 }
 
 export function insertForkOriginItem(

@@ -238,6 +238,39 @@ describe('历史窗口空洞 — 单次长工具', () => {
   });
 });
 
+// ── Scenario A6:thinking 时长要算进锚点(review #676 codex) ──────────────────
+
+describe('历史窗口空洞 — 长 thinking', () => {
+  it('A6. 想了 40 分钟的 thinking 块之后紧跟的动作不被判成空洞', () => {
+    // thinking 的 createdAt 是块「开始」的时刻，真正结束要加 thinkingDurationMs
+    // （workRunEndTs 早就是这个口径）。只看 createdAt 会把长 thinking 后紧跟的
+    // 工具调用误判成历史空洞，切开一个本来连续的 turn。
+    const messages: ChatMessage[] = [
+      mkUser('u1', '2026-07-25T10:00:00.000Z', '好好想一下这个设计'),
+      {
+        clientId: 'th1',
+        role: 'thinking',
+        content: 'Long deliberation',
+        createdAt: '2026-07-25T10:00:05.000Z',
+        thinkingDurationMs: 40 * 60_000,
+      },
+      // thinking 结束（10:40:05）之后 10 秒就动手 —— 不该被判成空洞。
+      mkTool('t1', '2026-07-25T10:40:15.000Z'),
+      mkResult('r1', 'tu-t1', '2026-07-25T10:40:30.000Z'),
+      mkAssistant('a1', '2026-07-25T10:41:00.000Z', '按这个方案做。'),
+    ];
+
+    const { items } = buildRenderItems(messages);
+    const grouped = groupWorkRuns(items, false);
+    const groups = workGroups(grouped);
+
+    // thinking 与其后的工具调用应在同一个工作组里。
+    expect(groups).toHaveLength(1);
+    expect(groupContains(groups[0], 'th1')).toBe(true);
+    expect(groupContains(groups[0], 't1')).toBe(true);
+  });
+});
+
 // ── Scenario B:正常连续 turn 不被误切 ───────────────────────────────────────
 
 describe('历史窗口空洞 — 正常 turn 不受影响', () => {

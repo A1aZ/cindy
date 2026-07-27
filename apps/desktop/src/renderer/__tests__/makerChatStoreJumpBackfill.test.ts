@@ -316,6 +316,40 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).not.toContain('rewound');
   });
 
+  it('J. 纯文本会话按 1:1 计入 item 预算,不会无限翻到几千个 item', async () => {
+    // review #676（codex）：预算按 DB 行数计时，纯文本对话（每条 user/assistant 各是
+    // 一个 render item）会被严重低估——2000 行就是 2000 个 item，照样冻结渲染。
+    // 现在按 role 折算：非工具行 1:1，所以文本会话会在 600 个 item 左右就停手。
+    const target = serverMessage({
+      id: 'way-back',
+      clientId: 'way-back',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    // 每页 100 条纯文本（满页 → 一直有更多），永远命不中目标。
+    let page = 0;
+    vi.mocked(listMessagesFor).mockImplementation(async () => {
+      const base = page++;
+      return Array.from({ length: 100 }, (_, i) =>
+        serverMessage({
+          id: `txt-${base}-${i}`,
+          clientId: `txt-${base}-${i}`,
+          role: i % 2 === 0 ? 'user' : 'assistant',
+          createdAt: new Date(
+            Date.UTC(2026, 6, 25, 12, 0, 0) - (base * 100 + i) * 60_000,
+          ).toISOString(),
+        }),
+      );
+    });
+
+    await makerChatStore.loadAroundMessageClientId(SID, 'way-back', { radius: 60 });
+
+    // 600 个 item 预算 ÷ 每页 100 个 item ≈ 6 页就该停，远小于按行数算的 20 页。
+    const calls = vi.mocked(listMessagesFor).mock.calls.length;
+    expect(calls).toBeGreaterThan(0);
+    expect(calls).toBeLessThanOrEqual(7);
+  });
+
   it('F. 让位时不释放别人的分页锁', async () => {
     // review #676（codex）：让位后 fallback 若写 isLoadingMore:false，就把仍在飞行的
     // loadOlderMessages 的锁提前释放了，下一次滚动/跳转会从同一游标再开一个请求。

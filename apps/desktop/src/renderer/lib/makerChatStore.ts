@@ -5596,34 +5596,50 @@ function loadOlderMessages(sessionId: string): void {
 }
 
 /**
- * 跳转补齐的翻页上限。每页 100 行(messages:list 的 MAX_LIMIT),最多 20 页 = 2000 行。
- * 触顶仍未覆盖目标时退回两个跳转入口原有的 around 窗口 merge,不无限翻。
+ * 跳转补齐的预算:按**预估 render item 数**计,不是 DB 行数。
  *
- * 为什么是 2000 而不是更多:MessageStream 的锚定渲染窗口
- * (visibleRenderItems 的 firstVisibleItemKey 分支)是 `slice(startIdx)` ——
- * 从锚点一直切到末尾、没有上界。补齐把 messages 变长后,跳转到很早的位置就会
- * 一次挂载"锚点 → 末尾"的全部 item。按 tool_use + tool_result 合成 tool_segment 的
- * 实测比例(render item ≈ messages / 5),2000 行 ≈ 400 个 item,是
- * RENDER_WINDOW_INITIAL_ITEMS(80)与单次 expandWindow 增量(80)的 5 倍量级 ——
- * 可感知但不冻结;6000 行 ≈ 1200 个 item 就会明显卡顿。
+ * 为什么要有预算:MessageStream 的锚定渲染窗口(visibleRenderItems 的
+ * firstVisibleItemKey 分支)是 `slice(startIdx)` —— 从锚点一直切到末尾、没有上界。
+ * 补齐把 messages 变长后,跳转到很早的位置就会一次挂载"锚点 → 末尾"的全部 item。
  *
- * 这是当前的约束手段,不是终态。彻底的解法是把锚定窗口做成双向有界 + 配套向下
- * 扩窗(与滚到顶时的 expandWindow 对称),那样补齐规模就不再受渲染体量牵制;它要
- * 联动改 MessageStream 的 startIdx / windowAtTop / isNearBottom / expandWindow /
+ * 为什么不按行数:行→item 的比例随会话内容剧烈变化。工具密集的会话里
+ * tool_use + tool_result 会被合成 tool_segment(几十行折成一个 item),而纯文本对话
+ * 里每条 user / assistant 各自就是一个 item —— 接近 1:1。按行数设预算会在文本密集
+ * 的会话里严重低估渲染体量(#676 review 指出:2000 行可能就是 2000 个 item,照样冻结)。
+ * 所以这里按 role 折算:非工具行按 1:1 计,工具行按 TOOL_ROWS_PER_ITEM 折算成段。
+ *
+ * 600 个 item 是 RENDER_WINDOW_INITIAL_ITEMS(80)的 7.5 倍量级:可感知但不冻结。
+ *
+ * 这仍是约束手段,不是终态。彻底的解法是把锚定窗口做成双向有界 + 配套向下扩窗
+ * (与滚到顶时的 expandWindow 对称),那样补齐规模就不再受渲染体量牵制;它要联动改
+ * MessageStream 的 startIdx / windowAtTop / isNearBottom / expandWindow /
  * handleScroll 五处派生,并且必须实机验证滚动手感,故留作独立改动。
- * 会话长度超过本上限时跳转仍会退回 around 窗口(窗口不连续),由渲染层的
+ * 会话超出本预算时跳转仍会退回 around 窗口(窗口不连续),由渲染层的
  * HISTORY_GAP_SPLIT_MS 守卫兜底,不会再折出跨空洞的假组。
  */
-const JUMP_BACKFILL_MAX_ROWS = 2000;
+const JUMP_BACKFILL_MAX_ITEMS = 600;
+/** 工具行折算比:一个 tool_segment 通常吃掉若干 tool_use + tool_result 行。 */
+const TOOL_ROWS_PER_ITEM = 4;
 const JUMP_BACKFILL_PAGE_SIZE = 100;
+
+/** 一页行数折算成大致的 render item 数(口径见 JUMP_BACKFILL_MAX_ITEMS)。 */
+function estimateRenderItemCount(rows: Message[]): number {
+  let toolRows = 0;
+  let otherRows = 0;
+  for (const row of rows) {
+    if (row.role === 'tool_use' || row.role === 'tool_result') toolRows++;
+    else otherRows++;
+  }
+  return otherRows + Math.ceil(toolRows / TOOL_ROWS_PER_ITEM);
+}
 /**
  * 请求次数安全上限,与行预算分开计。
  *
  * 不能只按"页数"计预算:device-link 会话的 messages:list 结果超过 relay 帧上限时,
  * sliceRemoteMessageWindowForChannel 只返回一个很短的前缀并打 remoteRowsTrimmed。
  * 那种分片每次只带回几行,若和整页共用同一个计数器,远程会话会在远未取到 2000 行时
- * 就耗尽预算、退回不连续的 around 窗口(#676 review)。所以行数走
- * JUMP_BACKFILL_MAX_ROWS,请求次数只作为防死循环的独立兜底。
+ * 就耗尽预算、退回不连续的 around 窗口(#676 review)。所以体量走
+ * JUMP_BACKFILL_MAX_ITEMS,请求次数只作为防死循环的独立兜底。
  */
 const JUMP_BACKFILL_MAX_REQUESTS = 80;
 
@@ -5679,11 +5695,11 @@ async function backfillHistoryUntil(
   if (getOrCreateState(sessionId).isLoadingMore) return 'busy';
 
   setState(sessionId, (s) => ({ ...s, isLoadingMore: true }));
-  let rowsFetched = 0;
+  let itemsFetched = 0;
   try {
     for (
       let request = 0;
-      request < JUMP_BACKFILL_MAX_REQUESTS && rowsFetched < JUMP_BACKFILL_MAX_ROWS;
+      request < JUMP_BACKFILL_MAX_REQUESTS && itemsFetched < JUMP_BACKFILL_MAX_ITEMS;
       request++
     ) {
       const state = getOrCreateState(sessionId);
@@ -5699,7 +5715,7 @@ async function backfillHistoryUntil(
         return 'exhausted';
       }
 
-      rowsFetched += rows.length;
+      itemsFetched += estimateRenderItemCount(rows);
       const mapped = mapServerMessages(rows);
       const oldestRow = oldestMessageRow(rows, 'newest-first');
       const hasMore = serverMessagePageHasMore(rows, JUMP_BACKFILL_PAGE_SIZE);
@@ -5722,7 +5738,7 @@ async function backfillHistoryUntil(
       // hasMoreMessages 此刻已确证为 false,调用方不得再改回 true。
       if (!hasMore) return 'exhausted';
     }
-    // 触到行预算或请求上限:上方还有历史,hasMore 保持原值让用户继续向上翻。
+    // 触到 item 预算或请求上限:上方还有历史,hasMore 保持原值让用户继续向上翻。
     return 'unavailable';
   } catch (err) {
     log.warn('backfillHistoryUntil failed', { sessionId, err: String(err) });

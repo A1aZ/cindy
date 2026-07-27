@@ -2083,6 +2083,13 @@ struct AgentIslandLayout: Equatable {
       return clampedWidth
     }
     let hiddenWidth = min(maxWidth, max(1, CGFloat(screenMetrics.notchWidth)))
+    // The hidden/basic classification stays anchored to the badge-independent basic
+    // width. Otherwise a persisted basic width silently falls below the hidden
+    // threshold once a wider badge enlarges `basicWidth`, collapsing the whole island.
+    let baseBasicWidth = min(
+      maxWidth,
+      max(hiddenWidth, defaultCompactWidth(hasSession: hasSession, screenMetrics: screenMetrics))
+    )
     let basicWidth = min(
       maxWidth,
       max(
@@ -2094,11 +2101,11 @@ struct AgentIslandLayout: Equatable {
         )
       )
     )
-    let gap = basicWidth - hiddenWidth
+    let gap = baseBasicWidth - hiddenWidth
     guard gap > 8 else {
       return hiddenWidth
     }
-    let hiddenThreshold = basicWidth - min(
+    let hiddenThreshold = baseBasicWidth - min(
       AgentIslandScreenMetricsConfig.compactHardwareHiddenPullDistance,
       max(24, gap * 0.5)
     )

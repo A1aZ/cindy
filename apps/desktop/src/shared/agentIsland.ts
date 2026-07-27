@@ -596,6 +596,16 @@ export function snapAgentIslandCompactHardwareContentWidth(input: {
     return input.clampedWidth;
   }
   const hiddenWidth = Math.min(input.maxWidth, Math.max(1, input.screenMetrics.notchWidth));
+  // hidden/basic 的分类必须锚在与徽标无关的 basic 宽度上。否则计数一变多、basic 宽度被撑大后,
+  // 用户此前停在 basic 的持久化宽度会突然落到 hidden 阈值以下,整个 compact 岛被收起。
+  const baseBasicWidth = Math.min(
+    input.maxWidth,
+    Math.max(hiddenWidth, getAgentIslandDefaultContentWidth({
+      expanded: false,
+      hasSession: input.hasSession,
+      screenMetrics: input.screenMetrics,
+    })),
+  );
   const basicWidth = Math.min(
     input.maxWidth,
     Math.max(hiddenWidth, getAgentIslandDefaultContentWidth({
@@ -605,11 +615,11 @@ export function snapAgentIslandCompactHardwareContentWidth(input: {
       pillSnapshot: input.pillSnapshot,
     })),
   );
-  const gap = basicWidth - hiddenWidth;
+  const gap = baseBasicWidth - hiddenWidth;
   if (gap <= 8) {
     return hiddenWidth;
   }
-  const hiddenThreshold = basicWidth - Math.min(
+  const hiddenThreshold = baseBasicWidth - Math.min(
     AGENT_ISLAND_COMPACT_HARDWARE_HIDDEN_PULL_DISTANCE,
     Math.max(24, gap * 0.5),
   );

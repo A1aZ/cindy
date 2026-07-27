@@ -278,4 +278,84 @@ describe('snapAgentIslandCompactHardwareContentWidth', () => {
       pillSnapshot: { activeSessionCount: 11, sessionCount: 12 },
     })).toBe(notchWidth);
   });
+
+  it('计数变多不会把此前停在 basic 的持久化宽度判成 hidden(灵动岛不塌缩)', () => {
+    // 回归:三位数徽标把 basicWidth 撑到 320,若 hidden 阈值也跟着抬到 272,
+    // 用户此前存下的 basic 宽度 264 会被判成 hidden,整个 compact 岛被收起。
+    const notchWidth = 200;
+    const persistedBasicWidth = notchWidth + AGENT_ISLAND_COMPACT_HARDWARE_ACTIVE_EXTRA_WIDTH;
+    const screenMetrics = { hasNotch: true, notchWidth };
+    for (const pillSnapshot of [
+      { activeSessionCount: 10, sessionCount: 100 },
+      { activeSessionCount: 11, sessionCount: 12 },
+      { activeSessionCount: 123, sessionCount: 456 },
+    ]) {
+      const widened = getAgentIslandDefaultContentWidth({
+        expanded: false,
+        hasSession: true,
+        screenMetrics,
+        pillSnapshot,
+      });
+      const resolved = snapAgentIslandCompactHardwareContentWidth({
+        desiredWidth: persistedBasicWidth,
+        clampedWidth: persistedBasicWidth,
+        maxWidth: 920,
+        hasSession: true,
+        screenMetrics,
+        pillSnapshot,
+      });
+      expect(resolved, `${pillSnapshot.activeSessionCount}/${pillSnapshot.sessionCount} 塌缩到了 ${resolved}`)
+        .not.toBe(notchWidth);
+      expect(resolved).toBe(widened);
+    }
+  });
+
+  it('hidden 阈值与旧实现一致:略窄于旧 basic 仍吸附到 basic,更窄才隐藏', () => {
+    const notchWidth = 200;
+    const screenMetrics = { hasNotch: true, notchWidth };
+    const pillSnapshot = { activeSessionCount: 11, sessionCount: 12 };
+    const widened = getAgentIslandDefaultContentWidth({
+      expanded: false,
+      hasSession: true,
+      screenMetrics,
+      pillSnapshot,
+    });
+    // 旧 basic 264、hidden 200、gap 64 → 阈值 264 - 32 = 232。
+    expect(snapAgentIslandCompactHardwareContentWidth({
+      desiredWidth: 240,
+      clampedWidth: 240,
+      maxWidth: 920,
+      hasSession: true,
+      screenMetrics,
+      pillSnapshot,
+    })).toBe(widened);
+    expect(snapAgentIslandCompactHardwareContentWidth({
+      desiredWidth: 230,
+      clampedWidth: 230,
+      maxWidth: 920,
+      hasSession: true,
+      screenMetrics,
+      pillSnapshot,
+    })).toBe(notchWidth);
+  });
+
+  it('不传 pillSnapshot 时吸附行为与旧实现完全一致', () => {
+    const notchWidth = 200;
+    const screenMetrics = { hasNotch: true, notchWidth };
+    const legacyBasic = notchWidth + AGENT_ISLAND_COMPACT_HARDWARE_ACTIVE_EXTRA_WIDTH;
+    for (const [desiredWidth, expected] of [
+      [legacyBasic, legacyBasic],
+      [240, legacyBasic],
+      [230, notchWidth],
+      [notchWidth, notchWidth],
+    ] as Array<[number, number]>) {
+      expect(snapAgentIslandCompactHardwareContentWidth({
+        desiredWidth,
+        clampedWidth: desiredWidth,
+        maxWidth: 920,
+        hasSession: true,
+        screenMetrics,
+      })).toBe(expected);
+    }
+  });
 });

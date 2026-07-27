@@ -167,7 +167,7 @@ export type VoiceTimelineEvent =
   | { type: 'stable_received'; runId: string; at: number; text: string }
   | { type: 'submitted'; runId: string; at: number; text: string; source: 'stable' | 'partial' }
   | { type: 'refine_requested'; runId: string; at: number; text: string }
-  | { type: 'refine_discarded'; runId: string; at: number; reason: 'final_text_changed' | 'stale_run' | 'cancelled' | 'no_submitted_text' | 'no_editable_range'; basedOnText: string }
+  | { type: 'refine_discarded'; runId: string; at: number; reason: 'final_text_changed' | 'stale_run' | 'cancelled' | 'no_submitted_text' | 'no_editable_range' | 'run_failed'; basedOnText: string }
   | { type: 'refine_accepted'; runId: string; at: number; basedOnText: string; refinedText: string; elapsedMs: number }
   | {
       type: 'refine_rejected';

@@ -90,6 +90,15 @@ export class VoiceInputController {
   private startedAt = 0;
   private latestPartial = '';
   private latestStable = '';
+  // The most recent transcript regardless of lane, plus which lane produced it.
+  // Salvage cannot prefer `latestStable`: every provider emits both lanes as the
+  // full aggregate transcript, so a partial arriving after a stable (the next
+  // utterance already in progress) is strictly more complete. Preferring the
+  // stable lane would drop that tail — exactly the loss this salvage exists to
+  // prevent. stop() keeps its own stable-first ordering: there the flush is what
+  // produces the authoritative final stable.
+  private latestTranscript = '';
+  private latestTranscriptSource: 'partial' | 'stable' = 'partial';
   private firstPartialSeen = false;
   private firstAudioChunkSeen = false;
   // Run-level speech activity separates an intentional silent stop from an
@@ -150,6 +159,8 @@ export class VoiceInputController {
     this.startedAt = performance.now();
     this.latestPartial = '';
     this.latestStable = '';
+    this.latestTranscript = '';
+    this.latestTranscriptSource = 'partial';
     this.firstPartialSeen = false;
     this.firstAudioChunkSeen = false;
     this.speechActivitySeen = false;
@@ -214,6 +225,19 @@ export class VoiceInputController {
     }
 
     const stable = await this.waitForStable(this.stableWaitMs);
+
+    // A failure that lands while stop() is in flight already ran salvage and
+    // moved the run to its terminal state. Providers can hide such a failure
+    // from this path: flushAudio() awaits an in-flight recover() but swallows
+    // its rejection, so the await above can resolve normally on a run that
+    // fail() has already finished. Continuing would submit the same transcript
+    // a second time and overwrite 'error' with 'refining'/'done'.
+    if (this.leftSubmittingState()) {
+      this.discardRefinement(runId, optimisticRefinement, 'run_failed');
+      await this.asr.stop();
+      return;
+    }
+
     const text = normalizeSubmittedText(stable || this.latestStable || this.latestPartial);
     const source = stable || this.latestStable ? 'stable' : 'partial';
 
@@ -256,6 +280,16 @@ export class VoiceInputController {
     }
   }
 
+  /**
+   * True when something moved this run out of the state stop() set on entry —
+   * fail() from a rejected recovery, or cancel(). Deliberately a method: inside
+   * stop(), the `state !== 'listening'` guard narrows this.state for the whole
+   * body, so an inline comparison against 'submitting' is a type error.
+   */
+  private leftSubmittingState(): boolean {
+    return this.state !== 'submitting';
+  }
+
   async cancel(): Promise<void> {
     if (!this.runId) return;
     const runId = this.runId;
@@ -286,6 +320,8 @@ export class VoiceInputController {
       case 'partial':
         if (this.state !== 'listening' && this.state !== 'submitting') return;
         this.latestPartial = event.text;
+        this.latestTranscript = event.text;
+        this.latestTranscriptSource = 'partial';
         this.resetStallCounters();
         if (this.state !== 'listening') return;
         if (!this.firstPartialSeen) {
@@ -303,6 +339,8 @@ export class VoiceInputController {
       case 'stable':
         if (this.state !== 'listening' && this.state !== 'submitting') return;
         this.latestStable = event.text;
+        this.latestTranscript = event.text;
+        this.latestTranscriptSource = 'stable';
         this.resetStallCounters();
         this.logger.record({
           type: 'stable_received',
@@ -539,7 +577,7 @@ export class VoiceInputController {
   private discardRefinement(
     runId: string,
     request: PendingRefinement | undefined,
-    reason: 'final_text_changed' | 'stale_run' | 'cancelled' | 'no_submitted_text' | 'no_editable_range',
+    reason: 'final_text_changed' | 'stale_run' | 'cancelled' | 'no_submitted_text' | 'no_editable_range' | 'run_failed',
   ): void {
     if (!request) return;
     this.logger.record({
@@ -590,7 +628,7 @@ export class VoiceInputController {
    */
   private salvageTranscript(failureMessage: string): boolean {
     if (this.transcriptEmitted) return false;
-    const text = normalizeSubmittedText(this.latestStable || this.latestPartial);
+    const text = normalizeSubmittedText(this.latestTranscript);
     if (!text) return false;
     const segment: SpeechSegment = {
       id: createVoiceInputId(),
@@ -612,7 +650,7 @@ export class VoiceInputController {
       runId: this.runId,
       at: Date.now(),
       text,
-      source: this.latestStable ? 'stable' : 'partial',
+      source: this.latestTranscriptSource,
       failureMessage,
     });
     return true;

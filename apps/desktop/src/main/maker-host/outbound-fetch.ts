@@ -241,20 +241,22 @@ async function resolveProxyTarget(
   return target;
 }
 
-function rememberProxyDecision(origin: string, raw: string | null): void {
+/** key 是 resolveKeyOf() 给的「origin + path」,不是单纯 origin —— per-path PAC 靠它。 */
+function rememberProxyDecision(resolveKey: string, raw: string | null): void {
   if (proxyDecisionCache.size >= ROUTING_POOL_MAX_ENTRIES) {
     // 与 routing wrapper 同量级即够(快照只服务重定向选路);满了整体重建,不做 LRU。
     proxyDecisionCache.clear();
   }
-  proxyDecisionCache.set(origin, { raw, expiresAt: Date.now() + PROXY_DECISION_TTL_MS });
+  proxyDecisionCache.set(resolveKey, { raw, expiresAt: Date.now() + PROXY_DECISION_TTL_MS });
 }
 
 /**
- * 同步取该 origin 的代理决策:`{ known: false }` = 快照里没有(调用方自行决定兜底),
- * `{ known: true, target: null }` = 直连,否则给出代理目标。不发起任何异步解析。
+ * 同步取某个解析 key(**origin + path**,不是单纯 origin)的代理决策:
+ * `{ known: false }` = 快照里没有(调用方自行决定兜底),`{ known: true, target: null }`
+ * = 直连,否则给出代理目标。不发起任何异步解析。
  */
-function syncProxyDecision(origin: string): { known: boolean; target: OutboundProxyTarget | null } {
-  const hit = proxyDecisionCache.get(origin);
+function syncProxyDecision(resolveKey: string): { known: boolean; target: OutboundProxyTarget | null } {
+  const hit = proxyDecisionCache.get(resolveKey);
   if (!hit || hit.expiresAt <= Date.now()) return { known: false, target: null };
   if (!hit.raw) return { known: true, target: null };
   return { known: true, target: parseOutboundProxyUrl(hit.raw) };
@@ -686,7 +688,13 @@ async function followRedirectsThroughProxy(
     } catch {
       return res; // Location 非法:交回调用方按非 ok 处理,不自造异常
     }
-    if (res.status === 303 || ((res.status === 301 || res.status === 302) && method !== 'GET' && method !== 'HEAD')) {
+    // fetch 规范的 method 改写只有两种情形:301/302 上的 **POST**,以及 303 上的
+    // 非 GET/HEAD。其余(301 上的 PUT/PATCH、303 上的 HEAD、307/308 全部)保留原方法
+    // 与 body(review 2026-07-28 P1:之前写宽了,PUT 会丢方法和 body、HEAD 会变 GET)。
+    const rewriteToGet =
+      ((res.status === 301 || res.status === 302) && method === 'POST') ||
+      (res.status === 303 && method !== 'GET' && method !== 'HEAD');
+    if (rewriteToGet) {
       method = 'GET';
       body = undefined;
       headers.delete('content-type');

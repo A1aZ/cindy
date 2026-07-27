@@ -384,6 +384,30 @@ describe('outboundFetch', () => {
     expect(headers.has('content-type')).toBe(false);
   });
 
+  it('only rewrites POST on 301/302 and never rewrites HEAD on 303', async () => {
+    resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
+    // 301 + PUT:fetch 规范只把 POST 转 GET,PUT 必须带着方法和 body 继续。
+    undiciState.fetch
+      .mockResolvedValueOnce(redirectResponse(301, 'https://api.example.com/moved') as never)
+      .mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers(), body: null } as never);
+    await outboundFetch('https://api.example.com/old', { method: 'PUT', body: 'payload' });
+    const [, put] = undiciState.fetch.mock.calls[1] as unknown as [
+      string,
+      { method: string; body?: Buffer },
+    ];
+    expect(put.method).toBe('PUT');
+    expect(put.body?.toString()).toBe('payload');
+
+    // 303 + HEAD:探测请求不该变成 GET。
+    undiciState.fetch.mockReset();
+    undiciState.fetch
+      .mockResolvedValueOnce(redirectResponse(303, 'https://api.example.com/probe2') as never)
+      .mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers(), body: null } as never);
+    await outboundFetch('https://api.example.com/probe', { method: 'HEAD' });
+    const [, head] = undiciState.fetch.mock.calls[1] as unknown as [string, { method: string }];
+    expect(head.method).toBe('HEAD');
+  });
+
   it('replays method and body on 307 and stops after too many hops', async () => {
     resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
     undiciState.fetch.mockImplementation(

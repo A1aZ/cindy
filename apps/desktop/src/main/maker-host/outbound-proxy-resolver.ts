@@ -77,21 +77,40 @@ interface CachedResolution {
   expiresAt: number;
 }
 
+/**
+ * 缓存条目上限。调用方可以按「origin + path」解析(PAC 允许按路径判定),条目数因此
+ * 与被访问的路径数同阶;满了整体重建(下一轮按 TTL 重新解析),不做 LRU。
+ */
+const SYSTEM_PROXY_CACHE_MAX_ENTRIES = 256;
+
 const systemProxyCache = new Map<string, CachedResolution>();
 // 每个 origin 上次记录过日志的生效值;仅在变化时记 info,避免 per-request 刷日志。
 const lastLoggedByOrigin = new Map<string, string>();
 
+/** 日志维度恒为 origin:path 可能带业务语义,且按 path 去重会把日志刷成噪音。 */
+function originForLog(upstreamUrl: string): string {
+  try {
+    const u = new URL(upstreamUrl);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return upstreamUrl;
+  }
+}
+
 function logIfChanged(upstreamUrl: string, source: 'env' | 'system', value: string | null): void {
+  const origin = originForLog(upstreamUrl);
   // env 值可能是 http://user:pass@host 形态,持久化日志只允许脱敏形态(scheme://host:port)。
   const rendered = value === null ? 'direct' : redactProxyUrlForLog(value);
-  if (lastLoggedByOrigin.get(upstreamUrl) === `${source}:${rendered}`) return;
-  lastLoggedByOrigin.set(upstreamUrl, `${source}:${rendered}`);
-  log.info('outbound proxy resolved', { upstream: upstreamUrl, source, proxy: rendered });
+  if (lastLoggedByOrigin.get(origin) === `${source}:${rendered}`) return;
+  if (lastLoggedByOrigin.size >= SYSTEM_PROXY_CACHE_MAX_ENTRIES) lastLoggedByOrigin.clear();
+  lastLoggedByOrigin.set(origin, `${source}:${rendered}`);
+  log.info('outbound proxy resolved', { upstream: origin, source, proxy: rendered });
 }
 
 async function resolveViaSystemProxy(upstreamUrl: string): Promise<string | null> {
   const cached = systemProxyCache.get(upstreamUrl);
   if (cached && cached.expiresAt > Date.now()) return cached.value;
+  if (systemProxyCache.size >= SYSTEM_PROXY_CACHE_MAX_ENTRIES) systemProxyCache.clear();
   // app 未 ready 时 session 不可用;此时按直连处理(splash 极早期,正常请求不会赶在这)。
   if (!app.isReady()) return null;
   const ses = session.defaultSession;
@@ -101,7 +120,7 @@ async function resolveViaSystemProxy(upstreamUrl: string): Promise<string | null
     value = parseChromiumProxyResult(await ses.resolveProxy(upstreamUrl));
   } catch (err) {
     log.warn('system proxy resolution failed — using direct connection', {
-      upstream: upstreamUrl,
+      upstream: originForLog(upstreamUrl),
       err: err instanceof Error ? err.message : String(err),
     });
     value = null;

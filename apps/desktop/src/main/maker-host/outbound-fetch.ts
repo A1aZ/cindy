@@ -128,9 +128,27 @@ function parseUpstream(url: string): URL | null {
   }
 }
 
-/** 上游 origin 串(协议 + host),resolver 与两级缓存共用的 key。 */
+/** 上游 origin 串(协议 + host)—— 日志与 loopback 判定用。 */
 function originOf(upstream: URL): string {
   return `${upstreamProtocol(upstream)}//${upstream.host}`;
+}
+
+/**
+ * 送给 resolver / 两级缓存的 key:origin + path,**不带 query 与 fragment**。
+ *
+ * 带 path 是因为 PAC 的 `FindProxyForURL(url, host)` 允许按路径判定 —— 只送 origin 会
+ * 让同一 origin 上所有路径共用 `/` 的结论,配置了「某内部路径直连、其余走代理」的用户
+ * 会被判错(review 2026-07-27 P1)。不带 query 是纪律:query 常带令牌等敏感参数,而它
+ * 会进入 resolver 的缓存 key;按 path 已经覆盖了现实中的 PAC 写法。
+ */
+function resolveKeyOf(upstream: URL): string {
+  return `${originOf(upstream)}${upstream.pathname}`;
+}
+
+/** 从 dispatch() 的 (origin, path) 拼出同一个 key —— 重定向选路要查同一份快照。 */
+function resolveKeyFromParts(origin: string, path: string | undefined): string {
+  const pathname = (path ?? '/').split('?')[0]?.split('#')[0] || '/';
+  return `${origin}${pathname}`;
 }
 
 /**
@@ -149,13 +167,17 @@ function abortErrorOf(signal: AbortSignal): unknown {
  * 带两道保险地取代理串:调用方 abort 立刻抛(与 fetch 的取消语义一致),解析自身
  * 超时则按直连处理。
  */
-async function resolveRawProxy(origin: string, signal?: AbortSignal): Promise<string | null> {
+async function resolveRawProxy(
+  resolveKey: string,
+  origin: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
   if (signal?.aborted) throw abortErrorOf(signal);
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
   try {
     return await Promise.race<string | null>([
-      Promise.resolve(resolveDesktopOutboundProxy(origin)).then((v) => v ?? null),
+      Promise.resolve(resolveDesktopOutboundProxy(resolveKey)).then((v) => v ?? null),
       new Promise<string | null>((resolve) => {
         timer = setTimeout(() => {
           warnOnce(origin, 'resolution-timed-out', { upstream: origin });
@@ -181,11 +203,12 @@ async function resolveProxyTarget(
   signal?: AbortSignal,
 ): Promise<OutboundProxyTarget | null> {
   if (isLoopbackHostname(upstream.hostname)) return null;
-  // resolver 按 origin 解析(它自己带缓存与「变化才记日志」);query 不参与,也不该进日志。
+  // resolver 拿 origin + path(PAC 可按路径判定);日志与告警只用 origin。
+  const resolveKey = resolveKeyOf(upstream);
   const originUrl = originOf(upstream);
   let raw: string | null | undefined;
   try {
-    raw = await resolveRawProxy(originUrl, signal);
+    raw = await resolveRawProxy(resolveKey, originUrl, signal);
   } catch (err) {
     // 取消要如实向上抛(否则调用方的 abort 变成静默直连请求)。
     if (signal?.aborted) throw err;
@@ -196,7 +219,7 @@ async function resolveProxyTarget(
     });
     return null;
   }
-  rememberProxyDecision(originUrl, raw ?? null);
+  rememberProxyDecision(resolveKey, raw ?? null);
   if (!raw) return null;
   const target = parseOutboundProxyUrl(raw);
   if (!target) {
@@ -303,13 +326,14 @@ function routingPoolGet(key: string, create: () => Dispatcher): Dispatcher {
  * connector 做 TLS(`httpSocket` 选项)—— TLS 端到端,SNI / 证书校验沿用 undici 逻辑,
  * 代理只见密文。http 上游没有 TLS 这一步,握手好的 socket 直接就是那条 TCP 连接。
  */
-function createSocks5Connector(proxy: OutboundProxyTarget): buildConnector.connector {
+function createSocks5Connector(
+  proxy: OutboundProxyTarget,
+  connectOptions: Record<string, unknown>,
+): buildConnector.connector {
   // BuildOptions 的类型联合里 TcpNetConnectOpts 要求 port,但 connector 的 port 是
   // per-request 从 options 取的(建 connector 时给不了);undici 运行时只读我们传的这
-  // 一个字段,断言收在这一行。
-  const tlsConnector = buildConnector({
-    autoSelectFamilyAttemptTimeout: CONNECT_ATTEMPT_TIMEOUT_MS,
-  } as buildConnector.BuildOptions);
+  // 几个字段,断言收在这一行。
+  const tlsConnector = buildConnector(connectOptions as buildConnector.BuildOptions);
   return (options, callback) => {
     const protocol = options.protocol === 'https:' ? 'https:' : 'http:';
     const port = Number(options.port) || defaultPort(protocol);
@@ -327,23 +351,51 @@ function createSocks5Connector(proxy: OutboundProxyTarget): buildConnector.conne
   };
 }
 
+/**
+ * 合并握手配置:调用方给的 `agentOptions.connect` 优先,只在它没给某项时补默认。
+ * 无条件覆盖会让调用方的调优失效(voice-input 允许用 env 调
+ * autoSelectFamilyAttemptTimeout),而该字段又参与 dispatcherKey —— 那就白白多分一个
+ * 语义相同的池(review 2026-07-27)。调用方传的是自定义 connector 函数时原样保留。
+ *
+ * @internal 导出仅供单测断言合并规则。
+ */
+export function resolveConnectOptions(
+  agentOptions: UndiciAgent.Options | undefined,
+): Record<string, unknown> | UndiciAgent.Options['connect'] {
+  const callerConnect = agentOptions?.connect;
+  if (typeof callerConnect === 'function') return callerConnect;
+  return {
+    autoSelectFamilyAttemptTimeout: CONNECT_ATTEMPT_TIMEOUT_MS,
+    ...(callerConnect && typeof callerConnect === 'object'
+      ? (callerConnect as Record<string, unknown>)
+      : {}),
+  };
+}
+
 function createProxyDispatcher(
   proxy: OutboundProxyTarget,
   protocol: 'http:' | 'https:',
   agentOptions: UndiciAgent.Options | undefined,
 ): Dispatcher {
   log.debug('creating outbound proxy dispatcher', { proxy: proxy.url, protocol });
+  const connect = resolveConnectOptions(agentOptions);
   if (proxy.kind === 'socks5') {
+    // SOCKS5 隧道必须用我们自己的 connector(先握手再在裸 socket 上做 TLS),调用方若
+    // 自带 connector 无法复用 —— 那时 TLS 段退回默认握手参数。
+    const tlsOptions =
+      typeof connect === 'function'
+        ? { autoSelectFamilyAttemptTimeout: CONNECT_ATTEMPT_TIMEOUT_MS }
+        : ((connect ?? {}) as Record<string, unknown>);
     return new UndiciAgent({
       ...agentOptions,
-      connect: createSocks5Connector(proxy),
+      connect: createSocks5Connector(proxy, tlsOptions),
     });
   }
   return new ProxyAgent({
     ...agentOptions,
     uri: proxy.url,
     ...(proxy.authHeader ? { token: proxy.authHeader } : {}),
-    connect: { autoSelectFamilyAttemptTimeout: CONNECT_ATTEMPT_TIMEOUT_MS },
+    connect,
   });
 }
 
@@ -375,7 +427,8 @@ interface OriginRoutingDispatcher extends Dispatcher {
 
 /** wrapper 的首跳出口描述 —— 存的是「怎么取」而不是 dispatcher 实例本身,见下方注释。 */
 interface PrimaryRoute {
-  origin: string;
+  /** 首跳的解析 key(origin + path),与快照 / resolver 同一维度。 */
+  resolveKey: string;
   proxy: OutboundProxyTarget;
   protocol: 'http:' | 'https:';
 }
@@ -409,18 +462,26 @@ function routingDispatcherCtor(): OriginRoutingDispatcherCtor {
     override async destroy(): Promise<void> {}
 
     pickForUrlForTest(url: string): Dispatcher {
-      return this.pick({ origin: url, path: '/', method: 'GET' });
+      // 与 undici 的 dispatch 一致:origin 与 path 分开给。
+      const parsed = parseUpstream(url);
+      return this.pick({
+        origin: parsed ? originOf(parsed) : url,
+        path: parsed ? `${parsed.pathname}${parsed.search}` : '/',
+        method: 'GET',
+      });
     }
 
     private pick(options: Dispatcher.DispatchOptions): Dispatcher {
       const target = this.targetUrl(options);
       if (!target) return this.forProxy(this.primary.proxy, this.primary.protocol);
       const origin = originOf(target);
-      if (origin === this.primary.origin) {
+      if (isLoopbackHostname(target.hostname)) return getDirectAgent();
+      // 快照与 resolver 同 key(origin + path):PAC 可按路径判定,只比 origin 会串味。
+      const key = resolveKeyFromParts(origin, options.path);
+      if (key === this.primary.resolveKey) {
         return this.forProxy(this.primary.proxy, this.primary.protocol);
       }
-      if (isLoopbackHostname(target.hostname)) return getDirectAgent();
-      const decision = syncProxyDecision(origin);
+      const decision = syncProxyDecision(key);
       if (!decision.known) {
         // 后台补解析(它会写进快照),本跳沿用首跳出口。
         void resolveProxyTarget(target).catch(() => undefined);
@@ -463,17 +524,17 @@ export async function resolveOutboundDispatcher(
   const proxy = await resolveProxyTarget(upstream, opts.signal);
   if (!proxy) return opts.fallback;
   const protocol = upstreamProtocol(upstream);
-  const origin = originOf(upstream);
+  const resolveKey = resolveKeyOf(upstream);
   const key = dispatcherKey(proxy, protocol, opts.agentOptions);
   // 先把底层池建起来(首跳大概率立刻要用),wrapper 里仍按 key 现取,所以底层被逐出
   // 重建也不会留下 stale 引用。
   poolGet(key, () => createProxyDispatcher(proxy, protocol, opts.agentOptions));
-  // 包装按 (底层 key, 首跳 origin) 缓存:同一上游反复请求拿到同一个实例;
+  // 包装按 (底层 key, 首跳解析 key) 缓存:同一上游反复请求拿到同一个实例;
   // 底层连接池仍跨 origin 共享(wrapper 本身不持有连接)。
   const Routing = routingDispatcherCtor();
   return routingPoolGet(
-    `${key}|${origin}`,
-    () => new Routing({ origin, proxy, protocol }, opts.agentOptions),
+    `${key}|${resolveKey}`,
+    () => new Routing({ resolveKey, proxy, protocol }, opts.agentOptions),
   );
 }
 

@@ -56,6 +56,7 @@ import {
   outboundFetch,
   outboundUndiciFetch,
   resetOutboundFetchStateForTest,
+  resolveConnectOptions,
   resolveOutboundDispatcher,
 } from '../outbound-fetch.js';
 
@@ -94,11 +95,45 @@ describe('resolveOutboundDispatcher', () => {
     expect(resolverState.resolve).not.toHaveBeenCalled();
   });
 
-  it('resolves per origin (no query/path) and builds a ProxyAgent for http proxies', async () => {
+  it('resolves per origin + path (query stripped) and builds a ProxyAgent for http proxies', async () => {
     resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
     const dispatcher = await resolveOutboundDispatcher('https://platform.claude.com/v1/oauth/token?x=1');
     expect(pick(dispatcher, 'https://platform.claude.com/v1/oauth/token')).toBeInstanceOf(ProxyAgent);
-    expect(resolverState.resolve).toHaveBeenCalledWith('https://platform.claude.com');
+    // PAC 的 FindProxyForURL 可以按路径判定 → 必须把 path 带上;query 可能含令牌,剥掉。
+    expect(resolverState.resolve).toHaveBeenCalledWith('https://platform.claude.com/v1/oauth/token');
+  });
+
+  it('keeps per-path PAC decisions apart on the same origin', async () => {
+    // 「/internal 直连、其余走代理」这类 PAC 配置必须逐路径生效。
+    resolverState.resolve.mockImplementation(async (target: string) =>
+      target.endsWith('/internal') ? null : 'http://127.0.0.1:7890',
+    );
+    const proxied = await resolveOutboundDispatcher('https://api.example.com/public');
+    expect(proxied).toBeDefined();
+    await expect(resolveOutboundDispatcher('https://api.example.com/internal')).resolves.toBeUndefined();
+    // 重定向选路也查同一份「origin + path」快照,不会把 /internal 拖进代理。
+    expect(pick(proxied, 'https://api.example.com/internal')).not.toBeInstanceOf(ProxyAgent);
+  });
+
+  it('lets caller connect tuning win over the built-in default', async () => {
+    // 合并规则(纯函数):默认值只补缺,调用方给的值优先,自定义 connector 原样保留。
+    expect(resolveConnectOptions(undefined)).toEqual({ autoSelectFamilyAttemptTimeout: 2500 });
+    expect(
+      resolveConnectOptions({ connect: { autoSelectFamilyAttemptTimeout: 9999 } }),
+    ).toEqual({ autoSelectFamilyAttemptTimeout: 9999 });
+    expect(resolveConnectOptions({ connect: { maxCachedSessions: 0 } })).toEqual({
+      autoSelectFamilyAttemptTimeout: 2500,
+      maxCachedSessions: 0,
+    });
+    const connector = (): void => {};
+    expect(resolveConnectOptions({ connect: connector as never })).toBe(connector);
+
+    // 端到端:带自定义 connect 调优时仍建得出 ProxyAgent。
+    resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
+    const dispatcher = await resolveOutboundDispatcher('https://chatgpt.com/backend-api/codex', {
+      agentOptions: { connect: { autoSelectFamilyAttemptTimeout: 9999 } },
+    });
+    expect(pick(dispatcher, 'https://chatgpt.com/backend-api/codex')).toBeInstanceOf(ProxyAgent);
   });
 
   it('builds a plain Agent with a socks5 connector for socks5 proxies', async () => {
@@ -252,7 +287,7 @@ describe('outboundFetch', () => {
   it('accepts URL inputs', async () => {
     resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
     await outboundFetch(new URL('https://api.anthropic.com/v1/models'));
-    expect(resolverState.resolve).toHaveBeenCalledWith('https://api.anthropic.com');
+    expect(resolverState.resolve).toHaveBeenCalledWith('https://api.anthropic.com/v1/models');
   });
 
   it('normalizes global FormData bodies for the npm-undici proxy path', async () => {
@@ -283,8 +318,8 @@ describe('outboundFetch', () => {
 
   it('follows redirects itself, re-resolving the proxy for every hop', async () => {
     // 首跳走代理;第二跳的目标 host 在快照里是「直连」→ 不能再被塞进代理隧道。
-    resolverState.resolve.mockImplementation(async (origin: string) =>
-      origin === 'https://oauth.example.com' ? 'http://127.0.0.1:7890' : null,
+    resolverState.resolve.mockImplementation(async (target: string) =>
+      target.startsWith('https://oauth.example.com') ? 'http://127.0.0.1:7890' : null,
     );
     undiciState.fetch
       .mockResolvedValueOnce(redirectResponse(302, 'https://cdn.example.net/final') as never)
@@ -308,7 +343,7 @@ describe('outboundFetch', () => {
     expect(secondUrl).toBe('https://cdn.example.net/final');
     // 第二跳解析为直连 → 不带 dispatcher(走 undici 自己的全局池)。
     expect(secondInit.dispatcher).toBeUndefined();
-    expect(resolverState.resolve).toHaveBeenCalledWith('https://cdn.example.net');
+    expect(resolverState.resolve).toHaveBeenCalledWith('https://cdn.example.net/final');
   });
 
   it('turns 303 into GET, drops the body, and never replays credentials cross-origin', async () => {
@@ -445,7 +480,7 @@ describe('createOutboundHttpAgent', () => {
     resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
     const agent = await createOutboundHttpAgent('wss://api.elevenlabs.io/v1/x');
     expect(agent).toBeInstanceOf(TunnelingHttpsAgent);
-    expect(resolverState.resolve).toHaveBeenCalledWith('https://api.elevenlabs.io');
+    expect(resolverState.resolve).toHaveBeenCalledWith('https://api.elevenlabs.io/v1/x');
     agent?.destroy();
   });
 

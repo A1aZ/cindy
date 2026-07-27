@@ -594,6 +594,13 @@ export class DeviceLinkClient {
         authorization: `Bearer ${token}`,
       });
     } catch (err) {
+      // 异步工厂可能在更新的一轮 connect 已经起来之后才 reject —— 那是过期尝试的失败,
+      // 不能据此改状态或排重连(scheduleReconnect 的 connect() 会顶掉那条更新的、
+      // 可能健康的连接)。与工厂成功分支用同一道 stopped/epoch 闸(review 2026-07-27 P1)。
+      if (this.stopped || epoch !== this.connEpoch) {
+        this.log.debug?.('stale createWebSocket rejection ignored', err);
+        return;
+      }
       this.log.warn('createWebSocket failed', err);
       this.scheduleReconnect();
       return;

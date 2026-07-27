@@ -2835,8 +2835,9 @@ export class CodexAgent extends BaseAgent {
     let pendingTightenInterrupt = false;
     /**
      * 最近一次 send 的 turn 是否以无人值守策略发射 (覆盖在飞与运行中两个阶段)。
-     * auto_review / never 发射的 turn 在收紧时需要中断; user reviewer 发射的 turn
-     * 审批请求照常流经本地、收紧即时生效,即使期间 UI 短暂切过宽松档也不得误杀。
+     * Auto (auto_review 或 untrusted 降级) / never 发射的 turn 在收紧时需要中断;
+     * user reviewer 发射的 turn 审批请求照常流经本地、收紧即时生效,即使期间 UI
+     * 短暂切过宽松档也不得误杀。
      */
     let turnLaunchedUnattended = false;
     /**
@@ -4036,10 +4037,10 @@ export class CodexAgent extends BaseAgent {
         // effort 同理: 协议层只能在 turn/start 透传 (v2.rs:5800), thread/start 不接;
         // 用户在 session 创建时选的 effort 也是靠 first turn/start 这里传过去才生效。
         const turnWorkspaceConfig = currentTurnWorkspaceConfig();
-        const { approvalPolicy, approvalsReviewer } = turnWorkspaceConfig;
-        // 记录本 turn 是否由无人值守策略发射。Auto-review 也需要在切回 Ask
-        // 时中断当前 turn,避免 reviewer 继续替用户批准新的越界操作。
-        turnLaunchedUnattended = approvalPolicy === 'never' || approvalsReviewer === 'auto_review';
+        const { approvalPolicy } = turnWorkspaceConfig;
+        // 记录本 turn 是否由无人值守策略发射。Auto 即使因路由能力降级为
+        // untrusted,切回 Ask 时也必须中断当前 turn,避免旧策略继续执行 trusted 操作。
+        turnLaunchedUnattended = mutablePermissionMode === 'auto' || approvalPolicy === 'never';
         let turnInput: TurnStartParams['input'];
         try {
           turnInput = await toTurnInput(message.content);
@@ -4445,8 +4446,8 @@ export class CodexAgent extends BaseAgent {
         if (!tightensCurrentTurn) {
           pendingTightenInterrupt = false;
         } else if (!closed && turnLaunchedUnattended) {
-          // 只中断 auto_review / never 发射的 turn; user reviewer 发射的 turn 审批请求
-          // 照常流经本地、收紧即时生效,期间 UI 短暂切过宽松档不构成中断理由。
+          // 只中断 Auto (含 untrusted 降级) / never 发射的 turn; user reviewer 发射的
+          // turn 审批请求照常流经本地、收紧即时生效,期间 UI 短暂切过宽松档不构成中断理由。
           if (currentTurnId !== null) {
             await interruptTurnForPermissionTighten(currentTurnId);
           } else if (isTurnStartPending) {

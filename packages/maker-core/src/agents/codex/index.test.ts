@@ -3520,7 +3520,7 @@ describe('CodexAgent MCP thread context hooks', () => {
     await handle.close();
   });
 
-  it('falls back to untrusted approvals on the XD gateway instead of routing the hidden reviewer model', async () => {
+  it('falls back to untrusted approvals on XD and interrupts the active turn when tightened to Ask', async () => {
     const agent = new CodexAgent(createDeps());
     const host = installFakeHost(agent, (method) => {
       if (method === Method.TurnStart) {
@@ -3558,6 +3558,12 @@ describe('CodexAgent MCP thread context hooks', () => {
       sandboxPolicy: { type: 'workspaceWrite' },
     });
     expect(turnParams).not.toHaveProperty('approvalsReviewer');
+    if (!handle.setPermissionMode) throw new Error('expected setPermissionMode');
+    await handle.setPermissionMode('ask');
+    expect(host.request).toHaveBeenCalledWith(Method.TurnInterrupt, {
+      threadId: 'start-thread-id',
+      turnId: 'turn-xd-auto-fallback',
+    });
     await handle.close();
   });
 

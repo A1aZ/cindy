@@ -873,6 +873,14 @@ export function buildRenderItems(
   let pendingResultMap = new Map<string, string>();
   // 段内 tool_use clientId → tool_result.createdAt(ms),见 resultTsMap 注释。
   let pendingResultTsMap = new Map<string, number>();
+  // 段内已见过的最晚**结束**时间(调用发起时刻与其 tool_result 时间取 max)。空洞判定用它,
+  // 增量维护而不是每条调用重扫一遍 pendingToolCalls —— 工具密集的长 turn 里那是 O(n²)
+  // (#676 review copilot)。flushSegment 时复位。
+  let pendingSegmentEndMs: number | null = null;
+  const notePendingSegmentEnd = (ms: number | null | undefined): void => {
+    if (ms === null || ms === undefined || !Number.isFinite(ms)) return;
+    pendingSegmentEndMs = pendingSegmentEndMs === null ? ms : Math.max(pendingSegmentEndMs, ms);
+  };
   // 状态判定专用:tool_result 已到达的 tool_use(含被 shouldHideToolResult
   // 隐藏、不进 resultMap 的空结果)。
   let pendingSettledIds = new Set<string>();
@@ -930,6 +938,7 @@ export function buildRenderItems(
     pendingToolCalls = [];
     pendingResultMap = new Map<string, string>();
     pendingResultTsMap = new Map<string, number>();
+    pendingSegmentEndMs = null;
     pendingSettledIds = new Set<string>();
     pendingSegmentMedia = [];
     pendingSegmentGhostCards = [];
@@ -1157,41 +1166,33 @@ export function buildRenderItems(
         // 而 groupWorkRuns 的空洞守卫只看段首时间、发现不了段内部的跳变。所以在段内
         // 也按同一阈值切开,让「已工作 Xs」的时长和分组都落在真实连续的动作上。
         //
-        // 锚点用上一条调用的**结束**时间:max(它的 tool_use.createdAt, 它的
-        // tool_result.createdAt)。用 start 会把"上一条工具跑了半小时以上、结果刚回来就
-        // 紧接着下一次调用"的连续长任务误判成空洞、把段切碎(#676 review)。
-        // 锚点取**段内所有调用**的结束时间最大值,不能只看紧邻的上一条:并行工具可以乱序
-        // 完成(A 跑 40 分钟、B 紧随其后一分钟就回、C 在 A 结束后立刻发起),只比 B 的早结束
-        // 时间会把 C 误判成空洞、把一段连续工作切碎,段产物(tool_media)也跟着挪到错误的
-        // 边界上(#676 review codex P1)。groupWorkRuns 的 prevEndMs 早就是单调取 max 的,
-        // 这里补齐同一口径。
+        // 锚点是 pendingSegmentEndMs —— 段内所有调用结束时间的**最大值**,不能只看紧邻的
+        // 上一条:并行工具会乱序完成(A 跑 40 分钟还没回,B 紧随其后一分钟就结束,这时又发起
+        // C),只比 B 的早结束时间会把 C 误判成空洞、把一段连续工作切碎,段产物(tool_media)
+        // 也跟着挪到错误的边界上(#676 review codex P1)。groupWorkRuns 的 prevEndMs 早就是
+        // 单调取 max 的,这里补齐同一口径。
         if (pendingToolCalls.length > 0) {
-          let segmentEndMs: number | null = null;
-          for (const call of pendingToolCalls) {
-            const callMs = messageTs(call);
-            if (callMs !== null) segmentEndMs = Math.max(segmentEndMs ?? callMs, callMs);
-            const resultMs = pendingResultTsMap.get(call.clientId);
-            if (resultMs !== undefined) {
-              segmentEndMs = Math.max(segmentEndMs ?? resultMs, resultMs);
-            }
-          }
           const currentCallMs = messageTs(msg);
           if (
-            segmentEndMs !== null &&
+            pendingSegmentEndMs !== null &&
             currentCallMs !== null &&
-            currentCallMs - segmentEndMs > HISTORY_GAP_SPLIT_MS
+            currentCallMs - pendingSegmentEndMs > HISTORY_GAP_SPLIT_MS
           ) {
             flushSegment();
           }
         }
         pendingToolCalls.push(msg);
+        notePendingSegmentEnd(messageTs(msg));
         if (mainResult !== undefined) {
           // result 到了就算 settled,即便内容被隐藏不进 resultMap。
           pendingSettledIds.add(msg.clientId);
           // 时间戳与内容是否被隐藏无关:段的结束时间靠它算(见 resultTsMap 注释)。
           const resultTs =
             typeof msg.toolUseId === 'string' ? resultTsByToolUseId.get(msg.toolUseId) : undefined;
-          if (resultTs !== undefined) pendingResultTsMap.set(msg.clientId, resultTs);
+          if (resultTs !== undefined) {
+            pendingResultTsMap.set(msg.clientId, resultTs);
+            notePendingSegmentEnd(resultTs);
+          }
         }
         if (mainResult !== undefined && !shouldHideToolResult(toolName, mainResult)) {
           pendingResultMap.set(msg.clientId, mainResult);
@@ -1213,6 +1214,7 @@ export function buildRenderItems(
           // adjacency 配对同样要留下 result 时间戳(段结束时间用)。
           const adjacencyTs = Date.parse(messages[j].createdAt ?? '');
           if (Number.isFinite(adjacencyTs)) {
+            notePendingSegmentEnd(adjacencyTs);
             const known = pendingResultTsMap.get(msg.clientId);
             if (known === undefined || adjacencyTs > known) {
               pendingResultTsMap.set(msg.clientId, adjacencyTs);
@@ -1528,12 +1530,22 @@ function workRunEndTs(it: WorkChildItem): number | null {
   return renderItemEndMs(it);
 }
 
+/**
+ * 没有终结正文可用时,run 的结束时间 = **所有子项结束时间的最大值**。
+ *
+ * 不能"从后往前找第一个有时间的子项就返回":并行的 Agent/Task 会乱序完成(A 跑到 40 分钟,
+ * B 紧随其后 2 分钟就结束),末尾那张卡的结束时间可能远早于整段真正的结束。被空洞收尾的组
+ * 正好走这条 fallback(没有 nextItem),于是 40 分钟的工作显示成约 2 分钟 —— 而空洞判定那边
+ * 用的已经是正确的最大值(#676 review codex P1)。
+ */
 function workRunFallbackEndTs(run: WorkChildItem[]): number | null {
-  for (let i = run.length - 1; i >= 0; i--) {
-    const ts = workRunEndTs(run[i]);
-    if (ts !== null) return ts;
+  let latest: number | null = null;
+  for (const item of run) {
+    const ts = workRunEndTs(item);
+    if (ts === null) continue;
+    latest = latest === null ? ts : Math.max(latest, ts);
   }
-  return null;
+  return latest;
 }
 
 function createWorkGroup(

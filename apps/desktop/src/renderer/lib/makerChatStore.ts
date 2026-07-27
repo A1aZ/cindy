@@ -5591,18 +5591,20 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
       //
       // historyWindowHasIsland 按"是否保留了晚到的本地行"决定清不清,见下方 lateArrivals。
       const isContiguous = reachedKnownWindow;
-      if (!isContiguous) bumpMessagesEpoch(sessionId);
+      // 代际 bump 与分页锁释放都**只在重建真正提交后**才做。原先在 setState 之前先 bump:
+      // 一旦更新器里的 isStreaming 守卫(分页期间开始了新 turn)否掉这次重建,窗口没换、
+      // 却已经作废掉一个无关的 in-flight 跳转 / 翻页、还替它放了锁;更晚启动的对账也会
+      // 因为这个白 bump 被当成陈旧丢掉(#676 review codex P1)。setState 是同步的,
+      // 把 bump 挪到它之后不引入任何可观察的中间态。
+      let didRebuild = false;
       setState(sessionId, (s) => {
-        // 锁归本次重置释放(与 reloadMessages / clear / trim / demote 同规矩):被作废的
-        // 请求不会代清,漏清会让行首守卫把该会话的翻页永久卡住。早返路径同样要放。
-        const lockReset = !isContiguous && s.isLoadingMore ? { isLoadingMore: false } : null;
         // promise 期间可能已开始新 turn(streaming)→ 放弃本次合并,turn 结束会再触发。
         // force 时(stall 看门狗已确认被控端 not-running)放行:此处 isStreaming 是卡死残留。
         // 丢弃合并 = 拉回的窗口没进 UI:置 windowApplied=false,本次不得上报同步完成
         // (否则挂起的远程已读回执会在缺帧内容尚未展示时被放行),等 turn 结束的下一轮。
         if (s.isStreaming && !opts?.force) {
           windowApplied = false;
-          return lockReset ? { ...s, ...lockReset } : s;
+          return s;
         }
         // 权威重建时保留下来的"快照之后新到的本地行"(典型:分页期间的 remote push,也可能是
         // 并发跳转刚 merge 进来的孤岛)。
@@ -5612,26 +5614,37 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
         const messages = isContiguous
           ? mergeMessages(mapped, s.messages, {}, 'newest-first')
           : mergeAuthoritativeRemoteWindow(mapped, lateArrivals, 'newest-first');
-        // 无缺失且无权威字段变化 → 不换引用(视同已应用)。锁要放的话仍得发布一次。
-        if (messages === s.messages) return lockReset ? { ...s, ...lockReset } : s;
+        // 无缺失且无权威字段变化 → 不换引用(视同已应用)。
+        if (messages === s.messages) return s;
         if (isContiguous) return { ...s, messages };
+        didRebuild = true;
         const oldestRow = oldestMessageRow(collected, 'newest-first');
+        // 保留下来的晚到行是否**可证明**与新窗口连续:
+        //  - 比权威窗口最新一行还新 → 就是分页期间的 live push,接在尾部,连续;
+        //  - 落在权威窗口时间范围之内 → 那段范围本身是连续拉回来的,不产生洞;
+        //  - 比权威窗口最老一行还老 → 与新窗口之间隔着没加载的历史,**是孤岛**。
+        // 第三种典型来源:搜索补齐在 existingIds 快照之后落地,它相对旧窗口是 covered、
+        // 所以标记还是 false,重建把旧窗口换掉之后它就成了孤岛(#676 review codex P1)。
+        // 所以这里必须**按事实赋值**,而不是"没有晚到行才清、否则沿用旧值"。
+        const authoritativeOldestMs = messageTime(oldestRow?.createdAt);
+        const hasDetachedArrival = lateArrivals.some((message) => {
+          const ms = messageTime(message.createdAt);
+          return Number.isFinite(ms) && Number.isFinite(authoritativeOldestMs)
+            ? ms < authoritativeOldestMs
+            : false;
+        });
         return {
           ...s,
           messages,
           oldestMessageId: oldestRow?.id ?? s.oldestMessageId,
           hasMoreMessages: !reachedHistoryStart,
+          // 锁归本次重置释放(与 reloadMessages / clear / trim / demote 同规矩):被作废的
+          // 请求不会代清,漏清会让行首守卫把该会话的翻页永久卡住。
           isLoadingMore: false,
-          // 一行"晚到的本地行"都没保留 → 新窗口**完全**由本次从最新连续翻回来的页组成,
-          // 按构造没有孤岛,标记可以清零。反之(保留了晚到的行)必须留着:那些行里可能就有
-          // 并发跳转刚 merge 的孤岛,清掉会让之后跳回它走成员快速通道、永不修复。
-          //
-          // 不清的代价不是"多做一次补齐"而已:标记只由整窗重建清零,而这些目标比重建后的
-          // oldestMessageId 更新,往上翻页永远碰不到它们 —— 每次窗口内搜索都会白跑到预算
-          // 上限再退回 fallback(#676 review codex P1)。所以能证明连续时必须清。
-          ...(lateArrivals.length === 0 ? { historyWindowHasIsland: false } : {}),
+          historyWindowHasIsland: hasDetachedArrival,
         };
       });
+      if (didRebuild) bumpMessagesEpoch(sessionId);
       // 真正落地了(没被 isStreaming 守卫丢掉)才记下"这一号已提交" —— 之后再回来的、启动更早
       // 的那些对账据此作废。被丢掉时不记:什么都没进 UI,不该因此把先启动那次也一起废掉。
       if (windowApplied) {
@@ -6093,6 +6106,8 @@ function commitAroundWindow(
       };
     }
 
+    // mergeMessages 只增不减 → "长度没变"等价于"这次 merge 没引入任何新行"。
+    const addedRows = messages.length !== s.messages.length;
     return {
       ...s,
       messages,
@@ -6112,15 +6127,21 @@ function commitAroundWindow(
       oldestMessageId:
         s.oldestMessageId ??
         oldestServerMessageIdForWindow(rows, s.messages, null, 'oldest-first'),
-      // hasMoreMessages 一律置 true,即便 backfill 刚确证"从旧游标往上没有更多"。
-      // 原因:走到这里说明马上要 merge 的 around 行比旧游标更早(否则早就 covered
-      // 了),窗口最老边界因此前移,旧结论对新边界不成立 —— 而 around 行之上是否还有
-      // 历史是未知的。锁成 false 会让用户再也翻不动这段历史;既有回归
-      // makerChatStoreActiveView 的 loadOlder 系列 8 个用例正覆盖这个语义。
-      hasMoreMessages: true,
+      // hasMoreMessages:**merge 真的加进了行**时置 true,否则保持原值。
+      //
+      // 置 true 的理由:那些新行比旧游标更早(否则早就 covered 了),窗口最老边界因此前移,
+      // "从旧游标往上没有更多"这个结论对新边界不成立,而 around 行之上是否还有历史是未知的。
+      // 锁成 false 会让用户再也翻不动这段历史(makerChatStoreActiveView 的 loadOlder 系列
+      // 8 个用例覆盖这个语义)。
+      //
+      // 但一行都没加进来时,窗口边界没动,旧结论仍然成立:此时若把已经确证为 false 的
+      // hasMoreMessages 翻回 true,已经完整翻到历史起点的会话会重新亮起"还有更多历史",
+      // 每次窗口内搜索都会把它重新亮一次(#676 review codex P1)。
+      hasMoreMessages: addedRows ? true : s.hasMoreMessages,
       isLoadingMore: false,
       // 退回 around 窗口 = 窗口里多了一座孤岛(它与尾部窗口之间隔着没加载的历史)。
-      historyWindowHasIsland: true,
+      // 同理:没加进任何行就没有新孤岛,保持原值。
+      historyWindowHasIsland: addedRows ? true : s.historyWindowHasIsland,
     };
   });
 }

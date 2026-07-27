@@ -671,6 +671,94 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     ]);
   });
 
+  it('远程会话:权威重建保留了更老的晚到行时,按事实记上孤岛', async () => {
+    // review #676(codex P1):晚到行不一定与新窗口连续。搜索补齐若在 existingIds 快照之后
+    // 落地,它相对**旧**窗口是 covered、标记还是 false;重建把旧窗口换掉之后,那些行就成了
+    // 与新窗口之间隔着未加载历史的孤岛。所以标记要按事实赋值,不能"没有晚到行才清、否则沿用"。
+    const s = sid();
+    makerChatStore.initGlobalListeners();
+    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
+    expect(makerChatStore.getSnapshot(s).historyWindowHasIsland).toBe(false);
+
+    const pendingList = deferred<Message[]>();
+    remoteListResolver = () => pendingList.promise;
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    // 分页期间落地了一段**更老**的历史(补齐 / 深跳 merge 的形状)。
+    remotePush?.({
+      deviceId: DEVICE_ID,
+      channel: 'local-db:messages:created',
+      payload: {
+        sessionId: s,
+        message: dbMessage(s, 'far-older', 'far older row', '2026-05-01T00:00:00.000Z'),
+      },
+    });
+
+    // 权威页与旧窗口无重叠 → 重建;far-older 比权威窗口最老一行还老 → 保留但不连续。
+    pendingList.resolve([dbMessage(s, 'auth-1', 'authoritative', '2026-06-20T00:00:00.000Z')]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    const ids = makerChatStore.getSnapshot(s).messages.map((m) => m.clientId);
+    expect(ids).toContain('client-far-older');
+    expect(ids).toContain('client-auth-1');
+    // 关键:保留了脱离新窗口的行 → 标记必须点亮,后续跳转才会尝试补连续。
+    expect(makerChatStore.getSnapshot(s).historyWindowHasIsland).toBe(true);
+  });
+
+  it('远程会话:分页期间转入 streaming 时,不 bump 代际也不抢别人的分页锁', async () => {
+    // review #676(codex P1):代际 bump 原先在 setState **之前**。一旦更新器里的 isStreaming
+    // 守卫否掉这次重建,窗口没换,却已经作废了一个无关的 in-flight 跳转 / 翻页,还替它放了锁。
+    const s = sid();
+    makerChatStore.initGlobalListeners();
+    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
+
+    const reconcilePage = deferred<Message[]>();
+    const jumpPage = deferred<Message[]>();
+    remoteListResolver = (args) => {
+      const opts = (args[1] ?? {}) as { limit?: number };
+      if (opts.limit === 100) return jumpPage.promise;
+      return reconcilePage.promise;
+    };
+
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+
+    // 新代际里发起一次跳转,它拿到分页锁并停在自己那一页上。
+    const target = dbMessage(s, 'jump-target', 'jump target', '2026-06-14T00:00:00.000Z');
+    remoteAround = [target];
+    const jump = makerChatStore.loadAroundMessageClientId(s, 'client-jump-target', { radius: 60 });
+    await flush();
+    expect(makerChatStore.getSnapshot(s).isLoadingMore).toBe(true);
+
+    // 对账页回来之前,被控端开始了新 turn(isRunning=true → isStreaming=true)。
+    remotePush?.({
+      deviceId: DEVICE_ID,
+      channel: 'maker:event',
+      payload: {
+        sessionId: s,
+        event: {
+          type: 'status',
+          source: 'claude-code',
+          data: { status: 'thinking', isRunning: true, tokenUsage: 0, contextTokens: 0, contextWindow: 0 },
+        },
+      },
+    });
+    expect(makerChatStore.getSnapshot(s).isStreaming).toBe(true);
+
+    reconcilePage.resolve([dbMessage(s, 'auth-1', 'authoritative', '2026-06-20T00:00:00.000Z')]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    // 重建被 streaming 守卫否掉:窗口没换,锁仍属于那次跳转。
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).not.toContain('client-auth-1');
+    expect(makerChatStore.getSnapshot(s).isLoadingMore).toBe(true);
+
+    // 跳转没被作废:它自己那一页回来后正常命中目标。
+    jumpPage.resolve([target]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    expect((await jump)?.clientId).toBe('client-jump-target');
+    expect(makerChatStore.getSnapshot(s).isLoadingMore).toBe(false);
+  });
+
   it('远程会话:权威重建没保留任何晚到的行时,孤岛标记清零', async () => {
     // review #676(codex P1):这种情况下新窗口**完全**由本次从最新连续翻回来的页组成,按构造
     // 没有孤岛。留着标记的代价不是"多做一次补齐":标记只由整窗重建清零,而窗口内的目标比重建

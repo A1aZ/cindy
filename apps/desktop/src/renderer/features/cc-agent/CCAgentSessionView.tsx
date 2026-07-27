@@ -846,6 +846,13 @@ export function CCAgentSessionView({
       clearSearchJumpState();
       return;
     }
+    // 目标当前已经渲染在窗口里(只是窗口有孤岛,所以上面没走快速通道)。这种情况下"修复
+    // 连续性"失败不该连"跳到那一行"一起失败:导航根本不需要网络。被控端临时离线时
+    // invokeRemote 会 reject,原先的 catch 只弹 jumpFailed、不 focus,用户明明看得见那一行
+    // 却跳不过去(#676 review codex P1)。孤岛标记保留,留给下一次跳转再试修复。
+    const targetAlreadyInWindow = currentState.messages.some(
+      (message) => message.clientId === searchJump.messageClientId,
+    );
     const loadAround =
       searchJump.messageIdKind === 'clientId'
         ? makerChatStore.loadAroundMessageClientId
@@ -854,7 +861,8 @@ export function CCAgentSessionView({
       .then((message) => {
         if (cancelled) return;
         requestFocusMessage(message?.clientId ?? searchJump.messageClientId);
-        if (!message) {
+        // 没取到权威行,但目标本来就在窗口里 → 用户看到的就是"跳过去了",不该再报错。
+        if (!message && !targetAlreadyInWindow) {
           toast.error(t('ccAgent.search.jumpFailed'));
         }
         clearSearchJumpState();
@@ -862,7 +870,11 @@ export function CCAgentSessionView({
       .catch((err) => {
         if (!cancelled) {
           log.warn('Failed to load search hit context:', err);
-          toast.error(t('ccAgent.search.jumpFailed'));
+          if (targetAlreadyInWindow) {
+            requestFocusMessage(searchJump.messageClientId);
+          } else {
+            toast.error(t('ccAgent.search.jumpFailed'));
+          }
           clearSearchJumpState();
         }
       });

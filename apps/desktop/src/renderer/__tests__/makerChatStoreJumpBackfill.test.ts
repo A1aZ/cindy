@@ -958,6 +958,32 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(false);
   });
 
+  it('J3. fallback 一行都没加进来时,不把已确证的 hasMoreMessages 翻回 true', async () => {
+    // review #676(codex P1):fallback 原先无条件置 hasMoreMessages=true。已经完整翻到历史
+    // 起点的会话因此每次窗口内搜索都重新亮起"还有更多历史",并再发一轮无用请求。
+    // 置 true 的正当理由只在"merge 真的把更早的行加进来了"时成立(窗口边界前移)。
+    const target = serverMessage({
+      id: 'only-row',
+      clientId: 'only-row',
+      createdAt: '2026-07-20T00:00:00.000Z',
+    });
+    // 第 1 次跳转:补齐取不到目标(空页 → exhausted)→ 退回 around,merge 进目标这一行。
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValue([target]);
+    vi.mocked(listMessagesFor).mockResolvedValue([]);
+    await makerChatStore.loadAroundMessageClientId(SID, 'only-row', { radius: 60 });
+    expect(makerChatStore.getSnapshot(SID).historyWindowHasIsland).toBe(true);
+    // 有新行加进来 → 边界前移,hasMore 置 true 是对的。
+    expect(makerChatStore.getSnapshot(SID).hasMoreMessages).toBe(true);
+
+    // 第 2 次跳转同一目标:孤岛在,所以仍走补齐 → 空页 → exhausted(确证没有更多历史),
+    // 而 around 这次一行都没新增。
+    await makerChatStore.loadAroundMessageClientId(SID, 'only-row', { radius: 60 });
+
+    expect(makerChatStore.getSnapshot(SID).messages).toHaveLength(1);
+    // 关键:没加进任何行 → 窗口边界没动 → 不得把 exhausted 刚确证的 false 翻回 true。
+    expect(makerChatStore.getSnapshot(SID).hasMoreMessages).toBe(false);
+  });
+
   it('Y. 超长裁剪不清孤岛标记(裁剪只保证"最新 200 行",不保证连续)', async () => {
     // review #676(codex P1):slice(-TRIM_TARGET) 取的是最新 200 行,不等于"连续的最新
     // 一段"。若先前几次深跳留下多个孤岛、真正连续的尾段不足 200 行,裁剪结果里还夹着孤岛。

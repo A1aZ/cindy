@@ -612,3 +612,43 @@ describe('历史窗口空洞 — 并行工具乱序完成', () => {
     ]);
   });
 });
+
+// ── Scenario F:被空洞收尾的组要取子项结束时间的最大值(review #676 codex P1) ──
+
+describe('历史窗口空洞 — 被空洞收尾的组含长任务', () => {
+  it('F. 组末尾是短子项、长任务在前时,时长取最大结束时间', () => {
+    // 组被空洞收尾 → createWorkGroup 没有 nextItem → 回落到 workRunFallbackEndTs。
+    // 那份 fallback 原来"从后往前取第一个有时间的子项",于是"Task 跑到 40 分钟、但组末尾是
+    // 一个早就结束的 thinking 块"时,整段显示成 20 秒 —— 而空洞判定那边用的已经是正确的
+    // 最大值。这里 result 不与任何 tool_use 相邻(中间隔着 thinking),所以只能经 toolUseId
+    // 配对,adjacency 兜底不会把它的时间戳挪到末尾子项上。
+    const messages: ChatMessage[] = [
+      mkUser('u1', '2026-07-23T16:00:00.000Z', '跑个长 Task'),
+      {
+        clientId: 'taskA',
+        role: 'tool_use',
+        content: '',
+        toolUseId: 'tu-taskA',
+        toolName: 'Task',
+        toolInput: { description: '慢的' },
+        createdAt: '2026-07-23T16:00:10.000Z',
+      },
+      // Task 还在跑,agent 先想了一下(组的末尾子项,20 秒就结束)。
+      mkThinking('th1', '2026-07-23T16:00:30.000Z'),
+      // 40 分钟后 Task 才回结果。
+      mkResult('rA', 'tu-taskA', '2026-07-23T16:40:10.000Z'),
+      // ── 空洞:47 小时,且组后面没有 assistant 正文 ──
+      mkUser('u2', '2026-07-25T15:00:00.000Z', '继续'),
+      mkAssistant('a2', '2026-07-25T15:00:30.000Z', '好。'),
+    ];
+
+    const { items } = buildRenderItems(messages);
+    const grouped = groupWorkRuns(items, false);
+    const durations = workGroups(grouped)
+      .map((g) => (g.type === 'work_group' ? g.durationMs : undefined))
+      .filter((d): d is number => d !== undefined);
+
+    // 16:00:10 → 16:40:10 = 40 分钟。取末尾子项会得到 20 秒。
+    expect(durations).toContain(40 * 60 * 1000);
+  });
+});

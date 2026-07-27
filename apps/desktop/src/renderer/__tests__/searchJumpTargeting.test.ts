@@ -35,3 +35,27 @@ describe('搜索跳转落点判定', () => {
     );
   });
 });
+
+describe('canFocusWithoutJumpLoad · 已翻到历史起点', () => {
+  it('有孤岛但没有更多页可取时直接 focus(补齐不可能改善覆盖)', () => {
+    // review #676(codex P1):分页只能往更老翻,而那边已经空了 —— 再打一次 around + list
+    // 不会让窗口更完整,只是每次搜索白跑两个请求。
+    const state = {
+      messages: [{ clientId: 'a' }, { clientId: 'b' }],
+      historyWindowHasIsland: true,
+      hasMoreMessages: false,
+    };
+    expect(canFocusWithoutJumpLoad(state, 'b')).toBe(true);
+    // 目标不在窗口里时仍然要走 store。
+    expect(canFocusWithoutJumpLoad(state, 'zzz')).toBe(false);
+  });
+
+  it('有孤岛且还能继续翻页时仍交回 store 补齐', () => {
+    const state = {
+      messages: [{ clientId: 'a' }],
+      historyWindowHasIsland: true,
+      hasMoreMessages: true,
+    };
+    expect(canFocusWithoutJumpLoad(state, 'a')).toBe(false);
+  });
+});

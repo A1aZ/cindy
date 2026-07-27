@@ -1495,41 +1495,60 @@ export async function findPendingAgentHandoff(sessionId: string): Promise<string
 /**
  * 查 fork 出的子会话是否还欠一条「来源标记」——返回父会话 id,不欠则 null。
  *
- * 判定用 `total_token_usage`:fork 建会话时它被显式 reset 为 0(见
- * maker-orchestration/fork.ts),此后每完成一轮由 recordSessionTurnTokens 累加。
- * 所以 `> 0` ⟺ 子会话确实自己跑过一轮,`= 0` ⟺ 还欠这条来源标记。
+ * 判定"子会话是否已经自己跑过一轮",两个信号取**或**——单用任一个都有整条引擎
+ * 线失效:
+ *  1. `total_token_usage > 0`:fork 建会话时显式 reset 为 0。但只有 Codex 会累加
+ *     (recordSessionTurnTokens 的唯一调用点在 register.ts 的
+ *     `event.source === 'codex'` done 分支),Claude 会话这列恒为 0;
+ *  2. 存在 `createdAt >= session.createdAt` 的 assistant 行:引擎无关,补齐 Claude。
  *
- * 为什么不比时间戳:消息 createdAt 不可信。
- *  - 复制历史保留原 createdAt,而外部导入的会话里这个值是**合成**的——importer
- *    故意写 `createdAt + sequence`(claude-local-sessions.ts)与 `timestamp + lineNo`
+ * 精度边界(全部只发生在信号二上,且方向不同,故意如此排序——信号一先判,能挡掉
+ * Codex 侧的全部边角):
+ *  - **漏注入一次**:外部导入的会话里 createdAt 是**合成**的,importer 故意写
+ *    `createdAt + sequence`(claude-local-sessions.ts)与 `timestamp + lineNo`
  *    (codex-local-sessions.ts)来强制行序,长 transcript 的末尾行能超出真实墙钟
- *    好几秒。拿它跟新会话 createdAt 比大小,会把纯粹的 pre-fork 历史误判成子会话
- *    自己的回应,首发就漏掉来源标记;
- *  - 同毫秒边界同样无解(复制行与 fork 操作落在同一毫秒)。
+ *    好几秒;fork 这类会话时,复制来的 assistant 可能被算成子会话自己的回应。
+ *    同毫秒边界(复制行与 fork 操作同一毫秒)同理。
+ *  - **多注入一次**:一轮跑完但 usage 上报失败、或 turn 中途重启。
  *
- * 为什么不看有没有 user / assistant 行:也不可靠。goal 路径的 setGoal 先
- * persistUserMessage 再 fireTurn→peek(goal-host/controller.ts),dispatch 前就落了
- * user 行;而 assistant 行仍要回到上面那套时间戳比较。token 计数没有这两个问题。
+ * 为什么不看 user 行:goal 路径的 setGoal 先 persistUserMessage 再 fireTurn→peek
+ * (goal-host/controller.ts),dispatch 前就落了 user 行,会把 fork 后首个动作是
+ * /goal 的会话误判成已发送。assistant 只在模型确实回应后才出现,没这个问题。
  *
- * 已知精度边界(方向是"多注入一次"而非丢失,可接受):一轮跑完但 usage 上报失败,
- * 或 turn 中途重启,计数仍为 0,下次发送会再注入一次。
- *
- * 不为它加持久位:写 messages 隐藏边界行会让该会话之后再也不能被 fork
+ * 为什么不加持久消费位:写 messages 隐藏边界行会让该会话之后再也不能被 fork
  * (resolveForkNativeSource 见到 context_rebuild 即判 UNSUPPORTED_HISTORY);
- * 加 schema 列则是为一个元信息付一次 migration。既有列已经够用。
+ * 加 schema 列则是为一个元信息付一次 migration。两者的代价都高于上述边角。
  */
 export async function findPendingForkOrigin(sessionId: string): Promise<string | null> {
   const db = getDbClient().drizzle;
   const [sessRow] = await db
     .select({
       parentSessionId: sessions.parentSessionId,
+      createdAt: sessions.createdAt,
       totalTokenUsage: sessions.totalTokenUsage,
     })
     .from(sessions)
     .where(eq(sessions.id, sessionId))
     .limit(1);
   if (!sessRow?.parentSessionId) return null;
-  return (sessRow.totalTokenUsage ?? 0) > 0 ? null : sessRow.parentSessionId;
+  // 信号一(Codex):fork 把 total_token_usage reset 为 0,只有真跑过 turn 才被累加。
+  if ((sessRow.totalTokenUsage ?? 0) > 0) return null;
+  // 信号二(Claude 与兜底):Claude 完成路径不累加该列——recordSessionTurnTokens 只在
+  // register.ts 的 `event.source === 'codex'` done 分支调用,单靠信号一会让 Claude
+  // 会话每次重启后重复注入。回落到"子会话自己产生过 assistant 行"。
+  const [assistantAfterFork] = await db
+    .select({ id: messages.id })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.sessionId, sessionId),
+        eq(messages.role, 'assistant'),
+        isNull(messages.rewindAt),
+        gte(messages.createdAt, sessRow.createdAt),
+      ),
+    )
+    .limit(1);
+  return assistantAfterFork ? null : sessRow.parentSessionId;
 }
 
 /**

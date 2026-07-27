@@ -321,13 +321,23 @@ describe('findPendingForkOrigin 来源标记重建', () => {
     await expect(findPendingForkOrigin('s1')).resolves.toBeNull();
   });
 
-  it('导入会话的合成时间戳晚于 fork 时刻也不误判(importer 写 createdAt+sequence)', async () => {
-    // claude-local-sessions / codex-local-sessions 为强制行序会把末尾行的 createdAt
-    // 推到真实墙钟之后;按时间戳比较会把纯 pre-fork 历史当成子会话自己的回应。
+  it('Claude 会话(token 列恒为 0)靠 assistant 行判定已跑过一轮', async () => {
+    // recordSessionTurnTokens 只在 register.ts 的 codex done 分支调用,Claude 的
+    // total_token_usage 永远是 0;只认 token 会让 Claude fork 每次重启都重复注入。
+    const sqlite = createDb();
+    insertForkedSession(sqlite, 'parent-1');
+    insertRowAt(sqlite, 'assistant', FORK_AT + 10);
+    await expect(findPendingForkOrigin('s1')).resolves.toBeNull();
+  });
+
+  it('已知边界:导入会话的合成时间戳会让来源标记漏注入一次(方向安全,故意接受)', async () => {
+    // importer 为强制行序写 createdAt+sequence / timestamp+lineNo,长 transcript 的
+    // 末尾行能超出真实墙钟数秒。此时复制来的 assistant 会被算成子会话自己的回应。
+    // 记录为已接受的取舍:方向是漏一次,而不是把内部说明重复灌给模型。
     const sqlite = createDb();
     insertForkedSession(sqlite, 'parent-1');
     insertRowAt(sqlite, 'assistant', FORK_AT + 9_000);
-    await expect(findPendingForkOrigin('s1')).resolves.toBe('parent-1');
+    await expect(findPendingForkOrigin('s1')).resolves.toBeNull();
   });
 
   it('goal 路径先落 user 行再 peek:仍返回父会话 id(不被 pre-dispatch 持久化骗过)', async () => {

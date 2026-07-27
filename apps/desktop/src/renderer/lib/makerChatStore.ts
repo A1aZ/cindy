@@ -5697,13 +5697,15 @@ const JUMP_BACKFILL_MAX_REQUESTS = 80;
  * 补齐结果。每一态对应一套 fallback 处置,合并任意两态都会踩坑:
  *
  * - `covered`    已补齐,窗口连续。游标 / hasMore 归 backfill 维护,fallback 不得回退。
- * - `exhausted`  翻到历史起点仍未命中(目标已被 rewind 软删等)。此时 hasMoreMessages
- *                已确证为 false,fallback **不能**把它改回 true,否则 UI 会继续放行
- *                向上翻页、发无用请求。
+ * - `exhausted`  沿旧游标翻到历史起点仍未命中(目标已被 rewind 软删等)。backfill 自己已
+ *                把 hasMoreMessages 置 false,但 fallback 随后**要**把它改回 true —— 它
+ *                merge 进来的 around 行可能比旧游标更早,"旧游标之上没有更多"这个结论对
+ *                合并后的新边界不成立;钉死 false 会让向上翻页永久停在孤岛上沿。
  * - `busy`       让位给正在飞行的 loadOlderMessages。锁是别人的,fallback **不能**写
  *                isLoadingMore —— 提前释放会让下一次滚动/跳转从同一游标再开一个请求,
  *                正是这把锁要防的游标竞态。
- * - `unavailable` 超页数上限或请求异常。可继续翻,hasMore 保持原值。
+ * - `unavailable` 超页数上限或请求异常。同 `exhausted`:fallback 置 hasMore=true,
+ *                因为 merge 进来的 around 行会把窗口上沿推到旧游标之外。
  * - `cancelled`  切片被 rewind / clear / purge 故意重置。调用方**不能**再 merge 之前
  *                抓到的 around 行,否则会把刚被移除的消息(甚至已 purge 的切片)塞回窗口。
  */

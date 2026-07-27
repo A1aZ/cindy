@@ -43,8 +43,9 @@ Firefox 早已按规范放行，只有 Safari 没跟，而 Safari 是 macOS 默�
 ② 打开系统浏览器 → GET <auth>/api/auth/social/<provider>/authorize
      ?redirect_uri=<托管回调地址>&code_challenge=...&client_state=...&ui_locale=...
 ③ 用户在 provider 处授权，provider 回调到 auth-server 既有的 provider 回调路由
-④ auth-server 照常签发一次性授权码，302 到 redirect_uri —— 也就是托管回调路由
-⑤ 托管回调按 client_state 把授权码寄存进 Redis，302 到结果展示页（URL 不含 code）
+④ auth-server 照常签发一次性授权码，但发现 redirect_uri 是托管地址时**不把码放进 URL**，
+   而是在签发处直接按 client_state 寄存进 Redis
+⑤ 302 到结果展示页（URL 既不含 code 也不含 state）
 ⑥ 客户端自②起持续轮询 poll 接口，取到 code 后照常 POST /api/auth/token 完成 PKCE 兑换
 ⑦ 用户在展示页点「回到 Cindy」→ cindy://focus/desktop-login
 ```
@@ -71,15 +72,22 @@ provider 回调路由（`googleCallbackUrl()` 等）与 `callbackShared.ts` 的�
 任何以它为前缀的地址都会先命中 RFC 8252 的 loopback 例外，所以哪怕把同源放行整条删掉，
 集成测试也照样全绿（已用变异验证确认）。生产是 https 域名，只有这条规则能放行它。
 
-### 3.2 `GET /api/auth/desktop/callback`
+### 3.2 寄存发生在签发处，**没有公开的写入端点**
 
-接住 auth-server 自己 302 过来的回跳（`?code=…&state=<clientState>` 或 `?error=…`）：
+`callbackShared.ts` 的 `finishWithAuthCode` / `failWithRedirect` 在识别出 redirect_uri 是
+托管地址时，直接把结果寄存进 Redis（key `deskcb:<clientState>`，TTL 5 分钟），然后 302 到
+`/desktop/login-callback?status=ok|error[&detail=<错误码>]`。
 
-- 按 `clientState` 把结果寄存进 Redis（key `deskcb:<clientState>`，TTL 5 分钟）；
-- 302 到 `/desktop/login-callback?status=ok|error[&detail=<错误码>]`，**URL 不带 code**；
-- 既无 `code` 也无 `error` 时寄存 `INVALID_AUTH_CODE`——什么都不寄存的话，客户端只能
-  一路轮询到 5 分钟预算耗尽；
-- `state` 缺失或超长直接 400，不写任何寄存。
+**曾经存在一个公开的 `GET /api/auth/desktop/callback` 用来接住自己的 302 并写寄存，已删除。**
+那条路径无法鉴权：任何能看到浏览器地址栏里 `client_state` 的扩展或同机进程，都可以拿同一个
+state 伪造一个 `error` 打进去，让正在轮询的客户端提前收到假的终态、中断登录。哈希 `pollSecret`
+只保护了读取，保护不了写入。
+
+从签发处直接写还顺带解决两件事：授权码彻底不进浏览器地址栏与导航历史；`codeExpiresAt` 是在
+签发的那一刻算的，不会因为浏览器延迟跟随 302 而虚长出一截。
+
+`DESKTOP_CALLBACK_PATH`（`/api/auth/desktop/callback`）现在只作为「这次登录走托管模式」的
+**标识**出现在 redirect_uri 里，不再有对应的可访问路由（访问它得到 404）。
 
 ### 3.3 `POST /api/auth/desktop/callback/poll`
 

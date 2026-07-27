@@ -49,9 +49,22 @@ describe('AttachmentTypeThumb — 缩略图取用契约', () => {
     expect(src).toMatch(/size: THUMB_PX \* 2/);
   });
 
-  it('取不到缩略图记进 miss 集合,不每次重挂载都重问 main', () => {
-    expect(src).toMatch(/thumbMisses\.add\(filePath\)/);
-    expect(src).toMatch(/if \(thumbMisses\.has\(filePath\)\) return/);
+  it('缓存只用于消闪烁,每次挂载仍向 main 复核(文件被覆盖时不会一直显示旧图)', () => {
+    // 缓存按路径存,而同一路径的文件可能被覆盖 —— main 侧才按 mtime+size 判失效,
+    // 所以这里必须无条件 revalidate,不能命中缓存就 return。
+    const effect = src.slice(src.indexOf('useEffect(() => {'), src.indexOf('if (thumb) {'));
+    expect(effect).toMatch(/const cached = thumbCache\.get\(filePath\) \?\? null;\s*\n\s*setThumb\(cached\)/);
+    expect(effect).not.toMatch(/if \(cached\)[\s\S]{0,80}return;/);
+    expect(effect).toMatch(/getFileThumbnail/);
+    // 复核结果为空时清掉可能过期的缓存,回落图标。
+    expect(effect).toMatch(/thumbCache\.delete\(filePath\)/);
+  });
+
+  it('renderer 缓存有上限(长会话里拖入的文件数没有上限)', () => {
+    expect(src).toMatch(/const THUMB_CACHE_LIMIT = \d+/);
+    expect(src).toMatch(/function rememberThumb[\s\S]*thumbCache\.delete\(oldest\.value\)/);
+    // 不再维护会无限增长、且永久记住失败的 miss 集合。
+    expect(src).not.toMatch(/thumbMisses/);
   });
 
   it('粘贴产生的 clipboard:// 伪路径不去问系统缩略图', () => {

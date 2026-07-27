@@ -33,10 +33,25 @@ interface Thumb {
   isIcon: boolean;
 }
 
-/** 已取回的缩略图(key = 路径)。托盘会随会话切换 / HMR / 草稿恢复反复重挂载。 */
+/**
+ * 已取回的缩略图(key = 路径),只用来消掉重挂载时的闪烁 —— 托盘会随会话切换 /
+ * HMR / 草稿恢复反复重挂载,没有它每次都要空一帧再补图。
+ *
+ * 它**不是**事实源:每次挂载仍会向 main 复核一次(stale-while-revalidate),因为
+ * 这里按路径存,而同一路径的文件可能被覆盖(main 侧按 mtime+size 判失效)。
+ * 长会话里拖入的文件数没有上限,所以这里也必须有上限,不能无限长。
+ */
+const THUMB_CACHE_LIMIT = 64;
 const thumbCache = new Map<string, Thumb>();
-/** 已知拿不到缩略图的路径:避免每次重挂载都再问一次 main。 */
-const thumbMisses = new Set<string>();
+
+function rememberThumb(key: string, value: Thumb): void {
+  if (thumbCache.size >= THUMB_CACHE_LIMIT && !thumbCache.has(key)) {
+    const oldest = thumbCache.keys().next();
+    if (!oldest.done) thumbCache.delete(oldest.value);
+  }
+  thumbCache.delete(key);
+  thumbCache.set(key, value);
+}
 
 /**
  * 判断系统返回的是类型图标还是内容缩略图:图标画在透明画布中央,四边都是空的;
@@ -191,13 +206,10 @@ export function AttachmentTypeThumb({ file }: { file: AttachedFile }) {
       setThumb(null);
       return;
     }
-    const cached = thumbCache.get(filePath);
-    if (cached) {
-      setThumb(cached);
-      return;
-    }
-    setThumb(null);
-    if (thumbMisses.has(filePath)) return;
+    // 先用缓存顶上(可能是旧内容),再无条件向 main 复核一次:main 按 mtime+size
+    // 判失效,文件被覆盖时会给回新图;之前出不了图的文件后来变得可读也能补上。
+    const cached = thumbCache.get(filePath) ?? null;
+    setThumb(cached);
     let cancelled = false;
     void (async () => {
       try {
@@ -205,16 +217,18 @@ export function AttachmentTypeThumb({ file }: { file: AttachedFile }) {
           path: filePath,
           size: THUMB_PX * 2,
         });
+        if (cancelled) return;
         if (!dataUrl) {
-          thumbMisses.add(filePath);
+          // 现在拿不到图:清掉可能过期的缓存,回落自绘图标。
+          thumbCache.delete(filePath);
+          setThumb(null);
           return;
         }
         const next: Thumb = { url: dataUrl, isIcon: await looksLikeIconBitmap(dataUrl) };
-        thumbCache.set(filePath, next);
+        rememberThumb(filePath, next);
         if (!cancelled) setThumb(next);
       } catch (err) {
-        // 取不到缩略图是常态(远端路径 / 冷门格式),回落图标即可,不打扰用户。
-        thumbMisses.add(filePath);
+        // 取不到缩略图是常态(冷门格式 / 文件已被移走),回落图标即可,不打扰用户。
         log.debug('file thumbnail unavailable', { error: String(err) });
       }
     })();

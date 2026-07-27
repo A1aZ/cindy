@@ -44,6 +44,30 @@ interface Thumb {
 const THUMB_CACHE_LIMIT = 64;
 const thumbCache = new Map<string, Thumb>();
 
+/**
+ * 焦点复核的**单例**广播:托盘里的附件数量没有上限,每张卡各挂一个 focus 监听、
+ * 各自发一次 IPC 的话,一次切窗口就能打出成百上千次 realpath/stat。这里收敛成
+ * 一个监听器 + 节流窗口,订阅者共享同一次广播。
+ *
+ * 真正昂贵的原生缩略图那一层另有防线(main 的 4 名额闸门 + mtime/size 缓存),
+ * 这里挡住的是「切一次窗口就全量重问」的放大效应。
+ */
+const REVALIDATE_MIN_INTERVAL_MS = 30_000;
+const revalidateSubscribers = new Set<() => void>();
+let lastRevalidateAt = 0;
+let focusListenerBound = false;
+
+function ensureFocusListener(): void {
+  if (focusListenerBound || typeof window === 'undefined') return;
+  focusListenerBound = true;
+  window.addEventListener('focus', () => {
+    const now = Date.now();
+    if (now - lastRevalidateAt < REVALIDATE_MIN_INTERVAL_MS) return;
+    lastRevalidateAt = now;
+    for (const notify of revalidateSubscribers) notify();
+  });
+}
+
 function rememberThumb(key: string, value: Thumb): void {
   if (thumbCache.size >= THUMB_CACHE_LIMIT && !thumbCache.has(key)) {
     const oldest = thumbCache.keys().next();
@@ -223,14 +247,18 @@ export function AttachmentTypeThumb({
 
   // 附件挂在托盘上的这段时间里,用户完全可能切出去把文件改了再切回来发送 —— 只在
   // 挂载时复核一次的话,预览和大小描述的还是旧内容。窗口重新获得焦点就是这个场景
-  // 的自然触发点(切到编辑器改完再切回来),比轮询或 fs.watch 都便宜;main 侧按
-  // mtime+size 命中缓存,没改动的文件这一趟几乎不花钱。
+  // 的自然触发点(切到编辑器改完再切回来),比轮询或 fs.watch 都便宜。监听与节流
+  // 都在模块级单例里,见 ensureFocusListener。
   const [revalidateTick, setRevalidateTick] = useState(0);
   useEffect(() => {
-    const onFocus = () => setRevalidateTick((n) => n + 1);
-    window.addEventListener('focus', onFocus);
-    return () => window.removeEventListener('focus', onFocus);
-  }, []);
+    if (!filePath) return;
+    ensureFocusListener();
+    const notify = () => setRevalidateTick((n) => n + 1);
+    revalidateSubscribers.add(notify);
+    return () => {
+      revalidateSubscribers.delete(notify);
+    };
+  }, [filePath]);
 
   useEffect(() => {
     if (!filePath) {

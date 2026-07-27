@@ -50,7 +50,7 @@ beforeEach(() => {
   __clearFileThumbnailCacheForTest();
   isPathAllowedAgainst.mockReturnValue(true);
   realpath.mockImplementation(async (p: string) => p);
-  stat.mockResolvedValue({ isFile: () => true, mtimeMs: 1, size: 10 });
+  stat.mockResolvedValue({ isFile: () => true, mtimeMs: 1, size: 10, ino: 1, dev: 1 });
   createThumbnailFromPath.mockResolvedValue(okImage());
 });
 
@@ -96,7 +96,7 @@ describe('readFileThumbnail — 授权边界', () => {
   });
 
   it('目录与不存在的文件不出图', async () => {
-    stat.mockResolvedValueOnce({ isFile: () => false, mtimeMs: 1, size: 0 });
+    stat.mockResolvedValueOnce({ isFile: () => false, mtimeMs: 1, size: 0, ino: 1, dev: 1 });
     await expect(readFileThumbnail({ path: '/tmp/dir', size: 80 })).resolves.toBeNull();
     stat.mockRejectedValueOnce(new Error('ENOENT'));
     await expect(readFileThumbnail({ path: '/tmp/missing.pdf', size: 80 })).resolves.toBeNull();
@@ -122,7 +122,7 @@ describe('readFileThumbnail — 兜底与缓存', () => {
   });
 
   it('回传复核那一刻的当前字节数(卡片据此刷新「类型 · 大小」)', async () => {
-    stat.mockResolvedValue({ isFile: () => true, mtimeMs: 7, size: 4242 });
+    stat.mockResolvedValue({ isFile: () => true, mtimeMs: 7, size: 4242, ino: 1, dev: 1 });
     await expect(readFileThumbnail({ path: '/tmp/a.pdf', size: 80 })).resolves.toEqual({
       dataUrl: 'data:image/png;base64,AAA',
       byteSize: 4242,
@@ -142,6 +142,15 @@ describe('readFileThumbnail — 兜底与缓存', () => {
     expect((await readFileThumbnail({ path: '/tmp/a.zzz', size: 80 }))?.dataUrl).toBeNull();
     expect((await readFileThumbnail({ path: '/tmp/a.zzz', size: 80 }))?.dataUrl).toBeNull();
     expect(createThumbnailFromPath).toHaveBeenCalledTimes(1);
+  });
+
+  it('取图后目标被掉包(dev/ino/mtime 变了)则丢弃结果,不交给 renderer', async () => {
+    // createThumbnailFromPath 只吃路径、拿不到 fd,校验用的 stat 和它内部那次 open
+    // 绑不到同一文件对象;结果出锅后复验一次身份,变了就不返回也不入缓存。
+    stat
+      .mockResolvedValueOnce({ isFile: () => true, mtimeMs: 1, size: 10, ino: 1, dev: 1 })
+      .mockResolvedValue({ isFile: () => true, mtimeMs: 1, size: 10, ino: 999, dev: 1 });
+    expect((await readFileThumbnail({ path: '/tmp/swap.pdf', size: 80 }))?.dataUrl).toBeNull();
   });
 
   it('系统 API 同步抛(Linux 没有这个 API)时释放名额,不把闸门占死', async () => {
@@ -347,7 +356,7 @@ describe('readFileThumbnail — 兜底与缓存', () => {
 
   it('文件被改写(mtime/size 变化)后重新出图,不吃旧缓存', async () => {
     await readFileThumbnail({ path: '/tmp/a.pdf', size: 80 });
-    stat.mockResolvedValue({ isFile: () => true, mtimeMs: 999, size: 20 });
+    stat.mockResolvedValue({ isFile: () => true, mtimeMs: 999, size: 20, ino: 1, dev: 1 });
     createThumbnailFromPath.mockResolvedValue(okImage('data:image/png;base64,BBB'));
     expect((await readFileThumbnail({ path: '/tmp/a.pdf', size: 80 }))?.dataUrl).toBe(
       'data:image/png;base64,BBB',

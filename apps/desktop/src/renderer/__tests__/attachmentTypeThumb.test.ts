@@ -87,9 +87,19 @@ describe('AttachmentTypeThumb — 缩略图取用契约', () => {
 
   it('窗口重新获得焦点时复核(附件挂在托盘期间文件可能被改写)', () => {
     // 只在挂载时问一次的话,「切出去改完文件再切回来发送」这个场景拿到的还是旧内容。
-    expect(src).toMatch(/window\.addEventListener\('focus', onFocus\)/);
-    expect(src).toMatch(/window\.removeEventListener\('focus', onFocus\)/);
+    expect(src).toMatch(/window\.addEventListener\('focus'/);
     expect(src).toMatch(/\}, \[filePath, revalidateTick\]\)/);
+  });
+
+  it('焦点复核走模块级单例 + 节流,不是每张卡各挂一个监听', () => {
+    // 托盘附件数没有上限;每卡一个 focus 监听 + 各自发 IPC,一次切窗口就能打出
+    // 成百上千次 realpath/stat。
+    expect(src).toMatch(/const revalidateSubscribers = new Set<\(\) => void>\(\)/);
+    expect(src).toMatch(/if \(focusListenerBound \|\| typeof window === 'undefined'\) return/);
+    expect(src).toMatch(/const REVALIDATE_MIN_INTERVAL_MS = [\d_]+/);
+    expect(src).toMatch(/now - lastRevalidateAt < REVALIDATE_MIN_INTERVAL_MS/);
+    // 卸载要退订,否则订阅集合会随会话切换无限增长。
+    expect(src).toMatch(/revalidateSubscribers\.delete\(notify\)/);
   });
 
   it('角标标签渲染尺寸不低于 10px(DESIGN.md §3 Micro Label 下限)', () => {

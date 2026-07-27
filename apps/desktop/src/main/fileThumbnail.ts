@@ -187,6 +187,24 @@ export async function readFileThumbnail(
   const pending = inFlight.get(key);
   if (pending) return pending;
 
+  /**
+   * 取图后复验目标身份。`createThumbnailFromPath` 只吃路径、拿不到 fd,校验用的
+   * stat 与它内部那次 open 天然绑不到同一个文件对象;允许目录里的目录项若在这中间
+   * 被换成指向敏感文件的软链,拿回来的就会是别人的内容。这里在结果出锅后按
+   * dev/ino/mtime 复验一次:关不掉底层竞争窗口,但能拦住「已经被换掉的目标」的
+   * 缩略图交到 renderer 手里。(既有 xdt-file:// 协议是同构写法,同一量级的窗口。)
+   */
+  const sameTarget = async (): Promise<boolean> => {
+    try {
+      const after = await fs.stat(realPath);
+      return (
+        after.ino === stat.ino && after.dev === stat.dev && after.mtimeMs === stat.mtimeMs
+      );
+    } catch {
+      return false;
+    }
+  };
+
   const task = (async (): Promise<FileThumbnailResult> => {
     // 排队这一段也算进超时:四个挂死的原生任务会一直占着名额,排不上就直接回落。
     const gotSlot = await acquireSlot(TIMEOUT_MS);
@@ -225,8 +243,13 @@ export async function readFileThumbnail(
     // 若在超时那一刻就放名额、删 inFlight,系统卡住时每过 4s 就会再放 4 个新任务
     // 进去,闸门等于没有——真实在飞数必须由原生任务的生命周期决定。
     void native
-      .then((image) => {
+      .then(async (image) => {
         // 迟到的结果照样有用:写进缓存,下次挂载直接命中,不用再跑一遍。
+        // 但先复验目标没被掉包,否则连缓存都不该留。
+        if (!(await sameTarget())) {
+          log.debug('thumbnail target changed under us', { ext: path.extname(realPath) });
+          return;
+        }
         cacheSet(key, encodeOnce(image));
       })
       .catch((err) => {
@@ -248,6 +271,7 @@ export async function readFileThumbnail(
           timer = setTimeout(() => reject(new Error('thumbnail timeout')), TIMEOUT_MS);
         }),
       ]);
+      if (!(await sameTarget())) return { dataUrl: null, byteSize };
       return { dataUrl: encodeOnce(image), byteSize };
     } catch {
       // 超时或原生失败:本次 IPC 回 null 让卡片先回落图标。task 会带着 null 停在

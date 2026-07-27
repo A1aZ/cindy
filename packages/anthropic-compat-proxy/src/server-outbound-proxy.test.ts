@@ -120,6 +120,27 @@ describe('anthropic-compat-proxy outbound proxy wiring', () => {
     expect(seen).toEqual([{ url: '/v1/messages', host: 'upstream.invalid' }]);
   });
 
+  it('encodes IPv6 literal upstreams as ATYP=0x04 through the whole forward path', async () => {
+    // 回归:parseUpstream 保留 WHATWG hostname 的方括号,并一路传到 agent 的
+    // options.host。桩直接拒绝 CONNECT(0x05),用例只关心送出去的目标编码。
+    const stub = await startSocks5Stub({ replyCode: 0x05 });
+    cleanups.push(() => stub.close());
+
+    proxy = await createAnthropicCompatProxy({
+      upstream: 'http://[2001:db8::1]:8080',
+      transformRequest: [],
+      resolveOutboundProxy: () => `socks5://127.0.0.1:${stub.port}`,
+    });
+
+    const res = await fetch(`${proxy.url}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'x', messages: [] }),
+    });
+    expect(res.status).toBe(502);
+    expect(stub.requests).toEqual([{ atyp: 0x04, host: '2001:db8:0:0:0:0:0:1', port: 8080 }]);
+  });
+
   it('never consults the resolver for loopback upstreams', async () => {
     const upstream = createHttpServer((_req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });

@@ -68,6 +68,15 @@ describe('socks5Connect', () => {
     expect(v6.requests).toEqual([{ atyp: 0x04, host: '2001:db8:0:0:0:0:0:1', port: 443 }]);
   });
 
+  it('strips IPv6 brackets before classifying the destination', async () => {
+    // 回归:上游 URL 里的 IPv6 经 WHATWG URL 解析后 hostname 恒带方括号,Node 又把它
+    // 原样传到 agent 的 options.host。不剥就会当成域名(ATYP=0x03)连括号发出去,
+    // 代理拿去做 DNS 解析必然失败。
+    const stub = await startSocks5Stub();
+    (await socks5Connect(target(stub.port), '[2001:db8::1]', 443)).destroy();
+    expect(stub.requests).toEqual([{ atyp: 0x04, host: '2001:db8:0:0:0:0:0:1', port: 443 }]);
+  });
+
   it('performs RFC 1929 username/password authentication with raw credentials', async () => {
     const stub = await startSocks5Stub({ requireAuth: true });
     const socket = await socks5Connect(

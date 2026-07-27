@@ -60,8 +60,10 @@ export type OutboundProxyResolver = (
  * 去掉 IPv6 字面量的方括号。WHATWG URL 的 `hostname` 对 IPv6 返回**带方括号**的
  * 形式(`new URL('https://[::1]').hostname === '[::1]'`),而比较 / 重组 authority
  * 都需要裸地址;所有消费 hostname 的入口先过这里归一化。
+ * 带括号的形态会一路传到 agent 的 `options.host`(实测 Node 不会自己剥),
+ * socks5.ts 编码目标地址前也要用它。
  */
-function stripIpv6Brackets(hostname: string): string {
+export function stripIpv6Brackets(hostname: string): string {
   return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname;
 }
 

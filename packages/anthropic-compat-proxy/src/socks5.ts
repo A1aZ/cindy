@@ -22,7 +22,12 @@ import { Agent as HttpsAgent, type AgentOptions } from 'node:https';
 import { connect as netConnect, isIPv4, isIPv6, type Socket, type TcpSocketConnectOpts } from 'node:net';
 import type { Duplex } from 'node:stream';
 
-import { formatAuthority, SOCKS5_CREDENTIAL_MAX_BYTES, type OutboundProxyTarget } from './outbound-proxy.js';
+import {
+  formatAuthority,
+  SOCKS5_CREDENTIAL_MAX_BYTES,
+  stripIpv6Brackets,
+  type OutboundProxyTarget,
+} from './outbound-proxy.js';
 
 // 握手整体超时(TCP 连上代理 → CONNECT 回复读完)。与 HTTP 代理 CONNECT 的
 // PROXY_CONNECT_TIMEOUT_MS 对齐:代理通常在本机/局域网,正常毫秒级完成,上限只防
@@ -104,8 +109,14 @@ export function ipv6ToBytes(address: string): Buffer | null {
 /**
  * 把目标地址编码成 SOCKS5 的 ATYP + ADDR 段。域名走 ATYP_DOMAIN 交给代理解析
  * (见文件头注释);域名超 255 字节无法表达,返回 null。
+ *
+ * 先剥 IPv6 方括号:上游 URL 里的 `https://[2001:db8::1]` 经 WHATWG URL 解析后
+ * hostname 恒带方括号,且 Node 把它原样传到 agent 的 `options.host`(实测)。
+ * 不剥的话 isIPv6 判否,地址会被当成**域名**连括号一起发出去,代理拿去做 DNS
+ * 解析必然失败。
  */
-function encodeDestination(host: string): Buffer | null {
+function encodeDestination(rawHost: string): Buffer | null {
+  const host = stripIpv6Brackets(rawHost);
   if (isIPv4(host)) {
     return Buffer.concat([Buffer.of(ATYP_IPV4), Buffer.from(host.split('.').map(Number))]);
   }

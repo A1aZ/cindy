@@ -25,6 +25,7 @@ import { redactSensitiveText } from '@cindy/maker-shared/error-redaction';
 import { applyCodexPlanSnapshotOnDone } from '@cindy/maker-shared/message-render';
 import { isAgentTaskToolName } from '@cindy/maker-shared/agent-task';
 import { HISTORY_GAP_SPLIT_MS } from './historyGap';
+import { isGhostCallToolName } from '../../shared/ghost';
 import type { MessageRole, Message, MessageAutomationOrigin } from '@/lib/ccAgent.types';
 import type { AttachedFile, MentionedResource, SerializedAttachedFile } from '@/lib/fileTypes';
 import type {
@@ -5271,6 +5272,11 @@ function removeMessagesByClientIds(
       messages,
       taskUpdates,
       isFirstMessage: !messages.some((message) => message.role === 'user'),
+      // 第四条 epoch-reset 路径:上面 invalidateHistory 时已 bump epoch 作废 in-flight
+      // 的翻页 / 跳转补齐,锁同样由本次重置释放。被作废的请求不会代清(它们分辨不出锁
+      // 属于哪一代),漏清会让行首守卫把该会话的翻页永久卡住 —— 既有回归
+      // 「discards an in-flight paging window after grouped deletion」正守着这条。
+      ...(options.invalidateHistory !== false ? { isLoadingMore: false } : {}),
     };
   });
 }
@@ -5570,13 +5576,16 @@ function loadOlderMessages(sessionId: string): void {
         log.warn('loadOlderMessages page fetch failed', { sessionId, err: String(err) });
       }
 
-      // 代际比对:追页期间切片被整体重置(rewind reloadMessages / /clear / purge)
-      // → 本次窗口作废,只复位 spinner(reload 的 setState 不清 isLoadingMore,这里
-      // 不复位会让行首守卫永久卡住翻页)。此点之后到 setState 提交全程同步,无新竞态窗口。
-      if ((_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart) {
-        setState(sessionId, (s) => ({ ...s, isLoadingMore: false }));
-        return;
-      }
+      // 代际比对:追页期间切片被整体重置(reloadMessages / /clear / edit-last 截断 /
+      // purge)→ 本次窗口作废,直接退出且**不碰 isLoadingMore**。
+      //
+      // 早先这里会顺手复位 spinner,理由是"reload 的 setState 不清 isLoadingMore"。
+      // 那条前提已经不成立:三条 epoch-reset 路径(reloadMessages /
+      // clearSessionAfterGuard / dropMessagesFromClientId)现在各自显式释放锁。而在
+      // 重置之后,新代际很可能已经开始自己的分页并重新置了锁 —— 这里再无条件清一次,
+      // 就是把别人的锁放掉,让后续滚动 / 跳转并发去抢同一个游标,重新制造游标回退与
+      // 重复分页(#676 review)。谁重置谁释放,被作废的请求一律不碰。
+      if ((_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart) return;
 
       if (collected.length === 0) {
         setState(sessionId, (s) => ({
@@ -5683,11 +5692,20 @@ function estimateRenderItemCount(rows: Message[]): number {
       continue;
     }
     if (row.role === 'tool_use') {
-      // 工具名在 content.toolName 里(与 mapServerMessages 同口径);拿不到就按普通
-      // 工具折算,宁可低估这一行也不因解析失败放大预算。
+      // 工具名在 content.toolName 里(与 mapServerMessages 同口径)。
+      //
+      // 白名单口径,而不是黑名单:只有**确认**会被合成 tool_segment 的普通工具才享受
+      // 折算,其余(Agent / Task / collab / Workflow 的 agent_task 卡、ghost_call 配上
+      // 卡后隐身行 + 独立 ghost_card、以及 toolName 解析失败的未知行)一律按 1:1 计,
+      // 并结束当前段 —— 这几类在 buildRenderItems 里都会 flushSegment 并各自出一个
+      // item。低估预算的方向恰恰是危险的那一侧:它会放进更多实际渲染量(#676 review)。
       const toolName = toolNameOfRow(row);
-      if (isAgentTaskToolName(toolName) || toolName === 'Workflow') {
-        // 独立 agent_task 卡,并且它也会 flushSegment。
+      const foldsIntoSegment =
+        toolName.length > 0 &&
+        !isAgentTaskToolName(toolName) &&
+        toolName !== 'Workflow' &&
+        !isGhostCallToolName(toolName);
+      if (!foldsIntoSegment) {
         oneToOneRows++;
         rowsInCurrentSegment = 0;
         lastPlainToolMs = null;
@@ -5757,14 +5775,20 @@ async function backfillHistoryUntil(
 ): Promise<JumpBackfillOutcome> {
   const epochChanged = () => (_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart;
   if (epochChanged()) return 'cancelled';
-  if (covered(getOrCreateState(sessionId).messages)) return 'covered';
 
-  // 与 loadOlderMessages 共用 isLoadingMore 这把锁:它已在飞行中时不抢游标。
-  // 两个流程并发读写同一个 oldestMessageId,响应乱序会让游标回退、重复拉页并耗尽
-  // 上限;让位后退回 around 窗口(窗口可能不连续,由渲染层的空洞守卫兜底)比制造
-  // 游标错乱更安全。反向由这里立刻置位 isLoadingMore 挡住后续 loadOlderMessages。
-  // 返回 busy 而不是 unavailable:锁是别人的,fallback 路径不得代为释放。
+  // 锁优先,连"目标已在窗口内"这种零成本情况也不例外(#676 review)。
+  //
+  // 与 loadOlderMessages 共用 isLoadingMore 这把锁:它已在飞行中时不抢游标。两个流程
+  // 并发读写同一个 oldestMessageId,响应乱序会让游标回退、重复拉页并耗尽上限;让位后
+  // 退回 around 窗口(窗口可能不连续,由渲染层的空洞守卫兜底)比制造游标错乱更安全。
+  // 反向由下面立刻置位 isLoadingMore 挡住后续 loadOlderMessages。
+  //
+  // 为什么不能先判 covered:covered 会让 commitAroundWindow 去写 oldestMessageId,
+  // 那在别人持锁期间同样破坏游标单调性。busy 分支只做权威 merge、不碰任何分页状态,
+  // 所以锁被占用时一律 busy —— 返回 busy 而不是 unavailable,是因为锁是别人的,
+  // fallback 路径不得代为释放。
   if (getOrCreateState(sessionId).isLoadingMore) return 'busy';
+  if (covered(getOrCreateState(sessionId).messages)) return 'covered';
 
   setState(sessionId, (s) => ({ ...s, isLoadingMore: true }));
   let itemsFetched = 0;

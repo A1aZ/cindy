@@ -507,6 +507,83 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(false);
   });
 
+  it('P. ghost_call 与未知工具名都按 1:1 计入预算(白名单口径)', async () => {
+    // review #676（codex + copilot）：ghost_call 配上卡后工具行隐身、另出一个独立
+    // ghost_card；toolName 解析失败的行也无从判断。这两类按普通工具 4:1 折算都是
+    // **低估**，而低估方向恰恰危险——它会放进更多实际渲染量。
+    const target = serverMessage({
+      id: 'cards-deep',
+      clientId: 'cards-deep',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    let page = 0;
+    vi.mocked(listMessagesFor).mockImplementation(async () => {
+      const base = page++;
+      // 每页 100 条 ghost_call（密集，间隔 10 秒 → 不会被空洞切段）。
+      return Array.from({ length: 100 }, (_, i) =>
+        serverMessage({
+          id: `gc-${base}-${i}`,
+          clientId: `gc-${base}-${i}`,
+          role: 'tool_use',
+          content: JSON.stringify({
+            toolName: 'mcp__cindy__ghost_call',
+            input: { ghostId: 'g1' },
+          }),
+          createdAt: new Date(
+            Date.UTC(2026, 6, 25, 12, 0, 0) - (base * 100 + i) * 10_000,
+          ).toISOString(),
+        }),
+      );
+    });
+
+    await makerChatStore.loadAroundMessageClientId(SID, 'cards-deep', { radius: 60 });
+
+    // 100 张卡/页、600 预算 → 约 6 页；按 4:1 折算会翻到 24 页。
+    const calls = vi.mocked(listMessagesFor).mock.calls.length;
+    expect(calls).toBeGreaterThan(0);
+    expect(calls).toBeLessThanOrEqual(7);
+  });
+
+  it('Q. 锁被占用时即便目标已在窗口内也让位,不写游标', async () => {
+    // review #676（copilot）：covered 判定原先排在锁检查之前，于是别人持锁期间
+    // commitAroundWindow('covered') 仍会写 oldestMessageId，破坏游标单调性。
+    const seeded = fullPageNewestFirst();
+    const inWindow = seeded[50];
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([inWindow]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce(seeded);
+    await makerChatStore.loadAroundMessageClientId(SID, inWindow.clientId, { radius: 60 });
+
+    let releasePage: (rows: Message[]) => void = () => {};
+    vi.mocked(listMessagesFor).mockImplementationOnce(
+      () =>
+        new Promise<Message[]>((resolve) => {
+          releasePage = resolve;
+        }),
+    );
+    makerChatStore.loadOlderMessages(SID);
+    await flushMicrotasks();
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(true);
+
+    const cursorBefore = makerChatStore.getSnapshot(SID).oldestMessageId;
+    // 目标已经在窗口里（→ covered），但 around 窗口按 radius 还带回一条**更早**的行。
+    // 旧顺序先判 covered，commitAroundWindow('covered') 就会把游标推到那条更早的行，
+    // 而锁归正在飞行的 loadOlderMessages —— 游标单调性被破坏。
+    const olderNeighbour = serverMessage({
+      id: 'q-older',
+      clientId: 'q-older',
+      createdAt: '2026-07-19T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([olderNeighbour, inWindow]);
+    await makerChatStore.loadAroundMessageClientId(SID, inWindow.clientId, { radius: 60 });
+
+    expect(makerChatStore.getSnapshot(SID).oldestMessageId).toBe(cursorBefore);
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(true);
+
+    releasePage([]);
+    await flushMicrotasks();
+  });
+
   it('F. 让位时不释放别人的分页锁', async () => {
     // review #676（codex）：让位后 fallback 若写 isLoadingMore:false，就把仍在飞行的
     // loadOlderMessages 的锁提前释放了，下一次滚动/跳转会从同一游标再开一个请求。

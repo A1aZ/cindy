@@ -79,3 +79,23 @@ export async function noteHookSessionMoved(
     });
   }
 }
+
+/**
+ * 移动写库成功后调用: 清掉绑定上的在途标记(previousWorkingDir)。
+ * 让「登记已落、库还没落」的容忍窗口严格限定在移动的两步之间 —— 标记留着不清,
+ * 之后把会话目录改回旧值就能靠它绕过撤权(PR #669 review 指出)。
+ */
+export function completeHookSessionMove(sessionId: string, workingDir: string): void {
+  try {
+    const store = createHookBindingStore({
+      filePath: ownerScopedUserDataPath('hook-bindings.json'),
+      log: { warn: (msg: string) => log.warn(msg) },
+    });
+    store.completeSessionMove(sessionId, workingDir);
+  } catch (err) {
+    log.warn('completeHookSessionMove failed', {
+      sessionId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+}

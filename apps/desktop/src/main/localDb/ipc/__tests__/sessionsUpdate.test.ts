@@ -25,6 +25,7 @@ const h = vi.hoisted(() => ({
     persistedSdkSessionId: null,
   })),
   noteHookSessionMoved: vi.fn(async () => undefined),
+  completeHookSessionMove: vi.fn(),
   isKnownRecentWorkdir: vi.fn(async () => true),
   assertTrustedAppRendererEvent: vi.fn(),
   moveOrder: [] as string[],
@@ -68,6 +69,7 @@ vi.mock('../../../maker-host/claude-transcript-relocation.js', () => ({
 }));
 vi.mock('../../../hook-control/sessionMoves.js', () => ({
   noteHookSessionMoved: h.noteHookSessionMoved,
+  completeHookSessionMove: h.completeHookSessionMove,
 }));
 
 import { registerSessionIpc } from '../sessions';
@@ -343,6 +345,32 @@ describe('local-db:sessions:move handler wiring', () => {
 
   it('rejects an unknown target kind', async () => {
     await expect(invokeMove('codex-local', { kind: 'nowhere' })).rejects.toThrow(/INVALID_PARAMS/);
+  });
+
+  it('clears the in-flight marker once the move commits', async () => {
+    await invokeMove('codex-local', { kind: 'project', workingDir: '/new/dir' });
+
+    expect(h.noteHookSessionMoved).toHaveBeenCalledWith('codex-local', {
+      from: '/old/dir',
+      to: '/new/dir',
+    });
+    // 收尾必须发生在写库之后:标记留着不清就能被拿来绕过撤权
+    expect(h.completeHookSessionMove).toHaveBeenCalledWith('codex-local', '/new/dir');
+    const persisted = h
+      .sqlite!.prepare('SELECT working_dir FROM sessions WHERE id = ?')
+      .get('codex-local') as { working_dir: string };
+    expect(persisted.working_dir).toBe('/new/dir');
+  });
+
+  it('rejects a project target that contains path traversal segments', async () => {
+    // 校验解析后的路径、存原串, 两者不一致就能绕过目的地校验
+    await expect(
+      invokeMove('codex-local', {
+        kind: 'project',
+        workingDir: '/known/repo/.cindy-worktrees/x/../../../etc',
+      }),
+    ).rejects.toThrow(/INVALID_PARAMS/);
+    expect(h.noteHookSessionMoved).not.toHaveBeenCalled();
   });
 
   it('rejects a project target whose path normalizes to nothing', async () => {

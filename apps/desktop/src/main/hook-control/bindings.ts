@@ -104,6 +104,13 @@ export interface HookBindingStore {
     move: { from: string | null; to: string },
     authority: HookBindingAuthority,
   ): number;
+  /**
+   * 移动写库成功后收尾: 清掉 previousWorkingDir(在途标记), 让它严格只存在于
+   * 「登记已落、库还没落」那一小段。不清的话这个标记会一直有效, 之后有人把
+   * 会话目录改回旧值就能靠它绕过撤权(PR #669 review 指出)。
+   * 只对仍指向本次目标目录的绑定生效; 返回更新条数。
+   */
+  completeSessionMove(sessionId: string, workingDir: string): number;
   /** 删除单条绑定(session 失效重建前清理)。 */
   remove(connectionId: string, externalKey: string): void;
 }
@@ -225,6 +232,23 @@ export function createHookBindingStore(deps: {
             rev: revOf(row) + 1,
             updatedAt: Date.now(),
           };
+          updated += 1;
+        }
+      }
+      if (updated > 0) writeAll(data);
+      return updated;
+    },
+    completeSessionMove(sessionId, workingDir) {
+      if (!sessionId || !workingDir) return 0;
+      const data = readAll();
+      let updated = 0;
+      for (const rows of Object.values(data)) {
+        for (const [externalKey, row] of Object.entries(rows)) {
+          if (row?.sessionId !== sessionId) continue;
+          if (row.workingDir !== workingDir) continue;
+          if (row.previousWorkingDir == null) continue;
+          const { previousWorkingDir: _dropped, ...rest } = row;
+          rows[externalKey] = { ...rest, rev: revOf(row) + 1, updatedAt: Date.now() };
           updated += 1;
         }
       }

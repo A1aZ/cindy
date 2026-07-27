@@ -65,6 +65,17 @@ function memoryBindings(): HookBindingStore {
       });
       return true;
     },
+    completeSessionMove: (sessionId, workingDir) => {
+      let updated = 0;
+      for (const [key, row] of map) {
+        if (row.sessionId !== sessionId) continue;
+        if (row.workingDir !== workingDir) continue;
+        if (row.previousWorkingDir === null) continue;
+        map.set(key, { ...row, previousWorkingDir: null, rev: row.rev + 1 });
+        updated += 1;
+      }
+      return updated;
+    },
     noteSessionMoved: (sessionId, move, authority) => {
       let updated = 0;
       for (const [key, row] of map) {

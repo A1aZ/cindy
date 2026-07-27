@@ -720,7 +720,10 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
         const authority: HookBindingAuthority = inAllowedRoot ? 'workspace' : 'local-move';
         // 登记过的移动要在渠道里说明一次(说明完就清掉 pending)
         const announceMove = locallyAuthorized && boundEntry?.noticePending === true;
-        migrateLegacyBinding(workingDir, authority);
+        // 在途移动时不迁移 legacy 行: 迁移会把 inspect 到的旧目录写进新命名空间
+        // 并丢掉 previousWorkingDir / noticePending, 等于抹掉刚落下的登记
+        // (PR #669 review 指出)。等移动落库后的下一条消息再迁, 语义不变。
+        if (!pendingMoveRegistration) migrateLegacyBinding(workingDir, authority);
         // 快照回填 / 授权收敛: 只在目录、来源或待说明状态变化时落盘, 常规复用
         // 不产生写。在途移动(pendingMoveRegistration)一律不回填 —— 那会把刚落
         // 下的授权收敛回旧目录, 移动写库后下一条消息就当撤权把绑定删了。

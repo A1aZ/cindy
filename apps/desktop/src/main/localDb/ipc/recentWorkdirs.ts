@@ -155,11 +155,6 @@ async function resolveRealPath(p: string): Promise<string | null> {
 export async function isKnownRecentWorkdir(candidate: string | null | undefined): Promise<boolean> {
   const shaped = normalizePathShape(candidate);
   if (!shaped) return false;
-  // 受管 worktree 解析回它的 base 项目再判定 —— 这里**不能**复用
-  // normalizeRecentWorkdirPath 的 worktree 排除(那是"别进最近列表"的语义):
-  // hook 自己新建的会话就跑在 worktree 里, 把会话移到 worktree 是正常操作,
-  // 直接判 false 会让移动后的 thread 白白重开(PR #669 review 指出)。
-  const normalized = getManagedWorktreeBasePath(shaped) ?? shaped;
   try {
     const db = getDbClient().drizzle;
     // 与 list IPC 同样加 LIMIT: 万一驱逐路径被绕过, 也不至于让每次移动都变成
@@ -171,10 +166,17 @@ export async function isKnownRecentWorkdir(candidate: string | null | undefined)
       .limit(MAX_RECENT_WORKDIRS);
     if (rows.length === 0) return false;
     const lower = (v: string): string => (process.platform === 'win32' ? v.toLowerCase() : v);
-    const resolvedTarget = await resolveRealPath(normalized);
+    // **先解析成 canonical 路径再谈 worktree**: 反过来的话
+    // `/known/repo/.cindy-worktrees/x/../../../etc` 会被 marker 切成
+    // `/known/repo` 而通过校验, 真正生效的却是 /etc(PR #669 review 指出)。
+    const resolvedTarget = await resolveRealPath(shaped);
     // 目标解析不了 = 不存在 / 断链 / 无权限 -> 不认它是已知项目(fail closed)
     if (resolvedTarget === null) return false;
-    const target = lower(resolvedTarget);
+    // 受管 worktree 解析回它的 base 项目再判定 —— 这里**不能**复用
+    // normalizeRecentWorkdirPath 的 worktree 排除(那是"别进最近列表"的语义):
+    // hook 自己新建的会话就跑在 worktree 里, 把会话移到 worktree 是正常操作,
+    // 直接判 false 会让移动后的 thread 白白重开。
+    const target = lower(getManagedWorktreeBasePath(resolvedTarget) ?? resolvedTarget);
     const bases = await Promise.all(rows.map((row) => resolveRealPath(row.path)));
     return bases.some((raw) => {
       // 解析不了的项目条目(目录已被删/移走)不参与判定

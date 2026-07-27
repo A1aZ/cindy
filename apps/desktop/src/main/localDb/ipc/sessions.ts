@@ -16,7 +16,7 @@ import type { DbClient } from '../client/DbClient';
 import { sessions, messages } from '../schema';
 import { throwIpcError, requireString, requireObject } from '../../utils/ipcValidate';
 import { assertTrustedAppRendererEvent } from '../../security/trustedAppRenderer.js';
-import { noteHookSessionMoved } from '../../hook-control/sessionMoves.js';
+import { completeHookSessionMove, noteHookSessionMoved } from '../../hook-control/sessionMoves.js';
 import { resolveBusinessSessionId } from '../../sessionIds';
 import {
   sessionToCamel,
@@ -1055,6 +1055,12 @@ export function registerSessionIpc(): void {
       // 的不一致状态, 这里直接拒绝(PR #669 review 指出)。
       const normalized = normalizeWorkingDirForStorage(requireString(t.workingDir, 'workingDir'));
       if (!normalized) throwIpcError('INVALID_PARAMS', 'workingDir must be a usable path');
+      // 拒绝含 `..` 段的路径: 校验用的是解析后的路径、存下来的却是原串, 两者
+      // 不一致就会被拿来绕过目的地校验(PR #669 review 指出)。正常入口(原生
+      // 目录框 / 项目列表)给的都是规范绝对路径。
+      if (normalized.split('/').includes('..')) {
+        throwIpcError('INVALID_PARAMS', 'workingDir must not contain path traversal segments');
+      }
       patch = { workspaceKind: 'project', workingDir: normalized };
     }
 
@@ -1072,6 +1078,10 @@ export function registerSessionIpc(): void {
       // 目标不在用户已知项目里就不铸造授权(移动本身照常进行)
       if (fromDir !== nextDir && (await isKnownRecentWorkdir(nextDir))) {
         await noteHookSessionMoved(sid, { from: fromDir, to: nextDir });
+        const updated = await applySessionUpdate(sid, patch);
+        // 写库成功 = 移动的两步都完成, 立刻收掉在途标记(见 bindings 文件头)
+        completeHookSessionMove(sid, nextDir);
+        return updated;
       }
     }
     return applySessionUpdate(sid, patch);

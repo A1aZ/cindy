@@ -2,18 +2,24 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import type { DictationDictionaryLearningAction } from '@cindy/voice-input-core';
+import {
+  addManualEntry,
+  deleteTerms,
+  recordLearningEvent,
+  renameTerm,
+  termKeyFromMaterializedId,
+  type DictationDictionaryLearningAction,
+  type MaterializedDictionary,
+} from '@cindy/voice-input-core';
 
 import { createLogger } from '../logger.js';
 import { ownerScopedUserDataPath, getActiveAppSession } from '../appSessionState.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
+import { voiceDictionarySyncStore } from './VoiceDictionarySyncStore.js';
 import {
-  applyVoiceInputDictionaryLearningActions,
   compactVoiceInputHistoryIfNeeded,
   createVoiceInputHistoryEntry,
-  deleteVoiceInputDictionaryEntriesFromSettings,
   getDefaultVoiceInputSettings,
-  getNewAutomaticDictionaryEntries,
   normalizeVoiceInputDataSnapshot,
   normalizeVoiceInputHistory,
   normalizeVoiceInputSettings,
@@ -74,9 +80,11 @@ export class VoiceInputDataStore {
 
   updateSettings(patch: unknown): VoiceInputSettings {
     const current = this.load();
+    // 词典三件套的真相在同步状态里,不接受整份覆盖 —— 那会绕过 CRDT,让本地写入
+    // 在下一次物化时被静默丢掉。词典变更一律走下面的语义化入口。
     const nextSettings = normalizeVoiceInputSettings({
       ...current.settings,
-      ...(isRecord(patch) ? patch : {}),
+      ...stripDictionaryFields(patch),
     }, process.platform);
     this.replaceState({
       ...current,
@@ -86,15 +94,45 @@ export class VoiceInputDataStore {
   }
 
   deleteDictionaryEntries(entryIds: string[]): VoiceInputSettings {
-    const current = this.load();
-    const nextSettings = deleteVoiceInputDictionaryEntriesFromSettings(current.settings, entryIds);
-    if (nextSettings !== current.settings) {
-      this.replaceState({
-        ...current,
-        settings: nextSettings,
-      });
-    }
-    return cloneSettings(nextSettings);
+    const state = voiceDictionarySyncStore.getState();
+    const termKeys = entryIds
+      .map((entryId) => termKeyFromMaterializedId(state, entryId))
+      .filter((key): key is string => Boolean(key));
+    if (termKeys.length === 0) return cloneSettings(this.load().settings);
+    return this.applyDictionaryMutation((current, clock) =>
+      deleteTerms(current, clock, { termKeys, nowMs: Date.now() }),
+    );
+  }
+
+  addManualDictionaryEntry(text: string): VoiceInputSettings {
+    return this.applyDictionaryMutation((current, clock) =>
+      addManualEntry(current, clock, { text, nowMs: Date.now() }),
+    );
+  }
+
+  /** CSV 导入:整批按手动词条认领,单条失败不影响其余。 */
+  importManualDictionaryEntries(texts: string[]): VoiceInputSettings {
+    return this.applyDictionaryMutation((current, clock) => {
+      let state = current;
+      let nextClock = clock;
+      let changed = false;
+      const nowMs = Date.now();
+      for (const text of texts) {
+        const result = addManualEntry(state, nextClock, { text, nowMs });
+        state = result.state;
+        nextClock = result.clock;
+        changed = changed || result.changed;
+      }
+      return { state, clock: nextClock, changed };
+    });
+  }
+
+  renameDictionaryEntry(entryId: string, nextText: string): VoiceInputSettings {
+    const termKey = termKeyFromMaterializedId(voiceDictionarySyncStore.getState(), entryId);
+    if (!termKey) return cloneSettings(this.load().settings);
+    return this.applyDictionaryMutation((current, clock) =>
+      renameTerm(current, clock, { termKey, nextText, nowMs: Date.now() }),
+    );
   }
 
   recordDictionaryLearningActions(actions: DictationDictionaryLearningAction[]): {
@@ -102,23 +140,87 @@ export class VoiceInputDataStore {
     newAutomaticEntries: Array<Pick<VoiceInputDictionaryEntry, 'id' | 'text'>>;
   } {
     const current = this.load();
-    const appliedSettings = applyVoiceInputDictionaryLearningActions(current.settings, actions);
-    if (appliedSettings === current.settings) {
+    if (!current.settings.refinementEnabled || !current.settings.autoDictionaryEnabled) {
       return { settings: cloneSettings(current.settings), newAutomaticEntries: [] };
     }
-    const nextSettings = normalizeVoiceInputSettings(appliedSettings, process.platform);
-    const newAutomaticEntries = getNewAutomaticDictionaryEntries(
-      current.settings.dictionaryEntries,
-      nextSettings.dictionaryEntries,
+    const previousEntryKeys = new Set(
+      current.settings.dictionaryEntries
+        .filter((entry) => entry.source === 'automatic')
+        .map((entry) => entry.text.toLocaleLowerCase()),
     );
-    this.replaceState({
-      ...current,
-      settings: nextSettings,
+
+    const nextSettings = this.applyDictionaryMutation((state, clock) => {
+      let nextState = state;
+      let nextClock = clock;
+      let changed = false;
+      const nowMs = Date.now();
+      for (const action of actions) {
+        // 与单机学习路径一致:低置信度或没有别名证据的建议不进词典。
+        if (action.confidence === 'low') continue;
+        const aliases = action.aliases ?? [];
+        if (aliases.length === 0) continue;
+        const result = recordLearningEvent(nextState, nextClock, {
+          text: action.term,
+          aliases,
+          stage: action.action === 'add_candidate' ? 'candidate' : 'entry',
+          nowMs,
+        });
+        nextState = result.state;
+        nextClock = result.clock;
+        changed = changed || result.changed;
+      }
+      return { state: nextState, clock: nextClock, changed };
     });
-    return {
-      settings: cloneSettings(nextSettings),
-      newAutomaticEntries,
-    };
+
+    const newAutomaticEntries = nextSettings.dictionaryEntries
+      .filter((entry) => entry.source === 'automatic')
+      .filter((entry) => !previousEntryKeys.has(entry.text.toLocaleLowerCase()))
+      .map((entry) => ({ id: entry.id, text: entry.text }));
+    return { settings: cloneSettings(nextSettings), newAutomaticEntries };
+  }
+
+  /**
+   * 合并远端设备送来的同步状态。返回是否引入了新信息(调用方据此决定要不要回传
+   * 自己的状态)。
+   */
+  mergeRemoteDictionaryState(remote: unknown): boolean {
+    const materialized = voiceDictionarySyncStore.mergeRemote(remote);
+    if (!materialized) return false;
+    this.commitMaterializedDictionary(materialized);
+    return true;
+  }
+
+  /**
+   * 执行一次词典变更并把物化结果落回 settings。
+   *
+   * 物化结果是**只读投影**:写回 settings 之后绝不能再被反向读成本地增量,否则
+   * 合并进来的远端计数会被重复记账,词典频次随同步次数膨胀。日常路径永远是
+   * 「操作 → 状态 → 物化 → settings」这一个方向。
+   */
+  private applyDictionaryMutation(
+    apply: Parameters<typeof voiceDictionarySyncStore.mutate>[0],
+  ): VoiceInputSettings {
+    const materialized = voiceDictionarySyncStore.mutate(apply);
+    if (!materialized) return cloneSettings(this.load().settings);
+    return cloneSettings(this.commitMaterializedDictionary(materialized));
+  }
+
+  private commitMaterializedDictionary(materialized: MaterializedDictionary): VoiceInputSettings {
+    const current = this.load();
+    const nextSettings = normalizeVoiceInputSettings(
+      { ...current.settings, ...projectMaterializedDictionary(materialized) },
+      process.platform,
+    );
+    this.replaceState({ ...current, settings: nextSettings });
+    voiceDictionarySyncStore.markMaterialized(materialized);
+    dictionaryChangedListeners.forEach((listener) => {
+      try {
+        listener();
+      } catch {
+        // 监听者(同步驱动)出问题不能影响词典本身的写入。
+      }
+    });
+    return nextSettings;
   }
 
   recordHistory(text: string): string | null {
@@ -215,6 +317,7 @@ export class VoiceInputDataStore {
         legacyRendererStorageMigrated: isRecord(parsed) && parsed.legacyRendererStorageMigrated === true,
         ...snapshot,
       };
+      this.state = this.hydrateDictionaryFromSyncState(this.state);
       return this.state;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -227,7 +330,54 @@ export class VoiceInputDataStore {
         settings: getDefaultVoiceInputSettings(process.platform),
         history: [],
       };
+      this.state = this.hydrateDictionaryFromSyncState(this.state);
       return this.state;
+    }
+  }
+
+  /**
+   * 让内存里的词典与同步状态对齐。
+   *
+   * 顺带承担两件一次性工作:
+   *  - **首次迁移**:同步状态为空、上次物化主键也为空时,回收会把词典文件里已有的
+   *    词条整份认领进来 —— 存量用户升级后词典原样保留,不需要单独的迁移代码路径。
+   *  - **降级回收**:旧版本客户端直接改过词典文件时,把那些改动认领回状态。
+   *
+   * 只在 `load()` 里跑,不在运行期跑:运行期的写入全部走 `applyDictionaryMutation`,
+   * 物化是单向投影,绝不反向推断。
+   */
+  private hydrateDictionaryFromSyncState(state: StoredVoiceInputData): StoredVoiceInputData {
+    try {
+      voiceDictionarySyncStore.reconcile({
+        // 带上频次:首次迁移时状态是空的,这些数字是用户长期积累的排序权重,
+        // 必须原样接管(seedTerm 只对状态里不存在的词条生效,不会重复记账)。
+        entries: state.settings.dictionaryEntries.map((entry) => ({
+          text: entry.text,
+          source: entry.source,
+          frequency: entry.frequency,
+        })),
+        suppressedTexts: state.settings.suppressedAutomaticDictionaryTexts,
+        candidates: state.settings.dictionaryCandidates.map((candidate) => ({
+          text: candidate.text,
+          evidenceCount: candidate.evidenceCount,
+        })),
+      });
+      voiceDictionarySyncStore.collectGarbage();
+      const materialized = voiceDictionarySyncStore.materialize();
+      voiceDictionarySyncStore.markMaterialized(materialized);
+      return {
+        ...state,
+        settings: normalizeVoiceInputSettings(
+          { ...state.settings, ...projectMaterializedDictionary(materialized) },
+          process.platform,
+        ),
+      };
+    } catch (error) {
+      // 同步状态坏了不能让词典功能整体不可用:退回文件里的词典继续跑。
+      log.warn('dictionary sync hydration failed, falling back to on-disk dictionary', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return state;
     }
   }
 
@@ -273,6 +423,17 @@ export class VoiceInputDataStoreWriteError extends Error {
 
 export const voiceInputDataStore = new VoiceInputDataStore();
 
+/**
+ * 词典变更监听。同步驱动订阅它来触发广播 —— 用回调而不是让 store 直接 import
+ * driver,避免两个模块互相 import 形成加载期环。
+ */
+const dictionaryChangedListeners = new Set<() => void>();
+
+export function onVoiceInputDictionaryChanged(listener: () => void): () => void {
+  dictionaryChangedListeners.add(listener);
+  return () => dictionaryChangedListeners.delete(listener);
+}
+
 export function registerVoiceInputDataStoreIpc(): void {
   if (ipcRegistered) return;
   ipcRegistered = true;
@@ -304,6 +465,39 @@ export function registerVoiceInputDataStoreIpc(): void {
       throwVoiceInputDataStoreIpcError(error);
     }
   });
+
+  // 词典的增改都是语义化操作,不接受 renderer 整份覆盖词条数组:同步状态是词典的
+  // 真相,整份覆盖既表达不了「用户到底做了什么」,也会在下一次物化时被丢掉。
+  ipcMain.handle('voice-input:dictionary:add-entry', (_event, text: unknown): VoiceInputSettings => {
+    try {
+      return voiceInputDataStore.addManualDictionaryEntry(typeof text === 'string' ? text : '');
+    } catch (error) {
+      throwVoiceInputDataStoreIpcError(error);
+    }
+  });
+
+  ipcMain.handle('voice-input:dictionary:import-entries', (_event, texts: unknown): VoiceInputSettings => {
+    try {
+      const list = Array.isArray(texts) ? texts.filter((item): item is string => typeof item === 'string') : [];
+      return voiceInputDataStore.importManualDictionaryEntries(list);
+    } catch (error) {
+      throwVoiceInputDataStoreIpcError(error);
+    }
+  });
+
+  ipcMain.handle(
+    'voice-input:dictionary:rename-entry',
+    (_event, payload: { entryId?: unknown; text?: unknown }): VoiceInputSettings => {
+      try {
+        const entryId = typeof payload?.entryId === 'string' ? payload.entryId : '';
+        const text = typeof payload?.text === 'string' ? payload.text : '';
+        if (!entryId) return voiceInputDataStore.getSettings();
+        return voiceInputDataStore.renameDictionaryEntry(entryId, text);
+      } catch (error) {
+        throwVoiceInputDataStoreIpcError(error);
+      }
+    },
+  );
 
   ipcMain.handle('voice-input:dictionary-learning:record-actions', (_event, actions: DictationDictionaryLearningAction[]) => {
     try {
@@ -404,4 +598,42 @@ function cloneHistory(history: VoiceInputHistoryEntry[]): VoiceInputHistoryEntry
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+/** 把 CRDT 物化结果投影成 settings 的词典三件套(两边字段形状本就一致)。 */
+function projectMaterializedDictionary(
+  materialized: MaterializedDictionary,
+): Pick<
+  VoiceInputSettings,
+  'dictionaryEntries' | 'dictionaryCandidates' | 'suppressedAutomaticDictionaryTexts'
+> {
+  return {
+    dictionaryEntries: materialized.entries.map((entry) => ({
+      id: entry.id,
+      text: entry.text,
+      source: entry.source,
+      frequency: entry.frequency,
+      aliases: entry.aliases.map((alias) => ({ ...alias })),
+      createdAt: entry.createdAt,
+      updatedAt: entry.updatedAt,
+    })),
+    dictionaryCandidates: materialized.candidates.map((candidate) => ({
+      text: candidate.text,
+      evidenceCount: candidate.evidenceCount,
+      aliases: candidate.aliases.map((alias) => ({ ...alias })),
+      createdAt: candidate.createdAt,
+      updatedAt: candidate.updatedAt,
+    })),
+    suppressedAutomaticDictionaryTexts: [...materialized.suppressedTexts],
+  };
+}
+
+/** 词典字段一律从通用 settings patch 里剥掉,防止绕过 CRDT 的整份覆盖。 */
+function stripDictionaryFields(patch: unknown): Record<string, unknown> {
+  if (!isRecord(patch)) return {};
+  const next = { ...patch };
+  delete next.dictionaryEntries;
+  delete next.dictionaryCandidates;
+  delete next.suppressedAutomaticDictionaryTexts;
+  return next;
 }

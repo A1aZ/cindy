@@ -6,6 +6,7 @@ export const DEVICE_LINK_MEDIA_FETCH_CHANNEL = 'device-link:media:fetch';
 export const DEVICE_LINK_VOICE_TRANSCRIBE_CHANNEL = 'device-link:voice:transcribe';
 export const DEVICE_LINK_VOICE_CREDENTIAL_SYNC_CHANNEL = 'device-link:voice:credential-sync';
 export const DEVICE_LINK_VOICE_DICTIONARY_LEARNING_CHANNEL = 'device-link:voice:dictionary-learning';
+export const DEVICE_LINK_VOICE_DICTIONARY_GET_CHANNEL = 'device-link:voice:dictionary:get';
 
 export type MobileVoiceCredentialSyncAsr = {
   provider: string;
@@ -64,6 +65,22 @@ export type MobileVoiceCredentialSyncResult = {
   refinerProviderChain?: MobileVoiceCredentialSyncRefiner[];
   settings?: MobileVoiceCredentialSyncSettings;
 };
+
+/**
+ * 手机拉取被控桌面词典的只读快照。
+ *
+ * 手机不参与 CRDT 合并 —— 它在后台不维持 WebSocket,拿不到对等同步的 push 帧,
+ * 也不该持有一份会分叉的可写词典。这里只投影 refine 真正用得上的字段。
+ */
+export type MobileVoiceDictionarySnapshotResult =
+  | {
+      ok: true;
+      entries: MobileVoiceCredentialSyncDictionaryEntry[];
+    }
+  | {
+      ok: false;
+      error: string;
+    };
 
 export type MobileVoiceDictionaryLearningRequest = {
   source: 'mobile';
@@ -265,6 +282,7 @@ export const MOBILE_REMOTE_INVOKE_CHANNELS = [
   DEVICE_LINK_MEDIA_FETCH_CHANNEL,
   DEVICE_LINK_VOICE_TRANSCRIBE_CHANNEL,
   DEVICE_LINK_VOICE_DICTIONARY_LEARNING_CHANNEL,
+  DEVICE_LINK_VOICE_DICTIONARY_GET_CHANNEL,
   'maker:get-pending-interactions',
   'maker:resolve-interaction',
   'maker:get-context-usage',

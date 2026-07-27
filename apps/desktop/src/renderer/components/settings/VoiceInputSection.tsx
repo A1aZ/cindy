@@ -13,7 +13,6 @@ import { cn } from '@/lib/utils';
 import {
   MAX_VOICE_INPUT_REFINEMENT_INSTRUCTIONS_CHARS,
   MAX_VOICE_INPUT_DICTIONARY_CSV_BYTES,
-  createManualVoiceInputDictionaryEntry,
   getVoiceInputSettings,
   mergeVoiceInputDictionaryCsvTerms,
   normalizeVoiceInputDictionaryEntryText,
@@ -1059,7 +1058,10 @@ export function VoiceInputSection() {
     setRefinementEnabled,
     setRefinementInstructions,
     setAutoDictionaryEnabled,
-    setDictionaryEntries,
+    setDictionarySyncEnabled,
+    addDictionaryEntry: addDictionarySettingEntry,
+    importDictionaryEntries: importDictionarySettingEntries,
+    renameDictionaryEntry: renameDictionarySettingEntry,
     deleteDictionaryEntry: deleteDictionarySettingEntry,
     setShortcut,
   } = useVoiceInputSettings();
@@ -1568,12 +1570,12 @@ export function VoiceInputSection() {
   );
 
   const addDictionaryEntry = useCallback(() => {
-    const entry = createManualVoiceInputDictionaryEntry(newDictionaryEntryText);
-    if (!entry) return;
-    setDictionaryEntries([...settings.dictionaryEntries, entry]);
+    const text = normalizeVoiceInputDictionaryEntryText(newDictionaryEntryText);
+    if (!text) return;
+    addDictionarySettingEntry(text);
     setNewDictionaryEntryText('');
     setAddingDictionaryEntry(false);
-  }, [newDictionaryEntryText, setDictionaryEntries, settings.dictionaryEntries]);
+  }, [addDictionarySettingEntry, newDictionaryEntryText]);
 
   const closeDictionaryEntryDialog = useCallback(() => {
     setAddingDictionaryEntry(false);
@@ -1624,7 +1626,16 @@ export function VoiceInputSection() {
       return;
     }
 
-    setDictionaryEntries(merged.entries);
+    // 容量与去重裁决仍由 mergeVoiceInputDictionaryCsvTerms 负责(下面的统计文案依赖
+    // 它的计数),但写入只提交「本次真正新增的词条文本」,由主进程按手动词条认领。
+    const existingKeys = new Set(
+      settings.dictionaryEntries.map((entry) => entry.text.toLocaleLowerCase()),
+    );
+    importDictionarySettingEntries(
+      merged.entries
+        .filter((entry) => !existingKeys.has(entry.text.toLocaleLowerCase()))
+        .map((entry) => entry.text),
+    );
     closeDictionaryEntryDialog();
     const skippedCount =
       parsed.duplicateRowCount +
@@ -1644,7 +1655,7 @@ export function VoiceInputSection() {
     );
   }, [
     closeDictionaryEntryDialog,
-    setDictionaryEntries,
+    importDictionarySettingEntries,
     settings.dictionaryEntries,
     t,
   ]);
@@ -1662,33 +1673,20 @@ export function VoiceInputSection() {
   const saveEditingDictionaryEntry = useCallback(() => {
     if (!editingDictionaryEntryId) return;
     const text = normalizeVoiceInputDictionaryEntryText(editingDictionaryEntryText);
+    // 清空文本仍然等于删除该词条(与改动前的交互一致)。
     if (!text) {
-      setDictionaryEntries(
-        settings.dictionaryEntries.filter((entry) => entry.id !== editingDictionaryEntryId),
-      );
+      deleteDictionarySettingEntry(editingDictionaryEntryId);
       cancelEditingDictionaryEntry();
       return;
     }
-    const now = Date.now();
-    setDictionaryEntries(
-      settings.dictionaryEntries.map((entry) =>
-        entry.id === editingDictionaryEntryId
-          ? {
-              ...entry,
-              text,
-              source: 'manual',
-              updatedAt: now,
-            }
-          : entry,
-      ),
-    );
+    renameDictionarySettingEntry(editingDictionaryEntryId, text);
     cancelEditingDictionaryEntry();
   }, [
     cancelEditingDictionaryEntry,
+    deleteDictionarySettingEntry,
     editingDictionaryEntryId,
     editingDictionaryEntryText,
-    setDictionaryEntries,
-    settings.dictionaryEntries,
+    renameDictionarySettingEntry,
   ]);
 
   const deleteDictionaryEntry = useCallback(
@@ -1949,6 +1947,23 @@ export function VoiceInputSection() {
                       checked={settings.autoDictionaryEnabled}
                       onCheckedChange={setAutoDictionaryEnabled}
                       aria-label={t('settings.voiceInput.refinement.dictionary.autoLearning.ariaLabel')}
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-4 rounded-[12px] border border-[var(--settings-input-border)] bg-[var(--settings-input-bg)] px-3 py-2.5">
+                    <div className="flex min-w-0 flex-col gap-0.5">
+                      <p className="text-13 font-medium text-[var(--settings-section-title)]">
+                        {t('settings.voiceInput.refinement.dictionary.deviceSync.label')}
+                      </p>
+                      <p className="text-12 leading-[1.35] text-[var(--settings-section-sublabel)] opacity-70">
+                        {t('settings.voiceInput.refinement.dictionary.deviceSync.hint')}
+                      </p>
+                    </div>
+
+                    <Switch
+                      checked={settings.dictionarySyncEnabled}
+                      onCheckedChange={setDictionarySyncEnabled}
+                      aria-label={t('settings.voiceInput.refinement.dictionary.deviceSync.ariaLabel')}
                     />
                   </div>
 

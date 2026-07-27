@@ -76,6 +76,13 @@ export interface VoiceInputSettings {
   refinementEnabled: boolean;
   refinementInstructions: string;
   autoDictionaryEnabled: boolean;
+  /**
+   * 是否在本账号的桌面设备之间自动同步词典。
+   *
+   * 刻意不复用 device-link 的「允许被控」开关:那个开关的语义是「允许别的设备操作
+   * 我这台电脑」,而词典同步是自己设备之间的数据流动,两者该分开决定。
+   */
+  dictionarySyncEnabled: boolean;
   dictionaryEntries: VoiceInputDictionaryEntry[];
   dictionaryCandidates: VoiceInputDictionaryCandidate[];
   suppressedAutomaticDictionaryTexts: string[];
@@ -405,6 +412,7 @@ export function getDefaultVoiceInputSettings(
     refinementEnabled: true,
     refinementInstructions: DEFAULT_VOICE_INPUT_REFINEMENT_INSTRUCTIONS,
     autoDictionaryEnabled: true,
+    dictionarySyncEnabled: true,
     dictionaryEntries: [],
     dictionaryCandidates: [],
     suppressedAutomaticDictionaryTexts: [],
@@ -457,6 +465,10 @@ export function normalizeVoiceInputSettings(
       typeof candidate.autoDictionaryEnabled === 'boolean'
         ? candidate.autoDictionaryEnabled
         : defaults.autoDictionaryEnabled,
+    dictionarySyncEnabled:
+      typeof candidate.dictionarySyncEnabled === 'boolean'
+        ? candidate.dictionarySyncEnabled
+        : defaults.dictionarySyncEnabled,
     dictionaryEntries: normalizeVoiceInputDictionaryEntries(
       candidate.dictionaryEntries ?? (candidate as { customDictionary?: unknown }).customDictionary,
     ),

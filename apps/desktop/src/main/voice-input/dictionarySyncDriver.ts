@@ -1,0 +1,180 @@
+/**
+ * 词典在本账号桌面设备之间的对等同步驱动。
+ *
+ * 传输走 device-link 的 push 帧:relay 只按 dst 转发,不解析、不落盘,所以词典内容
+ * (含人名、内部项目名、代号)全程不进服务端存储。push 不在 relay 的 CONTROL_KINDS
+ * 里,因此桌面之间交换词典**不要求**对方打开「允许被控」。
+ *
+ * ## 为什么可以不管丢帧
+ *
+ * relay 不暂存离线消息,目标不在线就直接失败。这里完全不做重试、ack 或补偿 ——
+ * 交换的是整份 CRDT 状态,合并幂等且可交换,这次没送到,下次任一触发时机再送一次
+ * 就收敛。为此触发点铺了三层:对端上线、本地变更(去抖)、以及长周期兜底。
+ *
+ * 手机不参与这条通道:移动端在后台不维持 WebSocket,收不到 push。它改用
+ * `device-link:voice:dictionary:get` 主动向在线桌面拉一份只读快照。
+ */
+
+import type { VoiceDictionarySyncState } from '@cindy/voice-input-core';
+
+import { createLogger } from '../logger.js';
+import { voiceDictionarySyncStore } from './VoiceDictionarySyncStore.js';
+import { voiceInputDataStore } from './VoiceInputDataStore.js';
+
+const log = createLogger('voice-input:dictionary-sync-driver');
+
+/** push 帧 channel。payload 形状见 {@link DictionarySyncFramePayload}。 */
+export const DL_VOICE_DICTIONARY_SYNC_CHANNEL = 'device-link:voice:dictionary:sync-state';
+
+/** 本地变更后的去抖窗口:连续学习/编辑合并成一次广播。 */
+const BROADCAST_DEBOUNCE_MS = 8_000;
+/** 兜底心跳:即便没有任何本地变更,也定期交换一次,收敛因丢帧错过的状态。 */
+const BROADCAST_INTERVAL_MS = 30 * 60 * 1000;
+/** 桌面平台白名单:手机(ios/android)不参与 push 同步。 */
+const DESKTOP_PLATFORMS = new Set(['darwin', 'win32', 'linux']);
+
+export interface DictionarySyncFramePayload {
+  /** 帧结构版本;收到不认识的版本直接忽略,不猜着解析。 */
+  frameVersion: 1;
+  state: VoiceDictionarySyncState;
+}
+
+export interface DictionarySyncTransport {
+  /** 发一帧状态给指定设备(尽力而为,失败只记日志)。 */
+  sendState(deviceId: string, payload: DictionarySyncFramePayload): void;
+  /** 当前在线的同账号**桌面**设备。 */
+  listOnlineDesktopDevices(): string[];
+}
+
+let transport: DictionarySyncTransport | null = null;
+let debounceTimer: NodeJS.Timeout | null = null;
+let intervalTimer: NodeJS.Timeout | null = null;
+
+export function isDesktopPlatform(platform: string | undefined | null): boolean {
+  return typeof platform === 'string' && DESKTOP_PLATFORMS.has(platform);
+}
+
+export function initVoiceDictionarySync(next: DictionarySyncTransport): void {
+  transport = next;
+  if (intervalTimer) clearInterval(intervalTimer);
+  intervalTimer = setInterval(() => broadcastToAllPeers('interval'), BROADCAST_INTERVAL_MS);
+  // 定时器不该让 app 因为它而活着(Electron main 里 unref 是良好习惯)。
+  intervalTimer.unref?.();
+}
+
+export function stopVoiceDictionarySync(): void {
+  transport = null;
+  if (debounceTimer) clearTimeout(debounceTimer);
+  if (intervalTimer) clearInterval(intervalTimer);
+  debounceTimer = null;
+  intervalTimer = null;
+}
+
+/** 对端桌面上线:立刻单发一次,让它尽快拿到本机状态(它也会回发自己的)。 */
+export function handleDesktopPeerOnline(deviceId: string): void {
+  if (!isSyncEnabled()) return;
+  sendStateTo(deviceId, 'peer-online');
+}
+
+/** 本地词典变更:去抖后广播。连续学习事件不会打出一连串帧。 */
+export function notifyLocalDictionaryChanged(): void {
+  if (!isSyncEnabled()) return;
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => {
+    debounceTimer = null;
+    broadcastToAllPeers('local-change');
+  }, BROADCAST_DEBOUNCE_MS);
+  debounceTimer.unref?.();
+}
+
+/**
+ * 处理对端送来的状态帧。
+ *
+ * 合并后若本机状态比对方更全(合并引入了新信息),回发一次自己的状态,让对方也收敛
+ * —— 两轮之内双方一致,不需要版本协商。
+ */
+export function handleIncomingDictionaryState(src: string, payload: unknown): void {
+  if (!isSyncEnabled()) return;
+  const frame = payload as Partial<DictionarySyncFramePayload> | undefined;
+  if (!frame || frame.frameVersion !== 1 || !frame.state) return;
+
+  let changed = false;
+  try {
+    changed = voiceInputDataStore.mergeRemoteDictionaryState(frame.state);
+  } catch (error) {
+    log.warn('merging remote dictionary state failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+  if (changed) {
+    log.info(`merged dictionary state from ${src.slice(0, 8)}`);
+    // 本机因为这次合并产生了新状态,对端未必有 —— 回发一次完成双向收敛。
+    sendStateTo(src, 'merge-reply');
+  }
+}
+
+/** 供 mobile 拉取的只读投影(不含同步元数据)。 */
+export function readDictionaryProjectionForMobile(): Array<{
+  text: string;
+  frequency: number;
+  aliases: Array<{ text: string; count: number }>;
+}> {
+  return voiceDictionarySyncStore.materialize().entries.map((entry) => ({
+    text: entry.text,
+    frequency: entry.frequency,
+    aliases: entry.aliases.map((alias) => ({ text: alias.text, count: alias.count })),
+  }));
+}
+
+function broadcastToAllPeers(reason: string): void {
+  if (!isSyncEnabled() || !transport) return;
+  const peers = transport.listOnlineDesktopDevices();
+  if (peers.length === 0) return;
+  const payload = buildFrame();
+  for (const deviceId of peers) {
+    try {
+      transport.sendState(deviceId, payload);
+    } catch (error) {
+      // 丢一帧无所谓:状态合并幂等,下一次触发会补上。
+      log.warn(`dictionary state push failed (${reason}) to ${deviceId.slice(0, 8)}`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
+function sendStateTo(deviceId: string, reason: string): void {
+  if (!transport) return;
+  try {
+    transport.sendState(deviceId, buildFrame());
+  } catch (error) {
+    log.warn(`dictionary state push failed (${reason}) to ${deviceId.slice(0, 8)}`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+function buildFrame(): DictionarySyncFramePayload {
+  return { frameVersion: 1, state: voiceDictionarySyncStore.getState() };
+}
+
+function isSyncEnabled(): boolean {
+  try {
+    return voiceInputDataStore.getSettings().dictionarySyncEnabled;
+  } catch {
+    return false;
+  }
+}
+
+export const __testing = {
+  reset(): void {
+    stopVoiceDictionarySync();
+  },
+  flushDebounce(): void {
+    if (!debounceTimer) return;
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+    broadcastToAllPeers('test-flush');
+  },
+};

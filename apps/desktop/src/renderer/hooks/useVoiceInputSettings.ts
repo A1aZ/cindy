@@ -162,7 +162,10 @@ export function useVoiceInputSettings(): {
   setRefinementEnabled: (enabled: boolean) => void;
   setRefinementInstructions: (instructions: string) => void;
   setAutoDictionaryEnabled: (enabled: boolean) => void;
-  setDictionaryEntries: (entries: VoiceInputDictionaryEntry[]) => void;
+  setDictionarySyncEnabled: (enabled: boolean) => void;
+  addDictionaryEntry: (text: string) => void;
+  importDictionaryEntries: (texts: string[]) => void;
+  renameDictionaryEntry: (entryId: string, text: string) => void;
   deleteDictionaryEntry: (entryId: string) => void;
   recordDictionaryLearningActions: (actions: DictationDictionaryLearningAction[]) => void;
   setShortcut: (shortcut: VoiceInputShortcut | null) => Promise<VoiceInputShortcutUpdateResult>;
@@ -226,20 +229,47 @@ export function useVoiceInputSettings(): {
     [updateSettings],
   );
 
-  const setDictionaryEntries = useCallback(
-    (dictionaryEntries: VoiceInputDictionaryEntry[]) => updateSettings({ dictionaryEntries }),
+  const setDictionarySyncEnabled = useCallback(
+    (dictionarySyncEnabled: boolean) => updateSettings({ dictionarySyncEnabled }),
     [updateSettings],
   );
 
-  const deleteDictionaryEntry = useCallback((entryId: string) => {
-    void window.electronAPI.voiceInput
-      .deleteDictionaryEntries([entryId])
-      .then(setSettings)
-      .catch((error) => {
-        log.warn('voice input dictionary delete failed:', error instanceof Error ? error.message : String(error));
-        toast.error(formatVoiceInputPersistenceError(t, error));
-      });
-  }, [t]);
+  // 词典的增改删都是语义化操作:主进程按「用户做了什么」更新同步状态,再把物化
+  // 结果回投影成 settings。整份覆盖词条数组表达不了用户意图,也会被下一次物化冲掉。
+  const runDictionaryMutation = useCallback(
+    (mutate: () => Promise<unknown>) => {
+      void mutate()
+        .then((next) => setSettings(next as VoiceInputSettings))
+        .catch((error) => {
+          log.warn('voice input dictionary update failed:', error instanceof Error ? error.message : String(error));
+          toast.error(formatVoiceInputPersistenceError(t, error));
+        });
+    },
+    [t],
+  );
+
+  const addDictionaryEntry = useCallback(
+    (text: string) => runDictionaryMutation(() => window.electronAPI.voiceInput.addDictionaryEntry(text)),
+    [runDictionaryMutation],
+  );
+
+  const importDictionaryEntries = useCallback(
+    (texts: string[]) =>
+      runDictionaryMutation(() => window.electronAPI.voiceInput.importDictionaryEntries(texts)),
+    [runDictionaryMutation],
+  );
+
+  const renameDictionaryEntry = useCallback(
+    (entryId: string, text: string) =>
+      runDictionaryMutation(() => window.electronAPI.voiceInput.renameDictionaryEntry(entryId, text)),
+    [runDictionaryMutation],
+  );
+
+  const deleteDictionaryEntry = useCallback(
+    (entryId: string) =>
+      runDictionaryMutation(() => window.electronAPI.voiceInput.deleteDictionaryEntries([entryId])),
+    [runDictionaryMutation],
+  );
 
   const recordDictionaryLearningActions = useCallback((actions: DictationDictionaryLearningAction[]) => {
     void recordVoiceInputDictionaryLearningActions(actions);
@@ -276,7 +306,10 @@ export function useVoiceInputSettings(): {
     setRefinementEnabled,
     setRefinementInstructions,
     setAutoDictionaryEnabled,
-    setDictionaryEntries,
+    setDictionarySyncEnabled,
+    addDictionaryEntry,
+    importDictionaryEntries,
+    renameDictionaryEntry,
     deleteDictionaryEntry,
     recordDictionaryLearningActions,
     setShortcut,

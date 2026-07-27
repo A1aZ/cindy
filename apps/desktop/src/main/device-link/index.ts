@@ -53,6 +53,16 @@ import {
   handleControllerOffline,
 } from './dispatch';
 import { setBusyProbe, helloBusy, pollBusyChange, resetBusyDedupe } from './busyReporter';
+import {
+  DL_VOICE_DICTIONARY_SYNC_CHANNEL,
+  handleDesktopPeerOnline,
+  handleIncomingDictionaryState,
+  initVoiceDictionarySync,
+  isDesktopPlatform,
+  notifyLocalDictionaryChanged,
+  stopVoiceDictionarySync,
+} from '../voice-input/dictionarySyncDriver';
+import { onVoiceInputDictionaryChanged } from '../voice-input/VoiceInputDataStore';
 import { resetAll as resetSubscriptionRefs, snapshotSubscriptions } from './subscriptionRefcount';
 import { getControllersForTopic } from './subscriptions';
 import {
@@ -99,6 +109,21 @@ let appliedKeepAwake: boolean | null = null;
 let pendingQuitOwnershipRelease: Promise<void> | null = null;
 const openLinkInFlight = new Map<string, Promise<LinkAcceptPayload>>();
 const presenceAvailableByDevice = new Map<string, boolean>();
+/**
+ * 词典同步的对端选择只看「在线 + 是桌面」,不看 remoteControlEnabled ——
+ * push 帧不属于 relay 的控制类帧,自己设备之间同步词典不该要求对方开放被控。
+ */
+const presenceOnlineByDevice = new Map<string, boolean>();
+const presencePlatformByDevice = new Map<string, string>();
+let unsubscribeDictionaryChanged: (() => void) | null = null;
+
+/**
+ * 用户撤销过访问权限的设备,同样不参与词典同步 —— 撤销的意图是「不再跟这台设备
+ * 交换数据」,不只是「不许它操作我」。
+ */
+function isDeviceRevoked(deviceId: string): boolean {
+  return readDeviceLinkSettings().revokedControllers.includes(deviceId);
+}
 
 /**
  * relay 连续报 auth-failed 时,两次主动 refresh 之间的最小间隔。
@@ -247,13 +272,21 @@ export function initDeviceLinkService(): void {
   client.onPresenceChanged((snap: PresenceSnapshot) => {
     const wasAvailable = presenceAvailableByDevice.get(snap.deviceId);
     const available = snap.online && snap.remoteControlEnabled;
+    const wasOnline = presenceOnlineByDevice.get(snap.deviceId);
     presenceAvailableByDevice.set(snap.deviceId, available);
+    presenceOnlineByDevice.set(snap.deviceId, snap.online);
+    presencePlatformByDevice.set(snap.deviceId, snap.platform);
     void rememberLastKnownDeviceName(snap.deviceId, snap.deviceName); // best-effort 名称缓存,不阻塞 presence 处理
     broadcast(DEVICE_LINK_PUSH.PRESENCE_CHANGED, snap);
     // 被控端兜底:对等控制端下线 → 清掉它在本机的订阅 registry(防僵尸订阅持续 sendPush)。
     if (!snap.online) handleControllerOffline(snap.deviceId);
     if (available && wasAvailable === false) {
       replayActiveSubscriptions(`presence-online:${snap.deviceId.slice(0, 8)}`, snap.deviceId);
+    }
+    // 词典同步只看在线与否 —— push 帧不受对端「允许被控」开关限制,它是自己设备
+    // 之间的数据流动,不是远程控制。
+    if (snap.online && wasOnline !== true && isDesktopPlatform(snap.platform)) {
+      handleDesktopPeerOnline(snap.deviceId);
     }
   });
 
@@ -283,12 +316,33 @@ export function initDeviceLinkService(): void {
     }
     if (env.kind !== 'push') return;
     const p = env.payload as PushPayload;
+    // 词典同步帧在 main 侧消费,不转给 renderer —— 它不是远程视图事件,
+    // renderer 也不该看到别的设备的同步状态。
+    if (p?.channel === DL_VOICE_DICTIONARY_SYNC_CHANNEL) {
+      if (!isDeviceRevoked(env.src)) handleIncomingDictionaryState(env.src, p.payload);
+      return;
+    }
     broadcast(DEVICE_LINK_PUSH.REMOTE_PUSH, {
       deviceId: env.src,
       channel: p.channel,
       payload: p.payload,
     });
   });
+
+  // 词典对等同步:传输能力注入驱动,驱动只管什么时候发、发给谁。
+  initVoiceDictionarySync({
+    sendState: (deviceId, payload) => {
+      client?.sendPush(deviceId, DL_VOICE_DICTIONARY_SYNC_CHANNEL, payload);
+    },
+    listOnlineDesktopDevices: () =>
+      [...presenceOnlineByDevice.entries()]
+        .filter(([deviceId, online]) => online
+          && isDesktopPlatform(presencePlatformByDevice.get(deviceId))
+          && !isDeviceRevoked(deviceId))
+        .map(([deviceId]) => deviceId),
+  });
+  if (unsubscribeDictionaryChanged) unsubscribeDictionaryChanged();
+  unsubscribeDictionaryChanged = onVoiceInputDictionaryChanged(notifyLocalDictionaryChanged);
 
   // 同机多实例单持有者仲裁:共享 userData(同 deviceId)的多个实例中,只有认领
   // 成功的持有者才连 relay,其余被动待命 —— 否则 relay 的 last-wins 顶号语义会
@@ -435,6 +489,12 @@ function teardownActiveLink(): void {
   }
   dropAllControllers(client, 'shutdown');
   presenceAvailableByDevice.clear();
+  // 词典同步驱动是进程级的,**不随单次链路起停**:多实例仲裁的 demote → acquire
+  // 只会 client.start(),不会重跑 initDeviceLinkService,在这里 stop 掉它会让词典
+  // 同步在降级过一次之后永久失效。清空 presence 就够了 —— 没有对端就不会发送,
+  // client 为 null 时 sendPush 也是 no-op。
+  presenceOnlineByDevice.clear();
+  presencePlatformByDevice.clear();
   resetSubscriptionRefs();
   resetBusyDedupe(); // 重置 busy dedupe,避免重连后首个真实 busy 状态被旧值压掉
   client.stop();

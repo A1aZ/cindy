@@ -640,6 +640,11 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       authority: HookBindingAuthority | null,
     ): void => {
       if (!legacyBound || !legacyNamespace) return;
+      // inspect 期间 legacy 行可能刚收到一次移动登记 —— 用初读的快照迁移会把
+      // 旧目录写进新命名空间并把带登记的 legacy 行删掉(PR #669 review 指出)。
+      // 迁移前重读一次, 版本变了就这轮不迁, 下条消息再走正常路径。
+      const fresh = bindings.getEntry(legacyNamespace, payload.externalKey);
+      if (!fresh || fresh.sessionId !== legacyBound || fresh.rev !== legacyEntry?.rev) return;
       bindings.set(connectionId, payload.externalKey, legacyBound, {
         workingDir,
         authority,
@@ -707,11 +712,15 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
        *
        * 少了这条, 从映射外再移动一次会直接丢绑定: 新授权指向新目录、session 还
        * 在旧的映射外目录, 两个条件都不满足就落到撤权分支(PR #669 review 指出)。
+       *
+       * **不限定 authority**: 从映射外移回映射内时登记的是 'workspace', 只认
+       * local-move 的话这条路径照样丢绑定。previousWorkingDir 只由可信的 move
+       * 入口写入、写库成功即清, 它本身就是"有一次已登记的移动在途"的证据; 放行
+       * 的又是移动前那个已授权目录, 不放宽任何边界。
        */
       const pendingMoveRegistration =
         usable &&
-        boundEntry?.authority === 'local-move' &&
-        boundEntry.previousWorkingDir != null &&
+        boundEntry?.previousWorkingDir != null &&
         isSamePath(boundEntry.previousWorkingDir, info!.workingDir!);
       // 三者都不满足 = 映射被改/删的撤权语义(或目录被别的路径改过), 仍丢绑定
       // 重建。老绑定无授权记录时同样走保守侧。

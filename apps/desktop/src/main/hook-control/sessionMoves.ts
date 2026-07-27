@@ -52,12 +52,17 @@ function authorityForDir(workingDir: string): HookBindingAuthority {
  *
  * 必须在**写库之前**同步 await 完 —— 「目录已变、授权还没落」的窗口里, 一条
  * 到达的 IM 消息会把绑定当成撤权删掉, 那条 thread 就永久换了新对话
- * (PR #669 review 指出)。best-effort: 登记失败只记日志, 不拖累移动本身。
+ * (PR #669 review 指出)。
+ *
+ * 返回是否登记成功。**失败必须让整个移动失败**: 吞掉错误照常写库的话, 目录变了
+ * 而授权没落, 下一条 IM 消息就把绑定当撤权删掉、thread 静默丢上下文; 移动是用户
+ * 主动动作, 报错让他重试比静默降级好(PR #669 review 指出)。没有绑定的会话读到
+ * 空表同样算成功, 不受影响。
  */
 export async function noteHookSessionMoved(
   sessionId: string,
   move: { from: string | null; to: string },
-): Promise<void> {
+): Promise<boolean> {
   try {
     const store = createHookBindingStore({
       filePath: ownerScopedUserDataPath('hook-bindings.json'),
@@ -72,11 +77,13 @@ export async function noteHookSessionMoved(
         authority,
       });
     }
+    return true;
   } catch (err) {
     log.warn('noteHookSessionMoved failed', {
       sessionId,
       err: err instanceof Error ? err.message : String(err),
     });
+    return false;
   }
 }
 

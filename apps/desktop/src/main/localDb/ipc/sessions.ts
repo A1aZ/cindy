@@ -1061,6 +1061,11 @@ export function registerSessionIpc(): void {
       if (normalized.split('/').includes('..')) {
         throwIpcError('INVALID_PARAMS', 'workingDir must not contain path traversal segments');
       }
+      // 相对路径会在后续 path.resolve / fs 操作里按主进程 CWD 解释, 落到意料外
+      // 的目录(PR #669 review 指出)。移动目标必须是绝对路径。
+      if (!path.isAbsolute(normalized) && !/^[A-Za-z]:\//.test(normalized)) {
+        throwIpcError('INVALID_PARAMS', 'workingDir must be an absolute path');
+      }
       patch = { workspaceKind: 'project', workingDir: normalized };
     }
 
@@ -1077,7 +1082,11 @@ export function registerSessionIpc(): void {
       const fromDir = normalizeWorkingDirForStorage(before.workingDir);
       // 目标不在用户已知项目里就不铸造授权(移动本身照常进行)
       if (fromDir !== nextDir && (await isKnownRecentWorkdir(nextDir))) {
-        await noteHookSessionMoved(sid, { from: fromDir, to: nextDir });
+        // 登记失败就别提交移动: 目录变了而授权没落的话, 下一条 IM 消息会把绑定
+        // 当撤权删掉, 用户莫名丢上下文。报错让他重试(PR #669 review 指出)。
+        if (!(await noteHookSessionMoved(sid, { from: fromDir, to: nextDir }))) {
+          throwIpcError('INTERNAL', '移动失败:无法更新 IM 绑定,请重试');
+        }
         const updated = await applySessionUpdate(sid, patch);
         // 写库成功 = 移动的两步都完成, 立刻收掉在途标记(见 bindings 文件头)
         completeHookSessionMove(sid, nextDir);

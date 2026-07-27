@@ -24,7 +24,7 @@ const h = vi.hoisted(() => ({
   relocate: vi.fn(async (): Promise<{ persistedSdkSessionId: string | null }> => ({
     persistedSdkSessionId: null,
   })),
-  noteHookSessionMoved: vi.fn(async () => undefined),
+  noteHookSessionMoved: vi.fn(async () => true),
   completeHookSessionMove: vi.fn(),
   isKnownRecentWorkdir: vi.fn(async () => true),
   assertTrustedAppRendererEvent: vi.fn(),
@@ -163,7 +163,7 @@ beforeEach(() => {
   h.moveOrder = [];
   h.isKnownRecentWorkdir.mockImplementation(async () => true);
   h.assertTrustedAppRendererEvent.mockImplementation(() => undefined);
-  h.noteHookSessionMoved.mockImplementation(async () => undefined);
+  h.noteHookSessionMoved.mockImplementation(async () => true);
   h.relocate.mockImplementation(async () => ({ persistedSdkSessionId: null }));
   h.handlers.clear();
   createDb();
@@ -298,6 +298,7 @@ describe('local-db:sessions:move handler wiring', () => {
         .sqlite!.prepare('SELECT working_dir FROM sessions WHERE id = ?')
         .get('codex-local') as { working_dir: string | null };
       h.moveOrder.push(`db-at-note:${row.working_dir}`);
+      return true;
     });
 
     await invokeMove('codex-local', { kind: 'project', workingDir: '/new/dir' });
@@ -360,6 +361,28 @@ describe('local-db:sessions:move handler wiring', () => {
       .sqlite!.prepare('SELECT working_dir FROM sessions WHERE id = ?')
       .get('codex-local') as { working_dir: string };
     expect(persisted.working_dir).toBe('/new/dir');
+  });
+
+  it('aborts the move when the binding registration fails', async () => {
+    // 吞掉登记失败照常写库的话, 下一条 IM 消息会把绑定当撤权删掉、静默丢上下文
+    h.noteHookSessionMoved.mockImplementation(async () => false);
+
+    await expect(
+      invokeMove('codex-local', { kind: 'project', workingDir: '/new/dir' }),
+    ).rejects.toThrow(/INTERNAL/);
+    const persisted = h
+      .sqlite!.prepare('SELECT working_dir FROM sessions WHERE id = ?')
+      .get('codex-local') as { working_dir: string };
+    expect(persisted.working_dir).toBe('/old/dir');
+    expect(h.completeHookSessionMove).not.toHaveBeenCalled();
+  });
+
+  it('rejects a relative project target', async () => {
+    // 相对路径会按主进程 CWD 解释, 落到意料外的目录
+    await expect(invokeMove('codex-local', { kind: 'project', workingDir: 'foo' })).rejects.toThrow(
+      /INVALID_PARAMS/,
+    );
+    expect(h.noteHookSessionMoved).not.toHaveBeenCalled();
   });
 
   it('rejects a project target that contains path traversal segments', async () => {

@@ -132,6 +132,48 @@ describe('历史窗口空洞 — 跨空洞不合并工作组', () => {
   });
 });
 
+// ── Scenario A3:纯 tool → tool 的空洞边界(review #676 codex P1) ─────────────
+
+describe('历史窗口空洞 — 段内部的空洞', () => {
+  // 空洞正好落在两次工具调用之间(缺的是 user 行),中间没有 thinking / assistant
+  // 把它们隔开。旧行为:buildRenderItems 把两个窗口的 tool call 合成同一个
+  // tool_segment,段首尾时间差 = 跨空洞的假时长,而只看段首时间的切组守卫发现不了。
+  const toolToToolGap = (): ChatMessage[] => [
+    mkUser('u1', '2026-07-23T16:28:30.000Z'),
+    mkTool('t1', '2026-07-23T16:29:04.000Z'),
+    mkResult('r1', 'tu-t1', '2026-07-23T16:29:20.000Z'),
+    // ── 空洞:47 小时,且两侧都是工具调用 ──
+    mkTool('t2', '2026-07-25T15:27:00.000Z'),
+    mkResult('r2', 'tu-t2', '2026-07-25T15:28:00.000Z'),
+    mkAssistant('a1', '2026-07-25T15:29:33.000Z', 'PR #379 已合并。'),
+  ];
+
+  it('A3. 段按空洞切开,两侧工具调用不在同一段,时长不谎报', () => {
+    const { items } = buildRenderItems(toolToToolGap());
+
+    const segments = items.filter((it) => it.type === 'tool_segment');
+    const segWithT1 = segments.filter(
+      (s) => s.type === 'tool_segment' && s.toolCalls.some((c) => c.clientId === 't1'),
+    );
+    const segWithT2 = segments.filter(
+      (s) => s.type === 'tool_segment' && s.toolCalls.some((c) => c.clientId === 't2'),
+    );
+    expect(segWithT1).toHaveLength(1);
+    expect(segWithT2).toHaveLength(1);
+    // 关键:两次调用没有被合进同一段。
+    expect(segWithT1[0]).not.toBe(segWithT2[0]);
+
+    // 分组后也不该出现跨空洞的假时长。
+    const grouped = groupWorkRuns(items, false);
+    const durations = workGroups(grouped)
+      .map((g) => (g.type === 'work_group' ? g.durationMs : undefined))
+      .filter((d): d is number => d !== undefined);
+    for (const d of durations) {
+      expect(d).toBeLessThanOrEqual(THIRTY_MIN_MS);
+    }
+  });
+});
+
 // ── Scenario B:正常连续 turn 不被误切 ───────────────────────────────────────
 
 describe('历史窗口空洞 — 正常 turn 不受影响', () => {
@@ -155,5 +197,8 @@ describe('历史窗口空洞 — 正常 turn 不受影响', () => {
     expect(holdingT1).toHaveLength(1);
     // 同一个 turn 内的两次工具调用仍在同一个组里。
     expect(groupContains(holdingT1[0], 't2')).toBe(true);
+    // 段也不该被误切:阈值内的连续调用仍合成一段。
+    const segments = items.filter((it) => it.type === 'tool_segment');
+    expect(segments).toHaveLength(1);
   });
 });

@@ -95,6 +95,29 @@ export const RENDER_WINDOW_FIRST_PAINT_ITEMS = 30;
 const RENDER_WINDOW_GROWTH_ITEMS = 80;
 const RENDER_WINDOW_BOUNDARY_LOOKBACK_ITEMS = 24;
 
+/**
+ * 历史窗口空洞的切分阈值。两个消费方:`buildRenderItems` 的 tool_segment 累积,
+ * 以及 work-group pass 的 `groupWorkRuns`。
+ *
+ * 跳转到历史消息(makerChatStore 的 loadAroundMessage / loadAroundMessageClientId)
+ * 补齐失败时,目标附近的窗口与已加载的尾部窗口之间会隔着大段没加载的历史。渲染层
+ * 看到的是两段"相邻"item,中间的 user 行(唯一的 turn 边界)全部缺席,于是跨越空洞
+ * 的所有动作被折成同一个「已工作 Xs」:实测出现过一条组吞掉 47 小时、40 条 user
+ * 消息的会话,组时长(末项时间 − 首项时间)也跟着谎报成 2820m。
+ *
+ * 因此除 user 行外,相邻动作间隔超过本阈值也切断——工作组按此切组,tool_segment
+ * 按此切段(空洞正好落在两次工具调用之间时,不切段的话段首尾时间差仍是假时长,
+ * 而只看段首时间的切组守卫发现不了)。
+ *
+ * 30 分钟:单个 turn 内相邻动作(工具调用 / thinking)正常在秒级到分钟级,等长任务
+ * 最多几十分钟;真被误切也只是多出一个折叠条,代价远小于把不相干的两段并成一条
+ * 并谎报时长。
+ *
+ * 这是兜底层。空洞本身由 makerChatStore 的 backfillHistoryUntil 在跳转时补齐,
+ * 只有补齐触顶或让位并发分页时才会走到这里。
+ */
+const HISTORY_GAP_SPLIT_MS = 30 * 60 * 1000;
+
 function isEditableKeyboardTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   const tagName = target.tagName;
@@ -1100,6 +1123,22 @@ export function buildRenderItems(
 
       // Regular tool_use — accumulate(配上卡的 ghost_call 不进段,行隐身)。
       if (!hideRowForCard) {
+        // 历史窗口空洞可能正好落在两次工具调用之间(缺的是 user 行):那样两个窗口的
+        // tool call 会被合进同一个 tool_segment,段首尾时间差直接成了跨空洞的假时长,
+        // 而 groupWorkRuns 的空洞守卫只看段首时间、发现不了段内部的跳变。所以在段内
+        // 也按同一阈值切开,让「已工作 Xs」的时长和分组都落在真实连续的动作上。
+        const prevCall = pendingToolCalls[pendingToolCalls.length - 1];
+        if (prevCall) {
+          const prevCallMs = messageTs(prevCall);
+          const currentCallMs = messageTs(msg);
+          if (
+            prevCallMs !== null &&
+            currentCallMs !== null &&
+            currentCallMs - prevCallMs > HISTORY_GAP_SPLIT_MS
+          ) {
+            flushSegment();
+          }
+        }
         pendingToolCalls.push(msg);
         if (mainResult !== undefined) {
           // result 到了就算 settled,即便内容被隐藏不进 resultMap。
@@ -1188,25 +1227,6 @@ export function buildRenderItems(
 // ---------------------------------------------------------------------------
 // Work-group pass(buildRenderItems 之后的第二层后处理)
 // ---------------------------------------------------------------------------
-
-/**
- * 历史窗口空洞的切组阈值。
- *
- * 跳转到历史消息(makerChatStore 的 loadAroundMessage /
- * loadAroundMessageClientId)会把目标附近的窗口 merge 进当前 messages,它与已加载
- * 的尾部窗口之间可能隔着大段尚未加载的历史。渲染层看到的是两段"相邻"item,中间
- * 的 user 行(唯一的 turn 边界)全部缺席,于是跨越空洞的所有动作被折成同一个
- * 「已工作 Xs」:实测出现过一条组吞掉 47 小时、40 条 user 消息的会话,组时长
- * (末项时间 − 首项时间)也跟着谎报成 2820m。
- *
- * 因此除 user 行外,相邻动作间隔超过本阈值也切断工作组。30 分钟:单个 turn 内相邻
- * 动作(工具调用 / thinking)正常在秒级到分钟级,等长任务最多几十分钟;真被误切也
- * 只是多出一个折叠条,代价远小于把不相干的两段并成一条并谎报时长。
- *
- * 注意这只消除"看起来像丢消息"的渲染症状,空洞本身仍在 messages 里——补齐中间
- * 历史属于分页/跳转加载的职责,不在本 pass 内解决。
- */
-const HISTORY_GAP_SPLIT_MS = 30 * 60 * 1000;
 
 /** 完成态 work_group 可合并的子项:tool_segment / agent_task / thinking /
  *  assistant 工作文字。运行态只通过 isWorkActivityItem 收动作,所以不会提前

@@ -91,6 +91,11 @@ function serverMessage(over: Partial<Message>): Message {
   } as Message;
 }
 
+/** 让挂起的 store 异步链推进若干轮微任务(store 内部多层 await)。 */
+async function flushMicrotasks(rounds = 8): Promise<void> {
+  for (let i = 0; i < rounds; i++) await Promise.resolve();
+}
+
 /** 一整页(100 行 = messages:list 的 MAX_LIMIT)较新的历史,newest-first。 */
 function fullPageNewestFirst(): Message[] {
   return Array.from({ length: 100 }, (_, i) =>
@@ -166,6 +171,79 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     await makerChatStore.loadAroundMessageClientId(SID, 'already', { radius: 60 });
     expect(vi.mocked(listMessagesFor).mock.calls).toHaveLength(1);
     expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).toEqual(['already']);
+  });
+
+  it('D. 补齐期间切片被 clear/rewind 重置时,跳转整体作废,不把 around 行 merge 回来', async () => {
+    // review #676（codex P1）：epoch 变化后若仍执行 fallback merge，会把刚被移除的
+    // 消息重新塞回窗口。补齐必须与「补不到」区分开，返回取消语义。
+    const target = serverMessage({
+      id: 'gone',
+      clientId: 'gone',
+      createdAt: '2026-07-20T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    // 第一页返回满页（本会继续翻），但这次响应落地时切片已被 purge（bump epoch），
+    // 等价于 /clear、rewind、purge 在补齐 await 期间发生。
+    vi.mocked(listMessagesFor).mockImplementationOnce(async () => {
+      const page = fullPageNewestFirst();
+      makerChatStore.purgeSession(SID);
+      return page;
+    });
+
+    const result = await makerChatStore.loadAroundMessageClientId(SID, 'gone', { radius: 60 });
+
+    // 跳转作废：不返回目标，也不能把 around 行 merge 进窗口。
+    expect(result).toBeNull();
+    expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).not.toContain('gone');
+    // spinner 仍要复位，否则行首守卫会让该会话永久无法再翻页。
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(false);
+  });
+
+  it('E. 已有向上分页在飞行中时让位,不并发抢同一个游标', async () => {
+    // review #676（greptile P1）：两个流程并发读写 oldestMessageId，响应乱序会让
+    // 游标回退、重复拉页并耗尽上限。让位后退回 around 窗口（渲染层守卫兜底）。
+    const seeded = fullPageNewestFirst();
+    const inWindow = seeded[50];
+
+    // 第 1 步：一次正常跳转把窗口建立起来（满页 → hasMoreMessages=true，
+    // oldestMessageId 已就位），这样 loadOlderMessages 才能通过行首守卫。
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([inWindow]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce(seeded);
+    await makerChatStore.loadAroundMessageClientId(SID, inWindow.clientId, { radius: 60 });
+    expect(makerChatStore.getSnapshot(SID).hasMoreMessages).toBe(true);
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(false);
+
+    // 第 2 步：让向上分页进入飞行并挂住，占住 isLoadingMore 这把锁。
+    let releasePage: (rows: Message[]) => void = () => {};
+    vi.mocked(listMessagesFor).mockImplementationOnce(
+      () =>
+        new Promise<Message[]>((resolve) => {
+          releasePage = resolve;
+        }),
+    );
+    makerChatStore.loadOlderMessages(SID);
+    await flushMicrotasks();
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(true);
+
+    // 第 3 步：此时跳转到窗口外的更早消息 —— 必须让位，不得再翻页抢游标。
+    const older = serverMessage({
+      id: 'older-target',
+      clientId: 'older-target',
+      createdAt: '2026-07-20T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([older]);
+    const callsBefore = vi.mocked(listMessagesFor).mock.calls.length;
+    const result = await makerChatStore.loadAroundMessageClientId(SID, 'older-target', {
+      radius: 60,
+    });
+
+    // 没有额外翻页（没抢游标），但跳转仍走 around 窗口成功定位。
+    expect(vi.mocked(listMessagesFor).mock.calls).toHaveLength(callsBefore);
+    expect(result?.clientId).toBe('older-target');
+
+    // 收尾：放开挂住的分页，避免 pending promise 拖到后续用例。
+    releasePage([]);
+    await flushMicrotasks();
   });
 
   it('C. 翻完历史仍没命中时退回 around 窗口,跳转不失败', async () => {

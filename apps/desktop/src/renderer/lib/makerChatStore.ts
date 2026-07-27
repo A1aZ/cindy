@@ -5592,10 +5592,17 @@ function loadOlderMessages(sessionId: string): void {
 
 /**
  * 跳转补齐的翻页上限。每页 100 行(messages:list 的 MAX_LIMIT),最多 60 页 = 6000 行。
- * 触顶仍未覆盖目标时退回 around 窗口(见 loadAroundWindow),不无限翻。
+ * 触顶仍未覆盖目标时退回两个跳转入口原有的 around 窗口 merge,不无限翻。
  */
 const JUMP_BACKFILL_MAX_PAGES = 60;
 const JUMP_BACKFILL_PAGE_SIZE = 100;
+
+/**
+ * 补齐结果三态。`cancelled` 必须与 `incomplete` 分开:前者代表切片被 rewind /
+ * clear / purge 故意重置,此时调用方**不能**再 merge 之前抓到的 around 行,否则
+ * 会把刚被移除的消息(甚至已 purge 的会话切片)重新塞回窗口。
+ */
+type JumpBackfillOutcome = 'covered' | 'incomplete' | 'cancelled';
 
 /**
  * 把当前窗口从最新连续向上补齐,直到 `covered` 判定命中目标。
@@ -5609,15 +5616,20 @@ const JUMP_BACKFILL_PAGE_SIZE = 100;
  * 用现有 `before` 游标向上翻页实现,不需要给 messages:list 加 `after` 方向,
  * 因而不触碰 device-link 隧道的跨端 wire protocol。远程会话经 listMessagesFor
  * 自动走 origin-aware 路由。
- *
- * 返回是否已覆盖目标;false = 触顶/翻完/失败,调用方需自行兜底。
  */
 async function backfillHistoryUntil(
   sessionId: string,
   covered: (messages: ChatMessage[]) => boolean,
-): Promise<boolean> {
+): Promise<JumpBackfillOutcome> {
   const epochAtStart = _messagesEpoch.get(sessionId) ?? 0;
-  if (covered(getOrCreateState(sessionId).messages)) return true;
+  const epochChanged = () => (_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart;
+  if (covered(getOrCreateState(sessionId).messages)) return 'covered';
+
+  // 与 loadOlderMessages 共用 isLoadingMore 这把锁:它已在飞行中时不抢游标。
+  // 两个流程并发读写同一个 oldestMessageId,响应乱序会让游标回退、重复拉页并耗尽
+  // 上限;让位后退回 around 窗口(窗口可能不连续,由渲染层的空洞守卫兜底)比制造
+  // 游标错乱更安全。反向由这里立刻置位 isLoadingMore 挡住后续 loadOlderMessages。
+  if (getOrCreateState(sessionId).isLoadingMore) return 'incomplete';
 
   setState(sessionId, (s) => ({ ...s, isLoadingMore: true }));
   try {
@@ -5628,11 +5640,11 @@ async function backfillHistoryUntil(
       if (state.oldestMessageId) opts.before = state.oldestMessageId;
 
       const rows = await listMessagesFor(sessionId, opts);
-      // 代际比对:追页期间 rewind / clear / purge 重置了切片 → 本次窗口作废。
-      if ((_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart) return false;
+      // 代际比对:追页期间 rewind / clear / purge 重置了切片 → 本次跳转整体作废。
+      if (epochChanged()) return 'cancelled';
       if (rows.length === 0) {
-        setState(sessionId, (s) => ({ ...s, hasMoreMessages: false, isLoadingMore: false }));
-        return false;
+        setState(sessionId, (s) => ({ ...s, hasMoreMessages: false }));
+        return 'incomplete';
       }
 
       const mapped = mapServerMessages(rows);
@@ -5652,25 +5664,19 @@ async function backfillHistoryUntil(
         };
       });
 
-      if (covered(merged)) {
-        setState(sessionId, (s) => ({ ...s, isLoadingMore: false }));
-        return true;
-      }
-      if (!hasMore) {
-        // 已翻到历史起点仍没命中:目标不在本会话可见历史里(例如被 rewind 软删)。
-        setState(sessionId, (s) => ({ ...s, isLoadingMore: false }));
-        return false;
-      }
+      if (covered(merged)) return 'covered';
+      // 已翻到历史起点仍没命中:目标不在本会话可见历史里(例如被 rewind 软删)。
+      if (!hasMore) return 'incomplete';
     }
-    return false;
+    return 'incomplete';
   } catch (err) {
     log.warn('backfillHistoryUntil failed', { sessionId, err: String(err) });
-    return false;
+    return 'incomplete';
   } finally {
-    // 任何出口都要复位 spinner,否则行首守卫会让该会话永久无法再翻页。
-    if ((_messagesEpoch.get(sessionId) ?? 0) === epochAtStart) {
-      setState(sessionId, (s) => (s.isLoadingMore ? { ...s, isLoadingMore: false } : s));
-    }
+    // 任何出口都必须复位 spinner —— 包括 epoch 失效那条:reload / clear 的 setState
+    // 不清 isLoadingMore(见 loadOlderMessages 同款注释),漏复位会让行首守卫把该
+    // 会话的翻页永久卡住。epoch 变了也照复位:setState 作用于当前切片,不复活数据。
+    setState(sessionId, (s) => (s.isLoadingMore ? { ...s, isLoadingMore: false } : s));
   }
 }
 
@@ -5688,13 +5694,17 @@ async function loadAroundMessage(
   const targetClientId = targetRow?.clientId ?? null;
 
   // 优先把窗口从最新连续补齐到目标,不留历史空洞(见 backfillHistoryUntil)。
-  // 补不到(超上限 / 翻完 / 失败)则退回 around 窗口 merge:此时窗口仍不连续,
-  // 由渲染层的 HISTORY_GAP_SPLIT_MS 守卫兜底,不至于把两段折成一个工作组。
-  const covered = targetClientId
+  // 补不到(超上限 / 翻完 / 让位并发分页)则退回 around 窗口 merge:此时窗口仍不
+  // 连续,由渲染层的 HISTORY_GAP_SPLIT_MS 守卫兜底,不至于把两段折成一个工作组。
+  const outcome = targetClientId
     ? await backfillHistoryUntil(sessionId, (messages) =>
         messages.some((message) => message.clientId === targetClientId),
       )
-    : false;
+    : 'incomplete';
+
+  // 切片在补齐期间被 rewind / clear / purge 重置:整个跳转作废。绝不能再 merge
+  // 之前抓到的 around 行,那会把刚被移除的消息重新塞回窗口。
+  if (outcome === 'cancelled') return null;
 
   setState(sessionId, (s) => {
     // 两条路径都要 merge:around 返回的是权威行,重复跳转同一条消息时要靠它把本地
@@ -5702,7 +5712,7 @@ async function loadAroundMessage(
     const messages = mergeMessages(mapped, s.messages, {}, 'oldest-first');
     // 已补齐时窗口是"某点 → 最新"的连续区间,游标与 hasMore 由 backfill 维护,
     // 不能再被 around 窗口的边界回退。
-    if (covered) return { ...s, messages };
+    if (outcome === 'covered') return { ...s, messages };
     const oldestMessageId = oldestServerMessageIdForWindow(
       rows,
       s.messages,
@@ -5739,14 +5749,17 @@ async function loadAroundMessageClientId(
   const mapped = mapServerMessages(rows);
 
   // 同 loadAroundMessage:先连续补齐,避免跳转窗口与尾部窗口之间留下历史空洞。
-  const covered = await backfillHistoryUntil(sessionId, (messages) =>
+  const outcome = await backfillHistoryUntil(sessionId, (messages) =>
     messages.some((message) => message.clientId === clientId),
   );
+
+  // 切片被重置 → 跳转作废,不 merge 旧的 around 行(见 loadAroundMessage 同款注释)。
+  if (outcome === 'cancelled') return null;
 
   setState(sessionId, (s) => {
     // around 行是权威内容,两条路径都要 merge(重复跳转同一条时负责 hydration)。
     const messages = mergeMessages(mapped, s.messages, {}, 'oldest-first');
-    if (covered) return { ...s, messages };
+    if (outcome === 'covered') return { ...s, messages };
     const oldestMessageId = oldestServerMessageIdForWindow(
       rows,
       s.messages,

@@ -2227,6 +2227,13 @@ const createWindow = () => {
   mainWindow.on('show', emitWindowHidden);
   mainWindow.on('minimize', emitWindowHidden);
   mainWindow.on('restore', emitWindowHidden);
+  // 补发基线:preload 的 createIpcFanOut 是惰性绑定(首个订阅者到来才 ipcRenderer.on),
+  // 订阅之前发生的事件会丢。若窗口在 Renderer 起来之前就已隐藏(启动即最小化、
+  // show:false 等),Renderer 侧会一直停在初始的「未隐藏」,叠加节流关闭时 visibilityState
+  // 恒为 visible,就永远不冻结。did-finish-load 对应 window load,必然晚于 index.tsx 顶层
+  // 的 installHiddenAnimationGate(),补一发即可让首次订阅拿到正确基线。reload / HMR
+  // 重新加载后同样会补发。
+  mainWindow.webContents.on('did-finish-load', emitWindowHidden);
 
   // App badge: 用户把任意 XDMaker 窗口点回前台(Dock 点击 / taskbar / alt-tab / 点窗口)即视为
   // 「已查看」,直接清空整个 dock 红点。badge 是 app 级状态,不该依赖当前停在哪个

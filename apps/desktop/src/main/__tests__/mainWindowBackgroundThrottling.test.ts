@@ -128,3 +128,23 @@ describe('主 BrowserWindow 后台节流', () => {
     expect(isTerminalTurnErrorEvent(legacyError)).toBe(true);
   });
 });
+
+/**
+ * 关闭节流会让 Renderer 的 document.visibilityState 一直停在 'visible'(Electron 41.2.0
+ * 实测:throttling=false 时 minimize()/hide() 后仍为 visible),所以装饰动画闸门不能只靠
+ * visibilityState —— 必须有这条 main 侧广播兜底。两者是同一套机制的两半,一旦这里被删掉,
+ * 闸门会在「有 running turn + 窗口隐藏」这个主场景下静默失效,故在此加源码契约守护。
+ */
+describe('窗口可见性广播（装饰动画闸门的兜底信号）', () => {
+  it('按 BrowserWindow 显隐事件广播，判据同时覆盖 hide 与最小化', () => {
+    expect(source).toContain("mainWindow.webContents.send('window-hidden-change', hidden);");
+    expect(source).toContain('const hidden = !mainWindow.isVisible() || mainWindow.isMinimized();');
+    for (const event of ['hide', 'show', 'minimize', 'restore']) {
+      expect(source).toContain(`mainWindow.on('${event}', emitWindowHidden);`);
+    }
+  });
+
+  it('页面加载完成后补发基线，避免 Renderer 惰性订阅错过隐藏态', () => {
+    expect(source).toContain("mainWindow.webContents.on('did-finish-load', emitWindowHidden);");
+  });
+});

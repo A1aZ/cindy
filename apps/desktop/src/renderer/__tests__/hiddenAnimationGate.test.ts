@@ -207,8 +207,16 @@ describe('同源子文档（Ghost 卡片 iframe）传播', () => {
       fileURLToPath(new URL('../components/chat/GhostToolCard.tsx', import.meta.url)),
       'utf8',
     );
-    // 选择器要同时覆盖根元素与后代：意识可以把动画挂在 html/:root 上。
-    expect(src).toContain("html[${HIDDEN_ANIMATION_ATTR}='true'],html[${HIDDEN_ANIMATION_ATTR}='true'] *");
+    // 选择器要覆盖三种落点：html 自身、后代元素、后代的伪元素。
+    // 通配符不匹配伪元素，animation-play-state 也不继承，::before/::after 必须单列。
+    for (const part of [
+      "html[${HIDDEN_ANIMATION_ATTR}='true'],",
+      "html[${HIDDEN_ANIMATION_ATTR}='true'] *,",
+      "html[${HIDDEN_ANIMATION_ATTR}='true'] *::before,",
+      "html[${HIDDEN_ANIMATION_ATTR}='true'] *::after",
+    ]) {
+      expect(src).toContain(part);
+    }
     expect(src).toContain('animation-play-state:paused!important');
     // 新挂载的卡片要自己对齐一次：闸门遍历时它还不存在。
     expect(src).toContain('document.documentElement.hasAttribute(HIDDEN_ANIMATION_ATTR)');
@@ -352,6 +360,13 @@ describe('globals.css 冻结规则', () => {
 
   // 属性名分散在 CSS / gate / GhostToolCard / 测试里，CSS 侧没法 import 常量，
   // 这里替它把两边钉在一起。
+  // drawio viewer 把循环动画以 inline style 写到 SVG 上，类名不含任何可匹配的串，
+  // 且是压缩过的第三方脚本，前面的 CSS / tsx 扫描都够不着 —— 只能按容器子树冻结。
+  it('drawio viewer 子树在冻结清单里', () => {
+    expect(frozenBlock).toContain('[data-mxgraph]');
+    expect(frozenBlock).toContain('[data-mxgraph] *');
+  });
+
   it('CSS 冻结清单用的属性名与模块导出的常量一致', () => {
     expect(HIDDEN_ANIMATION_ATTR).toBe('data-app-hidden');
     expect(frozenBlock).toContain(`[${HIDDEN_ANIMATION_ATTR}='true']`);

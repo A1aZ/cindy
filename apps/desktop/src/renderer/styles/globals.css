@@ -871,7 +871,14 @@ body.resizing-pane [data-ghost-webview] {
 [data-app-hidden='true'] .agent-island-mascot-sparkle,
 [data-app-hidden='true'] [class*='animate-spin'],
 [data-app-hidden='true'] [class*='animate-pulse'],
-[data-app-hidden='true'] [class*='infinite'] {
+[data-app-hidden='true'] [class*='infinite'],
+/* drawio viewer(vendor/drawio/viewer-static.min.js)把循环动画以 inline style 直接写到
+   SVG 元素上(flowAnimation 的流动虚线、加载 spinner),类名既不含 animate-* 也不含
+   infinite,前面几条都够不着;它又是压缩过的第三方脚本,不归 globals.css / tsx 扫描管。
+   按容器整棵子树冻结 —— 容器形态是 <div class="mxgraph" data-mxgraph="{json}">,
+   见 DrawioPreview.tsx。 */
+[data-app-hidden='true'] [data-mxgraph],
+[data-app-hidden='true'] [data-mxgraph] * {
   animation-play-state: paused !important;
 }
 

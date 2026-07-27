@@ -129,9 +129,11 @@ function buildCardSrcDoc(sanitizedHtml: string, themeVars: string): string {
     // 属性由宿主写到本文档的 documentElement 上(CSS 选择器跨不进 iframe,见
     // hiddenAnimationGate 的 iframe 传播)。这里用 * 全量暂停而不是像宿主侧那样列
     // allowlist —— 卡内容是意识现画的,没有可枚举的清单;冻结点落在动画自身取值区间内,
-    // 恢复可见后接着播。选择器要带上 html 自身:意识可以把动画挂在 html/:root 上,
-    // 只写后代选择器会漏掉根元素。
-    `<style>html,body{margin:0;padding:0;overflow:hidden;font-family:system-ui,-apple-system,sans-serif}img{max-width:100%;-webkit-user-drag:none;-webkit-user-select:none;user-select:none}@media (prefers-reduced-motion:reduce){*{animation:none!important}}html[${HIDDEN_ANIMATION_ATTR}='true'],html[${HIDDEN_ANIMATION_ATTR}='true'] *{animation-play-state:paused!important}</style>`,
+    // 恢复可见后接着播。选择器要覆盖三种落点:html 自身(意识可以把动画挂在 html/:root
+    // 上)、后代元素、以及后代的 ::before / ::after —— 通配符不匹配伪元素,而
+    // animation-play-state 又不继承,所以 .item::before 上的循环动画得单列出来
+    // (cardSanitizer 会原样保留这类选择器)。
+    `<style>html,body{margin:0;padding:0;overflow:hidden;font-family:system-ui,-apple-system,sans-serif}img{max-width:100%;-webkit-user-drag:none;-webkit-user-select:none;user-select:none}@media (prefers-reduced-motion:reduce){*{animation:none!important}}html[${HIDDEN_ANIMATION_ATTR}='true'],html[${HIDDEN_ANIMATION_ATTR}='true'] *,html[${HIDDEN_ANIMATION_ATTR}='true'] *::before,html[${HIDDEN_ANIMATION_ATTR}='true'] *::after{animation-play-state:paused!important}</style>`,
     '</head><body>',
     sanitizedHtml,
     '</body></html>',

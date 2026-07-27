@@ -958,6 +958,44 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(false);
   });
 
+  it('J4. 分页锁一路持有到 around 提交,中途不出现"锁已开但窗口未提交"的空档', async () => {
+    // review #676(codex P1):原先 backfill 在 finally 里放锁,于是"backfill 返回"与"调用方
+    // 提交"之间多出一个 microtask 空档 —— 另一次跳转(隧道响应的 continuation 尤其容易排在
+    // 这里)能在空档里抢到锁,随后旧那次的提交又把 isLoadingMore 清掉,新持有者的游标就暴露
+    // 给并发分页了。
+    //
+    // 这里用一个确定性的观察点来守:订阅每一次发布,断言**第一个 isLoadingMore=false 的状态
+    // 里已经能看到 around 行**。旧实现会先发布一个"锁已开、around 还没 merge"的中间态。
+    const target = serverMessage({
+      id: 'held-lock',
+      clientId: 'held-lock',
+      createdAt: '2026-07-20T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    // 空页 → exhausted → 走 fallback 提交(around 行在提交里才 merge)。
+    vi.mocked(listMessagesFor).mockResolvedValueOnce([]);
+
+    const seen: { loading: boolean; hasTarget: boolean }[] = [];
+    const unsubscribe = makerChatStore.subscribe(SID, () => {
+      const snap = makerChatStore.getSnapshot(SID);
+      seen.push({
+        loading: snap.isLoadingMore,
+        hasTarget: snap.messages.some((m) => m.clientId === 'held-lock'),
+      });
+    });
+
+    await makerChatStore.loadAroundMessageClientId(SID, 'held-lock', { radius: 60 });
+    unsubscribe();
+
+    // 锁确实被持有过,也确实被释放了。
+    expect(seen.some((entry) => entry.loading)).toBe(true);
+    const firstReleased = seen.find((entry) => !entry.loading);
+    expect(firstReleased).toBeDefined();
+    // 关键:锁开的那一刻,around 行已经在窗口里 —— 没有"锁已开、窗口还没提交"的中间态。
+    expect(firstReleased?.hasTarget).toBe(true);
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(false);
+  });
+
   it('J3. fallback 一行都没加进来时,不把已确证的 hasMoreMessages 翻回 true', async () => {
     // review #676(codex P1):fallback 原先无条件置 hasMoreMessages=true。已经完整翻到历史
     // 起点的会话因此每次窗口内搜索都重新亮起"还有更多历史",并再发一轮无用请求。

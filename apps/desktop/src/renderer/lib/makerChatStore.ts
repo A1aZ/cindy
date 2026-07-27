@@ -6037,21 +6037,18 @@ async function backfillHistoryUntil(
     if (epochChanged()) return 'cancelled';
     publishCollected();
     return 'unavailable';
-  } finally {
-    // 只释放**本代际自己**持有的锁。
-    //
-    // 两个前置条件都必要:
-    //   - sessions.has:setState 走 getOrCreateState,对已被 _purgeSession 删掉的会话
-    //     会重新 materialize 一个空 state 并 touch LRU(见 getOrCreateState 与
-    //     hasPendingQueue 的注释),把刚 purge 的会话又塞回 sessions Map。
-    //   - epoch 未变:会话被 purge / LRU 驱逐后又以同一 ID 重开时,新代际可能已经开始
-    //     自己的分页并置了 isLoadingMore;旧请求此刻清标志就等于释放别人的锁,让并发
-    //     请求去抢同一个游标(#676 review)。重置路径(reloadMessages / clear)自己会清
-    //     锁,不需要被作废的请求代劳。
-    if (sessions.has(sessionId) && !epochChanged()) {
-      setState(sessionId, (s) => (s.isLoadingMore ? { ...s, isLoadingMore: false } : s));
-    }
   }
+  // 注意:这里**不释放**分页锁 —— 它一路持有到调用方的 commitAroundWindow(见那里的
+  // isLoadingMore 处置)。
+  //
+  // 原先在 finally 里释放,于是"backfill 返回"与"调用方提交"之间多出一个 microtask 空档:
+  // 另一次跳转(隧道响应的 continuation 尤其容易排在这里)可以在空档里抢到锁,随后旧那次的
+  // exhausted / unavailable 提交又把 isLoadingMore 清掉 —— 新持有者的游标就暴露给并发分页了
+  // (#676 review codex P1)。改为持有到提交:backfill 返回后到 commitAroundWindow 之间全是
+  // 同步代码,没有可插入的空档。
+  //
+  // 被作废(cancelled)那条路不释放:epoch 已变说明重置路径接管了,而重置路径自己会清锁 ——
+  // 被作废的请求不该代劳(它分辨不出锁属于哪一代)。
 }
 
 /**
@@ -6078,6 +6075,8 @@ function commitAroundWindow(
       return {
         ...s,
         messages,
+        // 锁由本次提交释放(backfill 一路持有到这里,见那里的说明)。
+        isLoadingMore: false,
         // 注意这里**不清**孤岛标记。补齐到达目标只证明"尾部 → 本次目标"连续,不证明更早的
         // 孤岛都被跨过:先前一次失败的深跳留下孤岛 A,之后跳一个更近的目标 B 并补齐成功,
         // B↔A 之间的洞和 A 自己的行都还在。清掉唯一的 boolean 会让之后跳回 A 走成员快速

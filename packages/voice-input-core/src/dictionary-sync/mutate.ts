@@ -15,7 +15,11 @@ import { tickHlc, type HlcClock, type HlcTimestamp } from './hlc';
 import { MATERIALIZED_ID_PREFIX, materializeDictionary, pickDisplayText } from './materialize';
 import { dictionaryTermKey, normalizeDictionaryTermText } from './text';
 import {
+  copyDictionaryMap,
+  createDictionaryMap,
+  hasDictionaryKey,
   listLiveIncarnations,
+  withDictionaryKey,
   type DictionaryIncarnation,
   type DictionaryRecord,
   type DictionaryStage,
@@ -68,7 +72,7 @@ export function recordLearningEvent(
   // 后者看起来无害(物化阶段本来就会被抑制压住),但每次学习都会改状态 → 触发
   // 写盘与同步广播,而且计数一直涨,是纯粹的浪费。用户手动把词加回来之后
   // (存在 manual 存活化身)才恢复正常学习。
-  if (key in state.suppressed && !live.some((item) => item.source === 'manual')) {
+  if (hasDictionaryKey(state.suppressed, key) && !live.some((item) => item.source === 'manual')) {
     return { state, clock, changed: false };
   }
 
@@ -104,7 +108,7 @@ export function recordLearningEvent(
     state: putRecord(state, key, {
       ...record!,
       incarnations: {
-        ...record!.incarnations,
+        ...copyDictionaryMap(record!.incarnations),
         [target.tag]: bumpIncarnation(target, {
           nodeId: clock.nodeId,
           stage: input.stage,
@@ -125,6 +129,14 @@ export interface SeedTermInput {
   stage: DictionaryStage;
   /** 已积累的证据次数(来自被认领的词典文件),至少按 1 计。 */
   count: number;
+  /**
+   * 已积累的别名(误识别写法)及其次数。
+   *
+   * 别名是词典纠错能力的主体 —— 「web coding → Vibe Coding」这类映射全靠它。
+   * 认领时不带上,存量用户升级后纠错能力就凭空退化了,而且下一次物化写回文件
+   * 就永久丢失。
+   */
+  aliases?: ReadonlyArray<{ text: string; count?: number }>;
   nowMs: number;
 }
 
@@ -143,8 +155,8 @@ export function seedTerm(
 ): MutationResult {
   const text = normalizeDictionaryTermText(input.text);
   const key = dictionaryTermKey(text);
-  if (!key || key in state.records) return { state, clock, changed: false };
-  if (input.source === 'automatic' && key in state.suppressed) {
+  if (!key || hasDictionaryKey(state.records, key)) return { state, clock, changed: false };
+  if (input.source === 'automatic' && hasDictionaryKey(state.suppressed, key)) {
     return { state, clock, changed: false };
   }
 
@@ -159,12 +171,31 @@ export function seedTerm(
     aliasTexts: [],
     nowMs: input.nowMs,
   });
+
+  // 别名按各自既有次数种下(同样只在首次认领时发生,不会重复记账)。
+  const aliases = createDictionaryMap<SyncAliasState>();
+  for (const alias of input.aliases ?? []) {
+    const aliasText = normalizeDictionaryTermText(alias?.text);
+    const aliasKey = dictionaryTermKey(aliasText);
+    if (!aliasKey || aliasKey === key || hasDictionaryKey(aliases, aliasKey)) continue;
+    aliases[aliasKey] = {
+      text: aliasText,
+      textStamp: ticked.stamp,
+      counters: withDictionaryKey(null, clock.nodeId, Math.max(1, Math.floor(alias?.count ?? 1))),
+      lastSeenAt: input.nowMs,
+    };
+  }
+
+  const incarnations = createDictionaryMap<DictionaryIncarnation>();
+  incarnations[ticked.stamp] = {
+    ...incarnation,
+    counters: withDictionaryKey(null, clock.nodeId, count),
+    aliases,
+  };
   return {
     state: putRecord(state, key, {
-      incarnations: {
-        [ticked.stamp]: { ...incarnation, counters: { [clock.nodeId]: count } },
-      },
-      tombstones: {},
+      incarnations,
+      tombstones: createDictionaryMap<HlcTimestamp>(),
     }),
     clock: ticked.clock,
     changed: true,
@@ -212,7 +243,7 @@ export function addManualEntry(
   return {
     state: putRecord(state, key, {
       incarnations: {
-        ...(record?.incarnations ?? {}),
+        ...copyDictionaryMap(record?.incarnations),
         [ticked.stamp]: createIncarnation({
           tag: ticked.stamp,
           text,
@@ -271,19 +302,19 @@ export function deleteTerms(
     const ticked = tickHlc(nextClock, input.nowMs);
     nextClock = ticked.clock;
 
-    const tombstones: Record<HlcTimestamp, HlcTimestamp> = { ...record.tombstones };
+    const tombstones: Record<HlcTimestamp, HlcTimestamp> = copyDictionaryMap(record.tombstones);
     for (const incarnation of live) tombstones[incarnation.tag] = ticked.stamp;
 
     const isAutomatic = !live.some((item) => item.source === 'manual');
     nextState = putRecord(nextState, key, { ...record, tombstones });
-    if (input.suppressAutomatic !== false && isAutomatic && !(key in nextState.suppressed)) {
+    if (input.suppressAutomatic !== false && isAutomatic && !hasDictionaryKey(nextState.suppressed, key)) {
       nextState = {
         ...nextState,
-        suppressed: {
-          ...nextState.suppressed,
+        suppressed: withDictionaryKey(nextState.suppressed, key, {
           // 抑制列表展示的文本与词条列表用同一套 LWW 规则,避免两处显示不一致。
-          [key]: { text: pickDisplayText(live), stamp: ticked.stamp },
-        },
+          text: pickDisplayText(live),
+          stamp: ticked.stamp,
+        }),
       };
     }
     changed = true;
@@ -337,7 +368,7 @@ export function renameTerm(
   }
 
   const ticked = tickHlc(clock, input.nowMs);
-  const incarnations: Record<HlcTimestamp, DictionaryIncarnation> = { ...record!.incarnations };
+  const incarnations: Record<HlcTimestamp, DictionaryIncarnation> = copyDictionaryMap(record!.incarnations);
   for (const incarnation of live) {
     incarnations[incarnation.tag] = {
       ...incarnation,
@@ -369,7 +400,7 @@ export function termKeyFromMaterializedId(
   if (!trimmed) return null;
   if (trimmed.startsWith(MATERIALIZED_ID_PREFIX)) {
     const key = trimmed.slice(MATERIALIZED_ID_PREFIX.length);
-    return key in state.records ? key : null;
+    return hasDictionaryKey(state.records, key) ? key : null;
   }
   const match = materializeDictionary(state, limits).entries.find((entry) => entry.id === trimmed);
   return match ? dictionaryTermKey(match.text) : null;
@@ -436,7 +467,7 @@ function putRecord(
   key: string,
   record: DictionaryRecord,
 ): VoiceDictionarySyncState {
-  return { ...state, records: { ...state.records, [key]: record } };
+  return { ...state, records: withDictionaryKey(state.records, key, record) };
 }
 
 function createIncarnation(input: {
@@ -475,7 +506,7 @@ function bumpIncarnation(
     ...incarnation,
     stage: incarnation.stage === 'entry' || input.stage === 'entry' ? 'entry' : 'candidate',
     counters: {
-      ...incarnation.counters,
+      ...copyDictionaryMap(incarnation.counters),
       [input.nodeId]: (incarnation.counters[input.nodeId] ?? 0) + 1,
     },
     aliases: buildAliases(incarnation.aliases, input.aliasTexts, input.nodeId, input.stamp, input.nowMs),
@@ -491,7 +522,7 @@ function buildAliases(
   nowMs: number,
 ): Record<string, SyncAliasState> {
   if (aliasTexts.length === 0) return current;
-  const next: Record<string, SyncAliasState> = { ...current };
+  const next: Record<string, SyncAliasState> = copyDictionaryMap(current);
   for (const aliasText of aliasTexts) {
     const aliasKey = dictionaryTermKey(aliasText);
     if (!aliasKey) continue;

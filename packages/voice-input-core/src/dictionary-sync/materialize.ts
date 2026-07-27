@@ -12,6 +12,7 @@
 
 import { compareHlc } from './hlc';
 import {
+  hasDictionaryKey,
   listLiveIncarnations,
   readCounterTotal,
   type DictionaryIncarnation,
@@ -101,7 +102,7 @@ export function materializeDictionary(
       : 'automatic';
     // 抑制只压制自动学习的产物。用户手动添加过的同名词条不受影响 —— 与 desktop
     // 单机语义一致(手动词条的删除本来就不写抑制集合)。
-    if (source === 'automatic' && key in state.suppressed) continue;
+    if (source === 'automatic' && hasDictionaryKey(state.suppressed, key)) continue;
 
     const stage = live.some((item) => item.stage === 'entry') ? 'entry' : 'candidate';
     const total = Math.max(1, live.reduce((sum, item) => sum + readCounterTotal(item.counters), 0));

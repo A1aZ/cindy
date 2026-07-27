@@ -55,12 +55,12 @@ import {
 import { setBusyProbe, helloBusy, pollBusyChange, resetBusyDedupe } from './busyReporter';
 import {
   DL_VOICE_DICTIONARY_SYNC_CHANNEL,
+  broadcastDictionaryNow,
   handleDesktopPeerOnline,
   handleIncomingDictionaryState,
   initVoiceDictionarySync,
   notifyLocalDictionaryChanged,
   shouldExchangeDictionaryWith,
-  stopVoiceDictionarySync,
 } from '../voice-input/dictionarySyncDriver';
 import { onVoiceInputDictionaryChanged } from '../voice-input/VoiceInputDataStore';
 import { resetAll as resetSubscriptionRefs, snapshotSubscriptions } from './subscriptionRefcount';
@@ -352,7 +352,10 @@ export function initDeviceLinkService(): void {
         .map(([deviceId]) => deviceId),
   });
   if (unsubscribeDictionaryChanged) unsubscribeDictionaryChanged();
-  unsubscribeDictionaryChanged = onVoiceInputDictionaryChanged(notifyLocalDictionaryChanged);
+  unsubscribeDictionaryChanged = onVoiceInputDictionaryChanged((options) => {
+    if (options?.immediate) broadcastDictionaryNow();
+    else notifyLocalDictionaryChanged();
+  });
 
   // 同机多实例单持有者仲裁:共享 userData(同 deviceId)的多个实例中,只有认领
   // 成功的持有者才连 relay,其余被动待命 —— 否则 relay 的 last-wins 顶号语义会

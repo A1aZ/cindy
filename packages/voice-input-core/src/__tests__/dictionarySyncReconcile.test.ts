@@ -128,6 +128,75 @@ describe('dictionary sync — 首次迁移保留频次', () => {
     ]);
   });
 
+  it('别名与其次数一并接管 —— 它们是纠错能力的主体,丢了词典就白学了', () => {
+    const result = reconcileFromLocalSnapshot(createEmptySyncState(), createHlcClock('a', 1_000), {
+      snapshot: {
+        entries: [
+          {
+            text: 'Vibe Coding',
+            source: 'automatic',
+            frequency: 4,
+            aliases: [
+              { text: 'web coding', count: 3 },
+              { text: '外部 coding', count: 1 },
+            ],
+          },
+        ],
+        suppressedTexts: [],
+        candidates: [
+          { text: 'Orca', evidenceCount: 2, aliases: [{ text: 'okra', count: 2 }] },
+        ],
+      },
+      lastMaterializedKeys: [],
+      nowMs: 2_000,
+    });
+
+    const materialized = materializeDictionary(result.state);
+    const entry = materialized.entries[0];
+    expect(entry.frequency).toBe(4);
+    expect(entry.aliases.map((alias) => [alias.text, alias.count])).toEqual([
+      ['web coding', 3],
+      ['外部 coding', 1],
+    ]);
+    expect(materialized.candidates[0].aliases.map((alias) => alias.text)).toEqual(['okra']);
+  });
+
+  it('迁移进来的别名可以继续累积,并跨设备合并', () => {
+    const migrate = (nodeId: string) => reconcileFromLocalSnapshot(
+      createEmptySyncState(),
+      createHlcClock(nodeId, 1_000),
+      {
+        snapshot: {
+          entries: [{
+            text: 'Vibe Coding',
+            source: 'automatic',
+            frequency: 2,
+            aliases: [{ text: 'web coding', count: 2 }],
+          }],
+          suppressedTexts: [],
+        },
+        lastMaterializedKeys: [],
+        nowMs: 2_000,
+      },
+    );
+
+    const a = migrate('a');
+    const bumped = recordLearningEvent(a.state, a.clock, {
+      text: 'Vibe Coding',
+      aliases: ['web coding'],
+      stage: 'entry',
+      nowMs: 3_000,
+    });
+    expect(materializeDictionary(bumped.state).entries[0].aliases[0].count).toBe(3);
+
+    // 两台各自迁移同一份词典再合并:别名取并集,计数不会因合并翻倍。
+    const b = migrate('b');
+    const merged = mergeSyncStates(bumped.state, b.state);
+    const aliases = materializeDictionary(merged).entries[0].aliases;
+    expect(aliases).toHaveLength(1);
+    expect(aliases[0].text).toBe('web coding');
+  });
+
   it('缺失或异常的频次退回 1,不产生 0 或负数', () => {
     const result = reconcileFromLocalSnapshot(createEmptySyncState(), createHlcClock('a', 1_000), {
       snapshot: {

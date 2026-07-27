@@ -6,7 +6,7 @@
  * 只剩渲染。
  */
 
-import type { DeviceView } from '@cindy/device-link';
+import type { DeviceView, PresenceSnapshot } from '@cindy/device-link';
 import type { MobileVoiceCredentialSyncDictionaryEntry } from '@cindy/maker-shared/device-link-contract';
 
 /** 桌面平台白名单:词典只存在于电脑上,手机之间不互相同步。 */
@@ -27,17 +27,47 @@ export interface MobileVoiceDictionaryHost {
 export function collectMobileVoiceDictionaryHosts(
   devices: readonly DeviceView[],
 ): MobileVoiceDictionaryHost[] {
-  return devices
+  const mapped = devices
     .filter((device) => !device.isSelf && isDesktopDevice(device.platform))
     .map((device) => ({
       deviceId: device.deviceId,
       name: device.name?.trim() || device.deviceId.slice(0, 8),
       online: Boolean(device.online),
     }))
-    .sort((a, b) => {
-      if (a.online !== b.online) return a.online ? -1 : 1;
-      return a.name.localeCompare(b.name) || (a.deviceId < b.deviceId ? -1 : 1);
-    });
+  ;
+  return sortHosts(mapped);
+}
+
+/** 在线优先,其次按名称,最后用 deviceId 兜底 —— 顺序必须在多次渲染间稳定。 */
+function sortHosts(hosts: MobileVoiceDictionaryHost[]): MobileVoiceDictionaryHost[] {
+  return [...hosts].sort((a, b) => {
+    if (a.online !== b.online) return a.online ? -1 : 1;
+    return a.name.localeCompare(b.name) || (a.deviceId < b.deviceId ? -1 : 1);
+  });
+}
+
+/**
+ * 用一条 presence 事件修正电脑清单。
+ *
+ * 设备清单来自打开页面那一刻的 REST 快照;presence 是之后的增量真相。没见过的
+ * 电脑要补进来(上线后才注册的),已知设备只更新在线状态与名字。返回原数组表示
+ * 没有变化,避免无谓重渲染。
+ */
+export function patchMobileVoiceDictionaryHosts(
+  hosts: readonly MobileVoiceDictionaryHost[],
+  snapshot: PresenceSnapshot,
+): MobileVoiceDictionaryHost[] {
+  if (!snapshot?.deviceId || !isDesktopDevice(snapshot.platform)) return [...hosts];
+  const name = snapshot.deviceName?.trim() || snapshot.deviceId.slice(0, 8);
+  const index = hosts.findIndex((host) => host.deviceId === snapshot.deviceId);
+  if (index < 0) {
+    return sortHosts([...hosts, { deviceId: snapshot.deviceId, name, online: Boolean(snapshot.online) }]);
+  }
+  const previous = hosts[index];
+  if (previous.online === Boolean(snapshot.online) && previous.name === name) return [...hosts];
+  const next = [...hosts];
+  next[index] = { ...previous, name, online: Boolean(snapshot.online) };
+  return sortHosts(next);
 }
 
 export function isDesktopDevice(platform: string | null | undefined): boolean {
@@ -52,71 +82,59 @@ export interface MobileVoiceDictionaryEntryView {
   aliases: string[];
 }
 
+/** 一台电脑的词典快照 + 它的拉取时间。 */
+export interface MobileVoiceDictionarySnapshot {
+  entries: readonly MobileVoiceCredentialSyncDictionaryEntry[];
+  /** 成功拉取的时间(unix ms);从未拉到过为 0。 */
+  fetchedAt: number;
+}
+
 /**
- * 把若干台电脑的词典快照合成用户看到的**那一份**词典。
+ * 从各台电脑的缓存里挑出用户该看到的**那一份**词典。
  *
- * 词典对用户是单数:同账号下所有开启同步的电脑收敛到同一份内容,「哪台电脑的词典」
- * 不是用户需要理解的概念,更不该在界面上分组呈现 —— 同一台机器换过名字或重装过
- * 就会冒出好几个组,列表立刻没法看。
+ * ## 为什么是「取最新」而不是「取并集」
  *
- * 合并按归一化文本去重;同一个词在不同快照里频次不同(某台还没收敛完)时取最大值,
- * 别名取并集。这样只要有一台电脑拉取成功,用户就能看到完整词典。
+ * 所有电脑收敛到同一份词典,所以任意一份新鲜快照就是完整答案。而并集是错的:
+ * 一台电脑离线、缓存停在三天前,另一台在线且刚同步过——如果这期间删掉或改名了
+ * 某个词,并集会把那个旧词永久加回列表(频次取 max 更让旧值直接赢)。用户在电脑
+ * 上删了词,手机上却怎么刷新都还在。
  *
- * 排序按频次降序 —— 用得最多的排最前,与电脑端词典列表一致;频次并列时按文本排序
- * 保证稳定。
+ * 取最新那份则天然表达了删除:新快照里没有,就是没有。
  */
 export function buildMobileVoiceDictionaryEntryViews(
-  snapshots: ReadonlyArray<readonly MobileVoiceCredentialSyncDictionaryEntry[]>,
+  snapshots: ReadonlyArray<MobileVoiceDictionarySnapshot>,
   options?: { maxAliases?: number },
 ): MobileVoiceDictionaryEntryView[] {
   const maxAliases = options?.maxAliases ?? 3;
-  const merged = new Map<
-    string,
-    { text: string; frequency: number; aliases: Map<string, { text: string; count: number }> }
-  >();
+  const freshest = snapshots.reduce<MobileVoiceDictionarySnapshot | null>((best, snapshot) => {
+    if (!snapshot || snapshot.fetchedAt <= 0) return best;
+    return !best || snapshot.fetchedAt > best.fetchedAt ? snapshot : best;
+  }, null);
+  if (!freshest) return [];
 
-  for (const entries of snapshots) {
-    for (const entry of entries ?? []) {
-      const text = entry?.text?.trim();
-      if (!text) continue;
-      const key = text.toLocaleLowerCase();
-      const frequency = readPositive(entry.frequency);
-      const existing = merged.get(key);
-      const target = existing ?? { text, frequency, aliases: new Map() };
-      if (existing) {
-        // 频次取最大值而不是相加:这些快照是同一份词典的不同副本,相加会凭空翻倍。
-        target.frequency = Math.max(existing.frequency, frequency);
-      }
-      for (const alias of entry.aliases ?? []) {
-        const aliasText = alias?.text?.trim();
-        if (!aliasText) continue;
-        const aliasKey = aliasText.toLocaleLowerCase();
-        const count = readPositive(alias.count);
-        const existingAlias = target.aliases.get(aliasKey);
-        target.aliases.set(aliasKey, {
-          text: aliasText,
-          count: existingAlias ? Math.max(existingAlias.count, count) : count,
-        });
-      }
-      merged.set(key, target);
-    }
+  const seen = new Set<string>();
+  const views: Array<MobileVoiceDictionaryEntryView & { frequency: number }> = [];
+  for (const entry of freshest.entries ?? []) {
+    const text = entry?.text?.trim();
+    if (!text) continue;
+    const key = text.toLocaleLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    views.push({
+      key,
+      text,
+      frequency: readPositive(entry.frequency),
+      aliases: [...(entry.aliases ?? [])]
+        .filter((alias) => alias?.text?.trim())
+        .sort((a, b) => readPositive(b.count) - readPositive(a.count) || a.text.localeCompare(b.text))
+        .slice(0, maxAliases)
+        .map((alias) => alias.text.trim()),
+    });
   }
 
-  return [...merged.entries()]
-    .map(([key, entry]) => ({
-      key,
-      text: entry.text,
-      aliases: [...entry.aliases.values()]
-        .sort((a, b) => b.count - a.count || a.text.localeCompare(b.text))
-        .slice(0, maxAliases)
-        .map((alias) => alias.text),
-    }))
-    .sort((a, b) => {
-      const frequencyA = merged.get(a.key)?.frequency ?? 1;
-      const frequencyB = merged.get(b.key)?.frequency ?? 1;
-      if (frequencyA !== frequencyB) return frequencyB - frequencyA;
-      return a.text.localeCompare(b.text);
-    });
+  return views
+    .sort((a, b) => b.frequency - a.frequency || a.text.localeCompare(b.text))
+    .map(({ key, text, aliases }) => ({ key, text, aliases }));
 }
 
 function readPositive(value: unknown): number {

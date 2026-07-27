@@ -61,11 +61,25 @@ interface StoredSyncData {
   state: VoiceDictionarySyncState;
   /** 上次物化写进词典文件的主键集合;降级回收判断删除时用。 */
   lastMaterializedKeys: string[];
+  /**
+   * 盘上的 sidecar 是更高版本(更新的客户端写的),本进程读不懂。
+   *
+   * 此时整个 store 进入旁路:不读、不合并、更不写。降级回来的旧客户端如果照常
+   * 走流程,会把读不懂的状态当成空状态物化出一份空词典,再用 markMaterialized
+   * 把空的 v1 状态覆盖写回 —— 用户的词典和所有设备的合并历史一起没了。
+   * 这个标记不落盘,只是本次加载的判断结果。
+   */
+  incompatible?: boolean;
 }
 
 export class VoiceDictionarySyncStore {
   private data: StoredSyncData | null = null;
   private dataOwnerId: string | null = null;
+
+  /** 盘上的同步状态是否来自更新的客户端。true 时调用方必须完全绕开同步。 */
+  isIncompatible(): boolean {
+    return this.load().incompatible === true;
+  }
 
   getNodeId(): string {
     return this.load().nodeId;
@@ -185,6 +199,9 @@ export class VoiceDictionarySyncStore {
   }
 
   private persist(next: StoredSyncData): void {
+    // 读不懂的 sidecar 一个字节都不能覆盖:那是更新客户端的状态,写回去就是
+    // 用空状态销毁它。
+    if (next.incompatible || this.data?.incompatible) return;
     const filePath = getDataFilePath();
     try {
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -222,9 +239,11 @@ function normalizeStoredData(raw: unknown): StoredSyncData {
   const nodeId = typeof candidate.nodeId === 'string' && candidate.nodeId.trim()
     ? candidate.nodeId.trim()
     : randomUUID();
+  const incompatible = isNewerVersion(candidate.state);
   const state = normalizeState(candidate.state);
   return {
     version: 1,
+    incompatible,
     nodeId,
     clock: {
       wallMs: readNonNegative(candidate.clock?.wallMs),
@@ -237,15 +256,30 @@ function normalizeStoredData(raw: unknown): StoredSyncData {
   };
 }
 
-function normalizeState(raw: unknown): VoiceDictionarySyncState {
-  if (!raw || typeof raw !== 'object') return createEmptySyncState();
+/** 结构本身能不能被本进程理解(版本号 + 两个必需字段)。 */
+function isReadableState(raw: unknown): raw is VoiceDictionarySyncState {
+  if (!raw || typeof raw !== 'object') return false;
   const candidate = raw as Partial<VoiceDictionarySyncState>;
-  // 更高的结构版本来自更新的客户端:本进程读不懂,当作空状态重新开始,而不是
-  // 按半懂不懂的结构去合并(那会产出错误的词典)。降级期间的改动由回收认领。
-  if (candidate.version !== VOICE_DICTIONARY_SYNC_VERSION) return createEmptySyncState();
-  if (!candidate.records || typeof candidate.records !== 'object') return createEmptySyncState();
-  if (!candidate.suppressed || typeof candidate.suppressed !== 'object') return createEmptySyncState();
-  return candidate as VoiceDictionarySyncState;
+  if (candidate.version !== VOICE_DICTIONARY_SYNC_VERSION) return false;
+  if (!candidate.records || typeof candidate.records !== 'object') return false;
+  if (!candidate.suppressed || typeof candidate.suppressed !== 'object') return false;
+  return true;
+}
+
+/**
+ * 盘上状态是否来自更新的客户端。
+ *
+ * 只认「版本号明确更高」这一种情况 —— 结构坏了(缺字段、被截断)属于损坏,照常
+ * 重建即可;而版本更高是合法数据,必须原样留着。
+ */
+function isNewerVersion(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object') return false;
+  const version = (raw as { version?: unknown }).version;
+  return typeof version === 'number' && version > VOICE_DICTIONARY_SYNC_VERSION;
+}
+
+function normalizeState(raw: unknown): VoiceDictionarySyncState {
+  return isReadableState(raw) ? raw : createEmptySyncState();
 }
 
 function readNonNegative(value: unknown): number {

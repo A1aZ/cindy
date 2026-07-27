@@ -65,12 +65,13 @@ import {
 } from '@/notifications/pushNotifications';
 import {
   hydrateMobileVoiceDictionary,
-  readCachedMobileVoiceDictionary,
+  readCachedMobileVoiceDictionarySnapshot,
   refreshMobileVoiceDictionary,
 } from '@/session/mobileVoiceDictionaryCache';
 import {
   buildMobileVoiceDictionaryEntryViews,
   collectMobileVoiceDictionaryHosts,
+  patchMobileVoiceDictionaryHosts,
   type MobileVoiceDictionaryEntryView,
   type MobileVoiceDictionaryHost,
 } from '@/session/mobileVoiceDictionaryView';
@@ -105,7 +106,7 @@ export default function SettingsScreen() {
   const { t } = useTranslation();
   const { locale, setLocale } = useLocale();
   const deviceLink = useDeviceLink();
-  const { status } = deviceLink;
+  const { lastPresenceSnapshot, status } = deviceLink;
   const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const [accountDeletionAvailable, setAccountDeletionAvailable] =
@@ -602,6 +603,14 @@ export default function SettingsScreen() {
     }
   }, [analyticsBusy, resumeAnalyticsReporting, t]);
 
+  // REST 设备清单是「打开设置页那一刻」的快照,之后电脑上线/下线不会反映进来。
+  // 设置页可能开着很久,不跟 presence 的话:某台电脑上线了,这里仍认为全部离线,
+  // 刷新按钮直接 return,用户只能退出重进才能拉词典。
+  useEffect(() => {
+    if (!lastPresenceSnapshot) return;
+    setDesktopDevices((current) => patchMobileVoiceDictionaryHosts(current, lastPresenceSnapshot));
+  }, [lastPresenceSnapshot]);
+
   /**
    * 向所有在线电脑各拉一次词典快照。
    *
@@ -643,7 +652,7 @@ export default function SettingsScreen() {
     () => {
       void dictionaryRevision; // 订阅刷新计数,让缓存更新后重新求值
       return buildMobileVoiceDictionaryEntryViews(
-        desktopDevices.map((host) => readCachedMobileVoiceDictionary(host.deviceId)),
+        desktopDevices.map((host) => readCachedMobileVoiceDictionarySnapshot(host.deviceId)),
       );
     },
     [desktopDevices, dictionaryRevision],

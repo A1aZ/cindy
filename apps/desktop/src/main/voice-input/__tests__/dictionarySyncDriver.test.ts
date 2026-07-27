@@ -15,7 +15,7 @@ vi.mock('../../logger.js', () => ({
 }));
 
 const syncEnabled = { value: true };
-const mergeRemoteDictionaryState = vi.fn((_remote: unknown): boolean => true);
+const mergeRemoteDictionaryState = vi.fn<(remote: unknown) => boolean>(() => true);
 vi.mock('../VoiceInputDataStore.js', () => ({
   voiceInputDataStore: {
     getSettings: () => ({ dictionarySyncEnabled: syncEnabled.value }),

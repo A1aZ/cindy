@@ -85,18 +85,23 @@ describe('collectMobileVoiceDictionaryHosts', () => {
 });
 
 describe('buildMobileVoiceDictionaryEntryViews', () => {
+  const snap = (
+    entries: Array<{ text: string; frequency?: number; aliases?: Array<{ text: string; count?: number }> }>,
+    fetchedAt = 1_000,
+  ) => ({ entries, fetchedAt });
+
   it('按频次降序,并列时按文本稳定排序', () => {
-    const views = buildMobileVoiceDictionaryEntryViews([[
+    const views = buildMobileVoiceDictionaryEntryViews([snap([
       { text: 'Orca', frequency: 2 },
       { text: 'Cindy', frequency: 9 },
       { text: 'Alpha', frequency: 2 },
-    ]]);
+    ])]);
     expect(views.map((view) => view.text)).toEqual(['Cindy', 'Alpha', 'Orca']);
   });
 
   it('别名按观察次数降序并截断', () => {
     const [view] = buildMobileVoiceDictionaryEntryViews(
-      [[
+      [snap([
         {
           text: 'Vibe Coding',
           frequency: 3,
@@ -104,62 +109,62 @@ describe('buildMobileVoiceDictionaryEntryViews', () => {
             { text: 'rare', count: 1 },
             { text: 'common', count: 9 },
             { text: 'mid', count: 4 },
-            { text: 'dropped', count: 0 },
           ],
         },
-      ]],
+      ])],
       { maxAliases: 2 },
     );
     expect(view.aliases).toEqual(['common', 'mid']);
   });
 
   it('丢弃空文本并按归一化主键去重', () => {
-    const views = buildMobileVoiceDictionaryEntryViews([[
+    const views = buildMobileVoiceDictionaryEntryViews([snap([
       { text: '  ' },
       { text: 'Cindy', frequency: 5 },
       { text: 'cindy', frequency: 1 },
-    ]]);
+    ])]);
     expect(views.map((view) => view.text)).toEqual(['Cindy']);
   });
 
-  it('空词典返回空列表', () => {
+  it('没有任何成功拉取过的快照时返回空列表', () => {
     expect(buildMobileVoiceDictionaryEntryViews([])).toEqual([]);
-    expect(buildMobileVoiceDictionaryEntryViews([[], []])).toEqual([]);
+    // fetchedAt=0 表示从没拉到过,不能当成"词典是空的"来用。
+    expect(buildMobileVoiceDictionaryEntryViews([{ entries: [{ text: 'X' }], fetchedAt: 0 }])).toEqual([]);
   });
 });
 
-describe('buildMobileVoiceDictionaryEntryViews — 多台电脑合成同一份词典', () => {
-  it('同一个词在不同电脑上不会重复出现', () => {
+describe('buildMobileVoiceDictionaryEntryViews — 多台电脑取最新那份', () => {
+  it('用最新快照,不与旧快照取并集', () => {
     const views = buildMobileVoiceDictionaryEntryViews([
-      [{ text: 'Cindy', frequency: 3 }],
-      [{ text: 'cindy', frequency: 5 }],
+      { entries: [{ text: 'Cindy' }, { text: 'Orca' }], fetchedAt: 1_000 },
+      { entries: [{ text: 'Cindy' }], fetchedAt: 5_000 },
     ]);
-    expect(views).toHaveLength(1);
-    expect(views[0].text).toBe('Cindy');
+    expect(views.map((view) => view.text)).toEqual(['Cindy']);
   });
 
-  it('频次取最大值而不是相加 —— 这些是同一份词典的副本,相加会凭空翻倍', () => {
-    const views = buildMobileVoiceDictionaryEntryViews([
-      [{ text: 'Cindy', frequency: 5 }, { text: 'Orca', frequency: 9 }],
-      [{ text: 'Cindy', frequency: 5 }, { text: 'Orca', frequency: 2 }],
-    ]);
-    // Orca(9)排在 Cindy(5)前面;若相加则 Cindy=10 会排到最前,顺序就错了。
-    expect(views.map((view) => view.text)).toEqual(['Orca', 'Cindy']);
+  it('在别处删掉的词不会被离线电脑的旧缓存复活', () => {
+    // 这正是并集的致命处:用户在在线电脑上删了 Orca,离线电脑的三天前缓存还留着它,
+    // 并集会让它在手机上永远删不掉。
+    const stale = { entries: [{ text: 'Cindy', frequency: 9 }, { text: 'Orca', frequency: 4 }], fetchedAt: 1_000 };
+    const fresh = { entries: [{ text: 'Cindy', frequency: 2 }], fetchedAt: 9_000 };
+    const views = buildMobileVoiceDictionaryEntryViews([stale, fresh]);
+    expect(views.map((view) => view.text)).toEqual(['Cindy']);
   });
 
-  it('只要有一台拉取成功就能看到完整词典', () => {
+  it('最新快照为空时就显示空 —— 那代表词典真的被清空了', () => {
     const views = buildMobileVoiceDictionaryEntryViews([
-      [], // 这台是旧版本 / 没开被控,拉不到
-      [{ text: 'Cindy' }, { text: 'Orca' }],
+      { entries: [{ text: 'Cindy' }], fetchedAt: 1_000 },
+      { entries: [], fetchedAt: 9_000 },
     ]);
-    expect(views.map((view) => view.text).sort()).toEqual(['Cindy', 'Orca']);
+    expect(views).toEqual([]);
   });
 
-  it('别名跨电脑取并集', () => {
-    const [view] = buildMobileVoiceDictionaryEntryViews([
-      [{ text: 'Vibe Coding', aliases: [{ text: 'web coding', count: 3 }] }],
-      [{ text: 'Vibe Coding', aliases: [{ text: '外部 coding', count: 1 }] }],
-    ]);
-    expect(view.aliases).toEqual(['web coding', '外部 coding']);
+  it('只有一台拉到过时就用它,顺序与来源无关', () => {
+    const never = { entries: [], fetchedAt: 0 };
+    const ok = { entries: [{ text: 'Cindy' }, { text: 'Orca' }], fetchedAt: 3_000 };
+    expect(buildMobileVoiceDictionaryEntryViews([never, ok]).map((v) => v.text).sort())
+      .toEqual(['Cindy', 'Orca']);
+    expect(buildMobileVoiceDictionaryEntryViews([ok, never]).map((v) => v.text).sort())
+      .toEqual(['Cindy', 'Orca']);
   });
 });

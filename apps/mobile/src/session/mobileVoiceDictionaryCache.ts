@@ -51,6 +51,20 @@ export function readMobileVoiceDictionaryFetchedAt(hostDeviceId: string): number
   return cached && cached.fetchedAt > 0 ? cached.fetchedAt : null;
 }
 
+/**
+ * 读一台电脑的缓存快照(含拉取时间)。
+ *
+ * 展示层要靠 fetchedAt 挑出最新那份 —— 离线电脑的旧缓存不能和新鲜数据混在一起,
+ * 否则已经删掉的词会被旧快照带回来。
+ */
+export function readCachedMobileVoiceDictionarySnapshot(hostDeviceId: string): {
+  entries: MobileVoiceCredentialSyncDictionaryEntry[];
+  fetchedAt: number;
+} {
+  const cached = memoryCache.get(normalizeHostDeviceId(hostDeviceId));
+  return { entries: cached?.entries ?? [], fetchedAt: cached?.fetchedAt ?? 0 };
+}
+
 /** 从盘上恢复缓存(App 启动或首次用到该 host 时调用一次)。 */
 export async function hydrateMobileVoiceDictionary(hostDeviceId: string): Promise<void> {
   const host = normalizeHostDeviceId(hostDeviceId);

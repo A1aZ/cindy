@@ -20,24 +20,32 @@
  */
 
 import { tickHlc, type HlcClock } from './hlc';
-import {
-  addManualEntry,
-  deleteTerms,
-  recordLearningEvent,
-  seedTerm,
-  type MutationResult,
-} from './mutate';
+import { deleteTerms, seedTerm, type MutationResult } from './mutate';
 import { dictionaryTermKey, normalizeDictionaryTermText } from './text';
-import type { DictionaryTermSource, VoiceDictionarySyncState } from './types';
+import {
+  hasDictionaryKey,
+  withDictionaryKey,
+  type DictionaryTermSource,
+  type VoiceDictionarySyncState,
+} from './types';
 
 export interface LocalDictionarySnapshot {
-  entries: ReadonlyArray<{ text: string; source: DictionaryTermSource; frequency?: number }>;
+  entries: ReadonlyArray<{
+    text: string;
+    source: DictionaryTermSource;
+    frequency?: number;
+    aliases?: ReadonlyArray<{ text: string; count?: number }>;
+  }>;
   suppressedTexts: ReadonlyArray<string>;
   /**
    * 候选词(还在攒证据、用户不可见的中间态)。只认领新增,不认领删除 —— 候选词
    * 没有「上次物化」的基准可比,而丢一个候选词只会让它重新攒证据,代价极小。
    */
-  candidates?: ReadonlyArray<{ text: string; evidenceCount?: number }>;
+  candidates?: ReadonlyArray<{
+    text: string;
+    evidenceCount?: number;
+    aliases?: ReadonlyArray<{ text: string; count?: number }>;
+  }>;
 }
 
 export interface ReconcileInput {
@@ -62,7 +70,7 @@ export function reconcileFromLocalSnapshot(
   for (const rawText of input.snapshot.suppressedTexts ?? []) {
     const text = normalizeDictionaryTermText(rawText);
     const key = dictionaryTermKey(text);
-    if (!key || key in nextState.suppressed) continue;
+    if (!key || hasDictionaryKey(nextState.suppressed, key)) continue;
     const result = deleteTerms(nextState, nextClock, {
       termKeys: [key],
       nowMs: input.nowMs,
@@ -72,7 +80,7 @@ export function reconcileFromLocalSnapshot(
     nextClock = result.clock;
     // 该词可能压根不在状态里(旧版本删掉后状态里也没有),deleteTerms 不会写抑制,
     // 这里补上,保证抑制意图不丢。
-    if (!(key in nextState.suppressed)) {
+    if (!hasDictionaryKey(nextState.suppressed, key)) {
       const stamped = addSuppression(nextState, nextClock, key, text, input.nowMs);
       nextState = stamped.state;
       nextClock = stamped.clock;
@@ -82,7 +90,12 @@ export function reconcileFromLocalSnapshot(
 
   const currentByKey = new Map<
     string,
-    { text: string; source: DictionaryTermSource; frequency: number }
+    {
+      text: string;
+      source: DictionaryTermSource;
+      frequency: number;
+      aliases: ReadonlyArray<{ text: string; count?: number }>;
+    }
   >();
   for (const entry of input.snapshot.entries) {
     const text = normalizeDictionaryTermText(entry.text);
@@ -92,6 +105,7 @@ export function reconcileFromLocalSnapshot(
       text,
       source: entry.source === 'manual' ? 'manual' : 'automatic',
       frequency: readCount(entry.frequency),
+      aliases: entry.aliases ?? [],
     });
   }
 
@@ -113,6 +127,7 @@ export function reconcileFromLocalSnapshot(
       source: entry.source,
       stage: 'entry',
       count: entry.frequency,
+      aliases: entry.aliases,
       nowMs: input.nowMs,
     });
     if (!result.changed) {
@@ -132,12 +147,13 @@ export function reconcileFromLocalSnapshot(
   for (const candidate of input.snapshot.candidates ?? []) {
     const text = normalizeDictionaryTermText(candidate.text);
     const key = dictionaryTermKey(text);
-    if (!key || key in nextState.records || currentByKey.has(key)) continue;
+    if (!key || hasDictionaryKey(nextState.records, key) || currentByKey.has(key)) continue;
     const result = seedTerm(nextState, nextClock, {
       text,
       source: 'automatic',
       stage: 'candidate',
       count: readCount(candidate.evidenceCount),
+      aliases: candidate.aliases,
       nowMs: input.nowMs,
     });
     nextState = result.state;
@@ -177,7 +193,7 @@ function addSuppression(
   return {
     state: {
       ...state,
-      suppressed: { ...state.suppressed, [key]: { text, stamp: ticked.stamp } },
+      suppressed: withDictionaryKey(state.suppressed, key, { text, stamp: ticked.stamp }),
     },
     clock: ticked.clock,
   };

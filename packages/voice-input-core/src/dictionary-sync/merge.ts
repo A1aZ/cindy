@@ -17,6 +17,7 @@
 import { compareHlc, maxHlc, minHlc, type HlcTimestamp } from './hlc';
 import {
   VOICE_DICTIONARY_SYNC_VERSION,
+  createDictionaryMap,
   createEmptySyncState,
   type DictionaryIncarnation,
   type DictionaryRecord,
@@ -36,7 +37,7 @@ import {
  * 历史,逐节点 max 得到的正是每个节点的真实事件数,求和即全局真实总数。
  */
 export function mergeCounters(a: GCounter, b: GCounter): GCounter {
-  const merged: GCounter = {};
+  const merged: GCounter = createDictionaryMap<number>();
   for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) {
     const left = normalizeCount(a[key]);
     const right = normalizeCount(b[key]);
@@ -78,7 +79,7 @@ function mergeAliases(
   a: Record<string, SyncAliasState>,
   b: Record<string, SyncAliasState>,
 ): Record<string, SyncAliasState> {
-  const merged: Record<string, SyncAliasState> = {};
+  const merged: Record<string, SyncAliasState> = createDictionaryMap<SyncAliasState>();
   for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) {
     const left = a[key];
     const right = b[key];
@@ -118,7 +119,7 @@ function mergeIncarnation(a: DictionaryIncarnation, b: DictionaryIncarnation): D
 }
 
 function mergeRecord(a: DictionaryRecord, b: DictionaryRecord): DictionaryRecord {
-  const incarnations: Record<HlcTimestamp, DictionaryIncarnation> = {};
+  const incarnations: Record<HlcTimestamp, DictionaryIncarnation> = createDictionaryMap<DictionaryIncarnation>();
   for (const tag of new Set([...Object.keys(a.incarnations), ...Object.keys(b.incarnations)])) {
     const left = a.incarnations[tag];
     const right = b.incarnations[tag];
@@ -129,7 +130,7 @@ function mergeRecord(a: DictionaryRecord, b: DictionaryRecord): DictionaryRecord
   // 墓碑是只增集合:一旦某个化身被删,任何一方的合并结果里它都保持被删。
   // 同 tag 的删除时间取 max —— 取 min 会让墓碑提前过 TTL 被回收,给「离线设备
   // 回来复活旧化身」多开一道门。
-  const tombstones: Record<HlcTimestamp, HlcTimestamp> = {};
+  const tombstones: Record<HlcTimestamp, HlcTimestamp> = createDictionaryMap<HlcTimestamp>();
   for (const tag of new Set([...Object.keys(a.tombstones), ...Object.keys(b.tombstones)])) {
     const left = a.tombstones[tag];
     const right = b.tombstones[tag];
@@ -163,7 +164,7 @@ export function mergeSyncStates(
     return createEmptySyncState();
   }
 
-  const records: Record<string, DictionaryRecord> = {};
+  const records: Record<string, DictionaryRecord> = createDictionaryMap<DictionaryRecord>();
   for (const key of new Set([...Object.keys(a.records), ...Object.keys(b.records)])) {
     const left = a.records[key];
     const right = b.records[key];
@@ -171,7 +172,7 @@ export function mergeSyncStates(
     else records[key] = left ?? right;
   }
 
-  const suppressed: Record<string, DictionarySuppression> = {};
+  const suppressed: Record<string, DictionarySuppression> = createDictionaryMap<DictionarySuppression>();
   for (const key of new Set([...Object.keys(a.suppressed), ...Object.keys(b.suppressed)])) {
     const left = a.suppressed[key];
     const right = b.suppressed[key];

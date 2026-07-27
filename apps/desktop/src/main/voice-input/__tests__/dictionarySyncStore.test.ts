@@ -215,6 +215,44 @@ describe('词典同步落盘 —— 合并与回收', () => {
     ]);
   });
 
+  it('更新版本的 sidecar 原样保留,词典也不被清空', () => {
+    // 降级场景:用户装过更新的客户端,sidecar 里是 v2 状态。旧客户端读不懂,
+    // 但绝不能把它当空状态物化出空词典再覆盖写回 —— 那会同时销毁用户的词典和
+    // 所有设备的合并历史。
+    writeDictionaryFile({
+      dictionaryEntries: [
+        { id: 'a', text: 'Vibe Coding', source: 'manual', frequency: 3, aliases: [] },
+        { id: 'b', text: 'LiteLLM', source: 'automatic', frequency: 2, aliases: [] },
+      ],
+      dictionaryCandidates: [],
+      suppressedAutomaticDictionaryTexts: [],
+    });
+    const syncPath = ownerPath(SYNC_FILE);
+    const futureSidecar = JSON.stringify({
+      version: 1,
+      nodeId: 'future-node',
+      clock: { wallMs: 9_000, counter: 3 },
+      state: { version: 2, records: { future: { magic: true } }, suppressed: {} },
+      lastMaterializedKeys: ['vibe coding', 'litellm'],
+    });
+    fs.mkdirSync(path.dirname(syncPath), { recursive: true });
+    fs.writeFileSync(syncPath, futureSidecar, 'utf-8');
+    resetStoreCaches();
+
+    // 词典照常可用(来自词典文件,不是空的)。
+    const settings = voiceInputDataStore.getSettings();
+    expect(settings.dictionaryEntries.map((entry) => entry.text).sort()).toEqual([
+      'LiteLLM',
+      'Vibe Coding',
+    ]);
+    // sidecar 逐字节未动。
+    expect(fs.readFileSync(syncPath, 'utf-8')).toBe(futureSidecar);
+
+    // 即便发生词典写入,也不能把更新版本的 sidecar 覆盖掉。
+    voiceInputDataStore.addManualDictionaryEntry('Orca');
+    expect(fs.readFileSync(syncPath, 'utf-8')).toBe(futureSidecar);
+  });
+
   it('同步状态文件损坏时回退到词典文件,不让词典功能整体失效', () => {
     writeDictionaryFile({
       dictionaryEntries: [{ id: 'a', text: 'Cindy', source: 'manual', frequency: 1, aliases: [] }],
@@ -227,5 +265,42 @@ describe('词典同步落盘 —— 合并与回收', () => {
     expect(voiceInputDataStore.getSettings().dictionaryEntries.map((entry) => entry.text)).toEqual([
       'Cindy',
     ]);
+  });
+});
+
+describe('词典同步开关 —— 只持久化用户 override', () => {
+  it('未自定义时配置里不留该字段,用户随版本跟随默认值', () => {
+    writeDictionaryFile({ dictionaryEntries: [] });
+    // 任何一次无关设置保存都不该把当前默认值固化进用户配置。
+    voiceInputDataStore.updateSettings({ language: 'zh-CN' });
+
+    const raw = JSON.parse(fs.readFileSync(ownerPath(DATA_FILE), 'utf-8')).settings;
+    expect(raw.dictionarySyncEnabledOverride).toBeUndefined();
+    // 有效值仍然是默认值。
+    expect(voiceInputDataStore.getSettings().dictionarySyncEnabled).toBe(true);
+  });
+
+  it('用户显式关闭后记录 override,并在重载后保持', () => {
+    writeDictionaryFile({ dictionaryEntries: [] });
+    voiceInputDataStore.updateSettings({ dictionarySyncEnabled: false });
+
+    const raw = JSON.parse(fs.readFileSync(ownerPath(DATA_FILE), 'utf-8')).settings;
+    expect(raw.dictionarySyncEnabledOverride).toBe(false);
+
+    resetStoreCaches();
+    expect(voiceInputDataStore.getSettings().dictionarySyncEnabled).toBe(false);
+  });
+
+  it('存量配置里的有效值:与默认不同才认作用户选择', () => {
+    // 本 PR 早期版本把有效值直接写进了配置。false 只可能来自用户主动关闭。
+    writeDictionaryFile({ dictionaryEntries: [], dictionarySyncEnabled: false });
+    expect(voiceInputDataStore.getSettings().dictionarySyncEnabled).toBe(false);
+
+    // 而 true 与当时默认相同,无法区分「用户选的」和「默认」,按规则不猜意图。
+    resetStoreCaches();
+    writeDictionaryFile({ dictionaryEntries: [], dictionarySyncEnabled: true });
+    voiceInputDataStore.updateSettings({ language: 'en' });
+    const raw = JSON.parse(fs.readFileSync(ownerPath(DATA_FILE), 'utf-8')).settings;
+    expect(raw.dictionarySyncEnabledOverride).toBeUndefined();
   });
 });

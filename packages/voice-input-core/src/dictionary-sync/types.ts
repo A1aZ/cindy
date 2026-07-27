@@ -118,14 +118,61 @@ export interface VoiceDictionarySyncState {
   suppressed: Record<string, DictionarySuppression>;
 }
 
+/**
+ * 建一个没有原型的字典对象。
+ *
+ * 词条主键直接来自用户输入,而 `constructor`、`toString`、`__proto__`、`valueOf`
+ * 都是完全合法的技术术语。用普通 `{}` 的话 `'constructor' in records` 恒为真、
+ * `records['toString']` 会取到继承来的函数 —— 于是这些词会被当成"已存在"而静默
+ * 丢弃,或者把一个函数喂给只认记录结构的代码。所有以用户文本为键的对象一律用
+ * 这个工厂建。
+ */
+export function createDictionaryMap<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
+
+/**
+ * 复制成无原型字典。
+ *
+ * **不要用 `{ ...map }`**:对象字面量自带 `Object.prototype`,复制出来的东西再被
+ * 别处按 `map[key]` 读取时,`__proto__` 这类键会命中原型上的访问器,拿到的不是
+ * 词条而是原型对象本身(而且它 truthy,会一路蒙混到崩溃点才炸)。
+ */
+export function copyDictionaryMap<T>(map: Record<string, T> | undefined | null): Record<string, T> {
+  const next = createDictionaryMap<T>();
+  if (!map) return next;
+  for (const key of Object.keys(map)) next[key] = map[key];
+  return next;
+}
+
+/** 在无原型副本上写一个键,等价于安全版的 `{ ...map, [key]: value }`。 */
+export function withDictionaryKey<T>(
+  map: Record<string, T> | undefined | null,
+  key: string,
+  value: T,
+): Record<string, T> {
+  const next = copyDictionaryMap(map);
+  next[key] = value;
+  return next;
+}
+
+/** 自有属性检查。绝不用 `in`:它会命中原型链上的同名成员。 */
+export function hasDictionaryKey(map: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(map, key);
+}
+
 export function createEmptySyncState(): VoiceDictionarySyncState {
-  return { version: VOICE_DICTIONARY_SYNC_VERSION, records: {}, suppressed: {} };
+  return {
+    version: VOICE_DICTIONARY_SYNC_VERSION,
+    records: createDictionaryMap(),
+    suppressed: createDictionaryMap(),
+  };
 }
 
 /** 存活化身 = 没有被墓碑覆盖的化身。词条的一切对外读数都只看这些。 */
 export function listLiveIncarnations(record: DictionaryRecord): DictionaryIncarnation[] {
   return Object.values(record.incarnations)
-    .filter((incarnation) => !(incarnation.tag in record.tombstones))
+    .filter((incarnation) => !hasDictionaryKey(record.tombstones, incarnation.tag))
     .sort((a, b) => (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0));
 }
 

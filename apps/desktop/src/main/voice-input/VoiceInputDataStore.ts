@@ -80,6 +80,9 @@ export class VoiceInputDataStore {
 
   updateSettings(patch: unknown): VoiceInputSettings {
     const current = this.load();
+    const syncJustEnabled = isRecord(patch)
+      && patch.dictionarySyncEnabled === true
+      && current.settings.dictionarySyncEnabled === false;
     // 词典三件套的真相在同步状态里,不接受整份覆盖 —— 那会绕过 CRDT,让本地写入
     // 在下一次物化时被静默丢掉。词典变更一律走下面的语义化入口。
     const nextSettings = normalizeVoiceInputSettings({
@@ -90,6 +93,9 @@ export class VoiceInputDataStore {
       ...current,
       settings: nextSettings,
     });
+    // 刚打开同步开关:对端可能早已在线,既没有 presence 事件也没有词典变更,
+    // 不主动推一次就要等到兜底心跳才收敛。
+    if (syncJustEnabled) notifyDictionaryChanged({ immediate: true });
     return cloneSettings(nextSettings);
   }
 
@@ -213,13 +219,7 @@ export class VoiceInputDataStore {
     );
     this.replaceState({ ...current, settings: nextSettings });
     voiceDictionarySyncStore.markMaterialized(materialized);
-    dictionaryChangedListeners.forEach((listener) => {
-      try {
-        listener();
-      } catch {
-        // 监听者(同步驱动)出问题不能影响词典本身的写入。
-      }
-    });
+    notifyDictionaryChanged();
     return nextSettings;
   }
 
@@ -348,18 +348,29 @@ export class VoiceInputDataStore {
    */
   private hydrateDictionaryFromSyncState(state: StoredVoiceInputData): StoredVoiceInputData {
     try {
+      // 盘上的同步状态来自更新的客户端:本进程读不懂,直接用词典文件里的内容跑,
+      // 一个字节都不碰 sidecar。照常走下去会把读不懂的状态当空状态物化出空词典,
+      // 再覆盖写回,把用户的词典连同所有设备的合并历史一起销毁。
+      if (voiceDictionarySyncStore.isIncompatible()) {
+        log.warn('dictionary sync state was written by a newer client, running without sync');
+        return state;
+      }
       voiceDictionarySyncStore.reconcile({
-        // 带上频次:首次迁移时状态是空的,这些数字是用户长期积累的排序权重,
-        // 必须原样接管(seedTerm 只对状态里不存在的词条生效,不会重复记账)。
+        // 带上频次与别名:首次迁移时状态是空的,这些都是用户长期积累的东西 ——
+        // 频次是排序权重,别名更是纠错能力的主体(「web coding → Vibe Coding」
+        // 这类映射全靠它)。不带上就等于把存量用户的词典能力清零,而且下一次
+        // 物化写回文件后永久丢失。seedTerm 只对状态里不存在的词条生效,不会重复记账。
         entries: state.settings.dictionaryEntries.map((entry) => ({
           text: entry.text,
           source: entry.source,
           frequency: entry.frequency,
+          aliases: entry.aliases.map((alias) => ({ text: alias.text, count: alias.count })),
         })),
         suppressedTexts: state.settings.suppressedAutomaticDictionaryTexts,
         candidates: state.settings.dictionaryCandidates.map((candidate) => ({
           text: candidate.text,
           evidenceCount: candidate.evidenceCount,
+          aliases: candidate.aliases.map((alias) => ({ text: alias.text, count: alias.count })),
         })),
       });
       voiceDictionarySyncStore.collectGarbage();
@@ -427,9 +438,14 @@ export const voiceInputDataStore = new VoiceInputDataStore();
  * 词典变更监听。同步驱动订阅它来触发广播 —— 用回调而不是让 store 直接 import
  * driver,避免两个模块互相 import 形成加载期环。
  */
-const dictionaryChangedListeners = new Set<() => void>();
+const dictionaryChangedListeners = new Set<DictionaryChangedListener>();
 
-export function onVoiceInputDictionaryChanged(listener: () => void): () => void {
+/**
+ * `immediate` = 这次变更希望立刻广播,不要走去抖(用户刚打开同步开关)。
+ */
+export type DictionaryChangedListener = (options?: { immediate?: boolean }) => void;
+
+export function onVoiceInputDictionaryChanged(listener: DictionaryChangedListener): () => void {
   dictionaryChangedListeners.add(listener);
   return () => dictionaryChangedListeners.delete(listener);
 }
@@ -596,6 +612,16 @@ function cloneHistory(history: VoiceInputHistoryEntry[]): VoiceInputHistoryEntry
   return JSON.parse(JSON.stringify(history)) as VoiceInputHistoryEntry[];
 }
 
+function notifyDictionaryChanged(options?: { immediate?: boolean }): void {
+  dictionaryChangedListeners.forEach((listener) => {
+    try {
+      listener(options);
+    } catch {
+      // 监听者(同步驱动)出问题不能影响词典本身的写入。
+    }
+  });
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -628,12 +654,21 @@ function projectMaterializedDictionary(
   };
 }
 
-/** 词典字段一律从通用 settings patch 里剥掉,防止绕过 CRDT 的整份覆盖。 */
+/**
+ * 词典字段一律从通用 settings patch 里剥掉,防止绕过 CRDT 的整份覆盖。
+ *
+ * 同步开关额外转写:UI 传的是有效值,持久化只认 override(见
+ * `configuration-and-overrides.md` §2),所以在这里把它翻译成显式自定义标记。
+ */
 function stripDictionaryFields(patch: unknown): Record<string, unknown> {
   if (!isRecord(patch)) return {};
   const next = { ...patch };
   delete next.dictionaryEntries;
   delete next.dictionaryCandidates;
   delete next.suppressedAutomaticDictionaryTexts;
+  if (typeof next.dictionarySyncEnabled === 'boolean') {
+    next.dictionarySyncEnabledOverride = next.dictionarySyncEnabled;
+    delete next.dictionarySyncEnabled;
+  }
   return next;
 }

@@ -96,6 +96,20 @@ export function handleDesktopPeerOnline(deviceId: string): void {
   sendStateTo(deviceId, 'peer-online');
 }
 
+/**
+ * 立即广播一次当前状态,不走去抖。
+ *
+ * 用于用户刚打开同步开关这类显式操作:此时对端可能早就在线,既不会有 presence
+ * 事件也不会有词典变更,不立刻发一次就要干等到兜底心跳(半小时)才收敛。
+ */
+export function broadcastDictionaryNow(): void {
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+  broadcastToAllPeers('sync-enabled');
+}
+
 /** 本地词典变更:去抖后广播。连续学习事件不会打出一连串帧。 */
 export function notifyLocalDictionaryChanged(): void {
   if (!isSyncEnabled()) return;

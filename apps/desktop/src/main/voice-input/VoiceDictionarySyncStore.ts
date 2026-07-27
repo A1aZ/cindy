@@ -103,6 +103,9 @@ export class VoiceDictionarySyncStore {
     apply: (state: VoiceDictionarySyncState, clock: HlcClock) => MutationResult,
   ): MaterializedDictionary | null {
     const current = this.load();
+    // 读不懂盘上的 sidecar 时,本机没有可信的同步状态 —— 基于空状态算出来的物化
+    // 结果会把用户现有词典覆盖成空。这条路径必须硬失败,由调用方决定怎么办。
+    if (current.incompatible) throw new VoiceDictionarySyncUnavailableError();
     const result = apply(current.state, this.readClock(current));
     if (!result.changed) return null;
     return this.commit(result.state, result.clock);
@@ -117,6 +120,7 @@ export class VoiceDictionarySyncStore {
    */
   mergeRemote(remote: unknown): MaterializedDictionary | null {
     const current = this.load();
+    if (current.incompatible) return null;
     const remoteState = normalizeState(remote);
     const merged = mergeSyncStates(current.state, remoteState);
     if (isSameState(merged, current.state)) return null;
@@ -236,14 +240,33 @@ export class VoiceDictionarySyncStore {
       fs.writeFileSync(tmp, JSON.stringify(next), 'utf-8');
       fs.renameSync(tmp, filePath);
     } catch (error) {
-      // 同步状态写不下去时不能连累词典本身:调用方仍然拿得到物化结果,词典功能
-      // 照常工作,只是这次变更在重启后需要靠回收重新认领。
+      // sidecar 是词典的正本,写不下去就不能报告成功:调用方据此回滚并把失败暴露
+      // 给用户。早先这里只记一条 warn 就当没事 —— 于是「频次/别名涨了但只存进了
+      // 投影文件」,重启后回收又刻意不认领频次与别名,那次增长就永久丢了。
       log.warn('dictionary sync state write failed', {
         error: error instanceof Error ? error.message : String(error),
       });
+      // 内存状态仍然提交:本进程后续的合并不能基于过期状态。
+      this.data = next;
+      throw new VoiceDictionarySyncWriteError(error);
     }
-    // 内存状态始终提交:写盘失败也不能让本进程后续的合并基于过期状态。
     this.data = next;
+  }
+}
+
+/** 盘上的同步状态来自更新的客户端,本进程不能安全地改它。 */
+export class VoiceDictionarySyncUnavailableError extends Error {
+  constructor() {
+    super('dictionary sync state was written by a newer client');
+    this.name = 'VoiceDictionarySyncUnavailableError';
+  }
+}
+
+/** 同步状态写盘失败;词典正本没落地,调用方必须回滚并上报。 */
+export class VoiceDictionarySyncWriteError extends Error {
+  constructor(cause: unknown) {
+    super(`dictionary sync state write failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = 'VoiceDictionarySyncWriteError';
   }
 }
 
@@ -284,24 +307,6 @@ function normalizeStoredData(raw: unknown): StoredSyncData {
 }
 
 /**
- * 结构本身能不能被本进程理解(版本号 + 两个必需字段)。
- *
- * 入参是未经校验的隧道 payload,所以字典字段必须**排除数组** —— `typeof [] ===
- * 'object'`,只判 typeof 会让一个数组冒充 records 进到合并逻辑里。
- */
-function isReadableState(raw: unknown): raw is VoiceDictionarySyncState {
-  if (!isPlainObject(raw)) return false;
-  const candidate = raw as Partial<VoiceDictionarySyncState>;
-  if (candidate.version !== VOICE_DICTIONARY_SYNC_VERSION) return false;
-  if (!isPlainObject(candidate.records)) return false;
-  if (!isPlainObject(candidate.suppressed)) return false;
-  return true;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 /**
  * 盘上状态是否来自更新的客户端。
  *
@@ -314,8 +319,15 @@ function isNewerVersion(raw: unknown): boolean {
   return typeof version === 'number' && version > VOICE_DICTIONARY_SYNC_VERSION;
 }
 
+/**
+ * 归一化一份状态(盘上的或隧道来的)。
+ *
+ * 走 core 的**深度**校验:只看顶层的话,一个缺 `counters` 的化身能一路通过校验被
+ * 持久化,然后在物化时才抛 —— 而这份中毒的 sidecar 每次重启都会被重新接受,词典
+ * 修改与同步会一直坏下去,直到有人手工删文件。结构不合法就整份丢弃,重新开始。
+ */
 function normalizeState(raw: unknown): VoiceDictionarySyncState {
-  return isReadableState(raw) ? raw : createEmptySyncState();
+  return isValidSyncState(raw) ? raw : createEmptySyncState();
 }
 
 function readNonNegative(value: unknown): number {

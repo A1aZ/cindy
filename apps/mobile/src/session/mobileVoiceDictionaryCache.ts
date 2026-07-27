@@ -122,8 +122,12 @@ export async function refreshMobileVoiceDictionary(
         fetchedAt: Date.now(),
       };
       memoryCache.set(host, next);
-      await AsyncStorage.setItem(storageKeyForHost(host), JSON.stringify(next)).catch(() => undefined);
+      // 顺序很关键:**先登记索引,再写快照**。两个写不是原子的,进程随时可能死在
+      // 中间 —— 索引里多一条(快照还没写)只是清理时删一个不存在的 key,无害;
+      // 反过来快照落了盘而索引没登记,登出就枚举不到它,下个账号用同一台电脑会
+      // hydrate 到上个账号的词典。宁可多登记,不可漏登记。
       await addHostToIndex(host).catch(() => undefined);
+      await AsyncStorage.setItem(storageKeyForHost(host), JSON.stringify(next)).catch(() => undefined);
       // 落盘与索引写入都是异步的,清理完全可能发生在这中间 —— 那样这份属于上个
       // 账号的快照会在删除之后重新出现在盘上。写完再确认一次代际,过期就自己清掉。
       if (epoch !== cacheEpoch) {

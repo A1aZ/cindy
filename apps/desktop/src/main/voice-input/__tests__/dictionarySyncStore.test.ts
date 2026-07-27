@@ -248,8 +248,8 @@ describe('词典同步落盘 —— 合并与回收', () => {
     // sidecar 逐字节未动。
     expect(fs.readFileSync(syncPath, 'utf-8')).toBe(futureSidecar);
 
-    // 即便发生词典写入,也不能把更新版本的 sidecar 覆盖掉。
-    voiceInputDataStore.addManualDictionaryEntry('Orca');
+    // 词典写入必须明确失败(而不是静默无效或覆盖成空),sidecar 一个字节都不动。
+    expect(() => voiceInputDataStore.addManualDictionaryEntry('Orca')).toThrow();
     expect(fs.readFileSync(syncPath, 'utf-8')).toBe(futureSidecar);
   });
 
@@ -302,5 +302,65 @@ describe('词典同步开关 —— 只持久化用户 override', () => {
     voiceInputDataStore.updateSettings({ language: 'en' });
     const raw = JSON.parse(fs.readFileSync(ownerPath(DATA_FILE), 'utf-8')).settings;
     expect(raw.dictionarySyncEnabledOverride).toBeUndefined();
+  });
+});
+
+describe('词典同步落盘 —— 数据丢失防线', () => {
+  it('词典文件损坏时只读投影,绝不把整份词典墓碑掉', () => {
+    // 先正常建立同步状态。
+    writeDictionaryFile({
+      dictionaryEntries: [
+        { id: 'a', text: 'Vibe Coding', source: 'manual', frequency: 3, aliases: [] },
+        { id: 'b', text: 'LiteLLM', source: 'automatic', frequency: 2, aliases: [] },
+      ],
+      dictionaryCandidates: [],
+      suppressedAutomaticDictionaryTexts: [],
+    });
+    voiceInputDataStore.getSettings();
+    const sidecarBefore = fs.readFileSync(ownerPath(SYNC_FILE), 'utf-8');
+
+    // 投影文件损坏(不是缺失)。此时 settings 退化成默认空值,如果照常跑回收,
+    // lastMaterializedKeys 里的每一条都会被判成用户删除 —— 一次读失败就此升级成
+    // CRDT 正本的永久损毁。
+    fs.writeFileSync(ownerPath(DATA_FILE), '{ not json', 'utf-8');
+    resetStoreCaches();
+
+    const settings = voiceInputDataStore.getSettings();
+    expect(settings.dictionaryEntries.map((entry) => entry.text).sort()).toEqual([
+      'LiteLLM',
+      'Vibe Coding',
+    ]);
+    // sidecar 未被改写,更没有墓碑。
+    expect(fs.readFileSync(ownerPath(SYNC_FILE), 'utf-8')).toBe(sidecarBefore);
+    const sync = JSON.parse(sidecarBefore);
+    for (const record of Object.values(sync.state.records) as Array<{ tombstones: object }>) {
+      expect(Object.keys(record.tombstones)).toEqual([]);
+    }
+  });
+
+  it('sidecar 来自更新客户端时拒绝词典写入,而不是覆盖成空', () => {
+    writeDictionaryFile({
+      dictionaryEntries: [{ id: 'a', text: 'Vibe Coding', source: 'manual', frequency: 3, aliases: [] }],
+    });
+    const syncPath = ownerPath(SYNC_FILE);
+    const futureSidecar = JSON.stringify({
+      version: 1,
+      nodeId: 'future-node',
+      clock: { wallMs: 9_000, counter: 3 },
+      state: { version: 99, records: {}, suppressed: {} },
+      lastMaterializedKeys: ['vibe coding'],
+    });
+    fs.mkdirSync(path.dirname(syncPath), { recursive: true });
+    fs.writeFileSync(syncPath, futureSidecar, 'utf-8');
+    resetStoreCaches();
+
+    // 词典可读。
+    expect(voiceInputDataStore.getSettings().dictionaryEntries.map((e) => e.text)).toEqual([
+      'Vibe Coding',
+    ]);
+    // 写入必须明确失败 —— 早先会基于空状态物化,把现有词典覆盖成空。
+    expect(() => voiceInputDataStore.addManualDictionaryEntry('Orca')).toThrow();
+    expect(readDictionaryFile().dictionaryEntries.map((e) => e.text)).toEqual(['Vibe Coding']);
+    expect(fs.readFileSync(syncPath, 'utf-8')).toBe(futureSidecar);
   });
 });

@@ -10,6 +10,7 @@ import { Tip } from '@/components/ui/tooltip';
 import { useAuth } from '@/contexts/AuthContext';
 import { SUPPORTED_LOCALES } from '@/i18n';
 import { cn } from '@/lib/utils';
+import { dictionaryTermKey } from '@cindy/voice-input-core';
 import {
   MAX_VOICE_INPUT_REFINEMENT_INSTRUCTIONS_CHARS,
   MAX_VOICE_INPUT_DICTIONARY_CSV_BYTES,
@@ -1628,12 +1629,14 @@ export function VoiceInputSection() {
 
     // 容量与去重裁决仍由 mergeVoiceInputDictionaryCsvTerms 负责(下面的统计文案依赖
     // 它的计数),但写入只提交「本次真正新增的词条文本」,由主进程按手动词条认领。
+    // 去重键必须与同步主键同一套折叠(locale 无关),否则土耳其语这类 locale 下
+    // 会出现「明明已存在却被当成新增」或反之,导入结果与实际合并结果对不上。
     const existingKeys = new Set(
-      settings.dictionaryEntries.map((entry) => entry.text.toLocaleLowerCase()),
+      settings.dictionaryEntries.map((entry) => dictionaryTermKey(entry.text)),
     );
     importDictionarySettingEntries(
       merged.entries
-        .filter((entry) => !existingKeys.has(entry.text.toLocaleLowerCase()))
+        .filter((entry) => !existingKeys.has(dictionaryTermKey(entry.text)))
         .map((entry) => entry.text),
     );
     closeDictionaryEntryDialog();

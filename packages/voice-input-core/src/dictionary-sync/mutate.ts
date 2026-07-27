@@ -19,6 +19,7 @@ import {
   createDictionaryMap,
   hasDictionaryKey,
   listLiveIncarnations,
+  readCounterTotal,
   withDictionaryKey,
   type DictionaryIncarnation,
   type DictionaryRecord,
@@ -355,11 +356,37 @@ export function renameTerm(
   if (live.length === 0) return { state, clock, changed: false };
 
   if (fromKey !== toKey) {
+    // 改名 = 删旧 + 建新,但必须把积累的证据一起搬过去:频次是排序权重,别名更是
+    // 纠错能力本身。改动前的写法是新词条从 1 起、别名清空 —— 用户纠正一个学错的
+    // 写法,反而把这个词学到的东西全丢了。
+    const carriedFrequency = live.reduce((sum, item) => sum + readCounterTotal(item.counters), 0);
+    const carriedAliases = new Map<string, { text: string; count: number }>();
+    for (const incarnation of live) {
+      for (const [aliasKey, alias] of Object.entries(incarnation.aliases)) {
+        const count = readCounterTotal(alias.counters);
+        const existing = carriedAliases.get(aliasKey);
+        carriedAliases.set(aliasKey, {
+          text: alias.text,
+          count: (existing?.count ?? 0) + count,
+        });
+      }
+    }
+
     const removed = deleteTerms(state, clock, {
       termKeys: [fromKey],
       nowMs: input.nowMs,
       suppressAutomatic: false,
     });
+    // 目标词条已存在时 seedTerm 不生效,退回普通手动添加(此时它自己的证据更可信)。
+    const seeded = seedTerm(removed.state, removed.clock, {
+      text: nextText,
+      source: 'manual',
+      stage: 'entry',
+      count: Math.max(1, carriedFrequency),
+      aliases: [...carriedAliases.values()],
+      nowMs: input.nowMs,
+    });
+    if (seeded.changed) return seeded;
     return addManualEntry(removed.state, removed.clock, { text: nextText, nowMs: input.nowMs });
   }
 

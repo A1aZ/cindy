@@ -70,6 +70,32 @@ describe('dictionary sync — 改写词条', () => {
     expect(entry.source).toBe('manual');
   });
 
+  it('改成另一个词时把频次与别名一并搬过去 —— 纠正写法不该丢掉学到的东西', () => {
+    const a = device('a');
+    for (let index = 0; index < 4; index += 1) {
+      const result = recordLearningEvent(a.state, a.clock, {
+        text: 'litellm',
+        aliases: ['light LLM'],
+        stage: 'entry',
+        nowMs: 1_000 + index,
+      });
+      a.state = result.state;
+      a.clock = result.clock;
+    }
+
+    const renamed = renameTerm(a.state, a.clock, {
+      termKey: 'litellm',
+      nextText: 'LiteLLM Proxy',
+      nowMs: 2_000,
+    });
+    a.state = renamed.state;
+
+    const entry = materializeDictionary(a.state).entries[0];
+    expect(entry.text).toBe('LiteLLM Proxy');
+    expect(entry.frequency).toBe(4);
+    expect(entry.aliases.map((alias) => [alias.text, alias.count])).toEqual([['light LLM', 4]]);
+  });
+
   it('改成另一个词等价于删除加新增,且不写抑制', () => {
     const a = device('a');
     learn(a, 'Orca', 1_000);

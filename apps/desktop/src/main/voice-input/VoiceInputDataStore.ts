@@ -18,6 +18,7 @@ import { ownerScopedUserDataPath, getActiveAppSession } from '../appSessionState
 import { throwIpcError } from '../utils/ipcValidate.js';
 import { voiceDictionarySyncStore } from './VoiceDictionarySyncStore.js';
 import {
+  MAX_VOICE_INPUT_DICTIONARY_ENTRIES,
   compactVoiceInputHistoryIfNeeded,
   createVoiceInputHistoryEntry,
   getDefaultVoiceInputSettings,
@@ -210,6 +211,13 @@ export class VoiceInputDataStore {
     // 两段写入必须整体成败:同步状态先行、词典文件随后。第二段失败时状态会领先于
     // 用户看到的内容,而重试通常是 no-op(sidecar 里已经有这次操作),UI 会一直停在
     // 旧内容直到重启 —— 所以失败就把 sidecar 回滚,让重试真的能重来。
+    if (voiceDictionarySyncStore.isIncompatible()) {
+      // 读不懂盘上的同步状态时不能改词典:基于空状态物化会把现有词典覆盖成空。
+      // 明确报错(IPC 会转成 INTERNAL),而不是假装成功。
+      throw new VoiceInputDataStoreWriteError(
+        new Error('dictionary sync state was written by a newer client; upgrade to edit the dictionary'),
+      );
+    }
     const rollbackPoint = voiceDictionarySyncStore.snapshotForRollback();
     const materialized = voiceDictionarySyncStore.mutate(apply);
     if (!materialized) return cloneSettings(this.load().settings);
@@ -319,6 +327,32 @@ export class VoiceInputDataStore {
     return this.getSnapshot();
   }
 
+  /**
+   * 只把同步状态物化到 settings,不做回收、不写盘。
+   *
+   * 用于词典文件读失败(损坏 / 权限 / 临时不可读)的场景:此时手上的 settings 是
+   * 默认空值,拿它去回收等于宣告「用户删光了词典」。只读投影既能让用户继续看到
+   * 同步状态里的词典,又不会把损坏扩散到正本。
+   */
+  private projectDictionaryWithoutReconcile(state: StoredVoiceInputData): StoredVoiceInputData {
+    try {
+      if (voiceDictionarySyncStore.isIncompatible()) return state;
+      const materialized = voiceDictionarySyncStore.materialize();
+      return {
+        ...state,
+        settings: normalizeVoiceInputSettings(
+          { ...state.settings, ...projectMaterializedDictionary(materialized) },
+          process.platform,
+        ),
+      };
+    } catch (error) {
+      log.warn('dictionary projection failed while the data file was unreadable', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return state;
+    }
+  }
+
   /** 把一份来自旧存储的 settings 词典认领进 CRDT,返回物化后的 settings。 */
   private reconcileMigratedDictionary(settings: VoiceInputSettings): VoiceInputSettings {
     if (voiceDictionarySyncStore.isIncompatible()) return settings;
@@ -369,7 +403,8 @@ export class VoiceInputDataStore {
       this.state = this.hydrateDictionaryFromSyncState(this.state);
       return this.state;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      const missing = (error as NodeJS.ErrnoException).code === 'ENOENT';
+      if (!missing) {
         log.warn('voice input data read failed, using defaults', {
           error: error instanceof Error ? error.message : String(error),
         });
@@ -379,7 +414,12 @@ export class VoiceInputDataStore {
         settings: getDefaultVoiceInputSettings(process.platform),
         history: [],
       };
-      this.state = this.hydrateDictionaryFromSyncState(this.state);
+      // 文件损坏或临时读不到时,**不能**跑回收:那会把 lastMaterializedKeys 里的
+      // 每一条都判成「用户删除」,给整份词典打上墓碑并持久化 —— 投影文件的一次
+      // 读失败就此升级成 CRDT 正本的永久损毁。此时只做只读物化,不写任何东西。
+      this.state = missing
+        ? this.hydrateDictionaryFromSyncState(this.state)
+        : this.projectDictionaryWithoutReconcile(this.state);
       return this.state;
     }
   }
@@ -543,7 +583,13 @@ export function registerVoiceInputDataStoreIpc(): void {
 
   ipcMain.handle('voice-input:dictionary:import-entries', (_event, texts: unknown): VoiceInputSettings => {
     try {
-      const list = Array.isArray(texts) ? texts.filter((item): item is string => typeof item === 'string') : [];
+      // renderer 直连时可以绕开 CSV UI 的容量裁决,这里必须自己兜底:无上限地
+      // 建 CRDT 记录会卡住 main 线程,并把 sidecar 撑到物化与 relay 帧上限之外。
+      const list = Array.isArray(texts)
+        ? texts
+            .filter((item): item is string => typeof item === 'string')
+            .slice(0, MAX_VOICE_INPUT_DICTIONARY_ENTRIES)
+        : [];
       return voiceInputDataStore.importManualDictionaryEntries(list);
     } catch (error) {
       throwVoiceInputDataStoreIpcError(error);

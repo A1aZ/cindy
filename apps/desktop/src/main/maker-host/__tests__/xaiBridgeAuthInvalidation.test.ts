@@ -70,7 +70,9 @@ describe('xAI bridge auth invalidation', () => {
       handleFailure({ status: 403, body: REJECTED_BODY, failedAccessToken: 'token-a' }),
     ).resolves.toBe('refreshed');
     expect(recover).toHaveBeenCalledOnce();
-    expect(recover).toHaveBeenCalledWith('access_token_rejected');
+    // 必须把被拒的 token 一并交给收口:等值检查到 recover 之间还有一次 await 边界,
+    // 收口要用它重新绑定,否则会拿期间新登录的凭证承担旧 token 的失败。
+    expect(recover).toHaveBeenCalledWith('access_token_rejected', 'token-a');
   });
 
   it('把 refresh_token 也被作废的结果原样回传', async () => {

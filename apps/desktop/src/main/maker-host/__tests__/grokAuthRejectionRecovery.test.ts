@@ -51,12 +51,14 @@ import {
 } from '../grok-oauth-login.js';
 
 const SECRET_ID = 'xai';
+/** 上游拒掉的那把 access_token —— 收口必须绑定到它。 */
+const REJECTED_TOKEN = 'rejected-access-token';
 
 function seedCredentials(overrides: Record<string, unknown> = {}): void {
   store.set(
     SECRET_ID,
     JSON.stringify({
-      access_token: 'rejected-access-token',
+      access_token: REJECTED_TOKEN,
       refresh_token: 'refresh-token-v1',
       // 故意设成远未到期:被服务端提前作废的 token 本地看就是"没过期",
       // 常规刷新永远不触发,只有强制路径能动它。
@@ -105,7 +107,7 @@ describe('recoverGrokAuthAfterRejection', () => {
       ),
     );
 
-    await expect(recoverGrokAuthAfterRejection()).resolves.toBe('refreshed');
+    await expect(recoverGrokAuthAfterRejection(REJECTED_TOKEN)).resolves.toBe('refreshed');
     expect(readStored()?.access_token).toBe('fresh-access-token');
   });
 
@@ -113,7 +115,31 @@ describe('recoverGrokAuthAfterRejection', () => {
     seedCredentials();
     vi.stubGlobal('fetch', vi.fn(async () => tokenResponse(400, { error: 'invalid_grant' })));
 
-    await expect(recoverGrokAuthAfterRejection()).resolves.toBe('logged_out');
+    await expect(recoverGrokAuthAfterRejection(REJECTED_TOKEN)).resolves.toBe('logged_out');
+    expect(readStored()).toBeNull();
+  });
+
+  it('收口开始时凭证已换成别的账号 —— 不拿新凭证承担旧 token 的失败', async () => {
+    // invalidator 的等值检查到 recover 开始之间还有一次 await 边界,期间可能完成新登录或
+    // 切换数据归属。收口必须重新绑定被拒的那把 token,否则会对新账号强制刷新,
+    // 一个 invalid_grant 就把新账号登出了。
+    seedCredentials({ access_token: 'another-account-token', refresh_token: 'another-refresh' });
+    const fetchMock = vi.fn(async () => tokenResponse(400, { error: 'invalid_grant' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(recoverGrokAuthAfterRejection(REJECTED_TOKEN)).resolves.toBe('superseded');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(readStored()?.access_token).toBe('another-account-token');
+  });
+
+  it('本地没有 refresh_token 时无从自愈,登出但不消耗冷却', async () => {
+    // unrecoverable ≠ rejected:前者请求都没发出去,冷却要还回去。
+    seedCredentials({ refresh_token: undefined });
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(recoverGrokAuthAfterRejection(REJECTED_TOKEN)).resolves.toBe('logged_out');
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(readStored()).toBeNull();
   });
 
@@ -138,7 +164,7 @@ describe('recoverGrokAuthAfterRejection', () => {
       }),
     );
 
-    await expect(recoverGrokAuthAfterRejection()).resolves.toBe('superseded');
+    await expect(recoverGrokAuthAfterRejection(REJECTED_TOKEN)).resolves.toBe('superseded');
     // 新登录态必须原封不动。
     expect(readStored()?.access_token).toBe('relogin-access-token');
     expect(readStored()?.refresh_token).toBe('refresh-token-from-relogin');
@@ -155,7 +181,7 @@ describe('recoverGrokAuthAfterRejection', () => {
       }),
     );
 
-    await expect(recoverGrokAuthAfterRejection()).resolves.toBe('superseded');
+    await expect(recoverGrokAuthAfterRejection(REJECTED_TOKEN)).resolves.toBe('superseded');
     expect(readStored()).toBeNull();
   });
 
@@ -171,7 +197,7 @@ describe('recoverGrokAuthAfterRejection', () => {
       ),
     );
 
-    await expect(recoverGrokAuthAfterRejection()).resolves.toBe('unchanged');
+    await expect(recoverGrokAuthAfterRejection(REJECTED_TOKEN)).resolves.toBe('unchanged');
     expect(readStored()?.access_token).toBe('rejected-access-token');
   });
 
@@ -179,14 +205,14 @@ describe('recoverGrokAuthAfterRejection', () => {
     seedCredentials();
     vi.stubGlobal('fetch', vi.fn(async () => tokenResponse(400, '<html>invalid_grant</html>')));
 
-    await expect(recoverGrokAuthAfterRejection()).resolves.toBe('unchanged');
+    await expect(recoverGrokAuthAfterRejection(REJECTED_TOKEN)).resolves.toBe('unchanged');
     expect(readStored()?.access_token).toBe('rejected-access-token');
   });
 
   it('5xx 与网络异常不误杀凭证', async () => {
     seedCredentials();
     vi.stubGlobal('fetch', vi.fn(async () => tokenResponse(503, { error: 'invalid_grant' })));
-    await expect(recoverGrokAuthAfterRejection()).resolves.toBe('unchanged');
+    await expect(recoverGrokAuthAfterRejection(REJECTED_TOKEN)).resolves.toBe('unchanged');
     expect(readStored()?.access_token).toBe('rejected-access-token');
 
     resetGrokOAuthMemoryCache();
@@ -196,7 +222,7 @@ describe('recoverGrokAuthAfterRejection', () => {
         throw new Error('network down');
       }),
     );
-    await expect(recoverGrokAuthAfterRejection()).resolves.toBe('unchanged');
+    await expect(recoverGrokAuthAfterRejection(REJECTED_TOKEN)).resolves.toBe('unchanged');
     expect(readStored()?.access_token).toBe('rejected-access-token');
   });
 
@@ -207,10 +233,10 @@ describe('recoverGrokAuthAfterRejection', () => {
     );
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(recoverGrokAuthAfterRejection()).resolves.toBe('refreshed');
-    // 403 若实为订阅/权限问题,刷新会一直"成功"却修不好;冷却挡住第二次,
-    // 否则每个请求都会消耗一次 refresh_token 轮换。
-    await expect(recoverGrokAuthAfterRejection()).resolves.toBe('unchanged');
+    await expect(recoverGrokAuthAfterRejection(REJECTED_TOKEN)).resolves.toBe('refreshed');
+    // 403 若实为订阅/权限问题,刷新会一直"成功"却修不好:换出来的新 token 一样被拒。
+    // 冷却必须挡住这一次,否则每个请求都会消耗一次 refresh_token 轮换。
+    await expect(recoverGrokAuthAfterRejection('fresh-access-token')).resolves.toBe('unchanged');
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -240,7 +266,7 @@ describe('recoverGrokAuthAfterRejection', () => {
       ),
     );
 
-    const pending = recoverGrokAuthAfterRejection();
+    const pending = recoverGrokAuthAfterRejection(REJECTED_TOKEN);
     await inText;
     releaseText();
     // 推进两拍:`await res.text().catch(...)` 的 catch 派生一层 promise,所以 refreshBlob
@@ -270,7 +296,7 @@ describe('recoverGrokAuthAfterRejection', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     // 在刷新任务进入串行链之前登出:锁内重读拿到 null,直接 superseded,不发请求。
-    const pending = recoverGrokAuthAfterRejection();
+    const pending = recoverGrokAuthAfterRejection(REJECTED_TOKEN);
     logoutGrok();
     await expect(pending).resolves.toBe('superseded');
     expect(fetchMock).not.toHaveBeenCalled();
@@ -279,7 +305,7 @@ describe('recoverGrokAuthAfterRejection', () => {
     bound = true;
     seedCredentials({ access_token: 'second-access-token', refresh_token: 'refresh-token-v2' });
     resetGrokOAuthMemoryCache();
-    await expect(recoverGrokAuthAfterRejection()).resolves.toBe('refreshed');
+    await expect(recoverGrokAuthAfterRejection('second-access-token')).resolves.toBe('refreshed');
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -287,11 +313,11 @@ describe('recoverGrokAuthAfterRejection', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(recoverGrokAuthAfterRejection()).resolves.toBe('superseded');
+    await expect(recoverGrokAuthAfterRejection(REJECTED_TOKEN)).resolves.toBe('superseded');
 
     seedCredentials();
     bound = false;
-    await expect(recoverGrokAuthAfterRejection()).resolves.toBe('superseded');
+    await expect(recoverGrokAuthAfterRejection(REJECTED_TOKEN)).resolves.toBe('superseded');
     expect(readStored()?.access_token).toBe('rejected-access-token');
     expect(fetchMock).not.toHaveBeenCalled();
   });

@@ -27,8 +27,8 @@ export function setXaiAuthInvalidatedHandler(cb: () => void): void {
 /** 全局唯一的 xAI 凭证收口入口(两条 agent 链路共用)。 */
 export const invalidateXaiBridgeAuth = createXaiBridgeAuthInvalidator({
   getCurrentAccessToken: async () => peekGrokAccessToken(),
-  recover: async () => {
-    const outcome = await recoverGrokAuthAfterRejection();
+  recover: async (_reason, failedAccessToken) => {
+    const outcome = await recoverGrokAuthAfterRejection(failedAccessToken);
     // 自动登出必须和手动登出一样即时反映到 UI,否则用户仍停在「显示已连接」的假状态 ——
     // 那正是本模块要消灭的东西。广播失败不影响凭证收口结论。
     if (outcome === 'logged_out') {

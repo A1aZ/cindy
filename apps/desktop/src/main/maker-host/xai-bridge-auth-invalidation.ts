@@ -47,7 +47,15 @@ export type XaiBridgeAuthInvalidationResult = XaiBridgeAuthRecoveryOutcome | 'ig
 /** bridge 认证失效协调器所需的 host 能力。 */
 export interface XaiBridgeAuthInvalidatorDependencies {
   getCurrentAccessToken: () => Promise<string | null>;
-  recover: (reason: XaiBridgeAuthInvalidationReason) => Promise<XaiBridgeAuthRecoveryOutcome>;
+  /**
+   * 执行收口。**必须接住 failedAccessToken 并在开始时重新校验** —— 下面的等值检查到这里
+   * 还隔着一次 await 边界,期间可能完成新登录或切换数据归属;只凭 reason 恢复会拿新账号的
+   * 凭证去承担旧 token 的失败。
+   */
+  recover: (
+    reason: XaiBridgeAuthInvalidationReason,
+    failedAccessToken: string,
+  ) => Promise<XaiBridgeAuthRecoveryOutcome>;
 }
 
 /**
@@ -91,7 +99,8 @@ export function createXaiBridgeAuthInvalidator(
     const run = (async (): Promise<XaiBridgeAuthInvalidationResult> => {
       const currentAccessToken = await dependencies.getCurrentAccessToken();
       if (currentAccessToken !== failure.failedAccessToken) return 'superseded';
-      return await dependencies.recover(reason);
+      // 这一步之后还有 await 边界,recover 必须自己再绑一次被拒的 token(见依赖注释)。
+      return await dependencies.recover(reason, failure.failedAccessToken);
     })();
     inFlightByToken.set(failure.failedAccessToken, run);
     try {

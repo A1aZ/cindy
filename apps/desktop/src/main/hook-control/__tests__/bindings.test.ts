@@ -28,32 +28,46 @@ afterEach(() => {
 const makeStore = () => createHookBindingStore({ filePath: filePath(), log: noopLog });
 
 describe('hook binding store', () => {
-  it('落绑定时记下工作目录快照, get / getEntry 都能读回', () => {
+  it('落绑定时记下工作目录快照与授权来源, get / getEntry 都能读回', () => {
     const store = makeStore();
-    store.set('conn-1', 'slack:C1:1.1', 'sess-1', '/repos/demo');
+    store.set('conn-1', 'slack:C1:1.1', 'sess-1', '/repos/demo', 'workspace');
 
     expect(store.get('conn-1', 'slack:C1:1.1')).toBe('sess-1');
     expect(store.getEntry('conn-1', 'slack:C1:1.1')).toEqual({
       sessionId: 'sess-1',
       workingDir: '/repos/demo',
+      authority: 'workspace',
     });
     expect(store.getEntry('conn-1', 'missing')).toBeNull();
   });
 
-  it('快照跨实例持久化, 且未传目录时不写该字段', () => {
-    makeStore().set('conn-1', 'k', 'sess-1', '/repos/demo');
-    expect(makeStore().getEntry('conn-1', 'k')?.workingDir).toBe('/repos/demo');
+  it('local-move 授权跨实例持久化(重启后跟随不能退回撤权)', () => {
+    makeStore().set('conn-1', 'k', 'sess-1', '/repos/moved', 'local-move');
 
+    expect(makeStore().getEntry('conn-1', 'k')).toEqual({
+      sessionId: 'sess-1',
+      workingDir: '/repos/moved',
+      authority: 'local-move',
+    });
+  });
+
+  it('未传目录 / 授权时不写这两个字段', () => {
     makeStore().set('conn-1', 'k', 'sess-2');
     const row = JSON.parse(fs.readFileSync(filePath(), 'utf-8')) as Record<
       string,
       Record<string, Record<string, unknown>>
     >;
+
     expect(row['conn-1']['k']).not.toHaveProperty('workingDir');
-    expect(makeStore().getEntry('conn-1', 'k')).toEqual({ sessionId: 'sess-2', workingDir: null });
+    expect(row['conn-1']['k']).not.toHaveProperty('authority');
+    expect(makeStore().getEntry('conn-1', 'k')).toEqual({
+      sessionId: 'sess-2',
+      workingDir: null,
+      authority: null,
+    });
   });
 
-  it('老文件(无 workingDir 字段)读成 null, 不当成"目录变过"', () => {
+  it('老文件(无 workingDir / authority)读成 null, 不当成"目录变过"或"已授权"', () => {
     fs.writeFileSync(
       filePath(),
       JSON.stringify({ 'conn-1': { 'slack:C1:1.1': { sessionId: 'legacy', updatedAt: 1 } } }),
@@ -65,12 +79,32 @@ describe('hook binding store', () => {
     expect(store.getEntry('conn-1', 'slack:C1:1.1')).toEqual({
       sessionId: 'legacy',
       workingDir: null,
+      authority: null,
     });
   });
 
-  it('remove 清掉整条绑定(含快照)', () => {
+  it('authority 是未知字面量时按"没有授权记录"读(fail closed)', () => {
+    fs.writeFileSync(
+      filePath(),
+      JSON.stringify({
+        'conn-1': {
+          k: {
+            sessionId: 'sess-1',
+            workingDir: '/repos/demo',
+            authority: 'anything',
+            updatedAt: 1,
+          },
+        },
+      }),
+      'utf-8',
+    );
+
+    expect(makeStore().getEntry('conn-1', 'k')?.authority).toBeNull();
+  });
+
+  it('remove 清掉整条绑定(含快照与授权)', () => {
     const store = makeStore();
-    store.set('conn-1', 'k', 'sess-1', '/repos/demo');
+    store.set('conn-1', 'k', 'sess-1', '/repos/demo', 'local-move');
     store.remove('conn-1', 'k');
 
     expect(store.getEntry('conn-1', 'k')).toBeNull();

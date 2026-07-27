@@ -3116,6 +3116,14 @@ interface ElectronAPI {
         },
       ) => Promise<import('@/lib/ccAgent.types').Session>;
       /**
+       * 窄口径「移动对话到项目 / 对话」。IM 绑定本地移动授权的唯一铸造入口
+       * （main 侧校验 sender 与目的地），移动 UI 必须走它而不是通用 update。
+       */
+      move: (
+        id: string,
+        target: { kind: 'project'; workingDir: string } | { kind: 'dialogue' },
+      ) => Promise<import('@/lib/ccAgent.types').Session>;
+      /**
        * 单字段 bump：把 user_send_at 设为 atMs（默认当前时间）。
        * fire-and-forget；renderer 应在 emitPatch userSendAt 之后调用，作为持久化兜底。
        */

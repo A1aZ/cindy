@@ -1728,7 +1728,14 @@ function ExpandedView({
         }
       }
       try {
-        await sessionService.update(sessionId, nextPatch);
+        // 走窄口径 move(不是通用 update):它是 IM 绑定「本地移动授权」的唯一
+        // 铸造入口,绑了 Slack / Telegram 的对话靠它在移动后继续复用原对话。
+        await sessionService.moveToWorkspace(
+          sessionId,
+          target.kind === 'dialogue'
+            ? { kind: 'dialogue' }
+            : { kind: 'project', workingDir: targetWorkingDir! },
+        );
         if (target.kind !== 'dialogue') {
           void recentWorkdirsStore.forceRefresh().catch(() => undefined);
         }

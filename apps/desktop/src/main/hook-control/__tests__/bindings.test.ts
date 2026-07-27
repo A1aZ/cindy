@@ -51,7 +51,7 @@ describe('hook binding store', () => {
     store.set('conn-b', 'k2', 'sess-1', { workingDir: '/repos/demo', authority: 'workspace' });
     store.set('conn-b', 'k3', 'other', { workingDir: '/repos/demo', authority: 'workspace' });
 
-    expect(store.noteSessionMoved('sess-1', '/repos/moved')).toBe(2);
+    expect(store.noteSessionMoved('sess-1', '/repos/moved', 'local-move')).toBe(2);
 
     // 重启(新实例)后仍认这份授权, 否则跟随会退回撤权
     const reopened = makeStore();
@@ -69,7 +69,7 @@ describe('hook binding store', () => {
     // 别的会话的绑定不受影响
     expect(reopened.getEntry('conn-b', 'k3')?.authority).toBe('workspace');
     // 没有匹配绑定时是廉价 no-op
-    expect(reopened.noteSessionMoved('nobody', '/repos/moved')).toBe(0);
+    expect(reopened.noteSessionMoved('nobody', '/repos/moved', 'local-move')).toBe(0);
   });
 
   it('未传 meta 时不写这些字段', () => {

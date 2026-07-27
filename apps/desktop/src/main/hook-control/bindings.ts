@@ -67,11 +67,12 @@ export interface HookBindingStore {
   /** 整行覆盖写: meta 里省略的字段等于清空, 调用方应显式传当前状态。 */
   set(connectionId: string, externalKey: string, sessionId: string, meta?: HookBindingMeta): void;
   /**
-   * 登记一次「用户在桌面端把这个会话移到了 workingDir」—— 由 Main 侧真实的
-   * 移动写入调用(见 localDb/ipc/sessions.ts), 是 local-move 授权的唯一来源。
-   * 跨全部 connection 命名空间反查该 sessionId; 返回更新的绑定条数。
+   * 登记一次「用户在桌面端把这个会话移到了 workingDir」—— 由窄口径的
+   * `local-db:sessions:move` 经 sessionMoves.ts 调用, 是 local-move 授权的唯一
+   * 来源。authority 由调用方按当前工作目录映射判定(移进映射内的目录记
+   * 'workspace', 不留例外)。跨全部 connection 命名空间反查; 返回更新条数。
    */
-  noteSessionMoved(sessionId: string, workingDir: string): number;
+  noteSessionMoved(sessionId: string, workingDir: string, authority: HookBindingAuthority): number;
   /** 删除单条绑定(session 失效重建前清理)。 */
   remove(connectionId: string, externalKey: string): void;
 }
@@ -150,7 +151,7 @@ export function createHookBindingStore(deps: {
       (data[connectionId] ??= {})[externalKey] = toRow(sessionId, meta);
       writeAll(data);
     },
-    noteSessionMoved(sessionId, workingDir) {
+    noteSessionMoved(sessionId, workingDir, authority) {
       if (!sessionId || !workingDir) return 0;
       const data = readAll();
       let updated = 0;
@@ -160,8 +161,9 @@ export function createHookBindingStore(deps: {
           rows[externalKey] = {
             sessionId,
             workingDir,
-            authority: 'local-move',
-            noticePending: true,
+            authority,
+            // 只有映射外的跟随才需要在渠道里解释一句
+            ...(authority === 'local-move' ? { noticePending: true } : {}),
             updatedAt: Date.now(),
           };
           updated += 1;

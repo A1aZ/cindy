@@ -24,7 +24,10 @@ const h = vi.hoisted(() => ({
   relocate: vi.fn(async (): Promise<{ persistedSdkSessionId: string | null }> => ({
     persistedSdkSessionId: null,
   })),
-  noteHookSessionMoved: vi.fn(),
+  noteHookSessionMoved: vi.fn(async () => undefined),
+  isKnownRecentWorkdir: vi.fn(async () => true),
+  assertTrustedAppRendererEvent: vi.fn(),
+  moveOrder: [] as string[],
   tapWindowBroadcast: vi.fn(),
 }));
 
@@ -47,7 +50,13 @@ vi.mock('../../../git-context/prRefsStore', () => ({
   recomputePrRefsForSession: vi.fn(async () => undefined),
 }));
 vi.mock('../../../imageCacheStore', () => ({ removeSession: vi.fn(async () => undefined) }));
-vi.mock('../recentWorkdirs', () => ({ upsertRecentWorkdir: vi.fn(async () => undefined) }));
+vi.mock('../recentWorkdirs', () => ({
+  upsertRecentWorkdir: vi.fn(async () => undefined),
+  isKnownRecentWorkdir: h.isKnownRecentWorkdir,
+}));
+vi.mock('../../../security/trustedAppRenderer.js', () => ({
+  assertTrustedAppRendererEvent: h.assertTrustedAppRendererEvent,
+}));
 vi.mock('../../../device-link/broadcast-tap.js', () => ({
   tapWindowBroadcast: h.tapWindowBroadcast,
 }));
@@ -141,8 +150,20 @@ async function invokeUpdate(id: string, patch: Record<string, unknown>): Promise
   return handler({}, id, patch);
 }
 
+async function invokeMove(id: string, target: Record<string, unknown>): Promise<unknown> {
+  const handler = h.handlers.get('local-db:sessions:move');
+  if (!handler) throw new Error('move handler not registered');
+  return handler({}, id, target);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  h.moveOrder = [];
+  h.isKnownRecentWorkdir.mockImplementation(async () => true);
+  h.assertTrustedAppRendererEvent.mockImplementation(() => undefined);
+  h.noteHookSessionMoved.mockImplementation(async (...args: unknown[]) => {
+    h.moveOrder.push(`note:${String(args[1])}`);
+  });
   h.relocate.mockImplementation(async () => ({ persistedSdkSessionId: null }));
   h.handlers.clear();
   createDb();
@@ -243,33 +264,83 @@ describe('local-db:sessions:update handler wiring', () => {
     expect(h.relocate).not.toHaveBeenCalled();
   });
 
-  it('registers the local-move authorization for IM bindings when the dir really changes', async () => {
-    // codex 会话也要登记:授权与 agent 种类无关,只与"目录被用户移动了"有关
+  it('never mints move authority from the generic update IPC', async () => {
+    // 通用 patch 通道是不可信 Renderer 也能调的(preload 直接暴露),
+    // 它改 workingDir 只写库,绝不铸造 IM 绑定授权 —— 这正是 #669 要堵的洞。
     await invokeUpdate('codex-local', { workingDir: '/new/dir', workspaceKind: 'project' });
     await Promise.resolve();
     await Promise.resolve();
 
+    expect(h.noteHookSessionMoved).not.toHaveBeenCalled();
+  });
+});
+
+describe('local-db:sessions:move handler wiring', () => {
+  it('mints the move authority and persists the new workspace target', async () => {
+    const updated = (await invokeMove('codex-local', {
+      kind: 'project',
+      workingDir: '/new/dir',
+    })) as { workingDir: string; workspaceKind: string };
+
     expect(h.noteHookSessionMoved).toHaveBeenCalledWith('codex-local', '/new/dir');
+    expect(updated.workingDir).toBe('/new/dir');
+    expect(updated.workspaceKind).toBe('project');
   });
 
-  it('does not register a move when the workingDir only changes spelling', async () => {
-    h.sqlite!.prepare('UPDATE sessions SET working_dir = ? WHERE id = ?').run(
-      'D:\\repo\\project',
-      'cc-local',
-    );
+  it('registers the authority before the directory lands in the database', async () => {
+    // 顺序反了就有一个"目录已变、授权还没落"的窗口,那期间到达的 IM 消息会把
+    // 绑定当撤权删掉(#669 review)。用登记回调里读库来锁死这个顺序。
+    h.noteHookSessionMoved.mockImplementation(async () => {
+      const row = h
+        .sqlite!.prepare('SELECT working_dir FROM sessions WHERE id = ?')
+        .get('codex-local') as { working_dir: string | null };
+      h.moveOrder.push(`db-at-note:${row.working_dir}`);
+    });
 
-    await invokeUpdate('cc-local', { workingDir: 'D:/repo/project' });
-    await Promise.resolve();
-    await Promise.resolve();
+    await invokeMove('codex-local', { kind: 'project', workingDir: '/new/dir' });
+
+    expect(h.moveOrder).toEqual(['db-at-note:/old/dir']);
+  });
+
+  it('rejects callers that are not the trusted Cindy renderer', async () => {
+    h.assertTrustedAppRendererEvent.mockImplementation(() => {
+      throw new Error('[PERMISSION_DENIED] 此操作只能从 Cindy 主页面发起');
+    });
+
+    await expect(
+      invokeMove('codex-local', { kind: 'project', workingDir: '/new/dir' }),
+    ).rejects.toThrow(/PERMISSION_DENIED/);
+    expect(h.noteHookSessionMoved).not.toHaveBeenCalled();
+  });
+
+  it('still moves but mints no authority when the destination is not a known project', async () => {
+    h.isKnownRecentWorkdir.mockImplementation(async () => false);
+
+    const updated = (await invokeMove('codex-local', {
+      kind: 'project',
+      workingDir: '/private/keys',
+    })) as { workingDir: string };
+
+    expect(h.noteHookSessionMoved).not.toHaveBeenCalled();
+    expect(updated.workingDir).toBe('/private/keys');
+  });
+
+  it('does not mint authority when the move keeps the same directory', async () => {
+    await invokeMove('codex-local', { kind: 'project', workingDir: '/old/dir' });
 
     expect(h.noteHookSessionMoved).not.toHaveBeenCalled();
   });
 
-  it('does not register a move for patches without workingDir', async () => {
-    await invokeUpdate('cc-local', { workspaceKind: 'dialogue', title: '换个名字' });
-    await Promise.resolve();
-    await Promise.resolve();
+  it('moves back to dialogue without touching bindings', async () => {
+    const updated = (await invokeMove('codex-local', { kind: 'dialogue' })) as {
+      workspaceKind: string;
+    };
 
+    expect(updated.workspaceKind).toBe('dialogue');
     expect(h.noteHookSessionMoved).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown target kind', async () => {
+    await expect(invokeMove('codex-local', { kind: 'nowhere' })).rejects.toThrow(/INVALID_PARAMS/);
   });
 });

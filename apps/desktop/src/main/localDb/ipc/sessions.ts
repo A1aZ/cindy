@@ -15,6 +15,7 @@ import { getDbClient } from '../client/current';
 import type { DbClient } from '../client/DbClient';
 import { sessions, messages } from '../schema';
 import { throwIpcError, requireString, requireObject } from '../../utils/ipcValidate';
+import { assertTrustedAppRendererEvent } from '../../security/trustedAppRenderer.js';
 import { resolveBusinessSessionId } from '../../sessionIds';
 import {
   sessionToCamel,
@@ -28,7 +29,7 @@ import { ensureProjectGitInitialized } from '../../git-snapshot/projectGitBootst
 import { readGitSafetySettings } from '../../maker-host/git-safety-settings-store';
 import * as imageCacheStore from '../../imageCacheStore';
 import { removeSessionRefs as removeSessionMediaRefs } from '../../cindy-media/ledger';
-import { upsertRecentWorkdir } from './recentWorkdirs';
+import { isKnownRecentWorkdir, upsertRecentWorkdir } from './recentWorkdirs';
 import { createLogger } from '../../logger';
 import { DESKTOP_VISIBLE_SESSION_SOURCES } from '../../../shared/sessionSource.js';
 import { normalizeWorkingDirForStorage } from '../../../shared/workingDir.js';
@@ -875,7 +876,12 @@ export function registerSessionIpc(): void {
     },
   );
 
-  ipcMain.handle('local-db:sessions:update', async (_e, id: unknown, patch: unknown) => {
+  /**
+   * update handler 的实现体。抽成具名函数供窄口径的 sessions:move 复用 ——
+   * 移动必须复用同一条写入编排(转录迁移、recent_workdirs、广播、agent island
+   * 通知), 否则两条路径会漂移。
+   */
+  async function applySessionUpdate(id: unknown, patch: unknown): Promise<unknown> {
     const sid = requireString(id, 'id');
     const p = requireObject(patch, 'patch');
     const db = getDbClient().drizzle;
@@ -955,22 +961,6 @@ export function registerSessionIpc(): void {
       broadcastSessionPatched(sid, { summary: null });
       void recomputePrRefsForSession(sid).catch(() => undefined);
     }
-    // 会话被移到别的目录时给 IM 绑定登记一次「本地移动授权」:这是 hook 侧
-    // local-move 授权的唯一来源(dispatcher 不从 session 元数据反推是不是用户
-    // 移的,见 hook-control/bindings.ts 文件头)。只在目录真的变了时登记,归一化
-    // 写法差异不算移动。fire-and-forget:登记失败只影响该 thread 下一条消息会
-    // 重开新对话,不该拖累移动本身。
-    if (
-      beforeMove &&
-      typeof p.workingDir === 'string' &&
-      p.workingDir &&
-      normalizeWorkingDirForStorage(beforeMove.workingDir) !== p.workingDir
-    ) {
-      const movedTo = p.workingDir;
-      void import('../../hook-control/sessionMoves.js')
-        .then((m) => m.noteHookSessionMoved(sid, movedTo))
-        .catch(() => undefined);
-    }
     // workingDir 实际变化的本机 cc 会话:迁移 CLI 转录后再查询返回行/广播,保证
     // renderer 拿到更新结果时转录已就位(用户可立即续聊),且迁移中持久化的最新
     // sdkSessionId 能进返回行与广播 patch——否则 renderer 留着旧 resume id,下一次
@@ -1030,6 +1020,56 @@ export function registerSessionIpc(): void {
     notifyGhostSessionStatusChange(sid, p.status, updated.workingDir);
     removeHookAttachmentDir(sid, p.status);
     return updated;
+  }
+
+  ipcMain.handle('local-db:sessions:update', async (_e, id: unknown, patch: unknown) =>
+    applySessionUpdate(id, patch),
+  );
+
+  /**
+   * 窄口径「移动对话到项目 / 对话」。与通用 sessions:update 的区别只有一个:
+   * **只有它能铸造 IM 绑定的本地移动授权**(hook 侧据此在工作目录映射外继续
+   * 复用该会话, 见 hook-control/bindings.ts 文件头)。因此这里比 update 多三道闸:
+   *
+   *  1. sender 必须是 Cindy 主页面(assertTrustedAppRendererEvent) —— WebView、
+   *     Ghost 面板、子 frame 一律拒绝;
+   *  2. 目标目录必须是**用户已经用 Cindy 打开过的项目**(recent_workdirs 内),
+   *     否则照常移动但**不铸造授权** —— 攻击者拿不到"把 IM 引向任意路径"的能力,
+   *     用户自己浏览新目录移动时也不会被阻断(代价只是该 thread 换新对话并收到说明);
+   *  3. 授权在写库**之前**同步登记 —— 否则存在"目录已变、授权还没落"的窗口,
+   *     那期间到达的 IM 消息会把绑定当成撤权删掉(PR #669 review 指出)。
+   */
+  ipcMain.handle('local-db:sessions:move', async (event, id: unknown, target: unknown) => {
+    assertTrustedAppRendererEvent(event);
+    const sid = requireString(id, 'id');
+    const t = requireObject(target, 'target');
+    if (t.kind !== 'project' && t.kind !== 'dialogue') {
+      throwIpcError('INVALID_PARAMS', `invalid target.kind: ${String(t.kind)}`);
+    }
+    const patch: Record<string, unknown> =
+      t.kind === 'dialogue'
+        ? { workspaceKind: 'dialogue' }
+        : {
+            workspaceKind: 'project',
+            workingDir: normalizeWorkingDirForStorage(requireString(t.workingDir, 'workingDir')),
+          };
+
+    const nextDir = typeof patch.workingDir === 'string' ? patch.workingDir : null;
+    if (nextDir !== null) {
+      const db = getDbClient().drizzle;
+      const [before] = await db
+        .select({ workingDir: sessions.workingDir })
+        .from(sessions)
+        .where(eq(sessions.id, sid));
+      const dirActuallyChanges =
+        !before || normalizeWorkingDirForStorage(before.workingDir) !== nextDir;
+      // 目标不在用户已知项目里就不铸造授权(移动本身照常进行)
+      if (dirActuallyChanges && (await isKnownRecentWorkdir(nextDir))) {
+        const m = await import('../../hook-control/sessionMoves.js');
+        await m.noteHookSessionMoved(sid, nextDir);
+      }
+    }
+    return applySessionUpdate(sid, patch);
   });
 
   // 窄口径会话元数据编辑(status / title / pinnedAt)。专为 device-link 控制端**远程**

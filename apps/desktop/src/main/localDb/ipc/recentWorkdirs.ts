@@ -55,9 +55,7 @@ const MAX_RECENT_WORKDIRS = 10;
  *
  * 空 / 非字符串 / worktree 路径 → 返回 null,调用方应据此跳过 upsert。
  */
-export function normalizeRecentWorkdirPath(
-  raw: string | null | undefined,
-): string | null {
+export function normalizeRecentWorkdirPath(raw: string | null | undefined): string | null {
   if (typeof raw !== 'string') return null;
   const trimmed = raw.trim();
   if (trimmed.length === 0) return null;
@@ -121,6 +119,35 @@ async function dirExists(path: string): Promise<boolean> {
   try {
     return (await stat(path)).isDirectory();
   } catch {
+    return false;
+  }
+}
+
+/**
+ * 该目录是否是「用户已经用 Cindy 打开过的项目」—— 即 recent_workdirs 里某条
+ * 记录本身或它的子目录(worktree 落在项目内, 同样算已知)。
+ *
+ * 用途是给 sessions:move 判断「目标是不是用户授权过的目的地」: 只有已知项目
+ * 才铸造 IM 绑定的本地移动授权, 攻击者因此拿不到"把 IM 引向任意路径"的能力。
+ * 任何异常按 false 处理(fail closed)。
+ */
+export async function isKnownRecentWorkdir(candidate: string | null | undefined): Promise<boolean> {
+  const normalized = normalizeRecentWorkdirPath(candidate);
+  if (!normalized) return false;
+  try {
+    const db = getDbClient().drizzle;
+    const rows = await db.select({ path: recentWorkdirs.path }).from(recentWorkdirs);
+    return rows.some((row) => {
+      // 表内与入参都已过 normalizeRecentWorkdirPath(posix 形态、无尾斜杠),
+      // 直接按段前缀比即可; Windows 盘符大小写不敏感, 统一小写再比。
+      const base = process.platform === 'win32' ? row.path.toLowerCase() : row.path;
+      const target = process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+      return target === base || target.startsWith(base.endsWith('/') ? base : `${base}/`);
+    });
+  } catch (err) {
+    log.warn('[localDb] isKnownRecentWorkdir failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
     return false;
   }
 }

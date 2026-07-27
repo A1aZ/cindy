@@ -331,7 +331,14 @@ export function SessionContentHeader({
           : { workingDir: targetWorkingDir, workspaceKind: 'project' as const };
       patchLocal(session.id, nextPatch);
       try {
-        await sessionService.update(session.id, nextPatch);
+        // 走窄口径 move(不是通用 update):它是 IM 绑定「本地移动授权」的唯一
+        // 铸造入口,绑了 Slack / Telegram 的对话靠它在移动后继续复用原对话。
+        await sessionService.moveToWorkspace(
+          session.id,
+          target.kind === 'dialogue'
+            ? { kind: 'dialogue' }
+            : { kind: 'project', workingDir: targetWorkingDir! },
+        );
         if (target.kind !== 'dialogue') {
           void recentWorkdirsStore.forceRefresh().catch(() => undefined);
         }

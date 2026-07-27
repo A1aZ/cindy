@@ -134,6 +134,18 @@ export async function update(
 }
 
 /**
+ * 移动对话到项目 / 内置「对话」。走 main 的窄口径 `sessions:move` 而不是通用
+ * update —— 它是 IM 绑定「本地移动授权」的唯一铸造入口(main 侧校验 sender 与
+ * 目的地),绑定了 Slack / Telegram 的对话靠它在移动后继续复用原对话。
+ */
+export async function moveToWorkspace(
+  id: string,
+  target: { kind: 'project'; workingDir: string } | { kind: 'dialogue' },
+): Promise<Session> {
+  return wrap(window.electronAPI.localDb.sessions.move(id, target));
+}
+
+/**
  * 窄口径会话元数据编辑(status / title / pinnedAt = 删/归档/恢复/重命名/置顶)。按来源路由:
  *   - device-link 远程会话 → 隧道到被控端的 local-db:sessions:patch-meta(allowlist 内的窄口径写)
  *   - 本机会话 → 保持原 update 路径(零行为变更)

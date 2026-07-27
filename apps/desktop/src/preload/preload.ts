@@ -3307,6 +3307,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
         ipcRenderer.invoke('local-db:sessions:restore-if-archived', id, expected),
       update: (id: string, patch: unknown): Promise<unknown> =>
         ipcRenderer.invoke('local-db:sessions:update', id, patch),
+      /**
+       * 窄口径「移动对话到项目 / 对话」。与 update 的区别是它是 IM 绑定本地移动
+       * 授权的唯一铸造入口(main 侧带 sender 闸与目的地校验),移动 UI 必须走它。
+       */
+      move: (id: string, target: unknown): Promise<unknown> =>
+        ipcRenderer.invoke('local-db:sessions:move', id, target),
       touchUserSend: (id: string, atMs?: number): Promise<void> =>
         ipcRenderer.invoke('local-db:sessions:touchUserSend', id, atMs),
       /** interrupted-turn-resume:「疑似中断」(startedAt > endedAt)的 active 会话 id(启动红点)。 */

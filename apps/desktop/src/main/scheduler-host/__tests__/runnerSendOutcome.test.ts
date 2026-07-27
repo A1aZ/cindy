@@ -298,15 +298,22 @@ describe('MakerScheduleRunner send outcome policy', () => {
   });
 
   it('applies a deferred switch before heartbeat meta lookup and creates the target engine session', async () => {
-    const h = createSessionHarness(async () => ({
-      accepted: false,
-      reason: 'cancelled-before-dispatch',
-    }));
     const order: string[] = [];
-    const applyPendingAgentSwitch = vi.fn(async () => {
-      order.push('apply');
+    const h = createSessionHarness(async () => {
+      order.push('send');
+      return {
+        accepted: false,
+        reason: 'cancelled-before-dispatch',
+      };
     });
-    const { runner, maker } = createRunnerHarness(h.session, { applyPendingAgentSwitch });
+    const releaseAgentSwitchLock = vi.fn(() => {
+      order.push('release');
+    });
+    const acquirePendingAgentSwitch = vi.fn(async () => {
+      order.push('apply');
+      return releaseAgentSwitchLock;
+    });
+    const { runner, maker } = createRunnerHarness(h.session, { acquirePendingAgentSwitch });
     vi.mocked(maker.getSessionMeta).mockImplementation(async () => {
       order.push('meta');
       return {
@@ -338,7 +345,7 @@ describe('MakerScheduleRunner send outcome policy', () => {
     ).rejects.toThrow(/cancelled-before-dispatch/);
 
     expect(order.slice(0, 2)).toEqual(['apply', 'meta']);
-    expect(applyPendingAgentSwitch).toHaveBeenCalledWith('scheduler-session', ctx.signal);
+    expect(acquirePendingAgentSwitch).toHaveBeenCalledWith('scheduler-session', ctx.signal);
     expect(maker.createSession).toHaveBeenCalledWith(
       expect.objectContaining({
         id: 'scheduler-session',
@@ -347,6 +354,7 @@ describe('MakerScheduleRunner send outcome policy', () => {
       }),
     );
     expect(h.send).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['apply', 'meta', 'send', 'release']);
   });
 
   it('captures the scheduler git baseline after the user row exists and aborts it when send is rejected', async () => {

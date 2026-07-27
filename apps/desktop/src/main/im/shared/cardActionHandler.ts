@@ -27,7 +27,11 @@ import { requiresFullAccessConfirmation } from '@cindy/maker-shared/permission-m
 
 import { createLogger } from '../../logger';
 import { getMaker } from '../../maker-host';
-import { getSessionProvider, setSessionProvider } from '../../maker-host/session-provider-store';
+import {
+  getSessionProvider,
+  normalizeSessionProviderId,
+  setSessionProvider,
+} from '../../maker-host/session-provider-store';
 import {
   clearPendingCredentialSwitchForSession,
   getPendingCredentialSwitchTarget,
@@ -240,8 +244,9 @@ export function createCardActionHandler(
     const effort = (event.payload.effort ?? null) as Effort | null;
     // providerId:新卡片携带(供应商/模型名 picker);老卡片(升级前发出的)没有 → undefined,
     // 此时保持旧行为(只切 model/effort,不动会话的供应商选择)。
-    const providerId =
-      typeof event.payload.providerId === 'string' ? event.payload.providerId : undefined;
+    const providerId = normalizeSessionProviderId(
+      typeof event.payload.providerId === 'string' ? event.payload.providerId : undefined,
+    );
 
     if (!sessionId || !modelId) {
       log.warn('model:pick missing sessionId/modelId — ignoring');

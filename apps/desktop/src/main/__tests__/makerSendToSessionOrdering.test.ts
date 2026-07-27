@@ -381,7 +381,7 @@ describe('sendToSession ordering', () => {
     );
     const directSendSwitchBlock = extractBetween(
       source,
-      'pendingAgentSwitchApplyHolder = (sessionId, signal) =>',
+      'pendingAgentSwitchApplyHolder = async (sessionId, signal) =>',
       'ipcMain.handle(MAKER_INVOKE.MARK_ORCA_ROLE',
     );
 
@@ -393,14 +393,13 @@ describe('sendToSession ordering', () => {
       'return withSendToSessionLock(sessionId, async () => {',
       'applySetModelThenCancelAgentSwitchIntent(',
     );
-    expect(directSendSwitchBlock).toContain(
-      'withSendToSessionLock(sessionId, () =>',
-    );
+    expect(directSendSwitchBlock).toContain('const release = await acquireSendToSessionLock(sessionId);');
     expectOrder(
       directSendSwitchBlock,
-      'withSendToSessionLock(sessionId, () =>',
+      'const release = await acquireSendToSessionLock(sessionId);',
       'applyPendingAgentSwitchIfIdle(',
     );
+    expectOrder(directSendSwitchBlock, 'applyPendingAgentSwitchIfIdle(', 'return release;');
   });
 
   it('publishes Agent Island prompt preview from send intent and wires commit rollback', () => {

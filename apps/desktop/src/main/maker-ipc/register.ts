@@ -1548,21 +1548,47 @@ const pendingFailedTurnAssistantPersistId = new Map<string, string>();
  */
 const sendToSessionLocks = new Map<string, Promise<unknown>>();
 
-/** Serialize every local send / runtime release / route mutation for one session. */
-export function withSendToSessionLock<T>(
-  sessionId: string,
-  task: () => Promise<T>,
-): Promise<T> {
+/**
+ * Acquire the per-session send/route lock until the returned release callback runs.
+ *
+ * Direct-send callers need this lease form because applying a deferred agent switch,
+ * refreshing the resulting live Session, and calling Session.send happen in different
+ * modules but must remain one atomic route decision.
+ */
+async function acquireSendToSessionLock(sessionId: string): Promise<() => void> {
   const previous = sendToSessionLocks.get(sessionId);
   const waitPrevious = previous ? previous.catch(() => undefined) : Promise.resolve();
-  const run = waitPrevious.then(task);
+  let releaseGate!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  const run = waitPrevious.then(() => gate);
   const tracked = run.finally(() => {
     if (sendToSessionLocks.get(sessionId) === tracked) {
       sendToSessionLocks.delete(sessionId);
     }
   });
   sendToSessionLocks.set(sessionId, tracked);
-  return tracked;
+  await waitPrevious;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    releaseGate();
+  };
+}
+
+/** Serialize every local send / runtime release / route mutation for one session. */
+export async function withSendToSessionLock<T>(
+  sessionId: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const release = await acquireSendToSessionLock(sessionId);
+  try {
+    return await task();
+  } finally {
+    release();
+  }
 }
 
 let agentInputCoordinatorHolder: AgentInputCoordinator | null = null;
@@ -1571,7 +1597,8 @@ const SESSION_REWIND_INPUT_LOCK_ID = 'session-rewind';
 const SESSION_REWIND_STOP_TIMEOUT_MS = 15_000;
 let pendingCredentialSwitchHolder: PendingCredentialSwitchService | null = null;
 let deferredCodexRestartHolder: DeferredCodexRestartService | null = null;
-let pendingAgentSwitchApplyHolder: ((sessionId: string, signal?: AbortSignal) => Promise<void>) | null = null;
+let pendingAgentSwitchApplyHolder:
+  ((sessionId: string, signal?: AbortSignal) => Promise<() => void>) | null = null;
 let gitSnapshotCoordinator: GitSnapshotCoordinator | null = null;
 const sessionTurnActivityTracker = new SessionTurnActivityTracker();
 
@@ -1678,17 +1705,18 @@ export function clearDeferredCodexRestartForOwnerBoundary(): void {
 }
 
 /**
- * Goal / IM / scheduler 直发 `Session.send()` 前的 deferred agent-switch 桥。
+ * Goal / IM / scheduler 直发 `Session.send()` 的 deferred agent-switch 锁桥。
  *
  * 与 renderer 的 makerSendTransaction 不同,这些调用方没有后续 lazy-create 阶段;
- * holder 因此要求 apply 成功时同步 bootstrap 新引擎,调用方再重新读取 live session。
- * 启动期 holder 尚未就绪时不可能已有进程内 pending intent,no-op 即可。
+ * holder 因此先在 session 锁内同步 bootstrap 新引擎,调用方重新读取 live session
+ * 并完成 send 后才 release。启动期 holder 尚未就绪时不可能已有进程内 pending
+ * intent,返回 no-op release 即可。
  */
-export async function applyPendingAgentSwitchForDirectSend(
+export async function acquirePendingAgentSwitchForDirectSend(
   sessionId: string,
   signal?: AbortSignal,
-): Promise<void> {
-  await pendingAgentSwitchApplyHolder?.(sessionId, signal);
+): Promise<() => void> {
+  return pendingAgentSwitchApplyHolder?.(sessionId, signal) ?? (() => {});
 }
 
 /**
@@ -4259,13 +4287,19 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     withCloseSuppressed: withRehydrateCloseSuppressed,
     log,
   });
-  pendingAgentSwitchApplyHolder = (sessionId, signal) =>
-    withSendToSessionLock(sessionId, () =>
-      applyPendingAgentSwitchIfIdle(agentSwitchDeps, sessionId, {
+  pendingAgentSwitchApplyHolder = async (sessionId, signal) => {
+    const release = await acquireSendToSessionLock(sessionId);
+    try {
+      await applyPendingAgentSwitchIfIdle(agentSwitchDeps, sessionId, {
         bootstrapAfterSwitch: true,
         signal,
-      }),
-    );
+      });
+      return release;
+    } catch (err) {
+      release();
+      throw err;
+    }
+  };
 
   ipcMain.handle(MAKER_INVOKE.MARK_ORCA_ROLE, async (_e, sessionId: unknown, role: unknown) => {
     if (typeof sessionId !== 'string') throwIpcError('INVALID_PARAMS', 'sessionId required');

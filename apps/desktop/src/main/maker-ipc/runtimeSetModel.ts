@@ -1,6 +1,10 @@
 import type { AgentKind } from '@cindy/maker-core';
 
-import { getSessionProvider, setSessionProvider } from '../maker-host/session-provider-store.js';
+import {
+  getSessionProvider,
+  normalizeSessionProviderId,
+  setSessionProvider,
+} from '../maker-host/session-provider-store.js';
 // type-only import:编译期擦除,不会把 codex-proxy-host 的运行时依赖拖进本模块/单测。
 import type { CodexProxyAuthInjection } from '../maker-host/codex-proxy-host.js';
 import {
@@ -108,12 +112,7 @@ export async function applyRuntimeSetModelChange(
   input: ApplyRuntimeSetModelChangeInput,
 ): Promise<ApplyRuntimeSetModelChangeResult> {
   const { maker, sessionId, model, providerId, isSessionInTurn, logger } = input;
-  const normalizedProviderId =
-    providerId === undefined
-      ? undefined
-      : typeof providerId === 'string'
-        ? providerId.trim() || null
-        : null;
+  const normalizedProviderId = normalizeSessionProviderId(providerId);
   const sess = maker.getSession(sessionId);
   const currentProviderId = getSessionProvider(sessionId);
   // model-only 调用以 pending 的 providerId 为「当前来源意图」:用户先 deferred 选了

@@ -406,13 +406,15 @@ describe('GoalController', () => {
     const oldSession = new FakeSession('s1', 'claude-code');
     const switchedSession = new FakeSession('s1', 'codex');
     let live = oldSession;
-    const applyPendingAgentSwitch = vi.fn(async () => {
+    const releaseAgentSwitchLock = vi.fn();
+    const acquirePendingAgentSwitch = vi.fn(async () => {
       live = switchedSession;
+      return releaseAgentSwitchLock;
     });
     const local = makeController({
       getSession: () => live,
       ensureSession: async () => live,
-      applyPendingAgentSwitch,
+      acquirePendingAgentSwitch,
     });
 
     await local.controller.setGoal({
@@ -421,10 +423,11 @@ describe('GoalController', () => {
       agentKind: 'claude-code',
     });
 
-    expect(applyPendingAgentSwitch).toHaveBeenCalledWith('s1');
+    expect(acquirePendingAgentSwitch).toHaveBeenCalledWith('s1');
     expect(oldSession.sends).toHaveLength(0);
     expect(switchedSession.sends).toHaveLength(1);
     expect(switchedSession.sends[0].originKind).toBe('goal');
+    expect(releaseAgentSwitchLock).toHaveBeenCalledTimes(1);
   });
 
   it('migrates the Goal listener to the switched session so the new engine turn can finalize (reviewer P1)', async () => {
@@ -432,13 +435,14 @@ describe('GoalController', () => {
     const switchedSession = new FakeSession('s1', 'codex');
     let live: FakeSession = oldSession;
     // deferred switch commit:关旧 live session + spawn 目标引擎 → maker.getSession 换新对象。
-    const applyPendingAgentSwitch = vi.fn(async () => {
+    const acquirePendingAgentSwitch = vi.fn(async () => {
       live = switchedSession;
+      return () => {};
     });
     const local = makeController({
       getSession: () => live,
       ensureSession: async () => live,
-      applyPendingAgentSwitch,
+      acquirePendingAgentSwitch,
     });
 
     // setGoal 先在 oldSession 上挂 listener,首轮 fireTurn 落实切换 → listener 必须迁到 switchedSession。

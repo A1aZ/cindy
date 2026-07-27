@@ -177,8 +177,11 @@ export interface MakerScheduleRunnerDeps {
   logger: Logger;
   beforeDispatchUserTurn?: (sessionId: string) => void | Promise<void>;
   onUndispatchedUserTurn?: (sessionId: string) => void;
-  /** heartbeat 直发前落实 deferred agent switch,并 bootstrap 新 live session。 */
-  applyPendingAgentSwitch?: (sessionId: string, signal?: AbortSignal) => Promise<void>;
+  /**
+   * 锁住 heartbeat session、落实 deferred switch 并 bootstrap 新 live session。
+   * runner 在 Session.send 返回后 release。
+   */
+  acquirePendingAgentSwitch?: (sessionId: string, signal?: AbortSignal) => Promise<() => void>;
   /** 新建可见会话落库后通知本机窗口与 device-link 列表订阅者。 */
   onSessionCreated?: (sessionId: string) => void;
   /** 可选:撞忙排队桥。未注入时心跳撞忙回退为顺延(deferFire)旧行为。 */
@@ -270,6 +273,8 @@ export class MakerScheduleRunner implements ScheduleRunner {
       throwIfFireAborted(ctx.signal, 'runner entry');
       return await this.fireInner(schedule, ctx, holder);
     } finally {
+      holder.releaseAgentSwitchLock?.();
+      holder.releaseAgentSwitchLock = undefined;
       holder.headlessGhostSetupTurn?.close();
       if (
         holder.sessionId &&
@@ -414,7 +419,8 @@ export class MakerScheduleRunner implements ScheduleRunner {
       // 直发路径不经过 makerSendTransaction。先落实 pending switch,再读取 meta/row,
       // 才能让本轮 createSession 与 send 都指向切换后的 live engine。
       throwIfFireAborted(ctx.signal, 'credential switch setup');
-      await this.deps.applyPendingAgentSwitch?.(sessionId, ctx.signal);
+      holder.releaseAgentSwitchLock =
+        (await this.deps.acquirePendingAgentSwitch?.(sessionId, ctx.signal)) ?? undefined;
       throwIfFireAborted(ctx.signal, 'credential switch setup');
       const [meta, row] = await Promise.all([
         this.deps.maker.getSessionMeta(sessionId).catch(() => null),
@@ -436,6 +442,8 @@ export class MakerScheduleRunner implements ScheduleRunner {
             this.deps.logger.warn?.('[runner] persistent rebind clear failed', err);
           }
           isHeartbeat = false;
+          holder.releaseAgentSwitchLock?.();
+          holder.releaseAgentSwitchLock = undefined;
           sessionId = randomUUID();
           // resumeSessionId / heartbeatWorkingDir / heartbeatModel 仍是 undefined,
           // 下方 workingDir 解析自然走 schedule.workingDir + schedule.useWorktree 分支
@@ -476,8 +484,12 @@ export class MakerScheduleRunner implements ScheduleRunner {
           // await 崩溃恢复快照读回再查重,覆盖"重启后快照未恢复、内存队列还空"
           // 的窗口(review P1)—— 命中时返回 duplicate,下方按同一语义收口。
           if (this.deps.schedulerQueue.hasQueuedPrompt(sessionId, schedule.id)) {
+            holder.releaseAgentSwitchLock?.();
+            holder.releaseAgentSwitchLock = undefined;
             return await this.settleDuplicateQueuedFire(schedule, ctx, sessionId);
           }
+          holder.releaseAgentSwitchLock?.();
+          holder.releaseAgentSwitchLock = undefined;
           return await this.fireHeartbeatViaQueue(schedule, ctx, sessionId, {
             model: meta?.model,
             effort: meta?.effort,
@@ -998,6 +1010,9 @@ export class MakerScheduleRunner implements ScheduleRunner {
         reason: normalized.reason,
         error: normalized.error,
       });
+    } finally {
+      holder.releaseAgentSwitchLock?.();
+      holder.releaseAgentSwitchLock = undefined;
     }
 
     // 7. 等 turn end，组装 run，主动 notify
@@ -1688,6 +1703,8 @@ interface EphemeralSessionHolder {
   worktreeSessionId?: string;
   /** true = heartbeat 复用会话或持续会话,收尾时不关闭。 */
   keepAlive?: boolean;
+  /** heartbeat direct-send route lock; released immediately after Session.send settles. */
+  releaseAgentSwitchLock?: () => void;
 }
 
 interface HeadlessGhostSetupTurnGuard {

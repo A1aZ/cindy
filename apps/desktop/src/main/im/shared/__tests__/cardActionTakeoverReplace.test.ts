@@ -82,6 +82,8 @@ vi.mock('../sessionRepo', () => ({
 }));
 vi.mock('../../../maker-host/session-provider-store', () => ({
   getSessionProvider: mocks.getSessionProvider,
+  normalizeSessionProviderId: (providerId: string | null | undefined) =>
+    providerId === undefined ? undefined : providerId?.trim() || null,
   setSessionProvider: mocks.setSessionProvider,
 }));
 vi.mock('../../../maker-ipc/runtimeSetModel', () => ({
@@ -564,7 +566,7 @@ describe('/permission Full access 确认', () => {
 });
 
 describe('model:pick 持久化失败', () => {
-  async function pressModelPick(im: ChannelIM): Promise<void> {
+  async function pressModelPick(im: ChannelIM, providerId = 'anthropic'): Promise<void> {
     const attach = createCardActionHandler(adapter, cards, turnRunner);
     let handler: ((e: IMCardActionEvent) => Promise<void>) | null = null;
     (im.onCardAction as ReturnType<typeof vi.fn>).mockImplementation((cb) => {
@@ -581,7 +583,7 @@ describe('model:pick 持久化失败', () => {
         modelId: 'claude-opus-4-7',
         modelLabel: 'Opus 4.7',
         effort: 'high',
-        providerId: 'anthropic',
+        providerId,
       },
     } as unknown as IMCardActionEvent);
   }
@@ -609,6 +611,22 @@ describe('model:pick 持久化失败', () => {
 
     expect(mocks.updateModelEffort).toHaveBeenCalled();
     expect(mocks.applyRuntimeSetModelChange).toHaveBeenCalled();
+  });
+
+  it('在持久化和运行态切换前统一归一化 providerId', async () => {
+    const im = makeIm();
+
+    await pressModelPick(im, '  anthropic  ');
+
+    expect(mocks.updateModelEffort).toHaveBeenCalledWith(
+      'sess-target',
+      'claude-opus-4-7',
+      'high',
+      'anthropic',
+    );
+    expect(mocks.applyRuntimeSetModelChange).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: 'anthropic' }),
+    );
   });
 
   it('busy provider 切换注入 pending hooks，并在 deferred 时不 mid-turn 改 effort', async () => {

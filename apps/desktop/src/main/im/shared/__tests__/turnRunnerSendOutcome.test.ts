@@ -586,14 +586,18 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
   });
 
   it('applies a deferred switch and sends the first queued IM message through the refreshed session', async () => {
+    const order: string[] = [];
     const oldSession = createSessionHarness(async () => ({
       accepted: false,
       reason: 'cancelled-before-dispatch',
     }));
-    const switchedSession = createSessionHarness(async () => ({
-      accepted: false,
-      reason: 'cancelled-before-dispatch',
-    }));
+    const switchedSession = createSessionHarness(async () => {
+      order.push('send');
+      return {
+        accepted: false,
+        reason: 'cancelled-before-dispatch',
+      };
+    });
     let live: Session | undefined = oldSession.session;
     const maker = {
       createSession: vi.fn(async () => oldSession.session),
@@ -606,12 +610,17 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
       }),
     };
     mocks.getMaker.mockReturnValue(maker);
-    const applyPendingAgentSwitch = vi.fn(async () => {
+    const releaseAgentSwitchLock = vi.fn(() => {
+      order.push('release');
+    });
+    const acquirePendingAgentSwitch = vi.fn(async () => {
+      order.push('apply');
       live = switchedSession.session;
       emitMakerEvent({ type: 'session:closed', sessionId: 'feishu-session' });
+      return releaseAgentSwitchLock;
     });
     const localRunner = createTurnRunner(fakeAdapter, fakeRepo, fakeCards, {
-      applyPendingAgentSwitch,
+      acquirePendingAgentSwitch,
     });
 
     try {
@@ -623,10 +632,11 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
         attachments: [],
       });
 
-      expect(applyPendingAgentSwitch).toHaveBeenCalledWith('feishu-session');
+      expect(acquirePendingAgentSwitch).toHaveBeenCalledWith('feishu-session');
       expect(oldSession.send).not.toHaveBeenCalled();
       expect(switchedSession.send).toHaveBeenCalledTimes(1);
       expect(mocks.wireSessionToIpcExternal).toHaveBeenLastCalledWith(switchedSession.session);
+      expect(order).toEqual(['apply', 'send', 'release']);
     } finally {
       localRunner.disposeAllSessions();
     }

@@ -5787,7 +5787,13 @@ async function backfillHistoryUntil(
   let cursorId: string | null = getOrCreateState(sessionId).oldestMessageId;
   let hasMoreAtEnd = true;
 
-  /** 把累积的页一次性并入窗口。collected 为空时只更新 hasMore 语义。 */
+  /**
+   * 把累积的页一次性并入窗口。
+   *
+   * collected 为空时直接 return、**不改任何 state** —— 包括 hasMoreMessages:一页都没取到
+   * 时该改成什么值取决于为何结束(触顶 / 异常 / 超预算),只有调用点知道,所以由调用点各自
+   * setState(#676 review)。
+   */
   const publishCollected = (): void => {
     if (collected.length === 0) return;
     const mapped = mapServerMessages(collected);
@@ -7129,6 +7135,12 @@ async function clearSessionAfterGuard(sessionId: string, clearedAt: string): Pro
       streamingClientId: null,
       streamingText: '',
       isStreaming: false,
+      // 窗口清空 → 按构造没有孤岛,标记必须一起清零(与 reloadMessages / trim / demote
+      // 同规矩)。漏清的后果不是数据错而是永久降级:covered 刻意保留孤岛标记(到达本次
+      // 目标不证明更早的洞都补上了),于是 /clear 之后这个会话永远被判为"不连续",
+      // canFocusWithoutJumpLoad 拒绝每一次窗口内命中,每次搜索跳转都白跑一轮补齐
+      // (#676 review)。
+      historyWindowHasIsland: false,
       // 分页锁归本次重置释放(与 reloadMessages / dropMessagesFromClientId 同规矩):
       // 上面刚 bump epoch 作废了 in-flight 的翻页 / 跳转补齐,而被作废的请求不会(也不该)
       // 代清这把锁 —— 它们分辨不出锁属于哪一代。漏清会让行首守卫把该会话的翻页永久

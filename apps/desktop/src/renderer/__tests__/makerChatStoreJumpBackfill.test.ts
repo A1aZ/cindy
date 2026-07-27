@@ -31,9 +31,25 @@ vi.mock('@/lib/makerTransport', () => ({
   makerApiFor: vi.fn(() => ({
     input: {
       getProjection: vi.fn(async () => Promise.reject(new Error('n/a in test'))),
+      clearSession: vi.fn(async () => ({ text: '', images: [], files: [] })),
     },
+    closeSession: vi.fn(async () => {}),
   })),
   isRemoteSession: vi.fn(() => false),
+}));
+
+// /clear 的落库与 sidebar 广播副作用(用例 X 会走到):只需要不炸,断言看的是渲染层 state。
+// sessionsBus 真身走 window.dispatchEvent,Node 环境下会往 stderr 抛一串已被 catch 的报错。
+vi.mock('@/lib/sessionService', () => ({
+  update: vi.fn(async () => {}),
+  get: vi.fn(async () => null),
+}));
+
+vi.mock('@/lib/sessionsBus', () => ({
+  emitRefresh: vi.fn(),
+  emitPatch: vi.fn(),
+  onRefresh: vi.fn(() => () => {}),
+  onPatch: vi.fn(() => () => {}),
 }));
 
 vi.mock('@/lib/userPromptStore', () => ({
@@ -859,5 +875,31 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
 
     expect(result).toBeNull();
     expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).not.toContain('stale');
+  });
+
+  it('X. /clear 清空窗口时一并清掉孤岛标记,不把会话永久钉在"不连续"', async () => {
+    // review #676（codex P1）：covered 刻意保留孤岛标记（到达本次目标不证明更早的洞都补
+    // 上了），所以标记只能由「窗口整体重建」清零。/clear 清了 messages / 游标 / 锁却漏了
+    // 这个标记 → 清空后的会话永远被判为不连续：canFocusWithoutJumpLoad 拒绝每一次窗口内
+    // 命中，之后每次搜索跳转都白跑一轮补齐。
+    const target = serverMessage({
+      id: 'island-clear',
+      clientId: 'island-clear',
+      createdAt: '2026-07-20T00:00:00.000Z',
+    });
+    // 先制造孤岛：翻页取不到目标 → 退回 around 窗口。
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce([
+      serverMessage({ id: 'tail-c', clientId: 'tail-c', createdAt: '2026-07-25T12:00:00.000Z' }),
+    ]);
+    await makerChatStore.loadAroundMessageClientId(SID, 'island-clear', { radius: 60 });
+    expect(makerChatStore.getSnapshot(SID).historyWindowHasIsland).toBe(true);
+
+    makerChatStore.clearSession(SID);
+    await flushMicrotasks();
+
+    // 窗口空了 → 按构造没有孤岛。
+    expect(makerChatStore.getSnapshot(SID).messages).toHaveLength(0);
+    expect(makerChatStore.getSnapshot(SID).historyWindowHasIsland).toBe(false);
   });
 });

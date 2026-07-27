@@ -20,6 +20,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { buildRenderItems, groupWorkRuns } from '../components/chat/MessageStream';
+import { HISTORY_GAP_SPLIT_MS } from '../lib/historyGap';
 import type { ChatMessage } from '@/lib/makerChatStore';
 
 // ── 工厂(带 createdAt:本组回归全靠时间戳) ──────────────────────────────────
@@ -81,7 +82,8 @@ function groupContains(group: RenderItems[number], clientId: string): boolean {
   return group.children.some(hit);
 }
 
-const THIRTY_MIN_MS = 30 * 60 * 1000;
+// 阈值直接引用生产常量:测试里再硬编码一份 30 分钟,等于把单一来源分叉成两处,
+// 将来调 HISTORY_GAP_SPLIT_MS 时测试会以旧值继续"通过"(#676 review)。
 
 // ── Scenario A:窗口空洞两侧不并组 ───────────────────────────────────────────
 
@@ -127,7 +129,7 @@ describe('历史窗口空洞 — 跨空洞不合并工作组', () => {
 
     expect(durations.length).toBeGreaterThan(0);
     for (const d of durations) {
-      expect(d).toBeLessThanOrEqual(THIRTY_MIN_MS);
+      expect(d).toBeLessThanOrEqual(HISTORY_GAP_SPLIT_MS);
     }
   });
 });
@@ -169,7 +171,7 @@ describe('历史窗口空洞 — 段内部的空洞', () => {
       .map((g) => (g.type === 'work_group' ? g.durationMs : undefined))
       .filter((d): d is number => d !== undefined);
     for (const d of durations) {
-      expect(d).toBeLessThanOrEqual(THIRTY_MIN_MS);
+      expect(d).toBeLessThanOrEqual(HISTORY_GAP_SPLIT_MS);
     }
   });
 });

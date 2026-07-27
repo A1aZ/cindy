@@ -764,7 +764,7 @@ export async function recoverGrokAuthAfterRejection(): Promise<XaiBridgeAuthReco
   // 先占位再刷:并发进来的其它 token 不该同时发起强制刷新。
   const previousForcedRefreshAt = _lastForcedRefreshAt;
   _lastForcedRefreshAt = now;
-  const { outcome } = await refreshBlob(blob, true);
+  const { blob: attempted, outcome } = await refreshBlob(blob, true);
   switch (outcome) {
     case 'refreshed':
       log.info('xai access_token 被上游拒绝,已强制刷新恢复');
@@ -775,10 +775,19 @@ export async function recoverGrokAuthAfterRejection(): Promise<XaiBridgeAuthReco
       // 仅在占位仍是自己写的时候回滚,避免覆盖期间另一次真实刷新的时间戳。
       if (_lastForcedRefreshAt === now) _lastForcedRefreshAt = previousForcedRefreshAt;
       return 'superseded';
-    case 'rejected':
+    case 'rejected': {
+      // refreshBlob 内部那道复核到这里还隔着两次 await 恢复(锁链 await + 本函数 await),
+      // 足够让一次进行中的 OAuth 登录把新凭证写进来。删凭证是不可逆动作,登出前再复核一次:
+      // 不是同一枚 refresh_token 就说明作废结论已经过期,按 superseded 放过。
+      // 冷却不回滚 —— 这一路确实发出了刷新请求,轮换已经消耗掉了。
+      const currentBlob = readBlob();
+      if (currentBlob === null || currentBlob.refresh_token !== attempted.refresh_token) {
+        return 'superseded';
+      }
       log.warn('xai refresh_token 已被服务端作废,清空本机凭证并回落未登录');
       logoutGrok();
       return 'logged_out';
+    }
     default:
       // failed / skipped:刷新没成功但也没有作废证据,保留凭证等下次。
       return 'unchanged';

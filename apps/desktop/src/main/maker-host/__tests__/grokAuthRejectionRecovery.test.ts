@@ -214,6 +214,54 @@ describe('recoverGrokAuthAfterRejection', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('复核之后、登出之前完成的新登录不被误删', async () => {
+    // refreshBlob 内部那道复核到 logoutGrok() 之间隔着两次 await 恢复,进行中的 OAuth
+    // 登录足以插进来。这里用手工控制的 text() resolve 时机精确落在那个窗口里。
+    seedCredentials();
+    let enteredText!: () => void;
+    const inText = new Promise<void>((resolve) => {
+      enteredText = resolve;
+    });
+    let releaseText!: () => void;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          ({
+            ok: false,
+            status: 400,
+            text: () =>
+              new Promise<string>((resolve) => {
+                releaseText = () => resolve(JSON.stringify({ error: 'invalid_grant' }));
+                enteredText();
+              }),
+            json: async () => ({}),
+          }) as unknown as Response,
+      ),
+    );
+
+    const pending = recoverGrokAuthAfterRejection();
+    await inText;
+    releaseText();
+    // 推进两拍:`await res.text().catch(...)` 的 catch 派生一层 promise,所以 refreshBlob
+    // 内那道复核要到第二个 microtask 才跑完(此刻它看到的仍是旧凭证)。停在这里时
+    // recoverGrokAuthAfterRejection 尚未恢复到 switch —— 正是要覆盖的窗口。
+    await Promise.resolve();
+    await Promise.resolve();
+    store.set(
+      SECRET_ID,
+      JSON.stringify({
+        access_token: 'relogin-access-token',
+        refresh_token: 'refresh-token-from-relogin',
+        expires_at: Date.now() + 3600_000,
+      }),
+    );
+    resetGrokOAuthMemoryCache();
+
+    await expect(pending).resolves.toBe('superseded');
+    expect(readStored()?.access_token).toBe('relogin-access-token');
+  });
+
   it('superseded 没有真的刷新,不占用冷却窗口', async () => {
     seedCredentials();
     const fetchMock = vi.fn(async () =>

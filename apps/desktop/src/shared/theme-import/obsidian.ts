@@ -114,6 +114,8 @@ function shouldRecurseAtRule(selector: string): boolean {
   return true;
 }
 
+const NESTED_THEME_SELECTOR_RE = /(?:^|[,\s])&\s*\.theme-(dark|light)/i;
+
 function scanCssRules(source: string, depth: number): CssRule[] {
   if (depth >= MAX_AT_RULE_DEPTH) return [];
   const rules: CssRule[] = [];
@@ -151,14 +153,25 @@ function scanCssRules(source: string, depth: number): CssRule[] {
       const j = findBlockEnd(source, i);
       const body = source.slice(i + 1, Math.max(i + 1, j - 1));
       if (selector.startsWith('@')) {
-        // 跳过 `@media print`、`@supports`、`@keyframes` 等与屏幕显示
-        // 无关的 at-rule。`@media` 的响应式条件（min-width 等）和
-        // `@layer` 仍递归——主题合法地在里面放 `.theme-dark` 变量。
         if (shouldRecurseAtRule(selector)) {
           rules.push(...scanCssRules(body, depth + 1));
         }
       } else if (selector.length > 0) {
         rules.push({ selector, body });
+        // CSS nesting: `body { &.theme-dark { ... } }` — recurse into the
+        // body so nested theme selectors are collected as separate rules.
+        // The parent rule's `collectCustomProps` strips nested blocks, so
+        // declarations from nested selectors won't contaminate the parent.
+        if (depth === 0) {
+          const nested = scanCssRules(body, depth + 1);
+          for (const child of nested) {
+            // Resolve `&` against the parent selector for nested theme rules.
+            if (NESTED_THEME_SELECTOR_RE.test(child.selector)) {
+              const resolved = child.selector.replace(/&/g, selector);
+              rules.push({ selector: resolved, body: child.body });
+            }
+          }
+        }
       }
       i = j;
       selectorStart = i;
@@ -196,8 +209,24 @@ function collectCustomProps(body: string, into: VarMap, locked?: Set<string>): v
 function stripNestedBlocks(body: string): string {
   let out = '';
   let depth = 0;
+  let quote: string | null = null;
   for (let i = 0; i < body.length; i += 1) {
     const c = body[i];
+    if (quote !== null) {
+      if (c === '\\') {
+        if (depth === 0) out += c + (body[i + 1] ?? '');
+        i += 1;
+        continue;
+      }
+      if (c === quote) quote = null;
+      if (depth === 0) out += c;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      quote = c;
+      if (depth === 0) out += c;
+      continue;
+    }
     if (c === '{') { depth += 1; continue; }
     if (c === '}') { if (depth > 0) depth -= 1; continue; }
     if (depth === 0) out += c;
@@ -390,21 +419,24 @@ export function extractObsidianPalette({ type, vars }: ModeVars): ObsidianExtrac
     () => step(surface, 0.2),
   );
 
-  const textPrimary = role(
-    'textPrimary',
-    ['--text-normal', '--color-base-100'],
-    () => (dark ? { r: 212, g: 212, b: 212 } : { r: 38, g: 38, b: 38 }),
-  );
-  const textSecondary = role(
-    'textSecondary',
-    ['--text-muted', '--color-base-70'],
-    () => shade(textPrimary, dark ? -0.28 : 0.28),
-  );
-  const textTertiary = role(
-    'textTertiary',
-    ['--text-faint', '--color-base-50'],
-    () => shade(textSecondary, dark ? -0.16 : 0.16),
-  );
+  const textPrimary = (() => {
+    const hit = readColor(vars, ['--text-normal', '--color-base-100'], unresolved, surface);
+    if (hit) { resolvedRoles += 1; return hit; }
+    derivedRoles.push('textPrimary');
+    return dark ? { r: 212, g: 212, b: 212 } : { r: 38, g: 38, b: 38 };
+  })();
+  const textSecondary = (() => {
+    const hit = readColor(vars, ['--text-muted', '--color-base-70'], unresolved, surface);
+    if (hit) { resolvedRoles += 1; return hit; }
+    derivedRoles.push('textSecondary');
+    return shade(textPrimary, dark ? -0.28 : 0.28);
+  })();
+  const textTertiary = (() => {
+    const hit = readColor(vars, ['--text-faint', '--color-base-50'], unresolved, surface);
+    if (hit) { resolvedRoles += 1; return hit; }
+    derivedRoles.push('textTertiary');
+    return shade(textSecondary, dark ? -0.16 : 0.16);
+  })();
   const textDisabled = role(
     'textDisabled',
     ['--color-base-40'],
@@ -427,6 +459,7 @@ export function extractObsidianPalette({ type, vars }: ModeVars): ObsidianExtrac
   if (accentDeepHit) resolvedRoles += 1;
   else derivedRoles.push('accentDeep');
   const elevatedSoft = dark ? elevated : step(elevated, 0.08);
+  derivedRoles.push('elevatedSoft');
 
   const headings = ['--h1-color', '--h2-color', '--h3-color', '--h4-color', '--h5-color', '--h6-color']
     .map((name) => readColor(vars, [name], unresolved));

@@ -292,6 +292,7 @@ export function extractVsCodePalette(
     'textPrimary',
     ['editor.foreground', 'foreground'],
     () => (dark ? { r: 212, g: 212, b: 212 } : { r: 38, g: 38, b: 38 }),
+    surfaceHit,
   );
   // 二级文字优先取注释色——这是 one-dark-pro.ts 注释里记录的人工判断
   // (SECONDARY ← comments),比 descriptionForeground 更贴近"弱化正文"的观感。

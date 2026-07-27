@@ -24,6 +24,10 @@ export const PALETTE_ROLE_COUNT = 13;
 
 const WINDOWS_RESERVED_RE = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
 
+// Maximum slug length. Filesystem limit is 255 bytes; we need room for:
+// `-dark` (5) + `-99` (3) + `-local` (6) + `.json` (5) = 19 chars overhead.
+const MAX_SLUG_LENGTH = 200;
+
 function toSlug(name: string): string {
   let slug = name
     .trim()
@@ -32,6 +36,9 @@ function toSlug(name: string): string {
     .replace(/^-+|-+$/g, '');
   if (slug.length === 0) return 'imported-theme';
   if (WINDOWS_RESERVED_RE.test(slug)) slug = `theme-${slug}`;
+  if (slug.length > MAX_SLUG_LENGTH) {
+    slug = slug.slice(0, MAX_SLUG_LENGTH).replace(/-+$/, '');
+  }
   return slug;
 }
 
@@ -102,7 +109,11 @@ export function convertObsidianTheme(
 
   for (const mode of modes) {
     const extracted = extractObsidianPalette(mode);
-    if (!extracted) continue;
+    if (!extracted) {
+      // Mode advertised by the stylesheet but background unresolvable — report it.
+      unresolved.push(`mode:${mode.type}`);
+      continue;
+    }
     const built = buildThemeColorsFromPalette(
       extracted.palette,
       extracted.type,

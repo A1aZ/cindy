@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useState } from 'react';
 import { createElement, type ReactNode } from 'react';
 
 import {
@@ -8,6 +8,7 @@ import {
   resolveFamilyVariant,
   tryGetFamily,
 } from '../themes/families';
+import { onLocalThemesChange } from '../themes/local-themes';
 import { themeService } from '../themes/theme-service';
 import type { ThemeType } from '../themes/types';
 
@@ -227,6 +228,12 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       ? false
       : window.matchMedia(PREFERS_DARK_QUERY).matches,
   );
+  // Invalidate memos that depend on family membership when local themes change.
+  const [localThemeRev, bumpLocalThemeRev] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => onLocalThemesChange(() => {
+    bumpLocalThemeRev();
+    applyThemeClass(theme, true);
+  }), [theme]);
 
   const setTheme = useCallback((next: Theme) => {
     setThemeState(next);
@@ -318,7 +325,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     const isDarkRequested = theme === 'dark' || (theme === 'system' && systemPrefersDark);
     const requestedType: ThemeType = isDarkRequested ? 'dark' : 'light';
     return family[requestedType] === null ? requestedType : null;
-  }, [familyId, theme, systemPrefersDark]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [familyId, theme, systemPrefersDark, localThemeRev]);
 
   return createElement(
     ThemeContext.Provider,

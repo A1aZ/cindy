@@ -19,9 +19,14 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildRenderItems, groupWorkRuns } from '../components/chat/MessageStream';
+import {
+  buildRenderItems,
+  groupWorkRuns,
+  insertForkOriginItem,
+} from '../components/chat/MessageStream';
 import { HISTORY_GAP_SPLIT_MS } from '../lib/historyGap';
 import type { ChatMessage } from '@/lib/makerChatStore';
+import type { GhostCardSnapshot, GhostCardEntry } from '@/cindy-brain/ghostCardStore';
 
 // ── 工厂(带 createdAt:本组回归全靠时间戳) ──────────────────────────────────
 
@@ -409,5 +414,140 @@ describe('历史窗口空洞 — 正常 turn 不受影响', () => {
     // 段也不该被误切:阈值内的连续调用仍合成一段。
     const segments = items.filter((it) => it.type === 'tool_segment');
     expect(segments).toHaveLength(1);
+  });
+});
+
+
+// ── Scenario C:被卡片取代的调用也必须报出时间(review #676 copilot) ──────────
+//
+// ghost_card(意识供卡)与 agent_plan(TodoWrite / update_plan)是各自那次调用在流里的
+// **唯一**呈现——工具行被卡片取代、不再单独渲染。它们原先在 renderItemStartMs /
+// renderItemEndMs 里没有分支,一律报 null。
+//
+// 实测过后果的具体形状(两侧都跑过,只留能真正区分的断言):
+//  - 工作组切分本身**不受影响**:两类卡都会被 groupAnsweredTurnItems 提到组外,而空洞后
+//    只要还有任何带时间戳的 item,切分照旧发生 —— 分组结果与时长两侧完全一致。
+//  - 真正会错的是另外两处:
+//    C1 长供卡调用(出图 / 出视频跑很久)的结束时间没算进 tool_result → 紧随其后的正文被
+//       误判成空洞,进度文字被当成最终答复留在工作组外(与 A4 同一退化)。
+//    C2 / C3 insertForkOriginItem 按"第一个时间 >= 分叉时刻的 item"插标记 → 报 null 的卡
+//       被跳过,于是**分叉之后**生成的卡片渲染在「从这里分叉」标记之上,视觉上被算进父会话。
+
+const GHOST_TOOL = 'mcp__cindy__ghost_call';
+
+const mkGhostCall = (id: string, createdAt: string): ChatMessage => ({
+  clientId: id,
+  role: 'tool_use',
+  content: '',
+  toolUseId: `tu-${id}`,
+  toolName: GHOST_TOOL,
+  toolInput: { ghost_id: 'cindy-art', tool: 'gen_image' },
+  createdAt,
+});
+
+const mkGhostResult = (
+  id: string,
+  toolUseId: string,
+  cardId: string,
+  createdAt: string,
+): ChatMessage => ({
+  clientId: id,
+  role: 'tool_result',
+  content: JSON.stringify({ ok: true, xdt_card_id: cardId }),
+  toolUseId,
+  createdAt,
+});
+
+const ghostSnapshot = (cardIds: string[]): GhostCardSnapshot => ({
+  version: 1,
+  byCallId: new Map(
+    cardIds.map((id) => [
+      id,
+      { status: 'ready', ghostId: 'cindy-art', html: '<p>card</p>', height: 240 } as GhostCardEntry,
+    ]),
+  ),
+  liveCards: [],
+});
+
+const mkTodoWrite = (id: string, createdAt: string, content: string): ChatMessage => ({
+  clientId: id,
+  role: 'tool_use',
+  content: '',
+  toolUseId: `tu-${id}`,
+  toolName: 'TodoWrite',
+  toolInput: { todos: [{ content, status: 'pending', activeForm: content }] },
+  createdAt,
+});
+
+const forkOrigin = {
+  parentSessionId: 'parent-sess',
+  forkedAtMessageId: 'msg-fork',
+  forkedSessionCreatedAt: '2026-07-25T10:05:00.000Z',
+} as unknown as Parameters<typeof insertForkOriginItem>[1];
+
+describe('历史窗口空洞 — 被卡片取代的调用', () => {
+  it('C1. 一次跑很久的供卡调用不被误判成空洞(结束时间算进 tool_result)', () => {
+    // 出图 / 出视频这类调用可能跑很久。卡片的 toolCall.createdAt 只是"开始",拿它当结束
+    // 会把紧随其后的动作误判成空洞:进度文字 a0 被切成前一段的"最终答复"、留在组外。
+    const messages: ChatMessage[] = [
+      mkUser('u1', '2026-07-25T10:00:00.000Z', '出个视频'),
+      mkAssistant('a0', '2026-07-25T10:00:05.000Z', '我来生成。'),
+      mkTool('t0', '2026-07-25T10:00:08.000Z'),
+      mkResult('r0', 'tu-t0', '2026-07-25T10:00:09.000Z'),
+      mkGhostCall('g1', '2026-07-25T10:00:10.000Z'),
+      // 45 分钟后才回结果(> 阈值)。
+      mkGhostResult('gr1', 'tu-g1', 'call-1', '2026-07-25T10:45:10.000Z'),
+      mkTool('t9', '2026-07-25T10:45:20.000Z'),
+      mkResult('r9', 'tu-t9', '2026-07-25T10:45:25.000Z'),
+      mkAssistant('a1', '2026-07-25T10:45:40.000Z', '视频好了。'),
+    ];
+
+    const { items } = buildRenderItems(messages, undefined, ghostSnapshot(['call-1']));
+    expect(items.some((it) => it.type === 'ghost_card')).toBe(true);
+
+    const grouped = groupWorkRuns(items, false);
+    // 关键:进度文字仍在「已工作」组里。卡片结束时间取不到 result 时,这里会退化成
+    // 组外的一条裸 assistant(与 A4 同一形状)。
+    const groups = workGroups(grouped);
+    expect(groups.some((g) => groupContains(g, 'a0'))).toBe(true);
+  });
+
+  it('C2. 分叉之后生成的 ghost_card 渲染在分叉标记之下', () => {
+    const messages: ChatMessage[] = [
+      // 分叉点之前:来自父会话的历史。
+      mkUser('u1', '2026-07-25T10:00:00.000Z', '继续'),
+      // 分叉点(10:05)之后:本会话自己的供卡调用。
+      mkGhostCall('g1', '2026-07-25T10:06:00.000Z'),
+      mkGhostResult('gr1', 'tu-g1', 'call-1', '2026-07-25T10:06:30.000Z'),
+      mkAssistant('a1', '2026-07-25T10:07:00.000Z', '好了。'),
+    ];
+
+    const { items } = buildRenderItems(messages, undefined, ghostSnapshot(['call-1']));
+    const withMarker = insertForkOriginItem(items, forkOrigin);
+
+    const markerIdx = withMarker.findIndex((it) => it.type === 'fork_origin');
+    const cardIdx = withMarker.findIndex((it) => it.type === 'ghost_card');
+    expect(markerIdx).toBeGreaterThanOrEqual(0);
+    expect(cardIdx).toBeGreaterThanOrEqual(0);
+    // 卡片报不出时间时会被 findIndex 跳过,标记插到它**后面** → 卡片被算进父会话。
+    expect(markerIdx).toBeLessThan(cardIdx);
+  });
+
+  it('C3. 分叉之后的 agent_plan 渲染在分叉标记之下', () => {
+    const messages: ChatMessage[] = [
+      mkUser('u1', '2026-07-25T10:00:00.000Z', '继续'),
+      mkTodoWrite('p1', '2026-07-25T10:06:00.000Z', '先跑门禁'),
+      mkResult('pr1', 'tu-p1', '2026-07-25T10:06:01.000Z'),
+      mkAssistant('a1', '2026-07-25T10:07:00.000Z', '计划已更新。'),
+    ];
+
+    const { items } = buildRenderItems(messages);
+    const withMarker = insertForkOriginItem(items, forkOrigin);
+
+    const markerIdx = withMarker.findIndex((it) => it.type === 'fork_origin');
+    const planIdx = withMarker.findIndex((it) => it.type === 'agent_plan');
+    expect(markerIdx).toBeGreaterThanOrEqual(0);
+    expect(planIdx).toBeGreaterThanOrEqual(0);
+    expect(markerIdx).toBeLessThan(planIdx);
   });
 });

@@ -252,7 +252,15 @@ interface MessageStreamProps {
 // 引用这两个成员(WorkChildItem),让「children 只含这两类」由类型系统保证,
 // 渲染处无需 as 强转;其余成员保持内联。
 type MessageRenderItem = { type: 'message'; key: string; message: ChatMessage };
-type AgentPlanRenderItem = { type: 'agent_plan'; key: string; todos: TodoItem[] };
+type AgentPlanRenderItem = {
+  type: 'agent_plan';
+  key: string;
+  todos: TodoItem[];
+  /** 派生自哪条 TodoWrite / update_plan 调用(该调用的行被卡片取代,不再单独渲染)。
+   *  空洞判定与工作组锚定需要它:卡片是这次调用在流里的**唯一**呈现,没有时间戳的
+   *  item 会被间隔判定跳过,于是"空洞后的第一个动作恰好是计划卡"时切不开(#676 review)。 */
+  createdAt?: string;
+};
 type ToolSegmentRenderItem = {
   /** A run of consecutive tool_use messages between text segments,
    *  rendered as a single AgentActionsBlock. v2 — no isStreaming
@@ -348,6 +356,11 @@ export type RenderItem =
       /** 原始 tool_use 消息(头带展开区显示调用参数;审计层不因行隐身而丢)。 */
       toolCall: ChatMessage;
       settled: boolean;
+      /** 配对到的 tool_result 时间戳(ms)。与 AgentTaskRenderItem.resultTsMs 同口径:
+       *  toolCall.createdAt 只是"开始调用",一次跑很久的供卡调用(出图 / 出视频)拿它
+       *  当结束会把结束时间低估整个执行时长,紧随其后的正文被误判成历史空洞。
+       *  未配对(活卡)时缺省。 */
+      resultTsMs?: number;
       /** 回锚媒体:后续调用(如 poll_result)的 tool_result 带 xdt_anchor_card_id
        *  指回本卡时,其媒体挂在卡正下方渲染(替换"生成中"的视觉位置),而非
        *  留在轮询调用处。仅同 ghostId 的结果可锚入;无回锚时字段缺省。 */
@@ -954,7 +967,12 @@ export function buildRenderItems(
         const sessionTodos = planInsertAt.get(i);
         if (sessionTodos) {
           flushSegment();
-          items.push({ type: 'agent_plan', key: sessionTodos.key, todos: sessionTodos.todos });
+          items.push({
+            type: 'agent_plan',
+            key: sessionTodos.key,
+            todos: sessionTodos.todos,
+            createdAt: msg.createdAt,
+          });
         }
         let j = i + 1;
         while (j < messages.length && messages[j].role === 'tool_result') j++;
@@ -1032,6 +1050,10 @@ export function buildRenderItems(
               tool: toolFromInput,
               toolCall: msg,
               settled: true,
+              resultTsMs:
+                typeof msg.toolUseId === 'string'
+                  ? resultTsByToolUseId.get(msg.toolUseId)
+                  : undefined,
             };
             pendingSegmentGhostCards.push(cardItem);
             ghostCardItemByCallId.set(cardId, cardItem);
@@ -1358,12 +1380,27 @@ function renderItemStartMs(item: RenderItem): number | null {
     const ms = Date.parse(item.toolCall?.createdAt ?? item.update?.createdAt ?? '');
     return Number.isFinite(ms) ? ms : null;
   }
+  // ghost_card / agent_plan 是各自那次调用在流里的**唯一**呈现(工具行被卡片取代),
+  // 所以它们必须报出调用时间。漏掉的后果是间隔判定把它们当"无时间戳"跳过:空洞后的
+  // 第一个动作恰好是卡片时切不开,卡片还会被归到空洞前那一组里(#676 review)。
+  if (item.type === 'ghost_card') {
+    const ms = Date.parse(item.toolCall.createdAt ?? '');
+    return Number.isFinite(ms) ? ms : null;
+  }
+  if (item.type === 'agent_plan') {
+    const ms = Date.parse(item.createdAt ?? '');
+    return Number.isFinite(ms) ? ms : null;
+  }
   if (item.type === 'work_group') {
     for (const child of item.children) {
       const childMs = renderItemStartMs(child);
       if (childMs !== null) return childMs;
     }
   }
+  // 剩下两类**故意**不报时间,不是漏:
+  //  - tool_media:段产物,永远紧跟在派生它的 tool_segment 之后(见 flushSegment),
+  //    锚点留在段末正是它自己的时间区间,单独给它一个时间戳没有意义。
+  //  - fork_origin:分叉标记,不是动作,不该参与间隔判定。
   return null;
 }
 
@@ -1403,6 +1440,11 @@ function renderItemEndMs(item: RenderItem): number | null {
     // 这张卡真正的结束(与 tool_segment 同口径)。两者取更晚的。
     if (item.resultTsMs === undefined) return liveEnd;
     return liveEnd === null ? item.resultTsMs : Math.max(liveEnd, item.resultTsMs);
+  }
+  if (item.type === 'ghost_card') {
+    const startMs = renderItemStartMs(item);
+    if (item.resultTsMs === undefined) return startMs;
+    return startMs === null ? item.resultTsMs : Math.max(startMs, item.resultTsMs);
   }
   if (item.type === 'work_group') {
     for (let i = item.children.length - 1; i >= 0; i--) {

@@ -5031,7 +5031,12 @@ const _historyLoadOrigin = new Map<string, string | undefined>();
 
 /**
  * 会话消息切片的代际号:整体重置切片的路径递增——reloadMessages(rewind / origin
- * 漂移重载)、clearSessionAfterGuard(/clear)、_purgeSession(删除 / 归档 / LRU 驱逐)。
+ * 漂移重载)、clearSessionAfterGuard(/clear)、_purgeSession(删除 / 归档 / LRU 驱逐)、
+ * dropMessagesFromClientId(edit-last 截断)、removeMessagesByClientIds(分组删除)、
+ * _trimMessagesIfNeeded(超长裁剪)、_demoteIdleSessions(空闲降级)、
+ * reconcileRemoteMessages 的权威重建分支(远程对账翻满上限仍未接回已知区段)。
+ * 判据只有一条:**这次改动是否换掉了窗口整体或 oldestMessageId** —— 换了就必须 bump,
+ * 并由这条路径自己释放分页锁(被作废的请求分辨不出锁属于哪一代,不会代清)。
  * loadOlderMessages 的追页循环在发起时快照代际,提交前比对——不一致说明
  * 追页期间切片已被整体重置,拉回的窗口作废(只复位 spinner,不把可能已软删的行
  * merge 回刚清空的 slice)。追页循环把竞态窗口从 1 次 RTT 拉长到最多 10 次
@@ -5475,16 +5480,32 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
       }
       if (collected.length === 0) return;
       const mapped = mapServerMessages(collected);
+      // 翻满上限仍没接回已知区段 → 下面走权威重建分支:整片旧窗口被换掉、oldestMessageId
+      // 也被改写。这是第八条"整体重建窗口"的路径,必须 bump epoch 作废 in-flight 的翻页 /
+      // 跳转补齐 —— 否则那些请求会带着**重建前**的游标返回,把一段脱离上下文的旧历史接到
+      // 新窗口上;更坏的是若那一页里有跳转目标,补齐会判 covered、连孤岛标记都不留,退化成
+      // 本 PR 要修的那个静默空洞(#676 review codex P1)。
+      //
+      // 取舍:被作废的跳转会返回 null,用户那次搜索跳转落空、需要再点一次。反过来(让跳转
+      // 赢、把对账推到下一轮触发)会让被控端权威内容继续缺着,而走到这个分支本身就说明本地
+      // 窗口已经严重过期。所以让权威重建赢。
+      //
+      // historyWindowHasIsland **不清**:重建保留了 existingIds 快照之后新到的本地行,里面
+      // 可能就有并发跳转刚 merge 进来的孤岛,清掉会让之后跳回它走成员快速通道、永不修复。
+      const isContiguous = reachedKnownWindow;
+      if (!isContiguous) bumpMessagesEpoch(sessionId);
       setState(sessionId, (s) => {
+        // 锁归本次重置释放(与 reloadMessages / clear / trim / demote 同规矩):被作废的
+        // 请求不会代清,漏清会让行首守卫把该会话的翻页永久卡住。早返路径同样要放。
+        const lockReset = !isContiguous && s.isLoadingMore ? { isLoadingMore: false } : null;
         // promise 期间可能已开始新 turn(streaming)→ 放弃本次合并,turn 结束会再触发。
         // force 时(stall 看门狗已确认被控端 not-running)放行:此处 isStreaming 是卡死残留。
         // 丢弃合并 = 拉回的窗口没进 UI:置 windowApplied=false,本次不得上报同步完成
         // (否则挂起的远程已读回执会在缺帧内容尚未展示时被放行),等 turn 结束的下一轮。
         if (s.isStreaming && !opts?.force) {
           windowApplied = false;
-          return s;
+          return lockReset ? { ...s, ...lockReset } : s;
         }
-        const isContiguous = reachedKnownWindow;
         const messages = isContiguous
           ? mergeMessages(mapped, s.messages, {}, 'newest-first')
           : mergeAuthoritativeRemoteWindow(
@@ -5492,7 +5513,8 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
               s.messages.filter((message) => !existingIds.has(message.clientId)),
               'newest-first',
             );
-        if (messages === s.messages) return s; // 无缺失且无权威字段变化 → 不换引用(视同已应用)
+        // 无缺失且无权威字段变化 → 不换引用(视同已应用)。锁要放的话仍得发布一次。
+        if (messages === s.messages) return lockReset ? { ...s, ...lockReset } : s;
         if (isContiguous) return { ...s, messages };
         const oldestRow = oldestMessageRow(collected, 'newest-first');
         return {
@@ -5500,6 +5522,7 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
           messages,
           oldestMessageId: oldestRow?.id ?? s.oldestMessageId,
           hasMoreMessages: !reachedHistoryStart,
+          isLoadingMore: false,
         };
       });
     } finally {

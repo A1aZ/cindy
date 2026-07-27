@@ -60,8 +60,11 @@ function thinkingDbMessage(
 /** 被控端经隧道返回的权威消息列表(local-db:messages:list)。 */
 let remoteList: Message[] = [];
 let remoteListResolver: ((args: unknown[]) => Message[] | Promise<Message[]>) | null = null;
+/** 被控端经隧道返回的 around 窗口(local-db:messages:around-client-id):搜索跳转用。 */
+let remoteAround: Message[] = [];
 const invoke = vi.fn(async (_deviceId: string, channel: string, _args: unknown[]) => {
   if (channel === 'local-db:messages:list') return remoteListResolver?.(_args) ?? remoteList;
+  if (channel === 'local-db:messages:around-client-id') return remoteAround;
   if (channel === 'local-db:sessions:get') {
     return { agentKind: 'cc', remoteHostId: null, sdkSessionId: null, fastMode: false, contextTokens: 0, contextWindow: 0, totalCostUsd: 0 };
   }
@@ -131,6 +134,7 @@ beforeEach(() => {
   stubApi();
   remoteList = [];
   remoteListResolver = null;
+  remoteAround = [];
   invoke.mockClear();
 });
 
@@ -625,6 +629,50 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     makerChatStore.reconcileRemoteMessages(s);
     await flush();
     expect(invoke).not.toHaveBeenCalledWith(DEVICE_ID, 'local-db:messages:list', expect.anything());
+  });
+
+  it('远程会话:权威重建作废在飞行中的跳转补齐,并释放分页锁', async () => {
+    // review #676(codex P1):无重叠分支换掉整片窗口 + 改写 oldestMessageId,却不 bump
+    // 代际。此时一个在飞行中的搜索跳转补齐会带着**重建前**的游标返回,把脱离上下文的旧
+    // 历史接到新窗口上;若那一页里有跳转目标,补齐还会判 covered、连孤岛标记都不留,
+    // 退化成本 PR 要修的静默空洞。
+    const s = sid();
+    await openRemoteWithHistory(s, [
+      dbMessage(s, 'stale-tail', 'stale cached tail', '2026-06-15T00:00:00.000Z'),
+    ]);
+
+    const target = dbMessage(s, 'jump-target', 'jump target', '2026-06-10T00:00:00.000Z');
+    // 跳转补齐用 limit=100 翻页(JUMP_BACKFILL_PAGE_SIZE),对账用 limit=50 —— 按 limit
+    // 分派,让补齐那一页停在飞行中,对账那几页正常返回。
+    const backfillPage = deferred<Message[]>();
+    remoteListResolver = (args) => {
+      const opts = (args[1] ?? {}) as { limit?: number };
+      if (opts.limit === 100) return backfillPage.promise;
+      return [dbMessage(s, 'auth-1', 'authoritative latest', '2026-06-20T00:00:00.000Z')];
+    };
+
+    remoteAround = [target];
+    // 跳转:around 拿到目标后进入补齐循环,卡在第一页上。
+    const jump = makerChatStore.loadAroundMessageClientId(s, 'client-jump-target', { radius: 60 });
+    await flush();
+    expect(makerChatStore.getSnapshot(s).isLoadingMore).toBe(true);
+
+    // 对账落地:与已有窗口没有重叠 → 权威重建。
+    makerChatStore.reconcileRemoteMessages(s);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual(['client-auth-1']);
+    // 锁归本次重置释放:被作废的补齐不会代清。
+    expect(makerChatStore.getSnapshot(s).isLoadingMore).toBe(false);
+
+    // 补齐那一页现在才回来(带着重建前的游标)。
+    backfillPage.resolve([target]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    await jump;
+
+    const ids = makerChatStore.getSnapshot(s).messages.map((m) => m.clientId);
+    // 关键:陈旧的那一页(含跳转目标)不得被接到权威窗口上。
+    expect(ids).toEqual(['client-auth-1']);
+    expect(makerChatStore.getSnapshot(s).isLoadingMore).toBe(false);
   });
 });
 

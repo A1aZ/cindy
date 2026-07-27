@@ -631,6 +631,46 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     expect(invoke).not.toHaveBeenCalledWith(DEVICE_ID, 'local-db:messages:list', expect.anything());
   });
 
+  it('远程会话:后启动的对账赢 —— 即使它只 merge、不 bump 代际', async () => {
+    // review #676(codex P1):代际守卫只能挡下"新一次对账**也重建了窗口**"的情况。找到重叠的
+    // 对账只做加性 merge、不 bump 代际,于是"旧的无重叠对账 + 新的有重叠对账"这一对里,旧那次
+    // 仍能通过代际比对,把陈旧的权威重建落地(还会用过期字段 hydrate 更新的行)。
+    const s = sid();
+    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
+
+    const stalePage = deferred<Message[]>();
+    let calls = 0;
+    remoteListResolver = () => {
+      calls += 1;
+      // 对账 #1 的首页停在飞行中(它拉回的是一段与 seed 无重叠的旧历史)。
+      if (calls === 1) return stalePage.promise;
+      // 对账 #2:与已有窗口**有重叠**(带上 seed)→ 只 merge、不 bump 代际。
+      return [
+        dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z'),
+        dbMessage(s, 'fresh', 'fresh row', '2026-06-15T00:01:00.000Z'),
+      ];
+    };
+
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    makerChatStore.reconcileRemoteMessages(s);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual([
+      'client-seed',
+      'client-fresh',
+    ]);
+
+    // 陈旧的那一页现在才回来:无重叠 → 它想走权威重建,把 seed / fresh 都换掉。
+    stalePage.resolve([dbMessage(s, 'stale', 'stale authoritative', '2026-06-10T00:00:00.000Z')]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    // 关键:后启动的那次赢,陈旧重建不得落地。
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual([
+      'client-seed',
+      'client-fresh',
+    ]);
+  });
+
   it('远程会话:陈旧代际的对账整体作废,不覆盖新窗口也不抢新代际的锁', async () => {
     // review #676(codex P1):CCAgentSessionView 直接发起一次对账,useRemoteSessionSync
     // 又独立 fire-and-forget 排一次,两次可以重叠。旧的那次若不比对代际就落地,会拿着过期的

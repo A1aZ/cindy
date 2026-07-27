@@ -370,6 +370,47 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     expect(calls).toBeLessThanOrEqual(7);
   });
 
+  it('J2. 预算是硬上限:最后一页把 limit 夹到剩余额度,窗口不会被顶出上限', async () => {
+    // review #676(copilot):循环条件只判"还没到上限",而每页最多带回 PAGE_SIZE 行,于是
+    // 最后一次请求可以把窗口顶出上限近一整页 —— 上限就不是上限了。
+    //
+    // 用"首页不满页但仍有更多"制造错位(device-link 帧裁剪的真实形状:整页被压成几十行,
+    // 靠 remoteRowsTrimmed 表示"还有"),这样预算边界就落在页中间而不是刚好对齐。
+    const target = serverMessage({
+      id: 'never-reached',
+      clientId: 'never-reached',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    let page = 0;
+    const requestedLimits: number[] = [];
+    vi.mocked(listMessagesFor).mockImplementation(async (_sid, opts) => {
+      const limit = (opts as { limit: number }).limit;
+      requestedLimits.push(limit);
+      const base = page++;
+      // 首页只回 55 行并带 remoteRowsTrimmed(不满页也还有更多),之后按请求的 limit 回满页。
+      const trimmed = base === 0;
+      const count = trimmed ? Math.min(55, limit) : limit;
+      return Array.from({ length: count }, (_, i) =>
+        serverMessage({
+          id: `cap-${base}-${i}`,
+          clientId: `cap-${base}-${i}`,
+          createdAt: new Date(
+            Date.UTC(2026, 6, 25, 12, 0, 0) - (base * 100 + i) * 60_000,
+          ).toISOString(),
+          ...(trimmed && i === 0 ? { agentMeta: { remoteRowsTrimmed: true } } : {}),
+        }),
+      );
+    });
+
+    await makerChatStore.loadAroundMessageClientId(SID, 'never-reached', { radius: 60 });
+
+    // 关键:窗口不得超过预算(around 那一行是 fallback merge 的,单独计)。
+    expect(makerChatStore.getSnapshot(SID).messages.length).toBeLessThanOrEqual(600 + 1);
+    // 收尾那一页的 limit 被夹小,不再是整页。
+    expect(requestedLimits.at(-1)).toBeLessThan(100);
+  });
+
   it('K. Agent/Task 类调用按 1:1 计入 item 预算,不按普通工具的 4:1 折算', async () => {
     // review #676（codex）：buildRenderItems 给每个 Agent/Task/Workflow tool_use 出一张
     // 独立 agent_task 卡（1:1）。按普通工具 4:1 折算会让预算放进约 4 倍的实际渲染量，

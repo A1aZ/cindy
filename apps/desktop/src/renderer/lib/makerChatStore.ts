@@ -5064,6 +5064,17 @@ const _historyLoadOrigin = new Map<string, string | undefined>();
  */
 const _messagesEpoch = new Map<string, number>();
 
+/**
+ * device-link 远程对账的启动序号(每会话单调递增,latest-wins 单飞)。
+ *
+ * 为什么代际号不够:代际只在"窗口被整体重建"时递增,而找到重叠的对账只做加性 merge、
+ * 不 bump 代际。于是"旧的无重叠对账 + 新的有重叠对账"这一对里,旧那次能通过代际比对、
+ * 把陈旧的权威重建落地(#676 review codex P1)。序号与代际是两个维度,两道都要过。
+ *
+ * 只增不删(purge 后重建照样单调,数值不复用);条目仅一个 number,无泄漏压力。
+ */
+const _remoteReconcileSeq = new Map<string, number>();
+
 function bumpMessagesEpoch(sessionId: string): void {
   _messagesEpoch.set(sessionId, (_messagesEpoch.get(sessionId) ?? 0) + 1);
 }
@@ -5477,6 +5488,13 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
   // 过期的 existingIds 覆盖新窗口,还会 bump 代际、把新一次跳转刚拿到的分页锁清掉
   // (那次跳转随即被作废,同时放开了另一个请求去抢游标)(#676 review codex P1)。
   const reconcileEpochAtStart = _messagesEpoch.get(sessionId) ?? 0;
+  // 对账自己的序号(latest-wins 单飞):代际守卫只能挡下"新一次对账**也重建了窗口**"的情况,
+  // 而找到重叠的对账只 merge、不 bump 代际(典型触发:两次快照之间来了一条 live push,新那次
+  // 因此命中重叠)。这时旧那次仍能通过代际比对,把陈旧的权威重建落地、用过期字段 hydrate
+  // 更新的行,还会清掉新那次之后才拿到的分页锁。所以再加一道对账专属的序号:同一会话只有
+  // **最后启动**的那次对账允许落地(#676 review codex P1)。
+  const reconcileSeq = (_remoteReconcileSeq.get(sessionId) ?? 0) + 1;
+  _remoteReconcileSeq.set(sessionId, reconcileSeq);
   // 远程回执新鲜度括号:启动记代、成功完成上报(失败不报)。回执只被「入队之后
   // 才启动且成功完成」的对账放行,见 sessionAttentionStore 的门槛说明。
   const syncToken = noteRemoteSessionSyncStarted(sessionId);
@@ -5518,9 +5536,15 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
         before = oldest.id;
       }
       if (collected.length === 0) return;
-      // 代际已变 → 本次对账整体作废:existingIds 与拉回的窗口都属于旧代际,落地只会覆盖
-      // 新窗口;更不能 bump 代际去清掉新代际的分页锁。不上报同步完成,交给下一轮触发。
-      if ((_messagesEpoch.get(sessionId) ?? 0) !== reconcileEpochAtStart) {
+      // 本次对账整体作废的两种情形:
+      //  1. 代际已变:窗口被 rewind / clear / trim / demote / 另一次对账重建过;
+      //  2. 之后又启动了对账:那次读到的是更新的真相,本次的 existingIds 与拉回的行都过期了。
+      // 两种都不能落地(会覆盖新窗口、用过期字段 hydrate 更新的行),更不能 bump 代际去清掉
+      // 新代际的分页锁。不上报同步完成,交给下一轮触发。
+      if (
+        (_messagesEpoch.get(sessionId) ?? 0) !== reconcileEpochAtStart ||
+        _remoteReconcileSeq.get(sessionId) !== reconcileSeq
+      ) {
         windowApplied = false;
         return;
       }
@@ -5885,8 +5909,13 @@ async function backfillHistoryUntil(
       baseWindowSize + collected.length < JUMP_BACKFILL_MAX_ITEMS;
       request++
     ) {
+      // 本次能再取多少行:预算按**窗口总量**算,而每页最多带回 PAGE_SIZE 行。只在循环条件里
+      // 判"还没到上限"的话,最后一次请求可以把窗口顶出上限近一整页(#676 review copilot),
+      // 所以把 limit 夹到剩余额度上,让上限真正是上限。
+      const remainingBudget = JUMP_BACKFILL_MAX_ITEMS - (baseWindowSize + collected.length);
+      const pageLimit = Math.min(JUMP_BACKFILL_PAGE_SIZE, remainingBudget);
       // 首页(窗口为空)不带游标 —— messages:list 默认返回最新一页。
-      const opts: { limit: number; before?: string } = { limit: JUMP_BACKFILL_PAGE_SIZE };
+      const opts: { limit: number; before?: string } = { limit: pageLimit };
       if (cursorId) opts.before = cursorId;
 
       const rows = await listMessagesFor(sessionId, opts);
@@ -5908,7 +5937,9 @@ async function backfillHistoryUntil(
       }
       const oldestRow = oldestMessageRow(rows, 'newest-first');
       if (oldestRow) cursorId = oldestRow.id;
-      hasMoreAtEnd = serverMessagePageHasMore(rows, JUMP_BACKFILL_PAGE_SIZE);
+      // 满页判定要对照**本次实际请求的 limit**:预算收尾时 limit 被夹小了,拿 PAGE_SIZE 去比
+      // 会把一页满页误判成"历史到底了"、错误地把 hasMoreMessages 关掉。
+      hasMoreAtEnd = serverMessagePageHasMore(rows, pageLimit);
 
       // 只认"本页真的取到了目标" —— 窗口里有它可能只是先前 fallback 留下的孤岛。
       if (rows.some((row) => row.clientId === targetClientId)) {

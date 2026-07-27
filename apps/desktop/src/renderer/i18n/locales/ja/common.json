@@ -368,6 +368,7 @@
         "importNotAFile": "フォルダではなくファイルを選択してください。",
         "importTooLarge": "ファイルが大きすぎるため、テーマとしてインポートできません。",
         "importWriteError": "テーマを保存できませんでした。ディスク容量と権限をご確認ください。",
+        "importInternalError": "ファイルを読み込めませんでした。もう一度選択してください。",
         "openDirFailed": "フォルダを開けませんでした: {{error}}",
         "refreshed": "ローカルテーマを更新しました"
       },

@@ -90,6 +90,23 @@ export type EditorTextRange = {
   to: number;
 };
 
+/**
+ * Move a stored range through a document change, so offsets captured earlier
+ * keep pointing at the same content. Bias the ends outward (-1 / 1) so text
+ * inserted at the boundaries stays outside the range rather than being swallowed
+ * by the next replacement.
+ */
+function mapEditorTextRange(
+  range: EditorTextRange | null,
+  transaction: Transaction,
+): EditorTextRange | null {
+  if (!range) return null;
+  return {
+    from: transaction.mapping.map(range.from, -1),
+    to: transaction.mapping.map(range.to, 1),
+  };
+}
+
 type DictionaryLearningWatch = {
   segmentId: string;
   rawTranscriptText?: string;
@@ -1085,6 +1102,15 @@ export function useVoiceInput(
     if (!editor) return;
     const handleTransaction = ({ transaction }: { transaction: Transaction }) => {
       inspectDictionaryLearningTransaction(transaction);
+      // The insertion point is captured from the selection when dictation
+      // starts, and the composer is read-only while it runs — but programmatic
+      // writes (draft restore, quote insertion, …) bypass that and shift every
+      // offset after them. A stale offset is worst exactly where it is used
+      // last: the salvage path replaces that range after a failure, which would
+      // eat whatever text now occupies it. Ride along on ProseMirror's mapping.
+      if (!transaction.docChanged || applyingVoiceTextRef.current) return;
+      insertionRangeRef.current = mapEditorTextRange(insertionRangeRef.current, transaction);
+      draftDisplayRangeRef.current = mapEditorTextRange(draftDisplayRangeRef.current, transaction);
     };
     editor.on('transaction', handleTransaction);
     return () => {

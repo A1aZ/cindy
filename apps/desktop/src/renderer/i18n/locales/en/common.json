@@ -4296,7 +4296,8 @@
     "emptyTranscript": "Speech was detected, but no text was recognized. Please try again.",
     "connectionInterrupted": "The voice connection was interrupted. Check your network and try again.",
     "recognitionStalled": "Voice recognition stopped returning results. Try again.",
-    "transcriptKept": "{{message}} The text recognized so far was kept — you can edit it directly."
+    "transcriptKept": "{{message}} The text recognized so far was kept — you can edit it directly.",
+    "transcriptKeptOverlay": "{{message}} The text recognized so far was kept — copy it to continue."
   },
   "chat": {
     "askUserQuestion": {

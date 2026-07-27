@@ -396,10 +396,10 @@ export function VoiceInputOverlay() {
     // transport failure reads the same whether or not salvage happened, and raw
     // ECONNRESET/"fetch failed" strings never reach the user.
     const cause = code ? t(VOICE_INPUT_ERROR_CODE_KEYS[code]) : formatVoiceInputStartError(message);
-    // Paired with the retained-transcript panel below: the overlay keeps the
-    // text with a copy button, so the sentence must not read as a total loss —
-    // while still naming the cause the user has to act on.
-    return transcriptKept ? t('voiceInputOverlay.transcriptKept', { message: cause }) : cause;
+    // Overlay-specific retention copy: its transcript is a read-only HUD with a
+    // Copy button, so telling users to "edit it directly" (what the composers
+    // say) would name an action they cannot take here.
+    return transcriptKept ? t('voiceInputOverlay.transcriptKeptOverlay', { message: cause }) : cause;
   }, [formatVoiceInputStartError, t]);
 
   const appendAudioChunk = useCallback((chunk: PcmChunk) => {

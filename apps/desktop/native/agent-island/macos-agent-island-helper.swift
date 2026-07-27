@@ -2416,11 +2416,13 @@ struct CompactSessionView: View {
         )
           .lineLimit(1)
           .truncationMode(.tail)
-          .fixedSize(horizontal: true, vertical: false)
+          // No fixedSize here: the subtitle must yield width (and truncate) so the
+          // count badge keeps its full intrinsic width instead of being clipped.
           .opacity(textOpacity)
       }
 
       PillBadge(pillSnapshot: pillSnapshot, compact: true)
+        .layoutPriority(1)
     }
     .padding(.trailing, hardwareNotchSideInset(sideWidth: sideWidth, compactWidth: 22))
     .frame(width: sideWidth, alignment: .trailing)
@@ -2878,8 +2880,12 @@ struct PillBadge: View {
 
   private func badge(_ text: String, emphasized: Bool) -> some View {
     Text(text)
-      .font(.system(size: compact ? 10 : 11, weight: .semibold, design: .monospaced))
+      .font(badgeFont)
       .foregroundColor(Color.white.opacity(0.92))
+      // Multi-digit counts must widen the capsule instead of wrapping into two lines.
+      .lineLimit(1)
+      .fixedSize(horizontal: true, vertical: false)
+      .padding(.horizontal, badgeContentInset)
       .frame(minWidth: compact ? 22 : 24, minHeight: compact ? 18 : 20)
       .background(Color.white.opacity(emphasized ? 0.11 : 0.065))
       .clipShape(Capsule())
@@ -2894,11 +2900,21 @@ struct PillBadge: View {
       Text("\(total)")
         .foregroundColor(Color.white.opacity(0.92))
     }
-    .font(.system(size: compact ? 10 : 11, weight: .semibold, design: .monospaced))
+    .font(badgeFont)
+    // Multi-digit counts must widen the capsule instead of wrapping into two lines.
+    .lineLimit(1)
+    .fixedSize(horizontal: true, vertical: false)
+    .padding(.horizontal, badgeContentInset)
     .frame(minWidth: compact ? 30 : 34, minHeight: compact ? 18 : 20)
     .background(Color.white.opacity(emphasized ? 0.11 : 0.065))
     .clipShape(Capsule())
   }
+
+  private var badgeFont: Font {
+    .system(size: compact ? 10 : 11, weight: .semibold, design: .monospaced)
+  }
+
+  private var badgeContentInset: CGFloat { 2 }
 
   private var isEmphasized: Bool {
     pillSnapshot.pendingInteractionCount > 0 || pillSnapshot.attentionCount > 0

@@ -286,8 +286,36 @@ function dispatcherKey(
     proxy.username ?? '',
     proxy.password ?? '',
     protocol,
-    agentOptions ? JSON.stringify(agentOptions) : '',
+    agentOptions ? JSON.stringify(identifyFunctions(agentOptions)) : '',
   ]);
+}
+
+// 函数身份 → 稳定标识。函数在 JSON.stringify 里会被整个丢掉,直接 stringify
+// agentOptions 会让「两个不同的自定义 connect / factory」塌成同一个 key,进而共享一个
+// 用别的 connector 建出来的 dispatcher(review 2026-07-27)。WeakMap 不阻止回收。
+const functionKeys = new WeakMap<object, string>();
+let functionKeySeq = 0;
+
+function functionKey(fn: object): string {
+  let key = functionKeys.get(fn);
+  if (!key) {
+    functionKeySeq += 1;
+    key = `fn#${functionKeySeq}`;
+    functionKeys.set(fn, key);
+  }
+  return key;
+}
+
+/** 把 options 里的函数值换成稳定标识,其余原样(键顺序沿用调用方给的顺序)。 */
+function identifyFunctions(value: unknown): unknown {
+  if (typeof value === 'function') return functionKey(value as object);
+  if (Array.isArray(value)) return value.map(identifyFunctions);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, identifyFunctions(v)]),
+    );
+  }
+  return value;
 }
 
 function closeAfterGrace(dispatcher: Dispatcher): void {

@@ -160,6 +160,19 @@ describe('resolveOutboundDispatcher', () => {
     );
   });
 
+  it('separates pools per custom connect function (functions vanish in JSON.stringify)', async () => {
+    resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
+    const connectA = ((_o: unknown, cb: (e: Error | null) => void) => cb(null)) as never;
+    const connectB = ((_o: unknown, cb: (e: Error | null) => void) => cb(null)) as never;
+    const url = 'https://example.com/x';
+    const a = await resolveOutboundDispatcher(url, { agentOptions: { connect: connectA } });
+    const b = await resolveOutboundDispatcher(url, { agentOptions: { connect: connectB } });
+    const aAgain = await resolveOutboundDispatcher(url, { agentOptions: { connect: connectA } });
+    // 不同 connector → 不同底层池;同一 connector → 复用同一个。
+    expect(pick(b, url)).not.toBe(pick(a, url));
+    expect(pick(aAgain, url)).toBe(pick(a, url));
+  });
+
   it('separates dispatchers per upstream protocol', async () => {
     resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
     const https = await resolveOutboundDispatcher('https://example.com/a');

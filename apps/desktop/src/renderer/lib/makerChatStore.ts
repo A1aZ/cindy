@@ -23,9 +23,7 @@
 
 import { redactSensitiveText } from '@cindy/maker-shared/error-redaction';
 import { applyCodexPlanSnapshotOnDone } from '@cindy/maker-shared/message-render';
-import { isAgentTaskToolName } from '@cindy/maker-shared/agent-task';
 import { HISTORY_GAP_SPLIT_MS } from './historyGap';
-import { isGhostCallToolName } from '../../shared/ghost';
 import type { MessageRole, Message, MessageAutomationOrigin } from '@/lib/ccAgent.types';
 import type { AttachedFile, MentionedResource, SerializedAttachedFile } from '@/lib/fileTypes';
 import type {
@@ -5264,19 +5262,23 @@ function removeMessagesByClientIds(
       }
       if (changed) taskUpdates = nextTaskUpdates;
     }
+    // 第四条 epoch-reset 路径:上面 invalidateHistory 时已 bump epoch 作废 in-flight
+    // 的翻页 / 跳转补齐,锁同样由本次重置释放。被作废的请求不会代清(它们分辨不出锁
+    // 属于哪一代),漏清会让行首守卫把该会话的翻页永久卡住 —— 既有回归
+    // 「discards an in-flight paging window after grouped deletion」正守着这条。
+    const lockReset = options.invalidateHistory !== false ? { isLoadingMore: false } : {};
     if (messages.length === s.messages.length && taskUpdates === s.taskUpdates) {
-      return s;
+      // 删除推送只涉及本渲染层窗口之外的行(典型:另一个窗口 / 设备删的消息)时,本地
+      // 没有任何行要移除 —— 但 epoch 已经 bump 了,in-flight 请求照样被作废。这条早退
+      // 路径同样必须放锁,否则该会话的翻页与跳转会永久卡住(#676 review)。
+      return s.isLoadingMore && options.invalidateHistory !== false ? { ...s, ...lockReset } : s;
     }
     return {
       ...s,
       messages,
       taskUpdates,
       isFirstMessage: !messages.some((message) => message.role === 'user'),
-      // 第四条 epoch-reset 路径:上面 invalidateHistory 时已 bump epoch 作废 in-flight
-      // 的翻页 / 跳转补齐,锁同样由本次重置释放。被作废的请求不会代清(它们分辨不出锁
-      // 属于哪一代),漏清会让行首守卫把该会话的翻页永久卡住 —— 既有回归
-      // 「discards an in-flight paging window after grouped deletion」正守着这条。
-      ...(options.invalidateHistory !== false ? { isLoadingMore: false } : {}),
+      ...lockReset,
     };
   });
 }
@@ -5615,112 +5617,36 @@ function loadOlderMessages(sessionId: string): void {
 }
 
 /**
- * 跳转补齐的预算:按**预估 render item 数**计,不是 DB 行数。
+ * 跳转补齐的预算:按**行数**计,并把它当作 render item 数的保守上界。
  *
  * 为什么要有预算:MessageStream 的锚定渲染窗口(visibleRenderItems 的
  * firstVisibleItemKey 分支)是 `slice(startIdx)` —— 从锚点一直切到末尾、没有上界。
  * 补齐把 messages 变长后,跳转到很早的位置就会一次挂载"锚点 → 末尾"的全部 item。
  *
- * 为什么不按行数:行→item 的比例随会话内容剧烈变化。工具密集的会话里
- * tool_use + tool_result 会被合成 tool_segment(几十行折成一个 item),而纯文本对话
- * 里每条 user / assistant 各自就是一个 item —— 接近 1:1。按行数设预算会在文本密集
- * 的会话里严重低估渲染体量(#676 review 指出:2000 行可能就是 2000 个 item,照样冻结)。
- * 所以这里按 role 折算:非工具行按 1:1 计,工具行按 TOOL_ROWS_PER_ITEM 折算成段。
+ * 为什么不再按 role / 工具名折算:折算模型必须逐一追平 buildRenderItems 的每种 item
+ * 展开规则,而那套规则会持续演化。#676 的 review 连着四轮各挖出一种被低估的展开路径:
+ * agent_task 卡(每个 Agent/Task/Workflow 调用 1:1)、按空洞切段后的孤立单行调用、
+ * ghost_call 配卡后的独立 ghost_card、TodoWrite / update_plan 的 agent_plan 卡、
+ * 以及结果含媒体时额外产出的 tool_media —— 每次都是"某行额外产生 item",而折算恰恰
+ * 假设"多行合成一个 item"。低估预算的方向是危险的那一侧(放进更多实际渲染量),所以
+ * 不再猜比例:一行最多产出一个可见 item 的量级,直接按行数当上界。
  *
- * 600 个 item 是 RENDER_WINDOW_INITIAL_ITEMS(80)的 7.5 倍量级:可感知但不冻结。
+ * 代价说清楚:工具密集的会话补齐能力因此下降(600 行而不是折算后的两千多行),更早
+ * 退回不连续的 around 窗口 —— 那时由渲染层的 HISTORY_GAP_SPLIT_MS 守卫兜底,不会折出
+ * 跨空洞的假组或谎报时长。这条取舍的根因仍是锚定窗口没有上界:只要它在,补齐规模就得
+ * 受渲染体量牵制。彻底的解法是把锚定窗口做成双向有界 + 配套向下扩窗(与滚到顶时的
+ * expandWindow 对称),它要联动改 MessageStream 的 startIdx / windowAtTop /
+ * isNearBottom / expandWindow / handleScroll 五处派生,且滚动手感必须实机验证,
+ * 故留作独立改动。
  *
- * 这仍是约束手段,不是终态。彻底的解法是把锚定窗口做成双向有界 + 配套向下扩窗
- * (与滚到顶时的 expandWindow 对称),那样补齐规模就不再受渲染体量牵制;它要联动改
- * MessageStream 的 startIdx / windowAtTop / isNearBottom / expandWindow /
- * handleScroll 五处派生,并且必须实机验证滚动手感,故留作独立改动。
- * 会话超出本预算时跳转仍会退回 around 窗口(窗口不连续),由渲染层的
- * HISTORY_GAP_SPLIT_MS 守卫兜底,不会再折出跨空洞的假组。
+ * 600 是 RENDER_WINDOW_INITIAL_ITEMS(80)的 7.5 倍量级:可感知但不冻结。
  */
 const JUMP_BACKFILL_MAX_ITEMS = 600;
-/** 普通工具行的折算比:一个 tool_segment 通常吃掉若干 tool_use + tool_result 行。 */
-const TOOL_ROWS_PER_ITEM = 4;
 const JUMP_BACKFILL_PAGE_SIZE = 100;
 
-/**
- * 一页行数折算成大致的 render item 数(口径见 JUMP_BACKFILL_MAX_ITEMS)。
- *
- * 三档,不能一刀切:
- *   - Agent / Task / collab / Workflow 类 tool_use —— buildRenderItems 给每个都出一张
- *     独立的 agent_task 卡,是 1:1。历史里若大量是这类调用(尤其被中断、没有 result 的),
- *     按普通工具的 4:1 折算会让预算放进 4 倍的实际渲染量(#676 review)。
- *   - 其余 tool_use / tool_result —— 会被合成 tool_segment,按 TOOL_ROWS_PER_ITEM 折算。
- *   - 其它角色(user / assistant / thinking 等) —— 各自一个 item,1:1。
- */
-/** 从持久化行里取 tool_use 的工具名(与 mapServerMessages 同口径:content.toolName)。 */
-function toolNameOfRow(row: Message): string {
-  const raw: unknown = row.content;
-  const parsed: unknown =
-    typeof raw === 'string'
-      ? (() => {
-          try {
-            return JSON.parse(raw);
-          } catch {
-            return null;
-          }
-        })()
-      : raw;
-  if (!parsed || typeof parsed !== 'object') return '';
-  const toolName = (parsed as Record<string, unknown>).toolName;
-  return typeof toolName === 'string' ? toolName : '';
-}
-
+/** 一页行数折算成 render item 数的保守上界(口径见 JUMP_BACKFILL_MAX_ITEMS)。 */
 function estimateRenderItemCount(rows: Message[]): number {
-  let oneToOneRows = 0;
-  // 普通工具行按"段"计,而不是先累加再一次性除:buildRenderItems 现在会在相邻工具调用
-  // 间隔超过 HISTORY_GAP_SPLIT_MS 时切段,所以被间隔隔开的孤立单行调用各自就是一个
-  // tool_segment(1:1)。一次性 ceil(总数 / 4) 会把这种历史低估到 1/4(#676 review)。
-  let plainToolSegments = 0;
-  let rowsInCurrentSegment = 0;
-  let lastPlainToolMs: number | null = null;
-
-  const startNewSegment = () => {
-    plainToolSegments++;
-    rowsInCurrentSegment = 1;
-  };
-
-  for (const row of rows) {
-    if (row.role !== 'tool_use' && row.role !== 'tool_result') {
-      oneToOneRows++;
-      // 非工具行会 flushSegment,后续工具调用重新开段。
-      rowsInCurrentSegment = 0;
-      lastPlainToolMs = null;
-      continue;
-    }
-    if (row.role === 'tool_use') {
-      // 工具名在 content.toolName 里(与 mapServerMessages 同口径)。
-      //
-      // 白名单口径,而不是黑名单:只有**确认**会被合成 tool_segment 的普通工具才享受
-      // 折算,其余(Agent / Task / collab / Workflow 的 agent_task 卡、ghost_call 配上
-      // 卡后隐身行 + 独立 ghost_card、以及 toolName 解析失败的未知行)一律按 1:1 计,
-      // 并结束当前段 —— 这几类在 buildRenderItems 里都会 flushSegment 并各自出一个
-      // item。低估预算的方向恰恰是危险的那一侧:它会放进更多实际渲染量(#676 review)。
-      const toolName = toolNameOfRow(row);
-      const foldsIntoSegment =
-        toolName.length > 0 &&
-        !isAgentTaskToolName(toolName) &&
-        toolName !== 'Workflow' &&
-        !isGhostCallToolName(toolName);
-      if (!foldsIntoSegment) {
-        oneToOneRows++;
-        rowsInCurrentSegment = 0;
-        lastPlainToolMs = null;
-        continue;
-      }
-    }
-    const parsed = Date.parse(row.createdAt ?? '');
-    const ms = Number.isFinite(parsed) ? parsed : null;
-    const gapped =
-      lastPlainToolMs === null || ms === null || Math.abs(ms - lastPlainToolMs) > HISTORY_GAP_SPLIT_MS;
-    if (gapped || rowsInCurrentSegment >= TOOL_ROWS_PER_ITEM) startNewSegment();
-    else rowsInCurrentSegment++;
-    if (ms !== null) lastPlainToolMs = ms;
-  }
-  return oneToOneRows + plainToolSegments;
+  return rows.length;
 }
 /**
  * 请求次数安全上限,与行预算分开计。
@@ -5957,7 +5883,12 @@ async function loadAroundMessage(
 
   // 切片在跳转期间被 rewind / clear / purge 重置:整个跳转作废。绝不能再 merge
   // 之前抓到的 around 行,那会把刚被移除的消息重新塞回窗口。
-  if (outcome === 'cancelled') return null;
+  //
+  // outcome 只反映 backfill **返回那一刻**的代际。它 return 之后、本函数从 await 恢复
+  // 之前还有一个 microtask 间隙:重置的延续可能正好插在这里,于是 backfill 用旧代际算出
+  // 的 covered / exhausted 仍是"有效"的,而切片已经清空。所以 merge 前再校验一次
+  // (#676 review)。
+  if (outcome === 'cancelled' || (_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart) return null;
 
   commitAroundWindow(sessionId, rows, mapped, outcome);
 
@@ -5988,8 +5919,10 @@ async function loadAroundMessageClientId(
     epochAtStart,
   );
 
-  // 切片被重置 → 跳转作废,不 merge 旧的 around 行(见 loadAroundMessage 同款注释)。
-  if (outcome === 'cancelled') return null;
+  // 切片被重置 → 跳转作废,不 merge 旧的 around 行。merge 前再校验一次 epoch:outcome
+  // 只反映 backfill 返回那一刻的代际,它 return 之后到这里恢复之间还有一个 microtask
+  // 间隙(见 loadAroundMessage 同款注释)。
+  if (outcome === 'cancelled' || (_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart) return null;
 
   commitAroundWindow(sessionId, rows, mapped, outcome);
 

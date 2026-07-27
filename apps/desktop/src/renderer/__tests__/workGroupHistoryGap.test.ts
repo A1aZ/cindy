@@ -306,6 +306,35 @@ describe('历史窗口空洞 — 长 Agent/Task', () => {
   });
 });
 
+// ── Scenario A8:段内切段也要用上一条调用的结束时间(review #676 copilot) ───────
+
+describe('历史窗口空洞 — 段内连续长任务', () => {
+  it('A8. 上一条工具跑了 40 分钟、结果刚回就接下一次调用时,段不被切碎', () => {
+    // 段内切段的锚点必须是上一条调用的 end = max(tool_use, tool_result)。用 start 的话
+    // 「跑了 40 分钟的调用 + 紧接着的下一次调用」会被误判成空洞而切段。
+    const messages: ChatMessage[] = [
+      mkUser('u1', '2026-07-25T10:00:00.000Z', '连着跑两个长任务'),
+      mkTool('t1', '2026-07-25T10:00:10.000Z'),
+      // 40 分钟后结果才回来。
+      mkResult('r1', 'tu-t1', '2026-07-25T10:40:10.000Z'),
+      // 结果回来后 20 秒就发起下一次调用 —— 与「上一条的 end」很近,不该切段。
+      mkTool('t2', '2026-07-25T10:40:30.000Z'),
+      mkResult('r2', 'tu-t2', '2026-07-25T10:40:50.000Z'),
+      mkAssistant('a1', '2026-07-25T10:41:10.000Z', '两个都跑完了。'),
+    ];
+
+    const { items } = buildRenderItems(messages);
+    // 两次调用仍在同一段里。
+    const segments = items.filter((it) => it.type === 'tool_segment');
+    expect(segments).toHaveLength(1);
+    const seg = segments[0];
+    expect(seg.type === 'tool_segment' && seg.toolCalls.map((c) => c.clientId)).toEqual([
+      't1',
+      't2',
+    ]);
+  });
+});
+
 // ── Scenario B:正常连续 turn 不被误切 ───────────────────────────────────────
 
 describe('历史窗口空洞 — 正常 turn 不受影响', () => {

@@ -444,8 +444,11 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     expect(calls).toBeLessThanOrEqual(7);
   });
 
-  it('N. 密集的连续工具调用仍按段折算,不因逐行计数而过早耗尽预算', async () => {
-    // 防误伤：同一段内密集调用（间隔远小于阈值）应按 TOOL_ROWS_PER_ITEM 折算。
+  it('N. 任何 role 的行都按 1:1 计入预算,预算是渲染量的上界', async () => {
+    // 折算模型已放弃（见 JUMP_BACKFILL_MAX_ITEMS 注释）：#676 的 review 连着四轮各挖出
+    // 一种被低估的 item 展开路径（agent_task / 空洞切段 / ghost_card / agent_plan /
+    // tool_media），每次都是「某行额外产生 item」，而折算恰恰假设「多行合成一个 item」。
+    // 现在一律按行数当上界——密集连续的工具调用也不再享受折算。
     const target = serverMessage({
       id: 'dense',
       clientId: 'dense',
@@ -455,7 +458,7 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     let page = 0;
     vi.mocked(listMessagesFor).mockImplementation(async () => {
       const base = page++;
-      // 每条相隔 10 秒 → 同段，100 行 ≈ 25 个 item。
+      // 每条相隔 10 秒 → 真实渲染里会合成同一段，但预算按行数保守计。
       return Array.from({ length: 100 }, (_, i) =>
         serverMessage({
           id: `dense-${base}-${i}`,
@@ -471,8 +474,10 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
 
     await makerChatStore.loadAroundMessageClientId(SID, 'dense', { radius: 60 });
 
-    // 25 个 item/页、600 预算 → 该翻到 20+ 页（受 80 次请求上限约束），远多于 7。
-    expect(vi.mocked(listMessagesFor).mock.calls.length).toBeGreaterThan(10);
+    // 600 行预算 ÷ 每页 100 行 = 6 页停手（折算模型下会翻到 24 页）。
+    const calls = vi.mocked(listMessagesFor).mock.calls.length;
+    expect(calls).toBeGreaterThan(0);
+    expect(calls).toBeLessThanOrEqual(7);
   });
 
   it('O. edit-last 截断与 /clear 都自己释放分页锁,不把翻页永久卡死', async () => {
@@ -582,6 +587,64 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
 
     releasePage([]);
     await flushMicrotasks();
+  });
+
+  it('R. 补齐 await 期间被重置,跳转作废(命中 backfill 内部的代际检查)', async () => {
+    // review #676（codex）指出的是更窄的一层：outcome 只反映 backfill 返回那一刻的代际，
+    // 它 return 之后、调用方从 await 恢复之前还有一个 microtask 间隙。两个入口都在 merge
+    // 前补了一次 epoch 复检作为纵深防御，但那一跳无法从外部稳定构造（purge 的 microtask
+    // 必然排在 backfill 自己的 await 之后，先被内部检查拦住）——本用例覆盖的是内部这层，
+    // merge 前的复检只有代码注释与它对应。
+    const target = serverMessage({
+      id: 'gap-victim',
+      clientId: 'gap-victim',
+      createdAt: '2026-07-20T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    // 第一页就命中目标 → backfill 返回 covered；但在它 return 之后立刻 purge。
+    vi.mocked(listMessagesFor).mockImplementationOnce(async () => {
+      void Promise.resolve().then(() => makerChatStore.purgeSession(SID));
+      return [target];
+    });
+
+    const result = await makerChatStore.loadAroundMessageClientId(SID, 'gap-victim', {
+      radius: 60,
+    });
+
+    expect(result).toBeNull();
+    expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).not.toContain(
+      'gap-victim',
+    );
+  });
+
+  it('S. 删除推送只涉及窗口外的行时也要放锁,不把翻页永久卡死', async () => {
+    // review #676（codex）：removeMessagesByClientIds 已经 bump 了 epoch，但本地没有任何
+    // 行要移除时会走 unchanged-state 早退，绕过清锁；被作废的 loadOlderMessages 又刻意
+    // 不清锁（避免误解锁新代际）→ 该会话的翻页与跳转永久阻塞。
+    const seeded = fullPageNewestFirst();
+    const inWindow = seeded[50];
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([inWindow]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce(seeded);
+    await makerChatStore.loadAroundMessageClientId(SID, inWindow.clientId, { radius: 60 });
+
+    let releasePage: (rows: Message[]) => void = () => {};
+    vi.mocked(listMessagesFor).mockImplementationOnce(
+      () =>
+        new Promise<Message[]>((resolve) => {
+          releasePage = resolve;
+        }),
+    );
+    makerChatStore.loadOlderMessages(SID);
+    await flushMicrotasks();
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(true);
+
+    // 删的是本窗口之外的行（另一个窗口/设备删的），本地一行都不匹配。
+    makerChatStore.removeMessagesByClientIds(SID, ['not-in-this-window']);
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(false);
+
+    releasePage([]);
+    await flushMicrotasks();
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(false);
   });
 
   it('F. 让位时不释放别人的分页锁', async () => {

@@ -1134,14 +1134,25 @@ export function buildRenderItems(
         // tool call 会被合进同一个 tool_segment,段首尾时间差直接成了跨空洞的假时长,
         // 而 groupWorkRuns 的空洞守卫只看段首时间、发现不了段内部的跳变。所以在段内
         // 也按同一阈值切开,让「已工作 Xs」的时长和分组都落在真实连续的动作上。
+        //
+        // 锚点用上一条调用的**结束**时间:max(它的 tool_use.createdAt, 它的
+        // tool_result.createdAt)。用 start 会把"上一条工具跑了半小时以上、结果刚回来就
+        // 紧接着下一次调用"的连续长任务误判成空洞、把段切碎(#676 review)。
         const prevCall = pendingToolCalls[pendingToolCalls.length - 1];
         if (prevCall) {
-          const prevCallMs = messageTs(prevCall);
+          const prevStartMs = messageTs(prevCall);
+          const prevResultMs = pendingResultTsMap.get(prevCall.clientId) ?? null;
+          const prevEndMs =
+            prevStartMs === null
+              ? prevResultMs
+              : prevResultMs === null
+                ? prevStartMs
+                : Math.max(prevStartMs, prevResultMs);
           const currentCallMs = messageTs(msg);
           if (
-            prevCallMs !== null &&
+            prevEndMs !== null &&
             currentCallMs !== null &&
-            currentCallMs - prevCallMs > HISTORY_GAP_SPLIT_MS
+            currentCallMs - prevEndMs > HISTORY_GAP_SPLIT_MS
           ) {
             flushSegment();
           }

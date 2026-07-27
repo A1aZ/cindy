@@ -99,29 +99,37 @@ export async function upsertRecentWorkdir(
       });
     // LRU 驱逐:超过 MAX_RECENT_WORKDIRS 的行按 lastUsedAt 从旧到新淘汰。
     //
-    // 全部用 query builder 表达,不走 raw SQL —— 两个原因:
-    //  1. pin(见上):builder 走的是已捕获的 db,不会二次解析 DbClient。
-    //  2. main 侧的 drizzle 是 createDrizzleProxy 的代理,只把 **query builder** 的终结
-    //     方法(all / get / run / values)转发给 worker RPC。在 db 对象上直接跑 raw SQL
-    //     (db.run(sql`...`))不经过 builder,会落进代理内部那个只会抛错的
-    //     fakeSqliteClient.prepare(),被 drizzle 包成 "Failed to run the query '...'",再被
-    //     下面 fire-and-forget 的 catch 吞成一条 warn —— 驱逐 100% 静默失败,表一直涨过
-    //     上限(本 PR 修的就是这个,回归见 __tests__/recentWorkdirsLru)。
+    // 必须是**一条** DELETE,待删集合由子查询在同一条语句里求值 —— 不能先 SELECT 出
+    // 快照再按快照 DELETE。session 创建路径以 void 调用本 helper(fire-and-forget),两个
+    // upsert 会交错:若分两步,A 选中最旧的 X 之后 B 刷新了 X,A 仍按旧快照删掉 X ——
+    // 用户刚用过的目录反而从「最近」里消失,交错还会让列表少于上限。单语句在 SQLite 里
+    // 原子求值,最坏只是驱逐重复执行(幂等,结果一致)。
     //
-    // 不用 `LIMIT -1 OFFSET n` 子查询挑待删行:drizzle 会丢掉 limit(-1) 只留 offset,
-    // SQLite 报 `near "offset": syntax error`。这张表上限十几行,整表取回在 JS 里切更
-    // 直白,也顺带避开了拼 SQL。
-    const ordered = await db
+    // 用 query builder 而不是 client.exec 拼 raw SQL,两个原因:
+    //  1. pin(见上):builder 走的是已捕获的 db handle,不会二次解析 DbClient。
+    //  2. main 侧的 drizzle 是 createDrizzleProxy 的代理,只把 **query builder** 的终结方法
+    //     (all / get / run / values)转发给 worker RPC。在 db 对象上直接跑 raw SQL
+    //     (db.run(sql`...`))不经过 builder,会落进代理内部那个只会抛错的
+    //     fakeSqliteClient.prepare(),被 fire-and-forget 的 catch 吞成一条 warn —— 驱逐
+    //     100% 静默失败(本 PR 修的就是这个)。子查询的 limit / offset 是 builder 内部的
+    //     SQL 构造,不是 db 级 raw SQL,照样走代理。
+    //
+    // SQLite 的 OFFSET 必须跟着 LIMIT,而这里要的是"从第 n+1 行起全部":
+    //  - 不能传 -1(SQLite 表示无上限的写法):drizzle 会把数字 -1 丢掉只留 offset,生成
+    //    `... offset ?`,SQLite 直接报 `near "offset": syntax error`;
+    //  - 也不能传 sql`-1` 绕过:limit() 的类型只收 number | Placeholder,typecheck 不过。
+    // 所以用 MAX_SAFE_INTEGER 表达"无上限"(表上限十几行,永远取不满)。
+    //
+    // 一次删掉所有超出上限的行,不是每次删 1 行:稳态下单条 INSERT 最多新增 1 条,自然
+    // 也只删 1 条;而驱逐曾长期静默失败留下的脏数据(本机库涨到 18 行)在下一次 upsert
+    // 就一次清到上限,不用等多轮。
+    const doomed = db
       .select({ path: recentWorkdirs.path })
       .from(recentWorkdirs)
-      .orderBy(desc(recentWorkdirs.lastUsedAt));
-    const stale = ordered.slice(MAX_RECENT_WORKDIRS).map((row) => row.path);
-    if (stale.length > 0) {
-      // 一次删掉所有超出上限的行,不是每次删 1 行:稳态下单条 INSERT 最多新增 1 条,
-      // 自然也只删 1 条;而驱逐曾长期静默失败留下的脏数据(本机库涨到 18 行)在下一次
-      // upsert 就一次清到上限,不用等多轮。
-      await db.delete(recentWorkdirs).where(inArray(recentWorkdirs.path, stale));
-    }
+      .orderBy(desc(recentWorkdirs.lastUsedAt))
+      .limit(Number.MAX_SAFE_INTEGER)
+      .offset(MAX_RECENT_WORKDIRS);
+    await db.delete(recentWorkdirs).where(inArray(recentWorkdirs.path, doomed));
   } catch (err) {
     log.warn('[localDb] upsertRecentWorkdir failed', {
       path: normalized,

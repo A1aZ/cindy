@@ -23,6 +23,8 @@ const h = vi.hoisted(() => ({
   sqlite: null as InstanceType<typeof import('better-sqlite3')> | null,
   client: null as { drizzle: unknown; exec: unknown } | null,
   warns: [] as unknown[],
+  /** 本次 upsert 实际发给 backend 的 SQL,用于断言驱逐没退化成 SELECT + DELETE 两步。 */
+  statements: [] as string[],
 }));
 
 vi.mock('electron', () => ({
@@ -56,6 +58,7 @@ function createTransport(): DbTransport {
   return {
     send: async (op: string, args?: unknown) => {
       const { sql: text, params = [] } = (args ?? {}) as { sql: string; params?: unknown[] };
+      h.statements.push(text.replace(/\s+/g, ' ').trim());
       const stmt = h.sqlite!.prepare(text);
       if (op === 'query') return stmt.all(...(params as never[]));
       if (op === 'queryOne') return stmt.get(...(params as never[]));
@@ -88,6 +91,7 @@ beforeEach(() => {
   `);
   h.sqlite = sqlite;
   h.warns = [];
+  h.statements = [];
 
   const transport = createTransport();
   h.client = {
@@ -132,10 +136,27 @@ describe('upsertRecentWorkdir LRU 驱逐', () => {
 
     await upsertRecentWorkdir('/Users/dash/Code/fresh', 1_700_000_000_000);
 
-    // `LIMIT -1 OFFSET n` 删的是第 n+1 行起的全部行 → 一次到位。
+    // 子查询里的 `LIMIT -1 OFFSET n` 选中第 n+1 行起的全部行 → 一条 DELETE 一次到位。
     const kept = rows();
     expect(kept).toHaveLength(MAX_RECENT_WORKDIRS);
     expect(kept[0]?.path).toBe('/Users/dash/Code/fresh');
+    expect(h.warns).toEqual([]);
+  });
+
+  it('驱逐是单条 DELETE(子查询挑待删行),不退化成 SELECT 快照 + DELETE 两步', async () => {
+    // 分两步时,fire-and-forget 的并发 upsert 会在 SELECT 与 DELETE 之间刷新被选中的行,
+    // 前一个调用仍按旧快照把「刚用过的目录」删掉。单语句由 SQLite 原子求值,没有这个窗口。
+    for (let i = 0; i < MAX_RECENT_WORKDIRS + 2; i++) {
+      await upsertRecentWorkdir(`/Users/dash/Code/proj-${i}`, 1_700_000_000_000 + i * 1_000);
+    }
+
+    const sent = h.statements.map((s) => s.toLowerCase());
+    // 驱逐不得单独发 SELECT 去取快照。
+    expect(sent.filter((s) => s.startsWith('select'))).toEqual([]);
+    const deletes = sent.filter((s) => s.startsWith('delete'));
+    expect(deletes.length).toBeGreaterThan(0);
+    // 每条 DELETE 都必须自带子查询,而不是 `in (?, ?, …)` 这种按快照展开的形式。
+    for (const stmt of deletes) expect(stmt).toMatch(/in \(select /);
     expect(h.warns).toEqual([]);
   });
 

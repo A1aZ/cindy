@@ -243,3 +243,76 @@ describe('登出清理与分区切换的时序', () => {
     expect([...storage.keys()].filter((key) => key.includes('mobileVoiceDictionary'))).toEqual([]);
   });
 });
+
+describe('账号切走之后落地的旧请求', () => {
+  it('写进自己那个分区,不落到新账号的键上', async () => {
+    setMobileVoiceDictionaryAccountScope('user-a');
+    let release: (value: MobileVoiceDictionarySnapshotResult) => void = () => {};
+    const pending = new Promise<MobileVoiceDictionarySnapshotResult>((resolve) => {
+      release = resolve;
+    });
+    const inFlight = refreshMobileVoiceDictionary(HOST, () => pending);
+
+    // 请求还在飞,用户切到了另一个账号。
+    setMobileVoiceDictionaryAccountScope('user-b');
+    release({ ok: true, entries: [{ text: '账号A的词' }] });
+    await inFlight;
+
+    // 不该出现在 user-b 的分区里。
+    expect([...storage.keys()].some((key) => key.includes('user-b'))).toBe(false);
+    expect(readCachedMobileVoiceDictionary(HOST)).toEqual([]);
+  });
+
+  it('过期任务的补偿删除不会删掉新账号已经提交的快照', async () => {
+    setMobileVoiceDictionaryAccountScope('user-a');
+    let release: (value: MobileVoiceDictionarySnapshotResult) => void = () => {};
+    const pending = new Promise<MobileVoiceDictionarySnapshotResult>((resolve) => {
+      release = resolve;
+    });
+    const stale = refreshMobileVoiceDictionary(HOST, () => pending);
+
+    // 切到 user-b 并且它已经为同一台电脑写好了快照。
+    setMobileVoiceDictionaryAccountScope('user-b');
+    await refreshMobileVoiceDictionary(HOST, async () => ({
+      ok: true,
+      entries: [{ text: '账号B的词' }],
+    }));
+    expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('账号B的词');
+
+    // user-a 的请求现在才落地,它的自我回收只能删自己那份。
+    release({ ok: true, entries: [{ text: '账号A的词' }] });
+    await stale;
+
+    expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('账号B的词');
+    // 盘上也还在 —— 否则重启或内存失效后 user-b 的词典就空了。
+    __resetMobileVoiceDictionaryCacheForTests();
+    setMobileVoiceDictionaryAccountScope('user-b');
+    await hydrateMobileVoiceDictionary(HOST);
+    expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('账号B的词');
+  });
+});
+
+describe('在途请求的去重范围', () => {
+  it('新账号的刷新不会等在上一个账号那个必被丢弃的请求上', async () => {
+    setMobileVoiceDictionaryAccountScope('user-a');
+    let release: (value: MobileVoiceDictionarySnapshotResult) => void = () => {};
+    const pending = new Promise<MobileVoiceDictionarySnapshotResult>((resolve) => {
+      release = resolve;
+    });
+    const stale = refreshMobileVoiceDictionary(HOST, () => pending);
+    // 让 user-a 的任务真正登记进在途表(它挂在 fetchSnapshot 上)。
+    await Promise.resolve();
+
+    setMobileVoiceDictionaryAccountScope('user-b');
+    // 这一步以前会死等 user-a 的请求 —— 而那份响应按代际检查注定被丢弃。
+    await refreshMobileVoiceDictionary(HOST, async () => ({
+      ok: true,
+      entries: [{ text: '账号B的词' }],
+    }));
+    expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('账号B的词');
+
+    release({ ok: true, entries: [{ text: '账号A的词' }] });
+    await stale;
+    expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('账号B的词');
+  });
+});

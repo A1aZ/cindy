@@ -70,6 +70,11 @@ type CachedDictionary = {
 };
 
 const memoryCache = new Map<string, CachedDictionary>();
+/**
+ * 在途请求。键带账号分区 —— 只按 host 去重的话,账号切走之后新账号的刷新会拿到
+ * 上一个账号那个还挂着的请求并一直等它,而那个请求的结果按代际检查又必然被丢弃:
+ * 新账号什么也拿不到,调用方却以为刷新过了。
+ */
 const inFlight = new Map<string, Promise<void>>();
 /**
  * 缓存代际。账号边界清理时递增,在途请求据此判断自己是否已经过期。
@@ -117,8 +122,9 @@ export async function hydrateMobileVoiceDictionary(hostDeviceId: string): Promis
   // 磁盘读同样要受代际保护:登出可能恰好发生在 getItem 在途时,读回来再写内存
   // 就把上个账号的词典复活了。
   const epoch = cacheEpoch;
+  const scope = accountScope;
   try {
-    const raw = await AsyncStorage.getItem(storageKeyForHost(host));
+    const raw = await AsyncStorage.getItem(storageKeyForHost(host, scope));
     if (!raw) return;
     if (epoch !== cacheEpoch) return;
     const parsed = JSON.parse(raw) as Partial<CachedDictionary>;
@@ -150,15 +156,21 @@ export async function refreshMobileVoiceDictionary(
 ): Promise<void> {
   const host = normalizeHostDeviceId(hostDeviceId);
   if (!host) return;
-  // epoch 必须在第一个 await 之前取:清理可能恰好发生在下面任何一个挂起点上,
-  // 取晚了就会读到清理后的新值,于是这份属于上个账号的响应被判成"仍然有效"。
+  // epoch 与分区都必须在第一个 await 之前取。
+  //
+  // epoch 取晚了会读到清理后的新值,于是这份属于上个账号的响应被判成"仍然有效"。
+  // 分区取晚了更糟:下面每一次算 key 都发生在若干个挂起点之后,拿到的是**当前**
+  // 分区 —— 账号在这期间切走的话,旧账号的响应会写进新账号的分区,而末尾那次
+  // 补偿删除又会把新账号刚写的快照删掉。两者都只能在入口锁定。
   const epoch = cacheEpoch;
+  const scope = accountScope;
   await hydrateMobileVoiceDictionary(host);
 
   const cached = memoryCache.get(host);
   if (!options?.force && cached && Date.now() - cached.fetchedAt < REFETCH_INTERVAL_MS) return;
 
-  const existing = inFlight.get(host);
+  const inFlightKey = `${scope}\u0000${host}`;
+  const existing = inFlight.get(inFlightKey);
   if (existing) return existing;
 
   const task = (async () => {
@@ -184,20 +196,23 @@ export async function refreshMobileVoiceDictionary(
       } catch {
         return;
       }
-      await AsyncStorage.setItem(storageKeyForHost(host), JSON.stringify(next)).catch(() => undefined);
+      await AsyncStorage.setItem(storageKeyForHost(host, scope), JSON.stringify(next)).catch(
+        () => undefined,
+      );
       // 落盘与索引写入都是异步的,清理完全可能发生在这中间 —— 那样这份属于上个
       // 账号的快照会在删除之后重新出现在盘上。写完再确认一次代际,过期就自己清掉。
       if (epoch !== cacheEpoch) {
         memoryCache.delete(host);
-        await AsyncStorage.removeItem(storageKeyForHost(host)).catch(() => undefined);
+        // 只删自己刚写的那一份(按入口锁定的分区),不碰新账号已经提交的快照。
+        await AsyncStorage.removeItem(storageKeyForHost(host, scope)).catch(() => undefined);
       }
     } catch {
       // 桌面离线、老被控端不识别该 channel、隧道抖动 —— 一律沿用现有缓存。
     } finally {
-      inFlight.delete(host);
+      inFlight.delete(inFlightKey);
     }
   })();
-  inFlight.set(host, task);
+  inFlight.set(inFlightKey, task);
   return task;
 }
 

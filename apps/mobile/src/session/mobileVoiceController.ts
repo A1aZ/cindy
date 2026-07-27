@@ -386,12 +386,13 @@ export function createMobileVoiceControllerSession(
           && range.segmentIds.every((id, index) => voiceInsertionSegmentIds[index] === id);
         return sameRange && !isInsertionIntact(readCurrentDraft(), voiceInsertion);
       },
-      onError(message, code: VoiceInputErrorCode | undefined) {
-        const localizedMessage = code === 'empty_transcript'
+      onError(message, code: VoiceInputErrorCode | undefined, details) {
+        const cause = code === 'empty_transcript'
           ? mobileVoiceEmptyTranscriptError()
-          : code === 'transcript_kept'
-            ? mobileVoiceTranscriptKeptError()
-            : redactMobileVoiceCredentialText(message, options.credential);
+          : redactMobileVoiceCredentialText(message, options.credential);
+        const localizedMessage = details?.transcriptKept
+          ? mobileVoiceTranscriptKeptError(cause)
+          : cause;
         controllerError = new Error(localizedMessage);
         options.onError?.(localizedMessage);
       },

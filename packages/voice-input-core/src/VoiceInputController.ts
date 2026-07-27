@@ -225,23 +225,25 @@ export class VoiceInputController {
     }
 
     const stable = await this.waitForStable(this.stableWaitMs);
-
-    // A failure that lands while stop() is in flight already ran salvage and
-    // moved the run to its terminal state. Providers can hide such a failure
-    // from this path: flushAudio() awaits an in-flight recover() but swallows
-    // its rejection, so the await above can resolve normally on a run that
-    // fail() has already finished. Continuing would submit the same transcript
-    // a second time and overwrite 'error' with 'refining'/'done'.
-    if (this.leftSubmittingState()) {
-      this.discardRefinement(runId, optimisticRefinement, 'run_failed');
-      await this.asr.stop();
-      return;
-    }
-
     const text = normalizeSubmittedText(stable || this.latestStable || this.latestPartial);
     const source = stable || this.latestStable ? 'stable' : 'partial';
 
     await this.asr.stop();
+
+    // Placed after EVERY await in this method, because a failure can land during
+    // any of them and fail() already salvaged the transcript and set the terminal
+    // state. Providers hide such a failure from this path: both flushAudio() and
+    // stop() await an in-flight recover() but swallow its rejection, so those
+    // awaits resolve normally on a run that has already failed. Continuing would
+    // submit the same transcript twice and overwrite 'error' with
+    // 'refining'/'done', hiding the failure from the user entirely.
+    // transcriptEmitted is checked too: it is the direct invariant ("this run has
+    // already given the host its text"), so it holds even if a future failure
+    // path leaves the state alone.
+    if (this.leftSubmittingState() || this.transcriptEmitted) {
+      this.discardRefinement(runId, optimisticRefinement, 'run_failed');
+      return;
+    }
 
     if (!text) {
       this.discardRefinement(runId, optimisticRefinement, 'no_submitted_text');
@@ -609,12 +611,13 @@ export class VoiceInputController {
     this.pendingStableResolvers.splice(0).forEach((resolve) => resolve(undefined));
     // Salvage before the terminal state: hosts tear the draft down when they see
     // 'error', so the submitted text has to reach them first.
-    this.salvageTranscript(message);
+    this.salvageTranscript();
     this.setState('error', 'failed');
-    // transcriptEmitted covers both salvage and a stop() that already submitted
-    // before the failure landed (e.g. a recovery rejecting during refinement) —
-    // in both cases the user still has their text and should be told so.
-    this.callbacks.onError?.(message, this.transcriptEmitted ? 'transcript_kept' : code);
+    // Retention travels as a detail, never as the code: `message` may be the
+    // only thing telling the user their credential expired or their quota ran
+    // out. transcriptEmitted covers both salvage and a stop() that submitted
+    // before the failure landed (a recovery rejecting during refinement).
+    this.callbacks.onError?.(message, code, { transcriptKept: this.transcriptEmitted });
   }
 
   /**
@@ -624,9 +627,9 @@ export class VoiceInputController {
    * said so far: partials only ever existed as a host-side draft, and fail()
    * never offered them to onSubmitted. The transcript is worth more than the
    * dead session, so commit it raw — refinement needs the same network that
-   * just failed — and let the host report the failure as 'transcript_kept'.
+   * just failed — and let the host report the failure with transcriptKept set.
    */
-  private salvageTranscript(failureMessage: string): boolean {
+  private salvageTranscript(): boolean {
     if (this.transcriptEmitted) return false;
     const text = normalizeSubmittedText(this.latestTranscript);
     if (!text) return false;
@@ -651,7 +654,6 @@ export class VoiceInputController {
       at: Date.now(),
       text,
       source: this.latestTranscriptSource,
-      failureMessage,
     });
     return true;
   }

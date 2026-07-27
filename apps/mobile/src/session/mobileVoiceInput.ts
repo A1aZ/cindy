@@ -24,9 +24,10 @@ export const MOBILE_MAX_VOICE_AUDIO_BYTES = 64 * 1024 * 1024;
 export function mobileVoiceEmptyTranscriptError(): string {
   return i18n.t('composer.voice.emptyTranscript');
 }
-// 连接断了但已识别的文字已经落进输入框:提示要说清「没丢」,否则用户会以为白说了。
-export function mobileVoiceTranscriptKeptError(): string {
-  return i18n.t('composer.voice.transcriptKept');
+// 失败但已识别的文字已经落进输入框:在原始失败原因后面补一句「没丢」。原因不能被
+// 替换掉——凭证过期、配额用尽和断网需要用户做的事完全不同。
+export function mobileVoiceTranscriptKeptError(message: string): string {
+  return i18n.t('composer.voice.transcriptKept', { message });
 }
 export function mobileVoiceMicPermissionError(): string {
   return i18n.t('composer.voice.micPermission');

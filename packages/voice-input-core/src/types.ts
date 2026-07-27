@@ -8,13 +8,20 @@ export type VoiceInputState =
 
 export type VoiceInputTerminalOutcome = 'success' | 'no_speech' | 'failed' | 'cancelled';
 
+export type VoiceInputErrorCode = 'empty_transcript';
+
 /**
- * `transcript_kept` means the run failed (transport drop, flush failure, dead
- * recovery) but the text recognized before the failure was still handed to the
- * host through onSubmitted. Hosts should tell the user the session broke
- * *and* that nothing was lost, rather than showing a bare failure.
+ * Side facts about a failure, kept separate from its classification.
+ *
+ * `transcriptKept` means the text recognized before the failure still reached
+ * the host through onSubmitted. It is deliberately NOT an error code: the run
+ * can fail from an expired credential, an exhausted quota or a dropped socket,
+ * and the host must keep telling the user that actual cause — the retention
+ * note belongs alongside it, not instead of it.
  */
-export type VoiceInputErrorCode = 'empty_transcript' | 'transcript_kept';
+export type VoiceInputErrorDetails = {
+  transcriptKept: boolean;
+};
 
 export type AsrEvent =
   | { type: 'connected'; at: number }
@@ -204,14 +211,10 @@ export type VoiceTimelineEvent =
   | { type: 'asr_recovery_succeeded'; runId: string; at: number; elapsedMs: number }
   | { type: 'asr_recovery_failed'; runId: string; at: number; elapsedMs: number; reason: string }
   | { type: 'asr_stop_error_ignored'; runId: string; at: number; message: string; textChars: number }
-  | {
-      type: 'transcript_salvaged';
-      runId: string;
-      at: number;
-      text: string;
-      source: 'stable' | 'partial';
-      failureMessage: string;
-    }
+  // No failure message here: fail() records the 'error' event with the same
+  // runId immediately before salvaging, so the cause is already in the timeline
+  // — and unlike `text`, hosts don't redact this event's other fields.
+  | { type: 'transcript_salvaged'; runId: string; at: number; text: string; source: 'stable' | 'partial' }
   | { type: 'error'; runId: string; at: number; message: string };
 
 export type VoiceInputCallbacks = {
@@ -221,7 +224,7 @@ export type VoiceInputCallbacks = {
   isRangeUserTouched?: (range: EditableRange) => boolean;
   onRefinementPreview?: (text: string, segment: SpeechSegment, range: EditableRange) => void;
   applyRefinement?: (range: EditableRange, refinedText: string) => boolean;
-  onError?: (message: string, code?: VoiceInputErrorCode) => void;
+  onError?: (message: string, code?: VoiceInputErrorCode, details?: VoiceInputErrorDetails) => void;
 };
 
 export type RefinementTokenUsage = {
@@ -240,4 +243,4 @@ export type VoiceInputRendererEvent =
   | { type: 'refined'; runId: string; text: string; segment: SpeechSegment; range: EditableRange }
   | { type: 'usage'; runId: string; refinement: RefinementTokenUsage }
   | { type: 'timeline'; runId: string; event: VoiceTimelineEvent }
-  | { type: 'error'; runId: string; message: string; code?: VoiceInputErrorCode };
+  | { type: 'error'; runId: string; message: string; code?: VoiceInputErrorCode; transcriptKept?: boolean };

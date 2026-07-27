@@ -368,12 +368,16 @@ export function useVoiceInput(
     }, INLINE_ERROR_AUTO_DISMISS_MS);
   }, [clearInlineErrorDismissTimer]);
 
-  const formatVoiceInputError = useCallback((message: string, code?: VoiceInputErrorCode): string => {
-    if (code === 'empty_transcript') return t('voiceInputOverlay.emptyTranscript');
-    // The run failed, but the controller already handed the recognized text to
-    // the composer — say that, or the user assumes the words are gone.
-    if (code === 'transcript_kept') return t('voiceInputOverlay.transcriptKept');
-    return message;
+  const formatVoiceInputError = useCallback((
+    message: string,
+    code?: VoiceInputErrorCode,
+    transcriptKept?: boolean,
+  ): string => {
+    const cause = code === 'empty_transcript' ? t('voiceInputOverlay.emptyTranscript') : message;
+    // Retention is appended to the cause, never substituted for it: the user
+    // still needs to know whether this was a dropped socket or an expired
+    // credential, and they also need to know their words are in the composer.
+    return transcriptKept ? t('voiceInputOverlay.transcriptKept', { message: cause }) : cause;
   }, [t]);
 
   const formatVoiceInputStartError = useCallback((message: string): string => {
@@ -1005,7 +1009,7 @@ export function useVoiceInput(
         case 'error': {
           log.warn('voice input error:', event.message);
           terminalOutcomeRef.current = 'failed';
-          const formattedMessage = formatVoiceInputError(event.message, event.code);
+          const formattedMessage = formatVoiceInputError(event.message, event.code, event.transcriptKept);
           promptCodexSessionExpired(formattedMessage);
           commitUsageStats();
           void (async () => {

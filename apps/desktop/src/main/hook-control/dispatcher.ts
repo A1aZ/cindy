@@ -11,11 +11,10 @@
  *      - 带 sessionId(接管): session 必须存在且其工作目录落在本连接注册的
  *        别名路径内(白名单不因接管放松), 通过后把 externalKey 重绑到它;
  *      - 不带(默认): 别名解析(映射即白名单)-> binding 查 externalKey ->
- *        复用(且重校验白名单)或新建并落绑定; 白名单重校验失败时看绑定上的
- *        目录快照与授权来源: 目录相对快照变过 = 用户在桌面端把对话移出了
- *        映射(目录是本地用户亲手选的, 不是远端指定的)-> 跟随并记 local-move;
- *        目录没再变但已记过 local-move -> 继续认这份授权(否则跟随只生效一
- *        次); 两者都不满足 = 映射被改/删的撤权语义 -> 丢绑定重建;
+ *        复用(且重校验白名单)或新建并落绑定; 白名单重校验失败时只认绑定上
+ *        **已登记**的本地移动授权(authority=local-move 且目录仍是登记时那个,
+ *        登记入口 hook-control/sessionMoves.ts)-> 跟随, 并在渠道里说明一次;
+ *        没有该授权 = 映射被改/删的撤权语义 -> 丢绑定重建;
  *   3. 排队: 目标 session 正在跑 turn 时 FIFO 排队, ack 回 queued + 位置;
  *      turn 收口后自动 drain;
  *   4. 回推: turn.end 经当前连接发送; 连接不在线时缓存, 重连(onConnected)
@@ -592,13 +591,10 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       }
       // 接管路径刚校验过白名单, 授权来源恒为 workspace(远端不能凭接管把会话
       // 带出映射 —— 越界的 sessionId 在上面就被 workspace_not_allowed 打回)
-      bindings.set(
-        connectionId,
-        payload.externalKey,
-        payload.sessionId,
-        info.workingDir,
-        'workspace',
-      );
+      bindings.set(connectionId, payload.externalKey, payload.sessionId, {
+        workingDir: info.workingDir,
+        authority: 'workspace',
+      });
       return {
         run: {
           sessionId: payload.sessionId,
@@ -644,7 +640,11 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       authority: HookBindingAuthority | null,
     ): void => {
       if (!legacyBound || !legacyNamespace) return;
-      bindings.set(connectionId, payload.externalKey, legacyBound, workingDir, authority);
+      bindings.set(connectionId, payload.externalKey, legacyBound, {
+        workingDir,
+        authority,
+        noticePending: false,
+      });
       bindings.remove(legacyNamespace, payload.externalKey);
     };
     if (bound) {
@@ -683,42 +683,47 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       const inAllowedRoot =
         info !== null && (isChat ? inDialogueRoot(info.workingDir) : inWhitelist(info.workingDir));
       const usable = info?.usable === true && info.workingDir !== null;
-      /** 会话目录与绑定快照一致 = 自上次确认以来它没被动过。 */
-      const sameAsSnapshot =
+      /**
+       * 映射外唯一的放行依据: 绑定上有 Main 侧登记的「本地移动授权」, 且会话
+       * 目录仍是登记时那个 —— 用户在桌面端把对话移到了映射外的项目, 跟随即可,
+       * 否则同一个 thread 每条消息都会重开新对话。
+       *
+       * 授权**不从 session 元数据反推**(不比对"目录跟上次不一样"就放行):
+       * sessions 行的 workingDir 经通用 patch IPC 就能改, 而 Renderer 按
+       * electron-security 规则属不可信环境 —— 那样等于给了一条绕过工作目录
+       * 映射的路子; 目录归一化之类的无关写入也会被误判成移动。登记入口见
+       * hook-control/sessionMoves.ts。
+       */
+      const locallyAuthorized =
+        !inAllowedRoot &&
         usable &&
-        boundEntry?.workingDir != null &&
+        boundEntry?.authority === 'local-move' &&
+        boundEntry.workingDir != null &&
         isSamePath(boundEntry.workingDir, info!.workingDir!);
-      /**
-       * 白名单外但**目录相对快照变过** = 用户在桌面端把这条会话「移动到项目」了。
-       * 目录是本地用户亲手选的(不是远端指定的 —— 远端只能在接管路径里选白名单
-       * 内的会话), 属本地授权, 跟随即可; 否则同一个 thread 每条消息都会重开新
-       * 会话, 破坏「同 key 同 session」。
-       */
-      const movedNow =
-        !inAllowedRoot && usable && boundEntry?.workingDir != null && !sameAsSnapshot;
-      /**
-       * 上一条消息已按本地移动放行过, 且此后目录没再变 —— 必须继续认这份授权。
-       * 少了这一条, 跟随只在移动后的第一条消息生效: 那次会把快照更新成新目录,
-       * 下一条消息 movedNow 就变回 false, 绑定又被丢掉(PR #653 review 实测)。
-       */
-      const stillLocallyAuthorized =
-        !inAllowedRoot && usable && boundEntry?.authority === 'local-move' && sameAsSnapshot;
-      // 目录没变、也没有本地移动授权而校验失败, 才是「工作目录映射被改/删」的
-      // 撤权语义, 仍丢绑定重建。老绑定没有快照时同样走保守侧(正常复用会回填)。
-      if (usable && (inAllowedRoot || movedNow || stillLocallyAuthorized)) {
+      // 既不在映射内、也没有登记过的移动授权 = 映射被改/删的撤权语义(或目录被
+      // 别的路径改过), 仍丢绑定重建。老绑定无授权记录时同样走保守侧。
+      if (usable && (inAllowedRoot || locallyAuthorized)) {
         const workingDir = info!.workingDir!;
         const authority: HookBindingAuthority = inAllowedRoot ? 'workspace' : 'local-move';
+        // 登记过的移动要在渠道里说明一次(说明完就清掉 pending)
+        const announceMove = locallyAuthorized && boundEntry?.noticePending === true;
         migrateLegacyBinding(workingDir, authority);
-        // 快照回填 / 跟随: 只在目录或授权来源变化时落盘, 常规复用不产生写。
+        // 快照回填 / 授权收敛: 只在目录、来源或待说明状态变化时落盘,
+        // 常规复用不产生写。
         if (
           namespacedEntry !== null &&
           (namespacedEntry.workingDir === null ||
             !isSamePath(namespacedEntry.workingDir, workingDir) ||
-            namespacedEntry.authority !== authority)
+            namespacedEntry.authority !== authority ||
+            namespacedEntry.noticePending)
         ) {
-          bindings.set(connectionId, payload.externalKey, bound, workingDir, authority);
+          bindings.set(connectionId, payload.externalKey, bound, {
+            workingDir,
+            authority,
+            noticePending: false,
+          });
         }
-        if (movedNow) {
+        if (announceMove) {
           log.info(
             `hook session ${bound} followed a desktop-side move to ${workingDir} (outside the workspace map)`,
           );
@@ -737,8 +742,8 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
             attachments: payload.attachments,
             origin,
           },
-          // 只在"这次刚发现被移动"时说明一次; 之后的消息静默沿用该授权
-          ...(movedNow ? { notice: NOTICE_SESSION_MOVED } : {}),
+          // 每次登记的移动只说明一次; 之后的消息静默沿用该授权
+          ...(announceMove ? { notice: NOTICE_SESSION_MOVED } : {}),
         };
       }
       bindings.remove(connectionId, payload.externalKey);
@@ -791,7 +796,10 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       }
     }
     // 新建会话跑在别名目录(或对话根)里, 授权随映射走
-    bindings.set(connectionId, payload.externalKey, sessionId, runDir, 'workspace');
+    bindings.set(connectionId, payload.externalKey, sessionId, {
+      workingDir: runDir,
+      authority: 'workspace',
+    });
     // 标题带 provider 名: externalKey 约定为 `<providerId>:<渠道内标识>`,
     // 取前缀作 provider 名(如 team-slack), 比连接名(desktop 侧命名)更能
     // 说明"这条会话是谁驱动的"; 无前缀(非常规 key)时回退连接名

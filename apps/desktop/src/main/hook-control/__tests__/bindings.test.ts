@@ -30,28 +30,49 @@ const makeStore = () => createHookBindingStore({ filePath: filePath(), log: noop
 describe('hook binding store', () => {
   it('落绑定时记下工作目录快照与授权来源, get / getEntry 都能读回', () => {
     const store = makeStore();
-    store.set('conn-1', 'slack:C1:1.1', 'sess-1', '/repos/demo', 'workspace');
+    store.set('conn-1', 'slack:C1:1.1', 'sess-1', {
+      workingDir: '/repos/demo',
+      authority: 'workspace',
+    });
 
     expect(store.get('conn-1', 'slack:C1:1.1')).toBe('sess-1');
     expect(store.getEntry('conn-1', 'slack:C1:1.1')).toEqual({
       sessionId: 'sess-1',
       workingDir: '/repos/demo',
       authority: 'workspace',
+      noticePending: false,
     });
     expect(store.getEntry('conn-1', 'missing')).toBeNull();
   });
 
-  it('local-move 授权跨实例持久化(重启后跟随不能退回撤权)', () => {
-    makeStore().set('conn-1', 'k', 'sess-1', '/repos/moved', 'local-move');
+  it('noteSessionMoved 登记授权, 跨命名空间反查且跨实例持久化', () => {
+    const store = makeStore();
+    store.set('conn-a', 'k1', 'sess-1', { workingDir: '/repos/demo', authority: 'workspace' });
+    store.set('conn-b', 'k2', 'sess-1', { workingDir: '/repos/demo', authority: 'workspace' });
+    store.set('conn-b', 'k3', 'other', { workingDir: '/repos/demo', authority: 'workspace' });
 
-    expect(makeStore().getEntry('conn-1', 'k')).toEqual({
-      sessionId: 'sess-1',
-      workingDir: '/repos/moved',
-      authority: 'local-move',
-    });
+    expect(store.noteSessionMoved('sess-1', '/repos/moved')).toBe(2);
+
+    // 重启(新实例)后仍认这份授权, 否则跟随会退回撤权
+    const reopened = makeStore();
+    for (const [ns, key] of [
+      ['conn-a', 'k1'],
+      ['conn-b', 'k2'],
+    ] as const) {
+      expect(reopened.getEntry(ns, key)).toEqual({
+        sessionId: 'sess-1',
+        workingDir: '/repos/moved',
+        authority: 'local-move',
+        noticePending: true,
+      });
+    }
+    // 别的会话的绑定不受影响
+    expect(reopened.getEntry('conn-b', 'k3')?.authority).toBe('workspace');
+    // 没有匹配绑定时是廉价 no-op
+    expect(reopened.noteSessionMoved('nobody', '/repos/moved')).toBe(0);
   });
 
-  it('未传目录 / 授权时不写这两个字段', () => {
+  it('未传 meta 时不写这些字段', () => {
     makeStore().set('conn-1', 'k', 'sess-2');
     const row = JSON.parse(fs.readFileSync(filePath(), 'utf-8')) as Record<
       string,
@@ -64,6 +85,7 @@ describe('hook binding store', () => {
       sessionId: 'sess-2',
       workingDir: null,
       authority: null,
+      noticePending: false,
     });
   });
 
@@ -80,6 +102,7 @@ describe('hook binding store', () => {
       sessionId: 'legacy',
       workingDir: null,
       authority: null,
+      noticePending: false,
     });
   });
 
@@ -104,7 +127,7 @@ describe('hook binding store', () => {
 
   it('remove 清掉整条绑定(含快照与授权)', () => {
     const store = makeStore();
-    store.set('conn-1', 'k', 'sess-1', '/repos/demo', 'local-move');
+    store.set('conn-1', 'k', 'sess-1', { workingDir: '/repos/demo', authority: 'local-move' });
     store.remove('conn-1', 'k');
 
     expect(store.getEntry('conn-1', 'k')).toBeNull();

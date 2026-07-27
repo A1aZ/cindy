@@ -31,6 +31,7 @@
  */
 
 import type { HlcTimestamp } from './hlc';
+import { isCanonicalHlc } from './hlc';
 
 /** 状态结构版本;不兼容改动 +1,收到更高版本的状态整份忽略而不是猜着合并。 */
 export const VOICE_DICTIONARY_SYNC_VERSION = 1;
@@ -187,18 +188,24 @@ export function isValidSyncState(raw: unknown): raw is VoiceDictionarySyncState 
     if (!isPlainRecord(record)) return false;
     const { incarnations, tombstones } = record as Partial<DictionaryRecord>;
     if (!isPlainRecord(incarnations) || !isPlainRecord(tombstones)) return false;
-    for (const value of Object.values(tombstones)) {
-      if (typeof value !== 'string') return false;
+    // 墓碑的键是被覆盖的化身 tag,值是删除时刻的时间戳 —— 两者都参与定序与 TTL,
+    // 都必须是规范 HLC。
+    for (const [tag, value] of Object.entries(tombstones)) {
+      if (!isCanonicalHlc(tag) || !isCanonicalHlc(value)) return false;
     }
-    for (const incarnation of Object.values(incarnations)) {
+    for (const [tag, incarnation] of Object.entries(incarnations)) {
+      if (!isCanonicalHlc(tag)) return false;
       if (!isValidIncarnation(incarnation)) return false;
+      // 键必须与化身自称的 tag 一致:不一致时墓碑按键匹配、比较按 tag 走,
+      // 同一个化身会在两套判断下表现不同。
+      if ((incarnation as Partial<DictionaryIncarnation>).tag !== tag) return false;
     }
   }
 
   for (const suppression of Object.values(candidate.suppressed)) {
     if (!isPlainRecord(suppression)) return false;
     const { text, stamp } = suppression as Partial<DictionarySuppression>;
-    if (typeof text !== 'string' || typeof stamp !== 'string') return false;
+    if (typeof text !== 'string' || !isCanonicalHlc(stamp)) return false;
   }
   return true;
 }
@@ -206,8 +213,8 @@ export function isValidSyncState(raw: unknown): raw is VoiceDictionarySyncState 
 function isValidIncarnation(raw: unknown): boolean {
   if (!isPlainRecord(raw)) return false;
   const value = raw as Partial<DictionaryIncarnation>;
-  if (typeof value.tag !== 'string' || typeof value.text !== 'string') return false;
-  if (typeof value.textStamp !== 'string') return false;
+  if (!isCanonicalHlc(value.tag) || typeof value.text !== 'string') return false;
+  if (!isCanonicalHlc(value.textStamp)) return false;
   if (value.source !== 'manual' && value.source !== 'automatic') return false;
   if (value.stage !== 'entry' && value.stage !== 'candidate') return false;
   if (typeof value.createdAt !== 'number' || typeof value.updatedAt !== 'number') return false;
@@ -216,7 +223,7 @@ function isValidIncarnation(raw: unknown): boolean {
   for (const alias of Object.values(value.aliases)) {
     if (!isPlainRecord(alias)) return false;
     const aliasValue = alias as Partial<SyncAliasState>;
-    if (typeof aliasValue.text !== 'string' || typeof aliasValue.textStamp !== 'string') return false;
+    if (typeof aliasValue.text !== 'string' || !isCanonicalHlc(aliasValue.textStamp)) return false;
     if (typeof aliasValue.lastSeenAt !== 'number') return false;
     if (!isValidCounter(aliasValue.counters)) return false;
   }

@@ -170,13 +170,39 @@ describe('buildMobileVoiceDictionaryEntryViews — 多台电脑取最新那份',
 });
 
 describe('新鲜度判定', () => {
-  it('优先按状态水位比较,不被响应到达顺序左右', () => {
-    // 内容更新的那台响应更慢:按到达时间会挑错。
+  it('一方包含另一方时选包含者,不被响应到达顺序左右', () => {
+    // B 已经合并过 A 的事件(向量逐节点 ≥),但它的响应更慢:按到达时间会挑错。
     const views = buildMobileVoiceDictionaryEntryViews([
-      { entries: [{ text: '旧词' }], fetchedAt: 9_000, stateVersion: '0000000100' },
-      { entries: [{ text: '新词' }], fetchedAt: 1_000, stateVersion: '0000000200' },
+      { entries: [{ text: '旧词' }], fetchedAt: 9_000, stateVector: { a: '0000000100.0000.a' } },
+      {
+        entries: [{ text: '新词' }, { text: '旧词' }],
+        fetchedAt: 1_000,
+        stateVector: { a: '0000000100.0000.a', b: '0000000200.0000.b' },
+      },
     ]);
-    expect(views.map((view) => view.text)).toEqual(['新词']);
+    expect(views.map((view) => view.text).sort()).toEqual(['新词', '旧词'].sort());
+  });
+
+  it('互不包含(真并发)时退回按拉取时间取较新的', () => {
+    // A 加了 foo、B 加了 bar,谁都不包含谁 —— 没有正确答案,取较新的那份。
+    const views = buildMobileVoiceDictionaryEntryViews([
+      { entries: [{ text: 'foo' }], fetchedAt: 1_000, stateVector: { a: '0000000100.0000.a' } },
+      { entries: [{ text: 'bar' }], fetchedAt: 9_000, stateVector: { b: '0000000101.0000.b' } },
+    ]);
+    expect(views.map((view) => view.text)).toEqual(['bar']);
+  });
+
+  it('最大 HLC 更大但并不包含对方时,不能因此被当成完整答案', () => {
+    // 这正是只比最大时间戳会犯的错:B 的 HLC 更大,但它没有 A 的词。
+    const views = buildMobileVoiceDictionaryEntryViews([
+      {
+        entries: [{ text: 'foo' }, { text: 'bar' }],
+        fetchedAt: 9_000,
+        stateVector: { a: '0000000100.0000.a', b: '0000000101.0000.b' },
+      },
+      { entries: [{ text: 'bar' }], fetchedAt: 1_000, stateVector: { b: '0000000101.0000.b' } },
+    ]);
+    expect(views.map((view) => view.text).sort()).toEqual(['bar', 'foo']);
   });
 
   it('对端不上报水位时退回按拉取时间比较', () => {
@@ -187,11 +213,11 @@ describe('新鲜度判定', () => {
     expect(views.map((view) => view.text)).toEqual(['新词']);
   });
 
-  it('只有一台带水位时认它 —— 老版本不该压过明确更新的快照', () => {
+  it('只有一台带版本向量时认它 —— 老版本不该压过能自证更完整的快照', () => {
     const views = buildMobileVoiceDictionaryEntryViews([
       { entries: [{ text: '老版本' }], fetchedAt: 9_999 },
-      { entries: [{ text: '带水位' }], fetchedAt: 1_000, stateVersion: '0000000100' },
+      { entries: [{ text: '带向量' }], fetchedAt: 1_000, stateVector: { a: '0000000100.0000.a' } },
     ]);
-    expect(views.map((view) => view.text)).toEqual(['带水位']);
+    expect(views.map((view) => view.text)).toEqual(['带向量']);
   });
 });

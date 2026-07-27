@@ -16,7 +16,7 @@
  */
 
 import { MAX_FRAME_BYTES } from '@cindy/device-link';
-import { findMaxHlc, type VoiceDictionarySyncState } from '@cindy/voice-input-core';
+import { buildStateVersionVector, type VoiceDictionarySyncState } from '@cindy/voice-input-core';
 
 import { createLogger } from '../logger.js';
 import { voiceDictionarySyncStore } from './VoiceDictionarySyncStore.js';
@@ -179,7 +179,7 @@ export function handleIncomingDictionaryState(src: string, payload: unknown): vo
  */
 export function readDictionaryProjectionForMobile(): {
   entries: Array<{ text: string; frequency: number; aliases: Array<{ text: string; count: number }> }>;
-  stateVersion?: string;
+  stateVector?: Record<string, string>;
 } {
   if (!isSyncEnabled()) return { entries: [] };
   const entries = voiceDictionarySyncStore.materialize().entries.map((entry) => ({
@@ -187,10 +187,10 @@ export function readDictionaryProjectionForMobile(): {
     frequency: entry.frequency,
     aliases: entry.aliases.map((alias) => ({ text: alias.text, count: alias.count })),
   }));
-  // 状态水位单调不减(合并只做并集),所以它能表达"这份内容有多新",
-  // 与响应什么时候到达手机无关。
-  const maxHlc = findMaxHlc(voiceDictionarySyncStore.getState());
-  return maxHlc ? { entries, stateVersion: maxHlc } : { entries };
+  // 版本向量对合并单调(逐节点取 max),所以「逐节点 ≥」等价于「已经见过对方的
+  // 全部事件」—— 这才是手机可以拿一份替代另一份的条件,而不是谁的时间戳大。
+  const vector = buildStateVersionVector(voiceDictionarySyncStore.getState());
+  return Object.keys(vector).length > 0 ? { entries, stateVector: vector } : { entries };
 }
 
 function broadcastToAllPeers(reason: string, options?: { requestReply?: boolean }): void {

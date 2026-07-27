@@ -16,6 +16,12 @@ import path from 'node:path';
 
 let tempDir = '';
 
+const activeOwnerId = vi.hoisted(() => ({ value: 'owner-1' }));
+
+function setActiveOwner(ownerId: string): void {
+  activeOwnerId.value = ownerId;
+}
+
 vi.mock('electron', () => ({
   app: { getPath: () => tempDir },
   ipcMain: { handle: vi.fn(), on: vi.fn() },
@@ -25,7 +31,7 @@ vi.mock('../../logger.js', () => ({
   createLogger: () => ({ info: () => {}, warn: () => {}, error: () => {}, debug: () => {} }),
 }));
 vi.mock('../../appSessionState.js', () => ({
-  getActiveAppSession: () => ({ dataOwnerId: 'owner-1' }),
+  getActiveAppSession: () => ({ dataOwnerId: activeOwnerId.value }),
   ownerScopedUserDataPath: (...parts: string[]) => path.join(tempDir, 'owners', 'owner-1', ...parts),
 }));
 vi.mock('../../utils/ipcValidate.js', () => ({
@@ -63,8 +69,10 @@ function readDictionaryFile(): { dictionaryEntries: Array<{ text: string; source
 
 /** 每个用例都要拿到全新的 store 内存状态:两个 store 都按 ownerId 缓存。 */
 function resetStoreCaches(): void {
+  activeOwnerId.value = 'owner-1';
   (voiceDictionarySyncStore as unknown as { data: unknown; dataOwnerId: unknown }).data = null;
   (voiceDictionarySyncStore as unknown as { data: unknown; dataOwnerId: unknown }).dataOwnerId = null;
+  (voiceDictionarySyncStore as unknown as { pendingRecovery: unknown }).pendingRecovery = null;
   (voiceInputDataStore as unknown as { state: unknown; stateOwnerId: unknown }).state = null;
   (voiceInputDataStore as unknown as { state: unknown; stateOwnerId: unknown }).stateOwnerId = null;
 }
@@ -568,5 +576,48 @@ describe('首次迁移与 sidecar 丢失必须分得开', () => {
     resetStoreCaches();
     voiceInputDataStore.getSettings();
     expect(voiceDictionarySyncStore.hasPendingRecovery()).toBe(true);
+  });
+});
+
+describe('词典同步落盘 —— 第八轮收口', () => {
+  it('收到内容相同的对端状态也会落地挂起的恢复', () => {
+    writeDictionaryFile({
+      dictionaryEntries: [{ id: 'a', text: 'Cindy', source: 'manual', frequency: 2, aliases: [] }],
+      dictionaryCandidates: [],
+      suppressedAutomaticDictionaryTexts: [],
+    });
+    voiceInputDataStore.getSettings();
+    fs.rmSync(ownerPath(SYNC_FILE));
+    resetStoreCaches();
+    voiceInputDataStore.getSettings();
+    expect(voiceDictionarySyncStore.hasPendingRecovery()).toBe(true);
+
+    // 对端是台新机器,词典为空 —— 合并引入不了任何新信息,但它是一份合法状态。
+    // 不在这里落地的话,本机会一直只显示投影、对外发空状态,直到用户手动改词典。
+    voiceInputDataStore.mergeRemoteDictionaryState(createEmptySyncState());
+    expect(voiceDictionarySyncStore.hasPendingRecovery()).toBe(false);
+    expect(voiceDictionarySyncStore.materialize().entries.map((entry) => entry.text)).toEqual([
+      'Cindy',
+    ]);
+  });
+
+  it('切换账号会丢掉上一个账号挂起的恢复', () => {
+    writeDictionaryFile({
+      dictionaryEntries: [{ id: 'a', text: '账号A的词', source: 'manual', frequency: 1, aliases: [] }],
+      dictionaryCandidates: [],
+      suppressedAutomaticDictionaryTexts: [],
+    });
+    voiceInputDataStore.getSettings();
+    fs.rmSync(ownerPath(SYNC_FILE));
+    resetStoreCaches();
+    voiceInputDataStore.getSettings();
+    expect(voiceDictionarySyncStore.hasPendingRecovery()).toBe(true);
+
+    // 切到账号 B。挂起的快照属于 A,留着的话 B 的第一次编辑就会把 A 的词写进 B 的词典。
+    setActiveOwner('owner-2');
+    expect(voiceDictionarySyncStore.hasPendingRecovery()).toBe(false);
+
+    const settings = voiceInputDataStore.addManualDictionaryEntry('账号B的词');
+    expect(settings.dictionaryEntries.map((entry) => entry.text)).toEqual(['账号B的词']);
   });
 });

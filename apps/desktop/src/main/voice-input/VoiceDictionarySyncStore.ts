@@ -153,7 +153,12 @@ export class VoiceDictionarySyncStore {
     if (current.incompatible) return null;
     const remoteState = normalizeState(remote);
     const merged = mergeSyncStates(current.state, remoteState);
-    if (isSameState(merged, current.state)) return null;
+    if (isSameState(merged, current.state)) {
+      // 合并没引入新信息,但「收到了一份合法的对端状态」本身就是挂起恢复在等的信号:
+      // 对端是新机器、或它的词典也是空的时,每次握手都会走到这里 —— 不在这里落地的话,
+      // 本机会一直只显示投影、对外发空状态,直到用户手动改一次词典才自愈。
+      return this.flushPendingRecovery('merged');
+    }
     // 抬高本地时钟,保证本机之后产出的时间戳大于已经观察到的一切。
     const maxRemote = findMaxHlc(remoteState);
     const clock = maxRemote
@@ -194,6 +199,8 @@ export class VoiceDictionarySyncStore {
    * 必须调用 —— 否则 mutate 会基于空状态物化,把词典覆盖成空。
    */
   flushPendingRecovery(reason: 'merged' | 'local-edit'): MaterializedDictionary | null {
+    // 必须先 load():账号边界的检查在那里面,挂起的快照可能属于上一个账号。
+    this.load();
     const snapshot = this.pendingRecovery;
     if (!snapshot) return null;
     this.pendingRecovery = null;
@@ -202,6 +209,7 @@ export class VoiceDictionarySyncStore {
   }
 
   hasPendingRecovery(): boolean {
+    this.load();
     return this.pendingRecovery !== null;
   }
 
@@ -292,7 +300,12 @@ export class VoiceDictionarySyncStore {
 
   private load(): StoredSyncData {
     const ownerId = getActiveAppSession().dataOwnerId;
-    if (this.data && this.dataOwnerId !== ownerId) this.data = null;
+    if (this.data && this.dataOwnerId !== ownerId) {
+      this.data = null;
+      // 挂起的恢复属于**上一个**账号:留着的话,新账号的第一次编辑或合并会把上个
+      // 账号的词条写进它的 CRDT 和投影里。
+      this.pendingRecovery = null;
+    }
     this.dataOwnerId = ownerId;
     if (this.data) return this.data;
 

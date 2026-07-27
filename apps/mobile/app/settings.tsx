@@ -648,13 +648,12 @@ export default function SettingsScreen() {
     refreshVoiceDictionary();
   }, [desktopDevices, refreshVoiceDictionary]);
 
+  // dictionaryRevision 只作为依赖存在:缓存是模块级的,刷新完成后靠它触发重算。
   const dictionaryEntries = useMemo(
-    () => {
-      void dictionaryRevision; // 订阅刷新计数,让缓存更新后重新求值
-      return buildMobileVoiceDictionaryEntryViews(
+    () =>
+      buildMobileVoiceDictionaryEntryViews(
         desktopDevices.map((host) => readCachedMobileVoiceDictionarySnapshot(host.deviceId)),
-      );
-    },
+      ),
     [desktopDevices, dictionaryRevision],
   );
 

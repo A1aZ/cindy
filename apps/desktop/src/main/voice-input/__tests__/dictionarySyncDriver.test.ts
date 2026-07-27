@@ -13,6 +13,7 @@ import {
   addManualEntry,
   createEmptySyncState,
   createHlcClock,
+  versionVectorDominates,
 } from '@cindy/voice-input-core';
 
 vi.mock('../../logger.js', () => ({
@@ -230,22 +231,24 @@ describe('手机只读投影', () => {
     expect(projection.entries).toEqual([
       { text: 'Cindy', frequency: 2, aliases: [{ text: 'sindy', count: 1 }] },
     ]);
-    // 除了词条和状态水位,不该漏出节点 id、化身、墓碑等同步内部结构。
+    // 除了词条和版本向量,不该漏出节点 id、化身、墓碑等同步内部结构。
     expect(Object.keys(projection).sort()).toEqual(['entries']);
   });
 
-  it('带上状态水位,让手机按内容新鲜度而不是响应到达顺序挑快照', () => {
+  it('带上版本向量,让手机按包含关系而不是响应到达顺序挑快照', () => {
     const first = addManualEntry(createEmptySyncState(), createHlcClock('node-a', 1_000), {
       text: 'Cindy',
       nowMs: 1_000,
     });
     stateOverride.value = first.state;
-    const before = readDictionaryProjectionForMobile().stateVersion;
-    expect(typeof before).toBe('string');
+    const before = readDictionaryProjectionForMobile().stateVector;
+    expect(before && Object.keys(before)).toEqual(['node-a']);
 
     const second = addManualEntry(first.state, first.clock, { text: 'Orca', nowMs: 9_000 });
     stateOverride.value = second.state;
-    // 水位单调不减:新事件之后必须严格更大,否则手机会一直停在旧快照上。
-    expect(readDictionaryProjectionForMobile().stateVersion! > before!).toBe(true);
+    const after = readDictionaryProjectionForMobile().stateVector!;
+    // 向量对合并单调:后一份必须包含前一份,否则手机会一直停在旧快照上。
+    expect(versionVectorDominates(after, before!)).toBe(true);
+    expect(versionVectorDominates(before!, after)).toBe(false);
   });
 });

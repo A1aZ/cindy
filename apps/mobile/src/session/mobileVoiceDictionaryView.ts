@@ -89,8 +89,8 @@ export interface MobileVoiceDictionarySnapshot {
   entries: readonly MobileVoiceCredentialSyncDictionaryEntry[];
   /** 成功拉取的时间(unix ms);从未拉到过为 0。 */
   fetchedAt: number;
-  /** 被控端上报的状态水位(HLC 定长前缀,字典序即时间序);老版本被控端没有。 */
-  stateVersion?: string;
+  /** 被控端上报的版本向量 `{nodeId: 最大 HLC}`;老版本被控端没有。 */
+  stateVector?: Record<string, string>;
 }
 
 /**
@@ -105,27 +105,43 @@ export interface MobileVoiceDictionarySnapshot {
  *
  * 取最新那份则天然表达了删除:新快照里没有,就是没有。
  *
- * 新鲜度优先看被控端上报的 `stateVersion`(状态水位,合并只做并集所以单调不减),
- * 它描述的是内容有多新,与响应什么时候到达手机无关 —— 并发拉多台时,响应到达
- * 顺序会被网络抖动打乱,拿到达时间比较可能让手机停在某台正处于去抖窗口内的旧内容上。
- * 只有对端是不带该字段的老版本时才退回按 `fetchedAt` 比较。
+ * 新鲜度按被控端上报的**版本向量**判断:一份状态的向量逐节点 ≥ 另一份,才说明它
+ * 已经见过对方的全部事件、可以放心替代对方。用响应到达时间是错的(并发请求里慢的
+ * 那个反而显得"更新"),只比最大 HLC 也是错的 —— 两台电脑各自加了不同的词、还没
+ * 互相同步时谁都不包含谁,按最大值挑会漏掉另一份里的词。
+ *
+ * 真正并发(互不包含)时没有"正确答案":两份都不完整。此时退回按拉取时间取较新的
+ * 那份,并依赖桌面之间 8 秒内的自动交换收敛 —— 下次刷新就能拿到合并后的完整状态。
  */
 /**
- * 两份快照谁更新。带 `stateVersion` 的一律优先(内容水位比到达时间可信),两份都带
- * 时按字典序比 —— HLC 是定长前缀,字典序即时间序。只有一份带时也认它:老版本被控端
- * 不上报水位,不该因此压过一个明确更新的快照。
+ * 两份快照谁更适合作为"那一份"。
+ *
+ * 带版本向量的一律优先于不带的(老版本被控端不上报,不该压过一个能证明自己更完整
+ * 的快照)。两份都带时:一方包含另一方就选包含者;互不包含(真并发)时没有正确答案,
+ * 退回按拉取时间取较新的。
  */
 function isFresherThan(
   candidate: MobileVoiceDictionarySnapshot,
   best: MobileVoiceDictionarySnapshot,
 ): boolean {
-  if (candidate.stateVersion && best.stateVersion) {
-    if (candidate.stateVersion !== best.stateVersion) return candidate.stateVersion > best.stateVersion;
+  if (candidate.stateVector && best.stateVector) {
+    const candidateDominates = dominates(candidate.stateVector, best.stateVector);
+    const bestDominates = dominates(best.stateVector, candidate.stateVector);
+    if (candidateDominates !== bestDominates) return candidateDominates;
     return candidate.fetchedAt > best.fetchedAt;
   }
-  if (candidate.stateVersion) return true;
-  if (best.stateVersion) return false;
+  if (candidate.stateVector) return true;
+  if (best.stateVector) return false;
   return candidate.fetchedAt > best.fetchedAt;
+}
+
+/** `a` 是否已经见过 `b` 的全部事件(逐节点 ≥)。HLC 定长前缀,字符串比较即时间序。 */
+function dominates(a: Record<string, string>, b: Record<string, string>): boolean {
+  for (const [nodeId, stamp] of Object.entries(b)) {
+    const mine = a[nodeId];
+    if (mine === undefined || mine < stamp) return false;
+  }
+  return true;
 }
 
 export function buildMobileVoiceDictionaryEntryViews(

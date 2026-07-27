@@ -37,9 +37,19 @@ const LEGACY_STORAGE_INDEX_KEY = `${LEGACY_STORAGE_KEY_PREFIX}.hosts`;
  */
 let accountScope = '';
 
+/**
+ * 本会话见过的所有账号分区。
+ *
+ * 登出时 `applyUser(null)` 会先把分区切回匿名,清理才异步跑起来 —— 清理入口读到的
+ * 已经是匿名分区,只删匿名那份的话,正在登出的那个账号的快照会原封不动留在盘上。
+ * 记下见过的分区,清理时逐个删。
+ */
+const knownScopes = new Set<string>(['']);
+
 /** 设置账号分区。切换账号时同时递增代际,丢弃在途请求。 */
 export function setMobileVoiceDictionaryAccountScope(accountId: string): void {
   const next = typeof accountId === 'string' ? accountId.trim() : '';
+  knownScopes.add(next);
   if (next === accountScope) return;
   accountScope = next;
   cacheEpoch += 1;
@@ -55,8 +65,8 @@ const REFETCH_INTERVAL_MS = 5 * 60 * 1000;
 type CachedDictionary = {
   entries: MobileVoiceCredentialSyncDictionaryEntry[];
   fetchedAt: number;
-  /** 被控端上报的状态水位;老版本不带,此时只能退回按 fetchedAt 比较。 */
-  stateVersion?: string;
+  /** 被控端上报的版本向量;老版本不带,此时只能退回按 fetchedAt 比较。 */
+  stateVector?: Record<string, string>;
 };
 
 const memoryCache = new Map<string, CachedDictionary>();
@@ -90,13 +100,13 @@ export function readMobileVoiceDictionaryFetchedAt(hostDeviceId: string): number
 export function readCachedMobileVoiceDictionarySnapshot(hostDeviceId: string): {
   entries: MobileVoiceCredentialSyncDictionaryEntry[];
   fetchedAt: number;
-  stateVersion?: string;
+  stateVector?: Record<string, string>;
 } {
   const cached = memoryCache.get(normalizeHostDeviceId(hostDeviceId));
   return {
     entries: cached?.entries ?? [],
     fetchedAt: cached?.fetchedAt ?? 0,
-    stateVersion: cached?.stateVersion,
+    stateVector: cached?.stateVector,
   };
 }
 
@@ -115,7 +125,7 @@ export async function hydrateMobileVoiceDictionary(hostDeviceId: string): Promis
     const restored = {
       entries: normalizeEntries(parsed?.entries),
       fetchedAt: typeof parsed?.fetchedAt === 'number' ? parsed.fetchedAt : 0,
-      stateVersion: typeof parsed?.stateVersion === 'string' ? parsed.stateVersion : undefined,
+      stateVector: normalizeStateVector(parsed?.stateVector),
     };
     // 开麦路径会并发跑 hydrate 与 refresh。磁盘读晚于网络响应返回时,不能用旧
     // 快照盖掉刚拉到的新数据 —— 只在内存仍为空、或盘上确实更新时才写。
@@ -160,7 +170,7 @@ export async function refreshMobileVoiceDictionary(
       const next: CachedDictionary = {
         entries: normalizeEntries(result.entries),
         fetchedAt: Date.now(),
-        stateVersion: typeof result.stateVersion === 'string' ? result.stateVersion : undefined,
+        stateVector: normalizeStateVector(result.stateVector),
       };
       memoryCache.set(host, next);
       // 顺序很关键:**先登记索引,再写快照**。两个写不是原子的,进程随时可能死在
@@ -212,9 +222,14 @@ export async function clearAllMobileVoiceDictionaryCaches(): Promise<void> {
     listMobileVoiceHistoryHosts().catch(() => [] as string[]),
   ]);
   const hosts = [...new Set([...(ownHosts.hosts ?? []), ...historyHosts])];
+  // 逐个已知分区删:清理往往在分区已经被切回匿名之后才跑到这里,只删当前分区会把
+  // 正在登出的那个账号的快照留在盘上。
+  const scopes = [...knownScopes];
   await Promise.all(
     hosts.flatMap((host) => [
-      AsyncStorage.removeItem(storageKeyForHost(host)).catch(() => undefined),
+      ...scopes.map((scope) =>
+        AsyncStorage.removeItem(storageKeyForHost(host, scope)).catch(() => undefined),
+      ),
       // v1 的键不带账号,是真正会被下个账号读到的那一份 —— 一并尽力删掉。
       AsyncStorage.removeItem(legacyStorageKeyForHost(host)).catch(() => undefined),
     ]),
@@ -305,8 +320,20 @@ function readPositiveInt(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 1;
 }
 
-function storageKeyForHost(hostDeviceId: string): string {
-  return `${STORAGE_KEY_PREFIX}.${accountScope || 'anonymous'}.${hostDeviceId}`;
+/** 归一化被控端上报的版本向量;形状不对一律当作「没有」,退回按拉取时间比较。 */
+function normalizeStateVector(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const vector: Record<string, string> = {};
+  for (const [nodeId, stamp] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof nodeId === 'string' && nodeId && typeof stamp === 'string' && stamp) {
+      vector[nodeId] = stamp;
+    }
+  }
+  return Object.keys(vector).length > 0 ? vector : undefined;
+}
+
+function storageKeyForHost(hostDeviceId: string, scope: string = accountScope): string {
+  return `${STORAGE_KEY_PREFIX}.${scope || 'anonymous'}.${hostDeviceId}`;
 }
 
 function legacyStorageKeyForHost(hostDeviceId: string): string {

@@ -77,13 +77,14 @@ export type MobileVoiceDictionarySnapshotResult =
       ok: true;
       entries: MobileVoiceCredentialSyncDictionaryEntry[];
       /**
-       * 该桌面同步状态的版本水位(HLC 定长前缀,字典序即时间序)。
+       * 该桌面同步状态的版本向量:`{ nodeId: 该节点的最大 HLC }`。
        *
-       * 手机同时拉多台电脑时用它比较新鲜度。不能用响应到达时间:并发请求里慢的那个
-       * 反而显得"更新",可能让手机停在某台刚好处于去抖窗口内的旧内容上。老版本被控端
-       * 不带这个字段,手机退回按到达时间比较。
+       * 手机同时拉多台电脑时用它判断哪一份**包含**了另一份。不能用响应到达时间
+       * (并发请求里慢的那个反而显得"更新"),也不能只比最大 HLC —— 两台电脑各自
+       * 新增了不同的词、还没来得及互相同步时,最大 HLC 大的那份并不包含另一份,
+       * 拿它当完整答案会漏词。老版本被控端不带这个字段,手机退回按到达时间比较。
        */
-      stateVersion?: string;
+      stateVector?: Record<string, string>;
     }
   | {
       ok: false;

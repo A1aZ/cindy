@@ -218,9 +218,11 @@ export class VoiceInputDataStore {
     // 投影文件写失败时,重投同一帧会因为「合并没有引入新信息」直接返回 false,
     // 投影就永远停在旧内容上。
     const rollbackPoint = voiceDictionarySyncStore.snapshotForRollback();
-    const materialized = voiceDictionarySyncStore.mergeRemote(remote);
-    if (!materialized) return false;
     try {
+      // mergeRemote 自己写盘失败时也会先推进内存状态再抛 —— 不圈进 try 的话,重投
+      // 同一帧会因为「合并没有引入新信息」直接返回 false,投影永远停在旧内容上。
+      const materialized = voiceDictionarySyncStore.mergeRemote(remote);
+      if (!materialized) return false;
       this.commitMaterializedDictionary(materialized);
     } catch (error) {
       voiceDictionarySyncStore.rollbackTo(rollbackPoint);

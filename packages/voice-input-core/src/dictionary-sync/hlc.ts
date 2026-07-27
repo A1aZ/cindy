@@ -47,6 +47,45 @@ export function formatHlc(clock: HlcClock): HlcTimestamp {
   return `${wall}.${counter}.${clock.nodeId}`;
 }
 
+/**
+ * 时间戳是否是本模块产出的规范形式。
+ *
+ * 定序靠的是**字符串字典序**,前提是所有参与比较的时间戳都符合定长格式。一个来自
+ * 坏帧或恶意对端的 `~~~~`(`~` 的码位高于所有 base36 字符)会在每一次 LWW 比较里
+ * 胜出,而且它是持久化的 —— 那个字段此后再也改不动了,用户在任何设备上改词条显示
+ * 文本都会被这个假时间戳压回去。同时它解析出的墙钟是 0,墓碑 TTL 也会算错。
+ *
+ * 所以入站帧里的每一个 tag 与 stamp 都必须先过这一关。
+ */
+export function isCanonicalHlc(value: unknown): value is HlcTimestamp {
+  if (typeof value !== 'string') return false;
+  const wallEnd = WALL_RADIX_LENGTH;
+  const counterEnd = wallEnd + 1 + COUNTER_RADIX_LENGTH;
+  if (value.length < counterEnd + 2) return false;
+  if (value[wallEnd] !== '.' || value[counterEnd] !== '.') return false;
+  if (!isBase36(value.slice(0, wallEnd)) || !isBase36(value.slice(wallEnd + 1, counterEnd))) {
+    return false;
+  }
+  const nodeId = value.slice(counterEnd + 1);
+  // nodeId 不能含 '.',否则同一个字符串能被解析出多种切分。
+  return nodeId.length > 0 && !nodeId.includes('.');
+}
+
+/** 读出产出该时间戳的 nodeId;不是规范形式时返回 null。 */
+export function hlcNodeId(stamp: HlcTimestamp): string | null {
+  if (!isCanonicalHlc(stamp)) return null;
+  return stamp.slice(WALL_RADIX_LENGTH + 1 + COUNTER_RADIX_LENGTH + 1);
+}
+
+function isBase36(segment: string): boolean {
+  for (const char of segment) {
+    const isDigit = char >= '0' && char <= '9';
+    const isLower = char >= 'a' && char <= 'z';
+    if (!isDigit && !isLower) return false;
+  }
+  return segment.length > 0;
+}
+
 /** 解析出墙钟毫秒;只用于墓碑 TTL 与展示,不参与定序(定序一律用字符串比较)。 */
 export function hlcWallMs(stamp: HlcTimestamp): number {
   const wall = stamp.slice(0, WALL_RADIX_LENGTH);

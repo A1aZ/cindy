@@ -226,3 +226,20 @@ describe('账号分区', () => {
     expect(storage.get('xdt.mobileVoiceDictionary.v2.hosts')).toBe('{not json');
   });
 });
+
+describe('登出清理与分区切换的时序', () => {
+  it('分区已被切回匿名之后再清理,仍能删掉登出账号的快照', async () => {
+    setMobileVoiceDictionaryAccountScope('user-a');
+    await refreshMobileVoiceDictionary(HOST, async () => ({
+      ok: true,
+      entries: [{ text: '内部项目代号' }],
+    }));
+    expect([...storage.keys()].some((key) => key.includes('user-a'))).toBe(true);
+
+    // AuthContext 的实际顺序:先切分区(applyUser(null)),清理才异步跑起来。
+    setMobileVoiceDictionaryAccountScope('');
+    await clearAllMobileVoiceDictionaryCaches();
+
+    expect([...storage.keys()].filter((key) => key.includes('mobileVoiceDictionary'))).toEqual([]);
+  });
+});

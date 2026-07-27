@@ -14,7 +14,7 @@
  * 随同步次数膨胀。
  */
 
-import { compareHlc, maxHlc, minHlc, type HlcTimestamp } from './hlc';
+import { compareHlc, hlcNodeId, maxHlc, minHlc, type HlcTimestamp } from './hlc';
 import {
   VOICE_DICTIONARY_SYNC_VERSION,
   createDictionaryMap,
@@ -191,6 +191,54 @@ export function mergeAllSyncStates(
     (acc, state) => mergeSyncStates(acc, state),
     createEmptySyncState(),
   );
+}
+
+/**
+ * 状态的版本向量:每个 nodeId 在这份状态里出现过的最大时间戳。
+ *
+ * 用来判断两份状态之间的**包含关系**,而不是谁的时间戳大。单看最大 HLC 是错的:
+ * 设备 A 在 HLC 100 加了 `foo`、设备 B 在 HLC 101 加了 `bar`,两份状态互不包含,
+ * 但按最大值比会宣称 B 更新 —— 拿 B 当"完整答案"就漏掉了 `foo`。
+ *
+ * 向量对合并单调:`merge(a, b)` 的向量逐节点取 max,所以「A 的向量逐节点 ≥ B」
+ * 等价于「A 已经见过 B 的全部事件」,这才是可以放心替代 B 的条件。
+ */
+export function buildStateVersionVector(state: VoiceDictionarySyncState): Record<string, string> {
+  const vector: Record<string, string> = Object.create(null) as Record<string, string>;
+  const observe = (stamp: HlcTimestamp | undefined): void => {
+    if (!stamp) return;
+    const nodeId = hlcNodeId(stamp);
+    if (!nodeId) return;
+    const current = vector[nodeId];
+    if (current === undefined || compareHlc(stamp, current) > 0) vector[nodeId] = stamp;
+  };
+  for (const record of Object.values(state.records)) {
+    for (const incarnation of Object.values(record.incarnations)) {
+      observe(incarnation.tag);
+      observe(incarnation.textStamp);
+      for (const alias of Object.values(incarnation.aliases)) observe(alias.textStamp);
+    }
+    for (const stamp of Object.values(record.tombstones)) observe(stamp);
+  }
+  for (const suppression of Object.values(state.suppressed)) observe(suppression.stamp);
+  return { ...vector };
+}
+
+/**
+ * `a` 是否已经见过 `b` 的全部事件(逐节点 ≥)。
+ *
+ * 互不包含(并发)时两边都返回 false —— 调用方必须为这种情况准备一条独立的决策,
+ * 不能默认"那就选 a"。
+ */
+export function versionVectorDominates(
+  a: Readonly<Record<string, string>>,
+  b: Readonly<Record<string, string>>,
+): boolean {
+  for (const [nodeId, stamp] of Object.entries(b)) {
+    const mine = a[nodeId];
+    if (mine === undefined || compareHlc(mine, stamp) < 0) return false;
+  }
+  return true;
 }
 
 /** 状态里最大的 HLC,用于收到远端状态后抬高本地时钟(见 `observeHlc`)。 */

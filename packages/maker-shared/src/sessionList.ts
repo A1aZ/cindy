@@ -5,6 +5,7 @@ import type { RemoteSchedule, RemoteScheduleRun, RemoteScheduleRunStatus } from 
 import { toMillis } from './scheduleModel.js';
 import { sessionCollaborationLabel, sessionWorktreeLabel } from './sessionIdentity.js';
 import { getSessionListCollapseView } from './sessionListCollapse.js';
+import { collapseWorktreeDirForGrouping } from './worktreePaths.js';
 
 export interface RemoteSessionListSessionLike {
   _count?: { messages?: number } | null;
@@ -375,7 +376,9 @@ function buildProjectSections(
   const projectGroups = new Map<string, RemoteSessionListItem[]>();
   for (const item of items) {
     if (isDialogueSession(item.session)) continue;
-    const key = item.session.workingDir ?? 'unknown';
+    // worktree 会话按 base repo 归组(与首页 projectGroupKey、桌面侧栏同一口径),
+    // 否则每个 worktree 会单独成一个随机名分区。
+    const key = item.session.workingDir ? collapseWorktreeDirForGrouping(item.session.workingDir) : 'unknown';
     const list = projectGroups.get(key) ?? [];
     list.push(item);
     projectGroups.set(key, list);

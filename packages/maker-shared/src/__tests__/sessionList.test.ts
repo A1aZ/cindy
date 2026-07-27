@@ -91,6 +91,23 @@ describe('sessionList', () => {
     ]);
   });
 
+  it('groups worktree sessions under their base repo instead of the random worktree name', () => {
+    const sections = buildRemoteSessionSections([
+      session('main-repo', { updatedAt: '2026-01-01T00:01:00.000Z' }),
+      session('worktree', {
+        updatedAt: '2026-01-01T00:02:00.000Z',
+        workingDir: '/repo/app/.cindy-worktrees/serene-lovelace',
+        worktreePath: '/repo/app/.cindy-worktrees/serene-lovelace',
+      }),
+    ], new Date('2026-01-01T00:10:00.000Z').getTime());
+
+    expect(sections.map((section) => [section.key, section.title, section.data.map((item) => item.session.id)])).toEqual([
+      ['project:/repo/app', 'app', ['worktree', 'main-repo']],
+    ]);
+    // worktree 身份不丢:仍由会话行副标题标出。
+    expect(sections[0].data[0].worktreeLabel).toBe('Worktree serene-lovelace');
+  });
+
   it('builds compact display metadata for a session row', () => {
     const item = toRemoteSessionListItem(session('s1', {
       title: '',

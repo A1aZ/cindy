@@ -264,7 +264,19 @@ export class VoiceInputController {
       text,
       updatedAt: Date.now(),
     };
-    const range = this.callbacks.onSubmitted(text, segment);
+    let range: EditableRange | undefined;
+    try {
+      range = this.callbacks.onSubmitted(text, segment);
+    } catch (error) {
+      // salvageTranscript() already treats a throwing host as a real scenario
+      // (destroyed window, torn-down editor); this path has to survive it too.
+      // Letting the exception escape would reject stop() before any terminal
+      // state is set, stranding the run in 'submitting' — after which start()
+      // refuses to begin a new one and dictation is dead until reload.
+      this.discardRefinement(runId, optimisticRefinement, 'run_failed');
+      this.fail(error instanceof Error ? error.message : String(error));
+      return;
+    }
     // Same acceptance convention as salvageTranscript(): the returned range is
     // the host's "I took the text" signal, and a host may refuse (mobile stops
     // writing into the voice insertion once the user has edited it). Marking it

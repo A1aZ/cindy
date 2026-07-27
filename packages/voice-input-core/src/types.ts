@@ -12,8 +12,11 @@ export type VoiceInputTerminalOutcome = 'success' | 'no_speech' | 'failed' | 'ca
  * Classifies the failures this controller raises itself, so hosts can show a
  * localized sentence instead of the English `message` (which stays as the
  * log/debug string). Failures originating in a provider have no code — their
- * message is the only description of an auth, quota or protocol problem, and
- * is surfaced verbatim.
+ * message is the only description of an auth, quota or protocol problem, so the
+ * controller passes it through unchanged. How it is presented is the host's
+ * call: current hosts still normalize transport strings and redact credentials
+ * before showing it, so "no code" means "the controller has nothing to add",
+ * not "display this raw".
  */
 export type VoiceInputErrorCode =
   | 'empty_transcript'

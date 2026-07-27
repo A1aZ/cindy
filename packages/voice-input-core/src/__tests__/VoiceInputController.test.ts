@@ -566,6 +566,33 @@ describe('VoiceInputController', () => {
     expect(controller.currentState).toBe('error');
   });
 
+  it('does not strand the run when the host throws on submit', async () => {
+    const asr = new FakeAsrProvider();
+    const errors: Array<{ message: string; code?: string; kept?: boolean }> = [];
+    const controller = new VoiceInputController({
+      asr,
+      logger: new VoiceTimelineLogger(),
+      stableWaitMs: 0,
+      callbacks: {
+        onDraftChanged: () => {},
+        onSubmitted: () => {
+          // e.g. the composer's window was destroyed while stop() was in flight
+          throw new Error('editor is gone');
+        },
+        onError: (message, code, details) => errors.push({ message, code, kept: details?.transcriptKept }),
+      },
+    });
+
+    await controller.start();
+    asr.emit({ type: 'partial', text: 'nowhere to go', at: Date.now() });
+    await expect(controller.stop()).resolves.toBeUndefined();
+
+    // A terminal state is what lets the next dictation start at all.
+    expect(controller.currentState).toBe('error');
+    expect(errors).toEqual([{ message: 'editor is gone', code: undefined, kept: false }]);
+    await expect(controller.start()).resolves.toMatch(/./);
+  });
+
   it('does not claim retention when the host refuses the salvaged text', async () => {
     const asr = new FakeAsrProvider();
     const timeline: VoiceTimelineEvent[] = [];

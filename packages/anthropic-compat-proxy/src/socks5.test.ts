@@ -155,6 +155,15 @@ describe('socks5Connect', () => {
       .rejects.toThrow(/unexpected auth subnegotiation version 0x05/);
   });
 
+  it('fails immediately when the proxy hangs up mid-handshake instead of waiting for the timeout', async () => {
+    // 提前 EOF 必须当场失败:握手超时是 15s,空等到那里等于把一次请求白白挂死。
+    // (本用例默认 5s 超时,退化成空等会直接测超时。)
+    const stub = await startSocks5Stub({ closeAfterConnect: true });
+    await expect(socks5Connect(target(stub.port), 'x.invalid', 443))
+      .rejects.toThrow(/closed the connection during the SOCKS5 handshake/);
+    expect(stub.requests).toEqual([{ atyp: 0x03, host: 'x.invalid', port: 443 }]);
+  });
+
   it('rejects destinations that cannot be encoded instead of sending a truncated one', async () => {
     const stub = await startSocks5Stub();
     await expect(socks5Connect(target(stub.port), `${'a'.repeat(256)}.invalid`, 443))

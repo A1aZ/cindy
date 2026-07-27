@@ -151,6 +151,8 @@ function createSocketReader(socket: Socket): {
   // 具体 ArrayBuffer 类型参数不同,不标注会在 concat 赋值处类型不兼容。
   let buffered: Buffer = Buffer.alloc(0);
   let waiter: { need: number; resolve: (b: Buffer) => void; reject: (e: Error) => void } | null = null;
+  // socket 出错 / 提前关闭后记在这里,让后续 read 同步失败而不是空等到握手超时。
+  let terminalError: Error | null = null;
 
   const settleIfReady = (): void => {
     if (!waiter || buffered.length < waiter.need) return;
@@ -168,6 +170,11 @@ function createSocketReader(socket: Socket): {
   return {
     read(n: number): Promise<Buffer> {
       return new Promise<Buffer>((resolve, reject) => {
+        // socket 已经出错 / 关闭:立刻失败,不要挂到握手超时才发现。今天的握手是
+        // 一条线性 await 链(每次 read resolve 后的微任务里就挂上了下一个 waiter,
+        // 早于任何 I/O 回调),所以「无 waiter 时出错」这个窗口够不到;记住终止错误
+        // 是为了将来万一在两次 read 之间插入 await,不至于静默退化成 15s 空等。
+        if (terminalError) { reject(terminalError); return; }
         // 握手是串行的,同一时刻只会有一个等待者;并发读是编码错误。
         if (waiter) { reject(new Error('socks5: concurrent read')); return; }
         waiter = { need: n, resolve, reject };
@@ -175,6 +182,8 @@ function createSocketReader(socket: Socket): {
       });
     },
     fail(err: Error): void {
+      // 保留第一个错误 —— 它最接近根因(后续的 close 只是它的后果)。
+      terminalError ??= err;
       const pending = waiter;
       waiter = null;
       pending?.reject(err);

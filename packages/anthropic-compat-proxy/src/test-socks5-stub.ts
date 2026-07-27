@@ -23,6 +23,8 @@ export interface Socks5StubOptions {
   tunnelToPort?: number;
   /** 回复里 BND.ADDR 的形态,默认 ipv4。 */
   replyAddressType?: 'ipv4' | 'domain' | 'ipv6';
+  /** 收到 CONNECT 后不回复直接关闭连接(模拟代理握手中途断开)。 */
+  closeAfterConnect?: boolean;
 }
 
 export interface Socks5Stub {
@@ -109,6 +111,7 @@ export async function startSocks5Stub(options: Socks5StubOptions = {}): Promise<
       }
       const port = (await read(2)).readUInt16BE(0);
       requests.push({ atyp, host, port });
+      if (options.closeAfterConnect) { socket.end(); return; }
 
       const replyCode = options.replyCode ?? 0x00;
       const reply = Buffer.concat([

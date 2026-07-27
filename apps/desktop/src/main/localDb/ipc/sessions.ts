@@ -1065,11 +1065,13 @@ export function registerSessionIpc(): void {
         .select({ workingDir: sessions.workingDir })
         .from(sessions)
         .where(eq(sessions.id, sid));
-      const dirActuallyChanges =
-        !before || normalizeWorkingDirForStorage(before.workingDir) !== nextDir;
+      // 会话不存在时提前收口: 否则会先铸造一次"根本没发生的移动"的授权,
+      // 再由 applySessionUpdate 抛 NOT_FOUND(PR #669 review 指出)。
+      if (!before) throwIpcError('NOT_FOUND', 'Session 不存在');
+      const fromDir = normalizeWorkingDirForStorage(before.workingDir);
       // 目标不在用户已知项目里就不铸造授权(移动本身照常进行)
-      if (dirActuallyChanges && (await isKnownRecentWorkdir(nextDir))) {
-        await noteHookSessionMoved(sid, nextDir);
+      if (fromDir !== nextDir && (await isKnownRecentWorkdir(nextDir))) {
+        await noteHookSessionMoved(sid, { from: fromDir, to: nextDir });
       }
     }
     return applySessionUpdate(sid, patch);

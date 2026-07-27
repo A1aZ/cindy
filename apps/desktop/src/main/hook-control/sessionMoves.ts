@@ -54,14 +54,17 @@ function authorityForDir(workingDir: string): HookBindingAuthority {
  * 到达的 IM 消息会把绑定当成撤权删掉, 那条 thread 就永久换了新对话
  * (PR #669 review 指出)。best-effort: 登记失败只记日志, 不拖累移动本身。
  */
-export async function noteHookSessionMoved(sessionId: string, workingDir: string): Promise<void> {
+export async function noteHookSessionMoved(
+  sessionId: string,
+  move: { from: string | null; to: string },
+): Promise<void> {
   try {
     const store = createHookBindingStore({
       filePath: ownerScopedUserDataPath('hook-bindings.json'),
       log: { warn: (msg: string) => log.warn(msg) },
     });
-    const authority = authorityForDir(workingDir);
-    const updated = store.noteSessionMoved(sessionId, workingDir, authority);
+    const authority = authorityForDir(move.to);
+    const updated = store.noteSessionMoved(sessionId, move, authority);
     if (updated > 0) {
       log.info('recorded move authorization for hook bindings', {
         sessionId,

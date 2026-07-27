@@ -40,8 +40,6 @@ const CONFIG: HookConnectionConfig = {
 /** 内存 binding(含目录快照与授权状态, 与文件实现同语义)。 */
 function memoryBindings(): HookBindingStore {
   const map = new Map<string, HookBindingEntry>();
-  // 单调递增版本号,模拟文件实现的 updatedAt(乐观并发控制用)
-  let version = 1;
   const k = (c: string, e: string): string => `${c}|${e}`;
   return {
     get: (c, e) => map.get(k(c, e))?.sessionId ?? null,
@@ -52,31 +50,32 @@ function memoryBindings(): HookBindingStore {
     set: (c, e, s, meta) => {
       const current = map.get(k(c, e));
       if (
-        meta?.expectedUpdatedAt !== undefined &&
-        current !== undefined &&
-        current.updatedAt !== meta.expectedUpdatedAt
+        meta?.expectedRev !== undefined &&
+        (current === undefined || current.rev !== meta.expectedRev)
       ) {
         return false;
       }
       map.set(k(c, e), {
         sessionId: s,
         workingDir: meta?.workingDir ?? null,
+        previousWorkingDir: meta?.previousWorkingDir ?? null,
         authority: meta?.authority ?? null,
         noticePending: meta?.noticePending === true,
-        updatedAt: version++,
+        rev: (current?.rev ?? 0) + 1,
       });
       return true;
     },
-    noteSessionMoved: (sessionId, workingDir, authority) => {
+    noteSessionMoved: (sessionId, move, authority) => {
       let updated = 0;
       for (const [key, row] of map) {
         if (row.sessionId !== sessionId) continue;
         map.set(key, {
           sessionId,
-          workingDir,
+          workingDir: move.to,
+          previousWorkingDir: move.from,
           authority,
           noticePending: authority === 'local-move',
-          updatedAt: version++,
+          rev: row.rev + 1,
         });
         updated += 1;
       }
@@ -474,7 +473,7 @@ describe('dispatcher 核心语义', () => {
     // 用户在桌面端把这条会话「移动到项目」: Main 侧登记授权 + 会话目录变更
     const MOVED_DIR = path.resolve('/repos/another-project');
     sessions[first] = { workingDir: MOVED_DIR, usable: true };
-    expect(bindings.noteSessionMoved(first, MOVED_DIR, 'local-move')).toBe(1);
+    expect(bindings.noteSessionMoved(first, { from: WS_DIR, to: MOVED_DIR }, 'local-move')).toBe(1);
 
     d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
     await tick();
@@ -538,7 +537,7 @@ describe('dispatcher 核心语义', () => {
 
     // 移动后连发两条: 第二条时目录已等于登记值, 只有持久化的授权能保住复用
     sessions[first] = { workingDir: MOVED_DIR, usable: true };
-    bindings.noteSessionMoved(first, MOVED_DIR, 'local-move');
+    bindings.noteSessionMoved(first, { from: WS_DIR, to: MOVED_DIR }, 'local-move');
     d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
     await tick();
     fr.finish({ finalText: '第一次' });
@@ -571,7 +570,7 @@ describe('dispatcher 核心语义', () => {
     await tick();
 
     // 移动的两步之间: 授权已登记(新目录), session 行还停在旧目录
-    bindings.noteSessionMoved(first, MOVED_DIR, 'local-move');
+    bindings.noteSessionMoved(first, { from: WS_DIR, to: MOVED_DIR }, 'local-move');
     d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
     await tick();
     // 这一轮按 session 的真实目录(仍在映射内)复用
@@ -595,6 +594,52 @@ describe('dispatcher 核心语义', () => {
     expect(c.last('turn.end')!.payload.finalText).toContain('已被移动到新的工作目录');
   });
 
+  it('已在映射外的会话再次移动: 两步之间照常跑旧目录, 不丢绑定', async () => {
+    const bindings = memoryBindings();
+    const OUT_A = path.resolve('/repos/outside-a');
+    const OUT_B = path.resolve('/repos/outside-b');
+    const sessions: Record<string, { workingDir: string; usable: boolean }> = {
+      'sess-1': { workingDir: OUT_A, usable: true },
+    };
+    const fr = fakeRunner({ sessions });
+    const { d } = makeDispatcher({ runner: fr.runner, bindings });
+    const c = collector();
+    // 现状: 会话已在映射外 A, 且有 A 的 local-move 授权
+    bindings.set('conn-1', 'team-slack:C1:1.1', 'sess-1', {
+      workingDir: OUT_A,
+      authority: 'local-move',
+    });
+
+    // 再移动一次 A -> B: 登记已落, session 行还停在 A
+    bindings.noteSessionMoved('sess-1', { from: OUT_A, to: OUT_B }, 'local-move');
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+
+    // 绑定必须留着(旧版本在这里会直接判撤权、重开新对话)
+    expect(c.last('task.ack')!.payload.sessionId).toBe('sess-1');
+    expect(fr.calls[0]).toMatchObject({ isNew: false, sessionId: 'sess-1', workingDir: OUT_A });
+    expect(bindings.getEntry('conn-1', 'team-slack:C1:1.1')).toMatchObject({
+      workingDir: OUT_B,
+      previousWorkingDir: OUT_A,
+      authority: 'local-move',
+    });
+    fr.finish();
+    await tick();
+
+    // 写库完成后跟随到 B
+    sessions['sess-1'] = { workingDir: OUT_B, usable: true };
+    d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
+    await tick();
+    expect(fr.calls[1]).toMatchObject({ isNew: false, sessionId: 'sess-1', workingDir: OUT_B });
+    // 收敛后清掉在途标记
+    expect(bindings.getEntry('conn-1', 'team-slack:C1:1.1')).toMatchObject({
+      workingDir: OUT_B,
+      previousWorkingDir: null,
+      authority: 'local-move',
+    });
+    fr.finish();
+  });
+
   it('回填期间落下的登记不被覆盖(乐观并发控制)', async () => {
     const bindings = memoryBindings();
     const MOVED_DIR = path.resolve('/repos/another-project');
@@ -605,7 +650,7 @@ describe('dispatcher 核心语义', () => {
     const runner: HookSessionRunner = {
       isBusy: () => false,
       inspect: async (id) => {
-        bindings.noteSessionMoved('sess-1', MOVED_DIR, 'local-move');
+        bindings.noteSessionMoved('sess-1', { from: WS_DIR, to: MOVED_DIR }, 'local-move');
         return sessions[id] ? { ...sessions[id] } : null;
       },
       run: async () => ({ status: 'ok', finalText: 'ok', errorMessage: null, durationMs: 1 }),
@@ -639,7 +684,7 @@ describe('dispatcher 核心语义', () => {
     await tick();
     const first = c.last('task.ack')!.payload.sessionId!;
     sessions[first] = { workingDir: MOVED_DIR, usable: true };
-    bindings.noteSessionMoved(first, MOVED_DIR, 'local-move');
+    bindings.noteSessionMoved(first, { from: WS_DIR, to: MOVED_DIR }, 'local-move');
     fr.finish();
     await tick();
 
@@ -650,7 +695,7 @@ describe('dispatcher 核心语义', () => {
     await tick();
     sessions[first] = { workingDir: WS_DIR, usable: true };
     // 移回映射内: 登记方按当前映射记 workspace, 不留 local-move 例外
-    bindings.noteSessionMoved(first, WS_DIR, 'workspace');
+    bindings.noteSessionMoved(first, { from: MOVED_DIR, to: WS_DIR }, 'workspace');
     d.handleDispatch('conn-1', dispatch({ requestId: 'req-3' }), c.send);
     await tick();
     expect(bindings.getEntry('conn-1', 'team-slack:C1:1.1')).toMatchObject({

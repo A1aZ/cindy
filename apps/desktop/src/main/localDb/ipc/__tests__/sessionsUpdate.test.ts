@@ -161,9 +161,7 @@ beforeEach(() => {
   h.moveOrder = [];
   h.isKnownRecentWorkdir.mockImplementation(async () => true);
   h.assertTrustedAppRendererEvent.mockImplementation(() => undefined);
-  h.noteHookSessionMoved.mockImplementation(async (...args: unknown[]) => {
-    h.moveOrder.push(`note:${String(args[1])}`);
-  });
+  h.noteHookSessionMoved.mockImplementation(async () => undefined);
   h.relocate.mockImplementation(async () => ({ persistedSdkSessionId: null }));
   h.handlers.clear();
   createDb();
@@ -282,7 +280,10 @@ describe('local-db:sessions:move handler wiring', () => {
       workingDir: '/new/dir',
     })) as { workingDir: string; workspaceKind: string };
 
-    expect(h.noteHookSessionMoved).toHaveBeenCalledWith('codex-local', '/new/dir');
+    expect(h.noteHookSessionMoved).toHaveBeenCalledWith('codex-local', {
+      from: '/old/dir',
+      to: '/new/dir',
+    });
     expect(updated.workingDir).toBe('/new/dir');
     expect(updated.workspaceKind).toBe('project');
   });

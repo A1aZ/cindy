@@ -26,7 +26,13 @@
  *   映射被改/删且目录没动时即失效(撤权语义不变)。
  * - `authority: 'local-move'` + `workingDir` —— 用户把对话移到了这个目录,
  *   此后目录只要没再变就继续复用; 移回映射内会复位成 'workspace'。
+ * - `previousWorkingDir` —— 移动登记时会话**还在**的那个目录。移动是"先登记、
+ *   再写库"两步, 其间到达的消息看到的 session 仍是旧目录; 靠这个字段识别出
+ *   "登记已落、库还没落"的中间态, 照常在旧目录跑而不误判成撤权。落库后的第一次
+ *   收敛就清掉它。
  * - `noticePending` —— 该次移动还没在渠道里说明过, dispatcher 说明一次后清掉。
+ * - `rev` —— 单调递增的行版本, 供 set 的 expectedRev 做乐观并发控制。用计数而
+ *   不是时间戳: 毫秒精度下同一毫秒的两次写会撞版本, CAS 就形同虚设。
  *
  * 老文件没有这些字段 = null/false, 判定按保守侧(见 dispatcher.resolveTarget)。
  */
@@ -47,25 +53,29 @@ export interface HookBindingEntry {
   sessionId: string;
   /** 上次确认/登记时会话的工作目录; null = 老数据未记录。 */
   workingDir: string | null;
+  /** 见文件头: 移动登记时会话还在的目录; null = 没有在途的移动。 */
+  previousWorkingDir: string | null;
   /** 上次放行的依据; null = 老数据未记录。 */
   authority: HookBindingAuthority | null;
   /** 已登记的移动尚未在渠道里说明过。 */
   noticePending: boolean;
-  /** 该行最后一次写入时刻; set 的 expectedUpdatedAt 用它做乐观并发控制。 */
-  updatedAt: number;
+  /** 单调递增的行版本; set 的 expectedRev 用它做乐观并发控制。 */
+  rev: number;
 }
 
 /** set 的可选元信息(整行覆盖写, 省略即清空对应字段)。 */
 export interface HookBindingMeta {
   workingDir?: string | null;
+  previousWorkingDir?: string | null;
   authority?: HookBindingAuthority | null;
   noticePending?: boolean;
   /**
-   * 乐观并发控制: 只有当前行的 updatedAt 仍等于该值时才写。dispatcher 的回填
-   * 用它避免抹掉「读取之后、回填之前」落下的移动登记(PR #669 review 指出的
-   * 反向竞态)。省略 = 无条件覆盖。
+   * 乐观并发控制: 只有当前行存在且 rev 仍等于该值时才写。dispatcher 的回填用它
+   * 避免抹掉「读取之后、回填之前」落下的移动登记(PR #669 review 指出的反向
+   * 竞态)。行在此期间被删掉时同样拒绝写入 —— 那说明状态已经不是读到的那份。
+   * 省略 = 无条件覆盖。
    */
-  expectedUpdatedAt?: number;
+  expectedRev?: number;
 }
 
 export interface HookBindingStore {
@@ -74,7 +84,7 @@ export interface HookBindingStore {
   getEntry(connectionId: string, externalKey: string): HookBindingEntry | null;
   /**
    * 整行覆盖写: meta 里省略的字段等于清空, 调用方应显式传当前状态。
-   * 返回是否真的写入(带 expectedUpdatedAt 且版本已变时返回 false)。
+   * 返回是否真的写入(带 expectedRev 且行版本已变/行已被删时返回 false)。
    */
   set(
     connectionId: string,
@@ -83,12 +93,17 @@ export interface HookBindingStore {
     meta?: HookBindingMeta,
   ): boolean;
   /**
-   * 登记一次「用户在桌面端把这个会话移到了 workingDir」—— 由窄口径的
+   * 登记一次「用户在桌面端把这个会话从 move.from 移到了 move.to」—— 由窄口径的
    * `local-db:sessions:move` 经 sessionMoves.ts 调用, 是 local-move 授权的唯一
    * 来源。authority 由调用方按当前工作目录映射判定(移进映射内的目录记
-   * 'workspace', 不留例外)。跨全部 connection 命名空间反查; 返回更新条数。
+   * 'workspace', 不留例外); move.from 落进 previousWorkingDir, 让 dispatcher
+   * 认得出"登记已落、库还没落"的中间态。跨全部命名空间反查; 返回更新条数。
    */
-  noteSessionMoved(sessionId: string, workingDir: string, authority: HookBindingAuthority): number;
+  noteSessionMoved(
+    sessionId: string,
+    move: { from: string | null; to: string },
+    authority: HookBindingAuthority,
+  ): number;
   /** 删除单条绑定(session 失效重建前清理)。 */
   remove(connectionId: string, externalKey: string): void;
 }
@@ -97,10 +112,14 @@ interface BindingRow {
   sessionId: string;
   /** 见文件头: 上次确认/登记时的工作目录; 缺省 = 老数据。 */
   workingDir?: string | null;
+  /** 见文件头: 移动登记时会话还在的目录; 缺省 = 没有在途移动。 */
+  previousWorkingDir?: string | null;
   /** 见文件头: 上次放行的依据; 缺省 = 老数据。 */
   authority?: HookBindingAuthority | null;
   /** 见文件头: 已登记的移动还没说明过。 */
   noticePending?: boolean;
+  /** 见文件头: 单调递增的行版本(缺省 = 老数据, 按 0 起算)。 */
+  rev?: number;
   updatedAt: number;
 }
 
@@ -131,18 +150,30 @@ export function createHookBindingStore(deps: {
     fs.renameSync(tmp, filePath);
   }
 
-  function toRow(sessionId: string, meta: HookBindingMeta | undefined): BindingRow {
+  function toRow(
+    sessionId: string,
+    meta: HookBindingMeta | undefined,
+    previousRev: number,
+  ): BindingRow {
     return {
       sessionId,
       ...(typeof meta?.workingDir === 'string' && meta.workingDir.length > 0
         ? { workingDir: meta.workingDir }
         : {}),
+      ...(typeof meta?.previousWorkingDir === 'string' && meta.previousWorkingDir.length > 0
+        ? { previousWorkingDir: meta.previousWorkingDir }
+        : {}),
       ...(meta?.authority === 'workspace' || meta?.authority === 'local-move'
         ? { authority: meta.authority }
         : {}),
       ...(meta?.noticePending === true ? { noticePending: true } : {}),
+      rev: previousRev + 1,
       updatedAt: Date.now(),
     };
+  }
+
+  function revOf(row: BindingRow | undefined): number {
+    return typeof row?.rev === 'number' ? row.rev : 0;
   }
 
   return {
@@ -156,27 +187,28 @@ export function createHookBindingStore(deps: {
       return {
         sessionId: row.sessionId,
         workingDir: typeof row.workingDir === 'string' ? row.workingDir : null,
+        previousWorkingDir:
+          typeof row.previousWorkingDir === 'string' ? row.previousWorkingDir : null,
         // 未知字面量(手改文件 / 更早的实验值)按"没有授权记录"处理, fail closed
         authority:
           row.authority === 'workspace' || row.authority === 'local-move' ? row.authority : null,
         noticePending: row.noticePending === true,
-        updatedAt: typeof row.updatedAt === 'number' ? row.updatedAt : 0,
+        rev: revOf(row),
       };
     },
     set(connectionId, externalKey, sessionId, meta) {
       const data = readAll();
-      if (meta?.expectedUpdatedAt !== undefined) {
-        const current = data[connectionId]?.[externalKey];
-        const currentVersion = typeof current?.updatedAt === 'number' ? current.updatedAt : 0;
-        // 期间被别人写过(典型: 一次移动登记)——放弃本次覆盖, 保住更新的那条
-        if (current !== undefined && currentVersion !== meta.expectedUpdatedAt) return false;
+      const current = data[connectionId]?.[externalKey];
+      if (meta?.expectedRev !== undefined) {
+        // 期间被别人写过(典型: 一次移动登记)或整行被删 —— 放弃本次覆盖
+        if (current === undefined || revOf(current) !== meta.expectedRev) return false;
       }
-      (data[connectionId] ??= {})[externalKey] = toRow(sessionId, meta);
+      (data[connectionId] ??= {})[externalKey] = toRow(sessionId, meta, revOf(current));
       writeAll(data);
       return true;
     },
-    noteSessionMoved(sessionId, workingDir, authority) {
-      if (!sessionId || !workingDir) return 0;
+    noteSessionMoved(sessionId, move, authority) {
+      if (!sessionId || !move.to) return 0;
       const data = readAll();
       let updated = 0;
       for (const rows of Object.values(data)) {
@@ -184,10 +216,13 @@ export function createHookBindingStore(deps: {
           if (row?.sessionId !== sessionId) continue;
           rows[externalKey] = {
             sessionId,
-            workingDir,
+            workingDir: move.to,
+            // 记下移动前的目录: 登记与写库之间到达的消息看到的还是它
+            ...(move.from ? { previousWorkingDir: move.from } : {}),
             authority,
             // 只有映射外的跟随才需要在渠道里解释一句
             ...(authority === 'local-move' ? { noticePending: true } : {}),
+            rev: revOf(row) + 1,
             updatedAt: Date.now(),
           };
           updated += 1;

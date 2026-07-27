@@ -700,32 +700,37 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
         boundEntry?.authority === 'local-move' &&
         boundEntry.workingDir != null &&
         isSamePath(boundEntry.workingDir, info!.workingDir!);
-      // 既不在映射内、也没有登记过的移动授权 = 映射被改/删的撤权语义(或目录被
-      // 别的路径改过), 仍丢绑定重建。老绑定无授权记录时同样走保守侧。
-      if (usable && (inAllowedRoot || locallyAuthorized)) {
+      /**
+       * 移动是"先登记授权、再写库"两步。中间这一小段里绑定已指向新目录, 而
+       * session 行还停在移动前的目录 —— 靠登记时记下的 previousWorkingDir 认出
+       * 这个中间态: 这一轮照常在旧目录跑(那本就是已授权的目录), 且不动绑定。
+       *
+       * 少了这条, 从映射外再移动一次会直接丢绑定: 新授权指向新目录、session 还
+       * 在旧的映射外目录, 两个条件都不满足就落到撤权分支(PR #669 review 指出)。
+       */
+      const pendingMoveRegistration =
+        usable &&
+        boundEntry?.authority === 'local-move' &&
+        boundEntry.previousWorkingDir != null &&
+        isSamePath(boundEntry.previousWorkingDir, info!.workingDir!);
+      // 三者都不满足 = 映射被改/删的撤权语义(或目录被别的路径改过), 仍丢绑定
+      // 重建。老绑定无授权记录时同样走保守侧。
+      if (usable && (inAllowedRoot || locallyAuthorized || pendingMoveRegistration)) {
         const workingDir = info!.workingDir!;
         const authority: HookBindingAuthority = inAllowedRoot ? 'workspace' : 'local-move';
         // 登记过的移动要在渠道里说明一次(说明完就清掉 pending)
         const announceMove = locallyAuthorized && boundEntry?.noticePending === true;
         migrateLegacyBinding(workingDir, authority);
-        /**
-         * 已登记但尚未落库的移动: 绑定记着 local-move + 新目录, 而 session 行
-         * 还停在旧目录(移动的两步之间)。这一轮照常在旧目录跑, 但**不能**把绑定
-         * 收敛回 workspace + 旧目录 —— 那会抹掉刚落下的授权, 等移动写库完成后
-         * 下一条消息就把绑定当撤权删掉(PR #669 review 指出的反向竞态)。
-         */
-        const pendingMoveRegistration =
-          namespacedEntry?.authority === 'local-move' &&
-          namespacedEntry.workingDir != null &&
-          !isSamePath(namespacedEntry.workingDir, workingDir);
-        // 快照回填 / 授权收敛: 只在目录、来源或待说明状态变化时落盘,
-        // 常规复用不产生写。
+        // 快照回填 / 授权收敛: 只在目录、来源或待说明状态变化时落盘, 常规复用
+        // 不产生写。在途移动(pendingMoveRegistration)一律不回填 —— 那会把刚落
+        // 下的授权收敛回旧目录, 移动写库后下一条消息就当撤权把绑定删了。
         if (
           namespacedEntry !== null &&
           !pendingMoveRegistration &&
           (namespacedEntry.workingDir === null ||
             !isSamePath(namespacedEntry.workingDir, workingDir) ||
             namespacedEntry.authority !== authority ||
+            namespacedEntry.previousWorkingDir !== null ||
             namespacedEntry.noticePending)
         ) {
           bindings.set(connectionId, payload.externalKey, bound, {
@@ -733,8 +738,8 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
             authority,
             noticePending: false,
             // 另一半窗口: 本次 inspect 期间才落下的登记同样不能被覆盖,
-            // 用读到的版本做乐观并发控制(不匹配就放弃这次回填)。
-            expectedUpdatedAt: namespacedEntry.updatedAt,
+            // 用读到的行版本做乐观并发控制(不匹配就放弃这次回填)。
+            expectedRev: namespacedEntry.rev,
           });
         }
         if (announceMove) {

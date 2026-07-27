@@ -55,7 +55,7 @@ const MAX_RECENT_WORKDIRS = 10;
  *
  * 空 / 非字符串 / worktree 路径 → 返回 null,调用方应据此跳过 upsert。
  */
-export function normalizeRecentWorkdirPath(raw: string | null | undefined): string | null {
+function normalizePathShape(raw: string | null | undefined): string | null {
   if (typeof raw !== 'string') return null;
   const trimmed = raw.trim();
   if (trimmed.length === 0) return null;
@@ -64,6 +64,12 @@ export function normalizeRecentWorkdirPath(raw: string | null | undefined): stri
     if (/^[A-Za-z]:\/$/.test(s)) break; // 盘符根 `D:/`
     s = s.slice(0, -1);
   }
+  return s;
+}
+
+export function normalizeRecentWorkdirPath(raw: string | null | undefined): string | null {
+  const s = normalizePathShape(raw);
+  if (s === null) return null;
   if (getManagedWorktreeBasePath(s) != null) return null;
   return s;
 }
@@ -147,11 +153,22 @@ async function resolveRealPath(p: string): Promise<string | null> {
  * 任何异常按 false 处理(fail closed)。
  */
 export async function isKnownRecentWorkdir(candidate: string | null | undefined): Promise<boolean> {
-  const normalized = normalizeRecentWorkdirPath(candidate);
-  if (!normalized) return false;
+  const shaped = normalizePathShape(candidate);
+  if (!shaped) return false;
+  // 受管 worktree 解析回它的 base 项目再判定 —— 这里**不能**复用
+  // normalizeRecentWorkdirPath 的 worktree 排除(那是"别进最近列表"的语义):
+  // hook 自己新建的会话就跑在 worktree 里, 把会话移到 worktree 是正常操作,
+  // 直接判 false 会让移动后的 thread 白白重开(PR #669 review 指出)。
+  const normalized = getManagedWorktreeBasePath(shaped) ?? shaped;
   try {
     const db = getDbClient().drizzle;
-    const rows = await db.select({ path: recentWorkdirs.path }).from(recentWorkdirs);
+    // 与 list IPC 同样加 LIMIT: 万一驱逐路径被绕过, 也不至于让每次移动都变成
+    // 无界的 realpath 扫描。
+    const rows = await db
+      .select({ path: recentWorkdirs.path })
+      .from(recentWorkdirs)
+      .orderBy(desc(recentWorkdirs.lastUsedAt))
+      .limit(MAX_RECENT_WORKDIRS);
     if (rows.length === 0) return false;
     const lower = (v: string): string => (process.platform === 'win32' ? v.toLowerCase() : v);
     const resolvedTarget = await resolveRealPath(normalized);

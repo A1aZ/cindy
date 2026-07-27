@@ -22,6 +22,11 @@ export interface GitlabClientConfig {
   token: string;
   /** 项目路径，如 'group/project'。cross-project / user-scope 调用可省略。 */
   projectPath?: string;
+  /**
+   * 出网通道。缺省 = 全局 fetch(它**不吃系统代理**);宿主在代理网络下应注入自己的
+   * 代理感知实现(desktop 注入 main/maker-host/outbound-fetch)。
+   */
+  fetchImpl?: typeof fetch;
 }
 
 export interface GitlabUser {

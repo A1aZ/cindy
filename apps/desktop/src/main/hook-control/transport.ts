@@ -28,6 +28,8 @@ import {
   type WelcomePayload,
 } from '@cindy/slack-hook-protocol';
 
+import { createOutboundHttpAgent } from '../maker-host/outbound-fetch.js';
+
 /** transport 对外状态(manager 映射为 HookConnectionStatus)。 */
 export type HookTransportStatus = 'connecting' | 'connected' | 'standby' | 'error' | 'stopped';
 
@@ -164,7 +166,7 @@ export function createHookTransport(opts: HookTransportOpts): HookTransport {
           scheduleRetry();
           return;
         }
-        openSocket(token);
+        void openSocket(token);
       });
   }
 
@@ -191,12 +193,17 @@ export function createHookTransport(opts: HookTransportOpts): HookTransport {
       });
   }
 
-  function openSocket(token: string): void {
+  async function openSocket(token: string): Promise<void> {
     let socket: WebSocket;
     try {
+      // `ws` 不吃系统代理;直连时 agent 为 undefined,行为与不传一致。
+      const agent = await createOutboundHttpAgent(url);
+      // 代理解析是一次异步往返,期间可能已 stop —— 停了就不再建连。
+      if (stopped) return;
       socket = new WebSocket(url, {
         headers: { Authorization: `Bearer ${token}` },
         handshakeTimeout: 15_000,
+        agent,
       });
     } catch (err) {
       // URL 非法等同步失败: 记错误并按退避重试(配置修好后自然恢复)

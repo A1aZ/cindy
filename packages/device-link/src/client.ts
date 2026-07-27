@@ -75,8 +75,14 @@ export interface WsLike {
   on(event: 'error', cb: (err: Error) => void): void;
 }
 
-/** 创建一条带鉴权 header 的 ws 连接 */
-export type WsFactory = (url: string, headers: Record<string, string>) => WsLike;
+/**
+ * 创建一条带鉴权 header 的 ws 连接。允许返回 Promise —— host 建连前可能要先做异步
+ * 准备(如 desktop 现取系统代理拿 http agent)。
+ */
+export type WsFactory = (
+  url: string,
+  headers: Record<string, string>,
+) => WsLike | Promise<WsLike>;
 
 export interface DeviceLinkLogger {
   debug(...args: unknown[]): void;
@@ -584,12 +590,22 @@ export class DeviceLinkClient {
 
     let ws: WsLike;
     try {
-      ws = this.opts.createWebSocket(this.opts.getWsUrl(), {
+      ws = await this.opts.createWebSocket(this.opts.getWsUrl(), {
         authorization: `Bearer ${token}`,
       });
     } catch (err) {
       this.log.warn('createWebSocket failed', err);
       this.scheduleReconnect();
+      return;
+    }
+    // 工厂可能是异步的(host 建连前要准备代理 agent 等):期间可能已 stop 或换了
+    // 连接世代 —— 那这条 socket 是孤儿,关掉再退,别挂到 this.ws 上。
+    if (this.stopped || epoch !== this.connEpoch) {
+      try {
+        ws.close();
+      } catch {
+        /* 关闭孤儿连接失败无需处理 */
+      }
       return;
     }
     this.ws = ws;

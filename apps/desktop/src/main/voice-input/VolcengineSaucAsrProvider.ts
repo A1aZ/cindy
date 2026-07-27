@@ -3,6 +3,7 @@ import { gzipSync, gunzipSync } from 'node:zlib';
 import type { ClientRequest, IncomingMessage } from 'node:http';
 import type { AsrEvent, AsrProvider, AudioTrace } from '@cindy/voice-input-core';
 import { createLogger } from '../logger.js';
+import { createOutboundHttpAgent } from '../maker-host/outbound-fetch.js';
 import { resamplePcm16 } from './RealtimeAsrWebSocketProvider.js';
 import { mergeRecoveredTranscript } from './transcriptMerge.js';
 import { describeAsrHandshakeTraceId, describeAsrWebSocketTarget } from './voiceInputAsrConfig.js';
@@ -142,6 +143,8 @@ export class VolcengineSaucAsrProvider implements AsrProvider {
         'X-Api-Resource-Id': this.resourceId,
         'X-Api-Connect-Id': buildConnectId(),
       },
+      // `ws` 不吃系统代理;直连时为 undefined,行为与不传一致。
+      agent: await createOutboundHttpAgent(connection.websocketUrl),
     });
     this.socket = socket;
     this.attachSocketHandlers(socket);

@@ -60,6 +60,11 @@ export interface HeartbeatClientOptions {
    * 适合复用 heartbeat 的节拍做本地轻量任务,但回调异常不会中断心跳上报。
    */
   onTick?: (payload: HeartbeatTickPayload) => void;
+  /**
+   * 出网通道。缺省 = `globalThis.fetch`(它**不吃系统代理**);需要经代理出网的宿主
+   * 注入自己的实现(desktop 注入 main/maker-host/outbound-fetch)。
+   */
+  fetchImpl?: typeof fetch;
 }
 
 /** start() 返回的句柄,允许停止与状态查询。 */

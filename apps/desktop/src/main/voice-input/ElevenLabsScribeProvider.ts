@@ -2,6 +2,7 @@ import WebSocket from 'ws';
 import type { ClientRequest, IncomingMessage } from 'node:http';
 import type { AsrEvent, AsrProvider, AudioTrace } from '@cindy/voice-input-core';
 import { createLogger } from '../logger.js';
+import { createOutboundHttpAgent } from '../maker-host/outbound-fetch.js';
 import { elevenLabsLanguageCode } from './language.js';
 import { mergeRecoveredTranscript } from './transcriptMerge.js';
 
@@ -95,8 +96,11 @@ export class ElevenLabsScribeProvider implements AsrProvider {
       credential: this.apiKey ? 'elevenlabs-api-key' : 'proxy-api-key',
     });
 
+    // agent:`ws` 不吃系统代理,境外 wss 上游在「系统代理」模式下连不上;
+    // 直连时为 undefined,行为与不传一致(见 maker-host/outbound-fetch)。
     const socket = new WebSocket(url, {
       headers: this.buildHeaders(),
+      agent: await createOutboundHttpAgent(url),
     });
     this.socket = socket;
 

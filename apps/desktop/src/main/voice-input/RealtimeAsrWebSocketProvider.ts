@@ -3,6 +3,7 @@ import type { ClientRequest, IncomingMessage } from 'node:http';
 import type { AsrEvent, AsrProvider, AudioTrace } from '@cindy/voice-input-core';
 import type { VoiceInputRealtimeProtocolProfile } from '../../shared/voiceInputAsrProfiles.js';
 import { createLogger } from '../logger.js';
+import { createOutboundHttpAgent } from '../maker-host/outbound-fetch.js';
 import { openAiLanguageCode } from './language.js';
 import { describeAsrHandshakeTraceId, describeAsrWebSocketTarget } from './voiceInputAsrConfig.js';
 import {
@@ -336,9 +337,13 @@ function createWarmRealtimeSession(
     if (!accessToken) return;
     if (generation !== warmRealtimeSessionGeneration) return;
 
+    // `ws` 不吃系统代理;直连时 agent 为 undefined,行为与不传一致。
+    const wsAgent = await createOutboundHttpAgent(connection.realtimeUrl);
+
     await new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(connection.realtimeUrl, {
         headers: realtimeHeaders(accessToken, connection.extraHeaders),
+        agent: wsAgent,
       });
       let settled = false;
       let keepAliveTimer: ReturnType<typeof setInterval> | undefined;
@@ -756,6 +761,7 @@ export class RealtimeAsrWebSocketProvider implements AsrProvider {
 
     const socket = new WebSocket(realtimeUrl, {
       headers: realtimeHeaders(accessToken, this.extraHeaders),
+      agent: await createOutboundHttpAgent(realtimeUrl),
     });
     this.socket = socket;
     this.attachSocketHandlers(socket);

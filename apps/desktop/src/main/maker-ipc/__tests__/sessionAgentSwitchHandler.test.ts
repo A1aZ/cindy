@@ -129,6 +129,24 @@ describe('performSessionAgentSwitch', () => {
     );
   });
 
+  it.each([
+    ['空白值', '  ', null],
+    ['首尾空格', ' anthropic ', 'anthropic'],
+  ])('%s providerId 在 DB 与内存路由中使用同一归一化值', async (_case, providerId, expected) => {
+    const { deps } = makeDeps();
+
+    await performSessionAgentSwitch(deps, {
+      ...validParams,
+      providerId,
+    });
+
+    expect(deps.applyAgentSwitchToDb).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ providerId: expected }),
+    );
+    expect(deps.setSessionProvider).toHaveBeenCalledWith('s1', expected);
+  });
+
   it('参数校验:非法 sessionId / targetAgentKind / model 抛 INVALID_PARAMS', async () => {
     const { deps } = makeDeps();
     await expect(performSessionAgentSwitch(deps, { ...validParams, sessionId: 7 })).rejects.toThrow(/INVALID_PARAMS/);

@@ -302,6 +302,8 @@ export async function performSessionAgentSwitch(
   if (providerId !== undefined && providerId !== null && typeof providerId !== 'string') {
     throwIpcError('INVALID_PARAMS', 'providerId must be string | null');
   }
+  const normalizedProviderId =
+    typeof providerId === 'string' ? providerId.trim() || null : providerId;
 
   const row = await deps.getSessionRow(sessionId);
   throwIfAgentSwitchAborted(signal);
@@ -334,7 +336,7 @@ export async function performSessionAgentSwitch(
     const intent: PendingAgentSwitchIntent = {
       targetAgentKind,
       model,
-      providerId: providerId as string | null | undefined,
+      providerId: normalizedProviderId,
       ...(typeof params.effort === 'string' && params.effort ? { effort: params.effort } : {}),
       ...(typeof params.fastMode === 'boolean' ? { fastMode: params.fastMode } : {}),
     };
@@ -394,13 +396,13 @@ export async function performSessionAgentSwitch(
     await deps.applyAgentSwitchToDb(sessionId, {
       agentKind: toDbKind,
       model,
-      providerId: providerId as string | null | undefined,
+      providerId: normalizedProviderId,
       sdkSessionId: parked?.sdkSessionId ?? null,
       ...(typeof params.effort === 'string' && params.effort ? { effort: params.effort } : {}),
       ...(typeof params.fastMode === 'boolean' ? { fastMode: params.fastMode } : {}),
     });
-    if (providerId !== undefined) {
-      deps.setSessionProvider(sessionId, providerId as string | null);
+    if (normalizedProviderId !== undefined) {
+      deps.setSessionProvider(sessionId, normalizedProviderId);
     }
 
     const boundaryContent: AgentSwitchBoundaryContent = {
@@ -467,7 +469,7 @@ export async function performSessionAgentSwitch(
               deps.pendingSwitches?.set(sessionId, {
                 targetAgentKind,
                 model,
-                providerId: providerId as string | null | undefined,
+                providerId: normalizedProviderId,
                 ...(typeof params.effort === 'string' && params.effort ? { effort: params.effort } : {}),
                 ...(typeof params.fastMode === 'boolean' ? { fastMode: params.fastMode } : {}),
                 resumeFallbackRecovery: {
@@ -489,7 +491,7 @@ export async function performSessionAgentSwitch(
             deps.pendingSwitches?.set(sessionId, {
               targetAgentKind,
               model,
-              providerId: providerId as string | null | undefined,
+              providerId: normalizedProviderId,
               ...(typeof params.effort === 'string' && params.effort ? { effort: params.effort } : {}),
               ...(typeof params.fastMode === 'boolean' ? { fastMode: params.fastMode } : {}),
               resumeFallbackRecovery: {

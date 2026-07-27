@@ -533,12 +533,29 @@ async function openHostedBrowserAuthorization(
   const { clientState, pollSecret } = createDesktopPollCredentials();
   const client = createAuthClient();
   const authUrl = client.buildAuthorizeUrl({ ...input, state: clientState, redirectUri });
-  try {
-    await shell.openExternal(authUrl);
-  } catch (error) {
-    log.warn('open auth URL in system browser failed', error);
-    return { error: 'BROWSER_OPEN_FAILED' };
-  }
+
+  // 整次尝试共用一个截止时间:唤起浏览器与随后的轮询都从这份预算里花,和 loopback
+  // 分支「先起 timer 再 openExternal」的语义对齐。
+  const deadline = Date.now() + BROWSER_AUTH_TIMEOUT_MS;
+
+  // shell.openExternal 必须与取消/超时竞速。它在某些环境下会长时间不返回(系统
+  // 默认浏览器正在冷启动、handler 注册异常等),而这一步发生在轮询开始之前——
+  // 若只是 await 它,取消信号和五分钟预算都够不着,cancel-browser 会一直等在同一个
+  // 未 settle 的登录动作上。
+  const launchDeadline = AbortSignal.timeout(BROWSER_AUTH_TIMEOUT_MS);
+  const launched = await raceAuthBrowserCancellation(
+    shell.openExternal(authUrl).then(
+      () => ({ ok: true }) as const,
+      (error: unknown) => {
+        log.warn('open auth URL in system browser failed', error);
+        return { ok: false } as const;
+      },
+    ),
+    AbortSignal.any([signal, launchDeadline]),
+  );
+  // 取消与超时都收敛成 USER_CANCELLED(renderer 特意不展示它),与 loopback 一致。
+  if (launched.cancelled) return { error: 'USER_CANCELLED' };
+  if (!launched.value.ok) return { error: 'BROWSER_OPEN_FAILED' };
 
   return runHostedCallbackPolling({
     poll: async () => {
@@ -555,7 +572,8 @@ async function openHostedBrowserAuthorization(
     sleep: (ms) => sleepUnlessAborted(ms, signal),
     now: () => Date.now(),
     signal,
-    timeoutMs: BROWSER_AUTH_TIMEOUT_MS,
+    // 扣掉唤起浏览器已经花掉的时间,整次尝试仍只有一个五分钟预算。
+    timeoutMs: Math.max(0, deadline - Date.now()),
   });
 }
 

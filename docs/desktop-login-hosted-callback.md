@@ -100,7 +100,7 @@ provider 回调路由（`googleCallbackUrl()` 等）与 `callbackShared.ts` 的�
 
 ```jsonc
 { "status": "pending" }                       // 尚未完成，客户端继续轮询
-{ "status": "ok", "code": "<一次性授权码>" }   // 返回后必须立即失效
+{ "status": "ok", "code": "<授权码>" }          // 同一 pollSecret 可重复取到（见下）
 { "status": "error", "error": "<错误码>" }     // provider / 服务端侧失败
 { "status": "expired" }                       // 暂存已过 TTL 或已被取走
 ```
@@ -109,8 +109,12 @@ provider 回调路由（`googleCallbackUrl()` 等）与 `callbackShared.ts` 的�
 客户端从打开浏览器的那一刻就开始轮询，此时用户还没授权完，服务端多半还没有这条记录；
 这时若返回终态，第一次轮询就会把登录判死。
 
-`expired` 只用于两种确定失效的情形：结果已被取走，或授权码已过它自己的 60s TTL
-（寄存记录会带上 `codeExpiresAt`，见 §4）。
+**读取是幂等的，不做 GETDEL。** 服务端已删、响应却在网络上丢了的情形必须可恢复——
+否则用户明明在浏览器里授权完成，却因为一次丢包被要求重新登录。同一个 `pollSecret`
+在授权码存活期内可以重复取到同一个 code；真正的一次性发生在 `/api/auth/token`
+（authCode 侧的 GETDEL），所以重复取回不会让授权码被用两次。
+
+`expired` 只用于一种情形：授权码已过它自己的 60s TTL（寄存记录带 `codeExpiresAt`，见 §4）。
 
 其它约定：
 

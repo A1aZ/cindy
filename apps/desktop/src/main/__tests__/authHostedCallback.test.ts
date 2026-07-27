@@ -277,6 +277,22 @@ describe('openSystemBrowserAuthorization 分流', () => {
    * 取回凭据必须与走浏览器的 state 分离。写回 input.state 会让任何能读浏览历史的
    * 扩展 / 同机进程抢先消费掉一次性结果,把真实客户端顶成 expired。
    */
+  /**
+   * 唤起浏览器这一步发生在轮询开始之前,若只是 await 它,取消信号与五分钟预算都够
+   * 不着——shell.openExternal 在系统默认浏览器冷启动等情况下可能长时间不返回。
+   */
+  it('唤起浏览器与取消/超时竞速,并从同一份预算里扣时间', () => {
+    const hostedStart = source.indexOf('async function openHostedBrowserAuthorization(');
+    const hostedBody = source.slice(hostedStart, source.indexOf('\n}\n', hostedStart));
+
+    expect(hostedBody).toContain('raceAuthBrowserCancellation(');
+    expect(hostedBody).toContain('AbortSignal.any([signal, launchDeadline])');
+    // 不能是裸 await:那样取消与超时都落不到这一步上
+    expect(hostedBody).not.toMatch(/await shell\.openExternal\(authUrl\);/);
+    // 轮询预算要扣掉唤起已花的时间,整次尝试仍是一个五分钟
+    expect(hostedBody).toContain('deadline - Date.now()');
+  });
+
   it('轮询用的是 pollSecret,不是会进浏览器的 state', () => {
     const hostedStart = source.indexOf('async function openHostedBrowserAuthorization(');
     const hostedBody = source.slice(hostedStart, source.indexOf('\n}\n', hostedStart));

@@ -1274,6 +1274,12 @@ function _trimMessagesIfNeeded(sessionId: string): void {
   if (_isSessionBusy(sessionId, state)) return;
   if (_activeViewSessions.has(sessionId)) return;
 
+  // 裁剪等于一次代际重置:它砍掉窗口中段、把 oldestMessageId 清空,in-flight 的翻页 /
+  // 跳转补齐若仍按 pre-trim 游标提交,就会把更老的一页直接接到保留的尾部上 —— 中间被裁掉
+  // 的区间成了新的空洞,而补齐还可能据此判 covered 并清掉孤岛标记(#676 review)。
+  // 所以照 reloadMessages / clear / edit-last 同一规矩:bump epoch 作废 in-flight,并由
+  // 本次重置自己释放分页锁。
+  bumpMessagesEpoch(sessionId);
   setState(sessionId, (s) => {
     if (s.messages.length <= TRIM_THRESHOLD) return s;
     return {
@@ -1281,6 +1287,10 @@ function _trimMessagesIfNeeded(sessionId: string): void {
       messages: s.messages.slice(-TRIM_TARGET),
       hasMoreMessages: true,
       oldestMessageId: null,
+      isLoadingMore: false,
+      // 保留下来的是连续的最新一段,本身没有孤岛;危害只来自 in-flight 请求把 pre-trim
+      // 游标那一页接到它上面,而那已由上面的 bump 作废。
+      historyWindowHasIsland: false,
     };
   });
 }
@@ -5707,7 +5717,16 @@ type JumpBackfillOutcome = 'covered' | 'exhausted' | 'busy' | 'unavailable' | 'c
  */
 async function backfillHistoryUntil(
   sessionId: string,
-  covered: (messages: ChatMessage[]) => boolean,
+  /**
+   * 要连上的目标行 clientId。
+   *
+   * 判定"已覆盖"只能看**本次翻页真正取回来的行**里有没有它,不能看合并后的 messages 里
+   * 有没有:退回 around 窗口时目标本来就以孤岛形式躺在 messages 里,拿合并后的数组判定,
+   * 重试的第一页(哪怕内容完全无关)就会让判定成立、进而把孤岛标记清掉,"中间缺失"于是
+   * 永远补不回来(#676 review)。翻页是从最新连续向上的,所以"本页取到目标"等价于
+   * "从最新到目标已经连续"。
+   */
+  targetClientId: string,
   /**
    * 跳转发起时(**around 请求之前**)的 epoch 快照。必须由调用方传入:在这里才取
    * 就会漏掉 around 请求自己那个 await —— 若 /clear、rewind、purge 发生在 around
@@ -5735,7 +5754,11 @@ async function backfillHistoryUntil(
   // 掺过孤岛(补齐失败时 merge 的 around 窗口)时,目标可能正是那座孤岛上的行 —— 直接返回
   // covered 就等于承认"中间缺失"永久修不好。有孤岛时一律走下面的翻页补齐,让它自愈。
   const stateBeforeFetch = getOrCreateState(sessionId);
-  if (stateBeforeFetch.historyWindowHasIsland !== true && covered(stateBeforeFetch.messages)) {
+  if (
+    stateBeforeFetch.historyWindowHasIsland !== true &&
+    stateBeforeFetch.messages.some((message) => message.clientId === targetClientId)
+  ) {
+    // 窗口本身连续(无孤岛)时,成员判定就等于覆盖判定,可以零成本短路。
     return 'covered';
   }
 
@@ -5766,12 +5789,10 @@ async function backfillHistoryUntil(
       const mapped = mapServerMessages(rows);
       const oldestRow = oldestMessageRow(rows, 'newest-first');
       const hasMore = serverMessagePageHasMore(rows, JUMP_BACKFILL_PAGE_SIZE);
-      let merged: ChatMessage[] = [];
       setState(sessionId, (s) => {
-        merged = mergeMessages(mapped, s.messages, {}, 'newest-first');
         return {
           ...s,
-          messages: merged,
+          messages: mergeMessages(mapped, s.messages, {}, 'newest-first'),
           historyLoaded: true,
           isFirstMessage: false,
           oldestMessageId: oldestRow?.id ?? s.oldestMessageId,
@@ -5780,7 +5801,8 @@ async function backfillHistoryUntil(
         };
       });
 
-      if (covered(merged)) return 'covered';
+      // 只认"本页真的取到了目标" —— merged 里有它可能只是先前 fallback 留下的孤岛。
+      if (rows.some((row) => row.clientId === targetClientId)) return 'covered';
       // 已翻到历史起点仍没命中:目标不在本会话可见历史里(例如被 rewind 软删)。
       // hasMoreMessages 此刻已确证为 false,调用方不得再改回 true。
       if (!hasMore) return 'exhausted';
@@ -5903,11 +5925,7 @@ async function loadAroundMessage(
   // 补不到(超上限 / 翻完 / 让位并发分页)则退回 around 窗口 merge:此时窗口仍不
   // 连续,由渲染层的 HISTORY_GAP_SPLIT_MS 守卫兜底,不至于把两段折成一个工作组。
   const outcome: JumpBackfillOutcome = targetClientId
-    ? await backfillHistoryUntil(
-        sessionId,
-        (messages) => messages.some((message) => message.clientId === targetClientId),
-        epochAtStart,
-      )
+    ? await backfillHistoryUntil(sessionId, targetClientId, epochAtStart)
     : (_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart
       ? 'cancelled'
       : 'unavailable';
@@ -5944,11 +5962,7 @@ async function loadAroundMessageClientId(
   const mapped = mapServerMessages(rows);
 
   // 同 loadAroundMessage:先连续补齐,避免跳转窗口与尾部窗口之间留下历史空洞。
-  const outcome = await backfillHistoryUntil(
-    sessionId,
-    (messages) => messages.some((message) => message.clientId === clientId),
-    epochAtStart,
-  );
+  const outcome = await backfillHistoryUntil(sessionId, clientId, epochAtStart);
 
   // 切片被重置 → 跳转作废,不 merge 旧的 around 行。merge 前再校验一次 epoch:outcome
   // 只反映 backfill 返回那一刻的代际,它 return 之后到这里恢复之间还有一个 microtask

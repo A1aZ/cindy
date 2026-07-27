@@ -664,13 +664,27 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     await makerChatStore.loadAroundMessageClientId(SID, 'island', { radius: 60 });
     expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).toContain('island');
 
-    // 第 2 次跳转同一目标：目标已在窗口里，但那是孤岛 —— 必须重新尝试翻页补齐。
+    expect(makerChatStore.getSnapshot(SID).historyWindowHasIsland).toBe(true);
+
+    // 第 2 次跳转同一目标：目标已在窗口里，但那是孤岛 —— 必须重新尝试翻页补齐，
+    // 而且「取回一页无关的行」不能算作已覆盖（review #676：判定必须看本页是否真的取到
+    // 目标，看合并后的数组会让任何一页都让判定成立、进而错误清掉孤岛标记）。
     const callsBefore = vi.mocked(listMessagesFor).mock.calls.length;
     vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
-    vi.mocked(listMessagesFor).mockResolvedValueOnce([target]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce([
+      serverMessage({ id: 'noise', clientId: 'noise', createdAt: '2026-07-24T00:00:00.000Z' }),
+    ]);
     await makerChatStore.loadAroundMessageClientId(SID, 'island', { radius: 60 });
 
     expect(vi.mocked(listMessagesFor).mock.calls.length).toBeGreaterThan(callsBefore);
+    // 关键：没真的取到目标 → 孤岛标记必须还在，下次跳转仍会重试。
+    expect(makerChatStore.getSnapshot(SID).historyWindowHasIsland).toBe(true);
+
+    // 第 3 次跳转：这次翻页真的把目标取回来了 → 才算覆盖，孤岛标记清零。
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce([target]);
+    await makerChatStore.loadAroundMessageClientId(SID, 'island', { radius: 60 });
+    expect(makerChatStore.getSnapshot(SID).historyWindowHasIsland).toBe(false);
   });
 
   it('U. 预算对照窗口总量,连续多次跳转不会各自重新起算', async () => {

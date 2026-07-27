@@ -63,6 +63,19 @@ import {
   syncPushRegistration,
   writePushEnabled,
 } from '@/notifications/pushNotifications';
+import {
+  hydrateMobileVoiceDictionary,
+  readCachedMobileVoiceDictionary,
+  refreshMobileVoiceDictionary,
+} from '@/session/mobileVoiceDictionaryCache';
+import {
+  buildMobileVoiceDictionaryEntryViews,
+  collectMobileVoiceDictionaryHosts,
+  type MobileVoiceDictionaryEntryView,
+  type MobileVoiceDictionaryHost,
+} from '@/session/mobileVoiceDictionaryView';
+import { DEVICE_LINK_VOICE_DICTIONARY_GET_CHANNEL } from '@cindy/maker-shared/device-link-contract';
+import type { MobileVoiceDictionarySnapshotResult } from '@cindy/maker-shared/device-link-contract';
 import { buildMobileUpdateInfoRows, currentMobileOtaVersion } from '@/settings/updateInfo';
 import { shouldCheckBundleUpdate } from '@/update/bundleUpdate';
 import {
@@ -91,7 +104,8 @@ export default function SettingsScreen() {
   const auth = useAuth();
   const { t } = useTranslation();
   const { locale, setLocale } = useLocale();
-  const { status } = useDeviceLink();
+  const deviceLink = useDeviceLink();
+  const { status } = deviceLink;
   const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const [accountDeletionAvailable, setAccountDeletionAvailable] =
@@ -111,6 +125,12 @@ export default function SettingsScreen() {
   const [analyticsReady, setAnalyticsReady] = useState(false);
   const [analyticsMessage, setAnalyticsMessage] = useState<string | null>(null);
   const updateCheckInFlightRef = useRef(false);
+  // 语音词典:手机只读展示被控桌面的词典快照(正本在桌面,手机不参与合并)。
+  const [dictionaryScreenOpen, setDictionaryScreenOpen] = useState(false);
+  const [desktopDevices, setDesktopDevices] = useState<MobileVoiceDictionaryHost[]>([]);
+  const [dictionaryRefreshing, setDictionaryRefreshing] = useState(false);
+  /** 缓存在模块里,组件用这个计数强制重渲染(每次刷新完成 +1)。 */
+  const [dictionaryRevision, setDictionaryRevision] = useState(0);
   const [selfDeviceName, setSelfDeviceName] = useState<string | null>(null);
   const [selfDeviceNameDraft, setSelfDeviceNameDraft] = useState('');
   const [selfDeviceNameEditing, setSelfDeviceNameEditing] = useState(false);
@@ -190,9 +210,13 @@ export default function SettingsScreen() {
         if (cancelled) return;
         const self = res.devices.find((device) => device.deviceId === auth.deviceId);
         setSelfDeviceName(self?.name?.trim() || null);
+        // 同一份设备清单顺带筛出电脑:词典正本在电脑上,手机按电脑分别展示。
+        setDesktopDevices(collectMobileVoiceDictionaryHosts(res.devices));
       })
       .catch(() => {
-        if (!cancelled) setSelfDeviceName(null);
+        if (!cancelled) return;
+        setSelfDeviceName(null);
+        setDesktopDevices([]);
       });
 
     return () => {
@@ -578,6 +602,59 @@ export default function SettingsScreen() {
     }
   }, [analyticsBusy, resumeAnalyticsReporting, t]);
 
+  /**
+   * 向所有在线电脑各拉一次词典快照。
+   *
+   * 它们本来就该收敛到同一份内容,拉多台只是为了容错(某台是旧版本、某台正好断线)。
+   * 失败一律静默:电脑离线、没开「允许被控」、老版本不认识这个 channel 都是常态,
+   * 页面继续显示上次缓存,不弹错。
+   */
+  const refreshVoiceDictionary = useCallback(() => {
+    const online = desktopDevices.filter((host) => host.online);
+    if (online.length === 0) return;
+    setDictionaryRefreshing(true);
+    void Promise.all(
+      online.map((host) => refreshMobileVoiceDictionary(
+        host.deviceId,
+        () => deviceLink.invoke<MobileVoiceDictionarySnapshotResult>(
+          host.deviceId,
+          DEVICE_LINK_VOICE_DICTIONARY_GET_CHANNEL,
+          [],
+        ),
+        { force: true },
+      )),
+    ).finally(() => {
+      setDictionaryRefreshing(false);
+      // 缓存写在模块里,组件靠这个计数触发重渲染。
+      setDictionaryRevision((value) => value + 1);
+    });
+  }, [desktopDevices, deviceLink]);
+
+  const openVoiceDictionary = useCallback(() => {
+    setDictionaryScreenOpen(true);
+    // 进页面先把盘上缓存读进内存(离线也有内容可看),再拉一次最新的。
+    void Promise.all(desktopDevices.map((host) => hydrateMobileVoiceDictionary(host.deviceId)))
+      .then(() => setDictionaryRevision((value) => value + 1))
+      .catch(() => undefined);
+    refreshVoiceDictionary();
+  }, [desktopDevices, refreshVoiceDictionary]);
+
+  const dictionaryEntries = useMemo(
+    () => {
+      void dictionaryRevision; // 订阅刷新计数,让缓存更新后重新求值
+      return buildMobileVoiceDictionaryEntryViews(
+        desktopDevices.map((host) => readCachedMobileVoiceDictionary(host.deviceId)),
+      );
+    },
+    [desktopDevices, dictionaryRevision],
+  );
+
+  const dictionaryStatus = desktopDevices.length === 0
+    ? 'no-desktops'
+    : desktopDevices.some((host) => host.online)
+      ? 'ready'
+      : 'all-offline';
+
   const avatarLabel = (overview.header.name.trim()[0] ?? '?').toUpperCase();
   const updateBusy = updatePhase === 'checking' || updatePhase === 'downloading';
   const updateButtonLabel = updatePhase === 'checking' ? t('settings.version.checking')
@@ -587,6 +664,18 @@ export default function SettingsScreen() {
         ? 'settings.version.testFlightCheckAction'
         : 'settings.version.checkAction',
     );
+
+  if (dictionaryScreenOpen) {
+    return (
+      <VoiceDictionaryScreen
+        entries={dictionaryEntries}
+        onBack={() => setDictionaryScreenOpen(false)}
+        onRefresh={refreshVoiceDictionary}
+        refreshing={dictionaryRefreshing}
+        status={dictionaryStatus}
+      />
+    );
+  }
 
   if (selfDeviceNameEditing) {
     return (
@@ -718,6 +807,23 @@ export default function SettingsScreen() {
             ]}
           </SettingsGroup>
         ) : null}
+
+        {/* 语音词典:只读查看电脑上的词典(正本在电脑,增删改回电脑做) */}
+        <SettingsGroup
+          footer={t('settings.voiceDictionary.hint')}
+          title={t('settings.voiceDictionary.sectionTitle')}
+        >
+          {[
+            <ActionInfoRow
+              accessibilityLabel={t('settings.voiceDictionary.openAccessibility')}
+              key="voice-dictionary"
+              label={t('settings.voiceDictionary.label')}
+              onPress={openVoiceDictionary}
+              testID="settings.voiceDictionary.row"
+              value={t('settings.voiceDictionary.entryCount', { count: dictionaryEntries.length })}
+            />,
+          ]}
+        </SettingsGroup>
 
         {/* 显示语言:默认跟随系统,手动选择即持久化 override(恢复跟随系统 = 清除 override) */}
         <SettingsGroup
@@ -1035,6 +1141,90 @@ function ActionInfoRow({
       </View>
       {detail ? <Text style={styles.rowDetail} numberOfLines={2}>{detail}</Text> : null}
     </Pressable>
+  );
+}
+
+/**
+ * 语音词典查看页(只读)。
+ *
+ * 词典对用户是**一份**:同账号下所有开启同步的电脑收敛到同一份内容,「这条词来自
+ * 哪台电脑」是实现细节,不该出现在界面上 —— 同一台机器换名或重装就会多出一个分组,
+ * 列表立刻没法看。所以这里把所有电脑的快照合并成单一列表。
+ *
+ * 正本在电脑上,手机只拉快照用于润色,因此没有任何编辑入口:增删改一律回电脑做,
+ * 避免手机维护一份会分叉的副本。
+ */
+function VoiceDictionaryScreen({
+  entries,
+  onBack,
+  onRefresh,
+  refreshing,
+  status,
+}: {
+  entries: readonly MobileVoiceDictionaryEntryView[];
+  onBack(): void;
+  onRefresh(): void;
+  refreshing: boolean;
+  status: 'ready' | 'no-desktops' | 'all-offline';
+}) {
+  const styles = useThemedStyles(makeStyles);
+  const { t } = useTranslation();
+
+  const footer = status === 'no-desktops'
+    ? t('settings.voiceDictionary.noDesktops')
+    : status === 'all-offline'
+      ? t('settings.voiceDictionary.offlineHint')
+      : t('settings.voiceDictionary.readOnlyHint');
+
+  return (
+    <SafeAreaView style={styles.safeArea} testID="settings.voiceDictionary.screen">
+      <ScreenHeader
+        backTestID="settings.voiceDictionary.backButton"
+        onBack={onBack}
+        title={t('settings.voiceDictionary.screenTitle')}
+      />
+      <ScrollView contentContainerStyle={styles.content} testID="settings.voiceDictionary.scroll">
+        <SettingsGroup footer={footer} title={t('settings.voiceDictionary.sectionTitle')}>
+          {[
+            <Pressable
+              accessibilityLabel={t('settings.voiceDictionary.refreshAccessibility')}
+              accessibilityRole="button"
+              key="refresh"
+              onPress={onRefresh}
+              style={({ pressed }) => [styles.row, pressed && styles.pressed]}
+              testID="settings.voiceDictionary.refresh"
+            >
+              <View style={styles.rowLine}>
+                <Text style={styles.rowLabel}>
+                  {t('settings.voiceDictionary.entryCount', { count: entries.length })}
+                </Text>
+                <Text style={styles.rowValue} numberOfLines={1}>
+                  {refreshing
+                    ? t('settings.voiceDictionary.refreshing')
+                    : t('settings.voiceDictionary.refresh')}
+                </Text>
+              </View>
+            </Pressable>,
+            ...entries.map((entry) => (
+              <View
+                key={entry.key}
+                style={styles.row}
+                testID={`settings.voiceDictionary.entry.${entry.key}`}
+              >
+                <View style={styles.rowLine}>
+                  <Text style={styles.rowLabel} numberOfLines={2}>{entry.text}</Text>
+                </View>
+                {entry.aliases.length > 0 ? (
+                  <Text style={styles.rowDetail} numberOfLines={2}>
+                    {t('settings.voiceDictionary.aliases', { aliases: entry.aliases.join('、') })}
+                  </Text>
+                ) : null}
+              </View>
+            )),
+          ]}
+        </SettingsGroup>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 

@@ -8,6 +8,7 @@ import {
   createXaiAuthInvalidationObserver,
   createXaiBridgeAuthInvalidator,
   detectXaiBridgeAuthInvalidationReason,
+  type XaiBridgeAuthFailure,
 } from '../xai-bridge-auth-invalidation.js';
 
 function deferred<T>() {
@@ -151,7 +152,10 @@ function observerCtx(overrides: Partial<ResponseObserverCtx> = {}): ResponseObse
     url: '/v1/responses',
     upstreamBase: 'https://api.x.ai/v1',
     status: 403,
-    requestHeaders: { authorization: 'Bearer token-a' },
+    // 客户端(codex 子进程)自带的 bearer 与实际路由注入的 xAI token 刻意不同 ——
+    // 收口必须关联后者,读错就永远 superseded。
+    requestHeaders: { authorization: 'Bearer codex-subprocess-token' },
+    outboundHeaders: { authorization: 'Bearer token-a' },
     responseHeaders: {},
     requestBody: Buffer.alloc(0),
     ...overrides,
@@ -178,8 +182,39 @@ describe('xAI codex-proxy auth invalidation observer', () => {
   it('请求没有 Bearer 时不观察(无从关联失败凭证)', () => {
     const observe = createXaiAuthInvalidationObserver(async () => undefined);
 
-    expect(observe(observerCtx({ requestHeaders: {} }))).toBeNull();
-    expect(observe(observerCtx({ requestHeaders: { authorization: 'Basic abc' } }))).toBeNull();
+    expect(observe(observerCtx({ outboundHeaders: {} }))).toBeNull();
+    expect(observe(observerCtx({ outboundHeaders: { authorization: 'Basic abc' } }))).toBeNull();
+  });
+
+  it('关联的是路由注入后的凭证,不是子进程自带的 bearer', () => {
+    // 回归:xAI token 由 provider-route 经 headerOverride 注入,只有 outboundHeaders 里才有。
+    // 早期版本读 requestHeaders,拿到 codex 自带 bearer → 等值比对永远不成立 → 收口静默失效。
+    const handleFailure = vi.fn(async () => undefined);
+    const observe = createXaiAuthInvalidationObserver(handleFailure);
+
+    const sink = observe(observerCtx());
+    sink!.onData?.(Buffer.from(REJECTED_BODY, 'utf-8'));
+    sink!.onEnd?.();
+
+    expect(handleFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ failedAccessToken: 'token-a' }),
+    );
+  });
+
+  it('超大 chunk 按剩余空间裁剪,不整段驻留', () => {
+    const seen: XaiBridgeAuthFailure[] = [];
+    const observe = createXaiAuthInvalidationObserver(async (failure) => {
+      seen.push(failure);
+    });
+
+    const sink = observe(observerCtx());
+    // 首个 chunk 就远超上限:必须只留下上限内的部分。
+    sink!.onData?.(Buffer.alloc(64 * 1024, 0x61));
+    sink!.onData?.(Buffer.alloc(8 * 1024, 0x62));
+    sink!.onEnd?.();
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].body).toBe('a'.repeat(8 * 1024));
   });
 
   it('401/403 命中 xAI 上游时把响应体与失败凭证交给收口', () => {

@@ -130,21 +130,31 @@ export function createXaiAuthInvalidationObserver(
   return (ctx: ResponseObserverCtx) => {
     if (ctx.status !== 401 && ctx.status !== 403) return null;
     if (!isXaiUpstream(ctx.upstreamBase)) return null;
-    const failedAccessToken = bearerAccessTokenFromHeaders(ctx.requestHeaders);
+    // 必须读 outboundHeaders:xAI token 是路由期经 headerOverride 注入的,requestHeaders
+    // 里的 authorization 还是 codex 子进程自带的那把,拿它做等值关联会永远 superseded,
+    // 等于这条链路的收口完全不生效。省略时回落 requestHeaders(无路由改写 = 两者相同)。
+    const failedAccessToken = bearerAccessTokenFromHeaders(
+      ctx.outboundHeaders ?? ctx.requestHeaders,
+    );
     if (!failedAccessToken) return null;
 
     const chunks: Buffer[] = [];
     let size = 0;
     return {
       onData: (chunk: Buffer) => {
-        if (size >= MAX_ERROR_BODY_BYTES) return;
-        chunks.push(chunk);
-        size += chunk.length;
+        // 按剩余空间裁剪后再缓存:上游可能一个 chunk 就远超上限,整段留到 onEnd 会把
+        // 大 Buffer 一直挂住(判定只需要开头的 code/error 字段)。
+        const remaining = MAX_ERROR_BODY_BYTES - size;
+        if (remaining <= 0) return;
+        const slice = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+        chunks.push(slice);
+        size += slice.length;
       },
       onEnd: () => {
         const encoding = ctx.responseHeaders['content-encoding'];
+        // size 在 onData 已按上限裁过,这里直接用即可。
         const body = decodeUpstreamErrorBody(
-          Buffer.concat(chunks, Math.min(size, MAX_ERROR_BODY_BYTES)),
+          Buffer.concat(chunks, size),
           typeof encoding === 'string' ? encoding : undefined,
         );
         // observer 契约是同步只读:收口只能 fire-and-forget,且必须自己吃掉异常 ——

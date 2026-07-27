@@ -599,13 +599,22 @@ interface GrokRefreshResult {
 /**
  * 服务端明确作废**用户凭证**的信号:再刷也不会好,只能重新登录。
  *
- * 只认 invalid_grant 家族(RFC 6749 里 refresh_token 失效/被撤销/被复用的标准回答)。
- * 刻意不认 invalid_client / unauthorized_client —— 那是 client 注册侧的问题,把它当作废
- * 会在 xAI 调整 client 配置时把所有人一起登出,而重新登录同样失败,只会更糟。
+ * 只认 RFC 6749 §5.2 的结构化 `error` 码,不对整个响应体做子串匹配 —— `error_description`
+ * 之类的自由文本里出现同样字样并不代表 refresh_token 被作废,上游改一句文案就把用户登出
+ * 是不可接受的。非 JSON 或读不出 error 码时一律按临时失败处理(保留凭证)。
+ *
+ * 只认 invalid_grant 家族。刻意不认 invalid_client / unauthorized_client —— 那是 client
+ * 注册侧的问题,把它当作废会在 xAI 调整 client 配置时把所有人一起登出,而重新登录同样失败。
  */
 function isRefreshRejection(status: number, body: string): boolean {
   if (status < 400 || status >= 500) return false;
-  return /invalid_grant|invalid_token/i.test(body);
+  let code: unknown;
+  try {
+    code = (JSON.parse(body) as { error?: unknown }).error;
+  } catch {
+    return false;
+  }
+  return code === 'invalid_grant' || code === 'invalid_token';
 }
 
 /**
@@ -662,6 +671,16 @@ async function refreshBlob(current: GrokTokenBlob, force: boolean): Promise<Grok
       const body = await res.text().catch(() => '');
       const rejected = isRefreshRejection(res.status, body);
       log.warn('xai token 刷新失败', { status: res.status, rejected });
+      if (rejected) {
+        // 与成功路径同一道复核(见下方 beforeWrite):作废结论只对**发起本次刷新的那枚**
+        // refresh_token 成立。fetch 期间用户可能已登出或重新登录 —— 此时凭证库里是另一枚
+        // 全新的 refresh_token,拿旧的 invalid_grant 去 logoutGrok 会当场删掉刚建立的登录态。
+        const currentBlob = readBlob();
+        if (currentBlob === null || currentBlob.refresh_token !== refreshToken) {
+          result = { blob: currentBlob ?? fresh, outcome: 'superseded' };
+          return;
+        }
+      }
       result = { blob: fresh, outcome: rejected ? 'rejected' : 'failed' };
       return;
     }

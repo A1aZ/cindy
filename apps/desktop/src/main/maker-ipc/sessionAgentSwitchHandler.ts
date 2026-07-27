@@ -132,6 +132,11 @@ export interface MakerSessionAgentSwitchHandlerDeps {
       fastMode?: boolean;
     },
   ): Promise<void>;
+  /**
+   * DB 提交成功后同步跨引擎 provider route。这里只在显式携带 providerId 的
+   * 生命周期切换边界调用，避免普通 create/resume 的异步 DB 读取覆盖运行时 SET_MODEL。
+   */
+  setSessionProvider(sessionId: string, providerId: string | null): void;
   /** 返回边界行 clientId(resume 回落时原子改写定位用)。 */
   insertBoundaryMessage(sessionId: string, content: AgentSwitchBoundaryContent): Promise<string>;
   /**
@@ -394,6 +399,9 @@ export async function performSessionAgentSwitch(
       ...(typeof params.effort === 'string' && params.effort ? { effort: params.effort } : {}),
       ...(typeof params.fastMode === 'boolean' ? { fastMode: params.fastMode } : {}),
     });
+    if (providerId !== undefined) {
+      deps.setSessionProvider(sessionId, providerId as string | null);
+    }
 
     const boundaryContent: AgentSwitchBoundaryContent = {
       fromAgentKind: fromDbKind,

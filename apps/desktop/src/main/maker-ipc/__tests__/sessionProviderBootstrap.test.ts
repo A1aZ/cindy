@@ -3,9 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   clearSessionProvider,
   getSessionProvider,
+  hydrateSessionProvider,
   setSessionProvider,
 } from '../../maker-host/session-provider-store.js';
-import { persistAndActivateSessionProvider } from '../sessionProviderBootstrap.js';
+import { persistAndHydrateSessionProvider } from '../sessionProviderBootstrap.js';
 
 const TEST_SESSION_ID = 'session-provider-bootstrap-test';
 
@@ -13,51 +14,73 @@ afterEach(() => {
   clearSessionProvider(TEST_SESSION_ID);
 });
 
-describe('persistAndActivateSessionProvider', () => {
-  it('persists explicit providerId=null and activates the cleared route', async () => {
+describe('persistAndHydrateSessionProvider', () => {
+  it('persists explicit providerId=null and hydrates the cleared route', async () => {
     let storedProviderId: string | null = 'anthropic';
-    const activateSessionProvider = vi.fn();
+    const hydrateSessionProvider = vi.fn();
 
-    await persistAndActivateSessionProvider({
+    await persistAndHydrateSessionProvider({
       sessionId: 'session-1',
       providerId: null,
       updateProviderId: vi.fn(async (_sessionId, providerId) => {
         storedProviderId = providerId;
       }),
       readProviderId: vi.fn(async () => storedProviderId),
-      setSessionProvider: activateSessionProvider,
+      hydrateSessionProvider,
     });
 
     expect(storedProviderId).toBeNull();
-    expect(activateSessionProvider).toHaveBeenCalledWith('session-1', null);
+    expect(hydrateSessionProvider).toHaveBeenCalledWith('session-1', null);
   });
 
-  it('leaves DB unchanged for providerId=undefined but still activates persisted value', async () => {
+  it('leaves DB unchanged for providerId=undefined but still hydrates persisted value', async () => {
     const updateProviderId = vi.fn(async () => {});
-    const activateSessionProvider = vi.fn();
+    const hydrateSessionProvider = vi.fn();
 
-    await persistAndActivateSessionProvider({
+    await persistAndHydrateSessionProvider({
       sessionId: 'session-1',
       providerId: undefined,
       updateProviderId,
       readProviderId: vi.fn(async () => 'openrouter'),
-      setSessionProvider: activateSessionProvider,
+      hydrateSessionProvider,
     });
 
     expect(updateProviderId).not.toHaveBeenCalled();
-    expect(activateSessionProvider).toHaveBeenCalledWith('session-1', 'openrouter');
+    expect(hydrateSessionProvider).toHaveBeenCalledWith('session-1', 'openrouter');
   });
 
-  it('replaces the previous engine provider route with the persisted provider', async () => {
-    setSessionProvider(TEST_SESSION_ID, 'openai');
+  it('does not treat a missing DB row as an explicit provider clear', async () => {
+    setSessionProvider(TEST_SESSION_ID, 'anthropic');
 
-    await persistAndActivateSessionProvider({
+    await persistAndHydrateSessionProvider({
       sessionId: TEST_SESSION_ID,
-      providerId: 'anthropic',
+      providerId: undefined,
       updateProviderId: vi.fn(async () => {}),
-      readProviderId: vi.fn(async () => 'anthropic'),
-      setSessionProvider,
+      readProviderId: vi.fn(async () => undefined),
+      hydrateSessionProvider,
     });
+
+    expect(getSessionProvider(TEST_SESSION_ID)).toBe('anthropic');
+  });
+
+  it('does not overwrite a runtime provider selected while the DB read is in flight', async () => {
+    let resolveRead!: (providerId: string | null) => void;
+    const persistedProviderId = new Promise<string | null>((resolve) => {
+      resolveRead = resolve;
+    });
+    const readProviderId = vi.fn(async () => persistedProviderId);
+    const hydration = persistAndHydrateSessionProvider({
+      sessionId: TEST_SESSION_ID,
+      providerId: undefined,
+      updateProviderId: vi.fn(async () => {}),
+      readProviderId,
+      hydrateSessionProvider,
+    });
+    expect(readProviderId).toHaveBeenCalledWith(TEST_SESSION_ID);
+
+    setSessionProvider(TEST_SESSION_ID, 'anthropic');
+    resolveRead('openai');
+    await hydration;
 
     expect(getSessionProvider(TEST_SESSION_ID)).toBe('anthropic');
   });

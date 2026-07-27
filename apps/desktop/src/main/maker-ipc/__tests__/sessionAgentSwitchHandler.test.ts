@@ -43,6 +43,9 @@ function makeDeps(overrides: Partial<MakerSessionAgentSwitchHandlerDeps> = {}): 
     applyAgentSwitchToDb: vi.fn(async () => {
       calls.push('db');
     }),
+    setSessionProvider: vi.fn(() => {
+      calls.push('provider');
+    }),
     insertBoundaryMessage: vi.fn(async () => {
       calls.push('boundary');
       return 'boundary-client-1';
@@ -75,13 +78,14 @@ describe('performSessionAgentSwitch', () => {
     const { deps, calls } = makeDeps();
     const result = await performSessionAgentSwitch(deps, validParams);
     expect(result).toEqual({ switched: true, agentKind: 'codex', model: 'gpt-5.5', engineReady: true });
-    expect(calls).toEqual(['close', 'db', 'boundary', 'pending', 'bootstrap']);
+    expect(calls).toEqual(['close', 'db', 'provider', 'boundary', 'pending', 'bootstrap']);
     expect(deps.applyAgentSwitchToDb).toHaveBeenCalledWith('s1', {
       agentKind: 'codex',
       model: 'gpt-5.5',
       providerId: null,
       sdkSessionId: null,
     });
+    expect(deps.setSessionProvider).toHaveBeenCalledWith('s1', null);
     const boundary = vi.mocked(deps.insertBoundaryMessage).mock.calls[0][1];
     expect(boundary.fromAgentKind).toBe('cc');
     expect(boundary.toAgentKind).toBe('codex');
@@ -105,9 +109,24 @@ describe('performSessionAgentSwitch', () => {
       model: 'claude-fable-5',
     });
     expect(result.switched).toBe(true);
+    expect(deps.setSessionProvider).not.toHaveBeenCalled();
     const boundary = vi.mocked(deps.insertBoundaryMessage).mock.calls[0][1];
     expect(boundary.fromAgentKind).toBe('codex');
     expect(boundary.toAgentKind).toBe('cc');
+  });
+
+  it('跨引擎 DB 提交后立即覆盖旧 provider route', async () => {
+    const { deps } = makeDeps();
+
+    await performSessionAgentSwitch(deps, {
+      ...validParams,
+      providerId: 'anthropic',
+    });
+
+    expect(deps.setSessionProvider).toHaveBeenCalledWith('s1', 'anthropic');
+    expect(vi.mocked(deps.applyAgentSwitchToDb).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(deps.setSessionProvider).mock.invocationCallOrder[0],
+    );
   });
 
   it('参数校验:非法 sessionId / targetAgentKind / model 抛 INVALID_PARAMS', async () => {
@@ -156,7 +175,7 @@ describe('performSessionAgentSwitch', () => {
     const { deps, calls } = makeDeps({ getLiveSession: vi.fn(() => null) });
     const result = await performSessionAgentSwitch(deps, validParams);
     expect(result.switched).toBe(true);
-    expect(calls).toEqual(['db', 'boundary', 'pending', 'bootstrap']);
+    expect(calls).toEqual(['db', 'provider', 'boundary', 'pending', 'bootstrap']);
   });
 
   it('边界行插入失败降级:仍设 pending 并 bootstrap,返回成功', async () => {
@@ -167,7 +186,7 @@ describe('performSessionAgentSwitch', () => {
     });
     const result = await performSessionAgentSwitch(deps, validParams);
     expect(result.switched).toBe(true);
-    expect(calls).toEqual(['close', 'db', 'pending', 'bootstrap']);
+    expect(calls).toEqual(['close', 'db', 'provider', 'pending', 'bootstrap']);
     expect(deps.log.warn).toHaveBeenCalled();
   });
 
@@ -190,6 +209,7 @@ describe('performSessionAgentSwitch', () => {
     });
     await expect(performSessionAgentSwitch(deps, validParams)).rejects.toThrow('db locked');
     expect(calls).toEqual(['close']);
+    expect(deps.setSessionProvider).not.toHaveBeenCalled();
   });
 });
 
@@ -264,7 +284,7 @@ describe('deferred switch (turn running)', () => {
       skipBootstrap: true,
     });
     expect(result).toMatchObject({ switched: true });
-    expect(calls).toEqual(['close', 'db', 'boundary', 'pending']);
+    expect(calls).toEqual(['close', 'db', 'provider', 'boundary', 'pending']);
   });
 
   it('意图制:effort/fastMode 经意图透传到 applyAgentSwitchToDb', async () => {
@@ -301,7 +321,7 @@ describe('deferred switch (turn running)', () => {
     await applyPendingAgentSwitchIfIdle(deps, 's1');
     expect(store.has('s1')).toBe(false);
     // skipBootstrap:不含 'bootstrap'
-    expect(calls).toEqual(['close', 'db', 'boundary', 'pending']);
+    expect(calls).toEqual(['close', 'db', 'provider', 'boundary', 'pending']);
     expect(deps.applyAgentSwitchToDb).toHaveBeenCalledWith('s1', {
       agentKind: 'codex',
       model: 'gpt-5.5',
@@ -432,7 +452,7 @@ describe('deferred switch (turn running)', () => {
 
     await applyPendingAgentSwitchIfIdle(deps, 's1', { signal: controller.signal });
 
-    expect(calls).toEqual(['close', 'db', 'boundary', 'pending']);
+    expect(calls).toEqual(['close', 'db', 'provider', 'boundary', 'pending']);
     expect(store.has('s1')).toBe(false);
   });
 });

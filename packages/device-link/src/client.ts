@@ -602,9 +602,14 @@ export class DeviceLinkClient {
     // 连接世代 —— 那这条 socket 是孤儿,关掉再退,别挂到 this.ws 上。
     if (this.stopped || epoch !== this.connEpoch) {
       try {
+        // 必须先挂 error 监听再 close:孤儿 socket 大概率还在 CONNECTING,close() 会让
+        // ws 异步 emit 'error'(如 "WebSocket was closed before the connection was
+        // established"),而 EventEmitter 对无监听的 'error' 是直接抛 —— 那会变成主进程
+        // 的未捕获异常(review 2026-07-27 P1)。
+        ws.on('error', () => {});
         ws.close();
-      } catch {
-        /* 关闭孤儿连接失败无需处理 */
+      } catch (err) {
+        this.log.debug?.('closing orphan websocket failed', err);
       }
       return;
     }

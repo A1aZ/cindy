@@ -84,6 +84,11 @@ export interface ResolveOutboundDispatcherOptions {
   fallback?: Dispatcher;
   /** 代理 dispatcher 的连接池调优(keepAlive / connections 等),参与缓存 key。 */
   agentOptions?: UndiciAgent.Options;
+  /**
+   * 调用方的取消信号。选路发生在请求出发之前,不传的话它就落在调用方的超时预算之外
+   * (见 PROXY_RESOLVE_TIMEOUT_MS 的注释);传了则 abort 时立刻抛,与 fetch 语义一致。
+   */
+  signal?: AbortSignal;
 }
 
 const dispatcherPool = new Map<string, Dispatcher>();
@@ -128,15 +133,62 @@ function originOf(upstream: URL): string {
   return `${upstreamProtocol(upstream)}//${upstream.host}`;
 }
 
+/**
+ * 代理解析自身的超时。解析发生在请求真正出发之前,不受调用方 `signal` /
+ * `AbortSignal.timeout` 约束 —— `session.resolveProxy` 若慢或不 settle,OAuth 的 30s、
+ * 探测的 10s 这些既有上限就形同虚设(review 2026-07-27 P1)。超时按直连处理
+ * (fail-open,与其它解析故障同口径),不把请求拖死在选路上。
+ */
+const PROXY_RESOLVE_TIMEOUT_MS = 2000;
+
+function abortErrorOf(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('This operation was aborted', 'AbortError');
+}
+
+/**
+ * 带两道保险地取代理串:调用方 abort 立刻抛(与 fetch 的取消语义一致),解析自身
+ * 超时则按直连处理。
+ */
+async function resolveRawProxy(origin: string, signal?: AbortSignal): Promise<string | null> {
+  if (signal?.aborted) throw abortErrorOf(signal);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  try {
+    return await Promise.race<string | null>([
+      Promise.resolve(resolveDesktopOutboundProxy(origin)).then((v) => v ?? null),
+      new Promise<string | null>((resolve) => {
+        timer = setTimeout(() => {
+          warnOnce(origin, 'resolution-timed-out', { upstream: origin });
+          resolve(null);
+        }, PROXY_RESOLVE_TIMEOUT_MS);
+        timer.unref?.();
+      }),
+      new Promise<never>((_resolve, reject) => {
+        if (!signal) return;
+        onAbort = () => reject(abortErrorOf(signal));
+        signal.addEventListener('abort', onAbort, { once: true });
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (onAbort && signal) signal.removeEventListener('abort', onAbort);
+  }
+}
+
 /** 取当前生效的代理目标;直连 / 解析失败 / loopback 上游一律 null。 */
-async function resolveProxyTarget(upstream: URL): Promise<OutboundProxyTarget | null> {
+async function resolveProxyTarget(
+  upstream: URL,
+  signal?: AbortSignal,
+): Promise<OutboundProxyTarget | null> {
   if (isLoopbackHostname(upstream.hostname)) return null;
   // resolver 按 origin 解析(它自己带缓存与「变化才记日志」);query 不参与,也不该进日志。
   const originUrl = originOf(upstream);
   let raw: string | null | undefined;
   try {
-    raw = await resolveDesktopOutboundProxy(originUrl);
+    raw = await resolveRawProxy(originUrl, signal);
   } catch (err) {
+    // 取消要如实向上抛(否则调用方的 abort 变成静默直连请求)。
+    if (signal?.aborted) throw err;
     // fail-open:代理解析故障不该让请求失败,退回直连(与 resolver 内部语义一致)。
     log.warn('outbound proxy resolution failed — using direct connection', {
       upstream: originUrl,
@@ -321,9 +373,15 @@ interface OriginRoutingDispatcher extends Dispatcher {
   pickForUrlForTest(url: string): Dispatcher;
 }
 
+/** wrapper 的首跳出口描述 —— 存的是「怎么取」而不是 dispatcher 实例本身,见下方注释。 */
+interface PrimaryRoute {
+  origin: string;
+  proxy: OutboundProxyTarget;
+  protocol: 'http:' | 'https:';
+}
+
 type OriginRoutingDispatcherCtor = new (
-  primary: Dispatcher,
-  primaryOrigin: string,
+  primary: PrimaryRoute,
   agentOptions: UndiciAgent.Options | undefined,
 ) => OriginRoutingDispatcher;
 
@@ -333,8 +391,7 @@ function routingDispatcherCtor(): OriginRoutingDispatcherCtor {
   if (_routingDispatcherCtor) return _routingDispatcherCtor;
   _routingDispatcherCtor = class extends Dispatcher {
     constructor(
-      private readonly primary: Dispatcher,
-      private readonly primaryOrigin: string,
+      private readonly primary: PrimaryRoute,
       private readonly agentOptions: UndiciAgent.Options | undefined,
     ) {
       super();
@@ -357,20 +414,29 @@ function routingDispatcherCtor(): OriginRoutingDispatcherCtor {
 
     private pick(options: Dispatcher.DispatchOptions): Dispatcher {
       const target = this.targetUrl(options);
-      if (!target) return this.primary;
+      if (!target) return this.forProxy(this.primary.proxy, this.primary.protocol);
       const origin = originOf(target);
-      if (origin === this.primaryOrigin) return this.primary;
+      if (origin === this.primary.origin) {
+        return this.forProxy(this.primary.proxy, this.primary.protocol);
+      }
       if (isLoopbackHostname(target.hostname)) return getDirectAgent();
       const decision = syncProxyDecision(origin);
       if (!decision.known) {
         // 后台补解析(它会写进快照),本跳沿用首跳出口。
         void resolveProxyTarget(target).catch(() => undefined);
-        return this.primary;
+        return this.forProxy(this.primary.proxy, this.primary.protocol);
       }
       if (!decision.target) return getDirectAgent();
-      const protocol = upstreamProtocol(target);
-      const key = dispatcherKey(decision.target, protocol, this.agentOptions);
-      const proxy = decision.target;
+      return this.forProxy(decision.target, upstreamProtocol(target));
+    }
+
+    /**
+     * 每次都从底层池现取(必要时重建),**不缓存 dispatcher 实例**:底层池有上限,
+     * 逐出后 60s 会 close 掉那个实例。若 wrapper 攥着旧引用,逐出之后就会把请求发给
+     * 一个已关闭的 dispatcher(review 2026-07-27 P1)。现取的代价只是一次 Map 查询。
+     */
+    private forProxy(proxy: OutboundProxyTarget, protocol: 'http:' | 'https:'): Dispatcher {
+      const key = dispatcherKey(proxy, protocol, this.agentOptions);
       return poolGet(key, () => createProxyDispatcher(proxy, protocol, this.agentOptions));
     }
 
@@ -394,16 +460,21 @@ export async function resolveOutboundDispatcher(
 ): Promise<Dispatcher | undefined> {
   const upstream = parseUpstream(url);
   if (!upstream) return opts.fallback;
-  const proxy = await resolveProxyTarget(upstream);
+  const proxy = await resolveProxyTarget(upstream, opts.signal);
   if (!proxy) return opts.fallback;
   const protocol = upstreamProtocol(upstream);
   const origin = originOf(upstream);
   const key = dispatcherKey(proxy, protocol, opts.agentOptions);
-  const base = poolGet(key, () => createProxyDispatcher(proxy, protocol, opts.agentOptions));
-  // 包装按 (底层池, 首跳 origin) 缓存:同一上游反复请求拿到同一个实例,
+  // 先把底层池建起来(首跳大概率立刻要用),wrapper 里仍按 key 现取,所以底层被逐出
+  // 重建也不会留下 stale 引用。
+  poolGet(key, () => createProxyDispatcher(proxy, protocol, opts.agentOptions));
+  // 包装按 (底层 key, 首跳 origin) 缓存:同一上游反复请求拿到同一个实例;
   // 底层连接池仍跨 origin 共享(wrapper 本身不持有连接)。
   const Routing = routingDispatcherCtor();
-  return routingPoolGet(`${key}|${origin}`, () => new Routing(base, origin, opts.agentOptions));
+  return routingPoolGet(
+    `${key}|${origin}`,
+    () => new Routing({ origin, proxy, protocol }, opts.agentOptions),
+  );
 }
 
 /**
@@ -424,11 +495,98 @@ export const outboundFetch = (async (
       : input instanceof URL
         ? input.href
         : ((input as { url?: string }).url ?? '');
-  const dispatcher = await resolveOutboundDispatcher(target);
+  const signal = signalOf(input, init);
+  const dispatcher = await resolveOutboundDispatcher(target, { signal });
   if (!dispatcher) return globalThis.fetch(input, init);
   const request = await normalizeForUndici(input, init);
-  return undiciFetch(request.url as never, { ...request.init, dispatcher } as never);
+  if (request.init.redirect !== 'follow') {
+    // 调用方要 manual / error 语义(插件 network 槽靠 manual 逐跳守门),原样交给 undici。
+    return undiciFetch(request.url as never, { ...request.init, dispatcher } as never);
+  }
+  return followRedirectsThroughProxy(request, dispatcher, signal);
 }) as unknown as typeof globalThis.fetch;
+
+function signalOf(
+  input: Parameters<typeof globalThis.fetch>[0],
+  init: Parameters<typeof globalThis.fetch>[1],
+): AbortSignal | undefined {
+  if (init && 'signal' in init && init.signal) return init.signal;
+  if (typeof input === 'object' && input !== null && 'signal' in input) {
+    return (input as { signal?: AbortSignal }).signal;
+  }
+  return undefined;
+}
+
+/** 与 fetch 规范一致的跳数上限。 */
+const MAX_REDIRECT_HOPS = 20;
+
+/**
+ * 代理路径上**自己**跟随重定向,每一跳都重新解析该 origin 该走什么。
+ *
+ * 为什么不交给 undici 的 `redirect: 'follow'`:它内部跟随时会一直用同一个 dispatcher,
+ * 而第一次访问某个重定向目标时我们的同步快照里通常没有它 —— 那一跳就会被塞进原来的
+ * 代理隧道,PAC / NO_PROXY 判定形同虚设(review 2026-07-27 P1)。这里逐跳 `await` 解析,
+ * 结论精确;`OriginRoutingDispatcher` 退化为其它入口(outboundUndiciFetch / voice 的
+ * 自带 dispatcher)的兜底。
+ *
+ * 跳转语义按 fetch 规范的子集:303、以及 301/302 上的非 GET/HEAD → 转 GET 并丢 body;
+ * 307/308 原样重放(body 已是 Buffer,可重放);跨 origin 去掉凭证类头。
+ */
+async function followRedirectsThroughProxy(
+  request: { url: string; init: Record<string, unknown> },
+  initialDispatcher: Dispatcher,
+  signal: AbortSignal | undefined,
+): Promise<unknown> {
+  let url = request.url;
+  let method = String(request.init.method ?? 'GET');
+  let body = request.init.body as Buffer | undefined;
+  const headers = new Headers(request.init.headers as Array<[string, string]>);
+  let dispatcher: Dispatcher | undefined = initialDispatcher;
+
+  for (let hop = 0; ; hop += 1) {
+    const res = (await undiciFetch(url as never, {
+      method,
+      headers: [...headers] as Array<[string, string]>,
+      ...(body ? { body } : {}),
+      redirect: 'manual',
+      ...(signal ? { signal } : {}),
+      ...(dispatcher ? { dispatcher } : {}),
+    } as never)) as unknown as {
+      status: number;
+      headers: { get(name: string): string | null };
+      body?: { cancel(): Promise<void> } | null;
+    };
+    const location = res.status >= 300 && res.status < 400 ? res.headers.get('location') : null;
+    // 非 3xx,或 3xx 但没有 Location(无从跟随)→ 原样回给调用方。
+    if (!location) return res;
+    if (hop >= MAX_REDIRECT_HOPS) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new TypeError('outboundFetch: too many redirects');
+    }
+    let next: URL;
+    try {
+      next = new URL(location, url);
+    } catch {
+      return res; // Location 非法:交回调用方按非 ok 处理,不自造异常
+    }
+    if (res.status === 303 || ((res.status === 301 || res.status === 302) && method !== 'GET' && method !== 'HEAD')) {
+      method = 'GET';
+      body = undefined;
+      headers.delete('content-type');
+      headers.delete('content-length');
+    }
+    if (new URL(url).origin !== next.origin) {
+      // 跨 origin 不重放凭证(与 github/gitlab client 的 fail-closed 纪律同口径)。
+      headers.delete('authorization');
+      headers.delete('cookie');
+      headers.delete('proxy-authorization');
+    }
+    // 3xx 的 body 不会被消费,显式取消以归还连接。
+    await res.body?.cancel().catch(() => undefined);
+    url = next.href;
+    dispatcher = await resolveOutboundDispatcher(url, { signal });
+  }
+}
 
 /**
  * 把「全局 fetch 的入参」翻译成 npm undici 认得的形状。

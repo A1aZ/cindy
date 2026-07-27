@@ -8,8 +8,21 @@ const resolverState = vi.hoisted(() => ({
 }));
 
 const undiciState = vi.hoisted(() => ({
-  fetch: vi.fn(async () => ({ ok: true })),
+  fetch: vi.fn(async () => ({ ok: true, status: 200, headers: new Headers(), body: null })),
 }));
+
+/** 造一个 3xx 响应桩(带可取消的 body,验证我们会归还连接)。 */
+function redirectResponse(status: number, location: string): {
+  status: number;
+  headers: Headers;
+  body: { cancel: () => Promise<void> };
+} {
+  return {
+    status,
+    headers: new Headers({ location }),
+    body: { cancel: async () => undefined },
+  };
+}
 
 const loggerState = vi.hoisted(() => ({
   warn: vi.fn(),
@@ -54,7 +67,8 @@ function pick(dispatcher: unknown, url: string): unknown {
 beforeEach(() => {
   resolverState.resolve.mockReset();
   resolverState.resolve.mockResolvedValue(null);
-  undiciState.fetch.mockClear();
+  undiciState.fetch.mockReset();
+  undiciState.fetch.mockResolvedValue({ ok: true, status: 200, headers: new Headers(), body: null });
   loggerState.warn.mockClear();
   resetOutboundFetchStateForTest();
 });
@@ -138,6 +152,25 @@ describe('resolveOutboundDispatcher', () => {
 
     // 从没解析过的 origin:同步拿不到结论,本跳沿用首跳出口(不阻塞热路径)。
     expect(pick(dispatcher, 'https://unknown.example.org/x')).toBe(proxied);
+  });
+
+  it('never hands out an evicted base dispatcher (wrapper re-derives from the pool)', async () => {
+    resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
+    const wrapper = await resolveOutboundDispatcher('https://a0.example.com/x');
+    const before = pick(wrapper, 'https://a0.example.com/x');
+
+    // 把底层池顶过上限,逼出 a0 那一项(wrapper 仍在 routingPool 里被复用)。
+    for (let i = 1; i <= 8; i += 1) {
+      await resolveOutboundDispatcher('https://a0.example.com/x', {
+        agentOptions: { keepAliveTimeout: 2000 + i },
+      });
+    }
+    const again = await resolveOutboundDispatcher('https://a0.example.com/x');
+    expect(again).toBe(wrapper); // 同一个 wrapper 实例
+    const after = pick(wrapper, 'https://a0.example.com/x');
+    // 但它派发到的底层已经是重建后的新实例,不是那个被安排关闭的旧实例。
+    expect(after).not.toBe(before);
+    expect(after).toBeInstanceOf(ProxyAgent);
   });
 
   it('does not close an evicted dispatcher immediately (it may already be in a caller hand)', async () => {
@@ -248,6 +281,107 @@ describe('outboundFetch', () => {
     expect(headers.get('authorization')).toBe('Bearer k');
   });
 
+  it('follows redirects itself, re-resolving the proxy for every hop', async () => {
+    // 首跳走代理;第二跳的目标 host 在快照里是「直连」→ 不能再被塞进代理隧道。
+    resolverState.resolve.mockImplementation(async (origin: string) =>
+      origin === 'https://oauth.example.com' ? 'http://127.0.0.1:7890' : null,
+    );
+    undiciState.fetch
+      .mockResolvedValueOnce(redirectResponse(302, 'https://cdn.example.net/final') as never)
+      .mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers(), body: null } as never);
+
+    await outboundFetch('https://oauth.example.com/token', { method: 'POST', body: '{}' });
+
+    expect(undiciState.fetch).toHaveBeenCalledTimes(2);
+    const [firstUrl, firstInit] = undiciState.fetch.mock.calls[0] as unknown as [
+      string,
+      { redirect: string; dispatcher?: unknown },
+    ];
+    const [secondUrl, secondInit] = undiciState.fetch.mock.calls[1] as unknown as [
+      string,
+      { method: string; dispatcher?: unknown },
+    ];
+    expect(firstUrl).toBe('https://oauth.example.com/token');
+    // 自己跟随 → 每跳都用 manual 拿 Location,不把选路交给 undici 内部。
+    expect(firstInit.redirect).toBe('manual');
+    expect(firstInit.dispatcher).toBeDefined();
+    expect(secondUrl).toBe('https://cdn.example.net/final');
+    // 第二跳解析为直连 → 不带 dispatcher(走 undici 自己的全局池)。
+    expect(secondInit.dispatcher).toBeUndefined();
+    expect(resolverState.resolve).toHaveBeenCalledWith('https://cdn.example.net');
+  });
+
+  it('turns 303 into GET, drops the body, and never replays credentials cross-origin', async () => {
+    resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
+    undiciState.fetch
+      .mockResolvedValueOnce(redirectResponse(303, 'https://other.example.org/done') as never)
+      .mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers(), body: null } as never);
+
+    await outboundFetch('https://api.example.com/submit', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer secret', 'Content-Type': 'application/json' },
+      body: '{"a":1}',
+    });
+
+    const [, second] = undiciState.fetch.mock.calls[1] as unknown as [
+      string,
+      { method: string; body?: unknown; headers: Array<[string, string]> },
+    ];
+    expect(second.method).toBe('GET');
+    expect(second.body).toBeUndefined();
+    const headers = new Map(second.headers.map(([k, v]) => [k.toLowerCase(), v]));
+    expect(headers.has('authorization')).toBe(false);
+    expect(headers.has('content-type')).toBe(false);
+  });
+
+  it('replays method and body on 307 and stops after too many hops', async () => {
+    resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
+    undiciState.fetch.mockImplementation(
+      async () => redirectResponse(307, 'https://api.example.com/loop') as never,
+    );
+    await expect(
+      outboundFetch('https://api.example.com/loop', { method: 'PUT', body: 'payload' }),
+    ).rejects.toThrow(/too many redirects/);
+    const [, second] = undiciState.fetch.mock.calls[1] as unknown as [
+      string,
+      { method: string; body?: Buffer },
+    ];
+    expect(second.method).toBe('PUT');
+    expect(second.body?.toString()).toBe('payload');
+  });
+
+  it('rejects with the abort reason instead of hanging on proxy resolution', async () => {
+    const controller = new AbortController();
+    resolverState.resolve.mockImplementation(() => new Promise(() => {}));
+    const inflight = outboundFetch('https://platform.claude.com/v1/oauth/token', {
+      signal: controller.signal,
+    });
+    controller.abort(new Error('caller gave up'));
+    await expect(inflight).rejects.toThrow('caller gave up');
+    expect(undiciState.fetch).not.toHaveBeenCalled();
+  });
+
+  it('falls back to direct when proxy resolution itself times out', async () => {
+    vi.useFakeTimers();
+    try {
+      resolverState.resolve.mockImplementation(() => new Promise(() => {}));
+      const globalFetch = vi.fn(async () => new Response('ok'));
+      const original = globalThis.fetch;
+      globalThis.fetch = globalFetch as unknown as typeof globalThis.fetch;
+      try {
+        const inflight = outboundFetch('https://platform.claude.com/v1/oauth/token');
+        await vi.advanceTimersByTimeAsync(2000);
+        await inflight;
+        expect(globalFetch).toHaveBeenCalledTimes(1);
+        expect(undiciState.fetch).not.toHaveBeenCalled();
+      } finally {
+        globalThis.fetch = original;
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps json string bodies and abort signals on the proxy path', async () => {
     resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
     const controller = new AbortController();
@@ -263,7 +397,20 @@ describe('outboundFetch', () => {
     ];
     expect(init.body.toString()).toBe('{"grant_type":"authorization_code"}');
     expect(init.signal).toBeInstanceOf(AbortSignal);
-    expect(init.redirect).toBe('follow');
+    // 调用方要的是默认 follow,由我们逐跳跟随实现 → 每跳对 undici 用 manual。
+    expect(init.redirect).toBe('manual');
+  });
+
+  it('hands manual/error redirect modes straight to undici (plugin network slot守门靠它)', async () => {
+    resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
+    undiciState.fetch.mockResolvedValue(
+      redirectResponse(302, 'https://elsewhere.example.com/x') as never,
+    );
+    await outboundFetch('https://api.example.com/x', { redirect: 'manual' });
+    // 显式 manual:只发一次,3xx 原样回给调用方(它要自己逐跳校验白名单)。
+    expect(undiciState.fetch).toHaveBeenCalledTimes(1);
+    const [, init] = undiciState.fetch.mock.calls[0] as unknown as [string, { redirect: string }];
+    expect(init.redirect).toBe('manual');
   });
 });
 

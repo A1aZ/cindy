@@ -374,7 +374,7 @@ import { prependHandoffToUserMessage } from './agentHandoff.js';
 import { hydrateQueuedAgentReferences } from './agentInputReferences.js';
 import { agentHandoffPending } from './agentHandoffPendingSingleton.js';
 import { type MakerSessionCreateOpts, withCreateSessionStderr } from './sessionRequest.js';
-import { persistAndHydrateSessionProvider } from './sessionProviderBootstrap.js';
+import { persistAndActivateSessionProvider } from './sessionProviderBootstrap.js';
 import { registerMakerSessionSendHandler } from './sessionSendHandler.js';
 import { registerStopAgentTaskHandler } from './stopAgentTaskHandler.js';
 import { registerStopSessionBackgroundTasksHandler } from './stopSessionBackgroundTasksHandler.js';
@@ -390,7 +390,7 @@ import {
   refreshCustomProvidersIntoCatalog,
 } from '../maker-host/createDesktopProviderService.js';
 import { connectedProvidersForAgent, effectiveSourceIdForModel } from '@cindy/model-providers';
-import { hydrateSessionProvider, getSessionProvider } from '../maker-host/session-provider-store.js';
+import { getSessionProvider, setSessionProvider } from '../maker-host/session-provider-store.js';
 import { getActiveCatalog, setDiscoveredProviderModels } from '../maker-host/active-catalog.js';
 import { testProviderConnection } from '../maker-host/provider-diagnostics.js';
 import { fetchProviderModels } from '../maker-host/provider-model-fetch.js';
@@ -3901,18 +3901,19 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     wireSessionToIpc(session);
     markOrcaMcpHydratedIfNeeded(session.id, o);
 
-    // per-session 供应商:从 DB(sessions.provider_id)回填路由 store —— 跨重启恢复会话显式选定的
-    // 供应商,让首个请求就按所选来源路由;无值则保持未设(→ 默认路由,行为不变)。hydrate 不覆盖
-    // 运行中已有的选择。读失败不致命(回落默认路由)。所有 create/resume 路径都经本funnel,单点覆盖。
+    // per-session 供应商:从 DB(sessions.provider_id)激活路由 store —— 新引擎实例必须以
+    // DB 已提交的选择覆盖同一 Cindy session 上一引擎留下的内存值,否则 Codex → Claude
+    // 切换后仍可能按旧来源路由。读失败不致命(回落现有路由)。所有 create/resume 路径
+    // 都经本 funnel,单点覆盖。
     //
     // device-link 远程 create(P2):DesktopSessionStorage.create 从 maker-core SessionMeta 建行,
-    // SessionMeta 不含 providerId → 远程新建行 provider_id 恒 NULL。这里在 hydrate 前用 create opts
-    // 的 providerId 补写 DB。providerId=null 是显式清除来源,也必须写库覆盖旧值;只有
+    // SessionMeta 不含 providerId → 远程新建行 provider_id 恒 NULL。这里在激活路由前用 create
+    // opts 的 providerId 补写 DB。providerId=null 是显式清除来源,也必须写库覆盖旧值;只有
     // providerId=undefined 才表示调用方没有携带来源选择。懒启动路径会在 maker.createSession
     // 前从 DB 预补 o.providerId,所以下面同时承担「新建落库」和「恢复路由 store」两件事。
     try {
       const db = getDbClient().drizzle;
-      await persistAndHydrateSessionProvider({
+      await persistAndActivateSessionProvider({
         sessionId: session.id,
         providerId: o.providerId,
         updateProviderId: async (targetSessionId, providerId) => {
@@ -3929,7 +3930,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
             .limit(1);
           return pRow?.providerId;
         },
-        hydrateSessionProvider,
+        setSessionProvider,
       });
       // bridge 会话态(effort / fast)同点 hydrate:让 resume / 重启后的首个 bridge 请求就带上
       // 用户上次选定的思维深度与 Fast(否则要等用户再点一次开关才写进内存 store)。
@@ -3941,7 +3942,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       if (efRow?.effort) setSessionEffort(session.id, efRow.effort);
       setSessionFastMode(session.id, !!efRow?.fastMode);
     } catch (err) {
-      log.debug('hydrate session provider failed (non-fatal)', {
+      log.debug('activate session provider failed (non-fatal)', {
         sessionId: session.id,
         error: err instanceof Error ? err.message : String(err),
       });

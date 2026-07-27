@@ -300,7 +300,7 @@ describe('VoiceInputController', () => {
     expect(submitted).toEqual(['half a sentence']);
     expect(errors).toEqual([{
       message: 'Voice input connection was interrupted. Please try again.',
-      code: undefined,
+      code: 'connection_interrupted',
       kept: true,
     }]);
     expect(controller.currentState).toBe('error');
@@ -416,7 +416,7 @@ describe('VoiceInputController', () => {
     expect(submitted).toEqual(['one submission only']);
     expect(errors).toEqual([{
       message: 'Voice input stopped receiving recognition. Please try again.',
-      code: undefined,
+      code: 'recognition_stalled',
       kept: true,
     }]);
   });
@@ -500,7 +500,7 @@ describe('VoiceInputController', () => {
     expect(controller.currentState).toBe('error');
     expect(errors).toEqual([{
       message: 'Voice input stopped receiving recognition. Please try again.',
-      code: undefined,
+      code: 'recognition_stalled',
       kept: true,
     }]);
   });
@@ -552,6 +552,70 @@ describe('VoiceInputController', () => {
 
     expect(submitted).toEqual(['only once']);
     expect(controller.currentState).toBe('error');
+  });
+
+  it('does not let a late refinement overwrite a failed run', async () => {
+    const asr = new FakeAsrProvider();
+    let rejectRecover: ((error: Error) => void) | undefined;
+    asr.recover = () => new Promise<void>((_resolve, reject) => {
+      rejectRecover = reject;
+    });
+    let resolveRefine: ((result: RefinementResult) => void) | undefined;
+    const applied: string[] = [];
+    const states: VoiceInputState[] = [];
+    const controller = new VoiceInputController({
+      asr,
+      logger: new VoiceTimelineLogger(),
+      stableWaitMs: 0,
+      refiner: {
+        refine: () => new Promise<RefinementResult>((resolve) => {
+          resolveRefine = resolve;
+        }),
+      },
+      callbacks: {
+        onStateChanged: (state) => states.push(state),
+        onDraftChanged: () => {},
+        onSubmitted: (text, segment) => ({
+          id: 'range-1',
+          segmentIds: [segment.id],
+          startOffset: 0,
+          endOffset: text.length,
+          userTouched: false,
+        }),
+        applyRefinement: (_range, refinedText) => {
+          applied.push(refinedText);
+          return true;
+        },
+        onError: () => {},
+      },
+    });
+
+    await controller.start();
+    asr.emit({ type: 'partial', text: 'text under refinement', at: Date.now() });
+    asr.emit({ type: 'disconnected', at: Date.now() });
+    await controller.stop();
+    expect(controller.currentState).toBe('refining');
+
+    // Recovery gives up while refinement is still running.
+    rejectRecover?.(new Error('network down'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(controller.currentState).toBe('error');
+
+    resolveRefine?.({
+      accepted: true,
+      sourceSegmentIds: ['segment-1'],
+      basedOnText: 'text under refinement',
+      refinedText: 'Text under refinement.',
+      elapsedMs: 1,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The user was already told the run failed; refinement must not rewrite
+    // their text nor flip the run back to a success state.
+    expect(applied).toEqual([]);
+    expect(controller.currentState).toBe('error');
+    expect(states.at(-1)).toBe('error');
   });
 
   it('reports the original failure cause alongside the retention flag', async () => {

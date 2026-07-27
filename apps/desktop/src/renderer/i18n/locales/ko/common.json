@@ -4293,6 +4293,8 @@
     "cindyServiceUnavailable": "Cindy 음성 서비스를 사용할 수 없습니다. 네트워크를 확인하거나 서비스 소스를 전환하세요.",
     "asrServiceUnavailable": "음성 인식 서비스에 연결하지 못했습니다. 네트워크를 확인한 뒤 다시 시도하세요.",
     "emptyTranscript": "음성이 감지되었지만 텍스트를 인식하지 못했습니다. 다시 시도하세요.",
+    "connectionInterrupted": "음성 연결이 중단되었습니다.",
+    "recognitionStalled": "음성 인식 결과가 더 이상 오지 않습니다.",
     "transcriptKept": "{{message}} 지금까지 인식된 텍스트는 유지했습니다. 이어서 편집하거나 다시 녹음하세요."
   },
   "chat": {

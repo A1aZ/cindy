@@ -8,7 +8,17 @@ export type VoiceInputState =
 
 export type VoiceInputTerminalOutcome = 'success' | 'no_speech' | 'failed' | 'cancelled';
 
-export type VoiceInputErrorCode = 'empty_transcript';
+/**
+ * Classifies the failures this controller raises itself, so hosts can show a
+ * localized sentence instead of the English `message` (which stays as the
+ * log/debug string). Failures originating in a provider have no code — their
+ * message is the only description of an auth, quota or protocol problem, and
+ * is surfaced verbatim.
+ */
+export type VoiceInputErrorCode =
+  | 'empty_transcript'
+  | 'connection_interrupted'
+  | 'recognition_stalled';
 
 /**
  * Side facts about a failure, kept separate from its classification.

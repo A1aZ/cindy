@@ -68,7 +68,7 @@ import { formatVoiceInputShortcut } from './shortcut';
 import { VoiceInputMicWaveIcon } from './VoiceInputMicWaveIcon';
 import { getVoiceInputWorkletUrl } from './workletUrl';
 import { VoiceInputPointerHintLayer } from './VoiceInputPointerHintLayer';
-import { isVoiceInputServiceConnectionError } from './overlayErrors';
+import { isVoiceInputServiceConnectionError, VOICE_INPUT_ERROR_CODE_KEYS } from './overlayErrors';
 import {
   resolveVoiceInputReadinessRecovery,
   type VoiceInputRecoverySettingsTab,
@@ -383,7 +383,10 @@ export function VoiceInputOverlay() {
     code?: VoiceInputErrorCode,
     transcriptKept?: boolean,
   ): string => {
-    const cause = code === 'empty_transcript' ? t('voiceInputOverlay.emptyTranscript') : message;
+    // Coded failures carry an English debug `message`; the localized sentence
+    // comes from the code. Uncoded ones are the provider's own description of
+    // an auth/quota/protocol problem and are shown verbatim.
+    const cause = code ? t(VOICE_INPUT_ERROR_CODE_KEYS[code]) : message;
     // Paired with the retained-transcript panel below: the overlay keeps the
     // text with a copy button, so the sentence must not read as a total loss —
     // while still naming the cause the user has to act on.
@@ -1271,12 +1274,18 @@ export function VoiceInputOverlay() {
           // that distinction drives which hint the panel shows, so a dropped
           // session is not reported as the target app rejecting input.
           const recognizedText = (finalTextRef.current || draftTextRef.current).trim();
-          if (closingRef.current && recognizedText) {
+          if (closingRef.current && recognizedText && !event.transcriptKept) {
             // Stop-time provider errors can arrive after ASR has produced a
             // stable transcript while refinement is still running. Treating
             // that late error as completion makes the global overlay paste raw
             // ASR text before the refined result arrives. Keep waiting for
             // done/refined here; waitForDone still has its timeout fallback.
+            //
+            // A retained-transcript failure is the opposite case: the run is
+            // already terminal, so nothing further will arrive. Skipping the
+            // setup below would leave the overlay open showing the transcript
+            // with no explanation and no copy button (stopAndPaste bails out on
+            // the error state without pasting).
             break;
           }
           // A retained-transcript message is already the final user-facing

@@ -230,13 +230,13 @@ export class VoiceInputController {
 
     await this.asr.stop();
 
-    // Placed after EVERY await in this method, because a failure can land during
-    // any of them and fail() already salvaged the transcript and set the terminal
-    // state. Providers hide such a failure from this path: both flushAudio() and
-    // stop() await an in-flight recover() but swallow its rejection, so those
-    // awaits resolve normally on a run that has already failed. Continuing would
-    // submit the same transcript twice and overwrite 'error' with
-    // 'refining'/'done', hiding the failure from the user entirely.
+    // Deliberately placed after the LAST provider await in this method, so it
+    // covers a failure landing during any of them. Providers hide such failures
+    // from this path: both flushAudio() and stop() await an in-flight recover()
+    // but swallow its rejection, so those awaits resolve normally on a run that
+    // fail() has already finished (salvaging the transcript and setting the
+    // terminal state). Continuing would submit the same transcript twice and
+    // overwrite 'error' with 'refining'/'done', hiding the failure entirely.
     // transcriptEmitted is checked too: it is the direct invariant ("this run has
     // already given the host its text"), so it holds even if a future failure
     // path leaves the state alone.
@@ -384,7 +384,10 @@ export class VoiceInputController {
         // was supposed to prevent.
         if (this.state === 'listening' && this.tryRecover('disconnected')) break;
         if (this.state === 'listening') {
-          this.fail('Voice input connection was interrupted. Please try again.');
+          this.fail(
+            'Voice input connection was interrupted. Please try again.',
+            'connection_interrupted',
+          );
         }
         break;
     }
@@ -498,6 +501,15 @@ export class VoiceInputController {
       this.discardRefinement(runId, request, 'cancelled');
       return;
     }
+    // A failure can land while refinement is in flight (a recovery rejecting
+    // after stop() already submitted). Every exit below writes a terminal state,
+    // so continuing would overwrite 'error' with 'done' and erase the failure
+    // the user was just told about — along with applying refined text to a run
+    // whose host already reported it as failed.
+    if (this.state === 'error') {
+      this.discardRefinement(runId, request, 'run_failed');
+      return;
+    }
 
     if (error) {
       this.logger.record({
@@ -562,7 +574,10 @@ export class VoiceInputController {
     const emitPreview = (text: string): void => {
       const normalized = text.replace(/\r\n?/g, '\n').trim();
       if (!normalized || normalized === request.text) return;
-      if (runId !== this.runId || this.currentRunCancelled) return;
+      // Same reason as finishRefinement's check: once the run has failed, its
+      // host is showing an error — streaming refinement previews into it would
+      // rewrite text the user was just told the session stopped producing.
+      if (runId !== this.runId || this.currentRunCancelled || this.state === 'error') return;
       if (this.callbacks.isRangeUserTouched?.(range) ?? range.userTouched) return;
       this.callbacks.onRefinementPreview?.(normalized, {
         ...segment,
@@ -755,7 +770,7 @@ export class VoiceInputController {
           reason,
         });
         this.stopStallWatchdog();
-        this.fail('Voice input stopped receiving recognition. Please try again.');
+        this.fail('Voice input stopped receiving recognition. Please try again.', 'recognition_stalled');
       })
       .finally(() => {
         if (runId !== this.runId) return;

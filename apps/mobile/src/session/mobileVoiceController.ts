@@ -23,7 +23,7 @@ import {
   buildMobileVoiceRefinementContext,
   makeMobileRefinerPromptCacheKey,
   MobileLiteLlmTextModelClient,
-  mobileVoiceEmptyTranscriptError,
+  mobileVoiceErrorCodeMessage,
   mobileVoiceTranscriptKeptError,
   type MobileVoiceDraftInsertion,
 } from '@/session/mobileVoiceInput';
@@ -387,8 +387,10 @@ export function createMobileVoiceControllerSession(
         return sameRange && !isInsertionIntact(readCurrentDraft(), voiceInsertion);
       },
       onError(message, code: VoiceInputErrorCode | undefined, details) {
-        const cause = code === 'empty_transcript'
-          ? mobileVoiceEmptyTranscriptError()
+        // 有 code 的是 controller 自己分类的失败(message 是英文调试串),按 code 取
+        // 本地化文案;没有 code 的来自 provider,那条 message 才是唯一的失败描述。
+        const cause = code
+          ? mobileVoiceErrorCodeMessage(code)
           : redactMobileVoiceCredentialText(message, options.credential);
         const localizedMessage = details?.transcriptKept
           ? mobileVoiceTranscriptKeptError(cause)

@@ -59,7 +59,7 @@ import { resolveVoiceInputStartGuards } from './startGuards';
 import { getVoiceInputWorkletUrl } from './workletUrl';
 import { buildRefinementPreviewText } from './refinementPreviewText';
 import { isVoiceInputEventScopeActive, shouldHandleVoiceInputEvent } from './eventScope';
-import { isVoiceInputServiceConnectionError } from './overlayErrors';
+import { isVoiceInputServiceConnectionError, VOICE_INPUT_ERROR_CODE_KEYS } from './overlayErrors';
 import {
   VOICE_INPUT_DICTIONARY_LEARNING_TRACK_TIMEOUT_MS,
 } from '../../shared/voiceInputDictionaryLearning';
@@ -373,7 +373,11 @@ export function useVoiceInput(
     code?: VoiceInputErrorCode,
     transcriptKept?: boolean,
   ): string => {
-    const cause = code === 'empty_transcript' ? t('voiceInputOverlay.emptyTranscript') : message;
+    // Coded failures are the controller's own; their `message` is an English
+    // debug string, so the localized sentence has to come from the code.
+    // Uncoded ones come from a provider — that message is the only description
+    // of an auth/quota/protocol problem, so it is shown verbatim.
+    const cause = code ? t(VOICE_INPUT_ERROR_CODE_KEYS[code]) : message;
     // Retention is appended to the cause, never substituted for it: the user
     // still needs to know whether this was a dropped socket or an expired
     // credential, and they also need to know their words are in the composer.

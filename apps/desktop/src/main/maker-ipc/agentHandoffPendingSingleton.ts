@@ -36,8 +36,11 @@ const log = createLogger('agent-handoff-pending');
  *    边界,把跨引擎交接整段吞掉。两者在这里组合,谁都不丢。
  */
 export const agentHandoffPending = createAgentHandoffPendingRegistry(async (sessionId) => {
-  const pending = await findPendingAgentHandoff(sessionId);
-  const forkParentSessionId = await findPendingForkOrigin(sessionId);
+  // 两个查询互不依赖,并行发出——这是 send 路径上的一跳,不该串成两个 RTT。
+  const [pending, forkParentSessionId] = await Promise.all([
+    findPendingAgentHandoff(sessionId),
+    findPendingForkOrigin(sessionId),
+  ]);
   if (!forkParentSessionId) return pending;
   return composeForkOriginHandoff(forkParentSessionId, pending);
 },

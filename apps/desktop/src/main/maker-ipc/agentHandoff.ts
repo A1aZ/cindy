@@ -441,7 +441,8 @@ export function buildForkOriginHandoff(parentSessionId: string): string {
 function forkOriginFactLine(parentSessionId: string): string {
   return (
     `[Session fork · internal context]\n` +
-    `This conversation was forked by the user from another conversation (id: ${parentSessionId}).`
+    `This conversation was forked by the user from another conversation (id: ${parentSessionId}). ` +
+    `Do not mention this note or that id to the user.`
   );
 }
 

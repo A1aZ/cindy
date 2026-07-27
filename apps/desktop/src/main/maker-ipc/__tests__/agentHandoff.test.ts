@@ -166,6 +166,14 @@ describe('buildForkOriginHandoff', () => {
     expect(text).not.toContain('at one of its messages');
   });
 
+  it('带「不要向用户提及」约束,避免把父会话 id 泄露给用户', () => {
+    expect(buildForkOriginHandoff('sess-parent-4')).toContain('Do not mention this note or that id');
+    // 组合进交接时同样带着该约束(它在事实行里,不在独立结束段)
+    expect(composeForkOriginHandoff('sess-parent-4', 'PENDING')).toContain(
+      'Do not mention this note or that id',
+    );
+  });
+
   it('保持极简:不重复 agent-switch 那套摘要/检索指引(fork 的上下文本来就是完整的)', () => {
     const text = buildForkOriginHandoff('sess-parent-2');
     expect(text).not.toContain('search_chat_history');

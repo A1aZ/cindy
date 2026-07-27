@@ -1497,13 +1497,24 @@ export async function findPendingAgentHandoff(sessionId: string): Promise<string
  *
  * 判定同样确定性、可从 DB 重建(不需要额外存储位):fork 复制历史时**保留原
  * createdAt**(见 maker-orchestration/fork.ts),而新会话的 createdAt = fork 时刻,
- * 所以复制来的行必然早于它;子会话自己发出的第一条 user 消息则不早于它。于是
- * 「不存在 createdAt >= session.createdAt 的 user 行」⟺ fork 后尚未发送过。
+ * 所以复制来的行早于它;子会话真正跑过一轮后才会有不早于它的 assistant 行。
  *
- * 已知精度边界:首发失败可能已先落 user 行(与 findPendingAgentHandoff 的 v1
- * 启发式同款局限),此时重试会丢掉来源标记。来源标记是元信息,丢了不影响正确性,
- * 不值得为它在 messages 里加一条隐藏边界行——那会让该会话之后再也不能被 fork
- * (resolveForkNativeSource 见到 context_rebuild 即判 UNSUPPORTED_HISTORY)。
+ * 为什么看 assistant 而不是 user:有调用方在 dispatch **之前**就先把 user 行落库
+ * ——goal 路径的 setGoal 先 persistUserMessage 再 fireTurn→peek(goal-host/
+ * controller.ts)。用 user 行判定会把这种 fork 后首个动作是 /goal 的会话误判成
+ * "已发送",恰好在它真正的第一轮里漏掉来源标记。assistant 行只在模型确实回应过
+ * 之后才出现,不受任何 pre-dispatch 持久化影响。
+ *
+ * 已知精度边界(方向都是"多注入一次"而非丢失,可接受):
+ *  - 首发失败、没等到 assistant 就重启:下次发送会再注入一次——首发本就没送达,
+ *    重注入是对的;
+ *  - 最后一条被复制的 assistant 与 fork 操作落在同一毫秒时,会被算成子会话自己的
+ *    回应而漏注入。fork 点通常是 user 消息(其后的 assistant 不进复制范围),要撞
+ *    上需要程序化 fork 与源 assistant 落库同毫秒,概率极低。
+ *
+ * 不为它在 messages 里加隐藏边界行:那会让该会话之后再也不能被 fork
+ * (resolveForkNativeSource 见到 context_rebuild 即判 UNSUPPORTED_HISTORY);
+ * 也不为它加 schema 列——来源标记是元信息,不值得一次 migration。
  */
 export async function findPendingForkOrigin(sessionId: string): Promise<string | null> {
   const db = getDbClient().drizzle;
@@ -1513,19 +1524,19 @@ export async function findPendingForkOrigin(sessionId: string): Promise<string |
     .where(eq(sessions.id, sessionId))
     .limit(1);
   if (!sessRow?.parentSessionId) return null;
-  const [userAfterFork] = await db
+  const [assistantAfterFork] = await db
     .select({ id: messages.id })
     .from(messages)
     .where(
       and(
         eq(messages.sessionId, sessionId),
-        eq(messages.role, 'user'),
+        eq(messages.role, 'assistant'),
         isNull(messages.rewindAt),
         gte(messages.createdAt, sessRow.createdAt),
       ),
     )
     .limit(1);
-  return userAfterFork ? null : sessRow.parentSessionId;
+  return assistantAfterFork ? null : sessRow.parentSessionId;
 }
 
 /**

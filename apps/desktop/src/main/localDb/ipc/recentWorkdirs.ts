@@ -93,7 +93,10 @@ export async function upsertRecentWorkdir(
       });
     // LRU 驱逐:超过 MAX_RECENT_WORKDIRS 时,删掉 lastUsedAt 最旧的多出来的行。
     // SQLite 不支持直接 DELETE ... ORDER BY LIMIT,用子查询 OFFSET 拿出待删 path。
-    // 单条 INSERT 最多新增 1 条 → 单条最多删 1 条;query 廉价。
+    // `LIMIT -1 OFFSET n` 选中第 n+1 行起的**全部**行 —— 一次收敛到上限,不是每次删 1 行:
+    // 稳态下单条 INSERT 最多新增 1 条,自然也只删 1 条;而历史脏数据(驱逐曾长期静默失败,
+    // 用户库涨到 18 行)在下一次 upsert 就一次清到 MAX_RECENT_WORKDIRS,不用等多轮。
+    // 表最多十几行,一次删几行无性能顾虑。
     //
     // 必须走 DbClient.exec,不能用 drizzle 的 db.run(sql`...`):main 侧拿到的
     // drizzle 是 createDrizzleProxy 的代理,只把 **query builder** 的终结方法

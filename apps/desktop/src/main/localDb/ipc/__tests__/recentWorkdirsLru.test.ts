@@ -109,6 +109,24 @@ describe('upsertRecentWorkdir LRU 驱逐', () => {
     expect(h.warns).toEqual([]);
   });
 
+  it('存量已远超上限时,一次 upsert 就收敛到上限(不是每次只删 1 行)', async () => {
+    // 模拟修复前留下的脏数据:驱逐长期静默失败,表涨到 18 行(线上实测值)。
+    for (let i = 0; i < 18; i++) {
+      h.sqlite!
+        .prepare('INSERT INTO recent_workdirs (path, last_used_at) VALUES (?, ?)')
+        .run(`/Users/dash/Code/stale-${i}`, 1_600_000_000_000 + i * 1_000);
+    }
+    expect(rows()).toHaveLength(18);
+
+    await upsertRecentWorkdir('/Users/dash/Code/fresh', 1_700_000_000_000);
+
+    // `LIMIT -1 OFFSET n` 删的是第 n+1 行起的全部行 → 一次到位。
+    const kept = rows();
+    expect(kept).toHaveLength(MAX_RECENT_WORKDIRS);
+    expect(kept[0]?.path).toBe('/Users/dash/Code/fresh');
+    expect(h.warns).toEqual([]);
+  });
+
   it('未超上限时不删任何行', async () => {
     for (let i = 0; i < 3; i++) {
       await upsertRecentWorkdir(`/Users/dash/Code/proj-${i}`, 1_700_000_000_000 + i * 1_000);

@@ -12,31 +12,30 @@ export type SearchJumpWindowState = {
   messages: readonly { clientId: string }[];
   /** 窗口里是否掺进过跳转孤岛(补齐失败时 merge 的 around 窗口)。 */
   historyWindowHasIsland?: boolean;
-  /** 还能不能继续往上翻页取历史。false = 已经翻到历史起点。 */
-  hasMoreMessages?: boolean;
 };
 
 /**
  * 能否直接 focus 已在窗口里的目标、跳过 store 的跳转加载?
  *
- * 前提:目标确实在当前窗口里。在此之上:
- *  - 窗口没有孤岛 → 直接 focus。
- *  - 有孤岛 → 一般要交回 store 重新补齐:"在窗口里"可能只是先前失败的深跳留下的孤立片段,
- *    它与已加载的尾部之间隔着没加载的历史,不补的话中间缺失永远修不回来。
- *  - **例外**:有孤岛但 `hasMoreMessages === false`,即已经翻到历史起点、再没有可取的页。
- *    这时任何补齐尝试都不可能改善覆盖(分页只能往更老翻,而那边已经空了),却每次搜索都要
- *    多打一次 around + 一次 list。直接 focus 严格更好:结果一样,少两个请求
- *    (#676 review codex P1)。孤岛标记保留,窗口整体重建时自然清零。
+ * 只有两个条件同时成立才可以:
+ *   1. 目标确实在当前窗口里;
+ *   2. 窗口没有孤岛 —— 否则"在窗口里"可能只是先前失败的深跳留下的孤立片段,它与已加载的
+ *      尾部之间隔着没加载的历史。这时必须交给 store 重新补齐,否则中间缺失永远修不回来。
  *
- * 注:靠 boolean 无法证明"窗口已完整覆盖"——那需要把已加载区间显式建模(见 MessageStream
- * 里锚定窗口双向有界的 TODO,同一条后续改动)。这里只做能证明的部分:取不到新页时不白跑。
+ * 曾经加过一个例外:"有孤岛但 hasMoreMessages === false 时直接 focus",理由是分页只能往更老
+ * 翻、那边已经空了,补齐不可能改善覆盖。**这个理由是错的**,已撤掉:跳转不只走分页,它还发
+ * around-client-id;远程权威重建可以同时留下「孤岛 + hasMore=false」(翻到历史起点却保留了一
+ * 条被有损推送落下的、脱离窗口的行),那时 around 恰好能把它周围缺的邻居捞回来。用 hasMore 去
+ * 短路会把这条修复通道永久关掉(#676 review codex P1)。
+ *
+ * 代价是"孤岛 + 已翻到历史起点"的会话每次窗口内搜索都会多打一次 around + 一次 list。要真正
+ * 判定"窗口已完整覆盖、无需再试",得把已加载区间显式建模(见 MessageStream 里锚定窗口双向
+ * 有界的 TODO,同一条后续改动),不是一个 boolean 能承载的。
  */
 export function canFocusWithoutJumpLoad(
   state: SearchJumpWindowState,
   targetClientId: string,
 ): boolean {
-  const inWindow = state.messages.some((message) => message.clientId === targetClientId);
-  if (!inWindow) return false;
-  if (state.historyWindowHasIsland !== true) return true;
-  return state.hasMoreMessages === false;
+  if (state.historyWindowHasIsland === true) return false;
+  return state.messages.some((message) => message.clientId === targetClientId);
 }

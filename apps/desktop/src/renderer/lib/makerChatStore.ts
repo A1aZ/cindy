@@ -5648,17 +5648,19 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
         // 最后一行,"比权威窗口更新"只证明它来得更晚,不证明中间那几行也送到了
         // (#676 review codex P1)。代价是分页期间来过 push 的会话会多做一次补齐尝试,
         // 换来的是不会把有损通道造成的缺口当成连续。
-        const authoritativeOldestMs = messageTime(oldestRow?.createdAt);
+        // 比较必须走 (createdAt, rowid) 这条完整时间线,不能只比毫秒:同一毫秒里插入的两行
+        // 靠 rowid 定序(messages 表与分页都用它),只比时间戳会把"与权威窗口最新行同毫秒、
+        // 但 rowid 更大"的晚到行判成范围内,而它与权威窗口之间那一行可能正好被有损推送丢了
+        // (#676 review codex P1)。
         const newestRow = newestMessageRowForWindow(collected);
-        const authoritativeNewestMs = messageTime(newestRow?.createdAt);
-        const hasDetachedArrival = lateArrivals.some((message) => {
-          const ms = messageTime(message.createdAt);
-          if (!Number.isFinite(ms)) return false;
-          if (!Number.isFinite(authoritativeOldestMs) || !Number.isFinite(authoritativeNewestMs)) {
-            return false;
-          }
-          return ms < authoritativeOldestMs || ms > authoritativeNewestMs;
-        });
+        const hasDetachedArrival =
+          oldestRow !== null &&
+          newestRow !== null &&
+          lateArrivals.some(
+            (message) =>
+              compareMessageTimeline(message, oldestRow) < 0 ||
+              compareMessageTimeline(message, newestRow) > 0,
+          );
         return {
           ...s,
           messages,

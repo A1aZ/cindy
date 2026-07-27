@@ -846,13 +846,26 @@ export function CCAgentSessionView({
       clearSearchJumpState();
       return;
     }
-    // 目标当前已经渲染在窗口里(只是窗口有孤岛,所以上面没走快速通道)。这种情况下"修复
-    // 连续性"失败不该连"跳到那一行"一起失败:导航根本不需要网络。被控端临时离线时
-    // invokeRemote 会 reject,原先的 catch 只弹 jumpFailed、不 focus,用户明明看得见那一行
-    // 却跳不过去(#676 review codex P1)。孤岛标记保留,留给下一次跳转再试修复。
-    const targetAlreadyInWindow = currentState.messages.some(
-      (message) => message.clientId === searchJump.messageClientId,
-    );
+    // 加载失败(取不到权威行 / 请求 reject)时的收口:目标只要**此刻**还渲染在窗口里,就直接
+    // focus 它、不报错 —— 导航到一行已经在屏上的消息根本不需要网络(被控端临时离线时
+    // invokeRemote 会 reject)。孤岛标记保留,留给下一次跳转再试修复。
+    //
+    // 必须查**实时**快照,不能用进 effect 时捕获的布尔值:请求飞行期间远程权威重建可能已经把
+    // 那一行移除(并 bump 代际,正是 loadAround 返回 null 的原因之一),那时照旧 focus 一个已
+    // 不存在的 clientId 会白吞掉这次跳转 —— 既不导航也不报错,MessageStream 还会在后续每次
+    // 渲染里线性扫描这个找不到的 id(#676 review codex P1 + copilot)。
+    const targetStillInWindow = (): boolean =>
+      makerChatStore
+        .getSnapshot(sessionId)
+        .messages.some((message) => message.clientId === searchJump.messageClientId);
+    const finishWithFallback = (): void => {
+      if (targetStillInWindow()) {
+        requestFocusMessage(searchJump.messageClientId);
+      } else {
+        toast.error(t('ccAgent.search.jumpFailed'));
+      }
+      clearSearchJumpState();
+    };
     const loadAround =
       searchJump.messageIdKind === 'clientId'
         ? makerChatStore.loadAroundMessageClientId
@@ -860,22 +873,17 @@ export function CCAgentSessionView({
     void loadAround(sessionId, searchJump.messageId, { radius: 60 })
       .then((message) => {
         if (cancelled) return;
-        requestFocusMessage(message?.clientId ?? searchJump.messageClientId);
-        // 没取到权威行,但目标本来就在窗口里 → 用户看到的就是"跳过去了",不该再报错。
-        if (!message && !targetAlreadyInWindow) {
-          toast.error(t('ccAgent.search.jumpFailed'));
+        if (message) {
+          requestFocusMessage(message.clientId);
+          clearSearchJumpState();
+          return;
         }
-        clearSearchJumpState();
+        finishWithFallback();
       })
       .catch((err) => {
         if (!cancelled) {
           log.warn('Failed to load search hit context:', err);
-          if (targetAlreadyInWindow) {
-            requestFocusMessage(searchJump.messageClientId);
-          } else {
-            toast.error(t('ccAgent.search.jumpFailed'));
-          }
-          clearSearchJumpState();
+          finishWithFallback();
         }
       });
     return () => {

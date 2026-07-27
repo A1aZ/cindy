@@ -36,21 +36,20 @@ describe('搜索跳转落点判定', () => {
   });
 });
 
-describe('canFocusWithoutJumpLoad · 已翻到历史起点', () => {
-  it('有孤岛但没有更多页可取时直接 focus(补齐不可能改善覆盖)', () => {
-    // review #676(codex P1):分页只能往更老翻,而那边已经空了 —— 再打一次 around + list
-    // 不会让窗口更完整,只是每次搜索白跑两个请求。
+describe('canFocusWithoutJumpLoad · 孤岛一律交回 store', () => {
+  it('有孤岛时即便已翻到历史起点也不直接 focus(around 仍可能捞回缺的邻居)', () => {
+    // review #676(codex P1):跳转不只走分页,它还发 around-client-id。远程权威重建可以同时
+    // 留下"孤岛 + hasMore=false"(翻到历史起点却保留了一条被有损推送落下的脱离行),那时
+    // around 恰好能把它周围缺的邻居捞回来。用 hasMore 短路会把这条修复通道永久关掉。
     const state = {
       messages: [{ clientId: 'a' }, { clientId: 'b' }],
       historyWindowHasIsland: true,
       hasMoreMessages: false,
     };
-    expect(canFocusWithoutJumpLoad(state, 'b')).toBe(true);
-    // 目标不在窗口里时仍然要走 store。
-    expect(canFocusWithoutJumpLoad(state, 'zzz')).toBe(false);
+    expect(canFocusWithoutJumpLoad(state, 'b')).toBe(false);
   });
 
-  it('有孤岛且还能继续翻页时仍交回 store 补齐', () => {
+  it('有孤岛且还能继续翻页时同样交回 store 补齐', () => {
     const state = {
       messages: [{ clientId: 'a' }],
       historyWindowHasIsland: true,

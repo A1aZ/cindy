@@ -683,6 +683,43 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     );
   });
 
+  it('远程会话:与权威窗口最新行同毫秒、rowid 更大的晚到行也算脱离', async () => {
+    // review #676(codex P1):同一毫秒里插入的多行靠 rowid 定序(messages 表与分页都用它)。
+    // 只比毫秒会把"同毫秒但 rowid 更大"的晚到行判成范围内,而它与权威窗口之间那一行可能正好
+    // 被有损推送丢了。
+    const s = sid();
+    makerChatStore.initGlobalListeners();
+    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
+
+    const pendingList = deferred<Message[]>();
+    remoteListResolver = () => pendingList.promise;
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    // 与权威窗口最新行**同毫秒**、但 rowid 更大(中间那行 rowid=11 没送到)。
+    remotePush?.({
+      deviceId: DEVICE_ID,
+      channel: 'local-db:messages:created',
+      payload: {
+        sessionId: s,
+        message: {
+          ...dbMessage(s, 'same-ms-later', 'same ms, later rowid', '2026-06-20T00:00:00.000Z'),
+          rowid: 12,
+        },
+      },
+    });
+
+    pendingList.resolve([
+      { ...dbMessage(s, 'auth-1', 'authoritative', '2026-06-20T00:00:00.000Z'), rowid: 10 },
+    ]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    const ids = makerChatStore.getSnapshot(s).messages.map((m) => m.clientId);
+    expect(ids).toContain('client-same-ms-later');
+    expect(ids).toContain('client-auth-1');
+    // 关键:同毫秒但 rowid 更大 → 落在权威范围之外 → 按孤岛处理。
+    expect(makerChatStore.getSnapshot(s).historyWindowHasIsland).toBe(true);
+  });
+
   it('远程会话:权威重建保留了比权威窗口更新的晚到行时也记孤岛(推送有损)', async () => {
     // review #676(codex P1):"比权威窗口最新一行还新"只证明它来得更晚。device-link 的实时
     // 推送是 fire-and-forget 有损的,被控端连产多行时可能只送到最后一行 —— 中间那几行没到,

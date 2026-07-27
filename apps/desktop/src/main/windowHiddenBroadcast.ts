@@ -11,9 +11,12 @@ import type { BrowserWindow } from 'electron';
  *   backgroundThrottling=false  minimize()/hide() → visibilityState 仍 'visible' ❌
  *   两种取值下 BrowserWindow 的 hide/minimize 事件都正常触发                     ✅
  *
- * 所以凡是关掉了节流的窗口都必须装这条广播,否则它那份闸门形同虚设。当前有两处:
- * 主窗(setMainWindowBackgroundThrottlingForActiveTurn 在有 running turn 时关节流)与
- * 语音浮窗(建窗即 backgroundThrottling:false,保住麦克风回调调度)。
+ * 所以判据是:**凡是会安装 hiddenAnimationGate、又关掉了节流的窗口,都必须装这条广播**,
+ * 否则它那份闸门形同虚设。是否安装闸门取决于窗口加载的 renderer 入口——闸门在
+ * index.tsx 顶层安装,所以凡加载主 renderer 入口(index.html,含各种 ?view= 变体)的窗口
+ * 都装了。这里不列具体窗口清单:新增窗口时清单必然过期,由
+ * mainWindowBackgroundThrottling.test.ts 的扫描测试按上述判据兜底(它按窗口计数,
+ * 并要求豁免必须显式登记理由)。
  *
  * 两路信号在 Renderer 侧取「或」:本广播不受节流影响、覆盖最小化与 hide;
  * visibilityState 覆盖 macOS 的窗口遮挡(occlusion)——那个没有对应的 Electron 事件。

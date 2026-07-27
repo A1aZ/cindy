@@ -1402,6 +1402,11 @@ function createDictionaryToastWindow(payload: { entries: DictionaryToastEntryPay
     scheduleMainAppPresenceRestore('voice-dictionary-toast-shown');
   });
 
+  // 词典 toast 同样 backgroundThrottling:false 且加载主 renderer 入口(index.html
+  // ?view=voice-input-dictionary-toast),顶层已安装装饰动画闸门 —— 不广播的话
+  // hide(如 Cmd+H)后 visibilityState 恒为 visible,闸门静默失效。
+  installWindowHiddenBroadcast(window);
+
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
     const url = new URL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
     url.search = DICTIONARY_TOAST_QUERY;

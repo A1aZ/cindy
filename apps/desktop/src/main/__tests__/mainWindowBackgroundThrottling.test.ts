@@ -21,6 +21,15 @@ import type { AgentEvent } from '@cindy/maker-core';
 const sourcePath = resolve(__dirname, '..', 'bootstrap-electron.ts');
 const source = readFileSync(sourcePath, 'utf8').replace(/\r\n?/g, '\n');
 
+/**
+ * 剥掉 TS 注释后再做关键字计数：`backgroundThrottling: false` /
+ * `installWindowHiddenBroadcast` 这些串在说明性注释里也会出现，不剥会把数目算虚。
+ * `[^:]` 前导避免误伤 `https://` 这类。
+ */
+function stripComments(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+}
+
 describe('主 BrowserWindow 后台节流', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -187,39 +196,48 @@ describe('窗口可见性广播（装饰动画闸门的兜底信号）', () => {
       return out;
     };
 
+    // 按「窗口」计数而不是「文件是否提到过」：voice-input/global.ts 里有两个关掉节流的
+    // 窗口(浮窗 + 词典 toast)，只看 includes 的话第一个装了就把第二个放过去了。
+    // 计数前先剥注释：这些关键字在说明性注释里也会出现，不剥的话数目虚高。
+    // 调用点用带实参的形式计数，避免把 import 语句算进去。
+    const countMatches = (text: string, re: RegExp): number => [...text.matchAll(re)].length;
+
     const offenders: string[] = [];
     for (const file of walk(mainDir)) {
-      const content = readFileSync(file, 'utf8');
-      if (!/backgroundThrottling:\s*false/.test(content)) continue;
+      const content = stripComments(readFileSync(file, 'utf8'));
+      const unthrottled = countMatches(content, /backgroundThrottling:\s*false/g);
+      if (unthrottled === 0) continue;
       const rel = relative(mainDir, file);
       if (BROADCAST_EXEMPT.has(rel)) continue;
-      if (!content.includes('installWindowHiddenBroadcast')) offenders.push(rel);
+      const installed = countMatches(content, /installWindowHiddenBroadcast\(\s*\w/g);
+      if (installed < unthrottled) {
+        offenders.push(`${rel}（关闭节流 ${unthrottled} 处，装了广播 ${installed} 处）`);
+      }
     }
 
     expect(
       offenders,
-      '以下文件关闭了 backgroundThrottling 但既没装 installWindowHiddenBroadcast，' +
-        '也没在 BROADCAST_EXEMPT 里登记豁免理由。若该窗口的视图有常驻装饰动画，' +
-        '闸门会静默失效：\n' +
+      '以下文件里关闭 backgroundThrottling 的窗口数多于装了 installWindowHiddenBroadcast 的数量，' +
+        '也没在 BROADCAST_EXEMPT 里登记豁免。若这些窗口的视图有常驻装饰动画，闸门会静默失效：\n' +
         offenders.join('\n'),
     ).toEqual([]);
   });
 
-  it('主窗与语音浮窗都装了广播', () => {
+  it('主窗、语音浮窗与词典 toast 都装了广播', () => {
     expect(source).toContain('installWindowHiddenBroadcast(mainWindow);');
 
-    const overlaySource = readFileSync(
-      resolve(__dirname, '..', 'voice-input', 'global.ts'),
-      'utf8',
-    ).replace(/\r\n?/g, '\n');
-    expect(overlaySource).toMatch(/backgroundThrottling:\s*false/);
-    expect(overlaySource).toContain('installWindowHiddenBroadcast(window);');
+    // 同一文件里两个窗口各装一份：overlay 与 dictionary toast 的局部变量都叫 window。
+    const overlaySource = stripComments(
+      readFileSync(resolve(__dirname, '..', 'voice-input', 'global.ts'), 'utf8').replace(/\r\n?/g, '\n'),
+    );
+    expect([...overlaySource.matchAll(/backgroundThrottling:\s*false/g)]).toHaveLength(2);
+    expect([...overlaySource.matchAll(/installWindowHiddenBroadcast\(window\);/g)]).toHaveLength(2);
   });
 
   it('豁免清单里的文件确实存在且确实关闭了节流（防止豁免过期后静默失效）', () => {
     const mainDir = resolve(__dirname, '..');
     for (const [rel, reason] of BROADCAST_EXEMPT) {
-      const content = readFileSync(resolve(mainDir, rel), 'utf8');
+      const content = stripComments(readFileSync(resolve(mainDir, rel), 'utf8'));
       expect(content, `${rel} 已不再关闭 backgroundThrottling，${reason} 这条豁免应删除`).toMatch(
         /backgroundThrottling:\s*false/,
       );

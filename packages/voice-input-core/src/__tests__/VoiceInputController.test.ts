@@ -50,6 +50,18 @@ class FakeAsrProvider implements AsrProvider {
   }
 }
 
+// A host that takes the text: salvage treats the returned range as the
+// acceptance signal, so stubs that mean "accepted" must return one.
+function acceptSubmission(text: string, segment: SpeechSegment): EditableRange {
+  return {
+    id: `range-${segment.id}`,
+    segmentIds: [segment.id],
+    startOffset: 0,
+    endOffset: text.length,
+    userTouched: false,
+  };
+}
+
 function pcmChunk(amplitude: number): ArrayBuffer {
   const samples = new Int16Array(160);
   samples.fill(amplitude);
@@ -285,9 +297,9 @@ describe('VoiceInputController', () => {
       logger: new VoiceTimelineLogger((event) => timeline.push(event)),
       callbacks: {
         onDraftChanged: () => {},
-        onSubmitted: (text) => {
+        onSubmitted: (text, segment) => {
           submitted.push(text);
-          return undefined;
+          return acceptSubmission(text, segment);
         },
         onError: (message, code, details) => errors.push({ message, code, kept: details?.transcriptKept }),
       },
@@ -320,9 +332,9 @@ describe('VoiceInputController', () => {
       callbacks: {
         onStateChanged: (state) => calls.push(`state:${state}`),
         onDraftChanged: () => {},
-        onSubmitted: () => {
+        onSubmitted: (text, segment) => {
           calls.push('submitted');
-          return undefined;
+          return acceptSubmission(text, segment);
         },
         onError: () => calls.push('error'),
       },
@@ -349,9 +361,9 @@ describe('VoiceInputController', () => {
       logger: new VoiceTimelineLogger((event) => timeline.push(event)),
       callbacks: {
         onDraftChanged: () => {},
-        onSubmitted: (text) => {
+        onSubmitted: (text, segment) => {
           submitted.push(text);
-          return undefined;
+          return acceptSubmission(text, segment);
         },
         onError: (message, code, details) => errors.push({ message, code, kept: details?.transcriptKept }),
       },
@@ -430,9 +442,9 @@ describe('VoiceInputController', () => {
       logger: new VoiceTimelineLogger((event) => timeline.push(event)),
       callbacks: {
         onDraftChanged: () => {},
-        onSubmitted: (text) => {
+        onSubmitted: (text, segment) => {
           submitted.push(text);
-          return undefined;
+          return acceptSubmission(text, segment);
         },
       },
     });
@@ -469,9 +481,9 @@ describe('VoiceInputController', () => {
       stableWaitMs: 0,
       callbacks: {
         onDraftChanged: () => {},
-        onSubmitted: (text) => {
+        onSubmitted: (text, segment) => {
           submitted.push(text);
-          return undefined;
+          return acceptSubmission(text, segment);
         },
         onError: (message, code, details) => errors.push({ message, code, kept: details?.transcriptKept }),
       },
@@ -523,9 +535,9 @@ describe('VoiceInputController', () => {
       stableWaitMs: 0,
       callbacks: {
         onDraftChanged: () => {},
-        onSubmitted: (text) => {
+        onSubmitted: (text, segment) => {
           submitted.push(text);
-          return undefined;
+          return acceptSubmission(text, segment);
         },
         onError: (message, code, details) => errors.push({ message, code, kept: details?.transcriptKept }),
       },
@@ -552,6 +564,86 @@ describe('VoiceInputController', () => {
 
     expect(submitted).toEqual(['only once']);
     expect(controller.currentState).toBe('error');
+  });
+
+  it('does not claim retention when the host refuses the salvaged text', async () => {
+    const asr = new FakeAsrProvider();
+    const timeline: VoiceTimelineEvent[] = [];
+    const errors: Array<{ message: string; code?: string; kept?: boolean }> = [];
+    const controller = new VoiceInputController({
+      asr,
+      logger: new VoiceTimelineLogger((event) => timeline.push(event)),
+      callbacks: {
+        onDraftChanged: () => {},
+        // Mobile refuses writes once the user has edited the voice insertion,
+        // so the salvaged text never lands in the composer.
+        onSubmitted: () => undefined,
+        onError: (message, code, details) => errors.push({ message, code, kept: details?.transcriptKept }),
+      },
+    });
+
+    await controller.start();
+    asr.emit({ type: 'partial', text: 'never lands', at: Date.now() });
+    asr.emit({ type: 'disconnected', at: Date.now() });
+
+    expect(errors).toEqual([{
+      message: 'Voice input connection was interrupted. Please try again.',
+      code: 'connection_interrupted',
+      kept: false,
+    }]);
+    expect(timeline).toContainEqual(expect.objectContaining({
+      type: 'transcript_salvaged',
+      accepted: false,
+    }));
+  });
+
+  it('logs an interrupted stop as cancelled when the user cancelled', async () => {
+    const asr = new FakeAsrProvider();
+    // stop() and cancel() each await the provider's stop(); hold both and
+    // release them together, otherwise the first one never settles.
+    const stopResolvers: Array<() => void> = [];
+    asr.stopHook = () => new Promise<void>((resolve) => {
+      stopResolvers.push(resolve);
+    });
+    const timeline: VoiceTimelineEvent[] = [];
+    const controller = new VoiceInputController({
+      asr,
+      logger: new VoiceTimelineLogger((event) => timeline.push(event)),
+      stableWaitMs: 0,
+      refiner: {
+        refine: () => new Promise<RefinementResult>(() => {}),
+      },
+      callbacks: {
+        onDraftChanged: () => {},
+        onSubmitted: (text, segment) => ({
+          id: 'range-1',
+          segmentIds: [segment.id],
+          startOffset: 0,
+          endOffset: text.length,
+          userTouched: false,
+        }),
+      },
+    });
+
+    await controller.start();
+    asr.emit({ type: 'partial', text: 'abandoned', at: Date.now() });
+    const stopPromise = controller.stop();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const cancelPromise = controller.cancel();
+    stopResolvers.splice(0).forEach((resolve) => resolve());
+    await cancelPromise;
+    stopResolvers.splice(0).forEach((resolve) => resolve());
+    await stopPromise;
+
+    expect(timeline).toContainEqual(expect.objectContaining({
+      type: 'refine_discarded',
+      reason: 'cancelled',
+    }));
+    expect(timeline).not.toContainEqual(expect.objectContaining({
+      type: 'refine_discarded',
+      reason: 'run_failed',
+    }));
   });
 
   it('does not let a late refinement overwrite a failed run', async () => {
@@ -626,7 +718,7 @@ describe('VoiceInputController', () => {
       logger: new VoiceTimelineLogger(),
       callbacks: {
         onDraftChanged: () => {},
-        onSubmitted: () => undefined,
+        onSubmitted: acceptSubmission,
         onError: (message, code, details) => errors.push({ message, code, kept: details?.transcriptKept }),
       },
     });

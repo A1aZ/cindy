@@ -241,7 +241,9 @@ export class VoiceInputController {
     // already given the host its text"), so it holds even if a future failure
     // path leaves the state alone.
     if (this.leftSubmittingState() || this.transcriptEmitted) {
-      this.discardRefinement(runId, optimisticRefinement, 'run_failed');
+      // cancel() also lands here (it moves the run to 'done'); logging that as
+      // a failure would misread the timeline for an intentional abort.
+      this.discardRefinement(runId, optimisticRefinement, this.currentRunCancelled ? 'cancelled' : 'run_failed');
       return;
     }
 
@@ -643,6 +645,11 @@ export class VoiceInputController {
    * never offered them to onSubmitted. The transcript is worth more than the
    * dead session, so commit it raw — refinement needs the same network that
    * just failed — and let the host report the failure with transcriptKept set.
+   *
+   * The host's returned range is the acceptance signal. A host can legitimately
+   * refuse: mobile stops writing into the voice insertion once the user has
+   * edited it, so the text never lands. Claiming retention there would tell the
+   * user their words were kept when the tail was actually dropped.
    */
   private salvageTranscript(): boolean {
     if (this.transcriptEmitted) return false;
@@ -655,21 +662,24 @@ export class VoiceInputController {
       text,
       updatedAt: Date.now(),
     };
+    let accepted = false;
     try {
-      this.callbacks.onSubmitted(text, segment);
+      accepted = Boolean(this.callbacks.onSubmitted(text, segment));
     } catch {
       // A host that cannot take the text (destroyed window, torn-down editor)
       // must not also swallow the error report the user is waiting for.
-      return false;
+      accepted = false;
     }
-    this.transcriptEmitted = true;
     this.logger.record({
       type: 'transcript_salvaged',
       runId: this.runId,
       at: Date.now(),
       text,
       source: this.latestTranscriptSource,
+      accepted,
     });
+    if (!accepted) return false;
+    this.transcriptEmitted = true;
     return true;
   }
 

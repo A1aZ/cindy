@@ -224,7 +224,17 @@ export type VoiceTimelineEvent =
   // No failure message here: fail() records the 'error' event with the same
   // runId immediately before salvaging, so the cause is already in the timeline
   // — and unlike `text`, hosts don't redact this event's other fields.
-  | { type: 'transcript_salvaged'; runId: string; at: number; text: string; source: 'stable' | 'partial' }
+  // `accepted` is false when the host refused the text (e.g. the user had
+  // already edited the voice insertion), which is exactly when the retention
+  // flag must NOT be reported to the user.
+  | {
+      type: 'transcript_salvaged';
+      runId: string;
+      at: number;
+      text: string;
+      source: 'stable' | 'partial';
+      accepted: boolean;
+    }
   | { type: 'error'; runId: string; at: number; message: string };
 
 export type VoiceInputCallbacks = {

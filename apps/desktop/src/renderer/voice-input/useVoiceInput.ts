@@ -368,6 +368,12 @@ export function useVoiceInput(
     }, INLINE_ERROR_AUTO_DISMISS_MS);
   }, [clearInlineErrorDismissTimer]);
 
+  const formatVoiceInputStartError = useCallback((message: string): string => {
+    return isVoiceInputServiceConnectionError(message)
+      ? t('voiceInputOverlay.asrServiceUnavailable')
+      : message;
+  }, [t]);
+
   const formatVoiceInputError = useCallback((
     message: string,
     code?: VoiceInputErrorCode,
@@ -375,20 +381,17 @@ export function useVoiceInput(
   ): string => {
     // Coded failures are the controller's own; their `message` is an English
     // debug string, so the localized sentence has to come from the code.
-    // Uncoded ones come from a provider — that message is the only description
-    // of an auth/quota/protocol problem, so it is shown verbatim.
-    const cause = code ? t(VOICE_INPUT_ERROR_CODE_KEYS[code]) : message;
+    // Uncoded ones come from a provider — run them through the same connection
+    // mapping the start path uses, so one transport failure reads the same on
+    // both paths and raw ECONNRESET/"fetch failed" strings stay out of the UI.
+    // Anything that is not a transport string (auth, quota, protocol) survives
+    // verbatim, since that message is its only description.
+    const cause = code ? t(VOICE_INPUT_ERROR_CODE_KEYS[code]) : formatVoiceInputStartError(message);
     // Retention is appended to the cause, never substituted for it: the user
     // still needs to know whether this was a dropped socket or an expired
     // credential, and they also need to know their words are in the composer.
     return transcriptKept ? t('voiceInputOverlay.transcriptKept', { message: cause }) : cause;
-  }, [t]);
-
-  const formatVoiceInputStartError = useCallback((message: string): string => {
-    return isVoiceInputServiceConnectionError(message)
-      ? t('voiceInputOverlay.asrServiceUnavailable')
-      : message;
-  }, [t]);
+  }, [formatVoiceInputStartError, t]);
 
   const appendAudioChunk = useCallback((chunk: PcmChunk) => {
     sentAudioMsRef.current += chunk.trace.durationMs;

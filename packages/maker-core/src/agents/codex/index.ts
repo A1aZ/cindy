@@ -296,8 +296,9 @@ function mapPermissionToCodex(
       return { approvalPolicy: 'never', sandbox: 'danger-full-access' };
     case 'auto':
       if (!approvalsReviewerSupported) {
-        // 旧 app-server 没有 approvalsReviewer 字段时回退到原生 untrusted:
-        // 可信命令自动执行,其余请求交给用户。不能发送未知字段让整次 RPC 失败。
+        // 旧 app-server 或未验证 reviewer 模型路由时回退到原生 untrusted:
+        // 可信命令自动执行,其余请求交给用户。既不能发送未知字段,也不能让
+        // 首个越界动作撞上 provider 不支持的隐藏审核模型。
         return { approvalPolicy: 'untrusted', sandbox: 'workspace-write' };
       }
       // Codex app-server 原生 auto_review 与 Claude Auto 的分工一致:
@@ -314,7 +315,7 @@ function mapPermissionToCodex(
  * Remote hosts may keep an older standalone binary across desktop upgrades, so parse the
  * initialize userAgent and conservatively omit the field unless that verified floor is met.
  */
-function supportsCodexApprovalsReviewer(userAgent: string | undefined): boolean {
+function supportsCodexApprovalsReviewerProtocol(userAgent: string | undefined): boolean {
   const match = /\/(\d+)\.(\d+)\.(\d+)(?:[-+ )]|$)/.exec(userAgent ?? '');
   if (!match) return false;
   const version = [Number(match[1]), Number(match[2]), Number(match[3])] as const;
@@ -333,7 +334,7 @@ function supportsCodexApprovalsReviewer(userAgent: string | undefined): boolean 
  * runtime root writable.
  */
 function supportsCodexReadonlyReferenceDirs(userAgent: string | undefined): boolean {
-  return supportsCodexApprovalsReviewer(userAgent);
+  return supportsCodexApprovalsReviewerProtocol(userAgent);
 }
 
 const READONLY_REFERENCES_PERMISSION_PROFILE = 'cindy-readonly-references';
@@ -2074,7 +2075,20 @@ export class CodexAgent extends BaseAgent {
       throw error;
     }
     if (initResp.codexHome) this.codexHome = initResp.codexHome;
-    const approvalsReviewerSupported = supportsCodexApprovalsReviewer(initResp.userAgent);
+    const sessionCredentialMode = opts.remoteHostId
+      ? undefined
+      : credentialMode ?? this.hostEffectiveCredentialModes.get(currentHostKey);
+    const approvalsReviewerProtocolSupported =
+      supportsCodexApprovalsReviewerProtocol(initResp.userAgent);
+    // Codex's built-in reviewer currently selects the hidden `codex-auto-review`
+    // model through the session's model provider. Cindy's gateway, third-party
+    // providers, and remote daemons do not have a verified route for that model.
+    // Keep Auto usable on those routes by falling back to Codex's native
+    // `untrusted` policy instead of letting the first write fail in the reviewer.
+    const approvalsReviewerRouteSupported =
+      !opts.remoteHostId && sessionCredentialMode === 'oauth-bearer';
+    const approvalsReviewerSupported =
+      approvalsReviewerProtocolSupported && approvalsReviewerRouteSupported;
     const readonlyReferenceDirsSupported = supportsCodexReadonlyReferenceDirs(initResp.userAgent);
     if (mutableExtraDirs.length > 0 && !readonlyReferenceDirsSupported) {
       releaseHostBindingLeaseIfNeeded();
@@ -2083,8 +2097,12 @@ export class CodexAgent extends BaseAgent {
       );
     }
     if (mutablePermissionMode === 'auto' && !approvalsReviewerSupported) {
-      log.warn('Codex Auto falling back to untrusted approvals: app-server lacks verified auto-review support', {
+      log.warn('Codex Auto falling back to untrusted approvals: automatic reviewer is unavailable on this route', {
         userAgent: initResp.userAgent,
+        providerId: opts.providerId ?? null,
+        credentialMode: sessionCredentialMode ?? 'unknown',
+        remote: Boolean(opts.remoteHostId),
+        protocolSupported: approvalsReviewerProtocolSupported,
       });
     }
     // 闭包 capture 一次, 整个 session 复用 — codexHome 是 server 进程级常量, host 不变就不变。
@@ -2702,9 +2720,9 @@ export class CodexAgent extends BaseAgent {
       req: InteractionRequest,
       opts?: { forcePrompt?: boolean },
     ): Promise<ApprovalDecision> {
-      // Full access 的普通审批不应打断用户。Auto 的越界审批由 app-server
-      // auto_review 负责；如果某个请求仍回到客户端，走 UI 是安全的 fail-to-prompt
-      // 兜底，不能绕过 reviewer 直接放行。forcePrompt 高风险 MCP inner tool
+      // Full access 的普通审批不应打断用户。Auto 在已验证路由上由 app-server
+      // auto_review 负责；降级路由则由 untrusted 把越界请求发回客户端。两条路径
+      // 只要收到请求都走 UI，不能绕过 reviewer / 降级审批直接放行。forcePrompt 高风险 MCP inner tool
       // (如 contacts delete/merge/系统回写)在任何模式下都必须拿到用户的逐次确认。
       if (
         !opts?.forcePrompt &&
@@ -4407,7 +4425,8 @@ export class CodexAgent extends BaseAgent {
       async setPermissionMode(newMode: PermissionMode) {
         log.debug('setPermissionMode', { from: mutablePermissionMode, to: newMode });
         // Full access 才能批量放行挂起的 ask。切到 Auto 时，已有请求不能绕过
-        // app-server reviewer，先 fail-closed 关闭；后续重试会按 auto_review 路由。
+        // reviewer / untrusted 降级审批，先 fail-closed 关闭；后续重试按当前路由能力
+        // 选择 auto_review 或 untrusted。
         const allowPending = newMode === 'bypassPermissions';
         dismissAllPending(`permission_mode_changed_to_${newMode}`, allowPending ? 'allow' : 'deny');
         const wasAuto = mutablePermissionMode === 'auto';

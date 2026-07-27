@@ -61,8 +61,10 @@ export interface HeartbeatClientOptions {
    */
   onTick?: (payload: HeartbeatTickPayload) => void;
   /**
-   * 出网通道。缺省 = `globalThis.fetch`(它**不吃系统代理**);需要经代理出网的宿主
-   * 注入自己的实现(desktop 注入 main/maker-host/outbound-fetch)。
+   * 出网通道。缺省 = `globalThis.fetch`。注意 **Node / Electron 主进程**下它是 undici,
+   * 不读系统代理设置也不读代理环境变量;需要经代理出网的宿主要注入自己的实现
+   * (desktop 注入 main/maker-host/outbound-fetch)。浏览器环境不受此影响 —— 那里的
+   * fetch 走浏览器网络栈,系统代理天然生效。
    */
   fetchImpl?: typeof fetch;
 }

@@ -16,9 +16,11 @@ import {
 import { createLogger } from '../logger.js';
 import { ownerScopedUserDataPath, getActiveAppSession } from '../appSessionState.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
+import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
 import { voiceDictionarySyncStore } from './VoiceDictionarySyncStore.js';
 import {
   MAX_VOICE_INPUT_DICTIONARY_ENTRIES,
+  MAX_VOICE_INPUT_DICTIONARY_ENTRY_CHARS,
   compactVoiceInputHistoryIfNeeded,
   createVoiceInputHistoryEntry,
   getDefaultVoiceInputSettings,
@@ -120,12 +122,18 @@ export class VoiceInputDataStore {
 
   /** CSV 导入:整批按手动词条认领,单条失败不影响其余。 */
   importManualDictionaryEntries(texts: string[]): VoiceInputSettings {
+    // 已有多少条也要算进上限:否则对着一份满词典反复导入,记录数可以无限增长,
+    // 撑过物化上限与 relay 单帧上限(同步会因此永久停摆)。
+    const existing = this.load().settings.dictionaryEntries.length;
+    const budget = Math.max(0, MAX_VOICE_INPUT_DICTIONARY_ENTRIES - existing);
+    if (budget === 0) return cloneSettings(this.load().settings);
+    const accepted = texts.slice(0, budget);
     return this.applyDictionaryMutation((current, clock) => {
       let state = current;
       let nextClock = clock;
       let changed = false;
       const nowMs = Date.now();
-      for (const text of texts) {
+      for (const text of accepted) {
         const result = addManualEntry(state, nextClock, { text, nowMs });
         state = result.state;
         nextClock = result.clock;
@@ -192,9 +200,18 @@ export class VoiceInputDataStore {
    * 自己的状态)。
    */
   mergeRemoteDictionaryState(remote: unknown): boolean {
+    // 与本地变更同样是两段写入,同样需要回滚点:sidecar 已经吸收了远端状态而
+    // 投影文件写失败时,重投同一帧会因为「合并没有引入新信息」直接返回 false,
+    // 投影就永远停在旧内容上。
+    const rollbackPoint = voiceDictionarySyncStore.snapshotForRollback();
     const materialized = voiceDictionarySyncStore.mergeRemote(remote);
     if (!materialized) return false;
-    this.commitMaterializedDictionary(materialized);
+    try {
+      this.commitMaterializedDictionary(materialized);
+    } catch (error) {
+      voiceDictionarySyncStore.rollbackTo(rollbackPoint);
+      throw error;
+    }
     return true;
   }
 
@@ -219,9 +236,11 @@ export class VoiceInputDataStore {
       );
     }
     const rollbackPoint = voiceDictionarySyncStore.snapshotForRollback();
-    const materialized = voiceDictionarySyncStore.mutate(apply);
-    if (!materialized) return cloneSettings(this.load().settings);
     try {
+      // mutate 自己写盘失败时也会先推进内存状态再抛 —— 不把它圈进 try 的话,
+      // 重试会因为「sidecar 里已经有这次操作」变成 no-op,投影一直停在旧内容。
+      const materialized = voiceDictionarySyncStore.mutate(apply);
+      if (!materialized) return cloneSettings(this.load().settings);
       return cloneSettings(this.commitMaterializedDictionary(materialized));
     } catch (error) {
       voiceDictionarySyncStore.rollbackTo(rollbackPoint);
@@ -327,6 +346,17 @@ export class VoiceInputDataStore {
     return this.getSnapshot();
   }
 
+  /** 同步状态里是否已经有词典 —— 有就说明这不是首次安装。 */
+  private hasSyncedDictionary(): boolean {
+    try {
+      if (voiceDictionarySyncStore.isIncompatible()) return true;
+      return voiceDictionarySyncStore.materialize().entries.length > 0;
+    } catch {
+      // 读不出来就按「有」处理:宁可少回收一次,也不能误删。
+      return true;
+    }
+  }
+
   /**
    * 只把同步状态物化到 settings,不做回收、不写盘。
    *
@@ -414,12 +444,16 @@ export class VoiceInputDataStore {
         settings: getDefaultVoiceInputSettings(process.platform),
         history: [],
       };
-      // 文件损坏或临时读不到时,**不能**跑回收:那会把 lastMaterializedKeys 里的
-      // 每一条都判成「用户删除」,给整份词典打上墓碑并持久化 —— 投影文件的一次
-      // 读失败就此升级成 CRDT 正本的永久损毁。此时只做只读物化,不写任何东西。
-      this.state = missing
-        ? this.hydrateDictionaryFromSyncState(this.state)
-        : this.projectDictionaryWithoutReconcile(this.state);
+      // 读不到投影文件时手上的 settings 是默认空值,拿它去回收等于宣告「用户把
+      // 词典删光了」——lastMaterializedKeys 里的每一条都会被打上墓碑并持久化,
+      // 投影文件的丢失就此升级成 CRDT 正本的永久损毁。
+      //
+      // 「文件不存在」和「文件损坏」在这一点上没有区别:只要 sidecar 里还有内容,
+      // 就说明这不是首次安装,而是投影没了。只有 sidecar 也是空的(真·首次安装)
+      // 才走回收 —— 那时回收本来也没有可删的东西。
+      this.state = this.hasSyncedDictionary()
+        ? this.projectDictionaryWithoutReconcile(this.state)
+        : this.hydrateDictionaryFromSyncState(this.state);
       return this.state;
     }
   }
@@ -443,6 +477,10 @@ export class VoiceInputDataStore {
       if (voiceDictionarySyncStore.isIncompatible()) {
         log.warn('dictionary sync state was written by a newer client, running without sync');
         return state;
+      }
+      // 先让 store 判断:sidecar 是丢了(投影里已有词典)还是首次安装(都为空)。
+      if (state.settings.dictionaryEntries.length > 0) {
+        voiceDictionarySyncStore.noteProjectionHasDictionary();
       }
       voiceDictionarySyncStore.reconcile({
         // 带上频次与别名:首次迁移时状态是空的,这些都是用户长期积累的东西 ——
@@ -573,21 +611,27 @@ export function registerVoiceInputDataStoreIpc(): void {
 
   // 词典的增改都是语义化操作,不接受 renderer 整份覆盖词条数组:同步状态是词典的
   // 真相,整份覆盖既表达不了「用户到底做了什么」,也会在下一次物化时被丢掉。
-  ipcMain.handle('voice-input:dictionary:add-entry', (_event, text: unknown): VoiceInputSettings => {
+  ipcMain.handle('voice-input:dictionary:add-entry', (event, text: unknown): VoiceInputSettings => {
     try {
+      // 词典写入会改用户的持久数据 —— 只接受可信的主 renderer,不能让任意子框架 /
+      // WebView 拿到这几个全局 channel 就能改词典。
+      assertTrustedAppRendererEvent(event);
       return voiceInputDataStore.addManualDictionaryEntry(typeof text === 'string' ? text : '');
     } catch (error) {
       throwVoiceInputDataStoreIpcError(error);
     }
   });
 
-  ipcMain.handle('voice-input:dictionary:import-entries', (_event, texts: unknown): VoiceInputSettings => {
+  ipcMain.handle('voice-input:dictionary:import-entries', (event, texts: unknown): VoiceInputSettings => {
     try {
-      // renderer 直连时可以绕开 CSV UI 的容量裁决,这里必须自己兜底:无上限地
-      // 建 CRDT 记录会卡住 main 线程,并把 sidecar 撑到物化与 relay 帧上限之外。
+      assertTrustedAppRendererEvent(event);
+      // renderer 直连时可以绕开 CSV UI 的容量裁决,这里必须自己兜底。三重上限
+      // 缺一不可:只限入参条数的话,对着已经装满的词典再灌 1000 条照样能撑爆
+      // sidecar,而超长单条也能用少量条目做到同一件事。
       const list = Array.isArray(texts)
         ? texts
             .filter((item): item is string => typeof item === 'string')
+            .map((item) => item.slice(0, MAX_VOICE_INPUT_DICTIONARY_ENTRY_CHARS))
             .slice(0, MAX_VOICE_INPUT_DICTIONARY_ENTRIES)
         : [];
       return voiceInputDataStore.importManualDictionaryEntries(list);
@@ -598,8 +642,9 @@ export function registerVoiceInputDataStoreIpc(): void {
 
   ipcMain.handle(
     'voice-input:dictionary:rename-entry',
-    (_event, payload: { entryId?: unknown; text?: unknown }): VoiceInputSettings => {
+    (event, payload: { entryId?: unknown; text?: unknown }): VoiceInputSettings => {
       try {
+        assertTrustedAppRendererEvent(event);
         const entryId = typeof payload?.entryId === 'string' ? payload.entryId : '';
         const text = typeof payload?.text === 'string' ? payload.text : '';
         if (!entryId) return voiceInputDataStore.getSettings();
@@ -763,6 +808,12 @@ function stripDictionaryFields(patch: unknown): Record<string, unknown> {
   delete next.suppressedAutomaticDictionaryTexts;
   if (typeof next.dictionarySyncEnabled === 'boolean') {
     next.dictionarySyncEnabledOverride = next.dictionarySyncEnabled;
+    delete next.dictionarySyncEnabled;
+  } else if (next.dictionarySyncEnabled === null) {
+    // 显式传 null = 恢复默认。规则要求「恢复默认」是删除 override 重新跟随版本
+    // 默认值,而不是写入一份静态快照;传 undefined 做不到这件事,因为 patch 是
+    // 展开合并的,undefined 会被现有值盖掉。
+    next.dictionarySyncEnabledOverride = null;
     delete next.dictionarySyncEnabled;
   }
   return next;

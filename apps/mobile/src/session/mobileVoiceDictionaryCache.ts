@@ -74,14 +74,23 @@ export function readCachedMobileVoiceDictionarySnapshot(hostDeviceId: string): {
 export async function hydrateMobileVoiceDictionary(hostDeviceId: string): Promise<void> {
   const host = normalizeHostDeviceId(hostDeviceId);
   if (memoryCache.has(host)) return;
+  // 磁盘读同样要受代际保护:登出可能恰好发生在 getItem 在途时,读回来再写内存
+  // 就把上个账号的词典复活了。
+  const epoch = cacheEpoch;
   try {
     const raw = await AsyncStorage.getItem(storageKeyForHost(host));
     if (!raw) return;
+    if (epoch !== cacheEpoch) return;
     const parsed = JSON.parse(raw) as Partial<CachedDictionary>;
-    memoryCache.set(host, {
+    const restored = {
       entries: normalizeEntries(parsed?.entries),
       fetchedAt: typeof parsed?.fetchedAt === 'number' ? parsed.fetchedAt : 0,
-    });
+    };
+    // 开麦路径会并发跑 hydrate 与 refresh。磁盘读晚于网络响应返回时,不能用旧
+    // 快照盖掉刚拉到的新数据 —— 只在内存仍为空、或盘上确实更新时才写。
+    const current = memoryCache.get(host);
+    if (current && current.fetchedAt >= restored.fetchedAt) return;
+    memoryCache.set(host, restored);
   } catch {
     // 缓存读坏了就当没有:下一次拉取会重建。
   }
@@ -126,7 +135,13 @@ export async function refreshMobileVoiceDictionary(
       // 中间 —— 索引里多一条(快照还没写)只是清理时删一个不存在的 key,无害;
       // 反过来快照落了盘而索引没登记,登出就枚举不到它,下个账号用同一台电脑会
       // hydrate 到上个账号的词典。宁可多登记,不可漏登记。
-      await addHostToIndex(host).catch(() => undefined);
+      // 索引登记失败就不要写快照:写了也是枚举不到的孤儿,登出删不掉,下个账号
+      // 用同一台电脑会 hydrate 到上个账号的词典。缓存只在内存里有效即可。
+      try {
+        await addHostToIndex(host);
+      } catch {
+        return;
+      }
       await AsyncStorage.setItem(storageKeyForHost(host), JSON.stringify(next)).catch(() => undefined);
       // 落盘与索引写入都是异步的,清理完全可能发生在这中间 —— 那样这份属于上个
       // 账号的快照会在删除之后重新出现在盘上。写完再确认一次代际,过期就自己清掉。

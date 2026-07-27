@@ -53,7 +53,7 @@ function snapshotOf(state: VoiceDictionarySyncState) {
 }
 
 function keysOf(state: VoiceDictionarySyncState): string[] {
-  return materializeDictionary(state).entries.map((entry) => entry.text.toLocaleLowerCase());
+  return materializeDictionary(state).entries.map((entry) => entry.text.toLowerCase());
 }
 
 describe('dictionary sync — 改写词条', () => {
@@ -364,7 +364,7 @@ describe('dictionary sync — 降级回收', () => {
         entries: visible.entries.map((entry) => ({ text: entry.text, source: entry.source })),
         suppressedTexts: [],
       },
-      lastMaterializedKeys: visible.entries.map((entry) => entry.text.toLocaleLowerCase()),
+      lastMaterializedKeys: visible.entries.map((entry) => entry.text.toLowerCase()),
       nowMs: 5_000,
     });
 

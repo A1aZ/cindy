@@ -102,7 +102,7 @@ function simulate(seed: number, deviceCount: number, steps: number): SimulationR
       device.state = result.state;
       device.clock = result.clock;
       if (result.changed) {
-        const key = term.toLocaleLowerCase();
+        const key = term.toLowerCase();
         truth.set(key, (truth.get(key) ?? 0) + 1);
       }
       continue;
@@ -146,9 +146,9 @@ function simulate(seed: number, deviceCount: number, steps: number): SimulationR
 function readTotals(state: VoiceDictionarySyncState): Map<string, number> {
   const materialized = materializeDictionary(state);
   const totals = new Map<string, number>();
-  for (const entry of materialized.entries) totals.set(entry.text.toLocaleLowerCase(), entry.frequency);
+  for (const entry of materialized.entries) totals.set(entry.text.toLowerCase(), entry.frequency);
   for (const candidate of materialized.candidates) {
-    totals.set(candidate.text.toLocaleLowerCase(), candidate.evidenceCount);
+    totals.set(candidate.text.toLowerCase(), candidate.evidenceCount);
   }
   return totals;
 }

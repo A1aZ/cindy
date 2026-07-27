@@ -92,7 +92,7 @@ export interface VoiceInputSettings {
    * 不把默认值固化进用户配置 —— 否则任何一次无关的设置保存都会把所有用户永久钉死
    * 在当时的默认值上,以后改默认值也带不动他们,「恢复默认」也失去意义。
    */
-  dictionarySyncEnabledOverride?: boolean;
+  dictionarySyncEnabledOverride?: boolean | null;
   dictionaryEntries: VoiceInputDictionaryEntry[];
   dictionaryCandidates: VoiceInputDictionaryCandidate[];
   suppressedAutomaticDictionaryTexts: string[];
@@ -889,6 +889,10 @@ export function createVoiceInputHistoryEntry(text: string, timestamp = Date.now(
 function normalizeDictionarySyncOverride(
   candidate: Partial<VoiceInputSettings>,
 ): Pick<VoiceInputSettings, 'dictionarySyncEnabled'> & { dictionarySyncEnabledOverride?: boolean } {
+  // null = 用户要求恢复默认:丢掉 override,重新跟随当前版本默认值。
+  if (candidate.dictionarySyncEnabledOverride === null) {
+    return { dictionarySyncEnabled: DEFAULT_DICTIONARY_SYNC_ENABLED };
+  }
   const override = typeof candidate.dictionarySyncEnabledOverride === 'boolean'
     ? candidate.dictionarySyncEnabledOverride
     : legacyDictionarySyncOverride(candidate.dictionarySyncEnabled);

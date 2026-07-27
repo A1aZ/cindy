@@ -1573,9 +1573,12 @@ export function VoiceInputSection() {
   const addDictionaryEntry = useCallback(() => {
     const text = normalizeVoiceInputDictionaryEntryText(newDictionaryEntryText);
     if (!text) return;
-    addDictionarySettingEntry(text);
-    setNewDictionaryEntryText('');
-    setAddingDictionaryEntry(false);
+    // 等主进程确认写入成功再清草稿关面板:失败时保留用户输入,别让他重打一遍。
+    void addDictionarySettingEntry(text).then((ok) => {
+      if (!ok) return;
+      setNewDictionaryEntryText('');
+      setAddingDictionaryEntry(false);
+    });
   }, [addDictionarySettingEntry, newDictionaryEntryText]);
 
   const closeDictionaryEntryDialog = useCallback(() => {
@@ -1634,11 +1637,13 @@ export function VoiceInputSection() {
     const existingKeys = new Set(
       settings.dictionaryEntries.map((entry) => dictionaryTermKey(entry.text)),
     );
-    importDictionarySettingEntries(
+    const imported = await importDictionarySettingEntries(
       merged.entries
         .filter((entry) => !existingKeys.has(dictionaryTermKey(entry.text)))
         .map((entry) => entry.text),
     );
+    // 写入失败时错误提示已经弹过了,不能再报一次"导入成功"。
+    if (!imported) return;
     closeDictionaryEntryDialog();
     const skippedCount =
       parsed.duplicateRowCount +
@@ -1678,12 +1683,14 @@ export function VoiceInputSection() {
     const text = normalizeVoiceInputDictionaryEntryText(editingDictionaryEntryText);
     // 清空文本仍然等于删除该词条(与改动前的交互一致)。
     if (!text) {
-      deleteDictionarySettingEntry(editingDictionaryEntryId);
-      cancelEditingDictionaryEntry();
+      void deleteDictionarySettingEntry(editingDictionaryEntryId).then((ok) => {
+        if (ok) cancelEditingDictionaryEntry();
+      });
       return;
     }
-    renameDictionarySettingEntry(editingDictionaryEntryId, text);
-    cancelEditingDictionaryEntry();
+    void renameDictionarySettingEntry(editingDictionaryEntryId, text).then((ok) => {
+      if (ok) cancelEditingDictionaryEntry();
+    });
   }, [
     cancelEditingDictionaryEntry,
     deleteDictionarySettingEntry,

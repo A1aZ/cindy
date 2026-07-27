@@ -364,3 +364,71 @@ describe('词典同步落盘 —— 数据丢失防线', () => {
     expect(fs.readFileSync(syncPath, 'utf-8')).toBe(futureSidecar);
   });
 });
+
+describe('词典同步落盘 —— 第六轮收口', () => {
+  it('投影文件被删除时同样只读物化,不把整份词典墓碑掉', () => {
+    writeDictionaryFile({
+      dictionaryEntries: [{ id: 'a', text: 'Vibe Coding', source: 'manual', frequency: 3, aliases: [] }],
+      dictionaryCandidates: [],
+      suppressedAutomaticDictionaryTexts: [],
+    });
+    voiceInputDataStore.getSettings();
+    const sidecarBefore = fs.readFileSync(ownerPath(SYNC_FILE), 'utf-8');
+
+    // 删除(不是损坏)投影文件 —— 与损坏一样,不能被当成「用户删光了词典」。
+    fs.rmSync(ownerPath(DATA_FILE));
+    resetStoreCaches();
+
+    expect(voiceInputDataStore.getSettings().dictionaryEntries.map((e) => e.text)).toEqual([
+      'Vibe Coding',
+    ]);
+    expect(fs.readFileSync(ownerPath(SYNC_FILE), 'utf-8')).toBe(sidecarBefore);
+  });
+
+  it('sidecar 丢失后重建不把已同步的频次当作本机新证据', () => {
+    // 投影里的频次含有别的设备合并进来的部分;当成本机计数重新播种的话,
+    // 与那台设备再同步时同一份事件会在两个节点桶里各记一遍,频次凭空翻倍。
+    writeDictionaryFile({
+      dictionaryEntries: [{ id: 'a', text: 'Cindy', source: 'automatic', frequency: 9, aliases: [] }],
+      dictionaryCandidates: [],
+      suppressedAutomaticDictionaryTexts: [],
+    });
+    voiceInputDataStore.getSettings();
+    fs.rmSync(ownerPath(SYNC_FILE));
+    resetStoreCaches();
+
+    const settings = voiceInputDataStore.getSettings();
+    expect(settings.dictionaryEntries.map((e) => e.text)).toEqual(['Cindy']);
+    // 存在性保留,计数不重新播种。
+    expect(settings.dictionaryEntries[0].frequency).toBe(1);
+  });
+
+  it('导入把已有词条数算进上限,不能对着满词典无限追加', () => {
+    writeDictionaryFile({ dictionaryEntries: [] });
+    voiceInputDataStore.getSettings();
+
+    voiceInputDataStore.importManualDictionaryEntries(
+      Array.from({ length: 1_200 }, (_, index) => `term-${index}`),
+    );
+    const first = voiceInputDataStore.getSettings().dictionaryEntries.length;
+    expect(first).toBe(1_000);
+
+    // 再导入一批:已经满了,不应该继续增长。
+    voiceInputDataStore.importManualDictionaryEntries(
+      Array.from({ length: 500 }, (_, index) => `extra-${index}`),
+    );
+    expect(voiceInputDataStore.getSettings().dictionaryEntries.length).toBe(1_000);
+  });
+
+  it('同步开关可以恢复默认(删除 override 而不是写静态快照)', () => {
+    writeDictionaryFile({ dictionaryEntries: [] });
+    voiceInputDataStore.updateSettings({ dictionarySyncEnabled: false });
+    expect(JSON.parse(fs.readFileSync(ownerPath(DATA_FILE), 'utf-8')).settings.dictionarySyncEnabledOverride)
+      .toBe(false);
+
+    voiceInputDataStore.updateSettings({ dictionarySyncEnabled: null });
+    const raw = JSON.parse(fs.readFileSync(ownerPath(DATA_FILE), 'utf-8')).settings;
+    expect(raw.dictionarySyncEnabledOverride).toBeUndefined();
+    expect(voiceInputDataStore.getSettings().dictionarySyncEnabled).toBe(true);
+  });
+});

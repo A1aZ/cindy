@@ -254,6 +254,10 @@ export function initDeviceLinkService(): void {
 
   client.onStatusChange((status) => {
     if (status !== 'online') openLinkInFlight.clear();
+    // 断线期间 relay 不会为对端补发 offline presence,重连后同一台电脑仍以
+    // online 到达,`wasOnline` 还是 true —— 上线握手不会触发,而断线这段时间的
+    // 改动谁也不会主动推。清空在线视图,让重连后的 presence 重新走一遍握手。
+    if (status !== 'online') presenceOnlineByDevice.clear();
     broadcast(DEVICE_LINK_PUSH.STATUS_CHANGED, { status });
     if (status === 'online') replayActiveSubscriptions('ws-online');
   });
@@ -327,7 +331,16 @@ export function initDeviceLinkService(): void {
     // 词典同步帧在 main 侧消费,不转给 renderer —— 它不是远程视图事件,
     // renderer 也不该看到别的设备的同步状态。
     if (p?.channel === DL_VOICE_DICTIONARY_SYNC_CHANNEL) {
-      if (!isDeviceRevoked(env.src)) handleIncomingDictionaryState(env.src, p.payload);
+      // 入站与出站走同一份准入判定:这条通道承载的是可写 CRDT 状态,只接受电脑
+      // 对端。手机在这套设计里是只读消费者(走 invoke 拉快照),不该能推状态过来
+      // 改桌面词典 —— 出站已经这么把关了,入站漏掉就等于白设。
+      if (shouldExchangeDictionaryWith({
+        online: true,
+        platform: presencePlatformByDevice.get(env.src),
+        revoked: isDeviceRevoked(env.src),
+      })) {
+        handleIncomingDictionaryState(env.src, p.payload);
+      }
       return;
     }
     broadcast(DEVICE_LINK_PUSH.REMOTE_PUSH, {

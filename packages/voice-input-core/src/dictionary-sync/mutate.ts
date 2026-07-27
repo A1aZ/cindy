@@ -156,7 +156,14 @@ export function seedTerm(
 ): MutationResult {
   const text = normalizeDictionaryTermText(input.text);
   const key = dictionaryTermKey(text);
-  if (!key || hasDictionaryKey(state.records, key)) return { state, clock, changed: false };
+  if (!key) return { state, clock, changed: false };
+  // 判据是「有没有存活化身」,不是「记录键在不在」。一个被删过又被旧版本重新加
+  // 回来的词,记录里只剩墓碑 —— 按键存在就跳过的话,回收永远认领不了它,那条词
+  // 在升级后就凭空消失了。新化身自带新 tag,旧墓碑覆盖不到它。
+  const existing = state.records[key];
+  if (existing && listLiveIncarnations(existing).length > 0) {
+    return { state, clock, changed: false };
+  }
   if (input.source === 'automatic' && hasDictionaryKey(state.suppressed, key)) {
     return { state, clock, changed: false };
   }
@@ -195,8 +202,9 @@ export function seedTerm(
   };
   return {
     state: putRecord(state, key, {
-      incarnations,
-      tombstones: createDictionaryMap<HlcTimestamp>(),
+      incarnations: { ...copyDictionaryMap(existing?.incarnations), ...incarnations },
+      // 墓碑必须留着:它们对应的是旧化身,丢掉会让那些化身在别的设备上复活。
+      tombstones: copyDictionaryMap(existing?.tombstones),
     }),
     clock: ticked.clock,
     changed: true,

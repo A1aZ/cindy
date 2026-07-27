@@ -1225,7 +1225,9 @@ function VoiceDictionaryScreen({
                 </View>
                 {entry.aliases.length > 0 ? (
                   <Text style={styles.rowDetail} numberOfLines={2}>
-                    {t('settings.voiceDictionary.aliases', { aliases: entry.aliases.join('、') })}
+                    {t('settings.voiceDictionary.aliases', {
+                          aliases: entry.aliases.join(t('settings.voiceDictionary.aliasSeparator')),
+                        })}
                   </Text>
                 ) : null}
               </View>

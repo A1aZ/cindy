@@ -65,6 +65,13 @@ interface StoredSyncData {
   /** 上次物化写进词典文件的主键集合;降级回收判断删除时用。 */
   lastMaterializedKeys: string[];
   /**
+   * sidecar 不存在但投影文件里已有词典 —— 说明同步状态丢了(手工删、磁盘损坏),
+   * 而不是首次安装。此时投影里的频次可能含有别的设备合并进来的计数,不能当作
+   * 本机证据重新播种,否则与那台设备再同步时同一份事件会被记两遍。
+   * 只是本次加载的判断结果,不落盘。
+   */
+  lostSidecarWithProjection?: boolean;
+  /**
    * 盘上的 sidecar 是更高版本(更新的客户端写的),本进程读不懂。
    *
    * 此时整个 store 进入旁路:不读、不合并、更不写。降级回来的旧客户端如果照常
@@ -78,6 +85,17 @@ interface StoredSyncData {
 export class VoiceDictionarySyncStore {
   private data: StoredSyncData | null = null;
   private dataOwnerId: string | null = null;
+
+  /** 告知本次加载:投影文件里已有词典(用于判断 sidecar 是丢了还是首次安装)。 */
+  noteProjectionHasDictionary(): void {
+    const current = this.load();
+    if (current.lostSidecarWithProjection !== undefined) return;
+    if (Object.keys(current.state.records).length > 0) {
+      this.data = { ...current, lostSidecarWithProjection: false };
+      return;
+    }
+    this.data = { ...current, lostSidecarWithProjection: true };
+  }
 
   /** 盘上的同步状态是否来自更新的客户端。true 时调用方必须完全绕开同步。 */
   isIncompatible(): boolean {
@@ -138,8 +156,13 @@ export class VoiceDictionarySyncStore {
    */
   reconcile(snapshot: LocalDictionarySnapshot): MaterializedDictionary | null {
     const current = this.load();
+    // sidecar 丢了但投影还在时(手工删、磁盘坏),这里会拿一份新 nodeId 把投影里
+    // 的频次当作**本机**证据重新播种 —— 而那些数字里含有别的设备合并进来的部分。
+    // 一旦与那台设备再同步,同一份事件就在两个节点桶里各记一遍,频次凭空翻倍。
+    // 这种情形只认领存在性,不认领计数。
+    const seedCounts = !current.lostSidecarWithProjection;
     const result = reconcileFromLocalSnapshot(current.state, this.readClock(current), {
-      snapshot,
+      snapshot: seedCounts ? snapshot : stripCountsFromSnapshot(snapshot),
       lastMaterializedKeys: current.lastMaterializedKeys,
       nowMs: Date.now(),
     });
@@ -307,7 +330,6 @@ function normalizeStoredData(raw: unknown): StoredSyncData {
 }
 
 /**
-/**
  * 盘上状态是否来自更新的客户端。
  *
  * 只认「版本号明确更高」这一种情况 —— 结构坏了(缺字段、被截断)属于损坏,照常
@@ -328,6 +350,15 @@ function isNewerVersion(raw: unknown): boolean {
  */
 function normalizeState(raw: unknown): VoiceDictionarySyncState {
   return isValidSyncState(raw) ? raw : createEmptySyncState();
+}
+
+/** 去掉快照里的频次与别名计数,只保留存在性(用于 sidecar 丢失后的重建)。 */
+function stripCountsFromSnapshot(snapshot: LocalDictionarySnapshot): LocalDictionarySnapshot {
+  return {
+    entries: snapshot.entries.map((entry) => ({ text: entry.text, source: entry.source })),
+    suppressedTexts: snapshot.suppressedTexts,
+    candidates: snapshot.candidates?.map((candidate) => ({ text: candidate.text })),
+  };
 }
 
 function readNonNegative(value: unknown): number {

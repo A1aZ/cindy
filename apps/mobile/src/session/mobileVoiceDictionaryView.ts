@@ -102,6 +102,11 @@ export interface MobileVoiceDictionarySnapshot {
  * 上删了词,手机上却怎么刷新都还在。
  *
  * 取最新那份则天然表达了删除:新快照里没有,就是没有。
+ *
+ * 新鲜度按 `fetchedAt` 比较。它是响应到达手机的时间,不是词典本身的版本 —— 并发
+ * 拉多台时,慢的那个响应反而"更新"。这是已知的近似:同步收敛后各台内容本就一致,
+ * 差异只出现在某台正处于桌面侧 8 秒去抖窗口内的短暂时刻,下次刷新即自愈。要根治
+ * 得让桌面在投影里带上自己的状态版本,那是跨端契约改动,留待后续。
  */
 export function buildMobileVoiceDictionaryEntryViews(
   snapshots: ReadonlyArray<MobileVoiceDictionarySnapshot>,

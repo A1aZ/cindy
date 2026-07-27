@@ -144,9 +144,12 @@ export function createXaiAuthInvalidationObserver(
       onData: (chunk: Buffer) => {
         // 按剩余空间裁剪后再缓存:上游可能一个 chunk 就远超上限,整段留到 onEnd 会把
         // 大 Buffer 一直挂住(判定只需要开头的 code/error 字段)。
+        // 超限时必须 Buffer.from 拷贝而不是只取 subarray —— 后者是共享底层内存的视图,
+        // 留着它等于留着整段原始 chunk,起不到限量的作用。
         const remaining = MAX_ERROR_BODY_BYTES - size;
         if (remaining <= 0) return;
-        const slice = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+        const slice =
+          chunk.length > remaining ? Buffer.from(chunk.subarray(0, remaining)) : chunk;
         chunks.push(slice);
         size += slice.length;
       },

@@ -46,6 +46,11 @@ import {
   resolveOutboundDispatcher,
 } from '../outbound-fetch.js';
 
+/** 取包装 dispatcher 对某个目标 URL 实际选中的底层 dispatcher(重定向选路即走这条)。 */
+function pick(dispatcher: unknown, url: string): unknown {
+  return (dispatcher as { pickForUrlForTest(u: string): unknown }).pickForUrlForTest(url);
+}
+
 beforeEach(() => {
   resolverState.resolve.mockReset();
   resolverState.resolve.mockResolvedValue(null);
@@ -78,15 +83,16 @@ describe('resolveOutboundDispatcher', () => {
   it('resolves per origin (no query/path) and builds a ProxyAgent for http proxies', async () => {
     resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
     const dispatcher = await resolveOutboundDispatcher('https://platform.claude.com/v1/oauth/token?x=1');
-    expect(dispatcher).toBeInstanceOf(ProxyAgent);
+    expect(pick(dispatcher, 'https://platform.claude.com/v1/oauth/token')).toBeInstanceOf(ProxyAgent);
     expect(resolverState.resolve).toHaveBeenCalledWith('https://platform.claude.com');
   });
 
   it('builds a plain Agent with a socks5 connector for socks5 proxies', async () => {
     resolverState.resolve.mockResolvedValue('socks5://127.0.0.1:7891');
     const dispatcher = await resolveOutboundDispatcher('https://api.anthropic.com/api/oauth/profile');
-    expect(dispatcher).toBeInstanceOf(UndiciAgent);
-    expect(dispatcher).not.toBeInstanceOf(ProxyAgent);
+    const base = pick(dispatcher, 'https://api.anthropic.com/api/oauth/profile');
+    expect(base).toBeInstanceOf(UndiciAgent);
+    expect(base).not.toBeInstanceOf(ProxyAgent);
   });
 
   it('reuses one dispatcher per proxy + tuning, and separates different tuning', async () => {
@@ -98,14 +104,63 @@ describe('resolveOutboundDispatcher', () => {
       agentOptions: { keepAliveTimeout: 60_000 },
     });
     expect(tuned).not.toBe(a);
-    expect(tuned).toBeInstanceOf(ProxyAgent);
+    expect(pick(tuned, 'https://chatgpt.com/backend-api/codex')).toBeInstanceOf(ProxyAgent);
+    // 不同调优 = 不同底层池,不能共享连接。
+    expect(pick(tuned, 'https://chatgpt.com/backend-api/codex')).not.toBe(
+      pick(a, 'https://chatgpt.com/backend-api/codex'),
+    );
   });
 
   it('separates dispatchers per upstream protocol', async () => {
     resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
     const https = await resolveOutboundDispatcher('https://example.com/a');
     const http = await resolveOutboundDispatcher('http://example.com/a');
-    expect(http).not.toBe(https);
+    expect(pick(http, 'http://example.com/a')).not.toBe(pick(https, 'https://example.com/a'));
+  });
+
+  it('re-routes per hop so redirects cannot drag loopback or bypassed hosts through the proxy', async () => {
+    resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
+    const dispatcher = await resolveOutboundDispatcher('https://platform.claude.com/v1/oauth/token');
+    const proxied = pick(dispatcher, 'https://platform.claude.com/v1/oauth/token');
+    expect(proxied).toBeInstanceOf(ProxyAgent);
+
+    // loopback 同步可判:重定向到本机一律直连,「loopback 恒直连」在跳转后依然成立。
+    const loopback = pick(dispatcher, 'http://127.0.0.1:51730/v1/messages');
+    expect(loopback).not.toBe(proxied);
+    expect(loopback).not.toBeInstanceOf(ProxyAgent);
+    // 同一个直连池复用,不会每跳新建。
+    expect(pick(dispatcher, 'http://localhost:51730/v1/messages')).toBe(loopback);
+
+    // 快照里记着「该 origin 直连」(NO_PROXY 命中等)→ 也走直连池。
+    resolverState.resolve.mockResolvedValue(null);
+    await resolveOutboundDispatcher('https://intranet.example.com/x');
+    expect(pick(dispatcher, 'https://intranet.example.com/x')).toBe(loopback);
+
+    // 从没解析过的 origin:同步拿不到结论,本跳沿用首跳出口(不阻塞热路径)。
+    expect(pick(dispatcher, 'https://unknown.example.org/x')).toBe(proxied);
+  });
+
+  it('does not close an evicted dispatcher immediately (it may already be in a caller hand)', async () => {
+    vi.useFakeTimers();
+    try {
+      resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
+      const first = await resolveOutboundDispatcher('https://a0.example.com/x');
+      const evictable = pick(first, 'https://a0.example.com/x') as { close: () => Promise<void> };
+      const closeSpy = vi.spyOn(evictable, 'close').mockResolvedValue(undefined);
+
+      // 用不同的池调优把底层池顶过上限(8),逼出最旧的那一项。
+      for (let i = 1; i <= 8; i += 1) {
+        await resolveOutboundDispatcher('https://a0.example.com/x', {
+          agentOptions: { keepAliveTimeout: 1000 + i },
+        });
+      }
+      expect(closeSpy).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('fails open to the fallback when the resolver throws', async () => {
@@ -142,7 +197,7 @@ describe('outboundFetch', () => {
     expect(undiciState.fetch).toHaveBeenCalledTimes(1);
     const [, init] = undiciState.fetch.mock.calls[0] as unknown as [unknown, Record<string, unknown>];
     expect(init.method).toBe('POST');
-    expect(init.dispatcher).toBeInstanceOf(ProxyAgent);
+    expect(pick(init.dispatcher, 'https://platform.claude.com/v1/oauth/token')).toBeInstanceOf(ProxyAgent);
   });
 
   it('delegates to globalThis.fetch verbatim when the upstream is direct', async () => {
@@ -166,6 +221,50 @@ describe('outboundFetch', () => {
     await outboundFetch(new URL('https://api.anthropic.com/v1/models'));
     expect(resolverState.resolve).toHaveBeenCalledWith('https://api.anthropic.com');
   });
+
+  it('normalizes global FormData bodies for the npm-undici proxy path', async () => {
+    // 全局 FormData 来自 Node 内置 undici;npm undici 的 instanceof 认不出来,不归一化
+    // 就会被序列化成 [object FormData](review 2026-07-27 P1)。
+    resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
+    const form = new FormData();
+    form.set('model', 'elevenlabs/scribe_v2');
+    form.set('file', new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }), 'a.mp3');
+    await outboundFetch('https://gateway.example.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer k' },
+      body: form,
+    });
+    const [url, init] = undiciState.fetch.mock.calls[0] as unknown as [
+      string,
+      { method: string; body: unknown; headers: Array<[string, string]> },
+    ];
+    expect(url).toBe('https://gateway.example.com/v1/audio/transcriptions');
+    expect(init.method).toBe('POST');
+    expect(Buffer.isBuffer(init.body)).toBe(true);
+    expect((init.body as Buffer).includes('elevenlabs/scribe_v2')).toBe(true);
+    const headers = new Map(init.headers.map(([k, v]) => [k.toLowerCase(), v]));
+    // boundary 由全局 Request 生成,必须随字节一起传下去,否则服务端解不出 multipart。
+    expect(headers.get('content-type')).toMatch(/^multipart\/form-data; boundary=/);
+    expect(headers.get('authorization')).toBe('Bearer k');
+  });
+
+  it('keeps json string bodies and abort signals on the proxy path', async () => {
+    resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
+    const controller = new AbortController();
+    await outboundFetch('https://platform.claude.com/v1/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grant_type: 'authorization_code' }),
+      signal: controller.signal,
+    });
+    const [, init] = undiciState.fetch.mock.calls[0] as unknown as [
+      string,
+      { body: Buffer; signal?: AbortSignal; redirect?: string },
+    ];
+    expect(init.body.toString()).toBe('{"grant_type":"authorization_code"}');
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(init.redirect).toBe('follow');
+  });
 });
 
 describe('outboundUndiciFetch', () => {
@@ -175,7 +274,7 @@ describe('outboundUndiciFetch', () => {
     resolverState.resolve.mockResolvedValue('http://127.0.0.1:7890');
     await outboundUndiciFetch('https://api.openai.com/v1/models');
     const [, init] = undiciState.fetch.mock.calls[1] as unknown as [unknown, Record<string, unknown>];
-    expect(init.dispatcher).toBeInstanceOf(ProxyAgent);
+    expect(pick(init.dispatcher, 'https://api.openai.com/v1/models')).toBeInstanceOf(ProxyAgent);
   });
 });
 

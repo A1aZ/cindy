@@ -137,14 +137,17 @@ export class VolcengineSaucAsrProvider implements AsrProvider {
           authorizationToken: this.proxyApiKey!,
         };
     if (this.stopRequested) throw new Error('Volcengine SAUC ASR connection stopped.');
+    // `ws` 不吃系统代理;直连时为 undefined,行为与不传一致。
+    const agent = await createOutboundHttpAgent(connection.websocketUrl);
+    // 解析代理是一次异步往返,期间可能已停录 —— 复查后再建连,不留孤儿 socket。
+    if (this.stopRequested) throw new Error('Volcengine SAUC ASR connection stopped.');
     const socket = new WebSocket(connection.websocketUrl, {
       headers: {
         Authorization: `Bearer ${connection.authorizationToken}`,
         'X-Api-Resource-Id': this.resourceId,
         'X-Api-Connect-Id': buildConnectId(),
       },
-      // `ws` 不吃系统代理;直连时为 undefined,行为与不传一致。
-      agent: await createOutboundHttpAgent(connection.websocketUrl),
+      agent,
     });
     this.socket = socket;
     this.attachSocketHandlers(socket);

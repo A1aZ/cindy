@@ -98,9 +98,13 @@ export class ElevenLabsScribeProvider implements AsrProvider {
 
     // agent:`ws` 不吃系统代理,境外 wss 上游在「系统代理」模式下连不上;
     // 直连时为 undefined,行为与不传一致(见 maker-host/outbound-fetch)。
+    const agent = await createOutboundHttpAgent(url);
+    // 代理解析是一次异步往返,期间用户可能已经松手停录(stop 只置标志、看不到还没
+    // 建出来的 socket)。停了就别再建连,否则留下一条没人回收的 socket。
+    if (this.stopRequested) return;
     const socket = new WebSocket(url, {
       headers: this.buildHeaders(),
-      agent: await createOutboundHttpAgent(url),
+      agent,
     });
     this.socket = socket;
 

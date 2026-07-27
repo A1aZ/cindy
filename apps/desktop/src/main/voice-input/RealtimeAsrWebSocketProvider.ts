@@ -339,6 +339,9 @@ function createWarmRealtimeSession(
 
     // `ws` 不吃系统代理;直连时 agent 为 undefined,行为与不传一致。
     const wsAgent = await createOutboundHttpAgent(connection.realtimeUrl);
+    // 代理解析是一次异步往返,期间预热世代可能已经翻篇(用户开录 / 换配置),
+    // 那就别再建这条预热连接 —— 它不会被任何人回收。
+    if (generation !== warmRealtimeSessionGeneration) return;
 
     await new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(connection.realtimeUrl, {
@@ -759,9 +762,12 @@ export class RealtimeAsrWebSocketProvider implements AsrProvider {
       return;
     }
 
+    const wsAgent = await createOutboundHttpAgent(realtimeUrl);
+    // 代理解析期间可能已停录:复查后再建连,不留没人回收的 socket。
+    if (this.stopRequested) throw new Error('Realtime ASR connection stopped.');
     const socket = new WebSocket(realtimeUrl, {
       headers: realtimeHeaders(accessToken, this.extraHeaders),
-      agent: await createOutboundHttpAgent(realtimeUrl),
+      agent: wsAgent,
     });
     this.socket = socket;
     this.attachSocketHandlers(socket);

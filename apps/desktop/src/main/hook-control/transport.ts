@@ -94,6 +94,12 @@ export function createHookTransport(opts: HookTransportOpts): HookTransport {
   let lastFrameAt = 0;
   let lastError: string | null = null;
   let unexpectedHttpStatus: number | null = null;
+  /**
+   * 建连世代。connect() 每次调用递增,建连路径上的每个 await 之后都要比对 —— 取 token
+   * 与解析出站代理各是一次异步往返,期间 401 重连 / 退避重试 / dispose 都可能再触发一次
+   * connect(),不比对就会并发建出多条 socket,旧的那条没人回收(review 2026-07-27)。
+   */
+  let connectEpoch = 0;
 
   function setStatus(status: HookTransportStatus): void {
     if (stopped && status !== 'stopped') return;
@@ -152,12 +158,13 @@ export function createHookTransport(opts: HookTransportOpts): HookTransport {
 
   function connect(): void {
     if (stopped) return;
+    const epoch = ++connectEpoch;
     unexpectedHttpStatus = null;
     setStatus('connecting');
     void getAuthToken()
       .catch(() => null)
       .then((token) => {
-        if (stopped) return;
+        if (stopped || epoch !== connectEpoch) return;
         if (!token) {
           // 未登录:不发起无凭证连接(必 401),记状态按退避重试;
           // 登录事件会经 manager.sync 重建 transport 即时恢复
@@ -166,7 +173,7 @@ export function createHookTransport(opts: HookTransportOpts): HookTransport {
           scheduleRetry();
           return;
         }
-        void openSocket(token);
+        void openSocket(token, epoch);
       });
   }
 
@@ -193,13 +200,13 @@ export function createHookTransport(opts: HookTransportOpts): HookTransport {
       });
   }
 
-  async function openSocket(token: string): Promise<void> {
+  async function openSocket(token: string, epoch: number): Promise<void> {
     let socket: WebSocket;
     try {
       // `ws` 不吃系统代理;直连时 agent 为 undefined,行为与不传一致。
       const agent = await createOutboundHttpAgent(url);
-      // 代理解析是一次异步往返,期间可能已 stop —— 停了就不再建连。
-      if (stopped) return;
+      // 代理解析是一次异步往返,期间可能已 stop 或又发起了一次 connect —— 都不再建连。
+      if (stopped || epoch !== connectEpoch) return;
       socket = new WebSocket(url, {
         headers: { Authorization: `Bearer ${token}` },
         handshakeTimeout: 15_000,

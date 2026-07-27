@@ -220,7 +220,9 @@ function UserFileChip({
   refText: string;
   fileName: string;
   workingDir: string;
-  onClick: (e: React.MouseEvent<HTMLButtonElement>) => void | Promise<void>;
+  // chip 由 InlineReferenceChip 渲染成 `<span role="button">`(见其剪贴板契约),
+  // 不再是原生 `<button>`;这里标 HTMLElement 与实际 currentTarget 对齐。
+  onClick: (e: React.MouseEvent<HTMLElement>) => void | Promise<void>;
 }) {
   // remote 会话:fs:resolve-path 打的是本机 fs,对远程 workdir 恒 none——
   // 按 workdir 风格直接 join(与 useResolvedMarkdownTarget 的 remote 分支同策)。
@@ -377,21 +379,23 @@ function looksLikeCommand(word: string): boolean {
  * Plain text segments are further scanned for URLs, which are rendered as
  * clickable links that open in the system default browser.
  *
- * F2: file chips are rendered as `<button>` (not `<span>`) so they can open
- * TextLightbox on click. The dir/agent/slash chips remain `<span>` — they
- * have no click target in this iteration.
+ * F2: file chips are clickable (they open TextLightbox); dir/agent/slash chips
+ * are inert — no click target in this iteration. Both render through
+ * InlineReferenceChip, whose interactive shell is a `<span role="button">`
+ * rather than a native `<button>` so copied messages survive an external
+ * paste (see the clipboard contract on InlineReferenceChip).
  *
  * @param content       The user message content to parse.
  * @param workingDir    Session cwd; used to resolve relative refs.
  * @param onFileChipClick  Called when a file chip is clicked. Receives the
  *                          resolved abs path, the displayed file name, and
- *                          the clicked button element (for focus restoration
+ *                          the clicked chip element (for focus restoration
  *                          when the lightbox closes — F6).
  */
 function renderContentWithoutPastedText(
   content: string,
   workingDir: string,
-  onFileChipClick: (abs: string, name: string, btn: HTMLButtonElement) => void | Promise<void>,
+  onFileChipClick: (abs: string, name: string, chip: HTMLElement) => void | Promise<void>,
   onImageClick: (xdtFileUrl: string) => void,
   t: TFunction,
   sessionId?: string,
@@ -597,7 +601,7 @@ export function projectSentRanges<T extends { start: number; end: number }>(
 function renderContent(
   content: string,
   workingDir: string,
-  onFileChipClick: (abs: string, name: string, btn: HTMLButtonElement) => void | Promise<void>,
+  onFileChipClick: (abs: string, name: string, chip: HTMLElement) => void | Promise<void>,
   onImageClick: (xdtFileUrl: string) => void,
   t: TFunction,
   sessionId?: string,
@@ -719,7 +723,7 @@ export function UserMessage({
   const [longMessageExpanded, setLongMessageExpanded] = useState(false);
   // text-lightbox F6: ref to the chip currently driving the lightbox so
   // close can return focus to it (only one lightbox at a time per message).
-  const activeFileChipRef = useRef<HTMLButtonElement | null>(null);
+  const activeFileChipRef = useRef<HTMLElement | null>(null);
 
   // text-lightbox F1 replaces the old `@path` inline prepend. Files are now
   // rendered as a dedicated Chip-Row above the text bubble (per cc-agent-view

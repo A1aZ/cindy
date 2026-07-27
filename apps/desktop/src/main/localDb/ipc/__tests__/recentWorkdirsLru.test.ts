@@ -48,15 +48,19 @@ import { upsertRecentWorkdir } from '../recentWorkdirs';
 
 /**
  * 假 transport:按 worker/dispatcher.ts 的 op 语义把 SQL 转发给真实 in-memory SQLite。
- * query → stmt.all / queryOne → stmt.get / run|exec → stmt.run,与真实 worker 一致。
+ * 逐条对齐 worker/opHandlers:query → stmt.all / queryOne → stmt.get /
+ * run|exec → stmt.run / rawAll → stmt.raw().all / rawGet → stmt.raw().get
+ * (raw* 返回数组而非对象,见 opHandlers/rawAll.ts、rawGet.ts)。
  */
 function createTransport(): DbTransport {
   return {
     send: async (op: string, args?: unknown) => {
       const { sql: text, params = [] } = (args ?? {}) as { sql: string; params?: unknown[] };
       const stmt = h.sqlite!.prepare(text);
-      if (op === 'query' || op === 'rawAll') return stmt.all(...(params as never[]));
-      if (op === 'queryOne' || op === 'rawGet') return stmt.get(...(params as never[]));
+      if (op === 'query') return stmt.all(...(params as never[]));
+      if (op === 'queryOne') return stmt.get(...(params as never[]));
+      if (op === 'rawAll') return stmt.raw().all(...(params as never[]));
+      if (op === 'rawGet') return stmt.raw().get(...(params as never[]));
       if (op === 'run' || op === 'exec') return stmt.run(...(params as never[]));
       throw new Error(`unexpected op: ${op}`);
     },

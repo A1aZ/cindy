@@ -83,7 +83,11 @@ export async function upsertRecentWorkdir(
   const normalized = normalizeRecentWorkdirPath(path);
   if (!normalized) return;
   try {
-    const db = getDbClient().drizzle;
+    // 一次拿 client 后复用:getDbClient() 读的是模块级可变 current(账号切换 / client
+    // 重新初始化会 set 或 clear 它),分两次取有可能让 insert 与下面的驱逐落在不同
+    // DbClient 上,或第二次直接抛 "DbClient not ready"。
+    const client = getDbClient();
+    const db = client.drizzle;
     await db
       .insert(recentWorkdirs)
       .values({ path: normalized, lastUsedAt: atMs })
@@ -104,7 +108,7 @@ export async function upsertRecentWorkdir(
     // 经过 builder,会落进代理内部那个只会抛错的 fakeSqliteClient.prepare(),再被
     // drizzle 包成 "Failed to run the query '...'" —— 驱逐 100% 静默失败(fire-and-
     // forget 的 catch 只留一条 warn),表会一直涨过上限。回归见 __tests__/recentWorkdirsLru。
-    await getDbClient().exec(
+    await client.exec(
       `DELETE FROM recent_workdirs
        WHERE path IN (
          SELECT path FROM recent_workdirs

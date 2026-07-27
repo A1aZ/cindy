@@ -59,6 +59,7 @@ import { resolveVoiceInputStartGuards } from './startGuards';
 import { getVoiceInputWorkletUrl } from './workletUrl';
 import { buildRefinementPreviewText } from './refinementPreviewText';
 import { isVoiceInputEventScopeActive, shouldHandleVoiceInputEvent } from './eventScope';
+import { mapEditorTextRange, type EditorTextRange } from './editorRangeMapping';
 import { isVoiceInputServiceConnectionError, VOICE_INPUT_ERROR_CODE_KEYS } from './overlayErrors';
 import {
   VOICE_INPUT_DICTIONARY_LEARNING_TRACK_TIMEOUT_MS,
@@ -85,27 +86,7 @@ type SubmittedTextRange = {
   historyEntryId: string | null;
 };
 
-export type EditorTextRange = {
-  from: number;
-  to: number;
-};
-
-/**
- * Move a stored range through a document change, so offsets captured earlier
- * keep pointing at the same content. Bias the ends outward (-1 / 1) so text
- * inserted at the boundaries stays outside the range rather than being swallowed
- * by the next replacement.
- */
-function mapEditorTextRange(
-  range: EditorTextRange | null,
-  transaction: Transaction,
-): EditorTextRange | null {
-  if (!range) return null;
-  return {
-    from: transaction.mapping.map(range.from, -1),
-    to: transaction.mapping.map(range.to, 1),
-  };
-}
+export type { EditorTextRange } from './editorRangeMapping';
 
 type DictionaryLearningWatch = {
   segmentId: string;

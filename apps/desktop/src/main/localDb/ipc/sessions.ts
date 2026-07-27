@@ -955,6 +955,22 @@ export function registerSessionIpc(): void {
       broadcastSessionPatched(sid, { summary: null });
       void recomputePrRefsForSession(sid).catch(() => undefined);
     }
+    // 会话被移到别的目录时给 IM 绑定登记一次「本地移动授权」:这是 hook 侧
+    // local-move 授权的唯一来源(dispatcher 不从 session 元数据反推是不是用户
+    // 移的,见 hook-control/bindings.ts 文件头)。只在目录真的变了时登记,归一化
+    // 写法差异不算移动。fire-and-forget:登记失败只影响该 thread 下一条消息会
+    // 重开新对话,不该拖累移动本身。
+    if (
+      beforeMove &&
+      typeof p.workingDir === 'string' &&
+      p.workingDir &&
+      normalizeWorkingDirForStorage(beforeMove.workingDir) !== p.workingDir
+    ) {
+      const movedTo = p.workingDir;
+      void import('../../hook-control/sessionMoves.js')
+        .then((m) => m.noteHookSessionMoved(sid, movedTo))
+        .catch(() => undefined);
+    }
     // workingDir 实际变化的本机 cc 会话:迁移 CLI 转录后再查询返回行/广播,保证
     // renderer 拿到更新结果时转录已就位(用户可立即续聊),且迁移中持久化的最新
     // sdkSessionId 能进返回行与广播 patch——否则 renderer 留着旧 resume id,下一次

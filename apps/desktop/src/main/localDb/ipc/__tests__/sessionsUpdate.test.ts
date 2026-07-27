@@ -6,6 +6,9 @@
  * relocateClaudeTranscriptsForSessionMove(旧值 → 新值)，并把迁移中持久化的最新
  * sdkSessionId 并入返回行与广播 patch；其它会话或未实际移动时不得调用。
  *
+ * 另覆盖 IM 绑定的「本地移动授权」登记:目录真的变了才登记(hook 侧据此在工作
+ * 目录映射外继续复用该会话,见 hook-control/bindings.ts),归一化写法差异不算。
+ *
  * 通过 mock electron ipcMain 捕获真实 handler + 内存 sqlite 全列 sessions 表做集成断言。
  */
 import Database from 'better-sqlite3';
@@ -21,6 +24,7 @@ const h = vi.hoisted(() => ({
   relocate: vi.fn(async (): Promise<{ persistedSdkSessionId: string | null }> => ({
     persistedSdkSessionId: null,
   })),
+  noteHookSessionMoved: vi.fn(),
   tapWindowBroadcast: vi.fn(),
 }));
 
@@ -52,6 +56,9 @@ vi.mock('../../../messagePersistBroadcaster', () => ({ noteSessionClearBoundary:
 vi.mock('../../../sessionIds', () => ({ resolveBusinessSessionId: (id: string) => id }));
 vi.mock('../../../maker-host/claude-transcript-relocation.js', () => ({
   relocateClaudeTranscriptsForSessionMove: h.relocate,
+}));
+vi.mock('../../../hook-control/sessionMoves.js', () => ({
+  noteHookSessionMoved: h.noteHookSessionMoved,
 }));
 
 import { registerSessionIpc } from '../sessions';
@@ -234,5 +241,35 @@ describe('local-db:sessions:update handler wiring', () => {
   it('does nothing for remote sessions', async () => {
     await invokeUpdate('cc-remote', { workingDir: '/new/dir' });
     expect(h.relocate).not.toHaveBeenCalled();
+  });
+
+  it('registers the local-move authorization for IM bindings when the dir really changes', async () => {
+    // codex 会话也要登记:授权与 agent 种类无关,只与"目录被用户移动了"有关
+    await invokeUpdate('codex-local', { workingDir: '/new/dir', workspaceKind: 'project' });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.noteHookSessionMoved).toHaveBeenCalledWith('codex-local', '/new/dir');
+  });
+
+  it('does not register a move when the workingDir only changes spelling', async () => {
+    h.sqlite!.prepare('UPDATE sessions SET working_dir = ? WHERE id = ?').run(
+      'D:\\repo\\project',
+      'cc-local',
+    );
+
+    await invokeUpdate('cc-local', { workingDir: 'D:/repo/project' });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.noteHookSessionMoved).not.toHaveBeenCalled();
+  });
+
+  it('does not register a move for patches without workingDir', async () => {
+    await invokeUpdate('cc-local', { workspaceKind: 'dialogue', title: '换个名字' });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.noteHookSessionMoved).not.toHaveBeenCalled();
   });
 });

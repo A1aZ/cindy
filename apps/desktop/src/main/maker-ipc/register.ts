@@ -1548,7 +1548,7 @@ const pendingFailedTurnAssistantPersistId = new Map<string, string>();
  */
 const sendToSessionLocks = new Map<string, Promise<unknown>>();
 
-/** Serialize every local send / runtime release for one session. */
+/** Serialize every local send / runtime release / route mutation for one session. */
 function withSendToSessionLock<T>(sessionId: string, task: () => Promise<T>): Promise<T> {
   const previous = sendToSessionLocks.get(sessionId);
   const waitPrevious = previous ? previous.catch(() => undefined) : Promise.resolve();
@@ -7035,41 +7035,46 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     ) {
       throwIpcError('INVALID_PARAMS', 'providerId must be string, null, or undefined');
     }
-    try {
-      const result = await applySetModelThenCancelAgentSwitchIntent(
-        agentSwitchPending,
-        sessionId,
-        () => applyRuntimeSetModelChange({
-          maker,
+    // 与 send 事务共用 session 锁:发送时刻执行的跨引擎切换必须先落定,
+    // 后到的 SET_MODEL 才能写 route。否则切换 DB await 恢复后会用旧 provider
+    // 覆盖用户刚选的新 route，形成 DB 与进程内路由分叉。
+    return withSendToSessionLock(sessionId, async () => {
+      try {
+        const result = await applySetModelThenCancelAgentSwitchIntent(
+          agentSwitchPending,
           sessionId,
-          model,
-          providerId,
-          isSessionInTurn,
-          registerPendingCredentialSwitch: registerPendingCredentialSwitchForSession,
-          clearPendingCredentialSwitch: clearPendingCredentialSwitchForSession,
-          wakeSessionInputQueue: wakeSessionInputAfterCredentialSwitch,
-          getPendingCredentialSwitch: getPendingCredentialSwitchTarget,
-          // 解析隐式来源的凭证家族,精确判定是否跨远端压缩身份边界(见
-          // shouldCloseSessionForCredentialSwitch.codexAuthInjection)。
-          codexAuthInjection: getCodexProxyAuthInjectionState(),
-          logger: log,
-        }),
-        (id) => broadcastSessionPatched(id, {
-          agentSwitchIntent: null,
-          agentSwitchIntentCanceled: true,
-        }),
-      );
-      // deferred = 会话自己在跑,选择已登记、turn 结束自动生效。renderer 据此提示
-      // "任务结束后生效"而不是当成已即时切换。
-      return { deferred: result.status === 'deferred' };
-    } catch (err) {
-      if (err instanceof CredentialModeSwitchBusyError) {
-        // 兜底(正常路径 busy 已转 deferred):切模型撞上凭证切换忙,独立 code,
-        // renderer toast 走 ipcError.CREDENTIAL_SWITCH_BUSY 专属文案。
-        throwIpcError('CREDENTIAL_SWITCH_BUSY', err.message);
+          () => applyRuntimeSetModelChange({
+            maker,
+            sessionId,
+            model,
+            providerId,
+            isSessionInTurn,
+            registerPendingCredentialSwitch: registerPendingCredentialSwitchForSession,
+            clearPendingCredentialSwitch: clearPendingCredentialSwitchForSession,
+            wakeSessionInputQueue: wakeSessionInputAfterCredentialSwitch,
+            getPendingCredentialSwitch: getPendingCredentialSwitchTarget,
+            // 解析隐式来源的凭证家族,精确判定是否跨远端压缩身份边界(见
+            // shouldCloseSessionForCredentialSwitch.codexAuthInjection)。
+            codexAuthInjection: getCodexProxyAuthInjectionState(),
+            logger: log,
+          }),
+          (id) => broadcastSessionPatched(id, {
+            agentSwitchIntent: null,
+            agentSwitchIntentCanceled: true,
+          }),
+        );
+        // deferred = 会话自己在跑,选择已登记、turn 结束自动生效。renderer 据此提示
+        // "任务结束后生效"而不是当成已即时切换。
+        return { deferred: result.status === 'deferred' };
+      } catch (err) {
+        if (err instanceof CredentialModeSwitchBusyError) {
+          // 兜底(正常路径 busy 已转 deferred):切模型撞上凭证切换忙,独立 code,
+          // renderer toast 走 ipcError.CREDENTIAL_SWITCH_BUSY 专属文案。
+          throwIpcError('CREDENTIAL_SWITCH_BUSY', err.message);
+        }
+        throw err;
       }
-      throw err;
-    }
+    });
   });
 
   ipcMain.handle(MAKER_INVOKE.SET_EFFORT, async (_e, sessionId: unknown, effort: unknown) => {

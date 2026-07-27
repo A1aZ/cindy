@@ -4294,9 +4294,9 @@
     "cindyServiceUnavailable": "The Cindy voice service is unavailable. Check your network or switch service source.",
     "asrServiceUnavailable": "Voice recognition service failed to connect. Check your network and try again.",
     "emptyTranscript": "Speech was detected, but no text was recognized. Please try again.",
-    "connectionInterrupted": "The voice connection was interrupted.",
-    "recognitionStalled": "Voice recognition stopped returning results.",
-    "transcriptKept": "{{message}} The text recognized so far was kept — edit it or dictate again."
+    "connectionInterrupted": "The voice connection was interrupted. Check your network and try again.",
+    "recognitionStalled": "Voice recognition stopped returning results. Try again.",
+    "transcriptKept": "{{message}} The text recognized so far was kept — you can edit it directly."
   },
   "chat": {
     "askUserQuestion": {

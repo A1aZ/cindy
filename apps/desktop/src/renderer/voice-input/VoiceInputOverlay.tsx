@@ -378,20 +378,29 @@ export function VoiceInputOverlay() {
     if (audioMs > 0) recordVoiceInputUsage(audioMs, terminalOutcomeRef.current);
   }, []);
 
+  const formatVoiceInputStartError = useCallback((message: string): string => {
+    if (isVoiceInputServiceConnectionError(message)) {
+      return t('voiceInputOverlay.asrServiceUnavailable');
+    }
+    return message;
+  }, [t]);
+
   const formatVoiceInputError = useCallback((
     message: string,
     code?: VoiceInputErrorCode,
     transcriptKept?: boolean,
   ): string => {
     // Coded failures carry an English debug `message`; the localized sentence
-    // comes from the code. Uncoded ones are the provider's own description of
-    // an auth/quota/protocol problem and are shown verbatim.
-    const cause = code ? t(VOICE_INPUT_ERROR_CODE_KEYS[code]) : message;
+    // comes from the code. Uncoded ones come from a provider — normalize them
+    // through the same connection mapping the start path uses, so the identical
+    // transport failure reads the same whether or not salvage happened, and raw
+    // ECONNRESET/"fetch failed" strings never reach the user.
+    const cause = code ? t(VOICE_INPUT_ERROR_CODE_KEYS[code]) : formatVoiceInputStartError(message);
     // Paired with the retained-transcript panel below: the overlay keeps the
     // text with a copy button, so the sentence must not read as a total loss —
     // while still naming the cause the user has to act on.
     return transcriptKept ? t('voiceInputOverlay.transcriptKept', { message: cause }) : cause;
-  }, [t]);
+  }, [formatVoiceInputStartError, t]);
 
   const appendAudioChunk = useCallback((chunk: PcmChunk) => {
     sentAudioMsRef.current += chunk.trace.durationMs;
@@ -406,13 +415,6 @@ export function VoiceInputOverlay() {
     }
     return false;
   }, []);
-
-  const formatVoiceInputStartError = useCallback((message: string): string => {
-    if (isVoiceInputServiceConnectionError(message)) {
-      return t('voiceInputOverlay.asrServiceUnavailable');
-    }
-    return message;
-  }, [t]);
 
   const cancelStartedRun = useCallback((startPromise: Promise<StartVoiceInputResult>) => {
     void startPromise
@@ -1288,13 +1290,12 @@ export function VoiceInputOverlay() {
             // the error state without pasting).
             break;
           }
-          // A retained-transcript message is already the final user-facing
-          // sentence (cause + "text was kept"). Running it through the
-          // start-error mapper risks swapping in the generic
-          // service-unavailable copy, which would drop the retention half.
-          setError(event.transcriptKept
-            ? formattedMessage
-            : formatVoiceInputStartError(formattedMessage));
+          // formatVoiceInputError already normalized the cause (including the
+          // connection mapping) and appended the retention note, so this must
+          // not run the finished sentence through the start-error mapper again
+          // — that would swap the whole thing for the generic
+          // service-unavailable copy and drop the retention half.
+          setError(formattedMessage);
           if (recognizedText) {
             pendingPasteTextRef.current = recognizedText;
             setPasteErrorCode(event.transcriptKept ? 'retained' : 'failed');
@@ -1323,7 +1324,7 @@ export function VoiceInputOverlay() {
           break;
       }
     });
-  }, [formatVoiceInputError, formatVoiceInputStartError, promptCodexSessionExpired, resolveDoneWaiters, setVoiceState]);
+  }, [formatVoiceInputError, promptCodexSessionExpired, resolveDoneWaiters, setVoiceState]);
 
   useEffect(() => {
     const unsubscribe = window.electronAPI.voiceInput.onGlobalOverlayCommand((command: GlobalOverlayCommand) => {

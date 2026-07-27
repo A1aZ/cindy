@@ -373,7 +373,7 @@ function looksLikeCommand(word: string): boolean {
  * Chip patterns:
  *   @.claude/agents/name.md  → agent chip (sparkles + name)
  *   @path/to/dir/            → dir chip (folder + dirname/)
- *   @path/to/file.ext        → file chip (file + basename) — clickable button
+ *   @path/to/file.ext        → file chip (file + basename) — clickable
  *   /command (at line start) → slash chip (no icon, /command)
  *
  * Plain text segments are further scanned for URLs, which are rendered as
@@ -490,11 +490,11 @@ function renderContentWithoutPastedText(
               onClick={async (e) => {
                 // Capture currentTarget before await — React pools events and
                 // by the time the IPC resolves, currentTarget is null.
-                const btn = e.currentTarget;
+                const chip = e.currentTarget;
                 if (remoteJoin) {
                   // remote:本机 BFS 无意义,join 出远端绝对路径,存在性由
                   // 点击后的远程取回链路兜底。
-                  await onFileChipClick(resolveLocalPath(ref, workingDir), fileName, btn);
+                  await onFileChipClick(resolveLocalPath(ref, workingDir), fileName, chip);
                   return;
                 }
                 // markdown-monorepo-resolve: smart resolve so a chip like
@@ -508,7 +508,7 @@ function renderContentWithoutPastedText(
                   return;
                 }
                 const abs = result.status === 'unique' ? result.absPath : result.fallbackAbsPath;
-                await onFileChipClick(abs, fileName, btn);
+                await onFileChipClick(abs, fileName, chip);
               }}
             />,
           );
@@ -1054,9 +1054,9 @@ export function UserMessage({
                   await saveChatAttachmentWithToasts(sessionFileCtx, f);
                   return;
                 }
-                const btn = e.currentTarget;
+                const chip = e.currentTarget;
                 if (!(await shouldOpenTextLightboxForOrigin(sessionFileCtx, f.path))) return;
-                activeFileChipRef.current = btn;
+                activeFileChipRef.current = chip;
                 setTextLightboxFile({ path: f.path, name: f.name });
               }}
               className={cn(
@@ -1282,7 +1282,7 @@ export function UserMessage({
                                 : renderContent(
                                     segment.text,
                                     workingDir,
-                                    async (abs, name, btn) => {
+                                    async (abs, name, chip) => {
                                       if (
                                         !(await shouldOpenTextLightboxForOrigin(
                                           sessionFileCtx,
@@ -1290,7 +1290,7 @@ export function UserMessage({
                                         ))
                                       )
                                         return;
-                                      activeFileChipRef.current = btn;
+                                      activeFileChipRef.current = chip;
                                       setTextLightboxFile({ path: abs, name });
                                     },
                                     (xdtFileUrl) => setLightboxSrc(xdtFileUrl),
@@ -1336,13 +1336,13 @@ export function UserMessage({
                           : renderContent(
                               bubbleBody,
                               workingDir,
-                              async (abs, name, btn) => {
+                              async (abs, name, chip) => {
                                 if (!(await shouldOpenTextLightboxForOrigin(sessionFileCtx, abs)))
                                   return;
-                                // F2 / F6: stash the clicked button so the lightbox can
+                                // F2 / F6: stash the clicked chip so the lightbox can
                                 // return focus on close. State + ref are shared with the
                                 // Chip-Row above ("most recent trigger wins" semantics).
-                                activeFileChipRef.current = btn;
+                                activeFileChipRef.current = chip;
                                 setTextLightboxFile({ path: abs, name });
                               },
                               (xdtFileUrl) => setLightboxSrc(xdtFileUrl),
@@ -1406,10 +1406,10 @@ export function UserMessage({
                         ? renderContent(
                             ghostCardPromptBody,
                             workingDir,
-                            async (abs, name, btn) => {
+                            async (abs, name, chip) => {
                               if (!(await shouldOpenTextLightboxForOrigin(sessionFileCtx, abs)))
                                 return;
-                              activeFileChipRef.current = btn;
+                              activeFileChipRef.current = chip;
                               setTextLightboxFile({ path: abs, name });
                             },
                             (xdtFileUrl) => setLightboxSrc(xdtFileUrl),

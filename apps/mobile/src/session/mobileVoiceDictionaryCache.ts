@@ -32,6 +32,8 @@ const REFETCH_INTERVAL_MS = 5 * 60 * 1000;
 type CachedDictionary = {
   entries: MobileVoiceCredentialSyncDictionaryEntry[];
   fetchedAt: number;
+  /** 被控端上报的状态水位;老版本不带,此时只能退回按 fetchedAt 比较。 */
+  stateVersion?: string;
 };
 
 const memoryCache = new Map<string, CachedDictionary>();
@@ -65,9 +67,14 @@ export function readMobileVoiceDictionaryFetchedAt(hostDeviceId: string): number
 export function readCachedMobileVoiceDictionarySnapshot(hostDeviceId: string): {
   entries: MobileVoiceCredentialSyncDictionaryEntry[];
   fetchedAt: number;
+  stateVersion?: string;
 } {
   const cached = memoryCache.get(normalizeHostDeviceId(hostDeviceId));
-  return { entries: cached?.entries ?? [], fetchedAt: cached?.fetchedAt ?? 0 };
+  return {
+    entries: cached?.entries ?? [],
+    fetchedAt: cached?.fetchedAt ?? 0,
+    stateVersion: cached?.stateVersion,
+  };
 }
 
 /** 从盘上恢复缓存(App 启动或首次用到该 host 时调用一次)。 */
@@ -85,6 +92,7 @@ export async function hydrateMobileVoiceDictionary(hostDeviceId: string): Promis
     const restored = {
       entries: normalizeEntries(parsed?.entries),
       fetchedAt: typeof parsed?.fetchedAt === 'number' ? parsed.fetchedAt : 0,
+      stateVersion: typeof parsed?.stateVersion === 'string' ? parsed.stateVersion : undefined,
     };
     // 开麦路径会并发跑 hydrate 与 refresh。磁盘读晚于网络响应返回时,不能用旧
     // 快照盖掉刚拉到的新数据 —— 只在内存仍为空、或盘上确实更新时才写。
@@ -129,6 +137,7 @@ export async function refreshMobileVoiceDictionary(
       const next: CachedDictionary = {
         entries: normalizeEntries(result.entries),
         fetchedAt: Date.now(),
+        stateVersion: typeof result.stateVersion === 'string' ? result.stateVersion : undefined,
       };
       memoryCache.set(host, next);
       // 顺序很关键:**先登记索引,再写快照**。两个写不是原子的,进程随时可能死在

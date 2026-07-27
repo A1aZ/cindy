@@ -89,6 +89,8 @@ export interface MobileVoiceDictionarySnapshot {
   entries: readonly MobileVoiceCredentialSyncDictionaryEntry[];
   /** 成功拉取的时间(unix ms);从未拉到过为 0。 */
   fetchedAt: number;
+  /** 被控端上报的状态水位(HLC 定长前缀,字典序即时间序);老版本被控端没有。 */
+  stateVersion?: string;
 }
 
 /**
@@ -103,11 +105,29 @@ export interface MobileVoiceDictionarySnapshot {
  *
  * 取最新那份则天然表达了删除:新快照里没有,就是没有。
  *
- * 新鲜度按 `fetchedAt` 比较。它是响应到达手机的时间,不是词典本身的版本 —— 并发
- * 拉多台时,慢的那个响应反而"更新"。这是已知的近似:同步收敛后各台内容本就一致,
- * 差异只出现在某台正处于桌面侧 8 秒去抖窗口内的短暂时刻,下次刷新即自愈。要根治
- * 得让桌面在投影里带上自己的状态版本,那是跨端契约改动,留待后续。
+ * 新鲜度优先看被控端上报的 `stateVersion`(状态水位,合并只做并集所以单调不减),
+ * 它描述的是内容有多新,与响应什么时候到达手机无关 —— 并发拉多台时,响应到达
+ * 顺序会被网络抖动打乱,拿到达时间比较可能让手机停在某台正处于去抖窗口内的旧内容上。
+ * 只有对端是不带该字段的老版本时才退回按 `fetchedAt` 比较。
  */
+/**
+ * 两份快照谁更新。带 `stateVersion` 的一律优先(内容水位比到达时间可信),两份都带
+ * 时按字典序比 —— HLC 是定长前缀,字典序即时间序。只有一份带时也认它:老版本被控端
+ * 不上报水位,不该因此压过一个明确更新的快照。
+ */
+function isFresherThan(
+  candidate: MobileVoiceDictionarySnapshot,
+  best: MobileVoiceDictionarySnapshot,
+): boolean {
+  if (candidate.stateVersion && best.stateVersion) {
+    if (candidate.stateVersion !== best.stateVersion) return candidate.stateVersion > best.stateVersion;
+    return candidate.fetchedAt > best.fetchedAt;
+  }
+  if (candidate.stateVersion) return true;
+  if (best.stateVersion) return false;
+  return candidate.fetchedAt > best.fetchedAt;
+}
+
 export function buildMobileVoiceDictionaryEntryViews(
   snapshots: ReadonlyArray<MobileVoiceDictionarySnapshot>,
   options?: { maxAliases?: number },
@@ -115,7 +135,7 @@ export function buildMobileVoiceDictionaryEntryViews(
   const maxAliases = options?.maxAliases ?? 3;
   const freshest = snapshots.reduce<MobileVoiceDictionarySnapshot | null>((best, snapshot) => {
     if (!snapshot || snapshot.fetchedAt <= 0) return best;
-    return !best || snapshot.fetchedAt > best.fetchedAt ? snapshot : best;
+    return !best || isFresherThan(snapshot, best) ? snapshot : best;
   }, null);
   if (!freshest) return [];
 

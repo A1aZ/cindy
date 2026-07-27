@@ -9,6 +9,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  addManualEntry,
+  createEmptySyncState,
+  createHlcClock,
+} from '@cindy/voice-input-core';
 
 vi.mock('../../logger.js', () => ({
   createLogger: () => ({ info: () => {}, warn: () => {}, error: () => {}, debug: () => {} }),
@@ -221,8 +226,26 @@ describe('帧大小上限', () => {
 
 describe('手机只读投影', () => {
   it('只投影润色用得上的字段,不含同步元数据', () => {
-    expect(readDictionaryProjectionForMobile()).toEqual([
+    const projection = readDictionaryProjectionForMobile();
+    expect(projection.entries).toEqual([
       { text: 'Cindy', frequency: 2, aliases: [{ text: 'sindy', count: 1 }] },
     ]);
+    // 除了词条和状态水位,不该漏出节点 id、化身、墓碑等同步内部结构。
+    expect(Object.keys(projection).sort()).toEqual(['entries']);
+  });
+
+  it('带上状态水位,让手机按内容新鲜度而不是响应到达顺序挑快照', () => {
+    const first = addManualEntry(createEmptySyncState(), createHlcClock('node-a', 1_000), {
+      text: 'Cindy',
+      nowMs: 1_000,
+    });
+    stateOverride.value = first.state;
+    const before = readDictionaryProjectionForMobile().stateVersion;
+    expect(typeof before).toBe('string');
+
+    const second = addManualEntry(first.state, first.clock, { text: 'Orca', nowMs: 9_000 });
+    stateOverride.value = second.state;
+    // 水位单调不减:新事件之后必须严格更大,否则手机会一直停在旧快照上。
+    expect(readDictionaryProjectionForMobile().stateVersion! > before!).toBe(true);
   });
 });

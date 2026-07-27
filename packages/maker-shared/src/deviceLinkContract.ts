@@ -76,6 +76,14 @@ export type MobileVoiceDictionarySnapshotResult =
   | {
       ok: true;
       entries: MobileVoiceCredentialSyncDictionaryEntry[];
+      /**
+       * 该桌面同步状态的版本水位(HLC 定长前缀,字典序即时间序)。
+       *
+       * 手机同时拉多台电脑时用它比较新鲜度。不能用响应到达时间:并发请求里慢的那个
+       * 反而显得"更新",可能让手机停在某台刚好处于去抖窗口内的旧内容上。老版本被控端
+       * 不带这个字段,手机退回按到达时间比较。
+       */
+      stateVersion?: string;
     }
   | {
       ok: false;

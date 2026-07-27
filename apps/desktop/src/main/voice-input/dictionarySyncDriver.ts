@@ -16,7 +16,7 @@
  */
 
 import { MAX_FRAME_BYTES } from '@cindy/device-link';
-import type { VoiceDictionarySyncState } from '@cindy/voice-input-core';
+import { findMaxHlc, type VoiceDictionarySyncState } from '@cindy/voice-input-core';
 
 import { createLogger } from '../logger.js';
 import { voiceDictionarySyncStore } from './VoiceDictionarySyncStore.js';
@@ -177,17 +177,20 @@ export function handleIncomingDictionaryState(src: string, payload: unknown): vo
  * 只让电脑之间停下、却继续把整份词典交给手机,与开关的承诺不符。关闭时返回空表
  * (而不是报错),手机侧照常降级到无词典,不打断语音输入。
  */
-export function readDictionaryProjectionForMobile(): Array<{
-  text: string;
-  frequency: number;
-  aliases: Array<{ text: string; count: number }>;
-}> {
-  if (!isSyncEnabled()) return [];
-  return voiceDictionarySyncStore.materialize().entries.map((entry) => ({
+export function readDictionaryProjectionForMobile(): {
+  entries: Array<{ text: string; frequency: number; aliases: Array<{ text: string; count: number }> }>;
+  stateVersion?: string;
+} {
+  if (!isSyncEnabled()) return { entries: [] };
+  const entries = voiceDictionarySyncStore.materialize().entries.map((entry) => ({
     text: entry.text,
     frequency: entry.frequency,
     aliases: entry.aliases.map((alias) => ({ text: alias.text, count: alias.count })),
   }));
+  // 状态水位单调不减(合并只做并集),所以它能表达"这份内容有多新",
+  // 与响应什么时候到达手机无关。
+  const maxHlc = findMaxHlc(voiceDictionarySyncStore.getState());
+  return maxHlc ? { entries, stateVersion: maxHlc } : { entries };
 }
 
 function broadcastToAllPeers(reason: string, options?: { requestReply?: boolean }): void {

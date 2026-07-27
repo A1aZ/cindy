@@ -168,3 +168,30 @@ describe('buildMobileVoiceDictionaryEntryViews — 多台电脑取最新那份',
       .toEqual(['Cindy', 'Orca']);
   });
 });
+
+describe('新鲜度判定', () => {
+  it('优先按状态水位比较,不被响应到达顺序左右', () => {
+    // 内容更新的那台响应更慢:按到达时间会挑错。
+    const views = buildMobileVoiceDictionaryEntryViews([
+      { entries: [{ text: '旧词' }], fetchedAt: 9_000, stateVersion: '0000000100' },
+      { entries: [{ text: '新词' }], fetchedAt: 1_000, stateVersion: '0000000200' },
+    ]);
+    expect(views.map((view) => view.text)).toEqual(['新词']);
+  });
+
+  it('对端不上报水位时退回按拉取时间比较', () => {
+    const views = buildMobileVoiceDictionaryEntryViews([
+      { entries: [{ text: '旧词' }], fetchedAt: 1_000 },
+      { entries: [{ text: '新词' }], fetchedAt: 9_000 },
+    ]);
+    expect(views.map((view) => view.text)).toEqual(['新词']);
+  });
+
+  it('只有一台带水位时认它 —— 老版本不该压过明确更新的快照', () => {
+    const views = buildMobileVoiceDictionaryEntryViews([
+      { entries: [{ text: '老版本' }], fetchedAt: 9_999 },
+      { entries: [{ text: '带水位' }], fetchedAt: 1_000, stateVersion: '0000000100' },
+    ]);
+    expect(views.map((view) => view.text)).toEqual(['带水位']);
+  });
+});

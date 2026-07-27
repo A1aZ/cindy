@@ -2502,8 +2502,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('media:read-image-bytes', params),
 
   // 附件卡缩略图:本机文件交给系统缩略图服务(macOS QuickLook / Windows Shell)
-  // 出一张小预览,拿不到时回 null(调用方回落自绘文件图标)。
-  getFileThumbnail: (params: { path: string; size: number }): Promise<string | null> =>
+  // 出一张小预览,顺带回传复核那一刻的当前字节数。整体不可用(路径越界 / 文件不在)
+  // 回 null;文件在但出不了图时 dataUrl 为 null,调用方回落自绘文件图标。
+  getFileThumbnail: (params: {
+    path: string;
+    size: number;
+  }): Promise<{ dataUrl: string | null; byteSize: number } | null> =>
     ipcRenderer.invoke('file:thumbnail', params),
 
   // markdown-monorepo-resolve: smart relative-path resolver.

@@ -2090,11 +2090,15 @@ interface ElectronAPI {
   }) => Promise<{ base64: string; mimeType: string }>;
 
   /**
-   * 附件卡缩略图:本机文件走系统缩略图服务(macOS QuickLook / Windows Shell),
-   * 返回 PNG dataURL。路径越界、文件不存在、系统不支持该类型或超时都回 null,
-   * 调用方需回落到自绘文件图标。
+   * 附件卡缩略图:本机文件走系统缩略图服务(macOS QuickLook / Windows Shell)。
+   * 路径越界 / 不是文件 / stat 失败 → 整体回 null;文件在但出不了图(系统不支持、
+   * 超时、排不上并发名额)→ `dataUrl` 为 null,调用方回落自绘文件图标。
+   * `byteSize` 是复核那一刻的当前大小,用来刷新卡片上「类型 · 大小」的快照值。
    */
-  getFileThumbnail: (params: { path: string; size: number }) => Promise<string | null>;
+  getFileThumbnail: (params: {
+    path: string;
+    size: number;
+  }) => Promise<{ dataUrl: string | null; byteSize: number } | null>;
 
   /**
    * markdown-monorepo-resolve: smart relative-path resolver. Tries direct

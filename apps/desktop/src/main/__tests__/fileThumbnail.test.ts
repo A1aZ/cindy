@@ -105,28 +105,42 @@ describe('readFileThumbnail — 授权边界', () => {
 });
 
 describe('readFileThumbnail — 兜底与缓存', () => {
-  it('系统服务抛错时回 null,不把异常抛给 renderer', async () => {
+  it('系统服务抛错时 dataUrl 为 null,不把异常抛给 renderer', async () => {
     createThumbnailFromPath.mockRejectedValue(new Error('unsupported'));
-    await expect(readFileThumbnail({ path: '/tmp/a.zzz', size: 80 })).resolves.toBeNull();
+    await expect(readFileThumbnail({ path: '/tmp/a.zzz', size: 80 })).resolves.toEqual({
+      dataUrl: null,
+      byteSize: 10,
+    });
   });
 
   it('空图当作拿不到', async () => {
     createThumbnailFromPath.mockResolvedValue({ isEmpty: () => true, toDataURL: () => '' });
-    await expect(readFileThumbnail({ path: '/tmp/a.pdf', size: 80 })).resolves.toBeNull();
+    await expect(readFileThumbnail({ path: '/tmp/a.pdf', size: 80 })).resolves.toEqual({
+      dataUrl: null,
+      byteSize: 10,
+    });
+  });
+
+  it('回传复核那一刻的当前字节数(卡片据此刷新「类型 · 大小」)', async () => {
+    stat.mockResolvedValue({ isFile: () => true, mtimeMs: 7, size: 4242 });
+    await expect(readFileThumbnail({ path: '/tmp/a.pdf', size: 80 })).resolves.toEqual({
+      dataUrl: 'data:image/png;base64,AAA',
+      byteSize: 4242,
+    });
   });
 
   it('同一文件重复请求只问一次系统服务', async () => {
     const first = await readFileThumbnail({ path: '/tmp/a.pdf', size: 80 });
     const second = await readFileThumbnail({ path: '/tmp/a.pdf', size: 80 });
-    expect(first).toBe('data:image/png;base64,AAA');
-    expect(second).toBe(first);
+    expect(first?.dataUrl).toBe('data:image/png;base64,AAA');
+    expect(second?.dataUrl).toBe(first?.dataUrl);
     expect(createThumbnailFromPath).toHaveBeenCalledTimes(1);
   });
 
   it('出不了图的文件进负缓存,不必每次重挂载都再撞一次昂贵的原生调用', async () => {
     createThumbnailFromPath.mockResolvedValue({ isEmpty: () => true, toDataURL: () => '' });
-    await expect(readFileThumbnail({ path: '/tmp/a.zzz', size: 80 })).resolves.toBeNull();
-    await expect(readFileThumbnail({ path: '/tmp/a.zzz', size: 80 })).resolves.toBeNull();
+    expect((await readFileThumbnail({ path: '/tmp/a.zzz', size: 80 }))?.dataUrl).toBeNull();
+    expect((await readFileThumbnail({ path: '/tmp/a.zzz', size: 80 }))?.dataUrl).toBeNull();
     expect(createThumbnailFromPath).toHaveBeenCalledTimes(1);
   });
 
@@ -157,19 +171,48 @@ describe('readFileThumbnail — 兜底与缓存', () => {
       expect(peak).toBe(4);
       // 让前 4 个全部超时:IPC 各自回 null,但原生任务仍挂着。
       await vi.advanceTimersByTimeAsync(TIMEOUT_MS + 100);
-      expect(await Promise.all(calls.slice(0, 4))).toEqual([null, null, null, null]);
-      // 关键断言:名额没被超时释放,排队的第 5 个仍进不来。
+      expect((await Promise.all(calls.slice(0, 4))).map((r) => r?.dataUrl)).toEqual([
+        null, null, null, null,
+      ]);
+      // 关键断言:名额没被超时释放,排队的第 5 个自始至终没能点火。
       expect(peak).toBe(4);
       expect(createThumbnailFromPath).toHaveBeenCalledTimes(4);
-      // 放掉一个原生任务,排队者才拿到名额。
-      gates.shift()?.();
-      await vi.advanceTimersByTimeAsync(0);
-      expect(createThumbnailFromPath).toHaveBeenCalledTimes(5);
+      // 而它也不会永远挂着——排队这一段同样受超时约束,直接回落。
+      expect((await calls[4])?.dataUrl).toBeNull();
+      expect(createThumbnailFromPath).toHaveBeenCalledTimes(4);
       while (gates.length) {
         gates.shift()?.();
         await vi.advanceTimersByTimeAsync(0);
       }
       await Promise.all(calls);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('名额被挂死任务占满时,排队请求超时回落而不是无限挂起', async () => {
+    const gates: (() => void)[] = [];
+    createThumbnailFromPath.mockImplementation(
+      () => new Promise((resolve) => gates.push(() => resolve(okImage()))),
+    );
+    vi.useFakeTimers();
+    try {
+      // 先用 4 个挂死任务占满名额。
+      const hung = Array.from({ length: 4 }, (_, i) =>
+        readFileThumbnail({ path: `/tmp/block${i}.pdf`, size: 80 }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(createThumbnailFromPath).toHaveBeenCalledTimes(4);
+      // 第 5 个只能排队:它必须在超时后自己回落,而不是等到天荒地老。
+      const queued = readFileThumbnail({ path: '/tmp/queued.pdf', size: 80 });
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS + 100);
+      expect((await queued)?.dataUrl).toBeNull();
+      expect(createThumbnailFromPath).toHaveBeenCalledTimes(4);
+      while (gates.length) {
+        gates.shift()?.();
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      await Promise.all(hung);
     } finally {
       vi.useRealTimers();
     }
@@ -183,11 +226,11 @@ describe('readFileThumbnail — 兜底与缓存', () => {
       }),
     );
     vi.useFakeTimers();
-    let first: Promise<string | null>;
+    let first: ReturnType<typeof readFileThumbnail>;
     try {
       first = readFileThumbnail({ path: '/tmp/late.pdf', size: 80 });
       await vi.advanceTimersByTimeAsync(TIMEOUT_MS + 100);
-      expect(await first).toBeNull();
+      expect((await first)?.dataUrl).toBeNull();
     } finally {
       vi.useRealTimers();
     }
@@ -195,7 +238,7 @@ describe('readFileThumbnail — 兜底与缓存', () => {
     resolveNative?.(okImage());
     await Promise.resolve();
     await Promise.resolve();
-    await expect(readFileThumbnail({ path: '/tmp/late.pdf', size: 80 })).resolves.toBe(
+    expect((await readFileThumbnail({ path: '/tmp/late.pdf', size: 80 }))?.dataUrl).toBe(
       'data:image/png;base64,AAA',
     );
     expect(createThumbnailFromPath).toHaveBeenCalledTimes(1);
@@ -209,14 +252,14 @@ describe('readFileThumbnail — 兜底与缓存', () => {
       }),
     );
     vi.useFakeTimers();
-    let first: Promise<string | null>;
+    let first: ReturnType<typeof readFileThumbnail>;
     try {
       first = readFileThumbnail({ path: '/tmp/slow.pdf', size: 80 });
       await vi.advanceTimersByTimeAsync(TIMEOUT_MS + 100);
-      expect(await first).toBeNull();
+      expect((await first)?.dataUrl).toBeNull();
       // 超时只让 IPC 早返回;原生任务还挂着时,同一文件的重挂载请求复用它,
       // 不会再点一把新火(否则系统卡住时会越积越多)。
-      await expect(readFileThumbnail({ path: '/tmp/slow.pdf', size: 80 })).resolves.toBeNull();
+      expect((await readFileThumbnail({ path: '/tmp/slow.pdf', size: 80 }))?.dataUrl).toBeNull();
       expect(createThumbnailFromPath).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
@@ -225,7 +268,7 @@ describe('readFileThumbnail — 兜底与缓存', () => {
     rejectNative?.(new Error('unsupported'));
     await Promise.resolve();
     await Promise.resolve();
-    await expect(readFileThumbnail({ path: '/tmp/slow.pdf', size: 80 })).resolves.toBeNull();
+    expect((await readFileThumbnail({ path: '/tmp/slow.pdf', size: 80 }))?.dataUrl).toBeNull();
     expect(createThumbnailFromPath).toHaveBeenCalledTimes(1);
   });
 
@@ -244,7 +287,7 @@ describe('readFileThumbnail — 兜底与缓存', () => {
     await Promise.resolve();
     resolveImage?.(okImage());
     const results = await all;
-    expect(results).toEqual(Array(3).fill('data:image/png;base64,AAA'));
+    expect(results.map((r) => r?.dataUrl)).toEqual(Array(3).fill('data:image/png;base64,AAA'));
     expect(createThumbnailFromPath).toHaveBeenCalledTimes(1);
   });
 
@@ -284,7 +327,7 @@ describe('readFileThumbnail — 兜底与缓存', () => {
     await readFileThumbnail({ path: '/tmp/a.pdf', size: 80 });
     stat.mockResolvedValue({ isFile: () => true, mtimeMs: 999, size: 20 });
     createThumbnailFromPath.mockResolvedValue(okImage('data:image/png;base64,BBB'));
-    await expect(readFileThumbnail({ path: '/tmp/a.pdf', size: 80 })).resolves.toBe(
+    expect((await readFileThumbnail({ path: '/tmp/a.pdf', size: 80 }))?.dataUrl).toBe(
       'data:image/png;base64,BBB',
     );
     expect(createThumbnailFromPath).toHaveBeenCalledTimes(2);

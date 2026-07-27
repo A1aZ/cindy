@@ -47,25 +47,53 @@ const MAX_CONCURRENT = 4;
 /** null = 已知这份文件出不了图(损坏 / 系统不支持),负缓存同样按内容版本失效。 */
 const cache = new Map<string, string | null>();
 /** 同 key 在飞的请求:多张卡指向同一文件时只做一次原生调用。 */
-const inFlight = new Map<string, Promise<string | null>>();
+const inFlight = new Map<string, Promise<FileThumbnailResult | null>>();
 
-let running = 0;
-const waiters: (() => void)[] = [];
-
-/** 并发闸:超过 MAX_CONCURRENT 时排队,拿到名额再往下走。 */
-async function acquireSlot(): Promise<void> {
-  if (running < MAX_CONCURRENT) {
-    running += 1;
-    return;
-  }
-  await new Promise<void>((resolve) => waiters.push(resolve));
-  running += 1;
+interface Waiter {
+  grant: () => void;
 }
 
+let running = 0;
+const waiters: Waiter[] = [];
+
+/**
+ * 并发闸:拿到名额返回 true;在 `timeoutMs` 内排不上就放弃(返回 false)并把自己
+ * 从队列摘掉 —— 计时必须覆盖**排队**这一段:四个挂死的原生任务会一直占着名额,
+ * 若只在拿到名额之后才起计时,排队者就永远等不到超时,IPC 会无限挂起。
+ */
+async function acquireSlot(timeoutMs: number): Promise<boolean> {
+  if (running < MAX_CONCURRENT) {
+    running += 1;
+    return true;
+  }
+  return new Promise<boolean>((resolve) => {
+    const waiter: Waiter = { grant: () => undefined };
+    const timer = setTimeout(() => {
+      const idx = waiters.indexOf(waiter);
+      if (idx >= 0) waiters.splice(idx, 1);
+      resolve(false);
+    }, timeoutMs);
+    waiter.grant = () => {
+      clearTimeout(timer);
+      // 名额由 releaseSlot 直接移交,running 不动(见下面的原子移交)。
+      resolve(true);
+    };
+    waiters.push(waiter);
+  });
+}
+
+/**
+ * 有人排队时把名额**原子移交**给它:先 `running -= 1` 再唤醒的话,两者之间隔着一个
+ * 微任务,这期间新来的请求会看到空位直接启动,加上随后恢复的排队者就超过
+ * MAX_CONCURRENT 了。只有队列真的空了才把计数减回去。
+ */
 function releaseSlot(): void {
-  running -= 1;
   const next = waiters.shift();
-  if (next) next();
+  if (next) {
+    next.grant();
+    return;
+  }
+  running -= 1;
 }
 
 function cacheGet(key: string): string | null | undefined {
@@ -78,17 +106,23 @@ function cacheGet(key: string): string | null | undefined {
 }
 
 function cacheSet(key: string, value: string | null): void {
-  if (cache.size >= CACHE_LIMIT) {
+  // 覆盖已有 key 不会让 size 增长,此时淘汰最旧条目纯属误伤;delete + set 同时把
+  // 这条刷成"最近使用"。
+  const existed = cache.delete(key);
+  if (!existed && cache.size >= CACHE_LIMIT) {
     const oldest = cache.keys().next();
     if (!oldest.done) cache.delete(oldest.value);
   }
   cache.set(key, value);
 }
 
-/** 仅供测试:清空缓存与在飞表,避免用例之间互相污染。 */
+/** 仅供测试:清空缓存、在飞表与并发闸,避免用例之间互相污染。 */
 export function __clearFileThumbnailCacheForTest(): void {
   cache.clear();
   inFlight.clear();
+  // 上个用例可能留下未 settle 的原生任务,不清零会让后续用例被错误限流甚至死等。
+  running = 0;
+  waiters.length = 0;
 }
 
 export interface FileThumbnailParams {
@@ -98,11 +132,23 @@ export interface FileThumbnailParams {
   size: number;
 }
 
+export interface FileThumbnailResult {
+  /** PNG dataURL;这份文件出不了图(损坏 / 系统不支持 / 超时)时为 null。 */
+  dataUrl: string | null;
+  /**
+   * 复核那一刻的**当前**字节数。附件卡上的「类型 · 大小」原本是拖入时的快照,
+   * 文件在托盘期间被改写后就会跟实际发送的内容对不上;这里顺路把新值带回去。
+   */
+  byteSize: number;
+}
+
 /**
- * 返回 PNG dataURL;拿不到缩略图(路径越界 / 文件不存在 / 系统不支持该类型 /
- * 超时)一律返回 null,由调用方回落到自绘图标。
+ * 取系统缩略图。路径越界 / 不是文件 / 取不到 stat 时返回 null(整体不可用);
+ * 文件在、但出不了图时返回 `{ dataUrl: null, byteSize }`,由调用方回落自绘图标。
  */
-export async function readFileThumbnail(params: FileThumbnailParams): Promise<string | null> {
+export async function readFileThumbnail(
+  params: FileThumbnailParams,
+): Promise<FileThumbnailResult | null> {
   const absPath = typeof params?.path === 'string' ? params.path : '';
   const size = Number(params?.size);
   if (!absPath || !path.isAbsolute(absPath)) return null;
@@ -133,15 +179,22 @@ export async function readFileThumbnail(params: FileThumbnailParams): Promise<st
   // mtime + size 进 key:文件被改写后不会拿到旧缩略图。key 用 realPath,不同软链
   // 指向同一份文件时天然共享一条缓存。
   const key = `${realPath}::${stat.mtimeMs}::${stat.size}::${Math.round(size)}`;
+  const byteSize = stat.size;
   const cached = cacheGet(key);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) return { dataUrl: cached, byteSize };
 
   // 同一份文件被多张卡同时请求(拖入一批 / 会话切回重挂载)时只做一次原生调用。
   const pending = inFlight.get(key);
   if (pending) return pending;
 
-  const task = (async () => {
-    await acquireSlot();
+  const task = (async (): Promise<FileThumbnailResult> => {
+    // 排队这一段也算进超时:四个挂死的原生任务会一直占着名额,排不上就直接回落。
+    const gotSlot = await acquireSlot(TIMEOUT_MS);
+    if (!gotSlot) {
+      inFlight.delete(key);
+      log.debug('thumbnail slot wait timed out', { ext: path.extname(realPath) });
+      return { dataUrl: null, byteSize };
+    }
     const native = nativeImage.createThumbnailFromPath(realPath, {
       width: Math.round(size),
       height: Math.round(size),
@@ -175,11 +228,11 @@ export async function readFileThumbnail(params: FileThumbnailParams): Promise<st
           timer = setTimeout(() => reject(new Error('thumbnail timeout')), TIMEOUT_MS);
         }),
       ]);
-      return !image || image.isEmpty() ? null : image.toDataURL();
+      return { dataUrl: !image || image.isEmpty() ? null : image.toDataURL(), byteSize };
     } catch {
-      // 超时或原生失败:本次 IPC 回 null 让卡片先回落图标。task 会以 null 停在
+      // 超时或原生失败:本次 IPC 回 null 让卡片先回落图标。task 会带着 null 停在
       // inFlight 里直到原生 settle —— 期间同一文件的重挂载请求复用它,不会再点火。
-      return null;
+      return { dataUrl: null, byteSize };
     } finally {
       if (timer) clearTimeout(timer);
     }

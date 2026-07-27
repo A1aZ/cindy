@@ -44,7 +44,7 @@ describe('Attachment thumbnail — non-image file card (attachment-file-card)', 
     const card = fileCardBlock();
     expect(card).toContain('{file.name}');
     // 缩略区交给 AttachmentTypeThumb(PDF 首页预览 / 类型图标),不再是扩展名方块。
-    expect(card).toContain('<AttachmentTypeThumb file={file} />');
+    expect(card).toContain('<AttachmentTypeThumb file={file} onByteSize={setLiveByteSize} />');
     expect(chatInput).toMatch(
       /import\s+\{\s*AttachmentTypeThumb\s*\}\s+from\s+'\.\/AttachmentTypeThumb'/,
     );
@@ -53,9 +53,11 @@ describe('Attachment thumbnail — non-image file card (attachment-file-card)', 
   it('副行给出「类型 · 大小」,大小复用 TextLightbox 的 formatBytes', () => {
     const block = thumbnailItemBlock();
     expect(block).toContain('{metaLine}');
-    // metaLine 由扩展名 + formatBytes(file.size) 组成,size 缺失时只留类型。
-    expect(block).toMatch(/const metaLine = \[[\s\S]*formatBytes\(file\.size\)[\s\S]*\]/);
-    expect(block).toMatch(/file\.size > 0 \? formatBytes\(file\.size\) : null/);
+    // metaLine 由扩展名 + formatBytes(当前大小)组成,size 缺失时只留类型。
+    expect(block).toMatch(/const metaLine = \[[\s\S]*formatBytes\(shownSize\)[\s\S]*\]/);
+    expect(block).toMatch(/shownSize > 0 \? formatBytes\(shownSize\) : null/);
+    // 显示的大小优先用复核回来的当前值,file.size 只是拖入那一刻的快照。
+    expect(block).toMatch(/const shownSize = liveByteSize \?\? file\.size/);
     // formatBytes 走 TextLightbox 的具名导出,不要在这里重造一份。
     expect(chatInput).toMatch(
       /import\s+\{\s*formatBytes,\s*TextLightbox\s*\}\s+from\s+'@\/components\/chat\/TextLightbox'/,

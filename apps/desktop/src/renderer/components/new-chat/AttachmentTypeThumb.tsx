@@ -14,7 +14,7 @@
  * 失败、既无 url 也无 base64 的图片才会落到这个组件。
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import type { AttachedFile, FileCategory } from '@/lib/fileTypes';
 import { createLogger } from '@/lib/logger';
@@ -152,42 +152,44 @@ export function pickIconKind(ext: string, category: FileCategory): IconKind {
 function FileGlyph({ kind }: { kind: IconKind }) {
   const accent = KIND_ACCENT[kind];
   const label = KIND_LABEL[kind];
+  // viewBox 32 渲染成 32px(1:1),角标文字 10 个单位即屏幕 10px —— DESIGN.md §3
+  // 的下限(Micro Label 10–13px)。此前 26px 渲染 + 7.5 单位只有约 6px,越界了。
   return (
-    <svg width="26" height="26" viewBox="0 0 32 32" fill="none" aria-hidden focusable="false">
+    <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden focusable="false">
       {/* 纸张本体 + 折角 */}
       <path
-        d="M7 3.5h11.2L26 11.3V28a1.5 1.5 0 0 1-1.5 1.5h-17A1.5 1.5 0 0 1 6 28V5a1.5 1.5 0 0 1 1-1.5Z"
+        d="M6.5 2.5h11.2L25.5 10.3V27a1.5 1.5 0 0 1-1.5 1.5H6.5A1.5 1.5 0 0 1 5 27V4a1.5 1.5 0 0 1 1.5-1.5Z"
         fill="var(--surface-elevated)"
         stroke="var(--text-placeholder)"
         strokeWidth="1.4"
         strokeLinejoin="round"
       />
       <path
-        d="M18 3.6V10a1.5 1.5 0 0 0 1.5 1.5h6.2"
+        d="M17.5 2.6V9a1.5 1.5 0 0 0 1.5 1.5h6.2"
         stroke="var(--text-placeholder)"
         strokeWidth="1.4"
         strokeLinejoin="round"
       />
       {/* 正文示意线:没有角标的中性类型靠它表达「这是文档」 */}
       <path
-        d="M10.5 15.5h11M10.5 19h11M10.5 22.5h6.5"
+        d="M9 14h13M9 17.5h13M9 21h7.5"
         stroke="var(--text-placeholder)"
         strokeWidth="1.4"
         strokeLinecap="round"
-        opacity={accent ? 0.45 : 0.9}
+        opacity={accent ? 0.35 : 0.9}
       />
-      {/* 类型角标 */}
+      {/* 类型角标:容纳 10px 标签,所以铺到底边整条 */}
       {accent && label ? (
         <>
-          <rect x="9" y="18.5" width="19" height="11" rx="2.5" fill={accent} />
+          <rect x="3" y="18.5" width="26" height="13.5" rx="3" fill={accent} />
           {/* 字重 500 封顶:DESIGN.md §3「Weight restraint — 只有 400 与 500,No bold」。 */}
           <text
-            x="18.5"
-            y="26.4"
+            x="16"
+            y="28.6"
             textAnchor="middle"
-            fontSize="7.5"
+            fontSize="10"
             fontWeight="500"
-            letterSpacing="0.2"
+            letterSpacing="0.3"
             fill="var(--file-badge-fg)"
           >
             {label}
@@ -200,11 +202,24 @@ function FileGlyph({ kind }: { kind: IconKind }) {
 
 // ── 组件 ─────────────────────────────────────────────────────────────────
 
-export function AttachmentTypeThumb({ file }: { file: AttachedFile }) {
+export function AttachmentTypeThumb({
+  file,
+  onByteSize,
+}: {
+  file: AttachedFile;
+  /**
+   * 复核缩略图时顺带带回的**当前**字节数。`file.size` 是拖入那一刻的快照,文件在
+   * 托盘期间被改写后就会跟真正发出去的内容对不上,卡片的「类型 · 大小」用这个刷新。
+   */
+  onByteSize?: (bytes: number) => void;
+}) {
   const filePath = file.path && !file.path.startsWith('clipboard://') ? file.path : null;
   const [thumb, setThumb] = useState<Thumb | null>(() =>
     filePath ? (thumbCache.get(filePath) ?? null) : null,
   );
+  // 走 ref:回调换引用不该触发重新取图(effect 只认 filePath)。
+  const onByteSizeRef = useRef(onByteSize);
+  onByteSizeRef.current = onByteSize;
 
   useEffect(() => {
     if (!filePath) {
@@ -218,18 +233,22 @@ export function AttachmentTypeThumb({ file }: { file: AttachedFile }) {
     let cancelled = false;
     void (async () => {
       try {
-        const dataUrl = await window.electronAPI.getFileThumbnail({
+        const result = await window.electronAPI.getFileThumbnail({
           path: filePath,
           size: THUMB_PX * 2,
         });
         if (cancelled) return;
-        if (!dataUrl) {
+        if (result) onByteSizeRef.current?.(result.byteSize);
+        if (!result?.dataUrl) {
           // 现在拿不到图:清掉可能过期的缓存,回落自绘图标。
           thumbCache.delete(filePath);
           setThumb(null);
           return;
         }
-        const next: Thumb = { url: dataUrl, isIcon: await looksLikeIconBitmap(dataUrl) };
+        const next: Thumb = {
+          url: result.dataUrl,
+          isIcon: await looksLikeIconBitmap(result.dataUrl),
+        };
         rememberThumb(filePath, next);
         if (!cancelled) setThumb(next);
       } catch (err) {

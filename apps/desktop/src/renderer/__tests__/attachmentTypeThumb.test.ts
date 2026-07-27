@@ -78,6 +78,19 @@ describe('AttachmentTypeThumb — 缩略图取用契约', () => {
     expect(src).toMatch(/if \(!cancelled\) setThumb\(next\)/);
   });
 
+  it('复核时把当前字节数回传给卡片(file.size 只是拖入那一刻的快照)', () => {
+    expect(src).toMatch(/onByteSize\?: \(bytes: number\) => void/);
+    expect(src).toMatch(/if \(result\) onByteSizeRef\.current\?\.\(result\.byteSize\)/);
+    // 回调走 ref:换引用不该触发重新取图。
+    expect(src).toMatch(/const onByteSizeRef = useRef\(onByteSize\)/);
+  });
+
+  it('角标标签渲染尺寸不低于 10px(DESIGN.md §3 Micro Label 下限)', () => {
+    // viewBox 32 + width 32 → 1:1,fontSize 10 即屏幕 10px。
+    expect(src).toMatch(/<svg width="32" height="32" viewBox="0 0 32 32"/);
+    expect(src).toMatch(/fontSize="10"/);
+  });
+
   it('图标型缩略图不裁切也不描边,内容型才裁切填满并描边', () => {
     // dmg / zip 这类系统只给类型图标:图标四周本来就是透明的,再套一圈边框
     // 等于在图标外面画个空方框(2026-07-27 Dash 指出)。

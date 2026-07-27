@@ -6040,10 +6040,14 @@ function ThumbnailItem({
   // base64 的图片同样落到文件卡分支。
   const isImageThumb = file.category === 'image' && Boolean(file.url || file.base64);
   // 副行是「类型 · 大小」;无扩展名(Makefile 之类)或 size 缺失时按存在的部分给。
+  // file.size 是拖入那一刻的快照:文件在托盘期间被改写后,发出去的是新内容,卡片
+  // 却还报旧字节数。缩略图复核时 main 会把当前 stat 大小一并带回,这里优先用它。
   const extLabel = file.ext.replace('.', '').toUpperCase();
+  const [liveByteSize, setLiveByteSize] = useState<number | null>(null);
+  const shownSize = liveByteSize ?? file.size;
   const metaLine = [
     extLabel || null,
-    Number.isFinite(file.size) && file.size > 0 ? formatBytes(file.size) : null,
+    Number.isFinite(shownSize) && shownSize > 0 ? formatBytes(shownSize) : null,
   ]
     .filter(Boolean)
     .join(' · ');
@@ -6097,7 +6101,7 @@ function ThumbnailItem({
               className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg"
               style={{ backgroundColor: 'var(--surface-elevated)' }}
             >
-              <AttachmentTypeThumb file={file} />
+              <AttachmentTypeThumb file={file} onByteSize={setLiveByteSize} />
             </span>
             <span className="flex min-w-0 flex-col gap-0.5">
               <span className="truncate text-xs" style={{ color: 'var(--text-primary)' }}>

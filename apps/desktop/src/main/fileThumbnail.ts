@@ -195,10 +195,30 @@ export async function readFileThumbnail(
       log.debug('thumbnail slot wait timed out', { ext: path.extname(realPath) });
       return { dataUrl: null, byteSize };
     }
-    const native = nativeImage.createThumbnailFromPath(realPath, {
-      width: Math.round(size),
-      height: Math.round(size),
-    });
+    let native: Promise<Electron.NativeImage>;
+    try {
+      native = nativeImage.createThumbnailFromPath(realPath, {
+        width: Math.round(size),
+        height: Math.round(size),
+      });
+    } catch (err) {
+      // 同步抛:Linux 上根本没有这个 API(Electron 只在 macOS / Windows 实现,而本仓
+      // 有 deb 打包目标),异常会在下面的 finally 装上之前就掀桌 —— 那样名额和
+      // inFlight 会永久泄漏,前四个附件就把闸门占死。这里补齐清理再回落。
+      releaseSlot();
+      inFlight.delete(key);
+      cacheSet(key, null);
+      log.debug('thumbnail api unavailable', { error: String(err) });
+      return { dataUrl: null, byteSize };
+    }
+
+    // 一张 NativeImage 只编码一次:成功路径上 race 与 native.then 都要拿 dataURL,
+    // 各编一次等于白白多做一遍 PNG 编码 + 字符串分配(一次拖入多个附件时会放大)。
+    let encoded: string | null | undefined;
+    const encodeOnce = (image: Electron.NativeImage | null | undefined): string | null => {
+      if (encoded === undefined) encoded = !image || image.isEmpty() ? null : image.toDataURL();
+      return encoded;
+    };
 
     // 名额与 in-flight 都跟着**原生 promise**走,不跟着下面那个 race:超时只能让
     // IPC 早点返回,取消不了已经交给 QuickLook / Shell 的任务(Electron 无此 API)。
@@ -207,7 +227,7 @@ export async function readFileThumbnail(
     void native
       .then((image) => {
         // 迟到的结果照样有用:写进缓存,下次挂载直接命中,不用再跑一遍。
-        cacheSet(key, !image || image.isEmpty() ? null : image.toDataURL());
+        cacheSet(key, encodeOnce(image));
       })
       .catch((err) => {
         // 系统不支持该类型是常态(冷门扩展名),按 debug 记,不刷 warn。
@@ -228,7 +248,7 @@ export async function readFileThumbnail(
           timer = setTimeout(() => reject(new Error('thumbnail timeout')), TIMEOUT_MS);
         }),
       ]);
-      return { dataUrl: !image || image.isEmpty() ? null : image.toDataURL(), byteSize };
+      return { dataUrl: encodeOnce(image), byteSize };
     } catch {
       // 超时或原生失败:本次 IPC 回 null 让卡片先回落图标。task 会带着 null 停在
       // inFlight 里直到原生 settle —— 期间同一文件的重挂载请求复用它,不会再点火。

@@ -6045,10 +6045,11 @@ function ThumbnailItem({
   const extLabel = file.ext.replace('.', '').toUpperCase();
   const [liveByteSize, setLiveByteSize] = useState<number | null>(null);
   const shownSize = liveByteSize ?? file.size;
-  const metaLine = [
-    extLabel || null,
-    Number.isFinite(shownSize) && shownSize > 0 ? formatBytes(shownSize) : null,
-  ]
+  // 复核回来的 0 是**真实的当前大小**(文件被清空了),要照实显示 0 B;只有拿不到
+  // 复核值、且快照本身就是 0/缺失时才省掉大小段。
+  const hasSize =
+    Number.isFinite(shownSize) && (liveByteSize !== null ? shownSize >= 0 : shownSize > 0);
+  const metaLine = [extLabel || null, hasSize ? formatBytes(shownSize) : null]
     .filter(Boolean)
     .join(' · ');
 

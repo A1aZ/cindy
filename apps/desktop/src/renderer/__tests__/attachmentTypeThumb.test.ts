@@ -85,6 +85,13 @@ describe('AttachmentTypeThumb — 缩略图取用契约', () => {
     expect(src).toMatch(/const onByteSizeRef = useRef\(onByteSize\)/);
   });
 
+  it('窗口重新获得焦点时复核(附件挂在托盘期间文件可能被改写)', () => {
+    // 只在挂载时问一次的话,「切出去改完文件再切回来发送」这个场景拿到的还是旧内容。
+    expect(src).toMatch(/window\.addEventListener\('focus', onFocus\)/);
+    expect(src).toMatch(/window\.removeEventListener\('focus', onFocus\)/);
+    expect(src).toMatch(/\}, \[filePath, revalidateTick\]\)/);
+  });
+
   it('角标标签渲染尺寸不低于 10px(DESIGN.md §3 Micro Label 下限)', () => {
     // viewBox 32 + width 32 → 1:1,fontSize 10 即屏幕 10px。
     expect(src).toMatch(/<svg width="32" height="32" viewBox="0 0 32 32"/);

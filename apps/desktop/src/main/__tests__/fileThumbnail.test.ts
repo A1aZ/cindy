@@ -144,6 +144,28 @@ describe('readFileThumbnail — 兜底与缓存', () => {
     expect(createThumbnailFromPath).toHaveBeenCalledTimes(1);
   });
 
+  it('系统 API 同步抛(Linux 没有这个 API)时释放名额,不把闸门占死', async () => {
+    // 本仓有 deb 打包目标,而 createThumbnailFromPath 只在 macOS / Windows 实现:
+    // 同步异常若发生在 native.finally 装上之前,名额和 inFlight 会永久泄漏。
+    createThumbnailFromPath.mockImplementation(() => {
+      throw new TypeError('createThumbnailFromPath is not a function');
+    });
+    for (let i = 0; i < 6; i++) {
+      expect((await readFileThumbnail({ path: `/tmp/lin${i}.pdf`, size: 80 }))?.dataUrl).toBeNull();
+    }
+    // 6 次全部真正跑到了系统调用,说明前 4 次没把名额占死。
+    expect(createThumbnailFromPath).toHaveBeenCalledTimes(6);
+  });
+
+  it('一张图只编码一次 dataURL(race 与迟到回调共用结果)', async () => {
+    const toDataURL = vi.fn(() => 'data:image/png;base64,AAA');
+    createThumbnailFromPath.mockResolvedValue({ isEmpty: () => false, toDataURL });
+    await readFileThumbnail({ path: '/tmp/once.pdf', size: 80 });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(toDataURL).toHaveBeenCalledTimes(1);
+  });
+
   it('超时后名额不放行,直到原生任务真正 settle(否则闸门形同虚设)', async () => {
     // 超时只让 IPC 早返回,QuickLook/Shell 那边取消不了 —— 若此刻就放名额,
     // 系统卡住时每过一个超时周期就会再放一批新任务进去。

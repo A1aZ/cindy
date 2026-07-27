@@ -55,7 +55,9 @@ describe('Attachment thumbnail — non-image file card (attachment-file-card)', 
     expect(block).toContain('{metaLine}');
     // metaLine 由扩展名 + formatBytes(当前大小)组成,size 缺失时只留类型。
     expect(block).toMatch(/const metaLine = \[[\s\S]*formatBytes\(shownSize\)[\s\S]*\]/);
-    expect(block).toMatch(/shownSize > 0 \? formatBytes\(shownSize\) : null/);
+    expect(block).toMatch(/hasSize \? formatBytes\(shownSize\) : null/);
+    // 复核回来的 0 是真实的当前大小(文件被清空),要照实显示 0 B。
+    expect(block).toMatch(/liveByteSize !== null \? shownSize >= 0 : shownSize > 0/);
     // 显示的大小优先用复核回来的当前值,file.size 只是拖入那一刻的快照。
     expect(block).toMatch(/const shownSize = liveByteSize \?\? file\.size/);
     // formatBytes 走 TextLightbox 的具名导出,不要在这里重造一份。

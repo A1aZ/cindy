@@ -217,9 +217,20 @@ export function AttachmentTypeThumb({
   const [thumb, setThumb] = useState<Thumb | null>(() =>
     filePath ? (thumbCache.get(filePath) ?? null) : null,
   );
-  // 走 ref:回调换引用不该触发重新取图(effect 只认 filePath)。
+  // 走 ref:回调换引用不该触发重新取图(effect 只认 filePath / revalidateTick)。
   const onByteSizeRef = useRef(onByteSize);
   onByteSizeRef.current = onByteSize;
+
+  // 附件挂在托盘上的这段时间里,用户完全可能切出去把文件改了再切回来发送 —— 只在
+  // 挂载时复核一次的话,预览和大小描述的还是旧内容。窗口重新获得焦点就是这个场景
+  // 的自然触发点(切到编辑器改完再切回来),比轮询或 fs.watch 都便宜;main 侧按
+  // mtime+size 命中缓存,没改动的文件这一趟几乎不花钱。
+  const [revalidateTick, setRevalidateTick] = useState(0);
+  useEffect(() => {
+    const onFocus = () => setRevalidateTick((n) => n + 1);
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, []);
 
   useEffect(() => {
     if (!filePath) {
@@ -259,7 +270,7 @@ export function AttachmentTypeThumb({
     return () => {
       cancelled = true;
     };
-  }, [filePath]);
+  }, [filePath, revalidateTick]);
 
   if (thumb) {
     // 图标型(dmg / zip 这类系统只给类型图标的):按原样居中显示,不裁切也不描边

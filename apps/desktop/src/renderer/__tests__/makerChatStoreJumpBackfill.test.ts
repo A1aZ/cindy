@@ -958,6 +958,44 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(false);
   });
 
+  it('J5. 成员快速通道不写分页状态(它没有置过锁,游标 / hasMore / 锁都不归它)', async () => {
+    // review #676(codex P1):快速通道在置锁**之前**就返回 covered。它的提交若照常写
+    // oldestMessageId 并清 isLoadingMore,两个 around 响应同时落地时就会把另一次刚拿到的锁
+    // 清掉、并覆写它的游标(隧道 continuation 下尤其容易排在一起)。
+    const seeded = fullPageNewestFirst();
+    const inWindow = seeded[50];
+
+    // 建立连续窗口(无孤岛),记下分页状态。
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([inWindow]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce(seeded);
+    await makerChatStore.loadAroundMessageClientId(SID, inWindow.clientId, { radius: 60 });
+    const before = makerChatStore.getSnapshot(SID);
+    expect(before.historyWindowHasIsland).toBe(false);
+    const cursorBefore = before.oldestMessageId;
+    const hasMoreBefore = before.hasMoreMessages;
+    const callsBefore = vi.mocked(listMessagesFor).mock.calls.length;
+
+    // 再跳同一个(已在连续窗口里的)目标:走成员快速通道,一个请求都不发。
+    // around 这次带回一条**比当前游标更老**的邻居 —— 旧实现会据此把游标前移。
+    const olderNeighbour = serverMessage({
+      id: 'older-neighbour',
+      clientId: 'older-neighbour',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([olderNeighbour, inWindow]);
+    await makerChatStore.loadAroundMessageClientId(SID, inWindow.clientId, { radius: 60 });
+
+    // 没发新请求(快速通道)。
+    expect(vi.mocked(listMessagesFor).mock.calls).toHaveLength(callsBefore);
+    // 权威 merge 照做。
+    expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).toContain(
+      'older-neighbour',
+    );
+    // 关键:分页状态一律没碰 —— 它不归这次跳转。
+    expect(makerChatStore.getSnapshot(SID).oldestMessageId).toBe(cursorBefore);
+    expect(makerChatStore.getSnapshot(SID).hasMoreMessages).toBe(hasMoreBefore);
+  });
+
   it('J4. 分页锁一路持有到 around 提交,中途不出现"锁已开但窗口未提交"的空档', async () => {
     // review #676(codex P1):原先 backfill 在 finally 里放锁,于是"backfill 返回"与"调用方
     // 提交"之间多出一个 microtask 空档 —— 另一次跳转(隧道响应的 continuation 尤其容易排在

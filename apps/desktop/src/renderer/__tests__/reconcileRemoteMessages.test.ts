@@ -631,6 +631,90 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     expect(invoke).not.toHaveBeenCalledWith(DEVICE_ID, 'local-db:messages:list', expect.anything());
   });
 
+  it('远程会话:purge 重开后,purge 前那次未回来的对账仍被序号拦下', async () => {
+    // review #676(codex P1):发号器若按 sessionId 分表,LRU purge 后重开会从 1 重新发号,
+    // 于是"purge 前尚未回来的对账"手里的旧序号反而更大 —— 既过序号检查,又能借
+    // lastCommit.epoch 过代际检查,把陈旧行盖回重开后的窗口。全局单调发号器堵住这条。
+    //
+    // 为了让旧序号真的更大,purge 前跑两次对账:第一次落地(占掉 seq),第二次停在飞行中。
+    const s = sid();
+    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
+
+    const prePurgePending = deferred<Message[]>();
+    let calls = 0;
+    remoteListResolver = () => {
+      calls += 1;
+      // #1(purge 前,落地):与 seed 有重叠 → 只 merge。
+      if (calls === 1) {
+        return [
+          dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z'),
+          dbMessage(s, 'pre-1', 'pre purge row', '2026-06-16T00:00:00.000Z'),
+        ];
+      }
+      // #2(purge 前,停在飞行中):回来时是一段与任何窗口都无重叠的旧历史。
+      if (calls === 2) return prePurgePending.promise;
+      // 重开后的首拉 / 对账。
+      return [dbMessage(s, 'fresh', 'fresh row', '2026-06-25T00:00:00.000Z')];
+    };
+
+    makerChatStore.reconcileRemoteMessages(s);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toContain('client-pre-1');
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+
+    // LRU 驱逐 / 归档 → 同 ID 重开 → 重开后又跑一次对账并成功落地。
+    makerChatStore.purgeSession(s);
+    makerChatStore.ensureInitialMessages(s);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    makerChatStore.reconcileRemoteMessages(s);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toContain('client-fresh');
+
+    // purge 前那次(序号比重开后那次**大**,如果发号器按会话分表的话)现在才回来。
+    prePurgePending.resolve([
+      dbMessage(s, 'stale', 'stale authoritative', '2026-05-01T00:00:00.000Z'),
+    ]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    // 关键:陈旧行不得盖回重开后的窗口。
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).not.toContain(
+      'client-stale',
+    );
+  });
+
+  it('远程会话:权威重建保留了比权威窗口更新的晚到行时也记孤岛(推送有损)', async () => {
+    // review #676(codex P1):"比权威窗口最新一行还新"只证明它来得更晚。device-link 的实时
+    // 推送是 fire-and-forget 有损的,被控端连产多行时可能只送到最后一行 —— 中间那几行没到,
+    // 它与权威窗口之间就是个洞。所以只有落在权威时间范围**之内**才算连续。
+    const s = sid();
+    makerChatStore.initGlobalListeners();
+    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
+
+    const pendingList = deferred<Message[]>();
+    remoteListResolver = () => pendingList.promise;
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    // 分页期间只送到了"最后一行"(比权威窗口更新)。
+    remotePush?.({
+      deviceId: DEVICE_ID,
+      channel: 'local-db:messages:created',
+      payload: {
+        sessionId: s,
+        message: dbMessage(s, 'last-of-burst', 'only the last row arrived', '2026-06-30T00:00:00.000Z'),
+      },
+    });
+
+    pendingList.resolve([dbMessage(s, 'auth-1', 'authoritative', '2026-06-20T00:00:00.000Z')]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    const ids = makerChatStore.getSnapshot(s).messages.map((m) => m.clientId);
+    expect(ids).toContain('client-last-of-burst');
+    expect(ids).toContain('client-auth-1');
+    // 关键:范围外的晚到行按孤岛处理,下一次跳转会尝试补连续。
+    expect(makerChatStore.getSnapshot(s).historyWindowHasIsland).toBe(true);
+  });
+
   it('远程会话:purge 清掉对账次序簿,但旧代际的对账仍被代际守卫拦下', async () => {
     // review #676(copilot):次序簿按 sessionId 无界增长,应随 purge 清理。清理后 seq 检查
     // 会因为 committed 归零而放行,正确性由代际守卫兜住(purge 刚 bump 过 epoch,而 epoch

@@ -1160,21 +1160,26 @@ export function buildRenderItems(
         // 锚点用上一条调用的**结束**时间:max(它的 tool_use.createdAt, 它的
         // tool_result.createdAt)。用 start 会把"上一条工具跑了半小时以上、结果刚回来就
         // 紧接着下一次调用"的连续长任务误判成空洞、把段切碎(#676 review)。
-        const prevCall = pendingToolCalls[pendingToolCalls.length - 1];
-        if (prevCall) {
-          const prevStartMs = messageTs(prevCall);
-          const prevResultMs = pendingResultTsMap.get(prevCall.clientId) ?? null;
-          const prevEndMs =
-            prevStartMs === null
-              ? prevResultMs
-              : prevResultMs === null
-                ? prevStartMs
-                : Math.max(prevStartMs, prevResultMs);
+        // 锚点取**段内所有调用**的结束时间最大值,不能只看紧邻的上一条:并行工具可以乱序
+        // 完成(A 跑 40 分钟、B 紧随其后一分钟就回、C 在 A 结束后立刻发起),只比 B 的早结束
+        // 时间会把 C 误判成空洞、把一段连续工作切碎,段产物(tool_media)也跟着挪到错误的
+        // 边界上(#676 review codex P1)。groupWorkRuns 的 prevEndMs 早就是单调取 max 的,
+        // 这里补齐同一口径。
+        if (pendingToolCalls.length > 0) {
+          let segmentEndMs: number | null = null;
+          for (const call of pendingToolCalls) {
+            const callMs = messageTs(call);
+            if (callMs !== null) segmentEndMs = Math.max(segmentEndMs ?? callMs, callMs);
+            const resultMs = pendingResultTsMap.get(call.clientId);
+            if (resultMs !== undefined) {
+              segmentEndMs = Math.max(segmentEndMs ?? resultMs, resultMs);
+            }
+          }
           const currentCallMs = messageTs(msg);
           if (
-            prevEndMs !== null &&
+            segmentEndMs !== null &&
             currentCallMs !== null &&
-            currentCallMs - prevEndMs > HISTORY_GAP_SPLIT_MS
+            currentCallMs - segmentEndMs > HISTORY_GAP_SPLIT_MS
           ) {
             flushSegment();
           }

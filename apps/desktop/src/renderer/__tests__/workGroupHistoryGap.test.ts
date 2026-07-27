@@ -579,3 +579,36 @@ describe('历史窗口空洞 — 被空洞收尾的组的时长', () => {
     expect(durationMs).toBe(40 * 60 * 1000);
   });
 });
+
+// ── Scenario E:并行工具仍在跑时不切段(review #676 codex P1) ─────────────────
+
+describe('历史窗口空洞 — 并行工具乱序完成', () => {
+  it('E. 段内锚点取所有调用结束时间的最大值,不只看紧邻的上一条', () => {
+    // 真正的并行:A 从 10:00 一直跑到 10:41(下一次调用发起时它**还没结束**),B 紧随其后、
+    // 一分钟就回。C 在 10:40:30 发起 —— 只比紧邻的 B 的早结束时间(10:01:30)会得出 39 分钟、
+    // 误判成历史空洞,把一段连续工作切成两段,段产物(tool_media)也跟着挪到错误的边界上。
+    // 锚点必须取段内所有调用结束时间的最大值(与 groupWorkRuns 的 prevEndMs 同口径)。
+    const messages: ChatMessage[] = [
+      mkUser('u1', '2026-07-25T10:00:00.000Z', '并行跑两件事'),
+      mkTool('tA', '2026-07-25T10:00:00.000Z'),
+      mkTool('tB', '2026-07-25T10:00:30.000Z'),
+      mkResult('rB', 'tu-tB', '2026-07-25T10:01:30.000Z'),
+      // A 还在跑,这时又发起了 C。
+      mkTool('tC', '2026-07-25T10:40:30.000Z'),
+      mkResult('rA', 'tu-tA', '2026-07-25T10:41:00.000Z'),
+      mkResult('rC', 'tu-tC', '2026-07-25T10:41:30.000Z'),
+      mkAssistant('a1', '2026-07-25T10:42:00.000Z', '都好了。'),
+    ];
+
+    const { items } = buildRenderItems(messages);
+    const segments = items.filter((it) => it.type === 'tool_segment');
+    // 关键:仍是一整段,三次调用都在里面。
+    expect(segments).toHaveLength(1);
+    const seg = segments[0];
+    expect(seg.type === 'tool_segment' && seg.toolCalls.map((c) => c.clientId)).toEqual([
+      'tA',
+      'tB',
+      'tC',
+    ]);
+  });
+});

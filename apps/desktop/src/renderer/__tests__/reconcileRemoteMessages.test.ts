@@ -671,6 +671,58 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     ]);
   });
 
+  it('远程会话:权威重建没保留任何晚到的行时,孤岛标记清零', async () => {
+    // review #676(codex P1):这种情况下新窗口**完全**由本次从最新连续翻回来的页组成,按构造
+    // 没有孤岛。留着标记的代价不是"多做一次补齐":标记只由整窗重建清零,而窗口内的目标比重建
+    // 后的 oldestMessageId 更新、往上翻永远碰不到,于是每次窗口内搜索都白跑到预算上限。
+    const s = sid();
+    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
+    // 先制造孤岛状态。
+    remoteAround = [dbMessage(s, 'island', 'island row', '2026-06-01T00:00:00.000Z')];
+    await makerChatStore.loadAroundMessageClientId(s, 'client-island', { radius: 60 });
+    expect(makerChatStore.getSnapshot(s).historyWindowHasIsland).toBe(true);
+
+    // 无重叠对账 → 权威重建,期间没有任何 remote push 进来。
+    remoteListResolver = () => [
+      dbMessage(s, 'auth-1', 'authoritative', '2026-06-20T00:00:00.000Z'),
+    ];
+    makerChatStore.reconcileRemoteMessages(s);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual(['client-auth-1']);
+    // 关键:窗口是完整重建出来的,标记必须清零。
+    expect(makerChatStore.getSnapshot(s).historyWindowHasIsland).toBe(false);
+  });
+
+  it('远程会话:更早启动的对账重建后,更晚启动那次仍能落地', async () => {
+    // review #676(codex P1):两次对账都在代际 N 启动,先回来的那次走权威重建、把代际 bump 到
+    // N+1。后回来的那次序号更新、抓到的是更新的真相,却会被这个 bump 当成陈旧作废 —— 旧快照
+    // 赢,更新的远端行继续缺着。提交时一并记下当时的代际,后来者认得出"这个 bump 是对账造成的"。
+    const s = sid();
+    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
+
+    const laterPage = deferred<Message[]>();
+    let calls = 0;
+    remoteListResolver = () => {
+      calls += 1;
+      // 对账 #1(先启动、先回来):无重叠 → 权威重建 + bump 代际。
+      if (calls === 1) return [dbMessage(s, 'early', 'early rebuild', '2026-06-18T00:00:00.000Z')];
+      // 对账 #2(后启动):停在飞行中,回来时带更新的真相。
+      return laterPage.promise;
+    };
+
+    makerChatStore.reconcileRemoteMessages(s);
+    makerChatStore.reconcileRemoteMessages(s);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual(['client-early']);
+
+    laterPage.resolve([dbMessage(s, 'later', 'later truth', '2026-06-19T00:00:00.000Z')]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    // 关键:后启动那次的结果必须落地,不能被前一次自己的 bump 挡掉。
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toContain('client-later');
+  });
+
   it('远程会话:后启动的对账失败时,先启动那次的结果照样落地(不丢 heal)', async () => {
     // review #676(codex P1):把作废判据放在启动点等于"后启动者一定会赢",但它可能中途
     // reject(隧道抖动 / 被控端下线)。那时旧那次已经拉回了有效的缺失窗口,却因为序号被抢走

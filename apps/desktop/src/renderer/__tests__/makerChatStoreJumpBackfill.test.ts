@@ -410,6 +410,103 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     );
   });
 
+  it('M. 被间隔切开的孤立工具调用按 1:1 计入预算,不按 4:1 折算', async () => {
+    // review #676（codex）：buildRenderItems 现在会在相邻工具调用间隔超过阈值时切段，
+    // 所以被间隔隔开的单行调用各自就是一个 tool_segment；一次性 ceil(总数/4) 会低估到 1/4。
+    const target = serverMessage({
+      id: 'deep',
+      clientId: 'deep',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    let page = 0;
+    vi.mocked(listMessagesFor).mockImplementation(async () => {
+      const base = page++;
+      // 每页 100 条普通工具调用，但每条相隔 1 小时（> 30 分钟阈值）→ 各自一段。
+      return Array.from({ length: 100 }, (_, i) =>
+        serverMessage({
+          id: `far-${base}-${i}`,
+          clientId: `far-${base}-${i}`,
+          role: 'tool_use',
+          content: JSON.stringify({ toolName: 'Bash', input: { command: 'ls' } }),
+          createdAt: new Date(
+            Date.UTC(2026, 6, 25, 12, 0, 0) - (base * 100 + i) * 3600_000,
+          ).toISOString(),
+        }),
+      );
+    });
+
+    await makerChatStore.loadAroundMessageClientId(SID, 'deep', { radius: 60 });
+
+    // 100 段/页、600 预算 → 约 6 页；按 4:1 折算会翻到 24 页。
+    const calls = vi.mocked(listMessagesFor).mock.calls.length;
+    expect(calls).toBeGreaterThan(0);
+    expect(calls).toBeLessThanOrEqual(7);
+  });
+
+  it('N. 密集的连续工具调用仍按段折算,不因逐行计数而过早耗尽预算', async () => {
+    // 防误伤：同一段内密集调用（间隔远小于阈值）应按 TOOL_ROWS_PER_ITEM 折算。
+    const target = serverMessage({
+      id: 'dense',
+      clientId: 'dense',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    let page = 0;
+    vi.mocked(listMessagesFor).mockImplementation(async () => {
+      const base = page++;
+      // 每条相隔 10 秒 → 同段，100 行 ≈ 25 个 item。
+      return Array.from({ length: 100 }, (_, i) =>
+        serverMessage({
+          id: `dense-${base}-${i}`,
+          clientId: `dense-${base}-${i}`,
+          role: 'tool_use',
+          content: JSON.stringify({ toolName: 'Bash', input: { command: 'ls' } }),
+          createdAt: new Date(
+            Date.UTC(2026, 6, 25, 12, 0, 0) - (base * 100 + i) * 10_000,
+          ).toISOString(),
+        }),
+      );
+    });
+
+    await makerChatStore.loadAroundMessageClientId(SID, 'dense', { radius: 60 });
+
+    // 25 个 item/页、600 预算 → 该翻到 20+ 页（受 80 次请求上限约束），远多于 7。
+    expect(vi.mocked(listMessagesFor).mock.calls.length).toBeGreaterThan(10);
+  });
+
+  it('O. edit-last 截断与 /clear 都自己释放分页锁,不把翻页永久卡死', async () => {
+    // review #676（copilot + codex）：锁释放责任移给「重置路径」后，dropMessagesFromClientId
+    // 与 clearSessionAfterGuard 都 bump epoch 但没清锁，而被作废的 backfill 的 finally
+    // 会因 epoch 变化跳过清理 → isLoadingMore 永久 true，行首守卫让该会话再也翻不了页。
+    const seeded = fullPageNewestFirst();
+    const inWindow = seeded[50];
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([inWindow]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce(seeded);
+    await makerChatStore.loadAroundMessageClientId(SID, inWindow.clientId, { radius: 60 });
+
+    // 让补齐挂在飞行中（持锁），期间发生 edit-last 本地截断。
+    let releasePage: (rows: Message[]) => void = () => {};
+    vi.mocked(listMessagesFor).mockImplementationOnce(
+      () =>
+        new Promise<Message[]>((resolve) => {
+          releasePage = resolve;
+        }),
+    );
+    makerChatStore.loadOlderMessages(SID);
+    await flushMicrotasks();
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(true);
+
+    makerChatStore.dropMessagesFromClientId(SID, seeded[10].clientId);
+    // 截断路径自己就该把锁放掉，不能等被作废的请求代劳。
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(false);
+
+    releasePage([]);
+    await flushMicrotasks();
+    // 被作废的请求收尾时也不该把锁重新置上或误清新代际的锁。
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(false);
+  });
+
   it('F. 让位时不释放别人的分页锁', async () => {
     // review #676（codex）：让位后 fallback 若写 isLoadingMore:false，就把仍在飞行的
     // loadOlderMessages 的锁提前释放了，下一次滚动/跳转会从同一游标再开一个请求。

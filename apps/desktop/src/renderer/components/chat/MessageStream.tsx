@@ -35,6 +35,7 @@ import { findMessageTodoInsertions, isAgentPlanToolName } from '@cindy/maker-sha
 
 import type { AgentTaskUpdate, ChatMessage } from '@/hooks/useCCAgentChat';
 import { Spinner } from '@/components/ui/spinner';
+import { HISTORY_GAP_SPLIT_MS } from '@/lib/historyGap';
 import type { KnownLocalFileRef } from '@/lib/localPathResolver';
 import { createLogger } from '@/lib/logger';
 import { stopAllMedia } from '@/lib/mediaPlaybackBus';
@@ -95,28 +96,6 @@ export const RENDER_WINDOW_FIRST_PAINT_ITEMS = 30;
 const RENDER_WINDOW_GROWTH_ITEMS = 80;
 const RENDER_WINDOW_BOUNDARY_LOOKBACK_ITEMS = 24;
 
-/**
- * 历史窗口空洞的切分阈值。两个消费方:`buildRenderItems` 的 tool_segment 累积,
- * 以及 work-group pass 的 `groupWorkRuns`。
- *
- * 跳转到历史消息(makerChatStore 的 loadAroundMessage / loadAroundMessageClientId)
- * 补齐失败时,目标附近的窗口与已加载的尾部窗口之间会隔着大段没加载的历史。渲染层
- * 看到的是两段"相邻"item,中间的 user 行(唯一的 turn 边界)全部缺席,于是跨越空洞
- * 的所有动作被折成同一个「已工作 Xs」:实测出现过一条组吞掉 47 小时、40 条 user
- * 消息的会话,组时长(末项时间 − 首项时间)也跟着谎报成 2820m。
- *
- * 因此除 user 行外,相邻动作间隔超过本阈值也切断——工作组按此切组,tool_segment
- * 按此切段(空洞正好落在两次工具调用之间时,不切段的话段首尾时间差仍是假时长,
- * 而只看段首时间的切组守卫发现不了)。
- *
- * 30 分钟:单个 turn 内相邻动作(工具调用 / thinking)正常在秒级到分钟级,等长任务
- * 最多几十分钟;真被误切也只是多出一个折叠条,代价远小于把不相干的两段并成一条
- * 并谎报时长。
- *
- * 这是兜底层。空洞本身由 makerChatStore 的 backfillHistoryUntil 在跳转时补齐,
- * 只有补齐触顶或让位并发分页时才会走到这里。
- */
-const HISTORY_GAP_SPLIT_MS = 30 * 60 * 1000;
 
 function isEditableKeyboardTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;

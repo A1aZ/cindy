@@ -24,6 +24,7 @@
 import { redactSensitiveText } from '@cindy/maker-shared/error-redaction';
 import { applyCodexPlanSnapshotOnDone } from '@cindy/maker-shared/message-render';
 import { isAgentTaskToolName } from '@cindy/maker-shared/agent-task';
+import { HISTORY_GAP_SPLIT_MS } from './historyGap';
 import type { MessageRole, Message, MessageAutomationOrigin } from '@/lib/ccAgent.types';
 import type { AttachedFile, MentionedResource, SerializedAttachedFile } from '@/lib/fileTypes';
 import type {
@@ -5308,6 +5309,10 @@ function dropMessagesFromClientId(sessionId: string, clientId: string): void {
       messages: s.messages.slice(0, idx),
       taskUpdates: new Map(),
       isStreaming: false,
+      // 同 reloadMessages / clearSessionAfterGuard:本地截断也是 epoch-reset 路径,
+      // 锁由它自己释放。上面已 bump epoch 作废 in-flight 请求,而它们的 finally 会
+      // 因 epoch 变化跳过清理(避免误解锁新代际),漏清就会让翻页永久卡住(#676 review)。
+      isLoadingMore: false,
     };
   });
 }
@@ -5656,21 +5661,48 @@ function toolNameOfRow(row: Message): string {
 }
 
 function estimateRenderItemCount(rows: Message[]): number {
-  let plainToolRows = 0;
   let oneToOneRows = 0;
+  // 普通工具行按"段"计,而不是先累加再一次性除:buildRenderItems 现在会在相邻工具调用
+  // 间隔超过 HISTORY_GAP_SPLIT_MS 时切段,所以被间隔隔开的孤立单行调用各自就是一个
+  // tool_segment(1:1)。一次性 ceil(总数 / 4) 会把这种历史低估到 1/4(#676 review)。
+  let plainToolSegments = 0;
+  let rowsInCurrentSegment = 0;
+  let lastPlainToolMs: number | null = null;
+
+  const startNewSegment = () => {
+    plainToolSegments++;
+    rowsInCurrentSegment = 1;
+  };
+
   for (const row of rows) {
+    if (row.role !== 'tool_use' && row.role !== 'tool_result') {
+      oneToOneRows++;
+      // 非工具行会 flushSegment,后续工具调用重新开段。
+      rowsInCurrentSegment = 0;
+      lastPlainToolMs = null;
+      continue;
+    }
     if (row.role === 'tool_use') {
       // 工具名在 content.toolName 里(与 mapServerMessages 同口径);拿不到就按普通
       // 工具折算,宁可低估这一行也不因解析失败放大预算。
       const toolName = toolNameOfRow(row);
-      if (isAgentTaskToolName(toolName) || toolName === 'Workflow') oneToOneRows++;
-      else plainToolRows++;
-      continue;
+      if (isAgentTaskToolName(toolName) || toolName === 'Workflow') {
+        // 独立 agent_task 卡,并且它也会 flushSegment。
+        oneToOneRows++;
+        rowsInCurrentSegment = 0;
+        lastPlainToolMs = null;
+        continue;
+      }
     }
-    if (row.role === 'tool_result') plainToolRows++;
-    else oneToOneRows++;
+    const parsed = Date.parse(row.createdAt ?? '');
+    const ms = Number.isFinite(parsed) ? parsed : null;
+    const gapped =
+      lastPlainToolMs === null || ms === null || Math.abs(ms - lastPlainToolMs) > HISTORY_GAP_SPLIT_MS;
+    if (gapped || rowsInCurrentSegment >= TOOL_ROWS_PER_ITEM) startNewSegment();
+    else rowsInCurrentSegment++;
+    if (ms !== null) lastPlainToolMs = ms;
   }
-  return oneToOneRows + Math.ceil(plainToolRows / TOOL_ROWS_PER_ITEM);
+  return oneToOneRows + plainToolSegments;
 }
 /**
  * 请求次数安全上限,与行预算分开计。
@@ -7025,6 +7057,11 @@ async function clearSessionAfterGuard(sessionId: string, clearedAt: string): Pro
       streamingClientId: null,
       streamingText: '',
       isStreaming: false,
+      // 分页锁归本次重置释放(与 reloadMessages / dropMessagesFromClientId 同规矩):
+      // 上面刚 bump epoch 作废了 in-flight 的翻页 / 跳转补齐,而被作废的请求不会(也不该)
+      // 代清这把锁 —— 它们分辨不出锁属于哪一代。漏清会让行首守卫把该会话的翻页永久
+      // 卡住(#676 review)。
+      isLoadingMore: false,
       error: null,
       errorReason: null,
       recoverableError: null,

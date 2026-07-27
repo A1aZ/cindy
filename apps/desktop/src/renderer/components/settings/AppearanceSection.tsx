@@ -50,6 +50,7 @@ const IMPORT_ERROR_KEYS: Record<string, string> = {
   NOT_A_FILE: 'settings.appearance.localThemes.importNotAFile',
   FILE_TOO_LARGE: 'settings.appearance.localThemes.importTooLarge',
   IMPORT_WRITE_ERROR: 'settings.appearance.localThemes.importWriteError',
+  IMPORT_INTERNAL_ERROR: 'settings.appearance.localThemes.importInternalError',
 };
 
 type ThemeOption = 'light' | 'dark' | 'system';

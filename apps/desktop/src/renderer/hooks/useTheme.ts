@@ -4,7 +4,6 @@ import { createElement, type ReactNode } from 'react';
 import {
   DEFAULT_FAMILY_ID,
   findFamilyByThemeId,
-  getFamily,
   resolveFamilyVariant,
   tryGetFamily,
 } from '../themes/families';
@@ -231,9 +230,15 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   // Invalidate memos that depend on family membership when local themes change.
   const [localThemeRev, bumpLocalThemeRev] = useReducer((n: number) => n + 1, 0);
   useEffect(() => onLocalThemesChange(() => {
+    // If the active family was removed, fall back before triggering render.
+    if (!tryGetFamily(familyId)) {
+      const fallback = DEFAULT_FAMILY_ID;
+      setFamilyIdState(fallback);
+      try { localStorage.setItem(FAMILY_KEY, fallback); } catch { /* ok */ }
+    }
     bumpLocalThemeRev();
     applyThemeClass(theme, true);
-  }), [theme]);
+  }), [theme, familyId]);
 
   const setTheme = useCallback((next: Theme) => {
     setThemeState(next);
@@ -321,7 +326,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   }, [familyId, theme, systemPrefersDark]);
 
   const fallbackFromType = useMemo<ThemeType | null>(() => {
-    const family = getFamily(familyId);
+    const family = tryGetFamily(familyId);
+    if (!family) return null;
     const isDarkRequested = theme === 'dark' || (theme === 'system' && systemPrefersDark);
     const requestedType: ThemeType = isDarkRequested ? 'dark' : 'light';
     return family[requestedType] === null ? requestedType : null;

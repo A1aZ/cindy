@@ -66,6 +66,10 @@ function usedFamilyKeys(): Set<string> {
       ? theme.id.slice(0, -LOCAL_THEME_SUFFIX.length)
       : theme.id;
     used.add(normalizedId);
+    // If the ID looks like `<slug>-light` or `<slug>-dark`, also reserve the
+    // base slug so paired imports don't generate colliding variant IDs.
+    const variantMatch = normalizedId.match(/^(.+)-(light|dark)$/);
+    if (variantMatch) used.add(variantMatch[1]);
     if (theme.family) {
       used.add(theme.family);
     }
@@ -140,19 +144,35 @@ async function rollbackWritten(written: ImportedThemeFileInternal[]): Promise<vo
   }
 }
 
+const MAX_DISPLAY_NAME_LENGTH = 100;
+
+function boundDisplayName(name: string): string {
+  const trimmed = name.trim();
+  if (trimmed.length <= MAX_DISPLAY_NAME_LENGTH) return trimmed;
+  return `${trimmed.slice(0, MAX_DISPLAY_NAME_LENGTH).trimEnd()}…`;
+}
+
 async function writeConverted(
   themes: ConvertedTheme[],
 ): Promise<{ written: ImportedThemeFileInternal[]; error?: string }> {
   const pair = themes.length > 1;
-  const familyKey = pickFamilyId(themeFamilyId(themes[0].name), usedFamilyKeys());
+  const used = usedFamilyKeys();
+  const familyKey = pickFamilyId(themeFamilyId(themes[0].name), used);
+  // For paired imports, also reserve the generated variant IDs.
+  if (pair) {
+    used.add(familyKey);
+    used.add(`${familyKey}-light`);
+    used.add(`${familyKey}-dark`);
+  }
   const written: ImportedThemeFileInternal[] = [];
   for (const theme of themes) {
     const baseId = pair ? `${familyKey}-${theme.type}` : familyKey;
+    const displayName = boundDisplayName(theme.name);
     const result = await writeLocalTheme({
       baseId,
       theme: {
         id: baseId,
-        name: theme.name,
+        name: displayName,
         type: theme.type,
         ...(pair ? { family: familyKey } : {}),
         colors: theme.colors,
@@ -165,7 +185,7 @@ async function writeConverted(
     written.push({
       path: result.path,
       id: result.finalId,
-      name: theme.name,
+      name: displayName,
       type: theme.type,
     });
   }

@@ -160,14 +160,15 @@ function scanCssRules(source: string, depth: number): CssRule[] {
         rules.push({ selector, body });
         // CSS nesting: `body { &.theme-dark { ... } }` — recurse into the
         // body so nested theme selectors are collected as separate rules.
-        // The parent rule's `collectCustomProps` strips nested blocks, so
-        // declarations from nested selectors won't contaminate the parent.
+        // Only emit children whose resolved selector passes selectorMode()
+        // as a root-level theme rule — prevents component-scoped descendants
+        // (`.theme-dark .modal { ... }`) from overriding global palette.
         if (depth === 0) {
           const nested = scanCssRules(body, depth + 1);
           for (const child of nested) {
-            // Resolve `&` against the parent selector for nested theme rules.
-            if (NESTED_THEME_SELECTOR_RE.test(child.selector)) {
-              const resolved = child.selector.replace(/&/g, selector);
+            if (!NESTED_THEME_SELECTOR_RE.test(child.selector)) continue;
+            const resolved = child.selector.replace(/&/g, selector);
+            if (selectorMode(resolved) !== null) {
               rules.push({ selector: resolved, body: child.body });
             }
           }
@@ -335,7 +336,15 @@ export function collectObsidianVars(source: string): ModeVars[] {
     );
   }
   const out: ModeVars[] = [];
-  const merge = (mode: VarMap): VarMap => new Map([...base, ...mode]);
+  // Merge base into mode, but base vars locked with !important take precedence.
+  const merge = (mode: VarMap): VarMap => {
+    const merged = new Map([...base, ...mode]);
+    for (const name of baseLocked) {
+      const baseVal = base.get(name);
+      if (baseVal !== undefined) merged.set(name, baseVal);
+    }
+    return merged;
+  };
   if (dark.size > 0) out.push({ type: 'dark', vars: merge(dark) });
   if (light.size > 0) out.push({ type: 'light', vars: merge(light) });
   // base-only fallback：只有根级声明且无显式模式块时，按背景亮度推断类型。

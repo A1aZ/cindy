@@ -13,7 +13,9 @@ import { describe, expect, it } from 'vitest';
 import {
   HIDDEN_ANIMATION_ATTR,
   installHiddenAnimationGate,
-  syncHiddenAttrToFrames,
+  isLoopingAnimation,
+  syncFrameAnimations,
+  type GateAnimation,
   type HiddenAnimationGateTarget,
 } from '../lib/hiddenAnimationGate';
 
@@ -153,73 +155,91 @@ describe('installHiddenAnimationGate', () => {
   });
 });
 
-describe('同源子文档（Ghost 卡片 iframe）传播', () => {
-  function makeFrame() {
-    const attrs = new Map<string, string>();
+describe('同源子文档（Ghost 卡片 iframe）动画同步', () => {
+  function makeAnim(iterations: number, playState = 'running') {
     return {
-      frame: {
-        contentDocument: {
-          documentElement: {
-            setAttribute: (n: string, v: string) => attrs.set(n, v),
-            removeAttribute: (n: string) => attrs.delete(n),
-          },
-        },
+      playState,
+      effect: { getTiming: () => ({ iterations }) },
+      paused: false,
+      pause() {
+        this.paused = true;
+        this.playState = 'paused';
       },
-      isFrozen: () => attrs.get('data-app-hidden') === 'true',
+      play() {
+        this.paused = false;
+        this.playState = 'running';
+      },
     };
   }
 
-  it('冻结与解冻都会传播到同源 iframe', () => {
-    const a = makeFrame();
-    const doc = {
-      querySelectorAll: () => [a.frame],
-    } as unknown as HiddenAnimationGateTarget['document'];
+  const docWith = (anims: unknown[]): HiddenAnimationGateTarget['document'] =>
+    ({
+      querySelectorAll: () => [{ contentDocument: { getAnimations: () => anims } }],
+    }) as unknown as HiddenAnimationGateTarget['document'];
 
-    syncHiddenAttrToFrames(doc, true);
-    expect(a.isFrozen()).toBe(true);
+  it('只暂停无限循环动画，有限动画照播（避免冻在中途帧、恢复时突兀）', () => {
+    const loop = makeAnim(Infinity);
+    const oneShot = makeAnim(1);
+    const paused = new Set<GateAnimation>();
 
-    syncHiddenAttrToFrames(doc, false);
-    expect(a.isFrozen()).toBe(false);
+    syncFrameAnimations(docWith([loop, oneShot]), true, paused);
+    expect(loop.paused).toBe(true);
+    expect(oneShot.paused).toBe(false);
+  });
+
+  it('恢复时只 play 本闸门暂停过的，不动意识自己 pause 的动画', () => {
+    const loop = makeAnim(Infinity);
+    const selfPaused = makeAnim(Infinity, 'paused');
+    const paused = new Set<GateAnimation>();
+
+    syncFrameAnimations(docWith([loop, selfPaused]), true, paused);
+    expect(loop.paused).toBe(true);
+    // 本来就是 paused 的不会被接管
+    expect(paused.has(selfPaused as unknown as GateAnimation)).toBe(false);
+
+    syncFrameAnimations(docWith([loop, selfPaused]), false, paused);
+    expect(loop.playState).toBe('running');
+    expect(selfPaused.playState).toBe('paused');
+    expect(paused.size).toBe(0);
   });
 
   it('跨源 iframe 读 contentDocument 抛错时跳过，不影响其它 frame', () => {
-    const ok = makeFrame();
+    const loop = makeAnim(Infinity);
     const crossOrigin = {
       get contentDocument(): never {
         throw new DOMException('cross-origin', 'SecurityError');
       },
     };
     const doc = {
-      querySelectorAll: () => [crossOrigin, ok.frame],
+      querySelectorAll: () => [crossOrigin, { contentDocument: { getAnimations: () => [loop] } }],
     } as unknown as HiddenAnimationGateTarget['document'];
 
-    expect(() => syncHiddenAttrToFrames(doc, true)).not.toThrow();
-    expect(ok.isFrozen()).toBe(true);
+    const paused = new Set<GateAnimation>();
+    expect(() => syncFrameAnimations(doc, true, paused)).not.toThrow();
+    expect(loop.paused).toBe(true);
   });
 
   it('宿主 document 没有 querySelectorAll 时安全跳过', () => {
     const doc = {} as unknown as HiddenAnimationGateTarget['document'];
-    expect(() => syncHiddenAttrToFrames(doc, true)).not.toThrow();
+    expect(() => syncFrameAnimations(doc, true, new Set())).not.toThrow();
   });
 
-  it('卡片 srcDoc 内置了隐藏态暂停规则（CSS 跨不进 iframe，必须由子文档自带）', () => {
+  it('isLoopingAnimation 只认 iterations === Infinity', () => {
+    expect(isLoopingAnimation({ effect: { getTiming: () => ({ iterations: Infinity }) } })).toBe(true);
+    expect(isLoopingAnimation({ effect: { getTiming: () => ({ iterations: 1 }) } })).toBe(false);
+    expect(isLoopingAnimation({})).toBe(false);
+  });
+
+  it('卡片 srcDoc 不再注通配暂停 CSS，改由 onLoad 精确暂停循环动画', () => {
     const src = readFileSync(
       fileURLToPath(new URL('../components/chat/GhostToolCard.tsx', import.meta.url)),
       'utf8',
     );
-    // 选择器要覆盖三种落点：html 自身、后代元素、后代的伪元素。
-    // 通配符不匹配伪元素，animation-play-state 也不继承，::before/::after 必须单列。
-    for (const part of [
-      "html[${HIDDEN_ANIMATION_ATTR}='true'],",
-      "html[${HIDDEN_ANIMATION_ATTR}='true'] *,",
-      "html[${HIDDEN_ANIMATION_ATTR}='true'] *::before,",
-      "html[${HIDDEN_ANIMATION_ATTR}='true'] *::after",
-    ]) {
-      expect(src).toContain(part);
-    }
-    expect(src).toContain('animation-play-state:paused!important');
-    // 新挂载的卡片要自己对齐一次：闸门遍历时它还不存在。
+    // 通配 CSS 会把有限动画一并冻住，必须已经移除。
+    expect(src).not.toContain('animation-play-state:paused!important');
+    // 新挂载的卡片自己对齐一次：闸门遍历时它还不存在。
     expect(src).toContain('document.documentElement.hasAttribute(HIDDEN_ANIMATION_ATTR)');
+    expect(src).toContain('isLoopingAnimation(anim)');
   });
 });
 

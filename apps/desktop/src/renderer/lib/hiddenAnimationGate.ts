@@ -31,9 +31,17 @@
  * 影响可见性)。此时表现为「不冻结」,即退回改动前的行为,不会误冻可见窗口。
  *
  * 只认可见性,不认 focus —— 副屏场景下窗口失焦但仍然可见,按失焦暂停会被用户直接
- * 看到。暂停语义由 CSS 侧的 `animation-play-state: paused` 承担(见 globals.css 的
- * `[data-app-hidden='true']` 段),这里只负责翻这一个属性:声明式覆盖,不遍历
- * `document.getAnimations()`,隐藏期间新挂载的动画也自动纳入。
+ * 看到。
+ *
+ * ## 两种暂停手段
+ *
+ * - **宿主文档**:翻 `documentElement` 上的 `data-app-hidden`,由 globals.css 的冻结
+ *   清单接管。声明式覆盖,隐藏期间新挂载的元素自动纳入;清单只列 infinite 装饰动画,
+ *   一次性动画刻意不进,免得被冻在中途帧。
+ * - **Ghost 卡片 srcDoc iframe**:CSS 跨不进子文档,且卡内动画是意识现画的、没有可枚举
+ *   清单,只能走 Web Animations API 逐个判 `iterations === Infinity`(见
+ *   `syncFrameAnimations`)。用 JS 而非往 srcDoc 注一条通配 CSS,正是为了保住上面那条
+ *   「不冻一次性动画」的性质。
  */
 /**
  * 冻结标记的属性名。单一来源:CSS(globals.css 的冻结清单、GhostToolCard 注入进 srcDoc 的
@@ -47,6 +55,13 @@ const HIDDEN_ATTR = HIDDEN_ANIMATION_ATTR;
 /** 存放 disposer 的槽位:本模块自有的私有约定,不在 lib.dom 的 Window 声明里。 */
 interface GateWindow {
   __xdtHiddenAnimationGateDisposer?: () => void;
+  /**
+   * 最近一次 main 广播的窗口隐藏态。必须跨重装存活:preload 的 createIpcFanOut 不会向
+   * 新订阅者回放最后一次 payload,而 HMR 重装时页面没有重新加载、也就不会触发 main 侧
+   * did-finish-load 的补发。不缓存的话,「窗口已隐藏 + 节流关闭(visibilityState 恒为
+   * visible)」时重装,闸门会一直等不到下一次 hide/minimize 而静默失效。
+   */
+  __xdtHiddenAnimationGateLastHidden?: boolean;
   /** main 侧窗口可见性广播;非 Electron 宿主(单测 / 纯浏览器)下缺省。 */
   electronAPI?: {
     onWindowHiddenChange?: (callback: (hidden: boolean) => void) => () => void;
@@ -64,37 +79,70 @@ export interface HiddenAnimationGateTarget {
   window: GateWindow;
 }
 
-/** iframe 的最小面:只需要拿到同源子文档的 documentElement。 */
+/** 子文档里一个动画的最小面(Web Animations API 的子集)。 */
+export interface GateAnimation {
+  readonly playState?: string;
+  effect?: { getTiming?: () => { iterations?: number } } | null;
+  pause?: () => void;
+  play?: () => void;
+}
+
+/** iframe 的最小面:同源子文档 + 其动画清单。 */
 export interface HiddenAnimationGateFrame {
   readonly contentDocument?: {
-    readonly documentElement?: Pick<Element, 'setAttribute' | 'removeAttribute'> | null;
+    getAnimations?: () => ArrayLike<GateAnimation>;
   } | null;
 }
 
+/** 供 GhostToolCard 在卡片 onLoad 时复用:判断一个动画是不是无限循环。 */
+export function isLoopingAnimation(anim: GateAnimation): boolean {
+  return anim.effect?.getTiming?.()?.iterations === Infinity;
+}
+
 /**
- * 把冻结标记同步进同源子文档。Ghost 卡片是 `sandbox="allow-same-origin"` 的 srcDoc
- * iframe,CSS 选择器跨不进去,而 cardSanitizer 明确保留意识作者写的动画(含 infinite),
- * 所以隐藏期间这些卡片会继续吃渲染。srcDoc 里已内置
- * `html[data-app-hidden='true'] *{animation-play-state:paused}`,这里只负责翻属性。
+ * 把冻结同步进同源子文档(Ghost 卡片的 srcDoc iframe)。
  *
- * 跨源 iframe 读 contentDocument 会抛,逐个吞掉即可 —— 跨源子文档本就不归我们管。
+ * Ghost 卡片是 `sandbox="allow-same-origin"` 的 srcDoc iframe,CSS 选择器跨不进去,而
+ * cardSanitizer 明确保留意识作者写的动画,所以隐藏期间这些卡片会继续吃渲染。
+ *
+ * 这里走 Web Animations API 而不是像宿主侧那样注一条 CSS 规则:CSS 选不出「只暂停无限
+ * 循环动画」——`animation-play-state` 加在通配选择器上会把有限动画一并冻住,而
+ * cardSanitizer 是允许 `animation:f 1s` 这类有限声明的。被冻在中途的有限动画会在窗口
+ * 恢复可见时突然从暂停帧接着播,正是宿主侧 allowlist 刻意规避的那种突兀感。
+ * `getAnimations()` 能逐个读 timing,精确只停 `iterations === Infinity` 的。
+ *
+ * 恢复时只 play 本闸门暂停过的那些,不动意识自己 pause 的动画 —— 调用方传入 paused 集合
+ * 承担这份记账。跨源 iframe 读 contentDocument 会抛,逐个吞掉即可。
  */
-export function syncHiddenAttrToFrames(
+export function syncFrameAnimations(
   doc: HiddenAnimationGateTarget['document'],
   hidden: boolean,
+  pausedByGate: Set<GateAnimation>,
 ): void {
   const frames = doc.querySelectorAll?.('iframe');
   if (!frames) return;
   for (let i = 0; i < frames.length; i++) {
     try {
-      const root = frames[i]?.contentDocument?.documentElement;
-      if (!root) continue;
-      if (hidden) root.setAttribute(HIDDEN_ATTR, 'true');
-      else root.removeAttribute(HIDDEN_ATTR);
+      const anims = frames[i]?.contentDocument?.getAnimations?.();
+      if (!anims) continue;
+      for (let j = 0; j < anims.length; j++) {
+        const anim = anims[j];
+        if (!anim) continue;
+        if (hidden) {
+          if (anim.playState !== 'running' || !isLoopingAnimation(anim)) continue;
+          anim.pause?.();
+          pausedByGate.add(anim);
+        } else if (pausedByGate.has(anim)) {
+          anim.play?.();
+          pausedByGate.delete(anim);
+        }
+      }
     } catch {
       // 跨源 / 已卸载的 frame:跳过
     }
   }
+  // 解冻时清账:已卸载的卡片对应的动画对象不会再出现在任何 frame 里。
+  if (!hidden) pausedByGate.clear();
 }
 
 function defaultTarget(): HiddenAnimationGateTarget {
@@ -107,9 +155,12 @@ export function installHiddenAnimationGate(
   // 重复安装时先拆旧的,避免同一 document 上挂多份监听。
   target.window.__xdtHiddenAnimationGateDisposer?.();
 
-  // main 广播的窗口态。启动时按「未隐藏」起步:窗口刚建出来就是可见的,
-  // 真隐藏了会立刻收到一条广播纠正。
-  let windowHidden = false;
+  // main 广播的窗口态。优先复用上一轮缓存(HMR 重装时窗口可能已经是隐藏的,
+  // 见 GateWindow 上该字段的注释);首次安装则按「未隐藏」起步 —— 窗口刚建出来就是
+  // 可见的,真隐藏了 main 侧 did-finish-load 的补发会立刻纠正。
+  let windowHidden = target.window.__xdtHiddenAnimationGateLastHidden ?? false;
+  // 本闸门暂停过的子文档动画,解冻时只 play 这些,不动意识自己 pause 的。
+  const pausedFrameAnimations = new Set<GateAnimation>();
 
   const apply = (): void => {
     const hidden = windowHidden || target.document.visibilityState === 'hidden';
@@ -120,7 +171,7 @@ export function installHiddenAnimationGate(
     }
     // 已挂载的同源子文档跟着翻。隐藏期间新建的 iframe 由挂载方(GhostToolCard 的
     // onLoad)自己对齐一次,那条路径不经过这里。
-    syncHiddenAttrToFrames(target.document, hidden);
+    syncFrameAnimations(target.document, hidden, pausedFrameAnimations);
   };
 
   // 安装时先对齐一次:窗口可能已经处于隐藏态(例如启动后立刻切走)。
@@ -129,6 +180,7 @@ export function installHiddenAnimationGate(
 
   const unsubscribeWindowHidden = target.window.electronAPI?.onWindowHiddenChange?.((hidden) => {
     windowHidden = hidden;
+    target.window.__xdtHiddenAnimationGateLastHidden = hidden;
     apply();
   });
 
@@ -137,7 +189,7 @@ export function installHiddenAnimationGate(
     unsubscribeWindowHidden?.();
     // 拆闸门时一律恢复动画,不把页面(及子文档)留在冻结态。
     target.document.documentElement.removeAttribute(HIDDEN_ATTR);
-    syncHiddenAttrToFrames(target.document, false);
+    syncFrameAnimations(target.document, false, pausedFrameAnimations);
     if (target.window.__xdtHiddenAnimationGateDisposer === dispose) {
       delete target.window.__xdtHiddenAnimationGateDisposer;
     }

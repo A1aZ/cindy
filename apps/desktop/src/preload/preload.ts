@@ -2744,7 +2744,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onFullscreenChange: fanOutFullscreenChange,
   getFullscreenState: (): Promise<boolean> => ipcRenderer.invoke('get-fullscreen-state'),
 
-  // 窗口对用户不可见(最小化 / hide)——装饰动画闸门用
+  // 窗口是否对用户不可见(最小化 / hide)。装饰动画闸门订阅它来决定要不要冻结常驻动画;
+  // 关掉 backgroundThrottling 的窗口里 document.visibilityState 不可信,只能靠这条。
   onWindowHiddenChange: fanOutWindowHiddenChange,
 
   // ── Release notes (per-version, fetched from CDN by main) ──

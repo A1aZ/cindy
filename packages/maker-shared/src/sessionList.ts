@@ -221,7 +221,9 @@ export function summarizeRemoteSessionOverview(
     if (session.status === 'active') active += 1;
     if (session.status === 'archived') archived += 1;
     if (session.pinnedAt) pinned += 1;
-    if (session.workingDir) projects.add(session.workingDir);
+    // 与 buildProjectSections 同一把折叠口径:worktree 会话算进它所属主仓,
+    // 否则概览里的项目数会比列表里的项目分区多出来。
+    if (session.workingDir) projects.add(collapseWorktreeDirForGrouping(session.workingDir));
     if ((pendingInteractionIndex.get(session.id) ?? 0) > 0) waiting += 1;
     if (isAutomationSession(session, scheduleIndex)) automation += 1;
   }

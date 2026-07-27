@@ -543,6 +543,21 @@ describe('sessionList', () => {
     expect(remoteSessionOverviewCopy(overview)).toBe('1 个置顶 · 3 个项目 · 1 个自动化执行中');
   });
 
+  it('counts a worktree session under its base repo so the overview matches the project sections', () => {
+    const sessions = [
+      session('main-repo', { workingDir: '/repo/app' }),
+      session('worktree', {
+        workingDir: '/repo/app/.cindy-worktrees/serene-lovelace',
+        worktreePath: '/repo/app/.cindy-worktrees/serene-lovelace',
+      }),
+    ];
+    const overview = summarizeRemoteSessionOverview(sessions, new Map(), new Map());
+    const sections = buildRemoteSessionSections(sessions, new Date('2026-01-01T00:10:00.000Z').getTime());
+
+    expect(overview.projectCount).toBe(1);
+    expect(sections.filter((section) => section.key.startsWith('project:'))).toHaveLength(1);
+  });
+
   it('builds mobile list context for search and grouped automation rows', () => {
     const now = new Date('2026-01-01T00:10:00.000Z').getTime();
     const activeSessions = [

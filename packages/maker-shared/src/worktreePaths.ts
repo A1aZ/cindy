@@ -4,8 +4,11 @@
  * 会话跑在 worktree 里时,它的 workingDir 是 `<base repo>/<容器目录>/<worktree 名>`。
  * worktree 名是随机生成的(见 desktop `worktree/nameGenerator.ts`,docker 风格
  * `形容词-名人`),所以**按 workingDir 原值分组会把每个 worktree 变成一个独立「项目」,
- * 标题显示成 `serene-lovelace` 这类随机名**。项目分组、项目归属判断与项目设置读写都
- * 必须先折叠到 base repo;需要真正读写文件的路径仍用会话 workingDir 原值。
+ * 标题显示成 `serene-lovelace` 这类随机名**。项目分组与项目归属判断必须先折叠到 base
+ * repo(`groupingWorktreeBaseRepo`,认全部四种容器目录);项目设置读写只对 Cindy 托管
+ * worktree 折叠(`managedWorktreeBaseRepo`)——用户自建的 `.worktrees` /
+ * `.claude/worktrees` 可能刻意带独立的 `.claude/settings.json`,继承 base repo 会覆盖
+ * 掉它的意图。需要真正读写文件的路径一律用会话 workingDir 原值。
  *
  * 本模块只做纯字符串折叠(不碰文件系统),同时接受 `/` 与 `\` 分隔符,并保留输入的
  * 分隔符风格 —— 手机端的项目标题 / 副标题直接展示折叠结果,不能被改写成另一种风格。

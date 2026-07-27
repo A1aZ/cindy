@@ -379,6 +379,11 @@ describe('sendToSession ordering', () => {
       'ipcMain.handle(MAKER_INVOKE.SET_MODEL',
       'ipcMain.handle(MAKER_INVOKE.SET_EFFORT',
     );
+    const directSendSwitchBlock = extractBetween(
+      source,
+      'pendingAgentSwitchApplyHolder = (sessionId, signal) =>',
+      'ipcMain.handle(MAKER_INVOKE.MARK_ORCA_ROLE',
+    );
 
     expect(setModelBlock).toContain(
       'return withSendToSessionLock(sessionId, async () => {',
@@ -387,6 +392,14 @@ describe('sendToSession ordering', () => {
       setModelBlock,
       'return withSendToSessionLock(sessionId, async () => {',
       'applySetModelThenCancelAgentSwitchIntent(',
+    );
+    expect(directSendSwitchBlock).toContain(
+      'withSendToSessionLock(sessionId, () =>',
+    );
+    expectOrder(
+      directSendSwitchBlock,
+      'withSendToSessionLock(sessionId, () =>',
+      'applyPendingAgentSwitchIfIdle(',
     );
   });
 

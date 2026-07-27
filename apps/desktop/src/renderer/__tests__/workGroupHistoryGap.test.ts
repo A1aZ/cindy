@@ -211,6 +211,33 @@ describe('历史窗口空洞 — 长任务不被误判', () => {
   });
 });
 
+// ── Scenario A5:单次长工具的段末要算 tool_result(review #676 codex) ──────────
+
+describe('历史窗口空洞 — 单次长工具', () => {
+  it('A5. 一次跑 40 分钟的工具,其后的最终答复不被判成空洞', () => {
+    // 段里只有一个 tool_use,它的 createdAt 是「开始执行」的时刻。若拿它当段末,
+    // 40 分钟后到达的 result 与紧随其后的最终答复都会落在阈值外 → 误判空洞。
+    const messages: ChatMessage[] = [
+      mkUser('u1', '2026-07-25T10:00:00.000Z', '跑一下全量构建'),
+      mkAssistant('a0', '2026-07-25T10:00:05.000Z', '我起一次全量构建。'),
+      mkTool('t1', '2026-07-25T10:00:10.000Z'),
+      // result 40 分钟后才回来。
+      mkResult('r1', 'tu-t1', '2026-07-25T10:40:10.000Z'),
+      // 紧接着给最终答复 —— 与「段末(result)」只差 20 秒。
+      mkAssistant('a1', '2026-07-25T10:40:30.000Z', '构建通过。'),
+    ];
+
+    const { items } = buildRenderItems(messages);
+    const grouped = groupWorkRuns(items, false);
+    const groups = workGroups(grouped);
+
+    // 一个工作组：进度文字 + 那次长工具都在组内，最终答复留在组外。
+    expect(groups).toHaveLength(1);
+    expect(groupContains(groups[0], 'a0')).toBe(true);
+    expect(groupContains(groups[0], 't1')).toBe(true);
+  });
+});
+
 // ── Scenario B:正常连续 turn 不被误切 ───────────────────────────────────────
 
 describe('历史窗口空洞 — 正常 turn 不受影响', () => {

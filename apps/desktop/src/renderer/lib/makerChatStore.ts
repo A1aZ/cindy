@@ -5285,6 +5285,11 @@ function removeMessageByClientId(sessionId: string, clientId: string): void {
  */
 function dropMessagesFromClientId(sessionId: string, clientId: string): void {
   discardPendingTextDelta(sessionId);
+  // 代际递增:这是与 reloadMessages / _purgeSession 并列的第三条"切片被本地截断"
+  // 路径,同样必须作废 in-flight 的分页 / 跳转补齐。漏 bump 的后果是它们把 rewind
+  // 刚软删掉的行当作有效响应 merge 回渲染层(#676 review)。clientId 不在列表时
+  // 也照 bump:代价只是让 in-flight 分页重新取一次,比漏作废安全。
+  bumpMessagesEpoch(sessionId);
   setState(sessionId, (s) => {
     const idx = s.messages.findIndex((m) => m.clientId === clientId);
     if (idx < 0) return s;
@@ -5609,8 +5614,18 @@ function loadOlderMessages(sessionId: string): void {
  * 会话长度超过本上限时跳转仍会退回 around 窗口(窗口不连续),由渲染层的
  * HISTORY_GAP_SPLIT_MS 守卫兜底,不会再折出跨空洞的假组。
  */
-const JUMP_BACKFILL_MAX_PAGES = 20;
+const JUMP_BACKFILL_MAX_ROWS = 2000;
 const JUMP_BACKFILL_PAGE_SIZE = 100;
+/**
+ * 请求次数安全上限,与行预算分开计。
+ *
+ * 不能只按"页数"计预算:device-link 会话的 messages:list 结果超过 relay 帧上限时,
+ * sliceRemoteMessageWindowForChannel 只返回一个很短的前缀并打 remoteRowsTrimmed。
+ * 那种分片每次只带回几行,若和整页共用同一个计数器,远程会话会在远未取到 2000 行时
+ * 就耗尽预算、退回不连续的 around 窗口(#676 review)。所以行数走
+ * JUMP_BACKFILL_MAX_ROWS,请求次数只作为防死循环的独立兜底。
+ */
+const JUMP_BACKFILL_MAX_REQUESTS = 80;
 
 /**
  * 补齐结果。每一态对应一套 fallback 处置,合并任意两态都会踩坑:
@@ -5664,8 +5679,13 @@ async function backfillHistoryUntil(
   if (getOrCreateState(sessionId).isLoadingMore) return 'busy';
 
   setState(sessionId, (s) => ({ ...s, isLoadingMore: true }));
+  let rowsFetched = 0;
   try {
-    for (let page = 0; page < JUMP_BACKFILL_MAX_PAGES; page++) {
+    for (
+      let request = 0;
+      request < JUMP_BACKFILL_MAX_REQUESTS && rowsFetched < JUMP_BACKFILL_MAX_ROWS;
+      request++
+    ) {
       const state = getOrCreateState(sessionId);
       // 首页(窗口为空)不带游标 —— messages:list 默认返回最新一页。
       const opts: { limit: number; before?: string } = { limit: JUMP_BACKFILL_PAGE_SIZE };
@@ -5679,6 +5699,7 @@ async function backfillHistoryUntil(
         return 'exhausted';
       }
 
+      rowsFetched += rows.length;
       const mapped = mapServerMessages(rows);
       const oldestRow = oldestMessageRow(rows, 'newest-first');
       const hasMore = serverMessagePageHasMore(rows, JUMP_BACKFILL_PAGE_SIZE);
@@ -5701,7 +5722,7 @@ async function backfillHistoryUntil(
       // hasMoreMessages 此刻已确证为 false,调用方不得再改回 true。
       if (!hasMore) return 'exhausted';
     }
-    // 超页数上限:上方还有历史,hasMore 保持原值让用户继续向上翻。
+    // 触到行预算或请求上限:上方还有历史,hasMore 保持原值让用户继续向上翻。
     return 'unavailable';
   } catch (err) {
     log.warn('backfillHistoryUntil failed', { sessionId, err: String(err) });
@@ -5736,9 +5757,23 @@ function commitAroundWindow(
 ): void {
   setState(sessionId, (s) => {
     const messages = mergeMessages(mapped, s.messages, {}, 'oldest-first');
-    // 已补齐:窗口是"某点 → 最新"的连续区间,游标与 hasMore 归 backfill 维护,
-    // 不能再被 around 窗口的边界回退。
-    if (outcome === 'covered') return { ...s, messages };
+    // 已补齐:hasMore 归 backfill 维护,不能被 around 窗口的边界回退。
+    // 但游标要取两侧更早的那个:radius 决定的 around 窗口可能含比"命中那一页的
+    // oldestMessageId"更早的行(目标落在该页靠旧的一侧时),只 merge 不推进游标会让
+    // 下一次向上翻页重复已加载区间、连翻几次都看不到新内容(#676 review)。
+    // oldestServerMessageIdForWindow 本身就是"取更早者"的语义。
+    if (outcome === 'covered') {
+      return {
+        ...s,
+        messages,
+        oldestMessageId: oldestServerMessageIdForWindow(
+          rows,
+          s.messages,
+          s.oldestMessageId,
+          'oldest-first',
+        ),
+      };
+    }
     const oldestMessageId = oldestServerMessageIdForWindow(
       rows,
       s.messages,

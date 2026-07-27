@@ -271,6 +271,51 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     expect(makerChatStore.getSnapshot(SID).hasMoreMessages).toBe(true);
   });
 
+  it('H. covered 时游标推进到 around 窗口更早的边界', async () => {
+    // review #676（codex）：目标落在命中页靠旧的一侧时，radius 决定的 around 窗口会
+    // 含比该页 oldestMessageId 更早的行。只 merge 不推进游标，下一次向上翻页就会从
+    // 已加载区间重新拉，连翻几次都看不到新内容。
+    const page = fullPageNewestFirst();
+    const target = page[page.length - 1]; // 该页最老的一行
+    // around 窗口除目标外，还带回一条更早的行（radius 往旧侧多取的部分）。
+    const olderNeighbour = serverMessage({
+      id: 'older-neighbour',
+      clientId: 'older-neighbour',
+      createdAt: '2026-07-25T09:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([olderNeighbour, target]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce(page);
+
+    await makerChatStore.loadAroundMessageClientId(SID, target.clientId, { radius: 60 });
+
+    // 游标必须指向 around 带回的那条更早的行，而不是命中页的最老行。
+    expect(makerChatStore.getSnapshot(SID).oldestMessageId).toBe('older-neighbour');
+  });
+
+  it('I. edit-last 本地截断也作废 in-flight 补齐(dropMessagesFromClientId bump epoch)', async () => {
+    // review #676（codex）：editLastUserMessage 走 dropMessagesFromClientId 做本地软删，
+    // 该路径原先不 bump epoch，于是 pre-rewind 的分页响应会被当成有效结果，把刚被
+    // 软删的行 merge 回渲染层。
+    const target = serverMessage({
+      id: 'rewound',
+      clientId: 'rewound',
+      createdAt: '2026-07-20T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    vi.mocked(listMessagesFor).mockImplementationOnce(async () => {
+      const page = fullPageNewestFirst();
+      // 补齐 await 期间发生 edit-last 截断。
+      makerChatStore.dropMessagesFromClientId(SID, page[page.length - 1].clientId);
+      return page;
+    });
+
+    const result = await makerChatStore.loadAroundMessageClientId(SID, 'rewound', { radius: 60 });
+
+    // 跳转整体作废：不返回目标，也不把 around 行 merge 回窗口。
+    expect(result).toBeNull();
+    expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).not.toContain('rewound');
+  });
+
   it('F. 让位时不释放别人的分页锁', async () => {
     // review #676（codex）：让位后 fallback 若写 isLoadingMore:false，就把仍在飞行的
     // loadOlderMessages 的锁提前释放了，下一次滚动/跳转会从同一游标再开一个请求。

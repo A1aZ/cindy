@@ -287,6 +287,11 @@ type ToolSegmentRenderItem = {
    *  隐藏、没进 resultMap 的空结果)。行级 running/done 状态判定用 —
    *  只看 resultMap 会让 orca 通信工具永久显示 running。 */
   settledIds: Set<string>;
+  /** tool_use clientId → 对应 tool_result 的 createdAt(ms)。
+   *  段的结束时间必须算进 result:单次工具跑了半小时以上时,只看最后一个 tool_use 的
+   *  createdAt 会把段的结束时间大幅低估,让紧随其后的最终答复被空洞守卫误判(#676
+   *  review)。resultMap 只留正文,时间戳单独存这里。 */
+  resultTsMap: Map<string, number>;
 };
 type AgentTaskRenderItem = {
   type: 'agent_task';
@@ -802,12 +807,17 @@ export function buildRenderItems(
   // Plan/task rendering and regular tool result pairing both need a stable
   // lookup by vendor toolUseId. Adjacency remains a fallback in Pass 2.
   const resultByToolUseId = new Map<string, string>();
+  // toolUseId → tool_result.createdAt(ms)。段的结束时间要算进 result,见
+  // ToolSegmentRenderItem.resultTsMap 的注释。
+  const resultTsByToolUseId = new Map<string, number>();
   // 卡槽③:已被某条 tool_result 认领的卡(xdt_card_id)——活卡锚定要跳过
   // 这些,防止 settle 后同一张卡又被别的 in-flight 行启发式抢走。
   const settledCardIds = new Set<string>();
   for (const m of messages) {
     if (m.role === 'tool_result' && typeof m.toolUseId === 'string' && m.toolUseId.length > 0) {
       resultByToolUseId.set(m.toolUseId, m.content);
+      const resultMs = Date.parse(m.createdAt ?? '');
+      if (Number.isFinite(resultMs)) resultTsByToolUseId.set(m.toolUseId, resultMs);
       const cardId = extractGhostCardId(m.content);
       if (cardId) settledCardIds.add(cardId);
     }
@@ -865,6 +875,8 @@ export function buildRenderItems(
   const singleResultMap = new Map<string, string>();
   let pendingToolCalls: ChatMessage[] = [];
   let pendingResultMap = new Map<string, string>();
+  // 段内 tool_use clientId → tool_result.createdAt(ms),见 resultTsMap 注释。
+  let pendingResultTsMap = new Map<string, number>();
   // 状态判定专用:tool_result 已到达的 tool_use(含被 shouldHideToolResult
   // 隐藏、不进 resultMap 的空结果)。
   let pendingSettledIds = new Set<string>();
@@ -896,6 +908,7 @@ export function buildRenderItems(
       key: segmentKey,
       toolCalls: pendingToolCalls,
       resultMap: pendingResultMap,
+      resultTsMap: pendingResultTsMap,
       settledIds: pendingSettledIds,
     });
     if (pendingSegmentMedia.length > 0) {
@@ -920,6 +933,7 @@ export function buildRenderItems(
     for (const gc of pendingSegmentGhostCards) items.push(gc);
     pendingToolCalls = [];
     pendingResultMap = new Map<string, string>();
+    pendingResultTsMap = new Map<string, number>();
     pendingSettledIds = new Set<string>();
     pendingSegmentMedia = [];
     pendingSegmentGhostCards = [];
@@ -1143,6 +1157,10 @@ export function buildRenderItems(
         if (mainResult !== undefined) {
           // result 到了就算 settled,即便内容被隐藏不进 resultMap。
           pendingSettledIds.add(msg.clientId);
+          // 时间戳与内容是否被隐藏无关:段的结束时间靠它算(见 resultTsMap 注释)。
+          const resultTs =
+            typeof msg.toolUseId === 'string' ? resultTsByToolUseId.get(msg.toolUseId) : undefined;
+          if (resultTs !== undefined) pendingResultTsMap.set(msg.clientId, resultTs);
         }
         if (mainResult !== undefined && !shouldHideToolResult(toolName, mainResult)) {
           pendingResultMap.set(msg.clientId, mainResult);
@@ -1161,6 +1179,14 @@ export function buildRenderItems(
       while (j < messages.length && messages[j].role === 'tool_result') {
         if (!hideRowForCard) {
           pendingSettledIds.add(msg.clientId);
+          // adjacency 配对同样要留下 result 时间戳(段结束时间用)。
+          const adjacencyTs = Date.parse(messages[j].createdAt ?? '');
+          if (Number.isFinite(adjacencyTs)) {
+            const known = pendingResultTsMap.get(msg.clientId);
+            if (known === undefined || adjacencyTs > known) {
+              pendingResultTsMap.set(msg.clientId, adjacencyTs);
+            }
+          }
           // 主路径没命中时才用 adjacency 覆盖(后到 last wins,保留原行为)
           const result = messages[j].content;
           if (!pendingResultMap.has(msg.clientId) && !shouldHideToolResult(toolName, result)) {
@@ -1344,12 +1370,21 @@ function renderItemStartMs(item: RenderItem): number | null {
  * 阈值内,所以不会被切段)。若拿下一条 item 的 start 去跟这个段的 **start** 比,
  * 差值就等于整段耗时,会把正常长任务误判成历史空洞:该切的没切,不该切的切了,
  * 前面的 assistant 进度文字被留在工作组外,时长也退化成段兜底而非最终答复。
+ *
+ * 段的结束必须算进 tool_result:单次工具跑半小时以上时(典型:一次长构建 / CI),
+ * 段里只有一个 tool_use,它的 createdAt 是"开始执行"的时刻,拿它当段末会把结束
+ * 时间低估整个执行时长,紧随其后的最终答复照样被误判成空洞。
  */
 function renderItemEndMs(item: RenderItem): number | null {
   if (item.type === 'tool_segment') {
-    const calls = item.toolCalls;
-    const ms = Date.parse(calls[calls.length - 1]?.createdAt ?? '');
-    return Number.isFinite(ms) ? ms : renderItemStartMs(item);
+    let latest = Number.NEGATIVE_INFINITY;
+    for (const call of item.toolCalls) {
+      const callMs = Date.parse(call.createdAt ?? '');
+      if (Number.isFinite(callMs)) latest = Math.max(latest, callMs);
+      const resultMs = item.resultTsMap.get(call.clientId);
+      if (resultMs !== undefined) latest = Math.max(latest, resultMs);
+    }
+    return Number.isFinite(latest) ? latest : renderItemStartMs(item);
   }
   if (item.type === 'agent_task') {
     const ms = Date.parse(

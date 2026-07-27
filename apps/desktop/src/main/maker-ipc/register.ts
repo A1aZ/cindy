@@ -1549,7 +1549,10 @@ const pendingFailedTurnAssistantPersistId = new Map<string, string>();
 const sendToSessionLocks = new Map<string, Promise<unknown>>();
 
 /** Serialize every local send / runtime release / route mutation for one session. */
-function withSendToSessionLock<T>(sessionId: string, task: () => Promise<T>): Promise<T> {
+export function withSendToSessionLock<T>(
+  sessionId: string,
+  task: () => Promise<T>,
+): Promise<T> {
   const previous = sendToSessionLocks.get(sessionId);
   const waitPrevious = previous ? previous.catch(() => undefined) : Promise.resolve();
   const run = waitPrevious.then(task);

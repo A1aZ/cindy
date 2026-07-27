@@ -35,6 +35,9 @@ const mocks = vi.hoisted(() => ({
   getSessionProvider: vi.fn(() => null),
   setSessionProvider: vi.fn(),
   isSessionInTurn: vi.fn(() => false),
+  withSendToSessionLock: vi.fn(
+    async (_sessionId: string, task: () => Promise<unknown>) => task(),
+  ),
   // 禁止回落 cwd:TEMP 是 Windows 独有变量,macOS 上回落 cwd 会让传递 import 的
   // 写盘副作用落进仓库工作区(见 authAdaptersImportPurity.test.ts 记录的事故)。
   userDataDir: process.env.TMPDIR ?? process.env.TEMP ?? '/tmp',
@@ -90,6 +93,7 @@ vi.mock('../../../maker-ipc/register', () => ({
   clearPendingCredentialSwitchForSession: mocks.clearPendingCredentialSwitchForSession,
   wakeSessionInputAfterCredentialSwitch: mocks.wakeSessionInputAfterCredentialSwitch,
   getPendingCredentialSwitchTarget: mocks.getPendingCredentialSwitchTarget,
+  withSendToSessionLock: mocks.withSendToSessionLock,
 }));
 vi.mock('../pendingInteractions', () => ({
   resolvePending: vi.fn(() => false),
@@ -581,6 +585,31 @@ describe('model:pick 持久化失败', () => {
       },
     } as unknown as IMCardActionEvent);
   }
+
+  it('在共享 session 锁内提交 DB 与运行态选择', async () => {
+    const lockGate = deferred();
+    mocks.withSendToSessionLock.mockImplementationOnce(async (_sessionId, task) => {
+      await lockGate.promise;
+      return task();
+    });
+    const im = makeIm();
+
+    const pickPromise = pressModelPick(im);
+    await vi.waitFor(() => {
+      expect(mocks.withSendToSessionLock).toHaveBeenCalledWith(
+        'sess-target',
+        expect.any(Function),
+      );
+    });
+    expect(mocks.updateModelEffort).not.toHaveBeenCalled();
+    expect(mocks.applyRuntimeSetModelChange).not.toHaveBeenCalled();
+
+    lockGate.resolve();
+    await pickPromise;
+
+    expect(mocks.updateModelEffort).toHaveBeenCalled();
+    expect(mocks.applyRuntimeSetModelChange).toHaveBeenCalled();
+  });
 
   it('busy provider 切换注入 pending hooks，并在 deferred 时不 mid-turn 改 effort', async () => {
     const live = {

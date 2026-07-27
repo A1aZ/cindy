@@ -33,6 +33,7 @@ import {
   getPendingCredentialSwitchTarget,
   isSessionInTurn,
   registerPendingCredentialSwitchForSession,
+  withSendToSessionLock,
   wakeSessionInputAfterCredentialSwitch,
 } from '../../maker-ipc/register';
 import { applyRuntimeSetModelChange } from '../../maker-ipc/runtimeSetModel';
@@ -259,94 +260,99 @@ export function createCardActionHandler(
       }
     };
 
-    let previousRoute: Awaited<ReturnType<typeof readModelRouteSnapshot>> = null;
-    try {
-      previousRoute = await readModelRouteSnapshot(sessionId);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log.warn(`model:pick route snapshot failed (non-fatal): ${msg}`);
-    }
-    const previousProviderId = previousRoute?.providerId ?? getSessionProvider(sessionId);
-    const restorePersistentRoute = async (reason: string): Promise<void> => {
-      if (!previousRoute) return;
+    const failureReason = await withSendToSessionLock(sessionId, async () => {
+      let previousRoute: Awaited<ReturnType<typeof readModelRouteSnapshot>> = null;
       try {
-        await updateModelEffort(
-          sessionId,
-          previousRoute.model,
-          previousRoute.effort,
-          providerId !== undefined ? previousRoute.providerId : undefined,
-        );
-      } catch (restoreErr) {
-        const restoreMsg = restoreErr instanceof Error ? restoreErr.message : String(restoreErr);
-        log.warn(`model:pick DB rollback after ${reason} failed (non-fatal): ${restoreMsg}`);
+        previousRoute = await readModelRouteSnapshot(sessionId);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.warn(`model:pick route snapshot failed (non-fatal): ${msg}`);
       }
-    };
-    const rollbackRuntimeChange = async (reason: string): Promise<void> => {
-      if (providerId !== undefined) {
-        setSessionProvider(sessionId, previousProviderId);
-      }
-      const liveForRollback = turnRunner.getMakerSessionById(sessionId);
-      if (!liveForRollback || !previousRoute) return;
-      try {
-        await liveForRollback.setModel(previousRoute.model);
-        if (effort) {
-          await liveForRollback.setEffort(previousRoute.effort);
+      const previousProviderId = previousRoute?.providerId ?? getSessionProvider(sessionId);
+      const restorePersistentRoute = async (reason: string): Promise<void> => {
+        if (!previousRoute) return;
+        try {
+          await updateModelEffort(
+            sessionId,
+            previousRoute.model,
+            previousRoute.effort,
+            providerId !== undefined ? previousRoute.providerId : undefined,
+          );
+        } catch (restoreErr) {
+          const restoreMsg = restoreErr instanceof Error ? restoreErr.message : String(restoreErr);
+          log.warn(`model:pick DB rollback after ${reason} failed (non-fatal): ${restoreMsg}`);
         }
-      } catch (rollbackErr) {
-        const rollbackMsg =
-          rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr);
-        log.warn(`model:pick live rollback after ${reason} failed (non-fatal): ${rollbackMsg}`);
+      };
+      const rollbackRuntimeChange = async (reason: string): Promise<void> => {
+        if (providerId !== undefined) {
+          setSessionProvider(sessionId, previousProviderId);
+        }
+        const liveForRollback = turnRunner.getMakerSessionById(sessionId);
+        if (!liveForRollback || !previousRoute) return;
+        try {
+          await liveForRollback.setModel(previousRoute.model);
+          if (effort) {
+            await liveForRollback.setEffort(previousRoute.effort);
+          }
+        } catch (rollbackErr) {
+          const rollbackMsg =
+            rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr);
+          log.warn(`model:pick live rollback after ${reason} failed (non-fatal): ${rollbackMsg}`);
+        }
+      };
+
+      // 持久化与运行态切换必须和 send / agent switch 共用 session 锁，保证后选覆盖先选。
+      try {
+        await updateModelEffort(sessionId, modelId, effort ?? 'high', providerId);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error(`model:pick DB update failed: ${msg}`);
+        return msg;
       }
-    };
 
-    // 先持久化,再做可能关闭 live session 的运行态切换;避免失败卡已经返回但 live session 被关掉。
-    try {
-      await updateModelEffort(sessionId, modelId, effort ?? 'high', providerId);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log.error(`model:pick DB update failed: ${msg}`);
-      await patchModelPickFailed(msg);
-      return;
-    }
+      try {
+        const runtimeChange = await applyRuntimeSetModelChange({
+          maker: getMaker(),
+          sessionId,
+          model: modelId,
+          providerId,
+          isSessionInTurn,
+          registerPendingCredentialSwitch: registerPendingCredentialSwitchForSession,
+          clearPendingCredentialSwitch: clearPendingCredentialSwitchForSession,
+          wakeSessionInputQueue: wakeSessionInputAfterCredentialSwitch,
+          getPendingCredentialSwitch: getPendingCredentialSwitchTarget,
+          logger: log,
+        });
 
-    try {
-      const runtimeChange = await applyRuntimeSetModelChange({
-        maker: getMaker(),
-        sessionId,
-        model: modelId,
-        providerId,
-        isSessionInTurn,
-        registerPendingCredentialSwitch: registerPendingCredentialSwitchForSession,
-        clearPendingCredentialSwitch: clearPendingCredentialSwitchForSession,
-        wakeSessionInputQueue: wakeSessionInputAfterCredentialSwitch,
-        getPendingCredentialSwitch: getPendingCredentialSwitchTarget,
-        logger: log,
-      });
+        const liveAfterModel = turnRunner.getMakerSessionById(sessionId);
+        if (runtimeChange.status !== 'deferred' && liveAfterModel && effort) {
+          try {
+            await liveAfterModel.setEffort(effort);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            log.warn(`model:pick live setEffort failed: ${msg}`);
+            await restorePersistentRoute('setEffort');
+            await rollbackRuntimeChange('setEffort');
+            return msg;
+          }
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.warn(`model:pick runtime setModel failed: ${msg}`);
+        await restorePersistentRoute('runtime setModel');
+        return msg;
+      }
 
       const liveAfterModel = turnRunner.getMakerSessionById(sessionId);
-      if (runtimeChange.status !== 'deferred' && liveAfterModel && effort) {
-        try {
-          await liveAfterModel.setEffort(effort);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          log.warn(`model:pick live setEffort failed: ${msg}`);
-          await restorePersistentRoute('setEffort');
-          await rollbackRuntimeChange('setEffort');
-          await patchModelPickFailed(msg);
-          return;
-        }
+      if (!liveAfterModel) {
+        log.info(`model:pick: no live session for ${sessionId.slice(-8)} — DB updated only`);
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log.warn(`model:pick runtime setModel failed: ${msg}`);
-      await restorePersistentRoute('runtime setModel');
-      await patchModelPickFailed(msg);
-      return;
-    }
+      return null;
+    });
 
-    const liveAfterModel = turnRunner.getMakerSessionById(sessionId);
-    if (!liveAfterModel) {
-      log.info(`model:pick: no live session for ${sessionId.slice(-8)} — DB updated only`);
+    if (failureReason !== null) {
+      await patchModelPickFailed(failureReason);
+      return;
     }
 
     try {

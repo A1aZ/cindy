@@ -124,7 +124,12 @@ function buildCardSrcDoc(sanitizedHtml: string, themeVars: string): string {
     // 减弱动效时,动画版卡片的意识自绘动画一律停播(srcdoc 内 media query
     // 正常继承系统偏好)。背景仍由意识正文自己决定:透明画布是现行卡片
     // 作者契约,宿主不能强铺 surface 改变其它 Ghost 的视觉。
-    '<style>html,body{margin:0;padding:0;overflow:hidden;font-family:system-ui,-apple-system,sans-serif}img{max-width:100%;-webkit-user-drag:none;-webkit-user-select:none;user-select:none}@media (prefers-reduced-motion:reduce){*{animation:none!important}}</style>',
+    // 窗口不可见时冻结卡内动画:与 reduced-motion 同属宿主强制门控,不靠意识作者自觉。
+    // 属性由宿主写到本文档的 documentElement 上(CSS 选择器跨不进 iframe,见
+    // hiddenAnimationGate 的 iframe 传播)。这里用 * 全量暂停而不是像宿主侧那样列
+    // allowlist —— 卡内容是意识现画的,没有可枚举的清单;冻结点落在动画自身取值区间内,
+    // 恢复可见后接着播。
+    '<style>html,body{margin:0;padding:0;overflow:hidden;font-family:system-ui,-apple-system,sans-serif}img{max-width:100%;-webkit-user-drag:none;-webkit-user-select:none;user-select:none}@media (prefers-reduced-motion:reduce){*{animation:none!important}}html[data-app-hidden=\'true\'] *{animation-play-state:paused!important}</style>',
     '</head><body>',
     sanitizedHtml,
     '</body></html>',
@@ -373,6 +378,14 @@ function GhostCardCanvas({
   const attachClickBridge = useCallback(() => {
     const doc = iframeRef.current?.contentDocument;
     if (!doc) return;
+    // 与宿主的装饰动画闸门对齐一次:窗口可能在本卡挂载之前就已隐藏,那时
+    // hiddenAnimationGate 的遍历还看不到这个 iframe。srcDoc 内已内置
+    // html[data-app-hidden='true'] 的暂停规则,这里只翻属性。
+    if (document.documentElement.hasAttribute('data-app-hidden')) {
+      doc.documentElement.setAttribute('data-app-hidden', 'true');
+    } else {
+      doc.documentElement.removeAttribute('data-app-hidden');
+    }
     const imgs = doc.querySelectorAll<HTMLImageElement>('img[src^="cindy-media://"]');
     imgs.forEach((img) => {
       // 量高写回会让 height prop 变化 → effect 重跑,对同一份未重载的文档

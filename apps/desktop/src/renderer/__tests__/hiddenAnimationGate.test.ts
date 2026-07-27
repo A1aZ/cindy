@@ -5,12 +5,14 @@
  * globals.css 的冻结规则做一次静态回归 —— 一次性动画不得被纳入冻结清单。
  */
 
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import {
   installHiddenAnimationGate,
+  syncHiddenAttrToFrames,
   type HiddenAnimationGateTarget,
 } from '../lib/hiddenAnimationGate';
 
@@ -150,6 +152,66 @@ describe('installHiddenAnimationGate', () => {
   });
 });
 
+describe('同源子文档（Ghost 卡片 iframe）传播', () => {
+  function makeFrame() {
+    const attrs = new Map<string, string>();
+    return {
+      frame: {
+        contentDocument: {
+          documentElement: {
+            setAttribute: (n: string, v: string) => attrs.set(n, v),
+            removeAttribute: (n: string) => attrs.delete(n),
+          },
+        },
+      },
+      isFrozen: () => attrs.get('data-app-hidden') === 'true',
+    };
+  }
+
+  it('冻结与解冻都会传播到同源 iframe', () => {
+    const a = makeFrame();
+    const doc = {
+      querySelectorAll: () => [a.frame],
+    } as unknown as HiddenAnimationGateTarget['document'];
+
+    syncHiddenAttrToFrames(doc, true);
+    expect(a.isFrozen()).toBe(true);
+
+    syncHiddenAttrToFrames(doc, false);
+    expect(a.isFrozen()).toBe(false);
+  });
+
+  it('跨源 iframe 读 contentDocument 抛错时跳过，不影响其它 frame', () => {
+    const ok = makeFrame();
+    const crossOrigin = {
+      get contentDocument(): never {
+        throw new DOMException('cross-origin', 'SecurityError');
+      },
+    };
+    const doc = {
+      querySelectorAll: () => [crossOrigin, ok.frame],
+    } as unknown as HiddenAnimationGateTarget['document'];
+
+    expect(() => syncHiddenAttrToFrames(doc, true)).not.toThrow();
+    expect(ok.isFrozen()).toBe(true);
+  });
+
+  it('宿主 document 没有 querySelectorAll 时安全跳过', () => {
+    const doc = {} as unknown as HiddenAnimationGateTarget['document'];
+    expect(() => syncHiddenAttrToFrames(doc, true)).not.toThrow();
+  });
+
+  it('卡片 srcDoc 内置了隐藏态暂停规则（CSS 跨不进 iframe，必须由子文档自带）', () => {
+    const src = readFileSync(
+      fileURLToPath(new URL('../components/chat/GhostToolCard.tsx', import.meta.url)),
+      'utf8',
+    );
+    expect(src).toContain("html[data-app-hidden=\\'true\\'] *{animation-play-state:paused!important}");
+    // 新挂载的卡片要自己对齐一次：闸门遍历时它还不存在。
+    expect(src).toContain("document.documentElement.hasAttribute('data-app-hidden')");
+  });
+});
+
 const CSS_PATH = fileURLToPath(new URL('../styles/globals.css', import.meta.url));
 const css = readFileSync(CSS_PATH, 'utf8');
 const frozenBlock =
@@ -244,5 +306,37 @@ describe('globals.css 冻结规则', () => {
   it('Tailwind 动画用 [class*=] 匹配，以覆盖 motion-safe: 等变体的转义类名', () => {
     expect(frozenBlock).toContain("[class*='animate-spin']");
     expect(frozenBlock).toContain("[class*='animate-pulse']");
+  });
+
+  // 任意值工具类（animate-[spin_2.4s_linear_infinite]）不含 animate-spin 子串，
+  // 也不在 globals.css 里，前面那条 CSS 扫描看不见它们 —— 单独扫源码兜住。
+  it('源码里的任意值循环动画工具类都能被冻结清单匹配', () => {
+    const rendererDir = fileURLToPath(new URL('..', import.meta.url));
+    const files = execFileSync(
+      'grep',
+      ['-rl', '--include=*.tsx', '--include=*.ts', 'animate-\\[', rendererDir],
+      { encoding: 'utf8' },
+    )
+      .split('\n')
+      .filter(Boolean)
+      .filter((f) => !f.includes('__tests__'));
+
+    const infiniteUtilities: string[] = [];
+    for (const file of files) {
+      const content = readFileSync(file, 'utf8');
+      for (const m of content.matchAll(/animate-\[[^\]]*\]/g)) {
+        if (m[0].includes('infinite')) {
+          infiniteUtilities.push(`${file.replace(rendererDir, '')}  ${m[0]}`);
+        }
+      }
+    }
+
+    // 有任意值循环动画存在时，冻结清单必须有能匹配它们的选择器。
+    if (infiniteUtilities.length > 0) {
+      expect(
+        frozenBlock.includes("[class*='infinite']"),
+        `源码里存在任意值循环动画工具类，但冻结清单没有 [class*='infinite'] 兜底：\n${infiniteUtilities.join('\n')}`,
+      ).toBe(true);
+    }
   });
 });

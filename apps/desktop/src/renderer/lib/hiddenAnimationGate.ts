@@ -51,8 +51,43 @@ export interface HiddenAnimationGateTarget {
   document: Pick<Document, 'addEventListener' | 'removeEventListener'> & {
     readonly visibilityState: DocumentVisibilityState;
     readonly documentElement: Pick<Element, 'setAttribute' | 'removeAttribute'>;
+    /** 用于把冻结标记传播进同源子文档(Ghost 卡片的 srcDoc iframe)。 */
+    querySelectorAll?: (selectors: string) => ArrayLike<HiddenAnimationGateFrame>;
   };
   window: GateWindow;
+}
+
+/** iframe 的最小面:只需要拿到同源子文档的 documentElement。 */
+export interface HiddenAnimationGateFrame {
+  readonly contentDocument?: {
+    readonly documentElement?: Pick<Element, 'setAttribute' | 'removeAttribute'> | null;
+  } | null;
+}
+
+/**
+ * 把冻结标记同步进同源子文档。Ghost 卡片是 `sandbox="allow-same-origin"` 的 srcDoc
+ * iframe,CSS 选择器跨不进去,而 cardSanitizer 明确保留意识作者写的动画(含 infinite),
+ * 所以隐藏期间这些卡片会继续吃渲染。srcDoc 里已内置
+ * `html[data-app-hidden='true'] *{animation-play-state:paused}`,这里只负责翻属性。
+ *
+ * 跨源 iframe 读 contentDocument 会抛,逐个吞掉即可 —— 跨源子文档本就不归我们管。
+ */
+export function syncHiddenAttrToFrames(
+  doc: HiddenAnimationGateTarget['document'],
+  hidden: boolean,
+): void {
+  const frames = doc.querySelectorAll?.('iframe');
+  if (!frames) return;
+  for (let i = 0; i < frames.length; i++) {
+    try {
+      const root = frames[i]?.contentDocument?.documentElement;
+      if (!root) continue;
+      if (hidden) root.setAttribute(HIDDEN_ATTR, 'true');
+      else root.removeAttribute(HIDDEN_ATTR);
+    } catch {
+      // 跨源 / 已卸载的 frame:跳过
+    }
+  }
 }
 
 function defaultTarget(): HiddenAnimationGateTarget {
@@ -76,6 +111,9 @@ export function installHiddenAnimationGate(
     } else {
       target.document.documentElement.removeAttribute(HIDDEN_ATTR);
     }
+    // 已挂载的同源子文档跟着翻。隐藏期间新建的 iframe 由挂载方(GhostToolCard 的
+    // onLoad)自己对齐一次,那条路径不经过这里。
+    syncHiddenAttrToFrames(target.document, hidden);
   };
 
   // 安装时先对齐一次:窗口可能已经处于隐藏态(例如启动后立刻切走)。
@@ -90,8 +128,9 @@ export function installHiddenAnimationGate(
   const dispose = (): void => {
     target.document.removeEventListener('visibilitychange', apply);
     unsubscribeWindowHidden?.();
-    // 拆闸门时一律恢复动画,不把页面留在冻结态。
+    // 拆闸门时一律恢复动画,不把页面(及子文档)留在冻结态。
     target.document.documentElement.removeAttribute(HIDDEN_ATTR);
+    syncHiddenAttrToFrames(target.document, false);
     if (target.window.__xdtHiddenAnimationGateDisposer === dispose) {
       delete target.window.__xdtHiddenAnimationGateDisposer;
     }

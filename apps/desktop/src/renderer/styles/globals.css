@@ -850,7 +850,10 @@ body.resizing-pane [data-ghost-webview] {
    恢复后接着播,用户不可察觉。
 
    Tailwind 的 animate-spin / animate-pulse 用 [class*=] 匹配,以覆盖
-   motion-safe:animate-pulse 这类变体编译出的转义类名。 */
+   motion-safe:animate-pulse 这类变体编译出的转义类名。任意值工具类
+   (animate-[spin_2.4s_linear_infinite] 之类,见 GhostSummonCard)不含 animate-spin
+   子串,靠 [class*='infinite'] 兜住:Tailwind 把 keyframes 简写原样编进类名,
+   循环动画必然带 infinite 字面量,而一次性的 animate-[xxx_200ms_ease-out] 不会。 */
 [data-app-hidden='true'] [data-voice-spinner-arc],
 [data-app-hidden='true'] [data-voice-mic-bar],
 [data-app-hidden='true'] .status-bar-shimmer,
@@ -867,7 +870,8 @@ body.resizing-pane [data-ghost-webview] {
 [data-app-hidden='true'] .agent-island-mascot-eyes,
 [data-app-hidden='true'] .agent-island-mascot-sparkle,
 [data-app-hidden='true'] [class*='animate-spin'],
-[data-app-hidden='true'] [class*='animate-pulse'] {
+[data-app-hidden='true'] [class*='animate-pulse'],
+[data-app-hidden='true'] [class*='infinite'] {
   animation-play-state: paused !important;
 }
 

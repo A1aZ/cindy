@@ -23,7 +23,6 @@
 
 import { redactSensitiveText } from '@cindy/maker-shared/error-redaction';
 import { applyCodexPlanSnapshotOnDone } from '@cindy/maker-shared/message-render';
-import { HISTORY_GAP_SPLIT_MS } from './historyGap';
 import type { MessageRole, Message, MessageAutomationOrigin } from '@/lib/ccAgent.types';
 import type { AttachedFile, MentionedResource, SerializedAttachedFile } from '@/lib/fileTypes';
 import type {
@@ -761,6 +760,19 @@ export interface SessionChatState {
   continuationInFlightClientId: string | null;
   isLoadingMore: boolean;
   hasMoreMessages: boolean;
+  /**
+   * 窗口里是否掺进过"孤岛" —— 跳转补齐失败时 merge 的 around 窗口,它与已加载的尾部窗口
+   * 之间隔着没加载的历史。
+   *
+   * 为什么需要它:补齐的快速通道原来只判 `messages.some(clientId === target)`,那是**成员**
+   * 判定而不是**连续覆盖**判定。孤岛一旦落进窗口,再跳同一个目标就会命中 some()、直接返回
+   * covered 而不补齐,于是"中间缺失"再也修不好(#676 review)。有孤岛时快速通道失效,
+   * 每次跳转都重新从最新翻页,让这个状态可自愈。
+   *
+   * 只由窗口整体重建(reloadMessages / clear / 初始加载)清回 false —— 那时窗口是从最新
+   * 连续拉起来的。
+   */
+  historyWindowHasIsland?: boolean;
   isFirstMessage: boolean;
   streamingClientId: string | null;
   streamingText: string;
@@ -985,6 +997,7 @@ function createInitialState(): SessionChatState {
     continuationInFlightClientId: null,
     isLoadingMore: false,
     hasMoreMessages: true,
+    historyWindowHasIsland: false,
     isFirstMessage: true,
     streamingClientId: null,
     streamingText: '',
@@ -1047,6 +1060,7 @@ export const EMPTY_SESSION_STATE: SessionChatState = Object.freeze({
   continuationInFlightClientId: null,
   isLoadingMore: false,
   hasMoreMessages: false,
+  historyWindowHasIsland: false,
   isFirstMessage: true,
   streamingClientId: null,
   streamingText: '',
@@ -5218,6 +5232,8 @@ function reloadMessages(sessionId: string): void {
     hasMoreMessages: false,
     oldestMessageId: null,
     isStreaming: false,
+    // 窗口从最新重新拉起 → 不再有孤岛。
+    historyWindowHasIsland: false,
     // 分页锁归本次重置释放:窗口和游标都清了,in-flight 的翻页 / 跳转补齐也已被上面的
     // bumpMessagesEpoch 作废,锁再留着只会让行首守卫卡住下一次翻页。由这里清而不是
     // 让被作废的请求代清 —— 它们无法分辨锁是自己那一代的还是重置后新代际的(#676 review)。
@@ -5306,7 +5322,10 @@ function dropMessagesFromClientId(sessionId: string, clientId: string): void {
   bumpMessagesEpoch(sessionId);
   setState(sessionId, (s) => {
     const idx = s.messages.findIndex((m) => m.clientId === clientId);
-    if (idx < 0) return s;
+    // 目标已经不在切片里(reload / 重开把它清掉了)也必须放锁:上面 bump 过 epoch,
+    // in-flight 请求已被作废,而它们刻意不自清 —— 漏这条早退路径同样会让翻页永久卡住
+    // (#676 review,与 removeMessagesByClientIds 的 unchanged-state 早退同一形状)。
+    if (idx < 0) return s.isLoadingMore ? { ...s, isLoadingMore: false } : s;
     // taskUpdates 必须随裁剪一起重置(对齐 reloadMessages):buildRenderItems
     // 会把「没有匹配到已渲染 tool_use」的 task update 兜底渲染成独立任务卡片,
     // 被裁 turn 的残留 update 会以孤儿卡片的形式回到消息流(bot review P1)。
@@ -5639,15 +5658,13 @@ function loadOlderMessages(sessionId: string): void {
  * isNearBottom / expandWindow / handleScroll 五处派生,且滚动手感必须实机验证,
  * 故留作独立改动。
  *
- * 600 是 RENDER_WINDOW_INITIAL_ITEMS(80)的 7.5 倍量级:可感知但不冻结。
+ * 600 是 RENDER_WINDOW_INITIAL_ITEMS(80)的 7.5 倍量级:可感知但不冻结。预算对照的是
+ * **窗口总行数**(s.messages.length),不是单次跳转的新增量 —— 否则连续几次向更早处跳转
+ * 会各自重新起算,把挂载树累积到几千行。
  */
 const JUMP_BACKFILL_MAX_ITEMS = 600;
 const JUMP_BACKFILL_PAGE_SIZE = 100;
 
-/** 一页行数折算成 render item 数的保守上界(口径见 JUMP_BACKFILL_MAX_ITEMS)。 */
-function estimateRenderItemCount(rows: Message[]): number {
-  return rows.length;
-}
 /**
  * 请求次数安全上限,与行预算分开计。
  *
@@ -5714,14 +5731,23 @@ async function backfillHistoryUntil(
   // 所以锁被占用时一律 busy —— 返回 busy 而不是 unavailable,是因为锁是别人的,
   // fallback 路径不得代为释放。
   if (getOrCreateState(sessionId).isLoadingMore) return 'busy';
-  if (covered(getOrCreateState(sessionId).messages)) return 'covered';
+  // 快速通道只在窗口没有孤岛时可信:some(clientId) 是成员判定,不是连续覆盖判定。窗口里
+  // 掺过孤岛(补齐失败时 merge 的 around 窗口)时,目标可能正是那座孤岛上的行 —— 直接返回
+  // covered 就等于承认"中间缺失"永久修不好。有孤岛时一律走下面的翻页补齐,让它自愈。
+  const stateBeforeFetch = getOrCreateState(sessionId);
+  if (stateBeforeFetch.historyWindowHasIsland !== true && covered(stateBeforeFetch.messages)) {
+    return 'covered';
+  }
 
   setState(sessionId, (s) => ({ ...s, isLoadingMore: true }));
-  let itemsFetched = 0;
+  // 预算对照**窗口总量**,不是本次跳转的新增量:itemsFetched 每次跳转都从 0 起算,而先前
+  // 跳转 merge 进来的行还留在 s.messages 里。连续几次向更早处跳转,每次各加 600 行,
+  // 锚定的 slice(startIdx) 照样能把挂载树堆到几千(#676 review)。
+  const windowSizeNow = () => getOrCreateState(sessionId).messages.length;
   try {
     for (
       let request = 0;
-      request < JUMP_BACKFILL_MAX_REQUESTS && itemsFetched < JUMP_BACKFILL_MAX_ITEMS;
+      request < JUMP_BACKFILL_MAX_REQUESTS && windowSizeNow() < JUMP_BACKFILL_MAX_ITEMS;
       request++
     ) {
       const state = getOrCreateState(sessionId);
@@ -5737,7 +5763,6 @@ async function backfillHistoryUntil(
         return 'exhausted';
       }
 
-      itemsFetched += estimateRenderItemCount(rows);
       const mapped = mapServerMessages(rows);
       const oldestRow = oldestMessageRow(rows, 'newest-first');
       const hasMore = serverMessagePageHasMore(rows, JUMP_BACKFILL_PAGE_SIZE);
@@ -5810,6 +5835,8 @@ function commitAroundWindow(
       return {
         ...s,
         messages,
+        // 补齐成功:窗口从最新连续到目标,孤岛标记可以清掉。
+        historyWindowHasIsland: false,
         oldestMessageId: oldestServerMessageIdForWindow(
           rows,
           s.messages,
@@ -5820,13 +5847,15 @@ function commitAroundWindow(
     }
     // busy = 分页状态整体归正在飞行的 loadOlderMessages,这里只做权威 merge(定位 +
     // 内容 hydration),游标 / hasMore / isLoadingMore / historyLoaded 一律不碰。
+    // 但孤岛标记要记上:这次 merge 进来的 around 行与尾部窗口之间可能隔着没加载的历史,
+    // 不记的话下次跳同一目标会命中快速通道、永远修不回连续(#676 review)。
     //
     // 为什么连游标也不能动:锁持有者的请求是从**它出发时**的游标发出的,它提交时会
     // 无条件把 oldestMessageId 写成自己那一页的边界。如果这里先把游标推到 around
     // 窗口更早的位置,那次提交就会把游标"回退到更新的值",破坏单调性 —— 后续向上滚动
     // 会重复拉已加载的历史,连翻几次看不到进展(#676 review)。让锁持有者自己收尾,
     // 代价只是下一次翻页可能重复取一段(mergeMessages 按 clientId 去重,不会重复显示)。
-    if (outcome === 'busy') return { ...s, messages };
+    if (outcome === 'busy') return { ...s, messages, historyWindowHasIsland: true };
 
     const oldestMessageId = oldestServerMessageIdForWindow(
       rows,
@@ -5847,6 +5876,8 @@ function commitAroundWindow(
       // makerChatStoreActiveView 的 loadOlder 系列 8 个用例正覆盖这个语义。
       hasMoreMessages: true,
       isLoadingMore: false,
+      // 退回 around 窗口 = 窗口里多了一座孤岛(它与尾部窗口之间隔着没加载的历史)。
+      historyWindowHasIsland: true,
     };
   });
 }

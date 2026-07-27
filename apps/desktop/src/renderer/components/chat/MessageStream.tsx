@@ -1896,7 +1896,13 @@ export function groupWorkRuns(items: RenderItem[], isSessionStreaming: boolean):
       flushTurn(false);
     }
     currentTurn.push(it);
-    prevEndMs = renderItemEndMs(it) ?? prevEndMs;
+    // 取本 turn 内见过的**最大**结束时间,不能无条件覆盖:并行的 Agent/Task 可能乱序完成
+    // (相邻的后一张卡先结束),无条件赋值会让锚点回退到更早的时刻,于是紧随其后的最终答复
+    // 与这个退化锚点相差超过阈值 → 连续 turn 被误切、时长被低报(#676 review)。
+    const itemEndMs = renderItemEndMs(it);
+    if (itemEndMs !== null) {
+      prevEndMs = prevEndMs === null ? itemEndMs : Math.max(prevEndMs, itemEndMs);
+    }
   }
   flushTurn(true);
   return out;

@@ -647,6 +647,99 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(false);
   });
 
+  it('T. 退回 around 窗口后再跳同一目标会重新补齐,不被成员判定短路', async () => {
+    // review #676（codex）：快速通道原来只判 messages.some(clientId===target)，那是成员
+    // 判定而非连续覆盖判定。孤岛（补齐失败时 merge 的 around 窗口）一旦落进窗口，再跳同一
+    // 目标就直接返回 covered、不补齐——"中间缺失"永久修不好。
+    const target = serverMessage({
+      id: 'island',
+      clientId: 'island',
+      createdAt: '2026-07-20T00:00:00.000Z',
+    });
+    // 第 1 次跳转：翻完历史仍没命中 → exhausted → 退回 around 窗口，留下孤岛。
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce([
+      serverMessage({ id: 'tail', clientId: 'tail', createdAt: '2026-07-25T12:00:00.000Z' }),
+    ]);
+    await makerChatStore.loadAroundMessageClientId(SID, 'island', { radius: 60 });
+    expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).toContain('island');
+
+    // 第 2 次跳转同一目标：目标已在窗口里，但那是孤岛 —— 必须重新尝试翻页补齐。
+    const callsBefore = vi.mocked(listMessagesFor).mock.calls.length;
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce([target]);
+    await makerChatStore.loadAroundMessageClientId(SID, 'island', { radius: 60 });
+
+    expect(vi.mocked(listMessagesFor).mock.calls.length).toBeGreaterThan(callsBefore);
+  });
+
+  it('U. 预算对照窗口总量,连续多次跳转不会各自重新起算', async () => {
+    // review #676（codex）：itemsFetched 每次跳转从 0 起算，而先前跳转 merge 的行还在
+    // s.messages 里；连续向更早处跳转会各加一整份预算，锚定的 slice(startIdx) 照样能把
+    // 挂载树堆到几千行。
+    const target = serverMessage({
+      id: 'never-found',
+      clientId: 'never-found',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValue([target]);
+    let page = 0;
+    vi.mocked(listMessagesFor).mockImplementation(async () => {
+      const base = page++;
+      return Array.from({ length: 100 }, (_, i) =>
+        serverMessage({
+          id: `u-${base}-${i}`,
+          clientId: `u-${base}-${i}`,
+          createdAt: new Date(
+            Date.UTC(2026, 6, 25, 12, 0, 0) - (base * 100 + i) * 60_000,
+          ).toISOString(),
+        }),
+      );
+    });
+
+    // 第 1 次跳转把窗口填到预算上限附近。
+    await makerChatStore.loadAroundMessageClientId(SID, 'never-found', { radius: 60 });
+    const sizeAfterFirst = makerChatStore.getSnapshot(SID).messages.length;
+    expect(sizeAfterFirst).toBeGreaterThan(0);
+
+    // 第 2 次跳转：窗口已经到量，不该再翻一整份预算进来。
+    const callsBefore = vi.mocked(listMessagesFor).mock.calls.length;
+    await makerChatStore.loadAroundMessageClientId(SID, 'never-found', { radius: 60 });
+    const extraCalls = vi.mocked(listMessagesFor).mock.calls.length - callsBefore;
+
+    expect(extraCalls).toBe(0);
+    // 窗口总量始终受同一个上限约束（around 行本身可能再加少量，留一点余量）。
+    expect(makerChatStore.getSnapshot(SID).messages.length).toBeLessThanOrEqual(650);
+  });
+
+  it('V. edit-last 的目标已不在切片里时也放锁', async () => {
+    // review #676（codex）：dropMessagesFromClientId 的 idx<0 早退（reload/重开已把目标
+    // 清掉）绕过清锁，而被作废的请求刻意不自清 → 翻页永久阻塞。
+    const seeded = fullPageNewestFirst();
+    const inWindow = seeded[50];
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([inWindow]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce(seeded);
+    await makerChatStore.loadAroundMessageClientId(SID, inWindow.clientId, { radius: 60 });
+
+    let releasePage: (rows: Message[]) => void = () => {};
+    vi.mocked(listMessagesFor).mockImplementationOnce(
+      () =>
+        new Promise<Message[]>((resolve) => {
+          releasePage = resolve;
+        }),
+    );
+    makerChatStore.loadOlderMessages(SID);
+    await flushMicrotasks();
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(true);
+
+    // 截断目标压根不在窗口里 → idx<0 早退，但 epoch 已 bump。
+    makerChatStore.dropMessagesFromClientId(SID, 'never-existed');
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(false);
+
+    releasePage([]);
+    await flushMicrotasks();
+  });
+
   it('F. 让位时不释放别人的分页锁', async () => {
     // review #676（codex）：让位后 fallback 若写 isLoadingMore:false，就把仍在飞行的
     // loadOlderMessages 的锁提前释放了，下一次滚动/跳转会从同一游标再开一个请求。

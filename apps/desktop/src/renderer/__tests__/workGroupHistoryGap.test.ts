@@ -335,6 +335,52 @@ describe('历史窗口空洞 — 段内连续长任务', () => {
   });
 });
 
+// ── Scenario A9:并行 Agent/Task 乱序完成时锚点不回退(review #676 codex) ──────
+
+describe('历史窗口空洞 — 并行任务乱序完成', () => {
+  it('A9. 相邻的后一张卡先结束时,空洞锚点不被拉回更早的时刻', () => {
+    // 锚点必须取本 turn 内见过的最大结束时间。无条件覆盖的话，「先发起、后结束」的任务
+    // 会被紧邻的「后发起、先结束」任务把锚点拉回去，于是其后的最终答复看起来隔了超过
+    // 阈值 → 连续 turn 被误切、时长被低报。
+    const messages: ChatMessage[] = [
+      mkUser('u1', '2026-07-25T10:00:00.000Z', '并行派两个子 Agent'),
+      mkAssistant('a0', '2026-07-25T10:00:05.000Z', '我同时派两个。'),
+      // 卡 1：先发起，40 分钟后才结束。
+      {
+        clientId: 'task1',
+        role: 'tool_use',
+        content: '',
+        toolUseId: 'tu-task1',
+        toolName: 'Task',
+        toolInput: { description: '慢的' },
+        createdAt: '2026-07-25T10:00:10.000Z',
+      },
+      mkResult('r1', 'tu-task1', '2026-07-25T10:40:10.000Z'),
+      // 卡 2：后发起，很快就结束（结束时间早于卡 1）。
+      {
+        clientId: 'task2',
+        role: 'tool_use',
+        content: '',
+        toolUseId: 'tu-task2',
+        toolName: 'Task',
+        toolInput: { description: '快的' },
+        createdAt: '2026-07-25T10:00:20.000Z',
+      },
+      mkResult('r2', 'tu-task2', '2026-07-25T10:01:00.000Z'),
+      // 最终答复紧跟慢任务结束（10:40:10）之后 30 秒。
+      mkAssistant('a1', '2026-07-25T10:40:40.000Z', '两个都回来了。'),
+    ];
+
+    const { items } = buildRenderItems(messages);
+    const grouped = groupWorkRuns(items, false);
+    const groups = workGroups(grouped);
+
+    // 一个工作组：进度文字与两张卡都在组内，最终答复留在组外。
+    expect(groups).toHaveLength(1);
+    expect(groupContains(groups[0], 'a0')).toBe(true);
+  });
+});
+
 // ── Scenario B:正常连续 turn 不被误切 ───────────────────────────────────────
 
 describe('历史窗口空洞 — 正常 turn 不受影响', () => {

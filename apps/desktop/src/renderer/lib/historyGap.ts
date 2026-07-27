@@ -1,13 +1,13 @@
 /**
  * 历史窗口空洞的判定阈值 —— 单一来源。
  *
- * 两侧消费方:
- *   - `components/chat/MessageStream`:tool_segment 按它切段、工作组按它切组。
- *   - `lib/makerChatStore`:跳转补齐的 render item 预算按它模拟切段。
+ * 唯一消费方:`components/chat/MessageStream` —— tool_segment 按它切段、工作组按它切组。
  *
- * 放在 lib 而不是 MessageStream 里 export:store 不能反向依赖 component
- * (见 docs/dev-rules/architecture-invariants.md 的依赖方向),而两边必须用同一个值 ——
- * 各存一份会静默漂移,预算估算与真实切段口径不一致就白算了。
+ * 为什么单独放在 lib 而不是埋在 MessageStream 里:它是一条产品级阈值(多久算"历史不
+ * 连续"),独立成文件便于查找与调整,也留出被 main / 其它 renderer 模块复用的位置而不必
+ * 反向依赖 component(见 docs/dev-rules/architecture-invariants.md 的依赖方向)。
+ * makerChatStore 一度按它模拟切段来估算跳转补齐预算,现已改为按行数取保守上界
+ * (见 JUMP_BACKFILL_MAX_ITEMS),不再依赖本常量。
  *
  * 为什么是 30 分钟:跳转到历史消息时,目标附近的窗口与已加载的尾部窗口之间可能隔着
  * 大段没加载的历史(补齐失败时)。渲染层看到的是两段"相邻"item,中间的 user 行(唯一的

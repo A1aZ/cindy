@@ -339,6 +339,30 @@ describe('snapAgentIslandCompactHardwareContentWidth', () => {
     })).toBe(notchWidth);
   });
 
+  it('持久化的是与徽标无关的 basic 宽度时,计数升降都能正确跟随', () => {
+    // native 侧 `persistedCompactContentWidth` 保证停在 basic 吸附位时存下的是
+    // 与计数无关的 baseBasicWidth,这里验证存下该标量后两个方向都归一到当前 basic。
+    const notchWidth = 200;
+    const screenMetrics = { hasNotch: true, notchWidth };
+    const persisted = notchWidth + AGENT_ISLAND_COMPACT_HARDWARE_ACTIVE_EXTRA_WIDTH;
+    const resolveFor = (pillSnapshot: { activeSessionCount: number; sessionCount: number }) =>
+      snapAgentIslandCompactHardwareContentWidth({
+        desiredWidth: persisted,
+        clampedWidth: persisted,
+        maxWidth: 920,
+        hasSession: true,
+        screenMetrics,
+        pillSnapshot,
+      });
+
+    const wide = resolveFor({ activeSessionCount: 11, sessionCount: 12 });
+    const narrow = resolveFor({ activeSessionCount: 0, sessionCount: 1 });
+    expect(wide).toBeGreaterThan(persisted);
+    // 计数回落后必须收缩回旧的 basic 宽度,不能停在为宽徽标撑开的宽度上。
+    expect(narrow).toBe(persisted);
+    expect(narrow).toBeLessThan(wide);
+  });
+
   it('不传 pillSnapshot 时吸附行为与旧实现完全一致', () => {
     const notchWidth = 200;
     const screenMetrics = { hasNotch: true, notchWidth };

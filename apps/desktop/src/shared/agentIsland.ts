@@ -463,6 +463,14 @@ export const AGENT_ISLAND_COMPACT_BADGE_CONTENT_INSET = 2;
 export const AGENT_ISLAND_COMPACT_BADGE_TEXT_SPACING = 1;
 /** Generous upper bound for one monospaced 10pt digit (real advance is ~6pt). */
 export const AGENT_ISLAND_COMPACT_BADGE_CHAR_WIDTH_BOUND = 7;
+/**
+ * Per-segment rounding slack, mirroring `PillBadge.segmentRoundingSlack` in the Swift
+ * helper (`ceil(measured + 1)` per `Text`). SwiftUI lays out and rounds every `Text`
+ * run separately, so the slack is added once per segment — not once per badge. Dropping
+ * it would make this estimate fall below the native width and let the badge get clipped
+ * again; `agentIslandCompactBadgeWidth.test.ts` guards that.
+ */
+export const AGENT_ISLAND_COMPACT_BADGE_SEGMENT_ROUNDING_SLACK = 1;
 /** Upper bound of the native `hardwareNotchSideInset` beside the badge. */
 export const AGENT_ISLAND_COMPACT_HARDWARE_BADGE_RESERVED_INSET = 9;
 export const AGENT_ISLAND_MAX_EXPANDED_HEIGHT = 560;
@@ -512,7 +520,9 @@ export function getAgentIslandCompactBadgeWidth(input: {
     ? [`${input.activeSessionCount}`, '/', `${input.sessionCount}`]
     : [`${Math.max(1, input.sessionCount)}`];
   const segmentsWidth = segments.reduce(
-    (total, segment) => total + segment.length * AGENT_ISLAND_COMPACT_BADGE_CHAR_WIDTH_BOUND + 1,
+    (total, segment) => total
+      + segment.length * AGENT_ISLAND_COMPACT_BADGE_CHAR_WIDTH_BOUND
+      + AGENT_ISLAND_COMPACT_BADGE_SEGMENT_ROUNDING_SLACK,
     0,
   );
   const spacing = AGENT_ISLAND_COMPACT_BADGE_TEXT_SPACING * Math.max(0, segments.length - 1);

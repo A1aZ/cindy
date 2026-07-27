@@ -415,6 +415,17 @@ describe('outboundFetch', () => {
 });
 
 describe('outboundUndiciFetch', () => {
+  it('honors the caller abort signal while resolving the proxy', async () => {
+    const controller = new AbortController();
+    resolverState.resolve.mockImplementation(() => new Promise(() => {}));
+    const inflight = outboundUndiciFetch('https://chatgpt.com/backend-api/codex', {
+      signal: controller.signal,
+    });
+    controller.abort(new Error('stopped mid-refine'));
+    await expect(inflight).rejects.toThrow('stopped mid-refine');
+    expect(undiciState.fetch).not.toHaveBeenCalled();
+  });
+
   it('keeps using undici on both paths (callers consume undici Response)', async () => {
     await outboundUndiciFetch('https://api.openai.com/v1/models');
     expect(undiciState.fetch).toHaveBeenCalledTimes(1);

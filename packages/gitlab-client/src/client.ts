@@ -1,8 +1,9 @@
 /**
  * GitLab REST API v4 客户端。
  *
- * 零外部依赖 — 仅使用全局 fetch(Node 18+ / Electron 28+)。
- * 所有方法均可在 main 进程直接调用。
+ * 零外部依赖 — 默认用全局 fetch(Node 18+ / Electron 28+),也可经
+ * `GitlabClientConfig.fetchImpl` 注入自己的实现(desktop 注入代理感知 fetch,因为
+ * 全局 fetch 不吃系统代理)。所有方法均可在 main 进程直接调用。
  */
 
 import type {

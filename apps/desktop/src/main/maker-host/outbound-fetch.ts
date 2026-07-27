@@ -630,7 +630,13 @@ export const outboundUndiciFetch: typeof undiciFetch = async (input, init) => {
       : input instanceof URL
         ? input.href
         : ((input as { url?: string }).url ?? '');
-  const dispatcher = await resolveOutboundDispatcher(target);
+  // signal 必须透传:选路在请求出发之前,不传就等于让调用方的取消晚生效(最多多等
+  // 一次解析超时),与 outboundFetch 的语义不一致。
+  const signal = signalOf(
+    input as Parameters<typeof globalThis.fetch>[0],
+    init as Parameters<typeof globalThis.fetch>[1],
+  );
+  const dispatcher = await resolveOutboundDispatcher(target, { signal });
   if (!dispatcher) return undiciFetch(input, init);
   return undiciFetch(input, { ...init, dispatcher });
 };

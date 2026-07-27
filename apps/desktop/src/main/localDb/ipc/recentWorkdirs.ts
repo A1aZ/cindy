@@ -20,7 +20,7 @@
 import { stat } from 'node:fs/promises';
 
 import { BrowserWindow, ipcMain } from 'electron';
-import { desc, eq, sql } from 'drizzle-orm';
+import { desc, eq } from 'drizzle-orm';
 
 import { getDbClient } from '../client/current';
 import { recentWorkdirs } from '../schema';
@@ -94,18 +94,29 @@ export async function upsertRecentWorkdir(
     // LRU 驱逐:超过 MAX_RECENT_WORKDIRS 时,删掉 lastUsedAt 最旧的多出来的行。
     // SQLite 不支持直接 DELETE ... ORDER BY LIMIT,用子查询 OFFSET 拿出待删 path。
     // 单条 INSERT 最多新增 1 条 → 单条最多删 1 条;query 廉价。
-    await db.run(sql`
-      DELETE FROM ${recentWorkdirs}
-      WHERE ${recentWorkdirs.path} IN (
-        SELECT ${recentWorkdirs.path} FROM ${recentWorkdirs}
-        ORDER BY ${recentWorkdirs.lastUsedAt} DESC
-        LIMIT -1 OFFSET ${MAX_RECENT_WORKDIRS}
-      )
-    `);
+    //
+    // 必须走 DbClient.exec,不能用 drizzle 的 db.run(sql`...`):main 侧拿到的
+    // drizzle 是 createDrizzleProxy 的代理,只把 **query builder** 的终结方法
+    // (all / get / run / values)转发给 worker RPC。直接在 db 对象上跑 raw SQL 不
+    // 经过 builder,会落进代理内部那个只会抛错的 fakeSqliteClient.prepare(),再被
+    // drizzle 包成 "Failed to run the query '...'" —— 驱逐 100% 静默失败(fire-and-
+    // forget 的 catch 只留一条 warn),表会一直涨过上限。回归见 __tests__/recentWorkdirsLru。
+    await getDbClient().exec(
+      `DELETE FROM recent_workdirs
+       WHERE path IN (
+         SELECT path FROM recent_workdirs
+         ORDER BY last_used_at DESC
+         LIMIT -1 OFFSET ?
+       )`,
+      [MAX_RECENT_WORKDIRS],
+    );
   } catch (err) {
     log.warn('[localDb] upsertRecentWorkdir failed', {
       path: normalized,
       error: err instanceof Error ? err.message : String(err),
+      // drizzle 把底层错误包一层后 message 只剩 "Failed to run the query '<sql>'",
+      // 根因全在 cause 里。不带上就只能对着一条无因果的 SQL 反向猜。
+      cause: err instanceof Error && err.cause instanceof Error ? err.cause.message : undefined,
     });
   }
 }

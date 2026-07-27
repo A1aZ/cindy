@@ -4896,7 +4896,10 @@ const registerIpcHandlers = () => {
   // 任何失败都回 null,由 renderer 回落到自绘文件图标。
   ipcMain.handle(
     'file:thumbnail',
-    async (event: Electron.IpcMainInvokeEvent, params: { path: string; size: number }) => {
+    async (
+      event: Electron.IpcMainInvokeEvent,
+      params: { path: string; size: number; revalidate?: boolean },
+    ) => {
       assertTrustedAppRendererEvent(event);
       return readFileThumbnail(params);
     },

@@ -2507,6 +2507,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getFileThumbnail: (params: {
     path: string;
     size: number;
+    revalidate?: boolean;
   }): Promise<{ dataUrl: string | null; byteSize: number } | null> =>
     ipcRenderer.invoke('file:thumbnail', params),
 

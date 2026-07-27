@@ -2098,6 +2098,8 @@ interface ElectronAPI {
   getFileThumbnail: (params: {
     path: string;
     size: number;
+    /** 显式复核:跳过正缓存重新生成(负缓存仍尊重)。焦点复核时传 true。 */
+    revalidate?: boolean;
   }) => Promise<{ dataUrl: string | null; byteSize: number } | null>;
 
   /**

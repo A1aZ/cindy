@@ -68,7 +68,7 @@ describe('readFileThumbnail — 授权边界', () => {
   });
 
   it('尺寸越界或非数字一律拒绝(不让 renderer 用尺寸放大资源占用)', async () => {
-    for (const size of [0, 8, 4096, Number.NaN, Number.POSITIVE_INFINITY]) {
+    for (const size of [0, 8, 129, 512, 4096, Number.NaN, Number.POSITIVE_INFINITY]) {
       await expect(readFileThumbnail({ path: '/tmp/a.pdf', size })).resolves.toBeNull();
     }
     expect(createThumbnailFromPath).not.toHaveBeenCalled();
@@ -187,13 +187,53 @@ describe('readFileThumbnail — 兜底与缓存', () => {
     expect(createThumbnailFromPath).toHaveBeenCalledTimes(2);
   });
 
-  it('取图后目标被掉包(dev/ino/mtime 变了)则丢弃结果,不交给 renderer', async () => {
+  it('revalidate 跳过正缓存重新生成,但仍尊重负缓存', async () => {
+    // 粗时间戳文件系统上「改完切回来就发送」算不出新 key,靠 TTL 要等十分钟。
+    await readFileThumbnail({ path: '/tmp/rv.pdf', size: 80 });
+    await readFileThumbnail({ path: '/tmp/rv.pdf', size: 80 });
+    expect(createThumbnailFromPath).toHaveBeenCalledTimes(1);
+    await readFileThumbnail({ path: '/tmp/rv.pdf', size: 80, revalidate: true });
+    expect(createThumbnailFromPath).toHaveBeenCalledTimes(2);
+
+    // 负缓存不跳过:否则每次焦点复核都要再撞一次同一堵墙。
+    __clearFileThumbnailCacheForTest();
+    vi.clearAllMocks();
+    createThumbnailFromPath.mockResolvedValue({ isEmpty: () => true, toDataURL: () => '' });
+    await readFileThumbnail({ path: '/tmp/neg.zzz', size: 80 });
+    await readFileThumbnail({ path: '/tmp/neg.zzz', size: 80, revalidate: true });
+    expect(createThumbnailFromPath).toHaveBeenCalledTimes(1);
+  });
+
+  it('缓存按字节预算限界,不只按条数(尺寸进 key,同路径换 size 就是新条目)', async () => {
+    // 单条约 4MB 的 dataURL:条数远没到 512,字节预算(24MB)先到顶。
+    const big = 'data:image/png;base64,' + 'A'.repeat(4 * 1024 * 1024);
+    createThumbnailFromPath.mockResolvedValue({ isEmpty: () => false, toDataURL: () => big });
+    for (let px = 16; px <= 26; px++) {
+      await readFileThumbnail({ path: '/tmp/big.pdf', size: px });
+    }
+    // 11 次请求 × 4MB = 44MB,若不按字节淘汰就会全留下。
+    vi.clearAllMocks();
+    createThumbnailFromPath.mockResolvedValue(okImage());
+    // 最早那几档已被淘汰 → 会重新生成。
+    await readFileThumbnail({ path: '/tmp/big.pdf', size: 16 });
+    expect(createThumbnailFromPath).toHaveBeenCalledTimes(1);
+  });
+
+  it('取图后目标被掉包(dev/ino/mtime/size 变了)则丢弃结果,不交给 renderer', async () => {
     // createThumbnailFromPath 只吃路径、拿不到 fd,校验用的 stat 和它内部那次 open
     // 绑不到同一文件对象;结果出锅后复验一次身份,变了就不返回也不入缓存。
     stat
       .mockResolvedValueOnce({ isFile: () => true, mtimeMs: 1, size: 10, ino: 1, dev: 1 })
       .mockResolvedValue({ isFile: () => true, mtimeMs: 1, size: 10, ino: 999, dev: 1 });
     expect((await readFileThumbnail({ path: '/tmp/swap.pdf', size: 80 }))?.dataUrl).toBeNull();
+  });
+
+  it('复验也比 size:mtime 没动但尺寸变了同样算被掉包', async () => {
+    __clearFileThumbnailCacheForTest();
+    stat
+      .mockResolvedValueOnce({ isFile: () => true, mtimeMs: 1, size: 10, ino: 1, dev: 1 })
+      .mockResolvedValue({ isFile: () => true, mtimeMs: 1, size: 4242, ino: 1, dev: 1 });
+    expect((await readFileThumbnail({ path: '/tmp/resize.pdf', size: 80 }))?.dataUrl).toBeNull();
   });
 
   it('系统 API 同步抛(Linux 没有这个 API)时释放名额,不把闸门占死', async () => {

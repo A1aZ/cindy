@@ -26,10 +26,12 @@ const log = createLogger('fileThumbnail');
 
 /**
  * 允许的请求边长(px)。只卡区间不要求整数——非整数会在下面统一 Math.round 后再
- * 进 key 与原生调用;这里的作用是不让 renderer 用一个夸张的尺寸放大资源占用。
+ * 进 key 与原生调用。上限按 UI 实际需要给(缩略区 40px @2x = 80,留一档余量到
+ * 128):尺寸进了缓存 key,放到 512 的话被攻陷的 renderer 只要变换 size 就能对同
+ * 一个路径囤出几百张大图,单张 512×512 未压缩可达 MB 级。
  */
 const MIN_PX = 16;
-const MAX_PX = 512;
+const MAX_PX = 128;
 
 /**
  * 系统缩略图偶发卡住(实测同进程连续调 app.getFileIcon 会挂死),这里给硬超时:
@@ -38,10 +40,17 @@ const MAX_PX = 512;
 const TIMEOUT_MS = 4000;
 
 /**
- * 缓存条数上限;value 是 40~80px 的 PNG dataURL,单条只有几 KB,512 条也就几 MB。
- * 给得宽是为了别让大托盘反复触发驱逐——驱逐后每次焦点复核都要重新跑一遍原生调用。
+ * 缓存条数上限;给得宽是为了别让大托盘反复触发驱逐——驱逐后每次焦点复核都要重新
+ * 跑一遍原生调用。
  */
 const CACHE_LIMIT = 512;
+
+/**
+ * 缓存的字节预算。只按条数限界挡不住内存:尺寸是 key 的一部分,同一路径换 size 就
+ * 是一条新条目。这里按 dataURL 的实际长度累计,超预算就从最旧的开始淘汰,让保有量
+ * 有一个与条数无关的硬顶。
+ */
+const CACHE_BYTES_BUDGET = 24 * 1024 * 1024;
 
 /**
  * 缓存条目的软过期。key 里的 mtimeMs 在粗时间戳文件系统(FAT 之类,量化到 2s)上
@@ -72,6 +81,8 @@ interface CacheEntry {
 }
 
 const cache = new Map<string, CacheEntry>();
+/** 当前缓存里 dataURL 的字节合计(与 cache 同步维护)。 */
+let cacheBytes = 0;
 /** 同 key 在飞的请求:多张卡指向同一文件时只做一次原生调用。 */
 const inFlight = new Map<string, Promise<FileThumbnailResult | null>>();
 
@@ -122,12 +133,25 @@ function releaseSlot(): void {
   running -= 1;
 }
 
+function dropEntry(key: string): boolean {
+  const entry = cache.get(key);
+  if (!entry) return false;
+  cacheBytes -= entry.dataUrl?.length ?? 0;
+  cache.delete(key);
+  return true;
+}
+
+function evictOldest(): void {
+  const oldest = cache.keys().next();
+  if (!oldest.done) dropEntry(oldest.value);
+}
+
 function cacheGet(key: string): string | null | undefined {
   const hit = cache.get(key);
   if (!hit) return undefined;
   const ttl = hit.dataUrl === null ? NEGATIVE_TTL_MS : POSITIVE_TTL_MS;
   if (Date.now() - hit.at > ttl) {
-    cache.delete(key);
+    dropEntry(key);
     return undefined;
   }
   // 简易 LRU:命中即挪到队尾。
@@ -139,17 +163,18 @@ function cacheGet(key: string): string | null | undefined {
 function cacheSet(key: string, value: string | null): void {
   // 覆盖已有 key 不会让 size 增长,此时淘汰最旧条目纯属误伤;delete + set 同时把
   // 这条刷成"最近使用"。
-  const existed = cache.delete(key);
-  if (!existed && cache.size >= CACHE_LIMIT) {
-    const oldest = cache.keys().next();
-    if (!oldest.done) cache.delete(oldest.value);
-  }
+  const existed = dropEntry(key);
+  if (!existed && cache.size >= CACHE_LIMIT) evictOldest();
   cache.set(key, { dataUrl: value, at: Date.now() });
+  cacheBytes += value?.length ?? 0;
+  // 字节预算兜底:条数没超但保有量超了同样要淘汰(尺寸不同的同一路径会各占一条)。
+  while (cacheBytes > CACHE_BYTES_BUDGET && cache.size > 1) evictOldest();
 }
 
 /** 仅供测试:清空缓存、在飞表与并发闸,避免用例之间互相污染。 */
 export function __clearFileThumbnailCacheForTest(): void {
   cache.clear();
+  cacheBytes = 0;
   inFlight.clear();
   // 上个用例可能留下未 settle 的原生任务,不清零会让后续用例被错误限流甚至死等。
   running = 0;
@@ -161,6 +186,12 @@ export interface FileThumbnailParams {
   path: string;
   /** 期望边长(px)。 */
   size: number;
+  /**
+   * 显式复核:跳过**正**缓存直接重新生成。粗时间戳文件系统(FAT 量化到 2s)上
+   * "同尺寸、同一时间片内改写"算不出新的版本 key,靠 TTL 要等十分钟才自愈,而
+   * 「改完切回来就发送」是常规动线。负缓存仍然尊重——那是防反复撞墙用的。
+   */
+  revalidate?: boolean;
 }
 
 export interface FileThumbnailResult {
@@ -214,7 +245,10 @@ export async function readFileThumbnail(
   const key = `${realPath}::${stat.dev}::${stat.ino}::${stat.mtimeMs}::${stat.size}::${Math.round(size)}`;
   const byteSize = stat.size;
   const cached = cacheGet(key);
-  if (cached !== undefined) return { dataUrl: cached, byteSize };
+  // revalidate 只跳过正缓存;负缓存照旧命中,否则每次焦点复核都要再撞一次同一堵墙。
+  if (cached !== undefined && !(params?.revalidate && cached !== null)) {
+    return { dataUrl: cached, byteSize };
+  }
 
   // 同一份文件被多张卡同时请求(拖入一批 / 会话切回重挂载)时只做一次原生调用。
   const pending = inFlight.get(key);
@@ -230,8 +264,13 @@ export async function readFileThumbnail(
   const sameTarget = async (): Promise<boolean> => {
     try {
       const after = await fs.stat(realPath);
+      // size 也要比:key 的"版本"语义里本来就含 size,粗时间戳文件系统上
+      // mtime 可能没动而内容尺寸变了,只比 mtime 会误判成同一目标。
       return (
-        after.ino === stat.ino && after.dev === stat.dev && after.mtimeMs === stat.mtimeMs
+        after.ino === stat.ino &&
+        after.dev === stat.dev &&
+        after.mtimeMs === stat.mtimeMs &&
+        after.size === stat.size
       );
     } catch {
       return false;

@@ -316,6 +316,9 @@ export function AttachmentTypeThumb({
         const result = await window.electronAPI.getFileThumbnail({
           path: filePath,
           size: THUMB_PX * 2,
+          // 首次挂载走缓存(消闪烁);焦点复核是"用户可能刚改过这个文件"的信号,
+          // 跳过正缓存重新生成,否则粗时间戳文件系统上的同尺寸改写要等 TTL 才自愈。
+          revalidate: revalidateTick > 0,
         });
         if (cancelled) return;
         if (result) onByteSizeRef.current?.(result.byteSize);
@@ -355,10 +358,14 @@ export function AttachmentTypeThumb({
         style={{
           width: '100%',
           height: '100%',
-          // 写成内联而不是 Tailwind 类:这两个值要跟 isIcon 一起切,内联最直白。
+          // 写成内联而不是 Tailwind 类:这几个值要跟 isIcon 一起切,内联最直白。
           objectFit: thumb.isIcon ? 'contain' : 'cover',
           objectPosition: 'top center',
-          boxShadow: thumb.isIcon ? undefined : 'inset 0 0 0 1px var(--border-default)',
+          // 用 1px Board 描边而不是 inset 阴影:DESIGN.md §6 只允许 token 化的浮层
+          // 阴影,in-page 元素一律靠边框区分。outline + 负 offset 画在元素内沿,
+          // 不占布局也不撑大缩略区。
+          outline: thumb.isIcon ? undefined : '1px solid var(--border-default)',
+          outlineOffset: thumb.isIcon ? undefined : '-1px',
         }}
         draggable={false}
       />

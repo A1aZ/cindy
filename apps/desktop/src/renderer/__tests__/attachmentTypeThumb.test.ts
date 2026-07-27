@@ -134,7 +134,13 @@ describe('AttachmentTypeThumb — 缩略图取用契约', () => {
     // dmg / zip 这类系统只给类型图标:图标四周本来就是透明的,再套一圈边框
     // 等于在图标外面画个空方框(2026-07-27 Dash 指出)。
     expect(src).toMatch(/objectFit: thumb\.isIcon \? 'contain' : 'cover'/);
-    expect(src).toMatch(/boxShadow: thumb\.isIcon \? undefined :/);
+    expect(src).toMatch(/outline: thumb\.isIcon \? undefined : '1px solid var\(--border-default\)'/);
+    // DESIGN.md §6:in-page 元素只能用 1px Board 边框区分,阴影只留给 token 化的浮层。
+    expect(src).not.toMatch(/boxShadow/);
+  });
+
+  it('焦点复核请求跳过正缓存(挂载首取仍走缓存消闪烁)', () => {
+    expect(src).toMatch(/revalidate: revalidateTick > 0/);
   });
 
   it('图标型判定采样四边中点与四角,解码失败按内容图处理', () => {

@@ -238,10 +238,10 @@ function titleBlockHtml(title, subtitle, withPill){
   if (withPill) {
     // 镜像产品 v2 inline 组(LoginControls LoginTitleBlock):标题 shrink-to-fit
     // 单行 + 徽标紧随 gap 2 设计px,组整体随外层 text-center 水平居中。
-    const pill = G.globalPill;
+    const pill = G.regionPill;
     inner = `<span class="lp-title-group" style="display:inline-flex;max-width:100%;align-items:center;justify-content:center;white-space:nowrap;vertical-align:top;gap:${px(pill.gap)};height:${px(G.title.height)}">` +
       `<span style="white-space:nowrap">${esc(title)}</span>` +
-      `<span class="lp-global-pill" style="flex-shrink:0;width:${px(pill.width)};height:${px(pill.height)};border-radius:${px(pill.radius)};background:${C('brandAccent')};color:${C('invertedButtonBorder')};font-size:${px(16)};line-height:${px(pill.height)};text-align:center;font-weight:700">${esc(t('globalRegion'))}</span></span>`;
+      `<span class="lp-region-pill" style="flex-shrink:0;padding-left:${px(pill.paddingX)};padding-right:${px(pill.paddingX)};height:${px(pill.height)};border-radius:${px(pill.radius)};background:${C('brandAccent')};color:${C('invertedButtonBorder')};font-size:${px(pill.fontSize)};line-height:${px(pill.height)};text-align:center;font-weight:700">${esc(t('regionPill.cn'))}</span></span>`;
   } else inner = esc(title);
   let html = `<div class="lp-title" style="top:${px(ti.y)};width:${px(G.panel.width)};height:${px(ti.height)};line-height:${px(ti.height)};font-size:${px(ti.fontSize)};color:${C('titleText')}">${inner}</div>`;
   if (subtitle != null) html += `<div class="lp-subtitle" style="left:${px(st.x)};top:${px(st.y)};width:${px(st.width)};height:${px(st.lineHeight*st.maxLines)};line-height:${px(st.lineHeight)};font-size:${px(st.fontSize)};color:${C('secondaryText')};-webkit-line-clamp:${st.maxLines}">${subtitle}</div>`;

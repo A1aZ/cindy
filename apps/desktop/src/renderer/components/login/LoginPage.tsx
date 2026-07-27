@@ -64,9 +64,12 @@ import { canResumePendingConsent, makeConsentStamp, type ConsentStamp } from './
  * **global 故意缺席**:Cindy 是「天生全球」的产品,默认版本不需要给自己贴标签
  * 证明是全球版——只有为特定法规单独构建的版本才被标注(不对称命名)。旧实现给
  * global 挂 "Global" 徽标,读出来反而是「存在一个本土主场版、这是它的出口型号」,
- * 与叙事相反。cn / dev 仍标注:两者连的是不同服务端,且 2026-07-26 起 cn 与
- * global 的可执行名统一为 Cindy(见 brandIdentity.ts),同机双装时登录页是用户
- * 唯一能分辨自己在哪个版本的地方。
+ * 与叙事相反。cn / dev 仍标注:两者连的都不是 global 端点(cn 走国内端点、dev
+ * 走独立 dev 端点),登录页是用户确认自己连向哪个后端的位置;dev 另有并存场景
+ * ——CindyDev 保持独立可执行名,可与正式包同机共存。⚠️ 别把 cn 的理由写成
+ * 「区分同机双装的 cn / global」:2026-07-26 起两者可执行名同为 Cindy、安装
+ * 目录与快捷方式同名互抢,该双装场景已明确放弃支持(见 brandIdentity.ts 的
+ * executableNameByRegion doc)。
  *
  * 值为四语同文的区域代号(与旧 login.globalRegion 一致:区域标识不翻译),仍走
  * i18n 以便日后改判为「中国大陆版」这类可译文案时不必回改组件。

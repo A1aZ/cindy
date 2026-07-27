@@ -128,6 +128,10 @@
 
 OAuth 2.0 Device Authorization Grant 中由用户在另一设备验证页输入的一次性代码。当前先采用各语言直译，作为待产品裁决术语登记，避免后续界面出现“设备代码／配对码／认证码”等多套说法。
 
+### Region badge
+
+桌面登录页标题旁的品牌红胶囊（DESIGN.md §16.3）。标签值本身是**不翻译的区域代号**、四语同值：cn 版为 CN、dev 版为 Dev，global 版按“不对称命名”不挂徽标（承袭旧 login.globalRegion 的四语同值做法）。作为待产品裁决术语登记：尚未拍板是否改为可译文案（如「中国大陆版 / Mainland China」），先登记以免后续界面自造“国内版／中国版／开发版”等多套说法。checkCase 设 false：dev 作为普通技术词在 settings.about.debugLogDescription 等文案里有正当小写用法，开启大小写检查会制造假阳性。
+
 ## 怎么加一条术语
 
 1. 在 `i18n/glossary.json` 的 `terms` 里加条目，`note` 必填——写清楚**为什么**这么定，

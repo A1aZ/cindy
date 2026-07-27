@@ -887,7 +887,7 @@ The execution rulebook for subsequent desktop / mobile UI updates. Sources: the 
 **区域徽标（`LoginTitleBlock` 的 `regionPill`，桌面；figma §4.10 胶囊 h30 r40，2026-07-27 改判）**：标题右侧品牌红胶囊，`--login-brand-accent` 底 + `--login-inverted-button-border` 白字 16 Bold，inline 组内 gap 2、垂直居中于 38 行框。
 
 - **挂哪些区域**：`cn` → `CN`；`dev` → `Dev`；**`global` 不挂**。这是产品叙事的硬规则而非视觉遗漏——Cindy 是「天生全球」的产品，默认版本不给自己贴标签自证是全球版，只有为特定法规单独构建的版本才被标注（不对称命名）。旧实现给 global 挂 `Global` 徽标，读出来反而是「存在一个本土主场版、这是它的出口型号」，与叙事相反。**给 global 恢复徽标即回退该决策，不得回退。**
-- **为什么 cn / dev 仍标**：两者连的是不同服务端；且 2026-07-26 起 cn 与 global 的可执行名统一为 `Cindy`（见 `packages/maker-shared/src/brandIdentity.ts`），同机双装时登录页是用户唯一能分辨自己在哪个版本的地方。
+- **为什么 cn / dev 仍标**：两者连的都不是 global 端点（cn 走国内端点、dev 走独立 dev 端点），登录页是用户确认自己连向哪个后端的位置；dev 另有并存场景——`CindyDev` 保持独立可执行名，可与正式包同机共存。⚠️ **不要把 cn 的理由写成「区分同机双装的 cn / global」**：2026-07-26 起两者可执行名同为 `Cindy`、安装目录与快捷方式同名互抢，该双装场景已**明确放弃支持**（见 `packages/maker-shared/src/brandIdentity.ts` 的 `executableNameByRegion` doc）。
 - **宽度自适应**：由 `REGION_PILL.paddingX`（11）撑开，不再固定 70px——70 是为 `Global` 一词量身定的，`CN` / `Dev` 在固定宽里会留大片空白。11 由原几何反推（(70 − `Global` 6 拉丁字符 @16 Bold ≈ 48) / 2），保住 figma 的左右留白密度。
 - **文案不翻译**：四语同文的区域代号（承袭旧 `login.globalRegion` 的做法），但仍走 i18n（`login.regionPill.*`），以便日后改判为「中国大陆版」这类可译文案时不必回改组件。
 - **手机端无此变体**：`apps/mobile` 的 `LoginTitleBlock` 不接 `regionPill`（移动端未做区域徽标）。

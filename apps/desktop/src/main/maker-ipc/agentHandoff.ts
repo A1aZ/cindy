@@ -508,6 +508,14 @@ export interface AgentHandoffPendingRegistry {
 export function createAgentHandoffPendingRegistry(
   queryPending: (sessionId: string) => Promise<string | null>,
   onConsume?: (sessionId: string) => void,
+  /**
+   * 内存命中时的补充组合钩子。存在的理由:交接不只由 queryPending 产出——
+   * agent-switch / 消息删除会直接 `set` 进内存(register.ts 的 setPendingHandoff),
+   * 那条路径不经过 DB fallback。fork 出的子会话若在首发前切了引擎,内存里就只有
+   * 切换交接,来源标记会被整条跳过。这里对**非 null 的内存值**再过一次组合,把两
+   * 者并起来;null(已 consume)不触发,消费语义不变。
+   */
+  decorateCached?: (sessionId: string, handoff: string) => Promise<string>,
 ): AgentHandoffPendingRegistry {
   const pending = new Map<string, string | null>();
   return {
@@ -515,7 +523,16 @@ export function createAgentHandoffPendingRegistry(
       pending.set(sessionId, handoff);
     },
     async peek(sessionId) {
-      if (pending.has(sessionId)) return pending.get(sessionId) ?? null;
+      if (pending.has(sessionId)) {
+        const cached = pending.get(sessionId) ?? null;
+        if (cached === null || !decorateCached) return cached;
+        try {
+          return await decorateCached(sessionId, cached);
+        } catch {
+          // 组合失败不能吞掉本来就该注入的交接——退回未组合的原值。
+          return cached;
+        }
+      }
       let fromDb: string | null = null;
       try {
         fromDb = await queryPending(sessionId);

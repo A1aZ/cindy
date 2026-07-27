@@ -244,6 +244,36 @@ describe('createAgentHandoffPendingRegistry', () => {
     expect(consumed).toHaveBeenCalledWith('s1');
   });
 
+  it('内存命中也过 decorate:agent-switch 直接 set 的交接仍能并上 fork 来源标记', async () => {
+    // fork 出子会话后、首发前切引擎:切换流程走 setPendingHandoff 直接写内存,
+    // 不经 DB fallback。没有这层组合,来源标记会被整条跳过。
+    const query = vi.fn(async () => null);
+    const decorate = vi.fn(async (_sid: string, handoff: string) => `FORK-ORIGIN\n\n${handoff}`);
+    const reg = createAgentHandoffPendingRegistry(query, undefined, decorate);
+    reg.set('s1', 'SWITCH-HANDOFF');
+    expect(await reg.peek('s1')).toBe('FORK-ORIGIN\n\nSWITCH-HANDOFF');
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('consume 后不触发 decorate(消费语义不被组合钩子破坏)', async () => {
+    const decorate = vi.fn(async (_sid: string, handoff: string) => `X${handoff}`);
+    const reg = createAgentHandoffPendingRegistry(async () => null, undefined, decorate);
+    reg.set('s1', 'H');
+    await reg.peek('s1');
+    reg.consume('s1');
+    expect(await reg.peek('s1')).toBeNull();
+    expect(decorate).toHaveBeenCalledTimes(1);
+  });
+
+  it('decorate 失败退回未组合的原值,不吞掉本来该注入的交接', async () => {
+    const decorate = vi.fn(async () => {
+      throw new Error('db down');
+    });
+    const reg = createAgentHandoffPendingRegistry(async () => null, undefined, decorate);
+    reg.set('s1', 'SWITCH-HANDOFF');
+    expect(await reg.peek('s1')).toBe('SWITCH-HANDOFF');
+  });
+
   it('内存 miss 时经 DB 重建并缓存(重启恢复语义)', async () => {
     const query = vi.fn(async () => 'from-db');
     const reg = createAgentHandoffPendingRegistry(query);

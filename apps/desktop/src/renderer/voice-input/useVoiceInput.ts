@@ -189,6 +189,12 @@ export function useVoiceInput(
   const startAttemptIdRef = useRef(0);
   const startReadyRef = useRef<StartReadyState | null>(null);
   const ownedRunIdRef = useRef<string | null>(null);
+  // Whether this run's transcript actually reached the editor. The main-process
+  // onSubmitted bridge is fire-and-forget — it emits the event and synthesizes a
+  // range, so the controller's transcriptKept flag only means "the bridge took
+  // it", not "the composer has it". If the editor was gone (route/session
+  // change), insertSubmittedText() returns null and only this side knows.
+  const transcriptLandedRef = useRef(false);
   const stopInFlightRef = useRef(false);
   const stopInFlightPromiseRef = useRef<Promise<void> | null>(null);
   const inlineErrorDismissTimerRef = useRef<number | null>(null);
@@ -947,6 +953,7 @@ export function useVoiceInput(
         case 'submitted':
           {
             const range = insertSubmittedText(event.text);
+            transcriptLandedRef.current = Boolean(range);
             if (range) {
               const historyEntryId = recordVoiceInputHistory(event.text);
               submittedRangesRef.current.set(event.segment.id, {
@@ -1016,7 +1023,12 @@ export function useVoiceInput(
         case 'error': {
           log.warn('voice input error:', event.message);
           terminalOutcomeRef.current = 'failed';
-          const formattedMessage = formatVoiceInputError(event.message, event.code, event.transcriptKept);
+          // Only this side knows whether the text really made it into the
+          // editor: the main-process bridge answers onSubmitted synchronously
+          // with a synthesized range, so transcriptKept alone would promise
+          // retention even when insertSubmittedText() found no live editor.
+          const transcriptKept = event.transcriptKept === true && transcriptLandedRef.current;
+          const formattedMessage = formatVoiceInputError(event.message, event.code, transcriptKept);
           promptCodexSessionExpired(formattedMessage);
           commitUsageStats();
           void (async () => {
@@ -1353,6 +1365,7 @@ export function useVoiceInput(
 
     runIdRef.current = result.runId;
     ownedRunIdRef.current = result.runId;
+    transcriptLandedRef.current = false;
     if (!isActiveStartAttempt(attemptId)) {
       resolveStartReadyState(attemptId, { ok: false, error: 'Voice input start was cancelled.' });
       await stopEngine();

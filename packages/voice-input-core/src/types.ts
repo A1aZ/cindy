@@ -243,6 +243,16 @@ export type VoiceTimelineEvent =
 export type VoiceInputCallbacks = {
   onStateChanged?: (state: VoiceInputState, outcome?: VoiceInputTerminalOutcome) => void;
   onDraftChanged: (text: string, segment: SpeechSegment, source: VoiceInputDraftSource) => void;
+  /**
+   * Take the final text. The returned range doubles as the acceptance signal:
+   * return one only when the text actually landed somewhere the user can see,
+   * and `undefined` when it did not (e.g. the user already edited the insertion
+   * region). The controller reports `transcriptKept` from this answer, so a host
+   * that synthesizes a range without knowing the outcome — a bridge that emits
+   * to another process and answers synchronously — will make the controller
+   * promise retention it cannot back. Such hosts must correct the claim on the
+   * side that does know (see the desktop inline composer).
+   */
   onSubmitted: (text: string, segment: SpeechSegment) => EditableRange | undefined;
   isRangeUserTouched?: (range: EditableRange) => boolean;
   onRefinementPreview?: (text: string, segment: SpeechSegment, range: EditableRange) => void;

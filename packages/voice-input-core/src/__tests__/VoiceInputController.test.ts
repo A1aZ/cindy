@@ -569,6 +569,7 @@ describe('VoiceInputController', () => {
   it('does not strand the run when the host throws on submit', async () => {
     const asr = new FakeAsrProvider();
     const errors: Array<{ message: string; code?: string; kept?: boolean }> = [];
+    let submitAttempts = 0;
     const controller = new VoiceInputController({
       asr,
       logger: new VoiceTimelineLogger(),
@@ -577,6 +578,7 @@ describe('VoiceInputController', () => {
         onDraftChanged: () => {},
         onSubmitted: () => {
           // e.g. the composer's window was destroyed while stop() was in flight
+          submitAttempts += 1;
           throw new Error('editor is gone');
         },
         onError: (message, code, details) => errors.push({ message, code, kept: details?.transcriptKept }),
@@ -590,6 +592,9 @@ describe('VoiceInputController', () => {
     // A terminal state is what lets the next dictation start at all.
     expect(controller.currentState).toBe('error');
     expect(errors).toEqual([{ message: 'editor is gone', code: undefined, kept: false }]);
+    // Exactly one attempt: a callback that threw part-way has already run an
+    // unknown share of its side effects, so salvage must not run it again.
+    expect(submitAttempts).toBe(1);
     await expect(controller.start()).resolves.toMatch(/./);
   });
 

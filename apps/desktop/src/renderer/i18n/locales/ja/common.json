@@ -4295,7 +4295,7 @@
     "emptyTranscript": "音声は検出されましたが、テキストを認識できませんでした。もう一度お試しください。",
     "connectionInterrupted": "音声接続が中断されました。ネットワークを確認してからやり直してください。",
     "recognitionStalled": "音声認識の結果が返ってこなくなりました。もう一度お試しください。",
-    "transcriptKept": "{{message}} ここまで認識したテキストは保持しています。そのまま編集できます。"
+    "transcriptKept": "{{message}}（ここまで認識したテキストは保持しており、そのまま編集できます）"
   },
   "chat": {
     "askUserQuestion": {

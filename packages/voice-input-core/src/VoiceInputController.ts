@@ -133,6 +133,11 @@ export class VoiceInputController {
   // failure-path salvage against double insertion: a recovery that rejects after
   // stop() already submitted would otherwise insert the same transcript twice.
   private transcriptEmitted = false;
+  // Set when onSubmitted threw. A callback that throws part-way has already run
+  // an unknown share of its side effects (mobile publishes the draft, then calls
+  // an injected history recorder that can throw), so retrying it through salvage
+  // would run those effects a second time. One attempt per run is the contract.
+  private submitCallbackThrew = false;
 
   constructor(options: VoiceInputControllerOptions) {
     this.asr = options.asr;
@@ -173,6 +178,7 @@ export class VoiceInputController {
     this.networkRecoveryInFlight = false;
     this.everSawAsrSignal = false;
     this.transcriptEmitted = false;
+    this.submitCallbackThrew = false;
     this.startStallWatchdog();
     this.setState('listening');
     this.logger.record({ type: 'start_clicked', runId: this.runId, at: Date.now() });
@@ -273,6 +279,7 @@ export class VoiceInputController {
       // Letting the exception escape would reject stop() before any terminal
       // state is set, stranding the run in 'submitting' — after which start()
       // refuses to begin a new one and dictation is dead until reload.
+      this.submitCallbackThrew = true;
       this.discardRefinement(runId, optimisticRefinement, 'run_failed');
       this.fail(error instanceof Error ? error.message : String(error));
       return;
@@ -669,7 +676,7 @@ export class VoiceInputController {
    * user their words were kept when the tail was actually dropped.
    */
   private salvageTranscript(): boolean {
-    if (this.transcriptEmitted) return false;
+    if (this.transcriptEmitted || this.submitCallbackThrew) return false;
     const text = normalizeSubmittedText(this.latestTranscript);
     if (!text) return false;
     const segment: SpeechSegment = {

@@ -574,7 +574,20 @@ export function createMobileVoiceControllerSession(
 
   function recordSubmittedHistory(text: string): void {
     if (!options.recordHistory) return;
-    historyEntryPromise = Promise.resolve(options.recordHistory(text))
+    // 下面的 .catch 只兜得住异步拒绝;同步抛会顺着 onSubmitted 冒出 controller,
+    // 被当成「宿主没接住这段文本」——文字其实已经写进草稿了,而 controller 还会
+    // 据此认定本次听写失败。历史记录是附带能力,不该有这个权力。
+    let recording: ReturnType<NonNullable<MobileVoiceControllerOptions['recordHistory']>>;
+    try {
+      recording = options.recordHistory(text);
+    } catch (error) {
+      console.warn(
+        '[mobile-voice] record history failed (non-fatal):',
+        error instanceof Error ? error.message : String(error),
+      );
+      return;
+    }
+    historyEntryPromise = Promise.resolve(recording)
       .then((entryId) => {
         if (typeof entryId === 'string' && entryId.trim()) {
           historyEntryId = entryId.trim();

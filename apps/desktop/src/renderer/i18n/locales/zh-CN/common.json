@@ -4295,7 +4295,7 @@
     "emptyTranscript": "检测到了语音，但没有识别出文字，请重试。",
     "connectionInterrupted": "语音连接中断了，请检查网络后重试。",
     "recognitionStalled": "语音识别没有继续返回结果，请重试。",
-    "transcriptKept": "{{message}} 识别出的文字已经保留，可以直接编辑。"
+    "transcriptKept": "{{message}}（识别出的文字已经保留，可以直接编辑）"
   },
   "chat": {
     "askUserQuestion": {

@@ -1,0 +1,96 @@
+/**
+ * attachmentTypeThumb.test.ts
+ * ---------------------------------------------------------------------------
+ * 附件卡缩略区(AttachmentTypeThumb)。
+ *
+ * 「文件需要根据文件类型有图片或者预览」(2026-07-27):优先要系统缩略图(真实
+ * 内容),拿不到才回落自绘的类型图标。这里钉住图标分派(纯函数)与回落契约;
+ * 缩略图那半依赖 Electron 系统服务,由 main 侧 fileThumbnail 测试 + 实机覆盖。
+ */
+
+import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+import { pickIconKind } from '../components/new-chat/AttachmentTypeThumb';
+
+const src = readFileSync(
+  resolve(__dirname, '..', 'components', 'new-chat', 'AttachmentTypeThumb.tsx'),
+  'utf8',
+).replace(/\r\n/g, '\n');
+
+describe('AttachmentTypeThumb — 自绘图标的类型分派', () => {
+  it('表格 / 幻灯片 / 文档 / 代码 / PDF 各归各的类型', () => {
+    expect(pickIconKind('.xlsx', 'office')).toBe('sheet');
+    expect(pickIconKind('.pptx', 'office')).toBe('slide');
+    expect(pickIconKind('.docx', 'office')).toBe('doc');
+    expect(pickIconKind('.ts', 'text')).toBe('code');
+    expect(pickIconKind('.pdf', 'pdf')).toBe('pdf');
+  });
+
+  it('大写扩展名同样命中(拖进来的文件名可能是 .PDF / .XLSX)', () => {
+    expect(pickIconKind('.XLSX', 'office')).toBe('sheet');
+    expect(pickIconKind('.PDF', 'pdf')).toBe('pdf');
+  });
+
+  it('无扩展名 / 未知类型回落中性纸张,不崩', () => {
+    expect(pickIconKind('', 'file')).toBe('plain');
+    expect(pickIconKind('.zzz', 'file')).toBe('plain');
+    expect(pickIconKind('', 'text')).toBe('text');
+  });
+
+  it('category 为 pdf 但扩展名缺失时仍算 PDF', () => {
+    expect(pickIconKind('', 'pdf')).toBe('pdf');
+  });
+});
+
+describe('AttachmentTypeThumb — 缩略图取用契约', () => {
+  it('按 2x 边长要图,retina 下不糊', () => {
+    expect(src).toMatch(/size: THUMB_PX \* 2/);
+  });
+
+  it('取不到缩略图记进 miss 集合,不每次重挂载都重问 main', () => {
+    expect(src).toMatch(/thumbMisses\.add\(filePath\)/);
+    expect(src).toMatch(/if \(thumbMisses\.has\(filePath\)\) return/);
+  });
+
+  it('粘贴产生的 clipboard:// 伪路径不去问系统缩略图', () => {
+    expect(src).toMatch(/startsWith\('clipboard:\/\/'\)/);
+  });
+
+  it('缩略图失败静默回落图标,不弹错', () => {
+    expect(src).toMatch(/catch \(err\)[\s\S]*log\.debug\('file thumbnail unavailable'/);
+    // 卸载后不得再 setState(附件可能在取图途中被移除)。
+    expect(src).toMatch(/cancelled = true/);
+    expect(src).toMatch(/if \(!cancelled\) setThumb\(next\)/);
+  });
+
+  it('图标型缩略图不裁切也不描边,内容型才裁切填满并描边', () => {
+    // dmg / zip 这类系统只给类型图标:图标四周本来就是透明的,再套一圈边框
+    // 等于在图标外面画个空方框(2026-07-27 Dash 指出)。
+    expect(src).toMatch(/objectFit: thumb\.isIcon \? 'contain' : 'cover'/);
+    expect(src).toMatch(/boxShadow: thumb\.isIcon \? undefined :/);
+  });
+
+  it('图标型判定采样四边中点与四角,解码失败按内容图处理', () => {
+    const fn = src.slice(src.indexOf('async function looksLikeIconBitmap'), src.indexOf('// ── 自绘文件图标'));
+    // 8 个采样点:四边中点 + 四角。少采会把「上白下花」的内容图误判成图标。
+    expect((fn.match(/\[[^\]]*\],/g) ?? []).length).toBeGreaterThanOrEqual(4);
+    expect(fn).toMatch(/samples\.every\(\(\[x, y\]\) => alphaAt\(x, y\) < 8\)/);
+    // 兜底方向:读不到像素时回 false(当内容图),多一圈边框好过给内容图裁错。
+    expect(fn).toMatch(/catch \{\s*return false;\s*\}/);
+  });
+
+  it('自绘图标的纸面走 token,只有类型角标带内容语义色', () => {
+    // 纸张本体 / 描边 / 正文线必须是 token,否则 Dark 模式会失配。
+    expect(src).toMatch(/fill="var\(--surface-elevated\)"/);
+    expect(src).toMatch(/stroke="var\(--text-placeholder\)"/);
+    // 角标色是 theme-invariant 的内容语义色,集中在 KIND_ACCENT 一张表里。
+    const accentBlock = src.slice(src.indexOf('const KIND_ACCENT'), src.indexOf('const KIND_LABEL'));
+    expect(accentBlock).toMatch(/pdf: '#D9553F'/);
+    // 表以外不得再散落硬编码色值(角标文字的纯白除外)。
+    const withoutAccent = src.replace(accentBlock, '');
+    const strays = withoutAccent.match(/#[0-9A-Fa-f]{6}/g) ?? [];
+    expect(strays).toEqual(['#FFFFFF']);
+  });
+});

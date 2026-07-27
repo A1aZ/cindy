@@ -2501,6 +2501,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   }): Promise<{ base64: string; mimeType: string }> =>
     ipcRenderer.invoke('media:read-image-bytes', params),
 
+  // 附件卡缩略图:本机文件交给系统缩略图服务(macOS QuickLook / Windows Shell)
+  // 出一张小预览,拿不到时回 null(调用方回落自绘文件图标)。
+  getFileThumbnail: (params: { path: string; size: number }): Promise<string | null> =>
+    ipcRenderer.invoke('file:thumbnail', params),
+
   // markdown-monorepo-resolve: smart relative-path resolver.
   // Tries `cwd/href` first, then BFS the workspace for files whose absolute
   // path ends with `/<href>` so monorepo sub-package refs (`src/App.tsx`

@@ -2090,6 +2090,13 @@ interface ElectronAPI {
   }) => Promise<{ base64: string; mimeType: string }>;
 
   /**
+   * 附件卡缩略图:本机文件走系统缩略图服务(macOS QuickLook / Windows Shell),
+   * 返回 PNG dataURL。路径越界、文件不存在、系统不支持该类型或超时都回 null,
+   * 调用方需回落到自绘文件图标。
+   */
+  getFileThumbnail: (params: { path: string; size: number }) => Promise<string | null>;
+
+  /**
    * markdown-monorepo-resolve: smart relative-path resolver. Tries direct
    * `cwd/href` first, then BFS the workspace for files whose absolute path
    * ends with `/<href>`. Returns 'none' on bad input or no matches so the

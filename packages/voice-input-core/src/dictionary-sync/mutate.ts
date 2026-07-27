@@ -431,10 +431,12 @@ export function gcTombstones(
 ): VoiceDictionarySyncState {
   const threshold = options.nowMs - options.ttlMs;
   let changed = false;
-  const records: Record<string, DictionaryRecord> = {};
+  // 用户文本作键 —— 必须无原型,否则 GC 后给 `__proto__` 赋值会走原型 setter,
+  // 那条合法词条会被静默丢掉,而且这个丢失还会被持久化并同步出去。
+  const records: Record<string, DictionaryRecord> = createDictionaryMap<DictionaryRecord>();
 
   for (const [key, record] of Object.entries(state.records)) {
-    const tombstones: Record<HlcTimestamp, HlcTimestamp> = {};
+    const tombstones: Record<HlcTimestamp, HlcTimestamp> = createDictionaryMap<HlcTimestamp>();
     const expired = new Set<HlcTimestamp>();
     for (const [tag, stamp] of Object.entries(record.tombstones)) {
       if (readTombstoneWallMs(stamp) < threshold) expired.add(tag);
@@ -445,7 +447,7 @@ export function gcTombstones(
       continue;
     }
     changed = true;
-    const incarnations: Record<HlcTimestamp, DictionaryIncarnation> = {};
+    const incarnations: Record<HlcTimestamp, DictionaryIncarnation> = createDictionaryMap<DictionaryIncarnation>();
     for (const [tag, incarnation] of Object.entries(record.incarnations)) {
       if (!expired.has(tag)) incarnations[tag] = incarnation;
     }

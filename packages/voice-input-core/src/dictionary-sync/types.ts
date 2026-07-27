@@ -169,6 +169,73 @@ export function createEmptySyncState(): VoiceDictionarySyncState {
   };
 }
 
+/**
+ * 深度校验一份来自隧道的状态。
+ *
+ * 只校验顶层是不够的:一个 incarnation 少了 `counters`、或者 aliases 里塞了字符串,
+ * 都能通过顶层检查并被持久化,然后在物化时才抛 —— 而且这份中毒的 sidecar 每次重启
+ * 都会被重新接受,词典修改和同步会一直坏下去,直到有人手工删文件。宁可在入口拒收
+ * 整帧。
+ */
+export function isValidSyncState(raw: unknown): raw is VoiceDictionarySyncState {
+  if (!isPlainRecord(raw)) return false;
+  const candidate = raw as Partial<VoiceDictionarySyncState>;
+  if (candidate.version !== VOICE_DICTIONARY_SYNC_VERSION) return false;
+  if (!isPlainRecord(candidate.records) || !isPlainRecord(candidate.suppressed)) return false;
+
+  for (const record of Object.values(candidate.records)) {
+    if (!isPlainRecord(record)) return false;
+    const { incarnations, tombstones } = record as Partial<DictionaryRecord>;
+    if (!isPlainRecord(incarnations) || !isPlainRecord(tombstones)) return false;
+    for (const value of Object.values(tombstones)) {
+      if (typeof value !== 'string') return false;
+    }
+    for (const incarnation of Object.values(incarnations)) {
+      if (!isValidIncarnation(incarnation)) return false;
+    }
+  }
+
+  for (const suppression of Object.values(candidate.suppressed)) {
+    if (!isPlainRecord(suppression)) return false;
+    const { text, stamp } = suppression as Partial<DictionarySuppression>;
+    if (typeof text !== 'string' || typeof stamp !== 'string') return false;
+  }
+  return true;
+}
+
+function isValidIncarnation(raw: unknown): boolean {
+  if (!isPlainRecord(raw)) return false;
+  const value = raw as Partial<DictionaryIncarnation>;
+  if (typeof value.tag !== 'string' || typeof value.text !== 'string') return false;
+  if (typeof value.textStamp !== 'string') return false;
+  if (value.source !== 'manual' && value.source !== 'automatic') return false;
+  if (value.stage !== 'entry' && value.stage !== 'candidate') return false;
+  if (typeof value.createdAt !== 'number' || typeof value.updatedAt !== 'number') return false;
+  if (!isValidCounter(value.counters)) return false;
+  if (!isPlainRecord(value.aliases)) return false;
+  for (const alias of Object.values(value.aliases)) {
+    if (!isPlainRecord(alias)) return false;
+    const aliasValue = alias as Partial<SyncAliasState>;
+    if (typeof aliasValue.text !== 'string' || typeof aliasValue.textStamp !== 'string') return false;
+    if (typeof aliasValue.lastSeenAt !== 'number') return false;
+    if (!isValidCounter(aliasValue.counters)) return false;
+  }
+  return true;
+}
+
+function isValidCounter(raw: unknown): boolean {
+  if (!isPlainRecord(raw)) return false;
+  for (const value of Object.values(raw)) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return false;
+  }
+  return true;
+}
+
+/** 普通对象(排除 null 与数组 —— 两者的 typeof 都是 'object')。 */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 /** 存活化身 = 没有被墓碑覆盖的化身。词条的一切对外读数都只看这些。 */
 export function listLiveIncarnations(record: DictionaryRecord): DictionaryIncarnation[] {
   return Object.values(record.incarnations)

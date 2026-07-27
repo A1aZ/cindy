@@ -118,6 +118,7 @@
     "openAccessibility": "음성 사전 보기",
     "screenTitle": "음성 사전",
     "entryCount": "{{count}}개 단어",
+    "aliasSeparator": ", ",
     "aliases": "자주 잘못 인식됨: {{aliases}}",
     "refresh": "새로고침",
     "refreshing": "새로고치는 중…",

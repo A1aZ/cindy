@@ -47,6 +47,15 @@ export interface DictionarySyncFramePayload {
   /** 帧结构版本;收到不认识的版本直接忽略,不猜着解析。 */
   frameVersion: 1;
   state: VoiceDictionarySyncState;
+  /**
+   * 请求对端无条件回发一次自己的状态。
+   *
+   * 平时只在「合并引入了新信息」时回发,省掉无谓的往返。但有一种情形必须显式索取:
+   * 发送方自己落后了(比如同步关了一段时间,期间对端学了新词)。这时对端合并完
+   * 发现自己已是超集、`changed === false`,就不会回发,发送方要一直等到对端下次
+   * 编辑或半小时兜底才追得上。
+   */
+  requestReply?: boolean;
 }
 
 export interface DictionarySyncTransport {
@@ -103,7 +112,8 @@ export function stopVoiceDictionarySync(): void {
 /** 对端桌面上线:立刻单发一次,让它尽快拿到本机状态(它也会回发自己的)。 */
 export function handleDesktopPeerOnline(deviceId: string): void {
   if (!isSyncEnabled()) return;
-  sendStateTo(deviceId, 'peer-online');
+  // 对端刚上线,它离线期间本机的状态可能已经落后于它 —— 一并索取回发。
+  sendStateTo(deviceId, 'peer-online', { requestReply: true });
 }
 
 /**
@@ -117,7 +127,8 @@ export function broadcastDictionaryNow(): void {
     clearTimeout(debounceTimer);
     debounceTimer = null;
   }
-  broadcastToAllPeers('sync-enabled');
+  // 索取回发:本机可能在关闭同步期间落后了,而对端不会主动告诉我们。
+  broadcastToAllPeers('sync-enabled', { requestReply: true });
 }
 
 /** 本地词典变更:去抖后广播。连续学习事件不会打出一连串帧。 */
@@ -151,19 +162,27 @@ export function handleIncomingDictionaryState(src: string, payload: unknown): vo
     });
     return;
   }
-  if (changed) {
-    log.info(`merged dictionary state from ${src.slice(0, 8)}`);
-    // 本机因为这次合并产生了新状态,对端未必有 —— 回发一次完成双向收敛。
-    sendStateTo(src, 'merge-reply');
+  // 回发条件:本机合并出了新东西(对端未必有),或者对端明确索取(它可能落后于我们
+  // 而自己并不知道)。requestReply 的回发不再索取,避免两端来回弹球。
+  if (changed || frame.requestReply === true) {
+    if (changed) log.info(`merged dictionary state from ${src.slice(0, 8)}`);
+    sendStateTo(src, changed ? 'merge-reply' : 'reply-requested');
   }
 }
 
-/** 供 mobile 拉取的只读投影(不含同步元数据)。 */
+/**
+ * 供 mobile 拉取的只读投影(不含同步元数据)。
+ *
+ * 同样受「在我的设备之间同步」开关约束:用户关掉之后,词典就不该再离开这台电脑 ——
+ * 只让电脑之间停下、却继续把整份词典交给手机,与开关的承诺不符。关闭时返回空表
+ * (而不是报错),手机侧照常降级到无词典,不打断语音输入。
+ */
 export function readDictionaryProjectionForMobile(): Array<{
   text: string;
   frequency: number;
   aliases: Array<{ text: string; count: number }>;
 }> {
+  if (!isSyncEnabled()) return [];
   return voiceDictionarySyncStore.materialize().entries.map((entry) => ({
     text: entry.text,
     frequency: entry.frequency,
@@ -171,11 +190,11 @@ export function readDictionaryProjectionForMobile(): Array<{
   }));
 }
 
-function broadcastToAllPeers(reason: string): void {
+function broadcastToAllPeers(reason: string, options?: { requestReply?: boolean }): void {
   if (!isSyncEnabled() || !transport) return;
   const peers = transport.listOnlineDesktopDevices();
   if (peers.length === 0) return;
-  const payload = buildFrame();
+  const payload = buildFrame(options);
   if (!payload) return;
   for (const deviceId of peers) {
     try {
@@ -189,9 +208,9 @@ function broadcastToAllPeers(reason: string): void {
   }
 }
 
-function sendStateTo(deviceId: string, reason: string): void {
+function sendStateTo(deviceId: string, reason: string, options?: { requestReply?: boolean }): void {
   if (!transport) return;
-  const payload = buildFrame();
+  const payload = buildFrame(options);
   if (!payload) return;
   try {
     transport.sendState(deviceId, payload);
@@ -202,9 +221,10 @@ function sendStateTo(deviceId: string, reason: string): void {
   }
 }
 
-function buildFrame(): DictionarySyncFramePayload | null {
+function buildFrame(options?: { requestReply?: boolean }): DictionarySyncFramePayload | null {
   const state = voiceDictionarySyncStore.getState();
   const payload: DictionarySyncFramePayload = { frameVersion: 1, state };
+  if (options?.requestReply) payload.requestReply = true;
   const bytes = Buffer.byteLength(JSON.stringify(payload), 'utf8');
   if (bytes <= MAX_STATE_FRAME_BYTES) return payload;
   // 超限:发出去只会被 relay 拒绝并抛错,且此后每次广播都一样。宁可这一轮不发,

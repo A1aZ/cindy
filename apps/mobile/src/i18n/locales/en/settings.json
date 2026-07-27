@@ -118,6 +118,7 @@
     "openAccessibility": "View voice dictionary",
     "screenTitle": "Voice dictionary",
     "entryCount": "{{count}} terms",
+    "aliasSeparator": ", ",
     "aliases": "Often misheard as: {{aliases}}",
     "refresh": "Refresh",
     "refreshing": "Refreshing…",

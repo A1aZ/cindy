@@ -118,6 +118,7 @@
     "openAccessibility": "查看语音词典",
     "screenTitle": "语音词典",
     "entryCount": "{{count}} 个词条",
+    "aliasSeparator": "、",
     "aliases": "常被听成：{{aliases}}",
     "refresh": "刷新",
     "refreshing": "刷新中…",

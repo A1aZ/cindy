@@ -303,13 +303,52 @@ export class VoiceInputDataStore {
       }
     }
 
+    // 先把迁移来的词典认领进同步状态,再提交。
+    //
+    // load() 早在处理 payload 之前就跑过了,那时词典文件还是空的,于是 sidecar 也
+    // 被初始化成空 —— 如果直接 replaceState,词条只进了 settings,而下一次词典变更
+    // 或收到远端状态都会用空 sidecar 物化出空词典,把刚迁移的内容盖掉。
+    const migrated = this.reconcileMigratedDictionary(settings);
+
     this.replaceState({
       ...current,
       legacyRendererStorageMigrated: true,
-      settings,
+      settings: migrated,
       history: compactVoiceInputHistoryIfNeeded(history),
     });
     return this.getSnapshot();
+  }
+
+  /** 把一份来自旧存储的 settings 词典认领进 CRDT,返回物化后的 settings。 */
+  private reconcileMigratedDictionary(settings: VoiceInputSettings): VoiceInputSettings {
+    if (voiceDictionarySyncStore.isIncompatible()) return settings;
+    try {
+      voiceDictionarySyncStore.reconcile({
+        entries: settings.dictionaryEntries.map((entry) => ({
+          text: entry.text,
+          source: entry.source,
+          frequency: entry.frequency,
+          aliases: entry.aliases.map((alias) => ({ text: alias.text, count: alias.count })),
+        })),
+        suppressedTexts: settings.suppressedAutomaticDictionaryTexts,
+        candidates: settings.dictionaryCandidates.map((candidate) => ({
+          text: candidate.text,
+          evidenceCount: candidate.evidenceCount,
+          aliases: candidate.aliases.map((alias) => ({ text: alias.text, count: alias.count })),
+        })),
+      });
+      const materialized = voiceDictionarySyncStore.materialize();
+      voiceDictionarySyncStore.markMaterialized(materialized);
+      return normalizeVoiceInputSettings(
+        { ...settings, ...projectMaterializedDictionary(materialized) },
+        process.platform,
+      );
+    } catch (error) {
+      log.warn('legacy renderer dictionary reconcile failed, keeping migrated settings as-is', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return settings;
+    }
   }
 
   private load(): StoredVoiceInputData {

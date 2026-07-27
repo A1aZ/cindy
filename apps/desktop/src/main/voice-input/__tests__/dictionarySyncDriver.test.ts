@@ -113,10 +113,16 @@ describe('对端准入判定', () => {
 });
 
 describe('出站', () => {
-  it('对端桌面上线时立即单发一次当前状态', () => {
+  it('对端桌面上线时立即单发一次当前状态,并索取回发', () => {
     handleDesktopPeerOnline('peer-1');
     expect(sendState).toHaveBeenCalledTimes(1);
-    expect(sendState).toHaveBeenCalledWith('peer-1', { frameVersion: 1, state: syncState });
+    // requestReply:对端离线期间本机可能已落后于它,而它合并后若发现自己是超集
+    // 就不会主动回发 —— 必须显式索取,否则要等到它下次编辑或半小时兜底。
+    expect(sendState).toHaveBeenCalledWith('peer-1', {
+      frameVersion: 1,
+      state: syncState,
+      requestReply: true,
+    });
   });
 
   it('开关关闭后既不主动发送也不处理入站', () => {
@@ -165,6 +171,31 @@ describe('入站', () => {
     });
     expect(() => handleIncomingDictionaryState('peer-1', { frameVersion: 1, state: syncState })).not.toThrow();
     expect(sendState).not.toHaveBeenCalled();
+  });
+});
+
+describe('回发协商', () => {
+  it('对端索取回发时,即使本次合并没有引入新信息也要回', () => {
+    // 场景:A 关掉同步期间 B 学了新词,A 重新打开并广播自己的陈旧状态。B 合并后
+    // 发现自己已是超集(changed=false),若不看 requestReply 就不会回发,A 永远
+    // 追不上 —— 直到 B 下次编辑或半小时兜底。
+    mergeRemoteDictionaryState.mockReturnValue(false);
+    handleIncomingDictionaryState('peer-1', {
+      frameVersion: 1,
+      state: syncState,
+      requestReply: true,
+    });
+    expect(sendState).toHaveBeenCalledTimes(1);
+  });
+
+  it('回发本身不再索取回发,避免两端来回弹球', () => {
+    mergeRemoteDictionaryState.mockReturnValue(false);
+    handleIncomingDictionaryState('peer-1', {
+      frameVersion: 1,
+      state: syncState,
+      requestReply: true,
+    });
+    expect(sendState).toHaveBeenCalledWith('peer-1', { frameVersion: 1, state: syncState });
   });
 });
 

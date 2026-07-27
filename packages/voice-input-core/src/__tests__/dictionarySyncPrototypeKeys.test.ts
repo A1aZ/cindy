@@ -12,10 +12,12 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  DEFAULT_TOMBSTONE_TTL_MS,
   addManualEntry,
   createEmptySyncState,
   createHlcClock,
   deleteTerms,
+  gcTombstones,
   materializeDictionary,
   mergeSyncStates,
   recordLearningEvent,
@@ -129,6 +131,26 @@ describe('原型链成员名作为词条', () => {
     expect(materializeDictionary(mergeSyncStates(b.state, a.state))).toEqual(
       materializeDictionary(merged),
     );
+  });
+
+  it('墓碑回收不会丢掉存活的原型名词条', () => {
+    // gcTombstones 重建 records;用普通 {} 的话,给 `__proto__` 赋值会走原型 setter,
+    // 这条合法词条会被静默丢掉,而且这个丢失还会被持久化并同步出去。
+    const a = device('a');
+    const kept = addManualEntry(a.state, a.clock, { text: '__proto__', nowMs: 1_000 });
+    a.state = kept.state;
+    a.clock = kept.clock;
+    const doomed = addManualEntry(a.state, a.clock, { text: 'Orca', nowMs: 1_100 });
+    a.state = doomed.state;
+    a.clock = doomed.clock;
+    const removed = deleteTerms(a.state, a.clock, { termKeys: ['orca'], nowMs: 2_000 });
+    a.state = removed.state;
+
+    const collected = gcTombstones(a.state, {
+      nowMs: 2_000 + DEFAULT_TOMBSTONE_TTL_MS + 1,
+      ttlMs: DEFAULT_TOMBSTONE_TTL_MS,
+    });
+    expect(materializeDictionary(collected).entries.map((entry) => entry.text)).toEqual(['__proto__']);
   });
 
   it('首次迁移时不会被当成「已存在」而静默丢弃', () => {

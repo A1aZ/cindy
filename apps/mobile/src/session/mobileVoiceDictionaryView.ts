@@ -56,15 +56,17 @@ function sortHosts(hosts: MobileVoiceDictionaryHost[]): MobileVoiceDictionaryHos
 export function patchMobileVoiceDictionaryHosts(
   hosts: readonly MobileVoiceDictionaryHost[],
   snapshot: PresenceSnapshot,
-): MobileVoiceDictionaryHost[] {
-  if (!snapshot?.deviceId || !isDesktopDevice(snapshot.platform)) return [...hosts];
+): readonly MobileVoiceDictionaryHost[] {
+  // 无变化时返回原引用:presence 事件很密集(手机、其它电脑的上下线都会来),
+  // 每次都造新数组会让设置页无谓重渲染。
+  if (!snapshot?.deviceId || !isDesktopDevice(snapshot.platform)) return hosts;
   const name = snapshot.deviceName?.trim() || snapshot.deviceId.slice(0, 8);
   const index = hosts.findIndex((host) => host.deviceId === snapshot.deviceId);
   if (index < 0) {
     return sortHosts([...hosts, { deviceId: snapshot.deviceId, name, online: Boolean(snapshot.online) }]);
   }
   const previous = hosts[index];
-  if (previous.online === Boolean(snapshot.online) && previous.name === name) return [...hosts];
+  if (previous.online === Boolean(snapshot.online) && previous.name === name) return hosts;
   const next = [...hosts];
   next[index] = { ...previous, name, online: Boolean(snapshot.online) };
   return sortHosts(next);

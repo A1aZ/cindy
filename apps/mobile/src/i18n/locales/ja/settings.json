@@ -118,6 +118,7 @@
     "openAccessibility": "音声辞書を見る",
     "screenTitle": "音声辞書",
     "entryCount": "{{count}} 語",
+    "aliasSeparator": "、",
     "aliases": "よくある誤認識：{{aliases}}",
     "refresh": "更新",
     "refreshing": "更新中…",

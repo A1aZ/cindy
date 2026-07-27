@@ -128,7 +128,7 @@ export default function SettingsScreen() {
   const updateCheckInFlightRef = useRef(false);
   // 语音词典:手机只读展示被控桌面的词典快照(正本在桌面,手机不参与合并)。
   const [dictionaryScreenOpen, setDictionaryScreenOpen] = useState(false);
-  const [desktopDevices, setDesktopDevices] = useState<MobileVoiceDictionaryHost[]>([]);
+  const [desktopDevices, setDesktopDevices] = useState<readonly MobileVoiceDictionaryHost[]>([]);
   const [dictionaryRefreshing, setDictionaryRefreshing] = useState(false);
   /** 缓存在模块里,组件用这个计数强制重渲染(每次刷新完成 +1)。 */
   const [dictionaryRevision, setDictionaryRevision] = useState(0);

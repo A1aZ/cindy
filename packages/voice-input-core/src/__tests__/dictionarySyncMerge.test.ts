@@ -331,3 +331,47 @@ describe('dictionary sync — 别名合并', () => {
     expect(aliases.map((alias) => alias.text)).toEqual(['sindy']);
   });
 });
+
+describe('dictionary sync — 远端帧深度校验', () => {
+  it('接受结构完整的状态', async () => {
+    const { isValidSyncState } = await import('../dictionary-sync');
+    const { devices } = simulate(5, 2, 60);
+    expect(isValidSyncState(devices[0].state)).toBe(true);
+    expect(isValidSyncState(createEmptySyncState())).toBe(true);
+  });
+
+  it('拒绝畸形的嵌套结构 —— 只校验顶层会让坏帧一路持久化,重启后依旧中毒', async () => {
+    const { isValidSyncState } = await import('../dictionary-sync');
+    const base = { version: 1, records: {}, suppressed: {} };
+    const incarnation = {
+      tag: 'a', text: 'x', textStamp: 'a', source: 'manual', stage: 'entry',
+      counters: { n: 1 }, aliases: {}, createdAt: 1, updatedAt: 1,
+    };
+
+    // 顶层就不合法
+    expect(isValidSyncState(null)).toBe(false);
+    expect(isValidSyncState([])).toBe(false);
+    expect(isValidSyncState({ ...base, version: 2 })).toBe(false);
+    expect(isValidSyncState({ ...base, records: [] })).toBe(false);
+
+    // 顶层通过、嵌套结构坏掉 —— 这些正是会被持久化后才在物化时炸的形状
+    expect(isValidSyncState({ ...base, records: { k: {} } })).toBe(false);
+    expect(isValidSyncState({
+      ...base,
+      records: { k: { incarnations: { a: { ...incarnation, counters: undefined } }, tombstones: {} } },
+    })).toBe(false);
+    expect(isValidSyncState({
+      ...base,
+      records: { k: { incarnations: { a: { ...incarnation, stage: 'bogus' } }, tombstones: {} } },
+    })).toBe(false);
+    expect(isValidSyncState({
+      ...base,
+      records: { k: { incarnations: { a: { ...incarnation, aliases: { x: { text: 'y' } } } }, tombstones: {} } },
+    })).toBe(false);
+    expect(isValidSyncState({
+      ...base,
+      records: { k: { incarnations: {}, tombstones: { a: 123 } } },
+    })).toBe(false);
+    expect(isValidSyncState({ ...base, suppressed: { k: { text: 'x' } } })).toBe(false);
+  });
+});

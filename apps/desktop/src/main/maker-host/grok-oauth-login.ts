@@ -32,6 +32,7 @@ import {
 import { desktopMakerLogger } from './logger-adapter.js';
 import { getProviderSecretStore } from '../secrets/providerSecretStore.js';
 import { bindNativeProviderAuth, isNativeProviderAuthBound, unbindNativeProviderAuth } from './nativeProviderAuthBinding.js';
+import type { XaiBridgeAuthRecoveryOutcome } from './xai-bridge-auth-invalidation.js';
 
 const log = desktopMakerLogger.child('grok-oauth-login');
 
@@ -86,6 +87,7 @@ let _blobCache: GrokTokenBlob | null | undefined;
 export function resetGrokOAuthMemoryCache(): void {
   _blobCache = undefined;
   _refreshChain = Promise.resolve();
+  _lastForcedRefreshAt = 0;
 }
 
 function readBlob(): GrokTokenBlob | null {
@@ -124,6 +126,8 @@ export function hasGrokOAuthLoginUnbound(): boolean {
 export function logoutGrok(): void {
   getProviderSecretStore().remove(SECRET_ID);
   _blobCache = null;
+  // 冷却窗口跟着登录态走:重新登录后第一次被拒仍应立刻尝试自愈。
+  _lastForcedRefreshAt = 0;
   unbindNativeProviderAuth('xai');
 }
 
@@ -571,28 +575,73 @@ export function cancelGrokOAuthLogin(): void {
 // ── token 刷新(bridge 每请求经 getGrokAccessToken 取用)────────────────────────
 let _refreshChain: Promise<void> = Promise.resolve();
 
+/** 被上游拒绝后强制刷新的冷却窗口(见 recoverGrokAuthAfterRejection 的说明)。 */
+const FORCED_REFRESH_COOLDOWN_MS = 60_000;
+let _lastForcedRefreshAt = 0;
+
 function isExpired(b: GrokTokenBlob): boolean {
-  if (!b.expires_at) return false; // 无 expiry 信息 → 不主动刷,靠 401 暴露
+  // 无 expiry 信息 → 不主动刷;真失效时由上游 401/403 经 recoverGrokAuthAfterRejection 收口。
+  if (!b.expires_at) return false;
   return Date.now() >= b.expires_at - REFRESH_MARGIN_SEC * 1000;
 }
 
-async function refreshIfNeeded(current: GrokTokenBlob): Promise<GrokTokenBlob> {
-  if (!isExpired(current) || !current.refresh_token) return current;
-  let result = current;
+/**
+ * 一次刷新尝试的结局。`rejected` 专指服务端明确作废 refresh_token(OAuth `invalid_grant`
+ * 家族),是唯一允许据此清空本机凭证的信号;网络抖动、5xx、超时一律 `failed`,保留凭证。
+ */
+type GrokRefreshOutcome = 'refreshed' | 'skipped' | 'superseded' | 'rejected' | 'failed';
+
+interface GrokRefreshResult {
+  blob: GrokTokenBlob;
+  outcome: GrokRefreshOutcome;
+}
+
+/**
+ * 服务端明确作废**用户凭证**的信号:再刷也不会好,只能重新登录。
+ *
+ * 只认 invalid_grant 家族(RFC 6749 里 refresh_token 失效/被撤销/被复用的标准回答)。
+ * 刻意不认 invalid_client / unauthorized_client —— 那是 client 注册侧的问题,把它当作废
+ * 会在 xAI 调整 client 配置时把所有人一起登出,而重新登录同样失败,只会更糟。
+ */
+function isRefreshRejection(status: number, body: string): boolean {
+  if (status < 400 || status >= 500) return false;
+  return /invalid_grant|invalid_token/i.test(body);
+}
+
+/**
+ * 刷新 access_token。
+ *
+ * @param force 忽略本地 expires_at 直接刷。上游已经拒了当前 token 时必须强制:被服务端
+ *   提前作废的 token 在本地看仍"没到期",不强制就永远刷不动 —— 这正是 403 长期无人
+ *   收口时用户卡在「UI 显示已连接、请求连环失败」的根因。
+ */
+async function refreshBlob(current: GrokTokenBlob, force: boolean): Promise<GrokRefreshResult> {
+  if (!force && !isExpired(current)) return { blob: current, outcome: 'skipped' };
+  if (!current.refresh_token) {
+    // 强制路径下没有 refresh_token = 无从自愈,交给调用方按「已作废」登出。
+    return { blob: current, outcome: force ? 'rejected' : 'skipped' };
+  }
+  // 下面的 catch 吞掉异常(超时 / 网络)时保留这个初值:强制路径当临时失败,不误杀凭证。
+  let result: GrokRefreshResult = { blob: current, outcome: force ? 'failed' : 'skipped' };
   const run = _refreshChain.then(async () => {
     const fresh = readBlob();
     if (fresh === null) {
       // 刷新期间用户已登出(blob 被清空)——不写回,让本次请求用旧 token 自然失败。
-      result = current;
+      result = { blob: current, outcome: 'superseded' };
       return;
     }
-    if (!isExpired(fresh)) {
-      result = fresh;
+    // 强制路径:其它请求或重新登录已经换过 token,本次失败关联的是旧凭证,不再消耗一次轮换。
+    if (force && fresh.access_token !== current.access_token) {
+      result = { blob: fresh, outcome: 'superseded' };
+      return;
+    }
+    if (!force && !isExpired(fresh)) {
+      result = { blob: fresh, outcome: 'skipped' };
       return;
     }
     const refreshToken = fresh.refresh_token;
     if (!refreshToken) {
-      result = fresh;
+      result = { blob: fresh, outcome: force ? 'rejected' : 'skipped' };
       return;
     }
     // 刷新路径只需 token endpoint，直接用常量，避免 OIDC discovery fetch 挂起整条 _refreshChain。
@@ -609,13 +658,16 @@ async function refreshIfNeeded(current: GrokTokenBlob): Promise<GrokTokenBlob> {
       signal: AbortSignal.timeout(REFRESH_FETCH_TIMEOUT_MS),
     });
     if (!res.ok) {
-      log.warn('xai token 刷新失败', { status: res.status });
-      result = fresh;
+      // body 只用于判定作废信号,不入日志 —— 错误响应可能回显授权材料。
+      const body = await res.text().catch(() => '');
+      const rejected = isRefreshRejection(res.status, body);
+      log.warn('xai token 刷新失败', { status: res.status, rejected });
+      result = { blob: fresh, outcome: rejected ? 'rejected' : 'failed' };
       return;
     }
     const tok = (await res.json()) as TokenResponse;
     if (!tok.access_token) {
-      result = fresh;
+      result = { blob: fresh, outcome: 'failed' };
       return;
     }
     const next = blobFromTokenResponse(tok, fresh);
@@ -624,21 +676,26 @@ async function refreshIfNeeded(current: GrokTokenBlob): Promise<GrokTokenBlob> {
     // 丢弃本次刷新结果。
     const beforeWrite = readBlob();
     if (beforeWrite === null) {
-      result = fresh;
+      result = { blob: fresh, outcome: 'superseded' };
       return;
     }
     if (beforeWrite.refresh_token !== refreshToken) {
-      result = beforeWrite;
+      result = { blob: beforeWrite, outcome: 'superseded' };
       return;
     }
     writeBlob(next);
-    result = next;
+    result = { blob: next, outcome: 'refreshed' };
   });
   _refreshChain = run.catch(() => undefined);
   await run.catch((err) =>
     log.warn('xai token 刷新异常', { err: err instanceof Error ? err.message : String(err) }),
   );
   return result;
+}
+
+/** 到期才刷的常规路径(getGrokAccessToken 用);强制刷新走 refreshBlob(blob, true)。 */
+async function refreshIfNeeded(current: GrokTokenBlob): Promise<GrokTokenBlob> {
+  return (await refreshBlob(current, false)).blob;
 }
 
 /**
@@ -654,4 +711,51 @@ export async function getGrokAccessToken(): Promise<string> {
   const fresh = await refreshIfNeeded(blob);
   if (!fresh.access_token) throw new Error('xAI access_token 不可用,请重新登录');
   return fresh.access_token;
+}
+
+/**
+ * 只读当前 access_token:不刷新、不抛错、未登录返回 null。
+ *
+ * 失效收口用它把上游失败与「当时确实发出去的那把凭证」做等值关联 —— 换成
+ * getGrokAccessToken 会顺带触发刷新,反而改变了要比对的状态。
+ */
+export function peekGrokAccessToken(): string | null {
+  if (!isNativeProviderAuthBound('xai')) return null;
+  return readBlob()?.access_token ?? null;
+}
+
+/**
+ * 上游(api.x.ai)明确拒绝当前 access_token 后的凭证收口。
+ *
+ * xAI 没有子进程替我们维护凭证(见文件头注),而被服务端提前作废的 token 在本地
+ * expires_at 上仍"没到期",常规刷新永远不会触发。所以这里强制刷一次:刷得动就自愈,
+ * refresh_token 也被作废才登出。网络或临时失败保留登录态 —— 宁可下次再撞一次 403,
+ * 也不要因为一次抖动把用户踢下线。
+ */
+export async function recoverGrokAuthAfterRejection(): Promise<XaiBridgeAuthRecoveryOutcome> {
+  // 与 getGrokAccessToken 同一道 owner 门:未绑定当前数据归属时不碰凭证。
+  if (!isNativeProviderAuthBound('xai')) return 'superseded';
+  const blob = readBlob();
+  if (!blob) return 'superseded';
+  // 冷却:同样是 401/403,也可能是订阅缺失、地域或模型未授权 —— 那种情况 token 本身有效,
+  // 刷新永远"成功"却永远修不好,不设窗口就会每个请求刷一次,空耗 refresh_token 轮换,
+  // 甚至撞上服务端的刷新复用检测。一个窗口只允许自愈一次,不行就让错误如实暴露给用户。
+  const now = Date.now();
+  if (now - _lastForcedRefreshAt < FORCED_REFRESH_COOLDOWN_MS) return 'unchanged';
+  _lastForcedRefreshAt = now;
+  const { outcome } = await refreshBlob(blob, true);
+  switch (outcome) {
+    case 'refreshed':
+      log.info('xai access_token 被上游拒绝,已强制刷新恢复');
+      return 'refreshed';
+    case 'superseded':
+      return 'superseded';
+    case 'rejected':
+      log.warn('xai refresh_token 已被服务端作废,清空本机凭证并回落未登录');
+      logoutGrok();
+      return 'logged_out';
+    default:
+      // failed / skipped:刷新没成功但也没有作废证据,保留凭证等下次。
+      return 'unchanged';
+  }
 }

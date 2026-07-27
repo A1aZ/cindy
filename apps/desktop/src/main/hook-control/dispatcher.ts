@@ -11,7 +11,9 @@
  *      - 带 sessionId(接管): session 必须存在且其工作目录落在本连接注册的
  *        别名路径内(白名单不因接管放松), 通过后把 externalKey 重绑到它;
  *      - 不带(默认): 别名解析(映射即白名单)-> binding 查 externalKey ->
- *        复用(且重校验白名单)或新建并落绑定;
+ *        复用(且重校验白名单)或新建并落绑定; 白名单重校验失败但**会话的工作
+ *        目录相对绑定时的快照变过**时按「用户在桌面端移动了会话」放行并跟随
+ *        (目录是本地用户亲手选的, 不是远端指定的), 目录没变才按撤权处理;
  *   3. 排队: 目标 session 正在跑 turn 时 FIFO 排队, ack 回 queued + 位置;
  *      turn 收口后自动 drain;
  *   4. 回推: turn.end 经当前连接发送; 连接不在线时缓存, 重连(onConnected)
@@ -213,15 +215,32 @@ const MAX_QUEUE_PER_SESSION = 20;
 /** 单连接离线 turn.end 缓存上限(FIFO 丢最老)。 */
 const MAX_PENDING_TURN_ENDS = 100;
 
+/** 路径比较前的规范化。Windows 大小写不敏感(规则 15)。 */
+function normalizePathForCompare(p: string): string {
+  const resolved = path.resolve(p);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
 /** target 是否落在 base 目录内(含相等)。Windows 大小写不敏感(规则 15)。 */
 export function isPathWithin(base: string, target: string): boolean {
-  const norm = (p: string): string => {
-    const resolved = path.resolve(p);
-    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-  };
-  const rel = path.relative(norm(base), norm(target));
+  const rel = path.relative(normalizePathForCompare(base), normalizePathForCompare(target));
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
+
+/** 两个路径是否指向同一目录(同 isPathWithin 的规范化口径)。 */
+export function isSamePath(a: string, b: string): boolean {
+  return normalizePathForCompare(a) === normalizePathForCompare(b);
+}
+
+/**
+ * 会话被用户移出工作目录映射后, 回给渠道的一次性说明(Slack / Telegram 侧文案
+ * 不进 locale, 与 interactions.ts 的卡片按钮同规硬编码中文)。
+ */
+const NOTICE_SESSION_MOVED = 'ℹ️ 这个对话已被移动到新的工作目录，后续消息都在新目录里执行。';
+const NOTICE_SESSION_RECREATED =
+  'ℹ️ 原对话已不在可用的工作目录里，这条消息起换用了新对话。' +
+  '要接着用原对话，请到 Cindy 的 设置 → 远程连接 → 工作目录映射，把它所在的目录加进来。';
+const NOTICE_SESSION_GONE = 'ℹ️ 原对话已被归档或删除，这条消息起换用了新对话。';
 
 /** 标题里消息摘要的最大长度(字符), 超出截断加省略号。 */
 const TITLE_SNIPPET_MAX = 24;
@@ -307,6 +326,8 @@ interface PendingTask {
   externalKey: string;
   run: HookRunRequest;
   accountGeneration: number;
+  /** 会话定位阶段产生的一次性说明, 前置到本次 turn.end 的 finalText。 */
+  notice?: string;
 }
 
 export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
@@ -480,6 +501,13 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     const status: 'ok' | 'error' | 'cancelled' = wasCancelled ? 'cancelled' : outcome.status;
     // 协议约束: error 必须带非空 errorMessage, ok / cancelled 必须为 null
     const isError = status === 'error';
+    // 会话定位说明前置到正文: 协议没有系统消息通道, 而"为什么换了个会话 /
+    // 目录变了"必须让渠道里的人看见, 否则只能观察到会话莫名重开。
+    const finalText = task.notice
+      ? outcome.finalText
+        ? `${task.notice}\n\n${outcome.finalText}`
+        : task.notice
+      : outcome.finalText;
     sendOrBuffer(
       task.connectionId,
       makeTurnEnd({
@@ -487,7 +515,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
         externalKey: task.externalKey,
         sessionId,
         status,
-        finalText: outcome.finalText,
+        finalText,
         errorMessage: isError ? outcome.errorMessage || 'unknown error' : null,
         usage: { durationMs: outcome.durationMs },
         ...(outcome.attachments !== undefined && outcome.attachments.length > 0
@@ -511,13 +539,17 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     void promise.finally(() => executing.delete(promise));
   }
 
-  /** 会话定位(接管 / 绑定复用 / 新建), 返回 run 参数或拒绝原因。 */
+  /**
+   * 会话定位(接管 / 绑定复用 / 新建), 返回 run 参数或拒绝原因。
+   * notice: 需要随本次 turn.end 一并告知渠道用户的一次性说明(会话被移动 /
+   * 旧绑定失效换了新会话) —— 协议没有系统消息通道, 由 execute 前置到 finalText。
+   */
   async function resolveTarget(
     connectionId: string,
     config: HookConnectionConfig,
     payload: TaskDispatchPayload,
     generation: number,
-  ): Promise<{ run: HookRunRequest } | { reject: TaskRejectReason }> {
+  ): Promise<{ run: HookRunRequest; notice?: string } | { reject: TaskRejectReason }> {
     // options 四元组原样透传给 runner —— 空值由 runner 按桌面端草稿默认落值
     // (取值链: Slack 按目录偏好 > 草稿默认, 权限缺省 bypass; 见
     // hook-control/defaults.ts)。复用/接管路径也照传, 消费与否由 runner 决定
@@ -539,6 +571,8 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       dir !== null && dialogue !== undefined && isPathWithin(dialogue.rootDir(), dir);
     // 保留别名「对话」: 不查 config.workspaces, 解析成 app 托管对话目录
     const isChat = payload.workspace === HOOK_CHAT_WORKSPACE_ALIAS && dialogue !== undefined;
+    /** 旧绑定作废、本次不得不新建会话时, 随 turn.end 回给渠道的说明。 */
+    let recreatedNotice: string | null = null;
 
     // 接管路径: server 显式指定已有 session(对话会话同样可接管)
     if (payload.sessionId !== null) {
@@ -548,7 +582,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       if (!inWhitelist(info.workingDir) && !inDialogueRoot(info.workingDir)) {
         return { reject: 'workspace_not_allowed' };
       }
-      bindings.set(connectionId, payload.externalKey, payload.sessionId);
+      bindings.set(connectionId, payload.externalKey, payload.sessionId, info.workingDir);
       return {
         run: {
           sessionId: payload.sessionId,
@@ -580,15 +614,18 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     // account/provider namespace may read it only as a candidate; it is moved
     // after current-account DB existence + workspace allowlist checks pass.
     const legacyNamespace = connectionId.endsWith(':slack') ? 'slack' : null;
-    const namespacedBound = bindings.get(connectionId, payload.externalKey);
-    const legacyBound =
-      namespacedBound === null && legacyNamespace !== null
-        ? bindings.get(legacyNamespace, payload.externalKey)
+    const namespacedEntry = bindings.getEntry(connectionId, payload.externalKey);
+    const legacyEntry =
+      namespacedEntry === null && legacyNamespace !== null
+        ? bindings.getEntry(legacyNamespace, payload.externalKey)
         : null;
-    const bound = namespacedBound ?? legacyBound;
-    const migrateLegacyBinding = (): void => {
+    const namespacedBound = namespacedEntry?.sessionId ?? null;
+    const legacyBound = legacyEntry?.sessionId ?? null;
+    const boundEntry = namespacedEntry ?? legacyEntry;
+    const bound = boundEntry?.sessionId ?? null;
+    const migrateLegacyBinding = (workingDir: string | null): void => {
       if (!legacyBound || !legacyNamespace) return;
-      bindings.set(connectionId, payload.externalKey, legacyBound);
+      bindings.set(connectionId, payload.externalKey, legacyBound, workingDir);
       bindings.remove(legacyNamespace, payload.externalKey);
     };
     if (bound) {
@@ -624,16 +661,42 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       if (!isCurrentGeneration(generation)) return { reject: 'disabled' };
       // 复用条件: 仍存在、可用、且仍在白名单内(别名映射可能已被用户改过);
       // chat 伪目录的会话住在 dialogues 根下, 按对话根校验
-      if (
-        info?.usable &&
-        (isChat ? inDialogueRoot(info.workingDir) : inWhitelist(info.workingDir))
-      ) {
-        migrateLegacyBinding();
+      const inAllowedRoot =
+        info !== null && (isChat ? inDialogueRoot(info.workingDir) : inWhitelist(info.workingDir));
+      /**
+       * 白名单外但**目录变过** = 用户在桌面端把这条会话「移动到项目」了。
+       * 目录是本地用户亲手选的(不是远端指定的), 属本地授权, 跟随即可 ——
+       * 否则同一个 thread 每条消息都会重开新会话, 破坏「同 key 同 session」。
+       * 目录没变而校验失败, 才是「工作目录映射被改/删」的撤权语义, 仍按旧逻辑
+       * 丢绑定重建。老绑定没有快照时同样走保守侧(下方正常复用会顺手回填)。
+       */
+      const movedByUser =
+        !inAllowedRoot &&
+        info?.usable === true &&
+        info.workingDir !== null &&
+        boundEntry?.workingDir != null &&
+        !isSamePath(boundEntry.workingDir, info.workingDir);
+      if (info?.usable && (inAllowedRoot || movedByUser)) {
+        const workingDir = info.workingDir as string;
+        migrateLegacyBinding(workingDir);
+        // 目录快照回填 / 跟随: 只在与快照不一致时落盘, 常规复用不产生写。
+        if (
+          namespacedEntry !== null &&
+          (namespacedEntry.workingDir === null ||
+            !isSamePath(namespacedEntry.workingDir, workingDir))
+        ) {
+          bindings.set(connectionId, payload.externalKey, bound, workingDir);
+        }
+        if (movedByUser) {
+          log.info(
+            `hook session ${bound} followed a desktop-side move to ${workingDir} (outside the workspace map)`,
+          );
+        }
         return {
           run: {
             sessionId: bound,
             isNew: false,
-            workingDir: info.workingDir as string,
+            workingDir,
             agentKind,
             model,
             effort,
@@ -643,10 +706,19 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
             attachments: payload.attachments,
             origin,
           },
+          ...(movedByUser ? { notice: NOTICE_SESSION_MOVED } : {}),
         };
       }
       bindings.remove(connectionId, payload.externalKey);
       if (legacyNamespace) bindings.remove(legacyNamespace, payload.externalKey);
+      // 旧绑定作废后下面会新建会话 —— 渠道侧只会看到"换了个会话"却无从得知
+      // 原因, 因此带一条说明随本次 turn.end 回去(见 execute)。
+      recreatedNotice = info?.usable ? NOTICE_SESSION_RECREATED : NOTICE_SESSION_GONE;
+      log.info(
+        `hook binding for ${payload.externalKey} dropped: session ${bound} ${
+          info?.usable ? 'left the workspace map' : 'is gone or archived'
+        }`,
+      );
     }
 
     // 新建会话: 默认为它预建独立 git worktree —— 每个 thread/会话一个隔离
@@ -686,7 +758,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
         if (prep.ok) void prep.cleanup().catch(() => undefined);
       }
     }
-    bindings.set(connectionId, payload.externalKey, sessionId);
+    bindings.set(connectionId, payload.externalKey, sessionId, runDir);
     // 标题带 provider 名: externalKey 约定为 `<providerId>:<渠道内标识>`,
     // 取前缀作 provider 名(如 team-slack), 比连接名(desktop 侧命名)更能
     // 说明"这条会话是谁驱动的"; 无前缀(非常规 key)时回退连接名
@@ -716,6 +788,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
         attachments: payload.attachments,
         origin,
       },
+      ...(recreatedNotice ? { notice: recreatedNotice } : {}),
     };
   }
 
@@ -773,6 +846,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
           externalKey: payload.externalKey,
           run: { ...resolved.run, ...(source ? { source } : {}) },
           accountGeneration: admittedGeneration,
+          ...(resolved.notice ? { notice: resolved.notice } : {}),
         };
         const sessionId = resolved.run.sessionId;
         const queue = queues.get(sessionId) ?? [];

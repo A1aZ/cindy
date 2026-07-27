@@ -14,6 +14,7 @@ import {
   buildHookSessionTitle,
   createHookDispatcher,
   isPathWithin,
+  isSamePath,
   normalizeTaskSource,
   type HookDispatcherDeps,
   type HookRunOutcome,
@@ -36,13 +37,18 @@ const CONFIG: HookConnectionConfig = {
   createdAt: 0,
 };
 
-/** 内存 binding。 */
+/** 内存 binding(含工作目录快照, 与文件实现同语义)。 */
 function memoryBindings(): HookBindingStore {
-  const map = new Map<string, string>();
+  const map = new Map<string, { sessionId: string; workingDir: string | null }>();
   const k = (c: string, e: string): string => `${c}|${e}`;
   return {
-    get: (c, e) => map.get(k(c, e)) ?? null,
-    set: (c, e, s) => void map.set(k(c, e), s),
+    get: (c, e) => map.get(k(c, e))?.sessionId ?? null,
+    getEntry: (c, e) => {
+      const row = map.get(k(c, e));
+      return row ? { ...row } : null;
+    },
+    set: (c, e, s, workingDir) =>
+      void map.set(k(c, e), { sessionId: s, workingDir: workingDir ?? null }),
     remove: (c, e) => void map.delete(k(c, e)),
   };
 }
@@ -148,6 +154,16 @@ describe('isPathWithin', () => {
     expect(isPathWithin(WS_DIR, path.resolve('/repos/other'))).toBe(false);
     // 前缀相似但非子目录(/repos/xdmaker-evil)不放行
     expect(isPathWithin(WS_DIR, `${WS_DIR}-evil`)).toBe(false);
+  });
+});
+
+describe('isSamePath', () => {
+  it('同一目录的不同写法算相同, 子目录不算', () => {
+    expect(isSamePath(WS_DIR, WS_DIR)).toBe(true);
+    expect(isSamePath(WS_DIR, path.join(WS_DIR, 'sub', '..'))).toBe(true);
+    expect(isSamePath(WS_DIR, `${WS_DIR}${path.sep}`)).toBe(true);
+    expect(isSamePath(WS_DIR, path.join(WS_DIR, 'sub'))).toBe(false);
+    expect(isSamePath(WS_DIR, path.resolve('/repos/other'))).toBe(false);
   });
 });
 
@@ -406,6 +422,136 @@ describe('dispatcher 核心语义', () => {
     expect(second.sessionId).toBe(first);
     expect(fr.calls[1]).toMatchObject({ isNew: false, sessionId: first });
     fr.finish();
+  });
+
+  it('会话被移出工作目录映射: 目录变过 -> 跟随复用并说明, 不重开新会话', async () => {
+    const bindings = memoryBindings();
+    const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
+    const fr = fakeRunner({ sessions });
+    const { d } = makeDispatcher({ runner: fr.runner, bindings });
+    const c = collector();
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    const first = c.last('task.ack')!.payload.sessionId!;
+    sessions[first] = { workingDir: WS_DIR, usable: true };
+    fr.finish();
+    await tick();
+
+    // 用户在桌面端把这条会话「移动到项目」, 目标目录不在工作目录映射里
+    const MOVED_DIR = path.resolve('/repos/another-project');
+    sessions[first] = { workingDir: MOVED_DIR, usable: true };
+
+    d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
+    await tick();
+    expect(c.last('task.ack')!.payload).toMatchObject({ result: 'accepted', sessionId: first });
+    expect(fr.calls[1]).toMatchObject({ isNew: false, sessionId: first, workingDir: MOVED_DIR });
+    // 快照跟随移动, 之后的消息不再重复提示
+    expect(bindings.getEntry('conn-1', 'team-slack:C1:1.1')).toEqual({
+      sessionId: first,
+      workingDir: MOVED_DIR,
+    });
+
+    fr.finish({ finalText: '在新目录里跑完了' });
+    await tick();
+    const finalText = c.last('turn.end')!.payload.finalText;
+    expect(finalText).toContain('已被移动到新的工作目录');
+    expect(finalText).toContain('在新目录里跑完了');
+  });
+
+  it('工作目录映射被改(会话目录没变) -> 仍丢绑定重建, 并说明原因', async () => {
+    const bindings = memoryBindings();
+    const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
+    const fr = fakeRunner({ sessions });
+    const config: HookConnectionConfig = { ...CONFIG, workspaces: { xdmaker: WS_DIR } };
+    const { d } = makeDispatcher({ runner: fr.runner, bindings, config });
+    const c = collector();
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    const first = c.last('task.ack')!.payload.sessionId!;
+    sessions[first] = { workingDir: WS_DIR, usable: true };
+    fr.finish();
+    await tick();
+
+    // 用户把别名改指到别的目录 = 撤销旧目录的 IM 访问, 旧会话不得继续被驱动
+    config.workspaces = { xdmaker: path.resolve('/repos/elsewhere') };
+
+    d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
+    await tick();
+    const second = c.last('task.ack')!.payload.sessionId!;
+    expect(second).not.toBe(first);
+    expect(fr.calls[1]).toMatchObject({
+      isNew: true,
+      workingDir: path.resolve('/repos/elsewhere'),
+    });
+
+    fr.finish({ finalText: '新会话的回答' });
+    await tick();
+    const finalText = c.last('turn.end')!.payload.finalText;
+    expect(finalText).toContain('原对话已不在可用的工作目录里');
+    expect(finalText).toContain('新会话的回答');
+  });
+
+  it('老绑定没有目录快照时按保守侧处理: 越界即重建', async () => {
+    const bindings = memoryBindings();
+    const OUTSIDE = path.resolve('/repos/another-project');
+    const fr = fakeRunner({
+      sessions: { 'legacy-session': { workingDir: OUTSIDE, usable: true } },
+    });
+    const { d } = makeDispatcher({ runner: fr.runner, bindings });
+    const c = collector();
+    // v1 形态: 只有 sessionId, 无从判断目录是被用户移动还是映射被改
+    bindings.set('conn-1', 'team-slack:C1:1.1', 'legacy-session');
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+
+    const sessionId = c.last('task.ack')!.payload.sessionId!;
+    expect(sessionId).not.toBe('legacy-session');
+    expect(fr.calls[0]).toMatchObject({ isNew: true, workingDir: WS_DIR });
+    expect(bindings.getEntry('conn-1', 'team-slack:C1:1.1')).toEqual({
+      sessionId,
+      workingDir: WS_DIR,
+    });
+    fr.finish();
+  });
+
+  it('正常复用顺手回填目录快照(存量绑定升级路径)', async () => {
+    const bindings = memoryBindings();
+    const fr = fakeRunner({ sessions: { 'legacy-session': { workingDir: WS_DIR, usable: true } } });
+    const { d } = makeDispatcher({ runner: fr.runner, bindings });
+    const c = collector();
+    bindings.set('conn-1', 'team-slack:C1:1.1', 'legacy-session');
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+
+    expect(c.last('task.ack')!.payload.sessionId).toBe('legacy-session');
+    expect(bindings.getEntry('conn-1', 'team-slack:C1:1.1')).toEqual({
+      sessionId: 'legacy-session',
+      workingDir: WS_DIR,
+    });
+    fr.finish({ finalText: '继续' });
+    await tick();
+    // 正常复用不打扰用户
+    expect(c.last('turn.end')!.payload.finalText).toBe('继续');
+  });
+
+  it('绑定的会话已归档/删除 -> 重建并说明是原对话没了', async () => {
+    const bindings = memoryBindings();
+    const fr = fakeRunner({ sessions: { 'gone-session': { workingDir: WS_DIR, usable: false } } });
+    const { d } = makeDispatcher({ runner: fr.runner, bindings });
+    const c = collector();
+    bindings.set('conn-1', 'team-slack:C1:1.1', 'gone-session', WS_DIR);
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    expect(c.last('task.ack')!.payload.sessionId).not.toBe('gone-session');
+
+    fr.finish({ finalText: '新的回答' });
+    await tick();
+    expect(c.last('turn.end')!.payload.finalText).toContain('原对话已被归档或删除');
   });
 
   it('切账号期间异步定位失败也不回写旧代 rejected ack', async () => {

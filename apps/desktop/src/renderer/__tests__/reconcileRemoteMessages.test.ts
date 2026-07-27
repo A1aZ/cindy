@@ -631,6 +631,64 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     expect(invoke).not.toHaveBeenCalledWith(DEVICE_ID, 'local-db:messages:list', expect.anything());
   });
 
+  it('远程会话:陈旧代际的对账整体作废,不覆盖新窗口也不抢新代际的锁', async () => {
+    // review #676(codex P1):CCAgentSessionView 直接发起一次对账,useRemoteSessionSync
+    // 又独立 fire-and-forget 排一次,两次可以重叠。旧的那次若不比对代际就落地,会拿着过期的
+    // existingIds 覆盖新窗口,还会 bump 代际把新代际里那次跳转刚拿到的分页锁清掉 —— 跳转
+    // 随即被作废,同时放开另一个请求去抢同一个游标。
+    const s = sid();
+    await openRemoteWithHistory(s, [
+      dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z'),
+    ]);
+
+    const stalePage = deferred<Message[]>();
+    const jumpPage = deferred<Message[]>();
+    let list50Calls = 0;
+    remoteListResolver = (args) => {
+      const opts = (args[1] ?? {}) as { limit?: number };
+      // 跳转补齐用 limit=100,对账用 limit=50。
+      if (opts.limit === 100) return jumpPage.promise;
+      list50Calls += 1;
+      // 第一次对账的首页停在飞行中;之后的对账正常返回权威页。
+      if (list50Calls === 1) return stalePage.promise;
+      return [dbMessage(s, 'auth-1', 'authoritative latest', '2026-06-20T00:00:00.000Z')];
+    };
+
+    // 对账 #1:卡在首页。
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    // 对账 #2:完成,与旧窗口无重叠 → 权威重建 + bump 代际。
+    makerChatStore.reconcileRemoteMessages(s);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual(['client-auth-1']);
+
+    // 新代际里发起一次跳转,它拿到分页锁并停在自己那一页上。
+    const target = dbMessage(s, 'jump-target', 'jump target', '2026-06-19T00:00:00.000Z');
+    remoteAround = [target];
+    const jump = makerChatStore.loadAroundMessageClientId(s, 'client-jump-target', { radius: 60 });
+    await flush();
+    expect(makerChatStore.getSnapshot(s).isLoadingMore).toBe(true);
+
+    // 对账 #1 的那一页现在才回来(属于旧代际)。
+    stalePage.resolve([
+      dbMessage(s, 'stale-auth', 'stale authoritative', '2026-06-14T00:00:00.000Z'),
+    ]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    // 关键一:陈旧对账的行不得落地。
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).not.toContain(
+      'client-stale-auth',
+    );
+    // 关键二:锁仍属于那次跳转 —— 陈旧对账不得代它释放。
+    expect(makerChatStore.getSnapshot(s).isLoadingMore).toBe(true);
+
+    // 跳转没被作废:它自己那一页回来后正常命中目标。
+    jumpPage.resolve([target]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    expect((await jump)?.clientId).toBe('client-jump-target');
+    expect(makerChatStore.getSnapshot(s).isLoadingMore).toBe(false);
+  });
+
   it('远程会话:权威重建作废在飞行中的跳转补齐,并释放分页锁', async () => {
     // review #676(codex P1):无重叠分支换掉整片窗口 + 改写 oldestMessageId,却不 bump
     // 代际。此时一个在飞行中的搜索跳转补齐会带着**重建前**的游标返回,把脱离上下文的旧

@@ -1509,9 +1509,6 @@ function workRunStartTs(it: WorkChildItem): number | null {
   return messageTs(it.message);
 }
 
-/** run 末子项的结束时间戳估算(无终结正文消息可用时的兜底):
- *  tool_segment 取最后一个 toolCall 的 createdAt(低估最后一次工具执行耗时,
- *  可接受);thinking 取 createdAt + durationMs 与 createdAt 的较大值。 */
 /**
  * run 末子项的结束时间戳 —— 直接复用 renderItemEndMs,不再自己算一份。
  *

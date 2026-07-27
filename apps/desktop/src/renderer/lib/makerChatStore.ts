@@ -769,8 +769,15 @@ export interface SessionChatState {
    * covered 而不补齐,于是"中间缺失"再也修不好(#676 review)。有孤岛时快速通道失效,
    * 每次跳转都重新从最新翻页,让这个状态可自愈。
    *
-   * 只由窗口整体重建(reloadMessages / clear / 初始加载)清回 false —— 那时窗口是从最新
-   * 连续拉起来的。
+   * 只由**把窗口清空、从最新重新拉起**的路径清回 false:reloadMessages(rewind / origin
+   * 漂移重载)、clearSessionAfterGuard(/clear)、_demoteIdleSessions(空闲降级)、
+   * _purgeSession(整条移除,重建后回到默认 false)。
+   *
+   * 反过来,这几处**刻意不清**(都在 #676 review 里逐条确认过):
+   *  - `covered`:到达本次目标只证明"尾部 → 本目标"连续,不证明更早的孤岛都被跨过;
+   *  - `_trimMessagesIfNeeded`:`slice(-TRIM_TARGET)` 只保证"最新 200 行",不保证连续;
+   *  - 首拉落地:它只是把最新一页 merge 进来,孤岛与尾段之间的洞还在(游标交还给最新页
+   *    下沿,好让往上翻能穿过去)。
    */
   historyWindowHasIsland?: boolean;
   isFirstMessage: boolean;
@@ -1281,7 +1288,12 @@ function _trimMessagesIfNeeded(sessionId: string): void {
   // 本次重置自己释放分页锁。
   bumpMessagesEpoch(sessionId);
   setState(sessionId, (s) => {
-    if (s.messages.length <= TRIM_THRESHOLD) return s;
+    // 兜底早返(当前不可达:上面三道守卫都在 bump 之前,而 setState 是同步的、拿到的就是
+    // 同一份 state)。仍然要放锁:epoch 已经 bump 掉,in-flight 的翻页 / 补齐已被作废且
+    // 刻意不自清,漏这一处就会让行首守卫把该会话的翻页永久卡住(#676 review greptile)。
+    if (s.messages.length <= TRIM_THRESHOLD) {
+      return s.isLoadingMore ? { ...s, isLoadingMore: false } : s;
+    }
     return {
       ...s,
       messages: s.messages.slice(-TRIM_TARGET),
@@ -5459,6 +5471,12 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
     );
   }
   const existingIds = new Set(state.messages.map((m) => m.clientId));
+  // 代际快照:对账要翻最多 10 页(隧道下可达数秒),这期间窗口可能已被别的路径整体重建
+  // ——包括**另一次对账**:CCAgentSessionView 会直接发起一次,而 useRemoteSessionSync
+  // 独立地 fire-and-forget 再排一次,两次可以重叠。旧的那次若不比对代际就落地,会拿着
+  // 过期的 existingIds 覆盖新窗口,还会 bump 代际、把新一次跳转刚拿到的分页锁清掉
+  // (那次跳转随即被作废,同时放开了另一个请求去抢游标)(#676 review codex P1)。
+  const reconcileEpochAtStart = _messagesEpoch.get(sessionId) ?? 0;
   // 远程回执新鲜度括号:启动记代、成功完成上报(失败不报)。回执只被「入队之后
   // 才启动且成功完成」的对账放行,见 sessionAttentionStore 的门槛说明。
   const syncToken = noteRemoteSessionSyncStarted(sessionId);
@@ -5500,6 +5518,12 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
         before = oldest.id;
       }
       if (collected.length === 0) return;
+      // 代际已变 → 本次对账整体作废:existingIds 与拉回的窗口都属于旧代际,落地只会覆盖
+      // 新窗口;更不能 bump 代际去清掉新代际的分页锁。不上报同步完成,交给下一轮触发。
+      if ((_messagesEpoch.get(sessionId) ?? 0) !== reconcileEpochAtStart) {
+        windowApplied = false;
+        return;
+      }
       const mapped = mapServerMessages(collected);
       // 翻满上限仍没接回已知区段 → 下面走权威重建分支:整片旧窗口被换掉、oldestMessageId
       // 也被改写。这是第八条"整体重建窗口"的路径,必须 bump epoch 作废 in-flight 的翻页 /
@@ -5974,7 +5998,21 @@ function commitAroundWindow(
     // 窗口更早的位置,那次提交就会把游标"回退到更新的值",破坏单调性 —— 后续向上滚动
     // 会重复拉已加载的历史,连翻几次看不到进展(#676 review)。让锁持有者自己收尾,
     // 代价只是下一次翻页可能重复取一段(mergeMessages 按 clientId 去重,不会重复显示)。
-    if (outcome === 'busy') return { ...s, messages, historyWindowHasIsland: true };
+    //
+    // 只有**真的加进了行**才记孤岛。busy 是在成员快速通道**之前**返回的(锁优先),所以
+    // 目标已在连续窗口里、around 一行都没新增的情况也会走到这里;无条件置 true 会把一个
+    // 本来连续的窗口永久标成不连续:此后每次窗口内搜索都绕过直接 focus、从 oldestMessageId
+    // 往上补齐,而那个游标比已加载的目标更老、翻页永远碰不到它,于是每次搜索都白跑最多
+    // 80 个请求再退回 fallback(#676 review codex P1)。mergeMessages 只增不减,所以
+    // "长度没变"就等价于"没引入可能不连续的行"。
+    if (outcome === 'busy') {
+      const addedRows = messages.length !== s.messages.length;
+      return {
+        ...s,
+        messages,
+        ...(addedRows ? { historyWindowHasIsland: true } : {}),
+      };
+    }
 
     return {
       ...s,

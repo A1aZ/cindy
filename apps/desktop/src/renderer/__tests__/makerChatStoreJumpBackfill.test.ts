@@ -877,6 +877,46 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).not.toContain('stale');
   });
 
+  it('Z. busy 让位时 around 一行没新增,不得凭空记上孤岛', async () => {
+    // review #676(codex P1):busy 是在成员快速通道**之前**返回的(锁优先),所以"目标本来
+    // 就在连续窗口里"也会走到 busy 的 fallback。那里原先无条件置 historyWindowHasIsland,
+    // 于是一个本来连续的窗口被永久标成不连续:此后每次窗口内搜索都绕过直接 focus、从
+    // oldestMessageId 往上补齐,而那个游标比已加载的目标更老、翻页永远碰不到它。
+    const seeded = fullPageNewestFirst();
+    const inWindow = seeded[50];
+
+    // 建立连续窗口。
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([inWindow]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce(seeded);
+    await makerChatStore.loadAroundMessageClientId(SID, inWindow.clientId, { radius: 60 });
+    expect(makerChatStore.getSnapshot(SID).historyWindowHasIsland).toBe(false);
+    const windowSize = makerChatStore.getSnapshot(SID).messages.length;
+
+    // 让普通向上分页占住锁。
+    let releasePage: (rows: Message[]) => void = () => {};
+    vi.mocked(listMessagesFor).mockImplementationOnce(
+      () =>
+        new Promise<Message[]>((resolve) => {
+          releasePage = resolve;
+        }),
+    );
+    makerChatStore.loadOlderMessages(SID);
+    await flushMicrotasks();
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(true);
+
+    // 跳一个**已在窗口里**的目标:补齐让位(busy),around 返回的行也全在窗口里 → 零新增。
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([seeded[49], inWindow]);
+    await makerChatStore.loadAroundMessageClientId(SID, inWindow.clientId, { radius: 60 });
+
+    expect(makerChatStore.getSnapshot(SID).messages).toHaveLength(windowSize);
+    // 关键:一行都没加进来 → 窗口连续性没有变化,标记不得被点亮。
+    expect(makerChatStore.getSnapshot(SID).historyWindowHasIsland).toBe(false);
+
+    releasePage([]);
+    await flushMicrotasks();
+    expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(false);
+  });
+
   it('Y. 超长裁剪不清孤岛标记(裁剪只保证"最新 200 行",不保证连续)', async () => {
     // review #676(codex P1):slice(-TRIM_TARGET) 取的是最新 200 行,不等于"连续的最新
     // 一段"。若先前几次深跳留下多个孤岛、真正连续的尾段不足 200 行,裁剪结果里还夹着孤岛。

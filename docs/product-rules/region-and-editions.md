@@ -91,7 +91,7 @@ Cindy 是一个面向全球的产品。中国大陆版是它为当地法规、�
 
 | 项 | 现状 | 冲突条款 | 收敛难点 |
 | --- | --- | --- | --- |
-| 登录页 `Global` 徽标 | 设计规范规定国际区在标题旁显示红色 `Global` pill、中国大陆版不标；见 `docs/design-rules/DESIGN.md` §16.1、`figma-component-spec.md` §4.10、`token-decision-table.md`（`login-global-badge-bg`），落码在 `apps/desktop/src/renderer/components/login/LoginPage.tsx` | §2.3 | 属于产品与设计决策，收敛需同步修订三份设计文档与既有 token |
+| 登录页区域徽标 | 原设计规范规定国际区在标题旁显示红色 `Global` pill、中国大陆版不标；见 `docs/design-rules/DESIGN.md` §16.1、`figma-component-spec.md` §4.10、`token-decision-table.md`（`login-global-badge-bg`），落码在 `apps/desktop/src/renderer/components/login/LoginPage.tsx` | §2.3 | **正在收敛**：PR #554 已将徽标翻转为 global 不标、`cn` / `dev` 标注，并同步修订 `DESIGN.md`。该 PR 合并后删除本行 |
 | 端点清单文件名 | `config/endpoint.json` 是中国大陆版，`config/endpoint.global.json` 才是 Global | §2.1 | 改名牵动构建脚本与发布链路 |
 | Electron userData 目录名 | `cn` 为 `Cindy`、`global` 为 `CindyGlobal` | §2.1 | 已发布客户端的数据目录不能直接改名，需要迁移方案 |
 

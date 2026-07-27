@@ -9,7 +9,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import {
   hasAnySessionInTurn,
   isTerminalTurnErrorEvent,
@@ -28,6 +28,11 @@ const source = readFileSync(sourcePath, 'utf8').replace(/\r\n?/g, '\n');
  */
 function stripComments(text: string): string {
   return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+}
+
+/** 路径分隔符归一成 POSIX：Windows 上 path.relative 返回反斜杠。 */
+function toPosix(p: string): string {
+  return p.split(sep).join('/');
 }
 
 describe('主 BrowserWindow 后台节流', () => {
@@ -207,7 +212,9 @@ describe('窗口可见性广播（装饰动画闸门的兜底信号）', () => {
       const content = stripComments(readFileSync(file, 'utf8'));
       const unthrottled = countMatches(content, /backgroundThrottling:\s*false/g);
       if (unthrottled === 0) continue;
-      const rel = relative(mainDir, file);
+      // 归一成 POSIX 分隔符再比对：Windows 上 path.relative 返回反斜杠，
+      // 而 BROADCAST_EXEMPT 的 key 是 POSIX 写法，不归一会匹配不上豁免、误报 offender。
+      const rel = toPosix(relative(mainDir, file));
       if (BROADCAST_EXEMPT.has(rel)) continue;
       const installed = countMatches(content, /installWindowHiddenBroadcast\(\s*\w/g);
       if (installed < unthrottled) {

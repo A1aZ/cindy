@@ -1495,48 +1495,41 @@ export async function findPendingAgentHandoff(sessionId: string): Promise<string
 /**
  * 查 fork 出的子会话是否还欠一条「来源标记」——返回父会话 id,不欠则 null。
  *
- * 判定同样确定性、可从 DB 重建(不需要额外存储位):fork 复制历史时**保留原
- * createdAt**(见 maker-orchestration/fork.ts),而新会话的 createdAt = fork 时刻,
- * 所以复制来的行早于它;子会话真正跑过一轮后才会有不早于它的 assistant 行。
+ * 判定用 `total_token_usage`:fork 建会话时它被显式 reset 为 0(见
+ * maker-orchestration/fork.ts),此后每完成一轮由 recordSessionTurnTokens 累加。
+ * 所以 `> 0` ⟺ 子会话确实自己跑过一轮,`= 0` ⟺ 还欠这条来源标记。
  *
- * 为什么看 assistant 而不是 user:有调用方在 dispatch **之前**就先把 user 行落库
- * ——goal 路径的 setGoal 先 persistUserMessage 再 fireTurn→peek(goal-host/
- * controller.ts)。用 user 行判定会把这种 fork 后首个动作是 /goal 的会话误判成
- * "已发送",恰好在它真正的第一轮里漏掉来源标记。assistant 行只在模型确实回应过
- * 之后才出现,不受任何 pre-dispatch 持久化影响。
+ * 为什么不比时间戳:消息 createdAt 不可信。
+ *  - 复制历史保留原 createdAt,而外部导入的会话里这个值是**合成**的——importer
+ *    故意写 `createdAt + sequence`(claude-local-sessions.ts)与 `timestamp + lineNo`
+ *    (codex-local-sessions.ts)来强制行序,长 transcript 的末尾行能超出真实墙钟
+ *    好几秒。拿它跟新会话 createdAt 比大小,会把纯粹的 pre-fork 历史误判成子会话
+ *    自己的回应,首发就漏掉来源标记;
+ *  - 同毫秒边界同样无解(复制行与 fork 操作落在同一毫秒)。
  *
- * 已知精度边界(方向都是"多注入一次"而非丢失,可接受):
- *  - 首发失败、没等到 assistant 就重启:下次发送会再注入一次——首发本就没送达,
- *    重注入是对的;
- *  - 最后一条被复制的 assistant 与 fork 操作落在同一毫秒时,会被算成子会话自己的
- *    回应而漏注入。fork 点通常是 user 消息(其后的 assistant 不进复制范围),要撞
- *    上需要程序化 fork 与源 assistant 落库同毫秒,概率极低。
+ * 为什么不看有没有 user / assistant 行:也不可靠。goal 路径的 setGoal 先
+ * persistUserMessage 再 fireTurn→peek(goal-host/controller.ts),dispatch 前就落了
+ * user 行;而 assistant 行仍要回到上面那套时间戳比较。token 计数没有这两个问题。
  *
- * 不为它在 messages 里加隐藏边界行:那会让该会话之后再也不能被 fork
+ * 已知精度边界(方向是"多注入一次"而非丢失,可接受):一轮跑完但 usage 上报失败,
+ * 或 turn 中途重启,计数仍为 0,下次发送会再注入一次。
+ *
+ * 不为它加持久位:写 messages 隐藏边界行会让该会话之后再也不能被 fork
  * (resolveForkNativeSource 见到 context_rebuild 即判 UNSUPPORTED_HISTORY);
- * 也不为它加 schema 列——来源标记是元信息,不值得一次 migration。
+ * 加 schema 列则是为一个元信息付一次 migration。既有列已经够用。
  */
 export async function findPendingForkOrigin(sessionId: string): Promise<string | null> {
   const db = getDbClient().drizzle;
   const [sessRow] = await db
-    .select({ parentSessionId: sessions.parentSessionId, createdAt: sessions.createdAt })
+    .select({
+      parentSessionId: sessions.parentSessionId,
+      totalTokenUsage: sessions.totalTokenUsage,
+    })
     .from(sessions)
     .where(eq(sessions.id, sessionId))
     .limit(1);
   if (!sessRow?.parentSessionId) return null;
-  const [assistantAfterFork] = await db
-    .select({ id: messages.id })
-    .from(messages)
-    .where(
-      and(
-        eq(messages.sessionId, sessionId),
-        eq(messages.role, 'assistant'),
-        isNull(messages.rewindAt),
-        gte(messages.createdAt, sessRow.createdAt),
-      ),
-    )
-    .limit(1);
-  return assistantAfterFork ? null : sessRow.parentSessionId;
+  return (sessRow.totalTokenUsage ?? 0) > 0 ? null : sessRow.parentSessionId;
 }
 
 /**

@@ -276,15 +276,38 @@ export function buildHandoffText(
   const turns = splitTurns(messages);
   // 超出硬上限时逐档收缩逐字区(4→3→2→1 轮)重组——绝不能从尾部硬切:
   // 检索指引与结束标记在尾部,是最不能丢的段。收缩到 1 轮仍超限才走最后的
-  // 尾部截断保险(实际不可达:各区预算之和 < 上限)。
+  // 尾部截断保险。
   for (let recentCount = RECENT_TURNS; recentCount >= 1; recentCount--) {
     const text = assembleHandoffText(turns, messages, opts, recentCount);
     if (text.length <= HANDOFF_HARD_CAP || recentCount === 1) {
-      return text.length > HANDOFF_HARD_CAP ? text.slice(0, HANDOFF_HARD_CAP) : text;
+      return capPreservingTerminator(text, opts);
     }
   }
   /* istanbul ignore next -- 循环必然 return */
-  return assembleHandoffText(turns, messages, opts, 1).slice(0, HANDOFF_HARD_CAP);
+  return capPreservingTerminator(assembleHandoffText(turns, messages, opts, 1), opts);
+}
+
+/** 结束标记——交接正文与"用户的新消息"之间唯一的分隔,任何情况下都要留住。 */
+function handoffTerminator(opts: BuildHandoffOptions): string {
+  return opts.reason === 'message-deletion'
+    ? "== End of rebuild note; the user's new message follows =="
+    : "== End of handoff note; the user's new message follows ==";
+}
+
+/**
+ * 兜底截断:宁可从正文中部切,也必须保住尾部的结束标记。
+ *
+ * 裸 `slice(0, CAP)` 会把结束标记连同检索指引的尾巴一起削掉,新用户消息就失去了与
+ * 内部历史的显式分隔——工具密集的长历史(逐字区已收缩到 1 轮仍超限)真会走到这里,
+ * 英文 framing 比原中文长,触达上限更容易。
+ */
+function capPreservingTerminator(text: string, opts: BuildHandoffOptions): string {
+  if (text.length <= HANDOFF_HARD_CAP) return text;
+  const terminator = handoffTerminator(opts);
+  const separator = '\n\n';
+  const room = HANDOFF_HARD_CAP - terminator.length - separator.length;
+  if (room <= 0) return terminator.slice(0, HANDOFF_HARD_CAP);
+  return `${text.slice(0, room)}${separator}${terminator}`;
 }
 
 function assembleHandoffText(
@@ -413,11 +436,7 @@ function assembleHandoffText(
     );
   }
 
-  sections.push(
-    opts.reason === 'message-deletion'
-      ? '== End of rebuild note; the user\'s new message follows =='
-      : '== End of handoff note; the user\'s new message follows ==',
-  );
+  sections.push(handoffTerminator(opts));
   // 不在组装阶段做任何截断——超限收缩由 buildHandoffText 的外层循环负责
   // (收缩逐字区保住首尾),尾部硬切只是外层最后的保险。
   return sections.join('\n\n');

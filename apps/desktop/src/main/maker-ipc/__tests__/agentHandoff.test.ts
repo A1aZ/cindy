@@ -465,6 +465,61 @@ describe('buildHandoffText 超限收缩保住首尾', () => {
     expect(text.trimEnd().endsWith("== End of handoff note; the user's new message follows ==")).toBe(true);
   });
 
+  /**
+   * 工具密集 + 工作状态区 + 检索指引三者叠满时,逐字区收缩到 1 轮仍会超过硬上限,
+   * 真正走到兜底截断分支(实测该构造正好顶到 16000)。英文 framing 比原中文长,
+   * 触达上限更容易;裸 slice 会把结束标记连同检索指引的尾巴一并削掉,用户的新消息
+   * 就失去了与内部历史的唯一显式分隔。
+   */
+  function capOverflowHistory(): HandoffSourceMessage[] {
+    const out: HandoffSourceMessage[] = [];
+    for (let i = 0; i < 25; i++) {
+      out.push(msg('user', `Q${i} ${'x'.repeat(3_000)}`));
+      out.push(msg('tool_use', {
+        toolUseId: `e-${i}`,
+        toolName: 'Edit',
+        input: { file_path: `/repo/very/deep/path/segment/${i}/${'d'.repeat(120)}.ts` },
+      }));
+      out.push(msg('tool_use', {
+        toolUseId: `b-${i}`,
+        toolName: 'Bash',
+        input: { command: `pnpm run something-${i} ${'c'.repeat(300)}` },
+      }));
+      out.push(msg('assistant', `A${i} ${'y'.repeat(3_000)}`));
+    }
+    for (let j = 0; j < 45; j++) {
+      out.push(msg('tool_use', {
+        toolUseId: `x-${j}`,
+        toolName: 'Read',
+        input: { file_path: `/repo/tail/${j}/${'t'.repeat(400)}.ts` },
+      }));
+    }
+    return out;
+  }
+
+  it('逐字区收缩到底仍超限时,兜底截断也必须留住结束标记(不裸 slice 削尾)', () => {
+    const text = buildHandoffText(capOverflowHistory(), {
+      fromLabel: 'Claude Code',
+      toLabel: 'Codex',
+      sessionId: 'sess-cap',
+    });
+    expect(text.length).toBe(16_000); // 确实顶到上限 = 确实走了兜底分支
+    expect(text.trimEnd().endsWith("== End of handoff note; the user's new message follows =="))
+      .toBe(true);
+  });
+
+  it('message-deletion 兜底截断留住的是重建版结束标记', () => {
+    const text = buildHandoffText(capOverflowHistory(), {
+      fromLabel: 'Codex',
+      toLabel: 'Codex',
+      sessionId: 'sess-cap',
+      reason: 'message-deletion',
+    });
+    expect(text.length).toBe(16_000);
+    expect(text.trimEnd().endsWith("== End of rebuild note; the user's new message follows =="))
+      .toBe(true);
+  });
+
   it('单轮 100 条 tool_use 折叠中部,且硬上限/检索段/结束标记全部存活', () => {
     const messages: HandoffSourceMessage[] = [msg('user', '执行大量工具')];
     for (let i = 0; i < 100; i++) {

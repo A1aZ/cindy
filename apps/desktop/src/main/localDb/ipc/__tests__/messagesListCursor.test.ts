@@ -57,7 +57,8 @@ function createDb(): Database.Database {
       id TEXT PRIMARY KEY,
       cleared_at INTEGER,
       parent_session_id TEXT,
-      created_at INTEGER NOT NULL DEFAULT 0
+      created_at INTEGER NOT NULL DEFAULT 0,
+      total_token_usage INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE messages (
       id TEXT PRIMARY KEY,
@@ -279,19 +280,22 @@ describe('local-db:messages:list cursor', () => {
 describe('findPendingForkOrigin 来源标记重建', () => {
   const FORK_AT = 5_000;
 
-  function insertForkedSession(sqlite: Database.Database, parent: string | null): void {
+  function insertForkedSession(
+    sqlite: Database.Database,
+    parent: string | null,
+    totalTokenUsage = 0,
+  ): void {
     sqlite
       .prepare(
-        'INSERT INTO sessions (id, cleared_at, parent_session_id, created_at) VALUES (?, NULL, ?, ?)',
+        'INSERT INTO sessions (id, cleared_at, parent_session_id, created_at, total_token_usage) VALUES (?, NULL, ?, ?, ?)',
       )
-      .run('s1', parent, FORK_AT);
+      .run('s1', parent, FORK_AT, totalTokenUsage);
   }
 
   function insertRowAt(
     sqlite: Database.Database,
     role: 'user' | 'assistant',
     createdAt: number,
-    rewindAt: number | null = null,
   ): void {
     sqlite
       .prepare(
@@ -299,31 +303,35 @@ describe('findPendingForkOrigin 来源标记重建', () => {
       INSERT INTO messages (
         id, client_id, session_id, role, content, tool_use_id, agent_meta,
         agent_kind, created_at, rewind_at
-      ) VALUES (?, ?, 's1', ?, '"q"', NULL, NULL, 'cc', ?, ?)
+      ) VALUES (?, ?, 's1', ?, '"q"', NULL, NULL, 'cc', ?, NULL)
     `,
       )
-      .run(`${role}-${createdAt}`, `${role}-${createdAt}`, role, createdAt, rewindAt);
+      .run(`${role}-${createdAt}`, `${role}-${createdAt}`, role, createdAt);
   }
 
   it('fork 后尚未跑过一轮:返回父会话 id(重启后同样可重建,不依赖内存态)', async () => {
     const sqlite = createDb();
     insertForkedSession(sqlite, 'parent-1');
-    // 复制来的历史保留原 createdAt,早于 fork 时刻——不应被当成"已发送"
-    insertRowAt(sqlite, 'user', FORK_AT - 1_000);
-    insertRowAt(sqlite, 'assistant', FORK_AT - 900);
     await expect(findPendingForkOrigin('s1')).resolves.toBe('parent-1');
   });
 
-  it('子会话已有 assistant 回应后不再返回', async () => {
+  it('子会话跑过一轮(token 已累加)后不再返回', async () => {
     const sqlite = createDb();
-    insertForkedSession(sqlite, 'parent-1');
-    insertRowAt(sqlite, 'assistant', FORK_AT);
+    insertForkedSession(sqlite, 'parent-1', 1_234);
     await expect(findPendingForkOrigin('s1')).resolves.toBeNull();
   });
 
+  it('导入会话的合成时间戳晚于 fork 时刻也不误判(importer 写 createdAt+sequence)', async () => {
+    // claude-local-sessions / codex-local-sessions 为强制行序会把末尾行的 createdAt
+    // 推到真实墙钟之后;按时间戳比较会把纯 pre-fork 历史当成子会话自己的回应。
+    const sqlite = createDb();
+    insertForkedSession(sqlite, 'parent-1');
+    insertRowAt(sqlite, 'assistant', FORK_AT + 9_000);
+    await expect(findPendingForkOrigin('s1')).resolves.toBe('parent-1');
+  });
+
   it('goal 路径先落 user 行再 peek:仍返回父会话 id(不被 pre-dispatch 持久化骗过)', async () => {
-    // GoalController.setGoal 先 persistUserMessage 再 fireTurn→peek;
-    // 用 user 行判定会在这里误判成"已发送",恰好漏掉真正第一轮的来源标记。
+    // GoalController.setGoal 先 persistUserMessage 再 fireTurn→peek。
     const sqlite = createDb();
     insertForkedSession(sqlite, 'parent-1');
     insertRowAt(sqlite, 'user', FORK_AT + 5);
@@ -332,15 +340,8 @@ describe('findPendingForkOrigin 来源标记重建', () => {
 
   it('非 fork 会话恒为 null', async () => {
     const sqlite = createDb();
-    insertForkedSession(sqlite, null);
+    insertForkedSession(sqlite, null, 999);
     await expect(findPendingForkOrigin('s1')).resolves.toBeNull();
-  });
-
-  it('已 rewind 软删的 assistant 不算跑过一轮', async () => {
-    const sqlite = createDb();
-    insertForkedSession(sqlite, 'parent-1');
-    insertRowAt(sqlite, 'assistant', FORK_AT + 10, FORK_AT + 20);
-    await expect(findPendingForkOrigin('s1')).resolves.toBe('parent-1');
   });
 });
 

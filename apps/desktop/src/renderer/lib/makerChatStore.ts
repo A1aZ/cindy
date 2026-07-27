@@ -5691,7 +5691,14 @@ async function backfillHistoryUntil(
     // 任何出口都必须复位 spinner —— 包括 epoch 失效那条:reload / clear 的 setState
     // 不清 isLoadingMore(见 loadOlderMessages 同款注释),漏复位会让行首守卫把该
     // 会话的翻页永久卡住。epoch 变了也照复位:setState 作用于当前切片,不复活数据。
-    setState(sessionId, (s) => (s.isLoadingMore ? { ...s, isLoadingMore: false } : s));
+    //
+    // 但必须先确认切片还在:setState 走 getOrCreateState,对已被 _purgeSession
+    // 删掉的会话会重新 materialize 一个空 state 并 touch LRU(见 getOrCreateState
+    // 与 hasPendingQueue 的注释),把刚 purge 的会话又塞回 sessions Map。purge 后
+    // 本来就没有 spinner 需要复位,直接跳过。
+    if (sessions.has(sessionId)) {
+      setState(sessionId, (s) => (s.isLoadingMore ? { ...s, isLoadingMore: false } : s));
+    }
   }
 }
 

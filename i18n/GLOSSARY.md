@@ -130,7 +130,7 @@ OAuth 2.0 Device Authorization Grant 中由用户在另一设备验证页输入�
 
 ### Region badge
 
-桌面登录页标题旁的品牌红胶囊（DESIGN.md §16.3）。标签值本身是**不翻译的区域代号**、四语同值：cn 版为 CN、dev 版为 Dev，global 版按“不对称命名”不挂徽标（承袭旧 login.globalRegion 的四语同值做法）。作为待产品裁决术语登记：尚未拍板是否改为可译文案（如「中国大陆版 / Mainland China」），先登记以免后续界面自造“国内版／中国版／开发版”等多套说法。checkCase 设 false：dev 作为普通技术词在 settings.about.debugLogDescription 等文案里有正当小写用法，开启大小写检查会制造假阳性。
+桌面登录页标题旁的品牌红胶囊（DESIGN.md §16.3）。标签值本身是**不翻译的区域代号**、四语同值：cn 版为 CN、dev 版为 Dev，global 版按“不对称命名”不挂徽标（承袭旧 login.globalRegion 的四语同值做法）。作为待产品裁决术语登记：尚未拍板是否改为可译文案（如「中国大陆版 / Mainland China」），先登记以免后续界面自造“国内版／中国版／开发版”等多套说法。不设 checkCase：本条 en 为 Region badge、各语言译文均非英文原词，caseStandardFor 天然返回 null，写 checkCase:false 只是冗余；徽标值 CN / Dev 不是本条术语，不受本条大小写约束。
 
 ## 怎么加一条术语
 

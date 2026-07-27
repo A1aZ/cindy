@@ -15,6 +15,7 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { hlcNodeId, isCanonicalHlc } from '@cindy/voice-input-core';
 import { listMobileVoiceHistoryHosts } from '@/session/mobileVoiceHistoryStore';
 import type {
   MobileVoiceCredentialSyncDictionaryEntry,
@@ -335,16 +336,23 @@ function readPositiveInt(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 1;
 }
 
-/** 归一化被控端上报的版本向量;形状不对一律当作「没有」,退回按拉取时间比较。 */
+/**
+ * 归一化被控端上报的版本向量;形状不对一律当作「没有」,退回按拉取时间比较。
+ *
+ * 新鲜度判断靠的是字符串字典序,而那只在时间戳是规范 HLC(定长前缀)时才等于时间序。
+ * 混进一个 `~~~~`(`~` 的码位高于所有 base36 字符)就会在每一次比较里永远胜出,
+ * 手机从此长期停在错误的快照上,表现成「怎么刷新都不更新」。所以逐项按规范形状过滤,
+ * 并要求时间戳自带的 nodeId 与它的键一致 —— 对不上说明这份向量本身就不自洽。
+ */
 function normalizeStateVector(raw: unknown): Record<string, string> | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   // nodeId 来自远端。用普通 {} 的话,一个叫 __proto__ 的键会走原型 setter,
   // 后面的包含性比较读到的就不是写进去的东西。
   const vector = Object.create(null) as Record<string, string>;
   for (const [nodeId, stamp] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof nodeId === 'string' && nodeId && typeof stamp === 'string' && stamp) {
-      vector[nodeId] = stamp;
-    }
+    if (!nodeId || typeof stamp !== 'string' || !isCanonicalHlc(stamp)) continue;
+    if (hlcNodeId(stamp) !== nodeId) continue;
+    vector[nodeId] = stamp;
   }
   return Object.keys(vector).length > 0 ? vector : undefined;
 }

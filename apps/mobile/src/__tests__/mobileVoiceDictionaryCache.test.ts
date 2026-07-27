@@ -32,6 +32,7 @@ const {
   clearAllMobileVoiceDictionaryCaches,
   hydrateMobileVoiceDictionary,
   readCachedMobileVoiceDictionary,
+  readCachedMobileVoiceDictionarySnapshot,
   refreshMobileVoiceDictionary,
 } = await import('@/session/mobileVoiceDictionaryCache');
 
@@ -314,5 +315,42 @@ describe('在途请求的去重范围', () => {
     release({ ok: true, entries: [{ text: '账号A的词' }] });
     await stale;
     expect(readCachedMobileVoiceDictionary(HOST)[0].text).toBe('账号B的词');
+  });
+});
+
+describe('版本向量的入站校验', () => {
+  const STAMP_A = '0000000rs4.0000.node-a';
+
+  it('非规范 HLC 的时间戳被丢掉,不会在字典序比较里永远胜出', async () => {
+    await refreshMobileVoiceDictionary(HOST, async () => ({
+      ok: true,
+      entries: [{ text: 'Cindy' }],
+      stateVector: { 'node-a': '~~~~', 'node-b': 42, 'node-c': '' },
+    } as never));
+
+    // 整份向量都不可用 → 当作「没有向量」,退回按拉取时间比较。
+    expect(readCachedMobileVoiceDictionarySnapshot(HOST).stateVector).toBeUndefined();
+  });
+
+  it('时间戳自带的 nodeId 与键对不上时丢弃该项', async () => {
+    await refreshMobileVoiceDictionary(HOST, async () => ({
+      ok: true,
+      entries: [{ text: 'Cindy' }],
+      stateVector: { 'node-a': STAMP_A, 'node-b': STAMP_A },
+    }));
+
+    const vector = readCachedMobileVoiceDictionarySnapshot(HOST).stateVector;
+    expect(vector && Object.keys(vector)).toEqual(['node-a']);
+  });
+
+  it('合法向量原样保留并能落盘恢复', async () => {
+    await refreshMobileVoiceDictionary(HOST, async () => ({
+      ok: true,
+      entries: [{ text: 'Cindy' }],
+      stateVector: { 'node-a': STAMP_A },
+    }));
+    __resetMobileVoiceDictionaryCacheForTests();
+    await hydrateMobileVoiceDictionary(HOST);
+    expect(readCachedMobileVoiceDictionarySnapshot(HOST).stateVector).toEqual({ 'node-a': STAMP_A });
   });
 });

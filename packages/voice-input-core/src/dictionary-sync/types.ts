@@ -217,25 +217,40 @@ function isValidIncarnation(raw: unknown): boolean {
   if (!isCanonicalHlc(value.textStamp)) return false;
   if (value.source !== 'manual' && value.source !== 'automatic') return false;
   if (value.stage !== 'entry' && value.stage !== 'candidate') return false;
-  if (typeof value.createdAt !== 'number' || typeof value.updatedAt !== 'number') return false;
+  // 必须是有限值:`NaN` / `Infinity` 的 typeof 也是 'number',放进来之后物化阶段的
+  // `Math.min` / `Math.max` 会把它传播到整条词条的时间戳上,排序与展示随之失稳,
+  // 而且这份中毒状态是持久化并继续同步出去的。
+  if (!isValidTimestamp(value.createdAt) || !isValidTimestamp(value.updatedAt)) return false;
   if (!isValidCounter(value.counters)) return false;
   if (!isPlainRecord(value.aliases)) return false;
   for (const alias of Object.values(value.aliases)) {
     if (!isPlainRecord(alias)) return false;
     const aliasValue = alias as Partial<SyncAliasState>;
     if (typeof aliasValue.text !== 'string' || !isCanonicalHlc(aliasValue.textStamp)) return false;
-    if (typeof aliasValue.lastSeenAt !== 'number') return false;
+    if (!isValidTimestamp(aliasValue.lastSeenAt)) return false;
     if (!isValidCounter(aliasValue.counters)) return false;
   }
   return true;
 }
 
+/**
+ * 计数桶。
+ *
+ * 语义是「事件累计次数」,所以只接受非负安全整数。放行负数或小数的话,展示读数会被
+ * `Math.floor` 悄悄改写 —— 症状出现在离入口很远的地方,而真正的原因(某一帧带了坏
+ * 计数)已经无从追溯;况且负计数还能让合并的逐节点 max 表现出反直觉的结果。
+ */
 function isValidCounter(raw: unknown): boolean {
   if (!isPlainRecord(raw)) return false;
   for (const value of Object.values(raw)) {
-    if (typeof value !== 'number' || !Number.isFinite(value)) return false;
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) return false;
   }
   return true;
+}
+
+/** 毫秒时间戳:有限、非负。 */
+function isValidTimestamp(value: unknown): boolean {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
 /** 普通对象(排除 null 与数组 —— 两者的 typeof 都是 'object')。 */

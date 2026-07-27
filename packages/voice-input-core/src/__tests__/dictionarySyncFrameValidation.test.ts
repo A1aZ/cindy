@@ -108,3 +108,44 @@ describe('版本向量', () => {
     expect(versionVectorDominates(once, twice)).toBe(true);
   });
 });
+
+describe('数值字段的校验', () => {
+  function poison(mutate: (incarnation: Record<string, unknown>) => void) {
+    const state = validState();
+    const key = Object.keys(state.records)[0];
+    const tag = Object.keys(state.records[key].incarnations)[0];
+    mutate(state.records[key].incarnations[tag] as unknown as Record<string, unknown>);
+    return state;
+  }
+
+  it('时间戳必须有限 —— NaN / Infinity 会顺着 Math.min/max 污染整条词条', () => {
+    expect(isValidSyncState(poison((item) => { item.createdAt = Number.NaN; }))).toBe(false);
+    expect(isValidSyncState(poison((item) => { item.updatedAt = Number.POSITIVE_INFINITY; }))).toBe(false);
+    expect(isValidSyncState(poison((item) => { item.createdAt = -1; }))).toBe(false);
+  });
+
+  it('别名的 lastSeenAt 同样要求有限', () => {
+    const state = validState();
+    const key = Object.keys(state.records)[0];
+    const tag = Object.keys(state.records[key].incarnations)[0];
+    const incarnation = state.records[key].incarnations[tag];
+    incarnation.aliases = {
+      'web coding': {
+        text: 'web coding',
+        textStamp: incarnation.textStamp,
+        counters: { 'node-a': 1 },
+        lastSeenAt: Number.NaN,
+      },
+    };
+    expect(isValidSyncState(state)).toBe(false);
+  });
+
+  it('计数必须是非负安全整数', () => {
+    expect(isValidSyncState(poison((item) => { item.counters = { 'node-a': -3 }; }))).toBe(false);
+    expect(isValidSyncState(poison((item) => { item.counters = { 'node-a': 1.5 }; }))).toBe(false);
+    expect(isValidSyncState(poison((item) => { item.counters = { 'node-a': Number.MAX_SAFE_INTEGER + 2 }; })))
+      .toBe(false);
+    // 0 是合法的:别名可能被减到 0 之后仍留在结构里。
+    expect(isValidSyncState(poison((item) => { item.counters = { 'node-a': 0 }; }))).toBe(true);
+  });
+});

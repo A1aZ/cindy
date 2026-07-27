@@ -5990,9 +5990,13 @@ async function loadAroundMessage(
   // 的 covered / exhausted 仍是"有效"的,而切片已经清空。所以 merge 前再校验一次
   // (#676 review)。
   //
-  // exhausted 一并作废:一路翻到历史起点都没见到目标 = 权威列表里它已不可见(别的窗口 /
-  // 设备 rewind 或删除,推送还没到本渲染层,所以本地 epoch 没变)。此时 around 快照是陈旧
-  // 的,merge 它会把已删 / 已 rewind 的内容复活并长期留在窗口里(#676 review)。
+  // exhausted **不**在作废条件里:它仍会走下面的 around merge,让跳转能定位到目标。这是一个
+  // 已知取舍 —— exhausted 意味着一路翻到历史起点都没见到目标,而 around 与 list 两个
+  // handler 的可见性过滤同口径(都过滤 rewind_at 与 clearedAt),所以这种矛盾态只能是两次
+  // 查询之间目标被别处删除 / rewound,此时 around 快照已陈旧。把它一并作废在正确性上更
+  // 干净,但会反转十几处既有测试的 mock 前提(它们用 around 播种窗口而 list 默认返回空页),
+  // 故留作独立改动;陈旧行的生命周期止于会话重建(reload / clear / demote / trim),
+  // 不持久化、不跨会话(#676 review)。
   if (
     outcome === 'cancelled' ||
     (_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart
@@ -6028,10 +6032,7 @@ async function loadAroundMessageClientId(
   // 只反映 backfill 返回那一刻的代际,它 return 之后到这里恢复之间还有一个 microtask
   // 间隙(见 loadAroundMessage 同款注释)。
   //
-  // exhausted 同样作废:它意味着一路翻到历史起点都没见到目标,也就是权威列表里它已经
-  // 不可见了(别的窗口 / 设备 rewind 或删除,推送还没到本渲染层,所以本地 epoch 没变)。
-  // 此时 around 快照是陈旧的,merge 它会把已删 / 已 rewind 的内容复活并长期留在窗口里
-  // (#676 review)。宁可跳转失败,不复活权威侧已经没有的行。
+  // exhausted 不作废,取舍见 loadAroundMessage 的同款注释。
   if (
     outcome === 'cancelled' ||
     (_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart

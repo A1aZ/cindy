@@ -122,6 +122,7 @@ import {
   makerChatStore,
   type MessageDeliveryMode,
 } from '@/lib/makerChatStore';
+import { canFocusWithoutJumpLoad } from '@/lib/searchJumpTargeting';
 import { getMakerMemoryEnabled } from '@/lib/memorySettingsStore';
 import { useWorktreeCreation, worktreeCreationStore } from '@/lib/worktreeCreationStore';
 import { useWorktreeForSession } from '@/contexts/WorktreeContext';
@@ -836,10 +837,11 @@ export function CCAgentSessionView({
     }
     let cancelled = false;
     const currentState = makerChatStore.getSnapshot(sessionId);
-    const existing = currentState.messages.find(
-      (message) => message.clientId === searchJump.messageClientId,
-    );
-    if (existing) {
+    // "目标已在 messages 里"不等于"窗口连续覆盖到它":先前一次补齐失败的跳转会把目标以
+    // 孤岛形式 merge 进窗口(它与已加载的尾部之间隔着没加载的历史)。这时若直接 focus 就
+    // 返回,store 侧的自愈补齐永远不会被触发,中间缺失一直修不回来(#676 review)。
+    // 判定逻辑抽在 canFocusWithoutJumpLoad,由 searchJumpTargeting.test.ts 直接覆盖。
+    if (canFocusWithoutJumpLoad(currentState, searchJump.messageClientId)) {
       requestFocusMessage(searchJump.messageClientId);
       clearSearchJumpState();
       return;

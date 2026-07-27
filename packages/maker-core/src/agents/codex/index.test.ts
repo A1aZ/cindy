@@ -3489,6 +3489,7 @@ describe('CodexAgent MCP thread context hooks', () => {
     const handle = await agent.startSession({
       sessionId: 'session-auto-approval-policy',
       model: 'gpt-5.5',
+      providerId: 'openai',
       workingDir: '/repo',
       permissionMode: 'auto',
     });
@@ -3519,6 +3520,53 @@ describe('CodexAgent MCP thread context hooks', () => {
     await handle.close();
   });
 
+  it('falls back to untrusted approvals on XD and interrupts the active turn when tightened to Ask', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent, (method) => {
+      if (method === Method.TurnStart) {
+        return { turn: { id: 'turn-xd-auto-fallback' } };
+      }
+      return undefined;
+    });
+    const handle = await agent.startSession({
+      sessionId: 'session-xd-auto-fallback',
+      model: 'gpt-5.5',
+      providerId: 'xd',
+      workingDir: '/repo',
+      permissionMode: 'auto',
+    });
+
+    const startParams = host.request.mock.calls.find(([method]) => method === Method.ThreadStart)?.[1] as {
+      approvalPolicy?: string;
+      approvalsReviewer?: string;
+      sandbox?: string;
+    };
+    expect(startParams).toMatchObject({
+      approvalPolicy: 'untrusted',
+      sandbox: 'workspace-write',
+    });
+    expect(startParams).not.toHaveProperty('approvalsReviewer');
+
+    await handle.send({ type: 'user', content: 'hello' });
+    const turnParams = host.request.mock.calls.find(([method]) => method === Method.TurnStart)?.[1] as {
+      approvalPolicy?: string;
+      approvalsReviewer?: string;
+      sandboxPolicy?: { type?: string };
+    };
+    expect(turnParams).toMatchObject({
+      approvalPolicy: 'untrusted',
+      sandboxPolicy: { type: 'workspaceWrite' },
+    });
+    expect(turnParams).not.toHaveProperty('approvalsReviewer');
+    if (!handle.setPermissionMode) throw new Error('expected setPermissionMode');
+    await handle.setPermissionMode('ask');
+    expect(host.request).toHaveBeenCalledWith(Method.TurnInterrupt, {
+      threadId: 'start-thread-id',
+      turnId: 'turn-xd-auto-fallback',
+    });
+    await handle.close();
+  });
+
   it('falls back to untrusted approvals without reviewer fields on an older app-server', async () => {
     const agent = new CodexAgent(createDeps());
     const host = installFakeHost(agent, (method) => {
@@ -3530,6 +3578,7 @@ describe('CodexAgent MCP thread context hooks', () => {
     const handle = await agent.startSession({
       sessionId: 'session-legacy-auto',
       model: 'gpt-5.5',
+      providerId: 'openai',
       workingDir: '/repo',
       permissionMode: 'auto',
     });
@@ -3557,6 +3606,7 @@ describe('CodexAgent MCP thread context hooks', () => {
     const handle = await agent.startSession({
       sessionId: 'session-auto-command-fallback',
       model: 'gpt-5.5',
+      providerId: 'openai',
       workingDir: '/repo',
       permissionMode: 'auto',
     });
@@ -3585,6 +3635,7 @@ describe('CodexAgent MCP thread context hooks', () => {
     const handle = await agent.startSession({
       sessionId: 'session-guardian-denial-fail-closed',
       model: 'gpt-5.5',
+      providerId: 'openai',
       workingDir: '/repo',
       permissionMode: 'auto',
     });
@@ -3630,6 +3681,7 @@ describe('CodexAgent MCP thread context hooks', () => {
     const handle = await agent.startSession({
       sessionId: 'session-guardian-timeout',
       model: 'gpt-5.5',
+      providerId: 'openai',
       workingDir: '/repo',
       permissionMode: 'auto',
     });
@@ -3677,6 +3729,7 @@ describe('CodexAgent MCP thread context hooks', () => {
     const handle = await agent.startSession({
       sessionId: 'session-guardian-timeout-runtime',
       model: 'gpt-5.5',
+      providerId: 'openai',
       workingDir: '/repo',
       permissionMode: 'auto',
     });
@@ -3722,6 +3775,7 @@ describe('CodexAgent MCP thread context hooks', () => {
     const handle = await agent.startSession({
       sessionId: 'session-guardian-reviewer-failure',
       model: 'gpt-5.5',
+      providerId: 'openai',
       workingDir: '/repo',
       permissionMode: 'auto',
     });
@@ -3772,6 +3826,7 @@ describe('CodexAgent MCP thread context hooks', () => {
     const handle = await agent.startSession({
       sessionId: 'session-guardian-stale-timeout',
       model: 'gpt-5.5',
+      providerId: 'openai',
       workingDir: '/repo',
       permissionMode: 'auto',
     });
@@ -3812,6 +3867,7 @@ describe('CodexAgent MCP thread context hooks', () => {
     const handle = await agent.startSession({
       sessionId: 'session-auto-review-tighten',
       model: 'gpt-5.5',
+      providerId: 'openai',
       workingDir: '/repo',
       permissionMode: 'auto',
     });
@@ -4760,6 +4816,46 @@ describe('CodexAgent steer', () => {
     });
 
     await expect(handle.steer({ type: 'user', content: 'steer message' })).rejects.toThrow(/no active turn to steer/i);
+    expect(host.request.mock.calls.filter(([method]) => method === Method.TurnStart)).toHaveLength(0);
+    await handle.close();
+  });
+
+  it('normalizes a server-side active-turn-id mismatch for the normal-send fallback', async () => {
+    const agent = new CodexAgent(createDeps());
+    const serverError = Object.assign(
+      new Error(
+        'codex app-server turn/steer error -32600: expected active turn id '
+        + '`019fa22b-2461-7842-b852-082c0f82676a` but found '
+        + '`dda88981-5aca-4b99-90c7-68488deaccc8`',
+      ),
+      { code: -32600 },
+    );
+    const host = installFakeHost(agent, (method) => {
+      if (method === Method.TurnSteer) {
+        throw serverError;
+      }
+      return undefined;
+    });
+
+    const handle = await agent.startSession({
+      sessionId: 'session-steer-server-active-turn-mismatch',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+      userPrompt: 'USER PROMPT',
+    });
+    const handlers = host.getThreadHandlers();
+    expect(handlers).not.toBeNull();
+    if (!handlers) throw new Error('expected thread handlers');
+    handlers.turnStarted?.({
+      threadId: 'start-thread-id',
+      turn: { id: '019fa22b-2461-7842-b852-082c0f82676a' },
+    });
+
+    await expect(handle.steer({ type: 'user', content: 'steer message' })).rejects.toMatchObject({
+      message: 'No active Codex turn to steer',
+      cause: serverError,
+    });
+    expect(host.request.mock.calls.filter(([method]) => method === Method.TurnSteer)).toHaveLength(1);
     expect(host.request.mock.calls.filter(([method]) => method === Method.TurnStart)).toHaveLength(0);
     await handle.close();
   });

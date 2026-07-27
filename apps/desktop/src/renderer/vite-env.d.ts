@@ -1246,7 +1246,7 @@ interface ElectronAPI {
     ) => Promise<import('../shared/pluginMarket').PluginMarketDetail>;
     install: (
       pluginId: string,
-      options?: { allowPermissionExpansion?: boolean },
+      options: { expectedReleaseId: string; allowPermissionExpansion?: boolean },
     ) => Promise<{ ghost: import('../shared/ghost').InstalledGhost }>;
     uninstall: (pluginId: string) => Promise<{ ok: true }>;
   };
@@ -1407,8 +1407,11 @@ interface ElectronAPI {
   // 「侧边栏在新窗口中显示」偏好 + 子窗口生命周期(main: right-sidebar-window/)。
   rightSidebarWindow: {
     getState: () => Promise<{ detached: boolean; lastOpen: boolean; open: boolean }>;
-    /** 幂等:已开则 show + focus。 */
-    open: () => Promise<void>;
+    /**
+     * 幂等开窗。缺省(用户手势)已开则 show + focus;
+     * userInitiated:false(启动恢复 / 插件 / agent 自发)已开则完全不动窗口。
+     */
+    open: (options?: { userInitiated?: boolean }) => Promise<void>;
     close: () => Promise<void>;
     /** 写偏好;true 附带开窗,false 附带关窗。返回新 state。 */
     setDetached: (
@@ -4492,12 +4495,28 @@ interface RawReleaseNotesSection {
   items: RawReleaseNotesItem[];
 }
 
+/** Topic-format (v2) block: one user-facing theme with a short narrative. */
+interface RawReleaseNotesTopic {
+  emoji?: string;
+  title: string;
+  text: string;
+  contributors?: string[];
+}
+
 interface RawReleaseNotesPayload {
   version: string;
   date: string;
-  /** Flat contributor list — collective hall-of-fame on top of per-item `by`. */
-  contributors: string[];
-  sections: RawReleaseNotesSection[];
+  /**
+   * Flat contributor list — collective hall-of-fame on top of per-item `by`.
+   * Optional: older notice files predate the field (renderer defaults to []).
+   */
+  contributors?: string[];
+  /** Legacy author-grouped sections. Absent on topic-format payloads. */
+  sections?: RawReleaseNotesSection[];
+  /** Topic-format blocks. Non-empty ⇒ renderer uses the topic layout. */
+  topics?: RawReleaseNotesTopic[];
+  /** Optional one-line lead above the topics (e.g. PR/commit counts). */
+  intro?: string;
 }
 
 /* ── SkillHub Registry types (v0.6) ──

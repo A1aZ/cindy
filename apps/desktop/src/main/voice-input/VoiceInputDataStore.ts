@@ -20,6 +20,7 @@ import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js
 import { voiceDictionarySyncStore } from './VoiceDictionarySyncStore.js';
 import {
   DEFAULT_DICTIONARY_SYNC_ENABLED,
+  MAX_VOICE_INPUT_DICTIONARY_ALIASES,
   MAX_VOICE_INPUT_DICTIONARY_ENTRIES,
   MAX_VOICE_INPUT_DICTIONARY_ENTRY_CHARS,
   compactVoiceInputHistoryIfNeeded,
@@ -503,7 +504,16 @@ export class VoiceInputDataStore {
       }
       // 先让 store 判断:sidecar 是丢了,还是首次安装 / 首次迁移。
       // 判据是投影里有没有「本机曾经同步过」的印记 —— 只看状态空不空分不出来。
-      if (state.settings.dictionaryEntries.length > 0 && state.dictionarySyncInitialized) {
+      //
+      // 候选词与抑制列表同样是权威投影数据:一个用户完全可能只有候选(自动学习刚
+      // 起步)或只有抑制项(把自动学来的词都删了)。漏算它们的话,这台机器丢了
+      // sidecar 会被当成首次迁移,把候选证据数按本机新证据重新播种 —— 与保留着
+      // 原状态的对端合并时,同一批证据就在两个节点桶里各记了一遍。
+      const hasProjectedDictionary =
+        state.settings.dictionaryEntries.length > 0 ||
+        state.settings.dictionaryCandidates.length > 0 ||
+        state.settings.suppressedAutomaticDictionaryTexts.length > 0;
+      if (hasProjectedDictionary && state.dictionarySyncInitialized) {
         voiceDictionarySyncStore.noteProjectionHasDictionary();
       }
       voiceDictionarySyncStore.reconcile({
@@ -612,12 +622,32 @@ export function onVoiceInputDictionaryChanged(listener: DictionaryChangedListene
 const MAX_DICTIONARY_LEARNING_ACTIONS = 32;
 
 /**
+ * 归一化单条动作的别名。
+ *
+ * 光过滤非字符串不够:32 条动作的上限挡不住「一条动作带十万个别名」—— 每个唯一
+ * 别名都会被写进 CRDT 正本,main 线程被同步写盘卡住,sidecar 也会涨过 relay 单帧
+ * 上限让同步永久停摆。条数与单条长度都要卡。
+ */
+function sanitizeLearningAliases(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const aliases: string[] = [];
+  for (const candidate of raw) {
+    if (typeof candidate !== 'string') continue;
+    const alias = candidate.trim();
+    if (!alias || alias.length > MAX_VOICE_INPUT_DICTIONARY_ENTRY_CHARS) continue;
+    aliases.push(alias);
+    if (aliases.length >= MAX_VOICE_INPUT_DICTIONARY_ALIASES) break;
+  }
+  return aliases;
+}
+
+/**
  * 归一化 renderer 提交的学习动作。
  *
  * 入参是未经校验的 IPC payload:形状不对的条目直接丢掉,整批也要有条数上限 ——
  * 这些动作会逐条写进 CRDT 正本,一批脏数据就是一批永久记录。
  */
-function sanitizeDictionaryLearningActions(input: unknown): DictationDictionaryLearningAction[] {
+export function sanitizeDictionaryLearningActions(input: unknown): DictationDictionaryLearningAction[] {
   if (!Array.isArray(input)) return [];
   const actions: DictationDictionaryLearningAction[] = [];
   for (const candidate of input) {
@@ -629,9 +659,7 @@ function sanitizeDictionaryLearningActions(input: unknown): DictationDictionaryL
     actions.push({
       ...(action as DictationDictionaryLearningAction),
       term,
-      aliases: Array.isArray(action.aliases)
-        ? action.aliases.filter((alias): alias is string => typeof alias === 'string')
-        : [],
+      aliases: sanitizeLearningAliases(action.aliases),
     });
     if (actions.length >= MAX_DICTIONARY_LEARNING_ACTIONS) break;
   }

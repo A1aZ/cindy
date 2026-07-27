@@ -323,7 +323,9 @@ function readPositiveInt(value: unknown): number {
 /** 归一化被控端上报的版本向量;形状不对一律当作「没有」,退回按拉取时间比较。 */
 function normalizeStateVector(raw: unknown): Record<string, string> | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
-  const vector: Record<string, string> = {};
+  // nodeId 来自远端。用普通 {} 的话,一个叫 __proto__ 的键会走原型 setter,
+  // 后面的包含性比较读到的就不是写进去的东西。
+  const vector = Object.create(null) as Record<string, string>;
   for (const [nodeId, stamp] of Object.entries(raw as Record<string, unknown>)) {
     if (typeof nodeId === 'string' && nodeId && typeof stamp === 'string' && stamp) {
       vector[nodeId] = stamp;

@@ -41,7 +41,9 @@ vi.mock('../../utils/ipcValidate.js', () => ({
 }));
 
 const { voiceDictionarySyncStore } = await import('../VoiceDictionarySyncStore.js');
-const { voiceInputDataStore } = await import('../VoiceInputDataStore.js');
+const { sanitizeDictionaryLearningActions, voiceInputDataStore } = await import(
+  '../VoiceInputDataStore.js'
+);
 const { createEmptySyncState, createHlcClock, deleteTerms, recordLearningEvent } = await import(
   '@cindy/voice-input-core'
 );
@@ -619,5 +621,128 @@ describe('词典同步落盘 —— 第八轮收口', () => {
 
     const settings = voiceInputDataStore.addManualDictionaryEntry('账号B的词');
     expect(settings.dictionaryEntries.map((entry) => entry.text)).toEqual(['账号B的词']);
+  });
+});
+
+describe('词典同步落盘 —— 第九轮收口', () => {
+  it('从盘上读回的状态是无原型字典 —— 原型名词条不会取到继承来的值', () => {
+    writeDictionaryFile({
+      dictionaryEntries: [
+        { id: 'a', text: 'constructor', source: 'manual', frequency: 1, aliases: [] },
+      ],
+      dictionaryCandidates: [],
+      suppressedAutomaticDictionaryTexts: [],
+    });
+    voiceInputDataStore.getSettings();
+    // 重新从盘上加载:JSON.parse 出来的对象带 Object.prototype。
+    resetStoreCaches();
+
+    const state = voiceDictionarySyncStore.getState();
+    expect(Object.getPrototypeOf(state.records)).toBeNull();
+    expect(Object.getPrototypeOf(state.suppressed)).toBeNull();
+    // 不存在的原型名键必须是 undefined,而不是继承来的函数。
+    expect(state.records['toString']).toBeUndefined();
+
+    // 而且此时还能正常给这类词做变更,不会拿函数当记录用。
+    const settings = voiceInputDataStore.addManualDictionaryEntry('toString');
+    expect(settings.dictionaryEntries.map((entry) => entry.text).sort()).toEqual([
+      'constructor',
+      'toString',
+    ]);
+  });
+
+  it('坏帧不算「收到对端状态」,不会提前落地挂起的恢复', () => {
+    writeDictionaryFile({
+      dictionaryEntries: [{ id: 'a', text: 'Cindy', source: 'manual', frequency: 1, aliases: [] }],
+      dictionaryCandidates: [],
+      suppressedAutomaticDictionaryTexts: [],
+    });
+    voiceInputDataStore.getSettings();
+    fs.rmSync(ownerPath(SYNC_FILE));
+    resetStoreCaches();
+    voiceInputDataStore.getSettings();
+    expect(voiceDictionarySyncStore.hasPendingRecovery()).toBe(true);
+
+    // 结构坏的帧、版本更高的帧都会被归一化成空状态 —— 但它们不是「对端词典是空的」,
+    // 拿它们当信号会在真正的墓碑到齐之前播种新化身。
+    voiceInputDataStore.mergeRemoteDictionaryState({ version: 1, records: 'nope' });
+    voiceInputDataStore.mergeRemoteDictionaryState({ version: 99, records: {}, suppressed: {} });
+    voiceInputDataStore.mergeRemoteDictionaryState(null);
+    expect(voiceDictionarySyncStore.hasPendingRecovery()).toBe(true);
+  });
+
+  it('恢复落地失败时挂起项要留着 —— 否则重试会把整份词典覆盖掉', () => {
+    writeDictionaryFile({
+      dictionaryEntries: [
+        { id: 'a', text: 'Cindy', source: 'manual', frequency: 1, aliases: [] },
+        { id: 'b', text: 'Orca', source: 'manual', frequency: 1, aliases: [] },
+      ],
+      dictionaryCandidates: [],
+      suppressedAutomaticDictionaryTexts: [],
+    });
+    voiceInputDataStore.getSettings();
+    fs.rmSync(ownerPath(SYNC_FILE));
+    resetStoreCaches();
+    voiceInputDataStore.getSettings();
+    expect(voiceDictionarySyncStore.hasPendingRecovery()).toBe(true);
+
+    const spy = vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => {
+      throw new Error('EIO');
+    });
+    expect(() => voiceInputDataStore.addManualDictionaryEntry('新词')).toThrow();
+    spy.mockRestore();
+    expect(voiceDictionarySyncStore.hasPendingRecovery()).toBe(true);
+
+    // 重试:恢复的词典和新编辑都在。
+    const settings = voiceInputDataStore.addManualDictionaryEntry('新词');
+    expect(settings.dictionaryEntries.map((entry) => entry.text).sort()).toEqual([
+      'Cindy',
+      'Orca',
+      '新词',
+    ]);
+  });
+
+  it('只有候选词的用户丢了 sidecar 也按恢复处理', () => {
+    writeDictionaryFile({
+      dictionaryEntries: [],
+      dictionaryCandidates: [{ text: 'Cindy', evidenceCount: 3, aliases: [] }],
+      suppressedAutomaticDictionaryTexts: [],
+    });
+    voiceInputDataStore.getSettings();
+    fs.rmSync(ownerPath(SYNC_FILE));
+    resetStoreCaches();
+    voiceInputDataStore.getSettings();
+
+    // 漏算候选的话这里会被当成首次迁移,把证据数按本机新证据重新播种。
+    expect(voiceDictionarySyncStore.hasPendingRecovery()).toBe(true);
+  });
+
+  it('学习动作在进 store 之前就被裁剪:动作条数、别名条数与单条长度都有上限', () => {
+    // 防线必须在 IPC 入口,而不是等 store 内部截断 —— 遍历十万个别名这件事本身
+    // 就会卡住 main 线程,即使最终只留下 8 个。
+    const sanitized = sanitizeDictionaryLearningActions([
+      ...Array.from({ length: 100 }, (_, index) => ({
+        action: 'add_entry',
+        term: `term-${index}`,
+        aliases: [
+          ...Array.from({ length: 5_000 }, (_, aliasIndex) => `alias-${aliasIndex}`),
+          'x'.repeat(5_000),
+          123,
+          '   ',
+        ],
+      })),
+      { action: 'add_entry' }, // 缺 term
+      { term: 'no-action' }, // 缺 action
+      null,
+      'not-an-object',
+      { action: 'add_entry', term: 'y'.repeat(5_000) }, // term 超长
+    ]);
+
+    expect(sanitized.length).toBe(32);
+    for (const action of sanitized) {
+      expect(action.aliases?.length).toBeLessThanOrEqual(8);
+      expect(action.aliases?.every((alias) => alias.length <= 120)).toBe(true);
+      expect(action.term.length).toBeLessThanOrEqual(120);
+    }
   });
 });

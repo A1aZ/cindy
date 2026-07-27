@@ -5,6 +5,7 @@ import { useUpdates } from 'expo-updates';
 import { useRouter } from 'expo-router';
 import { Children, Fragment, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
+  FlatList,
   Image,
   Linking,
   Platform,
@@ -1191,49 +1192,67 @@ function VoiceDictionaryScreen({
         onBack={onBack}
         title={t('settings.voiceDictionary.screenTitle')}
       />
-      <ScrollView contentContainerStyle={styles.content} testID="settings.voiceDictionary.scroll">
-        <SettingsGroup footer={footer} title={t('settings.voiceDictionary.sectionTitle')}>
-          {[
-            <Pressable
-              accessibilityLabel={t('settings.voiceDictionary.refreshAccessibility')}
-              accessibilityRole="button"
-              key="refresh"
-              onPress={onRefresh}
-              style={({ pressed }) => [styles.row, pressed && styles.pressed]}
-              testID="settings.voiceDictionary.refresh"
-            >
-              <View style={styles.rowLine}>
-                <Text style={styles.rowLabel}>
-                  {t('settings.voiceDictionary.entryCount', { count: entries.length })}
-                </Text>
-                <Text style={styles.rowValue} numberOfLines={1}>
-                  {refreshing
-                    ? t('settings.voiceDictionary.refreshing')
-                    : t('settings.voiceDictionary.refresh')}
-                </Text>
-              </View>
-            </Pressable>,
-            ...entries.map((entry) => (
-              <View
-                key={entry.key}
-                style={styles.row}
-                testID={`settings.voiceDictionary.entry.${entry.key}`}
+      {/*
+        词典上限是 1000 条,用 ScrollView 会把每一行都实例化出来 —— 低端机上首屏卡顿
+        且常驻内存。这里换成虚拟化列表,只挂载可见行;卡片视觉靠 header/item/footer
+        三段样式拼出来(FlatList 没法在外面包一层带圆角的 View 还保持自身滚动)。
+      */}
+      <FlatList
+        ListFooterComponent={
+          <>
+            <View style={styles.listCardBottom} />
+            <Text style={styles.groupFooter}>{footer}</Text>
+          </>
+        }
+        ListHeaderComponent={
+          <>
+            <View style={styles.groupTitleRow}>
+              <Text style={styles.groupTitle}>{t('settings.voiceDictionary.sectionTitle')}</Text>
+            </View>
+            <View style={styles.listCardTop}>
+              <Pressable
+                accessibilityLabel={t('settings.voiceDictionary.refreshAccessibility')}
+                accessibilityRole="button"
+                onPress={onRefresh}
+                style={({ pressed }) => [styles.row, pressed && styles.pressed]}
+                testID="settings.voiceDictionary.refresh"
               >
                 <View style={styles.rowLine}>
-                  <Text style={styles.rowLabel} numberOfLines={2}>{entry.text}</Text>
-                </View>
-                {entry.aliases.length > 0 ? (
-                  <Text style={styles.rowDetail} numberOfLines={2}>
-                    {t('settings.voiceDictionary.aliases', {
-                          aliases: entry.aliases.join(t('settings.voiceDictionary.aliasSeparator')),
-                        })}
+                  <Text style={styles.rowLabel}>
+                    {t('settings.voiceDictionary.entryCount', { count: entries.length })}
                   </Text>
-                ) : null}
+                  <Text style={styles.rowValue} numberOfLines={1}>
+                    {refreshing
+                      ? t('settings.voiceDictionary.refreshing')
+                      : t('settings.voiceDictionary.refresh')}
+                  </Text>
+                </View>
+              </Pressable>
+            </View>
+          </>
+        }
+        contentContainerStyle={styles.listContent}
+        data={entries}
+        keyExtractor={(entry) => entry.key}
+        renderItem={({ item }) => (
+          <View style={styles.listCardMiddle}>
+            <View style={styles.divider} />
+            <View style={styles.row} testID={`settings.voiceDictionary.entry.${item.key}`}>
+              <View style={styles.rowLine}>
+                <Text style={styles.rowLabel} numberOfLines={2}>{item.text}</Text>
               </View>
-            )),
-          ]}
-        </SettingsGroup>
-      </ScrollView>
+              {item.aliases.length > 0 ? (
+                <Text style={styles.rowDetail} numberOfLines={2}>
+                  {t('settings.voiceDictionary.aliases', {
+                    aliases: item.aliases.join(t('settings.voiceDictionary.aliasSeparator')),
+                  })}
+                </Text>
+              ) : null}
+            </View>
+          </View>
+        )}
+        testID="settings.voiceDictionary.scroll"
+      />
     </SafeAreaView>
   );
 }
@@ -1389,6 +1408,34 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     overflow: 'hidden',
   },
   divider: { backgroundColor: colors.border, height: StyleSheet.hairlineWidth, marginLeft: spacing.lg },
+  // —— 虚拟化列表拼出的卡片三段 ——
+  listContent: { paddingBottom: spacing.xxl, paddingHorizontal: spacing.lg, paddingTop: spacing.lg },
+  listCardTop: {
+    backgroundColor: colors.surfaceElevated,
+    borderColor: colors.border,
+    borderTopLeftRadius: radius.container,
+    borderTopRightRadius: radius.container,
+    borderWidth: StyleSheet.hairlineWidth,
+    marginTop: spacing.sm,
+    overflow: 'hidden',
+  },
+  listCardMiddle: {
+    backgroundColor: colors.surfaceElevated,
+    borderColor: colors.border,
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderRightWidth: StyleSheet.hairlineWidth,
+  },
+  listCardBottom: {
+    backgroundColor: colors.surfaceElevated,
+    borderBottomLeftRadius: radius.container,
+    borderBottomRightRadius: radius.container,
+    borderColor: colors.border,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderRightWidth: StyleSheet.hairlineWidth,
+    height: radius.container,
+    marginBottom: spacing.sm,
+  },
   // —— 行 ——
   row: { gap: 3, justifyContent: 'center', minHeight: 52, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
   rowLine: { alignItems: 'center', flexDirection: 'row', gap: spacing.md },

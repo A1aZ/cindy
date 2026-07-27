@@ -28,6 +28,7 @@ import path from 'node:path';
 
 import {
   DEFAULT_TOMBSTONE_TTL_MS,
+  createDictionaryMap,
   createEmptySyncState,
   createHlcClock,
   dictionaryTermKey,
@@ -42,7 +43,11 @@ import {
   type HlcClock,
   type LocalDictionarySnapshot,
   type MaterializedDictionary,
+  type DictionaryIncarnation,
+  type DictionaryRecord,
+  type DictionarySuppression,
   type MutationResult,
+  type SyncAliasState,
   type VoiceDictionarySyncState,
 } from '@cindy/voice-input-core';
 
@@ -151,13 +156,17 @@ export class VoiceDictionarySyncStore {
   mergeRemote(remote: unknown): MaterializedDictionary | null {
     const current = this.load();
     if (current.incompatible) return null;
-    const remoteState = normalizeState(remote);
+    // 坏帧、版本更高的帧都会被归一化成空状态 —— 那不是「对端词典是空的」,而是
+    // 「这一帧没法用」。挂起的恢复等的是一份**真的**对端状态(墓碑随它一起到达),
+    // 拿坏帧当信号会在墓碑到齐之前就播种新化身,对端删掉的词随后复活。
+    const isUsableFrame = isValidSyncState(remote);
+    const remoteState = isUsableFrame ? (remote as VoiceDictionarySyncState) : createEmptySyncState();
     const merged = mergeSyncStates(current.state, remoteState);
     if (isSameState(merged, current.state)) {
       // 合并没引入新信息,但「收到了一份合法的对端状态」本身就是挂起恢复在等的信号:
       // 对端是新机器、或它的词典也是空的时,每次握手都会走到这里 —— 不在这里落地的话,
       // 本机会一直只显示投影、对外发空状态,直到用户手动改一次词典才自愈。
-      return this.flushPendingRecovery('merged');
+      return isUsableFrame ? this.flushPendingRecovery('merged') : null;
     }
     // 抬高本地时钟,保证本机之后产出的时间戳大于已经观察到的一切。
     const maxRemote = findMaxHlc(remoteState);
@@ -203,9 +212,17 @@ export class VoiceDictionarySyncStore {
     this.load();
     const snapshot = this.pendingRecovery;
     if (!snapshot) return null;
-    this.pendingRecovery = null;
     log.info('applying deferred dictionary recovery', { reason, entries: snapshot.entries.length });
-    return this.reconcileNow(snapshot, { recovery: true });
+    let materialized: MaterializedDictionary | null;
+    try {
+      materialized = this.reconcileNow(snapshot, { recovery: true });
+    } catch (error) {
+      // 认领没落地就不能把快照丢掉:调用方回滚后重试时,这份词典是唯一的来源 ——
+      // 丢了的话重试只会物化出新编辑的那一条,把整份恢复中的词典覆盖掉。
+      throw error;
+    }
+    this.pendingRecovery = null;
+    return materialized;
   }
 
   hasPendingRecovery(): boolean {
@@ -443,7 +460,48 @@ function isNewerVersion(raw: unknown): boolean {
  * 修改与同步会一直坏下去,直到有人手工删文件。结构不合法就整份丢弃,重新开始。
  */
 function normalizeState(raw: unknown): VoiceDictionarySyncState {
-  return isValidSyncState(raw) ? raw : createEmptySyncState();
+  return isValidSyncState(raw) ? adoptDictionaryMaps(raw) : createEmptySyncState();
+}
+
+/**
+ * 把 `JSON.parse` 出来的普通对象重建成无原型字典。
+ *
+ * 词条主键、化身 tag、别名键、节点 id 都直接当对象键用,而 `constructor`、
+ * `toString`、`__proto__` 都是合法的技术术语 —— 用户完全可能把它们加进词典。带着
+ * `Object.prototype` 的对象上,`state.records['constructor']` 会取到继承来的函数,
+ * 后面 `listLiveIncarnations()` 拿它当记录用就直接抛,而且这条路径每次重启都会重现。
+ *
+ * 校验只保证形状对,不保证原型干净;所以每一份从盘上或隧道里来的状态都要过这里。
+ */
+function adoptDictionaryMaps(state: VoiceDictionarySyncState): VoiceDictionarySyncState {
+  const records = createDictionaryMap<DictionaryRecord>();
+  for (const [key, record] of Object.entries(state.records)) {
+    const incarnations = createDictionaryMap<DictionaryIncarnation>();
+    for (const [tag, incarnation] of Object.entries(record.incarnations)) {
+      const aliases = createDictionaryMap<SyncAliasState>();
+      for (const [aliasKey, alias] of Object.entries(incarnation.aliases)) {
+        aliases[aliasKey] = { ...alias, counters: adoptCounters(alias.counters) };
+      }
+      incarnations[tag] = {
+        ...incarnation,
+        counters: adoptCounters(incarnation.counters),
+        aliases,
+      };
+    }
+    const tombstones = createDictionaryMap<string>();
+    for (const [tag, stamp] of Object.entries(record.tombstones)) tombstones[tag] = stamp;
+    records[key] = { incarnations, tombstones };
+  }
+  const suppressed = createDictionaryMap<DictionarySuppression>();
+  for (const [key, value] of Object.entries(state.suppressed)) suppressed[key] = { ...value };
+  return { version: state.version, records, suppressed };
+}
+
+/** 计数桶的键是 nodeId,同样来自不可信输入。 */
+function adoptCounters(counters: Record<string, number>): Record<string, number> {
+  const adopted = createDictionaryMap<number>();
+  for (const [nodeId, value] of Object.entries(counters)) adopted[nodeId] = value;
+  return adopted;
 }
 
 /** 去掉快照里的频次与别名计数,只保留存在性(用于 sidecar 丢失后的重建)。 */

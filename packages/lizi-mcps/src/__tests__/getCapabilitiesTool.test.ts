@@ -76,61 +76,70 @@ describe('capabilities data source', () => {
     expect(entry!.detail).toContain('https://github.com/makecindy/cindy');
     // 执行位置不能被写死成客户端:SSH 远程工作区下 agent 进程在远端主机。
     expect(entry!.detail).toContain('SSH 远程工作区');
+    // 官网是区域敏感的:两个都要给,只给国际版会把大陆用户导错。
+    expect(entry!.detail).toContain('https://cindy.cn');
+    expect(entry!.detail).toContain('https://cindy.app');
   });
 });
 
 describe('get_capabilities tool', () => {
   it('不传 key 时返回包含 about-cindy 的索引', async () => {
     const h = await connect(createXdtHelperMcpServer({ logger: makeLogger() }, sessionCtx));
+    try {
+      const payload = parsePayload(
+        await h.client.callTool({
+          name: 'call_tool',
+          arguments: { name: 'get_capabilities', args: {} },
+        }),
+      );
 
-    const payload = parsePayload(
-      await h.client.callTool({ name: 'call_tool', arguments: { name: 'get_capabilities', args: {} } }),
-    );
-
-    expect(payload.ok).toBe(true);
-    const caps = payload.capabilities as Array<{ key: string; detail?: unknown }>;
-    expect(caps.map((c) => c.key)).toContain('about-cindy');
-    // 索引不应该带 detail —— 否则渐进式发现省 token 的意义就没了。
-    expect(caps.every((c) => c.detail === undefined)).toBe(true);
-
-    await h.cleanup();
+      expect(payload.ok).toBe(true);
+      const caps = payload.capabilities as Array<{ key: string; detail?: unknown }>;
+      expect(caps.map((c) => c.key)).toContain('about-cindy');
+      // 索引不应该带 detail —— 否则渐进式发现省 token 的意义就没了。
+      expect(caps.every((c) => c.detail === undefined)).toBe(true);
+    } finally {
+      await h.cleanup();
+    }
   });
 
   it('传 key=about-cindy 时返回 ok 与非空 detail', async () => {
     const h = await connect(createXdtHelperMcpServer({ logger: makeLogger() }, sessionCtx));
+    try {
+      const payload = parsePayload(
+        await h.client.callTool({
+          name: 'call_tool',
+          arguments: { name: 'get_capabilities', args: { key: 'about-cindy' } },
+        }),
+      );
 
-    const payload = parsePayload(
-      await h.client.callTool({
-        name: 'call_tool',
-        arguments: { name: 'get_capabilities', args: { key: 'about-cindy' } },
-      }),
-    );
-
-    expect(payload.ok).toBe(true);
-    const capability = payload.capability as { key: string; detail: string };
-    expect(capability.key).toBe('about-cindy');
-    expect(capability.detail.trim().length).toBeGreaterThan(0);
-
-    await h.cleanup();
+      expect(payload.ok).toBe(true);
+      const capability = payload.capability as { key: string; detail: string };
+      expect(capability.key).toBe('about-cindy');
+      expect(capability.detail.trim().length).toBeGreaterThan(0);
+    } finally {
+      await h.cleanup();
+    }
   });
 
   it('未知 key 返回 UNKNOWN_KEY,且 available 列表与当前清单同步', async () => {
     const h = await connect(createXdtHelperMcpServer({ logger: makeLogger() }, sessionCtx));
+    try {
+      const payload = parsePayload(
+        await h.client.callTool({
+          name: 'call_tool',
+          arguments: { name: 'get_capabilities', args: { key: 'no-such-capability' } },
+        }),
+      );
 
-    const payload = parsePayload(
-      await h.client.callTool({
-        name: 'call_tool',
-        arguments: { name: 'get_capabilities', args: { key: 'no-such-capability' } },
-      }),
-    );
-
-    expect(payload.ok).toBe(false);
-    expect(payload.errorCode).toBe('UNKNOWN_KEY');
-    const data = payload.data as { requested: string; available: string[] };
-    expect(data.requested).toBe('no-such-capability');
-    expect(data.available).toContain('about-cindy');
-    expect(data.available).toEqual(CAPABILITIES.map((c) => c.key));
-
-    await h.cleanup();
+      expect(payload.ok).toBe(false);
+      expect(payload.errorCode).toBe('UNKNOWN_KEY');
+      const data = payload.data as { requested: string; available: string[] };
+      expect(data.requested).toBe('no-such-capability');
+      expect(data.available).toContain('about-cindy');
+      expect(data.available).toEqual(CAPABILITIES.map((c) => c.key));
+    } finally {
+      await h.cleanup();
+    }
   });
 });

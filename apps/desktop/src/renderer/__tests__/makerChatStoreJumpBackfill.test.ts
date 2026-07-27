@@ -336,6 +336,8 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     await flushMicrotasks();
     expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(true);
 
+    const cursorBefore = makerChatStore.getSnapshot(SID).oldestMessageId;
+    const hasMoreBefore = makerChatStore.getSnapshot(SID).hasMoreMessages;
     const older = serverMessage({
       id: 'older2',
       clientId: 'older2',
@@ -346,6 +348,13 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
 
     // 锁仍归原请求持有 —— 跳转的 fallback 不得代为释放。
     expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(true);
+    // review #676（copilot + codex）：分页状态整体归锁持有者。这里若把游标推到
+    // around 窗口更早的位置，锁持有者提交时会用自己那一页的边界无条件覆盖，
+    // 把游标「回退到更新的值」，破坏单调性 → 后续向上滚动重复拉已加载历史。
+    expect(makerChatStore.getSnapshot(SID).oldestMessageId).toBe(cursorBefore);
+    expect(makerChatStore.getSnapshot(SID).hasMoreMessages).toBe(hasMoreBefore);
+    // 但权威 around 行仍要 merge 进窗口（定位 + 内容 hydration）。
+    expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).toContain('older2');
 
     releasePage([]);
     await flushMicrotasks();

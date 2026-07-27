@@ -5774,6 +5774,16 @@ function commitAroundWindow(
         ),
       };
     }
+    // busy = 分页状态整体归正在飞行的 loadOlderMessages,这里只做权威 merge(定位 +
+    // 内容 hydration),游标 / hasMore / isLoadingMore / historyLoaded 一律不碰。
+    //
+    // 为什么连游标也不能动:锁持有者的请求是从**它出发时**的游标发出的,它提交时会
+    // 无条件把 oldestMessageId 写成自己那一页的边界。如果这里先把游标推到 around
+    // 窗口更早的位置,那次提交就会把游标"回退到更新的值",破坏单调性 —— 后续向上滚动
+    // 会重复拉已加载的历史,连翻几次看不到进展(#676 review)。让锁持有者自己收尾,
+    // 代价只是下一次翻页可能重复取一段(mergeMessages 按 clientId 去重,不会重复显示)。
+    if (outcome === 'busy') return { ...s, messages };
+
     const oldestMessageId = oldestServerMessageIdForWindow(
       rows,
       s.messages,
@@ -5792,9 +5802,7 @@ function commitAroundWindow(
       // 历史是未知的。锁成 false 会让用户再也翻不动这段历史;既有回归
       // makerChatStoreActiveView 的 loadOlder 系列 8 个用例正覆盖这个语义。
       hasMoreMessages: true,
-      // busy = 锁归正在飞行的 loadOlderMessages。代它释放会让下一次滚动/跳转从同一
-      // 游标再开一个请求,正是这把锁要防的竞态,所以这条路径不碰该标志。
-      ...(outcome === 'busy' ? {} : { isLoadingMore: false }),
+      isLoadingMore: false,
     };
   });
 }

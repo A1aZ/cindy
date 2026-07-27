@@ -1,0 +1,86 @@
+import path from "node:path";
+
+import { describe, expect, it } from "vitest";
+
+import { createWdaBuildPlan, createWdaChildEnvironment } from "./build-plan.js";
+
+const UDID = "1A9D41E0-E031-4AD0-A8B5-847480802E8E";
+
+describe("createWdaBuildPlan", () => {
+  it("builds exact argv plans for a pinned simulator destination", () => {
+    const plan = createWdaBuildPlan({
+      checkoutPath: "/tmp/wda",
+      derivedDataPath: "/tmp/wda-derived",
+      simulatorUdid: UDID.toLowerCase(),
+      architecture: "arm64",
+      controlPort: 18_100,
+      mjpegPort: 19_100,
+    });
+
+    expect(plan.projectPath).toBe(
+      path.join("/tmp/wda", "WebDriverAgent.xcodeproj"),
+    );
+    expect(plan.build).toMatchObject({
+      command: "/usr/bin/xcodebuild",
+      cwd: "/tmp/wda",
+    });
+    expect(plan.build.args).toContain(
+      `platform=iOS Simulator,id=${UDID},arch=arm64`,
+    );
+    expect(plan.build.args[0]).toBe("-quiet");
+    expect(plan.build.args).toContain("build-for-testing");
+    expect(plan.build.env).not.toHaveProperty("XDT_CODEX_API_KEY");
+    expect(plan.launch.args).toContain("test-without-building");
+    expect(plan.launch.args[0]).toBe("-quiet");
+    expect(plan.launch.env).toMatchObject({
+      USE_PORT: "18100",
+      MJPEG_SERVER_PORT: "19100",
+    });
+  });
+
+  it("copies only the Apple tooling environment allowlist", () => {
+    expect(
+      createWdaChildEnvironment(
+        {
+          HOME: "/Users/tester",
+          PATH: "/usr/bin:/bin",
+          DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer",
+          XDT_CODEX_API_KEY: "must-not-leak",
+          OPENAI_API_KEY: "must-not-leak",
+        },
+        { USE_PORT: "18100" },
+      ),
+    ).toEqual({
+      HOME: "/Users/tester",
+      PATH: "/usr/bin:/bin",
+      DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer",
+      USE_PORT: "18100",
+    });
+  });
+
+  it("rejects relative paths, invalid UUIDs, and colliding ports", () => {
+    expect(() =>
+      createWdaBuildPlan({
+        checkoutPath: "relative",
+        derivedDataPath: "/tmp/derived",
+        simulatorUdid: UDID,
+      }),
+    ).toThrow("checkoutPath must be an absolute path");
+    expect(() =>
+      createWdaBuildPlan({
+        checkoutPath: "/tmp/wda",
+        derivedDataPath: "/tmp/derived",
+        simulatorUdid: "not-a-udid",
+      }),
+    ).toThrow("simulatorUdid must be an exact simulator UUID");
+    expect(() =>
+      createWdaBuildPlan({
+        checkoutPath: "/tmp/wda",
+        derivedDataPath: "/tmp/derived",
+        simulatorUdid: UDID,
+        controlPort: 8100,
+        mjpegPort: 8100,
+      }),
+    ).toThrow("controlPort and mjpegPort must differ");
+  });
+});

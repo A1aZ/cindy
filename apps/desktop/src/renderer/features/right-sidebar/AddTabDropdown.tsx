@@ -14,7 +14,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { FileDiff, FolderTree, Globe, Terminal } from 'lucide-react';
+import { FileDiff, FolderTree, Globe, Smartphone, Terminal } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { listGhostTabMenuMetas, useTabKindRegistryVersion } from './registry';
@@ -59,6 +59,13 @@ const MENU_ITEMS: TabKindMenuMeta[] = [
     labelKey: 'rightSidebar.tabs.kinds.browser',
     icon: Globe,
     order: 20,
+    enabled: true,
+  },
+  {
+    kind: 'ios-simulator',
+    labelKey: 'rightSidebar.tabs.kinds.iosSimulator',
+    icon: Smartphone,
+    order: 25,
     enabled: true,
   },
   {

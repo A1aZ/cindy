@@ -59,6 +59,7 @@ import {
   runDbValidate,
   verifyPackagedDrizzle,
   runSmokeTest,
+  runIOSSimulatorReleaseGate,
   fetchExistingManifestIfAvailable,
   findInstallerArtifact,
   ensureLinuxRuntimeAssets,
@@ -341,6 +342,7 @@ async function finishDarwin({ artifactDir, baseName, appName, arch, versionless,
 
   const applePassword = noSign ? undefined : process.env.APPLE_APP_PASSWORD;
   const wantsRealSigning = !versionless && !noSign;
+  const requireNativeReleaseGate = process.env.CINDY_IOS_SIMULATOR_RELEASE_NATIVE_SMOKE === '1';
   let signingMode = 'adhoc';
 
   if (wantsRealSigning && !applePassword && !allowUnsigned) {
@@ -357,6 +359,7 @@ async function finishDarwin({ artifactDir, baseName, appName, arch, versionless,
     console.log('==> Notarizing...');
     notarizeMacApp(appPath, identity);
     signingMode = 'developer-id+notarized';
+    runIOSSimulatorReleaseGate(appPath, arch, 'verified', requireNativeReleaseGate);
 
     const dmgPath = path.join(artifactDir, `${baseName}-${arch}.dmg`);
     console.log('==> Creating DMG...');
@@ -374,6 +377,18 @@ async function finishDarwin({ artifactDir, baseName, appName, arch, versionless,
   } else {
     // 版本无关(或显式放行)→ ad-hoc 签名,产出 .app 的 zip 供本机/内部试用。
     adhocSignMacApp(appPath, helperEntitlementsPath, mainEntitlementsPath);
+    if (requireNativeReleaseGate) {
+      throw new Error(
+        'CINDY_IOS_SIMULATOR_RELEASE_NATIVE_SMOKE=1 requires a Developer ID signed and notarized package',
+      );
+    }
+    if (arch === 'arm64' && !isPhysicalArm64Mac()) {
+      console.log(
+        '==> Skipping iOS Simulator release gate: arm64 app is not runnable on this Intel host',
+      );
+    } else {
+      runIOSSimulatorReleaseGate(appPath, arch, 'untrusted');
+    }
     const appZipPath = path.join(artifactDir, `${baseName}-${arch}.zip`);
     console.log('==> Creating app ZIP (ad-hoc signed)...');
     if (fs.existsSync(appZipPath)) fs.unlinkSync(appZipPath);

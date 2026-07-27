@@ -22,6 +22,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   FolderTree,
   Globe,
+  Smartphone,
   Terminal,
   GitPullRequestArrow,
   UsersRound,
@@ -117,6 +118,7 @@ interface TabStripProps {
 const KIND_ICON: Record<BuiltinTabKindId, LucideIcon> = {
   'file-browser': FolderTree,
   'web-browser': Globe,
+  'ios-simulator': Smartphone,
   terminal: Terminal,
   review: GitPullRequestArrow,
   'orca-workers': UsersRound,
@@ -125,6 +127,7 @@ const KIND_ICON: Record<BuiltinTabKindId, LucideIcon> = {
 const KIND_LABEL_KEY: Record<BuiltinTabKindId, string> = {
   'file-browser': 'rightSidebar.tabs.kinds.fileBrowser',
   'web-browser': 'rightSidebar.tabs.kinds.browser',
+  'ios-simulator': 'rightSidebar.tabs.kinds.iosSimulator',
   terminal: 'rightSidebar.tabs.kinds.terminal',
   review: 'rightSidebar.tabs.kinds.review',
   'orca-workers': 'rightSidebar.tabs.kinds.collaboration',
@@ -147,8 +150,7 @@ function labelKeyForTabKind(kind: TabKindId): string {
   // 而非「未知标签页」——kind 前缀本身就能识别它是谁的地盘。
   if (kind.startsWith('ghost:')) return 'rightSidebar.tabs.kinds.ghostPanel';
   return (
-    (KIND_LABEL_KEY as Partial<Record<string, string>>)[kind] ??
-    'rightSidebar.tabs.kinds.unknown'
+    (KIND_LABEL_KEY as Partial<Record<string, string>>)[kind] ?? 'rightSidebar.tabs.kinds.unknown'
   );
 }
 

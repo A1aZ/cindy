@@ -74,6 +74,10 @@ export default defineConfig({
       // shared 是 main/renderer 共用的纯函数层;此前漏配导致 src/shared/__tests__
       // 下的测试(如 workingDir.test.ts)从未跑过。
       'src/shared/__tests__/**/*.test.ts',
+      // Packaging/release runners are plain ESM and are exercised without
+      // launching Electron so their argument and report contracts stay in the
+      // normal Desktop unit-test gate.
+      'scripts/**/*.test.mjs',
     ],
   },
 });

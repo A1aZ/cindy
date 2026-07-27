@@ -12,12 +12,7 @@
 
 import { and, eq, inArray } from 'drizzle-orm';
 
-import type {
-  AgentKind,
-  SessionMeta,
-  SessionStorage,
-  WorkspaceKind,
-} from '@cindy/maker-core';
+import type { AgentKind, SessionMeta, SessionStorage, WorkspaceKind } from '@cindy/maker-core';
 
 import { getDbClient } from '../localDb/client/current.js';
 import { sessions } from '../localDb/schema.js';
@@ -98,6 +93,18 @@ export class DesktopSessionStorage implements SessionStorage {
     return rows[0] ? rowToMeta(rows[0]) : null;
   }
 
+  /** Read the product lifecycle status without widening maker-core SessionMeta. */
+  async getStatus(id: string): Promise<'active' | 'archived' | 'deleted' | null> {
+    const db = getDbClient().drizzle;
+    const rows = await db
+      .select({ status: sessions.status })
+      .from(sessions)
+      .where(eq(sessions.id, id))
+      .limit(1);
+    const status = rows[0]?.status;
+    return status === 'active' || status === 'archived' || status === 'deleted' ? status : null;
+  }
+
   async list(): Promise<SessionMeta[]> {
     const db = getDbClient().drizzle;
     const rows = await db
@@ -121,10 +128,7 @@ export class DesktopSessionStorage implements SessionStorage {
     return updated;
   }
 
-  async compareAndClearSdkSessionId(
-    id: string,
-    expectedSdkSessionId: string,
-  ): Promise<boolean> {
+  async compareAndClearSdkSessionId(id: string, expectedSdkSessionId: string): Promise<boolean> {
     const db = getDbClient().drizzle;
     const changed = await db
       .update(sessions)
@@ -163,15 +167,9 @@ export async function readCodexHistoryHasProductPrompt(id: string): Promise<bool
   return typeof value === 'boolean' ? value : undefined;
 }
 
-export async function writeCodexHistoryHasProductPrompt(
-  id: string,
-  value: boolean,
-): Promise<void> {
+export async function writeCodexHistoryHasProductPrompt(id: string, value: boolean): Promise<void> {
   const db = getDbClient().drizzle;
-  await db
-    .update(sessions)
-    .set({ codexHistoryHasProductPrompt: value })
-    .where(eq(sessions.id, id));
+  await db.update(sessions).set({ codexHistoryHasProductPrompt: value }).where(eq(sessions.id, id));
 }
 
 /**

@@ -142,6 +142,7 @@ export default {
     requiredUnitWorkspace('@cindy/mcps', 'packages/lizi-mcps'),
     requiredUnitWorkspace('@cindy/maker-cc-manager', 'packages/maker-cc-manager'),
     requiredUnitWorkspace('@cindy/maker-core', 'packages/maker-core'),
+    requiredUnitWorkspace('@cindy/ios-simulator-runtime', 'packages/ios-simulator-runtime'),
     requiredUnitWorkspace('@cindy/maker-remote-ssh', 'packages/maker-remote-ssh'),
     requiredUnitWorkspace('@cindy/maker-scheduler', 'packages/maker-scheduler'),
     requiredUnitWorkspace('@cindy/maker-shared', 'packages/maker-shared'),

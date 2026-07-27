@@ -243,6 +243,15 @@ import { startEmbeddingHost, stopEmbeddingHost, isEmbeddingHostStarted } from '.
 import { readClaudeApiKey } from './maker-host/auth-adapters';
 import { registerDevEmbeddingIpc } from './ipc/dev/embedding';
 import { onQuit, installQuitHandler } from './lifecycle';
+import {
+  disposeIOSSimulatorHost,
+  flushIOSSimulatorOwnershipRegistry,
+} from './mcp-integrations/ios-simulator';
+import {
+  parseIOSSimulatorReleaseGateArgs,
+  runIOSSimulatorReleaseGate,
+  type IOSSimulatorReleaseGateMode,
+} from './mcp-integrations/ios-simulator-release-gate';
 import { initStartupDiagnostics } from './startup-diagnostics';
 import {
   installPowerEventDiagnostics,
@@ -5094,6 +5103,33 @@ async function runSmokeTest(userId: string): Promise<void> {
   }
 }
 
+async function runPackagedIOSSimulatorReleaseGate(
+  mode: IOSSimulatorReleaseGateMode,
+): Promise<void> {
+  try {
+    const report = await runIOSSimulatorReleaseGate({
+      mode,
+      packaged: app.isPackaged,
+      platform: process.platform,
+      architecture: process.arch,
+      hostOsRelease: os.release(),
+      resourcesPath: process.resourcesPath,
+      version: app.getVersion(),
+    });
+    process.stdout.write(`${JSON.stringify(report)}\n`);
+    app.quit();
+  } catch {
+    process.stderr.write(
+      `${JSON.stringify({
+        schemaVersion: 1,
+        ok: false,
+        errorCode: 'IOS_SIMULATOR_RELEASE_GATE_FAILED',
+      })}\n`,
+    );
+    app.exit(1);
+  }
+}
+
 // AUMID 三位一体:必须与 NSIS appId(forge.config 按构建区域从 brandAppId() 取)
 // 与快捷方式 AUMID 逐字符一致。值经 shared/brandRegion 按构建期区域烘焙
 // (cn=com.xd.cindycn / global=com.xd.cindy；未注入 region 时默认 global)。
@@ -5174,6 +5210,24 @@ function cleanupLegacyDevShortcut(): Promise<void> {
 }
 
 app.on('ready', async () => {
+  try {
+    const releaseGate = parseIOSSimulatorReleaseGateArgs(process.argv);
+    if (releaseGate.enabled) {
+      await runPackagedIOSSimulatorReleaseGate(releaseGate.mode);
+      return;
+    }
+  } catch {
+    process.stderr.write(
+      `${JSON.stringify({
+        schemaVersion: 1,
+        ok: false,
+        errorCode: 'IOS_SIMULATOR_RELEASE_GATE_ARGUMENT_INVALID',
+      })}\n`,
+    );
+    app.exit(1);
+    return;
+  }
+
   // Smoke-test flag short-circuit: skip all normal init paths.
   const smoke = parseSmokeArgs();
   if (smoke.enabled) {
@@ -5692,6 +5746,8 @@ onQuit('hook-control', () => disposeHookControl(), 'sync');
 // session-git-pr-context: 取消 .git HEAD 的 parcel watcher 订阅, 防原生句柄阻塞退出。
 onQuit('git-context', () => disposeGitContext(), 'async');
 onQuit('db-client', () => lifecycleDbClientManager.dispose('quit'), 'async');
+onQuit('ios-simulator-host', disposeIOSSimulatorHost, 'async');
+onQuit('ios-simulator-ownership-registry', flushIOSSimulatorOwnershipRegistry, 'async');
 
 // Post-async 阶段: 串行跑, 确保依赖 async 阶段产物的清理 (WAL checkpoint by close)。
 onQuit('local-db-close', () => localDbCloseDb(), 'post-async');

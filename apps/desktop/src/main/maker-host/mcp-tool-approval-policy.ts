@@ -43,6 +43,7 @@ const READ_ONLY_MCP_TOOLS: ReadonlySet<string> = new Set([
   'cindy::ghost_forge_guide',
   'cindy_browser::list_tools',
   'cindy_android::list_tools',
+  'cindy_ios_simulator::list_tools',
   'cindy_computer::list_tools',
   'cindy_feishu_bot::list_tools',
   'cindy_scheduler::list_tools',
@@ -103,6 +104,17 @@ export function getDesktopMcpToolApprovalPolicy(
     return canAutoApproveContactsMcpTool({ toolName, toolParams })
       ? 'auto-approve'
       : 'prompt-each-time';
+  }
+  if (serverName === 'cindy_ios_simulator') {
+    if (toolName === 'call_tool') {
+      const innerName =
+        toolParams && typeof toolParams === 'object'
+        ? (toolParams as { name?: unknown }).name
+          : undefined;
+      return innerName === 'build_app' || innerName === 'open_url' || innerName === 'create_instance'
+        ? 'prompt-each-time'
+        : 'auto-approve';
+    }
   }
   if (TRUSTED_MCP_SERVERS.has(serverName)) {
     return 'auto-approve';

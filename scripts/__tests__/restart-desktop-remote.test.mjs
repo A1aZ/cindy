@@ -421,3 +421,16 @@ test("devEnvPrefix passes harness envs through on Windows cmd with quote strippi
 test("devEnvPrefix omits harness envs when unset (whitelist stays opt-in)", () => {
 	assert.equal(devEnvPrefix({}, "darwin"), "");
 });
+
+test("devEnvPrefix passes native iOS dev switches to Electron", () => {
+	assert.equal(
+		devEnvPrefix(
+			{
+				CINDY_IOS_SIMULATOR_NATIVE_H264: "1",
+				CINDY_IOS_SIMULATOR_NATIVE_HID: "1",
+			},
+			"darwin",
+		),
+		"CINDY_IOS_SIMULATOR_NATIVE_H264='1' CINDY_IOS_SIMULATOR_NATIVE_HID='1' ",
+	);
+});

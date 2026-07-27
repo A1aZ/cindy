@@ -9,6 +9,7 @@
  */
 
 import { app, BrowserWindow } from 'electron';
+import path from 'node:path';
 
 import {
   Maker,
@@ -63,6 +64,9 @@ import { getRemoteSshPool } from '../remote-ssh/index.js';
 import { openCcManagerSession } from './cc-manager-client.js';
 import { getRemoteClaudeBinaryPath } from '../remote-ssh/cc-manager-install.js';
 import { createReadImageHook } from './claude-hooks/read-image-hook.js';
+import { createIOSSimulatorShellGuardHook } from './claude-hooks/ios-simulator-shell-hook.js';
+import { getDesktopShellCommandPolicy } from './shell-command-policy.js';
+import { ensureAgentShellGuards } from './agent-shell-guards.js';
 import { deriveAvailableModels, refreshCatalogDerivedModels } from './catalog-to-descriptors.js';
 import { clearChatgptBridgeCredentialCache } from './anthropic-responses-bridge-host.js';
 import {
@@ -90,6 +94,7 @@ import {
   unregister as unregisterCodexProxyPrompt,
 } from './codex-proxy-host.js';
 import { createDesktopMcpProviders } from '../mcp-integrations/mcp-providers.js';
+import { getIOSSimulatorMcpDeps } from '../mcp-integrations/ios-simulator.js';
 import {
   registerCustomMcpArrays,
   refreshCustomMcpProviders,
@@ -119,6 +124,7 @@ import {
   getDesktopMcpToolApprovalPolicy,
 } from './mcp-tool-approval-policy.js';
 import { mapCodexAppServerModelsToCatalog } from './codex-model-discovery.js';
+import { createIOSSimulatorCodexDynamicToolProvider } from './ios-simulator-codex-dynamic-tools.js';
 import { prepareSharedProjectSkillLinks } from './shared-global-skills.js';
 export { withRehydrateCloseSuppressed };
 
@@ -364,6 +370,10 @@ export function getMaker(): Maker {
       claudeHooks: {
         PreToolUse: [
           {
+            matcher: 'Bash|PowerShell',
+            hooks: [createIOSSimulatorShellGuardHook(desktopMakerLogger)],
+          },
+          {
             matcher: 'Read',
             hooks: [createReadImageHook(desktopMakerLogger)],
           },
@@ -425,6 +435,13 @@ export function getMaker(): Maker {
       // 起 streamable-HTTP bridge 把 instance 通过 -c 'mcp_servers...=...' 注入。
       mcpProviders: codexMcpProviders,
       makerMemory: makerMemoryManager,
+      codexHostDynamicToolProvider:
+        createIOSSimulatorCodexDynamicToolProvider({
+          deps: getIOSSimulatorMcpDeps(),
+          isEnabled: (workingDir) =>
+            pluginRegistry.isEnabled('ios-simulator', workingDir),
+        }),
+      getShellCommandPolicy: ({ command }) => getDesktopShellCommandPolicy(command),
       // 模型清单 SSoT = 目录（providers.json，OSS 运行时真源 / bundled 兜底）。maker-core 的
       // CODEX_MODELS 已删、availableModels 起始为空；host 从账号可选目录派生 codex 列表注入
       // （gpt 原生 + codex/ 折扣网关路由）。「折扣GPT」codex/ 仍是「XD 网关来源」,渲染层按
@@ -464,6 +481,12 @@ export function getMaker(): Maker {
           desktopMakerLogger.error('codex MCP bridge prep failed, continuing without lizi MCP', {
             message: err instanceof Error ? err.message : String(err),
           });
+        }
+        const shellGuardDir = ensureAgentShellGuards();
+        if (shellGuardDir) {
+          mcpExtraEnv.PATH = [shellGuardDir, mcpExtraEnv.PATH ?? process.env.PATH]
+            .filter((value): value is string => Boolean(value))
+            .join(path.delimiter);
         }
         // API 模式: 追加 model_provider override, 让 codex app-server 走 AI Gateway
         // 而非 OAuth 订阅后端。每次 createHost 都现读 mode, 切模式后重建即生效。

@@ -54,6 +54,7 @@ import type { TabKindHostContext, TabKindId, TabState } from './types';
 // getTabKind 查 registry。
 import './plugins';
 import { initRsbBrowserBridge } from './lib/rsbBrowserBridge';
+import { initIOSSimulatorFocusBridge } from './lib/iosSimulatorFocusBridge';
 
 const log = createLogger('rightSidebar.shell');
 /**
@@ -155,6 +156,7 @@ export function RightSidebarShell({
   // 就断了。Shell 真的退出场景在 app quit,进程整体下线无所谓。
   useEffect(() => {
     initRsbBrowserBridge();
+    initIOSSimulatorFocusBridge();
   }, []);
 
   // 订阅当前 sessionId 桶变化 —— useSyncExternalStore 在 sessionId 变化时,
@@ -565,8 +567,7 @@ function PluginBodyHost({
       onVisibilityChange: () => {
         // Phase 4/5 真消费(webview mute / 暂停媒体);v1 noop。
       },
-      setCloseInterceptor: (interceptor) =>
-        setTabCloseInterceptor(tab.id, interceptor),
+      setCloseInterceptor: (interceptor) => setTabCloseInterceptor(tab.id, interceptor),
     }),
     [sessionId, workdir, remoteHostId, tab.id],
   );

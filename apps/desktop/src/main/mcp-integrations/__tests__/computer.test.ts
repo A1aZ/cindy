@@ -2365,6 +2365,24 @@ describe('computer mcp integration', () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
+  it('resolves Computer Use target PID provenance for package-level routing guards', async () => {
+    const deps = getComputerMcpDeps();
+    mockProcessSnapshotSpawn([{
+      pid: 686,
+      parentPid: 1,
+      name: 'Xcode',
+      command: '/Applications/Xcode.app/Contents/MacOS/Xcode',
+      executable: '/Applications/Xcode.app/Contents/MacOS/Xcode',
+    }]);
+
+    await expect(deps.resolveProcessIdentity?.(686)).resolves.toMatchObject({
+      pid: 686,
+      name: 'Xcode',
+      command: '/Applications/Xcode.app/Contents/MacOS/Xcode',
+    });
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+
   it('closes active MCP sessions and blocks tool dispatch while permission onboarding is paused', async () => {
     setPlatform('darwin');
     mcpCallToolMock

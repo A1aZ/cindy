@@ -57,6 +57,10 @@ describe('runtime-configs', () => {
 
     const claudeConfig = buildDesktopClaudeRuntimeConfig(() => 'http://127.0.0.1:1234');
 
+    expect(claudeConfig.systemPrompt).toContain('embedded iOS Simulator');
+    expect(claudeConfig.systemPrompt).toContain('must not choose the simulator');
+    expect(desktopCodexRuntimeConfig.systemPrompt).toContain('open -a Simulator');
+    expect(desktopCodexRuntimeConfig.systemPrompt).toContain('Only an explicit user request');
     expect(claudeConfig.memoryEnabled).toBe(false);
     expect(claudeConfig.makerMemoryEnabled).toBe(true);
     expect(desktopCodexRuntimeConfig.memoryEnabled).toBe(false);

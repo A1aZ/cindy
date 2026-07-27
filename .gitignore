@@ -152,6 +152,12 @@ config/endpoint.dev.json
 # 发布机本地地区 / 签名配置；仓库只保留对应的 .example 文件。
 apps/mobile/scripts/self-host-regions.json
 apps/desktop/scripts/release-regions.json
+# iOS Simulator WDA archives and native sidecars are generated locally.
+apps/desktop/resources/ios-simulator/*.tar.gz
+apps/desktop/resources/ios-simulator/*.tmp
+apps/desktop/resources/ios-simulator/native/arm64/
+apps/desktop/resources/ios-simulator/native/x86_64/
+apps/desktop/resources/ios-simulator/helper/
 # 视觉基线截图是开发者本地对照数据(可能截到真实会话内容),不入仓;
 # 本地跑 visual-baseline-check 时会自动生成。
 apps/mobile/e2e/visual-baselines/

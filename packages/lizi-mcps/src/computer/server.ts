@@ -24,6 +24,7 @@ export interface ComputerMcpServerOptions {
 
 const DESCRIPTION_LIST =
   'Discover local desktop computer-use tools. These tools operate on the user desktop through the installed driver. ' +
+  "For iOS work, cindy_ios_simulator is the default embedded-simulator route; use this server for macOS Simulator.app only after the user explicitly requests an external window. " +
   'Use read-only status/get_accessibility_tree/list_apps/list_windows/get_window_state before click/type_text/press_key/hotkey.';
 
 const DESCRIPTION_CALL =
@@ -83,6 +84,19 @@ const ELEMENT_INDEX_ACTION_TOOLS = new Set<ComputerMcpToolName>([
   'type_text',
   'set_value',
   'press_key',
+  'scroll',
+]);
+
+/** Actions that can change a target app after resolving its model-supplied PID. */
+const TARGETED_MUTATING_TOOLS = new Set<ComputerMcpToolName>([
+  'click',
+  'double_click',
+  'right_click',
+  'drag',
+  'type_text',
+  'set_value',
+  'press_key',
+  'hotkey',
   'scroll',
 ]);
 
@@ -252,7 +266,7 @@ export function createComputerMcpServer(
         inputSchema: z.toJSONSchema(z.object(tool.inputShape).strict()),
       })),
       workflow:
-        'Start with status and check_permissions. Then use get_accessibility_tree/list_windows, optionally narrow list_windows with query/workspace_root/process_name (for example, {"process_name":"Simulator"}), inspect a target with get_window_state, perform one action, and call get_window_state again to verify. Targeted actions such as click/type_text require pid; include window_id whenever the target window is known, and always for coordinates. Use get_window_state with {"capture_mode":"vision"} for screenshots and normally omit screenshot_out_file. Element indices are only valid for the latest snapshot of the same pid/window_id: pass the snapshot_id from get_window_state along with element_index, and re-observe when an action is rejected with STALE_SNAPSHOT. Use start_recording/stop_recording/replay_trajectory only when the user explicitly asks for recording or replay.',
+        'Start with status and check_permissions. For iOS work, use cindy_ios_simulator first; only use this server to inspect or launch macOS Simulator.app when the user explicitly requests an external window and launch_app receives use_external_simulator=true. Otherwise use get_accessibility_tree/list_windows, optionally narrow list_windows with query/workspace_root/process_name (for example, {"process_name":"Simulator"}), inspect a target with get_window_state, perform one action, and call get_window_state again to verify. Targeted actions such as click/type_text require pid; include window_id whenever the target window is known, and always for coordinates. Use get_window_state with {"capture_mode":"vision"} for screenshots and normally omit screenshot_out_file. Element indices are only valid for the latest snapshot of the same pid/window_id: pass the snapshot_id from get_window_state along with element_index, and re-observe when an action is rejected with STALE_SNAPSHOT. Use start_recording/stop_recording/replay_trajectory only when the user explicitly asks for recording or replay.',
     }),
   );
 
@@ -297,6 +311,17 @@ export function createComputerMcpServer(
     const sessionId = callContext?.sessionId;
     const parsedData = parsed.data as Record<string, unknown>;
 
+    const externalIosGuard = await guardExternalIosDesktopWorkflow(
+      name as ComputerMcpToolName,
+      parsedData,
+      callContext,
+    );
+    if (externalIosGuard) return externalIosGuard;
+    // These MCP-only routing flags are consumed by the guard and must never be
+    // forwarded to the underlying desktop driver.
+    delete parsedData.use_external_simulator;
+    delete parsedData.use_external_ios_workflow;
+
     // 快照代际护栏:element_index 指向"某次 get_window_state 的第几项",观察和
     // 动作之间 UI 树变化时会静默作用到错误元素。带 snapshot_id 的动作在此校验
     // 它是否仍是目标窗口最新观察;不带的放行(过渡兼容)但打遥测日志。
@@ -340,6 +365,109 @@ export function createComputerMcpServer(
         true,
       );
     }
+  }
+
+  /**
+   * Cindy's embedded simulator is the default iOS route. This guard uses
+   * host-resolved PID provenance so the model cannot relabel Xcode/Simulator
+   * and then drive Run/click/hotkey through generic desktop automation.
+   */
+  async function guardExternalIosDesktopWorkflow(
+    name: ComputerMcpToolName,
+    parsedData: Record<string, unknown>,
+    callContext: ComputerMcpCallContext | undefined,
+  ) {
+    const hostAuthorized = deps.isExternalIosWorkflowAllowed?.(callContext) === true;
+    if (name === 'launch_app') {
+      const target = classifyExternalIosTarget({
+        name: parsedData.name,
+        bundleId: parsedData.bundle_id,
+        executable: parsedData.name,
+      });
+      if (
+        target === 'simulator' &&
+        !(hostAuthorized && parsedData.use_external_simulator === true)
+      ) {
+        return embeddedIosSimulatorPreferredResult('Simulator.app');
+      }
+      if (
+        target === 'xcode' &&
+        !(hostAuthorized && parsedData.use_external_ios_workflow === true)
+      ) {
+        return embeddedIosSimulatorPreferredResult('Xcode');
+      }
+      return null;
+    }
+
+    if (
+      !TARGETED_MUTATING_TOOLS.has(name) ||
+      typeof parsedData.pid !== 'number' ||
+      !deps.resolveProcessIdentity
+    ) {
+      return null;
+    }
+    if (hostAuthorized && parsedData.use_external_ios_workflow === true) {
+      return null;
+    }
+
+    let identity;
+    try {
+      identity = await deps.resolveProcessIdentity(parsedData.pid);
+    } catch (err) {
+      deps.logger?.warn('failed to resolve Computer Use target process for iOS routing guard', {
+        pid: parsedData.pid,
+        tool: name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+    const target = classifyExternalIosTarget(identity ?? {});
+    if (!target) return null;
+
+    return embeddedIosSimulatorPreferredResult(target === 'xcode' ? 'Xcode' : 'Simulator.app');
+  }
+
+  function classifyExternalIosTarget(input: {
+    name?: unknown;
+    bundleId?: unknown;
+    command?: unknown;
+    executable?: unknown;
+  }): 'xcode' | 'simulator' | null {
+    const name = typeof input.name === 'string' ? input.name.trim().toLowerCase() : '';
+    const bundleId = typeof input.bundleId === 'string' ? input.bundleId.trim().toLowerCase() : '';
+    const command = typeof input.command === 'string' ? input.command.trim().toLowerCase() : '';
+    const executable = typeof input.executable === 'string' ? input.executable.trim().toLowerCase() : '';
+    const provenance = [name, command, executable].filter(Boolean).join(' ');
+
+    if (
+      bundleId === 'com.apple.iphonesimulator' ||
+      /(^|[\s/])simulator(?:\.app)?(?:[\s/]|$)/.test(provenance)
+    ) {
+      return 'simulator';
+    }
+    if (
+      bundleId === 'com.apple.dt.xcode' ||
+      /(^|[\s/])xcode(?:\.app)?(?:[\s/]|$)/.test(provenance)
+    ) {
+      return 'xcode';
+    }
+    return null;
+  }
+
+  function embeddedIosSimulatorPreferredResult(target: 'Xcode' | 'Simulator.app') {
+    return textResult(
+      {
+        ok: false,
+        errorCode: 'EMBEDDED_IOS_SIMULATOR_PREFERRED',
+        data: {
+          message:
+            `Use cindy_ios_simulator for Cindy's embedded viewer. External ${target} automation is disabled by default; use the explicit external-iOS override only when the user requested that desktop workflow.`,
+          next_tool: 'cindy_ios_simulator',
+          blocked_target: target,
+        },
+      },
+      true,
+    );
   }
 
   /**

@@ -65,12 +65,16 @@ describe('createComputerMcpServer', () => {
     expect(listWindows?.inputSchema?.properties).toHaveProperty('process_name');
     expect(payload.workflow).toContain('query/workspace_root/process_name');
     expect(listWindows?.description).toContain('{"process_name":"Simulator"}');
+    expect(payload.workflow).toContain('cindy_ios_simulator first');
+    expect(listWindows?.description).toContain('external desktop UI work');
     expect(payload.tools.find((tool) => tool.name === 'get_window_state')?.description)
       .toContain('{"capture_mode":"vision"}');
     expect(payload.tools.find((tool) => tool.name === 'click')?.description)
       .toContain('Always include pid');
     expect(payload.tools.find((tool) => tool.name === 'launch_app')?.description)
       .toContain('{"process_name":"Simulator"}');
+    expect(payload.tools.find((tool) => tool.name === 'launch_app')?.description)
+      .toContain('use_external_simulator=true');
     expect(payload.workflow).toContain('always for coordinates');
     expect(payload.workflow).toContain('{"capture_mode":"vision"}');
     await h.cleanup();
@@ -438,6 +442,288 @@ describe('createComputerMcpServer', () => {
       electron_debugging_port: 9222,
       additional_arguments: ['--flag'],
     });
+    await h.cleanup();
+  });
+
+  it('routes standalone Simulator.app launches to the embedded simulator by default', async () => {
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      callTool: vi.fn(),
+    };
+    const h = await makeHarness(deps);
+
+    const result = await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'launch_app',
+        args: { name: 'Simulator' },
+      },
+    });
+    const payload = textPayload(result) as {
+      ok: boolean;
+      errorCode: string;
+      data: { next_tool?: string };
+    };
+
+    expect(payload).toMatchObject({
+      ok: false,
+      errorCode: 'EMBEDDED_IOS_SIMULATOR_PREFERRED',
+      data: { next_tool: 'cindy_ios_simulator' },
+    });
+    expect(result.isError).toBe(true);
+    expect(deps.callTool).not.toHaveBeenCalled();
+    await h.cleanup();
+  });
+
+  it('routes Xcode launches to the embedded simulator workflow by default', async () => {
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      callTool: vi.fn(),
+    };
+    const h = await makeHarness(deps);
+
+    const result = await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'launch_app',
+        args: {
+          name: 'Xcode',
+          bundle_id: 'com.apple.dt.Xcode',
+          urls: ['file:///repo/App.xcworkspace'],
+        },
+      },
+    });
+    const payload = textPayload(result) as {
+      ok: boolean;
+      errorCode: string;
+      data: { next_tool?: string; blocked_target?: string };
+    };
+
+    expect(payload).toMatchObject({
+      ok: false,
+      errorCode: 'EMBEDDED_IOS_SIMULATOR_PREFERRED',
+      data: {
+        next_tool: 'cindy_ios_simulator',
+        blocked_target: 'Xcode',
+      },
+    });
+    expect(result.isError).toBe(true);
+    expect(deps.callTool).not.toHaveBeenCalled();
+    await h.cleanup();
+  });
+
+  it('blocks Xcode hotkeys using host-resolved PID provenance', async () => {
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      resolveProcessIdentity: vi.fn(async (pid) => ({
+        pid,
+        name: 'Xcode',
+        executable: '/Applications/Xcode.app/Contents/MacOS/Xcode',
+      })),
+      callTool: vi.fn(),
+    };
+    const h = await makeHarness(deps, { sessionId: 'agent-session-1' });
+
+    const result = await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'hotkey',
+        args: { pid: 686, window_id: 282, keys: ['cmd', 'r'] },
+      },
+    });
+    const payload = textPayload(result) as {
+      ok: boolean;
+      errorCode: string;
+      data: { next_tool?: string; blocked_target?: string };
+    };
+
+    expect(payload).toMatchObject({
+      ok: false,
+      errorCode: 'EMBEDDED_IOS_SIMULATOR_PREFERRED',
+      data: {
+        next_tool: 'cindy_ios_simulator',
+        blocked_target: 'Xcode',
+      },
+    });
+    expect(deps.resolveProcessIdentity).toHaveBeenCalledWith(686);
+    expect(deps.callTool).not.toHaveBeenCalled();
+    await h.cleanup();
+  });
+
+  it('blocks mutating Simulator.app actions using host-resolved PID provenance', async () => {
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      resolveProcessIdentity: vi.fn(async (pid) => ({
+        pid,
+        command: '/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator',
+      })),
+      callTool: vi.fn(),
+    };
+    const h = await makeHarness(deps);
+
+    const result = await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'click',
+        args: { pid: 44412, window_id: 29131, x: 20, y: 20 },
+      },
+    });
+    const payload = textPayload(result) as {
+      ok: boolean;
+      errorCode: string;
+      data: { blocked_target?: string };
+    };
+
+    expect(payload).toMatchObject({
+      ok: false,
+      errorCode: 'EMBEDDED_IOS_SIMULATOR_PREFERRED',
+      data: { blocked_target: 'Simulator.app' },
+    });
+    expect(deps.callTool).not.toHaveBeenCalled();
+    await h.cleanup();
+  });
+
+  it('keeps Xcode read-only inspection available', async () => {
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      resolveProcessIdentity: vi.fn(async (pid) => ({ pid, name: 'Xcode' })),
+      callTool: vi.fn(async () => ({ elements: [] })),
+    };
+    const h = await makeHarness(deps, { sessionId: 'agent-session-1' });
+
+    const payload = textPayload(await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'get_window_state',
+        args: { pid: 686, window_id: 282, capture_mode: 'ax' },
+      },
+    })) as { ok: boolean };
+
+    expect(payload.ok).toBe(true);
+    expect(deps.resolveProcessIdentity).not.toHaveBeenCalled();
+    expect(deps.callTool).toHaveBeenCalledWith('get_window_state', {
+      pid: 686,
+      window_id: 282,
+      capture_mode: 'ax',
+      session: 'agent-session-1',
+    }, { sessionId: 'agent-session-1' });
+    await h.cleanup();
+  });
+
+  it('does not block the same hotkey in a non-iOS desktop app', async () => {
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      resolveProcessIdentity: vi.fn(async (pid) => ({
+        pid,
+        name: 'Code',
+        executable: '/Applications/Visual Studio Code.app/Contents/MacOS/Electron',
+      })),
+      callTool: vi.fn(async () => ({ ok: true })),
+    };
+    const h = await makeHarness(deps, { sessionId: 'agent-session-1' });
+
+    const payload = textPayload(await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'hotkey',
+        args: { pid: 123, window_id: 7, keys: ['cmd', 'r'] },
+      },
+    })) as { ok: boolean };
+
+    expect(payload.ok).toBe(true);
+    expect(deps.callTool).toHaveBeenCalledWith('hotkey', {
+      pid: 123,
+      window_id: 7,
+      keys: ['cmd', 'r'],
+      session: 'agent-session-1',
+    }, { sessionId: 'agent-session-1' });
+    await h.cleanup();
+  });
+
+  it('allows an explicitly requested external Xcode workflow and strips the routing flag', async () => {
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      isExternalIosWorkflowAllowed: vi.fn(() => true),
+      resolveProcessIdentity: vi.fn(async (pid) => ({ pid, name: 'Xcode' })),
+      callTool: vi.fn(async () => ({ ok: true })),
+    };
+    const h = await makeHarness(deps, { sessionId: 'agent-session-1' });
+
+    const payload = textPayload(await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'hotkey',
+        args: {
+          pid: 686,
+          window_id: 282,
+          keys: ['cmd', 'r'],
+          use_external_ios_workflow: true,
+        },
+      },
+    })) as { ok: boolean };
+
+    expect(payload.ok).toBe(true);
+    expect(deps.resolveProcessIdentity).not.toHaveBeenCalled();
+    expect(deps.callTool).toHaveBeenCalledWith('hotkey', {
+      pid: 686,
+      window_id: 282,
+      keys: ['cmd', 'r'],
+      session: 'agent-session-1',
+    }, { sessionId: 'agent-session-1' });
+    await h.cleanup();
+  });
+
+  it('allows an explicitly requested external Simulator.app and strips the routing flag', async () => {
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      isExternalIosWorkflowAllowed: vi.fn(() => true),
+      callTool: vi.fn(async () => ({ ok: true })),
+    };
+    const h = await makeHarness(deps);
+
+    const result = await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'launch_app',
+        args: {
+          bundle_id: 'com.apple.iphonesimulator',
+          use_external_simulator: true,
+        },
+      },
+    });
+    const payload = textPayload(result) as { ok: boolean };
+
+    expect(payload.ok).toBe(true);
+    expect(deps.callTool).toHaveBeenCalledWith('launch_app', {
+      bundle_id: 'com.apple.iphonesimulator',
+    });
+    await h.cleanup();
+  });
+
+  it('does not treat a model-supplied external override as user authorization', async () => {
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      callTool: vi.fn(),
+    };
+    const h = await makeHarness(deps);
+
+    const result = await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'launch_app',
+        args: {
+          bundle_id: 'com.apple.iphonesimulator',
+          use_external_simulator: true,
+        },
+      },
+    });
+    const payload = textPayload(result) as { ok: boolean; errorCode: string };
+
+    expect(payload).toMatchObject({
+      ok: false,
+      errorCode: 'EMBEDDED_IOS_SIMULATOR_PREFERRED',
+    });
+    expect(deps.callTool).not.toHaveBeenCalled();
     await h.cleanup();
   });
 

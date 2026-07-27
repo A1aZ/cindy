@@ -11,6 +11,7 @@ import { createCindyGhostsMcpServer } from 'cindy-tools';
 import type { MakerMemoryManager } from '@cindy/maker-core';
 import { getCindyGhostsMcpDeps } from './ghost.js';
 import { getAndroidMcpDeps } from './android.js';
+import { getIOSSimulatorMcpDeps } from './ios-simulator.js';
 import { getBrowserMcpDeps } from './browser.js';
 import { getComputerMcpDeps } from './computer.js';
 import { feishuIm } from '../im';
@@ -40,12 +41,12 @@ import { getDesktopContactsManager } from '../maker-host/maker-contacts-host.js'
 import { broadcastContactsChanged } from '../maker-ipc/contacts-ipc.js';
 import { readContactsSettings } from '../maker-host/contacts-settings-store.js';
 import { readSystemContacts, writeSystemContacts } from '../maker-host/system-contacts.js';
-import { BUILTIN_LIZI_MCP_IDS, pluginIdForProviderName } from '../maker-host/plugins/builtin-plugins.js';
-import { GLOBAL_PLUGIN_IDS } from '../maker-host/plugins/types.js';
 import {
-  readChatHistoryMessages,
-  type ChatHistoryReaderDeps,
-} from './remoteChatHistory.js';
+  BUILTIN_LIZI_MCP_IDS,
+  pluginIdForProviderName,
+} from '../maker-host/plugins/builtin-plugins.js';
+import { GLOBAL_PLUGIN_IDS } from '../maker-host/plugins/types.js';
+import { readChatHistoryMessages, type ChatHistoryReaderDeps } from './remoteChatHistory.js';
 
 export interface DesktopMcpProvidersDeps {
   getMakerMemoryManager: () => MakerMemoryManager;
@@ -61,12 +62,26 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
 
   // 辅助桥接 OrcaCollabService → OrcaMcpDeps / sendToSession，
   // 并在边界捕获 HOST_NOT_READY / INTERNAL。
-  function wrap<Args extends unknown[], R>(fn: (svc: NonNullable<ReturnType<typeof tryGetOrcaCollabService>>, ...args: Args) => Promise<R>): (...args: Args) => Promise<R> {
+  function wrap<Args extends unknown[], R>(
+    fn: (svc: NonNullable<ReturnType<typeof tryGetOrcaCollabService>>, ...args: Args) => Promise<R>,
+  ): (...args: Args) => Promise<R> {
     return async (...args) => {
       const s = tryGetOrcaCollabService();
-      if (!s) return { ok: false, errorCode: 'HOST_NOT_READY' as const, message: 'orca collab service not initialized' } as R;
-      try { return await fn(s, ...args); }
-      catch (err) { return { ok: false, errorCode: 'INTERNAL' as const, message: err instanceof Error ? err.message : String(err) } as R; }
+      if (!s)
+        return {
+          ok: false,
+          errorCode: 'HOST_NOT_READY' as const,
+          message: 'orca collab service not initialized',
+        } as R;
+      try {
+        return await fn(s, ...args);
+      } catch (err) {
+        return {
+          ok: false,
+          errorCode: 'INTERNAL' as const,
+          message: err instanceof Error ? err.message : String(err),
+        } as R;
+      }
     };
   }
 
@@ -79,6 +94,9 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
         // Keep that snapshot for a busy turn when a disable refresh is deferred;
         // a successfully rebuilt bridge omits this provider via the outer gate.
         context?.agentKind === 'codex' || pluginRegistry.isEnabled('android'),
+    }),
+    iosSimulator: getIOSSimulatorMcpDeps({
+      isIOSSimulatorEnabled: () => pluginRegistry.isEnabled('ios-simulator'),
     }),
     browser: getBrowserMcpDeps(),
     computer: getComputerMcpDeps({
@@ -126,7 +144,9 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
           const { messageId } = await feishuIm.sendMarkdownText(chatId, markdown);
           return { ok: true, messageId };
         } catch (err) {
-          const r = (err as { response?: { data?: { code?: number; msg?: string }; status?: number } }).response;
+          const r = (
+            err as { response?: { data?: { code?: number; msg?: string }; status?: number } }
+          ).response;
           const detail = r
             ? `status=${r.status ?? 'n/a'} code=${r.data?.code ?? '?'} msg=${r.data?.msg ?? '?'}`
             : err instanceof Error
@@ -290,25 +310,57 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
           return { ok: false, errorCode: 'INTERNAL', message };
         }
       },
-      sendToSession: async ({ targetSessionId, message, dispatcherSessionId, title, useWorktree }) => {
+      sendToSession: async ({
+        targetSessionId,
+        message,
+        dispatcherSessionId,
+        title,
+        useWorktree,
+      }) => {
         const svc = tryGetOrcaCollabService();
         if (!svc) {
-          return { ok: false, errorCode: 'HOST_NOT_READY', message: 'orca collab service not initialized' };
+          return {
+            ok: false,
+            errorCode: 'HOST_NOT_READY',
+            message: 'orca collab service not initialized',
+          };
         }
         try {
-          return await svc.sendToSession({ targetSessionId, message, dispatcherSessionId, title, useWorktree });
+          return await svc.sendToSession({
+            targetSessionId,
+            message,
+            dispatcherSessionId,
+            title,
+            useWorktree,
+          });
         } catch (err) {
-          return { ok: false, errorCode: 'INTERNAL', message: err instanceof Error ? err.message : String(err) };
+          return {
+            ok: false,
+            errorCode: 'INTERNAL',
+            message: err instanceof Error ? err.message : String(err),
+          };
         }
       },
       history: {
         listWorkdirs: async (args) => {
-          try { const page = await listWorkdirsForHistory(args); return { ok: true, page }; }
-          catch (err) { const msg = err instanceof Error ? err.message : String(err); const errorCode = /localDb not ready/i.test(msg) ? 'HOST_NOT_READY' : 'INTERNAL'; return { ok: false, errorCode, message: msg }; }
+          try {
+            const page = await listWorkdirsForHistory(args);
+            return { ok: true, page };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            const errorCode = /localDb not ready/i.test(msg) ? 'HOST_NOT_READY' : 'INTERNAL';
+            return { ok: false, errorCode, message: msg };
+          }
         },
         listSessions: async (args) => {
-          try { const page = await listSessionsForHistory(args); return { ok: true, page }; }
-          catch (err) { const msg = err instanceof Error ? err.message : String(err); const errorCode = /localDb not ready/i.test(msg) ? 'HOST_NOT_READY' : 'INTERNAL'; return { ok: false, errorCode, message: msg }; }
+          try {
+            const page = await listSessionsForHistory(args);
+            return { ok: true, page };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            const errorCode = /localDb not ready/i.test(msg) ? 'HOST_NOT_READY' : 'INTERNAL';
+            return { ok: false, errorCode, message: msg };
+          }
         },
         getMessages: async (args) => {
           return readChatHistoryMessages(args, {
@@ -317,8 +369,14 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
           });
         },
         searchChatHistory: async (args) => {
-          try { const result = await searchChatHistoryHybrid(args); return { ok: true, result }; }
-          catch (err) { const msg = err instanceof Error ? err.message : String(err); const errorCode = /localDb not ready/i.test(msg) ? 'HOST_NOT_READY' : 'INTERNAL'; return { ok: false, errorCode, message: msg }; }
+          try {
+            const result = await searchChatHistoryHybrid(args);
+            return { ok: true, result };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            const errorCode = /localDb not ready/i.test(msg) ? 'HOST_NOT_READY' : 'INTERNAL';
+            return { ok: false, errorCode, message: msg };
+          }
         },
       },
       // submit_github_issue: 官方反馈提交(确认卡片 → serverApiFetch)。

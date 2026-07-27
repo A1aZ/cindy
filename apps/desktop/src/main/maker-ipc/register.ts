@@ -1599,6 +1599,7 @@ let pendingCredentialSwitchHolder: PendingCredentialSwitchService | null = null;
 let deferredCodexRestartHolder: DeferredCodexRestartService | null = null;
 let pendingAgentSwitchApplyHolder:
   ((sessionId: string, signal?: AbortSignal) => Promise<() => void>) | null = null;
+let cancelPendingAgentSwitchHolder: ((sessionId: string) => void) | null = null;
 let gitSnapshotCoordinator: GitSnapshotCoordinator | null = null;
 const sessionTurnActivityTracker = new SessionTurnActivityTracker();
 
@@ -1717,6 +1718,11 @@ export async function acquirePendingAgentSwitchForDirectSend(
   signal?: AbortSignal,
 ): Promise<() => void> {
   return pendingAgentSwitchApplyHolder?.(sessionId, signal) ?? (() => {});
+}
+
+/** Later successful model/provider picks supersede an earlier cross-engine intent. */
+export function cancelPendingAgentSwitchForSession(sessionId: string): void {
+  cancelPendingAgentSwitchHolder?.(sessionId);
 }
 
 /**
@@ -4128,6 +4134,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
 
   // turn 运行中登记的切换意图(下一条消息发送时刻由 send 事务 apply)。
   const agentSwitchPending = createPendingAgentSwitchRegistry();
+  cancelPendingAgentSwitchHolder = (sessionId) => {
+    agentSwitchPending.clear(sessionId);
+    broadcastSessionPatched(sessionId, {
+      agentSwitchIntent: null,
+      agentSwitchIntentCanceled: true,
+    });
+  };
 
   // session-agent-switch:lazy-create 前以 DB 行为真源校正 createOpts。切换后
   // 残留在 renderer store / 排队项里的旧 agentKind/resumeSessionId 若原样 spawn,
@@ -4187,7 +4200,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       return row ?? null;
     },
     getLiveSession: (sessionId) => maker.getSession(sessionId),
-    closeSession: (sessionId) => maker.closeSession(sessionId),
+    closeSession: (sessionId) => maker.closeSession(sessionId, 'agent-switch'),
     listMessagesForHandoff: (sessionId, after) => listMessagesForAgentHandoff(sessionId, 400, after),
     findParkedEngineSession: (sessionId, targetDbKind) =>
       findParkedEngineSession(sessionId, targetDbKind),
@@ -6983,15 +6996,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     // 同时覆盖"主动 closeSession"和"内部异常关闭"两条路径。
     // opts.preserveWorkspace=true(/clear、鉴权重连等软重启)时抑制这些重副作用,
     // 业务体与选项解析见 closeSessionRequest.ts。
-    await handleCloseSessionRequest(
-      {
-        closeSession: (sid) => maker.closeSession(sid),
-        withRehydrateCloseSuppressed,
-        cleanupPendingInteractions: (sid) =>
-          cleanupPendingInteractionsForSession(sid, 'session_closed'),
-      },
-      sessionId,
-      opts,
+    await withSendToSessionLock(sessionId, () =>
+      handleCloseSessionRequest(
+        {
+          closeSession: (sid) => maker.closeSession(sid),
+          withRehydrateCloseSuppressed,
+          cleanupPendingInteractions: (sid) =>
+            cleanupPendingInteractionsForSession(sid, 'session_closed'),
+        },
+        sessionId,
+        opts,
+      ),
     );
   });
 

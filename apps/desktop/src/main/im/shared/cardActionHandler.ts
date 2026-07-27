@@ -33,6 +33,7 @@ import {
   setSessionProvider,
 } from '../../maker-host/session-provider-store';
 import {
+  cancelPendingAgentSwitchForSession,
   clearPendingCredentialSwitchForSession,
   getPendingCredentialSwitchTarget,
   isSessionInTurn,
@@ -354,6 +355,9 @@ export function createCardActionHandler(
       if (!liveAfterModel) {
         log.info(`model:pick: no live session for ${sessionId.slice(-8)} — DB updated only`);
       }
+      // 这次 IM 选择晚于 renderer 登记的跨引擎 intent；只有整条 route 更新成功后
+      // 才取消旧 intent，失败回滚时仍保留它供下一次发送重试。
+      cancelPendingAgentSwitchForSession(sessionId);
       return null;
     });
 

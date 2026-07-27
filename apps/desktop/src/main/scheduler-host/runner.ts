@@ -429,6 +429,8 @@ export class MakerScheduleRunner implements ScheduleRunner {
       const archived =
         !row || row.status === 'archived' || row.status === 'deleted';
       if (archived) {
+        holder.releaseAgentSwitchLock?.();
+        holder.releaseAgentSwitchLock = undefined;
         // persistentSession=true：自我续命。清空死的 targetSessionId,本次 fire 走新建分支,
         // session 创建成功后 4.7.1 会重新绑定到新 sessionId。这样用户即便手动归档/删除
         // 了之前持续会话的 session,自动化也不会卡死,而是无感开新的继续跑。
@@ -442,8 +444,6 @@ export class MakerScheduleRunner implements ScheduleRunner {
             this.deps.logger.warn?.('[runner] persistent rebind clear failed', err);
           }
           isHeartbeat = false;
-          holder.releaseAgentSwitchLock?.();
-          holder.releaseAgentSwitchLock = undefined;
           sessionId = randomUUID();
           // resumeSessionId / heartbeatWorkingDir / heartbeatModel 仍是 undefined,
           // 下方 workingDir 解析自然走 schedule.workingDir + schedule.useWorktree 分支
@@ -470,6 +470,8 @@ export class MakerScheduleRunner implements ScheduleRunner {
         const recentlyUserDriven =
           row?.userSendAt != null && Date.now() - row.userSendAt < ACTIVE_YIELD_WINDOW_MS;
         if (recentlyUserDriven && isSessionInTurn(sessionId) && this.canDefer(schedule)) {
+          holder.releaseAgentSwitchLock?.();
+          holder.releaseAgentSwitchLock = undefined;
           return this.deferFire(schedule, sessionId, 'user-active');
         }
         // B1.5 撞忙排队(替代旧的"盲发 → SESSION_RUNNING → 顺延"路径):会话忙

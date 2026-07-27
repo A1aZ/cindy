@@ -328,8 +328,14 @@ export function createTurnRunner(
    *  the cache, both spawn a maker session, and the second clobbers the first
    *  in `sessionStates`. */
   const wiringInFlight = new Map<string, Promise<SessionState>>();
-  /** agent switch 主动 close 旧引擎时保留 IM 队列,待新 live session 原地接管。 */
-  const agentSwitchCloseSuppressed = new Set<string>();
+  /**
+   * agent switch 主动 close 的旧 Session。只有对象身份和 close reason 都匹配才
+   * 忽略；同一业务 sessionId 下的用户关闭或新引擎关闭必须照常清缓存。
+   */
+  const agentSwitchCloseSuppressed = new Map<
+    string,
+    { expectedSession: MakerSession }
+  >();
   type MakerInstance = ReturnType<typeof getMaker>;
   let subscribedMaker: MakerInstance | null = null;
   let unsubscribeMakerEvents: (() => void) | null = null;
@@ -340,7 +346,11 @@ export function createTurnRunner(
     subscribedMaker = maker;
     unsubscribeMakerEvents = maker.on((event) => {
       if (event.type !== 'session:closed') return;
-      if (agentSwitchCloseSuppressed.has(event.sessionId)) return;
+      const suppression = agentSwitchCloseSuppressed.get(event.sessionId);
+      if (
+        suppression?.expectedSession === event.session &&
+        event.reason === 'agent-switch'
+      ) return;
       forgetClosedSession(event.sessionId, 'maker session closed');
     });
   }
@@ -647,15 +657,19 @@ export function createTurnRunner(
       // deferred 切换会关闭旧 session。apply 成功后重新读取 maker 里的 live
       // session 并原地换绑 IM listener,确保当前这条消息发给目标引擎且队列不丢。
       if (deps.acquirePendingAgentSwitch) {
-        agentSwitchCloseSuppressed.add(rowId);
+        const suppression = {
+          expectedSession: state.makerSession,
+        };
+        agentSwitchCloseSuppressed.set(rowId, suppression);
         try {
           releaseAgentSwitchLock = await deps.acquirePendingAgentSwitch(rowId);
-          await refreshSessionAfterPendingAgentSwitch(state, rowId, userId);
         } finally {
-          // 只覆盖 agent switch 关闭旧引擎并换绑新 session 的窗口。刷新完成后的
-          // send 期间若会话被其它路径关闭，必须让全局订阅清掉陈旧 SessionState。
           agentSwitchCloseSuppressed.delete(rowId);
         }
+        if (sessionStates.get(rowId) !== state) {
+          throw new Error(`session ${rowId} closed while refreshing deferred agent switch`);
+        }
+        await refreshSessionAfterPendingAgentSwitch(state, rowId, userId);
       } else {
         await refreshSessionAfterPendingAgentSwitch(state, rowId, userId);
       }
@@ -744,16 +758,23 @@ export function createTurnRunner(
     if (!deps.acquirePendingAgentSwitch) return;
     const previous = state.makerSession;
     const maker = getMaker();
+    const [row] = await getDbClient()
+      .drizzle.select()
+      .from(sessionsTable)
+      .where(eq(sessionsTable.id, sessionId))
+      .limit(1);
+    if (!row || row.status === 'archived' || row.status === 'deleted') {
+      forgetClosedSession(
+        sessionId,
+        `session became ${row?.status ?? 'missing'} during route refresh`,
+      );
+      throw new Error(`session ${sessionId} is not active after deferred agent switch`);
+    }
     let current = maker.getSession(sessionId);
     // apply 已提交 DB 但 bootstrap 失败时,直发路径也要像 makerSendTransaction 的
     // lazy-create 一样按最新 DB 行自愈,不能退回已关闭的 previous.send()。
     if (!current) {
-      const [row] = await getDbClient()
-        .drizzle.select()
-        .from(sessionsTable)
-        .where(eq(sessionsTable.id, sessionId))
-        .limit(1);
-      if (!row?.workingDir) {
+      if (!row.workingDir) {
         throw new Error(`session ${sessionId} missing after deferred agent switch`);
       }
       const agentKind = toCoreAgentKind(row.agentKind);

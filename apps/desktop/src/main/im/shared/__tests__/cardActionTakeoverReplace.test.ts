@@ -35,6 +35,7 @@ const mocks = vi.hoisted(() => ({
   getSessionProvider: vi.fn<() => string | null>(() => null),
   setSessionProvider: vi.fn(),
   isSessionInTurn: vi.fn(() => false),
+  cancelPendingAgentSwitchForSession: vi.fn(),
   withSendToSessionLock: vi.fn(
     async (_sessionId: string, task: () => Promise<unknown>) => task(),
   ),
@@ -90,6 +91,7 @@ vi.mock('../../../maker-ipc/runtimeSetModel', () => ({
   applyRuntimeSetModelChange: mocks.applyRuntimeSetModelChange,
 }));
 vi.mock('../../../maker-ipc/register', () => ({
+  cancelPendingAgentSwitchForSession: mocks.cancelPendingAgentSwitchForSession,
   isSessionInTurn: mocks.isSessionInTurn,
   registerPendingCredentialSwitchForSession: mocks.registerPendingCredentialSwitchForSession,
   clearPendingCredentialSwitchForSession: mocks.clearPendingCredentialSwitchForSession,
@@ -611,6 +613,7 @@ describe('model:pick 持久化失败', () => {
 
     expect(mocks.updateModelEffort).toHaveBeenCalled();
     expect(mocks.applyRuntimeSetModelChange).toHaveBeenCalled();
+    expect(mocks.cancelPendingAgentSwitchForSession).toHaveBeenCalledWith('sess-target');
   });
 
   it('在持久化和运行态切换前统一归一化 providerId', async () => {
@@ -700,6 +703,7 @@ describe('model:pick 持久化失败', () => {
       'anthropic',
     );
     expect(mocks.applyRuntimeSetModelChange).not.toHaveBeenCalled();
+    expect(mocks.cancelPendingAgentSwitchForSession).not.toHaveBeenCalled();
     expect(mocks.setSessionProvider).not.toHaveBeenCalled();
     expect(live.setModel).not.toHaveBeenCalled();
     expect(live.setEffort).not.toHaveBeenCalled();
@@ -738,6 +742,7 @@ describe('model:pick 持久化失败', () => {
       'model-card',
       expect.objectContaining({ body: slackUi.cards.model.failed('runtime rejected') }),
     );
+    expect(mocks.cancelPendingAgentSwitchForSession).not.toHaveBeenCalled();
   });
 
   it('live setEffort 失败时恢复 route store 和 live model', async () => {
@@ -783,6 +788,7 @@ describe('model:pick 持久化失败', () => {
       'model-card',
       expect.objectContaining({ body: slackUi.cards.model.failed('effort rejected') }),
     );
+    expect(mocks.cancelPendingAgentSwitchForSession).not.toHaveBeenCalled();
   });
 
   it('回滚时保留 DB 快照中明确清空的 provider', async () => {

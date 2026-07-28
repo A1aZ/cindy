@@ -445,13 +445,7 @@ function findBlockedToolCall(
 ): BlockedToolCall | undefined {
   const messages = Array.isArray(body) ? body : [body];
   for (const message of messages) {
-    if (
-      message === null ||
-      typeof message !== 'object' ||
-      (message as { method?: unknown }).method !== 'tools/call'
-    ) {
-      continue;
-    }
+    if (!isToolCallMessage(message)) continue;
     // Resolve each tools/call independently. Batch siblings such as MCP
     // notifications may legitimately omit threadId and must not make a
     // disabled call fail open.
@@ -526,16 +520,49 @@ async function readJsonBody(
   return JSON.parse(text);
 }
 
+/**
+ * Resolve the single thread context this whole HTTP request should run under
+ * (used to wrap the transport in `runWithLiziMcpSessionContext`).
+ *
+ * Batch siblings such as MCP notifications legitimately omit
+ * `params._meta.threadId` — `findBlockedToolCall` already says so, and resolves
+ * each `tools/call` independently for exactly that reason. If such a sibling
+ * were allowed to collapse the whole batch to `undefined`, a perfectly
+ * well-attributed `tools/call` would run with NO AsyncLocalStorage context, and
+ * every built-in provider that reads it (cindy_browser's `__mcpSessionId`,
+ * cindy_android, …) would silently fall back to host-side UI-focus inference —
+ * i.e. the cross-session routing bug, just reachable only via batches. So
+ * threadId-less non-tool messages are skipped here.
+ *
+ * Still conservative where attribution actually matters:
+ *   - a `tools/call` WITHOUT a threadId → `undefined`; never run an
+ *     unattributed tool call under a sibling's session. (`findBlockedToolCall`
+ *     fail-closes this shape too, but only for servers that carry a pluginId,
+ *     so the guard has to live here as well.)
+ *   - two different threadIds in one batch → `undefined`; genuinely ambiguous,
+ *     there is no single correct context to pick.
+ */
 function extractCodexThreadId(body: unknown): string | undefined {
   const messages = Array.isArray(body) ? body : [body];
   let out: string | undefined;
   for (const message of messages) {
     const threadId = extractCodexThreadIdFromMessage(message);
-    if (!threadId) return undefined;
+    if (!threadId) {
+      if (isToolCallMessage(message)) return undefined;
+      continue;
+    }
     if (out && out !== threadId) return undefined;
     out = threadId;
   }
   return out;
+}
+
+function isToolCallMessage(message: unknown): boolean {
+  return (
+    message !== null &&
+    typeof message === 'object' &&
+    (message as { method?: unknown }).method === 'tools/call'
+  );
 }
 
 function extractCodexThreadIdFromMessage(message: unknown): string | undefined {

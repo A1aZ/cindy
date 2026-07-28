@@ -248,6 +248,36 @@ describe('model-disable:set handler', () => {
     expect(order).toEqual(['disable', 'enable']);
   });
 
+  it('异步窗口内切账号 → INTERNAL 拒写:A 的点击不落进 B 的 owner-scoped 偏好', async () => {
+    const harness = new IpcHarness();
+    let owner = 'owner-a';
+    const deps = makeDeps({
+      currentOwnerId: () => owner,
+      // 目录校验的 await 窗口内发生账号切换。
+      listProviders: async () => {
+        owner = 'owner-b';
+        return xdCatalog();
+      },
+    });
+    registerProviderHandlers(harness, deps);
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+        kind: 'model', providerId: 'xd', modelIds: ['claude-opus-5'], disabled: true,
+      }),
+    ).rejects.toThrow(/INTERNAL/);
+    expect(deps.setModelsDisabled).not.toHaveBeenCalled();
+    expect(deps.broadcastChanged).not.toHaveBeenCalled();
+
+    // 账号稳定时照常放行。
+    await expect(
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+        kind: 'model', providerId: 'xd', modelIds: ['claude-opus-5'], disabled: true,
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(deps.setModelsDisabled).toHaveBeenCalledOnce();
+  });
+
   it('落盘异常 → 结构化 INTERNAL,不把文件系统细节透过 IPC 边界', async () => {
     const harness = new IpcHarness();
     const deps = makeDeps({

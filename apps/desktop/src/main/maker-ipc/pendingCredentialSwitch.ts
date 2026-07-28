@@ -38,6 +38,8 @@ const PENDING_APPLY_RETRY_DELAY_MS = 10_000;
 export interface PendingCredentialSwitch {
   model: string;
   providerId: string | null;
+  /** 目标会话的 agent(register 时由调用方捕获,收口前的停用重裁决用;可缺席 = 不裁决)。 */
+  agentKind?: AgentKind;
   requestedAt: number;
 }
 
@@ -62,6 +64,20 @@ export interface PendingCredentialSwitchDeps {
   }) => void;
   /** 生效后唤醒该会话的输入队列(排队消息此前被 pending 门挡住)。 */
   onApplied?: (sessionId: string) => void;
+  /**
+   * 停用轴裁决(生产 = model-route-guard-live 的 verdictForModelRoute)。SET_MODEL
+   * 请求时刻已裁决过,但 deferred 切换的**生效**可能在数分钟后 —— 期间目标模型 /
+   * 来源可能已被用户停用,收口前必须重裁决(PR #744 review 第七轮)。缺席 = 不裁决。
+   */
+  checkRoute?: (
+    agent: AgentKind,
+    model: string,
+    providerId: string | null,
+  ) => Promise<
+    | { kind: 'pass' }
+    | { kind: 'reroute'; providerId: string }
+    | { kind: 'reject'; reason: string }
+  >;
   /** 自愈兜底重试间隔覆写(测试用)。 */
   retryDelayMs?: number;
   logger?: {
@@ -79,10 +95,14 @@ export class PendingCredentialSwitchService {
 
   constructor(private readonly deps: PendingCredentialSwitchDeps) {}
 
-  register(sessionId: string, target: { model: string; providerId: string | null }): void {
+  register(
+    sessionId: string,
+    target: { model: string; providerId: string | null; agentKind?: AgentKind },
+  ): void {
     this.pending.set(sessionId, {
       model: target.model,
       providerId: target.providerId,
+      ...(target.agentKind ? { agentKind: target.agentKind } : {}),
       requestedAt: Date.now(),
     });
     this.scheduleRetry(sessionId);
@@ -146,7 +166,7 @@ export class PendingCredentialSwitchService {
       // 收口,不能用进入函数时捕获的 stale target 覆盖后选(后选覆盖先选)。
       const latest = this.pending.get(sessionId);
       if (!latest) return;
-      this.finalizeApply(sessionId, latest, 'turn end');
+      await this.finalizeApplyChecked(sessionId, latest, 'turn end');
     } finally {
       this.applying.delete(sessionId);
     }
@@ -163,7 +183,54 @@ export class PendingCredentialSwitchService {
     if (this.applying.has(sessionId)) return;
     const target = this.pending.get(sessionId);
     if (!target) return;
-    this.finalizeApply(sessionId, target, 'session close');
+    this.applying.add(sessionId);
+    void this.finalizeApplyChecked(sessionId, target, 'session close').finally(() => {
+      this.applying.delete(sessionId);
+    });
+  }
+
+  /**
+   * 收口前的停用重裁决(PR #744 review 第七轮):SET_MODEL 时刻裁决过,但 deferred
+   * 生效可能在数分钟后,期间目标可能被停用。阶梯与 resolveLenientRoute 同思路但
+   * 模型不换(renderer 已按用户选择落盘 DB):显式来源被停用 ⇒ 丢来源走隐式 / 替代;
+   * 全部拷贝被停用 ⇒ 不写 route(apply=false,warn 留痕),登记照常收口(输入队列
+   * 不能被冻结)。裁决异常按放行(与 live 壳同则,不把裁决故障升级成切换丢失)。
+   */
+  private async resolveApplyRoute(
+    target: PendingCredentialSwitch,
+  ): Promise<{ providerId: string | null; apply: boolean }> {
+    const { checkRoute } = this.deps;
+    if (!checkRoute || !target.agentKind) return { providerId: target.providerId, apply: true };
+    try {
+      let verdict = await checkRoute(target.agentKind, target.model, target.providerId);
+      if (verdict.kind === 'pass') return { providerId: target.providerId, apply: true };
+      if (verdict.kind === 'reroute') return { providerId: verdict.providerId, apply: true };
+      if (target.providerId) {
+        verdict = await checkRoute(target.agentKind, target.model, null);
+        if (verdict.kind === 'pass') return { providerId: null, apply: true };
+        if (verdict.kind === 'reroute') return { providerId: verdict.providerId, apply: true };
+      }
+      return { providerId: target.providerId, apply: false };
+    } catch {
+      return { providerId: target.providerId, apply: true };
+    }
+  }
+
+  /** 重裁决 + 身份守卫后收口:await 期间用户改选/取消 ⇒ 本次让位(新登记有自己的定时器)。 */
+  private async finalizeApplyChecked(
+    sessionId: string,
+    target: PendingCredentialSwitch,
+    reason: string,
+  ): Promise<void> {
+    // 无裁决依赖 / 无 agentKind:同步快路径(onSessionClosed 的调用方不 await,
+    // 收口必须在同一 tick 完成才能保住既有「关闭即生效」时序)。
+    if (!this.deps.checkRoute || !target.agentKind) {
+      this.finalizeApply(sessionId, target, { providerId: target.providerId, apply: true }, reason);
+      return;
+    }
+    const resolved = await this.resolveApplyRoute(target);
+    if (this.pending.get(sessionId) !== target) return;
+    this.finalizeApply(sessionId, target, resolved, reason);
   }
 
   /**
@@ -175,16 +242,27 @@ export class PendingCredentialSwitchService {
   private finalizeApply(
     sessionId: string,
     target: PendingCredentialSwitch,
+    resolved: { providerId: string | null; apply: boolean },
     reason: string,
   ): void {
     this.pending.delete(sessionId);
     this.clearRetry(sessionId);
-    setSessionProvider(sessionId, target.providerId);
-    this.deps.logger?.info(`pending credential switch applied on ${reason}`, {
-      sessionId,
-      model: target.model,
-      providerId: target.providerId,
-    });
+    if (resolved.apply) {
+      setSessionProvider(sessionId, resolved.providerId);
+      this.deps.logger?.info(`pending credential switch applied on ${reason}`, {
+        sessionId,
+        model: target.model,
+        providerId: resolved.providerId,
+      });
+    } else {
+      // 目标在等待期间被停用且无启用替代:route 不写(不把停用来源写回 store),
+      // 登记照常收口 —— 队列必须解冻,广播照发让 renderer 清「任务结束后生效」标记。
+      this.deps.logger?.warn('pending credential switch target disabled in settings; route not applied', {
+        sessionId,
+        model: target.model,
+        providerId: target.providerId,
+      });
+    }
     try {
       this.deps.onApplied?.(sessionId);
     } catch (err) {
@@ -197,7 +275,7 @@ export class PendingCredentialSwitchService {
       this.deps.broadcastApplied?.({
         sessionId,
         model: target.model,
-        providerId: target.providerId,
+        providerId: resolved.apply ? resolved.providerId : target.providerId,
       });
     } catch (err) {
       this.deps.logger?.warn('pending credential switch: applied broadcast failed', {

@@ -31,7 +31,10 @@ interface HarnessSession {
   isTurnRunning?: () => boolean;
 }
 
-function createHarness(sessions: HarnessSession[], opts?: { retryDelayMs?: number }) {
+function createHarness(
+  sessions: HarnessSession[],
+  opts?: { retryDelayMs?: number; checkRoute?: PendingCredentialSwitchDeps['checkRoute'] },
+) {
   const closeSession = vi.fn(async (_sessionId: string) => {});
   const broadcastApplied = vi.fn<NonNullable<PendingCredentialSwitchDeps['broadcastApplied']>>();
   const onApplied = vi.fn<NonNullable<PendingCredentialSwitchDeps['onApplied']>>();
@@ -42,6 +45,7 @@ function createHarness(sessions: HarnessSession[], opts?: { retryDelayMs?: numbe
     },
     broadcastApplied,
     onApplied,
+    ...(opts?.checkRoute ? { checkRoute: opts.checkRoute } : {}),
     ...(opts?.retryDelayMs !== undefined ? { retryDelayMs: opts.retryDelayMs } : {}),
   });
   return { service, closeSession, broadcastApplied, onApplied, sessions };
@@ -251,5 +255,82 @@ describe('PendingCredentialSwitchService', () => {
     h.service.onSessionClosed('never-registered');
     expect(h.broadcastApplied).not.toHaveBeenCalled();
     expect(h.onApplied).not.toHaveBeenCalled();
+  });
+
+  describe('收口前的停用重裁决(PR #744 review 第七轮)', () => {
+    it('显式来源在等待期间被停用 ⇒ 丢来源按裁决落地(reroute 到替代来源)', async () => {
+      const sessionId = rememberSession('pending-switch-revalidate-reroute');
+      setSessionProvider(sessionId, 'openai');
+      const checkRoute = vi.fn(async (_a: string, _m: string, providerId: string | null) =>
+        providerId === 'xd'
+          ? ({ kind: 'reject', reason: 'explicit-source-disabled' } as const)
+          : ({ kind: 'reroute', providerId: 'anthropic' } as const),
+      );
+      const h = createHarness(
+        [{ id: sessionId, agentKind: 'claude-code', remoteHostId: null, isTurnRunning: () => false }],
+        { checkRoute },
+      );
+
+      h.service.register(sessionId, {
+        model: 'claude-opus-5',
+        providerId: 'xd',
+        agentKind: 'claude-code',
+      });
+      await h.service.onTurnSettled(sessionId);
+
+      expect(h.service.has(sessionId)).toBe(false);
+      expect(getSessionProvider(sessionId)).toBe('anthropic');
+      expect(h.broadcastApplied).toHaveBeenCalledWith({
+        sessionId,
+        model: 'claude-opus-5',
+        providerId: 'anthropic',
+      });
+      expect(h.onApplied).toHaveBeenCalledWith(sessionId);
+    });
+
+    it('目标模型全部拷贝被停用 ⇒ route 不写,但登记收口、队列解冻、广播照发', async () => {
+      const sessionId = rememberSession('pending-switch-revalidate-reject');
+      setSessionProvider(sessionId, 'openai');
+      const checkRoute = vi.fn(async () => ({ kind: 'reject', reason: 'model-disabled' } as const));
+      const h = createHarness(
+        [{ id: sessionId, agentKind: 'claude-code', remoteHostId: null, isTurnRunning: () => false }],
+        { checkRoute },
+      );
+
+      h.service.register(sessionId, {
+        model: 'claude-opus-5',
+        providerId: 'xd',
+        agentKind: 'claude-code',
+      });
+      await h.service.onTurnSettled(sessionId);
+
+      expect(h.service.has(sessionId)).toBe(false);
+      expect(getSessionProvider(sessionId)).toBe('openai'); // 停用来源没被写进 store
+      expect(h.onApplied).toHaveBeenCalledWith(sessionId); // 队列必须解冻
+      expect(h.broadcastApplied).toHaveBeenCalledTimes(1);
+    });
+
+    it('裁决通过 ⇒ 原样应用;register 未带 agentKind ⇒ 不裁决(向后兼容)', async () => {
+      const sessionId = rememberSession('pending-switch-revalidate-pass');
+      setSessionProvider(sessionId, 'openai');
+      const checkRoute = vi.fn(async () => ({ kind: 'pass' } as const));
+      const h = createHarness(
+        [{ id: sessionId, agentKind: 'codex', remoteHostId: null, isTurnRunning: () => false }],
+        { checkRoute },
+      );
+
+      h.service.register(sessionId, { model: 'gpt-5.5', providerId: 'xd', agentKind: 'codex' });
+      await h.service.onTurnSettled(sessionId);
+      expect(getSessionProvider(sessionId)).toBe('xd');
+      expect(checkRoute).toHaveBeenCalledWith('codex', 'gpt-5.5', 'xd');
+
+      const sessionId2 = rememberSession('pending-switch-no-agentkind');
+      setSessionProvider(sessionId2, 'openai');
+      checkRoute.mockClear();
+      h.service.register(sessionId2, { model: 'gpt-5.5', providerId: 'xd' });
+      h.service.onSessionClosed(sessionId2);
+      expect(getSessionProvider(sessionId2)).toBe('xd');
+      expect(checkRoute).not.toHaveBeenCalled();
+    });
   });
 });

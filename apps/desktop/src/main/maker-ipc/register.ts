@@ -437,6 +437,7 @@ import {
   syncModelVisibilityMirror,
 } from '../maker-host/model-visibility-mirror.js';
 import { setModelsDisabled, setProviderDisabled } from '../maker-host/model-disable-store.js';
+import { getCurrentDataOwnerId } from '../authManager.js';
 import { verdictForModelRoute } from '../maker-host/model-route-guard-live.js';
 import { setClaudeProxySessionIdResolver } from '../maker-host/anthropic-compat-proxy-host.js';
 import {
@@ -1757,7 +1758,13 @@ export function registerPendingCredentialSwitchForSession(
   if (!service) {
     throw new Error('Pending credential switch service is not initialized');
   }
-  service.register(sessionId, target);
+  // 捕获会话 agent:deferred 切换在收口时刻要重过停用裁决(期间目标可能被停用,
+  // PR #744 review 第七轮);读不到(会话行缺失)则登记不带 agentKind = 收口不裁决。
+  const dbAgentKind = getSessionDbAgentKind(sessionId);
+  service.register(sessionId, {
+    ...target,
+    ...(dbAgentKind ? { agentKind: dbAgentKind === 'cc' ? 'claude-code' as const : 'codex' as const } : {}),
+  });
 }
 
 export function clearPendingCredentialSwitchForSession(
@@ -3507,6 +3514,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     setModelsDisabled: (providerId, modelIds, disabled) =>
       setModelsDisabled(providerId, modelIds, disabled),
     setProviderDisabled: (providerId, disabled) => setProviderDisabled(providerId, disabled),
+    // 停用写入的归属校验:入口捕获 / 持久化前复核,异步窗口内切账号即拒,防 A 的
+    // 点击写进 B 的 owner-scoped 偏好文件(PR #744 review 第七轮)。
+    currentOwnerId: () => getCurrentDataOwnerId(),
     // 通用 OAuth（目录 auth.oauth 描述符驱动）：login 成功后 best-effort 拉动态模型发现
     // (additions-only merge 进 active-catalog) 并广播 PROVIDER_CHANGED 让 UI 刷新连接态。
     oauthLogin: async (providerId, isCurrent) => {
@@ -6599,6 +6609,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     onApplied: (sessionId) => {
       inputCoordinator.wakeSession(sessionId, 'pending-credential-switch-applied');
     },
+    // 停用轴:deferred 切换收口前重裁决(SET_MODEL 时刻裁决过,但生效可能在数分钟
+    // 后,期间目标可能被停用;PR #744 review 第七轮)。
+    checkRoute: verdictForModelRoute,
     logger: log,
   });
   pendingCredentialSwitchHolder = pendingCredentialSwitchService;

@@ -757,15 +757,33 @@ function ModelSelectorContentView({
 
   // ── 供应商分段 / flat 列表 ────────────────────────────────────────────────
   // sections 非空 = 按供应商分段(每行 = (供应商, 模型));null = flat(无供应商概念)。
+  // 当前会话的实际来源(activeSourceId)被供应商级停用时,connected(经
+  // connectedProvidersForAgent,剔除 suspended)不含它 —— 选中行会整个消失,
+  // keepSelected 豁免无从生效。把这个仍然连接着的 suspended 来源补进分段输入,
+  // 但只保留选中行(isVisible 收口):它的其它模型不可作为新路由选择
+  // (PR #744 review 第七轮)。
+  const sectionProviders = useMemo(() => {
+    if (!currentAgentKind || !activeSourceId) return connected;
+    if (connected.some((p) => p.id === activeSourceId)) return connected;
+    const actual = providers.find((p) => p.id === activeSourceId);
+    // 只补「已连接但 suspended」的当前来源;未连接来源仍走既有空态/断链路径。
+    if (!actual?.connected || !actual.agents.includes(currentAgentKind)) return connected;
+    return [...connected, actual];
+  }, [connected, providers, activeSourceId, currentAgentKind]);
+  const suspendedActiveSourceId =
+    sectionProviders === connected ? null : activeSourceId;
   // biome-ignore lint/correctness/useExhaustiveDependencies: visibilityVersion 是外部可见性偏好的刷新信号,需要强制重算分段列表。
   const sections = useMemo(() => {
     if (!sourcesEnabled || !currentAgentKind) return null;
     // 0 个可连来源 → 返回 null 退化到 flat 列表(而非空 sections 触发「无结果」)。覆盖:
     //  · device-link 老被控端不认 maker:provider:list(invoke reject)→ device providers 为空 → flat 兜底;
     //  · providers 拉取中的瞬态窗口;· 本机 0 来源已由上方 emptyState 引导卡先行接管。
-    if (connected.length === 0) return null;
+    if (sectionProviders.length === 0) return null;
+    // 被停用的当前来源只保留选中行(keepSelected 豁免语义)。
+    const restrictSuspended = (pid: string, mid: string): boolean =>
+      !(suspendedActiveSourceId && pid === suspendedActiveSourceId && mid !== modelId);
     return buildProviderSections({
-      providers: connected,
+      providers: sectionProviders,
       agent: currentAgentKind,
       selectedModelId: modelId,
       selectedProviderId: activeSourceId,
@@ -773,7 +791,8 @@ function ModelSelectorContentView({
       // 控制端本机 modelVisibilityPrefs。旧被控端不回传快照时 fail-open，保持兼容。
       isVisible: deviceId
         ? (pid, mid) => {
-            const p = connected.find((x) => x.id === pid);
+            if (!restrictSuspended(pid, mid)) return false;
+            const p = sectionProviders.find((x) => x.id === pid);
             const cat = p ? getModel(p, mid, currentAgentKind) : undefined;
             return isDeviceModelVisible(
               remoteProviders.modelVisibilityOverrides,
@@ -783,7 +802,8 @@ function ModelSelectorContentView({
             );
           }
         : (pid, mid) => {
-            const p = connected.find((x) => x.id === pid);
+            if (!restrictSuspended(pid, mid)) return false;
+            const p = sectionProviders.find((x) => x.id === pid);
             const cat = p ? getModel(p, mid, currentAgentKind) : undefined;
             return isModelEnabled(currentAgentKind, pid, {
               id: mid,
@@ -795,7 +815,8 @@ function ModelSelectorContentView({
     // visibilityVersion 仅作刷新触发器(设置页改显示开关后强制重算);deviceId 切换需重算分段。
   }, [
     sourcesEnabled,
-    connected,
+    sectionProviders,
+    suspendedActiveSourceId,
     currentAgentKind,
     modelId,
     activeSourceId,

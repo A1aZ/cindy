@@ -242,6 +242,14 @@ export interface ProviderHandlerDeps {
    */
   setModelsDisabled(providerId: string, modelIds: readonly string[], disabled: boolean): void;
   setProviderDisabled(providerId: string, disabled: boolean): void;
+  /**
+   * 当前数据归属账号 id(生产 = getCurrentDataOwnerId)。停用写入是 owner-scoped
+   * 持久化(model-disable-prefs.json 按账号分目录),而 handler 内有异步窗口(串行
+   * 队列排队 + 目录校验的 listProviders await)—— 期间切了账号,写入会落进**新**账号
+   * 的偏好文件。在入口捕获、持久化前复核,变了就拒(PR #744 review 第七轮)。
+   * 可选:未注入(单测最小桩)= 不做归属校验。
+   */
+  currentOwnerId?(): string | null;
 }
 
 /** 校验 PROVIDER_TEST_CONNECTION 入参形状（确定性代码校验，非法直接 INVALID_PARAMS）。 */
@@ -649,6 +657,15 @@ export function registerProviderHandlers(
         throwIpcError('INTERNAL', 'failed to persist model disable override');
       }
     };
+    // 归属捕获:store 路径按账号分目录且在 run() 执行时才解析,队列排队 + 目录校验
+    // 的 await 窗口内切账号会把 A 的点击写进 B 的偏好 —— 持久化前复核,变了就拒
+    // (PR #744 review 第七轮)。
+    const ownerAtIngress = deps.currentOwnerId?.() ?? null;
+    const assertSameOwner = (): void => {
+      if (deps.currentOwnerId && (deps.currentOwnerId() ?? null) !== ownerAtIngress) {
+        throwIpcError('INTERNAL', 'active account changed before persisting model disable override');
+      }
+    };
     const run = async () => {
       if (i.kind === 'model') {
         const modelIds = i.modelIds as string[];
@@ -668,9 +685,11 @@ export function registerProviderHandlers(
             );
           }
         }
+        assertSameOwner();
         persist(() => deps.setModelsDisabled(i.providerId as string, modelIds, i.disabled as boolean));
       } else {
         if (i.disabled) await requireCatalogProvider(i.providerId as string);
+        assertSameOwner();
         persist(() => deps.setProviderDisabled(i.providerId as string, i.disabled as boolean));
       }
       deps.broadcastChanged();

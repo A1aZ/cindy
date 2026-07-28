@@ -18,6 +18,7 @@
  */
 
 import {
+  findForkParentSessionId,
   findPendingAgentHandoff,
   findPendingForkOrigin,
   markLatestAgentHandoffConsumed,
@@ -62,8 +63,12 @@ export const agentHandoffPending = createAgentHandoffPendingRegistry(async (sess
   // agent-switch / 消息删除会直接把交接 set 进内存(register.ts 的 setPendingHandoff),
   // 不经上面的 DB fallback。fork 出的子会话若在首发前切了引擎,内存里就只剩切换交接,
   // 来源标记会被整条跳过——这里补一次组合。
+  //
+  // 这里用 findForkParentSessionId 而**不是** findPendingForkOrigin:这两条路径重建的是
+  // 新的原生上下文,交接正文纯按 messages 拼出、不含 fork 信息。fork 是会话的永久属性,
+  // 不该随首发那一次性标记被消费掉——否则首轮跑完再切引擎,新上下文就不知道自己是分叉。
   async (sessionId, handoff) => {
-    const forkParentSessionId = await findPendingForkOrigin(sessionId);
+    const forkParentSessionId = await findForkParentSessionId(sessionId);
     return forkParentSessionId
       ? composeForkOriginHandoff(forkParentSessionId, handoff)
       : handoff;

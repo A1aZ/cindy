@@ -43,6 +43,7 @@ vi.mock('../../client/current', () => ({
 import {
   findParkedEngineSession,
   findPendingAgentHandoff,
+  findForkParentSessionId,
   findPendingForkOrigin,
   getMessageDeletionTarget,
   markLatestAgentHandoffConsumed,
@@ -328,6 +329,26 @@ describe('findPendingForkOrigin 来源标记重建', () => {
     insertForkedSession(sqlite, 'parent-1');
     insertRowAt(sqlite, 'assistant', FORK_AT + 10);
     await expect(findPendingForkOrigin('s1')).resolves.toBeNull();
+  });
+
+  it('fork 后 /clear 过:不再注入(历史已被用户显式重置)', async () => {
+    const sqlite = createDb();
+    sqlite
+      .prepare(
+        'INSERT INTO sessions (id, cleared_at, parent_session_id, created_at, total_token_usage) VALUES (?, ?, ?, ?, 0)',
+      )
+      .run('s1', FORK_AT + 100, 'parent-1', FORK_AT);
+    await expect(findPendingForkOrigin('s1')).resolves.toBeNull();
+    await expect(findForkParentSessionId('s1')).resolves.toBeNull();
+  });
+
+  it('findForkParentSessionId 不受首发消费影响:切引擎/删消息重建上下文仍带血缘', async () => {
+    // 首轮已跑完(token 已累加)→ 一次性标记该消费;但 fork 是永久属性,
+    // 重建原生上下文时仍要带上,否则新上下文不知道自己是分叉。
+    const sqlite = createDb();
+    insertForkedSession(sqlite, 'parent-1', 5_000);
+    await expect(findPendingForkOrigin('s1')).resolves.toBeNull();
+    await expect(findForkParentSessionId('s1')).resolves.toBe('parent-1');
   });
 
   it('已知边界:导入会话的合成时间戳会让来源标记漏注入一次(方向安全,故意接受)', async () => {

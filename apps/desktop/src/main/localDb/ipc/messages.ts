@@ -1525,12 +1525,16 @@ export async function findPendingForkOrigin(sessionId: string): Promise<string |
     .select({
       parentSessionId: sessions.parentSessionId,
       createdAt: sessions.createdAt,
+      clearedAt: sessions.clearedAt,
       totalTokenUsage: sessions.totalTokenUsage,
     })
     .from(sessions)
     .where(eq(sessions.id, sessionId))
     .limit(1);
   if (!sessRow?.parentSessionId) return null;
+  // fork 之后 /clear 过:渲染历史与原生上下文都被显式重置成新对话,再把来源标记
+  // 灌进去等于往用户主动清空的上下文里塞旧元信息。
+  if (sessRow.clearedAt !== null && sessRow.clearedAt >= sessRow.createdAt) return null;
   // 信号一(Codex):fork 把 total_token_usage reset 为 0,只有真跑过 turn 才被累加。
   if ((sessRow.totalTokenUsage ?? 0) > 0) return null;
   // 信号二(Claude 与兜底):Claude 完成路径不累加该列——recordSessionTurnTokens 只在
@@ -1549,6 +1553,33 @@ export async function findPendingForkOrigin(sessionId: string): Promise<string |
     )
     .limit(1);
   return assistantAfterFork ? null : sessRow.parentSessionId;
+}
+
+/**
+ * 只看 fork 血缘,不看首发消费态——给"重建原生上下文"用。
+ *
+ * 与 findPendingForkOrigin 的区别在语义:后者管的是"首发那一次性的来源标记",
+ * 跑过一轮就该消费掉;而 fork 这个**事实**是会话的永久属性。引擎切换与消息删除
+ * 会从持久消息重新拼出一份交接、创建新的原生上下文,那份交接是纯粹按 messages
+ * 重建的,不含任何 fork 信息——若这里也跟着"已消费"一起沉默,新原生上下文就再也
+ * 不知道自己是分叉出来的。
+ *
+ * /clear 之后同样抑制:那时历史已被用户显式重置,血缘不该再进新上下文。
+ */
+export async function findForkParentSessionId(sessionId: string): Promise<string | null> {
+  const db = getDbClient().drizzle;
+  const [sessRow] = await db
+    .select({
+      parentSessionId: sessions.parentSessionId,
+      createdAt: sessions.createdAt,
+      clearedAt: sessions.clearedAt,
+    })
+    .from(sessions)
+    .where(eq(sessions.id, sessionId))
+    .limit(1);
+  if (!sessRow?.parentSessionId) return null;
+  if (sessRow.clearedAt !== null && sessRow.clearedAt >= sessRow.createdAt) return null;
+  return sessRow.parentSessionId;
 }
 
 /**

@@ -442,6 +442,35 @@ describe('dispatcher 核心语义', () => {
     expect(finalText).toContain('新对话的回答');
   });
 
+  it('旧任务还在跑时被移出映射: 新消息不排进旧会话(快路径也过边界)', async () => {
+    const bindings = memoryBindings();
+    const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
+    const fr = fakeRunner({ sessions });
+    const { d } = makeDispatcher({ runner: fr.runner, bindings });
+    const c = collector();
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    const first = c.last('task.ack')!.payload.sessionId!;
+    // 第一轮仍在执行(没有 fr.finish): session 落库并被用户移出映射
+    sessions[first] = { workingDir: path.resolve('/repos/another-project'), usable: true };
+
+    d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
+    await tick();
+    // 免检快路径只保「尚未落库」的窗口 —— 已落库的会话在跑也要过映射校验,
+    // 否则这条消息会排进旧会话, 由 session meta 的 workDir 带到映射外执行
+    const second = c.last('task.ack')!.payload.sessionId!;
+    expect(second).not.toBe(first);
+    expect(c.last('task.ack')!.payload.result).toBe('accepted');
+    expect(fr.calls[1]).toMatchObject({ isNew: true, workingDir: WS_DIR });
+    expect(bindings.get('conn-1', 'team-slack:C1:1.1')).toBe(second);
+
+    fr.finish();
+    await tick();
+    fr.finish();
+    await tick();
+  });
+
   it('在工作目录映射内换目录 -> 无感跟随复用(边界内的移动不受影响)', async () => {
     const bindings = memoryBindings();
     const sessions: Record<string, { workingDir: string; usable: boolean }> = {};

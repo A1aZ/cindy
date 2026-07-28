@@ -11,11 +11,10 @@
  *      - 带 sessionId(接管): session 必须存在且其工作目录落在本连接注册的
  *        别名路径内(白名单不因接管放松), 通过后把 externalKey 重绑到它;
  *      - 不带(默认): 别名解析(映射即白名单)-> binding 查 externalKey ->
- *        复用(且重校验白名单)或新建并落绑定; 白名单重校验失败时看绑定上的
- *        目录快照与授权来源: 目录相对快照变过 = 用户在桌面端把对话移出了
- *        映射(目录是本地用户亲手选的, 不是远端指定的)-> 跟随并记 local-move;
- *        目录没再变但已记过 local-move -> 继续认这份授权(否则跟随只生效一
- *        次); 两者都不满足 = 映射被改/删的撤权语义 -> 丢绑定重建;
+ *        复用或新建并落绑定。复用与否**每条消息现场重算**, 唯一依据是会话
+ *        当前的工作目录是否仍落在工作目录映射(或内置对话根)内 —— 映射是
+ *        「远端能驱动哪些本地目录」的唯一边界, 判定不带任何状态。移出映射
+ *        (被移到别处 / 映射被改删)= 丢绑定重建, 并回一条说明怎么恢复;
  *   3. 排队: 目标 session 正在跑 turn 时 FIFO 排队, ack 回 queued + 位置;
  *      turn 收口后自动 drain;
  *   4. 回推: turn.end 经当前连接发送; 连接不在线时缓存, 重连(onConnected)
@@ -630,13 +629,22 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       bindings.remove(legacyNamespace, payload.externalKey);
     };
     if (bound) {
-      // 关键竞态防护: 绑定的 session 正在本模块跑/排队(首次派发尚未落库,
-      // inspect 会查不到)时直接复用 —— 否则同 key 的连发消息会各开新 session,
-      // 破坏「同 key 同 session」铁律。
-      // 已声明的取舍: 该快路径不重校验白名单 —— 窗口仅限「用户改别名映射」与
-      // 「旧任务在跑」重叠的瞬间, 且此 session 本就是本连接刚创建的; 常规
-      // 复用路径(下方 inspect 分支)每次都重校验。
+      const info = await runner.inspect(bound);
+      if (!isCurrentGeneration(generation)) return { reject: 'disabled' };
+      /**
+       * 关键竞态防护: 绑定的 session 已派发但**尚未落库**(inspect 查不到)且
+       * 正在本模块跑/排队时直接复用 —— 否则同 key 的后续消息会各开新 session,
+       * 破坏「同 key 同 session」铁律。
+       *
+       * 严格限定在 `info === null` 这个窗口内: 一旦落库, 无论它是否在跑, 都要
+       * 走下面的映射校验。早期版本把「在跑/排队」整个当成免检快路径, 于是用户在
+       * 一轮任务执行期间把对话移出映射时, 新到的消息仍会排进这个 session ——
+       * 而 session-runner 的复用路径以 session meta 的 workDir 为权威(会覆盖
+       * 这里传的目录), 那条消息就真的在已移出映射的目录里执行了, 等于在
+       * 「每条消息现场按映射重算」上开了个洞(PR #733 review 指出)。
+       */
       if (
+        info === null &&
         namespacedBound !== null &&
         (running.has(bound) || (queues.get(bound)?.length ?? 0) > 0)
       ) {
@@ -644,8 +652,8 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
           run: {
             sessionId: bound,
             isNew: false,
-            // 复用路径 workingDir 仅供参考(runner 以 session meta 为权威);
-            // chat 伪目录无别名映射, 给 dialogues 根占位
+            // 尚未落库, 没有 meta 可查; chat 伪目录无别名映射, 给 dialogues 根
+            // 占位。此时 session 只可能是本连接刚在映射内建出来的。
             workingDir: dir ?? dialogue?.rootDir() ?? '',
             agentKind,
             model,
@@ -658,8 +666,6 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
           },
         };
       }
-      const info = await runner.inspect(bound);
-      if (!isCurrentGeneration(generation)) return { reject: 'disabled' };
       // 复用条件: 仍存在、可用、且仍在白名单内(别名映射可能已被用户改过);
       // chat 伪目录的会话住在 dialogues 根下, 按对话根校验
       const inAllowedRoot =

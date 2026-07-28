@@ -150,7 +150,14 @@
     "previewAttachments": "Attachments: {{num}}",
     "previewReadyTitle": "Ready to create and send",
     "previewNotReadyTitle": "Not ready to create yet",
-    "previewReadySubtitle": "Confirming creates the session on the controlled computer and queues the first message."
+    "previewReadySubtitle": "Confirming creates the session on the controlled computer and queues the first message.",
+    "useWorktree": "Use worktree",
+    "worktreeDetecting": "Detecting environment…",
+    "worktreeGitMissing": "git not detected — install it first",
+    "worktreeNotGitRepo": "Current directory is not a git repository",
+    "worktreeAlreadyInWorktree": "Already inside a worktree, nesting is not allowed",
+    "worktreeDetectFailed": "Could not check this directory — reselect it later and try again",
+    "worktreeCreateFailed": "Failed to create worktree: {{message}}"
   },
   "menu": {
     "chipPinned": "Pinned",

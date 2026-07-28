@@ -6,6 +6,7 @@ import {
   DL_SUBSCRIBE_CHANNEL,
   DL_UNSUBSCRIBE_CHANNEL,
   FILE_BROWSER_EVENT_CHANNEL,
+  INVOKE_TIMEOUT_OVERRIDES_MS,
   PROTOCOL_VERSION,
   type DeviceLinkConnectionIssue,
   type DeviceLinkStatus,
@@ -686,7 +687,11 @@ async function sendInvoke<T>(
   // 连接就绪后、真正发送前的最后检查点:重连等待期间调用方状态可能已失效
   // (写被同字段新写取代),抛错即中止发送。
   opts?.preSend?.();
-  const result = await client.invoke(deviceId, { channel, args });
+  // 逐 channel 超时覆盖是协议契约(allowlist 注释明言 client-agnostic,mobile/web 应与
+  // 桌面控制端用同一映射):worktree:create 在被控端有 60s 执行预算,不带覆盖会在 client
+  // 默认 30s 处先超时——被控端建完 worktree 但控制端已放弃,语义错误。未覆盖的 channel
+  // 传 undefined,沿用 client 默认 requestTimeoutMs。
+  const result = await client.invoke(deviceId, { channel, args }, INVOKE_TIMEOUT_OVERRIDES_MS[channel]);
   return unwrapInvoke<T>(result);
 }
 

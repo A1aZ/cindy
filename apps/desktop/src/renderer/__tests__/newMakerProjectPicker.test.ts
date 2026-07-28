@@ -69,9 +69,10 @@ describe('Shared create project picker', () => {
     expect(newMakerDraftRouteSource).not.toContain(
       'getProjectPickerEmptyLabelKey(workspacePrompt)',
     );
-    // 2026-07-19 恢复 worktree 高级入口(用户裁决,488cb33 误删回归;详见
+    // 2026-07-19 恢复 worktree 入口(用户裁决,488cb33 误删回归;详见
     // newMakerCreateAgentVisualContract):路由允许且仅允许一个 advancedOnly
-    // 齿轮变体的 WorktreeChipsRow(folderPickerMode="project" 仅为其 advancedHidden
+    // 变体的 WorktreeChipsRow(2026-07-28 起渲染 [分支 chip][worktree 勾选 chip],
+    // 齿轮 popover 已移除;folderPickerMode="project" 仅为其 advancedHidden
     // 语义服务),不回退 folder chip 版;项目选择仍由 mode pill 独占。
     expect(newMakerDraftRouteSource).toMatch(/<WorktreeChipsRow[\s\S]*?variant="advancedOnly"/);
     expect((newMakerDraftRouteSource.match(/<WorktreeChipsRow/g) ?? []).length).toBe(1);
@@ -126,16 +127,34 @@ describe('Shared create project picker', () => {
     );
   });
 
-  it('hides Advanced worktree controls for pure-dialogue drafts without a selected project', () => {
+  it('hides worktree controls for pure-dialogue drafts without a selected project', () => {
     // advancedHidden 把 "project 模式 + 无 cwd" 归到 dialogue 上下文,
-    // 让齿轮按钮 / worktree state effect / effectiveWorktreeEnabled 用同一个 flag 拦掉。
+    // 让 worktree chip / worktree state effect / effectiveWorktreeEnabled 用同一个 flag 拦掉。
+    // 自动关闭必须走 handleAutoDisable(只关 UI、不写工作端勾选记忆),
+    // 不得回退成直接调 onEnabledChange(那会把环境因素当用户显式切换持久化)。
     expect(worktreeChipsSource).toContain(
       "const advancedHidden = folderPickerMode === 'project' && !cwd",
     );
-    expect(worktreeChipsSource).toContain('if (advancedHidden && enabled) onEnabledChange(false)');
+    expect(worktreeChipsSource).toContain('if (advancedHidden && enabled) handleAutoDisable()');
     expect(worktreeChipsSource).toContain('{!advancedHidden && (');
     expect(worktreeChipsSource).toContain(
       'const effectiveWorktreeEnabled = enabled && !advancedHidden && !worktreeDisabled',
+    );
+  });
+
+  it('persists the worktree preference only on explicit chip toggles (three-tier semantics)', () => {
+    // 2026-07-28「勾选状态保存在工作端」三档语义:
+    //  chip 点击(source='chip')= 显式表态 → 写工作端记忆(本地 patchDraft / 远程写穿);
+    //  分支菜单 enable-worktree(source='branch-pick')= 本次草稿流程副作用 → 不落偏好;
+    //  资格自动关闭(handleAutoDisable)= 仅 UI。
+    expect(worktreeChipsSource).toContain("onToggle(!checked, 'chip')");
+    expect(worktreeChipsSource).toContain("onEnabledChange(true, 'branch-pick')");
+    expect(newMakerDraftRouteSource).toContain("if (source !== 'chip') return;");
+    expect(newMakerDraftRouteSource).toContain("'maker:apply-new-maker-worktree-pref'");
+    // 播种点亮门槛:enabled=true 必须蕴含 detect 已回填 baseRepo,
+    // 否则「偏好 ON + 挂载后立即发送」会撞 handleSend 的 worktreeMissingRepo 硬错误。
+    expect(newMakerDraftRouteSource).toContain(
+      'setWtEnabled(effectiveWorkingDir != null && wtBaseRepo != null && worktreePref)',
     );
   });
 

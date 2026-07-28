@@ -1651,6 +1651,8 @@ interface ElectronAPI {
     >;
     fastModeByModel: Record<string, boolean>;
     effortByModel: Record<string, string>;
+    /** 「新建会话默认启用 worktree」勾选记忆(vendor 无关根字段,远程草稿播种用)。 */
+    worktreeEnabled: boolean;
   }) => void;
 
   /** 被控端 renderer → 自身 main:providerModelMemory 全量快照镜像(草稿列表行真实读源)。 */
@@ -1680,6 +1682,11 @@ interface ElectronAPI {
       effort?: string;
       fast?: boolean;
     }) => void,
+  ) => () => void;
+
+  /** 被控端本地 main → 自身 renderer:控制端写穿的「新建会话默认启用 worktree」(patchDraft 写真实草稿)。 */
+  onMakerWorktreePrefApply: (
+    cb: (payload: { worktreeEnabled: boolean }) => void,
   ) => () => void;
 
   /** 被控端本地 main → 自身 renderer:控制端写穿的会话「模型 effort/fast」pref(调本地 setter)。 */

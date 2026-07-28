@@ -152,6 +152,12 @@ const CORE_INVOKE_CHANNELS: readonly string[] = [
   // re-mirror 回 main 并广播。被控端转发给自身 renderer 执行(无 sender 依赖、无本机副作用)。
   // 老被控端无 handler → CHANNEL_NOT_ALLOWED → 控制端吞掉,退回一次性 pull 行为。
   'maker:apply-new-maker-draft-pref',
+  // device-link 草稿「新建会话默认启用 worktree」写穿(控制端 → 被控端):worktree 勾选记忆是
+  // 被控端 newMakerDraft 的 vendor 无关根字段,「这台工作端新建会话是否默认进 worktree」的真相
+  // 在被控端。被控端 handler 校验布尔后转发给自身 renderer 写真实草稿(无 sender 依赖、无本机
+  // UI 副作用);回读经 maker:get-new-maker-defaults + NEW_MAKER_DRAFT_CHANGED 回流。
+  // 老被控端无 handler → CHANNEL_NOT_ALLOWED → 控制端吞掉降级(勾选仅本次草稿生效)。
+  'maker:apply-new-maker-worktree-pref',
   // 模型供应商目录(只读):远程会话的模型选择器据此 1:1 镜像被控端的「供应商+模型」结构。
   // 被控端 dispatch 在返回前剥离 routing 等执行字段(见 device-link/dispatch.ts),只回显示用字段。
   'maker:provider:list',

@@ -43,6 +43,7 @@ import {
   subscribeDraft,
   setEffortForModel,
   setFastModeForModel,
+  patchDraft,
   patchVendorPrefs,
   patchVendorPrefsPreservingModelChoice,
 } from '@/state/newMakerDraft';
@@ -156,6 +157,8 @@ export function App() {
         },
         fastModeByModel: draft.fastModeByModel,
         effortByModel: draft.effortByModel,
+        // worktree 勾选记忆(vendor 无关根字段):远程草稿(手机 / 桌面控制端)播种用。
+        worktreeEnabled: draft.worktreeEnabled,
       });
     };
     syncPrefs();
@@ -222,9 +225,15 @@ export function App() {
         });
       },
     );
+    // 控制端写穿的「新建会话默认启用 worktree」:renderer 是草稿真相,直接 patchDraft 落
+    // localStorage;写入触发 subscribeDraft → SYNC_NEW_MAKER_DRAFT re-mirror → 广播回流。
+    const offWorktree = window.electronAPI.onMakerWorktreePrefApply(({ worktreeEnabled }) => {
+      patchDraft({ worktreeEnabled: worktreeEnabled === true });
+    });
     return () => {
       offDraft();
       offSession();
+      offWorktree();
     };
   }, []);
 

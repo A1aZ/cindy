@@ -37,7 +37,8 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
     expect(source).not.toContain('createAgentSidebarProjects');
     // 2026-07-19 用户裁决:488cb33 对齐 Figma 时误删 branch/worktree 高级入口
     // (功能回归,wt* 状态与 send 管线一直健在)。恢复为 advancedOnly 变体挂在
-    // mode pill 右侧——只出齿轮,不回退到旧 folder chip 布局。
+    // mode pill 右侧;2026-07-28 用户裁决把 worktree 开关从齿轮 popover 提为
+    // 一级勾选 chip(齿轮删除),仍不回退到旧 folder chip 布局。
     expect(source).toContain('variant="advancedOnly"');
     expect(source).toMatch(/<WorktreeChipsRow[\s\S]*?variant="advancedOnly"/);
     expect(source).not.toContain('h-2.5 w-2.5 rounded-full');

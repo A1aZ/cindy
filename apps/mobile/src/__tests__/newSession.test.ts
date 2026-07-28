@@ -850,10 +850,15 @@ describe('new session composer surface', () => {
     expect(sendButtonStyle).toContain('width: MOBILE_COMPOSER_CONTROL_SIZE');
     expect(sendButtonDisabledStyle).toContain('backgroundColor: colors.surfaceChip');
     expect(sendButtonDisabledStyle).toContain('borderColor: colors.border');
-    // 模型 + 权限浮窗(ModelPickerSheet):工具排只剩 [+][模型 pill],独立权限按钮与
-    // composer 上方 drop-up 面板均已移除,权限收进浮窗二级视图。
+    // 模型浮窗(ModelPickerSheet):composer 上方 drop-up 面板不回潮。2026-07-28 起
+    // 权限从浮窗二级视图提为工具排独立药丸(permissionIndicator)+ 独立 sheet,
+    // 浮窗在新建页隐藏 header 权限入口(hidePermissionTrigger,会话页不变);
+    // 旧的 permissionButton/permissionPanel 形态仍不允许回潮。
     expect(newSource).toContain('<ModelPickerSheet');
     expect(newSource).toContain('testID="newSession.modelSheet"');
+    expect(newSource).toContain('hidePermissionTrigger');
+    expect(newSource).toContain('testID="newSession.permissionIndicator"');
+    expect(newSource).toContain('testID="newSession.permissionSheet"');
     expect(newSource).not.toContain('testID="newSession.permissionButton"');
     expect(newSource).not.toContain('testID="newSession.permissionPanel"');
     expect(newSource).not.toContain('testID="newSession.modelPickerPanel"');
@@ -970,5 +975,44 @@ describe('new session composer surface', () => {
     expect(newSource).not.toContain('composerToolbar: {');
     expect(newSource).not.toContain('permissionIcon: {');
     expect(newSource).not.toContain('style={styles.messageInput}');
+  });
+});
+
+describe('new session worktree wiring (source locks)', () => {
+  // worktree 两步建会话的接线不变量(纯函数测试覆盖不到的部分):
+  //  - worktree:create 必须发生在 startNewSessionCreation 之前(远程没有改已建会话
+  //    workingDir 的通道,且 create 对同 sessionId 重跑不幂等,不得进乐观管线重试面);
+  //  - 两步共用同一预生成 sessionId(工作端 close-session 按绑定回收 worktree);
+  //  - 成功后以 meta.path 替换 effectiveDraft.workingDir 再进管线;
+  //  - 失败(业务 {ok:false} / invoke 抛错)早退留在表单,不建会话。
+  const newSource = readTextLf(resolve(process.cwd(), 'app/sessions/new.tsx'), 'utf8');
+
+  it('runs worktree:create before the optimistic pipeline with the same preset sessionId', () => {
+    const createIdx = newSource.indexOf('maker.worktree.create(buildWorktreeCreateRequest({');
+    const pipelineIdx = newSource.indexOf('startNewSessionCreation({');
+    expect(createIdx).toBeGreaterThan(0);
+    expect(pipelineIdx).toBeGreaterThan(createIdx);
+    expect(newSource).toContain('effectiveDraft = { ...effectiveDraft, workingDir: resp.meta.path };');
+    expect(newSource).toContain('setError(formatWorktreeCreateFailure(resp.error));');
+    // 勾选生效三条件:project 模式 × 用户勾选 × 资格探测通过。
+    expect(newSource).toContain(
+      "if (effectiveDraft.workspaceKind === 'project' && worktreeEnabled && worktreeEligibility.status === 'eligible') {",
+    );
+  });
+
+  it('keeps the workstation-owned preference semantics (seed + explicit write-through)', () => {
+    // 播种:openLink + 瞬态重试(app 后台恢复的重连窗口不得把工作端偏好静默播成未勾)。
+    expect(newSource).toContain('return maker.getNewMakerDefaults(worktreeSeedAgentKindRef.current);');
+    expect(newSource).toContain('setWorktreeEnabled(seedWorktreeEnabled(defaults));');
+    // 显式点击才写穿工作端记忆;写失败吞掉降级。
+    expect(newSource).toContain('void maker.applyNewMakerWorktreePref(next).catch(() => undefined);');
+  });
+
+  it('applies the protocol timeout override map to mobile invokes (worktree:create needs 60s)', () => {
+    const contextSource = readTextLf(
+      resolve(process.cwd(), 'src/device-link/DeviceLinkContext.tsx'),
+      'utf8',
+    );
+    expect(contextSource).toContain('INVOKE_TIMEOUT_OVERRIDES_MS[channel]');
   });
 });

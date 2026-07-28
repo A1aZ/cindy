@@ -404,7 +404,10 @@ describe('newMakerDraft store', () => {
     expect(d.fastModeByModel).toEqual({});
   });
 
-  it('schema:worktree root 字段不再持久化,读取时直接忽略', async () => {
+  it('schema:legacy wt* root 字段仍被忽略,不迁移进 worktreeEnabled', async () => {
+    // 2026-07-28「勾选状态保存在工作端」上线后 worktree 记忆走新字段 worktreeEnabled;
+    // 历史残留的 wtEnabled/wtName/wtSourceBranch/wtBaseRepo(更早的持久化实验)继续
+    // 丢弃,且不从旧值猜测用户意图做迁移(configuration-and-overrides 规则)。
     memStorage.setItem(
       'xdt:newMakerDraft:v1',
       JSON.stringify({
@@ -422,6 +425,33 @@ describe('newMakerDraft store', () => {
     expect(d).not.toHaveProperty('wtName');
     expect(d).not.toHaveProperty('wtSourceBranch');
     expect(d).not.toHaveProperty('wtBaseRepo');
+    expect(d.worktreeEnabled).toBe(false);
+  });
+
+  it('schema:worktreeEnabled 持久化往返,脏值/缺字段归一 false', async () => {
+    // 勾选记忆是「工作端一份」的根级布尔:patchDraft 写入 → 重载后恢复。
+    vi.resetModules();
+    {
+      const { getDraft, patchDraft } = await loadModule();
+      expect(getDraft().worktreeEnabled).toBe(false); // 出厂默认不勾选(防误操作)
+      patchDraft({ worktreeEnabled: true });
+      expect(getDraft().worktreeEnabled).toBe(true);
+    }
+    vi.resetModules();
+    {
+      const { getDraft } = await loadModule();
+      expect(getDraft().worktreeEnabled).toBe(true);
+    }
+    // 脏值(非布尔 true)一律归一 false
+    memStorage.setItem(
+      'xdt:newMakerDraft:v1',
+      JSON.stringify({ vendor: 'cc', worktreeEnabled: 'yes' }),
+    );
+    vi.resetModules();
+    {
+      const { getDraft } = await loadModule();
+      expect(getDraft().worktreeEnabled).toBe(false);
+    }
   });
 
   it('vendor 字段非合法值(非 cc/codex)→ 回退 cc', async () => {

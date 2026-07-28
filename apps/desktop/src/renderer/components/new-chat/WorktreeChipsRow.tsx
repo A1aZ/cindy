@@ -1,19 +1,25 @@
 /**
- * WorktreeChipsRow — folder chip + 分支 chip + 齿轮(Advanced popover)。
+ * WorktreeChipsRow — folder chip + 分支 chip + worktree 勾选 chip。
  *
- * 2026-07(分支外显,Codex 风格)在 F1-E Hidden Advanced 基础上把 Branch 从
- * 齿轮 popover 提到独立 chip:
+ * 2026-07(分支外显,Codex 风格)把 Branch 从齿轮 popover 提到独立 chip;
+ * 2026-07-28 再把 worktree 开关本身也提为一级勾选 chip,齿轮 Advanced popover
+ * 整体移除(popover 里只剩它一项,藏一层纯属多余):
  *   - folder chip 是主操作;分支 chip 常态显示仓库当前 HEAD 分支,
- *     worktree ON 时显示 worktree 源分支(带主色提示,与齿轮同款)
+ *     worktree ON 时显示 worktree 源分支(带主色提示,与 worktree chip 同款)
  *   - 点分支 chip 弹分支列表:worktree ON 时改源分支;OFF 时选非当前分支
  *     自动开启 worktree(语义见 branchPick.ts —— 绝不 checkout 用户的 checkout)
- *   - 齿轮 popover 只剩 worktree 开关;关闭 popover 不丢状态,ON 时齿轮带主色
+ *   - worktree chip 点击即切换;不可用(非 git 仓库等)时禁用并以 tooltip 说明原因
+ *
+ * 勾选状态的持久化语义(2026-07-28):onEnabledChange 只承载**用户显式切换**
+ * (chip 点击 / 分支菜单触发的 enable-worktree),上层据此写工作端勾选记忆;
+ * 资格不满足触发的自动关闭走 onAutoDisable,只关 UI、绝不写穿偏好——
+ * 环境因素(切到非 git 目录)不该抹掉用户的选择。
  *
  * worktree 名称 **自动生成**（不暴露 UI），由 useSuggestName 拉取后透传给上层。
  */
 
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { GitBranch, ChevronDown, Folder, MessageCircle, SlidersHorizontal } from 'lucide-react';
+import { GitBranch, ChevronDown, Folder, MessageCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
@@ -24,7 +30,6 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Tip, Tooltip } from '@/components/ui/tooltip';
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
   FolderPickerPopover,
   addRecentFolder,
@@ -51,7 +56,18 @@ export interface WorktreeChipsRowProps {
   onAddRemoteProject?: () => void;
   emptyProjectLabel?: string;
   enabled: boolean;
-  onEnabledChange: (v: boolean) => void;
+  /**
+   * 用户切换 worktree。source 区分意图强度,供上层决定是否写工作端勾选记忆:
+   *  - 'chip':点 worktree chip 本体,是对「默认启用 worktree」的显式表态 → 持久化;
+   *  - 'branch-pick':分支菜单选非当前分支的自动开启,是本次草稿的流程副作用 →
+   *    只改本次 UI,不该悄悄改掉全局默认(防误操作口径)。
+   */
+  onEnabledChange: (v: boolean, source: 'chip' | 'branch-pick') => void;
+  /**
+   * 系统强制关闭(资格不满足 / 入口隐藏 / SSH 禁用)。只应关 UI 态,不写偏好。
+   * 缺省回落 onEnabledChange(false)(兼容旧调用方,但会把自动关闭当显式切换持久化)。
+   */
+  onAutoDisable?: () => void;
   sourceBranch: string;
   onSourceBranchChange: (v: string) => void;
   onBaseRepoChange?: (baseRepo: string | null) => void;
@@ -65,8 +81,8 @@ export interface WorktreeChipsRowProps {
   deviceLinkDeviceId?: string | null;
   /**
    * 渲染变体(2026-07-19 恢复 worktree 入口):统一创建页对齐 Figma 后项目选择
-   * 由页面自己的 mode pill 承担,'advancedOnly' 只渲染齿轮 AdvancedPopover
-   * (git 探测/分支/建议名逻辑全保留);缺省 'full' = folder chip + 齿轮原样。
+   * 由页面自己的 mode pill 承担,'advancedOnly' 只渲染 [分支 chip][worktree chip]
+   * (git 探测/分支/建议名逻辑全保留);缺省 'full' = folder chip + 两 chip 原样。
    */
   variant?: 'full' | 'advancedOnly';
   /** true → 齿轮走 30px 紧凑版 + create-agent 控件 token,与新建页 mode pill 同排对齐。 */
@@ -84,6 +100,7 @@ export function WorktreeChipsRow({
   emptyProjectLabel,
   enabled,
   onEnabledChange,
+  onAutoDisable,
   sourceBranch,
   onSourceBranchChange,
   onBaseRepoChange,
@@ -117,18 +134,25 @@ export function WorktreeChipsRow({
 
   const switchDisabled = disabled || worktreeDisabled || !!cantUseReason || detect.loading || !cwd;
 
+  // 自动关闭统一走 onAutoDisable(只关 UI、不持久化);旧调用方未传时回落 onEnabledChange
+  // (branch-pick 档,同样不该被当成显式表态)。
+  const handleAutoDisable = useCallback(() => {
+    if (onAutoDisable) onAutoDisable();
+    else onEnabledChange(false, 'branch-pick');
+  }, [onAutoDisable, onEnabledChange]);
+
   useEffect(() => {
     if (detect.loading) return;
-    if (cantUseReason && enabled) onEnabledChange(false);
-  }, [cantUseReason, enabled, onEnabledChange, detect.loading]);
+    if (cantUseReason && enabled) handleAutoDisable();
+  }, [cantUseReason, enabled, handleAutoDisable, detect.loading]);
 
   useEffect(() => {
-    if (advancedHidden && enabled) onEnabledChange(false);
-  }, [advancedHidden, enabled, onEnabledChange]);
+    if (advancedHidden && enabled) handleAutoDisable();
+  }, [advancedHidden, enabled, handleAutoDisable]);
 
   useEffect(() => {
-    if (worktreeDisabled && enabled) onEnabledChange(false);
-  }, [worktreeDisabled, enabled, onEnabledChange]);
+    if (worktreeDisabled && enabled) handleAutoDisable();
+  }, [worktreeDisabled, enabled, handleAutoDisable]);
 
   const effectiveWorktreeEnabled = enabled && !advancedHidden && !worktreeDisabled;
   // 分支列表懒加载 latch:worktree 未开时不预拉,首次点开分支 chip 菜单才拉,
@@ -196,7 +220,7 @@ export function WorktreeChipsRow({
       } else if (effect.kind === 'enable-worktree') {
         // 同帧一起写:sourceBranch 非空会让"worktree 开启后回填 current"的
         // effect 自然跳过,不会覆盖用户的选择。
-        onEnabledChange(true);
+        onEnabledChange(true, 'branch-pick');
         onSourceBranchChange(effect.branch);
       }
     },
@@ -222,19 +246,18 @@ export function WorktreeChipsRow({
     />
   ) : null;
 
-  // advancedOnly:项目选择交给页面自己的 pill,这里出 [分支 chip][齿轮]
+  // advancedOnly:项目选择交给页面自己的 pill,这里出 [分支 chip][worktree chip]
   // (cwd 为空时随 advancedHidden 整体不渲染,与 full 变体同一套隐藏/清状态 effect)。
   if (variant === 'advancedOnly') {
     if (advancedHidden) return null;
     return (
       <>
         {branchChip}
-        <AdvancedPopover
-          enabled={enabled}
-          onEnabledChange={onEnabledChange}
+        <WorktreeChip
+          checked={enabled}
+          onToggle={onEnabledChange}
           switchDisabled={switchDisabled}
           cantUseReason={cantUseReason ?? undefined}
-          disabled={disabled || worktreeDisabled}
           compact={compact}
         />
       </>
@@ -266,12 +289,11 @@ export function WorktreeChipsRow({
       />
       {branchChip}
       {!advancedHidden && (
-        <AdvancedPopover
-          enabled={enabled}
-          onEnabledChange={onEnabledChange}
+        <WorktreeChip
+          checked={enabled}
+          onToggle={onEnabledChange}
           switchDisabled={switchDisabled}
           cantUseReason={cantUseReason ?? undefined}
-          disabled={disabled || worktreeDisabled}
           compact={compact}
         />
       )}
@@ -499,99 +521,47 @@ function BranchChip({
   );
 }
 
-// ── 辅助：齿轮按钮 + 高级 popover（worktree 开关） ──────
+// ── worktree 勾选 chip:一级入口,点击即切换(原齿轮 Advanced popover 已移除) ──────
 
-function AdvancedPopover({
-  enabled,
-  onEnabledChange,
+function WorktreeChip({
+  checked,
+  onToggle,
   switchDisabled,
   cantUseReason,
-  disabled,
   compact,
 }: {
-  enabled: boolean;
-  onEnabledChange: (v: boolean) => void;
+  checked: boolean;
+  /** 用户显式切换(source='chip',上层持久化偏好);disabled 态不触发。 */
+  onToggle: (v: boolean, source: 'chip') => void;
   switchDisabled?: boolean;
   cantUseReason?: string;
-  disabled?: boolean;
   compact?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const { t } = useTranslation();
 
-  // worktree ON 时齿轮显示主色提示，让用户在 popover 关闭时也能感知到 worktree 已启用
-  const gearActive = enabled;
-
-  const trigger = (
-    <button
-      type="button"
-      disabled={disabled}
-      data-testid="create-agent-worktree-advanced"
-      className={cn(
-        'inline-flex items-center justify-center rounded-full border transition-colors',
-        'disabled:cursor-not-allowed disabled:opacity-50',
-        // compact:30px 紧凑版,取 create-agent 控件 token 与新建页 mode pill 同排同调
-        compact ? 'h-[30px] w-[30px]' : 'h-[42px] w-[42px] bg-[var(--chat-input-bg)]',
-        gearActive
-          ? 'border-primary/50 text-primary hover:bg-primary/10'
-          : compact
-            ? 'border-[var(--create-agent-control-border)] bg-[var(--create-agent-control-bg)] text-[var(--create-agent-control-icon)] hover:bg-[var(--create-agent-control-bg-hover)]'
-            : 'border-border text-muted-foreground hover:bg-sidebar-item-hover hover:text-foreground',
-      )}
-      aria-label="Advanced settings (worktree)"
-      aria-pressed={gearActive}
-    >
-      <SlidersHorizontal size={compact ? 13 : 15} className="shrink-0" />
-    </button>
-  );
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>{trigger}</PopoverTrigger>
-      <PopoverContent
-        align="end"
-        sideOffset={6}
-        className="w-[240px] rounded-xl border border-border bg-popover p-2 shadow-lg"
-      >
-        <div className="px-2 pt-1.5 pb-1 text-[13px] font-medium text-muted-foreground">
-          Advanced
-        </div>
-
-        {/* Worktree toggle(Branch 已外显为独立 chip,见 BranchChip) */}
-        <WorktreePopRow
-          checked={enabled}
-          onChange={onEnabledChange}
-          disabled={switchDisabled}
-          disabledReason={cantUseReason}
-        />
-      </PopoverContent>
-    </Popover>
-  );
-}
-
-function WorktreePopRow({
-  checked,
-  onChange,
-  disabled,
-  disabledReason,
-}: {
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  disabled?: boolean;
-  disabledReason?: string;
-}) {
   const btn = (
     <button
       type="button"
-      onClick={() => !disabled && onChange(!checked)}
-      disabled={disabled}
+      onClick={() => !switchDisabled && onToggle(!checked, 'chip')}
+      disabled={switchDisabled}
+      data-testid="create-agent-worktree-chip"
       className={cn(
-        'flex h-8 w-full items-center gap-2 rounded-md px-2',
-        'text-[13px] transition-colors hover:bg-sidebar-item-hover',
+        'inline-flex items-center rounded-full border transition-colors',
         'disabled:cursor-not-allowed disabled:opacity-50',
-        checked ? 'text-primary' : 'text-muted-foreground',
+        // compact:30px 紧凑版,取 create-agent 控件 token 与新建页 mode pill / 分支 chip 同排同调
+        compact
+          ? 'h-[30px] gap-1.5 border-[var(--create-agent-control-border)] bg-[var(--create-agent-control-bg)] px-3 text-[12px] font-medium leading-[14px] text-[var(--create-agent-control-text)]'
+          : 'h-[42px] gap-2.5 border-border bg-[var(--chat-input-bg)] px-[18px] text-[14px] font-medium text-foreground',
+        !switchDisabled &&
+          (compact
+            ? 'hover:bg-[var(--create-agent-control-bg-hover)] active:bg-[var(--create-agent-control-bg-pressed)]'
+            : 'hover:bg-sidebar-item-hover'),
+        // ON 时与分支 chip 同款主色提示:一眼看出"这次对话将以 worktree 隔离启动"。
+        checked && 'border-primary/50 text-primary',
+        checked && !switchDisabled && 'hover:bg-primary/10',
       )}
       aria-pressed={checked}
-      aria-label="Use worktree isolation"
+      aria-label={t('newChat.worktree.toggleAria')}
     >
       <span
         className={cn(
@@ -617,22 +587,27 @@ function WorktreePopRow({
           </svg>
         )}
       </span>
+      {/* 术语表裁决:worktree 四语一律保留英文小写原词,故 label 不走 locale 分叉。 */}
       <span>worktree</span>
     </button>
   );
 
-  if (disabled && disabledReason) {
+  // 不可用时以 tooltip 说明原因(替代旧 popover 内的行内禁用提示);
+  // 可用时 tooltip 解释语义,与分支 chip 的 tooltip 口径一致。
+  if (switchDisabled && cantUseReason) {
     return (
       <Tooltip.Root>
         <Tooltip.Trigger asChild>
-          <span className="inline-flex w-full" tabIndex={0}>
+          <span className="inline-flex" tabIndex={0}>
             {btn}
           </span>
         </Tooltip.Trigger>
-        <Tooltip.Content side="top">{disabledReason}</Tooltip.Content>
+        <Tooltip.Content side="top">{cantUseReason}</Tooltip.Content>
       </Tooltip.Root>
     );
   }
 
-  return btn;
+  if (switchDisabled) return btn;
+
+  return <Tip text={t('newChat.worktree.chipTooltip')}>{btn}</Tip>;
 }

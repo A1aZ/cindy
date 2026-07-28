@@ -3185,6 +3185,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       lastByVendor: p.lastByVendor,
       fastModeByModel: p.fastModeByModel,
       effortByModel: p.effortByModel,
+      // worktree 勾选记忆(vendor 无关根字段):旧 renderer 不推此字段 → false 兜底。
+      worktreeEnabled: p.worktreeEnabled === true,
     });
     broadcastNewMakerDraftChanged();
   });
@@ -3338,6 +3340,21 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       ...(p.markModelChoice === false ? { markModelChoice: false } : {}),
       ...(p.effort !== undefined ? { effort: p.effort } : {}),
       ...(p.fast !== undefined ? { fast: p.fast } : {}),
+    });
+  });
+
+  // device-link 草稿「新建会话默认启用 worktree」写穿:与上面的模型 pref 同款转发模式——
+  // 被控端不直接改 newMakerDefaultsCache(那只是镜像、renderer 才是真相),把布尔转发给
+  // 自身 renderer(WORKTREE_PREF_APPLY,仅本地窗口),renderer patchDraft 写真实草稿;
+  // 变更经既有 SYNC_NEW_MAKER_DRAFT re-mirror + NEW_MAKER_DRAFT_CHANGED 回流控制端。
+  ipcMain.handle(MAKER_INVOKE.APPLY_NEW_MAKER_WORKTREE_PREF, (_e, pref: unknown) => {
+    if (!pref || typeof pref !== 'object') throwIpcError('INVALID_PARAMS', 'pref required');
+    const p = pref as { worktreeEnabled?: unknown };
+    if (typeof p.worktreeEnabled !== 'boolean') {
+      throwIpcError('INVALID_PARAMS', 'worktreeEnabled must be boolean');
+    }
+    broadcastToAllWindows(MAKER_PUSH.WORKTREE_PREF_APPLY, {
+      worktreeEnabled: p.worktreeEnabled,
     });
   });
 

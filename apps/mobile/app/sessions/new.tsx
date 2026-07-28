@@ -49,7 +49,7 @@ import {
   requestRecordingPermissionsAsync,
   setAudioModeAsync,
 } from 'expo-audio';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ScreenBackButton } from '@/components/MobilePrimitives';
 import { PaperPlaneIcon } from '@/components/PaperPlaneIcon';
 import { useDeviceLink } from '@/device-link/DeviceLinkContext';
@@ -243,6 +243,20 @@ import {
   type ProviderModelRow,
 } from '@/session/providerModelSections';
 import { ModelPickerSheet } from '@/session/ModelPickerSheet';
+import { MobilePermissionPickerList } from '@/session/MobilePermissionPickerList';
+import { SheetModal } from '@/session/SheetModal';
+import { SheetSurface } from '@/session/SheetSurface';
+import { computeContextSheetSnapHeights, type ContextSheetSnap } from '@/session/contextSheetModel';
+import {
+  buildWorktreeCreateRequest,
+  formatWorktreeCreateFailure,
+  resolveWorktreeEligibility,
+  seedWorktreeEnabled,
+  shouldShowWorktreeToggle,
+  worktreeEligibilityCaptionKey,
+  worktreeEligibilityFromError,
+  type NewSessionWorktreeEligibility,
+} from '@/session/newSessionWorktree';
 import { MobileModelIconMark } from '@/session/MobileProviderMark';
 import { draftModelMemoryFor, hydrateDraftModelMemory } from '@/session/draftModelMemory';
 import { rowFastEditable } from '@/session/modelPickerRows';
@@ -363,9 +377,18 @@ export default function NewRemoteSessionScreen() {
   const [goalBusy, setGoalBusy] = useState(false);
   const [goalError, setGoalError] = useState<string | null>(null);
   const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
-  // 模型 + 权限浮窗(ContextSheet 同款 Modal,含二级「模型选项 / 权限」叠层)。
+  // 模型浮窗(ContextSheet 同款 Modal;新建页权限已提为独立选择器,浮窗只留模型)。
   const [modelSheetOpen, setModelSheetOpen] = useState(false);
+  // 权限模式独立浮窗(composer 工具条权限药丸点开;列表复用 MobilePermissionPickerList)。
+  const [permissionSheetOpen, setPermissionSheetOpen] = useState(false);
+  const [permissionSheetSnap, setPermissionSheetSnap] = useState<ContextSheetSnap>('half');
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
+  // worktree 开关(project 模式 + 已选目录时显示):勾选值存工作端(get-new-maker-defaults
+  // 播种 / 显式点击写穿),资格由 worktree:detect-cwd 探测(目录变化即重探,seq 防竞态)。
+  const [worktreeEnabled, setWorktreeEnabled] = useState(false);
+  const [worktreeEligibility, setWorktreeEligibility] = useState<NewSessionWorktreeEligibility>({ status: 'probing' });
+  const worktreeDetectSeqRef = useRef(0);
+  const worktreeSeedSeqRef = useRef(0);
   const [attachments, setAttachments] = useState<RemoteSerializedAttachment[]>([]);
   // create() 里 await 在途图片上传后闭包里的 attachments 已是旧值,经 ref 读最新列表。
   const attachmentsRef = useRef(attachments);
@@ -745,6 +768,17 @@ export default function NewRemoteSessionScreen() {
   );
   const WorkspaceIcon = draft.workspaceKind === 'dialogue' ? MessageCircle : Folder;
   const agentLabel = draft.agentKind === 'codex' ? 'Codex' : 'Claude';
+  // worktree 开关行:project + 已选目录才显示;老被控端(unsupported)整行隐藏。
+  const worktreeRowVisible = shouldShowWorktreeToggle({
+    workspaceKind: draft.workspaceKind,
+    workingDir: draft.workingDir,
+    eligibility: worktreeEligibility,
+  });
+  const worktreeToggleDisabled = creating || worktreeEligibility.status !== 'eligible';
+  // 勾选展示 = 用户偏好 × 资格通过:资格不满足时不显示已勾(不误导「会用 worktree」),
+  // 偏好值本身保留 —— 环境因素不抹掉用户选择,换回合格目录即恢复。
+  const worktreeChecked = worktreeEnabled && worktreeEligibility.status === 'eligible';
+  const worktreeCaptionKey = worktreeEligibilityCaptionKey(worktreeEligibility);
   const createValidation = useMemo(
     () => validateNewSessionDraft(draft, draftContent),
     [draft, draftContent],
@@ -775,6 +809,15 @@ export default function NewRemoteSessionScreen() {
   const composerInputContentHeight = firstMessageInputContentHeight;
   const keyboardState = useMobileKeyboardState();
   const windowDimensions = useWindowDimensions();
+  const safeAreaInsets = useSafeAreaInsets();
+  // 权限独立浮窗的档位高度(与模型浮窗同一套 sheet 高度模型;useMemo 保持身份稳定)。
+  const permissionSheetHeights = useMemo(
+    () => computeContextSheetSnapHeights({
+      safeAreaTopInset: safeAreaInsets.top,
+      screenHeight: windowDimensions.height,
+    }),
+    [safeAreaInsets.top, windowDimensions.height],
+  );
   // 聚焦 / 面板打开 / 语音中呈现卡片形态（输入区全宽 + 底部工具排），其余保持单行简洁态。
   // 语音结束后草稿仍有内容时经 hold 保持展开(一行文字也不收),
   // 不随 voiceIsBusy 归零塌回简洁态。
@@ -784,6 +827,7 @@ export default function NewRemoteSessionScreen() {
   });
   const composerCardActive = firstMessageInputFocused
     || modelSheetOpen
+    || permissionSheetOpen
     || voiceIsBusy
     || composerVoiceHoldActive;
   useComposerCardTransition(composerCardActive);
@@ -1364,8 +1408,97 @@ export default function NewRemoteSessionScreen() {
   const toggleModelPicker = useCallback(() => {
     setWorkspacePickerOpen(false);
     setAgentPickerOpen(false);
+    setPermissionSheetOpen(false);
     setModelSheetOpen(true);
   }, []);
+
+  const openPermissionPicker = useCallback(() => {
+    setDevicePickerOpen(false);
+    setWorkspacePickerOpen(false);
+    setAgentPickerOpen(false);
+    setModelSheetOpen(false);
+    setPermissionSheetSnap('half');
+    setPermissionSheetOpen(true);
+  }, []);
+
+  // 选权限档(独立选择器与模型浮窗共用同一语义):Full access 升级先过确认弹层,
+  // 非 plan 档写 per-agent 记忆(内存 + 落盘;对齐桌面 lastByVendor)。
+  const selectPermissionMode = useCallback((mode: string) => {
+    void (async () => {
+      if (!await confirmFullAccessChange(draft.permissionMode, mode)) return;
+      patchDraft({ permissionMode: mode });
+      if (mode === 'plan') return; // 老被控端兼容档,不入记忆
+      // 同步进本地 state:本次会话内切走再切回也能拿到最新记忆(落盘不回写 state)。
+      setNewSessionPreferences((prev) => prev
+        ? {
+            ...prev,
+            permissionModeByAgent: { ...prev.permissionModeByAgent, [draft.agentKind]: mode },
+          }
+        : prev);
+      void saveNewSessionPreferences({
+        permissionModeForAgent: { agentKind: draft.agentKind, mode },
+      });
+    })();
+  }, [draft.agentKind, draft.permissionMode, patchDraft]);
+
+  // —— worktree 资格探测:目录 / 设备变化即重探(seq 防竞态,旧结果作废)。
+  // CHANNEL_NOT_ALLOWED(老被控端)→ unsupported 整行隐藏;其余失败保留行但禁用。
+  useEffect(() => {
+    const cwd = draft.workspaceKind === 'project' ? draft.workingDir.trim() : '';
+    const seq = ++worktreeDetectSeqRef.current;
+    setWorktreeEligibility({ status: 'probing' });
+    if (!selectedDeviceId || !cwd) return;
+    void withTransientRemoteRetry(async () => {
+      await openLink(selectedDeviceId);
+      return maker.worktree.detectCwd(cwd);
+    }, { maxAttempts: 2 })
+      .then((result) => {
+        if (seq !== worktreeDetectSeqRef.current) return;
+        setWorktreeEligibility(resolveWorktreeEligibility(result, cwd));
+      })
+      .catch((err: unknown) => {
+        if (seq !== worktreeDetectSeqRef.current) return;
+        setWorktreeEligibility(worktreeEligibilityFromError(err));
+      });
+  }, [selectedDeviceId, draft.workspaceKind, draft.workingDir, maker, openLink]);
+
+  // —— worktree 勾选播种:选中设备后读工作端 get-new-maker-defaults 的 worktreeEnabled
+  // (vendor 无关,agentKind 只是通道入参,经 ref 读当前值,不因切 agent 重播)。
+  // 设备切换重新播种;老被控端 / 缺字段 → 未勾选。
+  const worktreeSeedAgentKindRef = useRef(draft.agentKind);
+  worktreeSeedAgentKindRef.current = draft.agentKind;
+  useEffect(() => {
+    const seq = ++worktreeSeedSeqRef.current;
+    if (!selectedDeviceId) {
+      setWorktreeEnabled(false);
+      return;
+    }
+    // 与上面 detect effect 同款:先建链再拉,包瞬态重试——app 后台恢复时 relay 常在
+    // 重连窗口,裸调会抛 NOT_CONNECTED 并把工作端持久化的勾选偏好静默播种成未勾。
+    void withTransientRemoteRetry(async () => {
+      await openLink(selectedDeviceId);
+      return maker.getNewMakerDefaults(worktreeSeedAgentKindRef.current);
+    }, { maxAttempts: 2 })
+      .then((defaults) => {
+        if (seq !== worktreeSeedSeqRef.current) return;
+        setWorktreeEnabled(seedWorktreeEnabled(defaults));
+      })
+      .catch(() => {
+        // 重试后仍失败(老被控端无通道 / 长断连)→ 按未勾选兜底(防误操作口径)。
+        if (seq !== worktreeSeedSeqRef.current) return;
+        setWorktreeEnabled(false);
+      });
+  }, [selectedDeviceId, maker, openLink]);
+
+  // 用户显式点击开关:本地翻转 + fire-and-forget 写穿工作端记忆(失败吞掉,仅本次生效)。
+  // 资格不满足导致的禁用不会走到这里 —— 环境因素不抹掉用户偏好。
+  const toggleWorktree = useCallback(() => {
+    const next = !worktreeEnabled;
+    setWorktreeEnabled(next);
+    // 播种在途回包不得覆盖用户显式选择(seq 作废旧回包)。
+    worktreeSeedSeqRef.current += 1;
+    void maker.applyNewMakerWorktreePref(next).catch(() => undefined);
+  }, [maker, worktreeEnabled]);
 
   useEffect(() => {
     const tracker = createMobileVoiceDictionaryLearningTracker({
@@ -1760,6 +1893,39 @@ export default function NewRemoteSessionScreen() {
   );
   // 聚焦卡片形态的底部工具排:[+][权限][模型] …… [语音][创建]。
   // 权限 / 模型即原「输入行上方常驻 expandedTools」的内容,收进底排后未聚焦时不再占布局。
+  // 权限模式独立入口(modelPill 同款药丸,紧邻其后):图标 + 当前档名 + Chevron,
+  // 危险档(auto / bypass)只染文字与图标、不染底(对齐桌面权限着色豁免规则)。
+  const renderPermissionPill = () => {
+    const presentation = permissionPresentation(displayPermissionMode, displayPermissionLabel);
+    const accent = presentation.accent !== 'neutral'
+      ? permissionAccentColor(presentation.accent, colors)
+      : null;
+    return (
+      <Pressable
+        accessibilityLabel={t('models.picker.permissionModeAccessibility', { mode: presentation.label })}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: permissionSheetOpen || undefined }}
+        hitSlop={10}
+        onPress={openPermissionPicker}
+        style={({ pressed }) => [styles.modelPill, pressed && styles.pressed]}
+        testID="newSession.permissionIndicator"
+      >
+        <presentation.Icon
+          color={accent ?? colors.textSecondary}
+          size={iconSize.sm}
+          strokeWidth={iconStroke.regular}
+        />
+        <Text
+          numberOfLines={1}
+          style={[styles.modelPillText, accent ? { color: accent } : null]}
+        >
+          {presentation.label}
+        </Text>
+        <ChevronDown color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+      </Pressable>
+    );
+  };
+
   const renderComposerToolbar = () => (
     <>
       {renderAttachmentToggleButton()}
@@ -1770,6 +1936,7 @@ export default function NewRemoteSessionScreen() {
           testID="newSession.planModeChip"
         />
       ) : null}
+      {renderPermissionPill()}
       <Pressable
         accessibilityLabel={t('session.new.modelAccessibility', { model: runtimeSummary.modelSummary })}
         accessibilityRole="button"
@@ -2224,6 +2391,33 @@ export default function NewRemoteSessionScreen() {
       // / 首条消息 enqueue 全部由 newSessionCreation 模块级后台管线完成(本页
       // unmount 不终止),失败重试面在会话页(横幅:重试 / 返回编辑)。
       const sessionId = createNewSessionId();
+      // —— worktree 两步流第一步(对齐桌面远程流程 NewMakerDraftRoute:远程没有改已建
+      // 会话 workingDir 的通道,顺序反过来 —— 先同步等工作端建好 worktree 拿路径,再以
+      // 该路径 + 同一预生成 sessionId 走乐观管线)。worktree:create 对同 sessionId 重跑
+      // 不幂等,不能放进管线的重试面 —— 失败(业务 {ok:false} / invoke 抛错)一律留在
+      // 表单展示错误,不建会话(草稿原地保留,与桌面远程失败语义一致)。
+      if (effectiveDraft.workspaceKind === 'project' && worktreeEnabled && worktreeEligibility.status === 'eligible') {
+        try {
+          // suggest-name 失败不阻断:走 auto- 兜底名(对齐桌面 :1316)。
+          const suggested = await maker.worktree
+            .suggestName(worktreeEligibility.baseRepo)
+            .then((result) => result.name)
+            .catch(() => null);
+          const resp = await maker.worktree.create(buildWorktreeCreateRequest({
+            sessionId,
+            eligibility: worktreeEligibility,
+            suggestedName: suggested,
+          }));
+          if (!resp.ok) {
+            setError(formatWorktreeCreateFailure(resp.error));
+            return;
+          }
+          effectiveDraft = { ...effectiveDraft, workingDir: resp.meta.path };
+        } catch (err) {
+          setError(t('session.new.worktreeCreateFailed', { message: formatRemoteError(err) }));
+          return;
+        }
+      }
       const agentKindSnapshot = effectiveDraft.agentKind;
       const deviceIdSnapshot = selectedDeviceId;
       // 老协议 plan 一次性语义(对齐桌面 PR#494):入队后恢复进入前的底层权限档。
@@ -2300,9 +2494,12 @@ export default function NewRemoteSessionScreen() {
     router,
     runtimeOptions,
     subscribe,
+    t,
     voiceIsProcessing,
     voiceState,
     waitForPendingUploads,
+    worktreeEligibility,
+    worktreeEnabled,
   ]);
 
   // 目标模式建会话(对齐桌面 handleCreateGoal):createSession → goal.set(被控端落
@@ -2610,6 +2807,43 @@ export default function NewRemoteSessionScreen() {
                   </View>
                 ) : null}
               </View>
+              {worktreeRowVisible ? (
+                <View style={styles.worktreeToggleWrap}>
+                  <Pressable
+                    accessibilityLabel={t('session.new.useWorktree')}
+                    accessibilityRole="checkbox"
+                    accessibilityState={{
+                      checked: worktreeChecked,
+                      disabled: worktreeToggleDisabled || undefined,
+                    }}
+                    disabled={worktreeToggleDisabled}
+                    onPress={toggleWorktree}
+                    style={({ pressed }) => [
+                      styles.worktreeToggleRow,
+                      pressed && styles.pressed,
+                      worktreeToggleDisabled && styles.disabled,
+                    ]}
+                    testID="newSession.worktreeToggle"
+                  >
+                    <View style={[
+                      styles.worktreeCheckbox,
+                      worktreeChecked && styles.worktreeCheckboxChecked,
+                    ]}>
+                      {worktreeChecked ? (
+                        <Check color={colors.ctaText} size={iconSize.xs} strokeWidth={iconStroke.bold} />
+                      ) : null}
+                    </View>
+                    <Text style={styles.worktreeToggleLabel} numberOfLines={1}>
+                      {t('session.new.useWorktree')}
+                    </Text>
+                  </Pressable>
+                  {worktreeCaptionKey ? (
+                    <Text style={styles.worktreeCaption} testID="newSession.worktreeCaption">
+                      {t(worktreeCaptionKey)}
+                    </Text>
+                  ) : null}
+                </View>
+              ) : null}
             </View>
 
             {browseOpen ? (
@@ -2964,25 +3198,10 @@ export default function NewRemoteSessionScreen() {
         modelMemory={draftMemory}
         onChangeSelectedEffort={changeSelectedEffort}
         onChangeSelectedFastMode={changeSelectedFastMode}
+        hidePermissionTrigger
         onClose={() => setModelSheetOpen(false)}
         onSelectFlatModel={selectFlatModel}
-        onSelectPermissionMode={(mode) => {
-          void (async () => {
-            if (!await confirmFullAccessChange(draft.permissionMode, mode)) return;
-            patchDraft({ permissionMode: mode });
-            if (mode === 'plan') return; // 老被控端兼容档,不入记忆
-            // 同步进本地 state:本次会话内切走再切回也能拿到最新记忆(落盘不回写 state)。
-            setNewSessionPreferences((prev) => prev
-              ? {
-                  ...prev,
-                  permissionModeByAgent: { ...prev.permissionModeByAgent, [draft.agentKind]: mode },
-                }
-              : prev);
-            void saveNewSessionPreferences({
-              permissionModeForAgent: { agentKind: draft.agentKind, mode },
-            });
-          })();
-        }}
+        onSelectPermissionMode={selectPermissionMode}
         onSelectProviderRow={selectProviderModelRow}
         permissionDisabled={creating}
         permissionOptions={runtimeOptions.permissionOptions}
@@ -2994,6 +3213,35 @@ export default function NewRemoteSessionScreen() {
         testID="newSession.modelSheet"
         visible={modelSheetOpen}
       />
+      {/* 权限模式独立浮窗:composer 权限药丸点开;列表复用 MobilePermissionPickerList,
+          选择走 selectPermissionMode(含 Full access 确认弹层 + per-agent 记忆)后关浮窗。 */}
+      <SheetModal
+        backdropTestID="newSession.permissionSheet.backdrop"
+        onBackdropPress={() => setPermissionSheetOpen(false)}
+        onRequestClose={() => setPermissionSheetOpen(false)}
+        visible={permissionSheetOpen}
+      >
+        <SheetSurface
+          bottomInset={safeAreaInsets.bottom}
+          heights={permissionSheetHeights}
+          onClose={() => setPermissionSheetOpen(false)}
+          onSnapChange={setPermissionSheetSnap}
+          snap={permissionSheetSnap}
+          testID="newSession.permissionSheet"
+          title={t('models.picker.permissionTitle')}
+        >
+          <MobilePermissionPickerList
+            activeMode={displayPermissionMode}
+            disabled={creating}
+            onSelect={(mode) => {
+              selectPermissionMode(mode);
+              setPermissionSheetOpen(false);
+            }}
+            options={runtimeOptions.permissionOptions}
+            testID="newSession.permissionSheet.option"
+          />
+        </SheetSurface>
+      </SheetModal>
       {composerPreviewUrl && composerGalleryImages.length > 0 ? (
         // composer 托盘图片的全屏查看(沿用聊天消息同款 ImageLightbox;本地图无需远端取件)。
         // annotation:托盘图可圈点标注 / 再编辑,保存后烧录替换附件重新上传。
@@ -3338,6 +3586,45 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     backgroundColor: colors.border,
     height: StyleSheet.hairlineWidth,
     marginVertical: spacing.xs,
+  },
+  // worktree 开关行(selectorStack 内、工作区选择器之后):自绘 checkbox 同 browseCheckbox
+  // 基因,行高与 selectorRow 对齐;caption 缩进到与文案左缘对齐。
+  worktreeToggleWrap: {
+    gap: spacing.xs,
+  },
+  worktreeToggleRow: {
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    gap: spacing.md,
+    minHeight: 42,
+  },
+  worktreeCheckbox: {
+    alignItems: 'center',
+    borderColor: colors.borderStrong,
+    borderRadius: radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    height: 20,
+    justifyContent: 'center',
+    width: 20,
+  },
+  worktreeCheckboxChecked: {
+    backgroundColor: colors.cta,
+    borderColor: colors.cta,
+  },
+  worktreeToggleLabel: {
+    color: colors.textTertiary,
+    flexShrink: 1,
+    fontSize: typeScale.body,
+    fontWeight: fontWeight.medium,
+    lineHeight: lineHeight.body,
+    minWidth: 0,
+  },
+  worktreeCaption: {
+    color: colors.textTertiary,
+    fontSize: typeScale.caption,
+    lineHeight: lineHeight.caption,
+    marginLeft: 20 + spacing.md,
   },
   hint: { color: colors.textSecondary, fontSize: typeScale.caption, lineHeight: lineHeight.caption },
   errorText: {

@@ -4031,7 +4031,9 @@
       "detecting": "Detecting environment…",
       "gitMissing": "git not detected, please install it first",
       "notGitRepo": "Current directory is not a git repository",
-      "alreadyInWorktree": "Already inside a worktree, nesting is not allowed"
+      "alreadyInWorktree": "Already inside a worktree, nesting is not allowed",
+      "toggleAria": "Use worktree isolation",
+      "chipTooltip": "Start this chat in an isolated worktree without touching the current branch"
     },
     "branchChip": {
       "label": "Branch",

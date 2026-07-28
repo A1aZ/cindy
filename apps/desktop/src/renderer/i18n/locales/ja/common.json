@@ -4030,7 +4030,9 @@
       "detecting": "環境を検出中…",
       "gitMissing": "git が検出されません。先にインストールしてください",
       "notGitRepo": "現在のディレクトリは git リポジトリではありません",
-      "alreadyInWorktree": "すでに worktree 内です。ネストは禁止です"
+      "alreadyInWorktree": "すでに worktree 内です。ネストは禁止です",
+      "toggleAria": "worktree 分離を使用",
+      "chipTooltip": "独立した worktree でこのチャットを開始し、現在のブランチには影響しません"
     },
     "branchChip": {
       "label": "ブランチ",

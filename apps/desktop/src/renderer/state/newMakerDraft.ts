@@ -103,6 +103,16 @@ export interface NewMakerDraft {
   /** 协同模式开关 + Worker 类型(草稿期持久化,Send 时由 enableOrca 消费)。 */
   collab: CollabDraft;
   /**
+   * 「新建会话默认启用 worktree」勾选记忆。vendor 无关的根级布尔(同 collab 先例),
+   * 语义是「这台工作端上新建会话时 worktree 开关的默认状态」——桌面本机草稿与手机 /
+   * 桌面控制端远程草稿读写同一份(读经 maker:get-new-maker-defaults 镜像,写经
+   * maker:apply-new-maker-worktree-pref 写穿)。
+   * 只在用户**显式**切换开关时写入;资格探测失败(非 git 仓库 / 已在 worktree 内等)
+   * 触发的自动关闭只改 UI 态、不写这里,避免环境因素抹掉用户偏好。
+   * 出厂默认 false(防误操作);老 localStorage 缺字段 → false。
+   */
+  worktreeEnabled: boolean;
+  /**
    * New Maker 的 Fast Mode 记忆,按模型分开。
    * 缺省 false;实际是否可用还要由 UI 结合 capabilities 判定。
    */
@@ -170,6 +180,7 @@ function makeDefault(): NewMakerDraft {
     deviceLinkDeviceId: null,
     deviceLinkDeviceName: null,
     collab: defaultCollab(),
+    worktreeEnabled: false,
     fastModeByModel: {},
     effortByModel: {},
     extraDirs: [],
@@ -313,6 +324,10 @@ function sanitize(raw: unknown): NewMakerDraft {
     deviceLinkDeviceId: null,
     deviceLinkDeviceName: null,
     collab,
+    // worktree 勾选记忆:严格 === true 才恢复(脏值/缺字段一律 false)。注意历史残留的
+    // wtEnabled/wtName/wtSourceBranch/wtBaseRepo 根字段(2026-07 前的短暂持久化实验)
+    // 仍被忽略丢弃——本字段是新契约,不做旧值迁移(不猜测用户意图)。
+    worktreeEnabled: r.worktreeEnabled === true,
     fastModeByModel,
     effortByModel,
     extraDirs,

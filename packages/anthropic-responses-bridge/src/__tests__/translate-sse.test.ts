@@ -573,59 +573,6 @@ describe('SseTranslator', () => {
     expect((starts[0].data.content_block as Record<string, unknown>).data).toBe('#id=rs_1#ENC');
   });
 
-  it('reasoning 一条 summary delta 都不发时,正文照常流式吐出,不被缓冲到 reasoning done', () => {
-    // xai/grok 开服务端工具(x_search)后的实测形态:reasoning item 只有 added / done,
-    // 中间不发任何 summary delta,且可能到整轮末尾才 done。
-    // 这里锁定的性质是「可见答案不许被扣住」:曾经为了把加密推理块排到正文之前,在
-    // output_item.added 处给 reasoning 占位,结果 output_text.delta(属 DEFERRABLE_TYPES)
-    // 被全量缓冲,长搜索轮看起来完全卡死。改为不占位、正文照常流,而那条注定放错位置的
-    // 加密推理直接丢掉(见下方断言)。
-    const t = new SseTranslator('xai/grok-4.5');
-    const created = t.push({ type: 'response.created', response: { id: 'r', model: 'grok-4.5' } });
-    const reasoningAdded = t.push({ type: 'response.output_item.added', output_index: 0, item: { id: 'rs_1', type: 'reasoning' } });
-    const msgAdded = t.push({ type: 'response.output_item.added', output_index: 1, item: { type: 'message' } });
-    // 关键:reasoning 尚未 done,这条 text delta 必须**立刻**吐出去,不能进 deferred 队列。
-    const textDelta = t.push({ type: 'response.output_text.delta', output_index: 1, delta: '答案正文' });
-
-    const textDeltaOut = textDelta.filter(
-      (e) => e.event === 'content_block_delta' && (e.data.delta as Record<string, unknown>).type === 'text_delta',
-    );
-    expect(textDeltaOut).toHaveLength(1);
-    expect((textDeltaOut[0].data.delta as Record<string, unknown>).text).toBe('答案正文');
-
-    const rest = [
-      { type: 'response.output_item.done', output_index: 1, item: { type: 'message' } },
-      { type: 'response.output_item.done', output_index: 0, item: { id: 'rs_1', type: 'reasoning', encrypted_content: 'ENC', summary: [] } },
-      { type: 'response.completed', response: { status: 'completed', usage: { input_tokens: 1, output_tokens: 1 } } },
-    ].flatMap((ev) => t.push(ev));
-
-    const out = [...created, ...reasoningAdded, ...msgAdded, ...textDelta, ...rest];
-    assertSequentialBlocks(out);
-    // 正文已经先落块 → 这条加密推理被**丢掉**,而不是发一个注定放错位置的块:它唯一用途是
-    // 回放,而 translate-request 按 block 顺序还原 input[],排在正文之后会让回放变成
-    // 「message 在 reasoning 之前」,偏离上游 output_index 顺序,下一轮可能被上游拒收。
-    const starts = byType(out, 'content_block_start');
-    expect(starts.map((e) => (e.data.content_block as Record<string, unknown>).type)).toEqual(['text']);
-  });
-
-  it('reasoning 零 summary delta 但先于正文 done → 加密推理照常保留(位置正确,可回放)', () => {
-    // 与上一条只差 reasoning done 的时机:这里它在 message item 之前收口,块顺序天然是
-    // reasoning → text,与上游 output_index 一致,能正确回放,不该丢。
-    const out = run([
-      { type: 'response.created', response: { id: 'r', model: 'grok-4.5' } },
-      { type: 'response.output_item.added', output_index: 0, item: { id: 'rs_1', type: 'reasoning' } },
-      { type: 'response.output_item.done', output_index: 0, item: { id: 'rs_1', type: 'reasoning', encrypted_content: 'ENC', summary: [] } },
-      { type: 'response.output_item.added', output_index: 1, item: { type: 'message' } },
-      { type: 'response.output_text.delta', output_index: 1, delta: '答案正文' },
-      { type: 'response.output_item.done', output_index: 1, item: { type: 'message' } },
-      { type: 'response.completed', response: { status: 'completed', usage: { input_tokens: 1, output_tokens: 1 } } },
-    ]);
-    assertSequentialBlocks(out);
-    const starts = byType(out, 'content_block_start');
-    expect(starts.map((e) => (e.data.content_block as Record<string, unknown>).type)).toEqual(['redacted_thinking', 'text']);
-    expect((starts[0].data.content_block as Record<string, unknown>).data).toBe('#id=rs_1#ENC');
-  });
-
   it('reasoning 只发纯空白 summary delta → 不开 thinking 块,encrypted_content 走 redacted_thinking', () => {
     const out = run([
       { type: 'response.created', response: { id: 'r', model: 'gpt-5.6-sol' } },

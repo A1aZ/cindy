@@ -66,6 +66,17 @@ describe('isNonAnchorHistoryRow — 历史初始页 backfill 判定', () => {
     expect(isNonAnchor(row('assistant'))).toBe(false);
     expect(isNonAnchor(row('user'))).toBe(false);
   });
+
+  it('合成指令行算无锚点(渲染 null),否则混进一条就会提前停止回填', () => {
+    // 与 loadOlderMessages 的可见锚点判定同口径。string 与 {text} 两种 content 形态都要覆盖。
+    const synthetic = (content: unknown): Message =>
+      ({ id: 'r', clientId: 'c', sessionId: SESSION_ID, role: 'user', content, createdAt: '2026-07-02T00:00:00.000Z' } as unknown as Message);
+    expect(isNonAnchor(synthetic('[UI_ACTION_TRIGGER] retry'))).toBe(true);
+    expect(isNonAnchor(synthetic({ text: '[UI_ACTION_TRIGGER] retry' }))).toBe(true);
+    // 真实用户消息仍是锚点。
+    expect(isNonAnchor(synthetic('帮我查一下'))).toBe(false);
+    expect(isNonAnchor(synthetic({ text: '帮我查一下' }))).toBe(false);
+  });
 });
 
 describe('handleStreamEvent — omitted thinking placeholder (live)', () => {

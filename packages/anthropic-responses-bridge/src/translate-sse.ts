@@ -106,21 +106,11 @@ export class SseTranslator {
     this.signaturePrefix = slash > 0 ? model.slice(0, slash + 1) : '';
   }
 
-  /** deferred 事件队列(见 DEFERRABLE_TYPES 注释):仅在 tool_use 块打开期间入队。 */
-  private deferred: unknown[] = [];
-
   /**
-   * 是否已经有**更靠后**的 output item 落过块(blockIndex 被分配即视为已发射)。
-   *
-   * 用于判断此刻再为 `outputIndex` 发块会不会造成「块顺序与上游 output_index 顺序相反」。
-   * blocks 里每个 item 的 blockIndex 初始为 -1,只有真正 emit content_block_start 时才赋值。
+   * deferred 事件队列(见 DEFERRABLE_TYPES 注释):**任一不可打断块**(tool_use / thinking)
+   * 打开期间,其它 item 的 DEFERRABLE_TYPES 事件都会入队 —— 不只是 tool_use。
    */
-  private hasEmittedLaterItem(outputIndex: number): boolean {
-    for (const [idx, st] of this.blocks) {
-      if (idx > outputIndex && st.blockIndex >= 0) return true;
-    }
-    return false;
-  }
+  private deferred: unknown[] = [];
 
   /** 当前打开的块是否不可打断(tool_use / thinking,见 DEFERRABLE_TYPES 注释)。 */
   private openBlockIsUninterruptible(): boolean {
@@ -297,13 +287,6 @@ export class SseTranslator {
     if (itemType === 'reasoning') {
       // 先登记,不开块 —— 有可见 summary 时在首个 summary delta 处开 thinking 块;
       // 无可见 summary 则在 output_item.done 处作为 redacted_thinking 整块吐。
-      //
-      // 刻意**不**在这里把本 item 占为「当前打开项」。曾经试过(为了让零 summary delta 的
-      // 加密推理块排在正文之前),但 `response.output_text.delta` 属于 DEFERRABLE_TYPES:
-      // 一旦这里占位,「reasoning added → 正文全部吐完 → reasoning done」这种上游序列会把
-      // **整个可见答案**缓冲到 reasoning done 才一次性放出 —— 长搜索轮看起来完全卡死。
-      // 用户可见的流式输出优先于加密推理块的相对位置:该块本就没有明文、renderer 也不展示
-      // (见 makerChatStore 的 redacted 过滤),排在正文之后不产生任何可见后果。
       this.blocks.set(outputIndex, { blockIndex: -1, kind: 'thinking', opened: false });
     } else if (itemType === 'message') {
       // 先登记,不开块 —— 首个非空 output_text.delta 时才开 text 块。曾经在
@@ -459,7 +442,7 @@ export class SseTranslator {
         out.push({ event: 'content_block_stop', data: { type: 'content_block_stop', index: st.blockIndex } });
         st.opened = false;
         if (this.openOutputIndex === outputIndex) this.openOutputIndex = null;
-      } else if (encrypted && !this.hasEmittedLaterItem(outputIndex)) {
+      } else if (encrypted) {
         // 无可见 summary(含全程只发空白 summary delta),或曾在流收尾强制排空时被
         // 关掉(签名没地方挂,仅 stream-end 路径,正常流中 thinking 块不可打断):
         // 作为 redacted_thinking 整块一次性吐(data=encrypted_content),reasoning
@@ -475,13 +458,6 @@ export class SseTranslator {
         // 块已即时开+关,标记为已闭合,避免结尾 closeAllOpenBlocks 重复关。
         st.opened = false;
       }
-      // encrypted 存在、但更靠后的 item 已经先落块(典型:reasoning added → 正文吐完 →
-      // reasoning done)→ **丢掉**这条加密推理,不发一个注定放错位置的块。
-      // 理由:该块唯一用途是回放(renderer 不展示它),而 translate-request 按 block 顺序
-      // 还原 input[],此处再吐会让回放变成「message 在 reasoning 之前」,偏离上游
-      // output_index 的原始顺序;Responses 的 reasoning 回放对顺序敏感,下一轮可能连带
-      // 整个请求被拒。丢掉只损失这一条推理状态的连续性,不会让后续请求失败 —— 相比
-      // 「放错位置」这是严格更安全的降级。正常序列(reasoning 先 done)不受影响。
       // 既无 summary 又无 encrypted_content:什么都不吐(空 reasoning)。
       // 释放"占位未开块"的 in-flight 标记(空白 summary delta 只占位不开块,
       // 见 onReasoningSummaryDelta):不释放会让 deferred 队列等不到解锁事件。

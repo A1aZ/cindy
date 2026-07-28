@@ -5126,7 +5126,8 @@ function ensureInitialMessages(sessionId: string): void {
       // 两类命中(见 isNonAnchorHistoryRow):
       //   - 全是 tool_result:配对的 tool_use 父消息在更老的页里,orphan 会被丢弃;
       //   - 全是被隐藏的 thinking 行:如一轮搜索密集、在产出可见正文前就失败的会话,
-      //     最新 50 行可能全是加密推理。
+      //     最新 50 行可能全是加密推理;
+      //   - 合成指令行:渲染 null,混在上面两类里同样撑不出可见锚点。
       // 这里继续往前翻页,直到出现可渲染锚点或翻完。
       // 上限 10 页(500 行)防御异常长的连续无锚点队列。
       let merged: Message[] = existing;
@@ -8330,13 +8331,20 @@ function isHiddenThinkingRow(m: Message): boolean {
 /**
  * 该服务端行**渲染后不会留下可见锚点**(初始页全是这类行时必须继续往前翻页)。
  *
- * `tool_result` 的配对 tool_use 父消息可能在更老的页里,MessageStream 会丢弃 orphan;
- * 被 `isHiddenThinkingRow` 过滤掉的行则直接不进列表。任何一类占满整页,都会让映射结果为空,
- * 而 MessageStream 在 `visibleRenderItems.length === 0` 时不触发自动翻页 —— 结果是
- * DB 里有几千条消息、重开会话却渲染 0 项,更老的用户/助手消息再也拉不回来。
+ * 三类:
+ *   - `tool_result`:配对的 tool_use 父消息可能在更老的页里,MessageStream 会丢弃 orphan;
+ *   - 被 `isHiddenThinkingRow` 过滤掉的行:直接不进渲染列表;
+ *   - 合成指令行(`isSyntheticTriggerRow`):MessageStream 渲染 null、content 置空,
+ *     与 `loadOlderMessages` 的可见锚点判定同口径(见该处「合成指令行渲染 null,不算可见
+ *     锚点」)。少了这一类,一页里只要混进一条合成 user 行就会被当成锚点提前停止回填,
+ *     而它映射后同样不产生可见内容 —— 症状与完全不回填一样。
+ *
+ * 任何组合占满整页,都会让映射结果为空,而 MessageStream 在 `visibleRenderItems.length === 0`
+ * 时不触发自动翻页 —— 结果是 DB 里有几千条消息、重开会话却渲染 0 项,更老的用户/助手消息
+ * 再也拉不回来。
  */
 function isNonAnchorHistoryRow(m: Message): boolean {
-  return m.role === 'tool_result' || isHiddenThinkingRow(m);
+  return m.role === 'tool_result' || isHiddenThinkingRow(m) || isSyntheticTriggerRow(m);
 }
 
 function mapServerMessages(serverMsgs: Message[]): ChatMessage[] {

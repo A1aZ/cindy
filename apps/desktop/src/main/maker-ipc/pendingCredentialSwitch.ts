@@ -209,29 +209,31 @@ export class PendingCredentialSwitchService {
   ): Promise<{ providerId: string | null; apply: boolean }> {
     const { checkRoute } = this.deps;
     if (!checkRoute) return { providerId: target.providerId, apply: true };
-    // agentKind 缺席(会话行缺失等罕见路径):不能因此跳过复核(PR #744 review
-    // 第九轮)—— 对两个 agent 都跑一遍裁决取最保守结论;目录不提供该模型的那个
-    // agent 天然得到 pass,不影响结果。
-    const agents: AgentKind[] = target.agentKind
-      ? [target.agentKind]
-      : ['claude-code', 'codex'];
     try {
-      let resolved: { providerId: string | null; apply: boolean } = {
-        providerId: target.providerId,
-        apply: true,
-      };
-      for (const agent of agents) {
-        const laddered = await this.ladderVerdict(checkRoute, agent, target);
-        if (!laddered.apply) {
-          // 确定性全停(所有拷贝被停用):改为「显式来源清空」落地(apply=true,
-          // providerId=null)—— 不能保留 DB 里由 renderer 预写的停用来源钉住下一次
-          // 懒 resume(resume 免裁决);模型本身已死,清成隐式路由是最小错状态
-          // (PR #744 review 第十轮)。
-          return { providerId: null, apply: true };
+      if (!target.agentKind) {
+        // agentKind 缺席(会话行缺失等罕见路径):不能跳过复核(第九轮),但也不能
+        // 采纳按**别的 agent** 解析出的 reroute 来源钉给真实会话 —— 那个来源可能
+        // 不提供该模型或其拷贝也被停用(PR #744 review 第十二轮 Greptile)。规则:
+        // 两个 agent 的阶梯都「原样通过」才原样应用;任一 agent 要求改动
+        // (reject / reroute / 丢来源)即把显式来源清空(最小错状态,同全停语义),
+        // 不猜测替代来源。目录不提供该模型的 agent 天然 pass,不影响结果。
+        for (const agent of ['claude-code', 'codex'] as AgentKind[]) {
+          const laddered = await this.ladderVerdict(checkRoute, agent, target);
+          if (!laddered.apply || laddered.providerId !== target.providerId) {
+            return { providerId: null, apply: true };
+          }
         }
-        if (laddered.providerId !== target.providerId) resolved = laddered;
+        return { providerId: target.providerId, apply: true };
       }
-      return resolved;
+      const laddered = await this.ladderVerdict(checkRoute, target.agentKind, target);
+      if (!laddered.apply) {
+        // 确定性全停(所有拷贝被停用):改为「显式来源清空」落地(apply=true,
+        // providerId=null)—— 不能保留 DB 里由 renderer 预写的停用来源钉住下一次
+        // 懒 resume(resume 免裁决);模型本身已死,清成隐式路由是最小错状态
+        // (PR #744 review 第十轮)。
+        return { providerId: null, apply: true };
+      }
+      return laddered;
     } catch (err) {
       // 复核异常按「不写 route」保守处理:目标可能恰在等待期间被停用,异常放行会把
       // 停用来源写回会话(PR #744 review 第八轮)。生产 checkRoute

@@ -44,7 +44,34 @@ const PROBE_TIMEOUT_MS = 4_000;
 function describe(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
   const code = (err as NodeJS.ErrnoException | null)?.code;
-  return (code ?? message).replace(/\s+/g, ' ').trim().slice(0, 60) || 'unknown';
+  // String() 归一:errno 的 code 在运行期也可能是数字(类型声明只写了 string),
+  // 直接 .replace() 会让诊断自己抛异常。
+  return String(code ?? message).replace(/\s+/g, ' ').trim().slice(0, 60) || 'unknown';
+}
+
+/**
+ * 给探针套硬 deadline。**每一段都必须套**:系统 PAC / 代理解析与 OS DNS 查询都可能
+ * 永不 settle,而这段代码跑在 app.ready 的阻断路径上——只给 TCP 传 timeout 的话,
+ * 一个 pending 的 resolveProxy 就能让阻断框(连同新的离线出口)永远不出现,
+ * 表现为"启动卡住没反应",比原来只报 ERR_FAILED 更糟。
+ */
+function withDeadline<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label}-timeout-${timeoutMs}ms`)),
+      timeoutMs,
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      },
+    );
+  });
 }
 
 export function createDefaultProbes(): EndpointFetchProbes {
@@ -80,6 +107,7 @@ export function createDefaultProbes(): EndpointFetchProbes {
 /**
  * 跑一轮分阶段探测。三段互不阻塞对方的失败——任何一段抛错都只记为该段失败,
  * 整个诊断永远不抛,绝不能把「排查辅助」变成新的启动失败源。
+ * 三段并发且各自都有 timeoutMs 硬 deadline,所以整轮墙钟上界 ≈ timeoutMs。
  */
 export async function probeEndpointFetch(
   url: string,
@@ -100,19 +128,18 @@ export async function probeEndpointFetch(
     };
   }
 
-  const proxy = probes
-    .resolveProxy(url)
+  const proxy = withDeadline(probes.resolveProxy(url), timeoutMs, 'proxy')
     .then((value) => ({ ok: true as const, value: value.trim() || 'unknown' }))
     .catch((err: unknown) => ({ ok: false as const, error: describe(err) }));
 
-  const dnsProbe = probes
-    .lookupHost(hostname)
+  const dnsProbe = withDeadline(probes.lookupHost(hostname), timeoutMs, 'dns')
     .then((addresses) => ({ ok: true as const, addresses }))
     .catch((err: unknown) => ({ ok: false as const, error: describe(err) }));
 
   const startedAt = Date.now();
-  const tcp = probes
-    .connectTcp(hostname, port, timeoutMs)
+  // connectTcp 自己也收 timeoutMs(socket.setTimeout),外层 deadline 是兜底:
+  // 探针实现可以被注入,不能假设它一定遵守自己的超时。
+  const tcp = withDeadline(probes.connectTcp(hostname, port, timeoutMs), timeoutMs, 'tcp')
     .then(() => ({ ok: true as const, elapsedMs: Date.now() - startedAt }))
     .catch((err: unknown) => ({ ok: false as const, error: describe(err) }));
 

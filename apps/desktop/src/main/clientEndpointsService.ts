@@ -13,15 +13,17 @@
  * 柔性只有两处,都不破坏"不静默降级":
  *  1. 弹框**之前**的网络层自动重试(AUTO_RETRY_DELAYS_MS,只对拉取失败生效、
  *     不对解析/校验失败生效),用于自愈首启瞬时抖动;重试用尽仍失败照样阻断。
- *  2. **用户在弹框上显式点击**的离线出口(2026-07 追加):网络层失败且本地存有
+ *  2. **用户在弹框上显式点击**的离线出口(2026-07 追加):传输层失败且本地存有
  *     上次成功清单时,弹框多一个「用上次配置启动」按钮。原设计连"用户明知自己
  *     离线、只想打开应用看看本地内容"都没有出口,只能反复弹框或退出。严格边界见
- *     endpointManifestCache.ts:只有**网络层**失败给出口(JSON / schema / 非法值 /
- *     region 不匹配这类配置事故照旧硬阻断——给出口等于帮用户绕过真实配置错),
- *     缓存原文读回后重新走同一套严格解析,清单地址变化即作废,全程必须用户点击。
+ *     endpointManifestCache.ts:只有**传输层**失败给出口(JSON / schema / 非法值 /
+ *     region 不匹配,以及永久性 HTTP 3xx/4xx 这类配置事故照旧硬阻断——给出口等于
+ *     帮用户绕过真实配置错,分类规则见 classifyManifestFailure),缓存存的是校验通过
+ *     的原文、读回后重新走同一套严格解析,清单地址变化即作废,全程必须用户点击。
  *
- * 网络层失败在弹框前还会跑一轮分阶段诊断(endpointFetchDiagnostics:代理决策 /
- * DNS / TCP)并抓一份 netlog,摘要同时进日志和弹框。原因是 Electron `net.request`
+ * 传输层失败在弹框前还会跑一轮分阶段诊断(endpointFetchDiagnostics:代理决策 /
+ * DNS / TCP,每段各有硬 deadline——这段跑在阻断路径上,探针挂住等于启动卡死)
+ * 并抓一份 netlog,摘要同时进日志和弹框。原因是 Electron `net.request`
  * 把 DNS、代理、TLS、被本机网络过滤扩展拦下全折叠成通用的 `ERR_FAILED`,
  * 只报一个错误码等于没有现场(2026-07 实测:同一 URL curl 与裸 Electron 都是 200,
  * 安装版毫秒级 ERR_FAILED,单看错误码无从下手)。
@@ -50,9 +52,6 @@ import { app, dialog, ipcMain, net } from 'electron';
 
 import {
   resolveClientEndpointsStrict,
-  CLIENT_ENDPOINT_KEYS,
-  CLIENT_ENDPOINT_REVIEW_KEY,
-  CLIENT_ENDPOINTS_SCHEMA_VERSION,
   type ClientEndpointKey,
   type ClientEndpointMap,
   type ClientEndpointRegion,
@@ -289,9 +288,24 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** 失败 reason → 用户可见的失败分类(决定文案与是否给离线出口)。 */
+/**
+ * 失败 reason → 失败分类(决定文案与是否给离线出口)。
+ *
+ * 分界不是"有没有拿到正文",而是**重试和离线出口有没有意义**,并且必须与自动重试
+ * 循环的永久性判定保持一致:
+ *  - 永久性 HTTP 3xx/4xx = 路径 / 权限 / 部署配置错。重试循环已经因此不重试,
+ *    这里同样归 config——否则同一个失败被判成"配置错所以不重试"又"网络问题所以
+ *    可以用缓存绕过",等于给一次真实的配置事故开了后门(review 抓到的正是这条);
+ *  - 5xx 与传输层失败(超时 / DNS / 代理 / ERR_*)才是 network,可重试、可离线;
+ *  - 烘焙基址为空是打包事故,同样 config。
+ */
 export function classifyManifestFailure(reason: string): EndpointManifestFailureKind {
-  return reason.startsWith('fetch-failed') ? 'network' : 'config';
+  if (!reason.startsWith('fetch-failed')) return 'config';
+  const detail = reason.slice('fetch-failed'.length).replace(/^:/, '');
+  if (detail === 'missing-manifest-base-url') return 'config';
+  const httpStatus = /^http-(\d+)$/.exec(detail)?.[1];
+  if (httpStatus && Number(httpStatus) < 500) return 'config';
+  return 'network';
 }
 
 /** 弹框需要的全部上下文;由阻断循环组装,宿主只负责渲染与取回选择。 */
@@ -352,10 +366,15 @@ export interface BlockingResolveDeps {
   /**
    * 启动宿主保存清单元数据;纯端点调用方无需提供。
    * source 区分本次是网络拉到的还是用户选了离线缓存——宿主据此决定是否回写缓存。
+   * rawText 只在 source==='network' 时给出:**校验通过的原始正文**。缓存必须存它而
+   * 不是按当前 CLIENT_ENDPOINT_KEYS 重新序列化的结果,否则清单里那些本构建还不认识
+   * 的新字段会被抹掉(前向兼容的发布模型正是"先发清单再发客户端"),等客户端升级后
+   * 从这份缓存离线启动,新端点会静默变成空串。
    */
   onResolved?(
     manifest: Extract<ParseClientEndpointManifestResult, { ok: true }>,
     source: 'network' | 'cache',
+    rawText?: string,
   ): void;
 }
 
@@ -399,7 +418,7 @@ export async function resolveClientEndpointsBlocking(
             reason = `region-mismatch:${deps.expectedRegionWhenPresent}:${parsed.region}`;
             break;
           }
-          deps.onResolved?.(parsed, 'network');
+          deps.onResolved?.(parsed, 'network', fetched.text);
           return parsed.endpoints;
         }
         // 拿到了正文但解析/校验不过 = 配置事故:重试同一份内容没有意义,直接弹框。
@@ -426,11 +445,11 @@ export async function resolveClientEndpointsBlocking(
     }
 
     const kind = (deps.classifyFailure ?? classifyManifestFailure)(reason);
-    // 基址为空是构建事故,拿空 URL 去跑 DNS/TCP 探针只会得到一堆 invalid-url。
-    const diagnosable = kind === 'network' && !reason.includes('missing-manifest-base-url');
+    // 只有 network 才诊断:config 里包含"烘焙基址为空",拿空 URL 去跑 DNS/TCP
+    // 只会得到一堆 invalid-url;HTTP 4xx / 内容非法也不是网络栈的问题。
     let diagnosis: string | null = null;
     let logPath: string | null = null;
-    if (diagnosable && deps.diagnose) {
+    if (kind === 'network' && deps.diagnose) {
       try {
         const report = await deps.diagnose(reason);
         diagnosis = report.summary;
@@ -626,33 +645,22 @@ function loadOfflineManifestCandidate(
 }
 
 /**
- * 把本次成功解析的清单**规范化**后写入缓存,供下次网络失败时的离线出口使用。
+ * 把本次**校验通过的清单原文**写入缓存,供下次网络失败时的离线出口使用。
  *
- * 写规范化结果而不是原始正文:原文可能带未知字段与格式噪声,规范化后写出的一定是
- * 一份能被同一 parser 接受的清单——离线出口不该因为"当年那份正文里有个新字段"
- * 而失败。空值字段直接省略(parser 对缺失与空串同义)。
+ * 存原文而不是按当前 CLIENT_ENDPOINT_KEYS 重新序列化:清单的发布模型是前向兼容的
+ * ——先上新字段的清单,再发认识它的客户端;老客户端按"未知字段忽略"接受这份清单。
+ * 如果缓存写的是重新序列化的结果,那些字段就在写入时被抹掉了,等客户端升级后从这份
+ * 缓存离线启动,新端点会静默变成空串(review 抓到的正是这条)。
+ * 原文是刚刚被同一个 parser 接受过的,所以"存原文会不会读不回来"不成立;真正需要
+ * 防的是读取时用新 parser 判定不通过,那条路径已经 fail closed(不给离线按钮)。
  */
-function cacheResolvedManifest(
-  manifestUrl: string,
-  manifest: Extract<ParseClientEndpointManifestResult, { ok: true }>,
-): void {
-  const payload: Record<string, unknown> = {
-    schemaVersion: CLIENT_ENDPOINTS_SCHEMA_VERSION,
-  };
-  if (manifest.region !== null) payload.region = manifest.region;
-  if (manifest.reviewVersion !== null) {
-    payload[CLIENT_ENDPOINT_REVIEW_KEY] = manifest.reviewVersion;
-  }
-  for (const key of CLIENT_ENDPOINT_KEYS) {
-    const value = manifest.endpoints[key];
-    if (value) payload[key] = value;
-  }
+function cacheResolvedManifest(manifestUrl: string, manifestText: string): void {
   let written = false;
   try {
     written = writeEndpointManifestCache(app.getPath('userData'), {
       savedAt: new Date().toISOString(),
       sourceUrl: manifestUrl,
-      manifestText: JSON.stringify(payload),
+      manifestText,
     });
   } catch (err) {
     log.debug('endpoint manifest cache write threw: %s', String(err));
@@ -705,11 +713,11 @@ export async function initClientEndpoints(): Promise<boolean> {
       source.kind === 'cdn'
         ? () => loadOfflineManifestCandidate(manifestUrl, dialogLocale)
         : undefined,
-    onResolved: (manifest, origin) => {
+    onResolved: (manifest, origin, rawText) => {
       resolvedManifestBox.value = manifest;
       resolvedManifestBox.fromCache = origin === 'cache';
-      if (origin === 'network' && source.kind === 'cdn') {
-        cacheResolvedManifest(manifestUrl, manifest);
+      if (origin === 'network' && source.kind === 'cdn' && rawText) {
+        cacheResolvedManifest(manifestUrl, rawText);
       }
     },
   });

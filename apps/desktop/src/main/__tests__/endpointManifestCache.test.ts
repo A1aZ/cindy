@@ -72,6 +72,20 @@ describe('endpointManifestCache', () => {
     expect(readEndpointManifestCache(dir)).toBeNull();
   });
 
+  it('文件字节数超上限时读前就拒绝(不把大文件读进内存)', () => {
+    fs.writeFileSync(cacheFile(), 'x'.repeat(64 * 1024 * 2 + 1), 'utf8');
+    expect(readEndpointManifestCache(dir)).toBeNull();
+  });
+
+  it('多字节 UTF-8 内容按字节而非字符数判断', () => {
+    // 每个汉字 3 字节:字符数远小于上限,字节数刚好越界。用 string.length 判断会放行。
+    const cjk = '配'.repeat(64 * 1024 * 2 / 3 + 10);
+    expect(Buffer.byteLength(cjk, 'utf8')).toBeGreaterThan(64 * 1024 * 2);
+    expect(cjk.length).toBeLessThan(64 * 1024 * 2);
+    fs.writeFileSync(cacheFile(), cjk, 'utf8');
+    expect(readEndpointManifestCache(dir)).toBeNull();
+  });
+
   it('清单原文超上限时拒绝写入', () => {
     const huge = { ...ENTRY, manifestText: 'x'.repeat(64 * 1024 + 1) };
     expect(writeEndpointManifestCache(dir, huge)).toBe(false);

@@ -481,7 +481,16 @@ describe('失败分类与弹框前诊断', () => {
   it.each([
     ['fetch-failed', 'network'],
     ['fetch-failed:ERR_FAILED', 'network'],
-    ['fetch-failed:missing-manifest-base-url', 'network'],
+    ['fetch-failed:timeout-15000ms', 'network'],
+    // 5xx 可能是瞬时故障:重试循环会重试,这里也给离线出口。
+    ['fetch-failed:http-500', 'network'],
+    ['fetch-failed:http-502', 'network'],
+    // 永久性 HTTP = 路径 / 权限 / 部署配置错。重试循环已因此不重试,分类必须一致,
+    // 否则同一失败会"配置错所以不重试"又"网络问题所以能用缓存绕过"。
+    ['fetch-failed:http-301', 'config'],
+    ['fetch-failed:http-403', 'config'],
+    ['fetch-failed:http-404', 'config'],
+    ['fetch-failed:missing-manifest-base-url', 'config'],
     ['invalid-json', 'config'],
     ['unsupported-schema-version:9', 'config'],
     ['invalid-protocol:cdnBaseUrl', 'config'],
@@ -620,7 +629,7 @@ describe('用户确认的离线出口', () => {
     expect(fetchManifest).toHaveBeenCalledTimes(1);
   });
 
-  it('走离线出口时 onResolved 收到 source=cache;网络成功则是 network', async () => {
+  it('走离线出口时 onResolved 收到 source=cache;网络成功则是 network 并带原文', async () => {
     const cacheResolved = vi.fn();
     await resolveClientEndpointsBlocking({
       fetchManifest: failFetch('ERR_FAILED'),
@@ -640,7 +649,68 @@ describe('用户确认的离线出口', () => {
       loadOfflineManifest: offlineCandidate,
       onResolved: netResolved,
     });
-    expect(netResolved).toHaveBeenCalledWith(expect.anything(), 'network');
+    // 第三个参数必须是**校验通过的原文本身**:宿主要拿它原样落缓存,不能重新序列化
+    // (重新序列化会抹掉本构建还不认识的新字段,升级后离线启动就丢配置)。
+    expect(netResolved).toHaveBeenCalledWith(expect.anything(), 'network', FULL_MANIFEST);
+  });
+
+  it('清单带本构建未知字段时,原文照样原样交给宿主落缓存', async () => {
+    const withUnknownField = JSON.stringify({
+      ...(JSON.parse(FULL_MANIFEST) as object),
+      // 前向兼容的发布模型:先上新字段的清单,再发认识它的客户端。
+      futureApiBaseUrl: 'https://future.remote.example.com',
+    });
+    const onResolved = vi.fn();
+
+    await resolveClientEndpointsBlocking({
+      fetchManifest: okFetch(withUnknownField),
+      promptRetry: vi.fn(),
+      exitApp: vi.fn(),
+      onResolved,
+    });
+
+    expect(onResolved.mock.calls[0][2]).toBe(withUnknownField);
+    expect(onResolved.mock.calls[0][2]).toContain('futureApiBaseUrl');
+  });
+
+  it.each([301, 403, 404])(
+    '永久性 HTTP %d 不给离线出口(与"不重试"的判定保持一致)',
+    async (status) => {
+      const loadOfflineManifest = vi.fn(offlineCandidate);
+      const diagnose = vi.fn();
+      const promptRetry = vi.fn().mockReturnValue('exit');
+
+      await resolveClientEndpointsBlocking({
+        fetchManifest: failFetch(`http-${status}`),
+        promptRetry,
+        exitApp: vi.fn(),
+        loadOfflineManifest,
+        diagnose,
+      });
+
+      expect(loadOfflineManifest).not.toHaveBeenCalled();
+      expect(diagnose).not.toHaveBeenCalled();
+      expect(promptRetry.mock.calls[0][0]).toMatchObject({
+        kind: 'config',
+        offlineSavedAt: null,
+      });
+    },
+  );
+
+  it('HTTP 502(瞬时)仍给离线出口', async () => {
+    const loadOfflineManifest = vi.fn(offlineCandidate);
+    const promptRetry = vi.fn().mockReturnValue('offline');
+
+    const result = await resolveClientEndpointsBlocking({
+      fetchManifest: failFetch('http-502'),
+      promptRetry,
+      exitApp: vi.fn(),
+      loadOfflineManifest,
+      ...NO_AUTO_RETRY,
+    });
+
+    expect(result?.authApiBaseUrl).toBe('https://auth.cached.example.com');
+    expect(promptRetry.mock.calls[0][0]).toMatchObject({ kind: 'network' });
   });
 
   it('配置事故绝不给离线出口:既不读缓存也不点亮按钮', async () => {

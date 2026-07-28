@@ -19,8 +19,10 @@ import type { SupportedLocale } from '../shared/locale.js';
 export type EndpointManifestDialogLocale = SupportedLocale;
 
 /**
- * 失败分类。network = 请求没拿到正文(可重试、可能给离线出口);
- * config = 拿到了正文但内容不合法(重试同一份内容没有意义,也不给离线出口)。
+ * 失败分类(判定规则见 clientEndpointsService 的 classifyManifestFailure)。
+ * network = 传输层没拿到清单(超时 / DNS / 代理 / 5xx),可重试、可能给离线出口;
+ * config = 拿不到**可用**清单且重试无意义——正文内容不合法、region 不匹配、烘焙基址
+ * 为空,以及永久性 HTTP(3xx/4xx:路径 / 权限 / 部署错)。这一类不给离线出口。
  */
 export type EndpointManifestFailureKind = 'network' | 'config';
 
@@ -51,11 +53,11 @@ export const ENDPOINT_MANIFEST_DIALOG_COPY: Record<
     networkBody:
       'Cindy 启动前需要先获取服务器配置，这次请求没有成功。请检查网络连接后重新获取。',
     configBody:
-      '获取到的服务器配置内容不合法，重新获取不会改变结果。请稍后再试或联系我们。',
+      '服务器没有返回可用的配置，重新获取不会改变结果。请稍后再试或联系我们。',
     sourceLine: '配置地址：{{source}}',
     reasonLine: '失败原因：{{reason}}',
     diagnosisLine: '网络诊断：{{diagnosis}}',
-    logLine: '诊断日志：{{path}}',
+    logLine: '诊断日志位置：{{path}}',
     offlineHint:
       '也可以用上次成功获取的配置离线启动（获取于 {{savedAt}}），需要联网的功能会不可用。',
     retryButton: '重新获取配置',
@@ -67,11 +69,11 @@ export const ENDPOINT_MANIFEST_DIALOG_COPY: Record<
     networkBody:
       'Cindy needs the server configuration before it can start, and this request did not go through. Check your network connection and fetch it again.',
     configBody:
-      'The server configuration that was returned is invalid, so fetching it again will not change the result. Try later or contact us.',
+      'The server did not return a usable configuration, so fetching it again will not change the result. Try later or contact us.',
     sourceLine: 'Configuration URL: {{source}}',
     reasonLine: 'Failure reason: {{reason}}',
     diagnosisLine: 'Network diagnosis: {{diagnosis}}',
-    logLine: 'Diagnostic log: {{path}}',
+    logLine: 'Diagnostic log location: {{path}}',
     offlineHint:
       'You can also start offline with the configuration Cindy last fetched ({{savedAt}}). Features that need a network connection will be unavailable.',
     retryButton: 'Fetch Configuration',
@@ -83,11 +85,11 @@ export const ENDPOINT_MANIFEST_DIALOG_COPY: Record<
     networkBody:
       'Cindy の起動にはサーバー設定の取得が必要ですが、今回のリクエストは失敗しました。ネットワーク接続を確認してから再取得してください。',
     configBody:
-      '取得したサーバー設定の内容が不正です。再取得しても結果は変わりません。時間をおいて試すか、お問い合わせください。',
+      'サーバーから使用可能な設定を取得できませんでした。再取得しても結果は変わりません。時間をおいて試すか、お問い合わせください。',
     sourceLine: '設定の取得先: {{source}}',
     reasonLine: '失敗の原因: {{reason}}',
     diagnosisLine: 'ネットワーク診断: {{diagnosis}}',
-    logLine: '診断ログ: {{path}}',
+    logLine: '診断ログの場所: {{path}}',
     offlineHint:
       '前回取得できた設定でオフライン起動することもできます（取得日時: {{savedAt}}）。ネットワークが必要な機能は利用できません。',
     retryButton: '設定を再取得',
@@ -99,11 +101,11 @@ export const ENDPOINT_MANIFEST_DIALOG_COPY: Record<
     networkBody:
       'Cindy를 시작하려면 먼저 서버 설정을 가져와야 하지만 이번 요청이 실패했습니다. 네트워크 연결을 확인한 후 다시 가져오세요.',
     configBody:
-      '가져온 서버 설정의 내용이 올바르지 않습니다. 다시 가져와도 결과는 바뀌지 않습니다. 잠시 후 다시 시도하거나 문의해 주세요.',
+      '서버에서 사용할 수 있는 설정을 가져오지 못했습니다. 다시 가져와도 결과는 바뀌지 않습니다. 잠시 후 다시 시도하거나 문의해 주세요.',
     sourceLine: '설정 주소: {{source}}',
     reasonLine: '실패 원인: {{reason}}',
     diagnosisLine: '네트워크 진단: {{diagnosis}}',
-    logLine: '진단 로그: {{path}}',
+    logLine: '진단 로그 위치: {{path}}',
     offlineHint:
       '마지막으로 가져온 설정으로 오프라인 시작할 수도 있습니다({{savedAt}} 기준). 네트워크가 필요한 기능은 사용할 수 없습니다.',
     retryButton: '설정 다시 가져오기',
@@ -121,7 +123,10 @@ export interface EndpointManifestDialogInput {
   source: string;
   /** 网络分阶段诊断摘要;没跑或跑失败时省略。 */
   diagnosis?: string | null;
-  /** 诊断日志目录;可用时附在 detail 末尾,方便用户直接找现场。 */
+  /**
+   * 诊断产物位置:netlog 抓成功时是那个文件,失败时回落成日志目录——所以文案用
+   * 「诊断日志位置」而不是「诊断日志」,不承诺一定是单个文件。
+   */
   logPath?: string | null;
   /** 上次成功配置的获取时间(已格式化);有值即提供离线启动按钮。 */
   offlineSavedAt?: string | null;

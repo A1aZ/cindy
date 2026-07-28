@@ -115,4 +115,46 @@ describe('probeEndpointFetch', () => {
     );
     expect(formatEndpointFetchDiagnosis(report)).toContain('dns=ok(1.1.1.1,2.2.2.2)');
   });
+
+  it('errno code 是数字时也不炸(诊断自己不能成为失败源)', async () => {
+    const report = await probeEndpointFetch(
+      URL_UNDER_TEST,
+      probes({
+        lookupHost: async () => {
+          const err = new Error('boom') as Error & { code: number };
+          err.code = 12345;
+          throw err;
+        },
+      }),
+    );
+    expect(report.dns).toEqual({ ok: false, error: '12345' });
+  });
+
+  describe('每段都必须受 deadline 约束', () => {
+    /** 永不 settle 的 promise:模拟 PAC/代理解析或 OS DNS 查询挂住。 */
+    const never = () => new Promise<never>(() => {});
+
+    it.each([
+      ['proxy', { resolveProxy: never }],
+      ['dns', { lookupHost: never }],
+      ['tcp', { connectTcp: never }],
+    ] as const)('%s 永不返回时按 deadline 记失败,整轮仍然返回', async (stage, override) => {
+      const startedAt = Date.now();
+      const report = await probeEndpointFetch(
+        URL_UNDER_TEST,
+        probes(override as Partial<EndpointFetchProbes>),
+        30,
+      );
+      // 关键不是耗时精确,而是"会返回":这段跑在 app.ready 的阻断路径上,
+      // 挂住就等于阻断框(连同离线出口)永远不出现,表现为启动卡死。
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+      const outcome = report[stage];
+      expect(outcome.ok).toBe(false);
+      expect(outcome.ok === false && outcome.error).toBe(`${stage}-timeout-30ms`);
+      // 其它两段照常出结果。
+      for (const other of ['proxy', 'dns', 'tcp'] as const) {
+        if (other !== stage) expect(report[other].ok).toBe(true);
+      }
+    });
+  });
 });

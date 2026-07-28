@@ -44,13 +44,17 @@ function cacheFilePath(userDataDir: string): string {
  * 任何异常都不该影响启动流程)。
  */
 export function readEndpointManifestCache(userDataDir: string): CachedEndpointManifest | null {
+  const file = cacheFilePath(userDataDir);
   let raw: string;
   try {
-    raw = fs.readFileSync(cacheFilePath(userDataDir), 'utf8');
+    // 先按**文件字节数**卡上限再读:用 string.length 判断在 UTF-8 多字节下根本不是
+    // 字节数,而且那时整个文件已经进内存了——异常大的文件应该在读之前就被拒。
+    // 上限给 JSON 包装留 2 倍余量(entry 除清单原文外还有 savedAt / sourceUrl)。
+    if (fs.statSync(file).size > MAX_MANIFEST_BYTES * 2) return null;
+    raw = fs.readFileSync(file, 'utf8');
   } catch {
     return null;
   }
-  if (raw.length > MAX_MANIFEST_BYTES * 2) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);

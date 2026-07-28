@@ -174,6 +174,8 @@ export interface HookDispatcherDeps {
    * eager behavior unless they opt out explicitly.
    */
   accountInitiallyActive?: boolean;
+  /** 当前时刻(epoch ms)。注入只为让「在途标记过期」这类时效判定可测。 */
+  now?: () => number;
   log: { info(msg: string): void; warn(msg: string): void };
 }
 
@@ -348,6 +350,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     archiveSessionRow,
     resolveInteraction,
     accountInitiallyActive,
+    now = () => Date.now(),
     log,
   } = deps;
 
@@ -721,6 +724,9 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       const pendingMoveRegistration =
         usable &&
         boundEntry?.previousWorkingDir != null &&
+        // 过期的在途标记不算数: 写库后清理标记万一失败(磁盘/权限), 残留的它
+        // 不能长期充当映射外的放行凭据(PR #669 review 指出)
+        boundEntry.movePendingUntil > now() &&
         isSamePath(boundEntry.previousWorkingDir, info!.workingDir!);
       // 三者都不满足 = 映射被改/删的撤权语义(或目录被别的路径改过), 仍丢绑定
       // 重建。老绑定无授权记录时同样走保守侧。

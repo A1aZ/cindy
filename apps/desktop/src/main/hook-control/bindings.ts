@@ -26,10 +26,12 @@
  *   映射被改/删且目录没动时即失效(撤权语义不变)。
  * - `authority: 'local-move'` + `workingDir` —— 用户把对话移到了这个目录,
  *   此后目录只要没再变就继续复用; 移回映射内会复位成 'workspace'。
- * - `previousWorkingDir` —— 移动登记时会话**还在**的那个目录。移动是"先登记、
- *   再写库"两步, 其间到达的消息看到的 session 仍是旧目录; 靠这个字段识别出
- *   "登记已落、库还没落"的中间态, 照常在旧目录跑而不误判成撤权。落库后的第一次
- *   收敛就清掉它。
+ * - `previousWorkingDir` + `movePendingUntil` —— 移动登记时会话**还在**的那个
+ *   目录, 以及这份"在途"容忍的截止时刻。移动是"先登记、再写库"两步, 其间到达
+ *   的消息看到的 session 仍是旧目录; 靠这两个字段识别出"登记已落、库还没落"的
+ *   中间态, 照常在旧目录跑而不误判成撤权。写库成功会立刻清掉它们, 万一清理
+ *   本身失败(磁盘/权限), 截止时刻到了也自动失效 —— 残留的标记不能变成一张
+ *   长期有效的"在途通行证"(PR #669 review 指出)。
  * - `noticePending` —— 该次移动还没在渠道里说明过, dispatcher 说明一次后清掉。
  * - `rev` —— 单调递增的行版本, 供 set 的 expectedRev 做乐观并发控制。用计数而
  *   不是时间戳: 毫秒精度下同一毫秒的两次写会撞版本, CAS 就形同虚设。
@@ -55,6 +57,8 @@ export interface HookBindingEntry {
   workingDir: string | null;
   /** 见文件头: 移动登记时会话还在的目录; null = 没有在途的移动。 */
   previousWorkingDir: string | null;
+  /** 见文件头: 在途容忍的截止时刻(epoch ms); 0 = 没有在途的移动。 */
+  movePendingUntil: number;
   /** 上次放行的依据; null = 老数据未记录。 */
   authority: HookBindingAuthority | null;
   /** 已登记的移动尚未在渠道里说明过。 */
@@ -67,6 +71,7 @@ export interface HookBindingEntry {
 export interface HookBindingMeta {
   workingDir?: string | null;
   previousWorkingDir?: string | null;
+  movePendingUntil?: number;
   authority?: HookBindingAuthority | null;
   noticePending?: boolean;
   /**
@@ -131,6 +136,8 @@ interface BindingRow {
   workingDir?: string | null;
   /** 见文件头: 移动登记时会话还在的目录; 缺省 = 没有在途移动。 */
   previousWorkingDir?: string | null;
+  /** 见文件头: 在途容忍的截止时刻(epoch ms); 缺省 = 没有在途移动。 */
+  movePendingUntil?: number;
   /** 见文件头: 上次放行的依据; 缺省 = 老数据。 */
   authority?: HookBindingAuthority | null;
   /** 见文件头: 已登记的移动还没说明过。 */
@@ -141,6 +148,13 @@ interface BindingRow {
 }
 
 type BindingFile = Record<string, Record<string, BindingRow>>;
+
+/**
+ * "登记已落、库还没落"的容忍时长。正常只有一次 DB 写入 + 转录迁移(百毫秒级),
+ * 给到一分钟足够宽松; 上限的意义是: 万一写库后清理标记本身失败(磁盘/权限),
+ * 残留的在途标记也会自动失效, 不至于长期充当映射外的放行凭据。
+ */
+const MOVE_PENDING_TTL_MS = 60_000;
 
 export function createHookBindingStore(deps: {
   filePath: string;
@@ -192,6 +206,9 @@ export function createHookBindingStore(deps: {
       ...(typeof meta?.previousWorkingDir === 'string' && meta.previousWorkingDir.length > 0
         ? { previousWorkingDir: meta.previousWorkingDir }
         : {}),
+      ...(typeof meta?.movePendingUntil === 'number' && meta.movePendingUntil > 0
+        ? { movePendingUntil: meta.movePendingUntil }
+        : {}),
       ...(meta?.authority === 'workspace' || meta?.authority === 'local-move'
         ? { authority: meta.authority }
         : {}),
@@ -218,6 +235,7 @@ export function createHookBindingStore(deps: {
         workingDir: typeof row.workingDir === 'string' ? row.workingDir : null,
         previousWorkingDir:
           typeof row.previousWorkingDir === 'string' ? row.previousWorkingDir : null,
+        movePendingUntil: typeof row.movePendingUntil === 'number' ? row.movePendingUntil : 0,
         // 未知字面量(手改文件 / 更早的实验值)按"没有授权记录"处理, fail closed
         authority:
           row.authority === 'workspace' || row.authority === 'local-move' ? row.authority : null,
@@ -250,8 +268,14 @@ export function createHookBindingStore(deps: {
           rows[externalKey] = {
             sessionId,
             workingDir: move.to,
-            // 记下移动前的目录: 登记与写库之间到达的消息看到的还是它
-            ...(move.from ? { previousWorkingDir: move.from } : {}),
+            // 记下移动前的目录与容忍截止时刻: 登记与写库之间到达的消息看到的
+            // 还是旧目录; 截止后标记自动失效, 不会变成长期通行证
+            ...(move.from
+              ? {
+                  previousWorkingDir: move.from,
+                  movePendingUntil: Date.now() + MOVE_PENDING_TTL_MS,
+                }
+              : {}),
             authority,
             // 只有映射外的跟随才需要在渠道里解释一句
             ...(authority === 'local-move' ? { noticePending: true } : {}),
@@ -285,8 +309,8 @@ export function createHookBindingStore(deps: {
         for (const [externalKey, row] of Object.entries(rows)) {
           if (row?.sessionId !== sessionId) continue;
           if (row.workingDir !== workingDir) continue;
-          if (row.previousWorkingDir == null) continue;
-          const { previousWorkingDir: _dropped, ...rest } = row;
+          if (row.previousWorkingDir == null && row.movePendingUntil == null) continue;
+          const { previousWorkingDir: _dropped, movePendingUntil: _alsoDropped, ...rest } = row;
           rows[externalKey] = { ...rest, rev: revOf(row) + 1, updatedAt: Date.now() };
           updated += 1;
         }

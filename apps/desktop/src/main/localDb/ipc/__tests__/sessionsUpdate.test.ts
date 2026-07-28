@@ -384,8 +384,9 @@ describe('local-db:sessions:move handler wiring', () => {
     expect(h.completeHookSessionMove).not.toHaveBeenCalled();
   });
 
-  it('rolls back the registration when the database write fails', async () => {
-    // 不回滚的话 previousWorkingDir 永久残留, 成了绕过撤权的"在途通行证"
+  it('finalizes instead of rolling back when the directory already committed', async () => {
+    // 目录写入在前、转录迁移等副作用在后: 这时回滚绑定会造成"库在新目录、绑定
+    // 记旧目录"的分叉, 下一条消息照样丢绑定
     h.relocate.mockImplementation(async () => {
       throw new Error('transcript relocation exploded');
     });
@@ -393,6 +394,23 @@ describe('local-db:sessions:move handler wiring', () => {
     await expect(
       invokeMove('cc-local', { kind: 'project', workingDir: '/new/dir' }),
     ).rejects.toThrow(/transcript relocation exploded/);
+    expect(h.rollbacks).toBe(0);
+    expect(h.completeHookSessionMove).toHaveBeenCalledWith('cc-local', '/new/dir');
+  });
+
+  it('rolls back the registration when the directory never lands', async () => {
+    // 登记之后、写库之前会话没了: 移动没成立, 必须回滚, 否则 previousWorkingDir
+    // 残留成绕过撤权的"在途通行证"
+    h.noteHookSessionMoved.mockImplementation(async () => {
+      h.sqlite!.prepare('DELETE FROM sessions WHERE id = ?').run('codex-local');
+      return () => {
+        h.rollbacks += 1;
+      };
+    });
+
+    await expect(
+      invokeMove('codex-local', { kind: 'project', workingDir: '/new/dir' }),
+    ).rejects.toThrow(/NOT_FOUND/);
     expect(h.rollbacks).toBe(1);
     expect(h.completeHookSessionMove).not.toHaveBeenCalled();
   });

@@ -1114,9 +1114,23 @@ export function registerSessionIpc(): void {
         completeHookSessionMove(sid, nextDir);
         return updated;
       } catch (err) {
-        // 写库失败必须回滚登记 —— 否则 previousWorkingDir 永久残留, 之后会话
-        // 目录再等于旧值时会被当成"在途移动"放行, 绕过撤权(PR #669 review)。
-        rollback();
+        // applySessionUpdate 里 DB 写入在前、转录迁移等副作用在后: 目录可能已经
+        // 提交了才抛错。这时回滚绑定会造成"库在新目录、绑定记旧目录"的分叉, 下
+        // 一条消息照样丢绑定(PR #669 review 指出)。按库里的真实状态补偿:
+        //   - 目录已经是新的 -> 移动其实成立, 收掉在途标记、保留新授权;
+        //   - 目录还是旧的   -> 移动没成立, 回滚登记。
+        let committed = false;
+        try {
+          const [after] = await db
+            .select({ workingDir: sessions.workingDir })
+            .from(sessions)
+            .where(eq(sessions.id, sid));
+          committed = !!after && normalizeWorkingDirForStorage(after.workingDir) === nextDir;
+        } catch {
+          // 连状态都查不到时按"没提交"处理: 回滚是保守侧(最多一次 thread 重开)
+        }
+        if (committed) completeHookSessionMove(sid, nextDir);
+        else rollback();
         throw err;
       }
     });

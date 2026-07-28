@@ -59,6 +59,7 @@ function memoryBindings(): HookBindingStore {
         sessionId: s,
         workingDir: meta?.workingDir ?? null,
         previousWorkingDir: meta?.previousWorkingDir ?? null,
+        movePendingUntil: meta?.movePendingUntil ?? 0,
         authority: meta?.authority ?? null,
         noticePending: meta?.noticePending === true,
         rev: (current?.rev ?? 0) + 1,
@@ -71,7 +72,7 @@ function memoryBindings(): HookBindingStore {
         if (row.sessionId !== sessionId) continue;
         if (row.workingDir !== workingDir) continue;
         if (row.previousWorkingDir === null) continue;
-        map.set(key, { ...row, previousWorkingDir: null, rev: row.rev + 1 });
+        map.set(key, { ...row, previousWorkingDir: null, movePendingUntil: 0, rev: row.rev + 1 });
         updated += 1;
       }
       return updated;
@@ -86,6 +87,8 @@ function memoryBindings(): HookBindingStore {
           sessionId,
           workingDir: move.to,
           previousWorkingDir: move.from,
+          // 与文件实现同规: 有 from 才算在途, TTL 给足(测试不模拟过期)
+          movePendingUntil: move.from ? Date.now() + 60_000 : 0,
           authority,
           noticePending: authority === 'local-move',
           rev: row.rev + 1,
@@ -183,6 +186,7 @@ function makeDispatcher(overrides?: {
   dialogue?: HookDispatcherDeps['dialogue'];
   abortSession?: HookDispatcherDeps['abortSession'];
   accountInitiallyActive?: boolean;
+  now?: HookDispatcherDeps['now'];
 }) {
   const bindings = overrides?.bindings ?? memoryBindings();
   const fr = fakeRunner();
@@ -195,6 +199,7 @@ function makeDispatcher(overrides?: {
     dialogue: overrides?.dialogue,
     abortSession: overrides?.abortSession,
     accountInitiallyActive: overrides?.accountInitiallyActive,
+    ...(overrides?.now ? { now: overrides.now } : {}),
     log: noopLog,
   });
   return { d, bindings, fr };
@@ -660,6 +665,29 @@ describe('dispatcher 核心语义', () => {
       previousWorkingDir: null,
       authority: 'local-move',
     });
+    fr.finish();
+  });
+
+  it('过期的在途标记不再放行(清理失败也不会变成长期通行证)', async () => {
+    const bindings = memoryBindings();
+    const OUTSIDE = path.resolve('/repos/outside');
+    const fr = fakeRunner({ sessions: { 'sess-1': { workingDir: OUTSIDE, usable: true } } });
+    // now 停在"标记已过期"之后
+    const { d } = makeDispatcher({ runner: fr.runner, bindings, now: () => 10_000_000 });
+    const c = collector();
+    // 残留的在途标记: 指向当前目录, 但截止时刻早已过去
+    bindings.set('conn-1', 'team-slack:C1:1.1', 'sess-1', {
+      workingDir: path.resolve('/repos/elsewhere'),
+      previousWorkingDir: OUTSIDE,
+      movePendingUntil: 9_000_000,
+      authority: 'local-move',
+    });
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+
+    // 过期标记不再充当放行凭据 -> 按撤权重建
+    expect(c.last('task.ack')!.payload.sessionId).not.toBe('sess-1');
     fr.finish();
   });
 

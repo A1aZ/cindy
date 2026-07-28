@@ -448,6 +448,7 @@ const fanOutMakerAuthStateChanged = createIpcFanOut('maker:auth:state-changed');
 const fanOutMakerAuthLoginProgress = createIpcFanOut('maker:auth:login-progress');
 // 自定义供应商增删改广播 → 各 useProviders 实例 refetch（设置页列表 + 对话模型选择器 live 刷新）。
 const fanOutMakerProvidersChanged = createIpcFanOut('maker:provider:changed');
+const fanOutMakerProviderOAuthProgress = createIpcFanOut('maker:provider:oauth:progress');
 // 自定义 MCP 服务器增删改广播 → 设置页 McpServersSection refetch。
 const fanOutMakerMcpChanged = createIpcFanOut('maker:mcp:changed');
 // 自定义供应商上游错误的结构化广播（payload = { agent, providerId, providerName, code, retryable, status }）。
@@ -962,7 +963,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('plugin-market:detail', pluginId),
     install: (
       pluginId: string,
-      options?: { allowPermissionExpansion?: boolean },
+      options: { expectedReleaseId: string; allowPermissionExpansion?: boolean },
     ): Promise<{ ghost: import('../shared/ghost').InstalledGhost }> =>
       ipcRenderer.invoke('plugin-market:install', pluginId, options),
     uninstall: (pluginId: string): Promise<{ ok: true }> =>
@@ -1052,6 +1053,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('voice-input:settings:update-shortcut', shortcut),
     deleteDictionaryEntries: (entryIds: string[]): Promise<unknown> =>
       ipcRenderer.invoke('voice-input:dictionary:delete-entries', entryIds),
+    addDictionaryEntry: (text: string): Promise<unknown> =>
+      ipcRenderer.invoke('voice-input:dictionary:add-entry', text),
+    importDictionaryEntries: (texts: string[]): Promise<unknown> =>
+      ipcRenderer.invoke('voice-input:dictionary:import-entries', texts),
+    renameDictionaryEntry: (entryId: string, text: string): Promise<unknown> =>
+      ipcRenderer.invoke('voice-input:dictionary:rename-entry', { entryId, text }),
     recordDictionaryLearningActions: (actions: unknown[]): Promise<unknown> =>
       ipcRenderer.invoke('voice-input:dictionary-learning:record-actions', actions),
     getHistory: (limit?: number): unknown => {
@@ -1156,8 +1163,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   rightSidebarWindow: {
     getState: (): Promise<{ detached: boolean; lastOpen: boolean; open: boolean }> =>
       ipcRenderer.invoke('maker:rsb-window:get-state'),
-    /** 幂等:已开则 show + focus。 */
-    open: (): Promise<void> => ipcRenderer.invoke('maker:rsb-window:open'),
+    /**
+     * 幂等开窗。缺省(用户手势)已开则 show + focus;
+     * userInitiated:false(启动恢复 / 插件 / agent 自发)已开则完全不动窗口。
+     */
+    open: (options?: { userInitiated?: boolean }): Promise<void> =>
+      ipcRenderer.invoke('maker:rsb-window:open', options),
     close: (): Promise<void> => ipcRenderer.invoke('maker:rsb-window:close'),
     /** 写偏好;true 附带开窗,false 附带关窗。返回新 state。 */
     setDetached: (
@@ -3641,6 +3652,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
               agent: 'claude-code' | 'codex';
               baseUrl: string;
               modelId: string;
+              wireProtocol?: import('@cindy/model-providers').ProviderWireProtocol;
+              requestPath?: string;
               apiKey?: string | null;
               headers?: Record<string, string>;
             };
@@ -3676,6 +3689,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     scanLocalCli: (): Promise<{
       detections: import('../shared/localCliDetect').LocalCliDetection[];
     }> => ipcRenderer.invoke('maker:provider:local-cli-scan'),
+    /**
+     * 立即重新发现动态清单（当前只有 anthropic 订阅）。host 只对暂时性失败做有限次退避
+     * 重试、确定性拒绝不重试，所以这是用户在失败态下「立刻再试一次」的入口（同时重开
+     * 一轮退避）；失败归因随结果回传，供 UI 渲染分类文案。
+     */
+    rediscoverModels: (
+      providerId: string,
+    ): Promise<{
+      ok: boolean;
+      failure?: import('@cindy/model-providers').ProviderModelDiscoveryFailureView;
+    }> => ipcRenderer.invoke('maker:provider:models-rediscover', providerId),
     /** 自定义供应商变更广播订阅（返回 off）。 */
     onProvidersChanged: fanOutMakerProvidersChanged,
 
@@ -3726,6 +3750,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('maker:provider:oauth:logout', providerId),
     providerOAuthCancel: (providerId: string): Promise<{ ok: true }> =>
       ipcRenderer.invoke('maker:provider:oauth:cancel', providerId),
+    onProviderOAuthProgress: fanOutMakerProviderOAuthProgress,
     /**
      * renderer → main 单向镜像「模型显示/隐藏」override 整张快照(modelVisibilityPrefs)。
      * 让 IM /model 在 main 侧复用同一套可见性过滤,与应用内模型列表逐模型一致。
@@ -4439,6 +4464,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 重命名输入框 Magic 按钮:按会话最新对话内容重新生成标题(素材由 main 读 DB)
     regenerateSessionTitle: (sessionId: string): Promise<{ title: string | null }> =>
       ipcRenderer.invoke('maker:regenerate-title', { sessionId }),
+    // 会话自动起名:renderer 只给素材,占位/条件写/归属表都在 main(单一真相源)。
+    autoTitle: (request: {
+      sessionId: string;
+      text: string;
+      agentKind: 'claude-code' | 'codex';
+      isUserText?: boolean;
+    }): Promise<{ applied: boolean; done: boolean }> =>
+      ipcRenderer.invoke('maker:auto-title', request),
     helpAsk: (
       request: import('../shared/helpTypes').HelpAskRequest,
     ): Promise<import('../shared/helpTypes').HelpAnswerResult> =>

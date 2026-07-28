@@ -35,6 +35,7 @@ import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { BrowserWindow, ipcMain } from 'electron';
 import type { AgentMeta } from '../../renderer/lib/ccAgent.types';
 import {
+  deriveAutoTitleSeed,
   getAgentFacingText,
   serializeSessionReferencePayload,
   type AgentInputCreateOpts,
@@ -67,7 +68,10 @@ import {
   getGhostSetupAssessment,
   isGhostAvailableForActiveSession,
 } from '../cindy-brain/index.js';
-import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
+import {
+  assertTrustedAppRendererEvent,
+  isTrustedAppRendererEvent,
+} from '../security/trustedAppRenderer.js';
 import {
   initRenameSessionsConfirm,
   RenameSessionsConfirmBridge,
@@ -127,7 +131,6 @@ import {
   broadcastSessionPatched,
   clearSessionContextInDb,
   getSessionRowSnapshot,
-  isUntitledDraftSessionBeforeFirstInput,
   persistSessionFields,
   persistSessionPermissionModeIfAuto,
 } from '../localDb/ipc/sessions.js';
@@ -333,7 +336,11 @@ import { getAgentIslandService } from '../agent-island/service.js';
 import { createOrcaLifecycleService, ORCA_WORKER_READY_MESSAGE } from './orcaLifecycleService.js';
 import { throwOrcaServiceFailure } from './orcaServiceFailure.js';
 import { createOrcaTeamService, findFocusTargetWorker, type ListWorkerQueuedMessagesResult, type OrcaTeamService, type OrcaWorkerEffort, type WorkerQueuedMessageControlResult } from './orcaTeamService.js';
-import { createOrcaWorkerCreationService, normalizeOrcaWorkerLabel } from './orcaWorkerCreationService.js';
+import {
+  createOrcaWorkerCreationService,
+  normalizeOrcaWorkerLabel,
+  providerRouteRequiresExplicitSelection,
+} from './orcaWorkerCreationService.js';
 import { registerOrcaWorkerControlHandlers } from './orcaWorkerControlHandlers.js';
 import {
   clearOrcaMcpHydrated,
@@ -374,16 +381,27 @@ import { registerStopSessionBackgroundTasksHandler } from './stopSessionBackgrou
 import { registerProviderHandlers } from './providerHandlers.js';
 import { createLocalCliScanDeps, scanLocalCliAuth } from './localCliDetect.js';
 import { registerMcpHandlers } from './mcpHandlers.js';
-import { refreshCustomMcpProviders } from '../mcp-integrations/custom-mcp-registry.js';
+import {
+  getBuiltinMcpServerNames,
+  refreshCustomMcpProviders,
+} from '../mcp-integrations/custom-mcp-registry.js';
 import {
   getDesktopProviderService,
   refreshCustomProvidersIntoCatalog,
 } from '../maker-host/createDesktopProviderService.js';
 import { connectedProvidersForAgent, effectiveSourceIdForModel } from '@cindy/model-providers';
-import { hydrateSessionProvider, getSessionProvider } from '../maker-host/session-provider-store.js';
+import {
+  getSessionProvider,
+  hydrateSessionProvider,
+  setSessionProvider,
+} from '../maker-host/session-provider-store.js';
 import { getActiveCatalog, setDiscoveredProviderModels } from '../maker-host/active-catalog.js';
 import { testProviderConnection } from '../maker-host/provider-diagnostics.js';
 import { fetchProviderModels } from '../maker-host/provider-model-fetch.js';
+import {
+  getAnthropicModelDiscoveryFailure,
+  refreshAnthropicModelsFromHttp,
+} from '../maker-host/model-discovery/anthropic.js';
 import { setProviderUpstreamErrorBroadcaster } from '../maker-host/provider-upstream-error-observer.js';
 import {
   createClaudeAutoPermissionFallbackCoordinator,
@@ -447,7 +465,11 @@ import { checkRemoteWorkingDir } from '../device-link/remote-workdir-guard.js';
 import { createWorkerTurnStartSequencer } from './workerTurnStartSequencer.js';
 import { createBusinessSessionId } from '../sessionIds.js';
 import { forkSessionAtMessage } from '../maker-orchestration/fork.js';
-import { scheduleEligibleDeviceLinkAutoTitle } from './deviceLinkAutoTitle.js';
+import {
+  isSessionAutoTitleEligible,
+  registerSessionAutoTitleHooks,
+  scheduleSessionAutoTitle,
+} from './sessionAutoTitle.js';
 import {
   SILENT_STOP_RESUME_PROMPT,
   SilentStopAutoResumeGuard,
@@ -460,6 +482,7 @@ import {
   getGhostFsSlot,
   hasEnabledGhostAssistantHook,
   runGhostAssistantReplyHook,
+  hasEnabledUserMessageHookGhost,
   screenGhostUserMessage,
   setGhostAgentTurnRunner,
   setGhostWorkspaceSessionService,
@@ -1525,18 +1548,47 @@ const pendingFailedTurnAssistantPersistId = new Map<string, string>();
  */
 const sendToSessionLocks = new Map<string, Promise<unknown>>();
 
-/** Serialize every local send / runtime release for one session. */
-function withSendToSessionLock<T>(sessionId: string, task: () => Promise<T>): Promise<T> {
+/**
+ * Acquire the per-session send/route lock until the returned release callback runs.
+ *
+ * Direct-send callers need this lease form because applying a deferred agent switch,
+ * refreshing the resulting live Session, and calling Session.send happen in different
+ * modules but must remain one atomic route decision.
+ */
+async function acquireSendToSessionLock(sessionId: string): Promise<() => void> {
   const previous = sendToSessionLocks.get(sessionId);
   const waitPrevious = previous ? previous.catch(() => undefined) : Promise.resolve();
-  const run = waitPrevious.then(task);
+  let releaseGate!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  const run = waitPrevious.then(() => gate);
   const tracked = run.finally(() => {
     if (sendToSessionLocks.get(sessionId) === tracked) {
       sendToSessionLocks.delete(sessionId);
     }
   });
   sendToSessionLocks.set(sessionId, tracked);
-  return tracked;
+  await waitPrevious;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    releaseGate();
+  };
+}
+
+/** Serialize every local send / runtime release / route mutation for one session. */
+export async function withSendToSessionLock<T>(
+  sessionId: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const release = await acquireSendToSessionLock(sessionId);
+  try {
+    return await task();
+  } finally {
+    release();
+  }
 }
 
 let agentInputCoordinatorHolder: AgentInputCoordinator | null = null;
@@ -1545,7 +1597,9 @@ const SESSION_REWIND_INPUT_LOCK_ID = 'session-rewind';
 const SESSION_REWIND_STOP_TIMEOUT_MS = 15_000;
 let pendingCredentialSwitchHolder: PendingCredentialSwitchService | null = null;
 let deferredCodexRestartHolder: DeferredCodexRestartService | null = null;
-let pendingAgentSwitchApplyHolder: ((sessionId: string, signal?: AbortSignal) => Promise<void>) | null = null;
+let pendingAgentSwitchApplyHolder:
+  ((sessionId: string, signal?: AbortSignal) => Promise<() => void>) | null = null;
+let cancelPendingAgentSwitchHolder: ((sessionId: string) => void) | null = null;
 let gitSnapshotCoordinator: GitSnapshotCoordinator | null = null;
 const sessionTurnActivityTracker = new SessionTurnActivityTracker();
 
@@ -1652,17 +1706,23 @@ export function clearDeferredCodexRestartForOwnerBoundary(): void {
 }
 
 /**
- * Goal / IM / scheduler 直发 `Session.send()` 前的 deferred agent-switch 桥。
+ * Goal / IM / scheduler 直发 `Session.send()` 的 deferred agent-switch 锁桥。
  *
  * 与 renderer 的 makerSendTransaction 不同,这些调用方没有后续 lazy-create 阶段;
- * holder 因此要求 apply 成功时同步 bootstrap 新引擎,调用方再重新读取 live session。
- * 启动期 holder 尚未就绪时不可能已有进程内 pending intent,no-op 即可。
+ * holder 因此先在 session 锁内同步 bootstrap 新引擎,调用方重新读取 live session
+ * 并完成 send 后才 release。启动期 holder 尚未就绪时不可能已有进程内 pending
+ * intent,返回 no-op release 即可。
  */
-export async function applyPendingAgentSwitchForDirectSend(
+export async function acquirePendingAgentSwitchForDirectSend(
   sessionId: string,
   signal?: AbortSignal,
-): Promise<void> {
-  await pendingAgentSwitchApplyHolder?.(sessionId, signal);
+): Promise<() => void> {
+  return pendingAgentSwitchApplyHolder?.(sessionId, signal) ?? (() => {});
+}
+
+/** Later successful model/provider picks supersede an earlier cross-engine intent. */
+export function cancelPendingAgentSwitchForSession(sessionId: string): void {
+  cancelPendingAgentSwitchHolder?.(sessionId);
 }
 
 /**
@@ -1830,10 +1890,11 @@ function handleAgentIslandEventAfterBroadcast(
 }
 
 function isRemoteAuthRetryErrorEvent(
-  session: { remoteHostId?: unknown },
+  session: { agentKind?: unknown; remoteHostId?: unknown },
   event: AgentEvent,
 ): boolean {
   if (!session.remoteHostId || event.type !== 'error' || !isTerminalTurnErrorEvent(event)) return false;
+  if (session.agentKind === 'codex') return false;
   const data = event.data as { message?: unknown; sdkError?: unknown; errorStatus?: unknown } | undefined;
   return data?.sdkError === 'authentication_failed' ||
     data?.errorStatus === 401 ||
@@ -2457,7 +2518,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       isPlannedUpgradeClose =
         errData?.reason === 'remote_daemon_closed' &&
         isCcMgrUpgradeInFlight(session.id);
-      // 远程 auth 错误跳过持久化：renderer 会静默 auto-retry（makerChatStore 在 reducer
+      // Legacy CC/XD 远程 auth 错误跳过持久化：renderer 会静默 auto-retry（makerChatStore 在 reducer
       // 前拦截、关闭旧会话、重发消息，不显示 ErrorBanner）；若 main 已落库，retry 成功后
       // 重开会话会看到虚假错误卡。判定与 renderer 的 isAuthError 保持一致，覆盖
       // sdkError === 'authentication_failed' 以及 message 命中 authentication_error /
@@ -3122,6 +3183,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
   getAgentIslandService()?.setPermissionResolver(resolvePendingPermissionFromAgentIsland);
   sessionTurnActivityTracker.setTurnKeepaliveChangeListener(options.onAnySessionTurnKeepaliveChange ?? null);
   gitSnapshotCoordinator = createGitSnapshotCoordinator(maker);
+  // 接上 DB 改名通知(用户手动改名后自动起名收手)与拦截意识探针(装了
+  // will-user-message 钩子时不把用户原话送去标题模型)。
+  registerSessionAutoTitleHooks({
+    isUserMessageScreeningActive: hasEnabledUserMessageHookGhost,
+  });
 
   // device-link busy presence:把「本机是否有 turn 在跑」探针注入 device-link host,
   // 它每 5s 取一次、翻转才上报,让控制端设备列表显示 busy 三态(规则 2:回调注入解耦)。
@@ -3397,13 +3463,27 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
   // 便于脱 Electron + 内存 db 单测。CRUD 成功后刷新 active-catalog 并广播 PROVIDER_CHANGED，
   // 让设置页列表 + 对话模型选择器（各 useProviders 实例）live 刷新。
   registerProviderHandlers(createElectronIpcHandlerRegistry(), {
-    listProviders: () => getDesktopProviderService().listProviders(),
+    listProviders: (opts) => getDesktopProviderService().listProviders(opts),
     getModelVisibilityOverrides: () => getModelVisibilityMirrorSnapshot(),
     refreshCatalog: () => refreshCustomProvidersIntoCatalog(),
     broadcastChanged: () => broadcastToAllWindows(MAKER_PUSH.PROVIDER_CHANGED, {}),
     listPresets: () => getActiveCatalog().presets ?? [],
     testConnection: (input) => testProviderConnection(input),
     fetchModels: (spec) => fetchProviderModels(spec),
+    // 重新发现会用订阅凭证发起真实上游请求，限主页面 sender（子 frame / WebView 拒绝）。
+    assertTrustedSender: (event) =>
+      assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
+    // provider:list 是只读通道且要服务 device-link（合成 event），不能加会抛的 guard；
+    // 改用不抛的判定决定「这次读取要不要放行本机绑定自愈 + 清单拉取」。
+    isTrustedSender: (event) =>
+      isTrustedAppRendererEvent(event as Parameters<typeof isTrustedAppRendererEvent>[0]),
+    // 动态清单重新发现：目前只有 anthropic 订阅是「清单唯一来源是动态发现」的供应商。
+    // 拉取内部只记账不抛，完成后现读一次失败归因回给 renderer。
+    rediscoverModels: async (providerId) => {
+      if (providerId !== 'anthropic') return null;
+      await refreshAnthropicModelsFromHttp();
+      return getAnthropicModelDiscoveryFailure();
+    },
     scanLocalCli: () => scanLocalCliAuth(createLocalCliScanDeps()),
     // 通用 OAuth（目录 auth.oauth 描述符驱动）：login 成功后 best-effort 拉动态模型发现
     // (additions-only merge 进 active-catalog) 并广播 PROVIDER_CHANGED 让 UI 刷新连接态。
@@ -3411,7 +3491,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       const provider = getActiveCatalog().providers.find((p) => p.id === providerId);
       const oauth = provider?.auth.oauth;
       if (!provider || !oauth) throw new Error(`provider '${providerId}' has no oauth descriptor`);
-      const result = await runGenericOAuthLogin({ id: provider.id, name: provider.name }, oauth);
+      const result = await runGenericOAuthLogin(
+        { id: provider.id, name: provider.name },
+        oauth,
+        {
+          onProgress: (progress) =>
+            broadcastToAllWindows(MAKER_PUSH.PROVIDER_OAUTH_PROGRESS, {
+              providerId,
+              ...progress,
+            }),
+        },
+      );
       if (result.ok) {
         // 授权成功后按 agent 自动发现模型（与内置订阅体验统一,用户不必手填模型）:
         // 发现端点 = 描述符显式声明 ?? 由该 runtime 的 baseUrl 推导（…/v1/models）。
@@ -3472,6 +3562,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
   registerMcpHandlers(createElectronIpcHandlerRegistry(), {
     refreshProviders: () => refreshCustomMcpProviders(),
     broadcastChanged: () => broadcastToAllWindows(MAKER_PUSH.MCP_CHANGED, {}),
+    // 内置 server 名对自定义 MCP 是保留名：撞名会在装配层顶替内置 server 并继承
+    // 它在 MCP 审批策略里的信任，所以 CRUD 阶段就拒收。
+    getReservedMcpIds: () => getBuiltinMcpServerNames(),
     // Codex 的 MCP flags 冻在 codexEnvironment 的 cached spawn 配置里,清缓存 + dispose app-server,
     // 让下个 codex 会话按新 MCP 配置重 spawn(与 slack 变更同款 best-effort;busy 会话软重启失败只告警)。
     // 顺序：先 dispose app-server（含 busy 检查），成功后再关 bridge/cache。
@@ -4041,6 +4134,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
 
   // turn 运行中登记的切换意图(下一条消息发送时刻由 send 事务 apply)。
   const agentSwitchPending = createPendingAgentSwitchRegistry();
+  cancelPendingAgentSwitchHolder = (sessionId) => {
+    agentSwitchPending.clear(sessionId);
+    broadcastSessionPatched(sessionId, {
+      agentSwitchIntent: null,
+      agentSwitchIntentCanceled: true,
+    });
+  };
 
   // session-agent-switch:lazy-create 前以 DB 行为真源校正 createOpts。切换后
   // 残留在 renderer store / 排队项里的旧 agentKind/resumeSessionId 若原样 spawn,
@@ -4100,11 +4200,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       return row ?? null;
     },
     getLiveSession: (sessionId) => maker.getSession(sessionId),
-    closeSession: (sessionId) => maker.closeSession(sessionId),
+    closeSession: (sessionId) => maker.closeSession(sessionId, 'agent-switch'),
     listMessagesForHandoff: (sessionId, after) => listMessagesForAgentHandoff(sessionId, 400, after),
     findParkedEngineSession: (sessionId, targetDbKind) =>
       findParkedEngineSession(sessionId, targetDbKind),
     applyAgentSwitchToDb: applyAgentSwitchToSessionRow,
+    setSessionProvider,
+    supersedePendingCredentialSwitch: clearPendingCredentialSwitchForSession,
     insertBoundaryMessage: async (sessionId, content) => {
       const clientId = `agent-switch:${createId()}`;
       await createDbMessage(sessionId, {
@@ -4199,11 +4301,19 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     withCloseSuppressed: withRehydrateCloseSuppressed,
     log,
   });
-  pendingAgentSwitchApplyHolder = (sessionId, signal) =>
-    applyPendingAgentSwitchIfIdle(agentSwitchDeps, sessionId, {
-      bootstrapAfterSwitch: true,
-      signal,
-    });
+  pendingAgentSwitchApplyHolder = async (sessionId, signal) => {
+    const release = await acquireSendToSessionLock(sessionId);
+    try {
+      await applyPendingAgentSwitchIfIdle(agentSwitchDeps, sessionId, {
+        bootstrapAfterSwitch: true,
+        signal,
+      });
+      return release;
+    } catch (err) {
+      release();
+      throw err;
+    }
+  };
 
   ipcMain.handle(MAKER_INVOKE.MARK_ORCA_ROLE, async (_e, sessionId: unknown, role: unknown) => {
     if (typeof sessionId !== 'string') throwIpcError('INVALID_PARAMS', 'sessionId required');
@@ -5508,7 +5618,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     getWorkerDefaults: getWorkerDefaultsFromNewMaker,
     getAvailableModels: (agent) => maker.getCapabilities(agent).availableModels,
     getProviderRoutingContext: async () => {
-      const views = await getDesktopProviderService().listProviders();
+      const views = await getDesktopProviderService().listProviders({ allowSideEffects: true });
       return {
         availability: {
           'claude-code': connectedProvidersForAgent(views, 'claude-code').map((provider) => ({
@@ -5526,8 +5636,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
                 { efforts: model.efforts, defaultEffort: model.defaultEffort },
               ]),
             ),
-            requiresExplicitRoute: provider.routing['claude-code']?.authStrategy === 'api-key-header'
-              || provider.routing['claude-code']?.authStrategy === 'oauth-token',
+            requiresExplicitRoute: providerRouteRequiresExplicitSelection(
+              provider.routing['claude-code']?.authStrategy,
+            ),
           })),
           codex: connectedProvidersForAgent(views, 'codex').map((provider) => ({
             id: provider.id,
@@ -5542,8 +5653,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
                 { efforts: model.efforts, defaultEffort: model.defaultEffort },
               ]),
             ),
-            requiresExplicitRoute: provider.routing.codex?.authStrategy === 'api-key-header'
-              || provider.routing.codex?.authStrategy === 'oauth-token',
+            requiresExplicitRoute: providerRouteRequiresExplicitSelection(
+              provider.routing.codex?.authStrategy,
+            ),
           })),
         },
         resolveDefaultProviderIdForModel: (agent, model) => (
@@ -6581,6 +6693,50 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     version: 1,
   }));
 
+  /**
+   * device-link 远控输入的自动起名(入队 / 插话共用)。
+   *
+   * 只对远控调用生效:本机 renderer 自己走 `maker:auto-title`。返回一个 commit 闭包
+   * 而不是直接调度 —— 调度必须发生在输入真正被 coordinator 接受之后,否则输入被拒
+   * 时会留下一个凭空出现的标题。
+   */
+  const prepareDeviceLinkAutoTitle = async (
+    sid: string,
+    queued: AgentInputQueuedMessage,
+  ): Promise<() => void> => {
+    const noop = () => {};
+    if (!isDeviceLinkInvoke()) return noop;
+    // 起名素材:用户写了字就用他的字(可喂标题模型);一个字没写(只贴图 / 只拖
+    // 文件 / 只 @ 一个文件 / 只引用一个会话)就用本地合成的描述,只当占位标题。
+    const seed = deriveAutoTitleSeed(queued, {
+      image: t('ccAgent.autoTitle.image'),
+      file: t('ccAgent.autoTitle.file'),
+    });
+    if (!seed) return noop;
+    let eligible: boolean;
+    try {
+      eligible = await isSessionAutoTitleEligible(sid);
+    } catch (err) {
+      // 这一步只是省一次无谓调度的**廉价预检**,权威资格判定在
+      // runSessionAutoTitle 内部(它自己也做重试安全的处理)。读不到时按"要起名"
+      // 放行,否则一次 DB 抖动就会让单轮对话的标题永久停在 New Maker(review P1)。
+      log.warn('[device-link] auto-title precheck failed (scheduling anyway)', {
+        sessionId: sid,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      eligible = true;
+    }
+    if (!eligible) return noop;
+    return () => {
+      scheduleSessionAutoTitle({
+        sessionId: sid,
+        text: seed.text,
+        agentKind: queued.createOpts.agentKind,
+        isUserText: seed.isUserText,
+      });
+    };
+  };
+
   ipcMain.handle(MAKER_INVOKE.INPUT_GET_PROJECTION, async (_e, sessionId: unknown) => {
     const sid = requireSessionId(sessionId);
     // 崩溃恢复(issue #761):renderer 打开会话首次取 projection 前,先把持久化的
@@ -6603,17 +6759,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       requireQueuedMessage(item),
     )) as AgentInputQueuedMessage;
     const queued = await hydrateQueuedAgentReferences(queuedWithAttachments);
-    let shouldAutoTitle = false;
-    if (isDeviceLinkInvoke() && queued.text.trim()) {
-      try {
-        shouldAutoTitle = await isUntitledDraftSessionBeforeFirstInput(sid);
-      } catch (err) {
-        log.warn('[device-link] auto-title eligibility check failed', {
-          sessionId: sid,
-          err: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
+    const commitAutoTitle = await prepareDeviceLinkAutoTitle(sid, queued);
 
     // 「继续任务」durable ack 延后到 vendor dispatch 成功（onDispatchedUserTurn）：
     // 排队可取消时旧中断提示必须能恢复；accepted 但仍可能 cancelled-before-dispatch
@@ -6626,14 +6772,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       // enqueue,不带此 flag,恢复暂停语义不变。
       resumeRestorePausedQueue: true,
     });
-    if (shouldAutoTitle) {
-      scheduleEligibleDeviceLinkAutoTitle({
-        maker,
-        sessionId: sid,
-        text: getAgentFacingText(queued),
-        agentKind: queued.createOpts.agentKind,
-      });
-    }
+    commitAutoTitle();
     return projection;
   });
 
@@ -6670,11 +6809,20 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       }),
     )) as AgentInputQueuedMessage;
     const queued = await hydrateQueuedAgentReferences(queuedWithAttachments);
-    return inputCoordinator.steer(
+    // 插话也补起名:远控用户完全可能趁这一轮还在跑就写下第一句话,只认入队的话
+    // 标题会一直停在首条纯附件消息的合成占位上(PR #510 review P1)。是否真的该
+    // 改名由 runSessionAutoTitle 权威判定。
+    const commitAutoTitle = await prepareDeviceLinkAutoTitle(sid, queued);
+    // steer 与 enqueue 不同:它会因同会话已有在飞 steer / Stop 边界 / 输入锁而
+    // 返回 false。必须等它落定、受理了才改名 —— 被拒的文本改掉默认名 / 合成占位 /
+    // fork 占位就是凭空改名(review P1)。
+    const accepted = await inputCoordinator.steer(
       sid,
       queued,
       steerOpts,
     );
+    if (accepted) commitAutoTitle();
+    return accepted;
   });
 
   ipcMain.handle(MAKER_INVOKE.INPUT_STOP, async (_e, sessionId: unknown, opts?: unknown) => {
@@ -6848,15 +6996,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     // 同时覆盖"主动 closeSession"和"内部异常关闭"两条路径。
     // opts.preserveWorkspace=true(/clear、鉴权重连等软重启)时抑制这些重副作用,
     // 业务体与选项解析见 closeSessionRequest.ts。
-    await handleCloseSessionRequest(
-      {
-        closeSession: (sid) => maker.closeSession(sid),
-        withRehydrateCloseSuppressed,
-        cleanupPendingInteractions: (sid) =>
-          cleanupPendingInteractionsForSession(sid, 'session_closed'),
-      },
-      sessionId,
-      opts,
+    await withSendToSessionLock(sessionId, () =>
+      handleCloseSessionRequest(
+        {
+          closeSession: (sid) => maker.closeSession(sid),
+          withRehydrateCloseSuppressed,
+          cleanupPendingInteractions: (sid) =>
+            cleanupPendingInteractionsForSession(sid, 'session_closed'),
+        },
+        sessionId,
+        opts,
+      ),
     );
   });
 
@@ -6940,41 +7090,46 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     ) {
       throwIpcError('INVALID_PARAMS', 'providerId must be string, null, or undefined');
     }
-    try {
-      const result = await applySetModelThenCancelAgentSwitchIntent(
-        agentSwitchPending,
-        sessionId,
-        () => applyRuntimeSetModelChange({
-          maker,
+    // 与 send 事务共用 session 锁:发送时刻执行的跨引擎切换必须先落定,
+    // 后到的 SET_MODEL 才能写 route。否则切换 DB await 恢复后会用旧 provider
+    // 覆盖用户刚选的新 route，形成 DB 与进程内路由分叉。
+    return withSendToSessionLock(sessionId, async () => {
+      try {
+        const result = await applySetModelThenCancelAgentSwitchIntent(
+          agentSwitchPending,
           sessionId,
-          model,
-          providerId,
-          isSessionInTurn,
-          registerPendingCredentialSwitch: registerPendingCredentialSwitchForSession,
-          clearPendingCredentialSwitch: clearPendingCredentialSwitchForSession,
-          wakeSessionInputQueue: wakeSessionInputAfterCredentialSwitch,
-          getPendingCredentialSwitch: getPendingCredentialSwitchTarget,
-          // 解析隐式来源的凭证家族,精确判定是否跨远端压缩身份边界(见
-          // shouldCloseSessionForCredentialSwitch.codexAuthInjection)。
-          codexAuthInjection: getCodexProxyAuthInjectionState(),
-          logger: log,
-        }),
-        (id) => broadcastSessionPatched(id, {
-          agentSwitchIntent: null,
-          agentSwitchIntentCanceled: true,
-        }),
-      );
-      // deferred = 会话自己在跑,选择已登记、turn 结束自动生效。renderer 据此提示
-      // "任务结束后生效"而不是当成已即时切换。
-      return { deferred: result.status === 'deferred' };
-    } catch (err) {
-      if (err instanceof CredentialModeSwitchBusyError) {
-        // 兜底(正常路径 busy 已转 deferred):切模型撞上凭证切换忙,独立 code,
-        // renderer toast 走 ipcError.CREDENTIAL_SWITCH_BUSY 专属文案。
-        throwIpcError('CREDENTIAL_SWITCH_BUSY', err.message);
+          () => applyRuntimeSetModelChange({
+            maker,
+            sessionId,
+            model,
+            providerId,
+            isSessionInTurn,
+            registerPendingCredentialSwitch: registerPendingCredentialSwitchForSession,
+            clearPendingCredentialSwitch: clearPendingCredentialSwitchForSession,
+            wakeSessionInputQueue: wakeSessionInputAfterCredentialSwitch,
+            getPendingCredentialSwitch: getPendingCredentialSwitchTarget,
+            // 解析隐式来源的凭证家族,精确判定是否跨远端压缩身份边界(见
+            // shouldCloseSessionForCredentialSwitch.codexAuthInjection)。
+            codexAuthInjection: getCodexProxyAuthInjectionState(),
+            logger: log,
+          }),
+          (id) => broadcastSessionPatched(id, {
+            agentSwitchIntent: null,
+            agentSwitchIntentCanceled: true,
+          }),
+        );
+        // deferred = 会话自己在跑,选择已登记、turn 结束自动生效。renderer 据此提示
+        // "任务结束后生效"而不是当成已即时切换。
+        return { deferred: result.status === 'deferred' };
+      } catch (err) {
+        if (err instanceof CredentialModeSwitchBusyError) {
+          // 兜底(正常路径 busy 已转 deferred):切模型撞上凭证切换忙,独立 code,
+          // renderer toast 走 ipcError.CREDENTIAL_SWITCH_BUSY 专属文案。
+          throwIpcError('CREDENTIAL_SWITCH_BUSY', err.message);
+        }
+        throw err;
       }
-      throw err;
-    }
+    });
   });
 
   ipcMain.handle(MAKER_INVOKE.SET_EFFORT, async (_e, sessionId: unknown, effort: unknown) => {

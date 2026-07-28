@@ -466,27 +466,215 @@ function pluginSetupCancelRevision(request: InteractionRequestLike): number | nu
 }
 
 /**
- * plugin_setup 卡在控制端的只读摘要:插件名 + 引导语 + 各步骤标题。
+ * 被控端 setup 步骤的稳定枚举。
  *
- * 控制端不渲染表单(Secret 输入与 OAuth 都在被控端),但也不该把 raw JSON 摔给
- * 用户——至少要能看懂「哪个插件、要配什么」再决定是取消还是回电脑端处理。
+ * 这里是**副本**,不是从 Desktop import 的(packages 不得依赖 apps)。正本在
+ * `apps/desktop/src/shared/ghost.ts`(`GhostSetupStepPhase` /
+ * `GHOST_SETUP_ERROR_CODES` / `GhostSetupActionKind`),两端由跨端契约绑定:
+ * 正本增删值时必须同步这里,否则控制端会把新值当未知丢弃(降级展示,不会崩)。
  */
-export function buildRemotePluginSetupSummary(request: InteractionRequestLike): {
+export const REMOTE_PLUGIN_SETUP_PHASES = [
+  'pending',
+  'action_running',
+  'waiting_external',
+  'verifying',
+  'satisfied',
+  'failed',
+  'cancelled',
+] as const;
+export type RemotePluginSetupPhase = (typeof REMOTE_PLUGIN_SETUP_PHASES)[number];
+
+export const REMOTE_PLUGIN_SETUP_ERROR_CODES = [
+  'ACTION_FAILED',
+  'ACTION_STALE',
+  'AUTH_CANCELLED',
+  'AUTH_FAILED',
+  'AUTH_NETWORK',
+  'AUTH_SERVICE_UNAVAILABLE',
+  'INLINE_INVALID',
+  'INLINE_UNAVAILABLE',
+  'SAVE_FAILED',
+  'WINDOW_CLOSED',
+  'TARGET_UNAVAILABLE',
+  'ASSESSMENT_FAILED',
+  'TIMEOUT',
+] as const;
+export type RemotePluginSetupErrorCode = (typeof REMOTE_PLUGIN_SETUP_ERROR_CODES)[number];
+
+export const REMOTE_PLUGIN_SETUP_ACTION_KINDS = [
+  'oauth_connect',
+  'open_plugin_settings',
+  'manage_connection',
+  'open_client_settings',
+  'inline_form',
+] as const;
+export type RemotePluginSetupActionKind = (typeof REMOTE_PLUGIN_SETUP_ACTION_KINDS)[number];
+
+export interface RemotePluginSetupStep {
+  id: string;
+  title: string;
+  description: string | null;
+  /** 非白名单值(被控端更新引入的新 phase)降级为 null,只是少显示一个徽标。 */
+  phase: RemotePluginSetupPhase | null;
+  errorCode: RemotePluginSetupErrorCode | null;
+  actionKind: RemotePluginSetupActionKind | null;
+  /**
+   * inline_form 字段的**标签**,用于说明「电脑端要填什么」。
+   * 只有 label,永远没有值:Secret 不进 interaction snapshot(见
+   * `docs/dev-rules/plugin-security-and-authoring.md` §4)。
+   */
+  inlineFieldLabel: string | null;
+}
+
+export interface RemotePluginSetupGroup {
+  id: string;
+  /** any_of 且组内不止一项 → UI 要提示「选择一种配置方式」,别让用户以为要全做。 */
+  anyOf: boolean;
+  steps: RemotePluginSetupStep[];
+}
+
+export interface RemotePluginSetupPresentation {
   ghostName: string | null;
+  /** 只接受 data:image/ 的内联图标;其它形态(远程 URL 等)一律丢弃。 */
+  iconDataUrl: string | null;
   intro: string | null;
-  stepTitles: string[];
-} {
-  // 作为导出的 shared API 显式挡住误用:换个 kind 传进来时返回空摘要,而不是
+  groups: RemotePluginSetupGroup[];
+  satisfiedCount: number;
+  stepCount: number;
+  /** 被控端已 settle 的收尾帧:不再 actionable,UI 不给可点动作。 */
+  terminal: boolean;
+}
+
+/**
+ * plugin_setup 卡在控制端的**只读**投影。
+ *
+ * 控制端不渲染表单、也不触发动作(Secret 输入与 OAuth 都必须留在被控端,见
+ * plugin-security-and-authoring.md §4 与 desktop 的 interactionResolveOrigin),
+ * 但被控端下发的状态信息足以让用户看懂「哪个插件、卡在哪一步、为什么失败、
+ * 回电脑端要做什么」,再决定是去电脑端处理还是取消。
+ *
+ * 入参来自远端 payload,一律按白名单收敛:未知 phase / errorCode / action kind
+ * 降级为 null 而不是原样透传,避免把被控端新版本的值直接喂给文案查表。
+ */
+export function buildRemotePluginSetupPresentation(
+  request: InteractionRequestLike,
+): RemotePluginSetupPresentation {
+  const empty: RemotePluginSetupPresentation = {
+    ghostName: null,
+    iconDataUrl: null,
+    intro: null,
+    groups: [],
+    satisfiedCount: 0,
+    stepCount: 0,
+    terminal: false,
+  };
+  // 作为导出的 shared API 显式挡住误用:换个 kind 传进来时返回空投影,而不是
   // 从任意 request 上刮字段、让调用错误看起来「正常返回」。
-  if (request.kind !== 'plugin_setup') return { ghostName: null, intro: null, stepTitles: [] };
+  if (request.kind !== 'plugin_setup') return empty;
+
   const ghost = isPlainRecord(request.ghost) ? request.ghost : null;
-  const ghostName = typeof ghost?.name === 'string' && ghost.name.trim() ? ghost.name.trim() : null;
-  const intro = typeof request.intro === 'string' && request.intro.trim() ? request.intro.trim() : null;
-  const steps = Array.isArray(request.steps) ? request.steps : [];
-  const stepTitles = steps
-    .map((step) => (isPlainRecord(step) && typeof step.title === 'string' ? step.title.trim() : ''))
-    .filter((title) => title.length > 0);
-  return { ghostName, intro, stepTitles };
+  const rawSteps = Array.isArray(request.steps) ? request.steps : [];
+  const groups: RemotePluginSetupGroup[] = [];
+  const groupsById = new Map<string, RemotePluginSetupGroup>();
+  let satisfiedCount = 0;
+  let stepCount = 0;
+
+  rawSteps.forEach((rawStep, index) => {
+    if (!isPlainRecord(rawStep)) return;
+    const title = trimmedOrNull(rawStep.title);
+    if (!title) return;
+    const phase = pickFromAllowlist(rawStep.phase, REMOTE_PLUGIN_SETUP_PHASES);
+    const action = isPlainRecord(rawStep.action) ? rawStep.action : null;
+    const actionKind = pickFromAllowlist(action?.kind, REMOTE_PLUGIN_SETUP_ACTION_KINDS);
+    const step: RemotePluginSetupStep = {
+      id: trimmedOrNull(rawStep.id) ?? `step-${index}`,
+      title,
+      description: trimmedOrNull(rawStep.description),
+      phase,
+      errorCode: pickFromAllowlist(rawStep.errorCode, REMOTE_PLUGIN_SETUP_ERROR_CODES),
+      actionKind,
+      inlineFieldLabel: actionKind === 'inline_form' ? inlineSecretFieldLabel(action) : null,
+    };
+    stepCount += 1;
+    if (phase === 'satisfied') satisfiedCount += 1;
+
+    // 分组按首次出现顺序保留。
+    const rawGroupId = trimmedOrNull(rawStep.groupId);
+    if (rawGroupId === null) {
+      // 缺 groupId 的步骤各自成组,并且**不进 groupsById**:合成的 id 与被控端真实
+      // groupId 共用一个命名空间,一旦撞名(远端某组恰好就叫合成出来的那个名字),
+      // 两批互不相关的配置要求会被并成一组、还套上 any_of 语义,让用户以为「二选
+      // 一」而漏做另一半(#657 review)。生成身份只用于本地展示,不参与查表。
+      groups.push({ id: `ungrouped-${index}`, anyOf: false, steps: [step] });
+      return;
+    }
+    const existing = groupsById.get(rawGroupId);
+    if (existing) {
+      existing.steps.push(step);
+      if (rawStep.groupMode === 'any_of') existing.anyOf = true;
+      return;
+    }
+    const group: RemotePluginSetupGroup = {
+      id: rawGroupId,
+      anyOf: rawStep.groupMode === 'any_of',
+      steps: [step],
+    };
+    groupsById.set(rawGroupId, group);
+    groups.push(group);
+  });
+
+  return {
+    ghostName: trimmedOrNull(ghost?.name),
+    iconDataUrl: inlineImageDataUrl(ghost?.iconDataUrl),
+    intro: trimmedOrNull(request.intro),
+    // 单项组没有「任选其一」的语义,提示只会让用户困惑。
+    groups: dedupeGroupIds(groups).map((group) => ({
+      ...group,
+      anyOf: group.anyOf && group.steps.length > 1,
+    })),
+    satisfiedCount,
+    stepCount,
+    terminal: request.terminal === true,
+  };
+}
+
+/**
+ * 保证组 id 在本次投影内唯一(渲染层拿它当 list key)。
+ *
+ * 合成的 `ungrouped-*` 已经不参与合并,但仍可能与被控端某个真实 groupId 撞名;
+ * 那只是展示身份重复,不该退化成重复 key。id 不回传被控端,改写是安全的。
+ */
+function dedupeGroupIds(groups: RemotePluginSetupGroup[]): RemotePluginSetupGroup[] {
+  const used = new Set<string>();
+  return groups.map((group) => {
+    let id = group.id;
+    for (let suffix = 2; used.has(id); suffix += 1) id = `${group.id}-${suffix}`;
+    used.add(id);
+    return id === group.id ? group : { ...group, id };
+  });
+}
+
+function trimmedOrNull(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function pickFromAllowlist<T extends string>(value: unknown, allowed: readonly T[]): T | null {
+  return typeof value === 'string' && (allowed as readonly string[]).includes(value)
+    ? (value as T)
+    : null;
+}
+
+function inlineSecretFieldLabel(action: Record<string, unknown> | null): string | null {
+  const form = isPlainRecord(action?.form) ? action.form : null;
+  const fields = Array.isArray(form?.fields) ? form.fields : [];
+  const first = fields.length > 0 && isPlainRecord(fields[0]) ? fields[0] : null;
+  return trimmedOrNull(first?.label);
+}
+
+function inlineImageDataUrl(value: unknown): string | null {
+  return typeof value === 'string' && value.startsWith('data:image/') ? value : null;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

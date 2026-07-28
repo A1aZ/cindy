@@ -1250,7 +1250,7 @@ interface ElectronAPI {
     ) => Promise<import('../shared/pluginMarket').PluginMarketDetail>;
     install: (
       pluginId: string,
-      options?: { allowPermissionExpansion?: boolean },
+      options: { expectedReleaseId: string; allowPermissionExpansion?: boolean },
     ) => Promise<{ ghost: import('../shared/ghost').InstalledGhost }>;
     uninstall: (pluginId: string) => Promise<{ ok: true }>;
   };
@@ -1354,6 +1354,9 @@ interface ElectronAPI {
       | { ok: false; error: string; errorCode?: VoiceInputGlobalErrorCode }
     >;
     deleteDictionaryEntries: (entryIds: string[]) => Promise<VoiceInputSettingsData>;
+    addDictionaryEntry: (text: string) => Promise<VoiceInputSettingsData>;
+    importDictionaryEntries: (texts: string[]) => Promise<VoiceInputSettingsData>;
+    renameDictionaryEntry: (entryId: string, text: string) => Promise<VoiceInputSettingsData>;
     recordDictionaryLearningActions: (actions: VoiceInputDictionaryLearningAction[]) => Promise<{
       settings: VoiceInputSettingsData;
       newAutomaticEntries: Array<{ id: string; text: string }>;
@@ -1411,8 +1414,11 @@ interface ElectronAPI {
   // 「侧边栏在新窗口中显示」偏好 + 子窗口生命周期(main: right-sidebar-window/)。
   rightSidebarWindow: {
     getState: () => Promise<{ detached: boolean; lastOpen: boolean; open: boolean }>;
-    /** 幂等:已开则 show + focus。 */
-    open: () => Promise<void>;
+    /**
+     * 幂等开窗。缺省(用户手势)已开则 show + focus;
+     * userInitiated:false(启动恢复 / 插件 / agent 自发)已开则完全不动窗口。
+     */
+    open: (options?: { userInitiated?: boolean }) => Promise<void>;
     close: () => Promise<void>;
     /** 写偏好;true 附带开窗,false 附带关窗。返回新 state。 */
     setDetached: (
@@ -3492,6 +3498,7 @@ interface ElectronAPI {
               baseUrl: string;
               modelId: string;
               wireProtocol?: import('@cindy/model-providers').ProviderWireProtocol;
+              requestPath?: string;
               apiKey?: string | null;
               headers?: Record<string, string>;
             };
@@ -3524,6 +3531,15 @@ interface ElectronAPI {
     scanLocalCli: () => Promise<{
       detections: import('../shared/localCliDetect').LocalCliDetection[];
     }>;
+    /**
+     * 立即重新发现动态清单（当前只有 anthropic 订阅）。host 只对暂时性失败做有限次退避
+     * 重试、确定性拒绝不重试，所以这是用户在失败态下「立刻再试一次」的入口（同时重开
+     * 一轮退避）；失败归因随结果回传，供 UI 渲染分类文案。
+     */
+    rediscoverModels: (providerId: string) => Promise<{
+      ok: boolean;
+      failure?: import('@cindy/model-providers').ProviderModelDiscoveryFailureView;
+    }>;
     /** 自定义供应商变更广播订阅（返回 off）。 */
     onProvidersChanged: (cb: () => void) => () => void;
 
@@ -3546,6 +3562,15 @@ interface ElectronAPI {
     providerOAuthLogin: (providerId: string) => Promise<{ ok: boolean; reason?: string }>;
     providerOAuthLogout: (providerId: string) => Promise<{ ok: true }>;
     providerOAuthCancel: (providerId: string) => Promise<{ ok: true }>;
+    onProviderOAuthProgress: (
+      cb: (progress: {
+        providerId: string;
+        phase: 'device-code';
+        verificationUrl: string;
+        userCode: string;
+        expiresAt: number;
+      }) => void,
+    ) => () => void;
     /** 自定义供应商上游错误订阅（返回 off）；code 走 providerError.* i18n。 */
     onProviderUpstreamError: (
       cb: (event: {
@@ -4148,6 +4173,17 @@ interface ElectronAPI {
     ) => Promise<{ title: string | null }>;
     /** 重命名输入框 Magic 按钮:按会话最新对话内容重新生成标题(失败返 title: null)。 */
     regenerateSessionTitle: (sessionId: string) => Promise<{ title: string | null }>;
+    /**
+     * 会话自动起名(权威实现在 main):立即占位 + 智能标题覆盖,条件写保证
+     * user rename wins。`done=true` 表示该会话已不需要再起名(已起过名或用户
+     * 手动改过名);瞬时失败返回 false,调用方应在下一条带文字的消息上重试。
+     */
+    autoTitle: (request: {
+      sessionId: string;
+      text: string;
+      agentKind: 'claude-code' | 'codex';
+      isUserText?: boolean;
+    }) => Promise<{ applied: boolean; done: boolean }>;
     helpAsk: (
       request: import('../shared/helpTypes').HelpAskRequest,
     ) => Promise<import('../shared/helpTypes').HelpAnswerResult>;
@@ -4475,12 +4511,28 @@ interface RawReleaseNotesSection {
   items: RawReleaseNotesItem[];
 }
 
+/** Topic-format (v2) block: one user-facing theme with a short narrative. */
+interface RawReleaseNotesTopic {
+  emoji?: string;
+  title: string;
+  text: string;
+  contributors?: string[];
+}
+
 interface RawReleaseNotesPayload {
   version: string;
   date: string;
-  /** Flat contributor list — collective hall-of-fame on top of per-item `by`. */
-  contributors: string[];
-  sections: RawReleaseNotesSection[];
+  /**
+   * Flat contributor list — collective hall-of-fame on top of per-item `by`.
+   * Optional: older notice files predate the field (renderer defaults to []).
+   */
+  contributors?: string[];
+  /** Legacy author-grouped sections. Absent on topic-format payloads. */
+  sections?: RawReleaseNotesSection[];
+  /** Topic-format blocks. Non-empty ⇒ renderer uses the topic layout. */
+  topics?: RawReleaseNotesTopic[];
+  /** Optional one-line lead above the topics (e.g. PR/commit counts). */
+  intro?: string;
 }
 
 /* ── SkillHub Registry types (v0.6) ──

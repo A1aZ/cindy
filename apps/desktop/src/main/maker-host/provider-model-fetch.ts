@@ -18,6 +18,7 @@ import {
   type ProviderErrorCode,
 } from '../../shared/providerErrors.js';
 import { deriveModelsDiscoveryUrl, parseModelsListResponse } from './generic-oauth.js';
+import { outboundFetch } from './outbound-fetch.js';
 
 /** 拉取超时（与 test-connection 探测同量级）。 */
 const FETCH_TIMEOUT_MS = 10_000;
@@ -58,9 +59,22 @@ function sameOrigin(a: string, b: string): boolean {
   }
 }
 
+function withoutCredentialHeaders(
+  headers: Record<string, string> | undefined,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers ?? {}).filter(([name]) => {
+      const normalized = name.toLowerCase();
+      return normalized !== 'authorization' && normalized !== 'x-api-key';
+    }),
+  );
+}
+
 /** 构造列模型请求（纯函数，单测直断言）。鉴权头组合与 buildProbeRequest 同口径。 */
 export function buildModelsFetchRequest(spec: ProviderModelsFetchSpec): { url: string; init: RequestInit } {
-  const headers: Record<string, string> = { ...(spec.headers ?? {}) };
+  const headers: Record<string, string> = spec.apiKey
+    ? withoutCredentialHeaders(spec.headers)
+    : { ...(spec.headers ?? {}) };
   if (spec.agent === 'claude-code') {
     // Anthropic wire 的所有端点（含 GET /v1/models）都要求 anthropic-version，缺失直接 400。
     headers['anthropic-version'] = headers['anthropic-version'] ?? '2023-06-01';
@@ -94,7 +108,7 @@ function networkErrorCode(err: unknown): string {
 /** 拉一次模型列表并分类结果。fetch 可注入（单测）。 */
 export async function fetchProviderModels(
   spec: ProviderModelsFetchSpec,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = outboundFetch,
 ): Promise<ProviderModelsFetchResult> {
   const { url, init } = buildModelsFetchRequest(spec);
   let res: Response;

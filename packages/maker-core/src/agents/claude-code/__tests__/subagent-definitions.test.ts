@@ -44,7 +44,6 @@ describe('discoverSubagentDefinitions', () => {
       scope: 'project',
       declaredModel: 'xai/grok-4.5',
     });
-    expect(found[0].body.trim()).toBe('你负责搜 X。');
   });
 
   it('model: inherit 与空值都归一成「未声明」(平台语义等同没写)', async () => {
@@ -248,23 +247,6 @@ describe('discoverSubagentDefinitions', () => {
     expect(found.map((f) => f.name)).toEqual(['a']);
   });
 
-  it('超大文件跳过(不整份读进内存),同目录其它定义照常', async () => {
-    const agents = path.join(root, 'repo', '.claude', 'agents');
-    await writeAgent(agents, 'small.md', 'name: small\nmodel: opus');
-    await fs.writeFile(
-      path.join(agents, 'huge.md'),
-      `---\nname: huge\nmodel: opus\n---\n${'x'.repeat(70 * 1024)}`,
-      'utf8',
-    );
-
-    const found = await discoverSubagentDefinitions({
-      workingDir: path.join(root, 'repo'),
-      env: { CLAUDE_CONFIG_DIR: path.join(root, 'empty-home') },
-    });
-
-    expect(found.map((f) => f.name)).toEqual(['small']);
-  });
-
   // 预算超限必须**抛**,不能静默返回半份结果 —— 半份结果会被上层当成「扫完了,没人声明」,
   // 于是又把覆盖用的 env 设回去。抛出来才能走调用方的显式降级。
   it('文件数超预算 → 抛 SubagentScanBudgetError', async () => {
@@ -346,6 +328,81 @@ describe('discoverSubagentDefinitions', () => {
     });
 
     expect(found.map((f) => f.name)).toEqual(['real-ancestor']);
+  });
+
+
+  // 回归:长 prompt 的 agent 完全合法。按大小整条跳过看着安全,实则漏掉一份声明了 model 的
+  // 定义 → 上层误判「没人声明」→ 又把覆盖用的 env 设回去,正是本 PR 要修的 bug。
+  it('超大定义文件照样读出 frontmatter(只读开头前缀,不按大小跳过)', async () => {
+    const agents = path.join(root, 'repo', '.claude', 'agents');
+    await fs.mkdir(agents, { recursive: true });
+    await fs.writeFile(
+      path.join(agents, 'huge.md'),
+      `---\nname: huge\nmodel: xai/grok-4.5\n---\n${'x'.repeat(400 * 1024)}`,
+      'utf8',
+    );
+
+    const found = await discoverSubagentDefinitions({
+      workingDir: path.join(root, 'repo'),
+      env: { CLAUDE_CONFIG_DIR: path.join(root, 'empty-home') },
+    });
+
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ name: 'huge', declaredModel: 'xai/grok-4.5' });
+  });
+
+  it('frontmatter 本身超出前缀 → 抛(结果不可信,不能当成「没人声明」)', async () => {
+    const agents = path.join(root, 'repo', '.claude', 'agents');
+    await fs.mkdir(agents, { recursive: true });
+    // 起始分隔符在,但收尾分隔符被推到 32 KiB 之外。
+    await fs.writeFile(
+      path.join(agents, 'bloated.md'),
+      `---\nname: bloated\ndescription: ${'d'.repeat(40 * 1024)}\nmodel: opus\n---\nbody\n`,
+      'utf8',
+    );
+
+    await expect(
+      discoverSubagentDefinitions({
+        workingDir: path.join(root, 'repo'),
+        env: { CLAUDE_CONFIG_DIR: path.join(root, 'empty-home') },
+      }),
+    ).rejects.toBeInstanceOf(SubagentScanBudgetError);
+  });
+
+  // 本仓既有的 customization-scanner 就是 toLowerCase().endsWith('.md');大小写敏感地漏掉
+  // 一份声明 = 又把 env 设回去。
+  it('扩展名大小写不敏感(reviewer.MD 也算定义)', async () => {
+    const agents = path.join(root, 'repo', '.claude', 'agents');
+    await fs.mkdir(agents, { recursive: true });
+    await fs.writeFile(path.join(agents, 'Reviewer.MD'), '---\nmodel: opus\n---\nbody\n', 'utf8');
+
+    const found = await discoverSubagentDefinitions({
+      workingDir: path.join(root, 'repo'),
+      env: { CLAUDE_CONFIG_DIR: path.join(root, 'empty-home') },
+    });
+
+    // name 缺失回退文件名,扩展名要被剥掉(不留 .MD)。
+    expect(found.map((f) => f.name)).toEqual(['Reviewer']);
+    expect(found[0].declaredModel).toBe('opus');
+  });
+
+  // readdir 会把整个目录物化成数组再排序 —— 生成出来的巨型目录能在计数预算生效前吃掉内存,
+  // 同步排序还堵住事件循环让外层定时器都没机会触发。改 opendir 流式并就地封顶。
+  it('单目录条目数超上限 → 抛(不物化、不排序)', async () => {
+    const agents = path.join(root, 'repo', '.claude', 'agents');
+    await fs.mkdir(agents, { recursive: true });
+    await Promise.all(
+      Array.from({ length: 520 }, (_, i) =>
+        fs.writeFile(path.join(agents, `x${i}.txt`), 'not a definition', 'utf8'),
+      ),
+    );
+
+    await expect(
+      discoverSubagentDefinitions({
+        workingDir: path.join(root, 'repo'),
+        env: { CLAUDE_CONFIG_DIR: path.join(root, 'empty-home') },
+      }),
+    ).rejects.toBeInstanceOf(SubagentScanBudgetError);
   });
 
   it('目录不存在 / workingDir 非绝对路径都安全返回空,不抛错', async () => {

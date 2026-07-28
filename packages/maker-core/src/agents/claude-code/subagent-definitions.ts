@@ -39,10 +39,16 @@
  * ## 启动期 IO 预算
  *
  * 本扫描位于会话启动的关键路径上(env 要在 sdkQuery 之前定好),而 `.claude/agents` 的内容
- * 完全由仓库决定:生成出来的大目录、几 MB 的 md、软链环都可能把新会话拖成「假死」。
- * 因此深度、目录数、文件数、单文件字节数与总耗时**都**有上限,任一超限即抛
+ * 完全由仓库决定:生成出来的大目录、几 MB 的 md、软链环、挂死的网络盘都可能把新会话拖成
+ * 「假死」。因此深度、目录数、单目录条目数、文件数与总耗时都有上限,任一超限即抛
  * {@link SubagentScanBudgetError},由调用方降级成「照旧设 env」——宁可默认值语义退回改动前,
  * 也不让会话卡在启动上。
+ *
+ * 两条原则贯穿这些上限:
+ *   - **超限一律抛,绝不静默截断**。半份结果会被上层当成「扫完了,没人声明 model」,于是又把
+ *     覆盖用的 env 设回去 —— 正是本 PR 要修的 bug 换个触发条件。
+ *   - **单个文件不设大小上限**,改成只读开头的有界前缀。按大小跳过看着安全,实则会漏掉长
+ *     prompt 的合法定义,同样退化成上一条那个 bug。
  */
 
 import type { Dirent } from 'node:fs';
@@ -65,10 +71,15 @@ export interface DiscoveredSubagent {
    * `undefined` = 没写 / 写了 `inherit`(平台语义等同没写)—— 这类才需要补默认值。
    */
   declaredModel?: string;
-  /** frontmatter 原始数据(诊断用;host 不改写它,也不重发定义)。 */
+  /**
+   * frontmatter 原始数据(诊断用;host 不改写它,也不重发定义)。
+   *
+   * **刻意不带正文**:host 只需要知道「声明了什么 model」,正文(subagent 的 system prompt)
+   * 一个字都用不上。不留这个字段,读取就能只取文件开头的有界前缀 —— 一份 5 MB 的 md 也只花
+   * 一次定长读,不必在「整份读进内存」和「按大小跳过」之间选(跳过会漏掉声明 → 又误判
+   * 「没人声明 model」)。
+   */
   frontmatter: Record<string, unknown>;
-  /** 正文 = subagent 的 system prompt。 */
-  body: string;
 }
 
 /**
@@ -88,8 +99,21 @@ const MAX_DEPTH = 8;
 const MAX_FILES = 200;
 /** 访问的目录数上限(深度管不住广度)。 */
 const MAX_DIRS = 200;
-/** 单个定义文件的字节上限。subagent 定义就是一段 prompt,64 KiB 已经很宽。 */
-const MAX_FILE_BYTES = 64 * 1024;
+/**
+ * 单个目录的条目数上限。
+ *
+ * 为什么单独设这一道:`readdir` 会把整个目录**一次性物化成数组**,后面再排序 —— 生成出来的
+ * 十万条目录能在计数预算生效前就吃掉内存,而同步排序还会**堵住事件循环**,连外层定时器都没
+ * 机会触发。所以改用 `opendir` 流式读并在这里就地封顶:一超即抛,不物化、不排序。
+ */
+const MAX_DIR_ENTRIES = 500;
+/**
+ * 单个定义文件读取的前缀字节数。
+ *
+ * 我们只要 frontmatter,而它一定在文件开头。定长前缀让「几 MB 的 md」既不占内存也不会被
+ * 整条跳过 —— 跳过等于漏掉一份可能声明了 model 的定义。
+ */
+const MAX_FRONTMATTER_BYTES = 32 * 1024;
 /** 整趟扫描的墙钟上限 —— 兜住慢盘 / 网络盘 / 病态目录。 */
 const MAX_ELAPSED_MS = 1_500;
 
@@ -175,6 +199,32 @@ async function isDirectory(p: string): Promise<boolean> {
 }
 
 /**
+ * 流式读一个目录的条目,条目数超 {@link MAX_DIR_ENTRIES} 立即抛。
+ *
+ * 打不开的目录(权限 / 竞态删除)当作空目录,只跳过它自己;但**条目过多要抛** —— 那种情况下
+ * 结果不可信,静默截断会让上层以为「扫完了,没人声明 model」。
+ * 每读一条都过一次时间预算:opendir 的异步迭代天然会让出事件循环,外层定时器也就有机会触发。
+ */
+async function readDirEntriesBounded(dir: string, budget: ScanBudget): Promise<Dirent[]> {
+  let handle: Awaited<ReturnType<typeof fs.opendir>>;
+  try {
+    handle = await fs.opendir(dir);
+  } catch {
+    return [];
+  }
+  const entries: Dirent[] = [];
+  // for-await 在 break / throw 时会自动关闭目录句柄。
+  for await (const ent of handle) {
+    if (entries.length >= MAX_DIR_ENTRIES) {
+      throw new SubagentScanBudgetError(`dirEntries>${MAX_DIR_ENTRIES}`);
+    }
+    entries.push(ent);
+    budget.checkTime();
+  }
+  return entries;
+}
+
+/**
  * 递归收集目录下的 .md 文件。单个坏目录只跳过它自己,不影响其余扫描;超预算则整趟抛出。
  *
  * **软链必须跟随**:`readdir(withFileTypes)` 给软链的 Dirent 既不是 file 也不是 dir,
@@ -184,6 +234,10 @@ async function isDirectory(p: string): Promise<boolean> {
  * 于是又把覆盖用的 env 设回去,正是本次要修的 bug。所以对软链补一次 follow-stat。
  *
  * 跟随软链就要防环:用 realpath 记账,同一真实目录只进一次(深度上限管不住 A→B→A)。
+ *
+ * **用 opendir 而不是 readdir**:readdir 会把整个目录一次性物化成数组,一个生成出来的十万
+ * 条目录在任何计数预算生效**之前**就吃掉内存,随后的同步排序还会堵住事件循环 —— 那期间连外层
+ * 定时器都触发不了。opendir 流式读能在超过 {@link MAX_DIR_ENTRIES} 时立刻抛出,不物化、不排序。
  */
 async function collectMarkdownFiles(
   dir: string,
@@ -202,18 +256,11 @@ async function collectMarkdownFiles(
   if (visitedDirs.has(real)) return [];
   visitedDirs.add(real);
   budget.countDir();
-  // 显式标注 Dirent[]:`withFileTypes: true` 的重载在部分 tsconfig(desktop 更严)下会被
-  // 推成 Buffer 变体,导致 ent.name 变成 Buffer。
-  let entries: Dirent[];
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
+  const entries = await readDirEntriesBounded(dir, budget);
   const files: string[] = [];
   // 名字排序保证同一目录下的遍历顺序稳定(平台对同目录同名的取舍是文件系统序,
-  // 我们至少让自己的结果可复现)。
-  const sorted = [...entries].sort((a, b) => a.name.localeCompare(b.name));
+  // 我们至少让自己的结果可复现)。条目数已封顶,这次排序的规模是有界的。
+  const sorted = entries.sort((a, b) => a.name.localeCompare(b.name));
   for (const ent of sorted) {
     const full = path.join(dir, ent.name);
     let isDir = ent.isDirectory();
@@ -230,7 +277,10 @@ async function collectMarkdownFiles(
     }
     if (isDir) {
       files.push(...(await collectMarkdownFiles(full, budget, visitedDirs, depth + 1)));
-    } else if (isFile && ent.name.endsWith('.md')) {
+      // 扩展名大小写不敏感:`reviewer.MD` 在大小写保留的文件系统上照样是一份定义,
+      // 本仓既有的 customization-scanner 也是 `toLowerCase().endsWith('.md')`。
+      // 大小写敏感地漏掉一份声明了 model 的定义 = 又把覆盖用的 env 设回去。
+    } else if (isFile && ent.name.toLowerCase().endsWith('.md')) {
       budget.countFile();
       files.push(full);
     }
@@ -275,19 +325,42 @@ function normalizeDeclaredModel(raw: unknown): string | undefined {
   return trimmed;
 }
 
+/**
+ * 读文件开头的有界前缀 —— frontmatter 一定在这里,正文我们不需要(见 DiscoveredSubagent)。
+ *
+ * 这样「几 MB 的 md」既不占内存,也**不会被整条跳过**:按大小跳过看着安全,实则会漏掉一份
+ * 可能声明了 model 的合法定义(长 system prompt 的 agent 完全正常),于是又误判「没人声明」
+ * 并把覆盖用的 env 设回去 —— 正是本 PR 要修的 bug。
+ *
+ * 返回 null = 读不到(不存在 / 无权限),这一条不算。
+ */
+async function readFilePrefix(filePath: string): Promise<string | null> {
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    handle = await fs.open(filePath, 'r');
+    const buf = Buffer.allocUnsafe(MAX_FRONTMATTER_BYTES);
+    const { bytesRead } = await handle.read(buf, 0, MAX_FRONTMATTER_BYTES, 0);
+    return buf.subarray(0, bytesRead).toString('utf8');
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/** frontmatter 起始分隔符(允许 BOM 与前导空行,与 gray-matter 的宽容度对齐)。 */
+const FRONTMATTER_OPEN = /^\uFEFF?\s*---\r?\n/;
+
 async function readSubagentFile(
   filePath: string,
   scope: DiscoveredSubagent['scope'],
 ): Promise<DiscoveredSubagent | null> {
-  let raw: string;
-  try {
-    // 先看大小再读:几 MB 的 md 放在 agents 目录里(生成物、误放的日志)不该被整份读进内存。
-    // 超限的**跳过而不抛** —— 它本身就不像一份 subagent 定义,不值得为它降级整趟扫描。
-    const st = await fs.stat(filePath);
-    if (st.size > MAX_FILE_BYTES) return null;
-    raw = await fs.readFile(filePath, 'utf8');
-  } catch {
-    return null;
+  const raw = await readFilePrefix(filePath);
+  if (raw === null) return null;
+  // 前缀里没读到 frontmatter 的**收尾**分隔符,但开头确实有起始分隔符 → 这份 frontmatter
+  // 大到超出前缀,解析结果不可信。此时**抛**而不是跳过:跳过会让上层以为「没人声明 model」。
+  if (FRONTMATTER_OPEN.test(raw) && !/\n---\s*(\r?\n|$)/.test(raw.replace(FRONTMATTER_OPEN, '\n'))) {
+    throw new SubagentScanBudgetError(`frontmatter>${MAX_FRONTMATTER_BYTES}B`);
   }
   const parsed = parseFrontmatter(raw);
   if (parsed.parseError || !parsed.frontmatter) return null;
@@ -300,7 +373,7 @@ async function readSubagentFile(
   // 的 agent,会让我们误判成「没人声明」从而设上 env 覆盖 —— 那正是本次要修的 bug。
   // 宁可多认一个,也不要漏认。
   const nameRaw = typeof fm.name === 'string' ? fm.name.trim() : '';
-  const name = nameRaw.length > 0 ? nameRaw : path.basename(filePath, '.md');
+  const name = nameRaw.length > 0 ? nameRaw : path.basename(filePath).replace(/\.md$/i, '');
   if (name.length === 0) return null;
   return {
     name,
@@ -308,8 +381,6 @@ async function readSubagentFile(
     scope,
     declaredModel: normalizeDeclaredModel(fm.model),
     frontmatter: fm,
-    // 正文即 system prompt。gray-matter 已剥掉 frontmatter。
-    body: raw.replace(/^---[\s\S]*?\n---\r?\n?/, ''),
   };
 }
 

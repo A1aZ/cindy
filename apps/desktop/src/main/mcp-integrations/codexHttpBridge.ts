@@ -575,16 +575,25 @@ async function readJsonBody(
  *     outright rejection (`ambiguous_thread_context`), because running such a
  *     batch contextless is what mis-routes it to the focused UI session.
  *
- * A `tools/call`'s own attribution always wins over its siblings': a sibling
- * naming some other thread must not be able to degrade a well-attributed call
- * to "no context" either. Sibling ids are consulted only when the request
- * carries no tool call at all (plain notifications and the like), which keeps
- * today's behaviour for non-tool traffic.
+ * A `tools/call`'s own attribution ALWAYS wins over its siblings', including
+ * when the siblings disagree among themselves: nothing a non-tool message
+ * carries may degrade a well-attributed call to "no context", because
+ * `hasAmbiguousThreadContext` only inspects `tools/call`s and would not reject
+ * the request either — it would just run contextless, back to UI focus. Sibling
+ * ids therefore matter only when the request carries no tool call at all.
+ *
+ * Note this does change behaviour for tool-free requests: a threadId-less
+ * sibling no longer suppresses a sibling that does carry an id (previously ANY
+ * id-less message collapsed the result to `undefined`). Conflicting sibling ids
+ * still yield `undefined`. Tool-free requests invoke no tool, so nothing reads
+ * the context they run under; resolving it is simply closer to what the client
+ * actually declared.
  */
 function extractCodexThreadId(body: unknown): string | undefined {
   const messages = Array.isArray(body) ? body : [body];
   let fromToolCall: string | undefined;
   let fromSibling: string | undefined;
+  let siblingsDisagree = false;
   for (const message of messages) {
     const threadId = extractCodexThreadIdFromMessage(message);
     if (isToolCallMessage(message)) {
@@ -594,10 +603,13 @@ function extractCodexThreadId(body: unknown): string | undefined {
       continue;
     }
     if (!threadId) continue;
-    if (fromSibling && fromSibling !== threadId) return undefined;
+    // Recorded, not returned: a sibling disagreement must not short-circuit the
+    // scan before a tools/call later in the batch gets to claim the request.
+    if (fromSibling && fromSibling !== threadId) siblingsDisagree = true;
     fromSibling = threadId;
   }
-  return fromToolCall ?? fromSibling;
+  if (fromToolCall) return fromToolCall;
+  return siblingsDisagree ? undefined : fromSibling;
 }
 
 function isToolCallMessage(message: unknown): boolean {

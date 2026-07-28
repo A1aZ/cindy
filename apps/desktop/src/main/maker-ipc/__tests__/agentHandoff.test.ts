@@ -255,6 +255,29 @@ describe('createAgentHandoffPendingRegistry', () => {
     expect(query).not.toHaveBeenCalled();
   });
 
+  it('decorate 结果回写缓存:重试 peek 不重跑 DB 查询,也不会叠加', async () => {
+    const decorate = vi.fn(async (_sid: string, handoff: string) => `FORK\n\n${handoff}`);
+    const reg = createAgentHandoffPendingRegistry(async () => null, undefined, decorate);
+    reg.set('s1', 'SWITCH-HANDOFF');
+    expect(await reg.peek('s1')).toBe('FORK\n\nSWITCH-HANDOFF');
+    // 首发被拒 → 未 consume → 重试再 peek
+    expect(await reg.peek('s1')).toBe('FORK\n\nSWITCH-HANDOFF');
+    expect(decorate).toHaveBeenCalledTimes(1);
+  });
+
+  it('decorate 失败不写缓存,下次 peek 仍重试组合', async () => {
+    let fail = true;
+    const decorate = vi.fn(async (_sid: string, handoff: string) => {
+      if (fail) throw new Error('db down');
+      return `FORK\n\n${handoff}`;
+    });
+    const reg = createAgentHandoffPendingRegistry(async () => null, undefined, decorate);
+    reg.set('s1', 'SWITCH-HANDOFF');
+    expect(await reg.peek('s1')).toBe('SWITCH-HANDOFF');
+    fail = false;
+    expect(await reg.peek('s1')).toBe('FORK\n\nSWITCH-HANDOFF');
+  });
+
   it('consume 后不触发 decorate(消费语义不被组合钩子破坏)', async () => {
     const decorate = vi.fn(async (_sid: string, handoff: string) => `X${handoff}`);
     const reg = createAgentHandoffPendingRegistry(async () => null, undefined, decorate);

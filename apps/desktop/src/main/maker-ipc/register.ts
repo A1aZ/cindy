@@ -6876,6 +6876,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     });
     const projection = inputCoordinator.clearSession(sid, clearBoundary);
     silentStopAutoResumeGuard.noteSessionReset(sid);
+    // 丢弃缓存的待注入交接 / fork 来源标记:它们是按 clear 之前的历史算出来的,
+    // DB 侧的 cleared_at 抑制拦不住已经落进 registry 内存的那一份(首发被拒后
+    // 缓存仍在),下次 send 会把旧血缘灌进用户刚显式清空的上下文。
+    agentHandoffPending.clear(sid);
     getAgentIslandService()?.notifyQueueEmptied(sid);
     // 清上下文后,active 目标失去其依据(objective 引用的内容已被抹掉)→ 一并清除目标。
     goalClearObserver?.(sid);

@@ -553,9 +553,16 @@ export function createAgentHandoffPendingRegistry(
         const cached = pending.get(sessionId) ?? null;
         if (cached === null || !decorateCached || composedByQuery.has(sessionId)) return cached;
         try {
-          return await decorateCached(sessionId, cached);
+          const decorated = await decorateCached(sessionId, cached);
+          // 组合结果回写并标记为已组合:同一条待注入交接在 consume 之前可能被 peek
+          // 多次(首发被拒后的重试),没有这步每次都要重跑一遍 decorate 的 DB 查询,
+          // 而且要靠 decorate 自身幂等才不会叠加。
+          pending.set(sessionId, decorated);
+          composedByQuery.add(sessionId);
+          return decorated;
         } catch {
-          // 组合失败不能吞掉本来就该注入的交接——退回未组合的原值。
+          // 组合失败不能吞掉本来就该注入的交接——退回未组合的原值,且不写缓存,
+          // 下次 peek 仍会重试组合。
           return cached;
         }
       }

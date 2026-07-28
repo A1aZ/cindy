@@ -63,6 +63,7 @@ import { isVoiceInputEventScopeActive, shouldHandleVoiceInputEvent } from './eve
 import {
   clampEditorTextRangeToDoc,
   mapEditorTextRange,
+  resolveInsertedTextRange,
   type EditorTextRange,
 } from './editorRangeMapping';
 import { isVoiceInputServiceConnectionError, VOICE_INPUT_ERROR_CODE_KEYS } from './overlayErrors';
@@ -817,17 +818,19 @@ export function useVoiceInput(
       ? clampEditorTextRange(insertionRangeRef.current, state.doc)
       : { from: state.selection.from, to: state.selection.to };
     insertionRangeRef.current = null;
-    const start = range.from;
     applyingVoiceTextRef.current = true;
     try {
-      dispatch(state.tr.insertText(text, range.from, range.to));
+      const transaction = state.tr.insertText(text, range.from, range.to);
+      // 上屏范围必须从事务推导,不能用插入前的 from:替换区间可以合法地从 block
+      // 边界开始(全选后听写就是 0..content.size),ProseMirror 会把 inline 文本
+      // fit 进段落,字形实际落在边界之后。用旧 from 记录会让润色回填、润色预览与
+      // 词典学习 watch 整体错位(润色会因读到截断文本而被丢弃)。
+      const inserted = resolveInsertedTextRange(transaction, range.from, text.length);
+      dispatch(transaction);
+      return inserted;
     } finally {
       applyingVoiceTextRef.current = false;
     }
-    return {
-      start,
-      end: start + text.length,
-    };
   }, [clampEditorTextRange]);
 
   const applyRefinedText = useCallback((event: Extract<VoiceInputRendererEvent, { type: 'refined' }>): boolean => {

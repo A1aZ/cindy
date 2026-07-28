@@ -13,7 +13,11 @@ import { describe, expect, it } from 'vitest';
 import { Schema } from '@tiptap/pm/model';
 import { EditorState } from '@tiptap/pm/state';
 
-import { clampEditorTextRangeToDoc, mapEditorTextRange } from '../editorRangeMapping';
+import {
+  clampEditorTextRangeToDoc,
+  mapEditorTextRange,
+  resolveInsertedTextRange,
+} from '../editorRangeMapping';
 
 const schema = new Schema({
   nodes: {
@@ -129,5 +133,30 @@ describe('clampEditorTextRangeToDoc', () => {
 
     expect(mapped!.from).toBe(0);
     expect(mapped!.to).toBe(tr.doc.content.size);
+  });
+});
+
+// 上屏范围必须从事务推导:替换区间可以从 block 边界开始(全选后听写就是
+// 0..content.size),ProseMirror 把 inline 文本 fit 进段落后字形落在边界之后。用插入
+// 前的 from 记录会让润色回填读到截断文本而丢弃润色,预览与词典学习 watch 也一起错位。
+describe('resolveInsertedTextRange', () => {
+  it('reports where the text landed after a whole-document replacement', () => {
+    const state = stateWith('旧的内容');
+    const to = state.doc.content.size;
+    const tr = state.tr.insertText('上屏文字', 0, to);
+    const range = resolveInsertedTextRange(tr, 0, '上屏文字'.length);
+
+    expect(tr.doc.childCount).toBe(1);
+    expect(range).toEqual({ start: 1, end: 1 + '上屏文字'.length });
+    expect(tr.doc.textBetween(range.start, range.end)).toBe('上屏文字');
+  });
+
+  it('reports the inserted span for an ordinary collapsed insertion', () => {
+    const state = stateWith('abc');
+    const tr = state.tr.insertText('XY', 2, 2);
+    const range = resolveInsertedTextRange(tr, 2, 2);
+
+    expect(range).toEqual({ start: 2, end: 4 });
+    expect(tr.doc.textBetween(range.start, range.end)).toBe('XY');
   });
 });

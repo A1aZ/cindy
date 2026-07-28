@@ -50,6 +50,34 @@ export function clampEditorTextRangeToDoc(range: EditorTextRange, doc: PMNode): 
 }
 
 /**
+ * Where the text an `insertText(text, from, to)` transaction just wrote ended up.
+ *
+ * The pre-insertion `from` is NOT that place. A replacement range may legally
+ * start at a block boundary (dictation over `AllSelection` spans
+ * `0..doc.content.size`), and ProseMirror then fits the inline text INTO a
+ * textblock — the glyphs land one position after that boundary. Recording the
+ * pre-insertion endpoint would offset everything keyed to this range:
+ * `applyRefinedText` would read a truncated `currentText` and drop the
+ * refinement, and refinement previews plus dictionary-learning watches would
+ * point at the wrong span.
+ *
+ * Mapping the range's START with association `-1` keeps it in front of the
+ * inserted slice; snapping that onto an inline position lands exactly on the
+ * first inserted character, however the slice was fitted.
+ */
+export function resolveInsertedTextRange(
+  transaction: Transaction,
+  replacedFrom: number,
+  textLength: number,
+): { start: number; end: number } {
+  const start = clampToInlinePosition(
+    transaction.doc,
+    transaction.mapping.map(replacedFrom, -1),
+  );
+  return { start, end: Math.min(start + textLength, transaction.doc.content.size) };
+}
+
+/**
  * Move a stored range through a document change, so offsets captured earlier
  * keep pointing at the same content.
  *

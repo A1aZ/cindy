@@ -13,7 +13,6 @@ import type { HookMessage, TaskDispatchPayload } from '@cindy/slack-hook-protoco
 import {
   buildHookSessionTitle,
   createHookDispatcher,
-  isPathWithin,
   normalizeTaskSource,
   type HookDispatcherDeps,
   type HookRunOutcome,
@@ -21,6 +20,7 @@ import {
   type HookSessionRunner,
 } from '../dispatcher';
 import type { HookBindingStore } from '../bindings';
+import { isPathWithin } from '../paths';
 import type { HookConnectionConfig } from '../store';
 
 const noopLog = { info: () => {}, warn: () => {} };
@@ -558,6 +558,38 @@ describe('dispatcher 核心语义', () => {
     await tick();
     expect(fr.calls[2]).toMatchObject({ sessionId: 'taken', expectedWorkingDir: WS_DIR });
     fr.finish();
+  });
+
+  it('排队期间映射被撤权: drain 时不执行, 回一条说明而不是在已撤权目录里跑', async () => {
+    const bindings = memoryBindings();
+    const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
+    const fr = fakeRunner({ sessions });
+    const config: HookConnectionConfig = { ...CONFIG, workspaces: { xdmaker: WS_DIR } };
+    const { d } = makeDispatcher({ runner: fr.runner, bindings, config });
+    const c = collector();
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    const first = c.last('task.ack')!.payload.sessionId!;
+    sessions[first] = { workingDir: WS_DIR, usable: true };
+
+    // 第一轮没收口时第二条进队列(此刻目录还在映射内, 校验通过)
+    d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
+    await tick();
+    expect(c.last('task.ack')!.payload).toMatchObject({ result: 'queued' });
+
+    // 排队期间用户把这个目录从映射里删掉 —— 会话目录和 expectedWorkingDir 都
+    // 没变, 只有"映射还认不认它"变了, 所以必须在开跑前重新查映射
+    config.workspaces = {};
+    fr.finish({ finalText: '第一条跑完了' });
+    await tick();
+
+    const ends = c.ofType('turn.end').map((m) => m.payload);
+    const queued = ends.find((e) => e.requestId === 'req-2')!;
+    expect(queued.status).toBe('error');
+    expect(queued.errorMessage).toContain('已不在工作目录映射里');
+    // 关键: 排队那条根本没进 runner
+    expect(fr.calls).toHaveLength(1);
   });
 
   it('在工作目录映射内换目录 -> 无感跟随复用(边界内的移动不受影响)', async () => {

@@ -48,6 +48,7 @@ import {
 } from '@cindy/model-providers';
 
 import { tapWindowBroadcast } from '../device-link/broadcast-tap.js';
+import { maskPath } from '../logger.js';
 import { getMaker } from '../maker-host/index.js';
 import {
   wireSessionToIpc,
@@ -89,8 +90,8 @@ import {
 } from '../im/shared/turnActivity.js';
 import { beginHeadlessGhostSetupTurn } from '../mcp-integrations/ghostSetupInteractionSurface.js';
 
-import { isSamePath } from './dispatcher.js';
 import type { HookRunOutcome, HookSessionRunner } from './dispatcher.js';
+import { isSamePath } from './paths.js';
 import { resolveHookSessionConfig, type ResolvedHookSessionConfig } from './defaults.js';
 import { decodeAttachments, sanitizeAttachmentName } from './attachments.js';
 import {
@@ -425,7 +426,7 @@ export function createMakerHookSessionRunner(deps: {
         !isSamePath(workingDir, req.expectedWorkingDir)
       ) {
         log.warn(
-          `hook run aborted: session ${req.sessionId} moved from ${req.expectedWorkingDir} to ${workingDir} between validation and execution`,
+          `hook run aborted: session ${req.sessionId} moved from ${maskPath(req.expectedWorkingDir)} to ${maskPath(workingDir)} between validation and execution`,
         );
         return fail('这个对话刚被移动到别的目录，本条消息没有执行；请重新发送。');
       }
@@ -488,6 +489,20 @@ export function createMakerHookSessionRunner(deps: {
           void WorktreeManager.removeWorktreeForSession(req.sessionId).catch(() => undefined);
         }
         return fail(err instanceof Error ? err.message : String(err));
+      }
+
+      /**
+       * 拿到的可能是**进程里早就活着的那个 session**: maker.createSession 对
+       * 已在 activeSessions 里的 id 直接返回既有实例, 完全忽略上面传的
+       * workingDir(maker.ts 的 active-session 短路)。那个实例的 workDir 与
+       * agent 句柄可能还指着落库前的旧目录 —— 上面比对的是持久化 meta, 拦不住
+       * 这一种。真正要执行的是它, 所以对着它再确认一次(PR #733 review 指出)。
+       */
+      if (req.expectedWorkingDir != null && !isSamePath(session.workDir, req.expectedWorkingDir)) {
+        log.warn(
+          `hook run aborted: live session ${req.sessionId} runs in ${maskPath(session.workDir)}, not the validated ${maskPath(req.expectedWorkingDir)}`,
+        );
+        return fail('这个对话正在别的目录里运行，本条消息没有执行；请重新发送。');
       }
 
       // 运行时来源注入(路由层经 session-provider-store 决定上游与钥匙):

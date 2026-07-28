@@ -13,8 +13,10 @@
  *      - 不带(默认): 别名解析(映射即白名单)-> binding 查 externalKey ->
  *        复用或新建并落绑定。复用与否**每条消息现场重算**, 唯一依据是会话
  *        当前的工作目录是否仍落在工作目录映射(或内置对话根)内 —— 映射是
- *        「远端能驱动哪些本地目录」的唯一边界, 判定不带任何状态。移出映射
- *        (被移到别处 / 映射被改删)= 丢绑定重建, 并回一条说明怎么恢复;
+ *        「远端能驱动哪些本地目录」的唯一边界, 判定不带任何**持久化授权**状态
+ *        (进程内仍有 awaitingPersist 这类短生命周期记账, 但它们只是收窄判定,
+ *        本身不构成放行依据)。移出映射(被移到别处 / 映射被改删)= 丢绑定重建,
+ *        并回一条说明怎么恢复;
  *   3. 排队: 目标 session 正在跑 turn 时 FIFO 排队, ack 回 queued + 位置;
  *      turn 收口后自动 drain;
  *   4. 回推: turn.end 经当前连接发送; 连接不在线时缓存, 重连(onConnected)
@@ -48,6 +50,7 @@ import {
 } from '@cindy/slack-hook-protocol';
 
 import { HOOK_CHAT_WORKSPACE_ALIAS } from '../../shared/hookControlIpc.js';
+import { isPathWithin } from './paths.js';
 import type { HookConnectionConfig } from './store.js';
 import type { HookBindingStore } from './bindings.js';
 
@@ -223,23 +226,6 @@ export interface HookDispatcher {
 const MAX_QUEUE_PER_SESSION = 20;
 /** 单连接离线 turn.end 缓存上限(FIFO 丢最老)。 */
 const MAX_PENDING_TURN_ENDS = 100;
-
-/** 路径比较前的规范化。Windows 大小写不敏感(规则 15)。 */
-function normalizePathForCompare(p: string): string {
-  const resolved = path.resolve(p);
-  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-}
-
-/** target 是否落在 base 目录内(含相等)。Windows 大小写不敏感(规则 15)。 */
-export function isPathWithin(base: string, target: string): boolean {
-  const rel = path.relative(normalizePathForCompare(base), normalizePathForCompare(target));
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
-}
-
-/** 两个路径是否指向同一目录(同 isPathWithin 的规范化口径)。 */
-export function isSamePath(a: string, b: string): boolean {
-  return normalizePathForCompare(a) === normalizePathForCompare(b);
-}
 
 /**
  * 原对话不再落在工作目录映射内时(被移到映射外的项目, 或映射本身被改/删),
@@ -515,15 +501,36 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     };
 
     let outcome: HookRunOutcome;
-    try {
-      outcome = await runner.run({ ...task.run, onProgress, onInteraction, onInteractionCancel });
-    } catch (err) {
+    /**
+     * 开跑前按当前映射再确认一次(见 dirStillAllowed)。resolveTarget 到这里之间
+     * 隔着排队与若干 await, 映射随时可能被改/删; 这是"每条消息按映射现场重算"
+     * 在执行侧的收口。expectedWorkingDir 为空 = 新建路径, 目录刚在上面算出来。
+     */
+    const guardDir = task.run.expectedWorkingDir ?? null;
+    if (guardDir !== null && !dirStillAllowed(task.connectionId, guardDir)) {
+      // 路径不进日志(规则: 用集中 PII helper, 而 dispatcher 是不碰 Electron 的
+      // 纯逻辑模块, 拿不到它)—— requestId 足够定位。
+      log.info(
+        `hook task ${task.requestId} aborted before execution: its directory left the workspace map`,
+      );
       outcome = {
         status: 'error',
         finalText: '',
-        errorMessage: err instanceof Error ? err.message : String(err),
+        errorMessage:
+          '这个对话所在的目录已不在工作目录映射里，本条消息没有执行。把它加回 设置 → 远程连接 → 工作目录映射 后再发一次。',
         durationMs: 0,
       };
+    } else {
+      try {
+        outcome = await runner.run({ ...task.run, onProgress, onInteraction, onInteractionCancel });
+      } catch (err) {
+        outcome = {
+          status: 'error',
+          finalText: '',
+          errorMessage: err instanceof Error ? err.message : String(err),
+          durationMs: 0,
+        };
+      }
     }
     runningByRequest.delete(requestKey);
     if (!isCurrentGeneration(task.accountGeneration)) {
@@ -569,6 +576,21 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       running.add(sessionId);
       startExecution(next);
     }
+  }
+
+  /**
+   * 这个目录**此刻**还落在该连接的工作目录映射(或内置对话根)内吗。
+   *
+   * 每次真正开跑之前都要问一遍: 排队期间用户可能把映射改了或删了, 而队列
+   * drain 不再走 resolveTarget —— 那时会话目录和 expectedWorkingDir 都没变,
+   * runner 侧那道"目录有没有被移走"的比对根本看不见这次撤权, 排着的消息就会
+   * 在已撤权的目录里执行(PR #733 review 指出)。连接本身没了也按撤权处理。
+   */
+  function dirStillAllowed(connectionId: string, dir: string): boolean {
+    const config = getConnection(connectionId);
+    if (!config) return false;
+    if (Object.values(config.workspaces).some((root) => isPathWithin(root, dir))) return true;
+    return dialogue !== undefined && isPathWithin(dialogue.rootDir(), dir);
   }
 
   function startExecution(task: PendingTask): void {

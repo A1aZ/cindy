@@ -168,6 +168,9 @@ vi.mock('../defaults.js', async (importOriginal) => {
 function makeFakeSession(id: string) {
   return {
     id,
+    // 真实 Session 有这个只读字段; runner 用它确认"真正要跑的这个会话"仍在
+    // dispatcher 校验过的目录里(createSession 对活会话短路时不认传入的 workDir)
+    workDir: 'D:/repo',
     onEvent(cb: (ev: { type: string; data: unknown }) => void) {
       h.eventCbs.set(id, cb);
       return () => {
@@ -320,6 +323,23 @@ describe('执行前按权威 meta 收口校验工作目录', () => {
     expect(outcome.status).toBe('error');
     expect(outcome.errorMessage).toContain('刚被移动到别的目录');
     expect(fakeMaker.createSession).not.toHaveBeenCalled();
+  });
+
+  it('createSession 短路返回的活会话跑在别处 -> 也要拒绝(meta 拦不住这种)', async () => {
+    // maker.createSession 对已在 activeSessions 里的 id 直接返回既有实例, 忽略
+    // 传入的 workingDir —— 那个实例的 workDir 可能还指着别处
+    fakeMaker.createSession.mockImplementationOnce(async (opts: { id?: string }) => ({
+      ...makeFakeSession(opts.id ?? 'sess-old'),
+      workDir: 'D:/still-the-old-place',
+    }));
+    const runner = createMakerHookSessionRunner({ log });
+
+    const outcome = await runner.run(
+      baseReq({ sessionId: 'sess-old', isNew: false, expectedWorkingDir: 'D:/repo' }),
+    );
+
+    expect(outcome.status).toBe('error');
+    expect(outcome.errorMessage).toContain('正在别的目录里运行');
   });
 
   it('目录一致 -> 照常执行; 新建路径不带该字段也不受影响', async () => {
@@ -626,6 +646,7 @@ describe('进度快照(turn.progress 链路)', () => {
   function makeManualSession(id: string) {
     return {
       id,
+      workDir: 'D:/repo',
       onEvent(cb: (ev: { type: string; data: unknown }) => void) {
         h.eventCbs.set(id, cb);
         return () => {
@@ -777,6 +798,7 @@ describe('交互卡链路(interaction listener 覆盖)', () => {
   function makeInteractiveSession(id: string) {
     return {
       id,
+      workDir: 'D:/repo',
       onEvent(cb: (ev: { type: string; data: unknown }) => void) {
         h.eventCbs.set(id, cb);
         return () => {

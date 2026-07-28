@@ -154,7 +154,9 @@ type MacTextInsertionHelperResult = {
   afterNumberOfCharacters?: number;
   enhancedAxAttempted?: boolean;
   enhancedAxHelped?: boolean;
-  /** focused-window-frame 命令：前台窗口 frame（DIP 屏幕坐标）。 */
+  /** 流式进度行的事件名；命令的最终结果行没有这个字段。 */
+  event?: string;
+  /** 前台窗口 frame（DIP 屏幕坐标），进度行与最终结果行都会带。 */
   frame?: unknown;
   frameSource?: string;
 };
@@ -240,6 +242,11 @@ let overlayDragSession: { startBounds: Rectangle; startCursor: Point } | null = 
 // 最近一次「浮窗真正呈现在哪」的 bounds。浮窗 hide 后会被停到屏幕外，实时
 // bounds 不能当锚点，全局浮窗路径的词典 toast 靠这份记录跟到同一块屏、同一位置。
 let lastPresentedOverlayBounds: Rectangle | null = null;
+// 发布外部听写的词典学习证据时对锚点拍的快照。词典建议是异步的（模型往返），
+// 期间用户可能已经在另一块屏开了新一次浮窗，把 lastPresentedOverlayBounds 覆盖成
+// 新会话的位置——那时旧会话的 toast 会盖在新浮窗上。所以连同当时的呈现代次一起
+// 记下来：代次变了就说明这条 toast 已经不属于当前现场，退回默认位置。
+let pendingDictionaryToastAnchor: { bounds: Rectangle; presentationSeq: number } | null = null;
 // 浮窗呈现代次。焦点屏查询是异步的，它的回调必须能认出「这次呈现还算不算数」：
 // 会话被取消（hide / 复位到 idle）或已经开始了新一次呈现时，迟到的回调不得再
 // 定位或显示窗口——浮窗是缓存复用的，hide 并不销毁它，只靠 isDestroyed() 判断
@@ -1500,8 +1507,22 @@ function startLoadedOverlaySession(window: BrowserWindow, shortcutInvokedAt: num
   //    读取，不会出现「浮窗开在 A 屏、粘贴却进了 B 屏的 App」。
   // 2. Tell the renderer to start microphone capture as soon as it is ready.
   // 3. Show the overlay on the next tick so UI display no longer gates mic start.
-  const captureOverlayPromise = captureMacPasteTarget();
-  const focusedDisplayQuery = startFocusedDisplayQuery(captureOverlayPromise);
+  //
+  // frame 走流式：helper 读到它就单独吐一行，不必等后面的 AX 上下文采集，所以
+  // 90ms 的选屏截止时间才有意义。
+  let resolveFocusedWindowFrame: (frame: Rectangle | null) => void = () => {};
+  const focusedWindowFramePromise = new Promise<Rectangle | null>((resolve) => {
+    resolveFocusedWindowFrame = resolve;
+  });
+  const captureOverlayPromise = captureMacPasteTarget({
+    onFocusedWindowFrame: (frame) => resolveFocusedWindowFrame(frame),
+  });
+  // 兜底：helper 没吐 frame（AX 与 CGWindowList 都没结果）、走了 osascript 回退，
+  // 或整个 capture 失败时，用最终结果收敛这个 promise，别让它永远悬着。
+  void captureOverlayPromise
+    .then((captured) => resolveFocusedWindowFrame(captured?.frame ?? null))
+    .catch(() => resolveFocusedWindowFrame(null));
+  const focusedDisplayQuery = startFocusedDisplayQuery(focusedWindowFramePromise);
   positionOverlayWindow(window);
   prepareOverlayForDisplay(window);
 
@@ -1624,7 +1645,7 @@ function getCursorDisplay(): Display {
 }
 
 /**
- * 从粘贴目标快照里派生「前台窗口在哪块屏」，返回 null 表示不查、直接用鼠标所在屏：
+ * 把前台窗口 frame 换算成「焦点屏」，返回 null 表示不查、直接用鼠标所在屏：
  * - 只有一块屏时答案唯一，不该为它推迟浮窗显示。
  * - 非 macOS 平台没有可用的低成本前台窗口查询（Electron 只能看自己的窗口），
  *   Windows 一律按鼠标所在屏判定。
@@ -1633,20 +1654,19 @@ function getCursorDisplay(): Display {
  * 打字时，粘贴目标在 B 屏，浮窗也应该开在 B 屏，所以这里优先认前台窗口。
  */
 function startFocusedDisplayQuery(
-  captureOverlayPromise: Promise<CapturedOverlayTarget | null>,
+  focusedWindowFramePromise: Promise<Rectangle | null>,
 ): Promise<Display | null> | null {
   if (process.platform !== 'darwin') return null;
   if (screen.getAllDisplays().length <= 1) return null;
   const startedAt = Date.now();
-  return captureOverlayPromise
-    .then((captured) => {
-      if (!captured?.frame) return null;
+  return focusedWindowFramePromise
+    .then((frame) => {
+      if (!frame) return null;
       // getDisplayMatching 按重叠面积选屏，跨屏摆放的窗口也能落到主要那块。
-      const display = screen.getDisplayMatching(captured.frame);
+      const display = screen.getDisplayMatching(frame);
       log.debug('focused display resolved', {
         elapsedMs: Date.now() - startedAt,
         displayId: display?.id,
-        target: describePasteTarget(captured.target),
       });
       return display ?? null;
     })
@@ -1703,17 +1723,26 @@ function computeOverlayBounds(display: Display): Rectangle {
 }
 
 /**
- * 全局浮窗听写的词典 toast 贴着「刚才浮窗所在的位置」出现。浮窗 hide 后会被停到
- * 屏幕外的 OVERLAY_IDLE_BOUNDS，实时 bounds 不能当锚点，所以用最近一次定位结果。
+ * 全局浮窗听写的词典 toast 贴着「产生它的那次浮窗所在的位置」出现。浮窗 hide 后会
+ * 被停到屏幕外的 OVERLAY_IDLE_BOUNDS，实时 bounds 不能当锚点，所以用发布证据时拍
+ * 下的快照（见 pendingDictionaryToastAnchor）。
  *
- * 这份缓存是进程级的，可能早于当前显示器拓扑：复用前必须确认它的中心还落在某块
- * 现存屏幕上（否则外接屏拔掉后 toast 会整个落到屏幕外）。不满足条件、或调用方
- * 不是全局浮窗链路时，一律退回鼠标所在屏的默认位置。
+ * 三个条件都满足才用它，否则退回鼠标所在屏的默认位置：
+ * - 调用方确实是全局浮窗链路（应用内听写与浮窗位置无关）；
+ * - 呈现代次没变——变了说明期间又开过浮窗，这条 toast 会盖在新浮窗上；
+ * - 锚点中心仍落在某块现存屏幕上——否则外接屏拔掉后 toast 会整个落到屏幕外。
  */
 function resolveDictionaryToastAnchorBounds(anchorToOverlay: boolean): Rectangle {
-  if (anchorToOverlay && lastPresentedOverlayBounds
-    && isBoundsCenterOnDisplay(lastPresentedOverlayBounds, getOverlayPlacementDisplays())) {
-    return lastPresentedOverlayBounds;
+  const anchor = pendingDictionaryToastAnchor;
+  if (anchorToOverlay && anchor
+    && anchor.presentationSeq === overlayPresentationSeq
+    && isBoundsCenterOnDisplay(anchor.bounds, getOverlayPlacementDisplays())) {
+    return anchor.bounds;
+  }
+  if (anchorToOverlay && anchor) {
+    log.debug('dictionary toast anchor dropped', {
+      staleSession: anchor.presentationSeq !== overlayPresentationSeq,
+    });
   }
   return computeOverlayBounds(getCursorDisplay());
 }
@@ -1960,10 +1989,25 @@ type CapturedOverlayTarget = {
   frame: Rectangle | null;
 };
 
-async function captureMacPasteTarget(): Promise<CapturedOverlayTarget | null> {
+/**
+ * `onFocusedWindowFrame` 会在 helper 吐出前台窗口 frame 那一行时立刻回调——远早于
+ * 整个 capture 完成（AX 上下文采集在 Chromium 系编辑器里可能要几百毫秒）。浮窗
+ * 选屏只等这一行，所以不能等最终结果。
+ */
+async function captureMacPasteTarget(
+  options?: { onFocusedWindowFrame?: (frame: Rectangle | null) => void },
+): Promise<CapturedOverlayTarget | null> {
   if (process.platform !== 'darwin') return null;
+  const onFocusedWindowFrame = options?.onFocusedWindowFrame;
   try {
-    const helperResult = await runMacTextInsertionHelper(['--command', 'capture-target']);
+    const helperResult = await runMacTextInsertionHelper(['--command', 'capture-target'], {
+      onProgress: onFocusedWindowFrame
+        ? (event) => {
+          if (event.event !== 'focused-window-frame') return;
+          onFocusedWindowFrame(normalizeFocusedWindowFrame(event.frame));
+        }
+        : undefined,
+    });
     if (helperResult.ok && helperResult.target?.processName) {
       const frame = normalizeFocusedWindowFrame(helperResult.frame);
       log.debug(PASTE_DEBUG_TAG, 'capture target result (native)', {
@@ -2433,6 +2477,11 @@ function publishExternalDictionaryLearningEvidence(
 ): void {
   const window = getOverlayWindow();
   if (!window || window.isDestroyed()) return;
+  // 在这里给 toast 锚点拍快照：这条证据对应的浮窗现场就是「刚刚那一次」。之后
+  // 模型往返期间新开的浮窗会推进呈现代次，届时这份快照自动失效。
+  pendingDictionaryToastAnchor = lastPresentedOverlayBounds
+    ? { bounds: lastPresentedOverlayBounds, presentationSeq: overlayPresentationSeq }
+    : null;
   window.webContents.send('voice-input:dictionary-learning-evidence', { evidence });
 }
 
@@ -2518,17 +2567,29 @@ function macTextInsertionTargetArgs(pasteTarget: MacPasteTarget): string[] {
   return args;
 }
 
+/**
+ * helper 可以在最终结果之前先流式吐出若干「进度行」（每行一个 JSON，带 `event`
+ * 字段），最后一行才是命令结果。`onProgress` 会在进度行到达时同步回调；只有传了
+ * 它才走 spawn 逐行读取，其余调用保持原来的 execFile 缓冲路径。
+ */
 async function runMacTextInsertionHelper(
   args: string[],
-  options?: { input?: string; timeoutMs?: number },
+  options?: {
+    input?: string;
+    timeoutMs?: number;
+    onProgress?: (event: MacTextInsertionHelperResult) => void;
+  },
 ): Promise<MacTextInsertionHelperResult> {
   const helperPath = await resolveMacTextInsertionHelperPath();
-  const stdout = await execFilePromise(helperPath, args, 'Could not run macOS text insertion helper.', {
-    timeoutMs: options?.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
-    input: options?.input,
-  });
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+  const stdout = options?.onProgress
+    ? await spawnHelperWithProgressPromise(helperPath, args, timeoutMs, options.onProgress)
+    : await execFilePromise(helperPath, args, 'Could not run macOS text insertion helper.', {
+      timeoutMs,
+      input: options?.input,
+    });
   try {
-    return JSON.parse(stdout) as MacTextInsertionHelperResult;
+    return parseMacTextInsertionHelperResult(stdout);
   } catch (error) {
     // Don't include stdout in the error message: the helper may have printed
     // partial JSON or debug output containing AX-captured surrounding text from
@@ -2539,6 +2600,92 @@ async function runMacTextInsertionHelper(
       `Invalid helper response: ${error instanceof Error ? error.message : String(error)}. Stdout bytes: ${stdout.length}.`,
     );
   }
+}
+
+/** 取 stdout 的最后一行 JSON 作为命令结果（前面的行是流式进度事件）。 */
+export function parseMacTextInsertionHelperResult(stdout: string): MacTextInsertionHelperResult {
+  const lines = stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+  const lastLine = lines[lines.length - 1];
+  if (lastLine === undefined) throw new Error('Empty helper response');
+  return JSON.parse(lastLine) as MacTextInsertionHelperResult;
+}
+
+/**
+ * spawn helper 并逐行解析 stdout：非最后一行的 JSON 交给 onProgress，完整 stdout
+ * 仍然返回给调用方按最后一行取结果。只有需要「结果之前先拿到中间事件」的调用会
+ * 走这里（目前只有 capture-target 的前台窗口 frame）。
+ */
+function spawnHelperWithProgressPromise(
+  command: string,
+  args: string[],
+  timeoutMs: number,
+  onProgress: (event: MacTextInsertionHelperResult) => void,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    let stdout = '';
+    let pending = '';
+    let stderr = '';
+    let settled = false;
+
+    const settle = (run: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      run();
+    };
+    const timer = setTimeout(() => {
+      settle(() => {
+        child.kill('SIGTERM');
+        reject(new PasteCommandError(
+          'Could not run macOS text insertion helper.',
+          `Helper timed out after ${timeoutMs}ms.`,
+        ));
+      });
+    }, timeoutMs);
+
+    // 每收到一个完整换行就尝试解析：带 event 字段的是进度事件，最后一行结果不在
+    // 这里派发（由调用方从完整 stdout 取）。解析失败的行直接忽略——stdout 可能
+    // 含用户输入框文本，不进日志。
+    child.stdout.on('data', (chunk: Buffer) => {
+      const text = chunk.toString();
+      stdout += text;
+      pending += text;
+      const lines = pending.split('\n');
+      pending = lines.pop() ?? '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const parsed = JSON.parse(trimmed) as MacTextInsertionHelperResult & { event?: string };
+          if (parsed.event) onProgress(parsed);
+        } catch {
+          // 半行 / 非 JSON 输出：忽略，最终结果仍按最后一行解析。
+        }
+      }
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', (error) => {
+      settle(() => reject(new PasteCommandError(
+        'Could not run macOS text insertion helper.',
+        error.message,
+      )));
+    });
+    child.on('close', (code) => {
+      settle(() => {
+        if (code === 0) {
+          resolve(stdout);
+          return;
+        }
+        reject(new PasteCommandError(
+          'Could not run macOS text insertion helper.',
+          stderr.trim() || `Helper exited with code ${code}.`,
+        ));
+      });
+    });
+  });
 }
 
 let macTextInsertionHelperPathPromise: Promise<string> | null = null;

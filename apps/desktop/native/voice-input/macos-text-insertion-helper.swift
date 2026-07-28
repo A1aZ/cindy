@@ -456,6 +456,19 @@ func captureTargetPayload() -> [String: Any] {
   // processes would each read frontmostApplication at a slightly different
   // moment.
   let focusedFrame = focusedWindowFrame(for: app)
+  // Stream the frame out on its own line right away, before the (potentially
+  // slow) context capture below. The overlay only waits ~90ms for it in order
+  // to pick a display, while the AX context walk used by Chromium-style editors
+  // can take hundreds of milliseconds — emitting only at exit would make the
+  // frame routinely arrive too late to be useful. The frame is repeated in the
+  // final payload so buffered callers keep working.
+  if let focusedFrame = focusedFrame {
+    emitLine([
+      "event": "focused-window-frame",
+      "frame": focusedFrame.frame,
+      "frameSource": focusedFrame.source
+    ])
+  }
   var context = captureFocusedElementContext(for: app)
   var enhancedAxAttempted = false
   var enhancedAxHelped = false
@@ -1335,6 +1348,23 @@ func buildPasteResult(
     "enhancedAxAttempted": enhancedAxAttempted,
     "enhancedAxHelped": enhancedAxHelped
   ]
+}
+
+/**
+ Writes one JSON line and flushes it immediately.
+
+ stdout is a pipe here, so libc buffers it fully — without the explicit flush an
+ early "progress" line would not reach the parent until the process exits, which
+ would defeat the whole point of streaming it. The parent treats the LAST JSON
+ line as the command result and earlier lines as tagged progress events.
+ */
+func emitLine(_ payload: [String: Any]) {
+  guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+        let text = String(data: data, encoding: .utf8) else {
+    return
+  }
+  print(text)
+  fflush(stdout)
 }
 
 func emit(_ payload: [String: Any]) {

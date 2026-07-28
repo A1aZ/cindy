@@ -316,9 +316,41 @@ describe('findPendingForkOrigin 来源标记重建', () => {
     await expect(findPendingForkOrigin('s1')).resolves.toBe('parent-1');
   });
 
-  it('子会话跑过一轮(token 已累加)后不再返回', async () => {
+  it('子会话跑过一轮(token 已累加且该轮 user 行仍存活)后不再返回', async () => {
     const sqlite = createDb();
     insertForkedSession(sqlite, 'parent-1', 1_234);
+    insertRowAt(sqlite, 'user', FORK_AT + 10);
+    await expect(findPendingForkOrigin('s1')).resolves.toBeNull();
+  });
+
+  it('Codex 回滚掉首个 post-fork turn 后重新 arm(token 计数不随 rewind 回退)', async () => {
+    // rewind 把该轮的 user / assistant 都标上 rewind_at，但 total_token_usage 留在原地；
+    // 只看 token 会让「回滚后重发」的 Codex 会话永远拿不回来源标记。
+    const sqlite = createDb();
+    insertForkedSession(sqlite, 'parent-1', 4_321);
+    sqlite
+      .prepare(
+        `INSERT INTO messages (
+          id, client_id, session_id, role, content, tool_use_id, agent_meta,
+          agent_kind, created_at, rewind_at
+        ) VALUES ('u-r', 'u-r', 's1', 'user', '"q"', NULL, NULL, 'codex', ?, ?)`,
+      )
+      .run(FORK_AT + 10, FORK_AT + 50);
+    sqlite
+      .prepare(
+        `INSERT INTO messages (
+          id, client_id, session_id, role, content, tool_use_id, agent_meta,
+          agent_kind, created_at, rewind_at
+        ) VALUES ('a-r', 'a-r', 's1', 'assistant', '"a"', NULL, NULL, 'codex', ?, ?)`,
+      )
+      .run(FORK_AT + 20, FORK_AT + 50);
+    await expect(findPendingForkOrigin('s1')).resolves.toBe('parent-1');
+  });
+
+  it('Codex 首轮完成(token>0 且 user 行存活)判定已消费', async () => {
+    const sqlite = createDb();
+    insertForkedSession(sqlite, 'parent-1', 4_321);
+    insertRowAt(sqlite, 'user', FORK_AT + 10);
     await expect(findPendingForkOrigin('s1')).resolves.toBeNull();
   });
 
@@ -347,6 +379,7 @@ describe('findPendingForkOrigin 来源标记重建', () => {
     // 重建原生上下文时仍要带上,否则新上下文不知道自己是分叉。
     const sqlite = createDb();
     insertForkedSession(sqlite, 'parent-1', 5_000);
+    insertRowAt(sqlite, 'user', FORK_AT + 10);
     await expect(findPendingForkOrigin('s1')).resolves.toBeNull();
     await expect(findForkParentSessionId('s1')).resolves.toBe('parent-1');
   });

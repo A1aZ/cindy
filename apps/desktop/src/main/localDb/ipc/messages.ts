@@ -1535,11 +1535,8 @@ export async function findPendingForkOrigin(sessionId: string): Promise<string |
   // fork 之后 /clear 过:渲染历史与原生上下文都被显式重置成新对话,再把来源标记
   // 灌进去等于往用户主动清空的上下文里塞旧元信息。
   if (sessRow.clearedAt !== null && sessRow.clearedAt >= sessRow.createdAt) return null;
-  // 信号一(Codex):fork 把 total_token_usage reset 为 0,只有真跑过 turn 才被累加。
-  if ((sessRow.totalTokenUsage ?? 0) > 0) return null;
-  // 信号二(Claude 与兜底):Claude 完成路径不累加该列——recordSessionTurnTokens 只在
-  // register.ts 的 `event.source === 'codex'` done 分支调用,单靠信号一会让 Claude
-  // 会话每次重启后重复注入。回落到"子会话自己产生过 assistant 行"。
+  // 信号一(引擎无关):子会话自己产生过 assistant 行。带 rewindAt 过滤,所以回滚掉
+  // 首个 post-fork turn 之后该信号会自动失效——标记重新 arm,正是期望行为。
   const [assistantAfterFork] = await db
     .select({ id: messages.id })
     .from(messages)
@@ -1552,7 +1549,27 @@ export async function findPendingForkOrigin(sessionId: string): Promise<string |
       ),
     )
     .limit(1);
-  return assistantAfterFork ? null : sessRow.parentSessionId;
+  if (assistantAfterFork) return null;
+  // 信号二(Codex 补充):Claude 完成路径不累加 total_token_usage(唯一调用点在
+  // register.ts 的 codex done 分支),所以只有 Codex 会走到这里。**必须搭配一条仍
+  // 存活的 user 行**才作数:token 计数不随 rewind 回退,单看它会让"回滚掉首个
+  // post-fork turn 再重发"的 Codex 会话永远拿不回来源标记。
+  if ((sessRow.totalTokenUsage ?? 0) > 0) {
+    const [userAfterFork] = await db
+      .select({ id: messages.id })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.sessionId, sessionId),
+          eq(messages.role, 'user'),
+          isNull(messages.rewindAt),
+          gte(messages.createdAt, sessRow.createdAt),
+        ),
+      )
+      .limit(1);
+    if (userAfterFork) return null;
+  }
+  return sessRow.parentSessionId;
 }
 
 /**

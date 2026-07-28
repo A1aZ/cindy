@@ -60,8 +60,8 @@ export const agentHandoffPending = createAgentHandoffPendingRegistry(async (sess
       ? composeForkOriginHandoff(forkParentSessionId, pending)
       : pending;
   }
-  // 没有交接 = 纯首发注入场景,这才该看一次性的消费态。非 fork 会话上面已短路,
-  // 不会多发这条查询。
+  // 没有交接 = 纯首发注入场景,这才该看一次性的消费态。非 fork 会话在这里短路,
+  // 只省掉这条**第二**次查询;上面 Promise.all 里的两条对所有会话都会发出。
   if (!forkParentSessionId) return null;
   const pendingForkOrigin = await findPendingForkOrigin(sessionId).catch(() => null);
   return pendingForkOrigin ? buildForkOriginHandoff(pendingForkOrigin) : null;

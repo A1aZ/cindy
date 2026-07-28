@@ -287,11 +287,24 @@ export function buildHandoffText(
   return capPreservingTerminator(assembleHandoffText(turns, messages, opts, 1), opts);
 }
 
+const REBUILD_TERMINATOR = "== End of rebuild note; the user's new message follows ==";
+const HANDOFF_TERMINATOR = "== End of handoff note; the user's new message follows ==";
+const FORK_TERMINATOR = "== End of fork note; the user's new message follows ==";
+
 /** 结束标记——交接正文与"用户的新消息"之间唯一的分隔,任何情况下都要留住。 */
 function handoffTerminator(opts: BuildHandoffOptions): string {
-  return opts.reason === 'message-deletion'
-    ? "== End of rebuild note; the user's new message follows =="
-    : "== End of handoff note; the user's new message follows ==";
+  return opts.reason === 'message-deletion' ? REBUILD_TERMINATOR : HANDOFF_TERMINATOR;
+}
+
+/** 拆出已有文本尾部的结束标记(含其前置空行),供二次裁剪时原样保留。 */
+function splitTrailingTerminator(text: string): [body: string, tail: string] {
+  for (const terminator of [HANDOFF_TERMINATOR, REBUILD_TERMINATOR, FORK_TERMINATOR]) {
+    const trimmed = text.trimEnd();
+    if (!trimmed.endsWith(terminator)) continue;
+    const tailStart = trimmed.length - terminator.length;
+    return [text.slice(0, tailStart), text.slice(tailStart)];
+  }
+  return [text, ''];
 }
 
 /**
@@ -481,9 +494,17 @@ export function composeForkOriginHandoff(
   parentSessionId: string,
   pendingHandoff: string | null,
 ): string {
-  return pendingHandoff
-    ? `${forkOriginFactLine(parentSessionId)}\n\n${pendingHandoff}`
-    : buildForkOriginHandoff(parentSessionId);
+  if (!pendingHandoff) return buildForkOriginHandoff(parentSessionId);
+  const fact = forkOriginFactLine(parentSessionId);
+  const composed = `${fact}\n\n${pendingHandoff}`;
+  if (composed.length <= HANDOFF_HARD_CAP) return composed;
+  // 交接正文可能**已经**被 buildHandoffText 顶到上限(工具密集的长历史),再前置
+  // fork 事实就会顶破它。从正文中部裁,两头都留住:前面的 fork 事实与它自带的结束
+  // 标记——否则这条路径正好在最需要分隔的长历史上丢掉分隔。
+  const [body, tail] = splitTrailingTerminator(pendingHandoff);
+  const room = HANDOFF_HARD_CAP - fact.length - 2 - tail.length;
+  if (room <= 0) return buildForkOriginHandoff(parentSessionId);
+  return `${fact}\n\n${body.slice(0, room)}${tail}`;
 }
 
 /** send 路径的 wire 消息形态(与 makerSendTransaction 的 IpcUserMessage 对齐)。 */
@@ -542,18 +563,34 @@ export function createAgentHandoffPendingRegistry(
   const pending = new Map<string, string | null>();
   /** 值由 queryPending 产出(已含组合结果)的 session,decorate 必须跳过它们。 */
   const composedByQuery = new Set<string>();
+  /**
+   * 每个 session 的状态代次。peek 里两处 await 之后都要写回 Map,而 `/clear` 与
+   * `set` 可能正好落在那个窗口里——不带代次校验地写回,会把 clear 掉的旧交接原样
+   * 塞回缓存并标成已组合,下一次 send 就绕过 `cleared_at` 把旧上下文灌进用户刚
+   * 清空的会话。任何改变状态的入口都递增它,await 后代次不符就丢弃本次结果。
+   */
+  const generation = new Map<string, number>();
+  const bump = (sessionId: string): void => {
+    generation.set(sessionId, (generation.get(sessionId) ?? 0) + 1);
+  };
+  const genOf = (sessionId: string): number => generation.get(sessionId) ?? 0;
   return {
     set(sessionId, handoff) {
       pending.set(sessionId, handoff);
       // 外部直接塞进来的交接没经过 queryPending 的组合,重新纳入 decorate 范围。
       composedByQuery.delete(sessionId);
+      bump(sessionId);
     },
     async peek(sessionId) {
       if (pending.has(sessionId)) {
         const cached = pending.get(sessionId) ?? null;
         if (cached === null || !decorateCached || composedByQuery.has(sessionId)) return cached;
+        const gen = genOf(sessionId);
         try {
           const decorated = await decorateCached(sessionId, cached);
+          // 期间被 clear / set:本次结果基于已作废的状态,既不写回也不返回——
+          // 返回它等于把 clear 掉的交接注入这一次发送。
+          if (genOf(sessionId) !== gen) return null;
           // 组合结果回写并标记为已组合:同一条待注入交接在 consume 之前可能被 peek
           // 多次(首发被拒后的重试),没有这步每次都要重跑一遍 decorate 的 DB 查询,
           // 而且要靠 decorate 自身幂等才不会叠加。
@@ -566,6 +603,7 @@ export function createAgentHandoffPendingRegistry(
           return cached;
         }
       }
+      const gen = genOf(sessionId);
       let fromDb: string | null = null;
       try {
         fromDb = await queryPending(sessionId);
@@ -573,6 +611,7 @@ export function createAgentHandoffPendingRegistry(
         // 查询失败按无 pending 处理(不阻塞发送);下次 send 重查。
         return null;
       }
+      if (genOf(sessionId) !== gen) return null;
       pending.set(sessionId, fromDb);
       composedByQuery.add(sessionId);
       return fromDb;
@@ -580,11 +619,13 @@ export function createAgentHandoffPendingRegistry(
     consume(sessionId) {
       pending.set(sessionId, null);
       composedByQuery.delete(sessionId);
+      bump(sessionId);
       onConsume?.(sessionId);
     },
     clear(sessionId) {
       pending.delete(sessionId);
       composedByQuery.delete(sessionId);
+      bump(sessionId);
     },
   };
 }

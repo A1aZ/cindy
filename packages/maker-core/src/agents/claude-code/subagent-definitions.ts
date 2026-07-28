@@ -462,17 +462,22 @@ async function scanSubagentDefinitions(
     { dir: userAgentsDir(opts.env, opts.hostEnv ?? process.env), scope: 'user' as const },
   ];
 
-  // 同名去重。跨作用域的优先级是**确定的**(项目近者 > 项目远者 > 用户,平台文档如此),
-  // 所以先到者胜;但**同一作用域内**两个文件用同一个 `name` 时,cc 按文件系统枚举顺序任选
-  // 其一 —— 那个顺序我们复现不了(ext4 与 APFS 不同,也不保证等于我们的名字排序)。
+  // 同名去重。分两种情况,因为「平台会选哪一个」的可知性完全不同:
   //
-  // 与其赌顺序,不如让判定**与顺序无关**:同名同作用域的候选里,**声明了 model 的那个胜出**。
-  // 这样无论文件系统怎么枚举,我们的结论都一样,#2 那类「我们的排序挑了另一个」的漂移就不存在了。
-  // 残留代价诚实说明:若 cc 实际加载的是没写 model 的那份,我们会多算一次「有人声明」→ 默认值
-  // 不生效。选这个方向是因为本 PR 的不变量是「用户显式写下的 model 不被静默覆盖」,而同作用域
-  // 重名本身是配置错误(cc 自己也只是任选其一)。
-  const byName = new Map<string, DiscoveredSubagent>();
-  for (const { dir, scope } of scoped) {
+  // 1. **来自不同扫描根**(项目近者 / 项目远者 / 用户):优先级是平台文档确定的,近者、项目优先。
+  //    `scoped` 已按该优先级排好,所以先到者胜、后来者一律不动。
+  //    注意不能用 `scope` 字段判断这件事 —— 它只有 'project' / 'user' 两个值,嵌套项目的
+  //    「近」与「远」两个根都是 'project',拿它当同源判据会把确定的优先级也一起打翻。
+  // 2. **来自同一个扫描根**(比如 `agents/x.md` 与 `agents/review/x.md`):cc 在这个根里按文件
+  //    系统枚举顺序任选其一 —— 那个顺序我们复现不了(ext4 与 APFS 不同,也不等于我们的名字
+  //    排序)。与其赌顺序,不如让判定**与顺序无关**:声明了 model 的那个胜出。这样无论文件系统
+  //    怎么枚举,结论都一样。
+  //
+  // 第 2 种的残留代价诚实说明:若 cc 实际加载的是没写 model 的那份,我们会多算一次「有人声明」
+  // → 默认值不生效。选这个方向是因为本 PR 的不变量是「用户显式写下的 model 不被静默覆盖」,
+  // 而同一个根里重名本身是配置错误(cc 自己也只是任选其一)。
+  const byName = new Map<string, { def: DiscoveredSubagent; rootIndex: number }>();
+  for (const [rootIndex, { dir, scope }] of scoped.entries()) {
     if (!(await isDirectory(dir))) continue;
     for (const filePath of await collectMarkdownFiles(dir, budget, visitedDirs)) {
       budget.checkTime();
@@ -480,18 +485,16 @@ async function scanSubagentDefinitions(
       if (!found) continue;
       const existing = byName.get(found.name);
       if (!existing) {
-        byName.set(found.name, found);
+        byName.set(found.name, { def: found, rootIndex });
         continue;
       }
-      // 已有同名:跨作用域(existing 来自更高优先级)一律不动;同作用域则让声明了 model 的胜出。
-      if (
-        existing.scope === found.scope
-        && existing.declaredModel === undefined
-        && found.declaredModel !== undefined
-      ) {
-        byName.set(found.name, found);
+      // 不同扫描根 → 已存在的那个优先级更高,不动(情况 1)。
+      if (existing.rootIndex !== rootIndex) continue;
+      // 同一个扫描根 → 声明了 model 的胜出(情况 2)。
+      if (existing.def.declaredModel === undefined && found.declaredModel !== undefined) {
+        byName.set(found.name, { def: found, rootIndex });
       }
     }
   }
-  return [...byName.values()];
+  return [...byName.values()].map((e) => e.def);
 }

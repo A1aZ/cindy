@@ -539,6 +539,46 @@ describe('discoverSubagentDefinitions', () => {
     expect(found[0].declaredModel).toHaveLength(256);
   });
 
+  // 回归:`scope` 只有 'project' / 'user' 两个值,嵌套项目的「近」根与「远」根都是 'project'。
+  // 拿 scope 当同源判据,会让「声明者胜」的 tie-break 跨目录生效,把平台**确定**的近者优先
+  // 也一起打翻 → 误判「有人声明」→ 删掉 env → 用户配的默认值静默失效。
+  it('嵌套项目目录:近者照旧胜出,即便远者才声明了 model', async () => {
+    const outer = path.join(root, 'repo');
+    const inner = path.join(outer, 'packages', 'app');
+    await fs.mkdir(inner, { recursive: true });
+    await writeAgent(
+      path.join(outer, '.claude', 'agents'),
+      'n.md',
+      'name: n\ndescription: 远者写了 model\nmodel: opus',
+    );
+    await writeAgent(path.join(inner, '.claude', 'agents'), 'n.md', 'name: n\ndescription: 近者没写');
+
+    const found = await discoverSubagentDefinitions({
+      workingDir: inner,
+      env: { CLAUDE_CONFIG_DIR: path.join(root, 'empty-home') },
+    });
+
+    expect(found).toHaveLength(1);
+    // 近者胜 → 没人声明 model → 上层应照旧设 env(默认值继续生效)。
+    expect(found[0].declaredModel).toBeUndefined();
+    // 不能拿 inner 前缀比 —— projectAgentsDirs 会 realpath,macOS 上 /var 会解成 /private/var。
+    expect(found[0].filePath).toContain(path.join('packages', 'app'));
+  });
+
+  it('同一个扫描根内跨子目录重名:仍按「声明者胜」(该根内的枚举顺序不可知)', async () => {
+    const agents = path.join(root, 'repo', '.claude', 'agents');
+    await writeAgent(agents, 'x.md', 'name: dup\ndescription: 根下没写 model');
+    await writeAgent(path.join(agents, 'review'), 'x.md', 'name: dup\ndescription: 子目录写了\nmodel: opus');
+
+    const found = await discoverSubagentDefinitions({
+      workingDir: path.join(root, 'repo'),
+      env: { CLAUDE_CONFIG_DIR: path.join(root, 'empty-home') },
+    });
+
+    expect(found).toHaveLength(1);
+    expect(found[0].declaredModel).toBe('opus');
+  });
+
   it('目录不存在 / workingDir 非绝对路径都安全返回空,不抛错', async () => {
     await expect(
       discoverSubagentDefinitions({

@@ -1277,6 +1277,57 @@ describe('provider:custom:* CRUD handlers', () => {
     expect(await listCustomProviders()).toHaveLength(1);
     expect(keys.get('codex')).toBe('must-survive');
   });
+
+  it('删除事务持 disable 写队列直到目录刷新:并发停用写排在刷新后,按成员校验拒绝', async () => {
+    // R22:只把清理入队的话,清理落盘后队列即释放,「删除完成前」的窗口里并发
+    // MODEL_DISABLE_SET 仍能从未刷新的 listProviders() 里找到该 provider、预埋新
+    // override,同 id 重建复活停用状态。整体持锁后,并发写必须排到 afterChange 刷完
+    // 目录之后 —— 那时成员校验已看不到该 provider,自然 INVALID_PARAMS 拒绝。
+    mountDb();
+    const harness = new IpcHarness();
+    let catalogHasProvider = true;
+    const deps = makeDeps({
+      listProviders: async () =>
+        catalogHasProvider ? [catalogView('openrouter', { codex: ['meta/llama-4'] })] : [],
+      stageClearProviderDisableOverrides: vi.fn(() => () => true),
+    });
+    registerProviderHandlers(harness, deps);
+    // create 的收尾也调 refreshCatalog(makeDeps 默认无门闩,直接放行);create 完成后
+    // 再把 refreshCatalog 换成带门闩的实现给删除用。
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, validConfig, { codex: 'k' });
+    let releaseDeleteRefresh!: () => void;
+    const deleteRefreshGate = new Promise<void>((resolve) => {
+      releaseDeleteRefresh = resolve;
+    });
+    let deleteRefreshEntered!: () => void;
+    const deleteRefreshEnteredGate = new Promise<void>((resolve) => {
+      deleteRefreshEntered = resolve;
+    });
+    (deps.refreshCatalog as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      deleteRefreshEntered();
+      await deleteRefreshGate;
+      catalogHasProvider = false;
+    });
+
+    const del = harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_DELETE, 'openrouter');
+    // 等删除事务推进到 afterChange(此刻配置已删、队列仍被删除事务持有)。
+    await deleteRefreshEnteredGate;
+    const set = harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+      kind: 'model', providerId: 'openrouter', modelIds: ['meta/llama-4'], disabled: true,
+    });
+    let setSettled = false;
+    void set.then(() => { setSettled = true; }, () => { setSettled = true; });
+    await Promise.resolve();
+    await Promise.resolve();
+    // 队列被删除事务持有 —— 并发停用写不得在目录刷新前落盘或返回。
+    expect(setSettled).toBe(false);
+    expect(deps.setModelsDisabled).not.toHaveBeenCalled();
+
+    releaseDeleteRefresh();
+    await expect(del).resolves.toEqual({ ok: true });
+    await expect(set).rejects.toThrow(/INVALID_PARAMS.*unknown providerId/);
+    expect(deps.setModelsDisabled).not.toHaveBeenCalled();
+  });
 });
 
 describe('provider:presets handler', () => {

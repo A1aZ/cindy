@@ -793,12 +793,18 @@ function ModelSelectorContentView({
       providers,
     });
     if (!rowAgentKind) return true;
+    // 逐模型停用与供应商级 suspended 同为准入硬门:被控端某来源整体启用但该模型被
+    // 点名停用(CatalogModel.disabled,由被控端把 override 烘进 provider 视图)时,
+    // 该拷贝不算可路由 —— 只数「来源连接且启用 + 模型条目未停用」的拷贝,否则远程
+    // flat picker(如 CreateWorkerPopover)选中后到 Main 准入才失败
+    // (PR #744 review 第二十二轮)。
     return !providers.some(
       (provider) =>
         provider.connected &&
         !provider.suspended &&
         provider.agents.includes(rowAgentKind) &&
-        providerOffersModel(provider, id, rowAgentKind),
+        providerOffersModel(provider, id, rowAgentKind) &&
+        getModel(provider, id, rowAgentKind)?.disabled !== true,
     );
   };
 

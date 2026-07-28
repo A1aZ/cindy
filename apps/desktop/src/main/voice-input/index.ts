@@ -1750,6 +1750,13 @@ export async function transcribeVoiceInputAudioFile(
 ): Promise<VoiceInputAudioFileTranscriptionResult> {
   const provider: VoiceInputProviderKind = 'litellm-batch';
   const profile = getVoiceInputAsrProfile(provider);
+  // 停用轴(PR #744 review 第二十二轮):device-link 批量转写与内联 ASR 链同为经
+  // XD 网关凭证的新付费调用 —— 本路径恒用 litellm proxy key 直连计费,不经
+  // voice-server,提交前按当前 override 复查,停用即拒绝。
+  const routeProviderId = asrProfileRouteProviderId(profile);
+  if (routeProviderId && isProviderRouteSuspended(routeProviderId)) {
+    throw new Error('voice transcription route disabled in settings');
+  }
   const { proxyApiKey, proxyBaseUrl } = readLiteLlmProxyConfig();
   if (!proxyApiKey || !proxyBaseUrl) throw new Error(profile.missingCredentialMessage);
   const text = await transcribeLiteLlmAudioFile({

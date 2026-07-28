@@ -1533,6 +1533,24 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // 已被用户在聊天里改过,必须按它 clamp,否则用 enqueue 时的陈旧 targetModel 会张冠李戴
     // (PR #479 review:follow-session 用 live.model / setModel 失败用 live.model 两条)。
     const runtimeModel = modelChanged && modelApplied ? targetModel : live.model;
+    // 停用轴终检(PR #744 review 第二十二轮):上方裁决的对象是 targetModel,但实际
+    // 运行模型可能不是它 —— setModel 失败回退 live.model,或 follow-session(无显式
+    // model)时 live.model 在排队等待期间已被用户改过。这两种情形下实际路由从未被
+    // 裁决过,而本次派发就是一次新的付费调用:runtimeModel 偏离 targetModel 时按
+    // (runtimeModel, 落地来源) 重新裁决,reject 即中止派发(与上方同语义,由排队
+    // onAccepted 在 vendor dispatch 之前收口)。
+    if (this.deps.checkModelRoute && runtimeModel !== targetModel) {
+      const actual = await this.deps.checkModelRoute(
+        live.agentKind,
+        runtimeModel,
+        applyProviderId ?? currentProviderId,
+      );
+      if (actual.kind === 'reject') {
+        throw new QueuedRouteDisabledError(
+          `schedule route unavailable: runtime model "${runtimeModel}" is disabled in settings (${actual.reason})`,
+        );
+      }
+    }
     // 只 reconcile schedule **显式配置**的 effort。follow-effort(schedule.effort 留空)不在排队路径
     // clamp:baseline.effort 是 enqueue 时刻的快照,排队等待期间用户可能已在聊天里改过 effort,拿旧
     // 快照 clamp 后 setEffort 会覆盖用户的新选择;而运行时无 live effort getter、拿不到当前真实值 ——

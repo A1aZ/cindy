@@ -640,7 +640,11 @@ async function executeCandidates(
       // 逐候选执行前按**当前** override 重查(PR #744 review 第二十一轮):前一个
       // 候选失败/超时可能耗时数十秒,期间本候选可能已被停用 —— 不再对其付费下单,
       // 记 model_unavailable 落到下一候选。
-      if (isUtilityRouteDisabled(candidate.profile)) {
+      // 本函数只服务显式来源路径(custom / builtin),candidate.providerId 就是目录
+      // 供应商 id —— 直接按 (来源, 模型) 查 override,不做 transport 推断:显式
+      // anthropic/custom 走 litellm wire、xai 走 responses wire,按 transport 推断
+      // 会查到 xd/openai 的 override 上(PR #744 review 第二十二轮)。
+      if (isProviderModelRouteDisabled(candidate.providerId, candidate.model)) {
         attempts.push(skippedAttempt(candidate.profile, 'model_unavailable'));
         continue;
       }

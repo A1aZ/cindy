@@ -891,33 +891,42 @@ export function registerProviderHandlers(
         // OAuth 形态自定义供应商的凭证 blob 一并清掉（apiKey 形态无 blob，幂等无害）。
         let restoreOAuthCredentials: (() => boolean) | null = null;
         let restoreDisableOverrides: (() => boolean) | null = null;
-        try {
-          // 停用 override 清理进事务(第二十轮):放在配置删除之前,后续任一步失败
-          // 由恢复函数把停用状态原样写回;清理自身抛错时事务未产生破坏,删除中止,
-          // 不再出现「配置删了、override 残留」让同 id 重建复活旧停用状态。
-          restoreDisableOverrides =
-            (await enqueueDisableWrite(
-              () => deps.stageClearProviderDisableOverrides?.(providerId) ?? null,
-            )) ?? null;
-          restoreOAuthCredentials = deps.removeOAuthCredentials(providerId);
-          if (!restoreOAuthCredentials) {
-            throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
+        // 整个删除事务(清 override → 删凭证 → 删配置 → 刷目录)在 disable 写队列**内**
+        // 执行,持队列直到 afterChange 刷完 active-catalog:只把清理入队的话,清理落盘
+        // 后队列即释放,「删除完成前」的窗口里并发 MODEL_DISABLE_SET 仍能从未刷新的
+        // listProviders() 里找到该 provider、预埋新 override,同 id 重建照旧复活停用
+        // 状态。整体持锁后,并发写会排到目录刷新之后,成员校验自然拒绝
+        // (PR #744 review 第二十二轮)。队列内不得再调 enqueueDisableWrite(自等死锁),
+        // 清理与恢复都直接调用。
+        await enqueueDisableWrite(async () => {
+          try {
+            // 停用 override 清理进事务(第二十轮):放在配置删除之前,后续任一步失败
+            // 由恢复函数把停用状态原样写回;清理自身抛错时事务未产生破坏,删除中止,
+            // 不再出现「配置删了、override 残留」让同 id 重建复活旧停用状态。
+            restoreDisableOverrides =
+              deps.stageClearProviderDisableOverrides?.(providerId) ?? null;
+            restoreOAuthCredentials = deps.removeOAuthCredentials(providerId);
+            if (!restoreOAuthCredentials) {
+              throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
+            }
+            await deleteCustomProvider(providerId);
+          } catch (err) {
+            const overridesRestored = !restoreDisableOverrides || restoreDisableOverrides();
+            const oauthRestored = !restoreOAuthCredentials || restoreOAuthCredentials();
+            const keysRestored = restoreProviderKeys(providerId, keySnapshots);
+            if (!oauthRestored || !keysRestored || !overridesRestored) {
+              throwIpcError(
+                'INTERNAL',
+                'provider deletion failed and existing credentials could not be restored',
+              );
+            }
+            throw err;
           }
-          await deleteCustomProvider(providerId);
-        } catch (err) {
-          const overridesRestored =
-            !restoreDisableOverrides || (await enqueueDisableWrite(restoreDisableOverrides));
-          const oauthRestored = !restoreOAuthCredentials || restoreOAuthCredentials();
-          const keysRestored = restoreProviderKeys(providerId, keySnapshots);
-          if (!oauthRestored || !keysRestored || !overridesRestored) {
-            throwIpcError(
-              'INTERNAL',
-              'provider deletion failed and existing credentials could not be restored',
-            );
-          }
-          throw err;
-        }
-        await afterChange();
+          // 刷目录也在队列内:队列释放的那一刻 listProviders() 必须已看不到该
+          // provider。afterChange 失败时配置已删,凭证/override 不回写(与改动前
+          // 语义一致 —— 恢复只覆盖删除本身失败的场景)。
+          await afterChange();
+        });
         return { ok: true };
       } finally {
         finishOAuthMutation(providerId, generation);

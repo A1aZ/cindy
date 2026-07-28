@@ -334,10 +334,36 @@ describe('createAgentHandoffPendingRegistry', () => {
     const reg = createAgentHandoffPendingRegistry(async () => null);
     // agent-switch / 消息删除在读历史之前取纪元
     const gen = reg.readGeneration('s1');
-    // 期间用户 /clear
+    // 期间用户 /clear:立墓碑 → cleared_at 落库 → 推进纪元(handler 的真实顺序)
     reg.invalidate('s1');
+    reg.markClearBoundarySettled('s1');
     // 异步活干完才写回——这份交接算的是 clear 前的历史
     reg.set('s1', 'STALE-PRE-CLEAR-HANDOFF', gen);
+    expect(await reg.peek('s1')).toBeNull();
+  });
+
+  it('纪元晚于 DB 边界:invalidate 本身不推进纪元,墓碑却已同步生效', async () => {
+    // /clear handler 里 invalidate 与 cleared_at 落库之间有个 await 窗口。纪元若在
+    // invalidate 就推进,窗口内启动的切换会同时拿到「clear 后的纪元」和「clear 前的
+    // DB 历史」——校验通过,旧交接盖掉墓碑。所以纪元必须留到落库之后。
+    const query = vi.fn(async () => 'FROM-DB-PRE-CLEAR');
+    const reg = createAgentHandoffPendingRegistry(query);
+    reg.set('s1', 'OLD-HANDOFF');
+    const genBeforeClear = reg.readGeneration('s1');
+
+    reg.invalidate('s1');
+    // 契约本体:墓碑立了,纪元还没动——窗口内启动的切换只可能取到 clear 前的值
+    expect(reg.readGeneration('s1')).toBe(genBeforeClear);
+    const genInWindow = reg.readGeneration('s1');
+    // 与此同时,窗口内到达的 send 已经拿不到旧交接(墓碑同步生效,且不回落 DB)
+    expect(await reg.peek('s1')).toBeNull();
+    expect(query).not.toHaveBeenCalled();
+
+    // cleared_at 落库完成 → 推进纪元
+    reg.markClearBoundarySettled('s1');
+    expect(reg.readGeneration('s1')).not.toBe(genBeforeClear);
+    // 那个窗口内启动、按 clear 前历史算出的交接写回时被丢弃
+    reg.set('s1', 'STALE-PRE-CLEAR-HANDOFF', genInWindow);
     expect(await reg.peek('s1')).toBeNull();
   });
 

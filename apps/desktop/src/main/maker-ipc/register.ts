@@ -6996,7 +6996,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     // 缓存仍在),下次 send 会把旧血缘灌进用户刚显式清空的上下文。
     //
     // 用 invalidate(留 null 墓碑)而不是 clear(删条目):删条目会让后续 send 回落到
-    // DB 重建,把旧交接捞回来再缓存住。
+    // DB 重建,把旧交接捞回来再缓存住。墓碑同步生效,窗口内的 send 立刻拿到 null;
+    // clear 纪元则要等下面 cleared_at 落库之后才推进。
     agentHandoffPending.invalidate(sid);
     getAgentIslandService()?.notifyQueueEmptied(sid);
     // 清上下文后,active 目标失去其依据(objective 引用的内容已被抹掉)→ 一并清除目标。
@@ -7012,13 +7013,22 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       typeof clearBoundary === 'number'
         ? clearBoundary
         : new Date(clearBoundary).getTime();
-    await clearSessionContextInDb(sid, clearBoundaryMs).catch((err) => {
-      log.warn('clear session context persist failed', {
+    try {
+      await clearSessionContextInDb(sid, clearBoundaryMs);
+    } catch (err) {
+      // 落库失败不阻断 /clear:内存墓碑已经立了,这一次以及后续 send 都拿不到旧交接。
+      // 残余风险是 DB 里没有 cleared_at,进程重启后 findPendingAgentHandoff 可能把
+      // clear 之前的交接重建出来——renderer 侧随后还会写一次同值(sdkSessionId + clearedAt),
+      // 那是这里的第二次机会。用 error 级别,便于事后从日志确认是否走到过这条路。
+      log.error('clear session context persist failed', {
         sessionId: sid,
         remoteInvoke,
         err: err instanceof Error ? err.message : String(err),
       });
-    });
+    }
+    // 纪元在落库尝试**结束之后**才推进:成功则 DB 边界已就位,失败则宁可把在途那批
+    // 按过期历史算出的交接一并丢弃。顺序不可颠倒,理由见 markClearBoundarySettled 注释。
+    agentHandoffPending.markClearBoundarySettled(sid);
     return projection;
   });
 

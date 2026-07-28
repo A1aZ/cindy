@@ -34,7 +34,8 @@ const PUSH_ENABLED_KEY = 'cindy.push.enabled';
 const PUSH_REGISTERED_KEY = 'cindy.push.registered';
 /**
  * 登出/终止时注销失败的待补偿区域集合：离线失败后保留原区域；对应窄权限
- * capability 单独放 SecureStore，下次启动不依赖新的登录 token 即可重放。
+ * capability 单独放 SecureStore；下次登录后用当前有效 token 通过原区域配置的
+ * peer issuer 验签，再对 capability + device 做联合撤销。
  */
 const PUSH_PENDING_UNREGISTER_KEY = 'cindy.push.pendingUnregister';
 /**
@@ -366,6 +367,7 @@ async function deletePushTokenWithAccessToken(
 async function deletePushTokenWithProofs(
   realm: ClientEndpointRegion,
   proofs: PushRevocationProof[],
+  accessToken: string,
 ): Promise<void> {
   if (proofs.length === 0) {
     throw new Error('missing push revocation proof');
@@ -378,7 +380,10 @@ async function deletePushTokenWithProofs(
       proofs.map((proof) =>
         fetch(deviceLinkBaseForRealm(realm) + PUSH_TOKEN_REVOCATION_PATH, {
           method: 'DELETE',
-          headers: { 'content-type': 'application/json' },
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'content-type': 'application/json',
+          },
           body: JSON.stringify(proof),
           signal: controller.signal,
         }),
@@ -560,9 +565,9 @@ async function unregisterPushTokenBestEffortInternal(accessToken: string | null)
     proofs = await ensureRevocationProofs(realm, legacyDeviceToken);
 
     let deleted = false;
-    if (proofs.length > 0) {
+    if (proofs.length > 0 && accessToken) {
       try {
-        await deletePushTokenWithProofs(realm, proofs);
+        await deletePushTokenWithProofs(realm, proofs, accessToken);
         deleted = true;
       } catch {
         // 服务端滚动升级尚未提供 capability 端点时，立即注销仍可回退当前 JWT。
@@ -607,11 +612,12 @@ export function markPendingUnregister(): Promise<void> {
 
 /**
  * 补偿上次登出/终止时失败的注销(登录态就绪后调用)。
- * capability 与原注册区域绑定，不使用当前登录 token：跨区重登不会把 Global
- * JWT 发给 CN（反之亦然），也不会触发当前会话 refresh/退登。
+ * capability 与原注册区域绑定；当前登录 token 只作为 @cindy/auth-verify 身份门，
+ * 原区域服务预配置 peer issuer 后可验签另一 auth region 的 Access Token。
+ * 使用裸 fetch，不触发当前会话 refresh/退登；401/503 只保留 outbox。
  */
-async function retryPendingUnregisterInternal(): Promise<void> {
-  if (!isPushSupported()) return;
+async function retryPendingUnregisterInternal(accessToken: string | null): Promise<void> {
+  if (!isPushSupported() || !accessToken) return;
   const pendingRealms = await readPushRealms(PUSH_PENDING_UNREGISTER_KEY);
   if (pendingRealms.size === 0) return;
 
@@ -621,7 +627,7 @@ async function retryPendingUnregisterInternal(): Promise<void> {
       const legacyDeviceToken = proofs.length === 0 ? await getNativeDeviceTokenBestEffort() : null;
       proofs = await ensureRevocationProofs(realm, legacyDeviceToken);
       if (proofs.length === 0) continue;
-      await deletePushTokenWithProofs(realm, proofs);
+      await deletePushTokenWithProofs(realm, proofs, accessToken);
       await removePushRealm(PUSH_PENDING_UNREGISTER_KEY, realm);
       await removePushRealm(PUSH_REGISTERED_KEY, realm, realm);
       await clearPushRevocationRealm(realm);
@@ -631,6 +637,6 @@ async function retryPendingUnregisterInternal(): Promise<void> {
   }
 }
 
-export function retryPendingUnregister(): Promise<void> {
-  return runPushMutation(retryPendingUnregisterInternal);
+export function retryPendingUnregister(accessToken: string | null): Promise<void> {
+  return runPushMutation(() => retryPendingUnregisterInternal(accessToken));
 }

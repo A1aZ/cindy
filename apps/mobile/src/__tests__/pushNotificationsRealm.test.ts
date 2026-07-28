@@ -137,7 +137,7 @@ describe('push notification unregister realm routing', () => {
     expect(store.get(REGISTERED_KEY)).toBe('1');
 
     envState.activeRealm = 'cn';
-    await retryPendingUnregister();
+    await retryPendingUnregister('cn-token');
 
     expect(mocks.loadMobileEndpointsForRealm).toHaveBeenLastCalledWith(
       'global',
@@ -146,11 +146,13 @@ describe('push notification unregister realm routing', () => {
       'https://relay.global.example/api/device-link/push-token/revocation',
       expect.objectContaining({
         method: 'DELETE',
-        headers: { 'content-type': 'application/json' },
+        headers: {
+          Authorization: 'Bearer cn-token',
+          'content-type': 'application/json',
+        },
         body: JSON.stringify({ revocationToken: 'a'.repeat(64) }),
       }),
     );
-    expect(fetch.mock.calls.at(-1)?.[1]?.headers).not.toHaveProperty('Authorization');
     expect(fetch).not.toHaveBeenCalledWith(
       expect.stringContaining('relay.cn.example'),
       expect.anything(),
@@ -171,15 +173,15 @@ describe('push notification unregister realm routing', () => {
 
     const fetch = vi
       .fn()
-      .mockRejectedValueOnce(new Error('global offline on logout'))
       .mockRejectedValueOnce(new Error('cn still offline'))
       .mockResolvedValueOnce({ ok: true, status: 204 });
     vi.stubGlobal('fetch', fetch);
     await unregisterPushTokenBestEffort(null);
 
     expect(readStoredRealms(PENDING_KEY)).toEqual(['cn', 'global']);
+    expect(fetch).not.toHaveBeenCalled();
 
-    await retryPendingUnregister();
+    await retryPendingUnregister('current-token');
 
     expect(readStoredRealms(PENDING_KEY)).toEqual(['cn']);
     expect(readStoredRealms(REGISTERED_KEY)).toEqual(['cn']);
@@ -199,11 +201,15 @@ describe('push notification unregister realm routing', () => {
     const fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     vi.stubGlobal('fetch', fetch);
 
-    await retryPendingUnregister();
+    await retryPendingUnregister('current-token');
 
     expect(fetch).toHaveBeenCalledWith(
       'https://relay.global.example/api/device-link/push-token/revocation',
       expect.objectContaining({
+        headers: {
+          Authorization: 'Bearer current-token',
+          'content-type': 'application/json',
+        },
         body: JSON.stringify({ token: 'legacy-apns-token' }),
       }),
     );

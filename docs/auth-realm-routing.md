@@ -64,6 +64,19 @@ Desktop safeStorage 和 Mobile SecureStore 都只保存一个加密的原子记�
 Mobile 的 Pending OAuth 同时保存 `realm`，但 redirect scheme 始终使用当前安装包的
 scheme。个人验证码和社交登录不做跨区域发现，也不合并两区 passport。
 
+## Mobile 推送撤销
+
+Mobile 为每个区域分别保存推送注册状态和 256-bit 撤销 capability。注册请求发出前先将
+candidate 写入 SecureStore，服务端只保存 SHA-256；即使响应丢失，下一次注册仍复用同一
+candidate，不会失去撤销能力。
+
+离线登出会把原 `sessionRealm` 写入 durable outbox。下次任一区域登录成功后，客户端取得
+当前有效 Access Token，加载原区域端点，并调用原区域只删除的撤销接口。原区域
+device-link-server 同时信任本区和预配置的对端 auth issuer，通过
+`@cindy/auth-verify` 验签当前 token；删除必须同时命中 capability（旧记录为 APNs token）
+与 token 的同一 `device` claim。401、503 或网络失败只保留 outbox，不触发当前会话刷新
+或登出，也不会把请求改发到当前区域。
+
 ## 上线与回滚
 
 必须按服务端先行、能力最后开启的顺序发布：
@@ -71,8 +84,12 @@ scheme。个人验证码和社交登录不做跨区域发现，也不合并两�
 1. 先升级中国大陆和国际 `auth-server`，确保 discovery 响应都包含正确的 `region`。
 2. 确认两区 `endpoint.json` 均可公网访问，且各自 `authApiBaseUrl` 指向同区域的
    auth-server。
-3. 发布包含双区域可信清单地址的 Desktop 与 Mobile 客户端。
-4. 用同区组织和跨区组织各验证一次发现、确认、登录、冷启动恢复与登出。
+3. 升级两区 device-link-server 的 `revocationTokenHash` 数据库迁移；确认标准域名
+   自动推导出的对端 issuer（或显式的 audience/JWKS 覆盖）正确，并验证两个 issuer
+   的 Access Token 都能通过撤销路由鉴权。新增变量缺失不得阻断服务启动。
+4. 发布包含双区域可信清单地址的 Desktop 与 Mobile 客户端。
+5. 用同区组织和跨区组织各验证一次发现、确认、登录、冷启动恢复与登出；Mobile 还需
+   验证离线登出后跨区重登能清理原区域推送注册。
 
 需要紧急回滚新的组织发现能力时，应通过客户端版本回滚或客户端级开关处理，不能删除
 任一区域清单；已建立的跨区会话仍需要按保存的 `sessionRealm` 加载原区域端点并刷新

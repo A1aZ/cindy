@@ -866,7 +866,7 @@ function AskUserQuestionCard({
                     isMulti ? styles.optionIndicatorSquare : styles.optionIndicatorRound,
                     selected && styles.optionIndicatorSelected,
                   ]}
-                  testID={selected ? 'interaction.ask.checkbox.checked' : 'interaction.ask.checkbox'}
+                  testID={`interaction.ask.${isMulti ? 'checkbox' : 'radio'}${selected ? '.checked' : ''}`}
                 >
                   {selected ? (
                     <Check

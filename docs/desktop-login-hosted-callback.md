@@ -40,8 +40,10 @@ Firefox 早已按规范放行，只有 Safari 没跟，而 Safari 是 macOS 默�
 ```
 ① 客户端生成 codeVerifier(PKCE) 与 pollSecret(256 bit 随机，仅存在于进程内存)，
    client_state = base64url(sha256(pollSecret)) —— 只有哈希值会经过浏览器
+   每次登录尝试都重新生成，不跨重试复用（见 §3.1）
 ② 打开系统浏览器 → GET <auth>/api/auth/social/<provider>/authorize
      ?redirect_uri=<托管回调地址>&code_challenge=...&client_state=...&ui_locale=...
+   auth-server 建登录事务时为该 client_state 占位，重复的 client_state 在此被 400 拒绝
 ③ 用户在 provider 处授权，provider 回调到 auth-server 既有的 provider 回调路由
 ④ auth-server 照常签发一次性授权码，但发现 redirect_uri 是托管地址时**不把码放进 URL**，
    而是在签发处直接按 client_state 寄存进 Redis
@@ -60,7 +62,9 @@ provider 回调路由（`googleCallbackUrl()` 等）与 `callbackShared.ts` 的�
 对应实现在 `auth-server/src/services/desktopCallback.ts` 与
 `auth-server/src/routes/desktopCallback.ts`。
 
-### 3.1 redirect_uri 放行
+### 3.1 authorize 阶段：redirect_uri 放行与 client_state 占位
+
+#### redirect_uri 放行
 
 **不需要新增环境变量、不需要运维配 `REDIRECT_URI_ALLOWLIST`。**
 `isAllowedRedirectUri`（`src/services/sso/transaction.ts`）比照既有的
@@ -71,6 +75,28 @@ provider 回调路由（`googleCallbackUrl()` 等）与 `callbackShared.ts` 的�
 **这一步不是形式主义**：测试环境的 `PUBLIC_BASE_URL` 是 `http://localhost:3344`，
 任何以它为前缀的地址都会先命中 RFC 8252 的 loopback 例外，所以哪怕把同源放行整条删掉，
 集成测试也照样全绿（已用变异验证确认）。生产是 https 域名，只有这条规则能放行它。
+
+#### client_state 必填且一次性占位
+
+走托管回调时，`client_state` 由可选变为**必填**：缺失直接 400。若放它过去，流程会一路走到
+签发授权码，然后不带 state 地寄存不了——码已经消耗掉，客户端却永远取不回来。与其在末端
+报错，不如在入口拒绝。
+
+建登录事务时还会用 Redis `SET NX` 为该 `client_state` **占位**（TTL 10 分钟，与登录事务
+对齐），已被占用则 400（`INVALID_PARAMS`）。没有这一步，「寄存挪到签发处」仍堵不严：
+`client_state` 会出现在浏览器的 authorize URL 里，看得到它的人可以**用同一个 client_state
+再发起一次 authorize**，立刻让那次事务走到 error 回调，其写入就会覆盖掉合法结果。占位之后，
+第二次 authorize 在建事务时就被拒，压根到不了回调。
+
+对客户端的约束：**每次登录尝试都必须新生成 `pollSecret`（因而 `client_state` 也是新的），
+不得跨重试复用。** 客户端现有实现本就每次 `randomBytes(32)`，天然满足；这里写明是为了让它
+成为契约而不是巧合。
+
+占位期间轮询返回 `pending`（占位记录与真实结果都在同一个 key `deskcb:<clientState>` 上，
+真实结果会覆盖占位）。建事务的后续步骤失败时占位会被归还——用的是比较删除（占位值带一次性
+nonce），只删自己写下的那一份，不会误伤已经落定的结果。
+
+**loopback `redirect_uri` 不受占位影响**，存量路径行为不变。
 
 ### 3.2 寄存发生在签发处，**没有公开的写入端点**
 
@@ -185,6 +211,9 @@ CodeQL 的 `js/bad-tag-filter` 判为不完整的标签过滤。
   导航历史里只有哈希值，读得到历史也无法抢先消费掉一次性结果。loopback 链路的 `state`
   生成方式未改（仍是 `randomUUID()`），存量路径行为不变。服务端侧请勿把 `pollSecret`
   写进可被检索的日志。
+- **`client_state` 一次性占位挡住抢占式写入**：删掉公开写入端点还不够——`client_state` 本身
+  就在浏览器的 authorize URL 里。authorize 建事务时对它 `SET NX` 占位，第二个人拿同一个值
+  再发起授权会被 400 拒绝，无法借自己的一次授权流程去覆盖别人的结果（见 §3.1）。
 - **不会交出注定失败的授权码**：授权码自身 TTL 60s，且从跳转到托管回调**之前**就开始
   计时。寄存记录活得更久（5 分钟）是为了在码过期后返回终态 `expired`，让用户立刻看到
   「授权已过期，请重新登录」，而不是拿一个在 `/api/auth/token` 必然撞 `INVALID_AUTH_CODE`

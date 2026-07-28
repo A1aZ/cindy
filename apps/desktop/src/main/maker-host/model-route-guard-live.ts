@@ -13,7 +13,9 @@
 import {
   isModelDisabled,
   isProviderDisabled,
+  modelSupportsFastMode,
   nativeDefaultSourceId,
+  sourcesForModel,
   type AgentKind,
   type ModelDisableOverrides,
   type ProviderView,
@@ -94,8 +96,15 @@ export async function resolveLenientSessionRoute(
   agent: AgentKind,
   model: string | undefined,
   providerId: string | null,
-  opts: { fallbackModel?: string; desiredEffort?: string } = {},
-): Promise<{ model?: string; providerId: string | null; degraded: boolean; effort?: string }> {
+  opts: { fallbackModel?: string; desiredEffort?: string; desiredFastMode?: boolean } = {},
+): Promise<{
+  model?: string;
+  providerId: string | null;
+  degraded: boolean;
+  effort?: string;
+  /** 仅 desiredFastMode=true 且路由被本解析改动时给出:落地拷贝不支持 Fast ⇒ false。 */
+  fastMode?: boolean;
+}> {
   let views: ProviderView[];
   try {
     views = await getDesktopProviderService().listProviders();
@@ -111,7 +120,27 @@ export async function resolveLenientSessionRoute(
     }
     return { model: undefined, providerId: null, degraded: true };
   }
-  return resolveLenientRoute(views, agent, model, providerId, opts);
+  const route: {
+    model?: string;
+    providerId: string | null;
+    degraded: boolean;
+    effort?: string;
+    fastMode?: boolean;
+  } = resolveLenientRoute(views, agent, model, providerId, opts);
+  // Fast reconcile(PR #744 review 第十七轮):Fast 能力是 per-(来源, 模型) 的
+  // (modelSupportsFastMode)。保存的 fast=true 是对**原路由**的选择,解析改了模型
+  // 或来源时按落地那份拷贝重查,不支持则清掉 —— 否则不支持 Fast 的兜底路由会带着
+  // fast 标志被上游拒。路由原样时不产出(调用方保持自己的保存值)。
+  if (opts.desiredFastMode === true && route.model) {
+    const routeChanged = route.model !== model || route.providerId !== providerId;
+    if (routeChanged) {
+      const provider = route.providerId
+        ? views.find((p) => p.id === route.providerId)
+        : sourcesForModel([...views], route.model, agent)[0];
+      route.fastMode = !!provider && modelSupportsFastMode(provider, route.model, agent);
+    }
+  }
+  return route;
 }
 
 /**

@@ -127,7 +127,11 @@ export function startLearnHost(deps: StartLearnHostDeps): LearnController {
         // 保守默认模型同走裁决阶梯:它自己也可能被停用,不能作为未经裁决的兜底
         // (PR #744 review 第六轮);desiredEffort 让换模型时的 effort 按解析出的
         // 模型条目 reconcile(第十一轮)。
-        { fallbackModel: defaultModelFor(agentKind), desiredEffort: originMeta?.effort },
+        {
+          fallbackModel: defaultModelFor(agentKind),
+          desiredEffort: originMeta?.effort,
+          desiredFastMode: originMeta?.fastMode === true,
+        },
       );
       if (route.degraded) {
         logger.warn('learn session inherited route degraded (disabled in settings)', {
@@ -152,7 +156,9 @@ export function startLearnHost(deps: StartLearnHostDeps): LearnController {
         workingDir: opts.workingDir,
         model: routeModel,
         ...(routeEffort ? { effort: routeEffort } : {}),
-        ...(originMeta?.fastMode != null ? { fastMode: originMeta.fastMode } : {}),
+        ...((route.fastMode ?? originMeta?.fastMode) != null
+          ? { fastMode: route.fastMode ?? originMeta?.fastMode }
+          : {}),
         // 权限收敛到工作区(Codex review ×2,安全红线):蒸馏输入含第三方 hub
         // 内容/自由文本,prompt 注入可诱导越权 —— 绝不能静默提到 bypass(Codex
         // 映射 danger-full-access、Claude 全放行)。acceptEdits 下:Claude 自动

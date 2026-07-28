@@ -149,6 +149,12 @@ export class EmbeddingService {
    * 典型用途: query embedding (用户搜索时即时嵌一段 query, 再去 searchVectors)。
    */
   async embedSync(texts: string[], opts: { modelId: EmbeddingModelId }): Promise<EmbedResponse> {
+    // 停用轴(PR #744 review 第十七轮):查询向量与后台批同为经 XD 网关的新付费
+    // 调用,供应商停用时同样不发 —— 抛错交给消费方既有降级路径(语义搜索回落
+    // 关键词检索)。
+    if (isProviderRouteSuspended('xd')) {
+      throw new Error('embedding provider disabled in settings');
+    }
     return this.deps.getClient().embed({ texts, model: opts.modelId });
   }
 

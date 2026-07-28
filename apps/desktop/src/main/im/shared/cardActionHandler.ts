@@ -828,11 +828,17 @@ export function createCardActionHandler(
       // 入口默认模型同走裁决阶梯:它自己也可能被停用,不能作为未经裁决的兜底
       // (PR #744 review 第六轮);desiredEffort 让换模型时的 effort 按解析出的
       // 模型条目 reconcile(第十一轮)。
-      { fallbackModel: DESKTOP_CC_DEFAULTS.model, desiredEffort: desktopPrefs.effort },
+      {
+        fallbackModel: DESKTOP_CC_DEFAULTS.model,
+        desiredEffort: desktopPrefs.effort,
+        desiredFastMode: desktopPrefs.fastMode === true,
+      },
     );
     // 换了模型时 effort 用 reconcile 结果(保存档可能超出兜底模型的支持集,原样透传
     // 会被上游拒);模型未换则保持用户保存档。route.effort 缺席 = 条目无 effort 概念,
     // 不携带交给 agent 默认。
+    // Fast 同理:路由被改动时按落地拷贝 reconcile(不支持 ⇒ false),原样保持保存值。
+    const routeFastMode = route.fastMode ?? desktopPrefs.fastMode;
     const routeEffort: Effort | undefined =
       route.model === desktopPrefs.model
         ? (desktopPrefs.effort as Effort)
@@ -883,7 +889,7 @@ export function createCardActionHandler(
           providerId: route.providerId ?? undefined,
           ...(routeEffort ? { effort: routeEffort } : {}),
           permissionMode: desktopPrefs.permissionMode as PermissionMode,
-          fastMode: desktopPrefs.fastMode,
+          fastMode: routeFastMode,
           title: FBOT_DRAFT_TITLE,
         });
         created = newSession.id;
@@ -965,7 +971,7 @@ export function createCardActionHandler(
         providerId: route.providerId ?? undefined,
         ...(routeEffort ? { effort: routeEffort } : {}),
         permissionMode: desktopPrefs.permissionMode as PermissionMode,
-        fastMode: desktopPrefs.fastMode,
+        fastMode: routeFastMode,
         title: FBOT_DRAFT_TITLE,
       });
       newSessionId = newSession.id;

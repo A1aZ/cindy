@@ -306,7 +306,12 @@ function handoffTerminator(opts: BuildHandoffOptions): string {
 const LEGACY_HANDOFF_TERMINATOR = '== 交接说明结束,以下是用户的新消息 ==';
 const LEGACY_REBUILD_TERMINATOR = '== 上下文重建说明结束,以下是用户的新消息 ==';
 
-/** 拆出已有文本尾部的结束标记(含其前置空行),供二次裁剪时原样保留。 */
+/**
+ * 拆出已有文本尾部的结束标记,供二次裁剪时原样保留。
+ *
+ * 返回的 `tail` **从标记本身起算**,不含它前面的空行——分隔空行由
+ * composeForkOriginHandoff 自己补,这样正文被从中部裁开后仍能保证标记前有空行。
+ */
 function splitTrailingTerminator(text: string): [body: string, tail: string] {
   for (const terminator of [
     HANDOFF_TERMINATOR,
@@ -605,25 +610,33 @@ export function createAgentHandoffPendingRegistry(
   /** 值由 queryPending 产出(已含组合结果)的 session,decorate 必须跳过它们。 */
   const composedByQuery = new Set<string>();
   /**
-   * 每个 session 的状态代次。peek 里两处 await 之后都要写回 Map,而 `/clear` 与
-   * `set` 可能正好落在那个窗口里——不带代次校验地写回,会把 clear 掉的旧交接原样
-   * 塞回缓存并标成已组合,下一次 send 就绕过 `cleared_at` 把旧上下文灌进用户刚
-   * 清空的会话。任何改变状态的入口都递增它,await 后代次不符就丢弃本次结果。
+   * 每个 session 的 **clear 纪元**:只有 `/clear`(invalidate / clear)递增它。
+   *
+   * 它回答的问题只有一个——"我手上这份按某时刻历史算出来的东西,期间有没有被用户
+   * 清空作废过"。所以 `set` / `consume` **不**递增:
+   *  - `consume` 递增会误伤正在途中的新交接:旧交接被 accepted 消费的同时,一个新的
+   *    引擎切换可能正等着读历史/写库,它带着更早的纪元回来就被无辜丢弃,新引擎反而
+   *    拿不到上下文(这是最常见的一种并发,根本不需要用户 /clear);
+   *  - `set` 递增会让同一流程内的第二次写入(resume 回落用全量交接覆盖增量交接)
+   *    被自己先前那次挡掉。
+   *
+   * peek 写回时除了纪元,还要确认缓存值仍是自己读到的那一份——纪元不变但被别的
+   * `set` 换过内容时,不能拿旧值盖回去。
    */
-  const generation = new Map<string, number>();
-  const bump = (sessionId: string): void => {
-    generation.set(sessionId, (generation.get(sessionId) ?? 0) + 1);
+  const clearEpoch = new Map<string, number>();
+  const bumpClearEpoch = (sessionId: string): void => {
+    clearEpoch.set(sessionId, (clearEpoch.get(sessionId) ?? 0) + 1);
   };
-  const genOf = (sessionId: string): number => generation.get(sessionId) ?? 0;
+  const genOf = (sessionId: string): number => clearEpoch.get(sessionId) ?? 0;
   return {
     set(sessionId, handoff, expectedGeneration) {
-      // 调用方带了代次就校验:它是在读历史之前取的,不符说明期间发生过 /clear 或
-      // 别的写入,这份交接算的是已作废的历史,丢弃而不是盖回去。
+      // 调用方带了 clear 纪元就校验:它是在读历史之前取的,不符说明期间用户 /clear 过,
+      // 这份交接算的是已作废的历史,丢弃而不是盖回去。纪元只由 clear 推进,所以同一
+      // 流程内的二次写入、以及与别处 consume 的并发,都不会被误拒。
       if (expectedGeneration !== undefined && genOf(sessionId) !== expectedGeneration) return;
       pending.set(sessionId, handoff);
       // 外部直接塞进来的交接没经过 queryPending 的组合,重新纳入 decorate 范围。
       composedByQuery.delete(sessionId);
-      bump(sessionId);
     },
     readGeneration(sessionId) {
       return genOf(sessionId);
@@ -635,9 +648,11 @@ export function createAgentHandoffPendingRegistry(
         const gen = genOf(sessionId);
         try {
           const decorated = await decorateCached(sessionId, cached);
-          // 期间被 clear / set:本次结果基于已作废的状态,既不写回也不返回——
-          // 返回它等于把 clear 掉的交接注入这一次发送。
+          // 期间被 /clear:本次结果基于已作废的状态,既不写回也不返回——返回它等于
+          // 把 clear 掉的交接注入这一次发送。
           if (genOf(sessionId) !== gen) return null;
+          // 纪元没变但值被别的 set 换过:别拿旧值盖回去,让下一次 peek 处理新值。
+          if (pending.get(sessionId) !== cached) return null;
           // 组合结果回写并标记为已组合:同一条待注入交接在 consume 之前可能被 peek
           // 多次(首发被拒后的重试),没有这步每次都要重跑一遍 decorate 的 DB 查询,
           // 而且要靠 decorate 自身幂等才不会叠加。
@@ -661,7 +676,8 @@ export function createAgentHandoffPendingRegistry(
         // 查询失败按无 pending 处理(不阻塞发送);下次 send 重查。
         return null;
       }
-      if (genOf(sessionId) !== gen) return null;
+      // 期间 /clear 或有人写入了新交接:这份 DB 重建结果已过时,不写回也不返回。
+      if (genOf(sessionId) !== gen || pending.has(sessionId)) return null;
       pending.set(sessionId, fromDb);
       composedByQuery.add(sessionId);
       return fromDb;
@@ -669,18 +685,18 @@ export function createAgentHandoffPendingRegistry(
     consume(sessionId) {
       pending.set(sessionId, null);
       composedByQuery.delete(sessionId);
-      bump(sessionId);
+      // 不推进 clear 纪元:消费的是"这一份"交接,不代表别处正在构造的新交接作废。
       onConsume?.(sessionId);
     },
     clear(sessionId) {
       pending.delete(sessionId);
       composedByQuery.delete(sessionId);
-      bump(sessionId);
+      bumpClearEpoch(sessionId);
     },
     invalidate(sessionId) {
       pending.set(sessionId, null);
       composedByQuery.delete(sessionId);
-      bump(sessionId);
+      bumpClearEpoch(sessionId);
     },
   };
 }

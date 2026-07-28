@@ -188,6 +188,20 @@ describe('composeForkOriginHandoff', () => {
     expect(composeForkOriginHandoff('sess-p', null)).toBe(buildForkOriginHandoff('sess-p'));
   });
 
+  it('legacy 中文结束标记同样被保留:老会话裁剪后不丢边界', () => {
+    // 升级前落库的 agent_switch 行仍是旧中文格式;识别不了就会在裁剪时把老会话
+    // 唯一的边界连同检索指引尾巴一起削掉。
+    const legacyTerminator = '== 交接说明结束,以下是用户的新消息 ==';
+    const capped = `${'x'.repeat(16_000 - legacyTerminator.length - 2)}\n\n${legacyTerminator}`;
+    expect(capped.length).toBe(16_000);
+
+    const text = composeForkOriginHandoff('sess-legacy', capped);
+
+    expect(text.length).toBeLessThanOrEqual(16_000);
+    expect(text).toContain('sess-legacy');
+    expect(text.endsWith(`\n\n${legacyTerminator}`)).toBe(true);
+  });
+
   it('已顶到上限的交接:组合后仍不超限,且结束标记前保有空行分隔', () => {
     const terminator = "== End of handoff note; the user's new message follows ==";
     const capped = `${'x'.repeat(16_000 - terminator.length - 2)}\n\n${terminator}`;
@@ -294,13 +308,34 @@ describe('createAgentHandoffPendingRegistry', () => {
 
   it('过期的 set 被丢弃:期间 /clear 过,按旧历史算出的交接不得盖掉墓碑', async () => {
     const reg = createAgentHandoffPendingRegistry(async () => null);
-    // agent-switch / 消息删除在读历史之前取代次
+    // agent-switch / 消息删除在读历史之前取纪元
     const gen = reg.readGeneration('s1');
     // 期间用户 /clear
     reg.invalidate('s1');
     // 异步活干完才写回——这份交接算的是 clear 前的历史
     reg.set('s1', 'STALE-PRE-CLEAR-HANDOFF', gen);
     expect(await reg.peek('s1')).toBeNull();
+  });
+
+  it('纪元只由 /clear 推进:consume 不得误伤正在途中的新交接', async () => {
+    // 最常见的并发,根本不需要用户 /clear:旧交接被 accepted 消费的同时,一个新的
+    // 引擎切换正等着读历史/写库。若 consume 也推进纪元,新交接回来就被无辜丢弃,
+    // 新引擎反而拿不到上下文。
+    const reg = createAgentHandoffPendingRegistry(async () => null);
+    reg.set('s1', 'OLD-HANDOFF');
+    const genForNewSwitch = reg.readGeneration('s1');
+    reg.consume('s1');
+    reg.set('s1', 'NEW-SWITCH-HANDOFF', genForNewSwitch);
+    expect(await reg.peek('s1')).toBe('NEW-SWITCH-HANDOFF');
+  });
+
+  it('纪元只由 /clear 推进:同一流程内的二次写入不被自己先前那次挡掉', async () => {
+    const reg = createAgentHandoffPendingRegistry(async () => null);
+    const gen = reg.readGeneration('s1');
+    reg.set('s1', 'DELTA-HANDOFF', gen);
+    // resume 回落:用全量交接覆盖自己刚写的增量交接,仍用最初那个纪元
+    reg.set('s1', 'FULL-HANDOFF', gen);
+    expect(await reg.peek('s1')).toBe('FULL-HANDOFF');
   });
 
   it('代次未变时 set 正常生效(无 /clear 干扰的常规路径)', async () => {

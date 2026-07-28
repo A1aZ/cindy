@@ -445,10 +445,6 @@ export async function performSessionAgentSwitch(
       });
     }
     deps.setPendingHandoff(sessionId, handoff, handoffGeneration);
-    // 上面这次写入自己就 bump 了代次。后面 resume 回落还要用 fullHandoff 覆盖它,
-    // 那次必须以"本次写入之后"为基准——继续拿 handoffGeneration 会被 registry 当成
-    // 过期写入丢掉(哪怕根本没有 /clear),引擎就只剩缺早期历史的增量交接。
-    let latestHandoffGeneration = deps.readPendingHandoffGeneration?.(sessionId);
 
     let engineReady = true;
     let resumed = !!parked;
@@ -529,10 +525,11 @@ export async function performSessionAgentSwitch(
               sessionId,
             });
           }
-          // 用最近一次写入后的代次:允许覆盖自己先前写的增量交接,但期间真发生 /clear
-          // 时(代次已被 clear 再次推进)这次替换仍会被正确丢弃。
-          deps.setPendingHandoff(sessionId, fullHandoff, latestHandoffGeneration);
-          latestHandoffGeneration = deps.readPendingHandoffGeneration?.(sessionId);
+          // 仍用最初那个纪元,**不要**在这里重读:纪元只由 /clear 推进,所以覆盖自己
+          // 先前写的增量交接本来就不会被挡;而重读会在"期间发生过 /clear、首次写入
+          // 已被正确拒绝"时拿到 clear 之后的新纪元,让这份基于清空前历史构造的全量
+          // 交接反而绕过墓碑写进去。
+          deps.setPendingHandoff(sessionId, fullHandoff, handoffGeneration);
           if (fallbackCommitted) {
             try {
               await deps.bootstrapSwitchedSession(sessionId);

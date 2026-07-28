@@ -11,6 +11,7 @@ import {
 import type { Display, NativeImage, Point, Rectangle, WebContents } from 'electron';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import {
   inspectExternalEditedInsertedText,
@@ -242,11 +243,19 @@ let overlayDragSession: { startBounds: Rectangle; startCursor: Point } | null = 
 // 最近一次「浮窗真正呈现在哪」的 bounds。浮窗 hide 后会被停到屏幕外，实时
 // bounds 不能当锚点，全局浮窗路径的词典 toast 靠这份记录跟到同一块屏、同一位置。
 let lastPresentedOverlayBounds: Rectangle | null = null;
-// 从「发布证据」交棒给「显示 toast」的锚点，一次性消费。快照本身是在建 watch 时
-// （刚粘贴完）拍的，见 ExternalDictionaryLearningWatch.toastAnchor：词典建议要等
-// 延迟轮询 + 模型往返，期间用户可能已在另一块屏开了新一次浮窗，锚点必须跟着来源
-// 会话走，并在显示时用呈现代次复核，否则旧会话的 toast 会盖在新浮窗上。
-let pendingDictionaryToastAnchor: { bounds: Rectangle; presentationSeq: number } | null = null;
+// 从「发布证据」交棒给「显示 toast」的锚点，按证据逐条登记、一次性消费。
+//
+// 快照本身是在建 watch 时（刚粘贴完）拍的，见
+// ExternalDictionaryLearningWatch.toastAnchor：词典建议要等延迟轮询 + 模型往返，
+// 期间用户可能已在另一块屏开了新一次浮窗，锚点必须跟着来源会话走，并在显示时用
+// 呈现代次复核，否则旧会话的 toast 会盖在新浮窗上。
+//
+// 用 Map 而不是单个槽：renderer 是并发发起 advisor 的，不排队也不互等。会话 A 的
+// 请求还在跑时会话 B 就可能发布证据，共用一个槽会让先返回的 A 消费掉 B 的锚点。
+const dictionaryToastAnchors = new Map<string, { bounds: Rectangle; presentationSeq: number }>();
+// 登记表只用于「刚刚发布、还没出 toast」的证据，超过这个数就丢最旧的，
+// 避免 advisor 从不返回时无界增长。
+const DICTIONARY_TOAST_ANCHOR_MAX_ENTRIES = 8;
 // 浮窗呈现代次。焦点屏查询是异步的，它的回调必须能认出「这次呈现还算不算数」：
 // 会话被取消（hide / 复位到 idle）或已经开始了新一次呈现时，迟到的回调不得再
 // 定位或显示窗口——浮窗是缓存复用的，hide 并不销毁它，只靠 isDestroyed() 判断
@@ -288,8 +297,11 @@ export type DictionaryToastEntryPayload = {
 
 type DictionaryToastPayload = {
   entries: DictionaryToastEntryPayload[];
-  /** true = 该 toast 来自全局浮窗听写，可以贴着刚才的浮窗位置出现。 */
-  anchorToOverlay: boolean;
+  /**
+   * 非 null = 该 toast 来自全局浮窗听写，凭这个 key 去取它自己那条证据登记的锚点，
+   * 贴着产生它的那次浮窗位置出现。
+   */
+  anchorKey: string | null;
 };
 
 const EXTERNAL_DICTIONARY_LEARNING_POLL_DELAYS_MS = [2500, 6500, 14000];
@@ -716,7 +728,7 @@ export function registerGlobalVoiceInputIpc(): void {
       const entries = normalizeDictionaryToastEntries(payload);
       if (entries.length === 0) return { ok: false, error: 'Dictionary toast payload is incomplete.' };
       // Renderer 侧（应用内听写）触发的 toast 与全局浮窗位置无关。
-      showDictionaryToastWindow({ entries, anchorToOverlay: false });
+      showDictionaryToastWindow({ entries, anchorKey: null });
       return { ok: true };
     },
   );
@@ -1419,23 +1431,24 @@ function showDictionaryToastWindow(payload: DictionaryToastPayload): void {
 }
 
 /**
- * `anchorToOverlay` 只应由全局浮窗那条听写链路传 true。应用内听写的 toast 不能
- * 借用浮窗位置：用户可能在另一块屏的 Cindy 窗口里操作，甚至浮窗那块屏早已拔掉。
+ * `anchorKey` 只应由全局浮窗那条听写链路传（用
+ * `voiceInputDictionaryToastAnchorKey()` 从证据算出）。应用内听写不传：它的 toast
+ * 不能借用浮窗位置，用户可能在另一块屏的 Cindy 窗口里操作，甚至浮窗那块屏早已拔掉。
  */
 export function showVoiceInputDictionaryToast(
   entries: DictionaryToastEntryPayload[],
-  options?: { anchorToOverlay?: boolean },
+  options?: { anchorKey?: string | null },
 ): void {
   if (entries.length === 0) return;
   showDictionaryToastWindow({
     entries,
-    anchorToOverlay: Boolean(options?.anchorToOverlay),
+    anchorKey: options?.anchorKey ?? null,
   });
 }
 
 function createDictionaryToastWindow(payload: DictionaryToastPayload): BrowserWindow {
   const bounds = computeDictionaryToastBounds(
-    resolveDictionaryToastAnchorBounds(payload.anchorToOverlay),
+    resolveDictionaryToastAnchorBounds(payload.anchorKey),
   );
   const window = new BrowserWindow({
     ...bounds,
@@ -1741,20 +1754,19 @@ function computeOverlayBounds(display: Display): Rectangle {
 
 /**
  * 全局浮窗听写的词典 toast 贴着「产生它的那次浮窗所在的位置」出现。浮窗 hide 后会
- * 被停到屏幕外的 OVERLAY_IDLE_BOUNDS，实时 bounds 不能当锚点，所以用发布证据时拍
- * 下的快照（见 pendingDictionaryToastAnchor）。
+ * 被停到屏幕外的 OVERLAY_IDLE_BOUNDS，实时 bounds 不能当锚点，所以用建 watch 时拍下、
+ * 发布证据时按 key 登记的快照（见 dictionaryToastAnchors）。
  *
  * 三个条件都满足才用它，否则退回鼠标所在屏的默认位置：
- * - 调用方确实是全局浮窗链路（应用内听写与浮窗位置无关）；
+ * - 调用方是全局浮窗链路并带来了自己那条证据的 key（应用内听写不传）；
  * - 呈现代次没变——变了说明期间又开过浮窗，这条 toast 会盖在新浮窗上；
  * - 锚点中心仍落在某块现存屏幕上——否则外接屏拔掉后 toast 会整个落到屏幕外。
  */
-function resolveDictionaryToastAnchorBounds(anchorToOverlay: boolean): Rectangle {
-  if (!anchorToOverlay) return computeOverlayBounds(getCursorDisplay());
-  // 一次性消费：锚点只对它自己那条证据有效。若真有两条建议请求并发，后一条拿不到
-  // 锚点就退回默认位置——退化成「位置不贴心」，而不是「贴到别的会话上去」。
-  const anchor = pendingDictionaryToastAnchor;
-  pendingDictionaryToastAnchor = null;
+function resolveDictionaryToastAnchorBounds(anchorKey: string | null): Rectangle {
+  if (!anchorKey) return computeOverlayBounds(getCursorDisplay());
+  // 一次性消费：锚点只对它自己那条证据有效。
+  const anchor = dictionaryToastAnchors.get(anchorKey);
+  dictionaryToastAnchors.delete(anchorKey);
   if (anchor
     && anchor.presentationSeq === overlayPresentationSeq
     && isBoundsCenterOnDisplay(anchor.bounds, getOverlayPlacementDisplays())) {
@@ -2501,11 +2513,42 @@ function publishExternalDictionaryLearningEvidence(
 ): void {
   const window = getOverlayWindow();
   if (!window || window.isDestroyed()) return;
-  // 锚点是建 watch 时拍的（那才是这条证据对应的浮窗现场），这里只是交棒给 toast。
-  // 证据要经 renderer 往返再回到 main，不把几何值放进那条链路：renderer 传回来的
-  // 坐标属于不可信输入。
-  pendingDictionaryToastAnchor = toastAnchor;
+  // 锚点是建 watch 时拍的（那才是这条证据对应的浮窗现场），这里按证据 key 登记，
+  // 等这条证据的建议回来时凭同一个 key 取走。
+  //
+  // key 由 main 从证据内容派生，不放进 IPC payload：证据要经 renderer 往返，
+  // renderer 传回的几何值不可信，而 renderer 回传时只会往 context 里加语言字段、
+  // 不改 source / beforeText / afterText，所以 main 能在收到建议请求时重算出同一个
+  // key。真被改过就查不到锚点，退回默认位置，不会指向别的会话。
+  if (toastAnchor) {
+    registerDictionaryToastAnchor(voiceInputDictionaryToastAnchorKey(evidence), toastAnchor);
+  }
   window.webContents.send('voice-input:dictionary-learning-evidence', { evidence });
+}
+
+/**
+ * 词典 toast 锚点的证据 key。只取 renderer 往返途中不会改动的字段，并做摘要，
+ * 避免把用户听写文本原样留在 Map 的 key 里（日志、堆快照都可能带出去）。
+ */
+export function voiceInputDictionaryToastAnchorKey(
+  evidence: Pick<DictationDictionaryAdviceInput, 'source' | 'beforeText' | 'afterText'>,
+): string {
+  return createHash('sha256')
+    .update(`${evidence.source ?? ''} ${evidence.beforeText ?? ''} ${evidence.afterText ?? ''}`)
+    .digest('hex')
+    .slice(0, 32);
+}
+
+function registerDictionaryToastAnchor(
+  key: string,
+  anchor: { bounds: Rectangle; presentationSeq: number },
+): void {
+  dictionaryToastAnchors.set(key, anchor);
+  while (dictionaryToastAnchors.size > DICTIONARY_TOAST_ANCHOR_MAX_ENTRIES) {
+    const oldest = dictionaryToastAnchors.keys().next();
+    if (oldest.done) break;
+    dictionaryToastAnchors.delete(oldest.value);
+  }
 }
 
 // Length-only summary for normal diagnostics. Full text debug is isolated in

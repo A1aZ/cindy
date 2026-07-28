@@ -81,6 +81,7 @@ import {
   registerActiveInlineVoiceInputWebContents,
   showVoiceInputDictionaryToast,
   unregisterActiveInlineVoiceInputWebContents,
+  voiceInputDictionaryToastAnchorKey,
 } from './global.js';
 import {
   registerVoiceInputDataStoreIpc,
@@ -380,9 +381,14 @@ export async function adviseAndRecordVoiceInputDictionaryLearning(
           entryId: entry.id,
           term: entry.text,
         })),
-        // 只有全局浮窗听写的 toast 才贴着刚才的浮窗位置出现；应用内听写用户在
-        // 哪块屏操作与浮窗无关，按默认位置来。
-        { anchorToOverlay: sourceLabel === 'external_overlay' },
+        // 只有全局浮窗听写的 toast 才贴着「产生它的那次浮窗」的位置出现，且要带上
+        // 本条证据自己的 key —— 并发的 advisor 请求各自认自己的锚点，先返回的不会
+        // 消费掉别人的。应用内听写用户在哪块屏操作与浮窗无关，不传 key、走默认位置。
+        {
+          anchorKey: sourceLabel === 'external_overlay'
+            ? voiceInputDictionaryToastAnchorKey(payload)
+            : null,
+        },
       );
     }
     log.debug('dictionary learning advice', {

@@ -285,4 +285,40 @@ describe('voice input global shortcut registration', () => {
       expect(() => parseMacTextInsertionHelperResult('not json')).toThrow();
     });
   });
+
+  // 词典 toast 锚点按证据逐条登记,靠这个 key 关联。renderer 并发发起 advisor,
+  // key 必须只依赖往返途中不会变的字段,且不同证据不能撞成同一个 key。
+  describe('voiceInputDictionaryToastAnchorKey', () => {
+    const evidence = {
+      source: 'external_overlay',
+      beforeText: '把这段话写进文档',
+      afterText: '把这段话写进文档里',
+    };
+
+    it('同一条证据在 renderer 往返后仍算出同一个 key', async () => {
+      const { voiceInputDictionaryToastAnchorKey } = await import('../global.js');
+      // renderer 只会往 context 里加语言字段,不改 source / beforeText / afterText。
+      const roundTripped = {
+        ...evidence,
+        context: { uiLanguage: 'zh-CN', sourceLanguage: 'zh' },
+        debug: true,
+      };
+      expect(voiceInputDictionaryToastAnchorKey(roundTripped))
+        .toBe(voiceInputDictionaryToastAnchorKey(evidence));
+    });
+
+    it('不同证据得到不同 key(并发请求不会互相消费锚点)', async () => {
+      const { voiceInputDictionaryToastAnchorKey } = await import('../global.js');
+      const other = { ...evidence, afterText: '把这段话写进文档中' };
+      expect(voiceInputDictionaryToastAnchorKey(other))
+        .not.toBe(voiceInputDictionaryToastAnchorKey(evidence));
+    });
+
+    it('key 不含用户听写原文', async () => {
+      const { voiceInputDictionaryToastAnchorKey } = await import('../global.js');
+      const key = voiceInputDictionaryToastAnchorKey(evidence);
+      expect(key).toMatch(/^[0-9a-f]{32}$/);
+      expect(key).not.toContain('文档');
+    });
+  });
 });

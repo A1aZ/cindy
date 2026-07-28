@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Editor } from '@tiptap/core';
+import type { Node as PMNode } from '@tiptap/pm/model';
 import type { Transaction } from '@tiptap/pm/state';
 import { useTranslation } from 'react-i18next';
 import type {
@@ -59,7 +60,11 @@ import { resolveVoiceInputStartGuards } from './startGuards';
 import { getVoiceInputWorkletUrl } from './workletUrl';
 import { buildRefinementPreviewText } from './refinementPreviewText';
 import { isVoiceInputEventScopeActive, shouldHandleVoiceInputEvent } from './eventScope';
-import { mapEditorTextRange, type EditorTextRange } from './editorRangeMapping';
+import {
+  clampEditorTextRangeToDoc,
+  mapEditorTextRange,
+  type EditorTextRange,
+} from './editorRangeMapping';
 import { isVoiceInputServiceConnectionError, VOICE_INPUT_ERROR_CODE_KEYS } from './overlayErrors';
 import {
   VOICE_INPUT_DICTIONARY_LEARNING_TRACK_TIMEOUT_MS,
@@ -530,11 +535,12 @@ export function useVoiceInput(
     };
   }, []);
 
-  const clampEditorTextRange = useCallback((range: EditorTextRange, docSize: number): EditorTextRange => {
-    const from = Math.max(0, Math.min(Math.min(range.from, range.to), docSize));
-    const to = Math.max(0, Math.min(Math.max(range.from, range.to), docSize));
-    return { from, to };
-  }, []);
+  // 钳制到「能承载 inline 内容」的位置,而不是只钳到 doc.content.size:后者本身就是
+  // 一个 block 边界,在那里 insertText 会另起一个段落,上屏文字前凭空多一个空行。
+  const clampEditorTextRange = useCallback(
+    (range: EditorTextRange, doc: PMNode): EditorTextRange => clampEditorTextRangeToDoc(range, doc),
+    [],
+  );
 
   const clearDictionaryLearningWatchTimer = useCallback((watch: DictionaryLearningWatch | undefined) => {
     if (watch?.pendingAdviceTimer !== undefined) {
@@ -611,7 +617,7 @@ export function useVoiceInput(
       const { doc } = current.state;
       const range = clampEditorTextRange(
         { from: currentWatch.start, to: currentWatch.end },
-        doc.content.size,
+        doc,
       );
       const afterText = doc.textBetween(range.from, range.to, '\n', '\n');
       if (!afterText || afterText === currentWatch.baselineText) {
@@ -677,7 +683,7 @@ export function useVoiceInput(
       .flatMap((watch) => {
         const start = transaction.mapping.map(watch.start, -1);
         const end = transaction.mapping.map(watch.end, -1);
-        const range = clampEditorTextRange({ from: start, to: end }, transaction.doc.content.size);
+        const range = clampEditorTextRange({ from: start, to: end }, transaction.doc);
         const currentText = transaction.doc.textBetween(range.from, range.to, '\n', '\n');
         if (!currentText) {
           finalizeDictionaryLearningWatch(watch.segmentId, 'clear_input_box');
@@ -762,7 +768,7 @@ export function useVoiceInput(
     const { doc, selection } = current.state;
     const range = clampEditorTextRange(
       insertionRangeRef.current ?? { from: selection.from, to: selection.to },
-      doc.content.size,
+      doc,
     );
     return {
       ...baseContext,
@@ -808,7 +814,7 @@ export function useVoiceInput(
     current.commands.focus();
     const { state, dispatch } = current.view;
     const range = insertionRangeRef.current
-      ? clampEditorTextRange(insertionRangeRef.current, state.doc.content.size)
+      ? clampEditorTextRange(insertionRangeRef.current, state.doc)
       : { from: state.selection.from, to: state.selection.to };
     insertionRangeRef.current = null;
     const start = range.from;
@@ -995,10 +1001,13 @@ export function useVoiceInput(
             const range = segmentId ? submittedRangesRef.current.get(segmentId) : undefined;
             const current = editorRef.current;
             if (range && current && !current.isDestroyed) {
-              const docSize = current.state.doc.content.size;
-              if (range.start <= docSize) {
+              const currentDoc = current.state.doc;
+              if (range.start <= currentDoc.content.size) {
                 const baseText = event.segment.basedOnText ?? range.submittedText;
-                draftDisplayRangeRef.current = clampEditorTextRange({ from: range.start, to: range.end }, docSize);
+                draftDisplayRangeRef.current = clampEditorTextRange(
+                  { from: range.start, to: range.end },
+                  currentDoc,
+                );
                 setDraftText(buildRefinementPreviewText(baseText, event.text));
                 setDraftSource('refinement');
               }

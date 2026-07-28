@@ -3768,6 +3768,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
      */
     syncModelVisibility: (map: Record<string, boolean>): Promise<void> =>
       ipcRenderer.invoke('maker:model-visibility:sync', map),
+    /**
+     * 「模型 / 供应商停用」override 写入(main 侧持久化真源 model-disable-store)。
+     * 成功后 main 广播 PROVIDER_CHANGED,renderer 经 useProviders 快照刷新拿到
+     * 烘焙了 suspended / model.disabled 标志的新视图。
+     */
+    setModelDisable: (
+      input:
+        | { kind: 'model'; providerId: string; modelIds: string[]; disabled: boolean }
+        | { kind: 'provider'; providerId: string; disabled: boolean },
+    ): Promise<{ ok: true }> => ipcRenderer.invoke('maker:model-disable:set', input),
 
     // 「在新窗口打开」会话多开 —— 新建一个完整窗口定位到该 session。
     openSessionInNewWindow: (sessionId: string): Promise<void> =>

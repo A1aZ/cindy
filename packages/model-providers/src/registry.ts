@@ -14,6 +14,11 @@
 
 import type { Catalog, Provider, CatalogModel, AgentKind, RoutingDescriptor } from './types.js';
 import type { ProviderLogoKind } from './providerBranding.js';
+import {
+  isModelDisabled,
+  isProviderDisabled,
+  type ModelDisableOverrides,
+} from './disableOverrides.js';
 
 /** 各供应商是否已连接，由 host 注入。 */
 export type ConnectionState = Record<string, boolean>;
@@ -89,6 +94,13 @@ export interface ProviderView extends Provider {
   logoKind?: ProviderLogoKind;
   /** 动态清单发现的最近一次失败（已剥掉 detail）；成功或从未失败时缺席。 */
   modelDiscoveryFailure?: ProviderModelDiscoveryFailureView;
+  /**
+   * 用户把该供应商整体「停用」(凭证保留;见 disableOverrides.ts)。`connected` 保持真实
+   * 连接态(设置页要如实展示凭证状态),但 `connectedProvidersForAgent` /
+   * `sourcesForModel` 会把 suspended 供应商从一切可路由集合里剔除 —— 对所有
+   * 选择器 / 路由 / IM / device-link 消费方,停用 ≙ 不可用。
+   */
+  suspended?: boolean;
 }
 
 /**
@@ -104,20 +116,39 @@ function stripDiscoveryFailureDetail(
   return view;
 }
 
-/** 把目录与连接状态合成 registry。 */
+/** 把目录与连接状态合成 registry。`access` = 用户的停用 override(见 disableOverrides.ts)。 */
 export function buildRegistry(
   catalog: Catalog,
   connected: ConnectionState,
   discoveryFailures: ModelDiscoveryFailureState = {},
+  access?: ModelDisableOverrides,
 ): ProviderView[] {
+  const hasDisabledModels =
+    !!access?.disabledModels && Object.keys(access.disabledModels).length > 0;
   return catalog.providers.map((p) => {
     const failure = discoveryFailures[p.id];
     // 剥掉 detail 再下发:它可能是上游原始响应体,而这份视图会过 IPC 到 renderer、
     // 再经 device-link 投影给配对控制端。UI 只用 kind。
     const failureView = failure ? stripDiscoveryFailureDetail(failure) : null;
+    const suspended = isProviderDisabled(access, p.id);
+    // 停用标志烘焙进模型条目(视图层字段,见 CatalogModel.disabled):renderer 与
+    // device-link 控制端直接消费,不需要各自再查一份 override 表。无停用条目时
+    // 原样透传 models(零额外分配 —— listProviders 是热路径)。
+    let models = p.models;
+    if (hasDisabledModels) {
+      const mapped: Provider['models'] = {};
+      for (const agent of Object.keys(p.models) as AgentKind[]) {
+        mapped[agent] = (p.models[agent] ?? []).map((m) =>
+          isModelDisabled(access, p.id, m.id) ? { ...m, disabled: true } : m,
+        );
+      }
+      models = mapped;
+    }
     return {
       ...p,
+      models,
       connected: connected[p.id] ?? false,
+      ...(suspended ? { suspended: true } : {}),
       ...(failureView ? { modelDiscoveryFailure: failureView } : {}),
     };
   });
@@ -134,9 +165,11 @@ export function providersForAgent(views: ProviderView[], agent: AgentKind): Prov
   return views.filter((p) => hasEnabledAgentRuntime(p, agent));
 }
 
-/** 该 agent 已连接的供应商 —— 模型选择器「来源栏」用。 */
+/** 该 agent 已连接的供应商 —— 模型选择器「来源栏」用。停用(suspended)的供应商不可路由,一并剔除。 */
 export function connectedProvidersForAgent(views: ProviderView[], agent: AgentKind): ProviderView[] {
-  return views.filter((p) => p.connected && hasEnabledAgentRuntime(p, agent));
+  // 两道正交的剔除:runtime 级 disabled(目录 routing 声明,上游 #526)与用户的
+  // 供应商级停用(suspended,model-disable-store)—— 任一命中都不可路由。
+  return views.filter((p) => p.connected && !p.suspended && hasEnabledAgentRuntime(p, agent));
 }
 
 /** 该供应商是否在某 agent 下提供某 model id。 */
@@ -165,8 +198,11 @@ export function sourcesForModel(
   opts: { onlyConnected?: boolean } = {},
 ): ProviderView[] {
   const onlyConnected = opts.onlyConnected ?? true;
+  // suspended 供应商无条件出局:本函数的产出是「可路由来源」(选择器 activeSourceId /
+  // effectiveSourceIdForModel / Fast 门控),停用供应商即便凭证在场也不允许被路由到。
   return views.filter(
     (p) =>
+      !p.suspended &&
       (!onlyConnected || p.connected) &&
       hasEnabledAgentRuntime(p, agent) &&
       providerOffersModel(p, modelId, agent),

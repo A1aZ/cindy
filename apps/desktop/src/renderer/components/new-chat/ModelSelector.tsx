@@ -744,6 +744,7 @@ function ModelSelectorContentView({
     return !providers.some(
       (provider) =>
         provider.connected &&
+        !provider.suspended &&
         provider.agents.includes(rowAgentKind) &&
         providerOffersModel(provider, id, rowAgentKind),
     );

@@ -389,7 +389,12 @@ import {
   getDesktopProviderService,
   refreshCustomProvidersIntoCatalog,
 } from '../maker-host/createDesktopProviderService.js';
-import { connectedProvidersForAgent, effectiveSourceIdForModel } from '@cindy/model-providers';
+import {
+  connectedProvidersForAgent,
+  effectiveSourceIdForModel,
+  isAgentSelectableModel,
+  type ProviderView,
+} from '@cindy/model-providers';
 import {
   getSessionProvider,
   hydrateSessionProvider,
@@ -431,6 +436,7 @@ import {
   getModelVisibilityMirrorSnapshot,
   syncModelVisibilityMirror,
 } from '../maker-host/model-visibility-mirror.js';
+import { setModelsDisabled, setProviderDisabled } from '../maker-host/model-disable-store.js';
 import { setClaudeProxySessionIdResolver } from '../maker-host/anthropic-compat-proxy-host.js';
 import {
   clearClaudeSessionBackgroundActivity,
@@ -3496,6 +3502,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       return getAnthropicModelDiscoveryFailure();
     },
     scanLocalCli: () => scanLocalCliAuth(createLocalCliScanDeps()),
+    // 「模型 / 供应商停用」override 写入(main 侧持久化,handler 写后广播 PROVIDER_CHANGED)。
+    setModelsDisabled: (providerId, modelIds, disabled) =>
+      setModelsDisabled(providerId, modelIds, disabled),
+    setProviderDisabled: (providerId, disabled) => setProviderDisabled(providerId, disabled),
     // 通用 OAuth（目录 auth.oauth 描述符驱动）：login 成功后 best-effort 拉动态模型发现
     // (additions-only merge 进 active-catalog) 并广播 PROVIDER_CHANGED 让 UI 刷新连接态。
     oauthLogin: async (providerId, isCurrent) => {
@@ -5650,44 +5660,42 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     getAvailableModels: (agent) => maker.getCapabilities(agent).availableModels,
     getProviderRoutingContext: async () => {
       const views = await getDesktopProviderService().listProviders({ allowSideEffects: true });
-      return {
-        availability: {
-          'claude-code': connectedProvidersForAgent(views, 'claude-code').map((provider) => ({
+      // 准入过滤与 modelList.ts 标准派生同口径:用户停用的模型(disabled,见
+      // model-disable-store)与非 agent 分组的能力模型(图像/音频/视频/向量)不进
+      // 路由可用集 —— MCP create_worker 点名它们会走既有的 INVALID_PARAMS /
+      // NO_PROVIDER 拒绝路径,而不是静默路由过去。停用的供应商已在
+      // connectedProvidersForAgent(suspended)一层出局。
+      const routableModels = (provider: ProviderView, agent: AgentKind) =>
+        (provider.models[agent] ?? []).filter(
+          (model) => model.disabled !== true && isAgentSelectableModel(model),
+        );
+      const availabilityFor = (agent: AgentKind) =>
+        connectedProvidersForAgent(views, agent).map((provider) => {
+          const models = routableModels(provider, agent);
+          return {
             id: provider.id,
             name: provider.name,
-            models: (provider.models['claude-code'] ?? []).map((model) => model.id),
+            models: models.map((model) => model.id),
             // Fast 能力 per-(provider, model):显式来源的 Fast 判定按该来源自己的条目。
-            fastModels: (provider.models['claude-code'] ?? [])
+            fastModels: models
               .filter((model) => model.supportsFastMode)
               .map((model) => model.id),
             // effort 档位同样 per-(provider, model):供 service 按实际路由来源重归一。
             effortMetaByModel: Object.fromEntries(
-              (provider.models['claude-code'] ?? []).map((model) => [
+              models.map((model) => [
                 model.id,
                 { efforts: model.efforts, defaultEffort: model.defaultEffort },
               ]),
             ),
             requiresExplicitRoute: providerRouteRequiresExplicitSelection(
-              provider.routing['claude-code']?.authStrategy,
+              provider.routing[agent]?.authStrategy,
             ),
-          })),
-          codex: connectedProvidersForAgent(views, 'codex').map((provider) => ({
-            id: provider.id,
-            name: provider.name,
-            models: (provider.models.codex ?? []).map((model) => model.id),
-            fastModels: (provider.models.codex ?? [])
-              .filter((model) => model.supportsFastMode)
-              .map((model) => model.id),
-            effortMetaByModel: Object.fromEntries(
-              (provider.models.codex ?? []).map((model) => [
-                model.id,
-                { efforts: model.efforts, defaultEffort: model.defaultEffort },
-              ]),
-            ),
-            requiresExplicitRoute: providerRouteRequiresExplicitSelection(
-              provider.routing.codex?.authStrategy,
-            ),
-          })),
+          };
+        });
+      return {
+        availability: {
+          'claude-code': availabilityFor('claude-code'),
+          codex: availabilityFor('codex'),
         },
         resolveDefaultProviderIdForModel: (agent, model) => (
           effectiveSourceIdForModel(views, null, model, agent)

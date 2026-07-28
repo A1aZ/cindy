@@ -284,6 +284,16 @@ export interface CatalogModel {
    * 新增模型缺省 = 默认开,符合「未自定义用户随版本吃到新默认」(CLAUDE.md 规则 20)。
    */
   defaultEnabled?: boolean;
+  /**
+   * **视图层字段**:该 (供应商, 模型) 已被用户「停用」(准入关,与 `defaultEnabled` 的
+   * 「显示」轴正交)。由 `buildRegistry` 按 host 注入的 ModelDisableOverrides 填充,
+   * 目录数据本身**不携带**本字段,也不参与 `modelSignature` 一致性校验。
+   *
+   * 语义:停用 = 不可被任何新路由选中(选择器 / worker 创建 / MCP 点名 / IM 兜底),
+   * 由 modelList.ts 的标准派生统一过滤;已在运行的会话不受影响(keepSelected 豁免)。
+   * 与「隐藏」(defaultEnabled/visibility override,仅陈列过滤、点名与兜底仍可用)不同。
+   */
+  disabled?: boolean;
 }
 
 /** 供应商定义。 */

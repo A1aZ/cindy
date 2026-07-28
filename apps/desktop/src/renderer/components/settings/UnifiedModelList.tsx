@@ -1,30 +1,45 @@
 /**
- * UnifiedModelList —— 供应商详情面板的「以模型为主体」统一可见性列表。
+ * UnifiedModelList —— 供应商详情面板的「以模型为主体」统一列表。
  *
- * 设计(2026-07 模型供应商重构定稿):
+ * 设计(2026-07 模型供应商重构定稿 + 2026-07-28 启用/显示双轴交互定稿):
  *   - 列表 = 该供应商**所有 agent 的模型并集**(按 model id 合并),不再按 CLI 分 Tab。
- *   - 普通模式:每行恒为**一个开关**,一次拨动同时写该模型全部可用 agent 的可见性
- *     override(底层仍是 per-agent 的 modelVisibilityPrefs,存储结构不变)。
- *   - 能力事实(模型只存在于某个 CLI):模型名旁的**无边框灰字**「不支持 Codex」——
- *     读作元数据;仅当供应商本身服务双 agent 时才逐行标注(单 agent 供应商由
- *     详情头部统一说明,行级不重复)。
- *   - 用户偏好分歧(双端可用但可见性不同):**带底色 chip**「已在 X 隐藏」,点击进入
- *     分别调整;普通模式下开关显示「任一端开启」,拨动即归一(行为可预期)。
- *   - 分别调整模式:所有行统一变为两列(列头 Claude Code / Codex),模型在某 agent
- *     不可用时该格显示「—」(不是灰开关,避免「灰=关闭?」二次歧义)。
+ *   - 三个概念钉死到三种互不借用的表达上(用户裁决):
+ *       · **开关 = 显示轴**(仅对话模型行):是否出现在模型选择面板 —— 纯陈列,全页
+ *         唯一一种开关语义。隐藏的模型被显式点名 / 自动兜底时仍可用。存储 =
+ *         renderer modelVisibilityPrefs(不变)。
+ *       · **「⋯」菜单 = 停用动作**(所有行,hover 显现):停用 = 准入关,不可被任何
+ *         新路由选中。存储 = main 侧 model-disable-store,经 PROVIDER_LIST 的
+ *         model.disabled 标志回读,写走 setModelDisable IPC。
+ *       · **底部「已停用」分区 = 停用状态**:停用的行离开原分组、沉到列表底部的
+ *         折叠区(复用分组折叠交互,默认展开),行内「启用此模型」即飞回原分组。
+ *         "下沉"是停用在整个设置页的统一隐喻(左栏停用的供应商同样沉底)。
+ *   - **能力模型组**(图像/音频/视频/向量/其它):不能当 agent 用,永远不进对话模型
+ *     选择面板(modelList.ts 硬排除),没有显示轴 ⇒ 行内**没有开关**,只有「⋯」停用;
+ *     其启用状态控制媒体生成等专属链路能否使用它。
+ *   - 普通模式:对话模型行恒为一个开关,一次拨动同时写该模型全部可用 agent 的可见性
+ *     override;分歧(双端可用但可见性不同)以「已在 X 隐藏」chip 提示,点击进入分别调整。
+ *   - 分别调整模式:对话模型行统一变为两列(列头 Claude Code / Codex),模型在某 agent
+ *     不可用时该格显示「—」。停用行不在分组里,不参与分别模式(停用不分 agent,一停全停)。
  *
- * 同一模式下控件形态唯一 —— 这是本组件的硬约束(v4 交互稿定稿):普通=每行一个
- * 开关;分别=每行两列。开关数量不携带任何语义。
+ * 同一模式下同一轴的控件形态唯一 —— 这是本组件的硬约束(v4 交互稿定稿延续)。
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, RefreshCw, Search } from 'lucide-react';
+import { ChevronDown, MoreHorizontal, RefreshCw, Search } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
+import { toast } from '@/lib/toast';
 import { Switch } from '@/components/ui/switch';
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import {
   groupModelsForDisplay,
+  groupOf,
   CATEGORY_LABEL_KEY,
   type ModelCategory,
 } from '@/components/new-chat/sourceSwitch';
@@ -35,6 +50,7 @@ import {
   useModelVisibilityVersion,
 } from '@/state/modelVisibilityPrefs';
 
+import { isAgentSelectableModel } from '@cindy/model-providers';
 import type { AgentKind, CatalogModel, ProviderView } from '@cindy/model-providers';
 
 const AGENT_LABEL: Record<AgentKind, string> = {
@@ -44,17 +60,21 @@ const AGENT_LABEL: Record<AgentKind, string> = {
 
 /**
  * 分组折叠态(仅 UI 展示,按设备记忆)。非对话类型组(图像/音频/视频/向量/其它)默认折叠——
- * 它们是网关多出的、不能当 agent 用的模型,默认收起让列表清爽;对话厂商组默认展开。
- * 只存用户显式改过的组(与 modelVisibilityPrefs 同哲学:未改的跟随默认),搜索时强制全展开。
+ * 它们是能力模型,不参与对话模型选择,默认收起让列表清爽;对话厂商组默认展开;
+ * 底部「已停用」分区(key = '__disabled')默认**展开**——区里有东西说明是用户主动停的,
+ * 找回路径要一眼可见。只存用户显式改过的组(与 modelVisibilityPrefs 同哲学),搜索时强制全展开。
+ * CAPABILITY_CATEGORIES 同时就是「能力模型组」的判定(成员 = classification 的非 agent 分组)。
  */
 const COLLAPSE_STORAGE_KEY = 'xdt:modelListCollapsedGroups:v1';
-const DEFAULT_COLLAPSED_CATEGORIES = new Set<ModelCategory>([
+const DISABLED_GROUP_KEY = '__disabled';
+const CAPABILITY_CATEGORIES = new Set<ModelCategory>([
   'image',
   'audio',
   'video',
   'embedding',
   'other',
 ]);
+const DEFAULT_COLLAPSED_CATEGORIES = CAPABILITY_CATEGORIES;
 
 function loadCollapsedMap(): Record<string, boolean> {
   try {
@@ -131,21 +151,37 @@ function rowEnabled(providerId: string, row: UnionModelRow, agent: AgentKind): b
   return m ? isModelEnabled(agent, providerId, m) : null;
 }
 
-/** 分歧 = 双端可用且可见性不同。 */
+/** 该行是否被停用(准入轴;单一写入口把全部 avail 一起写,任一端带标志即视为停用)。 */
+export function isRowDisabled(row: UnionModelRow): boolean {
+  return row.avail.some((a) => row.byAgent[a]?.disabled === true);
+}
+
+/** 该行是否是「能力模型」(图像/音频/视频/向量等,没有显示轴;见头注)。 */
+export function isCapabilityRow(row: UnionModelRow): boolean {
+  const rep = row.byAgent[row.avail[0]];
+  return !!rep && !isAgentSelectableModel(rep);
+}
+
+/** 分歧 = 双端可用且可见性不同(仅对话模型行有意义)。 */
 export function isRowDiverged(providerId: string, row: UnionModelRow): boolean {
   if (row.avail.length < 2) return false;
   const values = row.avail.map((a) => rowEnabled(providerId, row, a));
   return values.some((v) => v !== values[0]);
 }
 
-/** 每个 Agent 各自的模型显示数；UI 必须保留 Agent 维度，不能汇总成模型条目总数。 */
+/**
+ * 每个 Agent 各自的模型显示数;UI 必须保留 Agent 维度,不能汇总成模型条目总数。
+ * 口径 = 对话模型(能力模型没有显示轴)且未停用(停用行不可显示,不计入分母)。
+ */
 export function countModelsByAgent(provider: ProviderView): Array<{
   agent: AgentKind;
   on: number;
   total: number;
 }> {
   return provider.agents.map((agent) => {
-    const models = provider.models[agent] ?? [];
+    const models = (provider.models[agent] ?? []).filter(
+      (model) => isAgentSelectableModel(model) && model.disabled !== true,
+    );
     return {
       agent,
       on: models.filter((model) => isModelEnabled(agent, provider.id, model)).length,
@@ -157,6 +193,22 @@ export function countModelsByAgent(provider: ProviderView): Array<{
 /** 普通模式的单开关显示值:任一可用 agent 开启即视为开(拨动才归一)。 */
 function rowAnyEnabled(providerId: string, row: UnionModelRow): boolean {
   return row.avail.some((a) => rowEnabled(providerId, row, a) === true);
+}
+
+/** 该行全部 avail agent 的真实目录 id(桥接投影两端 id 不同,写停用要两端一起写)。 */
+function rowModelIds(row: UnionModelRow): string[] {
+  const ids = new Set<string>();
+  for (const a of row.avail) {
+    const m = row.byAgent[a];
+    if (m) ids.add(m.id);
+  }
+  return [...ids];
+}
+
+/** 该行的厂商分组(用代表条目判;已停用分区里标注来源分组也用它)。 */
+function rowCategory(row: UnionModelRow): ModelCategory {
+  const rep = row.byAgent[row.avail[0]];
+  return rep ? groupOf(rep) : 'other';
 }
 
 export function UnifiedModelList({
@@ -173,20 +225,32 @@ export function UnifiedModelList({
   const [query, setQuery] = useState('');
   const [splitMode, setSplitMode] = useState(false);
   const [collapsedMap, setCollapsedMap] = useState<Record<string, boolean>>(loadCollapsedMap);
+  // 停用写入的乐观覆盖:setModelDisable 走 IPC → main 落盘 → PROVIDER_CHANGED 广播 →
+  // useProviders 快照刷新,期间(可能上百毫秒,含凭证库读取)用本地覆盖顶住 —— 行在
+  // 分组与「已停用」分区之间的迁移一次到位,不出现回跳帧(规则 7)。新快照到达即清空。
+  const [pendingDisabled, setPendingDisabled] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    setPendingDisabled({});
+  }, [provider]);
 
+  // 折叠态:分组用 ModelCategory 作 key,「已停用」分区用 DISABLED_GROUP_KEY(默认展开)。
   const isCollapsed = useCallback(
-    (cat: ModelCategory) => collapsedMap[cat] ?? DEFAULT_COLLAPSED_CATEGORIES.has(cat),
+    (key: string) =>
+      collapsedMap[key] ??
+      (key !== DISABLED_GROUP_KEY && DEFAULT_COLLAPSED_CATEGORIES.has(key as ModelCategory)),
     [collapsedMap],
   );
-  const toggleCollapsed = useCallback((cat: ModelCategory) => {
+  const toggleCollapsed = useCallback((key: string) => {
     setCollapsedMap((prev) => {
-      const cur = prev[cat] ?? DEFAULT_COLLAPSED_CATEGORIES.has(cat);
+      const defaultCollapsed =
+        key !== DISABLED_GROUP_KEY && DEFAULT_COLLAPSED_CATEGORIES.has(key as ModelCategory);
+      const cur = prev[key] ?? defaultCollapsed;
       const newVal = !cur;
       const next = { ...prev };
-      if (newVal === DEFAULT_COLLAPSED_CATEGORIES.has(cat)) {
-        delete next[cat];
+      if (newVal === defaultCollapsed) {
+        delete next[key];
       } else {
-        next[cat] = newVal;
+        next[key] = newVal;
       }
       try {
         window.localStorage.setItem(COLLAPSE_STORAGE_KEY, JSON.stringify(next));
@@ -203,27 +267,61 @@ export function UnifiedModelList({
   const multiAgent = provider.agents.length > 1;
   const unionRows = useMemo(() => buildUnionRows(provider), [provider]);
 
+  const rowDisabledEffective = useCallback(
+    (row: UnionModelRow) => pendingDisabled[row.id] ?? isRowDisabled(row),
+    [pendingDisabled],
+  );
+
+  /** 写停用轴:乐观覆盖 + IPC;失败回滚并提示(错误 = 发生了什么 + 下一步)。 */
+  const setRowDisabled = useCallback(
+    (row: UnionModelRow, disabled: boolean) => {
+      setPendingDisabled((prev) => ({ ...prev, [row.id]: disabled }));
+      void window.electronAPI.maker
+        .setModelDisable({
+          kind: 'model',
+          providerId: provider.id,
+          modelIds: rowModelIds(row),
+          disabled,
+        })
+        .catch(() => {
+          setPendingDisabled((prev) => {
+            const next = { ...prev };
+            delete next[row.id];
+            return next;
+          });
+          toast.error(t('settings.providers.models.accessWriteFailed'));
+        });
+    },
+    [provider.id, t],
+  );
+
+  // 分组(仅未停用的行)+「已停用」分区(停用的行,跨分组沉底)。搜索两边都过滤。
   // 分组沿用现有口径:用每行第一个可用 agent 的目录条目作代表参与分组。
-  const groups = useMemo(() => {
+  const { groups, disabledRows } = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const filtered = q
+    const matched = q
       ? unionRows.filter((r) => r.name.toLowerCase().includes(q) || r.id.toLowerCase().includes(q))
       : unionRows;
+    const active = matched.filter((r) => !rowDisabledEffective(r));
+    const disabled = matched.filter((r) => rowDisabledEffective(r));
     const repByRow = new Map<string, UnionModelRow>();
     const reps: CatalogModel[] = [];
-    for (const r of filtered) {
+    for (const r of active) {
       const rep = r.byAgent[r.avail[0]];
       if (!rep) continue;
       repByRow.set(rep.id, r);
       reps.push(rep);
     }
-    return groupModelsForDisplay(reps).map((g) => ({
-      category: g.category,
-      rows: g.models
-        .map((m) => repByRow.get(m.id))
-        .filter((r): r is UnionModelRow => !!r),
-    }));
-  }, [unionRows, query]);
+    return {
+      groups: groupModelsForDisplay(reps).map((g) => ({
+        category: g.category,
+        rows: g.models
+          .map((m) => repByRow.get(m.id))
+          .filter((r): r is UnionModelRow => !!r),
+      })),
+      disabledRows: disabled,
+    };
+  }, [unionRows, query, rowDisabledEffective]);
   const showGroupHeaders = groups.length > 1;
   const showSearch = unionRows.length > 8;
 
@@ -234,8 +332,8 @@ export function UnifiedModelList({
   const totalModelsAcrossAgents = agentCounts.reduce((sum, count) => sum + count.total, 0);
   const allOn = totalModelsAcrossAgents > 0 && agentCounts.every((count) => count.on === count.total);
 
-  /** 单开关:一次写该行全部可用 agent(分歧行拨动即归一)。写入用各 agent 的**真实模型 id**
-   *  (桥接投影行两端 id 不同:chatgpt/gpt-5.5 vs gpt-5.5),不能用规范化后的 row.id。 */
+  /** 单开关(显示轴):一次写该行全部可用 agent(分歧行拨动即归一)。写入用各 agent 的
+   *  **真实模型 id**(桥接投影行两端 id 不同:chatgpt/gpt-5.5 vs gpt-5.5),不能用规范化后的 row.id。 */
   const toggleRow = useCallback(
     (row: UnionModelRow) => {
       const next = !rowAnyEnabled(provider.id, row);
@@ -247,19 +345,51 @@ export function UnifiedModelList({
     [provider.id],
   );
 
-  /** 全部开启 / 关闭:逐 agent 批量写(单 agent 一次落盘)。 */
+  /** 全部显示 / 隐藏:逐 agent 批量写(单 agent 一次落盘)。只作用于**对话模型的显示轴**
+   *  —— 能力模型没有显示轴,停用行没有可显示态,都不写(写了 = 无效 override 污染存储,
+   *  且历史上会把图像模型漏进选择器)。 */
   const handleBulk = useCallback(() => {
     const next = !allOn;
     for (const agent of provider.agents) {
-      const ids = (provider.models[agent] ?? []).map((m) => m.id);
+      const ids = (provider.models[agent] ?? [])
+        .filter((m) => isAgentSelectableModel(m) && m.disabled !== true)
+        .map((m) => m.id);
       setManyVisibility(agent, provider.id, ids, next);
     }
   }, [allOn, provider]);
 
+  /** 行级「⋯」菜单(hover 显现;菜单打开期间保持可见):停用动作的唯一入口。 */
+  const rowMenu = (row: UnionModelRow) => (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label={t('settings.providers.detail.moreActionsAria')}
+          className={cn(
+            'flex h-6 w-6 shrink-0 items-center justify-center rounded-md opacity-0 transition-opacity',
+            'hover:bg-[var(--surface-hover)] focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100',
+          )}
+          style={{ color: 'var(--text-tertiary)' }}
+        >
+          <MoreHorizontal size={14} />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onClick={() => setRowDisabled(row, true)}>
+          {t('settings.providers.models.disableModel')}
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+
   return (
     <div className="flex flex-col">
-      {/* 工具行:搜索 + 计数 + 刷新(自定义) + 分别调整(双 agent) + 全部开关 */}
+      {/* 工具行:标题(开关语义的唯一说明,**常驻**,不被搜索框挤掉 —— 2026-07-28 用户
+          反馈)+ 搜索 + 刷新(自定义) + 分别调整(双 agent) + 全部开关 */}
       <div className="flex items-center gap-3 px-5 py-2.5">
+        <span className="shrink-0 text-13 font-medium" style={{ color: 'var(--text-secondary)' }}>
+          {t('settings.providers.models.available')}
+        </span>
         {showSearch ? (
           <div
             className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-full px-3"
@@ -277,17 +407,8 @@ export function UnifiedModelList({
             />
           </div>
         ) : (
-          <span className="flex-1 text-13 font-medium" style={{ color: 'var(--text-secondary)' }}>
-            {t('settings.providers.models.available')}
-          </span>
+          <span className="min-w-0 flex-1" />
         )}
-        <span className="shrink-0 text-12 font-medium tabular-nums" style={{ color: 'var(--text-tertiary)' }}>
-          {agentCounts
-            .map(({ agent, on, total }) =>
-              t('settings.providers.models.agentEnabledCount', { agent: AGENT_LABEL[agent], on, total }),
-            )
-            .join(' · ')}
-        </span>
         {onRefresh && (
           <button
             type="button"
@@ -348,9 +469,9 @@ export function UnifiedModelList({
         </div>
       )}
 
-      {/* 分组 + 模型行 */}
+      {/* 分组 + 模型行 + 底部「已停用」分区 */}
       <div className="flex flex-col gap-4 px-5 pb-4 pt-0.5">
-        {groups.length === 0 ? (
+        {groups.length === 0 && disabledRows.length === 0 ? (
           <div className="py-4 text-center text-13" style={{ color: 'var(--text-tertiary)' }}>
             {t('settings.providers.models.noResults')}
           </div>
@@ -358,6 +479,7 @@ export function UnifiedModelList({
           groups.map((g) => {
             // 搜索时强制展开(否则匹配项藏在折叠组里看不到);仅多组时才有折叠头。
             const collapsed = showGroupHeaders && !query.trim() && isCollapsed(g.category);
+            const capability = CAPABILITY_CATEGORIES.has(g.category);
             return (
             <div key={g.category} className="flex flex-col">
               {showGroupHeaders && (
@@ -388,14 +510,25 @@ export function UnifiedModelList({
                   </span>
                 </button>
               )}
+              {/* 能力模型组的消歧说明:这组不参与对话模型选择、行内没有显示开关 ——
+                  语义与上面的对话模型组不同,必须就地讲清,不能指望用户猜。 */}
+              {capability && !collapsed && (
+                <span
+                  className={cn('pb-1 text-11 leading-snug', showGroupHeaders && 'pl-[17px]')}
+                  style={{ color: 'var(--text-tertiary)' }}
+                >
+                  {t('settings.providers.models.capabilityGroupHint')}
+                </span>
+              )}
               {!collapsed &&
                 g.rows.map((row) => {
                 const rep = row.byAgent[row.avail[0]]!;
-                const diverged = isRowDiverged(provider.id, row);
+                const diverged = !capability && isRowDiverged(provider.id, row);
                 const anyOn = rowAnyEnabled(provider.id, row);
-                // 能力注记:仅双 agent 供应商 + 单端模型才标(单 agent 供应商头部已说明)。
+                // 能力注记:仅双 agent 供应商 + 单端模型才标(单 agent 供应商头部已说明);
+                // 能力模型组不标(它们本来就不参与 agent 维度)。
                 const capNote =
-                  multiAgent && row.avail.length === 1
+                  !capability && multiAgent && row.avail.length === 1
                     ? t('settings.providers.models.capabilityNote', {
                         agent: AGENT_LABEL[row.avail[0] === 'claude-code' ? 'codex' : 'claude-code'],
                       })
@@ -414,10 +547,15 @@ export function UnifiedModelList({
                   ? row.avail.find((a) => rowEnabled(provider.id, row, a) === false)
                   : undefined;
                 return (
-                  <div key={row.id} className="flex items-center gap-3 py-[7px]">
+                  <div key={row.id} className="group flex items-center gap-3 py-[7px]">
                     <span
                       className="min-w-0 truncate text-14 font-medium"
-                      style={{ color: anyOn ? 'var(--settings-section-title)' : 'var(--text-tertiary)' }}
+                      style={{
+                        color:
+                          capability || anyOn
+                            ? 'var(--settings-section-title)'
+                            : 'var(--text-tertiary)',
+                      }}
                     >
                       {rep.name}
                     </span>
@@ -447,30 +585,33 @@ export function UnifiedModelList({
                     >
                       {formatContextWindow(rep.contextWindow)}
                     </span>
-                    {splitMode ? (
-                      <div className="flex shrink-0 items-center">
-                        {provider.agents.map((a) => {
-                          const m = row.byAgent[a];
-                          return (
-                            <span key={a} className="flex w-[88px] items-center justify-center">
-                              {m ? (
-                                <Switch
-                                  checked={isModelEnabled(a, provider.id, m)}
-                                  onCheckedChange={(v) => setModelVisibility(a, provider.id, m.id, v)}
-                                  aria-label={`${rep.name} · ${AGENT_LABEL[a]}`}
-                                />
-                              ) : (
-                                <span className="text-12" style={{ color: 'var(--text-tertiary)' }}>
-                                  —
-                                </span>
-                              )}
-                            </span>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <Switch checked={anyOn} onCheckedChange={() => toggleRow(row)} aria-label={rep.name} />
-                    )}
+                    {rowMenu(row)}
+                    {/* 能力模型行没有显示轴 ⇒ 没有开关(全页开关语义唯一 = 显示)。 */}
+                    {!capability &&
+                      (splitMode ? (
+                        <div className="flex shrink-0 items-center">
+                          {provider.agents.map((a) => {
+                            const m = row.byAgent[a];
+                            return (
+                              <span key={a} className="flex w-[88px] items-center justify-center">
+                                {m ? (
+                                  <Switch
+                                    checked={isModelEnabled(a, provider.id, m)}
+                                    onCheckedChange={(v) => setModelVisibility(a, provider.id, m.id, v)}
+                                    aria-label={`${rep.name} · ${AGENT_LABEL[a]}`}
+                                  />
+                                ) : (
+                                  <span className="text-12" style={{ color: 'var(--text-tertiary)' }}>
+                                    —
+                                  </span>
+                                )}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <Switch checked={anyOn} onCheckedChange={() => toggleRow(row)} aria-label={rep.name} />
+                      ))}
                   </div>
                 );
               })}
@@ -478,6 +619,74 @@ export function UnifiedModelList({
             );
           })
         )}
+
+        {/* 「已停用」分区:停用的行跨分组沉底;默认展开(区里有东西 = 用户主动停的,
+            找回路径要一眼可见),搜索时强制展开。行内「启用此模型」即飞回原分组。 */}
+        {disabledRows.length > 0 && (() => {
+          const collapsed = !query.trim() && isCollapsed(DISABLED_GROUP_KEY);
+          return (
+            <div className="flex flex-col">
+              <button
+                type="button"
+                onClick={() => toggleCollapsed(DISABLED_GROUP_KEY)}
+                aria-expanded={!collapsed}
+                className="flex items-center gap-1 self-start pb-0.5 text-left transition-opacity hover:opacity-80"
+              >
+                <span
+                  className="inline-flex transition-transform duration-150"
+                  style={{ color: 'var(--text-tertiary)', transform: collapsed ? 'rotate(-90deg)' : 'none' }}
+                >
+                  <ChevronDown size={12} />
+                </span>
+                <span
+                  className="text-11 font-semibold uppercase"
+                  style={{ color: 'var(--text-tertiary)', letterSpacing: '0.4px' }}
+                >
+                  {t('settings.providers.models.disabledGroup')}
+                </span>
+                <span className="text-11 tabular-nums" style={{ color: 'var(--text-tertiary)', opacity: 0.6 }}>
+                  {disabledRows.length}
+                </span>
+              </button>
+              {!collapsed &&
+                disabledRows.map((row) => {
+                  const rep = row.byAgent[row.avail[0]]!;
+                  return (
+                    <div key={row.id} className="flex items-center gap-3 py-[7px]">
+                      <span
+                        className="min-w-0 truncate text-14 font-medium"
+                        style={{ color: 'var(--text-disabled)' }}
+                      >
+                        {rep.name}
+                      </span>
+                      {/* 来源分组注记:启用后会回到哪个组,别让用户猜。 */}
+                      <span className="shrink-0 text-12" style={{ color: 'var(--text-tertiary)' }}>
+                        {t(CATEGORY_LABEL_KEY[rowCategory(row)])}
+                      </span>
+                      <span className="min-w-0 flex-1" />
+                      <span
+                        className="shrink-0 text-12 tabular-nums"
+                        style={{ color: 'var(--text-disabled)' }}
+                      >
+                        {formatContextWindow(rep.contextWindow)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setRowDisabled(row, false)}
+                        className="flex h-6 shrink-0 items-center rounded-full border px-2.5 text-12 font-medium transition-colors hover:bg-[var(--surface-hover)]"
+                        style={{
+                          borderColor: 'var(--settings-btn-secondary-border)',
+                          color: 'var(--settings-btn-secondary-text)',
+                        }}
+                      >
+                        {t('settings.providers.models.enableModel')}
+                      </button>
+                    </div>
+                  );
+                })}
+            </div>
+          );
+        })()}
       </div>
     </div>
   );

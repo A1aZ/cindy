@@ -7,7 +7,13 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { buildUnionRows, countModelsByAgent, isRowDiverged } from '@/components/settings/UnifiedModelList';
+import {
+  buildUnionRows,
+  countModelsByAgent,
+  isCapabilityRow,
+  isRowDisabled,
+  isRowDiverged,
+} from '@/components/settings/UnifiedModelList';
 import { __resetForTest, setModelVisibility } from '@/state/modelVisibilityPrefs';
 
 import type { CatalogModel, ProviderView } from '@cindy/model-providers';
@@ -121,5 +127,52 @@ describe('countModelsByAgent', () => {
       { agent: 'claude-code', on: 2, total: 2 },
       { agent: 'codex', on: 2, total: 3 },
     ]);
+  });
+
+  it('停用模型与能力模型(image 等)不进「显示 x/y」计数', () => {
+    const withExtras = {
+      ...provider,
+      models: {
+        ...provider.models,
+        // gpt-image-2 按 id 归入 image 能力分组;disabled 是 buildRegistry 烘焙的视图层标志。
+        codex: [
+          ...(provider.models.codex ?? []),
+          model('gpt-image-2'),
+          { ...model('banned'), disabled: true },
+        ],
+      },
+    } as ProviderView;
+    expect(countModelsByAgent(withExtras)).toEqual([
+      { agent: 'claude-code', on: 2, total: 2 },
+      { agent: 'codex', on: 2, total: 2 },
+    ]);
+  });
+});
+
+describe('停用轴(isRowDisabled / isCapabilityRow)', () => {
+  it('任一端条目带 disabled 标志即视为停用行(单一写入口两端一起写)', () => {
+    const withDisabled = {
+      ...provider,
+      models: {
+        'claude-code': [{ ...model('shared'), disabled: true }, model('cc-only')],
+        codex: [model('shared', 272_000), model('codex-only')],
+      },
+    } as ProviderView;
+    const rows = buildUnionRows(withDisabled);
+    expect(isRowDisabled(rows[0])).toBe(true);
+    expect(isRowDisabled(rows[1])).toBe(false);
+  });
+
+  it('能力模型行按分组判定(image → 能力行;对话厂商/兜底分组 → 否)', () => {
+    const withImage = {
+      ...provider,
+      models: {
+        ...provider.models,
+        codex: [...(provider.models.codex ?? []), model('gpt-image-2')],
+      },
+    } as ProviderView;
+    const rows = buildUnionRows(withImage);
+    expect(isCapabilityRow(rows.find((r) => r.id === 'gpt-image-2')!)).toBe(true);
+    expect(isCapabilityRow(rows.find((r) => r.id === 'shared')!)).toBe(false);
   });
 });

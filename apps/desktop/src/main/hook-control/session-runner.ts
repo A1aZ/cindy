@@ -42,7 +42,6 @@ import type {
 } from '@cindy/maker-core';
 import {
   effectiveSourceIdForModel,
-  isModelVisible,
   type ProviderView,
   visibleModelUnion,
 } from '@cindy/model-providers';
@@ -79,7 +78,6 @@ import { worktreeStore, WorktreeManager } from '../worktree/index.js';
 import { readImDefaultSettings } from '../im/defaultSettingsStore.js';
 import { getWorkspaceProviderSource } from './workspaceProviderSourceStore.js';
 import { getDesktopProviderService } from '../maker-host/createDesktopProviderService.js';
-import { getModelVisibilityOverride } from '../maker-host/model-visibility-mirror.js';
 import {
   createTurnActivity,
   markActivityWriting,
@@ -129,14 +127,13 @@ async function resolveNewSessionConfig(
   const resolved = resolveHookSessionConfig(
     {
       readDefaults: () => readImDefaultSettings(sourceIm === 'slack' ? 'slack' : undefined),
+      // 可执行清单按**启用**口径,不叠加「显示 / 隐藏」偏好:隐藏只是陈列过滤
+      // (选择器不列),被 IM 显式点名或兜底选中仍然合法;停用的模型与供应商已由
+      // visibleModelUnion 内建的准入过滤(model.disabled / suspended)剔除,点名
+      // 会走 defaults.ts 的降级 + warn 路径(2026-07 启用/显示双轴拆分)。
       getModels: (agentKind) =>
         providers
-          ? visibleModelUnion(providers, agentKind, (providerId, model) =>
-              isModelVisible(
-                getModelVisibilityOverride(agentKind, providerId, model.id),
-                model.defaultEnabled,
-              ),
-            )
+          ? visibleModelUnion(providers, agentKind, () => true)
           : getMaker().getCapabilities(agentKind).availableModels,
       getPermissionModes: (agentKind) =>
         getMaker()

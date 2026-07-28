@@ -162,6 +162,8 @@ import {
   storeGhostSecret,
 } from '../secrets/providerSecretStore.js';
 import { getActiveCatalog } from '../maker-host/active-catalog.js';
+import { isModelDisabled, isProviderDisabled } from '@cindy/model-providers';
+import { readModelDisableOverrides } from '../maker-host/model-disable-store.js';
 import { outboundFetch } from '../maker-host/outbound-fetch.js';
 import {
   CINDY_CAPABILITY_KEYS,
@@ -1670,7 +1672,16 @@ export function getGhostPreviewSlot(): GhostPreviewSlot {
  */
 function getCatalogMediaConfig(kind: 'image' | 'video'): CindyMediaCatalogConfig {
   try {
-    return deriveCindyMediaConfig(getActiveCatalog().providers, kind);
+    // 停用过滤:用户在 设置 → 模型供应商 停用的媒体模型 / 供应商不进候选清单
+    // (与对话模型的准入口径同源,见 model-disable-store)。
+    const access = readModelDisableOverrides();
+    return deriveCindyMediaConfig(
+      getActiveCatalog().providers,
+      kind,
+      (providerId, modelId) =>
+        isProviderDisabled(access, providerId) ||
+        isModelDisabled(access, providerId, modelId),
+    );
   } catch (err) {
     // 目录读取异常 = 拿不到可用性证明,同「空清单」处理(不静默顶一份旧名单)。
     log.warn(`read catalog ${kind} config failed, treating capability as unavailable`, {

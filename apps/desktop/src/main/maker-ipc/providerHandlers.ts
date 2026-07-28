@@ -236,6 +236,12 @@ export interface ProviderHandlerDeps {
    * 单测注入 stub 不碰真实 home)。只 stat 不读内容(规则 23)。
    */
   scanLocalCli(): Promise<LocalCliDetection[]>;
+  /**
+   * 「模型 / 供应商停用」override 写入(生产 = model-disable-store 的 setModelsDisabled /
+   * setProviderDisabled)。写成功后由 handler 统一广播 PROVIDER_CHANGED。
+   */
+  setModelsDisabled(providerId: string, modelIds: readonly string[], disabled: boolean): void;
+  setProviderDisabled(providerId: string, disabled: boolean): void;
 }
 
 /** 校验 PROVIDER_TEST_CONNECTION 入参形状（确定性代码校验，非法直接 INVALID_PARAMS）。 */
@@ -577,6 +583,36 @@ export function registerProviderHandlers(
     }
     deps.assertTrustedSender(event);
   }
+
+  // 「模型 / 供应商停用」override 写入。设置类写操作:仅本机主页面可调(device-link
+  // 合成 event 与不受信 frame 一律拒绝 —— 远程改被控端全局设置越权);守卫缺席按拒绝
+  // 处理(assertTrustedProviderMutationSender)。写的是 main 侧持久化 override,目录
+  // 本身没变,**不**走 refreshCatalog,只广播 PROVIDER_CHANGED 让各端重拉视图。
+  registry.handle(MAKER_INVOKE.MODEL_DISABLE_SET, async (event, input: unknown) => {
+    assertTrustedProviderMutationSender(event);
+    if (!input || typeof input !== 'object') throwIpcError('INVALID_PARAMS', 'invalid input');
+    const i = input as Record<string, unknown>;
+    if (typeof i.providerId !== 'string' || i.providerId.length === 0) {
+      throwIpcError('INVALID_PARAMS', 'providerId required');
+    }
+    if (typeof i.disabled !== 'boolean') throwIpcError('INVALID_PARAMS', 'disabled required');
+    if (i.kind === 'model') {
+      if (
+        !Array.isArray(i.modelIds) ||
+        i.modelIds.length === 0 ||
+        i.modelIds.some((id) => typeof id !== 'string' || id.length === 0)
+      ) {
+        throwIpcError('INVALID_PARAMS', 'modelIds must be a non-empty string[]');
+      }
+      deps.setModelsDisabled(i.providerId, i.modelIds as string[], i.disabled);
+    } else if (i.kind === 'provider') {
+      deps.setProviderDisabled(i.providerId, i.disabled);
+    } else {
+      throwIpcError('INVALID_PARAMS', 'kind must be "model" or "provider"');
+    }
+    deps.broadcastChanged();
+    return { ok: true };
+  });
 
   registry.handle(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, async (event, input: unknown, keyInput?: unknown) => {
     assertTrustedProviderMutationSender(event);

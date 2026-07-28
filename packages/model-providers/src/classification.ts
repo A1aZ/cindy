@@ -94,6 +94,25 @@ export function categorize(id: string): ModelCategory {
 const KNOWN_CATEGORIES = new Set<string>(CATEGORY_ORDER);
 
 /**
+ * 能作为 agent 对话模型被选择/路由的厂商分组(anthropic..china)。image / audio / video /
+ * embedding / other 是网关多返回的**能力模型**:不能当 agent 用,永远不进对话模型选择面板
+ * (硬排除,与显示开关无关),它们的「启用」只作用于媒体生成等专属链路。
+ */
+const AGENT_MODEL_CATEGORIES: ReadonlySet<ModelCategory> = new Set([
+  'anthropic',
+  'gpt',
+  'gpt-budget',
+  'grok',
+  'google',
+  'china',
+]);
+
+/** 该模型是否属于可被 agent 选择的对话厂商分组(见 AGENT_MODEL_CATEGORIES)。 */
+export function isAgentSelectableModel(model: { id: string; group?: string }): boolean {
+  return AGENT_MODEL_CATEGORIES.has(groupOf(model));
+}
+
+/**
  * 决定一个模型的厂商分组 —— **数据优先**:目录里带了合法 `group` 就用它,
  * 否则回退到 id 前缀归类(categorize)。未知的 group 值(渲染层没有对应标签)也回退,
  * 避免出现没有 i18n 标签的空分组。

@@ -78,6 +78,8 @@ function makeDeps(over: Partial<ProviderHandlerDeps> = {}): ProviderHandlerDeps 
     storeCustomProviderKey: vi.fn(() => true),
     removeCustomProviderKey: vi.fn(() => ({ success: true })),
     scanLocalCli: vi.fn(async () => []),
+    setModelsDisabled: vi.fn(() => {}),
+    setProviderDisabled: vi.fn(() => {}),
     ...over,
   };
 }
@@ -116,6 +118,75 @@ describe('provider:list IPC handler', () => {
       }),
     );
     await expect(harness.invoke(MAKER_INVOKE.PROVIDER_LIST)).rejects.toThrow('boom');
+  });
+});
+
+describe('model-disable:set handler', () => {
+  it('model 形态:写停用 override 并广播 PROVIDER_CHANGED', async () => {
+    const harness = new IpcHarness();
+    const deps = makeDeps();
+    registerProviderHandlers(harness, deps);
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+        kind: 'model',
+        providerId: 'xd',
+        modelIds: ['claude-opus-5', 'chatgpt/gpt-5.5'],
+        disabled: true,
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(deps.setModelsDisabled).toHaveBeenCalledWith('xd', ['claude-opus-5', 'chatgpt/gpt-5.5'], true);
+    expect(deps.broadcastChanged).toHaveBeenCalledOnce();
+  });
+
+  it('provider 形态:写供应商级停用并广播', async () => {
+    const harness = new IpcHarness();
+    const deps = makeDeps();
+    registerProviderHandlers(harness, deps);
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, { kind: 'provider', providerId: 'xd', disabled: false }),
+    ).resolves.toEqual({ ok: true });
+    expect(deps.setProviderDisabled).toHaveBeenCalledWith('xd', false);
+    expect(deps.broadcastChanged).toHaveBeenCalledOnce();
+  });
+
+  it('入参非法(缺 modelIds / 未知 kind)→ INVALID_PARAMS,不写不广播', async () => {
+    const harness = new IpcHarness();
+    const deps = makeDeps();
+    registerProviderHandlers(harness, deps);
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, { kind: 'model', providerId: 'xd', modelIds: [], disabled: true }),
+    ).rejects.toThrow(/INVALID_PARAMS/);
+    await expect(
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, { kind: 'nope', providerId: 'xd', disabled: true }),
+    ).rejects.toThrow(/INVALID_PARAMS/);
+    expect(deps.setModelsDisabled).not.toHaveBeenCalled();
+    expect(deps.setProviderDisabled).not.toHaveBeenCalled();
+    expect(deps.broadcastChanged).not.toHaveBeenCalled();
+  });
+
+  it('设置类写操作:不可信 sender / 守卫未接线一律拒绝', async () => {
+    const harness = new IpcHarness();
+    const rejecting = makeDeps({
+      assertTrustedSender: vi.fn(() => {
+        throwIpcError('PERMISSION_DENIED', '此操作只能从 Cindy 主页面发起');
+      }),
+    });
+    registerProviderHandlers(harness, rejecting);
+    await expect(
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, { kind: 'provider', providerId: 'xd', disabled: true }),
+    ).rejects.toThrow(/PERMISSION_DENIED/);
+    expect(rejecting.setProviderDisabled).not.toHaveBeenCalled();
+
+    const harness2 = new IpcHarness();
+    const unwired = makeDeps({ assertTrustedSender: undefined });
+    registerProviderHandlers(harness2, unwired);
+    await expect(
+      harness2.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, { kind: 'provider', providerId: 'xd', disabled: true }),
+    ).rejects.toThrow(/PERMISSION_DENIED/);
+    expect(unwired.setProviderDisabled).not.toHaveBeenCalled();
   });
 });
 

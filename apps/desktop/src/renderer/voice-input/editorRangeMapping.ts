@@ -30,11 +30,23 @@ export function clampToInlinePosition(doc: PMNode, position: number): number {
   return TextSelection.near($pos, 1).from;
 }
 
-/** Clamp a stored range into valid, ordered inline positions of `doc`. */
+/**
+ * Clamp a stored range into valid, ordered positions of `doc`.
+ *
+ * Only a COLLAPSED anchor is snapped onto an inline position. A non-collapsed
+ * range carries replacement semantics that the endpoints are part of: dictation
+ * started over `AllSelection` (Ctrl/Cmd+A) spans `0..doc.content.size`, and
+ * snapping those endpoints inward would leave the outer nodes — a bullet/ordered
+ * list wrapper, say — outside the replacement, so the transcript would land
+ * inside the first list item instead of replacing the whole composer. Such a
+ * range is only bounds-checked.
+ */
 export function clampEditorTextRangeToDoc(range: EditorTextRange, doc: PMNode): EditorTextRange {
-  const from = clampToInlinePosition(doc, Math.min(range.from, range.to));
-  const to = clampToInlinePosition(doc, Math.max(range.from, range.to));
-  return from <= to ? { from, to } : { from, to: from };
+  const lower = Math.max(0, Math.min(Math.min(range.from, range.to), doc.content.size));
+  const upper = Math.max(0, Math.min(Math.max(range.from, range.to), doc.content.size));
+  if (lower !== upper) return { from: lower, to: upper };
+  const snapped = clampToInlinePosition(doc, lower);
+  return { from: snapped, to: snapped };
 }
 
 /**
@@ -49,9 +61,10 @@ export function clampEditorTextRangeToDoc(range: EditorTextRange, doc: PMNode): 
  * inverted; keep it collapsed after the insertion rather than letting a
  * downstream min/max clamp swap it back into a range spanning that text.
  *
- * The mapped result is snapped back onto inline positions: a full-document
- * replacement maps every anchor out to a block boundary, which is not a place
- * dictation may insert at (see `clampToInlinePosition`).
+ * A mapped COLLAPSED anchor is snapped back onto an inline position: a
+ * full-document replacement maps it out to a block boundary, which is not a
+ * place dictation may insert at (see `clampToInlinePosition`). Non-collapsed
+ * ranges keep their endpoints — see `clampEditorTextRangeToDoc`.
  *
  * Lives in its own module so it can be tested without pulling in the voice
  * input hook and its Electron bridge.

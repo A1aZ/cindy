@@ -108,4 +108,26 @@ describe('clampEditorTextRangeToDoc', () => {
     expect(clampEditorTextRangeToDoc({ from: 999, to: 999 }, doc)).toEqual({ from: 3, to: 3 });
     expect(clampEditorTextRangeToDoc({ from: 3, to: 1 }, doc)).toEqual({ from: 1, to: 3 });
   });
+
+  // 只有折叠锚点该被吸附。非折叠区间的两端是"要替换什么"的一部分:全选(AllSelection)
+  // 后开始听写,区间就是 0..content.size;把两端往里收会把外层节点(列表包装等)留在
+  // 替换范围外,上屏文字于是塞进第一个列表项,而不是替换整篇。
+  it('preserves the endpoints of a non-collapsed (AllSelection) range', () => {
+    const doc = stateWith('hello').doc;
+    expect(clampEditorTextRangeToDoc({ from: 0, to: doc.content.size }, doc)).toEqual({
+      from: 0,
+      to: doc.content.size,
+    });
+  });
+
+  it('keeps a mapped non-collapsed range spanning the whole document', () => {
+    const state = stateWith('hello');
+    const size = state.doc.content.size;
+    // 无关的 doc 变更(此处在区间内插入)不该让整篇替换范围被收进段落内。
+    const tr = state.tr.insertText('X', 3);
+    const mapped = mapEditorTextRange({ from: 0, to: size }, tr);
+
+    expect(mapped!.from).toBe(0);
+    expect(mapped!.to).toBe(tr.doc.content.size);
+  });
 });

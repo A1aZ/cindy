@@ -1935,7 +1935,7 @@ function getGhostOauthAccountManager(): GhostOauthAccountManager {
           return serverApiFetch(path, {
             method: 'POST',
             body,
-            baseUrl: getClientEndpoint('oauthBrokerApiBaseUrl'),
+            baseUrl: () => getClientEndpoint('oauthBrokerApiBaseUrl'),
           });
         },
         hasLoginToken: () => getAccessToken() !== null,
@@ -2090,6 +2090,9 @@ export async function executeGhostSetupAction(args: {
       args.ghostId,
       secretKey,
       decl,
+      runtimeManifest.network?.hosts?.length
+        ? { deliveryHosts: runtimeManifest.network.hosts }
+        : undefined,
     );
     return connected.ok
       ? { ok: true }
@@ -2726,6 +2729,7 @@ export function registerGhostIpc(): void {
       pathname,
       readBodyText,
       oauthSecrets,
+      networkHosts: runtimeManifest.network?.hosts,
       manager: getGhostOauthAccountManager(),
       ghostId,
       onChanged: (secretKey) => {

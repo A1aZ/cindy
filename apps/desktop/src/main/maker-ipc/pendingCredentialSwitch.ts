@@ -200,17 +200,24 @@ export class PendingCredentialSwitchService {
     target: PendingCredentialSwitch,
   ): Promise<{ providerId: string | null; apply: boolean }> {
     const { checkRoute } = this.deps;
-    if (!checkRoute || !target.agentKind) return { providerId: target.providerId, apply: true };
+    if (!checkRoute) return { providerId: target.providerId, apply: true };
+    // agentKind 缺席(会话行缺失等罕见路径):不能因此跳过复核(PR #744 review
+    // 第九轮)—— 对两个 agent 都跑一遍裁决取最保守结论;目录不提供该模型的那个
+    // agent 天然得到 pass,不影响结果。
+    const agents: AgentKind[] = target.agentKind
+      ? [target.agentKind]
+      : ['claude-code', 'codex'];
     try {
-      let verdict = await checkRoute(target.agentKind, target.model, target.providerId);
-      if (verdict.kind === 'pass') return { providerId: target.providerId, apply: true };
-      if (verdict.kind === 'reroute') return { providerId: verdict.providerId, apply: true };
-      if (target.providerId) {
-        verdict = await checkRoute(target.agentKind, target.model, null);
-        if (verdict.kind === 'pass') return { providerId: null, apply: true };
-        if (verdict.kind === 'reroute') return { providerId: verdict.providerId, apply: true };
+      let resolved: { providerId: string | null; apply: boolean } = {
+        providerId: target.providerId,
+        apply: true,
+      };
+      for (const agent of agents) {
+        const laddered = await this.ladderVerdict(checkRoute, agent, target);
+        if (!laddered.apply) return laddered;
+        if (laddered.providerId !== target.providerId) resolved = laddered;
       }
-      return { providerId: target.providerId, apply: false };
+      return resolved;
     } catch (err) {
       // 复核异常按「不写 route」保守处理:目标可能恰在等待期间被停用,异常放行会把
       // 停用来源写回会话(PR #744 review 第八轮)。生产 checkRoute
@@ -225,15 +232,33 @@ export class PendingCredentialSwitchService {
     }
   }
 
+  /** 单 agent 的降级阶梯:显式来源被停用 ⇒ 丢来源再判(隐式默认 / 替代)。 */
+  private async ladderVerdict(
+    checkRoute: NonNullable<PendingCredentialSwitchDeps['checkRoute']>,
+    agent: AgentKind,
+    target: PendingCredentialSwitch,
+  ): Promise<{ providerId: string | null; apply: boolean }> {
+    let verdict = await checkRoute(agent, target.model, target.providerId);
+    if (verdict.kind === 'pass') return { providerId: target.providerId, apply: true };
+    if (verdict.kind === 'reroute') return { providerId: verdict.providerId, apply: true };
+    if (target.providerId) {
+      verdict = await checkRoute(agent, target.model, null);
+      if (verdict.kind === 'pass') return { providerId: null, apply: true };
+      if (verdict.kind === 'reroute') return { providerId: verdict.providerId, apply: true };
+    }
+    return { providerId: target.providerId, apply: false };
+  }
+
   /** 重裁决 + 身份守卫后收口:await 期间用户改选/取消 ⇒ 本次让位(新登记有自己的定时器)。 */
   private async finalizeApplyChecked(
     sessionId: string,
     target: PendingCredentialSwitch,
     reason: string,
   ): Promise<void> {
-    // 无裁决依赖 / 无 agentKind:同步快路径(onSessionClosed 的调用方不 await,
-    // 收口必须在同一 tick 完成才能保住既有「关闭即生效」时序)。
-    if (!this.deps.checkRoute || !target.agentKind) {
+    // 无裁决依赖:同步快路径(onSessionClosed 的调用方不 await,收口必须在同一
+    // tick 完成才能保住既有「关闭即生效」时序)。注入了 checkRoute 就必审 ——
+    // agentKind 缺席不构成绕过(resolveApplyRoute 内对双 agent 保守裁决)。
+    if (!this.deps.checkRoute) {
       this.finalizeApply(sessionId, target, { providerId: target.providerId, apply: true }, reason);
       return;
     }

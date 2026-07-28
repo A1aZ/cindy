@@ -334,10 +334,12 @@ describe('PendingCredentialSwitchService', () => {
       expect(h.broadcastApplied).toHaveBeenCalledTimes(1);
     });
 
-    it('裁决通过 ⇒ 原样应用;register 未带 agentKind ⇒ 不裁决(向后兼容)', async () => {
+    it('裁决通过 ⇒ 原样应用;register 未带 agentKind ⇒ 对双 agent 保守裁决,不构成绕过', async () => {
       const sessionId = rememberSession('pending-switch-revalidate-pass');
       setSessionProvider(sessionId, 'openai');
-      const checkRoute = vi.fn(async () => ({ kind: 'pass' } as const));
+      const checkRoute = vi.fn<NonNullable<PendingCredentialSwitchDeps['checkRoute']>>(
+        async () => ({ kind: 'pass' as const }),
+      );
       const h = createHarness(
         [{ id: sessionId, agentKind: 'codex', remoteHostId: null, isTurnRunning: () => false }],
         { checkRoute },
@@ -348,13 +350,26 @@ describe('PendingCredentialSwitchService', () => {
       expect(getSessionProvider(sessionId)).toBe('xd');
       expect(checkRoute).toHaveBeenCalledWith('codex', 'gpt-5.5', 'xd');
 
+      // agentKind 缺席(会话行缺失等罕见路径):两个 agent 都要过裁决;任一 agent
+      // 判停用即不写 route(目录不提供该模型的 agent 天然 pass,不影响结果)。
       const sessionId2 = rememberSession('pending-switch-no-agentkind');
       setSessionProvider(sessionId2, 'openai');
       checkRoute.mockClear();
-      h.service.register(sessionId2, { model: 'gpt-5.5', providerId: 'xd' });
-      h.service.onSessionClosed(sessionId2);
-      expect(getSessionProvider(sessionId2)).toBe('xd');
-      expect(checkRoute).not.toHaveBeenCalled();
+      checkRoute.mockImplementation(async (agent) =>
+        agent === 'codex'
+          ? { kind: 'reject' as const, reason: 'model-disabled' }
+          : { kind: 'pass' as const },
+      );
+      const h2 = createHarness(
+        [{ id: sessionId2, agentKind: 'codex', remoteHostId: null, isTurnRunning: () => false }],
+        { checkRoute },
+      );
+      h2.service.register(sessionId2, { model: 'gpt-5.5', providerId: 'xd' });
+      await h2.service.onTurnSettled(sessionId2);
+      expect(h2.service.has(sessionId2)).toBe(false);
+      expect(getSessionProvider(sessionId2)).toBe('openai'); // 停用来源没被写回
+      expect(checkRoute).toHaveBeenCalledWith('claude-code', 'gpt-5.5', 'xd');
+      expect(checkRoute).toHaveBeenCalledWith('codex', 'gpt-5.5', 'xd');
     });
   });
 });

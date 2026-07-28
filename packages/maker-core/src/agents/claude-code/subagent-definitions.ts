@@ -97,7 +97,7 @@ const MAX_ELAPSED_MS = 1_500;
 class ScanBudget {
   private files = 0;
   private dirs = 0;
-  constructor(private readonly startedAt: number) {}
+  constructor(private readonly startedAt: number, private readonly deadlineMs: number) {}
 
   countDir(): void {
     if (++this.dirs > MAX_DIRS) throw new SubagentScanBudgetError(`dirs>${MAX_DIRS}`);
@@ -110,9 +110,37 @@ class ScanBudget {
   }
 
   checkTime(): void {
-    if (Date.now() - this.startedAt > MAX_ELAPSED_MS) {
-      throw new SubagentScanBudgetError(`elapsed>${MAX_ELAPSED_MS}ms`);
+    if (Date.now() - this.startedAt > this.deadlineMs) {
+      throw new SubagentScanBudgetError(`elapsed>${this.deadlineMs}ms`);
     }
+  }
+}
+
+/**
+ * 给整趟扫描套一个**真**超时。
+ *
+ * 为什么计数式的 checkTime() 不够:它只在两次 await 之间执行。落在网络盘 / 已失联的挂载点上
+ * 的 `readdir` / `stat` / `readFile` 可以一直挂着不返回,此时代码根本走不到下一次检查 ——
+ * 会话启动就跟着无限期卡住。所以必须让**等待方**自己放弃,而不是指望被等的操作回来。
+ *
+ * 放弃后底层 fs 操作仍会挂在 libuv 线程池里(没有取消语义),但我们不再等它:定时器一到就以
+ * {@link SubagentScanBudgetError} 拒绝,调用方走既有的降级路径。定时器 unref,不拖住进程退出。
+ */
+async function withDeadline<T>(work: Promise<T>, deadlineMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new SubagentScanBudgetError(`deadline>${deadlineMs}ms`)),
+          deadlineMs,
+        );
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -213,11 +241,21 @@ async function collectMarkdownFiles(
 /**
  * 从 workingDir 向上逐级收集 `.claude/agents` 目录(近者在前)。
  * 平台对嵌套项目目录的规则是「离 workingDir 最近的同名定义生效」,顺序与此一致。
+ *
+ * **先 realpath 再向上走**:workingDir 本身可能是个软链(指向仓库的某个子目录)。子进程的
+ * cwd 会被解析成物理路径,cc 于是能看到 `<真实仓库>/.claude/agents`;而按软链的字面父目录
+ * 往上走查会走到完全另一支,漏掉那份定义 → 又误判「没人声明 model」。realpath 失败(不存在
+ * 等)时回落字面路径,不因此放弃整个项目作用域。
  */
 async function projectAgentsDirs(workingDir: string): Promise<string[]> {
   if (!workingDir || !path.isAbsolute(workingDir)) return [];
   const dirs: string[] = [];
   let cur = workingDir;
+  try {
+    cur = await fs.realpath(workingDir);
+  } catch {
+    /* 保持字面路径 */
+  }
   for (;;) {
     const candidate = path.join(cur, '.claude', 'agents');
     if (await isDirectory(candidate)) dirs.push(candidate);
@@ -287,6 +325,8 @@ export interface DiscoverSubagentsOptions {
   env: NodeJS.ProcessEnv;
   /** host 自己的 env;缺省 `process.env`。SDK spawn 会把它合并进子进程,故一并参与解析。 */
   hostEnv?: NodeJS.ProcessEnv;
+  /** 整趟扫描的墙钟上限;缺省 {@link MAX_ELAPSED_MS}。测试注入小值验证超时分支。 */
+  deadlineMs?: number;
   /** 测试注入起始时刻(避免依赖真实时钟)。 */
   now?: () => number;
 }
@@ -297,11 +337,23 @@ export interface DiscoverSubagentsOptions {
  * 单个文件/目录的 IO 异常都被吞成「这条不算」——本扫描只服务默认值与诊断,不能让它拖垮
  * 会话启动。但**预算超限会抛** {@link SubagentScanBudgetError}:那种情况下结果已不可信,
  * 必须由调用方显式降级,不能伪装成「扫完了,没人声明」。
+ *
+ * 超时有两道:计数式的 `budget.checkTime()`(便宜,覆盖「很多个都不慢」的累积)+ 外层
+ * {@link withDeadline} 的真定时器(覆盖「某一个 fs 调用永远不返回」)。缺了后者,挂死的网络盘
+ * 能让会话启动无限期卡住 —— 计数检查根本没机会执行。
  */
 export async function discoverSubagentDefinitions(
   opts: DiscoverSubagentsOptions,
 ): Promise<DiscoveredSubagent[]> {
-  const budget = new ScanBudget((opts.now ?? Date.now)());
+  const deadlineMs = opts.deadlineMs ?? MAX_ELAPSED_MS;
+  return await withDeadline(scanSubagentDefinitions(opts, deadlineMs), deadlineMs);
+}
+
+async function scanSubagentDefinitions(
+  opts: DiscoverSubagentsOptions,
+  deadlineMs: number,
+): Promise<DiscoveredSubagent[]> {
+  const budget = new ScanBudget((opts.now ?? Date.now)(), deadlineMs);
   const visitedDirs = new Set<string>();
   const scoped: Array<{ dir: string; scope: DiscoveredSubagent['scope'] }> = [
     // 顺序 = 优先级从高到低;同名先到者胜。

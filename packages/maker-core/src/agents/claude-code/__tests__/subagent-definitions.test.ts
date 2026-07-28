@@ -296,6 +296,58 @@ describe('discoverSubagentDefinitions', () => {
     ).rejects.toBeInstanceOf(SubagentScanBudgetError);
   });
 
+  // 计数式 checkTime() 只在两次 await 之间执行,挂死的网络盘会让它永远轮不到 —— 必须有个
+  // 真定时器让**等待方**放弃。这里注入极短 deadline 验证外层超时确实会拒绝。
+  it('外层 deadline 到点即拒绝(不指望被等的 fs 调用回来)', async () => {
+    const agents = path.join(root, 'repo', '.claude', 'agents');
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        writeAgent(path.join(agents, `d${i}`), `a${i}.md`, `name: a${i}`),
+      ),
+    );
+
+    await expect(
+      discoverSubagentDefinitions({
+        workingDir: path.join(root, 'repo'),
+        env: { CLAUDE_CONFIG_DIR: path.join(root, 'empty-home') },
+        deadlineMs: 0,
+      }),
+    ).rejects.toBeInstanceOf(SubagentScanBudgetError);
+  });
+
+  it('deadline 充裕时正常返回(定时器不会误伤正常路径)', async () => {
+    await writeAgent(path.join(root, 'repo', '.claude', 'agents'), 'a.md', 'name: a\nmodel: opus');
+
+    const found = await discoverSubagentDefinitions({
+      workingDir: path.join(root, 'repo'),
+      env: { CLAUDE_CONFIG_DIR: path.join(root, 'empty-home') },
+      deadlineMs: 5_000,
+    });
+
+    expect(found.map((f) => f.name)).toEqual(['a']);
+  });
+
+  // 回归:workingDir 可能是软链。子进程 cwd 会被解析成物理路径,cc 于是看得到
+  // <真实仓库>/.claude/agents;按软链的字面父目录往上走会走到另一支,漏掉那份定义。
+  it('workingDir 是软链时,按真实路径向上走查', async () => {
+    const realRepo = path.join(root, 'real-repo');
+    const workSub = path.join(realRepo, 'packages', 'app');
+    await fs.mkdir(workSub, { recursive: true });
+    await writeAgent(path.join(realRepo, '.claude', 'agents'), 'r.md', 'name: real-ancestor\nmodel: opus');
+    // 软链放在一个完全没有 .claude 祖先的位置,字面向上走查什么也找不到。
+    const linkParent = path.join(root, 'elsewhere');
+    await fs.mkdir(linkParent, { recursive: true });
+    const link = path.join(linkParent, 'app-link');
+    await fs.symlink(workSub, link, 'dir');
+
+    const found = await discoverSubagentDefinitions({
+      workingDir: link,
+      env: { CLAUDE_CONFIG_DIR: path.join(root, 'empty-home') },
+    });
+
+    expect(found.map((f) => f.name)).toEqual(['real-ancestor']);
+  });
+
   it('目录不存在 / workingDir 非绝对路径都安全返回空,不抛错', async () => {
     await expect(
       discoverSubagentDefinitions({

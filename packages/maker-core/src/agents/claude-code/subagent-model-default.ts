@@ -170,12 +170,16 @@ export function resolveSubagentModelDefault(
         suggestedModelIds: suggestModelIds(declared, available),
         availableModelCount: available.length,
       });
-      if (MODEL_ALIASES.has(declared.toLowerCase())) {
+      // 归一化要在**分类之前**做:`sonnet[1m]` 这种带 wire 后缀的别名 cc 认(历史上
+      // legacyToSdkModelString 产出的就是它),不归一化会被判成 unknown,提醒里说成
+      // 「会回落到主会话模型」—— 而它其实是一个会漂移的别名,该说的是另一件事。
+      const bare = stripWireSuffix(declared);
+      if (MODEL_ALIASES.has(bare.toLowerCase())) {
         // 别名能跑,不拦、不改用户文件 —— 只把「会随版本漂移」这件事说出来,由用户决定。
         diagnostics.push(base('alias-model'));
         continue;
       }
-      if (known.has(stripWireSuffix(declared))) continue;
+      if (known.has(bare)) continue;
       diagnostics.push(base('unknown-model'));
     }
   }
@@ -186,6 +190,31 @@ export function resolveSubagentModelDefault(
   // 有任何 agent 自己声明了 model → 不设 env,否则那些声明会被静默覆盖。
   const someoneDeclared = input.discovered.some((d) => d.declaredModel !== undefined);
   return someoneDeclared ? { diagnostics } : { envSubagentModel: configured, diagnostics };
+}
+
+/**
+ * 把诊断交给 host 回调,并保证**任何**失败都影响不到会话启动。
+ *
+ * 同步 throw 好接;麻烦的是异步:回调类型是 `=> void`,而 TS 在 void 返回位置接受任意返回值,
+ * 所以 host 完全可以传一个 `async` 函数。那时 reject 发生在调用点的 try 之外,变成 unhandled
+ * rejection —— Node 默认直接结束进程,和「上报失败不影响会话启动」的约定正好相反。
+ * 因此对返回的 thenable 显式挂 catch。
+ */
+export function reportSubagentModelDiagnostics(
+  callback: ((diagnostics: readonly SubagentModelDiagnostic[]) => void) | undefined,
+  diagnostics: readonly SubagentModelDiagnostic[],
+): void {
+  if (!callback || diagnostics.length === 0) return;
+  try {
+    const returned: unknown = callback(diagnostics);
+    if (typeof (returned as { then?: unknown } | undefined)?.then === 'function') {
+      void (returned as Promise<unknown>).catch(() => {
+        /* 上报失败不影响会话启动 */
+      });
+    }
+  } catch {
+    /* 同上 */
+  }
 }
 
 /** 提醒里最多列几条诊断 —— 一个仓库塞几百个坏定义时,不能让它占满上下文。 */

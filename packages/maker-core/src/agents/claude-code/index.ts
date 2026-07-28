@@ -34,6 +34,7 @@ import type { Query, CanUseTool, McpServerConfig, PermissionUpdate, Settings } f
 import { discoverSubagentDefinitions } from './subagent-definitions.js';
 import {
   formatSubagentDiagnosticsReminder,
+  reportSubagentModelDiagnostics,
   resolveSubagentModelDefault,
   type ResolveSubagentModelDefaultResult,
 } from './subagent-model-default.js';
@@ -854,13 +855,11 @@ export class ClaudeCodeAgent extends BaseAgent {
         for (const d of subagentDefault.diagnostics) {
           log.warn('subagent model diagnostic', { ...d });
         }
-        if (subagentDefault.diagnostics.length > 0) {
-          try {
-            this.deps.runtimeConfig.onSubagentModelDiagnostics?.(subagentDefault.diagnostics);
-          } catch {
-            /* 诊断上报失败不影响会话启动 */
-          }
-        }
+        // 同步 throw 与 async reject 都在里面接住(host 可能传 async 回调)。
+        reportSubagentModelDiagnostics(
+          this.deps.runtimeConfig.onSubagentModelDiagnostics,
+          subagentDefault.diagnostics,
+        );
       } catch (e) {
         log.warn('discover subagent definitions failed; falling back to env override', {
           error: e instanceof Error ? e.message : String(e),

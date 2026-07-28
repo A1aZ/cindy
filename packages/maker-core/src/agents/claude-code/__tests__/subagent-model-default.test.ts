@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import {
   formatSubagentDiagnosticsReminder,
+  reportSubagentModelDiagnostics,
   resolveSubagentModelDefault,
   suggestModelIds,
 } from '../subagent-model-default.js';
 import type { DiscoveredSubagent } from '../subagent-definitions.js';
+import type { SubagentModelDiagnostic } from '../subagent-model-default.js';
 
 function agent(over: Partial<DiscoveredSubagent> & { name: string }): DiscoveredSubagent {
   return {
@@ -148,6 +150,21 @@ describe('声明模型的可用性校验', () => {
       availableModelIds: available,
     });
     expect(r.diagnostics).toEqual([]);
+  });
+
+  // 回归:归一化必须发生在**分类之前**。`sonnet[1m]` 是 cc 认的历史 wire 形态
+  // (legacyToSdkModelString 曾产出它),原来会被判成 unknown 并说「会回落到主会话模型」——
+  // 而它其实是个会漂移的别名,该说的是完全另一件事。
+  it('带 [1m] 后缀的裸别名归到 alias-model,不误判成 unknown', () => {
+    const r = resolveSubagentModelDefault({
+      configuredDefault: undefined,
+      discovered: [
+        agent({ name: 'a', declaredModel: 'sonnet[1m]' }),
+        agent({ name: 'b', declaredModel: 'Opus[1m]' }),
+      ],
+      availableModelIds: available,
+    });
+    expect(r.diagnostics.map((d) => d.kind)).toEqual(['alias-model', 'alias-model']);
   });
 
   it('可用清单本身带 [1m] 时,不带后缀的声明也放行(两侧都归一)', () => {
@@ -332,5 +349,69 @@ describe('formatSubagentDiagnosticsReminder', () => {
       },
     ]);
     expect(text).not.toContain('另有');
+  });
+});
+
+describe('reportSubagentModelDiagnostics', () => {
+  const one: SubagentModelDiagnostic[] = [
+    {
+      agent: 'a',
+      filePath: '/p/a.md',
+      kind: 'unknown-model',
+      declaredModel: 'nope',
+      suggestedModelIds: [],
+      availableModelCount: 1,
+    },
+  ];
+
+  it('正常回调收到诊断', () => {
+    const seen: unknown[] = [];
+    reportSubagentModelDiagnostics((d) => void seen.push(d), one);
+    expect(seen).toEqual([one]);
+  });
+
+  it('没配回调 / 没有诊断都不调用', () => {
+    expect(() => reportSubagentModelDiagnostics(undefined, one)).not.toThrow();
+    const calls: number[] = [];
+    reportSubagentModelDiagnostics(() => void calls.push(1), []);
+    expect(calls).toEqual([]);
+  });
+
+  it('同步 throw 被接住', () => {
+    expect(() =>
+      reportSubagentModelDiagnostics(() => {
+        throw new Error('host boom');
+      }, one),
+    ).not.toThrow();
+  });
+
+  // 回归:回调类型是 `=> void`,TS 在 void 位置接受任意返回值,host 完全可以传 async 函数。
+  // 那时 reject 落在调用点的 try 之外 → unhandled rejection → Node 默认结束进程,
+  // 与「上报失败不影响会话启动」的约定相反。必须对 thenable 显式挂 catch。
+  it('async 回调的 reject 不逃逸成 unhandled rejection', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown): void => void unhandled.push(e);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      reportSubagentModelDiagnostics(
+        (() => Promise.reject(new Error('async host boom'))) as unknown as (
+          d: readonly SubagentModelDiagnostic[],
+        ) => void,
+        one,
+      );
+      // 让 microtask 队列跑完,unhandled rejection 若发生会在这之后被记上。
+      await new Promise((r) => setTimeout(r, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('返回非 thenable 的普通值不报错', () => {
+    expect(() =>
+      reportSubagentModelDiagnostics((() => 42) as unknown as (
+        d: readonly SubagentModelDiagnostic[],
+      ) => void, one),
+    ).not.toThrow();
   });
 });

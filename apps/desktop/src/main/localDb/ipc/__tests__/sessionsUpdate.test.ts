@@ -24,7 +24,8 @@ const h = vi.hoisted(() => ({
   relocate: vi.fn(async (): Promise<{ persistedSdkSessionId: string | null }> => ({
     persistedSdkSessionId: null,
   })),
-  noteHookSessionMoved: vi.fn(async () => () => {}),
+  // 返回类型显式放宽: 生产签名是 rollback 句柄或 null(登记失败), 用例两种都要 mock
+  noteHookSessionMoved: vi.fn(async (): Promise<(() => void) | null> => () => {}),
   rollbacks: 0,
   completeHookSessionMove: vi.fn(),
   isKnownRecentWorkdir: vi.fn(async () => true),

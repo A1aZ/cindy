@@ -90,6 +90,13 @@ describe('mobile native app config', () => {
     expect(cn.extra.xdtProductionEnv).not.toHaveProperty(
       'EXPO_PUBLIC_ENDPOINT_MANIFEST_PEER_BASE_URL',
     );
+    const runtimeEnvSource = readFileSync(
+      resolve(process.cwd(), 'src/config/env.ts'),
+      'utf8',
+    );
+    expect(runtimeEnvSource).toContain(
+      'process.env.EXPO_PUBLIC_ENDPOINT_MANIFEST_PEER_BASE_URL',
+    );
   });
 
   it('injects EAS owner / projectId / updates from env and omits them when unset', () => {

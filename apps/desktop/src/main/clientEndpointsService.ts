@@ -159,10 +159,13 @@ function fetchTextViaNet(url: string, timeoutMs: number): Promise<ManifestFetchR
       const request = net.request(url);
       let body = '';
       let settled = false;
-      const finish = (value: ManifestFetchResult) => {
+      const finish = (
+        value: ManifestFetchResult,
+        timeoutToClear?: ReturnType<typeof setTimeout>,
+      ) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timeout);
+        if (timeoutToClear !== undefined) clearTimeout(timeoutToClear);
         if (!value.ok) log.debug('fetch failed (%s) for %s', value.detail, url);
         resolve(value);
       };
@@ -174,16 +177,20 @@ function fetchTextViaNet(url: string, timeoutMs: number): Promise<ManifestFetchR
       request.on('response', (response) => {
         if (response.statusCode !== 200) {
           response.on('data', () => {});
-          finish({ ok: false, detail: `http-${response.statusCode}` });
+          finish({ ok: false, detail: `http-${response.statusCode}` }, timeout);
           return;
         }
         response.on('data', (chunk) => {
           body += chunk.toString();
         });
-        response.on('end', () => finish({ ok: true, text: body }));
-        response.on('error', (err) => finish({ ok: false, detail: describeFetchError(err) }));
+        response.on('end', () => finish({ ok: true, text: body }, timeout));
+        response.on('error', (err) =>
+          finish({ ok: false, detail: describeFetchError(err) }, timeout),
+        );
       });
-      request.on('error', (err) => finish({ ok: false, detail: describeFetchError(err) }));
+      request.on('error', (err) =>
+        finish({ ok: false, detail: describeFetchError(err) }, timeout),
+      );
       request.end();
     } catch (err) {
       resolve({ ok: false, detail: describeFetchError(err) });

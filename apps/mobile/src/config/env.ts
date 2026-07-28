@@ -363,8 +363,11 @@ export const MOBILE_VOICE_LITELLM_BASE_URL =
 export const ENDPOINT_MANIFEST_BASE_URL = configuredValue(
   'EXPO_PUBLIC_ENDPOINT_MANIFEST_BASE_URL',
 ).replace(/\/+$/, '');
-export const ENDPOINT_MANIFEST_PEER_BASE_URL = configuredValue(
-  'EXPO_PUBLIC_ENDPOINT_MANIFEST_PEER_BASE_URL',
+export const ENDPOINT_MANIFEST_PEER_BASE_URL = (
+  // Expo/Metro 只内联静态属性访问；不能改回 configuredValue(dynamicKey)。
+  process.env.EXPO_PUBLIC_ENDPOINT_MANIFEST_PEER_BASE_URL?.trim() ||
+  configuredBuildEnv.EXPO_PUBLIC_ENDPOINT_MANIFEST_PEER_BASE_URL?.trim() ||
+  ''
 ).replace(/\/+$/, '');
 
 function trustedMobileRealmManifestBaseUrls(): RealmManifestBaseUrls {

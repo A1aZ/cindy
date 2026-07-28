@@ -135,6 +135,7 @@ import {
   buildRecentWorkspaceOptions,
   filterRemoteDirectoryEntries,
   normalizeCreateSessionResult,
+  isNewSessionDraftMissingPayloadOnly,
   parseNewSessionDeviceOptions,
   pickAgentDefaultRuntime,
   pickInitialNewSessionWorkspace,
@@ -788,8 +789,13 @@ export default function NewRemoteSessionScreen() {
   // 豁免——那些不会被转写补上,放行只会「可点但必失败」(review 二轮收窄)。
   // validateNewSessionDraft 的校验顺序是 路径→模型→正文,命中缺正文文案即代表
   // 前两项都已通过。
-  const createValidationIsMissingPayload =
-    createValidation === t('session.new.enterFirstMessageOrAttachment');
+  // 结构化判定,不比对本地化文案:locale 异步恢复(如深链直达后语言落地)时
+  // memo 住的旧语言校验文案与新 t() 输出不等,字符串比对会让豁免静默失效
+  // (review 三轮收口)。
+  const createValidationIsMissingPayload = useMemo(
+    () => isNewSessionDraftMissingPayloadOnly(draft, draftContent),
+    [draft, draftContent],
+  );
   const canCreate = (!createValidation || (voiceIsListening && createValidationIsMissingPayload))
     && !creating
     && !voiceIsProcessing;

@@ -865,7 +865,10 @@ describe('new session composer surface', () => {
     expect(newSource).toContain("|| voiceStartPending\n    || voiceState === 'listening'\n    || voiceState === 'submitting'\n    || voiceState === 'refining';");
     // listening 时只豁免「缺正文/附件」校验(路径/模型等其它校验不放行,
     // 否则按钮可点但必失败):点创建 = 停录并用最终转写创建(review 二轮收窄)。
-    expect(newSource).toContain("createValidation === t('session.new.enterFirstMessageOrAttachment');");
+    // 判定必须是结构化的 isNewSessionDraftMissingPayloadOnly,禁止比对本地化
+    // 文案——locale 异步恢复时字符串比对会静默失效(review 三轮收口)。
+    expect(newSource).toContain('isNewSessionDraftMissingPayloadOnly(draft, draftContent)');
+    expect(newSource).not.toContain("=== t('session.new.enterFirstMessageOrAttachment')");
     expect(newSource).toContain('const canCreate = (!createValidation || (voiceIsListening && createValidationIsMissingPayload))');
     expect(newSource).not.toContain('(!createValidation || voiceIsListening) &&');
     expect(newSource).toContain('const composerShowCreateButton = composerHasMessage');

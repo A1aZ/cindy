@@ -449,39 +449,40 @@ export function createMakerHookSessionRunner(deps: {
       const providerId = req.isNew ? (resolved?.providerId ?? null) : rowProviderId;
 
       let session: Awaited<ReturnType<ReturnType<typeof getMaker>['createSession']>>;
+      const createOpts = {
+        id: req.sessionId,
+        agentKind: effectiveAgentKind,
+        workingDir,
+        model: effectiveModel,
+        ...(providerId !== null ? { providerId } : {}),
+        ...(effort !== undefined ? { effort } : {}),
+        permissionMode,
+        // chat 伪目录新会话: 标记 dialogue, 落侧边栏「对话」分组而非按
+        // dialogues/<日期>/<id> 目录名聚成项目节点
+        ...(req.isNew && req.workspaceKind !== undefined
+          ? { workspaceKind: req.workspaceKind }
+          : {}),
+        title: req.isNew ? (req.title ?? undefined) : undefined,
+        // 渠道标记(仅 hook 亲生新会话): cindy_feishu_bot 据此在构建期给
+        // 工具描述注入渠道路由提示。两个刻意限定:
+        //   - 不用 'slack'(那是已退役的 organic SlackIM relay 渠道的历史
+        //     标记,留给存量会话的侧边栏显示,新会话不再产生);
+        //   - 复用/接管路径(isNew=false,可能是桌面端创建的会话)不传,
+        //     否则冷 resume 时会把桌面会话打上 Slack 渠道描述并存续整个
+        //     进程生命周期(对齐 im/turnRunner「attached 不传 vendorOptions」
+        //     的裁决)。hook turn 本身的渠道说明由逐 turn 的
+        //     provider-aware hook prompt note 全覆盖,不依赖这里。
+        ...(req.isNew
+          ? {
+              vendorOptions: {
+                source: req.source?.im === 'telegram' ? 'telegram' : 'slack-hook',
+              },
+            }
+          : {}),
+        resumeSessionId,
+      };
       try {
-        session = await maker.createSession({
-          id: req.sessionId,
-          agentKind: effectiveAgentKind,
-          workingDir,
-          model: effectiveModel,
-          ...(providerId !== null ? { providerId } : {}),
-          ...(effort !== undefined ? { effort } : {}),
-          permissionMode,
-          // chat 伪目录新会话: 标记 dialogue, 落侧边栏「对话」分组而非按
-          // dialogues/<日期>/<id> 目录名聚成项目节点
-          ...(req.isNew && req.workspaceKind !== undefined
-            ? { workspaceKind: req.workspaceKind }
-            : {}),
-          title: req.isNew ? (req.title ?? undefined) : undefined,
-          // 渠道标记(仅 hook 亲生新会话): cindy_feishu_bot 据此在构建期给
-          // 工具描述注入渠道路由提示。两个刻意限定:
-          //   - 不用 'slack'(那是已退役的 organic SlackIM relay 渠道的历史
-          //     标记,留给存量会话的侧边栏显示,新会话不再产生);
-          //   - 复用/接管路径(isNew=false,可能是桌面端创建的会话)不传,
-          //     否则冷 resume 时会把桌面会话打上 Slack 渠道描述并存续整个
-          //     进程生命周期(对齐 im/turnRunner「attached 不传 vendorOptions」
-          //     的裁决)。hook turn 本身的渠道说明由逐 turn 的
-          //     provider-aware hook prompt note 全覆盖,不依赖这里。
-          ...(req.isNew
-            ? {
-                vendorOptions: {
-                  source: req.source?.im === 'telegram' ? 'telegram' : 'slack-hook',
-                },
-              }
-            : {}),
-          resumeSessionId,
-        });
+        session = await maker.createSession(createOpts);
       } catch (err) {
         // session 未建成: 若有预建 worktree 则回收(同 maker-ipc/register.ts
         // 的 shouldRecycleHandoffWorktreeOnFailure 判据), 防孤儿泄漏
@@ -495,14 +496,41 @@ export function createMakerHookSessionRunner(deps: {
        * 拿到的可能是**进程里早就活着的那个 session**: maker.createSession 对
        * 已在 activeSessions 里的 id 直接返回既有实例, 完全忽略上面传的
        * workingDir(maker.ts 的 active-session 短路)。那个实例的 workDir 与
-       * agent 句柄可能还指着落库前的旧目录 —— 上面比对的是持久化 meta, 拦不住
-       * 这一种。真正要执行的是它, 所以对着它再确认一次(PR #733 review 指出)。
+       * agent 句柄仍指着它创建时的目录, 而侧边栏"移动到项目"只改库里的行 ——
+       * 于是 meta 已是新目录、live 实例还在旧目录。真正执行的是 live 实例, 所以
+       * 对着它再确认一次(PR #733 review 指出)。
+       *
+       * 不一致时**重建而不是拒绝**: expectedWorkingDir 是 dispatcher 刚过完映射
+       * 校验的目录, 在那里重建既回到授权边界内, 也让"映射内换目录仍然无感跟随"
+       * 继续成立 —— 只报错的话, 映射内 A→B 的合法移动会被永久拒绝, 直到会话被
+       * 关闭或 app 重启(同一轮 review 指出)。
        */
       if (req.expectedWorkingDir != null && !isSamePath(session.workDir, req.expectedWorkingDir)) {
-        log.warn(
-          `hook run aborted: live session ${req.sessionId} runs in ${maskPath(session.workDir)}, not the validated ${maskPath(req.expectedWorkingDir)}`,
+        // 正在跑 turn 的会话不能从底下抽走(桌面端或别的入口可能正用着它)。
+        // 这是暂态: 那一轮跑完后重发即可走到下面的重建。
+        if (isSessionInTurn(req.sessionId)) {
+          log.warn(
+            `hook run aborted: live session ${req.sessionId} still runs in ${maskPath(session.workDir)}, not the validated ${maskPath(req.expectedWorkingDir)}`,
+          );
+          return fail('这个对话正在别的目录里运行，本条消息没有执行；请稍后重发。');
+        }
+        log.info(
+          `recreating live session ${req.sessionId} at ${maskPath(req.expectedWorkingDir)} (was ${maskPath(session.workDir)})`,
         );
-        return fail('这个对话正在别的目录里运行，本条消息没有执行；请重新发送。');
+        try {
+          await maker.closeSession(req.sessionId);
+          session = await maker.createSession(createOpts);
+        } catch (err) {
+          return fail(err instanceof Error ? err.message : String(err));
+        }
+        // 关闭后 activeSessions 的清理若还没落地, 重建仍可能拿到旧实例 ——
+        // 那就这一轮不跑, 让用户重发(下一次拿到的就是新实例), 而不是在旧目录里跑。
+        if (!isSamePath(session.workDir, req.expectedWorkingDir)) {
+          log.warn(
+            `hook run aborted: session ${req.sessionId} could not be recreated at ${maskPath(req.expectedWorkingDir)}`,
+          );
+          return fail('这个对话刚换了工作目录，本条消息没有执行；请重新发送。');
+        }
       }
 
       // 运行时来源注入(路由层经 session-provider-store 决定上游与钥匙):

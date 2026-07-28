@@ -200,6 +200,7 @@ const fakeMaker = {
     permissionMode: undefined as 'ask' | 'bypassPermissions' | undefined,
   })),
   getSession: vi.fn(),
+  closeSession: vi.fn(async (_id: string) => undefined),
   getCapabilities: vi.fn(() => ({ availableModels: [], permissionModes: [] })),
 };
 
@@ -325,12 +326,12 @@ describe('执行前按权威 meta 收口校验工作目录', () => {
     expect(fakeMaker.createSession).not.toHaveBeenCalled();
   });
 
-  it('createSession 短路返回的活会话跑在别处 -> 也要拒绝(meta 拦不住这种)', async () => {
+  it('createSession 短路返回的活会话跑在别处 -> 关掉重建到校验过的目录再跑', async () => {
     // maker.createSession 对已在 activeSessions 里的 id 直接返回既有实例, 忽略
-    // 传入的 workingDir —— 那个实例的 workDir 可能还指着别处
+    // 传入的 workingDir —— 那个实例的 workDir 还指着移动前的目录
     fakeMaker.createSession.mockImplementationOnce(async (opts: { id?: string }) => ({
       ...makeFakeSession(opts.id ?? 'sess-old'),
-      workDir: 'D:/still-the-old-place',
+      workDir: 'D:/the-old-place',
     }));
     const runner = createMakerHookSessionRunner({ log });
 
@@ -338,8 +339,27 @@ describe('执行前按权威 meta 收口校验工作目录', () => {
       baseReq({ sessionId: 'sess-old', isNew: false, expectedWorkingDir: 'D:/repo' }),
     );
 
+    // 只报错的话, 映射内 A->B 的合法移动会被永久拒绝到 app 重启
+    expect(outcome.status).toBe('ok');
+    expect(fakeMaker.closeSession).toHaveBeenCalledWith('sess-old');
+    expect(fakeMaker.createSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('重建后仍拿到旧实例 -> 这一轮不跑(不在旧目录里执行)', async () => {
+    // 关闭后 activeSessions 清理还没落地的情形: 两次都拿到旧实例
+    const stale = async (opts: { id?: string }) => ({
+      ...makeFakeSession(opts.id ?? 'sess-old'),
+      workDir: 'D:/the-old-place',
+    });
+    fakeMaker.createSession.mockImplementationOnce(stale).mockImplementationOnce(stale);
+    const runner = createMakerHookSessionRunner({ log });
+
+    const outcome = await runner.run(
+      baseReq({ sessionId: 'sess-old', isNew: false, expectedWorkingDir: 'D:/repo' }),
+    );
+
     expect(outcome.status).toBe('error');
-    expect(outcome.errorMessage).toContain('正在别的目录里运行');
+    expect(outcome.errorMessage).toContain('刚换了工作目录');
   });
 
   it('目录一致 -> 照常执行; 新建路径不带该字段也不受影响', async () => {

@@ -356,10 +356,20 @@
       "localThemes": {
         "title": "Local themes",
         "export": "Create local copy",
+        "import": "Import VSCode / Obsidian theme",
         "openDir": "Open themes folder",
         "refresh": "Refresh",
         "exportSuccess": "Created {{file}}. Replace the example image paths, save, then click \"Refresh\".",
         "exportFailed": "Export failed: {{error}}",
+        "importSuccess": "Imported {{name}} ({{themeCount}} variant(s)). Pick it in the theme list above.",
+        "importPartial": "Imported {{name}} ({{themeCount}} variant(s)). {{skipped}} semantic colors stay unchanged per spec, {{unresolved}} values could not be read, and {{derived}} roles were approximated from nearby colors.",
+        "importFailed": "Import failed: {{error}}",
+        "importUnsupported": "This file is not a recognizable VSCode or Obsidian theme.",
+        "importUsesInclude": "This VSCode theme inherits colors via \"include\" and cannot be imported standalone.",
+        "importNotAFile": "Select a file, not a folder.",
+        "importTooLarge": "File is too large to import as a theme.",
+        "importWriteError": "Could not save the theme. Check disk space and permissions.",
+        "importInternalError": "The file could not be read or processed. Try selecting it again.",
         "openDirFailed": "Failed to open folder: {{error}}",
         "refreshed": "Local themes refreshed"
       },
@@ -654,6 +664,12 @@
       "analyticsSaveFailed": "Failed to save usage statistics settings",
       "debugLogLabel": "Debug logs",
       "debugLogDescription": "When enabled, emits verbose debug logs: main/maker logger raised to debug level; new Claude Code sessions also log API request URL/status/latency, Node-level DNS/TCP/TLS handshake timing, and SDK internals. Output is large — turn off after troubleshooting. Always on in dev mode.",
+      "legal": {
+        "termsOfServiceLabel": "Terms of Service",
+        "privacyPolicyLabel": "Privacy Policy",
+        "viewDocument": "View {{document}}",
+        "openFailed": "Unable to open the document. Check your system browser settings."
+      },
       "social": {
         "title": "Connect with Cindy",
         "discordLabel": "Discord",
@@ -1328,9 +1344,12 @@
         "capabilityNote": "Not available in {{agent}}",
         "divergedChip": "Hidden in {{agent}}",
         "refreshAria": "Refresh model list (additions only)",
+        "refreshBuiltinAria": "Refresh Model List",
+        "refreshingAria": "Refreshing model list…",
+        "refreshDone": "Model list refreshed",
         "refreshAdded": "Found {{count}} new models",
         "refreshNoNew": "Model list is up to date — nothing new",
-        "refreshFailed": "Failed to refresh the model list. Please try again later",
+        "refreshFailed": "Model list couldn’t be refreshed — try again later",
         "disableModel": "Disable This Model",
         "enableModel": "Enable This Model",
         "capabilityGroupHint": "Not shown in the chat model picker; used only by features like image generation.",
@@ -4285,6 +4304,12 @@
       "editTitle": "Edit Pasted Text",
       "cancelEdit": "Cancel Editing",
       "saveEdit": "Save Text"
+    },
+    "permissionPrompt": {
+      "alwaysAllowScoped": "Always Allow {{scope}} in This Session",
+      "alwaysAllowScopedHint": "Applies to the whole session, and only to what is listed here.",
+      "alwaysAllowSessionHint": "Applies to the whole session, not just this one request.",
+      "ruleSeparator": ", "
     }
   },
   "onboarding": {
@@ -4802,6 +4827,7 @@
         "label": "Switched from {{from}} to {{to}}",
         "toggleHint": "View handoff context",
         "handoffTitle": "Handoff — the context summary sent to the new engine at switch time (not part of the chat transcript; shown only here)",
+        "handoffTitleEnglishSource": "Handoff — the context summary sent to the new engine at switch time (not part of the chat transcript; shown only here)",
         "resumedBadge": "session resumed"
       }
     },
@@ -6373,10 +6399,20 @@
       "typeFeature": "Feature",
       "titleLabel": "Title",
       "bodyLabel": "Body (Markdown)",
-      "identityGithubUser": "Submitting identity: GitHub user @{{login}} (you)",
-      "identityPlatform": "Submitting identity: Cindy platform (GitHub App {{login}})",
+      "submissionMethodLabel": "Publishing Method",
+      "identityGithubUser": "Publish directly through GitHub account @{{login}}",
+      "identityGithubUserHint": "You will be the GitHub author and can edit or close this Issue on GitHub",
+      "identityPlatform": "Publish through Cindy (GitHub App {{login}})",
+      "identityPlatformHint": "You will not be the GitHub author and cannot edit or close this Issue yourself",
+      "publicNameLabel": "Public Attribution",
+      "publicNameHint": "This attribution will appear publicly in the Issue body",
+      "anonymous": "Anonymous",
+      "useAnonymous": "Use Anonymous Attribution",
       "envLine": "Attached automatically on submit: client {{appVersion}} · {{platform}} {{arch}} · UI language {{uiLanguage}}",
-      "submit": "Submit",
+      "regionLine": "Build region: {{region}}",
+      "regionCodeCn": "CN",
+      "regionCodeDev": "Dev",
+      "submit": "Submit Feedback",
       "cancel": "Cancel"
     },
     "redirect": {

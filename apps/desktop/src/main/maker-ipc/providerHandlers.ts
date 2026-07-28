@@ -26,6 +26,16 @@ import {
 
 import type { LocalCliDetection } from '../../shared/localCliDetect.js';
 import { isIpcError } from '../../shared/ipc-errors.js';
+import {
+  BUILTIN_REFRESHABLE_PROVIDER_IDS,
+  isBuiltinRefreshableProviderId,
+  isProviderModelAutoRefreshRendererTrigger,
+  PROVIDER_MODEL_AUTO_REFRESH_RENDERER_TRIGGERS,
+  type BuiltinRefreshableProviderId,
+  type ProviderModelAutoRefreshRendererTrigger,
+  type ProviderModelAutoRefreshResult,
+  type ProviderModelRefreshResult,
+} from '../../shared/providerModelRefresh.js';
 
 import { createLogger } from '../logger.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
@@ -183,6 +193,12 @@ export interface ProviderHandlerDeps {
   testConnection(input: ProviderTestInput): Promise<ProviderTestResult>;
   /** 获取模型列表（生产 = fetchProviderModels；单测注入 stub 不联网）。 */
   fetchModels(spec: ProviderModelsFetchSpec): Promise<ProviderModelsFetchResult>;
+  /** 内置四家的模型真源刷新；生产按 providerId 分派到既有 discovery 机制。 */
+  refreshBuiltinModels(providerId: BuiltinRefreshableProviderId): Promise<void>;
+  /** Renderer 自动刷新提示；Main 侧负责静默失败、冷却和跨窗口去重。 */
+  requestModelsAutoRefresh(
+    trigger: ProviderModelAutoRefreshRendererTrigger,
+  ): Promise<void>;
   /**
    * 重新发现某供应商的动态清单（生产 = anthropic 的 refreshAnthropicModelsFromHttp）。
    * 返回本次结束后的失败归因，成功为 null。不认识的 providerId 直接返回 null（没有
@@ -579,6 +595,45 @@ export function registerProviderHandlers(
     },
   );
 
+  registry.handle(
+    MAKER_INVOKE.PROVIDER_MODELS_REFRESH,
+    async (event, providerId: unknown): Promise<ProviderModelRefreshResult> => {
+      assertTrustedProviderMutationSender(event);
+      if (!isBuiltinRefreshableProviderId(providerId)) {
+        throwIpcError(
+          'INVALID_PARAMS',
+          `providerId must be one of: ${BUILTIN_REFRESHABLE_PROVIDER_IDS.join(', ')}`,
+        );
+      }
+      try {
+        await deps.refreshBuiltinModels(providerId);
+      } catch (err) {
+        if (isIpcError(err)) throw err;
+        log.warn('built-in provider model refresh failed', {
+          providerId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throwIpcError('INTERNAL', `model list refresh failed for '${providerId}'`);
+      }
+      return { ok: true, providerId };
+    },
+  );
+
+  registry.handle(
+    MAKER_INVOKE.PROVIDER_MODELS_AUTO_REFRESH,
+    async (event, trigger: unknown): Promise<ProviderModelAutoRefreshResult> => {
+      assertTrustedProviderMutationSender(event);
+      if (!isProviderModelAutoRefreshRendererTrigger(trigger)) {
+        throwIpcError(
+          'INVALID_PARAMS',
+          `trigger must be one of: ${PROVIDER_MODEL_AUTO_REFRESH_RENDERER_TRIGGERS.join(', ')}`,
+        );
+      }
+      await deps.requestModelsAutoRefresh(trigger);
+      return { ok: true };
+    },
+  );
+
   // CRUD 成功后统一收尾：刷新 active-catalog + 广播。
   async function afterChange(): Promise<void> {
     await deps.refreshCatalog();
@@ -863,8 +918,12 @@ export function registerProviderHandlers(
     }
   });
 
-  // 获取模型列表：查询型结构化返回（同上例外条款）；网络/上游失败在结果 code 里，不抛。
-  registry.handle(MAKER_INVOKE.PROVIDER_MODELS_FETCH, async (_event, input: unknown) => {
+  // 获取模型列表：查询型结构化返回（同上例外条款）；仅网络/上游失败在结果 code 里，不抛。
+  registry.handle(MAKER_INVOKE.PROVIDER_MODELS_FETCH, async (event, input: unknown) => {
+    // 这条查询会把 renderer 提供的 API key / 自定义 headers 带到目标 endpoint；
+    // 与重新发现一样，必须先确认调用方是 Cindy 自有顶层页面，避免 WebView / 子 frame
+    // 把 Main 变成可向任意 http(s) 地址发凭证请求的代理。
+    assertTrustedProviderMutationSender(event);
     const parsed = parseModelsFetchInput(input);
     if (!parsed) throwIpcError('INVALID_PARAMS', 'invalid models-fetch input');
     return deps.fetchModels(parsed);

@@ -67,12 +67,18 @@ import {
   type BrowserCommentDraftItem,
 } from '@/lib/browserComments';
 import { isGlobalDropIntercepted } from '@/lib/globalDropIntercept';
+import {
+  classifyUnclassifiedDroppedItems,
+  getDroppedFileItems,
+  type DroppedFileItems,
+} from '@/lib/fileDrop';
 import { shouldOpenTextLightbox } from '@/lib/filePreview';
 import {
   getDraft as getComposerDraft,
   saveDraft as saveComposerDraft,
   clearDraft as clearComposerDraft,
   subscribeDraft as subscribeComposerDraft,
+  tiptapDocHasContent,
 } from '@/lib/composerDraftStore';
 import { subscribeSessionLinkInsert } from '@/lib/composerActionsBus';
 import { ModelSelector, type ModelMemoryAccessors } from './ModelSelector';
@@ -429,7 +435,7 @@ interface ChatInputProps {
   attachmentState: {
     attachments: AttachedFile[];
     hasAttachments: boolean;
-    addFiles: (fileList: FileList) => Promise<void>;
+    addFiles: (fileList: FileList | readonly File[]) => Promise<void>;
     addClipboardImage: (blob: Blob) => Promise<void>;
     rejections: { id: string; message: string }[];
     dismissRejection: (id: string) => void;
@@ -517,7 +523,7 @@ interface ChatInputProps {
   onRememberedEffortChange?: (modelId: string, effort: Effort) => void;
   /** Enables wrapping for narrow split-pane layouts such as Orca. Defaults to false. */
   compactToolbar?: boolean;
-  /** 窄态新建对话时使用紧凑单行工具栏，保留所有操作入口。 */
+  /** 强制使用紧凑单行工具栏；容器测宽也会自动进入同一状态。 */
   narrowToolbar?: boolean;
   /**
    * 工具行采用更紧凑的视觉密度 (字号 -1px, 协同 toggle 只剩 logo)。
@@ -1483,11 +1489,7 @@ export function ChatInput({
               handledAny = true;
             }
           }
-          if (filesWithPath.length > 0) {
-            const dt = new DataTransfer();
-            for (const f of filesWithPath) dt.items.add(f);
-            addFilesRef.current(dt.files);
-          }
+          if (filesWithPath.length > 0) addFilesRef.current(filesWithPath);
           if (handledAny) {
             // Prevent default so the file/image doesn't insert as inline
             // content — we handle it as an attachment instead. Text content
@@ -2714,9 +2716,13 @@ export function ChatInput({
       setBrowserComments(draft.browserComments ?? []);
       // 同值外部写入不做全量 setContent,避免把用户停在中段的光标弹到末尾、
       // 打断 IME 组合。appendQuoteToDraft 会改变正文文档,自然走下方 setContent。
-      const normalizedDraftText = draft.text
-        ? normalizeComposerDocumentJSON(draft.text)
-        : null;
+      // 空草稿在存储里可能是 `{doc:[空 paragraph]}` 而不是 undefined,而右侧对
+      // "编辑器为空"一律折叠成 null。两侧判空口径必须一致,否则每次外部草稿通知都
+      // 会拿一份空文档整段 setContent:doc 被原地重建,所有按位置存活的状态(语音
+      // 草稿锚点等)被迫跨整篇映射(#720 后语音录音时首行多一个空行的成因)。
+      const draftDocument = draft.text ? normalizeComposerDocumentJSON(draft.text) : null;
+      const normalizedDraftText =
+        draftDocument && tiptapDocHasContent(draftDocument) ? draftDocument : null;
       const textUnchanged =
         JSON.stringify(normalizedDraftText) ===
         JSON.stringify(composerDocIsEmpty(editor.state.doc) ? null : editor.getJSON());
@@ -4749,9 +4755,10 @@ export function ChatInput({
   const showTopSlot = !!topSlot;
   const showFusedWrapper = showQueuePanel || showTopSlot;
   const isCreateAgentVariant = visualVariant === 'create-agent';
-  const useNarrowToolbar =
-    isCreateAgentVariant &&
-    (narrowToolbar || (toolbarWidth != null && toolbarWidth < 600));
+  // split-pane 同时打开侧栏 / 会话 / 浏览器时，普通会话 composer 也会落到窄容器。
+  // 这里必须按 card 实际宽度统一切 compact，而不是只照顾 create-agent；否则普通
+  // 会话仍走两组 max-content flex，长模型名会把权限入口挤进语音 / 发送固定动作区。
+  const useNarrowToolbar = narrowToolbar || (toolbarWidth != null && toolbarWidth < 600);
   const useCompactMiddleToolbar =
     isCreateAgentVariant && (toolbarWidth == null ? narrowToolbar : toolbarWidth < 600);
   const useUltraCompactToolbar =
@@ -4958,32 +4965,28 @@ export function ChatInput({
                 if (storageKey) void attachGhostMediaToSession(ghostMediaUri, storageKey, t);
                 return;
               }
-              if (e.dataTransfer.files.length > 0) {
-                // Separate files from folders using webkitGetAsEntry()
-                const files: File[] = [];
-                for (let i = 0; i < e.dataTransfer.items.length; i++) {
-                  const item = e.dataTransfer.items[i];
-                  const entry = item.webkitGetAsEntry?.();
-                  const file = e.dataTransfer.files[i];
-                  if (!file) continue;
-                  if (entry?.isDirectory) {
-                    let folderPath = '';
-                    try {
-                      folderPath = window.electronAPI.getFilePath(file);
-                    } catch {
-                      /* ignore */
-                    }
-                    if (folderPath) addFolderPath(folderPath);
-                  } else {
-                    files.push(file);
+              const attachDroppedItems = (
+                items: Pick<DroppedFileItems, 'files' | 'directories'>,
+              ) => {
+                for (const directory of items.directories) {
+                  let folderPath = '';
+                  try {
+                    folderPath = window.electronAPI.getFilePath(directory);
+                  } catch {
+                    /* ignore */
                   }
+                  if (folderPath) addFolderPath(folderPath);
                 }
-                if (files.length > 0) {
-                  // Build a synthetic FileList-compatible object
-                  const dt = new DataTransfer();
-                  for (const f of files) dt.items.add(f);
-                  addFiles(dt.files);
-                }
+                if (items.files.length > 0) addFiles(items.files);
+              };
+              const droppedItems = getDroppedFileItems(e.dataTransfer);
+              attachDroppedItems(droppedItems);
+              if (droppedItems.unclassified.length > 0) {
+                void classifyUnclassifiedDroppedItems(droppedItems.unclassified, {
+                  getFilePath: (file) => window.electronAPI.getFilePath(file),
+                  classifyPath: (path) =>
+                    window.electronAPI.localDb.sessionShare.classifyPath({ path }),
+                }).then(attachDroppedItems);
               }
             }}
           >

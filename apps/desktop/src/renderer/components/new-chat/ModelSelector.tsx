@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useState,
   useMemo,
   useEffect,
@@ -27,7 +28,6 @@ import { useModelPricing } from '@/hooks/useModelPricing';
 import { useProviders } from '@/hooks/useProviders';
 import { useDeviceProviders } from '@/hooks/useDeviceProviders';
 import {
-  formatModelPricePair,
   modelPriceDiscountLabelValues,
   modelPriceDetailRows,
   modelPricePresentation,
@@ -93,8 +93,8 @@ const PROVIDER_TITLE_KEY: Record<string, string> = {
 // 配置面板锚在主菜单内缩 8px 的模型行上；补偿这段内缩，让两块面板贴边但不重叠。
 const MODEL_OPTIONS_SIDE_OFFSET = 8;
 const MODEL_LIST_DEFAULT_MAX_HEIGHT_PX = 300;
-// 折扣模型的价格会叠成两行：27.5px 价格栈 + 16px 纵向 padding，向上取整为 44px。
-const MODEL_LIST_CONSTRAINED_ROW_HEIGHT_PX = 44;
+// 一级菜单只保留单行模型信息与必要标签：20px 内容 + 16px 纵向 padding。
+const MODEL_LIST_ROW_HEIGHT_PX = 36;
 const MODEL_LIST_ROW_GAP_PX = 2;
 
 export function modelListMaxHeightForRows(maxVisibleRows?: number): number | undefined {
@@ -102,7 +102,7 @@ export function modelListMaxHeightForRows(maxVisibleRows?: number): number | und
   const rows = Math.max(1, Math.floor(maxVisibleRows));
   return Math.min(
     MODEL_LIST_DEFAULT_MAX_HEIGHT_PX,
-    rows * MODEL_LIST_CONSTRAINED_ROW_HEIGHT_PX + Math.max(0, rows - 1) * MODEL_LIST_ROW_GAP_PX,
+    rows * MODEL_LIST_ROW_HEIGHT_PX + Math.max(0, rows - 1) * MODEL_LIST_ROW_GAP_PX,
   );
 }
 
@@ -326,9 +326,9 @@ interface ModelSelectorProps {
   disabled?: boolean;
   /** 窄容器下把 trigger 字号/高度各压一档,默认 false。 */
   dense?: boolean;
-  /** 窄态工具栏的简略触发器:隐藏 effort / Fast 次要信息并限制模型名宽度。 */
+  /** 窄 composer 的简略触发器:隐藏 effort / Fast 次要信息并限制模型名宽度。 */
   compactToolbar?: boolean;
-  /** 极窄工具栏进一步隐藏模型文字，只保留模型图标和下拉箭头。 */
+  /** 极窄 composer 进一步隐藏模型文字，只保留模型图标和下拉箭头。 */
   ultraCompactToolbar?: boolean;
   /** Trigger presentation: toolbar keeps the compact chat pill; field renders a settings input-like control. */
   triggerVariant?: 'toolbar' | 'field';
@@ -1314,7 +1314,7 @@ function ModelSelectorContentView({
             }}
             className={cn(
               'flex w-full cursor-pointer items-center justify-between rounded-[8px] px-3 py-2',
-              constrainedListMaxHeight !== undefined && 'min-h-11',
+              constrainedListMaxHeight !== undefined && 'min-h-9',
               'transition-colors duration-100 hover:bg-[var(--model-item-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]',
               isSelected && 'bg-[var(--model-item-hover)]',
               isEditingThis &&
@@ -1337,7 +1337,7 @@ function ModelSelectorContentView({
               )}
               <span className="flex min-w-0 flex-1 items-center gap-1.5">
                 <span className="flex min-w-0 flex-1 items-center gap-1.5">
-                  <span className="truncate text-14 font-medium text-[var(--model-item-text)]">
+                  <span className="truncate text-14 font-medium leading-5 text-[var(--model-item-text)]">
                     {model.displayName}
                   </span>
                   {rowEffort && (
@@ -1372,29 +1372,9 @@ function ModelSelectorContentView({
                 )}
               </span>
             </span>
-            {(rowPrice?.kind === 'priced' || isSelected) && (
-              <span className="ml-2 flex shrink-0 items-center gap-1.5">
-                {rowPrice?.kind === 'priced' && (
-                  <span
-                    data-model-price-stack={rowPrice.original ? 'true' : undefined}
-                    className={cn(
-                      'flex tabular-nums text-11 font-normal leading-[1.25]',
-                      rowPrice.original ? 'flex-col items-end' : 'items-center',
-                    )}
-                  >
-                    <span className="text-[var(--text-secondary)]">
-                      {formatModelPricePair(rowPrice.current)}
-                    </span>
-                    {rowPrice.original && (
-                      <span className="text-[var(--text-tertiary)] line-through">
-                        {formatModelPricePair(rowPrice.original)}
-                      </span>
-                    )}
-                  </span>
-                )}
-                {isSelected && (
-                  <Check size={15} className="shrink-0 text-[var(--model-item-check)]" />
-                )}
+            {isSelected && (
+              <span className="ml-2 flex shrink-0 items-center">
+                <Check size={15} className="shrink-0 text-[var(--model-item-check)]" />
               </span>
             )}
           </div>
@@ -1636,7 +1616,26 @@ export function ModelSelector({
 }: ModelSelectorProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const openRef = useRef(false);
   const [keepOpenForAgentConfirmation, setKeepOpenForAgentConfirmation] = useState(false);
+  const setOpenWithoutAutoRefresh = useCallback((next: boolean): void => {
+    openRef.current = next;
+    setOpen(next);
+  }, []);
+  const handleOpenChange = useCallback(
+    (next: boolean): void => {
+      const nextOpen = disabled ? false : next;
+      const wasOpen = openRef.current;
+      openRef.current = nextOpen;
+      if (nextOpen && !wasOpen && !deviceId) {
+        void window.electronAPI.maker
+          .requestProviderModelsAutoRefresh('model-selector-open')
+          .catch(() => undefined);
+      }
+      setOpen(nextOpen);
+    },
+    [deviceId, disabled],
+  );
 
   // AlertDialog 打开时会被 Popover 视作外部交互并请求关闭。Agent 分段确认期间
   // 强制保留已展开的模型面板；确认结束后把底层 open 恢复为 true，避免弹窗关闭
@@ -1651,12 +1650,12 @@ export function ModelSelector({
         try {
           return await confirmBrowseSwitch();
         } finally {
-          setOpen(true);
+          setOpenWithoutAutoRefresh(true);
           setKeepOpenForAgentConfirmation(false);
         }
       },
     };
-  }, [agentSwitch]);
+  }, [agentSwitch, setOpenWithoutAutoRefresh]);
 
   const agentKind = vendorKeyToAgentKind(vendorKey);
   const cc = useAgentCapabilities('claude-code', deviceId);
@@ -1812,12 +1811,17 @@ export function ModelSelector({
             effort: effortLabel,
           })
         : t('newChat.modelSelector.trigger.aria', { model: displayLabel });
+  // compact 会隐藏断连状态文字；原生 title 仍需保留同一状态，避免鼠标用户悬停
+  // 错误图标时只看到模型名、无法判断发送为何被阻断。
+  const triggerTitle = showSourceDisconnected ? baseAriaLabel : displayLabel;
   // 多实例同屏(IM 目录偏好)时前置「字段名 · 行别名」,读屏才能区分行与行。
   const ariaLabel = ariaContext ? `${ariaContext}:${baseAriaLabel}` : baseAriaLabel;
   const isBudget = modelId.startsWith('codex/');
   const isFieldTrigger = triggerVariant === 'field';
   const isCreateAgentVariant = visualVariant === 'create-agent';
-  const isCompactToolbar = compactToolbar && isCreateAgentVariant;
+  // compact 是 composer 容器宽度状态，不是 create-agent 的视觉私有状态。
+  // 正常会话在侧栏 + 浏览器 split-pane 下也必须让长模型名承担收缩。
+  const isCompactToolbar = compactToolbar && !isFieldTrigger;
   const isUltraCompactToolbar = ultraCompactToolbar && isCompactToolbar;
   // 保留 useMorphPopover 作用域开关(仅 composer 工具条 opt-in;settings/CreateWorker 用 Radix 回退),
   // 但去掉 !isCreateAgentVariant —— 新建对话框工具条也走脱身上浮 morph,与会话内统一(2026-07-22)。
@@ -1835,10 +1839,10 @@ export function ModelSelector({
     <button
       type="button"
       disabled={switching || disabled}
-      onClick={morphEnabled ? () => setOpen((prev) => (disabled ? false : !prev)) : undefined}
+      onClick={morphEnabled ? () => handleOpenChange(!openRef.current) : undefined}
       aria-expanded={open && !disabled}
       aria-haspopup="listbox"
-      title={displayLabel}
+      title={triggerTitle}
       className={cn(
         'flex min-w-0 max-w-full items-center gap-1 transition-colors',
         isFieldTrigger
@@ -1852,9 +1856,13 @@ export function ModelSelector({
               'rounded-full',
               // 裸态工具条(2026-07-22 用户定稿):默认无框,hover 才浮现胶囊外框。
               // create-agent(新建对话框)与会话内共用同一套裸态,不再分叉 —— 静息/hover 逐字一致。
-              'h-[30px] min-w-[72px] max-w-full shrink overflow-hidden px-2.5',
-              // 窄态工具条(#562):新建对话框空间不足时钳制触发器宽度,防与语音/发送重叠。
-              isUltraCompactToolbar ? 'w-[64px]' : isCompactToolbar ? 'w-[148px]' : undefined,
+              'h-[30px] max-w-full shrink overflow-hidden px-2.5',
+              // 窄态工具条:钳制唯一可收缩的模型入口，给语音 / 发送固定动作留足空间。
+              isUltraCompactToolbar
+                ? 'w-[64px] min-w-[64px]'
+                : isCompactToolbar
+                  ? 'w-[148px] min-w-[72px]'
+                  : 'min-w-[72px]',
               'border border-transparent bg-transparent',
               'hover:border-[var(--border-default)] hover:bg-[var(--composer-pill-bg,#FCFCFC)] dark:hover:bg-[var(--composer-pill-bg,#393838)]',
             ),
@@ -1880,13 +1888,13 @@ export function ModelSelector({
               isCreateAgentVariant
                 ? 'text-[var(--create-agent-control-text)]'
                 : 'text-[var(--text-primary)]',
-              isCreateAgentVariant
-                ? isUltraCompactToolbar
-                  ? 'hidden'
-                  : isCompactToolbar
-                    ? 'max-w-[108px] truncate'
-                    : 'truncate'
-                : cn('truncate', isFieldTrigger ? 'max-w-[260px]' : ''),
+              isUltraCompactToolbar
+                ? 'hidden'
+                : isCompactToolbar
+                  ? 'max-w-[108px] truncate'
+                  : isCreateAgentVariant
+                    ? 'truncate'
+                    : cn('truncate', isFieldTrigger ? 'max-w-[260px]' : ''),
               isCreateAgentVariant ? 'text-[12px]' : dense ? 'text-[12.5px]' : 'text-[13px]',
             )}
           >
@@ -1909,15 +1917,15 @@ export function ModelSelector({
           <span
             className={cn(
               'min-w-0 font-normal text-[var(--text-primary)]',
-              isCreateAgentVariant
-                ? isUltraCompactToolbar
-                  ? 'hidden'
-                  : isCompactToolbar
-                    ? 'max-w-[108px] truncate'
-                    : 'truncate'
-                : isFieldTrigger
-                  ? 'max-w-[260px] truncate'
-                  : 'truncate',
+              isUltraCompactToolbar
+                ? 'hidden'
+                : isCompactToolbar
+                  ? 'max-w-[108px] truncate'
+                  : isCreateAgentVariant
+                    ? 'truncate'
+                    : isFieldTrigger
+                      ? 'max-w-[260px] truncate'
+                      : 'truncate',
               isCreateAgentVariant ? 'text-[12px]' : dense ? 'text-[12.5px]' : 'text-[13px]',
             )}
           >
@@ -1930,14 +1938,16 @@ export function ModelSelector({
             className="ml-0.5 shrink-0 text-[var(--error-fg)]"
             aria-hidden
           />
-          <span
-            className={cn(
-              'shrink-0 font-medium text-[var(--error-fg)]',
-              dense ? 'text-[11.5px]' : 'text-[12px]',
-            )}
-          >
-            {t('newChat.modelSelector.source.disconnected')}
-          </span>
+          {!isCompactToolbar && (
+            <span
+              className={cn(
+                'shrink-0 font-medium text-[var(--error-fg)]',
+                dense ? 'text-[11.5px]' : 'text-[12px]',
+              )}
+            >
+              {t('newChat.modelSelector.source.disconnected')}
+            </span>
+          )}
         </>
       ) : (
         <>
@@ -1958,15 +1968,15 @@ export function ModelSelector({
           <span
             className={cn(
               'min-w-0 font-normal',
-              isCreateAgentVariant
-                ? isUltraCompactToolbar
-                  ? 'hidden'
-                  : isCompactToolbar
-                    ? 'max-w-[108px] truncate'
-                    : 'truncate'
-                : isFieldTrigger
-                  ? 'max-w-[260px] truncate'
-                  : 'truncate',
+              isUltraCompactToolbar
+                ? 'hidden'
+                : isCompactToolbar
+                  ? 'max-w-[108px] truncate'
+                  : isCreateAgentVariant
+                    ? 'truncate'
+                    : isFieldTrigger
+                      ? 'max-w-[260px] truncate'
+                      : 'truncate',
               !isBudget &&
                 (isCreateAgentVariant
                   ? 'text-[var(--create-agent-control-text)]'
@@ -2056,7 +2066,7 @@ export function ModelSelector({
       deviceId={deviceId}
       excludeSubscriptionDirect={excludeSubscriptionDirect}
       excludeChatBridgedCodex={excludeChatBridgedCodex}
-      onDismiss={() => setOpen(false)}
+      onDismiss={() => setOpenWithoutAutoRefresh(false)}
       actualRoute={actualRoute}
       maxVisibleModelRows={maxVisibleModelRows}
       currentProviderId={currentProviderId}
@@ -2084,7 +2094,7 @@ export function ModelSelector({
     return (
       <MorphPopover
         open={(open || keepOpenForAgentConfirmation) && !disabled}
-        onOpenChange={(next) => setOpen(disabled ? false : next)}
+        onOpenChange={handleOpenChange}
         side={popoverSide}
         align="end"
         wrapperClassName="min-w-0 max-w-full shrink"
@@ -2100,7 +2110,7 @@ export function ModelSelector({
   return (
     <Popover
       open={(open || keepOpenForAgentConfirmation) && !disabled}
-      onOpenChange={(next) => setOpen(disabled ? false : next)}
+      onOpenChange={handleOpenChange}
     >
       <PopoverTrigger asChild>{trigger}</PopoverTrigger>
       <PopoverContent

@@ -356,10 +356,20 @@
       "localThemes": {
         "title": "로컬 테마",
         "export": "로컬 복사본 만들기",
+        "import": "VSCode / Obsidian 테마 가져오기",
         "openDir": "테마 폴더 열기",
         "refresh": "새로고침",
         "exportSuccess": "{{file}} 파일을 만들었습니다. 예시 이미지 경로를 바꾸고 저장한 뒤 \"새로고침\"을 누르세요.",
         "exportFailed": "내보내기에 실패했습니다: {{error}}",
+        "importSuccess": "{{name}}({{themeCount}}개 구성)을 가져왔습니다. 위 테마 목록에서 선택하세요.",
+        "importPartial": "{{name}}({{themeCount}}개 구성)을 가져왔습니다. 의미가 정해진 색 {{skipped}}개는 규칙대로 그대로 두었고, {{unresolved}}개는 값을 읽을 수 없어 건너뛰었고, {{derived}}개는 인접색에서 추정했습니다.",
+        "importFailed": "가져오기에 실패했습니다: {{error}}",
+        "importUnsupported": "이 파일은 VSCode 또는 Obsidian 테마로 인식할 수 없습니다.",
+        "importUsesInclude": "이 VSCode 테마는 include를 통해 색상을 상속하므로 단독으로 가져올 수 없습니다.",
+        "importNotAFile": "폴더가 아닌 파일을 선택해 주세요.",
+        "importTooLarge": "파일이 너무 커서 테마로 가져올 수 없습니다.",
+        "importWriteError": "테마를 저장할 수 없습니다. 디스크 공간과 권한을 확인하세요.",
+        "importInternalError": "파일을 읽거나 처리할 수 없습니다. 다시 선택해 보세요.",
         "openDirFailed": "폴더를 열지 못했습니다: {{error}}",
         "refreshed": "로컬 테마를 새로고쳤습니다"
       },
@@ -654,6 +664,12 @@
       "analyticsSaveFailed": "사용 통계 설정을 저장하지 못했습니다",
       "debugLogLabel": "디버그 로그",
       "debugLogDescription": "활성화하면 전체 디버그 로그를 출력합니다: main/maker logger가 debug 레벨로 올라가며, 새 Claude Code 세션은 API 요청 URL/상태/지연 시간, Node 레벨 DNS/TCP/TLS 핸드셰이크 타이밍 및 SDK 내부 정보도 출력합니다. 로그 양이 많으므로 문제 해결 후에는 꺼주세요. dev 모드에서는 항상 켜져 있습니다.",
+      "legal": {
+        "termsOfServiceLabel": "서비스 이용약관",
+        "privacyPolicyLabel": "개인정보 처리방침",
+        "viewDocument": "{{document}} 보기",
+        "openFailed": "문서를 열 수 없습니다. 시스템 브라우저 설정을 확인해 주세요"
+      },
       "social": {
         "title": "Cindy와 연결하기",
         "discordLabel": "Discord",
@@ -1327,9 +1343,12 @@
         "capabilityNote": "{{agent}}에서는 사용 불가",
         "divergedChip": "{{agent}}에서 숨김",
         "refreshAria": "모델 목록 새로고침(추가만)",
+        "refreshBuiltinAria": "모델 목록 새로고침",
+        "refreshingAria": "모델 목록 새로고침 중…",
+        "refreshDone": "모델 목록을 새로고침했습니다",
         "refreshAdded": "새 모델 {{count}}개를 발견했습니다",
         "refreshNoNew": "모델 목록이 최신 상태입니다. 새 항목이 없습니다",
-        "refreshFailed": "모델 목록 새로고침에 실패했습니다. 잠시 후 다시 시도해 주세요",
+        "refreshFailed": "모델 목록을 새로고침하지 못했습니다. 잠시 후 다시 시도해 주세요",
         "disableModel": "이 모델 비활성화",
         "enableModel": "이 모델 활성화",
         "capabilityGroupHint": "대화 모델 선택에는 표시되지 않으며, 이미지 생성 등 기능에서만 사용됩니다.",
@@ -4284,6 +4303,12 @@
       "editTitle": "붙여넣은 텍스트 편집",
       "cancelEdit": "편집 취소",
       "saveEdit": "텍스트 저장"
+    },
+    "permissionPrompt": {
+      "alwaysAllowScoped": "이 세션에서 {{scope}} 항상 허용",
+      "alwaysAllowScopedHint": "이 세션 전체에 적용되며, 여기에 표시된 범위에만 해당합니다.",
+      "alwaysAllowSessionHint": "이번 요청 한 번이 아니라 이 세션 전체에 적용됩니다.",
+      "ruleSeparator": ", "
     }
   },
   "onboarding": {
@@ -4800,7 +4825,8 @@
       "agentSwitch": {
         "label": "{{from}}에서 {{to}}(으)로 전환됨",
         "toggleHint": "인계 내용 보기",
-        "handoffTitle": "인계 내용——전환 시 새 엔진에 전송된 컨텍스트 요약. 원문은 영어(대화 기록에 포함되지 않으며 여기에서만 표시)",
+        "handoffTitle": "인계 내용——전환 시 새 엔진에 전송된 컨텍스트 요약(대화 기록에 포함되지 않으며 여기에서만 표시)",
+        "handoffTitleEnglishSource": "인계 내용——전환 시 새 엔진에 전송된 컨텍스트 요약. 원문은 영어(대화 기록에 포함되지 않으며 여기에서만 표시)",
         "resumedBadge": "세션 재개됨"
       }
     },
@@ -6363,10 +6389,20 @@
       "typeFeature": "기능 제안",
       "titleLabel": "제목",
       "bodyLabel": "본문(Markdown)",
-      "identityGithubUser": "제출 계정: GitHub 사용자 @{{login}}(본인)",
-      "identityPlatform": "제출 계정: Cindy 플랫폼 대리 제출(GitHub App {{login}})",
+      "submissionMethodLabel": "게시 방식",
+      "identityGithubUser": "GitHub 계정 @{{login}}에서 직접 게시",
+      "identityGithubUserHint": "GitHub의 Issue 작성자가 되며 직접 수정하거나 닫을 수 있습니다",
+      "identityPlatform": "Cindy에서 대신 게시(GitHub App {{login}})",
+      "identityPlatformHint": "GitHub의 Issue 작성자가 아니므로 직접 수정하거나 닫을 수 없습니다",
+      "publicNameLabel": "공개 서명",
+      "publicNameHint": "이 서명은 Issue 본문에 공개적으로 표시됩니다",
+      "anonymous": "익명",
+      "useAnonymous": "익명 서명 사용",
       "envLine": "제출 시 자동으로 첨부됩니다: 클라이언트 {{appVersion}} · {{platform}} {{arch}} · 표시 언어 {{uiLanguage}}",
-      "submit": "제출",
+      "regionLine": "지역: {{region}}",
+      "regionCodeCn": "CN",
+      "regionCodeDev": "Dev",
+      "submit": "피드백 제출",
       "cancel": "취소"
     },
     "redirect": {

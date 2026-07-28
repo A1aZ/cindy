@@ -45,6 +45,7 @@ import type {
   LocalThemeWriteRequest,
   LocalThemeWriteResult,
 } from '../shared/local-themes';
+import type { LocalThemeImportResult } from '../shared/theme-import/types';
 import { DEFAULT_LOCALE, SUPPORTED_LOCALES, type SupportedLocale } from '../shared/locale';
 import {
   MODEL_ACCESS_STATUS_CHANNEL,
@@ -299,6 +300,9 @@ const fanOutTapdbDailyActive = createIpcFanOut('tapdb:daily-active');
 // 使用统计(TapDB)的同意状态 / 开关变化;renderer 据此即时 init 或 opt-out
 const fanOutAnalyticsSettingsChange = createIpcFanOut(ANALYTICS_SETTINGS_CHANGE_CHANNEL);
 const fanOutFullscreenChange = createIpcFanOut('fullscreen-change');
+// 窗口是否对用户不可见(最小化 / hide)。装饰动画闸门用它兜底 —— backgroundThrottling
+// 关闭时 Renderer 的 document.visibilityState 会一直停在 visible,见 main 侧注释。
+const fanOutWindowHiddenChange = createIpcFanOut('window-hidden-change');
 const fanOutApplicationMenuCommand = createIpcFanOut('app-menu:command');
 // 首登轻量数据迁移(mToc)弹窗阶段推送(confirm / running / done / failed)
 const fanOutLegacyMigrationState = createIpcFanOut('legacy-migration:state');
@@ -744,6 +748,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('local-themes:write', req),
     openDir: (): Promise<LocalThemeOpenDirResult> =>
       ipcRenderer.invoke('local-themes:open-dir'),
+    // 导入 VSCode / Obsidian 主题文件。对话框与读文件都在 main 侧,这里不接受
+    // 任何路径参数。失败走 IPC 错误协议(reject,renderer 用 extractIpcError 解码)。
+    importExternal: (): Promise<LocalThemeImportResult> =>
+      ipcRenderer.invoke('local-themes:import') as Promise<LocalThemeImportResult>,
   },
 
   // RSB terminal tab(PTY 后端 + xterm.js)
@@ -2761,6 +2769,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onFullscreenChange: fanOutFullscreenChange,
   getFullscreenState: (): Promise<boolean> => ipcRenderer.invoke('get-fullscreen-state'),
 
+  // 窗口是否对用户不可见(最小化 / hide)。装饰动画闸门订阅它来决定要不要冻结常驻动画;
+  // 关掉 backgroundThrottling 的窗口里 document.visibilityState 不可信,只能靠这条。
+  onWindowHiddenChange: fanOutWindowHiddenChange,
+
   // ── Release notes (per-version, fetched from CDN by main) ──
   // Platform is resolved in main via getPlatformKey() to keep the CDN path
   // axis identical to the hot-update manifest.
@@ -3625,6 +3637,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 模型供应商目录（只读）—— 内置目录元数据 + 各供应商实时连接状态。
     listProviders: (): Promise<{ providers: import('@cindy/model-providers').ProviderView[] }> =>
       ipcRenderer.invoke('maker:provider:list'),
+    /** Refresh one built-in provider through its existing main-process discovery source. */
+    refreshBuiltinProviderModels: (
+      providerId: import('../shared/providerModelRefresh').BuiltinRefreshableProviderId,
+    ): Promise<import('../shared/providerModelRefresh').ProviderModelRefreshResult> =>
+      ipcRenderer.invoke('maker:provider:models-refresh', providerId),
+    /** Hint Main to silently refresh connected built-in providers when stale. */
+    requestProviderModelsAutoRefresh: (
+      trigger: import('../shared/providerModelRefresh').ProviderModelAutoRefreshRendererTrigger,
+    ): Promise<import('../shared/providerModelRefresh').ProviderModelAutoRefreshResult> =>
+      ipcRenderer.invoke('maker:provider:models-auto-refresh', trigger),
 
     // 自定义供应商配置 CRUD（配置与 runtime 密钥均由 main 原子排队）。
     createCustomProvider: (

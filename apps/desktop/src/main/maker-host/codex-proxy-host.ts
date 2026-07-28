@@ -60,6 +60,7 @@ import { getSessionProvider } from './session-provider-store.js';
 import { composeResponseObservers } from './claude-rate-limit-headers-observer.js';
 import { createProviderUpstreamErrorObserver, reportProviderUpstreamError } from './provider-upstream-error-observer.js';
 import { createXaiProxyAuthInvalidationObserver } from './xai-auth-invalidation-host.js';
+import { xaiServerSideTools } from './xai-server-side-tools.js';
 import { encryptedStripController, imageGenerationStripController } from './thread-strip-controllers.js';
 import { createMakerLogger } from './logger-adapter.js';
 import { resolveDesktopOutboundProxy } from './outbound-proxy-resolver.js';
@@ -77,6 +78,8 @@ const threadToSession = new Map<string, string>();
 
 let _handle: ProxyHandle | null = null;
 let _startPromise: Promise<void> | null = null;
+const _controlPlaneHandles = new Map<CodexProxyAuthInjection, ProxyHandle>();
+const _controlPlaneStartPromises = new Map<CodexProxyAuthInjection, Promise<void>>();
 let _disposeGeneration = 0;
 let dumpSeq = 0;
 
@@ -641,6 +644,52 @@ function sanitizeXaiTools(body: Record<string, unknown>): Record<string, unknown
 }
 
 /**
+ * 给 xAI 会话恒定补上 xAI 的服务端搜索工具(当前是 `x_search`,Grok 原生搜 X)。
+ *
+ * Codex 自己只会声明 OpenAI 系的内建工具,不知道 xAI 还有 x_search;不补的话用户选了
+ * Grok 也拿不到 X 的实时视野(见 xai-server-side-tools.ts)。补在**已有 tools 末尾**:
+ * 位置固定 + 只由 model 决定 → 同一会话逐轮请求的 tools 列表恒定,不破坏前缀稳定性。
+ * 上游已经带了同名工具(用户/Codex 自己声明过)则原样保留,不重复也不覆盖其参数。
+ *
+ * `tool_choice:'required'`(必须调用所提供工具之一)的处理与 bridge 侧同口径:required 作用于
+ * 整个 tools 数组,附加服务端工具后模型可能用 x_search 顶替调用方强制要的 function call。
+ * 这里同样**不**因此摘掉工具声明(那会让 tools 前缀在会话中途变动),而是在能精确表达时把
+ * tool_choice 收窄成指名唯一那个 function;有多个 function tool 时 Responses 无法表达
+ * 「required 但只限这几个」,保留 required 并接受该残余风险。
+ */
+function narrowXaiForcedToolChoice(
+  body: Record<string, unknown>,
+  tools: unknown[],
+): Record<string, unknown> | null {
+  if (body.tool_choice !== 'required') return null;
+  const functionTools = tools.filter(
+    (tool) => isPlainObject(tool) && tool.type === 'function' && typeof tool.name === 'string',
+  );
+  if (functionTools.length !== 1) return null;
+  const only = functionTools[0] as Record<string, unknown>;
+  return { ...body, tool_choice: { type: 'function', name: only.name } };
+}
+
+function ensureXaiServerSideTools(body: Record<string, unknown>): Record<string, unknown> | null {
+  const realModel = xaiRealModelId(body.model);
+  if (!realModel) return null;
+  const serverTools = xaiServerSideTools(realModel);
+  if (serverTools.length === 0) return null;
+
+  const existing = Array.isArray(body.tools) ? body.tools : [];
+  const declaredTypes = new Set(
+    existing.map((tool) => (isPlainObject(tool) && typeof tool.type === 'string' ? tool.type : '')),
+  );
+  const missing = serverTools.filter((tool) => !declaredTypes.has(tool.type));
+  // 工具已齐时仍要判 tool_choice 收窄:x_search 可能是上游自己声明的。
+  const nextTools = missing.length > 0 ? [...existing, ...missing] : existing;
+  const withTools = missing.length > 0 ? { ...body, tools: nextTools } : body;
+  const narrowed = narrowXaiForcedToolChoice(withTools, nextTools);
+  if (narrowed) return narrowed;
+  return missing.length > 0 ? withTools : null;
+}
+
+/**
  * ByteDance Seed accepts standard function tools and web search. Codex also
  * emits namespaced and other built-in descriptors that Volcengine rejects
  * before the request reaches the model. Its web-search descriptor must also
@@ -925,6 +974,14 @@ function createXaiResponsesCompatTransform(): RequestTransform {
     const withSanitizedTools = sanitizeXaiTools(current);
     if (withSanitizedTools) {
       current = withSanitizedTools;
+      changed = true;
+    }
+
+    // 补服务端工具排在 sanitize 之后:先按 xAI schema 清掉 Codex 专属工具,再追加 x_search,
+    // 保证注入项不会被同一轮的裁剪逻辑改形或丢掉。
+    const withServerSideTools = ensureXaiServerSideTools(current);
+    if (withServerSideTools) {
+      current = withServerSideTools;
       changed = true;
     }
 
@@ -1288,13 +1345,15 @@ export function decideCodexRoute(opts: {
   return { upstreamOverride: CODEX_OAUTH_UPSTREAM };
 }
 
-export function createModelRoutingTransform(): RoutingTransform {
+export function createModelRoutingTransform(
+  frozenAuthInjection?: CodexProxyAuthInjection,
+): RoutingTransform {
   return (body, ctx) => {
     // body 可能为 undefined —— 无 body 的 GET(典型: codex models-manager 的 `GET /models` 轮询,
     // 引擎现在也会对它跑路由)。不再因 body 非对象就短路;会话解析只依赖 headers,model 字段可选。
     const model = isPlainObject(body) && typeof body.model === 'string' ? body.model : '';
     const gatewayKey = _readGatewayKey();
-    const authInjection = getCodexProxyAuthInjection();
+    const authInjection = frozenAuthInjection ?? getCodexProxyAuthInjection();
     const threadId = selectedThreadIdFromHeaders(ctx.headers);
     const sessionId = threadId ? threadToSession.get(threadId) : undefined;
 
@@ -1396,6 +1455,46 @@ function createTransformRequestChain(): RequestTransform[] {
   return transforms;
 }
 
+function createCodexProxyHandle(
+  frozenAuthInjection?: CodexProxyAuthInjection,
+): Promise<ProxyHandle> {
+  return createAnthropicCompatProxy({
+    // 默认上游 = gateway(含 /v1)；普通模型 + oauth 由 routingTransform 覆盖到 ChatGPT。
+    upstream: () => buildCodexGatewayBaseUrl(),
+    transformRequest: createTransformRequestChain(),
+    // 常规 session proxy 继续读取当前全局 spawn 形态；control-plane proxy 在创建时
+    // 冻结自己的形态，两个 app-server 并行时不会互相改写路由。
+    routingTransform: createModelRoutingTransform(frozenAuthInjection),
+    responseObserver: composeResponseObservers(
+      createCodexResponseObserver(),
+      createProviderUpstreamErrorObserver({
+        agent: 'codex',
+        resolveUserProviderId: (requestHeaders) => {
+          const threadId = selectedThreadIdFromHeaders(requestHeaders);
+          const sessionId = threadId ? threadToSession.get(threadId) : undefined;
+          return sessionId ? getUserProviderIdForSession(sessionId) : null;
+        },
+        resolveUserProviderName: (providerId) =>
+          getActiveCatalog().providers.find((provider) => provider.id === providerId)?.name ?? null,
+      }),
+      createXaiProxyAuthInvalidationObserver(),
+    ),
+    maxRequestBodyBytes: CODEX_PROXY_MAX_REQUEST_BODY_BYTES,
+    debugDumpRequestBody: process.env.XDT_PROXY_DUMP_REQUEST_BODY === '1',
+    recoveryRules: [
+      createEncryptedContentRecoveryRule({
+        enabled: () => readSilentEncryptedRetrySettings().enabled,
+        onRetry: (threadId, model) => encryptedStripController.markActive(threadId, model),
+      }),
+      createImageGenerationIdRecoveryRule({
+        onRetry: (threadId, model) => imageGenerationStripController.markActive(threadId, model),
+      }),
+    ],
+    logger: log,
+    resolveOutboundProxy: resolveDesktopOutboundProxy,
+  });
+}
+
 /**
  * 启动本地 Codex prompt proxy。幂等 —— 重复调用直接返回已缓存状态。
  *
@@ -1409,51 +1508,7 @@ export async function ensureCodexProxyReady(): Promise<void> {
   const generation = _disposeGeneration;
   _startPromise = (async () => {
     try {
-      const handle = await createAnthropicCompatProxy({
-        // 默认上游 = gateway(含 /v1); 「普通模型 + oauth」由 routingTransform override 到 ChatGPT。
-        // 函数形态:model-access 下发切换网关 endpoint 后,常驻 proxy 每请求现取(按值 memoize)。
-        upstream: () => buildCodexGatewayBaseUrl(),
-        transformRequest: createTransformRequestChain(),
-        routingTransform: createModelRoutingTransform(),
-        // 组合三个只读观察器:service-tier 抽取 + 自定义供应商上游错误分类广播 + xAI 凭证
-        // 失效收口(后两者分别仅在 status≥400 路由到 user 供应商、401/403 且上游为 api.x.ai
-        // 时才 tee,成功路径零开销)。
-        responseObserver: composeResponseObservers(
-          createCodexResponseObserver(),
-          createProviderUpstreamErrorObserver({
-            agent: 'codex',
-            resolveUserProviderId: (requestHeaders) => {
-              const threadId = selectedThreadIdFromHeaders(requestHeaders);
-              const sessionId = threadId ? threadToSession.get(threadId) : undefined;
-              return sessionId ? getUserProviderIdForSession(sessionId) : null;
-            },
-            resolveUserProviderName: (providerId) =>
-              getActiveCatalog().providers.find((provider) => provider.id === providerId)?.name ?? null,
-          }),
-          // xai 是 builtin 来源,上面那个 observer 的 user-only 语义覆盖不到它;订阅 OAuth
-          // 被上游作废后必须有人收口,否则 codex agent 下会连环 403 而 UI 仍显示已连接。
-          createXaiProxyAuthInvalidationObserver(),
-        ),
-        maxRequestBodyBytes: CODEX_PROXY_MAX_REQUEST_BODY_BYTES,
-        // 请求体 dump 默认关(dev trace 级别 + agent 高并发会刷爆 main event loop
-        // 与日志盘);诊断请求体时设 XDT_PROXY_DUMP_REQUEST_BODY=1 显式开启。
-        debugDumpRequestBody: process.env.XDT_PROXY_DUMP_REQUEST_BODY === '1',
-        // Codex 走 OpenAI Responses API, 从不打 Anthropic Messages API, 不会出现空 thinking 块 400
-        // → 挂 Responses 专属恢复规则, 不挂 thinking 规则。
-        recoveryRules: [
-          createEncryptedContentRecoveryRule({
-            enabled: () => readSilentEncryptedRetrySettings().enabled,
-            onRetry: (threadId, model) => encryptedStripController.markActive(threadId, model),
-          }),
-          createImageGenerationIdRecoveryRule({
-            onRetry: (threadId, model) => imageGenerationStripController.markActive(threadId, model),
-          }),
-        ],
-        logger: log,
-        // 上游连接跟随代理环境变量 / 系统代理(非 TUN 的代理软件场景);无代理配置时直连,
-        // 行为与之前字节级一致。见 outbound-proxy-resolver.ts。
-        resolveOutboundProxy: resolveDesktopOutboundProxy,
-      });
+      const handle = await createCodexProxyHandle();
       if (generation !== _disposeGeneration) {
         await handle.dispose().catch((err) => {
           log.warn('codex proxy start raced with dispose; disposing fresh handle failed', {
@@ -1475,6 +1530,72 @@ export async function ensureCodexProxyReady(): Promise<void> {
     }
   })();
   return _startPromise;
+}
+
+/**
+ * 为一次独立 control-plane app-server 提供冻结鉴权形态的专用 proxy。
+ * 它不读取也不改写 session host 的全局 auth injection；同形态可安全复用同一端口。
+ */
+export async function ensureCodexControlPlaneProxyReady(
+  authInjection: CodexProxyAuthInjection,
+): Promise<void> {
+  if (_controlPlaneHandles.has(authInjection)) return;
+  const existing = _controlPlaneStartPromises.get(authInjection);
+  if (existing) return existing;
+
+  const generation = _disposeGeneration;
+  let start!: Promise<void>;
+  start = (async () => {
+    try {
+      const handle = await createCodexProxyHandle(authInjection);
+      if (generation !== _disposeGeneration) {
+        await handle.dispose().catch((err) => {
+          log.warn('codex control-plane proxy start raced with dispose', {
+            authInjection,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        });
+        return;
+      }
+      _controlPlaneHandles.set(authInjection, handle);
+      log.info('codex control-plane proxy ready', {
+        authInjection,
+        url: handle.url,
+        upstream: buildCodexGatewayBaseUrl(),
+      });
+    } catch (err) {
+      _controlPlaneHandles.delete(authInjection);
+      log.error('codex control-plane proxy failed to start', {
+        authInjection,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      if (_controlPlaneStartPromises.get(authInjection) === start) {
+        _controlPlaneStartPromises.delete(authInjection);
+      }
+    }
+  })();
+  _controlPlaneStartPromises.set(authInjection, start);
+  return start;
+}
+
+export function isCodexControlPlaneProxyHandleReady(
+  authInjection: CodexProxyAuthInjection,
+): boolean {
+  return _controlPlaneHandles.has(authInjection);
+}
+
+export function getCodexControlPlaneProxyEndpoint(
+  authInjection: CodexProxyAuthInjection,
+): string {
+  const handle = _controlPlaneHandles.get(authInjection);
+  if (handle) return handle.url;
+  const fallbackEndpoint = buildCodexGatewayBaseUrl();
+  log.warn('codex control-plane proxy not ready, falling back to direct gateway', {
+    authInjection,
+    fallbackEndpoint,
+  });
+  return fallbackEndpoint;
 }
 
 /**
@@ -1563,13 +1684,30 @@ export async function disposeCodexProxy(): Promise<void> {
     await _startPromise.catch(() => undefined);
   }
 
-  if (!_handle) return;
-
   const h = _handle;
   _handle = null;
-  try {
-    await h.dispose();
-  } catch (err) {
-    log.warn('codex proxy dispose failed', { err: err instanceof Error ? err.message : String(err) });
+
+  if (_controlPlaneStartPromises.size > 0) {
+    await Promise.allSettled(_controlPlaneStartPromises.values());
+    _controlPlaneStartPromises.clear();
   }
+  const controlPlaneHandles = Array.from(_controlPlaneHandles.values());
+  _controlPlaneHandles.clear();
+
+  if (h) {
+    try {
+      await h.dispose();
+    } catch (err) {
+      log.warn('codex proxy dispose failed', { err: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  await Promise.all(controlPlaneHandles.map(async (handle) => {
+    try {
+      await handle.dispose();
+    } catch (err) {
+      log.warn('codex control-plane proxy dispose failed', {
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }));
 }

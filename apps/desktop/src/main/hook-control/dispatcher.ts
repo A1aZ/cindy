@@ -39,6 +39,8 @@ import {
   makeTaskAck,
   makeTurnEnd,
   makeTurnProgress,
+  makeTurnReopen,
+  HOOK_FEATURE_TURN_REOPEN,
   type HookMessage,
   type InteractionButton,
   type InteractionDecisionPayload,
@@ -65,6 +67,41 @@ export interface HookSessionRunner {
   inspect(sessionId: string): Promise<{ workingDir: string | null; usable: boolean } | null>;
   /** 跑一个完整 turn, 收口(done / terminal error)后返回。 */
   run(req: HookRunRequest): Promise<HookRunOutcome>;
+  /**
+   * 观察一次「桌面端续跑」并把过程与结果回流(turn.reopen 链路, 见协议第 14 条)。
+   * 返回撤销函数(幂等)。未实现 = 该 runner 不支持回流, dispatcher 自动降级为
+   * 旧行为(渠道消息停在失败上)。
+   */
+  watchContinuation?(req: HookContinuationWatchRequest): () => void;
+}
+
+/**
+ * 一次续跑观察。dispatcher 在收到「用户在桌面端续跑了这个会话」信号后发起,
+ * runner 负责挂事件监听。
+ *
+ * 回调契约(dispatcher 依赖它来保证渠道消息不会卡在假的"进行中"):
+ *   - onClaim 最多一次, 且**只在真的收到第一个事件后**才调 —— 桌面端的续跑发送
+ *     可能根本没被接受(排队被挡 / 凭证切换), 先认领再发现没动静, 渠道消息就会
+ *     停在假的进行中;
+ *   - onClaim 调过之后, 必然恰好有一次 onEnd(正常收口 / 错误 / 硬超时);
+ *   - onClaim 没调过时, 必然恰好有一次 onAbandon(空转超时 / 会话已不在 / 被撤销)。
+ */
+export interface HookContinuationWatchRequest {
+  sessionId: string;
+  /** 原任务的目录(出站附件的允许根; runner 会用 live session 的实际目录复核)。 */
+  workingDir: string;
+  /** 原任务的来源标注(决定 Telegram / Slack 的进度渲染差异)。 */
+  source?: TaskSource;
+  /** 原任务的渠道形态; 与 run() 同判据地决定进度只发正文还是带过程区。 */
+  laneKind?: 'dm' | 'group';
+  /** 这一轮真的跑起来了 —— 此刻才认领渠道那条消息。 */
+  onClaim: () => void;
+  /** 执行中渲染快照(仅 onClaim 之后)。 */
+  onProgress: (text: string) => void;
+  /** 收口(仅 onClaim 之后)。 */
+  onEnd: (outcome: HookRunOutcome) => void;
+  /** 一个事件都没等到就放弃(onClaim 未发生)。 */
+  onAbandon: () => void;
 }
 
 export interface HookRunRequest {
@@ -196,6 +233,12 @@ export interface HookDispatcherDeps {
    */
   resolveInteraction?: (interactionId: string, buttonId: string) => boolean;
   /**
+   * 可选: 订阅「用户在桌面端显式续跑了某会话」信号(生产为 maker-ipc 的
+   * onUiContinuation)。未注入 = 不做续跑回流, 渠道消息停在失败上(旧行为)。
+   * 返回退订函数, dispose 时调用。
+   */
+  subscribeUiContinuation?: (listener: (sessionId: string) => void) => () => void;
+  /**
    * Production keeps ingress closed until the owner DB-ready callback opens
    * the account boundary. Tests and standalone consumers retain the historical
    * eager behavior unless they opt out explicitly.
@@ -211,8 +254,16 @@ export interface HookDispatcher {
     payload: TaskDispatchPayload,
     send: (m: HookMessage) => boolean,
   ): void;
-  /** 连接握手完成(welcome)后调用: 更新发送函数并补发离线期间积压的 turn.end。 */
-  onConnected(connectionId: string, send: (m: HookMessage) => boolean): void;
+  /**
+   * 连接握手完成(welcome)后调用: 更新发送函数并补发离线期间积压的 turn.end。
+   * features 为该连接本次 welcome 宣告的能力集(缺省 = 空, 按老 server 处理)——
+   * turn.reopen 只在 server 宣告支持时才用。
+   */
+  onConnected(
+    connectionId: string,
+    send: (m: HookMessage) => boolean,
+    features?: readonly string[],
+  ): void;
   /** transport 离线或失去已协商能力时调用，禁止继续向旧 socket 发送帧。 */
   onDisconnected(connectionId: string): void;
   /**
@@ -242,6 +293,18 @@ export interface HookDispatcher {
 const MAX_QUEUE_PER_SESSION = 20;
 /** 单连接离线 turn.end 缓存上限(FIFO 丢最老)。 */
 const MAX_PENDING_TURN_ENDS = 100;
+
+/**
+ * 失败任务的续跑记账保留时长。
+ *
+ * 用户看到渠道里那条失败消息、打开桌面端点「重试」, 中间可能隔很久(下班前失败,
+ * 第二天早上才处理)。取 24h 让"当天内回来点重试"都能接回; 更久的意义不大, 而且
+ * server 侧那条消息的位置映射也未必还在(它认不出 reopenOf 时会静默忽略, 所以两端
+ * TTL 不必对齐, 最坏就是回到"消息停在失败上")。
+ */
+const REOPEN_TTL_MS = 24 * 60 * 60_000;
+/** 续跑记账条数上限(FIFO 淘汰最老), 同 ackHistory 语义: 防长驻进程无界增长。 */
+const MAX_PENDING_REOPENS = 200;
 
 /**
  * 原对话不再落在工作目录映射内时(被移到映射外的项目, 或映射本身被改/删),
@@ -368,6 +431,28 @@ interface PendingTask {
   cleanupWorktree?: () => Promise<void>;
 }
 
+/** 一条等待续跑的失败任务(见 pendingReopens)。 */
+/**
+ * 渠道形态(dm / group)—— 只看 externalKey 的前缀形状, 不查任何状态。
+ * execute() 与续跑观察共用: 两边都要用它算 answerOnlyProgress, 判据分叉就会让
+ * 续跑轮的进度渲染跟正常任务不一致(Telegram DM 冒出过程区 / 群里少了过程区)。
+ */
+function deriveLaneKind(externalKey: string): 'dm' | 'group' {
+  return /^telegram:(group|topic):/.test(externalKey) ? 'group' : 'dm';
+}
+
+interface PendingReopen {
+  connectionId: string;
+  /** 失败那一轮的 requestId —— server 用它定位渠道里那条消息(reopenOf)。 */
+  requestId: string;
+  externalKey: string;
+  /** 那一轮真正跑的目录(执行前还要按当前映射复核一次)。 */
+  workingDir: string;
+  source?: TaskSource;
+  accountGeneration: number;
+  expiresAt: number;
+}
+
 export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
   const {
     getConnection,
@@ -379,6 +464,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     abortSession,
     archiveSessionRow,
     resolveInteraction,
+    subscribeUiContinuation,
     accountInitiallyActive,
     log,
   } = deps;
@@ -455,6 +541,25 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
   const runningByRequest = new Map<string, { sessionId: string; connectionId: string }>();
   /** 已请求取消的 connectionId + requestId(execute 收口时据此把结果改写为 cancelled)。 */
   const cancelRequested = new Set<string>();
+  /** 每连接最近一次 welcome 宣告的能力集(turn.reopen 的 feature gate)。 */
+  const serverFeatures = new Map<string, readonly string[]>();
+  /**
+   * 以失败收口、**还等着被续跑**的任务, 按 sessionId 记账(见协议第 14 条)。
+   *
+   * 只存进程内: app 重启后原 requestId 已随进程消失, server 侧也早已把那一轮当
+   * 结束处理, 没有可续的东西。同一 session 后来又有 hook turn 时这条记账作废
+   * (那条消息的"最新一轮"已经换人了)。
+   */
+  const pendingReopens = new Map<string, PendingReopen>();
+  /** 正在观察的续跑轮 -> 撤销函数, 按 sessionId(同一会话同时只可能有一轮)。 */
+  const activeContinuations = new Map<string, () => void>();
+  /** 正在因"新任务接管"而撤销的 session —— 它的收口不得再记待续跑(见 dropContinuation)。 */
+  let suppressReopenFor: string | null = null;
+  // dispatcher 是进程级单例(ipc.ts), 与信号源同生命周期 —— 没有 dispose 通道,
+  // 也就不持有退订句柄; 测试注入自己的 subscribe, 不会跨用例串台。
+  subscribeUiContinuation?.((sessionId) => {
+    onUiContinuation(sessionId);
+  });
   let accountActive = accountInitiallyActive ?? true;
   let accountGeneration = 0;
   const executing = new Set<Promise<void>>();
@@ -497,6 +602,151 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     return { requestId, result: 'rejected', reason, sessionId: null, queuePosition: null };
   }
 
+  /** server 本次握手宣告了 turn.reopen 能力吗(缺席 = 老 server, 不回流)。 */
+  function supportsReopen(connectionId: string): boolean {
+    return serverFeatures.get(connectionId)?.includes(HOOK_FEATURE_TURN_REOPEN) === true;
+  }
+
+  /**
+   * 放弃这个 session 的续跑回流: 撤销在观察的那一轮 + 清掉记账。
+   *
+   * 新的 hook turn 一开跑就必须调 —— 那条渠道消息的"最新一轮"已经换人了, 旧的
+   * 观察器若还挂着, 新 turn 的事件会被当成续跑的继续, 把上一条消息改写成不相干
+   * 的内容。
+   */
+  function dropContinuation(sessionId: string): void {
+    pendingReopens.delete(sessionId);
+    const cancel = activeContinuations.get(sessionId);
+    if (!cancel) return;
+    activeContinuations.delete(sessionId);
+    // 撤销会让 runner 以"已取消"收口, 那条 turn.end 是 error —— 但**不能**据此再记
+    // 一笔待续跑: 这条消息线已经交给新任务了, 留下记账会让之后的一次续跑信号把
+    // 用户带回一条早已过期的消息。suppress 覆盖同步收口, 尾随的 delete 兜住同一
+    // tick 内的异步收口。
+    suppressReopenFor = sessionId;
+    try {
+      cancel();
+    } finally {
+      suppressReopenFor = null;
+    }
+    pendingReopens.delete(sessionId);
+  }
+
+  /** 失败收口后登记"等着被续跑"。只有 server 支持回流时才记, 否则纯占内存。 */
+  function rememberForReopen(sessionId: string, entry: Omit<PendingReopen, 'expiresAt'>): void {
+    if (suppressReopenFor === sessionId) return;
+    if (!runner.watchContinuation || !supportsReopen(entry.connectionId)) return;
+    pendingReopens.set(sessionId, { ...entry, expiresAt: Date.now() + REOPEN_TTL_MS });
+    if (pendingReopens.size > MAX_PENDING_REOPENS) {
+      const oldest = pendingReopens.keys().next().value;
+      if (oldest !== undefined) pendingReopens.delete(oldest);
+    }
+  }
+
+  /**
+   * 「用户在桌面端续跑了这个会话」信号到达。命中记账就把这一轮接回渠道那条消息。
+   *
+   * 记账是一次性的: 无论最终接回成功还是放弃, 这条都不再复用 —— 续跑轮自己若又
+   * 失败, 由它的 onEnd 重新登记(带新 requestId), 于是形成一条每环都有独立 id 的
+   * 链, 而不是让同一条记账被反复认领。
+   */
+  function onUiContinuation(sessionId: string): void {
+    const entry = pendingReopens.get(sessionId);
+    if (!entry) return;
+    pendingReopens.delete(sessionId);
+    const watch = runner.watchContinuation;
+    if (!watch) return;
+    if (!isCurrentGeneration(entry.accountGeneration)) return;
+    if (Date.now() > entry.expiresAt) return;
+    // 本模块正跑这个 session 的 hook turn: 那一轮才是这条消息线的主人。
+    if (running.has(sessionId) || activeContinuations.has(sessionId)) return;
+    if (!supportsReopen(entry.connectionId)) return;
+    // 目录授权按现场重算(与 execute 同一道收口): 排队/等待期间映射可能已被改删。
+    if (!dirStillAllowed(entry.connectionId, entry.workingDir)) {
+      log.info(
+        `hook continuation skipped: the session directory is no longer authorized (reopenOf=${entry.requestId})`,
+      );
+      return;
+    }
+    const requestId = randomUUID();
+    const requestKey = ackKey(entry.connectionId, requestId);
+    let claimed = false;
+    // runner 可能在 watch() 里**同步**收口(会话已不在进程里就直接 onAbandon),
+    // 那时 cancelWatch 还没赋值 —— 用这个标记决定要不要登记, 不去碰它。
+    let settledEarly = false;
+    const cleanup = (): void => {
+      settledEarly = true;
+      runningByRequest.delete(requestKey);
+      cancelRequested.delete(requestKey);
+      activeContinuations.delete(sessionId);
+    };
+    const cancelWatch = watch({
+      sessionId,
+      workingDir: entry.workingDir,
+      ...(entry.source ? { source: entry.source } : {}),
+      laneKind: deriveLaneKind(entry.externalKey),
+      onClaim: () => {
+        if (!isCurrentGeneration(entry.accountGeneration)) return;
+        const send = sendFns.get(entry.connectionId);
+        // 连接不在线: reopen 是"把消息接回来"的即时动作, 缓存补发没有意义
+        // (等重连时那轮早跑完了)。不认领 = 消息保持原样, 与旧行为一致。
+        if (!send) return;
+        claimed = send(
+          makeTurnReopen({
+            requestId,
+            reopenOf: entry.requestId,
+            externalKey: entry.externalKey,
+            sessionId,
+          }),
+        );
+        // 认领成功后这一轮就等同于一个在执行的任务: 登记进 runningByRequest,
+        // 渠道侧的 /stop 才能用新 requestId 命中它。
+        if (claimed) runningByRequest.set(requestKey, { sessionId, connectionId: entry.connectionId });
+      },
+      onProgress: (text) => {
+        if (!claimed || !isCurrentGeneration(entry.accountGeneration)) return;
+        const send = sendFns.get(entry.connectionId);
+        if (send) send(makeTurnProgress({ requestId, text }));
+      },
+      onEnd: (outcome) => {
+        const wasCancelled = cancelRequested.has(requestKey);
+        cleanup();
+        if (!claimed || !isCurrentGeneration(entry.accountGeneration)) return;
+        const status: 'ok' | 'error' | 'cancelled' = wasCancelled ? 'cancelled' : outcome.status;
+        const isError = status === 'error';
+        sendOrBuffer(
+          entry.connectionId,
+          makeTurnEnd({
+            requestId,
+            externalKey: entry.externalKey,
+            sessionId,
+            status,
+            finalText: outcome.finalText,
+            errorMessage: isError ? outcome.errorMessage || 'unknown error' : null,
+            usage: { durationMs: outcome.durationMs },
+            ...(outcome.attachments !== undefined && outcome.attachments.length > 0
+              ? { attachments: outcome.attachments }
+              : {}),
+          }),
+        );
+        // 续跑又失败了 -> 允许再续一次(用户还得再点一次重试, 天然限流)。
+        // reopenOf 换成这一轮的 requestId: server 侧那条消息现在挂在它上面。
+        if (isError) {
+          rememberForReopen(sessionId, {
+            connectionId: entry.connectionId,
+            requestId,
+            externalKey: entry.externalKey,
+            workingDir: entry.workingDir,
+            ...(entry.source ? { source: entry.source } : {}),
+            accountGeneration: entry.accountGeneration,
+          });
+        }
+      },
+      onAbandon: cleanup,
+    });
+    if (!settledEarly) activeContinuations.set(sessionId, cancelWatch);
+  }
+
   /** 执行一个任务并回推 turn.end; 收口后 drain 同 session 队列。 */
   async function execute(task: PendingTask): Promise<void> {
     const sessionId = task.run.sessionId;
@@ -505,6 +755,8 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       running.delete(sessionId);
       return;
     }
+    // 这条消息线交给新任务了: 撤掉上一轮失败留下的续跑观察与记账。
+    dropContinuation(sessionId);
     runningByRequest.set(requestKey, { sessionId, connectionId: task.connectionId });
 
     // 进度快照直发不缓存: 断线期间的中间帧没有补发价值(turn.end 会带最终
@@ -614,6 +866,19 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       }),
     );
     running.delete(sessionId);
+    // 失败收口 -> 记一笔"等着被续跑"。只有 error 记: cancelled 是用户按了停止,
+    // ok 没什么可续的。用户之后在桌面端点「重试」时, 这一轮的进展与结果就能接回
+    // 渠道里这条消息(协议第 14 条)。
+    if (isError) {
+      rememberForReopen(sessionId, {
+        connectionId: task.connectionId,
+        requestId: task.requestId,
+        externalKey: task.externalKey,
+        workingDir: task.run.workingDir,
+        ...(task.run.source ? { source: task.run.source } : {}),
+        accountGeneration: task.accountGeneration,
+      });
+    }
     // 本次执行收口, 免检窗口到此为止。注意**不能**断言"session 一定已落库":
     // 上面可能因映射撤权根本没进 runner, runner 也可能在 createSession 之前就
     // 失败(PR #733 review 指出)。这里删掉只是让后续消息回到正常判定 —— 那两种
@@ -700,8 +965,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     /** 旧绑定作废、本次不得不新建会话时, 随 turn.end 回给渠道的说明。 */
     let recreatedNotice: string | null = null;
 
-    const laneKind: 'dm' | 'group' =
-      /^telegram:(group|topic):/.test(payload.externalKey) ? 'group' : 'dm';
+    const laneKind = deriveLaneKind(payload.externalKey);
     // 接管路径: server 显式指定已有 session(对话会话同样可接管)
     if (payload.sessionId !== null) {
       const info = await runner.inspect(payload.sessionId);
@@ -1112,6 +1376,10 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       queues.clear();
       sendFns.clear();
       pendingTurnEnds.clear();
+      // 续跑记账与在观察的续跑轮都属于上一个账号, 一并清掉(记账里带
+      // accountGeneration 只是第二道防线, 表本身不该跨账号留存)。
+      for (const sessionId of [...activeContinuations.keys()]) dropContinuation(sessionId);
+      pendingReopens.clear();
 
       const drain = (async (): Promise<void> => {
         const aborts: Promise<void>[] = [];
@@ -1287,8 +1555,11 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     onDisconnected(connectionId) {
       sendFns.delete(connectionId);
     },
-    onConnected(connectionId, send) {
+    onConnected(connectionId, send, features) {
       if (!accountActive) return;
+      // 能力集以最新一次握手为准: 滚动发布时重连可能落到另一版本的实例上,
+      // 老实例不宣告 turn.reopen 时必须立刻停用回流, 不能拿上一次的快照发帧。
+      serverFeatures.set(connectionId, features ? [...features] : []);
       sendFns.set(connectionId, send);
       const buf = pendingTurnEnds.get(connectionId);
       if (!buf?.length) return;

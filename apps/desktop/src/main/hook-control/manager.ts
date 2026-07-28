@@ -2199,7 +2199,9 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
         // 握手完成 → dispatcher 刷新发送函数并补发离线积压的 turn.end
         if (s === 'connected') {
           const t = created;
-          dispatcher?.onConnected(dispatchId('slack'), (m) => t.send(m));
+          // features 一并交出去: dispatcher 的 turn.reopen 回流按 server 本次
+          // 握手宣告的能力开关(滚动发布时重连可能落到不支持的旧实例)。
+          dispatcher?.onConnected(dispatchId('slack'), (m) => t.send(m), serverFeatures);
           // 阶段 4 起绑定走 SIWS OIDC, 由用户点「连接 Slack」显式发起(需开浏览器),
           // 不再随连接就绪自动绑 —— 抢占式绑定若自动补绑会让两台设备互相顶。
         }
@@ -2264,7 +2266,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
           // refreshHello() can upgrade an already-open socket after a rolling
           // deploy without another status transition.
           const t = created;
-          dispatcher?.onConnected(dispatchId(provider), (m) => t.send(m));
+          dispatcher?.onConnected(dispatchId(provider), (m) => t.send(m), lane.serverFeatures);
         }
         notifyStatus(toView());
       },
@@ -2278,7 +2280,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
         }
         if (s === 'connected' && laneCapabilityReady(lane)) {
           const t = created;
-          dispatcher?.onConnected(dispatchId(provider), (m) => t.send(m));
+          dispatcher?.onConnected(dispatchId(provider), (m) => t.send(m), lane.serverFeatures);
         }
         notifyStatus(toView());
       },

@@ -8,12 +8,17 @@ import path from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import type { HookMessage, TaskDispatchPayload } from '@cindy/slack-hook-protocol';
+import {
+  HOOK_FEATURE_TURN_REOPEN,
+  type HookMessage,
+  type TaskDispatchPayload,
+} from '@cindy/slack-hook-protocol';
 
 import {
   buildHookSessionTitle,
   createHookDispatcher,
   normalizeTaskSource,
+  type HookContinuationWatchRequest,
   type HookDispatcherDeps,
   type HookRunOutcome,
   type HookRunRequest,
@@ -124,6 +129,7 @@ function makeDispatcher(overrides?: {
   prepareWorktree?: HookDispatcherDeps['prepareWorktree'];
   dialogue?: HookDispatcherDeps['dialogue'];
   abortSession?: HookDispatcherDeps['abortSession'];
+  subscribeUiContinuation?: HookDispatcherDeps['subscribeUiContinuation'];
   accountInitiallyActive?: boolean;
 }) {
   const bindings = overrides?.bindings ?? memoryBindings();
@@ -136,6 +142,7 @@ function makeDispatcher(overrides?: {
     prepareWorktree: overrides?.prepareWorktree,
     dialogue: overrides?.dialogue,
     abortSession: overrides?.abortSession,
+    subscribeUiContinuation: overrides?.subscribeUiContinuation,
     accountInitiallyActive: overrides?.accountInitiallyActive,
     log: noopLog,
   });
@@ -1927,5 +1934,289 @@ describe('内置「对话」伪目录(chat 保留别名)', () => {
       result: 'rejected',
       reason: 'unknown_workspace',
     });
+  });
+});
+
+describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () => {
+  /**
+   * 可控续跑观察器: 记录 watch 请求, 由测试驱动 claim / progress / end。
+   * sessions 是可变的 —— 测试可在首轮之后把会话登记进去, 让后续 dispatch 走
+   * 「binding 复用同一个 session」而不是查不到重建。
+   */
+  function continuationRunner() {
+    const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
+    const fr = fakeRunner({ sessions });
+    const watches: HookContinuationWatchRequest[] = [];
+    const cancels: number[] = [];
+    const runner: HookSessionRunner = {
+      ...fr.runner,
+      watchContinuation: (req) => {
+        watches.push(req);
+        const index = watches.length - 1;
+        return () => cancels.push(index);
+      },
+    };
+    return {
+      ...fr,
+      runner,
+      sessions,
+      watches,
+      cancels,
+      latest: () => watches[watches.length - 1],
+    };
+  }
+
+  /** 一个信号源(测试手动触发"用户在桌面端续跑了")。 */
+  function signalSource() {
+    const listeners = new Set<(sessionId: string) => void>();
+    return {
+      subscribe: ((listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      }) as NonNullable<HookDispatcherDeps['subscribeUiContinuation']>,
+      fire: (sessionId: string) => {
+        for (const l of [...listeners]) l(sessionId);
+      },
+    };
+  }
+
+  const REOPEN_FEATURES = [HOOK_FEATURE_TURN_REOPEN];
+
+  /** 跑一个 hook 任务并让它以失败收口, 返回环境与那一轮的 sessionId。 */
+  async function failOneTask(opts?: { features?: readonly string[] }) {
+    const cr = continuationRunner();
+    const sig = signalSource();
+    const c = collector();
+    const { d } = makeDispatcher({ runner: cr.runner, subscribeUiContinuation: sig.subscribe });
+    d.onConnected('conn-1', c.send, opts?.features ?? REOPEN_FEATURES);
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    const sessionId = c.last('task.ack')!.payload.sessionId!;
+    cr.finish({ status: 'error', finalText: '', errorMessage: 'boom' });
+    await tick();
+    expect(c.last('turn.end')!.payload.status).toBe('error');
+    return { cr, sig, c, d, sessionId };
+  }
+
+  it('续跑信号 -> turn.reopen(新 requestId + reopenOf) -> 进度与结果都走新 id', async () => {
+    const { cr, sig, c, sessionId } = await failOneTask();
+
+    sig.fire(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(1);
+    expect(cr.latest().sessionId).toBe(sessionId);
+    // 认领之前不发任何帧: 桌面端那条续跑可能根本没被接受。
+    expect(c.ofType('turn.reopen')).toHaveLength(0);
+
+    cr.latest().onProgress('太早了, 不该发出去');
+    expect(c.ofType('turn.progress')).toHaveLength(0);
+
+    cr.latest().onClaim();
+    const reopen = c.last('turn.reopen')!.payload;
+    expect(reopen.reopenOf).toBe('req-1');
+    expect(reopen.requestId).not.toBe('req-1');
+    expect(reopen.externalKey).toBe('team-slack:C1:1.1');
+    expect(reopen.sessionId).toBe(sessionId);
+    expect(reopen.reason).toBe('user-continued');
+
+    cr.latest().onProgress('干到一半了');
+    expect(c.last('turn.progress')!.payload).toEqual({
+      requestId: reopen.requestId,
+      text: '干到一半了',
+    });
+
+    cr.latest().onEnd({
+      status: 'ok',
+      finalText: '这次成了',
+      errorMessage: null,
+      durationMs: 12,
+    });
+    const end = c.ofType('turn.end').at(-1)!.payload;
+    expect(end.requestId).toBe(reopen.requestId);
+    expect(end.status).toBe('ok');
+    expect(end.finalText).toBe('这次成了');
+    // 原 requestId 的那条 turn.end 仍然只有一条(server 侧幂等语义不变)。
+    expect(c.ofType('turn.end').filter((m) => m.payload.requestId === 'req-1')).toHaveLength(1);
+  });
+
+  it('server 没宣告 turn-reopen 能力时完全不启用(不记账, 信号空转)', async () => {
+    const { cr, sig, c, sessionId } = await failOneTask({ features: [] });
+    sig.fire(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(0);
+    expect(c.ofType('turn.reopen')).toHaveLength(0);
+  });
+
+  it('只有 error 收口才记账: ok 与 cancelled 都不接回', async () => {
+    for (const outcome of [
+      { status: 'ok' as const, finalText: 'done', errorMessage: null },
+      { status: 'error' as const, finalText: '', errorMessage: 'x' }, // cancelled 走 cancel() 改写
+    ]) {
+      const cr = continuationRunner();
+      const sig = signalSource();
+      const c = collector();
+      const { d } = makeDispatcher({ runner: cr.runner, subscribeUiContinuation: sig.subscribe });
+      d.onConnected('conn-1', c.send, REOPEN_FEATURES);
+      d.handleDispatch('conn-1', dispatch(), c.send);
+      await tick();
+      const sessionId = c.last('task.ack')!.payload.sessionId!;
+      if (outcome.status === 'error') {
+        // 用户按了停止 -> 上游看到的是 cancelled, 不该被当成"失败等续跑"。
+        d.cancel('conn-1', 'req-1');
+      }
+      cr.finish({ ...outcome, durationMs: 1 });
+      await tick();
+      sig.fire(sessionId);
+      await tick();
+      expect(c.ofType('turn.reopen')).toHaveLength(0);
+      expect(cr.watches).toHaveLength(0);
+    }
+  });
+
+  it('同 session 又来了新的 hook 任务 -> 撤销在观察的续跑并作废记账', async () => {
+    const { cr, sig, c, d, sessionId } = await failOneTask();
+    // 让后续 dispatch 沿 binding 落回同一个会话(否则 inspect 查不到会重建)。
+    cr.sessions[sessionId] = { workingDir: WS_DIR, usable: true };
+    sig.fire(sessionId);
+    await tick();
+    cr.latest().onClaim();
+    expect(c.ofType('turn.reopen')).toHaveLength(1);
+
+    // 新任务接管这条消息线: 旧观察器必须被撤销, 否则新 turn 的事件会被当成
+    // 续跑的继续, 把上一条渠道消息改写成不相干的内容。
+    d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
+    await tick();
+    expect(cr.cancels).toEqual([0]);
+
+    // 记账也作废: 再来一次续跑信号不会重开旧消息。
+    cr.finish({ status: 'error', finalText: '', errorMessage: 'again' });
+    await tick();
+    sig.fire(sessionId);
+    await tick();
+    // 新一轮(req-2)自己失败后重新记账, 于是这次接回的是 req-2 那条消息。
+    expect(cr.watches).toHaveLength(2);
+    cr.latest().onClaim();
+    expect(c.ofType('turn.reopen').at(-1)!.payload.reopenOf).toBe('req-2');
+  });
+
+  it('接管导致的撤销不留新记账(否则续跑会把用户带回一条过期消息)', async () => {
+    const { cr, sig, c, d, sessionId } = await failOneTask();
+    cr.sessions[sessionId] = { workingDir: WS_DIR, usable: true };
+    sig.fire(sessionId);
+    await tick();
+    cr.latest().onClaim();
+
+    // 新任务接管 -> 撤销续跑。撤销的收口是 error, 但这条消息线已经归新任务了。
+    d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
+    await tick();
+    expect(cr.cancels).toEqual([0]);
+
+    // 新任务成功收口 -> 全程没有任何"等着被续跑"的东西。
+    cr.finish({ status: 'ok', finalText: '这次好了', errorMessage: null });
+    await tick();
+    sig.fire(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(1);
+    expect(c.ofType('turn.reopen')).toHaveLength(1);
+  });
+
+  it('一个事件都没等到(onAbandon) -> 不发任何帧, 记账已消耗不重试', async () => {
+    const { cr, sig, c, sessionId } = await failOneTask();
+    sig.fire(sessionId);
+    await tick();
+    cr.latest().onAbandon();
+    await tick();
+    expect(c.ofType('turn.reopen')).toHaveLength(0);
+    expect(c.ofType('turn.end').filter((m) => m.payload.requestId !== 'req-1')).toHaveLength(0);
+
+    // 记账是一次性的: 同一条不会被第二个信号重复认领。
+    sig.fire(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(1);
+  });
+
+  it('续跑又失败 -> 允许再续一次, reopenOf 指向上一轮的新 id(成链)', async () => {
+    const { cr, sig, c, sessionId } = await failOneTask();
+    sig.fire(sessionId);
+    await tick();
+    cr.latest().onClaim();
+    const firstReopen = c.last('turn.reopen')!.payload.requestId;
+    cr.latest().onEnd({
+      status: 'error',
+      finalText: '',
+      errorMessage: '又崩了',
+      durationMs: 3,
+    });
+    await tick();
+
+    sig.fire(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(2);
+    cr.latest().onClaim();
+    const secondReopen = c.ofType('turn.reopen').at(-1)!.payload;
+    expect(secondReopen.reopenOf).toBe(firstReopen);
+    expect(secondReopen.requestId).not.toBe(firstReopen);
+  });
+
+  it('续跑轮可被 /stop 精确取消(新 requestId 已登记为在执行的任务)', async () => {
+    const aborted: string[] = [];
+    const cr = continuationRunner();
+    const sig = signalSource();
+    const c = collector();
+    const { d } = makeDispatcher({
+      runner: cr.runner,
+      subscribeUiContinuation: sig.subscribe,
+      abortSession: async (id) => void aborted.push(id),
+    });
+    d.onConnected('conn-1', c.send, REOPEN_FEATURES);
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    const sessionId = c.last('task.ack')!.payload.sessionId!;
+    cr.finish({ status: 'error', finalText: '', errorMessage: 'boom' });
+    await tick();
+
+    sig.fire(sessionId);
+    await tick();
+    cr.latest().onClaim();
+    const requestId = c.last('turn.reopen')!.payload.requestId;
+
+    d.cancel('conn-1', requestId);
+    expect(aborted).toEqual([sessionId]);
+    cr.latest().onEnd({
+      status: 'error',
+      finalText: '',
+      errorMessage: 'aborted',
+      durationMs: 2,
+    });
+    const end = c.ofType('turn.end').at(-1)!.payload;
+    expect(end.requestId).toBe(requestId);
+    expect(end.status).toBe('cancelled');
+    expect(end.errorMessage).toBeNull();
+  });
+
+  it('目录已被移出工作目录映射 -> 不接回(与执行前的映射收口同一道判定)', async () => {
+    const cr = continuationRunner();
+    const sig = signalSource();
+    const c = collector();
+    let config: HookConnectionConfig | null = CONFIG;
+    const d = createHookDispatcher({
+      getConnection: () => config,
+      bindings: memoryBindings(),
+      runner: cr.runner,
+      subscribeUiContinuation: sig.subscribe,
+      log: noopLog,
+    });
+    d.onConnected('conn-1', c.send, REOPEN_FEATURES);
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    const sessionId = c.last('task.ack')!.payload.sessionId!;
+    cr.finish({ status: 'error', finalText: '', errorMessage: 'boom' });
+    await tick();
+
+    config = { ...CONFIG, workspaces: {} };
+    sig.fire(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(0);
+    expect(c.ofType('turn.reopen')).toHaveLength(0);
   });
 });

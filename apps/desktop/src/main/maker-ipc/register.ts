@@ -516,6 +516,7 @@ import {
   SILENT_STOP_RESUME_PROMPT,
   SilentStopAutoResumeGuard,
 } from './silentStopAutoResume.js';
+import { noteUserMessageForContinuation } from './uiContinuationSignal.js';
 import { readSilentStopAutoResumeSettings } from '../maker-host/silent-stop-auto-resume-store.js';
 import {
   broadcastGhostMessageBlocked,
@@ -6612,8 +6613,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     bootstrapSession,
     markOrcaRoleIfNeeded,
     broadcastSessionCreated,
-    prepareSendUserMessage: (sessionId, message) =>
-      prepareUserMessageForAgent(sessionId, message, 'send'),
+    prepareSendUserMessage: (sessionId, message) => {
+      // 「用户在桌面端点了错误横幅的重试 / 中断横幅的继续任务」信号。发在这里
+      // 而不是 createDbMessage: 这一步在 sess.send 之前, hook 侧的续跑观察器能
+      // 赶在首个事件之前挂上监听, 不丢正文开头。判定只认那两条隐藏续跑指令,
+      // 桌面端在同一会话里聊的其它内容不会把渠道消息改写掉(见该模块注释)。
+      noteUserMessageForContinuation(
+        sessionId,
+        (message as { content?: unknown } | null)?.content,
+      );
+      return prepareUserMessageForAgent(sessionId, message, 'send');
+    },
     createDbMessage: async (sessionId, message, opts) => {
       // 真实用户消息(renderer 发送事务)→ 给 silent-stop 守卫充值自动续跑额度。
       // 自动补发的「继续」不走本路径(直接 session.send),不会自我充值。

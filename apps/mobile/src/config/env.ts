@@ -260,12 +260,14 @@ export const APP_PLATFORM: AppPlatform = resolveAppPlatform();
  * 安卓自建装机,把它们的热更与整包检查一起冻结(2026-07 实踩:review="0.1.0" 冻结全部
  * 0.1.0 安卓装机)。安卓自建线不过商店审核,没有需要关闭更新检查的场景,故在此豁免。
  * 只豁免 android:iOS(含平台未知)一律保持原语义,不弱化送审合规。
+ * platform 形参收敛为 AppPlatform 而非 string:拼写 / 大小写错误('Android')会静默
+ * 走回 iOS 语义、丢掉安卓豁免,这类误用要在类型层就挡住,不留给运行期。
  */
 export function isReviewModeActive(
   reviewVersion: string | null | undefined,
   appBinaryVersion: string,
   isTestFlight = false,
-  platform: string = APP_PLATFORM,
+  platform: AppPlatform = APP_PLATFORM,
 ): boolean {
   if (platform === 'android') return false;
   const review = reviewVersion?.trim();

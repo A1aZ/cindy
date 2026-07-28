@@ -1567,9 +1567,14 @@ function startLoadedOverlaySession(window: BrowserWindow, shortcutInvokedAt: num
   if (pendingModifierOverlaySubmit) {
     pendingModifierOverlaySubmit = false;
     setImmediate(() => {
-      if (!window.isDestroyed() && overlayPresentationActive) {
-        window.webContents.send('voice-input:global-overlay-command', { type: 'submit' });
+      // 同 show()：这条延迟提交也必须绑定呈现代次。窗口是跨会话复用的，
+      // overlayPresentationActive 是进程级状态，取消后紧接着重启会让它重新为
+      // true，届时旧会话的回调会把刚开始录音的新会话直接提交掉。
+      if (!isCurrentOverlayPresentation(window, presentationSeq)) {
+        log.debug('pending modifier submit dropped: presentation no longer current');
+        return;
       }
+      window.webContents.send('voice-input:global-overlay-command', { type: 'submit' });
     });
   }
   const show = (): void => {

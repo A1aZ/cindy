@@ -49,6 +49,20 @@ export function IssueConfirmCard({ pending, onRespond }: IssueConfirmCardProps) 
 
   const canSubmit = title.trim().length > 0 && body.trim().length > 0;
 
+  // 构建区域代号,与登录页区域徽标同一套不对称命名(DESIGN.md §16.3):cn → CN、
+  // dev → Dev、global 不标。global 不标是产品叙事硬规则(「不得回退」),这里同样
+  // 适用——而且 issue 正文也不写这一行,两边必须一致:卡片承诺展示的就是最终写进
+  // issue 的内容(落码单点 githubIssueSubmitService 的 REGION_ISSUE_LABEL)。
+  // region 缺失(IPC payload 异常)时按不标处理,不猜一个代号。
+  // 代号四语同文不翻译,但仍走 i18n(同 login.regionPill.*,便于日后改判为可译文案);
+  // key 写成字面量分支而非动态拼接,保证 pnpm check:i18n 的静态提取能看到全部 key。
+  const regionCode =
+    pending.env.region === 'cn'
+      ? t('issueAgent.confirm.regionCodeCn')
+      : pending.env.region === 'dev'
+        ? t('issueAgent.confirm.regionCodeDev')
+        : null;
+
   const handleSubmit = useCallback(() => {
     if (!canSubmit) return;
     onRespond({
@@ -156,6 +170,11 @@ export function IssueConfirmCard({ pending, onRespond }: IssueConfirmCardProps) 
               login: pending.submissionIdentity.login,
             })}
       </p>
+      {regionCode && (
+        <p className="mt-1 text-12 leading-tight text-[var(--status-bar-meta)]">
+          {t('issueAgent.confirm.regionLine', { region: regionCode })}
+        </p>
+      )}
       <p className="mt-1 text-12 leading-tight text-[var(--status-bar-meta)]">
         {t('issueAgent.confirm.envLine', {
           appVersion: pending.env.appVersion,

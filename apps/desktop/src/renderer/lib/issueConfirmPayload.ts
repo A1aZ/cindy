@@ -1,3 +1,15 @@
+import type { CindyRegion } from '@cindy/maker-shared/brand-identity';
+
+const CINDY_REGIONS: readonly string[] = ['cn', 'global', 'dev'];
+
+/**
+ * issue_confirm IPC 里的构建区域。非法或缺失一律返回 undefined —— 确认卡片宁可
+ * 不展示区域，也不能把用户的中国版说成国际版。
+ */
+export function parseIssueEnvRegion(raw: unknown): CindyRegion | undefined {
+  return typeof raw === 'string' && CINDY_REGIONS.includes(raw) ? (raw as CindyRegion) : undefined;
+}
+
 /** issue_confirm IPC 中的真实 GitHub 提交身份；renderer 只展示，不参与选择。 */
 export type IssueSubmissionIdentity =
   { kind: 'github-user'; login: string } | { kind: 'platform'; login: string };

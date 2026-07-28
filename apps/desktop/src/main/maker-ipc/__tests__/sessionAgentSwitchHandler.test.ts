@@ -659,6 +659,7 @@ describe('Phase 2:切回停泊引擎(resume + 增量交接)', () => {
     expect(deps.setPendingHandoff).toHaveBeenLastCalledWith(
       's1',
       expect.stringContaining('最早的问题'),
+      undefined,
     );
   });
 

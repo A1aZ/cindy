@@ -296,9 +296,25 @@ function handoffTerminator(opts: BuildHandoffOptions): string {
   return opts.reason === 'message-deletion' ? REBUILD_TERMINATOR : HANDOFF_TERMINATOR;
 }
 
+/**
+ * 升级前已持久化在 agent_switch / context_rebuild 行里的中文结束标记。
+ *
+ * 这些行的 `content.handoff` 是**存量数据**,不会因为本次英文化而改写;老会话在升级后
+ * 仍可能把它们取出来当 pending handoff 用。裁剪时若认不出这些标记,就会把它们连同
+ * "以下是用户的新消息" 这个唯一边界一起截掉——所以识别列表必须包含旧格式。
+ */
+const LEGACY_HANDOFF_TERMINATOR = '== 交接说明结束,以下是用户的新消息 ==';
+const LEGACY_REBUILD_TERMINATOR = '== 上下文重建说明结束,以下是用户的新消息 ==';
+
 /** 拆出已有文本尾部的结束标记(含其前置空行),供二次裁剪时原样保留。 */
 function splitTrailingTerminator(text: string): [body: string, tail: string] {
-  for (const terminator of [HANDOFF_TERMINATOR, REBUILD_TERMINATOR, FORK_TERMINATOR]) {
+  for (const terminator of [
+    HANDOFF_TERMINATOR,
+    REBUILD_TERMINATOR,
+    FORK_TERMINATOR,
+    LEGACY_HANDOFF_TERMINATOR,
+    LEGACY_REBUILD_TERMINATOR,
+  ]) {
     const trimmed = text.trimEnd();
     if (!trimmed.endsWith(terminator)) continue;
     const tailStart = trimmed.length - terminator.length;
@@ -543,7 +559,17 @@ export function prependHandoffToUserMessage(
  *    pending 下次重试。
  */
 export interface AgentHandoffPendingRegistry {
-  set(sessionId: string, handoff: string): void;
+  /**
+   * 写入待注入交接。
+   *
+   * `expectedGeneration` 给"读历史 → 一堆异步活 → 才写回"的调用方(引擎切换、消息
+   * 删除)用:它们在开始时用 `readGeneration()` 取一次,写回时带上;期间若发生
+   * `/clear` 或别的写入,这次写就被丢弃。没有它,一个基于 clear 前历史算出来的交接
+   * 会盖掉 `/clear` 刚立的墓碑,把已清空的上下文重新灌回去。
+   */
+  set(sessionId: string, handoff: string, expectedGeneration?: number): void;
+  /** 取当前代次,配合 `set` 的 `expectedGeneration` 做写入前后的一致性校验。 */
+  readGeneration(sessionId: string): number;
   peek(sessionId: string): Promise<string | null>;
   consume(sessionId: string): void;
   /** session 删除 / 关闭清理,避免 Map 泄漏。 */
@@ -590,11 +616,17 @@ export function createAgentHandoffPendingRegistry(
   };
   const genOf = (sessionId: string): number => generation.get(sessionId) ?? 0;
   return {
-    set(sessionId, handoff) {
+    set(sessionId, handoff, expectedGeneration) {
+      // 调用方带了代次就校验:它是在读历史之前取的,不符说明期间发生过 /clear 或
+      // 别的写入,这份交接算的是已作废的历史,丢弃而不是盖回去。
+      if (expectedGeneration !== undefined && genOf(sessionId) !== expectedGeneration) return;
       pending.set(sessionId, handoff);
       // 外部直接塞进来的交接没经过 queryPending 的组合,重新纳入 decorate 范围。
       composedByQuery.delete(sessionId);
       bump(sessionId);
+    },
+    readGeneration(sessionId) {
+      return genOf(sessionId);
     },
     async peek(sessionId) {
       if (pending.has(sessionId)) {

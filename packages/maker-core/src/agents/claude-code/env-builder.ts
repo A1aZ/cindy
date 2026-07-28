@@ -223,7 +223,7 @@ export async function buildClaudeEnv(
   // 路由感知版优先:子代理请求跑在父会话来源上,覆写是否可注入要按该来源判
   // (host 的停用轴按 (来源, 模型) 记账;PR #744 review 第十九轮)。
   const subagentModel = (runtimeConfig.subagentModelForRoute
-    ? runtimeConfig.subagentModelForRoute(options.sessionProviderId ?? null)
+    ? runtimeConfig.subagentModelForRoute(options.sessionProviderId ?? null, options.credentialMode)
     : runtimeConfig.subagentModel
   )?.trim();
   if (subagentModel) {

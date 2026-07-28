@@ -259,11 +259,12 @@ export interface ProviderHandlerDeps {
   setModelsDisabled(providerId: string, modelIds: readonly string[], disabled: boolean): void;
   setProviderDisabled(providerId: string, disabled: boolean): void;
   /**
-   * 自定义供应商删除成功后清掉其全部停用 override(供应商级 + 逐模型):否则同 id
-   * 重建的新供应商会带着旧停用状态复活(PR #744 review 第十九轮)。best-effort,
-   * 失败不回滚删除(清理性质)。
+   * 自定义供应商删除事务内的停用 override 清理(供应商级 + 逐模型):同步清掉并
+   * 返回恢复函数 —— 后续删除步骤失败时把停用状态原样写回;清理自身抛错 = 事务未
+   * 产生破坏,删除整体中止。否则同 id 重建的新供应商会带着旧停用状态复活
+   * (PR #744 review 第十九、二十轮)。
    */
-  clearProviderDisableOverrides?(providerId: string): void;
+  stageClearProviderDisableOverrides?(providerId: string): () => boolean;
   /**
    * 当前数据归属账号 id(生产 = getCurrentDataOwnerId)。停用写入是 owner-scoped
    * 持久化(model-disable-prefs.json 按账号分目录),而 handler 内有异步窗口(串行
@@ -880,32 +881,28 @@ export function registerProviderHandlers(
         );
         // OAuth 形态自定义供应商的凭证 blob 一并清掉（apiKey 形态无 blob，幂等无害）。
         let restoreOAuthCredentials: (() => boolean) | null = null;
+        let restoreDisableOverrides: (() => boolean) | null = null;
         try {
+          // 停用 override 清理进事务(第二十轮):放在配置删除之前,后续任一步失败
+          // 由恢复函数把停用状态原样写回;清理自身抛错时事务未产生破坏,删除中止,
+          // 不再出现「配置删了、override 残留」让同 id 重建复活旧停用状态。
+          restoreDisableOverrides = deps.stageClearProviderDisableOverrides?.(providerId) ?? null;
           restoreOAuthCredentials = deps.removeOAuthCredentials(providerId);
           if (!restoreOAuthCredentials) {
             throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
           }
           await deleteCustomProvider(providerId);
         } catch (err) {
+          const overridesRestored = !restoreDisableOverrides || restoreDisableOverrides();
           const oauthRestored = !restoreOAuthCredentials || restoreOAuthCredentials();
           const keysRestored = restoreProviderKeys(providerId, keySnapshots);
-          if (!oauthRestored || !keysRestored) {
+          if (!oauthRestored || !keysRestored || !overridesRestored) {
             throwIpcError(
               'INTERNAL',
               'provider deletion failed and existing credentials could not be restored',
             );
           }
           throw err;
-        }
-        // 删除已成功:清掉该供应商名下全部停用 override(供应商级 + 逐模型),
-        // 防同 id 重建复活旧停用状态。best-effort —— 清理失败只留痕,不回滚删除。
-        try {
-          deps.clearProviderDisableOverrides?.(providerId);
-        } catch (err) {
-          log.warn('clear provider disable overrides after delete failed', {
-            providerId,
-            error: err instanceof Error ? err.message : String(err),
-          });
         }
         await afterChange();
         return { ok: true };

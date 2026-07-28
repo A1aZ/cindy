@@ -385,13 +385,18 @@ export class PendingCredentialSwitchService {
         providerId: resolved.providerId,
       });
     } else {
-      // 复核异常(唯一的 apply=false 情形):route 不写不回写,登记照常收口 ——
-      // 队列必须解冻,广播照发让 renderer 清「任务结束后生效」标记。
-      this.deps.logger?.warn('pending credential switch target not applied', {
+      // 复核异常(唯一的 apply=false 情形)同 persist 失败一样 fail-closed:此刻
+      // DB 里躺着 renderer 预写的目标路由,它可能恰在等待期间被停用 —— 收口唤醒
+      // 会让排队消息按未经复核的路由懒 resume(PR #744 review 第二十轮)。保留
+      // 登记(pending 门继续挡派发)+ 自愈定时器重试整个收口;生产 resolveRoute
+      // 自带降级不抛,此分支纯防御,fail-closed 零日常代价。
+      this.deps.logger?.error?.('pending credential switch revalidation failed; keeping queue gated for retry', {
         sessionId,
         model: target.model,
         providerId: target.providerId,
       });
+      if (this.pending.get(sessionId) === target) this.scheduleRetry(sessionId);
+      return;
     }
     // 删登记(解除 coordinator 的 pending 门)必须在 route 写入 + DB 回写之后。
     this.pending.delete(sessionId);
@@ -407,8 +412,8 @@ export class PendingCredentialSwitchService {
     try {
       this.deps.broadcastApplied?.({
         sessionId,
-        model: resolved.apply ? (resolved.model ?? target.model) : target.model,
-        providerId: resolved.apply ? resolved.providerId : target.providerId,
+        model: resolved.model ?? target.model,
+        providerId: resolved.providerId,
       });
     } catch (err) {
       this.deps.logger?.warn('pending credential switch: applied broadcast failed', {

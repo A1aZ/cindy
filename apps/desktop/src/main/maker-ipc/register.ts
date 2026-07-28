@@ -446,9 +446,9 @@ import {
   syncModelVisibilityMirror,
 } from '../maker-host/model-visibility-mirror.js';
 import {
-  clearProviderDisableOverrides,
   setModelsDisabled,
   setProviderDisabled,
+  stageProviderDisableOverridesClear,
 } from '../maker-host/model-disable-store.js';
 import { getCurrentDataOwnerId } from '../authManager.js';
 import {
@@ -3585,7 +3585,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     setModelsDisabled: (providerId, modelIds, disabled) =>
       setModelsDisabled(providerId, modelIds, disabled),
     setProviderDisabled: (providerId, disabled) => setProviderDisabled(providerId, disabled),
-    clearProviderDisableOverrides: (providerId) => clearProviderDisableOverrides(providerId),
+    stageClearProviderDisableOverrides: (providerId) =>
+      stageProviderDisableOverridesClear(providerId),
     // 停用写入的归属校验:入口捕获 / 持久化前复核,异步窗口内切账号即拒,防 A 的
     // 点击写进 B 的 owner-scoped 偏好文件(PR #744 review 第七轮)。
     currentOwnerId: () => getCurrentDataOwnerId(),

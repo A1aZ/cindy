@@ -1695,6 +1695,22 @@ const getCatalogImageConfig = (): ReturnType<typeof getCatalogMediaConfig> => ge
 const getCatalogVideoConfig = (): ReturnType<typeof getCatalogMediaConfig> => getCatalogMediaConfig('video');
 
 /**
+ * 派发前重查(PR #744 review 第二十轮):cindySlot 从白名单校验到实际下单之间隔着
+ * 归属查账、参考图准备等长 await,期间该媒体模型 / 供应商可能被用户停用 —— 在
+ * generateImage / editImage / 视频提交边界按**当前** override 重算启用候选再验一次,
+ * 不在册即拒,这次付费请求不发出(与 scheduler 派发前重裁决同语义)。
+ */
+function assertMediaModelStillEnabled(kind: 'image' | 'video', model: string): void {
+  if (!getCatalogMediaConfig(kind).models.some((m) => m.id === model)) {
+    throw new Error(
+      kind === 'image'
+        ? '图像模型已在设置中停用,本次生成已取消'
+        : '视频模型已在设置中停用,本次生成已取消',
+    );
+  }
+}
+
+/**
  * 把图片通道的底层报错翻译成用户可行动的话术(意识交卷失败时 AI 会原样
  * 转述给用户,裸网关英文错误没人看得懂)。
  */
@@ -1776,6 +1792,7 @@ export function getGhostCindySlot(): GhostCindySlot {
       // 这里收窄类型是安全的。
       generateImage: async ({ prompt, model, aspectRatio }) => {
         try {
+          assertMediaModelStillEnabled('image', model);
           return decodeImageResponse(
             await getCindyProxyMediaService().backend.generateImage({
               model: model as GatewayImageModel,
@@ -1790,6 +1807,7 @@ export function getGhostCindySlot(): GhostCindySlot {
       },
       editImage: async ({ prompt, model, imagePaths }) => {
         try {
+          assertMediaModelStillEnabled('image', model);
           return decodeImageResponse(
             await getCindyProxyMediaService().backend.editImage({ model: model as GatewayImageModel, prompt, imagePaths }),
           );
@@ -1799,6 +1817,7 @@ export function getGhostCindySlot(): GhostCindySlot {
       },
       generateVideo: async ({ prompt, model }) => {
         try {
+          assertMediaModelStillEnabled('video', model);
           return await runGhostVideo({ alias: model, prompt });
         } catch (err) {
           humanizeImageChannelError(err);
@@ -1806,6 +1825,7 @@ export function getGhostCindySlot(): GhostCindySlot {
       },
       editVideo: async ({ prompt, model, imagePaths }) => {
         try {
+          assertMediaModelStillEnabled('video', model);
           const imageDataUris = await Promise.all(imagePaths.map(readImageFileAsDataUri));
           return await runGhostVideo({ alias: model, prompt, imageDataUris });
         } catch (err) {

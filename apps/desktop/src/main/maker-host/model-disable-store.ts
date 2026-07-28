@@ -155,9 +155,40 @@ export function setProviderDisabled(providerId: string, disabled: boolean): void
 }
 
 /**
+ * 事务式清理:同步清掉该供应商全部 override 并返回恢复函数(把清理前的条目原样
+ * 写回)。自定义供应商删除事务用 —— 清理进事务、失败可恢复,而不是删除成功后的
+ * best-effort(清理失败会让同 id 重建复活旧停用状态,PR #744 review 第二十轮)。
+ * 清理自身抛错 = 事务未产生破坏,由调用方中止删除。
+ */
+export function stageProviderDisableOverridesClear(providerId: string): () => boolean {
+  if (!providerId) return () => true;
+  store.invalidateIfChanged();
+  const current = store.read();
+  const hadProviderEntry = current.disabledProviders[providerId] === true;
+  const prefix = `${providerId}:`;
+  const modelIds = Object.keys(current.disabledModels)
+    .filter((key) => key.startsWith(prefix))
+    .map((key) => key.slice(prefix.length));
+  if (!hadProviderEntry && modelIds.length === 0) return () => true;
+  clearProviderDisableOverrides(providerId);
+  return () => {
+    try {
+      if (hadProviderEntry) setProviderDisabled(providerId, true);
+      if (modelIds.length > 0) setModelsDisabled(providerId, modelIds, true);
+      return true;
+    } catch (err) {
+      log.warn('restore provider disable overrides failed', {
+        providerId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  };
+}
+
+/**
  * 清掉某供应商名下的**全部** override(供应商级 + 该来源全部逐模型条目)。
- * 自定义供应商删除事务的收尾用:配置与凭证删了、override 不清的话,同 id 重建的
- * 新供应商会带着旧的停用状态复活(PR #744 review 第十九轮)。幂等;无条目即 no-op。
+ * 幂等;无条目即 no-op。事务式消费方走 stageProviderDisableOverridesClear。
  */
 export function clearProviderDisableOverrides(providerId: string): void {
   if (!providerId) return;

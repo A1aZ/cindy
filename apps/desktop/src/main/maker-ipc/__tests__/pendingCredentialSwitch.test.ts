@@ -425,7 +425,9 @@ describe('PendingCredentialSwitchService', () => {
       expect(h.onApplied).toHaveBeenCalledWith(sessionId);
     });
 
-    it('复核异常 ⇒ 保守不写 route(登记收口、队列解冻),不把异常当放行', async () => {
+    it('复核异常 ⇒ fail-closed:route 不写、保留登记(队列门不解除)、留给自愈重试', async () => {
+      // DB 里躺着 renderer 预写的目标路由(可能恰在等待期间被停用),异常时收口唤醒
+      // 会让排队消息按未经复核的路由懒 resume(PR #744 review 第二十轮)。
       const sessionId = rememberSession('pending-switch-revalidate-throw');
       setSessionProvider(sessionId, 'openai');
       const resolveRoute = vi.fn(async () => {
@@ -433,7 +435,7 @@ describe('PendingCredentialSwitchService', () => {
       });
       const h = createHarness(
         [{ id: sessionId, agentKind: 'claude-code', remoteHostId: null, isTurnRunning: () => false }],
-        { resolveRoute },
+        { resolveRoute, retryDelayMs: 60_000 },
       );
 
       h.service.register(sessionId, {
@@ -443,11 +445,11 @@ describe('PendingCredentialSwitchService', () => {
       });
       await h.service.onTurnSettled(sessionId);
 
-      expect(h.service.has(sessionId)).toBe(false);
+      expect(h.service.has(sessionId)).toBe(true);
       expect(getSessionProvider(sessionId)).toBe('openai');
       expect(h.persistRoute).not.toHaveBeenCalled();
-      expect(h.onApplied).toHaveBeenCalledWith(sessionId);
-      expect(h.broadcastApplied).toHaveBeenCalledTimes(1);
+      expect(h.onApplied).not.toHaveBeenCalled();
+      expect(h.broadcastApplied).not.toHaveBeenCalled();
     });
 
     it('裁决通过 ⇒ 原样应用;register 未带 agentKind ⇒ 双 agent 保守,不采纳跨 agent 结果', async () => {

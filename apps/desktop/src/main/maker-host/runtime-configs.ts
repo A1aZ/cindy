@@ -177,15 +177,21 @@ export function buildDesktopClaudeRuntimeConfig(endpointFn: () => string): Agent
   // 跑在**父会话来源**上 —— 判定必须按该来源的那份拷贝:父会话钉 XD、XD 拷贝被停用
   // 时,Anthropic 家有启用拷贝也不能豁免。env-builder 每次 spawn 传入会话来源。
   // 同步热路径,只用同步源(active catalog + override store)。
-  config.subagentModelForRoute = (providerId) => resolveSubagentModelForRoute(providerId);
+  config.subagentModelForRoute = (providerId, credentialMode) =>
+    resolveSubagentModelForRoute(providerId, credentialMode);
   return config;
 }
 
 /**
- * providerId:string = 显式来源;null = 隐式默认(无连接态可查,按 cc 静态原生默认序
- * xd 优先近似);undefined = 完全无路由上下文(退回「全部拷贝停用才丢弃」的保守判)。
+ * providerId:string = 显式来源;null = 隐式默认 —— 按 spawn 已解析的凭证形态映射
+ * 实际落点(gateway-key = xd / oauth-bearer = Anthropic 直连;静态猜 xd 会在 XD 未
+ * 连接、走 Anthropic 订阅时判错,PR #744 review 第二十轮);undefined = 完全无路由
+ * 上下文(退回「全部拷贝停用才丢弃」的保守判)。
  */
-function resolveSubagentModelForRoute(providerId: string | null | undefined): string | undefined {
+function resolveSubagentModelForRoute(
+  providerId: string | null | undefined,
+  credentialMode?: string,
+): string | undefined {
   const saved = readSubagentModelSettings().claudeCode ?? undefined;
   if (!saved) return undefined;
   const overrides = readModelDisableOverrides();
@@ -196,10 +202,19 @@ function resolveSubagentModelForRoute(providerId: string | null | undefined): st
   const copyDisabled = (id: string) =>
     isProviderDisabled(overrides, id) || isModelDisabled(overrides, id, saved);
   if (providerId !== undefined) {
+    const implicitRouteId =
+      credentialMode === 'gateway-key'
+        ? 'xd'
+        : credentialMode === 'oauth-bearer'
+          ? 'anthropic'
+          : null;
     const routeProvider = providerId
       ? offering.find((p) => p.id === providerId)
-      : (offering.find((p) => p.id === 'xd') ?? offering[0]);
-    // 显式来源不提供该模型(跨来源 subagent 覆写):子代理实际落点不明,退回保守判。
+      : implicitRouteId
+        ? offering.find((p) => p.id === implicitRouteId)
+        : undefined;
+    // 显式/映射来源不提供该模型(跨来源 subagent 覆写)或凭证形态未知:实际落点
+    // 不明,落到下方保守判。
     if (routeProvider) return copyDisabled(routeProvider.id) ? undefined : saved;
   }
   const allDisabled = offering.every((p) => copyDisabled(p.id));

@@ -117,6 +117,7 @@ export const TEMPLATE_TOKEN_IDS: readonly string[] = [
   'accent-soft',
   'accent-hover',
   'accent-pure-cta-fg',
+  'status-badge-fg',
   // ── alias / singleton(56) ──
   'accent',
   'agent-actions-rail',
@@ -268,6 +269,7 @@ export function buildThemeColorsFromPalette(
     'accent-soft': pick(accentSoft, accentDeep),
     'accent-hover': accentDeep,
     'accent-pure-cta-fg': onAccent,
+    'status-badge-fg': '#1F1F1F',
 
     // ── alias / singleton ──
     accent: hoverHsl,

@@ -29,6 +29,7 @@ import type {
   ThemeConversionResult,
 } from '../../shared/theme-import/types';
 import { createLogger } from '../logger';
+import { throwIpcError } from '../utils/ipcValidate';
 import { loadLocalThemesSync } from './loader';
 import { writeLocalTheme } from './writer';
 
@@ -217,32 +218,35 @@ export async function importExternalTheme(
       ? await dialog.showOpenDialog(deps.parentWindow, options)
       : await dialog.showOpenDialog(options);
     if (picked.canceled || picked.filePaths.length === 0) {
-      return { success: true, canceled: true };
+      return { canceled: true };
     }
     const filePath = picked.filePaths[0];
 
     const stat = await fs.promises.stat(filePath);
     if (!stat.isFile()) {
-      return { success: false, error: 'NOT_A_FILE' };
+      throwIpcError('THEME_NOT_A_FILE', 'selected path is not a regular file');
     }
     if (stat.size > MAX_THEME_FILE_BYTES) {
-      return { success: false, error: 'FILE_TOO_LARGE' };
+      throwIpcError('THEME_FILE_TOO_LARGE', `file exceeds ${MAX_THEME_FILE_BYTES} bytes`);
     }
     const content = await fs.promises.readFile(filePath, 'utf8');
 
     const converted = convert(filePath, content);
     if (!converted) {
-      return { success: false, error: 'UNSUPPORTED_THEME_FILE' };
+      throwIpcError('THEME_UNSUPPORTED_FILE', 'file is not a recognized VSCode or Obsidian theme');
     }
     if (converted.themes.length === 0) {
       const hasInclude = converted.report.unresolved.some((u) => u.startsWith('include:'));
-      return { success: false, error: hasInclude ? 'THEME_USES_INCLUDE' : 'UNSUPPORTED_THEME_FILE' };
+      if (hasInclude) {
+        throwIpcError('THEME_USES_INCLUDE', 'theme uses include and cannot be fully parsed standalone');
+      }
+      throwIpcError('THEME_UNSUPPORTED_FILE', 'no usable color palette could be extracted');
     }
 
     const { written, error } = await writeConverted(converted.themes);
     if (error) {
       log.warn(`Failed to write imported theme: ${error}`);
-      return { success: false, error: 'IMPORT_WRITE_ERROR' };
+      throwIpcError('THEME_WRITE_ERROR', 'failed to persist theme file');
     }
     log.info(
       `Imported ${written.length} theme(s) from ${converted.report.source}: `
@@ -250,15 +254,15 @@ export async function importExternalTheme(
     );
     const safeWritten: ImportedThemeFile[] = written.map(({ id, name, type }) => ({ id, name, type }));
     return {
-      success: true,
       canceled: false,
       written: safeWritten,
       report: converted.report,
     };
   } catch (error) {
+    // Re-throw IPC errors from throwIpcError() (already typed and safe for renderer).
+    if (error instanceof Error && 'code' in error) throw error;
     const message = normalizeError(error);
     log.warn(`Theme import failed: ${message}`);
-    // 只返回稳定错误码，不把含文件系统路径的原始 error.message 透传给 Renderer。
-    return { success: false, error: 'IMPORT_INTERNAL_ERROR' };
+    throwIpcError('THEME_IMPORT_INTERNAL', 'unexpected error during theme import');
   }
 }

@@ -39,18 +39,19 @@ import { isLocalThemeId } from '../../../shared/local-themes';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Tip } from '@/components/ui/tooltip';
 import { Slider } from '@/components/ui/slider';
+import { extractIpcError } from '@/utils/ipcError';
 import { FontFamilyPicker, type FontPreset } from './FontFamilyPicker';
 
 const log = createLogger('settings/AppearanceSection');
 
-/** main 侧导入失败码 → 专门文案；未列出的码落到通用 importFailed。 */
+/** IPC 错误码 → 专门文案；未列出的码落到通用 importFailed。 */
 const IMPORT_ERROR_KEYS: Record<string, string> = {
-  UNSUPPORTED_THEME_FILE: 'settings.appearance.localThemes.importUnsupported',
+  THEME_UNSUPPORTED_FILE: 'settings.appearance.localThemes.importUnsupported',
   THEME_USES_INCLUDE: 'settings.appearance.localThemes.importUsesInclude',
-  NOT_A_FILE: 'settings.appearance.localThemes.importNotAFile',
-  FILE_TOO_LARGE: 'settings.appearance.localThemes.importTooLarge',
-  IMPORT_WRITE_ERROR: 'settings.appearance.localThemes.importWriteError',
-  IMPORT_INTERNAL_ERROR: 'settings.appearance.localThemes.importInternalError',
+  THEME_NOT_A_FILE: 'settings.appearance.localThemes.importNotAFile',
+  THEME_FILE_TOO_LARGE: 'settings.appearance.localThemes.importTooLarge',
+  THEME_WRITE_ERROR: 'settings.appearance.localThemes.importWriteError',
+  THEME_IMPORT_INTERNAL: 'settings.appearance.localThemes.importInternalError',
 };
 
 type ThemeOption = 'light' | 'dark' | 'system';
@@ -397,13 +398,16 @@ export function AppearanceSection() {
   }, [familyId, t, theme]);
 
   const handleImport = useCallback(async () => {
-    const result = await window.electronAPI.localThemes.importExternal();
-    if (!result.success) {
-      const key = IMPORT_ERROR_KEYS[result.error];
+    let result;
+    try {
+      result = await window.electronAPI.localThemes.importExternal();
+    } catch (err) {
+      const ipcErr = extractIpcError(err);
+      const key = ipcErr ? IMPORT_ERROR_KEYS[ipcErr.code] : undefined;
       toast.error(
         key
           ? t(key)
-          : t('settings.appearance.localThemes.importFailed', { error: result.error }),
+          : t('settings.appearance.localThemes.importFailed', { error: ipcErr?.code ?? 'UNKNOWN' }),
       );
       return;
     }

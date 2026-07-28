@@ -99,7 +99,7 @@ describe('外部主题导入（main 侧编排）', () => {
 
     const result = await importExternalTheme();
 
-    expect(result).toEqual({ success: true, canceled: true });
+    expect(result).toEqual({ canceled: true });
     expect(loadLocalThemesSync().themes).toEqual([]);
   });
 
@@ -108,8 +108,7 @@ describe('外部主题导入（main 侧编排）', () => {
 
     const result = await importExternalTheme();
 
-    expect(result.success).toBe(true);
-    if (!result.success || result.canceled) throw new Error('expected written result');
+    if (result.canceled) throw new Error('expected written result');
     expect(result.written).toHaveLength(1);
     expect(result.written[0]).toMatchObject({ name: 'One Dark Pro', type: 'dark' });
     expect(result.report.source).toBe('vscode');
@@ -134,8 +133,7 @@ describe('外部主题导入（main 侧编排）', () => {
 
     const result = await importExternalTheme();
 
-    expect(result.success).toBe(true);
-    if (!result.success || result.canceled) throw new Error('expected written result');
+    if (result.canceled) throw new Error('expected written result');
     expect(result.written).toHaveLength(2);
     // 目录名兜底成主题名（`<vault>/.obsidian/themes/<名字>/theme.css`）。
     expect(result.written.every((w) => w.name === 'Minimal')).toBe(true);
@@ -177,8 +175,7 @@ describe('外部主题导入（main 侧编排）', () => {
 
     const result = await importExternalTheme();
 
-    expect(result.success).toBe(true);
-    if (!result.success || result.canceled) throw new Error('expected written result');
+    if (result.canceled) throw new Error('expected written result');
     const loaded = loadLocalThemesSync();
     // 旧主题隐式家族键是 `minimal`，所以导入的两个产物必须让位到 `minimal-2`。
     const families = new Set(
@@ -209,8 +206,7 @@ describe('外部主题导入（main 侧编排）', () => {
 
     const result = await importExternalTheme();
 
-    expect(result.success).toBe(true);
-    if (!result.success || result.canceled) throw new Error('expected written result');
+    if (result.canceled) throw new Error('expected written result');
     // 已有主题占了 `one-dark-pro` 这个家族键，单产物必须让位。
     expect(result.written[0].id).toBe('one-dark-pro-2');
   });
@@ -227,11 +223,7 @@ describe('外部主题导入（main 侧编排）', () => {
       return realWriteFile(...(args as Parameters<typeof realWriteFile>));
     });
 
-    const result = await importExternalTheme();
-
-    expect(result.success).toBe(false);
-    if (result.success) throw new Error('expected failure');
-    expect(result.error).toBe('IMPORT_WRITE_ERROR');
+    await expect(importExternalTheme()).rejects.toThrow('THEME_WRITE_ERROR');
     // 关键:第一个产物已被回滚，目录干净。
     expect(loadLocalThemesSync().themes).toEqual([]);
   });
@@ -247,51 +239,40 @@ describe('外部主题导入（main 侧编排）', () => {
 
     const result = await importExternalTheme();
 
-    expect(result.success).toBe(true);
-    if (!result.success || result.canceled) throw new Error('expected written result');
+    if (result.canceled) throw new Error('expected written result');
     expect(result.written.every((w) => w.name === 'Things')).toBe(true);
   });
 
-  it('不是主题的 JSON 报 UNSUPPORTED_THEME_FILE 且不落盘', async () => {
+  it('不是主题的 JSON 报 THEME_UNSUPPORTED_FILE 且不落盘', async () => {
     pickFile(writeSource('settings.json', '{"editor.fontSize": 14}'));
 
-    const result = await importExternalTheme();
-
-    expect(result).toEqual({ success: false, error: 'UNSUPPORTED_THEME_FILE' });
+    await expect(importExternalTheme()).rejects.toThrow('THEME_UNSUPPORTED_FILE');
     expect(loadLocalThemesSync().themes).toEqual([]);
   });
 
-  it('无法识别的扩展名报 UNSUPPORTED_THEME_FILE', async () => {
+  it('无法识别的扩展名报 THEME_UNSUPPORTED_FILE', async () => {
     pickFile(writeSource('README.md', '# hello'));
 
-    const result = await importExternalTheme();
-
-    expect(result).toEqual({ success: false, error: 'UNSUPPORTED_THEME_FILE' });
+    await expect(importExternalTheme()).rejects.toThrow('THEME_UNSUPPORTED_FILE');
   });
 
-  it('没有主题变量的 CSS 报 UNSUPPORTED_THEME_FILE', async () => {
+  it('没有主题变量的 CSS 报 THEME_UNSUPPORTED_FILE', async () => {
     pickFile(writeSource('plain.css', '.foo { color: red; }'));
 
-    const result = await importExternalTheme();
-
-    expect(result).toEqual({ success: false, error: 'UNSUPPORTED_THEME_FILE' });
+    await expect(importExternalTheme()).rejects.toThrow('THEME_UNSUPPORTED_FILE');
   });
 
-  it('超大文件报 FILE_TOO_LARGE 而不读进内存', async () => {
+  it('超大文件报 THEME_FILE_TOO_LARGE 而不读进内存', async () => {
     const big = `{"colors":{"editor.background":"#000000"},"_pad":"${'x'.repeat(4 * 1024 * 1024 + 16)}"}`;
     pickFile(writeSource('huge.json', big));
 
-    const result = await importExternalTheme();
-
-    expect(result).toEqual({ success: false, error: 'FILE_TOO_LARGE' });
+    await expect(importExternalTheme()).rejects.toThrow('THEME_FILE_TOO_LARGE');
   });
 
-  it('选中的是目录时报 NOT_A_FILE', async () => {
+  it('选中的是目录时报 THEME_NOT_A_FILE', async () => {
     pickFile(sourceDir);
 
-    const result = await importExternalTheme();
-
-    expect(result).toEqual({ success: false, error: 'NOT_A_FILE' });
+    await expect(importExternalTheme()).rejects.toThrow('THEME_NOT_A_FILE');
   });
 
   it('产物不含任何语义豁免族 token', async () => {

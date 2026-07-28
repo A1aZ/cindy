@@ -189,7 +189,7 @@ function tokenColorFor(theme: VsCodeThemeJson, wanted: string, over?: Rgb | null
         const rgb = over ? parseCssColorComposited(fg, over) : parseCssColor(fg);
         if (rgb) return rgb;
       }
-      if (!prefixHit && scope.startsWith(`${wanted}.`)) {
+      if (!prefixHit && wanted.startsWith(`${scope}.`)) {
         prefixHit = over ? parseCssColorComposited(fg, over) : parseCssColor(fg);
       }
     }
@@ -303,6 +303,7 @@ export function extractVsCodePalette(
     'textSecondary',
     ['descriptionForeground', 'editorCodeLens.foreground'],
     () => shade(textPrimary, dark ? -0.28 : 0.28),
+    surfaceHit,
   );
   const textDisabled = role(
     'textDisabled',

@@ -746,15 +746,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     openDir: (): Promise<LocalThemeOpenDirResult> =>
       ipcRenderer.invoke('local-themes:open-dir'),
     // 导入 VSCode / Obsidian 主题文件。对话框与读文件都在 main 侧,这里不接受
-    // 任何路径参数。main 侧来源闸拒绝时把 reject 收敛成统一失败结构,让调用方
-    // 只处理一种形态。
-    importExternal: async (): Promise<LocalThemeImportResult> => {
-      try {
-        return (await ipcRenderer.invoke('local-themes:import')) as LocalThemeImportResult;
-      } catch (err) {
-        return { success: false, error: String(err) };
-      }
-    },
+    // 任何路径参数。失败走 IPC 错误协议(reject,renderer 用 extractIpcError 解码)。
+    importExternal: (): Promise<LocalThemeImportResult> =>
+      ipcRenderer.invoke('local-themes:import') as Promise<LocalThemeImportResult>,
   },
 
   // RSB terminal tab(PTY 后端 + xterm.js)

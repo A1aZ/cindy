@@ -231,8 +231,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   // Read latest values from storage to avoid closure staleness races.
   const [localThemeRev, bumpLocalThemeRev] = useReducer((n: number) => n + 1, 0);
   useEffect(() => onLocalThemesChange(() => {
-    const currentFamily = getStoredFamilyId();
-    if (!tryGetFamily(currentFamily)) {
+    let rawFamily: string | null = null;
+    try { rawFamily = localStorage.getItem(FAMILY_KEY); } catch { /* ok */ }
+    if (rawFamily && !tryGetFamily(rawFamily)) {
       const fallback = DEFAULT_FAMILY_ID;
       setFamilyIdState(fallback);
       try { localStorage.setItem(FAMILY_KEY, fallback); } catch { /* ok */ }

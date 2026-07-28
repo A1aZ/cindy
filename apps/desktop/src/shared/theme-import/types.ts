@@ -46,17 +46,11 @@ export interface ImportedThemeFileInternal extends ImportedThemeFile {
 
 export type LocalThemeImportResult =
   | {
-      success: true;
       /** 用户在原生对话框里取消。 */
       canceled: true;
     }
   | {
-      success: true;
       canceled: false;
       written: ImportedThemeFile[];
       report: ThemeConversionReport;
-    }
-  | {
-      success: false;
-      error: string;
     };

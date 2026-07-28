@@ -403,8 +403,8 @@ export function extractObsidianPalette({ type, vars }: ModeVars): ObsidianExtrac
   const derivedRoles: string[] = [];
   let resolvedRoles = 0;
 
-  const role = (name: string, names: string[], derive: () => Rgb): Rgb => {
-    const hit = readColor(vars, names, unresolved);
+  const role = (name: string, names: string[], derive: () => Rgb, compositeBg?: Rgb | null): Rgb => {
+    const hit = readColor(vars, names, unresolved, compositeBg);
     if (hit) {
       resolvedRoles += 1;
       return hit;
@@ -424,6 +424,7 @@ export function extractObsidianPalette({ type, vars }: ModeVars): ObsidianExtrac
     'elevated',
     ['--background-secondary', '--background-primary-alt', '--color-base-10'],
     () => step(surface, 0.05),
+    surface,
   );
   const hover = (() => {
     const hit = readColor(vars, ['--background-modifier-hover', '--color-base-20'], unresolved, surface);

@@ -19,7 +19,10 @@ import {
   type VoiceTimelineEvent,
 } from '@cindy/voice-input-core';
 import { createLogger } from '../logger.js';
-import { isUtilityRouteDisabled } from '../utility-model/oneShotCandidates.js';
+import {
+  isProviderRouteSuspended,
+  isUtilityRouteDisabled,
+} from '../utility-model/oneShotCandidates.js';
 import { getAppCapabilities } from '../appCapabilities.js';
 import { getProviderSecretStore } from '../secrets/providerSecretStore.js';
 import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
@@ -1297,6 +1300,16 @@ async function getVoiceInputReadiness(): Promise<VoiceInputReadiness> {
 // The startable chain for one dictation session: credential-ready candidates
 // in cooldown-aware priority order. FallbackAsrProvider walks this list at
 // connect time.
+/**
+ * ASR 档位 → 真实路由供应商:litellm-* 走 XD 网关,openai-* / codex 凭证走 OpenAI;
+ * ElevenLabs / 自定义端点不在供应商目录,不受停用轴约束(独立凭证独立计费)。
+ */
+function asrProfileRouteProviderId(profile: VoiceInputAsrProfile): string | null {
+  if (profile.id.startsWith('litellm-')) return 'xd';
+  if (profile.auth === 'codex' || profile.id.startsWith('openai-')) return 'openai';
+  return null;
+}
+
 async function resolveStartableAsrChain(): Promise<VoiceInputProviderKind[]> {
   const byokMode = isVoiceInputByokMode();
   const startable: VoiceInputProviderKind[] = [];
@@ -1305,6 +1318,13 @@ async function resolveStartableAsrChain(): Promise<VoiceInputProviderKind[]> {
     // Managed mode only dials voice-server-eligible profiles; explicit BYOK
     // mode may start any credential-ready profile from the configured chain.
     if (!byokMode && !isManagedVoiceAsrProfile(profile)) continue;
+    // 停用轴(BYOK,PR #744 review 第十六轮):转写与精修同为独立付费路由 ——
+    // 用户停用 OpenAI / XD 后,经其凭证的 ASR 档位不再进入可启动链。managed 模式
+    // 路由与计费都在 voice-server,不查本机供应商停用。
+    if (byokMode) {
+      const routeProviderId = asrProfileRouteProviderId(profile);
+      if (routeProviderId && isProviderRouteSuspended(routeProviderId)) continue;
+    }
     const credential = await getAsrProfileCredentialReadiness(profile);
     if (credential.ok) startable.push(kind);
   }

@@ -20,6 +20,7 @@ import type { EmbedResponse, EmbeddingClient, EmbeddingModelId } from '@cindy/em
 
 import type { createLogger } from '../logger';
 import type { DbClient } from '../localDb/client/DbClient';
+import { isProviderRouteSuspended } from '../utility-model/oneShotCandidates';
 import { EmbeddingWorker } from './EmbeddingWorker';
 import { VecTableRegistry, type VecTableSpec } from './VecTableRegistry';
 import {
@@ -87,6 +88,9 @@ export class EmbeddingService {
       getDbClient: deps.getDbClient,
       getClient: deps.getClient,
       isVecAvailable: deps.isVecAvailable,
+      // 停用轴:embedding 批经 XD 网关计费,用户停用 XD 时停批(job 保持
+      // pending,恢复后续跑;PR #744 review 第十六轮)。
+      isRouteSuspended: () => isProviderRouteSuspended('xd'),
       log: deps.log,
     });
   }

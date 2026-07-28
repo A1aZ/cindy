@@ -222,6 +222,40 @@ describe('resolveImSessionDefaults', () => {
     });
   });
 
+  it('reroutes an implicit default whose native-default copy is disabled', async () => {
+    // providerId 留空(隐式路由):原生默认落点(codex → openai)的拷贝被停用而 xd
+    // 有启用拷贝时必须显式改道 —— turnRunner 直建不过路由守卫(第十六轮)。
+    mocks.listProviders.mockResolvedValue([
+      {
+        ...providers[0],
+        models: {
+          'claude-code': claudeModels,
+          codex: [{ ...openAiCodexModels[0] }],
+        },
+      },
+      {
+        ...providers[1],
+        models: {
+          'claude-code': [],
+          codex: [{ ...openAiCodexModels[0], disabled: true }],
+        },
+      },
+    ]);
+    mocks.readImDefaultSettings.mockReturnValue({
+      agentKind: 'codex',
+      agents: {
+        'claude-code': { providerId: null, model: 'claude-opus-4-8', effort: 'xhigh' },
+        codex: { providerId: null, model: 'gpt-5.5', effort: 'high' },
+      },
+    });
+
+    await expect(resolveImSessionDefaults(config)).resolves.toMatchObject({
+      agentKind: 'codex',
+      model: 'gpt-5.5',
+      providerId: 'xd',
+    });
+  });
+
   it('drops a saved provider whose model copy is disabled and reroutes to the enabled copy', async () => {
     mocks.listProviders.mockResolvedValue([
       {

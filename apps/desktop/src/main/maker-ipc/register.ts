@@ -176,6 +176,7 @@ import { createGitSnapshotCoordinator } from '../maker-host/git-snapshot-host.js
 import {
   cancelCodexAuthModeChange,
   finalizeCodexAfterAuthModeChange,
+  getMaker,
   getPluginRegistry,
   prepareCodexForAuthModeChange,
   restartCodexAfterAuthModeChange,
@@ -1764,9 +1765,16 @@ export function registerPendingCredentialSwitchForSession(
   // 捕获会话 agent:deferred 切换在收口时刻要重过停用裁决(期间目标可能被停用,
   // PR #744 review 第七轮);读不到(会话行缺失)则登记不带 agentKind = 收口不裁决。
   const dbAgentKind = getSessionDbAgentKind(sessionId);
+  // 捕获切换前的运行路由(live handle 的当前模型 + provider store 当前来源,均为
+  // 同步源):目标在等待期间被全停且目录无启用兜底时,收口回滚到它(第十六轮)。
+  // deferred 场景会话正在跑 turn,live handle 必在;取不到就不带 = 无从回滚。
+  const live = getMaker().getSession(sessionId);
   service.register(sessionId, {
     ...target,
     ...(dbAgentKind ? { agentKind: dbAgentKind === 'cc' ? 'claude-code' as const : 'codex' as const } : {}),
+    ...(live
+      ? { previousRoute: { model: live.model, providerId: getSessionProvider(sessionId) } }
+      : {}),
   });
 }
 
@@ -4021,14 +4029,34 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     await hydrateProviderIdBeforeSessionStart(o);
     // 停用轴准入(PR #744 review):**新建**会话不得路由到用户停用的模型 / 来源。
     // renderer 选择器已过滤,但 create-session 在 device-link allowlist 内,老控制端
-    // 可直接点名 —— main 必须自己裁决。resume(含跨重启恢复,resumeSessionId 非空)
-    // 不拦:运行中的会话不打断。放在 hydrate 之后,判定的是真实生效的显式来源。
+    // 可直接点名 —— main 必须自己裁决。resume 豁免(运行中的会话不打断)只给
+    // **经核实的原样续跑**:请求路由与本会话 DB 持久化路由一致才算;resumeSessionId
+    // 是调用方可控字段,携带任意非空 id 同时改点停用 model/provider 不能构成绕过
+    // (PR #744 review 第十六轮)。读不到会话行(远端新建等)按非豁免走正常裁决。
     // 隐式来源的原生默认落点被停用而有启用替代拷贝时,把会话显式改路由过去(下方
     // persistAndHydrateSessionProvider 会把它落库):实际路由层对隐式来源走原生
     // 默认、不查停用标志,仅放行等于继续用停用拷贝付费。
-    if (!o.resumeSessionId && typeof o.model === 'string' && o.model) {
-      const reroute = await assertModelRouteUsable(o.agentKind, o.model, o.providerId ?? null);
-      if (reroute && !o.providerId) o.providerId = reroute;
+    if (typeof o.model === 'string' && o.model) {
+      let verifiedResume = false;
+      if (o.resumeSessionId && typeof o.id === 'string' && o.id) {
+        try {
+          const [row] = await getDbClient()
+            .drizzle.select({ model: sessions.model, providerId: sessions.providerId })
+            .from(sessions)
+            .where(eq(sessions.id, o.id))
+            .limit(1);
+          verifiedResume =
+            !!row &&
+            row.model === o.model &&
+            (row.providerId ?? null) === (o.providerId ?? null);
+        } catch {
+          verifiedResume = false;
+        }
+      }
+      if (!verifiedResume) {
+        const reroute = await assertModelRouteUsable(o.agentKind, o.model, o.providerId ?? null);
+        if (reroute && !o.providerId) o.providerId = reroute;
+      }
     }
     const session = await maker.createSession(o);
     await markProjectContextIfNeeded(session.id, didInjectProjectContext);

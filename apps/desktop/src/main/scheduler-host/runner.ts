@@ -946,6 +946,26 @@ export class MakerScheduleRunner implements ScheduleRunner {
       // explicit guard prevents a cancellation racing the setup above from
       // dispatching a new agent turn.
       throwIfFireAborted(ctx.signal, 'agent turn dispatch');
+      // 停用轴派发前重裁决(PR #744 review 第十六轮):fire 入口的裁决到这里隔着
+      // 凭证切换 / createSession / 模型同步 / 交接准备等多个长 await,期间路由可能
+      // 刚被停用 —— 按**实际将运行的路由**(runtimeModel + 会话此刻的来源)再判一次,
+      // reject 即失败收口,不发出这次新的付费调用。
+      if (this.deps.checkModelRoute) {
+        const dispatchProviderId = getSessionProvider(session.id);
+        const verdict = await this.deps.checkModelRoute(
+          effectiveAgentKind,
+          runtimeModel,
+          dispatchProviderId,
+        );
+        if (verdict.kind === 'reject') {
+          throw new Error(
+            `schedule route unavailable: model "${runtimeModel}" is disabled in settings (${verdict.reason}, revalidated before dispatch)`,
+          );
+        }
+        if (verdict.kind === 'reroute' && !dispatchProviderId) {
+          setSessionProvider(session.id, verdict.providerId);
+        }
+      }
       const sendResult = await session.send(outgoingMessage as never, {
         origin,
         planMode: false,

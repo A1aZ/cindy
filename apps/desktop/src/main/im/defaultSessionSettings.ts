@@ -16,7 +16,11 @@ import {
   type ProviderView,
 } from '@cindy/model-providers';
 
-import { pickEnabledFallbackModel, resolveLenientRoute } from '../maker-host/model-route-guard';
+import {
+  checkModelRoute,
+  pickEnabledFallbackModel,
+  resolveLenientRoute,
+} from '../maker-host/model-route-guard';
 
 import {
   IM_DEFAULT_EFFORT_OVERRIDES,
@@ -231,7 +235,23 @@ function resolveProviderId(
   modelId: string,
   providerId: string | null,
 ): string | null {
-  if (!providerId) return null;
+  if (!providerId) {
+    if (!providers) return null;
+    // 隐式默认(未选来源)同样过裁决:原生默认落点的拷贝被停用而有启用替代时,
+    // 必须显式改道 —— turnRunner 直建会话不过路由守卫,返回 null 会让 provider-route
+    // 照旧落到停用的原生默认拷贝(PR #744 review 第十六轮)。pass(隐式安全)保持
+    // null;reject 不应到达(pickModel 已按启用口径选模)兜底也保持 null。
+    const verdict = checkModelRoute(providers, agentKind, modelId, null);
+    if (verdict.kind === 'reroute') {
+      log.warn('im default implicit route disabled; rerouting to enabled source', {
+        agentKind,
+        modelId,
+        fallback: verdict.providerId,
+      });
+      return verdict.providerId;
+    }
+    return null;
+  }
   if (!providers) return providerId;
   const provider = connectedProvidersForAgent(providers, agentKind).find(
     (p) => p.id === providerId,

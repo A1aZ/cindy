@@ -9,7 +9,11 @@ import { app } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { isModelDisabled, isProviderDisabled } from '@cindy/model-providers';
+
 import { effectiveXdGatewayBaseUrl } from '../model-access/effectiveEndpoint.js';
+import { getActiveCatalog } from './active-catalog.js';
+import { readModelDisableOverrides } from './model-disable-store.js';
 import claudeSystemPrompt from './claude-system-prompt.md?raw';
 import codexSystemPrompt from './codex-system-prompt.md?raw';
 import hostSystemPrompt from './host-system-prompt.md?raw';
@@ -158,7 +162,25 @@ export function buildDesktopClaudeRuntimeConfig(endpointFn: () => string): Agent
     configurable: false,
   });
   Object.defineProperty(config, 'subagentModel', {
-    get: () => readSubagentModelSettings().claudeCode ?? undefined,
+    // 停用轴(PR #744 review 第十六轮):保存的 subagent 覆写(CLAUDE_CODE_SUBAGENT_MODEL)
+    // 是每次 Agent 工具调用的新付费请求路由。目录里该模型的**所有**拷贝都被用户停用
+    // (供应商级 suspended 或逐模型条目)时丢弃覆写,回退 CLI 原生 subagent 选择;
+    // 尚有任一未停用拷贝则保留(subagent 跑在父会话来源上,精确到来源的判定此处
+    // 无会话上下文,保守方向 = 不误杀仍可路由的覆写)。getter 为同步热路径,只用
+    // 同步源(active catalog + override store)。
+    get: () => {
+      const saved = readSubagentModelSettings().claudeCode ?? undefined;
+      if (!saved) return undefined;
+      const overrides = readModelDisableOverrides();
+      const copies = getActiveCatalog().providers.filter((p) =>
+        (p.models['claude-code'] ?? []).some((m) => m.id === saved),
+      );
+      if (copies.length === 0) return saved; // 目录不认识 → 不新增拒绝面
+      const allDisabled = copies.every(
+        (p) => isProviderDisabled(overrides, p.id) || isModelDisabled(overrides, p.id, saved),
+      );
+      return allDisabled ? undefined : saved;
+    },
     enumerable: true,
     configurable: false,
   });

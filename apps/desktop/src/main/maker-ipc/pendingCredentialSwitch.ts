@@ -40,6 +40,13 @@ export interface PendingCredentialSwitch {
   providerId: string | null;
   /** 目标会话的 agent(register 时由调用方捕获,收口前的停用重裁决用;可缺席 = 不裁决)。 */
   agentKind?: AgentKind;
+  /**
+   * 切换前的运行路由(register 时由调用方从 live handle / provider store 捕获)。
+   * 收口重裁决发现目标全停且目录无启用兜底模型时回滚到它 —— renderer 已把停用目标
+   * 预写进 DB,不回滚的话懒 resume 会经停用隐式来源重建(PR #744 review 第十六轮)。
+   * 缺席 = 无从回滚,退化为只清显式来源。
+   */
+  previousRoute?: { model: string; providerId: string | null };
   requestedAt: number;
 }
 
@@ -93,6 +100,7 @@ export interface PendingCredentialSwitchDeps {
   logger?: {
     info: (message: string, meta?: Record<string, unknown>) => void;
     warn: (message: string, meta?: Record<string, unknown>) => void;
+    error?: (message: string, meta?: Record<string, unknown>) => void;
   };
 }
 
@@ -107,12 +115,18 @@ export class PendingCredentialSwitchService {
 
   register(
     sessionId: string,
-    target: { model: string; providerId: string | null; agentKind?: AgentKind },
+    target: {
+      model: string;
+      providerId: string | null;
+      agentKind?: AgentKind;
+      previousRoute?: { model: string; providerId: string | null };
+    },
   ): void {
     this.pending.set(sessionId, {
       model: target.model,
       providerId: target.providerId,
       ...(target.agentKind ? { agentKind: target.agentKind } : {}),
+      ...(target.previousRoute ? { previousRoute: target.previousRoute } : {}),
       requestedAt: Date.now(),
     });
     this.scheduleRetry(sessionId);
@@ -231,6 +245,20 @@ export class PendingCredentialSwitchService {
       }
       const resolved = await resolveRoute(target.agentKind, target.model, target.providerId);
       if (!resolved.model) {
+        // 目标全停且目录里没有任何启用兜底模型:回滚到切换前的运行路由(register 时
+        // 捕获)—— renderer 已把停用目标预写进 DB,只清来源仍会让懒 resume 用停用
+        // 模型经隐式来源重建(PR #744 review 第十六轮)。切换前路由属于「本来就在
+        // 跑」的豁免域,是此刻唯一有依据的安全落点;无 previousRoute 才退化为只清
+        // 显式来源。
+        if (target.previousRoute) {
+          return {
+            providerId: target.previousRoute.providerId,
+            ...(target.previousRoute.model !== target.model
+              ? { model: target.previousRoute.model }
+              : {}),
+            apply: true,
+          };
+        }
         return { providerId: null, apply: true };
       }
       if (resolved.model !== target.model) {
@@ -310,12 +338,18 @@ export class PendingCredentialSwitchService {
               : {}),
           });
         } catch (err) {
-          this.deps.logger?.warn('pending credential switch: persist resolved route failed', {
+          // fail-closed(PR #744 review 第十六轮):DB 里躺着 renderer 预写的停用
+          // 目标,回写失败就唤醒队列 = 排队消息立刻按停用路由懒 resume。保留登记
+          // (pending 门继续挡住派发)+ 自愈定时器重试整个收口(重新裁决 + 回写);
+          // 用户改选 / 取消随时接管。error 级留痕 —— 这是会冻结该会话队列的状态。
+          this.deps.logger?.error?.('pending credential switch: persist resolved route failed; keeping queue gated for retry', {
             sessionId,
             providerId: resolved.providerId,
             model: resolved.model,
             error: err instanceof Error ? err.message : String(err),
           });
+          if (this.pending.get(sessionId) === target) this.scheduleRetry(sessionId);
+          return;
         }
         // await 期间用户可能改选 / 取消:本次让位,新登记有自己的收口路径。
         if (this.pending.get(sessionId) !== target) return;

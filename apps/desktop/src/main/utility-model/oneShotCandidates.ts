@@ -122,6 +122,15 @@ export function isUtilityRouteDisabled(profile: {
   );
 }
 
+/**
+ * 供应商级停用的直查入口(voice ASR / embedding 等非目录模型消费方用):这些链路
+ * 的模型不在 chat/media 目录里,逐模型停用无从谈起,但「供应商整体停用」必须生效
+ * —— 它们同样是经该供应商凭证的新付费调用(PR #744 review 第十六轮)。
+ */
+export function isProviderRouteSuspended(providerId: string): boolean {
+  return isProviderDisabled(readModelDisableOverrides(), providerId);
+}
+
 async function resolveUtilityTextCandidates(
   maker: Maker,
   capability: UtilityTextCapability,

@@ -331,6 +331,66 @@ describe('PendingCredentialSwitchService', () => {
       expect(h.onApplied).toHaveBeenCalledWith(sessionId);
     });
 
+    it('目标全停且无启用兜底 ⇒ 回滚到切换前路由(register 捕获的 previousRoute)', async () => {
+      const sessionId = rememberSession('pending-switch-rollback-previous');
+      setSessionProvider(sessionId, 'openai');
+      const resolveRoute = vi.fn(async () => ({
+        model: undefined,
+        providerId: null,
+        degraded: true,
+      }));
+      const h = createHarness(
+        [{ id: sessionId, agentKind: 'claude-code', remoteHostId: null, isTurnRunning: () => false }],
+        { resolveRoute },
+      );
+
+      h.service.register(sessionId, {
+        model: 'claude-opus-5',
+        providerId: 'xd',
+        agentKind: 'claude-code',
+        previousRoute: { model: 'claude-sonnet-4-6', providerId: 'openai' },
+      });
+      await h.service.onTurnSettled(sessionId);
+
+      expect(getSessionProvider(sessionId)).toBe('openai');
+      expect(h.persistRoute).toHaveBeenCalledWith(sessionId, {
+        providerId: 'openai',
+        model: 'claude-sonnet-4-6',
+      });
+      expect(h.broadcastApplied).toHaveBeenCalledWith({
+        sessionId,
+        model: 'claude-sonnet-4-6',
+        providerId: 'openai',
+      });
+    });
+
+    it('回写失败 ⇒ fail-closed:保留登记(队列门不解除)、不广播、留给自愈重试', async () => {
+      const sessionId = rememberSession('pending-switch-persist-fail');
+      setSessionProvider(sessionId, 'openai');
+      const resolveRoute = vi.fn(async (_a: string, model: string) => ({
+        model,
+        providerId: 'anthropic',
+        degraded: true,
+      }));
+      const h = createHarness(
+        [{ id: sessionId, agentKind: 'claude-code', remoteHostId: null, isTurnRunning: () => false }],
+        { resolveRoute, retryDelayMs: 60_000 },
+      );
+      h.persistRoute.mockRejectedValueOnce(new Error('disk on fire'));
+
+      h.service.register(sessionId, {
+        model: 'claude-opus-5',
+        providerId: 'xd',
+        agentKind: 'claude-code',
+      });
+      await h.service.onTurnSettled(sessionId);
+
+      // DB 还躺着 renderer 预写的停用目标:此刻唤醒队列 = 排队消息按停用路由懒 resume。
+      expect(h.service.has(sessionId)).toBe(true);
+      expect(h.onApplied).not.toHaveBeenCalled();
+      expect(h.broadcastApplied).not.toHaveBeenCalled();
+    });
+
     it('目录里一个启用对话模型都没有 ⇒ 只清显式来源(store null + DB 回写 null)', async () => {
       const sessionId = rememberSession('pending-switch-revalidate-all-dead');
       setSessionProvider(sessionId, 'openai');

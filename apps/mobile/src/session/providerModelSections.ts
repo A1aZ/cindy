@@ -68,6 +68,13 @@ export function buildMobileModelSections(args: {
   query?: string;
   /** 被控端「模型显示/隐藏」override 快照;undefined/null = 旧被控端,不过滤。 */
   visibilityOverrides?: Record<string, boolean> | null;
+  /**
+   * true = 已建会话的选择器:当前来源按**实际路由口径**解析(不剔除停用拷贝,
+   * 运行中会话跟真实扣费路由),并给被停用的当前来源保留选中行。缺省 false =
+   * 新建草稿等**新路由选择**:按准入口径(effectiveSourceIdForModel)解析,停用
+   * 拷贝不高亮也不可选(PR #744 review 第十二轮)。
+   */
+  existingSessionRoute?: boolean;
 }): MobileModelSections {
   const connected = connectedProvidersForAgent([...args.providers], args.agentKind);
 
@@ -79,8 +86,11 @@ export function buildMobileModelSections(args: {
   // 口径 = **实际路由**(actualSourceIdForModel,不剔除停用拷贝,桌面同款):本函数
   // 服务的是已建会话的选择器,运行中会话继续走它真正在用的来源,高亮/药丸必须跟
   // 真实扣费路由,不能显示成准入过滤后的替代来源(PR #744 review 第十轮)。
+  const resolveSourceId = args.existingSessionRoute
+    ? actualSourceIdForModel
+    : effectiveSourceIdForModel;
   const activeSourceId = args.selectedModelId
-    ? actualSourceIdForModel(
+    ? resolveSourceId(
         [...args.providers],
         args.selectedProviderId ?? null,
         args.selectedModelId,
@@ -93,7 +103,7 @@ export function buildMobileModelSections(args: {
   // 当前来源被供应商级停用(仍连接着,但 connected 剔除了它)时补进分段输入,
   // 并只保留选中行 —— 选中行豁免生效,其它模型不可作为新路由选择(桌面同款)。
   const suspendedActive =
-    activeSourceId && !connected.some((p) => p.id === activeSourceId)
+    args.existingSessionRoute && activeSourceId && !connected.some((p) => p.id === activeSourceId)
       ? args.providers.find(
           (p) =>
             p.id === activeSourceId && p.connected && p.agents.includes(args.agentKind),

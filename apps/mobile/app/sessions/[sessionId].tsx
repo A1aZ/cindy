@@ -1461,6 +1461,8 @@ export default function SessionScreen() {
           selectedModelId: currentSession.model,
           selectedProviderId: currentSession.providerId ?? null,
           visibilityOverrides: composerDeviceProviders.modelVisibilityOverrides,
+          // 已建会话:实际路由口径(运行中会话跟真实扣费路由,含停用拷贝)。
+          existingSessionRoute: true,
         })
       : null,
     [composerDeviceProviders.providers, composerDeviceProviders.modelVisibilityOverrides, currentSession],
@@ -6763,6 +6765,8 @@ export default function SessionScreen() {
         {currentSession && runtimeOptions && modelSheetSelection && modelSheetRuntimeOptions ? (
           <ModelPickerSheet
             activeModelId={modelSheetSelection.model}
+            existingSessionRoute
+
             activePermissionMode={displayPermissionMode ?? currentSession.permissionMode}
             agentKind={modelSheetAgentKind}
             agentSwitch={sessionAgentSwitchSupported ? {

@@ -7204,28 +7204,30 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     ) {
       throwIpcError('INVALID_PARAMS', 'providerId must be string, null, or undefined');
     }
-    // 停用轴准入(PR #744 review):切换模型是一次新的路由选择,不得切到用户停用的
-    // 模型 / 来源(本机选择器已过滤,但本 channel 在 device-link allowlist 内,老控制
-    // 端可直接点名)。会话当前正用着的停用模型不受影响 —— 这里只拦「切过去」。
-    // 隐式来源的原生默认落点被停用而有启用替代拷贝时,以显式来源落地(与
-    // bootstrapSession 同语义)。agentKind 读不到(会话行缺失等)时不拦。
-    // DB 存的是 'cc' | 'codex'(messages.agent_kind 口径),目录侧是 AgentKind。
-    let effectiveProviderId = providerId;
-    {
-      const dbAgentKind = getSessionDbAgentKind(sessionId);
-      if (dbAgentKind) {
-        const reroute = await assertModelRouteUsable(
-          dbAgentKind === 'cc' ? 'claude-code' : 'codex',
-          model,
-          typeof providerId === 'string' ? providerId : null,
-        );
-        if (reroute && typeof providerId !== 'string') effectiveProviderId = reroute;
-      }
-    }
     // 与 send 事务共用 session 锁:发送时刻执行的跨引擎切换必须先落定,
     // 后到的 SET_MODEL 才能写 route。否则切换 DB await 恢复后会用旧 provider
     // 覆盖用户刚选的新 route，形成 DB 与进程内路由分叉。
     return withSendToSessionLock(sessionId, async () => {
+      // 停用轴准入(PR #744 review;第十二轮移入锁内):切换模型是一次新的路由选择,
+      // 不得切到用户停用的模型 / 来源(本机选择器已过滤,但本 channel 在 device-link
+      // allowlist 内,老控制端可直接点名)。裁决必须在拿到会话锁**之后**执行 ——
+      // 排队等待期间目标可能刚被停用,而同凭证族的变更即时生效、不经 deferred 收口
+      // 的重裁决,锁前裁决结果可能已过期。会话当前正用着的停用模型不受影响,这里只
+      // 拦「切过去」;隐式来源的原生默认落点被停用而有启用替代拷贝时,以显式来源
+      // 落地(与 bootstrapSession 同语义)。agentKind 读不到(会话行缺失等)时不拦。
+      // DB 存的是 'cc' | 'codex'(messages.agent_kind 口径),目录侧是 AgentKind。
+      let effectiveProviderId = providerId;
+      {
+        const dbAgentKind = getSessionDbAgentKind(sessionId);
+        if (dbAgentKind) {
+          const reroute = await assertModelRouteUsable(
+            dbAgentKind === 'cc' ? 'claude-code' : 'codex',
+            model,
+            typeof providerId === 'string' ? providerId : null,
+          );
+          if (reroute && typeof providerId !== 'string') effectiveProviderId = reroute;
+        }
+      }
       try {
         const result = await applySetModelThenCancelAgentSwitchIntent(
           agentSwitchPending,

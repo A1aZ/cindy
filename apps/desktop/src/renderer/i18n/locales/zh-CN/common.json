@@ -4731,7 +4731,7 @@
       "agentSwitch": {
         "label": "已从 {{from}} 切换到 {{to}}",
         "toggleHint": "查看交接内容",
-        "handoffTitle": "交接内容——切换时发送给新引擎的上下文摘要(不会出现在你的消息里)",
+        "handoffTitle": "交接内容——切换时发送给新引擎的上下文摘要，原文为英文(不会出现在你的消息里)",
         "resumedBadge": "已续接原对话"
       }
     },

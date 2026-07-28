@@ -24,7 +24,11 @@ import {
   markLatestAgentHandoffConsumed,
 } from '../localDb/ipc/messages.js';
 import { createLogger } from '../logger.js';
-import { composeForkOriginHandoff, createAgentHandoffPendingRegistry } from './agentHandoff.js';
+import {
+  buildForkOriginHandoff,
+  composeForkOriginHandoff,
+  createAgentHandoffPendingRegistry,
+} from './agentHandoff.js';
 
 const log = createLogger('agent-handoff-pending');
 
@@ -45,10 +49,22 @@ export const agentHandoffPending = createAgentHandoffPendingRegistry(async (sess
   //  - 来源标记只是元信息,查失败就降级为无,不该反过来拖累交接。
   const [pending, forkParentSessionId] = await Promise.all([
     findPendingAgentHandoff(sessionId),
-    findPendingForkOrigin(sessionId).catch(() => null),
+    findForkParentSessionId(sessionId).catch(() => null),
   ]);
-  if (!forkParentSessionId) return pending;
-  return composeForkOriginHandoff(forkParentSessionId, pending);
+  // 有待注入的交接 = 正在重建原生上下文(agent-switch / 消息删除)。此时用**永久血缘**,
+  // 与 decorateCached 同口径:重启若正好落在"重建之后、发送之前",内存态已丢,这条 DB
+  // 路径是唯一出口;若它改看首发消费态,首轮跑过的 fork 会在这里丢掉血缘,新原生上下文
+  // 再也不知道自己是分叉。
+  if (pending) {
+    return forkParentSessionId
+      ? composeForkOriginHandoff(forkParentSessionId, pending)
+      : pending;
+  }
+  // 没有交接 = 纯首发注入场景,这才该看一次性的消费态。非 fork 会话上面已短路,
+  // 不会多发这条查询。
+  if (!forkParentSessionId) return null;
+  const pendingForkOrigin = await findPendingForkOrigin(sessionId).catch(() => null);
+  return pendingForkOrigin ? buildForkOriginHandoff(pendingForkOrigin) : null;
 },
   (sessionId) => {
     void markLatestAgentHandoffConsumed(sessionId).catch((err) => {

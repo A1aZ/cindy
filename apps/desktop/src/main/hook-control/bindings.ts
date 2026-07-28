@@ -74,12 +74,18 @@ export function createHookBindingStore(deps: {
    */
   function namespaceFor(data: BindingFile, connectionId: string): Record<string, BindingRow> {
     const ns: unknown = data[connectionId];
-    if (!ns || typeof ns !== 'object' || Array.isArray(ns)) {
-      const fresh: Record<string, BindingRow> = {};
-      data[connectionId] = fresh;
-      return fresh;
+    // 一律搬进 null 原型对象再写: externalKey 是渠道来的不可信输入, 直接拿它当
+    // 动态键写进普通对象时, `__proto__` 这类键会改到原型上去(原型污染), 结构和
+    // 落盘的 JSON 都会变得不可预期。同目录 store.ts 的 EMPTY_ACCOUNTS 同款做法
+    // (PR #733 review 指出)。
+    const fresh: Record<string, BindingRow> = Object.create(null) as Record<string, BindingRow>;
+    if (ns && typeof ns === 'object' && !Array.isArray(ns)) {
+      for (const [key, row] of Object.entries(ns as Record<string, BindingRow>)) {
+        fresh[key] = row;
+      }
     }
-    return ns as Record<string, BindingRow>;
+    data[connectionId] = fresh;
+    return fresh;
   }
 
   return {

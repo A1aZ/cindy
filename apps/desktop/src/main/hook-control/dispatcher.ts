@@ -130,6 +130,14 @@ export interface HookRunRequest {
   }) => void;
   /** 交互已在本端收口(超时默认 / turn 结束), 通知 server 改写卡片。 */
   onInteractionCancel?: (interactionId: string, reason: string) => void;
+  /**
+   * "这个任务此刻还被授权吗"—— dispatcher 注入的实时判定(工作目录仍在映射内且
+   * 连接仍启用)。runner 必须在**真正把消息交给 agent 之前的最后一个同步点**再
+   * 问一次: dispatcher 那道校验之后, runner 还要 await 一串准备工作, 这段窗口
+   * 里用户完全可能改掉映射或停用连接(PR #733 review 指出)。
+   * 省略 = 不再校验(测试与旧调用方)。
+   */
+  isStillAuthorized?: () => boolean;
 }
 
 export interface HookRunOutcome {
@@ -334,6 +342,13 @@ interface PendingTask {
   accountGeneration: number;
   /** 会话定位阶段产生的一次性说明, 前置到本次 turn.end 的 finalText。 */
   notice?: string;
+  /**
+   * 本次定位为新会话预建的 worktree 的回收句柄。**只在这个任务最终没能进
+   * runner 时调用** —— 正常执行时 worktree 归会话所有, 不能回收。少了它,
+   * 执行前的映射收口一旦拦下任务, 刚建好的 worktree 目录与分支就成了没有会话
+   * 认领的孤儿, 反复改映射会累积(PR #733 review 指出)。
+   */
+  cleanupWorktree?: () => Promise<void>;
 }
 
 export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
@@ -516,8 +531,10 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       // 路径不进日志(规则: 用集中 PII helper, 而 dispatcher 是不碰 Electron 的
       // 纯逻辑模块, 拿不到它)—— requestId 足够定位。
       log.info(
-        `hook task ${task.requestId} aborted before execution: its directory left the workspace map`,
+        `hook task ${task.requestId} aborted before execution: its directory is no longer authorized`,
       );
+      // 任务没能进 runner, 刚预建的 worktree 不会有会话来认领 —— 就地回收
+      if (task.cleanupWorktree) void task.cleanupWorktree().catch(() => undefined);
       outcome = {
         status: 'error',
         finalText: '',
@@ -527,7 +544,16 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       };
     } else {
       try {
-        outcome = await runner.run({ ...task.run, onProgress, onInteraction, onInteractionCancel });
+        outcome = await runner.run({
+          ...task.run,
+          onProgress,
+          onInteraction,
+          onInteractionCancel,
+          // runner 内部还要 await 一串准备工作(provider 解析、建会话、写库、附件
+          // 落盘)才到真正的 send —— 这段里映射照样可能被撤。把判定本身传下去,
+          // 让它在最后那个同步点再问一次(PR #733 review 指出)。
+          isStillAuthorized: () => dirStillAllowed(task.connectionId, guardDir ?? ''),
+        });
       } catch (err) {
         outcome = {
           status: 'error',
@@ -596,7 +622,9 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
    */
   function dirStillAllowed(connectionId: string, dir: string): boolean {
     const config = getConnection(connectionId);
-    if (!config) return false;
+    // 连接被停用 = 用户已经切断了这条远端通道。handleDispatch 入口就这么判,
+    // 排队中的任务同样不能因为"目录还在映射里"就照跑(PR #733 review 指出)。
+    if (!config || !config.enabled) return false;
     if (Object.values(config.workspaces).some((root) => isPathWithin(root, dir))) return true;
     return dialogue !== undefined && isPathWithin(dialogue.rootDir(), dir);
   }
@@ -617,7 +645,10 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     config: HookConnectionConfig,
     payload: TaskDispatchPayload,
     generation: number,
-  ): Promise<{ run: HookRunRequest; notice?: string } | { reject: TaskRejectReason }> {
+  ): Promise<
+    | { run: HookRunRequest; notice?: string; cleanupWorktree?: () => Promise<void> }
+    | { reject: TaskRejectReason }
+  > {
     // options 四元组原样透传给 runner —— 空值由 runner 按桌面端草稿默认落值
     // (取值链: Slack 按目录偏好 > 草稿默认, 权限缺省 bypass; 见
     // hook-control/defaults.ts)。复用/接管路径也照传, 消费与否由 runner 决定
@@ -820,6 +851,8 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     } else {
       runDir = dir as string;
     }
+    /** 预建成功的 worktree 回收句柄, 随任务带下去(见 PendingTask.cleanupWorktree)。 */
+    let cleanupWorktree: (() => Promise<void>) | undefined;
     if (prepareWorktree && !isChat && dir !== undefined) {
       const prep = await prepareWorktreeSerial(dir);
       if (!isCurrentGeneration(generation)) {
@@ -829,6 +862,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       if (prep.ok && isPathWithin(dir, prep.path)) {
         sessionId = prep.sessionId;
         runDir = prep.path;
+        cleanupWorktree = () => prep.cleanup();
         log.info(`hook session ${sessionId} gets dedicated worktree: ${prep.path}`);
       } else {
         const why = prep.ok
@@ -875,6 +909,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
         origin,
       },
       ...(recreatedNotice ? { notice: recreatedNotice } : {}),
+      ...(cleanupWorktree ? { cleanupWorktree } : {}),
     };
   }
 
@@ -933,6 +968,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
           run: { ...resolved.run, ...(source ? { source } : {}) },
           accountGeneration: admittedGeneration,
           ...(resolved.notice ? { notice: resolved.notice } : {}),
+          ...(resolved.cleanupWorktree ? { cleanupWorktree: resolved.cleanupWorktree } : {}),
         };
         const sessionId = resolved.run.sessionId;
         const queue = queues.get(sessionId) ?? [];

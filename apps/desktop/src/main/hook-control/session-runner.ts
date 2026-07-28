@@ -950,6 +950,19 @@ export function createMakerHookSessionRunner(deps: {
 
       try {
         const pendingHandoff = await agentHandoffPending.peek(session.id);
+        /**
+         * 最后一道: 把消息交给 agent 之前的最后一个同步点。dispatcher 那道校验
+         * 之后, 上面这一大段准备工作(provider 解析、读 meta、建会话、写库、附件
+         * 落盘)全是 await —— 这段窗口里用户完全可能撤掉映射或停用连接, 那样这条
+         * 远端消息就会在已撤权的目录里真的跑起来(PR #733 review 指出)。
+         * 之后就没有窗口了: send 一返回, turn 已经在跑。
+         */
+        if (req.isStillAuthorized && !req.isStillAuthorized()) {
+          log.warn(`hook run aborted at send time: session ${req.sessionId} lost authorization`);
+          return fail(
+            '这个对话所在的目录已不在工作目录映射里，本条消息没有执行；恢复映射后请重新发送。',
+          );
+        }
         const outgoingMessage: UserMessage = pendingHandoff
           ? (prependHandoffToUserMessage(
               { type: 'user', content: sendContent },

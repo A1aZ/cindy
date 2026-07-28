@@ -92,6 +92,22 @@ describe('hook binding store', () => {
     expect(store.get('conn-2', 'k')).toBe('sess-2');
   });
 
+  it('externalKey 是 __proto__ 之类的键时不污染原型', () => {
+    const store = makeStore();
+    store.set('conn-1', '__proto__', 'sess-evil');
+
+    // 写进去的是自有键, 不是原型
+    expect(({} as Record<string, unknown>).sessionId).toBeUndefined();
+    expect(Object.getPrototypeOf({})).toBe(Object.prototype);
+    expect(store.get('conn-1', '__proto__')).toBe('sess-evil');
+    // 普通键不受影响, 且没被原型上的东西串味
+    expect(store.get('conn-1', 'constructor')).toBeNull();
+
+    store.set('conn-1', 'normal', 'sess-1');
+    expect(store.get('conn-1', 'normal')).toBe('sess-1');
+    expect(store.get('conn-1', '__proto__')).toBe('sess-evil');
+  });
+
   it('remove 清掉整条绑定', () => {
     const store = makeStore();
     store.set('conn-1', 'k', 'sess-1');

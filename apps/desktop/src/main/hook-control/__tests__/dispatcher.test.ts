@@ -621,6 +621,75 @@ describe('dispatcher 核心语义', () => {
     expect(end.errorMessage).toContain('已不在工作目录映射里');
   });
 
+  it('排队期间连接被停用: 目录还在映射里也不执行', async () => {
+    const fr = fakeRunner({ sessions: {} });
+    const config: HookConnectionConfig = { ...CONFIG, workspaces: { xdmaker: WS_DIR } };
+    const { d } = makeDispatcher({ runner: fr.runner, config });
+    const c = collector();
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
+    await tick();
+    expect(c.last('task.ack')!.payload.result).toBe('queued');
+
+    // 用户关掉了这条连接 —— 通道已切断, 排着的远端任务不能因为"目录还在映射里"就跑
+    config.enabled = false;
+    fr.finish();
+    await tick();
+
+    expect(fr.calls).toHaveLength(1);
+    const queued = c
+      .ofType('turn.end')
+      .map((m) => m.payload)
+      .find((e) => e.requestId === 'req-2')!;
+    expect(queued.status).toBe('error');
+  });
+
+  it('执行前被拦下时回收预建的 worktree(不留孤儿)', async () => {
+    const fr = fakeRunner();
+    const config: HookConnectionConfig = { ...CONFIG, workspaces: { xdmaker: WS_DIR } };
+    const cleanup = vi.fn(async () => undefined);
+    let release!: (v: PrepareWorktreeResult) => void;
+    const { d } = makeDispatcher({
+      runner: fr.runner,
+      config,
+      prepareWorktree: () =>
+        new Promise<PrepareWorktreeResult>((resolve) => {
+          release = resolve;
+        }),
+    });
+    const c = collector();
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    config.workspaces = {};
+    release({ ok: true, sessionId: 'wt-session', path: path.join(WS_DIR, 'wt'), cleanup });
+    await tick();
+
+    expect(fr.calls).toHaveLength(0);
+    // worktree 已经建出来了却没有会话认领 —— 必须就地回收
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it('进 runner 后失去授权: isStillAuthorized 在 send 前把它拦下', async () => {
+    const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
+    const fr = fakeRunner({ sessions });
+    const config: HookConnectionConfig = { ...CONFIG, workspaces: { xdmaker: WS_DIR } };
+    const { d } = makeDispatcher({ runner: fr.runner, config });
+    const c = collector();
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    const req = fr.calls[0];
+    expect(req.isStillAuthorized?.()).toBe(true);
+
+    // runner 内部还在做准备工作时映射被撤
+    config.workspaces = {};
+    expect(req.isStillAuthorized?.()).toBe(false);
+    fr.finish();
+  });
+
   it('在工作目录映射内换目录 -> 无感跟随复用(边界内的移动不受影响)', async () => {
     const bindings = memoryBindings();
     const sessions: Record<string, { workingDir: string; usable: boolean }> = {};

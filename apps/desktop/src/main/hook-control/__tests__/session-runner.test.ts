@@ -362,6 +362,17 @@ describe('执行前按权威 meta 收口校验工作目录', () => {
     expect(outcome.errorMessage).toContain('刚换了工作目录');
   });
 
+  it('准备期间失去授权 -> send 之前拦下, 消息不进 agent', async () => {
+    const runner = createMakerHookSessionRunner({ log });
+
+    const outcome = await runner.run(baseReq({ isStillAuthorized: () => false }));
+
+    expect(outcome.status).toBe('error');
+    expect(outcome.errorMessage).toContain('已不在工作目录映射里');
+    const session = await fakeMaker.createSession.mock.results[0].value;
+    expect(session.send).not.toHaveBeenCalled();
+  });
+
   it('目录一致 -> 照常执行; 新建路径不带该字段也不受影响', async () => {
     const runner = createMakerHookSessionRunner({ log });
 

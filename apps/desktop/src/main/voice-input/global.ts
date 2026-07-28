@@ -1567,7 +1567,13 @@ function startLoadedOverlaySession(window: BrowserWindow, shortcutInvokedAt: num
     });
   }
   const show = (): void => {
-    if (window.isDestroyed()) return;
+    // 两条路径（单屏的 setImmediate、多屏的等待回调）都要过这道校验：显示总是
+    // 延后至少一个 tick，期间用户可能已经取消。取消只让缓存窗口进 idle、不销毁，
+    // 所以只查 isDestroyed() 会让已取消的浮窗重新出现。
+    if (!isCurrentOverlayPresentation(window, presentationSeq)) {
+      log.debug('global overlay show skipped: presentation no longer current');
+      return;
+    }
     log.debug('global overlay ready to show', {
       elapsedSinceShortcutMs: Date.now() - shortcutInvokedAt,
     });

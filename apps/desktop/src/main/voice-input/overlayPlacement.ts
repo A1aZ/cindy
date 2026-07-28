@@ -255,8 +255,9 @@ function boundsFromRatio(
  * - 快照带屏内相对比例 → 一律按比例还原到焦点屏。workArea 没变时它还原出的就是
  *   原坐标（±1px 取整），变了（分辨率 / 缩放 / 排布调整）则跟着新尺寸走，不会
  *   把「原来居中」变成「偏左」。
- * - 旧快照没有比例 → 同屏且坐标仍落在该屏内时按绝对坐标原样恢复，否则按坐标
- *   反推出的比例还原，避免恢复到一个早已失效的坐标上。
+ * - 旧快照没有比例 → 坐标仍落在归属屏内时：同屏按绝对坐标原样恢复，跨屏按坐标
+ *   反推的比例迁移；坐标已经不在归属屏内（升级前的坐标 + 之后的显示器重排）则
+ *   无从还原原意，回退默认位置，不去夹出一个贴边的假位置。
  *
  * 记忆所属屏认 `displayId`：显示器重排后旧坐标可能正好落进另一块屏，那是坐标
  * 失效而不是「用户当时放在那块屏」。`displayId` 记着但已不在 = 那块屏被拔掉，
@@ -287,17 +288,26 @@ export function resolveOverlayInitialBounds({
   const savedRatio = savedPosition.ratioX !== undefined && savedPosition.ratioY !== undefined
     ? { ratioX: savedPosition.ratioX, ratioY: savedPosition.ratioY }
     : null;
-  const savedCoordsStillValid = targetDisplay.id === savedDisplay.id
-    && rectContainsPoint(savedDisplay.workArea, boundsCenter(saved));
-  const bounds = !savedRatio && savedCoordsStillValid
-    ? saved
-    : boundsFromRatio(
-      // 旧快照没有比例：按绝对坐标反推，结果夹到 0~1，避免坐标已经失效
-      // （落在归属屏外）时把浮窗甩到屏外。
-      savedRatio ?? computeOverlayPositionRatio(saved, savedDisplay.workArea),
-      targetDisplay.workArea,
-      size,
-    );
+  const savedCoordsUsable = rectContainsPoint(savedDisplay.workArea, boundsCenter(saved));
+  if (!savedRatio) {
+    // 旧快照没有比例，只能从绝对坐标反推。坐标已经不在归属屏内时（典型：升级前
+    // 存的坐标 + 之后显示器重排改了这块屏的 workArea 原点）反推不出有意义的比例
+    // ——夹到 0~1 会把「原本居中」恢复成贴边，不如老老实实回退默认位置。
+    if (!savedCoordsUsable) return fallbackBounds;
+    if (targetDisplay.id === savedDisplay.id) {
+      return clampOverlayBoundsToWorkArea({
+        bounds: saved,
+        workArea: targetDisplay.workArea,
+        contentInset,
+        edgePadding,
+      });
+    }
+  }
+  const bounds = boundsFromRatio(
+    savedRatio ?? computeOverlayPositionRatio(saved, savedDisplay.workArea),
+    targetDisplay.workArea,
+    size,
+  );
   return clampOverlayBoundsToWorkArea({
     bounds,
     workArea: targetDisplay.workArea,

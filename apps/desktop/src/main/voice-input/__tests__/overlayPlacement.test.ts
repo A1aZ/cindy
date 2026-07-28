@@ -218,13 +218,27 @@ describe('resolveOverlayInitialBounds', () => {
     expect(Math.abs(result.x - expectedX)).toBeLessThanOrEqual(1);
   });
 
-  it('屏幕重新排布让旧坐标落到空隙时，仍按 displayId 认回记忆', () => {
-    const result = initial({ x: 3000, y: 500, displayId: 1, updatedAt: 1 }, {
+  it('旧快照没有比例、坐标又已不在归属屏内时回退默认位置', () => {
+    // 升级前存下的绝对坐标 + 之后的显示器重排：反推不出有意义的比例，夹到 0~1
+    // 只会得到一个贴边的假位置，不如回退默认。
+    expect(initial({ x: 3000, y: 500, displayId: primary.id, updatedAt: 1 }, {
       displays: [primary],
       activeDisplay: primary,
-    });
-    // 记忆有效但坐标越界 → clamp 回主屏右边界，而不是退回默认位置。
-    expect(result.x).toBe(primary.workArea.x + primary.workArea.width - WIDTH - (EDGE_PADDING - CONTENT_INSET));
+    })).toEqual(fallbackBounds);
+  });
+
+  it('同样场景下带比例的快照仍能还原记忆（这正是持久化比例的意义）', () => {
+    const result = initial({
+      x: 3000,
+      y: 500,
+      displayId: primary.id,
+      ratioX: 0.5,
+      ratioY: 0.86,
+      updatedAt: 1,
+    }, { displays: [primary], activeDisplay: primary });
+    const expectedX = primary.workArea.x + primary.workArea.width * 0.5 - WIDTH / 2;
+    expect(Math.abs(result.x - expectedX)).toBeLessThanOrEqual(1);
+    expect(result).not.toEqual(fallbackBounds);
   });
 
   it('旧坐标落进另一块屏时，归属屏认 displayId 而不认坐标落点', () => {

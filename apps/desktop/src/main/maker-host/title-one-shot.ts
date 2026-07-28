@@ -34,7 +34,6 @@ import {
   type Effort,
   type Provider,
   type ProviderView,
-  getModel,
   nativeDefaultSourceId,
 } from '@cindy/model-providers';
 import { toSdkModelString } from '@cindy/maker-core';
@@ -341,9 +340,12 @@ export async function generateTitleViaProvider(
     return null;
   }
   // 标题模型这份拷贝被用户停用 → 跳过(回落启发式起名)。rail 条目带 buildRegistry
-  // 烘焙的 disabled 标志;titleModel 不在该 agent 清单里时(getModel 取不到)不额外拦。
+  // 烘焙的 disabled 标志。查找必须跨该供应商的**所有 agent** 清单(findCatalogModel,
+  // 与 buildTitleTarget 解析 titleModel 的口径一致):cc 会话经 OpenAI 路由时,标题模型
+  // gpt-5.4-mini 挂在 codex 清单下,只查会话 agent 会漏掉停用标志(PR #744 review
+  // 第十一轮)。目录里完全找不到该模型时不额外拦。
   const railProvider = rail.find((p) => p.id === providerId);
-  if (railProvider && getModel(railProvider, target.model, args.agentKind)?.disabled === true) {
+  if (railProvider && findCatalogModel(railProvider, target.model)?.disabled === true) {
     log.debug('title oneShot skipped: title model disabled in settings', {
       providerId,
       model: target.model,

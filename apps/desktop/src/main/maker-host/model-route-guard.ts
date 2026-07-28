@@ -150,8 +150,8 @@ export function resolveLenientRoute(
   agent: AgentKind,
   model: string | undefined,
   providerId: string | null,
-  opts: { fallbackModel?: string } = {},
-): { model?: string; providerId: string | null; degraded: boolean } {
+  opts: { fallbackModel?: string; desiredEffort?: string } = {},
+): { model?: string; providerId: string | null; degraded: boolean; effort?: string } {
   if (!model) return { model, providerId, degraded: false };
   let verdict = checkModelRoute(views, agent, model, providerId);
   if (verdict.kind === 'pass') return { model, providerId, degraded: false };
@@ -163,14 +163,37 @@ export function resolveLenientRoute(
       return { model, providerId: verdict.providerId, degraded: true };
     }
   }
+  // ④ 换模型:调用方保存的 effort 是对**原模型**的选择,换出的模型可能不支持
+  //   (如 max 换到只到 xhigh 的模型,原样透传会被上游拒)—— 按解析出的模型条目
+  //   reconcile:仍支持则保留,否则取该条目默认档;条目不带 effort 概念 / 找不到
+  //   时缺席(调用方不携带 effort,交给 agent 默认;PR #744 review 第十一轮)。
+  const withEffort = (
+    resolvedModel: string,
+    resolvedProviderId: string | null,
+  ): { model: string; providerId: string | null; degraded: true; effort?: string } => {
+    const provider = resolvedProviderId
+      ? views.find((p) => p.id === resolvedProviderId)
+      : sourcesForModel([...views], resolvedModel, agent)[0];
+    const copy = provider ? getModel(provider, resolvedModel, agent) : undefined;
+    let effort: string | undefined;
+    if (copy && copy.efforts.length > 0) {
+      effort =
+        opts.desiredEffort && copy.efforts.includes(opts.desiredEffort as never)
+          ? opts.desiredEffort
+          : copy.defaultEffort && copy.efforts.includes(copy.defaultEffort)
+            ? copy.defaultEffort
+            : copy.efforts[copy.efforts.length - 1];
+    }
+    return { model: resolvedModel, providerId: resolvedProviderId, degraded: true, effort };
+  };
   if (opts.fallbackModel && opts.fallbackModel !== model) {
     const fallback = resolveLenientRoute(views, agent, opts.fallbackModel, null);
     if (fallback.model) {
-      return { model: fallback.model, providerId: fallback.providerId, degraded: true };
+      return withEffort(fallback.model, fallback.providerId);
     }
   }
   const pick = pickEnabledFallbackModel(views, agent);
   return pick
-    ? { model: pick.model, providerId: pick.providerId, degraded: true }
+    ? withEffort(pick.model, pick.providerId)
     : { model: undefined, providerId: null, degraded: true };
 }

@@ -14,7 +14,7 @@ import path from 'node:path';
 
 import { BrowserWindow } from 'electron';
 
-import type { Maker } from '@cindy/maker-core';
+import type { Effort, Maker } from '@cindy/maker-core';
 import { isTerminalAgentErrorEvent } from '@cindy/maker-core';
 
 import { tapWindowBroadcast } from '../device-link/broadcast-tap.js';
@@ -119,13 +119,15 @@ export function startLearnHost(deps: StartLearnHostDeps): LearnController {
       // model/provider 可能已被用户停用 —— 宽松降级(丢弃被停用的来源/模型,
       // 退回默认路由),不让 /learn 因停用整体失败。
       const agentKind = originMeta?.agentKind ?? 'claude-code';
+      const desiredModel = originMeta?.model ?? defaultModelFor(agentKind);
       const route = await resolveLenientSessionRoute(
         agentKind,
-        originMeta?.model ?? defaultModelFor(agentKind),
+        desiredModel,
         inheritedProviderId,
         // 保守默认模型同走裁决阶梯:它自己也可能被停用,不能作为未经裁决的兜底
-        // (PR #744 review 第六轮)。
-        { fallbackModel: defaultModelFor(agentKind) },
+        // (PR #744 review 第六轮);desiredEffort 让换模型时的 effort 按解析出的
+        // 模型条目 reconcile(第十一轮)。
+        { fallbackModel: defaultModelFor(agentKind), desiredEffort: originMeta?.effort },
       );
       if (route.degraded) {
         logger.warn('learn session inherited route degraded (disabled in settings)', {
@@ -140,12 +142,16 @@ export function startLearnHost(deps: StartLearnHostDeps): LearnController {
         throw new Error('learn session has no enabled chat model (all models disabled in settings)');
       }
       if (route.providerId) setSessionProvider(opts.id, route.providerId);
+      // 换了模型时 effort 用 reconcile 结果(继承档可能超出兜底模型支持集);未换则
+      // 保持继承档。route.effort 缺席 = 条目无 effort 概念,不携带交给 agent 默认。
+      const routeEffort =
+        routeModel === desiredModel ? originMeta?.effort : (route.effort as Effort | undefined);
       const session = await deps.maker.createSession({
         id: opts.id,
         agentKind,
         workingDir: opts.workingDir,
         model: routeModel,
-        ...(originMeta?.effort ? { effort: originMeta.effort } : {}),
+        ...(routeEffort ? { effort: routeEffort } : {}),
         ...(originMeta?.fastMode != null ? { fastMode: originMeta.fastMode } : {}),
         // 权限收敛到工作区(Codex review ×2,安全红线):蒸馏输入含第三方 hub
         // 内容/自由文本,prompt 注入可诱导越权 —— 绝不能静默提到 bypass(Codex

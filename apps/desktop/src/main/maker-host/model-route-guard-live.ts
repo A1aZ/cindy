@@ -94,8 +94,8 @@ export async function resolveLenientSessionRoute(
   agent: AgentKind,
   model: string | undefined,
   providerId: string | null,
-  opts: { fallbackModel?: string } = {},
-): Promise<{ model?: string; providerId: string | null; degraded: boolean }> {
+  opts: { fallbackModel?: string; desiredEffort?: string } = {},
+): Promise<{ model?: string; providerId: string | null; degraded: boolean; effort?: string }> {
   let views: ProviderView[];
   try {
     views = await getDesktopProviderService().listProviders();

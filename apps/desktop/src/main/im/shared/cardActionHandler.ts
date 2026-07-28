@@ -826,9 +826,17 @@ export function createCardActionHandler(
       desktopPrefs.model,
       desktopPrefs.providerId ?? null,
       // 入口默认模型同走裁决阶梯:它自己也可能被停用,不能作为未经裁决的兜底
-      // (PR #744 review 第六轮)。
-      { fallbackModel: DESKTOP_CC_DEFAULTS.model },
+      // (PR #744 review 第六轮);desiredEffort 让换模型时的 effort 按解析出的
+      // 模型条目 reconcile(第十一轮)。
+      { fallbackModel: DESKTOP_CC_DEFAULTS.model, desiredEffort: desktopPrefs.effort },
     );
+    // 换了模型时 effort 用 reconcile 结果(保存档可能超出兜底模型的支持集,原样透传
+    // 会被上游拒);模型未换则保持用户保存档。route.effort 缺席 = 条目无 effort 概念,
+    // 不携带交给 agent 默认。
+    const routeEffort: Effort | undefined =
+      route.model === desktopPrefs.model
+        ? (desktopPrefs.effort as Effort)
+        : (route.effort as Effort | undefined);
     if (route.degraded) {
       log.warn(
         `control:new saved route degraded (disabled in settings): model=${desktopPrefs.model} providerId=${desktopPrefs.providerId ?? 'null'}`,
@@ -857,7 +865,7 @@ export function createCardActionHandler(
       await updateModelEffort(
         session.id,
         route.model ?? session.model,
-        desktopPrefs.effort as Effort,
+        routeEffort ?? ('medium' as Effort),
         route.providerId,
       );
       setSessionProvider(session.id, route.providerId);
@@ -873,7 +881,7 @@ export function createCardActionHandler(
           workingDir,
           model: requireRouteModel(),
           providerId: route.providerId ?? undefined,
-          effort: desktopPrefs.effort as Effort,
+          ...(routeEffort ? { effort: routeEffort } : {}),
           permissionMode: desktopPrefs.permissionMode as PermissionMode,
           fastMode: desktopPrefs.fastMode,
           title: FBOT_DRAFT_TITLE,
@@ -955,7 +963,7 @@ export function createCardActionHandler(
         workingDir,
         model: requireRouteModel(),
         providerId: route.providerId ?? undefined,
-        effort: desktopPrefs.effort as Effort,
+        ...(routeEffort ? { effort: routeEffort } : {}),
         permissionMode: desktopPrefs.permissionMode as PermissionMode,
         fastMode: desktopPrefs.fastMode,
         title: FBOT_DRAFT_TITLE,

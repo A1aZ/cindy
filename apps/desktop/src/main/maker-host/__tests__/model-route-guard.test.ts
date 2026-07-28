@@ -270,4 +270,36 @@ describe('resolveLenientRoute(自动化直建会话的宽松降级)', () => {
       }),
     ).toEqual({ model: undefined, providerId: null, degraded: true });
   });
+
+  it('④ 换模型时按解析条目 reconcile effort:超出支持集取默认档,仍支持则保留', () => {
+    // haiku 支持 low/high、默认 low;保存档 max 超出支持集。
+    const catalog = {
+      providers: [
+        provider('xd', [model('claude-opus-5')]),
+        provider('anthropic', [
+          model('claude-opus-5'),
+          model('claude-haiku-4-5', { efforts: ['low', 'high'], defaultEffort: 'low' }),
+        ]),
+      ],
+    } as Catalog;
+    const opusDead = {
+      disabledModels: { 'xd:claude-opus-5': true, 'anthropic:claude-opus-5': true },
+    };
+    const v = buildRegistry(catalog, { xd: true, anthropic: true }, {}, opusDead);
+    expect(
+      resolveLenientRoute(v, 'claude-code', 'claude-opus-5', null, { desiredEffort: 'max' }),
+    ).toEqual({
+      model: 'claude-haiku-4-5',
+      providerId: 'anthropic',
+      degraded: true,
+      effort: 'low',
+    });
+    expect(
+      resolveLenientRoute(v, 'claude-code', 'claude-opus-5', null, { desiredEffort: 'high' }),
+    ).toMatchObject({ model: 'claude-haiku-4-5', effort: 'high' });
+    // 模型未换(pass)时不产出 effort:调用方保持自己的保存档。
+    expect(
+      resolveLenientRoute(views(), 'claude-code', 'claude-opus-5', null, { desiredEffort: 'max' }),
+    ).toEqual({ model: 'claude-opus-5', providerId: null, degraded: false });
+  });
 });

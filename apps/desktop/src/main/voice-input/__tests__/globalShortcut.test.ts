@@ -290,7 +290,7 @@ describe('voice input global shortcut registration', () => {
   // key 必须只依赖往返途中不会变的字段,且不同证据不能撞成同一个 key。
   describe('voiceInputDictionaryToastAnchorKey', () => {
     const evidence = {
-      source: 'external_overlay',
+      source: 'external_overlay' as const,
       beforeText: '把这段话写进文档',
       afterText: '把这段话写进文档里',
     };

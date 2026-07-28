@@ -573,6 +573,31 @@ describe('SseTranslator', () => {
     expect((starts[0].data.content_block as Record<string, unknown>).data).toBe('#id=rs_1#ENC');
   });
 
+  it('reasoning 一条 summary delta 都不发且与 message 交错 → 占位仍在,redacted_thinking 排在正文之前', () => {
+    // xai/grok 开服务端工具(x_search)后的实测形态:reasoning item 只有 added / done,
+    // 中间不发任何 summary delta。占位若等首个 delta 就永远等不到 —— 正文会抢先吐完,
+    // 加密推理块被挤到答案后面(UI 上「无法显示的思考过程」出现在结果之后)。
+    const out = run([
+      { type: 'response.created', response: { id: 'r', model: 'grok-4.5' } },
+      { type: 'response.output_item.added', output_index: 0, item: { id: 'rs_1', type: 'reasoning' } },
+      // reasoning 未 done,message item 直接插进来吐正文:必须 defer
+      { type: 'response.output_item.added', output_index: 1, item: { type: 'message' } },
+      { type: 'response.output_text.delta', output_index: 1, delta: '答案正文' },
+      { type: 'response.output_item.done', output_index: 1, item: { type: 'message' } },
+      { type: 'response.output_item.done', output_index: 0, item: { id: 'rs_1', type: 'reasoning', encrypted_content: 'ENC', summary: [] } },
+      { type: 'response.completed', response: { status: 'completed', usage: { input_tokens: 1, output_tokens: 1 } } },
+    ]);
+    assertSequentialBlocks(out);
+    const starts = byType(out, 'content_block_start');
+    expect(starts.map((e) => (e.data.content_block as Record<string, unknown>).type)).toEqual(['redacted_thinking', 'text']);
+    expect((starts[0].data.content_block as Record<string, unknown>).data).toBe('#id=rs_1#ENC');
+    // 正文不因 defer 而丢字。
+    const textDelta = byType(out, 'content_block_delta').find(
+      (e) => (e.data.delta as Record<string, unknown>).type === 'text_delta',
+    );
+    expect((textDelta?.data.delta as Record<string, unknown>).text).toBe('答案正文');
+  });
+
   it('reasoning 只发纯空白 summary delta → 不开 thinking 块,encrypted_content 走 redacted_thinking', () => {
     const out = run([
       { type: 'response.created', response: { id: 'r', model: 'gpt-5.6-sol' } },

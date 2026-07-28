@@ -95,19 +95,20 @@ describe('handleStreamEvent — omitted thinking placeholder (live)', () => {
     expect(msg?.isStreaming).toBe(false);
   });
 
-  it('keeps redacted thinking (independent stage, untouched by the filter)', () => {
+  it('drops redacted thinking (加密推理无明文可读,不进渲染列表)', () => {
     const next = handleStreamEvent(EMPTY_SESSION_STATE, {
       sessionId: SESSION_ID,
       type: 'thinking',
       data: { stage: 'redacted', blockId: 'tb-red' },
     });
-    const msg = next.messages.find((m) => m.role === 'thinking');
-    expect(msg?.thinkingRedacted).toBe(true);
+    expect(next.messages.find((m) => m.role === 'thinking')).toBeUndefined();
+    // 不产生任何消息,也不改动既有 state。
+    expect(next.messages).toEqual(EMPTY_SESSION_STATE.messages);
   });
 });
 
 describe('mapServerMessages — omitted thinking placeholder (restore)', () => {
-  it('filters empty+zero-duration rows, keeps content / duration / redacted rows', () => {
+  it('filters empty+zero-duration rows 与 redacted 行,keeps content / duration 行', () => {
     const mapped = makerChatStore.__mapServerMessagesForTest([
       thinkingRow('t-empty', { kind: 'thinking', text: '', durationMs: 0, isRedacted: false }),
       thinkingRow('t-text', { kind: 'thinking', text: 'real reasoning', durationMs: 0, isRedacted: false }),
@@ -118,8 +119,8 @@ describe('mapServerMessages — omitted thinking placeholder (restore)', () => {
     expect(ids).not.toContain('t-empty');
     expect(ids).toContain('t-text');
     expect(ids).toContain('t-dur');
-    expect(ids).toContain('t-red');
-    expect(mapped.find((m) => m.clientId === 't-red')?.thinkingRedacted).toBe(true);
+    // 历史里的加密推理行同样不复原(与 live 路径同判定);DB 行本身保留不动。
+    expect(ids).not.toContain('t-red');
   });
 
   it('legacy rows without text/durationMs fields are treated as placeholders', () => {

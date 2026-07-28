@@ -2159,22 +2159,13 @@ export function handleStreamEvent(
         };
       }
 
-      // stage === 'redacted' —— 落库已收口 main(onThinkingEvent),renderer 只做 UI。
-      return {
-        ...state,
-        messages: [
-          ...state.messages,
-          {
-            clientId: data.blockId,
-            role: 'thinking',
-            content: '',
-            isStreaming: false,
-            thinkingRedacted: true,
-            createdAt: new Date().toISOString(),
-            ...assistantMetaFields,
-          },
-        ],
-      };
+      // stage === 'redacted' —— 加密推理不进渲染列表。
+      //
+      // 这类块没有任何明文可读,卡片只能显示"无法显示的思考过程";上游(如 Grok 开了
+      // 服务端搜索)一轮能产出十几条,会把真实产出淹掉。落库仍由 main(onThinkingEvent)
+      // 照旧收口、encrypted_content 也不受影响(回放走 agent 侧 transcript,不依赖这里),
+      // 这里只是不展示。恢复展示 = 删掉这个提前 return,并同步 mapServerMessages 的同名过滤。
+      return state;
     }
 
     case 'agent_task_update': {
@@ -8325,7 +8316,12 @@ function mapServerMessages(serverMsgs: Message[]): ChatMessage[] {
       const c = m.content as Record<string, unknown>;
       const text = typeof c.text === 'string' ? c.text : '';
       const durationMs = typeof c.durationMs === 'number' ? c.durationMs : 0;
-      if (c.isRedacted !== true && isOmittedThinkingPlaceholder(text, durationMs)) return false;
+      // 加密推理(redacted)一律不展示:它没有任何明文可读,卡片只能显示"无法显示的
+      // 思考过程",对用户是纯噪音;上游开服务端工具后一轮能出十几条,会淹掉真实产出。
+      // 与 live 路径(handleStreamEvent 的 stage==='redacted')同判定。DB 行照旧保留,
+      // 只是不进渲染列表 —— 将来要恢复展示,删掉这一条即可。
+      if (c.isRedacted === true) return false;
+      if (isOmittedThinkingPlaceholder(text, durationMs)) return false;
       return true;
     }
     return true;

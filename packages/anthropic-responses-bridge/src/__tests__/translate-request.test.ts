@@ -179,6 +179,44 @@ describe('translateRequest', () => {
     expect(out.input).toEqual([{ type: 'function_call_output', call_id: 'c1', output: 'r1\nr2' }]);
   });
 
+  it('serverSideTools 恒定追加在 function tools 之后(位置固定 → 前缀稳定)', () => {
+    const req: AnthropicMessagesRequest = {
+      model: 'xai/grok-4.5',
+      tools: [{ name: 'f', description: 'd', input_schema: { type: 'object', properties: {} } }],
+      tool_choice: { type: 'auto' },
+      messages: [],
+    };
+    const out = translateRequest(req, { model: 'grok-4.5', serverSideTools: [{ type: 'x_search' }] });
+
+    expect(out.tools).toEqual([
+      { type: 'function', name: 'f', description: 'd', strict: false, parameters: { type: 'object', properties: {} } },
+      { type: 'x_search' },
+    ]);
+    // 本地 function tool 仍在 → 调用策略字段照发。
+    expect(out.parallel_tool_calls).toBe(true);
+    expect(out.tool_choice).toBe('auto');
+  });
+
+  it('纯服务端工具轮(请求没带 function tool)也下发 tools,但不发 tool_choice / parallel_tool_calls', () => {
+    const out = translateRequest(
+      { model: 'xai/grok-4.5', messages: [] },
+      { model: 'grok-4.5', serverSideTools: [{ type: 'x_search' }] },
+    );
+
+    expect(out.tools).toEqual([{ type: 'x_search' }]);
+    // tool_choice 只描述本地 function tool 的调用策略;没有 function tool 时发它会指向不存在的工具。
+    expect(out.tool_choice).toBeUndefined();
+    expect(out.parallel_tool_calls).toBeUndefined();
+  });
+
+  it('不传 serverSideTools 时 tools 行为与改造前一致(空数组不落 tools 字段)', () => {
+    const out = translateRequest({ model: 'gpt-5.5', messages: [] }, { model: 'gpt-5.5' });
+    expect(out.tools).toBeUndefined();
+
+    const empty = translateRequest({ model: 'gpt-5.5', messages: [] }, { model: 'gpt-5.5', serverSideTools: [] });
+    expect(empty.tools).toBeUndefined();
+  });
+
   it('maps thinking budget → reasoning effort', () => {
     const low = translateRequest(
       { model: 'gpt-5.5', messages: [], thinking: { type: 'enabled', budget_tokens: 2000 } },

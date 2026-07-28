@@ -6,6 +6,7 @@
  *   messages[]                → input[](按 block 顺序拆成 message / function_call /
  *                               function_call_output / reasoning 四种 item)
  *   tools[].input_schema      → function tools[].parameters
+ *   (provider 声明)            → 追加在 function tools 之后的上游服务端工具(如 xAI x_search)
  *   tool_choice               → tool_choice
  *   thinking.budget_tokens    → reasoning.effort
  *   max_tokens                → max_output_tokens
@@ -26,6 +27,7 @@ import type {
   ResponsesContentPart,
   ResponsesInputItem,
   ResponsesRequest,
+  ResponsesServerTool,
   ResponsesTool,
   ResponsesToolChoice,
 } from './types.js';
@@ -270,6 +272,12 @@ export interface TranslateRequestOptions {
    * 省略 = 不回放任何带 signature 的 reasoning(保守:无法证明出处即不回放)。
    */
   providerPrefix?: string;
+  /**
+   * 上游自带的服务端工具声明(如 xAI 的 `{ type: 'x_search' }`),由 provider 配置按 model 决定。
+   * 恒定追加在 function tools **之后**,顺序稳定,保证请求前缀在会话内逐轮一致。
+   * 请求本身没有任何 function tool 时也会单独下发(纯服务端工具轮)。
+   */
+  serverSideTools?: ResponsesServerTool[];
 }
 
 /**
@@ -290,13 +298,15 @@ export function translateRequest(
     input.push(...messageToInputItems(msg, reasoningReplay));
   }
 
-  const tools: ResponsesTool[] | undefined = req.tools?.map((t) => ({
+  const functionTools: ResponsesTool[] = (req.tools ?? []).map((t) => ({
     type: 'function',
     name: t.name,
     description: t.description,
     strict: false,
     parameters: t.input_schema ?? { type: 'object', properties: {} },
   }));
+  // 服务端工具恒定排在 function tools 之后:位置固定 → 请求前缀逐轮稳定(缓存友好)。
+  const tools: ResponsesTool[] = [...functionTools, ...(opts.serverSideTools ?? [])];
 
   const out: ResponsesRequest = {
     model: opts.model,
@@ -316,8 +326,10 @@ export function translateRequest(
 
   const instructions = systemToInstructions(req.system);
   if (instructions) out.instructions = instructions;
-  if (tools && tools.length > 0) {
-    out.tools = tools;
+  if (tools.length > 0) out.tools = tools;
+  // parallel_tool_calls / tool_choice 只描述**本地 function tool** 的调用策略:纯服务端工具轮
+  // (客户端没带任何 function tool)不发这两个字段,避免 tool_choice 指向不存在的 function。
+  if (functionTools.length > 0) {
     out.parallel_tool_calls = true;
     const tc = toolChoiceToResponses(req.tool_choice);
     if (tc) out.tool_choice = tc;

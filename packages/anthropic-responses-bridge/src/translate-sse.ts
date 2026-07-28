@@ -284,6 +284,16 @@ export class SseTranslator {
     if (itemType === 'reasoning') {
       // 先登记,不开块 —— 有可见 summary 时在首个 summary delta 处开 thinking 块;
       // 无可见 summary 则在 output_item.done 处作为 redacted_thinking 整块吐。
+      //
+      // 登记的同时就把本 item 占为「当前打开项」(opened=false 的占位态):不可打断语义必须
+      // 从 item 出生就生效,不能等首个 summary delta。上游**一条 summary delta 都不发**、
+      // 只在 done 时给 encrypted_content 时(实测 xai/grok 开服务端工具后的常见形态),
+      // 等 delta 才占位就等不到:后续 message item 会抢先吐完正文,本 item 的 done 再兜底成
+      // redacted_thinking,块顺序变成「正文 → 推理」——UI 上加密推理排到答案后面,
+      // 且 translate-request 回放 reasoning 的顺序也跟着错位(Responses 回放顺序敏感)。
+      // 占位由 item.done 释放;上游始终不发 done 时,流收尾的强制排空兜底(见 drainDeferred)。
+      this.closeOpenBlockForOtherItem(outputIndex, out);
+      this.openOutputIndex = outputIndex;
       this.blocks.set(outputIndex, { blockIndex: -1, kind: 'thinking', opened: false });
     } else if (itemType === 'message') {
       // 先登记,不开块 —— 首个非空 output_text.delta 时才开 text 块。曾经在

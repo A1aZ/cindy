@@ -8,21 +8,8 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useUpdateStatus } from '@/hooks/useUpdateStatus';
 import { useUpdateBannerDismiss } from '@/hooks/useUpdateBannerDismiss';
 import { CURRENT_CINDY_REGION } from '../../../shared/brandRegion';
+import { shouldLabelRegion } from '../../../shared/regionCode';
 import { MobileDownloadDialog } from './MobileDownloadDialog';
-
-/**
- * 版本行的区域前缀(与登录页 REGION_PILL_KEY 同一口径)。
- *
- * **global 故意缺席**:Cindy 本身就是全球产品,默认形态不需要给自己贴标签证明
- * 是全球版——只有为特定法规单独构建的版本才被标注(见
- * `docs/product-rules/region-and-editions.md` §2.3)。cn / dev 保留代号:两者
- * 连的都不是 global 端点,这一行是用户自查当前构建身份的位置。
- * 区域代号不翻译,四语同文,不进 i18n。
- */
-const REGION_LABEL: Partial<Record<typeof CURRENT_CINDY_REGION, string>> = {
-  cn: 'CN',
-  dev: 'Dev',
-};
 
 interface UserInfoSectionProps {
   isCollapsed: boolean;
@@ -61,7 +48,18 @@ export function UserInfoSection({ isCollapsed, onOpenUpdateNotice }: UserInfoSec
   const initial = displayName.charAt(0).toUpperCase();
   const appDisplayVersion = window.electronAPI.appDisplayVersion;
   const appDisplayVersionDetail = window.electronAPI.appDisplayVersionDetail;
-  const appRegionLabel = REGION_LABEL[CURRENT_CINDY_REGION];
+  // 版本行的区域前缀。「哪些区域要标」只有 CINDY_REGION_CODE 一个事实源(issue
+  // 反馈链路同源),口径见 DESIGN.md §16.3 与 region-and-editions.md §2.3:
+  // cn → CN、dev → Dev、**global 不标**——Cindy 默认版本不给自己贴标签自证是全球版,
+  // global 构建这一行只剩版本号。展示文案走 i18n(同 login.regionPill.* 的做法),
+  // 便于日后改判为「中国大陆版」这类可译文案时不必回改组件;key 写成字面量分支而非
+  // 动态拼接,保证 pnpm check:i18n 的静态提取能看到全部 key。一致性由
+  // __tests__/regionCode.consistency.test.ts 逐区域逐语言断言。
+  const appRegionLabel = !shouldLabelRegion(CURRENT_CINDY_REGION)
+    ? null
+    : CURRENT_CINDY_REGION === 'cn'
+      ? t('sidebar.user.regionCodeCn')
+      : t('sidebar.user.regionCodeDev');
   const appVersionLabel = appRegionLabel
     ? `${appRegionLabel} · ${appDisplayVersion}`
     : appDisplayVersion;

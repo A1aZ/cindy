@@ -65,27 +65,29 @@ export interface PendingCredentialSwitchDeps {
   /** 生效后唤醒该会话的输入队列(排队消息此前被 pending 门挡住)。 */
   onApplied?: (sessionId: string) => void;
   /**
-   * 停用轴裁决(生产 = model-route-guard-live 的 verdictForModelRoute)。SET_MODEL
-   * 请求时刻已裁决过,但 deferred 切换的**生效**可能在数分钟后 —— 期间目标模型 /
-   * 来源可能已被用户停用,收口前必须重裁决(PR #744 review 第七轮)。缺席 = 不裁决。
+   * 停用轴裁决(生产 = model-route-guard-live 的 resolveLenientSessionRoute)。
+   * SET_MODEL 请求时刻已裁决过,但 deferred 切换的**生效**可能在数分钟后 —— 期间
+   * 目标模型 / 来源可能已被用户停用,收口前必须重裁决(PR #744 review 第七轮)。
+   * 宽松降级形态:模型原样 = 只调来源;模型换了 = 目标全停、已解析出启用兜底
+   * (renderer 预写进 DB 的停用模型必须连模型一起纠正,否则下一次懒 resume 经
+   * 停用的隐式来源重建,第十四轮);model 缺席 = 目录全停。缺席 = 不裁决。
    */
-  checkRoute?: (
+  resolveRoute?: (
     agent: AgentKind,
     model: string,
     providerId: string | null,
-  ) => Promise<
-    | { kind: 'pass' }
-    | { kind: 'reroute'; providerId: string }
-    | { kind: 'reject'; reason: string }
-  >;
+  ) => Promise<{ model?: string; providerId: string | null; degraded: boolean; effort?: string }>;
   /**
-   * 把收口裁决后的实际 route 持久化(生产 = 直写 sessions.provider_id + 广播
+   * 把收口裁决后的实际 route 持久化(生产 = 直写 sessions 行 + 广播
    * sessions:patched)。renderer 在 deferred 被接受那一刻已按**请求值**落盘 DB;
-   * 收口裁决改道 / 丢弃被停用的显式来源时必须回写实际值 —— 否则下一次懒 resume
-   * 按 DB 里的停用来源重建(resume 免裁决,PR #744 review 第十轮)。缺席 = 只写
-   * 内存 store(测试最小 harness)。
+   * 收口裁决改道 / 丢弃被停用的显式来源 / 全停换模型时必须回写实际值 —— 否则下
+   * 一次懒 resume 按 DB 里的停用路由重建(resume 免裁决,PR #744 review 第十、
+   * 十四轮)。缺席 = 只写内存 store(测试最小 harness)。
    */
-  persistRoute?: (sessionId: string, route: { providerId: string | null }) => Promise<void>;
+  persistRoute?: (
+    sessionId: string,
+    route: { providerId: string | null; model?: string; effort?: string },
+  ) => Promise<void>;
   /** 自愈兜底重试间隔覆写(测试用)。 */
   retryDelayMs?: number;
   logger?: {
@@ -198,47 +200,53 @@ export class PendingCredentialSwitchService {
   }
 
   /**
-   * 收口前的停用重裁决(PR #744 review 第七轮):SET_MODEL 时刻裁决过,但 deferred
-   * 生效可能在数分钟后,期间目标可能被停用。阶梯与 resolveLenientRoute 同思路但
-   * 模型不换(renderer 已按用户选择落盘 DB):显式来源被停用 ⇒ 丢来源走隐式 / 替代;
-   * 全部拷贝被停用 ⇒ 不写 route(apply=false,warn 留痕),登记照常收口(输入队列
-   * 不能被冻结)。裁决异常按放行(与 live 壳同则,不把裁决故障升级成切换丢失)。
+   * 收口前的停用重裁决(PR #744 review 第七轮起):SET_MODEL 时刻裁决过,但 deferred
+   * 生效可能在数分钟后,期间目标可能被停用。走宽松降级(resolveRoute):
+   *   - 模型原样 ⇒ 只按裁决调整来源(pass 原样 / reroute 替代 / 丢弃停用显式来源);
+   *   - 模型换了 ⇒ 目标全部拷贝被停用、已解析出启用兜底模型 —— 连模型一起落地
+   *     (renderer 预写进 DB 的停用模型必须纠正,否则下一次懒 resume 经停用的隐式
+   *     来源重建,第十四轮);
+   *   - model 缺席 ⇒ 目录里一个启用对话模型都没有,只清显式来源(最小错状态)。
+   * 裁决异常按「不写 route」保守处理(第八轮);agentKind 缺席时只做「原样通过 /
+   * 清空来源」二choice,绝不采纳按别的 agent 解析出的来源或模型(第十二、十三轮)。
    */
   private async resolveApplyRoute(
     target: PendingCredentialSwitch,
-  ): Promise<{ providerId: string | null; apply: boolean }> {
-    const { checkRoute } = this.deps;
-    if (!checkRoute) return { providerId: target.providerId, apply: true };
+  ): Promise<{ providerId: string | null; model?: string; effort?: string; apply: boolean }> {
+    const { resolveRoute } = this.deps;
+    if (!resolveRoute) return { providerId: target.providerId, apply: true };
     try {
       if (!target.agentKind) {
-        // agentKind 缺席(会话行缺失等罕见路径):不能跳过复核(第九轮),但也不能
-        // 采纳按**别的 agent** 解析出的 reroute 来源钉给真实会话 —— 那个来源可能
-        // 不提供该模型或其拷贝也被停用(PR #744 review 第十二轮 Greptile)。规则:
-        // 两个 agent 的阶梯都「原样通过」才原样应用;任一 agent 要求改动
-        // (reject / reroute / 丢来源)即把显式来源清空(最小错状态,同全停语义),
-        // 不猜测替代来源。目录不提供该模型的 agent 天然 pass,不影响结果。
         for (const agent of ['claude-code', 'codex'] as AgentKind[]) {
-          const laddered = await this.ladderVerdict(checkRoute, agent, target);
-          if (!laddered.apply || laddered.providerId !== target.providerId) {
+          const resolved = await resolveRoute(agent, target.model, target.providerId);
+          if (
+            resolved.model !== target.model ||
+            resolved.providerId !== target.providerId ||
+            resolved.degraded
+          ) {
             return { providerId: null, apply: true };
           }
         }
         return { providerId: target.providerId, apply: true };
       }
-      const laddered = await this.ladderVerdict(checkRoute, target.agentKind, target);
-      if (!laddered.apply) {
-        // 确定性全停(所有拷贝被停用):改为「显式来源清空」落地(apply=true,
-        // providerId=null)—— 不能保留 DB 里由 renderer 预写的停用来源钉住下一次
-        // 懒 resume(resume 免裁决);模型本身已死,清成隐式路由是最小错状态
-        // (PR #744 review 第十轮)。
+      const resolved = await resolveRoute(target.agentKind, target.model, target.providerId);
+      if (!resolved.model) {
         return { providerId: null, apply: true };
       }
-      return laddered;
+      if (resolved.model !== target.model) {
+        return {
+          providerId: resolved.providerId,
+          model: resolved.model,
+          ...(resolved.effort ? { effort: resolved.effort } : {}),
+          apply: true,
+        };
+      }
+      return { providerId: resolved.providerId, apply: true };
     } catch (err) {
       // 复核异常按「不写 route」保守处理:目标可能恰在等待期间被停用,异常放行会把
-      // 停用来源写回会话(PR #744 review 第八轮)。生产 checkRoute
-      // (verdictForModelRoute)自带目录故障降级、不抛,此分支纯防御 —— 保守方向
-      // 零日常代价;登记照常收口,模型选择本身已由 renderer 落盘,不丢失。
+      // 停用来源写回会话(PR #744 review 第八轮)。生产 resolveRoute
+      // (resolveLenientSessionRoute)自带目录故障降级、不抛,此分支纯防御 ——
+      // 保守方向零日常代价;登记照常收口,模型选择本身已由 renderer 落盘,不丢失。
       this.deps.logger?.warn('pending credential switch revalidation failed; route not applied', {
         model: target.model,
         providerId: target.providerId,
@@ -248,23 +256,6 @@ export class PendingCredentialSwitchService {
     }
   }
 
-  /** 单 agent 的降级阶梯:显式来源被停用 ⇒ 丢来源再判(隐式默认 / 替代)。 */
-  private async ladderVerdict(
-    checkRoute: NonNullable<PendingCredentialSwitchDeps['checkRoute']>,
-    agent: AgentKind,
-    target: PendingCredentialSwitch,
-  ): Promise<{ providerId: string | null; apply: boolean }> {
-    let verdict = await checkRoute(agent, target.model, target.providerId);
-    if (verdict.kind === 'pass') return { providerId: target.providerId, apply: true };
-    if (verdict.kind === 'reroute') return { providerId: verdict.providerId, apply: true };
-    if (target.providerId) {
-      verdict = await checkRoute(agent, target.model, null);
-      if (verdict.kind === 'pass') return { providerId: null, apply: true };
-      if (verdict.kind === 'reroute') return { providerId: verdict.providerId, apply: true };
-    }
-    return { providerId: target.providerId, apply: false };
-  }
-
   /** 重裁决 + 身份守卫后收口:await 期间用户改选/取消 ⇒ 本次让位(新登记有自己的定时器)。 */
   private async finalizeApplyChecked(
     sessionId: string,
@@ -272,9 +263,9 @@ export class PendingCredentialSwitchService {
     reason: string,
   ): Promise<void> {
     // 无裁决依赖:同步快路径(onSessionClosed 的调用方不 await,收口必须在同一
-    // tick 完成才能保住既有「关闭即生效」时序)。注入了 checkRoute 就必审 ——
+    // tick 完成才能保住既有「关闭即生效」时序)。注入了 resolveRoute 就必审 ——
     // agentKind 缺席不构成绕过(resolveApplyRoute 内对双 agent 保守裁决)。
-    if (!this.deps.checkRoute) {
+    if (!this.deps.resolveRoute) {
       this.finalizeApply(sessionId, target, { providerId: target.providerId, apply: true }, reason);
       return;
     }
@@ -292,31 +283,36 @@ export class PendingCredentialSwitchService {
   private finalizeApply(
     sessionId: string,
     target: PendingCredentialSwitch,
-    resolved: { providerId: string | null; apply: boolean },
+    resolved: { providerId: string | null; model?: string; effort?: string; apply: boolean },
     reason: string,
   ): void {
     this.pending.delete(sessionId);
     this.clearRetry(sessionId);
     if (resolved.apply) {
       setSessionProvider(sessionId, resolved.providerId);
-      // 裁决改了落地来源(reroute / 丢弃停用显式来源 / 全停清空):回写 DB ——
-      // renderer 在 deferred 接受时已按请求值落盘 sessions.provider_id,不纠正的话
-      // 下一次懒 resume 按停用来源重建(resume 免裁决)。fire-and-forget,失败仅
-      // warn(内存 store 已是权威,DB 差异在下次显式切换时收敛)。
-      if (resolved.providerId !== target.providerId && this.deps.persistRoute) {
-        void this.deps.persistRoute(sessionId, { providerId: resolved.providerId }).catch(
-          (err) => {
-            this.deps.logger?.warn('pending credential switch: persist resolved route failed', {
-              sessionId,
-              providerId: resolved.providerId,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          },
-        );
+      // 裁决改了落地路由(reroute / 丢弃停用显式来源 / 全停换模型或清空):回写 DB
+      // —— renderer 在 deferred 接受时已按请求值落盘 sessions 行,不纠正的话下一次
+      // 懒 resume 按停用路由重建(resume 免裁决)。fire-and-forget,失败仅 warn
+      // (内存 store 已是权威,DB 差异在下次显式切换时收敛)。
+      const modelChanged = !!resolved.model && resolved.model !== target.model;
+      if ((resolved.providerId !== target.providerId || modelChanged) && this.deps.persistRoute) {
+        void this.deps.persistRoute(sessionId, {
+          providerId: resolved.providerId,
+          ...(modelChanged
+            ? { model: resolved.model, ...(resolved.effort ? { effort: resolved.effort } : {}) }
+            : {}),
+        }).catch((err) => {
+          this.deps.logger?.warn('pending credential switch: persist resolved route failed', {
+            sessionId,
+            providerId: resolved.providerId,
+            model: resolved.model,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
       }
       this.deps.logger?.info(`pending credential switch applied on ${reason}`, {
         sessionId,
-        model: target.model,
+        model: resolved.model ?? target.model,
         providerId: resolved.providerId,
       });
     } else {
@@ -339,7 +335,7 @@ export class PendingCredentialSwitchService {
     try {
       this.deps.broadcastApplied?.({
         sessionId,
-        model: target.model,
+        model: resolved.apply ? (resolved.model ?? target.model) : target.model,
         providerId: resolved.apply ? resolved.providerId : target.providerId,
       });
     } catch (err) {

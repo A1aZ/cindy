@@ -609,6 +609,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // 停用轴准入(PR #744 review):每次 fire 都是新的付费调用,不属于「运行中的会话
     // 不打断」豁免 —— 保存过的路由被用户停用后,本次 run 必须以明确错误失败(run 历史
     // 可见),不能继续经停用路由扣费;隐式默认落点被停用而有启用替代拷贝时改路由过去。
+    let reroutedProviderId: string | null = null;
     if (this.deps.checkModelRoute) {
       const verdict = await this.deps.checkModelRoute(effectiveAgentKind, model, createProviderId);
       if (verdict.kind === 'reject') {
@@ -616,7 +617,10 @@ export class MakerScheduleRunner implements ScheduleRunner {
           `schedule route unavailable: model "${model}" is disabled in settings (${verdict.reason})`,
         );
       }
-      if (verdict.kind === 'reroute' && !createProviderId) createProviderId = verdict.providerId;
+      if (verdict.kind === 'reroute' && !createProviderId) {
+        createProviderId = verdict.providerId;
+        reroutedProviderId = verdict.providerId;
+      }
     }
     // issue #456:未门控入口(定时任务 fire)按所选模型自报的 supported efforts 把 effort
     // clamp 到最高兼容档,避免把模型不支持的档(如 gpt-5.5 + max/ultra)透给上游被拒。
@@ -792,6 +796,12 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // null 的字节级不变性见 session-provider-store 契约;空值全程不进新分支(no-break)。
     if (explicitProviderId) {
       setSessionProvider(session.id, explicitProviderId);
+    } else if (reroutedProviderId) {
+      // 停用轴 reroute:隐式默认落点被停用,fire 前已裁决出启用替代 —— 复用的 live
+      // 会话 createSession 忽略 opts.providerId,只有显式写 provider store 才对本次
+      // 心跳生效,否则照旧经停用的隐式默认派发(PR #744 review 第十四轮)。fresh
+      // spawn 时与 opts.providerId 幂等。
+      setSessionProvider(session.id, reroutedProviderId);
     } else if (isHeartbeat) {
       hydrateSessionProvider(session.id, heartbeatProviderId);
     }

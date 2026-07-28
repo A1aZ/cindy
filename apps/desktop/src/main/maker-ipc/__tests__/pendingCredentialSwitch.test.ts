@@ -33,7 +33,7 @@ interface HarnessSession {
 
 function createHarness(
   sessions: HarnessSession[],
-  opts?: { retryDelayMs?: number; checkRoute?: PendingCredentialSwitchDeps['checkRoute'] },
+  opts?: { retryDelayMs?: number; resolveRoute?: PendingCredentialSwitchDeps['resolveRoute'] },
 ) {
   const closeSession = vi.fn(async (_sessionId: string) => {});
   const broadcastApplied = vi.fn<NonNullable<PendingCredentialSwitchDeps['broadcastApplied']>>();
@@ -49,7 +49,7 @@ function createHarness(
     broadcastApplied,
     onApplied,
     persistRoute,
-    ...(opts?.checkRoute ? { checkRoute: opts.checkRoute } : {}),
+    ...(opts?.resolveRoute ? { resolveRoute: opts.resolveRoute } : {}),
     ...(opts?.retryDelayMs !== undefined ? { retryDelayMs: opts.retryDelayMs } : {}),
   });
   return { service, closeSession, broadcastApplied, onApplied, persistRoute, sessions };
@@ -261,18 +261,18 @@ describe('PendingCredentialSwitchService', () => {
     expect(h.onApplied).not.toHaveBeenCalled();
   });
 
-  describe('收口前的停用重裁决(PR #744 review 第七轮)', () => {
-    it('显式来源在等待期间被停用 ⇒ 丢来源按裁决落地(reroute 到替代来源)', async () => {
+  describe('收口前的停用重裁决(PR #744 review 第七轮起,宽松降级形态)', () => {
+    it('显式来源在等待期间被停用 ⇒ 按裁决改道到替代来源并回写 DB', async () => {
       const sessionId = rememberSession('pending-switch-revalidate-reroute');
       setSessionProvider(sessionId, 'openai');
-      const checkRoute = vi.fn(async (_a: string, _m: string, providerId: string | null) =>
-        providerId === 'xd'
-          ? ({ kind: 'reject', reason: 'explicit-source-disabled' } as const)
-          : ({ kind: 'reroute', providerId: 'anthropic' } as const),
-      );
+      const resolveRoute = vi.fn(async (_a: string, model: string, _pid: string | null) => ({
+        model,
+        providerId: 'anthropic',
+        degraded: true,
+      }));
       const h = createHarness(
         [{ id: sessionId, agentKind: 'claude-code', remoteHostId: null, isTurnRunning: () => false }],
-        { checkRoute },
+        { resolveRoute },
       );
 
       h.service.register(sessionId, {
@@ -284,6 +284,7 @@ describe('PendingCredentialSwitchService', () => {
 
       expect(h.service.has(sessionId)).toBe(false);
       expect(getSessionProvider(sessionId)).toBe('anthropic');
+      expect(h.persistRoute).toHaveBeenCalledWith(sessionId, { providerId: 'anthropic' });
       expect(h.broadcastApplied).toHaveBeenCalledWith({
         sessionId,
         model: 'claude-opus-5',
@@ -292,13 +293,20 @@ describe('PendingCredentialSwitchService', () => {
       expect(h.onApplied).toHaveBeenCalledWith(sessionId);
     });
 
-    it('目标模型全部拷贝被停用 ⇒ 显式来源清空(store + DB 回写),登记收口、队列解冻', async () => {
-      const sessionId = rememberSession('pending-switch-revalidate-reject');
+    it('目标模型全部拷贝被停用 ⇒ 连模型一起换到启用兜底并回写(store + DB + 广播)', async () => {
+      // renderer 已把停用模型预写进 DB:只清来源不够 —— 下一次懒 resume 会经停用的
+      // 隐式来源重建(resume 免裁决,PR #744 review 第十四轮)。
+      const sessionId = rememberSession('pending-switch-revalidate-model-swap');
       setSessionProvider(sessionId, 'openai');
-      const checkRoute = vi.fn(async () => ({ kind: 'reject', reason: 'model-disabled' } as const));
+      const resolveRoute = vi.fn(async () => ({
+        model: 'claude-haiku-4-5',
+        providerId: 'anthropic',
+        degraded: true,
+        effort: 'low',
+      }));
       const h = createHarness(
         [{ id: sessionId, agentKind: 'claude-code', remoteHostId: null, isTurnRunning: () => false }],
-        { checkRoute },
+        { resolveRoute },
       );
 
       h.service.register(sessionId, {
@@ -309,27 +317,54 @@ describe('PendingCredentialSwitchService', () => {
       await h.service.onTurnSettled(sessionId);
 
       expect(h.service.has(sessionId)).toBe(false);
-      // 停用来源不落地:清成隐式路由(renderer 已把停用来源预写进 DB,必须回写纠正,
-      // 否则下一次懒 resume 按停用来源重建 —— resume 免裁决)。
-      expect(getSessionProvider(sessionId)).toBeNull();
-      expect(h.persistRoute).toHaveBeenCalledWith(sessionId, { providerId: null });
-      expect(h.onApplied).toHaveBeenCalledWith(sessionId); // 队列必须解冻
+      expect(getSessionProvider(sessionId)).toBe('anthropic');
+      expect(h.persistRoute).toHaveBeenCalledWith(sessionId, {
+        providerId: 'anthropic',
+        model: 'claude-haiku-4-5',
+        effort: 'low',
+      });
       expect(h.broadcastApplied).toHaveBeenCalledWith({
         sessionId,
-        model: 'claude-opus-5',
-        providerId: null,
+        model: 'claude-haiku-4-5',
+        providerId: 'anthropic',
       });
+      expect(h.onApplied).toHaveBeenCalledWith(sessionId);
     });
 
-    it('复核异常 ⇒ 保守不写 route(登记照常收口、队列解冻),不把异常当放行', async () => {
+    it('目录里一个启用对话模型都没有 ⇒ 只清显式来源(store null + DB 回写 null)', async () => {
+      const sessionId = rememberSession('pending-switch-revalidate-all-dead');
+      setSessionProvider(sessionId, 'openai');
+      const resolveRoute = vi.fn(async () => ({
+        model: undefined,
+        providerId: null,
+        degraded: true,
+      }));
+      const h = createHarness(
+        [{ id: sessionId, agentKind: 'claude-code', remoteHostId: null, isTurnRunning: () => false }],
+        { resolveRoute },
+      );
+
+      h.service.register(sessionId, {
+        model: 'claude-opus-5',
+        providerId: 'xd',
+        agentKind: 'claude-code',
+      });
+      await h.service.onTurnSettled(sessionId);
+
+      expect(getSessionProvider(sessionId)).toBeNull();
+      expect(h.persistRoute).toHaveBeenCalledWith(sessionId, { providerId: null });
+      expect(h.onApplied).toHaveBeenCalledWith(sessionId);
+    });
+
+    it('复核异常 ⇒ 保守不写 route(登记收口、队列解冻),不把异常当放行', async () => {
       const sessionId = rememberSession('pending-switch-revalidate-throw');
       setSessionProvider(sessionId, 'openai');
-      const checkRoute = vi.fn(async () => {
+      const resolveRoute = vi.fn(async () => {
         throw new Error('catalog exploded');
       });
       const h = createHarness(
         [{ id: sessionId, agentKind: 'claude-code', remoteHostId: null, isTurnRunning: () => false }],
-        { checkRoute },
+        { resolveRoute },
       );
 
       h.service.register(sessionId, {
@@ -341,47 +376,51 @@ describe('PendingCredentialSwitchService', () => {
 
       expect(h.service.has(sessionId)).toBe(false);
       expect(getSessionProvider(sessionId)).toBe('openai');
+      expect(h.persistRoute).not.toHaveBeenCalled();
       expect(h.onApplied).toHaveBeenCalledWith(sessionId);
       expect(h.broadcastApplied).toHaveBeenCalledTimes(1);
     });
 
-    it('裁决通过 ⇒ 原样应用;register 未带 agentKind ⇒ 对双 agent 保守裁决,不构成绕过', async () => {
+    it('裁决通过 ⇒ 原样应用;register 未带 agentKind ⇒ 双 agent 保守,不采纳跨 agent 结果', async () => {
       const sessionId = rememberSession('pending-switch-revalidate-pass');
       setSessionProvider(sessionId, 'openai');
-      const checkRoute = vi.fn<NonNullable<PendingCredentialSwitchDeps['checkRoute']>>(
-        async () => ({ kind: 'pass' as const }),
+      const resolveRoute = vi.fn(
+        async (_a: string, model: string, providerId: string | null) => ({
+          model,
+          providerId,
+          degraded: false,
+        }),
       );
       const h = createHarness(
         [{ id: sessionId, agentKind: 'codex', remoteHostId: null, isTurnRunning: () => false }],
-        { checkRoute },
+        { resolveRoute },
       );
 
       h.service.register(sessionId, { model: 'gpt-5.5', providerId: 'xd', agentKind: 'codex' });
       await h.service.onTurnSettled(sessionId);
       expect(getSessionProvider(sessionId)).toBe('xd');
-      expect(checkRoute).toHaveBeenCalledWith('codex', 'gpt-5.5', 'xd');
+      expect(h.persistRoute).not.toHaveBeenCalled();
+      expect(resolveRoute).toHaveBeenCalledWith('codex', 'gpt-5.5', 'xd');
 
-      // agentKind 缺席(会话行缺失等罕见路径):两个 agent 都要过裁决;任一 agent
-      // 判停用即不写 route(目录不提供该模型的 agent 天然 pass,不影响结果)。
+      // agentKind 缺席:任一 agent 的裁决要求改动(此处 codex 判 reroute)即清空显式
+      // 来源,绝不把按别的 agent 解析出的来源钉给真实会话(第十二、十三轮)。
       const sessionId2 = rememberSession('pending-switch-no-agentkind');
       setSessionProvider(sessionId2, 'openai');
-      checkRoute.mockClear();
-      checkRoute.mockImplementation(async (agent) =>
+      const resolveRoute2 = vi.fn(async (agent: string, model: string, providerId: string | null) =>
         agent === 'codex'
-          ? { kind: 'reject' as const, reason: 'model-disabled' }
-          : { kind: 'pass' as const },
+          ? { model, providerId: 'anthropic', degraded: true }
+          : { model, providerId, degraded: false },
       );
       const h2 = createHarness(
         [{ id: sessionId2, agentKind: 'codex', remoteHostId: null, isTurnRunning: () => false }],
-        { checkRoute },
+        { resolveRoute: resolveRoute2 },
       );
       h2.service.register(sessionId2, { model: 'gpt-5.5', providerId: 'xd' });
       await h2.service.onTurnSettled(sessionId2);
       expect(h2.service.has(sessionId2)).toBe(false);
-      // reject 一侧生效:停用来源不落地,显式来源清空(全停语义,同上一用例)。
       expect(getSessionProvider(sessionId2)).toBeNull();
-      expect(checkRoute).toHaveBeenCalledWith('claude-code', 'gpt-5.5', 'xd');
-      expect(checkRoute).toHaveBeenCalledWith('codex', 'gpt-5.5', 'xd');
+      expect(resolveRoute2).toHaveBeenCalledWith('claude-code', 'gpt-5.5', 'xd');
+      expect(resolveRoute2).toHaveBeenCalledWith('codex', 'gpt-5.5', 'xd');
     });
   });
 });

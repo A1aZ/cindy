@@ -438,7 +438,10 @@ import {
 } from '../maker-host/model-visibility-mirror.js';
 import { setModelsDisabled, setProviderDisabled } from '../maker-host/model-disable-store.js';
 import { getCurrentDataOwnerId } from '../authManager.js';
-import { verdictForModelRoute } from '../maker-host/model-route-guard-live.js';
+import {
+  resolveLenientSessionRoute,
+  verdictForModelRoute,
+} from '../maker-host/model-route-guard-live.js';
 import { setClaudeProxySessionIdResolver } from '../maker-host/anthropic-compat-proxy-host.js';
 import {
   clearClaudeSessionBackgroundActivity,
@@ -6610,16 +6613,21 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       inputCoordinator.wakeSession(sessionId, 'pending-credential-switch-applied');
     },
     // 停用轴:deferred 切换收口前重裁决(SET_MODEL 时刻裁决过,但生效可能在数分钟
-    // 后,期间目标可能被停用;PR #744 review 第七轮)。
-    checkRoute: verdictForModelRoute,
-    // 裁决改道 / 清空显式来源时回写 DB + 广播 patch:renderer 在 deferred 接受时已按
-    // 请求值落盘,不纠正则下一次懒 resume 按停用来源重建(PR #744 review 第十轮)。
+    // 后,期间目标可能被停用;PR #744 review 第七轮,第十四轮换宽松降级形态 ——
+    // 目标全停时连模型一起换到启用兜底)。
+    resolveRoute: resolveLenientSessionRoute,
+    // 裁决改道 / 清空显式来源 / 全停换模型时回写 DB + 广播 patch:renderer 在
+    // deferred 接受时已按请求值落盘,不纠正则下一次懒 resume 按停用路由重建
+    // (PR #744 review 第十、十四轮)。
     persistRoute: async (sessionId, route) => {
+      const patch: Record<string, unknown> = { providerId: route.providerId };
+      if (route.model) patch.model = route.model;
+      if (route.effort) patch.effort = route.effort;
       await getDbClient()
         .drizzle.update(sessions)
-        .set({ providerId: route.providerId })
+        .set(patch)
         .where(eq(sessions.id, sessionId));
-      broadcastSessionPatched(sessionId, { providerId: route.providerId });
+      broadcastSessionPatched(sessionId, patch);
     },
     logger: log,
   });

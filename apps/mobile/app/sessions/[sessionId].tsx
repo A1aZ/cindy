@@ -1481,6 +1481,8 @@ export default function SessionScreen() {
       loading: composerDeviceProviders.loading,
       error: composerDeviceProviders.error,
       agentKind: sessionAgentKind,
+      // 已建会话:suspended 来源计入(停用不打断运行中会话,门禁只看凭证连接态)。
+      existingSessionRoute: true,
     });
     return verdict === 'unauthenticated' ? agentAuthGateHint(sessionAgentKind) : null;
   }, [

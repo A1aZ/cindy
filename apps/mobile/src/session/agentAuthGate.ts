@@ -25,17 +25,21 @@ export interface AgentAuthGateInput {
   /** 目录拉取失败(典型:旧被控端不识别通道)。 */
   error: string | null;
   agentKind: 'claude-code' | 'codex';
+  /**
+   * true = 已建会话的发送门禁:计入 suspended 来源(停用是准入轴,不打断运行中
+   * 会话,门禁只回答「凭证还连着吗」)。缺省 false = 新建草稿:suspended 不算可
+   * 路由来源,全停时如实报 unauthenticated,别让草稿创建到 Main 侧才被拒
+   * (PR #744 review 第十、十四轮)。
+   */
+  existingSessionRoute?: boolean;
 }
 
 /** 判定某 agent 在被控端是否有已连接来源;不确定时回 'unknown'(调用方不拦截)。 */
 export function agentAuthGateVerdict(input: AgentAuthGateInput): AgentAuthGateVerdict {
   if (input.loading || input.error !== null || input.providers.length === 0) return 'unknown';
-  // includeSuspended:本门禁只回答「凭证还连着吗」。供应商级停用(suspended)是
-  // 准入轴,不打断已建会话 —— 全部来源被停用时把发送判成 unauthenticated 会误堵
-  // 运行中会话的发送路径(停用的准入拦截由被控端 main 的路由守卫负责,
-  // PR #744 review 第十轮)。
-  return connectedProvidersForAgent(input.providers, input.agentKind, { includeSuspended: true })
-    .length > 0
+  return connectedProvidersForAgent(input.providers, input.agentKind, {
+    includeSuspended: input.existingSessionRoute === true,
+  }).length > 0
     ? 'ready'
     : 'unauthenticated';
 }

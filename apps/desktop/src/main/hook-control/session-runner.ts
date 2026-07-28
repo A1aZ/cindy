@@ -48,6 +48,7 @@ import {
 
 import { tapWindowBroadcast } from '../device-link/broadcast-tap.js';
 import { getMaker } from '../maker-host/index.js';
+import { resolveLenientRoute } from '../maker-host/model-route-guard.js';
 import { resolveLenientSessionRoute } from '../maker-host/model-route-guard-live.js';
 import {
   wireSessionToIpc,
@@ -161,29 +162,26 @@ async function resolveNewSessionConfig(
   const providerId = providers
     ? effectiveSourceIdForModel(providers, preferredProviderId, resolved.model, resolved.agentKind)
     : resolved.providerId;
-  if (!providers) {
-    // 目录故障窗口的停用收口(PR #744 review 第十轮):冻结的 availableModels 不带
-    // 停用标志、saved provider 也未经校验 —— 走共享宽松降级(其目录故障分支 =
-    // override-only 保守裁决,只凭本地 override 文件判):命中即逐级丢弃;模型被
-    // override 判死时抛错交给 hook 既有失败路径,绝不在故障窗口直建停用路由的付费会话。
-    const lenient = await resolveLenientSessionRoute(
-      resolved.agentKind,
-      resolved.model,
-      providerId ?? null,
-    );
-    if (!lenient.model) {
-      throw new Error(
-        'hook session route unavailable: model disabled in settings (catalog outage window)',
-      );
-    }
-    if (lenient.degraded) {
-      log.warn(
-        `hook saved route degraded during catalog outage: model=${resolved.model} providerId=${providerId ?? 'null'}`,
-      );
-    }
-    return { ...resolved, model: lenient.model, providerId: lenient.providerId };
+  // 停用收口(PR #744 review 第十、十四轮):两条路径都必须经宽松降级裁决 ——
+  //   · 目录读取失败:冻结的 availableModels 不带停用标志、saved provider 未经校验,
+  //     live 壳的目录故障分支 = override-only 保守裁决(只凭本地 override 文件判);
+  //   · 目录读取成功但该 agent 的启用模型集为空:上方 getModels 过滤后
+  //     resolveHookSessionConfig 会回退到 raw saved desktop model(未准入),
+  //     effectiveSourceIdForModel 解析为 null 后若直接返回,后续 createSession 仍以
+  //     停用模型 + 隐式来源直建付费会话。
+  // 命中即逐级丢弃;模型判死抛错交给 hook 既有失败路径。
+  const lenient = providers
+    ? resolveLenientRoute(providers, resolved.agentKind, resolved.model, providerId ?? null)
+    : await resolveLenientSessionRoute(resolved.agentKind, resolved.model, providerId ?? null);
+  if (!lenient.model) {
+    throw new Error('hook session route unavailable: model disabled in settings');
   }
-  return { ...resolved, providerId };
+  if (lenient.degraded) {
+    log.warn(
+      `hook saved route degraded (disabled in settings): model=${resolved.model} providerId=${providerId ?? 'null'} catalog=${providers ? 'ok' : 'outage'}`,
+    );
+  }
+  return { ...resolved, model: lenient.model, providerId: lenient.providerId };
 }
 
 /** 后台 subagent 事件静默兜底(同 scheduler BG_TASK_IDLE_FALLBACK_MS 语义)。 */

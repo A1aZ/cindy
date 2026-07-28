@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mobileClientBuildEnv } from '../../../scripts/shared/client-endpoint-build-env.mjs';
+import { mobileClientBundleEnv } from '../../../scripts/shared/client-endpoint-build-env.mjs';
 
 export const MOBILE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // 2026-07 端点清单重构后收缩:dev 业务端点初值来自仓内 config/endpoint.json
@@ -46,7 +46,7 @@ export function ensureMobileEnv({
     ...easDefaults,
     ...(endpointEnv ??
       (authRegion || needsClientBuildDefaults
-        ? mobileClientBuildEnv({
+        ? mobileClientBundleEnv({
             authRegion:
               authRegion || existingRegion || easDefaults.EXPO_PUBLIC_CINDY_AUTH_REGION,
           })

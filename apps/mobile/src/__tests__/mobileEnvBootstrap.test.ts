@@ -6,7 +6,7 @@ import {
   ensureMobileEnv,
   REQUIRED_MOBILE_ENV_KEYS,
 } from '../../scripts/ensure-mobile-env.mjs';
-import { mobileClientBuildEnv } from '../../../../scripts/shared/client-endpoint-build-env.mjs';
+import { mobileClientBundleEnv } from '../../../../scripts/shared/client-endpoint-build-env.mjs';
 
 const roots: string[] = [];
 
@@ -188,7 +188,7 @@ describe('mobile simulator env bootstrap', () => {
 
     expect(result.addedKeys).toEqual(REQUIRED_MOBILE_ENV_KEYS);
     expect(readEnvMap(join(mobileDir, '.env'))).toMatchObject(
-      mobileClientBuildEnv({ authRegion: 'global' }),
+      mobileClientBundleEnv({ authRegion: 'global' }),
     );
   });
 });

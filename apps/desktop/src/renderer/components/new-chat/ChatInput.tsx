@@ -73,6 +73,7 @@ import {
   saveDraft as saveComposerDraft,
   clearDraft as clearComposerDraft,
   subscribeDraft as subscribeComposerDraft,
+  tiptapDocHasContent,
 } from '@/lib/composerDraftStore';
 import { subscribeSessionLinkInsert } from '@/lib/composerActionsBus';
 import { ModelSelector, type ModelMemoryAccessors } from './ModelSelector';
@@ -517,7 +518,7 @@ interface ChatInputProps {
   onRememberedEffortChange?: (modelId: string, effort: Effort) => void;
   /** Enables wrapping for narrow split-pane layouts such as Orca. Defaults to false. */
   compactToolbar?: boolean;
-  /** 窄态新建对话时使用紧凑单行工具栏，保留所有操作入口。 */
+  /** 强制使用紧凑单行工具栏；容器测宽也会自动进入同一状态。 */
   narrowToolbar?: boolean;
   /**
    * 工具行采用更紧凑的视觉密度 (字号 -1px, 协同 toggle 只剩 logo)。
@@ -2708,9 +2709,13 @@ export function ChatInput({
       setBrowserComments(draft.browserComments ?? []);
       // 同值外部写入不做全量 setContent,避免把用户停在中段的光标弹到末尾、
       // 打断 IME 组合。appendQuoteToDraft 会改变正文文档,自然走下方 setContent。
-      const normalizedDraftText = draft.text
-        ? normalizeComposerDocumentJSON(draft.text)
-        : null;
+      // 空草稿在存储里可能是 `{doc:[空 paragraph]}` 而不是 undefined,而右侧对
+      // "编辑器为空"一律折叠成 null。两侧判空口径必须一致,否则每次外部草稿通知都
+      // 会拿一份空文档整段 setContent:doc 被原地重建,所有按位置存活的状态(语音
+      // 草稿锚点等)被迫跨整篇映射(#720 后语音录音时首行多一个空行的成因)。
+      const draftDocument = draft.text ? normalizeComposerDocumentJSON(draft.text) : null;
+      const normalizedDraftText =
+        draftDocument && tiptapDocHasContent(draftDocument) ? draftDocument : null;
       const textUnchanged =
         JSON.stringify(normalizedDraftText) ===
         JSON.stringify(composerDocIsEmpty(editor.state.doc) ? null : editor.getJSON());
@@ -4743,9 +4748,10 @@ export function ChatInput({
   const showTopSlot = !!topSlot;
   const showFusedWrapper = showQueuePanel || showTopSlot;
   const isCreateAgentVariant = visualVariant === 'create-agent';
-  const useNarrowToolbar =
-    isCreateAgentVariant &&
-    (narrowToolbar || (toolbarWidth != null && toolbarWidth < 600));
+  // split-pane 同时打开侧栏 / 会话 / 浏览器时，普通会话 composer 也会落到窄容器。
+  // 这里必须按 card 实际宽度统一切 compact，而不是只照顾 create-agent；否则普通
+  // 会话仍走两组 max-content flex，长模型名会把权限入口挤进语音 / 发送固定动作区。
+  const useNarrowToolbar = narrowToolbar || (toolbarWidth != null && toolbarWidth < 600);
   const useCompactMiddleToolbar =
     isCreateAgentVariant && (toolbarWidth == null ? narrowToolbar : toolbarWidth < 600);
   const useUltraCompactToolbar =

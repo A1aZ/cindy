@@ -452,7 +452,8 @@ export function getClientEndpointRealmConfig(): {
 
 /**
  * 从构建期受信任地址加载指定区域清单。区域身份由地址表的 key 决定；清单不必
- * 重复自报 region。失败不会修改当前会话端点，也不会退回构建区域发送跨区 token。
+ * 重复自报 region，但一旦携带就必须与目标区域一致。失败不会修改当前会话端点，
+ * 也不会退回构建区域发送跨区 token。
  */
 export async function loadClientEndpointsForRealm(
   region: ClientEndpointRegion,
@@ -473,6 +474,9 @@ export async function loadClientEndpointsForRealm(
   const parsed = resolveClientEndpointsStrict(fetched.text);
   if (!parsed.ok) {
     throw new Error(parsed.reason);
+  }
+  if (parsed.region !== null && parsed.region !== region) {
+    throw new Error(`region-mismatch:${region}:${parsed.region}`);
   }
   realmEndpointCache.set(region, parsed.endpoints);
   return parsed.endpoints;

@@ -554,4 +554,28 @@ describe('getter / IPC', () => {
       ),
     );
   });
+
+  it('对端清单自报 region 时必须与目标区域一致，拒绝后不污染缓存', async () => {
+    resetClientEndpointsForTest(TEST_CLIENT_ENDPOINTS, {
+      buildRegion: 'cn',
+      realmManifestBaseUrls: {
+        cn: 'https://manifest.cn.example.com/app',
+        global: 'https://manifest.global.example.com/app',
+      },
+    });
+    const globalManifest = {
+      ...(JSON.parse(FULL_MANIFEST) as Record<string, unknown>),
+      authApiBaseUrl: 'https://auth.global.example.com',
+    };
+    mockNetManifest(JSON.stringify({ ...globalManifest, region: 'cn' }));
+    mockNetManifest(JSON.stringify(globalManifest));
+
+    await expect(loadClientEndpointsForRealm('global')).rejects.toThrow(
+      'region-mismatch:global:cn',
+    );
+    await expect(loadClientEndpointsForRealm('global')).resolves.toMatchObject({
+      authApiBaseUrl: 'https://auth.global.example.com',
+    });
+    expect(netRequest).toHaveBeenCalledTimes(2);
+  });
 });

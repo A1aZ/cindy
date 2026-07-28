@@ -8,6 +8,7 @@ import {
   desktopClientBuildEnv,
   loadEndpointManifestBaseUrl,
   loadPeerEndpointManifestBaseUrl,
+  mobileClientBundleEnv,
   mobileClientBuildEnv,
 } from '../shared/client-endpoint-build-env.mjs';
 import { resolveReleaseCdnBaseUrl } from '../shared/release-env.mjs';
@@ -38,6 +39,10 @@ test('desktop/mobile 构建从 region 清单的 cdnBaseUrl 生成自举环境变
     false,
   );
   assert.deepEqual(mobileClientBuildEnv({ authRegion: 'global', repoRoot }), {
+    EXPO_PUBLIC_CINDY_AUTH_REGION: 'global',
+    EXPO_PUBLIC_ENDPOINT_MANIFEST_BASE_URL: 'https://hotfix-global.example.invalid/app',
+  });
+  assert.deepEqual(mobileClientBundleEnv({ authRegion: 'global', repoRoot }), {
     EXPO_PUBLIC_CINDY_AUTH_REGION: 'global',
     EXPO_PUBLIC_ENDPOINT_MANIFEST_BASE_URL: 'https://hotfix-global.example.invalid/app',
     EXPO_PUBLIC_ENDPOINT_MANIFEST_PEER_BASE_URL: 'https://hotfix-cn.example.invalid/app',

@@ -117,9 +117,20 @@ export function mobileClientBuildEnv({ authRegion, repoRoot } = {}) {
       authRegion: region,
       repoRoot,
     }),
+  };
+}
+
+/**
+ * Mobile JS bundle 额外需要对端区域清单基址。与 mobileClientBuildEnv 分开，
+ * 避免把这个纯 JS 变量加入 app.config 的既有 Expo extra / runtime fingerprint。
+ */
+export function mobileClientBundleEnv(options = {}) {
+  const buildEnv = mobileClientBuildEnv(options);
+  return {
+    ...buildEnv,
     EXPO_PUBLIC_ENDPOINT_MANIFEST_PEER_BASE_URL: loadPeerEndpointManifestBaseUrl({
-      authRegion: region,
-      repoRoot,
+      authRegion: buildEnv.EXPO_PUBLIC_CINDY_AUTH_REGION,
+      repoRoot: options.repoRoot,
     }),
   };
 }

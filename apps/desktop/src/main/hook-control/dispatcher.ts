@@ -665,6 +665,17 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     const whitelistDirs = Object.values(config.workspaces);
     const inWhitelist = (dir: string | null): boolean =>
       dir !== null && whitelistDirs.some((base) => isPathWithin(base, dir));
+    /**
+     * 同上, 但每次都重读连接配置 —— 撤权判定必须用**此刻**的映射: `config` 是
+     * 消息进来那一刻的快照, 而下面要 await `runner.inspect()`。用快照判定的话,
+     * 用户在这段时间里刚把目录加回映射(或改回别名)时, 一条此刻完全合法的绑定
+     * 会被当成越界删掉, 那条 thread 就白白换了新对话(PR #733 review 指出)。
+     */
+    const inWhitelistNow = (dir: string | null): boolean =>
+      dir !== null &&
+      Object.values(getConnection(connectionId)?.workspaces ?? config.workspaces).some((base) =>
+        isPathWithin(base, dir),
+      );
     /** app 托管对话目录(dialogues 根)内的路径 —— chat 伪目录会话的白名单等价物。 */
     const inDialogueRoot = (dir: string | null): boolean =>
       dir !== null && dialogue !== undefined && isPathWithin(dialogue.rootDir(), dir);
@@ -785,8 +796,11 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       }
       // 复用条件: 仍存在、可用、且仍在白名单内(别名映射可能已被用户改过);
       // chat 伪目录的会话住在 dialogues 根下, 按对话根校验
+      // 用 inWhitelistNow 而不是入口快照: 见其定义处 —— inspect 期间映射可能刚
+      // 被改回来, 拿旧快照判撤权会误杀一条此刻合法的绑定。
       const inAllowedRoot =
-        info !== null && (isChat ? inDialogueRoot(info.workingDir) : inWhitelist(info.workingDir));
+        info !== null &&
+        (isChat ? inDialogueRoot(info.workingDir) : inWhitelistNow(info.workingDir));
       const usable = info?.usable === true && info.workingDir !== null;
       /**
        * 复用与否只看这一条: 会话当前的工作目录仍落在工作目录映射(或内置对话根)
@@ -1102,6 +1116,26 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       // 归档并发穿插 —— 归档排在其后, 能看到刚落下的绑定。
       serializeByKey(`${connectionId} ${externalKey}`, async () => {
         if (!isCurrentGeneration(admittedGeneration)) return;
+        /**
+         * 这个会话此刻还归远端管吗 —— 归档同样要过工作目录映射这道边界。
+         * 会话已被移出映射(或映射被改/删)时, 远端的 `/new` 不该还能归档它并
+         * 触发 worktree 清理: 那是对一个它已无权驱动的本地会话动手
+         * (PR #733 review 指出)。
+         */
+        const stillOurs = async (sessionId: string): Promise<boolean> => {
+          // 本 dispatcher 刚建、还没落库的会话 inspect 查不到(见 awaitingPersist),
+          // 但它建在哪是记着的 —— 用那个目录判, 否则紧跟着新建到来的 `/new` 会
+          // 静默失效。
+          const pendingDir = awaitingPersist.get(sessionId);
+          if (pendingDir !== undefined) return dirStillAllowed(connectionId, pendingDir);
+          const info = await runner.inspect(sessionId);
+          if (!isCurrentGeneration(admittedGeneration)) return false;
+          return (
+            info?.usable === true &&
+            info.workingDir !== null &&
+            dirStillAllowed(connectionId, info.workingDir)
+          );
+        };
         let bindingNamespace = connectionId;
         let bound = bindings.get(connectionId, externalKey);
         if (!bound && connectionId.endsWith(':slack')) {
@@ -1111,26 +1145,27 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
             // a chance to migrate the v1 mapping. Only act on that mapping
             // after proving it belongs to the current account DB and remains
             // inside today's workspace/dialogue allowlist.
-            const config = getConnection(connectionId);
-            const info = await runner.inspect(legacyBound);
-            if (!isCurrentGeneration(admittedGeneration)) return;
-            const allowed =
-              info?.usable === true &&
-              info.workingDir !== null &&
-              (Object.values(config?.workspaces ?? {}).some((root) =>
-                isPathWithin(root, info.workingDir!),
-              ) ||
-                (dialogue !== undefined && isPathWithin(dialogue.rootDir(), info.workingDir)));
-            if (allowed) {
+            if (await stillOurs(legacyBound)) {
               bound = legacyBound;
               bindingNamespace = 'slack';
             } else {
+              if (!isCurrentGeneration(admittedGeneration)) return;
               bindings.remove('slack', externalKey);
             }
           }
         }
         if (!bound) return; // 该 key 从没建过会话(或已归档清理过), 幂等 no-op
+        // 当前命名空间的绑定过同一道闸: 通不过就只丢绑定(下条消息本就会重开
+        // 会话), 但不动那个已越界的本地会话。
+        const authorized = bindingNamespace === 'slack' || (await stillOurs(bound));
+        if (!isCurrentGeneration(admittedGeneration)) return;
         bindings.remove(bindingNamespace, externalKey);
+        if (!authorized) {
+          log.info(
+            `hook archive skipped for ${externalKey}: session ${bound} is no longer inside the workspace map`,
+          );
+          return;
+        }
         if (!archiveSessionRow) return;
         try {
           await archiveSessionRow(bound);

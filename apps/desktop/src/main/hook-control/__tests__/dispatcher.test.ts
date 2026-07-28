@@ -690,6 +690,39 @@ describe('dispatcher 核心语义', () => {
     fr.finish();
   });
 
+  it('inspect 期间目录被加回映射: 按当前映射判定, 不误杀这条绑定', async () => {
+    const bindings = memoryBindings();
+    const OUTSIDE = path.resolve('/repos/another-project');
+    const sessions: Record<string, { workingDir: string; usable: boolean }> = {
+      'bound-session': { workingDir: OUTSIDE, usable: true },
+    };
+    const config: HookConnectionConfig = { ...CONFIG, workspaces: { xdmaker: WS_DIR } };
+    let releaseInspect!: () => void;
+    const runner: HookSessionRunner = {
+      isBusy: () => false,
+      inspect: async (id) => {
+        await new Promise<void>((resolve) => {
+          releaseInspect = resolve;
+        });
+        return sessions[id] ? { ...sessions[id] } : null;
+      },
+      run: async () => ({ status: 'ok', finalText: 'done', errorMessage: null, durationMs: 1 }),
+    };
+    const { d } = makeDispatcher({ runner, bindings, config });
+    const c = collector();
+    bindings.set('conn-1', 'team-slack:C1:1.1', 'bound-session');
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    // inspect 还挂着时用户把这个目录加进了映射 —— 入口快照里没有它, 当前映射有
+    config.workspaces = { xdmaker: WS_DIR, other: OUTSIDE };
+    releaseInspect();
+    await tick();
+
+    expect(c.last('task.ack')!.payload.sessionId).toBe('bound-session');
+    expect(bindings.get('conn-1', 'team-slack:C1:1.1')).toBe('bound-session');
+  });
+
   it('在工作目录映射内换目录 -> 无感跟随复用(边界内的移动不受影响)', async () => {
     const bindings = memoryBindings();
     const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
@@ -1514,7 +1547,38 @@ describe('session.archive(/new 换代归档旧代会话)', () => {
   });
 
   it('有绑定: 归档 session 行并清绑定', async () => {
-    const fr = fakeRunner();
+    const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
+    const fr = fakeRunner({ sessions });
+    const bindings = memoryBindings();
+    const archived: string[] = [];
+    const d = createHookDispatcher({
+      getConnection: () => CONFIG,
+      bindings,
+      runner: fr.runner,
+      archiveSessionRow: async (sessionId) => void archived.push(sessionId),
+      log: noopLog,
+    });
+    const c = collector();
+    d.handleDispatch(
+      'conn-1',
+      dispatch({ requestId: 'r1', externalKey: 'slack:dm:U1:g1' }),
+      c.send,
+    );
+    await tick();
+    const sessionId = c.last('task.ack')!.payload.sessionId as string;
+    sessions[sessionId] = { workingDir: WS_DIR, usable: true };
+    fr.finish();
+    await tick();
+
+    d.handleSessionArchive('conn-1', 'slack:dm:U1:g1');
+    await tick();
+    expect(archived).toEqual([sessionId]);
+    expect(bindings.get('conn-1', 'slack:dm:U1:g1')).toBeNull();
+  });
+
+  it('会话已被移出映射: /new 只清绑定, 不归档那个本地会话', async () => {
+    const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
+    const fr = fakeRunner({ sessions });
     const bindings = memoryBindings();
     const archived: string[] = [];
     const d = createHookDispatcher({
@@ -1534,10 +1598,14 @@ describe('session.archive(/new 换代归档旧代会话)', () => {
     const sessionId = c.last('task.ack')!.payload.sessionId as string;
     fr.finish();
     await tick();
+    // 用户把它移到映射外 —— 远端已经无权驱动它, 也就无权归档它 / 触发它的
+    // worktree 清理
+    sessions[sessionId] = { workingDir: path.resolve('/repos/elsewhere'), usable: true };
 
     d.handleSessionArchive('conn-1', 'slack:dm:U1:g1');
     await tick();
-    expect(archived).toEqual([sessionId]);
+    expect(archived).toEqual([]);
+    // 绑定还是要清: 下条消息本就该开新会话
     expect(bindings.get('conn-1', 'slack:dm:U1:g1')).toBeNull();
   });
 
@@ -1560,10 +1628,11 @@ describe('session.archive(/new 换代归档旧代会话)', () => {
     d.handleSessionArchive('conn-1', 'slack:dm:U1:g1');
     await tick();
     expect(archiveCalls).toEqual([]);
-    // 有绑定但行已不存在: 调用发生、异常被吞、绑定仍被清理
+    // 有绑定但会话查不到(行已不存在): 无从确认它还在映射内, 就不对它动手 ——
+    // 反正 archiveSessionRow 也只会 NOT_FOUND。绑定照清, 幂等目的达到。
     d.handleSessionArchive('conn-1', 'slack:dm:U1:g2');
     await tick();
-    expect(archiveCalls).toEqual(['sess-gone']);
+    expect(archiveCalls).toEqual([]);
     expect(bindings.get('conn-1', 'slack:dm:U1:g2')).toBeNull();
   });
 

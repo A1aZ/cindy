@@ -96,6 +96,38 @@ describe('auth weak-network bootstrap', () => {
     );
   });
 
+  it('旧 refresh 的 realm 清单迟到时，必须先检查 generation 再激活区域', () => {
+    const refreshStart = authSource.indexOf('const refresh = useCallback');
+    const refreshBody = authSource.slice(
+      refreshStart,
+      authSource.indexOf('\n  useEffect(() => {', refreshStart),
+    );
+    const readSessionAt = refreshBody.indexOf(
+      'const session = await serializeRefreshTokenMutation(',
+    );
+    const emptySessionAt = refreshBody.indexOf('if (!session) {');
+    const loadRealmAt = refreshBody.indexOf(
+      'await loadMobileEndpointsForRealm(session.realm);',
+    );
+    const activateRealmAt = refreshBody.indexOf(
+      'activateMobileSessionRealm(session.realm);',
+    );
+    const guards = [
+      ...refreshBody.matchAll(
+        /if \(authGenerationRef\.current !== generation\) return null;/g,
+      ),
+    ].map((match) => match.index);
+
+    expect(readSessionAt).toBeGreaterThanOrEqual(0);
+    expect(
+      guards.some((index) => index > readSessionAt && index < emptySessionAt),
+    ).toBe(true);
+    expect(loadRealmAt).toBeGreaterThan(emptySessionAt);
+    expect(
+      guards.some((index) => index > loadRealmAt && index < activateRealmAt),
+    ).toBe(true);
+  });
+
   it('换账号或区域时先用旧会话撤销旧区域推送，再激活新区域', () => {
     const acceptStart = authSource.indexOf('const acceptOutcome = useCallback');
     const acceptBody = authSource.slice(

@@ -560,12 +560,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const session = await serializeRefreshTokenMutation(
           readPersistedAuthSession,
         );
+        if (authGenerationRef.current !== generation) return null;
         if (!session) {
           await clearCanaryChannel().catch(() => undefined);
           return null;
         }
         try {
           await loadMobileEndpointsForRealm(session.realm);
+          if (authGenerationRef.current !== generation) return null;
           activateMobileSessionRealm(session.realm);
           activeAuthRealmRef.current = session.realm;
           const pair = await authClientFor(did, session.realm).refresh(

@@ -299,12 +299,13 @@ export default function HomeScreen() {
   const hydrateDeviceSessions = useCallback(async (device: DeviceView): Promise<HydrateDeviceSessionsResult> => {
     updateDeviceConnectionState(device.deviceId, 'syncing');
     try {
-      // Fence the snapshot so a retry push received while this request is in flight keeps
-      // its newer N/M, while an older attempt left over from before hydration is cleared.
-      const activeSessionSnapshotEpoch = remoteSessionStore.captureActiveSessionSnapshotEpoch();
-      const [list, activeSessions] = await withTransientRemoteRetry(async () => {
+      const [list, activeSessions, activeSessionSnapshotEpoch] = await withTransientRemoteRetry(async () => {
         await subscribe('device-list', device.deviceId, ['sessions']);
-        return Promise.all([
+        // Capture inside the retry callback so every maker:list-active attempt gets its own
+        // fence. A newer retry push received while this request is in flight must survive
+        // the older snapshot, while progress predating this attempt can be cleared.
+        const activeSessionSnapshotEpoch = remoteSessionStore.captureActiveSessionSnapshotEpoch();
+        const [list, activeSessions] = await Promise.all([
           invoke<RemoteSession[]>(device.deviceId, 'local-db:sessions:list', [
             LIST_LIMIT,
             remoteListStatusFilter(statusFilter),
@@ -318,6 +319,7 @@ export default function HomeScreen() {
             throw err;
           }),
         ]);
+        return [list, activeSessions, activeSessionSnapshotEpoch] as const;
       });
       const nextSessions = Array.isArray(list) ? list : [];
       remoteSessionStore.setDeviceSessions(

@@ -7,6 +7,18 @@ const readTextLf = (...args: Parameters<typeof readFileSync>): string =>
   String(readFileSync(...args)).replace(/\r\n/g, '\n');
 
 describe('mobile session composer desktop-first surface', () => {
+  it('fences every active-session snapshot request against newer retry progress', () => {
+    const source = readTextLf(resolve(process.cwd(), 'app/sessions/[sessionId].tsx'), 'utf8');
+
+    expect(source).toContain('const fetchActiveSessionSnapshot = async () => {');
+    expect(source).toContain(
+      'const activityEpochAtFetchStart = remoteSessionStore.captureActiveSessionSnapshotEpoch();',
+    );
+    expect((source.match(/fetchActiveSessionSnapshot\(\),/g) ?? []).length).toBe(2);
+    expect((source.match(/activeSessionSnapshot\.activityEpochAtFetchStart/g) ?? []).length).toBe(2);
+    expect((source.match(/maker\.listActiveSessions\(\)/g) ?? []).length).toBe(1);
+  });
+
   it('uses icon controls for attachment quick actions near the composer', () => {
     const source = readTextLf(resolve(process.cwd(), 'app/sessions/[sessionId].tsx'), 'utf8');
     const voiceStart = source.indexOf('const startVoiceRecording = useCallback(async () => {');

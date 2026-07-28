@@ -463,20 +463,41 @@ func captureTargetPayload(withFocusedFrame: Bool) -> [String: Any] {
   // on" and "which app do we paste into" from disagreeing — two separate helper
   // processes would each read frontmostApplication at a slightly different
   // moment.
-  let focusedFrame = withFocusedFrame ? focusedWindowFrame(for: app) : nil
-  // Stream the frame out on its own line right away, before the (potentially
-  // slow) context capture below. The overlay only waits ~90ms for it in order
-  // to pick a display, while the AX context walk used by Chromium-style editors
-  // can take hundreds of milliseconds — emitting only at exit would make the
-  // frame routinely arrive too late to be useful. The frame is repeated in the
-  // final payload so buffered callers keep working.
-  if let focusedFrame = focusedFrame {
-    emitLine([
-      "event": "focused-window-frame",
-      "frame": focusedFrame.frame,
-      "frameSource": focusedFrame.source
-    ])
+  // Two frames, streamed in cost order, each on its own line before the
+  // (potentially slow) context capture below:
+  //
+  // 1. CGWindowList — an in-process window-server query with no Accessibility
+  //    grant and no per-request timeout. It always lands inside the caller's
+  //    ~90 ms display-selection deadline, but z-order is only an approximation of
+  //    focus: an app's unfocused always-on-top palette can sit in front of the
+  //    focused document.
+  // 2. AX kAXFocusedWindow — authoritative about focus, but each request can burn
+  //    a messaging timeout against an unresponsive target, so it may miss the
+  //    deadline entirely.
+  //
+  // Emitting both lets the caller use the accurate answer whenever it arrives in
+  // time and still have a usable one when it does not. The final payload carries
+  // the best available frame so buffered callers keep working.
+  var bestFrame: (frame: [String: Any], source: String)? = nil
+  if withFocusedFrame {
+    if let listFrame = frontWindowFrameFromWindowList(pid: app.processIdentifier) {
+      bestFrame = (listFrame, "window-list")
+      emitLine([
+        "event": "focused-window-frame",
+        "frame": listFrame,
+        "frameSource": "window-list"
+      ])
+    }
+    if let axFrame = axFocusedWindowFrame(for: app) {
+      bestFrame = (axFrame, "ax")
+      emitLine([
+        "event": "focused-window-frame",
+        "frame": axFrame,
+        "frameSource": "ax"
+      ])
+    }
   }
+  let focusedFrame = bestFrame
   var context = captureFocusedElementContext(for: app)
   var enhancedAxAttempted = false
   var enhancedAxHelped = false
@@ -531,26 +552,6 @@ func captureTargetPayload(withFocusedFrame: Bool) -> [String: Any] {
 // primary display, y growing downwards, in points. That matches Electron's DIP
 // screen coordinate space on macOS, so main can feed the frame straight into
 // screen.getDisplayMatching().
-// CGWindowList is deliberately consulted FIRST. It is an in-process window-server
-// query: no Accessibility grant, no per-request messaging timeout, and it still
-// reports geometry when Screen Recording is denied (only window titles are gated).
-// The AX path can spend one 200 ms messaging timeout per request (focused window,
-// position, size) against an unresponsive target, which would blow the caller's
-// ~90 ms display-selection deadline and silently degrade the overlay back to the
-// mouse display — exactly the case this feature exists to fix.
-//
-// For *picking a display* the frontmost normal-layer window of the frontmost app
-// is as good as the AX focused window; AX only stays as the fallback for apps that
-// expose no on-screen normal-layer window.
-func focusedWindowFrame(for app: NSRunningApplication) -> (frame: [String: Any], source: String)? {
-  if let frame = frontWindowFrameFromWindowList(pid: app.processIdentifier) {
-    return (frame, "window-list")
-  }
-  if let frame = axFocusedWindowFrame(for: app) {
-    return (frame, "ax")
-  }
-  return nil
-}
 
 func axFocusedWindowFrame(for app: NSRunningApplication) -> [String: Any]? {
   guard AXIsProcessTrusted() else { return nil }
@@ -599,15 +600,16 @@ func frontWindowFrameFromWindowList(pid: pid_t) -> [String: Any]? {
   guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
     return nil
   }
-  // The list is ordered front to back, so the first window owned by the frontmost
-  // process is the one the user is looking at.
+  // This is the deadline-safe approximation only; AX kAXFocusedWindow is what
+  // actually knows where focus is, and the caller prefers it whenever it arrives
+  // in time (see captureTargetPayload).
   //
-  // Deliberately NOT restricted to layer 0: a focused text field can live in a
-  // floating NSPanel / utility window, which sits on a higher layer. Requiring
-  // layer 0 would skip it and return the app's ordinary document window instead —
-  // on a different display that means the overlay opens away from the field that
-  // is about to receive the paste. Front-to-back order already encodes "which of
-  // this app's windows is on top", so take the first usable one regardless of layer.
+  // Within that role, prefer the frontmost layer-0 window: an app's document
+  // windows live on layer 0, while higher layers hold palettes, tooltips and
+  // always-on-top helpers that are commonly NOT focused. Only if the app exposes
+  // no layer-0 window at all do we fall back to its frontmost window on any layer
+  // (some apps are panel-only).
+  var fallbackAnyLayer: [String: Any]? = nil
   for window in windows {
     // 这些值是 NSNumber。不要写 `as? pid_t`：NSNumber 只桥接到 Int，条件转换到
     // Int32 会一律失败，整条兜底就变成永远返回 nil。
@@ -623,14 +625,17 @@ func frontWindowFrameFromWindowList(pid: pid_t) -> [String: Any]? {
     }
     // 退化尺寸同样跳过：1x1 之类的占位窗口没法用来判断用户在哪块屏。
     if rect.width <= 1 || rect.height <= 1 { continue }
-    return [
+    let frame: [String: Any] = [
       "x": Double(rect.origin.x),
       "y": Double(rect.origin.y),
       "width": Double(rect.width),
       "height": Double(rect.height)
     ]
+    let layer = (window[kCGWindowLayer as String] as? NSNumber)?.intValue
+    if layer == 0 { return frame }
+    if fallbackAnyLayer == nil { fallbackAnyLayer = frame }
   }
-  return nil
+  return fallbackAnyLayer
 }
 
 // Extracts before/selected/after text around the cursor in the focused element.

@@ -1541,28 +1541,44 @@ function startLoadedOverlaySession(window: BrowserWindow, shortcutInvokedAt: num
   // 2. Tell the renderer to start microphone capture as soon as it is ready.
   // 3. Show the overlay on the next tick so UI display no longer gates mic start.
   //
-  // frame 走流式：helper 读到它就单独吐一行，不必等后面的 AX 上下文采集，所以
-  // 90ms 的选屏截止时间才有意义。
+  // frame 走流式：helper 读到就单独吐一行，不必等后面的 AX 上下文采集，所以 90ms 的
+  // 选屏截止时间才有意义。helper 会吐两条——先是便宜有界的 CGWindowList（z-order
+  // 近似，一定赶得上截止线），再是权威但可能超时的 AX kAXFocusedWindow。这里保留
+  // 「当前最好的一条」，AX 到了就立刻放行，没到就用已经到手的近似值。
   //
   // 要不要采集 frame 在 spawn 之前就定：单屏（或非 macOS）下答案改变不了落屏结果，
   // 就不让 helper 去读——AX 慢的目标 App 里那几次读取会白白推迟粘贴目标采集。
-  let resolveFocusedWindowFrame: (frame: Rectangle | null) => void = () => {};
-  const focusedWindowFramePromise = new Promise<Rectangle | null>((resolve) => {
-    resolveFocusedWindowFrame = resolve;
+  let bestFocusedWindowFrame: Rectangle | null = null;
+  let hasAuthoritativeFrame = false;
+  let resolvePreferredFrame: () => void = () => {};
+  const preferredFrameArrived = new Promise<void>((resolve) => {
+    resolvePreferredFrame = resolve;
   });
   const wantsFocusedDisplay = shouldResolveFocusedDisplay();
   const captureOverlayPromise = captureMacPasteTarget(
     wantsFocusedDisplay
-      ? { onFocusedWindowFrame: (frame) => resolveFocusedWindowFrame(frame) }
+      ? {
+        onFocusedWindowFrame: (frame, source) => {
+          if (!frame || hasAuthoritativeFrame) return;
+          bestFocusedWindowFrame = frame;
+          if (source !== 'ax') return;
+          // AX 是权威答案，到了就不再等，也不再被后续行覆盖。
+          hasAuthoritativeFrame = true;
+          resolvePreferredFrame();
+        },
+      }
       : undefined,
   );
-  // 兜底：helper 没吐 frame（AX 与 CGWindowList 都没结果）、走了 osascript 回退，
-  // 或整个 capture 失败时，用最终结果收敛这个 promise，别让它永远悬着。
+  // 兜底：helper 一条 frame 都没吐（AX 与 CGWindowList 都没结果）、走了 osascript
+  // 回退，或整个 capture 失败时，用最终结果收敛，别让选屏一直等到截止线。
   void captureOverlayPromise
-    .then((captured) => resolveFocusedWindowFrame(captured?.frame ?? null))
-    .catch(() => resolveFocusedWindowFrame(null));
+    .then((captured) => {
+      if (!hasAuthoritativeFrame && captured?.frame) bestFocusedWindowFrame = captured.frame;
+      resolvePreferredFrame();
+    })
+    .catch(() => resolvePreferredFrame());
   const focusedDisplayQuery = wantsFocusedDisplay
-    ? startFocusedDisplayQuery(focusedWindowFramePromise)
+    ? startFocusedDisplayQuery(preferredFrameArrived, () => bestFocusedWindowFrame)
     : null;
   positionOverlayWindow(window);
   prepareOverlayForDisplay(window);
@@ -1638,7 +1654,7 @@ function startLoadedOverlaySession(window: BrowserWindow, shortcutInvokedAt: num
   // 所以重定位不会被看成跳动；超时则维持鼠标所在屏的定位直接显示。
   // 这段等待期里呈现已经算「打开」（麦克风在录），见 overlayPresentationAwaitingShow。
   overlayPresentationAwaitingShow = true;
-  void awaitFocusedDisplay(focusedDisplayQuery).then((focusedDisplay) => {
+  void focusedDisplayQuery.then((focusedDisplay) => {
     if (!isCurrentOverlayPresentation(window, presentationSeq)) {
       // 等待期间用户取消了浮窗、或者已经开始了新一次呈现：这次的答案作废。
       log.debug('focused display result dropped: overlay presentation no longer current');
@@ -1718,54 +1734,51 @@ function shouldResolveFocusedDisplay(): boolean {
 }
 
 /**
- * 把前台窗口 frame 换算成「焦点屏」。
+ * 把前台窗口 frame 换算成「焦点屏」，并给它加显示截止时间。
  *
- * 注意鼠标所在屏和键盘焦点所在屏可以不同：鼠标停在 A 屏、正在 B 屏的编辑器里
- * 打字时，粘贴目标在 B 屏，浮窗也应该开在 B 屏，所以这里优先认前台窗口。
+ * `preferredFrameArrived` 在权威答案（AX kAXFocusedWindow）到达、或 capture 整体
+ * 收敛时兑现；截止线到了就用 `readBestFrame()` 当时已有的最好答案（通常是先到的
+ * CGWindowList 近似值），而不是干脆放弃——放弃就退回鼠标所在屏，恰恰是本功能要修的
+ * 那个错。两者都没有才返回 null。
+ *
+ * 注意鼠标所在屏和键盘焦点所在屏可以不同：鼠标停在 A 屏、正在 B 屏的编辑器里打字时，
+ * 粘贴目标在 B 屏，浮窗也应该开在 B 屏，所以这里优先认前台窗口。
  */
 function startFocusedDisplayQuery(
-  focusedWindowFramePromise: Promise<Rectangle | null>,
+  preferredFrameArrived: Promise<void>,
+  readBestFrame: () => Rectangle | null,
 ): Promise<Display | null> {
   const startedAt = Date.now();
-  return focusedWindowFramePromise
-    .then((frame) => {
-      if (!frame) return null;
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (timedOut: boolean): void => {
+      if (settled) return;
+      settled = true;
+      const frame = readBestFrame();
+      if (!frame) {
+        log.debug('focused display unresolved, falling back to cursor display', {
+          elapsedMs: Date.now() - startedAt,
+          timedOut,
+        });
+        resolve(null);
+        return;
+      }
       // getDisplayMatching 按重叠面积选屏，跨屏摆放的窗口也能落到主要那块。
       const display = screen.getDisplayMatching(frame);
       log.debug('focused display resolved', {
         elapsedMs: Date.now() - startedAt,
         displayId: display?.id,
+        // true = 没等到 AX 权威答案，用的是先到的近似 frame。
+        timedOut,
       });
-      return display ?? null;
-    })
-    .catch((error) => {
-      log.debug('focused display query failed, falling back to cursor display', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return null;
-    });
-}
-
-/** 给焦点屏查询加显示截止时间：迟到的答案直接丢弃，不再挪已经可见的浮窗。 */
-function awaitFocusedDisplay(query: Promise<Display | null>): Promise<Display | null> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const settle = (display: Display | null): void => {
-      if (settled) return;
-      settled = true;
-      resolve(display);
+      resolve(display ?? null);
     };
-    const timer = setTimeout(() => {
-      log.debug('focused display query deadline exceeded', {
-        deadlineMs: OVERLAY_FOCUSED_DISPLAY_DEADLINE_MS,
-      });
-      settle(null);
-    }, OVERLAY_FOCUSED_DISPLAY_DEADLINE_MS);
-    void query
-      .catch(() => null)
-      .then((display) => {
+    const timer = setTimeout(() => settle(true), OVERLAY_FOCUSED_DISPLAY_DEADLINE_MS);
+    void preferredFrameArrived
+      .catch(() => undefined)
+      .then(() => {
         clearTimeout(timer);
-        settle(display);
+        settle(false);
       });
   });
 }
@@ -2062,12 +2075,15 @@ type CapturedOverlayTarget = {
 };
 
 /**
- * `onFocusedWindowFrame` 会在 helper 吐出前台窗口 frame 那一行时立刻回调——远早于
- * 整个 capture 完成（AX 上下文采集在 Chromium 系编辑器里可能要几百毫秒）。浮窗
- * 选屏只等这一行，所以不能等最终结果。
+ * `onFocusedWindowFrame` 会在 helper 吐出前台窗口 frame 行时立刻回调——远早于整个
+ * capture 完成（AX 上下文采集在 Chromium 系编辑器里可能要几百毫秒）。浮窗选屏只等
+ * 这些行，所以不能等最终结果。
+ *
+ * helper 会吐两条：`window-list`（便宜有界的 z-order 近似）和 `ax`（权威的
+ * kAXFocusedWindow，可能超时）。`source` 原样透传，由调用方决定取舍。
  */
 async function captureMacPasteTarget(
-  options?: { onFocusedWindowFrame?: (frame: Rectangle | null) => void },
+  options?: { onFocusedWindowFrame?: (frame: Rectangle | null, source: string) => void },
 ): Promise<CapturedOverlayTarget | null> {
   if (process.platform !== 'darwin') return null;
   const onFocusedWindowFrame = options?.onFocusedWindowFrame;
@@ -2081,7 +2097,10 @@ async function captureMacPasteTarget(
       onProgress: onFocusedWindowFrame
         ? (event) => {
           if (event.event !== 'focused-window-frame') return;
-          onFocusedWindowFrame(normalizeFocusedWindowFrame(event.frame));
+          onFocusedWindowFrame(
+            normalizeFocusedWindowFrame(event.frame),
+            typeof event.frameSource === 'string' ? event.frameSource : 'unknown',
+          );
         }
         : undefined,
     });

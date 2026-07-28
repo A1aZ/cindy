@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { AuthAdapter } from '../../../interfaces/auth-adapter.js';
 import type { AgentRuntimeConfig } from '../../../interfaces/runtime-config.js';
-import { buildClaudeEnv } from '../env-builder.js';
+import {
+  SENSITIVE_ANTHROPIC_ENV_KEYS,
+  applySubagentModelEnv,
+  buildClaudeEnv,
+} from '../env-builder.js';
 
 const MODEL_CONTEXT_WINDOWS_ENV = 'XDT_MAKER_MODEL_CONTEXT_WINDOWS';
 
@@ -145,6 +149,31 @@ describe('buildClaudeEnv', () => {
     const env = await buildClaudeEnv(createAuthAdapter(), { subagentModel: 'legacy' }, {});
 
     expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('legacy');
+  });
+
+  // 回归:该键归 host 独占。继承来的残留会以最高优先级静默盖掉手写 agent 的 frontmatter
+  // model,而 host 判定的「不要设」在 SDK 的 {...process.env, ...userEnv} 合并里压不住它
+  // (只能覆盖、删不掉)—— 所以必须进 strip 名单,从根上清掉。
+  it('CLAUDE_CODE_SUBAGENT_MODEL 在 strip 名单里,process.env 的继承值不漏给子进程', async () => {
+    expect(SENSITIVE_ANTHROPIC_ENV_KEYS).toContain('CLAUDE_CODE_SUBAGENT_MODEL');
+
+    process.env.CLAUDE_CODE_SUBAGENT_MODEL = 'inherited-from-outer-cc-session';
+
+    const env = await buildClaudeEnv(createAuthAdapter(), {}, {});
+
+    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined();
+  });
+
+  it('null 决定要**删掉** behaviorFlags 带进来的同名键(只跳过赋值不够)', async () => {
+    delete process.env.CLAUDE_CODE_SUBAGENT_MODEL;
+
+    const env = await buildClaudeEnv(
+      createAuthAdapter(),
+      { behaviorFlags: { CLAUDE_CODE_SUBAGENT_MODEL: 'from-flags' } },
+      { subagentModel: null },
+    );
+
+    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined();
   });
 
   it('keeps native cron disabled even when inherited env or runtime flags try to enable it', async () => {
@@ -414,5 +443,37 @@ describe('buildClaudeEnv', () => {
       // remote 从空字典起,不继承本机 OS env
       expect(env.HOME).toBeUndefined();
     });
+  });
+});
+
+describe('applySubagentModelEnv', () => {
+  it('非空串 → 设值', () => {
+    const env: Record<string, string> = {};
+    applySubagentModelEnv(env, ' claude-sonnet-5 ');
+    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('claude-sonnet-5');
+  });
+
+  it('null / 空串 → 删键(明确「不要设」)', () => {
+    const withNull: Record<string, string> = { CLAUDE_CODE_SUBAGENT_MODEL: 'stale' };
+    applySubagentModelEnv(withNull, null);
+    expect('CLAUDE_CODE_SUBAGENT_MODEL' in withNull).toBe(false);
+
+    const withBlank: Record<string, string> = { CLAUDE_CODE_SUBAGENT_MODEL: 'stale' };
+    applySubagentModelEnv(withBlank, '   ');
+    expect('CLAUDE_CODE_SUBAGENT_MODEL' in withBlank).toBe(false);
+  });
+
+  it('undefined → 不动(调用方没做过决定)', () => {
+    const env: Record<string, string> = { CLAUDE_CODE_SUBAGENT_MODEL: 'keep' };
+    applySubagentModelEnv(env, undefined);
+    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('keep');
+  });
+
+  it('会话启动路径的用法:env 先建好(可能带残留),判定后回来覆盖或删除', () => {
+    const env: Record<string, string> = { CLAUDE_CODE_SUBAGENT_MODEL: 'leftover' };
+    applySubagentModelEnv(env, 'xai/grok-4.5');
+    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('xai/grok-4.5');
+    applySubagentModelEnv(env, null);
+    expect('CLAUDE_CODE_SUBAGENT_MODEL' in env).toBe(false);
   });
 });

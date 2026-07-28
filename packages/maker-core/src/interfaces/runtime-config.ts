@@ -7,14 +7,13 @@
  * - 这样 CLI host 可以一行配置切换不走 proxy；业务 flag 也能交给用户 settings 调
  */
 
+import type { SubagentModelDiagnostic } from '../agents/claude-code/subagent-model-default.js';
 import type { AgentCredentialMode } from './auth-adapter.js';
 
 /** 函数形态 behaviorFlags 的入参:本次 spawn 的凭证形态(undefined = 未显式指定,走 adapter fallback)。 */
 export interface BehaviorFlagsContext {
   credentialMode?: AgentCredentialMode;
 }
-
-import type { SubagentModelDiagnostic } from '../agents/claude-code/subagent-model-default.js';
 
 export interface AgentRuntimeConfig {
   /**
@@ -121,7 +120,10 @@ export interface AgentRuntimeConfig {
   /**
    * 「Subagent 模型」相关诊断的回调(见 agents/claude-code/subagent-model-default.ts)。
    *
-   * 会话启动时扫描用户手写 subagent 定义,发现「想补默认值但字段不认识」等情况时逐条回调。
+   * 会话启动时扫描用户手写 subagent 定义,对每条问题逐一回调。当前的种类见
+   * `SubagentModelDiagnosticKind`:声明的模型不在可用清单里(`unknown-model`),或用了会随
+   * 二进制升级漂移的裸别名(`alias-model`)。
+   *
    * host 据此落日志、在会话内提示用户、或交给 AI 查询。缺省 = 只落 agent 层日志。
    * 回调抛错被吞(诊断不能影响会话启动)。
    */

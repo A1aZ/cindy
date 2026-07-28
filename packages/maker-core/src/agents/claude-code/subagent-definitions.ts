@@ -2,29 +2,47 @@
  * subagent 定义发现 —— 扫出用户手写的 subagent 文件,读出它们各自声明的 model。
  *
  * 一次扫描服务两个用途:
- *   1. 「Subagent 模型」设置的**真默认语义**(见 subagent-model-default.ts):判断有没有
- *      agent 自己声明了 model,决定是走 env 覆盖还是走 programmatic 补默认值;
- *   2. **诊断**:agent 指定的模型拼错 / 供应商未连接 / 被设置盖掉时,给用户可读的原因。
+ *   1. 「Subagent 模型」设置的**真默认语义**(见 subagent-model-default.ts):判断本会话里
+ *      有没有 agent 自己声明了 model,据此决定要不要设 `CLAUDE_CODE_SUBAGENT_MODEL`;
+ *   2. **诊断**:agent 指定的模型拼错 / 供应商未连接 / 用了会漂移的裸别名时,给用户可读的原因。
  *
  * ## 为什么要自己扫
  *
  * Claude Code 的 model 解析顺序是
  * `CLAUDE_CODE_SUBAGENT_MODEL` → 每次调用的 model 参数 → frontmatter → 主会话模型。
- * env 变量位于**最高**优先级,平台**没有**「最低优先级默认值」这个位置。所以想让
- * 「设置 = 默认值、frontmatter 能盖过它」,只能由 host 自己判断哪些 agent 没写 model,
- * 再经 programmatic 通道(`options.agents`)把默认值补给它们,并且**不设** env 变量。
+ * env 变量位于**最高**优先级,平台**没有**「最低优先级默认值」这个位置,也没有「只对某几个
+ * agent 生效」的粒度(env 是进程级的)。所以想让「设置 = 默认值、frontmatter 能盖过它」,
+ * 唯一可行的做法是:host 自己先看清有没有人声明 model,有人声明就整个会话不设那个 env。
  * 这就要求 host 先知道每个 agent 声明了什么 —— 即本模块。
+ *
+ * (曾试过「不设 env + 经 `options.agents` 给未声明者补默认值」,实测走不通:同名时文件定义
+ * 胜出。判别实验与结论记在 subagent-model-default.ts 的模块头,改这块前先读。)
  *
  * ## 扫描范围与它的边界
  *
  * 覆盖用户**手写**的两个作用域(平台优先级 3 / 4):
  *   - 项目:从 workingDir 向上逐级找 `.claude/agents`(平台也是向上走查,近者优先);
- *   - 用户:`~/.claude/agents`(或 `CLAUDE_CONFIG_DIR`)。
+ *   - 用户:`<CLAUDE_CONFIG_DIR>/agents`,缺省 `~/.claude/agents`。
  * 两者都递归子目录 —— 平台允许用 `agents/review/` 这类子目录归类,身份只认 frontmatter
  * 的 `name`,与路径无关。
  *
+ * **必须传子进程 env**:`CLAUDE_CONFIG_DIR` 在 host boot 期就被 stripSensitiveAnthropicEnv
+ * 从 `process.env` 清掉了,dev 多实例隔离是由 auth adapter 只往**子进程 env** 注入的
+ * (apps/desktop/src/main/maker-host/auth-adapters.ts)。所以调用方要把最终交给 SDK 的那份
+ * env 传进来,否则这里扫的是 `~/.claude/agents`,而 cc 读的是 `<userData>/claude-home/agents`
+ * ——判定与实际不符,声明照旧被覆盖。目录解析要同时看递入 env 与 host env,原因见
+ * {@link userAgentsDir}(SDK spawn 是两份 env 合并)。
+ *
  * **刻意不覆盖** managed settings 与插件的 `agents/` 目录:那是组织与插件分发的内容,
  * 不是用户手写的,host 不该替它们改模型;这两类继续走 env 覆盖(与本改动前一致,不是回退)。
+ *
+ * ## 启动期 IO 预算
+ *
+ * 本扫描位于会话启动的关键路径上(env 要在 sdkQuery 之前定好),而 `.claude/agents` 的内容
+ * 完全由仓库决定:生成出来的大目录、几 MB 的 md、软链环都可能把新会话拖成「假死」。
+ * 因此深度、目录数、文件数、单文件字节数与总耗时**都**有上限,任一超限即抛
+ * {@link SubagentScanBudgetError},由调用方降级成「照旧设 env」——宁可默认值语义退回改动前,
+ * 也不让会话卡在启动上。
  */
 
 import type { Dirent } from 'node:fs';
@@ -47,15 +65,75 @@ export interface DiscoveredSubagent {
    * `undefined` = 没写 / 写了 `inherit`(平台语义等同没写)—— 这类才需要补默认值。
    */
   declaredModel?: string;
-  /** frontmatter 原始数据(重发定义时按字段映射搬运)。 */
+  /** frontmatter 原始数据(诊断用;host 不改写它,也不重发定义)。 */
   frontmatter: Record<string, unknown>;
   /** 正文 = subagent 的 system prompt。 */
   body: string;
 }
 
-/** `~/.claude`(或 CLAUDE_CONFIG_DIR)下的 agents 目录。 */
-function userAgentsDir(env: NodeJS.ProcessEnv): string {
-  const configDir = env.CLAUDE_CONFIG_DIR?.trim();
+/**
+ * 扫描触及预算上限 —— 调用方应据此降级(见模块头「启动期 IO 预算」),不要当作
+ * 「没有人声明 model」。
+ */
+export class SubagentScanBudgetError extends Error {
+  constructor(readonly budget: string) {
+    super(`subagent definition scan exceeded budget: ${budget}`);
+    this.name = 'SubagentScanBudgetError';
+  }
+}
+
+/** 目录递归深度上限:防软链环 / 异常深目录。 */
+const MAX_DEPTH = 8;
+/** 遍历到的 .md 文件数上限。真实用法是个位数到几十;上百已属异常。 */
+const MAX_FILES = 200;
+/** 访问的目录数上限(深度管不住广度)。 */
+const MAX_DIRS = 200;
+/** 单个定义文件的字节上限。subagent 定义就是一段 prompt,64 KiB 已经很宽。 */
+const MAX_FILE_BYTES = 64 * 1024;
+/** 整趟扫描的墙钟上限 —— 兜住慢盘 / 网络盘 / 病态目录。 */
+const MAX_ELAPSED_MS = 1_500;
+
+/** 预算账本。任一维度超限立即抛,不做「静默截断」——截断会让判定悄悄失真。 */
+class ScanBudget {
+  private files = 0;
+  private dirs = 0;
+  constructor(private readonly startedAt: number) {}
+
+  countDir(): void {
+    if (++this.dirs > MAX_DIRS) throw new SubagentScanBudgetError(`dirs>${MAX_DIRS}`);
+    this.checkTime();
+  }
+
+  countFile(): void {
+    if (++this.files > MAX_FILES) throw new SubagentScanBudgetError(`files>${MAX_FILES}`);
+    this.checkTime();
+  }
+
+  checkTime(): void {
+    if (Date.now() - this.startedAt > MAX_ELAPSED_MS) {
+      throw new SubagentScanBudgetError(`elapsed>${MAX_ELAPSED_MS}ms`);
+    }
+  }
+}
+
+/**
+ * cc 子进程实际会读的 `<config dir>/agents`。
+ *
+ * 必须按 **SDK spawn 的合并语义**来解:SDK 起 CLI 时用的是
+ * `{ ...process.env, ...userEnv }`,所以子进程看到的 `CLAUDE_CONFIG_DIR` 是
+ * 「host 递入的那份」优先、其次才是「host 自己 process.env 上的」。
+ *
+ * 两者都要看,漏一个就会扫错目录:
+ *   - 只看 `process.env`:dev 多实例的重定向只存在于递入的 env 里(desktop boot 已把该键
+ *     从 process.env 剥掉),会漏掉;
+ *   - 只看递入的 env:没调过 stripSensitiveAnthropicEnv 的 host(CLI host、单测)其
+ *     `process.env.CLAUDE_CONFIG_DIR` 照样会被 SDK 合并进子进程 —— 我们的字典副本里没有它
+ *     (cleanProcessEnv 剥了),但 cc 读的就是它。
+ *
+ * 都没有则回落 `~/.claude` —— 与 cc 在子进程里自己的解析一致(local spawn 同一个用户)。
+ */
+function userAgentsDir(childEnv: NodeJS.ProcessEnv, hostEnv: NodeJS.ProcessEnv): string {
+  const configDir = childEnv.CLAUDE_CONFIG_DIR?.trim() || hostEnv.CLAUDE_CONFIG_DIR?.trim();
   const base = configDir && configDir.length > 0 ? configDir : path.join(os.homedir(), '.claude');
   return path.join(base, 'agents');
 }
@@ -68,10 +146,34 @@ async function isDirectory(p: string): Promise<boolean> {
   }
 }
 
-/** 递归收集目录下的 .md 文件。单个坏目录只跳过它自己,不影响其余扫描。 */
-async function collectMarkdownFiles(dir: string, depth = 0): Promise<string[]> {
-  // 目录深度兜底:防软链环 / 异常深目录把会话启动拖住。
-  if (depth > 8) return [];
+/**
+ * 递归收集目录下的 .md 文件。单个坏目录只跳过它自己,不影响其余扫描;超预算则整趟抛出。
+ *
+ * **软链必须跟随**:`readdir(withFileTypes)` 给软链的 Dirent 既不是 file 也不是 dir,
+ * 只看 isFile()/isDirectory() 会把它整条漏掉。本仓在建 worktree 时是**刻意**保留
+ * `.claude/agents` 里的软链的(WorktreeManager.copyDirIfExists 用 `dereference: false`,
+ * 因为有人就是这么复用定义的)—— 漏掉一个软链定义,就等于误判「没人声明 model」,
+ * 于是又把覆盖用的 env 设回去,正是本次要修的 bug。所以对软链补一次 follow-stat。
+ *
+ * 跟随软链就要防环:用 realpath 记账,同一真实目录只进一次(深度上限管不住 A→B→A)。
+ */
+async function collectMarkdownFiles(
+  dir: string,
+  budget: ScanBudget,
+  visitedDirs: Set<string>,
+  depth = 0,
+): Promise<string[]> {
+  if (depth > MAX_DEPTH) return [];
+  // 软链环兜底:按真实路径去重。realpath 失败(悬空链)就跳过这个目录。
+  let real: string;
+  try {
+    real = await fs.realpath(dir);
+  } catch {
+    return [];
+  }
+  if (visitedDirs.has(real)) return [];
+  visitedDirs.add(real);
+  budget.countDir();
   // 显式标注 Dirent[]:`withFileTypes: true` 的重载在部分 tsconfig(desktop 更严)下会被
   // 推成 Buffer 变体,导致 ent.name 变成 Buffer。
   let entries: Dirent[];
@@ -86,8 +188,24 @@ async function collectMarkdownFiles(dir: string, depth = 0): Promise<string[]> {
   const sorted = [...entries].sort((a, b) => a.name.localeCompare(b.name));
   for (const ent of sorted) {
     const full = path.join(dir, ent.name);
-    if (ent.isDirectory()) files.push(...(await collectMarkdownFiles(full, depth + 1)));
-    else if (ent.isFile() && ent.name.endsWith('.md')) files.push(full);
+    let isDir = ent.isDirectory();
+    let isFile = ent.isFile();
+    if (ent.isSymbolicLink()) {
+      // follow: stat 走目标。悬空 / 无权限的链直接跳过这一条。
+      try {
+        const st = await fs.stat(full);
+        isDir = st.isDirectory();
+        isFile = st.isFile();
+      } catch {
+        continue;
+      }
+    }
+    if (isDir) {
+      files.push(...(await collectMarkdownFiles(full, budget, visitedDirs, depth + 1)));
+    } else if (isFile && ent.name.endsWith('.md')) {
+      budget.countFile();
+      files.push(full);
+    }
   }
   return files;
 }
@@ -125,6 +243,10 @@ async function readSubagentFile(
 ): Promise<DiscoveredSubagent | null> {
   let raw: string;
   try {
+    // 先看大小再读:几 MB 的 md 放在 agents 目录里(生成物、误放的日志)不该被整份读进内存。
+    // 超限的**跳过而不抛** —— 它本身就不像一份 subagent 定义,不值得为它降级整趟扫描。
+    const st = await fs.stat(filePath);
+    if (st.size > MAX_FILE_BYTES) return null;
     raw = await fs.readFile(filePath, 'utf8');
   } catch {
     return null;
@@ -155,29 +277,43 @@ async function readSubagentFile(
 
 export interface DiscoverSubagentsOptions {
   workingDir: string;
-  /** 测试注入;缺省读 process.env。 */
-  env?: NodeJS.ProcessEnv;
+  /**
+   * **递给 SDK 的那份子进程 env**(`options.env`),用于取 `CLAUDE_CONFIG_DIR`。
+   *
+   * 刻意设成**必填**:dev 多实例的配置目录重定向只存在于这份 env 里(host boot 期已把该键
+   * 从 `process.env` 剥掉),缺了它就会静默扫错目录。让类型强制调用方交出这份 env,
+   * 比留个默认值再靠注释提醒可靠。解析规则见 {@link userAgentsDir}。
+   */
+  env: NodeJS.ProcessEnv;
+  /** host 自己的 env;缺省 `process.env`。SDK spawn 会把它合并进子进程,故一并参与解析。 */
+  hostEnv?: NodeJS.ProcessEnv;
+  /** 测试注入起始时刻(避免依赖真实时钟)。 */
+  now?: () => number;
 }
 
 /**
  * 扫出当前会话可见的用户手写 subagent 定义,按平台优先级去重(项目近者 > 项目远者 > 用户)。
  *
- * 任何 IO 异常都被吞成「这条不算」——本扫描只服务默认值与诊断,不能让它拖垮会话启动。
+ * 单个文件/目录的 IO 异常都被吞成「这条不算」——本扫描只服务默认值与诊断,不能让它拖垮
+ * 会话启动。但**预算超限会抛** {@link SubagentScanBudgetError}:那种情况下结果已不可信,
+ * 必须由调用方显式降级,不能伪装成「扫完了,没人声明」。
  */
 export async function discoverSubagentDefinitions(
   opts: DiscoverSubagentsOptions,
 ): Promise<DiscoveredSubagent[]> {
-  const env = opts.env ?? process.env;
+  const budget = new ScanBudget((opts.now ?? Date.now)());
+  const visitedDirs = new Set<string>();
   const scoped: Array<{ dir: string; scope: DiscoveredSubagent['scope'] }> = [
     // 顺序 = 优先级从高到低;同名先到者胜。
     ...(await projectAgentsDirs(opts.workingDir)).map((dir) => ({ dir, scope: 'project' as const })),
-    { dir: userAgentsDir(env), scope: 'user' as const },
+    { dir: userAgentsDir(opts.env, opts.hostEnv ?? process.env), scope: 'user' as const },
   ];
 
   const byName = new Map<string, DiscoveredSubagent>();
   for (const { dir, scope } of scoped) {
     if (!(await isDirectory(dir))) continue;
-    for (const filePath of await collectMarkdownFiles(dir)) {
+    for (const filePath of await collectMarkdownFiles(dir, budget, visitedDirs)) {
+      budget.checkTime();
       const found = await readSubagentFile(filePath, scope);
       if (!found) continue;
       // 高优先级作用域先遍历,已存在同名即不覆盖。

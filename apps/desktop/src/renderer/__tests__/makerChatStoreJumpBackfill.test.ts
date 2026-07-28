@@ -75,6 +75,9 @@ import type { Message } from '@/lib/ccAgent.types';
 
 const SID = 'sess-jump-backfill';
 
+/** 捕获 local-db:messages:created 的监听器,用来在测试里模拟 live push。 */
+let messageCreatedListener: ((raw: unknown) => void) | undefined;
+
 function makeElectronApiStub() {
   const fanOut = () => () => () => {};
   return {
@@ -88,7 +91,16 @@ function makeElectronApiStub() {
         getProjection: vi.fn(async () => Promise.reject(new Error('n/a in test'))),
       },
     },
-    localDb: { messages: { onCreated: fanOut() } },
+    localDb: {
+      messages: {
+        onCreated: (cb: (raw: unknown) => void) => {
+          messageCreatedListener = cb;
+          return () => {
+            messageCreatedListener = undefined;
+          };
+        },
+      },
+    },
     onUsageMessageTurnCost: fanOut(),
   };
 }
@@ -1043,6 +1055,64 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     expect(snap.messages.find((m) => m.clientId === 'other-row')?.content).toBe(
       'live final content',
     );
+  });
+
+  it('J8. 跳转期间目标行被 live 更新过时,around 快照也不许 hydrate 它', async () => {
+    // review #676(codex P1):目标行的 hydrate 是 around 提交的目的,但 around 是在补齐循环
+    // **之前**取的;这期间 local-db:messages:created 把目标更新过时,拿旧快照 hydrate 就会把
+    // 更新的内容盖回去。判据是对象引用:store 里的 ChatMessage 不可变,只有真的变了才换对象。
+    const target = serverMessage({
+      id: 'live-target',
+      clientId: 'live-target',
+      role: 'assistant',
+      content: 'content when around was fetched',
+      createdAt: '2026-07-25T11:00:00.000Z',
+    });
+    // 第 1 步:普通跳转把目标放进窗口。
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce([target]);
+    await makerChatStore.loadAroundMessageClientId(SID, 'live-target', { radius: 60 });
+
+    // 第 2 步:制造孤岛(补齐取不到 → 退回 around fallback),这样下一次跳转不会走成员快速通道。
+    const island = serverMessage({
+      id: 'island-row',
+      clientId: 'island-row',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([island]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce([]);
+    await makerChatStore.loadAroundMessageClientId(SID, 'island-row', { radius: 60 });
+    expect(makerChatStore.getSnapshot(SID).historyWindowHasIsland).toBe(true);
+
+    // 第 3 步:再跳目标。around 返回的是"取快照那一刻"的旧内容,补齐停在飞行中。
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    let releasePage: (rows: Message[]) => void = () => {};
+    vi.mocked(listMessagesFor).mockImplementationOnce(
+      () =>
+        new Promise<Message[]>((resolve) => {
+          releasePage = resolve;
+        }),
+    );
+    const jump = makerChatStore.loadAroundMessageClientId(SID, 'live-target', { radius: 60 });
+    await flushMicrotasks();
+
+    // 飞行期间 live push 把目标更新了(真实通道:local-db:messages:created)。
+    messageCreatedListener?.({
+      sessionId: SID,
+      message: { ...target, content: 'live newer content' },
+    });
+    expect(
+      makerChatStore.getSnapshot(SID).messages.find((m) => m.clientId === 'live-target')?.content,
+    ).toBe('live newer content');
+
+    releasePage([]);
+    await jump;
+    await flushMicrotasks();
+
+    // 关键:陈旧的 around 快照不许把 live 内容盖回去。
+    expect(
+      makerChatStore.getSnapshot(SID).messages.find((m) => m.clientId === 'live-target')?.content,
+    ).toBe('live newer content');
   });
 
   it('J6b. addOnly 只影响"已有的行",缺行照补(merge 契约直测)', () => {

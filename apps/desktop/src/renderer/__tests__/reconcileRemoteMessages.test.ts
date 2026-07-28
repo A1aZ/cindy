@@ -752,6 +752,59 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     expect(makerChatStore.getSnapshot(s).historyWindowHasIsland).toBe(false);
   });
 
+  it('远程会话:加性提交不擦掉重建出处,第三次(更晚启动)仍能落地', async () => {
+    // review #676(codex P1):三次对账都在代际 N 启动。#1 重建到 N+1,#2 作为更新的加性 merge
+    // 被放行,但它的提交记录把"谁解释了这次 bump"覆写成 rebuilt:false。#3(更晚启动、也从 N
+    // 出发)于是过不了 epochAcceptable,它取回的新行一直缺着。rebuildEpoch 单独记就不会丢。
+    const s = sid();
+    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
+
+    const p1 = deferred<Message[]>();
+    const p2 = deferred<Message[]>();
+    const p3 = deferred<Message[]>();
+    let calls = 0;
+    remoteListResolver = () => {
+      calls += 1;
+      if (calls === 1) return p1.promise;
+      if (calls === 2) return p2.promise;
+      return p3.promise;
+    };
+
+    // 三次都在同一代际启动。
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+
+    // #1 先回来:与 seed 无重叠 → 权威重建(bump 代际)。
+    p1.resolve([dbMessage(s, 'rebuilt', 'authoritative rebuilt', '2026-06-20T00:00:00.000Z')]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual([
+      'client-rebuilt',
+    ]);
+
+    // #2 再回来:重叠判定看的是**它自己启动时**的 existingIds({seed}),所以页里带 seed 才算
+    // 有重叠 → 走加性 merge(不 bump 代际,也正是这条 review 的前提)。
+    p2.resolve([
+      dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z'),
+      dbMessage(s, 'from-2', 'row from run 2', '2026-06-21T00:00:00.000Z'),
+    ]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toContain('client-from-2');
+
+    // #3 最后回来(启动最晚、序号最大):同样从代际 N 出发,必须仍能落地。
+    p3.resolve([
+      dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z'),
+      dbMessage(s, 'from-3', 'row from run 3', '2026-06-22T00:00:00.000Z'),
+    ]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    // 关键:加性提交没把重建出处擦掉,#3 的新行进得来。
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toContain('client-from-3');
+  });
+
   it('远程会话:加性提交不能替一次无关的 rewind 背书,rewind 掉的尾部不得被补回', async () => {
     // review #676(codex P1):加性提交不 bump 代际,所以"它记的代际恰好等于现在"解释不了代际
     // 为什么从本次启动时变了 —— 那个变化另有来源(这里是 rewind)。旧写法让任何更晚的加性提交

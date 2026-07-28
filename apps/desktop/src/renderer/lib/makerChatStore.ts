@@ -5115,6 +5115,14 @@ const _remoteReconcileCommit = new Map<
     epoch: number;
     /** 那次提交走的是权威重建(整片换窗口)还是加性 merge。决定"先启动者能否补交"。 */
     rebuilt: boolean;
+    /**
+     * 最近一次**权威重建**留下的代际(没有重建过则 undefined)。
+     *
+     * 与 epoch 分开记:加性提交会覆写这条记录,若把"谁解释了这次 bump"和"最后一次提交"混在
+     * 一个字段里,重建的出处就被随后的加性提交擦掉了 —— 第三个更晚启动的请求于是过不了
+     * epochAcceptable、它取回的新行一直缺着(#676 review codex P1)。加性提交继承它。
+     */
+    rebuildEpoch?: number;
   }
 >();
 
@@ -5599,8 +5607,7 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
       // demote)。旧写法让任何更晚的加性提交都能替一次无关的重置背书,于是 rewind 掉的尾部会被
       // 先启动那次当成"缺的行"补回来(#676 review codex P1)。
       const epochAcceptable =
-        epochNow === reconcileEpochAtStart ||
-        (lastCommit !== undefined && lastCommit.rebuilt === true && epochNow === lastCommit.epoch);
+        epochNow === reconcileEpochAtStart || epochNow === lastCommit?.rebuildEpoch;
       const supersededByNewerCommit = (lastCommit?.seq ?? 0) >= reconcileSeq;
       // 序号这一关只拦**权威重建**,不拦加性 merge —— 但补交的门开得很窄,三个条件都要满足。
       //
@@ -5729,6 +5736,12 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
         _remoteReconcileCommit.set(sessionId, {
           seq: reconcileSeq,
           rebuilt: didRebuild,
+          // 重建出处独立于"最后一次提交":加性提交继承前一条记录里的值,不把它擦掉。
+          ...(didRebuild
+            ? { rebuildEpoch: _messagesEpoch.get(sessionId) ?? 0 }
+            : lastCommit?.rebuildEpoch !== undefined
+              ? { rebuildEpoch: lastCommit.rebuildEpoch }
+              : {}),
           // 代际要在**可能的 bump 之后**读:权威重建分支刚把它 +1,记的就得是新值,
           // 后来者才能据此认出"这个 bump 是对账提交造成的"。
           epoch: _messagesEpoch.get(sessionId) ?? 0,
@@ -6148,6 +6161,33 @@ async function backfillHistoryUntil(
  * around 行是权威内容,除 `cancelled` 外每条路径都要 merge —— 重复跳转同一条消息
  * 时靠它把本地旧内容 hydrate 成最新(典型:tool_result 由 verbose 收敛成权威短内容)。
  */
+/**
+ * around 快照能否 hydrate 跳转目标那一行 —— 只有"跳转期间它没被动过"才可以。
+ *
+ * 目标行的 hydrate 是 around 提交的目的(重复跳转把本地 verbose 的 tool_result 收敛成权威
+ * 内容),但 around 是在补齐循环**之前**取的:若这期间 local-db:messages:created 把目标行更新
+ * 过,拿旧快照 hydrate 就会把更新的内容 / 元数据盖回去(#676 review codex P1)。
+ *
+ * 判据用**对象引用**:store 里的 ChatMessage 是不可变的,只有内容真的变了才会被换成新对象
+ * (mergeMessages / hydratePersistedMessage 都有 shallowEqual 短路)。引用没变 ⇒ 没被动过。
+ * 这样不需要给每条消息加修订号(messages 表没有 updatedAt)。
+ *
+ * 跳转前窗口里本来就没有这一行(before === undefined)时照常放行:那一行是被 merge **新增**
+ * 进来的,不存在"盖掉更新"的问题。
+ */
+function hydrateTargetIfUntouched(
+  sessionId: string,
+  targetClientId: string | null,
+  before: ChatMessage | undefined,
+): string | null {
+  if (!targetClientId) return null;
+  if (before === undefined) return targetClientId;
+  const now = getOrCreateState(sessionId).messages.find(
+    (message) => message.clientId === targetClientId,
+  );
+  return now === before ? targetClientId : null;
+}
+
 function commitAroundWindow(
   sessionId: string,
   rows: Message[],
@@ -6281,6 +6321,12 @@ async function loadAroundMessage(
   const mapped = mapServerMessages(rows);
   const targetRow = rows.find((row) => row.id === messageId) ?? null;
   const targetClientId = targetRow?.clientId ?? null;
+  // 补齐可能跑好几秒;先记下目标行**当前的对象引用**,提交时据此判断它有没有被 live push 动过
+  // (见 hydrateTargetIfUntouched)。
+  const targetRowBeforeBackfill = targetClientId
+    ? getOrCreateState(sessionId).messages.find((message) => message.clientId === targetClientId)
+    : undefined;
+
 
   // 优先把窗口从最新连续补齐到目标,不留历史空洞(见 backfillHistoryUntil)。
   // 补不到(超上限 / 翻完 / 让位并发分页)则退回 around 窗口 merge:此时窗口仍不
@@ -6316,7 +6362,14 @@ async function loadAroundMessage(
   )
     return null;
 
-  commitAroundWindow(sessionId, rows, mapped, outcome, ownsPagingLock, targetClientId);
+  commitAroundWindow(
+    sessionId,
+    rows,
+    mapped,
+    outcome,
+    ownsPagingLock,
+    hydrateTargetIfUntouched(sessionId, targetClientId, targetRowBeforeBackfill),
+  );
 
   if (!targetClientId) return null;
   return (
@@ -6339,6 +6392,11 @@ async function loadAroundMessageClientId(
   const mapped = mapServerMessages(rows);
 
   // 同 loadAroundMessage:先连续补齐,避免跳转窗口与尾部窗口之间留下历史空洞。
+  // 同 loadAroundMessage:补齐之前记下目标行的对象引用,提交时判断它有没有被 live push 动过。
+  const targetRowBeforeBackfill = getOrCreateState(sessionId).messages.find(
+    (message) => message.clientId === clientId,
+  );
+
   const { outcome, ownsPagingLock } = await backfillHistoryUntil(
     sessionId,
     clientId,
@@ -6356,7 +6414,14 @@ async function loadAroundMessageClientId(
   )
     return null;
 
-  commitAroundWindow(sessionId, rows, mapped, outcome, ownsPagingLock, clientId);
+  commitAroundWindow(
+    sessionId,
+    rows,
+    mapped,
+    outcome,
+    ownsPagingLock,
+    hydrateTargetIfUntouched(sessionId, clientId, targetRowBeforeBackfill),
+  );
 
   return (
     getOrCreateState(sessionId).messages.find((message) => message.clientId === clientId) ?? null

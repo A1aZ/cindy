@@ -33,7 +33,6 @@ import {
 import type { Query, CanUseTool, McpServerConfig, PermissionUpdate, Settings } from '@anthropic-ai/claude-agent-sdk';
 import { discoverSubagentDefinitions } from './subagent-definitions.js';
 import {
-  formatSubagentDiagnosticsReminder,
   reportSubagentModelDiagnostics,
   resolveSubagentModelDefault,
   type ResolveSubagentModelDefaultResult,
@@ -291,40 +290,6 @@ function quotedMentionText(block: { path: string; kind?: 'file' | 'dir' | 'agent
 
 function hasMentionText(existingText: string, block: { path: string; kind?: 'file' | 'dir' | 'agent' }): boolean {
   return existingText.includes(rawMentionText(block)) || existingText.includes(quotedMentionText(block));
-}
-
-/**
- * 这条消息是不是「原样交给 SDK 识别的斜杠命令」。
- *
- * `/compact`、`/context` 这些内置命令的执行方式是**把 `/<name> [args]` 当 prompt 前缀直接
- * 发过去**,由 SDK 自己认(见 commands.ts)。识别靠的就是「首字符是 `/`」——一旦在前面插了
- * 别的东西(比如我们的 `<system-reminder>`),SDK 就把整条当普通文本,命令静默不执行。
- * 所以带提醒时必须**跳过**这类消息,把提醒留给下一条普通消息。
- */
-function startsWithSlashCommand(
-  content: string | Array<{ type: string; [k: string]: unknown }>,
-): boolean {
-  if (typeof content === 'string') return content.trimStart().startsWith('/');
-  const firstText = content.find((b) => b.type === 'text');
-  return typeof firstText?.text === 'string' && firstText.text.trimStart().startsWith('/');
-}
-
-/**
- * 把一段 `<system-reminder>` 放到用户消息内容**之前**(两种 content 形态都支持)。
- *
- * 挂用户消息而不是 system prompt:tool / system 段是 prompt 缓存前缀的最上层,往那儿塞
- * 会话相关内容会让整条前缀失效;上游 Claude Code 自己也是把提醒挂到下一条用户消息。
- *
- * 遇到斜杠命令则原样返回(见 {@link startsWithSlashCommand}),调用方据此判断提醒有没有
- * 被真正带出去。
- */
-export function prependSystemReminder(
-  content: string | Array<{ type: string; [k: string]: unknown }>,
-  reminder: string,
-): string | Array<{ type: string; [k: string]: unknown }> {
-  if (startsWithSlashCommand(content)) return content;
-  if (typeof content === 'string') return `${reminder}\n\n${content}`;
-  return [{ type: 'text', text: reminder }, ...content];
 }
 
 /**
@@ -828,8 +793,9 @@ export class ClaudeCodeAgent extends BaseAgent {
     // (boot 期已从 process.env 剥离)。拿 process.env 去扫会扫到 `~/.claude/agents`,
     // 和 cc 实际读的目录不是同一个 → 判定失真,声明照旧被覆盖。
     //
-    // 只在会话启动时解析一次 —— env 进子进程、诊断进首轮上下文,会话中途变动会破坏
+    // 只在会话启动时解析一次 —— env 要在 spawn 前定好,会话中途变动 tools/system 会破坏
     // prompt 缓存(见 docs/dev-rules/maker-core-and-agent-behavior.md §3.1)。
+    // 诊断只落日志与 host 回调,**不进模型上下文**(理由见 subagent-model-default.ts 模块头)。
     // 扫描失败(含触发 IO 预算)一律降级成「照旧设 env」= 本改动前的行为,绝不阻断会话启动。
     let subagentDefault: ResolveSubagentModelDefaultResult = {
       envSubagentModel: this.deps.runtimeConfig.subagentModel?.trim() || undefined,
@@ -868,9 +834,6 @@ export class ClaudeCodeAgent extends BaseAgent {
     }
     // 判定落到 env(唯一写入点,见 env-builder.applySubagentModelEnv)。
     applySubagentModelEnv(env, subagentDefault.envSubagentModel ?? null);
-    // 一次性诊断提醒:挂到**首条**用户消息上(不进 system prompt —— 那是缓存前缀最上层,
-    // 且触发 §4 门禁)。发出成功即清空,后续 turn 不再重复占用上下文。
-    let pendingSubagentReminder = formatSubagentDiagnosticsReminder(subagentDefault.diagnostics);
     // 远端单独一份 env:用 'remote' 模式从空字典起(不继承 desktop OS env),否则
     // Windows HOME=C:\Users\Lizi 之类污染远端 cc CLI 的 ~ 展开(session/memory
     // 落怪路径)。详见 env-builder.ts buildClaudeEnv 文档。
@@ -3453,22 +3416,9 @@ export class ClaudeCodeAgent extends BaseAgent {
           // Claude Code streaming-input 协议要求 message 包装层,漏掉会 exit code 1。
           // sendOpts.messageUuid 注入到 SDK input.uuid — SDK 透传当作 file checkpoint
           // snapshot 的 messageId, rewind preview 拿同款 uuid 调 rewindFiles dryRun。
-          // subagent 诊断提醒:只挂第一条用户消息。放在用户文本**之前**,与 system-reminder
-          // 的既有惯例一致(模型先读到环境提示再读用户诉求)。
-          //
-          // 消费时机有两个讲究:
-          //   - 斜杠命令(/compact 等)不能被前置任何内容,prependSystemReminder 会原样返回
-          //     → 提醒没带出去,必须留着给下一条普通消息;
-          //   - 清空要等 inputQueue.push 被接收之后 —— 队列已关闭时这条 send 会抛,提前清空
-          //     就等于把诊断永久丢掉(用户重试也再看不到)。
-          const contentWithReminder = pendingSubagentReminder
-            ? prependSystemReminder(content, pendingSubagentReminder)
-            : content;
-          const reminderDelivered =
-            pendingSubagentReminder !== null && contentWithReminder !== content;
           const sdkInput: SdkUserInput = {
             type: 'user',
-            message: { role: 'user', content: contentWithReminder },
+            message: { role: 'user', content },
             parent_tool_use_id: null,
             ...(sendOpts?.messageUuid ? { uuid: sendOpts.messageUuid } : {}),
           };
@@ -3480,8 +3430,6 @@ export class ClaudeCodeAgent extends BaseAgent {
             // get persisted and removed even though Claude never received them.
             throw new Error('Claude input queue is closed');
           }
-          // 到这里才算真送出去了(见上面的消费时机说明)。
-          if (reminderDelivered) pendingSubagentReminder = null;
           userInputAccepted = true;
           replayableUserInput = sdkInput;
           // upstream-response-idle watchdog 起表 — 放在 inputQueue.push 之后, 避免把

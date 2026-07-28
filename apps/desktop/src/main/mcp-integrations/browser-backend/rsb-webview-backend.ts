@@ -199,9 +199,13 @@ export class RsbWebviewBackend implements BrowserBackend {
         // Phase 4 CDP territory. `act` supports `evaluate` only in this phase
         // (handled above); `act:click` / `act:type` / etc. require CDP Input
         // domain and ARIA snapshot infrastructure that lands in a follow-up.
+        // 错误信息带可执行替代路径(teach-via-error):agent 只看得到 message,
+        // 不给出路它就会在同一个 action 上反复空转。
         return actionFailed(
           request.action,
-          `action '${request.action}' not yet supported in rsb-webview backend`,
+          `action '${request.action}' 在侧边栏内置浏览器模式下不可用。` +
+            `替代:navigate 打开页面 → extract / act:evaluate(页内 JS 读 DOM / 提数据) → screenshot 视觉确认;` +
+            `确需该能力时,请用户到 设置 → 自动操作 切换为独立外置浏览器后重试。`,
         );
     }
   }
@@ -388,7 +392,9 @@ export class RsbWebviewBackend implements BrowserBackend {
     if (inner.kind !== 'evaluate') {
       return actionFailed(
         req.action,
-        `act:${String(inner.kind)} not yet supported in rsb-webview backend (Phase 4)`,
+        `act:${String(inner.kind)} 在侧边栏内置浏览器模式下不可用(仅支持 act:evaluate)。` +
+          `替代:用 act:evaluate 在页内执行 JS 完成点击 / 填表 / 读数;` +
+          `确需原生输入模拟时,请用户到 设置 → 自动操作 切换为独立外置浏览器后重试。`,
       );
     }
     if (typeof inner.fn !== 'string' || inner.fn === '') {

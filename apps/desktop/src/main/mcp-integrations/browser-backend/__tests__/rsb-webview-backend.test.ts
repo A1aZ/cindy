@@ -464,7 +464,7 @@ describe('RsbWebviewBackend — act:evaluate', () => {
     expect(callArg.indexOf('window.__pwned')).toBeGreaterThan(callArg.indexOf(JSON.stringify(adversarial).slice(0, 10)));
   });
 
-  it('non-evaluate act kinds are rejected with a Phase 4 message', async () => {
+  it('non-evaluate act kinds are rejected with an actionable hint', async () => {
     const { backend } = buildEvalEnv(null);
     const res = await backend.call({
       action: 'act',
@@ -472,7 +472,11 @@ describe('RsbWebviewBackend — act:evaluate', () => {
       request: { kind: 'click', ref: 'r-1' },
     } as never);
     expect(res.ok).toBe(false);
-    expect(res.message).toMatch(/click not yet supported/);
+    // teach-via-error:报错必须点名不可用的 kind,并给出替代路径(act:evaluate)
+    // 与升级路径(切外置浏览器),agent 才不会在同一 action 上空转。
+    expect(res.message).toMatch(/act:click/);
+    expect(res.message).toMatch(/act:evaluate/);
+    expect(res.message).toMatch(/独立外置浏览器/);
   });
 
   it('executeJavaScript throw propagates as actionFailed', async () => {
@@ -834,7 +838,10 @@ describe('RsbWebviewBackend — unsupported actions', () => {
     const res = await backend.call({ action: 'snapshot' } as never);
     expect(res.ok).toBe(false);
     expect(res.errorCode).toBe('BROWSER_RUNTIME_ACTION_FAILED');
-    expect(res.message).toMatch(/not yet supported/);
+    // teach-via-error:报错点名 action + 替代路径 + 升级路径。
+    expect(res.message).toMatch(/'snapshot'/);
+    expect(res.message).toMatch(/act:evaluate/);
+    expect(res.message).toMatch(/独立外置浏览器/);
   });
 
   it('thrown exceptions inside a handler are caught into actionFailed', async () => {

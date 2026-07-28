@@ -58,12 +58,18 @@ describe('UserInfoSection — outer wrapper takes over full-row hover', () => {
 });
 
 describe('UserInfoSection — version label', () => {
-  it('shows the build region alongside the app version', () => {
+  it('labels only the non-global builds alongside the app version', () => {
     expect(source).toContain("import { CURRENT_CINDY_REGION } from '../../../shared/brandRegion';");
-    expect(source).toContain(
-      "const appRegionLabel = CURRENT_CINDY_REGION === 'global' ? 'Global' : 'CN';",
+    // global 故意不贴标签(docs/product-rules/region-and-editions.md §2.3):
+    // 映射表里只有 cn / dev,global 落到 undefined 分支只显示版本号。
+    expect(source).toMatch(
+      /const REGION_LABEL: Partial<Record<typeof CURRENT_CINDY_REGION, string>> = \{\s*\n\s*cn: 'CN',\s*\n\s*dev: 'Dev',\s*\n\s*\};/,
     );
-    expect(source).toContain('const appVersionLabel = `${appRegionLabel} · ${appDisplayVersion}`;');
+    expect(source).not.toContain("'Global'");
+    expect(source).toContain('const appRegionLabel = REGION_LABEL[CURRENT_CINDY_REGION];');
+    expect(source).toMatch(
+      /const appVersionLabel = appRegionLabel\s*\n\s*\? `\$\{appRegionLabel\} · \$\{appDisplayVersion\}`\s*\n\s*: appDisplayVersion;/,
+    );
     expect(source).not.toContain('XD.Inc');
     expect(source).toContain('{appVersionLabel}');
     expect(source).toContain('title={appVersionLabelDetail}');

@@ -10,6 +10,20 @@ import { useUpdateBannerDismiss } from '@/hooks/useUpdateBannerDismiss';
 import { CURRENT_CINDY_REGION } from '../../../shared/brandRegion';
 import { MobileDownloadDialog } from './MobileDownloadDialog';
 
+/**
+ * 版本行的区域前缀(与登录页 REGION_PILL_KEY 同一口径)。
+ *
+ * **global 故意缺席**:Cindy 本身就是全球产品,默认形态不需要给自己贴标签证明
+ * 是全球版——只有为特定法规单独构建的版本才被标注(见
+ * `docs/product-rules/region-and-editions.md` §2.3)。cn / dev 保留代号:两者
+ * 连的都不是 global 端点,这一行是用户自查当前构建身份的位置。
+ * 区域代号不翻译,四语同文,不进 i18n。
+ */
+const REGION_LABEL: Partial<Record<typeof CURRENT_CINDY_REGION, string>> = {
+  cn: 'CN',
+  dev: 'Dev',
+};
+
 interface UserInfoSectionProps {
   isCollapsed: boolean;
   onOpenUpdateNotice?: () => void;
@@ -47,9 +61,13 @@ export function UserInfoSection({ isCollapsed, onOpenUpdateNotice }: UserInfoSec
   const initial = displayName.charAt(0).toUpperCase();
   const appDisplayVersion = window.electronAPI.appDisplayVersion;
   const appDisplayVersionDetail = window.electronAPI.appDisplayVersionDetail;
-  const appRegionLabel = CURRENT_CINDY_REGION === 'global' ? 'Global' : 'CN';
-  const appVersionLabel = `${appRegionLabel} · ${appDisplayVersion}`;
-  const appVersionLabelDetail = `${appRegionLabel} · ${appDisplayVersionDetail}`;
+  const appRegionLabel = REGION_LABEL[CURRENT_CINDY_REGION];
+  const appVersionLabel = appRegionLabel
+    ? `${appRegionLabel} · ${appDisplayVersion}`
+    : appDisplayVersion;
+  const appVersionLabelDetail = appRegionLabel
+    ? `${appRegionLabel} · ${appDisplayVersionDetail}`
+    : appDisplayVersionDetail;
   const remoteAvailable = mode === 'cloud';
 
   const handleClick = () => {

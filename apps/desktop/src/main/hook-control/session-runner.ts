@@ -89,6 +89,7 @@ import {
 } from '../im/shared/turnActivity.js';
 import { beginHeadlessGhostSetupTurn } from '../mcp-integrations/ghostSetupInteractionSurface.js';
 
+import { isSamePath } from './dispatcher.js';
 import type { HookRunOutcome, HookSessionRunner } from './dispatcher.js';
 import { resolveHookSessionConfig, type ResolvedHookSessionConfig } from './defaults.js';
 import { decodeAttachments, sanitizeAttachmentName } from './attachments.js';
@@ -149,7 +150,11 @@ async function resolveNewSessionConfig(
 
   // 目录级来源偏好(纯本地, 用户在工作目录映射行显式选的来源)优先于草稿默认来源。
   const channel =
-    sourceIm === 'telegram' ? ('telegram' as const) : sourceIm === 'slack' ? ('slack' as const) : null;
+    sourceIm === 'telegram'
+      ? ('telegram' as const)
+      : sourceIm === 'slack'
+        ? ('slack' as const)
+        : null;
   const workdirProviderId =
     channel !== null && workspaceCtx?.alias
       ? getWorkspaceProviderSource(channel, workspaceCtx.teamId, workspaceCtx.alias)
@@ -403,6 +408,27 @@ export function createMakerHookSessionRunner(deps: {
         errorMessage: msg,
         durationMs: Date.now() - startedAt,
       });
+
+      /**
+       * 复用/接管路径的收口校验: dispatcher 是拿 inspect 的结果过的工作目录映射,
+       * 而真正决定在哪执行的是上面刚读到的 meta.workDir —— 两次读取之间会话仍可能
+       * 被移走(桌面端移动对话、或会话尚未落库时别名被改指), 那样这条消息就跑到
+       * 校验过的目录之外去了。在读权威 workDir 的同一处再确认一次, 不一致即拒绝
+       * (PR #733 review 指出)。
+       *
+       * 拒绝而不是改到新目录跑: 新目录有没有被授权, 只有 dispatcher 查得到映射
+       * 才能判断。下一条消息会重新走一遍完整判定, 该复用复用、该断开断开。
+       */
+      if (
+        req.expectedWorkingDir != null &&
+        workingDir !== null &&
+        !isSamePath(workingDir, req.expectedWorkingDir)
+      ) {
+        log.warn(
+          `hook run aborted: session ${req.sessionId} moved from ${req.expectedWorkingDir} to ${workingDir} between validation and execution`,
+        );
+        return fail('这个对话刚被移动到别的目录，本条消息没有执行；请重新发送。');
+      }
 
       // resolved 路径必有 model; 复用路径 meta 缺失时兜底草稿默认
       const effectiveModel = model?.trim()

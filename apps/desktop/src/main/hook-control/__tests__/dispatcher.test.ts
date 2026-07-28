@@ -504,6 +504,62 @@ describe('dispatcher 核心语义', () => {
     await tick();
   });
 
+  it('免检窗口内别名被改指: 未落库的会话也要重过映射校验, 不再免检', async () => {
+    const bindings = memoryBindings();
+    const fr = fakeRunner(); // sessions 恒空 -> inspect 一直返回 null(未落库)
+    const config: HookConnectionConfig = { ...CONFIG, workspaces: { xdmaker: WS_DIR } };
+    const { d } = makeDispatcher({ runner: fr.runner, bindings, config });
+    const c = collector();
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    const first = c.last('task.ack')!.payload.sessionId!;
+    expect(fr.calls[0]).toMatchObject({ isNew: true, workingDir: WS_DIR });
+
+    // 第一轮还在 agent.startSession 里(没落库、没收口), 此时用户把别名改指走
+    config.workspaces = { xdmaker: path.resolve('/repos/elsewhere') };
+
+    d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
+    await tick();
+    // 只认 sessionId 的话这条会排进 first —— 而 first 建在已撤权的目录里
+    expect(c.last('task.ack')!.payload.sessionId).not.toBe(first);
+
+    fr.finish();
+    await tick();
+    fr.finish();
+    await tick();
+  });
+
+  it('复用与接管都带上已校验目录, 供 runner 在读权威 meta 后收口比对', async () => {
+    const bindings = memoryBindings();
+    const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
+    const fr = fakeRunner({ sessions });
+    const { d } = makeDispatcher({ runner: fr.runner, bindings });
+    const c = collector();
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    const first = c.last('task.ack')!.payload.sessionId!;
+    // 新建路径不比对(还没有权威 meta 可言)
+    expect(fr.calls[0].expectedWorkingDir ?? null).toBeNull();
+    sessions[first] = { workingDir: WS_DIR, usable: true };
+    fr.finish();
+    await tick();
+
+    d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
+    await tick();
+    expect(fr.calls[1]).toMatchObject({ sessionId: first, expectedWorkingDir: WS_DIR });
+    fr.finish();
+    await tick();
+
+    // 接管路径同理
+    sessions['taken'] = { workingDir: WS_DIR, usable: true };
+    d.handleDispatch('conn-1', dispatch({ requestId: 'req-3', sessionId: 'taken' }), c.send);
+    await tick();
+    expect(fr.calls[2]).toMatchObject({ sessionId: 'taken', expectedWorkingDir: WS_DIR });
+    fr.finish();
+  });
+
   it('在工作目录映射内换目录 -> 无感跟随复用(边界内的移动不受影响)', async () => {
     const bindings = memoryBindings();
     const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
@@ -642,7 +698,8 @@ describe('dispatcher 核心语义', () => {
 
     fr.finish({ finalText: '新的回答' });
     await tick();
-    expect(c.last('turn.end')!.payload.finalText).toContain('原对话已被归档或删除');
+    // 措辞留余地: inspect 的 null 也可能是读库瞬时失败, 不能一口咬定会话没了
+    expect(c.last('turn.end')!.payload.finalText).toContain('原对话现在读不到');
   });
 
   it('切账号期间异步定位失败也不回写旧代 rejected ack', async () => {

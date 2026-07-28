@@ -309,6 +309,32 @@ describe('hook session 精确接管边界', () => {
   });
 });
 
+describe('执行前按权威 meta 收口校验工作目录', () => {
+  it('meta.workDir 与 dispatcher 校验过的目录不符 -> 拒绝执行, 不建会话', async () => {
+    const runner = createMakerHookSessionRunner({ log });
+    // dispatcher 是拿 inspect 的结果过的映射; 到这里 meta 已经指向别处
+    const outcome = await runner.run(
+      baseReq({ sessionId: 'sess-old', isNew: false, expectedWorkingDir: 'D:/somewhere-else' }),
+    );
+
+    expect(outcome.status).toBe('error');
+    expect(outcome.errorMessage).toContain('刚被移动到别的目录');
+    expect(fakeMaker.createSession).not.toHaveBeenCalled();
+  });
+
+  it('目录一致 -> 照常执行; 新建路径不带该字段也不受影响', async () => {
+    const runner = createMakerHookSessionRunner({ log });
+
+    const reused = await runner.run(
+      baseReq({ sessionId: 'sess-old', isNew: false, expectedWorkingDir: 'D:/repo' }),
+    );
+    expect(reused.status).toBe('ok');
+
+    const created = await runner.run(baseReq({}));
+    expect(created.status).toBe('ok');
+  });
+});
+
 describe('hook session-runner 的 userSendAt 时序(未分类误判回归)', () => {
   it('isNew: touchUserSendInDb 在 sessions:created 广播之前落库, onAccepted 再 bump 一次', async () => {
     const runner = createMakerHookSessionRunner({ log });

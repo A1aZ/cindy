@@ -90,6 +90,14 @@ export interface HookRunRequest {
    * 来源偏好(workspaceProviderSourceStore)。缺省 = 老 server 未带 workspace。
    */
   workspaceAlias?: string;
+  /**
+   * 复用/接管路径下 dispatcher 校验通过的那个目录。runner 以 session meta 的
+   * workDir 为执行权威(会覆盖上面的 workingDir), 而 dispatcher 的校验发生在
+   * 读 meta 之前 —— 中间这段里会话被移走的话, 校验过的目录和真正执行的目录就
+   * 不是同一个了。runner 读到权威 workDir 后必须比对它, 不一致即拒绝执行
+   * (PR #733 review 指出)。null / 省略 = 不比对(新建路径)。
+   */
+  expectedWorkingDir?: string | null;
   title: string | null;
   prompt: string;
   /** 本次派发携带的入站附件(base64); 无则省略。runner 解码落盘后喂给 agent。 */
@@ -228,6 +236,11 @@ export function isPathWithin(base: string, target: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
+/** 两个路径是否指向同一目录(同 isPathWithin 的规范化口径)。 */
+export function isSamePath(a: string, b: string): boolean {
+  return normalizePathForCompare(a) === normalizePathForCompare(b);
+}
+
 /**
  * 原对话不再落在工作目录映射内时(被移到映射外的项目, 或映射本身被改/删),
  * 回给渠道的一次性说明(Slack / Telegram 侧文案不进 locale, 与 interactions.ts
@@ -241,7 +254,13 @@ const NOTICE_SESSION_RECREATED =
   'ℹ️ 原对话已不在可用的工作目录里，这条消息起换用了新对话，原对话的上下文不会带过来。' +
   '想接回原对话：先到 Cindy 的 设置 → 远程连接 → 工作目录映射 把它所在的目录加进来，' +
   '再在这里用对话选择重新指定它。';
-const NOTICE_SESSION_GONE = 'ℹ️ 原对话已被归档或删除，这条消息起换用了新对话。';
+/**
+ * 查不到原对话时的说明。措辞刻意留了余地: inspect 返回 null 是多义的 ——
+ * 会话真的没了是 null, meta / DB 读取瞬时失败也被吞成 null(session-runner
+ * 两路都 catch)。一口咬定"已被归档或删除"会在读库抖动时误导用户
+ * (PR #733 review 指出)。
+ */
+const NOTICE_SESSION_GONE = 'ℹ️ 原对话现在读不到（可能已被归档或删除），这条消息起换用了新对话。';
 
 /** 标题里消息摘要的最大长度(字符), 超出截断加省略号。 */
 const TITLE_SNIPPET_MAX = 24;
@@ -396,15 +415,21 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
   /** 正在执行 turn 的 session(本模块发起的)。 */
   const running = new Set<string>();
   /**
-   * 本 dispatcher 刚新建、但**还没被确认落库**的 session。免检快路径只认这个
-   * 集合(见 resolveTarget)—— `inspect()` 返回 null 是多义的: session 不存在
-   * 是 null, meta / DB 读取瞬时失败也被吞成 null(session-runner.ts 两路都
-   * catch)。只凭 null 放行, 一次读库抖动就能让已落库、已被移出映射的 session
-   * 继续收消息, 绕过映射边界(PR #733 review 指出)。
-   * 出集合的两个口子: 任何一次 inspect 成功查到它(说明已落库), 或它的 turn
-   * 收口(run 返回时 session 必已建好)。因此集合规模 ≤ 并发新建数, 不会泄漏。
+   * 本 dispatcher 刚新建、但**还没被确认落库**的 session -> 建它时用的目录。
+   * 免检快路径只认这张表(见 resolveTarget)—— `inspect()` 返回 null 是多义的:
+   * session 不存在是 null, meta / DB 读取瞬时失败也被吞成 null(session-runner
+   * 两路都 catch)。只凭 null 放行, 一次读库抖动就能让已落库、已被移出映射的
+   * session 继续收消息, 绕过映射边界(PR #733 review 指出)。
+   *
+   * 存目录而不只是 id: 会话还没落库的这段时间里别名映射可能已被改指, 免检时
+   * 要拿它跟当前映射重新比一次 —— 否则那条消息会排进一个建在已撤权目录里的
+   * 会话(同一轮 review 指出)。它不是"授权凭据", 只是 dispatcher 自己刚用过的
+   * 目录的进程内记账, 每次都要重新过映射校验才算数。
+   *
+   * 出表的两个口子: 任何一次 inspect 成功查到它(说明已落库), 或它的 turn
+   * 收口(run 返回时 session 必已建好)。因此表的规模 ≤ 并发新建数, 不会泄漏。
    */
-  const awaitingPersist = new Set<string>();
+  const awaitingPersist = new Map<string, string>();
   /** 每 session 的 FIFO 等待队列。 */
   const queues = new Map<string, PendingTask[]>();
   /** connectionId + requestId -> 正在执行它的 session(cancel 定位与归属校验用, 收口即清)。 */
@@ -603,6 +628,8 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
           sessionId: payload.sessionId,
           isNew: false,
           workingDir: info.workingDir as string,
+          // 同复用路径: 校验与执行之间会话仍可能被移走, 由 runner 兜住
+          expectedWorkingDir: info.workingDir as string,
           agentKind,
           model,
           effort,
@@ -646,6 +673,14 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       // 查得到 = 已落库, 此后一律走映射校验
       if (info !== null) awaitingPersist.delete(bound);
       /**
+       * 免检窗口里那个会话建在哪 —— 必须拿它跟**当前**映射再比一次: 会话还没
+       * 落库的这段时间里用户可能已经把别名改指走了(撤权), 只认 id 的话那条消息
+       * 会排进一个建在已撤权目录里的会话(PR #733 review 指出)。
+       */
+      const pendingDir = awaitingPersist.get(bound) ?? null;
+      const pendingStillAllowed =
+        pendingDir !== null && (isChat ? inDialogueRoot(pendingDir) : inWhitelist(pendingDir));
+      /**
        * 关键竞态防护: 绑定的 session 是本 dispatcher 刚建、**尚未落库**的
        * (inspect 查不到)且正在跑/排队时直接复用 —— 否则同 key 的后续消息会各开
        * 新 session, 破坏「同 key 同 session」铁律。
@@ -663,7 +698,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
        */
       if (
         info === null &&
-        awaitingPersist.has(bound) &&
+        pendingStillAllowed &&
         namespacedBound !== null &&
         (running.has(bound) || (queues.get(bound)?.length ?? 0) > 0)
       ) {
@@ -671,9 +706,11 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
           run: {
             sessionId: bound,
             isNew: false,
-            // 尚未落库, 没有 meta 可查; chat 伪目录无别名映射, 给 dialogues 根
-            // 占位。此时 session 只可能是本连接刚在映射内建出来的。
-            workingDir: dir ?? dialogue?.rootDir() ?? '',
+            // 尚未落库, 没有 meta 可查 —— 用建它时那个刚重新过完映射校验的目录
+            workingDir: pendingDir!,
+            // 落库后 runner 会拿 meta.workDir 覆盖上面这个值; 届时必须仍是同一
+            // 个目录, 否则这条消息就跑到校验过的目录之外去了
+            expectedWorkingDir: pendingDir!,
             agentKind,
             model,
             effort,
@@ -709,6 +746,9 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
             sessionId: bound,
             isNew: false,
             workingDir,
+            // 上面这次校验和 runner 读 meta 之间会话仍可能被移走 —— runner 拿到
+            // 权威 workDir 后必须确认还是这个目录
+            expectedWorkingDir: workingDir,
             agentKind,
             model,
             effort,
@@ -772,8 +812,9 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     // 新建会话跑在别名目录(或对话根)里, 是否还能复用每次现场按映射判定
     bindings.set(connectionId, payload.externalKey, sessionId);
     // 落库前的免检窗口从这里开始(见 awaitingPersist 声明处): 此刻这个 session
-    // 必定建在映射内, inspect 还查不到它, 同 key 的后续消息要能认出它。
-    awaitingPersist.add(sessionId);
+    // 必定建在映射内, inspect 还查不到它, 同 key 的后续消息要能认出它。记下它
+    // 建在哪 —— 免检时要拿这个目录跟当时的映射再比一次。
+    awaitingPersist.set(sessionId, runDir);
     // 标题带 provider 名: externalKey 约定为 `<providerId>:<渠道内标识>`,
     // 取前缀作 provider 名(如 team-slack), 比连接名(desktop 侧命名)更能
     // 说明"这条会话是谁驱动的"; 无前缀(非常规 key)时回退连接名

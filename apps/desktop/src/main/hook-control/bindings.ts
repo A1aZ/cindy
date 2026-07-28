@@ -24,7 +24,11 @@ import path from 'node:path';
 
 export interface HookBindingStore {
   get(connectionId: string, externalKey: string): string | null;
-  /** 整行覆盖写(同 key 重复派发时刷新 updatedAt)。 */
+  /**
+   * 整行覆盖写。只在绑定真正变化时调用(新建会话、legacy 命名空间迁移、接管)——
+   * 常规复用不写, 所以 updatedAt 是"这条绑定上次被改写"的时间, **不是**"上次被
+   * 用到"的时间(PR #733 review 指出)。
+   */
   set(connectionId: string, externalKey: string, sessionId: string): void;
   /** 删除单条绑定(session 失效重建前清理)。 */
   remove(connectionId: string, externalKey: string): void;

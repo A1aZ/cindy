@@ -5594,9 +5594,13 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
       // (#676 review codex P1)。
       const lastCommit = _remoteReconcileCommit.get(sessionId);
       const epochNow = _messagesEpoch.get(sessionId) ?? 0;
+      // 代际例外只认**重建造成的** bump:加性提交不 bump 代际,所以"它记的代际恰好等于现在"
+      // 根本解释不了代际为什么从本次启动时变了 —— 那个变化另有来源(rewind / clear / trim /
+      // demote)。旧写法让任何更晚的加性提交都能替一次无关的重置背书,于是 rewind 掉的尾部会被
+      // 先启动那次当成"缺的行"补回来(#676 review codex P1)。
       const epochAcceptable =
         epochNow === reconcileEpochAtStart ||
-        (lastCommit !== undefined && epochNow === lastCommit.epoch);
+        (lastCommit !== undefined && lastCommit.rebuilt === true && epochNow === lastCommit.epoch);
       const supersededByNewerCommit = (lastCommit?.seq ?? 0) >= reconcileSeq;
       // 序号这一关只拦**权威重建**,不拦加性 merge —— 但补交的门开得很窄,三个条件都要满足。
       //
@@ -6150,9 +6154,29 @@ function commitAroundWindow(
    * —— 清掉别人刚拿到的锁、或把游标覆写成"更新的值"破坏单调性(#676 review codex P1)。
    */
   ownsPagingLock: boolean,
+  /**
+   * 本次跳转的目标 clientId —— around 快照只被允许 hydrate 这一行。
+   *
+   * around 是在整个补齐循环**之前**取的,隧道下可能已经陈旧好几秒;期间 live push 可能已经把
+   * 窗口里某行更新过。默认 hydrate 是 persisted 赢,于是陈旧的 around 快照会把更新的内容 /
+   * 元数据盖回去(#676 review codex P1)。
+   *
+   * 但对**目标那一行**,hydrate 恰恰是这次提交的目的:重复跳转同一条消息时靠它把本地
+   * verbose 的 tool_result 收敛成权威内容(既有回归 makerChatStoreAroundClientId 守着)。
+   * 所以只给目标开口子,其余一律只补缺行。
+   */
+  hydrateClientId: string | null,
 ): void {
   setState(sessionId, (s) => {
-    const messages = mergeMessages(mapped, s.messages, {}, 'oldest-first');
+    const messages = mergeMessages(
+      mapped,
+      s.messages,
+      {
+        addOnly: true,
+        ...(hydrateClientId ? { addOnlyExcept: new Set([hydrateClientId]) } : {}),
+      },
+      'oldest-first',
+    );
     if (!ownsPagingLock) {
       // mergeMessages 只增不减 → "长度没变"等价于"没引入可能不连续的行"。
       const addedRows = messages.length !== s.messages.length;
@@ -6285,7 +6309,7 @@ async function loadAroundMessage(
   )
     return null;
 
-  commitAroundWindow(sessionId, rows, mapped, outcome, ownsPagingLock);
+  commitAroundWindow(sessionId, rows, mapped, outcome, ownsPagingLock, targetClientId);
 
   if (!targetClientId) return null;
   return (
@@ -6325,7 +6349,7 @@ async function loadAroundMessageClientId(
   )
     return null;
 
-  commitAroundWindow(sessionId, rows, mapped, outcome, ownsPagingLock);
+  commitAroundWindow(sessionId, rows, mapped, outcome, ownsPagingLock, clientId);
 
   return (
     getOrCreateState(sessionId).messages.find((message) => message.clientId === clientId) ?? null
@@ -8784,7 +8808,11 @@ function mergeMessages(
    * (#676 review codex P1)。彻底解法需要每条消息的修订号,而 messages 表没有 updatedAt,
    * 属于跨层改动;这里先把"发布延迟最长"的那个来源摘出去。
    */
-  options: HydratePersistedMessageOptions & { addOnly?: boolean } = {},
+  options: HydratePersistedMessageOptions & {
+    addOnly?: boolean;
+    /** addOnly 的白名单:这些 clientId 仍然照常 hydrate。 */
+    addOnlyExcept?: ReadonlySet<string>;
+  } = {},
   rowsOrder: RemoteRowsOrder = 'oldest-first',
 ): ChatMessage[] {
   const serverOrder = new Map(serverMsgs.map((message, index) => [message.clientId, index]));
@@ -8795,7 +8823,10 @@ function mergeMessages(
   const hydratedExisting = existing.map((message) => {
     seen.add(message.clientId);
     const persisted = serverByClientId.get(message.clientId);
-    if (!persisted || options.addOnly === true) return message;
+    if (!persisted) return message;
+    if (options.addOnly === true && options.addOnlyExcept?.has(message.clientId) !== true) {
+      return message;
+    }
     const hydrated = hydratePersistedMessage(message, persisted, options);
     if (hydrated !== message) changed = true;
     return hydrated;

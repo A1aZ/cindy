@@ -999,6 +999,52 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     );
   });
 
+  it('J7. around 提交只 hydrate 跳转目标,不用陈旧快照盖掉窗口里其它行', async () => {
+    // review #676(codex P1):around 是在整个补齐循环**之前**取的,隧道下可能陈旧好几秒;
+    // 期间 live push 可能已经更新过窗口里某行。默认 hydrate 让 persisted 赢 → 陈旧的 around
+    // 快照把更新的内容盖回去。目标那一行的 hydrate 是刻意保留的(重复跳转收敛权威内容)。
+    const other = serverMessage({
+      id: 'other-row',
+      clientId: 'other-row',
+      role: 'tool_result',
+      content: 'live final content',
+      createdAt: '2026-07-25T12:00:00.000Z',
+    });
+    const target = serverMessage({
+      id: 'jump-target',
+      clientId: 'jump-target',
+      role: 'tool_result',
+      content: 'stale local content',
+      createdAt: '2026-07-25T11:00:00.000Z',
+    });
+    // 先建立窗口:两行都在,内容都是"当前最新"。
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target, other]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce([target, other]);
+    await makerChatStore.loadAroundMessageClientId(SID, 'other-row', { radius: 60 });
+    expect(
+      makerChatStore.getSnapshot(SID).messages.find((m) => m.clientId === 'other-row')?.content,
+    ).toBe('live final content');
+
+    // 再跳到 target:around 快照里两行都是**旧内容**(target 的权威内容更长,other 已过期)。
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([
+      { ...target, content: 'authoritative target content' },
+      { ...other, content: 'stale other content' },
+    ]);
+    // 目标已在连续窗口里 → 走成员快速通道,一个 list 请求都不发(所以这里不排 list mock,
+    // 免得留下未消费的 Once 影响后续用例)。
+    await makerChatStore.loadAroundMessageClientId(SID, 'jump-target', { radius: 60 });
+
+    const snap = makerChatStore.getSnapshot(SID);
+    // 目标照常 hydrate 成权威内容(这是跳转提交的目的)。
+    expect(snap.messages.find((m) => m.clientId === 'jump-target')?.content).toBe(
+      'authoritative target content',
+    );
+    // 关键:其它行不被陈旧的 around 快照盖掉。
+    expect(snap.messages.find((m) => m.clientId === 'other-row')?.content).toBe(
+      'live final content',
+    );
+  });
+
   it('J6b. addOnly 只影响"已有的行",缺行照补(merge 契约直测)', () => {
     const existing = [
       { clientId: 'a', role: 'assistant' as const, content: 'live', createdAt: '2026-07-25T12:00:00.000Z' },

@@ -752,6 +752,49 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     expect(makerChatStore.getSnapshot(s).historyWindowHasIsland).toBe(false);
   });
 
+  it('远程会话:加性提交不能替一次无关的 rewind 背书,rewind 掉的尾部不得被补回', async () => {
+    // review #676(codex P1):加性提交不 bump 代际,所以"它记的代际恰好等于现在"解释不了代际
+    // 为什么从本次启动时变了 —— 那个变化另有来源(这里是 rewind)。旧写法让任何更晚的加性提交
+    // 都能替这次无关重置背书,于是 rewind 掉的尾部被先启动那次当成"缺的行"补回来。
+    const s = sid();
+    await openRemoteWithHistory(s, [
+      dbMessage(s, 'keep', 'kept prefix', '2026-06-15T00:00:00.000Z'),
+      dbMessage(s, 'rewound', 'to be rewound', '2026-06-16T00:00:00.000Z'),
+    ]);
+
+    const prePage = deferred<Message[]>();
+    let calls = 0;
+    remoteListResolver = () => {
+      calls += 1;
+      // #1(rewind 之前启动):回来时仍带着 rewind 掉的那一行。
+      if (calls === 1) return prePage.promise;
+      // #2(rewind 之后启动):与保留下来的前缀有重叠 → 加性提交(不 bump 代际)。
+      return [dbMessage(s, 'keep', 'kept prefix', '2026-06-15T00:00:00.000Z')];
+    };
+
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+
+    // rewind:本地截断掉 'rewound' 起的整段(bump 代际)。
+    makerChatStore.dropMessagesFromClientId(s, 'client-rewound');
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual(['client-keep']);
+
+    // rewind 之后的对账:有重叠 → 加性提交。
+    makerChatStore.reconcileRemoteMessages(s);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual(['client-keep']);
+
+    // rewind 之前那次现在才回来。
+    prePage.resolve([
+      dbMessage(s, 'keep', 'kept prefix', '2026-06-15T00:00:00.000Z'),
+      dbMessage(s, 'rewound', 'to be rewound', '2026-06-16T00:00:00.000Z'),
+    ]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    // 关键:被 rewind 掉的行不得复活。
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual(['client-keep']);
+  });
+
   it('远程会话:补交的加性 merge 不用旧快照盖掉已落地的更新内容', async () => {
     // review #676(codex P1):放行"被后继超越但仍补交"之后,它的 merge 若走默认口径,同一
     // clientId 上后继(或 live push)刚 hydrate 的更新内容会被这份更旧的快照盖回去。

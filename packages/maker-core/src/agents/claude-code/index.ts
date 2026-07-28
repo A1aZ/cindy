@@ -31,6 +31,12 @@ import {
   forkSession as sdkForkSession,
 } from '@anthropic-ai/claude-agent-sdk';
 import type { Query, CanUseTool, McpServerConfig, PermissionUpdate, Settings } from '@anthropic-ai/claude-agent-sdk';
+import { discoverSubagentDefinitions } from './subagent-definitions.js';
+import {
+  formatSubagentDiagnosticsReminder,
+  resolveSubagentModelDefault,
+  type ResolveSubagentModelDefaultResult,
+} from './subagent-model-default.js';
 import Anthropic, { APIError } from '@anthropic-ai/sdk';
 
 import { BaseAgent, OneShotError, AgentNotAuthenticatedError, type AgentSessionHandle, type AgentDeps, type StartSessionOptions, type OneShotOptions, type SendOptions } from '../base-agent.js';
@@ -284,6 +290,20 @@ function quotedMentionText(block: { path: string; kind?: 'file' | 'dir' | 'agent
 
 function hasMentionText(existingText: string, block: { path: string; kind?: 'file' | 'dir' | 'agent' }): boolean {
   return existingText.includes(rawMentionText(block)) || existingText.includes(quotedMentionText(block));
+}
+
+/**
+ * 把一段 `<system-reminder>` 放到用户消息内容**之前**(两种 content 形态都支持)。
+ *
+ * 挂用户消息而不是 system prompt:tool / system 段是 prompt 缓存前缀的最上层,往那儿塞
+ * 会话相关内容会让整条前缀失效;上游 Claude Code 自己也是把提醒挂到下一条用户消息。
+ */
+export function prependSystemReminder(
+  content: string | Array<{ type: string; [k: string]: unknown }>,
+  reminder: string,
+): string | Array<{ type: string; [k: string]: unknown }> {
+  if (typeof content === 'string') return `${reminder}\n\n${content}`;
+  return [{ type: 'text', text: reminder }, ...content];
 }
 
 /**
@@ -769,9 +789,54 @@ export class ClaudeCodeAgent extends BaseAgent {
     const providerRoutedModels = this.capabilities.availableModels.filter((model) =>
       isProviderRoutedModel(model.id),
     );
+    // 「Subagent 模型」设置的默认值语义(见 subagent-model-default.ts):
+    // 平台的 CLAUDE_CODE_SUBAGENT_MODEL 是最高优先级**强制覆盖**,会静默盖掉用户手写
+    // agent 的 `model:`。这里先扫一遍用户手写定义再决定:没人声明 model → 照旧设 env
+    // (内置 agent 也吃到默认值);有人声明 → 不设 env,让那些声明生效。
+    //
+    // 只在会话启动时解析一次 —— env 进子进程、诊断进首轮上下文,会话中途变动会破坏
+    // prompt 缓存(见 docs/dev-rules/maker-core-and-agent-behavior.md §3.1)。
+    // 扫描失败一律降级成「照旧设 env」= 本改动前的行为,绝不阻断会话启动。
+    let subagentDefault: ResolveSubagentModelDefaultResult = {
+      envSubagentModel: this.deps.runtimeConfig.subagentModel?.trim() || undefined,
+      diagnostics: [],
+    };
+    // 远端(SSH)会话**不做**本地扫描:opts.workingDir 是远端机器上的路径(本地不存在),
+    // `~/.claude/agents` 也是本地用户的而非远端的 —— 拿本地结果去决定远端行为,既会误判
+    // 「有没有人声明 model」,又会把本地 agent 定义重发到远端。远端保持既有 env 语义。
+    if (!opts.remoteHostId) {
+      try {
+        const discovered = await discoverSubagentDefinitions({ workingDir: opts.workingDir });
+        subagentDefault = resolveSubagentModelDefault({
+          configuredDefault: this.deps.runtimeConfig.subagentModel,
+          discovered,
+          // 校验 agent 声明的 model 是否真的可用 —— 清单就是 host 从目录派生的那份。
+          availableModelIds: this.capabilities.availableModels.map((m) => m.id),
+        });
+        for (const d of subagentDefault.diagnostics) {
+          log.warn('subagent model diagnostic', { ...d });
+        }
+        if (subagentDefault.diagnostics.length > 0) {
+          try {
+            this.deps.runtimeConfig.onSubagentModelDiagnostics?.(subagentDefault.diagnostics);
+          } catch {
+            /* 诊断上报失败不影响会话启动 */
+          }
+        }
+      } catch (e) {
+        log.warn('discover subagent definitions failed; falling back to env override', {
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+    // 一次性诊断提醒:挂到**首条**用户消息上(不进 system prompt —— 那是缓存前缀最上层,
+    // 且触发 §4 门禁)。消费即清空,后续 turn 不再重复占用上下文。
+    let pendingSubagentReminder = formatSubagentDiagnosticsReminder(subagentDefault.diagnostics);
+
     const env = await buildClaudeEnv(this.deps.auth, this.deps.runtimeConfig, {
       credentialMode,
       modelContextWindows: providerRoutedModels,
+      subagentModel: subagentDefault.envSubagentModel ?? null,
     });
     // 远端单独一份 env:用 'remote' 模式从空字典起(不继承 desktop OS env),否则
     // Windows HOME=C:\Users\Lizi 之类污染远端 cc CLI 的 ~ 展开(session/memory
@@ -781,6 +846,8 @@ export class ClaudeCodeAgent extends BaseAgent {
           credentialMode,
           mode: 'remote',
           modelContextWindows: providerRoutedModels,
+          // 与本地分支同源:远端 cc 也按同一份判定决定设不设 env。
+          subagentModel: subagentDefault.envSubagentModel ?? null,
         })
       : null;
     const hostSystemPrompt = this.deps.runtimeConfig.systemPrompt;
@@ -3353,9 +3420,15 @@ export class ClaudeCodeAgent extends BaseAgent {
           // Claude Code streaming-input 协议要求 message 包装层,漏掉会 exit code 1。
           // sendOpts.messageUuid 注入到 SDK input.uuid — SDK 透传当作 file checkpoint
           // snapshot 的 messageId, rewind preview 拿同款 uuid 调 rewindFiles dryRun。
+          // subagent 诊断提醒:只挂第一条用户消息,发出即清空。放在用户文本**之前**,
+          // 与 system-reminder 的既有惯例一致(模型先读到环境提示再读用户诉求)。
+          const contentWithReminder = pendingSubagentReminder
+            ? prependSystemReminder(content, pendingSubagentReminder)
+            : content;
+          pendingSubagentReminder = null;
           const sdkInput: SdkUserInput = {
             type: 'user',
-            message: { role: 'user', content },
+            message: { role: 'user', content: contentWithReminder },
             parent_tool_use_id: null,
             ...(sendOpts?.messageUuid ? { uuid: sendOpts.messageUuid } : {}),
           };

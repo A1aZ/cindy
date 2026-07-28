@@ -14,6 +14,8 @@ export interface BehaviorFlagsContext {
   credentialMode?: AgentCredentialMode;
 }
 
+import type { SubagentModelDiagnostic } from '../agents/claude-code/subagent-model-default.js';
+
 export interface AgentRuntimeConfig {
   /**
    * 接入端点。设为 undefined 表示走 SDK 默认（如 api.anthropic.com）。
@@ -115,6 +117,15 @@ export interface AgentRuntimeConfig {
    * 不允许 (true, true) 共存 (双写会污染 LLM 上下文)。
    */
   makerMemoryEnabled?: boolean;
+
+  /**
+   * 「Subagent 模型」相关诊断的回调(见 agents/claude-code/subagent-model-default.ts)。
+   *
+   * 会话启动时扫描用户手写 subagent 定义,发现「想补默认值但字段不认识」等情况时逐条回调。
+   * host 据此落日志、在会话内提示用户、或交给 AI 查询。缺省 = 只落 agent 层日志。
+   * 回调抛错被吞(诊断不能影响会话启动)。
+   */
+  onSubagentModelDiagnostics?: (diagnostics: readonly SubagentModelDiagnostic[]) => void;
 
   /**
    * Electron app.getPath('userData') 绝对路径, host 注入。

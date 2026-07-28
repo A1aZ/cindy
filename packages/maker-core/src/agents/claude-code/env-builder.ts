@@ -38,6 +38,13 @@ interface ClaudeEnvBuildOptions {
   mode?: 'local' | 'remote';
   /** 本次子进程明确要走的凭证形态。undefined 时保持 adapter 既有 fallback。 */
   credentialMode?: AgentCredentialMode;
+  /**
+   * 调用方已解析好的 `CLAUDE_CODE_SUBAGENT_MODEL` 决定(见 subagent-model-default.ts)。
+   *   - 字符串 → 设该值;
+   *   - `null`  → 明确**不要设**(让用户手写 agent 的 frontmatter `model:` 生效);
+   *   - 省略    → 回落读 `runtimeConfig.subagentModel`(未接该解析的调用方保持旧行为)。
+   */
+  subagentModel?: string | null;
 }
 
 function serializeModelContextWindows(
@@ -215,7 +222,16 @@ export async function buildClaudeEnv(
 
   // Claude Code's documented child-agent model override. Blank / undefined deliberately leaves
   // the key untouched so the host preserves the pre-existing native selection behavior.
-  const subagentModel = runtimeConfig.subagentModel?.trim();
+  //
+  // `options.subagentModel` 是调用方**已解析过**的决定(见 subagent-model-default.ts):
+  //   - 字符串 → 设该值;
+  //   - `null`  → 明确「不要设」—— 用户手写 agent 自己声明了 model,设了会把它静默盖掉;
+  //   - 省略    → 回落读 runtimeConfig(未接入该解析的调用方保持旧行为)。
+  // 该 env 在平台解析顺序里是最高优先级,所以「不设」是让 frontmatter 生效的唯一办法。
+  const subagentModel =
+    options.subagentModel !== undefined
+      ? (options.subagentModel ?? '').trim()
+      : runtimeConfig.subagentModel?.trim();
   if (subagentModel) {
     env.CLAUDE_CODE_SUBAGENT_MODEL = subagentModel;
   }

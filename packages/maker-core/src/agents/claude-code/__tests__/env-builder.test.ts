@@ -114,6 +114,39 @@ describe('buildClaudeEnv', () => {
     expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined();
   });
 
+  it('options.subagentModel = null → 明确不设 env(让手写 agent 的 frontmatter model 生效)', async () => {
+    delete process.env.CLAUDE_CODE_SUBAGENT_MODEL;
+
+    // runtimeConfig 配了默认值,但调用方解析后判定「本会话不要设 env」。
+    const env = await buildClaudeEnv(
+      createAuthAdapter(),
+      { subagentModel: 'claude-haiku-4-5-20251001' },
+      { subagentModel: null },
+    );
+
+    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined();
+  });
+
+  it('options.subagentModel 为字符串时压过 runtimeConfig', async () => {
+    delete process.env.CLAUDE_CODE_SUBAGENT_MODEL;
+
+    const env = await buildClaudeEnv(
+      createAuthAdapter(),
+      { subagentModel: 'from-runtime-config' },
+      { subagentModel: 'from-caller' },
+    );
+
+    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('from-caller');
+  });
+
+  it('省略 options.subagentModel 时回落 runtimeConfig(未接该解析的调用方保持旧行为)', async () => {
+    delete process.env.CLAUDE_CODE_SUBAGENT_MODEL;
+
+    const env = await buildClaudeEnv(createAuthAdapter(), { subagentModel: 'legacy' }, {});
+
+    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('legacy');
+  });
+
   it('keeps native cron disabled even when inherited env or runtime flags try to enable it', async () => {
     process.env.CLAUDE_CODE_DISABLE_CRON = '0';
     const runtimeConfig: AgentRuntimeConfig = {

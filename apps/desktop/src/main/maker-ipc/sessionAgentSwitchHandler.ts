@@ -445,6 +445,10 @@ export async function performSessionAgentSwitch(
       });
     }
     deps.setPendingHandoff(sessionId, handoff, handoffGeneration);
+    // 上面这次写入自己就 bump 了代次。后面 resume 回落还要用 fullHandoff 覆盖它,
+    // 那次必须以"本次写入之后"为基准——继续拿 handoffGeneration 会被 registry 当成
+    // 过期写入丢掉(哪怕根本没有 /clear),引擎就只剩缺早期历史的增量交接。
+    let latestHandoffGeneration = deps.readPendingHandoffGeneration?.(sessionId);
 
     let engineReady = true;
     let resumed = !!parked;
@@ -525,7 +529,10 @@ export async function performSessionAgentSwitch(
               sessionId,
             });
           }
-          deps.setPendingHandoff(sessionId, fullHandoff, handoffGeneration);
+          // 用最近一次写入后的代次:允许覆盖自己先前写的增量交接,但期间真发生 /clear
+          // 时(代次已被 clear 再次推进)这次替换仍会被正确丢弃。
+          deps.setPendingHandoff(sessionId, fullHandoff, latestHandoffGeneration);
+          latestHandoffGeneration = deps.readPendingHandoffGeneration?.(sessionId);
           if (fallbackCommitted) {
             try {
               await deps.bootstrapSwitchedSession(sessionId);

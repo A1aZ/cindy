@@ -759,7 +759,10 @@ function AutoResumeCard() {
 const ENGLISH_HANDOFF_TERMINATOR_TAIL = "; the user's new message follows ==";
 
 function isEnglishSourceHandoff(handoff: string): boolean {
-  return handoff.includes(ENGLISH_HANDOFF_TERMINATOR_TAIL);
+  // 锚在**尾部**而不是 includes:交接正文里嵌着用户与助手的历史原文,里面完全可能
+  // 出现这段尾串(比如聊过这段代码),那样旧中文交接会被误判成英文。结束标记只可能
+  // 在整段的最末尾。
+  return handoff.trimEnd().endsWith(ENGLISH_HANDOFF_TERMINATOR_TAIL);
 }
 
 /**

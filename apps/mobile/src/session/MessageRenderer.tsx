@@ -2937,7 +2937,9 @@ const agentSwitchEngineLabel = (kind: unknown): string => (kind === 'codex' ? 'C
 const ENGLISH_HANDOFF_TERMINATOR_TAIL = "; the user's new message follows ==";
 
 function isEnglishSourceHandoff(handoff: string): boolean {
-  return handoff.includes(ENGLISH_HANDOFF_TERMINATOR_TAIL);
+  // 锚在尾部而非 includes(与 desktop SystemCard.tsx 同款):正文里嵌着历史原文,
+  // 可能自身就含这段尾串,那样旧中文交接会被误判成英文。
+  return handoff.trimEnd().endsWith(ENGLISH_HANDOFF_TERMINATOR_TAIL);
 }
 
 // session-agent-switch 边界卡 —— 1:1 对齐桌面 SystemCard.tsx 的 AgentSwitchCard:

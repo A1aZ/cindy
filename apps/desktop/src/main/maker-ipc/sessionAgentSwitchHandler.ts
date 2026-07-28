@@ -143,7 +143,14 @@ export interface MakerSessionAgentSwitchHandlerDeps {
     clientId: string,
     content: AgentSwitchBoundaryContent,
   ): Promise<void>;
-  setPendingHandoff(sessionId: string, handoff: string): void;
+  /**
+   * 写待注入交接。`expectedGeneration` 取自 readPendingHandoffGeneration:本函数从读
+   * 历史到写回之间有大量异步工作,期间若发生 /clear,这份按 clear 前历史算出的交接
+   * 必须被丢弃,而不是盖掉 clear 立的墓碑。
+   */
+  setPendingHandoff(sessionId: string, handoff: string, expectedGeneration?: number): void;
+  /** 读交接注册表的当前代次(在读历史之前取一次)。 */
+  readPendingHandoffGeneration?(sessionId: string): number;
   /** 从 DB 行(切换已提交后的新值)重建 live session;抛错 = 引擎未就绪。 */
   bootstrapSwitchedSession(sessionId: string): Promise<void>;
   /**
@@ -349,6 +356,9 @@ export async function performSessionAgentSwitch(
     // 竞态兜底:仍在跑就拒绝,绝不打断进行中的 turn。
     throwIpcError('SESSION_RUNNING', `Session ${sessionId} is running a turn`);
   }
+  // 交接注册表代次:必须在读历史**之前**取。下面到 setPendingHandoff 之间全是异步活,
+  // 期间用户可能 /clear——带上它,过期的写入会被 registry 丢弃而不是盖掉墓碑。
+  const handoffGeneration = deps.readPendingHandoffGeneration?.(sessionId);
   // 交接素材与停泊绑定先于任何状态变更取得(失败不留半切换状态)。
   // Phase 2:目标引擎有停泊原生会话 → resume + 增量交接(只补离开期间的进展,
   // 工作状态区仍按全量历史提取);无绑定 → v1 全量交接 + 全新原生会话。
@@ -415,7 +425,7 @@ export async function performSessionAgentSwitch(
         err: err instanceof Error ? err.message : String(err),
       });
     }
-    deps.setPendingHandoff(sessionId, handoff);
+    deps.setPendingHandoff(sessionId, handoff, handoffGeneration);
 
     let engineReady = true;
     let resumed = !!parked;
@@ -496,7 +506,7 @@ export async function performSessionAgentSwitch(
               sessionId,
             });
           }
-          deps.setPendingHandoff(sessionId, fullHandoff);
+          deps.setPendingHandoff(sessionId, fullHandoff, handoffGeneration);
           if (fallbackCommitted) {
             try {
               await deps.bootstrapSwitchedSession(sessionId);
@@ -573,6 +583,9 @@ export function applyPendingAgentSwitchIfIdle(
       if (intent.resumeFallbackRecovery) {
         const recovery = intent.resumeFallbackRecovery;
         throwIfAgentSwitchAborted(opts?.signal);
+        // 与主路径同理:重试期间也可能 /clear,写回前校验代次。基准取本次重试开始时,
+        // 而不是原始切换时——中途的 clear 才是要拦的,更早的历史已由 intent 自己承载。
+        const recoveryHandoffGeneration = deps.readPendingHandoffGeneration?.(sessionId);
         const boundaryClientId = recovery.boundaryClientId ??
           await deps.insertBoundaryMessage(sessionId, recovery.boundaryContent);
         // 边界补写成功、原子事务仍失败时记住 id；下次只重试事务，不重复插边界。
@@ -582,7 +595,7 @@ export function applyPendingAgentSwitchIfIdle(
           boundaryClientId,
           recovery.boundaryContent,
         );
-        deps.setPendingHandoff(sessionId, recovery.handoff);
+        deps.setPendingHandoff(sessionId, recovery.handoff, recoveryHandoffGeneration);
         if (deps.pendingSwitches?.get(sessionId) === intent) {
           deps.pendingSwitches.clear(sessionId);
           deps.onPendingSwitchChanged?.(sessionId, null);

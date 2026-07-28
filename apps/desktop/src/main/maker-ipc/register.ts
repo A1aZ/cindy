@@ -4145,7 +4145,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       return clientId;
     },
     applyResumeFallbackAtomically: applyAgentSwitchResumeFallbackAtomically,
-    setPendingHandoff: (sessionId, handoff) => agentHandoffPending.set(sessionId, handoff),
+    setPendingHandoff: (sessionId, handoff, expectedGeneration) =>
+      agentHandoffPending.set(sessionId, handoff, expectedGeneration),
+    readPendingHandoffGeneration: (sessionId) => agentHandoffPending.readGeneration(sessionId),
     bootstrapSwitchedSession: async (sessionId) => {
       // 切换已提交,从 DB 行(新引擎值)重建 live session。resumeSessionId 直接取
       // 行上的 sdk_session_id:切换事务在有停泊绑定时已把它落成停泊 id(Phase 2
@@ -4209,7 +4211,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     hasBackgroundActivity: getClaudeSessionBackgroundActivity,
     closeSession: (sessionId) => maker.closeSession(sessionId),
     commitDeletion: commitMessageDeletion,
-    setPendingHandoff: (sessionId, handoff) => agentHandoffPending.set(sessionId, handoff),
+    setPendingHandoff: (sessionId, handoff, expectedGeneration) =>
+      agentHandoffPending.set(sessionId, handoff, expectedGeneration),
+    readPendingHandoffGeneration: (sessionId) => agentHandoffPending.readGeneration(sessionId),
     onCommitted: (
       { sessionId, deletedClientIds, updatedAt, preview, messageCount },
       requestedClientId,

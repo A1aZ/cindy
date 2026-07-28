@@ -292,6 +292,31 @@ describe('createAgentHandoffPendingRegistry', () => {
     expect(await reg.peek('s1')).toBe('FORK\n\nSWITCH-HANDOFF');
   });
 
+  it('过期的 set 被丢弃:期间 /clear 过,按旧历史算出的交接不得盖掉墓碑', async () => {
+    const reg = createAgentHandoffPendingRegistry(async () => null);
+    // agent-switch / 消息删除在读历史之前取代次
+    const gen = reg.readGeneration('s1');
+    // 期间用户 /clear
+    reg.invalidate('s1');
+    // 异步活干完才写回——这份交接算的是 clear 前的历史
+    reg.set('s1', 'STALE-PRE-CLEAR-HANDOFF', gen);
+    expect(await reg.peek('s1')).toBeNull();
+  });
+
+  it('代次未变时 set 正常生效(无 /clear 干扰的常规路径)', async () => {
+    const reg = createAgentHandoffPendingRegistry(async () => null);
+    const gen = reg.readGeneration('s1');
+    reg.set('s1', 'SWITCH-HANDOFF', gen);
+    expect(await reg.peek('s1')).toBe('SWITCH-HANDOFF');
+  });
+
+  it('不传代次的 set 保持既有语义(无条件写入)', async () => {
+    const reg = createAgentHandoffPendingRegistry(async () => null);
+    reg.invalidate('s1');
+    reg.set('s1', 'UNCONDITIONAL');
+    expect(await reg.peek('s1')).toBe('UNCONDITIONAL');
+  });
+
   it('invalidate 留墓碑:后续 peek 直接返回 null,不回落 DB(/clear 的 cleared_at 尚未落库)', async () => {
     const query = vi.fn(async () => 'FROM-DB-PRE-CLEAR');
     const reg = createAgentHandoffPendingRegistry(query);

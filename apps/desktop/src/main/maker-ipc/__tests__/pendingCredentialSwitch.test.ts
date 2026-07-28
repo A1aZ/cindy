@@ -348,7 +348,14 @@ describe('PendingCredentialSwitchService', () => {
         model: 'claude-opus-5',
         providerId: 'xd',
         agentKind: 'claude-code',
-        previousRoute: { model: 'claude-sonnet-4-6', providerId: 'openai' },
+        // 回滚成套:renderer 已把目标 model/effort/fast 落盘,只回滚 model 会让旧
+        // 模型配上目标档位被上游拒(第十八轮)。
+        previousRoute: {
+          model: 'claude-sonnet-4-6',
+          providerId: 'openai',
+          effort: 'high',
+          fastMode: false,
+        },
       });
       await h.service.onTurnSettled(sessionId);
 
@@ -356,6 +363,8 @@ describe('PendingCredentialSwitchService', () => {
       expect(h.persistRoute).toHaveBeenCalledWith(sessionId, {
         providerId: 'openai',
         model: 'claude-sonnet-4-6',
+        effort: 'high',
+        fastMode: false,
       });
       expect(h.broadcastApplied).toHaveBeenCalledWith({
         sessionId,

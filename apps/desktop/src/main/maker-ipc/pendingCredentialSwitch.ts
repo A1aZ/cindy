@@ -46,7 +46,7 @@ export interface PendingCredentialSwitch {
    * 预写进 DB,不回滚的话懒 resume 会经停用隐式来源重建(PR #744 review 第十六轮)。
    * 缺席 = 无从回滚,退化为只清显式来源。
    */
-  previousRoute?: { model: string; providerId: string | null };
+  previousRoute?: { model: string; providerId: string | null; effort?: string; fastMode?: boolean };
   requestedAt: number;
 }
 
@@ -93,7 +93,7 @@ export interface PendingCredentialSwitchDeps {
    */
   persistRoute?: (
     sessionId: string,
-    route: { providerId: string | null; model?: string; effort?: string },
+    route: { providerId: string | null; model?: string; effort?: string; fastMode?: boolean },
   ) => Promise<void>;
   /** 自愈兜底重试间隔覆写(测试用)。 */
   retryDelayMs?: number;
@@ -119,7 +119,7 @@ export class PendingCredentialSwitchService {
       model: string;
       providerId: string | null;
       agentKind?: AgentKind;
-      previousRoute?: { model: string; providerId: string | null };
+      previousRoute?: { model: string; providerId: string | null; effort?: string; fastMode?: boolean };
     },
   ): void {
     this.pending.set(sessionId, {
@@ -226,7 +226,7 @@ export class PendingCredentialSwitchService {
    */
   private async resolveApplyRoute(
     target: PendingCredentialSwitch,
-  ): Promise<{ providerId: string | null; model?: string; effort?: string; apply: boolean }> {
+  ): Promise<{ providerId: string | null; model?: string; effort?: string; fastMode?: boolean; apply: boolean }> {
     const { resolveRoute } = this.deps;
     if (!resolveRoute) return { providerId: target.providerId, apply: true };
     try {
@@ -251,10 +251,18 @@ export class PendingCredentialSwitchService {
         // 跑」的豁免域,是此刻唯一有依据的安全落点;无 previousRoute 才退化为只清
         // 显式来源。
         if (target.previousRoute) {
+          const prev = target.previousRoute;
+          // 回滚成套:renderer 已把目标 model/effort/fast 落盘,只回滚 model 会让
+          // 旧模型配上目标档位(如 max effort / Fast)被上游拒(第十八轮)。模型
+          // 未变(只换来源被拒)时 effort/fast 本就没动,不带。
           return {
-            providerId: target.previousRoute.providerId,
-            ...(target.previousRoute.model !== target.model
-              ? { model: target.previousRoute.model }
+            providerId: prev.providerId,
+            ...(prev.model !== target.model
+              ? {
+                  model: prev.model,
+                  ...(prev.effort ? { effort: prev.effort } : {}),
+                  ...(prev.fastMode !== undefined ? { fastMode: prev.fastMode } : {}),
+                }
               : {}),
             apply: true,
           };
@@ -316,7 +324,7 @@ export class PendingCredentialSwitchService {
   private async finalizeApply(
     sessionId: string,
     target: PendingCredentialSwitch,
-    resolved: { providerId: string | null; model?: string; effort?: string; apply: boolean },
+    resolved: { providerId: string | null; model?: string; effort?: string; fastMode?: boolean; apply: boolean },
     reason: string,
   ): Promise<void> {
     if (resolved.apply) {
@@ -334,7 +342,11 @@ export class PendingCredentialSwitchService {
           await this.deps.persistRoute(sessionId, {
             providerId: resolved.providerId,
             ...(modelChanged
-              ? { model: resolved.model, ...(resolved.effort ? { effort: resolved.effort } : {}) }
+              ? {
+                  model: resolved.model,
+                  ...(resolved.effort ? { effort: resolved.effort } : {}),
+                  ...(resolved.fastMode !== undefined ? { fastMode: resolved.fastMode } : {}),
+                }
               : {}),
           });
         } catch (err) {

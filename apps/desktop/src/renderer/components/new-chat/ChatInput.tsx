@@ -3347,8 +3347,12 @@ export function ChatInput({
       // 只有「确实零已连接来源」才拦截;≥1 个直接放行(无弹窗)。currentModelAgentKind
       // 解析不出(罕见:capabilities 未就绪)时不拦,交给下游处理,不误伤。
       if (currentModelAgentKind) {
+        // 已建会话按实际路由口径判(includeDisabled,与上方 hasConnectedSendSource
+        // 同则):运行中会话不因停用打断,最终 preflight 若按准入 rail 判会在全停时
+        // 弹「去连接来源」把继续发送挡死(PR #744 review 第十八轮)。草稿保持准入口径。
         const connectedSources = sourcesForModel(providers, activeModel, currentModelAgentKind, {
           onlyConnected: true,
+          includeDisabled: !!sessionId,
         });
         if (connectedSources.length === 0) {
           const goConnect = await confirmDialog({

@@ -1762,10 +1762,10 @@ export function cancelPendingAgentSwitchForSession(sessionId: string): void {
  * 另一端 fail-closed 的行为分叉。register 在 service 尚未初始化时必须抛错，不能
  * 假装登记成功后丢失用户选择；其余读取/清理入口保持启动期 no-op 语义。
  */
-export function registerPendingCredentialSwitchForSession(
+export async function registerPendingCredentialSwitchForSession(
   sessionId: string,
   target: { model: string; providerId: string | null },
-): void {
+): Promise<void> {
   const service = pendingCredentialSwitchHolder;
   if (!service) {
     throw new Error('Pending credential switch service is not initialized');
@@ -1773,15 +1773,42 @@ export function registerPendingCredentialSwitchForSession(
   // 捕获会话 agent:deferred 切换在收口时刻要重过停用裁决(期间目标可能被停用,
   // PR #744 review 第七轮);读不到(会话行缺失)则登记不带 agentKind = 收口不裁决。
   const dbAgentKind = getSessionDbAgentKind(sessionId);
-  // 捕获切换前的运行路由(live handle 的当前模型 + provider store 当前来源,均为
-  // 同步源):目标在等待期间被全停且目录无启用兜底时,收口回滚到它(第十六轮)。
+  // 捕获切换前的运行路由:model 用 live handle(热切过未落库时比 DB 权威),来源用
+  // provider store;effort / fast 无 live getter,从 DB 行读 —— renderer 在收到
+  // deferred 结果**之后**才落盘请求值,本函数在 IPC 回包之前执行,此刻行里仍是
+  // 切换前值,无竞态。目标在等待期间被全停且目录无启用兜底时,收口按整套
+  // previousRoute 回滚(model/provider/effort/fast 一致成对,第十六、十八轮)。
   // deferred 场景会话正在跑 turn,live handle 必在;取不到就不带 = 无从回滚。
   const live = getMaker().getSession(sessionId);
+  let prevRow: { model: string | null; effort: string | null; fastMode: boolean | null; providerId: string | null } | null = null;
+  try {
+    const [row] = await getDbClient()
+      .drizzle.select({
+        model: sessions.model,
+        effort: sessions.effort,
+        fastMode: sessions.fastMode,
+        providerId: sessions.providerId,
+      })
+      .from(sessions)
+      .where(eq(sessions.id, sessionId))
+      .limit(1);
+    prevRow = row ?? null;
+  } catch {
+    prevRow = null;
+  }
+  const prevModel = live?.model ?? prevRow?.model ?? null;
   service.register(sessionId, {
     ...target,
     ...(dbAgentKind ? { agentKind: dbAgentKind === 'cc' ? 'claude-code' as const : 'codex' as const } : {}),
-    ...(live
-      ? { previousRoute: { model: live.model, providerId: getSessionProvider(sessionId) } }
+    ...(prevModel
+      ? {
+          previousRoute: {
+            model: prevModel,
+            providerId: getSessionProvider(sessionId) ?? prevRow?.providerId ?? null,
+            ...(prevRow?.effort ? { effort: prevRow.effort } : {}),
+            ...(prevRow?.fastMode != null ? { fastMode: prevRow.fastMode } : {}),
+          },
+        }
       : {}),
   });
 }
@@ -6684,6 +6711,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       const patch: Record<string, unknown> = { providerId: route.providerId };
       if (route.model) patch.model = route.model;
       if (route.effort) patch.effort = route.effort;
+      if (route.fastMode !== undefined) patch.fastMode = route.fastMode;
       await getDbClient()
         .drizzle.update(sessions)
         .set(patch)

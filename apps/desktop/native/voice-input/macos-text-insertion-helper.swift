@@ -34,6 +34,12 @@ struct Options {
   var targetPid: pid_t?
   var targetBundleId = ""
   var targetName = ""
+  /// Only collect the focused window frame when the caller actually needs it.
+  /// On a single-display Mac the answer cannot change which display the overlay
+  /// opens on, and on an AX-slow target these extra requests each cost up to the
+  /// configured messaging timeout — that would delay the paste target capture for
+  /// nothing.
+  var withFocusedFrame = false
 }
 
 struct Snapshot {
@@ -140,6 +146,8 @@ func parseOptions() throws -> Options {
     case "--target-name":
       guard let value = iterator.next() else { throw HelperError.missingValue(arg) }
       options.targetName = value
+    case "--with-focused-frame":
+      options.withFocusedFrame = true
     default:
       throw HelperError.invalidArgument("Unknown argument: \(arg)")
     }
@@ -441,7 +449,7 @@ let AX_SELECTED_TEXT_MARKER_RANGE = "AXSelectedTextMarkerRange" as CFString
 let AX_TEXT_MARKER_RANGE_FOR_UI_ELEMENT = "AXTextMarkerRangeForUIElement" as CFString
 let AX_STRING_FOR_TEXT_MARKER_RANGE = "AXStringForTextMarkerRange" as CFString
 
-func captureTargetPayload() -> [String: Any] {
+func captureTargetPayload(withFocusedFrame: Bool) -> [String: Any] {
   guard let app = NSWorkspace.shared.frontmostApplication else {
     return [
       "ok": false,
@@ -455,7 +463,7 @@ func captureTargetPayload() -> [String: Any] {
   // on" and "which app do we paste into" from disagreeing — two separate helper
   // processes would each read frontmostApplication at a slightly different
   // moment.
-  let focusedFrame = focusedWindowFrame(for: app)
+  let focusedFrame = withFocusedFrame ? focusedWindowFrame(for: app) : nil
   // Stream the frame out on its own line right away, before the (potentially
   // slow) context capture below. The overlay only waits ~90ms for it in order
   // to pick a display, while the AX context walk used by Chromium-style editors
@@ -1398,7 +1406,7 @@ do {
   let options = try parseOptions()
   switch options.command {
   case "capture-target":
-    emit(captureTargetPayload())
+    emit(captureTargetPayload(withFocusedFrame: options.withFocusedFrame))
   case "paste-verified":
     emit(pasteVerifiedPayload(options: options))
   default:

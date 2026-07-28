@@ -80,8 +80,8 @@ import {
   refreshVoiceInputInputMonitoringPermissionSnapshot,
   registerActiveInlineVoiceInputWebContents,
   showVoiceInputDictionaryToast,
+  takeOverlayDictionaryToastAnchor,
   unregisterActiveInlineVoiceInputWebContents,
-  voiceInputDictionaryToastAnchorKey,
 } from './global.js';
 import {
   registerVoiceInputDataStoreIpc,
@@ -314,6 +314,12 @@ export async function adviseAndRecordVoiceInputDictionaryLearning(
   }
 
   const sourceLabel = options.sourceLabel ?? payload.source ?? 'in_app';
+  // 锚点必须在任何 await 之前取：请求到达 main 的顺序与浮窗发布证据的顺序一致，
+  // 在这里绑定就等于「这次请求认自己那次会话的浮窗现场」；等 advisor 返回后再取，
+  // 并发请求会互相抢到别人的锚点。跳过分支也要取走，否则它会留给下一次请求。
+  const toastAnchor = sourceLabel === 'external_overlay'
+    ? takeOverlayDictionaryToastAnchor()
+    : null;
   const skipReason = getDictationDictionaryAdviceSkipReason(payload);
   if (skipReason) {
     log.debug('dictionary learning advice skipped', {
@@ -381,14 +387,10 @@ export async function adviseAndRecordVoiceInputDictionaryLearning(
           entryId: entry.id,
           term: entry.text,
         })),
-        // 只有全局浮窗听写的 toast 才贴着「产生它的那次浮窗」的位置出现，且要带上
-        // 本条证据自己的 key —— 并发的 advisor 请求各自认自己的锚点，先返回的不会
-        // 消费掉别人的。应用内听写用户在哪块屏操作与浮窗无关，不传 key、走默认位置。
-        {
-          anchorKey: sourceLabel === 'external_overlay'
-            ? voiceInputDictionaryToastAnchorKey(payload)
-            : null,
-        },
+        // 锚点在本函数入口、任何 await 之前就绑定好了（见 toastAnchor），这里只是
+        // 把它交给 toast：并发的 advisor 请求各认自己那次会话的现场，先返回的不会
+        // 消费掉别人的。应用内听写不带锚点，走默认位置。
+        { anchor: toastAnchor },
       );
     }
     log.debug('dictionary learning advice', {

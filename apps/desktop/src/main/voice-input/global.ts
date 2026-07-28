@@ -11,7 +11,6 @@ import {
 import type { Display, NativeImage, Point, Rectangle, WebContents } from 'electron';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import {
   inspectExternalEditedInsertedText,
@@ -243,18 +242,20 @@ let overlayDragSession: { startBounds: Rectangle; startCursor: Point } | null = 
 // 最近一次「浮窗真正呈现在哪」的 bounds。浮窗 hide 后会被停到屏幕外，实时
 // bounds 不能当锚点，全局浮窗路径的词典 toast 靠这份记录跟到同一块屏、同一位置。
 let lastPresentedOverlayBounds: Rectangle | null = null;
-// 从「发布证据」交棒给「显示 toast」的锚点，按证据逐条登记、一次性消费。
+// 从「发布证据」交棒给「显示 toast」的锚点队列，先进先出、一次性消费。
 //
-// 快照本身是在建 watch 时（刚粘贴完）拍的，见
-// ExternalDictionaryLearningWatch.toastAnchor：词典建议要等延迟轮询 + 模型往返，
-// 期间用户可能已在另一块屏开了新一次浮窗，锚点必须跟着来源会话走，并在显示时用
-// 呈现代次复核，否则旧会话的 toast 会盖在新浮窗上。
+// 快照是在粘贴开始前拍的（见 pasteTextToFocusedTarget）：那才是产生这条听写的浮窗
+// 现场。之后的粘贴 await、延迟轮询、模型往返期间用户都可能开新会话，锚点必须跟着
+// 来源会话走，并在显示时用呈现代次复核，否则旧会话的 toast 会盖在新浮窗上。
 //
-// 用 Map 而不是单个槽：renderer 是并发发起 advisor 的，不排队也不互等。会话 A 的
-// 请求还在跑时会话 B 就可能发布证据，共用一个槽会让先返回的 A 消费掉 B 的锚点。
-const dictionaryToastAnchors = new Map<string, { bounds: Rectangle; presentationSeq: number }>();
-// 登记表只用于「刚刚发布、还没出 toast」的证据，超过这个数就丢最旧的，
-// 避免 advisor 从不返回时无界增长。
+// 为什么 FIFO 队列就够、不需要给每条证据编 ID：renderer 收到证据会立刻发起 advisor
+// 请求，所以**请求到达 main 的顺序 == 证据发布顺序**；并发只发生在 advisor 的响应上。
+// main 在请求到达时（await 之前）就把队首锚点绑给这次请求，之后谁先返回都不会串台，
+// 内容相同的两次修正也不会互相覆盖。
+const pendingDictionaryToastAnchors: DictionaryToastAnchor[] = [];
+// 队列只用于「刚发布、还没出 toast」的证据。renderer 侧若因功能开关未发起 advisor，
+// 对应锚点不会被取走，所以设上限丢最旧，避免无界增长；残留的旧锚点也过不了呈现代次
+// 复核，只会退化成默认位置。
 const DICTIONARY_TOAST_ANCHOR_MAX_ENTRIES = 8;
 // 浮窗呈现代次。焦点屏查询是异步的，它的回调必须能认出「这次呈现还算不算数」：
 // 会话被取消（hide / 复位到 idle）或已经开始了新一次呈现时，迟到的回调不得再
@@ -282,7 +283,7 @@ type ExternalDictionaryLearningWatch = {
    * watch 会延迟轮询几十秒，期间用户可能已经在另一块屏开了新一次浮窗，所以锚点
    * 必须跟着 watch 走，不能等发布证据时再去读进程级的「最近一次浮窗位置」。
    */
-  toastAnchor: { bounds: Rectangle; presentationSeq: number } | null;
+  toastAnchor: DictionaryToastAnchor | null;
   pendingEdit?: {
     editedText: string;
     detectedAt: number;
@@ -295,13 +296,19 @@ export type DictionaryToastEntryPayload = {
   term: string;
 };
 
+/** 一次浮窗听写的「现场」：浮窗当时的位置 + 当时的呈现代次。 */
+export type DictionaryToastAnchor = {
+  bounds: Rectangle;
+  presentationSeq: number;
+};
+
 type DictionaryToastPayload = {
   entries: DictionaryToastEntryPayload[];
   /**
-   * 非 null = 该 toast 来自全局浮窗听写，凭这个 key 去取它自己那条证据登记的锚点，
-   * 贴着产生它的那次浮窗位置出现。
+   * 非 null = 该 toast 来自全局浮窗听写，且已绑定产生它的那次浮窗现场，
+   * 显示时贴着那个位置出现（仍要过呈现代次与屏幕存在性复核）。
    */
-  anchorKey: string | null;
+  anchor: DictionaryToastAnchor | null;
 };
 
 const EXTERNAL_DICTIONARY_LEARNING_POLL_DELAYS_MS = [2500, 6500, 14000];
@@ -728,7 +735,7 @@ export function registerGlobalVoiceInputIpc(): void {
       const entries = normalizeDictionaryToastEntries(payload);
       if (entries.length === 0) return { ok: false, error: 'Dictionary toast payload is incomplete.' };
       // Renderer 侧（应用内听写）触发的 toast 与全局浮窗位置无关。
-      showDictionaryToastWindow({ entries, anchorKey: null });
+      showDictionaryToastWindow({ entries, anchor: null });
       return { ok: true };
     },
   );
@@ -1431,24 +1438,24 @@ function showDictionaryToastWindow(payload: DictionaryToastPayload): void {
 }
 
 /**
- * `anchorKey` 只应由全局浮窗那条听写链路传（用
- * `voiceInputDictionaryToastAnchorKey()` 从证据算出）。应用内听写不传：它的 toast
- * 不能借用浮窗位置，用户可能在另一块屏的 Cindy 窗口里操作，甚至浮窗那块屏早已拔掉。
+ * `anchor` 只应由全局浮窗那条听写链路传（用 `takeOverlayDictionaryToastAnchor()`
+ * 在请求到达时取得）。应用内听写不传：它的 toast 不能借用浮窗位置，用户可能在另一
+ * 块屏的 Cindy 窗口里操作，甚至浮窗那块屏早已拔掉。
  */
 export function showVoiceInputDictionaryToast(
   entries: DictionaryToastEntryPayload[],
-  options?: { anchorKey?: string | null },
+  options?: { anchor?: DictionaryToastAnchor | null },
 ): void {
   if (entries.length === 0) return;
   showDictionaryToastWindow({
     entries,
-    anchorKey: options?.anchorKey ?? null,
+    anchor: options?.anchor ?? null,
   });
 }
 
 function createDictionaryToastWindow(payload: DictionaryToastPayload): BrowserWindow {
   const bounds = computeDictionaryToastBounds(
-    resolveDictionaryToastAnchorBounds(payload.anchorKey),
+    resolveDictionaryToastAnchorBounds(payload.anchor),
   );
   const window = new BrowserWindow({
     ...bounds,
@@ -1529,19 +1536,27 @@ function startLoadedOverlaySession(window: BrowserWindow, shortcutInvokedAt: num
   //
   // frame 走流式：helper 读到它就单独吐一行，不必等后面的 AX 上下文采集，所以
   // 90ms 的选屏截止时间才有意义。
+  //
+  // 要不要采集 frame 在 spawn 之前就定：单屏（或非 macOS）下答案改变不了落屏结果，
+  // 就不让 helper 去读——AX 慢的目标 App 里那几次读取会白白推迟粘贴目标采集。
   let resolveFocusedWindowFrame: (frame: Rectangle | null) => void = () => {};
   const focusedWindowFramePromise = new Promise<Rectangle | null>((resolve) => {
     resolveFocusedWindowFrame = resolve;
   });
-  const captureOverlayPromise = captureMacPasteTarget({
-    onFocusedWindowFrame: (frame) => resolveFocusedWindowFrame(frame),
-  });
+  const wantsFocusedDisplay = shouldResolveFocusedDisplay();
+  const captureOverlayPromise = captureMacPasteTarget(
+    wantsFocusedDisplay
+      ? { onFocusedWindowFrame: (frame) => resolveFocusedWindowFrame(frame) }
+      : undefined,
+  );
   // 兜底：helper 没吐 frame（AX 与 CGWindowList 都没结果）、走了 osascript 回退，
   // 或整个 capture 失败时，用最终结果收敛这个 promise，别让它永远悬着。
   void captureOverlayPromise
     .then((captured) => resolveFocusedWindowFrame(captured?.frame ?? null))
     .catch(() => resolveFocusedWindowFrame(null));
-  const focusedDisplayQuery = startFocusedDisplayQuery(focusedWindowFramePromise);
+  const focusedDisplayQuery = wantsFocusedDisplay
+    ? startFocusedDisplayQuery(focusedWindowFramePromise)
+    : null;
   positionOverlayWindow(window);
   prepareOverlayForDisplay(window);
 
@@ -1675,19 +1690,26 @@ function getCursorDisplay(): Display {
 }
 
 /**
- * 把前台窗口 frame 换算成「焦点屏」，返回 null 表示不查、直接用鼠标所在屏：
- * - 只有一块屏时答案唯一，不该为它推迟浮窗显示。
+ * 是否值得去问「前台窗口在哪块屏」。false 时既不采集 frame 也不推迟显示，直接用
+ * 鼠标所在屏：
+ * - 只有一块屏时答案唯一；
  * - 非 macOS 平台没有可用的低成本前台窗口查询（Electron 只能看自己的窗口），
  *   Windows 一律按鼠标所在屏判定。
+ */
+function shouldResolveFocusedDisplay(): boolean {
+  if (process.platform !== 'darwin') return false;
+  return screen.getAllDisplays().length > 1;
+}
+
+/**
+ * 把前台窗口 frame 换算成「焦点屏」。
  *
  * 注意鼠标所在屏和键盘焦点所在屏可以不同：鼠标停在 A 屏、正在 B 屏的编辑器里
  * 打字时，粘贴目标在 B 屏，浮窗也应该开在 B 屏，所以这里优先认前台窗口。
  */
 function startFocusedDisplayQuery(
   focusedWindowFramePromise: Promise<Rectangle | null>,
-): Promise<Display | null> | null {
-  if (process.platform !== 'darwin') return null;
-  if (screen.getAllDisplays().length <= 1) return null;
+): Promise<Display | null> {
   const startedAt = Date.now();
   return focusedWindowFramePromise
     .then((frame) => {
@@ -1754,27 +1776,22 @@ function computeOverlayBounds(display: Display): Rectangle {
 
 /**
  * 全局浮窗听写的词典 toast 贴着「产生它的那次浮窗所在的位置」出现。浮窗 hide 后会
- * 被停到屏幕外的 OVERLAY_IDLE_BOUNDS，实时 bounds 不能当锚点，所以用建 watch 时拍下、
- * 发布证据时按 key 登记的快照（见 dictionaryToastAnchors）。
+ * 被停到屏幕外的 OVERLAY_IDLE_BOUNDS，实时 bounds 不能当锚点，所以用粘贴前拍下、
+ * 请求到达时按序绑定的快照（见 pendingDictionaryToastAnchors）。
  *
  * 三个条件都满足才用它，否则退回鼠标所在屏的默认位置：
- * - 调用方是全局浮窗链路并带来了自己那条证据的 key（应用内听写不传）；
+ * - 调用方是全局浮窗链路并带来了自己那次会话的锚点（应用内听写不传）；
  * - 呈现代次没变——变了说明期间又开过浮窗，这条 toast 会盖在新浮窗上；
  * - 锚点中心仍落在某块现存屏幕上——否则外接屏拔掉后 toast 会整个落到屏幕外。
  */
-function resolveDictionaryToastAnchorBounds(anchorKey: string | null): Rectangle {
-  if (!anchorKey) return computeOverlayBounds(getCursorDisplay());
-  // 一次性消费：锚点只对它自己那条证据有效。
-  const anchor = dictionaryToastAnchors.get(anchorKey);
-  dictionaryToastAnchors.delete(anchorKey);
-  if (anchor
-    && anchor.presentationSeq === overlayPresentationSeq
+function resolveDictionaryToastAnchorBounds(anchor: DictionaryToastAnchor | null): Rectangle {
+  if (!anchor) return computeOverlayBounds(getCursorDisplay());
+  if (anchor.presentationSeq === overlayPresentationSeq
     && isBoundsCenterOnDisplay(anchor.bounds, getOverlayPlacementDisplays())) {
     return anchor.bounds;
   }
   log.debug('dictionary toast anchor dropped', {
-    hasAnchor: Boolean(anchor),
-    staleSession: Boolean(anchor && anchor.presentationSeq !== overlayPresentationSeq),
+    staleSession: anchor.presentationSeq !== overlayPresentationSeq,
   });
   return computeOverlayBounds(getCursorDisplay());
 }
@@ -1789,6 +1806,10 @@ function computeDictionaryToastBounds(overlayBounds: Rectangle): Rectangle {
 }
 
 async function pasteTextToFocusedTarget(text: string, rawTranscriptText?: string): Promise<void> {
+  // 词典 toast 锚点必须在这里、任何 await 之前拍：renderer 已经把浮窗收起并让粘贴
+  // 在后台跑，用户完全可以在 pasteTextToMacTarget() 返回前开下一次会话。等到建 watch
+  // 时再读 lastPresentedOverlayBounds / 呈现代次，拿到的就是新会话的现场了。
+  const toastAnchor = captureOverlayToastAnchor();
   const pasteTarget = await resolveOverlayPasteTarget();
   log.debug(PASTE_DEBUG_TAG, 'paste start', {
     chars: text.length,
@@ -1797,7 +1818,7 @@ async function pasteTextToFocusedTarget(text: string, rawTranscriptText?: string
   });
   if (process.platform === 'darwin') {
     await pasteTextToMacTarget(text, pasteTarget);
-    scheduleExternalDictionaryLearningWatch(text, rawTranscriptText, pasteTarget, overlayPasteContext);
+    scheduleExternalDictionaryLearningWatch(text, rawTranscriptText, pasteTarget, overlayPasteContext, toastAnchor);
     return;
   }
 
@@ -2032,7 +2053,12 @@ async function captureMacPasteTarget(
   if (process.platform !== 'darwin') return null;
   const onFocusedWindowFrame = options?.onFocusedWindowFrame;
   try {
-    const helperResult = await runMacTextInsertionHelper(['--command', 'capture-target'], {
+    // 只有真要用 frame 时才让 helper 去读它：AX 慢的目标 App 里 focusedWindow /
+    // position / size 三次请求各自可能吃满 200ms messaging timeout，而单屏下这个答案
+    // 根本改变不了落屏结果，白白推迟粘贴目标采集。
+    const args = ['--command', 'capture-target'];
+    if (onFocusedWindowFrame) args.push('--with-focused-frame');
+    const helperResult = await runMacTextInsertionHelper(args, {
       onProgress: onFocusedWindowFrame
         ? (event) => {
           if (event.event !== 'focused-window-frame') return;
@@ -2109,6 +2135,7 @@ function scheduleExternalDictionaryLearningWatch(
   rawTranscriptText: string | undefined,
   target: MacPasteTarget | null,
   context: MacPasteContext | null,
+  toastAnchor: DictionaryToastAnchor | null,
 ): void {
   if (process.platform !== 'darwin') return;
   cancelExternalDictionaryLearningWatch();
@@ -2141,9 +2168,7 @@ function scheduleExternalDictionaryLearningWatch(
     timers: [],
     completed: false,
     inspecting: false,
-    toastAnchor: lastPresentedOverlayBounds
-      ? { bounds: lastPresentedOverlayBounds, presentationSeq: overlayPresentationSeq }
-      : null,
+    toastAnchor,
   };
   externalDictionaryLearningWatch = watch;
   EXTERNAL_DICTIONARY_LEARNING_POLL_DELAYS_MS.forEach((delayMs) => {
@@ -2509,46 +2534,37 @@ function isSameMacPasteTarget(lhs: MacPasteTarget, rhs: MacPasteTarget): boolean
 
 function publishExternalDictionaryLearningEvidence(
   evidence: Pick<DictationDictionaryAdviceInput, 'source' | 'rawTranscriptText' | 'beforeText' | 'afterText' | 'context'>,
-  toastAnchor: ExternalDictionaryLearningWatch['toastAnchor'],
+  toastAnchor: DictionaryToastAnchor | null,
 ): void {
   const window = getOverlayWindow();
   if (!window || window.isDestroyed()) return;
-  // 锚点是建 watch 时拍的（那才是这条证据对应的浮窗现场），这里按证据 key 登记，
-  // 等这条证据的建议回来时凭同一个 key 取走。
-  //
-  // key 由 main 从证据内容派生，不放进 IPC payload：证据要经 renderer 往返，
-  // renderer 传回的几何值不可信，而 renderer 回传时只会往 context 里加语言字段、
-  // 不改 source / beforeText / afterText，所以 main 能在收到建议请求时重算出同一个
-  // key。真被改过就查不到锚点，退回默认位置，不会指向别的会话。
+  // 锚点是粘贴开始前拍的（那才是这条证据对应的浮窗现场），这里排进队列，等这条
+  // 证据的建议请求到达 main 时按到达顺序取走。几何值不进 IPC payload：证据要经
+  // renderer 往返，renderer 传回的坐标属于不可信输入。
   if (toastAnchor) {
-    registerDictionaryToastAnchor(voiceInputDictionaryToastAnchorKey(evidence), toastAnchor);
+    pendingDictionaryToastAnchors.push(toastAnchor);
+    while (pendingDictionaryToastAnchors.length > DICTIONARY_TOAST_ANCHOR_MAX_ENTRIES) {
+      pendingDictionaryToastAnchors.shift();
+    }
   }
   window.webContents.send('voice-input:dictionary-learning-evidence', { evidence });
 }
 
-/**
- * 词典 toast 锚点的证据 key。只取 renderer 往返途中不会改动的字段，并做摘要，
- * 避免把用户听写文本原样留在 Map 的 key 里（日志、堆快照都可能带出去）。
- */
-export function voiceInputDictionaryToastAnchorKey(
-  evidence: Pick<DictationDictionaryAdviceInput, 'source' | 'beforeText' | 'afterText'>,
-): string {
-  return createHash('sha256')
-    .update(`${evidence.source ?? ''} ${evidence.beforeText ?? ''} ${evidence.afterText ?? ''}`)
-    .digest('hex')
-    .slice(0, 32);
+/** 拍下「当前这次浮窗现场」，供之后给它的词典 toast 定位。 */
+function captureOverlayToastAnchor(): DictionaryToastAnchor | null {
+  if (!lastPresentedOverlayBounds) return null;
+  return { bounds: lastPresentedOverlayBounds, presentationSeq: overlayPresentationSeq };
 }
 
-function registerDictionaryToastAnchor(
-  key: string,
-  anchor: { bounds: Rectangle; presentationSeq: number },
-): void {
-  dictionaryToastAnchors.set(key, anchor);
-  while (dictionaryToastAnchors.size > DICTIONARY_TOAST_ANCHOR_MAX_ENTRIES) {
-    const oldest = dictionaryToastAnchors.keys().next();
-    if (oldest.done) break;
-    dictionaryToastAnchors.delete(oldest.value);
-  }
+/**
+ * 取走队首的浮窗 toast 锚点，绑定给「这一次」词典建议请求。
+ *
+ * 必须在建议请求刚到达、任何 await 之前调用：那时的到达顺序与证据发布顺序一致，
+ * 绑定之后无论哪个请求先返回都不会拿到别人的锚点，内容相同的两次修正也不会互相
+ * 覆盖。应用内听写不要调用它。
+ */
+export function takeOverlayDictionaryToastAnchor(): DictionaryToastAnchor | null {
+  return pendingDictionaryToastAnchors.shift() ?? null;
 }
 
 // Length-only summary for normal diagnostics. Full text debug is isolated in

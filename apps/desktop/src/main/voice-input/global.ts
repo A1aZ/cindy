@@ -242,10 +242,10 @@ let overlayDragSession: { startBounds: Rectangle; startCursor: Point } | null = 
 // 最近一次「浮窗真正呈现在哪」的 bounds。浮窗 hide 后会被停到屏幕外，实时
 // bounds 不能当锚点，全局浮窗路径的词典 toast 靠这份记录跟到同一块屏、同一位置。
 let lastPresentedOverlayBounds: Rectangle | null = null;
-// 发布外部听写的词典学习证据时对锚点拍的快照。词典建议是异步的（模型往返），
-// 期间用户可能已经在另一块屏开了新一次浮窗，把 lastPresentedOverlayBounds 覆盖成
-// 新会话的位置——那时旧会话的 toast 会盖在新浮窗上。所以连同当时的呈现代次一起
-// 记下来：代次变了就说明这条 toast 已经不属于当前现场，退回默认位置。
+// 从「发布证据」交棒给「显示 toast」的锚点，一次性消费。快照本身是在建 watch 时
+// （刚粘贴完）拍的，见 ExternalDictionaryLearningWatch.toastAnchor：词典建议要等
+// 延迟轮询 + 模型往返，期间用户可能已在另一块屏开了新一次浮窗，锚点必须跟着来源
+// 会话走，并在显示时用呈现代次复核，否则旧会话的 toast 会盖在新浮窗上。
 let pendingDictionaryToastAnchor: { bounds: Rectangle; presentationSeq: number } | null = null;
 // 浮窗呈现代次。焦点屏查询是异步的，它的回调必须能认出「这次呈现还算不算数」：
 // 会话被取消（hide / 复位到 idle）或已经开始了新一次呈现时，迟到的回调不得再
@@ -268,6 +268,12 @@ type ExternalDictionaryLearningWatch = {
   timers: NodeJS.Timeout[];
   completed: boolean;
   inspecting: boolean;
+  /**
+   * 这次听写的浮窗现场，建 watch 时（刚粘贴完、浮窗刚收起）就拍下来。
+   * watch 会延迟轮询几十秒，期间用户可能已经在另一块屏开了新一次浮窗，所以锚点
+   * 必须跟着 watch 走，不能等发布证据时再去读进程级的「最近一次浮窗位置」。
+   */
+  toastAnchor: { bounds: Rectangle; presentationSeq: number } | null;
   pendingEdit?: {
     editedText: string;
     detectedAt: number;
@@ -1739,17 +1745,20 @@ function computeOverlayBounds(display: Display): Rectangle {
  * - 锚点中心仍落在某块现存屏幕上——否则外接屏拔掉后 toast 会整个落到屏幕外。
  */
 function resolveDictionaryToastAnchorBounds(anchorToOverlay: boolean): Rectangle {
+  if (!anchorToOverlay) return computeOverlayBounds(getCursorDisplay());
+  // 一次性消费：锚点只对它自己那条证据有效。若真有两条建议请求并发，后一条拿不到
+  // 锚点就退回默认位置——退化成「位置不贴心」，而不是「贴到别的会话上去」。
   const anchor = pendingDictionaryToastAnchor;
-  if (anchorToOverlay && anchor
+  pendingDictionaryToastAnchor = null;
+  if (anchor
     && anchor.presentationSeq === overlayPresentationSeq
     && isBoundsCenterOnDisplay(anchor.bounds, getOverlayPlacementDisplays())) {
     return anchor.bounds;
   }
-  if (anchorToOverlay && anchor) {
-    log.debug('dictionary toast anchor dropped', {
-      staleSession: anchor.presentationSeq !== overlayPresentationSeq,
-    });
-  }
+  log.debug('dictionary toast anchor dropped', {
+    hasAnchor: Boolean(anchor),
+    staleSession: Boolean(anchor && anchor.presentationSeq !== overlayPresentationSeq),
+  });
   return computeOverlayBounds(getCursorDisplay());
 }
 
@@ -2115,6 +2124,9 @@ function scheduleExternalDictionaryLearningWatch(
     timers: [],
     completed: false,
     inspecting: false,
+    toastAnchor: lastPresentedOverlayBounds
+      ? { bounds: lastPresentedOverlayBounds, presentationSeq: overlayPresentationSeq }
+      : null,
   };
   externalDictionaryLearningWatch = watch;
   EXTERNAL_DICTIONARY_LEARNING_POLL_DELAYS_MS.forEach((delayMs) => {
@@ -2374,7 +2386,7 @@ function finalizePendingExternalDictionaryLearningEdit(
       selectedText: originalContext.selectedText,
       selectionAfter: originalContext.selectionAfter,
     },
-  });
+  }, watch.toastAnchor);
   log.debug('external dictionary learning pending evidence finalized', {
     target: describePasteTarget(watch.target),
     triggerReason,
@@ -2480,14 +2492,14 @@ function isSameMacPasteTarget(lhs: MacPasteTarget, rhs: MacPasteTarget): boolean
 
 function publishExternalDictionaryLearningEvidence(
   evidence: Pick<DictationDictionaryAdviceInput, 'source' | 'rawTranscriptText' | 'beforeText' | 'afterText' | 'context'>,
+  toastAnchor: ExternalDictionaryLearningWatch['toastAnchor'],
 ): void {
   const window = getOverlayWindow();
   if (!window || window.isDestroyed()) return;
-  // 在这里给 toast 锚点拍快照：这条证据对应的浮窗现场就是「刚刚那一次」。之后
-  // 模型往返期间新开的浮窗会推进呈现代次，届时这份快照自动失效。
-  pendingDictionaryToastAnchor = lastPresentedOverlayBounds
-    ? { bounds: lastPresentedOverlayBounds, presentationSeq: overlayPresentationSeq }
-    : null;
+  // 锚点是建 watch 时拍的（那才是这条证据对应的浮窗现场），这里只是交棒给 toast。
+  // 证据要经 renderer 往返再回到 main，不把几何值放进那条链路：renderer 传回来的
+  // 坐标属于不可信输入。
+  pendingDictionaryToastAnchor = toastAnchor;
   window.webContents.send('voice-input:dictionary-learning-evidence', { evidence });
 }
 

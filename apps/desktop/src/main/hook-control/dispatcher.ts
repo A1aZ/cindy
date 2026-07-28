@@ -503,10 +503,15 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     let outcome: HookRunOutcome;
     /**
      * 开跑前按当前映射再确认一次(见 dirStillAllowed)。resolveTarget 到这里之间
-     * 隔着排队与若干 await, 映射随时可能被改/删; 这是"每条消息按映射现场重算"
-     * 在执行侧的收口。expectedWorkingDir 为空 = 新建路径, 目录刚在上面算出来。
+     * 隔着排队与若干 await(新建路径还要等 worktree 预建 / 对话目录分配), 映射
+     * 随时可能被改/删; 这是"每条消息按映射现场重算"在执行侧的收口。
+     *
+     * 新建路径没有 expectedWorkingDir(它是给 runner 比对 session meta 用的,
+     * 新会话还没有 meta), 回退到 workingDir —— 那就是这次要跑的目录。少了这个
+     * 回退, 新建路径整条绕过执行侧收口(PR #733 review 指出)。用 `||` 而非 `??`:
+     * workingDir 可能是空串占位, 空串过 isPathWithin 会 resolve 成 cwd。
      */
-    const guardDir = task.run.expectedWorkingDir ?? null;
+    const guardDir = task.run.expectedWorkingDir || task.run.workingDir || null;
     if (guardDir !== null && !dirStillAllowed(task.connectionId, guardDir)) {
       // 路径不进日志(规则: 用集中 PII helper, 而 dispatcher 是不碰 Electron 的
       // 纯逻辑模块, 拿不到它)—— requestId 足够定位。
@@ -567,7 +572,10 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       }),
     );
     running.delete(sessionId);
-    // run 返回 = session 一定已经建好落库, 免检窗口到此为止
+    // 本次执行收口, 免检窗口到此为止。注意**不能**断言"session 一定已落库":
+    // 上面可能因映射撤权根本没进 runner, runner 也可能在 createSession 之前就
+    // 失败(PR #733 review 指出)。这里删掉只是让后续消息回到正常判定 —— 那两种
+    // 情况下 inspect 查不到会话, 走的是丢绑定重建的保守侧, 方向正确。
     awaitingPersist.delete(sessionId);
     const queue = queues.get(sessionId);
     const next = queue?.shift();

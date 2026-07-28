@@ -18,6 +18,7 @@ import {
   type HookRunOutcome,
   type HookRunRequest,
   type HookSessionRunner,
+  type PrepareWorktreeResult,
 } from '../dispatcher';
 import type { HookBindingStore } from '../bindings';
 import { isPathWithin } from '../paths';
@@ -590,6 +591,34 @@ describe('dispatcher 核心语义', () => {
     expect(queued.errorMessage).toContain('已不在工作目录映射里');
     // 关键: 排队那条根本没进 runner
     expect(fr.calls).toHaveLength(1);
+  });
+
+  it('新建会话在定位与执行之间被撤权: 同样不执行(新建路径也走执行侧收口)', async () => {
+    const fr = fakeRunner();
+    const config: HookConnectionConfig = { ...CONFIG, workspaces: { xdmaker: WS_DIR } };
+    let release!: (v: PrepareWorktreeResult) => void;
+    const { d } = makeDispatcher({
+      runner: fr.runner,
+      config,
+      prepareWorktree: () =>
+        new Promise<PrepareWorktreeResult>((resolve) => {
+          release = resolve;
+        }),
+    });
+    const c = collector();
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    // 定位还卡在 worktree 预建上, 此时用户把这个目录从映射里删掉
+    config.workspaces = {};
+    release({ ok: false, message: 'no worktree' });
+    await tick();
+
+    // 新建路径没有 expectedWorkingDir, 但 workingDir 就是要跑的目录, 照样拦下
+    expect(fr.calls).toHaveLength(0);
+    const end = c.last('turn.end')!.payload;
+    expect(end.status).toBe('error');
+    expect(end.errorMessage).toContain('已不在工作目录映射里');
   });
 
   it('在工作目录映射内换目录 -> 无感跟随复用(边界内的移动不受影响)', async () => {

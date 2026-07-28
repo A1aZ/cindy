@@ -55,6 +55,16 @@ describe('normalize(坏形态清洗)', () => {
       disabledProviders: {},
     });
   });
+
+  it('读入同样截断到单 section 上限:手改/灌大的文件不被完整持有与重写放大', () => {
+    const raw = {
+      disabledModels: Object.fromEntries(
+        Array.from({ length: 5000 }, (_v, i) => [`p:m-${i}`, true]),
+      ),
+      disabledProviders: {},
+    };
+    expect(Object.keys(__testing.normalize(raw).disabledModels)).toHaveLength(4096);
+  });
 });
 
 describe('单 section 总量硬上限(深防线)', () => {

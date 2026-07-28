@@ -38,12 +38,27 @@ const DEFAULTS: ModelAccessPrefs = { disabledModels: {}, disabledProviders: {} }
  */
 const MAX_ENTRIES_PER_SECTION = 4096;
 
-/** 只收 value === true 的字符串 key 条目;其它形态(false / 非布尔 / 空 key)一律丢弃 = 启用。 */
+/**
+ * 只收 value === true 的字符串 key 条目;其它形态(false / 非布尔 / 空 key)一律丢弃 =
+ * 启用。有效条目同样受 MAX_ENTRIES_PER_SECTION 截断:写入路径的上限挡不住「直接
+ * 手改 / 恶意进程灌大文件」,读入不截断的话超大 map 会被完整持有并在下次 writePatch
+ * 原样重写放大(PR #744 review 第八轮)。超限部分按遍历序丢弃(= 视为启用,恢复
+ * 默认方向,无副作用)。
+ */
 function sanitizeSection(raw: unknown): Record<string, true> {
   const out: Record<string, true> = {};
   if (raw && typeof raw === 'object') {
+    let kept = 0;
     for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-      if (k && v === true) out[k] = true;
+      if (!k || v !== true) continue;
+      if (kept >= MAX_ENTRIES_PER_SECTION) {
+        log.warn('model disable prefs section truncated at hard cap on read', {
+          cap: MAX_ENTRIES_PER_SECTION,
+        });
+        break;
+      }
+      out[k] = true;
+      kept += 1;
     }
   }
   return out;

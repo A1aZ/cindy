@@ -1427,17 +1427,23 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // 路由(常等于 live 当前路由)已被停用时照发等于继续经停用路由扣费。
     let applyProviderId = explicitProviderId;
     if (this.deps.checkModelRoute) {
+      // 裁决对象 = 本轮实际将使用的来源:schedule 显式配置优先,否则会话当前存的
+      // 来源(它同样是显式路由,provider-route 不查停用标志)—— 只传
+      // explicitProviderId 会在「schedule 未指定来源 + 会话当前来源已被停用」时
+      // 误按隐式默认裁决放行,随后照旧沿停用来源派发(PR #744 review 第八轮)。
+      // 两者都缺才是真正的隐式默认(reroute 才有意义)。
+      const routeProviderId = explicitProviderId ?? currentProviderId;
       const verdict = await this.deps.checkModelRoute(
         live.agentKind,
         targetModel,
-        explicitProviderId,
+        routeProviderId,
       );
       if (verdict.kind === 'reject') {
         throw new QueuedRouteDisabledError(
           `schedule route unavailable: model "${targetModel}" is disabled in settings (${verdict.reason})`,
         );
       }
-      if (verdict.kind === 'reroute' && !explicitProviderId) {
+      if (verdict.kind === 'reroute' && !routeProviderId) {
         applyProviderId = verdict.providerId;
       }
     }

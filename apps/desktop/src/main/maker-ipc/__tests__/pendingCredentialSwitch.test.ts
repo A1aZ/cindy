@@ -310,6 +310,30 @@ describe('PendingCredentialSwitchService', () => {
       expect(h.broadcastApplied).toHaveBeenCalledTimes(1);
     });
 
+    it('复核异常 ⇒ 保守不写 route(登记照常收口、队列解冻),不把异常当放行', async () => {
+      const sessionId = rememberSession('pending-switch-revalidate-throw');
+      setSessionProvider(sessionId, 'openai');
+      const checkRoute = vi.fn(async () => {
+        throw new Error('catalog exploded');
+      });
+      const h = createHarness(
+        [{ id: sessionId, agentKind: 'claude-code', remoteHostId: null, isTurnRunning: () => false }],
+        { checkRoute },
+      );
+
+      h.service.register(sessionId, {
+        model: 'claude-opus-5',
+        providerId: 'xd',
+        agentKind: 'claude-code',
+      });
+      await h.service.onTurnSettled(sessionId);
+
+      expect(h.service.has(sessionId)).toBe(false);
+      expect(getSessionProvider(sessionId)).toBe('openai');
+      expect(h.onApplied).toHaveBeenCalledWith(sessionId);
+      expect(h.broadcastApplied).toHaveBeenCalledTimes(1);
+    });
+
     it('裁决通过 ⇒ 原样应用;register 未带 agentKind ⇒ 不裁决(向后兼容)', async () => {
       const sessionId = rememberSession('pending-switch-revalidate-pass');
       setSessionProvider(sessionId, 'openai');

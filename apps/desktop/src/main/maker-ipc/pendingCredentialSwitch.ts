@@ -211,8 +211,17 @@ export class PendingCredentialSwitchService {
         if (verdict.kind === 'reroute') return { providerId: verdict.providerId, apply: true };
       }
       return { providerId: target.providerId, apply: false };
-    } catch {
-      return { providerId: target.providerId, apply: true };
+    } catch (err) {
+      // 复核异常按「不写 route」保守处理:目标可能恰在等待期间被停用,异常放行会把
+      // 停用来源写回会话(PR #744 review 第八轮)。生产 checkRoute
+      // (verdictForModelRoute)自带目录故障降级、不抛,此分支纯防御 —— 保守方向
+      // 零日常代价;登记照常收口,模型选择本身已由 renderer 落盘,不丢失。
+      this.deps.logger?.warn('pending credential switch revalidation failed; route not applied', {
+        model: target.model,
+        providerId: target.providerId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return { providerId: target.providerId, apply: false };
     }
   }
 

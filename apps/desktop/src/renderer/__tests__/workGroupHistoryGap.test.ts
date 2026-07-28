@@ -575,8 +575,9 @@ describe('历史窗口空洞 — 被空洞收尾的组的时长', () => {
     const group = workGroups(grouped).find((g) => groupContains(g, 't1'));
     expect(group?.type).toBe('work_group');
     const durationMs = group?.type === 'work_group' ? group.durationMs : undefined;
-    // 40 分钟(发起 16:00:10 → 结果 16:40:10)。取发起时刻当结束会得到 0。
-    expect(durationMs).toBe(40 * 60 * 1000);
+    // 起点是 turn 开场那条 user 行(16:00:00,#598 的口径),终点是 tool_result(16:40:10)
+    // → 40 分 10 秒。这条用例守的是**终点**:取发起时刻当结束会得到约 0。
+    expect(durationMs).toBe(40 * 60 * 1000 + 10 * 1000);
   });
 });
 
@@ -648,7 +649,8 @@ describe('历史窗口空洞 — 被空洞收尾的组含长任务', () => {
       .map((g) => (g.type === 'work_group' ? g.durationMs : undefined))
       .filter((d): d is number => d !== undefined);
 
-    // 16:00:10 → 16:40:10 = 40 分钟。取末尾子项会得到 20 秒。
-    expect(durations).toContain(40 * 60 * 1000);
+    // 起点是 turn 开场那条 user 行(16:00:00,#598 的口径),终点取子项结束时间的最大值
+    // (16:40:10)→ 40 分 10 秒。取末尾子项当终点会得到约 30 秒。
+    expect(durations).toContain(40 * 60 * 1000 + 10 * 1000);
   });
 });

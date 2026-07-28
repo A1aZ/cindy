@@ -77,6 +77,21 @@ describe('hook binding store', () => {
     expect(readFile()['conn-1']['k']).not.toHaveProperty('authority');
   });
 
+  it('命名空间被损坏成非对象时不卡死写入(换成空命名空间重建)', () => {
+    fs.writeFileSync(filePath(), JSON.stringify({ 'conn-1': 'oops', 'conn-2': [1, 2] }), 'utf-8');
+    const store = makeStore();
+
+    expect(store.get('conn-1', 'k')).toBeNull();
+    expect(store.get('conn-2', 'k')).toBeNull();
+    expect(() => store.remove('conn-1', 'k')).not.toThrow();
+
+    store.set('conn-1', 'k', 'sess-1');
+    expect(store.get('conn-1', 'k')).toBe('sess-1');
+    // 另一个坏命名空间不受影响, 直到它自己被写入时才重建
+    store.set('conn-2', 'k', 'sess-2');
+    expect(store.get('conn-2', 'k')).toBe('sess-2');
+  });
+
   it('remove 清掉整条绑定', () => {
     const store = makeStore();
     store.set('conn-1', 'k', 'sess-1');

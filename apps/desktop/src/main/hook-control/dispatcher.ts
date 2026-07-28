@@ -395,6 +395,16 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
   const pendingTurnEnds = new Map<string, HookMessage[]>();
   /** 正在执行 turn 的 session(本模块发起的)。 */
   const running = new Set<string>();
+  /**
+   * 本 dispatcher 刚新建、但**还没被确认落库**的 session。免检快路径只认这个
+   * 集合(见 resolveTarget)—— `inspect()` 返回 null 是多义的: session 不存在
+   * 是 null, meta / DB 读取瞬时失败也被吞成 null(session-runner.ts 两路都
+   * catch)。只凭 null 放行, 一次读库抖动就能让已落库、已被移出映射的 session
+   * 继续收消息, 绕过映射边界(PR #733 review 指出)。
+   * 出集合的两个口子: 任何一次 inspect 成功查到它(说明已落库), 或它的 turn
+   * 收口(run 返回时 session 必已建好)。因此集合规模 ≤ 并发新建数, 不会泄漏。
+   */
+  const awaitingPersist = new Set<string>();
   /** 每 session 的 FIFO 等待队列。 */
   const queues = new Map<string, PendingTask[]>();
   /** connectionId + requestId -> 正在执行它的 session(cancel 定位与归属校验用, 收口即清)。 */
@@ -525,6 +535,8 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       }),
     );
     running.delete(sessionId);
+    // run 返回 = session 一定已经建好落库, 免检窗口到此为止
+    awaitingPersist.delete(sessionId);
     const queue = queues.get(sessionId);
     const next = queue?.shift();
     if (!queue || queue.length === 0) queues.delete(sessionId);
@@ -631,20 +643,27 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     if (bound) {
       const info = await runner.inspect(bound);
       if (!isCurrentGeneration(generation)) return { reject: 'disabled' };
+      // 查得到 = 已落库, 此后一律走映射校验
+      if (info !== null) awaitingPersist.delete(bound);
       /**
-       * 关键竞态防护: 绑定的 session 已派发但**尚未落库**(inspect 查不到)且
-       * 正在本模块跑/排队时直接复用 —— 否则同 key 的后续消息会各开新 session,
-       * 破坏「同 key 同 session」铁律。
+       * 关键竞态防护: 绑定的 session 是本 dispatcher 刚建、**尚未落库**的
+       * (inspect 查不到)且正在跑/排队时直接复用 —— 否则同 key 的后续消息会各开
+       * 新 session, 破坏「同 key 同 session」铁律。
        *
-       * 严格限定在 `info === null` 这个窗口内: 一旦落库, 无论它是否在跑, 都要
-       * 走下面的映射校验。早期版本把「在跑/排队」整个当成免检快路径, 于是用户在
-       * 一轮任务执行期间把对话移出映射时, 新到的消息仍会排进这个 session ——
-       * 而 session-runner 的复用路径以 session meta 的 workDir 为权威(会覆盖
-       * 这里传的目录), 那条消息就真的在已移出映射的目录里执行了, 等于在
-       * 「每条消息现场按映射重算」上开了个洞(PR #733 review 指出)。
+       * 两层收窄, 都是为了不让免检变成绕过映射边界的口子:
+       * - 早期版本把「在跑/排队」整个当成免检快路径, 且放在 inspect 之前。用户在
+       *   一轮任务执行期间把对话移出映射时, 新消息仍会排进这个 session —— 而
+       *   session-runner 的复用路径以 session meta 的 workDir 为权威(会覆盖这里
+       *   传的目录), 那条消息就真的在映射外执行了。
+       * - 只判 `info === null` 也不够: 这个 null 是多义的, session 不存在是 null,
+       *   meta / DB 读取瞬时失败也被吞成 null。一次读库抖动就能让已落库、已被移出
+       *   映射的 session 继续收消息。所以改判 awaitingPersist —— 只有本 dispatcher
+       *   刚在映射内建出来、还没确认落库的 session 才免检。
+       * 两条都由 PR #733 review 指出。
        */
       if (
         info === null &&
+        awaitingPersist.has(bound) &&
         namespacedBound !== null &&
         (running.has(bound) || (queues.get(bound)?.length ?? 0) > 0)
       ) {
@@ -752,6 +771,9 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     }
     // 新建会话跑在别名目录(或对话根)里, 是否还能复用每次现场按映射判定
     bindings.set(connectionId, payload.externalKey, sessionId);
+    // 落库前的免检窗口从这里开始(见 awaitingPersist 声明处): 此刻这个 session
+    // 必定建在映射内, inspect 还查不到它, 同 key 的后续消息要能认出它。
+    awaitingPersist.add(sessionId);
     // 标题带 provider 名: externalKey 约定为 `<providerId>:<渠道内标识>`,
     // 取前缀作 provider 名(如 team-slack), 比连接名(desktop 侧命名)更能
     // 说明"这条会话是谁驱动的"; 无前缀(非常规 key)时回退连接名

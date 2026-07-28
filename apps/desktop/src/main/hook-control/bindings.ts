@@ -62,22 +62,41 @@ export function createHookBindingStore(deps: {
     fs.renameSync(tmp, filePath);
   }
 
+  /**
+   * 取出可写的命名空间。readAll 只校验了顶层是对象, 二层没校验 —— 文件被手工
+   * 编辑或半截写坏成 `{"conn-1": "oops"}` 时, `??=` 不会替换字符串, 随后给它赋
+   * 属性在严格模式(ESM)下抛 TypeError, 绑定就再也落不了盘。坏数据直接换成空
+   * 命名空间: 大不了重开一次会话, 不能卡死写入(PR #733 review 指出)。
+   */
+  function namespaceFor(data: BindingFile, connectionId: string): Record<string, BindingRow> {
+    const ns: unknown = data[connectionId];
+    if (!ns || typeof ns !== 'object' || Array.isArray(ns)) {
+      const fresh: Record<string, BindingRow> = {};
+      data[connectionId] = fresh;
+      return fresh;
+    }
+    return ns as Record<string, BindingRow>;
+  }
+
   return {
     get(connectionId, externalKey) {
-      const row = readAll()[connectionId]?.[externalKey];
+      const ns: unknown = readAll()[connectionId];
+      if (!ns || typeof ns !== 'object' || Array.isArray(ns)) return null;
+      const row = (ns as Record<string, BindingRow | undefined>)[externalKey];
       return typeof row?.sessionId === 'string' ? row.sessionId : null;
     },
     set(connectionId, externalKey, sessionId) {
       const data = readAll();
-      (data[connectionId] ??= {})[externalKey] = { sessionId, updatedAt: Date.now() };
+      namespaceFor(data, connectionId)[externalKey] = { sessionId, updatedAt: Date.now() };
       writeAll(data);
     },
     remove(connectionId, externalKey) {
       const data = readAll();
-      if (data[connectionId]?.[externalKey]) {
-        delete data[connectionId][externalKey];
-        writeAll(data);
-      }
+      const ns: unknown = data[connectionId];
+      if (!ns || typeof ns !== 'object' || Array.isArray(ns)) return;
+      if (!Object.hasOwn(ns, externalKey)) return;
+      delete (ns as Record<string, BindingRow>)[externalKey];
+      writeAll(data);
     },
   };
 }

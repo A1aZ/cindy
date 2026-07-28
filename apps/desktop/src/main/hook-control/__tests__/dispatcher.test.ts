@@ -471,6 +471,39 @@ describe('dispatcher 核心语义', () => {
     await tick();
   });
 
+  it('inspect 瞬时失败(返回 null)不构成免检: 已落库的会话仍按边界处理', async () => {
+    const bindings = memoryBindings();
+    const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
+    const fr = fakeRunner({ sessions });
+    const { d } = makeDispatcher({ runner: fr.runner, bindings });
+    const c = collector();
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    const first = c.last('task.ack')!.payload.sessionId!;
+    sessions[first] = { workingDir: WS_DIR, usable: true };
+    fr.finish();
+    await tick();
+
+    // 第二轮开着不收口, 让 first 留在 running 里
+    d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
+    await tick();
+    expect(c.last('task.ack')!.payload.sessionId).toBe(first);
+
+    // 模拟 meta / DB 读取瞬时失败: inspect 也返回 null, 与"不存在"不可区分。
+    // 免检窗口只认 awaitingPersist(本 dispatcher 新建且未落库), first 早已出局,
+    // 所以这里必须 fail closed 而不是把消息排进 first。
+    delete sessions[first];
+    d.handleDispatch('conn-1', dispatch({ requestId: 'req-3' }), c.send);
+    await tick();
+    expect(c.last('task.ack')!.payload.sessionId).not.toBe(first);
+
+    fr.finish();
+    await tick();
+    fr.finish();
+    await tick();
+  });
+
   it('在工作目录映射内换目录 -> 无感跟随复用(边界内的移动不受影响)', async () => {
     const bindings = memoryBindings();
     const sessions: Record<string, { workingDir: string; usable: boolean }> = {};

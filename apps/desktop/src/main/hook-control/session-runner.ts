@@ -437,7 +437,7 @@ export function createMakerHookSessionRunner(deps: {
       const providerId = req.isNew ? (resolved?.providerId ?? null) : rowProviderId;
 
       let session: Awaited<ReturnType<ReturnType<typeof getMaker>['createSession']>>;
-      const createOpts = {
+      const createOpts: Parameters<ReturnType<typeof getMaker>['createSession']>[0] = {
         id: req.sessionId,
         agentKind: effectiveAgentKind,
         workingDir,
@@ -478,6 +478,31 @@ export function createMakerHookSessionRunner(deps: {
           void WorktreeManager.removeWorktreeForSession(req.sessionId).catch(() => undefined);
         }
         return fail(err instanceof Error ? err.message : String(err));
+      }
+
+      /**
+       * 拿到的可能是**进程里早就活着的那个实例**: maker.createSession 对已在
+       * activeSessions 里的 id 直接返回它, 忽略上面传的 workingDir。侧边栏
+       * "移动到项目"只改库里的行, 那个实例的 workDir 仍是它创建时的目录 ——
+       * 于是 dispatcher 按库里的新目录过了映射校验, 真正执行却在旧目录。
+       *
+       * 这不是"校验到执行之间的窗口"(那条已在 PR #733 的风险段里声明接受),
+       * 而是**持久错配**: 实例不换, 每次重试都一样, 直到会话自然关闭。所以这里
+       * 必须拦 —— 判据是"真正要跑的这个目录此刻还在映射内吗", 由 dispatcher 注入
+       * (它才查得到映射)。
+       *
+       * 刻意只判、不重建: 关掉再建会打断可能正用着它的桌面会话、触发 onClose 的
+       * 附件与 worktree 清理, 前几轮实测这些后果比问题本身更重(PR #733 review)。
+       * 目录仍在映射内的合法移动(A→B 都在映射里)不受影响: 那时判定通过, 这一轮
+       * 继续在 A 跑, 与本 PR 之前的行为一致。
+       */
+      if (req.isDirAuthorized && !req.isDirAuthorized(session.workDir)) {
+        log.warn(
+          `hook run aborted: live session ${req.sessionId} runs in a directory that is no longer in the workspace map`,
+        );
+        return fail(
+          '这个对话正在一个已不在工作目录映射里的目录中运行，本条消息没有执行。把该目录加进 设置 → 远程连接 → 工作目录映射，或在桌面端关掉这个对话后重发。',
+        );
       }
 
       // 运行时来源注入(路由层经 session-provider-store 决定上游与钥匙):

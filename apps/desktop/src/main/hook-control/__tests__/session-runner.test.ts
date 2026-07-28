@@ -310,6 +310,45 @@ describe('hook session 精确接管边界', () => {
   });
 });
 
+describe('真正要跑的那个 live session 的目录也要过映射', () => {
+  it('活实例仍在已撤权的目录 -> 拒绝执行, 消息不进 agent', async () => {
+    // maker.createSession 对已在 activeSessions 里的 id 直接返回既有实例, 忽略
+    // 传入的 workingDir —— 那个实例的 workDir 可能已被移出映射
+    fakeMaker.createSession.mockImplementationOnce(async (opts: { id?: string }) => ({
+      ...makeFakeSession(opts.id ?? 'sess-old'),
+      workDir: 'D:/unmapped-place',
+    }));
+    const runner = createMakerHookSessionRunner({ log });
+
+    const outcome = await runner.run(
+      baseReq({
+        sessionId: 'sess-old',
+        isNew: false,
+        isDirAuthorized: (dir: string) => dir === 'D:/repo',
+      }),
+    );
+
+    expect(outcome.status).toBe('error');
+    expect(outcome.errorMessage).toContain('已不在工作目录映射里的目录');
+    const session = await fakeMaker.createSession.mock.results[0].value;
+    expect(session.send).not.toHaveBeenCalled();
+  });
+
+  it('活实例的目录仍在映射内 -> 照常执行(映射内的移动不受影响)', async () => {
+    const runner = createMakerHookSessionRunner({ log });
+
+    const outcome = await runner.run(
+      baseReq({
+        sessionId: 'sess-old',
+        isNew: false,
+        isDirAuthorized: (dir: string) => dir === 'D:/repo',
+      }),
+    );
+
+    expect(outcome.status).toBe('ok');
+  });
+});
+
 describe('hook session-runner 的 userSendAt 时序(未分类误判回归)', () => {
   it('isNew: touchUserSendInDb 在 sessions:created 广播之前落库, onAccepted 再 bump 一次', async () => {
     const runner = createMakerHookSessionRunner({ log });

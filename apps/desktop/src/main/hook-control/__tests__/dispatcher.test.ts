@@ -642,6 +642,26 @@ describe('dispatcher 核心语义', () => {
     expect(cleanup).toHaveBeenCalledTimes(1);
   });
 
+  it('isDirAuthorized 按当前映射回答, 供 runner 校验实际执行目录', async () => {
+    const fr = fakeRunner();
+    const config: HookConnectionConfig = { ...CONFIG, workspaces: { xdmaker: WS_DIR } };
+    const { d } = makeDispatcher({ runner: fr.runner, config });
+    const c = collector();
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    const ask = fr.calls[0].isDirAuthorized!;
+    expect(ask(WS_DIR)).toBe(true);
+    expect(ask(path.join(WS_DIR, 'sub'))).toBe(true);
+    expect(ask(path.resolve('/repos/elsewhere'))).toBe(false);
+
+    // 映射被改后同一个回调立刻反映新状态(runner 是在 await 之后才问的)
+    config.workspaces = { xdmaker: path.resolve('/repos/elsewhere') };
+    expect(ask(WS_DIR)).toBe(false);
+    expect(ask(path.resolve('/repos/elsewhere'))).toBe(true);
+    fr.finish();
+  });
+
   it('inspect 期间目录被加回映射: 按当前映射判定, 不误杀这条绑定', async () => {
     const bindings = memoryBindings();
     const OUTSIDE = path.resolve('/repos/another-project');

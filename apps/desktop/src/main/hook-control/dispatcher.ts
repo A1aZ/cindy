@@ -122,6 +122,14 @@ export interface HookRunRequest {
   }) => void;
   /** 交互已在本端收口(超时默认 / turn 结束), 通知 server 改写卡片。 */
   onInteractionCancel?: (interactionId: string, reason: string) => void;
+  /**
+   * "这个目录此刻还在本连接的工作目录映射内吗" —— dispatcher 注入(只有它查得到
+   * 映射)。runner 用它校验**真正要跑的那个 live session 的 workDir**: maker 对
+   * 已活着的 session id 会忽略传入的 workingDir 直接返回旧实例, 那个实例的目录
+   * 可能已被移出映射, 且实例不换就一直错配(PR #733 review 指出)。
+   * 省略 = 不校验(测试与旧调用方)。
+   */
+  isDirAuthorized?: (dir: string) => boolean;
 }
 
 export interface HookRunOutcome {
@@ -532,6 +540,9 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
           onProgress,
           onInteraction,
           onInteractionCancel,
+          // runner 建/取到 session 后, 拿它真正要跑的那个目录回来问一次 ——
+          // 那个目录可能与这里校验过的不是同一个(见 isDirAuthorized 的说明)。
+          isDirAuthorized: (dir) => dirStillAllowed(task.connectionId, dir),
         });
       } catch (err) {
         outcome = {
@@ -1075,6 +1086,10 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
         running.clear();
         runningByRequest.clear();
         cancelRequested.clear();
+        // 切账号时 execute() 会在代际检查处提前 return, 走不到收口那行删除 ——
+        // 不在这里清的话, 每次切账号都永久留下一条 sessionId + 完整工作目录路径
+        // (PR #733 review 指出)。这些会话属于上一个账号, 新账号下本就不该免检。
+        awaitingPersist.clear();
         keyChains.clear();
       })();
       accountDeactivation = drain.finally(() => {

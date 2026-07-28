@@ -60,7 +60,7 @@ import { parseFrontmatter } from '../shared/customization-scanner.js';
 
 /** 扫描到的单个 subagent 定义。 */
 export interface DiscoveredSubagent {
-  /** frontmatter 的 `name`(身份来源;缺失时回退文件名,与平台一致度尽力而为)。 */
+  /** frontmatter 的 `name` —— 身份来源,与 cc 一致(缺失的定义 cc 不加载,这里也不收)。 */
   name: string;
   /** 定义文件绝对路径。 */
   filePath: string;
@@ -376,12 +376,20 @@ async function readSubagentFile(
   // (放在 agents 目录里的说明文件、笔记等)。空 frontmatter 一律跳过,否则会被当成
   // 一个匿名 agent 重发出去。
   if (Object.keys(fm).length === 0) return null;
-  // `name` 按平台文档是必填,但这里**故意宽容**回退到文件名:漏掉一个「其实声明了 model」
-  // 的 agent,会让我们误判成「没人声明」从而设上 env 覆盖 —— 那正是本次要修的 bug。
-  // 宁可多认一个,也不要漏认。
-  const nameRaw = typeof fm.name === 'string' ? fm.name.trim() : '';
-  const name = nameRaw.length > 0 ? nameRaw : path.basename(filePath).replace(/\.md$/i, '');
-  if (name.length === 0) return null;
+  // 严格对齐 cc 的加载条件:`name` 与 `description` 都必须是非空字符串,缺任一 cc 就把整份
+  // 定义**丢弃**(反编译自 bundled cli.js 的 agent 文件加载函数:
+  //   `if (!name || typeof name !== 'string') return null;`
+  //   `if (!description || typeof description !== 'string') { warn(...); return null; }`
+  // 身份取 `frontmatter.name`;函数里的 basename(file,'.md') 只用于 memory 前缀与 filename
+  // 字段,**不是** name 的回退)。
+  //
+  // 这里两个方向都会出错,所以必须照抄平台规则而不是往任一边偏:
+  //   - 漏认一份 cc 会加载的定义 → 误判「没人声明 model」→ 又把覆盖用的 env 设回去;
+  //   - 多认一份 cc 不加载的定义(例如只写了 model 没写 name 的草稿)→ 误判「有人声明」→
+  //     删掉 env → 用户配的默认值对**所有**真实 agent 和内置 agent 静默失效。
+  const name = typeof fm.name === 'string' ? fm.name.trim() : '';
+  const description = typeof fm.description === 'string' ? fm.description.trim() : '';
+  if (name.length === 0 || description.length === 0) return null;
   return {
     name,
     filePath,

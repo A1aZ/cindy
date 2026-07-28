@@ -10,9 +10,15 @@ import {
 
 let root: string;
 
+// cc 的加载条件是 name + description 都必须是非空字符串(见 subagent-definitions.ts 里
+// readSubagentFile 的反编译依据)。固件默认补上 description,让它们代表「cc 真的会加载」的
+// 定义;需要测缺字段的用例自己写全 frontmatter。
 async function writeAgent(dir: string, file: string, frontmatter: string, body = 'prompt body') {
   await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(path.join(dir, file), `---\n${frontmatter}\n---\n${body}\n`, 'utf8');
+  const fm = /(^|\n)description:/.test(frontmatter)
+    ? frontmatter
+    : `${frontmatter}\ndescription: fixture agent`;
+  await fs.writeFile(path.join(dir, file), `---\n${fm}\n---\n${body}\n`, 'utf8');
 }
 
 beforeEach(async () => {
@@ -123,9 +129,29 @@ describe('discoverSubagentDefinitions', () => {
     expect(found[0]).toMatchObject({ name: 'u', scope: 'user', declaredModel: 'sonnet' });
   });
 
-  it('name 缺失时回退文件名;无 frontmatter 的文件跳过', async () => {
+  // 回归:严格对齐 cc 的加载条件。cc 对缺 name 或缺 description 的文件直接 return null,
+  // 我们若「宽容」地按文件名收下它,就会误判「有人声明了 model」→ 删掉 env → 用户配的默认值
+  // 对所有真实 agent 静默失效(与漏认反向、但同样严重的失效模式)。
+  it('缺 name 或缺 description 的定义都不收(cc 也不加载),无 frontmatter 的同样跳过', async () => {
     const dir = path.join(root, 'repo', '.claude', 'agents');
-    await writeAgent(dir, 'from-filename.md', 'description: 没写 name\nmodel: opus');
+    await writeAgent(dir, 'ok.md', 'name: ok\ndescription: 正常\nmodel: opus');
+    // 这三个必须绕过 writeAgent —— 它会自动补 description,正好会掩掉要测的缺字段。
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(
+      path.join(dir, 'no-name.md'),
+      '---\ndescription: 没写 name\nmodel: opus\n---\nbody\n',
+      'utf8',
+    );
+    await fs.writeFile(
+      path.join(dir, 'blank-desc.md'),
+      '---\nname: blank-desc\ndescription: "  "\nmodel: opus\n---\nbody\n',
+      'utf8',
+    );
+    await fs.writeFile(
+      path.join(dir, 'desc-missing.md'),
+      '---\nname: desc-missing\nmodel: opus\n---\nbody\n',
+      'utf8',
+    );
     await fs.writeFile(path.join(dir, 'plain.md'), '没有 frontmatter 的普通 md\n', 'utf8');
 
     const found = await discoverSubagentDefinitions({
@@ -133,7 +159,7 @@ describe('discoverSubagentDefinitions', () => {
       env: { CLAUDE_CONFIG_DIR: path.join(root, 'empty-home') },
     });
 
-    expect(found.map((f) => f.name)).toEqual(['from-filename']);
+    expect(found.map((f) => f.name)).toEqual(['ok']);
   });
 
   // 回归:CLAUDE_CONFIG_DIR 在 host boot 期就被剥离出 process.env,dev 多实例的重定向只
@@ -254,7 +280,11 @@ describe('discoverSubagentDefinitions', () => {
     await fs.mkdir(agents, { recursive: true });
     await Promise.all(
       Array.from({ length: 210 }, (_, i) =>
-        fs.writeFile(path.join(agents, `a${i}.md`), `---\nname: a${i}\n---\nbody\n`, 'utf8'),
+        fs.writeFile(
+          path.join(agents, `a${i}.md`),
+          `---\nname: a${i}\ndescription: d\n---\nbody\n`,
+          'utf8',
+        ),
       ),
     );
 
@@ -338,7 +368,7 @@ describe('discoverSubagentDefinitions', () => {
     await fs.mkdir(agents, { recursive: true });
     await fs.writeFile(
       path.join(agents, 'huge.md'),
-      `---\nname: huge\nmodel: xai/grok-4.5\n---\n${'x'.repeat(400 * 1024)}`,
+      `---\nname: huge\ndescription: 长 prompt\nmodel: xai/grok-4.5\n---\n${'x'.repeat(400 * 1024)}`,
       'utf8',
     );
 
@@ -374,14 +404,17 @@ describe('discoverSubagentDefinitions', () => {
   it('扩展名大小写不敏感(reviewer.MD 也算定义)', async () => {
     const agents = path.join(root, 'repo', '.claude', 'agents');
     await fs.mkdir(agents, { recursive: true });
-    await fs.writeFile(path.join(agents, 'Reviewer.MD'), '---\nmodel: opus\n---\nbody\n', 'utf8');
+    await fs.writeFile(
+      path.join(agents, 'Reviewer.MD'),
+      '---\nname: Reviewer\ndescription: 大写扩展名\nmodel: opus\n---\nbody\n',
+      'utf8',
+    );
 
     const found = await discoverSubagentDefinitions({
       workingDir: path.join(root, 'repo'),
       env: { CLAUDE_CONFIG_DIR: path.join(root, 'empty-home') },
     });
 
-    // name 缺失回退文件名,扩展名要被剥掉(不留 .MD)。
     expect(found.map((f) => f.name)).toEqual(['Reviewer']);
     expect(found[0].declaredModel).toBe('opus');
   });

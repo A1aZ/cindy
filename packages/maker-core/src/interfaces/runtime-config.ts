@@ -57,6 +57,11 @@ export interface AgentRuntimeConfig {
    *
    * Claude maps this to `CLAUDE_CODE_SUBAGENT_MODEL`. Codex does not consume it yet because
    * its full-history fork path rejects model overrides in the currently bundled binary.
+   *
+   * ⚠️ 该 env 在 cc 的解析顺序里是**最高优先级**,不仅压过 agent frontmatter 的 `model:`,
+   * 也压过每次 Task/Agent 调用传入的 `model` 参数,而平台不提供更低优先级的槽位。
+   * Claude agent 因此只在「本会话没有任何手写 agent 声明 model」时才注入它 —— 取舍与实测
+   * 依据见 agents/claude-code/subagent-model-default.ts 的模块头。
    */
   subagentModel?: string;
 

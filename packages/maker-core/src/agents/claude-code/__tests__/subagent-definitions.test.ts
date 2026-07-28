@@ -405,6 +405,38 @@ describe('discoverSubagentDefinitions', () => {
     ).rejects.toBeInstanceOf(SubagentScanBudgetError);
   });
 
+  // 深度上限也是预算:静默返回空会让上层判「没人声明 model」→ 又把覆盖用的 env 设回去。
+  it('递归深度超上限 → 抛(不静默截断)', async () => {
+    const deep = path.join(root, 'repo', '.claude', 'agents', ...Array(10).fill('d'));
+    await writeAgent(deep, 'x.md', 'name: deep\nmodel: opus');
+
+    await expect(
+      discoverSubagentDefinitions({
+        workingDir: path.join(root, 'repo'),
+        env: { CLAUDE_CONFIG_DIR: path.join(root, 'empty-home') },
+      }),
+    ).rejects.toBeInstanceOf(SubagentScanBudgetError);
+  });
+
+  // 这条的风险方向与其它几条相反:多认一份 cc 根本不加载的隐藏备份,会让我们以为「有人声明了
+  // model」从而删掉 env —— 用户配的默认值对真正的 agent 反而失效。与既有 scanner 同一份过滤。
+  it('隐藏条目与 .bak.N 备份都跳过(与既有 scanner 同一份有效定义集)', async () => {
+    const agents = path.join(root, 'repo', '.claude', 'agents');
+    await writeAgent(agents, 'real.md', 'name: real');
+    await writeAgent(agents, '.reviewer.md', 'name: hidden-backup\nmodel: opus');
+    await writeAgent(agents, 'old.md.bak.1', 'name: bak-backup\nmodel: opus');
+    await writeAgent(path.join(agents, '.archive'), 'z.md', 'name: in-hidden-dir\nmodel: opus');
+
+    const found = await discoverSubagentDefinitions({
+      workingDir: path.join(root, 'repo'),
+      env: { CLAUDE_CONFIG_DIR: path.join(root, 'empty-home') },
+    });
+
+    expect(found.map((f) => f.name)).toEqual(['real']);
+    // 关键后果:没人「声明」model,默认值该照旧生效。
+    expect(found.every((f) => f.declaredModel === undefined)).toBe(true);
+  });
+
   it('目录不存在 / workingDir 非绝对路径都安全返回空,不抛错', async () => {
     await expect(
       discoverSubagentDefinitions({

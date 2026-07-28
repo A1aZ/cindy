@@ -245,7 +245,9 @@ async function collectMarkdownFiles(
   visitedDirs: Set<string>,
   depth = 0,
 ): Promise<string[]> {
-  if (depth > MAX_DEPTH) return [];
+  // 深度上限也是预算的一部分,超了同样**抛**而不是返回空:深层目录里若有声明了 model 的定义,
+  // 静默截断会让上层判成「没人声明」→ 又把覆盖用的 env 设回去(本 PR 要修的 bug)。
+  if (depth > MAX_DEPTH) throw new SubagentScanBudgetError(`depth>${MAX_DEPTH}`);
   // 软链环兜底:按真实路径去重。realpath 失败(悬空链)就跳过这个目录。
   let real: string;
   try {
@@ -262,6 +264,11 @@ async function collectMarkdownFiles(
   // 我们至少让自己的结果可复现)。条目数已封顶,这次排序的规模是有界的。
   const sorted = entries.sort((a, b) => a.name.localeCompare(b.name));
   for (const ent of sorted) {
+    // 隐藏条目与 .bak.N 备份跳过 —— 与本仓既有的 customization-scanner(同名过滤,
+    // agents/shared/customization-scanner.ts)保持**同一份有效定义集**。
+    // 这条的风险方向和其它几条相反:多认一份 cc 根本不加载的 `.reviewer.md` 备份,会让我们
+    // 以为「有人声明了 model」从而删掉 env —— 用户配的默认值对真正的 agent 反而失效了。
+    if (ent.name.startsWith('.') || /\.bak\.\d+$/.test(ent.name)) continue;
     const full = path.join(dir, ent.name);
     let isDir = ent.isDirectory();
     let isFile = ent.isFile();

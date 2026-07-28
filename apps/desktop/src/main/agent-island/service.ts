@@ -2017,6 +2017,7 @@ function buildAgentIslandStrings(): AgentIslandStrings {
     input: t('agentIsland.native.input'),
     done: t('agentIsland.native.done'),
     running: t('agentIsland.native.running'),
+    networkReconnecting: t('agentIsland.native.networkReconnecting'),
     updatingTasks: t('agentIsland.native.updatingTasks'),
     awaitingPermission: t('agentIsland.native.awaitingPermission'),
     awaitingQuestion: t('agentIsland.native.awaitingQuestion'),

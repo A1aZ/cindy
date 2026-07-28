@@ -61,6 +61,7 @@
       "input": "Input",
       "done": "Done",
       "running": "Running",
+      "networkReconnecting": "Connection interrupted — reconnecting ({{attempt}}/{{maxAttempts}})…",
       "updatingTasks": "Updating tasks",
       "awaitingPermission": "Awaiting permission",
       "awaitingQuestion": "Awaiting your reply",

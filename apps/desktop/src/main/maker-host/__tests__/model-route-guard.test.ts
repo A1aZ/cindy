@@ -1,13 +1,15 @@
 /**
- * model-route-guard.test.ts —— 停用轴在 main 会话路由边界的准入判定矩阵。
- * 纯函数直测(规则 14);register.ts 的 bootstrapSession / SET_MODEL 只是薄接线。
+ * model-route-guard.test.ts —— 停用轴在 main 会话路由边界的三态裁决矩阵。
+ * 纯函数直测(规则 14);register.ts 的 bootstrapSession / SET_MODEL / agent-switch
+ * 只是薄接线。语义:pass = 不涉停用;reroute = 隐式默认落点被停用但有启用替代拷贝
+ * (调用方以显式来源落地);reject = 显式点名停用来源 / 全部已连接拷贝停用。
  */
 
 import { describe, expect, it } from 'vitest';
 
 import { buildRegistry, type Catalog, type CatalogModel, type Provider } from '@cindy/model-providers';
 
-import { checkModelRouteDisabled } from '../model-route-guard.js';
+import { checkModelRoute } from '../model-route-guard.js';
 
 function model(id: string, extra: Partial<CatalogModel> = {}): CatalogModel {
   return { id, name: id, contextWindow: 200_000, efforts: [], defaultEffort: null, ...extra };
@@ -25,72 +27,86 @@ function provider(id: string, models: CatalogModel[]): Provider {
   };
 }
 
+// xd 是 claude-code 的原生默认来源(nativeDefaultSourceId 口径),anthropic 是替代拷贝。
 const CATALOG: Catalog = {
   providers: [
-    provider('alpha', [model('claude-opus-5')]),
-    provider('beta', [model('claude-opus-5')]),
+    provider('xd', [model('claude-opus-5')]),
+    provider('anthropic', [model('claude-opus-5')]),
   ],
 } as Catalog;
-const CONNECTED = { alpha: true, beta: true };
 
-function views(access?: Parameters<typeof buildRegistry>[3]) {
-  return buildRegistry(CATALOG, CONNECTED, {}, access);
+function views(
+  access?: Parameters<typeof buildRegistry>[3],
+  connected: Record<string, boolean> = { xd: true, anthropic: true },
+) {
+  return buildRegistry(CATALOG, connected, {}, access);
 }
 
-describe('checkModelRouteDisabled', () => {
-  it('无停用条目 / 目录不认识该模型 ⇒ 放行(不新增拒绝面)', () => {
-    expect(checkModelRouteDisabled(views(), 'claude-code', 'claude-opus-5', null)).toBeNull();
-    expect(checkModelRouteDisabled(views(), 'claude-code', 'unknown-model', null)).toBeNull();
-    expect(
-      checkModelRouteDisabled(
-        views({ disabledModels: { 'alpha:claude-opus-5': true } }),
-        'claude-code',
-        'unknown-model',
-        'alpha',
-      ),
-    ).toBeNull();
+describe('checkModelRoute', () => {
+  it('无停用条目 / 目录不认识该模型 ⇒ pass(不新增拒绝面)', () => {
+    expect(checkModelRoute(views(), 'claude-code', 'claude-opus-5', null)).toEqual({ kind: 'pass' });
+    expect(checkModelRoute(views(), 'claude-code', 'unknown-model', null)).toEqual({ kind: 'pass' });
   });
 
-  it('单份拷贝停用但仍有启用来源 ⇒ 默认路由放行;点名停用的那家 ⇒ 拒绝', () => {
-    const v = views({ disabledModels: { 'alpha:claude-opus-5': true } });
-    expect(checkModelRouteDisabled(v, 'claude-code', 'claude-opus-5', null)).toBeNull();
-    expect(checkModelRouteDisabled(v, 'claude-code', 'claude-opus-5', 'beta')).toBeNull();
-    expect(checkModelRouteDisabled(v, 'claude-code', 'claude-opus-5', 'alpha')).toBe(
-      'explicit-source-disabled',
-    );
-  });
-
-  it('全部拷贝停用 ⇒ 无论是否点名来源都拒绝', () => {
-    const v = views({
-      disabledModels: { 'alpha:claude-opus-5': true, 'beta:claude-opus-5': true },
+  it('显式点名:停用的来源 reject;启用的来源 / 不提供该模型的来源 pass', () => {
+    const v = views({ disabledModels: { 'xd:claude-opus-5': true } });
+    expect(checkModelRoute(v, 'claude-code', 'claude-opus-5', 'xd')).toEqual({
+      kind: 'reject',
+      reason: 'explicit-source-disabled',
     });
-    expect(checkModelRouteDisabled(v, 'claude-code', 'claude-opus-5', null)).toBe('model-disabled');
-    expect(checkModelRouteDisabled(v, 'claude-code', 'claude-opus-5', 'alpha')).toBe(
-      'explicit-source-disabled',
-    );
+    expect(checkModelRoute(v, 'claude-code', 'claude-opus-5', 'anthropic')).toEqual({ kind: 'pass' });
+    expect(checkModelRoute(v, 'claude-code', 'claude-opus-5', 'nonexistent')).toEqual({ kind: 'pass' });
   });
 
-  it('供应商级停用与模型级同语义:点名 suspended 来源拒绝,全 suspended 拒绝', () => {
+  it('隐式来源:原生默认落点(xd)被停用且替代拷贝已连接启用 ⇒ reroute 到替代来源', () => {
+    // 实际路由层对隐式来源走原生默认、不查停用标志 —— 仅放行等于继续用停用拷贝
+    // 付费,必须显式改路由(PR #744 review 第三轮)。
+    const v = views({ disabledModels: { 'xd:claude-opus-5': true } });
+    expect(checkModelRoute(v, 'claude-code', 'claude-opus-5', null)).toEqual({
+      kind: 'reroute',
+      providerId: 'anthropic',
+    });
+  });
+
+  it('隐式来源:替代拷贝存在但**未连接** ⇒ reject(不能把会话路由到连不上的来源)', () => {
+    const v = views(
+      { disabledModels: { 'xd:claude-opus-5': true } },
+      { xd: true, anthropic: false },
+    );
+    expect(checkModelRoute(v, 'claude-code', 'claude-opus-5', null)).toEqual({
+      kind: 'reject',
+      reason: 'model-disabled',
+    });
+  });
+
+  it('隐式来源:原生默认落点未被停用 ⇒ pass,不改变既有路由', () => {
+    const v = views({ disabledModels: { 'anthropic:claude-opus-5': true } });
+    expect(checkModelRoute(v, 'claude-code', 'claude-opus-5', null)).toEqual({ kind: 'pass' });
+  });
+
+  it('零已连接来源 ⇒ pass(连接域问题,交给既有错误路径)', () => {
+    const v = views(
+      { disabledModels: { 'xd:claude-opus-5': true, 'anthropic:claude-opus-5': true } },
+      { xd: false, anthropic: false },
+    );
+    expect(checkModelRoute(v, 'claude-code', 'claude-opus-5', null)).toEqual({ kind: 'pass' });
+  });
+
+  it('供应商级停用与模型级同语义:点名 suspended 来源 reject;默认落点 suspended 且无替代 ⇒ reject', () => {
     expect(
-      checkModelRouteDisabled(
-        views({ disabledProviders: { alpha: true } }),
-        'claude-code',
-        'claude-opus-5',
-        'alpha',
-      ),
-    ).toBe('explicit-source-disabled');
+      checkModelRoute(views({ disabledProviders: { xd: true } }), 'claude-code', 'claude-opus-5', 'xd'),
+    ).toEqual({ kind: 'reject', reason: 'explicit-source-disabled' });
     expect(
-      checkModelRouteDisabled(
-        views({ disabledProviders: { alpha: true, beta: true } }),
+      checkModelRoute(
+        views({ disabledProviders: { xd: true, anthropic: true } }),
         'claude-code',
         'claude-opus-5',
         null,
       ),
-    ).toBe('model-disabled');
-  });
-
-  it('点名来源不提供该模型 ⇒ 放行(交给既有收窄 / preflight)', () => {
-    const v = views({ disabledModels: { 'alpha:claude-opus-5': true } });
-    expect(checkModelRouteDisabled(v, 'claude-code', 'claude-opus-5', 'nonexistent')).toBeNull();
+    ).toEqual({ kind: 'reject', reason: 'model-disabled' });
+    // suspended 默认落点 + 启用替代 ⇒ reroute。
+    expect(
+      checkModelRoute(views({ disabledProviders: { xd: true } }), 'claude-code', 'claude-opus-5', null),
+    ).toEqual({ kind: 'reroute', providerId: 'anthropic' });
   });
 });

@@ -1062,8 +1062,11 @@ export function NewMakerDraftRoute() {
       // bridge 模型(chatgpt/ / xai/)在远程模式不可用(不经本地 compat-proxy),需降级。
       // 非 bridge 模型也必须在已连接的本地来源中存在,否则 SSH 会话首消息会被阻塞。
       const sshConnected = connectedProvidersForAgent(localProviders, capabilityAgentKind);
-      const sshVisibleModels = deriveModelsFromProviders(sshConnected, capabilityAgentKind)
-        .filter((m) => !isSubscriptionDirectModel(m.id));
+      // admissionFiltered:SSH 候选是「挑一个可路由模型」的清单,停用条目与能力模型
+      // 不参与(降级兜底也不能落到停用模型上,PR #744 review)。
+      const sshVisibleModels = deriveModelsFromProviders(sshConnected, capabilityAgentKind, {
+        admissionFiltered: true,
+      }).filter((m) => !isSubscriptionDirectModel(m.id));
       let sshModel = draftInitialModel;
       if (isSubscriptionDirectModel(sshModel) || !sshVisibleModels.some((m) => m.id === sshModel)) {
         if (!sshVisibleModels.length) {

@@ -206,20 +206,23 @@ export function sourcesForModel(
   views: ProviderView[],
   modelId: string,
   agent: AgentKind,
-  opts: { onlyConnected?: boolean } = {},
+  opts: { onlyConnected?: boolean; includeDisabled?: boolean } = {},
 ): ProviderView[] {
   const onlyConnected = opts.onlyConnected ?? true;
-  // suspended 供应商与**该来源下被停用的模型条目**无条件出局:本函数的产出是
+  // suspended 供应商与**该来源下被停用的模型条目**默认出局:本函数的产出是
   // 「可路由来源」(选择器 activeSourceId / effectiveSourceIdForModel / Fast 门控),
   // 停用的那份拷贝即便凭证在场也不允许被路由到 —— 同 id 模型在 A 家停用、B 家
   // 启用时,默认来源解析必须落到 B,而不是继续把 A 当候选(PR #744 review)。
+  // `includeDisabled` 保留停用条目(suspended / model.disabled)—— 给准入守卫
+  // (model-route-guard)推演「不考虑停用时会路由到谁」用,普通消费方不要传。
+  const includeDisabled = opts.includeDisabled === true;
   return views.filter(
     (p) =>
-      !p.suspended &&
+      (includeDisabled || !p.suspended) &&
       (!onlyConnected || p.connected) &&
       hasEnabledAgentRuntime(p, agent) &&
       providerOffersModel(p, modelId, agent) &&
-      getModel(p, modelId, agent)?.disabled !== true,
+      (includeDisabled || getModel(p, modelId, agent)?.disabled !== true),
   );
 }
 

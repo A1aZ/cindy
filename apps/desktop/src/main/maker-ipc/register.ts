@@ -437,7 +437,7 @@ import {
   syncModelVisibilityMirror,
 } from '../maker-host/model-visibility-mirror.js';
 import { setModelsDisabled, setProviderDisabled } from '../maker-host/model-disable-store.js';
-import { checkModelRouteDisabled } from '../maker-host/model-route-guard.js';
+import { checkModelRoute } from '../maker-host/model-route-guard.js';
 import { setClaudeProxySessionIdResolver } from '../maker-host/anthropic-compat-proxy-host.js';
 import {
   clearClaudeSessionBackgroundActivity,
@@ -3966,31 +3966,34 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
    * 导致 Orca MCP 工具 rehydrate 失败），抽 helper 让"漏调"在编译期不可能发生。
    */
   /**
-   * 停用轴的边界拒绝(判定纯逻辑在 model-route-guard.ts,可单测)。目录读取失败按
+   * 停用轴的边界裁决(判定纯逻辑在 model-route-guard.ts,可单测)。
+   * 返回值 = 需要改路由到的启用来源 id(隐式默认落点被停用而有替代拷贝时),
+   * undefined = 照常;停用语义下不可路由则抛 INVALID_PARAMS。目录读取失败按
    * 放行处理:目录不可用时历史行为就是回落 capabilities 继续跑,本守卫只执行停用
    * 语义,不把目录故障升级成会话不可建。allowSideEffects=false —— 这条路径可能由
    * device-link / renderer 驱动,纯读即可(自愈另有主进程业务入口负责)。
    */
-  async function assertModelRouteNotDisabled(
+  async function assertModelRouteUsable(
     agent: AgentKind,
     model: string,
     providerId: string | null,
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     let views: ProviderView[];
     try {
       views = await getDesktopProviderService().listProviders();
     } catch {
-      return;
+      return undefined;
     }
-    const reason = checkModelRouteDisabled(views, agent, model, providerId);
-    if (reason !== null) {
+    const verdict = checkModelRoute(views, agent, model, providerId);
+    if (verdict.kind === 'reject') {
       throwIpcError(
         'INVALID_PARAMS',
-        reason === 'explicit-source-disabled'
+        verdict.reason === 'explicit-source-disabled'
           ? `provider "${providerId}" is disabled for model "${model}" in settings`
           : `model "${model}" is disabled in settings`,
       );
     }
+    return verdict.kind === 'reroute' ? verdict.providerId : undefined;
   }
 
   async function bootstrapSession(o: CreateOpts): Promise<{
@@ -4009,10 +4012,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     await hydrateProviderIdBeforeSessionStart(o);
     // 停用轴准入(PR #744 review):**新建**会话不得路由到用户停用的模型 / 来源。
     // renderer 选择器已过滤,但 create-session 在 device-link allowlist 内,老控制端
-    // 可直接点名 —— main 必须自己拒绝。resume(含跨重启恢复,resumeSessionId 非空)
+    // 可直接点名 —— main 必须自己裁决。resume(含跨重启恢复,resumeSessionId 非空)
     // 不拦:运行中的会话不打断。放在 hydrate 之后,判定的是真实生效的显式来源。
+    // 隐式来源的原生默认落点被停用而有启用替代拷贝时,把会话显式改路由过去(下方
+    // persistAndHydrateSessionProvider 会把它落库):实际路由层对隐式来源走原生
+    // 默认、不查停用标志,仅放行等于继续用停用拷贝付费。
     if (!o.resumeSessionId && typeof o.model === 'string' && o.model) {
-      await assertModelRouteNotDisabled(o.agentKind, o.model, o.providerId ?? null);
+      const reroute = await assertModelRouteUsable(o.agentKind, o.model, o.providerId ?? null);
+      if (reroute && !o.providerId) o.providerId = reroute;
     }
     const session = await maker.createSession(o);
     await markProjectContextIfNeeded(session.id, didInjectProjectContext);
@@ -4259,6 +4266,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
   }
 
   const agentSwitchDeps: MakerSessionAgentSwitchHandlerDeps = {
+    // 停用轴边界裁决:目标路由被停用 → 抛错;隐式默认落点被停用 → 返回启用替代来源。
+    assertModelRouteUsable: (agent, model, providerId) =>
+      assertModelRouteUsable(agent, model, providerId),
     getSessionRow: async (sessionId) => {
       const db = getDbClient().drizzle;
       const [row] = await db
@@ -7179,16 +7189,19 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     // 停用轴准入(PR #744 review):切换模型是一次新的路由选择,不得切到用户停用的
     // 模型 / 来源(本机选择器已过滤,但本 channel 在 device-link allowlist 内,老控制
     // 端可直接点名)。会话当前正用着的停用模型不受影响 —— 这里只拦「切过去」。
-    // agentKind 读不到(会话行缺失等)时不拦,交给既有 no-op / 后续路径。
+    // 隐式来源的原生默认落点被停用而有启用替代拷贝时,以显式来源落地(与
+    // bootstrapSession 同语义)。agentKind 读不到(会话行缺失等)时不拦。
     // DB 存的是 'cc' | 'codex'(messages.agent_kind 口径),目录侧是 AgentKind。
+    let effectiveProviderId = providerId;
     {
       const dbAgentKind = getSessionDbAgentKind(sessionId);
       if (dbAgentKind) {
-        await assertModelRouteNotDisabled(
+        const reroute = await assertModelRouteUsable(
           dbAgentKind === 'cc' ? 'claude-code' : 'codex',
           model,
           typeof providerId === 'string' ? providerId : null,
         );
+        if (reroute && typeof providerId !== 'string') effectiveProviderId = reroute;
       }
     }
     // 与 send 事务共用 session 锁:发送时刻执行的跨引擎切换必须先落定,
@@ -7203,7 +7216,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
             maker,
             sessionId,
             model,
-            providerId,
+            providerId: effectiveProviderId,
             isSessionInTurn,
             registerPendingCredentialSwitch: registerPendingCredentialSwitchForSession,
             clearPendingCredentialSwitch: clearPendingCredentialSwitchForSession,

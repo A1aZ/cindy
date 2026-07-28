@@ -34,6 +34,7 @@ import {
   type Effort,
   type Provider,
   type ProviderView,
+  getModel,
   nativeDefaultSourceId,
 } from '@cindy/model-providers';
 import { toSdkModelString } from '@cindy/maker-core';
@@ -314,15 +315,18 @@ export async function generateTitleViaProvider(
   const readGatewayKey = deps.readGatewayKey ?? readClaudeApiKey;
 
   // Provider 解析:WYSIWYG,与模型选择器高亮同口径。
-  //   1. DB sessions.provider_id(显式选中,race-free)。
+  //   1. DB sessions.provider_id(显式选中,race-free)—— 但必须仍在可路由 rail 里
+  //      (connectedProvidersForAgent 已剔除 suspended 停用供应商):标题 one-shot 是
+  //      一次新的付费调用,停用的来源不给用(PR #744 review);断开的来源本来也会在
+  //      各 wire 的凭证检查处折返,这里提前跳过语义一致。
   //   2. 无显式选 → nativeDefaultSourceId(已连接来源列表,agentKind)。
   //   3. 零已连接来源 → null → 直接跳过(不起智能标题)。
   const explicitFromDb = args.sessionId ? await readSessionProviderId(args.sessionId) : null;
+  const rail = await listConnectedProviders(args.agentKind);
   let providerId: string | null;
   if (explicitFromDb) {
-    providerId = explicitFromDb;
+    providerId = rail.some((p) => p.id === explicitFromDb) ? explicitFromDb : null;
   } else {
-    const rail = await listConnectedProviders(args.agentKind);
     providerId = nativeDefaultSourceId(rail, args.agentKind);
   }
 
@@ -334,6 +338,16 @@ export async function generateTitleViaProvider(
   const target = buildTitleTarget(providerId);
   if (!target) {
     log.debug('title oneShot skipped: no title target', { providerId, agentKind: args.agentKind });
+    return null;
+  }
+  // 标题模型这份拷贝被用户停用 → 跳过(回落启发式起名)。rail 条目带 buildRegistry
+  // 烘焙的 disabled 标志;titleModel 不在该 agent 清单里时(getModel 取不到)不额外拦。
+  const railProvider = rail.find((p) => p.id === providerId);
+  if (railProvider && getModel(railProvider, target.model, args.agentKind)?.disabled === true) {
+    log.debug('title oneShot skipped: title model disabled in settings', {
+      providerId,
+      model: target.model,
+    });
     return null;
   }
 

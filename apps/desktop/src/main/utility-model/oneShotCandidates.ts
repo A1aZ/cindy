@@ -13,6 +13,8 @@ import { readCachedGenericOAuthAccessToken } from '../maker-host/generic-oauth.j
 import { outboundUndiciFetch as undiciFetch } from '../maker-host/outbound-fetch.js';
 import { claudeUpstreamEndpoint } from '../maker-host/runtime-configs.js';
 import { getActiveCatalog } from '../maker-host/active-catalog.js';
+import { readModelDisableOverrides } from '../maker-host/model-disable-store.js';
+import { isModelDisabled, isProviderDisabled } from '@cindy/model-providers';
 import { isProviderRouteMutationInProgress } from '../maker-host/provider-route.js';
 import { effectiveXdGatewayBaseUrl } from '../model-access/effectiveEndpoint.js';
 import { readCustomProviderKey } from '../secrets/providerSecretStore.js';
@@ -89,7 +91,21 @@ async function resolveUtilityTextCandidates(
   const profiles = getUtilityModelChainProfiles();
   const candidates: UtilityTextCandidate[] = [];
   const attempts: UtilityTextAttempt[] = [];
+  // 停用轴同样约束 utility one-shot(帮助/摘要/hook 生成):停用的供应商或模型
+  // 不再作为候选付费下单,链路自然落到下一个候选(PR #744 review)。
+  const disableOverrides = readModelDisableOverrides();
   for (const profile of profiles) {
+    if (
+      isProviderDisabled(disableOverrides, profile.id) ||
+      isModelDisabled(disableOverrides, profile.id, profile.model)
+    ) {
+      log.debug('utility text candidate skipped: disabled in settings', {
+        providerId: profile.id,
+        model: profile.model,
+      });
+      attempts.push(skippedAttempt(profile, 'model_unavailable'));
+      continue;
+    }
     if (!capability.transports.includes(profile.transport)) {
       log.debug('utility text candidate skipped: unsupported transport', {
         providerId: profile.id,
@@ -125,6 +141,20 @@ export async function requestUtilityText(
   const explicitProviderId = opts?.providerId?.trim()
     || inferUniqueProviderId(opts?.agentKind, opts?.model);
   if (explicitProviderId) {
+    // 停用轴:显式点名的 (来源, 模型) 被停用 → fail closed,不派发也不落到
+    // 无关的 XD utility fallback chain(与会话路由边界同语义,PR #744 review)。
+    const disableOverrides = readModelDisableOverrides();
+    const explicitModel = opts?.model?.trim();
+    if (
+      isProviderDisabled(disableOverrides, explicitProviderId) ||
+      (explicitModel && isModelDisabled(disableOverrides, explicitProviderId, explicitModel))
+    ) {
+      log.warn('utility text route disabled in settings', {
+        providerId: explicitProviderId,
+        model: explicitModel ?? null,
+      });
+      return { ok: false, reason: 'no_candidate', attempts: [] };
+    }
     return requestExplicitProviderText(prompt, {
       ...opts,
       providerId: explicitProviderId,
@@ -150,8 +180,13 @@ export async function requestUtilityText(
 function inferUniqueProviderId(agentKind: AgentKind | undefined, model: string | undefined): string | undefined {
   const normalizedModel = model?.trim();
   if (!agentKind || !normalizedModel) return undefined;
+  // 停用的 (来源, 模型) 不参与推断:被推断出来也会在派发前被 fail closed,
+  // 提前剔除让「另一家启用的来源」仍能保住所选路由。
+  const disableOverrides = readModelDisableOverrides();
   const matches = getActiveCatalog().providers.filter((provider) =>
     provider.agents.includes(agentKind)
+    && !isProviderDisabled(disableOverrides, provider.id)
+    && !isModelDisabled(disableOverrides, provider.id, normalizedModel)
     && (provider.models[agentKind] ?? []).some((candidate) => candidate.id === normalizedModel),
   );
   const nonXd = matches.filter((provider) => provider.id !== 'xd');
@@ -929,6 +964,7 @@ function skippedAttempt(
   reason: Extract<UtilityTextAttemptReason,
     | 'unsupported_transport'
     | 'agent_unavailable'
+    | 'model_unavailable'
     | 'not_authenticated'
     | 'auth_probe_failed'
     | 'api_key_missing'

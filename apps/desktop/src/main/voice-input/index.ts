@@ -314,9 +314,9 @@ export async function adviseAndRecordVoiceInputDictionaryLearning(
   }
 
   const sourceLabel = options.sourceLabel ?? payload.source ?? 'in_app';
-  // 锚点必须在任何 await 之前取：请求到达 main 的顺序与浮窗发布证据的顺序一致，
-  // 在这里绑定就等于「这次请求认自己那次会话的浮窗现场」；等 advisor 返回后再取，
-  // 并发请求会互相抢到别人的锚点。跳过分支也要取走，否则它会留给下一次请求。
+  // 锚点必须在任何 await 之前取：此刻的呈现代次才代表这次请求的来源会话，绑定后
+  // 无论 advisor 何时返回都只认自己那份。等 advisor 返回后再取，并发请求会互相抢。
+  // 跳过分支同样取走，让过期锚点尽早出队。
   const toastAnchor = sourceLabel === 'external_overlay'
     ? takeOverlayDictionaryToastAnchor()
     : null;

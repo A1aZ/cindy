@@ -242,20 +242,18 @@ let overlayDragSession: { startBounds: Rectangle; startCursor: Point } | null = 
 // 最近一次「浮窗真正呈现在哪」的 bounds。浮窗 hide 后会被停到屏幕外，实时
 // bounds 不能当锚点，全局浮窗路径的词典 toast 靠这份记录跟到同一块屏、同一位置。
 let lastPresentedOverlayBounds: Rectangle | null = null;
-// 从「发布证据」交棒给「显示 toast」的锚点队列，先进先出、一次性消费。
+// 从「发布证据」交棒给「显示 toast」的锚点队列，一次性消费。
 //
 // 快照是在粘贴开始前拍的（见 pasteTextToFocusedTarget）：那才是产生这条听写的浮窗
 // 现场。之后的粘贴 await、延迟轮询、模型往返期间用户都可能开新会话，锚点必须跟着
 // 来源会话走，并在显示时用呈现代次复核，否则旧会话的 toast 会盖在新浮窗上。
 //
-// 为什么 FIFO 队列就够、不需要给每条证据编 ID：renderer 收到证据会立刻发起 advisor
-// 请求，所以**请求到达 main 的顺序 == 证据发布顺序**；并发只发生在 advisor 的响应上。
-// main 在请求到达时（await 之前）就把队首锚点绑给这次请求，之后谁先返回都不会串台，
-// 内容相同的两次修正也不会互相覆盖。
+// 为什么不需要给每条证据编 ID：锚点的身份就是它的呈现代次。代次变过的锚点对任何
+// 请求都无效（那正是「期间又开过浮窗」），所以取用时直接丢弃过期的、拿代次仍匹配
+// 的那个——见 takeOverlayDictionaryToastAnchor()。
 const pendingDictionaryToastAnchors: DictionaryToastAnchor[] = [];
 // 队列只用于「刚发布、还没出 toast」的证据。renderer 侧若因功能开关未发起 advisor，
-// 对应锚点不会被取走，所以设上限丢最旧，避免无界增长；残留的旧锚点也过不了呈现代次
-// 复核，只会退化成默认位置。
+// 对应锚点不会被取走，所以设上限丢最旧，避免无界增长。
 const DICTIONARY_TOAST_ANCHOR_MAX_ENTRIES = 8;
 // 浮窗呈现代次。焦点屏查询是异步的，它的回调必须能认出「这次呈现还算不算数」：
 // 会话被取消（hide / 复位到 idle）或已经开始了新一次呈现时，迟到的回调不得再
@@ -2557,14 +2555,24 @@ function captureOverlayToastAnchor(): DictionaryToastAnchor | null {
 }
 
 /**
- * 取走队首的浮窗 toast 锚点，绑定给「这一次」词典建议请求。
+ * 取走属于「当前这次浮窗呈现」的 toast 锚点，绑定给这一次词典建议请求。
  *
- * 必须在建议请求刚到达、任何 await 之前调用：那时的到达顺序与证据发布顺序一致，
- * 绑定之后无论哪个请求先返回都不会拿到别人的锚点，内容相同的两次修正也不会互相
- * 覆盖。应用内听写不要调用它。
+ * 身份靠呈现代次，不靠队列位置：代次已经变过的锚点无论给谁都过不了
+ * resolveDictionaryToastAnchorBounds() 的复核（那正是「期间又开过浮窗」的定义），
+ * 所以这里遇到就直接丢弃，继续找代次仍匹配的那个。这样两种情况都不会错位：
+ * - 旧会话的建议迟到（此时已开过新浮窗）→ 它的锚点已过期，取不到，走默认位置；
+ * - renderer 因功能开关没发起请求，锚点留在队列里 → 下次请求会把它当过期丢掉，
+ *   拿到自己那份，不会一直错位一格。
+ *
+ * 必须在请求刚到达、任何 await 之前调用（代次此刻才代表这次请求的来源会话）。
+ * 应用内听写不要调用它。
  */
 export function takeOverlayDictionaryToastAnchor(): DictionaryToastAnchor | null {
-  return pendingDictionaryToastAnchors.shift() ?? null;
+  while (pendingDictionaryToastAnchors.length > 0) {
+    const candidate = pendingDictionaryToastAnchors.shift();
+    if (candidate && candidate.presentationSeq === overlayPresentationSeq) return candidate;
+  }
+  return null;
 }
 
 // Length-only summary for normal diagnostics. Full text debug is isolated in

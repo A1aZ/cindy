@@ -3336,6 +3336,7 @@
         "browser": "Browser",
         "terminal": "Terminal",
         "review": "Review",
+        "backgroundTasks": "Background tasks",
         "collaboration": "Team",
         "unknown": "Unknown tab",
         "ghostPanel": "Plugin panel"
@@ -3359,6 +3360,8 @@
         "fileSub": "Files",
         "openReview": "Open review",
         "reviewSub": "Review",
+        "openBackgroundTasks": "Open background tasks",
+        "backgroundTasksSub": "Background tasks",
         "openBrowser": "Open browser",
         "browserSub": "Browser",
         "openTerminal": "Open terminal",
@@ -3720,6 +3723,16 @@
       "touchCountAria_other": "Edited {{count}} times",
       "expandAllAria": "Expand all files",
       "collapseAllAria": "Collapse all files"
+    },
+    "backgroundTasks": {
+      "running": "Running",
+      "completed": "Completed",
+      "empty": "No background tasks in this session yet",
+      "stop": "Stop",
+      "back": "Back",
+      "progressSummary": "{{done}}/{{total}} agents",
+      "tokens": "{{value}} tokens",
+      "noProgress": "No progress details yet"
     }
   },
   "update": {
@@ -4030,7 +4043,14 @@
       "trigger": {
         "placeholder": "Select model",
         "aria": "Select model. Current: {{model}}",
-        "ariaWithEffort": "Select model. Current: {{model}}, effort: {{effort}}"
+        "ariaWithEffort": "Select model. Current: {{model}}, effort: {{effort}}",
+        "pendingAria": "Select model. Next message: {{agent}} · {{model}}",
+        "pendingAriaWithEffort": "Select model. Next message: {{agent}} · {{model}}, effort: {{effort}}",
+        "agent": {
+          "claudeCode": "Claude Code",
+          "codex": "Codex",
+          "pending": "Next: {{agent}}"
+        }
       },
       "category": {
         "anthropic": "Anthropic",
@@ -4444,6 +4464,9 @@
         "stopped": "Stopped"
       },
       "stop": "Stop this task",
+      "openInPanel": "Open in the background tasks panel",
+      "workflowProgressLine": "{{phase}} · {{done}}/{{total}} agents",
+      "workflowProgressCount": "{{done}}/{{total}} agents",
       "tokens": "{{count}} tokens",
       "toolUses_one": "{{count}} tool use",
       "toolUses_other": "{{count}} tool uses",
@@ -5000,13 +5023,19 @@
     "workflowTree": {
       "agentsCount": "{{count}} agents",
       "attempt": "attempt {{count}}",
+      "endedEarly": "Ended before completion",
       "state": {
         "queued": "Queued",
+        "pending": "Pending",
+        "start": "Starting",
         "running": "Running",
+        "progress": "Running",
         "done": "Done",
         "completed": "Completed",
         "failed": "Failed",
-        "stopped": "Stopped"
+        "error": "Failed",
+        "stopped": "Stopped",
+        "killed": "Killed"
       }
     },
     "credentialSwitchWait": {
@@ -7290,11 +7319,6 @@
     },
     "hub": {
       "learnButton": "Learn this skill"
-    }
-  },
-  "workflows": {
-    "toast": {
-      "none": "No workflow is running in this session"
     }
   },
   "planMode": {

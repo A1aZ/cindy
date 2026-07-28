@@ -5521,6 +5521,11 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
       }
     }
   })();
+  // 显式挂一个吞掉的 rejection handler:返回的 promise 语义不变(仍然会 reject,需要的调用方照样
+  // 能 await 到),但 Node / renderer 不再把它当成 unhandled rejection —— 绝大多数调用方是
+  // `void makerChatStore.reconcileRemoteMessages(...)` 这种 fire-and-forget(#676 review copilot)。
+  // 旧实现靠 `run.then(onOk, onErr)` 顺带完成了这件事,单飞包装接手后必须自己补上。
+  void entry.run.catch(() => undefined);
   return entry.run;
 }
 

@@ -631,6 +631,24 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     expect(invoke).not.toHaveBeenCalledWith(DEVICE_ID, 'local-db:messages:list', expect.anything());
   });
 
+  it('远程会话:fire-and-forget 调用不产生 unhandled rejection(请求失败时)', async () => {
+    // review #676(copilot):单飞包装返回的是 entry.run,旧实现靠 run.then(onOk, onErr) 顺带把
+    // rejection 标记为已处理。包装接手后必须自己挂 —— 否则隧道断链时 `void reconcile...` 这种
+    // fire-and-forget 调用会冒出 unhandled rejection(vitest 会因此整个文件失败)。
+    const s = sid();
+    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
+    remoteListResolver = () => Promise.reject(new Error('tunnel down'));
+
+    // 故意不 catch,复刻 useRemoteSessionSync 的调用形态。
+    void makerChatStore.reconcileRemoteMessages(s);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    // 窗口不受影响(失败什么都不落地)。
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual(['client-seed']);
+    // 需要的调用方仍能 await 到 rejection —— 语义没被吞掉。
+    await expect(makerChatStore.reconcileRemoteMessages(s)).rejects.toThrow('tunnel down');
+  });
+
   it('远程会话:同一会话不并发对账 —— 第二次触发被合并,收尾后补跑一次', async () => {
     // review #676(codex P1 连着七八轮):两次对账重叠会长出一整族只有并发才成立的错况
     // (旧那次拿过期 existingIds 覆盖新窗口、陈旧快照 hydrate 更新的行、bump 代际抢别人的分页锁、

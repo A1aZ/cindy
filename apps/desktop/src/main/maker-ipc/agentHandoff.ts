@@ -467,7 +467,7 @@ function assembleHandoffText(
  * 不提分叉点。
  */
 export function buildForkOriginHandoff(parentSessionId: string): string {
-  return `${forkOriginFactLine(parentSessionId)}\n\n== End of fork note; the user's new message follows ==`;
+  return `${forkOriginFactLine(parentSessionId)}\n\n${FORK_TERMINATOR}`;
 }
 
 function forkOriginFactLine(parentSessionId: string): string {
@@ -546,6 +546,16 @@ export interface AgentHandoffPendingRegistry {
   consume(sessionId: string): void;
   /** session 删除 / 关闭清理,避免 Map 泄漏。 */
   clear(sessionId: string): void;
+  /**
+   * 墓碑式失效:留下 null 条目,后续 peek 直接返回 null,**不回落 DB**。
+   *
+   * 给 `/clear` 用。本地 `/clear` 的 `cleared_at` 是 renderer 侧 fire-and-forget 写入
+   * 的(main 只在 device-link 远程调用时自己落库),handler 返回到那次写入提交之间有
+   * 个窗口;若此刻用 `clear()` 删掉条目,恰好撞上 hook / scheduler 等直发路径的 send,
+   * peek 会回落到**尚未更新 cleared_at** 的 DB 行,把旧交接重建出来并缓存,而后来的
+   * DB 更新不会让那份缓存失效。留墓碑就没有这个窗口——真有新交接时 `set()` 会覆盖它。
+   */
+  invalidate(sessionId: string): void;
 }
 
 export function createAgentHandoffPendingRegistry(
@@ -630,6 +640,11 @@ export function createAgentHandoffPendingRegistry(
     },
     clear(sessionId) {
       pending.delete(sessionId);
+      composedByQuery.delete(sessionId);
+      bump(sessionId);
+    },
+    invalidate(sessionId) {
+      pending.set(sessionId, null);
       composedByQuery.delete(sessionId);
       bump(sessionId);
     },

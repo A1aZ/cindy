@@ -1496,14 +1496,15 @@ export async function findPendingAgentHandoff(sessionId: string): Promise<string
  * 查 fork 出的子会话是否还欠一条「来源标记」——返回父会话 id,不欠则 null。
  *
  * 判定"子会话是否已经自己跑过一轮",两个信号取**或**——单用任一个都有整条引擎
- * 线失效:
- *  1. `total_token_usage > 0`:fork 建会话时显式 reset 为 0。但只有 Codex 会累加
- *     (recordSessionTurnTokens 的唯一调用点在 register.ts 的
- *     `event.source === 'codex'` done 分支),Claude 会话这列恒为 0;
- *  2. 存在 `createdAt >= session.createdAt` 的 assistant 行:引擎无关,补齐 Claude。
+ * 线失效。按代码里的判定顺序:
+ *  1. 存在未 rewind 的 assistant 行(`createdAt >= session.createdAt`):引擎无关的
+ *     主信号,带 rewind_at 过滤,所以回滚掉首个 post-fork turn 后会自动失效;
+ *  2. `total_token_usage > 0` **且**存在未 rewind 的 user 行:Codex 补充——Claude
+ *     完成路径不累加该列(recordSessionTurnTokens 的唯一调用点在 register.ts 的
+ *     `event.source === 'codex'` done 分支),而 token 计数不随 rewind 回退,所以必须
+ *     搭配一条仍存活的 user 行才作数。
  *
- * 精度边界(全部只发生在信号二上,且方向不同,故意如此排序——信号一先判,能挡掉
- * Codex 侧的全部边角):
+ * 精度边界(都落在信号一的时间戳比较上,方向不同):
  *  - **漏注入一次**:外部导入的会话里 createdAt 是**合成**的,importer 故意写
  *    `createdAt + sequence`(claude-local-sessions.ts)与 `timestamp + lineNo`
  *    (codex-local-sessions.ts)来强制行序,长 transcript 的末尾行能超出真实墙钟

@@ -292,6 +292,22 @@ describe('createAgentHandoffPendingRegistry', () => {
     expect(await reg.peek('s1')).toBe('FORK\n\nSWITCH-HANDOFF');
   });
 
+  it('invalidate 留墓碑:后续 peek 直接返回 null,不回落 DB(/clear 的 cleared_at 尚未落库)', async () => {
+    const query = vi.fn(async () => 'FROM-DB-PRE-CLEAR');
+    const reg = createAgentHandoffPendingRegistry(query);
+    reg.set('s1', 'H');
+    reg.invalidate('s1');
+    expect(await reg.peek('s1')).toBeNull();
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('invalidate 之后的 set 可以覆盖墓碑(clear 后又切引擎)', async () => {
+    const reg = createAgentHandoffPendingRegistry(async () => null);
+    reg.invalidate('s1');
+    reg.set('s1', 'NEW-SWITCH-HANDOFF');
+    expect(await reg.peek('s1')).toBe('NEW-SWITCH-HANDOFF');
+  });
+
   it('decorate 抛错期间发生 /clear:不退回已作废的交接', async () => {
     let reg: ReturnType<typeof createAgentHandoffPendingRegistry>;
     const decorate = vi.fn(async () => {

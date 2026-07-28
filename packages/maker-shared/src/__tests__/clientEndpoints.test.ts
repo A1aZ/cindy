@@ -8,6 +8,12 @@ import {
 
 const VALID_MANIFEST = {
   schemaVersion: 1,
+  region: 'cn',
+  crossRealmOrgLoginEnabled: true,
+  realmManifestBaseUrls: {
+    cn: 'https://hotfix.cindy.com.cn/cindy',
+    global: 'https://hotfix.cindy.app/cindy',
+  },
   apiBaseUrl: 'https://api.example.com',
   authApiBaseUrl: 'https://auth.example.com',
   authDesktopCallbackUrl: 'https://auth.example.com/api/auth/desktop/callback',
@@ -36,7 +42,71 @@ describe('parseClientEndpointManifest(字段可按 region 缺省)', () => {
     if (!result.ok) throw new Error('unreachable');
     expect(result.endpoints.authApiBaseUrl).toBe('https://auth.example.com');
     expect(result.endpoints.slackHookWsUrl).toBe('wss://slack-hook.example.com');
+    expect(result.region).toBe('cn');
+    expect(result.crossRealmOrgLoginEnabled).toBe(true);
+    expect(result.realmManifestBaseUrls?.global).toBe('https://hotfix.cindy.app/cindy');
     expect(Object.keys(result.endpoints).sort()).toEqual([...CLIENT_ENDPOINT_KEYS].sort());
+  });
+
+  it('老清单缺少跨区域元数据时保持兼容并关闭能力', () => {
+    const legacy: Record<string, unknown> = { ...VALID_MANIFEST };
+    delete legacy.region;
+    delete legacy.crossRealmOrgLoginEnabled;
+    delete legacy.realmManifestBaseUrls;
+    const result = parseClientEndpointManifest(JSON.stringify(legacy));
+    expect(result).toMatchObject({
+      ok: true,
+      region: null,
+      crossRealmOrgLoginEnabled: false,
+      realmManifestBaseUrls: null,
+    });
+  });
+
+  it.each([
+    [
+      '区域非法',
+      { region: 'us' },
+      undefined,
+      'invalid-field:region',
+    ],
+    [
+      '开关非 boolean',
+      { crossRealmOrgLoginEnabled: 'true' },
+      undefined,
+      'invalid-field:crossRealmOrgLoginEnabled',
+    ],
+    [
+      '区域清单基址必须 https',
+      {
+        realmManifestBaseUrls: {
+          cn: 'http://hotfix.cindy.com.cn/cindy',
+          global: 'https://hotfix.cindy.app/cindy',
+        },
+      },
+      undefined,
+      'invalid-protocol:realmManifestBaseUrls.cn',
+    ],
+    [
+      '期望区域不匹配',
+      { region: 'global' },
+      { expectedRegion: 'cn' as const },
+      'region-mismatch:cn:global',
+    ],
+  ])('拒绝跨区域元数据配置错误：%s', (_label, patch, options, reason) => {
+    expect(
+      parseClientEndpointManifest(JSON.stringify({ ...VALID_MANIFEST, ...patch }), options),
+    ).toEqual({ ok: false, reason });
+  });
+
+  it('开关打开时必须同时提供 region 与双区域清单基址', () => {
+    expect(
+      parseClientEndpointManifest(
+        JSON.stringify({
+          ...VALID_MANIFEST,
+          realmManifestBaseUrls: undefined,
+        }),
+      ),
+    ).toEqual({ ok: false, reason: 'incomplete-cross-realm-config' });
   });
 
   it('忽略未知字段(向前兼容)', () => {

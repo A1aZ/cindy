@@ -13,7 +13,7 @@ describe('auth weak-network bootstrap', () => {
 
   it('bootstrap 先用本地会话痕迹(refresh token + 用户快照)恢复登录视图', () => {
     // 快照恢复必须双条件:refresh token 还在 + 有缓存资料;二者缺一不得凭空造登录态。
-    expect(authSource).toContain('if (storedRefreshToken && cachedUser) {');
+    expect(authSource).toContain('if (storedSession && cachedUser) {');
     expect(authSource).toContain('userRef.current = cachedUser;');
     expect(authSource).toContain('setUser(cachedUser);');
     // bootstrap 里的 refresh 失败必须是"保留降级会话",不许再出现坍缩式 .catch(() => null)。
@@ -42,15 +42,14 @@ describe('auth weak-network bootstrap', () => {
     // 判定凭证是否存在,只能继续退避,绝不能据此 applyUser(null) 误登出。
     const healStart = authSource.indexOf('// 降级会话自愈');
     const healBody = authSource.slice(healStart, authSource.indexOf('}, [accessToken, applyUser', healStart));
-    expect(healBody).toContain('storedRefreshToken = await getSecureItem(REFRESH_TOKEN_KEY);');
-    expect(healBody).not.toContain('getSecureItem(REFRESH_TOKEN_KEY).catch(() => null)');
+    expect(healBody).toContain('storedSession = await readPersistedAuthSession();');
     // 读取异常分支:只 scheduleNext,不 applyUser(null)
-    const catchStart = healBody.indexOf('} catch {', healBody.indexOf('storedRefreshToken = await getSecureItem'));
+    const catchStart = healBody.indexOf('} catch {', healBody.indexOf('storedSession = await'));
     const catchBody = healBody.slice(catchStart, healBody.indexOf('}', catchStart + 10) + 1);
     expect(catchBody).toContain('scheduleNext();');
     expect(catchBody).not.toContain('applyUser(null)');
     // 成功读到空值才登出收敛
-    expect(healBody).toContain('if (!storedRefreshToken) {');
+    expect(healBody).toContain('if (!storedSession) {');
     expect(healBody).toContain('applyUser(null);');
   });
 

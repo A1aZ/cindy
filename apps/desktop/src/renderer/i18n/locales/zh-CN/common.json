@@ -3009,6 +3009,12 @@
     "ssoOrgPlaceholder": "请输入企业 ID、slug 或域名",
     "ssoOrgHint": "不知道企业登录标识？请联系企业管理员",
     "ssoOrgDetected": "选择企业「{{org}}」的单点登录方式",
+    "realmConsent": {
+      "title": "确认企业登录区域",
+      "body": "Cindy 将把你输入的企业 ID 或域名发送到中国大陆和国际登录服务。登录后，组织数据与服务请求将使用组织所在区域；当前安装版本和更新通道不会改变。",
+      "agree": "继续企业登录",
+      "disagree": "取消企业登录"
+    },
     "ssoVerificationTitle": "验证企业联系方式",
     "ssoVerificationSubtitle": "首次登录需要验证身份提供方返回的联系方式 {{target}}",
     "enterCode": "输入验证码",
@@ -3057,6 +3063,8 @@
       "RATE_LIMITED": "操作过于频繁，请稍后再试",
       "SSO_LOGIN_REQUIRED": "该邮箱所属企业要求通过 SSO 登录",
       "ORG_SSO_NOT_FOUND": "未找到该企业，或该企业未启用 SSO 登录",
+      "ORG_REALM_AMBIGUOUS": "该企业标识同时存在于两个区域，请联系企业管理员处理",
+      "ORG_REALM_UNAVAILABLE": "暂时无法确认企业所在区域，请检查网络后重试",
       "SSO_EMAIL_REQUIRED": "该企业身份未提供有效邮箱，请联系企业管理员检查 IdP 配置",
       "INVALID_SSO_VERIFICATION_TICKET": "企业身份验证已过期，请重新发起 SSO 登录",
       "SOCIAL_TOKEN_INVALID": "第三方授权已失效，请重试",

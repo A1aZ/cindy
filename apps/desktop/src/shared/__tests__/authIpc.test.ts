@@ -34,6 +34,7 @@ describe('desktop auth IPC validation', () => {
       parseDesktopLoginAction({
         type: 'discover-sso-org',
         org: 'a'.repeat(254),
+        crossRegionConsent: true,
       }),
     ).toBeNull();
     expect(parseDesktopLoginAction({ type: 'discover-sso-org', org: '' })).toBeNull();
@@ -49,9 +50,17 @@ describe('desktop auth IPC validation', () => {
       parseDesktopLoginAction({
         type: 'discover-sso-org',
         org: `${'a'.repeat(64)}.example.com`,
+        crossRegionConsent: true,
         extra: 'x',
       }),
-    ).toEqual({ type: 'discover-sso-org', org: `${'a'.repeat(64)}.example.com` });
+    ).toEqual({
+      type: 'discover-sso-org',
+      org: `${'a'.repeat(64)}.example.com`,
+      crossRegionConsent: true,
+    });
+    expect(
+      parseDesktopLoginAction({ type: 'discover-sso-org', org: 'corp' }),
+    ).toBeNull();
     expect(
       parseDesktopLoginAction({
         type: 'request-code',

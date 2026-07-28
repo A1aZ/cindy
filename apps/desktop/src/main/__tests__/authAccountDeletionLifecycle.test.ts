@@ -14,21 +14,42 @@ describe('desktop auth account-deletion lifecycle', () => {
     const end = source.indexOf('\n}\n\n/**\n * Confirm deletion', start);
     const body = source.slice(start, end);
 
-    expect(body).toContain('writeSafe(ACCOUNT_DELETION_RECEIPT_KEY, challenge.receiptToken)');
-    expect(body.indexOf('writeSafe(')).toBeLessThan(body.indexOf('return {'));
+    expect(body).toContain('writePersistedAccountDeletionReceipt(challenge.receiptToken)');
+    expect(body.indexOf('writePersistedAccountDeletionReceipt(')).toBeLessThan(
+      body.indexOf('return {'),
+    );
     expect(body).not.toContain('receiptToken: challenge.receiptToken');
   });
 
-  it('recovers an ambiguous confirm through receipt status before local logout', () => {
+  it('recovers an ambiguous confirm through the receipt realm before local logout', () => {
     const start = source.indexOf('export async function confirmAccountDeletion(');
     const end = source.indexOf('\n}\n\n/** Query the persisted receipt', start);
     const body = source.slice(start, end);
 
     expect(body).toContain("['NETWORK_ERROR', 'REQUEST_TIMEOUT', 'INVALID_RESPONSE']");
-    expect(body).toContain('client.getAccountDeletionStatus(receiptToken)');
+    expect(body).toContain('const client = createAuthClient(receipt.realm);');
+    expect(body).toContain('.getAccountDeletionStatus(receipt.receiptToken)');
     expect(body).toContain("recovered.status === 'cancelled'");
     expect(body).toContain('commitAccountDeletionConfirmation(expectedIdentity, status)');
     expect(body).not.toContain("apiFetch('/api/auth/logout'");
+  });
+
+  it('queries a persisted deletion receipt against its original realm after logout', () => {
+    const helperStart = source.indexOf('function writePersistedAccountDeletionReceipt(');
+    const helperEnd = source.indexOf('\n}\n\n// ── PKCE', helperStart);
+    const helperBody = source.slice(helperStart, helperEnd);
+    expect(helperBody).toContain('serializeAccountDeletionReceiptRecord(realm, receiptToken)');
+
+    const statusStart = source.indexOf('export async function getAccountDeletionStatus()');
+    const statusEnd = source.indexOf(
+      '\n}\n\nexport function clearAccountDeletionReceipt',
+      statusStart,
+    );
+    const statusBody = source.slice(statusStart, statusEnd);
+    expect(statusBody).toContain('await loadClientEndpointsForRealm(receipt.realm);');
+    expect(statusBody).toContain(
+      'createAuthClient(receipt.realm).getAccountDeletionStatus(receipt.receiptToken)',
+    );
   });
 
   it('preserves a confirmed receipt on local clear but drops it on ordinary logout', () => {
@@ -103,8 +124,20 @@ describe('desktop auth account-deletion lifecycle', () => {
 
     expect(helperBody).toContain("error.code === 'ACCOUNT_UNAVAILABLE'");
     expect(helperBody).toContain("void invalidateSession('account-unavailable')");
-    expect(source).toContain(
-      'return runProtectedAuthRequest(() =>\n    createAuthClient().getAccountDeletionAvailability(token)',
+    const availabilityStart = source.indexOf(
+      'export function getAccountDeletionAvailability()',
+    );
+    const availabilityEnd = source.indexOf(
+      '\n}\n\n/**\n * Request an OTP',
+      availabilityStart,
+    );
+    const availabilityBody = source.slice(
+      availabilityStart,
+      availabilityEnd,
+    );
+    expect(availabilityBody).toContain('return runProtectedAuthRequest(() =>');
+    expect(availabilityBody).toContain(
+      'createAuthClient().getAccountDeletionAvailability(token)',
     );
   });
 });

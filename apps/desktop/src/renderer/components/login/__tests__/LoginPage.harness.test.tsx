@@ -261,7 +261,7 @@ describe('ssoOrgMode 子视图', () => {
     expect(screen.getByText('login.ssoOrgHint')).toBeTruthy();
   });
 
-  it('sso-org 填写态:输入企业 ID 后继续可用,提交派发 discover-sso-org', async () => {
+  it('sso-org 填写态:跨区说明确认后才派发 discover-sso-org', async () => {
     mount(await identifierState('providers:both'));
     fireEvent.click(screen.getByTestId('login-social-sso'));
     const input = screen.getByTestId('login-sso-org-input') as HTMLInputElement;
@@ -269,9 +269,13 @@ describe('ssoOrgMode 子视图', () => {
     const continueBtn = screen.getByTestId('login-sso-org-continue') as HTMLButtonElement;
     expect(continueBtn.disabled).toBe(false);
     fireEvent.click(continueBtn);
+    expect(loginHook.value.dispatch).not.toHaveBeenCalled();
+    expect(screen.getByText('login.realmConsent.body')).toBeTruthy();
+    fireEvent.click(screen.getByText('login.realmConsent.agree'));
     expect(loginHook.value.dispatch).toHaveBeenCalledWith({
       type: 'discover-sso-org',
       org: 'example-corp',
+      crossRegionConsent: true,
     });
   });
 

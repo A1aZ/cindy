@@ -69,8 +69,8 @@ export const CLIENT_ENDPOINT_KEYS = [
   // SlackIM→slack-hook / GitHub 反馈→githubApiBaseUrl / Skillhub→
   // skillhubApiBaseUrl)。退役时清单体系尚无已发布的 packaged/mobile 消费者,
   // 正本(=CDN 上传源)已同步删值,无兼容包袱(同 cdnInternalBaseUrl 先例)。
-  // auth 不分 cn/global:国内/海外是两条 CDN 各发各的清单,清单本身已 region 化,
-  // 客户端无脑取本字段即可。
+  // 每份清单只描述自身 region 的 auth/业务端点。默认会话读取构建清单；
+  // 跨区域组织登录会先加载目标 region 清单，再整体切换 token 消费端点。
   'authApiBaseUrl',
   // desktop 系统浏览器登录的**服务端托管回调**地址(auth-server 路由,精确值需与
   // 服务端 redirect_uri allowlist 逐字符一致)。非空 = 走托管回调链路:回调页停在
@@ -113,6 +113,13 @@ export type ClientEndpointKey = (typeof CLIENT_ENDPOINT_KEYS)[number];
 
 /** 解析成功后的端点全集(全 key 存在;清单缺失/空白的字段值为 `''`)。 */
 export type ClientEndpointMap = Record<ClientEndpointKey, string>;
+
+/** auth-server 的物理部署区域；与 App 包体的品牌/更新区域是两个独立概念。 */
+export type ClientEndpointRegion = 'cn' | 'global';
+
+export type RealmManifestBaseUrls = Readonly<
+  Record<ClientEndpointRegion, string>
+>;
 
 /**
  * 可选字符串字段:`review` = 手机版审核模式的**送审版本号**(App 审核期间填
@@ -162,6 +169,8 @@ const FIELD_PROTOCOLS: Record<ClientEndpointKey, readonly string[]> = {
 export interface ParseClientEndpointManifestOptions {
   /** true 时 https-only 字段追加接受 http:、wss 字段追加 ws:(localhost 场景)。 */
   allowHttp?: boolean;
+  /** 加载指定区域的清单时必须提供；清单自报区域不一致或缺失会整份拒绝。 */
+  expectedRegion?: ClientEndpointRegion;
 }
 
 // 去尾部斜杠。不用 /\/+$/ 正则——超长 '/' 串上会 O(n²) 回溯(CodeQL js/polynomial-redos)。
@@ -171,7 +180,10 @@ function trimTrailingSlashes(s: string): string {
   return s.slice(0, end);
 }
 
-function allowedProtocols(key: ClientEndpointKey, allowHttp: boolean): readonly string[] {
+function allowedProtocols(
+  key: ClientEndpointKey,
+  allowHttp: boolean,
+): readonly string[] {
   const base = FIELD_PROTOCOLS[key];
   if (!allowHttp) return base;
   const relaxed = [...base];
@@ -181,8 +193,52 @@ function allowedProtocols(key: ClientEndpointKey, allowHttp: boolean): readonly 
 }
 
 export type ParseClientEndpointManifestResult =
-  | { ok: true; endpoints: ClientEndpointMap; reviewVersion: string | null }
+  | {
+      ok: true;
+      endpoints: ClientEndpointMap;
+      reviewVersion: string | null;
+      /** 老清单缺字段时为 null；跨区域组织登录因此保持关闭。 */
+      region: ClientEndpointRegion | null;
+      crossRealmOrgLoginEnabled: boolean;
+      realmManifestBaseUrls: RealmManifestBaseUrls | null;
+    }
   | { ok: false; reason: string };
+
+function parseManifestBaseUrl(
+  raw: unknown,
+  key: ClientEndpointRegion,
+  allowHttp: boolean,
+): { ok: true; value: string } | { ok: false; reason: string } {
+  if (typeof raw !== 'string' || !raw.trim()) {
+    return { ok: false, reason: `invalid-field:realmManifestBaseUrls.${key}` };
+  }
+  const normalized = trimTrailingSlashes(raw.trim());
+  try {
+    const url = new URL(normalized);
+    const protocols = allowHttp ? ['https:', 'http:'] : ['https:'];
+    if (!protocols.includes(url.protocol)) {
+      return {
+        ok: false,
+        reason: `invalid-protocol:realmManifestBaseUrls.${key}`,
+      };
+    }
+    if (!url.hostname) {
+      return {
+        ok: false,
+        reason: `invalid-field:realmManifestBaseUrls.${key}`,
+      };
+    }
+    if (url.username || url.password) {
+      return {
+        ok: false,
+        reason: `credentials-in-url:realmManifestBaseUrls.${key}`,
+      };
+    }
+  } catch {
+    return { ok: false, reason: `invalid-field:realmManifestBaseUrls.${key}` };
+  }
+  return { ok: true, value: normalized };
+}
 
 /**
  * 解析并校验一份清单原文。纯函数,输入任意文本都不会抛出。
@@ -234,7 +290,9 @@ export function parseClientEndpointManifest(
     } catch {
       return { ok: false, reason: `invalid-field:${key}` };
     }
-    if (!allowedProtocols(key, options?.allowHttp === true).includes(url.protocol)) {
+    if (
+      !allowedProtocols(key, options?.allowHttp === true).includes(url.protocol)
+    ) {
       return { ok: false, reason: `invalid-protocol:${key}` };
     }
     if (url.username || url.password) {
@@ -250,11 +308,78 @@ export function parseClientEndpointManifest(
   const reviewVersion =
     typeof rawReview === 'string' && rawReview.trim() ? rawReview.trim() : null;
 
-  return { ok: true, endpoints, reviewVersion };
+  const rawRegion = record.region;
+  const region =
+    rawRegion === undefined
+      ? null
+      : rawRegion === 'cn' || rawRegion === 'global'
+        ? rawRegion
+        : null;
+  if (rawRegion !== undefined && region === null) {
+    return { ok: false, reason: 'invalid-field:region' };
+  }
+  if (
+    options?.expectedRegion !== undefined &&
+    region !== options.expectedRegion
+  ) {
+    return {
+      ok: false,
+      reason: `region-mismatch:${options.expectedRegion}:${region ?? 'missing'}`,
+    };
+  }
+
+  const rawEnabled = record.crossRealmOrgLoginEnabled;
+  if (rawEnabled !== undefined && typeof rawEnabled !== 'boolean') {
+    return { ok: false, reason: 'invalid-field:crossRealmOrgLoginEnabled' };
+  }
+  const crossRealmOrgLoginEnabled = rawEnabled === true;
+
+  const rawRealmUrls = record.realmManifestBaseUrls;
+  let realmManifestBaseUrls: RealmManifestBaseUrls | null = null;
+  if (rawRealmUrls !== undefined) {
+    if (
+      !rawRealmUrls ||
+      typeof rawRealmUrls !== 'object' ||
+      Array.isArray(rawRealmUrls)
+    ) {
+      return { ok: false, reason: 'invalid-field:realmManifestBaseUrls' };
+    }
+    const realmUrlRecord = rawRealmUrls as Record<string, unknown>;
+    const cn = parseManifestBaseUrl(
+      realmUrlRecord.cn,
+      'cn',
+      options?.allowHttp === true,
+    );
+    if (!cn.ok) return cn;
+    const global = parseManifestBaseUrl(
+      realmUrlRecord.global,
+      'global',
+      options?.allowHttp === true,
+    );
+    if (!global.ok) return global;
+    realmManifestBaseUrls = { cn: cn.value, global: global.value };
+  }
+
+  // 开关打开却没有完整且自报区域的路由表属于配置事故，不能静默退回单区。
+  if (
+    crossRealmOrgLoginEnabled &&
+    (region === null || realmManifestBaseUrls === null)
+  ) {
+    return { ok: false, reason: 'incomplete-cross-realm-config' };
+  }
+
+  return {
+    ok: true,
+    endpoints,
+    reviewVersion,
+    region,
+    crossRealmOrgLoginEnabled,
+    realmManifestBaseUrls,
+  };
 }
 
 export type ResolveClientEndpointsResult =
-  | { ok: true; endpoints: ClientEndpointMap; reviewVersion: string | null }
+  | Extract<ParseClientEndpointManifestResult, { ok: true }>
   | { ok: false; reason: string };
 
 /**

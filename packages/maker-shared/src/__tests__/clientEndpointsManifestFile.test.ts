@@ -55,6 +55,9 @@ describe.each(MANIFESTS)('config/endpoint*.json 守门($label)', ({ filePath }) 
     const allowed = new Set<string>([
       ...CLIENT_ENDPOINT_KEYS,
       CLIENT_ENDPOINT_REVIEW_KEY,
+      'region',
+      'crossRealmOrgLoginEnabled',
+      'realmManifestBaseUrls',
     ]);
     expect(keys.filter((key) => !allowed.has(key))).toEqual([]);
   });

@@ -335,6 +335,7 @@ export function LoginConsentDialog({
   onDisagree,
   onOpenTerms,
   onOpenPrivacy,
+  compactBody = false,
 }: {
   /** 面板缩放 = stage.scale × loginGroupScale(与登录组同口径,750 设计 px → 物理 px) */
   scale: number;
@@ -346,6 +347,8 @@ export function LoginConsentDialog({
   onDisagree: () => void;
   onOpenTerms: () => void;
   onOpenPrivacy: () => void;
+  /** 较长的说明型确认文案使用更紧凑排版，避免与底部按钮重叠。 */
+  compactBody?: boolean;
 }) {
   const { colors } = useTheme();
   const login = colors.login;
@@ -417,8 +420,8 @@ export function LoginConsentDialog({
           >
             <LegalStatementText
               color={login.secondaryText}
-              fontSize={D.body.font}
-              lineHeight={D.body.lineHeight}
+              fontSize={compactBody ? 20 : D.body.font}
+              lineHeight={compactBody ? 30 : D.body.lineHeight}
               onOpenPrivacy={onOpenPrivacy}
               onOpenTerms={onOpenTerms}
               statement={body}

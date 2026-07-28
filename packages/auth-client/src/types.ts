@@ -42,6 +42,7 @@ export const ssoOrgConnectionSchema = z.object({
 export type SsoOrgConnection = z.infer<typeof ssoOrgConnectionSchema>;
 
 export const ssoOrgDiscoverySchema = z.object({
+  region: authRegionSchema,
   orgName: z.string(),
   // 不设 min(1)：服务端对「企业存在但未启用 SSO」可能返回 200 + connections:[]。
   // 让空数组通过 schema 校验，由 CindyAuthClient.discoverSsoOrg 显式映射成精确的

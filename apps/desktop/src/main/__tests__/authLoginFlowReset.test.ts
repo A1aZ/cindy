@@ -52,6 +52,34 @@ describe('auth login-flow reset', () => {
     expect(body).toContain("email: ''");
   });
 
+  it('clears stale organization realm state before personal login and a new discovery', () => {
+    const discoveryStart = source.indexOf(
+      'async function discoverOrganizationRealm(org: string)',
+    );
+    const discoveryBody = source.slice(
+      discoveryStart,
+      source.indexOf('\n}', discoveryStart),
+    );
+    expect(discoveryBody).toContain('pendingAuthRealm = null;');
+
+    const actionStart = source.indexOf(
+      'async function runLoginAction(action: DesktopLoginAction)',
+    );
+    const actionPreamble = source.slice(
+      actionStart,
+      source.indexOf('const stateBeforeAction', actionStart),
+    );
+    expect(actionPreamble).toContain("action.type === 'discover'");
+    expect(actionPreamble).toContain("action.type === 'request-code'");
+    expect(actionPreamble).toContain("action.type === 'verify-code'");
+    expect(actionPreamble).toContain(
+      "action.type === 'start-browser' && action.kind === 'social'",
+    );
+    expect(actionPreamble).toContain(
+      'if (startsBuildRealmFlow) pendingAuthRealm = null;',
+    );
+  });
+
   it('does not leave expired private tickets on a screen that can only reuse them', () => {
     expect(source).toContain("'INVALID_LOGIN_TICKET',");
     expect(source).toContain("'INVALID_BIND_TICKET',");
@@ -104,7 +132,7 @@ describe('auth login-flow reset', () => {
     const initializeEnd = source.indexOf('\n}\n\n/**\n * 冷启动 refresh 流程本体', initializeStart);
     const initializeBody = source.slice(initializeStart, initializeEnd);
     const localGuard = initializeBody.indexOf("getActiveAppSession().mode === 'local'");
-    const refreshTokenRead = initializeBody.indexOf('readSafe(REFRESH_TOKEN_KEY)');
+    const refreshTokenRead = initializeBody.indexOf('readPersistedAuthSession()');
 
     expect(localGuard).toBeGreaterThan(-1);
     expect(refreshTokenRead).toBeGreaterThan(localGuard);

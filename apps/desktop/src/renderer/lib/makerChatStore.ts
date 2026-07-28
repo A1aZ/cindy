@@ -5703,9 +5703,15 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
           lateArrivals.some((message) => {
             // 本次权威页里就带着它 → 必然连续。
             if (authoritativeClientIds.has(message.clientId)) return false;
-            const cmpOldest = compareMessageTimeline(message, oldestRow);
+            // thinking 行要换回**落库那条时间线**再比:mapServerMessages 把它的 createdAt 改写成
+            // `finishedAt - durationMs`(块的开始时刻,渲染层算时长用),而 oldestRow / newestRow
+            // 是原始 DB 行。混着比会让一个"想了很久"的 thinking 落在页范围里,而它与权威窗口之间
+            // 那一行可能正好被有损推送丢了(#676 review codex P1)。换算不出来就保守判脱离。
+            const timelineRow = thinkingSafeTimelineRow(message);
+            if (timelineRow === null) return true;
+            const cmpOldest = compareMessageTimeline(timelineRow, oldestRow);
             if (cmpOldest < 0) return true;
-            const cmpNewest = compareMessageTimeline(message, newestRow);
+            const cmpNewest = compareMessageTimeline(timelineRow, newestRow);
             if (cmpNewest > 0) return true;
             // 与某个边界打平 ⇒ 同毫秒且至少一侧没有 rowid(rowid 唯一,都有则不会打平)。
             // 生产的 local-db:messages:created 广播走 messageToCamel,**不带 rowid**
@@ -8969,6 +8975,25 @@ function oldestServerMessageIdForWindow(
     return previousOldestId;
   }
   return compareMessageTimeline(oldestRow, existingOldest) < 0 ? oldestRow.id : previousOldestId;
+}
+
+/**
+ * 把一条窗口内消息换算回"落库那条时间线"上的可比对象(与原始 DB 行同口径)。
+ *
+ * 只有 thinking 需要换算:mapServerMessages 会把它的 createdAt 改写成 `finishedAt - durationMs`
+ * (渲染层拿它当块的开始时刻算时长)。拿改写后的值去跟原始 DB 行比大小,就是在混两条时间线。
+ * 换算不出来(没有 thinkingFinishedAtMs)时返回 null,调用方按"无法判定 ⇒ 保守判脱离"处理。
+ */
+function thinkingSafeTimelineRow(
+  message: ChatMessage,
+): { createdAt?: string; rowid?: number } | null {
+  if (message.role !== 'thinking') return message;
+  if (typeof message.thinkingFinishedAtMs !== 'number') return null;
+  if (!Number.isFinite(message.thinkingFinishedAtMs)) return null;
+  return {
+    createdAt: new Date(message.thinkingFinishedAtMs).toISOString(),
+    rowid: message.rowid,
+  };
 }
 
 /**

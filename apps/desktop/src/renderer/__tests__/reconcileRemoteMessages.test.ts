@@ -683,6 +683,50 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     );
   });
 
+  it('远程会话:thinking 晚到行按落库时间线判脱离,不被改写后的开始时刻骗过', async () => {
+    // review #676(codex P1):mapServerMessages 把 thinking 的 createdAt 改写成
+    // `finishedAt - durationMs`(块的开始时刻),而权威页边界是原始 DB 行。混着比会让一个
+    // "想了很久"的 thinking 落进页范围,而它与权威窗口之间那一行可能正好被有损推送丢了。
+    const s = sid();
+    makerChatStore.initGlobalListeners();
+    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
+
+    const pendingList = deferred<Message[]>();
+    remoteListResolver = () => pendingList.promise;
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    // 落库时间(finishedAt)= 06-25,明显比权威页最新行(06-20)更新 → 应判脱离;
+    // 但它想了 10 天,改写后的"开始时刻"= 06-15,落在权威页范围里 → 旧写法会判连续。
+    remotePush?.({
+      deviceId: DEVICE_ID,
+      channel: 'local-db:messages:created',
+      payload: {
+        sessionId: s,
+        message: thinkingDbMessage(
+          s,
+          'long-thinking',
+          'thought for a long time',
+          '2026-06-25T00:00:00.000Z',
+          10 * 24 * 60 * 60 * 1000,
+          '2026-06-25T00:00:00.000Z',
+        ),
+      },
+    });
+
+    // 权威页跨 06-10 ~ 06-20:改写后的"开始时刻"(06-15)恰好落在里面,而落库时间(06-25)在外面。
+    pendingList.resolve([
+      dbMessage(s, 'auth-a', 'authoritative a', '2026-06-10T00:00:00.000Z'),
+      dbMessage(s, 'auth-b', 'authoritative b', '2026-06-20T00:00:00.000Z'),
+    ]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    const ids = makerChatStore.getSnapshot(s).messages.map((m) => m.clientId);
+    expect(ids).toContain('long-thinking');
+    expect(ids).toContain('client-auth-b');
+    // 关键:按落库时间线它在权威范围之外 → 按孤岛处理。
+    expect(makerChatStore.getSnapshot(s).historyWindowHasIsland).toBe(true);
+  });
+
   it('远程会话:同毫秒但没有 rowid 的 live push 保守按脱离处理', async () => {
     // review #676(codex P1):生产的 local-db:messages:created 广播走 messageToCamel、**不带
     // rowid**(list 结果才带),所以 live push 与权威边界同毫秒时排不出先后 —— 中间那一行可能

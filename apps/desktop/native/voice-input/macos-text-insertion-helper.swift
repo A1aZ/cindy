@@ -448,6 +448,14 @@ func captureTargetPayload() -> [String: Any] {
       "error": "No frontmost application"
     ]
   }
+  // Read the focused window frame FIRST, before any AX mutation below: it must
+  // describe the same frontmostApplication snapshot as the paste target, and it
+  // must not observe a layout perturbed by the AXEnhancedUserInterface flip.
+  // Deriving both from one helper run is what keeps "which display do we open
+  // on" and "which app do we paste into" from disagreeing — two separate helper
+  // processes would each read frontmostApplication at a slightly different
+  // moment.
+  let focusedFrame = focusedWindowFrame(for: app)
   var context = captureFocusedElementContext(for: app)
   var enhancedAxAttempted = false
   var enhancedAxHelped = false
@@ -488,51 +496,31 @@ func captureTargetPayload() -> [String: Any] {
   if let context = context {
     payload["context"] = context
   }
+  if let focusedFrame = focusedFrame {
+    payload["frame"] = focusedFrame.frame
+    payload["frameSource"] = focusedFrame.source
+  }
   return payload
 }
 
 // Reports the frontmost window's frame so the global voice overlay can open on
-// the display the user is actually working on. This is deliberately the
-// cheapest possible command in this helper: no AXEnhancedUserInterface flip, no
-// text extraction, no subtree walk — the overlay's visible appearance waits on
-// this answer for a few dozen milliseconds, so it must stay fast.
+// the display the user is actually working on.
 //
 // Coordinates are AX/CGWindow screen coordinates: origin at the top-left of the
 // primary display, y growing downwards, in points. That matches Electron's DIP
 // screen coordinate space on macOS, so main can feed the frame straight into
 // screen.getDisplayMatching().
-func focusedWindowFramePayload() -> [String: Any] {
-  guard let app = NSWorkspace.shared.frontmostApplication else {
-    return [
-      "ok": false,
-      "error": "No frontmost application"
-    ]
-  }
-  var payload: [String: Any] = [
-    "target": [
-      "processName": app.localizedName ?? "",
-      "bundleId": app.bundleIdentifier ?? "",
-      "pid": Int(app.processIdentifier)
-    ]
-  ]
+func focusedWindowFrame(for app: NSRunningApplication) -> (frame: [String: Any], source: String)? {
   if let frame = axFocusedWindowFrame(for: app) {
-    payload["ok"] = true
-    payload["frame"] = frame
-    payload["frameSource"] = "ax"
-    return payload
+    return (frame, "ax")
   }
   // CGWindowList needs no Accessibility grant and still reports geometry when
   // Screen Recording is denied (only window titles are gated), so it covers the
   // pre-permission first run and apps whose AX focused window is unavailable.
   if let frame = frontWindowFrameFromWindowList(pid: app.processIdentifier) {
-    payload["ok"] = true
-    payload["frame"] = frame
-    payload["frameSource"] = "window-list"
-    return payload
+    return (frame, "window-list")
   }
-  payload["ok"] = false
-  payload["error"] = "No focused window frame"
-  return payload
+  return nil
 }
 
 func axFocusedWindowFrame(for app: NSRunningApplication) -> [String: Any]? {
@@ -1381,8 +1369,6 @@ do {
   switch options.command {
   case "capture-target":
     emit(captureTargetPayload())
-  case "focused-window-frame":
-    emit(focusedWindowFramePayload())
   case "paste-verified":
     emit(pasteVerifiedPayload(options: options))
   default:

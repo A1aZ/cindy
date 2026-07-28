@@ -200,9 +200,6 @@ const OVERLAY_IDLE_BOUNDS: Rectangle = {
 const MAC_CORE_EDITING_SHORTCUTS = new Set(['KeyA', 'KeyC', 'KeyV', 'KeyX', 'KeyZ', 'Comma']);
 const DEFAULT_COMMAND_TIMEOUT_MS = 2500;
 const MAC_TEXT_INSERTION_HELPER_PASTE_TIMEOUT_MS = 5000;
-// focused-window-frame 只读两个 AX 属性，比 DEFAULT_COMMAND_TIMEOUT_MS 短得多：
-// 它的答案过了显示截止时间就没用了，没必要让子进程继续挂着。
-const MAC_FOCUSED_WINDOW_FRAME_TIMEOUT_MS = 800;
 const CLIPBOARD_RESTORE_DELAY_MS = 600;
 const OVERLAY_CANCEL_ACCELERATOR = 'Escape';
 const PASTE_DEBUG_TAG = '[global-paste-debug]';
@@ -248,6 +245,10 @@ let lastPresentedOverlayBounds: Rectangle | null = null;
 // 定位或显示窗口——浮窗是缓存复用的，hide 并不销毁它，只靠 isDestroyed() 判断
 // 会让已取消的浮窗重新出现。
 let overlayPresentationSeq = 0;
+// 多屏下浮窗会先等最多 90ms 的焦点屏答案再显示。这段窗口里呈现已经开始（麦克风
+// 在录）但窗口还不可见，所以「浮窗是否已打开」不能只看 isVisible()：否则等待期
+// 内再按一次快捷键不会走提交分支，而是又开一次呈现，用户那一下就丢了。
+let overlayPresentationAwaitingShow = false;
 
 type ExternalDictionaryLearningWatch = {
   id: string;
@@ -327,7 +328,17 @@ export function prewarmGlobalVoiceInputOverlay(): void {
 }
 
 export function isGlobalVoiceInputOverlayVisible(): boolean {
-  return Boolean(overlayPresentationActive && getOverlayWindow()?.isVisible());
+  return isOverlayPresentationOpen(getOverlayWindow());
+}
+
+/**
+ * 一次浮窗呈现是否处于「已打开」状态：呈现生效，且窗口已可见或正等着显示。
+ * 快捷键的提交分支、Dock 激活让位判断都必须用这个，而不是裸 isVisible()。
+ */
+function isOverlayPresentationOpen(overlay: BrowserWindow | null): boolean {
+  if (!overlay || overlay.isDestroyed()) return false;
+  if (!overlayPresentationActive) return false;
+  return overlay.isVisible() || overlayPresentationAwaitingShow;
 }
 
 /**
@@ -871,13 +882,14 @@ function stableVoiceInputShortcutKey(shortcut: VoiceInputShortcut): string {
 function handleGlobalVoiceInputShortcut(phase?: Extract<GlobalVoiceInputShortcutPhase, 'start'>): void {
   const invokedAt = Date.now();
   const overlay = getOverlayWindow();
-  const overlayOpen = Boolean(overlay && overlayPresentationActive && overlay.isVisible());
+  const overlayOpen = isOverlayPresentationOpen(overlay);
   log.debug('global shortcut invoked', {
     overlayOpen,
     overlayVisible: Boolean(overlay?.isVisible()),
+    overlayAwaitingShow: overlayPresentationAwaitingShow,
     appFocused: Boolean(BrowserWindow.getFocusedWindow()),
   });
-  if (overlay && overlayPresentationActive && overlay.isVisible()) {
+  if (overlay && overlayOpen) {
     if (phase === 'start') {
       pendingModifierOverlaySuppressNextTap = false;
       pendingModifierOverlaySuppressNextRelease = true;
@@ -925,7 +937,7 @@ function handleGlobalVoiceInputShortcutTap(): void {
   }
   if (sendShortcutToActiveInlineVoiceInput('tap')) return;
   const overlay = getOverlayWindow();
-  if (overlay && overlayPresentationActive && overlay.isVisible()) {
+  if (overlay && isOverlayPresentationOpen(overlay)) {
     overlay.webContents.send('voice-input:global-overlay-command', { type: 'submit' });
     return;
   }
@@ -1155,6 +1167,7 @@ function destroyOverlayWindow(): void {
   overlayPresentationActive = false;
   // 同 setOverlayIdlePresentationState：作废本次呈现，pending 的异步定位回调失效。
   overlayPresentationSeq += 1;
+  overlayPresentationAwaitingShow = false;
   pendingOverlayStart = null;
   pendingModifierOverlaySubmit = false;
   pendingModifierOverlaySuppressNextTap = false;
@@ -1174,6 +1187,7 @@ function setOverlayIdlePresentationState(window: BrowserWindow): void {
   overlayPresentationActive = false;
   // 作废本次呈现：pending 的焦点屏回调据此放弃定位与显示。
   overlayPresentationSeq += 1;
+  overlayPresentationAwaitingShow = false;
   // `show: false` at BrowserWindow construction is not enough on macOS: a
   // prewarmed native window can still be unhidden when the app is activated by
   // a normal menu shortcut such as Cmd+,. Park the warm cache outside visible
@@ -1234,7 +1248,10 @@ function unregisterOverlayCancelShortcut(): void {
 
 async function showOverlayWindow(shortcutInvokedAt = Date.now()): Promise<void> {
   const existing = getOverlayWindow();
-  if (existing?.isVisible()) {
+  // 第一个条件是原有行为（窗口已可见就提交）；第二个补上「呈现已开始、正等着
+  // 显示」这段窗口，否则等待期内的第二次按键会再开一次呈现，renderer 收到重复
+  // start 会忽略，用户那一下等于丢了。
+  if (existing && (existing.isVisible() || isOverlayPresentationOpen(existing))) {
     existing.webContents.send('voice-input:global-overlay-command', { type: 'submit' });
     return;
   }
@@ -1477,16 +1494,17 @@ function startLoadedOverlaySession(window: BrowserWindow, shortcutInvokedAt: num
   if (window.isDestroyed()) return;
 
   const presentationSeq = ++overlayPresentationSeq;
-  // 焦点屏查询要最先发起：它是个子进程，能和下面的建窗、定位、麦克风启动并行。
-  const focusedDisplayQuery = startFocusedDisplayQuery();
-  positionOverlayWindow(window);
-  prepareOverlayForDisplay(window);
-
   // Startup ordering is intentional:
-  // 1. Capture the paste target before showing the overlay.
+  // 1. Capture the paste target before showing the overlay. 这一次调用同时带回
+  //    前台窗口 frame，焦点屏由它派生——和 target 同一次 frontmostApplication
+  //    读取，不会出现「浮窗开在 A 屏、粘贴却进了 B 屏的 App」。
   // 2. Tell the renderer to start microphone capture as soon as it is ready.
   // 3. Show the overlay on the next tick so UI display no longer gates mic start.
   const captureOverlayPromise = captureMacPasteTarget();
+  const focusedDisplayQuery = startFocusedDisplayQuery(captureOverlayPromise);
+  positionOverlayWindow(window);
+  prepareOverlayForDisplay(window);
+
   overlayPasteTarget = null;
   overlayPasteContext = null;
   overlayPasteTargetPromise = captureOverlayPromise.then((captured) => captured?.target ?? null);
@@ -1532,6 +1550,7 @@ function startLoadedOverlaySession(window: BrowserWindow, shortcutInvokedAt: num
     log.debug('global overlay ready to show', {
       elapsedSinceShortcutMs: Date.now() - shortcutInvokedAt,
     });
+    overlayPresentationAwaitingShow = false;
     window.showInactive();
     // showInactive preserves the user's focused app, but some Electron/macOS
     // combinations can still perturb app-level presence. Restore immediately
@@ -1544,6 +1563,8 @@ function startLoadedOverlaySession(window: BrowserWindow, shortcutInvokedAt: num
   }
   // 多屏：先等一小会儿焦点屏答案，拿到就在显示前重新定位。窗口此刻还没可见，
   // 所以重定位不会被看成跳动；超时则维持鼠标所在屏的定位直接显示。
+  // 这段等待期里呈现已经算「打开」（麦克风在录），见 overlayPresentationAwaitingShow。
+  overlayPresentationAwaitingShow = true;
   void awaitFocusedDisplay(focusedDisplayQuery).then((focusedDisplay) => {
     if (!isCurrentOverlayPresentation(window, presentationSeq)) {
       // 等待期间用户取消了浮窗、或者已经开始了新一次呈现：这次的答案作废。
@@ -1603,26 +1624,29 @@ function getCursorDisplay(): Display {
 }
 
 /**
- * 发起「前台窗口在哪块屏」查询，返回 null 表示不查、直接用鼠标所在屏：
- * - 只有一块屏时答案唯一，不值得多开一个进程、也不该为它推迟浮窗显示。
+ * 从粘贴目标快照里派生「前台窗口在哪块屏」，返回 null 表示不查、直接用鼠标所在屏：
+ * - 只有一块屏时答案唯一，不该为它推迟浮窗显示。
  * - 非 macOS 平台没有可用的低成本前台窗口查询（Electron 只能看自己的窗口），
  *   Windows 一律按鼠标所在屏判定。
  *
  * 注意鼠标所在屏和键盘焦点所在屏可以不同：鼠标停在 A 屏、正在 B 屏的编辑器里
- * 打字时，粘贴目标在 B 屏，浮窗也应该开在 B 屏，所以这里优先问前台窗口。
+ * 打字时，粘贴目标在 B 屏，浮窗也应该开在 B 屏，所以这里优先认前台窗口。
  */
-function startFocusedDisplayQuery(): Promise<Display | null> | null {
+function startFocusedDisplayQuery(
+  captureOverlayPromise: Promise<CapturedOverlayTarget | null>,
+): Promise<Display | null> | null {
   if (process.platform !== 'darwin') return null;
   if (screen.getAllDisplays().length <= 1) return null;
   const startedAt = Date.now();
-  return queryMacFocusedWindowFrame()
-    .then((frame) => {
-      if (!frame) return null;
+  return captureOverlayPromise
+    .then((captured) => {
+      if (!captured?.frame) return null;
       // getDisplayMatching 按重叠面积选屏，跨屏摆放的窗口也能落到主要那块。
-      const display = screen.getDisplayMatching(frame);
+      const display = screen.getDisplayMatching(captured.frame);
       log.debug('focused display resolved', {
         elapsedMs: Date.now() - startedAt,
         displayId: display?.id,
+        target: describePasteTarget(captured.target),
       });
       return display ?? null;
     })
@@ -1656,14 +1680,6 @@ function awaitFocusedDisplay(query: Promise<Display | null>): Promise<Display | 
         settle(display);
       });
   });
-}
-
-async function queryMacFocusedWindowFrame(): Promise<Rectangle | null> {
-  const result = await runMacTextInsertionHelper(['--command', 'focused-window-frame'], {
-    timeoutMs: MAC_FOCUSED_WINDOW_FRAME_TIMEOUT_MS,
-  });
-  if (!result.ok) return null;
-  return normalizeFocusedWindowFrame(result.frame);
 }
 
 function getOverlayPlacementDisplays(): OverlayPlacementDisplay[] {
@@ -1936,6 +1952,12 @@ function scheduleClipboardRestore(snapshot: ClipboardSnapshot | null, expectedTe
 type CapturedOverlayTarget = {
   target: MacPasteTarget;
   context: MacPasteContext | null;
+  /**
+   * 前台窗口 frame（DIP 屏幕坐标），来自与 target 同一次 helper 调用、同一次
+   * frontmostApplication 读取，所以「浮窗开在哪块屏」与「粘贴进哪个 App」不会
+   * 各自认到不同的前台 App。osascript 兜底路径拿不到 frame。
+   */
+  frame: Rectangle | null;
 };
 
 async function captureMacPasteTarget(): Promise<CapturedOverlayTarget | null> {
@@ -1943,15 +1965,19 @@ async function captureMacPasteTarget(): Promise<CapturedOverlayTarget | null> {
   try {
     const helperResult = await runMacTextInsertionHelper(['--command', 'capture-target']);
     if (helperResult.ok && helperResult.target?.processName) {
+      const frame = normalizeFocusedWindowFrame(helperResult.frame);
       log.debug(PASTE_DEBUG_TAG, 'capture target result (native)', {
         target: describePasteTarget(helperResult.target),
         context: summarizePasteContext(helperResult.context),
         enhancedAxAttempted: Boolean(helperResult.enhancedAxAttempted),
         enhancedAxHelped: Boolean(helperResult.enhancedAxHelped),
+        hasFocusedWindowFrame: Boolean(frame),
+        frameSource: helperResult.frameSource,
       });
       return {
         target: helperResult.target,
         context: helperResult.context ?? null,
+        frame,
       };
     }
   } catch (error) {
@@ -1993,6 +2019,8 @@ async function captureMacPasteTarget(): Promise<CapturedOverlayTarget | null> {
     return {
       target: { processName, bundleId: bundleId ?? '', pid },
       context: null,
+      // osascript 只报前台 App，不报窗口几何：焦点屏退回鼠标所在屏。
+      frame: null,
     };
   } catch (error) {
     log.warn('capture paste target failed', { error: stringifyError(error) });
@@ -2357,6 +2385,8 @@ async function captureMacPasteTargetForLearning(
     return {
       target: helperResult.target,
       context: helperResult.context,
+      // 词典学习只关心文本上下文，不需要窗口几何（浮窗此时早已关掉）。
+      frame: null,
     };
   } catch (error) {
     log.debug('external dictionary learning capture failed', {

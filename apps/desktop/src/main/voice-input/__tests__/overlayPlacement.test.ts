@@ -157,6 +157,11 @@ describe('resolveOverlayInitialBounds', () => {
     });
   }
 
+  /** 按 global.ts 落盘时的算法，为一个绝对坐标算出屏内相对比例。 */
+  function ratioOf(x: number, y: number, display: OverlayPlacementDisplay) {
+    return computeOverlayPositionRatio({ x, y, width: WIDTH, height: HEIGHT }, display.workArea);
+  }
+
   it('无保存位置时使用默认位置', () => {
     expect(initial(null)).toEqual(fallbackBounds);
   });
@@ -169,6 +174,48 @@ describe('resolveOverlayInitialBounds', () => {
   it('保存位置所在屏幕已不存在时回退默认位置', () => {
     // 中心在已拔掉的副屏，displayId 也找不到对应屏。
     expect(initial({ x: 3000, y: 500, displayId: 2, updatedAt: 1 })).toEqual(fallbackBounds);
+  });
+
+  it('displayId 记着但那块屏已拔掉时回退默认位置，即使旧坐标现在落进了另一块屏', () => {
+    // 记忆属于副屏（已拔掉），旧坐标现在落在主屏范围内。不能因此把记忆改判给
+    // 主屏并恢复那个陈旧坐标。
+    expect(initial({ x: 300, y: 500, displayId: secondary.id, updatedAt: 1 }, {
+      displays: [primary],
+      activeDisplay: primary,
+    })).toEqual(fallbackBounds);
+  });
+
+  it('同屏 workArea 未变时，带比例的记忆还原回原坐标（1px 取整误差内）', () => {
+    const saved = {
+      x: 400,
+      y: 700,
+      displayId: primary.id,
+      ...ratioOf(400, 700, primary),
+      updatedAt: 1,
+    };
+    const result = initial(saved, { displays: [primary], activeDisplay: primary });
+    expect(Math.abs(result.x - saved.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(result.y - saved.y)).toBeLessThanOrEqual(1);
+  });
+
+  it('同屏但分辨率变了时按比例走，不沿用旧的绝对坐标', () => {
+    // 在 1920 宽的屏上水平居中存下；该屏换成 2560 宽后仍应居中，而不是停在
+    // 旧坐标（那会变成偏左）。旧坐标中心仍落在新 workArea 内，所以这条正是
+    // 「坐标看起来还有效但其实已经不对」的场景。
+    const savedX = Math.round(primary.workArea.x + (primary.workArea.width - WIDTH) / 2);
+    const widerPrimary: OverlayPlacementDisplay = {
+      id: primary.id,
+      workArea: { x: primary.workArea.x, y: primary.workArea.y, width: 2560, height: 1055 },
+    };
+    const result = initial({
+      x: savedX,
+      y: 700,
+      displayId: primary.id,
+      ...ratioOf(savedX, 700, primary),
+      updatedAt: 1,
+    }, { displays: [widerPrimary], activeDisplay: widerPrimary });
+    const expectedX = Math.round(widerPrimary.workArea.x + (widerPrimary.workArea.width - WIDTH) / 2);
+    expect(Math.abs(result.x - expectedX)).toBeLessThanOrEqual(1);
   });
 
   it('屏幕重新排布让旧坐标落到空隙时，仍按 displayId 认回记忆', () => {

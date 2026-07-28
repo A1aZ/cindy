@@ -53,9 +53,17 @@ Firefox 早已按规范放行，只有 Safari 没跟，而 Safari 是 macOS 默�
 ```
 
 关键点：`redirect_uri` 是「auth-server 完事后往哪跳」，**不是 provider 的回调地址**。
-provider 回调路由（`googleCallbackUrl()` 等）与 `callbackShared.ts` 的收尾逻辑一行未改，
-托管回调只是多了一个接住自己回跳的新路由。`redirect_uri` 与 `client_state` 参数客户端
-本来就在传（`buildAuthorizeUrl`），authorize 接口也不需要改。
+provider 回调路由（`googleCallbackUrl()` 等）与开放平台注册的地址一字未改，托管回调不占用
+其中任何一个。
+
+改动落在两处：
+
+- `callbackShared.ts` 的收尾逻辑——识别出 `redirect_uri` 是托管地址时，改为在签发处直接寄存，
+  不再把码放进任何 URL（见 §3.2）；
+- authorize——`client_state` 由可选变为必填，并在建事务时一次性占位（见 §3.1）。
+
+`redirect_uri` 与 `client_state` 两个参数客户端本来就在传（`buildAuthorizeUrl`），
+所以**客户端侧的请求形态没变**，变的是服务端对它们的处理。
 
 ## 3. 服务端实现
 
@@ -92,7 +100,7 @@ provider 回调路由（`googleCallbackUrl()` 等）与 `callbackShared.ts` 的�
 不得跨重试复用。** 客户端现有实现本就每次 `randomBytes(32)`，天然满足；这里写明是为了让它
 成为契约而不是巧合。
 
-占位期间轮询返回 `pending`（占位记录与真实结果都在同一个 key `deskcb:<clientState>` 上，
+占位期间轮询返回 `pending`（占位记录与真实结果都在同一个 key `deskcb:<client_state>` 上，
 真实结果会覆盖占位）。建事务的后续步骤失败时占位会被归还——用的是比较删除（占位值带一次性
 nonce），只删自己写下的那一份，不会误伤已经落定的结果。
 
@@ -101,7 +109,7 @@ nonce），只删自己写下的那一份，不会误伤已经落定的结果。
 ### 3.2 寄存发生在签发处，**没有公开的写入端点**
 
 `callbackShared.ts` 的 `finishWithAuthCode` / `failWithRedirect` 在识别出 redirect_uri 是
-托管地址时，直接把结果寄存进 Redis（key `deskcb:<clientState>`，TTL 5 分钟），然后 302 到
+托管地址时，直接把结果寄存进 Redis（key `deskcb:<client_state>`，TTL 5 分钟），然后 302 到
 `/desktop/login-callback?status=ok|error[&detail=<错误码>]`。
 
 **曾经存在一个公开的 `GET /api/auth/desktop/callback` 用来接住自己的 302 并写寄存，已删除。**
@@ -114,6 +122,11 @@ state 伪造一个 `error` 打进去，让正在轮询的客户端提前收到�
 
 `DESKTOP_CALLBACK_PATH`（`/api/auth/desktop/callback`）现在只作为「这次登录走托管模式」的
 **标识**出现在 redirect_uri 里，不再有对应的可访问路由（访问它得到 404）。
+
+**浏览器永远不会被跳到这个地址。** 它只在两个地方被用到：authorize 时用来判定「这次走托管
+模式」并过同源放行，以及签发处用来判定「结果该寄存而不是进 URL」。浏览器实际收到的 302
+目标始终是结果展示页 `/desktop/login-callback`。所以尽管它形式上是 `redirect_uri`，从来没有
+任何一次重定向真的落在它上面。
 
 ### 3.3 `POST /api/auth/desktop/callback/poll`
 
@@ -240,7 +253,7 @@ CodeQL 的 `js/bad-tag-filter` 判为不完整的标签过滤。
 - [x] **两端 wire 对齐**：用客户端真实的 `CindyAuthClient` 打本地 auth-server，覆盖
       pending / ok / 一次性 / error / AbortSignal 取消
 - [x] 结果页 URL 不含授权码（curl 与集成测试双重确认）
-- [x] 未知 `clientState` 返回 `pending`
+- [x] 未知 `client_state` 返回 `pending`
 - [x] 展示页 light / dark 双模式目检（`docs/design-rules/DESIGN.md` 双模式交付门槛）
 - [x] 内联布局脚本在真实浏览器中执行、卡片正确居中缩放（CSP hash 生效）
 - [x] `detail` HTML 转义，不能注入标签

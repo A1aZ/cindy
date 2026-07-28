@@ -307,17 +307,28 @@ const DICTIONARY_LEARNING_TEXT_DEBUG = !app.isPackaged;
 
 export async function adviseAndRecordVoiceInputDictionaryLearning(
   payload: DictationDictionaryAdviceInput | undefined,
-  options: { senderId?: number | string; sourceLabel?: string } = {},
+  options: {
+    senderId?: number | string;
+    sourceLabel?: string;
+    /**
+     * 该请求是否真的来自全局浮窗的 renderer。只有 main 依据 `event.sender` 反查得出
+     * 的结论才算，不能用 payload.source —— 那是 renderer 自报的，别的 renderer 拿
+     * 共享的 adviseDictionaryLearning 桥填个 'external_overlay' 就能消费掉浮窗锚点，
+     * 让真正的浮窗请求失去锚点、自己拿到浮窗的位置。
+     */
+    fromOverlaySender?: boolean;
+  } = {},
 ): Promise<DictionaryAdviceIpcResult> {
   if (!payload?.beforeText || !payload.afterText) {
     return { ok: true, actions: [], elapsedMs: 0 };
   }
 
   const sourceLabel = options.sourceLabel ?? payload.source ?? 'in_app';
-  // 锚点必须在任何 await 之前取：此刻的呈现代次才代表这次请求的来源会话，绑定后
-  // 无论 advisor 何时返回都只认自己那份。等 advisor 返回后再取，并发请求会互相抢。
-  // 跳过分支同样取走，让过期锚点尽早出队。
-  const toastAnchor = sourceLabel === 'external_overlay'
+  // 锚点资格只认 main 侧由 event.sender 反查出的 fromOverlaySender，不认 payload.source
+  // 这个 renderer 自报字段。锚点必须在任何 await 之前取：此刻的呈现代次才代表这次请求
+  // 的来源会话，绑定后无论 advisor 何时返回都只认自己那份；等 advisor 返回后再取，
+  // 并发请求会互相抢。跳过分支同样取走，让过期锚点尽早出队。
+  const toastAnchor = options.fromOverlaySender === true
     ? takeOverlayDictionaryToastAnchor()
     : null;
   const skipReason = getDictationDictionaryAdviceSkipReason(payload);
@@ -1895,7 +1906,12 @@ export function registerVoiceInputIpc(): void {
   ipcMain.handle(
     'voice-input:dictionary-learning:advise',
     async (event, payload: DictationDictionaryAdviceInput | undefined): Promise<DictionaryAdviceIpcResult> => {
-      return adviseAndRecordVoiceInputDictionaryLearning(payload, { senderId: event.sender.id });
+      return adviseAndRecordVoiceInputDictionaryLearning(payload, {
+        senderId: event.sender.id,
+        // 这个桥是所有 renderer 共享的：浮窗 toast 锚点的资格由真实 sender 决定，
+        // 不看 payload 里自报的 source。
+        fromOverlaySender: isGlobalVoiceInputOverlaySender(event.sender),
+      });
     },
   );
 

@@ -599,20 +599,30 @@ func frontWindowFrameFromWindowList(pid: pid_t) -> [String: Any]? {
   guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
     return nil
   }
-  // The list is ordered front to back, so the first normal-layer window owned by
-  // the frontmost process is the one the user is looking at.
+  // The list is ordered front to back, so the first window owned by the frontmost
+  // process is the one the user is looking at.
+  //
+  // Deliberately NOT restricted to layer 0: a focused text field can live in a
+  // floating NSPanel / utility window, which sits on a higher layer. Requiring
+  // layer 0 would skip it and return the app's ordinary document window instead —
+  // on a different display that means the overlay opens away from the field that
+  // is about to receive the paste. Front-to-back order already encodes "which of
+  // this app's windows is on top", so take the first usable one regardless of layer.
   for window in windows {
     // 这些值是 NSNumber。不要写 `as? pid_t`：NSNumber 只桥接到 Int，条件转换到
     // Int32 会一律失败，整条兜底就变成永远返回 nil。
     guard let ownerPid = (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
           ownerPid == pid else { continue }
-    guard let layer = (window[kCGWindowLayer as String] as? NSNumber)?.intValue,
-          layer == 0 else { continue }
+    // 完全透明的窗口不是用户在看的东西（点击穿透层、隐藏的辅助窗口）。
+    if let alpha = (window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue, alpha <= 0 {
+      continue
+    }
     guard let boundsDict = window[kCGWindowBounds as String] as? [String: Any],
           let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else {
       continue
     }
-    if rect.width <= 0 || rect.height <= 0 { continue }
+    // 退化尺寸同样跳过：1x1 之类的占位窗口没法用来判断用户在哪块屏。
+    if rect.width <= 1 || rect.height <= 1 { continue }
     return [
       "x": Double(rect.origin.x),
       "y": Double(rect.origin.y),

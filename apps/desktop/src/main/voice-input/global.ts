@@ -2755,11 +2755,17 @@ function spawnHelperWithProgressPromise(
       });
     }, timeoutMs);
 
+    // setEncoding 必须在这里显式设：否则每个 Buffer 各自 toString()，一个跨 chunk
+    // 边界被切开的多字节 UTF-8 字符会两边各变成替换字符。AX 上下文里全是中文这类
+    // 非 ASCII 文本，而最终 JSON 仍能解析成功，损坏会静默流进 refine 与词典学习。
+    // 设了编码后由流内部的 StringDecoder 跨 chunk 保留半个字符。
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+
     // 每收到一个完整换行就尝试解析：带 event 字段的是进度事件，最后一行结果不在
     // 这里派发（由调用方从完整 stdout 取）。解析失败的行直接忽略——stdout 可能
     // 含用户输入框文本，不进日志。
-    child.stdout.on('data', (chunk: Buffer) => {
-      const text = chunk.toString();
+    child.stdout.on('data', (text: string) => {
       stdout += text;
       pending += text;
       const lines = pending.split('\n');
@@ -2775,8 +2781,8 @@ function spawnHelperWithProgressPromise(
         }
       }
     });
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
+    child.stderr.on('data', (text: string) => {
+      stderr += text;
     });
     child.on('error', (error) => {
       settle(() => reject(new PasteCommandError(

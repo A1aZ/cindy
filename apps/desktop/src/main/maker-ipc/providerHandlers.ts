@@ -670,6 +670,18 @@ export function registerProviderHandlers(
   // 同步形状校验留在队列外(到达序执行,非法入参不占队列);写操作稀疏且轻,全局
   // 单队列足够,不需要 per-provider 粒度。
   let modelDisableMutationTail: Promise<unknown> = Promise.resolve();
+  // 所有 override 写入(停用/启用/删除清理/失败恢复)共用同一串行队列:删除事务的
+  // 清理若绕开队列,在途的停用写(等 listProviders 校验)可能在清理之后落盘,同 id
+  // 重建照旧复活旧停用状态(PR #744 review 第二十一轮)。
+  const enqueueDisableWrite = <T,>(run: () => T | Promise<T>): Promise<T> => {
+    const previous = modelDisableMutationTail;
+    const result = previous.catch(() => undefined).then(run);
+    modelDisableMutationTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
   registry.handle(MAKER_INVOKE.MODEL_DISABLE_SET, async (event, input: unknown) => {
     assertTrustedProviderMutationSender(event);
     if (!input || typeof input !== 'object') throwIpcError('INVALID_PARAMS', 'invalid input');
@@ -757,10 +769,7 @@ export function registerProviderHandlers(
       deps.broadcastChanged();
       return { ok: true };
     };
-    const previous = modelDisableMutationTail;
-    const result = previous.catch(() => undefined).then(run);
-    modelDisableMutationTail = result.catch(() => undefined);
-    return result;
+    return enqueueDisableWrite(run);
   });
 
   registry.handle(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, async (event, input: unknown, keyInput?: unknown) => {
@@ -886,14 +895,18 @@ export function registerProviderHandlers(
           // 停用 override 清理进事务(第二十轮):放在配置删除之前,后续任一步失败
           // 由恢复函数把停用状态原样写回;清理自身抛错时事务未产生破坏,删除中止,
           // 不再出现「配置删了、override 残留」让同 id 重建复活旧停用状态。
-          restoreDisableOverrides = deps.stageClearProviderDisableOverrides?.(providerId) ?? null;
+          restoreDisableOverrides =
+            (await enqueueDisableWrite(
+              () => deps.stageClearProviderDisableOverrides?.(providerId) ?? null,
+            )) ?? null;
           restoreOAuthCredentials = deps.removeOAuthCredentials(providerId);
           if (!restoreOAuthCredentials) {
             throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
           }
           await deleteCustomProvider(providerId);
         } catch (err) {
-          const overridesRestored = !restoreDisableOverrides || restoreDisableOverrides();
+          const overridesRestored =
+            !restoreDisableOverrides || (await enqueueDisableWrite(restoreDisableOverrides));
           const oauthRestored = !restoreOAuthCredentials || restoreOAuthCredentials();
           const keysRestored = restoreProviderKeys(providerId, keySnapshots);
           if (!oauthRestored || !keysRestored || !overridesRestored) {

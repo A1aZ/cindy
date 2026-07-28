@@ -853,6 +853,25 @@ async function getVoiceInputRefinerReadiness(
   };
 }
 
+/**
+ * TextModelClient 的停用轴 live 包装(BYOK):每次 requestJson(= 一次精修付费请求)
+ * 前按当前 override 重查该档的真实路由,停用即抛错 —— FallbackTextModelClient 将其
+ * 视为该档失败,自然落到下一档(PR #744 review 第二十一轮)。
+ */
+function guardRefinerClientAgainstDisable(
+  profile: VoiceInputRefinerProfile,
+  client: TextModelClient,
+): TextModelClient {
+  return {
+    requestJson: (input) => {
+      if (isUtilityRouteDisabled(profile)) {
+        return Promise.reject(new Error('voice refiner route disabled in settings'));
+      }
+      return client.requestJson(input);
+    },
+  };
+}
+
 function createVoiceInputTextModelClient(
   profile: VoiceInputRefinerProfile,
   options?: {
@@ -2040,7 +2059,18 @@ export function registerVoiceInputIpc(): void {
     try {
       provider = new FallbackAsrProvider(startableAsrChain.map((kind) => ({
         kind,
-        create: () => createVoiceInputProvider(kind, asrLanguageHint, voiceContext),
+        create: () => {
+          // BYOK live 谓词(PR #744 review 第二十一轮):后备转写档在前一档失败后
+          // 才被 connect,可能距会话开始数分钟 —— create 时刻按当前 override 重查,
+          // 停用即抛错让 fallback 落到下一家。managed 模式路由在 voice-server,不查。
+          if (!voiceContext) {
+            const routeProviderId = asrProfileRouteProviderId(getVoiceInputAsrProfile(kind));
+            if (routeProviderId && isProviderRouteSuspended(routeProviderId)) {
+              throw new Error('voice ASR provider disabled in settings');
+            }
+          }
+          return createVoiceInputProvider(kind, asrLanguageHint, voiceContext);
+        },
       })));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2098,13 +2128,19 @@ export function registerVoiceInputIpc(): void {
           const refinerAttempts: FallbackTextModelAttempt[] = readyRefinerProfiles.map((profile) => ({
             profileId: profile.id as VoiceInputRefinerProviderKind,
             model: profile.model,
-            client: createVoiceInputTextModelClient(profile, {
-              timeoutMs: VOICE_INPUT_REFINER_IDLE_TIMEOUT_MS,
-              onUsage: (usage) => {
-                if (!runId) return;
-                emit({ type: 'usage', runId, refinement: { ...usage, refinerProvider: profile.id } });
-              },
-            }),
+            // live 谓词包装(PR #744 review 第二十一轮):精修请求在用户停止说话时才
+            // 发出,可能距控制器构造数分钟 —— 每次请求前按当前 override 重查,停用
+            // 即抛错让 fallback 落到下一档。
+            client: guardRefinerClientAgainstDisable(
+              profile,
+              createVoiceInputTextModelClient(profile, {
+                timeoutMs: VOICE_INPUT_REFINER_IDLE_TIMEOUT_MS,
+                onUsage: (usage) => {
+                  if (!runId) return;
+                  emit({ type: 'usage', runId, refinement: { ...usage, refinerProvider: profile.id } });
+                },
+              }),
+            ),
             // A caller-supplied cache scope flows through unchanged for every
             // attempt; the default per-profile scope keeps cache keys separate
             // across providers.

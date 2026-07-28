@@ -42,6 +42,8 @@ import { createLogger } from '../logger.js';
 import { getAppCapabilities } from '../appCapabilities.js';
 
 import { getActiveCatalog } from './active-catalog.js';
+import { isModelDisabled, isProviderDisabled } from '@cindy/model-providers';
+import { readModelDisableOverrides } from './model-disable-store.js';
 import { readClaudeApiKey, readCodexOneShotCreds } from './auth-adapters.js';
 import { getValidClaudeAiOAuth } from './claude-oauth-refresh.js';
 import { outboundUndiciFetch } from './outbound-fetch.js';
@@ -360,6 +362,18 @@ export async function generateTitleViaProvider(
   const onExternalAbort = () => controller.abort();
   args.signal?.addEventListener('abort', onExternalAbort);
 
+  // 派发紧前重查(PR #744 review 第二十一轮):OAuth 刷新等凭证获取是可能数秒的
+  // await,期间该 (来源, 标题模型) 可能被用户停用 —— 凭证到手、请求发出的紧前按
+  // override store 同步再验一次(key 无 agent 维度,组合判定即精确口径)。
+  // 直查 override store(不经 oneShotCandidates:那条链模块加载期拖 runtime-configs
+  // / ripgrep 探测等 electron 面,污染轻量测试环境)。
+  const routeDisabledNow = (): boolean => {
+    const overrides = readModelDisableOverrides();
+    return (
+      isProviderDisabled(overrides, providerId) ||
+      isModelDisabled(overrides, providerId, target.model)
+    );
+  };
   try {
     let text = '';
     switch (target.wire) {
@@ -367,6 +381,10 @@ export async function generateTitleViaProvider(
         const oauth = await readAnthropicOAuth();
         if (!oauth?.accessToken) {
           log.debug('title oneShot skipped: no anthropic OAuth', { providerId });
+          return null;
+        }
+        if (routeDisabledNow()) {
+          log.debug('title oneShot skipped: route disabled after credential refresh', { providerId });
           return null;
         }
         text = await fetchAnthropicTitle(target.upstream, target.model, args.prompt, oauth.accessToken, fetchImpl, controller.signal);
@@ -378,6 +396,10 @@ export async function generateTitleViaProvider(
           log.debug('title oneShot skipped: no codex creds', { providerId });
           return null;
         }
+        if (routeDisabledNow()) {
+          log.debug('title oneShot skipped: route disabled before dispatch', { providerId });
+          return null;
+        }
         text = await fetchCodexTitle(target.upstream, target.model, target.effort, args.prompt, creds, fetchImpl, controller.signal);
         break;
       }
@@ -385,6 +407,10 @@ export async function generateTitleViaProvider(
         const key = readGatewayKey();
         if (!key) {
           log.debug('title oneShot skipped: no gateway key', { providerId });
+          return null;
+        }
+        if (routeDisabledNow()) {
+          log.debug('title oneShot skipped: route disabled before dispatch', { providerId });
           return null;
         }
         text = await fetchGatewayTitle(target.upstream, target.model, args.prompt, key, fetchImpl, controller.signal);

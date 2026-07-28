@@ -274,6 +274,13 @@ async function requestDefaultUtilityText(
   }
 
   for (const candidate of candidates) {
+      // 逐候选执行前按**当前** override 重查(PR #744 review 第二十一轮):前一个
+      // 候选失败/超时可能耗时数十秒,期间本候选可能已被停用 —— 不再对其付费下单,
+      // 记 model_unavailable 落到下一候选。
+      if (isUtilityRouteDisabled(candidate.profile)) {
+        attempts.push(skippedAttempt(candidate.profile, 'model_unavailable'));
+        continue;
+      }
     try {
       const text = (await candidate.execute(prompt, opts)).trim();
       if (!text) throw new UtilityTextExecutionError({ reason: 'empty_response' });
@@ -630,6 +637,13 @@ async function executeCandidates(
   opts?: UtilityTextRequestOptions,
 ): Promise<UtilityTextResult> {
   for (const candidate of candidates) {
+      // 逐候选执行前按**当前** override 重查(PR #744 review 第二十一轮):前一个
+      // 候选失败/超时可能耗时数十秒,期间本候选可能已被停用 —— 不再对其付费下单,
+      // 记 model_unavailable 落到下一候选。
+      if (isUtilityRouteDisabled(candidate.profile)) {
+        attempts.push(skippedAttempt(candidate.profile, 'model_unavailable'));
+        continue;
+      }
     try {
       const text = (await candidate.execute(prompt, opts)).trim();
       if (!text) throw new UtilityTextExecutionError({ reason: 'empty_response' });

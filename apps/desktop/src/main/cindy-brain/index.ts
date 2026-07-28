@@ -1754,6 +1754,8 @@ async function runGhostVideo(params: {
   if (!registry || !registry.hasAny()) {
     throw new Error('视频能力不可用:主机未配置视频通道');
   }
+  // 提交紧前重查(第二十一轮):参考图 data URI 准备是 await,窗口内被停用即拒。
+  assertMediaModelStillEnabled('video', params.alias);
   const r = await submitAndAwaitVideo(registry, params);
   return { buffer: r.buffer, mimeType: r.mimeType };
 }

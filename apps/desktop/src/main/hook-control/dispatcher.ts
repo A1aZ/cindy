@@ -702,12 +702,43 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
        * 映射的路子; 目录归一化之类的无关写入也会被误判成移动。登记入口见
        * hook-control/sessionMoves.ts。
        */
-      const locallyAuthorized =
-        !inAllowedRoot &&
+      const authorizedBy = (
+        entry: typeof boundEntry,
+      ): { locallyAuthorized: boolean; pendingMoveRegistration: boolean } => ({
+        locallyAuthorized:
+          !inAllowedRoot &&
+          usable &&
+          entry?.authority === 'local-move' &&
+          entry.workingDir != null &&
+          isSamePath(entry.workingDir, info!.workingDir!),
+        pendingMoveRegistration:
+          usable &&
+          entry?.previousWorkingDir != null &&
+          // 过期的在途标记不算数: 写库后清理标记万一失败(磁盘/权限), 残留的它
+          // 不能长期充当映射外的放行凭据(PR #669 review 指出)
+          entry.movePendingUntil > now() &&
+          isSamePath(entry.previousWorkingDir, info!.workingDir!),
+      });
+      let effectiveEntry = boundEntry;
+      let verdict = authorizedBy(effectiveEntry);
+      /**
+       * inspect 是个 await —— 期间可能刚好完成一次移动(登记 + 写库 + 清标记),
+       * 那时 info 已是新目录而 boundEntry 还是移动前的快照, 三条判定全落空,
+       * 绑定就被当撤权删掉(PR #669 review 指出)。撤权前用最新的绑定重判一次。
+       */
+      if (
         usable &&
-        boundEntry?.authority === 'local-move' &&
-        boundEntry.workingDir != null &&
-        isSamePath(boundEntry.workingDir, info!.workingDir!);
+        !inAllowedRoot &&
+        !verdict.locallyAuthorized &&
+        !verdict.pendingMoveRegistration
+      ) {
+        const latest = bindings.getEntry(connectionId, payload.externalKey);
+        if (latest && latest.sessionId === bound && latest.rev !== namespacedEntry?.rev) {
+          effectiveEntry = latest;
+          verdict = authorizedBy(latest);
+        }
+      }
+      const locallyAuthorized = verdict.locallyAuthorized;
       /**
        * 移动是"先登记授权、再写库"两步。中间这一小段里绑定已指向新目录, 而
        * session 行还停在移动前的目录 —— 靠登记时记下的 previousWorkingDir 认出
@@ -721,20 +752,14 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
        * 入口写入、写库成功即清, 它本身就是"有一次已登记的移动在途"的证据; 放行
        * 的又是移动前那个已授权目录, 不放宽任何边界。
        */
-      const pendingMoveRegistration =
-        usable &&
-        boundEntry?.previousWorkingDir != null &&
-        // 过期的在途标记不算数: 写库后清理标记万一失败(磁盘/权限), 残留的它
-        // 不能长期充当映射外的放行凭据(PR #669 review 指出)
-        boundEntry.movePendingUntil > now() &&
-        isSamePath(boundEntry.previousWorkingDir, info!.workingDir!);
+      const pendingMoveRegistration = verdict.pendingMoveRegistration;
       // 三者都不满足 = 映射被改/删的撤权语义(或目录被别的路径改过), 仍丢绑定
       // 重建。老绑定无授权记录时同样走保守侧。
       if (usable && (inAllowedRoot || locallyAuthorized || pendingMoveRegistration)) {
         const workingDir = info!.workingDir!;
         const authority: HookBindingAuthority = inAllowedRoot ? 'workspace' : 'local-move';
         // 登记过的移动要在渠道里说明一次(说明完就清掉 pending)
-        const announceMove = locallyAuthorized && boundEntry?.noticePending === true;
+        const announceMove = locallyAuthorized && effectiveEntry?.noticePending === true;
         // 在途移动时不迁移 legacy 行: 迁移会把 inspect 到的旧目录写进新命名空间
         // 并丢掉 previousWorkingDir / noticePending, 等于抹掉刚落下的登记
         // (PR #669 review 指出)。等移动落库后的下一条消息再迁, 语义不变。
@@ -742,14 +767,16 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
         // 快照回填 / 授权收敛: 只在目录、来源或待说明状态变化时落盘, 常规复用
         // 不产生写。在途移动(pendingMoveRegistration)一律不回填 —— 那会把刚落
         // 下的授权收敛回旧目录, 移动写库后下一条消息就当撤权把绑定删了。
+        // 重判时读到的最新行(若有)才是回填基准, 否则会拿陈旧 rev 去 CAS
+        const backfillBase = namespacedEntry === null ? null : (effectiveEntry ?? namespacedEntry);
         if (
-          namespacedEntry !== null &&
+          backfillBase !== null &&
           !pendingMoveRegistration &&
-          (namespacedEntry.workingDir === null ||
-            !isSamePath(namespacedEntry.workingDir, workingDir) ||
-            namespacedEntry.authority !== authority ||
-            namespacedEntry.previousWorkingDir !== null ||
-            namespacedEntry.noticePending)
+          (backfillBase.workingDir === null ||
+            !isSamePath(backfillBase.workingDir, workingDir) ||
+            backfillBase.authority !== authority ||
+            backfillBase.previousWorkingDir !== null ||
+            backfillBase.noticePending)
         ) {
           bindings.set(connectionId, payload.externalKey, bound, {
             workingDir,
@@ -757,7 +784,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
             noticePending: false,
             // 另一半窗口: 本次 inspect 期间才落下的登记同样不能被覆盖,
             // 用读到的行版本做乐观并发控制(不匹配就放弃这次回填)。
-            expectedRev: namespacedEntry.rev,
+            expectedRev: backfillBase.rev,
           });
         }
         if (announceMove) {

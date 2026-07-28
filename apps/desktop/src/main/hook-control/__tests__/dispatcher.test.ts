@@ -668,6 +668,38 @@ describe('dispatcher 核心语义', () => {
     fr.finish();
   });
 
+  it('inspect 期间完成的移动不被当成撤权(撤权前重读绑定)', async () => {
+    const bindings = memoryBindings();
+    const OUTSIDE = path.resolve('/repos/outside');
+    let inspected = 0;
+    const runner: HookSessionRunner = {
+      isBusy: () => false,
+      inspect: async () => {
+        inspected += 1;
+        // 第一次 inspect 的"期间", 移动完成: 绑定被登记并清掉在途标记,
+        // 会话已在新目录 —— 旧快照三条判定全落空
+        bindings.noteSessionMoved('sess-1', { from: WS_DIR, to: OUTSIDE }, 'local-move');
+        bindings.completeSessionMove('sess-1', OUTSIDE);
+        return { workingDir: OUTSIDE, usable: true };
+      },
+      run: async () => ({ status: 'ok', finalText: 'done', errorMessage: null, durationMs: 1 }),
+    };
+    const { d } = makeDispatcher({ runner, bindings });
+    const c = collector();
+    bindings.set('conn-1', 'team-slack:C1:1.1', 'sess-1', {
+      workingDir: WS_DIR,
+      authority: 'workspace',
+    });
+
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+
+    expect(inspected).toBe(1);
+    // 重读后认出新授权 -> 继续复用原会话, 而不是删绑定重开
+    expect(c.last('task.ack')!.payload.sessionId).toBe('sess-1');
+    expect(bindings.get('conn-1', 'team-slack:C1:1.1')).toBe('sess-1');
+  });
+
   it('过期的在途标记不再放行(清理失败也不会变成长期通行证)', async () => {
     const bindings = memoryBindings();
     const OUTSIDE = path.resolve('/repos/outside');

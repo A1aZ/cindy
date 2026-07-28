@@ -1119,7 +1119,7 @@ export function registerSessionIpc(): void {
         // 一条消息照样丢绑定(PR #669 review 指出)。按库里的真实状态补偿:
         //   - 目录已经是新的 -> 移动其实成立, 收掉在途标记、保留新授权;
         //   - 目录还是旧的   -> 移动没成立, 回滚登记。
-        let committed = false;
+        let committed: boolean | null = null;
         try {
           const [after] = await db
             .select({ workingDir: sessions.workingDir })
@@ -1127,10 +1127,13 @@ export function registerSessionIpc(): void {
             .where(eq(sessions.id, sid));
           committed = !!after && normalizeWorkingDirForStorage(after.workingDir) === nextDir;
         } catch {
-          // 连状态都查不到时按"没提交"处理: 回滚是保守侧(最多一次 thread 重开)
+          // 连状态都查不到 -> 什么都不动。硬判成"没提交"去回滚, 万一其实提交了
+          // 就制造出"库在新目录、绑定记旧目录"的分叉(PR #669 review 指出);
+          // 保留在途标记则两种情况都能自愈: 真提交了下一条消息按新目录复用,
+          // 没提交则标记过期(movePendingUntil)后按撤权处理。
         }
-        if (committed) completeHookSessionMove(sid, nextDir);
-        else rollback();
+        if (committed === true) completeHookSessionMove(sid, nextDir);
+        else if (committed === false) rollback();
         throw err;
       }
     });

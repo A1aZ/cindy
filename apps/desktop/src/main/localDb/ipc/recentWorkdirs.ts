@@ -138,7 +138,11 @@ async function dirExists(path: string): Promise<boolean> {
  */
 async function resolveRealPath(p: string): Promise<string | null> {
   try {
-    return (await realpath(p)).replace(/\\/g, '/');
+    const resolved = (await realpath(p)).replace(/\\/g, '/');
+    // Windows 的 realpath 可能带扩展长度 / 设备命名空间前缀(`\\?\C:\...`、
+    // `\\.\C:\...`), 替换斜杠后成了 `//?/C:/...` —— 不剥掉就永远比不上表里的
+    // `C:/...`, 授权判定会系统性 false negative(PR #669 review 指出)。
+    return resolved.replace(/^\/\/[?.]\/(?:UNC\/)?/, (m) => (m.includes('UNC') ? '//' : ''));
   } catch {
     return null;
   }
@@ -172,6 +176,9 @@ export async function isKnownRecentWorkdir(candidate: string | null | undefined)
     const resolvedTarget = await resolveRealPath(shaped);
     // 目标解析不了 = 不存在 / 断链 / 无权限 -> 不认它是已知项目(fail closed)
     if (resolvedTarget === null) return false;
+    // 必须是目录: 已知项目里的一个普通文件(如 /repo/package.json)也能通过前缀
+    // 比较, 存成 workingDir 后 agent 每轮都会拿它当 cwd 失败(PR #669 review)。
+    if (!(await dirExists(resolvedTarget))) return false;
     // 受管 worktree 解析回它的 base 项目再判定 —— 这里**不能**复用
     // normalizeRecentWorkdirPath 的 worktree 排除(那是"别进最近列表"的语义):
     // hook 自己新建的会话就跑在 worktree 里, 把会话移到 worktree 是正常操作,

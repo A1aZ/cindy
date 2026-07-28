@@ -12,6 +12,8 @@
  * 这里直接按当前 data owner 的绑定文件写(hook 关着时移动、之后再开也照样跟随)。
  */
 
+import fs from 'node:fs';
+
 import { ownerScopedUserDataPath } from '../appSessionState.js';
 import { createLogger } from '../logger.js';
 import { createHookBindingStore, type HookBindingAuthority } from './bindings.js';
@@ -29,6 +31,17 @@ const log = createLogger('hookSessionMoves');
  */
 function authorityForDir(workingDir: string): HookBindingAuthority {
   try {
+    // store.get() 自己会把读失败兜底成空配置 —— 那样 roots 为空, 结论就成了
+    // local-move(凭空发放映射外例外)。安全判定不能吃这个兜底: 先严格读一次,
+    // 文件存在但读不动/解析不了就抛, 由 catch 落到 fail-closed 的 workspace
+    // (PR #669 review 指出)。
+    const configPath = ownerScopedUserDataPath('slack-hook.json');
+    if (fs.existsSync(configPath)) {
+      const raw: unknown = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        throw new Error('slack-hook.json is not an object');
+      }
+    }
     const store = createSlackHookStore({
       filePath: ownerScopedUserDataPath('slack-hook.json'),
       // 这里只读 workspaces 映射, 不碰服务器地址 —— 给个空默认值即可,
@@ -102,17 +115,24 @@ export async function noteHookSessionMoved(
  * 让「登记已落、库还没落」的容忍窗口严格限定在移动的两步之间 —— 标记留着不清,
  * 之后把会话目录改回旧值就能靠它绕过撤权(PR #669 review 指出)。
  */
-export function completeHookSessionMove(sessionId: string, workingDir: string): void {
-  try {
-    const store = createHookBindingStore({
-      filePath: ownerScopedUserDataPath('hook-bindings.json'),
-      log: { warn: (msg: string) => log.warn(msg) },
-    });
-    store.completeSessionMove(sessionId, workingDir);
-  } catch (err) {
-    log.warn('completeHookSessionMove failed', {
-      sessionId,
-      err: err instanceof Error ? err.message : String(err),
-    });
-  }
+export function completeHookSessionMove(sessionId: string, workingDir: string): boolean {
+  const attempt = (): boolean => {
+    try {
+      const store = createHookBindingStore({
+        filePath: ownerScopedUserDataPath('hook-bindings.json'),
+        log: { warn: (msg: string) => log.warn(msg) },
+      });
+      store.completeSessionMove(sessionId, workingDir);
+      return true;
+    } catch (err) {
+      log.warn('completeHookSessionMove failed', {
+        sessionId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  };
+  // 重试一次: 瞬时的文件系统抖动不该让标记多留一个 TTL 窗口。两次都失败也不
+  // 让移动失败(那时移动已经真的完成了, 报错会误导), 靠 movePendingUntil 兜底。
+  return attempt() || attempt();
 }

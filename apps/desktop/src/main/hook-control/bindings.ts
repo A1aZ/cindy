@@ -151,10 +151,11 @@ type BindingFile = Record<string, Record<string, BindingRow>>;
 
 /**
  * "登记已落、库还没落"的容忍时长。正常只有一次 DB 写入 + 转录迁移(百毫秒级),
- * 给到一分钟足够宽松; 上限的意义是: 万一写库后清理标记本身失败(磁盘/权限),
- * 残留的在途标记也会自动失效, 不至于长期充当映射外的放行凭据。
+ * 十几秒已经很宽松; 上限的意义是: 万一写库后清理标记本身失败(磁盘/权限),
+ * 残留的在途标记也会自动失效, 不至于充当映射外的放行凭据 —— 窗口越短, 那段
+ * 时间里"把会话目录改回旧值来蹭这张票"的机会越小(PR #669 review 指出)。
  */
-const MOVE_PENDING_TTL_MS = 60_000;
+const MOVE_PENDING_TTL_MS = 15_000;
 
 export function createHookBindingStore(deps: {
   filePath: string;
@@ -290,20 +291,26 @@ export function createHookBindingStore(deps: {
       return {
         updated,
         rollback: () => {
-          const current = readAll();
+          // 严格读: readAll 的兜底会把一次读故障变成空表, 然后 writeAll 就把整个
+          // 绑定文件覆写成 {} —— 一次失败的移动会清光所有 thread 绑定
+          // (PR #669 review 指出)。读不动就直接放弃回滚, 不写。
+          const current = readAllStrict();
+          let restored = 0;
           for (const { namespace, externalKey, row } of before) {
             const live = current[namespace]?.[externalKey];
             // 回滚期间又被别人写过(新的移动登记)就别覆盖它
             if (!live || live.sessionId !== sessionId) continue;
             (current[namespace] ??= {})[externalKey] = { ...row, rev: revOf(live) + 1 };
+            restored += 1;
           }
-          writeAll(current);
+          if (restored > 0) writeAll(current);
         },
       };
     },
     completeSessionMove(sessionId, workingDir) {
       if (!sessionId || !workingDir) return 0;
-      const data = readAll();
+      // 同 rollback: 读故障不能被兜底成空表后整file覆写
+      const data = readAllStrict();
       let updated = 0;
       for (const rows of Object.values(data)) {
         for (const [externalKey, row] of Object.entries(rows)) {

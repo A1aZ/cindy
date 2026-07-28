@@ -609,13 +609,13 @@ export function applyAgentIslandEvent(
     if (!isTerminal) {
       const message = typeof data?.message === 'string' ? data.message : '';
       const reconnectAttempt = parseReconnectAttemptMessage(message);
-      if (reconnectAttempt) {
-        session.reconnectStatus = formatReconnectStatus(
-          state.strings.networkReconnecting,
-          reconnectAttempt.attempt,
-          reconnectAttempt.maxAttempts,
-        );
-      }
+      session.reconnectStatus = reconnectAttempt
+        ? formatReconnectStatus(
+            state.strings.networkReconnecting,
+            reconnectAttempt.attempt,
+            reconnectAttempt.maxAttempts,
+          )
+        : null;
       return true;
     }
     session.reconnectStatus = null;

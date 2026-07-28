@@ -178,7 +178,8 @@ describe('mobile home desktop-first surface', () => {
     expect(source).toContain('if (isAccessRevokedError(error) || isDeviceOfflineError(error)) return false;');
     expect(source).toContain("if (text.includes('REMOTE_DISABLED')) return false;");
     expect(source).toContain('return true;');
-    expect(source).toContain('remoteSessionStore.setActiveSessionSnapshots(device.deviceId, activeSessions)');
+    expect(source).toContain('remoteSessionStore.captureActiveSessionSnapshotEpoch()');
+    expect(source).toContain('activeSessionSnapshotEpoch,');
     expect(source).toContain('remoteScheduleEventStore.subscribe(() => {');
     expect(source).toContain('const snapshot = remoteScheduleEventStore.getSnapshot(deviceId)');
     expect(source).toContain('const version = snapshot.version');

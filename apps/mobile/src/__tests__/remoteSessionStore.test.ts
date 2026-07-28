@@ -1289,6 +1289,37 @@ describe('remoteSessionStore', () => {
     }
   });
 
+  it('clears stale reconnect progress from an active snapshot without erasing newer retry events', () => {
+    remoteSessionStore.setDeviceSessions('dev-1', 'Mac', [session('s1')]);
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 's1',
+      event: { type: 'error', data: { message: 'Reconnecting... 1/5', willRetry: true } },
+    });
+
+    const currentSnapshotEpoch = remoteSessionStore.captureActiveSessionSnapshotEpoch();
+    remoteSessionStore.setActiveSessionSnapshots(
+      'dev-1',
+      [{ sessionId: 's1', isTurnRunning: true }],
+      currentSnapshotEpoch,
+    );
+    expect(remoteSessionStore.getSessionRunStatus('s1').reconnectAttempt).toBeNull();
+
+    const staleSnapshotEpoch = remoteSessionStore.captureActiveSessionSnapshotEpoch();
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 's1',
+      event: { type: 'error', data: { message: 'Reconnecting... 2/5', willRetry: true } },
+    });
+    remoteSessionStore.setActiveSessionSnapshots(
+      'dev-1',
+      [{ sessionId: 's1', isTurnRunning: true }],
+      staleSnapshotEpoch,
+    );
+    expect(remoteSessionStore.getSessionRunStatus('s1').reconnectAttempt).toEqual({
+      attempt: 2,
+      maxAttempts: 5,
+    });
+  });
+
   it('tracks session running state from maker event push boundaries', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:10.000Z'));
@@ -1329,12 +1360,29 @@ describe('remoteSessionStore', () => {
       maxAttempts: 5,
     });
 
-    pushMakerText('s1', 'persist-reconnected', 'resumed', false);
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 's1',
+      event: { type: 'error', data: { message: 'Waiting before retry', willRetry: true } },
+    });
     expect(remoteSessionStore.getSessionRunStatus('s1').reconnectAttempt).toBeNull();
 
     remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
       sessionId: 's1',
       event: { type: 'error', data: { message: 'Reconnecting... 3/5', willRetry: true } },
+    });
+    pushMakerText('s1', 'persist-reconnected', 'resumed', false);
+    expect(remoteSessionStore.getSessionRunStatus('s1').reconnectAttempt).toBeNull();
+
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 's1',
+      event: { type: 'error', data: { message: 'Reconnecting... 4/5', willRetry: true } },
+    });
+    remoteSessionStore.applyInteractionRequest('s1', pending('permission', 'permission-1'));
+    expect(remoteSessionStore.getSessionRunStatus('s1').reconnectAttempt).toBeNull();
+
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 's1',
+      event: { type: 'error', data: { message: 'Reconnecting... 5/5', willRetry: true } },
     });
 
     vi.setSystemTime(new Date('2026-01-01T00:00:20.000Z'));

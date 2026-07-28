@@ -299,6 +299,9 @@ export default function HomeScreen() {
   const hydrateDeviceSessions = useCallback(async (device: DeviceView): Promise<HydrateDeviceSessionsResult> => {
     updateDeviceConnectionState(device.deviceId, 'syncing');
     try {
+      // Fence the snapshot so a retry push received while this request is in flight keeps
+      // its newer N/M, while an older attempt left over from before hydration is cleared.
+      const activeSessionSnapshotEpoch = remoteSessionStore.captureActiveSessionSnapshotEpoch();
       const [list, activeSessions] = await withTransientRemoteRetry(async () => {
         await subscribe('device-list', device.deviceId, ['sessions']);
         return Promise.all([
@@ -323,7 +326,11 @@ export default function HomeScreen() {
         nextSessions,
       );
       if (Array.isArray(activeSessions)) {
-        remoteSessionStore.setActiveSessionSnapshots(device.deviceId, activeSessions);
+        remoteSessionStore.setActiveSessionSnapshots(
+          device.deviceId,
+          activeSessions,
+          activeSessionSnapshotEpoch,
+        );
       }
       // schedule-index(1+N 个 listRuns)是次要徽标数据,延后发,避开"开 app→立刻点会话"时和会话关键读
       // 抢同一条 WS 管道(见 scheduleIndexDefer / issue #324)。home 自动化分组与名称已由 fallbackScheduleInfo

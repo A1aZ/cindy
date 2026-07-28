@@ -294,7 +294,7 @@ describe('Agent Island display state', () => {
     const start = 1_000;
     setAgentIslandStrings(state, {
       ...DEFAULT_AGENT_ISLAND_STRINGS,
-      networkReconnecting: '正在重连（{{attempt}}/{{maxAttempts}}）…',
+      networkReconnecting: '（{{attempt}}/{{maxAttempts}}）正在重连…',
     });
 
     applyAgentIslandUserPrompt(state, { sessionId: 's1', title: 'Task', agentKind: 'codex' }, 'run tests', start);
@@ -310,11 +310,11 @@ describe('Agent Island display state', () => {
     }, start + 200);
     expect(state.sessions.get('s1')).toMatchObject({
       assistantStreamRawText: '我会先',
-      reconnectStatus: '正在重连（1/5）…',
+      reconnectStatus: '（1/5）正在重连…',
     });
     expect(buildAgentIslandDisplayState(state, start + 200).sessions[0]).toMatchObject({
-      detail: '正在重连（1/5）…',
-      compactDetail: '正在重连（1/5）…',
+      detail: '（1/5）正在重连…',
+      compactDetail: '（1/5）正在重连…',
     });
 
     applyAgentIslandEvent(state, { sessionId: 's1' }, {
@@ -327,9 +327,22 @@ describe('Agent Island display state', () => {
       },
     }, start + 250);
     expect(buildAgentIslandDisplayState(state, start + 250).sessions[0]).toMatchObject({
-      detail: '正在重连（2/5）…',
-      compactDetail: '正在重连（2/5）…',
+      detail: '（2/5）正在重连…',
+      compactDetail: '（2/5）正在重连…',
     });
+
+    applyAgentIslandEvent(state, { sessionId: 's1' }, {
+      type: 'error',
+      source: 'codex',
+      data: {
+        message: 'Waiting before another automatic retry',
+        isTerminal: false,
+        willRetry: true,
+      },
+    }, start + 275);
+    expect(state.sessions.get('s1')?.reconnectStatus).toBeNull();
+    expect(buildAgentIslandDisplayState(state, start + 275).sessions[0]?.compactDetail)
+      .not.toContain('2/5');
 
     applyAgentIslandEvent(state, { sessionId: 's1' }, textDeltaEvent('继续处理'), start + 300);
     expect(state.sessions.get('s1')?.reconnectStatus).toBeNull();

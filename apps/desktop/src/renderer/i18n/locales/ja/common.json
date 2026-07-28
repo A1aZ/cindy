@@ -61,7 +61,7 @@
       "input": "入力",
       "done": "完了",
       "running": "実行中",
-      "networkReconnecting": "接続が中断されました。再接続中（{{attempt}}/{{maxAttempts}}）…",
+      "networkReconnecting": "（{{attempt}}/{{maxAttempts}}）接続が中断されました。再接続中…",
       "updatingTasks": "タスクを更新中",
       "awaitingPermission": "承認待ち",
       "awaitingQuestion": "返信待ち",

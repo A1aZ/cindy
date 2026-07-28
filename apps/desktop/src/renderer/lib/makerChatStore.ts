@@ -5879,7 +5879,14 @@ function loadOlderMessages(sessionId: string): void {
       // map/merge/commit 阶段兜底(subagent review P1):任何异常都必须复位
       // isLoadingMore,否则行首守卫会让该会话永久无法再翻页(spinner 卡死)。
       log.warn('loadOlderMessages commit failed', { sessionId, err: String(err) });
-      setState(sessionId, (s) => ({ ...s, isLoadingMore: false }));
+      // 但只放**自己那一代**的锁。当前代码里这条 catch 只可能在代际比对**之后**触发
+      // (所有 await 都在内层 try 里,fetch reject 被它吞掉、随后照常走比对),所以这道守卫
+      // 今天不可达;加上它是为了让"谁重置谁释放、被作废的请求一律不碰锁"这条不变式
+      // 不依赖调用顺序 —— 将来若有人在比对之前插入 await,不至于又变成"误放别人的锁"
+      // (#676 review greptile)。
+      if ((_messagesEpoch.get(sessionId) ?? 0) === epochAtStart) {
+        setState(sessionId, (s) => ({ ...s, isLoadingMore: false }));
+      }
     }
   })();
 }

@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 import { Schema } from '@tiptap/pm/model';
 import { EditorState } from '@tiptap/pm/state';
 
-import { mapEditorTextRange } from '../editorRangeMapping';
+import { clampEditorTextRangeToDoc, mapEditorTextRange } from '../editorRangeMapping';
 
 const schema = new Schema({
   nodes: {
@@ -71,5 +71,41 @@ describe('mapEditorTextRange', () => {
 
     expect(mapped).toEqual({ from: 9, to: 14 });
     expect(state.tr.insertText('XY', 1).doc.textBetween(mapped!.from, mapped!.to)).toBe('world');
+  });
+
+  // 整篇替换(外部草稿恢复走 setContent → replace(0, size))会把锚点映射到 block
+  // 边界。那不是听写能插入的位置:insertText 会另起一个段落,上屏文字前面凭空多出
+  // 一个空行(新建对话页语音结束时多一个回车的成因)。映射结果必须吸附回段落内。
+  it('snaps an anchor back inside the paragraph after a full-document replacement', () => {
+    const state = stateWith('');
+    const tr = state.tr.replaceWith(0, state.doc.content.size, schema.node('paragraph'));
+    const mapped = mapEditorTextRange({ from: 1, to: 1 }, tr);
+
+    expect(mapped).toEqual({ from: 1, to: 1 });
+    expect(tr.doc.resolve(mapped!.from).parent.isTextblock).toBe(true);
+    // 用映射后的位置上屏时不得再生成第二个段落。
+    const inserted = tr.doc.type.schema === schema
+      ? EditorState.create({ doc: tr.doc }).tr.insertText('上屏文字', mapped!.from, mapped!.to).doc
+      : null;
+    expect(inserted?.childCount).toBe(1);
+    expect(inserted?.textContent).toBe('上屏文字');
+  });
+});
+
+describe('clampEditorTextRangeToDoc', () => {
+  it('pulls block-boundary positions onto the nearest inline position', () => {
+    const doc = stateWith('hi').doc;
+    // 0 是 doc 起点、doc.content.size 是段落之后 —— 两者都不是 inline 位置。
+    expect(clampEditorTextRangeToDoc({ from: 0, to: 0 }, doc)).toEqual({ from: 1, to: 1 });
+    expect(clampEditorTextRangeToDoc({ from: doc.content.size, to: doc.content.size }, doc)).toEqual({
+      from: 3,
+      to: 3,
+    });
+  });
+
+  it('clamps out-of-bounds offsets and normalizes inverted ranges', () => {
+    const doc = stateWith('hi').doc;
+    expect(clampEditorTextRangeToDoc({ from: 999, to: 999 }, doc)).toEqual({ from: 3, to: 3 });
+    expect(clampEditorTextRangeToDoc({ from: 3, to: 1 }, doc)).toEqual({ from: 1, to: 3 });
   });
 });

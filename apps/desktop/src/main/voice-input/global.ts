@@ -1427,6 +1427,15 @@ function normalizeDictionaryToastEntries(payload: unknown): DictionaryToastEntry
 }
 
 function showDictionaryToastWindow(payload: DictionaryToastPayload): void {
+  // 有浮窗正在呈现（用户正在录音）时不弹 toast。toast 是 alwaysOnTop 的，且它的默认
+  // 位置就是浮窗的默认位置——旧会话的建议迟到时退回默认位置，恰好会盖住正在录音的
+  // 新浮窗五秒。词条本身已经落库，这个提示不重要到值得挡住用户的操作界面。
+  if (isOverlayPresentationOpen(getOverlayWindow())) {
+    log.debug('dictionary toast suppressed: overlay presentation is open', {
+      entries: payload.entries.length,
+    });
+    return;
+  }
   closeDictionaryToastWindow();
   const window = createDictionaryToastWindow(payload);
   dictionaryToastWindow = window;
@@ -1781,6 +1790,9 @@ function computeOverlayBounds(display: Display): Rectangle {
  * - 调用方是全局浮窗链路并带来了自己那次会话的锚点（应用内听写不传）；
  * - 呈现代次没变——变了说明期间又开过浮窗，这条 toast 会盖在新浮窗上；
  * - 锚点中心仍落在某块现存屏幕上——否则外接屏拔掉后 toast 会整个落到屏幕外。
+ *
+ * 注意「退回默认位置」本身不足以避免遮挡：默认位置就是浮窗的默认位置。真正在录音
+ * 时的遮挡由 showDictionaryToastWindow() 的「有浮窗呈现就不弹」拦掉。
  */
 function resolveDictionaryToastAnchorBounds(anchor: DictionaryToastAnchor | null): Rectangle {
   if (!anchor) return computeOverlayBounds(getCursorDisplay());

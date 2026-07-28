@@ -251,6 +251,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const pendingAccountTokenRef = useRef<string | null>(null);
   const [user, setUser] = useState<MobileUser | null>(null);
   const userRef = useRef<MobileUser | null>(null);
+  // 跨区缓存会话在所属 realm 清单尚未就绪时保持未认证，但仍需后台重试，
+  // 不能复用只由 user 驱动的弱网自愈条件。
+  const [deferredSessionRecovery, setDeferredSessionRecovery] = useState(false);
   const [loginState, setLoginState] = useState<AuthFlowState | null>(null);
   const loginStateRef = useRef<AuthFlowState | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -377,6 +380,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // 缓存资料恢复“已登录”视图,token 由后台刷新补齐。
   const applyUser = useCallback(
     (next: MobileUser | null) => {
+      setDeferredSessionRecovery(false);
       userRef.current = next;
       setUser(next);
       void serializeUserProfileMutation(() => writeCachedUserProfile(next));
@@ -649,10 +653,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             );
           }
         }
-        // 弱网冷启动:先用本地会话痕迹恢复已登录视图,再走网络刷新。
+        // 弱网冷启动只有在会话所属 realm 的业务端点已整体激活后，才发布缓存用户。
+        // 构建 realm 命中启动缓存，不增加网络依赖；跨区清单不可用时保持未认证，
+        // 防止业务调用先捕获构建区 URL、随后 refresh 又把对端 token 发给该 URL。
         if (storedSession && cachedUser) {
-          userRef.current = cachedUser;
-          setUser(cachedUser);
+          try {
+            await loadMobileEndpointsForRealm(storedSession.realm);
+            if (cancelled) return;
+            activateMobileSessionRealm(storedSession.realm);
+            activeAuthRealmRef.current = storedSession.realm;
+            userRef.current = cachedUser;
+            setUser(cachedUser);
+          } catch {
+            if (!cancelled) setDeferredSessionRecovery(true);
+          }
         }
         if (!storedSession)
           await deleteSecureItem(USER_PROFILE_KEY).catch(() => undefined);
@@ -697,9 +711,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [refresh]);
 
-  // 降级会话自愈:有缓存用户但尚未取得 access token 时,以退避节奏和回前台时机重试。
+  // 降级会话自愈:已安全发布的缓存用户，或因跨区清单失败而延迟发布的会话，
+  // 都以退避节奏和回前台时机重试。
   useEffect(() => {
-    if (!initialized || !user || accessToken) return;
+    const hasRecoverableSession =
+      user !== null || deferredSessionRecovery;
+    if (!initialized || accessToken || !hasRecoverableSession) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
@@ -742,7 +759,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       subscription.remove();
       if (timer) clearTimeout(timer);
     };
-  }, [accessToken, applyUser, initialized, refresh, user]);
+  }, [
+    accessToken,
+    applyUser,
+    deferredSessionRecovery,
+    initialized,
+    refresh,
+    user,
+  ]);
 
   // 存量同意迁移已在冷启动流程里 await 完成(见上方 initialize),这里只负责绑定
   // 账号标识 —— initialized 变 true 时迁移必然已经落盘。

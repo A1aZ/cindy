@@ -11,11 +11,30 @@ import { describe, expect, it } from 'vitest';
 describe('auth weak-network bootstrap', () => {
   const authSource = readFileSync(resolve(process.cwd(), 'src/auth/AuthContext.tsx'), 'utf8');
 
-  it('bootstrap 先用本地会话痕迹(refresh token + 用户快照)恢复登录视图', () => {
+  it('bootstrap 只在会话 realm 端点激活后用本地痕迹恢复登录视图', () => {
     // 快照恢复必须双条件:refresh token 还在 + 有缓存资料;二者缺一不得凭空造登录态。
     expect(authSource).toContain('if (storedSession && cachedUser) {');
     expect(authSource).toContain('userRef.current = cachedUser;');
     expect(authSource).toContain('setUser(cachedUser);');
+    const restoreStart = authSource.indexOf(
+      'if (storedSession && cachedUser) {',
+    );
+    const restoreEnd = authSource.indexOf(
+      '\n        if (!storedSession)',
+      restoreStart,
+    );
+    const restoreBody = authSource.slice(restoreStart, restoreEnd);
+    const loadRealmAt = restoreBody.indexOf(
+      'await loadMobileEndpointsForRealm(storedSession.realm);',
+    );
+    const activateRealmAt = restoreBody.indexOf(
+      'activateMobileSessionRealm(storedSession.realm);',
+    );
+    const publishUserAt = restoreBody.indexOf('setUser(cachedUser);');
+    expect(loadRealmAt).toBeGreaterThanOrEqual(0);
+    expect(activateRealmAt).toBeGreaterThan(loadRealmAt);
+    expect(publishUserAt).toBeGreaterThan(activateRealmAt);
+    expect(restoreBody).toContain('setDeferredSessionRecovery(true);');
     // bootstrap 里的 refresh 失败必须是"保留降级会话",不许再出现坍缩式 .catch(() => null)。
     expect(authSource).not.toContain('await refresh(did).catch(() => null)');
     expect(authSource).toMatch(
@@ -31,8 +50,13 @@ describe('auth weak-network bootstrap', () => {
     expect(authSource).not.toContain('isAuthenticated: accessToken !== null && user !== null');
   });
 
-  it('降级会话存在自愈路径:退避重试 + 回前台重试', () => {
-    expect(authSource).toContain('if (!initialized || !user || accessToken) return;');
+  it('已发布或因 realm 清单失败而延迟的降级会话都会自愈', () => {
+    expect(authSource).toMatch(
+      /const hasRecoverableSession\s*=\s*user !== null \|\| deferredSessionRecovery;/,
+    );
+    expect(authSource).toContain(
+      'if (!initialized || accessToken || !hasRecoverableSession) return;',
+    );
     expect(authSource).toContain('const delay = Math.min(5_000 * 2 ** attempt, 60_000);');
   });
 

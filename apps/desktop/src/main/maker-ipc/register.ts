@@ -6995,26 +6995,30 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     // DB 侧的 cleared_at 抑制拦不住已经落进 registry 内存的那一份(首发被拒后
     // 缓存仍在),下次 send 会把旧血缘灌进用户刚显式清空的上下文。
     //
-    // 用 invalidate(留 null 墓碑)而不是 clear(删条目):本地 /clear 的 cleared_at
-    // 由 renderer fire-and-forget 落库(main 只在 remoteInvoke 分支自己写),删条目会
-    // 让这段窗口内的 headless send 回落到尚未更新 cleared_at 的 DB 行,把旧交接重建
-    // 出来再缓存住。
+    // 用 invalidate(留 null 墓碑)而不是 clear(删条目):删条目会让后续 send 回落到
+    // DB 重建,把旧交接捞回来再缓存住。
     agentHandoffPending.invalidate(sid);
     getAgentIslandService()?.notifyQueueEmptied(sid);
     // 清上下文后,active 目标失去其依据(objective 引用的内容已被抹掉)→ 一并清除目标。
     goalClearObserver?.(sid);
-    if (remoteInvoke) {
-      const clearBoundaryMs =
-        typeof clearBoundary === 'number'
-          ? clearBoundary
-          : new Date(clearBoundary).getTime();
-      await clearSessionContextInDb(sid, clearBoundaryMs).catch((err) => {
-        log.warn('remote clear session context persist failed', {
-          sessionId: sid,
-          err: err instanceof Error ? err.message : String(err),
-        });
+    // cleared_at 在 handler 内**同步**落库,本地与远程同一口径。
+    //
+    // 过去本地路径只靠 renderer 事后 fire-and-forget 写这一列,于是 handler 返回到那次
+    // 写入落库之间有个窗口:此刻启动的引擎切换 / 消息删除会读到**尚未标记 clear**的
+    // DB 历史,却又拿到 clear 之后的纪元——纪元校验因此形同虚设,基于已清空历史算出的
+    // 交接会盖掉刚立的墓碑。在这里同步写掉,那个窗口就不存在了;renderer 之后若再写一次
+    // 也是同值幂等。
+    const clearBoundaryMs =
+      typeof clearBoundary === 'number'
+        ? clearBoundary
+        : new Date(clearBoundary).getTime();
+    await clearSessionContextInDb(sid, clearBoundaryMs).catch((err) => {
+      log.warn('clear session context persist failed', {
+        sessionId: sid,
+        remoteInvoke,
+        err: err instanceof Error ? err.message : String(err),
       });
-    }
+    });
     return projection;
   });
 

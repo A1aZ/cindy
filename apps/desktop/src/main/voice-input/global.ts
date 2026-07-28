@@ -1659,7 +1659,16 @@ function isCurrentOverlayPresentation(window: BrowserWindow, presentationSeq: nu
 
 function showPassiveOverlayWindow(window: BrowserWindow): void {
   if (window.isDestroyed()) return;
-  positionOverlayWindow(window);
+  // 被动呈现走的是「启动失败 / 粘贴失败后把浮窗重新亮出来」，属于同一次会话的延续，
+  // 必须留在它刚才所在的位置：这时重新按鼠标所在屏定位，会让错误提示从用户正在用的
+  // 那块屏跳到鼠标那块屏。浮窗 hide 后被停到屏幕外，所以用最近一次实际呈现的 bounds，
+  // 那块屏已经不存在时才退回默认定位。
+  const previousBounds = lastPresentedOverlayBounds;
+  if (previousBounds && isBoundsCenterOnDisplay(previousBounds, getOverlayPlacementDisplays())) {
+    window.setBounds(previousBounds);
+  } else {
+    positionOverlayWindow(window);
+  }
   registerOverlayCancelShortcut();
   window.setAlwaysOnTop(true, 'floating');
   window.setVisibleOnAllWorkspaces(true, {

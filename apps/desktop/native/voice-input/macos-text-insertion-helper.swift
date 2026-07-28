@@ -531,15 +531,23 @@ func captureTargetPayload(withFocusedFrame: Bool) -> [String: Any] {
 // primary display, y growing downwards, in points. That matches Electron's DIP
 // screen coordinate space on macOS, so main can feed the frame straight into
 // screen.getDisplayMatching().
+// CGWindowList is deliberately consulted FIRST. It is an in-process window-server
+// query: no Accessibility grant, no per-request messaging timeout, and it still
+// reports geometry when Screen Recording is denied (only window titles are gated).
+// The AX path can spend one 200 ms messaging timeout per request (focused window,
+// position, size) against an unresponsive target, which would blow the caller's
+// ~90 ms display-selection deadline and silently degrade the overlay back to the
+// mouse display — exactly the case this feature exists to fix.
+//
+// For *picking a display* the frontmost normal-layer window of the frontmost app
+// is as good as the AX focused window; AX only stays as the fallback for apps that
+// expose no on-screen normal-layer window.
 func focusedWindowFrame(for app: NSRunningApplication) -> (frame: [String: Any], source: String)? {
-  if let frame = axFocusedWindowFrame(for: app) {
-    return (frame, "ax")
-  }
-  // CGWindowList needs no Accessibility grant and still reports geometry when
-  // Screen Recording is denied (only window titles are gated), so it covers the
-  // pre-permission first run and apps whose AX focused window is unavailable.
   if let frame = frontWindowFrameFromWindowList(pid: app.processIdentifier) {
     return (frame, "window-list")
+  }
+  if let frame = axFocusedWindowFrame(for: app) {
+    return (frame, "ax")
   }
   return nil
 }
@@ -594,8 +602,12 @@ func frontWindowFrameFromWindowList(pid: pid_t) -> [String: Any]? {
   // The list is ordered front to back, so the first normal-layer window owned by
   // the frontmost process is the one the user is looking at.
   for window in windows {
-    guard let ownerPid = window[kCGWindowOwnerPID as String] as? pid_t, ownerPid == pid else { continue }
-    guard let layer = window[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
+    // 这些值是 NSNumber。不要写 `as? pid_t`：NSNumber 只桥接到 Int，条件转换到
+    // Int32 会一律失败，整条兜底就变成永远返回 nil。
+    guard let ownerPid = (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+          ownerPid == pid else { continue }
+    guard let layer = (window[kCGWindowLayer as String] as? NSNumber)?.intValue,
+          layer == 0 else { continue }
     guard let boundsDict = window[kCGWindowBounds as String] as? [String: Any],
           let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else {
       continue

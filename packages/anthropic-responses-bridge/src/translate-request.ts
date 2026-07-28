@@ -305,8 +305,20 @@ export function translateRequest(
     strict: false,
     parameters: t.input_schema ?? { type: 'object', properties: {} },
   }));
+  const toolChoice = toolChoiceToResponses(req.tool_choice);
+  // Anthropic `tool_choice:{type:'any'}` → Responses `required`,语义是「必须调用所提供工具
+  // 之一」。而 Responses 的 required 作用于**整个** tools 数组:附加服务端工具后,上游可以
+  // 靠跑一次 x_search 就满足 required,调用方强制要的那次本地 function call 永远不发生
+  // ——用 any 逼出客户端工具调用的流程会被静默打断。这种强制轮宁可不带服务端工具:
+  // 少一次搜索只是能力打折,丢掉被强制的工具调用是行为错误。
+  //
+  // 只对 required 生效:`{type:'tool',name}` 指名到具体 function、`auto` / `none` 都不会被
+  // 服务端工具顶替。functionTools 为空时 required 无意义(下面也不会下发 tool_choice),
+  // 不必为它牺牲搜索能力。
+  const forcedFunctionChoice = functionTools.length > 0 && toolChoice === 'required';
   // 服务端工具恒定排在 function tools 之后:位置固定 → 请求前缀逐轮稳定(缓存友好)。
-  const tools: ResponsesTool[] = [...functionTools, ...(opts.serverSideTools ?? [])];
+  const serverSideTools = forcedFunctionChoice ? [] : (opts.serverSideTools ?? []);
+  const tools: ResponsesTool[] = [...functionTools, ...serverSideTools];
 
   const out: ResponsesRequest = {
     model: opts.model,
@@ -331,8 +343,7 @@ export function translateRequest(
   // (客户端没带任何 function tool)不发这两个字段,避免 tool_choice 指向不存在的 function。
   if (functionTools.length > 0) {
     out.parallel_tool_calls = true;
-    const tc = toolChoiceToResponses(req.tool_choice);
-    if (tc) out.tool_choice = tc;
+    if (toolChoice) out.tool_choice = toolChoice;
   }
   if (opts.maxOutputTokensSupported && typeof req.max_tokens === 'number' && req.max_tokens > 0) {
     out.max_output_tokens = req.max_tokens;

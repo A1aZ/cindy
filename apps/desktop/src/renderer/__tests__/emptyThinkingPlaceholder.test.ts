@@ -105,6 +105,18 @@ describe('handleStreamEvent — omitted thinking placeholder (live)', () => {
     // 不产生任何消息,也不改动既有 state。
     expect(next.messages).toEqual(EMPTY_SESSION_STATE.messages);
   });
+
+  it('redacted 事件带 agentMeta 时仍刷新 lastAgentMeta(不展示 ≠ 丢事件)', () => {
+    const next = handleStreamEvent(EMPTY_SESSION_STATE, {
+      sessionId: SESSION_ID,
+      type: 'thinking',
+      data: { stage: 'redacted', blockId: 'tb-red-meta' },
+      agentMeta: { model: 'xai/grok-4.5', parentUuid: 'parent-1' },
+    });
+    // 消息列表仍不新增,但 mid-turn 抢救用的 lastAgentMeta 不能被静默吞掉。
+    expect(next.messages).toEqual(EMPTY_SESSION_STATE.messages);
+    expect(next.lastAgentMeta).toEqual({ model: 'xai/grok-4.5', parentUuid: 'parent-1' });
+  });
 });
 
 describe('mapServerMessages — omitted thinking placeholder (restore)', () => {

@@ -2165,7 +2165,11 @@ export function handleStreamEvent(
       // 服务端搜索)一轮能产出十几条,会把真实产出淹掉。落库仍由 main(onThinkingEvent)
       // 照旧收口、encrypted_content 也不受影响(回放走 agent 侧 transcript,不依赖这里),
       // 这里只是不展示。恢复展示 = 删掉这个提前 return,并同步 mapServerMessages 的同名过滤。
-      return state;
+      //
+      // 不展示 ≠ 丢事件:仍按本函数开头的不变量刷新 lastAgentMeta(带 agentMeta 的事件都要刷,
+      // mid-turn 抢救 assistant 累积流时拿它当 fallback)。否则这条事件携带的 model /
+      // parentUuid 会被静默吞掉。
+      return incomingMeta ? { ...state, lastAgentMeta: incomingMeta } : state;
     }
 
     case 'agent_task_update': {

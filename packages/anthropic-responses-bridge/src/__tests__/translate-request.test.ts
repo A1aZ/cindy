@@ -197,6 +197,58 @@ describe('translateRequest', () => {
     expect(out.tool_choice).toBe('auto');
   });
 
+  it('tool_choice:any(→required)时不附加服务端工具,保住「必须调用调用方 function」的语义', () => {
+    // required 作用于整个 tools 数组:带上 x_search 的话上游可以只跑搜索就满足 required,
+    // 调用方强制要的那次本地 function call 永远不发生。
+    const out = translateRequest(
+      {
+        model: 'xai/grok-4.5',
+        tools: [{ name: 'f', input_schema: { type: 'object', properties: {} } }],
+        tool_choice: { type: 'any' },
+        messages: [],
+      },
+      { model: 'grok-4.5', serverSideTools: [{ type: 'x_search' }] },
+    );
+    expect(out.tool_choice).toBe('required');
+    expect(out.tools).toEqual([
+      { type: 'function', name: 'f', description: undefined, strict: false, parameters: { type: 'object', properties: {} } },
+    ]);
+  });
+
+  it('tool_choice 指名具体 function / auto 时仍附加服务端工具(不会被顶替)', () => {
+    const named = translateRequest(
+      {
+        model: 'xai/grok-4.5',
+        tools: [{ name: 'f', input_schema: { type: 'object', properties: {} } }],
+        tool_choice: { type: 'tool', name: 'f' },
+        messages: [],
+      },
+      { model: 'grok-4.5', serverSideTools: [{ type: 'x_search' }] },
+    );
+    expect(named.tool_choice).toEqual({ type: 'function', name: 'f' });
+    expect(named.tools?.at(-1)).toEqual({ type: 'x_search' });
+
+    const auto = translateRequest(
+      {
+        model: 'xai/grok-4.5',
+        tools: [{ name: 'f', input_schema: { type: 'object', properties: {} } }],
+        tool_choice: { type: 'auto' },
+        messages: [],
+      },
+      { model: 'grok-4.5', serverSideTools: [{ type: 'x_search' }] },
+    );
+    expect(auto.tools?.at(-1)).toEqual({ type: 'x_search' });
+  });
+
+  it('tool_choice:any 但请求没带 function tool → required 无意义,服务端工具照常下发', () => {
+    const out = translateRequest(
+      { model: 'xai/grok-4.5', tool_choice: { type: 'any' }, messages: [] },
+      { model: 'grok-4.5', serverSideTools: [{ type: 'x_search' }] },
+    );
+    expect(out.tools).toEqual([{ type: 'x_search' }]);
+    expect(out.tool_choice).toBeUndefined();
+  });
+
   it('纯服务端工具轮(请求没带 function tool)也下发 tools,但不发 tool_choice / parallel_tool_calls', () => {
     const out = translateRequest(
       { model: 'xai/grok-4.5', messages: [] },

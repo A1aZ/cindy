@@ -19,6 +19,7 @@ import {
   type VoiceTimelineEvent,
 } from '@cindy/voice-input-core';
 import { createLogger } from '../logger.js';
+import { isUtilityRouteDisabled } from '../utility-model/oneShotCandidates.js';
 import { getAppCapabilities } from '../appCapabilities.js';
 import { getProviderSecretStore } from '../secrets/providerSecretStore.js';
 import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
@@ -752,6 +753,16 @@ async function resolveVoiceInputRefinerChainForRuntime(
     const profile = profilesByProvider.get(provider);
     const readiness = readinessByProvider.get(provider);
     if (!profile || !readiness) continue;
+    // 停用轴:BYOK 精修是直连的真实付费调用(CodexResponses / LiteLLM 客户端),
+    // 与 utility 档位共享真实路由供应商 —— 被停用的档位从链中剔除,交给下一个
+    // 候选(managed 模式在上方早返,由 voice-server 端裁决;PR #744 review 第十五轮)。
+    if (isUtilityRouteDisabled(profile)) {
+      log.info('refiner profile skipped: disabled in settings', {
+        profileId: profile.id,
+        model: profile.model,
+      });
+      continue;
+    }
     refinerChainProfiles.push(profile);
     refinerReadinessList.push(readiness);
   }

@@ -266,12 +266,17 @@ export class PendingCredentialSwitchService {
     // tick 完成才能保住既有「关闭即生效」时序)。注入了 resolveRoute 就必审 ——
     // agentKind 缺席不构成绕过(resolveApplyRoute 内对双 agent 保守裁决)。
     if (!this.deps.resolveRoute) {
-      this.finalizeApply(sessionId, target, { providerId: target.providerId, apply: true }, reason);
+      await this.finalizeApply(
+        sessionId,
+        target,
+        { providerId: target.providerId, apply: true },
+        reason,
+      );
       return;
     }
     const resolved = await this.resolveApplyRoute(target);
     if (this.pending.get(sessionId) !== target) return;
-    this.finalizeApply(sessionId, target, resolved, reason);
+    await this.finalizeApply(sessionId, target, resolved, reason);
   }
 
   /**
@@ -280,35 +285,40 @@ export class PendingCredentialSwitchService {
    * 提示,单独 try/catch,坏窗口等异常不允许连带吞掉唤醒或向上抛(register 侧
    * fire-and-forget,抛出去就是 unhandled rejection)。
    */
-  private finalizeApply(
+  private async finalizeApply(
     sessionId: string,
     target: PendingCredentialSwitch,
     resolved: { providerId: string | null; model?: string; effort?: string; apply: boolean },
     reason: string,
-  ): void {
-    this.pending.delete(sessionId);
-    this.clearRetry(sessionId);
+  ): Promise<void> {
     if (resolved.apply) {
       setSessionProvider(sessionId, resolved.providerId);
       // 裁决改了落地路由(reroute / 丢弃停用显式来源 / 全停换模型或清空):回写 DB
       // —— renderer 在 deferred 接受时已按请求值落盘 sessions 行,不纠正的话下一次
-      // 懒 resume 按停用路由重建(resume 免裁决)。fire-and-forget,失败仅 warn
-      // (内存 store 已是权威,DB 差异在下次显式切换时收敛)。
+      // 懒 resume 按停用路由重建(resume 免裁决)。回写必须 **await 且先于**删登记 /
+      // 唤醒队列:排队消息在唤醒后立刻按 DB 懒 resume,fire-and-forget 会让它抢在
+      // 替换模型落库前用停用目标重建(PR #744 review 第十五轮);await 期间 pending
+      // 仍在,coordinator 的 pending 门保持关闭。失败留痕后仍收口(队列不能永久
+      // 冻结;内存 store 已是权威路由,DB 差异在下次显式切换收敛)。
       const modelChanged = !!resolved.model && resolved.model !== target.model;
       if ((resolved.providerId !== target.providerId || modelChanged) && this.deps.persistRoute) {
-        void this.deps.persistRoute(sessionId, {
-          providerId: resolved.providerId,
-          ...(modelChanged
-            ? { model: resolved.model, ...(resolved.effort ? { effort: resolved.effort } : {}) }
-            : {}),
-        }).catch((err) => {
+        try {
+          await this.deps.persistRoute(sessionId, {
+            providerId: resolved.providerId,
+            ...(modelChanged
+              ? { model: resolved.model, ...(resolved.effort ? { effort: resolved.effort } : {}) }
+              : {}),
+          });
+        } catch (err) {
           this.deps.logger?.warn('pending credential switch: persist resolved route failed', {
             sessionId,
             providerId: resolved.providerId,
             model: resolved.model,
             error: err instanceof Error ? err.message : String(err),
           });
-        });
+        }
+        // await 期间用户可能改选 / 取消:本次让位,新登记有自己的收口路径。
+        if (this.pending.get(sessionId) !== target) return;
       }
       this.deps.logger?.info(`pending credential switch applied on ${reason}`, {
         sessionId,
@@ -324,6 +334,9 @@ export class PendingCredentialSwitchService {
         providerId: target.providerId,
       });
     }
+    // 删登记(解除 coordinator 的 pending 门)必须在 route 写入 + DB 回写之后。
+    this.pending.delete(sessionId);
+    this.clearRetry(sessionId);
     try {
       this.deps.onApplied?.(sessionId);
     } catch (err) {

@@ -90,14 +90,36 @@ export async function getUtilityTextCandidates(
  * 未知 transport 回退 profile.id(宁可过滤不命中,不误伤)。
  */
 function utilityProfileRouteProviderId(profile: UtilityModelProfile): string {
-  switch (profile.transport) {
+  return utilityRouteProviderIdFor(profile.transport, profile.id);
+}
+
+function utilityRouteProviderIdFor(transport: string | undefined, fallbackId: string): string {
+  switch (transport) {
     case 'codex-responses':
       return 'openai';
     case 'litellm-chat-completions':
       return 'xd';
     default:
-      return profile.id;
+      return fallbackId;
   }
+}
+
+/**
+ * 共享 utility 档位形态的直连消费方(voice-input BYOK 精修链等)复用的停用判定:
+ * 按真实路由供应商(codex-responses→openai,litellm→xd)查 override,供应商级或
+ * 该 (来源, 模型) 条目命中即视为停用(PR #744 review 第十五轮)。
+ */
+export function isUtilityRouteDisabled(profile: {
+  id: string;
+  transport?: string;
+  model: string;
+}): boolean {
+  const overrides = readModelDisableOverrides();
+  const routeProviderId = utilityRouteProviderIdFor(profile.transport, profile.id);
+  return (
+    isProviderDisabled(overrides, routeProviderId) ||
+    isModelDisabled(overrides, routeProviderId, profile.model)
+  );
 }
 
 async function resolveUtilityTextCandidates(

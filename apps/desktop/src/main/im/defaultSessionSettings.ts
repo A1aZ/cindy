@@ -16,7 +16,7 @@ import {
   type ProviderView,
 } from '@cindy/model-providers';
 
-import { pickEnabledFallbackModel } from '../maker-host/model-route-guard';
+import { pickEnabledFallbackModel, resolveLenientRoute } from '../maker-host/model-route-guard';
 
 import {
   IM_DEFAULT_EFFORT_OVERRIDES,
@@ -151,15 +151,32 @@ function pickModel(
     return { agentKind: config.agentKind, modelId: config.defaultModel };
   }
 
+  // 硬编码系统兜底同样过准入(PR #744 review 第十五轮):走到这里时该 agent 的
+  // 启用来源已全部耗尽,目录可用而硬编码模型也被停用 ⇒ 抛错走 IM 既有失败路径,
+  // 绝不让 turnRunner 拿停用模型直建付费会话;目录不可用保持旧兜底(降级窗口)。
+  const systemAgent = IM_DEFAULT_SETTINGS.agentKind;
+  const systemFallbackModel = IM_DEFAULT_SETTINGS.agents[systemAgent].model;
+  if (providers) {
+    const lenient = resolveLenientRoute(providers, systemAgent, systemFallbackModel, null);
+    if (!lenient.model) {
+      throw new Error(
+        'im default session has no enabled chat model (all models disabled in settings)',
+      );
+    }
+    log.warn('im default: all model sources exhausted; using admitted system fallback', {
+      requestedAgent,
+      channelAgent: config.agentKind,
+      channelModel: config.defaultModel,
+      fallbackModel: lenient.model,
+    });
+    return { agentKind: systemAgent, modelId: lenient.model };
+  }
   log.warn('im default: all model sources exhausted; using hardcoded system default', {
     requestedAgent,
     channelAgent: config.agentKind,
     channelModel: config.defaultModel,
   });
-  return {
-    agentKind: IM_DEFAULT_SETTINGS.agentKind,
-    modelId: IM_DEFAULT_SETTINGS.agents[IM_DEFAULT_SETTINGS.agentKind].model,
-  };
+  return { agentKind: systemAgent, modelId: systemFallbackModel };
 }
 
 function hasModel(

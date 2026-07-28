@@ -115,9 +115,21 @@ export async function resolveLenientSessionRoute(
 }
 
 /**
- * agent one-shot 兜底(help / 会话摘要)是否被停用轴挡住。
- * 带具体模型时走完整裁决;不带模型(agent 默认一击)按「该 agent 的原生默认来源
- * 被停用」判 —— 无模型的一击走 agent 原生默认路由,来源级 suspended 即不可发。
+ * agent one-shot 不带 model 时各 agent 的内部默认模型(与 maker-core base-agent
+ * OneShotOptions 文档口径一致:Claude → haiku,Codex → mini)。裁决要落到具体
+ * 默认模型上:只查来源级 suspended 会漏掉「恰好停用了这一个模型」的 override
+ * (PR #744 review 第十五轮)。
+ */
+const DEFAULT_ONESHOT_MODEL: Record<AgentKind, string> = {
+  'claude-code': 'claude-haiku-4-5',
+  codex: 'gpt-5.4-mini',
+};
+
+/**
+ * agent one-shot 兜底(help / 会话摘要 / 快照标签)是否被停用轴挡住。
+ * 带具体模型时走完整裁决;不带模型(agent 默认一击)按**该 agent 的内部默认模型**
+ * 走同一裁决,再叠加原生默认来源 suspended 检查(默认模型不在目录时裁决 pass,
+ * 来源级停用仍要拦)。
  */
 export async function isAgentOneShotRouteDisabled(
   agent: AgentKind,
@@ -127,6 +139,9 @@ export async function isAgentOneShotRouteDisabled(
     // reroute 同样视为不可发:one-shot 无法携带显式 providerId,实际派发仍会落在
     // 被停用的隐式默认来源上 —— 只有 pass 才允许(PR #744 review 第五轮)。
     return (await verdictForModelRoute(agent, model, null)).kind !== 'pass';
+  }
+  if ((await verdictForModelRoute(agent, DEFAULT_ONESHOT_MODEL[agent], null)).kind !== 'pass') {
+    return true;
   }
   let views: ProviderView[];
   try {

@@ -426,6 +426,20 @@ export async function performSessionAgentSwitch(
       await deps.closeSession(sessionId);
     }
 
+    // 停用轴:提交点重裁决(PR #744 review 第十五轮)—— parked 数据加载、handoff
+    // 构建、closeSession 都是长 await,入口裁决可能已过期。此刻拒绝仍安全:DB 未写,
+    // 旧会话即使已关也只是下一次发送按旧路由懒重建,不产生新的停用路由请求。
+    if (deps.assertModelRouteUsable) {
+      const rerouteAtCommit = await deps.assertModelRouteUsable(
+        targetAgentKind,
+        model,
+        typeof normalizedProviderId === 'string' ? normalizedProviderId : null,
+      );
+      if (rerouteAtCommit && typeof normalizedProviderId !== 'string') {
+        normalizedProviderId = rerouteAtCommit;
+      }
+    }
+
     // ---- commit point:此后切换生效 ----
     await deps.applyAgentSwitchToDb(sessionId, {
       agentKind: toDbKind,

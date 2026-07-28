@@ -18,6 +18,23 @@ function fakeView(id: string, connected: boolean): ProviderView {
   return { id, connected } as unknown as ProviderView;
 }
 
+/** 目录成员校验用的视图桩:models[agent] ∪ imageModels ∪ videoModels 只放 id。 */
+function catalogView(
+  id: string,
+  models: Partial<Record<AgentKind, string[]>>,
+  media: { image?: string[]; video?: string[] } = {},
+): ProviderView {
+  return {
+    id,
+    connected: true,
+    models: Object.fromEntries(
+      Object.entries(models).map(([agent, ids]) => [agent, (ids ?? []).map((m) => ({ id: m }))]),
+    ),
+    imageModels: (media.image ?? []).map((m) => ({ id: m, name: m })),
+    videoModels: (media.video ?? []).map((m) => ({ id: m, name: m })),
+  } as unknown as ProviderView;
+}
+
 const CREATE_SQL = `
   CREATE TABLE custom_providers (
     id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, runtimes TEXT NOT NULL DEFAULT '{}',
@@ -122,9 +139,18 @@ describe('provider:list IPC handler', () => {
 });
 
 describe('model-disable:set handler', () => {
+  /** 停用写入(disabled=true)按目录成员校验,fixture 提供 xd 的真实清单。 */
+  const xdCatalog = () => [
+    catalogView(
+      'xd',
+      { 'claude-code': ['claude-opus-5'], codex: ['chatgpt/gpt-5.5'] },
+      { image: ['seedream-5'], video: ['seedance-2'] },
+    ),
+  ];
+
   it('model 形态:写停用 override 并广播 PROVIDER_CHANGED', async () => {
     const harness = new IpcHarness();
-    const deps = makeDeps();
+    const deps = makeDeps({ listProviders: async () => xdCatalog() });
     registerProviderHandlers(harness, deps);
 
     await expect(
@@ -137,6 +163,57 @@ describe('model-disable:set handler', () => {
     ).resolves.toEqual({ ok: true });
     expect(deps.setModelsDisabled).toHaveBeenCalledWith('xd', ['claude-opus-5', 'chatgpt/gpt-5.5'], true);
     expect(deps.broadcastChanged).toHaveBeenCalledOnce();
+  });
+
+  it('专属媒体清单(imageModels/videoModels)的 id 同样是合法停用目标', async () => {
+    const harness = new IpcHarness();
+    const deps = makeDeps({ listProviders: async () => xdCatalog() });
+    registerProviderHandlers(harness, deps);
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+        kind: 'model', providerId: 'xd', modelIds: ['seedream-5', 'seedance-2'], disabled: true,
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(deps.setModelsDisabled).toHaveBeenCalledWith('xd', ['seedream-5', 'seedance-2'], true);
+  });
+
+  it('停用按目录成员校验:未知 providerId / 未知 modelId → INVALID_PARAMS,不写', async () => {
+    const harness = new IpcHarness();
+    const deps = makeDeps({ listProviders: async () => xdCatalog() });
+    registerProviderHandlers(harness, deps);
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+        kind: 'model', providerId: 'ghost', modelIds: ['claude-opus-5'], disabled: true,
+      }),
+    ).rejects.toThrow(/INVALID_PARAMS/);
+    await expect(
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+        kind: 'model', providerId: 'xd', modelIds: ['claude-opus-5', 'not-in-catalog'], disabled: true,
+      }),
+    ).rejects.toThrow(/INVALID_PARAMS/);
+    await expect(
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+        kind: 'provider', providerId: 'ghost', disabled: true,
+      }),
+    ).rejects.toThrow(/INVALID_PARAMS/);
+    expect(deps.setModelsDisabled).not.toHaveBeenCalled();
+    expect(deps.setProviderDisabled).not.toHaveBeenCalled();
+    expect(deps.broadcastChanged).not.toHaveBeenCalled();
+  });
+
+  it('恢复启用(disabled=false)不校验成员:目录漂移后仍能清掉陈旧 override', async () => {
+    const harness = new IpcHarness();
+    const deps = makeDeps({ listProviders: async () => [] });
+    registerProviderHandlers(harness, deps);
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+        kind: 'model', providerId: 'retired', modelIds: ['gone-model'], disabled: false,
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(deps.setModelsDisabled).toHaveBeenCalledWith('retired', ['gone-model'], false);
   });
 
   it('provider 形态:写供应商级停用并广播', async () => {

@@ -84,6 +84,22 @@ export async function getUtilityTextCandidates(
 }
 
 /** Resolve candidates and retain safe reasons for every skipped profile. */
+/**
+ * utility profile 的真实路由供应商 id(停用 override 的记账主体):
+ * codex-responses 经 OpenAI 订阅下单,litellm-chat-completions 经 XD 网关。
+ * 未知 transport 回退 profile.id(宁可过滤不命中,不误伤)。
+ */
+function utilityProfileRouteProviderId(profile: UtilityModelProfile): string {
+  switch (profile.transport) {
+    case 'codex-responses':
+      return 'openai';
+    case 'litellm-chat-completions':
+      return 'xd';
+    default:
+      return profile.id;
+  }
+}
+
 async function resolveUtilityTextCandidates(
   maker: Maker,
   capability: UtilityTextCapability,
@@ -93,14 +109,20 @@ async function resolveUtilityTextCandidates(
   const attempts: UtilityTextAttempt[] = [];
   // 停用轴同样约束 utility one-shot(帮助/摘要/hook 生成):停用的供应商或模型
   // 不再作为候选付费下单,链路自然落到下一个候选(PR #744 review)。
+  // 注意:profile.id 是逻辑档位键(codex-gpt-5.4-mini / litellm-gpt-5.4-mini),
+  // 而停用 override 按**目录供应商 id** 记账 —— 必须先映射到真实路由供应商
+  // (codex-responses 走 OpenAI 订阅,litellm 走 XD 网关),否则过滤恒不命中
+  // (PR #744 review 第四轮)。
   const disableOverrides = readModelDisableOverrides();
   for (const profile of profiles) {
+    const routeProviderId = utilityProfileRouteProviderId(profile);
     if (
-      isProviderDisabled(disableOverrides, profile.id) ||
-      isModelDisabled(disableOverrides, profile.id, profile.model)
+      isProviderDisabled(disableOverrides, routeProviderId) ||
+      isModelDisabled(disableOverrides, routeProviderId, profile.model)
     ) {
       log.debug('utility text candidate skipped: disabled in settings', {
-        providerId: profile.id,
+        providerId: routeProviderId,
+        profileId: profile.id,
         model: profile.model,
       });
       attempts.push(skippedAttempt(profile, 'model_unavailable'));

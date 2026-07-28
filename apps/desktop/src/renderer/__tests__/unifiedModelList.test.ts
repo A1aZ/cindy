@@ -147,6 +147,27 @@ describe('countModelsByAgent', () => {
       { agent: 'codex', on: 2, total: 2 },
     ]);
   });
+
+  it('注入停用判定(乐观覆盖口径)时以之为准,而非快照的 disabled 标志', () => {
+    // 组件把 pendingDisabled 叠加进判定:刚点「停用」快照未回来时计数即时收缩,
+    // 刚点「启用」时快照仍带 disabled 标志的行也立刻回到分母(PR #744 review 第四轮)。
+    const withDisabled = {
+      ...provider,
+      models: {
+        ...provider.models,
+        codex: [...(provider.models.codex ?? []), { ...model('banned'), disabled: true }],
+      },
+    } as ProviderView;
+    const pending: Record<string, boolean> = { shared: true, banned: false };
+    const counts = countModelsByAgent(
+      withDisabled,
+      (_agent, m) => pending[m.id] ?? m.disabled === true,
+    );
+    expect(counts).toEqual([
+      { agent: 'claude-code', on: 1, total: 1 },
+      { agent: 'codex', on: 2, total: 2 },
+    ]);
+  });
 });
 
 describe('停用轴(isRowDisabled / isCapabilityRow)', () => {

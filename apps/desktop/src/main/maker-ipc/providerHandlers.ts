@@ -606,6 +606,15 @@ export function registerProviderHandlers(
       throwIpcError('INVALID_PARAMS', 'providerId required');
     }
     if (typeof i.disabled !== 'boolean') throwIpcError('INVALID_PARAMS', 'disabled required');
+    // 目录成员校验(仅 disabled=true 的写入):落盘的是无界 key-value 文件,尺寸校验挡
+    // 不住「合法长度但不存在的 id」被批量预埋。停用必须指向当前目录里真实存在的
+    // provider / model(chat 各 agent 清单 ∪ imageModels ∪ videoModels);恢复启用是
+    // 删条目,故意不校验 —— 目录漂移后用户仍能清掉指向已下架 id 的陈旧 override。
+    const requireCatalogProvider = async (providerId: string): Promise<ProviderView> => {
+      const provider = (await deps.listProviders()).find((p) => p.id === providerId);
+      if (!provider) throwIpcError('INVALID_PARAMS', `unknown providerId "${providerId}"`);
+      return provider;
+    };
     if (i.kind === 'model') {
       if (
         !Array.isArray(i.modelIds) ||
@@ -617,8 +626,26 @@ export function registerProviderHandlers(
       ) {
         throwIpcError('INVALID_PARAMS', 'modelIds must be a bounded non-empty string[]');
       }
-      deps.setModelsDisabled(i.providerId, i.modelIds as string[], i.disabled);
+      const modelIds = i.modelIds as string[];
+      if (i.disabled) {
+        const provider = await requireCatalogProvider(i.providerId);
+        const known = new Set<string>();
+        for (const list of Object.values(provider.models)) {
+          for (const m of list ?? []) known.add(m.id);
+        }
+        for (const m of provider.imageModels ?? []) known.add(m.id);
+        for (const m of provider.videoModels ?? []) known.add(m.id);
+        const unknown = modelIds.filter((id) => !known.has(id));
+        if (unknown.length > 0) {
+          throwIpcError(
+            'INVALID_PARAMS',
+            `unknown modelIds for provider "${i.providerId}": ${unknown.slice(0, 5).join(', ')}`,
+          );
+        }
+      }
+      deps.setModelsDisabled(i.providerId, modelIds, i.disabled);
     } else if (i.kind === 'provider') {
+      if (i.disabled) await requireCatalogProvider(i.providerId);
       deps.setProviderDisabled(i.providerId, i.disabled);
     } else {
       throwIpcError('INVALID_PARAMS', 'kind must be "model" or "provider"');

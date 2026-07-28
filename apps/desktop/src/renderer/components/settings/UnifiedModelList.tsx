@@ -210,8 +210,15 @@ export function isRowDiverged(providerId: string, row: UnionModelRow): boolean {
 /**
  * 每个 Agent 各自的模型显示数;UI 必须保留 Agent 维度,不能汇总成模型条目总数。
  * 口径 = 对话模型(能力模型没有显示轴)且未停用(停用行不可显示,不计入分母)。
+ * `isDisabled` 允许调用方注入停用判定(组件里 = 快照标志叠加 pendingDisabled 乐观
+ * 覆盖,否则乐观窗口内「全部显示/隐藏」的方向与分母陈旧,PR #744 review);缺省读
+ * 快照的 model.disabled。
  */
-export function countModelsByAgent(provider: ProviderView): Array<{
+export function countModelsByAgent(
+  provider: ProviderView,
+  isDisabled: (agent: AgentKind, model: CatalogModel) => boolean = (_agent, model) =>
+    model.disabled === true,
+): Array<{
   agent: AgentKind;
   on: number;
   total: number;
@@ -220,7 +227,7 @@ export function countModelsByAgent(provider: ProviderView): Array<{
     const models = (provider.models[agent] ?? []).filter(
       (model) =>
         isAgentSelectableModel(model, { userProvider: provider.source === 'user' }) &&
-        model.disabled !== true,
+        !isDisabled(agent, model),
     );
     return {
       agent,
@@ -368,7 +375,16 @@ export function UnifiedModelList({
   // 每个 Agent 单独计数。不能把「模型 × Agent」压成一个总数，否则 6 个双端模型
   // 会显示为 12，用户会自然地把它误读成 12 个模型。
   // visibilityVersion 是 countModelsByAgent 读取的外部 store 失效信号，必须进依赖数组。
-  const agentCounts = useMemo(() => countModelsByAgent(provider), [provider, visibilityVersion]);
+  // 停用判定叠加 pendingDisabled(按规范化行 key):乐观窗口内计数/allOn 与行迁移同步。
+  const agentCounts = useMemo(
+    () =>
+      countModelsByAgent(
+        provider,
+        (agent, m) =>
+          pendingDisabled[canonicalModelKey(provider, agent, m.id)] ?? m.disabled === true,
+      ),
+    [provider, visibilityVersion, pendingDisabled],
+  );
   const totalModelsAcrossAgents = agentCounts.reduce((sum, count) => sum + count.total, 0);
   const allOn = totalModelsAcrossAgents > 0 && agentCounts.every((count) => count.on === count.total);
 
@@ -396,8 +412,8 @@ export function UnifiedModelList({
         .filter(
           (m) =>
             isAgentSelectableModel(m, { userProvider: provider.source === 'user' }) &&
-            m.disabled !== true &&
-            pendingDisabled[canonicalModelKey(provider, agent, m.id)] !== true,
+            (pendingDisabled[canonicalModelKey(provider, agent, m.id)] ?? m.disabled === true) !==
+              true,
         )
         .map((m) => m.id);
       setManyVisibility(agent, provider.id, ids, next);

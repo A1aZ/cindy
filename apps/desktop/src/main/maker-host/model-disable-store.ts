@@ -30,6 +30,14 @@ interface ModelAccessPrefs {
 
 const DEFAULTS: ModelAccessPrefs = { disabledModels: {}, disabledProviders: {} };
 
+/**
+ * 单 section 条目总量硬上限(深防线,PR #744 review):正常路径已有 IPC 边界的尺寸 +
+ * 目录成员双重校验,这里兜的是「绕过 IPC 直改文件 / 未来新增写入口漏校验」——超限的
+ * 新增写入被丢弃并告警,防止这份同步读写的 JSON 无界膨胀拖死 main。上限取目录现实
+ * 规模(数百)的一个数量级以上,正常用户永远碰不到。
+ */
+const MAX_ENTRIES_PER_SECTION = 4096;
+
 /** 只收 value === true 的字符串 key 条目;其它形态(false / 非布尔 / 空 key)一律丢弃 = 启用。 */
 function sanitizeSection(raw: unknown): Record<string, true> {
   const out: Record<string, true> = {};
@@ -73,17 +81,32 @@ export function setModelsDisabled(
   if (!providerId || modelIds.length === 0) return;
   store.invalidateIfChanged();
   const disabledModels = { ...store.read().disabledModels };
+  let entryCount = Object.keys(disabledModels).length;
   let changed = false;
+  let dropped = 0;
   for (const modelId of modelIds) {
     if (!modelId) continue;
     const key = modelDisableKey(providerId, modelId);
     if (disabled && disabledModels[key] !== true) {
+      if (entryCount >= MAX_ENTRIES_PER_SECTION) {
+        dropped += 1;
+        continue;
+      }
       disabledModels[key] = true;
+      entryCount += 1;
       changed = true;
     } else if (!disabled && key in disabledModels) {
       delete disabledModels[key];
+      entryCount -= 1;
       changed = true;
     }
+  }
+  if (dropped > 0) {
+    log.warn('model disable entries dropped: section at hard cap', {
+      providerId,
+      dropped,
+      cap: MAX_ENTRIES_PER_SECTION,
+    });
   }
   if (!changed) return;
   store.writePatch({ disabledModels });
@@ -99,6 +122,13 @@ export function setProviderDisabled(providerId: string, disabled: boolean): void
   store.invalidateIfChanged();
   const disabledProviders = { ...store.read().disabledProviders };
   if (disabled && disabledProviders[providerId] !== true) {
+    if (Object.keys(disabledProviders).length >= MAX_ENTRIES_PER_SECTION) {
+      log.warn('provider disable entry dropped: section at hard cap', {
+        providerId,
+        cap: MAX_ENTRIES_PER_SECTION,
+      });
+      return;
+    }
     disabledProviders[providerId] = true;
   } else if (!disabled && providerId in disabledProviders) {
     delete disabledProviders[providerId];

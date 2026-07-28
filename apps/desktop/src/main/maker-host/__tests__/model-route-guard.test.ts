@@ -92,6 +92,23 @@ describe('checkModelRoute', () => {
     expect(checkModelRoute(v, 'claude-code', 'claude-opus-5', null)).toEqual({ kind: 'pass' });
   });
 
+  it('能力模型(图像/视频等分组)⇒ reject capability-model(隐式与显式点名同判)', () => {
+    // 老控制端可经 allowlisted 通道直接点名图像模型当对话模型 —— 选择器的硬排除
+    // 帮不上,必须在同一边界拒绝(PR #744 review 第四轮)。
+    const catalog = {
+      providers: [provider('xd', [model('seedream-5', { group: 'image' })])],
+    } as Catalog;
+    const v = buildRegistry(catalog, { xd: true }, {});
+    expect(checkModelRoute(v, 'claude-code', 'seedream-5', null)).toEqual({
+      kind: 'reject',
+      reason: 'capability-model',
+    });
+    expect(checkModelRoute(v, 'claude-code', 'seedream-5', 'xd')).toEqual({
+      kind: 'reject',
+      reason: 'capability-model',
+    });
+  });
+
   it('供应商级停用与模型级同语义:点名 suspended 来源 reject;默认落点 suspended 且无替代 ⇒ reject', () => {
     expect(
       checkModelRoute(views({ disabledProviders: { xd: true } }), 'claude-code', 'claude-opus-5', 'xd'),

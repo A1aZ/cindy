@@ -23,6 +23,7 @@
 import {
   effectiveSourceIdForModel,
   getModel,
+  isAgentSelectableModel,
   nativeDefaultSourceId,
   providerOffersModel,
   sourcesForModel,
@@ -33,7 +34,10 @@ import {
 export type ModelRouteVerdict =
   | { kind: 'pass' }
   | { kind: 'reroute'; providerId: string }
-  | { kind: 'reject'; reason: 'model-disabled' | 'explicit-source-disabled' };
+  | {
+      kind: 'reject';
+      reason: 'model-disabled' | 'explicit-source-disabled' | 'capability-model';
+    };
 
 /** 该来源下这份 (model, agent) 拷贝是否被停用(含供应商级)。 */
 function copyDisabled(p: ProviderView, modelId: string, agent: AgentKind): boolean {
@@ -50,6 +54,16 @@ export function checkModelRoute(
     (p) => p.agents.includes(agent) && providerOffersModel(p, modelId, agent),
   );
   if (offering.length === 0) return { kind: 'pass' };
+
+  // 能力模型(图像/音频/视频/向量)不能当 agent 对话模型:目录里没有任何一份拷贝是
+  // agent 可选条目时直接拒绝 —— 选择器已硬排除,但 create/set-model/switch 这些
+  // allowlisted 通道可被老控制端直接点名,maker 侧的 availableModels 派生也不做
+  // 该分类,必须在同一边界拦(PR #744 review 第四轮)。
+  const anyAgentSelectable = offering.some((p) => {
+    const copy = getModel(p, modelId, agent);
+    return !!copy && isAgentSelectableModel(copy, { userProvider: p.source === 'user' });
+  });
+  if (!anyAgentSelectable) return { kind: 'reject', reason: 'capability-model' };
 
   if (providerId) {
     const explicit = offering.find((p) => p.id === providerId);

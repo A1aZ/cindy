@@ -186,6 +186,22 @@ export interface MakerScheduleRunnerDeps {
   onSessionCreated?: (sessionId: string) => void;
   /** 可选:撞忙排队桥。未注入时心跳撞忙回退为顺延(deferFire)旧行为。 */
   schedulerQueue?: SchedulerQueueDeps;
+  /**
+   * 停用轴裁决(生产 = maker-host/model-route-guard-live 的 verdictForModelRoute)。
+   * scheduler 的每次 fire 都是新的付费调用,不属于「运行中的会话不打断」豁免:
+   * 保存过的路由若已被用户停用,新建会话必须拒绝、心跳的模型切换必须跳过 ——
+   * 否则停用后自动化仍夜复一夜地经停用路由扣费(PR #744 review)。
+   * 缺省 = 不裁决(测试最小 harness)。
+   */
+  checkModelRoute?: (
+    agent: AgentKind,
+    model: string,
+    providerId: string | null,
+  ) => Promise<
+    | { kind: 'pass' }
+    | { kind: 'reroute'; providerId: string }
+    | { kind: 'reject'; reason: string }
+  >;
 }
 
 /** createTurnCompletionWaiter 的返回:turn 终态等待 + 文本缓冲 + 幂等摘除。 */
@@ -582,7 +598,19 @@ export class MakerScheduleRunner implements ScheduleRunner {
           : schedule.fastMode
         : undefined;
     const explicitProviderId = schedule.providerId?.trim() ? schedule.providerId.trim() : null;
-    const createProviderId = explicitProviderId ?? (isHeartbeat ? heartbeatProviderId : null);
+    let createProviderId = explicitProviderId ?? (isHeartbeat ? heartbeatProviderId : null);
+    // 停用轴准入(PR #744 review):每次 fire 都是新的付费调用,不属于「运行中的会话
+    // 不打断」豁免 —— 保存过的路由被用户停用后,本次 run 必须以明确错误失败(run 历史
+    // 可见),不能继续经停用路由扣费;隐式默认落点被停用而有启用替代拷贝时改路由过去。
+    if (this.deps.checkModelRoute) {
+      const verdict = await this.deps.checkModelRoute(effectiveAgentKind, model, createProviderId);
+      if (verdict.kind === 'reject') {
+        throw new Error(
+          `schedule route unavailable: model "${model}" is disabled in settings (${verdict.reason})`,
+        );
+      }
+      if (verdict.kind === 'reroute' && !createProviderId) createProviderId = verdict.providerId;
+    }
     // issue #456:未门控入口(定时任务 fire)按所选模型自报的 supported efforts 把 effort
     // clamp 到最高兼容档,避免把模型不支持的档(如 gpt-5.5 + max/ultra)透给上游被拒。
     // 模型已声明支持的档原样保留(不降级 —— 保 #352 交互式口径);schedule 配置本身不回写,
@@ -1393,11 +1421,26 @@ export class MakerScheduleRunner implements ScheduleRunner {
     const modelChanged = explicitModel !== undefined && targetModel !== live.model;
     let modelApplied = true;
     if (modelChanged) {
-      try {
-        await live.setModel(targetModel);
-      } catch (err) {
-        modelApplied = false;
-        this.deps.logger.warn?.('[runner] queued heartbeat setModel failed (non-fatal)', err);
+      // 停用轴准入(PR #744 review):排队分支在 fire 主路径的准入点之前早退,切换
+      // 目标要单独过裁决 —— 被停用则跳过切换、继续跑 live 当前模型(不打断在跑
+      // 的会话),warn 留痕;下方 runtimeModel 按 live.model clamp,口径自洽。
+      if (this.deps.checkModelRoute) {
+        const verdict = await this.deps.checkModelRoute(live.agentKind, targetModel, null);
+        if (verdict.kind === 'reject') {
+          modelApplied = false;
+          this.deps.logger.warn?.(
+            '[runner] queued heartbeat target model disabled in settings; keeping live model',
+            { scheduleId: schedule.id, targetModel },
+          );
+        }
+      }
+      if (modelApplied) {
+        try {
+          await live.setModel(targetModel);
+        } catch (err) {
+          modelApplied = false;
+          this.deps.logger.warn?.('[runner] queued heartbeat setModel failed (non-fatal)', err);
+        }
       }
     }
     // issue #456:排队派发路径与直发路径同口径 —— 按**实际会运行的模型**能力把 effort clamp

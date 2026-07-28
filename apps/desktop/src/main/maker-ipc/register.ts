@@ -437,7 +437,7 @@ import {
   syncModelVisibilityMirror,
 } from '../maker-host/model-visibility-mirror.js';
 import { setModelsDisabled, setProviderDisabled } from '../maker-host/model-disable-store.js';
-import { checkModelRoute } from '../maker-host/model-route-guard.js';
+import { verdictForModelRoute } from '../maker-host/model-route-guard-live.js';
 import { setClaudeProxySessionIdResolver } from '../maker-host/anthropic-compat-proxy-host.js';
 import {
   clearClaudeSessionBackgroundActivity,
@@ -3978,19 +3978,15 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     model: string,
     providerId: string | null,
   ): Promise<string | undefined> {
-    let views: ProviderView[];
-    try {
-      views = await getDesktopProviderService().listProviders();
-    } catch {
-      return undefined;
-    }
-    const verdict = checkModelRoute(views, agent, model, providerId);
+    const verdict = await verdictForModelRoute(agent, model, providerId);
     if (verdict.kind === 'reject') {
       throwIpcError(
         'INVALID_PARAMS',
         verdict.reason === 'explicit-source-disabled'
           ? `provider "${providerId}" is disabled for model "${model}" in settings`
-          : `model "${model}" is disabled in settings`,
+          : verdict.reason === 'capability-model'
+            ? `model "${model}" is not an agent chat model`
+            : `model "${model}" is disabled in settings`,
       );
     }
     return verdict.kind === 'reroute' ? verdict.providerId : undefined;

@@ -46,6 +46,7 @@ import { useDeviceLinkModelMirrorVersion } from '@/state/deviceLinkModelMirror';
 import {
   connectedProvidersForAgent,
   actualSourceIdForModel,
+  effectiveSourceIdForModel,
   getModel,
   modelSupportsFastMode,
   providerOffersModel,
@@ -293,6 +294,8 @@ interface ModelSelectorProps {
    * 其他消费方(ScheduleChips / ImDefaultSettingsSection / CreateWorkerPopover 等)不传 = 行为不变。
    */
   sourceDisconnected?: boolean;
+  /** 语义同 ModelSelectorContentProps.actualRoute(仅已建会话传 true)。 */
+  actualRoute?: boolean;
   /** Fast Mode 状态 + 回调(从工具栏搬进 Edit 配置列)。不传 → 配置列不显示 Fast 开关。 */
   fastMode?: boolean;
   onFastModeChange?: (enabled: boolean) => void | Promise<void>;
@@ -397,6 +400,15 @@ interface ModelSelectorContentProps {
   excludeChatBridgedCodex?: boolean;
   /** 选中后是否自动关闭。Popover 场景传入,内嵌场景不传。 */
   onDismiss?: () => void;
+  /**
+   * 当前来源解析口径。true = 实际路由口径(actualSourceIdForModel,不剔除停用拷贝)
+   * —— 仅**已建会话**的选择器传(ChatInput sessionId 在时):运行中会话的图标/价格/
+   * Fast/选中行豁免必须跟真实扣费路由。缺省 false = 准入口径
+   * (effectiveSourceIdForModel):草稿 / worker / IM 默认 / hook 配置等**新路由
+   * 选择**场景,高亮与元数据必须指向真正会被路由到的启用来源
+   * (PR #744 review 第十轮)。
+   */
+  actualRoute?: boolean;
   /** 语义同 ModelSelectorProps.maxVisibleModelRows。 */
   maxVisibleModelRows?: number;
   /** 模型信息 / 选项浮层的额外样式。供嵌套在高层级 overlay 中的调用方覆盖默认 z-index。 */
@@ -460,6 +472,7 @@ function ModelSelectorContentView({
   excludeSubscriptionDirect,
   excludeChatBridgedCodex,
   onDismiss,
+  actualRoute = false,
   maxVisibleModelRows,
   overlayContentClassName,
   currentProviderId,
@@ -473,6 +486,8 @@ function ModelSelectorContentView({
   agentSwitch,
   pricing,
 }: ModelSelectorContentProps & { pricing: ModelPricingCatalog | null }) {
+  // 当前来源解析器:已建会话 = 实际路由口径(含停用拷贝),其余 = 准入口径。
+  const resolveCurrentSourceId = actualRoute ? actualSourceIdForModel : effectiveSourceIdForModel;
   const { t } = useTranslation();
   const constrainedListMaxHeight = modelListMaxHeightForRows(maxVisibleModelRows);
   // session-agent-switch:两步式引擎切换的浏览态。browseVendor 初始 = 会话当前引擎;
@@ -690,9 +705,9 @@ function ModelSelectorContentView({
   const activeSourceId = useMemo(
     () =>
       currentAgentKind
-        ? actualSourceIdForModel(providers, currentProviderId, modelId, currentAgentKind)
+        ? resolveCurrentSourceId(providers, currentProviderId, modelId, currentAgentKind)
         : null,
-    [providers, currentProviderId, modelId, currentAgentKind],
+    [providers, currentProviderId, modelId, currentAgentKind, resolveCurrentSourceId],
   );
 
   // 行级 Fast 可编辑性 = agent 能力 × 该(供应商, 模型)条目的 supportsFastMode。
@@ -718,7 +733,7 @@ function ModelSelectorContentView({
     const effectiveProviderId =
       providerId ??
       (currentAgentKind
-        ? actualSourceIdForModel(providers, currentProviderId, id, currentAgentKind)
+        ? resolveCurrentSourceId(providers, currentProviderId, id, currentAgentKind)
         : null);
     const quote = getModelPriceQuote(pricing, effectiveProviderId, id);
     if (effectiveProviderId === 'xd' && (!quote || quote.source === 'gateway')) {
@@ -1031,9 +1046,9 @@ function ModelSelectorContentView({
     if (!editingModel || !currentAgentKind) return undefined;
     const providerId =
       editingProviderId ??
-      actualSourceIdForModel(providers, currentProviderId, editingModel.id, currentAgentKind);
+      resolveCurrentSourceId(providers, currentProviderId, editingModel.id, currentAgentKind);
     return providerId ? providers.find((provider) => provider.id === providerId) : undefined;
-  }, [editingModel, currentAgentKind, editingProviderId, providers, currentProviderId]);
+  }, [editingModel, currentAgentKind, editingProviderId, providers, currentProviderId, resolveCurrentSourceId]);
   const editingPricePresentation = editingModel
     ? pricePresentationOf(editingProvider?.id ?? editingProviderId, editingModel.id)
     : null;
@@ -1614,6 +1629,7 @@ export function ModelSelector({
   ariaContext,
   currentProviderId,
   sourceDisconnected = false,
+  actualRoute = false,
   onProviderChange,
   onNavigateToProviders,
   agentSwitch,
@@ -1721,9 +1737,9 @@ export function ModelSelector({
   const activeSourceId = useMemo<string | null>(
     () =>
       currentAgentKind
-        ? actualSourceIdForModel(providers, currentProviderId, modelId, currentAgentKind)
+        ? (actualRoute ? actualSourceIdForModel : effectiveSourceIdForModel)(providers, currentProviderId, modelId, currentAgentKind)
         : null,
-    [providers, currentAgentKind, currentProviderId, modelId],
+    [providers, currentAgentKind, currentProviderId, modelId, actualRoute],
   );
   // 空態:当前模型一个已连接来源都没有 → trigger 改「连接来源」CTA。
   // device-link 远程会话不走此 CTA(控制端无法替被控端连来源;hasConnectedSource 是本机口径)。
@@ -2041,6 +2057,7 @@ export function ModelSelector({
       excludeSubscriptionDirect={excludeSubscriptionDirect}
       excludeChatBridgedCodex={excludeChatBridgedCodex}
       onDismiss={() => setOpen(false)}
+      actualRoute={actualRoute}
       maxVisibleModelRows={maxVisibleModelRows}
       currentProviderId={currentProviderId}
       onProviderChange={onProviderChange}

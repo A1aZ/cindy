@@ -1459,6 +1459,21 @@ export class MakerScheduleRunner implements ScheduleRunner {
         currentCodexProxyActive: live.codexProxyActive,
       })
     ) {
+      // 早退 = 本轮沿用 live 当前路由派发:这条保留路由自己也要过停用裁决 ——
+      // 目标来源启用但需要凭证切换、而**当前**来源在排队等待期间被停用时,不裁决
+      // 就成了绕过口,照发等于继续经停用路由扣费(PR #744 review 第十轮)。
+      if (this.deps.checkModelRoute) {
+        const retained = await this.deps.checkModelRoute(
+          live.agentKind,
+          live.model,
+          currentProviderId,
+        );
+        if (retained.kind === 'reject') {
+          throw new QueuedRouteDisabledError(
+            `schedule route unavailable: current session route (model "${live.model}") is disabled in settings (${retained.reason})`,
+          );
+        }
+      }
       this.deps.logger.info?.(
         '[runner] queued heartbeat routing needs credential mode switch; keeping session routing this round',
         { scheduleId: schedule.id, sessionId: live.id, fromModel: live.model, toModel: targetModel },

@@ -6612,6 +6612,15 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     // 停用轴:deferred 切换收口前重裁决(SET_MODEL 时刻裁决过,但生效可能在数分钟
     // 后,期间目标可能被停用;PR #744 review 第七轮)。
     checkRoute: verdictForModelRoute,
+    // 裁决改道 / 清空显式来源时回写 DB + 广播 patch:renderer 在 deferred 接受时已按
+    // 请求值落盘,不纠正则下一次懒 resume 按停用来源重建(PR #744 review 第十轮)。
+    persistRoute: async (sessionId, route) => {
+      await getDbClient()
+        .drizzle.update(sessions)
+        .set({ providerId: route.providerId })
+        .where(eq(sessions.id, sessionId));
+      broadcastSessionPatched(sessionId, { providerId: route.providerId });
+    },
     logger: log,
   });
   pendingCredentialSwitchHolder = pendingCredentialSwitchService;

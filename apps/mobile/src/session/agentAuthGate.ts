@@ -30,7 +30,12 @@ export interface AgentAuthGateInput {
 /** 判定某 agent 在被控端是否有已连接来源;不确定时回 'unknown'(调用方不拦截)。 */
 export function agentAuthGateVerdict(input: AgentAuthGateInput): AgentAuthGateVerdict {
   if (input.loading || input.error !== null || input.providers.length === 0) return 'unknown';
-  return connectedProvidersForAgent(input.providers, input.agentKind).length > 0
+  // includeSuspended:本门禁只回答「凭证还连着吗」。供应商级停用(suspended)是
+  // 准入轴,不打断已建会话 —— 全部来源被停用时把发送判成 unauthenticated 会误堵
+  // 运行中会话的发送路径(停用的准入拦截由被控端 main 的路由守卫负责,
+  // PR #744 review 第十轮)。
+  return connectedProvidersForAgent(input.providers, input.agentKind, { includeSuspended: true })
+    .length > 0
     ? 'ready'
     : 'unauthenticated';
 }

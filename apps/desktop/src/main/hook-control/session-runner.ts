@@ -48,6 +48,7 @@ import {
 
 import { tapWindowBroadcast } from '../device-link/broadcast-tap.js';
 import { getMaker } from '../maker-host/index.js';
+import { resolveLenientSessionRoute } from '../maker-host/model-route-guard-live.js';
 import {
   wireSessionToIpc,
   isSessionInTurn,
@@ -160,6 +161,28 @@ async function resolveNewSessionConfig(
   const providerId = providers
     ? effectiveSourceIdForModel(providers, preferredProviderId, resolved.model, resolved.agentKind)
     : resolved.providerId;
+  if (!providers) {
+    // 目录故障窗口的停用收口(PR #744 review 第十轮):冻结的 availableModels 不带
+    // 停用标志、saved provider 也未经校验 —— 走共享宽松降级(其目录故障分支 =
+    // override-only 保守裁决,只凭本地 override 文件判):命中即逐级丢弃;模型被
+    // override 判死时抛错交给 hook 既有失败路径,绝不在故障窗口直建停用路由的付费会话。
+    const lenient = await resolveLenientSessionRoute(
+      resolved.agentKind,
+      resolved.model,
+      providerId ?? null,
+    );
+    if (!lenient.model) {
+      throw new Error(
+        'hook session route unavailable: model disabled in settings (catalog outage window)',
+      );
+    }
+    if (lenient.degraded) {
+      log.warn(
+        `hook saved route degraded during catalog outage: model=${resolved.model} providerId=${providerId ?? 'null'}`,
+      );
+    }
+    return { ...resolved, model: lenient.model, providerId: lenient.providerId };
+  }
   return { ...resolved, providerId };
 }
 

@@ -78,6 +78,14 @@ export interface PendingCredentialSwitchDeps {
     | { kind: 'reroute'; providerId: string }
     | { kind: 'reject'; reason: string }
   >;
+  /**
+   * 把收口裁决后的实际 route 持久化(生产 = 直写 sessions.provider_id + 广播
+   * sessions:patched)。renderer 在 deferred 被接受那一刻已按**请求值**落盘 DB;
+   * 收口裁决改道 / 丢弃被停用的显式来源时必须回写实际值 —— 否则下一次懒 resume
+   * 按 DB 里的停用来源重建(resume 免裁决,PR #744 review 第十轮)。缺席 = 只写
+   * 内存 store(测试最小 harness)。
+   */
+  persistRoute?: (sessionId: string, route: { providerId: string | null }) => Promise<void>;
   /** 自愈兜底重试间隔覆写(测试用)。 */
   retryDelayMs?: number;
   logger?: {
@@ -214,7 +222,13 @@ export class PendingCredentialSwitchService {
       };
       for (const agent of agents) {
         const laddered = await this.ladderVerdict(checkRoute, agent, target);
-        if (!laddered.apply) return laddered;
+        if (!laddered.apply) {
+          // 确定性全停(所有拷贝被停用):改为「显式来源清空」落地(apply=true,
+          // providerId=null)—— 不能保留 DB 里由 renderer 预写的停用来源钉住下一次
+          // 懒 resume(resume 免裁决);模型本身已死,清成隐式路由是最小错状态
+          // (PR #744 review 第十轮)。
+          return { providerId: null, apply: true };
+        }
         if (laddered.providerId !== target.providerId) resolved = laddered;
       }
       return resolved;
@@ -283,15 +297,30 @@ export class PendingCredentialSwitchService {
     this.clearRetry(sessionId);
     if (resolved.apply) {
       setSessionProvider(sessionId, resolved.providerId);
+      // 裁决改了落地来源(reroute / 丢弃停用显式来源 / 全停清空):回写 DB ——
+      // renderer 在 deferred 接受时已按请求值落盘 sessions.provider_id,不纠正的话
+      // 下一次懒 resume 按停用来源重建(resume 免裁决)。fire-and-forget,失败仅
+      // warn(内存 store 已是权威,DB 差异在下次显式切换时收敛)。
+      if (resolved.providerId !== target.providerId && this.deps.persistRoute) {
+        void this.deps.persistRoute(sessionId, { providerId: resolved.providerId }).catch(
+          (err) => {
+            this.deps.logger?.warn('pending credential switch: persist resolved route failed', {
+              sessionId,
+              providerId: resolved.providerId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          },
+        );
+      }
       this.deps.logger?.info(`pending credential switch applied on ${reason}`, {
         sessionId,
         model: target.model,
         providerId: resolved.providerId,
       });
     } else {
-      // 目标在等待期间被停用且无启用替代:route 不写(不把停用来源写回 store),
-      // 登记照常收口 —— 队列必须解冻,广播照发让 renderer 清「任务结束后生效」标记。
-      this.deps.logger?.warn('pending credential switch target disabled in settings; route not applied', {
+      // 复核异常(唯一的 apply=false 情形):route 不写不回写,登记照常收口 ——
+      // 队列必须解冻,广播照发让 renderer 清「任务结束后生效」标记。
+      this.deps.logger?.warn('pending credential switch target not applied', {
         sessionId,
         model: target.model,
         providerId: target.providerId,

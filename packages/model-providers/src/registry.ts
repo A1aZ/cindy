@@ -176,11 +176,25 @@ export function providersForAgent(views: ProviderView[], agent: AgentKind): Prov
   return views.filter((p) => hasEnabledAgentRuntime(p, agent));
 }
 
-/** 该 agent 已连接的供应商 —— 模型选择器「来源栏」用。停用(suspended)的供应商不可路由,一并剔除。 */
-export function connectedProvidersForAgent(views: ProviderView[], agent: AgentKind): ProviderView[] {
+/**
+ * 该 agent 已连接的供应商 —— 模型选择器「来源栏」用。停用(suspended)的供应商不可
+ * 作为新路由,默认一并剔除。`includeSuspended` 保留 suspended 来源 —— 给**已建会话**
+ * 的鉴权/发送门禁用(运行中会话不因停用打断,门禁只回答「凭证还连着吗」,把停用当
+ * 未鉴权会误禁发送;PR #744 review 第十轮)。新路由消费方不要传。
+ */
+export function connectedProvidersForAgent(
+  views: ProviderView[],
+  agent: AgentKind,
+  opts: { includeSuspended?: boolean } = {},
+): ProviderView[] {
   // 两道正交的剔除:runtime 级 disabled(目录 routing 声明,上游 #526)与用户的
   // 供应商级停用(suspended,model-disable-store)—— 任一命中都不可路由。
-  return views.filter((p) => p.connected && !p.suspended && hasEnabledAgentRuntime(p, agent));
+  return views.filter(
+    (p) =>
+      p.connected &&
+      (opts.includeSuspended === true || !p.suspended) &&
+      hasEnabledAgentRuntime(p, agent),
+  );
 }
 
 /** 该供应商是否在某 agent 下提供某 model id。 */

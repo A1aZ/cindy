@@ -38,6 +38,9 @@ function createHarness(
   const closeSession = vi.fn(async (_sessionId: string) => {});
   const broadcastApplied = vi.fn<NonNullable<PendingCredentialSwitchDeps['broadcastApplied']>>();
   const onApplied = vi.fn<NonNullable<PendingCredentialSwitchDeps['onApplied']>>();
+  const persistRoute = vi.fn<NonNullable<PendingCredentialSwitchDeps['persistRoute']>>(
+    async () => {},
+  );
   const service = new PendingCredentialSwitchService({
     maker: {
       listActiveSessions: () => sessions,
@@ -45,10 +48,11 @@ function createHarness(
     },
     broadcastApplied,
     onApplied,
+    persistRoute,
     ...(opts?.checkRoute ? { checkRoute: opts.checkRoute } : {}),
     ...(opts?.retryDelayMs !== undefined ? { retryDelayMs: opts.retryDelayMs } : {}),
   });
-  return { service, closeSession, broadcastApplied, onApplied, sessions };
+  return { service, closeSession, broadcastApplied, onApplied, persistRoute, sessions };
 }
 
 describe('PendingCredentialSwitchService', () => {
@@ -288,7 +292,7 @@ describe('PendingCredentialSwitchService', () => {
       expect(h.onApplied).toHaveBeenCalledWith(sessionId);
     });
 
-    it('目标模型全部拷贝被停用 ⇒ route 不写,但登记收口、队列解冻、广播照发', async () => {
+    it('目标模型全部拷贝被停用 ⇒ 显式来源清空(store + DB 回写),登记收口、队列解冻', async () => {
       const sessionId = rememberSession('pending-switch-revalidate-reject');
       setSessionProvider(sessionId, 'openai');
       const checkRoute = vi.fn(async () => ({ kind: 'reject', reason: 'model-disabled' } as const));
@@ -305,9 +309,16 @@ describe('PendingCredentialSwitchService', () => {
       await h.service.onTurnSettled(sessionId);
 
       expect(h.service.has(sessionId)).toBe(false);
-      expect(getSessionProvider(sessionId)).toBe('openai'); // 停用来源没被写进 store
+      // 停用来源不落地:清成隐式路由(renderer 已把停用来源预写进 DB,必须回写纠正,
+      // 否则下一次懒 resume 按停用来源重建 —— resume 免裁决)。
+      expect(getSessionProvider(sessionId)).toBeNull();
+      expect(h.persistRoute).toHaveBeenCalledWith(sessionId, { providerId: null });
       expect(h.onApplied).toHaveBeenCalledWith(sessionId); // 队列必须解冻
-      expect(h.broadcastApplied).toHaveBeenCalledTimes(1);
+      expect(h.broadcastApplied).toHaveBeenCalledWith({
+        sessionId,
+        model: 'claude-opus-5',
+        providerId: null,
+      });
     });
 
     it('复核异常 ⇒ 保守不写 route(登记照常收口、队列解冻),不把异常当放行', async () => {
@@ -367,7 +378,8 @@ describe('PendingCredentialSwitchService', () => {
       h2.service.register(sessionId2, { model: 'gpt-5.5', providerId: 'xd' });
       await h2.service.onTurnSettled(sessionId2);
       expect(h2.service.has(sessionId2)).toBe(false);
-      expect(getSessionProvider(sessionId2)).toBe('openai'); // 停用来源没被写回
+      // reject 一侧生效:停用来源不落地,显式来源清空(全停语义,同上一用例)。
+      expect(getSessionProvider(sessionId2)).toBeNull();
       expect(checkRoute).toHaveBeenCalledWith('claude-code', 'gpt-5.5', 'xd');
       expect(checkRoute).toHaveBeenCalledWith('codex', 'gpt-5.5', 'xd');
     });

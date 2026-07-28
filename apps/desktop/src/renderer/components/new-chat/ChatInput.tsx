@@ -1238,8 +1238,14 @@ export function ChatInput({
     currentModelAgentKind,
     activeModel,
   );
+  // 已建会话(sessionId 在)按实际路由口径判(includeDisabled):运行中的会话不因
+  // 停用打断,请求仍走原路由,把停用当「无来源」会误禁 Send(PR #744 review 第十轮)。
+  // 草稿是新路由选择,保持准入口径(停用拷贝不算可发送来源)。
   const hasConnectedSendSource = currentModelAgentKind
-    ? sourcesForModel(sendProviders, activeModel, currentModelAgentKind, { onlyConnected: true }).length > 0
+    ? sourcesForModel(sendProviders, activeModel, currentModelAgentKind, {
+        onlyConnected: true,
+        includeDisabled: !!sessionId,
+      }).length > 0
     : false;
   const noConnectedSource = !!currentModelAgentKind && !providersLoading && !hasConnectedSendSource;
 
@@ -5295,6 +5301,9 @@ export function ChatInput({
                     // 意图期显示用户在浏览态选中的来源(null = flat 退化行,跟随默认路由)。
                     currentProviderId={activeProviderId}
                     sourceDisconnected={selectedSourceDisconnected}
+                    // 已建会话按实际路由口径解析当前来源(含停用拷贝,跟真实扣费路由);
+                    // 草稿是新路由选择,保持准入口径(PR #744 review 第十轮)。
+                    actualRoute={!!sessionId}
                     onProviderChange={handleProviderChange}
                     onNavigateToProviders={handleNavigateToProviders}
                     switching={remoteSwitchInFlight}

@@ -106,11 +106,12 @@ export function checkModelRoute(
 }
 
 /**
- * 目录里第一份「已连接、启用、agent 可选」的对话模型拷贝(宽松降级的最终兜底)。
+ * 目录里第一份「已连接、启用、agent 可选」的对话模型拷贝(宽松降级的最终兜底;
+ * IM 默认设置的 firstModel 亦复用,避免两处「兜底选模型」口径漂移)。
  * 顺序:原生默认来源优先,其余按 rail 序;来源与模型一起返回(显式 providerId,
  * 免得同 id 的隐式默认落点又是一份停用/能力拷贝)。零候选 ⇒ null。
  */
-function pickEnabledFallbackModel(
+export function pickEnabledFallbackModel(
   views: readonly ProviderView[],
   agent: AgentKind,
 ): { model: string; providerId: string } | null {

@@ -9,12 +9,14 @@
 import type { AgentKind, Effort, PermissionMode } from '@cindy/maker-core';
 import {
   connectedProvidersForAgent,
+  effectiveSourceIdForModel,
   getModel,
-  nativeDefaultSourceId,
   providerOffersModel,
   sourcesForModel,
   type ProviderView,
 } from '@cindy/model-providers';
+
+import { pickEnabledFallbackModel } from '../maker-host/model-route-guard';
 
 import {
   IM_DEFAULT_EFFORT_OVERRIDES,
@@ -175,12 +177,10 @@ function hasModel(
 
 function firstModel(agentKind: AgentKind, providers: ProviderView[] | null): string | null {
   if (providers) {
-    const connected = connectedProvidersForAgent(providers, agentKind);
-    const nativeId = nativeDefaultSourceId(connected, agentKind);
-    const native = nativeId ? connected.find((p) => p.id === nativeId) : undefined;
-    const nativeModel = native?.models[agentKind]?.[0]?.id;
-    if (nativeModel) return nativeModel;
-    return connected.flatMap((p) => p.models[agentKind] ?? [])[0]?.id ?? null;
+    // 兜底选模型与宽松降级同口径(pickEnabledFallbackModel):跳过停用条目与能力
+    // 模型(图像/音频等),否则「保存的默认模型失效 → 取目录第一个」可能落在一份
+    // 被停用或根本不是对话模型的条目上(PR #744 review 第十轮)。
+    return pickEnabledFallbackModel(providers, agentKind)?.model ?? null;
   }
   return getMaker().getCapabilities(agentKind).availableModels[0]?.id ?? null;
 }
@@ -219,13 +219,24 @@ function resolveProviderId(
   const provider = connectedProvidersForAgent(providers, agentKind).find(
     (p) => p.id === providerId,
   );
-  if (!provider || !providerOffersModel(provider, modelId, agentKind)) {
-    log.warn('im default provider unavailable; falling back to default routing', {
+  if (
+    !provider ||
+    !providerOffersModel(provider, modelId, agentKind) ||
+    // 该 (来源, 模型) 拷贝被停用同样使保存的显式来源失效:B 家启用不豁免 A 家
+    // 停用拷贝(PR #744 review 第十轮)。
+    getModel(provider, modelId, agentKind)?.disabled === true
+  ) {
+    // 经**启用 rail** 解析替代来源并显式落地,而不是返回 null 走隐式默认 ——
+    // turnRunner 直建会话不过路由守卫,隐式默认落点可能恰是被停用的那份拷贝
+    // (provider-route 不查停用标志)。零启用来源 ⇒ null,交给既有失败路径。
+    const fallback = effectiveSourceIdForModel(providers, null, modelId, agentKind);
+    log.warn('im default provider unavailable; rerouting to enabled source', {
       agentKind,
       modelId,
       providerId,
+      fallback,
     });
-    return null;
+    return fallback;
   }
   return providerId;
 }

@@ -506,7 +506,9 @@ export function composeForkOriginHandoff(
   // 两个 separator:fact 与正文之间、正文与结束标记之间。后者不能省——正文被从中部
   // 裁开后末尾多半停在半句上,结束标记直接贴上去就毁掉了"显式分隔"这个不变量本身。
   const room = HANDOFF_HARD_CAP - fact.length - separator.length * 2 - tail.length;
-  if (room <= 0) return buildForkOriginHandoff(parentSessionId);
+  // 极端情形(当前上限下不可达)也要守住优先级:交接关系到跨引擎的对话连续性,
+  // 来源标记只是元信息——挤不下时丢后者,绝不能反过来把整段交接换成一行来源说明。
+  if (room <= 0) return pendingHandoff;
   return `${fact}${separator}${body.slice(0, room).trimEnd()}${separator}${tail}`;
 }
 

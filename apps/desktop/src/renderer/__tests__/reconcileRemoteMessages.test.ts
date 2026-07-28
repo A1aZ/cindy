@@ -752,6 +752,81 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     expect(makerChatStore.getSnapshot(s).historyWindowHasIsland).toBe(false);
   });
 
+  it('远程会话:补交的加性 merge 不用旧快照盖掉已落地的更新内容', async () => {
+    // review #676(codex P1):放行"被后继超越但仍补交"之后,它的 merge 若走默认口径,同一
+    // clientId 上后继(或 live push)刚 hydrate 的更新内容会被这份更旧的快照盖回去。
+    const s = sid();
+    await openRemoteWithHistory(s, [dbMessage(s, 'tail', 'known tail', '2026-06-15T00:00:00.000Z')]);
+
+    const deepPage = deferred<Message[]>();
+    let calls = 0;
+    remoteListResolver = () => {
+      calls += 1;
+      // #1(先启动,深翻):回来时带着缺口里的行 + 已知尾部的**旧内容**。
+      if (calls === 1) return deepPage.promise;
+      // #2(后启动,浅重叠):把尾部那一行更新成最新内容。
+      return [dbMessage(s, 'tail', 'newer tail content', '2026-06-15T00:00:00.000Z')];
+    };
+
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    makerChatStore.reconcileRemoteMessages(s);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    expect(
+      makerChatStore.getSnapshot(s).messages.find((m) => m.clientId === 'client-tail')?.content,
+    ).toBe('newer tail content');
+
+    deepPage.resolve([
+      dbMessage(s, 'deep-1', 'deep missing row', '2026-06-14T00:00:00.000Z'),
+      dbMessage(s, 'tail', 'stale tail content', '2026-06-15T00:00:00.000Z'),
+    ]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    // 缺行照补。
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toContain('client-deep-1');
+    // 关键:已落地的更新内容不被更旧的补交快照盖回去。
+    expect(
+      makerChatStore.getSnapshot(s).messages.find((m) => m.clientId === 'client-tail')?.content,
+    ).toBe('newer tail content');
+  });
+
+  it('远程会话:后继走的是权威重建时,先启动那次一律不许补交', async () => {
+    // review #676(codex P1):本次的 reachedKnownWindow 是拿**重建前**的 existingIds 判出来的。
+    // 后继若整片换过窗口(远端可能已被 rewind / clear),那个"已知区段"可能已不存在 —— 补交会
+    // 把已移除的行复活,或把一段脱离的旧区间静默接上去。
+    const s = sid();
+    await openRemoteWithHistory(s, [dbMessage(s, 'tail', 'known tail', '2026-06-15T00:00:00.000Z')]);
+
+    const deepPage = deferred<Message[]>();
+    let calls = 0;
+    remoteListResolver = () => {
+      calls += 1;
+      // #1(先启动,深翻):回来时带着旧的"已知尾部"(相对重建前有重叠 → 加性 merge)。
+      if (calls === 1) return deepPage.promise;
+      // #2(后启动):与旧窗口**无重叠** → 权威重建。
+      return [dbMessage(s, 'rebuilt', 'authoritative rebuilt row', '2026-06-30T00:00:00.000Z')];
+    };
+
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    makerChatStore.reconcileRemoteMessages(s);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual([
+      'client-rebuilt',
+    ]);
+
+    deepPage.resolve([
+      dbMessage(s, 'deep-1', 'deep row from stale run', '2026-06-14T00:00:00.000Z'),
+      dbMessage(s, 'tail', 'known tail', '2026-06-15T00:00:00.000Z'),
+    ]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    // 关键:重建之后不许补交 —— 那些行可能已经被远端删除 / rewind 掉了。
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual([
+      'client-rebuilt',
+    ]);
+  });
+
   it('远程会话:后启动那次只浅重叠时,先启动那次更深的加性覆盖仍然落地', async () => {
     // review #676(codex P1):后启动的对账可能在第一页就撞上刚推送过来的最新行、判有重叠然后
     // 提交,而先启动那次正深翻着一段更早的缺口。序号若一律拦下,那段更深的覆盖就被白白扔掉。

@@ -5108,7 +5108,15 @@ let _remoteReconcileSeqCounter = 0;
  * 所以判据放在**提交点**:只有"已经有一次更晚启动的对账成功落地过"才作废本次。
  * 后启动者成功 → 先启动者作废(latest-wins);后启动者失败 → 先启动者照常落地(不丢 heal)。
  */
-const _remoteReconcileCommit = new Map<string, { seq: number; epoch: number }>();
+const _remoteReconcileCommit = new Map<
+  string,
+  {
+    seq: number;
+    epoch: number;
+    /** 那次提交走的是权威重建(整片换窗口)还是加性 merge。决定"先启动者能否补交"。 */
+    rebuilt: boolean;
+  }
+>();
 
 function bumpMessagesEpoch(sessionId: string): void {
   _messagesEpoch.set(sessionId, (_messagesEpoch.get(sessionId) ?? 0) + 1);
@@ -5590,15 +5598,23 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
         epochNow === reconcileEpochAtStart ||
         (lastCommit !== undefined && epochNow === lastCommit.epoch);
       const supersededByNewerCommit = (lastCommit?.seq ?? 0) >= reconcileSeq;
-      // 序号这一关只拦**权威重建**,不拦加性 merge。
+      // 序号这一关只拦**权威重建**,不拦加性 merge —— 但补交的门开得很窄,三个条件都要满足。
       //
-      // 后启动的那次不一定翻得和先启动的一样深:它可能在第一页就撞上刚被推送过来的最新行、
-      // 判 reachedKnownWindow 然后提交,而先启动那次正深翻着一段更早的缺口。若一律按序号丢弃,
-      // 那段更深的覆盖就被"浅重叠的后继"白白扔掉,缺口既没补上也没标记(#676 review codex P1)。
-      // 加性 merge(reachedKnownWindow 分支)只补窗口里缺的行、不动游标 / hasMore / 锁,
-      // 后启动者已经落地也不会被它覆盖,所以放它进来是安全的;真正会覆盖窗口的重建分支仍然
-      // 严格 latest-wins。
-      if (!epochAcceptable || (supersededByNewerCommit && !reachedKnownWindow)) {
+      // 为什么要开这道门:后启动的那次不一定翻得和先启动的一样深。它可能在第一页就撞上刚被推送
+      // 过来的最新行、判 reachedKnownWindow 然后提交,而先启动那次正深翻着一段更早的缺口。若
+      // 一律按序号丢弃,那段更深的覆盖就被"浅重叠的后继"白白扔掉,缺口既没补上也没标记
+      // (#676 review codex P1)。
+      //
+      // 为什么门必须窄:
+      //  1. 本次得是加性 merge(reachedKnownWindow):它只补缺行、不动游标 / hasMore / 锁;
+      //  2. 后继那次也得是加性 merge(lastCommit.rebuilt !== true)。后继若走的是**权威重建**,
+      //     当前窗口已经整片换过,而本次的 reachedKnownWindow 是拿**重建前**的 existingIds 判
+      //     出来的 —— 那个"已知区段"可能已经不存在(远端被 rewind / clear),补交就会把已移除
+      //     的行复活,或把一段脱离的旧区间静默接上去(#676 review codex P1);
+      //  3. merge 走 addOnly(见下),不用陈旧快照 hydrate 已有的行。
+      const supersededMergeAllowed =
+        supersededByNewerCommit && reachedKnownWindow && lastCommit?.rebuilt !== true;
+      if (!epochAcceptable || (supersededByNewerCommit && !supersededMergeAllowed)) {
         windowApplied = false;
         return;
       }
@@ -5636,7 +5652,14 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
           ? []
           : s.messages.filter((message) => !existingIds.has(message.clientId));
         const messages = isContiguous
-          ? mergeMessages(mapped, s.messages, {}, 'newest-first')
+          ? mergeMessages(
+              mapped,
+              s.messages,
+              // 补交(被后继超越但仍放行)时只补缺行:本次快照比已落地的那次更旧,默认 hydrate
+              // 会让它把更新的内容 / 元数据盖回去(#676 review codex P1)。
+              supersededMergeAllowed ? { addOnly: true } : {},
+              'newest-first',
+            )
           : mergeAuthoritativeRemoteWindow(mapped, lateArrivals, 'newest-first');
         // 无缺失且无权威字段变化 → 不换引用(视同已应用)。
         if (messages === s.messages) return s;
@@ -5701,6 +5724,7 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
       if (windowApplied && !supersededByNewerCommit) {
         _remoteReconcileCommit.set(sessionId, {
           seq: reconcileSeq,
+          rebuilt: didRebuild,
           // 代际要在**可能的 bump 之后**读:权威重建分支刚把它 +1,记的就得是新值,
           // 后来者才能据此认出"这个 bump 是对账提交造成的"。
           epoch: _messagesEpoch.get(sessionId) ?? 0,

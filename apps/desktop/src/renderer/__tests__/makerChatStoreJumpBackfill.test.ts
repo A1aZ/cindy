@@ -1115,6 +1115,57 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     ).toBe('live newer content');
   });
 
+  it('J9. 跳转期间目标行才被 push 补进来时,同样不许用陈旧 around 快照 hydrate 它', async () => {
+    // review #676(codex P1):目标"跳转前不在窗口里"原先无条件放行 hydrate,但它可能在补齐飞行
+    // 期间被 messages:created 补进来,那份内容比 around 快照**更新**。
+    const target = serverMessage({
+      id: 'arrived-target',
+      clientId: 'arrived-target',
+      role: 'assistant',
+      content: 'content in the around snapshot',
+      createdAt: '2026-07-25T11:00:00.000Z',
+    });
+    // 先制造孤岛,保证下一次跳转必须走补齐(有飞行窗口)。
+    const island = serverMessage({
+      id: 'island-row',
+      clientId: 'island-row',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([island]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce([]);
+    await makerChatStore.loadAroundMessageClientId(SID, 'island-row', { radius: 60 });
+    expect(makerChatStore.getSnapshot(SID).historyWindowHasIsland).toBe(true);
+    // 目标此刻**不在**窗口里。
+    expect(
+      makerChatStore.getSnapshot(SID).messages.some((m) => m.clientId === 'arrived-target'),
+    ).toBe(false);
+
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    let releasePage: (rows: Message[]) => void = () => {};
+    vi.mocked(listMessagesFor).mockImplementationOnce(
+      () =>
+        new Promise<Message[]>((resolve) => {
+          releasePage = resolve;
+        }),
+    );
+    const jump = makerChatStore.loadAroundMessageClientId(SID, 'arrived-target', { radius: 60 });
+    await flushMicrotasks();
+
+    // 飞行期间目标被 push 补进来,内容比 around 快照更新。
+    messageCreatedListener?.({
+      sessionId: SID,
+      message: { ...target, content: 'live newer content' },
+    });
+    releasePage([]);
+    await jump;
+    await flushMicrotasks();
+
+    // 关键:陈旧的 around 快照不许把它盖回去。
+    expect(
+      makerChatStore.getSnapshot(SID).messages.find((m) => m.clientId === 'arrived-target')?.content,
+    ).toBe('live newer content');
+  });
+
   it('J6b. addOnly 只影响"已有的行",缺行照补(merge 契约直测)', () => {
     const existing = [
       { clientId: 'a', role: 'assistant' as const, content: 'live', createdAt: '2026-07-25T12:00:00.000Z' },

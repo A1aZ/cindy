@@ -5533,6 +5533,10 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
     );
   }
   const existingIds = new Set(state.messages.map((m) => m.clientId));
+  // 起始快照的**对象引用**表:提交时用它区分"这一行期间被 live push 动过没有"。ChatMessage 不可变,
+  // 只有内容真变了才会换新对象,所以引用相同 ⇒ 没被动过 ⇒ 可以用权威快照 hydrate;引用变了就只补
+  // 不改,免得几秒前取的页把更新的内容盖回去(#676 review codex P1)。
+  const rowsAtStart = new Map(state.messages.map((m) => [m.clientId, m]));
   // 代际快照:对账要翻最多 10 页(隧道下可达数秒),这期间窗口可能已被别的路径整体重建
   // ——包括**另一次对账**:CCAgentSessionView 会直接发起一次,而 useRemoteSessionSync
   // 独立地 fire-and-forget 再排一次,两次可以重叠。旧的那次若不比对代际就落地,会拿着
@@ -5662,13 +5666,21 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
         const lateArrivals = isContiguous
           ? []
           : s.messages.filter((message) => !existingIds.has(message.clientId));
+        // 只给"启动到现在没被动过"的行开 hydrate 口子:其余(期间被 live push 更新过的)只补不改。
+        // 补交场景(被后继超越但仍放行)一律不 hydrate —— 本次快照比已落地的那次更旧。
+        const untouchedSinceStart = new Set<string>();
+        if (!supersededMergeAllowed) {
+          for (const message of s.messages) {
+            if (rowsAtStart.get(message.clientId) === message) {
+              untouchedSinceStart.add(message.clientId);
+            }
+          }
+        }
         const messages = isContiguous
           ? mergeMessages(
               mapped,
               s.messages,
-              // 补交(被后继超越但仍放行)时只补缺行:本次快照比已落地的那次更旧,默认 hydrate
-              // 会让它把更新的内容 / 元数据盖回去(#676 review codex P1)。
-              supersededMergeAllowed ? { addOnly: true } : {},
+              { addOnly: true, addOnlyExcept: untouchedSinceStart },
               'newest-first',
             )
           : mergeAuthoritativeRemoteWindow(mapped, lateArrivals, 'newest-first');
@@ -6187,10 +6199,13 @@ function hydrateTargetIfUntouched(
   before: ChatMessage | undefined,
 ): string | null {
   if (!targetClientId) return null;
-  if (before === undefined) return targetClientId;
   const now = getOrCreateState(sessionId).messages.find(
     (message) => message.clientId === targetClientId,
   );
+  // 一条判据同时覆盖两种情形:
+  //  - 跳转前就有这一行:引用没变 ⇒ 期间没被 live push 动过 → 可以 hydrate;
+  //  - 跳转前没有这一行(before === undefined):现在仍然没有才放行。若期间被 push 补进来了,
+  //    那份内容比 around 快照**更新**,拿旧快照 hydrate 就是回退(#676 review codex P1)。
   return now === before ? targetClientId : null;
 }
 
@@ -6240,7 +6255,10 @@ function commitAroundWindow(
       // covered 且不持锁 = 成员快速通道:它成立的前提就是"窗口无孤岛且目标在窗口里",
       // 所以 radius 内的邻居与目标同处连续区间,不产生孤岛,标记不动。
       const marksIsland = outcome === 'busy' && addedRows;
-      return marksIsland ? { ...s, messages, historyWindowHasIsland: true } : { ...s, messages };
+      if (marksIsland) return { ...s, messages, historyWindowHasIsland: true };
+      // 真正的 no-op(merge 没换引用、也不用记孤岛)直接返回原 state:setState 只要
+      // next !== prev 就通知订阅者,白发一次会让整棵消息树重渲染(#676 review copilot)。
+      return messages === s.messages ? s : { ...s, messages };
     }
     // 已补齐:hasMore 归 backfill 维护,不能被 around 窗口的边界回退。
     // 但游标要取两侧更早的那个:radius 决定的 around 窗口可能含比"命中那一页的
@@ -8929,7 +8947,9 @@ function mergeAuthoritativeRemoteWindow(
   rowsOrder: RemoteRowsOrder,
 ): ChatMessage[] {
   if (serverMsgs.length === 0) return lateArrivals;
-  return mergeMessages(serverMsgs, lateArrivals, {}, rowsOrder);
+  // addOnly:lateArrivals 全是"快照之后才到"的行,它们比 serverMsgs 更新,不能被旧快照 hydrate
+  // (#676 review codex P1)。权威行本身是新增,不受影响。
+  return mergeMessages(serverMsgs, lateArrivals, { addOnly: true }, rowsOrder);
 }
 
 function sortMessagesChronologically(

@@ -683,6 +683,51 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     );
   });
 
+  it('远程会话:分页期间被 live 更新过的行,对账不用旧快照盖回去;未被动过的照常 hydrate', async () => {
+    // review #676(codex P1):普通(未被超越)的对账也可能翻好几秒,期间 messages:created 把某行
+    // 更新过;默认 persisted-wins 会让几秒前取的页把更新的内容盖回去。判据用对象引用:起始快照里
+    // 引用相同 ⇒ 期间没被动过 ⇒ 仍按权威快照 hydrate。
+    const s = sid();
+    makerChatStore.initGlobalListeners();
+    await openRemoteWithHistory(s, [
+      dbMessage(s, 'touched', 'old content', '2026-06-15T00:00:00.000Z'),
+      dbMessage(s, 'untouched', 'old content', '2026-06-16T00:00:00.000Z'),
+    ]);
+
+    const pendingList = deferred<Message[]>();
+    remoteListResolver = () => pendingList.promise;
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+
+    // 分页期间 live push 更新了其中一行。
+    remotePush?.({
+      deviceId: DEVICE_ID,
+      channel: 'local-db:messages:created',
+      payload: {
+        sessionId: s,
+        message: dbMessage(s, 'touched', 'live newer content', '2026-06-15T00:00:00.000Z'),
+      },
+    });
+    expect(
+      makerChatStore.getSnapshot(s).messages.find((m) => m.clientId === 'client-touched')?.content,
+    ).toBe('live newer content');
+
+    // 对账那一页回来:与已知窗口有重叠 → 加性 merge,但它带的是**两行的旧内容**。
+    pendingList.resolve([
+      dbMessage(s, 'touched', 'stale page content', '2026-06-15T00:00:00.000Z'),
+      dbMessage(s, 'untouched', 'authoritative content', '2026-06-16T00:00:00.000Z'),
+    ]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    const rows = makerChatStore.getSnapshot(s).messages;
+    // 关键:被动过的那行保留 live 内容。
+    expect(rows.find((m) => m.clientId === 'client-touched')?.content).toBe('live newer content');
+    // 没被动过的那行照常 hydrate 成权威内容(权威口径没有被一刀切掉)。
+    expect(rows.find((m) => m.clientId === 'client-untouched')?.content).toBe(
+      'authoritative content',
+    );
+  });
+
   it('远程会话:thinking 晚到行按落库时间线判脱离,不被改写后的开始时刻骗过', async () => {
     // review #676(codex P1):mapServerMessages 把 thinking 的 createdAt 改写成
     // `finishedAt - durationMs`(块的开始时刻),而权威页边界是原始 DB 行。混着比会让一个

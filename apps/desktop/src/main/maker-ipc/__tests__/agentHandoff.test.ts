@@ -293,6 +293,30 @@ describe('createAgentHandoffPendingRegistry', () => {
     expect(decorate).toHaveBeenCalledTimes(1);
   });
 
+  it('decorate 抛错期间该交接已被 consume:不退回过期值', async () => {
+    // consume / set 不推进 clear 纪元(它只由 /clear 推进),所以失败路径不能只看纪元
+    // ——退回已被消费的那份,accepted 后的无条件 consume 还会抹掉更新的交接。
+    let reg: ReturnType<typeof createAgentHandoffPendingRegistry>;
+    const decorate = vi.fn(async () => {
+      reg.consume('s1');
+      throw new Error('db down');
+    });
+    reg = createAgentHandoffPendingRegistry(async () => null, undefined, decorate);
+    reg.set('s1', 'CONSUMED-HANDOFF');
+    expect(await reg.peek('s1')).toBeNull();
+  });
+
+  it('decorate 抛错期间该交接已被新的 set 替换:不退回旧值', async () => {
+    let reg: ReturnType<typeof createAgentHandoffPendingRegistry>;
+    const decorate = vi.fn(async () => {
+      reg.set('s1', 'NEWER-HANDOFF');
+      throw new Error('db down');
+    });
+    reg = createAgentHandoffPendingRegistry(async () => null, undefined, decorate);
+    reg.set('s1', 'OLD-HANDOFF');
+    expect(await reg.peek('s1')).toBeNull();
+  });
+
   it('decorate 失败不写缓存,下次 peek 仍重试组合', async () => {
     let fail = true;
     const decorate = vi.fn(async (_sid: string, handoff: string) => {

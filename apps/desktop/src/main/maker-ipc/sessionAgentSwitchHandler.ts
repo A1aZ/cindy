@@ -213,6 +213,12 @@ export interface PendingAgentSwitchIntent {
     boundaryClientId: string | null;
     boundaryContent: AgentSwitchBoundaryContent;
     handoff: string;
+    /**
+     * 构造这份 handoff 时的 clear 纪元。重试路径必须用它、而不是重试开始时重读——
+     * intent 里的 handoff 是按**当初**的历史生成的,若这中间用户 /clear 过(而 /clear
+     * 并不取消 intent),重读会拿到 clear 之后的纪元,让这份已作废的历史绕过墓碑写回去。
+     */
+    handoffClearEpoch?: number;
   };
 }
 
@@ -495,6 +501,7 @@ export async function performSessionAgentSwitch(
                   boundaryClientId,
                   boundaryContent: fallbackBoundaryContent,
                   handoff: fullHandoff,
+                  handoffClearEpoch: handoffGeneration,
                 },
               });
               engineReady = false;
@@ -517,6 +524,7 @@ export async function performSessionAgentSwitch(
                 boundaryClientId: null,
                 boundaryContent: fallbackBoundaryContent,
                 handoff: fullHandoff,
+                handoffClearEpoch: handoffGeneration,
               },
             });
             engineReady = false;
@@ -606,9 +614,10 @@ export function applyPendingAgentSwitchIfIdle(
       if (intent.resumeFallbackRecovery) {
         const recovery = intent.resumeFallbackRecovery;
         throwIfAgentSwitchAborted(opts?.signal);
-        // 与主路径同理:重试期间也可能 /clear,写回前校验代次。基准取本次重试开始时,
-        // 而不是原始切换时——中途的 clear 才是要拦的,更早的历史已由 intent 自己承载。
-        const recoveryHandoffGeneration = deps.readPendingHandoffGeneration?.(sessionId);
+        // 用**构造这份 handoff 时**记下的纪元,不要在这里重读:intent 里的 handoff 按
+        // 当初的历史生成,而 /clear 并不取消 intent——重读会拿到 clear 之后的纪元,让
+        // 这份已作废的历史绕过墓碑写回去。
+        const recoveryHandoffGeneration = recovery.handoffClearEpoch;
         const boundaryClientId = recovery.boundaryClientId ??
           await deps.insertBoundaryMessage(sessionId, recovery.boundaryContent);
         // 边界补写成功、原子事务仍失败时记住 id；下次只重试事务，不重复插边界。

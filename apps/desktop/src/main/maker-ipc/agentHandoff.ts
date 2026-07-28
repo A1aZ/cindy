@@ -568,12 +568,16 @@ export interface AgentHandoffPendingRegistry {
    * 写入待注入交接。
    *
    * `expectedGeneration` 给"读历史 → 一堆异步活 → 才写回"的调用方(引擎切换、消息
-   * 删除)用:它们在开始时用 `readGeneration()` 取一次,写回时带上;期间若发生
-   * `/clear` 或别的写入,这次写就被丢弃。没有它,一个基于 clear 前历史算出来的交接
-   * 会盖掉 `/clear` 刚立的墓碑,把已清空的上下文重新灌回去。
+   * 删除)用:它们在读历史之前用 `readGeneration()` 取一次,写回时带上;期间若发生
+   * `/clear`,这次写就被丢弃。没有它,一个基于 clear 前历史算出来的交接会盖掉
+   * `/clear` 刚立的墓碑,把已清空的上下文重新灌回去。
+   *
+   * 比较的是 **clear 纪元**,只由 `/clear`(invalidate / clear)推进——`set` 与
+   * `consume` 都不推进它,所以同一流程内的二次写入、以及与别处 consume 的并发,
+   * 都不会被误拒。
    */
   set(sessionId: string, handoff: string, expectedGeneration?: number): void;
-  /** 取当前代次,配合 `set` 的 `expectedGeneration` 做写入前后的一致性校验。 */
+  /** 取当前 clear 纪元(只由 `/clear` 推进),配合 `set` 的 `expectedGeneration` 使用。 */
   readGeneration(sessionId: string): number;
   peek(sessionId: string): Promise<string | null>;
   consume(sessionId: string): void;
@@ -660,9 +664,11 @@ export function createAgentHandoffPendingRegistry(
           composedByQuery.add(sessionId);
           return decorated;
         } catch {
-          // 失败路径同样要看代次:decorate 抛错(如查询瞬时失败)期间若发生 /clear,
-          // 退回 cached 等于把已作废的交接注入这次发送——那正是代次校验要拦的事。
+          // 失败路径与成功路径同一套校验:decorate 抛错期间若发生 /clear,或这份交接
+          // 已被别处 consume / 被新交接替换,退回 cached 都等于把过期内容注入这次发送
+          // ——尤其 consume 之后再注入,accepted 后的无条件 consume 还会抹掉更新的那份。
           if (genOf(sessionId) !== gen) return null;
+          if (pending.get(sessionId) !== cached) return null;
           // 组合失败不能吞掉本来就该注入的交接——退回未组合的原值,且不写缓存,
           // 下次 peek 仍会重试组合。
           return cached;

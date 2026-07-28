@@ -631,53 +631,108 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     expect(invoke).not.toHaveBeenCalledWith(DEVICE_ID, 'local-db:messages:list', expect.anything());
   });
 
-  it('远程会话:purge 重开后,purge 前那次未回来的对账仍被序号拦下', async () => {
-    // review #676(codex P1):发号器若按 sessionId 分表,LRU purge 后重开会从 1 重新发号,
-    // 于是"purge 前尚未回来的对账"手里的旧序号反而更大 —— 既过序号检查,又能借
-    // lastCommit.epoch 过代际检查,把陈旧行盖回重开后的窗口。全局单调发号器堵住这条。
-    //
-    // 为了让旧序号真的更大,purge 前跑两次对账:第一次落地(占掉 seq),第二次停在飞行中。
+  it('远程会话:同一会话不并发对账 —— 第二次触发被合并,收尾后补跑一次', async () => {
+    // review #676(codex P1 连着七八轮):两次对账重叠会长出一整族只有并发才成立的错况
+    // (旧那次拿过期 existingIds 覆盖新窗口、陈旧快照 hydrate 更新的行、bump 代际抢别人的分页锁、
+    // 浅重叠的后继丢掉深翻的前驱、代际 bump 的出处追踪…)。每加一道谓词就长出新角落,所以改成
+    // 单飞 + 尾随重跑:根上不让两次重叠。
     const s = sid();
     await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
 
-    const prePurgePending = deferred<Message[]>();
+    const first = deferred<Message[]>();
     let calls = 0;
     remoteListResolver = () => {
       calls += 1;
-      // #1(purge 前,落地):与 seed 有重叠 → 只 merge。
-      if (calls === 1) {
-        return [
-          dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z'),
-          dbMessage(s, 'pre-1', 'pre purge row', '2026-06-16T00:00:00.000Z'),
-        ];
-      }
-      // #2(purge 前,停在飞行中):回来时是一段与任何窗口都无重叠的旧历史。
-      if (calls === 2) return prePurgePending.promise;
-      // 重开后的首拉 / 对账。
+      if (calls === 1) return first.promise;
+      return [
+        dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z'),
+        dbMessage(s, 'from-rerun', 'row fetched by the trailing rerun', '2026-06-17T00:00:00.000Z'),
+      ];
+    };
+
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    expect(calls).toBe(1);
+
+    // 第二、第三次触发都在飞行期间到达:不许再发请求,合并成"收尾后补跑一次"。
+    makerChatStore.reconcileRemoteMessages(s);
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    expect(calls).toBe(1);
+
+    first.resolve([
+      dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z'),
+      dbMessage(s, 'from-first', 'row fetched by the first run', '2026-06-16T00:00:00.000Z'),
+    ]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    // 两次的结果都在:第一次照常落地,合并掉的触发变成一次尾随重跑(不丢触发)。
+    const ids = makerChatStore.getSnapshot(s).messages.map((m) => m.clientId);
+    expect(ids).toContain('client-from-first');
+    expect(ids).toContain('client-from-rerun');
+    // 而且只补跑**一次**,不是每个被合并的触发各跑一次。
+    expect(calls).toBe(2);
+  });
+
+  it('远程会话:飞行期间窗口被重置(rewind)时,陈旧对账整体作废;尾随重跑照常补', async () => {
+    // 单飞之后"代际变了"必然来自真正的窗口重置,不可能是另一次对账 —— 这条守卫因此变成唯一一道。
+    const s = sid();
+    await openRemoteWithHistory(s, [
+      dbMessage(s, 'keep', 'kept prefix', '2026-06-15T00:00:00.000Z'),
+      dbMessage(s, 'rewound', 'to be rewound', '2026-06-16T00:00:00.000Z'),
+    ]);
+
+    const stale = deferred<Message[]>();
+    let calls = 0;
+    remoteListResolver = () => {
+      calls += 1;
+      if (calls === 1) return stale.promise;
+      return [dbMessage(s, 'keep', 'kept prefix', '2026-06-15T00:00:00.000Z')];
+    };
+
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+
+    // rewind:本地截断掉 'rewound' 起的整段(bump 代际)。
+    makerChatStore.dropMessagesFromClientId(s, 'client-rewound');
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual(['client-keep']);
+
+    // 陈旧那次现在才回来,带着被 rewind 掉的那一行。
+    stale.resolve([
+      dbMessage(s, 'keep', 'kept prefix', '2026-06-15T00:00:00.000Z'),
+      dbMessage(s, 'rewound', 'to be rewound', '2026-06-16T00:00:00.000Z'),
+    ]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    // 关键:被 rewind 掉的行不得复活。
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual(['client-keep']);
+  });
+
+  it('远程会话:purge 期间在飞的对账不把陈旧行塞回重开后的窗口', async () => {
+    const s = sid();
+    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
+
+    const prePurge = deferred<Message[]>();
+    let calls = 0;
+    remoteListResolver = () => {
+      calls += 1;
+      if (calls === 1) return prePurge.promise;
       return [dbMessage(s, 'fresh', 'fresh row', '2026-06-25T00:00:00.000Z')];
     };
 
     makerChatStore.reconcileRemoteMessages(s);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toContain('client-pre-1');
-    makerChatStore.reconcileRemoteMessages(s);
     await flush();
 
-    // LRU 驱逐 / 归档 → 同 ID 重开 → 重开后又跑一次对账并成功落地。
+    // LRU 驱逐 / 归档 → 同 ID 重开。
     makerChatStore.purgeSession(s);
     makerChatStore.ensureInitialMessages(s);
     await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-    makerChatStore.reconcileRemoteMessages(s);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toContain('client-fresh');
 
-    // purge 前那次(序号比重开后那次**大**,如果发号器按会话分表的话)现在才回来。
-    prePurgePending.resolve([
+    prePurge.resolve([
       dbMessage(s, 'stale', 'stale authoritative', '2026-05-01T00:00:00.000Z'),
     ]);
     await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
 
-    // 关键:陈旧行不得盖回重开后的窗口。
     expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).not.toContain(
       'client-stale',
     );
@@ -841,59 +896,6 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     expect(makerChatStore.getSnapshot(s).historyWindowHasIsland).toBe(false);
   });
 
-  it('远程会话:加性提交不擦掉重建出处,第三次(更晚启动)仍能落地', async () => {
-    // review #676(codex P1):三次对账都在代际 N 启动。#1 重建到 N+1,#2 作为更新的加性 merge
-    // 被放行,但它的提交记录把"谁解释了这次 bump"覆写成 rebuilt:false。#3(更晚启动、也从 N
-    // 出发)于是过不了 epochAcceptable,它取回的新行一直缺着。rebuildEpoch 单独记就不会丢。
-    const s = sid();
-    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
-
-    const p1 = deferred<Message[]>();
-    const p2 = deferred<Message[]>();
-    const p3 = deferred<Message[]>();
-    let calls = 0;
-    remoteListResolver = () => {
-      calls += 1;
-      if (calls === 1) return p1.promise;
-      if (calls === 2) return p2.promise;
-      return p3.promise;
-    };
-
-    // 三次都在同一代际启动。
-    makerChatStore.reconcileRemoteMessages(s);
-    await flush();
-    makerChatStore.reconcileRemoteMessages(s);
-    await flush();
-    makerChatStore.reconcileRemoteMessages(s);
-    await flush();
-
-    // #1 先回来:与 seed 无重叠 → 权威重建(bump 代际)。
-    p1.resolve([dbMessage(s, 'rebuilt', 'authoritative rebuilt', '2026-06-20T00:00:00.000Z')]);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual([
-      'client-rebuilt',
-    ]);
-
-    // #2 再回来:重叠判定看的是**它自己启动时**的 existingIds({seed}),所以页里带 seed 才算
-    // 有重叠 → 走加性 merge(不 bump 代际,也正是这条 review 的前提)。
-    p2.resolve([
-      dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z'),
-      dbMessage(s, 'from-2', 'row from run 2', '2026-06-21T00:00:00.000Z'),
-    ]);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toContain('client-from-2');
-
-    // #3 最后回来(启动最晚、序号最大):同样从代际 N 出发,必须仍能落地。
-    p3.resolve([
-      dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z'),
-      dbMessage(s, 'from-3', 'row from run 3', '2026-06-22T00:00:00.000Z'),
-    ]);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-
-    // 关键:加性提交没把重建出处擦掉,#3 的新行进得来。
-    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toContain('client-from-3');
-  });
-
   it('远程会话:加性提交不能替一次无关的 rewind 背书,rewind 掉的尾部不得被补回', async () => {
     // review #676(codex P1):加性提交不 bump 代际,所以"它记的代际恰好等于现在"解释不了代际
     // 为什么从本次启动时变了 —— 那个变化另有来源(这里是 rewind)。旧写法让任何更晚的加性提交
@@ -935,121 +937,6 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
 
     // 关键:被 rewind 掉的行不得复活。
     expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual(['client-keep']);
-  });
-
-  it('远程会话:补交的加性 merge 不用旧快照盖掉已落地的更新内容', async () => {
-    // review #676(codex P1):放行"被后继超越但仍补交"之后,它的 merge 若走默认口径,同一
-    // clientId 上后继(或 live push)刚 hydrate 的更新内容会被这份更旧的快照盖回去。
-    const s = sid();
-    await openRemoteWithHistory(s, [dbMessage(s, 'tail', 'known tail', '2026-06-15T00:00:00.000Z')]);
-
-    const deepPage = deferred<Message[]>();
-    let calls = 0;
-    remoteListResolver = () => {
-      calls += 1;
-      // #1(先启动,深翻):回来时带着缺口里的行 + 已知尾部的**旧内容**。
-      if (calls === 1) return deepPage.promise;
-      // #2(后启动,浅重叠):把尾部那一行更新成最新内容。
-      return [dbMessage(s, 'tail', 'newer tail content', '2026-06-15T00:00:00.000Z')];
-    };
-
-    makerChatStore.reconcileRemoteMessages(s);
-    await flush();
-    makerChatStore.reconcileRemoteMessages(s);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-    expect(
-      makerChatStore.getSnapshot(s).messages.find((m) => m.clientId === 'client-tail')?.content,
-    ).toBe('newer tail content');
-
-    deepPage.resolve([
-      dbMessage(s, 'deep-1', 'deep missing row', '2026-06-14T00:00:00.000Z'),
-      dbMessage(s, 'tail', 'stale tail content', '2026-06-15T00:00:00.000Z'),
-    ]);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-
-    // 缺行照补。
-    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toContain('client-deep-1');
-    // 关键:已落地的更新内容不被更旧的补交快照盖回去。
-    expect(
-      makerChatStore.getSnapshot(s).messages.find((m) => m.clientId === 'client-tail')?.content,
-    ).toBe('newer tail content');
-  });
-
-  it('远程会话:后继走的是权威重建时,先启动那次一律不许补交', async () => {
-    // review #676(codex P1):本次的 reachedKnownWindow 是拿**重建前**的 existingIds 判出来的。
-    // 后继若整片换过窗口(远端可能已被 rewind / clear),那个"已知区段"可能已不存在 —— 补交会
-    // 把已移除的行复活,或把一段脱离的旧区间静默接上去。
-    const s = sid();
-    await openRemoteWithHistory(s, [dbMessage(s, 'tail', 'known tail', '2026-06-15T00:00:00.000Z')]);
-
-    const deepPage = deferred<Message[]>();
-    let calls = 0;
-    remoteListResolver = () => {
-      calls += 1;
-      // #1(先启动,深翻):回来时带着旧的"已知尾部"(相对重建前有重叠 → 加性 merge)。
-      if (calls === 1) return deepPage.promise;
-      // #2(后启动):与旧窗口**无重叠** → 权威重建。
-      return [dbMessage(s, 'rebuilt', 'authoritative rebuilt row', '2026-06-30T00:00:00.000Z')];
-    };
-
-    makerChatStore.reconcileRemoteMessages(s);
-    await flush();
-    makerChatStore.reconcileRemoteMessages(s);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual([
-      'client-rebuilt',
-    ]);
-
-    deepPage.resolve([
-      dbMessage(s, 'deep-1', 'deep row from stale run', '2026-06-14T00:00:00.000Z'),
-      dbMessage(s, 'tail', 'known tail', '2026-06-15T00:00:00.000Z'),
-    ]);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-
-    // 关键:重建之后不许补交 —— 那些行可能已经被远端删除 / rewind 掉了。
-    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual([
-      'client-rebuilt',
-    ]);
-  });
-
-  it('远程会话:后启动那次只浅重叠时,先启动那次更深的加性覆盖仍然落地', async () => {
-    // review #676(codex P1):后启动的对账可能在第一页就撞上刚推送过来的最新行、判有重叠然后
-    // 提交,而先启动那次正深翻着一段更早的缺口。序号若一律拦下,那段更深的覆盖就被白白扔掉。
-    // 加性 merge 不动游标 / hasMore / 锁,放它落地是安全的。
-    const s = sid();
-    await openRemoteWithHistory(s, [dbMessage(s, 'tail', 'known tail', '2026-06-15T00:00:00.000Z')]);
-
-    const deepPage = deferred<Message[]>();
-    let calls = 0;
-    remoteListResolver = () => {
-      calls += 1;
-      // #1(先启动,深翻):停在飞行中,回来时带着缺口里的行 + 已知尾部(有重叠 → 加性 merge)。
-      if (calls === 1) return deepPage.promise;
-      // #2(后启动,浅重叠):第一页就带着已知尾部 → reachedKnownWindow → 直接提交。
-      return [
-        dbMessage(s, 'tail', 'known tail', '2026-06-15T00:00:00.000Z'),
-        dbMessage(s, 'shallow', 'shallow new row', '2026-06-16T00:00:00.000Z'),
-      ];
-    };
-
-    makerChatStore.reconcileRemoteMessages(s);
-    await flush();
-    makerChatStore.reconcileRemoteMessages(s);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toContain(
-      'client-shallow',
-    );
-
-    deepPage.resolve([
-      dbMessage(s, 'deep-1', 'deep missing row', '2026-06-14T00:00:00.000Z'),
-      dbMessage(s, 'tail', 'known tail', '2026-06-15T00:00:00.000Z'),
-    ]);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-
-    // 关键:先启动那次补回的更深的行不得被浅重叠的后继丢掉。
-    const ids = makerChatStore.getSnapshot(s).messages.map((m) => m.clientId);
-    expect(ids).toContain('client-deep-1');
-    expect(ids).toContain('client-shallow');
   });
 
   it('远程会话:与权威窗口最新行同毫秒、rowid 更大的晚到行也算脱离', async () => {
@@ -1141,46 +1028,6 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
 
     // 关键:陈旧对账不得把行 merge 进 purge 后重建的空切片。
     expect(makerChatStore.getSnapshot(s).messages).toHaveLength(0);
-  });
-
-  it('远程会话:后启动的对账赢 —— 即使它只 merge、不 bump 代际', async () => {
-    // review #676(codex P1):代际守卫只能挡下"新一次对账**也重建了窗口**"的情况。找到重叠的
-    // 对账只做加性 merge、不 bump 代际,于是"旧的无重叠对账 + 新的有重叠对账"这一对里,旧那次
-    // 仍能通过代际比对,把陈旧的权威重建落地(还会用过期字段 hydrate 更新的行)。
-    const s = sid();
-    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
-
-    const stalePage = deferred<Message[]>();
-    let calls = 0;
-    remoteListResolver = () => {
-      calls += 1;
-      // 对账 #1 的首页停在飞行中(它拉回的是一段与 seed 无重叠的旧历史)。
-      if (calls === 1) return stalePage.promise;
-      // 对账 #2:与已有窗口**有重叠**(带上 seed)→ 只 merge、不 bump 代际。
-      return [
-        dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z'),
-        dbMessage(s, 'fresh', 'fresh row', '2026-06-15T00:01:00.000Z'),
-      ];
-    };
-
-    makerChatStore.reconcileRemoteMessages(s);
-    await flush();
-    makerChatStore.reconcileRemoteMessages(s);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual([
-      'client-seed',
-      'client-fresh',
-    ]);
-
-    // 陈旧的那一页现在才回来:无重叠 → 它想走权威重建,把 seed / fresh 都换掉。
-    stalePage.resolve([dbMessage(s, 'stale', 'stale authoritative', '2026-06-10T00:00:00.000Z')]);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-
-    // 关键:后启动的那次赢,陈旧重建不得落地。
-    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual([
-      'client-seed',
-      'client-fresh',
-    ]);
   });
 
   it('远程会话:权威重建保留了更老的晚到行时,按事实记上孤岛', async () => {
@@ -1292,131 +1139,6 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual(['client-auth-1']);
     // 关键:窗口是完整重建出来的,标记必须清零。
     expect(makerChatStore.getSnapshot(s).historyWindowHasIsland).toBe(false);
-  });
-
-  it('远程会话:更早启动的对账重建后,更晚启动那次仍能落地', async () => {
-    // review #676(codex P1):两次对账都在代际 N 启动,先回来的那次走权威重建、把代际 bump 到
-    // N+1。后回来的那次序号更新、抓到的是更新的真相,却会被这个 bump 当成陈旧作废 —— 旧快照
-    // 赢,更新的远端行继续缺着。提交时一并记下当时的代际,后来者认得出"这个 bump 是对账造成的"。
-    const s = sid();
-    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
-
-    const laterPage = deferred<Message[]>();
-    let calls = 0;
-    remoteListResolver = () => {
-      calls += 1;
-      // 对账 #1(先启动、先回来):无重叠 → 权威重建 + bump 代际。
-      if (calls === 1) return [dbMessage(s, 'early', 'early rebuild', '2026-06-18T00:00:00.000Z')];
-      // 对账 #2(后启动):停在飞行中,回来时带更新的真相。
-      return laterPage.promise;
-    };
-
-    makerChatStore.reconcileRemoteMessages(s);
-    makerChatStore.reconcileRemoteMessages(s);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual(['client-early']);
-
-    laterPage.resolve([dbMessage(s, 'later', 'later truth', '2026-06-19T00:00:00.000Z')]);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-
-    // 关键:后启动那次的结果必须落地,不能被前一次自己的 bump 挡掉。
-    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toContain('client-later');
-  });
-
-  it('远程会话:后启动的对账失败时,先启动那次的结果照样落地(不丢 heal)', async () => {
-    // review #676(codex P1):把作废判据放在启动点等于"后启动者一定会赢",但它可能中途
-    // reject(隧道抖动 / 被控端下线)。那时旧那次已经拉回了有效的缺失窗口,却因为序号被抢走
-    // 而丢弃,新那次又什么都没落地 —— 对账全是 fire-and-forget、空闲会话没有保证的重试,
-    // 被控端的消息会一直缺到下一次聚焦 / 重连 / turn 结束 / 手动重新同步。
-    const s = sid();
-    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
-
-    const oldPage = deferred<Message[]>();
-    let calls = 0;
-    remoteListResolver = () => {
-      calls += 1;
-      // 对账 #1(先启动):首页停在飞行中,回来时带一条 push 丢掉的消息。
-      if (calls === 1) return oldPage.promise;
-      // 对账 #2(后启动):请求失败。
-      return Promise.reject(new Error('tunnel flapped'));
-    };
-
-    makerChatStore.reconcileRemoteMessages(s);
-    await flush();
-    makerChatStore.reconcileRemoteMessages(s);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-    // 后启动那次什么都没落地。
-    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual(['client-seed']);
-
-    oldPage.resolve([
-      dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z'),
-      dbMessage(s, 'healed', 'push-dropped row', '2026-06-15T00:01:00.000Z'),
-    ]);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-
-    // 关键:先启动那次补回的消息必须进 UI —— 它的结果不该被一个失败的后继作废。
-    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual([
-      'client-seed',
-      'client-healed',
-    ]);
-  });
-
-  it('远程会话:陈旧代际的对账整体作废,不覆盖新窗口也不抢新代际的锁', async () => {
-    // review #676(codex P1):CCAgentSessionView 直接发起一次对账,useRemoteSessionSync
-    // 又独立 fire-and-forget 排一次,两次可以重叠。旧的那次若不比对代际就落地,会拿着过期的
-    // existingIds 覆盖新窗口,还会 bump 代际把新代际里那次跳转刚拿到的分页锁清掉 —— 跳转
-    // 随即被作废,同时放开另一个请求去抢同一个游标。
-    const s = sid();
-    await openRemoteWithHistory(s, [
-      dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z'),
-    ]);
-
-    const stalePage = deferred<Message[]>();
-    const jumpPage = deferred<Message[]>();
-    let list50Calls = 0;
-    remoteListResolver = (args) => {
-      const opts = (args[1] ?? {}) as { limit?: number };
-      // 跳转补齐用 limit=100,对账用 limit=50。
-      if (opts.limit === 100) return jumpPage.promise;
-      list50Calls += 1;
-      // 第一次对账的首页停在飞行中;之后的对账正常返回权威页。
-      if (list50Calls === 1) return stalePage.promise;
-      return [dbMessage(s, 'auth-1', 'authoritative latest', '2026-06-20T00:00:00.000Z')];
-    };
-
-    // 对账 #1:卡在首页。
-    makerChatStore.reconcileRemoteMessages(s);
-    await flush();
-    // 对账 #2:完成,与旧窗口无重叠 → 权威重建 + bump 代际。
-    makerChatStore.reconcileRemoteMessages(s);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toEqual(['client-auth-1']);
-
-    // 新代际里发起一次跳转,它拿到分页锁并停在自己那一页上。
-    const target = dbMessage(s, 'jump-target', 'jump target', '2026-06-19T00:00:00.000Z');
-    remoteAround = [target];
-    const jump = makerChatStore.loadAroundMessageClientId(s, 'client-jump-target', { radius: 60 });
-    await flush();
-    expect(makerChatStore.getSnapshot(s).isLoadingMore).toBe(true);
-
-    // 对账 #1 的那一页现在才回来(属于旧代际)。
-    stalePage.resolve([
-      dbMessage(s, 'stale-auth', 'stale authoritative', '2026-06-14T00:00:00.000Z'),
-    ]);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-
-    // 关键一:陈旧对账的行不得落地。
-    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).not.toContain(
-      'client-stale-auth',
-    );
-    // 关键二:锁仍属于那次跳转 —— 陈旧对账不得代它释放。
-    expect(makerChatStore.getSnapshot(s).isLoadingMore).toBe(true);
-
-    // 跳转没被作废:它自己那一页回来后正常命中目标。
-    jumpPage.resolve([target]);
-    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
-    expect((await jump)?.clientId).toBe('client-jump-target');
-    expect(makerChatStore.getSnapshot(s).isLoadingMore).toBe(false);
   });
 
   it('远程会话:权威重建作废在飞行中的跳转补齐,并释放分页锁', async () => {

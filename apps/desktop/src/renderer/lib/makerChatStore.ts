@@ -1230,13 +1230,6 @@ function _purgeSession(sessionId: string): void {
   _lastViewedAt.delete(sessionId);
   _lastInboundEventAt.delete(sessionId);
   rendererClearBoundaryBySession.delete(sessionId);
-  // 远程对账的提交记录:会话整条消失后不再有意义,随 purge 一起清,避免 Map 随 sessionId
-  // 无界增长(#676 review copilot)。
-  //
-  // 能安全 delete 的前提是发号器**全进程单调**(_remoteReconcileSeqCounter):序号不会在
-  // 重开后被复用,所以"purge 前尚未回来的对账"永远小于重开后启动的任何一次,提交点的
-  // seq 检查照样拦得住它。清零本身不再是漏洞(#676 review codex P1)。
-  _remoteReconcileCommit.delete(sessionId);
   const i = _accessOrder.indexOf(sessionId);
   if (i !== -1) _accessOrder.splice(i, 1);
 }
@@ -5095,63 +5088,9 @@ const _historyLoadOrigin = new Map<string, string | undefined>();
  * (隧道下可达数秒),这层守卫随之补上(subagent review 记录的既有竞态类别)。
  * purge 时保留条目(bump 而非 delete)是**有意**的:删掉会让"捕获 0 → purge → 重建后仍是 0"
  * 的路径误判为未变。代价是这张表随本进程见过的 sessionId 单调增长(每条一个 number),
- * 上界是历史会话数 —— 拿不回来,但也换不掉:删条目就等于放弃这层守卫。相邻的对账次序簿
- * (_remoteReconcileCommit)没有这个约束(发号器 _remoteReconcileSeqCounter 全进程单调),
- * 已随 purge 清理。
+ * 上界是历史会话数 —— 拿不回来,但也换不掉:删条目就等于放弃这层守卫。
  */
 const _messagesEpoch = new Map<string, number>();
-
-/**
- * device-link 远程对账的启动序号发号器 —— **全进程单调**,不按 sessionId 分表。
- *
- * 它只给每次对账一个先后次序,不在启动时作废任何人(作废判据在提交点,见
- * _remoteReconcileCommit)。
- *
- * 为什么代际号不够:代际只在"窗口被整体重建"时递增,而找到重叠的对账只做加性 merge、
- * 不 bump 代际。于是"旧的无重叠对账 + 新的有重叠对账"这一对里,旧那次能通过代际比对、
- * 把陈旧的权威重建落地(#676 review codex P1)。序号与代际是两个维度,两道都要过。
- *
- * 为什么必须全局、不能每会话一个计数器:会话被 LRU purge 后以同一 ID 重开时,per-session
- * 计数器会从 1 重新发号,于是"purge 前那次尚未回来的对账"手里的旧序号反而**大于**重开后
- * 已提交的序号,既通过序号检查、又能借 lastCommit.epoch 通过代际检查,把陈旧行盖回新窗口
- * (#676 review codex P1)。全局单调保证"启动更晚 ⇒ 序号更大"横跨 purge 仍然成立,
- * 于是 _remoteReconcileCommit 那张表可以随 purge 安全清理。
- */
-let _remoteReconcileSeqCounter = 0;
-
-/**
- * 最近一次**成功落地**的对账:它的启动序号,以及落地那一刻的消息代际。
- *
- * `seq` 用来作废启动更早的那些对账(latest-wins,但判据在提交点,见下)。
- * `epoch` 用来把"对账提交造成的代际 bump"与"无关的窗口重置(rewind / clear / trim / demote)"
- * 区分开:更早启动的对账走权威重建时会 bump 代际,之后回来的更晚启动者不能因此被误判成陈旧
- * ——否则旧快照赢,更新的远端行继续缺着(#676 review codex P1)。
- *
- * 为什么不能在启动时就作废前一次:那等于"后启动者一定会赢",但它可能中途 reject
- * (隧道抖动 / 被控端下线)。这时旧那次已经拉回了有效的缺失窗口,却因为序号被抢走而丢弃,
- * 新那次又什么都没落地 —— 对账全是 fire-and-forget、空闲会话没有保证的重试,于是被控端
- * 的消息一直缺到下一次聚焦 / 重连 / turn 结束 / 手动重新同步(#676 review codex P1)。
- *
- * 所以判据放在**提交点**:只有"已经有一次更晚启动的对账成功落地过"才作废本次。
- * 后启动者成功 → 先启动者作废(latest-wins);后启动者失败 → 先启动者照常落地(不丢 heal)。
- */
-const _remoteReconcileCommit = new Map<
-  string,
-  {
-    seq: number;
-    epoch: number;
-    /** 那次提交走的是权威重建(整片换窗口)还是加性 merge。决定"先启动者能否补交"。 */
-    rebuilt: boolean;
-    /**
-     * 最近一次**权威重建**留下的代际(没有重建过则 undefined)。
-     *
-     * 与 epoch 分开记:加性提交会覆写这条记录,若把"谁解释了这次 bump"和"最后一次提交"混在
-     * 一个字段里,重建的出处就被随后的加性提交擦掉了 —— 第三个更晚启动的请求于是过不了
-     * epochAcceptable、它取回的新行一直缺着(#676 review codex P1)。加性提交继承它。
-     */
-    rebuildEpoch?: number;
-  }
->();
 
 function bumpMessagesEpoch(sessionId: string): void {
   _messagesEpoch.set(sessionId, (_messagesEpoch.get(sessionId) ?? 0) + 1);
@@ -5532,9 +5471,60 @@ function reconcileOpenSessionOrigins(): void {
  *    此时 isStreaming 是「卡死残留」而非真在串,必须能补回丢失的终态/消息。
  *  - 无新 clientId → no-op(不产生新数组引用,避免无谓重渲染)。
  */
+/**
+ * 同一会话的对账**单飞 + 尾随重跑**:已有一次在飞就不再并发第二次,只把"期间又被触发过"记下来,
+ * 等这次收尾后补跑一次。
+ *
+ * 为什么必须单飞:两次对账重叠会产生一整族只有并发才成立的错况 —— 旧那次拿过期的 existingIds
+ * 覆盖新窗口、用陈旧快照 hydrate 更新的行、bump 代际清掉别人刚拿到的分页锁、浅重叠的后继把深翻
+ * 的前驱整段丢掉、以及"谁解释了这次代际 bump"的出处追踪。#676 的 review 连着七八轮都在这族里:
+ * 每加一道谓词(seq / rebuilt / rebuildEpoch / superseded 补交)就长出新的角落。单飞把这族问题
+ * 从根上消掉,而不是继续加谓词。
+ *
+ * 为什么不是"排队":排队会让最新的触发等一次可能长达数秒的隧道翻页。这里是**合并**:第二次触发
+ * 不自己跑,而是保证当前这次结束后再跑一次最新的 —— 触发不丢,也不并发。
+ *
+ * 交互面板重建(reconcilePendingInteractions)照旧立刻跑:它幂等,而 turn 内的权限 / ask / plan
+ * 提示必须尽快重建,不能被合并推迟。
+ */
+const _remoteReconcileInFlight = new Map<
+  string,
+  { run: Promise<void>; rerun: boolean; rerunForce: boolean }
+>();
+
 function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }): Promise<void> {
   // 返回完成 promise 供调用方需要时等待;既有调用方均按 fire-and-forget 使用。
   if (!sessionId || !isRemoteSession(sessionId)) return Promise.resolve();
+  const inFlight = _remoteReconcileInFlight.get(sessionId);
+  if (inFlight) {
+    inFlight.rerun = true;
+    if (opts?.force) inFlight.rerunForce = true;
+    void reconcilePendingInteractions(sessionId).catch(() => undefined);
+    return inFlight.run;
+  }
+  const entry: { run: Promise<void>; rerun: boolean; rerunForce: boolean } = {
+    run: Promise.resolve(),
+    rerun: false,
+    rerunForce: false,
+  };
+  _remoteReconcileInFlight.set(sessionId, entry);
+  entry.run = (async () => {
+    try {
+      await runRemoteReconcile(sessionId, opts);
+    } finally {
+      const rerun = entry.rerun;
+      const rerunForce = entry.rerunForce;
+      // 先摘掉在飞标记,再补跑 —— 补跑会自己建新的 entry,期间来的触发继续被那一份合并。
+      _remoteReconcileInFlight.delete(sessionId);
+      if (rerun && sessions.has(sessionId)) {
+        await reconcileRemoteMessages(sessionId, rerunForce ? { force: true } : undefined);
+      }
+    }
+  })();
+  return entry.run;
+}
+
+function runRemoteReconcile(sessionId: string, opts?: { force?: boolean }): Promise<void> {
   // 挂起交互面板重建**无条件先行**,不受下方 isStreaming 守卫约束:turn 内弹出的
   // permission / ask / plan 正是 isStreaming=true 的常见态(pendingPermission 与
   // isRunning 共存),断连重连 / 聚焦时若被守卫吞掉,交互面板不重建、用户无法回应,
@@ -5574,12 +5564,6 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
   // 过期的 existingIds 覆盖新窗口,还会 bump 代际、把新一次跳转刚拿到的分页锁清掉
   // (那次跳转随即被作废,同时放开了另一个请求去抢游标)(#676 review codex P1)。
   const reconcileEpochAtStart = _messagesEpoch.get(sessionId) ?? 0;
-  // 对账自己的序号(latest-wins 单飞):代际守卫只能挡下"新一次对账**也重建了窗口**"的情况,
-  // 而找到重叠的对账只 merge、不 bump 代际(典型触发:两次快照之间来了一条 live push,新那次
-  // 因此命中重叠)。这时旧那次仍能通过代际比对,把陈旧的权威重建落地、用过期字段 hydrate
-  // 更新的行,还会清掉新那次之后才拿到的分页锁。所以再加一道对账专属的序号:同一会话只有
-  // **最后启动**的那次对账允许落地(#676 review codex P1)。
-  const reconcileSeq = ++_remoteReconcileSeqCounter;
   // 远程回执新鲜度括号:启动记代、成功完成上报(失败不报)。回执只被「入队之后
   // 才启动且成功完成」的对账放行,见 sessionAttentionStore 的门槛说明。
   const syncToken = noteRemoteSessionSyncStarted(sessionId);
@@ -5630,37 +5614,12 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
       // 两种都不能落地(会覆盖新窗口、用过期字段 hydrate 更新的行),更不能 bump 代际去清掉
       // 新代际的分页锁。不上报同步完成,交给下一轮触发。
       //
-      // 代际这一关有个例外必须放行:**更早**启动的那次对账若走了权威重建分支,它自己就 bump 了
-      // 代际;之后回来的、启动更晚且拉到更新真相的那次,不能因为这个 bump 被当成陈旧作废
-      // (否则旧快照赢,更新的远端行继续缺着)。所以把"对账提交造成的 bump"与"无关的窗口重置"
-      // 区分开:提交时一并记下当时的代际,后来者只要看到的是那个值就照常落地
-      // (#676 review codex P1)。
-      const lastCommit = _remoteReconcileCommit.get(sessionId);
+      // 代际比对是唯一一道:同一会话的对账已经单飞(见 reconcileRemoteMessages 的包装),
+      // 所以"代际变了"必然来自真正的窗口重置(rewind / clear / trim / demote / purge),
+      // 不可能是另一次对账。本次拉回的行与 existingIds 都属于旧代际 → 整体作废,不上报同步完成,
+      // 交给下一轮触发(单飞的尾随重跑也会补上)。
       const epochNow = _messagesEpoch.get(sessionId) ?? 0;
-      // 代际例外只认**重建造成的** bump:加性提交不 bump 代际,所以"它记的代际恰好等于现在"
-      // 根本解释不了代际为什么从本次启动时变了 —— 那个变化另有来源(rewind / clear / trim /
-      // demote)。旧写法让任何更晚的加性提交都能替一次无关的重置背书,于是 rewind 掉的尾部会被
-      // 先启动那次当成"缺的行"补回来(#676 review codex P1)。
-      const epochAcceptable =
-        epochNow === reconcileEpochAtStart || epochNow === lastCommit?.rebuildEpoch;
-      const supersededByNewerCommit = (lastCommit?.seq ?? 0) >= reconcileSeq;
-      // 序号这一关只拦**权威重建**,不拦加性 merge —— 但补交的门开得很窄,三个条件都要满足。
-      //
-      // 为什么要开这道门:后启动的那次不一定翻得和先启动的一样深。它可能在第一页就撞上刚被推送
-      // 过来的最新行、判 reachedKnownWindow 然后提交,而先启动那次正深翻着一段更早的缺口。若
-      // 一律按序号丢弃,那段更深的覆盖就被"浅重叠的后继"白白扔掉,缺口既没补上也没标记
-      // (#676 review codex P1)。
-      //
-      // 为什么门必须窄:
-      //  1. 本次得是加性 merge(reachedKnownWindow):它只补缺行、不动游标 / hasMore / 锁;
-      //  2. 后继那次也得是加性 merge(lastCommit.rebuilt !== true)。后继若走的是**权威重建**,
-      //     当前窗口已经整片换过,而本次的 reachedKnownWindow 是拿**重建前**的 existingIds 判
-      //     出来的 —— 那个"已知区段"可能已经不存在(远端被 rewind / clear),补交就会把已移除
-      //     的行复活,或把一段脱离的旧区间静默接上去(#676 review codex P1);
-      //  3. merge 走 addOnly(见下),不用陈旧快照 hydrate 已有的行。
-      const supersededMergeAllowed =
-        supersededByNewerCommit && reachedKnownWindow && lastCommit?.rebuilt !== true;
-      if (!epochAcceptable || (supersededByNewerCommit && !supersededMergeAllowed)) {
+      if (epochNow !== reconcileEpochAtStart) {
         windowApplied = false;
         return;
       }
@@ -5697,14 +5656,12 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
         const lateArrivals = isContiguous
           ? []
           : s.messages.filter((message) => !existingIds.has(message.clientId));
-        // 只给"启动到现在没被动过"的行开 hydrate 口子:其余(期间被 live push 更新过的)只补不改。
-        // 补交场景(被后继超越但仍放行)一律不 hydrate —— 本次快照比已落地的那次更旧。
+        // 只给"启动到现在没被动过"的行开 hydrate 口子:其余只补不改。单飞之后,期间唯一可能动过
+        // 这些行的就是 live push(messages:created),它比本次快照更新,不该被旧快照盖回去。
         const untouchedSinceStart = new Set<string>();
-        if (!supersededMergeAllowed) {
-          for (const message of s.messages) {
-            if (rowsAtStart.get(message.clientId) === message) {
-              untouchedSinceStart.add(message.clientId);
-            }
+        for (const message of s.messages) {
+          if (rowsAtStart.get(message.clientId) === message) {
+            untouchedSinceStart.add(message.clientId);
           }
         }
         const messages = isContiguous
@@ -5777,25 +5734,6 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
         };
       });
       if (didRebuild) bumpMessagesEpoch(sessionId);
-      // 真正落地了(没被 isStreaming 守卫丢掉)才记下"这一号已提交" —— 之后再回来的、启动更早
-      // 的那些对账据此作废。被丢掉时不记:什么都没进 UI,不该因此把先启动那次也一起废掉。
-      // supersededByNewerCommit 时不改提交记录:那会把 committed seq 拉回更小的值,
-      // 让真正更早的那些对账又能通过序号检查。
-      if (windowApplied && !supersededByNewerCommit) {
-        _remoteReconcileCommit.set(sessionId, {
-          seq: reconcileSeq,
-          rebuilt: didRebuild,
-          // 重建出处独立于"最后一次提交":加性提交继承前一条记录里的值,不把它擦掉。
-          ...(didRebuild
-            ? { rebuildEpoch: _messagesEpoch.get(sessionId) ?? 0 }
-            : lastCommit?.rebuildEpoch !== undefined
-              ? { rebuildEpoch: lastCommit.rebuildEpoch }
-              : {}),
-          // 代际要在**可能的 bump 之后**读:权威重建分支刚把它 +1,记的就得是新值,
-          // 后来者才能据此认出"这个 bump 是对账提交造成的"。
-          epoch: _messagesEpoch.get(sessionId) ?? 0,
-        });
-      }
     } finally {
       // 消息路径的早返 / 异常都要等交互重建落定;交互失败会让 run reject(替换原结果),
       // 语义正确:本代不完成。

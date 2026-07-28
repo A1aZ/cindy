@@ -7,11 +7,24 @@
  * app.ready 内、createWindow / 一切更新检查之前解析清单;endpoint 字段允许按
  * region 缺失或留空,不会阻断启动;拉不到、JSON / schema 无法解析或非空值非法
  * 时才弹系统错误框(重试 / 退出),用户不重试成功就不放行启动。
- * **没有缓存回退、没有超时后静默继续、没有逐字段烘焙回退**——生效的端点
- * (含更新链 CDN base)全部来自清单,非空值配置非法会在启动时立刻暴露。
- * 唯一的柔性是弹框**之前**的网络层自动重试(AUTO_RETRY_DELAYS_MS,只对
- * 拉取失败生效、不对解析/校验失败生效),用于自愈首启瞬时抖动;重试用尽
- * 仍失败照样阻断,所以严格语义不变。
+ * **没有自动缓存回退、没有超时后静默继续、没有逐字段烘焙回退**——生效的端点
+ * (含更新链 CDN base)默认全部来自本次拉到的清单,非空值配置非法会在启动时立刻暴露。
+ *
+ * 柔性只有两处,都不破坏"不静默降级":
+ *  1. 弹框**之前**的网络层自动重试(AUTO_RETRY_DELAYS_MS,只对拉取失败生效、
+ *     不对解析/校验失败生效),用于自愈首启瞬时抖动;重试用尽仍失败照样阻断。
+ *  2. **用户在弹框上显式点击**的离线出口(2026-07 追加):网络层失败且本地存有
+ *     上次成功清单时,弹框多一个「用上次配置启动」按钮。原设计连"用户明知自己
+ *     离线、只想打开应用看看本地内容"都没有出口,只能反复弹框或退出。严格边界见
+ *     endpointManifestCache.ts:只有**网络层**失败给出口(JSON / schema / 非法值 /
+ *     region 不匹配这类配置事故照旧硬阻断——给出口等于帮用户绕过真实配置错),
+ *     缓存原文读回后重新走同一套严格解析,清单地址变化即作废,全程必须用户点击。
+ *
+ * 网络层失败在弹框前还会跑一轮分阶段诊断(endpointFetchDiagnostics:代理决策 /
+ * DNS / TCP)并抓一份 netlog,摘要同时进日志和弹框。原因是 Electron `net.request`
+ * 把 DNS、代理、TLS、被本机网络过滤扩展拦下全折叠成通用的 `ERR_FAILED`,
+ * 只报一个错误码等于没有现场(2026-07 实测:同一 URL curl 与裸 Electron 都是 200,
+ * 安装版毫秒级 ERR_FAILED,单看错误码无从下手)。
  *
  * 清单来源按运行形态三选一(resolveEndpointSource,纯函数可单测):
  *  - packaged / dev + --endpoints-cdn:从当前构建区域的烘焙自举基址
@@ -37,6 +50,9 @@ import { app, dialog, ipcMain, net } from 'electron';
 
 import {
   resolveClientEndpointsStrict,
+  CLIENT_ENDPOINT_KEYS,
+  CLIENT_ENDPOINT_REVIEW_KEY,
+  CLIENT_ENDPOINTS_SCHEMA_VERSION,
   type ClientEndpointKey,
   type ClientEndpointMap,
   type ClientEndpointRegion,
@@ -44,11 +60,28 @@ import {
   type RealmManifestBaseUrls,
 } from '@cindy/maker-shared/client-endpoints';
 
-import { createLogger } from './logger';
+import {
+  createDefaultProbes,
+  formatEndpointFetchDiagnosis,
+  probeEndpointFetch,
+} from './endpointFetchDiagnostics';
+import {
+  formatCacheSavedAt,
+  readEndpointManifestCache,
+  writeEndpointManifestCache,
+} from './endpointManifestCache';
+import {
+  buildEndpointManifestDialogContent,
+  type EndpointManifestDialogChoice,
+  type EndpointManifestDialogLocale,
+  type EndpointManifestFailureKind,
+} from './endpointManifestDialogCopy';
+import { createLogger, getLogDir } from './logger';
 import {
   ENDPOINT_MANIFEST_BASE_URL,
   ENDPOINT_MANIFEST_PEER_BASE_URL,
 } from '../shared/endpoints';
+import { resolvePreferredSystemLocale } from '../shared/locale';
 
 const log = createLogger('clientEndpoints');
 
@@ -129,7 +162,13 @@ export function resolveEndpointSource(input: ResolveEndpointSourceInput): Endpoi
  * error 对象整个丢掉、统一折叠成 `fetch-failed`,现场只能看到一句
  * "fetch-failed",日志里也无从区分 DNS / 代理 / TLS / 超时,排查全靠猜。
  */
-export type ManifestFetchResult = { ok: true; text: string } | { ok: false; detail: string };
+export type ManifestFetchResult =
+  | { ok: true; text: string }
+  /**
+   * detail = 错误码级别的短标识(进 reason / 弹框);raw = 未抽码的原始错误消息,
+   * 只进日志。两者分开是因为 `ERR_FAILED` 这类通用码丢掉原文后就再无信息可查。
+   */
+  | { ok: false; detail: string; raw?: string };
 
 /** 归一为单行并截断:避免多行栈把弹框 detail 与日志行撑爆。 */
 function normalizeDetail(detail: string): string {
@@ -144,6 +183,14 @@ function describeFetchError(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
   const code = /\b(ERR_[A-Z0-9_]+)\b/.exec(message)?.[1];
   return normalizeDetail(code ?? message);
+}
+
+/** 未抽码的原始错误消息(含 errno / syscall 等),只写日志不进弹框。 */
+function rawFetchError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const errno = err as NodeJS.ErrnoException | null;
+  const extras = [errno?.code, errno?.syscall].filter(Boolean).join(' ');
+  return normalizeDetail(extras ? `${message} (${extras})` : message);
 }
 
 /** 失败 detail → 阻断循环用的 reason(保持 maker-shared 的 `fetch-failed` 前缀语义)。 */
@@ -166,7 +213,15 @@ function fetchTextViaNet(url: string, timeoutMs: number): Promise<ManifestFetchR
         if (settled) return;
         settled = true;
         if (timeoutToClear !== undefined) clearTimeout(timeoutToClear);
-        if (!value.ok) log.debug('fetch failed (%s) for %s', value.detail, url);
+        if (!value.ok) {
+          // raw 只在这里落日志:detail 抽过码后可能只剩 ERR_FAILED,原文是唯一现场。
+          log.warn(
+            'fetch failed (%s%s) for %s',
+            value.detail,
+            value.raw && value.raw !== value.detail ? ` | ${value.raw}` : '',
+            url,
+          );
+        }
         resolve(value);
       };
       const timeout = setTimeout(() => {
@@ -185,15 +240,21 @@ function fetchTextViaNet(url: string, timeoutMs: number): Promise<ManifestFetchR
         });
         response.on('end', () => finish({ ok: true, text: body }, timeout));
         response.on('error', (err) =>
-          finish({ ok: false, detail: describeFetchError(err) }, timeout),
+          finish(
+            { ok: false, detail: describeFetchError(err), raw: rawFetchError(err) },
+            timeout,
+          ),
         );
       });
       request.on('error', (err) =>
-        finish({ ok: false, detail: describeFetchError(err) }, timeout),
+        finish(
+          { ok: false, detail: describeFetchError(err), raw: rawFetchError(err) },
+          timeout,
+        ),
       );
       request.end();
     } catch (err) {
-      resolve({ ok: false, detail: describeFetchError(err) });
+      resolve({ ok: false, detail: describeFetchError(err), raw: rawFetchError(err) });
     }
   });
 }
@@ -228,11 +289,35 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** 失败 reason → 用户可见的失败分类(决定文案与是否给离线出口)。 */
+export function classifyManifestFailure(reason: string): EndpointManifestFailureKind {
+  return reason.startsWith('fetch-failed') ? 'network' : 'config';
+}
+
+/** 弹框需要的全部上下文;由阻断循环组装,宿主只负责渲染与取回选择。 */
+export interface ManifestPromptContext {
+  reason: string;
+  kind: EndpointManifestFailureKind;
+  /** 分阶段网络诊断摘要;非网络失败或诊断未跑时为 null。 */
+  diagnosis: string | null;
+  /** 诊断产物(netlog / 日志)所在目录;拿不到时为 null。 */
+  logPath: string | null;
+  /** 有值 = 存在已通过严格解析的离线缓存,弹框应给出「用上次配置启动」。 */
+  offlineSavedAt: string | null;
+}
+
+/** 严格解析过的离线缓存候选。 */
+export interface OfflineManifestCandidate {
+  parsed: Extract<ParseClientEndpointManifestResult, { ok: true }>;
+  /** 已格式化好的写入时间,直接进弹框文案。 */
+  savedAt: string;
+}
+
 /** 阻断循环的依赖注入面(规则 14:测试用内存 harness 驱动,不起 Electron)。 */
 export interface BlockingResolveDeps {
   fetchManifest(timeoutMs: number): Promise<ManifestFetchResult>;
   /** 拉取/校验失败时问用户;生产实现是系统模态错误框。 */
-  promptRetry(reason: string): 'retry' | 'exit';
+  promptRetry(context: ManifestPromptContext): EndpointManifestDialogChoice;
   exitApp(): void;
   timeoutMs?: number;
   /** 仅 dev 本地文件路径为 true(localhost http);CDN 路径一律不传。 */
@@ -248,8 +333,30 @@ export interface BlockingResolveDeps {
   autoRetryDelaysMs?: readonly number[];
   /** 仅测试注入(默认 setTimeout);让重试节奏在内存 harness 里零等待可测。 */
   sleep?(ms: number): Promise<void>;
-  /** 启动宿主保存清单元数据；纯端点调用方无需提供。 */
-  onResolved?(manifest: Extract<ParseClientEndpointManifestResult, { ok: true }>): void;
+  /**
+   * 失败分类覆写,默认 classifyManifestFailure。dev 的本地文件模式传 `() => 'config'`:
+   * 读不到 config/endpoint.json 的 reason 也是 `fetch-failed:ENOENT`,按默认规则会
+   * 被判成网络失败,弹框于是让开发者"检查网络连接"——真正的问题在本地路径或内容。
+   */
+  classifyFailure?(reason: string): EndpointManifestFailureKind;
+  /**
+   * 弹框前的分阶段网络诊断(代理 / DNS / TCP + netlog)。只在网络层失败时调用,
+   * 抛错不影响阻断流程——诊断是排查辅助,绝不能变成新的启动失败源。
+   */
+  diagnose?(reason: string): Promise<{ summary: string | null; logPath: string | null }>;
+  /**
+   * 读取并**严格解析**离线缓存;返回 null = 无可用缓存(缺失 / 损坏 / 清单地址
+   * 变化 / region 不符)。只在网络层失败时调用,且结果仅用于点亮弹框上的离线按钮。
+   */
+  loadOfflineManifest?(): OfflineManifestCandidate | null;
+  /**
+   * 启动宿主保存清单元数据;纯端点调用方无需提供。
+   * source 区分本次是网络拉到的还是用户选了离线缓存——宿主据此决定是否回写缓存。
+   */
+  onResolved?(
+    manifest: Extract<ParseClientEndpointManifestResult, { ok: true }>,
+    source: 'network' | 'cache',
+  ): void;
 }
 
 /**
@@ -257,7 +364,11 @@ export interface BlockingResolveDeps {
  *
  * 每一轮 = 一次首发尝试 + 若干次自动重试(仅网络层失败消耗预算,见
  * AUTO_RETRY_DELAYS_MS);一轮全败才 promptRetry,用户选 'retry' 则重新开一轮
- * (同样带完整自动重试预算)。没有任何静默降级路径。
+ * (同样带完整自动重试预算)。
+ *
+ * 出口只有三个,都由用户在弹框上点出来:retry(再来一轮)、exit(退出)、
+ * offline(用上次成功清单启动,仅网络层失败且缓存可用时才会被点亮)。
+ * **没有任何自动降级路径**——不点就一直阻断。
  */
 export async function resolveClientEndpointsBlocking(
   deps: BlockingResolveDeps,
@@ -274,7 +385,7 @@ export async function resolveClientEndpointsBlocking(
       try {
         fetched = await deps.fetchManifest(timeoutMs);
       } catch (err) {
-        fetched = { ok: false, detail: describeFetchError(err) };
+        fetched = { ok: false, detail: describeFetchError(err), raw: rawFetchError(err) };
       }
 
       if (fetched.ok) {
@@ -288,7 +399,7 @@ export async function resolveClientEndpointsBlocking(
             reason = `region-mismatch:${deps.expectedRegionWhenPresent}:${parsed.region}`;
             break;
           }
-          deps.onResolved?.(parsed);
+          deps.onResolved?.(parsed, 'network');
           return parsed.endpoints;
         }
         // 拿到了正文但解析/校验不过 = 配置事故:重试同一份内容没有意义,直接弹框。
@@ -314,32 +425,87 @@ export async function resolveClientEndpointsBlocking(
       await sleep(delay);
     }
 
-    log.warn(`client endpoints manifest unavailable (${reason}), prompting user`);
-    if (deps.promptRetry(reason) === 'exit') {
+    const kind = (deps.classifyFailure ?? classifyManifestFailure)(reason);
+    // 基址为空是构建事故,拿空 URL 去跑 DNS/TCP 探针只会得到一堆 invalid-url。
+    const diagnosable = kind === 'network' && !reason.includes('missing-manifest-base-url');
+    let diagnosis: string | null = null;
+    let logPath: string | null = null;
+    if (diagnosable && deps.diagnose) {
+      try {
+        const report = await deps.diagnose(reason);
+        diagnosis = report.summary;
+        logPath = report.logPath;
+      } catch (err) {
+        log.debug('manifest fetch diagnosis failed: %s', String(err));
+      }
+    }
+
+    let offline: OfflineManifestCandidate | null = null;
+    if (kind === 'network' && deps.loadOfflineManifest) {
+      try {
+        offline = deps.loadOfflineManifest();
+      } catch (err) {
+        log.debug('offline endpoint manifest unavailable: %s', String(err));
+      }
+    }
+
+    log.warn(
+      'client endpoints manifest unavailable (%s, kind=%s, diagnosis=%s, offline=%s), prompting user',
+      reason,
+      kind,
+      diagnosis ?? 'n/a',
+      offline ? 'available' : 'none',
+    );
+    const choice = deps.promptRetry({
+      reason,
+      kind,
+      diagnosis,
+      logPath,
+      offlineSavedAt: offline?.savedAt ?? null,
+    });
+    if (choice === 'exit') {
       deps.exitApp();
       return null;
     }
+    if (choice === 'offline' && offline) {
+      log.warn(
+        'starting with cached endpoint manifest (savedAt=%s) after user confirmation',
+        offline.savedAt,
+      );
+      deps.onResolved?.(offline.parsed, 'cache');
+      return offline.parsed.endpoints;
+    }
+    // 'retry',或选了离线但缓存在这一瞬间失效 → 重开一轮完整尝试。
   }
 }
 
-function promptRetryDialog(reason: string, sourceLabel: string): 'retry' | 'exit' {
+/** 弹框宿主实现:按系统语言取四语文案(不再中英混排),返回用户选择的语义。 */
+function promptRetryDialog(
+  context: ManifestPromptContext,
+  sourceLabel: string,
+  locale: EndpointManifestDialogLocale,
+): EndpointManifestDialogChoice {
+  const content = buildEndpointManifestDialogContent({
+    locale,
+    kind: context.kind,
+    reason: context.reason,
+    source: sourceLabel,
+    diagnosis: context.diagnosis,
+    logPath: context.logPath,
+    offlineSavedAt: context.offlineSavedAt,
+  });
   // createWindow 之前无父窗口,showMessageBoxSync 直接系统模态。
-  const choice = dialog.showMessageBoxSync({
+  const clicked = dialog.showMessageBoxSync({
     type: 'error',
     title: 'Cindy',
-    message: '无法获取服务器配置',
-    detail:
-      `启动所需的服务器端点清单获取失败(${reason})。\n` +
-      `来源 source: ${sourceLabel}\n` +
-      '请检查网络连接后重试;无法联网时应用不能继续启动。\n\n' +
-      `Failed to load the server endpoint manifest (${reason}). ` +
-      'Please check your network connection and retry.',
-    buttons: ['重试 Retry', '退出 Quit'],
-    defaultId: 0,
-    cancelId: 1,
+    message: content.message,
+    detail: content.detail,
+    buttons: content.buttons,
+    defaultId: content.defaultId,
+    cancelId: content.cancelId,
     noLink: true,
   });
-  return choice === 0 ? 'retry' : 'exit';
+  return content.choices[clicked] ?? 'exit';
 }
 
 // ── 模块状态与启动入口 ──────────────────────────────────────────────────────
@@ -350,12 +516,149 @@ let crossRealmOrgLoginEnabled = BUILD_VARIANT !== 'dev';
 let realmManifestBaseUrls: RealmManifestBaseUrls = DEFAULT_REALM_MANIFEST_BASE_URLS;
 let activeSessionRealm: ClientEndpointRegion | null = null;
 const realmEndpointCache = new Map<ClientEndpointRegion, ClientEndpointMap>();
+/** 本次启动是否走了用户确认的离线缓存(而非本次网络拉取)。 */
+let startedFromCachedManifest = false;
 
 const BUILD_SCOPED_ENDPOINT_KEYS = new Set<ClientEndpointKey>([
   'websiteUrl',
   'cdnBaseUrl',
   'mobileUpdateBaseUrl',
 ]);
+
+/** 弹框语言:跟随系统语言偏好列表,与原生菜单栏同一套解析。 */
+function resolveDialogLocale(): EndpointManifestDialogLocale {
+  const langs = app.getPreferredSystemLanguages();
+  return resolvePreferredSystemLocale(langs.length > 0 ? langs : [app.getLocale()]);
+}
+
+/** netlog 固定文件名:每次失败覆盖同一份,避免在日志目录里无界堆积。 */
+const ENDPOINT_NETLOG_FILE_NAME = 'endpoint-netlog.json';
+/** 诊断用的额外一次请求预算,比正常尝试短——用户已经在等弹框。 */
+const DIAGNOSIS_ATTEMPT_TIMEOUT_MS = 5_000;
+
+/**
+ * 抓一份 netlog:在录制期间再打一次同样的清单请求,把 Chromium 内部对这次失败的
+ * 判定(代理决策、socket、TLS、被谁取消)留在磁盘上。`ERR_FAILED` 这类通用码
+ * 单看错误字符串永远得不到这些信息。任何异常都只降级为「没有 netlog」。
+ */
+async function captureEndpointNetLog(): Promise<string | null> {
+  try {
+    // 动态 import(仓内先例:mcp-providers / createDesktopProviderService):netLog 只在
+    // 这条诊断路径用到,静态引入会让本模块的所有单测都必须在 electron mock 里补这个 key。
+    const { netLog } = await import('electron');
+    const file = path.join(getLogDir(), ENDPOINT_NETLOG_FILE_NAME);
+    await netLog.startLogging(file, { captureMode: 'default' });
+    try {
+      await fetchManifestViaCdn(DIAGNOSIS_ATTEMPT_TIMEOUT_MS);
+    } finally {
+      await netLog.stopLogging();
+    }
+    return file;
+  } catch (err) {
+    log.debug('netlog capture failed: %s', String(err));
+    return null;
+  }
+}
+
+/** CDN 路径的诊断实现:分阶段探针摘要 + netlog 落盘路径。 */
+async function diagnoseCdnManifestFetch(
+  manifestUrl: string,
+): Promise<{ summary: string | null; logPath: string | null }> {
+  let summary: string | null = null;
+  try {
+    const report = await probeEndpointFetch(manifestUrl, createDefaultProbes());
+    summary = formatEndpointFetchDiagnosis(report);
+    log.warn('endpoint manifest fetch diagnosis: %s (%s)', summary, manifestUrl);
+  } catch (err) {
+    log.debug('endpoint fetch probe failed: %s', String(err));
+  }
+  const netLogPath = await captureEndpointNetLog();
+  return { summary, logPath: netLogPath ?? getLogDirSafe() };
+}
+
+/** 日志目录取值失败(logger 未初始化)时不要连带炸掉阻断流程。 */
+function getLogDirSafe(): string | null {
+  try {
+    return getLogDir();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 读离线缓存并做与主路径完全相同的严格校验。任何一项不符都返回 null——
+ * 弹框上就不会出现离线按钮,用户看到的仍是"重试 / 退出"。
+ */
+function loadOfflineManifestCandidate(
+  manifestUrl: string,
+  locale: EndpointManifestDialogLocale,
+): OfflineManifestCandidate | null {
+  let cached: ReturnType<typeof readEndpointManifestCache>;
+  try {
+    cached = readEndpointManifestCache(app.getPath('userData'));
+  } catch {
+    return null;
+  }
+  if (!cached) return null;
+  if (cached.sourceUrl !== manifestUrl) {
+    log.warn(
+      'cached endpoint manifest ignored: source changed (cached=%s current=%s)',
+      cached.sourceUrl,
+      manifestUrl,
+    );
+    return null;
+  }
+  // 磁盘内容不被信任:CDN 路径同样零放松(不开 allowHttp)。
+  const parsed = resolveClientEndpointsStrict(cached.manifestText);
+  if (!parsed.ok) {
+    log.warn('cached endpoint manifest ignored: %s', parsed.reason);
+    return null;
+  }
+  if (parsed.region !== null && parsed.region !== BUILD_AUTH_REGION) {
+    log.warn(
+      'cached endpoint manifest ignored: region %s != build %s',
+      parsed.region,
+      BUILD_AUTH_REGION,
+    );
+    return null;
+  }
+  return { parsed, savedAt: formatCacheSavedAt(cached.savedAt, locale) };
+}
+
+/**
+ * 把本次成功解析的清单**规范化**后写入缓存,供下次网络失败时的离线出口使用。
+ *
+ * 写规范化结果而不是原始正文:原文可能带未知字段与格式噪声,规范化后写出的一定是
+ * 一份能被同一 parser 接受的清单——离线出口不该因为"当年那份正文里有个新字段"
+ * 而失败。空值字段直接省略(parser 对缺失与空串同义)。
+ */
+function cacheResolvedManifest(
+  manifestUrl: string,
+  manifest: Extract<ParseClientEndpointManifestResult, { ok: true }>,
+): void {
+  const payload: Record<string, unknown> = {
+    schemaVersion: CLIENT_ENDPOINTS_SCHEMA_VERSION,
+  };
+  if (manifest.region !== null) payload.region = manifest.region;
+  if (manifest.reviewVersion !== null) {
+    payload[CLIENT_ENDPOINT_REVIEW_KEY] = manifest.reviewVersion;
+  }
+  for (const key of CLIENT_ENDPOINT_KEYS) {
+    const value = manifest.endpoints[key];
+    if (value) payload[key] = value;
+  }
+  let written = false;
+  try {
+    written = writeEndpointManifestCache(app.getPath('userData'), {
+      savedAt: new Date().toISOString(),
+      sourceUrl: manifestUrl,
+      manifestText: JSON.stringify(payload),
+    });
+  } catch (err) {
+    log.debug('endpoint manifest cache write threw: %s', String(err));
+  }
+  if (!written) log.warn('failed to persist endpoint manifest cache');
+}
 
 /**
  * 启动第一步(先于一切更新检查):阻断式解析清单(packaged=CDN;dev=本地文件,
@@ -372,31 +675,47 @@ export async function initClientEndpoints(): Promise<boolean> {
     // dev 下 app.getAppPath() = apps/desktop;packaged 不走 file 分支,该值无消费。
     repoRoot: path.resolve(app.getAppPath(), '..', '..'),
   });
-  const sourceLabel =
-    source.kind === 'cdn' ? `${ENDPOINT_MANIFEST_BASE_URL}/${MANIFEST_FILE_NAME}` : source.filePath;
+  const manifestUrl = `${ENDPOINT_MANIFEST_BASE_URL}/${MANIFEST_FILE_NAME}`;
+  const sourceLabel = source.kind === 'cdn' ? manifestUrl : source.filePath;
+  const dialogLocale = resolveDialogLocale();
   // The resolver reports the parsed manifest through a callback. Keep it in a
   // box so TypeScript does not incorrectly conclude that the callback-owned
   // assignment is unreachable at the reads below.
   const resolvedManifestBox: {
     value: Extract<ParseClientEndpointManifestResult, { ok: true }> | null;
-  } = { value: null };
+    fromCache: boolean;
+  } = { value: null, fromCache: false };
   const endpoints = await resolveClientEndpointsBlocking({
     fetchManifest:
       source.kind === 'cdn'
         ? fetchManifestViaCdn
         : () => Promise.resolve(readManifestFromFile(source.filePath)),
-    promptRetry: (reason) => promptRetryDialog(reason, sourceLabel),
+    promptRetry: (context) => promptRetryDialog(context, sourceLabel, dialogLocale),
     exitApp: () => app.exit(1),
     allowHttp: source.kind === 'file',
     expectedRegionWhenPresent: BUILD_AUTH_REGION,
-    // dev 本地文件:读不到就是路径/内容配置错,不自动重试(见 BlockingResolveDeps)。
+    // dev 本地文件:读不到就是路径/内容配置错,不自动重试、也按配置事故出文案
+    // (见 BlockingResolveDeps 的 autoRetryDelaysMs / classifyFailure)。
     autoRetryDelaysMs: source.kind === 'cdn' ? undefined : [],
-    onResolved: (manifest) => {
+    classifyFailure: source.kind === 'cdn' ? undefined : () => 'config',
+    // 诊断与离线出口只对 CDN 路径有意义:file 模式的失败是本地路径/内容配置错,
+    // 探测网络毫无信息量,拿远端缓存顶掉本地正本更是把 dev 的配置错藏起来。
+    diagnose: source.kind === 'cdn' ? () => diagnoseCdnManifestFetch(manifestUrl) : undefined,
+    loadOfflineManifest:
+      source.kind === 'cdn'
+        ? () => loadOfflineManifestCandidate(manifestUrl, dialogLocale)
+        : undefined,
+    onResolved: (manifest, origin) => {
       resolvedManifestBox.value = manifest;
+      resolvedManifestBox.fromCache = origin === 'cache';
+      if (origin === 'network' && source.kind === 'cdn') {
+        cacheResolvedManifest(manifestUrl, manifest);
+      }
     },
   });
   if (endpoints === null) return false; // 用户选择退出,app.exit 已调用
   const resolvedManifest = resolvedManifestBox.value;
+  startedFromCachedManifest = resolvedManifestBox.fromCache;
   resolvedEndpoints = endpoints;
   resolvedRegion = resolvedManifest?.region ?? null;
   // 老清单没有 region 元数据，但它一定来自构建区域的自举地址。只把这份端点
@@ -406,12 +725,24 @@ export async function initClientEndpoints(): Promise<boolean> {
   realmEndpointCache.set(activeSessionRealm, endpoints);
   log.info(
     'resolved from %s (%s): auth=%s cdn=%s',
-    source.kind === 'cdn' ? 'remote manifest' : 'local manifest file',
+    startedFromCachedManifest
+      ? 'cached manifest (user-confirmed offline start)'
+      : source.kind === 'cdn'
+        ? 'remote manifest'
+        : 'local manifest file',
     sourceLabel,
     endpoints.authApiBaseUrl,
     endpoints.cdnBaseUrl,
   );
   return true;
+}
+
+/**
+ * 本次启动是否用的是用户确认的离线缓存。需要联网的功能可以据此给出更准确的提示,
+ * 而不是把"清单是旧的"表现成一堆各自失败的请求。
+ */
+export function isUsingCachedClientEndpoints(): boolean {
+  return startedFromCachedManifest;
 }
 
 /**
@@ -542,6 +873,7 @@ export function resetClientEndpointsForTest(
 ): void {
   resolvedEndpoints = resolved ?? null;
   resolvedRegion = resolved ? (options?.buildRegion ?? null) : null;
+  startedFromCachedManifest = false;
   crossRealmOrgLoginEnabled = options?.crossRealmOrgLoginEnabled ?? BUILD_VARIANT !== 'dev';
   realmManifestBaseUrls =
     options?.realmManifestBaseUrls ?? DEFAULT_REALM_MANIFEST_BASE_URLS;

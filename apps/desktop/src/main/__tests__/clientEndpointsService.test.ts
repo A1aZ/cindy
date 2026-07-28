@@ -5,7 +5,9 @@
  * 这里只测 desktop 宿主层:清单来源解析(resolveEndpointSource 表驱动)、
  * 阻断式重试循环(失败 → prompt → 重试/退出,无静默降级、无烘焙合并)、
  * 弹框前的网络层自动重试(mac 首装瞬时失败自愈;配置事故不消耗预算)、
- * 失败 reason 带错误码、
+ * 失败 reason 带错误码、失败分类(network / config)、
+ * 弹框前的分阶段诊断调用时机、
+ * **用户显式确认的离线出口**(仅网络层失败给,配置事故绝不给)、
  * file 模式的 allowHttp 放行、init 前 getter 抛错(启动时序守卫)、sendSync IPC 形状。
  */
 import path from 'node:path';
@@ -31,14 +33,17 @@ vi.mock('electron', () => ({
 
 vi.mock('../logger', () => ({
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }),
+  getLogDir: () => '/tmp/cindy-test-logs',
 }));
 
 import {
   activateClientEndpointRealm,
+  classifyManifestFailure,
   getClientEndpoint,
   getClientEndpointForRealm,
   getResolvedClientEndpoints,
   loadClientEndpointsForRealm,
+  isUsingCachedClientEndpoints,
   registerClientEndpointsIpc,
   resetClientEndpointRealm,
   resetClientEndpointsForTest,
@@ -46,6 +51,7 @@ import {
   resolveEndpointSource,
   CLIENT_ENDPOINTS_SYNC_CHANNEL,
   type BlockingResolveDeps,
+  type ManifestPromptContext,
 } from '../clientEndpointsService';
 
 afterEach(() => {
@@ -141,6 +147,10 @@ const NO_AUTO_RETRY = { autoRetryDelaysMs: [] as readonly number[] };
 const okFetch = (text: string) => async () => ({ ok: true as const, text });
 const failFetch = (detail: string) => async () => ({ ok: false as const, detail });
 
+/** promptRetry 现在收整个上下文对象;断言只钉住 reason 与失败分类。 */
+const promptedWith = (reason: string, kind: 'network' | 'config' = 'network') =>
+  expect.objectContaining({ reason, kind });
+
 function mockNetManifest(text: string): void {
   const request = new EventEmitter() as EventEmitter & {
     abort: ReturnType<typeof vi.fn>;
@@ -185,7 +195,7 @@ describe('resolveClientEndpointsBlocking(阻断循环,清单即唯一事实源)'
       ...NO_AUTO_RETRY,
     });
     expect(mismatch).toBeNull();
-    expect(promptRetry).toHaveBeenCalledWith('region-mismatch:cn:global');
+    expect(promptRetry).toHaveBeenCalledWith(promptedWith('region-mismatch:cn:global', 'config'));
 
     await expect(
       resolveClientEndpointsBlocking({
@@ -213,7 +223,7 @@ describe('resolveClientEndpointsBlocking(阻断循环,清单即唯一事实源)'
       ...NO_AUTO_RETRY,
     });
     expect(promptRetry).toHaveBeenCalledTimes(1);
-    expect(promptRetry).toHaveBeenCalledWith('fetch-failed:ERR_CONNECTION_REFUSED');
+    expect(promptRetry).toHaveBeenCalledWith(promptedWith('fetch-failed:ERR_CONNECTION_REFUSED'));
     expect(fetchManifest).toHaveBeenCalledTimes(2);
     expect(result?.authApiBaseUrl).toBe('https://auth.remote.example.com');
     expect(exitApp).not.toHaveBeenCalled();
@@ -250,7 +260,7 @@ describe('resolveClientEndpointsBlocking(阻断循环,清单即唯一事实源)'
       ...NO_AUTO_RETRY,
     });
     expect(result).toBeNull();
-    expect(promptRetry).toHaveBeenCalledWith('fetch-failed:ERR_NAME_NOT_RESOLVED');
+    expect(promptRetry).toHaveBeenCalledWith(promptedWith('fetch-failed:ERR_NAME_NOT_RESOLVED'));
     expect(exitApp).toHaveBeenCalledTimes(1);
   });
 
@@ -262,7 +272,7 @@ describe('resolveClientEndpointsBlocking(阻断循环,清单即唯一事实源)'
       exitApp: vi.fn(),
       ...NO_AUTO_RETRY,
     });
-    expect(promptRetry).toHaveBeenCalledWith('fetch-failed');
+    expect(promptRetry).toHaveBeenCalledWith(promptedWith('fetch-failed'));
   });
 
   it('localhost http 清单:默认拒绝(CDN 路径零放松),allowHttp(file 模式)放行', async () => {
@@ -292,7 +302,7 @@ describe('resolveClientEndpointsBlocking(阻断循环,清单即唯一事实源)'
       ...NO_AUTO_RETRY,
     });
     expect(result).toBeNull();
-    expect(promptRetry).toHaveBeenCalledWith('fetch-failed:ENOENT');
+    expect(promptRetry).toHaveBeenCalledWith(promptedWith('fetch-failed:ENOENT'));
   });
 });
 
@@ -339,7 +349,7 @@ describe('弹框前的自动重试(mac 首装瞬时失败自愈)', () => {
 
     expect(fetchManifest).toHaveBeenCalledTimes(3); // 首发 + 2 次自动重试
     expect(promptRetry).toHaveBeenCalledTimes(1);
-    expect(promptRetry).toHaveBeenCalledWith('fetch-failed:timeout-15000ms');
+    expect(promptRetry).toHaveBeenCalledWith(promptedWith('fetch-failed:timeout-15000ms'));
     expect(result).toBeNull();
     expect(exitApp).toHaveBeenCalledTimes(1);
   });
@@ -395,7 +405,8 @@ describe('弹框前的自动重试(mac 首装瞬时失败自愈)', () => {
     expect(fetchManifest).toHaveBeenCalledTimes(1);
     expect(sleep).not.toHaveBeenCalled();
     expect(promptRetry).toHaveBeenCalledTimes(1);
-    expect(promptRetry.mock.calls[0][0]).not.toMatch(/^fetch-failed/);
+    expect(promptRetry.mock.calls[0][0].reason).not.toMatch(/^fetch-failed/);
+    expect(promptRetry.mock.calls[0][0].kind).toBe('config');
     expect(result).toBeNull();
   });
 
@@ -466,7 +477,262 @@ describe('弹框前的自动重试(mac 首装瞬时失败自愈)', () => {
   });
 });
 
+describe('失败分类与弹框前诊断', () => {
+  it.each([
+    ['fetch-failed', 'network'],
+    ['fetch-failed:ERR_FAILED', 'network'],
+    ['fetch-failed:missing-manifest-base-url', 'network'],
+    ['invalid-json', 'config'],
+    ['unsupported-schema-version:9', 'config'],
+    ['invalid-protocol:cdnBaseUrl', 'config'],
+    ['region-mismatch:cn:global', 'config'],
+  ] as const)('%s → %s', (reason, kind) => {
+    expect(classifyManifestFailure(reason)).toBe(kind);
+  });
+
+  it('网络失败时诊断摘要与日志路径进 prompt 上下文', async () => {
+    const diagnose = vi.fn().mockResolvedValue({
+      summary: 'proxy=DIRECT dns=ok(1.2.3.4) tcp=ok(9ms)',
+      logPath: '/tmp/cindy-test-logs/endpoint-netlog.json',
+    });
+    const promptRetry = vi.fn().mockReturnValue('exit');
+
+    await resolveClientEndpointsBlocking({
+      fetchManifest: failFetch('ERR_FAILED'),
+      promptRetry,
+      exitApp: vi.fn(),
+      diagnose,
+      ...NO_AUTO_RETRY,
+    });
+
+    // 一轮只诊断一次(自动重试期间不诊断,别把弹框前的等待翻倍)。
+    expect(diagnose).toHaveBeenCalledTimes(1);
+    expect(promptRetry.mock.calls[0][0]).toMatchObject({
+      kind: 'network',
+      diagnosis: 'proxy=DIRECT dns=ok(1.2.3.4) tcp=ok(9ms)',
+      logPath: '/tmp/cindy-test-logs/endpoint-netlog.json',
+    });
+  });
+
+  it('配置事故不跑诊断(探网络没有信息量)', async () => {
+    const diagnose = vi.fn();
+    const promptRetry = vi.fn().mockReturnValue('exit');
+
+    await resolveClientEndpointsBlocking({
+      fetchManifest: okFetch('not json'),
+      promptRetry,
+      exitApp: vi.fn(),
+      diagnose,
+    });
+
+    expect(diagnose).not.toHaveBeenCalled();
+    expect(promptRetry.mock.calls[0][0]).toMatchObject({ diagnosis: null, logPath: null });
+  });
+
+  it('烘焙基址缺失不跑诊断(空 URL 探不出东西)', async () => {
+    const diagnose = vi.fn();
+    const promptRetry = vi.fn().mockReturnValue('exit');
+
+    await resolveClientEndpointsBlocking({
+      fetchManifest: failFetch('missing-manifest-base-url'),
+      promptRetry,
+      exitApp: vi.fn(),
+      diagnose,
+    });
+
+    expect(diagnose).not.toHaveBeenCalled();
+  });
+
+  it('file 模式覆写分类:本地读不到不该让人去检查网络', async () => {
+    const promptRetry = vi.fn().mockReturnValue('exit');
+    const diagnose = vi.fn();
+    const loadOfflineManifest = vi.fn();
+
+    await resolveClientEndpointsBlocking({
+      fetchManifest: failFetch('ENOENT'),
+      promptRetry,
+      exitApp: vi.fn(),
+      allowHttp: true,
+      classifyFailure: () => 'config',
+      diagnose,
+      loadOfflineManifest,
+      ...NO_AUTO_RETRY,
+    });
+
+    expect(promptRetry).toHaveBeenCalledWith(promptedWith('fetch-failed:ENOENT', 'config'));
+    expect(diagnose).not.toHaveBeenCalled();
+    expect(loadOfflineManifest).not.toHaveBeenCalled();
+  });
+
+  it('诊断自身抛错不影响阻断流程', async () => {
+    const promptRetry = vi.fn().mockReturnValue('exit');
+    const exitApp = vi.fn();
+
+    const result = await resolveClientEndpointsBlocking({
+      fetchManifest: failFetch('ERR_FAILED'),
+      promptRetry,
+      exitApp,
+      diagnose: async () => {
+        throw new Error('probe blew up');
+      },
+      ...NO_AUTO_RETRY,
+    });
+
+    expect(result).toBeNull();
+    expect(promptRetry.mock.calls[0][0]).toMatchObject({ diagnosis: null });
+    expect(exitApp).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('用户确认的离线出口', () => {
+  const offlineCandidate = () => ({
+    parsed: {
+      ok: true as const,
+      endpoints: { ...TEST_CLIENT_ENDPOINTS, authApiBaseUrl: 'https://auth.cached.example.com' },
+      reviewVersion: null,
+      region: null,
+    },
+    savedAt: '2026/7/29 06:22',
+  });
+
+  it('网络失败 + 有缓存 + 用户点离线 → 用缓存端点启动', async () => {
+    const loadOfflineManifest = vi.fn(offlineCandidate);
+    const onResolved = vi.fn();
+    const fetchManifest = vi
+      .fn<BlockingResolveDeps['fetchManifest']>()
+      .mockResolvedValue({ ok: false, detail: 'ERR_FAILED' });
+    const promptRetry = vi.fn().mockReturnValue('offline');
+    const exitApp = vi.fn();
+
+    const result = await resolveClientEndpointsBlocking({
+      fetchManifest,
+      promptRetry,
+      exitApp,
+      loadOfflineManifest,
+      ...NO_AUTO_RETRY,
+    });
+
+    expect(result?.authApiBaseUrl).toBe('https://auth.cached.example.com');
+    expect(promptRetry.mock.calls[0][0]).toMatchObject({ offlineSavedAt: '2026/7/29 06:22' });
+    expect(onResolved).not.toHaveBeenCalled();
+    expect(exitApp).not.toHaveBeenCalled();
+    // 只尝试了一次网络:离线是出口而不是"再试一次"。
+    expect(fetchManifest).toHaveBeenCalledTimes(1);
+  });
+
+  it('走离线出口时 onResolved 收到 source=cache;网络成功则是 network', async () => {
+    const cacheResolved = vi.fn();
+    await resolveClientEndpointsBlocking({
+      fetchManifest: failFetch('ERR_FAILED'),
+      promptRetry: () => 'offline',
+      exitApp: vi.fn(),
+      loadOfflineManifest: offlineCandidate,
+      onResolved: cacheResolved,
+      ...NO_AUTO_RETRY,
+    });
+    expect(cacheResolved).toHaveBeenCalledWith(expect.anything(), 'cache');
+
+    const netResolved = vi.fn();
+    await resolveClientEndpointsBlocking({
+      fetchManifest: okFetch(FULL_MANIFEST),
+      promptRetry: vi.fn(),
+      exitApp: vi.fn(),
+      loadOfflineManifest: offlineCandidate,
+      onResolved: netResolved,
+    });
+    expect(netResolved).toHaveBeenCalledWith(expect.anything(), 'network');
+  });
+
+  it('配置事故绝不给离线出口:既不读缓存也不点亮按钮', async () => {
+    const loadOfflineManifest = vi.fn(offlineCandidate);
+    const promptRetry = vi.fn().mockReturnValue('exit');
+
+    await resolveClientEndpointsBlocking({
+      fetchManifest: okFetch('not json'),
+      promptRetry,
+      exitApp: vi.fn(),
+      loadOfflineManifest,
+    });
+
+    expect(loadOfflineManifest).not.toHaveBeenCalled();
+    expect(promptRetry.mock.calls[0][0]).toMatchObject({
+      kind: 'config',
+      offlineSavedAt: null,
+    });
+  });
+
+  it('没有可用缓存时 offlineSavedAt 为 null(弹框不出离线按钮)', async () => {
+    const promptRetry = vi.fn().mockReturnValue('exit');
+    await resolveClientEndpointsBlocking({
+      fetchManifest: failFetch('ERR_FAILED'),
+      promptRetry,
+      exitApp: vi.fn(),
+      loadOfflineManifest: () => null,
+      ...NO_AUTO_RETRY,
+    });
+    expect(promptRetry.mock.calls[0][0]).toMatchObject({ offlineSavedAt: null });
+  });
+
+  it('读缓存抛错只降级为"没有缓存"', async () => {
+    const promptRetry = vi.fn().mockReturnValue('exit');
+    const result = await resolveClientEndpointsBlocking({
+      fetchManifest: failFetch('ERR_FAILED'),
+      promptRetry,
+      exitApp: vi.fn(),
+      loadOfflineManifest: () => {
+        throw new Error('disk on fire');
+      },
+      ...NO_AUTO_RETRY,
+    });
+    expect(result).toBeNull();
+    expect(promptRetry.mock.calls[0][0]).toMatchObject({ offlineSavedAt: null });
+  });
+
+  it('选了离线但缓存这一瞬失效 → 回到下一轮尝试,不静默继续', async () => {
+    const fetchManifest = vi
+      .fn<BlockingResolveDeps['fetchManifest']>()
+      .mockResolvedValueOnce({ ok: false, detail: 'ERR_FAILED' })
+      .mockResolvedValueOnce({ ok: true, text: FULL_MANIFEST });
+    // 第一轮报告有缓存,用户点离线时缓存已经不可用(被清理 / 校验不过)。
+    const loadOfflineManifest = vi
+      .fn<NonNullable<BlockingResolveDeps['loadOfflineManifest']>>()
+      .mockReturnValueOnce(null);
+    const promptRetry = vi
+      .fn<(context: ManifestPromptContext) => 'retry' | 'offline' | 'exit'>()
+      .mockReturnValue('offline');
+
+    const result = await resolveClientEndpointsBlocking({
+      fetchManifest,
+      promptRetry,
+      exitApp: vi.fn(),
+      loadOfflineManifest,
+      ...NO_AUTO_RETRY,
+    });
+
+    expect(result?.authApiBaseUrl).toBe('https://auth.remote.example.com');
+    expect(fetchManifest).toHaveBeenCalledTimes(2);
+  });
+
+  it('自动重试期间不问缓存(只在真要弹框时读一次盘)', async () => {
+    const loadOfflineManifest = vi.fn(offlineCandidate);
+    await resolveClientEndpointsBlocking({
+      fetchManifest: failFetch('ERR_FAILED'),
+      promptRetry: () => 'exit',
+      exitApp: vi.fn(),
+      loadOfflineManifest,
+      autoRetryDelaysMs: [1, 2],
+      sleep: async () => {},
+    });
+    expect(loadOfflineManifest).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('getter / IPC', () => {
+  it('默认不是离线缓存启动', () => {
+    expect(isUsingCachedClientEndpoints()).toBe(false);
+  });
+
+
   it('init 之前 getClientEndpoint / getResolvedClientEndpoints 直接抛错(启动时序守卫)', () => {
     expect(() => getClientEndpoint('authApiBaseUrl')).toThrow(/not initialized/);
     expect(() => getResolvedClientEndpoints()).toThrow(/not initialized/);

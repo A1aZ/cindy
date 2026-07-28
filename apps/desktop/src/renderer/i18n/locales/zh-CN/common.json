@@ -1342,6 +1342,9 @@
         "capabilityNote": "不支持 {{agent}}",
         "divergedChip": "已在 {{agent}} 隐藏",
         "refreshAria": "刷新模型列表(仅新增，不改动现有)",
+        "refreshBuiltinAria": "刷新模型列表",
+        "refreshingAria": "正在刷新模型列表…",
+        "refreshDone": "模型列表已刷新",
         "refreshAdded": "已发现 {{count}} 个新模型",
         "refreshNoNew": "模型列表已是最新，无新增",
         "refreshFailed": "模型列表刷新失败，请稍后再试"
@@ -4297,6 +4300,12 @@
       "editTitle": "编辑粘贴的文本",
       "cancelEdit": "取消编辑",
       "saveEdit": "保存文本"
+    },
+    "permissionPrompt": {
+      "alwaysAllowScoped": "本对话都允许 {{scope}}",
+      "alwaysAllowScopedHint": "作用于整个对话，且只限这里列出的范围。",
+      "alwaysAllowSessionHint": "作用于整个对话，不只是这一次请求。",
+      "ruleSeparator": "、"
     }
   },
   "onboarding": {

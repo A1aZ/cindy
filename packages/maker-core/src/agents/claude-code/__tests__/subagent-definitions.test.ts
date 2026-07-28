@@ -132,7 +132,7 @@ describe('discoverSubagentDefinitions', () => {
   // 回归:严格对齐 cc 的加载条件。cc 对缺 name 或缺 description 的文件直接 return null,
   // 我们若「宽容」地按文件名收下它,就会误判「有人声明了 model」→ 删掉 env → 用户配的默认值
   // 对所有真实 agent 静默失效(与漏认反向、但同样严重的失效模式)。
-  it('缺 name 或缺 description 的定义都不收(cc 也不加载),无 frontmatter 的同样跳过', async () => {
+  it('缺 name / 缺 description 的不收,但纯空白 description 要收(与 cc 的谓词逐字一致)', async () => {
     const dir = path.join(root, 'repo', '.claude', 'agents');
     await writeAgent(dir, 'ok.md', 'name: ok\ndescription: 正常\nmodel: opus');
     // 这三个必须绕过 writeAgent —— 它会自动补 description,正好会掩掉要测的缺字段。
@@ -159,7 +159,9 @@ describe('discoverSubagentDefinitions', () => {
       env: { CLAUDE_CONFIG_DIR: path.join(root, 'empty-home') },
     });
 
-    expect(found.map((f) => f.name)).toEqual(['ok']);
+    // blank-desc 要被**收下** —— cc 的谓词是 `!description || typeof !== 'string'`,不 trim,
+    // 所以纯空白是合法的、cc 会加载。比 cc 更严就会漏认它的 model 声明。
+    expect(found.map((f) => f.name).sort()).toEqual(['blank-desc', 'ok']);
   });
 
   // 回归:CLAUDE_CONFIG_DIR 在 host boot 期就被剥离出 process.env,dev 多实例的重定向只
@@ -468,6 +470,73 @@ describe('discoverSubagentDefinitions', () => {
     expect(found.map((f) => f.name)).toEqual(['real']);
     // 关键后果:没人「声明」model,默认值该照旧生效。
     expect(found.every((f) => f.declaredModel === undefined)).toBe(true);
+  });
+
+  // 回归:同一作用域内两个文件用同一个 name 时,cc 按文件系统枚举顺序任选其一 —— 那个顺序
+  // 复现不了(ext4 ≠ APFS,也不等于我们的名字排序)。所以判定必须**与顺序无关**:声明了 model
+  // 的候选胜出。否则我们的排序挑中没写 model 的那份 → 误判「没人声明」→ env 覆盖复位。
+  it('同作用域重名:声明了 model 的胜出,与枚举顺序无关', async () => {
+    const dir = path.join(root, 'repo', '.claude', 'agents');
+    // 名字排序下 a-plain.md 在前(没写 model),z-declared.md 在后(写了)。
+    await writeAgent(dir, 'a-plain.md', 'name: dup\ndescription: 没写 model');
+    await writeAgent(dir, 'z-declared.md', 'name: dup\ndescription: 写了 model\nmodel: xai/grok-4.5');
+
+    const found = await discoverSubagentDefinitions({
+      workingDir: path.join(root, 'repo'),
+      env: { CLAUDE_CONFIG_DIR: path.join(root, 'empty-home') },
+    });
+
+    expect(found).toHaveLength(1);
+    expect(found[0].declaredModel).toBe('xai/grok-4.5');
+  });
+
+  it('同作用域重名:反向文件名顺序下结论相同', async () => {
+    const dir = path.join(root, 'repo', '.claude', 'agents');
+    await writeAgent(dir, 'a-declared.md', 'name: dup\ndescription: 写了 model\nmodel: opus');
+    await writeAgent(dir, 'z-plain.md', 'name: dup\ndescription: 没写 model');
+
+    const found = await discoverSubagentDefinitions({
+      workingDir: path.join(root, 'repo'),
+      env: { CLAUDE_CONFIG_DIR: path.join(root, 'empty-home') },
+    });
+
+    expect(found).toHaveLength(1);
+    expect(found[0].declaredModel).toBe('opus');
+  });
+
+  // 跨作用域的优先级是确定的(平台文档),不受上面那条「声明者胜」影响。
+  it('跨作用域重名:项目照旧压过用户,即便用户那份声明了 model', async () => {
+    const home = path.join(root, 'home', '.claude');
+    await writeAgent(path.join(home, 'agents'), 'dup.md', 'name: dup\ndescription: 用户\nmodel: haiku');
+    await writeAgent(
+      path.join(root, 'repo', '.claude', 'agents'),
+      'dup.md',
+      'name: dup\ndescription: 项目',
+    );
+
+    const found = await discoverSubagentDefinitions({
+      workingDir: path.join(root, 'repo'),
+      env: { CLAUDE_CONFIG_DIR: home },
+    });
+
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ scope: 'project', declaredModel: undefined });
+  });
+
+  // 恶意/畸形输入:32 KiB 的 model 串会一路流进同步的诊断打分与日志,必须在源头封顶。
+  it('超长 model 串在发现层就被截断到 256 字符', async () => {
+    await writeAgent(
+      path.join(root, 'repo', '.claude', 'agents'),
+      'huge-model.md',
+      `name: hm\ndescription: d\nmodel: ${'x'.repeat(5000)}`,
+    );
+
+    const found = await discoverSubagentDefinitions({
+      workingDir: path.join(root, 'repo'),
+      env: { CLAUDE_CONFIG_DIR: path.join(root, 'empty-home') },
+    });
+
+    expect(found[0].declaredModel).toHaveLength(256);
   });
 
   it('目录不存在 / workingDir 非绝对路径都安全返回空,不抛错', async () => {

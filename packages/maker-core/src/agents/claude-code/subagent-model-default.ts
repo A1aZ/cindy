@@ -147,6 +147,10 @@ function stripWireSuffix(model: string): string {
 
 /** 最多给几个候选 —— 可用清单常有几十条(含图像/向量等无关模型),全列既无用又误导。 */
 const MAX_SUGGESTIONS = 8;
+/** 参与打分的字符数上限(发现层已限 256,这里是独立的第二道)。 */
+const MAX_SCORING_CHARS = 256;
+/** 参与第二档匹配的词干个数上限 —— 真实 id 拆出来就几个词,几千个词干只可能来自恶意输入。 */
+const MAX_STEM_SEGMENTS = 8;
 
 /**
  * 给写错的 model 挑几个最可能的候选。
@@ -156,10 +160,16 @@ const MAX_SUGGESTIONS = 8;
  * (里面还混着 embedding / image 模型)有用得多。
  */
 export function suggestModelIds(declared: string, available: readonly string[]): string[] {
-  const lower = declared.toLowerCase();
+  // 打分是**同步**的,而且发生在扫描 deadline 之外 —— 一旦入参失控就是实打实的事件循环卡顿,
+  // 任何异步超时都拦不住。所以入参在这里再封一道:发现层已把 model id 限到 256 字符
+  // (MAX_DECLARED_MODEL_CHARS),这里再限词干个数。上界因此是
+  // MAX_STEM_SEGMENTS × available.length 次 includes,与仓库内容无关。
+  const lower = declared.slice(0, MAX_SCORING_CHARS).toLowerCase();
   const ns = lower.includes('/') ? lower.slice(0, lower.indexOf('/') + 1) : '';
   // 取写错值里的字母词干(如 grok / gpt / claude),用于第二档匹配。
-  const stem = (lower.match(/[a-z]+/g) ?? []).filter((w) => w.length >= 3 && w !== ns.replace('/', ''));
+  const stem = (lower.match(/[a-z]+/g) ?? [])
+    .filter((w) => w.length >= 3 && w !== ns.replace('/', ''))
+    .slice(0, MAX_STEM_SEGMENTS);
   const score = (id: string): number => {
     const l = id.toLowerCase();
     if (ns && l.startsWith(ns)) return 0;

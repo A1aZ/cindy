@@ -323,13 +323,22 @@ async function projectAgentsDirs(workingDir: string): Promise<string[]> {
   return dirs;
 }
 
+/**
+ * model id 的长度上限。真实 id 最长也就几十个字符;frontmatter 却能塞进整个前缀(32 KiB)。
+ * 不封顶的话,这个串会一路流到诊断打分(suggestModelIds 逐词干比对整份可用清单)与日志里 ——
+ * 前者是**同步**计算且发生在扫描 deadline 之外,拦不住,只能从源头限长。
+ */
+const MAX_DECLARED_MODEL_CHARS = 256;
+
 function normalizeDeclaredModel(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined;
+  // cc 对 model **会** trim,且把空白与 `inherit` 都当作「没指定」,继续沿解析链向下。
   const trimmed = raw.trim();
   if (trimmed.length === 0) return undefined;
-  // `inherit` 在平台语义里等同「没指定」,继续沿解析链向下 —— 视作未声明。
   if (trimmed.toLowerCase() === 'inherit') return undefined;
-  return trimmed;
+  return trimmed.length > MAX_DECLARED_MODEL_CHARS
+    ? trimmed.slice(0, MAX_DECLARED_MODEL_CHARS)
+    : trimmed;
 }
 
 /**
@@ -387,9 +396,15 @@ async function readSubagentFile(
   //   - 漏认一份 cc 会加载的定义 → 误判「没人声明 model」→ 又把覆盖用的 env 设回去;
   //   - 多认一份 cc 不加载的定义(例如只写了 model 没写 name 的草稿)→ 误判「有人声明」→
   //     删掉 env → 用户配的默认值对**所有**真实 agent 和内置 agent 静默失效。
-  const name = typeof fm.name === 'string' ? fm.name.trim() : '';
-  const description = typeof fm.description === 'string' ? fm.description.trim() : '';
-  if (name.length === 0 || description.length === 0) return null;
+  //
+  // ⚠️ 三个字段的谓词**不对称**,必须逐个照抄,不能一刀切:
+  //   - `name` / `description`:`!value || typeof value !== 'string'` —— 只排除空串,
+  //     **不 trim**。所以 `description: "  "` 在 cc 眼里是合法的、会被加载;我们若额外 trim
+  //     就比 cc 更严 → 漏认一份 cc 真会加载的定义 → 又把覆盖用的 env 设回去。
+  //   - `model`:cc 自己会 `trim()` 并把空白与 `inherit` 视作未指定(见 normalizeDeclaredModel)。
+  const name = typeof fm.name === 'string' && fm.name.length > 0 ? fm.name : '';
+  const hasDescription = typeof fm.description === 'string' && fm.description.length > 0;
+  if (name.length === 0 || !hasDescription) return null;
   return {
     name,
     filePath,
@@ -442,11 +457,20 @@ async function scanSubagentDefinitions(
   const budget = new ScanBudget((opts.now ?? Date.now)(), deadlineMs);
   const visitedDirs = new Set<string>();
   const scoped: Array<{ dir: string; scope: DiscoveredSubagent['scope'] }> = [
-    // 顺序 = 优先级从高到低;同名先到者胜。
+    // 顺序 = 跨作用域优先级从高到低(项目近者 > 项目远者 > 用户)。
     ...(await projectAgentsDirs(opts.workingDir)).map((dir) => ({ dir, scope: 'project' as const })),
     { dir: userAgentsDir(opts.env, opts.hostEnv ?? process.env), scope: 'user' as const },
   ];
 
+  // 同名去重。跨作用域的优先级是**确定的**(项目近者 > 项目远者 > 用户,平台文档如此),
+  // 所以先到者胜;但**同一作用域内**两个文件用同一个 `name` 时,cc 按文件系统枚举顺序任选
+  // 其一 —— 那个顺序我们复现不了(ext4 与 APFS 不同,也不保证等于我们的名字排序)。
+  //
+  // 与其赌顺序,不如让判定**与顺序无关**:同名同作用域的候选里,**声明了 model 的那个胜出**。
+  // 这样无论文件系统怎么枚举,我们的结论都一样,#2 那类「我们的排序挑了另一个」的漂移就不存在了。
+  // 残留代价诚实说明:若 cc 实际加载的是没写 model 的那份,我们会多算一次「有人声明」→ 默认值
+  // 不生效。选这个方向是因为本 PR 的不变量是「用户显式写下的 model 不被静默覆盖」,而同作用域
+  // 重名本身是配置错误(cc 自己也只是任选其一)。
   const byName = new Map<string, DiscoveredSubagent>();
   for (const { dir, scope } of scoped) {
     if (!(await isDirectory(dir))) continue;
@@ -454,8 +478,19 @@ async function scanSubagentDefinitions(
       budget.checkTime();
       const found = await readSubagentFile(filePath, scope);
       if (!found) continue;
-      // 高优先级作用域先遍历,已存在同名即不覆盖。
-      if (!byName.has(found.name)) byName.set(found.name, found);
+      const existing = byName.get(found.name);
+      if (!existing) {
+        byName.set(found.name, found);
+        continue;
+      }
+      // 已有同名:跨作用域(existing 来自更高优先级)一律不动;同作用域则让声明了 model 的胜出。
+      if (
+        existing.scope === found.scope
+        && existing.declaredModel === undefined
+        && found.declaredModel !== undefined
+      ) {
+        byName.set(found.name, found);
+      }
     }
   }
   return [...byName.values()];

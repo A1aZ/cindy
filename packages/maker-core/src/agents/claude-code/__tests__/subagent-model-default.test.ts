@@ -215,6 +215,17 @@ describe('suggestModelIds', () => {
     expect(suggestModelIds('nonsense', many)).toHaveLength(8);
   });
 
+  // 打分是同步的、且跑在扫描 deadline 之外,入参失控就是实打实的事件循环卡顿。
+  // 上界必须只与「可用清单长度 × 词干上限」有关,与仓库塞进来的串多长无关。
+  it('超长 declared 串不放大打分成本(词干与参与字符都有上限)', () => {
+    const evil = Array.from({ length: 4000 }, (_, i) => `seg${i}`).join('-');
+    const started = Date.now();
+    const s = suggestModelIds(evil, many);
+    expect(s.length).toBeLessThanOrEqual(8);
+    // 不做精确计时断言(CI 机器抖动),只锁一个宽松上界:失控实现会是秒级。
+    expect(Date.now() - started).toBeLessThan(200);
+  });
+
   it('同档内保持目录原序(结果稳定可预期)', () => {
     const s = suggestModelIds('xai/x', ['xai/b', 'xai/a']);
     expect(s).toEqual(['xai/b', 'xai/a']);

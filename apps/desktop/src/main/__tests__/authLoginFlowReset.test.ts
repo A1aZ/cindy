@@ -41,15 +41,28 @@ describe('auth login-flow reset', () => {
     expect(source).not.toContain('setJwt(');
   });
 
-  it('registers enterprise-id SSO discovery into the start-browser connection whitelist', () => {
-    // 企业 ID discovery 的连接必须写入 discoveredMethods:start-browser 的
-    // connectionId 校验以它为白名单,漏写会让该入口发起的 SSO 全部 404。
+  it('requires confirmation only when enterprise discovery crosses the build region', () => {
     const start = source.indexOf("if (action.type === 'discover-sso-org') {");
     expect(start).toBeGreaterThan(-1);
-    const body = source.slice(start, source.indexOf('\n    }', start));
-    expect(body).toContain('discoveredMethods = ssoOrgDiscoveryToMethods(discovery)');
+    const body = source.slice(
+      start,
+      source.indexOf("\n    if (action.type === 'request-code')", start),
+    );
+    expect(body).toContain('const methods = ssoOrgDiscoveryToMethods(discovery)');
+    expect(body).toContain('if (discovery.region !== AUTH_REGION)');
+    expect(body).toContain("type: 'realm-switch-required'");
     expect(body).toContain("type: 'discovery-loaded'");
     expect(body).toContain("email: ''");
+
+    // 跨区连接只有 confirm action 才写入 start-browser 白名单；弹窗阶段不能
+    // 通过伪造 connectionId 直接跳过确认。
+    const confirmStart = source.indexOf("if (action.type === 'confirm-sso-realm') {");
+    const confirmBody = source.slice(
+      confirmStart,
+      source.indexOf("\n    if (action.type === 'cancel-sso-realm')", confirmStart),
+    );
+    expect(confirmBody).toContain('discoveredMethods = confirmation.methods;');
+    expect(confirmBody).toContain("type: 'discovery-loaded'");
   });
 
   it('clears stale organization realm state before personal login and a new discovery', () => {

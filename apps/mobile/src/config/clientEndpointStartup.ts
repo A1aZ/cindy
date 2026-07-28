@@ -103,8 +103,6 @@ export interface StartupEndpointResolveDeps {
     reviewVersion: string | null;
     isTestFlight: boolean;
     region: 'cn' | 'global' | null;
-    crossRealmOrgLoginEnabled: boolean;
-    realmManifestBaseUrls: Readonly<Record<'cn' | 'global', string>> | null;
   }) => void;
   timeoutMs?: number;
   /** 自动重试节奏,默认 AUTO_RETRY_DELAYS_MS;传 `[]` 关闭(单次尝试)。 */
@@ -200,8 +198,6 @@ export async function runStartupEndpointResolve(
       reviewVersion: result.reviewVersion,
       isTestFlight,
       region: result.region,
-      crossRealmOrgLoginEnabled: result.crossRealmOrgLoginEnabled,
-      realmManifestBaseUrls: result.realmManifestBaseUrls,
     });
     return { ok: true, source: 'cdn' };
   } catch {

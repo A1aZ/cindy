@@ -782,7 +782,6 @@ export function LoginConsentDialog({
   onDisagree,
   onOpenTerms,
   onOpenPrivacy,
-  compactBody = false,
 }: {
   title: string;
   body: string;
@@ -792,8 +791,6 @@ export function LoginConsentDialog({
   onDisagree: () => void;
   onOpenTerms: () => void;
   onOpenPrivacy: () => void;
-  /** 较长的说明型确认文案使用更紧凑排版，避免与底部按钮重叠。 */
-  compactBody?: boolean;
 }) {
   const agreeRef = useRef<HTMLButtonElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -895,13 +892,13 @@ export function LoginConsentDialog({
         </div>
         <div
           id="login-consent-dialog-body"
-          className="absolute text-center"
+          className="absolute whitespace-pre-line text-center"
           style={{
             left: CONSENT_DIALOG.body.x,
             top: CONSENT_DIALOG.body.y,
             width: CONSENT_DIALOG.body.width,
-            fontSize: compactBody ? 20 : CONSENT_DIALOG.body.fontSize,
-            lineHeight: `${compactBody ? 30 : CONSENT_DIALOG.body.lineHeight}px`,
+            fontSize: CONSENT_DIALOG.body.fontSize,
+            lineHeight: `${CONSENT_DIALOG.body.lineHeight}px`,
             color: LOGIN_COLORS.secondaryText,
           }}
         >

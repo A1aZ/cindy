@@ -14,8 +14,9 @@
  * 仍失败照样阻断,所以严格语义不变。
  *
  * 清单来源按运行形态三选一(resolveEndpointSource,纯函数可单测):
- *  - packaged / dev + --endpoints-cdn:从烘焙自举基址 ENDPOINT_MANIFEST_BASE_URL
- *    (region 化 hotfix 域名,客户端唯一"有感"的烘焙远程 URL)直连拉取;
+ *  - packaged / dev + --endpoints-cdn:从当前构建区域的烘焙自举基址
+ *    ENDPOINT_MANIFEST_BASE_URL 直连拉取；另一物理区域的基址也在构建期注入，
+ *    只用于组织区域发现和已绑定会话恢复；
  *  - dev 默认:读仓内 `config/endpoint.json`(XDT_ENDPOINT_MANIFEST_FILE 可
  *    指定其它文件,restart:desktop:local 用它指到 config/endpoint.local.json),
  *    同一条阻断循环,文件缺失 / 非法同样弹框——配置错要炸出来,不静默猜测;
@@ -44,14 +45,28 @@ import {
 } from '@cindy/maker-shared/client-endpoints';
 
 import { createLogger } from './logger';
-import { ENDPOINT_MANIFEST_BASE_URL } from '../shared/endpoints';
+import {
+  ENDPOINT_MANIFEST_BASE_URL,
+  ENDPOINT_MANIFEST_PEER_BASE_URL,
+} from '../shared/endpoints';
 
 const log = createLogger('clientEndpoints');
 
 const MANIFEST_FILE_NAME = 'endpoint.json';
-/** 与 authManager 的构建区域判定保持一致；老清单缺 region 时用于唯一确定回退归属。 */
+const BUILD_VARIANT = import.meta.env.VITE_CINDY_AUTH_REGION;
+/** 与 authManager 的构建区域判定保持一致；dev 使用 CN auth 身份。 */
 const BUILD_AUTH_REGION: ClientEndpointRegion =
-  import.meta.env.VITE_CINDY_AUTH_REGION === 'global' ? 'global' : 'cn';
+  BUILD_VARIANT === 'global' ? 'global' : 'cn';
+const DEFAULT_REALM_MANIFEST_BASE_URLS: RealmManifestBaseUrls =
+  BUILD_AUTH_REGION === 'global'
+    ? {
+        cn: ENDPOINT_MANIFEST_PEER_BASE_URL,
+        global: ENDPOINT_MANIFEST_BASE_URL,
+      }
+    : {
+        cn: ENDPOINT_MANIFEST_BASE_URL,
+        global: ENDPOINT_MANIFEST_PEER_BASE_URL,
+      };
 /** 单次请求的网络超时——只用于触发错误框,不是静默降级。 */
 const ATTEMPT_TIMEOUT_MS = 15_000;
 
@@ -324,8 +339,8 @@ function promptRetryDialog(reason: string, sourceLabel: string): 'retry' | 'exit
 
 let resolvedEndpoints: ClientEndpointMap | null = null;
 let resolvedRegion: ClientEndpointRegion | null = null;
-let crossRealmOrgLoginEnabled = false;
-let realmManifestBaseUrls: RealmManifestBaseUrls | null = null;
+let crossRealmOrgLoginEnabled = BUILD_VARIANT !== 'dev';
+let realmManifestBaseUrls: RealmManifestBaseUrls = DEFAULT_REALM_MANIFEST_BASE_URLS;
 let activeSessionRealm: ClientEndpointRegion | null = null;
 const realmEndpointCache = new Map<ClientEndpointRegion, ClientEndpointMap>();
 
@@ -377,8 +392,6 @@ export async function initClientEndpoints(): Promise<boolean> {
   const resolvedManifest = resolvedManifestBox.value;
   resolvedEndpoints = endpoints;
   resolvedRegion = resolvedManifest?.region ?? null;
-  crossRealmOrgLoginEnabled = resolvedManifest?.crossRealmOrgLoginEnabled ?? false;
-  realmManifestBaseUrls = resolvedManifest?.realmManifestBaseUrls ?? null;
   // 老清单没有 region 元数据，但它一定来自构建区域的自举地址。只把这份端点
   // 缓存在构建区域，不能同时塞进两区，否则升级后留下的跨区 token 会被误发。
   activeSessionRealm = resolvedRegion ?? BUILD_AUTH_REGION;
@@ -423,32 +436,30 @@ export function getBuildClientEndpoint(key: ClientEndpointKey): string {
 }
 
 export function getClientEndpointRealmConfig(): {
-  buildRegion: ClientEndpointRegion | null;
+  buildRegion: ClientEndpointRegion;
   crossRealmOrgLoginEnabled: boolean;
-  realmManifestBaseUrls: RealmManifestBaseUrls | null;
+  realmManifestBaseUrls: RealmManifestBaseUrls;
 } {
   if (resolvedEndpoints === null) {
     throw new Error('client endpoints not initialized');
   }
   return {
-    buildRegion: resolvedRegion,
+    buildRegion: BUILD_AUTH_REGION,
     crossRealmOrgLoginEnabled,
     realmManifestBaseUrls,
   };
 }
 
 /**
- * 加载并严格核对指定区域清单。失败不会修改当前会话端点；调用方应保留凭据并允许
- * 用户稍后重试，绝不能退回构建区域拿跨区 token 发请求。
+ * 从构建期受信任地址加载指定区域清单。区域身份由地址表的 key 决定；清单不必
+ * 重复自报 region。失败不会修改当前会话端点，也不会退回构建区域发送跨区 token。
  */
 export async function loadClientEndpointsForRealm(
   region: ClientEndpointRegion,
 ): Promise<ClientEndpointMap> {
   const cached = realmEndpointCache.get(region);
   if (cached) return cached;
-  const baseUrl = realmManifestBaseUrls?.[region];
-  // 能力开关只控制“新的双区组织发现”。关闭开关回滚时，已持久化的跨区
-  // session/注销 receipt 仍必须能加载原区域清单，避免把 token 误发到构建区。
+  const baseUrl = realmManifestBaseUrls[region];
   if (!baseUrl) {
     throw new Error('realm-manifest-url-unavailable');
   }
@@ -459,7 +470,7 @@ export async function loadClientEndpointsForRealm(
   if (!fetched.ok) {
     throw new Error(fetchFailedReason(fetched.detail));
   }
-  const parsed = resolveClientEndpointsStrict(fetched.text, { expectedRegion: region });
+  const parsed = resolveClientEndpointsStrict(fetched.text);
   if (!parsed.ok) {
     throw new Error(parsed.reason);
   }
@@ -520,8 +531,9 @@ export function resetClientEndpointsForTest(
 ): void {
   resolvedEndpoints = resolved ?? null;
   resolvedRegion = resolved ? (options?.buildRegion ?? null) : null;
-  crossRealmOrgLoginEnabled = options?.crossRealmOrgLoginEnabled ?? false;
-  realmManifestBaseUrls = options?.realmManifestBaseUrls ?? null;
+  crossRealmOrgLoginEnabled = options?.crossRealmOrgLoginEnabled ?? BUILD_VARIANT !== 'dev';
+  realmManifestBaseUrls =
+    options?.realmManifestBaseUrls ?? DEFAULT_REALM_MANIFEST_BASE_URLS;
   activeSessionRealm = resolvedRegion;
   realmEndpointCache.clear();
   // 既有 desktop 单测只注入一份逻辑端点，不关心物理区域；让两种构建区域都能

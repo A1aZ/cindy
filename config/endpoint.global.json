@@ -1,11 +1,5 @@
 {
   "schemaVersion": 1,
-  "region": "global",
-  "crossRealmOrgLoginEnabled": true,
-  "realmManifestBaseUrls": {
-    "cn": "https://hotfix.cindy.com.cn/cindy",
-    "global": "https://hotfix.cindy.app/cindy"
-  },
   "authApiBaseUrl": "https://auth.cindy.app",
   "authDesktopCallbackUrl": "https://auth.cindy.app/api/auth/desktop/callback",
   "deviceLinkApiBaseUrl": "https://device-link.cindy.app",

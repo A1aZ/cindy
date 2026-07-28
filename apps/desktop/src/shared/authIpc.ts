@@ -10,7 +10,9 @@ export type DesktopLoginAction =
   | { type: 'reset' }
   | { type: 'cancel-browser' }
   | { type: 'discover'; email: string }
-  | { type: 'discover-sso-org'; org: string; crossRegionConsent: true }
+  | { type: 'discover-sso-org'; org: string }
+  | { type: 'confirm-sso-realm' }
+  | { type: 'cancel-sso-realm' }
   | { type: 'request-code'; kind: VerificationKind; identifier: string }
   | { type: 'verify-code'; kind: VerificationKind; identifier: string; code: string }
   | {
@@ -90,10 +92,13 @@ export function parseDesktopLoginAction(value: unknown): DesktopLoginAction | nu
         ? { type: 'discover', email: value.email }
         : null;
     case 'discover-sso-org':
-      return isBoundedString(value.org, MAX_ORG_IDENTIFIER_LENGTH) &&
-        value.crossRegionConsent === true
-        ? { type: 'discover-sso-org', org: value.org, crossRegionConsent: true }
+      return isBoundedString(value.org, MAX_ORG_IDENTIFIER_LENGTH)
+        ? { type: 'discover-sso-org', org: value.org }
         : null;
+    case 'confirm-sso-realm':
+      return { type: 'confirm-sso-realm' };
+    case 'cancel-sso-realm':
+      return { type: 'cancel-sso-realm' };
     case 'request-code':
       return isVerificationKind(value.kind) &&
         isBoundedString(value.identifier, MAX_IDENTIFIER_LENGTH)

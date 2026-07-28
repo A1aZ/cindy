@@ -1845,8 +1845,9 @@ async function discoverOrganizationRealm(org: string) {
     return createAuthClient(AUTH_REGION).discoverSsoOrg(org);
   }
 
-  // 用户确认后才进入本函数；先并行加载/校验两区清单，再并行做 home-realm
-  // discovery。任一清单或请求不可用都 fail closed，不凭另一侧成功结果猜区域。
+  // 先并行加载/校验两区清单，再并行做 home-realm discovery。任一清单或请求
+  // 不可用都 fail closed，不凭另一侧成功结果猜区域；只有发现结果跨出安装包
+  // 区域时，后续状态机才要求用户确认。
   try {
     await Promise.all([loadClientEndpointsForRealm('cn'), loadClientEndpointsForRealm('global')]);
   } catch {
@@ -2019,6 +2020,43 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
     if (action.type === 'reset') {
       return { success: true, state: await loadLoginProviders() };
     }
+    if (action.type === 'confirm-sso-realm') {
+      const confirmation = loginFlowState;
+      if (
+        confirmation?.step !== 'realm-confirmation' ||
+        pendingAuthRealm !== confirmation.targetRegion
+      ) {
+        throw new AuthApiError(
+          'INVALID_AUTH_ACTION',
+          400,
+          'No enterprise region switch is waiting for confirmation',
+        );
+      }
+      discoveredMethods = confirmation.methods;
+      loginFlowState = reduceAuthFlow(loginFlowState, {
+        type: 'discovery-loaded',
+        email: '',
+        methods: confirmation.methods,
+      });
+      return { success: true, state: loginFlowState };
+    }
+    if (action.type === 'cancel-sso-realm') {
+      const confirmation = loginFlowState;
+      if (confirmation?.step !== 'realm-confirmation') {
+        throw new AuthApiError(
+          'INVALID_AUTH_ACTION',
+          400,
+          'No enterprise region switch is waiting for cancellation',
+        );
+      }
+      pendingAuthRealm = null;
+      discoveredMethods = [];
+      loginFlowState = reduceAuthFlow(loginFlowState, {
+        type: 'providers-loaded',
+        providers: confirmation.providers,
+      });
+      return { success: true, state: loginFlowState };
+    }
     if (!providerConfig) await loadLoginProviders();
 
     if (action.type === 'discover') {
@@ -2033,10 +2071,29 @@ async function runLoginAction(action: DesktopLoginAction): Promise<DesktopLoginA
     }
 
     // 企业 SSO 入口（按组织 ID/slug/已验证域名）：结果映射进 method-choice，
-    // 使 start-browser 的 connectionId 白名单校验与连接选择 UI 直接复用。
+    // 同区域直接进入连接选择；跨区域先进入确认状态，确认后才把连接写入
+    // start-browser 白名单并允许继续 SSO。
     if (action.type === 'discover-sso-org') {
       const discovery = await discoverOrganizationRealm(action.org.trim().toLowerCase());
-      discoveredMethods = ssoOrgDiscoveryToMethods(discovery);
+      const methods = ssoOrgDiscoveryToMethods(discovery);
+      if (discovery.region !== AUTH_REGION) {
+        if (!providerConfig) {
+          throw new AuthApiError(
+            'AUTH_SERVICE_UNAVAILABLE',
+            503,
+            'Login provider configuration is unavailable',
+          );
+        }
+        discoveredMethods = [];
+        loginFlowState = reduceAuthFlow(loginFlowState, {
+          type: 'realm-switch-required',
+          targetRegion: discovery.region,
+          providers: providerConfig,
+          methods,
+        });
+        return { success: true, state: loginFlowState };
+      }
+      discoveredMethods = methods;
       loginFlowState = reduceAuthFlow(loginFlowState, {
         type: 'discovery-loaded',
         email: '',

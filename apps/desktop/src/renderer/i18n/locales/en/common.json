@@ -3011,10 +3011,11 @@
     "ssoOrgHint": "Don't know your enterprise sign-in identifier? Ask your admin",
     "ssoOrgDetected": "Choose a single sign-on connection for \"{{org}}\"",
     "realmConsent": {
-      "title": "Confirm enterprise region lookup",
-      "body": "Cindy will send the company ID or domain you entered to both Mainland China and Global sign-in services. After sign-in, organization data and service requests use the organization's region; this app edition and its update channel do not change.",
-      "agree": "Continue Enterprise Sign-In",
-      "disagree": "Cancel Enterprise Sign-In"
+      "title": "Connect to your enterprise region",
+      "bodyCn": "Your enterprise is in Mainland China.\nContinue to connect Cindy to this region.",
+      "bodyGlobal": "Your enterprise is in the Global region.\nContinue to connect Cindy to this region.",
+      "agree": "Continue sign-in",
+      "disagree": "Cancel"
     },
     "ssoVerificationTitle": "Verify Your Work Identity",
     "ssoVerificationSubtitle": "First-time sign-in requires verification of the contact returned by your identity provider: {{target}}",

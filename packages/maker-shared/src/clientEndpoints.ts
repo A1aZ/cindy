@@ -14,8 +14,9 @@
  *  - **没有缓存回退、没有超时后静默继续、没有逐字段烘焙回退**——任何本地兜底
  *    都会把非空 CDN 配置错误静默掩盖成"部分端点漂移",这里要的是非法值立刻暴露;
  *    desktop 与 mobile 正式包均遵守本条严格语义。
- *  - 客户端唯一烘焙的远程 URL 是拉清单用的 CDN 基址(自举必需,且防"清单配错
- *    CDN 把自己锁死");**更新/hotfix 链的 CDN base 也来自清单**(cdnBaseUrl)
+ *  - 客户端只烘焙 CN/Global 两份清单的 CDN 基址(自举与组织区域发现必需,
+ *    且防"清单配错 CDN 把自己锁死");**更新/hotfix 链的 CDN base 也来自清单**
+ *    (cdnBaseUrl)
  *    ——清单阻断在一切更新检查之前,更新链拿到的一定是已解析的清单值,
  *    无鸡生蛋问题;
  *  - dev(desktop 未打包 / mobile __DEV__)默认不走 CDN,改读仓内正本文件
@@ -197,48 +198,10 @@ export type ParseClientEndpointManifestResult =
       ok: true;
       endpoints: ClientEndpointMap;
       reviewVersion: string | null;
-      /** 老清单缺字段时为 null；跨区域组织登录因此保持关闭。 */
+      /** 可选诊断元数据；缺失时由受信任清单地址确定区域。 */
       region: ClientEndpointRegion | null;
-      crossRealmOrgLoginEnabled: boolean;
-      realmManifestBaseUrls: RealmManifestBaseUrls | null;
     }
   | { ok: false; reason: string };
-
-function parseManifestBaseUrl(
-  raw: unknown,
-  key: ClientEndpointRegion,
-  allowHttp: boolean,
-): { ok: true; value: string } | { ok: false; reason: string } {
-  if (typeof raw !== 'string' || !raw.trim()) {
-    return { ok: false, reason: `invalid-field:realmManifestBaseUrls.${key}` };
-  }
-  const normalized = trimTrailingSlashes(raw.trim());
-  try {
-    const url = new URL(normalized);
-    const protocols = allowHttp ? ['https:', 'http:'] : ['https:'];
-    if (!protocols.includes(url.protocol)) {
-      return {
-        ok: false,
-        reason: `invalid-protocol:realmManifestBaseUrls.${key}`,
-      };
-    }
-    if (!url.hostname) {
-      return {
-        ok: false,
-        reason: `invalid-field:realmManifestBaseUrls.${key}`,
-      };
-    }
-    if (url.username || url.password) {
-      return {
-        ok: false,
-        reason: `credentials-in-url:realmManifestBaseUrls.${key}`,
-      };
-    }
-  } catch {
-    return { ok: false, reason: `invalid-field:realmManifestBaseUrls.${key}` };
-  }
-  return { ok: true, value: normalized };
-}
 
 /**
  * 解析并校验一份清单原文。纯函数,输入任意文本都不会抛出。
@@ -328,53 +291,11 @@ export function parseClientEndpointManifest(
     };
   }
 
-  const rawEnabled = record.crossRealmOrgLoginEnabled;
-  if (rawEnabled !== undefined && typeof rawEnabled !== 'boolean') {
-    return { ok: false, reason: 'invalid-field:crossRealmOrgLoginEnabled' };
-  }
-  const crossRealmOrgLoginEnabled = rawEnabled === true;
-
-  const rawRealmUrls = record.realmManifestBaseUrls;
-  let realmManifestBaseUrls: RealmManifestBaseUrls | null = null;
-  if (rawRealmUrls !== undefined) {
-    if (
-      !rawRealmUrls ||
-      typeof rawRealmUrls !== 'object' ||
-      Array.isArray(rawRealmUrls)
-    ) {
-      return { ok: false, reason: 'invalid-field:realmManifestBaseUrls' };
-    }
-    const realmUrlRecord = rawRealmUrls as Record<string, unknown>;
-    const cn = parseManifestBaseUrl(
-      realmUrlRecord.cn,
-      'cn',
-      options?.allowHttp === true,
-    );
-    if (!cn.ok) return cn;
-    const global = parseManifestBaseUrl(
-      realmUrlRecord.global,
-      'global',
-      options?.allowHttp === true,
-    );
-    if (!global.ok) return global;
-    realmManifestBaseUrls = { cn: cn.value, global: global.value };
-  }
-
-  // 开关打开却没有完整且自报区域的路由表属于配置事故，不能静默退回单区。
-  if (
-    crossRealmOrgLoginEnabled &&
-    (region === null || realmManifestBaseUrls === null)
-  ) {
-    return { ok: false, reason: 'incomplete-cross-realm-config' };
-  }
-
   return {
     ok: true,
     endpoints,
     reviewVersion,
     region,
-    crossRealmOrgLoginEnabled,
-    realmManifestBaseUrls,
   };
 }
 

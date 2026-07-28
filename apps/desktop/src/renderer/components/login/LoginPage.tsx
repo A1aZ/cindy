@@ -134,7 +134,7 @@ export function LoginPage() {
   // 企业 SSO 入口子视图:在 identifier 步骤内输入组织标识(本地展示态,不进 main)。
   // 需先于 bottomReserve 计算声明——协议行只在 identifier 主视图渲染,sso-org 子视图隐藏。
   const [ssoOrgMode, setSsoOrgMode] = useState(false);
-  const [realmConsentOrg, setRealmConsentOrg] = useState<string | null>(null);
+  const realmConfirmation = loginState?.step === 'realm-confirmation' ? loginState : null;
 
   /* ── 协议同意链路(consent PR):radio 状态 + 未勾选拦截弹窗 + 同意后续接。
      过门点(产品拍板 2026-07-24 二次):手机号提交、邮箱提交(discover 前)、
@@ -385,16 +385,9 @@ export function LoginPage() {
     event.preventDefault();
     const value = ssoOrg.trim();
     if (!value) return;
-    // 企业标识会同时发送到国内与国际 auth-server；必须在任何跨区网络请求前
-    // 获得本次显式确认。确认不持久化，每次新的组织发现都重新说明数据去向。
-    setRealmConsentOrg(value);
-  };
-
-  const confirmRealmDiscovery = () => {
-    const org = realmConsentOrg;
-    setRealmConsentOrg(null);
-    if (!org) return;
-    void dispatch({ type: 'discover-sso-org', org, crossRegionConsent: true });
+    // 组织区域先静默发现；仅当结果与安装包区域不一致时，main 状态机进入
+    // realm-confirmation，由下方弹窗在继续 SSO 前向用户确认。
+    void dispatch({ type: 'discover-sso-org', org: value });
   };
 
   /* ── identifier 主视图(680×560 组:面板 + 第三方圆钮行) ── */
@@ -1052,17 +1045,20 @@ export function LoginPage() {
           onOpenPrivacy={() => openLegalLink('privacy')}
         />
       )}
-      {realmConsentOrg && (
+      {realmConfirmation && (
         <LoginConsentDialog
           title={t('login.realmConsent.title')}
-          body={t('login.realmConsent.body')}
+          body={t(
+            realmConfirmation.targetRegion === 'cn'
+              ? 'login.realmConsent.bodyCn'
+              : 'login.realmConsent.bodyGlobal',
+          )}
           agreeLabel={t('login.realmConsent.agree')}
           disagreeLabel={t('login.realmConsent.disagree')}
-          onAgree={confirmRealmDiscovery}
-          onDisagree={() => setRealmConsentOrg(null)}
+          onAgree={() => void dispatch({ type: 'confirm-sso-realm' })}
+          onDisagree={() => void dispatch({ type: 'cancel-sso-realm' })}
           onOpenTerms={() => undefined}
           onOpenPrivacy={() => undefined}
-          compactBody
         />
       )}
     </div>

@@ -10,6 +10,7 @@ export const MOBILE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 export const REQUIRED_MOBILE_ENV_KEYS = [
   'EXPO_PUBLIC_CINDY_AUTH_REGION',
   'EXPO_PUBLIC_ENDPOINT_MANIFEST_BASE_URL',
+  'EXPO_PUBLIC_ENDPOINT_MANIFEST_PEER_BASE_URL',
 ];
 
 /**

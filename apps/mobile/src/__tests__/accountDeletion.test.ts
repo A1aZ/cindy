@@ -318,7 +318,7 @@ describe('mobile account deletion', () => {
     // 仅 iOS 生效);② 入场未完成(opacity/pointerEvents 只管渲染与命中,读屏照念)。
     // iOS 与 Android 属性都要给,条件收敛到一个常量避免两处漂移。
     expect(login).toContain(
-      'const realmConsentOpen = realmConsentOrg !== null;',
+      'const realmConsentOpen = realmConfirmation !== null;',
     );
     expect(login).toContain(
       "const deletionBubbleA11yHidden =\n    consentDialogOpen || realmConsentOpen || handoffPhase !== 'done';",

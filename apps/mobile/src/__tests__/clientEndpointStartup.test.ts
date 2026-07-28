@@ -505,51 +505,42 @@ describe('applyResolvedClientEndpoints', () => {
 
   it('组织会话切换 token 消费端点,退出后恢复构建区域且不改变更新端点', async () => {
     const { env, startup } = await freshModules();
-    const cnManifest = {
-      ...FULL_MANIFEST_OBJECT,
-      region: 'cn',
-      crossRealmOrgLoginEnabled: true,
-      realmManifestBaseUrls: {
-        cn: 'https://manifest.cn.example.com/app',
-        global: 'https://manifest.global.example.com/app',
-      },
-    };
     await expect(
       startup.runStartupEndpointResolve({
-        fetchManifest: okFetch(JSON.stringify(cnManifest)),
+        fetchManifest: okFetch(FULL_MANIFEST),
       }),
     ).resolves.toEqual({ ok: true, source: 'cdn' });
 
     const buildUpdateBaseUrl = env.OTA_SERVER_BASE_URL;
-    const globalManifest = {
+    const peerRegion = env.BUILD_AUTH_REGION === 'cn' ? 'global' : 'cn';
+    const peerManifest = {
       ...FULL_MANIFEST_OBJECT,
-      region: 'global',
-      authApiBaseUrl: 'https://auth.global.example.com',
-      oauthBrokerApiBaseUrl: 'https://oauth.global.example.com',
-      deviceLinkApiBaseUrl: 'https://device.global.example.com',
-      voiceApiBaseUrl: 'https://voice.global.example.com',
-      mobileUpdateBaseUrl: 'https://update.global.example.com',
+      authApiBaseUrl: `https://auth.${peerRegion}.example.com`,
+      oauthBrokerApiBaseUrl: `https://oauth.${peerRegion}.example.com`,
+      deviceLinkApiBaseUrl: `https://device.${peerRegion}.example.com`,
+      voiceApiBaseUrl: `https://voice.${peerRegion}.example.com`,
+      mobileUpdateBaseUrl: `https://update.${peerRegion}.example.com`,
     };
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,
-      text: async () => JSON.stringify(globalManifest),
+      text: async () => JSON.stringify(peerManifest),
     } as Response);
     try {
-      await env.loadMobileEndpointsForRealm('global');
-      env.activateMobileSessionRealm('global');
+      await env.loadMobileEndpointsForRealm(peerRegion);
+      env.activateMobileSessionRealm(peerRegion);
 
-      expect(env.AUTH_API_BASE_URL).toBe(globalManifest.authApiBaseUrl);
+      expect(env.AUTH_API_BASE_URL).toBe(peerManifest.authApiBaseUrl);
       expect(env.OAUTH_BROKER_API_BASE_URL).toBe(
-        globalManifest.oauthBrokerApiBaseUrl,
+        peerManifest.oauthBrokerApiBaseUrl,
       );
       expect(env.DEVICE_LINK_API_BASE_URL).toBe(
-        globalManifest.deviceLinkApiBaseUrl,
+        peerManifest.deviceLinkApiBaseUrl,
       );
-      expect(env.VOICE_API_BASE_URL).toBe(globalManifest.voiceApiBaseUrl);
+      expect(env.VOICE_API_BASE_URL).toBe(peerManifest.voiceApiBaseUrl);
       expect(env.OTA_SERVER_BASE_URL).toBe(buildUpdateBaseUrl);
       expect(fetchSpy).toHaveBeenCalledWith(
-        expect.stringMatching(
-          /^https:\/\/manifest\.global\.example\.com\/app\/endpoint\.json\?t=\d+$/,
+        expect.stringContaining(
+          `${env.ENDPOINT_MANIFEST_PEER_BASE_URL}/endpoint.json?t=`,
         ),
         expect.objectContaining({ signal: expect.any(AbortSignal) }),
       );
@@ -568,32 +559,30 @@ describe('applyResolvedClientEndpoints', () => {
     }
   });
 
-  it('关闭新组织发现开关后，已有跨区会话仍可加载原区域清单', async () => {
+  it('不依赖远端跨区字段，按构建期可信地址加载旧格式对端清单', async () => {
     const { env, startup } = await freshModules();
     const buildRegion = env.BUILD_AUTH_REGION;
     const peerRegion = buildRegion === 'cn' ? 'global' : 'cn';
     await expect(
       startup.runStartupEndpointResolve({
-        fetchManifest: okFetch(
-          JSON.stringify({
-            ...FULL_MANIFEST_OBJECT,
-            region: buildRegion,
-            crossRealmOrgLoginEnabled: false,
-            realmManifestBaseUrls: {
-              cn: 'https://manifest.cn.example.com/app',
-              global: 'https://manifest.global.example.com/app',
-            },
-          }),
-        ),
+        fetchManifest: okFetch(FULL_MANIFEST),
       }),
     ).resolves.toEqual({ ok: true, source: 'cdn' });
+
+    const realmConfig = env.getMobileEndpointRealmConfig();
+    expect(realmConfig.crossRealmOrgLoginEnabled).toBe(true);
+    expect(realmConfig.realmManifestBaseUrls[buildRegion]).toBe(
+      env.ENDPOINT_MANIFEST_BASE_URL,
+    );
+    expect(realmConfig.realmManifestBaseUrls[peerRegion]).toBe(
+      env.ENDPOINT_MANIFEST_PEER_BASE_URL,
+    );
 
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,
       text: async () =>
         JSON.stringify({
           ...FULL_MANIFEST_OBJECT,
-          region: peerRegion,
           authApiBaseUrl: `https://auth.${peerRegion}.example.com`,
         }),
     } as Response);
@@ -603,6 +592,12 @@ describe('applyResolvedClientEndpoints', () => {
       ).resolves.toMatchObject({
         authApiBaseUrl: `https://auth.${peerRegion}.example.com`,
       });
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `${env.ENDPOINT_MANIFEST_PEER_BASE_URL}/endpoint.json?t=`,
+        ),
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
     } finally {
       fetchSpy.mockRestore();
     }

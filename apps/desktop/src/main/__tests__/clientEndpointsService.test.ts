@@ -530,10 +530,9 @@ describe('getter / IPC', () => {
     expect(getClientEndpoint('authApiBaseUrl')).toBe(cn.authApiBaseUrl);
   });
 
-  it('关闭新组织发现开关后，已有跨区会话仍可加载原区域清单', async () => {
+  it('不依赖远端跨区字段，按构建期可信地址加载旧格式对端清单', async () => {
     resetClientEndpointsForTest(TEST_CLIENT_ENDPOINTS, {
       buildRegion: 'cn',
-      crossRealmOrgLoginEnabled: false,
       realmManifestBaseUrls: {
         cn: 'https://manifest.cn.example.com/app',
         global: 'https://manifest.global.example.com/app',
@@ -541,7 +540,6 @@ describe('getter / IPC', () => {
     });
     const globalManifest = {
       ...(JSON.parse(FULL_MANIFEST) as Record<string, unknown>),
-      region: 'global',
       authApiBaseUrl: 'https://auth.global.example.com',
     };
     mockNetManifest(JSON.stringify(globalManifest));
@@ -550,5 +548,10 @@ describe('getter / IPC', () => {
       authApiBaseUrl: 'https://auth.global.example.com',
     });
     expect(netRequest).toHaveBeenCalledTimes(1);
+    expect(netRequest).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /^https:\/\/manifest\.global\.example\.com\/app\/endpoint\.json\?t=\d+$/,
+      ),
+    );
   });
 });

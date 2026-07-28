@@ -43,11 +43,11 @@ const messages = {
     ssoOrgPlaceholder: '企业 ID、slug 或域名',
     ssoOrgHint: '不知道企业登录标识？请联系企业管理员。',
     ssoOrgDetected: '选择企业「{org}」的单点登录方式',
-    realmConsentTitle: '确认企业登录区域',
-    realmConsentBody:
-      'Cindy 将把你输入的企业 ID 或域名发送到中国大陆和国际登录服务。登录后，组织数据与服务请求将使用组织所在区域；当前安装版本和更新通道不会改变。',
-    realmConsentAgree: '继续企业登录',
-    realmConsentDisagree: '取消企业登录',
+    realmConsentTitle: '连接企业所在区域',
+    realmConsentBodyCn: '你的企业位于中国大陆区。\n继续后，Cindy 会连接该区域。',
+    realmConsentBodyGlobal: '你的企业位于国际区。\n继续后，Cindy 会连接该区域。',
+    realmConsentAgree: '继续登录',
+    realmConsentDisagree: '取消',
     ssoVerificationTitle: '验证企业联系方式',
     ssoVerificationSubtitle:
       '首次登录需要验证身份提供方返回的联系方式 {target}。',
@@ -153,11 +153,13 @@ const messages = {
     ssoOrgHint:
       "Don't know your enterprise sign-in identifier? Ask your admin.",
     ssoOrgDetected: 'Choose a single sign-on connection for "{org}"',
-    realmConsentTitle: 'Confirm enterprise region lookup',
-    realmConsentBody:
-      "Cindy will send the company ID or domain you entered to both Mainland China and Global sign-in services. After sign-in, organization data and service requests use the organization's region; this app edition and its update channel do not change.",
-    realmConsentAgree: 'Continue Enterprise Sign-In',
-    realmConsentDisagree: 'Cancel Enterprise Sign-In',
+    realmConsentTitle: 'Connect to your enterprise region',
+    realmConsentBodyCn:
+      'Your enterprise is in Mainland China.\nContinue to connect Cindy to this region.',
+    realmConsentBodyGlobal:
+      'Your enterprise is in the Global region.\nContinue to connect Cindy to this region.',
+    realmConsentAgree: 'Continue sign-in',
+    realmConsentDisagree: 'Cancel',
     ssoVerificationTitle: 'Verify your work identity',
     ssoVerificationSubtitle:
       'First-time sign-in requires verification of the contact returned by your identity provider: {target}.',
@@ -275,11 +277,13 @@ const messages = {
     ssoOrgHint:
       '企業のログイン識別子が不明な場合は、管理者にお問い合わせください。',
     ssoOrgDetected: '組織「{org}」のシングルサインオン方法を選択',
-    realmConsentTitle: '企業ログイン地域の確認',
-    realmConsentBody:
-      '入力した企業 ID またはドメインは、中国本土とグローバルのログインサービスの両方に送信されます。ログイン後、組織データとサービス要求には組織の地域が使用されます。現在のアプリ版と更新チャネルは変わりません。',
-    realmConsentAgree: '企業ログインを続ける',
-    realmConsentDisagree: '企業ログインをキャンセル',
+    realmConsentTitle: '企業のリージョンに接続',
+    realmConsentBodyCn:
+      'この企業は中国本土リージョンにあります。\n続行すると Cindy はこの地域に接続します。',
+    realmConsentBodyGlobal:
+      'この企業はグローバルリージョンにあります。\n続行すると Cindy はこの地域に接続します。',
+    realmConsentAgree: 'ログインを続ける',
+    realmConsentDisagree: 'キャンセル',
     ssoVerificationTitle: '企業の連絡先を確認',
     ssoVerificationSubtitle:
       '初回ログイン時、IdP が返した連絡先 {target} の確認が必要です。',
@@ -395,11 +399,13 @@ const messages = {
     ssoOrgPlaceholder: '회사 ID, slug 또는 도메인',
     ssoOrgHint: '기업 로그인 식별자를 모르시나요? 관리자에게 문의하세요.',
     ssoOrgDetected: '"{org}" 조직의 SSO 연결을 선택하세요',
-    realmConsentTitle: '기업 로그인 지역 확인',
-    realmConsentBody:
-      '입력한 회사 ID 또는 도메인은 중국 본토 및 글로벌 로그인 서비스 양쪽으로 전송됩니다. 로그인 후 조직 데이터와 서비스 요청은 조직이 속한 지역을 사용하며, 현재 앱 에디션과 업데이트 채널은 변경되지 않습니다.',
-    realmConsentAgree: '기업 로그인 계속',
-    realmConsentDisagree: '기업 로그인 취소',
+    realmConsentTitle: '기업 지역에 연결',
+    realmConsentBodyCn:
+      '이 기업은 중국 본토 지역에 있습니다.\n계속하면 Cindy가 해당 지역에 연결됩니다.',
+    realmConsentBodyGlobal:
+      '이 기업은 글로벌 지역에 있습니다.\n계속하면 Cindy가 해당 지역에 연결됩니다.',
+    realmConsentAgree: '로그인 계속',
+    realmConsentDisagree: '취소',
     ssoVerificationTitle: '기업 신원 확인',
     ssoVerificationSubtitle:
       '최초 로그인 시 ID 공급자가 반환한 연락처 {target} 확인이 필요합니다.',

@@ -1,7 +1,8 @@
 # 组织登录区域路由
 
 Cindy 的中国大陆版与国际版仍是两个独立的安装包和更新通道。组织 SSO 登录可以在
-用户确认后自动发现组织所在的 auth 区域，并让本次登录会话使用该区域的完整服务端点。
+用户提交企业标识后自动发现组织所在的 auth 区域，并让本次登录会话使用该区域的完整
+服务端点。
 
 ## 两类区域状态
 
@@ -16,30 +17,25 @@ Cindy 的中国大陆版与国际版仍是两个独立的安装包和更新通�
 
 ## 端点清单契约
 
-区域清单在原有 `schemaVersion: 1` 上增加三个向前兼容字段：
+区域身份不由远端清单自报，而由构建时注入的受信任地址表决定：
 
-```json
-{
-  "region": "cn",
-  "crossRealmOrgLoginEnabled": true,
-  "realmManifestBaseUrls": {
-    "cn": "https://hotfix.cindy.com.cn/cindy",
-    "global": "https://hotfix.cindy.app/cindy"
-  }
-}
-```
+- `*.cindy.com.cn` 对应中国大陆区域；
+- `*.cindy.app` 对应国际区域。
 
-`realmManifestBaseUrls` 在正式包中必须是无凭据的 HTTPS URL。构建清单一旦声明
-`region`，就必须与安装包区域一致；加载对端清单时也必须与目标区域完全一致。旧清单
-缺少这些字段时仍可启动，但跨区域组织登录保持关闭。将
-`crossRealmOrgLoginEnabled` 改为 `false` 只关闭新的双区发现；已保存的跨区会话和注销
-receipt 仍可按 `realmManifestBaseUrls` 加载原区域，禁止将其退回安装包区域。
+构建脚本分别读取 `config/endpoint.json` 与 `config/endpoint.global.json` 的
+`cdnBaseUrl`，把当前区域和对端区域的两个清单基址烘焙进客户端。远端
+`endpoint.json` 继续使用原有 `schemaVersion: 1` 与业务端点字段，不要求
+`region`、`crossRealmOrgLoginEnabled` 或 `realmManifestBaseUrls`。
+
+客户端从某个受信任地址加载到清单后，就把它归入该地址对应的区域，并使用其中的
+`authApiBaseUrl` 调用该区 auth-server。discovery 响应仍必须包含 `region`，且必须与
+请求的区域一致；这可以防止 CDN 或 auth-server 配错后把组织路由到错误数据面。
 
 ## 发现与失败规则
 
-输入企业 ID、组织 slug 或已验证域名前，客户端明确告知该标识会发送到中国大陆和国际
-登录服务，并要求本次确认。确认后客户端并行加载两区清单并调用两区
-`POST /api/auth/sso/discovery`。服务端响应包含自报的 `region`。
+用户提交企业 ID、组织 slug 或已验证域名后，客户端直接并行加载两区清单，分别取出
+各自的 `authApiBaseUrl`，再并行调用两区 `POST /api/auth/sso/discovery`。服务端响应
+包含自报的 `region`。
 
 - 一区成功、另一区明确返回 `ORG_SSO_NOT_FOUND`：选择成功区域。
 - 两区都成功：`ORG_REALM_AMBIGUOUS`，不自动猜测。
@@ -47,8 +43,10 @@ receipt 仍可按 `realmManifestBaseUrls` 加载原区域，禁止将其退回�
 - 任一区超时、不可达、响应非法或区域不匹配：`ORG_REALM_UNAVAILABLE`；即使另一区
   成功也 fail closed。
 
-选中的临时区域用于本次 SSO authorize、callback、授权码兑换、联系方式验证与身份选择。
-取消或 reset 会丢弃临时区域。
+发现结果与 `buildRegion` 相同时直接进入连接选择，不显示额外确认。发现结果与
+`buildRegion` 不同时，客户端显示目标区域及「安装版本和更新方式不会改变」的说明；
+用户确认后才进入连接选择并继续 SSO，取消或 reset 会丢弃临时区域。选中的临时区域
+用于本次 SSO authorize、callback、授权码兑换、联系方式验证与身份选择。
 
 ## 会话持久化与恢复
 
@@ -70,11 +68,11 @@ scheme。个人验证码和社交登录不做跨区域发现，也不合并两�
 必须按服务端先行、能力最后开启的顺序发布：
 
 1. 先升级中国大陆和国际 `auth-server`，确保 discovery 响应都包含正确的 `region`。
-2. 发布两区端点清单，补齐区域元数据，但先保持
-   `crossRealmOrgLoginEnabled: false`。
-3. 发布包含双区域发现能力的 Desktop 与 Mobile 客户端。
-4. 确认两区清单互相可达且区域校验通过后，再同时将开关改为 `true`。
+2. 确认两区 `endpoint.json` 均可公网访问，且各自 `authApiBaseUrl` 指向同区域的
+   auth-server。
+3. 发布包含双区域可信清单地址的 Desktop 与 Mobile 客户端。
+4. 用同区组织和跨区组织各验证一次发现、确认、登录、冷启动恢复与登出。
 
-需要紧急回滚时，只需同时关闭两区清单中的 `crossRealmOrgLoginEnabled`；已建立的会话
-仍按其保存的 `sessionRealm` 恢复，新的组织登录则只访问安装包区域。不要移除对端清单，
-否则现有跨区域会话将无法安全 refresh。
+需要紧急回滚新的组织发现能力时，应通过客户端版本回滚或客户端级开关处理，不能删除
+任一区域清单；已建立的跨区会话仍需要按保存的 `sessionRealm` 加载原区域端点并刷新
+token。

@@ -171,6 +171,28 @@ describe('mobile auth-server login', () => {
     expect(discoveryBody).toContain('pendingAuthRealmRef.current = null;');
   });
 
+  it('asks for confirmation only when enterprise discovery crosses the build region', () => {
+    const authSource = readFileSync(
+      resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
+      'utf8',
+    );
+
+    expect(authSource).toContain(
+      'if (discovery.region !== BUILD_AUTH_REGION) {',
+    );
+    expect(authSource).toContain("type: 'realm-switch-required'");
+    expect(authSource).toContain(
+      "if (action.type === 'confirm-sso-realm') {",
+    );
+    expect(authSource).toContain(
+      "if (action.type === 'cancel-sso-realm') {",
+    );
+    expect(authSource).toContain('methods: confirmation.methods');
+    expect(authSource).toContain(
+      "previousState?.step !== 'method-choice' ||",
+    );
+  });
+
   it('keeps account tokens inside membership selection and private tickets off screen', () => {
     const authSource = readFileSync(
       resolve(process.cwd(), 'src/auth/AuthContext.tsx'),

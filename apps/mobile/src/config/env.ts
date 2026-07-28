@@ -86,10 +86,6 @@ let buildEndpointMap: ClientEndpointMap | null =
   DEV_MANIFEST_PARSED?.endpoints ?? null;
 let endpointManifestRegion: ClientEndpointRegion | null =
   DEV_MANIFEST_PARSED?.region ?? null;
-let crossRealmOrgLoginEnabled =
-  DEV_MANIFEST_PARSED?.crossRealmOrgLoginEnabled ?? false;
-let realmManifestBaseUrls: RealmManifestBaseUrls | null =
-  DEV_MANIFEST_PARSED?.realmManifestBaseUrls ?? null;
 let activeSessionRealm: ClientEndpointRegion = BUILD_AUTH_REGION;
 const realmEndpointCache = new Map<ClientEndpointRegion, ClientEndpointMap>();
 if (buildEndpointMap) {
@@ -322,14 +318,27 @@ export const MOBILE_VOICE_LITELLM_BASE_URL =
     ? normalizeBaseUrlWithDefault(DEFAULT_MOBILE_VOICE_LITELLM_BASE_URL, '')
     : '';
 
-// 端点清单(endpoint.json)的自举拉取基址(启动闸门专用),按 region 构建期二选一
-// 烘焙(EXPO_PUBLIC_ENDPOINT_MANIFEST_BASE_URL ← region 对应 endpoint*.json 的
-// cdnBaseUrl)。**烘焙常量、不接受远程覆盖**——拉清单的
-// 地址若吃清单自己的字段,配错一次就把自己锁死(与 desktop 同则)。这是客户端
-// 唯一"有感"的烘焙远程 URL。
+// 本区与对端 endpoint.json 的自举拉取基址，均由构建期从两份仓内清单的
+// cdnBaseUrl 注入。**烘焙常量、不接受远程覆盖**——区域身份由受信任地址表
+// 决定，远端清单只提供该区域的业务端点。
 export const ENDPOINT_MANIFEST_BASE_URL = configuredValue(
   'EXPO_PUBLIC_ENDPOINT_MANIFEST_BASE_URL',
 ).replace(/\/+$/, '');
+export const ENDPOINT_MANIFEST_PEER_BASE_URL = configuredValue(
+  'EXPO_PUBLIC_ENDPOINT_MANIFEST_PEER_BASE_URL',
+).replace(/\/+$/, '');
+
+function trustedMobileRealmManifestBaseUrls(): RealmManifestBaseUrls {
+  return BUILD_AUTH_REGION === 'global'
+    ? {
+        cn: ENDPOINT_MANIFEST_PEER_BASE_URL,
+        global: ENDPOINT_MANIFEST_BASE_URL,
+      }
+    : {
+        cn: ENDPOINT_MANIFEST_BASE_URL,
+        global: ENDPOINT_MANIFEST_PEER_BASE_URL,
+      };
+}
 
 /**
  * 启动闸门拉到远程端点清单后回写运行期端点。`undefined` 表示调用方未提供、
@@ -348,8 +357,6 @@ export function applyResolvedClientEndpoints(resolved: {
   /** iOS StoreKit 分发环境；TestFlight 保留 OTA、禁用整包外跳。 */
   isTestFlight?: boolean;
   region?: ClientEndpointRegion | null;
-  crossRealmOrgLoginEnabled?: boolean;
-  realmManifestBaseUrls?: RealmManifestBaseUrls | null;
 }): void {
   if (resolved.authApiBaseUrl !== undefined) {
     AUTH_API_BASE_URL = normalizeBaseUrlWithDefault(
@@ -400,8 +407,6 @@ export function applyResolvedClientEndpoints(resolved: {
   if (hasCompleteEndpointMap) {
     buildEndpointMap = resolved as ClientEndpointMap;
     endpointManifestRegion = resolved.region ?? null;
-    crossRealmOrgLoginEnabled = resolved.crossRealmOrgLoginEnabled ?? false;
-    realmManifestBaseUrls = resolved.realmManifestBaseUrls ?? null;
     activeSessionRealm = endpointManifestRegion ?? BUILD_AUTH_REGION;
     realmEndpointCache.clear();
     realmEndpointCache.set(activeSessionRealm, buildEndpointMap);
@@ -412,13 +417,13 @@ export function getMobileEndpointRealmConfig(): {
   buildRegion: ClientEndpointRegion;
   manifestRegion: ClientEndpointRegion | null;
   crossRealmOrgLoginEnabled: boolean;
-  realmManifestBaseUrls: RealmManifestBaseUrls | null;
+  realmManifestBaseUrls: RealmManifestBaseUrls;
 } {
   return {
     buildRegion: BUILD_AUTH_REGION,
     manifestRegion: endpointManifestRegion,
-    crossRealmOrgLoginEnabled,
-    realmManifestBaseUrls,
+    crossRealmOrgLoginEnabled: AUTH_REGION !== 'dev',
+    realmManifestBaseUrls: trustedMobileRealmManifestBaseUrls(),
   };
 }
 
@@ -429,9 +434,7 @@ export async function loadMobileEndpointsForRealm(
 ): Promise<ClientEndpointMap> {
   const cached = realmEndpointCache.get(region);
   if (cached) return cached;
-  const baseUrl = realmManifestBaseUrls?.[region];
-  // 能力开关只控制“新的双区组织发现”。关闭开关回滚时，已持久化的跨区
-  // session/注销 receipt 仍必须能加载原区域清单，避免把 token 误发到构建区。
+  const baseUrl = trustedMobileRealmManifestBaseUrls()[region];
   if (!baseUrl) {
     throw new Error('realm-manifest-url-unavailable');
   }
@@ -445,9 +448,7 @@ export async function loadMobileEndpointsForRealm(
       signal: controller.signal,
     });
     if (!response.ok) throw new Error(`http-${response.status}`);
-    const parsed = parseClientEndpointManifest(await response.text(), {
-      expectedRegion: region,
-    });
+    const parsed = parseClientEndpointManifest(await response.text());
     if (!parsed.ok) throw new Error(parsed.reason);
     realmEndpointCache.set(region, parsed.endpoints);
     return parsed.endpoints;

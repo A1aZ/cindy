@@ -62,7 +62,7 @@ import {
 import { buildExportOptionsPlist, resolveIosSigningEnv } from './lib/ios-local.mjs';
 import { clearBundlerCache } from './lib/bundler-cache.mjs';
 import { readEmbeddedRuntimeVersionFromIpa } from './lib/embedded-runtime.mjs';
-import { loadEndpointManifestBaseUrl, mobileClientBuildEnv } from '../../../scripts/shared/client-endpoint-build-env.mjs';
+import { mobileClientBuildEnv } from '../../../scripts/shared/client-endpoint-build-env.mjs';
 import { SELF_HOST_REGIONS, loadSelfHostRegions, missingSelfHostBakeFields, stripSelfHostRegionEnv } from './lib/self-host-region.mjs';
 
 const MOBILE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -89,8 +89,7 @@ function selfhostEnv(region, desktopVersion) {
 // 口令等机密)引入日志(与 selfhostEnv 注入的同名值一致)。
 function bakedDisplayEnv(region, desktopVersion) {
   return {
-    EXPO_PUBLIC_CINDY_AUTH_REGION: region.authRegion,
-    EXPO_PUBLIC_ENDPOINT_MANIFEST_BASE_URL: loadEndpointManifestBaseUrl({ authRegion: region.authRegion }),
+    ...mobileClientBuildEnv({ authRegion: region.authRegion }),
     EXPO_PUBLIC_XDT_OTA_SELFHOST: '1',
     ...(desktopVersion ? { EXPO_PUBLIC_DESKTOP_VERSION: desktopVersion } : {}),
   };

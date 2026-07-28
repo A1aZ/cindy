@@ -130,7 +130,9 @@ export interface MobileUser {
 export type MobileLoginAction =
   | { type: 'reset' }
   | { type: 'discover'; email: string }
-  | { type: 'discover-sso-org'; org: string; crossRegionConsent: true }
+  | { type: 'discover-sso-org'; org: string }
+  | { type: 'confirm-sso-realm' }
+  | { type: 'cancel-sso-realm' }
   | { type: 'request-code'; kind: VerificationKind; identifier: string }
   | {
       type: 'verify-code';
@@ -882,6 +884,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             );
             return true;
           }
+          if (action.type === 'confirm-sso-realm') {
+            const confirmation = loginStateRef.current;
+            if (
+              confirmation?.step !== 'realm-confirmation' ||
+              pendingAuthRealmRef.current !== confirmation.targetRegion
+            ) {
+              throw authCodeError('INVALID_AUTH_ACTION');
+            }
+            updateLoginState(
+              reduceAuthFlow(confirmation, {
+                type: 'discovery-loaded',
+                email: '',
+                methods: confirmation.methods,
+              }),
+            );
+            return true;
+          }
+          if (action.type === 'cancel-sso-realm') {
+            const confirmation = loginStateRef.current;
+            if (confirmation?.step !== 'realm-confirmation') {
+              throw authCodeError('INVALID_AUTH_ACTION');
+            }
+            pendingAuthRealmRef.current = null;
+            resetMobileSessionRealm();
+            updateLoginState(
+              reduceAuthFlow(confirmation, {
+                type: 'providers-loaded',
+                providers: confirmation.providers,
+              }),
+            );
+            return true;
+          }
           if (action.type === 'discover') {
             const email = action.email.trim().toLowerCase();
             const methods = await authClientFor(
@@ -935,13 +969,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 BUILD_AUTH_REGION,
               ).discoverSsoOrg(org);
             }
-            updateLoginState(
-              reduceAuthFlow(loginStateRef.current, {
-                type: 'discovery-loaded',
-                email: '',
-                methods: ssoOrgDiscoveryToMethods(discovery),
-              }),
-            );
+            const methods = ssoOrgDiscoveryToMethods(discovery);
+            const currentState = loginStateRef.current;
+            if (discovery.region !== BUILD_AUTH_REGION) {
+              if (currentState?.step !== 'identifier') {
+                throw authCodeError('INVALID_AUTH_ACTION');
+              }
+              updateLoginState(
+                reduceAuthFlow(currentState, {
+                  type: 'realm-switch-required',
+                  targetRegion: discovery.region,
+                  providers: currentState.providers,
+                  methods,
+                }),
+              );
+            } else {
+              updateLoginState(
+                reduceAuthFlow(currentState, {
+                  type: 'discovery-loaded',
+                  email: '',
+                  methods,
+                }),
+              );
+            }
             return true;
           }
           if (action.type === 'request-code') {
@@ -985,6 +1035,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           }
           if (action.type === 'start-sso') {
             const previousState = loginStateRef.current;
+            if (
+              previousState?.step !== 'method-choice' ||
+              !previousState.methods.some(
+                (method) =>
+                  method.type === 'sso' &&
+                  method.connectionId === action.connectionId,
+              )
+            ) {
+              throw authCodeError('INVALID_AUTH_ACTION');
+            }
             const { codeVerifier, codeChallenge } = await createPkcePair();
             const state = createState();
             await setSecureItem(

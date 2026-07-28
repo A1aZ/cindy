@@ -17,43 +17,50 @@ function resolveRegion(value) {
 
 function loadMobileClientBuildEnv() {
   const region = resolveRegion(process.env.EXPO_PUBLIC_CINDY_AUTH_REGION);
-  const manifestPath = path.join(
-    REPO_ROOT,
-    'config',
-    { cn: 'endpoint.json', global: 'endpoint.global.json', dev: 'endpoint.dev.json' }[region],
-  );
-  let parsed;
-  try {
-    parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-  } catch (error) {
-    if (error && typeof error === 'object' && error.code === 'ENOENT') {
-      throw new Error(`缺少 ${region} 客户端端点清单: ${manifestPath}`);
+  const fileByRegion = {
+    cn: 'endpoint.json',
+    global: 'endpoint.global.json',
+    dev: 'endpoint.dev.json',
+  };
+  const readManifestBaseUrl = (targetRegion) => {
+    const manifestPath = path.join(REPO_ROOT, 'config', fileByRegion[targetRegion]);
+    let parsed;
+    try {
+      parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    } catch (error) {
+      if (error && typeof error === 'object' && error.code === 'ENOENT') {
+        throw new Error(`缺少 ${targetRegion} 客户端端点清单: ${manifestPath}`);
+      }
+      if (error instanceof SyntaxError) {
+        throw new Error(`客户端端点清单不是合法 JSON: ${manifestPath}`);
+      }
+      throw error;
     }
-    if (error instanceof SyntaxError) {
-      throw new Error(`客户端端点清单不是合法 JSON: ${manifestPath}`);
+    if (!Number.isInteger(parsed?.schemaVersion) || parsed.schemaVersion < 1) {
+      throw new Error(`客户端端点清单 schemaVersion 非法: ${manifestPath}`);
     }
-    throw error;
-  }
-  if (!Number.isInteger(parsed?.schemaVersion) || parsed.schemaVersion < 1) {
-    throw new Error(`客户端端点清单 schemaVersion 非法: ${manifestPath}`);
-  }
-  const raw = parsed?.cdnBaseUrl;
-  if (typeof raw !== 'string' || !raw.trim()) {
-    throw new Error(`客户端端点清单缺少非空字段 cdnBaseUrl: ${manifestPath}`);
-  }
-  const normalized = raw.trim().replace(/\/+$/, '');
-  let url;
-  try {
-    url = new URL(normalized);
-  } catch {
-    throw new Error(`客户端端点清单字段 cdnBaseUrl 不是合法绝对 URL: ${manifestPath}`);
-  }
-  if (url.protocol !== 'https:' || url.username || url.password) {
-    throw new Error(`客户端端点清单字段 cdnBaseUrl 必须是无凭据 HTTPS URL: ${manifestPath}`);
-  }
+    const raw = parsed?.cdnBaseUrl;
+    if (typeof raw !== 'string' || !raw.trim()) {
+      throw new Error(`客户端端点清单缺少非空字段 cdnBaseUrl: ${manifestPath}`);
+    }
+    const normalized = raw.trim().replace(/\/+$/, '');
+    let url;
+    try {
+      url = new URL(normalized);
+    } catch {
+      throw new Error(`客户端端点清单字段 cdnBaseUrl 不是合法绝对 URL: ${manifestPath}`);
+    }
+    if (url.protocol !== 'https:' || url.username || url.password) {
+      throw new Error(`客户端端点清单字段 cdnBaseUrl 必须是无凭据 HTTPS URL: ${manifestPath}`);
+    }
+    return normalized;
+  };
+  const manifestBaseUrl = readManifestBaseUrl(region);
+  const peerManifestBaseUrl = readManifestBaseUrl(region === 'global' ? 'cn' : 'global');
   return Object.freeze({
     EXPO_PUBLIC_CINDY_AUTH_REGION: region,
-    EXPO_PUBLIC_ENDPOINT_MANIFEST_BASE_URL: normalized,
+    EXPO_PUBLIC_ENDPOINT_MANIFEST_BASE_URL: manifestBaseUrl,
+    EXPO_PUBLIC_ENDPOINT_MANIFEST_PEER_BASE_URL: peerManifestBaseUrl,
   });
 }
 

@@ -455,6 +455,53 @@ describe("auth session realm record", () => {
 });
 
 describe("reduceAuthFlow", () => {
+  it("keeps a cross-region discovery pending until the user confirms", () => {
+    const providers = {
+      region: "global" as const,
+      attribution: "email" as const,
+      email: true,
+      phone: false,
+      social: [],
+    };
+    const methods = [
+      {
+        type: "sso" as const,
+        connectionId: "cn-sso",
+        protocol: "oidc" as const,
+        orgName: "CN Corp",
+        connectionName: "Enterprise SSO",
+        ssoRequired: false,
+      },
+    ];
+    const confirmation = reduceAuthFlow(null, {
+      type: "realm-switch-required",
+      targetRegion: "cn",
+      providers,
+      methods,
+    });
+    expect(confirmation).toEqual({
+      step: "realm-confirmation",
+      targetRegion: "cn",
+      providers,
+      methods,
+    });
+    if (confirmation.step !== "realm-confirmation") {
+      throw new Error("expected realm confirmation");
+    }
+
+    expect(
+      reduceAuthFlow(confirmation, {
+        type: "discovery-loaded",
+        email: "",
+        methods: confirmation.methods,
+      }),
+    ).toEqual({
+      step: "method-choice",
+      email: "",
+      methods,
+    });
+  });
+
   it("projects secret-bearing outcomes into public states", () => {
     const state = reduceAuthFlow(null, {
       type: "outcome",

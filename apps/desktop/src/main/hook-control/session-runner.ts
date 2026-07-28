@@ -53,6 +53,7 @@ import { getMaker } from '../maker-host/index.js';
 import {
   wireSessionToIpc,
   isSessionInTurn,
+  withSendToSessionLock,
   installDesktopInteractionListener,
   noteSilentStopUserSend,
   onSilentStopSettled,
@@ -506,23 +507,31 @@ export function createMakerHookSessionRunner(deps: {
        * 关闭或 app 重启(同一轮 review 指出)。
        */
       if (req.expectedWorkingDir != null && !isSamePath(session.workDir, req.expectedWorkingDir)) {
-        // 正在跑 turn 的会话不能从底下抽走(桌面端或别的入口可能正用着它)。
-        // 这是暂态: 那一轮跑完后重发即可走到下面的重建。
-        if (isSessionInTurn(req.sessionId)) {
+        /**
+         * 整段替换必须拿这把 per-session 锁: 桌面端发送走的是同一把
+         * (withSendToSessionLock)。不加锁的话, "空闲"判定与 closeSession 之间用户
+         * 刚起的一个本地 turn 会被我们从底下关掉 —— 那是把远端的目录校验代价转嫁
+         * 给了正在打字的人(PR #733 review 指出)。空闲重检也放进锁里, 否则检查本身
+         * 就是过期信息。
+         */
+        const replacement = await withSendToSessionLock(req.sessionId, async () => {
+          // 正在跑 turn 的会话不能从底下抽走。这是暂态: 那一轮跑完后重发即可。
+          if (isSessionInTurn(req.sessionId)) return { busy: true as const };
+          log.info(
+            `recreating live session ${req.sessionId} at ${maskPath(req.expectedWorkingDir!)} (was ${maskPath(session.workDir)})`,
+          );
+          await maker.closeSession(req.sessionId);
+          return { busy: false as const, session: await maker.createSession(createOpts) };
+        }).catch((err: unknown) => ({ err: err instanceof Error ? err.message : String(err) }));
+
+        if ('err' in replacement) return fail(replacement.err);
+        if (replacement.busy) {
           log.warn(
             `hook run aborted: live session ${req.sessionId} still runs in ${maskPath(session.workDir)}, not the validated ${maskPath(req.expectedWorkingDir)}`,
           );
           return fail('这个对话正在别的目录里运行，本条消息没有执行；请稍后重发。');
         }
-        log.info(
-          `recreating live session ${req.sessionId} at ${maskPath(req.expectedWorkingDir)} (was ${maskPath(session.workDir)})`,
-        );
-        try {
-          await maker.closeSession(req.sessionId);
-          session = await maker.createSession(createOpts);
-        } catch (err) {
-          return fail(err instanceof Error ? err.message : String(err));
-        }
+        session = replacement.session;
         // 关闭后 activeSessions 的清理若还没落地, 重建仍可能拿到旧实例 ——
         // 那就这一轮不跑, 让用户重发(下一次拿到的就是新实例), 而不是在旧目录里跑。
         if (!isSamePath(session.workDir, req.expectedWorkingDir)) {

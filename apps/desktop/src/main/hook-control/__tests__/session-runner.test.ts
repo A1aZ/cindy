@@ -82,6 +82,7 @@ vi.mock('../../device-link/broadcast-tap.js', () => ({
 vi.mock('../../maker-ipc/register.js', () => ({
   wireSessionToIpc: vi.fn(),
   isSessionInTurn: () => false,
+  withSendToSessionLock: (id: string, task: () => Promise<unknown>) => lockMock.impl(id, task),
   installDesktopInteractionListener: h.installDesktopInteractionListener,
   noteSilentStopUserSend: vi.fn(),
   onSilentStopSettled: vi.fn(() => () => {}),
@@ -111,6 +112,10 @@ vi.mock('../../maker-ipc/agentHandoffPendingSingleton.js', () => ({
 }));
 vi.mock('../../imageCacheStore.js', () => ({
   resolveSafe: vi.fn(),
+}));
+/** per-session 发送锁: 默认直通, 需要观察加锁范围的用例可改写 impl。 */
+const lockMock = vi.hoisted(() => ({
+  impl: async (_id: string, task: () => Promise<unknown>) => task(),
 }));
 // cindy-media:入站图片写入媒体总仓,mock 记调用。
 const cindyMock = vi.hoisted(() => ({
@@ -280,6 +285,7 @@ beforeEach(() => {
   h.resolvedConfig.permissionMode = 'bypassPermissions';
   h.resolvedConfig.providerId = null;
   h.peekPendingHandoff.mockResolvedValue(null);
+  lockMock.impl = async (_id, task) => task();
 });
 
 describe('hook session 精确接管边界', () => {
@@ -343,6 +349,32 @@ describe('执行前按权威 meta 收口校验工作目录', () => {
     expect(outcome.status).toBe('ok');
     expect(fakeMaker.closeSession).toHaveBeenCalledWith('sess-old');
     expect(fakeMaker.createSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('重建全程拿 per-session 发送锁(不从正在打字的桌面会话底下抽走实例)', async () => {
+    const order: string[] = [];
+    lockMock.impl = async (id, task) => {
+      order.push(`lock:${id}`);
+      const r = await task();
+      order.push(`unlock:${id}`);
+      return r;
+    };
+    fakeMaker.createSession.mockImplementationOnce(async (opts: { id?: string }) => ({
+      ...makeFakeSession(opts.id ?? 'sess-old'),
+      workDir: 'D:/the-old-place',
+    }));
+    fakeMaker.closeSession.mockImplementationOnce(async (id: string) => {
+      order.push(`close:${id}`);
+    });
+    const runner = createMakerHookSessionRunner({ log });
+
+    const outcome = await runner.run(
+      baseReq({ sessionId: 'sess-old', isNew: false, expectedWorkingDir: 'D:/repo' }),
+    );
+
+    expect(outcome.status).toBe('ok');
+    // 关闭与重建都必须发生在锁内
+    expect(order).toEqual(['lock:sess-old', 'close:sess-old', 'unlock:sess-old']);
   });
 
   it('重建后仍拿到旧实例 -> 这一轮不跑(不在旧目录里执行)', async () => {

@@ -52,7 +52,8 @@ describe('hook binding store', () => {
     store.set('conn-b', 'k3', 'other', { workingDir: '/repos/demo', authority: 'workspace' });
 
     expect(
-      store.noteSessionMoved('sess-1', { from: '/repos/demo', to: '/repos/moved' }, 'local-move'),
+      store.noteSessionMoved('sess-1', { from: '/repos/demo', to: '/repos/moved' }, 'local-move')
+        .updated,
     ).toBe(2);
 
     // 重启(新实例)后仍认这份授权, 否则跟随会退回撤权
@@ -72,7 +73,7 @@ describe('hook binding store', () => {
     expect(reopened.getEntry('conn-b', 'k3')?.authority).toBe('workspace');
     // 没有匹配绑定时是廉价 no-op
     expect(
-      reopened.noteSessionMoved('nobody', { from: null, to: '/repos/moved' }, 'local-move'),
+      reopened.noteSessionMoved('nobody', { from: null, to: '/repos/moved' }, 'local-move').updated,
     ).toBe(0);
   });
 

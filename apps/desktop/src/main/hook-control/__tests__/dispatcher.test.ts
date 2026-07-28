@@ -77,9 +77,11 @@ function memoryBindings(): HookBindingStore {
       return updated;
     },
     noteSessionMoved: (sessionId, move, authority) => {
+      const before: Array<[string, HookBindingEntry]> = [];
       let updated = 0;
       for (const [key, row] of map) {
         if (row.sessionId !== sessionId) continue;
+        before.push([key, { ...row }]);
         map.set(key, {
           sessionId,
           workingDir: move.to,
@@ -90,7 +92,15 @@ function memoryBindings(): HookBindingStore {
         });
         updated += 1;
       }
-      return updated;
+      return {
+        updated,
+        rollback: () => {
+          for (const [key, row] of before) {
+            const live = map.get(key);
+            map.set(key, { ...row, rev: (live?.rev ?? row.rev) + 1 });
+          }
+        },
+      };
     },
     remove: (c, e) => void map.delete(k(c, e)),
   };
@@ -484,7 +494,9 @@ describe('dispatcher 核心语义', () => {
     // 用户在桌面端把这条会话「移动到项目」: Main 侧登记授权 + 会话目录变更
     const MOVED_DIR = path.resolve('/repos/another-project');
     sessions[first] = { workingDir: MOVED_DIR, usable: true };
-    expect(bindings.noteSessionMoved(first, { from: WS_DIR, to: MOVED_DIR }, 'local-move')).toBe(1);
+    expect(
+      bindings.noteSessionMoved(first, { from: WS_DIR, to: MOVED_DIR }, 'local-move').updated,
+    ).toBe(1);
 
     d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
     await tick();

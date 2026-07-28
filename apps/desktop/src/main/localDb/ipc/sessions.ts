@@ -1040,6 +1040,25 @@ export function registerSessionIpc(): void {
    *  3. 授权在写库**之前**同步登记 —— 否则存在"目录已变、授权还没落"的窗口,
    *     那期间到达的 IM 消息会把绑定当成撤权删掉(PR #669 review 指出)。
    */
+  /**
+   * 同一 session 的移动必须串行: 两次并发移动会各自读到同一个 fromDir、各自登记,
+   * 先落库的那次与绑定记录对不上, 到达的 IM 消息就把绑定删了(PR #669 review)。
+   */
+  const moveChains = new Map<string, Promise<unknown>>();
+  function serializeMove<T>(sessionId: string, run: () => Promise<T>): Promise<T> {
+    const prev = moveChains.get(sessionId) ?? Promise.resolve();
+    const next = prev.then(run, run);
+    const settled = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    moveChains.set(sessionId, settled);
+    void settled.finally(() => {
+      if (moveChains.get(sessionId) === settled) moveChains.delete(sessionId);
+    });
+    return next;
+  }
+
   ipcMain.handle('local-db:sessions:move', async (event, id: unknown, target: unknown) => {
     assertTrustedAppRendererEvent(event);
     const sid = requireString(id, 'id');
@@ -1070,7 +1089,8 @@ export function registerSessionIpc(): void {
     }
 
     const nextDir = typeof patch.workingDir === 'string' ? patch.workingDir : null;
-    if (nextDir !== null) {
+    return serializeMove(sid, async () => {
+      if (nextDir === null) return applySessionUpdate(sid, patch);
       const db = getDbClient().drizzle;
       const [before] = await db
         .select({ workingDir: sessions.workingDir })
@@ -1081,19 +1101,25 @@ export function registerSessionIpc(): void {
       if (!before) throwIpcError('NOT_FOUND', 'Session 不存在');
       const fromDir = normalizeWorkingDirForStorage(before.workingDir);
       // 目标不在用户已知项目里就不铸造授权(移动本身照常进行)
-      if (fromDir !== nextDir && (await isKnownRecentWorkdir(nextDir))) {
-        // 登记失败就别提交移动: 目录变了而授权没落的话, 下一条 IM 消息会把绑定
-        // 当撤权删掉, 用户莫名丢上下文。报错让他重试(PR #669 review 指出)。
-        if (!(await noteHookSessionMoved(sid, { from: fromDir, to: nextDir }))) {
-          throwIpcError('INTERNAL', '移动失败:无法更新 IM 绑定,请重试');
-        }
+      if (fromDir === nextDir || !(await isKnownRecentWorkdir(nextDir))) {
+        return applySessionUpdate(sid, patch);
+      }
+      // 登记失败就别提交移动: 目录变了而授权没落的话, 下一条 IM 消息会把绑定
+      // 当撤权删掉, 用户莫名丢上下文。报错让他重试(PR #669 review 指出)。
+      const rollback = await noteHookSessionMoved(sid, { from: fromDir, to: nextDir });
+      if (!rollback) throwIpcError('INTERNAL', '移动失败:无法更新 IM 绑定,请重试');
+      try {
         const updated = await applySessionUpdate(sid, patch);
         // 写库成功 = 移动的两步都完成, 立刻收掉在途标记(见 bindings 文件头)
         completeHookSessionMove(sid, nextDir);
         return updated;
+      } catch (err) {
+        // 写库失败必须回滚登记 —— 否则 previousWorkingDir 永久残留, 之后会话
+        // 目录再等于旧值时会被当成"在途移动"放行, 绕过撤权(PR #669 review)。
+        rollback();
+        throw err;
       }
-    }
-    return applySessionUpdate(sid, patch);
+    });
   });
 
   // 窄口径会话元数据编辑(status / title / pinnedAt)。专为 device-link 控制端**远程**

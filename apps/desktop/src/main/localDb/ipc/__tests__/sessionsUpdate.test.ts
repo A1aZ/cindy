@@ -24,7 +24,8 @@ const h = vi.hoisted(() => ({
   relocate: vi.fn(async (): Promise<{ persistedSdkSessionId: string | null }> => ({
     persistedSdkSessionId: null,
   })),
-  noteHookSessionMoved: vi.fn(async () => true),
+  noteHookSessionMoved: vi.fn(async () => () => {}),
+  rollbacks: 0,
   completeHookSessionMove: vi.fn(),
   isKnownRecentWorkdir: vi.fn(async () => true),
   assertTrustedAppRendererEvent: vi.fn(),
@@ -163,7 +164,10 @@ beforeEach(() => {
   h.moveOrder = [];
   h.isKnownRecentWorkdir.mockImplementation(async () => true);
   h.assertTrustedAppRendererEvent.mockImplementation(() => undefined);
-  h.noteHookSessionMoved.mockImplementation(async () => true);
+  h.rollbacks = 0;
+  h.noteHookSessionMoved.mockImplementation(async () => () => {
+    h.rollbacks += 1;
+  });
   h.relocate.mockImplementation(async () => ({ persistedSdkSessionId: null }));
   h.handlers.clear();
   createDb();
@@ -298,7 +302,9 @@ describe('local-db:sessions:move handler wiring', () => {
         .sqlite!.prepare('SELECT working_dir FROM sessions WHERE id = ?')
         .get('codex-local') as { working_dir: string | null };
       h.moveOrder.push(`db-at-note:${row.working_dir}`);
-      return true;
+      return () => {
+        h.rollbacks += 1;
+      };
     });
 
     await invokeMove('codex-local', { kind: 'project', workingDir: '/new/dir' });
@@ -365,7 +371,7 @@ describe('local-db:sessions:move handler wiring', () => {
 
   it('aborts the move when the binding registration fails', async () => {
     // 吞掉登记失败照常写库的话, 下一条 IM 消息会把绑定当撤权删掉、静默丢上下文
-    h.noteHookSessionMoved.mockImplementation(async () => false);
+    h.noteHookSessionMoved.mockImplementation(async () => null);
 
     await expect(
       invokeMove('codex-local', { kind: 'project', workingDir: '/new/dir' }),
@@ -375,6 +381,36 @@ describe('local-db:sessions:move handler wiring', () => {
       .get('codex-local') as { working_dir: string };
     expect(persisted.working_dir).toBe('/old/dir');
     expect(h.completeHookSessionMove).not.toHaveBeenCalled();
+  });
+
+  it('rolls back the registration when the database write fails', async () => {
+    // 不回滚的话 previousWorkingDir 永久残留, 成了绕过撤权的"在途通行证"
+    h.relocate.mockImplementation(async () => {
+      throw new Error('transcript relocation exploded');
+    });
+
+    await expect(
+      invokeMove('cc-local', { kind: 'project', workingDir: '/new/dir' }),
+    ).rejects.toThrow(/transcript relocation exploded/);
+    expect(h.rollbacks).toBe(1);
+    expect(h.completeHookSessionMove).not.toHaveBeenCalled();
+  });
+
+  it('serializes concurrent moves for the same session', async () => {
+    // 并发移动各自读到同一个 fromDir 时, 先落库的那次会与绑定记录对不上
+    const seen: Array<string | null> = [];
+    h.noteHookSessionMoved.mockImplementation(async (...args: unknown[]) => {
+      seen.push((args[1] as { from: string | null }).from);
+      return () => {};
+    });
+
+    await Promise.all([
+      invokeMove('codex-local', { kind: 'project', workingDir: '/dir-b' }),
+      invokeMove('codex-local', { kind: 'project', workingDir: '/dir-c' }),
+    ]);
+
+    // 第二次必须看到第一次落库后的目录, 而不是同一个旧值
+    expect(seen).toEqual(['/old/dir', '/dir-b']);
   });
 
   it('rejects a relative project target', async () => {

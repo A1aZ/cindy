@@ -78,6 +78,16 @@ export interface HookBindingMeta {
   expectedRev?: number;
 }
 
+/**
+ * 一次移动登记的结果。rollback 把被覆盖的行原样写回 —— 移动写库失败时必须回滚,
+ * 否则 previousWorkingDir 会永久残留成一张"在途通行证"(PR #669 review 指出)。
+ */
+export interface HookMoveRegistration {
+  /** 实际改写的绑定条数(0 = 该会话没有 IM 绑定)。 */
+  updated: number;
+  rollback(): void;
+}
+
 export interface HookBindingStore {
   get(connectionId: string, externalKey: string): string | null;
   /** 含目录快照与授权状态的绑定视图; 不存在时 null。 */
@@ -103,7 +113,7 @@ export interface HookBindingStore {
     sessionId: string,
     move: { from: string | null; to: string },
     authority: HookBindingAuthority,
-  ): number;
+  ): HookMoveRegistration;
   /**
    * 移动写库成功后收尾: 清掉 previousWorkingDir(在途标记), 让它严格只存在于
    * 「登记已落、库还没落」那一小段。不清的话这个标记会一直有效, 之后有人把
@@ -138,12 +148,24 @@ export function createHookBindingStore(deps: {
 }): HookBindingStore {
   const { filePath, log } = deps;
 
+  /**
+   * 严格读取: 文件不存在 = 真的没有绑定(返回空表), 读不动 / 解析不了则**抛出**。
+   * 读侧的常规调用容忍失败(见 readAll), 但移动登记必须把失败当失败 —— 把一次
+   * 读故障当成"空表"会让登记静默变成 no-op, 移动照常提交, 等文件恢复可读后
+   * 下一条 IM 消息就把绑定当撤权删掉(PR #669 review 指出)。
+   */
+  function readAllStrict(): BindingFile {
+    if (!fs.existsSync(filePath)) return {};
+    const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as unknown;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error('hook-bindings.json is not an object');
+    }
+    return raw as BindingFile;
+  }
+
   function readAll(): BindingFile {
     try {
-      if (!fs.existsSync(filePath)) return {};
-      const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as unknown;
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
-      return raw as BindingFile;
+      return readAllStrict();
     } catch (err) {
       log.warn(`read hook-bindings failed: ${err instanceof Error ? err.message : String(err)}`);
       return {};
@@ -215,12 +237,16 @@ export function createHookBindingStore(deps: {
       return true;
     },
     noteSessionMoved(sessionId, move, authority) {
-      if (!sessionId || !move.to) return 0;
-      const data = readAll();
+      const noop: HookMoveRegistration = { updated: 0, rollback: () => {} };
+      if (!sessionId || !move.to) return noop;
+      // 严格读: 读故障不能被当成"没有绑定"(见 readAllStrict)
+      const data = readAllStrict();
+      const before: Array<{ namespace: string; externalKey: string; row: BindingRow }> = [];
       let updated = 0;
-      for (const rows of Object.values(data)) {
+      for (const [namespace, rows] of Object.entries(data)) {
         for (const [externalKey, row] of Object.entries(rows)) {
           if (row?.sessionId !== sessionId) continue;
+          before.push({ namespace, externalKey, row: { ...row } });
           rows[externalKey] = {
             sessionId,
             workingDir: move.to,
@@ -235,8 +261,21 @@ export function createHookBindingStore(deps: {
           updated += 1;
         }
       }
-      if (updated > 0) writeAll(data);
-      return updated;
+      if (updated === 0) return noop;
+      writeAll(data);
+      return {
+        updated,
+        rollback: () => {
+          const current = readAll();
+          for (const { namespace, externalKey, row } of before) {
+            const live = current[namespace]?.[externalKey];
+            // 回滚期间又被别人写过(新的移动登记)就别覆盖它
+            if (!live || live.sessionId !== sessionId) continue;
+            (current[namespace] ??= {})[externalKey] = { ...row, rev: revOf(live) + 1 };
+          }
+          writeAll(current);
+        },
+      };
     },
     completeSessionMove(sessionId, workingDir) {
       if (!sessionId || !workingDir) return 0;

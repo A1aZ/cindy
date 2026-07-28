@@ -39,10 +39,11 @@ function authorityForDir(workingDir: string): HookBindingAuthority {
     const roots = Object.values(store.get().workspaces);
     return roots.some((root) => isPathWithin(root, workingDir)) ? 'workspace' : 'local-move';
   } catch (err) {
-    // 读不到配置时按 local-move 记(移动确实发生过); dispatcher 每次仍按当前
-    // 映射重判, 目录在映射内时会把它收敛回 workspace。
+    // fail closed: 读不到映射时按 'workspace' 记(不发放映射外例外)。反过来默认
+    // local-move 是 fail-open —— 用户随后撤销该目录的映射时, 这条凭空来的例外
+    // 还会放行(PR #669 review 指出)。判错的代价只是 thread 重开一次。
     log.warn(`authorityForDir failed: ${err instanceof Error ? err.message : String(err)}`);
-    return 'local-move';
+    return 'workspace';
   }
 }
 
@@ -54,36 +55,45 @@ function authorityForDir(workingDir: string): HookBindingAuthority {
  * 到达的 IM 消息会把绑定当成撤权删掉, 那条 thread 就永久换了新对话
  * (PR #669 review 指出)。
  *
- * 返回是否登记成功。**失败必须让整个移动失败**: 吞掉错误照常写库的话, 目录变了
- * 而授权没落, 下一条 IM 消息就把绑定当撤权删掉、thread 静默丢上下文; 移动是用户
- * 主动动作, 报错让他重试比静默降级好(PR #669 review 指出)。没有绑定的会话读到
- * 空表同样算成功, 不受影响。
+ * 成功时返回 rollback(写库失败必须调它, 否则 previousWorkingDir 会永久残留成
+ * 一张"在途通行证"); 失败返回 null, 调用方**必须中止移动** —— 吞掉错误照常写库
+ * 的话, 目录变了而授权没落, 下一条 IM 消息就把绑定当撤权删掉、thread 静默丢上
+ * 下文(PR #669 review 指出)。文件不存在(没有任何绑定)算成功。
  */
 export async function noteHookSessionMoved(
   sessionId: string,
   move: { from: string | null; to: string },
-): Promise<boolean> {
+): Promise<(() => void) | null> {
   try {
     const store = createHookBindingStore({
       filePath: ownerScopedUserDataPath('hook-bindings.json'),
       log: { warn: (msg: string) => log.warn(msg) },
     });
     const authority = authorityForDir(move.to);
-    const updated = store.noteSessionMoved(sessionId, move, authority);
-    if (updated > 0) {
+    const registration = store.noteSessionMoved(sessionId, move, authority);
+    if (registration.updated > 0) {
       log.info('recorded move authorization for hook bindings', {
         sessionId,
-        bindings: updated,
+        bindings: registration.updated,
         authority,
       });
     }
-    return true;
+    return () => {
+      try {
+        registration.rollback();
+      } catch (err) {
+        log.warn('rollback of move authorization failed', {
+          sessionId,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    };
   } catch (err) {
     log.warn('noteHookSessionMoved failed', {
       sessionId,
       err: err instanceof Error ? err.message : String(err),
     });
-    return false;
+    return null;
   }
 }
 

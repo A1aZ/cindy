@@ -16,16 +16,22 @@ import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
+// CRLF 归一化:Windows checkout 下源码带 \r\n,否则跨 checkout 断言会假失败
+// (同 chatInputSessionFocus 等既有源码契约测试)。
 const chatInput = readFileSync(
   path.join(path.resolve(__dirname, '..'), 'components/new-chat/ChatInput.tsx'),
   'utf8',
-);
+).replace(/\r\n?/g, '\n');
 
 describe('external draft notification empty-document handling', () => {
   it('collapses an empty draft document to null before comparing with the editor', () => {
     const start = chatInput.indexOf('return subscribeComposerDraft(storageKey, () => {');
     expect(start).toBeGreaterThan(-1);
-    const block = chatInput.slice(start, chatInput.indexOf('const textUnchanged', start));
+    // 两个锚点都必须真实命中:end 缺失时 indexOf 返回 -1,slice(start, -1) 会切出
+    // 一大段无关源码,让下面的 toContain 假通过、契约形同失效。
+    const end = chatInput.indexOf('const textUnchanged', start);
+    expect(end).toBeGreaterThan(start);
+    const block = chatInput.slice(start, end);
 
     expect(block).toContain('normalizeComposerDocumentJSON(draft.text)');
     // 判空必须走共享实现,与 draftHasContent / isEditorEmpty 同源。

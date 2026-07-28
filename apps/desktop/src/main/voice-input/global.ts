@@ -37,6 +37,7 @@ import {
   type MacInputMonitoringPermissionSnapshot,
 } from './MacModifierShortcutListener.js';
 import {
+  normalizeFocusedWindowFrame,
   resolveDraggedOverlayBounds,
   resolveOverlayInitialBounds,
   type OverlayPlacementDisplay,
@@ -151,6 +152,9 @@ type MacTextInsertionHelperResult = {
   afterNumberOfCharacters?: number;
   enhancedAxAttempted?: boolean;
   enhancedAxHelped?: boolean;
+  /** focused-window-frame 命令：前台窗口 frame（DIP 屏幕坐标）。 */
+  frame?: unknown;
+  frameSource?: string;
 };
 
 const OVERLAY_QUERY = 'view=voice-input-overlay';
@@ -167,6 +171,9 @@ const OVERLAY_EDGE_PADDING = 24;
 // 拖动时卡片中心距 workArea 水平中线小于该值即吸附到水平居中（灵动岛式，
 // 第一版只做 X 轴中线吸附，不做四边吸附）。
 const OVERLAY_SNAP_THRESHOLD_X = 48;
+// 多屏下等待「前台窗口在哪块屏」的上限。超时就用鼠标所在屏，宁可判定退化
+// 也不让浮窗出现明显延迟；答案迟到时不再挪窗，避免可见的跨屏跳动。
+const OVERLAY_FOCUSED_DISPLAY_DEADLINE_MS = 90;
 const DICTIONARY_TOAST_QUERY = 'view=voice-input-dictionary-toast';
 const DICTIONARY_TOAST_CARD_WIDTH = 360;
 const DICTIONARY_TOAST_CARD_ESTIMATED_HEIGHT = 68;
@@ -191,6 +198,9 @@ const OVERLAY_IDLE_BOUNDS: Rectangle = {
 const MAC_CORE_EDITING_SHORTCUTS = new Set(['KeyA', 'KeyC', 'KeyV', 'KeyX', 'KeyZ', 'Comma']);
 const DEFAULT_COMMAND_TIMEOUT_MS = 2500;
 const MAC_TEXT_INSERTION_HELPER_PASTE_TIMEOUT_MS = 5000;
+// focused-window-frame 只读两个 AX 属性，比 DEFAULT_COMMAND_TIMEOUT_MS 短得多：
+// 它的答案过了显示截止时间就没用了，没必要让子进程继续挂着。
+const MAC_FOCUSED_WINDOW_FRAME_TIMEOUT_MS = 800;
 const CLIPBOARD_RESTORE_DELAY_MS = 600;
 const OVERLAY_CANCEL_ACCELERATOR = 'Escape';
 const PASTE_DEBUG_TAG = '[global-paste-debug]';
@@ -228,6 +238,9 @@ let dictionaryToastCloseTimer: NodeJS.Timeout | null = null;
 // 坐标一律由 main 从 screen.getCursorScreenPoint() 读取（DIP 坐标系），
 // 避免 renderer screenX/screenY 在 Windows 缩放下的坐标系不一致问题。
 let overlayDragSession: { startBounds: Rectangle; startCursor: Point } | null = null;
+// 最近一次「浮窗真正呈现在哪」的 bounds。浮窗 hide 后会被停到屏幕外，实时
+// bounds 不能当锚点，词典 toast 靠这份记录跟到同一块屏、同一位置。
+let lastPresentedOverlayBounds: Rectangle | null = null;
 
 type ExternalDictionaryLearningWatch = {
   id: string;
@@ -568,6 +581,7 @@ export function registerGlobalVoiceInputIpc(): void {
     // 走 positionOverlayWindow 的记忆优先路径。
     const bounds = window.getBounds();
     const display = screen.getDisplayMatching(bounds);
+    lastPresentedOverlayBounds = bounds;
     voiceInputOverlayPositionStore.save({
       x: bounds.x,
       y: bounds.y,
@@ -582,9 +596,12 @@ export function registerGlobalVoiceInputIpc(): void {
     if (window && event.sender === window.webContents) {
       overlayDragSession = null;
       voiceInputOverlayPositionStore.clear();
-      const cursorPoint = screen.getCursorScreenPoint();
-      const display = screen.getDisplayNearestPoint(cursorPoint);
-      window.setBounds(computeOverlayBounds(display));
+      // 复位到「浮窗当前所在这块屏」的默认位置：双击复位时浮窗已经在用户眼前，
+      // 不该因为鼠标所在屏判定跑到另一块屏上去。
+      const display = screen.getDisplayMatching(window.getBounds());
+      const bounds = computeOverlayBounds(display);
+      lastPresentedOverlayBounds = bounds;
+      window.setBounds(bounds);
       log.debug('global overlay position reset to default');
     }
     return { ok: true };
@@ -1214,9 +1231,8 @@ async function showOverlayWindow(shortcutInvokedAt = Date.now()): Promise<void> 
 }
 
 function createOverlayWindow(shortcutInvokedAt: number): BrowserWindow {
-  const cursorPoint = screen.getCursorScreenPoint();
-  const display = screen.getDisplayNearestPoint(cursorPoint);
-  const bounds = computeOverlayBounds(display);
+  // 建窗时的 bounds 只是占位：真正的定位在 positionOverlayWindow 里按焦点屏做。
+  const bounds = computeOverlayBounds(getCursorDisplay());
   // The global voice overlay behaves like an input-method candidate panel:
   // visible above other apps, not part of normal app switching, and not allowed
   // to take over the text field that will receive the paste.
@@ -1357,9 +1373,7 @@ export function showVoiceInputDictionaryToast(entries: DictionaryToastEntryPaylo
 }
 
 function createDictionaryToastWindow(payload: { entries: DictionaryToastEntryPayload[] }): BrowserWindow {
-  const cursorPoint = screen.getCursorScreenPoint();
-  const display = screen.getDisplayNearestPoint(cursorPoint);
-  const bounds = computeDictionaryToastBounds(display);
+  const bounds = computeDictionaryToastBounds(resolveDictionaryToastAnchorBounds());
   const window = new BrowserWindow({
     ...bounds,
     frame: false,
@@ -1429,6 +1443,8 @@ function createDictionaryToastWindow(payload: { entries: DictionaryToastEntryPay
 function startLoadedOverlaySession(window: BrowserWindow, shortcutInvokedAt: number): void {
   if (window.isDestroyed()) return;
 
+  // 焦点屏查询要最先发起：它是个子进程，能和下面的建窗、定位、麦克风启动并行。
+  const focusedDisplayQuery = startFocusedDisplayQuery();
   positionOverlayWindow(window);
   prepareOverlayForDisplay(window);
 
@@ -1477,7 +1493,7 @@ function startLoadedOverlaySession(window: BrowserWindow, shortcutInvokedAt: num
       }
     });
   }
-  setImmediate(() => {
+  const show = (): void => {
     if (window.isDestroyed()) return;
     log.debug('global overlay ready to show', {
       elapsedSinceShortcutMs: Date.now() - shortcutInvokedAt,
@@ -1487,6 +1503,17 @@ function startLoadedOverlaySession(window: BrowserWindow, shortcutInvokedAt: num
     // combinations can still perturb app-level presence. Restore immediately
     // after showing without focusing the main app.
     scheduleMainAppPresenceRestore('global-voice-overlay-shown');
+  };
+  if (!focusedDisplayQuery) {
+    setImmediate(show);
+    return;
+  }
+  // 多屏：先等一小会儿焦点屏答案，拿到就在显示前重新定位。窗口此刻还没可见，
+  // 所以重定位不会被看成跳动；超时则维持鼠标所在屏的定位直接显示。
+  void awaitFocusedDisplay(focusedDisplayQuery).then((focusedDisplay) => {
+    if (window.isDestroyed()) return;
+    if (focusedDisplay) positionOverlayWindow(window, focusedDisplay);
+    show();
   });
 }
 
@@ -1504,19 +1531,93 @@ function showPassiveOverlayWindow(window: BrowserWindow): void {
   scheduleMainAppPresenceRestore('global-voice-overlay-passive-shown');
 }
 
-function positionOverlayWindow(window: BrowserWindow): void {
-  const cursorPoint = screen.getCursorScreenPoint();
-  const display = screen.getDisplayNearestPoint(cursorPoint);
-  // 记忆优先：用户拖动过就用保存位置（clamp 进现存屏幕可见区域），保存
-  // 位置所在屏幕已不存在或从未拖动过则回退鼠标所在屏幕的默认位置。
-  window.setBounds(resolveOverlayInitialBounds({
+/**
+ * 把浮窗定位到焦点屏。`display` 省略时退回鼠标所在屏。
+ *
+ * 屏内位置沿用「记忆优先」：用户拖动过就用保存位置（clamp 进可见区域），
+ * 保存位置在别的屏上时按相对比例迁移过来，从未拖动过则用该屏默认位置。
+ */
+function positionOverlayWindow(window: BrowserWindow, display = getCursorDisplay()): void {
+  const displays = getOverlayPlacementDisplays();
+  const bounds = resolveOverlayInitialBounds({
     savedPosition: voiceInputOverlayPositionStore.read(),
-    displays: getOverlayPlacementDisplays(),
+    displays,
+    activeDisplay: displays.find((candidate) => candidate.id === display.id) ?? null,
     size: { width: OVERLAY_WIDTH, height: OVERLAY_HEIGHT },
     contentInset: OVERLAY_SHADOW_PADDING,
     edgePadding: OVERLAY_EDGE_PADDING,
     fallbackBounds: computeOverlayBounds(display),
-  }));
+  });
+  lastPresentedOverlayBounds = bounds;
+  window.setBounds(bounds);
+}
+
+function getCursorDisplay(): Display {
+  return screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+}
+
+/**
+ * 发起「前台窗口在哪块屏」查询，返回 null 表示不查、直接用鼠标所在屏：
+ * - 只有一块屏时答案唯一，不值得多开一个进程、也不该为它推迟浮窗显示。
+ * - 非 macOS 平台没有可用的低成本前台窗口查询（Electron 只能看自己的窗口），
+ *   Windows 一律按鼠标所在屏判定。
+ *
+ * 注意鼠标所在屏和键盘焦点所在屏可以不同：鼠标停在 A 屏、正在 B 屏的编辑器里
+ * 打字时，粘贴目标在 B 屏，浮窗也应该开在 B 屏，所以这里优先问前台窗口。
+ */
+function startFocusedDisplayQuery(): Promise<Display | null> | null {
+  if (process.platform !== 'darwin') return null;
+  if (screen.getAllDisplays().length <= 1) return null;
+  const startedAt = Date.now();
+  return queryMacFocusedWindowFrame()
+    .then((frame) => {
+      if (!frame) return null;
+      // getDisplayMatching 按重叠面积选屏，跨屏摆放的窗口也能落到主要那块。
+      const display = screen.getDisplayMatching(frame);
+      log.debug('focused display resolved', {
+        elapsedMs: Date.now() - startedAt,
+        displayId: display?.id,
+      });
+      return display ?? null;
+    })
+    .catch((error) => {
+      log.debug('focused display query failed, falling back to cursor display', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    });
+}
+
+/** 给焦点屏查询加显示截止时间：迟到的答案直接丢弃，不再挪已经可见的浮窗。 */
+function awaitFocusedDisplay(query: Promise<Display | null>): Promise<Display | null> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (display: Display | null): void => {
+      if (settled) return;
+      settled = true;
+      resolve(display);
+    };
+    const timer = setTimeout(() => {
+      log.debug('focused display query deadline exceeded', {
+        deadlineMs: OVERLAY_FOCUSED_DISPLAY_DEADLINE_MS,
+      });
+      settle(null);
+    }, OVERLAY_FOCUSED_DISPLAY_DEADLINE_MS);
+    void query
+      .catch(() => null)
+      .then((display) => {
+        clearTimeout(timer);
+        settle(display);
+      });
+  });
+}
+
+async function queryMacFocusedWindowFrame(): Promise<Rectangle | null> {
+  const result = await runMacTextInsertionHelper(['--command', 'focused-window-frame'], {
+    timeoutMs: MAC_FOCUSED_WINDOW_FRAME_TIMEOUT_MS,
+  });
+  if (!result.ok) return null;
+  return normalizeFocusedWindowFrame(result.frame);
 }
 
 function getOverlayPlacementDisplays(): OverlayPlacementDisplay[] {
@@ -1539,8 +1640,16 @@ function computeOverlayBounds(display: Display): Rectangle {
   return { x, y, width: OVERLAY_WIDTH, height: OVERLAY_HEIGHT };
 }
 
-function computeDictionaryToastBounds(display: Display): Rectangle {
-  const overlayBounds = computeOverlayBounds(display);
+/**
+ * 词典 toast 贴着「刚才浮窗所在的位置」出现。浮窗 hide 后会被停到屏幕外的
+ * OVERLAY_IDLE_BOUNDS，它的实时 bounds 不能当锚点，所以记住最近一次定位结果；
+ * 本次启动还没开过浮窗时退回鼠标所在屏的默认位置。
+ */
+function resolveDictionaryToastAnchorBounds(): Rectangle {
+  return lastPresentedOverlayBounds ?? computeOverlayBounds(getCursorDisplay());
+}
+
+function computeDictionaryToastBounds(overlayBounds: Rectangle): Rectangle {
   return {
     x: Math.round(overlayBounds.x + (overlayBounds.width - DICTIONARY_TOAST_WIDTH) / 2),
     y: Math.round(overlayBounds.y + (overlayBounds.height - DICTIONARY_TOAST_HEIGHT) / 2),

@@ -62,10 +62,16 @@ export function normalizeSavedOverlayPosition(value: unknown): SavedOverlayPosit
 export type ResolveOverlayInitialBoundsInput = {
   savedPosition: SavedOverlayPosition | null;
   displays: OverlayPlacementDisplay[];
+  /**
+   * 用户焦点所在的屏（前台窗口所在屏优先，取不到时是鼠标所在屏）。
+   * 浮窗必须开在这块屏上，保存位置只决定「在这块屏的什么位置」。
+   * null = 调用方拿不到任何屏快照（防御分支）。
+   */
+  activeDisplay: OverlayPlacementDisplay | null;
   size: { width: number; height: number };
   contentInset: number;
   edgePadding: number;
-  /** 无保存位置或保存位置不可用时的默认 bounds（现有 computeOverlayBounds 结果）。 */
+  /** 无保存位置或保存位置不可用时的默认 bounds（焦点屏上的 computeOverlayBounds 结果）。 */
   fallbackBounds: Rectangle;
 };
 
@@ -185,13 +191,35 @@ export function resolveDraggedOverlayBounds({
 }
 
 /**
- * 打开浮窗时的初始位置：有有效保存位置则「记忆优先」，否则回退默认。
- * 保存位置的卡片中心不在任何现存 display 的 workArea 内（典型：外接屏
- * 已拔掉）时同样回退默认，避免浮窗打开在看不见的位置。
+ * 把 bounds 按「卡片中心在 workArea 里的相对比例」搬到另一块屏。
+ * 分辨率不同的两块屏之间也成立：贴边保持贴边，水平居中（比例 0.5）
+ * 仍然落在新屏的水平中线上。
+ */
+function migrateBoundsToWorkArea(bounds: Rectangle, from: Rectangle, to: Rectangle): Rectangle {
+  const center = boundsCenter(bounds);
+  const ratioX = from.width > 0 ? (center.x - from.x) / from.width : 0.5;
+  const ratioY = from.height > 0 ? (center.y - from.y) / from.height : 0.5;
+  return {
+    x: Math.round(to.x + to.width * ratioX - bounds.width / 2),
+    y: Math.round(to.y + to.height * ratioY - bounds.height / 2),
+    width: bounds.width,
+    height: bounds.height,
+  };
+}
+
+/**
+ * 打开浮窗时的初始位置。
+ *
+ * 「浮窗开在焦点屏」是硬约束，位置记忆只在焦点屏内部生效：
+ * - 无保存位置 / 保存位置不可用（典型：外接屏已拔掉）→ 焦点屏默认位置。
+ * - 保存位置就在焦点屏上 → 原样恢复（clamp 回可见区域）。
+ * - 保存位置在另一块屏上 → 按相对比例迁移到焦点屏，用户「习惯放在偏下
+ *   居中 / 靠右下」这类偏好跟着走，而不是把浮窗留在用户没在看的那块屏。
  */
 export function resolveOverlayInitialBounds({
   savedPosition,
   displays,
+  activeDisplay,
   size,
   contentInset,
   edgePadding,
@@ -205,12 +233,38 @@ export function resolveOverlayInitialBounds({
     width: size.width,
     height: size.height,
   };
-  const display = findDisplayContainingPoint(displays, boundsCenter(saved));
-  if (!display) return fallbackBounds;
+  // 先认坐标落点，再认保存下来的 displayId：屏幕重新排布后旧坐标可能
+  // 已经落到空隙里，但那块屏本身还在，仍然算「记忆有效」。
+  const savedDisplay = findDisplayContainingPoint(displays, boundsCenter(saved))
+    ?? displays.find((display) => display.id === savedPosition.displayId)
+    ?? null;
+  if (!savedDisplay) return fallbackBounds;
+  const targetDisplay = activeDisplay ?? savedDisplay;
+  const bounds = targetDisplay.id === savedDisplay.id
+    ? saved
+    : migrateBoundsToWorkArea(saved, savedDisplay.workArea, targetDisplay.workArea);
   return clampOverlayBoundsToWorkArea({
-    bounds: saved,
-    workArea: display.workArea,
+    bounds,
+    workArea: targetDisplay.workArea,
     contentInset,
     edgePadding,
   });
+}
+
+/**
+ * 校验 macOS helper 返回的前台窗口 frame。宽高必须为正：AX 偶尔会给出
+ * 0 尺寸的占位窗口，那种 frame 不能用来判断焦点屏。
+ */
+export function normalizeFocusedWindowFrame(value: unknown): Rectangle | null {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as Partial<Rectangle>;
+  if (!Number.isFinite(candidate.x) || !Number.isFinite(candidate.y)) return null;
+  if (!Number.isFinite(candidate.width) || !Number.isFinite(candidate.height)) return null;
+  if ((candidate.width as number) <= 0 || (candidate.height as number) <= 0) return null;
+  return {
+    x: candidate.x as number,
+    y: candidate.y as number,
+    width: candidate.width as number,
+    height: candidate.height as number,
+  };
 }

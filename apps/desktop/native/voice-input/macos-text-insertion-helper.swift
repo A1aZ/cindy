@@ -491,6 +491,117 @@ func captureTargetPayload() -> [String: Any] {
   return payload
 }
 
+// Reports the frontmost window's frame so the global voice overlay can open on
+// the display the user is actually working on. This is deliberately the
+// cheapest possible command in this helper: no AXEnhancedUserInterface flip, no
+// text extraction, no subtree walk — the overlay's visible appearance waits on
+// this answer for a few dozen milliseconds, so it must stay fast.
+//
+// Coordinates are AX/CGWindow screen coordinates: origin at the top-left of the
+// primary display, y growing downwards, in points. That matches Electron's DIP
+// screen coordinate space on macOS, so main can feed the frame straight into
+// screen.getDisplayMatching().
+func focusedWindowFramePayload() -> [String: Any] {
+  guard let app = NSWorkspace.shared.frontmostApplication else {
+    return [
+      "ok": false,
+      "error": "No frontmost application"
+    ]
+  }
+  var payload: [String: Any] = [
+    "target": [
+      "processName": app.localizedName ?? "",
+      "bundleId": app.bundleIdentifier ?? "",
+      "pid": Int(app.processIdentifier)
+    ]
+  ]
+  if let frame = axFocusedWindowFrame(for: app) {
+    payload["ok"] = true
+    payload["frame"] = frame
+    payload["frameSource"] = "ax"
+    return payload
+  }
+  // CGWindowList needs no Accessibility grant and still reports geometry when
+  // Screen Recording is denied (only window titles are gated), so it covers the
+  // pre-permission first run and apps whose AX focused window is unavailable.
+  if let frame = frontWindowFrameFromWindowList(pid: app.processIdentifier) {
+    payload["ok"] = true
+    payload["frame"] = frame
+    payload["frameSource"] = "window-list"
+    return payload
+  }
+  payload["ok"] = false
+  payload["error"] = "No focused window frame"
+  return payload
+}
+
+func axFocusedWindowFrame(for app: NSRunningApplication) -> [String: Any]? {
+  guard AXIsProcessTrusted() else { return nil }
+  let axApp = AXUIElementCreateApplication(app.processIdentifier)
+  AXUIElementSetMessagingTimeout(axApp, 0.2)
+  guard let windowValue = copyAttribute(axApp, kAXFocusedWindowAttribute as CFString),
+        CFGetTypeID(windowValue) == AXUIElementGetTypeID() else {
+    return nil
+  }
+  let window = windowValue as! AXUIElement
+  AXUIElementSetMessagingTimeout(window, 0.2)
+  guard let origin = axPointAttribute(window, kAXPositionAttribute as CFString),
+        let size = axSizeAttribute(window, kAXSizeAttribute as CFString) else {
+    return nil
+  }
+  return [
+    "x": Double(origin.x),
+    "y": Double(origin.y),
+    "width": Double(size.width),
+    "height": Double(size.height)
+  ]
+}
+
+func axPointAttribute(_ element: AXUIElement, _ attribute: CFString) -> CGPoint? {
+  guard let value = copyAttribute(element, attribute),
+        CFGetTypeID(value) == AXValueGetTypeID() else {
+    return nil
+  }
+  var point = CGPoint.zero
+  guard AXValueGetValue(value as! AXValue, .cgPoint, &point) else { return nil }
+  return point
+}
+
+func axSizeAttribute(_ element: AXUIElement, _ attribute: CFString) -> CGSize? {
+  guard let value = copyAttribute(element, attribute),
+        CFGetTypeID(value) == AXValueGetTypeID() else {
+    return nil
+  }
+  var size = CGSize.zero
+  guard AXValueGetValue(value as! AXValue, .cgSize, &size) else { return nil }
+  return size
+}
+
+func frontWindowFrameFromWindowList(pid: pid_t) -> [String: Any]? {
+  let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+  guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+    return nil
+  }
+  // The list is ordered front to back, so the first normal-layer window owned by
+  // the frontmost process is the one the user is looking at.
+  for window in windows {
+    guard let ownerPid = window[kCGWindowOwnerPID as String] as? pid_t, ownerPid == pid else { continue }
+    guard let layer = window[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
+    guard let boundsDict = window[kCGWindowBounds as String] as? [String: Any],
+          let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else {
+      continue
+    }
+    if rect.width <= 0 || rect.height <= 0 { continue }
+    return [
+      "x": Double(rect.origin.x),
+      "y": Double(rect.origin.y),
+      "width": Double(rect.width),
+      "height": Double(rect.height)
+    ]
+  }
+  return nil
+}
+
 // Extracts before/selected/after text around the cursor in the focused element.
 // Used by the global voice overlay path to give the refiner the same kind of
 // surrounding context that ChatInput already provides for in-app dictation —
@@ -1270,6 +1381,8 @@ do {
   switch options.command {
   case "capture-target":
     emit(captureTargetPayload())
+  case "focused-window-frame":
+    emit(focusedWindowFramePayload())
   case "paste-verified":
     emit(pasteVerifiedPayload(options: options))
   default:

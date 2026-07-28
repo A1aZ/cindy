@@ -284,6 +284,155 @@ describe('codexHttpBridge', () => {
     ).toBe('no-session');
   });
 
+  it('a sibling naming another thread cannot degrade a well-attributed call', async () => {
+    // Sibling attribution must never win over the tool call's own: otherwise a
+    // stray notification carrying some other threadId would strip the ALS
+    // context and re-open the UI-focus fallback.
+    bridge = await startCodexHttpBridge({
+      serverFactories: { cindy_test: createTestServer },
+      logger: noopLogger(),
+    });
+    for (const [threadId, sessionId] of [
+      ['thread-x', 'session-x'],
+      ['thread-y', 'session-y'],
+    ]) {
+      bridge.registerThreadContext(threadId!, {
+        agentKind: 'codex',
+        sessionId: sessionId!,
+        workingDir: '/repo',
+        vendorOptions: {},
+      });
+    }
+
+    const baseHeaders = {
+      authorization: `Bearer ${bridge.token}`,
+      accept: 'application/json, text/event-stream',
+      'content-type': 'application/json',
+    };
+    const initResp = await fetch(bridge.url('cindy_test'), {
+      method: 'POST',
+      headers: baseHeaders,
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2024-11-05',
+          capabilities: {},
+          clientInfo: { name: 'test-client', version: '1.0.0' },
+        },
+      }),
+    });
+    const mcpSessionId = initResp.headers.get('mcp-session-id');
+    await initResp.text();
+
+    const callResp = await fetch(bridge.url('cindy_test'), {
+      method: 'POST',
+      headers: { ...baseHeaders, 'mcp-session-id': mcpSessionId ?? '' },
+      body: JSON.stringify([
+        // Notification pointing at a DIFFERENT registered thread.
+        {
+          jsonrpc: '2.0',
+          method: 'notifications/progress',
+          params: { _meta: { threadId: 'thread-y' } },
+        },
+        {
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/call',
+          params: {
+            name: 'current_session',
+            arguments: {},
+            _meta: { threadId: 'thread-x' },
+          },
+        },
+      ]),
+    });
+
+    expect(callResp.status).toBe(200);
+    expect(await readRpcResponse(callResp)).toMatchObject({
+      id: 2,
+      result: { content: [{ type: 'text', text: 'session-x' }] },
+    });
+  });
+
+  it('fail-closes a batch whose tool calls name two different threads', async () => {
+    // Two registered+enabled threads coalesced into one batch: the per-call
+    // policy checks pass, and extractCodexThreadId rightly refuses to pick a
+    // context — but running contextless would route through the focused UI
+    // session. Refusing to pick must therefore mean refusing to run.
+    bridge = await startCodexHttpBridge({
+      serverFactories: { lizi_test: createTestServer },
+      pluginIdByServerName: { lizi_test: 'ssh' },
+      logger: noopLogger(),
+    });
+    for (const [threadId, sessionId] of [
+      ['thread-one', 'session-one'],
+      ['thread-two', 'session-two'],
+    ]) {
+      bridge.registerThreadContext(threadId!, {
+        agentKind: 'codex',
+        sessionId: sessionId!,
+        workingDir: '/repo',
+        // Plugin enabled on BOTH threads — findBlockedToolCall has no reason to
+        // block either call on its own.
+        vendorOptions: {},
+      });
+    }
+
+    const baseHeaders = {
+      authorization: `Bearer ${bridge.token}`,
+      accept: 'application/json, text/event-stream',
+      'content-type': 'application/json',
+    };
+    const initResp = await fetch(bridge.url('lizi_test'), {
+      method: 'POST',
+      headers: baseHeaders,
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2024-11-05',
+          capabilities: {},
+          clientInfo: { name: 'test-client', version: '1.0.0' },
+        },
+      }),
+    });
+    const mcpSessionId = initResp.headers.get('mcp-session-id');
+    await initResp.text();
+
+    const callResp = await fetch(bridge.url('lizi_test'), {
+      method: 'POST',
+      headers: { ...baseHeaders, 'mcp-session-id': mcpSessionId ?? '' },
+      body: JSON.stringify(
+        ['thread-one', 'thread-two'].map((threadId, i) => ({
+          jsonrpc: '2.0',
+          id: i + 2,
+          method: 'tools/call',
+          params: {
+            name: 'current_session',
+            arguments: {},
+            _meta: { threadId },
+          },
+        })),
+      ),
+    });
+
+    expect(callResp.status).toBe(200);
+    const results = (await readAllRpcResponses(callResp)) as Array<{
+      id?: number;
+      result?: { isError?: boolean; content?: Array<{ text?: string }> };
+    }>;
+    expect(results).toHaveLength(2);
+    for (const entry of results) {
+      // Rejected outright — and in particular NOT executed contextless, which
+      // is what 'no-session' (or either session id) here would mean.
+      expect(entry.result?.isError).toBe(true);
+      expect(entry.result?.content?.[0]?.text).toMatch(/more than one session/);
+    }
+  });
+
   it('blocks a tool call using the policy frozen on its Codex thread', async () => {
     bridge = await startCodexHttpBridge({
       serverFactories: { lizi_test: createTestServer },

@@ -188,6 +188,20 @@ describe('composeForkOriginHandoff', () => {
     expect(composeForkOriginHandoff('sess-p', null)).toBe(buildForkOriginHandoff('sess-p'));
   });
 
+  it('已顶到上限的交接:组合后仍不超限,且结束标记前保有空行分隔', () => {
+    const terminator = "== End of handoff note; the user's new message follows ==";
+    const capped = `${'x'.repeat(16_000 - terminator.length - 2)}\n\n${terminator}`;
+    expect(capped.length).toBe(16_000);
+
+    const text = composeForkOriginHandoff('sess-p', capped);
+
+    expect(text.length).toBeLessThanOrEqual(16_000);
+    expect(text).toContain('sess-p');
+    expect(text.trimEnd().endsWith(terminator)).toBe(true);
+    // 正文被从中部裁开后,结束标记不能直接贴在半句话后面
+    expect(text.endsWith(`\n\n${terminator}`)).toBe(true);
+  });
+
   it('在引擎切换边界上 fork:来源标记并入 re-armed 交接,不替换它', () => {
     // fork 事务会把复制过去的 agent_switch 边界 re-arm 成 consumed:false,
     // 子会话首发时必须仍拿得到完整跨引擎交接——顶掉它就等于让子会话失忆。
@@ -276,6 +290,17 @@ describe('createAgentHandoffPendingRegistry', () => {
     expect(await reg.peek('s1')).toBe('SWITCH-HANDOFF');
     fail = false;
     expect(await reg.peek('s1')).toBe('FORK\n\nSWITCH-HANDOFF');
+  });
+
+  it('decorate 抛错期间发生 /clear:不退回已作废的交接', async () => {
+    let reg: ReturnType<typeof createAgentHandoffPendingRegistry>;
+    const decorate = vi.fn(async () => {
+      reg.clear('s1');
+      throw new Error('db down');
+    });
+    reg = createAgentHandoffPendingRegistry(async () => null, undefined, decorate);
+    reg.set('s1', 'STALE-HANDOFF');
+    expect(await reg.peek('s1')).toBeNull();
   });
 
   it('consume 后不触发 decorate(消费语义不被组合钩子破坏)', async () => {

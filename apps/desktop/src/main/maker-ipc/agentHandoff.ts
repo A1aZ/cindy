@@ -502,9 +502,12 @@ export function composeForkOriginHandoff(
   // fork 事实就会顶破它。从正文中部裁,两头都留住:前面的 fork 事实与它自带的结束
   // 标记——否则这条路径正好在最需要分隔的长历史上丢掉分隔。
   const [body, tail] = splitTrailingTerminator(pendingHandoff);
-  const room = HANDOFF_HARD_CAP - fact.length - 2 - tail.length;
+  const separator = '\n\n';
+  // 两个 separator:fact 与正文之间、正文与结束标记之间。后者不能省——正文被从中部
+  // 裁开后末尾多半停在半句上,结束标记直接贴上去就毁掉了"显式分隔"这个不变量本身。
+  const room = HANDOFF_HARD_CAP - fact.length - separator.length * 2 - tail.length;
   if (room <= 0) return buildForkOriginHandoff(parentSessionId);
-  return `${fact}\n\n${body.slice(0, room)}${tail}`;
+  return `${fact}${separator}${body.slice(0, room).trimEnd()}${separator}${tail}`;
 }
 
 /** send 路径的 wire 消息形态(与 makerSendTransaction 的 IpcUserMessage 对齐)。 */
@@ -598,6 +601,9 @@ export function createAgentHandoffPendingRegistry(
           composedByQuery.add(sessionId);
           return decorated;
         } catch {
+          // 失败路径同样要看代次:decorate 抛错(如查询瞬时失败)期间若发生 /clear,
+          // 退回 cached 等于把已作废的交接注入这次发送——那正是代次校验要拦的事。
+          if (genOf(sessionId) !== gen) return null;
           // 组合失败不能吞掉本来就该注入的交接——退回未组合的原值,且不写缓存,
           // 下次 peek 仍会重试组合。
           return cached;

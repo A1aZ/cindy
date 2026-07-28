@@ -136,6 +136,7 @@ export function buildRegistry(
     // 原引用透传零分配 —— PR #744 review)。前缀误命中(如 'a:' 命中 'a:b:model')只
     // 多做一次无害映射,不影响正确性。
     let models = p.models;
+    let mediaOverrides: Pick<Provider, 'imageModels' | 'videoModels'> = {};
     if (disabledKeys.length > 0 && disabledKeys.some((k) => k.startsWith(`${p.id}:`))) {
       const mapped: Provider['models'] = {};
       for (const agent of Object.keys(p.models) as AgentKind[]) {
@@ -144,10 +145,19 @@ export function buildRegistry(
         );
       }
       models = mapped;
+      // 专属媒体清单(imageModels/videoModels,不挂 agent)同样烘焙停用标志:
+      // 设置页据此渲染/切换只经媒体清单下发的图像、视频型号(PR #744 review)。
+      const mapMedia = (list: NonNullable<Provider['imageModels']>) =>
+        list.map((m) => (isModelDisabled(access, p.id, m.id) ? { ...m, disabled: true } : m));
+      mediaOverrides = {
+        ...(p.imageModels ? { imageModels: mapMedia(p.imageModels) } : {}),
+        ...(p.videoModels ? { videoModels: mapMedia(p.videoModels) } : {}),
+      };
     }
     return {
       ...p,
       models,
+      ...mediaOverrides,
       connected: connected[p.id] ?? false,
       ...(suspended ? { suspended: true } : {}),
       ...(failureView ? { modelDiscoveryFailure: failureView } : {}),

@@ -333,8 +333,10 @@ export interface Provider {
    * agent runtime,由主机图像通道直调)。与聊天模型同一目录同一热更机制:
    * 消费方为意识 cindy 槽(白名单 + 详情页下拉)。
    * 可选字段,additions-only,老版本 App 忽略之。
+   * `disabled` 是视图层字段(与 CatalogModel.disabled 同语义):buildRegistry 按用户
+   * 停用 override 烘焙,设置页据此渲染专属媒体条目的停用状态;目录数据本身不携带。
    */
-  imageModels?: { id: string; name: string }[];
+  imageModels?: { id: string; name: string; disabled?: boolean }[];
   /**
    * 图像能力的默认选型(与 imageModels 配套;值必须是 imageModels 里的 id):
    * - standard:未指定任何偏好时的默认模型(意识 cindy 槽"默认"档的真身);
@@ -347,8 +349,9 @@ export interface Provider {
    * 该供应商提供的**视频生成/编辑模型**清单(与 imageModels 同地位:
    * 不挂 agent,由主机视频通道直调,id 即 video provider 层的 alias)。
    * 消费方为意识 cindy 槽(白名单 + 详情页下拉)。可选,additions-only。
+   * `disabled` 同 imageModels:视图层停用标志,buildRegistry 烘焙。
    */
-  videoModels?: { id: string; name: string }[];
+  videoModels?: { id: string; name: string; disabled?: boolean }[];
   /**
    * 视频能力的默认选型(与 videoModels 配套;值必须是 videoModels 里的 id;
    * 语义同 imageDefaults:standard 必填,draft/best 缺省回落 standard)。

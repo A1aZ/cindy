@@ -155,7 +155,7 @@ export function deriveModelList(opts: DeriveModelListOptions): ModelListEntry[] 
         if (provider.access !== undefined) entry.sourceAccess = provider.access;
         return entry;
       };
-      if (!isAgentSelectableModel(m)) continue;
+      if (!isAgentSelectableModel(m, { userProvider: provider.source === 'user' })) continue;
       if (!selected && m.disabled === true) continue;
       if (dedupe === 'first-wins' && seenIndex.has(m.id)) {
         // 首见行已占坑。keepSelected 点名 provider 且选中行排在后面时,首见行必须让位——
@@ -211,7 +211,7 @@ export function deriveModelSections(
     for (const m of provider.models[agent] ?? []) {
       if (excludeModel?.(m, provider)) continue;
       const selected = matchesSelected(keepSelected, provider.id, m.id);
-      if (!isAgentSelectableModel(m)) continue;
+      if (!isAgentSelectableModel(m, { userProvider: provider.source === 'user' })) continue;
       if (!selected && m.disabled === true) continue;
       if (!selected && isVisible && !isVisible(provider.id, m)) continue;
       if (q && !m.name.toLowerCase().includes(q) && !m.id.toLowerCase().includes(q)) continue;

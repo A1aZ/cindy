@@ -112,21 +112,42 @@ describe('来源过滤(模型级停用拷贝)', () => {
   });
 });
 
-describe('自定义分组模型不受 id 启发式误伤', () => {
-  it('group=custom:<id> 且模型名含 image/audio 关键字 ⇒ 仍是 agent 可选模型', () => {
+describe('未知 group 的例外只限用户供应商', () => {
+  it('user 供应商 + group=custom:<id> 且模型名含 image/audio 关键字 ⇒ 仍是 agent 可选模型', () => {
     const views = buildRegistry(
       {
         providers: [
-          provider('custom-p', [
-            model('gpt-4o-audio-preview', { group: 'custom:custom-p' }),
-            model('flux-image-x', { group: 'custom:custom-p' }),
-          ]),
+          {
+            ...provider('custom-p', [
+              model('gpt-4o-audio-preview', { group: 'custom:custom-p' }),
+              model('flux-image-x', { group: 'custom:custom-p' }),
+            ]),
+            source: 'user' as const,
+          },
         ],
       } as Catalog,
       { 'custom-p': true },
     );
     const ids = deriveModelList({ providers: views, agent: 'claude-code' }).map((m) => m.id);
     expect(ids).toEqual(['gpt-4o-audio-preview', 'flux-image-x']);
+  });
+
+  it('builtin 网关补的 custom:xd 未知组**不**豁免:无分组下发的图像模型仍被硬排除', () => {
+    // active-catalog 对缺 group 的网关条目补 `custom:xd`(见 active-catalog.ts)——
+    // 若无条件放行未知组,这类图像/音频模型会绕过能力分类重新漏进对话清单。
+    const views = buildRegistry(
+      {
+        providers: [
+          provider('xd', [
+            model('claude-opus-5', { group: 'custom:xd' }),
+            model('gpt-image-2', { group: 'custom:xd' }),
+          ]),
+        ],
+      } as Catalog,
+      { xd: true },
+    );
+    const ids = deriveModelList({ providers: views, agent: 'claude-code' }).map((m) => m.id);
+    expect(ids).toEqual(['claude-opus-5']);
   });
 });
 

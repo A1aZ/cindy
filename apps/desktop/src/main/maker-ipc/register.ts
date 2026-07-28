@@ -5703,7 +5703,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       // connectedProvidersForAgent(suspended)一层出局。
       const routableModels = (provider: ProviderView, agent: AgentKind) =>
         (provider.models[agent] ?? []).filter(
-          (model) => model.disabled !== true && isAgentSelectableModel(model),
+          (model) =>
+            model.disabled !== true &&
+            isAgentSelectableModel(model, { userProvider: provider.source === 'user' }),
         );
       const availabilityFor = (agent: AgentKind) =>
         connectedProvidersForAgent(views, agent).map((provider) => {

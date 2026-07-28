@@ -163,6 +163,25 @@ describe('停用轴(isRowDisabled / isCapabilityRow)', () => {
     expect(isRowDisabled(rows[1])).toBe(false);
   });
 
+  it('专属媒体清单(imageModels/videoModels)合成能力行:可停用、与 agent 清单同 id 去重', () => {
+    const withMedia = {
+      ...provider,
+      imageModels: [
+        { id: 'gpt-image-2', name: 'GPT Image 2', disabled: true },
+        { id: 'shared', name: '与 agent 清单撞 id(应被去重)' },
+      ],
+      videoModels: [{ id: 'seedance-fast', name: 'Seedance 快速' }],
+    } as ProviderView;
+    const rows = buildUnionRows(withMedia);
+    const image = rows.find((r) => r.id === 'gpt-image-2')!;
+    expect(isCapabilityRow(image, false)).toBe(true);
+    expect(isRowDisabled(image)).toBe(true);
+    expect(rows.find((r) => r.id === 'seedance-fast')).toBeTruthy();
+    // 同 id 去重:'shared' 只保留 agent 清单那行(可见性开关照常)。
+    expect(rows.filter((r) => r.id === 'shared')).toHaveLength(1);
+    expect(isCapabilityRow(rows.find((r) => r.id === 'shared')!, false)).toBe(false);
+  });
+
   it('能力模型行按分组判定(image → 能力行;对话厂商/兜底分组 → 否)', () => {
     const withImage = {
       ...provider,
@@ -172,7 +191,7 @@ describe('停用轴(isRowDisabled / isCapabilityRow)', () => {
       },
     } as ProviderView;
     const rows = buildUnionRows(withImage);
-    expect(isCapabilityRow(rows.find((r) => r.id === 'gpt-image-2')!)).toBe(true);
-    expect(isCapabilityRow(rows.find((r) => r.id === 'shared')!)).toBe(false);
+    expect(isCapabilityRow(rows.find((r) => r.id === 'gpt-image-2')!, false)).toBe(true);
+    expect(isCapabilityRow(rows.find((r) => r.id === 'shared')!, false)).toBe(false);
   });
 });

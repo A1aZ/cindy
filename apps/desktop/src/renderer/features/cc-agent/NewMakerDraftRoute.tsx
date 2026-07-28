@@ -570,7 +570,7 @@ export function NewMakerDraftRoute() {
         const kept = models.filter(
           (m) =>
             m.disabled !== true &&
-            isAgentSelectableModel(m) &&
+            isAgentSelectableModel(m, { userProvider: p.source === 'user' }) &&
             !(effectiveRemoteHostId && isSubscriptionDirectModel(m.id)),
         );
         if (kept.length === models.length) return p;

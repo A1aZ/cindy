@@ -121,7 +121,8 @@ function canonicalModelKey(provider: ProviderView, agent: AgentKind, id: string)
   return id;
 }
 
-/** 构建并集(导出供单测):行序 = 第一个 agent 的目录序,后续 agent 独占模型追加其后。 */
+/** 构建并集(导出供单测):行序 = 第一个 agent 的目录序,后续 agent 独占模型追加其后;
+ *  专属媒体清单(imageModels/videoModels,不挂 agent)以合成能力行追加在最后。 */
 export function buildUnionRows(provider: ProviderView): UnionModelRow[] {
   const rows: UnionModelRow[] = [];
   const byKey = new Map<string, UnionModelRow>();
@@ -142,6 +143,41 @@ export function buildUnionRows(provider: ProviderView): UnionModelRow[] {
       }
     }
   }
+  // 只经专属媒体清单下发的图像/视频型号也要能被停用管理(PR #744 review):合成
+  // 能力行(group 显式钉死,不吃 id 启发式;contextWindow=0 ⇒ 渲染时不显示)。与
+  // models[agent] 里同 id 条目去重 —— 网关历史上两处都发,以 agent 清单条目为准。
+  const realIds = new Set<string>();
+  for (const row of rows) {
+    for (const a of row.avail) {
+      const m = row.byAgent[a];
+      if (m) realIds.add(m.id);
+    }
+  }
+  const anchorAgent = provider.agents[0] ?? 'claude-code';
+  const media: Array<{ id: string; name: string; disabled?: boolean; group: 'image' | 'video' }> = [
+    ...(provider.imageModels ?? []).map((m) => ({ ...m, group: 'image' as const })),
+    ...(provider.videoModels ?? []).map((m) => ({ ...m, group: 'video' as const })),
+  ];
+  for (const m of media) {
+    if (realIds.has(m.id) || byKey.has(m.id)) continue;
+    const entry: CatalogModel = {
+      id: m.id,
+      name: m.name,
+      contextWindow: 0,
+      efforts: [],
+      defaultEffort: null,
+      group: m.group,
+      ...(m.disabled === true ? { disabled: true } : {}),
+    };
+    const row: UnionModelRow = {
+      id: m.id,
+      name: m.name,
+      byAgent: { [anchorAgent]: entry },
+      avail: [anchorAgent],
+    };
+    byKey.set(m.id, row);
+    rows.push(row);
+  }
   return rows;
 }
 
@@ -156,10 +192,12 @@ export function isRowDisabled(row: UnionModelRow): boolean {
   return row.avail.some((a) => row.byAgent[a]?.disabled === true);
 }
 
-/** 该行是否是「能力模型」(图像/音频/视频/向量等,没有显示轴;见头注)。 */
-export function isCapabilityRow(row: UnionModelRow): boolean {
+/** 该行是否是「能力模型」(图像/音频/视频/向量等,没有显示轴;见头注)。
+ *  `userProvider` = 行来自用户自定义供应商 —— 自定义对话模型的未知 group 不吃 id
+ *  启发式(`gpt-4o-audio-preview` 是合法对话模型,见 isAgentSelectableModel 注释)。 */
+export function isCapabilityRow(row: UnionModelRow, userProvider: boolean): boolean {
   const rep = row.byAgent[row.avail[0]];
-  return !!rep && !isAgentSelectableModel(rep);
+  return !!rep && !isAgentSelectableModel(rep, { userProvider });
 }
 
 /** 分歧 = 双端可用且可见性不同(仅对话模型行有意义)。 */
@@ -180,7 +218,9 @@ export function countModelsByAgent(provider: ProviderView): Array<{
 }> {
   return provider.agents.map((agent) => {
     const models = (provider.models[agent] ?? []).filter(
-      (model) => isAgentSelectableModel(model) && model.disabled !== true,
+      (model) =>
+        isAgentSelectableModel(model, { userProvider: provider.source === 'user' }) &&
+        model.disabled !== true,
     );
     return {
       agent,
@@ -352,7 +392,11 @@ export function UnifiedModelList({
     const next = !allOn;
     for (const agent of provider.agents) {
       const ids = (provider.models[agent] ?? [])
-        .filter((m) => isAgentSelectableModel(m) && m.disabled !== true)
+        .filter(
+          (m) =>
+            isAgentSelectableModel(m, { userProvider: provider.source === 'user' }) &&
+            m.disabled !== true,
+        )
         .map((m) => m.id);
       setManyVisibility(agent, provider.id, ids, next);
     }
@@ -479,7 +523,15 @@ export function UnifiedModelList({
           groups.map((g) => {
             // 搜索时强制展开(否则匹配项藏在折叠组里看不到);仅多组时才有折叠头。
             const collapsed = showGroupHeaders && !query.trim() && isCollapsed(g.category);
-            const capability = CAPABILITY_CATEGORIES.has(g.category);
+            // 能力语义按**行**判(isCapabilityRow,含自定义供应商的未知 group 豁免),
+            // 不能只看分组名:自定义对话模型(如 gpt-4o-audio-preview)会被 groupOf 的
+            // id 启发式落进 audio 组展示,但它有显示轴、必须有开关(PR #744 review)。
+            // 组级 hint 只在整组都是能力行时显示。
+            const userProvider = provider.source === 'user';
+            const wholeGroupCapability =
+              CAPABILITY_CATEGORIES.has(g.category) &&
+              g.rows.length > 0 &&
+              g.rows.every((r) => isCapabilityRow(r, userProvider));
             return (
             <div key={g.category} className="flex flex-col">
               {showGroupHeaders && (
@@ -512,7 +564,7 @@ export function UnifiedModelList({
               )}
               {/* 能力模型组的消歧说明:这组不参与对话模型选择、行内没有显示开关 ——
                   语义与上面的对话模型组不同,必须就地讲清,不能指望用户猜。 */}
-              {capability && !collapsed && (
+              {wholeGroupCapability && !collapsed && (
                 <span
                   className={cn('pb-1 text-11 leading-snug', showGroupHeaders && 'pl-[17px]')}
                   style={{ color: 'var(--text-tertiary)' }}
@@ -523,10 +575,11 @@ export function UnifiedModelList({
               {!collapsed &&
                 g.rows.map((row) => {
                 const rep = row.byAgent[row.avail[0]]!;
+                const capability = isCapabilityRow(row, userProvider);
                 const diverged = !capability && isRowDiverged(provider.id, row);
                 const anyOn = rowAnyEnabled(provider.id, row);
                 // 能力注记:仅双 agent 供应商 + 单端模型才标(单 agent 供应商头部已说明);
-                // 能力模型组不标(它们本来就不参与 agent 维度)。
+                // 能力模型行不标(它们本来就不参与 agent 维度)。
                 const capNote =
                   !capability && multiAgent && row.avail.length === 1
                     ? t('settings.providers.models.capabilityNote', {
@@ -578,13 +631,16 @@ export function UnifiedModelList({
                         {t('settings.providers.models.divergedChip', { agent: AGENT_LABEL[hiddenAgent] })}
                       </button>
                     )}
-                    <span
-                      className="shrink-0 text-12 tabular-nums"
-                      style={{ color: 'var(--text-tertiary)' }}
-                      title={ctxTitle}
-                    >
-                      {formatContextWindow(rep.contextWindow)}
-                    </span>
+                    {/* 合成媒体行(专属清单下发)没有上下文窗口元数据(=0),不显示。 */}
+                    {rep.contextWindow > 0 && (
+                      <span
+                        className="shrink-0 text-12 tabular-nums"
+                        style={{ color: 'var(--text-tertiary)' }}
+                        title={ctxTitle}
+                      >
+                        {formatContextWindow(rep.contextWindow)}
+                      </span>
+                    )}
                     {rowMenu(row)}
                     {/* 能力模型行没有显示轴 ⇒ 没有开关(全页开关语义唯一 = 显示)。 */}
                     {!capability &&
@@ -664,12 +720,14 @@ export function UnifiedModelList({
                         {t(CATEGORY_LABEL_KEY[rowCategory(row)])}
                       </span>
                       <span className="min-w-0 flex-1" />
-                      <span
-                        className="shrink-0 text-12 tabular-nums"
-                        style={{ color: 'var(--text-disabled)' }}
-                      >
-                        {formatContextWindow(rep.contextWindow)}
-                      </span>
+                      {rep.contextWindow > 0 && (
+                        <span
+                          className="shrink-0 text-12 tabular-nums"
+                          style={{ color: 'var(--text-disabled)' }}
+                        >
+                          {formatContextWindow(rep.contextWindow)}
+                        </span>
+                      )}
                       <button
                         type="button"
                         onClick={() => setRowDisabled(row, false)}

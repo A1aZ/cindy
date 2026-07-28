@@ -5589,7 +5589,16 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
       const epochAcceptable =
         epochNow === reconcileEpochAtStart ||
         (lastCommit !== undefined && epochNow === lastCommit.epoch);
-      if (!epochAcceptable || (lastCommit?.seq ?? 0) >= reconcileSeq) {
+      const supersededByNewerCommit = (lastCommit?.seq ?? 0) >= reconcileSeq;
+      // 序号这一关只拦**权威重建**,不拦加性 merge。
+      //
+      // 后启动的那次不一定翻得和先启动的一样深:它可能在第一页就撞上刚被推送过来的最新行、
+      // 判 reachedKnownWindow 然后提交,而先启动那次正深翻着一段更早的缺口。若一律按序号丢弃,
+      // 那段更深的覆盖就被"浅重叠的后继"白白扔掉,缺口既没补上也没标记(#676 review codex P1)。
+      // 加性 merge(reachedKnownWindow 分支)只补窗口里缺的行、不动游标 / hasMore / 锁,
+      // 后启动者已经落地也不会被它覆盖,所以放它进来是安全的;真正会覆盖窗口的重建分支仍然
+      // 严格 latest-wins。
+      if (!epochAcceptable || (supersededByNewerCommit && !reachedKnownWindow)) {
         windowApplied = false;
         return;
       }
@@ -5653,14 +5662,26 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
         // 但 rowid 更大"的晚到行判成范围内,而它与权威窗口之间那一行可能正好被有损推送丢了
         // (#676 review codex P1)。
         const newestRow = newestMessageRowForWindow(collected);
+        const authoritativeClientIds = new Set(collected.map((row) => row.clientId));
         const hasDetachedArrival =
           oldestRow !== null &&
           newestRow !== null &&
-          lateArrivals.some(
-            (message) =>
-              compareMessageTimeline(message, oldestRow) < 0 ||
-              compareMessageTimeline(message, newestRow) > 0,
-          );
+          lateArrivals.some((message) => {
+            // 本次权威页里就带着它 → 必然连续。
+            if (authoritativeClientIds.has(message.clientId)) return false;
+            const cmpOldest = compareMessageTimeline(message, oldestRow);
+            if (cmpOldest < 0) return true;
+            const cmpNewest = compareMessageTimeline(message, newestRow);
+            if (cmpNewest > 0) return true;
+            // 与某个边界打平 ⇒ 同毫秒且至少一侧没有 rowid(rowid 唯一,都有则不会打平)。
+            // 生产的 local-db:messages:created 广播走 messageToCamel,**不带 rowid**
+            // (list 结果才带),所以 live push 与边界同毫秒时根本排不出先后 —— 中间那一行
+            // 可能正好被有损推送丢了。这种无法判定的情况保守按脱离处理(#676 review codex P1)。
+            //
+            // 另一条路是"让广播也带上 rowid",但那要改 IPC / 隧道 payload 形状(跨端 wire),
+            // 为一个边界精度换协议改动不值当;保守判脱离的代价只是多做一次补齐尝试。
+            return cmpOldest === 0 || cmpNewest === 0;
+          });
         return {
           ...s,
           messages,
@@ -5675,7 +5696,9 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
       if (didRebuild) bumpMessagesEpoch(sessionId);
       // 真正落地了(没被 isStreaming 守卫丢掉)才记下"这一号已提交" —— 之后再回来的、启动更早
       // 的那些对账据此作废。被丢掉时不记:什么都没进 UI,不该因此把先启动那次也一起废掉。
-      if (windowApplied) {
+      // supersededByNewerCommit 时不改提交记录:那会把 committed seq 拉回更小的值,
+      // 让真正更早的那些对账又能通过序号检查。
+      if (windowApplied && !supersededByNewerCommit) {
         _remoteReconcileCommit.set(sessionId, {
           seq: reconcileSeq,
           // 代际要在**可能的 bump 之后**读:权威重建分支刚把它 +1,记的就得是新值,
@@ -5988,7 +6011,9 @@ async function backfillHistoryUntil(
     const mapped = mapServerMessages(collected);
     setState(sessionId, (s) => ({
       ...s,
-      messages: mergeMessages(mapped, s.messages, {}, 'newest-first'),
+      // addOnly:这些页可能是几秒前取到的,期间 live push 可能已经更新过其中某行;
+      // 用旧快照 hydrate 会把 live 更新盖回去(见 mergeMessages 的 addOnly 说明)。
+      messages: mergeMessages(mapped, s.messages, { addOnly: true }, 'newest-first'),
       historyLoaded: true,
       isFirstMessage: false,
       oldestMessageId: cursorId ?? s.oldestMessageId,
@@ -8726,7 +8751,16 @@ type RemoteRowsOrder = 'newest-first' | 'oldest-first';
 function mergeMessages(
   serverMsgs: ChatMessage[],
   existing: ChatMessage[],
-  options: HydratePersistedMessageOptions = {},
+  /**
+   * addOnly:只补窗口里缺的行,**不**用 server 快照去 hydrate 已有的行。
+   *
+   * 给"取回来很久之后才发布"的来源用(跳转补齐的多页循环:第一页可能在几秒前就取到了,
+   * 期间 local-db:messages:created 可能已经把某行更新过)。默认的 hydrate 是
+   * `{...existing, ...persisted}`,persisted 赢 —— 那时旧快照会把 live 更新盖回去
+   * (#676 review codex P1)。彻底解法需要每条消息的修订号,而 messages 表没有 updatedAt,
+   * 属于跨层改动;这里先把"发布延迟最长"的那个来源摘出去。
+   */
+  options: HydratePersistedMessageOptions & { addOnly?: boolean } = {},
   rowsOrder: RemoteRowsOrder = 'oldest-first',
 ): ChatMessage[] {
   const serverOrder = new Map(serverMsgs.map((message, index) => [message.clientId, index]));
@@ -8737,7 +8771,7 @@ function mergeMessages(
   const hydratedExisting = existing.map((message) => {
     seen.add(message.clientId);
     const persisted = serverByClientId.get(message.clientId);
-    if (!persisted) return message;
+    if (!persisted || options.addOnly === true) return message;
     const hydrated = hydratePersistedMessage(message, persisted, options);
     if (hydrated !== message) changed = true;
     return hydrated;
@@ -8810,17 +8844,18 @@ function oldestServerMessageIdForWindow(
   return compareMessageTimeline(oldestRow, existingOldest) < 0 ? oldestRow.id : previousOldestId;
 }
 
-/** 权威窗口里最新的一行(判"晚到的行是否落在权威范围内"用)。 */
+/**
+ * 权威窗口里最新的一行(判"晚到的行是否落在权威范围内"用)。
+ *
+ * 用 compareMessageTimeline 取最大,而不是只比毫秒:同毫秒的多行靠 rowid 定序,只比毫秒可能
+ * 挑到 rowid 更小的那行当"最新边界",于是把同毫秒、rowid 更大的**范围内**晚到行误判成脱离
+ * (#676 review copilot)。与 oldestMessageRow 同口径。
+ */
 function newestMessageRowForWindow(rows: Message[]): Message | null {
   let newest: Message | null = null;
-  let newestMs = Number.NEGATIVE_INFINITY;
   for (const row of rows) {
-    const ms = messageTime(row.createdAt);
-    if (!Number.isFinite(ms)) continue;
-    if (ms > newestMs) {
-      newestMs = ms;
-      newest = row;
-    }
+    if (!Number.isFinite(messageTime(row.createdAt))) continue;
+    if (newest === null || compareMessageTimeline(row, newest) > 0) newest = row;
   }
   return newest;
 }

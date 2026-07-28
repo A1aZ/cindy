@@ -958,6 +958,63 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     expect(makerChatStore.getSnapshot(SID).isLoadingMore).toBe(false);
   });
 
+  it('J6. 补齐页只补缺行,不用旧快照 hydrate 已有的行(不盖掉飞行期间的 live 更新)', async () => {
+    // review #676(codex P1):补齐的页可能在几秒前就取到了(多页 + 隧道),期间
+    // local-db:messages:created 可能已经把某行更新过。默认 merge 是 {...existing, ...persisted}
+    // ——persisted 赢,于是旧快照把 live 更新盖回去,界面上已完成的结果会变回旧内容。
+    const liveRow = serverMessage({
+      id: 'tool-row',
+      clientId: 'tool-row',
+      role: 'tool_result',
+      content: 'live final content',
+      createdAt: '2026-07-25T12:00:00.000Z',
+    });
+    // 第一次跳转把这一行的**最新**内容放进窗口。
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([liveRow]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce([liveRow]);
+    await makerChatStore.loadAroundMessageClientId(SID, 'tool-row', { radius: 60 });
+    expect(
+      makerChatStore.getSnapshot(SID).messages.find((m) => m.clientId === 'tool-row')?.content,
+    ).toBe('live final content');
+
+    // 第二次跳转到更早的目标:补齐取回的那一页带着**旧快照**的同一行。
+    const target = serverMessage({
+      id: 'deep-target',
+      clientId: 'deep-target',
+      createdAt: '2026-07-20T00:00:00.000Z',
+    });
+    vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    vi.mocked(listMessagesFor).mockResolvedValueOnce([
+      { ...liveRow, content: 'stale snapshot content' },
+    ]);
+    await makerChatStore.loadAroundMessageClientId(SID, 'deep-target', { radius: 60 });
+
+    // 关键:补齐页不 hydrate 已有的行 —— live 内容原样保留。
+    expect(
+      makerChatStore.getSnapshot(SID).messages.find((m) => m.clientId === 'tool-row')?.content,
+    ).toBe('live final content');
+    // 缺的行照常补进来。
+    expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).toContain(
+      'deep-target',
+    );
+  });
+
+  it('J6b. addOnly 只影响"已有的行",缺行照补(merge 契约直测)', () => {
+    const existing = [
+      { clientId: 'a', role: 'assistant' as const, content: 'live', createdAt: '2026-07-25T12:00:00.000Z' },
+    ];
+    const server = [
+      { clientId: 'a', role: 'assistant' as const, content: 'stale', createdAt: '2026-07-25T12:00:00.000Z' },
+      { clientId: 'b', role: 'assistant' as const, content: 'new row', createdAt: '2026-07-25T11:00:00.000Z' },
+    ];
+    const addOnly = makerChatStore.__mergeMessagesForTest(server, existing, { addOnly: true }, 'newest-first');
+    expect(addOnly.find((m) => m.clientId === 'a')?.content).toBe('live');
+    expect(addOnly.map((m) => m.clientId)).toContain('b');
+    // 对照:默认口径下 server 快照会赢(around 提交刻意依赖这个)。
+    const hydrated = makerChatStore.__mergeMessagesForTest(server, existing, {}, 'newest-first');
+    expect(hydrated.find((m) => m.clientId === 'a')?.content).toBe('stale');
+  });
+
   it('J5. 成员快速通道不写分页状态(它没有置过锁,游标 / hasMore / 锁都不归它)', async () => {
     // review #676(codex P1):快速通道在置锁**之前**就返回 covered。它的提交若照常写
     // oldestMessageId 并清 isLoadingMore,两个 around 响应同时落地时就会把另一次刚拿到的锁

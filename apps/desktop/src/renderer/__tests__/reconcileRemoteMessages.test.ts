@@ -683,6 +683,115 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     );
   });
 
+  it('远程会话:同毫秒但没有 rowid 的 live push 保守按脱离处理', async () => {
+    // review #676(codex P1):生产的 local-db:messages:created 广播走 messageToCamel、**不带
+    // rowid**(list 结果才带),所以 live push 与权威边界同毫秒时排不出先后 —— 中间那一行可能
+    // 正好被有损推送丢了。无法判定 ⇒ 保守判脱离。
+    const s = sid();
+    makerChatStore.initGlobalListeners();
+    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
+
+    const pendingList = deferred<Message[]>();
+    remoteListResolver = () => pendingList.promise;
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    // 与权威边界同毫秒,且**没有** rowid(复刻生产广播的形状)。
+    remotePush?.({
+      deviceId: DEVICE_ID,
+      channel: 'local-db:messages:created',
+      payload: {
+        sessionId: s,
+        message: dbMessage(s, 'same-ms-no-rowid', 'no rowid in broadcast', '2026-06-20T00:00:00.000Z'),
+      },
+    });
+
+    pendingList.resolve([
+      { ...dbMessage(s, 'auth-1', 'authoritative', '2026-06-20T00:00:00.000Z'), rowid: 10 },
+    ]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toContain(
+      'client-same-ms-no-rowid',
+    );
+    // 关键:排不出先后 → 按孤岛处理,而不是当成连续。
+    expect(makerChatStore.getSnapshot(s).historyWindowHasIsland).toBe(true);
+  });
+
+  it('远程会话:同毫秒、rowid 更小的范围内晚到行不被误判成脱离', async () => {
+    // review #676(copilot):newestMessageRowForWindow 只比毫秒时可能挑到 rowid 更小的那行当
+    // "最新边界",于是把同毫秒、rowid 更大的**范围内**行误判成脱离。这里权威页同毫秒两行
+    // (rowid 10 / 12),晚到行 rowid 11 夹在中间 → 落在范围内。
+    const s = sid();
+    makerChatStore.initGlobalListeners();
+    await openRemoteWithHistory(s, [dbMessage(s, 'seed', 'seed row', '2026-06-15T00:00:00.000Z')]);
+
+    const pendingList = deferred<Message[]>();
+    remoteListResolver = () => pendingList.promise;
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    remotePush?.({
+      deviceId: DEVICE_ID,
+      channel: 'local-db:messages:created',
+      payload: {
+        sessionId: s,
+        message: {
+          ...dbMessage(s, 'inside', 'inside the authoritative range', '2026-06-20T00:00:00.000Z'),
+          rowid: 11,
+        },
+      },
+    });
+
+    pendingList.resolve([
+      { ...dbMessage(s, 'auth-a', 'authoritative a', '2026-06-20T00:00:00.000Z'), rowid: 10 },
+      { ...dbMessage(s, 'auth-b', 'authoritative b', '2026-06-20T00:00:00.000Z'), rowid: 12 },
+    ]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toContain('client-inside');
+    // 关键:范围内 → 不记孤岛。
+    expect(makerChatStore.getSnapshot(s).historyWindowHasIsland).toBe(false);
+  });
+
+  it('远程会话:后启动那次只浅重叠时,先启动那次更深的加性覆盖仍然落地', async () => {
+    // review #676(codex P1):后启动的对账可能在第一页就撞上刚推送过来的最新行、判有重叠然后
+    // 提交,而先启动那次正深翻着一段更早的缺口。序号若一律拦下,那段更深的覆盖就被白白扔掉。
+    // 加性 merge 不动游标 / hasMore / 锁,放它落地是安全的。
+    const s = sid();
+    await openRemoteWithHistory(s, [dbMessage(s, 'tail', 'known tail', '2026-06-15T00:00:00.000Z')]);
+
+    const deepPage = deferred<Message[]>();
+    let calls = 0;
+    remoteListResolver = () => {
+      calls += 1;
+      // #1(先启动,深翻):停在飞行中,回来时带着缺口里的行 + 已知尾部(有重叠 → 加性 merge)。
+      if (calls === 1) return deepPage.promise;
+      // #2(后启动,浅重叠):第一页就带着已知尾部 → reachedKnownWindow → 直接提交。
+      return [
+        dbMessage(s, 'tail', 'known tail', '2026-06-15T00:00:00.000Z'),
+        dbMessage(s, 'shallow', 'shallow new row', '2026-06-16T00:00:00.000Z'),
+      ];
+    };
+
+    makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    makerChatStore.reconcileRemoteMessages(s);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    expect(makerChatStore.getSnapshot(s).messages.map((m) => m.clientId)).toContain(
+      'client-shallow',
+    );
+
+    deepPage.resolve([
+      dbMessage(s, 'deep-1', 'deep missing row', '2026-06-14T00:00:00.000Z'),
+      dbMessage(s, 'tail', 'known tail', '2026-06-15T00:00:00.000Z'),
+    ]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+
+    // 关键:先启动那次补回的更深的行不得被浅重叠的后继丢掉。
+    const ids = makerChatStore.getSnapshot(s).messages.map((m) => m.clientId);
+    expect(ids).toContain('client-deep-1');
+    expect(ids).toContain('client-shallow');
+  });
+
   it('远程会话:与权威窗口最新行同毫秒、rowid 更大的晚到行也算脱离', async () => {
     // review #676(codex P1):同一毫秒里插入的多行靠 rowid 定序(messages 表与分页都用它)。
     // 只比毫秒会把"同毫秒但 rowid 更大"的晚到行判成范围内,而它与权威窗口之间那一行可能正好

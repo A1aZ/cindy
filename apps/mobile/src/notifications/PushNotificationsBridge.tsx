@@ -28,9 +28,7 @@ export function PushNotificationsBridge() {
   /** 冷启动点通知时 auth 可能未就绪,先存下待路由的深链。 */
   const pendingDeepLinkRef = useRef<string | null>(null);
   const apiFetchRef = useRef(auth.apiFetch);
-  const getAccessTokenRef = useRef(auth.getAccessToken);
   apiFetchRef.current = auth.apiFetch;
-  getAccessTokenRef.current = auth.getAccessToken;
 
   useEffect(() => {
     if (!isPushSupported()) return;
@@ -44,9 +42,7 @@ export function PushNotificationsBridge() {
     let cancelled = false;
     void (async () => {
       // 先补偿上次登出/终止时失败的注销,再按当前开关同步注册状态
-      await retryPendingUnregister(getAccessTokenRef.current).catch(
-        () => undefined,
-      );
+      await retryPendingUnregister().catch(() => undefined);
       if (cancelled) return;
       const enabled = await readPushEnabled();
       if (cancelled || !enabled) return;

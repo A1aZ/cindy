@@ -121,8 +121,11 @@ export function startLearnHost(deps: StartLearnHostDeps): LearnController {
       const agentKind = originMeta?.agentKind ?? 'claude-code';
       const route = await resolveLenientSessionRoute(
         agentKind,
-        originMeta?.model ?? 'claude-sonnet-4-6',
+        originMeta?.model ?? defaultModelFor(agentKind),
         inheritedProviderId,
+        // 保守默认模型同走裁决阶梯:它自己也可能被停用,不能作为未经裁决的兜底
+        // (PR #744 review 第六轮)。
+        { fallbackModel: defaultModelFor(agentKind) },
       );
       if (route.degraded) {
         logger.warn('learn session inherited route degraded (disabled in settings)', {
@@ -131,13 +134,17 @@ export function startLearnHost(deps: StartLearnHostDeps): LearnController {
           providerId: inheritedProviderId,
         });
       }
+      // 目录里一个启用的对话模型都没有:失败收口,绝不拿未经裁决的模型直建付费会话。
+      const routeModel = route.model;
+      if (!routeModel) {
+        throw new Error('learn session has no enabled chat model (all models disabled in settings)');
+      }
       if (route.providerId) setSessionProvider(opts.id, route.providerId);
       const session = await deps.maker.createSession({
         id: opts.id,
         agentKind,
         workingDir: opts.workingDir,
-        // 降级 ④(继承模型的所有拷贝被停用)兜底回该 agent 的保守默认模型。
-        model: route.model ?? defaultModelFor(agentKind),
+        model: routeModel,
         ...(originMeta?.effort ? { effort: originMeta.effort } : {}),
         ...(originMeta?.fastMode != null ? { fastMode: originMeta.fastMode } : {}),
         // 权限收敛到工作区(Codex review ×2,安全红线):蒸馏输入含第三方 hub

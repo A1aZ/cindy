@@ -825,12 +825,23 @@ export function createCardActionHandler(
       'claude-code',
       desktopPrefs.model,
       desktopPrefs.providerId ?? null,
+      // 入口默认模型同走裁决阶梯:它自己也可能被停用,不能作为未经裁决的兜底
+      // (PR #744 review 第六轮)。
+      { fallbackModel: DESKTOP_CC_DEFAULTS.model },
     );
     if (route.degraded) {
       log.warn(
         `control:new saved route degraded (disabled in settings): model=${desktopPrefs.model} providerId=${desktopPrefs.providerId ?? 'null'}`,
       );
     }
+    // route.model 缺席 = 目录里一个启用的对话模型都没有:失败收口,绝不拿未经
+    // 裁决的模型直建付费会话。
+    const requireRouteModel = (): string => {
+      if (!route.model) {
+        throw new Error('control:new has no enabled chat model (all models disabled in settings)');
+      }
+      return route.model;
+    };
     const closeCreatedSessionAfterSetupFailure = async (sessionId: string): Promise<void> => {
       try {
         await getMaker().closeSession(sessionId);
@@ -860,8 +871,7 @@ export function createCardActionHandler(
         const newSession = await getMaker().createSession({
           agentKind: 'claude-code',
           workingDir,
-          // 降级 ④(模型所有拷贝被停用)兜底回本入口承诺的 desktop 默认模型。
-          model: route.model ?? DESKTOP_CC_DEFAULTS.model,
+          model: requireRouteModel(),
           providerId: route.providerId ?? undefined,
           effort: desktopPrefs.effort as Effort,
           permissionMode: desktopPrefs.permissionMode as PermissionMode,
@@ -943,8 +953,7 @@ export function createCardActionHandler(
       const newSession = await getMaker().createSession({
         agentKind: 'claude-code',
         workingDir,
-        // 降级 ④(模型所有拷贝被停用)兜底回本入口承诺的 desktop 默认模型。
-        model: route.model ?? DESKTOP_CC_DEFAULTS.model,
+        model: requireRouteModel(),
         providerId: route.providerId ?? undefined,
         effort: desktopPrefs.effort as Effort,
         permissionMode: desktopPrefs.permissionMode as PermissionMode,

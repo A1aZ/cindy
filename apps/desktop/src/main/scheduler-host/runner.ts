@@ -204,6 +204,13 @@ export interface MakerScheduleRunnerDeps {
   >;
 }
 
+/**
+ * 排队心跳的目标路由被停用轴拒绝(applyQueuedHeartbeatRouting 抛出)。排队派发的
+ * onAccepted 据此在 vendor dispatch 之前中断刚 accept 的 turn 并把 run 按失败收口
+ * (与 fire 主路径的准入拒绝同语义);其它路由同步失败仍按 non-fatal warn 处理。
+ */
+class QueuedRouteDisabledError extends Error {}
+
 /** createTurnCompletionWaiter 的返回:turn 终态等待 + 文本缓冲 + 幂等摘除。 */
 interface TurnCompletionWaiter {
   turnFinished: Promise<void>;
@@ -1254,9 +1261,23 @@ export class MakerScheduleRunner implements ScheduleRunner {
         // 的 4.4.1/4.4.2 语义,不让"任务改了模型且每轮都撞忙"的用户被静默忽略
         // (PR #972 review P2)。凭证形态需要切换的场景无法热切,跳过并留日志。
         if (live) {
-          await this.applyQueuedHeartbeatRouting(schedule, live, routingBaseline).catch((err) => {
+          try {
+            await this.applyQueuedHeartbeatRouting(schedule, live, routingBaseline);
+          } catch (err) {
+            if (err instanceof QueuedRouteDisabledError) {
+              // 停用轴准入拒绝(PR #744 review 第六轮):这次排队心跳是新的付费调用,
+              // 目标路由已被停用时不能"保持 live 路由继续派发"。此刻仍在 vendor
+              // dispatch 之前 —— 中断刚 accept 的 turn(同 late-dispatch abort 路径),
+              // run 以明确错误失败收口(不含 abort 字样 ⇒ 引擎按 failed 记录)。
+              void live.abort().catch((abortErr) => {
+                this.deps.logger.warn?.('[runner] route-disabled turn abort failed', abortErr);
+              });
+              failAfterAccept(err);
+              failDispatch(err);
+              return;
+            }
             this.deps.logger.warn?.('[runner] queued heartbeat routing sync failed (non-fatal)', err);
-          });
+          }
         }
         if (live) waiterSlot.current = this.createTurnCompletionWaiter(live);
         // 与直发路径 onAccepted 的簿记对齐(落库/基线钩子除外,见方法头注释)。
@@ -1396,13 +1417,14 @@ export class MakerScheduleRunner implements ScheduleRunner {
       explicitModel ?? (baseline.model?.trim() ? baseline.model : defaultModelFor(schedule.agentKind));
     const explicitProviderId = schedule.providerId?.trim() ? schedule.providerId.trim() : null;
     const currentProviderId = getSessionProvider(live.id) ?? baseline.providerId;
-    // 停用轴准入(PR #744 review 第五轮):排队分支在 fire 主路径的准入点之前早退,
-    // 必须**无条件**按「将要应用的路由」= (targetModel, explicitProviderId) 裁决 ——
-    // 不能只在改模型时查、更不能把显式来源丢成 null 去查隐式默认:schedule 保持
-    // 当前模型但指定了已停用来源时,旧写法会完全跳过校验、下面照样把停用来源
-    // setSessionProvider 进会话。reject ⇒ 本轮完全保持 live 现有路由(模型/来源都
-    // 不动,不打断在跑会话),warn 留痕;隐式默认被停用且有启用替代 ⇒ 显式落替代。
-    let routeRejected = false;
+    // 停用轴准入(PR #744 review 第五、六轮):排队分支在 fire 主路径的准入点之前
+    // 早退,必须**无条件**按「将要应用的路由」= (targetModel, explicitProviderId)
+    // 裁决 —— 不能只在改模型时查、更不能把显式来源丢成 null 去查隐式默认:schedule
+    // 保持当前模型但指定了已停用来源时会完全跳过校验。reject ⇒ 抛
+    // QueuedRouteDisabledError,由排队派发的 onAccepted 在 **vendor dispatch 之前**
+    // 中断本 turn 并把 run 按失败收口(与 fire 主路径同语义,run 历史可见)——
+    // 「保持 live 路由继续派发」不行:这次排队心跳本身就是一次新的付费调用,目标
+    // 路由(常等于 live 当前路由)已被停用时照发等于继续经停用路由扣费。
     let applyProviderId = explicitProviderId;
     if (this.deps.checkModelRoute) {
       const verdict = await this.deps.checkModelRoute(
@@ -1411,19 +1433,15 @@ export class MakerScheduleRunner implements ScheduleRunner {
         explicitProviderId,
       );
       if (verdict.kind === 'reject') {
-        routeRejected = true;
-        applyProviderId = null;
-        this.deps.logger.warn?.(
-          '[runner] queued heartbeat route disabled in settings; keeping live routing',
-          { scheduleId: schedule.id, targetModel, explicitProviderId, reason: verdict.reason },
+        throw new QueuedRouteDisabledError(
+          `schedule route unavailable: model "${targetModel}" is disabled in settings (${verdict.reason})`,
         );
-      } else if (verdict.kind === 'reroute' && !explicitProviderId) {
+      }
+      if (verdict.kind === 'reroute' && !explicitProviderId) {
         applyProviderId = verdict.providerId;
       }
     }
-    const nextProviderId = routeRejected
-      ? currentProviderId
-      : (applyProviderId ?? currentProviderId);
+    const nextProviderId = applyProviderId ?? currentProviderId;
     if (
       shouldCloseSessionForCredentialSwitch({
         agentKind: live.agentKind,
@@ -1431,7 +1449,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
         currentProviderId,
         nextProviderId,
         currentModel: live.model,
-        nextModel: routeRejected ? live.model : targetModel,
+        nextModel: targetModel,
         currentCodexProxyActive: live.codexProxyActive,
       })
     ) {
@@ -1445,7 +1463,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // 等待期间用户可能在聊天里切了模型,schedule 显式选择必须仍以派发时刻的
     // 真实运行值为基准判断是否需要覆盖(review P2)。effort 无 live getter,
     // 仍以 baseline 判断(setEffort 幂等,误判多调一次无害)。
-    const modelChanged = !routeRejected && explicitModel !== undefined && targetModel !== live.model;
+    const modelChanged = explicitModel !== undefined && targetModel !== live.model;
     let modelApplied = true;
     if (modelChanged) {
       try {
@@ -1491,7 +1509,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
       }
     }
     // applyProviderId = 裁决后的落地来源:显式来源(通过裁决)或隐式默认被停用时的
-    // 替代来源;reject 时恒为 null(保持 live 现有来源)。
+    // 替代来源(reject 已在上方抛错中止,走不到这里)。
     if (applyProviderId) {
       setSessionProvider(live.id, applyProviderId);
     }

@@ -44,6 +44,7 @@ export async function resolveLenientSessionRoute(
   agent: AgentKind,
   model: string | undefined,
   providerId: string | null,
+  opts: { fallbackModel?: string } = {},
 ): Promise<{ model?: string; providerId: string | null; degraded: boolean }> {
   let views: ProviderView[];
   try {
@@ -51,7 +52,7 @@ export async function resolveLenientSessionRoute(
   } catch {
     return { model, providerId, degraded: false };
   }
-  return resolveLenientRoute(views, agent, model, providerId);
+  return resolveLenientRoute(views, agent, model, providerId, opts);
 }
 
 /**

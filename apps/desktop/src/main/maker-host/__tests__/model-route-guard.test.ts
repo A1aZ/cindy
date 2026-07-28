@@ -15,11 +15,15 @@ function model(id: string, extra: Partial<CatalogModel> = {}): CatalogModel {
   return { id, name: id, contextWindow: 200_000, efforts: [], defaultEffort: null, ...extra };
 }
 
-function provider(id: string, models: CatalogModel[]): Provider {
+function provider(
+  id: string,
+  models: CatalogModel[],
+  source: Provider['source'] = 'builtin',
+): Provider {
   return {
     id,
     name: id,
-    source: 'builtin',
+    source,
     agents: ['claude-code'],
     auth: { method: 'apiKey' },
     routing: { 'claude-code': { wireProtocol: 'anthropic-messages', authStrategy: 'api_key' } as never },
@@ -109,6 +113,46 @@ describe('checkModelRoute', () => {
     });
   });
 
+  it('能力模型分类按将要路由的拷贝判:未连接来源的对话拷贝不构成豁免', () => {
+    // 同 id 在 xd 是图像模型、在用户自定义 mycorp 是对话模型,但 mycorp 未连接:
+    // 实际路由永远不会落到未连接拷贝,隐式与点名 xd 都必须拒(PR #744 review 第六轮)。
+    const catalog = {
+      providers: [
+        provider('xd', [model('gpt-image-2', { group: 'image' })]),
+        provider('mycorp', [model('gpt-image-2', { group: 'custom:mycorp' })], 'user'),
+      ],
+    } as Catalog;
+    const v = buildRegistry(catalog, { xd: true, mycorp: false }, {});
+    expect(checkModelRoute(v, 'claude-code', 'gpt-image-2', null)).toEqual({
+      kind: 'reject',
+      reason: 'capability-model',
+    });
+    expect(checkModelRoute(v, 'claude-code', 'gpt-image-2', 'xd')).toEqual({
+      kind: 'reject',
+      reason: 'capability-model',
+    });
+  });
+
+  it('混源同 id 双连接:分类按选中来源 —— 显式选用户家对话拷贝放行,XD 家能力拷贝与隐式默认都拒', () => {
+    const catalog = {
+      providers: [
+        provider('xd', [model('gpt-image-2', { group: 'image' })]),
+        provider('mycorp', [model('gpt-image-2', { group: 'custom:mycorp' })], 'user'),
+      ],
+    } as Catalog;
+    const v = buildRegistry(catalog, { xd: true, mycorp: true }, {});
+    expect(checkModelRoute(v, 'claude-code', 'gpt-image-2', 'mycorp')).toEqual({ kind: 'pass' });
+    expect(checkModelRoute(v, 'claude-code', 'gpt-image-2', 'xd')).toEqual({
+      kind: 'reject',
+      reason: 'capability-model',
+    });
+    // 隐式:原生默认落点是 xd(能力拷贝)—— provider-route 不看分类,必须在边界拒。
+    expect(checkModelRoute(v, 'claude-code', 'gpt-image-2', null)).toEqual({
+      kind: 'reject',
+      reason: 'capability-model',
+    });
+  });
+
   it('供应商级停用与模型级同语义:点名 suspended 来源 reject;默认落点 suspended 且无替代 ⇒ reject', () => {
     expect(
       checkModelRoute(views({ disabledProviders: { xd: true } }), 'claude-code', 'claude-opus-5', 'xd'),
@@ -184,5 +228,46 @@ describe('resolveLenientRoute(自动化直建会话的宽松降级)', () => {
       providerId: 'xd',
       degraded: false,
     });
+  });
+
+  it('④ 换模型:入口默认兜底同走裁决;默认也死时退到目录第一份启用对话模型;全停 ⇒ undefined', () => {
+    // xd 只有 opus;anthropic 有 opus + haiku。
+    const catalog = {
+      providers: [
+        provider('xd', [model('claude-opus-5')]),
+        provider('anthropic', [model('claude-opus-5'), model('claude-haiku-4-5')]),
+      ],
+    } as Catalog;
+    const mk = (access?: Parameters<typeof buildRegistry>[3]) =>
+      buildRegistry(catalog, { xd: true, anthropic: true }, {}, access);
+    const opusDead = { disabledModels: { 'xd:claude-opus-5': true, 'anthropic:claude-opus-5': true } };
+
+    // 入口默认(haiku)启用 ⇒ 兜底走它(经裁决,隐式路由可用则不强制显式来源)。
+    expect(
+      resolveLenientRoute(mk(opusDead), 'claude-code', 'claude-opus-5', null, {
+        fallbackModel: 'claude-haiku-4-5',
+      }),
+    ).toEqual({ model: 'claude-haiku-4-5', providerId: null, degraded: true });
+
+    // 不带入口默认 ⇒ 直接退到目录第一份启用对话模型(显式带上来源,防同 id 隐式
+    // 默认又落回停用拷贝)。
+    expect(
+      resolveLenientRoute(mk(opusDead), 'claude-code', 'claude-opus-5', null),
+    ).toEqual({ model: 'claude-haiku-4-5', providerId: 'anthropic', degraded: true });
+
+    // 入口默认自己也被停用、目录再无启用对话模型 ⇒ model undefined(调用方失败收口),
+    // 绝不把未经裁决的模型漏回去(PR #744 review 第六轮)。
+    const allDead = {
+      disabledModels: {
+        'xd:claude-opus-5': true,
+        'anthropic:claude-opus-5': true,
+        'anthropic:claude-haiku-4-5': true,
+      },
+    };
+    expect(
+      resolveLenientRoute(mk(allDead), 'claude-code', 'claude-opus-5', 'xd', {
+        fallbackModel: 'claude-haiku-4-5',
+      }),
+    ).toEqual({ model: undefined, providerId: null, degraded: true });
   });
 });

@@ -21,6 +21,7 @@
  */
 
 import {
+  connectedProvidersForAgent,
   effectiveSourceIdForModel,
   getModel,
   isAgentSelectableModel,
@@ -44,6 +45,12 @@ function copyDisabled(p: ProviderView, modelId: string, agent: AgentKind): boole
   return p.suspended === true || getModel(p, modelId, agent)?.disabled === true;
 }
 
+/** 该来源下这份 (model, agent) 拷贝是否是 agent 可选的对话模型条目。 */
+function copyAgentSelectable(p: ProviderView, modelId: string, agent: AgentKind): boolean {
+  const copy = getModel(p, modelId, agent);
+  return !!copy && isAgentSelectableModel(copy, { userProvider: p.source === 'user' });
+}
+
 export function checkModelRoute(
   views: readonly ProviderView[],
   agent: AgentKind,
@@ -55,49 +62,86 @@ export function checkModelRoute(
   );
   if (offering.length === 0) return { kind: 'pass' };
 
-  // 能力模型(图像/音频/视频/向量)不能当 agent 对话模型:目录里没有任何一份拷贝是
-  // agent 可选条目时直接拒绝 —— 选择器已硬排除,但 create/set-model/switch 这些
-  // allowlisted 通道可被老控制端直接点名,maker 侧的 availableModels 派生也不做
-  // 该分类,必须在同一边界拦(PR #744 review 第四轮)。
-  const anyAgentSelectable = offering.some((p) => {
-    const copy = getModel(p, modelId, agent);
-    return !!copy && isAgentSelectableModel(copy, { userProvider: p.source === 'user' });
-  });
-  if (!anyAgentSelectable) return { kind: 'reject', reason: 'capability-model' };
+  // 能力模型(图像/音频/视频/向量)不能当 agent 对话模型 —— 选择器已硬排除,但
+  // create/set-model/switch 这些 allowlisted 通道可被老控制端直接点名,必须在同一
+  // 边界拦。分类按**将要路由到的那份拷贝**判,不是「任一供应商的拷贝可选即放行」:
+  // 同 id 在 A 家是能力模型、在用户自定义 B 家是对话模型时,点名 A / 隐式落 A 都
+  // 必须拒,只有显式选 B 才放行;未连接来源的拷贝也不构成豁免(实际路由永远不会
+  // 落到它,PR #744 review 第五、六轮)。
 
   if (providerId) {
     const explicit = offering.find((p) => p.id === providerId);
-    if (explicit && copyDisabled(explicit, modelId, agent)) {
-      return { kind: 'reject', reason: 'explicit-source-disabled' };
+    if (explicit) {
+      if (!copyAgentSelectable(explicit, modelId, agent)) {
+        return { kind: 'reject', reason: 'capability-model' };
+      }
+      if (copyDisabled(explicit, modelId, agent)) {
+        return { kind: 'reject', reason: 'explicit-source-disabled' };
+      }
     }
     // 显式来源未被停用(或不提供该模型 —— 交给既有收窄 / preflight):放行。
     return { kind: 'pass' };
   }
 
   // 隐式来源:推演「不考虑停用时会路由到谁」(原生默认口径,与 provider-route 的
-  // 实际落点一致),只有那份拷贝被停用才需要介入 —— 否则照常放行,不改变既有路由。
+  // 实际落点一致;rail 只含已连接来源,零已连接 ⇒ pass 交给既有错误路径)。
   const preDisableRail = [...sourcesForModel([...views], modelId, agent, { includeDisabled: true })];
   const wouldRouteId = nativeDefaultSourceId(preDisableRail, agent);
   if (!wouldRouteId) return { kind: 'pass' };
   const wouldRoute = preDisableRail.find((p) => p.id === wouldRouteId);
-  if (!wouldRoute || !copyDisabled(wouldRoute, modelId, agent)) return { kind: 'pass' };
+  if (!wouldRoute) return { kind: 'pass' };
+  if (!copyAgentSelectable(wouldRoute, modelId, agent)) {
+    return { kind: 'reject', reason: 'capability-model' };
+  }
+  if (!copyDisabled(wouldRoute, modelId, agent)) return { kind: 'pass' };
 
   // 原生默认落点被停用:解析一份启用且已连接的替代拷贝(effectiveSourceIdForModel
-  // 走过滤后的 rail),有 ⇒ 显式改路由;无 ⇒ 该模型在停用语义下不可用。
+  // 走过滤后的 rail),且那份拷贝也必须是对话模型条目,有 ⇒ 显式改路由;
+  // 无 ⇒ 该模型在停用语义下不可用。
   const alternative = effectiveSourceIdForModel([...views], null, modelId, agent);
-  return alternative
+  const alternativeProvider = alternative ? views.find((p) => p.id === alternative) : undefined;
+  return alternative && alternativeProvider && copyAgentSelectable(alternativeProvider, modelId, agent)
     ? { kind: 'reroute', providerId: alternative }
     : { kind: 'reject', reason: 'model-disabled' };
 }
 
 /**
+ * 目录里第一份「已连接、启用、agent 可选」的对话模型拷贝(宽松降级的最终兜底)。
+ * 顺序:原生默认来源优先,其余按 rail 序;来源与模型一起返回(显式 providerId,
+ * 免得同 id 的隐式默认落点又是一份停用/能力拷贝)。零候选 ⇒ null。
+ */
+function pickEnabledFallbackModel(
+  views: readonly ProviderView[],
+  agent: AgentKind,
+): { model: string; providerId: string } | null {
+  const rail = connectedProvidersForAgent([...views], agent);
+  const defaultId = nativeDefaultSourceId(rail, agent);
+  const ordered = defaultId
+    ? [...rail.filter((p) => p.id === defaultId), ...rail.filter((p) => p.id !== defaultId)]
+    : rail;
+  for (const p of ordered) {
+    const m = (p.models[agent] ?? []).find(
+      (candidate) =>
+        candidate.disabled !== true &&
+        isAgentSelectableModel(candidate, { userProvider: p.source === 'user' }),
+    );
+    if (m) return { model: m.id, providerId: p.id };
+  }
+  return null;
+}
+
+/**
  * 「宽松降级」口径的路由解析(纯逻辑),给 main 侧自动化直建会话用(IM control:new /
  * learn 蒸馏):这些入口不是用户即时交互,reject 不该让整个流程失败,而是逐级退让
- * (PR #744 review 第五轮):
+ * (PR #744 review 第五、六轮):
  *   ① 原样可用 ⇒ 原样;
  *   ② 隐式默认落点被停用但有启用替代 ⇒ 显式落替代来源;
  *   ③ 显式来源被停用但模型本身仍可路由 ⇒ 丢弃来源保模型(隐式默认 / 替代);
- *   ④ 模型所有拷贝被停用 / 能力模型 ⇒ 连模型一起丢弃(交回 agent 默认路由)。
+ *   ④ 模型所有拷贝被停用 / 能力模型 ⇒ 换模型:先试调用方入口默认
+ *     (`opts.fallbackModel`,同走本阶梯 —— 兜底模型自己也可能被停用,不能裸用),
+ *     再退到目录第一份启用可路由的对话模型(pickEnabledFallbackModel);
+ *   ⑤ 目录里一个启用的对话模型都没有 ⇒ `model: undefined`,由调用方失败收口
+ *     (**不得**再用任何未经裁决的模型直接创建会话)。
  * `degraded` = 有任何用户保存值被丢弃(调用方据此 warn 留痕)。
  */
 export function resolveLenientRoute(
@@ -105,6 +149,7 @@ export function resolveLenientRoute(
   agent: AgentKind,
   model: string | undefined,
   providerId: string | null,
+  opts: { fallbackModel?: string } = {},
 ): { model?: string; providerId: string | null; degraded: boolean } {
   if (!model) return { model, providerId, degraded: false };
   let verdict = checkModelRoute(views, agent, model, providerId);
@@ -117,5 +162,14 @@ export function resolveLenientRoute(
       return { model, providerId: verdict.providerId, degraded: true };
     }
   }
-  return { model: undefined, providerId: null, degraded: true };
+  if (opts.fallbackModel && opts.fallbackModel !== model) {
+    const fallback = resolveLenientRoute(views, agent, opts.fallbackModel, null);
+    if (fallback.model) {
+      return { model: fallback.model, providerId: fallback.providerId, degraded: true };
+    }
+  }
+  const pick = pickEnabledFallbackModel(views, agent);
+  return pick
+    ? { model: pick.model, providerId: pick.providerId, degraded: true }
+    : { model: undefined, providerId: null, degraded: true };
 }

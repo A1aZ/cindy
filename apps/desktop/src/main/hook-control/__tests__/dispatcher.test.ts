@@ -531,36 +531,6 @@ describe('dispatcher 核心语义', () => {
     await tick();
   });
 
-  it('复用与接管都带上已校验目录, 供 runner 在读权威 meta 后收口比对', async () => {
-    const bindings = memoryBindings();
-    const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
-    const fr = fakeRunner({ sessions });
-    const { d } = makeDispatcher({ runner: fr.runner, bindings });
-    const c = collector();
-
-    d.handleDispatch('conn-1', dispatch(), c.send);
-    await tick();
-    const first = c.last('task.ack')!.payload.sessionId!;
-    // 新建路径不比对(还没有权威 meta 可言)
-    expect(fr.calls[0].expectedWorkingDir ?? null).toBeNull();
-    sessions[first] = { workingDir: WS_DIR, usable: true };
-    fr.finish();
-    await tick();
-
-    d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
-    await tick();
-    expect(fr.calls[1]).toMatchObject({ sessionId: first, expectedWorkingDir: WS_DIR });
-    fr.finish();
-    await tick();
-
-    // 接管路径同理
-    sessions['taken'] = { workingDir: WS_DIR, usable: true };
-    d.handleDispatch('conn-1', dispatch({ requestId: 'req-3', sessionId: 'taken' }), c.send);
-    await tick();
-    expect(fr.calls[2]).toMatchObject({ sessionId: 'taken', expectedWorkingDir: WS_DIR });
-    fr.finish();
-  });
-
   it('排队期间映射被撤权: drain 时不执行, 回一条说明而不是在已撤权目录里跑', async () => {
     const bindings = memoryBindings();
     const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
@@ -670,24 +640,6 @@ describe('dispatcher 核心语义', () => {
     expect(fr.calls).toHaveLength(0);
     // worktree 已经建出来了却没有会话认领 —— 必须就地回收
     expect(cleanup).toHaveBeenCalledTimes(1);
-  });
-
-  it('进 runner 后失去授权: isStillAuthorized 在 send 前把它拦下', async () => {
-    const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
-    const fr = fakeRunner({ sessions });
-    const config: HookConnectionConfig = { ...CONFIG, workspaces: { xdmaker: WS_DIR } };
-    const { d } = makeDispatcher({ runner: fr.runner, config });
-    const c = collector();
-
-    d.handleDispatch('conn-1', dispatch(), c.send);
-    await tick();
-    const req = fr.calls[0];
-    expect(req.isStillAuthorized?.()).toBe(true);
-
-    // runner 内部还在做准备工作时映射被撤
-    config.workspaces = {};
-    expect(req.isStillAuthorized?.()).toBe(false);
-    fr.finish();
   });
 
   it('inspect 期间目录被加回映射: 按当前映射判定, 不误杀这条绑定', async () => {
@@ -1574,6 +1526,37 @@ describe('session.archive(/new 换代归档旧代会话)', () => {
     await tick();
     expect(archived).toEqual([sessionId]);
     expect(bindings.get('conn-1', 'slack:dm:U1:g1')).toBeNull();
+  });
+
+  it('turn 还在跑但已落库时被移出映射: /new 也不归档(不走 awaitingPersist 捷径)', async () => {
+    const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
+    const fr = fakeRunner({ sessions });
+    const bindings = memoryBindings();
+    const archived: string[] = [];
+    const d = createHookDispatcher({
+      getConnection: () => CONFIG,
+      bindings,
+      runner: fr.runner,
+      archiveSessionRow: async (sessionId) => void archived.push(sessionId),
+      log: noopLog,
+    });
+    const c = collector();
+    d.handleDispatch(
+      'conn-1',
+      dispatch({ requestId: 'r1', externalKey: 'slack:dm:U1:g1' }),
+      c.send,
+    );
+    await tick();
+    const sessionId = c.last('task.ack')!.payload.sessionId as string;
+    // 关键: turn 没收口, 所以 awaitingPersist 里还留着它 —— 但它已经落库, 且
+    // 已被移出映射。捷径必须只在"真查不到"时才用。
+    sessions[sessionId] = { workingDir: path.resolve('/repos/elsewhere'), usable: true };
+
+    d.handleSessionArchive('conn-1', 'slack:dm:U1:g1');
+    await tick();
+    expect(archived).toEqual([]);
+    expect(bindings.get('conn-1', 'slack:dm:U1:g1')).toBeNull();
+    fr.finish();
   });
 
   it('会话已被移出映射: /new 只清绑定, 不归档那个本地会话', async () => {

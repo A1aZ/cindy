@@ -93,14 +93,6 @@ export interface HookRunRequest {
    * 来源偏好(workspaceProviderSourceStore)。缺省 = 老 server 未带 workspace。
    */
   workspaceAlias?: string;
-  /**
-   * 复用/接管路径下 dispatcher 校验通过的那个目录。runner 以 session meta 的
-   * workDir 为执行权威(会覆盖上面的 workingDir), 而 dispatcher 的校验发生在
-   * 读 meta 之前 —— 中间这段里会话被移走的话, 校验过的目录和真正执行的目录就
-   * 不是同一个了。runner 读到权威 workDir 后必须比对它, 不一致即拒绝执行
-   * (PR #733 review 指出)。null / 省略 = 不比对(新建路径)。
-   */
-  expectedWorkingDir?: string | null;
   title: string | null;
   prompt: string;
   /** 本次派发携带的入站附件(base64); 无则省略。runner 解码落盘后喂给 agent。 */
@@ -130,14 +122,6 @@ export interface HookRunRequest {
   }) => void;
   /** 交互已在本端收口(超时默认 / turn 结束), 通知 server 改写卡片。 */
   onInteractionCancel?: (interactionId: string, reason: string) => void;
-  /**
-   * "这个任务此刻还被授权吗"—— dispatcher 注入的实时判定(工作目录仍在映射内且
-   * 连接仍启用)。runner 必须在**真正把消息交给 agent 之前的最后一个同步点**再
-   * 问一次: dispatcher 那道校验之后, runner 还要 await 一串准备工作, 这段窗口
-   * 里用户完全可能改掉映射或停用连接(PR #733 review 指出)。
-   * 省略 = 不再校验(测试与旧调用方)。
-   */
-  isStillAuthorized?: () => boolean;
 }
 
 export interface HookRunOutcome {
@@ -521,12 +505,11 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
      * 隔着排队与若干 await(新建路径还要等 worktree 预建 / 对话目录分配), 映射
      * 随时可能被改/删; 这是"每条消息按映射现场重算"在执行侧的收口。
      *
-     * 新建路径没有 expectedWorkingDir(它是给 runner 比对 session meta 用的,
-     * 新会话还没有 meta), 回退到 workingDir —— 那就是这次要跑的目录。少了这个
-     * 回退, 新建路径整条绕过执行侧收口(PR #733 review 指出)。用 `||` 而非 `??`:
-     * workingDir 可能是空串占位, 空串过 isPathWithin 会 resolve 成 cwd。
+     * workingDir 就是这一轮要跑的目录(复用/接管路径是 dispatcher 刚校验过的
+     * 那个, 新建路径是刚算出来的 runDir)。用 `||` 而非 `??`: 它可能是空串占位,
+     * 而空串过 isPathWithin 会 resolve 成 cwd, 那就成了一条假放行。
      */
-    const guardDir = task.run.expectedWorkingDir || task.run.workingDir || null;
+    const guardDir = task.run.workingDir || null;
     if (guardDir !== null && !dirStillAllowed(task.connectionId, guardDir)) {
       // 路径不进日志(规则: 用集中 PII helper, 而 dispatcher 是不碰 Electron 的
       // 纯逻辑模块, 拿不到它)—— requestId 足够定位。
@@ -539,7 +522,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
         status: 'error',
         finalText: '',
         errorMessage:
-          '这个对话所在的目录已不在工作目录映射里，本条消息没有执行。把它加回 设置 → 远程连接 → 工作目录映射 后再发一次。',
+          '这个对话所在的目录已不在工作目录映射里，本条消息没有执行。把它所在的目录加进 设置 → 远程连接 → 工作目录映射 后再发一次。',
         durationMs: 0,
       };
     } else {
@@ -549,10 +532,6 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
           onProgress,
           onInteraction,
           onInteractionCancel,
-          // runner 内部还要 await 一串准备工作(provider 解析、建会话、写库、附件
-          // 落盘)才到真正的 send —— 这段里映射照样可能被撤。把判定本身传下去,
-          // 让它在最后那个同步点再问一次(PR #733 review 指出)。
-          isStillAuthorized: () => dirStillAllowed(task.connectionId, guardDir ?? ''),
         });
       } catch (err) {
         outcome = {
@@ -616,9 +595,9 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
    * 这个目录**此刻**还落在该连接的工作目录映射(或内置对话根)内吗。
    *
    * 每次真正开跑之前都要问一遍: 排队期间用户可能把映射改了或删了, 而队列
-   * drain 不再走 resolveTarget —— 那时会话目录和 expectedWorkingDir 都没变,
-   * runner 侧那道"目录有没有被移走"的比对根本看不见这次撤权, 排着的消息就会
-   * 在已撤权的目录里执行(PR #733 review 指出)。连接本身没了也按撤权处理。
+   * drain 不再走 resolveTarget, 而会话目录本身没变 —— 变的只是"映射还认不认
+   * 它", 所以必须在这里重新查一次当前映射, 否则排着的消息会在已撤权的目录里
+   * 执行(PR #733 review 指出)。连接本身没了或被停用, 同样按撤权处理。
    */
   function dirStillAllowed(connectionId: string, dir: string): boolean {
     const config = getConnection(connectionId);
@@ -700,8 +679,6 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
           sessionId: payload.sessionId,
           isNew: false,
           workingDir: info.workingDir as string,
-          // 同复用路径: 校验与执行之间会话仍可能被移走, 由 runner 兜住
-          expectedWorkingDir: info.workingDir as string,
           agentKind,
           model,
           effort,
@@ -750,8 +727,10 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
        * 会排进一个建在已撤权目录里的会话(PR #733 review 指出)。
        */
       const pendingDir = awaitingPersist.get(bound) ?? null;
+      // 同下方的 inAllowedRoot: 用当前映射而不是入口快照 —— inspect 期间用户可能
+      // 刚把这个目录加回来(PR #733 review 指出)。
       const pendingStillAllowed =
-        pendingDir !== null && (isChat ? inDialogueRoot(pendingDir) : inWhitelist(pendingDir));
+        pendingDir !== null && (isChat ? inDialogueRoot(pendingDir) : inWhitelistNow(pendingDir));
       /**
        * 关键竞态防护: 绑定的 session 是本 dispatcher 刚建、**尚未落库**的
        * (inspect 查不到)且正在跑/排队时直接复用 —— 否则同 key 的后续消息会各开
@@ -780,9 +759,6 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
             isNew: false,
             // 尚未落库, 没有 meta 可查 —— 用建它时那个刚重新过完映射校验的目录
             workingDir: pendingDir!,
-            // 落库后 runner 会拿 meta.workDir 覆盖上面这个值; 届时必须仍是同一
-            // 个目录, 否则这条消息就跑到校验过的目录之外去了
-            expectedWorkingDir: pendingDir!,
             agentKind,
             model,
             effort,
@@ -821,9 +797,6 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
             sessionId: bound,
             isNew: false,
             workingDir,
-            // 上面这次校验和 runner 读 meta 之间会话仍可能被移走 —— runner 拿到
-            // 权威 workDir 后必须确认还是这个目录
-            expectedWorkingDir: workingDir,
             agentKind,
             model,
             effort,
@@ -1123,15 +1096,18 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
          * (PR #733 review 指出)。
          */
         const stillOurs = async (sessionId: string): Promise<boolean> => {
-          // 本 dispatcher 刚建、还没落库的会话 inspect 查不到(见 awaitingPersist),
-          // 但它建在哪是记着的 —— 用那个目录判, 否则紧跟着新建到来的 `/new` 会
-          // 静默失效。
-          const pendingDir = awaitingPersist.get(sessionId);
-          if (pendingDir !== undefined) return dirStillAllowed(connectionId, pendingDir);
           const info = await runner.inspect(sessionId);
           if (!isCurrentGeneration(admittedGeneration)) return false;
+          // 查得到就以它为准。**只有**真的查不到(会话刚建、还没落库)才退回
+          // awaitingPersist 里记的那个目录 —— 该表在整轮 turn 结束前都留着, 拿它
+          // 当捷径会让"已落库、随后被移出映射"的会话绕过这道闸
+          // (PR #733 review 指出)。
+          if (info === null) {
+            const pendingDir = awaitingPersist.get(sessionId);
+            return pendingDir !== undefined && dirStillAllowed(connectionId, pendingDir);
+          }
           return (
-            info?.usable === true &&
+            info.usable === true &&
             info.workingDir !== null &&
             dirStillAllowed(connectionId, info.workingDir)
           );

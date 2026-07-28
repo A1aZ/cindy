@@ -82,7 +82,6 @@ vi.mock('../../device-link/broadcast-tap.js', () => ({
 vi.mock('../../maker-ipc/register.js', () => ({
   wireSessionToIpc: vi.fn(),
   isSessionInTurn: () => false,
-  withSendToSessionLock: (id: string, task: () => Promise<unknown>) => lockMock.impl(id, task),
   installDesktopInteractionListener: h.installDesktopInteractionListener,
   noteSilentStopUserSend: vi.fn(),
   onSilentStopSettled: vi.fn(() => () => {}),
@@ -112,10 +111,6 @@ vi.mock('../../maker-ipc/agentHandoffPendingSingleton.js', () => ({
 }));
 vi.mock('../../imageCacheStore.js', () => ({
   resolveSafe: vi.fn(),
-}));
-/** per-session 发送锁: 默认直通, 需要观察加锁范围的用例可改写 impl。 */
-const lockMock = vi.hoisted(() => ({
-  impl: async (_id: string, task: () => Promise<unknown>) => task(),
 }));
 // cindy-media:入站图片写入媒体总仓,mock 记调用。
 const cindyMock = vi.hoisted(() => ({
@@ -173,8 +168,6 @@ vi.mock('../defaults.js', async (importOriginal) => {
 function makeFakeSession(id: string) {
   return {
     id,
-    // 真实 Session 有这个只读字段; runner 用它确认"真正要跑的这个会话"仍在
-    // dispatcher 校验过的目录里(createSession 对活会话短路时不认传入的 workDir)
     workDir: 'D:/repo',
     onEvent(cb: (ev: { type: string; data: unknown }) => void) {
       h.eventCbs.set(id, cb);
@@ -205,7 +198,6 @@ const fakeMaker = {
     permissionMode: undefined as 'ask' | 'bypassPermissions' | undefined,
   })),
   getSession: vi.fn(),
-  closeSession: vi.fn(async (_id: string) => undefined),
   getCapabilities: vi.fn(() => ({ availableModels: [], permissionModes: [] })),
 };
 
@@ -285,7 +277,6 @@ beforeEach(() => {
   h.resolvedConfig.permissionMode = 'bypassPermissions';
   h.resolvedConfig.providerId = null;
   h.peekPendingHandoff.mockResolvedValue(null);
-  lockMock.impl = async (_id, task) => task();
 });
 
 describe('hook session 精确接管边界', () => {
@@ -316,105 +307,6 @@ describe('hook session 精确接管边界', () => {
 
     await expect(runner.inspect('remote-session')).resolves.toMatchObject({ usable: false });
     await expect(runner.inspect('worker-session')).resolves.toMatchObject({ usable: false });
-  });
-});
-
-describe('执行前按权威 meta 收口校验工作目录', () => {
-  it('meta.workDir 与 dispatcher 校验过的目录不符 -> 拒绝执行, 不建会话', async () => {
-    const runner = createMakerHookSessionRunner({ log });
-    // dispatcher 是拿 inspect 的结果过的映射; 到这里 meta 已经指向别处
-    const outcome = await runner.run(
-      baseReq({ sessionId: 'sess-old', isNew: false, expectedWorkingDir: 'D:/somewhere-else' }),
-    );
-
-    expect(outcome.status).toBe('error');
-    expect(outcome.errorMessage).toContain('刚被移动到别的目录');
-    expect(fakeMaker.createSession).not.toHaveBeenCalled();
-  });
-
-  it('createSession 短路返回的活会话跑在别处 -> 关掉重建到校验过的目录再跑', async () => {
-    // maker.createSession 对已在 activeSessions 里的 id 直接返回既有实例, 忽略
-    // 传入的 workingDir —— 那个实例的 workDir 还指着移动前的目录
-    fakeMaker.createSession.mockImplementationOnce(async (opts: { id?: string }) => ({
-      ...makeFakeSession(opts.id ?? 'sess-old'),
-      workDir: 'D:/the-old-place',
-    }));
-    const runner = createMakerHookSessionRunner({ log });
-
-    const outcome = await runner.run(
-      baseReq({ sessionId: 'sess-old', isNew: false, expectedWorkingDir: 'D:/repo' }),
-    );
-
-    // 只报错的话, 映射内 A->B 的合法移动会被永久拒绝到 app 重启
-    expect(outcome.status).toBe('ok');
-    expect(fakeMaker.closeSession).toHaveBeenCalledWith('sess-old');
-    expect(fakeMaker.createSession).toHaveBeenCalledTimes(2);
-  });
-
-  it('重建全程拿 per-session 发送锁(不从正在打字的桌面会话底下抽走实例)', async () => {
-    const order: string[] = [];
-    lockMock.impl = async (id, task) => {
-      order.push(`lock:${id}`);
-      const r = await task();
-      order.push(`unlock:${id}`);
-      return r;
-    };
-    fakeMaker.createSession.mockImplementationOnce(async (opts: { id?: string }) => ({
-      ...makeFakeSession(opts.id ?? 'sess-old'),
-      workDir: 'D:/the-old-place',
-    }));
-    fakeMaker.closeSession.mockImplementationOnce(async (id: string) => {
-      order.push(`close:${id}`);
-    });
-    const runner = createMakerHookSessionRunner({ log });
-
-    const outcome = await runner.run(
-      baseReq({ sessionId: 'sess-old', isNew: false, expectedWorkingDir: 'D:/repo' }),
-    );
-
-    expect(outcome.status).toBe('ok');
-    // 关闭与重建都必须发生在锁内
-    expect(order).toEqual(['lock:sess-old', 'close:sess-old', 'unlock:sess-old']);
-  });
-
-  it('重建后仍拿到旧实例 -> 这一轮不跑(不在旧目录里执行)', async () => {
-    // 关闭后 activeSessions 清理还没落地的情形: 两次都拿到旧实例
-    const stale = async (opts: { id?: string }) => ({
-      ...makeFakeSession(opts.id ?? 'sess-old'),
-      workDir: 'D:/the-old-place',
-    });
-    fakeMaker.createSession.mockImplementationOnce(stale).mockImplementationOnce(stale);
-    const runner = createMakerHookSessionRunner({ log });
-
-    const outcome = await runner.run(
-      baseReq({ sessionId: 'sess-old', isNew: false, expectedWorkingDir: 'D:/repo' }),
-    );
-
-    expect(outcome.status).toBe('error');
-    expect(outcome.errorMessage).toContain('刚换了工作目录');
-  });
-
-  it('准备期间失去授权 -> send 之前拦下, 消息不进 agent', async () => {
-    const runner = createMakerHookSessionRunner({ log });
-
-    const outcome = await runner.run(baseReq({ isStillAuthorized: () => false }));
-
-    expect(outcome.status).toBe('error');
-    expect(outcome.errorMessage).toContain('已不在工作目录映射里');
-    const session = await fakeMaker.createSession.mock.results[0].value;
-    expect(session.send).not.toHaveBeenCalled();
-  });
-
-  it('目录一致 -> 照常执行; 新建路径不带该字段也不受影响', async () => {
-    const runner = createMakerHookSessionRunner({ log });
-
-    const reused = await runner.run(
-      baseReq({ sessionId: 'sess-old', isNew: false, expectedWorkingDir: 'D:/repo' }),
-    );
-    expect(reused.status).toBe('ok');
-
-    const created = await runner.run(baseReq({}));
-    expect(created.status).toBe('ok');
   });
 });
 

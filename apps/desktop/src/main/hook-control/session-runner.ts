@@ -48,12 +48,10 @@ import {
 } from '@cindy/model-providers';
 
 import { tapWindowBroadcast } from '../device-link/broadcast-tap.js';
-import { maskPath } from '../logger.js';
 import { getMaker } from '../maker-host/index.js';
 import {
   wireSessionToIpc,
   isSessionInTurn,
-  withSendToSessionLock,
   installDesktopInteractionListener,
   noteSilentStopUserSend,
   onSilentStopSettled,
@@ -92,7 +90,6 @@ import {
 import { beginHeadlessGhostSetupTurn } from '../mcp-integrations/ghostSetupInteractionSurface.js';
 
 import type { HookRunOutcome, HookSessionRunner } from './dispatcher.js';
-import { isSamePath } from './paths.js';
 import { resolveHookSessionConfig, type ResolvedHookSessionConfig } from './defaults.js';
 import { decodeAttachments, sanitizeAttachmentName } from './attachments.js';
 import {
@@ -412,25 +409,15 @@ export function createMakerHookSessionRunner(deps: {
       });
 
       /**
-       * 复用/接管路径的收口校验: dispatcher 是拿 inspect 的结果过的工作目录映射,
-       * 而真正决定在哪执行的是上面刚读到的 meta.workDir —— 两次读取之间会话仍可能
-       * 被移走(桌面端移动对话、或会话尚未落库时别名被改指), 那样这条消息就跑到
-       * 校验过的目录之外去了。在读权威 workDir 的同一处再确认一次, 不一致即拒绝
-       * (PR #733 review 指出)。
-       *
-       * 拒绝而不是改到新目录跑: 新目录有没有被授权, 只有 dispatcher 查得到映射
-       * 才能判断。下一条消息会重新走一遍完整判定, 该复用复用、该断开断开。
+       * 授权判定刻意**只在 dispatcher 侧**做(定位时 + 执行前按当前映射重查),
+       * runner 不再参与。曾经尝试过把判定贯穿到这里 —— 比对 meta.workDir、比对
+       * live session 的 workDir 并重建、在 send 前回调实时授权 —— 结果是每加一层
+       * 都要重新接入锁、代际、会话生命周期、附件与 worktree 清理这些横切关注点,
+       * 接不全就是新一轮缺陷(打断桌面会话、清掉在用的临时附件、listener 泄漏)。
+       * 那些缺陷比它要防的窗口更严重: 窗口内最多是一条在途消息在"校验它时还合法"
+       * 的目录里多跑一轮, 而 agent 的文件边界本就是 allowedFileRoots: [workingDir],
+       * 不会越到别处。这个取舍写在 PR #733 的风险段里。
        */
-      if (
-        req.expectedWorkingDir != null &&
-        workingDir !== null &&
-        !isSamePath(workingDir, req.expectedWorkingDir)
-      ) {
-        log.warn(
-          `hook run aborted: session ${req.sessionId} moved from ${maskPath(req.expectedWorkingDir)} to ${maskPath(workingDir)} between validation and execution`,
-        );
-        return fail('这个对话刚被移动到别的目录，本条消息没有执行；请重新发送。');
-      }
 
       // resolved 路径必有 model; 复用路径 meta 缺失时兜底草稿默认
       const effectiveModel = model?.trim()
@@ -491,55 +478,6 @@ export function createMakerHookSessionRunner(deps: {
           void WorktreeManager.removeWorktreeForSession(req.sessionId).catch(() => undefined);
         }
         return fail(err instanceof Error ? err.message : String(err));
-      }
-
-      /**
-       * 拿到的可能是**进程里早就活着的那个 session**: maker.createSession 对
-       * 已在 activeSessions 里的 id 直接返回既有实例, 完全忽略上面传的
-       * workingDir(maker.ts 的 active-session 短路)。那个实例的 workDir 与
-       * agent 句柄仍指着它创建时的目录, 而侧边栏"移动到项目"只改库里的行 ——
-       * 于是 meta 已是新目录、live 实例还在旧目录。真正执行的是 live 实例, 所以
-       * 对着它再确认一次(PR #733 review 指出)。
-       *
-       * 不一致时**重建而不是拒绝**: expectedWorkingDir 是 dispatcher 刚过完映射
-       * 校验的目录, 在那里重建既回到授权边界内, 也让"映射内换目录仍然无感跟随"
-       * 继续成立 —— 只报错的话, 映射内 A→B 的合法移动会被永久拒绝, 直到会话被
-       * 关闭或 app 重启(同一轮 review 指出)。
-       */
-      if (req.expectedWorkingDir != null && !isSamePath(session.workDir, req.expectedWorkingDir)) {
-        /**
-         * 整段替换必须拿这把 per-session 锁: 桌面端发送走的是同一把
-         * (withSendToSessionLock)。不加锁的话, "空闲"判定与 closeSession 之间用户
-         * 刚起的一个本地 turn 会被我们从底下关掉 —— 那是把远端的目录校验代价转嫁
-         * 给了正在打字的人(PR #733 review 指出)。空闲重检也放进锁里, 否则检查本身
-         * 就是过期信息。
-         */
-        const replacement = await withSendToSessionLock(req.sessionId, async () => {
-          // 正在跑 turn 的会话不能从底下抽走。这是暂态: 那一轮跑完后重发即可。
-          if (isSessionInTurn(req.sessionId)) return { busy: true as const };
-          log.info(
-            `recreating live session ${req.sessionId} at ${maskPath(req.expectedWorkingDir!)} (was ${maskPath(session.workDir)})`,
-          );
-          await maker.closeSession(req.sessionId);
-          return { busy: false as const, session: await maker.createSession(createOpts) };
-        }).catch((err: unknown) => ({ err: err instanceof Error ? err.message : String(err) }));
-
-        if ('err' in replacement) return fail(replacement.err);
-        if (replacement.busy) {
-          log.warn(
-            `hook run aborted: live session ${req.sessionId} still runs in ${maskPath(session.workDir)}, not the validated ${maskPath(req.expectedWorkingDir)}`,
-          );
-          return fail('这个对话正在别的目录里运行，本条消息没有执行；请稍后重发。');
-        }
-        session = replacement.session;
-        // 关闭后 activeSessions 的清理若还没落地, 重建仍可能拿到旧实例 ——
-        // 那就这一轮不跑, 让用户重发(下一次拿到的就是新实例), 而不是在旧目录里跑。
-        if (!isSamePath(session.workDir, req.expectedWorkingDir)) {
-          log.warn(
-            `hook run aborted: session ${req.sessionId} could not be recreated at ${maskPath(req.expectedWorkingDir)}`,
-          );
-          return fail('这个对话刚换了工作目录，本条消息没有执行；请重新发送。');
-        }
       }
 
       // 运行时来源注入(路由层经 session-provider-store 决定上游与钥匙):
@@ -959,19 +897,6 @@ export function createMakerHookSessionRunner(deps: {
 
       try {
         const pendingHandoff = await agentHandoffPending.peek(session.id);
-        /**
-         * 最后一道: 把消息交给 agent 之前的最后一个同步点。dispatcher 那道校验
-         * 之后, 上面这一大段准备工作(provider 解析、读 meta、建会话、写库、附件
-         * 落盘)全是 await —— 这段窗口里用户完全可能撤掉映射或停用连接, 那样这条
-         * 远端消息就会在已撤权的目录里真的跑起来(PR #733 review 指出)。
-         * 之后就没有窗口了: send 一返回, turn 已经在跑。
-         */
-        if (req.isStillAuthorized && !req.isStillAuthorized()) {
-          log.warn(`hook run aborted at send time: session ${req.sessionId} lost authorization`);
-          return fail(
-            '这个对话所在的目录已不在工作目录映射里，本条消息没有执行；恢复映射后请重新发送。',
-          );
-        }
         const outgoingMessage: UserMessage = pendingHandoff
           ? (prependHandoffToUserMessage(
               { type: 'user', content: sendContent },

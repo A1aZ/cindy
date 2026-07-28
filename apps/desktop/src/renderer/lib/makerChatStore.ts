@@ -3810,10 +3810,15 @@ function initGlobalListeners(): void {
       // ephemeral 卡片(同 permission 语义,无 persistId 不落库),直接写 state,
       // 不走 handleStreamEvent —— 它不属于 agent 事件流。
       const draft = request.draft as PendingIssueConfirm['draft'] | undefined;
-      const rawEnv = request.env as (PendingIssueConfirm['env'] & { region?: unknown }) | undefined;
+      // region 必须先 Omit 掉再重建成 unknown:交叉类型做不到这件事
+      // (`CindyRegion & unknown` 仍是 `CindyRegion`),那样写会让 TS 以为 IPC 传来的
+      // region 已经是合法值,下面的白名单校验看着像在校验、实际没有类型层面的约束。
+      const rawEnv = request.env as
+        | (Omit<PendingIssueConfirm['env'], 'region'> & { region?: unknown })
+        | undefined;
       const submissionIdentity = parseIssueSubmissionIdentity(request.submissionIdentity);
       if (!draft || !rawEnv || !submissionIdentity) return;
-      // region 过一遍白名单:非法值宁可不展示区域,也不能把中国版说成国际版。
+      // region 过一遍白名单:非法值宁可不展示区域,也不能把 CN 版说成默认版。
       const env = { ...rawEnv, region: parseIssueEnvRegion(rawEnv.region) };
       setState(sessionId, (s) => ({
         ...s,

@@ -28,9 +28,7 @@ export function PushNotificationsBridge() {
   /** 冷启动点通知时 auth 可能未就绪,先存下待路由的深链。 */
   const pendingDeepLinkRef = useRef<string | null>(null);
   const apiFetchRef = useRef(auth.apiFetch);
-  const getAccessTokenRef = useRef(auth.getAccessToken);
   apiFetchRef.current = auth.apiFetch;
-  getAccessTokenRef.current = auth.getAccessToken;
 
   useEffect(() => {
     if (!isPushSupported()) return;
@@ -43,9 +41,8 @@ export function PushNotificationsBridge() {
     if (!auth.initialized || !auth.isAuthenticated) return;
     let cancelled = false;
     void (async () => {
-      // 先补偿上次登出/终止时失败的注销,再按当前开关同步注册状态
-      const accessToken = await getAccessTokenRef.current().catch(() => null);
-      await retryPendingUnregister(accessToken).catch(() => undefined);
+      // 只用当前会话补偿当前区域的注销，再按本机开关同步注册状态。
+      await retryPendingUnregister(apiFetchRef.current).catch(() => undefined);
       if (cancelled) return;
       const enabled = await readPushEnabled();
       if (cancelled || !enabled) return;
@@ -54,7 +51,7 @@ export function PushNotificationsBridge() {
     return () => {
       cancelled = true;
     };
-  }, [auth.initialized, auth.isAuthenticated]);
+  }, [auth.initialized, auth.isAuthenticated, auth.user]);
 
   // APNs token 轮换 → 重新上报(仅开关开启且已登录时)
   useEffect(() => {

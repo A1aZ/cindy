@@ -444,11 +444,22 @@ describe("auth session realm record", () => {
     const raw = serializeAccountDeletionReceiptRecord(
       "global",
       "receipt-secret",
+      "passport-1",
     );
     expect(parseAccountDeletionReceiptRecord(raw)).toEqual({
-      version: 1,
+      version: 2,
       realm: "global",
       receiptToken: "receipt-secret",
+      authIdentity: "passport-1",
+    });
+    expect(
+      parseAccountDeletionReceiptRecord(
+        serializeAccountDeletionReceiptRecord("cn", "legacy-receipt"),
+      ),
+    ).toEqual({
+      version: 1,
+      realm: "cn",
+      receiptToken: "legacy-receipt",
     });
     expect(parseAccountDeletionReceiptRecord("legacy-receipt")).toBeNull();
   });

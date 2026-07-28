@@ -14,7 +14,7 @@ describe('desktop auth account-deletion lifecycle', () => {
     const end = source.indexOf('\n}\n\n/**\n * Confirm deletion', start);
     const body = source.slice(start, end);
 
-    expect(body).toContain('writePersistedAccountDeletionReceipt(challenge.receiptToken)');
+    expect(body).toContain('writePersistedAccountDeletionReceipt(');
     expect(body.indexOf('writePersistedAccountDeletionReceipt(')).toBeLessThan(
       body.indexOf('return {'),
     );
@@ -30,16 +30,41 @@ describe('desktop auth account-deletion lifecycle', () => {
     expect(body).toContain('const client = createAuthClient(receipt.realm);');
     expect(body).toContain('.getAccountDeletionStatus(receipt.receiptToken)');
     expect(body).toContain("recovered.status === 'cancelled'");
-    expect(body).toContain('commitAccountDeletionConfirmation(expectedIdentity, status)');
+    expect(body).toContain(
+      'commitAccountDeletionConfirmation(expectedIdentity, receipt.realm, status)',
+    );
     expect(body).not.toContain("apiFetch('/api/auth/logout'");
   });
 
-  it('queries a persisted deletion receipt against its original realm after logout', () => {
+  it('binds confirmation to the credential identity and realm that requested the challenge', () => {
     const helperStart = source.indexOf('function writePersistedAccountDeletionReceipt(');
     const helperEnd = source.indexOf('\n}\n\n// ── PKCE', helperStart);
     const helperBody = source.slice(helperStart, helperEnd);
-    expect(helperBody).toContain('serializeAccountDeletionReceiptRecord(realm, receiptToken)');
+    expect(helperBody).toContain(
+      'serializeAccountDeletionReceiptRecord(realm, receiptToken, authIdentity)',
+    );
 
+    const requestStart = source.indexOf('export async function requestAccountDeletionChallenge()');
+    const requestEnd = source.indexOf('\n}\n\n/**\n * Confirm deletion', requestStart);
+    const requestBody = source.slice(requestStart, requestEnd);
+    expect(requestBody).toContain('const expectedIdentity = currentAccountDeletionAuthIdentity();');
+    expect(requestBody).toContain('const expectedRealm = activeAuthRealm;');
+    expect(requestBody).toMatch(
+      /writePersistedAccountDeletionReceipt\(\s*challenge\.receiptToken,\s*expectedRealm,\s*expectedIdentity,?\s*\)/,
+    );
+
+    const confirmStart = source.indexOf('export async function confirmAccountDeletion(');
+    const confirmEnd = source.indexOf('\n}\n\n/** Query the persisted receipt', confirmStart);
+    const confirmBody = source.slice(confirmStart, confirmEnd);
+    expect(confirmBody).toContain('receipt.version !== 2');
+    expect(confirmBody).toContain('receipt.authIdentity !== expectedIdentity');
+    expect(confirmBody).toContain('receipt.realm !== activeAuthRealm');
+    expect(confirmBody.indexOf('receipt.authIdentity !== expectedIdentity')).toBeLessThan(
+      confirmBody.indexOf('client.confirmAccountDeletion(token'),
+    );
+  });
+
+  it('queries a persisted deletion receipt against its original realm after logout', () => {
     const statusStart = source.indexOf('export async function getAccountDeletionStatus()');
     const statusEnd = source.indexOf(
       '\n}\n\nexport function clearAccountDeletionReceipt',

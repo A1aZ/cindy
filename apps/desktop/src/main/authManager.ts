@@ -258,9 +258,12 @@ let loginActionPromise: Promise<DesktopLoginActionResult> | null = null;
 // main-only until the final resource-token login commits.
 let pendingAccountDeletionRestored = false;
 let accountDeletionRestoredNoticePending = false;
-// Set only after auth-server has accepted deletion. The identity guard keeps a
-// late confirmation from tearing down a different account selected meanwhile.
-let confirmedAccountDeletionAuthIdentity: string | null = null;
+// Set only after auth-server has accepted deletion. The credential guard keeps a
+// late confirmation from tearing down another account or realm selected meanwhile.
+let confirmedAccountDeletionCredential: {
+  identity: string;
+  realm: AuthRegion;
+} | null = null;
 
 function createAuthClient(
   realm: AuthRegion = pendingAuthRealm ?? activeAuthRealm,
@@ -373,11 +376,12 @@ function readPersistedAccountDeletionReceipt() {
 
 function writePersistedAccountDeletionReceipt(
   receiptToken: string,
-  realm = activeAuthRealm,
+  realm: AuthRegion,
+  authIdentity: string,
 ): boolean {
   return writeSafe(
     ACCOUNT_DELETION_RECEIPT_KEY,
-    serializeAccountDeletionReceiptRecord(realm, receiptToken),
+    serializeAccountDeletionReceiptRecord(realm, receiptToken, authIdentity),
   );
 }
 
@@ -1135,7 +1139,7 @@ function clearAuth(
   pendingAccountToken = null;
   currentUser = null;
   accountDeletionRestoredNoticePending = false;
-  confirmedAccountDeletionAuthIdentity = null;
+  confirmedAccountDeletionCredential = null;
   resetLoginFlowState();
   persistedRefreshTokenNeedsIdentityCheck = false;
   lastAcceptedRefreshToken = null;
@@ -1348,16 +1352,23 @@ function currentAccountDeletionAuthIdentity(): string | null {
 
 function commitAccountDeletionConfirmation(
   expectedIdentity: string,
+  expectedRealm: AuthRegion,
   status: AccountDeletionStatus,
 ): AccountDeletionStatus {
-  if (currentAccountDeletionAuthIdentity() !== expectedIdentity) {
+  if (
+    currentAccountDeletionAuthIdentity() !== expectedIdentity ||
+    activeAuthRealm !== expectedRealm
+  ) {
     throw new AuthApiError(
       'AUTH_FLOW_SUPERSEDED',
       409,
       'Account deletion was superseded by a newer auth action',
     );
   }
-  confirmedAccountDeletionAuthIdentity = expectedIdentity;
+  confirmedAccountDeletionCredential = {
+    identity: expectedIdentity,
+    realm: expectedRealm,
+  };
   return status;
 }
 
@@ -1389,12 +1400,29 @@ export function getAccountDeletionAvailability(): Promise<AccountDeletionAvailab
  * desktop's immediate local logout after confirmation.
  */
 export async function requestAccountDeletionChallenge(): Promise<DesktopAccountDeletionChallenge> {
-  confirmedAccountDeletionAuthIdentity = null;
+  confirmedAccountDeletionCredential = null;
   const token = requireAccountDeletionAccessToken();
+  const expectedIdentity = currentAccountDeletionAuthIdentity();
+  const expectedRealm = activeAuthRealm;
+  if (!expectedIdentity) {
+    throw new AuthApiError('UNAUTHENTICATED', 401, 'Account deletion requires an active login');
+  }
   const challenge = await runProtectedAuthRequest(() =>
-    createAuthClient().requestAccountDeletionChallenge(token),
+    createAuthClient(expectedRealm).requestAccountDeletionChallenge(token),
   );
-  if (!writePersistedAccountDeletionReceipt(challenge.receiptToken)) {
+  if (
+    currentAccountDeletionAuthIdentity() !== expectedIdentity ||
+    activeAuthRealm !== expectedRealm
+  ) {
+    throw new AuthApiError(
+      'AUTH_FLOW_SUPERSEDED',
+      409,
+      'Account deletion was superseded by a newer auth action',
+    );
+  }
+  if (
+    !writePersistedAccountDeletionReceipt(challenge.receiptToken, expectedRealm, expectedIdentity)
+  ) {
     throw new AuthApiError(
       'ACCOUNT_DELETION_RECEIPT_STORE_FAILED',
       0,
@@ -1422,9 +1450,21 @@ export async function confirmAccountDeletion(input: {
   if (!expectedIdentity) {
     throw new AuthApiError('UNAUTHENTICATED', 401, 'Account deletion requires an active login');
   }
-  confirmedAccountDeletionAuthIdentity = null;
+  confirmedAccountDeletionCredential = null;
   const receipt = readPersistedAccountDeletionReceipt();
   if (!receipt) {
+    throw new AuthApiError(
+      'ACCOUNT_DELETION_RECEIPT_MISSING',
+      400,
+      'Request a new account deletion challenge',
+    );
+  }
+  if (
+    receipt.version !== 2 ||
+    receipt.authIdentity !== expectedIdentity ||
+    receipt.realm !== activeAuthRealm
+  ) {
+    removeSafe(ACCOUNT_DELETION_RECEIPT_KEY);
     throw new AuthApiError(
       'ACCOUNT_DELETION_RECEIPT_MISSING',
       400,
@@ -1450,7 +1490,7 @@ export async function confirmAccountDeletion(input: {
     if (!recovered || recovered.status === 'cancelled') throw error;
     status = recovered;
   }
-  return commitAccountDeletionConfirmation(expectedIdentity, status);
+  return commitAccountDeletionConfirmation(expectedIdentity, receipt.realm, status);
 }
 
 /** Query the persisted receipt without requiring an authenticated session. */
@@ -1479,8 +1519,9 @@ export function consumeAccountDeletionRestoredNotice(): boolean {
  */
 export function isConfirmedAccountDeletionSessionCurrent(): boolean {
   return (
-    confirmedAccountDeletionAuthIdentity !== null &&
-    currentAccountDeletionAuthIdentity() === confirmedAccountDeletionAuthIdentity
+    confirmedAccountDeletionCredential !== null &&
+    currentAccountDeletionAuthIdentity() === confirmedAccountDeletionCredential.identity &&
+    activeAuthRealm === confirmedAccountDeletionCredential.realm
   );
 }
 

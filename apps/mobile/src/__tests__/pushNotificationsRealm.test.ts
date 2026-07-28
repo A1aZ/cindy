@@ -14,7 +14,6 @@ const mocks = vi.hoisted(() => ({
   getPermissionsAsync: vi.fn(),
   requestPermissionsAsync: vi.fn(),
   getDevicePushTokenAsync: vi.fn(),
-  getRandomBytes: vi.fn(() => new Uint8Array(32).fill(0xab)),
 }));
 
 vi.mock('@react-native-async-storage/async-storage', () => ({
@@ -29,25 +28,11 @@ vi.mock('@react-native-async-storage/async-storage', () => ({
   },
 }));
 
-vi.mock('@/auth/secureStorage', () => ({
-  getSecureItem: vi.fn(async (key: string) => store.get(key) ?? null),
-  setSecureItem: vi.fn(async (key: string, value: string) => {
-    store.set(key, value);
-  }),
-  deleteSecureItem: vi.fn(async (key: string) => {
-    store.delete(key);
-  }),
-}));
-
 vi.mock('expo-notifications', () => ({
   setNotificationHandler: vi.fn(),
   getPermissionsAsync: mocks.getPermissionsAsync,
   requestPermissionsAsync: mocks.requestPermissionsAsync,
   getDevicePushTokenAsync: mocks.getDevicePushTokenAsync,
-}));
-
-vi.mock('expo-crypto', () => ({
-  getRandomBytes: mocks.getRandomBytes,
 }));
 
 vi.mock('react-native', () => ({
@@ -71,7 +56,10 @@ import {
 
 const REGISTERED_KEY = 'cindy.push.registered';
 const PENDING_KEY = 'cindy.push.pendingUnregister';
-const REVOCATION_KEY = 'cindy.push.revocationState';
+
+function setStoredRealms(key: string, realms: Array<'cn' | 'global'>): void {
+  store.set(key, JSON.stringify({ version: 1, realms }));
+}
 
 function readStoredRealms(key: string): string[] {
   const raw = store.get(key);
@@ -80,29 +68,7 @@ function readStoredRealms(key: string): string[] {
   return (JSON.parse(raw) as { realms: string[] }).realms;
 }
 
-function setRevocationRealm(realm: 'cn' | 'global', value: Record<string, unknown>): void {
-  const raw = store.get(REVOCATION_KEY);
-  const state = raw
-    ? (JSON.parse(raw) as {
-        version: 1;
-        realms: Record<string, Record<string, unknown>>;
-      })
-    : { version: 1 as const, realms: {} };
-  state.realms[realm] = value;
-  store.set(REVOCATION_KEY, JSON.stringify(state));
-}
-
-function readRevocationRealm(realm: 'cn' | 'global'): Record<string, unknown> | undefined {
-  const raw = store.get(REVOCATION_KEY);
-  if (!raw) return undefined;
-  return (
-    JSON.parse(raw) as {
-      realms: Record<string, Record<string, unknown>>;
-    }
-  ).realms[realm];
-}
-
-describe('push notification unregister realm routing', () => {
+describe('push notification realm routing', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     store.clear();
@@ -120,132 +86,123 @@ describe('push notification unregister realm routing', () => {
     vi.unstubAllGlobals();
   });
 
-  it('跨安装包区域离线注销会迁移旧布尔状态，并在下次跨区登录后向原端点补偿', async () => {
-    store.set(REGISTERED_KEY, '1');
+  it('向当前会话区域注册，但推送构建线仍保持安装包区域', async () => {
     envState.activeRealm = 'global';
-    setRevocationRealm('global', { current: 'a'.repeat(64) });
-    const fetch = vi
-      .fn()
-      .mockRejectedValueOnce(new Error('offline'))
-      .mockRejectedValueOnce(new Error('offline'))
-      .mockResolvedValueOnce({ ok: true, status: 204 });
+    const apiFetch = vi.fn().mockResolvedValue({ registered: true });
+
+    await expect(
+      syncPushRegistration({ enabled: true, apiFetch }),
+    ).resolves.toBe('registered');
+
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/device-link/push-token',
+      expect.objectContaining({
+        baseUrl: 'https://relay.global.example',
+        method: 'PUT',
+        body: expect.objectContaining({
+          token: 'apns-device-token',
+          appVariant: 'cn',
+        }),
+      }),
+    );
+    expect(apiFetch.mock.calls[0]?.[1]?.body).not.toHaveProperty(
+      'revocationToken',
+    );
+    expect(readStoredRealms(REGISTERED_KEY)).toEqual(['global']);
+  });
+
+  it('切换区域前用旧 token 向显式冻结的旧区域撤销', async () => {
+    setStoredRealms(REGISTERED_KEY, ['global']);
+    envState.activeRealm = 'cn';
+    const fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     vi.stubGlobal('fetch', fetch);
 
-    await unregisterPushTokenBestEffort('global-token');
+    await unregisterPushTokenBestEffort('old-global-token', 'global');
 
-    expect(readStoredRealms(PENDING_KEY)).toEqual(['global']);
-    expect(store.get(REGISTERED_KEY)).toBe('1');
-
-    envState.activeRealm = 'cn';
-    await retryPendingUnregister('cn-token');
-
-    expect(mocks.loadMobileEndpointsForRealm).toHaveBeenLastCalledWith(
-      'global',
-    );
-    expect(fetch).toHaveBeenLastCalledWith(
-      'https://relay.global.example/api/device-link/push-token/revocation',
+    expect(mocks.loadMobileEndpointsForRealm).toHaveBeenCalledWith('global');
+    expect(fetch).toHaveBeenCalledWith(
+      'https://relay.global.example/api/device-link/push-token',
       expect.objectContaining({
         method: 'DELETE',
         headers: {
-          Authorization: 'Bearer cn-token',
+          Authorization: 'Bearer old-global-token',
           'content-type': 'application/json',
         },
-        body: JSON.stringify({ revocationToken: 'a'.repeat(64) }),
+        body: JSON.stringify({ token: 'apns-device-token' }),
       }),
     );
     expect(fetch).not.toHaveBeenCalledWith(
       expect.stringContaining('relay.cn.example'),
       expect.anything(),
     );
-    expect(store.has(PENDING_KEY)).toBe(false);
-    expect(store.has(REGISTERED_KEY)).toBe(false);
+    expect(readStoredRealms(REGISTERED_KEY)).toEqual([]);
+    expect(readStoredRealms(PENDING_KEY)).toEqual([]);
   });
 
-  it('两个区域的待注销记录互不覆盖，单区失败不会清掉另一地区', async () => {
-    store.set(
-      REGISTERED_KEY,
-      JSON.stringify({ version: 1, realms: ['cn', 'global'] }),
-    );
-    store.set(PENDING_KEY, JSON.stringify({ version: 1, realms: ['cn'] }));
-    setRevocationRealm('cn', { current: 'c'.repeat(64) });
-    setRevocationRealm('global', { current: 'd'.repeat(64) });
-    envState.activeRealm = 'global';
-
-    const fetch = vi
-      .fn()
-      .mockRejectedValueOnce(new Error('cn still offline'))
-      .mockResolvedValueOnce({ ok: true, status: 204 });
-    vi.stubGlobal('fetch', fetch);
-    await unregisterPushTokenBestEffort(null);
-
-    expect(readStoredRealms(PENDING_KEY)).toEqual(['cn', 'global']);
-    expect(fetch).not.toHaveBeenCalled();
-
-    await retryPendingUnregister('current-token');
-
-    expect(readStoredRealms(PENDING_KEY)).toEqual(['cn']);
-    expect(readStoredRealms(REGISTERED_KEY)).toEqual(['cn']);
-    expect(readRevocationRealm('cn')).toEqual({
-      current: 'c'.repeat(64),
-    });
-    expect(readRevocationRealm('global')).toBeUndefined();
-  });
-
-  it('历史待注销标记没有 capability 时，用 APNs token 只撤销服务端 hash=null 旧行', async () => {
-    store.set(REGISTERED_KEY, JSON.stringify({ version: 1, realms: ['global'] }));
-    store.set(PENDING_KEY, JSON.stringify({ version: 1, realms: ['global'] }));
+  it('只用当前会话补偿当前区域，另一区域标记保持不动', async () => {
+    setStoredRealms(REGISTERED_KEY, ['cn', 'global']);
+    setStoredRealms(PENDING_KEY, ['cn', 'global']);
     envState.activeRealm = 'cn';
-    mocks.getDevicePushTokenAsync.mockResolvedValueOnce({
-      data: 'legacy-apns-token',
-    });
-    const fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
-    vi.stubGlobal('fetch', fetch);
+    const cnApiFetch = vi.fn().mockResolvedValue({ deleted: true });
 
-    await retryPendingUnregister('current-token');
+    await retryPendingUnregister(cnApiFetch);
 
-    expect(fetch).toHaveBeenCalledWith(
-      'https://relay.global.example/api/device-link/push-token/revocation',
+    expect(cnApiFetch).toHaveBeenCalledWith(
+      '/api/device-link/push-token',
       expect.objectContaining({
-        headers: {
-          Authorization: 'Bearer current-token',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ token: 'legacy-apns-token' }),
+        baseUrl: 'https://relay.cn.example',
+        method: 'DELETE',
+        body: { token: 'apns-device-token' },
       }),
     );
-    expect(store.has(PENDING_KEY)).toBe(false);
-    expect(store.has(REGISTERED_KEY)).toBe(false);
+    expect(readStoredRealms(PENDING_KEY)).toEqual(['global']);
+    expect(readStoredRealms(REGISTERED_KEY)).toEqual(['global']);
+
+    envState.activeRealm = 'global';
+    const globalApiFetch = vi.fn().mockResolvedValue({ deleted: true });
+    await retryPendingUnregister(globalApiFetch);
+
+    expect(globalApiFetch).toHaveBeenCalledWith(
+      '/api/device-link/push-token',
+      expect.objectContaining({
+        baseUrl: 'https://relay.global.example',
+      }),
+    );
+    expect(readStoredRealms(PENDING_KEY)).toEqual([]);
+    expect(readStoredRealms(REGISTERED_KEY)).toEqual([]);
   });
 
-  it('PUT 前持久化 candidate；响应不确定时复用，明确成功后晋升并轮换', async () => {
-    const apiFetch = vi
-      .fn()
-      .mockRejectedValueOnce(new Error('response lost'))
-      .mockResolvedValueOnce({ registered: true });
+  it('旧 token 不可用时不跨区请求，只保留旧区域标记', async () => {
+    setStoredRealms(REGISTERED_KEY, ['global']);
+    envState.activeRealm = 'cn';
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
 
-    await expect(syncPushRegistration({ enabled: true, apiFetch })).rejects.toThrow(
-      'response lost',
-    );
+    await unregisterPushTokenBestEffort(null, 'global');
 
-    const candidate = 'ab'.repeat(32);
-    expect(readStoredRealms(REGISTERED_KEY)).toEqual(['cn']);
-    expect(readRevocationRealm('cn')).toEqual({ candidate });
-    expect(apiFetch.mock.calls[0]?.[1]?.body).toEqual(
-      expect.objectContaining({ revocationToken: candidate }),
-    );
-
-    await expect(syncPushRegistration({ enabled: true, apiFetch })).resolves.toBe('registered');
-    expect(apiFetch.mock.calls[1]?.[1]?.body).toEqual(
-      expect.objectContaining({ revocationToken: candidate }),
-    );
-    expect(readRevocationRealm('cn')).toEqual({ current: candidate });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(readStoredRealms(REGISTERED_KEY)).toEqual(['global']);
+    expect(readStoredRealms(PENDING_KEY)).toEqual(['global']);
   });
 
-  it('apiFetch terminal handler 内同步退登不会等待自身，且在途 PUT 留下可重放 outbox', async () => {
+  it('关闭通知失败时把补偿固定在请求开始时的区域', async () => {
+    setStoredRealms(REGISTERED_KEY, ['global']);
+    envState.activeRealm = 'global';
+    const apiFetch = vi.fn().mockRejectedValue(new Error('offline'));
+
+    await expect(
+      syncPushRegistration({ enabled: false, apiFetch }),
+    ).rejects.toThrow('offline');
+
+    envState.activeRealm = 'cn';
+    expect(readStoredRealms(PENDING_KEY)).toEqual(['global']);
+  });
+
+  it('apiFetch terminal handler 内同步退登不会等待自身', async () => {
     const fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     vi.stubGlobal('fetch', fetch);
     const apiFetch = vi.fn(async () => {
-      await unregisterPushTokenBestEffort('access-token');
+      await unregisterPushTokenBestEffort('access-token', 'cn');
       throw new Error('account unavailable');
     });
 
@@ -253,15 +210,19 @@ describe('push notification unregister realm routing', () => {
       syncPushRegistration({ enabled: true, apiFetch }),
     ).rejects.toThrow('account unavailable');
 
+    expect(fetch).toHaveBeenCalledWith(
+      'https://relay.cn.example/api/device-link/push-token',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer access-token',
+        }),
+      }),
+    );
     expect(readStoredRealms(PENDING_KEY)).toEqual(['cn']);
-    expect(readStoredRealms(REGISTERED_KEY)).toEqual(['cn']);
-    expect(readRevocationRealm('cn')).toEqual({
-      candidate: 'ab'.repeat(32),
-    });
   });
 
-  it('关闭同步读取状态期间若发生退登，不会在生命周期失效后再发送认证请求', async () => {
-    store.set(REGISTERED_KEY, JSON.stringify({ version: 1, realms: ['cn'] }));
+  it('关闭同步读取状态期间若发生退登，不会在旧生命周期发送认证请求', async () => {
+    setStoredRealms(REGISTERED_KEY, ['cn']);
     const storedRegisteredState = store.get(REGISTERED_KEY) ?? null;
     let releaseRead: (() => void) | undefined;
     const readGate = new Promise<void>((resolve) => {
@@ -272,17 +233,18 @@ describe('push notification unregister realm routing', () => {
       return storedRegisteredState;
     });
     const apiFetch = vi.fn();
-    const fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    const fetch = vi.fn();
     vi.stubGlobal('fetch', fetch);
 
     const disableSync = syncPushRegistration({ enabled: false, apiFetch });
     await vi.waitFor(() => {
       expect(mocks.asyncGetItem).toHaveBeenCalledWith(REGISTERED_KEY);
     });
-    await unregisterPushTokenBestEffort(null);
+    await unregisterPushTokenBestEffort(null, 'cn');
     releaseRead?.();
 
     await expect(disableSync).resolves.toBe('skipped');
     expect(apiFetch).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
   });
 });

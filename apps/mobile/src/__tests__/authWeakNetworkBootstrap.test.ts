@@ -9,7 +9,10 @@ import { describe, expect, it } from 'vitest';
  * 弱网冷启动直接把持有效 refresh token 的用户踢回登录页。
  */
 describe('auth weak-network bootstrap', () => {
-  const authSource = readFileSync(resolve(process.cwd(), 'src/auth/AuthContext.tsx'), 'utf8');
+  const authSource = readFileSync(
+    resolve(process.cwd(), 'src/auth/AuthContext.tsx'),
+    'utf8',
+  );
 
   it('bootstrap 只在会话 realm 端点激活后用本地痕迹恢复登录视图', () => {
     // 快照恢复必须双条件:refresh token 还在 + 有缓存资料;二者缺一不得凭空造登录态。
@@ -47,17 +50,70 @@ describe('auth weak-network bootstrap', () => {
 
   it('isAuthenticated 以 user 为准,token 未刷到时不闪回登录页', () => {
     expect(authSource).toContain('isAuthenticated: user !== null');
-    expect(authSource).not.toContain('isAuthenticated: accessToken !== null && user !== null');
+    expect(authSource).not.toContain(
+      'isAuthenticated: accessToken !== null && user !== null',
+    );
   });
 
   it('已发布或因 realm 清单失败而延迟的降级会话都会自愈', () => {
     expect(authSource).toMatch(
       /const hasRecoverableSession\s*=\s*user !== null \|\| deferredSessionRecovery;/,
     );
-    expect(authSource).toContain(
-      'if (!initialized || accessToken || !hasRecoverableSession) return;',
+    expect(authSource).toMatch(
+      /if \(\s*!initialized \|\|\s*accessToken \|\|\s*!hasRecoverableSession \|\|\s*sessionRecoverySuspendedRef\.current\s*\)\s*return;/,
     );
-    expect(authSource).toContain('const delay = Math.min(5_000 * 2 ** attempt, 60_000);');
+    expect(authSource).toContain(
+      'const delay = Math.min(5_000 * 2 ** attempt, 60_000);',
+    );
+  });
+
+  it('用户开始新登录后立即停止旧会话自愈，迟到 refresh 也不能抢回界面', () => {
+    expect(authSource).toContain(
+      'const sessionRecoverySuspendedRef = useRef(false);',
+    );
+    expect(authSource).toContain('authGenerationRef.current += 1;');
+    const dispatchStart = authSource.indexOf(
+      'const dispatchLoginAction = useCallback',
+    );
+    const dispatchBody = authSource.slice(
+      dispatchStart,
+      authSource.indexOf(
+        'const clearLocalSession = useCallback',
+        dispatchStart,
+      ),
+    );
+    expect(dispatchBody).toMatch(
+      /action: MobileLoginAction[\s\S]*suspendSessionRecoveryForLogin\(\);[\s\S]*loginActionInFlightRef/,
+    );
+    const healStart = authSource.indexOf('// 降级会话自愈');
+    const healBody = authSource.slice(
+      healStart,
+      authSource.indexOf('// 存量同意迁移', healStart),
+    );
+    expect(healBody).toContain('sessionRecoverySuspendedRef.current');
+    expect(healBody).toContain(
+      'if (cancelled || sessionRecoverySuspendedRef.current) return;',
+    );
+  });
+
+  it('换账号或区域时先用旧会话撤销旧区域推送，再激活新区域', () => {
+    const acceptStart = authSource.indexOf('const acceptOutcome = useCallback');
+    const acceptBody = authSource.slice(
+      acceptStart,
+      authSource.indexOf('const refresh = useCallback', acceptStart),
+    );
+    const revokeAt = acceptBody.indexOf('await unregisterPushTokenBestEffort(');
+    const activateAt = acceptBody.indexOf(
+      'activateMobileSessionRealm(committedRealm);',
+    );
+    expect(acceptBody).toContain(
+      'const previousRealm = activeAuthRealmRef.current;',
+    );
+    expect(acceptBody).toMatch(
+      /unregisterPushTokenBestEffort\(\s*previousAccessToken,\s*previousRealm,?\s*\)/,
+    );
+    expect(revokeAt).toBeGreaterThanOrEqual(0);
+    expect(activateAt).toBeGreaterThan(revokeAt);
   });
 
   it('自愈路径处理 refresh 无异常返回 null:凭证确不在才登出,读取异常只退避(不静默卡死、不误登出)', () => {
@@ -65,11 +121,22 @@ describe('auth weak-network bootstrap', () => {
     // 而二次读取 getSecureItem 的**异常**不能与「读到空值」折叠——异常时无从
     // 判定凭证是否存在,只能继续退避,绝不能据此 applyUser(null) 误登出。
     const healStart = authSource.indexOf('// 降级会话自愈');
-    const healBody = authSource.slice(healStart, authSource.indexOf('}, [accessToken, applyUser', healStart));
-    expect(healBody).toContain('storedSession = await readPersistedAuthSession();');
+    const healBody = authSource.slice(
+      healStart,
+      authSource.indexOf('}, [accessToken, applyUser', healStart),
+    );
+    expect(healBody).toContain(
+      'storedSession = await readPersistedAuthSession();',
+    );
     // 读取异常分支:只 scheduleNext,不 applyUser(null)
-    const catchStart = healBody.indexOf('} catch {', healBody.indexOf('storedSession = await'));
-    const catchBody = healBody.slice(catchStart, healBody.indexOf('}', catchStart + 10) + 1);
+    const catchStart = healBody.indexOf(
+      '} catch {',
+      healBody.indexOf('storedSession = await'),
+    );
+    const catchBody = healBody.slice(
+      catchStart,
+      healBody.indexOf('}', catchStart + 10) + 1,
+    );
     expect(catchBody).toContain('scheduleNext();');
     expect(catchBody).not.toContain('applyUser(null)');
     // 成功读到空值才登出收敛
@@ -82,10 +149,10 @@ describe('auth weak-network bootstrap', () => {
     // 否则下次冷启动会用快照复活已失效的会话。
     const occurrences = authSource.split('applyUser(null)').length - 1;
     expect(occurrences).toBeGreaterThanOrEqual(2);
-    expect(authSource).toContain(
-      "const USER_PROFILE_KEY = 'cindy.mobile.auth.userProfile';",
+    expect(authSource).toMatch(
+      /const USER_PROFILE_KEY = ["']cindy\.mobile\.auth\.userProfile["'];/,
     );
-    expect(authSource).toContain("error.code === 'MEMBERSHIP_DISABLED'");
+    expect(authSource).toMatch(/error\.code === ["']MEMBERSHIP_DISABLED["']/);
     expect(authSource).toContain('updateLoginState(null);');
   });
 

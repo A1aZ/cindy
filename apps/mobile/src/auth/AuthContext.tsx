@@ -279,6 +279,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   >(async () => undefined);
   // Logout bumps this generation so a late refresh cannot resurrect the session.
   const authGenerationRef = useRef(0);
+  // 用户主动开始新登录后，旧的弱网会话不得再通过定时/前台恢复抢回界面。
+  const sessionRecoverySuspendedRef = useRef(false);
   // SecureStore operations are asynchronous. Serialize mutations so logout always
   // wins over a refresh/login write that was already inside the native storage call.
   const refreshTokenMutationRef = useRef<Promise<void>>(Promise.resolve());
@@ -286,6 +288,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const accountDeletionReceiptMutationRef = useRef<Promise<void>>(
     Promise.resolve(),
   );
+
+  const suspendSessionRecoveryForLogin = useCallback(() => {
+    if (sessionRecoverySuspendedRef.current) return;
+    sessionRecoverySuspendedRef.current = true;
+    authGenerationRef.current += 1;
+    refreshInFlightRef.current = null;
+    setDeferredSessionRecovery(false);
+  }, []);
 
   /** 登录态落地后异步刷新灰度标记；失败保留旧值，迟到响应按 auth generation 丢弃。 */
   const scheduleCanaryChannelSync = useCallback(
@@ -477,9 +487,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         outcome.accountDeletionRestored === true ||
         pendingAccountDeletionRestoredRef.current;
       pendingAccountDeletionRestoredRef.current = false;
+      const committedRealm = pendingAuthRealmRef.current ?? BUILD_AUTH_REGION;
+      const previousAccessToken = accessTokenRef.current;
+      const previousRealm = activeAuthRealmRef.current;
+      const replacesActiveSession =
+        previousAccessToken !== null &&
+        (previousRealm !== committedRealm ||
+          userRef.current?.id !== outcome.membership.id);
+      if (replacesActiveSession) {
+        // 新会话尚未覆盖旧 token / realm；在这一刻撤销旧区推送，失败不能阻断登录。
+        await unregisterPushTokenBestEffort(
+          previousAccessToken,
+          previousRealm,
+        );
+      }
       const generation = ++authGenerationRef.current;
       refreshInFlightRef.current = null;
-      const committedRealm = pendingAuthRealmRef.current ?? BUILD_AUTH_REGION;
       activateMobileSessionRealm(committedRealm);
       activeAuthRealmRef.current = committedRealm;
       const persisted = await serializeRefreshTokenMutation(async () => {
@@ -499,6 +522,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       applyUser(
         mergeMembershipWithExisting(outcome.membership, userRef.current),
       );
+      sessionRecoverySuspendedRef.current = false;
       scheduleCanaryChannelSync(outcome.accessToken, generation);
       updateLoginState(
         reduceAuthFlow(loginStateRef.current, { type: 'outcome', outcome }),
@@ -590,7 +614,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setIsBusy(true);
       try {
         const did = await ensureDeviceId();
-        if (cancelled) return;
+        if (cancelled || sessionRecoverySuspendedRef.current) return;
         deviceIdRef.current = did;
         setDeviceId(did);
         // Old Feishu refresh tokens are not valid in auth-server. Purge them explicitly
@@ -716,22 +740,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const hasRecoverableSession =
       user !== null || deferredSessionRecovery;
-    if (!initialized || accessToken || !hasRecoverableSession) return;
+    if (
+      !initialized ||
+      accessToken ||
+      !hasRecoverableSession ||
+      sessionRecoverySuspendedRef.current
+    )
+      return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
     const scheduleNext = () => {
-      if (cancelled) return;
+      if (cancelled || sessionRecoverySuspendedRef.current) return;
       attempt += 1;
       const delay = Math.min(5_000 * 2 ** attempt, 60_000);
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => void tryRefresh(), delay);
     };
     const tryRefresh = async () => {
-      if (cancelled) return;
+      if (cancelled || sessionRecoverySuspendedRef.current) return;
       try {
         const token = await refresh();
-        if (cancelled) return;
+        if (cancelled || sessionRecoverySuspendedRef.current) return;
         if (token) return;
         let storedSession: AuthSessionRecord | null;
         try {
@@ -740,7 +770,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           scheduleNext();
           return;
         }
-        if (cancelled) return;
+        if (cancelled || sessionRecoverySuspendedRef.current) return;
         if (!storedSession) {
           applyUser(null);
           return;
@@ -785,6 +815,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const completeOAuthCallback = useCallback(
     (callbackUrl: string): Promise<void> => {
       if (browserCompletionRef.current) return browserCompletionRef.current;
+      suspendSessionRecoveryForLogin();
       const run = (async () => {
         setIsBusy(true);
         try {
@@ -840,7 +871,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       );
       return run;
     },
-    [acceptOutcome, updateLoginState],
+    [acceptOutcome, suspendSessionRecoveryForLogin, updateLoginState],
   );
 
   // SSO returns through cindycn://auth or cindy://auth. The pending PKCE verifier
@@ -861,6 +892,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const dispatchLoginAction = useCallback(
     (action: MobileLoginAction): Promise<boolean> => {
+      suspendSessionRecoveryForLogin();
       if (loginActionInFlightRef.current) return loginActionInFlightRef.current;
       let run: Promise<boolean>;
       const clearIfCurrent = () => {
@@ -1217,7 +1249,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       run.then(clearIfCurrent, clearIfCurrent);
       return run;
     },
-    [acceptOutcome, completeOAuthCallback, updateLoginState],
+    [
+      acceptOutcome,
+      completeOAuthCallback,
+      suspendSessionRecoveryForLogin,
+      updateLoginState,
+    ],
   );
 
   const clearLocalSession = useCallback(async () => {
@@ -1225,7 +1262,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // 都先 best-effort 注销移动推送 token —— 只挂在 logout 会漏掉终止路径,设备会
     // 继续收到旧账号的任务通知。token 此刻可能已失效(账号不可用),失败静默,
     // 残留由 server 侧 APNs 410 回收与换账号重注册的让位逻辑兜底。
-    await unregisterPushTokenBestEffort(accessTokenRef.current);
+    await unregisterPushTokenBestEffort(
+      accessTokenRef.current,
+      activeAuthRealmRef.current,
+    );
     authGenerationRef.current += 1;
     refreshInFlightRef.current = null;
     setToken(null);

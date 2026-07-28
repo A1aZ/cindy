@@ -1,14 +1,8 @@
 import * as Notifications from 'expo-notifications';
-import * as Crypto from 'expo-crypto';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import type { ClientEndpointRegion } from '@cindy/maker-shared/client-endpoints';
 import type { ApiFetchOptions } from '@/api/client';
-import {
-  deleteSecureItem,
-  getSecureItem,
-  setSecureItem,
-} from '@/auth/secureStorage';
 import {
   AUTH_REGION,
   BUILD_AUTH_REGION,
@@ -23,31 +17,22 @@ import { buildPushTokenRegistrationBody } from './pushRegistrationModel';
  *
  * - 开关持久化在本机(AsyncStorage),默认关闭;打开时才请求系统通知权限。
  * - 注册目标是 device-link server 的 PUT /push-token(Bearer 鉴权与 WS 同源);
- *   关闭开关 / 登出时注销(DELETE,幂等)。
+ *   关闭开关 / 登出 / 换账号或区域时注销(DELETE,幂等)。
  * - 仅 iOS(APNs):Android 需 FCM / 国内厂商通道,二期接入(server 侧已预留
  *   provider='fcm' 字段)。
  * - App 在前台时压掉系统横幅(WS 活着,会话本来就在实时刷新)。
  */
 
 const PUSH_ENABLED_KEY = 'cindy.push.enabled';
-/** 成功注册过 token 的区域集合：避免未注册设备在每次启动时都打一发 DELETE。 */
+/** 成功或可能成功注册过 token 的区域集合，避免把注销请求发到错误区域。 */
 const PUSH_REGISTERED_KEY = 'cindy.push.registered';
 /**
- * 登出/终止时注销失败的待补偿区域集合：离线失败后保留原区域；对应窄权限
- * capability 单独放 SecureStore；下次登录后用当前有效 token 通过原区域配置的
- * peer issuer 验签，再对 capability + device 做联合撤销。
+ * 注销失败的区域集合。只允许在以后重新持有同一区域登录态时补偿，
+ * 不会用 CN token 请求 Global，也不会用 Global token 请求 CN。
  */
 const PUSH_PENDING_UNREGISTER_KEY = 'cindy.push.pendingUnregister';
-/**
- * SecureStore 中每个区域当前/在途注册的窄权限撤销凭证，以及登出后的 durable outbox。
- * capability 只能删除一条精确推送注册，不承载用户身份；仍不写入日志或错误文案。
- */
-const PUSH_REVOCATION_STATE_KEY = 'cindy.push.revocationState';
 const PUSH_TOKEN_PATH = '/api/device-link/push-token';
-const PUSH_TOKEN_REVOCATION_PATH = '/api/device-link/push-token/revocation';
 const PUSH_REALM_STATE_VERSION = 1;
-const PUSH_REVOCATION_STATE_VERSION = 1;
-const PUSH_REVOCATION_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
 const PUSH_DEVICE_TOKEN_MAX_LENGTH = 512;
 const PUSH_UNREGISTER_TIMEOUT_MS = 3_000;
 
@@ -56,31 +41,11 @@ interface PushRealmState {
   realms: ClientEndpointRegion[];
 }
 
-interface PushRevocationRealmState {
-  /** 已收到 PUT 成功响应的当前 capability。 */
-  current?: string;
-  /**
-   * PUT 发出前先落盘的 capability。请求/响应中断时无法判断服务端是否提交，
-   * 因此与 current 一并保留；下一次 PUT 复用它，直到收到明确成功。
-   */
-  candidate?: string;
-  /** 旧服务端注册没有 capability 时，以 APNs token 撤销 hash=null 的旧行。 */
-  legacyDeviceToken?: string;
-}
-
-interface PushRevocationState {
-  version: typeof PUSH_REVOCATION_STATE_VERSION;
-  realms: Partial<Record<ClientEndpointRegion, PushRevocationRealmState>>;
-}
-
-type PushRevocationProof = { revocationToken: string } | { token: string };
-
 /** React effects / token listener / 设置页可能同时触发，串行化避免注册与撤销倒序。 */
 let pushMutationTail: Promise<void> = Promise.resolve();
 /**
  * 终止登录不能排在 apiFetch 后面等待，否则 apiFetch 的 terminal handler 正在
- * await 注销时会形成环。注销直接递增 generation；在途 PUT 返回后看到代际变化，
- * 只落补偿 outbox，不再把自己晋升为当前注册。
+ * await 注销时会形成环。注销递增 generation，使旧生命周期的排队操作失效。
  */
 let pushLifecycleGeneration = 0;
 
@@ -98,9 +63,8 @@ function isClientEndpointRegion(value: unknown): value is ClientEndpointRegion {
 }
 
 /**
- * v1 以前两个 key 都是 '0'/'1'。旧版尚未记录区域：已注册状态由持有当前
- * 登录上下文的调用方提供迁移区域，失去上下文的待补偿状态才回落安装包区域。
- * 此后使用区域集合，避免 CN 与 Global 各有一笔待补偿时互相覆盖。
+ * v1 以前两个 key 都是 '0'/'1'。旧版没有区域字段：由仍持有登录上下文的
+ * 调用方提供迁移区域，避免把历史状态错误归到安装包区域。
  */
 async function readPushRealms(
   key: string,
@@ -145,7 +109,7 @@ async function writePushRealms(
 async function addPushRealm(
   key: string,
   realm: ClientEndpointRegion,
-  legacyRealm: ClientEndpointRegion = BUILD_AUTH_REGION,
+  legacyRealm: ClientEndpointRegion = realm,
 ): Promise<void> {
   const realms = await readPushRealms(key, legacyRealm);
   realms.add(realm);
@@ -155,15 +119,11 @@ async function addPushRealm(
 async function removePushRealm(
   key: string,
   realm: ClientEndpointRegion,
-  legacyRealm: ClientEndpointRegion = BUILD_AUTH_REGION,
+  legacyRealm: ClientEndpointRegion = realm,
 ): Promise<void> {
   const realms = await readPushRealms(key, legacyRealm);
   realms.delete(realm);
   await writePushRealms(key, realms);
-}
-
-function isPushRevocationToken(value: unknown): value is string {
-  return typeof value === 'string' && PUSH_REVOCATION_TOKEN_PATTERN.test(value);
 }
 
 function normalizeDeviceToken(value: unknown): string | null {
@@ -173,155 +133,6 @@ function normalizeDeviceToken(value: unknown): string | null {
     return null;
   }
   return token;
-}
-
-function sanitizeRevocationRealmState(value: unknown): PushRevocationRealmState | null {
-  if (typeof value !== 'object' || value === null) return null;
-  const raw = value as Record<string, unknown>;
-  const current = isPushRevocationToken(raw.current) ? raw.current : undefined;
-  const candidate = isPushRevocationToken(raw.candidate) ? raw.candidate : undefined;
-  const legacyDeviceToken = normalizeDeviceToken(raw.legacyDeviceToken) ?? undefined;
-  if (!current && !candidate && !legacyDeviceToken) {
-    return null;
-  }
-  return {
-    ...(current ? { current } : {}),
-    ...(candidate ? { candidate } : {}),
-    ...(legacyDeviceToken ? { legacyDeviceToken } : {}),
-  };
-}
-
-async function readPushRevocationState(): Promise<PushRevocationState> {
-  const empty: PushRevocationState = {
-    version: PUSH_REVOCATION_STATE_VERSION,
-    realms: {},
-  };
-  try {
-    const raw = await getSecureItem(PUSH_REVOCATION_STATE_KEY);
-    if (!raw) return empty;
-    const parsed: unknown = JSON.parse(raw);
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      (parsed as { version?: unknown }).version !== PUSH_REVOCATION_STATE_VERSION ||
-      typeof (parsed as { realms?: unknown }).realms !== 'object' ||
-      (parsed as { realms?: unknown }).realms === null
-    ) {
-      return empty;
-    }
-    const rawRealms = (parsed as { realms: Record<string, unknown> }).realms;
-    const realms: PushRevocationState['realms'] = {};
-    for (const realm of ['cn', 'global'] as const) {
-      const entry = sanitizeRevocationRealmState(rawRealms[realm]);
-      if (entry) realms[realm] = entry;
-    }
-    return { version: PUSH_REVOCATION_STATE_VERSION, realms };
-  } catch {
-    return empty;
-  }
-}
-
-async function writePushRevocationState(state: PushRevocationState): Promise<void> {
-  if (!state.realms.cn && !state.realms.global) {
-    await deleteSecureItem(PUSH_REVOCATION_STATE_KEY);
-    return;
-  }
-  await setSecureItem(PUSH_REVOCATION_STATE_KEY, JSON.stringify(state));
-}
-
-async function updatePushRevocationRealm(
-  realm: ClientEndpointRegion,
-  update: (current: PushRevocationRealmState) => PushRevocationRealmState | null,
-): Promise<PushRevocationRealmState | null> {
-  const state = await readPushRevocationState();
-  const next = sanitizeRevocationRealmState(update(state.realms[realm] ?? {}));
-  if (next) state.realms[realm] = next;
-  else delete state.realms[realm];
-  await writePushRevocationState(state);
-  return next;
-}
-
-function createPushRevocationToken(): string {
-  return Array.from(Crypto.getRandomBytes(32), (byte) => byte.toString(16).padStart(2, '0')).join(
-    '',
-  );
-}
-
-async function preparePushRevocationToken(realm: ClientEndpointRegion): Promise<string> {
-  let token = '';
-  await updatePushRevocationRealm(realm, (current) => {
-    token = current.candidate ?? createPushRevocationToken();
-    return { ...current, candidate: token };
-  });
-  return token;
-}
-
-async function commitPushRevocationToken(
-  realm: ClientEndpointRegion,
-  token: string,
-): Promise<void> {
-  await updatePushRevocationRealm(realm, () => ({ current: token }));
-}
-
-function revocationProofsFromState(state: PushRevocationRealmState | null): PushRevocationProof[] {
-  if (!state) return [];
-  const revocationTokens = [
-    ...new Set([
-      ...(state.current ? [state.current] : []),
-      ...(state.candidate ? [state.candidate] : []),
-    ]),
-  ];
-  if (revocationTokens.length > 0) {
-    return revocationTokens.map((revocationToken) => ({
-      revocationToken,
-    }));
-  }
-  return state.legacyDeviceToken ? [{ token: state.legacyDeviceToken }] : [];
-}
-
-async function readPushRevocationProofs(
-  realm: ClientEndpointRegion,
-): Promise<PushRevocationProof[]> {
-  const state = await readPushRevocationState();
-  return revocationProofsFromState(state.realms[realm] ?? null);
-}
-
-async function ensureRevocationProofs(
-  realm: ClientEndpointRegion,
-  legacyDeviceToken?: string | null,
-  additionalRevocationTokens: string[] = [],
-): Promise<PushRevocationProof[]> {
-  const next = await updatePushRevocationRealm(realm, (current) => {
-    const nextLegacyDeviceToken =
-      normalizeDeviceToken(legacyDeviceToken) ?? current.legacyDeviceToken;
-    let currentToken = current.current;
-    let candidateToken = current.candidate;
-    for (const token of additionalRevocationTokens.filter(isPushRevocationToken)) {
-      if (token === currentToken || token === candidateToken) continue;
-      if (!candidateToken) candidateToken = token;
-      else if (!currentToken) currentToken = token;
-      else candidateToken = token;
-    }
-    return {
-      ...(currentToken ? { current: currentToken } : {}),
-      ...(candidateToken ? { candidate: candidateToken } : {}),
-      ...(nextLegacyDeviceToken ? { legacyDeviceToken: nextLegacyDeviceToken } : {}),
-    };
-  });
-  return revocationProofsFromState(next);
-}
-
-async function queueRegistrationRevocation(
-  realm: ClientEndpointRegion,
-  revocationToken: string,
-): Promise<void> {
-  await addPushRealm(PUSH_REGISTERED_KEY, realm, realm);
-  await addPushRealm(PUSH_PENDING_UNREGISTER_KEY, realm);
-  await ensureRevocationProofs(realm, null, [revocationToken]);
-}
-
-async function clearPushRevocationRealm(realm: ClientEndpointRegion): Promise<void> {
-  await updatePushRevocationRealm(realm, () => null);
 }
 
 async function getNativeDeviceTokenBestEffort(): Promise<string | null> {
@@ -337,11 +148,20 @@ function deviceLinkBaseForRealm(realm: ClientEndpointRegion): string {
   return getMobileEndpointForRealm(realm, 'deviceLinkApiBaseUrl');
 }
 
+function pushDeleteBody(token: string | null): { token: string } | undefined {
+  return token ? { token } : undefined;
+}
+
+/**
+ * 清理登录态时不能走 apiFetch：401 terminal handler 可能正在等待当前清理，
+ * 形成自等待。调用方必须在切换 realm / 清空旧 access token 前进入此函数。
+ */
 async function deletePushTokenWithAccessToken(
   realm: ClientEndpointRegion,
   accessToken: string,
 ): Promise<void> {
   await loadMobileEndpointsForRealm(realm);
+  const deviceToken = await getNativeDeviceTokenBestEffort();
   const controller = new AbortController();
   const timer = setTimeout(
     () => controller.abort(),
@@ -352,46 +172,18 @@ async function deletePushTokenWithAccessToken(
       deviceLinkBaseForRealm(realm) + PUSH_TOKEN_PATH,
       {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${accessToken}` },
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          ...(deviceToken ? { 'content-type': 'application/json' } : {}),
+        },
+        ...(deviceToken
+          ? { body: JSON.stringify({ token: deviceToken }) }
+          : {}),
         signal: controller.signal,
       },
     );
     if (!response.ok) {
       throw new Error(`unregister failed: ${response.status}`);
-    }
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function deletePushTokenWithProofs(
-  realm: ClientEndpointRegion,
-  proofs: PushRevocationProof[],
-  accessToken: string,
-): Promise<void> {
-  if (proofs.length === 0) {
-    throw new Error('missing push revocation proof');
-  }
-  await loadMobileEndpointsForRealm(realm);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), PUSH_UNREGISTER_TIMEOUT_MS);
-  try {
-    const responses = await Promise.all(
-      proofs.map((proof) =>
-        fetch(deviceLinkBaseForRealm(realm) + PUSH_TOKEN_REVOCATION_PATH, {
-          method: 'DELETE',
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify(proof),
-          signal: controller.signal,
-        }),
-      ),
-    );
-    const failed = responses.find((response) => !response.ok);
-    if (failed) {
-      throw new Error(`capability unregister failed: ${failed.status}`);
     }
   } finally {
     clearTimeout(timer);
@@ -443,8 +235,8 @@ export type AuthedApiFetch = <T>(
 ) => Promise<T>;
 
 /**
- * 把本机开关状态同步到 server 注册表。开 → 请求权限 + 拿 APNs token + PUT;
- * 关 → 曾注册过才 DELETE。调用方决定时机(开关翻转 / 登录后启动 / token 轮换)。
+ * 把本机开关状态同步到当前会话区域的 server 注册表。开 → 请求权限 + 拿 APNs
+ * token + PUT；关 → 曾在当前区域注册过才 DELETE。
  */
 async function syncPushRegistrationInternal(
   opts: {
@@ -459,29 +251,38 @@ async function syncPushRegistrationInternal(
   const baseUrl = deviceLinkBaseForRealm(realm);
 
   if (!opts.enabled) {
-    const registeredRealms = await readPushRealms(
-      PUSH_REGISTERED_KEY,
-      realm,
-    );
+    const registeredRealms = await readPushRealms(PUSH_REGISTERED_KEY, realm);
     if (lifecycleGeneration !== pushLifecycleGeneration) return 'skipped';
     if (!registeredRealms.has(realm)) return 'skipped';
-    await opts.apiFetch(PUSH_TOKEN_PATH, {
-      baseUrl,
-      method: 'DELETE',
-    });
-    await removePushRealm(PUSH_REGISTERED_KEY, realm, realm);
+    const token = await getNativeDeviceTokenBestEffort();
+    if (lifecycleGeneration !== pushLifecycleGeneration) return 'skipped';
+    try {
+      await opts.apiFetch(PUSH_TOKEN_PATH, {
+        baseUrl,
+        method: 'DELETE',
+        ...(token ? { body: pushDeleteBody(token) } : {}),
+      });
+    } catch (error) {
+      await addPushRealm(PUSH_PENDING_UNREGISTER_KEY, realm).catch(
+        () => undefined,
+      );
+      throw error;
+    }
+    await removePushRealm(PUSH_REGISTERED_KEY, realm);
     await removePushRealm(PUSH_PENDING_UNREGISTER_KEY, realm);
-    await clearPushRevocationRealm(realm);
     return 'unregistered';
   }
 
   let permission = await Notifications.getPermissionsAsync();
+  if (lifecycleGeneration !== pushLifecycleGeneration) return 'skipped';
   if (permission.status !== 'granted' && permission.canAskAgain) {
     permission = await Notifications.requestPermissionsAsync();
+    if (lifecycleGeneration !== pushLifecycleGeneration) return 'skipped';
   }
   if (permission.status !== 'granted') return 'permission-denied';
 
   const deviceToken = await Notifications.getDevicePushTokenAsync();
+  if (lifecycleGeneration !== pushLifecycleGeneration) return 'skipped';
   const body = buildPushTokenRegistrationBody({
     token: typeof deviceToken.data === 'string' ? deviceToken.data : '',
     region: AUTH_REGION,
@@ -489,45 +290,32 @@ async function syncPushRegistrationInternal(
   });
   if (!body) return 'skipped';
 
-  // capability 在 PUT 前落盘：若服务端已提交但响应丢失，登出仍能撤销；下一次
-  // 注册复用 candidate，直到收到明确成功后再晋升 current。
-  const revocationToken = await preparePushRevocationToken(realm);
-  // 同理，PUT 响应不确定时也必须把该区域视作“可能已注册”，后续注销才会补偿。
-  await addPushRealm(PUSH_REGISTERED_KEY, realm, realm);
+  // PUT 响应丢失时无法判断服务端是否提交，发出前即标记“可能已注册”；
+  // 后续只能在该区域持有有效会话时做幂等 DELETE。
+  await addPushRealm(PUSH_REGISTERED_KEY, realm);
   if (lifecycleGeneration !== pushLifecycleGeneration) {
-    await queueRegistrationRevocation(realm, revocationToken);
+    await addPushRealm(PUSH_PENDING_UNREGISTER_KEY, realm);
     return 'skipped';
   }
   try {
     await opts.apiFetch(PUSH_TOKEN_PATH, {
       baseUrl,
       method: 'PUT',
-      body: { ...body, revocationToken },
+      body,
     });
   } catch (error) {
     if (lifecycleGeneration !== pushLifecycleGeneration) {
-      await queueRegistrationRevocation(realm, revocationToken).catch(
+      await addPushRealm(PUSH_PENDING_UNREGISTER_KEY, realm).catch(
         () => undefined,
       );
     }
     throw error;
   }
   if (lifecycleGeneration !== pushLifecycleGeneration) {
-    await queueRegistrationRevocation(realm, revocationToken);
+    await addPushRealm(PUSH_PENDING_UNREGISTER_KEY, realm);
     return 'skipped';
   }
-  await commitPushRevocationToken(realm, revocationToken);
-  if (lifecycleGeneration !== pushLifecycleGeneration) {
-    await queueRegistrationRevocation(realm, revocationToken);
-    return 'skipped';
-  }
-  // 同一区域重新注册成功后，server 的 token 让位逻辑已覆盖旧行；不能让旧的
-  // 待 DELETE 标记在下次启动时把这笔新注册删掉。
   await removePushRealm(PUSH_PENDING_UNREGISTER_KEY, realm);
-  if (lifecycleGeneration !== pushLifecycleGeneration) {
-    await queueRegistrationRevocation(realm, revocationToken);
-    return 'skipped';
-  }
   return 'registered';
 }
 
@@ -542,101 +330,74 @@ export function syncPushRegistration(opts: {
 }
 
 /**
- * 登出/终止前的 best-effort 注销。**不走 apiFetchRaw**:清理流程中若响应
- * 401 ACCOUNT_UNAVAILABLE,apiFetchRaw 会 await 全局 terminal handler →
- * terminateSession 单飞返回「正在等待本函数」的同一个 promise → 死锁。
- * 这里用裸 fetch,任何失败(含 401)都只落补偿标记。
+ * 登出、终止或换账号/区域前的 best-effort 注销。realm 与 access token 都在
+ * 调用开始时冻结，因此后续端点切换不会把旧 token 发到新区域。
  */
-async function unregisterPushTokenBestEffortInternal(accessToken: string | null): Promise<void> {
+async function unregisterPushTokenBestEffortInternal(
+  realm: ClientEndpointRegion,
+  accessToken: string | null,
+): Promise<void> {
   if (!isPushSupported()) return;
-  const realm = getActiveMobileSessionRealm();
   try {
-    const registeredRealms = await readPushRealms(
-      PUSH_REGISTERED_KEY,
-      realm,
-    );
+    const registeredRealms = await readPushRealms(PUSH_REGISTERED_KEY, realm);
     if (!registeredRealms.has(realm)) return;
 
-    // 先落 durable outbox 再发请求：进程在网络成功与本地清标记之间被杀时，
-    // 下次会幂等重放，不会永久留下旧区域注册。
     await addPushRealm(PUSH_PENDING_UNREGISTER_KEY, realm);
-    let proofs = await readPushRevocationProofs(realm);
-    const legacyDeviceToken = proofs.length === 0 ? await getNativeDeviceTokenBestEffort() : null;
-    proofs = await ensureRevocationProofs(realm, legacyDeviceToken);
+    if (!accessToken) return;
 
-    let deleted = false;
-    if (proofs.length > 0 && accessToken) {
-      try {
-        await deletePushTokenWithProofs(realm, proofs, accessToken);
-        deleted = true;
-      } catch {
-        // 服务端滚动升级尚未提供 capability 端点时，立即注销仍可回退当前 JWT。
-      }
-    }
-    if (!deleted && accessToken) {
-      await deletePushTokenWithAccessToken(realm, accessToken);
-      deleted = true;
-    }
-    if (!deleted) return;
-
-    await removePushRealm(PUSH_REGISTERED_KEY, realm, realm);
+    await deletePushTokenWithAccessToken(realm, accessToken);
+    await removePushRealm(PUSH_REGISTERED_KEY, realm);
     await removePushRealm(PUSH_PENDING_UNREGISTER_KEY, realm);
-    await clearPushRevocationRealm(realm);
   } catch {
-    // 注销失败(离线/超时/服务端错):登出流程不能被卡住。区域 + capability
-    // 已尽量先落盘；旧状态至少保留区域标记，下次登录继续补偿。
-    await addPushRealm(PUSH_PENDING_UNREGISTER_KEY, realm).catch(() => undefined);
+    // 离线/超时/旧 token 失效不能阻断退出或切换。标记只在以后登录同一区域时
+    // 重试，绝不引入服务端互信或客户端跨区 token 发送。
+    await addPushRealm(PUSH_PENDING_UNREGISTER_KEY, realm).catch(
+      () => undefined,
+    );
   }
 }
 
-export function unregisterPushTokenBestEffort(accessToken: string | null): Promise<void> {
+export function unregisterPushTokenBestEffort(
+  accessToken: string | null,
+  realm: ClientEndpointRegion = getActiveMobileSessionRealm(),
+): Promise<void> {
   pushLifecycleGeneration += 1;
   // 不进入 pushMutationTail：当前 tail 可能正在 apiFetch → terminal handler →
-  // clearLocalSession → 本函数。等待 tail 会形成自等待死锁，generation 负责收口竞态。
-  return unregisterPushTokenBestEffortInternal(accessToken);
-}
-
-/** 用户关闭开关但注销请求失败时排队补偿(opt-out 先落盘,注销之后补)。 */
-async function markPendingUnregisterInternal(): Promise<void> {
-  const realm = getActiveMobileSessionRealm();
-  await addPushRealm(PUSH_PENDING_UNREGISTER_KEY, realm);
-  const existingProofs = await readPushRevocationProofs(realm);
-  const legacyDeviceToken =
-    existingProofs.length === 0 ? await getNativeDeviceTokenBestEffort() : null;
-  await ensureRevocationProofs(realm, legacyDeviceToken);
-}
-
-export function markPendingUnregister(): Promise<void> {
-  return runPushMutation(markPendingUnregisterInternal);
+  // clearLocalSession → 本函数。等待 tail 会形成自等待死锁。
+  return unregisterPushTokenBestEffortInternal(realm, accessToken);
 }
 
 /**
- * 补偿上次登出/终止时失败的注销(登录态就绪后调用)。
- * capability 与原注册区域绑定；当前登录 token 只作为 @cindy/auth-verify 身份门，
- * 原区域服务预配置 peer issuer 后可验签另一 auth region 的 Access Token。
- * 使用裸 fetch，不触发当前会话 refresh/退登；401/503 只保留 outbox。
+ * 只补偿“当前会话区域”的注销。历史上另一区域的标记保持不动，直到用户再次
+ * 登录该区域；当前 token 永远不会被发送给 peer endpoint。
  */
-async function retryPendingUnregisterInternal(accessToken: string | null): Promise<void> {
-  if (!isPushSupported() || !accessToken) return;
-  const pendingRealms = await readPushRealms(PUSH_PENDING_UNREGISTER_KEY);
-  if (pendingRealms.size === 0) return;
+async function retryPendingUnregisterInternal(
+  apiFetch: AuthedApiFetch,
+): Promise<void> {
+  if (!isPushSupported()) return;
+  const realm = getActiveMobileSessionRealm();
+  const pendingRealms = await readPushRealms(
+    PUSH_PENDING_UNREGISTER_KEY,
+    realm,
+  );
+  if (!pendingRealms.has(realm)) return;
 
-  for (const realm of pendingRealms) {
-    try {
-      let proofs = await readPushRevocationProofs(realm);
-      const legacyDeviceToken = proofs.length === 0 ? await getNativeDeviceTokenBestEffort() : null;
-      proofs = await ensureRevocationProofs(realm, legacyDeviceToken);
-      if (proofs.length === 0) continue;
-      await deletePushTokenWithProofs(realm, proofs, accessToken);
-      await removePushRealm(PUSH_PENDING_UNREGISTER_KEY, realm);
-      await removePushRealm(PUSH_REGISTERED_KEY, realm, realm);
-      await clearPushRevocationRealm(realm);
-    } catch {
-      // 该区域仍失败:只保留它的标记；其它区域仍可独立完成补偿。
-    }
+  try {
+    const token = await getNativeDeviceTokenBestEffort();
+    await apiFetch(PUSH_TOKEN_PATH, {
+      baseUrl: deviceLinkBaseForRealm(realm),
+      method: 'DELETE',
+      ...(token ? { body: pushDeleteBody(token) } : {}),
+    });
+    await removePushRealm(PUSH_PENDING_UNREGISTER_KEY, realm);
+    await removePushRealm(PUSH_REGISTERED_KEY, realm);
+  } catch {
+    // 仍失败：保留当前区域标记，下次同区登录继续补偿。
   }
 }
 
-export function retryPendingUnregister(accessToken: string | null): Promise<void> {
-  return runPushMutation(() => retryPendingUnregisterInternal(accessToken));
+export function retryPendingUnregister(
+  apiFetch: AuthedApiFetch,
+): Promise<void> {
+  return runPushMutation(() => retryPendingUnregisterInternal(apiFetch));
 }

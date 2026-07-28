@@ -14,17 +14,40 @@ export interface AuthSessionRecord {
   refreshToken: string;
 }
 
-export const accountDeletionReceiptRecordSchema = z.object({
+const accountDeletionReceiptRecordV1Schema = z.object({
   version: z.literal(1),
   realm: authRegionSchema,
   receiptToken: z.string().min(1),
 });
 
-export interface AccountDeletionReceiptRecord {
+const accountDeletionReceiptRecordV2Schema = z.object({
+  version: z.literal(2),
+  realm: authRegionSchema,
+  receiptToken: z.string().min(1),
+  authIdentity: z.string().min(1),
+});
+
+export const accountDeletionReceiptRecordSchema = z.discriminatedUnion(
+  'version',
+  [accountDeletionReceiptRecordV1Schema, accountDeletionReceiptRecordV2Schema],
+);
+
+export interface AccountDeletionReceiptRecordV1 {
   version: 1;
   realm: AuthRegion;
   receiptToken: string;
 }
+
+export interface AccountDeletionReceiptRecordV2 {
+  version: 2;
+  realm: AuthRegion;
+  receiptToken: string;
+  /** Passport identity (membership fallback for legacy claims) that requested the challenge. */
+  authIdentity: string;
+}
+
+export type AccountDeletionReceiptRecord =
+  AccountDeletionReceiptRecordV1 | AccountDeletionReceiptRecordV2;
 
 /** Parse an encrypted-storage plaintext without throwing or logging credentials. */
 export function parseAuthSessionRecord(
@@ -69,12 +92,14 @@ export function parseAccountDeletionReceiptRecord(
 export function serializeAccountDeletionReceiptRecord(
   realm: AuthRegion,
   receiptToken: string,
+  authIdentity?: string,
 ): string {
   return JSON.stringify(
     accountDeletionReceiptRecordSchema.parse({
-      version: 1,
+      version: authIdentity ? 2 : 1,
       realm,
       receiptToken,
+      ...(authIdentity ? { authIdentity } : {}),
     }),
   );
 }

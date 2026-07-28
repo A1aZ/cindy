@@ -54,17 +54,15 @@
 
 #### 两种浏览器模式(先认环境,再谈登录)
 
-宿主用两种后端之一承接本工具,`action: "status"` 返回的 `backend` 字段是判别依据:
+宿主用两种后端之一承接本工具,**两种模式的 action 集合一致**,差别在"浏览器长在哪里、该让用户看哪个界面"。`action: "status"` 返回的 `backend` 字段是判别依据:
 
-- **`backend: "rsb-webview"` = Cindy 侧边栏内置浏览器(默认)**:嵌在 Cindy 会话侧边栏里,没有独立窗口。登录态**与系统浏览器、与独立外置浏览器全部隔离**——初始是全空的干净环境;用户在里面登录过的站点会持久保留。
-  - **能力子集**:只支持 `tabs / open / focus / close / navigate / extract / act:evaluate / screenshot / pdf / console`。`snapshot`、`act:click/type/press/wait` 等原生交互、`requests / responseBody / upload / dialog` **不可用**——操作路径统一走 `navigate` → `extract` 或 `act:evaluate`(页内 JS 完成点击 / 填表 / 读数)→ `screenshot` 视觉确认。收到 "不可用" 报错时按报错里的替代路径走,不要在同一 action 上重试。
-  - 需要完整原生交互能力时,如实建议用户:到 **设置 → 自动操作** 切换为独立外置浏览器。
-- **无 `backend` 字段 / 外置模式 = 独立外置浏览器**:一个专属持久自动化浏览器窗口(profile 显示为 "Cindy"),全部 action 可用,登录态同样独立、长期保留。
+- **`backend: "rsb-webview"` = Cindy 侧边栏内置浏览器(默认)**:嵌在 Cindy 会话侧边栏里,**没有独立窗口**——需要用户亲自看某个页面时,指的是侧边栏里那个 tab,不要说"看弹出来的浏览器窗口"。
+- **`backend` 不是 `"rsb-webview"`(通常没有该字段)= 独立外置浏览器**:一个专属持久自动化浏览器窗口(profile 显示为 "Cindy")。
 
-**不要传 `profile`**,直接走默认即可;也不要试图接管用户日常使用的 Chrome。
+**两种模式的登录态都与用户日常使用的系统浏览器(Chrome / Safari)彻底隔离,彼此之间也隔离**:初始是全空的干净环境,用户在其中登录过的站点会持久保留。**不要传 `profile`**,直接走默认即可;也不要试图接管用户日常使用的 Chrome。
 
 #### 登录与登录墙
-- 操作需要登录态的站点前,导航后先观察页面(侧边栏模式用 `extract` / `screenshot`,外置模式用 `snapshot`)判断是否已登录。**不要**用 `profiles` 判断登录态——它不携带按站点的登录信号。
+- 操作需要登录态的站点前,导航后先 `action: "snapshot"`(必要时配 `screenshot` 视觉确认)判断是否已登录。**不要**用 `profiles` 判断登录态——它不携带按站点的登录信号。
 - **撞到登录墙 / "请重新登录" 时**,先 `action: "focus"`(带该 tab 的 `targetId`)让该页面呈现给用户,再**停下来如实告诉用户**,按环境二选一:
   1. 请用户**直接在当前这个页面里登录**(扫码 / 输账号 / 过验证码)——侧边栏模式就是侧边栏里那个 tab,外置模式是那个已开着的浏览器窗口;登录态会长期保留,完成后你再继续。
   2. 若用户表示"我只在自己浏览器里登录过 / 不想再登一次",不要硬试:把 URL 给用户,请他在**系统浏览器**里自行打开查看。
@@ -78,22 +76,19 @@
 
 #### 环境
 - `status` 显示浏览器不可用,多半是本地浏览器运行时未就绪。提示用户到**设置 → 自动操作**检查浏览器状态 / 完成首次准备,不要在工具层反复重试。
-- `status` 返回 `backend: "rsb-webview"` = 侧边栏内置浏览器模式,注意上文「两种浏览器模式」的能力子集;报错信息里写了替代路径时优先照做。
 
 #### action 速查
-「侧边栏」列 = `backend: "rsb-webview"`(侧边栏内置浏览器)下是否可用;外置模式全部可用。
-
-| action | 用途 | 侧边栏 |
-|---|---|---|
-| `status` / `doctor` | 可用性 / 自检(`status.backend` 判环境) | ✓ |
-| `start` / `stop` | 启停浏览器 | ✓(no-op) |
-| `profiles` | 看 profile 列表(**不含**按站点登录态信号) | ✓ |
-| `tabs` / `open` / `focus` / `close` | 标签页:列 / 开(带 label)/ 切 / 关 | ✓ |
-| `navigate` | 当前或指定 tab 导航到 URL | ✓ |
-| `snapshot` | 读页面结构 + 拿 ref(交互前定位元素用) | ✗(改用 `extract` / `act:evaluate`) |
-| `act` | 执行 click/type/fill/press/select/hover/drag/wait/evaluate(见 `request.kind`) | 仅 `evaluate` |
-| `extract` | 按字段 schema 从 DOM 提结构化数据(列表/详情,优于全页 snapshot) | ✓ |
-| `requests` / `responseBody` | 看页面已发生的 XHR/fetch 列表(可 `filter`) / 等待并读下一个匹配响应的 body(先发起再触发;读 GET JSON 优先直接 navigate 到该 URL) | ✗ |
-| `recipe` / `siteguide` | 跑某站现成配方(`recipeId`+`inputs`) / 取某站内置指南(`site`,含入口/关键页/可用配方;非 sitemap.xml) | 部分(依赖 wait/click 的配方步骤会失败) |
-| `screenshot` | 仅在需要视觉确认时用 | ✓ |
-| `console` / `pdf` / `upload` / `dialog` | 控制台日志 / 导出 PDF / 上传文件 / 处理原生弹窗 | `console` / `pdf` ✓;`upload` / `dialog` ✗ |
+| action | 用途 |
+|---|---|
+| `status` / `doctor` | 可用性 / 自检(`status.backend` 判环境,见「两种浏览器模式」) |
+| `start` / `stop` | 启停浏览器 |
+| `profiles` | 看 profile 列表(**不含**按站点登录态信号) |
+| `tabs` / `open` / `focus` / `close` | 标签页:列 / 开(带 label)/ 切 / 关 |
+| `navigate` | 当前或指定 tab 导航到 URL |
+| `snapshot` | 读页面结构 + 拿 ref(交互前定位元素用) |
+| `act` | 执行 click/type/fill/press/select/hover/drag/wait/evaluate(见 `request.kind`) |
+| `extract` | 按字段 schema 从 DOM 提结构化数据(列表/详情,优于全页 snapshot) |
+| `requests` / `responseBody` | 看页面已发生的 XHR/fetch 列表(可 `filter`) / 等待并读下一个匹配响应的 body(先发起再触发;读 GET JSON 优先直接 navigate 到该 URL) |
+| `recipe` / `siteguide` | 跑某站现成配方(`recipeId`+`inputs`) / 取某站内置指南(`site`,含入口/关键页/可用配方;非 sitemap.xml) |
+| `screenshot` | 仅在需要视觉确认时用 |
+| `console` / `pdf` / `upload` / `dialog` | 控制台日志 / 导出 PDF / 上传文件 / 处理原生弹窗 |

@@ -25,6 +25,7 @@ import type {
   AnthropicMessagesRequest,
   AnthropicToolChoice,
   ResponsesContentPart,
+  ResponsesFunctionTool,
   ResponsesInputItem,
   ResponsesRequest,
   ResponsesServerTool,
@@ -240,6 +241,31 @@ function budgetToEffort(thinking: AnthropicMessagesRequest['thinking']): 'low' |
   return 'high';
 }
 
+/**
+ * 解析最终下发的 `tool_choice`,在**不动摇工具声明**的前提下尽量保住「强制调用本地工具」语义。
+ *
+ * Anthropic `tool_choice:{type:'any'}` → Responses `required`,意为「必须调用所提供工具之一」。
+ * 但 Responses 的 required 作用于**整个** tools 数组:同时声明了服务端工具(如 x_search)时,
+ * 上游可以靠跑一次搜索就满足 required,调用方强制要的那次本地 function call 永远不发生。
+ *
+ * 处理方式是收窄 tool_choice、而不是把服务端工具摘掉(摘掉会破坏 tools 前缀的跨轮稳定性):
+ *   - 恰好只有一个 function tool → 直接指名它,语义完全等价且不可能被服务端工具顶替;
+ *   - 有多个 function tool → Responses 无法表达「required 但只限这几个」,保留 required。
+ *     残余风险:模型可能用服务端工具满足 required。相比让 tools 声明在会话中途变动(缓存全程
+ *     失效、且违反 §3.1),这里选择保留声明稳定性并接受该残余风险。
+ *   - `{type:'tool',name}` / `auto` / `none` 本就不会被服务端工具顶替,原样透传。
+ */
+function resolveToolChoice(
+  raw: AnthropicToolChoice | undefined,
+  functionTools: ResponsesFunctionTool[],
+  hasServerSideTools: boolean,
+): ResponsesToolChoice | undefined {
+  const choice = toolChoiceToResponses(raw);
+  if (choice !== 'required' || !hasServerSideTools) return choice;
+  if (functionTools.length === 1) return { type: 'function', name: functionTools[0].name };
+  return choice;
+}
+
 /** Responses 端点接受的 reasoning effort 档(codex / api.x.ai 通用)。 */
 export type ResponsesReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
 
@@ -298,27 +324,24 @@ export function translateRequest(
     input.push(...messageToInputItems(msg, reasoningReplay));
   }
 
-  const functionTools: ResponsesTool[] = (req.tools ?? []).map((t) => ({
+  // 显式用 ResponsesFunctionTool(而非放宽后的 ResponsesTool 联合):function tool 的
+  // name / parameters 等必填字段要在编译期被校验,别被服务端工具那个 `type: string`
+  // 兜底分支放过去。
+  const functionTools: ResponsesFunctionTool[] = (req.tools ?? []).map((t) => ({
     type: 'function',
     name: t.name,
     description: t.description,
     strict: false,
     parameters: t.input_schema ?? { type: 'object', properties: {} },
   }));
-  const toolChoice = toolChoiceToResponses(req.tool_choice);
-  // Anthropic `tool_choice:{type:'any'}` → Responses `required`,语义是「必须调用所提供工具
-  // 之一」。而 Responses 的 required 作用于**整个** tools 数组:附加服务端工具后,上游可以
-  // 靠跑一次 x_search 就满足 required,调用方强制要的那次本地 function call 永远不发生
-  // ——用 any 逼出客户端工具调用的流程会被静默打断。这种强制轮宁可不带服务端工具:
-  // 少一次搜索只是能力打折,丢掉被强制的工具调用是行为错误。
-  //
-  // 只对 required 生效:`{type:'tool',name}` 指名到具体 function、`auto` / `none` 都不会被
-  // 服务端工具顶替。functionTools 为空时 required 无意义(下面也不会下发 tool_choice),
-  // 不必为它牺牲搜索能力。
-  const forcedFunctionChoice = functionTools.length > 0 && toolChoice === 'required';
-  // 服务端工具恒定排在 function tools 之后:位置固定 → 请求前缀逐轮稳定(缓存友好)。
-  const serverSideTools = forcedFunctionChoice ? [] : (opts.serverSideTools ?? []);
+  // 服务端工具的声明**只由 model 决定**,不受任何单轮请求态(含 tool_choice)影响 ——
+  // 这是 BridgeProviderConfig.serverSideTools 的契约,也是 prompt 前缀稳定性的前提:
+  // 若某一轮因 tool_choice 把它摘掉、下一轮又装回来,同一会话的 tools 前缀就会来回变化,
+  // 缓存全程失效(见 docs/dev-rules/maker-core-and-agent-behavior.md §3.1)。
+  // 恒定排在 function tools 之后,位置固定。
+  const serverSideTools = opts.serverSideTools ?? [];
   const tools: ResponsesTool[] = [...functionTools, ...serverSideTools];
+  const toolChoice = resolveToolChoice(req.tool_choice, functionTools, serverSideTools.length > 0);
 
   const out: ResponsesRequest = {
     model: opts.model,

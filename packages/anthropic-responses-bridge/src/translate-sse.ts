@@ -285,15 +285,12 @@ export class SseTranslator {
       // 先登记,不开块 —— 有可见 summary 时在首个 summary delta 处开 thinking 块;
       // 无可见 summary 则在 output_item.done 处作为 redacted_thinking 整块吐。
       //
-      // 登记的同时就把本 item 占为「当前打开项」(opened=false 的占位态):不可打断语义必须
-      // 从 item 出生就生效,不能等首个 summary delta。上游**一条 summary delta 都不发**、
-      // 只在 done 时给 encrypted_content 时(实测 xai/grok 开服务端工具后的常见形态),
-      // 等 delta 才占位就等不到:后续 message item 会抢先吐完正文,本 item 的 done 再兜底成
-      // redacted_thinking,块顺序变成「正文 → 推理」——UI 上加密推理排到答案后面,
-      // 且 translate-request 回放 reasoning 的顺序也跟着错位(Responses 回放顺序敏感)。
-      // 占位由 item.done 释放;上游始终不发 done 时,流收尾的强制排空兜底(见 drainDeferred)。
-      this.closeOpenBlockForOtherItem(outputIndex, out);
-      this.openOutputIndex = outputIndex;
+      // 刻意**不**在这里把本 item 占为「当前打开项」。曾经试过(为了让零 summary delta 的
+      // 加密推理块排在正文之前),但 `response.output_text.delta` 属于 DEFERRABLE_TYPES:
+      // 一旦这里占位,「reasoning added → 正文全部吐完 → reasoning done」这种上游序列会把
+      // **整个可见答案**缓冲到 reasoning done 才一次性放出 —— 长搜索轮看起来完全卡死。
+      // 用户可见的流式输出优先于加密推理块的相对位置:该块本就没有明文、renderer 也不展示
+      // (见 makerChatStore 的 redacted 过滤),排在正文之后不产生任何可见后果。
       this.blocks.set(outputIndex, { blockIndex: -1, kind: 'thinking', opened: false });
     } else if (itemType === 'message') {
       // 先登记,不开块 —— 首个非空 output_text.delta 时才开 text 块。曾经在

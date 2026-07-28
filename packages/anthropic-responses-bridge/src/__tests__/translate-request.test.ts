@@ -197,9 +197,10 @@ describe('translateRequest', () => {
     expect(out.tool_choice).toBe('auto');
   });
 
-  it('tool_choice:any(→required)时不附加服务端工具,保住「必须调用调用方 function」的语义', () => {
+  it('tool_choice:any + 唯一 function tool → 收窄成指名该 function,工具声明不动', () => {
     // required 作用于整个 tools 数组:带上 x_search 的话上游可以只跑搜索就满足 required,
-    // 调用方强制要的那次本地 function call 永远不发生。
+    // 调用方强制要的那次本地 function call 永远不发生。解法是收窄 tool_choice,
+    // 而不是摘掉服务端工具——后者会让 tools 前缀在会话中途变动、prompt 缓存全程失效。
     const out = translateRequest(
       {
         model: 'xai/grok-4.5',
@@ -209,10 +210,41 @@ describe('translateRequest', () => {
       },
       { model: 'grok-4.5', serverSideTools: [{ type: 'x_search' }] },
     );
+    expect(out.tool_choice).toEqual({ type: 'function', name: 'f' });
+    // 服务端工具照常声明:它只由 model 决定,不因某一轮的 tool_choice 增删。
+    expect(out.tools?.at(-1)).toEqual({ type: 'x_search' });
+  });
+
+  it('tool_choice:any + 多个 function tool → 保留 required,工具声明仍不动(前缀稳定优先)', () => {
+    // Responses 无法表达「required 但只限这几个」;此时保留 required 并接受残余风险,
+    // 不为它牺牲 tools 声明的跨轮稳定性。
+    const out = translateRequest(
+      {
+        model: 'xai/grok-4.5',
+        tools: [
+          { name: 'f1', input_schema: { type: 'object', properties: {} } },
+          { name: 'f2', input_schema: { type: 'object', properties: {} } },
+        ],
+        tool_choice: { type: 'any' },
+        messages: [],
+      },
+      { model: 'grok-4.5', serverSideTools: [{ type: 'x_search' }] },
+    );
     expect(out.tool_choice).toBe('required');
-    expect(out.tools).toEqual([
-      { type: 'function', name: 'f', description: undefined, strict: false, parameters: { type: 'object', properties: {} } },
-    ]);
+    expect(out.tools?.at(-1)).toEqual({ type: 'x_search' });
+  });
+
+  it('没有服务端工具时 tool_choice:any 原样保持 required(不做多余收窄)', () => {
+    const out = translateRequest(
+      {
+        model: 'chatgpt/gpt-5.5',
+        tools: [{ name: 'f', input_schema: { type: 'object', properties: {} } }],
+        tool_choice: { type: 'any' },
+        messages: [],
+      },
+      { model: 'gpt-5.5' },
+    );
+    expect(out.tool_choice).toBe('required');
   });
 
   it('tool_choice 指名具体 function / auto 时仍附加服务端工具(不会被顶替)', () => {
@@ -240,7 +272,7 @@ describe('translateRequest', () => {
     expect(auto.tools?.at(-1)).toEqual({ type: 'x_search' });
   });
 
-  it('tool_choice:any 但请求没带 function tool → required 无意义,服务端工具照常下发', () => {
+  it('tool_choice:any 但请求没带 function tool → 服务端工具照常下发,且不发 tool_choice', () => {
     const out = translateRequest(
       { model: 'xai/grok-4.5', tool_choice: { type: 'any' }, messages: [] },
       { model: 'grok-4.5', serverSideTools: [{ type: 'x_search' }] },

@@ -648,7 +648,26 @@ function sanitizeXaiTools(body: Record<string, unknown>): Record<string, unknown
  * Grok 也拿不到 X 的实时视野(见 xai-server-side-tools.ts)。补在**已有 tools 末尾**:
  * 位置固定 + 只由 model 决定 → 同一会话逐轮请求的 tools 列表恒定,不破坏前缀稳定性。
  * 上游已经带了同名工具(用户/Codex 自己声明过)则原样保留,不重复也不覆盖其参数。
+ *
+ * `tool_choice:'required'`(必须调用所提供工具之一)的处理与 bridge 侧同口径:required 作用于
+ * 整个 tools 数组,附加服务端工具后模型可能用 x_search 顶替调用方强制要的 function call。
+ * 这里同样**不**因此摘掉工具声明(那会让 tools 前缀在会话中途变动),而是在能精确表达时把
+ * tool_choice 收窄成指名唯一那个 function;有多个 function tool 时 Responses 无法表达
+ * 「required 但只限这几个」,保留 required 并接受该残余风险。
  */
+function narrowXaiForcedToolChoice(
+  body: Record<string, unknown>,
+  tools: unknown[],
+): Record<string, unknown> | null {
+  if (body.tool_choice !== 'required') return null;
+  const functionTools = tools.filter(
+    (tool) => isPlainObject(tool) && tool.type === 'function' && typeof tool.name === 'string',
+  );
+  if (functionTools.length !== 1) return null;
+  const only = functionTools[0] as Record<string, unknown>;
+  return { ...body, tool_choice: { type: 'function', name: only.name } };
+}
+
 function ensureXaiServerSideTools(body: Record<string, unknown>): Record<string, unknown> | null {
   const realModel = xaiRealModelId(body.model);
   if (!realModel) return null;
@@ -660,9 +679,12 @@ function ensureXaiServerSideTools(body: Record<string, unknown>): Record<string,
     existing.map((tool) => (isPlainObject(tool) && typeof tool.type === 'string' ? tool.type : '')),
   );
   const missing = serverTools.filter((tool) => !declaredTypes.has(tool.type));
-  if (missing.length === 0) return null;
-
-  return { ...body, tools: [...existing, ...missing] };
+  // 工具已齐时仍要判 tool_choice 收窄:x_search 可能是上游自己声明的。
+  const nextTools = missing.length > 0 ? [...existing, ...missing] : existing;
+  const withTools = missing.length > 0 ? { ...body, tools: nextTools } : body;
+  const narrowed = narrowXaiForcedToolChoice(withTools, nextTools);
+  if (narrowed) return narrowed;
+  return missing.length > 0 ? withTools : null;
 }
 
 /**

@@ -741,6 +741,50 @@ describe('codex proxy host', () => {
       expect(out.tools).toEqual([{ type: 'x_search', from_date: '2026-07-01', to_date: '2026-07-28' }]);
     });
 
+    it('tool_choice:required + 唯一 function tool → 收窄成指名该 function,x_search 仍照常声明', async () => {
+      // required 作用于整个 tools 数组,附加 x_search 后模型可能用搜索顶替被强制的 function
+      // call。与 bridge 侧同口径:收窄 tool_choice,不摘工具声明(摘了会让前缀中途变动)。
+      const out = (await runXaiTransforms('forced-single', {
+        model: 'xai/grok-4.5',
+        tools: [{ type: 'function', name: 'read_file' }],
+        tool_choice: 'required',
+        input: [{ role: 'user', content: 'hi' }],
+      })) as Record<string, unknown>;
+
+      expect(out.tool_choice).toEqual({ type: 'function', name: 'read_file' });
+      expect(out.tools).toEqual([{ type: 'function', name: 'read_file' }, { type: 'x_search' }]);
+    });
+
+    it('tool_choice:required + 多个 function tool → 保留 required(Responses 无法表达子集限定)', async () => {
+      const out = (await runXaiTransforms('forced-multi', {
+        model: 'xai/grok-4.5',
+        tools: [
+          { type: 'function', name: 'read_file' },
+          { type: 'function', name: 'write_file' },
+        ],
+        tool_choice: 'required',
+        input: [{ role: 'user', content: 'hi' }],
+      })) as Record<string, unknown>;
+
+      expect(out.tool_choice).toBe('required');
+      expect(out.tools).toEqual([
+        { type: 'function', name: 'read_file' },
+        { type: 'function', name: 'write_file' },
+        { type: 'x_search' },
+      ]);
+    });
+
+    it('tool_choice:auto 不被改写', async () => {
+      const out = (await runXaiTransforms('auto-choice', {
+        model: 'xai/grok-4.5',
+        tools: [{ type: 'function', name: 'read_file' }],
+        tool_choice: 'auto',
+        input: [{ role: 'user', content: 'hi' }],
+      })) as Record<string, unknown>;
+
+      expect(out.tool_choice).toBe('auto');
+    });
+
     it.each(['xai/grok-code-fast', 'xai/grok-build-preview'])(
       '编码模型 %s 不注入(该系列没有 agentic 搜索工具面,带上会被上游拒)',
       async (model) => {

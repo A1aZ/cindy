@@ -573,29 +573,40 @@ describe('SseTranslator', () => {
     expect((starts[0].data.content_block as Record<string, unknown>).data).toBe('#id=rs_1#ENC');
   });
 
-  it('reasoning 一条 summary delta 都不发且与 message 交错 → 占位仍在,redacted_thinking 排在正文之前', () => {
+  it('reasoning 一条 summary delta 都不发时,正文照常流式吐出,不被缓冲到 reasoning done', () => {
     // xai/grok 开服务端工具(x_search)后的实测形态:reasoning item 只有 added / done,
-    // 中间不发任何 summary delta。占位若等首个 delta 就永远等不到 —— 正文会抢先吐完,
-    // 加密推理块被挤到答案后面(UI 上「无法显示的思考过程」出现在结果之后)。
-    const out = run([
-      { type: 'response.created', response: { id: 'r', model: 'grok-4.5' } },
-      { type: 'response.output_item.added', output_index: 0, item: { id: 'rs_1', type: 'reasoning' } },
-      // reasoning 未 done,message item 直接插进来吐正文:必须 defer
-      { type: 'response.output_item.added', output_index: 1, item: { type: 'message' } },
-      { type: 'response.output_text.delta', output_index: 1, delta: '答案正文' },
+    // 中间不发任何 summary delta,且可能到整轮末尾才 done。
+    // 这里锁定的性质是「可见答案不许被扣住」:曾经为了把加密推理块排到正文之前,在
+    // output_item.added 处给 reasoning 占位,结果 output_text.delta(属 DEFERRABLE_TYPES)
+    // 被全量缓冲,长搜索轮看起来完全卡死。加密推理块没有明文、renderer 也不展示,
+    // 它排在正文之后没有可见后果 —— 流式性优先。
+    const t = new SseTranslator('xai/grok-4.5');
+    const created = t.push({ type: 'response.created', response: { id: 'r', model: 'grok-4.5' } });
+    const reasoningAdded = t.push({ type: 'response.output_item.added', output_index: 0, item: { id: 'rs_1', type: 'reasoning' } });
+    const msgAdded = t.push({ type: 'response.output_item.added', output_index: 1, item: { type: 'message' } });
+    // 关键:reasoning 尚未 done,这条 text delta 必须**立刻**吐出去,不能进 deferred 队列。
+    const textDelta = t.push({ type: 'response.output_text.delta', output_index: 1, delta: '答案正文' });
+
+    const textDeltaOut = textDelta.filter(
+      (e) => e.event === 'content_block_delta' && (e.data.delta as Record<string, unknown>).type === 'text_delta',
+    );
+    expect(textDeltaOut).toHaveLength(1);
+    expect((textDeltaOut[0].data.delta as Record<string, unknown>).text).toBe('答案正文');
+
+    const rest = [
       { type: 'response.output_item.done', output_index: 1, item: { type: 'message' } },
       { type: 'response.output_item.done', output_index: 0, item: { id: 'rs_1', type: 'reasoning', encrypted_content: 'ENC', summary: [] } },
       { type: 'response.completed', response: { status: 'completed', usage: { input_tokens: 1, output_tokens: 1 } } },
-    ]);
+    ].flatMap((ev) => t.push(ev));
+
+    const out = [...created, ...reasoningAdded, ...msgAdded, ...textDelta, ...rest];
     assertSequentialBlocks(out);
+    // 加密推理仍然完整保留(供 translate-request 回放),只是排在正文之后。
     const starts = byType(out, 'content_block_start');
-    expect(starts.map((e) => (e.data.content_block as Record<string, unknown>).type)).toEqual(['redacted_thinking', 'text']);
-    expect((starts[0].data.content_block as Record<string, unknown>).data).toBe('#id=rs_1#ENC');
-    // 正文不因 defer 而丢字。
-    const textDelta = byType(out, 'content_block_delta').find(
-      (e) => (e.data.delta as Record<string, unknown>).type === 'text_delta',
-    );
-    expect((textDelta?.data.delta as Record<string, unknown>).text).toBe('答案正文');
+    expect(starts.map((e) => (e.data.content_block as Record<string, unknown>).type)).toEqual(['text', 'redacted_thinking']);
+    const redacted = starts.find((e) => (e.data.content_block as Record<string, unknown>).type === 'redacted_thinking');
+    // 带 provider 前缀(构造用的是 xai/ 模型),出处过滤靠它。
+    expect((redacted!.data.content_block as Record<string, unknown>).data).toBe('xai/#id=rs_1#ENC');
   });
 
   it('reasoning 只发纯空白 summary delta → 不开 thinking 块,encrypted_content 走 redacted_thinking', () => {

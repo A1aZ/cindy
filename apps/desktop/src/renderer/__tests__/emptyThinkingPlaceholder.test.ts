@@ -44,6 +44,30 @@ describe('isOmittedThinkingPlaceholder', () => {
   });
 });
 
+describe('isNonAnchorHistoryRow — 历史初始页 backfill 判定', () => {
+  const isNonAnchor = makerChatStore.__isNonAnchorHistoryRowForTest;
+
+  it('被隐藏的 thinking 行算无锚点(否则整页被过滤后不会触发补页)', () => {
+    // 一轮搜索密集、产出可见正文前就失败的会话,最新 50 行可能全是加密推理:
+    // 映射结果为空 → MessageStream 不自动翻页 → 更老的消息再也拉不回来。
+    expect(isNonAnchor(thinkingRow('t-red', { kind: 'thinking', text: '', durationMs: 0, isRedacted: true }))).toBe(true);
+    expect(isNonAnchor(thinkingRow('t-empty', { kind: 'thinking', text: '', durationMs: 0, isRedacted: false }))).toBe(true);
+  });
+
+  it('有明文或有时长的 thinking 行是可见锚点,不触发补页', () => {
+    expect(isNonAnchor(thinkingRow('t-text', { kind: 'thinking', text: 'real reasoning', durationMs: 0, isRedacted: false }))).toBe(false);
+    expect(isNonAnchor(thinkingRow('t-dur', { kind: 'thinking', text: '', durationMs: 900, isRedacted: false }))).toBe(false);
+  });
+
+  it('tool_result 仍算无锚点(orphan 会被丢弃),普通消息不算', () => {
+    const row = (role: string): Message =>
+      ({ id: 'r', clientId: 'c', sessionId: SESSION_ID, role, content: 'hi', createdAt: '2026-07-02T00:00:00.000Z' } as unknown as Message);
+    expect(isNonAnchor(row('tool_result'))).toBe(true);
+    expect(isNonAnchor(row('assistant'))).toBe(false);
+    expect(isNonAnchor(row('user'))).toBe(false);
+  });
+});
+
 describe('handleStreamEvent — omitted thinking placeholder (live)', () => {
   it('drops a final-only empty thinking block (no start, durationMs=0)', () => {
     const next = handleStreamEvent(EMPTY_SESSION_STATE, {

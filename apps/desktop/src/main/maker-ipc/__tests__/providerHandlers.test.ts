@@ -216,6 +216,59 @@ describe('model-disable:set handler', () => {
     expect(deps.setModelsDisabled).toHaveBeenCalledWith('retired', ['gone-model'], false);
   });
 
+  it('写入串行:先到的停用(等目录校验)不被后到的启用超车,最后一次操作赢', async () => {
+    const harness = new IpcHarness();
+    const order: string[] = [];
+    let releaseCatalog!: () => void;
+    const catalogGate = new Promise<void>((resolve) => {
+      releaseCatalog = resolve;
+    });
+    const deps = makeDeps({
+      // 停用请求要等目录校验;启用(删条目)不查目录 —— 不串行时启用会先落盘。
+      listProviders: async () => {
+        await catalogGate;
+        return xdCatalog();
+      },
+      setModelsDisabled: vi.fn((_p: string, _ids: readonly string[], disabled: boolean) => {
+        order.push(disabled ? 'disable' : 'enable');
+      }),
+    });
+    registerProviderHandlers(harness, deps);
+
+    const disableReq = harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+      kind: 'model', providerId: 'xd', modelIds: ['claude-opus-5'], disabled: true,
+    });
+    const enableReq = harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+      kind: 'model', providerId: 'xd', modelIds: ['claude-opus-5'], disabled: false,
+    });
+    await Promise.resolve();
+    expect(order).toEqual([]); // 启用被队列挡在停用后面,而不是抢先落盘
+    releaseCatalog();
+    await Promise.all([disableReq, enableReq]);
+    expect(order).toEqual(['disable', 'enable']);
+  });
+
+  it('落盘异常 → 结构化 INTERNAL,不把文件系统细节透过 IPC 边界', async () => {
+    const harness = new IpcHarness();
+    const deps = makeDeps({
+      listProviders: async () => xdCatalog(),
+      setModelsDisabled: vi.fn(() => {
+        throw new Error('EACCES: permission denied, rename /Users/x/userData/model-disable-prefs.json');
+      }),
+    });
+    registerProviderHandlers(harness, deps);
+
+    const req = harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+      kind: 'model', providerId: 'xd', modelIds: ['claude-opus-5'], disabled: true,
+    });
+    await expect(req).rejects.toThrow(/INTERNAL/);
+    await req.catch((err: unknown) => {
+      expect(String(err)).not.toContain('EACCES');
+      expect(String(err)).not.toContain('userData');
+    });
+    expect(deps.broadcastChanged).not.toHaveBeenCalled();
+  });
+
   it('provider 形态:写供应商级停用并广播', async () => {
     const harness = new IpcHarness();
     const deps = makeDeps();

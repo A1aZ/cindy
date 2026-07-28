@@ -89,3 +89,33 @@ export function checkModelRoute(
     ? { kind: 'reroute', providerId: alternative }
     : { kind: 'reject', reason: 'model-disabled' };
 }
+
+/**
+ * 「宽松降级」口径的路由解析(纯逻辑),给 main 侧自动化直建会话用(IM control:new /
+ * learn 蒸馏):这些入口不是用户即时交互,reject 不该让整个流程失败,而是逐级退让
+ * (PR #744 review 第五轮):
+ *   ① 原样可用 ⇒ 原样;
+ *   ② 隐式默认落点被停用但有启用替代 ⇒ 显式落替代来源;
+ *   ③ 显式来源被停用但模型本身仍可路由 ⇒ 丢弃来源保模型(隐式默认 / 替代);
+ *   ④ 模型所有拷贝被停用 / 能力模型 ⇒ 连模型一起丢弃(交回 agent 默认路由)。
+ * `degraded` = 有任何用户保存值被丢弃(调用方据此 warn 留痕)。
+ */
+export function resolveLenientRoute(
+  views: readonly ProviderView[],
+  agent: AgentKind,
+  model: string | undefined,
+  providerId: string | null,
+): { model?: string; providerId: string | null; degraded: boolean } {
+  if (!model) return { model, providerId, degraded: false };
+  let verdict = checkModelRoute(views, agent, model, providerId);
+  if (verdict.kind === 'pass') return { model, providerId, degraded: false };
+  if (verdict.kind === 'reroute') return { model, providerId: verdict.providerId, degraded: false };
+  if (providerId) {
+    verdict = checkModelRoute(views, agent, model, null);
+    if (verdict.kind === 'pass') return { model, providerId: null, degraded: true };
+    if (verdict.kind === 'reroute') {
+      return { model, providerId: verdict.providerId, degraded: true };
+    }
+  }
+  return { model: undefined, providerId: null, degraded: true };
+}

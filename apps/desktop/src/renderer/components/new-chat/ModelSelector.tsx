@@ -45,7 +45,7 @@ import { useProviderModelMemoryVersion } from '@/state/providerModelMemory';
 import { useDeviceLinkModelMirrorVersion } from '@/state/deviceLinkModelMirror';
 import {
   connectedProvidersForAgent,
-  effectiveSourceIdForModel,
+  actualSourceIdForModel,
   getModel,
   modelSupportsFastMode,
   providerOffersModel,
@@ -683,10 +683,14 @@ function ModelSelectorContentView({
   }, [sourcesEnabled, providers, currentAgentKind, excludeChatBridgedCodex]);
   // 生效来源必须按当前模型收窄。只按 agent 从 connected 里兜底，会在 XD key 缺失但
   // OpenAI 已连接时拼出「OpenAI 图标 + Opus」这种不存在的路由。
+  // 用「实际路由口径」(actualSourceIdForModel,不剔除停用拷贝):这里描述的是**当前
+  // 会话正在用的来源**——运行中的会话不因停用打断,实际请求仍走原来源;若按准入过滤
+  // 后解析,图标/价格/Fast/选中行豁免会显示成替代来源,与真实扣费路由不符
+  // (PR #744 review 第五轮)。新路由选择(行点击/浏览)另走 connected 分段,不受影响。
   const activeSourceId = useMemo(
     () =>
       currentAgentKind
-        ? effectiveSourceIdForModel(providers, currentProviderId, modelId, currentAgentKind)
+        ? actualSourceIdForModel(providers, currentProviderId, modelId, currentAgentKind)
         : null,
     [providers, currentProviderId, modelId, currentAgentKind],
   );
@@ -695,10 +699,11 @@ function ModelSelectorContentView({
   // Fast 能力是 per-(provider, agent) 的(见 CatalogModel)：按该行供应商现查它自己的模型条目,
   // 同一 model id 在不同供应商下可不同(如某网关剥掉 fast 字段 ⇒ 那家配 false)。providerId 为 null
   // (flat / device-link 退化)回退 activeSourceId;取不到供应商 / 该来源不提供此模型 ⇒ false。
-  // cc / codex 同一套门控,仅各供应商的配置数据不同。
+  // cc / codex 同一套门控,仅各供应商的配置数据不同。查找用全量 providers:activeSourceId
+  // 可能指向 suspended 来源(实际路由口径),connected 里查不到会误判 Fast 不可用。
   const fastEditable = (providerId: string | null, m: RowModel): boolean => {
     if (!onFastModeChange || !hasFastModeCap || !currentAgentKind) return false;
-    const provider = connected.find((p) => p.id === (providerId ?? activeSourceId));
+    const provider = providers.find((p) => p.id === (providerId ?? activeSourceId));
     return modelSupportsFastMode(provider, m.id, currentAgentKind);
   };
 
@@ -713,7 +718,7 @@ function ModelSelectorContentView({
     const effectiveProviderId =
       providerId ??
       (currentAgentKind
-        ? effectiveSourceIdForModel(providers, currentProviderId, id, currentAgentKind)
+        ? actualSourceIdForModel(providers, currentProviderId, id, currentAgentKind)
         : null);
     const quote = getModelPriceQuote(pricing, effectiveProviderId, id);
     if (effectiveProviderId === 'xd' && (!quote || quote.source === 'gateway')) {
@@ -1005,7 +1010,7 @@ function ModelSelectorContentView({
     if (!editingModel || !currentAgentKind) return undefined;
     const providerId =
       editingProviderId ??
-      effectiveSourceIdForModel(providers, currentProviderId, editingModel.id, currentAgentKind);
+      actualSourceIdForModel(providers, currentProviderId, editingModel.id, currentAgentKind);
     return providerId ? providers.find((provider) => provider.id === providerId) : undefined;
   }, [editingModel, currentAgentKind, editingProviderId, providers, currentProviderId]);
   const editingPricePresentation = editingModel
@@ -1695,7 +1700,7 @@ export function ModelSelector({
   const activeSourceId = useMemo<string | null>(
     () =>
       currentAgentKind
-        ? effectiveSourceIdForModel(providers, currentProviderId, modelId, currentAgentKind)
+        ? actualSourceIdForModel(providers, currentProviderId, modelId, currentAgentKind)
         : null,
     [providers, currentAgentKind, currentProviderId, modelId],
   );

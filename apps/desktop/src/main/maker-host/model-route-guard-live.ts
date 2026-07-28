@@ -16,7 +16,11 @@ import {
 } from '@cindy/model-providers';
 
 import { getDesktopProviderService } from './createDesktopProviderService.js';
-import { checkModelRoute, type ModelRouteVerdict } from './model-route-guard.js';
+import {
+  checkModelRoute,
+  resolveLenientRoute,
+  type ModelRouteVerdict,
+} from './model-route-guard.js';
 
 export async function verdictForModelRoute(
   agent: AgentKind,
@@ -33,6 +37,24 @@ export async function verdictForModelRoute(
 }
 
 /**
+ * resolveLenientRoute 的桌面接线壳(语义见 model-route-guard.ts 头注):IM control:new /
+ * learn 蒸馏等自动化直建会话入口用。目录读取失败按「原样放行」处理。
+ */
+export async function resolveLenientSessionRoute(
+  agent: AgentKind,
+  model: string | undefined,
+  providerId: string | null,
+): Promise<{ model?: string; providerId: string | null; degraded: boolean }> {
+  let views: ProviderView[];
+  try {
+    views = await getDesktopProviderService().listProviders();
+  } catch {
+    return { model, providerId, degraded: false };
+  }
+  return resolveLenientRoute(views, agent, model, providerId);
+}
+
+/**
  * agent one-shot 兜底(help / 会话摘要)是否被停用轴挡住。
  * 带具体模型时走完整裁决;不带模型(agent 默认一击)按「该 agent 的原生默认来源
  * 被停用」判 —— 无模型的一击走 agent 原生默认路由,来源级 suspended 即不可发。
@@ -42,7 +64,9 @@ export async function isAgentOneShotRouteDisabled(
   model?: string,
 ): Promise<boolean> {
   if (model) {
-    return (await verdictForModelRoute(agent, model, null)).kind === 'reject';
+    // reroute 同样视为不可发:one-shot 无法携带显式 providerId,实际派发仍会落在
+    // 被停用的隐式默认来源上 —— 只有 pass 才允许(PR #744 review 第五轮)。
+    return (await verdictForModelRoute(agent, model, null)).kind !== 'pass';
   }
   let views: ProviderView[];
   try {

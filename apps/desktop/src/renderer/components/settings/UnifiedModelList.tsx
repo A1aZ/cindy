@@ -332,6 +332,11 @@ export function UnifiedModelList({
         })
         .catch(() => {
           setPendingDisabled((prev) => {
+            // 只回滚仍属于本次请求的乐观态:IPC 在途期间用户可能又点了反向操作
+            // (覆盖了 prev[row.id]),无条件删除会把**后一次**的乐观态一并清掉,
+            // UI 回跳旧快照(PR #744 review 第五轮)。值已不同 = 已被更晚的操作
+            // 接管,本次失败的回滚不再适用。
+            if (prev[row.id] !== disabled) return prev;
             const next = { ...prev };
             delete next[row.id];
             return next;

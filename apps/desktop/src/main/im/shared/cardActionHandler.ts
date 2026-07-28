@@ -27,6 +27,7 @@ import { requiresFullAccessConfirmation } from '@cindy/maker-shared/permission-m
 
 import { createLogger } from '../../logger';
 import { getMaker } from '../../maker-host';
+import { resolveLenientSessionRoute } from '../../maker-host/model-route-guard-live';
 import {
   getSessionProvider,
   normalizeSessionProviderId,
@@ -816,6 +817,20 @@ export function createCardActionHandler(
     );
 
     const desktopPrefs = getDesktopCcPrefs() ?? DESKTOP_CC_DEFAULTS;
+    // 停用轴准入(PR #744 review 第五轮):IM 新建会话是新的付费路由,desktop 偏好里
+    // 保存的 model/provider 可能已被用户停用 —— 宽松降级:被停用的显式来源/模型逐级
+    // 丢弃(退回 agent 默认路由),隐式默认被停用时显式落替代来源;不因停用让 IM
+    // 新建流程整体失败。
+    const route = await resolveLenientSessionRoute(
+      'claude-code',
+      desktopPrefs.model,
+      desktopPrefs.providerId ?? null,
+    );
+    if (route.degraded) {
+      log.warn(
+        `control:new saved route degraded (disabled in settings): model=${desktopPrefs.model} providerId=${desktopPrefs.providerId ?? 'null'}`,
+      );
+    }
     const closeCreatedSessionAfterSetupFailure = async (sessionId: string): Promise<void> => {
       try {
         await getMaker().closeSession(sessionId);
@@ -824,15 +839,17 @@ export function createCardActionHandler(
         log.warn(`control:new cleanup created session failed: ${msg}`);
       }
     };
-    const persistCreatedSessionProvider = async (sessionId: string): Promise<void> => {
-      const providerId = desktopPrefs.providerId ?? null;
+    const persistCreatedSessionProvider = async (session: {
+      id: string;
+      model: string;
+    }): Promise<void> => {
       await updateModelEffort(
-        sessionId,
-        desktopPrefs.model,
+        session.id,
+        route.model ?? session.model,
         desktopPrefs.effort as Effort,
-        providerId,
+        route.providerId,
       );
-      setSessionProvider(sessionId, providerId);
+      setSessionProvider(session.id, route.providerId);
     };
 
     // ── threadScoped: 新建 + 接管 → 顶层 root 卡 + thread ────────────────────
@@ -843,15 +860,16 @@ export function createCardActionHandler(
         const newSession = await getMaker().createSession({
           agentKind: 'claude-code',
           workingDir,
-          model: desktopPrefs.model,
-          providerId: desktopPrefs.providerId ?? undefined,
+          // 降级 ④(模型所有拷贝被停用)兜底回本入口承诺的 desktop 默认模型。
+          model: route.model ?? DESKTOP_CC_DEFAULTS.model,
+          providerId: route.providerId ?? undefined,
           effort: desktopPrefs.effort as Effort,
           permissionMode: desktopPrefs.permissionMode as PermissionMode,
           fastMode: desktopPrefs.fastMode,
           title: FBOT_DRAFT_TITLE,
         });
         created = newSession.id;
-        await persistCreatedSessionProvider(newSession.id);
+        await persistCreatedSessionProvider(newSession);
         await touchUserSent(newSession.id);
         broadcastSessionCreated(newSession.id);
       } catch (err) {
@@ -925,15 +943,16 @@ export function createCardActionHandler(
       const newSession = await getMaker().createSession({
         agentKind: 'claude-code',
         workingDir,
-        model: desktopPrefs.model,
-        providerId: desktopPrefs.providerId ?? undefined,
+        // 降级 ④(模型所有拷贝被停用)兜底回本入口承诺的 desktop 默认模型。
+        model: route.model ?? DESKTOP_CC_DEFAULTS.model,
+        providerId: route.providerId ?? undefined,
         effort: desktopPrefs.effort as Effort,
         permissionMode: desktopPrefs.permissionMode as PermissionMode,
         fastMode: desktopPrefs.fastMode,
         title: FBOT_DRAFT_TITLE,
       });
       newSessionId = newSession.id;
-      await persistCreatedSessionProvider(newSession.id);
+      await persistCreatedSessionProvider(newSession);
       // bump userSendAt = now, 让 sidebar 直接把这条 session 落到 workingDir
       // 对应的 Project group 下, 而不是判定成"草稿"挂在 Projects 这一级根。
       // 草稿规则 (projectGrouping.ts): workingDir 缺失 OR (userSendAt == null

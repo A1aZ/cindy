@@ -1396,7 +1396,34 @@ export class MakerScheduleRunner implements ScheduleRunner {
       explicitModel ?? (baseline.model?.trim() ? baseline.model : defaultModelFor(schedule.agentKind));
     const explicitProviderId = schedule.providerId?.trim() ? schedule.providerId.trim() : null;
     const currentProviderId = getSessionProvider(live.id) ?? baseline.providerId;
-    const nextProviderId = explicitProviderId ?? currentProviderId;
+    // 停用轴准入(PR #744 review 第五轮):排队分支在 fire 主路径的准入点之前早退,
+    // 必须**无条件**按「将要应用的路由」= (targetModel, explicitProviderId) 裁决 ——
+    // 不能只在改模型时查、更不能把显式来源丢成 null 去查隐式默认:schedule 保持
+    // 当前模型但指定了已停用来源时,旧写法会完全跳过校验、下面照样把停用来源
+    // setSessionProvider 进会话。reject ⇒ 本轮完全保持 live 现有路由(模型/来源都
+    // 不动,不打断在跑会话),warn 留痕;隐式默认被停用且有启用替代 ⇒ 显式落替代。
+    let routeRejected = false;
+    let applyProviderId = explicitProviderId;
+    if (this.deps.checkModelRoute) {
+      const verdict = await this.deps.checkModelRoute(
+        live.agentKind,
+        targetModel,
+        explicitProviderId,
+      );
+      if (verdict.kind === 'reject') {
+        routeRejected = true;
+        applyProviderId = null;
+        this.deps.logger.warn?.(
+          '[runner] queued heartbeat route disabled in settings; keeping live routing',
+          { scheduleId: schedule.id, targetModel, explicitProviderId, reason: verdict.reason },
+        );
+      } else if (verdict.kind === 'reroute' && !explicitProviderId) {
+        applyProviderId = verdict.providerId;
+      }
+    }
+    const nextProviderId = routeRejected
+      ? currentProviderId
+      : (applyProviderId ?? currentProviderId);
     if (
       shouldCloseSessionForCredentialSwitch({
         agentKind: live.agentKind,
@@ -1404,7 +1431,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
         currentProviderId,
         nextProviderId,
         currentModel: live.model,
-        nextModel: targetModel,
+        nextModel: routeRejected ? live.model : targetModel,
         currentCodexProxyActive: live.codexProxyActive,
       })
     ) {
@@ -1418,29 +1445,14 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // 等待期间用户可能在聊天里切了模型,schedule 显式选择必须仍以派发时刻的
     // 真实运行值为基准判断是否需要覆盖(review P2)。effort 无 live getter,
     // 仍以 baseline 判断(setEffort 幂等,误判多调一次无害)。
-    const modelChanged = explicitModel !== undefined && targetModel !== live.model;
+    const modelChanged = !routeRejected && explicitModel !== undefined && targetModel !== live.model;
     let modelApplied = true;
     if (modelChanged) {
-      // 停用轴准入(PR #744 review):排队分支在 fire 主路径的准入点之前早退,切换
-      // 目标要单独过裁决 —— 被停用则跳过切换、继续跑 live 当前模型(不打断在跑
-      // 的会话),warn 留痕;下方 runtimeModel 按 live.model clamp,口径自洽。
-      if (this.deps.checkModelRoute) {
-        const verdict = await this.deps.checkModelRoute(live.agentKind, targetModel, null);
-        if (verdict.kind === 'reject') {
-          modelApplied = false;
-          this.deps.logger.warn?.(
-            '[runner] queued heartbeat target model disabled in settings; keeping live model',
-            { scheduleId: schedule.id, targetModel },
-          );
-        }
-      }
-      if (modelApplied) {
-        try {
-          await live.setModel(targetModel);
-        } catch (err) {
-          modelApplied = false;
-          this.deps.logger.warn?.('[runner] queued heartbeat setModel failed (non-fatal)', err);
-        }
+      try {
+        await live.setModel(targetModel);
+      } catch (err) {
+        modelApplied = false;
+        this.deps.logger.warn?.('[runner] queued heartbeat setModel failed (non-fatal)', err);
       }
     }
     // issue #456:排队派发路径与直发路径同口径 —— 按**实际会运行的模型**能力把 effort clamp
@@ -1478,17 +1490,19 @@ export class MakerScheduleRunner implements ScheduleRunner {
         this.deps.logger.warn?.('[runner] queued heartbeat setEffort failed (non-fatal)', err);
       }
     }
-    if (explicitProviderId) {
-      setSessionProvider(live.id, explicitProviderId);
+    // applyProviderId = 裁决后的落地来源:显式来源(通过裁决)或隐式默认被停用时的
+    // 替代来源;reject 时恒为 null(保持 live 现有来源)。
+    if (applyProviderId) {
+      setSessionProvider(live.id, applyProviderId);
     }
-    if ((modelChanged && modelApplied) || (effortChanged && effortApplied) || explicitProviderId) {
+    if ((modelChanged && modelApplied) || (effortChanged && effortApplied) || applyProviderId) {
       await backfillSessionMeta(
         this.deps.getDb(),
         live.id,
         {
           model: modelChanged && modelApplied ? targetModel : undefined,
           effort: effortChanged && effortApplied ? reconciledEffort : undefined,
-          providerId: explicitProviderId ?? undefined,
+          providerId: applyProviderId ?? undefined,
         },
         this.deps.logger,
       );

@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest';
 
 import { buildRegistry, type Catalog, type CatalogModel, type Provider } from '@cindy/model-providers';
 
-import { checkModelRoute } from '../model-route-guard.js';
+import { checkModelRoute, resolveLenientRoute } from '../model-route-guard.js';
 
 function model(id: string, extra: Partial<CatalogModel> = {}): CatalogModel {
   return { id, name: id, contextWindow: 200_000, efforts: [], defaultEffort: null, ...extra };
@@ -125,5 +125,64 @@ describe('checkModelRoute', () => {
     expect(
       checkModelRoute(views({ disabledProviders: { xd: true } }), 'claude-code', 'claude-opus-5', null),
     ).toEqual({ kind: 'reroute', providerId: 'anthropic' });
+  });
+});
+
+describe('resolveLenientRoute(自动化直建会话的宽松降级)', () => {
+  it('原样可用 ⇒ 原样;隐式默认被停用有替代 ⇒ 显式落替代(均不算 degraded)', () => {
+    expect(resolveLenientRoute(views(), 'claude-code', 'claude-opus-5', null)).toEqual({
+      model: 'claude-opus-5',
+      providerId: null,
+      degraded: false,
+    });
+    expect(
+      resolveLenientRoute(
+        views({ disabledModels: { 'xd:claude-opus-5': true } }),
+        'claude-code',
+        'claude-opus-5',
+        null,
+      ),
+    ).toEqual({ model: 'claude-opus-5', providerId: 'anthropic', degraded: false });
+  });
+
+  it('显式来源被停用但模型仍可路由 ⇒ 丢弃来源保模型(degraded)', () => {
+    // anthropic 被点名且停用;xd(隐式默认)未停用 ⇒ 丢显式来源,隐式默认接住。
+    expect(
+      resolveLenientRoute(
+        views({ disabledModels: { 'anthropic:claude-opus-5': true } }),
+        'claude-code',
+        'claude-opus-5',
+        'anthropic',
+      ),
+    ).toEqual({ model: 'claude-opus-5', providerId: null, degraded: true });
+    // 显式来源停用 + 隐式默认(xd)也停用但 anthropic…此例换:显式 xd 停用、隐式默认
+    // 落 xd 也停用、替代 anthropic 启用 ⇒ 丢显式来源后 reroute 到替代。
+    expect(
+      resolveLenientRoute(
+        views({ disabledModels: { 'xd:claude-opus-5': true } }),
+        'claude-code',
+        'claude-opus-5',
+        'xd',
+      ),
+    ).toEqual({ model: 'claude-opus-5', providerId: 'anthropic', degraded: true });
+  });
+
+  it('所有已连接拷贝被停用 ⇒ 连模型一起丢弃(交回 agent 默认路由)', () => {
+    expect(
+      resolveLenientRoute(
+        views({ disabledModels: { 'xd:claude-opus-5': true, 'anthropic:claude-opus-5': true } }),
+        'claude-code',
+        'claude-opus-5',
+        'xd',
+      ),
+    ).toEqual({ model: undefined, providerId: null, degraded: true });
+  });
+
+  it('无模型 ⇒ 原样透传(不涉裁决)', () => {
+    expect(resolveLenientRoute(views(), 'claude-code', undefined, 'xd')).toEqual({
+      model: undefined,
+      providerId: 'xd',
+      degraded: false,
+    });
   });
 });

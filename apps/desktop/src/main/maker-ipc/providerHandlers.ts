@@ -594,6 +594,12 @@ export function registerProviderHandlers(
   // 规模的宽裕倍数:单 id ≤256 字符(目录 id 实际 <64),一次 ≤512 个模型 id。
   const MAX_DISABLE_ID_LENGTH = 256;
   const MAX_DISABLE_MODEL_IDS = 512;
+  // 写入全局串行队列:成员校验里的 listProviders() 是异步的,并发放行时先到的「停用」
+  // 可能在校验等待期间被后到的「启用」(恢复 = 删条目,无目录校验、不等待)超车,
+  // 落盘顺序反转 = 用户最后一次操作被更早的请求覆盖(PR #744 review 第五轮)。
+  // 同步形状校验留在队列外(到达序执行,非法入参不占队列);写操作稀疏且轻,全局
+  // 单队列足够,不需要 per-provider 粒度。
+  let modelDisableMutationTail: Promise<unknown> = Promise.resolve();
   registry.handle(MAKER_INVOKE.MODEL_DISABLE_SET, async (event, input: unknown) => {
     assertTrustedProviderMutationSender(event);
     if (!input || typeof input !== 'object') throwIpcError('INVALID_PARAMS', 'invalid input');
@@ -606,6 +612,20 @@ export function registerProviderHandlers(
       throwIpcError('INVALID_PARAMS', 'providerId required');
     }
     if (typeof i.disabled !== 'boolean') throwIpcError('INVALID_PARAMS', 'disabled required');
+    if (i.kind !== 'model' && i.kind !== 'provider') {
+      throwIpcError('INVALID_PARAMS', 'kind must be "model" or "provider"');
+    }
+    if (
+      i.kind === 'model' &&
+      (!Array.isArray(i.modelIds) ||
+        i.modelIds.length === 0 ||
+        i.modelIds.length > MAX_DISABLE_MODEL_IDS ||
+        i.modelIds.some(
+          (id) => typeof id !== 'string' || id.length === 0 || id.length > MAX_DISABLE_ID_LENGTH,
+        ))
+    ) {
+      throwIpcError('INVALID_PARAMS', 'modelIds must be a bounded non-empty string[]');
+    }
     // 目录成员校验(仅 disabled=true 的写入):落盘的是无界 key-value 文件,尺寸校验挡
     // 不住「合法长度但不存在的 id」被批量预埋。停用必须指向当前目录里真实存在的
     // provider / model(chat 各 agent 清单 ∪ imageModels ∪ videoModels);恢复启用是
@@ -615,43 +635,51 @@ export function registerProviderHandlers(
       if (!provider) throwIpcError('INVALID_PARAMS', `unknown providerId "${providerId}"`);
       return provider;
     };
-    if (i.kind === 'model') {
-      if (
-        !Array.isArray(i.modelIds) ||
-        i.modelIds.length === 0 ||
-        i.modelIds.length > MAX_DISABLE_MODEL_IDS ||
-        i.modelIds.some(
-          (id) => typeof id !== 'string' || id.length === 0 || id.length > MAX_DISABLE_ID_LENGTH,
-        )
-      ) {
-        throwIpcError('INVALID_PARAMS', 'modelIds must be a bounded non-empty string[]');
+    // 落盘异常统一转结构化 INTERNAL:userData 只读 / 磁盘满等原始 fs 错误可能带内部
+    // 绝对路径,不过 IPC 边界;原文只进 main 日志(PR #744 review 第五轮)。
+    const persist = (write: () => void): void => {
+      try {
+        write();
+      } catch (err) {
+        log.warn('model disable override persist failed', {
+          providerId: i.providerId,
+          kind: i.kind,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throwIpcError('INTERNAL', 'failed to persist model disable override');
       }
-      const modelIds = i.modelIds as string[];
-      if (i.disabled) {
-        const provider = await requireCatalogProvider(i.providerId);
-        const known = new Set<string>();
-        for (const list of Object.values(provider.models)) {
-          for (const m of list ?? []) known.add(m.id);
+    };
+    const run = async () => {
+      if (i.kind === 'model') {
+        const modelIds = i.modelIds as string[];
+        if (i.disabled) {
+          const provider = await requireCatalogProvider(i.providerId as string);
+          const known = new Set<string>();
+          for (const list of Object.values(provider.models)) {
+            for (const m of list ?? []) known.add(m.id);
+          }
+          for (const m of provider.imageModels ?? []) known.add(m.id);
+          for (const m of provider.videoModels ?? []) known.add(m.id);
+          const unknown = modelIds.filter((id) => !known.has(id));
+          if (unknown.length > 0) {
+            throwIpcError(
+              'INVALID_PARAMS',
+              `unknown modelIds for provider "${i.providerId}": ${unknown.slice(0, 5).join(', ')}`,
+            );
+          }
         }
-        for (const m of provider.imageModels ?? []) known.add(m.id);
-        for (const m of provider.videoModels ?? []) known.add(m.id);
-        const unknown = modelIds.filter((id) => !known.has(id));
-        if (unknown.length > 0) {
-          throwIpcError(
-            'INVALID_PARAMS',
-            `unknown modelIds for provider "${i.providerId}": ${unknown.slice(0, 5).join(', ')}`,
-          );
-        }
+        persist(() => deps.setModelsDisabled(i.providerId as string, modelIds, i.disabled as boolean));
+      } else {
+        if (i.disabled) await requireCatalogProvider(i.providerId as string);
+        persist(() => deps.setProviderDisabled(i.providerId as string, i.disabled as boolean));
       }
-      deps.setModelsDisabled(i.providerId, modelIds, i.disabled);
-    } else if (i.kind === 'provider') {
-      if (i.disabled) await requireCatalogProvider(i.providerId);
-      deps.setProviderDisabled(i.providerId, i.disabled);
-    } else {
-      throwIpcError('INVALID_PARAMS', 'kind must be "model" or "provider"');
-    }
-    deps.broadcastChanged();
-    return { ok: true };
+      deps.broadcastChanged();
+      return { ok: true };
+    };
+    const previous = modelDisableMutationTail;
+    const result = previous.catch(() => undefined).then(run);
+    modelDisableMutationTail = result.catch(() => undefined);
+    return result;
   });
 
   registry.handle(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, async (event, input: unknown, keyInput?: unknown) => {

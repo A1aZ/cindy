@@ -11,7 +11,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { buildRegistry, connectedProvidersForAgent, effectiveSourceIdForModel, sourcesForModel } from '../registry.js';
+import { actualSourceIdForModel, buildRegistry, connectedProvidersForAgent, effectiveSourceIdForModel, sourcesForModel } from '../registry.js';
 import { deriveModelList, deriveModelSections } from '../modelList.js';
 import { isModelDisabled, isProviderDisabled, modelDisableKey } from '../disableOverrides.js';
 import type { Catalog, CatalogModel, Provider } from '../types.js';
@@ -109,6 +109,19 @@ describe('来源过滤(模型级停用拷贝)', () => {
       disabledModels: { 'alpha:claude-opus-5': true, 'beta:claude-opus-5': true },
     });
     expect(effectiveSourceIdForModel(allDisabled, null, 'claude-opus-5', 'claude-code')).toBeNull();
+  });
+
+  it('actualSourceIdForModel(实际路由口径)保留停用拷贝:运行中会话的展示跟真实路由', () => {
+    // 准入口径(effective)解析到替代来源 beta;实际路由口径(actual)必须仍是会话
+    // 真正在用的来源 —— 显式点名的停用来源原样保留,隐式解析仍落原生默认
+    // (PR #744 review 第五轮:图标/价格/Fast/选中行豁免不能显示成替代来源)。
+    expect(actualSourceIdForModel(views, 'alpha', 'claude-opus-5', 'claude-code')).toBe('alpha');
+    const suspendedAlpha = buildRegistry(CATALOG, ALL_CONNECTED, {}, {
+      disabledProviders: { alpha: true },
+    });
+    expect(actualSourceIdForModel(suspendedAlpha, 'alpha', 'claude-opus-5', 'claude-code')).toBe(
+      'alpha',
+    );
   });
 });
 

@@ -587,6 +587,38 @@ describe('RsbWebviewBackend — cross-session isolation (P2-1)', () => {
     expect(res.ok).toBe(false);
     expect(res.message).toMatch(/no active RSB session/);
   });
+
+  it('targetless navigate falls back to a tab from __mcpSessionId, not UI focus', async () => {
+    // 修复回归:agent 在 session A 发 targetless navigate,用户正看着 session B。
+    // 兜底 tab 必须从 A(请求自带的 __mcpSessionId)里挑;修复前 extractTargetId
+    // 走 UI 焦点会把 B 的 tab 拿去导航——跨 session 污染。
+    const wcA = fakeWc({ url: 'https://a.example' });
+    const wcB = fakeWc({ url: 'https://b.example' });
+    const registry = fakeRegistry(
+      [
+        { sessionId: 'agent-session', tabId: 'tab-a', webContentsId: 1 },
+        { sessionId: 'focused-session', tabId: 'tab-b', webContentsId: 2 },
+      ],
+      new Map([
+        ['tab-a', wcA],
+        ['tab-b', wcB],
+      ]),
+    );
+    const backend = new RsbWebviewBackend({
+      registry,
+      getActiveSessionId: () => 'focused-session',
+      bridge: { getHostWebContents: () => null, logger: logger() },
+      logger: logger(),
+    });
+    const res = await backend.call({
+      action: 'navigate',
+      url: 'https://target.example',
+      __mcpSessionId: 'agent-session',
+    } as never);
+    expect(res.ok).toBe(true);
+    expect(wcA.loadURLMock).toHaveBeenCalledWith('https://target.example');
+    expect(wcB.loadURLMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('RsbWebviewBackend — per-action automation pin', () => {

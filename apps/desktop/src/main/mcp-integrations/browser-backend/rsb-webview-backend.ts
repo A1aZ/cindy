@@ -510,7 +510,10 @@ export class RsbWebviewBackend implements BrowserBackend {
   private extractTargetId(req: BackendRequest): string | null {
     const v = (req as { targetId?: unknown }).targetId;
     if (typeof v === 'string' && v !== '') return v;
-    const sessionId = this.opts.getActiveSessionId();
+    // 兜底 tab 必须从**请求方 session** 里挑(MCP 注入的 __mcpSessionId 优先),
+    // 不能用 UI-焦点 session:agent 在 session A 发 targetless navigate 时,若用户
+    // 正看着 session B,按焦点挑会把 B 的 tab 拿来导航——跨 session 污染。
+    const sessionId = this.resolveSessionId(req);
     if (!sessionId) return null;
     const records = this.opts.registry.listBySession(sessionId);
     // Last reported wins — RsbBrowserBridge replaces a tab's record on every

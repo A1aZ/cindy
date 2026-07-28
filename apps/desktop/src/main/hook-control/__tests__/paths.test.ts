@@ -33,6 +33,15 @@ describe('isPathWithin', () => {
     expect(isPathWithin(BASE, path.join(BASE, 'sub', '..', '..', 'elsewhere'))).toBe(false);
   });
 
+  it('空 / 全空白路径 fail closed(空串会 resolve 成 cwd, 那是假放行)', () => {
+    expect(isPathWithin(BASE, '')).toBe(false);
+    expect(isPathWithin(BASE, '   ')).toBe(false);
+    expect(isPathWithin('', BASE)).toBe(false);
+    expect(isPathWithin('', '')).toBe(false);
+    // 具体证据: 拿进程 cwd 当映射根时, 空目标不能被判成"在里面"
+    expect(isPathWithin(process.cwd(), '')).toBe(false);
+  });
+
   it('大小写: Windows 不敏感, 其它平台敏感(规则 15)', () => {
     // 两个分支都要锁住 —— 只在当前平台上跑, 另一半会在重构时悄悄回归
     const original = process.platform;

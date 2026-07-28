@@ -495,8 +495,16 @@ export function createMakerHookSessionRunner(deps: {
        * 附件与 worktree 清理, 前几轮实测这些后果比问题本身更重(PR #733 review)。
        * 目录仍在映射内的合法移动(A→B 都在映射里)不受影响: 那时判定通过, 这一轮
        * 继续在 A 跑, 与本 PR 之前的行为一致。
+       *
+       * **只对复用/接管路径生效**: 新会话的 id 是刚生成的, activeSessions 里不
+       * 可能有, createSession 一定按传入的 workingDir 新建 —— 错配根本不存在。
+       * 反倒是在这里拦下新会话会留垃圾: 那时 agent 已启动、session 行已插入、
+       * 预建的 worktree 还注册着(回收只在 createSession 抛错时跑), 于是留下一个
+       * 空会话 + 孤儿 worktree, 而渠道那边显示"没有执行"(同一轮 review 指出)。
+       * 新建路径那一小段(execute 的映射收口 -> createSession)属于已声明接受的
+       * 窗口, 见 PR #733 的风险段。
        */
-      if (req.isDirAuthorized && !req.isDirAuthorized(session.workDir)) {
+      if (!req.isNew && req.isDirAuthorized && !req.isDirAuthorized(session.workDir)) {
         log.warn(
           `hook run aborted: live session ${req.sessionId} runs in a directory that is no longer in the workspace map`,
         );

@@ -5,7 +5,7 @@
 //    tab 落进用户正在看的无关 session(跨会话串扰的主根因)。
 //  - 两条路径都解析不到 sessionId 时原样透传请求(host 端 fallback 生效)。
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createLiziMcpProviders } from '../providers.js';
 import { runWithLiziMcpSessionContext } from '../session-context.js';
@@ -20,6 +20,13 @@ vi.mock('../browser/index.js', () => ({
   },
 }));
 
+// capturedDeps 是模块级的,必须每条用例前清空:某条用例在 pop 之前就失败退出
+// 时会留下残条,后续用例 pop 到上一条的 deps → 顺序依赖 / 偶发失败。
+beforeEach(() => {
+  capturedDeps.length = 0;
+  vi.clearAllMocks();
+});
+
 function buildWrappedRuntime(factoryCtx: {
   agentKind: string;
   workingDir: string;
@@ -31,9 +38,10 @@ function buildWrappedRuntime(factoryCtx: {
   }).find((p) => p.name === 'cindy_browser');
   expect(provider).toBeDefined();
   provider!.toClaudeSdkConfig(factoryCtx);
-  const deps = capturedDeps.pop();
-  expect(deps).toBeDefined();
-  return { runtime: deps!.getRuntime(), innerCall };
+  // 恰好一条:配合 beforeEach 的清空,断言本次 factory 调用就是这条 deps 的来源,
+  // 而不是盲目 pop 一个可能来自别处的残留。
+  expect(capturedDeps).toHaveLength(1);
+  return { runtime: capturedDeps[0]!.getRuntime(), innerCall };
 }
 
 describe('cindy_browser provider — __mcpSessionId 注入', () => {

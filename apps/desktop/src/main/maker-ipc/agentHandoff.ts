@@ -313,6 +313,7 @@ const LEGACY_REBUILD_TERMINATOR = '== 上下文重建说明结束,以下是用�
  * composeForkOriginHandoff 自己补,这样正文被从中部裁开后仍能保证标记前有空行。
  */
 function splitTrailingTerminator(text: string): [body: string, tail: string] {
+  const trimmed = text.trimEnd();
   for (const terminator of [
     HANDOFF_TERMINATOR,
     REBUILD_TERMINATOR,
@@ -320,7 +321,6 @@ function splitTrailingTerminator(text: string): [body: string, tail: string] {
     LEGACY_HANDOFF_TERMINATOR,
     LEGACY_REBUILD_TERMINATOR,
   ]) {
-    const trimmed = text.trimEnd();
     if (!trimmed.endsWith(terminator)) continue;
     const tailStart = trimmed.length - terminator.length;
     return [text.slice(0, tailStart), text.slice(tailStart)];
@@ -581,16 +581,27 @@ export interface AgentHandoffPendingRegistry {
   readGeneration(sessionId: string): number;
   peek(sessionId: string): Promise<string | null>;
   consume(sessionId: string): void;
-  /** session 删除 / 关闭清理,避免 Map 泄漏。 */
+  /**
+   * 丢弃内存里的待注入交接并推进 clear 纪元,**允许后续 peek 回落 DB 重建**。
+   *
+   * 给 rewind 提交用:回退之后 DB 历史本身就变了,回落重建出来的是回退后的正确
+   * 结果,不需要墓碑。
+   *
+   * 注意纪元条目是**故意留着**的,不随本次调用删除:纪元缺省值是 0,删掉就等于把
+   * 它退回 0,而绝大多数会话在首次 clear 之前取到的快照正是 0——那些正在读历史的
+   * 切换 / 删除流程写回时会重新校验通过,基于回退前历史算出的交接照样盖回来,这个
+   * 保护就白做了。留下的是每个被 clear 过的 session 一个 `string -> number`,与
+   * `pending` 自身同量级。
+   */
   clear(sessionId: string): void;
   /**
    * 墓碑式失效:留下 null 条目,后续 peek 直接返回 null,**不回落 DB**。
    *
-   * 给 `/clear` 用。本地 `/clear` 的 `cleared_at` 是 renderer 侧 fire-and-forget 写入
-   * 的(main 只在 device-link 远程调用时自己落库),handler 返回到那次写入提交之间有
-   * 个窗口;若此刻用 `clear()` 删掉条目,恰好撞上 hook / scheduler 等直发路径的 send,
-   * peek 会回落到**尚未更新 cleared_at** 的 DB 行,把旧交接重建出来并缓存,而后来的
-   * DB 更新不会让那份缓存失效。留墓碑就没有这个窗口——真有新交接时 `set()` 会覆盖它。
+   * 给 `/clear` 用。`cleared_at` 现在由 clear handler 内同步落库(见 register.ts 的
+   * `INPUT_CLEAR_SESSION`),DB 回落本身已经能过滤掉 clear 之前的交接;但落库失败
+   * 或 DB 侧过滤有缺口时,`clear()` 的回落语义会把旧交接重建出来并缓存,而后来的
+   * DB 更新不会让那份缓存失效。墓碑不依赖 DB 状态,是这里更硬的保证——真有新交接时
+   * `set()` 会覆盖它。
    */
   invalidate(sessionId: string): void;
 }
@@ -697,6 +708,8 @@ export function createAgentHandoffPendingRegistry(
     clear(sessionId) {
       pending.delete(sessionId);
       composedByQuery.delete(sessionId);
+      // 不要"顺手"改成 clearEpoch.delete():缺省值 0 会让 clear 前取到 0 的在途写入
+      // 重新校验通过。理由见接口声明处。
       bumpClearEpoch(sessionId);
     },
     invalidate(sessionId) {

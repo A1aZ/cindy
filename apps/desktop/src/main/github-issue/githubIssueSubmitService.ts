@@ -12,6 +12,7 @@
 
 import type { CindyRegion } from '@cindy/maker-shared/brand-identity';
 
+import { ISSUE_REGION_CODE } from '../../shared/issueRegionCode.js';
 import type {
   IssueConfirmDecision,
   IssueDraft,
@@ -89,27 +90,6 @@ export interface GithubIssueSubmitServiceDeps {
 const SERVER_TITLE_MAX = 200;
 const SERVER_DESC_MAX = 5000;
 
-/**
- * issue 正文里的区域代号。与登录页区域徽标共用同一套不对称命名
- * (DESIGN.md §16.3「区域徽标」):cn → `CN`、dev → `Dev`、**global 不标**。
- * 代号不翻译(它是区域代号不是可译文案,术语表 region-code-cn / region-code-dev),
- * 所以这里直接落常量,不像 uiLanguage 那样跟随界面语言——issue 正文的读者是维护者。
- *
- * ⚠️ global 故意为 null,两条理由叠在一起:
- *  1. 产品叙事硬规则(DESIGN.md §16.3「给 global 恢复徽标即回退该决策,不得回退」)
- *     ——Cindy 默认版本不给自己贴标签自证是全球版,只标为特定法规单独构建的版本;
- *  2. global 是 DEFAULT_CINDY_REGION,「没有这一行」因此是个有含义的信号,不是漏
- *     附加。新增区域时要么给代号,要么明确复用这条默认语义,别让第二个区域也落
- *     进 null——那样两个区域就又分不清了。
- * 确认卡片(IssueConfirmCard)必须同步省略,否则卡片承诺的「展示的就是最终写进
- * issue 的内容」会失真。
- */
-const REGION_ISSUE_LABEL: Readonly<Record<CindyRegion, string | null>> = Object.freeze({
-  cn: 'CN',
-  global: null,
-  dev: 'Dev',
-});
-
 export async function submitGithubIssueWithConfirm(
   deps: GithubIssueSubmitServiceDeps,
   req: SubmitIssueRequest,
@@ -157,11 +137,11 @@ export async function submitGithubIssueWithConfirm(
     decision.type !== req.type;
 
   const uiLanguage = decision.uiLanguage ?? deps.getFallbackLocale();
-  const regionCode = REGION_ISSUE_LABEL[env.region];
+  const regionCode = ISSUE_REGION_CODE[env.region];
   const envBlock = [
     '',
     '---',
-    // global 不写这一行 —— 缺失即默认区域,见 REGION_ISSUE_LABEL。
+    // global 不写这一行 —— 缺失即默认区域,理由见 ISSUE_REGION_CODE(与确认卡片同源)。
     ...(regionCode ? [`**版本区域**: ${regionCode}`] : []),
     `**OS**: ${env.platform} ${env.arch} (${env.osVersion})`,
     `**界面语言**: ${uiLanguage}`,

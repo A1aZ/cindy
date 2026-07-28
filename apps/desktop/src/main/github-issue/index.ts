@@ -10,7 +10,7 @@ import os from 'node:os';
 
 import { app } from 'electron';
 
-import { CURRENT_CINDY_REGION } from '../../shared/brandRegion';
+import { CURRENT_CINDY_REGION } from '../../shared/brandRegion.js';
 import { getCurrentMembershipDisplayName } from '../authManager';
 import { getGhostManager, getGhostPipeDispatcher } from '../cindy-brain';
 import { isGhostDisabledForWorkdir } from '../cindy-brain/ghostWorkdirPrefs.js';

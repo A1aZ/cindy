@@ -18,6 +18,7 @@ import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
 import type { PendingIssueConfirm } from '@/lib/makerChatStore';
+import { shouldLabelIssueRegion } from '../../../shared/issueRegionCode';
 
 interface IssueConfirmCardProps {
   pending: PendingIssueConfirm;
@@ -50,18 +51,18 @@ export function IssueConfirmCard({ pending, onRespond }: IssueConfirmCardProps) 
   const canSubmit = title.trim().length > 0 && body.trim().length > 0;
 
   // 构建区域代号,与登录页区域徽标同一套不对称命名(DESIGN.md §16.3):cn → CN、
-  // dev → Dev、global 不标。global 不标是产品叙事硬规则(「不得回退」),这里同样
-  // 适用——而且 issue 正文也不写这一行,两边必须一致:卡片承诺展示的就是最终写进
-  // issue 的内容(落码单点 githubIssueSubmitService 的 REGION_ISSUE_LABEL)。
-  // region 缺失(IPC payload 异常)时按不标处理,不猜一个代号。
-  // 代号四语同文不翻译,但仍走 i18n(同 login.regionPill.*,便于日后改判为可译文案);
-  // key 写成字面量分支而非动态拼接,保证 pnpm check:i18n 的静态提取能看到全部 key。
-  const regionCode =
-    pending.env.region === 'cn'
+  // dev → Dev、global 不标。「哪些区域要标」只有 ISSUE_REGION_CODE 一个事实源 ——
+  // main 侧 issue 正文用的是同一个常量,卡片承诺展示的就是最终写进 issue 的内容,
+  // 两侧各写一份判断迟早漂移。region 缺失(IPC payload 异常)时按不标处理,不猜。
+  // 展示文案仍走 i18n(同 login.regionPill.*,便于日后改判为可译文案),所以这里是
+  // 「常量决定标不标 + i18n 提供文案」;两者逐区域逐语言的一致性由
+  // __tests__/issueRegionCode.consistency.test.ts 断言。key 写成字面量分支而非
+  // 动态拼接,保证 pnpm check:i18n 的静态提取能看到全部 key。
+  const regionCode = !shouldLabelIssueRegion(pending.env.region)
+    ? null
+    : pending.env.region === 'cn'
       ? t('issueAgent.confirm.regionCodeCn')
-      : pending.env.region === 'dev'
-        ? t('issueAgent.confirm.regionCodeDev')
-        : null;
+      : t('issueAgent.confirm.regionCodeDev');
 
   const handleSubmit = useCallback(() => {
     if (!canSubmit) return;

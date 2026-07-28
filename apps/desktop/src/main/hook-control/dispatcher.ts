@@ -50,7 +50,7 @@ import {
 
 import { HOOK_CHAT_WORKSPACE_ALIAS } from '../../shared/hookControlIpc.js';
 import type { HookConnectionConfig } from './store.js';
-import type { HookBindingAuthority, HookBindingStore } from './bindings.js';
+import type { HookBindingStore } from './bindings.js';
 
 /** 会话执行器抽象 —— 生产实现 session-runner.ts(包 maker), 测试注入假的。 */
 export interface HookSessionRunner {
@@ -229,24 +229,18 @@ export function isPathWithin(base: string, target: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
-/** 两个路径是否指向同一目录(同 isPathWithin 的规范化口径)。 */
-export function isSamePath(a: string, b: string): boolean {
-  return normalizePathForCompare(a) === normalizePathForCompare(b);
-}
-
 /**
- * 会话被用户移出工作目录映射后, 回给渠道的一次性说明(Slack / Telegram 侧文案
- * 不进 locale, 与 interactions.ts 的卡片按钮同规硬编码中文)。
- */
-const NOTICE_SESSION_MOVED = 'ℹ️ 这个对话已被移动到新的工作目录，后续消息都在新目录里执行。';
-/**
- * 重建说明必须如实: 旧绑定被丢弃后同一个 externalKey 立刻指向新会话, 光把
- * 老目录加回映射**不会**自动接回原对话(那条 thread 已经绑到新的了), 只有先
- * 恢复目录、再用会话选择重新指定原对话才接得回来 —— 两步缺一不可。
+ * 原对话不再落在工作目录映射内时(被移到映射外的项目, 或映射本身被改/删),
+ * 回给渠道的一次性说明(Slack / Telegram 侧文案不进 locale, 与 interactions.ts
+ * 的卡片按钮同规硬编码中文)。
+ *
+ * 必须如实: 旧绑定被丢弃后同一个 externalKey 立刻指向新对话, 光把目录加进映射
+ * **不会**自动接回原对话(那条 thread 已经绑到新的了), 只有先让目录进映射、再用
+ * 对话选择重新指定原对话才接得回来 —— 两步缺一不可。
  */
 const NOTICE_SESSION_RECREATED =
   'ℹ️ 原对话已不在可用的工作目录里，这条消息起换用了新对话，原对话的上下文不会带过来。' +
-  '想接回原对话：先到 Cindy 的 设置 → 远程连接 → 工作目录映射 把它所在的目录加回来，' +
+  '想接回原对话：先到 Cindy 的 设置 → 远程连接 → 工作目录映射 把它所在的目录加进来，' +
   '再在这里用对话选择重新指定它。';
 const NOTICE_SESSION_GONE = 'ℹ️ 原对话已被归档或删除，这条消息起换用了新对话。';
 
@@ -592,13 +586,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       }
       // 接管路径刚校验过白名单, 授权来源恒为 workspace(远端不能凭接管把会话
       // 带出映射 —— 越界的 sessionId 在上面就被 workspace_not_allowed 打回)
-      bindings.set(
-        connectionId,
-        payload.externalKey,
-        payload.sessionId,
-        info.workingDir,
-        'workspace',
-      );
+      bindings.set(connectionId, payload.externalKey, payload.sessionId);
       return {
         run: {
           sessionId: payload.sessionId,
@@ -630,21 +618,15 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     // account/provider namespace may read it only as a candidate; it is moved
     // after current-account DB existence + workspace allowlist checks pass.
     const legacyNamespace = connectionId.endsWith(':slack') ? 'slack' : null;
-    const namespacedEntry = bindings.getEntry(connectionId, payload.externalKey);
-    const legacyEntry =
-      namespacedEntry === null && legacyNamespace !== null
-        ? bindings.getEntry(legacyNamespace, payload.externalKey)
+    const namespacedBound = bindings.get(connectionId, payload.externalKey);
+    const legacyBound =
+      namespacedBound === null && legacyNamespace !== null
+        ? bindings.get(legacyNamespace, payload.externalKey)
         : null;
-    const namespacedBound = namespacedEntry?.sessionId ?? null;
-    const legacyBound = legacyEntry?.sessionId ?? null;
-    const boundEntry = namespacedEntry ?? legacyEntry;
-    const bound = boundEntry?.sessionId ?? null;
-    const migrateLegacyBinding = (
-      workingDir: string | null,
-      authority: HookBindingAuthority | null,
-    ): void => {
+    const bound = namespacedBound ?? legacyBound;
+    const migrateLegacyBinding = (): void => {
       if (!legacyBound || !legacyNamespace) return;
-      bindings.set(connectionId, payload.externalKey, legacyBound, workingDir, authority);
+      bindings.set(connectionId, payload.externalKey, legacyBound);
       bindings.remove(legacyNamespace, payload.externalKey);
     };
     if (bound) {
@@ -683,46 +665,20 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       const inAllowedRoot =
         info !== null && (isChat ? inDialogueRoot(info.workingDir) : inWhitelist(info.workingDir));
       const usable = info?.usable === true && info.workingDir !== null;
-      /** 会话目录与绑定快照一致 = 自上次确认以来它没被动过。 */
-      const sameAsSnapshot =
-        usable &&
-        boundEntry?.workingDir != null &&
-        isSamePath(boundEntry.workingDir, info!.workingDir!);
       /**
-       * 白名单外但**目录相对快照变过** = 用户在桌面端把这条会话「移动到项目」了。
-       * 目录是本地用户亲手选的(不是远端指定的 —— 远端只能在接管路径里选白名单
-       * 内的会话), 属本地授权, 跟随即可; 否则同一个 thread 每条消息都会重开新
-       * 会话, 破坏「同 key 同 session」。
+       * 复用与否只看这一条: 会话当前的工作目录仍落在工作目录映射(或内置对话根)
+       * 内。判定完全无状态 —— 绑定里不存快照也不存授权, 每条消息现场重算。
+       *
+       * 刻意**不**支持「被移出映射后继续跟随」: 那需要在映射之外发放一条例外,
+       * 而例外必须跨「绑定文件」与「会话库」两次无事务的写保持一致, 中间还夹着
+       * 随时可能到达的 IM 消息 —— PR #653 / #669 为此叠了在途标记、TTL、回滚、
+       * CAS、补偿五层状态, 十轮 review 仍在出新的组合边界。现在的语义是: 移出
+       * 映射 = 断开绑定, 并向渠道说明怎么恢复(见 NOTICE_SESSION_RECREATED)。
+       * 在映射**内**换目录仍然无感跟随, 因为那本就在边界内。
        */
-      const movedNow =
-        !inAllowedRoot && usable && boundEntry?.workingDir != null && !sameAsSnapshot;
-      /**
-       * 上一条消息已按本地移动放行过, 且此后目录没再变 —— 必须继续认这份授权。
-       * 少了这一条, 跟随只在移动后的第一条消息生效: 那次会把快照更新成新目录,
-       * 下一条消息 movedNow 就变回 false, 绑定又被丢掉(PR #653 review 实测)。
-       */
-      const stillLocallyAuthorized =
-        !inAllowedRoot && usable && boundEntry?.authority === 'local-move' && sameAsSnapshot;
-      // 目录没变、也没有本地移动授权而校验失败, 才是「工作目录映射被改/删」的
-      // 撤权语义, 仍丢绑定重建。老绑定没有快照时同样走保守侧(正常复用会回填)。
-      if (usable && (inAllowedRoot || movedNow || stillLocallyAuthorized)) {
+      if (usable && inAllowedRoot) {
         const workingDir = info!.workingDir!;
-        const authority: HookBindingAuthority = inAllowedRoot ? 'workspace' : 'local-move';
-        migrateLegacyBinding(workingDir, authority);
-        // 快照回填 / 跟随: 只在目录或授权来源变化时落盘, 常规复用不产生写。
-        if (
-          namespacedEntry !== null &&
-          (namespacedEntry.workingDir === null ||
-            !isSamePath(namespacedEntry.workingDir, workingDir) ||
-            namespacedEntry.authority !== authority)
-        ) {
-          bindings.set(connectionId, payload.externalKey, bound, workingDir, authority);
-        }
-        if (movedNow) {
-          log.info(
-            `hook session ${bound} followed a desktop-side move to ${workingDir} (outside the workspace map)`,
-          );
-        }
+        migrateLegacyBinding();
         return {
           run: {
             sessionId: bound,
@@ -737,8 +693,6 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
             attachments: payload.attachments,
             origin,
           },
-          // 只在"这次刚发现被移动"时说明一次; 之后的消息静默沿用该授权
-          ...(movedNow ? { notice: NOTICE_SESSION_MOVED } : {}),
         };
       }
       bindings.remove(connectionId, payload.externalKey);
@@ -790,8 +744,8 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
         if (prep.ok) void prep.cleanup().catch(() => undefined);
       }
     }
-    // 新建会话跑在别名目录(或对话根)里, 授权随映射走
-    bindings.set(connectionId, payload.externalKey, sessionId, runDir, 'workspace');
+    // 新建会话跑在别名目录(或对话根)里, 是否还能复用每次现场按映射判定
+    bindings.set(connectionId, payload.externalKey, sessionId);
     // 标题带 provider 名: externalKey 约定为 `<providerId>:<渠道内标识>`,
     // 取前缀作 provider 名(如 team-slack), 比连接名(desktop 侧命名)更能
     // 说明"这条会话是谁驱动的"; 无前缀(非常规 key)时回退连接名

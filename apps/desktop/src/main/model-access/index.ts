@@ -65,14 +65,14 @@ function notifyXdProviderKeyChanged(): void {
 
 function fetchCredentials(): Promise<CredentialsPayload> {
   return serverApiFetch<CredentialsPayload>(CREDENTIALS_PATH, {
-    baseUrl: getClientEndpoint('modelAccessApiBaseUrl'),
+    baseUrl: () => getClientEndpoint('modelAccessApiBaseUrl'),
   });
 }
 
 function rotateCredentials(): Promise<CredentialsPayload> {
   return serverApiFetch<CredentialsPayload>(`${CREDENTIALS_PATH}/rotate`, {
     method: 'POST',
-    baseUrl: getClientEndpoint('modelAccessApiBaseUrl'),
+    baseUrl: () => getClientEndpoint('modelAccessApiBaseUrl'),
   });
 }
 
@@ -176,7 +176,7 @@ async function runModelsSync(
   let payload: { models: ModelAccessGatewayModel[] };
   try {
     payload = await serverApiFetch<{ models: ModelAccessGatewayModel[] }>(MODELS_PATH, {
-      baseUrl: getClientEndpoint('modelAccessApiBaseUrl'),
+      baseUrl: () => getClientEndpoint('modelAccessApiBaseUrl'),
     });
   } catch (err) {
     log.warn('xd gateway models fetch failed (keeping last valid list)', {

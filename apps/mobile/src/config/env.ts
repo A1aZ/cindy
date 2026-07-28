@@ -471,6 +471,11 @@ export function getMobileEndpointRealmConfig(): {
 
 const MOBILE_REALM_MANIFEST_TIMEOUT_MS = 10_000;
 
+/** 当前登录态消费业务请求的区域；与安装包/更新通道所在区域相互独立。 */
+export function getActiveMobileSessionRealm(): ClientEndpointRegion {
+  return activeSessionRealm;
+}
+
 export async function loadMobileEndpointsForRealm(
   region: ClientEndpointRegion,
 ): Promise<ClientEndpointMap> {

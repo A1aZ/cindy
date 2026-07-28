@@ -26,7 +26,7 @@ function provider(id: string, models: CatalogModel[]): Provider {
     name: id,
     source: 'builtin',
     agents: ['claude-code'],
-    auth: { method: 'api_key' },
+    auth: { method: 'apiKey' },
     routing: { 'claude-code': { wireProtocol: 'anthropic-messages', authStrategy: 'api_key' } as never },
     models: { 'claude-code': models },
   };
@@ -93,6 +93,43 @@ describe('rail 过滤(suspended)', () => {
   });
 });
 
+describe('来源过滤(模型级停用拷贝)', () => {
+  // 同 id 模型 alpha 家停用、beta 家启用:默认来源解析必须落到 beta(PR #744 review)。
+  const views = buildRegistry(CATALOG, ALL_CONNECTED, {}, {
+    disabledModels: { 'alpha:claude-opus-5': true },
+  });
+
+  it('sourcesForModel 剔除停用的那份拷贝', () => {
+    expect(sourcesForModel(views, 'claude-opus-5', 'claude-code').map((p) => p.id)).toEqual(['beta']);
+  });
+
+  it('effectiveSourceIdForModel 落到启用拷贝;全部拷贝停用时解析为 null', () => {
+    expect(effectiveSourceIdForModel(views, 'alpha', 'claude-opus-5', 'claude-code')).toBe('beta');
+    const allDisabled = buildRegistry(CATALOG, ALL_CONNECTED, {}, {
+      disabledModels: { 'alpha:claude-opus-5': true, 'beta:claude-opus-5': true },
+    });
+    expect(effectiveSourceIdForModel(allDisabled, null, 'claude-opus-5', 'claude-code')).toBeNull();
+  });
+});
+
+describe('自定义分组模型不受 id 启发式误伤', () => {
+  it('group=custom:<id> 且模型名含 image/audio 关键字 ⇒ 仍是 agent 可选模型', () => {
+    const views = buildRegistry(
+      {
+        providers: [
+          provider('custom-p', [
+            model('gpt-4o-audio-preview', { group: 'custom:custom-p' }),
+            model('flux-image-x', { group: 'custom:custom-p' }),
+          ]),
+        ],
+      } as Catalog,
+      { 'custom-p': true },
+    );
+    const ids = deriveModelList({ providers: views, agent: 'claude-code' }).map((m) => m.id);
+    expect(ids).toEqual(['gpt-4o-audio-preview', 'flux-image-x']);
+  });
+});
+
 describe('标准派生准入(disabled + 能力模型硬排除)', () => {
   const views = buildRegistry(CATALOG, ALL_CONNECTED, {}, {
     disabledModels: { 'alpha:claude-sonnet-5': true },
@@ -113,5 +150,16 @@ describe('标准派生准入(disabled + 能力模型硬排除)', () => {
     const alpha = sections.find((s) => s.provider.id === 'alpha')!;
     // 停用的选中行豁免保留(运行中的会话不打断);image 能力模型仍被硬排除。
     expect(alpha.models.map((m) => m.id).sort()).toEqual(['claude-opus-5', 'claude-sonnet-5']);
+  });
+
+  it('keepSelected **不**豁免能力模型:历史坑遗留的图像模型选中项不再回到清单', () => {
+    const sections = deriveModelSections({
+      providers: views,
+      agent: 'claude-code',
+      providerScope: 'as-given',
+      keepSelected: { providerId: 'alpha', modelId: 'gpt-image-2' },
+    });
+    const alpha = sections.find((s) => s.provider.id === 'alpha')!;
+    expect(alpha.models.map((m) => m.id)).toEqual(['claude-opus-5']);
   });
 });

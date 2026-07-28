@@ -588,11 +588,21 @@ export function registerProviderHandlers(
   // 合成 event 与不受信 frame 一律拒绝 —— 远程改被控端全局设置越权);守卫缺席按拒绝
   // 处理(assertTrustedProviderMutationSender)。写的是 main 侧持久化 override,目录
   // 本身没变,**不**走 refreshCatalog,只广播 PROVIDER_CHANGED 让各端重拉视图。
+  // 入参尺寸上限:本通道会把内容同步序列化落盘(model-disable-prefs.json),sender 守卫
+  // 挡不住 Cindy 自身主页面被 XSS 的情形 —— 超长 id / 超大数组必须在边界拒绝,防止
+  // 拖死 main 或往磁盘灌垃圾、预埋不存在的目录 id(PR #744 review)。上限取目录现实
+  // 规模的宽裕倍数:单 id ≤256 字符(目录 id 实际 <64),一次 ≤512 个模型 id。
+  const MAX_DISABLE_ID_LENGTH = 256;
+  const MAX_DISABLE_MODEL_IDS = 512;
   registry.handle(MAKER_INVOKE.MODEL_DISABLE_SET, async (event, input: unknown) => {
     assertTrustedProviderMutationSender(event);
     if (!input || typeof input !== 'object') throwIpcError('INVALID_PARAMS', 'invalid input');
     const i = input as Record<string, unknown>;
-    if (typeof i.providerId !== 'string' || i.providerId.length === 0) {
+    if (
+      typeof i.providerId !== 'string' ||
+      i.providerId.length === 0 ||
+      i.providerId.length > MAX_DISABLE_ID_LENGTH
+    ) {
       throwIpcError('INVALID_PARAMS', 'providerId required');
     }
     if (typeof i.disabled !== 'boolean') throwIpcError('INVALID_PARAMS', 'disabled required');
@@ -600,9 +610,12 @@ export function registerProviderHandlers(
       if (
         !Array.isArray(i.modelIds) ||
         i.modelIds.length === 0 ||
-        i.modelIds.some((id) => typeof id !== 'string' || id.length === 0)
+        i.modelIds.length > MAX_DISABLE_MODEL_IDS ||
+        i.modelIds.some(
+          (id) => typeof id !== 'string' || id.length === 0 || id.length > MAX_DISABLE_ID_LENGTH,
+        )
       ) {
-        throwIpcError('INVALID_PARAMS', 'modelIds must be a non-empty string[]');
+        throwIpcError('INVALID_PARAMS', 'modelIds must be a bounded non-empty string[]');
       }
       deps.setModelsDisabled(i.providerId, i.modelIds as string[], i.disabled);
     } else if (i.kind === 'provider') {

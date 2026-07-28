@@ -437,6 +437,7 @@ import {
   syncModelVisibilityMirror,
 } from '../maker-host/model-visibility-mirror.js';
 import { setModelsDisabled, setProviderDisabled } from '../maker-host/model-disable-store.js';
+import { checkModelRouteDisabled } from '../maker-host/model-route-guard.js';
 import { setClaudeProxySessionIdResolver } from '../maker-host/anthropic-compat-proxy-host.js';
 import {
   clearClaudeSessionBackgroundActivity,
@@ -3964,6 +3965,34 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
    * 已踩过 commit 2e8371c7 的坑（路径 B/C 漏调 markOrcaMcpHydratedIfNeeded
    * 导致 Orca MCP 工具 rehydrate 失败），抽 helper 让"漏调"在编译期不可能发生。
    */
+  /**
+   * 停用轴的边界拒绝(判定纯逻辑在 model-route-guard.ts,可单测)。目录读取失败按
+   * 放行处理:目录不可用时历史行为就是回落 capabilities 继续跑,本守卫只执行停用
+   * 语义,不把目录故障升级成会话不可建。allowSideEffects=false —— 这条路径可能由
+   * device-link / renderer 驱动,纯读即可(自愈另有主进程业务入口负责)。
+   */
+  async function assertModelRouteNotDisabled(
+    agent: AgentKind,
+    model: string,
+    providerId: string | null,
+  ): Promise<void> {
+    let views: ProviderView[];
+    try {
+      views = await getDesktopProviderService().listProviders();
+    } catch {
+      return;
+    }
+    const reason = checkModelRouteDisabled(views, agent, model, providerId);
+    if (reason !== null) {
+      throwIpcError(
+        'INVALID_PARAMS',
+        reason === 'explicit-source-disabled'
+          ? `provider "${providerId}" is disabled for model "${model}" in settings`
+          : `model "${model}" is disabled in settings`,
+      );
+    }
+  }
+
   async function bootstrapSession(o: CreateOpts): Promise<{
     session: Awaited<ReturnType<typeof maker.createSession>>;
     didInjectOrcaInstructions: boolean;
@@ -3978,6 +4007,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
     }
 
     await hydrateProviderIdBeforeSessionStart(o);
+    // 停用轴准入(PR #744 review):**新建**会话不得路由到用户停用的模型 / 来源。
+    // renderer 选择器已过滤,但 create-session 在 device-link allowlist 内,老控制端
+    // 可直接点名 —— main 必须自己拒绝。resume(含跨重启恢复,resumeSessionId 非空)
+    // 不拦:运行中的会话不打断。放在 hydrate 之后,判定的是真实生效的显式来源。
+    if (!o.resumeSessionId && typeof o.model === 'string' && o.model) {
+      await assertModelRouteNotDisabled(o.agentKind, o.model, o.providerId ?? null);
+    }
     const session = await maker.createSession(o);
     await markProjectContextIfNeeded(session.id, didInjectProjectContext);
     wireSessionToIpc(session);
@@ -7137,6 +7173,21 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
       typeof providerId !== 'string'
     ) {
       throwIpcError('INVALID_PARAMS', 'providerId must be string, null, or undefined');
+    }
+    // 停用轴准入(PR #744 review):切换模型是一次新的路由选择,不得切到用户停用的
+    // 模型 / 来源(本机选择器已过滤,但本 channel 在 device-link allowlist 内,老控制
+    // 端可直接点名)。会话当前正用着的停用模型不受影响 —— 这里只拦「切过去」。
+    // agentKind 读不到(会话行缺失等)时不拦,交给既有 no-op / 后续路径。
+    // DB 存的是 'cc' | 'codex'(messages.agent_kind 口径),目录侧是 AgentKind。
+    {
+      const dbAgentKind = getSessionDbAgentKind(sessionId);
+      if (dbAgentKind) {
+        await assertModelRouteNotDisabled(
+          dbAgentKind === 'cc' ? 'claude-code' : 'codex',
+          model,
+          typeof providerId === 'string' ? providerId : null,
+        );
+      }
     }
     // 与 send 事务共用 session 锁:发送时刻执行的跨引擎切换必须先落定,
     // 后到的 SET_MODEL 才能写 route。否则切换 DB await 恢复后会用旧 provider

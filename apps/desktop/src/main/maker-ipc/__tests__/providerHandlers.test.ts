@@ -167,6 +167,32 @@ describe('model-disable:set handler', () => {
     expect(deps.broadcastChanged).not.toHaveBeenCalled();
   });
 
+  it('入参超限(超长 id / 超大数组)→ INVALID_PARAMS,不落盘(本通道同步序列化写文件)', async () => {
+    const harness = new IpcHarness();
+    const deps = makeDeps();
+    registerProviderHandlers(harness, deps);
+
+    const hugeId = 'x'.repeat(300);
+    const hugeList = Array.from({ length: 600 }, (_v, i) => `m-${i}`);
+    await expect(
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+        kind: 'model', providerId: hugeId, modelIds: ['m1'], disabled: true,
+      }),
+    ).rejects.toThrow(/INVALID_PARAMS/);
+    await expect(
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+        kind: 'model', providerId: 'xd', modelIds: [hugeId], disabled: true,
+      }),
+    ).rejects.toThrow(/INVALID_PARAMS/);
+    await expect(
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, {
+        kind: 'model', providerId: 'xd', modelIds: hugeList, disabled: true,
+      }),
+    ).rejects.toThrow(/INVALID_PARAMS/);
+    expect(deps.setModelsDisabled).not.toHaveBeenCalled();
+    expect(deps.broadcastChanged).not.toHaveBeenCalled();
+  });
+
   it('设置类写操作:不可信 sender / 守卫未接线一律拒绝', async () => {
     const harness = new IpcHarness();
     const rejecting = makeDeps({

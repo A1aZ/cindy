@@ -123,8 +123,7 @@ export function buildRegistry(
   discoveryFailures: ModelDiscoveryFailureState = {},
   access?: ModelDisableOverrides,
 ): ProviderView[] {
-  const hasDisabledModels =
-    !!access?.disabledModels && Object.keys(access.disabledModels).length > 0;
+  const disabledKeys = access?.disabledModels ? Object.keys(access.disabledModels) : [];
   return catalog.providers.map((p) => {
     const failure = discoveryFailures[p.id];
     // 剥掉 detail 再下发:它可能是上游原始响应体,而这份视图会过 IPC 到 renderer、
@@ -132,10 +131,12 @@ export function buildRegistry(
     const failureView = failure ? stripDiscoveryFailureDetail(failure) : null;
     const suspended = isProviderDisabled(access, p.id);
     // 停用标志烘焙进模型条目(视图层字段,见 CatalogModel.disabled):renderer 与
-    // device-link 控制端直接消费,不需要各自再查一份 override 表。无停用条目时
-    // 原样透传 models(零额外分配 —— listProviders 是热路径)。
+    // device-link 控制端直接消费,不需要各自再查一份 override 表。**只有确实带停用
+    // 条目的供应商**才重建 models(按 key 前缀判;listProviders 是热路径,其余供应商
+    // 原引用透传零分配 —— PR #744 review)。前缀误命中(如 'a:' 命中 'a:b:model')只
+    // 多做一次无害映射,不影响正确性。
     let models = p.models;
-    if (hasDisabledModels) {
+    if (disabledKeys.length > 0 && disabledKeys.some((k) => k.startsWith(`${p.id}:`))) {
       const mapped: Provider['models'] = {};
       for (const agent of Object.keys(p.models) as AgentKind[]) {
         mapped[agent] = (p.models[agent] ?? []).map((m) =>
@@ -198,14 +199,17 @@ export function sourcesForModel(
   opts: { onlyConnected?: boolean } = {},
 ): ProviderView[] {
   const onlyConnected = opts.onlyConnected ?? true;
-  // suspended 供应商无条件出局:本函数的产出是「可路由来源」(选择器 activeSourceId /
-  // effectiveSourceIdForModel / Fast 门控),停用供应商即便凭证在场也不允许被路由到。
+  // suspended 供应商与**该来源下被停用的模型条目**无条件出局:本函数的产出是
+  // 「可路由来源」(选择器 activeSourceId / effectiveSourceIdForModel / Fast 门控),
+  // 停用的那份拷贝即便凭证在场也不允许被路由到 —— 同 id 模型在 A 家停用、B 家
+  // 启用时,默认来源解析必须落到 B,而不是继续把 A 当候选(PR #744 review)。
   return views.filter(
     (p) =>
       !p.suspended &&
       (!onlyConnected || p.connected) &&
       hasEnabledAgentRuntime(p, agent) &&
-      providerOffersModel(p, modelId, agent),
+      providerOffersModel(p, modelId, agent) &&
+      getModel(p, modelId, agent)?.disabled !== true,
   );
 }
 

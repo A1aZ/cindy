@@ -109,6 +109,12 @@ const AGENT_MODEL_CATEGORIES: ReadonlySet<ModelCategory> = new Set([
 
 /** 该模型是否属于可被 agent 选择的对话厂商分组(见 AGENT_MODEL_CATEGORIES)。 */
 export function isAgentSelectableModel(model: { id: string; group?: string }): boolean {
+  // 目录带了**未知 group**(如 buildUserProvider 给自定义模型打的 `custom:<providerId>`)
+  // ⇒ 数据已声明它是用户显式配置的 agent 模型,直接放行 —— 不能让 groupOf 的未知组
+  // 回退再吃 id 前缀启发式,否则 `gpt-4o-audio-preview` 这类合法自定义对话模型会被
+  // 误判成能力模型而从全部对话清单消失(PR #744 review)。id 启发式只用于**没有**
+  // group 声明的目录条目(网关多返回的能力模型正是这种形态)。
+  if (model.group && !KNOWN_CATEGORIES.has(model.group)) return true;
   return AGENT_MODEL_CATEGORIES.has(groupOf(model));
 }
 

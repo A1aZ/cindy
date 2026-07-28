@@ -9,6 +9,7 @@ const envState = vi.hoisted(() => ({
   },
 }));
 const mocks = vi.hoisted(() => ({
+  asyncGetItem: vi.fn(async (key: string) => store.get(key) ?? null),
   loadMobileEndpointsForRealm: vi.fn(async (_realm: 'cn' | 'global') => ({})),
   getPermissionsAsync: vi.fn(),
   requestPermissionsAsync: vi.fn(),
@@ -18,7 +19,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@react-native-async-storage/async-storage', () => ({
   default: {
-    getItem: vi.fn(async (key: string) => store.get(key) ?? null),
+    getItem: mocks.asyncGetItem,
     setItem: vi.fn(async (key: string, value: string) => {
       store.set(key, value);
     }),
@@ -251,5 +252,31 @@ describe('push notification unregister realm routing', () => {
     expect(readRevocationRealm('cn')).toEqual({
       candidate: 'ab'.repeat(32),
     });
+  });
+
+  it('关闭同步读取状态期间若发生退登，不会在生命周期失效后再发送认证请求', async () => {
+    store.set(REGISTERED_KEY, JSON.stringify({ version: 1, realms: ['cn'] }));
+    const storedRegisteredState = store.get(REGISTERED_KEY) ?? null;
+    let releaseRead: (() => void) | undefined;
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    mocks.asyncGetItem.mockImplementationOnce(async () => {
+      await readGate;
+      return storedRegisteredState;
+    });
+    const apiFetch = vi.fn();
+    const fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetch);
+
+    const disableSync = syncPushRegistration({ enabled: false, apiFetch });
+    await vi.waitFor(() => {
+      expect(mocks.asyncGetItem).toHaveBeenCalledWith(REGISTERED_KEY);
+    });
+    await unregisterPushTokenBestEffort(null);
+    releaseRead?.();
+
+    await expect(disableSync).resolves.toBe('skipped');
+    expect(apiFetch).not.toHaveBeenCalled();
   });
 });

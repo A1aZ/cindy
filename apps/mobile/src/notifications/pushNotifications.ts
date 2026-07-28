@@ -458,6 +458,7 @@ async function syncPushRegistrationInternal(
       PUSH_REGISTERED_KEY,
       realm,
     );
+    if (lifecycleGeneration !== pushLifecycleGeneration) return 'skipped';
     if (!registeredRealms.has(realm)) return 'skipped';
     await opts.apiFetch(PUSH_TOKEN_PATH, {
       baseUrl,

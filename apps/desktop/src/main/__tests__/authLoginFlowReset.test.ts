@@ -8,6 +8,14 @@ describe('auth login-flow reset', () => {
     /\r\n/g,
     '\n',
   );
+  const deviceLinkSource = readFileSync(
+    resolve(process.cwd(), 'src/main/device-link/index.ts'),
+    'utf8',
+  ).replace(/\r\n/g, '\n');
+  const hookControlSource = readFileSync(
+    resolve(process.cwd(), 'src/main/hook-control/ipc.ts'),
+    'utf8',
+  ).replace(/\r\n/g, '\n');
 
   it('clears renderer state, provider cache, and private tickets whenever auth is cleared', () => {
     const resetStart = source.indexOf('function resetLoginFlowState(): void {');
@@ -164,6 +172,24 @@ describe('auth login-flow reset', () => {
     expect(refreshBody).toContain("refreshWasSuperseded('after-account-switch-teardown')");
     expect(refreshBody).toContain("refreshWasSuperseded('after-integration-reload')");
     expect(refreshBody).toContain("refreshWasSuperseded('catch')");
+  });
+
+  it('reconnects realm-bound main clients after a runtime realm change commits its new token', () => {
+    const refreshStart = source.indexOf('export async function refresh(): Promise<boolean> {');
+    const refreshEnd = source.indexOf('\n}\n\nexport async function logout()', refreshStart);
+    const refreshBody = source.slice(refreshStart, refreshEnd);
+
+    expect(refreshBody).toContain('const authRealmChanged = refreshRealm !== activeAuthRealm;');
+    expect(refreshBody).toContain('writePersistedAuthSession(data.refreshToken, refreshRealm);');
+    expect(refreshBody).toContain('activeAuthRealm = refreshRealm;');
+    expect(refreshBody).toContain('previousUserId !== currentUser.id || authRealmChanged');
+    expect(refreshBody).toContain('if (authRealmChanged) {\n        notifyAuthListeners();');
+
+    expect(deviceLinkSource).toContain('restartDeviceLinkForAuthRealmChange();');
+    expect(deviceLinkSource).toContain('void stopArbitrationAndTeardown()');
+    expect(deviceLinkSource).toContain('authManager.getActiveAuthRealm() !== targetRealm');
+    expect(hookControlSource).toContain('} else if (realmChanged) {');
+    expect(hookControlSource).toContain('manager?.sync();');
   });
 
   it('tears down the owner boundary before notifying runtime auth expiry', () => {

@@ -1276,6 +1276,11 @@ export function getAccessToken(): string | null {
   return accessToken;
 }
 
+/** 当前已认证会话的数据区域；主进程长连接据此识别同账号的跨区切换。 */
+export function getActiveAuthRealm(): AuthRegion {
+  return activeAuthRealm;
+}
+
 /** SkillHub v0.2.1: 返回当前登录用户 id（cuid），未登录时返回 null */
 export function getCurrentUserId(): string | null {
   return currentUser?.id ?? null;
@@ -2434,8 +2439,7 @@ export async function refresh(): Promise<boolean> {
         return false;
       }
 
-      activateClientEndpointRealm(refreshRealm);
-      activeAuthRealm = refreshRealm;
+      const authRealmChanged = refreshRealm !== activeAuthRealm;
       const data = result.data as RefreshResponse;
       const needsIdentityCheck =
         replacementRetries > 0 ||
@@ -2446,7 +2450,7 @@ export async function refresh(): Promise<boolean> {
         // instance. Verify / reconcile the account before accepting its access token,
         // otherwise renderer state could still show account A while API calls use B.
         persistedRefreshTokenNeedsIdentityCheck = true;
-        writePersistedAuthSession(data.refreshToken);
+        writePersistedAuthSession(data.refreshToken, refreshRealm);
         lastAcceptedRefreshToken = data.refreshToken;
 
         const previousUserId = currentUser?.id ?? null;
@@ -2500,6 +2504,10 @@ export async function refresh(): Promise<boolean> {
           }
         }
 
+        if (authRealmChanged) {
+          activateClientEndpointRealm(refreshRealm);
+          activeAuthRealm = refreshRealm;
+        }
         accessToken = data.accessToken;
         currentUser = nextUser;
         try {
@@ -2529,12 +2537,16 @@ export async function refresh(): Promise<boolean> {
         });
         scheduleRefresh(data.accessToken);
         notifyRenderer();
-        if (previousUserId !== currentUser.id) {
+        if (previousUserId !== currentUser.id || authRealmChanged) {
           notifyAuthListeners();
         }
         return true;
       }
 
+      if (authRealmChanged) {
+        activateClientEndpointRealm(refreshRealm);
+        activeAuthRealm = refreshRealm;
+      }
       accessToken = data.accessToken;
       currentUser = mergeMembershipWithExisting(data.membership, currentUser);
       commitActiveAppSession('cloud', currentUser.id);
@@ -2543,6 +2555,9 @@ export async function refresh(): Promise<boolean> {
       lastAcceptedRefreshToken = data.refreshToken;
       scheduleRefresh(data.accessToken);
       notifyRenderer();
+      if (authRealmChanged) {
+        notifyAuthListeners();
+      }
       return true;
     } catch (err) {
       if (refreshWasSuperseded('catch')) return false;

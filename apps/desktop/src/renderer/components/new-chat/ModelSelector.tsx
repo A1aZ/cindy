@@ -1256,7 +1256,7 @@ function ModelSelectorContentView({
               )}
               <span className="flex min-w-0 flex-1 items-center gap-1.5">
                 <span className="flex min-w-0 flex-1 items-center gap-1.5">
-                  <span className="truncate text-14 font-medium text-[var(--model-item-text)]">
+                  <span className="truncate text-14 font-medium leading-5 text-[var(--model-item-text)]">
                     {model.displayName}
                   </span>
                   {rowEffort && (

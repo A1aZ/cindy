@@ -1141,6 +1141,7 @@ describe('ModelSelector trigger variants', () => {
       // 一级菜单保持单行并保留折价标签；折后价和标准价只在完整详情展示。
       const row = screen.getByRole('option', { name: /Qwen 3\.7/ });
       expect(row.className).toContain('min-h-9');
+      expect(within(row).getByText('Qwen 3.7').className).toContain('leading-5');
       expect(screen.getByRole('listbox', { name: 'Model list' }).style.maxHeight).toBe('226px');
       expect(row.textContent).not.toContain('¥6 / ¥18');
       expect(row.textContent).not.toContain('¥12 / ¥36');

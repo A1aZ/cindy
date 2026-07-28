@@ -362,11 +362,16 @@ export function translateRequest(
   const instructions = systemToInstructions(req.system);
   if (instructions) out.instructions = instructions;
   if (tools.length > 0) out.tools = tools;
-  // parallel_tool_calls / tool_choice 只描述**本地 function tool** 的调用策略:纯服务端工具轮
-  // (客户端没带任何 function tool)不发这两个字段,避免 tool_choice 指向不存在的 function。
-  if (functionTools.length > 0) {
-    out.parallel_tool_calls = true;
-    if (toolChoice) out.tool_choice = toolChoice;
+  // parallel_tool_calls 只描述**本地 function tool** 的并行策略,纯服务端工具轮不发。
+  if (functionTools.length > 0) out.parallel_tool_calls = true;
+  // tool_choice:
+  //   - 有 function tool → 原样下发(含 required / 指名 function / auto / none);
+  //   - 没有 function tool → 只下发 `none`。`none` 是调用方**显式禁止用工具**,而我们仍会
+  //     声明服务端工具(声明只由 model 决定,见上),不把 none 传下去就等于放开 x_search、
+  //     把调用方的禁令反过来了。其余档在无 function tool 时不发:指名 function 会指向不存在
+  //     的工具;required 则会把「必须用工具」落到服务端工具上,等于替调用方决定去搜一次。
+  if (toolChoice && (functionTools.length > 0 || toolChoice === 'none')) {
+    out.tool_choice = toolChoice;
   }
   if (opts.maxOutputTokensSupported && typeof req.max_tokens === 'number' && req.max_tokens > 0) {
     out.max_output_tokens = req.max_tokens;

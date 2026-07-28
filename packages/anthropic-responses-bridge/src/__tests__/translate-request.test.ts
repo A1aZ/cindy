@@ -272,6 +272,40 @@ describe('translateRequest', () => {
     expect(auto.tools?.at(-1)).toEqual({ type: 'x_search' });
   });
 
+  it('tool_choice:none 且没有 function tool → 仍下发 none(否则等于放开服务端工具)', () => {
+    // none 是调用方显式禁止用工具;我们仍会声明 x_search(声明只由 model 决定),
+    // 不把 none 传下去就等于把调用方的禁令反过来。
+    const out = translateRequest(
+      { model: 'xai/grok-4.5', tool_choice: { type: 'none' }, messages: [] },
+      { model: 'grok-4.5', serverSideTools: [{ type: 'x_search' }] },
+    );
+    expect(out.tools).toEqual([{ type: 'x_search' }]);
+    expect(out.tool_choice).toBe('none');
+    // parallel_tool_calls 只描述本地 function tool 的并行策略,纯服务端工具轮不发。
+    expect(out.parallel_tool_calls).toBeUndefined();
+  });
+
+  it('tool_choice:none 且有 function tool → 照常下发 none', () => {
+    const out = translateRequest(
+      {
+        model: 'xai/grok-4.5',
+        tools: [{ name: 'f', input_schema: { type: 'object', properties: {} } }],
+        tool_choice: { type: 'none' },
+        messages: [],
+      },
+      { model: 'grok-4.5', serverSideTools: [{ type: 'x_search' }] },
+    );
+    expect(out.tool_choice).toBe('none');
+  });
+
+  it('tool_choice:{type:tool} 但没有 function tool → 不下发(会指向不存在的 function)', () => {
+    const out = translateRequest(
+      { model: 'xai/grok-4.5', tool_choice: { type: 'tool', name: 'ghost' }, messages: [] },
+      { model: 'grok-4.5', serverSideTools: [{ type: 'x_search' }] },
+    );
+    expect(out.tool_choice).toBeUndefined();
+  });
+
   it('tool_choice:any 但请求没带 function tool → 服务端工具照常下发,且不发 tool_choice', () => {
     const out = translateRequest(
       { model: 'xai/grok-4.5', tool_choice: { type: 'any' }, messages: [] },

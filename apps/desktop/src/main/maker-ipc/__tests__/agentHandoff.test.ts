@@ -334,9 +334,9 @@ describe('createAgentHandoffPendingRegistry', () => {
     const reg = createAgentHandoffPendingRegistry(async () => null);
     // agent-switch / 消息删除在读历史之前取纪元
     const gen = reg.readGeneration('s1');
-    // 期间用户 /clear:立墓碑 → cleared_at 落库 → 推进纪元(handler 的真实顺序)
+    // 期间用户 /clear:立墓碑 → cleared_at 落库 → 封边界(handler 的真实顺序)
     reg.invalidate('s1');
-    reg.markClearBoundarySettled('s1');
+    reg.sealClearBoundary('s1');
     // 异步活干完才写回——这份交接算的是 clear 前的历史
     reg.set('s1', 'STALE-PRE-CLEAR-HANDOFF', gen);
     expect(await reg.peek('s1')).toBeNull();
@@ -359,11 +359,29 @@ describe('createAgentHandoffPendingRegistry', () => {
     expect(await reg.peek('s1')).toBeNull();
     expect(query).not.toHaveBeenCalled();
 
-    // cleared_at 落库完成 → 推进纪元
-    reg.markClearBoundarySettled('s1');
+    // cleared_at 落库完成 → 封边界(重立墓碑 + 推进纪元)
+    reg.sealClearBoundary('s1');
     expect(reg.readGeneration('s1')).not.toBe(genBeforeClear);
     // 那个窗口内启动、按 clear 前历史算出的交接写回时被丢弃
     reg.set('s1', 'STALE-PRE-CLEAR-HANDOFF', genInWindow);
+    expect(await reg.peek('s1')).toBeNull();
+  });
+
+  it('封边界要重立墓碑:窗口内用 clear 前纪元挤进来的交接必须被清掉', async () => {
+    // 纪元推迟到落库之后,窗口里就有一段「纪元还是 clear 前的值」的时间。此刻写回的
+    // 切换 / 删除校验会通过,墓碑被换成按 clear 前历史算出的交接;只推进纪元不会把
+    // 已经写进去的那份清掉,下次发送照样把清空前的上下文灌回模型(#738 review)。
+    const reg = createAgentHandoffPendingRegistry(async () => null);
+    reg.set('s1', 'OLD-HANDOFF');
+    const gen = reg.readGeneration('s1');
+
+    reg.invalidate('s1');
+    // 窗口内写回:纪元此刻确实还没推进,所以它进得来
+    reg.set('s1', 'STALE-PRE-CLEAR-HANDOFF', gen);
+    expect(await reg.peek('s1')).toBe('STALE-PRE-CLEAR-HANDOFF');
+
+    // 落库完成 → 封边界,把它清掉
+    reg.sealClearBoundary('s1');
     expect(await reg.peek('s1')).toBeNull();
   });
 

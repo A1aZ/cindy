@@ -604,22 +604,27 @@ export interface AgentHandoffPendingRegistry {
    * `set()` 会覆盖它。
    *
    * **不推进 clear 纪元**:纪元一旦推进,就等于向在途的切换 / 删除宣告「DB 边界已
-   * 就位」,而此刻 `cleared_at` 还没落库。推进动作交给 `markClearBoundarySettled`,
-   * 由 handler 在落库尝试结束之后调用。墓碑本身是同步生效的,先立不影响。
+   * 就位」,而此刻 `cleared_at` 还没落库。推进动作交给 `sealClearBoundary`,由 handler
+   * 在落库尝试结束之后调用。墓碑本身是同步生效的,先立不影响。
    */
   invalidate(sessionId: string): void;
   /**
-   * 推进 clear 纪元,作废所有在此之前取过纪元的在途写入。
+   * 封上 clear 边界:**重立墓碑 + 推进 clear 纪元**,作废所有在此之前取过纪元的在途
+   * 写入。必须在 `/clear` 的 `cleared_at` 落库尝试**结束之后**调用(成功或失败都要调)。
    *
-   * 必须在 `/clear` 的 `cleared_at` 落库尝试**结束之后**调用(成功或失败都要调)。
-   * 顺序不能反:纪元先于落库推进的话,窗口内启动的切换 / 删除会同时拿到「clear 之后
-   * 的纪元」和「clear 之前的 DB 历史」——校验通过,基于已清空历史算出的交接照样盖掉
-   * 墓碑。落库失败时也要调,原因是在途那批算的仍是过期历史,宁可一并丢弃。
+   * 两件事都不能省,因为 `invalidate` 与本调用之间那段 await 是双向漏的:
+   *  - 纪元若在 `invalidate` 就推进,窗口内**启动**的切换 / 删除会同时拿到「clear 之后
+   *    的纪元」和「clear 之前的 DB 历史」——校验通过,基于已清空历史算出的交接盖掉墓碑;
+   *  - 纪元推迟到这里,窗口内**写回**的那批(纪元是 clear 前取的、此刻还没被推进)校验
+   *    同样通过,一样盖掉墓碑,而单纯推进纪元并不会把已经写进去的那份清掉。
    *
-   * 代价是窗口内启动、读到的却是**已清空**历史的那一批也会被拒(纪元是 clear 前取的)
-   * ——丢掉一份本来正确的交接,方向保守,可接受。
+   * 所以是「先重立墓碑清掉窗口内挤进来的,再推进纪元挡住后面写回的」。落库失败也要调:
+   * 在途那批算的仍是过期历史,宁可一并丢弃。
+   *
+   * 代价是窗口内启动、读到的却是**已清空**历史的那一批也会被误伤——丢掉一份本来正确
+   * 的交接,方向保守,可接受。
    */
-  markClearBoundarySettled(sessionId: string): void;
+  sealClearBoundary(sessionId: string): void;
 }
 
 export function createAgentHandoffPendingRegistry(
@@ -733,7 +738,12 @@ export function createAgentHandoffPendingRegistry(
       composedByQuery.delete(sessionId);
       // 纪元不在这里推进,见接口声明:要等 cleared_at 落库尝试结束。
     },
-    markClearBoundarySettled(sessionId) {
+    sealClearBoundary(sessionId) {
+      // 重立墓碑再推进纪元,顺序不能反过来也不能省。落库这段 await 里,一份用
+      // clear 前纪元的 set 是能挤进来的(那时纪元还没推进,校验通过),它算的是
+      // clear 前的历史;只推进纪元不会把它清掉。
+      pending.set(sessionId, null);
+      composedByQuery.delete(sessionId);
       bumpClearEpoch(sessionId);
     },
   };

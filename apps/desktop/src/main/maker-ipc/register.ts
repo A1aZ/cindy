@@ -7026,9 +7026,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions 
         err: err instanceof Error ? err.message : String(err),
       });
     }
-    // 纪元在落库尝试**结束之后**才推进:成功则 DB 边界已就位,失败则宁可把在途那批
-    // 按过期历史算出的交接一并丢弃。顺序不可颠倒,理由见 markClearBoundarySettled 注释。
-    agentHandoffPending.markClearBoundarySettled(sid);
+    // 落库尝试结束后封边界:重立墓碑(清掉这段 await 里用 clear 前纪元挤进来的那份)
+    // + 推进纪元(挡住后面才写回的那批)。顺序不可颠倒,理由见 sealClearBoundary 注释。
+    agentHandoffPending.sealClearBoundary(sid);
     return projection;
   });
 

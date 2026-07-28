@@ -409,6 +409,21 @@ describe('isReviewModeActive(送审版本号匹配纯函数)', () => {
       vi.resetModules();
     }
   });
+
+  it('APP_PLATFORM 只认 ios / android:其余内联值收敛为空串,不逸出取值域', async () => {
+    // web / 未来新平台 / 被改写成意外值时都按「拿不到平台」处理(此处
+    // Constants.platform 亦无平台段),而不是把原值透传给平台门控。
+    for (const value of ['web', 'ANDROID_TV', 'unknown']) {
+      process.env.EXPO_OS = value;
+      try {
+        const { env } = await freshModules();
+        expect(env.APP_PLATFORM).toBe('');
+      } finally {
+        delete process.env.EXPO_OS;
+        vi.resetModules();
+      }
+    }
+  });
 });
 
 describe('applyResolvedClientEndpoints', () => {

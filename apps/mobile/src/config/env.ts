@@ -222,7 +222,7 @@ export let VOICE_API_BASE_URL = normalizeBaseUrlWithDefault(
 export const APP_BINARY_VERSION =
   (Constants.nativeAppVersion ?? Constants.expoConfig?.version ?? '').trim();
 
-// 运行平台标识('ios' / 'android';拿不到即空串)。审核模式的平台门控要在 env.ts
+// 运行平台标识:只会是 'ios' / 'android' / ''(拿不到)。审核模式的平台门控要在 env.ts
 // 顶层就能判定,而这里不能引 react-native 的 Platform:env.ts 被 node 环境单测直接
 // 导入,react-native 真模块会把 Flow 语法拖进依赖链(同 vitest.config.ts 对
 // expo-localization 的处理)。改用两路互不依赖的 RN-free 信号:
@@ -231,16 +231,24 @@ export const APP_BINARY_VERSION =
 //    JS 常量,不进 @expo/fingerprint,不改 runtimeVersion。
 // 2. `Constants.platform` 的平台段兜底 —— 万一内联缺失(自定义 babel 配置等)仍能判出
 //    Android,避免「安卓被审核模式误冻结热更」这个高代价失效模式静默复发。
-function resolveAppPlatform(): string {
+// 取值收敛为白名单:两路信号都只认 'ios' / 'android',其余(web、未来新平台、
+// 被改写成意外值)一律当作「拿不到」→ 空串,由消费方按平台未知的语义处理,
+// 不让未预期的值逸出取值域后再去参与平台门控。
+const NATIVE_PLATFORMS = ['ios', 'android'] as const;
+
+export type AppPlatform = (typeof NATIVE_PLATFORMS)[number] | '';
+
+function resolveAppPlatform(): AppPlatform {
   const inlined = (process.env.EXPO_OS ?? '').trim().toLowerCase();
-  if (inlined) return inlined;
+  const matched = NATIVE_PLATFORMS.find((platform) => platform === inlined);
+  if (matched) return matched;
   const platformManifest = Constants.platform;
   if (platformManifest?.android) return 'android';
   if (platformManifest?.ios) return 'ios';
   return '';
 }
 
-export const APP_PLATFORM = resolveAppPlatform();
+export const APP_PLATFORM: AppPlatform = resolveAppPlatform();
 
 /**
  * 纯函数:清单 review(送审版本号)与二进制版本号严格相等、且当前安装不是

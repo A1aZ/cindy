@@ -52,7 +52,7 @@ export interface EmbeddingWorkerOptions {
    * 用户停用该供应商时 worker 必须停批(job 保持 pending,恢复启用后自然续跑)。
    * host 注入(= 查 model-disable override 的供应商级停用);缺席 = 不查。
    */
-  isRouteSuspended?: () => boolean;
+  isRouteSuspended?: (modelId?: string) => boolean;
   log: ReturnType<typeof createLogger>;
 }
 
@@ -266,6 +266,18 @@ export class EmbeddingWorker {
       // 4. 按 model_id 分组调 embed
       const byModel = groupBy(liveJobs, (j) => j.model_id);
       for (const [modelId, modelJobs] of byModel.entries()) {
+        // 逐模型停用(PR #744 review 第十九轮):该 embedding 模型被点名停用时本组
+        // 不下单,job 保持 pending,恢复启用后续跑。
+        if (this.opts.isRouteSuspended?.(modelId as string)) {
+          this.opts.log.warn(
+            JSON.stringify({
+              event: 'embeddingWorker.tick.skip.modelDisabled',
+              modelId,
+              count: modelJobs.length,
+            }),
+          );
+          continue;
+        }
         const inputs = modelJobs.map((j) => textByRowid.get(j.rowid) as string);
         try {
           const res = await this.opts.getClient().embed({ texts: inputs, model: modelId as never });

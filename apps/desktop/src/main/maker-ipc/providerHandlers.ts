@@ -259,6 +259,12 @@ export interface ProviderHandlerDeps {
   setModelsDisabled(providerId: string, modelIds: readonly string[], disabled: boolean): void;
   setProviderDisabled(providerId: string, disabled: boolean): void;
   /**
+   * 自定义供应商删除成功后清掉其全部停用 override(供应商级 + 逐模型):否则同 id
+   * 重建的新供应商会带着旧停用状态复活(PR #744 review 第十九轮)。best-effort,
+   * 失败不回滚删除(清理性质)。
+   */
+  clearProviderDisableOverrides?(providerId: string): void;
+  /**
    * 当前数据归属账号 id(生产 = getCurrentDataOwnerId)。停用写入是 owner-scoped
    * 持久化(model-disable-prefs.json 按账号分目录),而 handler 内有异步窗口(串行
    * 队列排队 + 目录校验的 listProviders await)—— 期间切了账号,写入会落进**新**账号
@@ -890,6 +896,16 @@ export function registerProviderHandlers(
             );
           }
           throw err;
+        }
+        // 删除已成功:清掉该供应商名下全部停用 override(供应商级 + 逐模型),
+        // 防同 id 重建复活旧停用状态。best-effort —— 清理失败只留痕,不回滚删除。
+        try {
+          deps.clearProviderDisableOverrides?.(providerId);
+        } catch (err) {
+          log.warn('clear provider disable overrides after delete failed', {
+            providerId,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
         await afterChange();
         return { ok: true };

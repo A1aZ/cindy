@@ -131,6 +131,19 @@ export function isProviderRouteSuspended(providerId: string): boolean {
   return isProviderDisabled(readModelDisableOverrides(), providerId);
 }
 
+/**
+ * (供应商, 模型) 组合判定:供应商级停用或该模型条目被点名停用任一命中即真。
+ * embedding 等「模型 id 可被逐条停用但不在 chat 目录」的消费方用
+ * (PR #744 review 第十九轮)。
+ */
+export function isProviderModelRouteDisabled(providerId: string, modelId: string): boolean {
+  const overrides = readModelDisableOverrides();
+  return (
+    isProviderDisabled(overrides, providerId) ||
+    isModelDisabled(overrides, providerId, modelId)
+  );
+}
+
 async function resolveUtilityTextCandidates(
   maker: Maker,
   capability: UtilityTextCapability,

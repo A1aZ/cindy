@@ -83,7 +83,14 @@ export interface PendingCredentialSwitchDeps {
     agent: AgentKind,
     model: string,
     providerId: string | null,
-  ) => Promise<{ model?: string; providerId: string | null; degraded: boolean; effort?: string }>;
+    opts?: { desiredFastMode?: boolean },
+  ) => Promise<{
+    model?: string;
+    providerId: string | null;
+    degraded: boolean;
+    effort?: string;
+    fastMode?: boolean;
+  }>;
   /**
    * 把收口裁决后的实际 route 持久化(生产 = 直写 sessions 行 + 广播
    * sessions:patched)。renderer 在 deferred 被接受那一刻已按**请求值**落盘 DB;
@@ -243,7 +250,12 @@ export class PendingCredentialSwitchService {
         }
         return { providerId: target.providerId, apply: true };
       }
-      const resolved = await resolveRoute(target.agentKind, target.model, target.providerId);
+      // desiredFastMode = 会话当前 fast(previousRoute 捕获;renderer 在 set-model 时
+      // 不动 fast,DB 现值即它):目标全停换兜底模型时按落地拷贝 reconcile,不支持
+      // Fast 的兜底不再带着 fast 标志被上游拒(PR #744 review 第十九轮)。
+      const resolved = await resolveRoute(target.agentKind, target.model, target.providerId, {
+        desiredFastMode: target.previousRoute?.fastMode === true,
+      });
       if (!resolved.model) {
         // 目标全停且目录里没有任何启用兜底模型:回滚到切换前的运行路由(register 时
         // 捕获)—— renderer 已把停用目标预写进 DB,只清来源仍会让懒 resume 用停用
@@ -274,6 +286,7 @@ export class PendingCredentialSwitchService {
           providerId: resolved.providerId,
           model: resolved.model,
           ...(resolved.effort ? { effort: resolved.effort } : {}),
+          ...(resolved.fastMode !== undefined ? { fastMode: resolved.fastMode } : {}),
           apply: true,
         };
       }

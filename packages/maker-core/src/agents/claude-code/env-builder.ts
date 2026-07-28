@@ -38,6 +38,11 @@ interface ClaudeEnvBuildOptions {
   mode?: 'local' | 'remote';
   /** 本次子进程明确要走的凭证形态。undefined 时保持 adapter 既有 fallback。 */
   credentialMode?: AgentCredentialMode;
+  /**
+   * 本次 spawn 的会话来源(显式 providerId;null/undefined = 隐式默认路由)。
+   * 供 runtimeConfig.subagentModelForRoute 按父会话来源判定 subagent 覆写是否可路由。
+   */
+  sessionProviderId?: string | null;
 }
 
 function serializeModelContextWindows(
@@ -215,7 +220,12 @@ export async function buildClaudeEnv(
 
   // Claude Code's documented child-agent model override. Blank / undefined deliberately leaves
   // the key untouched so the host preserves the pre-existing native selection behavior.
-  const subagentModel = runtimeConfig.subagentModel?.trim();
+  // 路由感知版优先:子代理请求跑在父会话来源上,覆写是否可注入要按该来源判
+  // (host 的停用轴按 (来源, 模型) 记账;PR #744 review 第十九轮)。
+  const subagentModel = (runtimeConfig.subagentModelForRoute
+    ? runtimeConfig.subagentModelForRoute(options.sessionProviderId ?? null)
+    : runtimeConfig.subagentModel
+  )?.trim();
   if (subagentModel) {
     env.CLAUDE_CODE_SUBAGENT_MODEL = subagentModel;
   }

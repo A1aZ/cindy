@@ -469,7 +469,9 @@ describe('PendingCredentialSwitchService', () => {
       await h.service.onTurnSettled(sessionId);
       expect(getSessionProvider(sessionId)).toBe('xd');
       expect(h.persistRoute).not.toHaveBeenCalled();
-      expect(resolveRoute).toHaveBeenCalledWith('codex', 'gpt-5.5', 'xd');
+      expect(resolveRoute).toHaveBeenCalledWith('codex', 'gpt-5.5', 'xd', {
+        desiredFastMode: false,
+      });
 
       // agentKind 缺席:任一 agent 的裁决要求改动(此处 codex 判 reroute)即清空显式
       // 来源,绝不把按别的 agent 解析出的来源钉给真实会话(第十二、十三轮)。

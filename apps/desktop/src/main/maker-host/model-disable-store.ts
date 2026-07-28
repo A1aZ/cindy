@@ -153,3 +153,31 @@ export function setProviderDisabled(providerId: string, disabled: boolean): void
   store.writePatch({ disabledProviders });
   log.info('provider access override written', { providerId, disabled });
 }
+
+/**
+ * 清掉某供应商名下的**全部** override(供应商级 + 该来源全部逐模型条目)。
+ * 自定义供应商删除事务的收尾用:配置与凭证删了、override 不清的话,同 id 重建的
+ * 新供应商会带着旧的停用状态复活(PR #744 review 第十九轮)。幂等;无条目即 no-op。
+ */
+export function clearProviderDisableOverrides(providerId: string): void {
+  if (!providerId) return;
+  store.invalidateIfChanged();
+  const current = store.read();
+  const disabledProviders = { ...current.disabledProviders };
+  const disabledModels = { ...current.disabledModels };
+  let changed = false;
+  if (providerId in disabledProviders) {
+    delete disabledProviders[providerId];
+    changed = true;
+  }
+  const prefix = `${providerId}:`;
+  for (const key of Object.keys(disabledModels)) {
+    if (key.startsWith(prefix)) {
+      delete disabledModels[key];
+      changed = true;
+    }
+  }
+  if (!changed) return;
+  store.writePatch({ disabledProviders, disabledModels });
+  log.info('provider disable overrides cleared on delete', { providerId });
+}

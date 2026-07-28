@@ -20,7 +20,10 @@ import type { EmbedResponse, EmbeddingClient, EmbeddingModelId } from '@cindy/em
 
 import type { createLogger } from '../logger';
 import type { DbClient } from '../localDb/client/DbClient';
-import { isProviderRouteSuspended } from '../utility-model/oneShotCandidates';
+import {
+  isProviderModelRouteDisabled,
+  isProviderRouteSuspended,
+} from '../utility-model/oneShotCandidates';
 import { EmbeddingWorker } from './EmbeddingWorker';
 import { VecTableRegistry, type VecTableSpec } from './VecTableRegistry';
 import {
@@ -90,7 +93,10 @@ export class EmbeddingService {
       isVecAvailable: deps.isVecAvailable,
       // 停用轴:embedding 批经 XD 网关计费,用户停用 XD 时停批(job 保持
       // pending,恢复后续跑;PR #744 review 第十六轮)。
-      isRouteSuspended: () => isProviderRouteSuspended('xd'),
+      // 无 modelId = tick 级供应商全停短路;带 modelId = 批派发前的逐模型判定
+      // (voyage/voyage-4 等可被单独停用,PR #744 review 第十九轮)。
+      isRouteSuspended: (modelId) =>
+        modelId ? isProviderModelRouteDisabled('xd', modelId) : isProviderRouteSuspended('xd'),
       log: deps.log,
     });
   }
@@ -152,8 +158,8 @@ export class EmbeddingService {
     // 停用轴(PR #744 review 第十七轮):查询向量与后台批同为经 XD 网关的新付费
     // 调用,供应商停用时同样不发 —— 抛错交给消费方既有降级路径(语义搜索回落
     // 关键词检索)。
-    if (isProviderRouteSuspended('xd')) {
-      throw new Error('embedding provider disabled in settings');
+    if (isProviderModelRouteDisabled('xd', opts.modelId)) {
+      throw new Error('embedding provider or model disabled in settings');
     }
     return this.deps.getClient().embed({ texts, model: opts.modelId });
   }

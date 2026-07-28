@@ -772,6 +772,7 @@ export class ClaudeCodeAgent extends BaseAgent {
     const env = await buildClaudeEnv(this.deps.auth, this.deps.runtimeConfig, {
       credentialMode,
       modelContextWindows: providerRoutedModels,
+      sessionProviderId: opts.providerId ?? null,
     });
     // 远端单独一份 env:用 'remote' 模式从空字典起(不继承 desktop OS env),否则
     // Windows HOME=C:\Users\Lizi 之类污染远端 cc CLI 的 ~ 展开(session/memory
@@ -781,6 +782,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           credentialMode,
           mode: 'remote',
           modelContextWindows: providerRoutedModels,
+          sessionProviderId: opts.providerId ?? null,
         })
       : null;
     const hostSystemPrompt = this.deps.runtimeConfig.systemPrompt;

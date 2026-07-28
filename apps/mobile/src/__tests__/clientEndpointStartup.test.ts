@@ -385,6 +385,30 @@ describe('isReviewModeActive(送审版本号匹配纯函数)', () => {
     expect(env.isReviewModeActive('1.4.0', '')).toBe(false);
     expect(env.isReviewModeActive('', '')).toBe(false);
   });
+
+  it('android 恒 false:清单 review 命中同版本号也不冻结安卓的更新检查', async () => {
+    const { env } = await freshModules();
+    // iOS 保持原语义(命中即进审核模式),android 在同样输入下豁免。
+    expect(env.isReviewModeActive('0.1.0', '0.1.0', false, 'ios')).toBe(true);
+    expect(env.isReviewModeActive('0.1.0', '0.1.0', false, 'android')).toBe(false);
+    // TestFlight 豁免与平台豁免互不干扰。
+    expect(env.isReviewModeActive('0.1.0', '0.1.0', true, 'android')).toBe(false);
+    // 平台未知(内联缺失且 Constants.platform 无平台段)时不弱化 iOS 送审合规。
+    expect(env.isReviewModeActive('0.1.0', '0.1.0', false, '')).toBe(true);
+  });
+
+  it('APP_PLATFORM 取 EXPO_OS 内联值;缺失时回落 Constants.platform 平台段', async () => {
+    process.env.EXPO_OS = 'android';
+    try {
+      const { env } = await freshModules();
+      expect(env.APP_PLATFORM).toBe('android');
+      // 平台默认参数走 APP_PLATFORM,安卓 bundle 下审核模式恒关。
+      expect(env.isReviewModeActive('0.1.0', '0.1.0')).toBe(false);
+    } finally {
+      delete process.env.EXPO_OS;
+      vi.resetModules();
+    }
+  });
 });
 
 describe('applyResolvedClientEndpoints', () => {

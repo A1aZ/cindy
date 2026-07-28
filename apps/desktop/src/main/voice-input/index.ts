@@ -380,6 +380,9 @@ export async function adviseAndRecordVoiceInputDictionaryLearning(
           entryId: entry.id,
           term: entry.text,
         })),
+        // 只有全局浮窗听写的 toast 才贴着刚才的浮窗位置出现；应用内听写用户在
+        // 哪块屏操作与浮窗无关，按默认位置来。
+        { anchorToOverlay: sourceLabel === 'external_overlay' },
       );
     }
     log.debug('dictionary learning advice', {

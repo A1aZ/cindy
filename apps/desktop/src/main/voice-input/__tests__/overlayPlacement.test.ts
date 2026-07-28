@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   clampOverlayBoundsToWorkArea,
+  computeOverlayPositionRatio,
+  isBoundsCenterOnDisplay,
   normalizeFocusedWindowFrame,
   normalizeSavedOverlayPosition,
   resolveDraggedOverlayBounds,
@@ -178,6 +180,57 @@ describe('resolveOverlayInitialBounds', () => {
     expect(result.x).toBe(primary.workArea.x + primary.workArea.width - WIDTH - (EDGE_PADDING - CONTENT_INSET));
   });
 
+  it('旧坐标落进另一块屏时，归属屏认 displayId 而不认坐标落点', () => {
+    // 记忆存的是主屏（displayId 1）+ 比例 (0.25, 0.5)，但显示器重排后旧坐标
+    // 落进了副屏范围。归属屏必须仍是主屏，且按比例还原到焦点屏（主屏）。
+    const result = initial({
+      x: secondary.workArea.x + 400,
+      y: secondary.workArea.y + 400,
+      displayId: primary.id,
+      ratioX: 0.25,
+      ratioY: 0.5,
+      updatedAt: 1,
+    }, { displays: [primary, secondary], activeDisplay: primary });
+    const expectedX = primary.workArea.x + primary.workArea.width * 0.25 - WIDTH / 2;
+    const expectedY = primary.workArea.y + primary.workArea.height * 0.5 - HEIGHT / 2;
+    expect(Math.abs(result.x - expectedX)).toBeLessThanOrEqual(1);
+    expect(Math.abs(result.y - expectedY)).toBeLessThanOrEqual(1);
+  });
+
+  it('同屏但坐标已被重排作废时按保存的比例还原，而不是用失效坐标', () => {
+    // 主屏 workArea 已右移，旧坐标 (100, 200) 不再落在它内部。
+    const movedPrimary: OverlayPlacementDisplay = {
+      id: primary.id,
+      workArea: { x: 2560, y: 0, width: 1920, height: 1055 },
+    };
+    const result = initial({
+      x: 100,
+      y: 200,
+      displayId: primary.id,
+      ratioX: 0.5,
+      ratioY: 0.8,
+      updatedAt: 1,
+    }, { displays: [movedPrimary], activeDisplay: movedPrimary });
+    const expectedX = movedPrimary.workArea.x + movedPrimary.workArea.width * 0.5 - WIDTH / 2;
+    const expectedY = movedPrimary.workArea.y + movedPrimary.workArea.height * 0.8 - HEIGHT / 2;
+    expect(Math.abs(result.x - expectedX)).toBeLessThanOrEqual(1);
+    expect(Math.abs(result.y - expectedY)).toBeLessThanOrEqual(1);
+  });
+
+  it('跨屏时保存的比例优先于按坐标反推的比例', () => {
+    const result = initial({
+      // 坐标反推会得到 (0.25, 0.5)，但快照里明确记着 (0.8, 0.3)。
+      x: Math.round(primary.workArea.x + primary.workArea.width * 0.25 - WIDTH / 2),
+      y: Math.round(primary.workArea.y + primary.workArea.height * 0.5 - HEIGHT / 2),
+      displayId: primary.id,
+      ratioX: 0.8,
+      ratioY: 0.3,
+      updatedAt: 1,
+    }, { displays: [primary, secondary], activeDisplay: secondary });
+    const expectedX = secondary.workArea.x + secondary.workArea.width * 0.8 - WIDTH / 2;
+    expect(Math.abs(result.x - expectedX)).toBeLessThanOrEqual(1);
+  });
+
   it('保存位置轻微越界时 clamp 回可见区域', () => {
     const result = initial({ x: -200, y: 950, updatedAt: 1 }); // 中心仍在主屏内
     expect(result.x).toBe(primary.workArea.x + EDGE_PADDING - CONTENT_INSET);
@@ -206,8 +259,10 @@ describe('resolveOverlayInitialBounds', () => {
     };
     const result = initial(saved, { displays: [primary, secondary], activeDisplay: secondary });
     // 保存位置本身是整数像素，比例换算会带 1px 以内的取整误差。
-    expect(result.x).toBeCloseTo(secondary.workArea.x + secondary.workArea.width * centerRatioX - WIDTH / 2, -0.5);
-    expect(result.y).toBeCloseTo(secondary.workArea.y + secondary.workArea.height * centerRatioY - HEIGHT / 2, -0.5);
+    const expectedX = secondary.workArea.x + secondary.workArea.width * centerRatioX - WIDTH / 2;
+    const expectedY = secondary.workArea.y + secondary.workArea.height * centerRatioY - HEIGHT / 2;
+    expect(Math.abs(result.x - expectedX)).toBeLessThanOrEqual(1);
+    expect(Math.abs(result.y - expectedY)).toBeLessThanOrEqual(1);
   });
 
   it('迁移保留水平居中：主屏居中的记忆在副屏也居中', () => {
@@ -250,6 +305,43 @@ describe('resolveOverlayInitialBounds', () => {
   });
 });
 
+describe('computeOverlayPositionRatio', () => {
+  it('按卡片中心算屏内相对比例', () => {
+    const bounds = {
+      x: Math.round(primary.workArea.x + primary.workArea.width * 0.25 - WIDTH / 2),
+      y: Math.round(primary.workArea.y + primary.workArea.height * 0.75 - HEIGHT / 2),
+      width: WIDTH,
+      height: HEIGHT,
+    };
+    const ratio = computeOverlayPositionRatio(bounds, primary.workArea);
+    expect(ratio.ratioX).toBeCloseTo(0.25, 3);
+    expect(ratio.ratioY).toBeCloseTo(0.75, 3);
+  });
+
+  it('中心在 workArea 之外时把比例夹进 0~1', () => {
+    const ratio = computeOverlayPositionRatio(
+      { x: -9999, y: 99999, width: WIDTH, height: HEIGHT },
+      primary.workArea,
+    );
+    expect(ratio.ratioX).toBe(0);
+    expect(ratio.ratioY).toBe(1);
+  });
+});
+
+describe('isBoundsCenterOnDisplay', () => {
+  it('中心落在现存屏幕内时为 true', () => {
+    expect(isBoundsCenterOnDisplay({ x: 100, y: 200, width: WIDTH, height: HEIGHT }, [primary]))
+      .toBe(true);
+  });
+
+  it('对应屏幕已拔掉时为 false', () => {
+    expect(isBoundsCenterOnDisplay(
+      { x: secondary.workArea.x + 300, y: 500, width: WIDTH, height: HEIGHT },
+      [primary],
+    )).toBe(false);
+  });
+});
+
 describe('normalizeFocusedWindowFrame', () => {
   it('接受合法 frame', () => {
     expect(normalizeFocusedWindowFrame({ x: 10, y: 20, width: 800, height: 600 }))
@@ -273,8 +365,8 @@ describe('normalizeFocusedWindowFrame', () => {
 
 describe('normalizeSavedOverlayPosition', () => {
   it('接受合法快照', () => {
-    expect(normalizeSavedOverlayPosition({ x: 1, y: 2, displayId: 3, updatedAt: 4 }))
-      .toEqual({ x: 1, y: 2, displayId: 3, updatedAt: 4 });
+    expect(normalizeSavedOverlayPosition({ x: 1, y: 2, displayId: 3, ratioX: 0.5, ratioY: 0.8, updatedAt: 4 }))
+      .toEqual({ x: 1, y: 2, displayId: 3, ratioX: 0.5, ratioY: 0.8, updatedAt: 4 });
   });
 
   it('缺字段 / 非法值返回 null', () => {
@@ -286,6 +378,18 @@ describe('normalizeSavedOverlayPosition', () => {
 
   it('displayId / updatedAt 非法时降级而不丢整条记录', () => {
     expect(normalizeSavedOverlayPosition({ x: 1, y: 2, displayId: 'nope' }))
-      .toEqual({ x: 1, y: 2, displayId: undefined, updatedAt: 0 });
+      .toEqual({ x: 1, y: 2, displayId: undefined, ratioX: undefined, ratioY: undefined, updatedAt: 0 });
+  });
+
+  it('旧快照没有比例字段时保持 undefined（由坐标反推）', () => {
+    expect(normalizeSavedOverlayPosition({ x: 1, y: 2, displayId: 3, updatedAt: 4 }))
+      .toEqual({ x: 1, y: 2, displayId: 3, ratioX: undefined, ratioY: undefined, updatedAt: 4 });
+  });
+
+  it('比例超出 0~1 或非有限数时丢弃该字段', () => {
+    expect(normalizeSavedOverlayPosition({ x: 1, y: 2, ratioX: 1.5, ratioY: -0.2, updatedAt: 4 }))
+      .toEqual({ x: 1, y: 2, displayId: undefined, ratioX: undefined, ratioY: undefined, updatedAt: 4 });
+    expect(normalizeSavedOverlayPosition({ x: 1, y: 2, ratioX: Number.NaN, ratioY: 0.5, updatedAt: 4 }))
+      .toEqual({ x: 1, y: 2, displayId: undefined, ratioX: undefined, ratioY: 0.5, updatedAt: 4 });
   });
 });

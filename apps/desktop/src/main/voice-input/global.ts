@@ -37,6 +37,8 @@ import {
   type MacInputMonitoringPermissionSnapshot,
 } from './MacModifierShortcutListener.js';
 import {
+  computeOverlayPositionRatio,
+  isBoundsCenterOnDisplay,
   normalizeFocusedWindowFrame,
   resolveDraggedOverlayBounds,
   resolveOverlayInitialBounds,
@@ -239,8 +241,13 @@ let dictionaryToastCloseTimer: NodeJS.Timeout | null = null;
 // 避免 renderer screenX/screenY 在 Windows 缩放下的坐标系不一致问题。
 let overlayDragSession: { startBounds: Rectangle; startCursor: Point } | null = null;
 // 最近一次「浮窗真正呈现在哪」的 bounds。浮窗 hide 后会被停到屏幕外，实时
-// bounds 不能当锚点，词典 toast 靠这份记录跟到同一块屏、同一位置。
+// bounds 不能当锚点，全局浮窗路径的词典 toast 靠这份记录跟到同一块屏、同一位置。
 let lastPresentedOverlayBounds: Rectangle | null = null;
+// 浮窗呈现代次。焦点屏查询是异步的，它的回调必须能认出「这次呈现还算不算数」：
+// 会话被取消（hide / 复位到 idle）或已经开始了新一次呈现时，迟到的回调不得再
+// 定位或显示窗口——浮窗是缓存复用的，hide 并不销毁它，只靠 isDestroyed() 判断
+// 会让已取消的浮窗重新出现。
+let overlayPresentationSeq = 0;
 
 type ExternalDictionaryLearningWatch = {
   id: string;
@@ -263,6 +270,12 @@ type ExternalDictionaryLearningWatch = {
 export type DictionaryToastEntryPayload = {
   entryId: string;
   term: string;
+};
+
+type DictionaryToastPayload = {
+  entries: DictionaryToastEntryPayload[];
+  /** true = 该 toast 来自全局浮窗听写，可以贴着刚才的浮窗位置出现。 */
+  anchorToOverlay: boolean;
 };
 
 const EXTERNAL_DICTIONARY_LEARNING_POLL_DELAYS_MS = [2500, 6500, 14000];
@@ -586,6 +599,9 @@ export function registerGlobalVoiceInputIpc(): void {
       x: bounds.x,
       y: bounds.y,
       displayId: display?.id,
+      // 同时存屏内相对比例：显示器重排后绝对坐标会失效，比例仍能还原用户
+      // 当时把浮窗放在这块屏的哪个位置。
+      ...(display ? computeOverlayPositionRatio(bounds, display.workArea) : {}),
       updatedAt: Date.now(),
     });
     log.debug('global overlay drag position saved', { x: bounds.x, y: bounds.y });
@@ -675,7 +691,8 @@ export function registerGlobalVoiceInputIpc(): void {
     (_event, payload: unknown): { ok: true } | { ok: false; error: string } => {
       const entries = normalizeDictionaryToastEntries(payload);
       if (entries.length === 0) return { ok: false, error: 'Dictionary toast payload is incomplete.' };
-      showDictionaryToastWindow({ entries });
+      // Renderer 侧（应用内听写）触发的 toast 与全局浮窗位置无关。
+      showDictionaryToastWindow({ entries, anchorToOverlay: false });
       return { ok: true };
     },
   );
@@ -1136,6 +1153,8 @@ function destroyOverlayWindow(): void {
   overlayWindow = null;
   overlayLoaded = false;
   overlayPresentationActive = false;
+  // 同 setOverlayIdlePresentationState：作废本次呈现，pending 的异步定位回调失效。
+  overlayPresentationSeq += 1;
   pendingOverlayStart = null;
   pendingModifierOverlaySubmit = false;
   pendingModifierOverlaySuppressNextTap = false;
@@ -1153,6 +1172,8 @@ function destroyOverlayWindow(): void {
 function setOverlayIdlePresentationState(window: BrowserWindow): void {
   if (window.isDestroyed()) return;
   overlayPresentationActive = false;
+  // 作废本次呈现：pending 的焦点屏回调据此放弃定位与显示。
+  overlayPresentationSeq += 1;
   // `show: false` at BrowserWindow construction is not enough on macOS: a
   // prewarmed native window can still be unhidden when the app is activated by
   // a normal menu shortcut such as Cmd+,. Park the warm cache outside visible
@@ -1358,7 +1379,7 @@ function normalizeDictionaryToastEntries(payload: unknown): DictionaryToastEntry
     .slice(0, DICTIONARY_TOAST_MAX_ENTRIES);
 }
 
-function showDictionaryToastWindow(payload: { entries: DictionaryToastEntryPayload[] }): void {
+function showDictionaryToastWindow(payload: DictionaryToastPayload): void {
   closeDictionaryToastWindow();
   const window = createDictionaryToastWindow(payload);
   dictionaryToastWindow = window;
@@ -1367,13 +1388,25 @@ function showDictionaryToastWindow(payload: { entries: DictionaryToastEntryPaylo
   }, DICTIONARY_TOAST_DURATION_MS);
 }
 
-export function showVoiceInputDictionaryToast(entries: DictionaryToastEntryPayload[]): void {
+/**
+ * `anchorToOverlay` 只应由全局浮窗那条听写链路传 true。应用内听写的 toast 不能
+ * 借用浮窗位置：用户可能在另一块屏的 Cindy 窗口里操作，甚至浮窗那块屏早已拔掉。
+ */
+export function showVoiceInputDictionaryToast(
+  entries: DictionaryToastEntryPayload[],
+  options?: { anchorToOverlay?: boolean },
+): void {
   if (entries.length === 0) return;
-  showDictionaryToastWindow({ entries });
+  showDictionaryToastWindow({
+    entries,
+    anchorToOverlay: Boolean(options?.anchorToOverlay),
+  });
 }
 
-function createDictionaryToastWindow(payload: { entries: DictionaryToastEntryPayload[] }): BrowserWindow {
-  const bounds = computeDictionaryToastBounds(resolveDictionaryToastAnchorBounds());
+function createDictionaryToastWindow(payload: DictionaryToastPayload): BrowserWindow {
+  const bounds = computeDictionaryToastBounds(
+    resolveDictionaryToastAnchorBounds(payload.anchorToOverlay),
+  );
   const window = new BrowserWindow({
     ...bounds,
     frame: false,
@@ -1443,6 +1476,7 @@ function createDictionaryToastWindow(payload: { entries: DictionaryToastEntryPay
 function startLoadedOverlaySession(window: BrowserWindow, shortcutInvokedAt: number): void {
   if (window.isDestroyed()) return;
 
+  const presentationSeq = ++overlayPresentationSeq;
   // 焦点屏查询要最先发起：它是个子进程，能和下面的建窗、定位、麦克风启动并行。
   const focusedDisplayQuery = startFocusedDisplayQuery();
   positionOverlayWindow(window);
@@ -1511,10 +1545,22 @@ function startLoadedOverlaySession(window: BrowserWindow, shortcutInvokedAt: num
   // 多屏：先等一小会儿焦点屏答案，拿到就在显示前重新定位。窗口此刻还没可见，
   // 所以重定位不会被看成跳动；超时则维持鼠标所在屏的定位直接显示。
   void awaitFocusedDisplay(focusedDisplayQuery).then((focusedDisplay) => {
-    if (window.isDestroyed()) return;
+    if (!isCurrentOverlayPresentation(window, presentationSeq)) {
+      // 等待期间用户取消了浮窗、或者已经开始了新一次呈现：这次的答案作废。
+      log.debug('focused display result dropped: overlay presentation no longer current');
+      return;
+    }
     if (focusedDisplay) positionOverlayWindow(window, focusedDisplay);
     show();
   });
+}
+
+/** 判断一次异步定位结果是否还属于「当前这次浮窗呈现」。 */
+function isCurrentOverlayPresentation(window: BrowserWindow, presentationSeq: number): boolean {
+  return overlayPresentationSeq === presentationSeq
+    && overlayPresentationActive
+    && overlayWindow === window
+    && !window.isDestroyed();
 }
 
 function showPassiveOverlayWindow(window: BrowserWindow): void {
@@ -1641,12 +1687,19 @@ function computeOverlayBounds(display: Display): Rectangle {
 }
 
 /**
- * 词典 toast 贴着「刚才浮窗所在的位置」出现。浮窗 hide 后会被停到屏幕外的
- * OVERLAY_IDLE_BOUNDS，它的实时 bounds 不能当锚点，所以记住最近一次定位结果；
- * 本次启动还没开过浮窗时退回鼠标所在屏的默认位置。
+ * 全局浮窗听写的词典 toast 贴着「刚才浮窗所在的位置」出现。浮窗 hide 后会被停到
+ * 屏幕外的 OVERLAY_IDLE_BOUNDS，实时 bounds 不能当锚点，所以用最近一次定位结果。
+ *
+ * 这份缓存是进程级的，可能早于当前显示器拓扑：复用前必须确认它的中心还落在某块
+ * 现存屏幕上（否则外接屏拔掉后 toast 会整个落到屏幕外）。不满足条件、或调用方
+ * 不是全局浮窗链路时，一律退回鼠标所在屏的默认位置。
  */
-function resolveDictionaryToastAnchorBounds(): Rectangle {
-  return lastPresentedOverlayBounds ?? computeOverlayBounds(getCursorDisplay());
+function resolveDictionaryToastAnchorBounds(anchorToOverlay: boolean): Rectangle {
+  if (anchorToOverlay && lastPresentedOverlayBounds
+    && isBoundsCenterOnDisplay(lastPresentedOverlayBounds, getOverlayPlacementDisplays())) {
+    return lastPresentedOverlayBounds;
+  }
+  return computeOverlayBounds(getCursorDisplay());
 }
 
 function computeDictionaryToastBounds(overlayBounds: Rectangle): Rectangle {

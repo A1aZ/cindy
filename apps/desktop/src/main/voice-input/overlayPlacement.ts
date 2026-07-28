@@ -43,8 +43,25 @@ export type SavedOverlayPosition = {
   x: number;
   y: number;
   displayId?: number;
+  /**
+   * 卡片中心在保存时那块屏 workArea 里的相对比例（0~1）。
+   *
+   * 绝对坐标一旦遇到显示器重新排布就会失效（同一块屏的 workArea 原点变了），
+   * 光靠 x/y 无法还原「用户当时把它放在这块屏的哪个位置」。比例与屏幕排布无关，
+   * 是跨屏迁移与重排后恢复的权威依据；x/y 只用于同屏且坐标仍然有效时的像素级
+   * 原样恢复。旧快照没有这两个字段，按 x/y 反推。
+   */
+  ratioX?: number;
+  ratioY?: number;
   updatedAt: number;
 };
+
+function normalizeRatio(value: unknown): number | undefined {
+  if (!Number.isFinite(value)) return undefined;
+  const ratio = value as number;
+  if (ratio < 0 || ratio > 1) return undefined;
+  return ratio;
+}
 
 /** 校验持久化快照，字段缺失 / 非有限数一律视为无保存位置。 */
 export function normalizeSavedOverlayPosition(value: unknown): SavedOverlayPosition | null {
@@ -55,7 +72,21 @@ export function normalizeSavedOverlayPosition(value: unknown): SavedOverlayPosit
     x: candidate.x as number,
     y: candidate.y as number,
     displayId: Number.isFinite(candidate.displayId) ? (candidate.displayId as number) : undefined,
+    ratioX: normalizeRatio(candidate.ratioX),
+    ratioY: normalizeRatio(candidate.ratioY),
     updatedAt: Number.isFinite(candidate.updatedAt) ? (candidate.updatedAt as number) : 0,
+  };
+}
+
+/** 落盘前算出屏内相对比例，让记忆不依赖屏幕排布。 */
+export function computeOverlayPositionRatio(
+  bounds: Rectangle,
+  workArea: Rectangle,
+): { ratioX: number; ratioY: number } {
+  const center = boundsCenter(bounds);
+  return {
+    ratioX: clampRatio(workArea.width > 0 ? (center.x - workArea.x) / workArea.width : 0.5),
+    ratioY: clampRatio(workArea.height > 0 ? (center.y - workArea.y) / workArea.height : 0.5),
   };
 }
 
@@ -116,6 +147,18 @@ function boundsCenter(bounds: Rectangle): Point {
     x: bounds.x + bounds.width / 2,
     y: bounds.y + bounds.height / 2,
   };
+}
+
+function clampRatio(value: number): number {
+  return Math.min(Math.max(value, 0), 1);
+}
+
+/** 卡片中心是否还落在某块现存屏幕的 workArea 里（判断缓存锚点是否仍然可见）。 */
+export function isBoundsCenterOnDisplay(
+  bounds: Rectangle,
+  displays: OverlayPlacementDisplay[],
+): boolean {
+  return findDisplayContainingPoint(displays, boundsCenter(bounds)) !== null;
 }
 
 /**
@@ -190,20 +233,17 @@ export function resolveDraggedOverlayBounds({
   return clamped;
 }
 
-/**
- * 把 bounds 按「卡片中心在 workArea 里的相对比例」搬到另一块屏。
- * 分辨率不同的两块屏之间也成立：贴边保持贴边，水平居中（比例 0.5）
- * 仍然落在新屏的水平中线上。
- */
-function migrateBoundsToWorkArea(bounds: Rectangle, from: Rectangle, to: Rectangle): Rectangle {
-  const center = boundsCenter(bounds);
-  const ratioX = from.width > 0 ? (center.x - from.x) / from.width : 0.5;
-  const ratioY = from.height > 0 ? (center.y - from.y) / from.height : 0.5;
+/** 把「屏内相对比例」还原成某块屏上的窗口 bounds。 */
+function boundsFromRatio(
+  ratio: { ratioX: number; ratioY: number },
+  workArea: Rectangle,
+  size: { width: number; height: number },
+): Rectangle {
   return {
-    x: Math.round(to.x + to.width * ratioX - bounds.width / 2),
-    y: Math.round(to.y + to.height * ratioY - bounds.height / 2),
-    width: bounds.width,
-    height: bounds.height,
+    x: Math.round(workArea.x + workArea.width * ratio.ratioX - size.width / 2),
+    y: Math.round(workArea.y + workArea.height * ratio.ratioY - size.height / 2),
+    width: size.width,
+    height: size.height,
   };
 }
 
@@ -211,10 +251,15 @@ function migrateBoundsToWorkArea(bounds: Rectangle, from: Rectangle, to: Rectang
  * 打开浮窗时的初始位置。
  *
  * 「浮窗开在焦点屏」是硬约束，位置记忆只在焦点屏内部生效：
- * - 无保存位置 / 保存位置不可用（典型：外接屏已拔掉）→ 焦点屏默认位置。
- * - 保存位置就在焦点屏上 → 原样恢复（clamp 回可见区域）。
- * - 保存位置在另一块屏上 → 按相对比例迁移到焦点屏，用户「习惯放在偏下
- *   居中 / 靠右下」这类偏好跟着走，而不是把浮窗留在用户没在看的那块屏。
+ * - 无保存位置 / 记忆所属屏已不存在（典型：外接屏已拔掉）→ 焦点屏默认位置。
+ * - 记忆就在焦点屏上、且绝对坐标仍落在该屏内 → 像素级原样恢复。
+ * - 其余情况（跨屏，或同屏但坐标已被显示器重排作废）→ 按屏内相对比例还原到
+ *   焦点屏，用户「习惯放在偏下居中 / 靠右下」这类偏好跟着走，而不是把浮窗
+ *   留在用户没在看的那块屏、或者恢复到一个早已失效的坐标上。
+ *
+ * 记忆所属屏优先认 `displayId`，坐标落点只作旧快照（无 displayId）的兜底：
+ * 显示器重排后旧坐标可能正好落进另一块屏，那是坐标失效而不是「用户当时放在
+ * 那块屏」，不能据此换掉记忆的归属屏。
  */
 export function resolveOverlayInitialBounds({
   savedPosition,
@@ -233,22 +278,36 @@ export function resolveOverlayInitialBounds({
     width: size.width,
     height: size.height,
   };
-  // 先认坐标落点，再认保存下来的 displayId：屏幕重新排布后旧坐标可能
-  // 已经落到空隙里，但那块屏本身还在，仍然算「记忆有效」。
-  const savedDisplay = findDisplayContainingPoint(displays, boundsCenter(saved))
-    ?? displays.find((display) => display.id === savedPosition.displayId)
+  const savedDisplay = displays.find((display) => display.id === savedPosition.displayId)
+    ?? findDisplayContainingPoint(displays, boundsCenter(saved))
     ?? null;
   if (!savedDisplay) return fallbackBounds;
   const targetDisplay = activeDisplay ?? savedDisplay;
-  const bounds = targetDisplay.id === savedDisplay.id
+  const savedCoordsStillValid = rectContainsPoint(savedDisplay.workArea, boundsCenter(saved));
+  const bounds = targetDisplay.id === savedDisplay.id && savedCoordsStillValid
     ? saved
-    : migrateBoundsToWorkArea(saved, savedDisplay.workArea, targetDisplay.workArea);
+    : boundsFromRatio(resolveSavedRatio(savedPosition, saved, savedDisplay.workArea), targetDisplay.workArea, size);
   return clampOverlayBoundsToWorkArea({
     bounds,
     workArea: targetDisplay.workArea,
     contentInset,
     edgePadding,
   });
+}
+
+/**
+ * 取记忆的屏内相对比例：快照里带比例就用它，旧快照按绝对坐标反推。
+ * 反推结果夹到 0~1，避免坐标已经失效（落在归属屏外）时把浮窗甩到屏外。
+ */
+function resolveSavedRatio(
+  savedPosition: SavedOverlayPosition,
+  saved: Rectangle,
+  workArea: Rectangle,
+): { ratioX: number; ratioY: number } {
+  if (savedPosition.ratioX !== undefined && savedPosition.ratioY !== undefined) {
+    return { ratioX: savedPosition.ratioX, ratioY: savedPosition.ratioY };
+  }
+  return computeOverlayPositionRatio(saved, workArea);
 }
 
 /**

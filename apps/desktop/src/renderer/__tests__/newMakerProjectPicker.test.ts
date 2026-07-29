@@ -211,6 +211,37 @@ describe('Shared create project picker', () => {
     expect(newMakerDraftRouteSource).toContain('if (effectiveWorkingDir && wt.enabled) {');
   });
 
+  // #807 review 修复:新建目标必须与普通发送同口径 —— 远程纯对话下不能因为缺 workingDir 就抛错。
+  it('lets goal creation accept a device-only draft (same shape as normal send)', () => {
+    expect(newMakerDraftRouteSource).not.toContain(
+      'if (!effectiveDeviceLinkDeviceId || !effectiveWorkingDir) {',
+    );
+    expect(newMakerDraftRouteSource).toContain('if (!effectiveDeviceLinkDeviceId) {');
+    expect(newMakerDraftRouteSource).toContain('workingDir: effectiveWorkingDir ?? undefined,');
+  });
+
+  // #807 review 修复:换工作区必须显式回传当前设备。store 的不变量是「改 workingDir 又不带
+  // 设备字段就清设备」,不显式带会让选「对话」/换项目把设备悄悄清回本机。
+  it('carries the current device when only the workspace changes', () => {
+    expect(newMakerDraftRouteSource).toContain('const keepDevice = {');
+    expect(newMakerDraftRouteSource).toContain('deviceLinkDeviceId: draft.deviceLinkDeviceId,');
+  });
+
+  // #807 review 修复:设备真正从可选列表消失时把草稿收敛回本机,避免显示与实际目标不一致。
+  it('falls back to local when the selected device is no longer selectable', () => {
+    expect(newMakerDraftRouteSource).toContain(
+      'if (selectableDevices.some((d) => d.deviceId === effectiveDeviceLinkDeviceId)) return;',
+    );
+    // 列表为空可能只是首帧未就绪 / device-link 暂不可用,此时不得抹掉用户刚选的设备。
+    expect(newMakerDraftRouteSource).toContain('if (selectableDevices.length === 0) return;');
+  });
+
+  // #807 review 修复:远程删除失败 + 权威回读也失败时,必须把行放回去,不留幻影删除。
+  it('restores the optimistically removed row when both remove and reload fail', () => {
+    expect(deviceLinkProjectsHookSource).toContain('const restored = removedRow;');
+    expect(deviceLinkProjectsHookSource).toContain('removedIndex');
+  });
+
   it('keeps recent-folder storage out of project-option selection', () => {
     expect(folderPickerPopoverSource).toContain('projectOptions?: readonly FolderPickerOption[]');
     expect(folderPickerPopoverSource).toContain(

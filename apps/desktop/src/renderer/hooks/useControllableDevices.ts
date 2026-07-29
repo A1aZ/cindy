@@ -59,13 +59,19 @@ export interface SelectableDevice extends ControllableDevice {
 }
 
 /**
- * 设备切换器的准入:同账号、非本机、对方已开「允许被控」、本机未关闭控制。
- * 与 isControllableDevice 的唯一差别是**不看 online** —— 见 SelectableDevice。
- * 仍然要求 remoteControlEnabled / controlEnabled:那两个是授权状态,离线期间保留上次已知值,
- * 没授权的机器不该出现在可选列表里(列出来也点不动,只是噪音)。
+ * 设备切换器的准入:同账号、非本机、本机未关闭控制;对方的「允许被控」**只在它在线时才作数**。
+ *
+ * 与 isControllableDevice 的差别是不要求 online —— 见 SelectableDevice。
+ *
+ * 为什么离线时不看 remoteControlEnabled:presence 掉线的行会把这一位报成 false,即使对方并没有
+ * 主动关闭远程控制(`useDeviceLinkRemoteProjects` 的 ineligible 判定早就写明「只有 online 的
+ * false 才权威」,离线一律当 transient disconnect)。要是照着这一位过滤,设备一掉线就整行消失、
+ * 唯一对端掉线时 pill 会整个不见 —— 恰好把本控件承诺的「离线也列出、置灰禁用」打死。
+ * `controlEnabled` 是控制端本地偏好,任何时候都权威,照常要求。
  */
 export function isSelectableDevice(d: DeviceLinkDeviceView): boolean {
-  return d.remoteControlEnabled && d.controlEnabled && !d.isSelf;
+  if (d.isSelf || !d.controlEnabled) return false;
+  return d.online ? d.remoteControlEnabled : true;
 }
 
 /** 设备全量列表 → 切换器视图(含离线)。纯函数,便于单测整条 transform。 */

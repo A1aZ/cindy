@@ -90,7 +90,16 @@ export function useDeviceLinkProjects(
 
       // 先让旧的取数失效,否则它回来会把刚乐观移除的行又贴回去。
       requestIdRef.current += 1;
-      setRows((current) => current.filter((row) => row.path !== option.path));
+      // 记下被移除的行与它原来的位置:两条恢复路径都要用(回读失败时按原序插回)。
+      let removedIndex = -1;
+      let removedRow: ExistingRemoteProject | undefined;
+      setRows((current) => {
+        const idx = current.findIndex((row) => row.path === option.path);
+        if (idx < 0) return current;
+        removedIndex = idx;
+        removedRow = current[idx];
+        return [...current.slice(0, idx), ...current.slice(idx + 1)];
+      });
 
       try {
         await removeDeviceLinkExistingProject(target.deviceId, option.path);
@@ -104,7 +113,19 @@ export function useDeviceLinkProjects(
           if (requestIdRef.current !== requestId) return;
           setRows(list);
         } catch {
-          // 下次打开 picker 会重试。
+          // 回读也失败(对端离线 / 隧道断)。此时**必须把行放回去**:删除既没在对端生效,
+          // 权威列表也拿不到,保留乐观移除等于让选择器藏着一个远端仍然存在的项目,而且不给
+          // 任何提示 —— 用户只能靠重开 picker 才发现它还在。按原位插回,顺序不乱。
+          if (requestIdRef.current !== requestId) return;
+          const restored = removedRow;
+          if (!restored) return;
+          setRows((current) => {
+            if (current.some((row) => row.path === restored.path)) return current;
+            const at = removedIndex >= 0 && removedIndex <= current.length
+              ? removedIndex
+              : current.length;
+            return [...current.slice(0, at), restored, ...current.slice(at)];
+          });
         }
       }
     },

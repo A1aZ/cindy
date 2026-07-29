@@ -1376,13 +1376,23 @@ export function NewMakerDraftRoute() {
   // 这里只在「当前设备」的语境内换工作区。所以选「对话」= 在当前设备上开不绑项目的对话,
   // 而不是退回本机 —— 后者由设备 pill 选「本机」来表达。picker 现在只列当前设备的项目,
   // 传进来的 path 必然属于当前设备,语义自洽。
-  const handleWorkingDirChange = useCallback((dir: string | null) => {
-    if (dir == null) {
-      patchDraft({ workingDir: null, remoteHostId: null, extraDirs: [] });
-      return;
-    }
-    patchDraft({ workingDir: dir, remoteHostId: null });
-  }, []);
+  const handleWorkingDirChange = useCallback(
+    (dir: string | null) => {
+      // 显式回传当前设备 = 「设备不变,只换工作区」。store 的不变量是「改 workingDir 又不带
+      // 设备字段就清设备」(防止本地项目被误当远程),所以这里必须显式带上,否则选「对话」或
+      // 换项目都会把设备悄悄清回本机 —— 而 picker 里列的项目本就属于当前设备。
+      const keepDevice = {
+        deviceLinkDeviceId: draft.deviceLinkDeviceId,
+        deviceLinkDeviceName: draft.deviceLinkDeviceName,
+      };
+      if (dir == null) {
+        patchDraft({ workingDir: null, remoteHostId: null, extraDirs: [], ...keepDevice });
+        return;
+      }
+      patchDraft({ workingDir: dir, remoteHostId: null, ...keepDevice });
+    },
+    [draft.deviceLinkDeviceId, draft.deviceLinkDeviceName],
+  );
 
   // ─── 新草稿入场:引用目录清零 ──────────────────────────────────────────
   // 引用目录是"这次给 agent 额外看哪"的单次授权,不是"我常用哪个"的偏好记忆:
@@ -1410,6 +1420,32 @@ export function NewMakerDraftRoute() {
     setDevicePickerOpen(open);
     if (open) setFolderPickerOpen(false);
   }, []);
+  /**
+   * 选中的设备真正从可选列表里消失时(对方撤销「允许被控」/ 本机关掉对它的控制 / 解除配对),
+   * 把草稿收敛回本机。
+   *
+   * 不这么做的后果:pill 上显示的是一个已经不可用的目标,而草稿里还留着那个 deviceId 并会据此
+   * 走远程 create-session —— 要么失败,要么在旧设备上建出会话,和界面显示完全不符。
+   *
+   * 只在「列表已就绪(非空)且当前设备不在其中」时才回落:
+   *   - 离线设备现在仍留在列表里(见 isSelectableDevice),所以掉线不会误触发这条;
+   *   - 列表为空可能只是首帧还没拉到 / device-link 暂时不可用,此时不动草稿,避免把用户
+   *     刚选好的设备在一次抖动里抹掉。
+   */
+  useEffect(() => {
+    if (!effectiveDeviceLinkDeviceId) return;
+    if (selectableDevices.length === 0) return;
+    if (selectableDevices.some((d) => d.deviceId === effectiveDeviceLinkDeviceId)) return;
+    log.warn('[new-maker] selected device is no longer selectable, falling back to local');
+    patchDraft({
+      deviceLinkDeviceId: null,
+      deviceLinkDeviceName: null,
+      workingDir: null,
+      remoteHostId: null,
+      extraDirs: [],
+    });
+  }, [effectiveDeviceLinkDeviceId, selectableDevices]);
+
   /**
    * 换设备(#807)。**一并清掉 workingDir 与 extraDirs** —— 上一台机器的路径在新机器上
    * 基本不存在,留着会让用户以为项目跟过来了,发送时才在被控端 path guard 上失败。
@@ -2103,9 +2139,11 @@ export function NewMakerDraftRoute() {
       });
       if (!proceed) return; // 用户取消授权:弹窗关闭即可,不算错误。
       if (isDeviceLinkDraft) {
-        // partial state 防御:device-link 草稿按不变量必带 deviceId+workingDir;
-        // 万一缺失,显式报错而不是静默落到「本地建会话 + 本地 setGoal」(目标会建错机器)。
-        if (!effectiveDeviceLinkDeviceId || !effectiveWorkingDir) {
+        // partial state 防御:只要 deviceId 就够 —— #807 起「选了设备但没选项目」是合法状态
+        // (在对端建 standalone dialogue),不能再要求 workingDir,否则新建目标在远程纯对话下
+        // 直接抛 createSessionFailed,而同一状态的普通发送是走得通的(两条路必须同口径)。
+        // 仍然保留 deviceId 缺失的报错:那才是真正的 partial state,静默落到本地会把目标建错机器。
+        if (!effectiveDeviceLinkDeviceId) {
           throw new Error(t('ccAgent.draft.createSessionFailed'));
         }
         const deviceId = effectiveDeviceLinkDeviceId;
@@ -2116,7 +2154,8 @@ export function NewMakerDraftRoute() {
           [
             buildDeviceLinkCreateArgs({
               agentKind: persistedAgentKind,
-              workingDir: effectiveWorkingDir,
+              // 无项目 → 不传,由 buildDeviceLinkCreateArgs 派生 workspaceKind:'dialogue'。
+              workingDir: effectiveWorkingDir ?? undefined,
               model: draftInitialModel,
               effort: draftInitialEffort,
               permissionMode: chatInitialPermissionMode,

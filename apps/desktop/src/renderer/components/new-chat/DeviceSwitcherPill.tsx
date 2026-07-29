@@ -40,14 +40,21 @@ interface Props {
   disabled?: boolean;
 }
 
-/** 当前值对应的展示名。选中的设备已离线 / 已消失时回落到本机文案,与列表可选项保持一致。 */
+/**
+ * 当前值对应的展示名。
+ *
+ * 选中的设备已从可选列表消失(被撤销控制权限 / 解除配对)时**不能回落到本机文案** —— 草稿里
+ * 还留着那个 deviceId 并会据此走远程创建,显示「本机」等于谎报目标,用户会以为在本机建、
+ * 实际发去了旧设备(或直接失败)。这里退而显示 deviceId,让显示与实际一致;把草稿收敛回本机
+ * 是调用方的职责(见 NewMakerDraftRoute 里的失效回落 effect),不在展示函数里偷偷抹掉状态。
+ */
 export function resolveDeviceLabel(
   devices: readonly SelectableDevice[],
   value: DeviceSwitcherValue,
   localLabel: string,
 ): string {
   if (value == null) return localLabel;
-  return devices.find((d) => d.deviceId === value)?.name ?? localLabel;
+  return devices.find((d) => d.deviceId === value)?.name ?? value;
 }
 
 export function DeviceSwitcherPill({

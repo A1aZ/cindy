@@ -11,6 +11,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { toDeviceProjectOptions } from '@/hooks/useDeviceLinkProjects';
+import { resolveDeviceLabel } from '@/components/new-chat/DeviceSwitcherPill';
 import { getProjectPickerDisplayName } from '@/hooks/useProjectPickerOptions';
 
 describe('device-link project picker options', () => {
@@ -60,5 +61,28 @@ describe('device-link project picker options', () => {
 
     expect(getProjectPickerDisplayName('/work/app', options, 'dev-b')).toBe('build/app');
     expect(getProjectPickerDisplayName('/work/app', options, 'dev-a')).toBe('studio/app');
+  });
+
+  // #807:设备失效(被撤销权限/解除配对)时,pill 绝不能显示成「本机」—— 草稿里还留着那个
+  // deviceId 并会据此走远程创建,显示本机等于谎报目标,用户以为在本机建、实际发去旧设备。
+  describe('resolveDeviceLabel', () => {
+    const devices = [
+      { deviceId: 'dev-a', name: 'Studio Mac', platform: 'darwin', online: true },
+      { deviceId: 'dev-b', name: 'Mac mini', platform: 'darwin', online: false },
+    ];
+
+    it('本机(value=null)→ 本机文案', () => {
+      expect(resolveDeviceLabel(devices, null, '本机')).toBe('本机');
+    });
+
+    it('命中列表 → 该设备名(在线与离线都一样取名字)', () => {
+      expect(resolveDeviceLabel(devices, 'dev-a', '本机')).toBe('Studio Mac');
+      expect(resolveDeviceLabel(devices, 'dev-b', '本机')).toBe('Mac mini');
+    });
+
+    it('设备已从列表消失 → 显示 deviceId,不得回落成本机文案', () => {
+      expect(resolveDeviceLabel(devices, 'dev-gone', '本机')).toBe('dev-gone');
+      expect(resolveDeviceLabel([], 'dev-gone', '本机')).toBe('dev-gone');
+    });
   });
 });

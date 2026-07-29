@@ -302,6 +302,21 @@ describe('Shared create project picker', () => {
     );
   });
 
+  // #807 review 第五轮:换设备必须同步失效上一台的远程默认值快照,否则 seed effect 会拿旧
+  // capabilities/defaults 种下新设备的 dlSel 并把它记成「已 seed」,新设备真值到达后又被 guard
+  // 挡住重种 —— composer 于是向新设备提交上一台的 model / provider / permission。
+  it('invalidates the previous device remote-default snapshots before switching', () => {
+    const handler = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const handleDeviceChange = useCallback('),
+    );
+    const body = handler.slice(0, handler.indexOf('patchDraft('));
+    expect(body).toContain('setDlSel(null);');
+    expect(body).toContain('dlSeedKeyRef.current = null;');
+    expect(body).toContain('setRemoteDraftState({ loaded: false, value: null });');
+    // worktree 上下文同属上一台机器。
+    expect(body).toContain('setWtEnabled(false);');
+  });
+
   // #807 review 第四轮:四个死角,都是前几轮修复留下的。
   it('never opens the local picker in a remote scope, even without onAddRemoteProject', () => {
     // 上层按 hasAnyRemoteTarget 下发 onAddRemoteProject,而选中的对端离线且是唯一远程目标时

@@ -1480,6 +1480,25 @@ export function NewMakerDraftRoute() {
           text: stripLocalMentionChips(composerDraft.text),
         });
       }
+      // 换设备前**同步失效上一台的远程默认值快照**。
+      //
+      // 不做的话会串台:patchDraft 只改 deviceId,而 dlSel / remoteDraftState / dlSeedKeyRef 仍
+      // 描述上一台。seed effect 随即以新 deviceId 组出 key(与旧 seedKey 不等)、却拿着**上一台的**
+      // capabilities + defaults 种下 dlSel,并把新设备记成「已 seed」;等新设备真正的能力与默认值
+      // 到达时,`dlSeedKeyRef.current === key` 又把重种挡掉。结果 composer 显示并向新设备提交上一台
+      // 的 model / provider / permission —— 那些值在新设备上可能根本不支持。
+      //
+      // 把 remoteDraftState 打回未加载即可堵住:seed effect 的 `!remoteDraftState.loaded` 会拦住这
+      // 一轮,等新设备的 defaults 真正到达后才种。dlSeedKeyRef 一并清空,避免 key 巧合相同时跳过。
+      // capabilities 不用手动清:它由 useAgentCapabilities 按 deviceId 解析,cache miss 分支自己会
+      // 置 null,cache hit 时拿到的就已经是新设备的。
+      setDlSel(null);
+      dlSeedKeyRef.current = null;
+      setRemoteDraftState({ loaded: false, value: null });
+      // worktree 上下文同样属于上一台机器(与「添加远程项目」交接路径同款重置)。
+      setWtEnabled(false);
+      setWtBaseRepo(null);
+      setWtSourceBranch('');
       patchDraft({
         deviceLinkDeviceId: deviceId,
         deviceLinkDeviceName: deviceName,

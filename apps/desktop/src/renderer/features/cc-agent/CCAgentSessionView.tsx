@@ -77,7 +77,7 @@ import {
   CONTINUE_AFTER_APP_EXIT_PROMPT,
   CONTINUE_AFTER_ERROR_PROMPT,
 } from '../../../shared/interruptedTurn';
-import { clearInterruptedAttentionIfOwned } from '@/hooks/useInterruptedSessionsAttention';
+import { refreshPendingAlerts } from '@/hooks/usePendingAlertAttention';
 import { CredentialSwitchWaitBanner } from '@/components/chat/CredentialSwitchWaitBanner';
 import { UpgradeBanner } from '@/components/chat/UpgradeBanner';
 import { WorktreeRestoreBanner } from '@/components/chat/WorktreeRestoreBanner';
@@ -90,7 +90,7 @@ import { RightSidebarToggle } from '@/components/layout/RightSidebarToggle';
 import { TopRightChipStack, TopRightChipStackProvider } from '@/components/chat/TopRightChipStack';
 import { ChatDisplaySnapshotProvider } from '@/components/chat/ChatDisplaySnapshotContext';
 import { useCCAgentChat } from '@/hooks/useCCAgentChat';
-import { ackErrorRead, useErrorReadAck } from '@/hooks/useErrorReadAck';
+import { ackErrorAlertHandled } from '@/lib/errorAlertAck';
 import { useAttachments } from '@/hooks/useAttachments';
 import { useCCSessions } from '@/hooks/useCCSessions';
 import { SessionContentHeaderRegistration } from './SessionContentHeader';
@@ -306,8 +306,9 @@ interface CCAgentSessionViewProps {
   showRsbToggle?: boolean;
   /**
    * 本视图当前是否真实可见(挂载 ≠ 可见)。workdir 文件页的聊天 rail 折叠时
-   * 视图仍挂载但宽度为 0,报错 banner 看不见 —— 报错「真实已读」判定
-   * (useErrorReadAck)依赖此标记,不可见时绝不 ack。默认 true。
+   * 视图仍挂载但宽度为 0。默认 true。
+   * 注:红点不再依赖它 —— 展示与否都不影响「告警未处理」的判定(2026-07 统一);
+   * 仍用于远程回执的 display-ready 门槛与其它按可见性收敛的逻辑。
    */
   viewVisible?: boolean;
   /**
@@ -1226,15 +1227,10 @@ export function CCAgentSessionView({
   const providers = remoteDeviceId ? deviceProviders : localProviders;
   // 该会话 agent 的能力(agent 级 hasFastMode + 旧被控端拍平回退用 availableModels);按 remoteDeviceId 作用域。
   const { capabilities: sessionCaps } = useAgentCapabilities(displayAgentKind, remoteDeviceId);
-  // 报错「真实已读」:终止错误的 ErrorBanner 在本视图内固定展示,视图真实可见 +
-  // 窗口聚焦驻留后经 badge 桥接 ack 灵动岛 / 清红角标。`error` 合并了 recoverable
-  // 错误(agent 仍在跑,不算已读),再用 store 的 terminal 判定过滤;渲染由同一
-  // store 状态驱动,同步读取不会拿到过期值。
-  const hasTerminalErrorForReadAck =
-    Boolean(error) &&
-    !agentStatus?.isRunning &&
-    (sessionId ? makerChatStore.hasSessionTerminalError(sessionId) : false);
-  useErrorReadAck(sessionId, hasTerminalErrorForReadAck, viewVisible);
+  // 这里曾有 useErrorReadAck:ErrorBanner 在视图内聚焦驻留 1.5s 即 explicit 清红点。
+  // 2026-07 统一后展示不再产生已读 —— 横幅还在就说明告警未处理,红点必须留着。
+  // 红角标现在只由用户处置横幅(handleRetry / handleSilentStopContinue /
+  // handleDismissError 调 ackErrorAlertHandled)或 pending-alerts 派生收敛来清。
 
   // 后台子任务活动:turn 已结束但该会话的 CC 子进程仍在调模型(后台子 agent 持续
   // 消耗用量)。main 侧按 proxy 活动信号判定并推送;消费点是 RunningStatusBar 的
@@ -1323,6 +1319,9 @@ export function CCAgentSessionView({
           ? CONTINUE_AFTER_APP_EXIT_PROMPT
           : CONTINUE_AFTER_ERROR_PROMPT,
       );
+      // 续跑项落库后原 error 行已不是尾行,重算清掉红点 —— 否则 'error' 在侧栏
+      // 状态优先级里高于 running,任务已经跑起来了却还挂着红点。
+      refreshPendingAlerts();
     } catch (err) {
       setErrorTailBannerHiddenFor(null);
       toast.error(err instanceof Error ? err.message : String(err));
@@ -1333,6 +1332,8 @@ export function CCAgentSessionView({
     // store 乐观置 errorDismissed(banner 即刻熄灭、切会话回来不复现)+ 持久化
     // (main 侧 merge dismissed:true,不丢 sdkError 等原字段;远程会话仅内存态)。
     makerChatStore.dismissErrorTailMessage(sessionId, errorTailMsg.clientId);
+    // 横幅被处置 = 告警消失,重算让红点跟着收敛(dismiss 落库无广播,必须显式触发)。
+    refreshPendingAlerts();
   }, [errorTailMsg, sessionId]);
   // interrupted-turn-resume(简化版):「疑似中断」由 session 行的双时间戳驱动
   // (startedAt > endedAt 且未被 /clear 越过,见 sessionActiveTurn.ts 文件头),
@@ -1375,12 +1376,11 @@ export function CCAgentSessionView({
     sessionInterruptAcked,
     remoteTurnActive,
   ]);
-  // 兜底清启动红点:打开会话且中断判定不成立(peer 已忽略 / 续跑已完成 / 用户已
-  // 操作)时,banner 不会 mount、useAckErrorAttention 没有清除时机 —— 这里清掉
-  // useInterruptedSessionsAttention 打的红点(只清 hook 自有的,不误伤任务失败红点)。
+  // 打开会话且中断判定不成立(peer 已忽略 / 续跑已完成 / 用户已操作)时重算告警:
+  // 红点是 pending-alerts 的派生,这里只触发重查,由差分决定清不清 —— 不直接清点,
+  // 否则会抹掉同一会话上仍未处理的错误尾行告警。
   useEffect(() => {
-    if (sessionId && session && !interruptedFromSession)
-      clearInterruptedAttentionIfOwned(sessionId);
+    if (sessionId && session && !interruptedFromSession) refreshPendingAlerts();
   }, [sessionId, session, interruptedFromSession]);
   const handleSessionInterruptContinue = useCallback(async () => {
     if (!sessionId) return;
@@ -1391,6 +1391,9 @@ export function CCAgentSessionView({
       // 续跑 turn 真正启动时会写更新的 started；若再次被 app 退出打断，仍会产生新提示。
       // 本视图先靠内存 acked 即时熄灭，peer 视图靠 dispatch 后的 ack 广播收敛。
       await makerChatStore.sendUiTrigger(sessionId, CONTINUE_AFTER_APP_EXIT_PROMPT);
+      // 同 handleErrorTailContinue:turn 已跑起来,红点必须让位给 running 状态。
+      // durable ack 的广播还要等 dispatch 成功,这里先收敛本地视图。
+      refreshPendingAlerts();
     } catch (err) {
       setSessionInterruptAcked(false);
       toast.error(err instanceof Error ? err.message : String(err));
@@ -2426,20 +2429,20 @@ export function CCAgentSessionView({
   // 规范化续跑指令(CONTINUE_AFTER_ERROR_PROMPT)替代重发原文;零产出仍重发原文。
   // 判定与文案都在 main(规则 9),renderer 只发意图。
   const handleRetry = useCallback(() => {
-    // 点击 Retry 即已读:用户操作了报错 banner,无需等驻留计时。
-    if (sessionId) ackErrorRead(sessionId);
+    // 点击 Retry = 处置了这条告警,清红角标(展示本身不算)。
+    if (sessionId) ackErrorAlertHandled(sessionId);
     retryLastError();
   }, [retryLastError, sessionId]);
 
-  // silent-stop 耗尽横幅「继续」:同 Retry 计已读,动作走 store(清横幅 + 隐藏续跑指令)。
+  // silent-stop 耗尽横幅「继续」:同 Retry 算处置,动作走 store(清横幅 + 隐藏续跑指令)。
   const handleSilentStopContinue = useCallback(() => {
-    if (sessionId) ackErrorRead(sessionId);
+    if (sessionId) ackErrorAlertHandled(sessionId);
     continueAfterSilentStop();
   }, [continueAfterSilentStop, sessionId]);
 
-  // 点击 Cancel 关闭报错 banner 同样算已读(操作了 banner 本身)。
+  // 点击 Cancel 关闭报错 banner 同样是处置(用户选择不管它了)。
   const handleDismissError = useCallback(() => {
-    if (sessionId) ackErrorRead(sessionId);
+    if (sessionId) ackErrorAlertHandled(sessionId);
     clearError();
   }, [clearError, sessionId]);
 
@@ -2970,22 +2973,18 @@ export function CCAgentSessionView({
               sessionId &&
               (errorTailKind === 'interrupted' ? (
                 <InterruptedTurnBanner
-                  sessionId={sessionId}
                   onContinue={handleErrorTailContinue}
                   onDismiss={handleErrorTailDismiss}
-                  viewVisible={viewVisible}
                   style={{ width: inputWidth }}
                   className="py-1"
                 />
               ) : (
                 <ErrorTailErrorBanner
-                  sessionId={sessionId}
                   errorText={errorTailText}
                   errorReason={errorTailMsg?.errorReason}
                   onContinue={handleErrorTailContinue}
                   onDismiss={handleErrorTailDismiss}
                   onSilentStopContinue={handleSilentStopContinue}
-                  viewVisible={viewVisible}
                   agentKind={session?.agentKind}
                   remoteHostId={session?.remoteHostId ?? undefined}
                   deviceLinkDeviceId={remoteDeviceId}
@@ -3010,10 +3009,8 @@ export function CCAgentSessionView({
               !agentStatus.isRunning &&
               sessionId && (
                 <InterruptedTurnBanner
-                  sessionId={sessionId}
                   onContinue={handleSessionInterruptContinue}
                   onDismiss={handleSessionInterruptDismiss}
-                  viewVisible={viewVisible}
                   style={{ width: inputWidth }}
                   className="py-1"
                 />

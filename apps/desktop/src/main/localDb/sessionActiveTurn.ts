@@ -208,9 +208,10 @@ function enqueueEndedWrite(sessionId: string, endedAt: number): Promise<void> {
 }
 
 /**
- * 启动红点数据源:所有「疑似中断」(startedAt > endedAt,未被 /clear 越过,
- * 桌面可见来源)的 active 会话 id。renderer 启动时打 'error' 红点,banner
- * 真实展示后 explicit 清除;继续 / 忽略都会写 ended,自然不再命中。
+ * 「疑似中断」(startedAt > endedAt,未被 /clear 越过,桌面可见来源)的 active
+ * 会话 id。继续 / 忽略都会写 ended,自然不再命中。
+ *
+ * 这是 listPendingAlertSessionIds 的两条腿之一;红点语义见后者的文件内注释。
  */
 export async function listInterruptedPendingSessionIds(): Promise<string[]> {
   const db = getDbClient().drizzle;
@@ -228,6 +229,88 @@ export async function listInterruptedPendingSessionIds(): Promise<string[]> {
       ),
     );
   return rows.map((r) => r.id);
+}
+
+/**
+ * 「尾部停在未处理错误行」的 active 会话 id —— 红点派生的第二条腿。
+ *
+ * 为什么需要它(2026-07 红点与横幅统一):侧栏红点此前只认 renderer 内存态
+ * (makerChatStore 的 state.error),而那份内存态有两个不可靠处 —— LRU 上限会驱逐
+ * 整条会话 slice;错误行落库后「会话不在活跃视图」时会主动清掉 live error。两者
+ * 都会让红点消失而输入框上方的 error-tail banner 仍在。banner 的判定
+ * (CCAgentSessionView 的 errorTailMsg)依赖已加载的 messages[],只有打开过的会话
+ * 算得出来,所以必须在 main 侧补一份对任意会话都成立的持久判定。
+ *
+ * 判定 = 会话未被 rewind 的**最后一条**消息是 role='error' 且未 dismissed。turn 一
+ * 旦重新跑起来就会插入新的 user 行,该 error 行不再是尾行,查询自然不再命中 ——
+ * 与 banner「会话空闲才展示」的条件天然对齐,不需要额外的 running 判定。
+ *
+ * ⚠️ 三个必须照做的点(踩过的坑):
+ *  1. content 是 TEXT 列而非 JSON 列,可能存非法 JSON(见 mergeDismissedIntoErrorContent
+ *     的 fallback 分支)。json_extract 遇非法 JSON 直接抛 malformed JSON,故先用
+ *     json_valid 守卫,非法内容按「未 dismissed」处理 —— 宁可多提示一次,不吞掉报错。
+ *  2. 「最后一条」用 (created_at, rowid) 双键严格大于,同毫秒靠插入序区分,并且两侧
+ *     都要 rewind_at IS NULL —— 漏掉会把已被 rewind 截断的历史行当成尾行。口径与
+ *     hasAssistantProgressAfterMessage 完全一致。
+ *  3. 必须走 `.select().from()` builder(同上函数的 ⚠️):生产 worker 模式的
+ *     drizzleProxy 只路由带 toSQL 的 builder,裸 `.all(sql)` 会被静默吞掉。
+ */
+export async function listErrorTailPendingRows(): Promise<
+  { sessionId: string; clientId: string }[]
+> {
+  const db = getDbClient().drizzle;
+  const rows = await db
+    .select({ sessionId: messages.sessionId, clientId: messages.clientId })
+    .from(messages)
+    .innerJoin(sessions, eq(sessions.id, messages.sessionId))
+    .where(
+      and(
+        eq(sessions.status, 'active'),
+        inArray(sessions.source, DESKTOP_VISIBLE_SESSION_SOURCES),
+        eq(messages.role, 'error'),
+        isNull(messages.rewindAt),
+        // 顶层 dismissed:true = 用户点过「忽略」(mergeDismissedIntoErrorContent 写入)。
+        sql`(json_valid(${messages.content}) = 0
+          OR json_extract(${messages.content}, '$.dismissed') IS NOT 1)`,
+        // 该 error 行必须是会话尾行(见上方 ⚠️ 2)。
+        sql`NOT EXISTS (
+          SELECT 1 FROM messages m2
+          WHERE m2.session_id = ${messages.sessionId}
+            AND m2.rewind_at IS NULL
+            AND (m2.created_at > ${messages.createdAt}
+              OR (m2.created_at = ${messages.createdAt}
+                AND m2.rowid > ${sql.raw('"messages"."rowid"')}))
+        )`,
+      ),
+    );
+  // 尾行判定保证每会话最多一行(同毫秒同 rowid 不可能并存)。
+  return rows;
+}
+
+/** 同上,只要会话 id —— 红点派生用。 */
+export async function listErrorTailPendingSessionIds(): Promise<string[]> {
+  const rows = await listErrorTailPendingRows();
+  return [...new Set(rows.map((r) => r.sessionId))];
+}
+
+/**
+ * 红点派生的唯一权威真源:存在**未处理告警**的 active 会话 id(中断 ∪ 错误尾行)。
+ *
+ * 语义(2026-07 统一决策):红点不再是「未读标记」,而是未处理告警集合的投影 ——
+ * 只要输入框上方的红色横幅还在(没被继续 / 重试 / 关闭处置掉),列表红点就一直在,
+ * 不存在「看到了但没处理」的中间态。renderer 侧 usePendingAlertAttention 启动拉取
+ * 本查询并在收敛触发点重算,对结果集做差分打点 / 清点。
+ *
+ * 两条腿都是纯 DB 判定,故对未打开的会话同样成立 —— 这是把红点从内存态改为派生态
+ * 的前提。live error(尾行落库前的过渡窗口)仍由 renderer 即时打点,落库后由本查询
+ * 接管,交接处红点不掉。
+ */
+export async function listPendingAlertSessionIds(): Promise<string[]> {
+  const [interrupted, errorTail] = await Promise.all([
+    listInterruptedPendingSessionIds(),
+    listErrorTailPendingSessionIds(),
+  ]);
+  return [...new Set([...interrupted, ...errorTail])];
 }
 
 /**

@@ -443,4 +443,104 @@ describe('sessionActiveTurn', () => {
     await insert('this-turn-tool', 'tool_use');
     expect(await hasAssistantProgressAfterMessage('s-same-ms', 'c-user2')).toBe(true);
   });
+
+  it('listErrorTailPendingSessionIds matches undismissed error tails only', async () => {
+    const { listErrorTailPendingSessionIds } = await import('../sessionActiveTurn.js');
+    const client = createTestDbClient();
+    const base = Date.now();
+    const insert = (
+      sessionId: string,
+      id: string,
+      role: string,
+      content: string,
+      createdAt: number,
+      rewindAt: number | null = null,
+    ) =>
+      client.exec(
+        'INSERT INTO messages (id, client_id, session_id, role, content, created_at, rewind_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [id, id, sessionId, role, content, createdAt, rewindAt],
+      );
+
+    // 命中:尾行是未 dismissed 的 error。
+    await seedSession(client, 's-err');
+    await insert('s-err', 'e1-user', 'user', '{}', base);
+    await insert('s-err', 'e1-err', 'error', '{"message":"boom"}', base + 100);
+
+    // 命中:content 是非法 JSON —— json_extract 会抛 malformed JSON,必须被
+    // json_valid 守卫挡住并按「未 dismissed」放行(fail-safe)。
+    await seedSession(client, 's-err-bad-json');
+    await insert('s-err-bad-json', 'e2-err', 'error', 'not json at all', base + 100);
+
+    // 命中:数组形态 content(合法 JSON 但取不到顶层键)同样按未 dismissed 处理。
+    await seedSession(client, 's-err-array');
+    await insert('s-err-array', 'e6-err', 'error', '["boom"]', base + 100);
+
+    // 不命中:用户点过「忽略」(mergeDismissedIntoErrorContent 写入顶层 dismissed)。
+    await seedSession(client, 's-dismissed');
+    await insert('s-dismissed', 'e3-err', 'error', '{"message":"boom","dismissed":true}', base + 100);
+
+    // 不命中:error 行之后又跑了新 turn,它已不是尾行(turn 重启即自然收敛)。
+    await seedSession(client, 's-resumed');
+    await insert('s-resumed', 'e4-err', 'error', '{"message":"boom"}', base + 100);
+    await insert('s-resumed', 'e4-user', 'user', '{}', base + 200);
+
+    // 不命中:error 行被 rewind 软删,不算尾行。
+    await seedSession(client, 's-rewound');
+    await insert('s-rewound', 'e5-err', 'error', '{"message":"boom"}', base + 100, base + 150);
+
+    // 命中:error 行与后续 rewind 行同毫秒 —— rewind 的不参与尾行比较,
+    // error 仍是尾行(双键比较两侧都过滤 rewind_at IS NULL)。
+    await seedSession(client, 's-same-ms-rewound');
+    await insert('s-same-ms-rewound', 'e7-err', 'error', '{"message":"boom"}', base + 100);
+    await insert('s-same-ms-rewound', 'e7-rewound', 'assistant', '{}', base + 100, base + 150);
+
+    // 不命中:同毫秒但 rowid 更大的活跃行在 error 之后 → error 不是尾行。
+    await seedSession(client, 's-same-ms-after');
+    await insert('s-same-ms-after', 'e8-err', 'error', '{"message":"boom"}', base + 100);
+    await insert('s-same-ms-after', 'e8-user', 'user', '{}', base + 100);
+
+    // 不命中:非 active 会话。
+    await seedSession(client, 's-deleted-err', { status: 'deleted' });
+    await insert('s-deleted-err', 'e9-err', 'error', '{"message":"boom"}', base + 100);
+
+    // 不命中:不在桌面可见来源白名单里,红点无处展示。
+    await seedSession(client, 's-hidden-err', { source: 'legacy-hidden' });
+    await insert('s-hidden-err', 'e10-err', 'error', '{"message":"boom"}', base + 100);
+
+    expect((await listErrorTailPendingSessionIds()).sort()).toEqual([
+      's-err',
+      's-err-array',
+      's-err-bad-json',
+      's-same-ms-rewound',
+    ]);
+  });
+
+  it('listPendingAlertSessionIds unions interrupted and error-tail legs without duplicates', async () => {
+    const { listPendingAlertSessionIds } = await import('../sessionActiveTurn.js');
+    const client = createTestDbClient();
+    const now = Date.now();
+
+    // 只中断。
+    await seedSession(client, 's-only-interrupted', { startedAt: now - 1000 });
+    // 只错误尾行。
+    await seedSession(client, 's-only-error');
+    await client.exec(
+      'INSERT INTO messages (id, client_id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      ['x1', 'x1', 's-only-error', 'error', '{"message":"boom"}', now],
+    );
+    // 两条腿同时命中 → 并集去重,只出现一次。
+    await seedSession(client, 's-both', { startedAt: now - 1000 });
+    await client.exec(
+      'INSERT INTO messages (id, client_id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      ['x2', 'x2', 's-both', 'error', '{"message":"boom"}', now],
+    );
+    // 都不命中。
+    await seedSession(client, 's-clean', { startedAt: now - 5000, endedAt: now - 1000 });
+
+    expect((await listPendingAlertSessionIds()).sort()).toEqual([
+      's-both',
+      's-only-error',
+      's-only-interrupted',
+    ]);
+  });
 });

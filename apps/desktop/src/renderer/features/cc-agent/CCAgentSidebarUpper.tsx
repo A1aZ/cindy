@@ -27,7 +27,7 @@ import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 import { toast } from '@/lib/toast';
 import { useCCSessions } from '@/hooks/useCCSessions';
-import { useInterruptedSessionsAttention } from '@/hooks/useInterruptedSessionsAttention';
+import { refreshPendingAlerts, usePendingAlertAttention } from '@/hooks/usePendingAlertAttention';
 import { useSidebarCollapsedState } from '../feature-context';
 import { stripTrailingPathSeparators } from '../../../shared/pathText';
 import { useRefreshWorktrees } from '@/contexts/WorktreeContext';
@@ -235,8 +235,9 @@ function cutoffForLastActivity(
 export function CCAgentSidebarUpper() {
   const { t } = useTranslation();
   const isCollapsed = useSidebarCollapsedState();
-  // interrupted-turn-resume:启动时拉取「尾部停在中断标记行」的会话,补 'error' 红点。
-  useInterruptedSessionsAttention();
+  // 错误红点的派生真源:拉取存在未处理告警(中断 ∪ 未 dismissed 错误尾行)的会话
+  // 并在收敛触发点重算 —— 横幅不被处置,红点就不消失。
+  usePendingAlertAttention();
   // F-PJ-10：filter.status 决定后端 fetch 时是否带 ?status=archived|all
   const filter = useSidebarFilter();
   const includeArchived = filter.status;
@@ -290,8 +291,17 @@ export function CCAgentSidebarUpper() {
   }, []);
   const handleMarkAllAutomationsRead = useCallback(async () => {
     setAutomationsMenuPos(null);
-    // 用户显式「全部标为已读」:explicit,允许连未读 error 一起清。
+    // 用户显式「全部标为已读」:explicit,允许连未处理的 error 一起清。
     clearSessionAttentionMany(automationAttentionSessionIds, { intent: 'explicit' });
+    // 红点是未处理告警的派生投影 —— 只清角标会被下一次重算打回来。这里做真正的
+    // 批量处置(错误尾行 merge dismissed、中断态写 ended),与逐个在横幅上点
+    // 「忽略」等价,落库后红点不再复活。失败不阻塞下面的 schedule run 已读。
+    try {
+      await window.electronAPI.localDb.sessions.dismissPendingAlerts(automationAttentionSessionIds);
+      refreshPendingAlerts();
+    } catch (e) {
+      log.warn('dismiss pending alerts failed', e);
+    }
     try {
       const updated = await markAllScheduleRunsReadAndSync();
       if (updated > 0) {

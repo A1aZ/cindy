@@ -17,15 +17,25 @@
  * 远程(device-link)会话:status IPC 查本机 DB 查不到行 → no-worktree → null,
  * 天然安全降级,无需显式分支。
  *
+ * 红点(2026-07 统一):横幅要展示时给该会话打 'error' attention,处置(恢复成功 /
+ * 用户点 X)后清 —— 与错误三条共享「不处置就不消失」的语义,展示不构成已读。
+ * 与那三条的区别是**不进 main 侧的 pending-alerts 批量查询**:worktree 状态要
+ * fs.access 探目录 + spawn git 查分支/快照 ref,对未打开会话批量算比纯读 sessions 表
+ * 贵一个数量级(见 main/worktree/restore.ts)。故未打开的会话不主动亮点,红点只在
+ * 会话被打开、自查出结果后建立。点 X 只是本视图隐藏(不落库),重开会话自查照旧
+ * 命中、红点重新打上 —— 告警确实还在,行为自洽。
+ *
  * 颜色走主题 token(规则 16):error 语义豁免色组(工作区缺失属破坏性状态提示)。
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { FolderX, RefreshCw, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 import { useRefreshWorktrees } from '@/contexts/WorktreeContext';
+import { addSessionAttention } from '@/lib/sessionAttentionStore';
+import { ackErrorAlertHandled } from '@/lib/errorAlertAck';
 
 type BannerPhase = 'hidden' | 'restorable' | 'restoring';
 /** missing = 目录不存在需重建;pending = 目录在但有未应用快照。决定文案与按钮词。 */
@@ -58,6 +68,16 @@ export function WorktreeRestoreBanner({
   const refreshWorktrees = useRefreshWorktrees();
   const [phase, setPhase] = useState<BannerPhase>('hidden');
   const [variant, setVariant] = useState<BannerVariant>('missing');
+  /** 本组件给哪个会话打过红点 —— 清点只清自己打的,不误伤 live error 等其它来源。 */
+  const markedSessionRef = useRef<string | null>(null);
+
+  /** 处置完成:清掉本组件打的红点(没打过则 no-op)。 */
+  const clearOwnAttention = useCallback(() => {
+    const marked = markedSessionRef.current;
+    if (!marked) return;
+    markedSessionRef.current = null;
+    ackErrorAlertHandled(marked);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,7 +96,12 @@ export function WorktreeRestoreBanner({
         } else if (status?.state === 'present' && status.hasSnapshot) {
           setVariant('pending');
           setPhase('restorable');
+        } else {
+          return;
         }
+        // 横幅要展示 = 有未处理告警 → 打红点(与错误三条同一个 'error' 语义色)。
+        markedSessionRef.current = sessionId;
+        addSessionAttention(sessionId, 'error');
       } catch {
         // 老被控端 / IPC 异常 → 不显示,保持旧行为
       }
@@ -100,6 +125,8 @@ export function WorktreeRestoreBanner({
         } else {
           toast.success(t('chat.worktreeRestoreBanner.restored'));
           setPhase('hidden');
+          // 恢复成功 = 告警消失,清红点。
+          clearOwnAttention();
         }
         void refreshWorktrees();
       } else {
@@ -161,7 +188,11 @@ export function WorktreeRestoreBanner({
       </button>
       <button
         type="button"
-        onClick={() => setPhase('hidden')}
+        onClick={() => {
+          setPhase('hidden');
+          // 用户主动忽略 = 处置(本视图内),清红点。重开会话自查再命中会重新打上。
+          clearOwnAttention();
+        }}
         className="shrink-0 text-[var(--error-fg)] opacity-60 hover:opacity-100 transition-opacity"
         title={t('chat.worktreeRestoreBanner.dismissTitle')}
       >

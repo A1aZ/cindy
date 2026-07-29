@@ -3350,9 +3350,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
         ipcRenderer.invoke('local-db:sessions:update', id, patch),
       touchUserSend: (id: string, atMs?: number): Promise<void> =>
         ipcRenderer.invoke('local-db:sessions:touchUserSend', id, atMs),
-      /** interrupted-turn-resume:「疑似中断」(startedAt > endedAt)的 active 会话 id(启动红点)。 */
+      /** interrupted-turn-resume:「疑似中断」(startedAt > endedAt)的 active 会话 id。 */
       interruptedPending: (): Promise<string[]> =>
         ipcRenderer.invoke('local-db:sessions:interrupted-pending'),
+      /** 红点派生真源:存在未处理告警(中断 ∪ 未 dismissed 错误尾行)的 active 会话 id。 */
+      pendingAlerts: (): Promise<string[]> =>
+        ipcRenderer.invoke('local-db:sessions:pending-alerts'),
+      /** 批量处置未处理告警(「全部标为已读」):等价于逐个在横幅上点「忽略」。 */
+      dismissPendingAlerts: (sessionIds: string[]): Promise<{ dismissed: number }> =>
+        ipcRenderer.invoke('local-db:sessions:dismiss-pending-alerts', sessionIds),
       /** interrupted-turn-resume:用户对中断提示点「忽略」,写一次正常收尾时刻。 */
       ackInterrupted: (id: string): Promise<void> =>
         ipcRenderer.invoke('local-db:sessions:ack-interrupted', id),

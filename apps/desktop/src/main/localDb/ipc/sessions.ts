@@ -38,10 +38,12 @@ import { notifyAgentIslandSessionPatch } from '../agentIslandSessionPatch';
 import { noteSessionClearBoundary } from '../../messagePersistBroadcaster';
 import {
   ackSessionTurnEndedDurable,
+  listErrorTailPendingRows,
   listInterruptedPendingSessionIds,
+  listPendingAlertSessionIds,
   setOnSessionTurnEndedPersisted,
 } from '../sessionActiveTurn';
-import { rebroadcastAgentSwitchBoundary } from './messages';
+import { dismissErrorMessage, rebroadcastAgentSwitchBoundary } from './messages';
 
 const log = createLogger('sessions');
 const DEFAULT_DRAFT_SESSION_TITLE = 'New Maker';
@@ -740,10 +742,51 @@ export function registerSessionIpc(): void {
     return sessionToCamel({ ...row, messageCount: 0 });
   });
 
-  // interrupted-turn-resume:启动红点数据源 —— 「疑似中断」(startedAt > endedAt)
-  // 的 active 会话 id 列表,纯读查询。renderer 启动时拉取一次,补 'error' 红点。
+  // interrupted-turn-resume:「疑似中断」(startedAt > endedAt)的 active 会话 id,
+  // 纯读查询。红点已改为 pending-alerts 的派生(见下),本 channel 保留:它在
+  // device-link allowlist 里是既有跨端契约,删掉会让老控制端拿到 CHANNEL_NOT_ALLOWED。
   ipcMain.handle('local-db:sessions:interrupted-pending', async () => {
     return listInterruptedPendingSessionIds();
+  });
+
+  // 红点派生的唯一真源:存在未处理告警(中断 ∪ 未 dismissed 的错误尾行)的 active
+  // 会话 id。纯读查询,renderer 的 usePendingAlertAttention 启动拉取 + 收敛触发点
+  // 重算,对结果集差分打点/清点(语义见 sessionActiveTurn.ts 的
+  // listPendingAlertSessionIds)。
+  // 故意**不**进 device-link allowlist:renderer 只查本机(远程会话的告警由被控端
+  // 自己的派生收敛负责,控制端的处置动作经既有 ack-interrupted / dismiss-error 窄写
+  // 落被控端 DB 后触发)。没有跨端调用方就不扩协议面。
+  ipcMain.handle('local-db:sessions:pending-alerts', async () => {
+    return listPendingAlertSessionIds();
+  });
+
+  // 批量处置未处理告警(自动化分组右键「全部标为已读」)。红点是告警的派生投影,
+  // 光清角标会被下一次重算打回来 —— 所以这个入口必须做真正的处置,与用户在横幅上
+  // 点「忽略」等价:错误尾行 merge dismissed:true(复用 dismissErrorMessage,带 peer
+  // 广播),中断态写 last_turn_ended_at 消化掉。
+  // 只处置**当前真的命中告警**的会话:一次全量查询后按传入集合取交集,避免对
+  // 无告警会话空写 lastTurnEndedAt 造成无意义的 patch 广播。
+  ipcMain.handle('local-db:sessions:dismiss-pending-alerts', async (_e, ids: unknown) => {
+    if (!Array.isArray(ids)) throwIpcError('INVALID_PARAMS', 'sessionIds 必须是数组');
+    const wanted = new Set(ids.filter((v): v is string => typeof v === 'string' && v.length > 0));
+    if (wanted.size === 0) return { dismissed: 0 };
+    const [tailRows, interrupted] = await Promise.all([
+      listErrorTailPendingRows(),
+      listInterruptedPendingSessionIds(),
+    ]);
+    let dismissed = 0;
+    for (const row of tailRows) {
+      if (!wanted.has(row.sessionId)) continue;
+      const updated = await dismissErrorMessage(row.sessionId, row.clientId);
+      if (updated) dismissed += 1;
+    }
+    for (const sessionId of interrupted) {
+      if (!wanted.has(sessionId)) continue;
+      // awaited durable 写:与单会话「忽略」同一路径(链 + MAX 守卫 + 落库后广播)。
+      await ackSessionTurnEndedDurable(sessionId);
+      dismissed += 1;
+    }
+    return { dismissed };
   });
 
   // interrupted-turn-resume:用户对「疑似中断」提示点「忽略」/「继续」——写一次

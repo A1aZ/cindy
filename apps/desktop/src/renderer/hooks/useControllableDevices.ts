@@ -8,7 +8,7 @@
  * 常驻时背上整套设置页的订阅开销。device-link 不可用(未登录 / relay 断)→ 静默空列表。
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 export interface ControllableDevice {
   deviceId: string;
@@ -116,13 +116,22 @@ export function sameSelectableList(
 export function useSelectableDevices(): { devices: SelectableDevice[]; loaded: boolean } {
   const [devices, setDevices] = useState<SelectableDevice[]>([]);
   const [loaded, setLoaded] = useState(false);
+  /**
+   * 请求序号:首次加载与两个监听(presence / control-target)都会并发调 refresh,而 REST 响应可能
+   * 乱序返回。没有它,一个更早的 listDevices 晚到就会把新的权威快照覆盖掉 —— 设备刚被解除配对
+   * 或撤销控制时,那份过期响应会把它连同 loaded=true 一起写回来,于是失效回落认为目标仍有效、
+   * picker 也允许再次选中它,直到下一次事件才纠正。同 useDeviceLinkProjects 的做法。
+   */
+  const requestIdRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
     const refresh = async () => {
+      const requestId = requestIdRef.current + 1;
+      requestIdRef.current = requestId;
       try {
         const { devices: list } = await window.electronAPI.deviceLink.listDevices();
-        if (cancelled) return;
+        if (cancelled || requestIdRef.current !== requestId) return;
         const next = toSelectableDevices(list);
         setDevices((prev) => (sameSelectableList(prev, next) ? prev : next));
         // 成功拿到快照 —— 哪怕是空的,也是权威的空。
@@ -135,7 +144,7 @@ export function useSelectableDevices(): { devices: SelectableDevice[]; loaded: b
         // (正确地)因为这个空不权威而不动草稿 —— 于是草稿仍指着那台设备,UI 上却没有任何控件能
         // 切回本机,直到下一次成功刷新。保留旧行的代价只是它们可能已过期(在线状态尤其),
         // 而 loaded=false 已经如实表达了「这份快照不权威」。
-        if (cancelled) return;
+        if (cancelled || requestIdRef.current !== requestId) return;
         setLoaded(false);
       }
     };

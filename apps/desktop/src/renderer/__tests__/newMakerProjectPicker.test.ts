@@ -302,6 +302,21 @@ describe('Shared create project picker', () => {
     );
   });
 
+  // #807 review 第九轮:设备列表刷新要按请求序号丢弃过期响应。首次加载与两个监听会并发调
+  // refresh,REST 响应可能乱序 —— 更早的 listDevices 晚到会把新的权威快照覆盖掉,把刚被解除配对
+  // 的设备连同 loaded=true 一起写回来,于是回落认为目标仍有效、picker 也允许再次选中它。
+  it('discards superseded device-list refreshes', () => {
+    const hook = controllableDevicesHookSource.slice(
+      controllableDevicesHookSource.indexOf('export function useSelectableDevices()'),
+    );
+    const body = hook.slice(0, hook.indexOf('export function useControllableDevices()'));
+    expect(body).toContain('const requestId = requestIdRef.current + 1;');
+    // 成功与失败两条路径都要 gate,否则过期的失败会误把 loaded 打回 false。
+    expect(
+      (body.match(/requestIdRef\.current !== requestId/g) ?? []).length,
+    ).toBeGreaterThanOrEqual(2);
+  });
+
   // #807 review 第八轮:两处对称性缺口,都是前几轮修复的直接后果。
   it('resets worktree state during the automatic local fallback too', () => {
     // 远程项目开过 worktree、设备随后被解除配对 → wtEnabled/wtBaseRepo 残留 → 下一次本机发送会进

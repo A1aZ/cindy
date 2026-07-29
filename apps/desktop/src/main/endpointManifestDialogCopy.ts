@@ -54,7 +54,7 @@ export const ENDPOINT_MANIFEST_DIALOG_COPY: Record<
       'Cindy 启动前需要先获取服务器配置，这次请求没有成功。请检查网络连接后重新获取。',
     configBody:
       '服务器没有返回可用的配置，重新获取不会改变结果。请稍后再试或联系我们。',
-    sourceLine: '配置地址：{{source}}',
+    sourceLine: '配置来源：{{source}}',
     reasonLine: '失败原因：{{reason}}',
     diagnosisLine: '网络诊断：{{diagnosis}}',
     logLine: '诊断日志位置：{{path}}',
@@ -70,7 +70,7 @@ export const ENDPOINT_MANIFEST_DIALOG_COPY: Record<
       'Cindy needs the server configuration before it can start, and this request did not go through. Check your network connection and fetch it again.',
     configBody:
       'The server did not return a usable configuration, so fetching it again will not change the result. Try later or contact us.',
-    sourceLine: 'Configuration URL: {{source}}',
+    sourceLine: 'Configuration source: {{source}}',
     reasonLine: 'Failure reason: {{reason}}',
     diagnosisLine: 'Network diagnosis: {{diagnosis}}',
     logLine: 'Diagnostic log location: {{path}}',
@@ -102,7 +102,7 @@ export const ENDPOINT_MANIFEST_DIALOG_COPY: Record<
       'Cindy를 시작하려면 먼저 서버 설정을 가져와야 하지만 이번 요청이 실패했습니다. 네트워크 연결을 확인한 후 다시 가져오세요.',
     configBody:
       '서버에서 사용할 수 있는 설정을 가져오지 못했습니다. 다시 가져와도 결과는 바뀌지 않습니다. 잠시 후 다시 시도하거나 문의해 주세요.',
-    sourceLine: '설정 주소: {{source}}',
+    sourceLine: '설정 출처: {{source}}',
     reasonLine: '실패 원인: {{reason}}',
     diagnosisLine: '네트워크 진단: {{diagnosis}}',
     logLine: '진단 로그 위치: {{path}}',
@@ -119,7 +119,10 @@ export interface EndpointManifestDialogInput {
   kind: EndpointManifestFailureKind;
   /** 错误码级别的短标识(fetch-failed:ERR_FAILED / invalid-json 等)。 */
   reason: string;
-  /** 清单地址或本地文件路径。 */
+  /**
+   * 清单来源:CDN 路径是 URL,dev 的 file 模式是本地文件路径。四语文案因此用中性的
+   * 「来源 / source / 取得先 / 출처」,不写「URL / 地址」——否则 file 模式下名不副实。
+   */
   source: string;
   /** 网络分阶段诊断摘要;没跑或跑失败时省略。 */
   diagnosis?: string | null;

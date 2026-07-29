@@ -308,6 +308,44 @@ describe('consent guard(未勾选拦截个人登录链路)', () => {
     expectConsentPersistedAfterEnterLocal();
   });
 
+  /* 并发窗口回归(codex 审查 P1 第二条,#907):auth:enter-local 的 handler 要 await
+     waitForSessionInvalidation() + teardownAuthAccountBoundary(),这段窗口里 isLoading
+     仍是 false、弹窗已关、consentAccepted 已为 true,于是邮箱 / 社交等入口仍可点。
+     它们走 deferConsentPersist=false 分支,会在 main 还没转成 local 时立刻 persist,
+     把 allowed:true 广播给 TapDB —— 必须一个都不放过。 */
+  it('会话切换窗口内点社交圆钮 → 不派发、不落同意;切换完成后只落 skip 自己那一次', async () => {
+    let releaseEnterLocal: () => void = () => undefined;
+    authEnterLocal.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseEnterLocal = () => resolve({ mode: 'local' });
+        }),
+    );
+    mount(await identifierState('providers:cn-social'));
+    fireEvent.click(screen.getByTestId('login-consent-radio'));
+    // 不 await:enter-local 故意悬挂在窗口里
+    fireEvent.click(screen.getByTestId('login-skip-entry'));
+    expect(authEnterLocal).toHaveBeenCalledTimes(1);
+    expect(acceptPrivacyConsent).not.toHaveBeenCalled();
+
+    // 窗口内点其它过门入口:一律作废
+    fireEvent.click(screen.getByTestId('login-social-apple'));
+    expect(loginHook.value.dispatch).not.toHaveBeenCalled();
+    expect(acceptPrivacyConsent).not.toHaveBeenCalled();
+    // 豁免协议门的企业 SSO 圆钮同样不该在切换中把视图拨走
+    fireEvent.click(screen.getByTestId('login-social-sso'));
+    expect(screen.queryByTestId('login-panel-sso-org')).toBeNull();
+
+    await act(async () => {
+      releaseEnterLocal();
+    });
+    // 只有 skip 自己那一次同意记录,且它落在 enter-local 之后
+    expect(acceptPrivacyConsent).toHaveBeenCalledTimes(1);
+    expect(authEnterLocal.mock.invocationCallOrder[0]).toBeLessThan(
+      acceptPrivacyConsent.mock.invocationCallOrder[0],
+    );
+  });
+
   it('其它个人链路不受影响:社交圆钮仍在派发前先落同意记录', async () => {
     mount(await identifierState('providers:cn-social'));
     await act(async () => {

@@ -978,6 +978,8 @@ The execution rulebook for subsequent desktop / mobile UI updates. Sources: the 
 「跳过登录」过门的口径（2026-07-29 拍板，**推翻 07-27 的免门结论**）：不登录账号也是在使用 Cindy 客户端，因此与个人账号登录同口径——未勾选时先弹协议弹窗，同意后才进未登录状态，并写入统计采集同意（是否真的上报另由 main 侧闸决定：`analyticsSettingsService` 对本地会话一律 `!isLocalMode()` 不放行）。协议 UI（radio 四态、弹窗小按钮）与企业 SSO 豁免均不变。
 
 > **实现约束（合规，勿改顺序）**：这条链路上「同意记录」必须落在 `auth:enter-local` **之后**，与其它过门点（放行时刻即落）不同。原因是 `acceptPrivacyConsent` 的 IPC handler 会同步广播 `allowed = isAnalyticsAllowed() && !isLocalMode()`——提前落同意时 `isLocalMode()` 尚为 false，广播出的 `allowed:true` 会让 renderer 的 TapDB 当场 `initSdk()` 并发出 `device_login`，等 `enter-local` 完成再广播 `allowed:false` 已经晚了，「未登录态不上报」在正式包上就被破了一个窗口。落码为 `requireConsent(action, { deferConsentPersist: true })` + `openLocalMode` 自己在会话切换后落同意；顺序由 `LoginPage.consent.test.tsx` 的 `invocationCallOrder` 断言锁住（面板内入口与 `error` 步逃生口、勾选与弹窗两条路径都覆盖）。
+>
+> 同一条合规约束还要求**切换窗口内不接任何新动作**：`auth:enter-local` 的 handler 要 await `waitForSessionInvalidation()` 与 `teardownAuthAccountBoundary()`，这段窗口里 `isLoading` 仍为 false、协议弹窗已关且 radio 已勾选，邮箱 / 社交等入口仍可点——它们走「放行即落同意」分支，会在 main 还没转成 local 时再次广播 `allowed:true`。收口点是 `requireConsent` 顶部的 `localModePendingRef` guard（豁免协议门的企业 SSO 入口与 `error` 步 `reset` 另行自挡，因为它们绕过 `requireConsent`）。用**行为层 guard 而不是给每个控件加 disabled**：窗口通常只有几十毫秒，全量 disabled 会换来一次可见闪变（规则 7：无视觉跳变），而行为 guard 已杜绝 persist 与派发。guard 读 ref 而非 state——点击可能落在 `setState` 与 re-render 之间，那时闭包里的 state 还是旧值。
 
 **协议同意行整行热区（2026-07-29 拍板）**：命中区由 radio 的 24px 圈体扩到**整行 680×40**——点声明文字或行内空白都等于点 radio。例外两类：行内「服务条款」/「隐私协议」链接各自 `stopPropagation`（只开链接、不切勾选态），radio 自身也 `stopPropagation`（否则冒泡到行容器二次 toggle，净效果为点不动）。行容器不加 `role` / `tabIndex`：radio 仍是唯一无障碍交互点（`role="checkbox"` + `aria-labelledby` 指向声明文字），整行点击只是鼠标增强；整行 `select-none`，避免连点选中文字盖住勾选反馈。
 

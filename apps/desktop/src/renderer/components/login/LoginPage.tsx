@@ -119,6 +119,14 @@ export function LoginPage() {
   }, []);
   const isMac = window.electronAPI?.platform === 'darwin';
   const [localModePending, setLocalModePending] = useState(false);
+  /* 会话切换进行中的**真值来源**。`localModePending` state 只用于按钮 disabled 视觉;
+     guard 一律读这个 ref —— 点击可能落在 setState 与 re-render 之间,那时事件处理器
+     闭包里的 state 还是旧的 false,ref 不受渲染时机影响。 */
+  const localModePendingRef = useRef(false);
+  const markLocalModeTransition = (pending: boolean) => {
+    localModePendingRef.current = pending;
+    setLocalModePending(pending);
+  };
 
   /**
    * 进入未登录状态(「跳过登录」入口 + error 步逃生入口共用)。
@@ -130,8 +138,8 @@ export function LoginPage() {
    * 在会话切过去之后落,不能由 requireConsent 提前落(竞态原因见那里的注释)。
    */
   const openLocalMode = async () => {
-    if (isLoading || localModePending || !window.electronAPI?.authEnterLocal) return;
-    setLocalModePending(true);
+    if (isLoading || localModePendingRef.current || !window.electronAPI?.authEnterLocal) return;
+    markLocalModeTransition(true);
     try {
       await window.electronAPI.authEnterLocal();
       // 顺序是硬要求:先 enter-local(main 侧 isLocalMode() 转真)再落同意,这样
@@ -148,7 +156,7 @@ export function LoginPage() {
       // (登录页的 errorCode 归 main 的 loginFlowState 所有,renderer 不旁路写)。
       log.error('enter not-signed-in session failed', error);
     } finally {
-      setLocalModePending(false);
+      markLocalModeTransition(false);
     }
   };
 
@@ -203,6 +211,16 @@ export function LoginPage() {
    *   先切会话、再落同意即可关掉这个窗口(此时 allowed 恒为 false)。
    */
   const requireConsent = (action: () => void, options?: { deferConsentPersist?: boolean }) => {
+    /* 会话切换进行中一律不接新的过门动作(codex 审查 P1 第二条,#907)。
+       `auth:enter-local` 的 handler 要 await waitForSessionInvalidation() 与
+       teardownAuthAccountBoundary(),这是一个真实可观测的窗口;窗口里 isLoading
+       仍为 false(enter-local 不走 loginFlow),而弹窗已关、consentAccepted 已为 true,
+       于是邮箱 / 社交等入口仍可点 —— 它们走的是 deferConsentPersist=false 分支,会在
+       main 还没转成 local 时立刻 persist,再次把 allowed:true 广播给 TapDB。
+       在这里单点收口而不是给每个控件补 disabled:窗口通常只有几十毫秒,给全部控件
+       加 disabled 视觉会换来一次可见闪变(§规则 7:无视觉跳变),而行为层 guard 已经
+       杜绝了 persist 与派发 —— 会话都在切了,任何登录动作本来就该作废。 */
+    if (localModePendingRef.current) return;
     const deferConsentPersist = options?.deferConsentPersist === true;
     if (consentAccepted) {
       if (!deferConsentPersist) persistPrivacyConsent();
@@ -387,6 +405,9 @@ export function LoginPage() {
   }, [errorCode, t]);
 
   const reset = () => {
+    // error 步的「重试」与 back 都走这里,而 error 步同时挂着跳过登录逃生入口:
+    // 会话已经在切了就别再把状态机拨回去(同 requireConsent 里那道 guard 的理由)。
+    if (localModePendingRef.current) return;
     clearError();
     setIdentifierFormatError(null);
     void dispatch({ type: 'reset' });
@@ -425,6 +446,9 @@ export function LoginPage() {
 
   const submitSsoOrg = (event: FormEvent) => {
     event.preventDefault();
+    // 企业 SSO 豁免协议门,所以拿不到 requireConsent 里那道会话切换 guard;它会真的
+    // 派发,切换期间必须自己挡住(否则 main 会同时处理 enter-local 与 SSO 登录)。
+    if (localModePendingRef.current) return;
     const value = ssoOrg.trim();
     if (!value) return;
     // 组织区域先静默发现；仅当结果与安装包区域不一致时，main 状态机进入
@@ -536,8 +560,9 @@ export function LoginPage() {
             isLoading={isLoading}
             onClick={() => {
               // SC-SOC-7: in-flight 期间 no-op(行为层 guard,无 disabled 视觉回填)。
-              // 企业 SSO 豁免协议门(产品拍板),不过 requireConsent。
-              if (isLoading) return;
+              // 企业 SSO 豁免协议门(产品拍板),不过 requireConsent —— 所以会话切换
+              // 期间要自己挡:那道 guard 在 requireConsent 里,这条路径绕过了它。
+              if (isLoading || localModePendingRef.current) return;
               clearError();
               setSsoOrgMode(true);
             }}

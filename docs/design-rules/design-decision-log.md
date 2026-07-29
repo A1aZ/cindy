@@ -23,7 +23,11 @@
   `auth:enter-local` **之后**——`acceptPrivacyConsent` 会同步广播 `allowed`,提前落时
   `isLocalMode()` 还是 false,`allowed:true` 会让 TapDB 当场 init 并发 `device_login`,
   把「未登录态不上报」破一个窗口。落码 = `deferConsentPersist` 选项 + `openLocalMode`
-  自己落同意,顺序由 consent 测试的 `invocationCallOrder` 断言锁住。
+  自己落同意,顺序由 consent 测试的 `invocationCallOrder` 断言锁住。同批还要求切换窗口内
+  不接任何新动作(`requireConsent` 顶部 `localModePendingRef` guard;企业 SSO 入口与
+  `error` 步 `reset` 因绕过 requireConsent 另行自挡),否则窗口里点邮箱 / 社交会走
+  「放行即落同意」分支再次广播 `allowed:true`。取舍:用行为层 guard 而非给全部控件加
+  disabled(窗口只有几十毫秒,全量 disabled 会换来可见闪变)。
   (2) **协议同意行整行可点**:热区由 radio 的 24px 圈体扩到整行 680×40(原来要瞄准一个小圆点);
   两个内联链接与 radio 自身 `stopPropagation`(前者只开链接,后者防冒泡二次 toggle),
   行容器不加 role / tabIndex(radio 仍是唯一无障碍交互点),整行 `select-none`。

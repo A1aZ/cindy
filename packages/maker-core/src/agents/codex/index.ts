@@ -3471,12 +3471,26 @@ export class CodexAgent extends BaseAgent {
     /**
      * 退役这个已确诊无响应的共享 app-server。写成箭头函数:下面的看门狗是 function
      * 声明,拿不到实例 this。
+     *
+     * **只退役当初超时的那个 host 实例**:两次 interrupt ack 要等 20s,期间别的路径
+     * (auth / 凭证重启等)完全可能已经把这个 key 下的 host 换成一个新的健康实例。
+     * retireHostKey 只按 key 查删,不加这道闸就会把新 host 退役、连带终止它名下正在
+     * 干活的会话(review #944 第九轮 P1)。isCurrentHost 同时校验实例身份与
+     * hostGeneration,与 skipIfStaleHost 同款判据。
      */
-    const retireUnresponsiveHost = (reason: string): Promise<void> =>
-      this.retireHostKey(currentHostKey, reason, {
+    const retireUnresponsiveHost = async (reason: string): Promise<void> => {
+      if (!isCurrentHost()) {
+        log.warn('upstream-idle watchdog: host already replaced, skipping retire', {
+          threadId,
+          hostKey: currentHostKey,
+        });
+        return;
+      }
+      await this.retireHostKey(currentHostKey, reason, {
         failIfActive: false,
         logPrefix: 'codex upstream-idle watchdog',
       });
+    };
     /** turn 结束 / 中断时收表并清工具项(终态可能先于 item completed 到达)。 */
     function resetUpstreamIdleForTurnEnd(): void {
       clearUpstreamIdle();

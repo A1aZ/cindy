@@ -5148,11 +5148,16 @@ describe('AgentInputCoordinator scheduler 排队心跳(review 反馈回归)', ()
     expect(mocks.touchUserSendInDb).toHaveBeenCalledWith('s-b', undefined);
   });
 
-  it('active-turn recovery 项:去重视为在途,存活探测视为不存活', async () => {
-    // 派发在持久化后被取消 → 项转 active-turn recovery:后续 Retry 走克隆已受理
-    // turn 路径,不再经过 onAcceptedQueuedMessage —— 排队方的回调等不到了。
-    // 去重(includeRecovery:true)仍要看见它防双份;存活探测(默认)必须判死,
-    // 让 runner 的 run 以失败收口而非永久挂 running(review P1)。
+  it('派发在持久化后被取消:scheduler 项不留 recovery(不可被人手动 Retry)', async () => {
+    // 项转 active-turn recovery 后唯一的出路是**用户点 Retry**,而 Retry 走克隆已受理
+    // turn 的路径,不再经过 onAcceptedQueuedMessage —— 没有 scheduler 回调也没有 run
+    // 跟踪。而这条 run 此刻已经顺延或落终态了,留着就等于让一条已收口的调度 prompt
+    // 之后还能被人手动跑一次(review #944 第九轮 P1)。所以 scheduler 项直接摘掉。
+    //
+    // 本条原本断言"去重(includeRecovery:true)仍要看见它防双份"。该预期已被推翻:
+    // 留着它,同任务后续每一次 fire 都会被去重判 duplicate,而这个残项永远不会有人
+    // 派发 —— 自动化就此停摆,正是隔壁「崩溃快照恢复时丢弃 scheduler 项」那条用例
+    // 记录的同一个坑。存活探测判死这一半的语义不变(下方仍断言)。
     const h = createHarness();
     const sid = 'sched-recovery';
     h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
@@ -5162,18 +5167,39 @@ describe('AgentInputCoordinator scheduler 排队心跳(review 反馈回归)', ()
     h.coordinator.enqueue(sid, makeItem('c1', 'hb', { origin: schedOrigin }));
     await flush();
 
-    expect(latestProjection(h.projections).recovery?.kind).toBe('active-turn');
+    expect(latestProjection(h.projections).recovery).toBeNull();
     const bySchedule = (includeRecovery: boolean) =>
       h.coordinator.hasQueuedItemWhere(
         sid,
         (item) => item.origin?.kind === 'scheduler' && item.origin.scheduleId === 'sch-1',
         { includeRecovery },
       );
-    expect(bySchedule(true)).toBe(true);
+    // 去重视角也看不到它 → 顺延重试 / 下一轮 cron 能重新入队,不被僵尸挡住
+    expect(bySchedule(true)).toBe(false);
     expect(bySchedule(false)).toBe(false);
     expect(
       h.coordinator.hasQueuedItemWhere(sid, (item) => item.clientId === 'c1'),
     ).toBe(false);
+  });
+
+  it('派发在持久化后被取消:普通用户项仍保留 active-turn recovery', async () => {
+    // 上一条只对 scheduler 来源生效 —— 交互输入的重试入口不受影响。
+    const h = createHarness();
+    const sid = 'user-recovery';
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return sessionDispatchFailure('SEND/user-recovery/send');
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'typed by hand'));
+    await flush();
+
+    const projection = latestProjection(h.projections);
+    expect(projection.recovery?.kind).toBe('active-turn');
+    expect(
+      h.coordinator.hasQueuedItemWhere(sid, (item) => item.clientId === 'c1', {
+        includeRecovery: true,
+      }),
+    ).toBe(true);
   });
 
   it('崩溃快照恢复时丢弃 scheduler 项(不进暂停队列,普通项照常恢复)', async () => {

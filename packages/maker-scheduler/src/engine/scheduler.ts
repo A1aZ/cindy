@@ -701,75 +701,93 @@ export class Scheduler extends EventEmitter {
       return;
     }
 
-    if (stallAborted) {
-      // 卡死守卫中断:run 记 'failed'(异常必须可见),且下方重排照常执行。
-      const errorMsg = this.describeStallAbort(runError);
-      await this.storage.updateRun(runId, { status: 'failed', finishedAt, errorMsg });
-      this.emitEvent({ type: 'failed', scheduleId: schedule.id, runId, error: errorMsg });
-      // 补发判据只看 runner 有没有真的投过**失败**通知(onRunnerNotified),不再用
-      // "有没有 runError"推断:守卫的 abort 可能落在前置检查 / 会话创建这类 setup
-      // await 上,runner 会在走到任何 notifier 调用之前抛错 —— 有 runError 却一条
-      // 通知都没发,旧判据会静默吞掉唯一的失败提醒(review #944 第五轮 P1)。
-      // runner 无错返回时它投的是**成功**通知,与本轮记为 failed 矛盾,照样要补
-      // (第三轮已确立)。
-      if (this.needsForcedFailureNotification(runId)) {
-        void this.notifyForcedFailure(schedule.id, runId, errorMsg);
+    // 整段"写 run 行 + 广播终态"包在 try 里:任何一次 storage.updateRun 抛存储瞬时错误
+    // 都不能把下面的 schedule 重排一起吞掉 —— claimDueFire 已清空 nextFireAt,异常直接
+    // 冒泡会让这条活跃的 recurring 任务静默停摆到进程重启(review #944 第九轮 P1)。
+    // run 行本身交给心跳过期后的僵尸清扫兜底(与 forceReleaseStalledRun 的落库失败分支
+    // 同款处置),这里只保证排期一定被恢复。
+    try {
+      if (stallAborted) {
+        // 卡死守卫中断:run 记 'failed'(异常必须可见),且下方重排照常执行。
+        const errorMsg = this.describeStallAbort(runError);
+        await this.storage.updateRun(runId, { status: 'failed', finishedAt, errorMsg });
+        this.emitEvent({ type: 'failed', scheduleId: schedule.id, runId, error: errorMsg });
+        // 补发判据只看 runner 有没有真的投过**失败**通知(onRunnerNotified),不再用
+        // "有没有 runError"推断:守卫的 abort 可能落在前置检查 / 会话创建这类 setup
+        // await 上,runner 会在走到任何 notifier 调用之前抛错 —— 有 runError 却一条
+        // 通知都没发,旧判据会静默吞掉唯一的失败提醒(review #944 第五轮 P1)。
+        // runner 无错返回时它投的是**成功**通知,与本轮记为 failed 矛盾,照样要补
+        // (第三轮已确立)。
+        if (this.needsForcedFailureNotification(runId)) {
+          void this.notifyForcedFailure(schedule.id, runId, errorMsg);
+        }
+      } else if (wasAborted) {
+        await this.storage.updateRun(runId, {
+          status: 'aborted',
+          finishedAt,
+          errorMsg: 'cancelled by user (schedule deleted or paused)',
+        });
+        this.emitEvent({
+          type: 'failed',
+          scheduleId: schedule.id,
+          runId,
+          error: 'aborted',
+        });
+      } else if (runError !== undefined) {
+        await this.storage.updateRun(runId, {
+          status: 'failed',
+          finishedAt,
+          errorMsg: runError,
+        });
+        this.emitEvent({ type: 'failed', scheduleId: schedule.id, runId, error: runError });
+      } else if (skipped) {
+        // 前置检查拦截(preRunHook exit 2):run 记录保留为 'skipped'(与 deferred 的
+        // "撤销不留痕"不同——跳过是本轮的最终结果,用户要能在历史里看到"这几轮是
+        // hook 拦的",与"调度器坏了"区分)。生而已读(readAt),不通知不亮红点;
+        // sessionId: 跳过时为空(不再创建留痕会话)。schedule 行照常走下方重排逻辑。
+        await this.storage.updateRun(runId, {
+          status: 'skipped',
+          sessionId: sessionId || undefined,
+          finishedAt,
+          costAttribution: 'zero',
+          resultText,
+          readAt: finishedAt,
+        });
+        this.emitEvent({ type: 'skipped', scheduleId: schedule.id, runId, sessionId: sessionId ?? '' });
+      } else {
+        // No error path: runner resolved. sessionId is whatever runner returned (string per
+        // FireResult contract); empty string is still treated as success — runner is responsible
+        // for throwing if it has no session to report.
+        const finalSessionId = sessionId ?? '';
+        // 静默 run(agent 经 silenceInflightRuns 声明"本轮无需关注"):落库时直接
+        // 置 readAt(生而已读)→ 小红点计算(!readAt && 终态)天然排除,运行历史
+        // 仍完整保留。仅 success 生效;failed/aborted 保留未读(异常必须可见)。
+        await this.storage.updateRun(runId, {
+          status: 'success',
+          sessionId: finalSessionId,
+          finishedAt,
+          resultText,
+          ...(this.silencedRuns.has(runId) ? { readAt: finishedAt } : {}),
+        });
+        this.emitEvent({
+          type: 'completed',
+          scheduleId: schedule.id,
+          runId,
+          sessionId: finalSessionId,
+          ...(this.silencedRuns.has(runId) ? { silenced: true } : {}),
+        });
       }
-    } else if (wasAborted) {
-      await this.storage.updateRun(runId, {
-        status: 'aborted',
-        finishedAt,
-        errorMsg: 'cancelled by user (schedule deleted or paused)',
-      });
-      this.emitEvent({
-        type: 'failed',
-        scheduleId: schedule.id,
-        runId,
-        error: 'aborted',
-      });
-    } else if (runError !== undefined) {
-      await this.storage.updateRun(runId, {
-        status: 'failed',
-        finishedAt,
-        errorMsg: runError,
-      });
-      this.emitEvent({ type: 'failed', scheduleId: schedule.id, runId, error: runError });
-    } else if (skipped) {
-      // 前置检查拦截(preRunHook exit 2):run 记录保留为 'skipped'(与 deferred 的
-      // "撤销不留痕"不同——跳过是本轮的最终结果,用户要能在历史里看到"这几轮是
-      // hook 拦的",与"调度器坏了"区分)。生而已读(readAt),不通知不亮红点;
-      // sessionId: 跳过时为空(不再创建留痕会话)。schedule 行照常走下方重排逻辑。
-      await this.storage.updateRun(runId, {
-        status: 'skipped',
-        sessionId: sessionId || undefined,
-        finishedAt,
-        costAttribution: 'zero',
-        resultText,
-        readAt: finishedAt,
-      });
-      this.emitEvent({ type: 'skipped', scheduleId: schedule.id, runId, sessionId: sessionId ?? '' });
-    } else {
-      // No error path: runner resolved. sessionId is whatever runner returned (string per
-      // FireResult contract); empty string is still treated as success — runner is responsible
-      // for throwing if it has no session to report.
-      const finalSessionId = sessionId ?? '';
-      // 静默 run(agent 经 silenceInflightRuns 声明"本轮无需关注"):落库时直接
-      // 置 readAt(生而已读)→ 小红点计算(!readAt && 终态)天然排除,运行历史
-      // 仍完整保留。仅 success 生效;failed/aborted 保留未读(异常必须可见)。
-      await this.storage.updateRun(runId, {
-        status: 'success',
-        sessionId: finalSessionId,
-        finishedAt,
-        resultText,
-        ...(this.silencedRuns.has(runId) ? { readAt: finishedAt } : {}),
-      });
-      this.emitEvent({
-        type: 'completed',
-        scheduleId: schedule.id,
-        runId,
-        sessionId: finalSessionId,
-        ...(this.silencedRuns.has(runId) ? { silenced: true } : {}),
-      });
+    } catch (err) {
+      this.logger?.error?.(
+        'scheduler: run terminal persistence failed; continuing so the schedule still gets replanned',
+        {
+          schedulerInstanceId: this.schedulerInstanceId,
+          processId: this.processId,
+          scheduleId: schedule.id,
+          runId,
+          error: String(err),
+        },
+      );
     }
     this.silencedRuns.delete(runId);
 

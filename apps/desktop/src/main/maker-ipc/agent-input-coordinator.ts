@@ -2096,7 +2096,9 @@ export class AgentInputCoordinator {
       }
       latest.error = errorMessage(err);
       latest.stickyError = null;
-      latest.recovery = { kind: 'active-turn', item: head };
+      // 同 handleSendNotDispatched:调度来源的 prompt 不留可被人手动 Retry 的 recovery
+      // (review #944 第九轮 P1)。
+      latest.recovery = head.origin?.kind === 'scheduler' ? null : { kind: 'active-turn', item: head };
       this.notifyUndispatchedUserTurn(sessionId, head);
       this.emit(sessionId);
       // Thread 3 fix: item was removed from the queue by drain but not put back
@@ -2147,16 +2149,28 @@ export class AgentInputCoordinator {
     latest.activeTurn = null;
     latest.error = message;
     latest.stickyError = null;
-    latest.recovery = { kind: 'active-turn', item };
+    // 调度来源的 prompt **不留 active-turn recovery**。它的 Retry 走的是普通用户 turn:
+    // 没有 scheduler 回调、没有 run 跟踪 —— 而这条 run 此刻已经顺延或落终态了,留着就等于
+    // 让一条已收口的调度 prompt 之后还能被人手动跑一次(review #944 第九轮 P1)。
+    // 失败本身经 scheduler 自己的运行历史 + 通知呈现,不靠这里的重试入口。
+    // 注:isPromptTracked 用的 hasQueuedItemWhere 默认不含 recovery,所以摘掉它不会影响
+    // runner 的排队存活探测。
+    const schedulerOrigin = item.origin?.kind === 'scheduler';
+    latest.recovery = schedulerOrigin ? null : { kind: 'active-turn', item };
     this.notifyUndispatchedUserTurn(sessionId, item);
     if (latest.queueAbortPending && result.kind === 'session-dispatch' && result.reason === 'cancelled-before-dispatch') {
       latest.queueAbortPending = false;
     }
-    log.warn('send not dispatched after persistence; kept active-turn recovery', {
-      sessionId,
-      clientId: item.clientId,
-      ...logFields,
-    });
+    log.warn(
+      schedulerOrigin
+        ? 'send not dispatched after persistence; dropped scheduler prompt (no user retry)'
+        : 'send not dispatched after persistence; kept active-turn recovery',
+      {
+        sessionId,
+        clientId: item.clientId,
+        ...logFields,
+      },
+    );
     this.emit(sessionId);
     // Thread 3 fix: item was removed from the queue by drain but not put back
     // (persisted path). If no other work is pending, any deferred completion must

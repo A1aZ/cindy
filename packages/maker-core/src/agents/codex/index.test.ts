@@ -10411,6 +10411,48 @@ describe('CodexAgent upstream-response-idle watchdog', () => {
     }
   });
 
+  it('等 interrupt 期间 host 已被换掉 → 不退役那个新的健康 host', async () => {
+    // 两次 interrupt ack 要等 20s,期间别的路径(auth / 凭证重启)完全可能已经把这个 key
+    // 下的 host 换成新实例。retireHostKey 只按 key 查删,不加身份闸就会把新 host 退役、
+    // 连带终止它名下正在干活的会话(review #944 第九轮 P1)。
+    vi.useFakeTimers();
+    try {
+      const agent = new CodexAgent(createDeps());
+      let turnSeq = 0;
+      const host = installFakeHost(agent, (method) => {
+        if (method === Method.TurnStart) return { turn: { id: `turn-${++turnSeq}` } };
+        if (method === Method.TurnInterrupt) return new Promise<never>(() => {});
+        return undefined;
+      });
+      const retireHostKey = vi
+        .spyOn(
+          agent as unknown as { retireHostKey: (...args: unknown[]) => Promise<void> },
+          'retireHostKey',
+        )
+        .mockResolvedValue(undefined);
+      const handle = await startIdleSession(agent, 'session-idle-host-replaced');
+      void (async () => {
+        for await (const ev of handle.events()) void ev;
+      })();
+      await handle.send({ type: 'user', content: 'go' });
+      const handlers = host.getThreadHandlers();
+      if (!handlers) throw new Error('expected thread handlers');
+      handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-1' } } as never);
+
+      // 看门狗开火,但在两次 ack 超时之前,别的路径(auth / 凭证重启)已经在这个 key 下
+      // 放了一个**新的** host —— isCurrentHost 由此判假。
+      await vi.advanceTimersByTimeAsync(IDLE_MS + 1);
+      (agent as unknown as { hosts: Map<string, unknown> }).hosts.set('local', {
+        replacement: true,
+      });
+      await vi.advanceTimersByTimeAsync(10_000 * 2 + 10);
+
+      expect(retireHostKey).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('interrupt 被 ack 时不作废 host(daemon 还活着,会话继续可用)', async () => {
     vi.useFakeTimers();
     try {

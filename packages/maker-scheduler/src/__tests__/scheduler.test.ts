@@ -3078,6 +3078,45 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
     }
   });
 
+  it('终态落库抛错不吞掉排期恢复', async () => {
+    // 守卫已中断 run、runner 在强制收口前老实返回,而这一步的 updateRun 撞上存储瞬时
+    // 错误 → 异常直接冒出 fireOneInner,把下面的 schedule 重排一起跳过。claimDueFire
+    // 已清空 nextFireAt,这条活跃的 recurring 任务就此静默停摆到进程重启
+    // (review #944 第九轮 P1)。
+    vi.useFakeTimers();
+    try {
+      const storage = new InMemoryStorage();
+      storage.updateRun = () => Promise.reject(new Error('database is locked'));
+      const h = makeHarness({
+        storage,
+        runStallMs: 60_000,
+        runStallAbortGraceMs: 30_000,
+        runnerImpl: (_s, ctx) =>
+          new Promise<FireResult>((_resolve, reject) => {
+            // 老实响应守卫 abort 并 settle → 走 fireOneInner 的 stallAborted 分支
+            ctx.signal.addEventListener('abort', () => reject(new Error('aborted by signal')));
+          }),
+      });
+      const sch = await h.scheduler.create({ ...baseInput, intervalMs: 3_600_000 });
+      h.clock.advance(3_600_000);
+      void h.scheduler.tick();
+      await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(1));
+      expect((await h.storage.get(sch.id))?.nextFireAt).toBeUndefined(); // 认领已清空
+
+      h.clock.advance(60_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+
+      // 落库失败(run 行留给僵尸清扫兜底),但排期必须已恢复
+      await vi.waitFor(async () =>
+        expect((await h.storage.get(sch.id))?.nextFireAt).toBeDefined(),
+      );
+      expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(0);
+      await h.scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('强制收口一次性任务:过期而不是又排一次', async () => {
     // 强制收口不走 fireOneInner 的正常终态段,lastFiredAt 从未落定,computeNextFireAt 会
     // 把 Once 当成"还没跑过"又排一次 —— 一个失败的一次性任务自己再跑一遍(第七轮 P1)。

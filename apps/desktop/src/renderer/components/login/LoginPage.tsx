@@ -118,11 +118,12 @@ export function LoginPage() {
   const [localModePending, setLocalModePending] = useState(false);
 
   /**
-   * 进入本地模式(「跳过登录」入口 + error 步逃生入口共用)。
+   * 进入未登录状态(「跳过登录」入口 + error 步逃生入口共用)。
    *
-   * 不过协议门(产品拍板 2026-07-27,推翻同年 07-24「游客也先同意协议」):跳过登录
-   * 不创建账号、不上报任何数据,radio 未勾选也直接进主界面。因此这里也不调
-   * persistPrivacyConsent——没有明示同意就保持采集闸关闭。
+   * **过协议门**(产品拍板 2026-07-29,推翻同年 07-27「跳过登录免协议门」):跳过登录
+   * 虽然不创建账号,用户仍在使用 Cindy 客户端,因此与个人账号登录同口径——radio
+   * 未勾选时先弹协议弹窗,同意后才进主界面。调用方一律用 requireConsent 包裹,
+   * 明示同意由它落 persistPrivacyConsent(本函数只负责切会话,不碰 consent)。
    */
   const openLocalMode = async () => {
     if (isLoading || localModePending || !window.electronAPI?.authEnterLocal) return;
@@ -144,12 +145,13 @@ export function LoginPage() {
 
   /* ── 协议同意链路(consent PR):radio 状态 + 未勾选拦截弹窗 + 同意后续接。
      过门点(产品拍板 2026-07-24 二次):手机号提交、邮箱提交(discover 前)、
-     method-choice 个人行发码、社交圆钮(Apple/Google/未来微信)——个人**账号**
-     登录一律先同意协议再发起,包括仅触发方式查询的 email discover(拍板压过
-     审查侧「discover 无副作用可放行」的建议)。豁免:显式企业 SSO 入口
-     (SSO 圆钮、组织标识提交、method-choice sso 行)+ 跳过登录/本地模式
-     (2026-07-27 拍板,见 openLocalMode)。pending 动作只存 renderer 本地
-     (不进 main loginFlowState;规则 9:分支全部代码状态机化)。 ── */
+     method-choice 个人行发码、社交圆钮(Apple/Google/未来微信),以及**跳过登录**
+     (面板内文字按钮 + error 步逃生入口;2026-07-29 拍板恢复,推翻 07-27 的免门
+     结论,见 openLocalMode)——个人链路一律先同意协议再发起,包括仅触发方式
+     查询的 email discover(拍板压过审查侧「discover 无副作用可放行」的建议)。
+     豁免仅限显式企业 SSO 入口(SSO 圆钮、组织标识提交、method-choice sso 行)。
+     pending 动作只存 renderer 本地(不进 main loginFlowState;规则 9:分支全部
+     代码状态机化)。 ── */
   const [consentAccepted, setConsentAccepted] = useState(false);
   const [consentDialogOpen, setConsentDialogOpen] = useState(false);
   // pending 带开门时刻快照,同意时复验防陈旧续接(codex 审查 P1;consentGate 单测)
@@ -454,12 +456,12 @@ export function LoginPage() {
           </form>
           {/* 「跳过登录」= 面板内文字按钮(新稿 705:1068 容器 680×60 @y430,取代旧游客
               圆钮;LoginSkipEntry ≠ LoginTextLink,见该组件注释):接既有 local mode
-              链路,不过协议门(2026-07-27 拍板)。槽位在 error_text(380..430)之下、
+              链路,过协议门(2026-07-29 拍板)。槽位在 error_text(380..430)之下、
               与其首尾相接,两者同时可见互不重叠;error 出现不推移本入口(均 absolute)。 */}
           <LoginSkipEntry
             testId="login-skip-entry"
             disabled={isLoading || localModePending}
-            onClick={() => void openLocalMode()}
+            onClick={() => requireConsent(() => void openLocalMode())}
           >
             {t('login.localModeEntry')}
           </LoginSkipEntry>
@@ -967,7 +969,8 @@ export function LoginPage() {
         data-testid="login-local-mode"
         type="button"
         disabled={localModePending || isLoading}
-        onClick={() => void openLocalMode()}
+        // error 步逃生入口与面板内文字按钮同口径:过协议门(2026-07-29 拍板)
+        onClick={() => requireConsent(() => void openLocalMode())}
         aria-describedby="login-local-mode-description"
         className="select-none rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-6 py-2.5 text-13 font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring-soft)] disabled:cursor-not-allowed disabled:opacity-60"
         style={{ minHeight: 40 }}

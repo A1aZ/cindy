@@ -964,18 +964,20 @@ The execution rulebook for subsequent desktop / mobile UI updates. Sources: the 
 | `binding` | 身份未绑 membership，补绑 phone / email（`codeRequested` 两子态；**无重发钮**，桌面 harness 锁定） | `LoginInput` / `LoginSkinPhoneInput` → `LoginInput`(center) + `LoginPrimaryButton` |
 | `account-deletion`（状态浮层） | 账号删除**状态展示**（发起流程在 Settings 的 `AccountDeletionSection`；登录页仅在存在删除回执时以**根层浮层气泡**展示 status，非主状态机 step；详见下方「注销状态浮层气泡」） | `AccountDeletionStatusPanel`（**登录皮容器外**的根层浮层，非面板内） |
 | `browser-redirect` | 社交 / SSO 跳浏览器验证，等待回调 | `LoginLoadingRing` + `LoginPrimaryButton`（取消）+ `LoginTitleBlock` |
-| `completed` / `error` | 登录成功 / 失败（含 browser 回调终态页）；`error` 步桌面另有面板下方 footer 的「跳过登录」**逃生入口**（登录服务不可用时仍能进本地模式，同样不过协议门） | 成功无面板（进主界面）；error = `LoginTitleBlock` + `LoginPrimaryButton`（重试）+ `LoginErrorText` + footer 本地模式按钮（桌面）；browser 回调页 `oauthResultPage`（系统浏览器独立 HTML，main 侧内联常量,色值与 `--login-callback-*` token 同源——renderer CSS var 不可达,改值需两处同步） |
+| `completed` / `error` | 登录成功 / 失败（含 browser 回调终态页）；`error` 步桌面另有面板下方 footer 的「跳过登录」**逃生入口**（登录服务不可用时仍能进未登录状态，与面板内入口同口径**过协议门**——2026-07-29 拍板） | 成功无面板（进主界面）；error = `LoginTitleBlock` + `LoginPrimaryButton`（重试）+ `LoginErrorText` + footer「跳过登录」按钮（桌面）；browser 回调页 `oauthResultPage`（系统浏览器独立 HTML，main 侧内联常量,色值与 `--login-callback-*` token 同源——renderer CSS var 不可达,改值需两处同步） |
 
 **~~配置错误屏同样承载「跳过登录」逃生入口（移动端）~~〔已作废 2026-07-28：手机端整体剥离，配置错误屏无该入口〕**：`getMobileConfigIssues()` 命中（如 auth base URL 非法）时面板切到 config 提示态，该面板内仍渲染同一个 `LoginSkipLoginLink`（同槽 @(0,430)、同 handler、同 in-flight 门）——跳过登录不发任何网络请求，配置坏掉时恰恰最需要这个入口。
 
-**协议门（consent gate）过门点与豁免（2026-07-27 更新）**：`identifier` 屏的协议同意行是一道**发起前拦截**——未勾选时点过门入口先弹服务条款 / 隐私协议弹窗，同意后续接原动作；同意即写入统计采集同意。
+**协议门（consent gate）过门点与豁免（2026-07-29 更新）**：`identifier` 屏的协议同意行是一道**发起前拦截**——未勾选时点过门入口先弹服务条款 / 隐私协议弹窗，同意后续接原动作；同意即写入统计采集同意。
 
 | | 入口 |
 |---|---|
-| **过门**（个人**账号**登录一律先同意） | 手机号提交、邮箱提交（含仅查方式的 discover）、`method-choice` 个人行发码、社交圆钮（Apple / Google / 未来微信） |
-| **豁免** | ① 显式企业 SSO 入口（SSO 圆钮、组织标识提交、`method-choice` sso 行）；② **「跳过登录」/ 本地模式**（面板内常驻入口 + 桌面 `error` 步 footer 逃生口）——2026-07-27 拍板 |
+| **过门**（个人链路一律先同意） | 手机号提交、邮箱提交（含仅查方式的 discover）、`method-choice` 个人行发码、社交圆钮（Apple / Google / 未来微信）、**「跳过登录」**（面板内常驻入口 + 桌面 `error` 步 footer 逃生口）——2026-07-29 拍板 |
+| **豁免** | 显式企业 SSO 入口（SSO 圆钮、组织标识提交、`method-choice` sso 行） |
 
-「跳过登录」豁免的口径：不创建账号、不上报数据，因此 **radio 未勾选也直接进主界面，且不写入统计采集同意**（没有明示同意就保持采集闸关闭）。除此之外其它个人链路的协议门与协议 UI（radio 四态、弹窗小按钮）**均不变**；企业 SSO 豁免同样不变。
+「跳过登录」过门的口径（2026-07-29 拍板，**推翻 07-27 的免门结论**）：不登录账号也是在使用 Cindy 客户端，因此与个人账号登录同口径——未勾选时先弹协议弹窗，同意后才进未登录状态，并按放行时刻写入统计采集同意（是否真的上报另由 main 侧闸决定：`analyticsSettingsService` 对本地会话一律 `!isLocalMode()` 不放行）。协议 UI（radio 四态、弹窗小按钮）与企业 SSO 豁免均不变。
+
+**协议同意行整行热区（2026-07-29 拍板）**：命中区由 radio 的 24px 圈体扩到**整行 680×40**——点声明文字或行内空白都等于点 radio。例外两类：行内「服务条款」/「隐私协议」链接各自 `stopPropagation`（只开链接、不切勾选态），radio 自身也 `stopPropagation`（否则冒泡到行容器二次 toggle，净效果为点不动）。行容器不加 `role` / `tabIndex`：radio 仍是唯一无障碍交互点（`role="checkbox"` + `aria-labelledby` 指向声明文字），整行点击只是鼠标增强；整行 `select-none`，避免连点选中文字盖住勾选反馈。
 
 **注销状态浮层气泡（figma 678:1075「注销状态」组件集，2026-07-26 定形）**：账号注销状态**不在登录面板内**，而是登录屏根容器的 absolute 浮层——历史实现曾把它放在登录皮容器（`LoginStage`）的文档流首子位置，被 `absolute; top:0` 的不透明登录面板 100% 覆盖（`pending` / `processing` / `completed` 三态全中，修复前证据见 `docs/design-previews/deletion-banner-repro/`）；**改回面板内即重现该缺陷，不得回退**。
 

@@ -10,8 +10,8 @@ import {
   hasSessionAttention,
 } from '@/lib/sessionAttentionStore';
 import {
-  observeNextSessionTerminalNotificationOwnedByScheduler,
-  observeNextSessionDoneSilenced,
+  isSessionTerminalNotificationOwnedByScheduler,
+  isSessionDoneSilenced,
   resetSilencedSessionDoneStoreForTests,
 } from '@/lib/silencedSessionDoneStore';
 
@@ -56,7 +56,7 @@ describe('useAutomationScheduleSessionIndex silence events', () => {
       });
     });
 
-    expect(observeNextSessionTerminalNotificationOwnedByScheduler('session-1')).toBe(true);
+    expect(isSessionTerminalNotificationOwnedByScheduler('session-1')).toBe(true);
   });
 
   it('registers silenced runs without clearing older session attention', () => {
@@ -86,7 +86,7 @@ describe('useAutomationScheduleSessionIndex silence events', () => {
     });
 
     expect(hasSessionAttention('session-1')).toBe(true);
-    expect(observeNextSessionDoneSilenced('session-1')).toBe(true);
+    expect(isSessionDoneSilenced('session-1')).toBe(true);
   });
 
   it('clears silenced done suppression when the run requests notification', () => {
@@ -113,8 +113,8 @@ describe('useAutomationScheduleSessionIndex silence events', () => {
       });
     });
 
-    expect(observeNextSessionDoneSilenced('session-1')).toBe(false);
-    expect(observeNextSessionTerminalNotificationOwnedByScheduler('session-1')).toBe(true);
+    expect(isSessionDoneSilenced('session-1')).toBe(false);
+    expect(isSessionTerminalNotificationOwnedByScheduler('session-1')).toBe(true);
   });
 
   it('clears only attention that could have been created by the silenced run fallback', () => {
@@ -165,7 +165,7 @@ describe('useAutomationScheduleSessionIndex silence events', () => {
       });
     });
 
-    expect(observeNextSessionDoneSilenced('session-1')).toBe(true);
+    expect(isSessionDoneSilenced('session-1')).toBe(true);
   });
 
   it('does not clear older attention when completed supplies the first silenced sessionId', () => {
@@ -189,6 +189,6 @@ describe('useAutomationScheduleSessionIndex silence events', () => {
     });
 
     expect(hasSessionAttention('session-1')).toBe(true);
-    expect(observeNextSessionDoneSilenced('session-1')).toBe(true);
+    expect(isSessionDoneSilenced('session-1')).toBe(true);
   });
 });

@@ -1915,9 +1915,24 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // 迟到 settle 的我们再投一条,用户会为同一轮收到两条(review #944 第十四轮 P1)。
     // 常见顺序恰好是"引擎先投、runner 几分钟后才 settle",所以只靠引擎侧挡不住。
     const abandoned = !!this.scheduler?.isRunAbandoned?.(ctx.runId);
+    // 被 abort 过的这一轮,**成功通知一定是错的**:引擎接下来只会把它记成 failed
+    // (卡死守卫)或 aborted(用户 pause/delete),两者都不是 success。abandoned 只盖得住
+    // "已经走完强制释放"的那一段;守卫 abort 之后、宽限到点之前 runner 恰好拿到成功结果
+    // 时,它仍是 false,于是同一轮先弹一条"成功"、紧接着引擎再弹一条"失败"
+    // (review #944 第十八轮 P1)。
+    // 只压 success:失败通知照发(异常必须可见),而且引擎的
+    // needsForcedFailureNotification 会因为 runner 已认领 'failure' 而不重复投。
+    // 用户主动 pause/delete 的那条路径本来也不该弹成功 —— 引擎记 aborted 且不通知,
+    // 语义一致。
+    const successAfterAbort = finalRun.status === 'success' && ctx.signal.aborted;
     if (abandoned) {
       this.deps.logger.info?.(
         '[runner] run was force-released by the stall guard; skipping duplicate notification',
+        { scheduleId: schedule.id, runId: ctx.runId },
+      );
+    } else if (successAfterAbort) {
+      this.deps.logger.info?.(
+        '[runner] run was aborted; suppressing the contradictory success notification',
         { scheduleId: schedule.id, runId: ctx.runId },
       );
     } else if (silenced) {

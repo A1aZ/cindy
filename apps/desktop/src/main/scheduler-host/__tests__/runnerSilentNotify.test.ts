@@ -308,6 +308,46 @@ describe('MakerScheduleRunner silent-run notification skip', () => {
     expect(notified).toEqual(['success']);
   });
 
+  it('守卫 abort 之后才拿到成功结果:压住这条自相矛盾的成功通知', async () => {
+    // 守卫 abort 已经发出、强制释放的宽限还没到点时,runner 可能恰好拿到成功结果。此刻
+    // abandoned 仍是 false,旧实现照常投一条"成功";紧接着引擎看到 stallAbortedAt,把这一轮
+    // 记成 failed 并补投一条"失败" —— 同一轮两条互相矛盾的通知(review #944 第十八轮 P1)。
+    const h = createSessionHarness(acceptingSend());
+    const { runner, notifier } = createRunnerHarness(h.session, { silenced: false });
+    const controller = new AbortController();
+    const ctx = createFireContext();
+    (ctx as { signal: AbortSignal }).signal = controller.signal;
+
+    const firePromise = runner.fire(baseSchedule(), ctx);
+    await vi.waitFor(() => expect(mocks.createMessage).toHaveBeenCalled());
+    controller.abort(); // 卡死守卫开火
+    h.emit({ type: 'done', data: {} }); // 但这一轮其实跑完了
+    await firePromise;
+
+    expect(notifier.notify).not.toHaveBeenCalled();
+  });
+
+  it('守卫 abort 之后拿到失败结果:失败通知照发(异常必须可见)', async () => {
+    // 压 success 不能顺手把失败也压掉。引擎那边有 needsForcedFailureNotification 兜着
+    // 去重(runner 认领过 'failure' 就不再补投),所以这条照发不会变成双份。
+    // 注:send 自己抛错时若 signal 已 abort,runner 更早就直接 rethrow、压根不到
+    // finalizeRun(第五轮已确立的语义,由引擎补发)。能带着 runError 走到 finalizeRun 的
+    // 是"turn 已受理、之后收到终态 error"这条路,所以这里这么构造。
+    const h = createSessionHarness(acceptingSend());
+    const { runner, notifier } = createRunnerHarness(h.session, { silenced: false });
+    const controller = new AbortController();
+    const ctx = createFireContext();
+    (ctx as { signal: AbortSignal }).signal = controller.signal;
+
+    const firePromise = runner.fire(baseSchedule(), ctx);
+    await vi.waitFor(() => expect(mocks.createMessage).toHaveBeenCalled());
+    controller.abort();
+    h.emit({ type: 'error', data: { message: 'upstream died', isTerminal: true } });
+    await expect(firePromise).rejects.toThrow();
+
+    expect(notifier.notify).toHaveBeenCalledTimes(1);
+  });
+
   it('未被强制收口时通知照发(去重不能变成永久静默)', async () => {
     const h = createSessionHarness(acceptingSend());
     const { runner, notifier } = createRunnerHarness(h.session, {

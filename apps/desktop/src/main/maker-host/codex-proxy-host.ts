@@ -186,6 +186,56 @@ function createCodexTransform(): RequestTransform {
   return createInstructionsInjectionTransform({ registry, logger: log });
 }
 
+/**
+ * Codex Code Mode 对部分 GPT-5.6 网关模型不会发出 Responses 原生搜索声明：
+ * 目录里的 `supports_search_tool` / `webSearch` 能力虽为 true，但 Gateway 只看最终
+ * 请求的 `tools`。插件搜索是增强项，不能作为该基础能力的前置条件，因此在明确走
+ * Cindy Gateway 的 GPT-5.6 请求中补回标准 `web_search` 工具；已有声明保持原样。
+ */
+function createGatewayNativeWebSearchTransform(): RequestTransform {
+  return (body, ctx) => {
+    if (!isPlainObject(body) || typeof body.model !== 'string') return null;
+    const path = ctx.url.split('?', 1)[0] ?? ctx.url;
+    if (ctx.method !== 'POST' || (!path.endsWith('/responses') && path !== '/responses')) return null;
+
+    const model = body.model;
+    const gatewayModel = model.replace(/^codex\//, '');
+    if (!/^gpt-5\.6(?:$|[-.])/.test(gatewayModel)) return null;
+
+    const sessionId = sessionIdFromTransformCtx(ctx);
+    const authInjection = getCodexProxyAuthInjection();
+    const canUseExplicitSessionRoute = Boolean(sessionId && (
+      authInjection === 'oauth-bearer' ||
+      isUserProviderSession(sessionId) ||
+      isHostInjectedAuthSession(sessionId, 'codex')
+    ));
+    const explicitRouting = canUseExplicitSessionRoute && sessionId
+      ? getSessionRoutingDescriptor(sessionId, 'codex', model)
+      : null;
+    const resolvedExplicitRoute = explicitRouting
+      && sessionId
+      && (authInjection === 'oauth-bearer' || authInjection === 'provider-oauth')
+      ? resolveSessionRouteDecision(sessionId, 'codex', _readGatewayKey(), model)
+      : null;
+    const providerOAuthGatewayFallback = authInjection === 'provider-oauth'
+      ? gatewayDefaultRouteDecision('codex', _readGatewayKey())
+      : null;
+    const isGatewaySession = explicitRouting
+      ? explicitRouting.authStrategy === 'gateway-key' &&
+        (authInjection === 'env-key' || resolvedExplicitRoute !== null)
+      // provider-oauth 的显式来源越界后，实际路由会回落默认 Gateway；没有 descriptor
+      // 时也必须与 createModelRoutingTransform 保持同源。
+      : model.startsWith('codex/') ||
+        authInjection === 'env-key' ||
+        providerOAuthGatewayFallback !== null;
+    if (!isGatewaySession) return null;
+
+    const existingTools = Array.isArray(body.tools) ? body.tools : [];
+    if (existingTools.some((tool) => isPlainObject(tool) && tool.type === 'web_search')) return null;
+    return { ...body, tools: [...existingTools, { type: 'web_search' }] };
+  };
+}
+
 function sessionIdFromTransformCtx(ctx: RequestTransformCtx): string | undefined {
   const threadId = selectedThreadIdFromHeaders(ctx.headers);
   return threadId ? threadToSession.get(threadId) : undefined;
@@ -1392,12 +1442,23 @@ export function createModelRoutingTransform(
     )) {
       const selectedRouting = getSessionRoutingDescriptor(sessionId, 'codex', model || undefined);
       if (selectedRouting?.wireProtocol === 'openai-chat' && ctx.method === 'POST' && model) {
-        return resolveSessionRoute(sessionId, 'codex', model).then((localRoute) =>
-          createChatBridgeDecision(
+        return resolveSessionRoute(sessionId, 'codex', model).then((localRoute) => {
+          const decision = createChatBridgeDecision(
             localRoute,
             threadId ? registry.get(threadId) : undefined,
             model,
-          ));
+          );
+          // chat bridge 走 localHandler,但它**确实出网** —— handler 自己用
+          // outboundFetch 打 route.routing.upstream(绕开转发层,却走同一个出站代理
+          // 解析器),所以照样会产生出站路径快照。这里必须补记 thread→上游映射:
+          // 漏了的话该供应商不可达时诊断查不到记录,静默退回通用猜测清单。
+          // 包装层(withCodexUpstreamRecording)看不到 localHandler 背后的上游,
+          // 只能由产生它的分支自己记。
+          if (decision && localRoute?.routing.upstream) {
+            recordCodexThreadUpstreamForDiagnostics(threadId, localRoute.routing.upstream);
+          }
+          return decision;
+        });
       }
       // model 传给 scope 门(空串 = 控制面 GET,不受范围限制);声明了 modelPrefixes 的
       // 供应商(如 xai)只捕获自家命名空间的请求,其余回落默认路由。
@@ -1462,6 +1523,7 @@ function createTransformRequestChain(): RequestTransform[] {
       strip: stripImageGenerationItemsWithoutIdFromBody,
     }),
     createCodexTransform(),
+    createGatewayNativeWebSearchTransform(),
     // 必须先于 xAI/MiniMax 兼容改写:加密压缩块换成明文占位 message 后,后续
     // 针对具体供应商的 input 归一化才能按标准 message 处理它。
     createCrossProviderCompactionCompatTransform(),
@@ -1478,6 +1540,98 @@ function createTransformRequestChain(): RequestTransform[] {
   return transforms;
 }
 
+/**
+ * threadId → 该 thread 最近一次转发的**实际出口 origin**。
+ *
+ * 「后端不可达」诊断要报的出站路径必须属于这次失败的请求。resolver 侧的快照按上游
+ * origin 分桶,但光有 origin 不够:codex 的出口随会话选定的 provider 变(订阅直连
+ * ChatGPT、网关、xAI、自定义供应商),多会话并发时「按时间戳挑最新」只是猜测,可能
+ * 把另一个会话的判定报到本次故障上。这里在转发前记下每个 thread 的实际出口,诊断按
+ * threadId 精确取。
+ *
+ * 记录点选在 routingTransform 外层而非 responseObserver:observer 要等响应回来才跑,
+ * 而上游不可达时压根没有响应 —— 那恰恰是诊断最需要它的时刻。
+ *
+ * 另一个副产品:只有请求**真的经过本 loopback proxy** 时才会有记录。gateway-key
+ * fallback 下 codexProxyActive=false、codex 直连 gateway,这个 transform 不跑,于是
+ * 查不到映射、诊断退回通用文案 —— 而不是报一条本次根本没走过的陈旧路径。
+ */
+const codexThreadUpstreamOrigin = new Map<string, string>();
+const CODEX_THREAD_UPSTREAM_MAX_ENTRIES = 256;
+
+/**
+ * 记录 thread 的出口 origin。两个调用点共用(routingTransform 包装层与 chat bridge
+ * 分支),守卫集中在这里 —— 分散写必然有一处漏掉 'unknown' 排除或漏掉 try/catch。
+ *
+ * `selectedThreadIdFromHeaders` 对无 thread 的请求(典型: models-manager 的
+ * `GET /models` 轮询)回落到字面量 'unknown';那不是一个 thread,记进去只会污染桶,
+ * 而诊断永远是用真实 threadId 来查的。
+ *
+ * 任何异常一律吞掉:这是诊断旁路,绝不能反过来影响转发。
+ */
+function recordCodexThreadUpstreamForDiagnostics(
+  threadId: string | undefined,
+  upstream: string,
+): void {
+  try {
+    if (!threadId || threadId === 'unknown') return;
+    const origin = new URL(upstream).origin;
+    if (
+      codexThreadUpstreamOrigin.size >= CODEX_THREAD_UPSTREAM_MAX_ENTRIES
+      && !codexThreadUpstreamOrigin.has(threadId)
+    ) {
+      codexThreadUpstreamOrigin.clear();
+    }
+    codexThreadUpstreamOrigin.set(threadId, origin);
+  } catch {
+    // 上游串解析不出 origin(或其它意外)→ 不记,转发照常。
+  }
+}
+
+/** 诊断用:该 thread 最近一次转发的实际出口 origin;没有记录过 → null。 */
+export function getCodexThreadUpstreamOrigin(threadId: string): string | null {
+  return codexThreadUpstreamOrigin.get(threadId) ?? null;
+}
+
+/** @internal 单测用。 */
+export function resetCodexThreadUpstreamForTest(): void {
+  codexThreadUpstreamOrigin.clear();
+}
+
+/**
+ * 给 routingTransform 包一层「记录本次实际出口」。刻意包在外层而不是往
+ * createModelRoutingTransform 内部逐分支补:那里有六个以上 return(含一个返回
+ * Promise 的 chat-bridge 分支),逐个补必漏。
+ *
+ * 记录异常一律吞掉 —— 这是诊断旁路,绝不能反过来影响转发。
+ */
+export function withCodexUpstreamRecording(
+  inner: RoutingTransform,
+  defaultUpstream: () => string,
+): RoutingTransform {
+  return (body, ctx) => {
+    const result = inner(body, ctx);
+    const record = (decision: RoutingDecision | null): RoutingDecision | null => {
+      try {
+        // localHandler 的上游在这一层**看不见**(它由产生 decision 的分支自己持有),
+        // 所以这里跳过,由那些分支自行记录 —— chat bridge 就在它的 .then 里记了。
+        // 注意:localHandler 不代表「不出网」(chat bridge 自己用 outboundFetch 打
+        // route.routing.upstream),只代表「不走 compat-proxy 的转发层」。
+        if (!decision?.localHandler) {
+          recordCodexThreadUpstreamForDiagnostics(
+            selectedThreadIdFromHeaders(ctx.headers),
+            decision?.upstreamOverride ?? defaultUpstream(),
+          );
+        }
+      } catch {
+        // 诊断旁路:记录失败就不记,转发照常。
+      }
+      return decision;
+    };
+    return result instanceof Promise ? result.then(record) : record(result);
+  };
+}
+
 function createCodexProxyHandle(
   frozenAuthInjection?: CodexProxyAuthInjection,
 ): Promise<ProxyHandle> {
@@ -1487,7 +1641,10 @@ function createCodexProxyHandle(
     transformRequest: createTransformRequestChain(),
     // 常规 session proxy 继续读取当前全局 spawn 形态；control-plane proxy 在创建时
     // 冻结自己的形态，两个 app-server 并行时不会互相改写路由。
-    routingTransform: createModelRoutingTransform(frozenAuthInjection),
+    routingTransform: withCodexUpstreamRecording(
+      createModelRoutingTransform(frozenAuthInjection),
+      () => buildCodexGatewayBaseUrl(),
+    ),
     responseObserver: composeResponseObservers(
       createCodexResponseObserver(),
       createProviderUpstreamErrorObserver({

@@ -2651,6 +2651,8 @@
         "cindyImageEdit": "Image editing (delegated to Cindy, its own images only)",
         "cindyVideoGenerate": "Video generation (delegated to Cindy)",
         "cindyVideoEdit": "Image-to-video (delegated to Cindy, reference images from its own media only)",
+        "cindyMediaDeposit": "Can save images, video or audio it holds into your media library",
+        "cindyMediaDepositDetail": "This lets AI work on material you paste or drop into the plugin. Saved items are recorded under this plugin, use at most {{quota}}, and are cleaned up when you uninstall it.",
         "agentUserAction": "Can start a new Agent turn after you click a plugin card",
         "agentUserActionDetail": "Each click permits one turn only, and only in the session that owns the card.",
         "agentBackground": "Can automatically start new Agent turns in the background",
@@ -3877,6 +3879,7 @@
       "ariaDescription": "Release notes for version {{version}}",
       "ariaDescriptionSpan": "Release notes for {{count}} versions since v{{from}}",
       "versionsSpan": "{{count}} versions",
+      "versionJumpAria": "Jump to a version — {{count}} versions, currently on v{{version}}",
       "loading": "Loading",
       "loadFailed": "Load failed",
       "retry": "Retry"
@@ -4652,6 +4655,9 @@
       "networkUnreachableNoRetry": "Network error: the service is temporarily unreachable.",
       "networkAutoRetrying": "Network error — retrying automatically…",
       "networkReconnecting": "Connection interrupted — reconnecting ({{attempt}}/{{maxAttempts}})…",
+      "overloadRetrying": "The model service is busy — retrying automatically ({{attempt}}/{{maxAttempts}})…",
+      "overloadBusy": "The model service is busy — the upstream has no capacity right now. Click \"Retry\", or switch to another model.",
+      "overloadBusyNoRetry": "The model service is busy — the upstream has no capacity right now. Try again later, or switch to another model.",
       "networkShowRaw": "Show raw error",
       "networkHideRaw": "Hide raw error",
       "silentStopContinue": "Continue",
@@ -5814,7 +5820,7 @@
         "activityDesc": "Recently active",
         "activityAsc": "Oldest active"
       },
-      "filterAria": "Search filters (Status: {{status}}, Agent: {{agent}}, Last activity: {{lastActivity}}, Projects: {{projects}})",
+      "filterAria": "Search filters and sort (Sort: {{sort}}, Status: {{status}}, Agent: {{agent}}, Last activity: {{lastActivity}}, Projects: {{projects}})",
       "filter": {
         "label": "Filters",
         "active": "{{count}} filters",
@@ -7332,7 +7338,8 @@
       "blocked": "Blocked",
       "complete": "Completed",
       "budgetLimited": "Limit reached",
-      "usageLimited": "Usage limited"
+      "usageLimited": "Usage limited",
+      "capacityLimited": "Model service busy"
     },
     "turns": "{{used}} turns",
     "turnsWithMax": "{{used}} / {{max}} turns",
@@ -7355,7 +7362,9 @@
       "failed": "Failed to create goal"
     },
     "usageLimitedUntil": "resumes {{time}}",
+    "capacityRetryAt": "Retrying at {{time}}",
     "usageResumeNotice": "Usage limit reset — resuming the goal",
+    "capacityRetryNotice": "Model service was busy — retrying the goal",
     "complete": {
       "record": "Goal achieved · {{turns}} turns · {{duration}}"
     },
@@ -7564,6 +7573,7 @@
       "poolDetail": "Used {{used}} · Total {{total}}",
       "remaining": "Remaining",
       "progressLabel": "{{label}} usage",
+      "noPlanCredits": "No subscription credits because there is no active subscription.",
       "historyUnavailable": "Usage history is incomplete. Only the remaining balance is available.",
       "detailsUnavailable": "Usage details are temporarily unavailable. Current balances are shown instead.",
       "promotionalDetails": {
@@ -7607,8 +7617,7 @@
     "catalog": {
       "errorTitle": "Plans are temporarily unavailable",
       "errorDescription": "Check your connection and retry. Local fallback plans will not be used.",
-      "emptyTitle": "No Plans Available",
-      "emptyDescription": "The server has not published any plans yet.",
+      "emptyTitle": "Coming soon. Stay tuned.",
       "currentPlan": "Current Plan",
       "unavailableReasons": {
         "OFFER_COMING_SOON": "Coming Soon",

@@ -8,8 +8,15 @@
  * 其余筛选(状态 / Agent / 最近活跃范围 / 项目)刻意**不**持久化:它们会静默收窄结果集,
  * 跨会话记住会让「搜不到东西」变得难以察觉。
  *
- * 纯函数化(load/persist 不依赖 React)以便在 node 环境下直接单测,
- * 策略同 sidebarFilterCore。
+ * **为什么是订阅式 store 而不是各自 useState 初始值**:搜索有两个常驻挂载的实例——
+ * rail 态的 ConversationSearchBox 与展开态 Provider 里的内联搜索(CCAgentSidebarUpper
+ * 用 opacity / hidden 切换可见性,两个视图都不卸载)。若各自只在挂载时读一次 localStorage,
+ * 在一处改排序后另一处会停在旧值,直到重挂载 / 重启才「记住」(PR #963 review)。这里把
+ * 偏好收成模块级单一真源 + useSyncExternalStore 订阅,任一处改动即时同步到所有实例;
+ * 同 origin 的其它窗口经 storage 事件跟随。
+ *
+ * load / persist 保持纯函数(不依赖 React)以便在 node 环境下直接单测,策略同
+ * sidebarFilterCore;store 层则在 jsdom 下测。
  */
 
 import { createLogger } from '@/lib/logger';
@@ -68,4 +75,69 @@ export function persistSearchSortBy(sortBy: ConversationSearchSortBy): void {
   } catch (err) {
     log.warn('failed to persist sortBy:', err);
   }
+}
+
+/* ==================== 共享 store(所有搜索实例的单一真源) ==================== */
+
+/** 进程内当前值。null = 还没读过 storage(首次 get 时惰性加载)。 */
+let cached: ConversationSearchSortBy | null = null;
+const listeners = new Set<() => void>();
+/** storage 事件监听只挂一次(模块级),用变量存 handler 以便测试重置时摘掉。 */
+let storageHandler: ((event: StorageEvent) => void) | null = null;
+
+function emit(): void {
+  for (const listener of [...listeners]) listener();
+}
+
+/** 把 storage 里的原始值收敛成合法排序值。 */
+function normalize(raw: string | null | undefined): ConversationSearchSortBy {
+  return raw && SORT_BY_VALUES.has(raw)
+    ? (raw as ConversationSearchSortBy)
+    : DEFAULT_SEARCH_SORT_BY;
+}
+
+function attachStorageListener(): void {
+  if (storageHandler || typeof window === 'undefined') return;
+  // 同 origin 的其它窗口改了排序 → 本窗口跟随(storage 事件只在**其它**窗口触发)。
+  storageHandler = (event: StorageEvent) => {
+    if (event.key !== SEARCH_SORT_BY_KEY) return;
+    const next = normalize(event.newValue);
+    if (next === cached) return;
+    cached = next;
+    emit();
+  };
+  window.addEventListener('storage', storageHandler);
+}
+
+/** 读当前排序(useSyncExternalStore 的 getSnapshot:同值必须返回同引用,字符串天然满足)。 */
+export function getSearchSortBy(): ConversationSearchSortBy {
+  if (cached === null) cached = loadSearchSortBy();
+  return cached;
+}
+
+/** 改排序:写 storage + 通知所有挂载中的搜索实例(rail 与内联即时一致)。 */
+export function setSearchSortBy(next: ConversationSearchSortBy): void {
+  if (getSearchSortBy() === next) return;
+  cached = next;
+  persistSearchSortBy(next);
+  emit();
+}
+
+/** 订阅排序变化;返回退订函数(useSyncExternalStore 契约)。 */
+export function subscribeSearchSortBy(onStoreChange: () => void): () => void {
+  attachStorageListener();
+  listeners.add(onStoreChange);
+  return () => {
+    listeners.delete(onStoreChange);
+  };
+}
+
+/** 仅测试用:清掉进程内缓存与订阅者,让下次 get 重新读 storage。 */
+export function __resetSearchSortByStoreForTests(): void {
+  cached = null;
+  listeners.clear();
+  if (storageHandler && typeof window !== 'undefined') {
+    window.removeEventListener('storage', storageHandler);
+  }
+  storageHandler = null;
 }

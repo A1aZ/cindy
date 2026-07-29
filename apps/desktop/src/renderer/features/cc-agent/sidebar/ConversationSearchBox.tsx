@@ -1,4 +1,12 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 import {
   Check,
   ChevronDown,
@@ -28,7 +36,11 @@ import {
 import { cn } from '@/lib/utils';
 import { searchConversations } from '@/lib/conversationSearchService';
 import { formatSidebarTime } from '../lib/formatSidebarTime';
-import { loadSearchSortBy, persistSearchSortBy } from './conversationSearchPrefs';
+import {
+  getSearchSortBy,
+  setSearchSortBy,
+  subscribeSearchSortBy,
+} from './conversationSearchPrefs';
 import type {
   ConversationSearchAgentFilter,
   ConversationSearchLastActivityFilter,
@@ -141,8 +153,9 @@ export function useConversationSearch({
   onResultChosen,
 }: UseConversationSearchParams) {
   const [query, setQuery] = useState('');
-  // 排序读上次选择(localStorage),其余筛选每次回到默认——见 conversationSearchPrefs 的取舍说明。
-  const [sortBy, setSortByState] = useState<ConversationSearchSortBy>(() => loadSearchSortBy());
+  // 排序订阅共享偏好 store(持久化 + 跨实例同步),其余筛选每次回到默认
+  // ——取舍与「为什么不是各自 useState」见 conversationSearchPrefs 的文件头。
+  const sortBy = useSyncExternalStore(subscribeSearchSortBy, getSearchSortBy);
   const [statusFilter, setStatusFilter] = useState<ConversationSearchStatusFilter>('all');
   const [agentFilter, setAgentFilter] = useState<ConversationSearchAgentFilter>('all');
   const [lastActivityFilter, setLastActivityFilter] =
@@ -271,10 +284,12 @@ export function useConversationSearch({
     trimmed,
   ]);
 
-  /** 切换排序并记住选择:下次打开搜索 / 重启客户端沿用同一排序。 */
+  /**
+   * 切换排序:写共享 store —— 立刻同步到所有挂载中的搜索实例(rail / 内联),
+   * 并落 localStorage,下次打开搜索 / 重启客户端沿用同一排序。
+   */
   const setSortBy = useCallback((next: ConversationSearchSortBy) => {
-    setSortByState(next);
-    persistSearchSortBy(next);
+    setSearchSortBy(next);
   }, []);
 
   /** 清空 query / 结果 / 状态(popover 关闭时调用)。项目锁定保留。 */
@@ -642,13 +657,15 @@ export function SearchFilterMenu({
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          // 排序也收在本菜单里,故一并读出当前排序(两段都是既有文案,不新增 key)。
-          aria-label={`${t('ccAgent.search.filterAria', {
+          // 排序也收在本菜单里,故 filterAria 文案本身多了 {{sort}} 段:整句由各语言自己
+          // 决定语序与标点,不在代码里拼接多段译文(PR #963 review)。
+          aria-label={t('ccAgent.search.filterAria', {
+            sort: sortValue,
             status: statusValue,
             agent: agentValue,
             lastActivity: lastActivityValue,
             projects: projectValue,
-          })} · ${t('ccAgent.search.sortAria', { sort: sortValue })}`}
+          })}
           aria-pressed={activeCount > 0}
           className={
             compact

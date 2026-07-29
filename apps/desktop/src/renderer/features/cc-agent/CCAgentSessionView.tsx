@@ -1402,14 +1402,23 @@ export function CCAgentSessionView({
   // 时重算告警:两种结局都需要重新对账 —— 成功时原 error 已不是尾行、红点该灭;
   // 取消时告警仍在、红点该回来(本机会话的点在 enqueue 成功时被临时清掉了)。
   // 只在挂起状态由 true 落回 false 的边沿触发,不在挂起期间反复重算。
-  const prevSyntheticPendingRef = useRef(false);
+  // 边沿状态必须**连 sessionId 一起记**:本组件在会话间复用,若只记布尔值,「A 有排队项
+  // (true)→ 切到 B(false)」会被误判成 A 的完成边沿,进而对 B 发 ack / 远程回执,
+  // 清掉用户从未处置的 B 的红点(PR #879 review P1)。
+  const prevSyntheticPendingRef = useRef<{ sessionId: string | undefined; pending: boolean }>({
+    sessionId: undefined,
+    pending: false,
+  });
   // 边沿处理要读「横幅此刻是否还在」,但把这些值写进 deps 会让 effect 在挂起期间反复
   // 重跑;用 ref 持有最新值,effect 只由挂起状态驱动。
   const alertStillPresentRef = useRef(false);
   alertStillPresentRef.current = Boolean(errorTailMsg) || interruptedFromSession;
   useEffect(() => {
-    const was = prevSyntheticPendingRef.current;
-    prevSyntheticPendingRef.current = syntheticContinuationPending;
+    const prev = prevSyntheticPendingRef.current;
+    prevSyntheticPendingRef.current = { sessionId, pending: syntheticContinuationPending };
+    // 跨会话不构成边沿:上一次记录属于别的会话,直接重新定基。
+    if (prev.sessionId !== sessionId) return;
+    const was = prev.pending;
     if (!was || syntheticContinuationPending) return;
     // 远程会话的 ack 延后到这里:本机库里没有它的行,重算无法恢复红点,所以必须先
     // 确认横幅**真的消失了**(dispatch 成功、续跑已落库)才发隧道回执;若横幅重现

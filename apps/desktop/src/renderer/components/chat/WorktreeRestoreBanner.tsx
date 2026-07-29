@@ -80,11 +80,13 @@ export function WorktreeRestoreBanner({
    * 派生腿把那些仍在库里的告警点立刻重建回来(usePendingAlertAttention 每轮无条件
    * 重打点,不会因为「上轮已 owned」而跳过)。
    */
-  const clearOwnAttention = useCallback(() => {
-    const marked = markedSessionRef.current;
-    if (!marked) return;
+  const clearOwnAttentionFor = useCallback((target: string) => {
+    // 只在 ref 仍指向 target 时清:本组件在会话间复用,「恢复 A 时切到 B」会让 B 的
+    // 状态查询先占据 ref,A 的迟到完成若照清 ref 里的值就会误清 B 的红点
+    // (PR #879 review P1)。ref 已被别人占据 = 本次完成已过期,直接忽略。
+    if (markedSessionRef.current !== target) return;
     markedSessionRef.current = null;
-    ackErrorAlertHandled(marked);
+    ackErrorAlertHandled(target);
     void refreshPendingAlerts();
   }, []);
 
@@ -132,9 +134,11 @@ export function WorktreeRestoreBanner({
   }, [sessionId]);
 
   const handleRestore = useCallback(async () => {
+    // 捕获发起时的会话:恢复是异步的,期间用户可能切走,组件被复用到别的会话。
+    const target = sessionId;
     setPhase('restoring');
     try {
-      const result = await window.electronAPI.worktreeRestoreForSession(sessionId);
+      const result = await window.electronAPI.worktreeRestoreForSession(target);
       if (result.ok) {
         if (result.snapshotApplied === false) {
           // 目录已就位但快照 apply 失败(冲突/锁),main 侧保留了快照——
@@ -145,8 +149,8 @@ export function WorktreeRestoreBanner({
         } else {
           toast.success(t('chat.worktreeRestoreBanner.restored'));
           setPhase('hidden');
-          // 恢复成功 = 告警消失,清红点。
-          clearOwnAttention();
+          // 恢复成功 = 告警消失,清**发起时那个会话**的红点(过期完成会被忽略)。
+          clearOwnAttentionFor(target);
         }
         void refreshWorktrees();
       } else {
@@ -163,7 +167,7 @@ export function WorktreeRestoreBanner({
       );
       setPhase('restorable');
     }
-  }, [refreshWorktrees, sessionId, t]);
+  }, [clearOwnAttentionFor, refreshWorktrees, sessionId, t]);
 
   if (phase === 'hidden') return null;
   const restoring = phase === 'restoring';
@@ -211,7 +215,7 @@ export function WorktreeRestoreBanner({
         onClick={() => {
           setPhase('hidden');
           // 用户主动忽略 = 处置(本视图内),清红点。重开会话自查再命中会重新打上。
-          clearOwnAttention();
+          if (sessionId) clearOwnAttentionFor(sessionId);
         }}
         className="shrink-0 text-[var(--error-fg)] opacity-60 hover:opacity-100 transition-opacity"
         title={t('chat.worktreeRestoreBanner.dismissTitle')}

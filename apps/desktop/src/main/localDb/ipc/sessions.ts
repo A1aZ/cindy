@@ -777,6 +777,9 @@ export function registerSessionIpc(): void {
   // 不合法直接 INVALID_PARAMS 拒绝,避免异常调用方让 main 侧分配任意大的集合并跑
   // 一轮数据库写。上限取 sidebar 可能的自动化会话量级的宽松倍数。
   const MAX_DISMISS_SESSION_IDS = 500;
+  // 单个 id 也要有界:session id 是 UUID / cuid(≤ 36 字符),128 是宽松上限。
+  // 只限数组长度不够 —— 500 个超长字符串同样能让 main 侧白留一大块内存并做无谓比较。
+  const MAX_SESSION_ID_LENGTH = 128;
   ipcMain.handle('local-db:sessions:dismiss-pending-alerts', async (event, ids: unknown) => {
     // 认证来源再做任何写:payload 有界 ≠ 来源可信(见上方 guard 说明)。
     assertTrustedAppRendererEvent(event);
@@ -784,7 +787,12 @@ export function registerSessionIpc(): void {
     if (ids.length > MAX_DISMISS_SESSION_IDS) {
       throwIpcError('INVALID_PARAMS', `sessionIds 超过上限 ${MAX_DISMISS_SESSION_IDS}`);
     }
-    for (const id of ids) requireString(id, 'sessionId');
+    for (const id of ids) {
+      const sid = requireString(id, 'sessionId');
+      if (sid.length > MAX_SESSION_ID_LENGTH) {
+        throwIpcError('INVALID_PARAMS', `sessionId 超过长度上限 ${MAX_SESSION_ID_LENGTH}`);
+      }
+    }
     const wanted = new Set(ids as string[]);
     if (wanted.size === 0) return { dismissed: 0, processed: [], failed: [] };
     const [tailRows, interruptedRows] = await Promise.all([

@@ -71,7 +71,7 @@ repository and is not part of this monorepo.
 | Mode | Account requirement | Availability |
 | --- | --- | --- |
 | Hosted service | Cindy cloud account | Use Cindy's full hosted service. See [pricing](https://cindy.app/#pricing). |
-| Skip sign-in | No Cindy sign-in required | Choose “Skip Sign-In” on the login screen to use local agents; the app then shows the account state as “Not signed in”. Server-backed capabilities are unavailable in this state. |
+| Skip Sign-In | No Cindy sign-in required | Choose “Skip Sign-In” on the login screen to use local agents; the app then shows the account state as “Not signed in”. Server-backed capabilities are unavailable in this state. |
 
 ## Prerequisites
 

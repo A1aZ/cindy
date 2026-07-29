@@ -237,8 +237,12 @@ export function FolderPickerPopover({
     // 远程设备语境下绝不能开本机原生目录对话框:选出来的是**控制端**路径,而草稿里的
     // deviceId 仍指向对端 —— 发送时要么被被控端 path guard 拒掉,要么(路径恰好在对端也存在)
     // 在一个毫不相关的远程目录里把会话建起来。改为打开设备域的远程浏览器,并带上当前设备。
-    if (deviceScope && onAddRemoteProject) {
-      onAddRemoteProject(deviceScope.deviceId);
+    // 判据只看 deviceScope,**不再 && onAddRemoteProject**:后者由上层按 hasAnyRemoteTarget 下发,
+    // 而选中的对端一旦离线、且它是唯一远程目标时那个 gate 会变 false —— 于是条件不成立、直接
+    // 落到下面的本机对话框,选出控制端路径配上远程 deviceId,又回到「被 path guard 拒 / 在对端
+    // 同名无关目录里建会话」。远程语境下宁可什么都不做,也绝不能开本机 picker。
+    if (deviceScope) {
+      onAddRemoteProject?.(deviceScope.deviceId);
       onOpenChange(false);
       return;
     }

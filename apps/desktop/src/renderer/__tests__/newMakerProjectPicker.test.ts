@@ -177,7 +177,8 @@ describe('Shared create project picker', () => {
     expect(newMakerDraftRouteSource).toContain(
       'const hasAnyRemoteTarget = useHasAnyRemoteTarget()',
     );
-    expect(newMakerDraftRouteSource).toContain('onAddRemoteProject={hasAnyRemoteTarget ?');
+    expect(newMakerDraftRouteSource).toContain('onAddRemoteProject={');
+    expect(newMakerDraftRouteSource).toContain('hasAnyRemoteTarget || folderPickerDeviceScope');
     // #807 方案 B:设备提成 pill 上的一级维度,项目区只列**当前设备**的项目(不再跨设备分组)。
     expect(newMakerDraftRouteSource).toContain('projectOptions={activeProjectOptions}');
     expect(newMakerDraftRouteSource).toContain('deviceScope={folderPickerDeviceScope}');
@@ -258,8 +259,8 @@ describe('Shared create project picker', () => {
   // 选出来的是控制端路径,配上远程 deviceId 发送时要么被 path guard 拒,要么在对端一个
   // 毫不相关的同名目录里建会话。
   it('routes folder browsing through the selected device instead of the local native picker', () => {
-    expect(folderPickerPopoverSource).toContain('if (deviceScope && onAddRemoteProject) {');
-    expect(folderPickerPopoverSource).toContain('onAddRemoteProject(deviceScope.deviceId);');
+    expect(folderPickerPopoverSource).toContain('if (deviceScope) {');
+    expect(folderPickerPopoverSource).toContain('onAddRemoteProject?.(deviceScope.deviceId);');
   });
 
   // #807 review 第二轮:空列表必须区分「还没拉到」与「拉到了确实没有」。唯一对端被解除配对时
@@ -298,6 +299,45 @@ describe('Shared create project picker', () => {
     // 靠 setRows 里的存在性检查保证幂等,而不是靠版本号。
     expect(deviceLinkProjectsHookSource).toContain(
       'if (current.some((row) => row.path === restored.path)) return current;',
+    );
+  });
+
+  // #807 review 第四轮:四个死角,都是前几轮修复留下的。
+  it('never opens the local picker in a remote scope, even without onAddRemoteProject', () => {
+    // 上层按 hasAnyRemoteTarget 下发 onAddRemoteProject,而选中的对端离线且是唯一远程目标时
+    // 那个 gate 会变 false —— 判据必须只看 deviceScope,否则又落回本机原生对话框。
+    expect(folderPickerPopoverSource).toContain('if (deviceScope) {');
+    expect(folderPickerPopoverSource).toContain('onAddRemoteProject?.(deviceScope.deviceId);');
+    // 已选定设备时无条件下发入口(设备离线也要能浏览它)。
+    expect(newMakerDraftRouteSource).toContain(
+      'hasAnyRemoteTarget || folderPickerDeviceScope ? handleOpenRemoteProject : undefined',
+    );
+  });
+
+  it('strips remote mention chips during the automatic local fallback too', () => {
+    // 回落 effect 绕过 handleDeviceChange,要自己做同款清理,否则对着远程机器建的 @file/@dir
+    // 会留在 composer,下一次本机发送被当成本机路径送进去。
+    const effect = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('selected device is no longer selectable'),
+    );
+    expect(effect.slice(0, effect.indexOf('patchDraft('))).toContain('stripLocalMentionChips');
+  });
+
+  it('keeps the last known device rows when listDevices fails', () => {
+    // 清空会造成死角:选了远程设备后一次瞬时失败就让 pill 返回 null,而回落 effect 又(正确地)
+    // 因为空不权威而不动草稿 —— 草稿仍指着那台设备,UI 上却没有控件能切回本机。
+    const catchBlock = controllableDevicesHookSource.slice(
+      controllableDevicesHookSource.indexOf('**保留上次已知的设备行**'),
+    );
+    const untilEnd = catchBlock.slice(0, catchBlock.indexOf('};'));
+    expect(untilEnd).toContain('setLoaded(false);');
+    expect(untilEnd).not.toContain('setDevices(');
+  });
+
+  it('gates the post-delete authoritative reload on device identity, not the shared request id', () => {
+    // requestIdRef 被 effect 取数与每次删除共享,快速删两行会让第一次成功的回读被丢弃。
+    expect(deviceLinkProjectsHookSource).toContain(
+      'if (currentDeviceIdRef.current !== target.deviceId) return;',
     );
   });
 

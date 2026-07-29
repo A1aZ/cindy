@@ -1441,6 +1441,15 @@ export function NewMakerDraftRoute() {
     if (!selectableDevicesLoaded) return;
     if (selectableDevices.some((d) => d.deviceId === effectiveDeviceLinkDeviceId)) return;
     log.warn('[new-maker] selected device is no longer selectable, falling back to local');
+    // 回落同样是换文件系统:草稿里的 @file / @dir chip 是对着**那台远程机器**建的,留着会在下一次
+    // 本机发送时被当成本机路径送进去。这条路径绕过了 handleDeviceChange,所以要自己做同款清理。
+    const composerDraft = getComposerDraft(NEW_MAKER_DRAFT_KEY);
+    if (composerDraft?.text) {
+      saveComposerDraft(NEW_MAKER_DRAFT_KEY, {
+        ...composerDraft,
+        text: stripLocalMentionChips(composerDraft.text),
+      });
+    }
     patchDraft({
       deviceLinkDeviceId: null,
       deviceLinkDeviceName: null,
@@ -2557,7 +2566,12 @@ export function NewMakerDraftRoute() {
                   deviceScope={folderPickerDeviceScope}
                   onRemoveRemoteProject={removeRemoteProject}
                   // 仅在有可用远程目标时暴露「添加远程项目」入口(SSH ready 主机 / device-link 可控设备)。
-                  onAddRemoteProject={hasAnyRemoteTarget ? handleOpenRemoteProject : undefined}
+                  // 已经选定对端设备时无条件下发:此时浏览目标是明确的那台机器,不该再受
+                  // hasAnyRemoteTarget 影响 —— 它会在该设备离线时变 false,把「浏览文件夹」推回
+                  // 本机原生对话框(见 FolderPickerPopover.handleChooseDifferent 的同款防护)。
+                  onAddRemoteProject={
+                    hasAnyRemoteTarget || folderPickerDeviceScope ? handleOpenRemoteProject : undefined
+                  }
                   side="bottom"
                   align="end"
                   sideOffset={6}

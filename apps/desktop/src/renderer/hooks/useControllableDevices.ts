@@ -128,10 +128,14 @@ export function useSelectableDevices(): { devices: SelectableDevice[]; loaded: b
         // 成功拿到快照 —— 哪怕是空的,也是权威的空。
         setLoaded(true);
       } catch {
-        // device-link 不可用(未登录 / relay 断):清空列表但**不置 loaded**,
-        // 这个空不作数,下游不得据此清掉用户选定的设备。
+        // device-link 暂时不可用(未登录 / relay 断)。
+        //
+        // **保留上次已知的设备行**,只把 loaded 置回 false。清空会造成一个死角:选了远程设备后
+        // 一次瞬时失败就让 DeviceSwitcherPill 因为没有设备而返回 null,而失效回落 effect 又
+        // (正确地)因为这个空不权威而不动草稿 —— 于是草稿仍指着那台设备,UI 上却没有任何控件能
+        // 切回本机,直到下一次成功刷新。保留旧行的代价只是它们可能已过期(在线状态尤其),
+        // 而 loaded=false 已经如实表达了「这份快照不权威」。
         if (cancelled) return;
-        setDevices((prev) => (prev.length === 0 ? prev : []));
         setLoaded(false);
       }
     };

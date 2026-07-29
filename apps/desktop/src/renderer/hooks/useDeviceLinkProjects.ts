@@ -54,8 +54,14 @@ export function useDeviceLinkProjects(
    * 否则慢的旧请求回来会把新设备的列表覆盖成上一台的项目(看起来像「项目跑到别的机器上了」)。
    */
   const requestIdRef = useRef(0);
+  /**
+   * 当前 hook 实例正在看哪台设备。删除失败后的权威回读用它做 gate —— 不能用 requestIdRef,
+   * 那个版本号被 effect 取数与每一次删除共享,并发删除会互相把对方的回读判成过期。
+   */
+  const currentDeviceIdRef = useRef<string | null>(null);
 
   useEffect(() => {
+    currentDeviceIdRef.current = deviceId;
     // 本机(deviceId=null)不走隧道;picker 没打开时不取数,避免常驻首页时白拉。
     if (!enabled || !deviceId) {
       setRows([]);
@@ -106,11 +112,16 @@ export function useDeviceLinkProjects(
       } catch {
         // 老被控端可能没有 remove channel。回读一次收敛到被控端真相,
         // 而不是留下一个「本地看着删了、对端其实还在」的幻影删除。
-        const requestId = requestIdRef.current + 1;
-        requestIdRef.current = requestId;
+        // 继续让更早的 effect 取数失效(它晚到会覆盖下面这次回读的结果);
+        // 但回读自身的有效性不再由这个版本号判定,见下。
+        requestIdRef.current += 1;
         try {
           const list = await loadDeviceLinkExistingProjects(target.deviceId);
-          if (requestIdRef.current !== requestId) return;
+          // gate 用**设备身份**而不是共享版本号:requestIdRef 同时被 effect 取数和每一次删除
+          // 递增,快速删 A、B 时 B 会把版本号推走,导致 A 随后成功的权威回读在这里被丢弃 ——
+          // A 既没在对端删成、又没被恢复,会一直从选择器里消失。只要设备没切走,这份回读就仍然
+          // 有效(它就是被控端真相),该应用。
+          if (currentDeviceIdRef.current !== target.deviceId) return;
           setRows(list);
         } catch {
           // 回读也失败(对端离线 / 隧道断)。此时**必须把行放回去**:删除既没在对端生效,

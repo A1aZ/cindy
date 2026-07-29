@@ -641,7 +641,10 @@ export class MakerScheduleRunner implements ScheduleRunner {
     if (reusedLiveSession) {
       const liveSession = this.deps.maker.getSession(sessionId);
       const currentProviderId = getSessionProvider(sessionId) ?? heartbeatProviderId;
-      const nextProviderId = explicitProviderId ?? currentProviderId;
+      // 隐式改道(reroutedProviderId)也是本次 fire 的落地来源:跨凭证家族的改道
+      // (如停用 XD 默认 → 改道 Anthropic)若不进本判定,会复用旧凭证 spawn 的
+      // live session,请求仍走旧轨道或直接鉴权失败(PR #744 review 第二十三轮)。
+      const nextProviderId = explicitProviderId ?? reroutedProviderId ?? currentProviderId;
       if (
         liveSession &&
         shouldCloseSessionForCredentialSwitch({

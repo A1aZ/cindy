@@ -284,7 +284,10 @@ describe('PendingCredentialSwitchService', () => {
 
       expect(h.service.has(sessionId)).toBe(false);
       expect(getSessionProvider(sessionId)).toBe('anthropic');
-      expect(h.persistRoute).toHaveBeenCalledWith(sessionId, { providerId: 'anthropic' });
+      expect(h.persistRoute).toHaveBeenCalledWith(sessionId, {
+        providerId: 'anthropic',
+        model: 'claude-opus-5',
+      });
       expect(h.broadcastApplied).toHaveBeenCalledWith({
         sessionId,
         model: 'claude-opus-5',
@@ -421,7 +424,10 @@ describe('PendingCredentialSwitchService', () => {
       await h.service.onTurnSettled(sessionId);
 
       expect(getSessionProvider(sessionId)).toBeNull();
-      expect(h.persistRoute).toHaveBeenCalledWith(sessionId, { providerId: null });
+      expect(h.persistRoute).toHaveBeenCalledWith(sessionId, {
+        providerId: null,
+        model: 'claude-opus-5',
+      });
       expect(h.onApplied).toHaveBeenCalledWith(sessionId);
     });
 
@@ -470,7 +476,12 @@ describe('PendingCredentialSwitchService', () => {
       h.service.register(sessionId, { model: 'gpt-5.5', providerId: 'xd', agentKind: 'codex' });
       await h.service.onTurnSettled(sessionId);
       expect(getSessionProvider(sessionId)).toBe('xd');
-      expect(h.persistRoute).not.toHaveBeenCalled();
+      // R23:裁决接线存在时收口恒写幂等回正(吸收旧 finalizer 迟到写竞态),
+      // 路由未改也回写 (providerId, model) —— 对 renderer 已写值的幂等重写。
+      expect(h.persistRoute).toHaveBeenCalledWith(sessionId, {
+        providerId: 'xd',
+        model: 'gpt-5.5',
+      });
       expect(resolveRoute).toHaveBeenCalledWith('codex', 'gpt-5.5', 'xd', {
         desiredFastMode: false,
       });

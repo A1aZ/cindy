@@ -52,14 +52,23 @@ describe('checkModelRoute', () => {
     expect(checkModelRoute(views(), 'claude-code', 'unknown-model', null)).toEqual({ kind: 'pass' });
   });
 
-  it('显式点名:停用的来源 reject;启用的来源 / 不提供该模型的来源 pass', () => {
+  it('显式点名:停用的来源 reject;启用的来源 pass;未知来源按隐式口径裁决', () => {
     const v = views({ disabledModels: { 'xd:claude-opus-5': true } });
     expect(checkModelRoute(v, 'claude-code', 'claude-opus-5', 'xd')).toEqual({
       kind: 'reject',
       reason: 'explicit-source-disabled',
     });
     expect(checkModelRoute(v, 'claude-code', 'claude-opus-5', 'anthropic')).toEqual({ kind: 'pass' });
-    expect(checkModelRoute(v, 'claude-code', 'claude-opus-5', 'nonexistent')).toEqual({ kind: 'pass' });
+    // 未知/陈旧的显式来源:实际路由层查不到 routing 会回退原生默认(xd,已停用)——
+    // 不 pass-through,按隐式口径裁决 ⇒ 改道到启用替代拷贝(R23)。
+    expect(checkModelRoute(v, 'claude-code', 'claude-opus-5', 'nonexistent')).toEqual({
+      kind: 'reroute',
+      providerId: 'anthropic',
+    });
+    // 未知显式来源 + 原生默认未停用 ⇒ 隐式口径 pass(不新增拒绝面)。
+    expect(checkModelRoute(views(), 'claude-code', 'claude-opus-5', 'nonexistent')).toEqual({
+      kind: 'pass',
+    });
   });
 
   it('隐式来源:原生默认落点(xd)被停用且替代拷贝已连接启用 ⇒ reroute 到替代来源', () => {
@@ -209,6 +218,44 @@ describe('resolveLenientRoute(自动化直建会话的宽松降级)', () => {
         'xd',
       ),
     ).toEqual({ model: 'claude-opus-5', providerId: 'anthropic', degraded: true });
+  });
+
+  it('R23:仅换来源(reroute / 丢弃显式来源)也按落地拷贝 reconcile effort', () => {
+    // effort 支持是 per-(来源, 模型) 的:xd 拷贝到 max,anthropic 拷贝只到 high。
+    const catalog: Catalog = {
+      providers: [
+        provider('xd', [
+          model('claude-opus-5', { efforts: ['low', 'medium', 'high', 'max'], defaultEffort: 'high' }),
+        ]),
+        provider('anthropic', [
+          model('claude-opus-5', { efforts: ['low', 'medium', 'high'], defaultEffort: 'high' }),
+        ]),
+      ],
+    } as Catalog;
+    // 隐式默认(xd)停用 ⇒ reroute 到 anthropic:desiredEffort=max 落地拷贝不支持 ⇒ 取默认档。
+    const rerouted = buildRegistry(
+      catalog,
+      { xd: true, anthropic: true },
+      {},
+      { disabledModels: { 'xd:claude-opus-5': true } },
+    );
+    expect(
+      resolveLenientRoute(rerouted, 'claude-code', 'claude-opus-5', null, { desiredEffort: 'max' }),
+    ).toEqual({ model: 'claude-opus-5', providerId: 'anthropic', degraded: false, effort: 'high' });
+    // 落地拷贝仍支持 desiredEffort ⇒ 保留原档。
+    expect(
+      resolveLenientRoute(rerouted, 'claude-code', 'claude-opus-5', null, { desiredEffort: 'medium' }),
+    ).toEqual({ model: 'claude-opus-5', providerId: 'anthropic', degraded: false, effort: 'medium' });
+    // 丢弃停用显式来源落隐式默认(xd 拷贝支持 max)⇒ effort 保留。
+    const dropped = buildRegistry(
+      catalog,
+      { xd: true, anthropic: true },
+      {},
+      { disabledModels: { 'anthropic:claude-opus-5': true } },
+    );
+    expect(
+      resolveLenientRoute(dropped, 'claude-code', 'claude-opus-5', 'anthropic', { desiredEffort: 'max' }),
+    ).toEqual({ model: 'claude-opus-5', providerId: null, degraded: true, effort: 'max' });
   });
 
   it('所有已连接拷贝被停用 ⇒ 连模型一起丢弃(交回 agent 默认路由)', () => {

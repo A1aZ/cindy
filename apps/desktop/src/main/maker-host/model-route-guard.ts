@@ -18,6 +18,12 @@
  *
  * 判定只对**新的路由选择**执行(新建会话 / 切模型 / 跨引擎切换);resume 与运行中
  * 的会话不打断 —— 调用方负责场景收口。
+ *
+ * 严格度口径(产品取舍,Dash 2026-07-29 拍板):停用是 **best-effort** 的产品开关,
+ * 先可用最重要。裁决发生在路由选择/派发编排时点,「检查后、真正扣费前」的毫秒级
+ * 竞态窗口可接受(最坏多发一次调用),不再为收窄此类 TOCTOU 追加持锁/终检/复查的
+ * 复杂度;真正的裁决漏洞(查错记账主体、口径用错、整条付费链路未接入)照常修。
+ * review 中的纯竞态收窄类反馈按本口径回复说明,不再加码。
  */
 
 import {
@@ -78,9 +84,14 @@ export function checkModelRoute(
       if (copyDisabled(explicit, modelId, agent)) {
         return { kind: 'reject', reason: 'explicit-source-disabled' };
       }
+      // 显式来源存在且未停用:放行。
+      return { kind: 'pass' };
     }
-    // 显式来源未被停用(或不提供该模型 —— 交给既有收窄 / preflight):放行。
-    return { kind: 'pass' };
+    // 未知/陈旧的显式来源(不在目录、或不提供该模型):实际路由层(provider-route)
+    // 查不到该 provider 的 routing 描述会回退**原生默认**落点 —— 效果等同隐式路由。
+    // 不能 pass-through:原生默认拷贝被停用时,带着陈旧 id 放行 = 照旧经停用拷贝
+    // 付费(PR #744 review 第二十三轮)。落到下方隐式口径继续裁决(reroute 会把
+    // 陈旧 id 替换成启用替代来源)。
   }
 
   // 隐式来源:推演「不考虑停用时会路由到谁」(原生默认口径,与 provider-route 的
@@ -153,24 +164,17 @@ export function resolveLenientRoute(
   opts: { fallbackModel?: string; desiredEffort?: string } = {},
 ): { model?: string; providerId: string | null; degraded: boolean; effort?: string } {
   if (!model) return { model, providerId, degraded: false };
-  let verdict = checkModelRoute(views, agent, model, providerId);
-  if (verdict.kind === 'pass') return { model, providerId, degraded: false };
-  if (verdict.kind === 'reroute') return { model, providerId: verdict.providerId, degraded: false };
-  if (providerId) {
-    verdict = checkModelRoute(views, agent, model, null);
-    if (verdict.kind === 'pass') return { model, providerId: null, degraded: true };
-    if (verdict.kind === 'reroute') {
-      return { model, providerId: verdict.providerId, degraded: true };
-    }
-  }
-  // ④ 换模型:调用方保存的 effort 是对**原模型**的选择,换出的模型可能不支持
-  //   (如 max 换到只到 xhigh 的模型,原样透传会被上游拒)—— 按解析出的模型条目
-  //   reconcile:仍支持则保留,否则取该条目默认档;条目不带 effort 概念 / 找不到
-  //   时缺席(调用方不携带 effort,交给 agent 默认;PR #744 review 第十一轮)。
+  // effort reconcile 的**唯一**出口(PR #744 review 第十一/二十三轮):调用方保存的
+  // effort 是对**原路由那份拷贝**的选择,而 effort 支持是 per-(来源, 模型) 的 ——
+  // 不止换模型,仅换来源(reroute / 丢弃停用显式来源)时落地拷贝也可能不支持原档
+  // (如 max 换到只到 xhigh 的拷贝,原样透传会被上游拒)。所有改动路由的返回都走
+  // 这里:仍支持则保留,否则取该条目默认档;条目不带 effort 概念 / 找不到时缺席
+  // (调用方不携带 effort,交给 agent 默认)。
   const withEffort = (
     resolvedModel: string,
     resolvedProviderId: string | null,
-  ): { model: string; providerId: string | null; degraded: true; effort?: string } => {
+    degraded: boolean,
+  ): { model: string; providerId: string | null; degraded: boolean; effort?: string } => {
     const provider = resolvedProviderId
       ? views.find((p) => p.id === resolvedProviderId)
       : sourcesForModel([...views], resolvedModel, agent)[0];
@@ -184,16 +188,26 @@ export function resolveLenientRoute(
             ? copy.defaultEffort
             : copy.efforts[copy.efforts.length - 1];
     }
-    return { model: resolvedModel, providerId: resolvedProviderId, degraded: true, effort };
+    return { model: resolvedModel, providerId: resolvedProviderId, degraded, effort };
   };
+  let verdict = checkModelRoute(views, agent, model, providerId);
+  if (verdict.kind === 'pass') return { model, providerId, degraded: false };
+  if (verdict.kind === 'reroute') return withEffort(model, verdict.providerId, false);
+  if (providerId) {
+    verdict = checkModelRoute(views, agent, model, null);
+    if (verdict.kind === 'pass') return withEffort(model, null, true);
+    if (verdict.kind === 'reroute') {
+      return withEffort(model, verdict.providerId, true);
+    }
+  }
   if (opts.fallbackModel && opts.fallbackModel !== model) {
     const fallback = resolveLenientRoute(views, agent, opts.fallbackModel, null);
     if (fallback.model) {
-      return withEffort(fallback.model, fallback.providerId);
+      return withEffort(fallback.model, fallback.providerId, true);
     }
   }
   const pick = pickEnabledFallbackModel(views, agent);
   return pick
-    ? withEffort(pick.model, pick.providerId)
+    ? withEffort(pick.model, pick.providerId, true)
     : { model: undefined, providerId: null, degraded: true };
 }

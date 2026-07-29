@@ -350,13 +350,23 @@ export class PendingCredentialSwitchService {
       // 仍在,coordinator 的 pending 门保持关闭。失败留痕后仍收口(队列不能永久
       // 冻结;内存 store 已是权威路由,DB 差异在下次显式切换收敛)。
       const modelChanged = !!resolved.model && resolved.model !== target.model;
-      if ((resolved.providerId !== target.providerId || modelChanged) && this.deps.persistRoute) {
+      const routeChanged = resolved.providerId !== target.providerId || modelChanged;
+      // 恒写幂等回正(最后收口者赢,PR #744 review 第二十三轮):旧登记的 finalizer 在
+      // await persistRoute 期间被新选择替换时,旧写可能晚于 renderer 为新选择落的盘;
+      // 若新登记收口时因「裁决未改路由」跳过回写,DB 会留着旧 finalizer 的迟到值,
+      // 下次懒 resume 用错路由。收口时恒写 (providerId, model) —— 正常路径是对
+      // renderer 已写值的幂等重写,零语义差;不做 per-session 写锁(产品口径:先可用,
+      // 低概率竞态由幂等回写收敛,见 model-route-guard.ts 头注)。
+      // 仅在裁决接线存在时恒写:该竞态面来自 resolveRoute/persist 的 await 窗口,
+      // 无接线的同步快路径(onSessionClosed 不 await,「关闭即生效」须同 tick 完成)
+      // 既无竞态也不能引入异步,保持只在路由改动时回写。
+      if (this.deps.persistRoute && (routeChanged || this.deps.resolveRoute)) {
         try {
           await this.deps.persistRoute(sessionId, {
             providerId: resolved.providerId,
+            model: resolved.model ?? target.model,
             ...(modelChanged
               ? {
-                  model: resolved.model,
                   ...(resolved.effort ? { effort: resolved.effort } : {}),
                   ...(resolved.fastMode !== undefined ? { fastMode: resolved.fastMode } : {}),
                 }

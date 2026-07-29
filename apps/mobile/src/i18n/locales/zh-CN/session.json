@@ -159,7 +159,8 @@
     "worktreeNotGitRepo": "当前目录不是 git 仓库",
     "worktreeAlreadyInWorktree": "已在 worktree 中，禁止嵌套",
     "worktreeDetectFailed": "无法检测目录环境，可稍后重选目录再试",
-    "worktreeCreateFailed": "worktree 创建失败：{{message}}"
+    "worktreeCreateFailed": "worktree 创建失败：{{message}}",
+    "worktreeRecoveryStateFailed": "无法保存 worktree 恢复状态，请重试。"
   },
   "menu": {
     "chipPinned": "已置顶",

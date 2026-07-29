@@ -159,7 +159,8 @@
     "worktreeNotGitRepo": "Current directory is not a git repository",
     "worktreeAlreadyInWorktree": "Already inside a worktree, nesting is not allowed",
     "worktreeDetectFailed": "Could not check this directory — reselect it later and try again",
-    "worktreeCreateFailed": "Failed to create worktree: {{message}}"
+    "worktreeCreateFailed": "Failed to create worktree: {{message}}",
+    "worktreeRecoveryStateFailed": "Could not save the worktree recovery state. Try again."
   },
   "menu": {
     "chipPinned": "Pinned",

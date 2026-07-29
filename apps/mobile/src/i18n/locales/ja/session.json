@@ -159,7 +159,8 @@
     "worktreeNotGitRepo": "現在のディレクトリは git リポジトリではありません",
     "worktreeAlreadyInWorktree": "すでに worktree 内です。ネストは禁止です",
     "worktreeDetectFailed": "ディレクトリ環境を確認できません。後でディレクトリを選び直してもう一度お試しください",
-    "worktreeCreateFailed": "worktree の作成に失敗しました：{{message}}"
+    "worktreeCreateFailed": "worktree の作成に失敗しました：{{message}}",
+    "worktreeRecoveryStateFailed": "worktree の復旧状態を保存できませんでした。もう一度お試しください。"
   },
   "menu": {
     "chipPinned": "ピン留め済み",

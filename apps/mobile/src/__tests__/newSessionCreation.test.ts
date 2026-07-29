@@ -129,6 +129,7 @@ describe('newSessionCreation pipeline', () => {
       's13',
       's14',
       's15',
+      's16',
     ]) dismissNewSessionCreation(id);
   });
 
@@ -479,5 +480,44 @@ describe('newSessionCreation pipeline', () => {
       status: 'create-failed',
     });
     expect(maker.worktree.discardPrecreated).toHaveBeenCalledTimes(1);
+  });
+
+  it('回收发现会话已认领时重新对账真实会话，不把用户困在 create-failed', async () => {
+    const worktreePath = '/repo/.cindy-worktrees/auto-four';
+    const claimedSession = sessionFromCreateResult(
+      { sessionId: 's16', workDir: worktreePath },
+      DRAFT,
+    );
+    const maker = makeMaker({
+      createSession: vi.fn(async () => {
+        throw new Error('INVALID_PARAMS: create response lost');
+      }),
+      getSession: vi.fn(async () => claimedSession),
+      worktree: {
+        discardPrecreated: vi.fn(async () => {
+          throw Object.assign(new Error('session already owns worktree'), {
+            code: 'PRECONDITION_FAILED',
+          });
+        }),
+      },
+    });
+    startNewSessionCreation(makeParams('s16', maker, {
+      draft: { ...DRAFT, workingDir: worktreePath },
+      precreatedWorktree: {
+        path: worktreePath,
+        originalWorkingDir: '/repo',
+      },
+    }));
+    await flushPipeline();
+    expect(getNewSessionCreationTask('s16')?.status).toBe('create-failed');
+
+    await expect(prepareNewSessionCreationForEdit('s16')).resolves.toBeNull();
+    expect(getNewSessionCreationTask('s16')?.status).toBe('enqueue-failed');
+    expect(remoteSessionStore.getSessions().find((s) => s.id === 's16')).toMatchObject({
+      id: 's16',
+      workingDir: worktreePath,
+      pendingLocalCreation: false,
+    });
+    expect(remoteSessionStore.getInputProjection('s16').pendingQueue).toHaveLength(0);
   });
 });

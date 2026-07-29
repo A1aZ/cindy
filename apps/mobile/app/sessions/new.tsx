@@ -156,6 +156,10 @@ import {
   drainStashedNewSessionDraft,
   startNewSessionCreation,
 } from '@/session/newSessionCreation';
+import {
+  holdPrecreatedWorktreeRegistration,
+  registerPendingPrecreatedWorktree,
+} from '@/session/precreatedWorktreeRecovery';
 import { prepareMobileQueuedSessionReferences } from '@/session/sessionReferences';
 import {
   readNewSessionPreferences,
@@ -2451,6 +2455,7 @@ export default function NewRemoteSessionScreen() {
     // 建出重复会话(codex review P2)。交接成功后锁保持到组件销毁;「返回编辑」
     // 回来的是新 mount,creatingRef 天然复位。
     let handedOff = false;
+    let releasePrecreatedRegistration: (() => void) | null = null;
     try {
       let effectiveDraft = draft;
       if (voiceRecordingActiveRef.current || voiceState === 'listening') {
@@ -2492,7 +2497,11 @@ export default function NewRemoteSessionScreen() {
       // / 首条消息 enqueue 全部由 newSessionCreation 模块级后台管线完成(本页
       // unmount 不终止),失败重试面在会话页(横幅:重试 / 返回编辑)。
       const sessionId = createNewSessionId();
-      let precreatedWorktree: { path: string; originalWorkingDir: string } | undefined;
+      let precreatedWorktree: {
+        path: string;
+        originalWorkingDir: string;
+        createdAt?: number;
+      } | undefined;
       // —— worktree 两步流第一步(对齐桌面远程流程 NewMakerDraftRoute:远程没有改已建
       // 会话 workingDir 的通道,顺序反过来 —— 先同步等工作端建好 worktree 拿路径,再以
       // 该路径 + 同一预生成 sessionId 走乐观管线)。worktree:create 对同 sessionId 重跑
@@ -2514,10 +2523,30 @@ export default function NewRemoteSessionScreen() {
             setError(formatWorktreeCreateFailure(resp.error));
             return;
           }
+          const createdAt = Date.now();
           precreatedWorktree = {
             path: resp.meta.path,
             originalWorkingDir: effectiveDraft.workingDir,
+            createdAt,
           };
+          const accountId = auth.user?.id?.trim() ?? '';
+          releasePrecreatedRegistration = holdPrecreatedWorktreeRegistration(sessionId);
+          const recoveryRecorded = await registerPendingPrecreatedWorktree(accountId, {
+            sessionId,
+            deviceId: selectedDeviceId,
+            path: precreatedWorktree.path,
+            createdAt,
+          });
+          if (!recoveryRecorded) {
+            // 没有持久恢复账本就不把两步流程交给后台：否则手机若在
+            // create-session 前被系统杀掉，只能等桌面下次启动对账。
+            await maker.worktree.discardPrecreated({
+              sessionId,
+              path: precreatedWorktree.path,
+            }).catch(() => undefined);
+            setError(t('session.new.worktreeRecoveryStateFailed'));
+            return;
+          }
           effectiveDraft = { ...effectiveDraft, workingDir: resp.meta.path };
         } catch (err) {
           setError(t('session.new.worktreeCreateFailed', { message: formatRemoteError(err) }));
@@ -2543,6 +2572,7 @@ export default function NewRemoteSessionScreen() {
         planModeArm: planModeCapability && planModeDraftOn,
         legacyPlanRestore,
         precreatedWorktree,
+        precreatedWorktreeAccountId: auth.user?.id?.trim() ?? '',
         // stale-ready 防护(review P1):缓存判 ready/unknown 也可能已过期。管线内
         // 与建链并行 revalidate;verdict 已是 unauthenticated 时上面刚现拉确认过,跳过。
         confirmUnauthenticated: agentAuthVerdict === 'unauthenticated'
@@ -2582,6 +2612,7 @@ export default function NewRemoteSessionScreen() {
       const raw = formatRemoteError(err);
       setError(describeAgentAuthError(raw) ?? raw);
     } finally {
+      releasePrecreatedRegistration?.();
       if (!handedOff) {
         creatingRef.current = false;
         setCreating(false);

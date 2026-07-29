@@ -27,6 +27,7 @@
  */
 import { useSyncExternalStore } from 'react';
 import * as ExpoCrypto from 'expo-crypto';
+import { isPreconditionFailedRemoteError } from '@cindy/maker-shared/device-link-contract';
 import { i18n } from '@/i18n';
 import { isTransientRemoteError, withTransientRemoteRetry } from '@/device-link/remoteRetry';
 import { formatRemoteError } from '@/device-link/remoteStatus';
@@ -43,6 +44,7 @@ import {
   type NewSessionDraft,
 } from '@/session/newSession';
 import { remoteSessionStore } from '@/session/remoteSessionStore';
+import { forgetPendingPrecreatedWorktree } from '@/session/precreatedWorktreeRecovery';
 import { worktreeEligibilityFromError } from '@/session/newSessionWorktree';
 import type {
   InputProjection,
@@ -80,7 +82,11 @@ export interface NewSessionCreationParams {
   precreatedWorktree?: {
     path: string;
     originalWorkingDir: string;
+    /** 持久恢复账本中的创建时间；老调用方缺失时按 session + path 匹配。 */
+    createdAt?: number;
   };
+  /** 与预创建 worktree 账本绑定的账号；空值表示旧调用方不启用持久清理。 */
+  precreatedWorktreeAccountId?: string;
   /**
    * createSession 前的鉴权 fresh revalidate(与建链并行跑)。返回 true = 确认
    * 未鉴权 → create-failed(文案用 authGateHint)并触发 onUnauthenticated
@@ -106,6 +112,7 @@ export interface NewSessionCreationTask {
   readonly precreatedWorktree?: {
     path: string;
     originalWorkingDir: string;
+    createdAt?: number;
   };
 }
 
@@ -280,6 +287,49 @@ export function dismissNewSessionCreation(sessionId: string, opts: { removeSynth
 }
 
 /**
+ * 回收与 create-session 共享 session 锁。若回收在 ownership 检查后收到
+ * PRECONDITION_FAILED，优先再读一次权威会话；这通常表示 create-session
+ * 已经提交、只是手机丢了最后的回包。把真实会话接回镜像并转入
+ * enqueue-failed，避免「返回编辑」路径把一个已存在的会话误当成孤儿，
+ * 也避免用户被困在 create-failed 页面。
+ */
+async function reconcileClaimedSessionForEdit(task: InternalTask): Promise<boolean> {
+  let claimed: RemoteSession;
+  try {
+    claimed = await task.params.transport.maker.getSession(task.sessionId);
+  } catch {
+    return false;
+  }
+  if (
+    !claimed
+    || claimed.id !== task.sessionId
+    || tasks.get(task.sessionId) !== task
+  ) {
+    return false;
+  }
+  remoteSessionStore.upsertDeviceSession(task.deviceId, task.deviceName, {
+    ...claimed,
+    pendingLocalCreation: false,
+  });
+  const accountId = task.params.precreatedWorktreeAccountId?.trim();
+  if (accountId && task.precreatedWorktree) {
+    await forgetPendingPrecreatedWorktree(accountId, {
+      sessionId: task.sessionId,
+      path: task.precreatedWorktree.path,
+      ...(task.precreatedWorktree.createdAt !== undefined
+        ? { createdAt: task.precreatedWorktree.createdAt }
+        : {}),
+    });
+  }
+  failTask(
+    task,
+    'enqueue-failed',
+    i18n.t('session.new.firstMessageNotSent'),
+  );
+  return true;
+}
+
+/**
  * create-failed「返回编辑」的异步前置：先补偿回收未被 session 认领的预创建 worktree。
  *
  * 成功后调用方才可 stash + dismiss + 跳页，避免用户很快再次提交时与仍在执行的删除并发，
@@ -293,6 +343,7 @@ export async function prepareNewSessionCreationForEdit(
   if (!task || task.status !== 'create-failed') return null;
   const precreated = task.precreatedWorktree;
   if (precreated) {
+    let cleanupAccepted = false;
     try {
       await withTransientRemoteRetry(async () => {
         await task.params.transport.openLink(task.deviceId);
@@ -301,9 +352,24 @@ export async function prepareNewSessionCreationForEdit(
           path: precreated.path,
         });
       }, { maxAttempts: 2 });
+      cleanupAccepted = true;
     } catch (err) {
+      if (isPreconditionFailedRemoteError(err)) {
+        // discard 与 create 共用 session 锁；ownership 拒绝通常意味着
+        // create 已提交但回包丢失。按真实会话收敛，不能把用户留在失败页。
+        if (await reconcileClaimedSessionForEdit(task)) return null;
+      }
       if (worktreeEligibilityFromError(err).status !== 'unsupported') throw err;
       // 混合版本：新手机 + 老被控端。老端没有精确补偿口，只能沿用其启动期孤儿对账。
+      cleanupAccepted = true;
+    }
+    const accountId = task.params.precreatedWorktreeAccountId?.trim();
+    if (cleanupAccepted && accountId) {
+      await forgetPendingPrecreatedWorktree(accountId, {
+        sessionId,
+        path: precreated.path,
+        ...(precreated.createdAt !== undefined ? { createdAt: precreated.createdAt } : {}),
+      });
     }
   }
   const current = tasks.get(sessionId);
@@ -398,8 +464,20 @@ function failTask(task: InternalTask, status: 'create-failed' | 'enqueue-failed'
   emit();
 }
 
+function forgetPrecreatedRecoveryRecord(task: InternalTask): void {
+  const precreated = task.params.precreatedWorktree;
+  const accountId = task.params.precreatedWorktreeAccountId?.trim();
+  if (!precreated || !accountId) return;
+  void forgetPendingPrecreatedWorktree(accountId, {
+    sessionId: task.sessionId,
+    path: precreated.path,
+    ...(precreated.createdAt !== undefined ? { createdAt: precreated.createdAt } : {}),
+  }).catch(() => undefined);
+}
+
 function finishTask(task: InternalTask): void {
   if (!tasks.has(task.sessionId)) return;
+  forgetPrecreatedRecoveryRecord(task);
   tasks.delete(task.sessionId);
   emit();
 }
@@ -516,6 +594,10 @@ async function runPipeline(task: InternalTask): Promise<void> {
 
     const createOutcome = await createSessionIdempotent(task);
     if (!tasks.has(sessionId)) return; // 已被用户 dismiss
+    // 从这一刻起 worktree 已被会话认领；即使首条消息 enqueue 后续失败，
+    // 也不应把它当作可补偿回收的孤儿记录。冷启动时的 ownership 查询仍
+    // 作为 AsyncStorage 写入失败/进程中断的最后兜底。
+    forgetPrecreatedRecoveryRecord(task);
 
     // 权威会话刷新(dialogue 会话此刻才拿到被控端分配的 workingDir);失败不阻断,
     // 排队 createOpts 用合成行兜底(project 会话字段本就齐全)。

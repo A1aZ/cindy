@@ -66,11 +66,12 @@ import {
   withDeadline,
 } from './endpointFetchDiagnostics';
 import {
-  deriveTrustedEndpointDomains,
+  findBootstrapHostOutsideTrustedDomains,
   findUntrustedCachedEndpoint,
   formatCacheSavedAt,
   readEndpointManifestCache,
   writeEndpointManifestCache,
+  TRUSTED_ENDPOINT_DOMAINS,
 } from './endpointManifestCache';
 import {
   buildEndpointManifestDialogContent,
@@ -102,18 +103,6 @@ const DEFAULT_REALM_MANIFEST_BASE_URLS: RealmManifestBaseUrls =
         cn: ENDPOINT_MANIFEST_BASE_URL,
         global: ENDPOINT_MANIFEST_PEER_BASE_URL,
       };
-/**
- * **缓存**端点允许落在的域(编译期锚点)。两份自举基址都由构建脚本注入二进制,
- * userData 里的任何写入都改不了它们,所以它是"这个构建被编译成信任哪些域"的唯一事实。
- * 取两份而不只取本区:CN 清单的 slack / telegram hook 在 cindy.app、其余在
- * cindy.com.cn,只取本区会把这两个合法端点判成不可信。仅约束缓存路径,理由见
- * endpointManifestCache.ts 的 findUntrustedCachedEndpoint。
- */
-const TRUSTED_ENDPOINT_DOMAINS = deriveTrustedEndpointDomains([
-  ENDPOINT_MANIFEST_BASE_URL,
-  ENDPOINT_MANIFEST_PEER_BASE_URL,
-]);
-
 /** 单次请求的网络超时——只用于触发错误框,不是静默降级。 */
 const ATTEMPT_TIMEOUT_MS = 15_000;
 
@@ -837,6 +826,20 @@ export async function initClientEndpoints(): Promise<boolean> {
   const manifestUrl = `${ENDPOINT_MANIFEST_BASE_URL}/${MANIFEST_FILE_NAME}`;
   const sourceLabel = source.kind === 'cdn' ? manifestUrl : source.filePath;
   const dialogLocale = resolveDialogLocale();
+  // 自检:写死的受信任域必须覆盖本构建实际使用的两个自举基址。域名迁移时忘了更新
+  // TRUSTED_ENDPOINT_DOMAINS 的后果是离线出口 fail closed(新域名的缓存判不可信),
+  // 这条 error 日志保证它不会静默失效到没人知道。不阻断启动:主路径不消费该清单。
+  const untrustedBootstrap = findBootstrapHostOutsideTrustedDomains(
+    [ENDPOINT_MANIFEST_BASE_URL, ENDPOINT_MANIFEST_PEER_BASE_URL],
+    TRUSTED_ENDPOINT_DOMAINS,
+  );
+  if (untrustedBootstrap) {
+    log.error(
+      'bootstrap host %s is outside TRUSTED_ENDPOINT_DOMAINS [%s]; offline start will be unavailable until the list is updated',
+      untrustedBootstrap,
+      TRUSTED_ENDPOINT_DOMAINS.join(', '),
+    );
+  }
   // The resolver reports the parsed manifest through a callback. Keep it in a
   // box so TypeScript does not incorrectly conclude that the callback-owned
   // assignment is unreachable at the reads below.

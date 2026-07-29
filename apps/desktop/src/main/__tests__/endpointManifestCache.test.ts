@@ -5,6 +5,7 @@
  * 异常都必须降级为 null,绝不能反过来变成新的启动失败源。临时目录走 mkdtemp
  * (engineering-conventions §3.1),不碰真实 userData。
  */
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,7 +14,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   ENDPOINT_MANIFEST_CACHE_FILE_NAME,
-  deriveTrustedEndpointDomains,
+  TRUSTED_ENDPOINT_DOMAINS,
+  findBootstrapHostOutsideTrustedDomains,
   findUntrustedCachedEndpoint,
   formatCacheSavedAt,
   readEndpointManifestCache,
@@ -104,21 +106,28 @@ describe('缓存端点的受信任域约束(安全边界)', () => {
   // 生产实际取值:两份自举基址都由构建脚本注入,userData 写入改不了。
   const GLOBAL_BASE = 'https://hotfix.cindy.app/cindy';
   const CN_BASE = 'https://hotfix.cindy.com.cn/cindy';
-  const TRUSTED = deriveTrustedEndpointDomains([GLOBAL_BASE, CN_BASE]);
+  const TRUSTED = TRUSTED_ENDPOINT_DOMAINS;
 
-  it('从自举基址推导注册域(多段去掉最左一段,两段用自己)', () => {
-    expect(deriveTrustedEndpointDomains([GLOBAL_BASE])).toEqual(['cindy.app']);
-    expect(deriveTrustedEndpointDomains([CN_BASE])).toEqual(['cindy.com.cn']);
-    expect(deriveTrustedEndpointDomains(['https://cindy.app'])).toEqual(['cindy.app']);
-    expect(TRUSTED.sort()).toEqual(['cindy.app', 'cindy.com.cn']);
+  it('受信任域是显式写死的两个产品域(不从基址推导)', () => {
+    // 上一版从自举基址「去掉最左一段」推导,在多段公共后缀上会**放宽**信任:
+    // https://example.co.uk → co.uk,于是任何 attacker.co.uk 都成了可信。
+    expect([...TRUSTED].sort()).toEqual(['cindy.app', 'cindy.com.cn']);
+  });
+
+  it('自检:两份自举基址都落在受信任域内', () => {
+    expect(findBootstrapHostOutsideTrustedDomains([GLOBAL_BASE, CN_BASE], TRUSTED)).toBeNull();
   });
 
   it.each([
-    ['空值', ''],
-    ['非 URL', 'not a url'],
-    ['单段主机', 'https://localhost'],
-  ])('%s 不产出受信任域', (_label, baseUrl) => {
-    expect(deriveTrustedEndpointDomains([baseUrl])).toEqual([]);
+    ['apex 在多段公共后缀下', 'https://example.co.uk', 'example.co.uk'],
+    ['完全无关的域', 'https://cdn.attacker.net', 'cdn.attacker.net'],
+    ['非 URL', 'not a url', 'not a url'],
+  ])('自检报出越界的自举主机:%s', (_label, baseUrl, expected) => {
+    expect(findBootstrapHostOutsideTrustedDomains([baseUrl], TRUSTED)).toBe(expected);
+  });
+
+  it('自检忽略空基址(某些构建只有本区基址)', () => {
+    expect(findBootstrapHostOutsideTrustedDomains([GLOBAL_BASE, '', '   '], TRUSTED)).toBeNull();
   });
 
   it('仓内两份清单的真实端点全部合规(含 CN 跨域的 hook 端点)', () => {
@@ -159,9 +168,32 @@ describe('缓存端点的受信任域约束(安全边界)', () => {
     ).toBeNull();
   });
 
-  it('推导不出受信任域时一律拒绝(fail closed,不是放行)', () => {
+  it('受信任域清单为空时一律拒绝(fail closed,不是放行)', () => {
     expect(findUntrustedCachedEndpoint({ authApiBaseUrl: 'https://auth.cindy.app' }, [])).toBe(
       'trusted-domains-unavailable',
     );
+  });
+});
+
+describe('缓存读取只接受常规文件(阻断路径不能被挂住)', () => {
+  it('symlink 指向合法缓存也拒绝(statSync 会跟随,lstatSync 不会)', () => {
+    const real = path.join(dir, 'real-cache.json');
+    fs.writeFileSync(real, JSON.stringify(ENTRY), 'utf8');
+    fs.symlinkSync(real, cacheFile());
+    expect(readEndpointManifestCache(dir)).toBeNull();
+  });
+
+  it('目录占位时拒绝', () => {
+    fs.mkdirSync(cacheFile());
+    expect(readEndpointManifestCache(dir)).toBeNull();
+  });
+
+  it('FIFO 时拒绝且不阻塞', () => {
+    // readFileSync 打开 FIFO 会**阻塞**——这段跑在启动阻断路径上,阻塞等于启动卡死。
+    const mkfifo = spawnSync('mkfifo', [cacheFile()]);
+    if (mkfifo.status !== 0) return; // 平台没有 mkfifo(Windows)时跳过
+    const startedAt = Date.now();
+    expect(readEndpointManifestCache(dir)).toBeNull();
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
   });
 });

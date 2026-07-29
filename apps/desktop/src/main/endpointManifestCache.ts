@@ -11,14 +11,14 @@
  *    配置事故照旧硬阻断(给出口等于帮用户绕过一次真实的配置错);
  *  - 读回来的原文必须重新走同一套严格解析,磁盘内容不被信任;
  *  - 记录写入时的清单地址,升级或换区导致自举基址变化时缓存直接作废;
- *  - **端点主机必须落在烘焙的受信任域内**(见 deriveTrustedEndpointDomains)。
+ *  - **端点主机必须落在写死的受信任域内**(见 TRUSTED_ENDPOINT_DOMAINS)。
  *
  * 最后一条是安全边界,不是洁癖(review 抓到):这个文件位于 userData,可被其他进程
  * 写。严格解析只保证**语法**合法,不保证来源可信——攻击者写一份把 authApiBaseUrl
  * 指向自己 https 主机的缓存,再让清单 CDN 不可达,用户点「用上次配置启动」之后
  * authManager 就会把 Bearer token 发到那台主机(凭证泄露)。真正的修法是服务端签名,
- * 但那是跨仓改动;在此之前用**编译期锚点**把爆炸半径收掉:受信任域由构建期注入的
- * 两份自举基址(本区 + 对端)推导,任何 userData 写入都改不了它。
+ * 但那是跨仓改动;在此之前用**编译期锚点**把爆炸半径收掉:受信任域是源码里写死的
+ * 产品域(TRUSTED_ENDPOINT_DOMAINS),任何 userData 写入都改不了它。
  *
  * 存储位置按 credentials-and-local-storage.md:Desktop 持久数据放
  * `app.getPath('userData')`。清单本身是 CDN 上公开可读的配置,不含任何凭证。
@@ -48,21 +48,51 @@ function cacheFilePath(userDataDir: string): string {
 }
 
 /**
+ * 读一个**必须是常规文件**且不超过 maxBytes 的文本文件;不满足一律返回 null。
+ *
+ * 为什么不用 statSync + readFileSync(review 抓到):这个路径在 userData,别的进程能把它
+ * 换成别的东西,而 `statSync` 会跟随 symlink、也不校验文件类型。symlink 到 `/dev/zero`
+ * 会让 readFileSync 一直读到内存耗尽,FIFO 会让它**直接阻塞**——而这段代码跑在启动
+ * 阻断路径上,阻塞等于启动卡死。
+ *
+ * 因此三道:
+ *  1. `lstatSync` + `isFile()`:symlink / FIFO / 设备 / 目录全部在打开之前就拒掉
+ *     (lstat 不跟随 symlink,对 symlink 而言 isFile() 为 false);
+ *  2. 打开后再用 `fstatSync` 复核类型与大小,关掉 lstat 与 open 之间被换掉的 TOCTOU 窗口;
+ *  3. 只读 fstat 报告的字节数,不给"打开后又变大"留口子。
+ */
+function readRegularFileWithin(file: string, maxBytes: number): string | null {
+  let fd: number | null = null;
+  try {
+    const pre = fs.lstatSync(file);
+    if (!pre.isFile() || pre.size > maxBytes) return null;
+    fd = fs.openSync(file, 'r');
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > maxBytes) return null;
+    const buffer = Buffer.allocUnsafe(stat.size);
+    const read = fs.readSync(fd, buffer, 0, stat.size, 0);
+    return buffer.subarray(0, read).toString('utf8');
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // 关闭失败无可挽回,也不该影响启动流程。
+      }
+    }
+  }
+}
+
+/**
  * 读缓存。文件缺失、损坏、字段类型不对或体积异常都返回 null(缓存是可选辅助,
  * 任何异常都不该影响启动流程)。
  */
 export function readEndpointManifestCache(userDataDir: string): CachedEndpointManifest | null {
   const file = cacheFilePath(userDataDir);
-  let raw: string;
-  try {
-    // 先按**文件字节数**卡上限再读:用 string.length 判断在 UTF-8 多字节下根本不是
-    // 字节数,而且那时整个文件已经进内存了——异常大的文件应该在读之前就被拒。
-    // 上限给 JSON 包装留 2 倍余量(entry 除清单原文外还有 savedAt / sourceUrl)。
-    if (fs.statSync(file).size > MAX_MANIFEST_BYTES * 2) return null;
-    raw = fs.readFileSync(file, 'utf8');
-  } catch {
-    return null;
-  }
+  const raw = readRegularFileWithin(file, MAX_MANIFEST_BYTES * 2);
+  if (raw === null) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -115,47 +145,62 @@ export function writeEndpointManifestCache(
 // ── 缓存端点的受信任域约束 ──────────────────────────────────────────────────
 
 /**
- * 从**构建期注入**的自举基址推导受信任域。传入本区 + 对端两份基址(两者都烘焙在
- * 二进制里,userData 写入无法影响),因此这个集合就是"这个构建被编译成信任哪些域"。
+ * **显式写死的受信任域**——离线缓存唯一的信任锚点。
  *
- * 推导规则:主机 ≥3 段时去掉最左一段(`hotfix.cindy.app` → `cindy.app`,
- * `hotfix.cindy.com.cn` → `cindy.com.cn`);只有 2 段时用它自己。**不查公共后缀表**,
- * 所以对 `a.b.example.com` 这种更深的基址会得到偏窄的 `b.example.com`——偏窄是安全的
- * 方向:最坏结果只是"离线按钮不出现",而不是放宽信任。
+ * 为什么不从自举基址「去掉最左一段」推导(review 抓到,这是上一版的真实漏洞):那样做
+ * 在多段公共后缀上会**放宽**信任。`https://example.co.uk` 去掉一段得到 `co.uk`,于是
+ * 任何人注册的 `attacker.co.uk` 都被判成可信,改缓存的进程又能把凭证引走。要正确推导
+ * 注册域必须查公共后缀表(PSL);为一处启动期校验引入 PSL 数据不划算,而且推导本身
+ * 并不比一份显式清单更可靠。
  *
- * 需要两份基址是因为 CN 清单里 slack / telegram hook 落在 cindy.app、其余在
- * cindy.com.cn:只取本区基址会把这两个合法端点判成不可信。
+ * 所以这里写死两个产品域。它是**安全常量**(性质同证书固定),不是"生产端点地址"——
+ * shared/endpoints.ts 不保存业务端点是为了让端点能远程改;信任锚点恰恰**不能**远程改,
+ * 否则它就不是锚点了。
+ *
+ * 两个域都要:CN 清单里 slack / telegram hook 落在 cindy.app、其余在 cindy.com.cn,
+ * 只留本区那个会把这两个合法端点判成不可信。
+ *
+ * 域名迁移时必须同步更新这里。忘了更新的后果是 fail closed——新域名的缓存被判不可信、
+ * 离线按钮消失,并由 findBootstrapHostOutsideTrustedDomains 在启动日志里报出来;
+ * 绝不会反过来继续信任旧域名之外的东西。
  */
-export function deriveTrustedEndpointDomains(
+export const TRUSTED_ENDPOINT_DOMAINS: readonly string[] = ['cindy.app', 'cindy.com.cn'];
+
+function hostOf(rawUrl: string): string | null {
+  try {
+    return new URL(rawUrl).hostname.toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 自检:构建期烘焙的自举基址是否都落在受信任域内。返回第一个越界的主机(供日志),
+ * 全部落在域内返回 null。
+ *
+ * 它把「写死的域名清单」和「构建实际使用的基址」钉在一起:域名迁移后如果忘了更新
+ * 清单,这里会在启动日志里明确报出来,而不是让离线出口静默失效到没人知道为止。
+ */
+export function findBootstrapHostOutsideTrustedDomains(
   bootstrapBaseUrls: readonly string[],
-): string[] {
-  const domains = new Set<string>();
+  trustedDomains: readonly string[] = TRUSTED_ENDPOINT_DOMAINS,
+): string | null {
   for (const baseUrl of bootstrapBaseUrls) {
     if (!baseUrl?.trim()) continue;
-    let host: string;
-    try {
-      host = new URL(baseUrl).hostname.toLowerCase();
-    } catch {
-      continue;
-    }
-    const labels = host.split('.').filter(Boolean);
-    if (labels.length < 2) continue;
-    const domain = labels.length >= 3 ? labels.slice(1).join('.') : host;
-    if (domain.split('.').filter(Boolean).length >= 2) domains.add(domain);
+    const host = hostOf(baseUrl);
+    if (!host) return baseUrl;
+    if (!isHostWithinDomains(host, trustedDomains)) return host;
   }
-  return [...domains];
+  return null;
+}
+
+function isHostWithinDomains(host: string, trustedDomains: readonly string[]): boolean {
+  return trustedDomains.some((domain) => host === domain || host.endsWith(`.${domain}`));
 }
 
 function isWithinTrustedDomains(rawUrl: string, trustedDomains: readonly string[]): boolean {
-  let host: string;
-  try {
-    host = new URL(rawUrl).hostname.toLowerCase();
-  } catch {
-    return false;
-  }
-  return trustedDomains.some(
-    (domain) => host === domain || host.endsWith(`.${domain}`),
-  );
+  const host = hostOf(rawUrl);
+  return host !== null && isHostWithinDomains(host, trustedDomains);
 }
 
 /**
@@ -167,7 +212,7 @@ function isWithinTrustedDomains(rawUrl: string, trustedDomains: readonly string[
  */
 export function findUntrustedCachedEndpoint(
   endpoints: Readonly<Record<string, string>>,
-  trustedDomains: readonly string[],
+  trustedDomains: readonly string[] = TRUSTED_ENDPOINT_DOMAINS,
 ): string | null {
   if (trustedDomains.length === 0) return 'trusted-domains-unavailable';
   for (const [key, value] of Object.entries(endpoints)) {

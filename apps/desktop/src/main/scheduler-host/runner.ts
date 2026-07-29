@@ -1869,6 +1869,10 @@ export class MakerScheduleRunner implements ScheduleRunner {
         // 即便 Notifier 实现违规 throw，runner 也要兜住 —— 通知不能阻塞 run 结果上报
         this.deps.logger.warn?.('notifier.notify threw (should not happen)', err);
       }
+      // 上报"这一轮 runner 自己投过通知了",供引擎决定卡死收口是否还要补发失败通知。
+      // 放在 catch 之后而不是 try 内:notifier 自己已做兜底,throw 也当投过处理 ——
+      // 引擎补发解决不了 notifier 坏掉的问题,重复打扰用户更没意义。
+      ctx.onRunnerNotified?.(finalRun.status === 'success' ? 'success' : 'failure');
     }
     if (runError) throw new Error(runError);
     return { sessionId, resultText: assistantText || undefined };
@@ -2033,6 +2037,8 @@ export class MakerScheduleRunner implements ScheduleRunner {
     } catch {
       /* notifier 已做兜底，再炸只能 swallow */
     }
+    // 见 finalizeRun 同名上报:引擎据此不再为这一轮重复补发失败通知。
+    ctx.onRunnerNotified?.('failure');
   }
 }
 

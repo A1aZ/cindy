@@ -87,6 +87,22 @@ export interface FireContext {
    */
   endQueueWait?: (reclaimSlot: boolean) => boolean;
   /**
+   * Runner 每次真的把一条通知投进 notifier 后上报投了哪一类。Scheduler 只用它回答
+   * 一个问题:卡死守卫把本轮记成 failed 时,**还需不需要补一条失败通知**。
+   *
+   * 为什么不能靠"runner 有没有抛错"推断(review #944 第五轮 P1):守卫的 abort 可能
+   * 落在前置检查脚本、workspace / session 创建这类 setup await 上,runner 会在走到
+   * 任何 notifier 调用之前就抛出 —— 有 runError 却一条通知都没发。按旧判据(有错
+   * 即视为已通知)会静默吞掉唯一的失败提醒,配了桌面 / 飞书通知的用户什么都收不到。
+   *
+   * 补发判据是"runner 没投过 **failure**",而不是"没投过任何通知":runner 无错返回
+   * (abort 只 drain 出一个普通 done)时它投的是**成功**通知,与本轮记为 failed 矛盾,
+   * 必须补一条失败通知纠正(第三轮已确立的语义)。
+   *
+   * optional;runner 不实现则退回"总是补发" —— 宁可重复一条,不可静默(失败必须可见)。
+   */
+  onRunnerNotified?: (kind: 'success' | 'failure') => void;
+  /**
    * Runner 收到任何一次执行进展信号（会话事件）时打点。Scheduler 用它做卡死判定:
    * 「多久没有新反馈」而不是「总共跑了多久」—— 后者会误砍真在干活的长任务。
    *

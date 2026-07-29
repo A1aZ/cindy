@@ -886,18 +886,19 @@ export class Session {
       },
       source: this.agentKind,
     } as AgentEvent);
-    void this.abort()
-      .catch((e) => {
-        this.logger.warn('turn stall watchdog abort failed', { error: String(e) });
-      })
-      .finally(() => {
-        // abort 只是"请求停止"。各 agent 在中断失败时都不改 turn-in-flight 状态,
-        // 所以必须复核 —— 见 STALL_ABORT_RECOVERY_GRACE_MS。
-        const timer = setTimeout(() => {
-          void this.recoverIfTurnStillRunning();
-        }, STALL_ABORT_RECOVERY_GRACE_MS);
-        (timer as unknown as { unref?: () => void }).unref?.();
-      });
+    // 复核定时器**先于** abort 排定,且不挂在 abort 的 promise 上。
+    // 曾经写在 .finally() 里,但 abort 走的正是"已经哑火"的那条链路:agent 的
+    // handle.abort() 若自己也悬挂(如 turn/interrupt RPC 永不返回),promise 永不 settle
+    // → finally 永不执行 → 复核永不发生 → 会话永久不可用,恰好是本看门狗要救的场景
+    // (review #944 第五轮 Copilot)。recoverIfTurnStillRunning 自己会复核 isTurnRunning,
+    // abort 正常生效时它是 no-op,所以无条件排定是安全的。
+    const timer = setTimeout(() => {
+      void this.recoverIfTurnStillRunning();
+    }, STALL_ABORT_RECOVERY_GRACE_MS);
+    (timer as unknown as { unref?: () => void }).unref?.();
+    void this.abort().catch((e) => {
+      this.logger.warn('turn stall watchdog abort failed', { error: String(e) });
+    });
   }
 
   /**

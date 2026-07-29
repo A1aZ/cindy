@@ -25,6 +25,11 @@ interface StubOptions {
   backgroundTasks?: BackgroundTaskSnapshot[];
   /** true = abort 不生效（turn 仍在跑），复刻中断失败的真实形态。 */
   abortIneffective?: boolean;
+  /**
+   * true = abort() 返回的 promise 永不 settle，复刻"中断请求本身也悬挂"的形态
+   * （codex 的 turn/interrupt RPC 永不返回、claude 的 q.interrupt() 卡在 stdio）。
+   */
+  abortHangs?: boolean;
 }
 
 /**
@@ -39,6 +44,7 @@ function createStubHandle(opts?: StubOptions) {
   // q.interrupt() 抛错 / codex 的 app-server 两次 ack 超时)时它们只记日志,
   // **不**清 turn-in-flight 状态 —— isTurnRunning() 因此恒为 true。
   const abort = vi.fn(async () => {
+    if (opts?.abortHangs) return new Promise<never>(() => {});
     if (opts?.abortIneffective) return;
     turnRunning = false;
   });
@@ -287,6 +293,29 @@ describe('Session turn stall watchdog', () => {
       await vi.advanceTimersByTimeAsync(STALL_MS + 1);
       expect(stub.abort).toHaveBeenCalledTimes(1);
       // 宽限期内不急着关:interrupt 成功后 turn 的终态事件要走一圈才让 isTurnRunning 翻假
+      expect(session.getStatus()).not.toBe('closed');
+
+      await vi.advanceTimersByTimeAsync(STALL_ABORT_RECOVERY_GRACE_MS + 1);
+      expect(session.getStatus()).toBe('closed');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('abort() 自己也悬挂时仍会复核并关闭会话', async () => {
+    // 复核定时器曾经排在 abort() 的 .finally() 里。但 abort 走的正是"已经哑火"的那条
+    // 链路:它自己悬挂(turn/interrupt RPC 永不返回)时 promise 永不 settle → finally
+    // 永不执行 → 复核永不发生 → 会话永久不可用,恰好是本看门狗要救的场景
+    // (review #944 第五轮 Copilot)。
+    vi.useFakeTimers();
+    try {
+      const stub = createStubHandle({ abortHangs: true });
+      const session = createSession(stub);
+      session.onEvent(() => {});
+
+      await session.send('go');
+      await vi.advanceTimersByTimeAsync(STALL_MS + 1);
+      expect(stub.abort).toHaveBeenCalledTimes(1);
       expect(session.getStatus()).not.toBe('closed');
 
       await vi.advanceTimersByTimeAsync(STALL_ABORT_RECOVERY_GRACE_MS + 1);

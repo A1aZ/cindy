@@ -3373,9 +3373,20 @@ export class CodexAgent extends BaseAgent {
      * (review #969 第四轮 Codex P2)。send 入口清空 (每个 send 周期独立)。
      */
     const turnsCompletedBeforeStartResp = new Set<string>();
-    async function interruptTurnForPermissionTighten(turnId: string): Promise<void> {
-      if (closed) return;
-      if (skipIfStaleHost('turn/interrupt')) return;
+    /**
+     * @param opts.suppressFailureEvent 终失败时不推 'permission-tighten-interrupt-failed'
+     *        非终态 error。给 upstream-idle watchdog 用:它已经推过一条终态 error,
+     *        再补一条"收紧权限时没能停下任务"既词不达意也是重复打扰;它对失败的处置
+     *        是直接作废 host(见 onUpstreamIdleTimeout)。
+     * @returns true = app-server 确认收到中断;false = 两次 ack 都超时/报错(daemon
+     *          对我们哑火)。调用方据此决定要不要升级处置;忽略返回值即维持原行为。
+     */
+    async function interruptTurnForPermissionTighten(
+      turnId: string,
+      opts?: { suppressFailureEvent?: boolean },
+    ): Promise<boolean> {
+      if (closed) return false;
+      if (skipIfStaleHost('turn/interrupt')) return false;
       dismissPendingUserInputForTurn(turnId, 'turn_interrupted');
       // 每次尝试都设有界超时: app-server / 连接无响应时该 RPC 会永久悬挂, 没有
       // 超时就既不会走重试、也不会透出失败提示, 免审 turn 将无声继续跑
@@ -3398,6 +3409,7 @@ export class CodexAgent extends BaseAgent {
         });
       try {
         await requestInterruptWithTimeout();
+        return true;
       } catch (e) {
         // 这次 RPC 是收紧 fail-safe 的唯一执行手段, 失败不能静默: 重试一次,
         // 仍失败则透出非终态 error —— UI 已按 ask 展示, 但免审 turn 还在跑,
@@ -3405,8 +3417,10 @@ export class CodexAgent extends BaseAgent {
         log.warn('turn/interrupt on permission tighten threw — retrying once', { error: String(e) });
         try {
           await requestInterruptWithTimeout();
+          return true;
         } catch (retryErr) {
           log.error('turn/interrupt on permission tighten failed after retry', { error: String(retryErr) });
+          if (opts?.suppressFailureEvent) return false;
           eventQueue.push({
             type: 'error',
             data: {
@@ -3419,6 +3433,7 @@ export class CodexAgent extends BaseAgent {
             },
             source: 'codex',
           });
+          return false;
         }
       }
     }
@@ -3528,9 +3543,37 @@ export class CodexAgent extends BaseAgent {
         threadId,
         turn: { id: turnId, status: 'failed' },
       } as TurnCompletedParams);
-      // 再尽力让 daemon 侧那个 turn 也停下(fire-and-forget:成败都不影响本地已恢复
-      // 的可用性;迟到事件由墓碑 + stale guard 拦)。
-      void interruptTurnForPermissionTighten(turnId);
+      // 再让 daemon 侧那个 turn 也停下。**必须看结果**:上面的本地收口把
+      // isTurnInFlight 清成 false,于是 handle.isTurnRunning() 变 false —— Session 层
+      // 的 recoverIfTurnStillRunning 正是以它为判据,现在会认为"abort 生效了,会话
+      // 仍可用"而放过这个 host。若中断其实没成功,这个已经哑火 30 分钟的 app-server
+      // 就被留下来给下一条 send 复用:要么再次超时,要么撞上服务端那个还在跑的 turn
+      // (review #944 第五轮 P1)。
+      //
+      // 所以中断确认失败 = daemon 确诊不可用 → 自己 close():eventQueue.end() 让
+      // Session 的事件循环自然收尾 → setStatus('closed') → Maker 摘掉 activeSessions
+      // → 下一条 send 走 lazy create 重建 handle 并按 sdkSessionId resume。这条路径
+      // 与 Session.recoverIfTurnStillRunning 用的是同一套恢复机制(见 session.ts
+      // "handle.events() 自然结束"注释),不需要各 agent 另造一套。
+      // 中断成功时什么都不做:daemon 既然 ack 了就还活着,会话继续可用。
+      void (async () => {
+        const interrupted = await interruptTurnForPermissionTighten(turnId, {
+          suppressFailureEvent: true,
+        });
+        if (interrupted || closed) return;
+        // 走到这里有两种可能,处置相同:两次 ack 都超时(daemon 哑火),或 host 已被
+        // 替换(stale —— 这个 handle 的 send 本来也会被 assertCurrentHost 拒掉)。
+        // 两种情况下这个 handle 都已不可用,关掉它让上层重建是唯一正确的出路。
+        log.error(
+          'upstream-idle watchdog: turn interrupt not confirmed — closing this codex host so the next send rebuilds it',
+          { threadId, turnId },
+        );
+        try {
+          await handle.close();
+        } catch (e) {
+          log.warn('upstream-idle watchdog close threw', { error: String(e) });
+        }
+      })();
     }
     // 装探针:此处仍远早于 handlers 注册(事件开始流动),不会漏掉任何一条。
     const rawEventQueuePush = eventQueue.push;

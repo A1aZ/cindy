@@ -231,6 +231,19 @@ interface InflightAttempt extends SchedulerInflightRun {
   lastLongRunningLogAt?: number;
   /** 卡死判定命中并已发出 abort 的时刻；用于计算强制收回槽位的宽限。 */
   stallAbortedAt?: number;
+  /**
+   * 本轮的 AbortController 是否已注册过（registerInflight 跑过）。
+   *
+   * attempt 在第一次 await 前就登记，而 controller 只在 run 行插入之后注册，两者之间
+   * 有一段前置窗口（claimDueFire / insertRun / runNow 的 storage.get）。缺了这个标记
+   * 就无法区分「controller 从未注册」和「runner 已 settle、finally 已摘掉 controller」
+   * —— 卡死守卫据此做过相反的处置，见 enforceStallGuard（review #944 第五轮 P1）。
+   */
+  controllerRegistered?: boolean;
+  /** 前置窗口卡死告警的上次输出时刻；节流用（心跳每 15s 会重入判定）。 */
+  preRegistrationStallLoggedAt?: number;
+  /** runner 已经投过一条**失败**通知；守卫收口时据此决定是否补发。见 onRunnerNotified。 */
+  runnerNotifiedFailure?: boolean;
 }
 
 interface InflightRunDiagnostic extends SchedulerInflightRun {
@@ -624,6 +637,7 @@ export class Scheduler extends EventEmitter {
         createChildRun: this.buildCreateChildRun(schedule.id, firedAt),
         onQueueWaitStart: this.buildOnQueueWaitStart(runId),
         endQueueWait: this.buildEndQueueWait(runId),
+        onRunnerNotified: this.buildOnRunnerNotified(runId),
         onProgress: this.buildOnProgress(runId),
       });
       sessionId = result.sessionId;
@@ -686,12 +700,13 @@ export class Scheduler extends EventEmitter {
       const errorMsg = this.describeStallAbort(runError);
       await this.storage.updateRun(runId, { status: 'failed', finishedAt, errorMsg });
       this.emitEvent({ type: 'failed', scheduleId: schedule.id, runId, error: errorMsg });
-      // 通知按 runner 实际投了什么来补:
-      //  - runner 报错(abort 抛 AbortError,常见路径)→ 它已投过失败通知,不重复;
-      //  - runner 无错返回(abort 只 drain 出普通 done)→ 它投的是**成功**通知,而这一轮
-      //    实际记为 failed;必须补一条失败通知纠正,否则用户只看到"成功"
-      //    (review #944 第三轮)。
-      if (runError === undefined) {
+      // 补发判据只看 runner 有没有真的投过**失败**通知(onRunnerNotified),不再用
+      // "有没有 runError"推断:守卫的 abort 可能落在前置检查 / 会话创建这类 setup
+      // await 上,runner 会在走到任何 notifier 调用之前抛错 —— 有 runError 却一条
+      // 通知都没发,旧判据会静默吞掉唯一的失败提醒(review #944 第五轮 P1)。
+      // runner 无错返回时它投的是**成功**通知,与本轮记为 failed 矛盾,照样要补
+      // (第三轮已确立)。
+      if (this.needsForcedFailureNotification(runId)) {
         void this.notifyForcedFailure(schedule.id, runId, errorMsg);
       }
     } else if (wasAborted) {
@@ -882,6 +897,7 @@ export class Scheduler extends EventEmitter {
         createChildRun: this.buildCreateChildRun(schedule.id, firedAt),
         onQueueWaitStart: this.buildOnQueueWaitStart(runId),
         endQueueWait: this.buildEndQueueWait(runId),
+        onRunnerNotified: this.buildOnRunnerNotified(runId),
         onProgress: this.buildOnProgress(runId),
       });
       runSessionId = result.sessionId;
@@ -937,11 +953,11 @@ export class Scheduler extends EventEmitter {
 
     if (stallAborted) {
       // 语义同 fireOneInner:守卫中断记 failed(可见)而不是 aborted(伪装成用户操作);
-      // 通知同样只在 runner 无错返回(它投的是成功通知)时补发纠正。
+      // 通知按 runner 有没有真的投过失败通知补发(判据理由见 fireOneInner 同名分支)。
       const errorMsg = this.describeStallAbort(runError);
       await this.storage.updateRun(runId, { status: 'failed', finishedAt, errorMsg });
       this.emitEvent({ type: 'failed', scheduleId: schedule.id, runId, error: errorMsg });
-      if (runError === undefined) {
+      if (this.needsForcedFailureNotification(runId)) {
         void this.notifyForcedFailure(schedule.id, runId, errorMsg);
       }
     } else if (wasAborted) {
@@ -1657,6 +1673,9 @@ export class Scheduler extends EventEmitter {
   /** 注册一次 fire 的 controller(fireOne/runNow 顶部调用)。两个 map 都要写。 */
   private registerInflight(scheduleId: string, runId: string, controller: AbortController): void {
     this.inflightControllers.set(runId, controller);
+    // 打上"注册过"的水印:此后 controller 缺席只可能是 finally 已摘（已 settle）。
+    const attempt = this.inflightAttempts.get(runId);
+    if (attempt) attempt.controllerRegistered = true;
     let set = this.inflightByschedule.get(scheduleId);
     if (!set) {
       set = new Set();
@@ -1942,6 +1961,23 @@ export class Scheduler extends EventEmitter {
     };
   }
 
+  /** runner 上报"我投了一条通知"。只记 failure —— 判据理由见 onRunnerNotified。 */
+  private buildOnRunnerNotified(runId: string): (kind: 'success' | 'failure') => void {
+    return (kind) => {
+      if (kind !== 'failure') return;
+      const attempt = this.inflightAttempts.get(runId);
+      if (attempt) attempt.runnerNotifiedFailure = true;
+    };
+  }
+
+  /**
+   * 守卫收口时是否还需要补一条失败通知。attempt 缺席(理论上不会:本判定跑在
+   * finishInflightAttempt 之前)按"没投过"处理 —— 宁可重复,不可静默。
+   */
+  private needsForcedFailureNotification(runId: string): boolean {
+    return this.inflightAttempts.get(runId)?.runnerNotifiedFailure !== true;
+  }
+
   /** 真正占用并发槽的 run 数：'queued' 的纯等待项不计入。 */
   private countSlotsInUse(): number {
     let n = 0;
@@ -1971,6 +2007,23 @@ export class Scheduler extends EventEmitter {
       // (script runner 第一方接 signal,abort 对它有效)。要根治应给 script 补默认超时,
       // 属独立改动,不塞进本 PR。
       if ((attempt.executionMode ?? 'agent') === 'script') continue;
+      if (!attempt.controllerRegistered) {
+        // 先过无进展阈值:正常 fire 也会有几毫秒处于"attempt 已登记、controller 未注册"
+        // 的前置窗口,不能一进这个窗口就报卡死。
+        if (now - attempt.lastProgressAt < this.runStallMs) continue;
+        // controller 只在 run 行插入之后注册。走到这里 = fire 还卡在前置 await 上
+        // (claimDueFire / insertRun / runNow 的 storage.get),runner 根本没启动:
+        //   - abort 无从下手:没有 controller,这些 DB await 也不看 signal;
+        //   - **更不能强制收口** —— forceReleaseStalledRun 会删掉 attempt,而挂起的
+        //     await 一旦返回,fire 会照原路往下走并真的启动 runner。此时它既不计入
+        //     maxConcurrentRuns、也不再受本守卫保护,正是本 PR 要消灭的那种隐形泄漏
+        //     (review #944 第五轮 P1)。
+        // 因此保持追踪(继续占槽、继续出现在诊断快照里)并节流告警。本地 SQLite 写
+        // 卡住一小时意味着整个宿主已经不可用,不是单条 run 能自愈的层级;真值得记的
+        // 是把它暴露出来,而不是悄悄把账做平。
+        this.logPreRegistrationStall(attempt, now);
+        continue;
+      }
       if (attempt.stallAbortedAt === undefined) {
         if (now - attempt.lastProgressAt < this.runStallMs) continue;
         attempt.stallAbortedAt = now;
@@ -2004,6 +2057,28 @@ export class Scheduler extends EventEmitter {
   }
 
   /**
+   * 前置窗口(controller 尚未注册)卡死的告警。不做处置,只保证可发现 —— 见
+   * enforceStallGuard 里的理由。心跳每 15s 重入,按 runStallMs 节流免刷屏。
+   */
+  private logPreRegistrationStall(attempt: InflightAttempt, now: number): void {
+    const last = attempt.preRegistrationStallLoggedAt;
+    if (last !== undefined && now - last < this.runStallMs) return;
+    attempt.preRegistrationStallLoggedAt = now;
+    this.logger?.error?.(
+      'scheduler: run stalled before its abort controller was registered — storage await appears wedged',
+      {
+        schedulerInstanceId: this.schedulerInstanceId,
+        processId: this.processId,
+        ...this.describeInflightRun(attempt, now),
+        noProgressMs: now - attempt.lastProgressAt,
+        runStallMs: this.runStallMs,
+        slotsInUse: this.countSlotsInUse(),
+        maxConcurrentRuns: this.maxConcurrentRuns,
+      },
+    );
+  }
+
+  /**
    * 强制收回一条卡死 run 的槽位并就地收口。abort 没能让 runner settle 时的最后手段。
    *
    * 收口顺序与 fireOneInner 的失败分支保持一致:先落 run 行终态,再按 recurring
@@ -2018,6 +2093,9 @@ export class Scheduler extends EventEmitter {
     // 竞态收窄:runner 在宽限最后一刻 settle 时,fire 的 finally 已经同步摘掉
     // controller、正在走自己的终态收口。此时不抢 —— 否则会把一次真实成功记成
     // failed。controller 还在 = runner 确实没动静,继续强制收口。
+    //
+    // 本分支只在 controllerRegistered=true 时可达(enforceStallGuard 已把"从未注册"
+    // 的前置窗口卡死分流走),所以 controller 缺席唯一的含义就是"已 settle"。
     if (!this.inflightControllers.has(runId)) {
       this.inflightAttempts.delete(runId);
       return;

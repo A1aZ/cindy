@@ -2921,8 +2921,8 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
   });
 
   it('守卫 abort 被 runner 响应时不重复投通知(runner 自己已投过)', async () => {
-    // notifyForcedFailure 只服务「runner 压根不返回」的强制释放路径。runner settle 了
-    // 说明它的 finalizeRun 已按 notify 配置投过通知,引擎再投一次就是重复推送。
+    // 判据是 runner 有没有经 onRunnerNotified 上报"我投过失败通知",不是"它有没有
+    // 抛错" —— 后者会把"abort 落在通知之前"的那批 run 一并当成已通知(见下一个用例)。
     vi.useFakeTimers();
     try {
       const notified: unknown[] = [];
@@ -2933,8 +2933,11 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
         runner: {
           fire: (_s, ctx) =>
             new Promise<FireResult>((_resolve, reject) => {
-              // 老实响应守卫 abort 并 settle
-              ctx.signal.addEventListener('abort', () => reject(new Error('aborted by signal')));
+              // 老实响应守卫 abort:先按自己的 notify 配置投一条失败通知,再 settle
+              ctx.signal.addEventListener('abort', () => {
+                ctx.onRunnerNotified?.('failure');
+                reject(new Error('aborted by signal'));
+              });
             }),
         },
         clock,
@@ -2959,6 +2962,123 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
       // run 仍记 failed（可见），但通知出口不被调用（避免与 runner 侧重复）
       expect(storage.runs.get(runId)?.status).toBe('failed');
       expect(notified).toHaveLength(0);
+      await scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('守卫 abort 落在 runner 投通知之前时补发失败通知', async () => {
+    // 守卫的 abort 可能命中前置检查脚本、workspace / session 创建这类 setup await:
+    // runner 从那里抛出,压根没走到任何 notifier 调用 —— 有 runError 却一条通知都没投。
+    // 旧判据(runError !== undefined 即视为已通知)会静默吞掉唯一的失败提醒,配了桌面/
+    // 飞书通知的用户什么都收不到(review #944 第五轮 P1)。
+    vi.useFakeTimers();
+    try {
+      const notified: { scheduleId: string; runId: string; errorMsg: string }[] = [];
+      const storage = new InMemoryStorage();
+      const clock = new FakeClock();
+      const scheduler = new Scheduler({
+        storage,
+        runner: {
+          fire: (_s, ctx) =>
+            new Promise<FireResult>((_resolve, reject) => {
+              // 响应 abort 并 settle,但**不**调 onRunnerNotified:复刻"还没走到通知
+              // 就被打断"的 setup 阶段失败。
+              ctx.signal.addEventListener('abort', () =>
+                reject(new Error('aborted while creating the session')),
+              );
+            }),
+        },
+        clock,
+        generateId: makeIdGen(),
+        tickIntervalMs: 60_000_000,
+        runStallMs: 60_000,
+        runStallAbortGraceMs: 30_000,
+        notifyForcedFailure: (input) => {
+          notified.push(input);
+        },
+        instanceId: 'test-notify-unnotified-stall',
+      });
+      const sch = await scheduler.create({ ...baseInput, manual: true });
+      const p = scheduler.runNow(sch.id);
+      await vi.waitFor(() => expect(scheduler.getRuntimeSnapshot().slotsInUse).toBe(1));
+      const runId = (await storage.listRuns(sch.id))[0].id;
+
+      clock.advance(60_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      await p;
+
+      expect(storage.runs.get(runId)?.status).toBe('failed');
+      expect(notified).toHaveLength(1);
+      expect(notified[0]).toMatchObject({ scheduleId: sch.id, runId });
+      await scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('前置 await 卡死时保持追踪:不删 attempt、不强制收口', async () => {
+    // attempt 在第一次 await 前就登记,而 AbortController 只在 run 行插入之后注册。
+    // 卡在这段前置窗口(claimDueFire / insertRun / runNow 的 storage.get)时,守卫既
+    // 无从 abort(没有 controller),也**不能**强制收口 —— 删掉 attempt 后,挂起的
+    // await 一旦返回,fire 会照原路启动 runner,此时它既不计入 maxConcurrentRuns、
+    // 也不再受守卫保护,正是本 PR 要消灭的隐形泄漏(review #944 第五轮 P1)。
+    vi.useFakeTimers();
+    try {
+      const notified: unknown[] = [];
+      const storage = new InMemoryStorage();
+      const clock = new FakeClock();
+      let releaseInsert: (() => void) | null = null;
+      const realInsertRun = storage.insertRun.bind(storage);
+      storage.insertRun = (run: ScheduleRun) =>
+        new Promise<ScheduleRun>((resolve) => {
+          releaseInsert = () => resolve(realInsertRun(run));
+        });
+      const errorLogs: string[] = [];
+      const logger = {
+        debug() {}, info() {}, warn() {},
+        error(msg: string) { errorLogs.push(msg); },
+      } as unknown as Logger;
+      const scheduler = new Scheduler({
+        storage,
+        runner: { fire: async (s) => ({ sessionId: `sess-${s.id}` }) },
+        clock,
+        generateId: makeIdGen(),
+        tickIntervalMs: 60_000_000,
+        runStallMs: 60_000,
+        runStallAbortGraceMs: 30_000,
+        logger,
+        notifyForcedFailure: (input) => {
+          notified.push(input);
+        },
+        instanceId: 'test-pre-registration-stall',
+      });
+      const sch = await scheduler.create({ ...baseInput, manual: true });
+      const p = scheduler.runNow(sch.id);
+      await vi.waitFor(() => expect(scheduler.getRuntimeSnapshot().slotsInUse).toBe(1));
+
+      // 阈值之内的前置窗口是正常形态(每次 fire 都会有几毫秒),不许报卡死
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      expect(errorLogs).toHaveLength(0);
+
+      // 走完"无进展超阈值 → 宽限也到点"的完整两拍:强制收口的条件已经齐了
+      clock.advance(60_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      clock.advance(30_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+
+      // 仍在账上(继续占槽、继续出现在诊断快照里),也没被记成 failed / 投通知
+      expect(scheduler.getRuntimeSnapshot().slotsInUse).toBe(1);
+      expect(scheduler.getRuntimeSnapshot().inFlightRuns).toHaveLength(1);
+      expect(notified).toHaveLength(0);
+      // 但必须留下诊断:静默占槽才是这个洞真正的危险处。节流后仍只有一条。
+      expect(errorLogs.filter((m) => m.includes('before its abort controller'))).toHaveLength(1);
+
+      // 挂起的写入返回后照常跑完,槽位由正常路径释放
+      releaseInsert!();
+      await p;
+      expect(scheduler.getRuntimeSnapshot().slotsInUse).toBe(0);
       await scheduler.stop();
     } finally {
       vi.useRealTimers();

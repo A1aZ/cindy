@@ -157,11 +157,15 @@ export function AddRemoteProjectDialog({
     }
     if (selectedKey && targets.some((tg) => tg.key === selectedKey)) return;
     const preferredKey = initialDeviceId ? `device:${initialDeviceId}` : null;
-    setSelectedKey(
-      (preferredKey && targets.some((target) => target.key === preferredKey)
-        ? preferredKey
-        : targets[0]?.key) ?? null,
-    );
+    if (preferredKey) {
+      // 调用方**指名**了设备(从该设备的工作区 picker 点进来的)。此时绝不能回落到别的目标:
+      // targets 只含在线设备,被指名的那台一旦离线就匹配不到,静默落到 targets[0](可能是某台
+      // SSH 主机或另一台设备)会让用户以为在浏览 A、实际把 B 的路径加进草稿,把草稿切到意外的机器。
+      // 匹配不到就保持未选中,由目标选择器显示空态 —— 宁可让用户自己再选一次。
+      setSelectedKey(targets.some((target) => target.key === preferredKey) ? preferredKey : null);
+      return;
+    }
+    setSelectedKey(targets[0]?.key ?? null);
   }, [open, targets, selectedKey, initialDeviceId]);
 
   const refreshList = useCallback(

@@ -302,6 +302,28 @@ describe('Shared create project picker', () => {
     );
   });
 
+  // #807 review 第十一轮:并发删除时,失败删除的权威回读不能复活另一个仍在飞的乐观删除
+  // (B 被复活后,它真的成功时成功路径不再更新状态,于是 B 一直显示到重开 picker)。
+  it('preserves other in-flight deletions when a failed removal reloads', () => {
+    expect(deviceLinkProjectsHookSource).toContain('pendingRemovalsRef');
+    expect(deviceLinkProjectsHookSource).toContain('pendingRemovalsRef.current.add(option.path);');
+    // 减去其它 pending,但不含自己 —— 这次删除失败了,真相里有它就该显示回来。
+    expect(deviceLinkProjectsHookSource).toContain(
+      '[...pendingRemovalsRef.current].filter((path) => path !== option.path)',
+    );
+    // finally 必须清除,否则一次异常会让那条 path 永久被过滤掉。
+    expect(deviceLinkProjectsHookSource).toContain('pendingRemovalsRef.current.delete(option.path);');
+  });
+
+  // #807 review 第十一轮:调用方指名了设备时,弹窗不得回落到别的目标 —— 被指名的那台离线时
+  // targets 里没有它,静默落到 targets[0](可能是 SSH 主机或另一台设备)会把草稿切到意外的机器。
+  it('never falls back to a different target when a device was explicitly requested', () => {
+    expect(addRemoteProjectDialogSource).toContain('if (preferredKey) {');
+    expect(addRemoteProjectDialogSource).toContain(
+      'setSelectedKey(targets.some((target) => target.key === preferredKey) ? preferredKey : null);',
+    );
+  });
+
   // #807 review 第十轮:两个创建 guard 必须把 remoteDraftState.loaded 一起看。换设备时我们把它
   // 打回未加载(防上一台默认值串台),而 capabilities/providers 若已缓存则那两个 loading 立刻为
   // false —— 只看它们会在 maker:get-new-maker-defaults 回来前放行,提交 capability 兜底值而不是

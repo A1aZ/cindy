@@ -59,6 +59,12 @@ export function useDeviceLinkProjects(
    * 那个版本号被 effect 取数与每一次删除共享,并发删除会互相把对方的回读判成过期。
    */
   const currentDeviceIdRef = useRef<string | null>(null);
+  /**
+   * 正在进行中的乐观删除(path 集合)。删除失败后的权威回读必须减去**其它**仍在飞的删除 ——
+   * 否则 A 的回读会把已被乐观移除、但删除还没回来的 B 复活;等 B 真的成功时它的成功路径不再更新
+   * 状态,于是 B 会一直显示到重开 picker 为止。
+   */
+  const pendingRemovalsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     currentDeviceIdRef.current = deviceId;
@@ -96,6 +102,7 @@ export function useDeviceLinkProjects(
 
       // 先让旧的取数失效,否则它回来会把刚乐观移除的行又贴回去。
       requestIdRef.current += 1;
+      pendingRemovalsRef.current.add(option.path);
       // 记下被移除的行与它原来的位置:两条恢复路径都要用(回读失败时按原序插回)。
       let removedIndex = -1;
       let removedRow: ExistingRemoteProject | undefined;
@@ -122,7 +129,11 @@ export function useDeviceLinkProjects(
           // A 既没在对端删成、又没被恢复,会一直从选择器里消失。只要设备没切走,这份回读就仍然
           // 有效(它就是被控端真相),该应用。
           if (currentDeviceIdRef.current !== target.deviceId) return;
-          setRows(list);
+          // 减去**其它**仍在飞的乐观删除(不含自己 —— 这次删除失败了,真相里有它就该显示回来)。
+          const othersPending = new Set(
+            [...pendingRemovalsRef.current].filter((path) => path !== option.path),
+          );
+          setRows(othersPending.size === 0 ? list : list.filter((row) => !othersPending.has(row.path)));
         } catch {
           // 回读也失败(对端离线 / 隧道断)。此时**必须把行放回去**:删除既没在对端生效,
           // 权威列表也拿不到,保留乐观移除等于让选择器藏着一个远端仍然存在的项目,而且不给
@@ -146,6 +157,8 @@ export function useDeviceLinkProjects(
             return [...current.slice(0, at), restored, ...current.slice(at)];
           });
         }
+      } finally {
+        pendingRemovalsRef.current.delete(option.path);
       }
     },
     [],

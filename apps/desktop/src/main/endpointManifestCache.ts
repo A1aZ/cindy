@@ -24,6 +24,7 @@
  * `app.getPath('userData')`。清单本身是 CDN 上公开可读的配置,不含任何凭证。
  * 路径由调用方注入(宿主决定目录),模块 import 时不产生任何文件系统副作用。
  */
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -119,6 +120,16 @@ export function readEndpointManifestCache(userDataDir: string): CachedEndpointMa
 /**
  * 写缓存(先写临时文件再 rename,避免断电/崩溃留下半份 JSON)。
  * 返回 false = 写失败;调用方只记日志,不阻断启动。
+ *
+ * 临时文件必须是**唯一名字 + 独占创建**(review 抓到:上一版用固定的
+ * `<target>.tmp`,而读路径的常规文件校验管不到写路径):
+ *  - 别的进程在那个可预测路径上放一个 FIFO,`writeFileSync` 会**无限阻塞**。这段跑在
+ *    清单解析**成功**之后、启动继续之前,阻塞等于启动卡死;
+ *  - 放一个 symlink,`writeFileSync` 会跟随并截断链接目标——等于把它变成一个任意
+ *    文件写入原语。
+ * `'wx'`(O_WRONLY|O_CREAT|O_EXCL)对已存在的路径直接报错而不是打开它,POSIX 下
+ * O_CREAT|O_EXCL 遇到 symlink 也必定失败;随机后缀则保证不会被"先占位"卡住。
+ * 最终的 renameSync 不跟随 symlink,所以 target 被换成 symlink 也只是被替换掉。
  */
 export function writeEndpointManifestCache(
   userDataDir: string,
@@ -126,17 +137,28 @@ export function writeEndpointManifestCache(
 ): boolean {
   if (Buffer.byteLength(entry.manifestText, 'utf8') > MAX_MANIFEST_BYTES) return false;
   const target = cacheFilePath(userDataDir);
-  const tmp = `${target}.tmp`;
+  const tmp = `${target}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  let fd: number | null = null;
   try {
     fs.mkdirSync(userDataDir, { recursive: true });
-    fs.writeFileSync(tmp, JSON.stringify(entry, null, 2), 'utf8');
+    fd = fs.openSync(tmp, 'wx', 0o600);
+    fs.writeFileSync(fd, JSON.stringify(entry, null, 2), 'utf8');
+    fs.closeSync(fd);
+    fd = null;
     fs.renameSync(tmp, target);
     return true;
   } catch {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // 关闭失败也要继续清理临时文件。
+      }
+    }
     try {
       fs.rmSync(tmp, { force: true });
     } catch {
-      // 清理失败无所谓,下次写入会覆盖同名临时文件。
+      // 清理失败只会留下一个带随机后缀的临时文件,不影响下次写入。
     }
     return false;
   }

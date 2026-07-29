@@ -661,7 +661,6 @@ describe('用户确认的离线出口', () => {
 
   it('网络失败 + 有缓存 + 用户点离线 → 用缓存端点启动', async () => {
     const loadOfflineManifest = vi.fn(offlineCandidate);
-    const onResolved = vi.fn();
     const fetchManifest = vi
       .fn<BlockingResolveDeps['fetchManifest']>()
       .mockResolvedValue({ ok: false, detail: 'ERR_FAILED' });
@@ -678,7 +677,6 @@ describe('用户确认的离线出口', () => {
 
     expect(result?.authApiBaseUrl).toBe('https://auth.cached.example.com');
     expect(promptRetry.mock.calls[0][0]).toMatchObject({ offlineSavedAt: '2026/7/29 06:22' });
-    expect(onResolved).not.toHaveBeenCalled();
     expect(exitApp).not.toHaveBeenCalled();
     // 只尝试了一次网络:离线是出口而不是"再试一次"。
     expect(fetchManifest).toHaveBeenCalledTimes(1);

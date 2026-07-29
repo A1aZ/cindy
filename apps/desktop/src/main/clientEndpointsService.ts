@@ -618,11 +618,15 @@ export interface NetLogLike {
 }
 
 /**
- * 围绕一次请求抓 netlog。成功返回文件路径,任何异常都降级为 null(没有 netlog)。
+ * 围绕一次请求抓 netlog。成功返回文件路径。
+ *
+ * 异常语义(别看错,review 提过注释与实现不符):**start / stop 的异常在这里被降级**
+ * ——start 失败返回 null,stop 失败只记日志并仍返回文件路径(那份 netlog 已经落盘,
+ * 残缺也对排查有价值);而 `runWhileRecording()` 抛出的异常**照原样向上抛**,只保证
+ * finally 里已经配对 stop 过。生产调用方 captureEndpointNetLog 外面裹了 try/catch,
+ * 所以整条诊断链路对外仍然只表现为"有没有 netlog"。
  *
  * 三个 await 全部有界:start / stop 各 stepTimeoutMs,中间那次请求由调用方自带预算。
- * stop 超时只记日志、仍然返回文件路径——那份 netlog 已经落了盘(可能残缺),
- * 对排查仍有价值。
  *
  * **迟到成功的 start 必须补一次 stop**(review 抓到的第三条):withDeadline 只解除
  * 我们这边的等待,并不能取消 Electron 侧的操作。如果 startLogging 在超时之后才成功,

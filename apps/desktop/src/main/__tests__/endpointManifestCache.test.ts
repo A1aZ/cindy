@@ -197,3 +197,36 @@ describe('缓存读取只接受常规文件(阻断路径不能被挂住)', () =>
     expect(Date.now() - startedAt).toBeLessThan(2_000);
   });
 });
+
+describe('缓存写入的临时文件必须唯一且独占创建', () => {
+  it('临时文件名带 pid 与随机后缀,不是可预测的 <target>.tmp', () => {
+    expect(writeEndpointManifestCache(dir, ENTRY)).toBe(true);
+    // 固定名字会被别的进程先占位(FIFO → writeFileSync 无限阻塞;symlink → 跟随并截断)。
+    expect(fs.existsSync(`${cacheFile()}.tmp`)).toBe(false);
+    // 成功路径不留任何临时文件。
+    expect(fs.readdirSync(dir).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('固定 .tmp 路径被 FIFO 占位也不影响写入(不再走那个路径)', () => {
+    const mkfifo = spawnSync('mkfifo', [`${cacheFile()}.tmp`]);
+    if (mkfifo.status !== 0) return; // 平台没有 mkfifo(Windows)时跳过
+    const startedAt = Date.now();
+    expect(writeEndpointManifestCache(dir, ENTRY)).toBe(true);
+    // 旧实现会在这里无限阻塞;这段跑在清单解析成功之后、启动继续之前。
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(readEndpointManifestCache(dir)).toEqual(ENTRY);
+  });
+
+  it('target 被换成 symlink 时 rename 替换掉它本身,不写穿到链接目标', () => {
+    const outside = path.join(dir, 'outside.txt');
+    fs.writeFileSync(outside, 'untouched', 'utf8');
+    fs.symlinkSync(outside, cacheFile());
+
+    expect(writeEndpointManifestCache(dir, ENTRY)).toBe(true);
+    // 链接目标内容不变 = 没有被当成任意文件写入原语。
+    expect(fs.readFileSync(outside, 'utf8')).toBe('untouched');
+    // cacheFile 现在是常规文件(symlink 已被 rename 替换),读回正常。
+    expect(fs.lstatSync(cacheFile()).isSymbolicLink()).toBe(false);
+    expect(readEndpointManifestCache(dir)).toEqual(ENTRY);
+  });
+});

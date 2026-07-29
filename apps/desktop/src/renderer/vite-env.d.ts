@@ -1383,7 +1383,11 @@ interface ElectronAPI {
     updateHistoryEntry: (id: string, text: string) => void;
     deleteHistoryEntry: (id: string) => void;
     onDataChanged: (callback: (payload: VoiceInputDataSnapshot) => void) => () => void;
-    setGlobalShortcut: (shortcut: VoiceInputShortcut | null) => Promise<VoiceInputGlobalResult>;
+    /** options.suspend = 录制期挂起（故意与存盘不同）；不带它的请求会被 main 按存盘校验。 */
+    setGlobalShortcut: (
+      shortcut: VoiceInputShortcut | null,
+      options?: { suspend?: true },
+    ) => Promise<VoiceInputGlobalResult>;
     startModifierShortcutRecording: () => Promise<VoiceInputGlobalResult>;
     stopModifierShortcutRecording: () => Promise<VoiceInputGlobalResult>;
     onModifierShortcutKeys: (callback: (payload: { keys: string[] }) => void) => () => void;

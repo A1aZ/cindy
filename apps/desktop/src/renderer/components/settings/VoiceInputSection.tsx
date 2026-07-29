@@ -20,6 +20,7 @@ import {
   mergeVoiceInputDictionaryCsvTerms,
   normalizeVoiceInputDictionaryEntryText,
   parseVoiceInputDictionaryCsv,
+  suspendVoiceInputGlobalShortcut,
   syncVoiceInputGlobalShortcut,
   useVoiceInputSettings,
   type VoiceInputDictionaryEntry,
@@ -1597,7 +1598,8 @@ export function VoiceInputSection() {
     // 录制 —— 那一轮才拥有「挂起」这个状态，上一轮的恢复必须让位，见下。
     const recordingSession = (recordingSessionRef.current += 1);
     let cancelled = false;
-    const suspendPromise = syncVoiceInputGlobalShortcut(null).then(() => {
+    // 显式的「挂起」而不是 sync(null)：main 侧按存盘校验同步请求，而挂起故意与存盘不同。
+    const suspendPromise = suspendVoiceInputGlobalShortcut().then(() => {
       if (cancelled) return;
       return startFnKeyCapture(() => cancelled);
     });

@@ -931,15 +931,45 @@ describe('voice input global shortcut registration', () => {
       });
 
       // 挂起(null)是这条 channel 的另一个正当用途,永远放行 —— 录制期就靠它。
-      it('always applies a suspend request', async () => {
+      it('always applies an explicit suspend request', async () => {
         setPlatform('darwin');
         mocks.setStoredShortcut(bareRightOption);
         const { registerGlobalVoiceInputIpc } = await import('../global.js');
         registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
+        // 挂起故意与存盘不同,所以必须显式带 intent 才放行。
+        const result = await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, null, { suspend: true });
+
+        expect(result).toMatchObject({ ok: true });
+        expect(mocks.modifierStop).toHaveBeenCalled();
+      });
+
+      // 「清空快捷键」那次提交广播出的 null 回声, 迟到落地就会把更晚一次提交刚注册好的快捷键
+      // 直接关掉 —— 存盘和界面显示新快捷键, 实际却什么都不响应。所以 null 也要按存盘校验。
+      it('ignores a stale null sync that is not an explicit suspend', async () => {
+        setPlatform('darwin');
+        // 存盘里已经是用户最后选的那个。
+        mocks.setStoredShortcut(bareRightOption);
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+        mocks.modifierStop.mockClear();
+
         const result = await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, null);
 
         expect(result).toMatchObject({ ok: true });
+        expect(mocks.modifierStop).not.toHaveBeenCalled();
+      });
+
+      // 存盘本来就是空的(用户清掉了快捷键): 这条 null 同步与存盘一致, 该照常落地。
+      it('still applies a null sync when the persisted shortcut is also null', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(null);
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+        mocks.modifierStop.mockClear();
+
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, null);
+
         expect(mocks.modifierStop).toHaveBeenCalled();
       });
 

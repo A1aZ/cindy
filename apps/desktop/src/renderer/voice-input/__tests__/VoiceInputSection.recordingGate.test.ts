@@ -22,6 +22,9 @@ describe('VoiceInputSection shortcut recording gate', () => {
     );
 
     expect(source).toContain('await shortcutSuspendPromiseRef.current');
+    // 挂起必须走显式 intent:main 侧按存盘校验同步请求,而挂起传的 null 故意与存盘不同。
+    expect(source).toContain('suspendVoiceInputGlobalShortcut().then(');
+    expect(source).not.toContain('syncVoiceInputGlobalShortcut(null)');
     expect(source).toContain('shortcutSuspendPromiseRef.current = suspendPromise');
     expect(source).toContain('syncVoiceInputGlobalShortcut(getVoiceInputSettings().shortcut)');
     // 恢复注册要等在飞的提交落地再读存盘：切走 tab 会立刻跑 cleanup，那时存盘还是旧快捷键,

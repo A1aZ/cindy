@@ -771,31 +771,38 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
   });
 
   /**
-   * 这条 channel 只有两种正当用途：**挂起**（传 null，录制期用）和**让运行期对上存盘**
-   * （传当前已保存的快捷键：录制结束恢复、授权后重新注册、renderer 收到设置变更后的回声）。
+   * 这条 channel 只有两种正当用途：**挂起**（录制期，显式带 options.suspend）和**让运行期
+   * 对上存盘**（录制结束恢复、授权后重新注册、renderer 收到设置变更后的回声）。
    *
-   * 所以非 null 的请求必须与当前存盘一致，不一致就是过时的回声，丢掉。
+   * 所以：带 suspend 的请求直接放行；不带的一律与当前存盘比对，不一致就是过时的回声，丢掉。
    *
    * 为什么需要这道闸：`useVoiceInputSettings` 里有个 effect，settings.shortcut 一变就调
    * syncVoiceInputGlobalShortcut(settings.shortcut) —— 每个挂载着它的窗口都会回声一次。
-   * 两次提交交错时，先落地那次会广播**旧**快捷键，某个后台窗口（渲染被节流，effect 跑得晚）
-   * 的回声就可能排在更晚那次提交之后，把旧的重新注册上：存盘和界面显示新的，实际生效的是
-   * 旧那个。比对存盘是最稳的判据 —— 不必给广播串代次，也不必要求每个订阅方自己判断新旧。
+   * 两次提交交错时，先落地那次会广播**旧**快捷键（清空提交广播的就是 null），某个后台窗口
+   * （渲染被节流，effect 跑得晚）的回声就可能排在更晚那次提交之后，把旧的重新注册上、或者
+   * 把新注册好的直接关掉：存盘和界面显示新的，实际生效的却不是。
+   *
+   * null 必须一起校验 —— 只放行非 null 的话，「清空快捷键」那次的 null 回声照样能迟到落地。
+   * 这也是为什么挂起要显式带 intent：它传的 null 恰恰故意与存盘不同，靠值本身分不出来。
    */
   ipcMain.handle(
     'voice-input:global-shortcut:set',
-    async (_event, shortcut: VoiceInputShortcut | null | undefined): Promise<VoiceInputGlobalResult> => {
+    async (
+      _event,
+      shortcut: VoiceInputShortcut | null | undefined,
+      options?: { suspend?: true },
+    ): Promise<VoiceInputGlobalResult> => {
       const nextShortcut = shortcut ?? null;
+      const suspending = options?.suspend === true;
       return queueShortcutMutation(async () => {
-        if (nextShortcut) {
+        if (!suspending) {
           const storedShortcut = voiceInputDataStore.getSettings().shortcut;
           // 用已有的 stableVoiceInputShortcutKey 比对：它把 trigger / code / key / 五个
           // modifier 全铺进去，就是一个快捷键的完整身份，比 JSON 串比较更不受字段顺序影响。
-          if (
-            !storedShortcut ||
-            stableVoiceInputShortcutKey(storedShortcut) !== stableVoiceInputShortcutKey(nextShortcut)
-          ) {
-            log.debug('ignoring stale global shortcut sync', { code: nextShortcut.code });
+          const storedKey = storedShortcut ? stableVoiceInputShortcutKey(storedShortcut) : null;
+          const nextKey = nextShortcut ? stableVoiceInputShortcutKey(nextShortcut) : null;
+          if (storedKey !== nextKey) {
+            log.debug('ignoring stale global shortcut sync', { code: nextShortcut?.code ?? null });
             return { ok: true };
           }
           // 录制期间是刻意挂起的。别的窗口的回声在这时把它装回来，用户按键试录就会真的

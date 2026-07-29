@@ -172,6 +172,13 @@ export function AddRemoteProjectDialog({
     setSelectedKey(targets[0]?.key ?? null);
   }, [open, targets, selectedKey, initialDeviceId]);
 
+  /**
+   * 调用方指名了设备、但它不在可选目标里(离线 / 撤销被控)。用于给「未选中」这个状态一个解释 ——
+   * 上一轮刻意不回落到别的目标,代价就是必须把原因说出来。
+   */
+  const requestedDeviceUnavailable =
+    initialDeviceId != null && !targets.some((tg) => tg.key === `device:${initialDeviceId}`);
+
   const refreshList = useCallback(
     async (browseApi: RemoteBrowseAdapter, targetPath: string) => {
       const mySeq = ++requestSeqRef.current;
@@ -388,6 +395,16 @@ export function AddRemoteProjectDialog({
                       color: 'var(--text-primary)',
                     }}
                   >
+                    {/* 未选中时必须有一个 value="" 的项供受控 select 显示(Codex review P1)。
+                        缺了它,浏览器会去显示第一个真实 option,而 selectedTarget 仍是 null ——
+                        「添加」保持 disabled;若只有一个备选目标,点那个已显示的项也不产生 change
+                        事件,弹窗就此卡死。disabled 让它只能被显示、不能被重新选回。
+                        这个空态是上一轮「指名设备离线时不静默回落到别的目标」带来的,得配一个占位。 */}
+                    {selectedKey === null && (
+                      <option value="" disabled>
+                        {t('newChat.addRemoteProject.selectTargetPlaceholder')}
+                      </option>
+                    )}
                     {sshTargets.length > 0 && (
                       <optgroup label={t('newChat.addRemoteProject.sourceGroupSsh')}>
                         {sshTargets.map((tg) => (
@@ -407,6 +424,13 @@ export function AddRemoteProjectDialog({
                       </optgroup>
                     )}
                   </select>
+                  {/* 指名的设备不在可选目标里(离线 / 撤销被控)→ 说明原因,否则用户只看到一个
+                      未选中的下拉,不知道为什么要自己重选。 */}
+                  {selectedKey === null && requestedDeviceUnavailable && (
+                    <span className="text-12" style={{ color: 'var(--text-secondary)' }}>
+                      {t('newChat.addRemoteProject.requestedDeviceUnavailable')}
+                    </span>
+                  )}
                 </label>
 
                 {/* Mode toggle — 默认「已有项目」,「浏览文件夹」为次要入口 */}

@@ -4127,7 +4127,9 @@
         "addFailed": "프로젝트 추가 실패",
         "pathEmpty": "프로젝트 경로를 입력하세요",
         "pathIsFile": "{{path}} 는 디렉터리가 아닌 파일입니다"
-      }
+      },
+      "selectTargetPlaceholder": "대상 선택…",
+      "requestedDeviceUnavailable": "지정한 기기를 현재 사용할 수 없습니다. 다른 대상을 선택하세요"
     },
     "projectPicker": {
       "addRemoteProject": "원격 프로젝트 추가"

@@ -233,4 +233,124 @@ describe('useDeviceLinkProjects 取数 / 删除并发', () => {
     expect(seen.projects).toEqual([{ path: '/b/only', deviceId: 'dev-b' }]);
     expect(seen.loading).toBe(false);
   });
+
+  it('同设备三个删除全部失败、回读交错完成时,所有项目都要回到列表(不互相抹掉)', async () => {
+    const first = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => first.promise);
+    const { seen } = mountHook();
+    await act(async () => {
+      first.resolve([row('/a/one'), row('/a/two'), row('/a/three')]);
+    });
+    expect(seen.projects.map((p) => p.path)).toEqual(['/a/one', '/a/two', '/a/three']);
+
+    // 三个删除各自挂住;失败后每个都会做一次权威回读(对端真相仍含三项,因为删除都失败了)。
+    const del1 = deferred<void>();
+    const del2 = deferred<void>();
+    const del3 = deferred<void>();
+    removeMock
+      .mockImplementationOnce(() => del1.promise)
+      .mockImplementationOnce(() => del2.promise)
+      .mockImplementationOnce(() => del3.promise);
+    const rb1 = deferred<ExistingRemoteProject[]>();
+    const rb2 = deferred<ExistingRemoteProject[]>();
+    const rb3 = deferred<ExistingRemoteProject[]>();
+    loadMock
+      .mockImplementationOnce(() => rb1.promise)
+      .mockImplementationOnce(() => rb2.promise)
+      .mockImplementationOnce(() => rb3.promise);
+
+    const promises: Promise<void>[] = [];
+    act(() => {
+      promises.push(seen.remove('/a/one', 'dev-a'));
+      promises.push(seen.remove('/a/two', 'dev-a'));
+      promises.push(seen.remove('/a/three', 'dev-a'));
+    });
+    // 三个都被乐观移除。
+    expect(seen.projects.map((p) => p.path)).toEqual([]);
+
+    // 三个删除依次失败 → 三次回读启动。
+    await act(async () => {
+      del1.reject(new Error('CHANNEL_NOT_ALLOWED'));
+      del2.reject(new Error('CHANNEL_NOT_ALLOWED'));
+      del3.reject(new Error('CHANNEL_NOT_ALLOWED'));
+      await Promise.resolve();
+    });
+
+    const truth = [row('/a/one'), row('/a/two'), row('/a/three')];
+    // 交错完成:1 → 3 → 2(刻意不按发起顺序)。
+    await act(async () => {
+      rb1.resolve(truth);
+    });
+    await act(async () => {
+      rb3.resolve(truth);
+    });
+    await act(async () => {
+      rb2.resolve(truth);
+      await Promise.all(promises.map((pr) => pr.catch(() => undefined)));
+    });
+
+    // 三个项目在对端都还在,最终列表必须三个都有 —— 一个都不能被别人的回读抹掉。
+    expect(seen.projects.map((p) => p.path).sort()).toEqual(['/a/one', '/a/three', '/a/two']);
+  });
+
+  it('回读之间又发起新删除(pending 集合增长)时仍逐步收敛,不会永久丢项目', async () => {
+    // 比上一条更严的排列:第一个回读**晚于**后两个删除发起才回来,于是它看到的 pending 比自己
+    // 开始时更大、只恢复自己那一项。收敛依赖一条不变量 —— 一个 path 还在 pending 就意味着它自己的
+    // 那次尝试尚未结束,而结束时它要么提交更全的真相(失败路径),要么它确实已被对端删掉(成功路径)。
+    const first = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => first.promise);
+    const { seen } = mountHook();
+    await act(async () => {
+      first.resolve([row('/a/one'), row('/a/two'), row('/a/three')]);
+    });
+
+    const del1 = deferred<void>();
+    const rb1 = deferred<ExistingRemoteProject[]>();
+    removeMock.mockImplementationOnce(() => del1.promise);
+    loadMock.mockImplementationOnce(() => rb1.promise);
+    const pending: Promise<void>[] = [];
+    act(() => {
+      pending.push(seen.remove('/a/one', 'dev-a'));
+    });
+    await act(async () => {
+      del1.reject(new Error('CHANNEL_NOT_ALLOWED'));
+      await Promise.resolve();
+    });
+
+    // rb1 还没回来,用户又删了另外两个。
+    const del2 = deferred<void>();
+    const del3 = deferred<void>();
+    const rb2 = deferred<ExistingRemoteProject[]>();
+    const rb3 = deferred<ExistingRemoteProject[]>();
+    removeMock
+      .mockImplementationOnce(() => del2.promise)
+      .mockImplementationOnce(() => del3.promise);
+    loadMock.mockImplementationOnce(() => rb2.promise).mockImplementationOnce(() => rb3.promise);
+    act(() => {
+      pending.push(seen.remove('/a/two', 'dev-a'));
+      pending.push(seen.remove('/a/three', 'dev-a'));
+    });
+
+    const truth = [row('/a/one'), row('/a/two'), row('/a/three')];
+    await act(async () => {
+      rb1.resolve(truth);
+    });
+    // 只恢复 one 是**正确**的中间态:two / three 的乐观删除还在飞,此刻贴回去才是错的。
+    expect(seen.projects.map((p) => p.path)).toEqual(['/a/one']);
+
+    await act(async () => {
+      del2.reject(new Error('CHANNEL_NOT_ALLOWED'));
+      del3.reject(new Error('CHANNEL_NOT_ALLOWED'));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      rb2.resolve(truth);
+    });
+    expect(seen.projects.map((p) => p.path).sort()).toEqual(['/a/one', '/a/two']);
+    await act(async () => {
+      rb3.resolve(truth);
+      await Promise.all(pending.map((pr) => pr.catch(() => undefined)));
+    });
+    expect(seen.projects.map((p) => p.path).sort()).toEqual(['/a/one', '/a/three', '/a/two']);
+  });
 });

@@ -838,6 +838,24 @@ describe('Shared create project picker', () => {
     expect(newGoalDialogSource).toContain('if (saving) event.preventDefault();');
   });
 
+  // #807 review 第二十五轮:上一轮把「指名设备离线就不回落到别的目标」改对了,但受控 select 的
+  // value="" 没有对应 option —— 浏览器会去显示第一个真实 option,而 selectedTarget 仍是 null,
+  // 「添加」保持 disabled;只有一个备选目标时点那个已显示的项也不产生 change,弹窗就此卡死。
+  it('gives the unselected target state a real placeholder option and a reason', () => {
+    expect(addRemoteProjectDialogSource).toContain('{selectedKey === null && (');
+    expect(addRemoteProjectDialogSource).toContain('<option value="" disabled>');
+    expect(addRemoteProjectDialogSource).toContain(
+      "t('newChat.addRemoteProject.selectTargetPlaceholder')",
+    );
+    // 未选中的原因也要说出来,否则用户只看到一个空下拉。
+    expect(addRemoteProjectDialogSource).toContain(
+      'const requestedDeviceUnavailable =',
+    );
+    expect(addRemoteProjectDialogSource).toContain(
+      "t('newChat.addRemoteProject.requestedDeviceUnavailable')",
+    );
+  });
+
   it('keeps recent-folder storage out of project-option selection', () => {
     expect(folderPickerPopoverSource).toContain('projectOptions?: readonly FolderPickerOption[]');
     expect(folderPickerPopoverSource).toContain(

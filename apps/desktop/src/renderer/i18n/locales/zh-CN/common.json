@@ -4127,7 +4127,9 @@
         "addFailed": "添加项目失败",
         "pathEmpty": "请输入项目路径",
         "pathIsFile": "{{path}} 是文件，不是目录"
-      }
+      },
+      "selectTargetPlaceholder": "请选择目标…",
+      "requestedDeviceUnavailable": "指定的设备当前不可用，请选择其它目标"
     },
     "projectPicker": {
       "addRemoteProject": "添加远程项目"

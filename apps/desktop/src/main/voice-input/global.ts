@@ -760,6 +760,20 @@ async function recoverPendingNativeShortcutRegistration(): Promise<void> {
   }
 }
 
+/**
+ * 登记「这个 renderer 正在录制快捷键」。
+ *
+ * 两个入口都调它：显式挂起（录制真正的起点）与 recording:start（capture 尝试）。销毁清理挂在
+ * 这里，所以哪个先到都不会漏 —— 录制框关掉不发 stop 就崩了的窗口也会被收掉。
+ */
+function markModifierShortcutRecordingSession(sender: WebContents): void {
+  if (modifierShortcutRecordingSessionIds.has(sender.id)) return;
+  modifierShortcutRecordingSessionIds.add(sender.id);
+  sender.once('destroyed', () => {
+    modifierShortcutRecordingSessionIds.delete(sender.id);
+  });
+}
+
 export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void {
   if (registered) return;
   registered = true;
@@ -788,12 +802,20 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
   ipcMain.handle(
     'voice-input:global-shortcut:set',
     async (
-      _event,
+      event,
       shortcut: VoiceInputShortcut | null | undefined,
       options?: { suspend?: true },
     ): Promise<VoiceInputGlobalResult> => {
       const nextShortcut = shortcut ?? null;
       const suspending = options?.suspend === true;
+      // 显式挂起就等于「这个 renderer 的录制开始了」——在入队之前就登记。
+      //
+      // 录制 effect 是先等挂起返回、再发 recording:start 的（顺序反过来的话，挂起里的
+      // listener.stop() 会把 capture 刚起的 helper 一起杀掉）。那两步之间有个窗口：兜底
+      // 恢复排在挂起之后执行时，录制会话还没登记，于是它照常把已保存的快捷键注册上；随后
+      // startKeyCapture 看见 child 已在跑就直接返回成功、不会清掉那个 shortcut —— 用户在
+      // 录制框里按键会真的触发一次语音输入。用挂起这个 intent 当会话起点，窗口就消失了。
+      if (suspending) markModifierShortcutRecordingSession(event.sender);
       return queueShortcutMutation(async () => {
         if (!suspending) {
           const storedShortcut = voiceInputDataStore.getSettings().shortcut;
@@ -858,10 +880,10 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
       }
       modifierShortcutRecordingWebContentsIds.add(event.sender.id);
       // 录制会话在**尝试之前**就登记：capture 起不起来都不影响「用户正在录」这个事实。
-      modifierShortcutRecordingSessionIds.add(event.sender.id);
+      // （显式挂起时其实已经登记过了，这里幂等补一次，不依赖调用顺序。）
+      markModifierShortcutRecordingSession(event.sender);
       event.sender.once('destroyed', () => {
         modifierShortcutRecordingWebContentsIds.delete(event.sender.id);
-        modifierShortcutRecordingSessionIds.delete(event.sender.id);
         if (modifierShortcutRecordingWebContentsIds.size === 0) {
           macModifierShortcutListener.stopKeyCapture();
         }

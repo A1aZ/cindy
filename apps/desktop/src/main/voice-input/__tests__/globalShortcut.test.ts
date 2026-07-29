@@ -938,10 +938,55 @@ describe('voice input global shortcut registration', () => {
         registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
         // 挂起故意与存盘不同,所以必须显式带 intent 才放行。
-        const result = await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, null, { suspend: true });
+        const result = await mocks.handlers.get('voice-input:global-shortcut:set')?.(
+          { sender: { id: mocks.focusedWindow.webContents.id, once: vi.fn() } },
+          null,
+          { suspend: true },
+        );
 
         expect(result).toMatchObject({ ok: true });
         expect(mocks.modifierStop).toHaveBeenCalled();
+      });
+
+      // 录制 effect 是先等挂起返回、再发 recording:start 的(顺序反过来会让挂起里的
+      // listener.stop() 把 capture 刚起的 helper 一起杀掉)。那两步之间, 排在挂起之后的兜底
+      // 恢复会看到「没在录制」而把已保存的快捷键装回去; 随后 startKeyCapture 看见 child 已在
+      // 跑就直接返回成功、不清掉那个 shortcut —— 用户在录制框里按键会真的触发语音输入。
+      it('blocks recovery from the moment an explicit suspend arrives, before recording:start', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        mocks.modifierIsRunning.mockReturnValue(false);
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        const sender = { id: mocks.focusedWindow.webContents.id, once: vi.fn() };
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.({ sender }, null, { suspend: true });
+        mocks.modifierSetShortcut.mockClear();
+
+        // recording:start 还没发出来就来了一次聚焦。
+        mocks.appListeners.get('browser-window-focus')?.();
+        await new Promise((resolve) => { setImmediate(resolve); });
+
+        expect(mocks.modifierSetShortcut).not.toHaveBeenCalled();
+      });
+
+      // 录制结束(stop)之后,兜底恢复必须重新可用 —— 否则挂起那一下会把它永久堵死。
+      it('lets recovery resume after the recording stops', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        mocks.modifierIsRunning.mockReturnValue(false);
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        const sender = { id: mocks.focusedWindow.webContents.id, once: vi.fn() };
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.({ sender }, null, { suspend: true });
+        await mocks.handlers.get('voice-input:modifier-shortcut-recording:stop')?.({ sender });
+        mocks.modifierSetShortcut.mockClear();
+
+        mocks.appListeners.get('browser-window-focus')?.();
+        await new Promise((resolve) => { setImmediate(resolve); });
+
+        expect(mocks.modifierSetShortcut).toHaveBeenCalledWith(bareRightOption);
       });
 
       // 「清空快捷键」那次提交广播出的 null 回声, 迟到落地就会把更晚一次提交刚注册好的快捷键

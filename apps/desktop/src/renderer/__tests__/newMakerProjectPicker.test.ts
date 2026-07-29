@@ -411,7 +411,8 @@ describe('Shared create project picker', () => {
     const untilPatch = handoff.slice(0, handoff.indexOf('skipDefaultsRefetchRef'));
     // 判据现在收在 deviceChanged 变量里(同一 handler 内多处复用)。
     expect(untilPatch).toContain('if (deviceChanged) {');
-    expect(untilPatch).toContain('stripLocalMentionChips');
+    // chip 剥离 + 路径型附件丢弃都在 helper 里(第十八轮收拢),这里只断言它被 gate 住地调到。
+    expect(untilPatch).toContain('cleanupCrossFilesystemDraftContext();');
   });
 
   // #807 review 第十二轮:pending 删除集合按设备分层,否则 A 上未结束的 /x 会被当成 B 的待删除项,
@@ -547,7 +548,9 @@ describe('Shared create project picker', () => {
     const effect = newMakerDraftRouteSource.slice(
       newMakerDraftRouteSource.indexOf('selected device is no longer selectable'),
     );
-    expect(effect.slice(0, effect.indexOf('patchDraft('))).toContain('stripLocalMentionChips');
+    expect(effect.slice(0, effect.indexOf('patchDraft('))).toContain(
+      'cleanupCrossFilesystemDraftContext();',
+    );
   });
 
   it('keeps the last known device rows when listDevices fails', () => {
@@ -655,14 +658,41 @@ describe('Shared create project picker', () => {
   // 附件只把 path 透传给模型,而 rehomeDraftAttachments 只重整图片 —— 上一台机器的路径会随首条
   // 消息发到新设备,读不到、或读到同路径下一个毫不相关的文件。
   it('drops path-backed attachments on every device switch', () => {
-    // 直接切设备 + 浏览器换到另一台机器,两条路径都要做。
+    // 换文件系统的清理只有一份实现(第十八轮收成 helper):三条路径此前分别漏过 chip / 附件 /
+    // 两样都漏,每次都是同一件事只做了一部分。
+    const helper = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const cleanupCrossFilesystemDraftContext = useCallback('),
+    );
+    const body = helper.slice(0, helper.indexOf('}, ['));
+    // chip 与附件在同一个函数里一起做。
+    expect(body).toContain('stripLocalMentionChips(composerDraft.text)');
+    expect(body).toContain(".filter((f) => f.category !== 'image')");
+    expect(body).toContain('attachmentState.removeFile(f.id)');
+    // 图片不动:它们走 xdt-image:// 缓存,不依赖对端文件系统。
+    expect(body).toContain("t('newChat.deviceSwitcher.attachmentsDropped'");
+    // 全文只此一处非图片过滤 —— 再出现第二处就说明又有人在某条路径上手写了一份。
     expect(
       (newMakerDraftRouteSource.match(/\.filter\(\(f\) => f\.category !== 'image'\)/g) ?? []).length,
-    ).toBe(2);
-    expect(newMakerDraftRouteSource).toContain('attachmentState.removeFile(f.id)');
-    // 图片不动:它们走 xdt-image:// 缓存,不依赖对端文件系统。
-    expect(newMakerDraftRouteSource).toContain(
-      "t('newChat.deviceSwitcher.attachmentsDropped'",
+    ).toBe(1);
+  });
+
+  // #807 review 第十八轮:换文件系统的三条路径必须都调同一个清理 —— ① 设备 pill 直接切;
+  // ② 设备域浏览器换到另一台机器上的项目;③ 所选设备失效后自动回落本机。第三条绕过前两个
+  // 显式 handler,前一轮只补了 ①②,回落路径的远程绝对路径会被当成本机路径送进下一次发送。
+  it('runs the cross-filesystem cleanup on all three device-switch paths', () => {
+    const calls = newMakerDraftRouteSource.match(/cleanupCrossFilesystemDraftContext\(\)/g) ?? [];
+    // 1 处声明体外的调用 ×3(声明本身是 `= useCallback(() => {`,不匹配这个模式)。
+    expect(calls.length).toBe(3);
+    // ③ 自动回落:effect 里必须调,且它的依赖数组要带上 helper(否则闭包吃旧 attachments)。
+    const effect = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf(
+        "log.warn('[new-maker] selected device is no longer selectable",
+      ),
+    );
+    const untilDeps = effect.slice(0, effect.indexOf('}, ['));
+    expect(untilDeps).toContain('cleanupCrossFilesystemDraftContext();');
+    expect(effect.slice(effect.indexOf('}, ['), effect.indexOf('}, [') + 220)).toContain(
+      'cleanupCrossFilesystemDraftContext,',
     );
   });
 

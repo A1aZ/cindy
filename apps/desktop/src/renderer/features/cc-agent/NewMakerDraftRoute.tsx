@@ -456,6 +456,33 @@ export function NewMakerDraftRoute() {
   // fallback——草稿态没真实会话目录可写),但 draftKey 用 NEW_MAKER_DRAFT_KEY
   // 让附件能在"切走再切回"时存活。
   const attachmentState = useAttachments(undefined, NEW_MAKER_DRAFT_KEY);
+  /**
+   * 「这份草稿的文件系统换了」的统一清理:剥 @file/@dir/@agent chip + 丢掉路径型附件。
+   *
+   * 有**三条**路径会换文件系统,必须同口径:① 设备 pill 直接切设备;② 经设备域浏览器换到另一台
+   * 机器上的项目;③ 所选设备失效(解除配对 / 撤销被控)后的自动回落到本机。前几轮 review 在这三条
+   * 上分别抓到「chip 漏剥」「附件漏丢」「回落路径两样都漏」—— 每次都是同一件事只做了一部分,
+   * 所以收成一个函数:再多一条换设备路径时,少做一半的空间也小一些。
+   *
+   * 为什么附件不能留:attachment-path-passthrough 之后非图片附件只把 path 透传给模型(agent 自己
+   * 用 Read 读),而 rehomeDraftAttachments 只重整图片、非图片原样返回 —— 换了机器那条绝对路径
+   * 要么读不到,要么读到同路径下一个毫不相关的文件(后者更糟,用户不会发现)。方向无关:远程→远程、
+   * 远程→本机都一样成立。图片走 xdt-image:// 缓存、不依赖对端文件系统,行为不变。
+   */
+  const cleanupCrossFilesystemDraftContext = useCallback(() => {
+    const composerDraft = getComposerDraft(NEW_MAKER_DRAFT_KEY);
+    if (composerDraft?.text) {
+      saveComposerDraft(NEW_MAKER_DRAFT_KEY, {
+        ...composerDraft,
+        text: stripLocalMentionChips(composerDraft.text),
+      });
+    }
+    const stranded = attachmentState.attachments.filter((f) => f.category !== 'image');
+    if (stranded.length === 0) return;
+    for (const f of stranded) attachmentState.removeFile(f.id);
+    // 只有附件给 toast:chip 是可见的文字、重打一次就有,附件从托盘里无声消失只会被当成 bug。
+    toast.info(t('newChat.deviceSwitcher.attachmentsDropped', { count: stranded.length }));
+  }, [attachmentState, t]);
   const effectiveWorkingDir = draft.workingDir;
   const effectiveRemoteHostId = draft.remoteHostId;
   const isRemoteProjectDraft = effectiveWorkingDir != null && effectiveRemoteHostId != null;
@@ -1099,20 +1126,7 @@ export function NewMakerDraftRoute() {
         // 「在同一台远程机器上从项目 X 换到项目 Y」也会走到这里 —— 那种情况文件系统没变,
         // 把用户已经写好的 @file / @dir / @agent 无声清掉纯粹是功能退化。
         if (deviceChanged) {
-          const dlDraft = getComposerDraft(NEW_MAKER_DRAFT_KEY);
-          if (dlDraft?.text) {
-            saveComposerDraft(NEW_MAKER_DRAFT_KEY, {
-              ...dlDraft,
-              text: stripLocalMentionChips(dlDraft.text),
-            });
-          }
-          // 路径型附件同样属于上一台机器,与 handleDeviceChange 同口径丢弃(理由见那里)。
-          // 这条路径也会换设备(浏览器可以选到另一台机器上的项目),漏了就等于只修了一半。
-          const stranded = attachmentState.attachments.filter((f) => f.category !== 'image');
-          if (stranded.length > 0) {
-            for (const f of stranded) attachmentState.removeFile(f.id);
-            toast.info(t('newChat.deviceSwitcher.attachmentsDropped', { count: stranded.length }));
-          }
+          cleanupCrossFilesystemDraftContext();
         }
         // 只有 deviceId 真正变化时 effect 才会重跑并消费 skip flag;同设备不设。
         if (deviceChanged) {
@@ -1260,7 +1274,7 @@ export function NewMakerDraftRoute() {
         throw err;
       }
     },
-    [draft.vendor, chatPrefs, chatInitialPermissionMode, chatInitialProviderId, draftInitialModel, draftInitialEffort, effectiveFastMode, effectiveDeviceLinkDeviceId, localProviders, localProvidersLoading, effectiveCollab, capabilityAgentKind, effectivePlanMode, attachmentState, createSession, navigate, t],
+    [draft.vendor, chatPrefs, chatInitialPermissionMode, chatInitialProviderId, draftInitialModel, draftInitialEffort, effectiveFastMode, effectiveDeviceLinkDeviceId, localProviders, localProvidersLoading, effectiveCollab, capabilityAgentKind, effectivePlanMode, attachmentState, cleanupCrossFilesystemDraftContext, createSession, navigate, t],
   );
 
   // ─── 切 vendor ──────────────────────────────────────────────────────
@@ -1480,15 +1494,10 @@ export function NewMakerDraftRoute() {
     if (!selectableDevicesLoaded) return;
     if (selectableDevices.some((d) => d.deviceId === effectiveDeviceLinkDeviceId)) return;
     log.warn('[new-maker] selected device is no longer selectable, falling back to local');
-    // 回落同样是换文件系统:草稿里的 @file / @dir chip 是对着**那台远程机器**建的,留着会在下一次
-    // 本机发送时被当成本机路径送进去。这条路径绕过了 handleDeviceChange,所以要自己做同款清理。
-    const composerDraft = getComposerDraft(NEW_MAKER_DRAFT_KEY);
-    if (composerDraft?.text) {
-      saveComposerDraft(NEW_MAKER_DRAFT_KEY, {
-        ...composerDraft,
-        text: stripLocalMentionChips(composerDraft.text),
-      });
-    }
+    // 回落同样是换文件系统:草稿里的 @file / @dir chip 与路径型附件都是对着**那台远程机器**建的,
+    // 留着会在下一次**本机**发送时被当成本机路径送进去(读不到,或读到同路径下一个无关文件)。
+    // 这条路径绕过了两个显式换设备 handler,所以要自己调同一个清理(Codex review P1)。
+    cleanupCrossFilesystemDraftContext();
     // worktree 上下文同样属于那台已失效的设备(与 handleDeviceChange 对称)。留着的话:远程项目
     // 开过 worktree、设备随后被解除配对 → wtEnabled/wtBaseRepo 残留 → 下一次**本机**发送会进
     // handleSend 的 worktree 分支,拿上一台设备的仓库路径去建,产出无效的本地会话或 worktree 失败。
@@ -1502,7 +1511,12 @@ export function NewMakerDraftRoute() {
       remoteHostId: null,
       extraDirs: [],
     });
-  }, [effectiveDeviceLinkDeviceId, selectableDevices, selectableDevicesLoaded]);
+  }, [
+    effectiveDeviceLinkDeviceId,
+    selectableDevices,
+    selectableDevicesLoaded,
+    cleanupCrossFilesystemDraftContext,
+  ]);
 
   /**
    * 换设备(#807)。**一并清掉 workingDir 与 extraDirs** —— 上一台机器的路径在新机器上
@@ -1516,33 +1530,12 @@ export function NewMakerDraftRoute() {
       // (它即时可读,不像 state 要等下一次渲染);pill 也会用同步的 sendInFlight 禁用,双保险。
       if (sendInFlightRef.current) return;
       // 点已选中的那一行(包括本机时点「本机」)只是确认当前选择,不该有任何副作用。
-      // 下面会剥 mention chip 并清 workingDir / extraDirs —— 重选同一设备时执行这些,
-      // 等于用户点一下就静默丢掉已选的项目和部分已写好的消息。必须先早返回。
+      // 下面会剥 mention chip、丢路径型附件并清 workingDir / extraDirs —— 重选同一设备时执行这些,
+      // 等于用户点一下就静默丢掉已选的项目、附件和部分已写好的消息。必须先早返回。
       if (deviceId === (effectiveDeviceLinkDeviceId ?? null)) return;
-      // 换机器 = 换文件系统:草稿里已有的 @file / @dir chip 指的是**上一台**机器(或本机)的路径,
-      // 它们会序列化成 MentionedResource 随首条消息发到新设备,在那边指向完全不同的东西。
-      // 「添加远程项目」那条交接路径早就为此调 stripLocalMentionChips,直接切设备这条同样要清。
-      const composerDraft = getComposerDraft(NEW_MAKER_DRAFT_KEY);
-      if (composerDraft?.text) {
-        saveComposerDraft(NEW_MAKER_DRAFT_KEY, {
-          ...composerDraft,
-          text: stripLocalMentionChips(composerDraft.text),
-        });
-      }
-      // 同理,**路径型附件**也留不得(Codex review P1)。attachment-path-passthrough 之后非图片附件
-      // 只把 path 透传给模型(agent 自己用 Read 读),而 rehomeDraftAttachments 只重整图片、非图片
-      // 原样返回 —— 于是上一台机器的路径会随首条消息发到新设备:要么读不到,要么读到同路径下一个
-      // 毫不相关的文件(后者更糟,用户不会发现)。图片走 xdt-image:// 缓存、不依赖对端文件系统,
-      // 行为保持不变。
-      //
-      // 这里给 toast:chip 是可见的文字、重打一次就有,附件从托盘里无声消失只会被当成 bug。
-      const strandedFiles = attachmentState.attachments.filter((f) => f.category !== 'image');
-      if (strandedFiles.length > 0) {
-        for (const f of strandedFiles) attachmentState.removeFile(f.id);
-        toast.info(
-          t('newChat.deviceSwitcher.attachmentsDropped', { count: strandedFiles.length }),
-        );
-      }
+      // 换机器 = 换文件系统:草稿里的 @file / @dir chip 与路径型附件都指着**上一台**机器(或本机)
+      // 的路径,随首条消息发到新设备后在那边指向完全不同的东西。三条换设备路径共用同一清理。
+      cleanupCrossFilesystemDraftContext();
       // 换设备前**同步失效上一台的远程默认值快照**。
       //
       // 不做的话会串台:patchDraft 只改 deviceId,而 dlSel / remoteDraftState / dlSeedKeyRef 仍
@@ -1570,7 +1563,7 @@ export function NewMakerDraftRoute() {
         extraDirs: [],
       });
     },
-    [effectiveDeviceLinkDeviceId, attachmentState, t],
+    [effectiveDeviceLinkDeviceId, cleanupCrossFilesystemDraftContext],
   );
   const handleOpenRemoteProject = useCallback((deviceId?: string) => {
     setAddRemoteProjectDeviceId(deviceId ?? null);

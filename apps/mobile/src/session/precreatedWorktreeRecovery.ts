@@ -7,10 +7,10 @@ import {
 /**
  * 移动端两步建会话的恢复账本。
  *
- * worktree:create 已经在被控端落盘后，手机进程可能在 maker:create-session
- * 回包前被系统杀掉。只把这份很小的「待补偿」元数据放在 AsyncStorage，
- * 不保存草稿、消息、凭证或 worktree 内容；下次同一账号启动并恢复设备链路时，
- * 根部 bridge 会用被控端的窄回收口重试。账本按账号隔离，避免换账号误碰旧设备。
+ * 手机在 worktree:create 前先把 sessionId + recoveryKey 持久化；即使进程在 create
+ * 回包前被系统杀掉，重启后也能让被控端按该随机键解析真实路径并安全回收。拿到
+ * create 回包后再补写 path，兼容旧的 path-only 记录。账本不保存草稿、消息、凭证
+ * 或 worktree 内容，并按账号隔离，避免换账号误碰旧设备。
  */
 
 const STORAGE_KEY_PREFIX = 'xdt.mobile.precreated-worktree-recovery.v1.';
@@ -20,13 +20,28 @@ const MAX_RECORD_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_SESSION_ID_LENGTH = 256;
 const MAX_DEVICE_ID_LENGTH = 256;
 const MAX_PATH_LENGTH = 4_096;
+const MIN_RECOVERY_KEY_LENGTH = 16;
+const MAX_RECOVERY_KEY_LENGTH = 256;
+const RECOVERY_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
 
-export interface PendingPrecreatedWorktree {
+interface PendingPrecreatedWorktreeBase {
   sessionId: string;
   deviceId: string;
-  path: string;
   createdAt: number;
 }
+
+export type PendingPrecreatedWorktree = PendingPrecreatedWorktreeBase & (
+  | {
+      /** create 回包后可用；旧账本只有该定位符。 */
+      path: string;
+      recoveryKey?: string;
+    }
+  | {
+      path?: never;
+      /** create 前持久化的新定位符。 */
+      recoveryKey: string;
+    }
+);
 
 interface StoredRecoveryLedger {
   version: typeof STORAGE_VERSION;
@@ -37,7 +52,9 @@ export interface PrecreatedWorktreeRecoveryDeps {
   openLink: (deviceId: string) => Promise<unknown>;
   discardPrecreated: (
     deviceId: string,
-    input: { sessionId: string; path: string },
+    input:
+      | { sessionId: string; path: string; recoveryKey?: never }
+      | { sessionId: string; recoveryKey: string; path?: never },
   ) => Promise<unknown>;
   /**
    * PRECONDITION_FAILED 既可能表示会话已经认领 worktree，也可能表示
@@ -148,6 +165,15 @@ function readString(value: unknown, maxLength: number): string | null {
     : null;
 }
 
+function readRecoveryKey(value: unknown): string | null {
+  const normalized = readString(value, MAX_RECOVERY_KEY_LENGTH);
+  return normalized
+    && normalized.length >= MIN_RECOVERY_KEY_LENGTH
+    && RECOVERY_KEY_PATTERN.test(normalized)
+    ? normalized
+    : null;
+}
+
 function coerceRecord(
   value: unknown,
   now: number,
@@ -156,14 +182,31 @@ function coerceRecord(
   const sessionId = readString(value.sessionId, MAX_SESSION_ID_LENGTH);
   const deviceId = readString(value.deviceId, MAX_DEVICE_ID_LENGTH);
   const path = readString(value.path, MAX_PATH_LENGTH);
+  const recoveryKey = readRecoveryKey(value.recoveryKey);
   const createdAt =
     typeof value.createdAt === 'number' && Number.isFinite(value.createdAt)
       ? value.createdAt
       : 0;
-  if (!sessionId || !deviceId || !path || createdAt <= 0) return null;
+  if (!sessionId || !deviceId || (!path && !recoveryKey) || createdAt <= 0) return null;
   if (createdAt > now + 5 * 60 * 1000) return null;
   if (now - createdAt > MAX_RECORD_AGE_MS) return null;
-  return { sessionId, deviceId, path, createdAt };
+  const base = {
+    sessionId,
+    deviceId,
+    createdAt,
+  };
+  if (path) {
+    return {
+      ...base,
+      path,
+      ...(recoveryKey ? { recoveryKey } : {}),
+    };
+  }
+  if (!recoveryKey) return null;
+  return {
+    ...base,
+    recoveryKey,
+  };
 }
 
 function normalizeRecords(
@@ -334,7 +377,9 @@ export function isPrecreatedWorktreeRegistrationInFlight(
 
 export async function forgetPendingPrecreatedWorktree(
   accountId: string,
-  target: Pick<PendingPrecreatedWorktree, 'sessionId' | 'path'> & {
+  target: Pick<PendingPrecreatedWorktree, 'sessionId'> & {
+    path?: string;
+    recoveryKey?: string;
     createdAt?: number;
   },
 ): Promise<void> {
@@ -344,10 +389,14 @@ export async function forgetPendingPrecreatedWorktree(
       storageReadable,
     } = await readRecordsUnserialized(accountId);
     const next = current.filter(
-      (item) =>
-        item.sessionId !== target.sessionId ||
-        item.path !== target.path ||
-        (target.createdAt !== undefined && item.createdAt !== target.createdAt),
+      (item) => {
+        if (item.sessionId !== target.sessionId) return true;
+        const locatorMatches = target.recoveryKey !== undefined
+          ? item.recoveryKey === target.recoveryKey
+          : target.path !== undefined && item.path === target.path;
+        if (!locatorMatches) return true;
+        return target.createdAt !== undefined && item.createdAt !== target.createdAt;
+      },
     );
     replaceVolatileRecords(accountId, next);
     if (storageReadable && next.length !== current.length) {
@@ -414,10 +463,19 @@ export async function recoverPendingPrecreatedWorktrees(
       await withTransientRemoteRetry(
         async () => {
           await deps.openLink(record.deviceId);
-          await deps.discardPrecreated(record.deviceId, {
-            sessionId: record.sessionId,
-            path: record.path,
-          });
+          if (typeof record.path === 'string') {
+            await deps.discardPrecreated(record.deviceId, {
+              sessionId: record.sessionId,
+              path: record.path,
+            });
+          } else if (typeof record.recoveryKey === 'string') {
+            await deps.discardPrecreated(record.deviceId, {
+              sessionId: record.sessionId,
+              recoveryKey: record.recoveryKey,
+            });
+          } else {
+            throw new Error('Invalid pre-created worktree recovery record');
+          }
         },
         {
           maxAttempts: 2,

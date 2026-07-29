@@ -23,6 +23,11 @@ export interface WorktreeMeta {
   sourceBranch: string;
   /** ISO 8601 创建时间。 */
   createdAt: string;
+  /**
+   * 手机端在远程落盘前持久化的随机恢复关联键。只用于证明一次预创建恢复请求
+   * 对应本记录；不授予通用删除能力。
+   */
+  recoveryKey?: string;
   /** true = scheduler 创建的临时 worktree，session 关闭时可池化复用而非销毁。 */
   ephemeral?: boolean;
 }
@@ -53,6 +58,8 @@ export interface CreateWorktreeReq {
   baseRepo: string;
   name: string;
   sourceBranch: string;
+  /** 远程两步创建的恢复关联键；本机普通创建不传。 */
+  recoveryKey?: string;
   /** 标记为 ephemeral worktree（scheduler 用），session 关闭时可池化复用。 */
   ephemeral?: boolean;
 }

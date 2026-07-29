@@ -153,10 +153,11 @@ function AuthHandoffBridge() {
 
 /**
  * 预创建 worktree 恢复桥：
- * worktree:create 成功后手机进程可能在 create-session 回包前被系统杀掉，
- * 这时页面 task 已不存在，不能等用户再次进入新建页才补偿。根部在同账号
- * 链路上线 / 回前台时读取小型恢复账本；当前进程仍有创建 task 的记录先跳过，
- * 避免与正常管线竞争，冷启动后再由被控端的 ownership guard 做最后裁决。
+ * 手机在 worktree:create 前已持久化 recoveryKey reservation；进程可能在 create
+ * 或 create-session 回包前被系统杀掉，这时页面 task 已不存在，不能等用户再次
+ * 进入新建页才补偿。根部在同账号链路上线 / 回前台时读取小型恢复账本；当前
+ * 进程仍有创建 task 的记录先跳过，避免与正常管线竞争，冷启动后再由被控端的
+ * 登记匹配与 ownership guard 做最后裁决。
  */
 function PrecreatedWorktreeRecoveryBridge() {
   const auth = useAuth();

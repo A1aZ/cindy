@@ -1091,31 +1091,38 @@ describe('new session worktree wiring (source locks)', () => {
     );
   });
 
-  it('records a volatile obligation before compensating an AsyncStorage failure', () => {
-    const remoteCreate = newSource.indexOf(
-      'maker.worktree.create(buildWorktreeCreateRequest({',
+  it('persists a recoveryKey reservation before allowing remote worktree creation', () => {
+    const hold = newSource.indexOf(
+      'releasePrecreatedRegistration = holdPrecreatedWorktreeRegistration(sessionId);',
     );
-    const register = newSource.indexOf(
-      'await registerPendingPrecreatedWorktree(worktreeAccountId',
-      remoteCreate,
+    const reservation = newSource.indexOf(
+      'const reservationRecorded = await registerPendingPrecreatedWorktree(',
+      hold,
     );
     const failedPersistence = newSource.indexOf(
-      'if (!recoveryRecorded)',
-      register,
+      'if (!reservationRecorded)',
+      reservation,
     );
-    const discard = newSource.indexOf(
-      'await maker.worktree.discardPrecreated({',
+    const remoteCreate = newSource.indexOf(
+      'maker.worktree.create(buildWorktreeCreateRequest({',
       failedPersistence,
     );
 
-    expect(register).toBeGreaterThan(remoteCreate);
-    expect(failedPersistence).toBeGreaterThan(register);
-    expect(discard).toBeGreaterThan(failedPersistence);
-    expect(newSource.slice(failedPersistence, discard)).toContain(
-      'let discarded = false;',
+    expect(hold).toBeGreaterThan(-1);
+    expect(reservation).toBeGreaterThan(hold);
+    expect(failedPersistence).toBeGreaterThan(reservation);
+    expect(remoteCreate).toBeGreaterThan(failedPersistence);
+    expect(newSource.slice(failedPersistence, remoteCreate)).toContain(
+      "setError(t('session.new.worktreeRecoveryStateFailed'))",
     );
-    expect(newSource.slice(discard, discard + 900)).toContain(
-      "'session.new.worktreeCleanupPending'",
+    expect(newSource.slice(remoteCreate, remoteCreate + 500)).toContain(
+      'recoveryKey,',
+    );
+    expect(newSource.slice(remoteCreate, remoteCreate + 1_500)).not.toContain(
+      'maker.worktree.discardPrecreated',
+    );
+    expect(newSource.slice(remoteCreate, remoteCreate + 2_500)).toContain(
+      "setError(t('session.new.worktreeCleanupPending'))",
     );
   });
 
@@ -1123,6 +1130,7 @@ describe('new session worktree wiring (source locks)', () => {
     expect(newSource).toContain('const worktreeEligibility = worktreeEligibilityForTarget(worktreeProbe, {');
     expect(newSource).toContain('deviceId: selectedDeviceId ??');
     expect(newSource).toContain('precreatedWorktree = {');
+    expect(newSource).toContain('recoveryKey,');
     expect(newSource).toContain('originalWorkingDir: effectiveDraft.workingDir,');
     expect(newSource).toContain('precreatedWorktree,');
   });

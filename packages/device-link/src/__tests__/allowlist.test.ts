@@ -178,8 +178,9 @@ describe('REMOTE_INVOKE_ALLOWLIST', () => {
       expect(REMOTE_INVOKE_ALLOWLIST.has(ch)).toBe(true);
     }
     // 通用删除与 reveal 不放行：discard-precreated 只接受 sessionId + 已登记的
-    // 精确 path，并由被控端复核 ownership/dirty/live refs；其余删除仍只在被控端
-    // 状态变更流程内部触发。reveal 是本机 shell 副作用(shell.showItemInFolder)。
+    // 精确 path，或 create 前已持久化且与被控端元数据匹配的 recoveryKey，并由
+    // 被控端复核 ownership/dirty/live refs；其余删除仍只在被控端状态变更流程
+    // 内部触发。reveal 是本机 shell 副作用(shell.showItemInFolder)。
     expect(REMOTE_INVOKE_ALLOWLIST.has('worktree:reveal')).toBe(false);
     expect(REMOTE_INVOKE_ALLOWLIST.has('worktree:get-for-session')).toBe(false);
     expect(REMOTE_INVOKE_ALLOWLIST.has('worktree:list-all')).toBe(false);

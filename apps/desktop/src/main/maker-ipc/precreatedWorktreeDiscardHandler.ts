@@ -3,8 +3,8 @@
  *
  * 手机/桌面控制端的远程新建流程会先用预生成 sessionId 创建 worktree，再调用
  * maker:create-session。只有第二步确定失败、用户明确放弃并返回编辑时才调用本口。
- * handler 只编排身份、参数、session ownership 与互斥；路径/dirty/分支安全裁决仍由
- * WorktreeManager.discardPrecreatedWorktree 负责。
+ * handler 只编排身份、参数、session ownership 与互斥；path / recoveryKey 的登记匹配、
+ * dirty 与分支安全裁决仍由 WorktreeManager 负责。
  */
 import type { DiscardPrecreatedWorktreeResult } from '../worktree/WorktreeManager.js';
 import { requireObject, requireString, throwIpcError } from '../utils/ipcValidate.js';
@@ -14,6 +14,7 @@ export const WORKTREE_DISCARD_PRECREATED_CHANNEL = 'worktree:discard-precreated'
 
 const MAX_SESSION_ID_LENGTH = 256;
 const MAX_EXPECTED_PATH_LENGTH = 4_096;
+const MAX_RECOVERY_KEY_LENGTH = 256;
 
 export interface PrecreatedWorktreeDiscardHandlerDeps {
   assertCaller(event: unknown): void;
@@ -23,6 +24,11 @@ export interface PrecreatedWorktreeDiscardHandlerDeps {
   discard(
     sessionId: string,
     expectedPath: string,
+    options: { canRemove: () => Promise<boolean> },
+  ): Promise<DiscardPrecreatedWorktreeResult>;
+  discardByRecoveryKey(
+    sessionId: string,
+    recoveryKey: string,
     options: { canRemove: () => Promise<boolean> },
   ): Promise<DiscardPrecreatedWorktreeResult>;
 }
@@ -47,10 +53,22 @@ export function registerPrecreatedWorktreeDiscardHandler(
     deps.assertCaller(event);
     const body = requireObject(raw, 'discard pre-created worktree request');
     const sessionId = requireString(body.sessionId, 'sessionId');
-    const expectedPath = requireString(body.path, 'path');
+    const hasPath = body.path !== undefined;
+    const hasRecoveryKey = body.recoveryKey !== undefined;
+    if (hasPath === hasRecoveryKey) {
+      throwIpcError(
+        'INVALID_PARAMS',
+        'discard pre-created worktree requires exactly one recovery locator',
+      );
+    }
+    const expectedPath = hasPath ? requireString(body.path, 'path') : null;
+    const recoveryKey = hasRecoveryKey
+      ? requireString(body.recoveryKey, 'recoveryKey')
+      : null;
     if (
       sessionId.length > MAX_SESSION_ID_LENGTH ||
-      expectedPath.length > MAX_EXPECTED_PATH_LENGTH
+      (expectedPath !== null && expectedPath.length > MAX_EXPECTED_PATH_LENGTH) ||
+      (recoveryKey !== null && recoveryKey.length > MAX_RECOVERY_KEY_LENGTH)
     ) {
       throwIpcError('INVALID_PARAMS', 'discard pre-created worktree request is too large');
     }
@@ -62,10 +80,17 @@ export function registerPrecreatedWorktreeDiscardHandler(
 
       let result: DiscardPrecreatedWorktreeResult;
       try {
-        result = await deps.discard(sessionId, expectedPath, {
+        const options = {
           // WorktreeManager 在真正删除前再次调用，封住 ownership 查询后的竞态窗口。
           canRemove: async () => !(await readSessionClaimed(deps, sessionId)),
-        });
+        };
+        if (expectedPath !== null) {
+          result = await deps.discard(sessionId, expectedPath, options);
+        } else if (recoveryKey !== null) {
+          result = await deps.discardByRecoveryKey(sessionId, recoveryKey, options);
+        } else {
+          throwIpcError('INVALID_PARAMS', 'discard pre-created worktree locator is missing');
+        }
       } catch {
         throwIpcError('INTERNAL', '预创建 worktree 回收失败');
       }

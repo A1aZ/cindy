@@ -32,6 +32,12 @@ const RECORD = {
   path: '/repo/.cindy-worktrees/auto-one',
   createdAt: Date.now() - 100,
 };
+const RESERVATION = {
+  sessionId: 'session-reserved',
+  deviceId: 'device-1',
+  recoveryKey: 'recovery-key-1234567890',
+  createdAt: Date.now() - 100,
+};
 
 describe('precreated worktree recovery ledger', () => {
   beforeEach(async () => {
@@ -81,6 +87,87 @@ describe('precreated worktree recovery ledger', () => {
     await expect(
       listPendingPrecreatedWorktrees('account-b'),
     ).resolves.toHaveLength(1);
+  });
+
+  it('persists a pathless reservation and recovers it by recoveryKey after a process restart', async () => {
+    await expect(
+      registerPendingPrecreatedWorktree(ACCOUNT, RESERVATION),
+    ).resolves.toBe(true);
+
+    // 清掉所有进程内镜像，模拟 App 被系统杀掉后重新启动。
+    __testing.resetVolatileLedgers();
+    await expect(listPendingPrecreatedWorktrees(ACCOUNT)).resolves.toEqual([
+      RESERVATION,
+    ]);
+
+    const discardPrecreated = vi.fn(async () => ({ discarded: true }));
+    await expect(
+      recoverPendingPrecreatedWorktrees(ACCOUNT, {
+        openLink: vi.fn(async () => undefined),
+        discardPrecreated,
+        isSessionClaimed: vi.fn(async () => false),
+        sleep: async () => undefined,
+      }),
+    ).resolves.toMatchObject({
+      attempted: 1,
+      recovered: 1,
+      retained: 0,
+      storageReadable: true,
+    });
+    expect(discardPrecreated).toHaveBeenCalledWith('device-1', {
+      sessionId: RESERVATION.sessionId,
+      recoveryKey: RESERVATION.recoveryKey,
+    });
+    await expect(listPendingPrecreatedWorktrees(ACCOUNT)).resolves.toEqual([]);
+  });
+
+  it('upgrades a reservation with the create response path and forgets it by recoveryKey identity', async () => {
+    await registerPendingPrecreatedWorktree(ACCOUNT, RESERVATION);
+    await registerPendingPrecreatedWorktree(ACCOUNT, {
+      ...RESERVATION,
+      path: RECORD.path,
+    });
+
+    await expect(listPendingPrecreatedWorktrees(ACCOUNT)).resolves.toEqual([{
+      ...RESERVATION,
+      path: RECORD.path,
+    }]);
+    await forgetPendingPrecreatedWorktree(ACCOUNT, {
+      sessionId: RESERVATION.sessionId,
+      recoveryKey: RESERVATION.recoveryKey,
+      createdAt: RESERVATION.createdAt,
+    });
+    await expect(listPendingPrecreatedWorktrees(ACCOUNT)).resolves.toEqual([]);
+  });
+
+  it('keeps the durable pathless reservation when the post-create path update fails', async () => {
+    await expect(
+      registerPendingPrecreatedWorktree(ACCOUNT, RESERVATION),
+    ).resolves.toBe(true);
+    asyncStorage.setItem.mockRejectedValueOnce(new Error('disk unavailable'));
+    await expect(
+      registerPendingPrecreatedWorktree(ACCOUNT, {
+        ...RESERVATION,
+        path: RECORD.path,
+      }),
+    ).resolves.toBe(false);
+
+    // App 退出会丢掉带 path 的 volatile 镜像；磁盘上的首次 reservation 仍可恢复。
+    __testing.resetVolatileLedgers();
+    await expect(listPendingPrecreatedWorktrees(ACCOUNT)).resolves.toEqual([
+      RESERVATION,
+    ]);
+    const discardPrecreated = vi.fn(async () => ({ discarded: true }));
+    await recoverPendingPrecreatedWorktrees(ACCOUNT, {
+      openLink: vi.fn(async () => undefined),
+      discardPrecreated,
+      isSessionClaimed: vi.fn(async () => false),
+      sleep: async () => undefined,
+    });
+    expect(discardPrecreated).toHaveBeenCalledWith('device-1', {
+      sessionId: RESERVATION.sessionId,
+      recoveryKey: RESERVATION.recoveryKey,
+    });
   });
 
   it('marks registration in flight so startup recovery cannot race the write', async () => {

@@ -6,8 +6,8 @@
  * 都收口到这里。
  *
  * removeWorktreeForSession 不暴露通用删除 IPC；唯一远程例外是
- * discardPrecreatedWorktree，它只回收「会话尚未落库」且路径与 create 回包精确匹配的
- * 预创建 worktree，调用方还必须注入实时 ownership guard。
+ * discardPrecreatedWorktree，它只回收「会话尚未落库」且 path 或 recoveryKey 与创建
+ * 记录精确匹配的预创建 worktree，调用方还必须注入实时 ownership guard。
  */
 
 import path from 'node:path';
@@ -101,6 +101,10 @@ async function timed<T>(label: string, fn: () => Promise<T>): Promise<T> {
 }
 
 const createWorktreeQueues = new Map<string, Promise<void>>();
+const precreatedWorktreeOperationQueues = new Map<string, Promise<void>>();
+const MIN_RECOVERY_KEY_LENGTH = 16;
+const MAX_RECOVERY_KEY_LENGTH = 256;
+const RECOVERY_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 async function withCreateWorktreeQueue<T>(baseRepo: string, fn: () => Promise<T>): Promise<T> {
   const key = path.resolve(baseRepo);
@@ -119,6 +123,34 @@ async function withCreateWorktreeQueue<T>(baseRepo: string, fn: () => Promise<T>
     releaseCurrent();
     if (createWorktreeQueues.get(key) === queued) {
       createWorktreeQueues.delete(key);
+    }
+  }
+}
+
+/**
+ * recoveryKey 创建与按键回收必须按 sessionId 串行：手机可能在 create 回包前退出并
+ * 很快重连，若回收在 create 最后的 store.set 之前把“暂时 absent”当成功，create
+ * 随后仍会落下一份已失去手机账本的孤儿记录。
+ */
+async function withPrecreatedWorktreeOperationQueue<T>(
+  sessionId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const previous = precreatedWorktreeOperationQueues.get(sessionId) ?? Promise.resolve();
+  let releaseCurrent!: () => void;
+  const current = new Promise<void>((resolve) => {
+    releaseCurrent = resolve;
+  });
+  const queued = previous.then(() => current, () => current);
+  precreatedWorktreeOperationQueues.set(sessionId, queued);
+
+  await previous.catch(() => {});
+  try {
+    return await fn();
+  } finally {
+    releaseCurrent();
+    if (precreatedWorktreeOperationQueues.get(sessionId) === queued) {
+      precreatedWorktreeOperationQueues.delete(sessionId);
     }
   }
 }
@@ -484,7 +516,13 @@ export async function copyClaudeSiviDirs(
 export async function createWorktree(
   req: CreateWorktreeReq,
 ): Promise<CreateWorktreeResp> {
-  return withCreateWorktreeQueue(req.baseRepo, () => createWorktreeInner(req));
+  const create = () => withCreateWorktreeQueue(
+    req.baseRepo,
+    () => createWorktreeInner(req),
+  );
+  return req.recoveryKey === undefined
+    ? create()
+    : withPrecreatedWorktreeOperationQueue(req.sessionId, create);
 }
 
 async function createWorktreeInner(
@@ -505,6 +543,26 @@ async function createWorktreeInner(
           kind: 'unknown',
           message: `worktree 名称非法: ${nameError}`,
           hint: `示例合法值: pensive-lederberg, auto-3l9k0c`,
+        },
+      };
+    }
+    const recoveryKey = typeof req.recoveryKey === 'string'
+      ? req.recoveryKey.trim()
+      : null;
+    if (
+      req.recoveryKey !== undefined
+      && (
+        !recoveryKey
+        || recoveryKey.length < MIN_RECOVERY_KEY_LENGTH
+        || recoveryKey.length > MAX_RECOVERY_KEY_LENGTH
+        || !RECOVERY_KEY_PATTERN.test(recoveryKey)
+      )
+    ) {
+      return {
+        ok: false,
+        error: {
+          kind: 'unknown',
+          message: 'worktree 恢复关联键非法',
         },
       };
     }
@@ -667,6 +725,7 @@ async function createWorktreeInner(
       branch,
       sourceBranch: req.sourceBranch,
       createdAt: nowIso(),
+      ...(recoveryKey ? { recoveryKey } : {}),
       ephemeral: req.ephemeral ?? false,
     };
     await timed('persist metadata', () => store.set(req.sessionId, meta));
@@ -907,6 +966,26 @@ export type DiscardPrecreatedWorktreeResult =
   | { status: 'path-mismatch' }
   | { status: 'preserved' }
   | { status: 'discarded'; branchDeleted: boolean };
+
+/**
+ * 手机在 worktree:create 之前先持久化 sessionId + recoveryKey；若进程在 create
+ * 回包前退出，恢复端拿不到 path。这里仅在随机关联键与被控端持久元数据精确匹配时
+ * 解析真实路径，再复用同一套 path / dirty / ownership 删除守卫。
+ */
+export async function discardPrecreatedWorktreeByRecoveryKey(
+  sessionId: string,
+  recoveryKey: string,
+  options: Pick<RemoveWorktreeOptions, 'canRemove'> = {},
+): Promise<DiscardPrecreatedWorktreeResult> {
+  return withPrecreatedWorktreeOperationQueue(sessionId, async () => {
+    const meta = store.get(sessionId);
+    if (!meta) return { status: 'absent' };
+    if (!meta.recoveryKey || meta.recoveryKey !== recoveryKey) {
+      return { status: 'path-mismatch' };
+    }
+    return discardPrecreatedWorktree(sessionId, meta.path, options);
+  });
+}
 
 /**
  * 回收「先 worktree:create、后 maker:create-session」中第二步失败后被放弃的预创建目录。

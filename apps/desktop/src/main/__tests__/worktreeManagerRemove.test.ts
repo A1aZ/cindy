@@ -422,6 +422,81 @@ describe('removeWorktreeForSession', () => {
     expect(storeMap.get('s1')).toBe(meta);
   });
 
+  it('discard pre-created: recovery waits for an in-flight create before deciding the record is absent', async () => {
+    let releaseGitVersion!: () => void;
+    gitExecMock.mockImplementationOnce(
+      () => new Promise<{ stdout: string; stderr: string }>((resolve) => {
+        releaseGitVersion = () => resolve({
+          stdout: 'git version 2.50.0\n',
+          stderr: '',
+        });
+      }),
+    );
+    const recoveryKey = 'recovery-key-123456';
+    const create = manager.createWorktree({
+      sessionId: 's1',
+      baseRepo: BASE_REPO,
+      name: 'recovery-race',
+      sourceBranch: 'main',
+      recoveryKey,
+    });
+    await vi.waitFor(() => {
+      expect(gitExecMock).toHaveBeenCalledWith(['--version']);
+    });
+
+    let discardSettled = false;
+    const discard = manager
+      .discardPrecreatedWorktreeByRecoveryKey('s1', recoveryKey)
+      .finally(() => {
+        discardSettled = true;
+      });
+    await Promise.resolve();
+    expect(discardSettled).toBe(false);
+
+    releaseGitVersion();
+    await expect(create).resolves.toMatchObject({ ok: false });
+    await expect(discard).resolves.toEqual({ status: 'absent' });
+  });
+
+  it('discard pre-created: a matching recovery key resolves the registered path and reuses cleanup guards', async () => {
+    const meta = {
+      ...makeMeta('s1'),
+      recoveryKey: 'recovery-key-123456',
+    };
+    storeMap.set('s1', meta);
+    const canRemove = vi.fn(async () => false);
+
+    await expect(
+      manager.discardPrecreatedWorktreeByRecoveryKey(
+        's1',
+        meta.recoveryKey,
+        { canRemove },
+      ),
+    ).resolves.toEqual({ status: 'preserved' });
+
+    expect(canRemove).toHaveBeenCalledTimes(1);
+    expect(gitExecMock).not.toHaveBeenCalled();
+    expect(storeMap.get('s1')).toBe(meta);
+  });
+
+  it('discard pre-created: a mismatched recovery key is non-destructive', async () => {
+    const meta = {
+      ...makeMeta('s1'),
+      recoveryKey: 'recovery-key-123456',
+    };
+    storeMap.set('s1', meta);
+
+    await expect(
+      manager.discardPrecreatedWorktreeByRecoveryKey(
+        's1',
+        'different-key-123456',
+      ),
+    ).resolves.toEqual({ status: 'path-mismatch' });
+
+    expect(gitExecMock).not.toHaveBeenCalled();
+    expect(storeMap.get('s1')).toBe(meta);
+  });
+
   it('discard pre-created: dirty worktrees are preserved without auto-stashing', async () => {
     const meta = makeMeta('s1');
     storeMap.set('s1', meta);

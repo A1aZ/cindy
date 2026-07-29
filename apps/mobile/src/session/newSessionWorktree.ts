@@ -162,6 +162,7 @@ export interface WorktreeCreateRequest {
   baseRepo: string;
   name: string;
   sourceBranch: string;
+  recoveryKey: string;
 }
 
 /** 组装 worktree:create 入参(第一步;第二步 createSession 复用同 sessionId + meta.path)。 */
@@ -169,6 +170,7 @@ export function buildWorktreeCreateRequest(input: {
   sessionId: string;
   eligibility: Extract<NewSessionWorktreeEligibility, { status: 'eligible' }>;
   suggestedName: string | null | undefined;
+  recoveryKey: string;
   now?: number;
 }): WorktreeCreateRequest {
   return {
@@ -176,6 +178,7 @@ export function buildWorktreeCreateRequest(input: {
     baseRepo: input.eligibility.baseRepo,
     name: normalizeSuggestedWorktreeName(input.suggestedName, input.now),
     sourceBranch: input.eligibility.sourceBranch,
+    recoveryKey: input.recoveryKey,
   };
 }
 

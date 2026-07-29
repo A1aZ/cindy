@@ -405,9 +405,11 @@ const EXTENDED_INVOKE_CHANNELS: readonly string[] = [
   // 层过 remote-workdir-guard 同款收敛(见 dispatch.ts PATH_GUARDED)。device-link
   // 已是同账号 + remoteControlEnabled 显式 opt-in,控制端本就能在项目目录跑 agent
   // (任意 exec),不扩大攻击面。removal-preview 只读、用于删除前警告；通用删除路径仍不放行。
-  // discard-precreated 是唯一窄删除例外：只收 sessionId + create 回包的精确 path，被控端
-  // 重新核对 store 归属、无 DB/live session、无 dirty/keep/live-ref 后才删，且与
-  // maker:create-session 共用 session 锁，专门补偿两步创建的失败窗口。
+  // discard-precreated 是唯一窄删除例外：常规收 sessionId + create 回包的精确 path；
+  // 若手机在 create 回包前退出，则收其在 create 前已持久化、并与被控端 worktree
+  // 元数据精确匹配的随机 recoveryKey。两路都重新核对 store 归属、无 DB/live
+  // session、无 dirty/keep/live-ref 后才删；recoveryKey create/discard 另按 sessionId
+  // 串行，且本口与 maker:create-session 共用 session 锁，专门补偿两步创建的失败窗口。
   // 老被控端无这些 channel → CHANNEL_NOT_ALLOWED → 控制端按对应能力降级。
   'worktree:detect-cwd',
   'worktree:list-branches',

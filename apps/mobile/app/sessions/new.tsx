@@ -2575,6 +2575,7 @@ export default function NewRemoteSessionScreen() {
       const sessionId = createNewSessionId();
       let precreatedWorktree: {
         path: string;
+        recoveryKey: string;
         originalWorkingDir: string;
         createdAt?: number;
       } | undefined;
@@ -2590,58 +2591,60 @@ export default function NewRemoteSessionScreen() {
             .suggestName(worktreeEligibility.baseRepo)
             .then((result) => result.name)
             .catch(() => null);
+          const recoveryKey = createNewSessionId();
+          const createdAt = Date.now();
+          releasePrecreatedRegistration = holdPrecreatedWorktreeRegistration(sessionId);
+          // reservation 必须先于远端副作用持久化。首次写盘失败时绝不调用
+          // worktree:create；volatile 镜像只负责阻止本进程继续制造第二个孤儿，
+          // 不能冒充跨进程保证。
+          const reservationRecorded = await registerPendingPrecreatedWorktree(
+            worktreeAccountId,
+            {
+              sessionId,
+              deviceId: selectedDeviceId,
+              recoveryKey,
+              createdAt,
+            },
+          );
+          if (!reservationRecorded) {
+            setError(t('session.new.worktreeRecoveryStateFailed'));
+            return;
+          }
           const resp = await maker.worktree.create(buildWorktreeCreateRequest({
             sessionId,
             eligibility: worktreeEligibility,
             suggestedName: suggested,
+            recoveryKey,
           }));
           if (!resp.ok) {
+            await forgetPendingPrecreatedWorktree(worktreeAccountId, {
+              sessionId,
+              recoveryKey,
+              createdAt,
+            });
             setError(formatWorktreeCreateFailure(resp.error));
             return;
           }
-          const createdAt = Date.now();
           precreatedWorktree = {
             path: resp.meta.path,
+            recoveryKey,
             originalWorkingDir: effectiveDraft.workingDir,
             createdAt,
           };
-          releasePrecreatedRegistration = holdPrecreatedWorktreeRegistration(sessionId);
-          const recoveryRecorded = await registerPendingPrecreatedWorktree(worktreeAccountId, {
+          // 回包后尽力把 path 补到账本；即使这次更新失败，首次已确认落盘的
+          // recoveryKey reservation 仍足够让重启后的进程从被控端解析真实路径。
+          await registerPendingPrecreatedWorktree(worktreeAccountId, {
             sessionId,
             deviceId: selectedDeviceId,
             path: precreatedWorktree.path,
+            recoveryKey,
             createdAt,
           });
-          if (!recoveryRecorded) {
-            // register 已先留下 volatile ledger。持久写失败时立即补偿；成功则
-            // 清掉内存 obligation，失败则保留并由重连 / 下次发送先恢复。
-            let discarded = false;
-            try {
-              await maker.worktree.discardPrecreated({
-                sessionId,
-                path: precreatedWorktree.path,
-              });
-              discarded = true;
-              await forgetPendingPrecreatedWorktree(worktreeAccountId, {
-                sessionId,
-                path: precreatedWorktree.path,
-                createdAt,
-              });
-            } catch {
-              // volatile ledger 保留，不能吞掉后继续生成第二份 worktree。
-            }
-            setError(
-              t(
-                discarded
-                  ? 'session.new.worktreeRecoveryStateFailed'
-                  : 'session.new.worktreeCleanupPending',
-              ),
-            );
-            return;
-          }
           effectiveDraft = { ...effectiveDraft, workingDir: resp.meta.path };
-        } catch (err) {
-          setError(t('session.new.worktreeCreateFailed', { message: formatRemoteError(err) }));
+        } catch {
+          // invoke 抛错时无法判断工作端是否已经完成创建；保留 reservation，
+          // 交给当前进程重连或下次冷启动按 recoveryKey 精确对账。
+          setError(t('session.new.worktreeCleanupPending'));
           return;
         }
       }

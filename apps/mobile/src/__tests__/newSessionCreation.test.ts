@@ -396,6 +396,7 @@ describe('newSessionCreation pipeline', () => {
       },
       precreatedWorktree: {
         path: '/repo/.cindy-worktrees/auto-one',
+        recoveryKey: 'recovery-key-1234567890',
         originalWorkingDir: '/repo',
       },
     });
@@ -437,6 +438,7 @@ describe('newSessionCreation pipeline', () => {
       },
       precreatedWorktree: {
         path: '/repo/.cindy-worktrees/auto-two',
+        recoveryKey: 'recovery-key-1234567890',
         originalWorkingDir: '/repo',
       },
     }));
@@ -468,6 +470,7 @@ describe('newSessionCreation pipeline', () => {
       },
       precreatedWorktree: {
         path: '/repo/.cindy-worktrees/auto-three',
+        recoveryKey: 'recovery-key-1234567890',
         originalWorkingDir: '/repo',
       },
     }));
@@ -505,6 +508,7 @@ describe('newSessionCreation pipeline', () => {
       draft: { ...DRAFT, workingDir: worktreePath },
       precreatedWorktree: {
         path: worktreePath,
+        recoveryKey: 'recovery-key-1234567890',
         originalWorkingDir: '/repo',
       },
     }));

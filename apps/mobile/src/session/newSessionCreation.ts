@@ -81,8 +81,9 @@ export interface NewSessionCreationParams {
    */
   precreatedWorktree?: {
     path: string;
+    recoveryKey: string;
     originalWorkingDir: string;
-    /** 持久恢复账本中的创建时间；老调用方缺失时按 session + path 匹配。 */
+    /** 持久恢复账本中的创建时间。 */
     createdAt?: number;
   };
   /** 与预创建 worktree 账本绑定的账号；空值表示旧调用方不启用持久清理。 */
@@ -111,6 +112,7 @@ export interface NewSessionCreationTask {
   readonly firstMessageClientId: string;
   readonly precreatedWorktree?: {
     path: string;
+    recoveryKey: string;
     originalWorkingDir: string;
     createdAt?: number;
   };
@@ -315,7 +317,7 @@ async function reconcileClaimedSessionForEdit(task: InternalTask): Promise<boole
   if (accountId && task.precreatedWorktree) {
     await forgetPendingPrecreatedWorktree(accountId, {
       sessionId: task.sessionId,
-      path: task.precreatedWorktree.path,
+      recoveryKey: task.precreatedWorktree.recoveryKey,
       ...(task.precreatedWorktree.createdAt !== undefined
         ? { createdAt: task.precreatedWorktree.createdAt }
         : {}),
@@ -367,7 +369,7 @@ export async function prepareNewSessionCreationForEdit(
     if (cleanupAccepted && accountId) {
       await forgetPendingPrecreatedWorktree(accountId, {
         sessionId,
-        path: precreated.path,
+        recoveryKey: precreated.recoveryKey,
         ...(precreated.createdAt !== undefined ? { createdAt: precreated.createdAt } : {}),
       });
     }
@@ -470,7 +472,7 @@ function forgetPrecreatedRecoveryRecord(task: InternalTask): void {
   if (!precreated || !accountId) return;
   void forgetPendingPrecreatedWorktree(accountId, {
     sessionId: task.sessionId,
-    path: precreated.path,
+    recoveryKey: precreated.recoveryKey,
     ...(precreated.createdAt !== undefined ? { createdAt: precreated.createdAt } : {}),
   }).catch(() => undefined);
 }

@@ -325,7 +325,7 @@ export interface MobileWorktreeDetectCwdResult {
   repoRoot?: string;
 }
 
-/** 工作端 worktree:create 元信息(形状对齐被控端 WorktreeMeta,手机只消费 path)。 */
+/** 工作端 worktree:create 元信息(形状对齐被控端 WorktreeMeta)。 */
 export interface MobileWorktreeMeta {
   sessionId: string;
   name: string;
@@ -334,6 +334,7 @@ export interface MobileWorktreeMeta {
   branch: string;
   sourceBranch: string;
   createdAt: string;
+  recoveryKey?: string;
 }
 
 /** 工作端 worktree:create 回包(error.message 为被控端生成的可展示文案)。 */
@@ -438,15 +439,17 @@ export interface MobileMakerTransport {
       baseRepo: string;
       name: string;
       sourceBranch: string;
+      recoveryKey: string;
     }): Promise<MobileWorktreeCreateResult>;
     /**
      * 两步创建的第二步确定失败、用户放弃返回编辑时，补偿回收尚未被 session 认领的
-     * 精确 worktree。被控端会再次校验 sessionId/path/dirty/live ownership。
+     * 精确 worktree。create 回包前恢复时可改用预先持久化的 recoveryKey；被控端会再次
+     * 校验登记匹配、dirty 与 live ownership。
      */
-    discardPrecreated(input: {
-      sessionId: string;
-      path: string;
-    }): Promise<{ discarded: true; branchDeleted?: boolean }>;
+    discardPrecreated(input:
+      | { sessionId: string; path: string; recoveryKey?: never }
+      | { sessionId: string; recoveryKey: string; path?: never }
+    ): Promise<{ discarded: true; branchDeleted?: boolean }>;
   };
   listAgentCommands(agentKind: MobileAgentKind): Promise<MobileAgentCommandListResult>;
   /** 被控端 desktop 自有 slash 命令清单(palette 展示;移动端只放行可执行子集)。 */

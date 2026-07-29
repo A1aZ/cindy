@@ -178,16 +178,18 @@ describe('worktree 名与 create 入参', () => {
     expect(fallbackWorktreeName(now)).toBe(`auto-${now.toString(36).slice(-6)}`);
   });
 
-  it('buildWorktreeCreateRequest 组装 sessionId + baseRepo + name + sourceBranch', () => {
+  it('buildWorktreeCreateRequest 组装 sessionId + baseRepo + name + sourceBranch + recoveryKey', () => {
     expect(buildWorktreeCreateRequest({
       sessionId: 's-1',
       eligibility: { status: 'eligible', baseRepo: '/repo/root', sourceBranch: 'develop' },
       suggestedName: 'fix-login',
+      recoveryKey: 'recovery-key-1234567890',
     })).toEqual({
       sessionId: 's-1',
       baseRepo: '/repo/root',
       name: 'fix-login',
       sourceBranch: 'develop',
+      recoveryKey: 'recovery-key-1234567890',
     });
   });
 
@@ -196,6 +198,7 @@ describe('worktree 名与 create 入参', () => {
       sessionId: 's-1',
       eligibility: { status: 'eligible', baseRepo: '/repo/root', sourceBranch: 'main' },
       suggestedName: null,
+      recoveryKey: 'recovery-key-1234567890',
       now: 1_750_000_000_000,
     });
     expect(request.name).toMatch(/^auto-[a-z0-9]{1,6}$/);

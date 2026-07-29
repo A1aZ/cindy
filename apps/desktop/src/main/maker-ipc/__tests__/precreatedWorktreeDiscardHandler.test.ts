@@ -18,6 +18,10 @@ function createDeps(
       status: 'discarded' as const,
       branchDeleted: true,
     })),
+    discardByRecoveryKey: vi.fn(async () => ({
+      status: 'discarded' as const,
+      branchDeleted: true,
+    })),
     ...overrides,
   };
 }
@@ -35,6 +39,30 @@ describe('worktree:discard-precreated IPC handler', () => {
     expect(deps.assertCaller).toHaveBeenCalledTimes(1);
     expect(deps.isSessionClaimed).not.toHaveBeenCalled();
     expect(deps.discard).not.toHaveBeenCalled();
+    expect(deps.discardByRecoveryKey).not.toHaveBeenCalled();
+  });
+
+  it('requires exactly one valid path or recoveryKey locator', async () => {
+    const harness = new IpcHarness();
+    const deps = createDeps();
+    registerPrecreatedWorktreeDiscardHandler(harness, deps);
+
+    for (const payload of [
+      { sessionId: 'session-1' },
+      {
+        sessionId: 'session-1',
+        path: '/repo/.cindy-worktrees/one',
+        recoveryKey: 'recovery-key-123456',
+      },
+      { sessionId: 'session-1', recoveryKey: 123 },
+    ]) {
+      await expect(
+        harness.invoke(WORKTREE_DISCARD_PRECREATED_CHANNEL, payload),
+      ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    }
+
+    expect(deps.discard).not.toHaveBeenCalled();
+    expect(deps.discardByRecoveryKey).not.toHaveBeenCalled();
   });
 
   it('runs the ownership check and discard under the shared session lock', async () => {
@@ -75,6 +103,34 @@ describe('worktree:discard-precreated IPC handler', () => {
     ]);
   });
 
+  it('routes a recoveryKey locator through the same ownership lock and guard', async () => {
+    const harness = new IpcHarness();
+    const recoveryKey = 'recovery-key-123456';
+    const discardByRecoveryKey = vi.fn(
+      async (_sessionId, _recoveryKey, options) => {
+        expect(await options.canRemove()).toBe(true);
+        return { status: 'discarded' as const, branchDeleted: false };
+      },
+    );
+    const deps = createDeps({ discardByRecoveryKey });
+    registerPrecreatedWorktreeDiscardHandler(harness, deps);
+
+    await expect(
+      harness.invoke(WORKTREE_DISCARD_PRECREATED_CHANNEL, {
+        sessionId: 'session-1',
+        recoveryKey,
+      }),
+    ).resolves.toEqual({ discarded: true, branchDeleted: false });
+
+    expect(discardByRecoveryKey).toHaveBeenCalledWith(
+      'session-1',
+      recoveryKey,
+      expect.objectContaining({ canRemove: expect.any(Function) }),
+    );
+    expect(deps.discard).not.toHaveBeenCalled();
+    expect(deps.isSessionClaimed).toHaveBeenCalledTimes(2);
+  });
+
   it('fails closed when the session is already claimed', async () => {
     const harness = new IpcHarness();
     const deps = createDeps({
@@ -104,6 +160,22 @@ describe('worktree:discard-precreated IPC handler', () => {
         path: '/untrusted/path',
       }),
     ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+  });
+
+  it('maps a recoveryKey mismatch to a permission error without falling back to path deletion', async () => {
+    const harness = new IpcHarness();
+    const deps = createDeps({
+      discardByRecoveryKey: vi.fn(async () => ({ status: 'path-mismatch' as const })),
+    });
+    registerPrecreatedWorktreeDiscardHandler(harness, deps);
+
+    await expect(
+      harness.invoke(WORKTREE_DISCARD_PRECREATED_CHANNEL, {
+        sessionId: 'session-1',
+        recoveryKey: 'wrong-recovery-key-123456',
+      }),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    expect(deps.discard).not.toHaveBeenCalled();
   });
 
   it('preserves dirty, kept, or live-referenced worktrees', async () => {

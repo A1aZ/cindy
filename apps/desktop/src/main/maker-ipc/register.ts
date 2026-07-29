@@ -4563,6 +4563,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
     discard: (sessionId, expectedPath, options) =>
       worktreeManager.discardPrecreatedWorktree(sessionId, expectedPath, options),
+    discardByRecoveryKey: (sessionId, recoveryKey, options) =>
+      worktreeManager.discardPrecreatedWorktreeByRecoveryKey(
+        sessionId,
+        recoveryKey,
+        options,
+      ),
   });
 
   // turn 运行中登记的切换意图(下一条消息发送时刻由 send 事务 apply)。

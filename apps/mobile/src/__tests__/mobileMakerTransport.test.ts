@@ -362,10 +362,15 @@ describe('mobile maker transport', () => {
       baseRepo: '/repo',
       name: 'auto-abc123',
       sourceBranch: 'main',
+      recoveryKey: 'recovery-key-1234567890',
     });
     await maker.worktree.discardPrecreated({
       sessionId: 'preset-session-1',
       path: '/repo/.cindy-worktrees/auto-abc123',
+    });
+    await maker.worktree.discardPrecreated({
+      sessionId: 'preset-session-2',
+      recoveryKey: 'recovery-key-0987654321',
     });
 
     expect(calls.map((call) => [call.channel, call.args])).toEqual([
@@ -378,10 +383,15 @@ describe('mobile maker transport', () => {
         baseRepo: '/repo',
         name: 'auto-abc123',
         sourceBranch: 'main',
+        recoveryKey: 'recovery-key-1234567890',
       }]],
       ['worktree:discard-precreated', [{
         sessionId: 'preset-session-1',
         path: '/repo/.cindy-worktrees/auto-abc123',
+      }]],
+      ['worktree:discard-precreated', [{
+        sessionId: 'preset-session-2',
+        recoveryKey: 'recovery-key-0987654321',
       }]],
     ]);
   });

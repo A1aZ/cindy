@@ -79,7 +79,10 @@ const mocks = vi.hoisted(() => {
   };
   // 抓住 listener 构造时传入的 onKeys。转发名单是模块私有的，onKeys 往哪些窗口 send
   // 是它唯一的可观察代理 —— 用来验证「被顶掉的那一轮没有把别人的登记删掉」。
-  const listenerOptions: { onKeys?: (keys: string[]) => void } = {};
+  const listenerOptions: {
+    onKeys?: (keys: string[]) => void;
+    onTrigger?: (phase: 'tap' | 'start' | 'end') => void;
+  } = {};
   const registerShortcut = vi.fn((accelerator: string) => {
     void accelerator;
     return true;
@@ -171,8 +174,12 @@ vi.mock('../index.js', () => ({
 }));
 
 vi.mock('../MacModifierShortcutListener.js', () => ({
-  MacModifierShortcutListener: vi.fn().mockImplementation((options: { onKeys?: (keys: string[]) => void }) => {
+  MacModifierShortcutListener: vi.fn().mockImplementation((options: {
+    onKeys?: (keys: string[]) => void;
+    onTrigger?: (phase: 'tap' | 'start' | 'end') => void;
+  }) => {
     mocks.listenerOptions.onKeys = options?.onKeys;
+    mocks.listenerOptions.onTrigger = options?.onTrigger;
     return {
       setShortcut: mocks.modifierSetShortcut,
       isRunning: mocks.modifierIsRunning,
@@ -1188,6 +1195,36 @@ describe('voice input global shortcut registration', () => {
         expect(mocks.focusedWindow.webContents.send).toHaveBeenCalledWith(
           'voice-input:global-shortcut-trigger',
           expect.objectContaining({ id: expect.any(String) }),
+        );
+      });
+
+      // 按住说话的会话可能在录制框打开**之前**就已经 start 了; 挂起/替换 listener 会调
+      // endActiveTriggerIfNeeded() 补发一次 end。把这个 end 也丢掉, 那个会话就永远停不下来 ——
+      // listener 已经停了, 它还在录。所以只挡新激活。
+      it('still delivers end while recording but drops new activations', async () => {
+        setPlatform('darwin');
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.(
+          { sender: otherSender },
+          null,
+          { suspend: true },
+        );
+        mocks.focusedWindow.webContents.send.mockClear();
+
+        mocks.listenerOptions.onTrigger?.('start');
+        mocks.listenerOptions.onTrigger?.('tap');
+        expect(mocks.focusedWindow.webContents.send).not.toHaveBeenCalledWith(
+          'voice-input:global-shortcut-trigger',
+          expect.anything(),
+        );
+
+        // 录制框打开之前就已经按下的那次, 它的 end 必须送到。
+        mocks.listenerOptions.onTrigger?.('end');
+        expect(mocks.focusedWindow.webContents.send).toHaveBeenCalledWith(
+          'voice-input:global-shortcut-trigger',
+          { phase: 'end' },
         );
       });
 

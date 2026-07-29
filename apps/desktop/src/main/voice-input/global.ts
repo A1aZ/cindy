@@ -66,7 +66,7 @@ const modifierShortcutRecordingSessionIds = new Set<number>();
 const activeInlineVoiceInputWebContentsIds = new Set<number>();
 
 /**
- * 有任何窗口的快捷键录制框开着时，全局快捷键的触发一律丢弃。
+ * 有任何窗口的快捷键录制框开着时，全局快捷键的**新激活**一律丢弃。
  *
  * 录制期由 renderer 主动挂起（suspend）是第一道；这条是投递层的兜底，因为「注册」和「录制」
  * 在多窗口下必然会有交叠：两个设置页可以同时开着录制框，一边提交的那一刻另一边还在录。把危险
@@ -74,6 +74,10 @@ const activeInlineVoiceInputWebContentsIds = new Set<number>();
  * 应用占了）没法在提交时报给用户，界面和存盘留着一个永远不生效的快捷键。
  *
  * 转发给录制页的 keys 不受影响：录制本身就靠它。
+ *
+ * `end` 是例外，必须照常投递：按住说话的会话可能在录制框打开**之前**就已经 start 了，而挂起
+ * （或替换）listener 会调 endActiveTriggerIfNeeded() 补发一次 end。把这个 end 也丢掉，那个
+ * 会话就永远停不下来 —— listener 已经停了，它还在录。所以只挡新激活（start / tap）。
  */
 function hasActiveShortcutRecordingSession(): boolean {
   return modifierShortcutRecordingSessionIds.size > 0;
@@ -81,8 +85,8 @@ function hasActiveShortcutRecordingSession(): boolean {
 
 const macModifierShortcutListener = new MacModifierShortcutListener({
   onTrigger: (phase) => {
-    if (hasActiveShortcutRecordingSession()) {
-      log.debug('ignoring native global shortcut trigger while recording', { phase });
+    if (phase !== 'end' && hasActiveShortcutRecordingSession()) {
+      log.debug('ignoring native global shortcut activation while recording', { phase });
       return;
     }
     log.debug('native global shortcut triggered', { phase });

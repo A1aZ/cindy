@@ -312,15 +312,21 @@ describe('Shared create project picker', () => {
     );
   });
 
-  // #807 review 第十三轮:切设备时必须立刻清空上一台的行 —— projects memo 依赖
-  // [deviceId, deviceName, rows],deviceId 已变成 B 而 rows 还是 A 的,加载窗口里会渲染出
-  // 「标着 B 的 A 的项目」,选中就把 A 的路径发给 B。
-  it('clears the previous device rows immediately when switching', () => {
-    const effect = deviceLinkProjectsHookSource.slice(
-      deviceLinkProjectsHookSource.indexOf('const requestId = requestIdRef.current + 1;'),
+  // #807 review 第十三 / 二十三轮:「标着 B 的 A 的项目」这条最初靠「切设备时立刻清空 rows」挡,
+  // 但那依赖 effect 先于渲染 —— passive effect 在 paint 之后才跑,于是仍有一帧会把 A 的路径包成
+  // 属于 B 的可点击选项(Greptile 抓到)。现在改成结构性保证:行连同归属设备一起存,memo 只在
+  // 归属相符时输出。逐帧行为断言在 deviceLinkProjectsConcurrency.test.tsx。
+  it('binds loaded rows to their owning device so a mismatch cannot be rendered', () => {
+    expect(deviceLinkProjectsHookSource).toContain('const [loaded, setLoaded] = useState<{');
+    // 写入必须申明归属 —— 没有「只改 rows 不改归属」的调用形态。
+    expect(deviceLinkProjectsHookSource).toContain(
+      'const commitRows = useCallback((ownerDeviceId: string | null, next: ExistingRemoteProject[])',
     );
-    expect(effect.slice(0, effect.indexOf('loadDeviceLinkExistingProjects'))).toContain(
-      'commitRows([]);',
+    // memo 的归属守卫:这是把 deviceId 绑进状态的唯一目的。
+    expect(deviceLinkProjectsHookSource).toContain('deviceId && loaded.deviceId === deviceId');
+    // 归属没对上时仍算加载中,避免切设备那一帧闪「没有项目」空态。
+    expect(deviceLinkProjectsHookSource).toContain(
+      'const effectiveLoading = loading || (deviceId != null && loaded.deviceId !== deviceId);',
     );
   });
 
@@ -329,20 +335,23 @@ describe('Shared create project picker', () => {
   // 的行 —— 从 updater 副作用取值可能读到 undefined(Copilot review),`if (!restored) return`
   // 于是把恢复整个跳过,幻影删除又回来了。改由同步镜像 rowsRef 供数,写入统一走 commitRows。
   it('captures the removed row from a synchronous mirror, not a setState updater side effect', () => {
+    expect(deviceLinkProjectsHookSource).toContain('const loadedRef = useRef<{');
     expect(deviceLinkProjectsHookSource).toContain(
-      'const rowsRef = useRef<ExistingRemoteProject[]>([]);',
+      'loadedRef.current = { deviceId: ownerDeviceId, rows: next };',
     );
-    expect(deviceLinkProjectsHookSource).toContain('rowsRef.current = next;');
-    expect(deviceLinkProjectsHookSource).toContain('const before = rowsRef.current;');
+    // 读镜像时同时校验归属:归属不符说明当前显示的已是别的设备的行,乐观移除会改错列表。
+    expect(deviceLinkProjectsHookSource).toContain(
+      'const before = loadedRef.current.deviceId === target.deviceId ? loadedRef.current.rows : [];',
+    );
     // 被移除的行与位置都从镜像同步算出,不再靠 updater 的副作用赋值。
     expect(deviceLinkProjectsHookSource).toContain(
       'const removedIndex = before.findIndex((row) => row.path === option.path);',
     );
-    // rows 只由 commitRows 写(唯一一处 `setRows(next)`)。留任何一个裸 setRows 就还有一条
-    // 镜像与状态不同步的路 —— 排除注释里提到的 `setRows(updater)` 字样。
-    const bareSetRows =
-      deviceLinkProjectsHookSource.match(/setRows\((?!next\)|updater\))/g) ?? [];
-    expect(bareSetRows.length).toBe(0);
+    // 状态只由 commitRows 写(唯一一处 `setLoaded(loadedRef.current)`)。留任何一个裸 setLoaded
+    // 就还有一条镜像与状态不同步、或归属未申明的路。
+    const bareSet =
+      deviceLinkProjectsHookSource.match(/setLoaded\((?!loadedRef\.current\))/g) ?? [];
+    expect(bareSet.length).toBe(0);
   });
 
   // #807 review 第十五轮:picker 换项目也必须作废 worktree 三态。baseRepo 由 WorktreeChipsRow

@@ -47,21 +47,35 @@ export function useDeviceLinkProjects(
   loading: boolean;
   removeProject: (option: FolderPickerOption) => Promise<void>;
 } {
-  const [rows, setRows] = useState<ExistingRemoteProject[]>([]);
+  /**
+   * 行**连同它属于哪台设备**一起存(Greptile review)。只存 rows 会留下一个结构性漏洞:
+   * `deviceId` 变成 B 的那一帧先于清空 rows 的 effect 渲染(passive effect 在 paint 之后才跑),
+   * 于是 projects memo 会把 A 的路径包成「属于 B」的可点击选项 —— 用户在那一帧点中,A 的路径就
+   * 写进了 B 的草稿。把归属绑进状态后,「A 的行被标成 B」在类型与数据上都不可能出现,不再依赖
+   * effect 与 render 的先后顺序(比改用 useLayoutEffect 把窗口缩小更彻底)。
+   */
+  const [loaded, setLoaded] = useState<{
+    deviceId: string | null;
+    rows: ExistingRemoteProject[];
+  }>({ deviceId: null, rows: [] });
   const [loading, setLoading] = useState(false);
   /**
-   * rows 的**同步**镜像。`setRows(updater)` 的 updater 只在 React 处理这次更新时才跑,而删除
-   * 失败后的恢复要在两次 await 之间就拿到「被移除的是哪一行、它原来在第几位」—— 从 updater
-   * 的副作用里取值会读到 undefined(Copilot review),于是 `if (!restored) return` 把恢复整个
-   * 跳过,幻影删除(本地看着删了、对端其实还在)又回来了。
+   * loaded 的**同步**镜像。setState 的 updater 只在 React 处理这次更新时才跑,而删除失败后的恢复
+   * 要在两次 await 之间就拿到「被移除的是哪一行、它原来在第几位」—— 从 updater 的副作用里取值会
+   * 读到 undefined(Copilot review),于是 `if (!restored) return` 把恢复整个跳过,幻影删除
+   * (本地看着删了、对端其实还在)又回来了。
    *
-   * 所有写 rows 的地方都经 commitRows,镜像与状态同步推进,这条路径不再依赖 React 的调度时机;
+   * 所有写入都经 commitRows,镜像与状态同步推进,这条路径不再依赖 React 的调度时机;
    * 顺带让并发删除各自读到「前一次删除之后」的列表,插回位置也不会错位。
    */
-  const rowsRef = useRef<ExistingRemoteProject[]>([]);
-  const commitRows = useCallback((next: ExistingRemoteProject[]) => {
-    rowsRef.current = next;
-    setRows(next);
+  const loadedRef = useRef<{ deviceId: string | null; rows: ExistingRemoteProject[] }>({
+    deviceId: null,
+    rows: [],
+  });
+  /** 写行必须同时申明归属设备 —— 没有「只改 rows 不改归属」这种调用形态。 */
+  const commitRows = useCallback((ownerDeviceId: string | null, next: ExistingRemoteProject[]) => {
+    loadedRef.current = { deviceId: ownerDeviceId, rows: next };
+    setLoaded(loadedRef.current);
   }, []);
   /**
    * **取数**序号,只由取数 effect 自增。切设备 / 重新打开 picker 会并发多个取数,只认最后一次的
@@ -92,7 +106,7 @@ export function useDeviceLinkProjects(
     currentDeviceIdRef.current = deviceId;
     // 本机(deviceId=null)不走隧道;picker 没打开时不取数,避免常驻首页时白拉。
     if (!enabled || !deviceId) {
-      commitRows([]);
+      commitRows(deviceId, []);
       setLoading(false);
       return;
     }
@@ -102,7 +116,7 @@ export function useDeviceLinkProjects(
     // 立刻清空上一台设备的行(#807 review):projects memo 依赖 [deviceId, deviceName, rows],
     // deviceId 已经变成 B 而 rows 还是 A 的,于是加载窗口里会渲染出「标着 B 的 A 的项目」——
     // 用户此时选中就把 A 的路径发给 B,撞 path guard 或打开 B 上同名的无关目录。
-    commitRows([]);
+    commitRows(deviceId, []);
     setLoading(true);
     void loadDeviceLinkExistingProjects(deviceId)
       .then((list) => {
@@ -111,13 +125,16 @@ export function useDeviceLinkProjects(
         // 点掉的行贴回去。以前靠删除路径自增 requestIdRef 作废取数来避免,但那个共享版本号会
         // 顺带把**别的设备**的取数误判成过期(见 requestIdRef 的说明),所以改成在这里过滤。
         const pending = pendingRemovalsRef.current.get(deviceId);
-        commitRows(pending && pending.size > 0 ? list.filter((row) => !pending.has(row.path)) : list);
+        commitRows(
+          deviceId,
+          pending && pending.size > 0 ? list.filter((row) => !pending.has(row.path)) : list,
+        );
         setLoading(false);
       })
       .catch(() => {
         // 被控端离线 / 老版本没这个 channel → 当作空列表,空态里仍有「浏览文件夹」兜底。
         if (cancelled || requestIdRef.current !== requestId) return;
-        commitRows([]);
+        commitRows(deviceId, []);
         setLoading(false);
       });
     return () => {
@@ -137,12 +154,16 @@ export function useDeviceLinkProjects(
       devicePending.add(option.path);
       pendingRemovalsRef.current.set(target.deviceId, devicePending);
       // 记下被移除的行与它原来的位置:两条恢复路径都要用(回读失败时按原序插回)。
-      // 从同步镜像读,不从 setRows 的 updater 副作用读 —— 见 rowsRef 的说明。
-      const before = rowsRef.current;
+      // 从同步镜像读,不从 setState 的 updater 副作用读 —— 见 loadedRef 的说明。
+      // 归属不符就不动列表:那说明当前显示的已经是别的设备的行,乐观移除会改错列表。
+      const before = loadedRef.current.deviceId === target.deviceId ? loadedRef.current.rows : [];
       const removedIndex = before.findIndex((row) => row.path === option.path);
       const removedRow = removedIndex >= 0 ? before[removedIndex] : undefined;
       if (removedIndex >= 0) {
-        commitRows([...before.slice(0, removedIndex), ...before.slice(removedIndex + 1)]);
+        commitRows(target.deviceId, [
+          ...before.slice(0, removedIndex),
+          ...before.slice(removedIndex + 1),
+        ]);
       }
 
       try {
@@ -165,6 +186,7 @@ export function useDeviceLinkProjects(
             ),
           );
           commitRows(
+            target.deviceId,
             othersPending.size === 0 ? list : list.filter((row) => !othersPending.has(row.path)),
           );
         } catch {
@@ -182,11 +204,12 @@ export function useDeviceLinkProjects(
           // 会被 toDeviceProjectOptions 标成属于 B —— 选中它就把 A 的路径发给 B 了。
           // 这与「并发删除不能互相取消」不冲突:设备身份只排除「已切走」,不排除同设备内的并发。
           if (currentDeviceIdRef.current !== target.deviceId) return;
-          const current = rowsRef.current;
+          if (loadedRef.current.deviceId !== target.deviceId) return;
+          const current = loadedRef.current.rows;
           if (current.some((row) => row.path === restored.path)) return;
           const at =
             removedIndex >= 0 && removedIndex <= current.length ? removedIndex : current.length;
-          commitRows([...current.slice(0, at), restored, ...current.slice(at)]);
+          commitRows(target.deviceId, [...current.slice(0, at), restored, ...current.slice(at)]);
         }
       } finally {
         const set = pendingRemovalsRef.current.get(target.deviceId);
@@ -197,10 +220,21 @@ export function useDeviceLinkProjects(
     [],
   );
 
+  /**
+   * 归属必须相符才输出选项 —— 这是上面把 deviceId 绑进状态的唯一目的:切设备的那一帧
+   * `loaded` 仍描述上一台,此时输出空列表,绝不把 A 的路径标成 B 的。
+   */
   const projects = useMemo<FolderPickerOption[]>(
-    () => (deviceId ? toDeviceProjectOptions(deviceId, deviceName, rows) : []),
-    [deviceId, deviceName, rows],
+    () =>
+      deviceId && loaded.deviceId === deviceId
+        ? toDeviceProjectOptions(deviceId, deviceName, loaded.rows)
+        : [],
+    [deviceId, deviceName, loaded],
   );
 
-  return { projects, loading, removeProject };
+  // 归属还没对上就仍算「加载中」:否则切设备那一帧会闪一下「没有项目」的空态
+  // (loading 要等 effect 才置 true)。宁可多显示一帧 spinner。
+  const effectiveLoading = loading || (deviceId != null && loaded.deviceId !== deviceId);
+
+  return { projects, loading: effectiveLoading, removeProject };
 }

@@ -42,11 +42,13 @@ interface Harness {
   projects: { path: string; deviceId: string }[];
   loading: boolean;
   remove: (path: string, deviceId: string) => Promise<void>;
+  /** 每一帧渲染看到的选项快照 —— 「切设备那一帧短暂标错归属」只能靠逐帧记录才抓得到。 */
+  frames: { path: string; deviceId: string }[][];
 }
 
 /** 把 hook 的输出暴露给测试,并允许在 render 之外驱动 removeProject / 切设备。 */
 function mountHook() {
-  const seen: Harness = { projects: [], loading: false, remove: async () => {} };
+  const seen: Harness = { projects: [], loading: false, remove: async () => {}, frames: [] };
   let setDevice!: (id: string) => void;
   let setEnabled!: (v: boolean) => void;
 
@@ -59,6 +61,7 @@ function mountHook() {
     const { useDeviceLinkProjects } = hookModule;
     const { projects, loading, removeProject } = useDeviceLinkProjects(deviceId, 'Peer', enabled);
     seen.projects = projects.map((p) => ({ path: p.path, deviceId: p.remoteDevice?.deviceId ?? '' }));
+    seen.frames.push(seen.projects);
     seen.loading = loading;
     seen.remove = (path, dId) =>
       removeProject({ path, name: path, remoteDevice: { deviceId: dId, deviceName: 'Peer' } });
@@ -189,5 +192,45 @@ describe('useDeviceLinkProjects 取数 / 删除并发', () => {
       after.resolve([row('/a/two')]);
     });
     expect(seen.projects.map((p) => p.path)).toEqual(['/a/two']);
+  });
+
+  it('切设备的任何一帧都不会把上一台的路径标成新设备的(结构性,不靠 effect 先后顺序)', async () => {
+    const aLoad = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => aLoad.promise);
+    const { seen, setDevice } = mountHook();
+    await act(async () => {
+      aLoad.resolve([row('/a/one'), row('/a/two')]);
+    });
+    expect(seen.projects).toEqual([
+      { path: '/a/one', deviceId: 'dev-a' },
+      { path: '/a/two', deviceId: 'dev-a' },
+    ]);
+
+    // 切到 B。B 的取数挂住不返回 —— 这样「渲染已是 B、行还是 A 的」这个窗口一直开着。
+    const bLoad = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => bLoad.promise);
+    const framesBefore = seen.frames.length;
+    await act(async () => {
+      setDevice('dev-b');
+    });
+
+    // 切换后的每一帧:凡是标着 dev-b 的选项,路径都不能来自 A。
+    const framesAfter = seen.frames.slice(framesBefore);
+    expect(framesAfter.length).toBeGreaterThan(0);
+    for (const frame of framesAfter) {
+      for (const opt of frame) {
+        if (opt.deviceId === 'dev-b') expect(opt.path.startsWith('/a/')).toBe(false);
+      }
+    }
+    // 取数未回来时列表为空,且仍算加载中(不闪「没有项目」的空态)。
+    expect(seen.projects).toEqual([]);
+    expect(seen.loading).toBe(true);
+
+    // B 的真实项目到达后正常显示。
+    await act(async () => {
+      bLoad.resolve([row('/b/only')]);
+    });
+    expect(seen.projects).toEqual([{ path: '/b/only', deviceId: 'dev-b' }]);
+    expect(seen.loading).toBe(false);
   });
 });

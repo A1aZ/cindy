@@ -185,6 +185,47 @@ describe('withCodexUpstreamRecording', () => {
     expect(host.getCodexThreadUpstreamOrigin('unknown')).toBe(null);
   });
 
+  it('records the chat-bridge upstream even though it routes through a localHandler', async () => {
+    // localHandler 不等于「不出网」:chat bridge 的 handler 自己用 outboundFetch 打
+    // route.routing.upstream,照样产生出站路径快照。漏记会让该供应商不可达时诊断
+    // 查不到映射、静默退回通用猜测清单。
+    const host = await freshCodexProxyHost();
+    host.resetCodexThreadUpstreamForTest();
+    const { buildUserProvider } = await import('@cindy/model-providers');
+    const { setCustomProviders } = await import('../active-catalog.js');
+    const { setCustomProviderKeyReader } = await import('../provider-route.js');
+    const { setSessionProvider, clearSessionProvider } = await import('../session-provider-store.js');
+    setCustomProviders([
+      buildUserProvider({
+        id: 'kimi-moonshot',
+        name: 'Kimi (Moonshot 中国大陆)',
+        runtimes: {
+          codex: {
+            baseUrl: 'https://api.moonshot.cn/v1',
+            wireProtocol: 'openai-chat',
+            models: [{ id: 'kimi-k3', name: 'Kimi K3' }],
+          },
+        },
+      }),
+    ]);
+    setCustomProviderKeyReader(() => 'moonshot-key');
+    host.registerComposed('session-kimi-diag', 'thread-kimi-diag', 'PRODUCT_PROMPT');
+    setSessionProvider('session-kimi-diag', 'kimi-moonshot');
+    host.setCodexProxyAuthInjection('env-key');
+
+    try {
+      const decision = await Promise.resolve(host.createModelRoutingTransform()(
+        { model: 'kimi-k3' },
+        { reqId: 1, method: 'POST', url: '/responses', headers: { 'thread-id': 'thread-kimi-diag' } },
+      ));
+      expect(decision).toEqual(expect.objectContaining({ localHandler: expect.any(Function) }));
+      expect(host.getCodexThreadUpstreamOrigin('thread-kimi-diag')).toBe('https://api.moonshot.cn');
+    } finally {
+      clearSessionProvider('session-kimi-diag');
+      setCustomProviders([]);
+    }
+  });
+
   it('never lets a recording failure affect forwarding', async () => {
     // 诊断旁路:默认上游取值抛错也不能影响 decision。
     const host = await freshCodexProxyHost();

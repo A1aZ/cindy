@@ -1442,12 +1442,23 @@ export function createModelRoutingTransform(
     )) {
       const selectedRouting = getSessionRoutingDescriptor(sessionId, 'codex', model || undefined);
       if (selectedRouting?.wireProtocol === 'openai-chat' && ctx.method === 'POST' && model) {
-        return resolveSessionRoute(sessionId, 'codex', model).then((localRoute) =>
-          createChatBridgeDecision(
+        return resolveSessionRoute(sessionId, 'codex', model).then((localRoute) => {
+          const decision = createChatBridgeDecision(
             localRoute,
             threadId ? registry.get(threadId) : undefined,
             model,
-          ));
+          );
+          // chat bridge 走 localHandler,但它**确实出网** —— handler 自己用
+          // outboundFetch 打 route.routing.upstream(绕开转发层,却走同一个出站代理
+          // 解析器),所以照样会产生出站路径快照。这里必须补记 thread→上游映射:
+          // 漏了的话该供应商不可达时诊断查不到记录,静默退回通用猜测清单。
+          // 包装层(withCodexUpstreamRecording)看不到 localHandler 背后的上游,
+          // 只能由产生它的分支自己记。
+          if (decision && localRoute?.routing.upstream) {
+            recordCodexThreadUpstreamForDiagnostics(threadId, localRoute.routing.upstream);
+          }
+          return decision;
+        });
       }
       // model 传给 scope 门(空串 = 控制面 GET,不受范围限制);声明了 modelPrefixes 的
       // 供应商(如 xai)只捕获自家命名空间的请求,其余回落默认路由。
@@ -1548,20 +1559,33 @@ function createTransformRequestChain(): RequestTransform[] {
 const codexThreadUpstreamOrigin = new Map<string, string>();
 const CODEX_THREAD_UPSTREAM_MAX_ENTRIES = 256;
 
-function recordCodexThreadUpstream(threadId: string, upstream: string): void {
-  let origin: string;
+/**
+ * 记录 thread 的出口 origin。两个调用点共用(routingTransform 包装层与 chat bridge
+ * 分支),守卫集中在这里 —— 分散写必然有一处漏掉 'unknown' 排除或漏掉 try/catch。
+ *
+ * `selectedThreadIdFromHeaders` 对无 thread 的请求(典型: models-manager 的
+ * `GET /models` 轮询)回落到字面量 'unknown';那不是一个 thread,记进去只会污染桶,
+ * 而诊断永远是用真实 threadId 来查的。
+ *
+ * 任何异常一律吞掉:这是诊断旁路,绝不能反过来影响转发。
+ */
+function recordCodexThreadUpstreamForDiagnostics(
+  threadId: string | undefined,
+  upstream: string,
+): void {
   try {
-    origin = new URL(upstream).origin;
+    if (!threadId || threadId === 'unknown') return;
+    const origin = new URL(upstream).origin;
+    if (
+      codexThreadUpstreamOrigin.size >= CODEX_THREAD_UPSTREAM_MAX_ENTRIES
+      && !codexThreadUpstreamOrigin.has(threadId)
+    ) {
+      codexThreadUpstreamOrigin.clear();
+    }
+    codexThreadUpstreamOrigin.set(threadId, origin);
   } catch {
-    return;
+    // 上游串解析不出 origin(或其它意外)→ 不记,转发照常。
   }
-  if (
-    codexThreadUpstreamOrigin.size >= CODEX_THREAD_UPSTREAM_MAX_ENTRIES
-    && !codexThreadUpstreamOrigin.has(threadId)
-  ) {
-    codexThreadUpstreamOrigin.clear();
-  }
-  codexThreadUpstreamOrigin.set(threadId, origin);
 }
 
 /** 诊断用:该 thread 最近一次转发的实际出口 origin;没有记录过 → null。 */
@@ -1589,15 +1613,15 @@ export function withCodexUpstreamRecording(
     const result = inner(body, ctx);
     const record = (decision: RoutingDecision | null): RoutingDecision | null => {
       try {
-        // localHandler 分支不转发上游(与其余路由字段互斥),没有出口可记。
+        // localHandler 的上游在这一层**看不见**(它由产生 decision 的分支自己持有),
+        // 所以这里跳过,由那些分支自行记录 —— chat bridge 就在它的 .then 里记了。
+        // 注意:localHandler 不代表「不出网」(chat bridge 自己用 outboundFetch 打
+        // route.routing.upstream),只代表「不走 compat-proxy 的转发层」。
         if (!decision?.localHandler) {
-          const threadId = selectedThreadIdFromHeaders(ctx.headers);
-          // selectedThreadIdFromHeaders 对无 thread 的请求(典型: models-manager 的
-          // `GET /models` 轮询)回落到字面量 'unknown' —— 那不是一个 thread,记进去
-          // 只会污染桶,而且诊断永远不会用真实 threadId 查到它。
-          if (threadId && threadId !== 'unknown') {
-            recordCodexThreadUpstream(threadId, decision?.upstreamOverride ?? defaultUpstream());
-          }
+          recordCodexThreadUpstreamForDiagnostics(
+            selectedThreadIdFromHeaders(ctx.headers),
+            decision?.upstreamOverride ?? defaultUpstream(),
+          );
         }
       } catch {
         // 诊断旁路:记录失败就不记,转发照常。

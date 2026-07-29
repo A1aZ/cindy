@@ -16,7 +16,7 @@
  * 最后一条是安全边界,不是洁癖(review 抓到):这个文件位于 userData,可被其他进程
  * 写。严格解析只保证**语法**合法,不保证来源可信——攻击者写一份把 authApiBaseUrl
  * 指向自己 https 主机的缓存,再让清单 CDN 不可达,用户点「用上次配置启动」之后
- * authManager 就会把 Bearer token 发到那台主机(凭证泄露)。真正的修法是服务端签名,
+ * authManager 就会把 access token 发到那台主机(凭证泄露)。真正的修法是服务端签名,
  * 但那是跨仓改动;在此之前用**编译期锚点**把爆炸半径收掉:受信任域是源码里写死的
  * 产品域(TRUSTED_ENDPOINT_DOMAINS),任何 userData 写入都改不了它。
  *

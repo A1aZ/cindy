@@ -770,8 +770,10 @@ function loadOfflineManifestCandidate(
     return null;
   }
   // 安全边界:这个文件在 userData、可被其他进程写,严格解析只管语法不管来源。
-  // 用编译期烘焙的两份自举基址推导受信任域,拒掉攻击者自选的主机——否则一份被改过的
-  // 缓存 + 一次 CDN 不可达,就能让 authManager 把 Bearer token 发到对方主机。
+  // 按源码里写死的 TRUSTED_ENDPOINT_DOMAINS 拒掉攻击者自选的主机——否则一份被改过的
+  // 缓存 + 一次 CDN 不可达,就能让 authManager 把 access token 发到对方主机。
+  // (曾经是"从自举基址去掉最左一段推导",那在多段公共后缀上会放宽信任,已废弃;
+  //  勿改回推导,理由见 endpointManifestCache.ts 的 TRUSTED_ENDPOINT_DOMAINS。)
   const untrusted = findUntrustedCachedEndpoint(parsed.endpoints, TRUSTED_ENDPOINT_DOMAINS);
   if (untrusted) {
     log.error(

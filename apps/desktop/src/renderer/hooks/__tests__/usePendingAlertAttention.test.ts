@@ -46,17 +46,32 @@ describe('usePendingAlertAttention (派生收敛)', () => {
     vi.clearAllMocks();
   });
 
-  it('打点只针对新出现的告警,重复重算不重复打点', async () => {
-    // 首次:两个会话有未处理告警。
+  it('告警仍在时每轮都重新打点,且绝不清点', async () => {
     await reconcile(['s1', 's2']);
     expect(addMock).toHaveBeenCalledWith('s1', 'error');
     expect(addMock).toHaveBeenCalledWith('s2', 'error');
 
     addMock.mockClear();
-    // 告警仍在(横幅没被处置)→ 不重复打点,也**绝不**清点。
+    // 告警仍在(横幅没被处置)→ 继续无条件打点(store 幂等),且绝不清点。
     await reconcile(['s1', 's2']);
-    expect(addMock).not.toHaveBeenCalled();
+    expect(addMock).toHaveBeenCalledWith('s1', 'error');
+    expect(addMock).toHaveBeenCalledWith('s2', 'error');
     expect(clearMock).not.toHaveBeenCalled();
+  });
+
+  // 回归(PR #879 review P1):此前「已 owned 就跳过 add」,于是别的 explicit 路径
+  // (Retry / 关闭 live ErrorBanner / turn 启动的 orphan 清理 / worktree 横幅处置)
+  // 清掉共享的 attention 条目后,未 dismissed 的横幅仍在而红点再也不会回来。
+  it('外部 explicit 清点后,告警仍在则下一轮重算把红点恢复', async () => {
+    await reconcile(['s1']);
+    addMock.mockClear();
+
+    // 模拟外部路径把该会话的 attention 清掉(store 里已无条目)。
+    kindMock.mockReturnValue(undefined);
+
+    // 告警仍未 dismissed,查询继续返回它 → 必须重新打点。
+    await reconcile(['s1']);
+    expect(addMock).toHaveBeenCalledWith('s1', 'error');
   });
 
   it('告警消失(横幅被处置)才清点,且用 explicit 意图', async () => {

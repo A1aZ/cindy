@@ -245,14 +245,19 @@ export async function listInterruptedPendingSessionIds(): Promise<string[]> {
  * 旦重新跑起来就会插入新的 user 行,该 error 行不再是尾行,查询自然不再命中 ——
  * 与 banner「会话空闲才展示」的条件天然对齐,不需要额外的 running 判定。
  *
- * ⚠️ 三个必须照做的点(踩过的坑):
+ * ⚠️ 四个必须照做的点(踩过的坑):
  *  1. content 是 TEXT 列而非 JSON 列,可能存非法 JSON(见 mergeDismissedIntoErrorContent
  *     的 fallback 分支)。json_extract 遇非法 JSON 直接抛 malformed JSON,故先用
  *     json_valid 守卫,非法内容按「未 dismissed」处理 —— 宁可多提示一次,不吞掉报错。
  *  2. 「最后一条」用 (created_at, rowid) 双键严格大于,同毫秒靠插入序区分,并且两侧
  *     都要 rewind_at IS NULL —— 漏掉会把已被 rewind 截断的历史行当成尾行。口径与
  *     hasAssistantProgressAfterMessage 完全一致。
- *  3. 必须走 `.select().from()` builder(同上函数的 ⚠️):生产 worker 模式的
+ *  3. **必须带 /clear 可见性边界**(created_at > cleared_at):`/clear` 不删消息行,
+ *     只推进 sessions.cleared_at,消息读取路径靠它把旧历史挡在视图外。漏掉这条会
+ *     让 clear 之前的 error 行继续被判为「未处理告警」—— 横幅根本不显示(消息已不
+ *     可见),红点却挂着且无法处置,批量处置还会去改已隐藏的历史行。中断态那条腿
+ *     (listInterruptedPendingSessionIds)一直有同款 cleared_at 守卫。
+ *  4. 必须走 `.select().from()` builder(同上函数的 ⚠️):生产 worker 模式的
  *     drizzleProxy 只路由带 toSQL 的 builder,裸 `.all(sql)` 会被静默吞掉。
  */
 export async function listErrorTailPendingRows(): Promise<
@@ -269,6 +274,8 @@ export async function listErrorTailPendingRows(): Promise<
         inArray(sessions.source, DESKTOP_VISIBLE_SESSION_SOURCES),
         eq(messages.role, 'error'),
         isNull(messages.rewindAt),
+        // /clear 可见性边界(见上方 ⚠️ 3):clear 之前的行在视图里已不可见,不能算告警。
+        gt(messages.createdAt, sql`COALESCE(${sessions.clearedAt}, 0)`),
         // 顶层 dismissed:true = 用户点过「忽略」(mergeDismissedIntoErrorContent 写入)。
         sql`(json_valid(${messages.content}) = 0
           OR json_extract(${messages.content}, '$.dismissed') IS NOT 1)`,

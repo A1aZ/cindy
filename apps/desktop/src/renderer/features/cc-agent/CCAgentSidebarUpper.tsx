@@ -291,17 +291,21 @@ export function CCAgentSidebarUpper() {
   }, []);
   const handleMarkAllAutomationsRead = useCallback(async () => {
     setAutomationsMenuPos(null);
-    // 用户显式「全部标为已读」:explicit,允许连未处理的 error 一起清。
-    clearSessionAttentionMany(automationAttentionSessionIds, { intent: 'explicit' });
-    // 红点是未处理告警的派生投影 —— 只清角标会被下一次重算打回来。这里做真正的
-    // 批量处置(错误尾行 merge dismissed、中断态写 ended),与逐个在横幅上点
-    // 「忽略」等价,落库后红点不再复活。失败不阻塞下面的 schedule run 已读。
+    // 先清 done / awaiting(passive,store 对 error 免疫):这部分是纯未读标记,
+    // 展示过就算已读,不需要落库处置。
+    clearSessionAttentionMany(automationAttentionSessionIds);
+    // error 红点是未处理告警的派生投影,**必须先落库处置再清点**:此前是乐观先清、
+    // 失败只记日志,一旦 dismissPendingAlerts 拒绝或只处理了部分会话,横幅仍在库里
+    // 而红点已经消失(还连带发了 explicit 桥接 / 远程回执),正是本 PR 要消灭的割裂。
+    // 现在成功才 explicit 清,失败则重算把仍存在的告警点恢复回来。
     try {
       await window.electronAPI.localDb.sessions.dismissPendingAlerts(automationAttentionSessionIds);
-      refreshPendingAlerts();
+      clearSessionAttentionMany(automationAttentionSessionIds, { intent: 'explicit' });
     } catch (e) {
       log.warn('dismiss pending alerts failed', e);
     }
+    // 成功与失败都重算一次:成功路径收敛掉残留,失败路径把红点恢复成库里的真实告警。
+    void refreshPendingAlerts();
     try {
       const updated = await markAllScheduleRunsReadAndSync();
       if (updated > 0) {

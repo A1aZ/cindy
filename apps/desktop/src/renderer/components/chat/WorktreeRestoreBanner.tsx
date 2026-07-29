@@ -36,6 +36,7 @@ import { cn } from '@/lib/utils';
 import { useRefreshWorktrees } from '@/contexts/WorktreeContext';
 import { addSessionAttention } from '@/lib/sessionAttentionStore';
 import { ackErrorAlertHandled } from '@/lib/errorAlertAck';
+import { refreshPendingAlerts } from '@/hooks/usePendingAlertAttention';
 
 type BannerPhase = 'hidden' | 'restorable' | 'restoring';
 /** missing = 目录不存在需重建;pending = 目录在但有未应用快照。决定文案与按钮词。 */
@@ -71,12 +72,20 @@ export function WorktreeRestoreBanner({
   /** 本组件给哪个会话打过红点 —— 清点只清自己打的,不误伤 live error 等其它来源。 */
   const markedSessionRef = useRef<string | null>(null);
 
-  /** 处置完成:清掉本组件打的红点(没打过则 no-op)。 */
+  /**
+   * 处置完成:清掉本组件打的红点(没打过则 no-op),然后立刻重算 pending-alerts。
+   *
+   * attentionMap 每会话只有**一条** entry,worktree 告警与错误尾行告警共享它 ——
+   * 单靠 ackErrorAlertHandled 会把同会话仍未处理的错误横幅红点一起清掉。重算让
+   * 派生腿把那些仍在库里的告警点立刻重建回来(usePendingAlertAttention 每轮无条件
+   * 重打点,不会因为「上轮已 owned」而跳过)。
+   */
   const clearOwnAttention = useCallback(() => {
     const marked = markedSessionRef.current;
     if (!marked) return;
     markedSessionRef.current = null;
     ackErrorAlertHandled(marked);
+    void refreshPendingAlerts();
   }, []);
 
   useEffect(() => {
@@ -108,6 +117,17 @@ export function WorktreeRestoreBanner({
     })();
     return () => {
       cancelled = true;
+      // 本组件无 key,会话切换时是**复用**而非重建:必须在这里交还上一个会话的
+      // 所有权,否则新会话的查询会覆盖 markedSessionRef,旧会话的红点再没人认领
+      // 而永久残留。清掉而不是留着 —— worktree 告警本就不覆盖未打开的会话
+      // (状态判定要扫盘 + git 子进程,不进 pending-alerts 批量查询),离开会话后
+      // 不亮点与该声明一致;下次打开该会话时自查会重新命中并重新打点。
+      const marked = markedSessionRef.current;
+      if (marked) {
+        markedSessionRef.current = null;
+        ackErrorAlertHandled(marked);
+        void refreshPendingAlerts();
+      }
     };
   }, [sessionId]);
 

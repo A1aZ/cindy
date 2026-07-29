@@ -1331,9 +1331,11 @@ export function CCAgentSessionView({
     if (!sessionId || !errorTailMsg) return;
     // store 乐观置 errorDismissed(banner 即刻熄灭、切会话回来不复现)+ 持久化
     // (main 侧 merge dismissed:true,不丢 sdkError 等原字段;远程会话仅内存态)。
-    makerChatStore.dismissErrorTailMessage(sessionId, errorTailMsg.clientId);
-    // 横幅被处置 = 告警消失,重算让红点跟着收敛(dismiss 落库无广播,必须显式触发)。
-    refreshPendingAlerts();
+    // 必须**等落库完成**再重算:dismiss 落库无广播,而 pending-alerts 是纯 DB 查询,
+    // 抢在写入前读会仍判定告警存在 —— 横幅已熄灭、红点却卡住。
+    void makerChatStore
+      .dismissErrorTailMessage(sessionId, errorTailMsg.clientId)
+      .then(() => refreshPendingAlerts());
   }, [errorTailMsg, sessionId]);
   // interrupted-turn-resume(简化版):「疑似中断」由 session 行的双时间戳驱动
   // (startedAt > endedAt 且未被 /clear 越过,见 sessionActiveTurn.ts 文件头),

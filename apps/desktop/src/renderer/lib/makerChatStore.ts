@@ -7451,17 +7451,26 @@ function continueAfterSilentStop(sessionId: string): void {
  * dismissErrorMessageFor 按会话来源路由:远程会话经隧道写到被控端 DB(allowlist
  * 窄口径写),重连/历史重拉后不复活;老被控端不识别该 channel 时 catch 吞错,
  * 退化为本视图内存隐藏。
+ *
+ * 返回落库完成的 promise(失败已内部吞错并落日志,不会 reject):红点是
+ * pending-alerts 查询的派生投影,调用方必须**等落库完成再重算**,否则重算会与
+ * 这次异步写竞态 —— 读到旧状态就仍判定告警存在,横幅已消失而红点卡住。
  */
-function dismissErrorTailMessage(sessionId: string, clientId: string): void {
-  if (!sessionId || !clientId) return;
+function dismissErrorTailMessage(sessionId: string, clientId: string): Promise<void> {
+  if (!sessionId || !clientId) return Promise.resolve();
   setState(sessionId, (s) => ({
     ...s,
     messages: s.messages.map((m) =>
       m.clientId === clientId && m.role === 'error' ? { ...m, errorDismissed: true } : m,
     ),
   }));
-  dismissErrorMessageFor(sessionId, clientId).catch((err) =>
-    log.warn('persist error dismiss failed:', err),
+  // 收敛成 Promise<void>:dismissErrorMessageFor 返回 Promise<unknown>(IPC 结果),
+  // 调用方只关心「写完了」这个时点,不消费返回值。
+  return dismissErrorMessageFor(sessionId, clientId).then(
+    () => undefined,
+    (err: unknown) => {
+      log.warn('persist error dismiss failed:', err);
+    },
   );
 }
 

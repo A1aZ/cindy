@@ -507,7 +507,17 @@ describe('sessionActiveTurn', () => {
     await seedSession(client, 's-hidden-err', { source: 'legacy-hidden' });
     await insert('s-hidden-err', 'e10-err', 'error', '{"message":"boom"}', base + 100);
 
+    // 不命中:/clear 越过了该 error 行 —— 消息读取路径靠 cleared_at 把它挡在视图外,
+    // 横幅根本不显示,红点若还挂着就永远无法处置(PR #879 review P1)。
+    await seedSession(client, 's-cleared-err', { clearedAt: base + 500 });
+    await insert('s-cleared-err', 'e11-err', 'error', '{"message":"boom"}', base + 100);
+
+    // 命中:error 行在 /clear 之后产生(clear 后又跑了一轮并失败)。
+    await seedSession(client, 's-cleared-then-err', { clearedAt: base + 100 });
+    await insert('s-cleared-then-err', 'e12-err', 'error', '{"message":"boom"}', base + 500);
+
     expect((await listErrorTailPendingSessionIds()).sort()).toEqual([
+      's-cleared-then-err',
       's-err',
       's-err-array',
       's-err-bad-json',

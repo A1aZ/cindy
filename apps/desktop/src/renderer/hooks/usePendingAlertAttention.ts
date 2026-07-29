@@ -40,7 +40,8 @@ const log = createLogger('pending-alert-attention');
 
 const MAX_INITIAL_ATTEMPTS = 5;
 let _startedThisWindow = false;
-/** 本 hook 依据 pending-alerts 打过、尚未收敛掉的会话 —— 限定清除范围。 */
+/** 上一轮 pending-alerts 命中的会话 —— 用于差分出「告警已消失」的清点范围,
+ *  不作为「是否需要打点」的短路依据(见 fetchAndReconcile 的无条件重打点)。 */
 const _ownedSessionIds = new Set<string>();
 /** 重查合流:进行中再来请求只置脏,完成后补跑一次(避免 turn 起落时打爆 IPC)。 */
 let _refreshInFlight: Promise<void> | null = null;
@@ -58,8 +59,13 @@ async function fetchAndReconcile(): Promise<void> {
   const ids = await window.electronAPI.localDb.sessions.pendingAlerts();
   const next = new Set(ids);
 
+  // 每轮**无条件**重打点,不做「已 owned 就跳过」的短路:红点是查询结果的投影,
+  // 每次重算都要对齐。别的 explicit 路径(Retry / 关闭 live ErrorBanner / turn 启动
+  // 的 orphan 清理 / worktree 横幅处置)会清掉共享的那条 attention 条目,若这里
+  // 短路跳过,未 dismissed 的横幅仍在而红点再也不会回来 —— 正是本次要消灭的割裂。
+  // addSessionAttention 自身幂等(kind 未变时直接 return,不 emit、不发 IPC),
+  // 所以无条件调用没有额外开销。
   for (const id of next) {
-    if (_ownedSessionIds.has(id)) continue;
     _ownedSessionIds.add(id);
     addSessionAttention(id, 'error');
   }
@@ -106,8 +112,9 @@ export function usePendingAlertAttention(): void {
   useEffect(() => {
     if (_startedThisWindow) return;
     _startedThisWindow = true;
-    // 首拉带指数退避重试:localDb 在登录后才 ready,过早会被 handler reject。
-    // 走 fetchAndReconcile 而非 refreshPendingAlerts —— 需要看到真实 reject 才能决定重试。
+    // 首拉带线性退避重试(2s / 4s / 6s / 8s):localDb 在登录后才 ready,过早会被
+    // handler reject。走 fetchAndReconcile 而非 refreshPendingAlerts —— 需要看到
+    // 真实 reject 才能决定是否重试。
     const tryFetch = (attempt: number): void => {
       fetchAndReconcile().catch((err) => {
         if (attempt >= MAX_INITIAL_ATTEMPTS) {

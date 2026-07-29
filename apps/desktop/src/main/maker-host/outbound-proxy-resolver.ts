@@ -294,16 +294,22 @@ function envResolver(upstreamUrl: string): string | null {
 }
 
 /**
- * 出站路径判定快照,**按上游 origin 分桶**。
+ * 出站路径判定快照,**按调用方给的原始 upstream 键分桶**。
  *
  * 必须分桶而不能存单值:这个 resolver 是共享的(codex proxy、anthropic-compat
  * proxy、通用 outbound-fetch 都在调),单值槽会被最后一个完成解析的请求覆盖。
- * 而 `NO_PROXY` 与 PAC 都可以逐 origin 给出不同判定,于是诊断可能报出一条属于
- * 无关上游、甚至与故障上游结论相反的路径。消费方按自己关心的 origin 取。
+ * 而 `NO_PROXY` 与 PAC 都可以逐上游给出不同判定,于是诊断可能报出一条属于无关
+ * 上游、甚至与故障上游结论相反的路径。
+ *
+ * 键刻意保留调用方传进来的原始形态,不归一成 origin:两个消费方的粒度本来就不同 ——
+ * compat-proxy 的转发层按 origin 解析,而 outbound-fetch 按「origin + path」解析
+ * (见其 `resolveKeyOf`,per-path PAC 靠它)。归一成 origin 会让同 origin、不同
+ * requestPath 的两个 chat-bridge 会话互相覆盖判定。展示侧仍只用 origin(见
+ * snapshot.upstream),不把 path 带进用户可见消息。
  *
  * 上限与 systemProxyCache 同量级;满了整体清空(下一轮请求会重新填)。
  */
-const outboundPathByOrigin = new Map<string, OutboundPathSnapshot>();
+const outboundPathByKey = new Map<string, OutboundPathSnapshot>();
 
 function recordOutboundPath(
   upstreamUrl: string,
@@ -316,10 +322,10 @@ function recordOutboundPath(
 ): void {
   const origin = originForLog(upstreamUrl);
   if (
-    outboundPathByOrigin.size >= SYSTEM_PROXY_CACHE_MAX_ENTRIES
-    && !outboundPathByOrigin.has(origin)
+    outboundPathByKey.size >= SYSTEM_PROXY_CACHE_MAX_ENTRIES
+    && !outboundPathByKey.has(upstreamUrl)
   ) {
-    outboundPathByOrigin.clear();
+    outboundPathByKey.clear();
   }
   // 关键:kind 必须反映**转发层实际会做什么**,不是 resolver 返回了什么字符串。
   // resolver 可以返回一个转发层根本用不了的地址(env 里写 HTTPS_PROXY=https://…
@@ -336,7 +342,7 @@ function recordOutboundPath(
       : value || opts.skippedUnsupported
         ? 'unsupported'
         : 'direct';
-  outboundPathByOrigin.set(origin, {
+  outboundPathByKey.set(upstreamUrl, {
     source,
     kind,
     // 只在转发层真能用时报地址,且只报脱敏形态(env 值可能带 user:pass)。
@@ -349,33 +355,44 @@ function recordOutboundPath(
 }
 
 /**
- * 取**指定上游**最近一次出站路径判定;给多个候选 origin 时返回其中最新的一条,
- * 都没有记录过则返回 null。
+ * 取**指定上游**的出站路径判定;都没有记录过则返回 null。
  *
- * 之所以收候选列表而不是单个 origin:调用方的实际上游可能随凭证模式动态切换
- * (codex 订阅直连打 ChatGPT,网关模式打 gateway),但两者都属于同一个消费方。
- * 传全部候选既能拿到真正用过的那条,又不会串到别的消费方的上游。
+ * 入参收候选列表而不是单个值:调用方的实际上游可能随凭证模式动态切换(codex 订阅
+ * 直连打 ChatGPT,网关模式打 gateway),但都属于同一个消费方;而且调用方手里通常是
+ * 带 path 的 base URL,与快照键的粒度不一定一致,所以这里按 origin 归组匹配。
  *
- * 只读诊断用途:上游不可达时把「当前走的是代理 / 直连 / 判定没问出来」这句事实
- * 交给用户,比让他猜快得多。返回的 proxy 字段已脱敏,可直接进错误消息与日志。
+ * **同一个 origin 下有多条判定且结论不一致时返回 null。** PAC 允许逐 path 给出不同
+ * 判定,此时无法确定失败的那次请求走的是哪一条 —— 报其中任意一条(哪怕是最新的)
+ * 都可能属于另一条 path。这条路径上宁可不报,也不能谎报。
+ *
+ * 注意冲突判定只在**组内**(同 origin):候选之间本来就允许不同(订阅直连与网关是
+ * 两个 origin、判定天然可以不同),跨组按 `at` 取最新。
+ *
+ * 只读诊断用途:上游不可达时把「当前走的是代理 / 直连 / 配了但用不了 / 判定没问
+ * 出来」这句事实交给用户,比让他猜快得多。返回的 proxy 字段已脱敏,可直接进错误
+ * 消息与日志。
  */
 export function getOutboundPathSnapshotFor(
-  upstreamOrigins: readonly string[],
+  upstreamCandidates: readonly string[],
 ): OutboundPathSnapshot | null {
+  const wanted = new Set(upstreamCandidates.map((raw) => originForLog(raw)));
+  const byOrigin = new Map<string, OutboundPathSnapshot>();
+  for (const snap of outboundPathByKey.values()) {
+    if (!wanted.has(snap.upstream)) continue;
+    const prev = byOrigin.get(snap.upstream);
+    if (!prev) {
+      byOrigin.set(snap.upstream, snap);
+      continue;
+    }
+    // 一致性只看结论(走哪个代理 / 哪一类);unknown 的具体 reason 不同不算冲突。
+    if (prev.kind !== snap.kind || prev.proxy !== snap.proxy) return null;
+    if (snap.at > prev.at) byOrigin.set(snap.upstream, snap);
+  }
   let best: OutboundPathSnapshot | null = null;
-  for (const raw of upstreamOrigins) {
-    const snap = outboundPathByOrigin.get(normalizeOriginKey(raw));
-    if (snap && (!best || snap.at > best.at)) best = snap;
+  for (const snap of byOrigin.values()) {
+    if (!best || snap.at > best.at) best = snap;
   }
   return best;
-}
-
-/**
- * 把调用方给的 URL / origin 归一成 recordOutboundPath 用的键。调用方手里通常是
- * 完整 base URL(带 path),而键是 origin 形态,不归一会永远查不中。
- */
-function normalizeOriginKey(raw: string): string {
-  return originForLog(raw);
 }
 
 /**
@@ -403,5 +420,5 @@ export const resolveDesktopOutboundProxy: OutboundProxyResolver = async (upstrea
 export function resetOutboundProxyResolverStateForTest(): void {
   systemProxyCache.clear();
   lastLoggedByOrigin.clear();
-  outboundPathByOrigin.clear();
+  outboundPathByKey.clear();
 }

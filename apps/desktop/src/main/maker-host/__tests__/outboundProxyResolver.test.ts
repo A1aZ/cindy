@@ -338,6 +338,34 @@ describe('getOutboundPathSnapshotFor', () => {
     }
   });
 
+  it('keeps per-path PAC verdicts apart instead of collapsing them to the origin', async () => {
+    // outbound-fetch 按「origin + path」解析(per-path PAC 靠它,见其 resolveKeyOf),
+    // 所以同 origin、不同 requestPath 的两个 chat-bridge 会话可以拿到不同判定。
+    // 早先按 origin 归一存快照会让后到的那条覆盖前一条。
+    electronState.resolveProxy.mockImplementation(async (url: string) =>
+      url.includes('/v1/chat/completions') ? 'PROXY 127.0.0.1:7890' : 'DIRECT');
+
+    await resolveDesktopOutboundProxy('https://api.moonshot.cn/v1/chat/completions');
+    await resolveDesktopOutboundProxy('https://api.moonshot.cn/v1/responses');
+
+    // 两条 path 的结论相反 → 无法确定失败的那次走了哪条,宁可不报也不谎报。
+    expect(snapshotFor('https://api.moonshot.cn/v1')).toBe(null);
+  });
+
+  it('still reports when every path under the origin agrees', async () => {
+    electronState.resolveProxy.mockResolvedValue('PROXY 127.0.0.1:7890');
+    await resolveDesktopOutboundProxy('https://api.moonshot.cn/v1/chat/completions');
+    await resolveDesktopOutboundProxy('https://api.moonshot.cn/v1/responses');
+
+    // 判定一致(PAC 只看 host 是常态)→ 照常给结论。
+    expect(snapshotFor('https://api.moonshot.cn/v1')).toMatchObject({
+      kind: 'proxy',
+      proxy: 'http://127.0.0.1:7890',
+      // 展示仍只用 origin —— path 可能带业务语义,不进用户可见消息。
+      upstream: 'https://api.moonshot.cn',
+    });
+  });
+
   it('does not claim a proxy path for env values the forwarding layer rejects', async () => {
     // envResolver 只做「哪个变量适用」,不校验值可用性。转发层的 parseOutboundProxyUrl
     // 会拒收 https://(TLS-to-proxy)与 socks4://,实际走直连 —— 此时报「已经过该代理」

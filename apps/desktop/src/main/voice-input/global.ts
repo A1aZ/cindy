@@ -65,8 +65,26 @@ const modifierShortcutRecordingWebContentsIds = new Set<number>();
 const modifierShortcutRecordingSessionIds = new Set<number>();
 const activeInlineVoiceInputWebContentsIds = new Set<number>();
 
+/**
+ * 有任何窗口的快捷键录制框开着时，全局快捷键的触发一律丢弃。
+ *
+ * 录制期由 renderer 主动挂起（suspend）是第一道；这条是投递层的兜底，因为「注册」和「录制」
+ * 在多窗口下必然会有交叠：两个设置页可以同时开着录制框，一边提交的那一刻另一边还在录。把危险
+ * 堵在投递而不是堵在注册，就不必为了避开交叠去推迟注册 —— 推迟会让注册失败（比如 F16 被别的
+ * 应用占了）没法在提交时报给用户，界面和存盘留着一个永远不生效的快捷键。
+ *
+ * 转发给录制页的 keys 不受影响：录制本身就靠它。
+ */
+function hasActiveShortcutRecordingSession(): boolean {
+  return modifierShortcutRecordingSessionIds.size > 0;
+}
+
 const macModifierShortcutListener = new MacModifierShortcutListener({
   onTrigger: (phase) => {
+    if (hasActiveShortcutRecordingSession()) {
+      log.debug('ignoring native global shortcut trigger while recording', { phase });
+      return;
+    }
     log.debug('native global shortcut triggered', { phase });
     if (phase === 'tap') {
       handleGlobalVoiceInputShortcutTap();
@@ -912,36 +930,9 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
 
   ipcMain.handle(
     'voice-input:settings:update-shortcut',
-    async (event, shortcut: VoiceInputShortcut | null | undefined): Promise<VoiceInputSettingsUpdateResult> => {
+    async (_event, shortcut: VoiceInputShortcut | null | undefined): Promise<VoiceInputSettingsUpdateResult> => {
       return queueShortcutMutation(async () => {
         const nextShortcut = shortcut ?? null;
-        // 另一个窗口的录制框还开着（两个设置页可以同时开着录）：现在就注册，会让**那个**窗口
-        // 里的按键真的触发一次语音输入 —— 与恢复/同步两条路上的录制守卫是同一条道理。
-        //
-        // 提交方自己的会话此刻也还在（录制态要等这次响应回去才收口），所以判据是「除我之外
-        // 还有别人在录」。
-        //
-        // 存盘照存，注册往后推：录制期间所有窗口的全局快捷键都是挂起的（没有任何注册），而
-        // 最后关闭的那个录制框在 cleanup 里会 sync 一次存盘值 —— 那时才注册，正是我们要的
-        // 时机。聚焦兜底恢复与 useVoiceInputSettings 的回声都是额外保险。
-        const recordedElsewhere = Array.from(modifierShortcutRecordingSessionIds)
-          .some((webContentsId) => webContentsId !== event.sender.id);
-        if (recordedElsewhere) {
-          log.info('deferring shortcut registration until other recorders close');
-          clearPendingShortcutRecoveryFailure();
-          // 仍然告诉用户「等授权」：preflight 只查不弹窗、也不碰 listener，所以推迟注册不等于
-          // 推迟引导。少了这步，缺权限时用户当场收不到授权请求。
-          const awaitingPermission = Boolean(
-            nextShortcut
-            && voiceInputShortcutNeedsMacNativeListener(nextShortcut, process.platform)
-            && (await refreshVoiceInputInputMonitoringPermissionSnapshot()).status === 'denied',
-          );
-          return {
-            ok: true,
-            settings: voiceInputDataStore.updateSettings({ shortcut: nextShortcut }),
-            ...(awaitingPermission ? { pendingInputMonitoring: true } : {}),
-          };
-        }
         const registration = await setVoiceInputGlobalShortcut(nextShortcut);
         // 只缺监听权限时仍然存盘：用户的选择要留住，快捷键等授权后自动生效（设置页在
         // 权限转为已授权时会重新 sync）。真故障（冲突、不支持、helper 坏了）照旧不存。
@@ -1493,6 +1484,11 @@ function stableVoiceInputShortcutKey(shortcut: VoiceInputShortcut): string {
 }
 
 function handleGlobalVoiceInputShortcut(phase?: Extract<GlobalVoiceInputShortcutPhase, 'start'>): void {
+  // Electron accelerator 那条路的同一道兜底（native 那条在 onTrigger 里挡）。
+  if (hasActiveShortcutRecordingSession()) {
+    log.debug('ignoring global shortcut trigger while recording');
+    return;
+  }
   const invokedAt = Date.now();
   const overlay = getOverlayWindow();
   const overlayOpen = isOverlayPresentationOpen(overlay);

@@ -1133,73 +1133,83 @@ describe('voice input global shortcut registration', () => {
       expect(result).toMatchObject({ ok: false, errorCode: 'permission' });
     });
 
-    // 两个设置页可以同时开着录制框。此时任一窗口提交快捷键都不能立刻注册 —— 那会让**另一个**
-    // 窗口里的按键真的触发一次语音输入。存盘照存, 注册留给最后关闭的那个录制框(它 cleanup 里
-    // 的恢复同步会读存盘注册)。
-    describe('a second recorder open elsewhere', () => {
+    // 两个设置页可以同时开着录制框:一边提交的那一刻另一边还在录。危险堵在**触发投递**而不是
+    // 堵在注册 —— 推迟注册会让「F16 被别的应用占了」这类失败没法在提交时报给用户, 界面和存盘
+    // 就留着一个永远不生效的快捷键。
+    describe('trigger suppression while a recorder is open', () => {
       const otherSender = { id: 4242, once: vi.fn() };
+      const f16: VoiceInputShortcut = {
+        trigger: 'keyboard',
+        code: 'F16',
+        key: 'F16',
+        modifiers: { meta: false, ctrl: false, alt: false, shift: false, fn: false },
+      };
 
-      async function openRecorderElsewhere(): Promise<void> {
+      // 构造真实状态: 另一个窗口在录(会话活跃), 这边提交 F16 —— 按本轮改动注册会照常发生,
+      // 于是 accelerator 确实是注册着的。直接在挂起之后去取回调是空转断言:挂起会把 accelerator
+      // 注销掉, 回调压根取不到, 「没触发」自然成立却什么都没测到(我第一版就是这么写的)。
+      async function recordElsewhereThenCommitF16(): Promise<void> {
         await mocks.handlers.get('voice-input:global-shortcut:set')?.(
           { sender: otherSender },
           null,
           { suspend: true },
         );
+        await mocks.handlers.get('voice-input:settings:update-shortcut')?.({}, f16);
+        expect(mocks.registeredShortcuts.has('F16')).toBe(true);
       }
 
-      it('persists the choice but defers registration', async () => {
+      it('drops accelerator triggers while another window is recording', async () => {
         setPlatform('darwin');
         const { registerGlobalVoiceInputIpc } = await import('../global.js');
         registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
-        await openRecorderElsewhere();
-        mocks.modifierSetShortcut.mockClear();
-        mocks.registerShortcut.mockClear();
+        await recordElsewhereThenCommitF16();
+        mocks.focusedWindow.webContents.send.mockClear();
 
-        const result = await mocks.handlers.get('voice-input:settings:update-shortcut')?.(
-          { sender: { id: mocks.focusedWindow.webContents.id, once: vi.fn() } },
-          bareRightOption,
+        mocks.registeredShortcuts.get('F16')?.();
+
+        expect(mocks.focusedWindow.webContents.send).not.toHaveBeenCalledWith(
+          'voice-input:global-shortcut-trigger',
+          expect.anything(),
         );
-
-        expect(result).toMatchObject({ ok: true });
-        expect(mocks.updateSettings).toHaveBeenCalledWith({ shortcut: bareRightOption });
-        // 关键:没有注册。
-        expect(mocks.modifierSetShortcut).not.toHaveBeenCalled();
-        expect(mocks.registerShortcut).not.toHaveBeenCalled();
       });
 
-      // 推迟注册不等于推迟引导:缺权限时照样要当场告诉用户去授权(preflight 只查不弹窗)。
-      it('still reports pendingInputMonitoring while deferring', async () => {
+      it('resumes triggers once the recorder closes', async () => {
         setPlatform('darwin');
-        mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
         const { registerGlobalVoiceInputIpc } = await import('../global.js');
         registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
-        await openRecorderElsewhere();
+        await recordElsewhereThenCommitF16();
+        await mocks.handlers.get('voice-input:modifier-shortcut-recording:stop')?.({ sender: otherSender });
+        mocks.focusedWindow.webContents.send.mockClear();
 
-        const result = await mocks.handlers.get('voice-input:settings:update-shortcut')?.(
-          { sender: { id: mocks.focusedWindow.webContents.id, once: vi.fn() } },
-          bareRightOption,
+        mocks.registeredShortcuts.get('F16')?.();
+
+        expect(mocks.focusedWindow.webContents.send).toHaveBeenCalledWith(
+          'voice-input:global-shortcut-trigger',
+          expect.objectContaining({ id: expect.any(String) }),
         );
-
-        expect(result).toMatchObject({ ok: true, pendingInputMonitoring: true });
       });
 
-      // 只有提交方自己的录制会话时必须照常注册 —— 提交方的会话在这次响应回去之前一直挂着,
-      // 把它也算进「别人在录」就等于永远不注册了。
-      it('registers normally when only the committing window is recording', async () => {
+      // 这条是本轮的核心:另一个窗口在录的时候提交, 注册照常发生, 所以注册失败(F16 被别的应用
+      // 占了)当场就能报给用户 —— 而不是存下一个永远不生效的快捷键、只在日志里留一行。
+      it('still reports a registration failure while another window is recording', async () => {
         setPlatform('darwin');
         const { registerGlobalVoiceInputIpc } = await import('../global.js');
         registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
-        const sender = { id: mocks.focusedWindow.webContents.id, once: vi.fn() };
-        await mocks.handlers.get('voice-input:global-shortcut:set')?.({ sender }, null, { suspend: true });
-        mocks.modifierSetShortcut.mockClear();
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.(
+          { sender: otherSender },
+          null,
+          { suspend: true },
+        );
+        // 系统里已被别的应用占用。
+        mocks.registerShortcut.mockReturnValue(false);
 
-        const result = await mocks.handlers.get('voice-input:settings:update-shortcut')?.({ sender }, bareRightOption);
+        const result = await mocks.handlers.get('voice-input:settings:update-shortcut')?.({}, f16);
 
-        expect(result).toMatchObject({ ok: true });
-        expect(mocks.modifierSetShortcut).toHaveBeenCalledWith(bareRightOption);
+        expect(result).toMatchObject({ ok: false });
+        expect(mocks.updateSettings).not.toHaveBeenCalled();
       });
     });
 

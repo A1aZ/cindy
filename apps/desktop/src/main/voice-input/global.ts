@@ -776,7 +776,14 @@ async function recoverPendingNativeShortcutRegistration(): Promise<void> {
       // 发这条通知之前必须重新看一眼该恢复什么：preflight 那次 await 期间用户完全可能把快捷键
       // 换成 F16 或干脆清掉（那次成功的 update-shortcut 已经清掉过期失败态了）。无条件发就会
       // 凭一个已经不存在的目标重新造出一条「重启 Cindy 再试」，而当前快捷键其实工作正常。
-      if (pendingNativeShortcutRecoveryTarget().kind !== 'register') {
+      const revalidated = pendingNativeShortcutRecoveryTarget();
+      if (revalidated.kind === 'wait-for-pending-start') {
+        // 有一次启动正在飞：它可能成功（那就什么都不用报），也可能超时/起来就退（它的调用方
+        // 只写一行日志）。两种都不该在这里下结论，排个尾跑等它落定 —— 与预筛那条同一个处理。
+        schedulePendingShortcutRecoveryRetry(PENDING_SHORTCUT_RECOVERY_MIN_INTERVAL_MS);
+        return;
+      }
+      if (revalidated.kind !== 'register') {
         log.debug('pending native shortcut recovery target changed while checking permission');
         return;
       }
@@ -891,7 +898,14 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
             return { ok: true };
           }
         }
-        return setVoiceInputGlobalShortcut(nextShortcut);
+        const result = await setVoiceInputGlobalShortcut(nextShortcut);
+        // 与存盘一致的同步注册成功 = 快捷键此刻是活的（或用户本来就清空了），之前那条「自动
+        // 恢复失败」就过期了。挂起不算：那是录制期的临时状态，失败态还得留着。
+        //
+        // 少了这步：早期一次瞬时 helper 故障之后，即便后来注册成功了，此后每开一个应用外壳
+        // 窗口都会取到那条陈旧失败、弹一次「重启 Cindy 再试」。
+        if (!suspending && result.ok) clearPendingShortcutRecoveryFailure();
+        return result;
       });
     },
   );

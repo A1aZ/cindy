@@ -737,6 +737,90 @@ describe('voice input global shortcut registration', () => {
         expect(consume?.(mocks.settingsEvent)).toEqual({ failed: false });
       });
 
+      // preflight 返回 unknown, 但此刻有一次 renderer 发起的启动正在飞: 它可能成功(不该报错),
+      // 也可能超时/起来就退(调用方只写一行日志)。两种都不能在这里下结论 —— 必须排尾跑等它落定,
+      // 不能和「恢复目标已经没了」走同一个静默返回。
+      it('schedules a retry when the post-preflight recheck finds an in-flight start', async () => {
+        setPlatform('darwin');
+        setTimeoutSpy?.mockRestore();
+        setTimeoutSpy = null;
+        vi.useFakeTimers();
+        try {
+          mocks.setStoredShortcut(bareRightOption);
+          mocks.modifierIsRunning.mockReturnValue(false);
+          let settlePreflight: (snapshot: unknown) => void = () => {};
+          mocks.inputMonitoringSnapshot.mockImplementationOnce(
+            () => new Promise((resolve) => { settlePreflight = resolve; }),
+          );
+          const { registerGlobalVoiceInputIpc } = await import('../global.js');
+          registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+          mocks.appListeners.get('browser-window-focus')?.();
+          await vi.advanceTimersByTimeAsync(0);
+
+          // preflight 期间 renderer 起了 helper(spawn 了但还没报 ready:没有任何注册记录)。
+          mocks.modifierIsRunning.mockReturnValue(true);
+          settlePreflight({ ok: false, status: 'unknown', error: 'helper unavailable' });
+          await vi.advanceTimersByTimeAsync(0);
+
+          // 不下结论:既不报故障, 也不当作没事发生。
+          const consume = mocks.handlers.get('voice-input:consume-shortcut-recovery-failure');
+          expect(consume?.(mocks.settingsEvent)).toEqual({ failed: false });
+
+          // 那次启动失败收场 → 尾跑必须自己回来再查一遍。
+          mocks.modifierIsRunning.mockReturnValue(false);
+          mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: true, status: 'granted' });
+          await vi.advanceTimersByTimeAsync(5_000);
+
+          expect(mocks.modifierSetShortcut).toHaveBeenCalledWith(bareRightOption);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      // 早期一次瞬时 helper 故障之后, 后来的同步注册成功了 —— 那条失败就过期了。不清的话此后
+      // 每开一个应用外壳窗口都会取到它、弹一次「重启 Cindy 再试」, 而快捷键其实是活的。
+      it('clears a stale recovery failure once a matching sync registers successfully', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        mocks.modifierIsRunning.mockReturnValue(false);
+        mocks.modifierSetShortcut.mockResolvedValueOnce({ ok: false, error: 'spawn ENOENT' });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await focusWindow();
+        // 先确认失败态真的置上了(否则下面那条断言会空转)。
+        expect(mocks.focusedWindow.webContents.send).toHaveBeenCalledWith('voice-input:shortcut-recovery-failed');
+
+        // 之后 renderer 的同步注册成功了。
+        mocks.modifierSetShortcut.mockResolvedValue({ ok: true });
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
+
+        const consume = mocks.handlers.get('voice-input:consume-shortcut-recovery-failure');
+        expect(consume?.(mocks.settingsEvent)).toEqual({ failed: false });
+      });
+
+      // 挂起是录制期的临时状态,不该清掉失败态。
+      it('keeps the recovery failure across a recording suspend', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        mocks.modifierIsRunning.mockReturnValue(false);
+        mocks.modifierSetShortcut.mockResolvedValueOnce({ ok: false, error: 'spawn ENOENT' });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await focusWindow();
+
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.(
+          { sender: { id: mocks.focusedWindow.webContents.id, once: vi.fn() } },
+          null,
+          { suspend: true },
+        );
+
+        const consume = mocks.handlers.get('voice-input:consume-shortcut-recovery-failure');
+        expect(consume?.(mocks.settingsEvent)).toEqual({ failed: true });
+      });
+
       // denied 是正常等待状态(用户还没在系统设置里打开),不该弹故障提示。
       it('does not report a recovery failure while the permission is merely denied', async () => {
         setPlatform('darwin');

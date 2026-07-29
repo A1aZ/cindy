@@ -5332,6 +5332,127 @@ describe('AgentInputCoordinator scheduler 排队心跳(review 反馈回归)', ()
     expect(latestProjection(h.projections).recovery?.kind).toBe('active-turn');
   });
 
+  it('终态 error 撞在持久化中途:落库后结算时 scheduler 项也不留 recovery', async () => {
+    // 第五条终态路径。终态 error 在 active.persisting 期间到达 → 被暂存成
+    // pendingTerminalEvent,落库完成后由 settlePendingTerminalEventAfterPersist 结算 ——
+    // 那里原来无条件造 active-turn recovery,漏了 scheduler 排除(第二十轮 P1)。
+    const h = createHarness();
+    const sid = 'sched-error-during-persist';
+    let releasePersist!: () => void;
+    mocks.createMessage.mockImplementationOnce(
+      () => new Promise<Record<string, never>>((resolve) => {
+        releasePersist = () => resolve({});
+      }),
+    );
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'hb', { origin: schedOrigin }));
+    await flush();
+
+    // 落库还挂着,此刻终态 error 到达 → 走 persisting 分支暂存
+    h.coordinator.onTurnEvent(sid, 'error', 'upstream died mid-persist');
+    await flush();
+    releasePersist();
+    await flush();
+
+    expect(latestProjection(h.projections).recovery).toBeNull();
+    expect(
+      h.coordinator.hasQueuedItemWhere(sid, (item) => item.clientId === 'c1', {
+        includeRecovery: true,
+      }),
+    ).toBe(false);
+  });
+
+  it('终态 error 撞在持久化中途:普通用户项仍保留 active-turn recovery', async () => {
+    const h = createHarness();
+    const sid = 'user-error-during-persist';
+    let releasePersist!: () => void;
+    mocks.createMessage.mockImplementationOnce(
+      () => new Promise<Record<string, never>>((resolve) => {
+        releasePersist = () => resolve({});
+      }),
+    );
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'typed by hand'));
+    await flush();
+
+    h.coordinator.onTurnEvent(sid, 'error', 'upstream died mid-persist');
+    await flush();
+    releasePersist();
+    await flush();
+
+    expect(latestProjection(h.projections).recovery?.kind).toBe('active-turn');
+  });
+
+  it('Stop 赢在 pre-vendor 窗口:已持久化的 scheduler 项不留 recovery', async () => {
+    // 第六条终态路径,本轮自查补上(reviewer 没报)。cancelPreSendActiveTurn 在 Stop
+    // (keepQueue) 时给已持久化的项留 active-turn recovery —— scheduler 项同样不该留。
+    const h = createHarness();
+    const sid = 'sched-stop-pre-vendor';
+    let releaseSend!: () => void;
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      await new Promise<void>((resolve) => { releaseSend = resolve; });
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'hb', { origin: schedOrigin }));
+    await flush();
+
+    const state = (
+      h.coordinator as unknown as {
+        getState: (id: string) => {
+          activeTurn: { persisted: boolean; sendStarted: boolean; dispatchLifecycle?: string } | null;
+        };
+      }
+    ).getState(sid);
+    expect(state.activeTurn).not.toBeNull();
+    // pre-vendor 窗口的形态:已落库,vendor 派发还没成立
+    state.activeTurn!.persisted = true;
+    state.activeTurn!.sendStarted = false;
+
+    h.coordinator.stop(sid, { keepQueue: true });
+    await flush();
+
+    expect(latestProjection(h.projections).recovery).toBeNull();
+    releaseSend();
+    await flush();
+  });
+
+  it('Stop 赢在 pre-vendor 窗口:普通用户项仍保留 active-turn recovery', async () => {
+    const h = createHarness();
+    const sid = 'user-stop-pre-vendor';
+    let releaseSend!: () => void;
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      await new Promise<void>((resolve) => { releaseSend = resolve; });
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'typed by hand'));
+    await flush();
+
+    const state = (
+      h.coordinator as unknown as {
+        getState: (id: string) => {
+          activeTurn: { persisted: boolean; sendStarted: boolean } | null;
+        };
+      }
+    ).getState(sid);
+    state.activeTurn!.persisted = true;
+    state.activeTurn!.sendStarted = false;
+
+    h.coordinator.stop(sid, { keepQueue: true });
+    await flush();
+
+    expect(latestProjection(h.projections).recovery?.kind).toBe('active-turn');
+    releaseSend();
+    await flush();
+  });
+
   it('派发前会话被关闭:已持久化的 scheduler 项不留 recovery', async () => {
     // 第三条漏掉的终态路径(onSessionClosed → handleActiveTurnClosedBeforeDispatch)。
     // 生产里它命中的是"持久化已过、vendor 派发还没起"的那一瞬,单测里从外部制造这个

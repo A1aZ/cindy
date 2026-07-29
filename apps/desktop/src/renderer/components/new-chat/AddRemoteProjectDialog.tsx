@@ -53,7 +53,11 @@ type RemoteTarget =
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** Device group that opened the dialog; falls back to the first available target. */
+  /**
+   * 打开本弹窗的设备。**指名了就只认这一台**:它不在可选目标里(离线 / 撤销被控)时选中项留空,
+   * 不回落到别的目标 —— 静默换机器会让用户在以为是 A 的界面里把项目建到 B 上。
+   * 未指名(从通用入口打开)时才由用户自己在下拉里选。
+   */
   initialDeviceId?: string | null;
   /** vendor 不在 dialog 里选 —— 由父层根据当前 draft / segmented switcher 决定。 */
   onProjectAdded: (target: RemoteProjectTarget) => void | Promise<void>;

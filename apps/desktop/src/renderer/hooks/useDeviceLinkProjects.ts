@@ -50,6 +50,20 @@ export function useDeviceLinkProjects(
   const [rows, setRows] = useState<ExistingRemoteProject[]>([]);
   const [loading, setLoading] = useState(false);
   /**
+   * rows 的**同步**镜像。`setRows(updater)` 的 updater 只在 React 处理这次更新时才跑,而删除
+   * 失败后的恢复要在两次 await 之间就拿到「被移除的是哪一行、它原来在第几位」—— 从 updater
+   * 的副作用里取值会读到 undefined(Copilot review),于是 `if (!restored) return` 把恢复整个
+   * 跳过,幻影删除(本地看着删了、对端其实还在)又回来了。
+   *
+   * 所有写 rows 的地方都经 commitRows,镜像与状态同步推进,这条路径不再依赖 React 的调度时机;
+   * 顺带让并发删除各自读到「前一次删除之后」的列表,插回位置也不会错位。
+   */
+  const rowsRef = useRef<ExistingRemoteProject[]>([]);
+  const commitRows = useCallback((next: ExistingRemoteProject[]) => {
+    rowsRef.current = next;
+    setRows(next);
+  }, []);
+  /**
    * 按设备记请求序号。切设备 / 重新打开 picker 会并发多个取数,只认最后一次的结果 ——
    * 否则慢的旧请求回来会把新设备的列表覆盖成上一台的项目(看起来像「项目跑到别的机器上了」)。
    */
@@ -73,7 +87,7 @@ export function useDeviceLinkProjects(
     currentDeviceIdRef.current = deviceId;
     // 本机(deviceId=null)不走隧道;picker 没打开时不取数,避免常驻首页时白拉。
     if (!enabled || !deviceId) {
-      setRows([]);
+      commitRows([]);
       setLoading(false);
       return;
     }
@@ -83,18 +97,18 @@ export function useDeviceLinkProjects(
     // 立刻清空上一台设备的行(#807 review):projects memo 依赖 [deviceId, deviceName, rows],
     // deviceId 已经变成 B 而 rows 还是 A 的,于是加载窗口里会渲染出「标着 B 的 A 的项目」——
     // 用户此时选中就把 A 的路径发给 B,撞 path guard 或打开 B 上同名的无关目录。
-    setRows([]);
+    commitRows([]);
     setLoading(true);
     void loadDeviceLinkExistingProjects(deviceId)
       .then((list) => {
         if (cancelled || requestIdRef.current !== requestId) return;
-        setRows(list);
+        commitRows(list);
         setLoading(false);
       })
       .catch(() => {
         // 被控端离线 / 老版本没这个 channel → 当作空列表,空态里仍有「浏览文件夹」兜底。
         if (cancelled || requestIdRef.current !== requestId) return;
-        setRows([]);
+        commitRows([]);
         setLoading(false);
       });
     return () => {
@@ -114,15 +128,13 @@ export function useDeviceLinkProjects(
       devicePending.add(option.path);
       pendingRemovalsRef.current.set(target.deviceId, devicePending);
       // 记下被移除的行与它原来的位置:两条恢复路径都要用(回读失败时按原序插回)。
-      let removedIndex = -1;
-      let removedRow: ExistingRemoteProject | undefined;
-      setRows((current) => {
-        const idx = current.findIndex((row) => row.path === option.path);
-        if (idx < 0) return current;
-        removedIndex = idx;
-        removedRow = current[idx];
-        return [...current.slice(0, idx), ...current.slice(idx + 1)];
-      });
+      // 从同步镜像读,不从 setRows 的 updater 副作用读 —— 见 rowsRef 的说明。
+      const before = rowsRef.current;
+      const removedIndex = before.findIndex((row) => row.path === option.path);
+      const removedRow = removedIndex >= 0 ? before[removedIndex] : undefined;
+      if (removedIndex >= 0) {
+        commitRows([...before.slice(0, removedIndex), ...before.slice(removedIndex + 1)]);
+      }
 
       try {
         await removeDeviceLinkExistingProject(target.deviceId, option.path);
@@ -146,7 +158,9 @@ export function useDeviceLinkProjects(
               (path) => path !== option.path,
             ),
           );
-          setRows(othersPending.size === 0 ? list : list.filter((row) => !othersPending.has(row.path)));
+          commitRows(
+            othersPending.size === 0 ? list : list.filter((row) => !othersPending.has(row.path)),
+          );
         } catch {
           // 回读也失败(对端离线 / 隧道断)。此时**必须把行放回去**:删除既没在对端生效,
           // 权威列表也拿不到,保留乐观移除等于让选择器藏着一个远端仍然存在的项目,而且不给
@@ -154,21 +168,19 @@ export function useDeviceLinkProjects(
           //
           // 这里**刻意不看 requestId**:删除按钮不会禁用后续点击,快速删两行时第二次会重写
           // 共享的 requestIdRef,若按版本号 gate,第一次的恢复就被跳过,那一行会一直从选择器
-          // 里消失(而它在对端还在)。恢复的是「这一行」这件具体的事,与列表版本无关;下面的
-          // setRows 自带存在性检查,期间真有成功回读把它带回来了也不会插重。
+          // 里消失(而它在对端还在)。恢复的是「这一行」这件具体的事,与列表版本无关;下面自带
+          // 存在性检查,期间真有成功回读把它带回来了也不会插重。
           const restored = removedRow;
           if (!restored) return;
           // 也要按当前设备 gate:若这两次请求还在飞时用户已切到别的设备,把 A 的行插进 B 的 rows
           // 会被 toDeviceProjectOptions 标成属于 B —— 选中它就把 A 的路径发给 B 了。
           // 这与「并发删除不能互相取消」不冲突:设备身份只排除「已切走」,不排除同设备内的并发。
           if (currentDeviceIdRef.current !== target.deviceId) return;
-          setRows((current) => {
-            if (current.some((row) => row.path === restored.path)) return current;
-            const at = removedIndex >= 0 && removedIndex <= current.length
-              ? removedIndex
-              : current.length;
-            return [...current.slice(0, at), restored, ...current.slice(at)];
-          });
+          const current = rowsRef.current;
+          if (current.some((row) => row.path === restored.path)) return;
+          const at =
+            removedIndex >= 0 && removedIndex <= current.length ? removedIndex : current.length;
+          commitRows([...current.slice(0, at), restored, ...current.slice(at)]);
         }
       } finally {
         const set = pendingRemovalsRef.current.get(target.deviceId);

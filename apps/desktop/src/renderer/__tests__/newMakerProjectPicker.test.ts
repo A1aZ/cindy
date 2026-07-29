@@ -296,9 +296,9 @@ describe('Shared create project picker', () => {
       deviceLinkProjectsHookSource.indexOf('const restored = removedRow;'),
     );
     expect(tail).not.toContain('requestIdRef.current !== requestId');
-    // 靠 setRows 里的存在性检查保证幂等,而不是靠版本号。
+    // 靠插回前的存在性检查保证幂等,而不是靠版本号。
     expect(deviceLinkProjectsHookSource).toContain(
-      'if (current.some((row) => row.path === restored.path)) return current;',
+      'if (current.some((row) => row.path === restored.path)) return;',
     );
   });
 
@@ -309,7 +309,48 @@ describe('Shared create project picker', () => {
     const effect = deviceLinkProjectsHookSource.slice(
       deviceLinkProjectsHookSource.indexOf('const requestId = requestIdRef.current + 1;'),
     );
-    expect(effect.slice(0, effect.indexOf('loadDeviceLinkExistingProjects'))).toContain('setRows([]);');
+    expect(effect.slice(0, effect.indexOf('loadDeviceLinkExistingProjects'))).toContain(
+      'commitRows([]);',
+    );
+  });
+
+  // #807 review 第十四轮:恢复路径不能依赖 React 的调度时机。`setRows(updater)` 的 updater
+  // 只在 React 处理更新时才跑,而「删除失败 + 回读失败」的恢复要在两次 await 之间就拿到被移除
+  // 的行 —— 从 updater 副作用取值可能读到 undefined(Copilot review),`if (!restored) return`
+  // 于是把恢复整个跳过,幻影删除又回来了。改由同步镜像 rowsRef 供数,写入统一走 commitRows。
+  it('captures the removed row from a synchronous mirror, not a setState updater side effect', () => {
+    expect(deviceLinkProjectsHookSource).toContain(
+      'const rowsRef = useRef<ExistingRemoteProject[]>([]);',
+    );
+    expect(deviceLinkProjectsHookSource).toContain('rowsRef.current = next;');
+    expect(deviceLinkProjectsHookSource).toContain('const before = rowsRef.current;');
+    // 被移除的行与位置都从镜像同步算出,不再靠 updater 的副作用赋值。
+    expect(deviceLinkProjectsHookSource).toContain(
+      'const removedIndex = before.findIndex((row) => row.path === option.path);',
+    );
+    // rows 只由 commitRows 写(唯一一处 `setRows(next)`)。留任何一个裸 setRows 就还有一条
+    // 镜像与状态不同步的路 —— 排除注释里提到的 `setRows(updater)` 字样。
+    const bareSetRows =
+      deviceLinkProjectsHookSource.match(/setRows\((?!next\)|updater\))/g) ?? [];
+    expect(bareSetRows.length).toBe(0);
+  });
+
+  // #807 review 第十四轮:compact 模式下按钮只剩图标 + 状态点,不渲染设备名 —— aria-label 只报
+  // 「设备」的话读屏用户无从得知当前选的是哪台机器。
+  it('announces the selected device in the switcher aria-label', () => {
+    expect(deviceSwitcherPillSource).toContain(
+      "const triggerLabel = `${t('newChat.deviceSwitcher.label')}: ${label}`;",
+    );
+    expect(deviceSwitcherPillSource).toContain('aria-label={triggerLabel}');
+  });
+
+  // #807 review 第十四轮:注释与实现必须一致 —— 早前几轮把「指名设备不在目标里就留空」改对了,
+  // 但 JSDoc 还写着 falls back to the first available target,会误导后续维护者改回静默换机器。
+  it('documents that an explicitly requested device never falls back', () => {
+    expect(addRemoteProjectDialogSource).not.toContain(
+      'falls back to the first available target',
+    );
+    expect(addRemoteProjectDialogSource).toContain('**指名了就只认这一台**');
   });
 
   // #807 review 第十三轮:同一台机器上换项目不得重置运行配置与引用目录 —— 上一轮只 gate 了
@@ -433,7 +474,7 @@ describe('Shared create project picker', () => {
     const restore = deviceLinkProjectsHookSource.slice(
       deviceLinkProjectsHookSource.indexOf('const restored = removedRow;'),
     );
-    expect(restore.slice(0, restore.indexOf('setRows('))).toContain(
+    expect(restore.slice(0, restore.indexOf('commitRows('))).toContain(
       'if (currentDeviceIdRef.current !== target.deviceId) return;',
     );
   });

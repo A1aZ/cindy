@@ -76,6 +76,10 @@ export function DeviceSwitcherPill({
   const current = value == null ? null : devices.find((d) => d.deviceId === value);
   // 本机不画状态点(它永远在线,画了只是噪音)。
   const showDot = current != null;
+  // 当前值必须进 aria-label:compact 模式下按钮只剩图标 + 状态点、不渲染设备名文本,只报
+  // 「设备」会让读屏用户完全不知道当前选的是哪台机器(Copilot review)。非 compact 时名字虽然
+  // 可见,一并读出也不冗余 —— aria-label 会覆盖内文,不会重复播报。
+  const triggerLabel = `${t('newChat.deviceSwitcher.label')}: ${label}`;
 
   const select = (deviceId: DeviceSwitcherValue, deviceName: string | null) => {
     onChange(deviceId, deviceName);
@@ -90,7 +94,7 @@ export function DeviceSwitcherPill({
           data-testid="create-agent-device-pill"
           disabled={disabled}
           title={compact ? label : undefined}
-          aria-label={t('newChat.deviceSwitcher.label')}
+          aria-label={triggerLabel}
           className={cn(
             'inline-flex h-[30px] items-center justify-center gap-1.5 rounded-full',
             'border border-[var(--create-agent-control-border)] bg-[var(--create-agent-control-bg)]',

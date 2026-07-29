@@ -1466,6 +1466,10 @@ export function NewMakerDraftRoute() {
    */
   const handleDeviceChange = useCallback(
     (deviceId: string | null, deviceName: string | null) => {
+      // 发送已经在途时拒绝换设备:那次调用的闭包持有旧设备,而 draft 会可见地切到新设备 ——
+      // 结果会话建在旧设备上、导航过去,同时把用户刚选的新设备上下文重置掉。ref 在这里是必需的
+      // (它即时可读,不像 state 要等下一次渲染);pill 也会用同步的 sendInFlight 禁用,双保险。
+      if (sendInFlightRef.current) return;
       // 点已选中的那一行(包括本机时点「本机」)只是确认当前选择,不该有任何副作用。
       // 下面会剥 mention chip 并清 workingDir / extraDirs —— 重选同一设备时执行这些,
       // 等于用户点一下就静默丢掉已选的项目和部分已写好的消息。必须先早返回。
@@ -1540,6 +1544,15 @@ export function NewMakerDraftRoute() {
 
   // 防止用户在 send 流程中再次按下 send(异步 createSession 期间)。
   const sendInFlightRef = useRef(false);
+  /**
+   * 与 sendInFlightRef 同步的渲染态。ref 用于同步 guard(重复发送、切设备)——它必须即时可读;
+   * state 只负责让「发送在途」能驱动 UI 禁用(ref 变化不触发渲染)。两者一起改,别只动一个。
+   */
+  const [sendInFlight, setSendInFlight] = useState(false);
+  const markSendInFlight = useCallback((value: boolean) => {
+    sendInFlightRef.current = value;
+    setSendInFlight(value);
+  }, []);
   const wtRef = useRef({
     enabled: wtEnabled,
     name: wtName,
@@ -1607,12 +1620,12 @@ export function NewMakerDraftRoute() {
       // 本地导航命令(/jump-session)在进入 createSession 前同步短路:命中即直接
       // 跳转,新建界面不会先创建 session。这正是它和 /issue 的关键区别。
       if (matchNavigationCommandName(message)) {
-        sendInFlightRef.current = true;
+        markSendInFlight(true);
         void (async () => {
           try {
             await tryHandleNavigationCommand(message, { navigate, t });
           } finally {
-            sendInFlightRef.current = false;
+            markSendInFlight(false);
           }
         })();
         return false;
@@ -1622,7 +1635,7 @@ export function NewMakerDraftRoute() {
       // 自动分配运行目录。项目不是必填项,只是同一创建页里的可切换上下文。
       const selectedWorkingDir = effectiveWorkingDir?.trim() || undefined;
 
-      sendInFlightRef.current = true;
+      markSendInFlight(true);
       void (async () => {
         try {
           // device-link:远程草稿就绪态以被控端为准(传 deviceId 走隧道查被控端 maker:agent:status);
@@ -2102,7 +2115,7 @@ export function NewMakerDraftRoute() {
           );
         } finally {
           setWtCreating(false);
-          sendInFlightRef.current = false;
+          markSendInFlight(false);
         }
       })();
 
@@ -2575,7 +2588,7 @@ export function NewMakerDraftRoute() {
                   onOpenChange={handleDevicePickerOpenChange}
                   // 窄屏 pill 排会进正常流并 flex-wrap;多台时收成图标 + 状态点少占一行。
                   compact={isDraftNarrow && selectableDevices.length > 1}
-                  disabled={wtCreating}
+                  disabled={wtCreating || sendInFlight}
                 />
                 <FolderPickerPopover
                   open={folderPickerOpen}

@@ -302,6 +302,23 @@ describe('Shared create project picker', () => {
     );
   });
 
+  // #807 review 第六轮:发送在途时不能换设备 —— 那次调用的闭包持有旧设备,draft 却切到新设备,
+  // 结果会话建在旧设备上并导航过去,同时把刚选的新设备上下文重置掉。
+  it('rejects and disables device switching while a send is in flight', () => {
+    const handler = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const handleDeviceChange = useCallback('),
+    );
+    // ref 而非 state:必须即时可读,不能等下一次渲染。
+    expect(handler.slice(0, handler.indexOf('patchDraft('))).toContain(
+      'if (sendInFlightRef.current) return;',
+    );
+    // 同时用同步的 state 禁用 pill(ref 变化不触发渲染)。
+    expect(newMakerDraftRouteSource).toContain('disabled={wtCreating || sendInFlight}');
+    // ref 与 state 必须一起改,所以赋值统一走 helper。
+    expect(newMakerDraftRouteSource).toContain('const markSendInFlight = useCallback(');
+    expect(newMakerDraftRouteSource).not.toContain('sendInFlightRef.current = true;');
+  });
+
   // #807 review 第五轮:换设备必须同步失效上一台的远程默认值快照,否则 seed effect 会拿旧
   // capabilities/defaults 种下新设备的 dlSel 并把它记成「已 seed」,新设备真值到达后又被 guard
   // 挡住重种 —— composer 于是向新设备提交上一台的 model / provider / permission。

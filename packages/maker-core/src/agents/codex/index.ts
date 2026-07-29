@@ -2181,6 +2181,20 @@ export class CodexAgent extends BaseAgent {
     let sdkSessionId: string | undefined;
     let currentTurnId: string | null = null;
     let isTurnInFlight = false;
+    /**
+     * 本 handle 上「起过多少个 turn」的单调计数器,每次 isTurnInFlight 被置活 +1。
+     *
+     * 存在的唯一理由:延迟很久的善后动作(upstream-idle 看门狗那条要等两次 interrupt
+     * ack、最长 20s)不能只看**当下**有没有 turn 在跑 —— 新 turn 完全可能在这段窗口里
+     * 起来又正常结束,把 isTurnInFlight / currentTurnId 双双复位,善后于是误判成"没人
+     * 用了"并关掉这个已被证明健康的 host(review #944 第十八轮 P1)。存量瞬时状态答不了
+     * "期间有没有发生过新活儿",单调计数器可以。
+     *
+     * 与 sendGeneration 的区别:那个按 send() 计数,起不来 turn 的 send(RPC 失败、
+     * 被拒)也会 +1,而计划实施 turn 这类不经 send 的路径反而不 +1。这里要的恰恰是
+     * "turn 被置活"这件事。
+     */
+    let turnStartGeneration = 0;
     let isTurnStartPending = false;
     // turn/start RPC 失败(超时/拒绝)后置位: server 可能实际已建 turn,
     // 迟到的孤儿 turnStarted 由 turnStarted handler 拦下并补 interrupt。
@@ -3835,6 +3849,9 @@ export class CodexAgent extends BaseAgent {
       // 与 Session.recoverIfTurnStillRunning 用的是同一套恢复机制(见 session.ts
       // "handle.events() 自然结束"注释),不需要各 agent 另造一套。
       // 中断成功时什么都不做:daemon 既然 ack 了就还活着,会话继续可用。
+      // 在进入 interrupt 等待窗口**之前**取一次快照:窗口里起过的新 turn 即使已经正常
+      // 结束(瞬时状态被复位),也要靠它认出来(见 turnStartGeneration 声明处)。
+      const turnGenBeforeInterrupt = turnStartGeneration;
       void (async () => {
         const interrupted = await interruptTurnForPermissionTighten(turnId, {
           suppressFailureEvent: true,
@@ -3847,12 +3864,24 @@ export class CodexAgent extends BaseAgent {
         // 起了新 turn"(review #944 第十七轮 P1;与第七轮 Session 的 turnGeneration、
         // 第九轮的 host 身份闸是同一类错误:善后动作没绑定到发起它的那个实体)。
         //
-        // 判据用 isTurnInFlight / currentTurnId:我们自己那次合成收口已经把它们清空,
-        // 所以只要它们非空,就一定是新活儿。留着这个 host 的风险由新 turn 自己的看门狗兜。
-        if (isTurnInFlight || currentTurnId !== null) {
+        // 判据有两半,缺一不可:
+        // ① isTurnInFlight / currentTurnId —— 我们自己那次合成收口已把它们清空,所以
+        //    非空就一定是新活儿(新 turn 此刻仍在跑)。
+        // ② turnStartGeneration 与窗口前的快照不一致 —— 新 turn 在这 20s 里起来又**正常
+        //    结束**时,①的两个瞬时量会被 handleTurnCompleted 双双复位,只看①会误判成
+        //    "没人用了",照样关掉一个刚刚证明自己健康的 host,并连带退役同 host 上的其它
+        //    会话(review #944 第十八轮 P1)。单调计数器答得了"期间有没有发生过新活儿"。
+        // 两半都不成立才继续善后。留着这个 host 的风险由新 turn 自己的看门狗兜。
+        if (isTurnInFlight || currentTurnId !== null || turnStartGeneration !== turnGenBeforeInterrupt) {
           log.warn(
-            'upstream-idle watchdog: a newer turn is running on this handle — skipping close/retire',
-            { threadId, stalledTurnId: turnId, currentTurnId },
+            'upstream-idle watchdog: this handle served a newer turn during the interrupt window — skipping close/retire',
+            {
+              threadId,
+              stalledTurnId: turnId,
+              currentTurnId,
+              turnGenBeforeInterrupt,
+              turnStartGeneration,
+            },
           );
           return;
         }
@@ -5688,6 +5717,7 @@ export class CodexAgent extends BaseAgent {
         });
         currentTurnId = params.turn.id;
         isTurnInFlight = true;
+        turnStartGeneration += 1; // 见声明处:延迟善后靠它判断"期间起过新 turn"
         // turn 开始 → 球在上游,起 idle 表(后续任何事件都会重置它)。
         armUpstreamIdle();
         // turn/start 在飞期间权限被收紧 (turnStarted 通知可能先于 turn/start resp
@@ -6414,6 +6444,7 @@ export class CodexAgent extends BaseAgent {
               turnOriginByTurnId.set(resp.turn.id, { startSeq: ownerSeq, sendGen: mySendGen });
               currentTurnId = resp.turn.id;
               isTurnInFlight = true;
+              turnStartGeneration += 1; // 见声明处:延迟善后靠它判断"期间起过新 turn"
               currentTurnPlanModeActive = turnStartsInPlanMode;
               pendingTurnStartPlanMode = null;
               startRolloutPlanFallback(resp.turn.id);

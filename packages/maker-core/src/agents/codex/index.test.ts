@@ -14192,6 +14192,59 @@ describe('CodexAgent upstream-response-idle watchdog', () => {
     }
   });
 
+  it('等 interrupt 期间新 turn 起了又正常结束 → 依然不关 handle、不退役 host', async () => {
+    // 上一个用例里新 turn 在窗口结束时**仍在跑**,所以看瞬时的 isTurnInFlight /
+    // currentTurnId 就够。但新 turn 完全可能在这 20s 里跑完:handleTurnCompleted 把两个
+    // 瞬时量双双复位,只看它们就会误判成"没人用了",照样关掉一个刚刚证明自己健康的 host,
+    // 并连带退役同 host 上的其它会话(review #944 第十八轮 P1)。判据必须是单调的
+    // turnStartGeneration:它答得了"期间有没有发生过新活儿"。
+    vi.useFakeTimers();
+    try {
+      const agent = new CodexAgent(createDeps());
+      let turnSeq = 0;
+      const host = installFakeHost(agent, (method) => {
+        if (method === Method.TurnStart) return { turn: { id: `turn-${++turnSeq}` } };
+        if (method === Method.TurnInterrupt) return new Promise<never>(() => {});
+        return undefined;
+      });
+      const retireHostKey = vi
+        .spyOn(
+          agent as unknown as { retireHostKey: (...args: unknown[]) => Promise<void> },
+          'retireHostKey',
+        )
+        .mockResolvedValue(undefined);
+      const handle = await startIdleSession(agent, 'session-idle-newer-turn-done');
+      let eventsEnded = false;
+      void (async () => {
+        for await (const ev of handle.events()) void ev;
+        eventsEnded = true;
+      })();
+      await handle.send({ type: 'user', content: 'go' });
+      const handlers = host.getThreadHandlers();
+      if (!handlers) throw new Error('expected thread handlers');
+      handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-1' } } as never);
+
+      // 看门狗开火 → 合成本地收口,interrupt 挂住
+      await vi.advanceTimersByTimeAsync(IDLE_MS + 1);
+      // 窗口里起了新 turn,并且**在窗口内就正常结束**
+      await handle.send({ type: 'user', content: 'next' });
+      handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-2' } } as never);
+      handlers.turnCompleted?.({
+        threadId: 'start-thread-id',
+        turn: { id: 'turn-2', status: 'completed' },
+      });
+      expect(handle.isTurnRunning?.()).toBe(false); // 瞬时量已被复位,只看它就会误判
+
+      await vi.advanceTimersByTimeAsync(10_000 * 2 + 10);
+
+      expect(eventsEnded).toBe(false);
+      expect(retireHostKey).not.toHaveBeenCalled();
+      await handle.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('等 interrupt 期间 host 已被换掉 → 不退役那个新的健康 host', async () => {
     // 两次 interrupt ack 要等 20s,期间别的路径(auth / 凭证重启)完全可能已经把这个 key
     // 下的 host 换成新实例。retireHostKey 只按 key 查删,不加身份闸就会把新 host 退役、

@@ -299,14 +299,14 @@ export function CCAgentSidebarUpper() {
     // 而红点已经消失(还连带发了 explicit 桥接 / 远程回执),正是本 PR 要消灭的割裂。
     // 现在成功才 explicit 清,失败则重算把仍存在的告警点恢复回来。
     try {
-      const { failed } = await window.electronAPI.localDb.sessions.dismissPendingAlerts(
+      const { processed, failed } = await window.electronAPI.localDb.sessions.dismissPendingAlerts(
         automationAttentionSessionIds,
       );
-      // 只清**确实处置成功**的会话:main 侧逐会话核实了落库结果并回报 failed,
-      // 部分失败时那些会话的横幅仍在库里,红点必须留着。
-      const failedSet = new Set(failed);
-      const succeeded = automationAttentionSessionIds.filter((id) => !failedSet.has(id));
-      clearSessionAttentionMany(succeeded, { intent: 'explicit' });
+      // 只清 main 侧**确切回报处置成功**的会话。不能用「不在 failed 里」推断成功:
+      // 请求集合里可能有本 IPC 根本不处理的告警来源(如 WorktreeRestoreBanner 打的
+      // 红点),那些会话既不成功也不失败,误清后重算也恢复不了(worktree 告警不进
+      // 那条查询)。
+      clearSessionAttentionMany(processed, { intent: 'explicit' });
       if (failed.length > 0) log.warn('some pending alerts were not dismissed', failed);
     } catch (e) {
       log.warn('dismiss pending alerts failed', e);

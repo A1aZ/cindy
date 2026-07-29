@@ -1434,7 +1434,13 @@ export function CCAgentSessionView({
         // sessions:patched(lastTurnEndedAt)收敛,不重复 ack。
         if (remoteDeviceId) ackErrorAlertHandled(sessionId);
       })
-      .catch(() => undefined);
+      .catch((err) => {
+        // 落库失败(典型:device-link 断连时忽略远程中断)必须复位闩锁 —— 否则横幅
+        // 永久隐藏而中断并未被确认,红点还挂着,用户不离开再重进就没法重试
+        // (PR #879 review P1)。与 handleSessionInterruptContinue 的失败处理一致。
+        setSessionInterruptAcked(false);
+        toast.error(err instanceof Error ? err.message : String(err));
+      });
   }, [remoteDeviceId, sessionId]);
   // device-link 远程会话首屏:历史/元数据经隧道往返(网络),慢网下 historyLoaded=false
   // 期间消息区空白。仅远程 + 延迟防闪后给「正在从被控端加载」提示(本机会话恒 false)。

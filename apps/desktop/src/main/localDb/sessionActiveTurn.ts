@@ -170,6 +170,64 @@ export async function ackSessionTurnEndedDurable(
   return endedAt;
 }
 
+/**
+ * 批量处置专用的**条件** ended 写:只在 active_turn_started_at 仍等于捕获值时落库,
+ * 并返回是否真的写进去了。
+ *
+ * 为什么需要它(PR #879 review P1):批量处置先用 listInterruptedPendingSessionIds
+ * 取快照,再逐个 ack。快照之后、轮到某会话之前,自动化可能已经启动了新 turn(写了新的
+ * activeTurnStartedAt)。此时盲写 ended 会把**刚启动的活跃 turn** 记成已收尾 ——
+ * 它真被中断时下次启动就检测不到了。bootAt 守卫只保证「查询时刻」正确,盖不住这段
+ * TOCTOU 窗口,所以把捕获的 startedAt 带进 WHERE 做 CAS。
+ *
+ * 仍走 per-session 写链(保序)与 MAX 守卫(ended 只前进),语义与普通 ended 写一致。
+ */
+export async function ackSessionTurnEndedIfUnchanged(
+  sessionId: string,
+  expectedStartedAt: number,
+): Promise<boolean> {
+  if (_quitFrozen) return false;
+  const endedAt = Date.now();
+  let landed = false;
+  await chainWrite(sessionId, async () => {
+    try {
+      const db = getDbClient().drizzle;
+      await db
+        .update(sessions)
+        .set({ lastTurnEndedAt: sql`MAX(COALESCE(${sessions.lastTurnEndedAt}, 0), ${endedAt})` })
+        .where(and(eq(sessions.id, sessionId), eq(sessions.activeTurnStartedAt, expectedStartedAt)));
+      // 读回校验:CAS 未命中(新 turn 已启动)或写失败都算未处置,调用方据此回报 failed。
+      const [row] = await db
+        .select({
+          startedAt: sessions.activeTurnStartedAt,
+          endedAt: sessions.lastTurnEndedAt,
+        })
+        .from(sessions)
+        .where(eq(sessions.id, sessionId));
+      landed =
+        row?.startedAt === expectedStartedAt &&
+        row.endedAt != null &&
+        row.endedAt >= expectedStartedAt;
+      if (landed && _onTurnEndedPersisted && row?.endedAt != null) {
+        try {
+          _onTurnEndedPersisted(sessionId, row.endedAt);
+        } catch (notifyErr) {
+          log.warn('onTurnEndedPersisted notify failed', {
+            sessionId,
+            error: notifyErr instanceof Error ? notifyErr.message : String(notifyErr),
+          });
+        }
+      }
+    } catch (err) {
+      log.warn('ackSessionTurnEndedIfUnchanged failed', {
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+  return landed;
+}
+
 /** ended 写入的唯一落库实现:MAX 守卫 + per-session 链,见 markSessionTurnEnded 注释。 */
 function enqueueEndedWrite(sessionId: string, endedAt: number): Promise<void> {
   return chainWrite(sessionId, async () => {
@@ -233,10 +291,12 @@ export function _setBootAtMsForTests(ms: number): void {
  * 启动首拉消费它(见下方两条腿消费周期的说明);但 startedAt < bootAt 的守卫让它
  * 在任何时刻调用都不会把运行中的会话算进来,批量处置因此也可以安全复用。
  */
-export async function listInterruptedPendingSessionIds(): Promise<string[]> {
+export async function listInterruptedPendingRows(): Promise<
+  { sessionId: string; startedAt: number }[]
+> {
   const db = getDbClient().drizzle;
   const rows = await db
-    .select({ id: sessions.id })
+    .select({ id: sessions.id, startedAt: sessions.activeTurnStartedAt })
     .from(sessions)
     .where(
       and(
@@ -250,7 +310,14 @@ export async function listInterruptedPendingSessionIds(): Promise<string[]> {
         lt(sessions.activeTurnStartedAt, _bootAtMs),
       ),
     );
-  return rows.map((r) => r.id);
+  // startedAt 必非 null(上面的 gt/lt 比较已排除),类型收窄用于批量处置的 CAS。
+  return rows.flatMap((r) => (r.startedAt == null ? [] : [{ sessionId: r.id, startedAt: r.startedAt }]));
+}
+
+/** 同上,只要会话 id —— 红点首拉用。 */
+export async function listInterruptedPendingSessionIds(): Promise<string[]> {
+  const rows = await listInterruptedPendingRows();
+  return rows.map((r) => r.sessionId);
 }
 
 /**

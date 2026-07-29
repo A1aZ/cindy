@@ -38,8 +38,10 @@ import { notifyAgentIslandSessionPatch } from '../agentIslandSessionPatch';
 import { noteSessionClearBoundary } from '../../messagePersistBroadcaster';
 import {
   ackSessionTurnEndedDurable,
+  ackSessionTurnEndedIfUnchanged,
   listErrorTailPendingRows,
   listErrorTailPendingSessionIds,
+  listInterruptedPendingRows,
   listInterruptedPendingSessionIds,
   setOnSessionTurnEndedPersisted,
 } from '../sessionActiveTurn';
@@ -776,44 +778,40 @@ export function registerSessionIpc(): void {
     }
     for (const id of ids) requireString(id, 'sessionId');
     const wanted = new Set(ids as string[]);
-    if (wanted.size === 0) return { dismissed: 0, failed: [] };
-    const [tailRows, interrupted] = await Promise.all([
+    if (wanted.size === 0) return { dismissed: 0, processed: [], failed: [] };
+    const [tailRows, interruptedRows] = await Promise.all([
       listErrorTailPendingRows(),
-      listInterruptedPendingSessionIds(),
+      listInterruptedPendingRows(),
     ]);
-    // 逐会话核实处置结果并回报失败清单:调用方据此只对**确实处置成功**的会话清红点。
-    // 之前只回 dismissed 计数,任何一处写失败都会让 renderer 以为整批成功而清掉红点,
-    // 而库里的告警仍在(PR #879 review P1)。
-    let dismissed = 0;
-    const failed: string[] = [];
+    // 回报**确切处置成功的 id**(processed),不让调用方用「不在 failed 里」推断成功:
+    // 请求集合里可能有本 handler 根本不处理的告警来源(典型是 WorktreeRestoreBanner
+    // 打的红点 —— 它不进错误尾行/中断查询),那些会话既不成功也不失败。按「非 failed
+    // 即成功」清点会抹掉它们的红点,而 worktree 告警又不在重算范围内、恢复不了
+    // (PR #879 review P1)。
+    const processed = new Set<string>();
+    const failed = new Set<string>();
     for (const row of tailRows) {
       if (!wanted.has(row.sessionId)) continue;
       try {
         const updated = await dismissErrorMessage(row.sessionId, row.clientId);
-        if (updated) dismissed += 1;
-        else failed.push(row.sessionId);
+        if (updated) processed.add(row.sessionId);
+        else failed.add(row.sessionId);
       } catch {
-        failed.push(row.sessionId);
+        failed.add(row.sessionId);
       }
     }
-    for (const sessionId of interrupted) {
-      if (!wanted.has(sessionId)) continue;
-      // awaited durable 写:与单会话「忽略」同一路径(链 + MAX 守卫 + 落库后广播)。
-      // ackSessionTurnEndedDurable 内部吞写错、照常 resolve,所以**读回校验**:
-      // 只有 lastTurnEndedAt 确实推进到 >= startedAt(中断判定不再成立)才算成功。
-      const endedAt = await ackSessionTurnEndedDurable(sessionId);
-      const [row] = await getDbClient()
-        .drizzle.select({
-          startedAt: sessions.activeTurnStartedAt,
-          endedAt: sessions.lastTurnEndedAt,
-        })
-        .from(sessions)
-        .where(eq(sessions.id, sessionId));
-      const landed = row?.endedAt != null && row.endedAt >= Math.min(endedAt, row.startedAt ?? 0);
-      if (landed) dismissed += 1;
-      else failed.push(sessionId);
+    for (const row of interruptedRows) {
+      if (!wanted.has(row.sessionId)) continue;
+      // CAS 写:带上快照里的 startedAt。快照之后若该会话已启动新 turn,条件不匹配、
+      // 不写入 —— 否则会把刚启动的活跃 turn 记成已收尾,它真被中断时下次启动检测不到
+      // (PR #879 review P1)。返回值已含读回校验。
+      const landed = await ackSessionTurnEndedIfUnchanged(row.sessionId, row.startedAt);
+      if (landed) processed.add(row.sessionId);
+      else failed.add(row.sessionId);
     }
-    return { dismissed, failed: [...new Set(failed)] };
+    // 同一会话两条腿都命中时,任一失败即整体算失败(它仍有未处置的告警)。
+    for (const id of failed) processed.delete(id);
+    return { dismissed: processed.size, processed: [...processed], failed: [...failed] };
   });
 
   // interrupted-turn-resume:用户对「疑似中断」提示点「忽略」/「继续」——写一次

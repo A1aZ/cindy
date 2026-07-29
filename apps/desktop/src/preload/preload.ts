@@ -3362,7 +3362,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
        *  failed 是**未处置成功**的会话 id —— 调用方只对成功的清红点。 */
       dismissPendingAlerts: (
         sessionIds: string[],
-      ): Promise<{ dismissed: number; failed: string[] }> =>
+      ): Promise<{ dismissed: number; processed: string[]; failed: string[] }> =>
         ipcRenderer.invoke('local-db:sessions:dismiss-pending-alerts', sessionIds),
       /** interrupted-turn-resume:用户对中断提示点「忽略」,写一次正常收尾时刻。 */
       ackInterrupted: (id: string): Promise<void> =>

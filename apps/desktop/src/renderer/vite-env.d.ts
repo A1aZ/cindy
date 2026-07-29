@@ -3169,7 +3169,7 @@ interface ElectronAPI {
       /** 批量处置未处理告警(「全部标为已读」)。failed = 未处置成功的会话 id。 */
       dismissPendingAlerts: (
         sessionIds: string[],
-      ) => Promise<{ dismissed: number; failed: string[] }>;
+      ) => Promise<{ dismissed: number; processed: string[]; failed: string[] }>;
       ackInterrupted: (id: string) => Promise<void>;
       // Stage 2 C2: fork 已迁到 electronAPI.maker.fork (走 maker:fork IPC)。
     };

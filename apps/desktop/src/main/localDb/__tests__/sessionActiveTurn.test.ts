@@ -525,6 +525,35 @@ describe('sessionActiveTurn', () => {
     ]);
   });
 
+  // 回归(PR #879 review P1):批量处置先取快照再逐个 ack,快照之后该会话可能已启动
+  // 新 turn。盲写 ended 会把刚启动的活跃 turn 记成已收尾,它真被中断时下次启动就
+  // 检测不到 —— 所以带上捕获的 startedAt 做 CAS。
+  it('ackSessionTurnEndedIfUnchanged skips the write when a new turn already started', async () => {
+    const { ackSessionTurnEndedIfUnchanged } = await import('../sessionActiveTurn.js');
+    const client = createTestDbClient();
+    const captured = Date.now() - 5000;
+    await seedSession(client, 's-cas', { startedAt: captured });
+
+    // startedAt 未变 → 写入并回报成功。
+    expect(await ackSessionTurnEndedIfUnchanged('s-cas', captured)).toBe(true);
+    const after = await readMarks(client, 's-cas');
+    expect(after?.last_turn_ended_at).toBeTypeOf('number');
+    expect(after!.last_turn_ended_at!).toBeGreaterThanOrEqual(captured);
+
+    // 模拟「快照之后又启动了新 turn」:startedAt 前进,CAS 不再命中。
+    await seedSession(client, 's-cas-restarted', { startedAt: captured });
+    const restarted = Date.now();
+    await client.exec('UPDATE sessions SET active_turn_started_at = ? WHERE id = ?', [
+      restarted,
+      's-cas-restarted',
+    ]);
+    expect(await ackSessionTurnEndedIfUnchanged('s-cas-restarted', captured)).toBe(false);
+    const untouched = await readMarks(client, 's-cas-restarted');
+    // 活跃 turn 没被伪装成已收尾:ended 仍为空,中断判定对它照常成立。
+    expect(untouched?.last_turn_ended_at).toBeNull();
+    expect(untouched?.active_turn_started_at).toBe(restarted);
+  });
+
   // 回归(PR #879 review P1,两个 reviewer 独立指出):「中断」必须是**开始于本进程
   // 启动之前**的未收尾 turn。只看 startedAt > endedAt 会把正在跑的 turn 也算进去 ——
   // 红点侧给运行中的会话亮红点,批量处置侧更糟:对活跃 turn 写 lastTurnEndedAt,

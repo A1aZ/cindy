@@ -153,7 +153,7 @@ export async function exportSessionShare(
   if (session.orcaRole) {
     throw codedError('PRECONDITION_FAILED', 'orca team sessions cannot be exported');
   }
-  if (session.agentKind !== 'cc' && session.agentKind !== 'codex') {
+  if (session.agentKind !== 'cc' && session.agentKind !== 'codex' && session.agentKind !== 'pi') {
     throw codedError('PRECONDITION_FAILED', `unsupported agentKind: ${session.agentKind}`);
   }
 

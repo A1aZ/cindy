@@ -90,8 +90,8 @@ interface ParsedAgentSwitchBoundary {
 function parseAgentSwitchBoundary(content: string): ParsedAgentSwitchBoundary | null {
   try {
     const parsed = JSON.parse(content) as Record<string, unknown>;
-    if (parsed.fromAgentKind !== 'cc' && parsed.fromAgentKind !== 'codex') return null;
-    const toAgentKind = parsed.toAgentKind === 'cc' || parsed.toAgentKind === 'codex'
+    if (parsed.fromAgentKind !== 'cc' && parsed.fromAgentKind !== 'codex' && parsed.fromAgentKind !== 'pi') return null;
+    const toAgentKind = parsed.toAgentKind === 'cc' || parsed.toAgentKind === 'codex' || parsed.toAgentKind === 'pi'
       ? parsed.toAgentKind
       : undefined;
     return {

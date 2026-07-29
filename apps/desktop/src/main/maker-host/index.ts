@@ -1307,11 +1307,16 @@ export function getMaker(): Maker {
     // 既有环境零影响。模型清单走目录 pi 投影(xd 网关模型经 active-catalog 按
     // claude-code 可达面镜像给 pi);登录后目录刷新经 refreshCatalogDerivedModels
     // 原地 splice 同步进 capabilities(PiAgent 每次 startSession 现读)。
+    const piMcpProviders = [
+      ...createDesktopMcpProviders(makerMemoryProviderDeps),
+      orcaWorkerBridgeProvider,
+    ];
     const piAgent = buildPiAgent({
       logger: desktopMakerLogger,
       capabilityAdditions: {
         availableModels: deriveAvailableModels(getDesktopSelectableCatalog(), 'pi'),
       },
+      mcpProviders: piMcpProviders,
     });
 
     _maker = new Maker({

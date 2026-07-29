@@ -9062,7 +9062,7 @@ function mirrorSessionFields(
   // 新引擎的事件会被旧引擎 reducer 错误处理(2026-07-20 审计实锤)。随引擎翻转
   // 同步清 sdkSessionId(旧引擎的原生会话 id 对新引擎无意义,与 noteAgentSwitched
   // 口径一致)。幂等:发起窗口已 noteAgentSwitched → 同值 no-op。
-  if (patch.agentKind === 'cc' || patch.agentKind === 'codex') {
+  if (patch.agentKind === 'cc' || patch.agentKind === 'codex' || patch.agentKind === 'pi') {
     const nextKind = patch.agentKind === 'codex' ? 'codex' : 'claude-code';
     setState(sessionId, (s) => {
       const intentApplied = s.agentSwitchIntent?.target === nextKind;

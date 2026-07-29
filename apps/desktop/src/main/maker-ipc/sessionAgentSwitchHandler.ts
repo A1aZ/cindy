@@ -111,7 +111,7 @@ export interface MakerSessionAgentSwitchHandlerDeps {
    * (测试最小 harness)。
    */
   assertModelRouteUsable?(
-    agent: 'claude-code' | 'codex',
+    agent: 'claude-code' | 'codex' | 'pi',
     model: string,
     providerId: string | null,
   ): Promise<string | undefined>;

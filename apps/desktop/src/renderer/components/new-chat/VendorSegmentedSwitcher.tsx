@@ -71,7 +71,7 @@ export function VendorSegmentedSwitcher({
   onChange,
   disabled,
   className,
-  width = 220,
+  width = 300,
   dense = false,
   iconOnly = false,
   visualVariant = 'default',

@@ -103,6 +103,14 @@ export type McpToolApprovalPolicy =
   | 'prompt'
   | 'prompt-each-time';
 
+/** pi spawn 附加配置:host 的 MCP HTTP bridge 出口(见 AgentDeps.preparePiExtraSpawnConfig)。 */
+export interface PiExtraSpawnConfig {
+  mcpBridge?: {
+    token: string;
+    servers: Array<{ name: string; url: string }>;
+  } | null;
+}
+
 export interface CodexExtraSpawnConfig {
   extraArgs: string[];
   extraEnv: Record<string, string>;
@@ -182,6 +190,18 @@ export interface AgentDeps {
    * 其它 agent 不消费此字段。
    */
   resolvePiAgentHome?: () => string | undefined;
+
+  /**
+   * pi 专用钩子:把 mcpProviders 转成 pi 子进程可消费的 MCP 桥配置。
+   *
+   * 与 prepareCodexExtraSpawnConfig 同因:pi 是独立子进程,没法消费 in-process
+   * JS McpServer instance —— host 起 streamable-HTTP bridge 把 instance 暴露到
+   * localhost,PiAgent 把 {token, servers} 经 env(CINDY_PI_MCP_BRIDGE)交给
+   * agentHome/extensions/cindy-bridge.ts,由它在 pi 内注册成工具。
+   *
+   * 缺省 / 返回 null → pi 跑纯内置工具(read/bash/edit/write),仍能基础对话。
+   */
+  preparePiExtraSpawnConfig?: (providers: McpProvider[]) => Promise<PiExtraSpawnConfig | null>;
 
   /**
    * Host-provided capability descriptor additions.

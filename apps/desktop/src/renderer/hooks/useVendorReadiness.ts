@@ -19,14 +19,14 @@ import { connectedProvidersForAgent, type AgentKind, type ProviderView } from '@
 
 export type Readiness = 'ready' | 'unauthenticated' | 'binary-missing' | 'loading';
 
-export function useVendorReadiness(vendorKey: 'cc' | 'codex'): {
+export function useVendorReadiness(vendorKey: 'cc' | 'codex' | 'pi'): {
   readiness: Readiness;
   revalidate: (opts?: { includeSuspended?: boolean }) => Promise<Readiness>;
 } {
   const [readiness, setReadiness] = useState<Readiness>('loading');
 
   const revalidate = useCallback(async (opts?: { includeSuspended?: boolean }): Promise<Readiness> => {
-    const agent: AgentKind = vendorKey === 'cc' ? 'claude-code' : 'codex';
+    const agent: AgentKind = vendorKey === 'cc' ? 'claude-code' : vendorKey === 'pi' ? 'pi' : 'codex';
 
     // 轴 2(仅 codex,正交于来源):本地二进制是运行时前提,缺了连发都发不了 → 优先返回
     // binary-missing。binary 状态走 maker:agent:status(其 authReady 是 codex OAuth 专属,已被

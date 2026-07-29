@@ -29,9 +29,14 @@ import {
   BaseAgent,
   type AgentDeps,
   type AgentSessionHandle,
+  type PiExtraSpawnConfig,
   type SendOptions,
   type StartSessionOptions,
 } from '../base-agent.js';
+import {
+  CINDY_BRIDGE_EXTENSION_FILENAME,
+  CINDY_BRIDGE_EXTENSION_SOURCE,
+} from './cindy-bridge-source.js';
 import type {
   Capabilities,
   ModelDescriptor,
@@ -138,16 +143,14 @@ export class PiAgent extends BaseAgent {
         { id: 'max', displayName: 'Max' },
       ],
       reasoningDisplay: ['off', 'full'],
-      // P0:pi 无内建权限系统,先只暴露完全放行档;ask 档随 cindy-bridge
-      // extension(tool_call 拦截 → interactionResolver)一起上。
+      // 权限执行层在 cindy-bridge extension 的 tool_call 拦截:ask 档下只读内置
+      // 工具放行,bash/edit/write 与全部桥接 MCP 工具逐次经 cindy 审批;
+      // bypassPermissions 全放行。档位从权限文件热读,setPermissionMode 即时生效。
       permissionModes: [
-        { id: 'bypassPermissions', displayName: '完全访问' },
+        { id: 'ask', displayName: 'Default permissions', description: '只读工具直通;写文件、跑命令与 MCP 工具逐次询问' },
+        { id: 'bypassPermissions', displayName: 'Full access', description: '全部工具免询问执行;风险高' },
       ],
-      setPermissionModeMidSession: {
-        supported: false,
-        reason: 'not-implemented',
-        message: 'pi permission modes land with the cindy-bridge extension',
-      },
+      setPermissionModeMidSession: { supported: true },
       multimodal: {
         text: { supported: true },
         image: { supported: true },
@@ -225,6 +228,42 @@ export class PiAgent extends BaseAgent {
     const sessionDir = path.join(agentHome, 'sessions');
     await fs.mkdir(sessionDir, { recursive: true });
 
+    // cindy-bridge extension:每次 startSession 覆写,保证桥代码与本版本一致。
+    const extensionsDir = path.join(agentHome, 'extensions');
+    await fs.mkdir(extensionsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(extensionsDir, CINDY_BRIDGE_EXTENSION_FILENAME),
+      CINDY_BRIDGE_EXTENSION_SOURCE,
+    );
+
+    // 权限档文件:extension 每次 tool_call 现读(热切换);读不到按 ask fail-closed。
+    const runtimeDir = path.join(agentHome, 'runtime');
+    await fs.mkdir(runtimeDir, { recursive: true });
+    const permissionFile = path.join(
+      runtimeDir,
+      `perm-${opts.sessionId ?? `anon-${process.pid}-${Date.now()}`}.json`,
+    );
+    const normalizePermissionMode = (mode: string | undefined): 'ask' | 'bypassPermissions' =>
+      mode === 'bypassPermissions' ? 'bypassPermissions' : 'ask';
+    let permissionMode = normalizePermissionMode(opts.permissionMode);
+    const writePermissionFile = async (): Promise<void> => {
+      await fs.writeFile(permissionFile, JSON.stringify({ mode: permissionMode }) + '\n');
+    };
+    await writePermissionFile();
+
+    // MCP 桥:host 把 in-process MCP providers 暴露成 localhost streamable-HTTP。
+    let mcpBridge: PiExtraSpawnConfig['mcpBridge'] = null;
+    if (this.deps.preparePiExtraSpawnConfig) {
+      try {
+        const extra = await this.deps.preparePiExtraSpawnConfig(this.deps.mcpProviders ?? []);
+        mcpBridge = extra?.mcpBridge ?? null;
+      } catch (err) {
+        this.deps.logger.error('pi MCP bridge prep failed, continuing without cindy tools', {
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     // 前缀稳定拼接:base → host 产品段 → 用户段。易变内容禁止进入(缓存规则 3.1)。
     const promptSections = [
       PI_SYSTEM_PROMPT_BASE,
@@ -254,11 +293,15 @@ export class PiAgent extends BaseAgent {
         ...process.env,
         ...authEnv,
         PI_CODING_AGENT_DIR: agentHome,
+        CINDY_PI_PERMISSION_FILE: permissionFile,
+        ...(mcpBridge && mcpBridge.servers.length > 0
+          ? { CINDY_PI_MCP_BRIDGE: JSON.stringify(mcpBridge) }
+          : {}),
       },
       logger: this.deps.logger,
       onEvent: (event: PiRpcEvent) => {
         if (event.type === 'extension_ui_request') {
-          this.handleExtensionUiRequest(event, proc, interactionResolver);
+          this.handleExtensionUiRequest(event, proc, () => interactionResolver);
           return;
         }
         translatePiEvent(event, queue, ctx);
@@ -386,6 +429,12 @@ export class PiAgent extends BaseAgent {
         });
         if (!resp.success) throw new Error(`pi set_thinking_level failed: ${resp.error ?? 'unknown'}`);
       },
+
+      async setPermissionMode(mode): Promise<void> {
+        // 非 bypass 一律归 ask(最严);extension 每次 tool_call 现读,写完即生效。
+        permissionMode = normalizePermissionMode(mode);
+        await writePermissionFile();
+      },
     };
 
     return handle;
@@ -394,21 +443,63 @@ export class PiAgent extends BaseAgent {
   /**
    * pi extension UI 子协议桥。
    *
-   * P0 兜底:cindy-bridge extension 还没定制审批 payload 前,dialog 类请求一律
-   * cancelled 回写(不挂死 agent loop);fire-and-forget 类忽略。P0-4 把 bridge 的
-   * tool 审批请求映射进 interactionResolver(kind='permission')。
+   * cindy-bridge 的权限询问走 confirm(title='cindy:permission', message=JSON
+   * {toolName, input}),映射成 InteractionRequest(kind='permission')交给
+   * cindy 审批 UI;resolver 缺失或抛错一律 deny(fail-closed —— ask 档没人接
+   * 不得放行)。其它 dialog 请求 cancelled 兜底,不挂死 agent loop。
    */
   private handleExtensionUiRequest(
     event: PiRpcEvent,
     proc: PiRpcProcess,
-    resolver: InteractionResolver | null,
+    getResolver: () => InteractionResolver | null,
   ): void {
-    void resolver;
     const method = typeof event.method === 'string' ? event.method : '';
     const id = typeof event.id === 'string' ? event.id : undefined;
+    if (!id) return;
+
+    if (method === 'confirm' && event.title === 'cindy:permission') {
+      let toolName = 'tool';
+      let input: Record<string, unknown> = {};
+      try {
+        const payload = JSON.parse(typeof event.message === 'string' ? event.message : '{}') as {
+          toolName?: unknown;
+          input?: unknown;
+        };
+        if (typeof payload.toolName === 'string' && payload.toolName.length > 0) toolName = payload.toolName;
+        if (payload.input && typeof payload.input === 'object') input = payload.input as Record<string, unknown>;
+      } catch {
+        /* keep defaults */
+      }
+      const resolver = getResolver();
+      if (!resolver) {
+        this.deps.logger.warn('pi permission request denied: no interaction resolver', { toolName });
+        proc.send({ type: 'extension_ui_response', id, confirmed: false });
+        return;
+      }
+      void (async () => {
+        try {
+          const decision = await resolver({
+            kind: 'permission',
+            requestId: id,
+            toolName,
+            input,
+          });
+          const allow = decision.kind === 'permission' && decision.behavior === 'allow';
+          proc.send({ type: 'extension_ui_response', id, confirmed: allow });
+        } catch (err) {
+          this.deps.logger.warn('pi permission resolver failed; denying', {
+            toolName,
+            message: err instanceof Error ? err.message : String(err),
+          });
+          proc.send({ type: 'extension_ui_response', id, confirmed: false });
+        }
+      })();
+      return;
+    }
+
     const isDialog = method === 'select' || method === 'confirm' || method === 'input' || method === 'editor';
-    if (!isDialog || !id) return;
-    this.deps.logger.warn('pi extension dialog auto-cancelled (no bridge mapping yet)', { method });
+    if (!isDialog) return;
+    this.deps.logger.warn('pi extension dialog auto-cancelled (no mapping)', { method });
     proc.send({ type: 'extension_ui_response', id, cancelled: true });
   }
 }

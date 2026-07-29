@@ -480,7 +480,7 @@ interface ChatInputProps {
    * M35: Vendor lock — when provided, ModelSelector only shows models
    * belonging to this vendor ('cc' for Claude, 'codex' for OpenAI Codex).
    */
-  vendorKey?: 'cc' | 'codex';
+  vendorKey?: 'cc' | 'codex' | 'pi';
   /**
    * Optional override for the composerDraftStore key used to persist editor
    * content (and via attachmentState, attachments) across mount/unmount.
@@ -580,9 +580,10 @@ interface ChatInputProps {
   };
 }
 
-function vendorKeyToAgentKind(v?: 'cc' | 'codex'): AgentKind | null {
+function vendorKeyToAgentKind(v?: 'cc' | 'codex' | 'pi'): AgentKind | null {
   if (v === 'cc') return 'claude-code';
   if (v === 'codex') return 'codex';
+  if (v === 'pi') return 'pi';
   return null;
 }
 

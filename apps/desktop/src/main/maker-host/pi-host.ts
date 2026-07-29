@@ -20,6 +20,7 @@ import { app } from 'electron';
 import { PiAgent, type AgentDeps, type AuthAdapter, type AuthState } from '@cindy/maker-core';
 import type { AgentRuntimeConfig, AuthAdapterOptions } from '@cindy/maker-core';
 
+import { getPiExtraSpawnConfig } from '../mcp-integrations/piEnvironment.js';
 import { readClaudeApiKey } from './auth-adapters.js';
 import { claudeUpstreamEndpoint } from './runtime-configs.js';
 import hostSystemPrompt from './host-system-prompt.md?raw';
@@ -114,6 +115,8 @@ function buildDesktopPiRuntimeConfig(): AgentRuntimeConfig {
 export interface BuildPiAgentOpts {
   logger: AgentDeps['logger'];
   capabilityAdditions?: AgentDeps['capabilityAdditions'];
+  /** Cindy MCP providers(与 claude/codex 同源工厂产物);经 HTTP bridge 暴露给 pi。 */
+  mcpProviders?: AgentDeps['mcpProviders'];
 }
 
 /** pi 二进制缺失时返回 null(调用方跳过注册);其余情况构造 PiAgent。 */
@@ -130,6 +133,8 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
     binaryPath,
     logger: opts.logger,
     capabilityAdditions: opts.capabilityAdditions,
+    mcpProviders: opts.mcpProviders,
     resolvePiAgentHome: () => path.join(app.getPath('userData'), 'pi-agent-home'),
+    preparePiExtraSpawnConfig: (providers) => getPiExtraSpawnConfig(providers, opts.logger),
   });
 }

@@ -227,7 +227,7 @@ export interface XdtshareManifest {
 }
 
 const FIDELITIES: ReadonlySet<string> = new Set(['full', 'partial', 'db-only']);
-const AGENT_KINDS: ReadonlySet<string> = new Set(['cc', 'codex']);
+const AGENT_KINDS: ReadonlySet<string> = new Set(['cc', 'codex', 'pi']);
 const WORKSPACE_KINDS: ReadonlySet<string> = new Set(['project', 'dialogue']);
 
 /**

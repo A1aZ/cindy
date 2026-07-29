@@ -4040,7 +4040,9 @@
       "loading": "Loading branches…",
       "loadFailed": "Failed to load branches — tap to retry",
       "currentTooltip": "Current branch",
-      "sourceTooltip": "Worktree source branch"
+      "sourceTooltip": "Worktree source branch",
+      "worktreeHint": "Picking another branch starts this chat in an isolated worktree",
+      "exitWorktreeHint": "Picking the current branch leaves worktree and starts directly on it"
     },
     "folderPicker": {
       "selectFolder": "Select folder",

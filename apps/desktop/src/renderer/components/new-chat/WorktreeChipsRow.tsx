@@ -6,15 +6,17 @@
  * 2026-07-29 用户裁决(对齐 Claude Code):分支与 worktree 合并为**一个** pill——
  * 左半分支区、竖分隔线、右半 checkbox + "worktree",两个点击区各管各的。
  *
- * 状态不变量(2026-07-29 用户裁决,最高优先):**勾选状态只属于用户**——
- *   - checkbox 原样直出工作端勾选记忆;选分支 / 切项目 / 资格变化都不改它;
- *   - 唯一改动路径 = 用户点击 checkbox 本体(onEnabledChange,上层必持久化);
- *   - 旧的「选非当前分支自动开 worktree」「资格不满足自动关」全部删除;
- *   - 环境不合格(已在 worktree 内 / SSH / 探测中)只是禁用 checkbox + tooltip,
- *     发送时由上层按「勾选 && 合格」静默降级,记忆永不被抹。
+ * 状态不变量(2026-07-29 用户裁决,实测后第二版):**勾选状态只属于用户**——
+ *   - 系统/环境因素(切项目、探测结果、播种)永远不改 checkbox;资格不满足只是
+ *     禁用 + tooltip,发送时由上层按「勾选 && 合格」静默降级,记忆永不被抹;
+ *   - 用户点击 checkbox 本体(source='chip')→ 改状态并写工作端勾选记忆;
+ *   - 用户选分支(source='branch-pick')→ 勾选**跟随本次选择**双向联动
+ *     (选非当前分支必须隔离 → 亮;选回当前 HEAD → 灭;见 branchPick.ts),
+ *     但只对本次草稿生效、不写记忆——分支选择表达的是"这一次从哪启动",
+ *     不是"以后都默认 worktree"。
  *
- * 分支区语义:未勾 = 只读展示仓库当前 HEAD(会话就跑在它上面);已勾 = worktree
- * 源分支选择器(默认当前分支,点开可换;见 branchPick.ts)。
+ * 分支区语义:菜单永远可点(资格允许时);未勾时菜单脚注说明"选其他分支将以
+ * worktree 隔离启动",已勾时脚注说明"选当前分支将退回直接启动"。
  *
  * worktree 名称 **自动生成**（不暴露 UI），由 useSuggestName 拉取后透传给上层。
  */
@@ -58,10 +60,13 @@ export interface WorktreeChipsRowProps {
   emptyProjectLabel?: string;
   enabled: boolean;
   /**
-   * 用户点击 checkbox 本体切换 worktree——**唯一**的状态改动路径,上层必持久化
-   * (写工作端勾选记忆)。系统任何路径都不得调用它替用户翻状态。
+   * 用户切换 worktree。source 决定是否写工作端勾选记忆:
+   *  - 'chip':点 checkbox 本体 → 持久化;
+   *  - 'branch-pick':分支选择的双向联动(用户动作,但表达的是"这一次从哪启动")
+   *    → 仅本次草稿,不落记忆。
+   * 系统/环境路径不得调用它替用户翻状态。
    */
-  onEnabledChange: (v: boolean) => void;
+  onEnabledChange: (v: boolean, source: 'chip' | 'branch-pick') => void;
   sourceBranch: string;
   onSourceBranchChange: (v: string) => void;
   onBaseRepoChange?: (baseRepo: string | null) => void;
@@ -182,9 +187,9 @@ export function WorktreeChipsRow({
     ? sourceBranch || branches.current || 'main'
     : (currentBranch ?? '');
   const showBranchChip = !advancedHidden && !!detect.data?.isGitRepo && branchLabel !== '';
-  // 分支菜单只在 worktree 已勾时可交互(= 源分支选择器);未勾时分支区只读展示当前
-  // HEAD——选分支不再承担任何隐式开关语义(状态不变量,见文件头)。
-  const branchInteractive = !disabled && effectiveWorktreeEnabled;
+  // 分支菜单永远可点(worktree 开不了的仓库除外——已在 worktree 内等场景选分支
+  // 无法产生任何效果,菜单保持只读展示)。
+  const branchInteractive = !disabled && (effectiveWorktreeEnabled || !switchDisabled);
 
   const handleBranchPick = useCallback(
     (picked: string) => {
@@ -192,9 +197,20 @@ export function WorktreeChipsRow({
         { worktreeEnabled: effectiveWorktreeEnabled, currentBranch, sourceBranch: branchLabel },
         picked,
       );
-      if (effect.kind === 'set-source') onSourceBranchChange(effect.branch);
+      if (effect.kind === 'set-source') {
+        onSourceBranchChange(effect.branch);
+      } else if (effect.kind === 'enable-worktree') {
+        // 同帧一起写:sourceBranch 非空会让"worktree 开启后回填 current"的
+        // effect 自然跳过,不会覆盖用户的选择。branch-pick 档 → 不落记忆。
+        onEnabledChange(true, 'branch-pick');
+        onSourceBranchChange(effect.branch);
+      } else if (effect.kind === 'disable-worktree') {
+        // 选回当前 HEAD → 勾选跟随熄灭(仅本次草稿);清源分支,下次开启重新回填。
+        onEnabledChange(false, 'branch-pick');
+        onSourceBranchChange('');
+      }
     },
-    [effectiveWorktreeEnabled, currentBranch, branchLabel, onSourceBranchChange],
+    [effectiveWorktreeEnabled, currentBranch, branchLabel, onSourceBranchChange, onEnabledChange],
   );
 
   const branchWorktree = showBranchChip ? (
@@ -214,7 +230,7 @@ export function WorktreeChipsRow({
         // 上次拉取失败的话,重新打开菜单就自动重试一次,不逼用户去点重试项。
         if (branches.failed && !branches.loading) branches.refetch();
       }}
-      onToggle={onEnabledChange}
+      onToggle={(v) => onEnabledChange(v, 'chip')}
       compact={compact}
     />
   ) : null;
@@ -470,6 +486,13 @@ function BranchWorktreeChip({
             </DropdownMenuItem>
           ))
         )}
+        {/* 脚注说明双向联动语义:未勾 → 选其他分支将开 worktree;已勾 → 选回
+            当前分支将退回直接启动。用户第一次遇到"勾选跟着分支走"时不至于意外。 */}
+        <div className="mt-1 border-t border-border px-3 pb-1 pt-1.5 text-[11px] leading-snug text-muted-foreground">
+          {checked
+            ? t('newChat.branchChip.exitWorktreeHint')
+            : t('newChat.branchChip.worktreeHint')}
+        </div>
       </DropdownMenuContent>
     </DropdownMenu>
   ) : (
@@ -549,7 +572,7 @@ function BranchWorktreeChip({
     <div
       data-testid="create-agent-branch-worktree"
       className={cn(
-        'inline-flex items-stretch overflow-hidden rounded-full border transition-colors',
+        'group inline-flex items-stretch overflow-hidden rounded-full border transition-colors',
         compact
           ? 'h-[30px] border-[var(--create-agent-control-border)] bg-[var(--create-agent-control-bg)] text-[var(--create-agent-control-text)]'
           : 'h-[42px] border-border bg-[var(--chat-input-bg)] text-foreground',
@@ -558,10 +581,11 @@ function BranchWorktreeChip({
       )}
     >
       {branchArea}
+      {/* 悬停激活任一半区时分隔线隐去,让 hover 填充看起来是一体的(对齐 Claude Code)。 */}
       <span
         aria-hidden
         className={cn(
-          'w-px shrink-0 self-center',
+          'w-px shrink-0 self-center transition-opacity group-hover:opacity-0',
           compact ? 'h-[14px] bg-[var(--create-agent-control-border)]' : 'h-[18px] bg-border',
         )}
       />

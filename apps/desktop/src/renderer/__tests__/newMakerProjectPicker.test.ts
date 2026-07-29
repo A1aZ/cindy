@@ -143,18 +143,23 @@ describe('Shared create project picker', () => {
     );
   });
 
-  it('keeps the worktree checkbox owned by the user alone (2026-07-29 invariant)', () => {
-    // 用户裁决:勾选状态只属于用户——
-    //  1) 组件内不存在任何自动改写 enabled 的 effect(资格变化只禁用、不改状态);
-    //  2) 分支选择不承担隐式开关语义(branchPick 无 enable-worktree effect);
-    //  3) 用户点击 checkbox 是唯一改动路径,且必写穿工作端记忆(本地 patchDraft /
+  it('keeps the worktree checkbox owned by the user alone (2026-07-29 invariant, v2)', () => {
+    // 用户裁决(实测后第二版):勾选状态只属于用户——
+    //  1) 组件内不存在任何 useEffect 自动改写 enabled 的路径(资格变化只禁用、
+    //     不改状态;旧 handleAutoDisable 机制不得复活);
+    //  2) 用户点击 checkbox(source='chip')→ 写穿工作端记忆(本地 patchDraft /
     //     device-link 远程 apply-new-maker-worktree-pref);
+    //  3) 用户选分支(source='branch-pick')→ 勾选双向联动但仅本次草稿、不落记忆
+    //     (route 侧 source !== 'chip' 直接 return);
     //  4) checkbox 原样直出记忆(播种无 baseRepo 点亮门槛),发送侧按
     //     「勾选 && baseRepo 就绪」静默降级,不报错拦截。
-    expect(worktreeChipsSource).not.toMatch(/onEnabledChange\(false\)/);
     expect(worktreeChipsSource).not.toContain('handleAutoDisable');
-    expect(worktreeChipsSource).toContain('onToggle(!checked)');
-    expect(branchPickSource).not.toContain('enable-worktree');
+    expect(worktreeChipsSource).not.toMatch(/useEffect\([^)]*onEnabledChange/s);
+    expect(worktreeChipsSource).toContain("onToggle={(v) => onEnabledChange(v, 'chip')}");
+    expect(worktreeChipsSource).toContain("onEnabledChange(true, 'branch-pick')");
+    expect(worktreeChipsSource).toContain("onEnabledChange(false, 'branch-pick')");
+    expect(branchPickSource).toContain("kind: 'disable-worktree'");
+    expect(newMakerDraftRouteSource).toContain("if (source !== 'chip') return;");
     expect(newMakerDraftRouteSource).toContain("'maker:apply-new-maker-worktree-pref'");
     expect(newMakerDraftRouteSource).toContain('setWtEnabled(worktreePref)');
     expect(newMakerDraftRouteSource).toContain('wt.enabled && wt.baseRepo');
@@ -162,13 +167,14 @@ describe('Shared create project picker', () => {
   });
 
   it('merges branch and worktree into a single joined pill (Claude Code style)', () => {
-    // 2026-07-29 用户裁决:[⎇ 分支 │ ☑ worktree] 是一个 pill、两个点击区。
-    // 未勾时分支区只读(菜单不可开);已勾时分支菜单 = worktree 源分支选择器。
+    // 2026-07-29 用户裁决:[⎇ 分支 │ ☑ worktree] 是一个 pill、两个点击区;
+    // 分支菜单永远可点(worktree 开不了的仓库除外);悬停任一半区时分隔线隐去。
     expect(worktreeChipsSource).toContain('function BranchWorktreeChip');
     expect(worktreeChipsSource).toContain('data-testid="create-agent-branch-worktree"');
     expect(worktreeChipsSource).toContain(
-      'const branchInteractive = !disabled && effectiveWorktreeEnabled',
+      'const branchInteractive = !disabled && (effectiveWorktreeEnabled || !switchDisabled)',
     );
+    expect(worktreeChipsSource).toContain('group-hover:opacity-0');
     expect(worktreeChipsSource).not.toContain('function BranchChip');
     expect(worktreeChipsSource).not.toContain('function WorktreeChip(');
   });

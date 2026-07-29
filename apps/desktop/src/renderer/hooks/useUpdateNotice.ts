@@ -47,6 +47,22 @@ function cmpVersion(a: string, b: string): number {
  *              visible version + doubles as a dropdown to jump to any version.
  *              Dismissal does NOT touch lastReadVersion (manual look-back
  *              must not suppress the next real upgrade popup).
+ *
+ * `onOpenVersion(pending)` is a third entry point — the sidebar UpdateBanner
+ * previewing an update that is downloaded but **not installed yet**. It reuses
+ * the `auto` layout contract verbatim (pre-loaded blocks, `v旧 → v新` badge,
+ * version count, no lazy history, no version jumper) because it carries the
+ * same shape of payload: an aggregated diff range. The only difference is which
+ * range — auto covers `(lastRead, appVersion]`, preview covers
+ * `(appVersion, pending]`, so a user who skipped several releases sees every
+ * version the restart will jump over, and a plain one-version bump sees one
+ * block.
+ *
+ * Two things it deliberately does NOT do: attach the installed version or its
+ * back-catalogue (that's the flame icon's job — `onOpen`), and advance
+ * `lastReadVersion` on dismiss (that would swallow the real popup after the
+ * restart). The read-marker, not `mode`, is what governs the latter — see
+ * `readMarkerRef`.
  */
 export type UpdateNoticeMode = 'auto' | 'manual';
 
@@ -80,6 +96,17 @@ export interface UseUpdateNoticeReturn {
   dismiss: () => void;
   /** Manually open the dialog for a lazy full-history review. */
   onOpen: () => void;
+  /**
+   * Open the dialog as a pre-install preview of `pendingVersion`: that version
+   * plus every version between it and the installed one, aggregated in the
+   * `auto` layout. Dismissal does not touch `lastReadVersion`.
+   *
+   * No fallback to a different version: if `pendingVersion`'s own notes can't
+   * be fetched we toast and stay closed rather than answering a question the
+   * user didn't ask. Callers should gate their entry point on a successful
+   * `fetchReleaseNotes` probe so this stays an edge case.
+   */
+  onOpenVersion: (pendingVersion: string) => void;
 }
 
 /**
@@ -110,6 +137,36 @@ function versionsToFetch(
   }
   if (curIdx <= lastIdx) return [appVersion];
   return index.slice(lastIdx + 1, curIdx + 1);
+}
+
+/**
+ * Build the pre-install preview range for `onOpenVersion`: every version the
+ * user is about to jump over, i.e. index entries in `(appVersion, pending]`,
+ * ascending, plus `pending` itself.
+ *
+ * Deliberately excludes `appVersion` and everything older — the question is
+ * "what do I get by restarting", not "what has ever shipped". Skipping several
+ * releases therefore yields several blocks; a normal one-version bump yields
+ * exactly one.
+ *
+ * - Index unreachable → just `[pending]`; the dialog still opens with the one
+ *   block that matters.
+ * - `pending` not in the index yet (CDN publishes the notice and the index
+ *   separately, so there is a window) → appended anyway. It is the version the
+ *   caller already probed successfully.
+ * - Capped to the newest `MAX_AGGREGATED_VERSIONS` for the same reason auto
+ *   mode is: nobody reads 30 blocks, and each one is a CDN round-trip.
+ */
+function versionsToPreview(
+  index: string[] | null,
+  appVersion: string,
+  pending: string,
+): string[] {
+  const inRange = (index ?? []).filter(
+    (v) => cmpVersion(v, appVersion) > 0 && cmpVersion(v, pending) <= 0,
+  );
+  if (!inRange.includes(pending)) inRange.push(pending);
+  return inRange.slice(-MAX_AGGREGATED_VERSIONS);
 }
 
 /**
@@ -302,10 +359,62 @@ export function useUpdateNotice(): UseUpdateNoticeReturn {
     });
   }, [t, open]);
 
+  const onOpenVersion = useCallback((pendingVersion: string) => {
+    if (open) return;
+    if (dismissTimerRef.current !== null) {
+      clearTimeout(dismissTimerRef.current);
+      dismissTimerRef.current = null;
+    }
+    dialogOpenedRef.current = true;
+    const appVersion = window.electronAPI.appVersion;
+
+    (async () => {
+      const index = await fetchReleaseNotesIndex();
+      const targets = versionsToPreview(index, appVersion, pendingVersion);
+      const results = await Promise.all(targets.map((v) => fetchReleaseNotes(v)));
+      const notes = results.filter((n): n is ReleaseNotes => n !== null);
+
+      // The pending version's own notes are the point of this dialog — if only
+      // the in-between ones loaded, we'd be answering a question the user
+      // didn't ask. Bail (the banner's probe makes this a rare CDN race).
+      if (!notes.some((n) => n.version === pendingVersion)) {
+        dialogOpenedRef.current = false;
+        toast.error(t('logic.toasts.fetchUpdateNoticeFailed'));
+        return;
+      }
+
+      // Same race guard as onOpen: never clobber an auto popup that has already
+      // claimed the dialog with a real read-marker.
+      if (readMarkerRef.current !== null) return;
+
+      notes.reverse();
+      setMode('auto');
+      setReleaseNotes(notes);
+      setAllVersions(null);
+      // Stays null: dismissing a pre-install preview must NOT advance
+      // lastReadVersion, or the real popup after the restart never fires.
+      readMarkerRef.current = null;
+      setOpen(true);
+    })().catch((err) => {
+      dialogOpenedRef.current = false;
+      log.warn('preview-fetch threw:', err);
+      toast.error(t('logic.toasts.fetchUpdateNoticeFailed'));
+    });
+  }, [t, open]);
+
   const loadVersion = useCallback(
     (version: string) => fetchReleaseNotes(version),
     [],
   );
 
-  return { open, mode, releaseNotes, allVersions, loadVersion, dismiss, onOpen };
+  return {
+    open,
+    mode,
+    releaseNotes,
+    allVersions,
+    loadVersion,
+    dismiss,
+    onOpen,
+    onOpenVersion,
+  };
 }

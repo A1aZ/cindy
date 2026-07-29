@@ -633,6 +633,49 @@ describe('voice input global shortcut registration', () => {
         }
       });
 
+      // 在飞的那次检查可能刚好在用户点开开关**之前**读到 denied,而这次被丢掉的聚焦正是他
+      // 授权完切回来的那一次 —— 应用此后一直在前台,不会再有下一个 focus 事件。
+      it('schedules a trailing retry when a focus arrives during an in-flight recovery', async () => {
+        setPlatform('darwin');
+        setTimeoutSpy?.mockRestore();
+        setTimeoutSpy = null;
+        vi.useFakeTimers();
+        try {
+          mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+          mocks.modifierIsRunning.mockReturnValue(false);
+          // 第一次检查卡住,由用例决定它何时返回(且返回的是授权前那个 denied)。
+          let settleFirstPreflight: (snapshot: unknown) => void = () => {};
+          mocks.inputMonitoringSnapshot.mockImplementationOnce(
+            () => new Promise((resolve) => { settleFirstPreflight = resolve; }),
+          );
+          mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: true, status: 'granted' });
+          const { registerGlobalVoiceInputIpc } = await import('../global.js');
+          registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+          const onFocus = mocks.appListeners.get('browser-window-focus');
+          onFocus?.();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(mocks.inputMonitoringSnapshot).toHaveBeenCalledTimes(1);
+
+          // 用户在系统设置里打开开关后切回来:这次聚焦落在「上一次还在飞」上。
+          onFocus?.();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(mocks.inputMonitoringSnapshot).toHaveBeenCalledTimes(1);
+
+          // 在飞那次带着授权前的 denied 收尾,什么都没注册。
+          settleFirstPreflight({ ok: false, status: 'denied', error: 'denied' });
+          await vi.advanceTimersByTimeAsync(0);
+          expect(mocks.modifierSetShortcut).not.toHaveBeenCalled();
+
+          // 尾跑必须补上这一次,否则快捷键一直不生效。
+          await vi.advanceTimersByTimeAsync(5_000);
+          expect(mocks.inputMonitoringSnapshot).toHaveBeenCalledTimes(2);
+          expect(mocks.modifierSetShortcut).toHaveBeenCalledWith(bareRightOption);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       // 录制期间全局快捷键是刻意挂起的。这里重新注册会把它顶回来,而用户此刻正在按键试录,
       // 会真的触发一次语音输入。
       it('does not re-register while a shortcut recording is in progress', async () => {

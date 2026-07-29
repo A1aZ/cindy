@@ -683,7 +683,13 @@ function schedulePendingShortcutRecoveryRetry(delayMs: number): void {
 
 async function recoverPendingNativeShortcutRegistration(): Promise<void> {
   if (process.platform !== 'darwin') return;
-  if (pendingShortcutRecoveryRunning) return;
+  if (pendingShortcutRecoveryRunning) {
+    // 同限流那条的道理：在飞的那次可能刚好在用户点开开关**之前**读到了 denied，而这次聚焦
+    // 正是他授权完切回来的那一次。丢掉就没有下一次了（应用此后一直在前台）。排个尾跑，
+    // 等在飞那次收尾、限流窗口也过去之后再查一遍。
+    schedulePendingShortcutRecoveryRetry(PENDING_SHORTCUT_RECOVERY_MIN_INTERVAL_MS);
+    return;
+  }
   // 这里只是「值不值得往下走」的预筛。真正要注册的那个必须在队列里现读，见下。
   if (!recoverableNativeShortcut()) return;
   // preflight 每次都要起一个 helper 进程，而窗口聚焦事件很密集，必须限流。

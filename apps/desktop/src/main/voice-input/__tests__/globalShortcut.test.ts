@@ -23,19 +23,24 @@ const mocks = vi.hoisted(() => {
   const mainWindowMainFrame = { url: 'http://localhost:5173/index.html' };
   // 单独留一份 Mock 引用，好在 beforeEach 里重置；断言成 BrowserWindow 后就取不到 Mock 了。
   const mainWindowIsDestroyed = vi.fn(() => false);
+  // 弹系统授权窗那两条 IPC 还要求 sender 是**当前聚焦**的应用外壳窗口。
+  const mainWindowIsFocused = vi.fn(() => true);
   const mainWindowWebContents = { id: 7, mainFrame: mainWindowMainFrame, once: vi.fn() };
   const mainWindow = {
     id: 1,
     isDestroyed: mainWindowIsDestroyed,
+    isFocused: mainWindowIsFocused,
     webContents: mainWindowWebContents,
   };
   const settingsEvent = { sender: mainWindowWebContents, senderFrame: mainWindowMainFrame };
   // 「Open in New Window」开出来的会话副窗口:同一套路由,设置页在里面照样打得开。
   const secondaryAppWindowMainFrame = { url: 'http://localhost:5173/index.html' };
   const secondaryAppWindowWebContents = { id: 21, mainFrame: secondaryAppWindowMainFrame, once: vi.fn() };
+  const secondaryAppWindowIsFocused = vi.fn(() => true);
   const secondaryAppWindow = {
     id: 3,
     isDestroyed: vi.fn(() => false),
+    isFocused: secondaryAppWindowIsFocused,
     webContents: secondaryAppWindowWebContents,
   };
   const secondaryAppWindowEvent = {
@@ -86,6 +91,8 @@ const mocks = vi.hoisted(() => {
     focusedWindow,
     mainWindow,
     mainWindowIsDestroyed,
+    mainWindowIsFocused,
+    secondaryAppWindowIsFocused,
     settingsEvent,
     secondaryWindowEvent,
     secondaryAppWindow,
@@ -221,6 +228,10 @@ describe('voice input global shortcut registration', () => {
     mocks.assertTrustedAppRenderer.mockReset();
     mocks.mainWindowIsDestroyed.mockReset();
     mocks.mainWindowIsDestroyed.mockReturnValue(false);
+    mocks.mainWindowIsFocused.mockReset();
+    mocks.mainWindowIsFocused.mockReturnValue(true);
+    mocks.secondaryAppWindowIsFocused.mockReset();
+    mocks.secondaryAppWindowIsFocused.mockReturnValue(true);
     mocks.getMainWindow.mockReset();
     mocks.getMainWindow.mockReturnValue(mocks.mainWindow as unknown as BrowserWindow);
     mocks.isSecondaryAppWindow.mockReset();
@@ -1079,6 +1090,34 @@ describe('voice input global shortcut registration', () => {
           mocks.handlers.get(channel)?.(mocks.secondaryAppWindowEvent),
         ).rejects.toThrow('[PERMISSION_DENIED]');
         expect(mocks.requestInputMonitoring).not.toHaveBeenCalled();
+      });
+
+      // 窗口身份挡不住「外壳窗口里的会话内容被 XSS 拿下」——主窗口同样承载会话内容(/settings
+      // 与 /cc-agent 是同一 router 下的兄弟路由)。但要求 sender 是**当前聚焦**的窗口, 后台或
+      // 被遮住的窗口就再也弹不出系统权限窗; 而合法路径(点徽章、录完快捷键)永远发生在用户正
+      // 看着的那个窗口里。
+      it(`rejects ${channel} from an unfocused app shell window`, async () => {
+        setPlatform('darwin');
+        mocks.mainWindowIsFocused.mockReturnValue(false);
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await expect(
+          mocks.handlers.get(channel)?.(mocks.settingsEvent),
+        ).rejects.toThrow('[PERMISSION_DENIED]');
+        expect(mocks.requestInputMonitoring).not.toHaveBeenCalled();
+      });
+
+      it(`rejects ${channel} from an unfocused session window`, async () => {
+        setPlatform('darwin');
+        mocks.isSecondaryAppWindow.mockReturnValue(true);
+        mocks.secondaryAppWindowIsFocused.mockReturnValue(false);
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await expect(
+          mocks.handlers.get(channel)?.(mocks.secondaryAppWindowEvent),
+        ).rejects.toThrow('[PERMISSION_DENIED]');
       });
 
       it(`rejects ${channel} when the generic trusted-renderer gate fails`, async () => {

@@ -555,13 +555,25 @@ export type GlobalVoiceInputIpcDeps = {
 };
 
 /**
- * 把「会弹 macOS 输入监控授权窗」的两条 IPC 锁到主窗口顶层 frame。
+ * 把「会弹 macOS 输入监控授权窗」的两条 IPC 锁到**当前聚焦的应用外壳窗口**的顶层 frame。
  *
- * 为什么不够用 assertTrustedAppRendererEvent：它认的是 appContentWindows 这个较宽的
- * 注册表，右侧栏窗口与 Ghost 面板窗口也会 markAppContentWindow，而它们同样装着完整的
- * preload。那两个窗口一旦被 XSS 或恶意内容拿下，就能凭 bridge 在设置流程之外弹出系统
- * 权限窗。语音设置页只存在于主窗口，所以这里按最小权限收到主窗口 webContents +
- * mainFrame（同 main/billing/index.ts 的 assertMainWindowSender）。
+ * 三层判据，每层挡的是不同的东西：
+ *
+ * 1. `assertTrustedAppRendererEvent` —— senderFrame 必须是顶层 frame 且 URL 属于 Cindy
+ *    自有 renderer，挡掉子 frame / WebView / 导航到别处的页面。
+ * 2. 必须是**承载应用外壳（router / MainLayout）的窗口**：主窗口，或 secondary-windows
+ *    登记的会话副窗口。不能只用 appContentWindows —— 那个注册表还含右侧栏与 Ghost 面板，
+ *    后者装的是插件内容，信任级别与我们自己的外壳完全不同，却同样带着完整 preload。
+ *    也不能只认主窗口：设置页在会话副窗口里照样打得开（`/settings` 与 `/cc-agent` 是同一
+ *    个 router 下的兄弟路由），只认主窗口会让用户在副窗口里点授权入口直接失败。
+ * 3. 必须是**当前聚焦的**那个窗口。这一层针对的正是「外壳窗口里的会话内容被 XSS 拿下」：
+ *    窗口身份挡不住它（主窗口同样承载会话内容），但后台/被遮住的窗口凭此再也弹不出系统权限
+ *    窗——而合法路径（点徽章、录完快捷键）永远发生在用户正看着的那个窗口里。这是在 Electron
+ *    不向 ipcMain 暴露 user-activation 的前提下，最接近「必须由用户手势触发」的判据；仓库里
+ *    已有同类先例（windowFocusClassifier 的 isFocusedAppContentWindow）。
+ *
+ * 能查的就这些：路由 / 页面无从可靠断言（hash 路由随手就能改），所以措辞和日志都只说窗口，
+ * 不说「设置页」——写成设置页会让日志读起来像做了更强的检查（对齐 billing 的口径）。
  */
 function assertVoiceSettingsWindowSender(
   event: IpcMainInvokeEvent,
@@ -580,8 +592,8 @@ function assertVoiceSettingsWindowSender(
   );
   const mainWindow = deps.getMainWindow();
   const isMainWindow = Boolean(mainWindow && !mainWindow.isDestroyed() && senderWindow === mainWindow);
-  const allowed = isWindowTopLevelSender && senderWindow !== null
-    && (isMainWindow || deps.isSecondaryAppWindow(senderWindow));
+  const isAppShellWindow = senderWindow !== null && (isMainWindow || deps.isSecondaryAppWindow(senderWindow));
+  const allowed = isWindowTopLevelSender && isAppShellWindow && senderWindow.isFocused();
   if (!allowed) {
     // 与本模块其它 throwIpcError 一致用英文：这句是给日志/调试看的，renderer 侧要展示
     // 时走 code → i18n 映射，不消费这里的原文。
@@ -590,7 +602,7 @@ function assertVoiceSettingsWindowSender(
     // 无从可靠断言，写成设置页会让日志读起来像做了更强的检查（对齐 billing 的口径）。
     throwIpcError(
       'PERMISSION_DENIED',
-      'Input Monitoring permission is only available to app shell windows',
+      'Input Monitoring permission is only available to the focused app shell window',
     );
   }
 }

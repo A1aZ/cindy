@@ -22,6 +22,8 @@ export interface SelectableMarkdownHtmlOptions {
   borderColor?: string;
   chipColor?: string;
   fontSize?: number;
+  /** 行内 code 文字色(压暗档,不是底色;见 css 里的说明)。 */
+  inlineCodeColor?: string;
   lineHeight?: number;
   markerWidth?: number;
   mutedColor?: string;
@@ -154,6 +156,7 @@ function buildSelectableMarkdownCss(options: SelectableMarkdownHtmlOptions): str
   const mutedColor = cssValue(options.mutedColor ?? lightColors.textSecondary);
   const borderColor = cssValue(options.borderColor ?? lightColors.border);
   const chipColor = cssValue(options.chipColor ?? lightColors.surfaceChip);
+  const inlineCodeColor = cssValue(options.inlineCodeColor ?? lightColors.chatInlineCodeText);
   const fontSize = cssNumber(options.fontSize ?? 16);
   const lineHeight = cssNumber(options.lineHeight ?? 23);
   const codeFontSize = cssNumber(typeScale.code);
@@ -279,10 +282,6 @@ function buildSelectableMarkdownCss(options: SelectableMarkdownHtmlOptions): str
       padding: 10px 12px;
       white-space: pre-wrap;
     }
-    /* 行内 code 与正文同底、只用等宽字体区分(与聊天消息流的
-       markdownInlineCode 同口径):底色会把成段正文切成一片色块,而 id / 路径 /
-       字段名这类内容在文档里非常密集。不给底色也就不需要 border-radius /
-       padding —— 它们只会在字词间挤出无意义的空隙。代码块(pre)另有底色与描边。 */
     /* 语法着色只作用于代码块内(pre code):行内 code 不着色 —— 一句话里的短标识
        被染成关键字色反而更吵。与聊天消息流共用 session/codeHighlight 的分词
        结果,配色同为 GitHub 主题。
@@ -293,15 +292,20 @@ function buildSelectableMarkdownCss(options: SelectableMarkdownHtmlOptions): str
     pre code .syn-number { color: ${syntax.number}; }
     pre code .syn-function { color: ${syntax.function}; }
     pre code .syn-property { color: ${syntax.property}; }
+    /* 行内 code:零底色 + 等宽字体 + 文字压暗(取值见 tokens 里 chatInlineCodeText)。
+       本文件虽然是 CSS,做得出圆角淡底,但仍跟随聊天消息流的 markdownInlineCode ——
+       同一个 App 里同一种元素不该两副样子;桌面端另走 GitHub 淡底,两端形态刻意不同。 */
     code {
+      color: ${inlineCodeColor};
       font-family: Menlo, Monaco, Consolas, monospace;
       font-size: ${codeFontSize}px;
     }
+    /* 代码块内不压暗:pre 已有底色与描边把它划成独立区块,里面还要承载语法着色,
+       正文片段必须留在正文色上。不写这条 color 就会继承上面 code 的压暗。 */
     pre code {
       background: transparent;
-      border-radius: 0;
+      color: ${textColor};
       font-size: inherit;
-      padding: 0;
     }
     a {
       color: ${textColor};

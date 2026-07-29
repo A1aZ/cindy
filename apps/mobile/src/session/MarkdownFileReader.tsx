@@ -48,6 +48,7 @@ export function MarkdownFileReader({
   const html = useMemo(() => buildSelectableMarkdownHtml(markdown, {
     borderColor: colors.border,
     chipColor: colors.surfaceChip,
+    inlineCodeColor: colors.chatInlineCodeText,
     fontSize: typeScale.body,
     // body(16/22)行高比 1.375,低于 DESIGN.md §3 正文区间 1.43–1.56 下限;
     // 文档阅读是长文连续阅读场景,换 bodyRelaxed(16/24)= 1.50 落到规范值。

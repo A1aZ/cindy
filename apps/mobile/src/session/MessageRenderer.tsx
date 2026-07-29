@@ -5914,19 +5914,22 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
   // 与普通强调的区别只在语义,视觉上沿用 italic 已足够。
   markdownMathInline: { fontStyle: 'italic' },
   markdownStrike: { textDecorationLine: 'line-through' },
-  // 刻意不给底色:行内 code 在中文正文里出现频率很高(id、路径、字段名),任何
-  // 底色都会把整段切成一片色块,可读性反而下降 —— 与正文同底、只用等宽字体区分
-  // (同一份文件里的 thinkingCode 也是这个形态)。也因此不需要 borderRadius /
-  // paddingHorizontal:没有底色时它们只会在字词间挤出无意义的空隙。
-  // 代码块另说:它用 chatCodeSurface + chatCodeBorder 描边成块,本来就该有底。
+  // 行内 code:零底色 + 等宽字体 + 文字压暗(参照 Codex 客户端)。
+  // 不给底色是平台约束:RN 嵌套在 Text 内的 inline 片段只认 backgroundColor,不认
+  // borderRadius(同 sessionLinkChipText 的注释),底色在这里只能是直角方块,成段
+  // 中文里一排方块比没有底色更糟。桌面走的是 GitHub 淡底 + 6px 圆角(CSS 能实现),
+  // 两端形态刻意不同 —— 取值与理由见 chatInlineCodeText。
   markdownInlineCode: {
+    color: colors.chatInlineCodeText,
     fontFamily: monoFont,
     fontSize: typeScale.code,
     lineHeight: lineHeight.code,
   },
-  // 已验证存在的文件/目录路径 chip:在 inline code 底色上加下划线示意可点
-  // (嵌套 Text 只支持有限样式,与 sessionLinkChipText 同一约束)。
+  // 已验证存在的文件/目录路径 chip:靠「正文色 + medium + 下划线」区别于普通行内
+  // code(后者压暗)。color 必须显式钉回 textPrimary —— 本样式总是叠在
+  // markdownInlineCode 之后,不写就会继承那份压暗色,可点的反而比不可点的更淡。
   markdownPathChip: {
+    color: colors.textPrimary,
     fontWeight: fontWeight.medium,
     textDecorationLine: 'underline',
   },

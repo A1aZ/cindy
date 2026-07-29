@@ -41,6 +41,23 @@ export interface ThemeColors {
   /** Chat / task code card 专用描边 */
   chatCodeBorder: string;
   /**
+   * markdown 行内 code 文字色 —— 移动端走「零底色 + 文字压暗」形态(参照 Codex
+   * 客户端)。**与桌面刻意不同**:桌面是 CSS,按 GitHub 的半透明淡底 + 6px 圆角实现
+   * (--msg-md-inline-code-bg);移动端聊天流是 RN 嵌套 Text,只认 backgroundColor 不认
+   * borderRadius,淡底在那边只能是直角方块,成段中文里一排方块比没有底色更糟。
+   * 两端不同是结论,不是漏改 —— 改这里之前先看这条。
+   *
+   * 取值实测(见 themeTokens.test.ts):light #686B72 对 surface 4.56:1、对正文
+   * Δ1.98;dark #A3A3A3 对 surface 5.81:1、对正文 Δ1.70 —— 都过 AA 且压暗可辨。
+   * light 值 = textTertiary(表内 AA 中性强调灰);dark 值取自桌面基表
+   * text-secondary 的 dark 原值 —— cindy 深色批准灰阶在 #6F6F6F(2.92:1,掉 AA)与
+   * #BFC1C4(对正文 Δ1.22,压暗看不出)之间没有中间档。
+   * 刻意**不**复用 textSecondary:它是 #8C8E94 / #6F6F6F,只有 2.80:1 / 2.92:1,
+   * 用在正文流里的标识符上会直接掉出 AA(那正是本轮要修的问题)。
+   * 压暗幅度受 AA 下限约束 —— 深色底 #2A2828 比 Codex 的近黑浅得多,再压就破线。
+   */
+  chatInlineCodeText: string;
+  /**
    * 代码高亮语法色(6 档)。色值对齐桌面端所用的 GitHub highlight.js 主题
    * (light = `highlight.js/styles/github.css`,dark = globals.css 里的 GitHub Dark
    * 覆盖),两端观感一致。移动端不引入 highlight.js —— 依赖会改 runtime
@@ -360,6 +377,7 @@ export const lightColors: ThemeColors = {
   activeGlyph: '#DF0C27',
   chatCodeSurface: '#F8F8F8',
   chatCodeBorder: '#DCDFE3',
+  chatInlineCodeText: '#686B72', // = textTertiary(表内 AA 中性强调灰),对 surface 4.56:1
   // GitHub light(highlight.js github.css)原值,与桌面端逐值一致。
   syntaxKeyword: '#D73A49',
   syntaxString: '#032F62',
@@ -430,6 +448,7 @@ export const darkColors: ThemeColors = {
   activeGlyph: '#A61629',
   chatCodeSurface: '#353333',
   chatCodeBorder: '#3C3C3C',
+  chatInlineCodeText: '#A3A3A3', // = 桌面基表 text-secondary dark 原值,对 surface 5.81:1
   // GitHub Dark,取自桌面 globals.css 的 .dark .n* 覆盖(#ff7b72 / #a5d6ff /
   // #8b949e / #79c0ff / #d2a8ff)。
   syntaxKeyword: '#FF7B72',

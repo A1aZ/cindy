@@ -20,7 +20,7 @@ import {
 } from '@cindy/voice-input-core';
 import { createLogger } from '../logger.js';
 import {
-  isProviderRouteSuspended,
+  isProviderModelRouteDisabled,
   isUtilityRouteDisabled,
 } from '../utility-model/oneShotCandidates.js';
 import { getAppCapabilities } from '../appCapabilities.js';
@@ -1351,6 +1351,17 @@ function asrProfileRouteProviderId(profile: VoiceInputAsrProfile): string | null
   return null;
 }
 
+/**
+ * ASR 档位在停用轴下是否不可发:按 (真实路由供应商, 档位模型) 双查 —— 供应商级
+ * 停用或该音频模型条目被点名停用(如 XD 启用但停了 elevenlabs/scribe_v2)任一命中
+ * 即真(PR #744 review 第二十五轮)。不在供应商目录的档位(ElevenLabs 直连 /
+ * 自定义端点,routeProviderId=null)不受约束。
+ */
+function isAsrProfileRouteDisabled(profile: VoiceInputAsrProfile): boolean {
+  const routeProviderId = asrProfileRouteProviderId(profile);
+  return !!routeProviderId && isProviderModelRouteDisabled(routeProviderId, profile.model);
+}
+
 async function resolveStartableAsrChain(): Promise<VoiceInputProviderKind[]> {
   const byokMode = isVoiceInputByokMode();
   const startable: VoiceInputProviderKind[] = [];
@@ -1359,13 +1370,10 @@ async function resolveStartableAsrChain(): Promise<VoiceInputProviderKind[]> {
     // Managed mode only dials voice-server-eligible profiles; explicit BYOK
     // mode may start any credential-ready profile from the configured chain.
     if (!byokMode && !isManagedVoiceAsrProfile(profile)) continue;
-    // 停用轴(BYOK,PR #744 review 第十六轮):转写与精修同为独立付费路由 ——
-    // 用户停用 OpenAI / XD 后,经其凭证的 ASR 档位不再进入可启动链。managed 模式
+    // 停用轴(BYOK,PR #744 review 第十六/二十五轮):转写与精修同为独立付费路由 ——
+    // 供应商级停用或该音频模型被点名停用的 ASR 档位不再进入可启动链。managed 模式
     // 路由与计费都在 voice-server,不查本机供应商停用。
-    if (byokMode) {
-      const routeProviderId = asrProfileRouteProviderId(profile);
-      if (routeProviderId && isProviderRouteSuspended(routeProviderId)) continue;
-    }
+    if (byokMode && isAsrProfileRouteDisabled(profile)) continue;
     const credential = await getAsrProfileCredentialReadiness(profile);
     if (credential.ok) startable.push(kind);
   }
@@ -1750,11 +1758,10 @@ export async function transcribeVoiceInputAudioFile(
 ): Promise<VoiceInputAudioFileTranscriptionResult> {
   const provider: VoiceInputProviderKind = 'litellm-batch';
   const profile = getVoiceInputAsrProfile(provider);
-  // 停用轴(PR #744 review 第二十二轮):device-link 批量转写与内联 ASR 链同为经
-  // XD 网关凭证的新付费调用 —— 本路径恒用 litellm proxy key 直连计费,不经
-  // voice-server,提交前按当前 override 复查,停用即拒绝。
-  const routeProviderId = asrProfileRouteProviderId(profile);
-  if (routeProviderId && isProviderRouteSuspended(routeProviderId)) {
+  // 停用轴(PR #744 review 第二十二/二十五轮):device-link 批量转写与内联 ASR 链
+  // 同为经 XD 网关凭证的新付费调用 —— 本路径恒用 litellm proxy key 直连计费,不经
+  // voice-server,提交前按 (来源, 模型) 双查,供应商级或该音频模型被点名停用即拒绝。
+  if (isAsrProfileRouteDisabled(profile)) {
     throw new Error('voice transcription route disabled in settings');
   }
   const { proxyApiKey, proxyBaseUrl } = readLiteLlmProxyConfig();
@@ -2094,14 +2101,12 @@ export function registerVoiceInputIpc(): void {
       provider = new FallbackAsrProvider(startableAsrChain.map((kind) => ({
         kind,
         create: () => {
-          // BYOK live 谓词(PR #744 review 第二十一轮):后备转写档在前一档失败后
-          // 才被 connect,可能距会话开始数分钟 —— create 时刻按当前 override 重查,
-          // 停用即抛错让 fallback 落到下一家。managed 模式路由在 voice-server,不查。
-          if (!voiceContext) {
-            const routeProviderId = asrProfileRouteProviderId(getVoiceInputAsrProfile(kind));
-            if (routeProviderId && isProviderRouteSuspended(routeProviderId)) {
-              throw new Error('voice ASR provider disabled in settings');
-            }
+          // BYOK live 谓词(PR #744 review 第二十一/二十五轮):后备转写档在前一档
+          // 失败后才被 connect,可能距会话开始数分钟 —— create 时刻按当前 override
+          // 以 (来源, 模型) 双查,停用即抛错让 fallback 落到下一家。managed 模式
+          // 路由在 voice-server,不查。
+          if (!voiceContext && isAsrProfileRouteDisabled(getVoiceInputAsrProfile(kind))) {
+            throw new Error('voice ASR provider disabled in settings');
           }
           return createVoiceInputProvider(kind, asrLanguageHint, voiceContext);
         },

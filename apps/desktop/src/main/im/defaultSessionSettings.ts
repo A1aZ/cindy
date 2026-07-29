@@ -73,18 +73,23 @@ export async function resolveImSessionDefaults(
   const model = pickModel(requestedAgent, requestedSettings, config, providers);
   const agentKind = model.agentKind;
   const agentSettings = raw.agents[agentKind] ?? requestedSettings;
+  // 先定来源再定 effort:effort 支持是 per-(来源, 模型) 的,保存的来源被停用改道后,
+  // 必须按**最终落地来源**的拷贝 reconcile —— 按第一份 connected 拷贝(可能正是那份
+  // 停用拷贝)算出的档位,启用替代来源未必支持,直建会话会被上游拒
+  // (PR #744 review 第二十五轮)。
+  const providerId = resolveProviderId(
+    providers,
+    agentKind,
+    model.modelId,
+    agentSettings.providerId,
+  );
   const effort = resolveEffort(
     agentKind,
     model.modelId,
     agentSettings.effort,
     config.effortOverrides,
     providers,
-  );
-  const providerId = resolveProviderId(
-    providers,
-    agentKind,
-    model.modelId,
-    agentSettings.providerId,
+    providerId,
   );
 
   return {
@@ -212,8 +217,9 @@ function resolveEffort(
   requested: Effort,
   overrides?: Readonly<Partial<Record<string, Effort>>>,
   providers?: ProviderView[] | null,
+  providerId?: string | null,
 ): Effort {
-  const model = findModel(agentKind, modelId, providers);
+  const model = findModel(agentKind, modelId, providers, providerId);
   if (!model || model.efforts.length === 0) {
     return requested || 'high';
   }
@@ -289,15 +295,27 @@ async function listProvidersForDefaults(): Promise<ProviderView[] | null> {
   }
 }
 
+/**
+ * 取 effort reconcile 用的模型条目:显式来源给定时取**该来源**的拷贝(effort 支持
+ * per-(来源, 模型),改道后必须按落地拷贝算);隐式(null)取启用 rail 里第一份
+ * **未停用**拷贝 —— 第一份 connected 拷贝可能正是被停用的那份,按它算档位会把
+ * 停用拷贝的 effort 钉给启用替代来源(PR #744 review 第二十五轮)。
+ */
 function findModel(
   agentKind: AgentKind,
   modelId: string,
   providers: ProviderView[] | null | undefined,
+  providerId?: string | null,
 ) {
   if (providers) {
+    if (providerId) {
+      const provider = providers.find((p) => p.id === providerId);
+      const model = provider ? getModel(provider, modelId, agentKind) : undefined;
+      if (model) return model;
+    }
     for (const provider of connectedProvidersForAgent(providers, agentKind)) {
       const model = getModel(provider, modelId, agentKind);
-      if (model) return model;
+      if (model && model.disabled !== true) return model;
     }
   }
   return getMaker()

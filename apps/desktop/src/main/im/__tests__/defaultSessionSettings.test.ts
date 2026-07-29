@@ -283,6 +283,47 @@ describe('resolveImSessionDefaults', () => {
     });
   });
 
+  it('R25:改道后 effort 按落地来源的拷贝 reconcile,不沿用停用拷贝的档位', async () => {
+    // 保存来源 xd 的拷贝(支持 high,已停用)→ 改道 openai 拷贝(只到 medium):
+    // effort 必须按落地拷贝重算(high → medium),否则直建会话被上游拒。
+    mocks.listProviders.mockResolvedValue([
+      {
+        ...providers[0],
+        models: {
+          'claude-code': claudeModels,
+          codex: [{ ...openAiCodexModels[0], disabled: true }],
+        },
+      },
+      {
+        ...providers[1],
+        models: {
+          'claude-code': [],
+          codex: [
+            {
+              ...openAiCodexModels[0],
+              efforts: ['minimal', 'low', 'medium'],
+              defaultEffort: 'medium',
+            },
+          ],
+        },
+      },
+    ]);
+    mocks.readImDefaultSettings.mockReturnValue({
+      agentKind: 'codex',
+      agents: {
+        'claude-code': { providerId: null, model: 'claude-opus-4-8', effort: 'xhigh' },
+        codex: { providerId: 'xd', model: 'gpt-5.5', effort: 'high' },
+      },
+    });
+
+    await expect(resolveImSessionDefaults(config)).resolves.toMatchObject({
+      agentKind: 'codex',
+      model: 'gpt-5.5',
+      providerId: 'openai',
+      effort: 'medium',
+    });
+  });
+
   it('falls back to the first model for the selected agent when the saved model is unavailable', async () => {
     mocks.readImDefaultSettings.mockReturnValue({
       agentKind: 'codex',

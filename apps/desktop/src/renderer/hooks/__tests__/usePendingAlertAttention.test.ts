@@ -173,4 +173,32 @@ describe('usePendingAlertAttention (派生收敛)', () => {
     // 中断腿结果照常应用(它没有「更新的版本」)。
     expect(addMock).toHaveBeenCalledWith('s-interrupted', 'error');
   });
+
+  // 回归(PR #879 review P1):作废旧结果的条件是「更新的查询**成功应用**了结果」,
+  // 不是「更新的查询已启动」。否则更新的那次失败 + 旧结果被丢弃会两边落空 ——
+  // 首拉自身已 resolve 不会重试,错误尾行会话就一直没有红点。
+  it('更新的查询失败时不作废先前成功的结果', async () => {
+    let resolveInitial: (() => void) | undefined;
+    interruptedPendingMock.mockResolvedValue([]);
+    errorTailPendingMock.mockReturnValueOnce(
+      new Promise<string[]>((res) => {
+        resolveInitial = () => res(['s-boot-tail']);
+      }),
+    );
+
+    renderHook(() => usePendingAlertAttention());
+
+    // 期间一次重算**失败**:代数推进了,但没有任何结果被应用。
+    errorTailPendingMock.mockRejectedValueOnce(new Error('transient'));
+    await refreshPendingAlerts();
+    addMock.mockClear();
+
+    // 首拉后返回:不能因为「有更晚的查询启动过」就丢掉这份唯一成功的结果。
+    resolveInitial?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(addMock).toHaveBeenCalledWith('s-boot-tail', 'error');
+  });
 });

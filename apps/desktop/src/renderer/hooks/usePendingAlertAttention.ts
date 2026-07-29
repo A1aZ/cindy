@@ -14,10 +14,11 @@
  * (LRU 驱逐、错误落库后主动清 live error),单靠它红点会在横幅仍在时消失。
  *
  * ⚠️ 两条腿的消费周期**必须分开**(PR #879 review P1):
- *  - **中断腿**(interruptedPending,startedAt > endedAt):只在启动首拉一次。该判定
- *    对**正在跑的 turn** 天然成立,只有启动时刻才能断定飞行中的 turn 来自上一个进程。
- *    周期性重跑会把运行中的会话误判为中断而亮红点。清除靠 sessions:patched 里的
- *    lastTurnEndedAt(用户点「继续 / 忽略」、其它窗口或 device-link 控制端的 ack)。
+ *  - **中断腿**(interruptedPending):一次性语义 —— 中断是「上一个进程留下的未收尾
+ *    turn」,只增不减(用户 ack 后永久消失),所以只在启动首拉一次,清除靠
+ *    sessions:patched 里的 lastTurnEndedAt(用户点「继续 / 忽略」、其它窗口或
+ *    device-link 控制端的 ack)。查询本身带 startedAt < bootAt 守卫,即使被运行时
+ *    调用也不会把正在跑的 turn 算进来。
  *  - **错误尾行腿**(errorTailPending):参与每轮重算。它与 turn 是否在跑无关 ——
  *    turn 一跑起来就插入新的 user 行,error 行不再是尾行,自然不命中。
  *
@@ -55,11 +56,16 @@ const _errorTailOwned = new Set<string>();
 let _refreshInFlight: Promise<void> | null = null;
 let _refreshDirty = false;
 /**
- * 查询代数:每次发起查询自增,结果回来时若已不是最新一代就整个丢弃。
- * 首拉(带退避重试,不经合流)与重算可能并发,较早开始的查询若后返回,会用过期
- * 结果重新添加已处置会话的红点、或清掉刚产生的告警点(PR #879 review P1)。
+ * 查询代数:每次发起查询自增。首拉(带退避重试,不经合流)与重算可能并发,较早开始
+ * 的查询若后返回,会用过期结果重新添加已处置会话的红点、或清掉刚产生的告警点。
+ *
+ * 丢弃判定用的是 _appliedGen(**已成功应用**的最大代)而不是 _queryGen:只有当更新的
+ * 查询真的成功并应用了结果,旧结果才算过期。否则「更新的查询失败 + 旧结果被丢弃」
+ * 会两边落空 —— 首拉自身已 resolve 不会重试,错误尾行会话就一直没有红点
+ * (PR #879 review P1)。
  */
 let _queryGen = 0;
+let _appliedGen = 0;
 /** bootstrap 窗口内收到的中断 ack —— 防止首拉用过期结果把已处置的中断重新打上点。
  *  首拉应用完中断腿后即清空(此后 ack 直接走 _interruptedOwned)。 */
 const _interruptedAckedEarly = new Set<string>();
@@ -73,6 +79,7 @@ export function _resetPendingAlertAttentionForTests(): void {
   _refreshInFlight = null;
   _refreshDirty = false;
   _queryGen = 0;
+  _appliedGen = 0;
 }
 
 /** 打点:无条件调用(store 幂等),让被别的 explicit 路径清掉的点能重新建立。 */
@@ -88,12 +95,14 @@ function clearAlertIfStillError(sessionId: string): void {
 
 /**
  * 重算**错误尾行**告警并收敛红点。中断腿不参与(见文件头 ⚠️)。
- * 过期结果(有更晚的查询已启动)整个丢弃,不打点也不清点。
+ * 已被更新结果取代的过期数据整个丢弃,不打点也不清点(判定见 _appliedGen)。
  */
 async function reconcileErrorTail(): Promise<void> {
   const gen = ++_queryGen;
   const ids = await window.electronAPI.localDb.sessions.errorTailPending();
-  if (gen !== _queryGen) return;
+  // 只有更新的查询**已成功应用**才作废本次结果(见 _appliedGen 注释)。
+  if (gen < _appliedGen) return;
+  _appliedGen = gen;
   const next = new Set(ids);
 
   // 无条件重打点,不做「已 owned 就跳过」的短路:红点是查询结果的投影,每次重算都要
@@ -179,8 +188,9 @@ async function initialFetch(): Promise<void> {
     markAlert(id);
   }
   _interruptedAckedEarly.clear();
-  // 错误尾行受代数守卫:更晚的重算已经拿到更新的结果,别用旧数据覆盖。
-  if (gen !== _queryGen) return;
+  // 错误尾行受代数守卫:仅当更晚的重算**已成功应用**结果时才跳过(见 _appliedGen)。
+  if (gen < _appliedGen) return;
+  _appliedGen = gen;
   for (const id of errorTail) {
     _errorTailOwned.add(id);
     markAlert(id);

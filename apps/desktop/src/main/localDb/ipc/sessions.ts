@@ -46,6 +46,7 @@ import {
   setOnSessionTurnEndedPersisted,
 } from '../sessionActiveTurn';
 import { dismissErrorMessage, rebroadcastAgentSwitchBoundary } from './messages';
+import { assertTrustedAppRendererEvent } from '../../security/trustedAppRenderer.js';
 
 const log = createLogger('sessions');
 const DEFAULT_DRAFT_SESSION_TITLE = 'New Maker';
@@ -757,7 +758,12 @@ export function registerSessionIpc(): void {
   // 故意**不**进 device-link allowlist:renderer 只查本机(远程会话的告警由被控端
   // 自己的派生收敛负责,控制端的处置动作经既有 ack-interrupted / dismiss-error 窄写
   // 落被控端 DB 后触发)。没有跨端调用方就不扩协议面。
-  ipcMain.handle('local-db:sessions:error-tail-pending', async () => {
+  // sender guard:新增 handler 一律验证来源(electron-security-and-process-boundaries.md
+  // §5 —— 存量未迁完不构成新 handler 省略校验的理由)。这两个 channel 都**不在**
+  // device-link allowlist 里,只由本机顶层 renderer 调用,所以 guard 不会挡掉隧道
+  // dispatch;将来若要放行跨端,必须连这道 guard 一起重新设计。
+  ipcMain.handle('local-db:sessions:error-tail-pending', async (event) => {
+    assertTrustedAppRendererEvent(event);
     return listErrorTailPendingSessionIds();
   });
 
@@ -771,7 +777,9 @@ export function registerSessionIpc(): void {
   // 不合法直接 INVALID_PARAMS 拒绝,避免异常调用方让 main 侧分配任意大的集合并跑
   // 一轮数据库写。上限取 sidebar 可能的自动化会话量级的宽松倍数。
   const MAX_DISMISS_SESSION_IDS = 500;
-  ipcMain.handle('local-db:sessions:dismiss-pending-alerts', async (_e, ids: unknown) => {
+  ipcMain.handle('local-db:sessions:dismiss-pending-alerts', async (event, ids: unknown) => {
+    // 认证来源再做任何写:payload 有界 ≠ 来源可信(见上方 guard 说明)。
+    assertTrustedAppRendererEvent(event);
     if (!Array.isArray(ids)) throwIpcError('INVALID_PARAMS', 'sessionIds 必须是数组');
     if (ids.length > MAX_DISMISS_SESSION_IDS) {
       throwIpcError('INVALID_PARAMS', `sessionIds 超过上限 ${MAX_DISMISS_SESSION_IDS}`);

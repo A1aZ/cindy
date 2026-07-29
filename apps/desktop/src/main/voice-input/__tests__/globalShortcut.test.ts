@@ -633,6 +633,34 @@ describe('voice input global shortcut registration', () => {
         }
       });
 
+      // 缺权限时 capture 起不来, keys 转发名单会被清掉 —— 但录制框还开着(裸修饰键走 DOM
+      // 事件, 此时照样能录)。拿转发名单当「有没有在录制」用就会判成「没在录」, 于是恢复把
+      // 已保存的全局快捷键装回去, 用户按键试录会真的触发语音输入。
+      it('still treats recording as active after a permission-blocked capture start', async () => {
+        setPlatform('darwin');
+        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.modifierIsRunning.mockReturnValue(false);
+        // capture 因缺权限起不来。
+        mocks.modifierStartKeyCapture.mockResolvedValue({
+          ok: false,
+          error: 'Could not listen for modifier shortcuts.',
+        });
+        mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        const start = mocks.handlers.get('voice-input:modifier-shortcut-recording:start');
+        const startResult = await start?.({ sender: { id: mocks.focusedWindow.webContents.id, once: vi.fn() } });
+        expect(startResult).toMatchObject({ ok: false, errorCode: 'permission' });
+
+        // 用户去系统设置里打开开关后切回来:此刻录制框仍开着,不该注册全局快捷键。
+        mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: true, status: 'granted' });
+        mocks.modifierSetShortcut.mockClear();
+        await focusWindow();
+
+        expect(mocks.modifierSetShortcut).not.toHaveBeenCalled();
+      });
+
       // 失败之后用户把快捷键换成 F16(或清空), 兜底恢复再也不会跑(没有需要监听权限的快捷键
       // 了), 这条失败就永远挂着 —— 此后每开一个应用外壳窗口都会取到它, 弹一条与当前状态无关
       // 的「重启 Cindy 再试」。

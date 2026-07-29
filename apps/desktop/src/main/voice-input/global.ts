@@ -53,6 +53,16 @@ const log = createLogger('voice-input-global');
 type GlobalVoiceInputShortcutPhase = 'start' | 'tap' | 'end';
 
 const modifierShortcutRecordingWebContentsIds = new Set<number>();
+/**
+ * 正在录制快捷键的 renderer —— 与上面那个「keys 转发名单」是两件事。
+ *
+ * 转发名单在 capture 起不来时会被清掉（起不来就没有 keys 可转发），但**录制框还开着**：
+ * 缺监听权限时用户照样在录裸修饰键。拿转发名单当「有没有在录制」用，就会在这种状态下判成
+ * 「没在录」，于是兜底恢复把已保存的全局快捷键装回去 —— 用户按键试录会真的触发语音输入。
+ *
+ * 所以录制会话单独记账：只在显式 stop 或 renderer 销毁时才移除。
+ */
+const modifierShortcutRecordingSessionIds = new Set<number>();
 const activeInlineVoiceInputWebContentsIds = new Set<number>();
 
 const macModifierShortcutListener = new MacModifierShortcutListener({
@@ -631,7 +641,7 @@ let pendingShortcutRecoveryRunning = false;
 function recoverableNativeShortcut(): VoiceInputShortcut | null {
   // 录制期间全局快捷键是刻意挂起的，这里注册会把它顶回来：用户正在按键试录就会真的触发
   // 一次语音输入，并发的 listener 启动还会把 Fn capture 顶掉。
-  if (modifierShortcutRecordingWebContentsIds.size > 0) return null;
+  if (modifierShortcutRecordingSessionIds.size > 0) return null;
   const shortcut = voiceInputDataStore.getSettings().shortcut;
   if (!shortcut || !voiceInputShortcutNeedsMacNativeListener(shortcut, process.platform)) return null;
   if (macModifierShortcutListener.isRunning()) return null;
@@ -807,8 +817,11 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
         return { ok: false, error: 'Modifier shortcut recording is only available on macOS.' };
       }
       modifierShortcutRecordingWebContentsIds.add(event.sender.id);
+      // 录制会话在**尝试之前**就登记：capture 起不起来都不影响「用户正在录」这个事实。
+      modifierShortcutRecordingSessionIds.add(event.sender.id);
       event.sender.once('destroyed', () => {
         modifierShortcutRecordingWebContentsIds.delete(event.sender.id);
+        modifierShortcutRecordingSessionIds.delete(event.sender.id);
         if (modifierShortcutRecordingWebContentsIds.size === 0) {
           macModifierShortcutListener.stopKeyCapture();
         }
@@ -843,6 +856,7 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
     'voice-input:modifier-shortcut-recording:stop',
     (event): VoiceInputGlobalResult => {
       modifierShortcutRecordingWebContentsIds.delete(event.sender.id);
+      modifierShortcutRecordingSessionIds.delete(event.sender.id);
       if (modifierShortcutRecordingWebContentsIds.size === 0) {
         macModifierShortcutListener.stopKeyCapture();
       }

@@ -176,6 +176,14 @@ export interface AgentDeps {
   mcpProviders?: McpProvider[];
 
   /**
+   * pi 专用:pi 配置目录(PI_CODING_AGENT_DIR,内含 models.json / sessions/ 等)
+   * 的解析器(host 注入)。文件落盘位置归 host 管;PiAgent 只在返回的目录里生成
+   * 配置与会话文件。缺省 → 落系统临时目录(数据不保久,仅兜底)。
+   * 其它 agent 不消费此字段。
+   */
+  resolvePiAgentHome?: () => string | undefined;
+
+  /**
    * Host-provided capability descriptor additions.
    *
    * This is append-only: additions with ids already present in the agent's built-in

@@ -90,6 +90,18 @@ export const STALL_ABORT_RECOVERY_GRACE_MS = 10_000;
  */
 export const MANUAL_ABORT_RECOVERY_GRACE_MS = 60_000;
 
+/**
+ * turn 零事件看门狗的计时分片长度。额度按片累加,片尾核对真实经过时间,
+ * 借此把系统挂起(合盖睡眠)的那段排除掉 —— 见 armTurnStallSlice。
+ */
+const TURN_STALL_SLICE_MS = 60_000;
+
+/**
+ * 一个计时分片的实际耗时超出片长这么多 → 判为进程被系统挂起过,该片不计入额度。
+ * 与 maker-scheduler 的 SUSPEND_GAP_MS 同量级:远大于正常的事件循环抖动。
+ */
+const TURN_STALL_SUSPEND_GAP_MS = 30_000;
+
 function parseTurnStallMs(raw: string | undefined): number {
   if (raw === undefined || raw === '') return DEFAULT_TURN_STALL_MS;
   const n = Number(raw);
@@ -264,6 +276,10 @@ export class Session {
   // ── turn 零事件看门狗（见 DEFAULT_TURN_STALL_MS）────────────────────────
   private readonly turnStallMs: number;
   private turnStallTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 还需要"清醒地"静默多久才判卡死;按分片递减(见 armTurnStallSlice)。 */
+  private turnStallRemainingMs = 0;
+  /** 当前分片的起始壁钟时刻;片尾据此识别系统挂起。 */
+  private turnStallSliceStartedAt = 0;
   /** 正在等用户回应的交互数；>0 期间不计 stall 额度（没事件是正常的）。 */
   private pendingInteractions = 0;
   /** 最近一次 fan-out 事件的时刻，仅用于日志诊断。 */
@@ -842,6 +858,8 @@ export class Session {
       clearTimeout(this.turnStallTimer);
       this.turnStallTimer = null;
     }
+    this.turnStallRemainingMs = 0;
+    this.turnStallSliceStartedAt = 0;
   }
 
   /**
@@ -861,10 +879,44 @@ export class Session {
     if (!this.isTurnRunning()) return;
     if (this.pendingInteractions > 0) return;
     if (this.hasRunningBackgroundTasks()) return;
+    this.turnStallRemainingMs = this.turnStallMs;
+    this.armTurnStallSlice();
+  }
+
+  /**
+   * 分片计时:每片最多 TURN_STALL_SLICE_MS,片尾核对"这一片真实走了多久"。
+   *
+   * 不能用一个 45 分钟的长定时器直接判定 —— Electron 被系统挂起(合盖睡眠)期间没有任何
+   * 事件,而定时器一旦在唤醒后到期就立刻开火:一次午休就足以让看门狗给一条完全健康的
+   * turn 推终态 error 并中断它(review #944 第十二轮 P1)。
+   *
+   * 片尾若发现壁钟走得远超本片时长,说明进程被冻结过 —— 这段不计入额度,重新起片。
+   * 只有"清醒地"连续静默满 turnStallMs 才判卡死。与 scheduler 侧
+   * absorbSuspendGap / tick 的挂起处理同源。
+   */
+  private armTurnStallSlice(): void {
+    const slice = Math.min(this.turnStallRemainingMs, TURN_STALL_SLICE_MS);
+    this.turnStallSliceStartedAt = Date.now();
     this.turnStallTimer = setTimeout(() => {
       this.turnStallTimer = null;
+      const elapsed = Date.now() - this.turnStallSliceStartedAt;
+      if (elapsed > slice + TURN_STALL_SUSPEND_GAP_MS) {
+        // 系统挂起过:这一片不算数,原地重开(额度不扣)。
+        this.logger.info('turn stall watchdog skipped a suspended slice', {
+          sliceMs: slice,
+          elapsedMs: elapsed,
+        });
+        // 唤醒后的状态可能已经变了(turn 结束 / 冒出交互 / 起了后台任务),走完整重判。
+        this.armTurnStallWatchdog();
+        return;
+      }
+      this.turnStallRemainingMs -= Math.max(0, elapsed);
+      if (this.turnStallRemainingMs > 0) {
+        this.armTurnStallSlice();
+        return;
+      }
       this.onTurnStallTimeout();
-    }, this.turnStallMs);
+    }, slice);
     // 不让看门狗拖住进程退出(Electron main 常驻无感,vitest / CLI 宿主有感)。
     (this.turnStallTimer as unknown as { unref?: () => void }).unref?.();
   }

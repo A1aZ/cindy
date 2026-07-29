@@ -702,6 +702,12 @@ const CRITICAL_THREAD_RPC_TIMEOUT_MS = 60_000;
  */
 const CODEX_UPSTREAM_IDLE_TIMEOUT_DEFAULT_MS = 30 * 60_000;
 
+/** upstream-idle 看门狗的计时分片长度(见 armUpstreamIdleSlice)。 */
+const CODEX_UPSTREAM_IDLE_SLICE_MS = 60_000;
+
+/** 分片实际耗时超出片长这么多 → 判为进程被系统挂起过,该片不计入额度。 */
+const CODEX_UPSTREAM_IDLE_SUSPEND_GAP_MS = 30_000;
+
 function parseCodexIdleTimeoutMs(raw: string | undefined): number {
   if (raw === undefined || raw === '') return CODEX_UPSTREAM_IDLE_TIMEOUT_DEFAULT_MS;
   const n = Number(raw);
@@ -3450,11 +3456,17 @@ export class CodexAgent extends BaseAgent {
     let upstreamIdleTimer: ReturnType<typeof setTimeout> | null = null;
     let upstreamIdleLastEventType: string | null = null;
     let upstreamIdleLastEventAt = 0;
+    /** 还需要"清醒地"静默多久才判上游哑火;按分片递减(见 armUpstreamIdleSlice)。 */
+    let upstreamIdleRemainingMs = 0;
+    /** 当前分片的起始壁钟时刻;片尾据此识别系统挂起。 */
+    let upstreamIdleSliceStartedAt = 0;
     function clearUpstreamIdle(): void {
       if (upstreamIdleTimer) {
         clearTimeout(upstreamIdleTimer);
         upstreamIdleTimer = null;
       }
+      upstreamIdleRemainingMs = 0;
+      upstreamIdleSliceStartedAt = 0;
     }
     function armUpstreamIdle(): void {
       clearUpstreamIdle();
@@ -3462,10 +3474,38 @@ export class CodexAgent extends BaseAgent {
       if (closed || !isTurnInFlight) return;
       // 工具执行 / 等审批期间 ball 不在上游,不计 idle 配额。
       if (pendingToolItemIds.size > 0) return;
+      upstreamIdleRemainingMs = upstreamIdleTimeoutMs;
+      armUpstreamIdleSlice();
+    }
+    /**
+     * 分片计时,片尾核对真实耗时。不能用一个 30 分钟的长定时器直接判定 —— Electron 被
+     * 系统挂起(合盖睡眠)期间没有任何事件,定时器一旦在唤醒后到期就立刻开火,一次午休
+     * 就能让看门狗中断一条完全健康的 turn(review #944 第十二轮 P1,与 Session 层的
+     * armTurnStallSlice、scheduler 的 absorbSuspendGap 同源)。
+     */
+    function armUpstreamIdleSlice(): void {
+      const slice = Math.min(upstreamIdleRemainingMs, CODEX_UPSTREAM_IDLE_SLICE_MS);
+      upstreamIdleSliceStartedAt = Date.now();
       upstreamIdleTimer = setTimeout(() => {
         upstreamIdleTimer = null;
+        const elapsed = Date.now() - upstreamIdleSliceStartedAt;
+        if (elapsed > slice + CODEX_UPSTREAM_IDLE_SUSPEND_GAP_MS) {
+          log.info('upstream-idle watchdog skipped a suspended slice', {
+            threadId,
+            sliceMs: slice,
+            elapsedMs: elapsed,
+          });
+          // 唤醒后状态可能已变(turn 结束 / 又有工具在跑),走完整重判。
+          armUpstreamIdle();
+          return;
+        }
+        upstreamIdleRemainingMs -= Math.max(0, elapsed);
+        if (upstreamIdleRemainingMs > 0) {
+          armUpstreamIdleSlice();
+          return;
+        }
         onUpstreamIdleTimeout();
-      }, upstreamIdleTimeoutMs);
+      }, slice);
       (upstreamIdleTimer as unknown as { unref?: () => void }).unref?.();
     }
     /**

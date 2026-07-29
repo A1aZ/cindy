@@ -376,6 +376,57 @@ describe('Session turn stall watchdog', () => {
     }
   });
 
+  it('系统挂起期间不计额度,醒来不立刻开火', async () => {
+    // Electron 被系统挂起(合盖睡眠)期间没有任何事件,而一个 45 分钟的长定时器一旦在
+    // 唤醒后到期就立刻开火 —— 一次午休就足以让看门狗给完全健康的 turn 推终态 error
+    // 并中断它(review #944 第十二轮 P1)。改成分片计时后,片尾发现壁钟走得远超片长
+    // 就判定被冻结过,该片不计入额度。
+    vi.useFakeTimers();
+    try {
+      const stub = createStubHandle();
+      const session = createSession(stub);
+      const seen: AgentEvent[] = [];
+      session.onEvent((ev) => seen.push(ev));
+
+      await session.send('go');
+      // 合盖睡 8 小时:壁钟前进,但定时器没有按比例推进
+      vi.setSystemTime(Date.now() + 8 * 3_600_000);
+      await vi.advanceTimersByTimeAsync(STALL_MS);
+
+      expect(seen.some((ev) => ev.type === 'error')).toBe(false);
+      expect(stub.abort).not.toHaveBeenCalled();
+
+      // 吸收不等于豁免:醒来后继续静默满一个阈值,照常开火
+      await vi.advanceTimersByTimeAsync(STALL_MS + 1);
+      expect(stub.abort).toHaveBeenCalledTimes(1);
+      expect(
+        seen.some(
+          (ev) =>
+            ev.type === 'error' &&
+            (ev.data as { reason?: string } | null)?.reason === 'turn_no_event_timeout',
+        ),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('清醒状态下的长时间静默照常开火(分片不该变成永久豁免)', async () => {
+    vi.useFakeTimers();
+    try {
+      const stub = createStubHandle();
+      const session = createSession(stub);
+      session.onEvent(() => {});
+
+      await session.send('go');
+      // 一路清醒地静默:每一片的真实耗时都等于片长,额度正常累减
+      await vi.advanceTimersByTimeAsync(STALL_MS + 1);
+      expect(stub.abort).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('手动 abort 不生效时也会复核并关闭会话', async () => {
     // 用户按 Stop 时 abort() 会先 clearTurnStallWatchdog()。若 transport 已不响应
     // (codex 的 turn/interrupt 悬挂 / claude 的 interrupt 失败且不清 turn-in-flight),

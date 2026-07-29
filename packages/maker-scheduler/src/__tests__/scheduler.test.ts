@@ -168,6 +168,8 @@ function makeHarness(opts?: {
   maxConcurrentRuns?: number;
   runStallMs?: number;
   runStallAbortGraceMs?: number;
+  /** 默认 0(关闭挂起吸收):假时钟跳表与真实睡眠在壁钟上同形,见 SchedulerOptions.suspendGapMs。 */
+  suspendGapMs?: number;
   logger?: Logger;
 }): Harness {
   const storage = opts?.storage ?? new InMemoryStorage();
@@ -193,6 +195,7 @@ function makeHarness(opts?: {
     maxConcurrentRuns: opts?.maxConcurrentRuns,
     runStallMs: opts?.runStallMs,
     runStallAbortGraceMs: opts?.runStallAbortGraceMs,
+    suspendGapMs: opts?.suspendGapMs ?? 0,
     logger: opts?.logger,
     instanceId: 'test-scheduler',
     processId: 1234,
@@ -2794,6 +2797,7 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
         clock,
         generateId: makeIdGen(),
         tickIntervalMs: 60_000_000,
+        suspendGapMs: 0, // 见 makeHarness 同名注释:假时钟跳表 ≠ 系统睡眠
         runStallMs: 60_000,
         runStallAbortGraceMs: 30_000,
         notifyForcedFailure: (input) => {
@@ -2943,6 +2947,7 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
         clock,
         generateId: makeIdGen(),
         tickIntervalMs: 60_000_000,
+        suspendGapMs: 0, // 见 makeHarness 同名注释:假时钟跳表 ≠ 系统睡眠
         runStallMs: 60_000,
         runStallAbortGraceMs: 30_000,
         notifyForcedFailure: (input) => {
@@ -2993,6 +2998,7 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
         clock,
         generateId: makeIdGen(),
         tickIntervalMs: 60_000_000,
+        suspendGapMs: 0, // 见 makeHarness 同名注释:假时钟跳表 ≠ 系统睡眠
         runStallMs: 60_000,
         runStallAbortGraceMs: 30_000,
         notifyForcedFailure: (input) => {
@@ -3041,6 +3047,7 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
         clock,
         generateId: makeIdGen(),
         tickIntervalMs: 60_000_000,
+        suspendGapMs: 0, // 见 makeHarness 同名注释:假时钟跳表 ≠ 系统睡眠
         runStallMs: 60_000,
         runStallAbortGraceMs: 30_000,
         notifyForcedFailure: (input) => {
@@ -3073,6 +3080,53 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
       expect(scheduler.getRuntimeSnapshot().slotsInUse).toBe(0);
       expect(storage.runs.get(runId)?.status).toBe('success');
       await scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('系统挂起(合盖睡眠)醒来后不把睡着的时间当成无反馈', async () => {
+    // 判据用壁钟:机器睡 8 小时,醒来第一次心跳看到的 noProgressMs 就是 8 小时,于是把
+    // 一条完全健康、睡前正在跑长工具的 run 直接 abort(review #944 第十二轮 P1)。
+    // 心跳每 15s 一拍,间隔突然出现远大于它的缺口只可能是进程被冻结过。
+    vi.useFakeTimers();
+    try {
+      let sawAbort = false;
+      const h = makeHarness({
+        runStallMs: 60_000,
+        runStallAbortGraceMs: 30_000,
+        suspendGapMs: 30_000, // 本用例专门验挂起吸收,显式打开
+        runnerImpl: (_s, ctx) =>
+          new Promise<FireResult>(() => {
+            ctx.signal.addEventListener('abort', () => { sawAbort = true; });
+          }),
+      });
+      await h.scheduler.create({ ...baseInput, intervalMs: 24 * 3_600_000 });
+      h.clock.advance(24 * 3_600_000);
+      void h.scheduler.tick();
+      await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(1));
+
+      // 第一拍心跳:建立基准(此时还没有可比的间隔)
+      h.clock.advance(RUN_HEARTBEAT_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      expect(sawAbort).toBe(false);
+
+      // 合盖睡 8 小时:定时器在睡眠期间不跑,醒来这一拍的壁钟间隔是 8 小时
+      h.clock.advance(8 * 3_600_000);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      expect(sawAbort).toBe(false); // 睡着的时间不算无反馈
+
+      // 醒来后继续静默,额度要从醒来那一刻重新算:再睡前额度已用掉 15s,还差 ~60s
+      h.clock.advance(RUN_HEARTBEAT_INTERVAL_MS);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      expect(sawAbort).toBe(false);
+      for (let i = 0; i < 4; i++) {
+        h.clock.advance(RUN_HEARTBEAT_INTERVAL_MS);
+        await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      }
+      // 真正连续静默满一分钟(清醒时间)之后,守卫照常开火 —— 吸收不等于豁免
+      expect(sawAbort).toBe(true);
+      await h.scheduler.stop();
     } finally {
       vi.useRealTimers();
     }
@@ -3330,6 +3384,7 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
         clock,
         generateId: makeIdGen(),
         tickIntervalMs: 60_000_000,
+        suspendGapMs: 0, // 见 makeHarness 同名注释:假时钟跳表 ≠ 系统睡眠
         runStallMs: 60_000,
         runStallAbortGraceMs: 30_000,
         logger,

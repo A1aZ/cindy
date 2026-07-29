@@ -124,6 +124,14 @@ export interface SchedulerOptions {
    */
   runStallAbortGraceMs?: number;
   /**
+   * 心跳间隔缺口超过它 → 判为系统挂起(合盖睡眠),把这段时间从卡死判定里剔除
+   * (见 absorbSuspendGap)。默认 SUSPEND_GAP_MS;传 0 关闭。
+   *
+   * 测试里默认关闭:假时钟"一次跳 60 秒再跑一拍心跳"与真实的"睡了 60 秒"在壁钟上
+   * 完全同形,开着会把用例想制造的静默当成睡眠吞掉。挂起行为本身由专门的用例覆盖。
+   */
+  suspendGapMs?: number;
+  /**
    * **强制释放路径专用**的通知出口。通知投递平时住在 host 的两个 runner 里(它们各自
    * 持有 Notifier),但 runner 永不返回时那条链路根本不会执行 —— 用户配了 desktop /
    * feishu 通知也只会看到一个未读红点(review #944 P1)。
@@ -277,6 +285,8 @@ export class Scheduler extends EventEmitter {
   // 僵尸清扫的挂起唤醒防误杀:上次 tick 时刻 + 清扫解禁时刻(见 SUSPEND_GAP_MS)。
   private lastTickAt = 0;
   private sweepBlockedUntil = 0;
+  // 卡死守卫的挂起唤醒防误杀:上次心跳时刻(见 absorbSuspendGap)。
+  private lastHeartbeatAt = 0;
 
   // In-flight run registry — 让 delete / pause 能真正中断已经在跑的 runner.fire()。
   //   inflightControllers: runId → AbortController (deleteRun 可精准 abort 单条)
@@ -313,6 +323,7 @@ export class Scheduler extends EventEmitter {
   private readonly maxConcurrentRuns: number;
   private readonly runStallMs: number;
   private readonly runStallAbortGraceMs: number;
+  private readonly suspendGapMs: number;
   private readonly schedulerInstanceId: string;
   private readonly processId?: number;
   private readonly inflightAttempts = new Map<string, InflightAttempt>();
@@ -344,6 +355,7 @@ export class Scheduler extends EventEmitter {
       0,
       opts.runStallAbortGraceMs ?? RUN_STALL_ABORT_GRACE_MS,
     );
+    this.suspendGapMs = Math.max(0, opts.suspendGapMs ?? SUSPEND_GAP_MS);
     this.schedulerInstanceId = opts.instanceId ?? `scheduler-${defaultGenerateId()}`;
     this.processId = opts.processId;
   }
@@ -1497,9 +1509,11 @@ export class Scheduler extends EventEmitter {
    */
   private startHeartbeatLoopIfNeeded(): void {
     if (this.heartbeatHandle !== null) return;
+    this.lastHeartbeatAt = 0;
     this.heartbeatHandle = setInterval(() => {
       const runIds = [...this.inflightControllers.keys()];
       const now = this.clock.now();
+      this.absorbSuspendGap(now);
       this.logLongRunningAttempts(now);
       this.enforceStallGuard(now);
       if (runIds.length > 0) {
@@ -2003,6 +2017,43 @@ export class Scheduler extends EventEmitter {
    */
   private needsForcedFailureNotification(runId: string): boolean {
     return this.inflightAttempts.get(runId)?.runnerNotifiedFailure !== true;
+  }
+
+  /**
+   * 把"系统挂起(合盖睡眠)的那段时间"从卡死判定里剔除。
+   *
+   * 判定用的是壁钟(clock.now):机器睡 8 小时,醒来第一次心跳看到的 noProgressMs 就是
+   * 8 小时,于是把一条完全健康的 run —— 甚至是睡前正在跑长工具的 run —— 直接 abort
+   * (review #944 第十二轮 P1)。心跳每 15s 一次,间隔突然出现远大于它的缺口,只可能是
+   * 进程被冻结过,不是"对方没动静"。
+   *
+   * 处置是把所有 in-flight 的时间戳整体前移这段缺口 —— 等价于"睡着的时间不算数",
+   * 醒来后各 run 的剩余额度与睡前一致。与 tick 里僵尸清扫的挂起处理同源(SUSPEND_GAP_MS),
+   * 只是那边推迟清扫窗口、这边平移判定基准。
+   */
+  private absorbSuspendGap(now: number): void {
+    const last = this.lastHeartbeatAt;
+    this.lastHeartbeatAt = now;
+    if (last === 0) return; // 本轮是心跳 loop 的第一拍,没有可比的间隔
+    if (this.suspendGapMs <= 0) return; // 显式关闭(测试默认)
+    const gap = now - last - RUN_HEARTBEAT_INTERVAL_MS;
+    if (gap <= this.suspendGapMs) return;
+    let shifted = 0;
+    for (const attempt of this.inflightAttempts.values()) {
+      attempt.lastProgressAt += gap;
+      if (attempt.stallAbortedAt !== undefined) attempt.stallAbortedAt += gap;
+      if (attempt.finalizingSince !== undefined) attempt.finalizingSince += gap;
+      if (attempt.storageStallLoggedAt !== undefined) attempt.storageStallLoggedAt += gap;
+      if (attempt.lastLongRunningLogAt !== undefined) attempt.lastLongRunningLogAt += gap;
+      attempt.startedAt += gap;
+      shifted += 1;
+    }
+    this.logger?.info?.('scheduler: absorbed system-suspend gap into stall accounting', {
+      schedulerInstanceId: this.schedulerInstanceId,
+      processId: this.processId,
+      gapMs: gap,
+      shiftedRuns: shifted,
+    });
   }
 
   /** 真正占用并发槽的 run 数：'queued' 的纯等待项不计入。 */

@@ -10477,6 +10477,46 @@ describe('CodexAgent upstream-response-idle watchdog', () => {
     }
   });
 
+  it('系统挂起期间不计额度,醒来不立刻开火', async () => {
+    // 与 Session 层同源的问题:一个 30 分钟的长定时器在唤醒后到期就立刻开火,一次午休
+    // 足以中断一条完全健康的 turn(review #944 第十二轮 P1)。
+    vi.useFakeTimers();
+    try {
+      const agent = new CodexAgent(createDeps());
+      const host = installIdleHost(agent);
+      const handle = await startIdleSession(agent, 'session-idle-suspend');
+      const seen = collectEvents(handle);
+      await handle.send({ type: 'user', content: 'go' });
+      const handlers = host.getThreadHandlers();
+      if (!handlers) throw new Error('expected thread handlers');
+      handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-1' } } as never);
+
+      // 合盖睡 8 小时:壁钟前进,但定时器没有按比例推进
+      vi.setSystemTime(Date.now() + 8 * 3_600_000);
+      await vi.advanceTimersByTimeAsync(IDLE_MS);
+      expect(
+        seen.some(
+          (ev) =>
+            ev.type === 'error' &&
+            (ev.data as { reason?: string } | null)?.reason === 'upstream_response_idle_timeout',
+        ),
+      ).toBe(false);
+
+      // 吸收不等于豁免:醒来后继续静默满一个阈值,照常开火
+      await vi.advanceTimersByTimeAsync(IDLE_MS + 1);
+      expect(
+        seen.some(
+          (ev) =>
+            ev.type === 'error' &&
+            (ev.data as { reason?: string } | null)?.reason === 'upstream_response_idle_timeout',
+        ),
+      ).toBe(true);
+      await handle.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('turn 正常收口后不再计时', async () => {
     vi.useFakeTimers();
     try {

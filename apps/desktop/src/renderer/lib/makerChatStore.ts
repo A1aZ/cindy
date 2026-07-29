@@ -7452,16 +7452,17 @@ function continueAfterSilentStop(sessionId: string): void {
  * 窄口径写),重连/历史重拉后不复活;老被控端不识别该 channel 时 catch 吞错,
  * 退化为本视图内存隐藏。
  *
- * 返回落库完成的 promise(不会 reject):红点是 pending-alerts 查询的派生投影,
- * 调用方必须**等落库完成再重算**,否则重算会与这次异步写竞态 —— 读到旧状态就仍
- * 判定告警存在,横幅已消失而红点卡住。
+ * 返回值 = **是否落库成功**(不会 reject):红点是告警查询的派生投影,调用方必须
+ * 等落库完成再重算,否则重算会与这次异步写竞态 —— 读到旧状态就仍判定告警存在,
+ * 横幅已消失而红点卡住。远程会话的调用方还要靠这个布尔决定是否发 explicit ack:
+ * 隧道写失败时不能清红点,否则横幅已回滚重现而红点没了(PR #879 review P1)。
  *
  * 落库失败时**回滚乐观更新**(errorDismissed 置回 false):否则横幅已被乐观隐藏、
  * 而库里的告警仍在,重算会把红点恢复,用户看到「红点在但没有横幅可处置」,只能重载
- * 才恢复(PR #879 review P1)。回滚后横幅重新出现,与红点重新一致,用户可以再试。
+ * 才恢复。回滚后横幅重新出现,与红点重新一致,用户可以再试。
  */
-function dismissErrorTailMessage(sessionId: string, clientId: string): Promise<void> {
-  if (!sessionId || !clientId) return Promise.resolve();
+function dismissErrorTailMessage(sessionId: string, clientId: string): Promise<boolean> {
+  if (!sessionId || !clientId) return Promise.resolve(false);
   const setDismissed = (dismissed: boolean): void => {
     setState(sessionId, (s) => ({
       ...s,
@@ -7471,13 +7472,14 @@ function dismissErrorTailMessage(sessionId: string, clientId: string): Promise<v
     }));
   };
   setDismissed(true);
-  // 收敛成 Promise<void>:dismissErrorMessageFor 返回 Promise<unknown>(IPC 结果),
-  // 调用方只关心「写完了」这个时点,不消费返回值。
+  // 收敛成 Promise<boolean>:dismissErrorMessageFor 返回 Promise<unknown>(IPC 结果),
+  // 调用方只关心「写成功了没有」。
   return dismissErrorMessageFor(sessionId, clientId).then(
-    () => undefined,
+    () => true,
     (err: unknown) => {
       log.warn('persist error dismiss failed, rolling back optimistic dismiss:', err);
       setDismissed(false);
+      return false;
     },
   );
 }

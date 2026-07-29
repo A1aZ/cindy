@@ -49,7 +49,7 @@
  * turn 主流程。
  */
 
-import { and, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNull, lt, sql } from 'drizzle-orm';
 
 import { getDbClient } from './client/current';
 import { messages, sessions } from './schema';
@@ -208,11 +208,30 @@ function enqueueEndedWrite(sessionId: string, endedAt: number): Promise<void> {
 }
 
 /**
- * 「疑似中断」(startedAt > endedAt,未被 /clear 越过,桌面可见来源)的 active
- * 会话 id。继续 / 忽略都会写 ended,自然不再命中。
+ * 本进程启动时刻(模块加载即定格)。「中断」的完整定义需要它:
+ * startedAt > endedAt 只说明「有个 turn 没收尾」,**正在跑的 turn 同样满足**;
+ * 真正的中断还要求这个 turn **开始于本进程启动之前** —— 那才只能是上一个进程留下的。
  *
- * 这是红点派生的两条腿之一(另一条是 listErrorTailPendingSessionIds)。
- * ⚠️ **只在启动首拉时消费**:见下方两条腿消费周期的说明。
+ * 早先这条约束只写在注释里(「只在启动首拉时消费」),于是任何运行时调用都会把
+ * 正在跑的会话误判为中断:红点侧会给运行中的会话亮红点,批量处置侧更糟 —— 会对
+ * 活跃 turn 写 lastTurnEndedAt,把它伪装成已收尾,导致这个 turn 真被中断时下次启动
+ * 检测不到(PR #879 review P1,两个 reviewer 独立指出)。现在把边界下沉进查询本身,
+ * 调用时机不再影响正确性。
+ */
+let _bootAtMs = Date.now();
+
+/** 测试专用:定格「本进程启动时刻」,让中断判定不依赖真实时钟。 */
+export function _setBootAtMsForTests(ms: number): void {
+  _bootAtMs = ms;
+}
+
+/**
+ * 「疑似中断」的 active 会话 id:turn 开始于本进程启动之前、至今未收尾,且未被
+ * /clear 越过,来源在桌面可见白名单内。继续 / 忽略都会写 ended,自然不再命中。
+ *
+ * 这是红点派生的两条腿之一(另一条是 listErrorTailPendingSessionIds)。红点侧只在
+ * 启动首拉消费它(见下方两条腿消费周期的说明);但 startedAt < bootAt 的守卫让它
+ * 在任何时刻调用都不会把运行中的会话算进来,批量处置因此也可以安全复用。
  */
 export async function listInterruptedPendingSessionIds(): Promise<string[]> {
   const db = getDbClient().drizzle;
@@ -227,6 +246,8 @@ export async function listInterruptedPendingSessionIds(): Promise<string[]> {
         inArray(sessions.source, DESKTOP_VISIBLE_SESSION_SOURCES),
         gt(sessions.activeTurnStartedAt, sql`COALESCE(${sessions.lastTurnEndedAt}, 0)`),
         gt(sessions.activeTurnStartedAt, sql`COALESCE(${sessions.clearedAt}, 0)`),
+        // 只认「开始于本进程启动之前」的 turn —— 排除正在跑的(见 _bootAtMs 注释)。
+        lt(sessions.activeTurnStartedAt, _bootAtMs),
       ),
     );
   return rows.map((r) => r.id);
@@ -302,13 +323,14 @@ export async function listErrorTailPendingSessionIds(): Promise<string[]> {
 }
 
 /**
- * ⚠️ 两条腿的消费周期必须分开,**不要**再提供一个「合集」入口:
- * 中断腿的判定(startedAt > endedAt)对**正在跑的 turn** 天然成立,只在启动时刻可靠
- * (那时飞行中的 turn 必然是上一个进程留下的)。若每次 turn 结束 / 错误落库都重跑它,
- * 运行中的会话会被误判为中断而亮红点(PR #879 review P1)。
- * renderer 因此分开消费:中断腿只在启动首拉一次(listInterruptedPendingSessionIds),
- * 错误尾行腿参与每轮重算(listErrorTailPendingSessionIds);批量处置需要 clientId,
- * 直接用 listErrorTailPendingRows。
+ * ⚠️ 两条腿语义不同,**不要**再提供一个「合集」入口:
+ * 中断是「上一个进程留下的未收尾 turn」,一次性、只增不减(用户 ack 后永久消失);
+ * 错误尾行是「当前消息流的尾部状态」,会随 turn 起落自然变化。renderer 因此分开
+ * 消费:中断腿只在启动首拉一次并由 lastTurnEndedAt patch 收敛,错误尾行腿参与每轮
+ * 重算。批量处置需要 clientId,直接用 listErrorTailPendingRows。
+ *
+ * 正确性不再依赖调用时机:中断腿自带 startedAt < bootAt 守卫(见 _bootAtMs),
+ * 运行中的会话在任何时刻都不会被它算进来。
  */
 
 /**

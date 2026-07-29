@@ -3358,8 +3358,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
        *  天然成立,周期性重跑会把运行中的会话误判为中断)。 */
       errorTailPending: (): Promise<string[]> =>
         ipcRenderer.invoke('local-db:sessions:error-tail-pending'),
-      /** 批量处置未处理告警(「全部标为已读」):等价于逐个在横幅上点「忽略」。 */
-      dismissPendingAlerts: (sessionIds: string[]): Promise<{ dismissed: number }> =>
+      /** 批量处置未处理告警(「全部标为已读」):等价于逐个在横幅上点「忽略」。
+       *  failed 是**未处置成功**的会话 id —— 调用方只对成功的清红点。 */
+      dismissPendingAlerts: (
+        sessionIds: string[],
+      ): Promise<{ dismissed: number; failed: string[] }> =>
         ipcRenderer.invoke('local-db:sessions:dismiss-pending-alerts', sessionIds),
       /** interrupted-turn-resume:用户对中断提示点「忽略」,写一次正常收尾时刻。 */
       ackInterrupted: (id: string): Promise<void> =>

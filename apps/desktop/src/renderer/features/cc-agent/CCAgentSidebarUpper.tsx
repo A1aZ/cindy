@@ -299,8 +299,15 @@ export function CCAgentSidebarUpper() {
     // 而红点已经消失(还连带发了 explicit 桥接 / 远程回执),正是本 PR 要消灭的割裂。
     // 现在成功才 explicit 清,失败则重算把仍存在的告警点恢复回来。
     try {
-      await window.electronAPI.localDb.sessions.dismissPendingAlerts(automationAttentionSessionIds);
-      clearSessionAttentionMany(automationAttentionSessionIds, { intent: 'explicit' });
+      const { failed } = await window.electronAPI.localDb.sessions.dismissPendingAlerts(
+        automationAttentionSessionIds,
+      );
+      // 只清**确实处置成功**的会话:main 侧逐会话核实了落库结果并回报 failed,
+      // 部分失败时那些会话的横幅仍在库里,红点必须留着。
+      const failedSet = new Set(failed);
+      const succeeded = automationAttentionSessionIds.filter((id) => !failedSet.has(id));
+      clearSessionAttentionMany(succeeded, { intent: 'explicit' });
+      if (failed.length > 0) log.warn('some pending alerts were not dismissed', failed);
     } catch (e) {
       log.warn('dismiss pending alerts failed', e);
     }

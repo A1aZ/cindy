@@ -1335,12 +1335,14 @@ export function CCAgentSessionView({
     // 抢在写入前读会仍判定告警存在 —— 横幅已熄灭、红点却卡住。
     void makerChatStore
       .dismissErrorTailMessage(sessionId, errorTailMsg.clientId)
-      .then(() => {
+      .then((persisted) => {
         // device-link 远程会话:dismiss 经隧道写到**被控端** DB,控制端本机库里没有
         // 这个会话的行,派生腿查不到、也从未认领它 —— 必须显式 ack(explicit 清本机
-        // 角标 + 隧道回执清被控端未读)。删掉展示型 ack 后这是唯一的清除路径
-        // (PR #879 review P1)。本机会话由下面的重算收敛,不重复 ack。
-        if (remoteDeviceId) ackErrorAlertHandled(sessionId);
+        // 角标 + 隧道回执清被控端未读)。删掉展示型 ack 后这是唯一的清除路径。
+        // **只在落库成功时 ack**:隧道写失败时 store 已回滚乐观态、横幅重新出现,
+        // 此时清红点会再造成「横幅在、红点没」(PR #879 review P1)。
+        // 本机会话由下面的重算收敛,不重复 ack。
+        if (persisted && remoteDeviceId) ackErrorAlertHandled(sessionId);
         return refreshPendingAlerts();
       });
   }, [errorTailMsg, remoteDeviceId, sessionId]);

@@ -776,24 +776,44 @@ export function registerSessionIpc(): void {
     }
     for (const id of ids) requireString(id, 'sessionId');
     const wanted = new Set(ids as string[]);
-    if (wanted.size === 0) return { dismissed: 0 };
+    if (wanted.size === 0) return { dismissed: 0, failed: [] };
     const [tailRows, interrupted] = await Promise.all([
       listErrorTailPendingRows(),
       listInterruptedPendingSessionIds(),
     ]);
+    // 逐会话核实处置结果并回报失败清单:调用方据此只对**确实处置成功**的会话清红点。
+    // 之前只回 dismissed 计数,任何一处写失败都会让 renderer 以为整批成功而清掉红点,
+    // 而库里的告警仍在(PR #879 review P1)。
     let dismissed = 0;
+    const failed: string[] = [];
     for (const row of tailRows) {
       if (!wanted.has(row.sessionId)) continue;
-      const updated = await dismissErrorMessage(row.sessionId, row.clientId);
-      if (updated) dismissed += 1;
+      try {
+        const updated = await dismissErrorMessage(row.sessionId, row.clientId);
+        if (updated) dismissed += 1;
+        else failed.push(row.sessionId);
+      } catch {
+        failed.push(row.sessionId);
+      }
     }
     for (const sessionId of interrupted) {
       if (!wanted.has(sessionId)) continue;
       // awaited durable 写:与单会话「忽略」同一路径(链 + MAX 守卫 + 落库后广播)。
-      await ackSessionTurnEndedDurable(sessionId);
-      dismissed += 1;
+      // ackSessionTurnEndedDurable 内部吞写错、照常 resolve,所以**读回校验**:
+      // 只有 lastTurnEndedAt 确实推进到 >= startedAt(中断判定不再成立)才算成功。
+      const endedAt = await ackSessionTurnEndedDurable(sessionId);
+      const [row] = await getDbClient()
+        .drizzle.select({
+          startedAt: sessions.activeTurnStartedAt,
+          endedAt: sessions.lastTurnEndedAt,
+        })
+        .from(sessions)
+        .where(eq(sessions.id, sessionId));
+      const landed = row?.endedAt != null && row.endedAt >= Math.min(endedAt, row.startedAt ?? 0);
+      if (landed) dismissed += 1;
+      else failed.push(sessionId);
     }
-    return { dismissed };
+    return { dismissed, failed: [...new Set(failed)] };
   });
 
   // interrupted-turn-resume:用户对「疑似中断」提示点「忽略」/「继续」——写一次

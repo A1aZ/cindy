@@ -60,12 +60,16 @@ let _refreshDirty = false;
  * 结果重新添加已处置会话的红点、或清掉刚产生的告警点(PR #879 review P1)。
  */
 let _queryGen = 0;
+/** bootstrap 窗口内收到的中断 ack —— 防止首拉用过期结果把已处置的中断重新打上点。
+ *  首拉应用完中断腿后即清空(此后 ack 直接走 _interruptedOwned)。 */
+const _interruptedAckedEarly = new Set<string>();
 
 /** 测试专用:重置单例守卫与打点账本。 */
 export function _resetPendingAlertAttentionForTests(): void {
   _startedThisWindow = false;
   _interruptedOwned.clear();
   _errorTailOwned.clear();
+  _interruptedAckedEarly.clear();
   _refreshInFlight = null;
   _refreshDirty = false;
   _queryGen = 0;
@@ -101,6 +105,12 @@ async function reconcileErrorTail(): Promise<void> {
     _errorTailOwned.add(id);
     markAlert(id);
   }
+
+  // 中断腿仍认领的会话也重新打点。中断点不参与本轮差分(它是 startup-only 的一次性
+  // 结果,只由 lastTurnEndedAt patch 收敛),但它和错误尾行共享同一条 attention
+  // 条目 —— 别的 explicit 路径(worktree 横幅处置、Retry 等)清掉那条条目后,只重查
+  // 错误尾行是恢复不了中断红点的,中断横幅仍在而红点消失(PR #879 review P1)。
+  for (const id of _interruptedOwned) markAlert(id);
 
   for (const id of [..._errorTailOwned]) {
     if (next.has(id)) continue;
@@ -139,8 +149,13 @@ export function refreshPendingAlerts(): Promise<void> {
   return run;
 }
 
-/** 清掉本 hook 首拉打的中断点(不是本 hook 打的 → no-op)。 */
-function clearInterruptedIfOwned(sessionId: string): void {
+/**
+ * 中断 ack 到达(本窗口 / 其它窗口 / device-link 控制端写了 lastTurnEndedAt)。
+ * 也记进 _interruptedAckedEarly:ack 可能早于首拉返回,那时 _interruptedOwned 还是空的,
+ * 若不记下来,首拉会把这个已被处置的中断重新打上点(窄但真实的 bootstrap 竞态)。
+ */
+function noteInterruptedAck(sessionId: string): void {
+  _interruptedAckedEarly.add(sessionId);
   if (!_interruptedOwned.delete(sessionId)) return;
   // 错误尾行腿仍认领时不清:同一会话可能同时停在未 dismissed 的错误行上。
   if (_errorTailOwned.has(sessionId)) return;
@@ -155,11 +170,17 @@ async function initialFetch(): Promise<void> {
     sessions.interruptedPending(),
     sessions.errorTailPending(),
   ]);
-  if (gen !== _queryGen) return;
+  // 中断腿**不受代数守卫**:它是 startup-only 的一次性结果,没有「更新的版本」会
+  // 取代它。若跟着错误尾行一起被丢弃,这个窗口内的中断会话就永远拿不到红点了
+  // (PR #879 review P1)。期间已被 ack 的除外。
   for (const id of interrupted) {
+    if (_interruptedAckedEarly.has(id)) continue;
     _interruptedOwned.add(id);
     markAlert(id);
   }
+  _interruptedAckedEarly.clear();
+  // 错误尾行受代数守卫:更晚的重算已经拿到更新的结果,别用旧数据覆盖。
+  if (gen !== _queryGen) return;
   for (const id of errorTail) {
     _errorTailOwned.add(id);
     markAlert(id);
@@ -194,7 +215,7 @@ export function usePendingAlertAttention(): void {
     if (!sessionsPush) return;
     return sessionsPush.onPatched(({ sessionId, patch }) => {
       if (patch && typeof patch === 'object' && 'lastTurnEndedAt' in patch) {
-        clearInterruptedIfOwned(sessionId);
+        noteInterruptedAck(sessionId);
       }
     });
   }, []);

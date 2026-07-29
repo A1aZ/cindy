@@ -3166,8 +3166,10 @@ interface ElectronAPI {
       interruptedPending: () => Promise<string[]>;
       /** 红点派生的周期性重算源:尾部停在未 dismissed 错误行的 active 会话 id。 */
       errorTailPending: () => Promise<string[]>;
-      /** 批量处置未处理告警(「全部标为已读」):等价于逐个在横幅上点「忽略」。 */
-      dismissPendingAlerts: (sessionIds: string[]) => Promise<{ dismissed: number }>;
+      /** 批量处置未处理告警(「全部标为已读」)。failed = 未处置成功的会话 id。 */
+      dismissPendingAlerts: (
+        sessionIds: string[],
+      ) => Promise<{ dismissed: number; failed: string[] }>;
       ackInterrupted: (id: string) => Promise<void>;
       // Stage 2 C2: fork 已迁到 electronAPI.maker.fork (走 maker:fork IPC)。
     };

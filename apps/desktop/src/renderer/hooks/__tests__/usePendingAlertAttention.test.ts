@@ -143,29 +143,34 @@ describe('usePendingAlertAttention (派生收敛)', () => {
     expect(errorTailPendingMock).toHaveBeenCalledTimes(2);
   });
 
-  // 回归(PR #879 review P1):首拉(带退避重试、不经合流)与重算可能并发。较早开始
-  // 的首拉若后返回,会用过期结果重新添加已处置会话的红点。代数守卫让它整个丢弃。
-  it('首拉与重算并发时,后返回的过期首拉结果被丢弃', async () => {
-    let resolveInitial: ((v: string[]) => void) | undefined;
-    interruptedPendingMock.mockReturnValueOnce(
+  // 回归(PR #879 review P1):首拉(带退避重试、不经合流)与重算可能并发。
+  // 代数守卫只丢弃**错误尾行**那半 —— 中断腿是 startup-only 的一次性结果,没有更新
+  // 的版本会取代它,跟着一起丢会让这个窗口内的中断会话永远拿不到红点。
+  it('首拉与重算并发:过期的错误尾行结果丢弃,中断腿结果保留', async () => {
+    let resolveInitial: (() => void) | undefined;
+    // 首拉的两条腿:中断腿立刻有值,错误尾行腿挂住(制造「首拉后返回」)。
+    interruptedPendingMock.mockResolvedValue(['s-interrupted']);
+    errorTailPendingMock.mockReturnValueOnce(
       new Promise<string[]>((res) => {
-        resolveInitial = res;
+        resolveInitial = () => res(['s-stale-tail']);
       }),
     );
+
+    renderHook(() => usePendingAlertAttention());
+
+    // 期间一次重算完成 → 代数推进,首拉那一代的错误尾行已过期。
     errorTailPendingMock.mockResolvedValue([]);
-
-    renderHook(() => usePendingAlertAttention()); // 首拉在飞(等 interruptedPending)
-
-    // 期间一次重算完成 → 代数推进,首拉那一代已过期。
     await refreshPendingAlerts();
     addMock.mockClear();
 
-    // 首拉现在才返回,结果必须被整个丢弃。
-    resolveInitial?.(['s-stale-interrupted']);
+    resolveInitial?.();
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(addMock).not.toHaveBeenCalledWith('s-stale-interrupted', 'error');
+    // 过期的错误尾行结果被丢弃。
+    expect(addMock).not.toHaveBeenCalledWith('s-stale-tail', 'error');
+    // 中断腿结果照常应用(它没有「更新的版本」)。
+    expect(addMock).toHaveBeenCalledWith('s-interrupted', 'error');
   });
 });

@@ -564,6 +564,9 @@ export async function forkSessionAtMessage(
       title: newTitle,
       workingDir: source.workingDir ?? undefined,
     }).catch((err: unknown) => {
+      // 这里刻意用 isCodex(非 usesTailTurnFork):CODEX_FORK_STATE_UNAVAILABLE 是 codex 专属
+      // 错误码 + 文案,只有真 codex 失败才包装。pi 与 cc 一样裸抛原始错误(不会拿到指名道姓
+      // 错对象的 "Codex 状态不可用" 提示)。改成 usesTailTurnFork 会让 pi 误报成 codex 错误。
       if (!isCodex) throw err;
       const detail = err instanceof Error ? err.message : String(err);
       throw forkError(

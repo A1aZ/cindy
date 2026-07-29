@@ -409,6 +409,30 @@ export class PiAgent extends BaseAgent {
     const sdkSessionId = stateData.sessionFile || stateData.sessionId || `pi-${Date.now()}`;
     queue.push({ type: 'session_id', data: sdkSessionId, source: 'pi' });
 
+    // plan 镜像与 pi 持久态对齐(resume 关键):pi 的 plan-mode 扩展在 session_start 会从
+    // session entry 自恢复 planModeEnabled,但不发 notify。若镜像固定为 false 而 pi 实为 true,
+    // 由于 /plan 是 toggle + setPlanMode 幂等短路,会导致方向反转或关不掉。故从 get_entries
+    // 读最后一条 plan-mode custom entry 的 enabled 校正镜像(get_entries 已验证暴露该 entry)。
+    if (planModeExtAvailable) {
+      try {
+        const entriesResp = await proc.request({ type: 'get_entries' });
+        const entries =
+          (entriesResp.data as { entries?: Array<{ customType?: string; data?: { enabled?: boolean } }> } | undefined)
+            ?.entries ?? [];
+        for (let i = entries.length - 1; i >= 0; i--) {
+          if (entries[i]?.customType === 'plan-mode') {
+            const enabled = entries[i]?.data?.enabled;
+            if (typeof enabled === 'boolean') planModeActive = enabled;
+            break;
+          }
+        }
+      } catch (err) {
+        this.deps.logger.warn('pi plan-mode state sync failed (non-fatal)', {
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     const deps = this.deps;
     const agentKind = this.kind;
 
@@ -583,6 +607,11 @@ export class PiAgent extends BaseAgent {
       const tailDrop = normalizeTailTurnsToDrop(opts.tailTurnsToDrop);
       if (tailDrop > 0) {
         const fm = await proc.request({ type: 'get_fork_messages' });
+        // 必须查 success:失败时 fm.data 为空会让 idx 恒负,误落"越界→整条 clone"分支,
+        // 把 RPC 故障静默降级成"保留全部历史"(用户要丢尾却拿到全量),且日志误导排障。
+        if (!fm.success) {
+          throw new Error(`pi get_fork_messages failed: ${fm.error ?? 'unknown'}`);
+        }
         const messages =
           (fm.data as { messages?: Array<{ entryId?: string }> } | undefined)?.messages ?? [];
         const idx = messages.length - tailDrop;

@@ -3816,8 +3816,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       active?: unknown;
       markModelChoice?: unknown;
     };
-    if (p.agent !== 'claude-code' && p.agent !== 'codex') {
-      throwIpcError('INVALID_PARAMS', 'agent must be claude-code|codex');
+    if (p.agent !== 'claude-code' && p.agent !== 'codex' && p.agent !== 'pi') {
+      throwIpcError('INVALID_PARAMS', 'agent must be claude-code|codex|pi');
     }
     if (p.providerId !== undefined && typeof p.providerId !== 'string') {
       throwIpcError('INVALID_PARAMS', 'providerId must be string');
@@ -3877,8 +3877,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     if (typeof p.sessionId !== 'string' || !p.sessionId) {
       throwIpcError('INVALID_PARAMS', 'sessionId required');
     }
-    if (p.agent !== 'claude-code' && p.agent !== 'codex') {
-      throwIpcError('INVALID_PARAMS', 'agent must be claude-code|codex');
+    if (p.agent !== 'claude-code' && p.agent !== 'codex' && p.agent !== 'pi') {
+      throwIpcError('INVALID_PARAMS', 'agent must be claude-code|codex|pi');
     }
     if (typeof p.providerId !== 'string' || !p.providerId) {
       throwIpcError('INVALID_PARAMS', 'providerId required');
@@ -3916,7 +3916,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     };
     if (
       typeof p.sessionId !== 'string' || !p.sessionId
-      || (p.agent !== 'claude-code' && p.agent !== 'codex')
+      || (p.agent !== 'claude-code' && p.agent !== 'codex' && p.agent !== 'pi')
       || typeof p.providerId !== 'string' || !p.providerId
       || typeof p.model !== 'string' || !p.model
     ) return;

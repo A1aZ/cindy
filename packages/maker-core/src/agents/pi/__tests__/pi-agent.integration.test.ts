@@ -10,7 +10,7 @@
  */
 
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -82,7 +82,7 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
   let server: Server;
   let endpoint = '';
   let agentHome = '';
-  const seenRequests: Array<{ url: string; auth: string | undefined }> = [];
+  const seenRequests: Array<{ url: string; auth: string | undefined; body: string }> = [];
 
   beforeAll(async () => {
     agentHome = mkdtempSync(path.join(tmpdir(), 'pi-agent-int-'));
@@ -93,6 +93,7 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         seenRequests.push({
           url: req.url ?? '',
           auth: (req.headers['x-api-key'] as string | undefined) ?? (req.headers.authorization as string | undefined),
+          body,
         });
         res.writeHead(200, {
           'content-type': 'text/event-stream',
@@ -241,6 +242,49 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
   );
 
   it(
+    'forwards an image attachment through pi to the gateway (multimodal image)',
+    { timeout: 60_000 },
+    async () => {
+      // 合法 1x1 透明 PNG —— pi 不会因非法图片拒收;其 base64 应原样出现在网关请求体。
+      const PNG_1x1_B64 =
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
+      const agent = new PiAgent(buildDeps());
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-img-cwd-'));
+      let handle: AgentSessionHandle | null = null;
+      try {
+        const imgPath = path.join(workingDir, 'pixel.png');
+        writeFileSync(imgPath, Buffer.from(PNG_1x1_B64, 'base64'));
+
+        handle = await agent.startSession({
+          sessionId: 'img-session',
+          workingDir,
+          model: 'pi-test-model',
+        });
+        const done = (async () => {
+          for await (const ev of handle!.events()) {
+            if (ev.type === 'done') break;
+          }
+        })();
+        await handle.send({
+          type: 'user',
+          content: [
+            { type: 'text', text: 'what is in this image?' },
+            { type: 'image', path: imgPath },
+          ],
+        });
+        await done;
+
+        // pi 应把图片 base64 转发进网关请求(Anthropic image content block)。
+        const sawImage = seenRequests.some((r) => r.body.includes(PNG_1x1_B64));
+        expect(sawImage).toBe(true);
+      } finally {
+        await handle?.close();
+        rmSync(workingDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
     'setPlanMode toggles plan mode via the bundled plan-mode extension (/plan, no gateway)',
     { timeout: 60_000 },
     async () => {
@@ -272,6 +316,52 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         expect(seenRequests.length).toBe(seenBefore);
       } finally {
         await handle?.close();
+        rmSync(workingDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    're-syncs plan mode from pi persisted state on resume (no mirror desync)',
+    { timeout: 60_000 },
+    async () => {
+      const agent = new PiAgent(buildDeps());
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-plan-resume-cwd-'));
+      let handle: AgentSessionHandle | null = null;
+      let resumed: AgentSessionHandle | null = null;
+      try {
+        handle = await agent.startSession({
+          sessionId: 'plan-resume-session',
+          workingDir,
+          model: 'pi-test-model',
+        });
+        // 先跑一轮真实 turn 让会话落盘(pi 对纯扩展活动的会话可能不持久化)。
+        const done = (async () => {
+          for await (const ev of handle!.events()) {
+            if (ev.type === 'done') break;
+          }
+        })();
+        await handle.send({ type: 'user', content: 'seed message so the session persists' });
+        await done;
+
+        await handle.setPlanMode?.(true);
+        expect(handle.getPlanMode?.()).toBe(true);
+        const resumeKey = handle.id; // pi 会话文件路径 = resume 钥匙
+        await handle.close();
+        handle = null;
+
+        // resume 同一会话:pi 的 plan-mode 扩展自恢复 planModeEnabled=true,新会话的
+        // planModeActive 必须从 get_entries 校正回 true(而非默认 false),否则 /plan toggle 会锁死。
+        resumed = await agent.startSession({
+          sessionId: 'plan-resume-session-2',
+          workingDir,
+          model: 'pi-test-model',
+          resumeSessionId: resumeKey,
+        });
+        expect(resumed.getPlanMode?.()).toBe(true);
+      } finally {
+        await handle?.close();
+        await resumed?.close();
         rmSync(workingDir, { recursive: true, force: true });
       }
     },

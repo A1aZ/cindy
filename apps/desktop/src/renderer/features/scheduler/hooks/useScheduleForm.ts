@@ -94,7 +94,7 @@ function loadScheduleFormPrefs(): ScheduleFormPrefs {
     const raw = window.localStorage.getItem(SCHEDULE_FORM_PREFS_KEY);
     if (!raw) return defaultScheduleFormPrefs();
     const parsed = JSON.parse(raw) as Partial<ScheduleFormPrefs>;
-    const agentKind = parsed.agentKind === 'codex' ? 'codex' : 'claude-code';
+    const agentKind = parsed.agentKind === 'codex' ? 'codex' : parsed.agentKind === 'pi' ? 'pi' : 'claude-code';
     const workingDir = typeof parsed.workingDir === 'string' ? parsed.workingDir : '';
     const workspaceKind = normalizePrefsWorkspaceKind(parsed.workspaceKind, workingDir);
     return {
@@ -153,7 +153,8 @@ export function getScheduleAgentPrefs(agentKind: ScheduleFormState['agentKind'])
  * 的事故见 2026-06 踩坑:任务里看着选了 Opus 4.8,实际每次跑 4.7)。
  */
 export function schedulerFallbackModel(agentKind: ScheduleFormState['agentKind']): string {
-  return agentKind === 'codex' ? 'gpt-5.5' : 'claude-sonnet-4-6';
+  // pi 显式列出(与 main 侧 model-defaults.ts 对齐):避免将来改 cc 默认时 pi 静默跟随。
+  return agentKind === 'codex' ? 'gpt-5.5' : agentKind === 'pi' ? 'claude-sonnet-4-6' : 'claude-sonnet-4-6';
 }
 
 /**
@@ -166,7 +167,7 @@ export function schedulerFallbackModel(agentKind: ScheduleFormState['agentKind']
 export function getScheduleDefaultModel(agentKind: ScheduleFormState['agentKind']): string {
   const prefs = getScheduleAgentPrefs(agentKind);
   if (prefs.model.trim()) return prefs.model;
-  const chatLast = getPersistedVendorModel(agentKind === 'codex' ? 'codex' : 'cc');
+  const chatLast = getPersistedVendorModel(agentKind === 'codex' ? 'codex' : agentKind === 'pi' ? 'pi' : 'cc');
   if (chatLast.trim()) return chatLast;
   return schedulerFallbackModel(agentKind);
 }

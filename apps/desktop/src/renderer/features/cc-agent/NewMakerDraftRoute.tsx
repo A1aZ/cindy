@@ -1083,13 +1083,19 @@ export function NewMakerDraftRoute() {
         setWtSourceBranch('');
         // patchDraft 会改 effectiveDeviceLinkDeviceId → 触发 defaults effect 重拉;
         // 我们已 inline 拉取了 freshDefaults,跳过那次重拉避免覆盖。
-        // 清除草稿中基于本地/前设备文件系统的 @file/@dir mention chips。
-        const dlDraft = getComposerDraft(NEW_MAKER_DRAFT_KEY);
-        if (dlDraft?.text) {
-          saveComposerDraft(NEW_MAKER_DRAFT_KEY, {
-            ...dlDraft,
-            text: stripLocalMentionChips(dlDraft.text),
-          });
+        // 清除草稿中基于本地 / **上一台**设备文件系统的 @file/@dir mention chips。
+        //
+        // 只在文件系统真的换了时才剥(#807 review):设备域的浏览器会优先预选当前设备,于是
+        // 「在同一台远程机器上从项目 X 换到项目 Y」也会走到这里 —— 那种情况文件系统没变,
+        // 把用户已经写好的 @file / @dir / @agent 无声清掉纯粹是功能退化。
+        if (target.deviceId !== effectiveDeviceLinkDeviceId) {
+          const dlDraft = getComposerDraft(NEW_MAKER_DRAFT_KEY);
+          if (dlDraft?.text) {
+            saveComposerDraft(NEW_MAKER_DRAFT_KEY, {
+              ...dlDraft,
+              text: stripLocalMentionChips(dlDraft.text),
+            });
+          }
         }
         // 只有 deviceId 真正变化时 effect 才会重跑并消费 skip flag;同设备不设。
         if (target.deviceId !== effectiveDeviceLinkDeviceId) {
@@ -1530,6 +1536,9 @@ export function NewMakerDraftRoute() {
    */
   const handleModePickerSelect = useCallback(
     (path: string, source: FolderPickerSelectSource) => {
+      // 与设备 pill 同款保护:发送已在途时那次调用的闭包持有旧工作区,draft 却会可见地切到
+      // 新的 —— 会话建在旧工作区里,而用户刚选的那个又被 create 后的重置清掉。
+      if (sendInFlightRef.current) return;
       handleWorkingDirChange(source === 'dialogue' ? null : path);
     },
     [handleWorkingDirChange],
@@ -2634,6 +2643,7 @@ export function NewMakerDraftRoute() {
                   <button
                     type="button"
                     data-testid="create-agent-mode-pill"
+                    disabled={wtCreating || sendInFlight}
                     className="inline-flex h-[30px] min-w-20 max-w-[220px] items-center justify-center gap-1.5 rounded-full border border-[var(--create-agent-control-border)] bg-[var(--create-agent-control-bg)] px-3 text-[12px] font-medium leading-[14px] text-[var(--create-agent-control-text)] transition-colors hover:bg-[var(--create-agent-control-bg-hover)] active:bg-[var(--create-agent-control-bg-pressed)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--create-agent-focus-ring)] disabled:cursor-not-allowed disabled:opacity-60"
                     aria-label={t('newChat.collaboration.modeLabel')}
                   >

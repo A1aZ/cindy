@@ -60,11 +60,14 @@ export function useDeviceLinkProjects(
    */
   const currentDeviceIdRef = useRef<string | null>(null);
   /**
-   * 正在进行中的乐观删除(path 集合)。删除失败后的权威回读必须减去**其它**仍在飞的删除 ——
-   * 否则 A 的回读会把已被乐观移除、但删除还没回来的 B 复活;等 B 真的成功时它的成功路径不再更新
-   * 状态,于是 B 会一直显示到重开 picker 为止。
+   * 正在进行中的乐观删除,**按设备分层**(deviceId → path 集合)。删除失败后的权威回读必须减去
+   * 同设备上其它仍在飞的删除 —— 否则 A 的回读会把已被乐观移除、但删除还没回来的 B 复活;
+   * 等 B 真的成功时它的成功路径不再更新状态,于是 B 会一直显示到重开 picker 为止。
+   *
+   * 分层而不是用裸 path 集合:否则设备 A 上未结束的 `/x` 会被当成设备 B 的待删除项,
+   * 如果 B 上恰好也有同名 `/x`,B 的权威列表会把它错误过滤掉、让那个项目从 B 的选择器里消失。
    */
-  const pendingRemovalsRef = useRef<Set<string>>(new Set());
+  const pendingRemovalsRef = useRef<Map<string, Set<string>>>(new Map());
 
   useEffect(() => {
     currentDeviceIdRef.current = deviceId;
@@ -102,7 +105,10 @@ export function useDeviceLinkProjects(
 
       // 先让旧的取数失效,否则它回来会把刚乐观移除的行又贴回去。
       requestIdRef.current += 1;
-      pendingRemovalsRef.current.add(option.path);
+      const devicePending =
+        pendingRemovalsRef.current.get(target.deviceId) ?? new Set<string>();
+      devicePending.add(option.path);
+      pendingRemovalsRef.current.set(target.deviceId, devicePending);
       // 记下被移除的行与它原来的位置:两条恢复路径都要用(回读失败时按原序插回)。
       let removedIndex = -1;
       let removedRow: ExistingRemoteProject | undefined;
@@ -129,9 +135,12 @@ export function useDeviceLinkProjects(
           // A 既没在对端删成、又没被恢复,会一直从选择器里消失。只要设备没切走,这份回读就仍然
           // 有效(它就是被控端真相),该应用。
           if (currentDeviceIdRef.current !== target.deviceId) return;
-          // 减去**其它**仍在飞的乐观删除(不含自己 —— 这次删除失败了,真相里有它就该显示回来)。
+          // 只减**这台设备上**其它仍在飞的乐观删除;不含自己 —— 这次删除失败了,真相里有它就该
+          // 显示回来。跨设备的 pending 不参与,否则同名路径会互相误伤。
           const othersPending = new Set(
-            [...pendingRemovalsRef.current].filter((path) => path !== option.path),
+            [...(pendingRemovalsRef.current.get(target.deviceId) ?? [])].filter(
+              (path) => path !== option.path,
+            ),
           );
           setRows(othersPending.size === 0 ? list : list.filter((row) => !othersPending.has(row.path)));
         } catch {
@@ -158,7 +167,9 @@ export function useDeviceLinkProjects(
           });
         }
       } finally {
-        pendingRemovalsRef.current.delete(option.path);
+        const set = pendingRemovalsRef.current.get(target.deviceId);
+        set?.delete(option.path);
+        if (set && set.size === 0) pendingRemovalsRef.current.delete(target.deviceId);
       }
     },
     [],

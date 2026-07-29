@@ -302,17 +302,52 @@ describe('Shared create project picker', () => {
     );
   });
 
+  // #807 review 第十二轮:in-flight 保护要覆盖**工作区** pill,不只是设备 pill —— 否则用户点了
+  // Send 还能从远程项目 X 切到 Y,会话建在 X 里、刚选的 Y 又被 create 后的重置清掉。
+  it('disables and guards workspace switching while a send is in flight', () => {
+    // 两个 pill 都要禁用。
+    expect(
+      (newMakerDraftRouteSource.match(/disabled=\{wtCreating \|\| sendInFlight\}/g) ?? []).length,
+    ).toBe(2);
+    const handler = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const handleModePickerSelect = useCallback('),
+    );
+    expect(handler.slice(0, handler.indexOf('handleWorkingDirChange('))).toContain(
+      'if (sendInFlightRef.current) return;',
+    );
+  });
+
+  // #807 review 第十二轮:同一台机器上换项目不该剥 mention chip —— 文件系统没变,
+  // 把用户写好的 @file/@dir/@agent 无声清掉是功能退化。
+  it('only strips mention chips when the target device actually changes', () => {
+    const handoff = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('清除草稿中基于本地 / **上一台**设备文件系统'),
+    );
+    const untilPatch = handoff.slice(0, handoff.indexOf('skipDefaultsRefetchRef'));
+    expect(untilPatch).toContain('if (target.deviceId !== effectiveDeviceLinkDeviceId) {');
+    expect(untilPatch).toContain('stripLocalMentionChips');
+  });
+
+  // #807 review 第十二轮:pending 删除集合按设备分层,否则 A 上未结束的 /x 会被当成 B 的待删除项,
+  // B 上同名 /x 会被权威列表错误过滤掉。
+  it('scopes pending removals per device', () => {
+    expect(deviceLinkProjectsHookSource).toContain(
+      'useRef<Map<string, Set<string>>>(new Map())',
+    );
+    expect(deviceLinkProjectsHookSource).toContain(
+      'pendingRemovalsRef.current.get(target.deviceId)',
+    );
+  });
+
   // #807 review 第十一轮:并发删除时,失败删除的权威回读不能复活另一个仍在飞的乐观删除
   // (B 被复活后,它真的成功时成功路径不再更新状态,于是 B 一直显示到重开 picker)。
   it('preserves other in-flight deletions when a failed removal reloads', () => {
     expect(deviceLinkProjectsHookSource).toContain('pendingRemovalsRef');
-    expect(deviceLinkProjectsHookSource).toContain('pendingRemovalsRef.current.add(option.path);');
+    expect(deviceLinkProjectsHookSource).toContain('devicePending.add(option.path);');
     // 减去其它 pending,但不含自己 —— 这次删除失败了,真相里有它就该显示回来。
-    expect(deviceLinkProjectsHookSource).toContain(
-      '[...pendingRemovalsRef.current].filter((path) => path !== option.path)',
-    );
+    expect(deviceLinkProjectsHookSource).toContain('(path) => path !== option.path,');
     // finally 必须清除,否则一次异常会让那条 path 永久被过滤掉。
-    expect(deviceLinkProjectsHookSource).toContain('pendingRemovalsRef.current.delete(option.path);');
+    expect(deviceLinkProjectsHookSource).toContain('set?.delete(option.path);');
   });
 
   // #807 review 第十一轮:调用方指名了设备时,弹窗不得回落到别的目标 —— 被指名的那台离线时

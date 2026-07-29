@@ -2905,6 +2905,51 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
     await h.scheduler.stop();
   });
 
+  it('守卫 abort 被 runner 响应时不重复投通知(runner 自己已投过)', async () => {
+    // notifyForcedFailure 只服务「runner 压根不返回」的强制释放路径。runner settle 了
+    // 说明它的 finalizeRun 已按 notify 配置投过通知,引擎再投一次就是重复推送。
+    vi.useFakeTimers();
+    try {
+      const notified: unknown[] = [];
+      const storage = new InMemoryStorage();
+      const clock = new FakeClock();
+      const scheduler = new Scheduler({
+        storage,
+        runner: {
+          fire: (_s, ctx) =>
+            new Promise<FireResult>((_resolve, reject) => {
+              // 老实响应守卫 abort 并 settle
+              ctx.signal.addEventListener('abort', () => reject(new Error('aborted by signal')));
+            }),
+        },
+        clock,
+        generateId: makeIdGen(),
+        tickIntervalMs: 60_000_000,
+        runStallMs: 60_000,
+        runStallAbortGraceMs: 30_000,
+        notifyForcedFailure: (input) => {
+          notified.push(input);
+        },
+        instanceId: 'test-no-dup-notify',
+      });
+      const sch = await scheduler.create({ ...baseInput, manual: true });
+      const p = scheduler.runNow(sch.id);
+      await vi.waitFor(() => expect(scheduler.getRuntimeSnapshot().slotsInUse).toBe(1));
+      const runId = (await storage.listRuns(sch.id))[0].id;
+
+      clock.advance(60_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      await p;
+
+      // run 仍记 failed（可见），但通知出口不被调用（避免与 runner 侧重复）
+      expect(storage.runs.get(runId)?.status).toBe('failed');
+      expect(notified).toHaveLength(0);
+      await scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('runStallMs=0 关闭卡死守卫', async () => {
     vi.useFakeTimers();
     try {

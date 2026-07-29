@@ -8,7 +8,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { Session } from './session.js';
-import type { AgentEvent } from './types/events.js';
+import type { AgentEvent, SendOrigin } from './types/events.js';
 import type { AgentSessionHandle, BackgroundTaskSnapshot } from './agents/base-agent.js';
 
 function createLogger() {
@@ -231,6 +231,37 @@ describe('Session turn stall watchdog', () => {
 
       expect(seen.some((ev) => ev.type === 'error')).toBe(false);
       expect(stub.abort).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('合成的超时 error 带 turnOrigin,并在 fan-out 后清空(review 第二轮)', async () => {
+    // 不带 origin 的话:goal-host 把它归类成 origin:'other' 并像用户插话一样暂停 goal,
+    // scheduler 的 IM 转播则直接忽略这条终态,卡片永不 finalize。
+    vi.useFakeTimers();
+    try {
+      const origin: SendOrigin = {
+        kind: 'scheduler',
+        scheduleId: 'sch-1',
+        scheduleName: 'PR #944 心跳',
+      };
+      const stub = createStubHandle();
+      const session = createSession(stub);
+      const seen: AgentEvent[] = [];
+      session.onEvent((ev) => seen.push(ev));
+
+      await session.send('go', { origin });
+      await vi.advanceTimersByTimeAsync(STALL_MS + 1);
+
+      const terminal = seen.find((ev) => ev.type === 'error');
+      expect(terminal).toBeDefined();
+      expect(terminal!.turnOrigin).toEqual(origin);
+
+      // 终态之后 origin 必须清空:下一轮无 origin 的 turn 不该继承它
+      stub.pushEvent({ type: 'status', data: { isRunning: false }, source: 'claude-code' } as AgentEvent);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(seen.at(-1)!.turnOrigin).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }

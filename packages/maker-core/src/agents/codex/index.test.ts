@@ -10292,6 +10292,46 @@ describe('CodexAgent upstream-response-idle watchdog', () => {
     }
   });
 
+  it('interrupt 两次都超时也要收干净本地 turn 状态,会话保持可发(review 第二轮)', async () => {
+    // app-server 彻底哑火时 interruptTurnForPermissionTighten 会两次 ack 超时后放弃,
+    // 而它按设计不动 isTurnInFlight —— 若 watchdog 只依赖它,会话 isTurnRunning() 恒 true,
+    // 之后每条 send 都被 in-flight guard 拒掉,watchdog 报告"已恢复"实际彻底不可用。
+    vi.useFakeTimers();
+    try {
+      const agent = new CodexAgent(createDeps());
+      let turnSeq = 0;
+      const host = installFakeHost(agent, (method) => {
+        if (method === Method.TurnStart) return { turn: { id: `turn-${++turnSeq}` } };
+        // interrupt 永不响应 → 触发两次 ack 超时
+        if (method === Method.TurnInterrupt) return new Promise(() => {}) as never;
+        return undefined;
+      });
+      const handle = await startIdleSession(agent, 'session-idle-interrupt-dead');
+      const seen = collectEvents(handle);
+      await handle.send({ type: 'user', content: 'go' });
+      const handlers = host.getThreadHandlers();
+      if (!handlers) throw new Error('expected thread handlers');
+      handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-1' } } as never);
+      expect(handle.isTurnRunning?.()).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(IDLE_MS + 1);
+
+      // 终态 error 照常推出
+      expect(
+        seen.some(
+          (ev) =>
+            ev.type === 'error' &&
+            (ev.data as { reason?: string } | null)?.reason === 'upstream_response_idle_timeout',
+        ),
+      ).toBe(true);
+      // 关键:本地 turn 状态必须已收干净,不等 interrupt 的结果
+      expect(handle.isTurnRunning?.()).toBe(false);
+      await handle.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('turn 正常收口后不再计时', async () => {
     vi.useFakeTimers();
     try {

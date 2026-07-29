@@ -124,10 +124,13 @@ export interface SchedulerOptions {
    */
   runStallAbortGraceMs?: number;
   /**
-   * 卡死收口的通知出口。通知投递本来住在 host 的两个 runner 里(它们各自持有
-   * Notifier),而卡死收口刻意绕过了 runner —— 要么 runner 压根不返回、要么它把守卫
-   * abort 当普通中断处理。没有这个回调,用户配了 desktop/feishu 通知也只会看到一个
-   * 未读红点(review #944 P1)。
+   * **强制释放路径专用**的通知出口。通知投递平时住在 host 的两个 runner 里(它们各自
+   * 持有 Notifier),但 runner 永不返回时那条链路根本不会执行 —— 用户配了 desktop /
+   * feishu 通知也只会看到一个未读红点(review #944 P1)。
+   *
+   * 只在 forceReleaseStalledRun 里调用。守卫 abort 被 runner 老实响应的那条路径**不**
+   * 走这里:那时 runner 已经 settle 并自己投过通知,引擎再投一次就是重复推送
+   * (review #944 第二轮)。
    *
    * 由 host 注入,内部自行处理失败;引擎 fire-and-forget 调用,绝不因通知失败影响收口。
    */
@@ -678,11 +681,13 @@ export class Scheduler extends EventEmitter {
     }
 
     if (stallAborted) {
-      // 卡死守卫中断:异常必须可见(红点 + 按 notify 配置提醒),且下方重排照常执行。
+      // 卡死守卫中断:run 记 'failed'(异常必须可见),且下方重排照常执行。
+      // **不**调 notifyForcedFailure —— runner 走到这里说明它已经 settle,它自己的
+      // finalizeRun 早已按 notify 配置投过通知;引擎再投一次就是重复推送
+      // (review #944 第二轮)。那个 hook 只服务"runner 压根不返回"的强制释放路径。
       const errorMsg = this.describeStallAbort(runError);
       await this.storage.updateRun(runId, { status: 'failed', finishedAt, errorMsg });
       this.emitEvent({ type: 'failed', scheduleId: schedule.id, runId, error: errorMsg });
-      void this.notifyForcedFailure(schedule.id, runId, errorMsg);
     } else if (wasAborted) {
       await this.storage.updateRun(runId, {
         status: 'aborted',
@@ -924,11 +929,11 @@ export class Scheduler extends EventEmitter {
     }
 
     if (stallAborted) {
-      // 语义同 fireOneInner:守卫中断记 failed(可见)而不是 aborted(伪装成用户操作)。
+      // 语义同 fireOneInner:守卫中断记 failed(可见)而不是 aborted(伪装成用户操作);
+      // 通知同样交给已经 settle 的 runner,引擎不重复投。
       const errorMsg = this.describeStallAbort(runError);
       await this.storage.updateRun(runId, { status: 'failed', finishedAt, errorMsg });
       this.emitEvent({ type: 'failed', scheduleId: schedule.id, runId, error: errorMsg });
-      void this.notifyForcedFailure(schedule.id, runId, errorMsg);
     } else if (wasAborted) {
       await this.storage.updateRun(runId, {
         status: 'aborted',

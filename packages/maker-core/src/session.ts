@@ -741,18 +741,42 @@ export class Session {
   }
 
   /**
-   * 事件 fan-out 的唯一出口(真实事件与看门狗合成的事件共用)。除了转发给订阅者,
-   * 还负责把「turn 还在推进」这件事告诉 stall 看门狗。
+   * 事件 fan-out 的唯一出口(真实事件与看门狗合成的事件共用)。三件事都收在这里,
+   * 保证两条来路语义一致 —— origin 打标、订阅者分发、stall 看门狗记账。
+   *
+   * origin 处理刻意放在这里而不是只放在 runEventLoop:看门狗合成的终态 error 若不
+   * 带 turnOrigin,消费方会把它当成"无来源"事件 —— goal-host 归类成 origin:'other'
+   * 并像用户插话一样暂停 goal,scheduler 的 IM 转播则直接忽略,卡片永不 finalize
+   * (review #944 第二轮)。
    */
   private fanOutEvent(event: AgentEvent): void {
     this.lastEventAt = Date.now();
     this.lastEventType = event.type;
+    // fan-out 前打 turn origin(所有 listener 拿到同一份);事件对象由 translator
+    // 每次新建、看门狗每次合成,不会串台。=== undefined 守卫:不覆盖 agent 自带的。
+    if (this.currentTurnOrigin && event.turnOrigin === undefined) {
+      event.turnOrigin = this.currentTurnOrigin;
+    }
     const listenerEvent = redactEventForListeners(event);
     for (const listener of this.eventListeners) {
       try { listener(listenerEvent); } catch (e) { this.logger.error('event listener threw', { error: String(e) }); }
     }
-    // 终态之后不再计 stall 额度;其余事件都算"还活着",重置计时。
-    if (event.type === 'done' || isTerminalAgentErrorEvent(event)) {
+    const isTerminal = event.type === 'done' || isTerminalAgentErrorEvent(event);
+    // turn 真正结束后清 origin,下一轮无 origin 的 turn 不被污染。
+    // 关键:**只**在 done / 终止型 error 上清,**不要**在 status(isRunning=false)
+    // 上清 —— translator 收尾是先 push end-status(isRunning=false)、紧接着 push
+    // done(claude translator.ts / codex 同序)。若在 end-status 上清,后随的 done
+    // 就拿不到 origin,而 IM 转播(turnRunner)正是按 scheduler-origin 的 done 收口
+    // 卡片;done 丢了 origin → 卡片永不 finalize,残留 ticker/state 污染下一轮转播。
+    // done / 终止型 error 自身已在上面打过 origin,清在它们之后安全。
+    //
+    // Bridge /compact 这类 agent 内部排队 turn 的边界应在 agent 层 suppress,
+    // 不应透传到 Session。凡是到达 Session 的 done / 终止型 error 都代表产品层
+    // turn 已结束,必须清 origin,避免后续 standalone auto-compact 等后台 turn 继承
+    // goal/scheduler origin。
+    if (isTerminal) {
+      this.currentTurnOrigin = null;
+      // 终态之后不再计 stall 额度。
       this.clearTurnStallWatchdog();
     } else {
       this.armTurnStallWatchdog();
@@ -853,27 +877,9 @@ export class Session {
     try {
       for await (const event of this.handle.events()) {
         this.releaseSendReservationIfObserved();
-        // fan-out 前打 turn origin(所有 listener 拿到同一份);事件对象由
-        // translator 每次新建,不会串台。=== undefined 守卫:不覆盖 agent 自带的。
-        if (this.currentTurnOrigin && event.turnOrigin === undefined) {
-          event.turnOrigin = this.currentTurnOrigin;
-        }
+        // origin 打标与终态清理都收在 fanOutEvent 里（看门狗合成的事件共用同一语义，
+        // 见那里的注释）。
         this.fanOutEvent(event);
-        // turn 真正结束后清 origin,下一轮无 origin 的 turn 不被污染。
-        // 关键:**只**在 done / 终止型 error 上清,**不要**在 status(isRunning=false)
-        // 上清 —— translator 收尾是先 push end-status(isRunning=false)、紧接着 push
-        // done(claude translator.ts / codex 同序)。若在 end-status 上清,后随的 done
-        // 就拿不到 origin,而 IM 转播(turnRunner)正是按 scheduler-origin 的 done 收口
-        // 卡片;done 丢了 origin → 卡片永不 finalize,残留 ticker/state 污染下一轮转播。
-        // done / 终止型 error 自身已在上面打过 origin,清在它们之后安全。
-        //
-        // Bridge /compact 这类 agent 内部排队 turn 的边界应在 agent 层 suppress,
-        // 不应透传到 Session。凡是到达 Session 的 done / 终止型 error 都代表产品层
-        // turn 已结束,必须清 origin,避免后续 standalone auto-compact 等后台 turn 继承
-        // goal/scheduler origin。
-        if (event.type === 'done' || isTerminalAgentErrorEvent(event)) {
-          this.currentTurnOrigin = null;
-        }
       }
     } catch (e) {
       this.logger.error('event loop crashed', { error: String(e) });

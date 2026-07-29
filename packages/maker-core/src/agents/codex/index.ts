@@ -3492,6 +3492,9 @@ export class CodexAgent extends BaseAgent {
         lastEventType: upstreamIdleLastEventType,
         msSinceLastEvent: msSinceLast,
       });
+      // 先立终态墓碑:下面合成的本地收口据此走 suppressTerminalUi 分支(只清状态、
+      // 不再推一遍终态 UI),迟到的 item / error 也一并被 stale guard 拦住。
+      if (turnId) terminalErroredTurnIds.add(turnId);
       eventQueue.push({
         type: 'error',
         data: {
@@ -3510,9 +3513,24 @@ export class CodexAgent extends BaseAgent {
         source: 'codex',
       });
       resetUpstreamIdleForTurnEnd();
-      if (turnId) {
-        void interruptTurnForPermissionTighten(turnId);
-      }
+      if (!turnId) return;
+      // **先把本地 turn 状态收干净,再去 interrupt**(review #944 第二轮 P1)。
+      // interruptTurnForPermissionTighten 在 app-server 彻底哑火时会两次 ack 超时
+      // 后放弃,而它按设计不动 isTurnInFlight / currentTurnId —— 那对权限收紧场景是
+      // 对的(turn 还在正常跑),但对这里是致命的:我们刚推了终态 error 让上层收口,
+      // 若本地仍认为 turn 在跑,handle.isTurnRunning() 恒 true,之后每一条 send 都被
+      // in-flight guard 拒掉,会话彻底不可用 —— watchdog 报告"已恢复"实际没有。
+      //
+      // 合成一次本地 turn 收口:上面已立墓碑,故走 suppressTerminalUi 分支,只清
+      // isTurnInFlight / currentTurnId / plan 态并做 usage 收尾,不重复推终态 UI。
+      // 同步完成,会话立刻恢复可发。
+      handleTurnCompleted({
+        threadId,
+        turn: { id: turnId, status: 'failed' },
+      } as TurnCompletedParams);
+      // 再尽力让 daemon 侧那个 turn 也停下(fire-and-forget:成败都不影响本地已恢复
+      // 的可用性;迟到事件由墓碑 + stale guard 拦)。
+      void interruptTurnForPermissionTighten(turnId);
     }
     // 装探针:此处仍远早于 handlers 注册(事件开始流动),不会漏掉任何一条。
     const rawEventQueuePush = eventQueue.push;

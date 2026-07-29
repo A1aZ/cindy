@@ -1042,6 +1042,23 @@ describe('new session worktree wiring (source locks)', () => {
     expect(newSource).toContain('void maker.applyNewMakerWorktreePref(next).catch(() => undefined);');
   });
 
+  it('re-probes worktree eligibility when the relay or workstation reconnects', () => {
+    expect(newSource).toContain(
+      "if (!selectedDeviceId || !cwd || deviceLinkStatus !== 'online') return;",
+    );
+    const detectEffect = newSource.indexOf(
+      'return maker.worktree.detectCwd(cwd);',
+    );
+    const preferenceEffect = newSource.indexOf(
+      'const worktreeSeedAgentKindRef',
+      detectEffect,
+    );
+    const detectBlock = newSource.slice(detectEffect, preferenceEffect);
+    expect(detectBlock).toContain('connectionEpoch,');
+    expect(detectBlock).toContain('deviceLinkStatus,');
+    expect(detectBlock).toContain('presenceVersion,');
+  });
+
   it('settles an unowned cleanup obligation before creating another worktree', () => {
     const recovery = newSource.indexOf(
       'const recovery = await recoverPendingPrecreatedWorktrees(worktreeAccountId, {',

@@ -336,6 +336,7 @@ export default function NewRemoteSessionScreen() {
     subscribe,
     status: deviceLinkStatus,
     connectionEpoch,
+    presenceVersion,
   } = useDeviceLink();
   const routeDeviceFallback = useMemo<NewSessionDeviceOption | null>(
     () => routeDeviceId ? { deviceId: routeDeviceId, name: routeDeviceName || routeDeviceId } : null,
@@ -1512,14 +1513,17 @@ export default function NewRemoteSessionScreen() {
     })();
   }, [draft.agentKind, draft.permissionMode, patchDraft]);
 
-  // —— worktree 资格探测:目录 / 设备变化即重探(seq 防竞态,旧结果作废)。
+  // —— worktree 资格探测:目录 / 设备 / 链路变化即重探(seq 防竞态,旧结果作废)。
   // CHANNEL_NOT_ALLOWED(老被控端)→ unsupported 整行隐藏;其余失败保留行但禁用。
   useEffect(() => {
     const cwd = draft.workspaceKind === 'project' ? draft.workingDir.trim() : '';
     const seq = ++worktreeDetectSeqRef.current;
     const target = { deviceId: selectedDeviceId ?? '', workingDir: cwd };
     setWorktreeProbe({ target, eligibility: { status: 'probing' } });
-    if (!selectedDeviceId || !cwd) return;
+    // Relay 离线时不把预期的 NOT_CONNECTED 固化成 detect-failed；online /
+    // connectionEpoch / presenceVersion 变化后自动重探，覆盖手机重连和工作端
+    // 重新上线两种路径。
+    if (!selectedDeviceId || !cwd || deviceLinkStatus !== 'online') return;
     void withTransientRemoteRetry(async () => {
       await openLink(selectedDeviceId);
       return maker.worktree.detectCwd(cwd);
@@ -1538,7 +1542,16 @@ export default function NewRemoteSessionScreen() {
           eligibility: worktreeEligibilityFromError(err),
         });
       });
-  }, [selectedDeviceId, draft.workspaceKind, draft.workingDir, maker, openLink]);
+  }, [
+    connectionEpoch,
+    deviceLinkStatus,
+    presenceVersion,
+    selectedDeviceId,
+    draft.workspaceKind,
+    draft.workingDir,
+    maker,
+    openLink,
+  ]);
 
   // —— worktree 勾选播种:选中设备后读工作端 get-new-maker-defaults 的 worktreeEnabled
   // (vendor 无关,agentKind 只是通道入参,经 ref 读当前值,不因切 agent 重播)。

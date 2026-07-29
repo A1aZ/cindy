@@ -64,14 +64,19 @@ export function useDeviceLinkProjects(
     setRows(next);
   }, []);
   /**
-   * 按设备记请求序号。切设备 / 重新打开 picker 会并发多个取数,只认最后一次的结果 ——
-   * 否则慢的旧请求回来会把新设备的列表覆盖成上一台的项目(看起来像「项目跑到别的机器上了」)。
+   * **取数**序号,只由取数 effect 自增。切设备 / 重新打开 picker 会并发多个取数,只认最后一次的
+   * 结果 —— 否则慢的旧请求回来会把新设备的列表覆盖成上一台的项目(看起来像「项目跑到别的机器上」)。
+   *
+   * ⚠️ 删除路径**不得**碰它(Greptile review)。它以前也被删除路径自增来「让在途取数失效」,
+   * 而删除失败后的兜底回读是异步的:它的自增可能落在用户已经切到设备 B、B 的取数已在飞之后 ——
+   * 于是 B 的结果被判成过期而丢弃,`setLoading(false)` 也跟着不执行,picker 就永久停在 loading
+   * 且一个项目都没有,直到关掉重开。取数与删除是两件事,不能共用一个版本号。
+   *
+   * 「在途取数不能把刚乐观移除的行贴回来」改由下面的 pendingRemovalsRef 过滤解决 —— 那本来就是
+   * 删除失败回读用的同一套机制,取数复用它即可,不需要作废任何请求。
    */
   const requestIdRef = useRef(0);
-  /**
-   * 当前 hook 实例正在看哪台设备。删除失败后的权威回读用它做 gate —— 不能用 requestIdRef,
-   * 那个版本号被 effect 取数与每一次删除共享,并发删除会互相把对方的回读判成过期。
-   */
+  /** 当前 hook 实例正在看哪台设备。删除失败后的权威回读用它做 gate(与取数序号无关)。 */
   const currentDeviceIdRef = useRef<string | null>(null);
   /**
    * 正在进行中的乐观删除,**按设备分层**(deviceId → path 集合)。删除失败后的权威回读必须减去
@@ -102,7 +107,11 @@ export function useDeviceLinkProjects(
     void loadDeviceLinkExistingProjects(deviceId)
       .then((list) => {
         if (cancelled || requestIdRef.current !== requestId) return;
-        commitRows(list);
+        // 减去这台设备上仍在飞的乐观删除:取数可能在某次删除进行中回来,原样落库会把用户刚
+        // 点掉的行贴回去。以前靠删除路径自增 requestIdRef 作废取数来避免,但那个共享版本号会
+        // 顺带把**别的设备**的取数误判成过期(见 requestIdRef 的说明),所以改成在这里过滤。
+        const pending = pendingRemovalsRef.current.get(deviceId);
+        commitRows(pending && pending.size > 0 ? list.filter((row) => !pending.has(row.path)) : list);
         setLoading(false);
       })
       .catch(() => {
@@ -121,8 +130,8 @@ export function useDeviceLinkProjects(
       const target = option.remoteDevice;
       if (!target) return;
 
-      // 先让旧的取数失效,否则它回来会把刚乐观移除的行又贴回去。
-      requestIdRef.current += 1;
+      // 刻意**不动** requestIdRef(Greptile review):在途取数不会把刚乐观移除的行贴回来 ——
+      // 它落库前会减去下面这个 pending 集合。作废取数反而会误伤别的设备的取数,见 requestIdRef。
       const devicePending =
         pendingRemovalsRef.current.get(target.deviceId) ?? new Set<string>();
       devicePending.add(option.path);
@@ -141,15 +150,12 @@ export function useDeviceLinkProjects(
       } catch {
         // 老被控端可能没有 remove channel。回读一次收敛到被控端真相,
         // 而不是留下一个「本地看着删了、对端其实还在」的幻影删除。
-        // 继续让更早的 effect 取数失效(它晚到会覆盖下面这次回读的结果);
-        // 但回读自身的有效性不再由这个版本号判定,见下。
-        requestIdRef.current += 1;
+        // 同样不动 requestIdRef:晚到的 effect 取数即使覆盖这次回读也无害 —— 两者都是被控端
+        // 真相,且都会减去仍在飞的乐观删除,结果一致。作废它只会误伤新设备的取数。
         try {
           const list = await loadDeviceLinkExistingProjects(target.deviceId);
-          // gate 用**设备身份**而不是共享版本号:requestIdRef 同时被 effect 取数和每一次删除
-          // 递增,快速删 A、B 时 B 会把版本号推走,导致 A 随后成功的权威回读在这里被丢弃 ——
-          // A 既没在对端删成、又没被恢复,会一直从选择器里消失。只要设备没切走,这份回读就仍然
-          // 有效(它就是被控端真相),该应用。
+          // gate 用**设备身份**:只要设备没切走,这份回读就是被控端真相,该应用。不用版本号 ——
+          // 并发删除会互相把对方的回读判成过期,那一行既没在对端删成、又没被恢复,会一直消失。
           if (currentDeviceIdRef.current !== target.deviceId) return;
           // 只减**这台设备上**其它仍在飞的乐观删除;不含自己 —— 这次删除失败了,真相里有它就该
           // 显示回来。跨设备的 pending 不参与,否则同名路径会互相误伤。
@@ -166,10 +172,10 @@ export function useDeviceLinkProjects(
           // 权威列表也拿不到,保留乐观移除等于让选择器藏着一个远端仍然存在的项目,而且不给
           // 任何提示 —— 用户只能靠重开 picker 才发现它还在。按原位插回,顺序不乱。
           //
-          // 这里**刻意不看 requestId**:删除按钮不会禁用后续点击,快速删两行时第二次会重写
-          // 共享的 requestIdRef,若按版本号 gate,第一次的恢复就被跳过,那一行会一直从选择器
-          // 里消失(而它在对端还在)。恢复的是「这一行」这件具体的事,与列表版本无关;下面自带
-          // 存在性检查,期间真有成功回读把它带回来了也不会插重。
+          // 这里**刻意不看 requestId**:恢复的是「这一行」这件具体的事,与取数版本无关 ——
+          // 期间用户重开 picker / 切回本设备都会推进版本号,按它 gate 会把这次恢复跳过,那一行
+          // 就一直从选择器里消失(而它在对端还在)。下面自带存在性检查,期间真有成功回读把它
+          // 带回来了也不会插重。
           const restored = removedRow;
           if (!restored) return;
           // 也要按当前设备 gate:若这两次请求还在飞时用户已切到别的设备,把 A 的行插进 B 的 rows

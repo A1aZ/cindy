@@ -24,13 +24,14 @@ describe('VoiceInputSection shortcut recording gate', () => {
     expect(source).toContain('await shortcutSuspendPromiseRef.current');
     expect(source).toContain('shortcutSuspendPromiseRef.current = suspendPromise');
     expect(source).toContain('syncVoiceInputGlobalShortcut(getVoiceInputSettings().shortcut)');
-    // 录制 effect 必须同时依赖监听权限：用户可能在录制中途去授权再切回来，那次失败的
-    // startModifierShortcutRecording 已经让 main 把本 renderer 从转发名单里摘掉，只有
-    // 让 effect 重跑（cleanup + setup）才能重新挂起快捷键并重建 Fn capture。
+    // 录制 effect 刻意**不**依赖监听权限：录制中途授权只需补一次 Fn capture（由权限
+    // effect 直接调 startFnKeyCapture），让本 effect 重跑会先由 cleanup 异步恢复已保存
+    // 的全局快捷键、再由 setup 挂起，中间那段窗口里用户按下旧快捷键会真的触发语音输入。
     //
     // 这里必须写全依赖数组：只断言 '}, [recordingShortcut]);' 会被同文件另一个 reset
     // effect 的同名数组匹配到，看着通过实则脱靶。
-    expect(source).toContain('}, [recordingShortcut, permissions.inputMonitoring.ok, t]);');
+    expect(source).toContain('}, [recordingShortcut, startFnKeyCapture]);');
+    expect(source).not.toContain('}, [recordingShortcut, permissions.inputMonitoring.ok, t]);');
   });
 
   it('clears stale custom ASR form fields when the saved config is removed', () => {

@@ -545,9 +545,12 @@ function assertVoiceSettingsMainWindowSender(
   ) {
     // 与本模块其它 throwIpcError 一致用英文：这句是给日志/调试看的，renderer 侧要展示
     // 时走 code → i18n 映射，不消费这里的原文。
+    //
+    // 措辞只说主窗口、不说「设置页」：闸能校验的就是主窗口顶层 frame，路由/页面无从
+    // 可靠断言，写成设置页会让日志读起来像做了更强的检查（对齐 billing 的口径）。
     throwIpcError(
       'PERMISSION_DENIED',
-      'Input Monitoring permission can only be requested from the main window settings page.',
+      'Input Monitoring permission is only available to the main window',
     );
   }
 }

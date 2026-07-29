@@ -1228,6 +1228,34 @@ export function VoiceInputSection() {
   const shortcutAwaitingInputMonitoring =
     shortcutNeedsKeyboardListenerPermission && permissions.inputMonitoring.status === 'denied';
 
+  /**
+   * 启动录制期的 Fn key capture，并把结果反映到提示区。
+   *
+   * 单独抽出来，是为了让「权限刚授予」这条路**只重启 capture**、不去重跑整个录制
+   * effect：重跑会先跑 cleanup 里的 syncVoiceInputGlobalShortcut(已保存快捷键)，再由
+   * setup 重新挂起，两步都是异步的，中间那个窗口里用户按下旧快捷键就会真的触发一次
+   * 语音输入——而他本意只是在录新键。
+   */
+  const startFnKeyCapture = useCallback(async (isCancelled?: () => boolean): Promise<void> => {
+    if (window.electronAPI.platform !== 'darwin') return;
+    const result = await window.electronAPI.voiceInput.startModifierShortcutRecording();
+    if (isCancelled?.()) return;
+    if (result.ok) {
+      // 授权后重启成功：清掉「Fn 需要授权」的提示，否则它会一直挂在那。
+      setFnRecordingBlocked(false);
+      return;
+    }
+    // 缺权限只挡住 Fn 检测，其它快捷键照录，所以在提示区说明而不是弹错误——
+    // 弹错误会让用户以为整个录制坏了，然后放弃。
+    if (result.errorCode === 'permission') {
+      setFnRecordingBlocked(true);
+      return;
+    }
+    toast.error(result.errorCode === 'failed'
+      ? t('settings.voiceInput.shortcut.toast.listenerUnavailable')
+      : t('settings.voiceInput.shortcut.toast.recordingFailed', { error: result.error }));
+  }, [t]);
+
   // 用户去系统设置里打开开关后切回来（window focus 会触发 refreshPermissions），在这里
   // 补一次注册：event tap 跑在独立 helper 子进程里，重新 spawn 就能拿到新授权，不需要
   // 重启 App。少了这步，用户授权完会发现快捷键依然没反应，那个「去授权」入口就等于白点。
@@ -1237,11 +1265,13 @@ export function VoiceInputSection() {
     const justGranted = granted && !inputMonitoringGrantedRef.current;
     inputMonitoringGrantedRef.current = granted;
     if (!justGranted) return;
-    // 录制中不在这里注册：录制期快捷键必须保持挂起，否则用户按键试录时会把旧快捷键
-    // 触发掉。这种情况下的收尾交给录制 effect —— 它依赖同一个权限状态，会重跑一轮
-    // cleanup + setup，既重新挂起快捷键又重启 Fn capture；退出录制时它的 cleanup 也会
-    // 把已保存的快捷键注册回去。
-    if (recordingShortcut) return;
+    if (recordingShortcut) {
+      // 录制中：全局快捷键必须一直保持挂起，所以这里只补上之前失败的 Fn capture，
+      // 绝不碰挂起状态，也不让录制 effect 重跑（那会产生一段旧快捷键被短暂恢复的
+      // 窗口，用户此刻正在按键试录，会真的触发一次语音输入）。
+      void startFnKeyCapture();
+      return;
+    }
     if (!shortcutNeedsKeyboardListenerPermission) return;
     void syncVoiceInputGlobalShortcut(settings.shortcut);
   }, [
@@ -1249,6 +1279,7 @@ export function VoiceInputSection() {
     recordingShortcut,
     settings.shortcut,
     shortcutNeedsKeyboardListenerPermission,
+    startFnKeyCapture,
   ]);
 
   const showAppShortcutConflict = useCallback(
@@ -1500,35 +1531,16 @@ export function VoiceInputSection() {
     // recording: the new key, unchanged old key on Escape, or null after
     // Backspace clear).
     //
-    // 依赖里带着 inputMonitoringGranted：用户可能在录制中途点徽章去授权再切回来。
-    // 缺权限那次 startModifierShortcutRecording 失败时，main 已经把本 renderer 从
-    // 转发名单里摘掉了，所以必须重启 capture，否则 UI 还停在录制态、Fn 却永远不来。
-    // 让整个 effect 重跑而不是另写一份「重启」逻辑：cleanup + setup 会重新挂起快捷键
-    // 并重建 capture，正是这里需要的完整状态复位。
+    // 这个 effect **不**依赖监听权限：录制中途授权后只需补一次 Fn capture，那由权限
+    // effect 直接调 startFnKeyCapture 完成。若改成让本 effect 重跑，cleanup 会先异步
+    // 恢复已保存的全局快捷键、setup 再把它挂起，中间那段窗口里用户按下旧快捷键会真的
+    // 触发一次语音输入。
     document.body.dataset.appShortcutRecording = '1';
     window.electronAPI.appShortcuts.setRecording(true);
     let cancelled = false;
     const suspendPromise = syncVoiceInputGlobalShortcut(null).then(() => {
-      if (!cancelled && window.electronAPI.platform === 'darwin') {
-        void window.electronAPI.voiceInput.startModifierShortcutRecording()
-          .then((result) => {
-            if (cancelled) return;
-            if (result.ok) {
-              // 授权后重启成功：清掉「Fn 需要授权」的提示，否则它会一直挂在那。
-              setFnRecordingBlocked(false);
-              return;
-            }
-            // 缺权限只挡住 Fn 检测，其它快捷键照录，所以在提示区说明而不是弹错误——
-            // 弹错误会让用户以为整个录制坏了，然后放弃。
-            if (result.errorCode === 'permission') {
-              setFnRecordingBlocked(true);
-              return;
-            }
-            toast.error(result.errorCode === 'failed'
-              ? t('settings.voiceInput.shortcut.toast.listenerUnavailable')
-              : t('settings.voiceInput.shortcut.toast.recordingFailed', { error: result.error }));
-          });
-      }
+      if (cancelled) return;
+      return startFnKeyCapture(() => cancelled);
     });
     shortcutSuspendPromiseRef.current = suspendPromise;
     return () => {
@@ -1541,7 +1553,7 @@ export function VoiceInputSection() {
       }
       void syncVoiceInputGlobalShortcut(getVoiceInputSettings().shortcut);
     };
-  }, [recordingShortcut, permissions.inputMonitoring.ok, t]);
+  }, [recordingShortcut, startFnKeyCapture]);
 
   useEffect(() => {
     if (!settings.refinementEnabled) {

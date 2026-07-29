@@ -112,6 +112,17 @@ export interface SchedulerOptions {
    * 无上限并发触发在任务堆积时会耗尽宿主内存(2026-07-07 凌晨实际 OOM 崩溃)。
    */
   maxConcurrentRuns?: number;
+  /**
+   * 卡死判定阈值:一条占槽的 run 连续这么久没有任何进展信号(见
+   * FireContext.onProgress)就被视为卡死并 abort。默认 RUN_STALL_MS。
+   * 判"无反馈"而非"总时长"——真在干活的长任务持续有事件,不会被误砍。
+   */
+  runStallMs?: number;
+  /**
+   * abort 后的宽限:超过这么久 runner 仍不 settle,就强制收回槽位(见
+   * forceReleaseStalledRun)。默认 RUN_STALL_ABORT_GRACE_MS。
+   */
+  runStallAbortGraceMs?: number;
   /** 宿主注入的 Scheduler 实例标识，用于区分同机多实例日志。 */
   instanceId?: string;
   /** 可选宿主进程标识；package 本身不读取 process，保持运行环境解耦。 */
@@ -120,14 +131,45 @@ export interface SchedulerOptions {
 
 const DEFAULT_TICK_MS = 1_000;
 
-/** maxConcurrentRuns 缺省值。内部常量,宿主可经 SchedulerOptions 覆盖,不进用户设置。 */
-export const DEFAULT_MAX_CONCURRENT_RUNS = 4;
+/**
+ * maxConcurrentRuns 缺省值。内部常量,宿主可经 SchedulerOptions 覆盖,不进用户设置。
+ *
+ * 历史:原为 4,是 2026-07-07 凌晨 OOM 后的应急闸门。那次崩溃的真因是**一夜累积
+ * 186 个未关闭会话句柄**(见 desktop runner 的 ephemeral 会话收尾注释),泄漏已由
+ * run 终态 closeSession 修掉,上限却一直没随根因修复重新评估。2026-07-29 排队心跳
+ * 占满全部 4 个槽导致整体停摆 3.5 小时后一并调整:纯等待不再占槽(见
+ * ScheduleRunPhase 的 'queued'),同时把上限提到 8 —— 槽位现在只被真正在执行的
+ * run 占用,4 个显著偏紧。
+ */
+export const DEFAULT_MAX_CONCURRENT_RUNS = 8;
 
 /** 并发闸门「有任务在排队」日志的节流间隔 —— tick 每秒一次,不节流会刷屏。 */
 const GATE_LOG_THROTTLE_MS = 30_000;
 
 /** 单条执行超过该时长后输出周期性长跑诊断。 */
 const LONG_RUNNING_DIAGNOSTIC_MS = 10 * 60_000;
+
+/**
+ * 卡死判定阈值(缺省):占槽的 run 连续这么久收不到任何进展信号即视为卡死。
+ *
+ * 为什么是 60min —— 分层不抢跑。卡死自愈按内到外分四层,每层阈值都大于内层,
+ * 保证内层先有机会自愈:
+ *   1. cc 子进程原生 stream watchdog(300s):网络层断流,透明降级恢复。
+ *   2. agent 层上游静默 watchdog(30min):球在上游却一个字都不吐 → interrupt turn。
+ *   3. Session 层 turn 零事件看门狗(45min):兜工具自己 hang / stdio 通道 wedge。
+ *   4. **本层(60min)**:兜上面全部失灵、runner.fire 永不返回的情形,以及压根没进
+ *      turn 的阶段(会话创建、凭证锁、workspace 分配)——那些阶段 2/3 层都不在计时。
+ * 判据是"无进展"而非"总时长":真在干活的长任务持续有事件,不会被误砍。
+ */
+export const RUN_STALL_MS = 60 * 60_000;
+
+/**
+ * abort 之后的宽限(缺省)。超过它 runner 仍不 settle,就不再等它 —— 强制把槽位
+ * 收回、run 落终态。abort 本身只是"请求停止",runner 不接信号或底层卡死时它不会
+ * 生效;既有 abortInflightAndWait 也只等 5s。槽位释放不能依赖对方配合,否则一条
+ * 卡死的 run 就能永久吃掉一格调度能力。
+ */
+export const RUN_STALL_ABORT_GRACE_MS = 60_000;
 
 /**
  * In-flight run 心跳续期间隔。执行实例每隔这么久把自己 in-flight run 的
@@ -171,6 +213,8 @@ const DB_SYNC_INTERVAL_MS = 30_000;
 /** 公开快照字段之外，再保留最近一次长跑诊断时间用于日志节流。 */
 interface InflightAttempt extends SchedulerInflightRun {
   lastLongRunningLogAt?: number;
+  /** 卡死判定命中并已发出 abort 的时刻；用于计算强制收回槽位的宽限。 */
+  stallAbortedAt?: number;
 }
 
 interface InflightRunDiagnostic extends SchedulerInflightRun {
@@ -231,11 +275,20 @@ export class Scheduler extends EventEmitter {
   // fireOne / runNow 包装层在第一次 await 前同步写入 attempts，tick 直接读取 Map.size。
   // 这样既保留原计数的无超发窗口，又让每个占用都能追溯到具体 run/source/phase。
   private readonly maxConcurrentRuns: number;
+  private readonly runStallMs: number;
+  private readonly runStallAbortGraceMs: number;
   private readonly schedulerInstanceId: string;
   private readonly processId?: number;
   private readonly inflightAttempts = new Map<string, InflightAttempt>();
   private readonly waitingSchedules = new Map<string, SchedulerWaitingSchedule>();
   private lastGateLogAt = 0;
+  /**
+   * 已被卡死守卫强制收口的 runId。这些 run 的槽位已收回、run 行已落终态、schedule
+   * 已重排 —— 若 runner 事后才 settle(可能几小时后),它的终态落库与事件广播必须整体
+   * 跳过,否则会把用户已经看到的 failed 覆写回 success、并二次重排 nextFireAt。
+   * 只存内存:进程重启后这些 run 行已是终态,不需要再记。
+   */
+  private readonly abandonedRuns = new Set<string>();
 
   constructor(opts: SchedulerOptions) {
     super();
@@ -248,6 +301,12 @@ export class Scheduler extends EventEmitter {
     this.isManagedWorkspaceDir = opts.isManagedWorkspaceDir;
     this.passive = opts.passive ?? false;
     this.maxConcurrentRuns = Math.max(1, opts.maxConcurrentRuns ?? DEFAULT_MAX_CONCURRENT_RUNS);
+    // 0 / 负值 = 关闭卡死守卫(逃生阀:守卫误伤时宿主可一键停掉,不必回滚版本)。
+    this.runStallMs = opts.runStallMs ?? RUN_STALL_MS;
+    this.runStallAbortGraceMs = Math.max(
+      0,
+      opts.runStallAbortGraceMs ?? RUN_STALL_ABORT_GRACE_MS,
+    );
     this.schedulerInstanceId = opts.instanceId ?? `scheduler-${defaultGenerateId()}`;
     this.processId = opts.processId;
   }
@@ -352,6 +411,9 @@ export class Scheduler extends EventEmitter {
     this.waitingSchedules.clear();
     this.inflightControllers.clear();
     this.inflightByschedule.clear();
+    // 全部 in-flight 已被清空,不再有"迟到 settle 需要丢弃"的对象;留着只会让下次
+    // 复用同一 runId(理论上不会)时误伤。
+    this.abandonedRuns.clear();
     this.stopHeartbeatLoopIfIdle();
     this.sessionIdToRunId.clear();
     this.runIdToSessionId.clear();
@@ -406,8 +468,11 @@ export class Scheduler extends EventEmitter {
     // **不从 activeSchedules 删除** —— nextFireAt 停在过去,下个 tick 天然重试,
     // 这就是等待队列本身:无新增状态、无新增持久化,进程重启后由 start() 归一接管。
     // 排队任务的认领(claimDueFire)只在真正放行时发生,跨实例互斥语义不变。
+    // 闸门只数**真正占槽**的 run:'queued' 的纯等待项(心跳排在忙会话的队列里等派发)
+    // 不消耗 agent 子进程 / MCP 注册 / token,让它们占配额等于让一个卡住的会话拖死
+    // 整个调度器(见 ScheduleRunPhase 注释的 2026-07-29 事故)。
     due.sort((a, b) => (a.nextFireAt ?? 0) - (b.nextFireAt ?? 0));
-    const slots = Math.max(0, this.maxConcurrentRuns - this.inflightAttempts.size);
+    const slots = Math.max(0, this.maxConcurrentRuns - this.countSlotsInUse());
     const toFire = due.slice(0, slots);
     const gatedSchedules = due.slice(slots);
     const gated = gatedSchedules.length;
@@ -425,6 +490,7 @@ export class Scheduler extends EventEmitter {
         schedulerInstanceId: this.schedulerInstanceId,
         processId: this.processId,
         inFlight: this.inflightAttempts.size,
+        slotsInUse: this.countSlotsInUse(),
         maxConcurrentRuns: this.maxConcurrentRuns,
         inFlightRuns: this.describeInflightRuns(now),
         gatedSchedules: gatedSchedules.map((schedule) => ({
@@ -538,6 +604,8 @@ export class Scheduler extends EventEmitter {
         onPreRunHookCompleted: this.buildOnPreRunHookCompleted(runId),
         onTurnActive: this.buildOnTurnActive(runId),
         createChildRun: this.buildCreateChildRun(schedule.id, firedAt),
+        onQueueWaitChanged: this.buildOnQueueWaitChanged(runId),
+        onProgress: this.buildOnProgress(runId),
       });
       sessionId = result.sessionId;
       resultText = result.resultText;
@@ -550,6 +618,14 @@ export class Scheduler extends EventEmitter {
     } finally {
       this.unregisterInflight(schedule.id, runId);
       this.updateInflightAttempt(runId, 'finalizing');
+    }
+
+    // 卡死守卫已经强制收口过这条 run(槽位收回、run 落 failed、schedule 重排)。
+    // 迟到的 settle 不能再写任何东西,否则会把用户已看到的失败覆写回 success
+    // 并二次重排 nextFireAt。
+    if (this.consumeAbandonedRun(runId)) {
+      this.silencedRuns.delete(runId);
+      return;
     }
 
     // 如果是被 delete/pause 主动 abort 的,把 run 标 'aborted' 而非 'failed' —— 让 UI
@@ -766,6 +842,8 @@ export class Scheduler extends EventEmitter {
         onPreRunHookCompleted: this.buildOnPreRunHookCompleted(runId),
         onTurnActive: this.buildOnTurnActive(runId),
         createChildRun: this.buildCreateChildRun(schedule.id, firedAt),
+        onQueueWaitChanged: this.buildOnQueueWaitChanged(runId),
+        onProgress: this.buildOnProgress(runId),
       });
       runSessionId = result.sessionId;
       runResultText = result.resultText;
@@ -779,6 +857,12 @@ export class Scheduler extends EventEmitter {
       this.updateInflightAttempt(runId, 'finalizing');
     }
     finishedAt = this.clock.now();
+
+    // 语义同 fireOneInner:被卡死守卫强制收口过的 run,迟到 settle 整体丢弃。
+    if (this.consumeAbandonedRun(runId)) {
+      this.silencedRuns.delete(runId);
+      return { runId };
+    }
 
     const wasAborted = this.wasRunAborted(schedule, controller.signal, runError);
 
@@ -1181,6 +1265,7 @@ export class Scheduler extends EventEmitter {
       schedulerInstanceId: this.schedulerInstanceId,
       ...(this.processId !== undefined ? { processId: this.processId } : {}),
       inFlight: this.inflightAttempts.size,
+      slotsInUse: this.countSlotsInUse(),
       maxConcurrentRuns: this.maxConcurrentRuns,
       inFlightRuns: [...this.inflightAttempts.values()].map((attempt) => ({
         scheduleId: attempt.scheduleId,
@@ -1191,6 +1276,7 @@ export class Scheduler extends EventEmitter {
         startedAt: attempt.startedAt,
         slotWaitMs: attempt.slotWaitMs,
         phase: attempt.phase,
+        lastProgressAt: attempt.lastProgressAt,
       })),
       waitingSchedules: [...this.waitingSchedules.values()].map((waiting) => ({ ...waiting })),
     };
@@ -1325,6 +1411,7 @@ export class Scheduler extends EventEmitter {
       const runIds = [...this.inflightControllers.keys()];
       const now = this.clock.now();
       this.logLongRunningAttempts(now);
+      this.enforceStallGuard(now);
       if (runIds.length > 0) {
         void this.storage.touchRunHeartbeats(runIds, now).catch((err) => {
           this.logger?.warn?.('scheduler: touchRunHeartbeats failed', err);
@@ -1335,20 +1422,33 @@ export class Scheduler extends EventEmitter {
     (this.heartbeatHandle as unknown as { unref?: () => void }).unref?.();
   }
 
+  /**
+   * 判据必须是 controller registry 而不是 attempts:'queued' 的纯等待 run 虽然不占
+   * 并发槽,DB 里的 run 行仍是 'running',心跳一停 heartbeatAt 就不再续期,60s 后会被
+   * 僵尸清扫误标 interrupted。两个 registry 的生命周期本来也是 controller 更长
+   * (register 在 insertRun 之后、unregister 在 fire settle 时)。
+   */
   private stopHeartbeatLoopIfIdle(): void {
-    if (this.inflightAttempts.size === 0 && this.heartbeatHandle !== null) {
+    if (
+      this.inflightAttempts.size === 0 &&
+      this.inflightControllers.size === 0 &&
+      this.heartbeatHandle !== null
+    ) {
       clearInterval(this.heartbeatHandle);
       this.heartbeatHandle = null;
     }
   }
 
   /** 在第一次 await 前同步登记一次槽位占用，并输出可配对的注册日志。 */
-  private beginInflightAttempt(input: Omit<SchedulerInflightRun, 'startedAt'>): void {
+  private beginInflightAttempt(
+    input: Omit<SchedulerInflightRun, 'startedAt' | 'lastProgressAt'>,
+  ): void {
     if (this.inflightAttempts.has(input.runId)) {
       throw new Error(`duplicate scheduler run id: ${input.runId}`);
     }
     const before = this.inflightAttempts.size;
-    const attempt: InflightAttempt = { ...input, startedAt: this.clock.now() };
+    const startedAt = this.clock.now();
+    const attempt: InflightAttempt = { ...input, startedAt, lastProgressAt: startedAt };
     this.inflightAttempts.set(input.runId, attempt);
     this.startHeartbeatLoopIfNeeded();
     this.logger?.info?.('scheduler: in-flight run registered', {
@@ -1459,6 +1559,7 @@ export class Scheduler extends EventEmitter {
       phase: attempt.phase,
       startedAt: attempt.startedAt,
       slotWaitMs: attempt.slotWaitMs,
+      lastProgressAt: attempt.lastProgressAt,
       durationMs: Math.max(0, now - attempt.startedAt),
     };
   }
@@ -1683,6 +1784,171 @@ export class Scheduler extends EventEmitter {
       this.sessionIdToRunId.set(sessionId, runId);
       this.runIdToSessionId.set(runId, sessionId);
     };
+  }
+
+  /**
+   * 构造 onQueueWaitChanged 回调:把 run 在「纯等待」与「执行中」之间切换 phase。
+   * 'queued' 期间该 run 不计入并发闸门(见 countSlotsInUse),也不受卡死守卫判定
+   * (等一个忙会话是正常状态,不是卡死;排队本身的上限由 runner 侧负责)。
+   *
+   * 离开等待时把 lastProgressAt 推到当下:排队那段时间不该算进"多久没反馈"的额度,
+   * 否则一条排了很久才被派发的 run 会在刚开始执行时就被守卫误判。
+   */
+  private buildOnQueueWaitChanged(runId: string): (waiting: boolean) => void {
+    return (waiting: boolean) => {
+      const attempt = this.inflightAttempts.get(runId);
+      if (!attempt) return;
+      const nextPhase: ScheduleRunPhase = waiting ? 'queued' : 'running';
+      if (attempt.phase === nextPhase) return;
+      attempt.phase = nextPhase;
+      attempt.lastProgressAt = this.clock.now();
+      // 离开等待即重新占槽,但不过闸门、不阻塞 —— run 已经在执行,拒绝它没有意义
+      // (契约见 FireContext.onQueueWaitChanged)。
+      this.logger?.info?.('scheduler: in-flight run queue-wait changed', {
+        schedulerInstanceId: this.schedulerInstanceId,
+        processId: this.processId,
+        ...this.describeInflightRun(attempt, attempt.lastProgressAt),
+        slotsInUse: this.countSlotsInUse(),
+        maxConcurrentRuns: this.maxConcurrentRuns,
+      });
+      this.emitRuntimeState();
+    };
+  }
+
+  /**
+   * 构造 onProgress 回调:热路径,只更新时间戳(不落库、不广播 runtime-state ——
+   * 每个会话事件广播一次 IPC 会把 renderer 打爆)。卡死守卫读它做判定。
+   */
+  private buildOnProgress(runId: string): () => void {
+    return () => {
+      const attempt = this.inflightAttempts.get(runId);
+      if (!attempt) return;
+      attempt.lastProgressAt = this.clock.now();
+      // 刻意**不**清 stallAbortedAt:abort 已经发出后,判据就从"你还在动吗"变成
+      // "你停下来了吗"。此时继续冒事件不代表健康(abort 收口本身也会产生事件),
+      // 让进展信号重置宽限会让强制释放永远等不到,卡死的槽位又收不回来了。
+    };
+  }
+
+  /** 真正占用并发槽的 run 数：'queued' 的纯等待项不计入。 */
+  private countSlotsInUse(): number {
+    let n = 0;
+    for (const attempt of this.inflightAttempts.values()) {
+      if (attempt.phase !== 'queued') n += 1;
+    }
+    return n;
+  }
+
+  /**
+   * 卡死守卫。挂在已有的 15s 心跳 loop 上(不新增定时器),两段式:
+   *   1. 无进展超过 runStallMs → abort,给 runner 一个体面收口的机会(它若响应
+   *      signal,会走正常的 aborted 终态路径,与用户 pause/delete 同款)。
+   *   2. abort 后再过 runStallAbortGraceMs 仍不 settle → 强制收回槽位(见
+   *      forceReleaseStalledRun)。槽位释放不能依赖对方配合。
+   * 'queued' 的纯等待项不参与判定:等忙会话是正常状态,且它本来就不占槽。
+   */
+  private enforceStallGuard(now: number): void {
+    if (this.runStallMs <= 0) return;
+    for (const attempt of [...this.inflightAttempts.values()]) {
+      if (attempt.phase === 'queued') continue;
+      if (attempt.stallAbortedAt === undefined) {
+        if (now - attempt.lastProgressAt < this.runStallMs) continue;
+        attempt.stallAbortedAt = now;
+        this.logger?.warn?.('scheduler: run stalled with no progress, aborting', {
+          schedulerInstanceId: this.schedulerInstanceId,
+          processId: this.processId,
+          ...this.describeInflightRun(attempt, now),
+          noProgressMs: now - attempt.lastProgressAt,
+          runStallMs: this.runStallMs,
+        });
+        try {
+          this.inflightControllers.get(attempt.runId)?.abort();
+        } catch (err) {
+          this.logger?.warn?.('scheduler: stall abort threw', err);
+        }
+        continue;
+      }
+      if (now - attempt.stallAbortedAt < this.runStallAbortGraceMs) continue;
+      void this.forceReleaseStalledRun(attempt, now);
+    }
+  }
+
+  /**
+   * 强制收回一条卡死 run 的槽位并就地收口。abort 没能让 runner settle 时的最后手段。
+   *
+   * 收口顺序与 fireOneInner 的失败分支保持一致:先落 run 行终态,再按 recurring
+   * 语义重排 schedule。**必须重排** —— claimDueFire 已把 nextFireAt 清空,不补排的话
+   * 这条 recurring 任务会静默停摆到下次进程重启(与 rescheduleAfterSweep 同款理由)。
+   *
+   * run 记 'failed' 而不是 'aborted':卡死是异常,必须可见(红点 + 按任务 notify
+   * 配置通知)。'aborted' 在 UI 上呈现为"用户中断",会把故障伪装成正常操作。
+   */
+  private async forceReleaseStalledRun(attempt: InflightAttempt, now: number): Promise<void> {
+    const { runId, scheduleId } = attempt;
+    // 竞态收窄:runner 在宽限最后一刻 settle 时,fire 的 finally 已经同步摘掉
+    // controller、正在走自己的终态收口。此时不抢 —— 否则会把一次真实成功记成
+    // failed。controller 还在 = runner 确实没动静,继续强制收口。
+    if (!this.inflightControllers.has(runId)) {
+      this.inflightAttempts.delete(runId);
+      return;
+    }
+    // 先摘 registry:同步完成,保证本轮之后的 tick / 守卫都不再看到这条,不会重复收口。
+    this.abandonedRuns.add(runId);
+    this.inflightAttempts.delete(runId);
+    this.inflightControllers.delete(runId);
+    const set = this.inflightByschedule.get(scheduleId);
+    if (set) {
+      set.delete(runId);
+      if (set.size === 0) this.inflightByschedule.delete(scheduleId);
+    }
+    const sessionId = this.runIdToSessionId.get(runId);
+    if (sessionId !== undefined) {
+      if (this.sessionIdToRunId.get(sessionId) === runId) this.sessionIdToRunId.delete(sessionId);
+      this.runIdToSessionId.delete(runId);
+    }
+    this.runIdToBoundSessionId.delete(runId);
+    this.silencedRuns.delete(runId);
+    this.stopHeartbeatLoopIfIdle();
+    const noProgressMs = now - attempt.lastProgressAt;
+    this.logger?.error?.('scheduler: force-releasing stalled run slot (runner never settled)', {
+      schedulerInstanceId: this.schedulerInstanceId,
+      processId: this.processId,
+      ...this.describeInflightRun(attempt, now),
+      noProgressMs,
+      abortGraceMs: this.runStallAbortGraceMs,
+      slotsInUse: this.countSlotsInUse(),
+      maxConcurrentRuns: this.maxConcurrentRuns,
+    });
+    this.emitRuntimeState();
+    const errorMsg =
+      `run stalled: no progress for ${Math.round(noProgressMs / 60_000)}min ` +
+      `and did not stop within ${Math.round(this.runStallAbortGraceMs / 1000)}s of abort`;
+    try {
+      await this.storage.updateRun(runId, { status: 'failed', finishedAt: now, errorMsg });
+    } catch (err) {
+      this.logger?.warn?.('scheduler: stalled run updateRun failed', { runId, error: String(err) });
+    }
+    this.emitEvent({ type: 'failed', scheduleId, runId, error: errorMsg });
+    // 重排:沿用 rescheduleAfterSweep 的语义(读回真实行、尊重 manual / 一次性任务的
+    // "不续命"、不覆盖已 paused/deleted 的行)。
+    await this.rescheduleAfterSweep(scheduleId, now);
+    this.emitEvent({ type: 'changed', scheduleId });
+  }
+
+  /**
+   * 该 run 是否已被卡死守卫强制收口。命中说明 run 行早已落终态、schedule 已重排,
+   * 迟到 settle 的 fireOneInner / runNowInner 必须整体跳过收口动作(见 abandonedRuns)。
+   * 顺带清理集合条目 —— 迟到的那次调用是它最后一个消费者。
+   */
+  private consumeAbandonedRun(runId: string): boolean {
+    if (!this.abandonedRuns.has(runId)) return false;
+    this.abandonedRuns.delete(runId);
+    this.logger?.warn?.('scheduler: discarding late settle of force-released run', {
+      schedulerInstanceId: this.schedulerInstanceId,
+      processId: this.processId,
+      runId,
+    });
+    return true;
   }
 }
 

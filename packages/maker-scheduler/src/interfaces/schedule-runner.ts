@@ -61,6 +61,31 @@ export interface FireContext {
    * fire() 返回后再保存，否则 fail-closed 的抛错路径会丢失诊断信息。
    */
   onPreRunHookCompleted?: (result: PreRunHookRunResult) => Promise<void> | void;
+  /**
+   * Runner 进入 / 离开「纯等待」状态时上报（waiting=true 进入，false 离开）。
+   * 目前唯一的纯等待场景:心跳 prompt 撞上正忙的目标会话被排进队列,等会话空闲后
+   * 派发 —— 此刻没有 agent 子进程、没有 MCP 注册、不烧 token。
+   *
+   * Scheduler 据此把该 run 的 phase 切到 'queued' 并**从并发闸门计数里摘出去**:
+   * 并发上限防的是"同时跑太多 agent",纯等待占着配额毫无收益,反而会让一个卡住的
+   * 会话拖死整个调度器(2026-07-29 实事故,见 ScheduleRunPhase 注释)。
+   *
+   * 约定:
+   * - 必须配对调用 —— 每条离开等待的路径(派发成功 / 撤项 / 失败 / abort)都要 (false)。
+   * - 离开等待时重新占槽是**纯记账**,不再过闸门、不阻塞:此时 run 已经在执行,拒绝
+   *   它没有意义。因此瞬时占用可能略微超过 maxConcurrentRuns,属预期。
+   * - optional;runner 不调则退回旧行为(排队期间照旧占槽)。
+   */
+  onQueueWaitChanged?: (waiting: boolean) => void;
+  /**
+   * Runner 收到任何一次执行进展信号（会话事件）时打点。Scheduler 用它做卡死判定:
+   * 「多久没有新反馈」而不是「总共跑了多久」—— 后者会误砍真在干活的长任务。
+   *
+   * 调用要求:热路径,实现必须廉价(引擎侧只写一个时间戳,不落库不广播)。
+   * optional;runner 不调则退回按 run 起始时间判定,长跑任务会被误判为卡死,
+   * 因此新 runner 都应该接。
+   */
+  onProgress?: () => void;
 }
 
 export interface FireResult {

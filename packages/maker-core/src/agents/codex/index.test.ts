@@ -10150,3 +10150,176 @@ describe('CodexAgent plan mode', () => {
     await handle.close();
   });
 });
+
+// ── upstream-response-idle watchdog ──────────────────────────────────────────
+// codex 此前只有 willRetry 风暴的终局升级(retry-escalation),覆盖不到 daemon **静默**
+// 卡死(后端连接半开 / 内部死锁 / app-server 不再投递任何通知)—— turn 会永远转圈。
+// 计时语义与 claude-code 侧一致:只在"球在上游"期间走表,工具执行期间停表。
+describe('CodexAgent upstream-response-idle watchdog', () => {
+  const IDLE_MS = 60_000;
+
+  beforeEach(() => {
+    vi.stubEnv('XDT_CODEX_IDLE_TIMEOUT_MS', String(IDLE_MS));
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  function installIdleHost(agent: CodexAgent) {
+    let turnSeq = 0;
+    return installFakeHost(agent, (method) => {
+      if (method === Method.TurnStart) return { turn: { id: `turn-${++turnSeq}` } };
+      if (method === Method.TurnInterrupt) return {};
+      return undefined;
+    });
+  }
+
+  async function startIdleSession(agent: CodexAgent, sessionId: string) {
+    return agent.startSession({ sessionId, model: 'gpt-5.4', workingDir: '/repo' });
+  }
+
+  function collectEvents(handle: Awaited<ReturnType<CodexAgent['startSession']>>): AgentEvent[] {
+    const seen: AgentEvent[] = [];
+    void (async () => {
+      for await (const ev of handle.events()) seen.push(ev);
+    })();
+    return seen;
+  }
+
+  it('turn 开始后上游持续静默 → 推终态 error 并 interrupt turn', async () => {
+    vi.useFakeTimers();
+    try {
+      const agent = new CodexAgent(createDeps());
+      const host = installIdleHost(agent);
+      const handle = await startIdleSession(agent, 'session-idle-trip');
+      const seen = collectEvents(handle);
+      await handle.send({ type: 'user', content: 'go' });
+      const handlers = host.getThreadHandlers();
+      if (!handlers) throw new Error('expected thread handlers');
+      handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-1' } } as never);
+
+      await vi.advanceTimersByTimeAsync(IDLE_MS + 1);
+
+      const terminal = seen.find(
+        (ev) =>
+          ev.type === 'error' &&
+          (ev.data as { reason?: string } | null)?.reason === 'upstream_response_idle_timeout',
+      );
+      expect(terminal).toBeDefined();
+      expect((terminal!.data as { isTerminal?: boolean }).isTerminal).toBe(true);
+      expect(
+        host.request.mock.calls.some(
+          ([method, params]) =>
+            method === Method.TurnInterrupt &&
+            (params as { turnId?: string }).turnId === 'turn-1',
+        ),
+      ).toBe(true);
+      await handle.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('工具执行期间停表:长命令不会被误杀', async () => {
+    vi.useFakeTimers();
+    try {
+      const agent = new CodexAgent(createDeps());
+      const host = installIdleHost(agent);
+      const handle = await startIdleSession(agent, 'session-idle-tool');
+      const seen = collectEvents(handle);
+      await handle.send({ type: 'user', content: 'run a long build' });
+      const handlers = host.getThreadHandlers();
+      if (!handlers) throw new Error('expected thread handlers');
+      handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-1' } } as never);
+      handlers.itemStarted?.({
+        threadId: 'start-thread-id',
+        turnId: 'turn-1',
+        item: { id: 'item-1', type: 'commandExecution', command: 'make build' },
+      } as never);
+
+      await vi.advanceTimersByTimeAsync(IDLE_MS * 5);
+
+      expect(
+        seen.some(
+          (ev) =>
+            ev.type === 'error' &&
+            (ev.data as { reason?: string } | null)?.reason === 'upstream_response_idle_timeout',
+        ),
+      ).toBe(false);
+      await handle.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('工具收工后恢复计时(停表不能变成永久豁免)', async () => {
+    vi.useFakeTimers();
+    try {
+      const agent = new CodexAgent(createDeps());
+      const host = installIdleHost(agent);
+      const handle = await startIdleSession(agent, 'session-idle-tool-done');
+      const seen = collectEvents(handle);
+      await handle.send({ type: 'user', content: 'run then think' });
+      const handlers = host.getThreadHandlers();
+      if (!handlers) throw new Error('expected thread handlers');
+      handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-1' } } as never);
+      handlers.itemStarted?.({
+        threadId: 'start-thread-id',
+        turnId: 'turn-1',
+        item: { id: 'item-1', type: 'commandExecution', command: 'make build' },
+      } as never);
+      await vi.advanceTimersByTimeAsync(IDLE_MS * 2);
+      handlers.itemCompleted?.({
+        threadId: 'start-thread-id',
+        turnId: 'turn-1',
+        item: { id: 'item-1', type: 'commandExecution', command: 'make build' },
+      } as never);
+
+      // 球回到上游,再静默满一个阈值 → 该触发
+      await vi.advanceTimersByTimeAsync(IDLE_MS + 1);
+
+      expect(
+        seen.some(
+          (ev) =>
+            ev.type === 'error' &&
+            (ev.data as { reason?: string } | null)?.reason === 'upstream_response_idle_timeout',
+        ),
+      ).toBe(true);
+      await handle.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('turn 正常收口后不再计时', async () => {
+    vi.useFakeTimers();
+    try {
+      const agent = new CodexAgent(createDeps());
+      const host = installIdleHost(agent);
+      const handle = await startIdleSession(agent, 'session-idle-completed');
+      const seen = collectEvents(handle);
+      await handle.send({ type: 'user', content: 'go' });
+      const handlers = host.getThreadHandlers();
+      if (!handlers) throw new Error('expected thread handlers');
+      handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-1' } } as never);
+      handlers.turnCompleted?.({
+        threadId: 'start-thread-id',
+        turn: { id: 'turn-1', status: 'completed' },
+      } as never);
+
+      await vi.advanceTimersByTimeAsync(IDLE_MS * 5);
+
+      expect(
+        seen.some(
+          (ev) =>
+            ev.type === 'error' &&
+            (ev.data as { reason?: string } | null)?.reason === 'upstream_response_idle_timeout',
+        ),
+      ).toBe(false);
+      await handle.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

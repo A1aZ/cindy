@@ -45,6 +45,30 @@ export type SessionEventListener = (event: AgentEvent) => void;
 export type SessionStatusListener = (status: SessionStatus) => void;
 export type InteractionRequestListener = (req: InteractionRequest) => Promise<InteractionDecision>;
 
+/**
+ * turn 零事件看门狗阈值(ms)。turn 在跑、却连续这么久**一个事件都没有**,视为整条
+ * 链路已死,中断本轮而不是永远转圈。env `XDT_SESSION_TURN_STALL_MS` 覆盖,0 关闭。
+ *
+ * 与 agent 层 watchdog 的分工:各 agent 内部的 upstream-idle watchdog 只盯"球在上游
+ * 却不回话"(claude-code 30min / codex 30min),它们在**工具执行期间刻意不计时** ——
+ * 因此工具自己 hang(MCP 卡住、SDK↔子进程 stdio 通道 wedge)时没有任何机制兜底,
+ * turn 可以永久挂着。这一层就是兜那个洞:不区分球在谁手里,只看"还有没有动静"。
+ *
+ * 45min 刻意大于 agent 层的 30min,保证正常情况下 agent 自己先自愈、不被抢跑;
+ * 只有 agent 层也失灵才轮到这里。
+ *
+ * 误杀防护(见 armTurnStallWatchdog):等用户回应交互(权限询问 / AskUserQuestion /
+ * plan review)期间、以及有后台任务在跑期间都不计时 —— 那些场景没有事件是正常的。
+ */
+const DEFAULT_TURN_STALL_MS = 45 * 60_000;
+
+function parseTurnStallMs(raw: string | undefined): number {
+  if (raw === undefined || raw === '') return DEFAULT_TURN_STALL_MS;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_TURN_STALL_MS;
+  return Math.floor(n);
+}
+
 export interface SessionOptions {
   id: string;
   agentKind: AgentKind;
@@ -59,6 +83,11 @@ export interface SessionOptions {
    * 是不可能存在于本地 fs 的, 没必要也不该 stat。
    */
   remoteHostId?: string | null;
+  /**
+   * turn 零事件看门狗阈值(ms)。省略 = env / DEFAULT_TURN_STALL_MS；0 = 关闭。
+   * 主要供测试注入短阈值，宿主正常不传。
+   */
+  turnStallMs?: number;
 }
 
 function redactEventForListeners(event: AgentEvent): AgentEvent {
@@ -204,6 +233,14 @@ export class Session {
    * session(心跳 + 远程控制)下区分 per-turn 归属。null = 未标记来源(默认)。
    */
   private currentTurnOrigin: SendOrigin | null = null;
+  // ── turn 零事件看门狗（见 DEFAULT_TURN_STALL_MS）────────────────────────
+  private readonly turnStallMs: number;
+  private turnStallTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 正在等用户回应的交互数；>0 期间不计 stall 额度（没事件是正常的）。 */
+  private pendingInteractions = 0;
+  /** 最近一次 fan-out 事件的时刻，仅用于日志诊断。 */
+  private lastEventAt = 0;
+  private lastEventType: string | null = null;
 
   constructor(opts: SessionOptions) {
     this.id = opts.id;
@@ -213,21 +250,32 @@ export class Session {
     this.capabilities = opts.capabilities;
     this.remoteHostId = opts.remoteHostId ?? null;
     this.logger = opts.logger.child(`s:${this.id}`);
+    this.turnStallMs =
+      opts.turnStallMs ?? parseTurnStallMs(process.env.XDT_SESSION_TURN_STALL_MS);
 
     // 注入 InteractionResolver 到底层 handle, 转发到 host 维护的 listener。
     // 没接 listener 时按 kind 给出安全默认: 都视作 deny(host 必须接 listener 才能交互)。
     this.handle.setInteractionResolver(async (req) => {
-      if (!this.interactionListener) {
-        this.logger.warn('interaction request received but no listener attached, denying', { kind: req.kind, requestId: req.requestId });
-        if (req.kind === 'ask_user_question') {
-          return { kind: 'ask_user_question', answers: {} };
+      // 等用户回应期间挂起 stall 看门狗:用户可能离开电脑很久,没有事件是正常的,
+      // 中断这种 turn 等于把"等你决定"误判成"卡死"(见 DEFAULT_TURN_STALL_MS)。
+      this.pendingInteractions += 1;
+      this.clearTurnStallWatchdog();
+      try {
+        if (!this.interactionListener) {
+          this.logger.warn('interaction request received but no listener attached, denying', { kind: req.kind, requestId: req.requestId });
+          if (req.kind === 'ask_user_question') {
+            return { kind: 'ask_user_question', answers: {} };
+          }
+          if (req.kind === 'plan_review') {
+            return { kind: 'plan_review', behavior: 'deny', reason: 'no_listener_attached', dismissed: true };
+          }
+          return { kind: req.kind, behavior: 'deny', reason: 'no_listener_attached' } as InteractionDecision;
         }
-        if (req.kind === 'plan_review') {
-          return { kind: 'plan_review', behavior: 'deny', reason: 'no_listener_attached', dismissed: true };
-        }
-        return { kind: req.kind, behavior: 'deny', reason: 'no_listener_attached' } as InteractionDecision;
+        return await this.interactionListener(req);
+      } finally {
+        this.pendingInteractions = Math.max(0, this.pendingInteractions - 1);
+        this.armTurnStallWatchdog();
       }
-      return this.interactionListener(req);
     });
   }
 
@@ -298,6 +346,9 @@ export class Session {
         return { accepted: false, reason: 'cancelled-before-dispatch' };
       }
       turnDispatched = true;
+      // turn 真正开始跑 → 起 stall 看门狗。后续每个事件都会重置它，done / 终态
+      // error 会清掉它（见 armTurnStallWatchdog）。
+      this.armTurnStallWatchdog();
       return { accepted: true };
     } catch (e) {
       if (this.sendReservation === reservation) {
@@ -345,6 +396,8 @@ export class Session {
     if (this.status === 'closed') return;
     if (this.status === 'error') return;
     this.cancelSendReservation(this.sendReservation);
+    // 中断已在进行:不再计 stall 额度(下一个 turn 的 send 会重新起表)。
+    this.clearTurnStallWatchdog();
     this.setStatus('aborting');
     try {
       await this.handle.abort();
@@ -401,6 +454,7 @@ export class Session {
 
   private async performClose(): Promise<void> {
     try {
+      this.clearTurnStallWatchdog();
       this.cancelSendReservation(this.sendReservation);
       await this.handle.close();
     } finally {
@@ -686,6 +740,115 @@ export class Session {
     void this.runEventLoop();
   }
 
+  /**
+   * 事件 fan-out 的唯一出口(真实事件与看门狗合成的事件共用)。除了转发给订阅者,
+   * 还负责把「turn 还在推进」这件事告诉 stall 看门狗。
+   */
+  private fanOutEvent(event: AgentEvent): void {
+    this.lastEventAt = Date.now();
+    this.lastEventType = event.type;
+    const listenerEvent = redactEventForListeners(event);
+    for (const listener of this.eventListeners) {
+      try { listener(listenerEvent); } catch (e) { this.logger.error('event listener threw', { error: String(e) }); }
+    }
+    // 终态之后不再计 stall 额度;其余事件都算"还活着",重置计时。
+    if (event.type === 'done' || isTerminalAgentErrorEvent(event)) {
+      this.clearTurnStallWatchdog();
+    } else {
+      this.armTurnStallWatchdog();
+    }
+  }
+
+  private clearTurnStallWatchdog(): void {
+    if (this.turnStallTimer) {
+      clearTimeout(this.turnStallTimer);
+      this.turnStallTimer = null;
+    }
+  }
+
+  /**
+   * (重新)起 turn 零事件看门狗。以下情形不起表:
+   *   - 阈值被关掉(0)
+   *   - 会话已不活跃(closed / error / aborting)
+   *   - 没有 turn 在跑 —— 空闲会话本来就没有事件
+   *   - 正在等用户回应交互 —— 权限询问 / AskUserQuestion / plan review 可能挂很久
+   *   - 有后台任务在跑 —— run_in_background 的 Bash、后台 subagent 期间安静是正常的
+   * 后两条是误杀防护(见 DEFAULT_TURN_STALL_MS)。
+   */
+  private armTurnStallWatchdog(): void {
+    this.clearTurnStallWatchdog();
+    if (this.turnStallMs <= 0) return;
+    if (this.status !== 'active') return;
+    if (this.closePromise) return;
+    if (!this.isTurnRunning()) return;
+    if (this.pendingInteractions > 0) return;
+    if (this.hasRunningBackgroundTasks()) return;
+    this.turnStallTimer = setTimeout(() => {
+      this.turnStallTimer = null;
+      this.onTurnStallTimeout();
+    }, this.turnStallMs);
+    // 不让看门狗拖住进程退出(Electron main 常驻无感,vitest / CLI 宿主有感)。
+    (this.turnStallTimer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  private hasRunningBackgroundTasks(): boolean {
+    try {
+      return (this.handle.listBackgroundTasks?.() ?? []).length > 0;
+    } catch (e) {
+      // 查询失败按"没有后台任务"处理:看门狗宁可起表(仍有 45min 缓冲 + 其余排除项),
+      // 也不要因为一个诊断查询抛错就永久失效。
+      this.logger.warn('listBackgroundTasks threw while arming stall watchdog', { error: String(e) });
+      return false;
+    }
+  }
+
+  /**
+   * turn 零事件超时:整条链路(上游 / 工具 / 子进程 stdio)已经没有任何动静。
+   * 先合成一条终态 error 事件让所有消费方收口(renderer 停转圈、scheduler 把 run 记
+   * failed、IM 转播 finalize 卡片),再中断 turn。
+   *
+   * 顺序与 claude-code 的 upstream-idle watchdog 一致:先推事件再中断 —— 中断本身
+   * 可能只 drain 出一个空 done(会被上游当成静默收尾),不足以让消费方知道发生了什么。
+   *
+   * 用 abort() 而不是 close():abort 在各 agent 里都是"只 interrupt 当前 turn"的安全
+   * 语义(见 claude-code handle.abort 注释),会话保持可用,用户可以直接发下一条继续。
+   */
+  private onTurnStallTimeout(): void {
+    // 触发前复核:定时器排上队之后可能已经收到事件 / turn 已结束 / 冒出交互等待。
+    if (this.status !== 'active' || this.closePromise) return;
+    if (!this.isTurnRunning()) return;
+    if (this.pendingInteractions > 0) return;
+    if (this.hasRunningBackgroundTasks()) return;
+    const now = Date.now();
+    const msSinceLastEvent = this.lastEventAt > 0 ? now - this.lastEventAt : null;
+    this.logger.warn('turn stall watchdog tripped — no events at all, interrupting turn', {
+      turnStallMs: this.turnStallMs,
+      lastEventType: this.lastEventType,
+      msSinceLastEvent,
+    });
+    const minutes = Math.round(this.turnStallMs / 60_000);
+    this.fanOutEvent({
+      type: 'error',
+      data: {
+        // reason 是 renderer i18n 的稳定 key(ERROR_REASON_I18N_KEYS,规则 18);
+        // message 仅作非 renderer 消费方(IM / orca / 日志)的英文兜底。
+        message:
+          `This turn produced no activity at all for ${minutes} minutes ` +
+          '(upstream, tools and the agent subprocess were all silent); ' +
+          'it was interrupted automatically. You can send the next message to continue.',
+        isTerminal: true,
+        reason: 'turn_no_event_timeout',
+        turnStallMs: this.turnStallMs,
+        lastEventType: this.lastEventType,
+        msSinceLastEvent,
+      },
+      source: this.agentKind,
+    } as AgentEvent);
+    void this.abort().catch((e) => {
+      this.logger.warn('turn stall watchdog abort failed', { error: String(e) });
+    });
+  }
+
   private async runEventLoop(): Promise<void> {
     try {
       for await (const event of this.handle.events()) {
@@ -695,10 +858,7 @@ export class Session {
         if (this.currentTurnOrigin && event.turnOrigin === undefined) {
           event.turnOrigin = this.currentTurnOrigin;
         }
-        const listenerEvent = redactEventForListeners(event);
-        for (const listener of this.eventListeners) {
-          try { listener(listenerEvent); } catch (e) { this.logger.error('event listener threw', { error: String(e) }); }
-        }
+        this.fanOutEvent(event);
         // turn 真正结束后清 origin,下一轮无 origin 的 turn 不被污染。
         // 关键:**只**在 done / 终止型 error 上清,**不要**在 status(isRunning=false)
         // 上清 —— translator 收尾是先 push end-status(isRunning=false)、紧接着 push
@@ -719,6 +879,7 @@ export class Session {
       this.logger.error('event loop crashed', { error: String(e) });
       this.sendReservation = null;
       this.currentTurnOrigin = null;
+      this.clearTurnStallWatchdog();
       this.setStatus('error');
       return;
     }

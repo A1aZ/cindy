@@ -70,6 +70,8 @@ vi.mock('../runners/_shared', () => ({
 
 import {
   MakerScheduleRunner,
+  QUEUED_DISPATCH_MAX_WAIT_MS,
+  QUEUED_DISPATCH_TRACK_POLL_MS,
   type MakerScheduleRunnerDeps,
   type SchedulerQueueDeps,
 } from '../runner';
@@ -765,6 +767,123 @@ describe('MakerScheduleRunner queued dispatch (busy bound session)', () => {
     const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
     await vi.waitFor(() => expect(harness.send).toHaveBeenCalledTimes(1));
     expect(queue.enqueueCalls.length).toBe(0);
+    harness.emit({ type: 'done', data: {}, source: 'claude-code' });
+    await expect(firePromise).resolves.toMatchObject({ sessionId: SESSION_ID });
+  });
+});
+
+// ── 排队等待:不占执行槽 + 有上限 ────────────────────────────────────────────
+// 2026-07-29 事故:目标会话长时间不空闲(用户在长对话里 / 那个会话自己卡死),队列
+// 永不 drain,`await dispatchGate` 永不 settle —— 4 个心跳 run 各挂 3.5 小时,占满
+// 全部执行槽,其余定时任务全部停摆。
+describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', () => {
+  it('入队即上报纯等待,派发被接受后离开等待(引擎据此把它从并发闸门里摘出去)', async () => {
+    const harness = createSessionHarness(async () => ({ accepted: true }));
+    const queue = createQueueHarness({ busy: true });
+    const { runner } = createRunnerHarness(harness.session, queue.deps);
+    const ctx = createFireContext();
+    const queueWaitCalls: boolean[] = [];
+    (ctx as { onQueueWaitChanged?: (w: boolean) => void }).onQueueWaitChanged = (w) => {
+      queueWaitCalls.push(w);
+    };
+
+    const firePromise = runner.fire(heartbeatSchedule(), ctx);
+    await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+    expect(queueWaitCalls).toEqual([true]);
+
+    await queue.accept();
+    await vi.waitFor(() => expect(queueWaitCalls).toEqual([true, false]));
+    harness.emit({ type: 'done', data: {}, source: 'claude-code' });
+    await expect(firePromise).resolves.toMatchObject({ sessionId: SESSION_ID });
+  });
+
+  it('等派发超过上限 → 撤项并顺延(recurring 任务下次到点重新排队)', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createSessionHarness(async () => ({ accepted: true }));
+      const queue = createQueueHarness({ busy: true });
+      const { runner } = createRunnerHarness(harness.session, queue.deps);
+      const ctx = createFireContext();
+      const queueWaitCalls: boolean[] = [];
+      (ctx as { onQueueWaitChanged?: (w: boolean) => void }).onQueueWaitChanged = (w) => {
+        queueWaitCalls.push(w);
+      };
+
+      const firePromise = runner.fire(heartbeatSchedule(), ctx);
+      await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+      // 走到上限:轮询在下一拍发现超时 → 撤项 + 顺延
+      await vi.advanceTimersByTimeAsync(QUEUED_DISPATCH_MAX_WAIT_MS + QUEUED_DISPATCH_TRACK_POLL_MS);
+
+      await expect(firePromise).resolves.toMatchObject({ deferred: true });
+      expect(queue.removeCalls).toEqual([{ sessionId: SESSION_ID, clientId: 'client-1' }]);
+      // 离开等待必须配对上报,否则引擎侧的槽位记账会漏
+      expect(queueWaitCalls).toEqual([true, false]);
+      expect(harness.send).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('不能顺延的任务(一次性)排队超时 → 可见失败,不静默消失', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createSessionHarness(async () => ({ accepted: true }));
+      const queue = createQueueHarness({ busy: true });
+      const { runner, notifier } = createRunnerHarness(harness.session, queue.deps);
+
+      const firePromise = runner.fire(
+        heartbeatSchedule({ recurring: false }),
+        createFireContext(),
+      );
+      // 先挂上 rejection handler 再推进假时钟:fire 会在 advance 期间同步 reject,
+      // 此时若还没有 handler,Node 会报 unhandled rejection 污染整个测试文件。
+      const rejection = expect(firePromise).rejects.toThrow();
+      await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+      await vi.advanceTimersByTimeAsync(QUEUED_DISPATCH_MAX_WAIT_MS + QUEUED_DISPATCH_TRACK_POLL_MS);
+
+      await rejection;
+      expect(queue.removeCalls).toEqual([{ sessionId: SESSION_ID, clientId: 'client-1' }]);
+      expect(notifier.notify).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('上限内被派发的排队项不受超时影响', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createSessionHarness(async () => ({ accepted: true }));
+      const queue = createQueueHarness({ busy: true });
+      const { runner } = createRunnerHarness(harness.session, queue.deps);
+
+      const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
+      await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+      // 快到上限时派发被接受
+      await vi.advanceTimersByTimeAsync(QUEUED_DISPATCH_MAX_WAIT_MS - QUEUED_DISPATCH_TRACK_POLL_MS);
+      await queue.accept();
+      // 再跨过上限:已 dispatched,轮询早退,不得撤项
+      await vi.advanceTimersByTimeAsync(QUEUED_DISPATCH_MAX_WAIT_MS);
+      harness.emit({ type: 'done', data: {}, source: 'claude-code' });
+
+      await expect(firePromise).resolves.toMatchObject({ sessionId: SESSION_ID });
+      expect(queue.removeCalls).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('turn 事件经 onProgress 上报给引擎的卡死守卫', async () => {
+    const harness = createSessionHarness(async () => ({ accepted: true }));
+    const queue = createQueueHarness({ busy: false });
+    const { runner } = createRunnerHarness(harness.session, queue.deps);
+    const ctx = createFireContext();
+    const onProgress = vi.fn();
+    (ctx as { onProgress?: () => void }).onProgress = onProgress;
+
+    const firePromise = runner.fire(heartbeatSchedule(), ctx);
+    await vi.waitFor(() => expect(harness.send).toHaveBeenCalledTimes(1));
+    harness.emit({ type: 'text', data: { text: 'thinking' }, source: 'claude-code' });
+    await vi.waitFor(() => expect(onProgress).toHaveBeenCalled());
     harness.emit({ type: 'done', data: {}, source: 'claude-code' });
     await expect(firePromise).resolves.toMatchObject({ sessionId: SESSION_ID });
   });

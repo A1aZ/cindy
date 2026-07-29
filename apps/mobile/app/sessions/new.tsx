@@ -1893,9 +1893,9 @@ export default function NewRemoteSessionScreen() {
   );
   // 聚焦卡片形态的底部工具排:[+][权限][模型] …… [语音][创建]。
   // 权限 / 模型即原「输入行上方常驻 expandedTools」的内容,收进底排后未聚焦时不再占布局。
-  // 权限模式独立入口(modelPill 同款药丸,紧邻其后):图标 + 当前档名 + Chevron,
-  // 危险档(auto / bypass)只染文字与图标、不染底(对齐桌面权限着色豁免规则)。
-  const renderPermissionPill = () => {
+  // 权限模式独立入口(2026-07-29 用户裁决,对齐 Codex):工具条左侧只显示档位图标的
+  // 圆钮,不带文字——档名留给浮窗与无障碍标签;危险档(auto / bypass)只染图标色。
+  const renderPermissionIconButton = () => {
     const presentation = permissionPresentation(displayPermissionMode, displayPermissionLabel);
     const accent = presentation.accent !== 'neutral'
       ? permissionAccentColor(presentation.accent, colors)
@@ -1907,7 +1907,7 @@ export default function NewRemoteSessionScreen() {
         accessibilityState={{ expanded: permissionSheetOpen || undefined }}
         hitSlop={10}
         onPress={openPermissionPicker}
-        style={({ pressed }) => [styles.modelPill, pressed && styles.pressed]}
+        style={({ pressed }) => [styles.composerIconButton, pressed && styles.pressed]}
         testID="newSession.permissionIndicator"
       >
         <presentation.Icon
@@ -1915,20 +1915,15 @@ export default function NewRemoteSessionScreen() {
           size={iconSize.sm}
           strokeWidth={iconStroke.regular}
         />
-        <Text
-          numberOfLines={1}
-          style={[styles.modelPillText, accent ? { color: accent } : null]}
-        >
-          {presentation.label}
-        </Text>
-        <ChevronDown color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
       </Pressable>
     );
   };
 
+  // 工具条布局(对齐 Codex):左 = [+][权限图标][计划 chip];右 = [模型][语音][创建]。
   const renderComposerToolbar = () => (
     <>
       {renderAttachmentToggleButton()}
+      {renderPermissionIconButton()}
       {planModeOn ? (
         <PlanModeChip
           disabled={creating}
@@ -1936,7 +1931,7 @@ export default function NewRemoteSessionScreen() {
           testID="newSession.planModeChip"
         />
       ) : null}
-      {renderPermissionPill()}
+      <ComposerToolbarSpacer />
       <Pressable
         accessibilityLabel={t('session.new.modelAccessibility', { model: runtimeSummary.modelSummary })}
         accessibilityRole="button"
@@ -1961,7 +1956,6 @@ export default function NewRemoteSessionScreen() {
         {triggerFastOn ? <Zap color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} /> : null}
         <ChevronDown color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
       </Pressable>
-      <ComposerToolbarSpacer />
       {composerVoicePlacement?.inline || composerVoicePlacement?.floating
         ? <ComposerToolbarVoiceSlot />
         : null}

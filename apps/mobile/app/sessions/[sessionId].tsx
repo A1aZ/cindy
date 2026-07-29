@@ -84,7 +84,10 @@ import { InlineQueueSection } from '@/session/InlineQueueSection';
 import { RewindPreviewPanel } from '@/session/RewindPreviewPanel';
 import { BlurBackdrop } from '@/session/BlurBackdrop';
 import { SheetModal } from '@/session/SheetModal';
-import { SheetGrabber } from '@/session/SheetSurface';
+import { SheetGrabber, SheetSurface } from '@/session/SheetSurface';
+import { MobilePermissionPickerList } from '@/session/MobilePermissionPickerList';
+import { computeContextSheetSnapHeights, type ContextSheetSnap } from '@/session/contextSheetModel';
+import { permissionAccentColor, permissionPresentation } from '@/session/permissionPresentation';
 import {
   SessionMenuSheet,
   type SessionExtraDirBrowserState,
@@ -1771,9 +1774,44 @@ export default function SessionScreen() {
   );
   // 聚焦卡片形态的底部工具排:[+][模型] …… [语音][停止/发送]。
   // + 号打开 Context 面板(附件 / 计划模式 / 目标模式收在面板内);权限模式入口收进会话设置。
+  // 权限模式图标钮(2026-07-29 用户裁决,对齐 Codex,与新建页同位同款):
+  // 只显示档位图标,不带文字;危险档(auto / bypass)只染图标色。
+  const renderSessionPermissionButton = () => {
+    const presentation = permissionPresentation(displayPermissionMode, displayPermissionLabel);
+    const accent = presentation.accent !== 'neutral'
+      ? permissionAccentColor(presentation.accent, colors)
+      : null;
+    return (
+      <RouteActionButton
+        accessibilityLabel={t('models.picker.permissionModeAccessibility', { mode: presentation.label })}
+        active={permissionSheetOpen}
+        disabled={controlBusy || !canUseComposer}
+        hitSlop={COMPOSER_CONTROL_HIT_SLOP}
+        onPress={() => {
+          setModelSheetOpen(false);
+          setPermissionSheetSnap('half');
+          setPermissionSheetOpen(true);
+        }}
+        style={[
+          styles.composerInlineToolButton,
+          permissionSheetOpen && styles.composerToolButtonActive,
+        ]}
+        testID="session.permissionIndicator"
+      >
+        <presentation.Icon
+          color={accent ?? colors.textSecondary}
+          size={iconSize.sm}
+          strokeWidth={iconStroke.regular}
+        />
+      </RouteActionButton>
+    );
+  };
+
+  // 工具条布局(对齐 Codex):左 = [+][权限图标][计划 chip];右 = [模型][语音][动作]。
   const renderComposerToolbar = () => (
     <>
       {renderComposerAttachmentButton()}
+      {renderSessionPermissionButton()}
       {planModeOn ? (
         <PlanModeChip
           disabled={!canUseComposer || controlBusy}
@@ -1781,6 +1819,7 @@ export default function SessionScreen() {
           testID="session.planModeChip"
         />
       ) : null}
+      <ComposerToolbarSpacer />
       {composerRuntimeSummary ? (
         <ComposerRuntimePill
           fastOn={composerPillFastOn}
@@ -1809,7 +1848,6 @@ export default function SessionScreen() {
           testID="session.composerModelButton"
         />
       ) : null}
-      <ComposerToolbarSpacer />
       {composerVoicePlacement?.inline || composerVoicePlacement?.floating
         ? <ComposerToolbarVoiceSlot />
         : null}
@@ -5327,6 +5365,30 @@ export default function SessionScreen() {
       ? prePlanPermissionModeRef.current
       : runtimeOptions?.permissionOptions.find((option) => option.id !== 'plan')?.id ?? 'ask')
     : currentSession?.permissionMode ?? 'ask';
+  // 权限模式独立浮窗(2026-07-29 用户裁决,对齐 Codex 与新建页):composer 左侧图标钮
+  // 点开;选择走既有 confirmFullAccessChange + maker:set-permission-mode 链路。
+  const [permissionSheetOpen, setPermissionSheetOpen] = useState(false);
+  const [permissionSheetSnap, setPermissionSheetSnap] = useState<ContextSheetSnap>('half');
+  const permissionSheetHeights = useMemo(
+    () => computeContextSheetSnapHeights({
+      safeAreaTopInset: insets.top,
+      screenHeight: windowDimensions.height,
+    }),
+    [insets.top, windowDimensions.height],
+  );
+  const displayPermissionLabel =
+    runtimeOptions?.permissionOptions.find((option) => option.id === displayPermissionMode)?.label
+      ?? displayPermissionMode;
+  const selectSessionPermissionMode = useCallback((mode: string) => {
+    void (async () => {
+      if (!currentSession) return;
+      if (!await confirmFullAccessChange(currentSession.permissionMode, mode)) return;
+      await runControlAction(
+        () => maker.setPermissionMode(sessionId, mode),
+        { permissionMode: mode },
+      );
+    })();
+  }, [currentSession, maker, runControlAction, sessionId]);
 
   // 「已提交、仍在上传」的相册资产:pendingUploads 携带 sourceId(相册来源才有)。
   // 重开面板时这些格子标 busy(spinner + 禁点),onUploaded 落定后自然转为勾选态,
@@ -6663,15 +6725,8 @@ export default function SessionScreen() {
             onChangeSelectedFastMode={changeComposerSelectedFastMode}
             onClose={() => setModelSheetOpen(false)}
             onSelectFlatModel={selectComposerFlatModel}
-            onSelectPermissionMode={(mode) => {
-              void (async () => {
-                if (!await confirmFullAccessChange(currentSession.permissionMode, mode)) return;
-                await runControlAction(
-                  () => maker.setPermissionMode(sessionId, mode),
-                  { permissionMode: mode },
-                );
-              })();
-            }}
+            hidePermissionTrigger
+            onSelectPermissionMode={selectSessionPermissionMode}
             onSelectProviderRow={selectComposerModelRow}
             permissionDisabled={controlBusy || !canUseComposer}
             permissionOptions={runtimeOptions.permissionOptions}
@@ -6683,6 +6738,37 @@ export default function SessionScreen() {
             testID="session.modelSheet"
             visible={modelSheetOpen && canUseComposer}
           />
+        ) : null}
+        {/* 权限模式独立浮窗(composer 权限图标钮点开;列表复用 MobilePermissionPickerList,
+            选择走 confirmFullAccessChange + maker:set-permission-mode 后关浮窗)。 */}
+        {currentSession && runtimeOptions ? (
+          <SheetModal
+            backdropTestID="session.permissionSheet.backdrop"
+            onBackdropPress={() => setPermissionSheetOpen(false)}
+            onRequestClose={() => setPermissionSheetOpen(false)}
+            visible={permissionSheetOpen && canUseComposer}
+          >
+            <SheetSurface
+              bottomInset={insets.bottom}
+              heights={permissionSheetHeights}
+              onClose={() => setPermissionSheetOpen(false)}
+              onSnapChange={setPermissionSheetSnap}
+              snap={permissionSheetSnap}
+              testID="session.permissionSheet"
+              title={t('models.picker.permissionTitle')}
+            >
+              <MobilePermissionPickerList
+                activeMode={displayPermissionMode}
+                disabled={controlBusy || !canUseComposer}
+                onSelect={(mode) => {
+                  selectSessionPermissionMode(mode);
+                  setPermissionSheetOpen(false);
+                }}
+                options={runtimeOptions.permissionOptions}
+                testID="session.permissionSheet.option"
+              />
+            </SheetSurface>
+          </SheetModal>
         ) : null}
         {composerPreviewUrl && composerGalleryImages.length > 0 ? (
           // composer 托盘图片的全屏查看(沿用聊天消息同款 ImageLightbox;本地图无需远端取件)。

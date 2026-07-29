@@ -23,13 +23,26 @@ const mocks = vi.hoisted(() => {
   const mainWindowMainFrame = { url: 'http://localhost:5173/index.html' };
   // 单独留一份 Mock 引用，好在 beforeEach 里重置；断言成 BrowserWindow 后就取不到 Mock 了。
   const mainWindowIsDestroyed = vi.fn(() => false);
-  const mainWindowWebContents = { id: 7, mainFrame: mainWindowMainFrame };
+  const mainWindowWebContents = { id: 7, mainFrame: mainWindowMainFrame, once: vi.fn() };
   const mainWindow = {
     id: 1,
     isDestroyed: mainWindowIsDestroyed,
     webContents: mainWindowWebContents,
   };
   const settingsEvent = { sender: mainWindowWebContents, senderFrame: mainWindowMainFrame };
+  // 「Open in New Window」开出来的会话副窗口:同一套路由,设置页在里面照样打得开。
+  const secondaryAppWindowMainFrame = { url: 'http://localhost:5173/index.html' };
+  const secondaryAppWindowWebContents = { id: 21, mainFrame: secondaryAppWindowMainFrame, once: vi.fn() };
+  const secondaryAppWindow = {
+    id: 3,
+    isDestroyed: vi.fn(() => false),
+    webContents: secondaryAppWindowWebContents,
+  };
+  const secondaryAppWindowEvent = {
+    sender: secondaryAppWindowWebContents,
+    senderFrame: secondaryAppWindowMainFrame,
+  };
+  const isSecondaryAppWindow = vi.fn(() => false);
   // 冒充「另一个已登记的应用窗口」（右侧栏 / Ghost 面板就是这种）：通用闸放行，
   // 但主窗口收窄闸必须拒。
   const secondaryWindowEvent = {
@@ -51,7 +64,10 @@ const mocks = vi.hoisted(() => {
   // 闸只读 isDestroyed / webContents / mainFrame，没必要拼一整个 BrowserWindow，所以
   // 断言收窄在这一处；ipcDeps 本身用真实类型，这样 deps 形状变化会在编译期暴露。
   const getMainWindow = vi.fn(() => mainWindow as unknown as BrowserWindow);
-  const ipcDeps: GlobalVoiceInputIpcDeps = { getMainWindow };
+  const ipcDeps: GlobalVoiceInputIpcDeps = {
+    getMainWindow,
+    isSecondaryAppWindow: isSecondaryAppWindow as unknown as GlobalVoiceInputIpcDeps['isSecondaryAppWindow'],
+  };
   // 抓住 listener 构造时传入的 onKeys。转发名单是模块私有的，onKeys 往哪些窗口 send
   // 是它唯一的可观察代理 —— 用来验证「被顶掉的那一轮没有把别人的登记删掉」。
   const listenerOptions: { onKeys?: (keys: string[]) => void } = {};
@@ -68,6 +84,10 @@ const mocks = vi.hoisted(() => {
     mainWindowIsDestroyed,
     settingsEvent,
     secondaryWindowEvent,
+    secondaryAppWindow,
+    secondaryAppWindowWebContents,
+    secondaryAppWindowEvent,
+    isSecondaryAppWindow,
     modifierSetShortcut,
     modifierStop,
     modifierIsRunning,
@@ -98,6 +118,12 @@ vi.mock('electron', () => ({
   BrowserWindow: {
     getAllWindows: vi.fn(() => [mocks.focusedWindow]),
     getFocusedWindow: vi.fn(() => mocks.focusedWindow),
+    // 闸要从 sender 反查它所属的窗口,才能判断「是不是某个窗口自己的顶层 webContents」。
+    fromWebContents: vi.fn((contents: unknown) => {
+      if (contents === mocks.mainWindow.webContents) return mocks.mainWindow;
+      if (contents === mocks.secondaryAppWindowWebContents) return mocks.secondaryAppWindow;
+      return null;
+    }),
   },
   clipboard: {},
   globalShortcut: {
@@ -192,6 +218,10 @@ describe('voice input global shortcut registration', () => {
     mocks.mainWindowIsDestroyed.mockReturnValue(false);
     mocks.getMainWindow.mockReset();
     mocks.getMainWindow.mockReturnValue(mocks.mainWindow as unknown as BrowserWindow);
+    mocks.isSecondaryAppWindow.mockReset();
+    mocks.isSecondaryAppWindow.mockReturnValue(false);
+    mocks.secondaryAppWindowWebContents.once.mockReset();
+    mocks.mainWindow.webContents.once.mockReset();
     mocks.getSettings.mockReset();
     mocks.getSettings.mockReturnValue({ shortcut: null });
     mocks.appListeners.clear();
@@ -549,9 +579,27 @@ describe('voice input global shortcut registration', () => {
 
         const consume = mocks.handlers.get('voice-input:consume-shortcut-recovery-failure');
         expect(consume).toBeTypeOf('function');
-        // 第一次取到,第二次就没了 —— 一次 App 运行只提示一次。
+        // 同一个 renderer 取第二次就没了 —— 同一个窗口不会被弹两次。
         expect(consume?.(mocks.settingsEvent)).toEqual({ failed: true });
         expect(consume?.(mocks.settingsEvent)).toEqual({ failed: false });
+      });
+
+      // 每个应用窗口(含会话副窗口)都挂着 MainLayout,都会来取。全局取一次就清的话,一个在
+      // 后台、被挡住的副窗口就可能吞掉这唯一一次提示,用户正看着的窗口反而什么都没有。
+      it('lets each renderer consume the failure once instead of clearing it globally', async () => {
+        setPlatform('darwin');
+        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.modifierIsRunning.mockReturnValue(false);
+        mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'spawn ENOENT' });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await focusWindow();
+
+        const consume = mocks.handlers.get('voice-input:consume-shortcut-recovery-failure');
+        expect(consume?.(mocks.secondaryAppWindowEvent)).toEqual({ failed: true });
+        // 副窗口先取走了,主窗口照样要能拿到。
+        expect(consume?.(mocks.settingsEvent)).toEqual({ failed: true });
       });
 
       // 限流窗口内的那次聚焦可能正是「用户刚授权完切回来」的那一次,而应用此后一直在前台、
@@ -734,7 +782,8 @@ describe('voice input global shortcut registration', () => {
 
     // 这两条 handler 会弹系统级授权窗。语音浮窗、词典 toast、右侧栏窗口、Ghost 面板装的
     // 都是同一份 preload，而后两者还会 markAppContentWindow —— 所以只靠「是不是受信应用
-    // 窗口」不够，必须收窄到主窗口，否则那些窗口被 XSS 拿下就能在设置流程外弹权限窗。
+    // 窗口」不够，必须收窄到承载路由的应用外壳窗口(主窗口 + 会话副窗口)，否则那些窗口被
+    // XSS 拿下就能在设置流程外弹权限窗。
     for (const channel of [
       'voice-input:request-input-monitoring-permission',
       'voice-input:open-input-monitoring-settings',
@@ -747,6 +796,32 @@ describe('voice input global shortcut registration', () => {
         // 通用闸放行（模拟右侧栏 / Ghost 面板这种已登记窗口），只有主窗口收窄闸拦下它。
         await expect(
           mocks.handlers.get(channel)?.(mocks.secondaryWindowEvent),
+        ).rejects.toThrow('[PERMISSION_DENIED]');
+        expect(mocks.requestInputMonitoring).not.toHaveBeenCalled();
+      });
+
+      // 「Open in New Window」的会话副窗口跑同一套路由,设置页在里面照样打得开。只认主窗口
+      // 的话:用户在副窗口里点授权入口只会得到失败,存盘后的自动请求还会静默失效。
+      it(`accepts ${channel} from a session window opened in a new window`, async () => {
+        setPlatform('darwin');
+        mocks.isSecondaryAppWindow.mockReturnValue(true);
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await expect(
+          mocks.handlers.get(channel)?.(mocks.secondaryAppWindowEvent),
+        ).resolves.toMatchObject({ ok: true });
+      });
+
+      // 同样形状的顶层窗口,但不是会话副窗口(右侧栏 / Ghost 面板就是这种):必须拒。
+      it(`rejects ${channel} from a top-level window that is not an app shell window`, async () => {
+        setPlatform('darwin');
+        mocks.isSecondaryAppWindow.mockReturnValue(false);
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await expect(
+          mocks.handlers.get(channel)?.(mocks.secondaryAppWindowEvent),
         ).rejects.toThrow('[PERMISSION_DENIED]');
         expect(mocks.requestInputMonitoring).not.toHaveBeenCalled();
       });

@@ -530,8 +530,18 @@ export function unregisterActiveInlineVoiceInputWebContents(webContentsId: numbe
 }
 
 export type GlobalVoiceInputIpcDeps = {
-  /** 主窗口访问器；语音设置页只在主窗口里，用于把弹系统授权窗的动作锁到它。 */
+  /** 主窗口访问器。 */
   getMainWindow: () => BrowserWindow | null;
+  /**
+   * 是不是「Open in New Window」开出来的会话副窗口。
+   *
+   * 副窗口跑的是同一套路由，设置页在里面照样打得开，所以弹系统授权窗那两条 IPC 必须认它 ——
+   * 否则用户在副窗口里点授权入口只会得到失败，存盘后的自动请求也会静默失效。
+   *
+   * 用这个而不是 appContentWindows：那个 WeakSet 还包含右侧栏与 Ghost 面板，它们不承载
+   * 路由、也就不该拿到弹系统授权窗的能力。
+   */
+  isSecondaryAppWindow: (win: BrowserWindow) => boolean;
 };
 
 /**
@@ -543,28 +553,34 @@ export type GlobalVoiceInputIpcDeps = {
  * 权限窗。语音设置页只存在于主窗口，所以这里按最小权限收到主窗口 webContents +
  * mainFrame（同 main/billing/index.ts 的 assertMainWindowSender）。
  */
-function assertVoiceSettingsMainWindowSender(
+function assertVoiceSettingsWindowSender(
   event: IpcMainInvokeEvent,
-  getMainWindow: () => BrowserWindow | null,
+  deps: GlobalVoiceInputIpcDeps,
 ): void {
   // 先过通用闸：它额外校验 senderFrame 是顶层 frame 且 URL 属于 Cindy 自有 renderer，
-  // 挡掉子 frame / WebView / 导航到别处的页面。下面再收窄到主窗口。
+  // 挡掉子 frame / WebView / 导航到别处的页面。下面再收窄到承载应用外壳的窗口。
   assertTrustedAppRendererEvent(event);
-  const mainWindow = getMainWindow();
-  if (
-    !mainWindow ||
-    mainWindow.isDestroyed() ||
-    event.sender !== mainWindow.webContents ||
-    event.senderFrame !== mainWindow.webContents.mainFrame
-  ) {
+  const senderWindow = BrowserWindow.fromWebContents(event.sender);
+  // 必须是某个窗口自己的顶层 webContents + 顶层 frame，而不是它内嵌的什么东西。
+  const isWindowTopLevelSender = Boolean(
+    senderWindow &&
+    !senderWindow.isDestroyed() &&
+    event.sender === senderWindow.webContents &&
+    event.senderFrame === senderWindow.webContents.mainFrame,
+  );
+  const mainWindow = deps.getMainWindow();
+  const isMainWindow = Boolean(mainWindow && !mainWindow.isDestroyed() && senderWindow === mainWindow);
+  const allowed = isWindowTopLevelSender && senderWindow !== null
+    && (isMainWindow || deps.isSecondaryAppWindow(senderWindow));
+  if (!allowed) {
     // 与本模块其它 throwIpcError 一致用英文：这句是给日志/调试看的，renderer 侧要展示
     // 时走 code → i18n 映射，不消费这里的原文。
     //
-    // 措辞只说主窗口、不说「设置页」：闸能校验的就是主窗口顶层 frame，路由/页面无从
-    // 可靠断言，写成设置页会让日志读起来像做了更强的检查（对齐 billing 的口径）。
+    // 措辞只说「应用外壳窗口」、不说「设置页」：闸能校验的就是窗口与顶层 frame，路由/页面
+    // 无从可靠断言，写成设置页会让日志读起来像做了更强的检查（对齐 billing 的口径）。
     throwIpcError(
       'PERMISSION_DENIED',
-      'Input Monitoring permission is only available to the main window',
+      'Input Monitoring permission is only available to app shell windows',
     );
   }
 }
@@ -633,10 +649,17 @@ function recoverableNativeShortcut(): VoiceInputShortcut | null {
  * 真坏掉会每次切回来都失败一遍，反复弹同一条只会变成骚扰 —— 用户此刻并没有在做这件事。
  */
 let pendingShortcutRecoveryFailure = false;
-let pendingShortcutRecoveryFailureConsumed = false;
+/**
+ * 已经取过这条通知的 renderer。
+ *
+ * 不能取一次就全局清掉：每个应用窗口（含会话副窗口）都挂着 MainLayout，都会来取。谁先到谁
+ * 拿走的话，一个在后台、被挡住的副窗口就可能吞掉这唯一一次提示，用户正看着的窗口反而拿到
+ * `{ failed: false }` —— 那条提示就等于没有。按 renderer 记账：每个窗口最多提示一次，用户
+ * 看着哪个窗口都能看到，也不会在同一个窗口里被弹第二次。
+ */
+const shortcutRecoveryFailureConsumers = new Set<number>();
 
 function notifyPendingShortcutRecoveryFailed(): void {
-  if (pendingShortcutRecoveryFailureConsumed) return;
   pendingShortcutRecoveryFailure = true;
   for (const window of BrowserWindow.getAllWindows()) {
     try {
@@ -691,6 +714,9 @@ async function recoverPendingNativeShortcutRegistration(): Promise<void> {
     }
     if (result.ok) {
       log.info('pending native shortcut re-registered after permission was granted');
+      // 恢复成功后清账：此后若又失败，那是一件新事，值得再提示一次。
+      pendingShortcutRecoveryFailure = false;
+      shortcutRecoveryFailureConsumers.clear();
       return;
     }
     if (result.errorCode === 'superseded') return;
@@ -996,23 +1022,30 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
    * renderer 挂载后来取「有没有一条自动恢复失败要提示」。
    *
    * 有它才能保证不漏：失败可能发生在 MainLayout 挂载之前（登录门 / 数据库门还在前面），
-   * 那时推送没有订阅者。状态在这里被取走才清，所以推送丢了也补得回来。
+   * 那时推送没有订阅者。状态留在 main、按 renderer 记账，所以推送丢了也补得回来。
    *
-   * 闸用通用的可信 renderer 校验（不是主窗口收窄闸）：MainLayout 在每个应用窗口里都挂着，
-   * 而这条只读一个布尔、不触发任何系统弹窗。
+   * 按 renderer 而不是全局记一次：每个应用窗口（含会话副窗口）都挂着 MainLayout，都会来取。
+   * 全局清的话，一个后台副窗口就可能吞掉这唯一一次提示。
+   *
+   * 闸用通用的可信 renderer 校验（不是应用外壳窗口那道收窄闸）：这条只读一个布尔、不触发
+   * 任何系统弹窗。
    */
   ipcMain.handle('voice-input:consume-shortcut-recovery-failure', (event): { failed: boolean } => {
     assertTrustedAppRendererEvent(event);
     if (!pendingShortcutRecoveryFailure) return { failed: false };
-    pendingShortcutRecoveryFailure = false;
-    pendingShortcutRecoveryFailureConsumed = true;
+    const senderId = event.sender.id;
+    if (shortcutRecoveryFailureConsumers.has(senderId)) return { failed: false };
+    shortcutRecoveryFailureConsumers.add(senderId);
+    event.sender.once('destroyed', () => {
+      shortcutRecoveryFailureConsumers.delete(senderId);
+    });
     return { failed: true };
   });
 
   ipcMain.handle('voice-input:open-input-monitoring-settings', async (event): Promise<VoiceInputGlobalResult> => {
     // 同下面的 request handler：这条也会触发 CGRequestListenEventAccess 弹系统授权窗，
     // 攻击面完全相同，所以一并上闸——只给新 handler 加等于没关洞。
-    assertVoiceSettingsMainWindowSender(event, deps.getMainWindow);
+    assertVoiceSettingsWindowSender(event, deps);
     if (process.platform !== 'darwin') {
       return {
         ok: false,
@@ -1041,13 +1074,13 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
   // - 必须过 sender 闸，并且收窄到主窗口顶层 frame。语音浮窗、词典 toast、右侧栏窗口、
   //   Ghost 面板装的都是同一份 preload；后两者还会 markAppContentWindow，所以只过
   //   assertTrustedAppRendererEvent 仍然放得进来。见
-  //   assertVoiceSettingsMainWindowSender 的注释。
+  //   assertVoiceSettingsWindowSender 的注释。
   // - 失败走 throwIpcError 而不是 return { ok: false }：这是动作型 handler，renderer
   //   不需要失败时的结构化 fallback（它随后会重新查权限），按 IPC 错误协议应当抛。
   ipcMain.handle(
     'voice-input:request-input-monitoring-permission',
     async (event): Promise<VoiceInputInputMonitoringRequestResult> => {
-      assertVoiceSettingsMainWindowSender(event, deps.getMainWindow);
+      assertVoiceSettingsWindowSender(event, deps);
       if (process.platform !== 'darwin') {
         throwIpcError('UNSUPPORTED_CAPABILITY', 'Input Monitoring permission is only required on macOS.');
       }

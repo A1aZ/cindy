@@ -1103,6 +1103,8 @@ export function VoiceInputSection() {
   const shortcutSuspendPromiseRef = useRef<Promise<void> | null>(null);
   // 快捷键提交的代次，见 commitRecordedShortcut。
   const shortcutSubmissionRef = useRef(0);
+  // 正在飞的那次提交，见 commitRecordedShortcut 与录制 effect 的 cleanup。
+  const shortcutCommitPromiseRef = useRef<Promise<void> | null>(null);
   const nativeFnShortcutActiveRef = useRef(false);
   const nativeFnComboSeenRef = useRef(false);
   const externalDictionaryLearningSupported = window.electronAPI.platform === 'darwin';
@@ -1337,7 +1339,7 @@ export function VoiceInputSection() {
       // 最新选的快捷键根本不需要监听权限时（比如改成了 F16）弹出 macOS 授权窗。
       const submission = (shortcutSubmissionRef.current += 1);
       const isStaleSubmission = (): boolean => shortcutSubmissionRef.current !== submission;
-      void (async () => {
+      const commit = (async () => {
         await shortcutSuspendPromiseRef.current;
         const result = await setShortcut(shortcut);
         if (isStaleSubmission()) return;
@@ -1368,6 +1370,12 @@ export function VoiceInputSection() {
           schedulePermissionRefresh({ immediate: true });
         }
       })();
+      // 录制 effect 的 cleanup 要靠它决定「现在能不能读存盘去恢复注册」：提交还在飞时
+      // 存盘里还是旧快捷键，此刻恢复等于在这次提交之后又把旧的注册回去。
+      shortcutCommitPromiseRef.current = commit;
+      void commit.finally(() => {
+        if (shortcutCommitPromiseRef.current === commit) shortcutCommitPromiseRef.current = null;
+      });
     },
     [schedulePermissionRefresh, setShortcut, t],
   );
@@ -1597,9 +1605,32 @@ export function VoiceInputSection() {
       if (window.electronAPI.platform === 'darwin') {
         void window.electronAPI.voiceInput.stopModifierShortcutRecording();
       }
-      void syncVoiceInputGlobalShortcut(getVoiceInputSettings().shortcut);
+      // 恢复注册必须等在飞的那次提交落地再读存盘。
+      //
+      // 切走设置 tab 会卸载本组件，cleanup 立刻跑；此刻提交还没存盘，getVoiceInputSettings()
+      // 读到的是**旧**快捷键，而它排到 main 队列里又在那次提交之后 —— 结果是存盘和界面都
+      // 指向新快捷键，实际生效的却是旧那个，直到下次进这个 tab 才被纠正。
+      //
+      // 等它落地就能对上：提交成功时读到的是新快捷键（重复注册同一个是幂等的），提交失败时
+      // 读到的仍是旧那个，而那正是此时该生效的。所以两条路都不需要额外判断。
+      const restoreRegistration = (): void => {
+        void syncVoiceInputGlobalShortcut(getVoiceInputSettings().shortcut);
+      };
+      const pendingCommit = shortcutCommitPromiseRef.current;
+      if (pendingCommit) {
+        void pendingCommit.then(restoreRegistration, restoreRegistration);
+      } else {
+        restoreRegistration();
+      }
     };
   }, [recordingShortcut, startFnKeyCapture]);
+
+  // 组件卸载（切走设置 tab、关掉设置页）时作废在飞的提交：代次原先只在下一次提交时才推进，
+  // 于是切走之后迟到的结果照样会执行副作用 —— 弹一条已经无处安放的提示，甚至凭一个用户
+  // 早已离开的界面上的选择弹出 macOS 授权窗。注册本身由 main 侧负责，不受此影响。
+  useEffect(() => () => {
+    shortcutSubmissionRef.current += 1;
+  }, []);
 
   useEffect(() => {
     if (!settings.refinementEnabled) {

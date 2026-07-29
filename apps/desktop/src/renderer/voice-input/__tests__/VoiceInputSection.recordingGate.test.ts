@@ -24,6 +24,10 @@ describe('VoiceInputSection shortcut recording gate', () => {
     expect(source).toContain('await shortcutSuspendPromiseRef.current');
     expect(source).toContain('shortcutSuspendPromiseRef.current = suspendPromise');
     expect(source).toContain('syncVoiceInputGlobalShortcut(getVoiceInputSettings().shortcut)');
+    // 恢复注册要等在飞的提交落地再读存盘：切走 tab 会立刻跑 cleanup，那时存盘还是旧快捷键,
+    // 直接恢复会在提交之后把旧的注册回去(存盘/界面指新的、实际生效旧的)。
+    expect(source).toContain('const pendingCommit = shortcutCommitPromiseRef.current;');
+    expect(source).toContain('void pendingCommit.then(restoreRegistration, restoreRegistration);');
     // 录制 effect 刻意**不**依赖监听权限：录制中途授权只需补一次 Fn capture（由权限
     // effect 直接调 startFnKeyCapture），让本 effect 重跑会先由 cleanup 异步恢复已保存
     // 的全局快捷键、再由 setup 挂起，中间那段窗口里用户按下旧快捷键会真的触发语音输入。
@@ -64,6 +68,9 @@ describe('VoiceInputSection shortcut recording gate', () => {
     expect(source).toMatch(
       /const result = await setShortcut\(shortcut\);\s*\n\s*if \(isStaleSubmission\(\)\) return;/,
     );
+    // 代次原先只在下一次提交时推进，切走设置 tab 卸载本组件并不会作废在飞的那次 ——
+    // 迟到的结果照样弹提示，甚至凭一个用户早已离开的界面上的选择弹出 macOS 授权窗。
+    expect(source).toMatch(/useEffect\(\(\) => \(\) => \{\s*\n\s*shortcutSubmissionRef\.current \+= 1;\s*\n\s*\}, \[\]\);/);
   });
 
   // 授权拿到了 ≠ 快捷键起得来：helper 仍可能 spawn 失败 / 启动超时 / 起来就退。原先这条

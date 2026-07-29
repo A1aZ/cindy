@@ -110,8 +110,8 @@ import { useCrossAgentMigrationDialog } from '@/hooks/useCrossAgentConvertPrompt
 import { getCollaborationStartErrorMessage } from './collaborationErrors';
 import { useCollabProjectPolicy } from './hooks/useCollabProjectPolicy';
 import { CrossAgentConvertDialog } from '@/components/ui/cross-agent-convert-dialog';
-import type { MakerVendor, Session } from '@/lib/ccAgent.types';
-import { remoteProjectsStore } from '@/features/device-link/remoteProjectsStore';
+import type { MakerVendor } from '@/lib/ccAgent.types';
+import { refreshRemoteDeviceSessions } from '@/features/device-link/refreshRemoteSessions';
 import {
   ChevronDown,
   Code2,
@@ -1785,14 +1785,22 @@ export function NewMakerDraftRoute() {
               toast.error(t('ccAgent.draft.createSessionFailed'));
               return;
             }
-            // 重拉该设备会话列表(含字段完整的新会话)→ 注册 origin + 出现在项目下。
-            const list = await window.electronAPI.deviceLink.invoke(
-              deviceId,
-              'local-db:sessions:list',
-              [200, 'active', { includePinned: true }],
-            );
-            if (Array.isArray(list)) {
-              remoteProjectsStore.setDeviceSessions(deviceId, deviceName, list as Session[]);
+            // remoteSessionId 到手就是**提交点**:对端会话已经建出来了。此后任何一步都不许再把它
+            // 退化成「创建失败」—— 用户会照着提示重试,于是对端多出第二个会话,第一个空着永久滞留
+            // (Codex review P1)。原来这里手写 invoke + setDeviceSessions,隧道一抖(被控端 DB 刚
+            // 启动未就绪 / 链路瞬断 / 超时)就抛进外层 catch,正是这个后果。
+            //
+            // 改走 refreshRemoteDeviceSessions —— 本仓所有其它「远程新建会话后回流」的入口
+            // (fork / orca worker / 删除消息 / reconnect)都用它,这两处是仅存的手写例外。它:
+            //   · 不抛:瞬态错误退避重试(~6.75s 窗口,覆盖被控端冷启动),永久错误返回 'gave-up';
+            //   · 认 snapshot epoch,不会覆盖更新的快照(手写调用完全绕过);
+            //   · 有界快照按 merge 落库 —— 手写调用把 200 行上限的列表当权威 replace,
+            //     被控端会话超过 200 条时会把窗口外已缓存的会话连同标题叠加层一起清掉。
+            // 回流失败(gave-up/superseded)也照常交接:sessions:created push 还会触发一次防抖重拉,
+            // 不能因为镜像慢一拍就谎报创建失败。
+            const refreshResult = await refreshRemoteDeviceSessions(deviceId, deviceName);
+            if (refreshResult !== 'ok') {
+              log.warn('[draft send] remote sessions refresh after create', refreshResult);
             }
             const rehydratedFiles = await rehomeDraftAttachments(files, remoteSessionId);
             setPending(remoteSessionId, {
@@ -2275,13 +2283,13 @@ export function NewMakerDraftRoute() {
           throw new Error(t('ccAgent.draft.createSessionFailed'));
         }
         // 重拉该设备会话列表 → 注册 origin(后续 goalApiFor / useGoalStatus 依赖它路由)。
-        const list = await window.electronAPI.deviceLink.invoke(
-          deviceId,
-          'local-db:sessions:list',
-          [200, 'active', { includePinned: true }],
-        );
-        if (Array.isArray(list)) {
-          remoteProjectsStore.setDeviceSessions(deviceId, deviceName, list as Session[]);
+        // 与 handleSend 远程分支同口径走 refreshRemoteDeviceSessions:remoteSessionId 已是提交点,
+        // 回流失败不能抛 —— 这里抛出去 NewGoalDialog 会内联报错并保持打开,用户再点一次「创建」
+        // 就在对端建出第二个目标会话,第一个空着滞留(Codex review P1)。不抛 / 认 epoch /
+        // 有界快照按 merge 落库这三条同上,见 handleSend 处的说明。
+        const refreshResult = await refreshRemoteDeviceSessions(deviceId, deviceName);
+        if (refreshResult !== 'ok') {
+          log.warn('[draft goal] remote sessions refresh after create', refreshResult);
         }
         // setGoal 不在这里发:重 topic session:<id> 订阅要等 CCAgentSessionView
         // mount 才建立,在 /cc-agent/new 就起 goal 首轮会让 maker:event/status 推送

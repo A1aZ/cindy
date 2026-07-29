@@ -530,6 +530,26 @@ describe('Shared create project picker', () => {
     expect(untilReturn).toContain('setError(null);');
   });
 
+  // #807 review 第十四轮:被控端 maker:create-session 一返回 sessionId 就是**提交点**。原来两处
+  // 远程分支手写 invoke('local-db:sessions:list') + setDeviceSessions 做镜像回流,隧道一抖(被控端
+  // DB 刚启动未就绪 / 链路瞬断 / 超时)就抛 —— handleSend 落进外层 catch 报「创建失败」、
+  // handleCreateGoal 让 NewGoalDialog 内联报错并保持打开,两者都会让用户重试,于是对端多出第二个
+  // 会话、第一个空着永久滞留。回流必须走 refreshRemoteDeviceSessions:它不抛(瞬态退避重试、
+  // 永久错误返回 'gave-up'),且认 snapshot epoch、有界快照按 merge 落库。
+  it('routes post-create mirror refresh through the non-throwing shared helper', () => {
+    expect(newMakerDraftRouteSource).toContain(
+      'const refreshResult = await refreshRemoteDeviceSessions(deviceId, deviceName);',
+    );
+    // 两条远程创建路径都得换掉 —— 只改一半等于留着另一条同样的路。
+    expect(
+      newMakerDraftRouteSource.match(/await refreshRemoteDeviceSessions\(deviceId, deviceName\)/g)
+        ?.length,
+    ).toBe(2);
+    // 手写回流必须彻底消失,否则提交点后仍有可抛的一步。
+    expect(newMakerDraftRouteSource).not.toContain("'local-db:sessions:list'");
+    expect(newMakerDraftRouteSource).not.toContain('setDeviceSessions(');
+  });
+
   it('keeps recent-folder storage out of project-option selection', () => {
     expect(folderPickerPopoverSource).toContain('projectOptions?: readonly FolderPickerOption[]');
     expect(folderPickerPopoverSource).toContain(

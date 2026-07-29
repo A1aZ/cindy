@@ -302,6 +302,32 @@ describe('Shared create project picker', () => {
     );
   });
 
+  // #807 review 第十三轮:切设备时必须立刻清空上一台的行 —— projects memo 依赖
+  // [deviceId, deviceName, rows],deviceId 已变成 B 而 rows 还是 A 的,加载窗口里会渲染出
+  // 「标着 B 的 A 的项目」,选中就把 A 的路径发给 B。
+  it('clears the previous device rows immediately when switching', () => {
+    const effect = deviceLinkProjectsHookSource.slice(
+      deviceLinkProjectsHookSource.indexOf('const requestId = requestIdRef.current + 1;'),
+    );
+    expect(effect.slice(0, effect.indexOf('loadDeviceLinkExistingProjects'))).toContain('setRows([]);');
+  });
+
+  // #807 review 第十三轮:同一台机器上换项目不得重置运行配置与引用目录 —— 上一轮只 gate 了
+  // mention chip,dlSel 与 extraDirs 仍被无条件打回默认值,用户选的远程模型/来源/权限和加好的
+  // 引用目录会静默丢失。
+  it('preserves runtime selection and extra dirs when browsing the same device', () => {
+    const handoff = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const deviceChanged = target.deviceId !== effectiveDeviceLinkDeviceId;'),
+    );
+    const untilReturn = handoff.slice(0, handoff.indexOf('return;'));
+    // dlSel 只在换设备时重种。
+    expect(untilReturn).toContain('if (deviceChanged) {\n          setDlSel(');
+    // extraDirs 只在换设备时清(不传则 store 保持原值)。
+    expect(untilReturn).toContain('...(deviceChanged ? { extraDirs: [] } : {}),');
+    // 但 worktree 三态照常重置 —— 换项目就是换 repo。
+    expect(untilReturn).toContain('setWtEnabled(false);');
+  });
+
   // #807 review 第十二轮:in-flight 保护要覆盖**工作区** pill,不只是设备 pill —— 否则用户点了
   // Send 还能从远程项目 X 切到 Y,会话建在 X 里、刚选的 Y 又被 create 后的重置清掉。
   it('disables and guards workspace switching while a send is in flight', () => {
@@ -324,7 +350,8 @@ describe('Shared create project picker', () => {
       newMakerDraftRouteSource.indexOf('清除草稿中基于本地 / **上一台**设备文件系统'),
     );
     const untilPatch = handoff.slice(0, handoff.indexOf('skipDefaultsRefetchRef'));
-    expect(untilPatch).toContain('if (target.deviceId !== effectiveDeviceLinkDeviceId) {');
+    // 判据现在收在 deviceChanged 变量里(同一 handler 内多处复用)。
+    expect(untilPatch).toContain('if (deviceChanged) {');
     expect(untilPatch).toContain('stripLocalMentionChips');
   });
 

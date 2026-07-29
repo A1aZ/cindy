@@ -1075,8 +1075,17 @@ export function NewMakerDraftRoute() {
           prefetchDeviceCapabilities(target.deviceId),
           prefetchDeviceProviders(target.deviceId),
         ]);
+        // 「换机器」与「同机器换项目」要区别对待(#807 review):设备域的浏览器会预选当前设备,
+        // 所以这个 handler 同时承担两件事。跨设备的重置(运行配置、引用目录、mention chip)只在
+        // 设备真的变了时才做 —— 否则用户在同一台机器上换个项目,就把自己选的远程模型 / 来源 /
+        // 权限模式和加好的引用目录静默打回默认值,下一次发送用的是回退后的配置。
+        const deviceChanged = target.deviceId !== effectiveDeviceLinkDeviceId;
         dlSeedKeyRef.current = `${target.deviceId}:${capabilityAgentKind}`;
-        setDlSel(resolveDeviceLinkDraftDefaults(freshCaps, freshDefaults, undefined, capabilityAgentKind));
+        // 同设备:保留用户已选的 model / provider / effort / permission。
+        if (deviceChanged) {
+          setDlSel(resolveDeviceLinkDraftDefaults(freshCaps, freshDefaults, undefined, capabilityAgentKind));
+        }
+        // remoteDraftState 照常刷新:同设备时它也是那台机器的最新值(provider model memory 的来源)。
         setRemoteDraftState({ loaded: true, value: freshDefaults });
         setWtEnabled(false);
         setWtBaseRepo(null);
@@ -1088,7 +1097,7 @@ export function NewMakerDraftRoute() {
         // 只在文件系统真的换了时才剥(#807 review):设备域的浏览器会优先预选当前设备,于是
         // 「在同一台远程机器上从项目 X 换到项目 Y」也会走到这里 —— 那种情况文件系统没变,
         // 把用户已经写好的 @file / @dir / @agent 无声清掉纯粹是功能退化。
-        if (target.deviceId !== effectiveDeviceLinkDeviceId) {
+        if (deviceChanged) {
           const dlDraft = getComposerDraft(NEW_MAKER_DRAFT_KEY);
           if (dlDraft?.text) {
             saveComposerDraft(NEW_MAKER_DRAFT_KEY, {
@@ -1098,7 +1107,7 @@ export function NewMakerDraftRoute() {
           }
         }
         // 只有 deviceId 真正变化时 effect 才会重跑并消费 skip flag;同设备不设。
-        if (target.deviceId !== effectiveDeviceLinkDeviceId) {
+        if (deviceChanged) {
           skipDefaultsRefetchRef.current = true;
         }
         patchDraft({
@@ -1106,7 +1115,9 @@ export function NewMakerDraftRoute() {
           remoteHostId: null,
           deviceLinkDeviceId: target.deviceId,
           deviceLinkDeviceName: target.deviceName,
-          extraDirs: [],
+          // 同机器换项目时保留引用目录:它们指向的是这台机器上仍然有效的路径。
+          // 不传 extraDirs 时 store 保持原值(只有显式带才改)。
+          ...(deviceChanged ? { extraDirs: [] } : {}),
         });
         return;
       }

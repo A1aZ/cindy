@@ -80,6 +80,10 @@ export function useDeviceLinkProjects(
     let cancelled = false;
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
+    // 立刻清空上一台设备的行(#807 review):projects memo 依赖 [deviceId, deviceName, rows],
+    // deviceId 已经变成 B 而 rows 还是 A 的,于是加载窗口里会渲染出「标着 B 的 A 的项目」——
+    // 用户此时选中就把 A 的路径发给 B,撞 path guard 或打开 B 上同名的无关目录。
+    setRows([]);
     setLoading(true);
     void loadDeviceLinkExistingProjects(deviceId)
       .then((list) => {

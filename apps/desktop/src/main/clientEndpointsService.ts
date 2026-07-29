@@ -48,7 +48,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { app, dialog, ipcMain, net } from 'electron';
+import { app, dialog, ipcMain, net, netLog } from 'electron';
 
 import {
   resolveClientEndpointsStrict,
@@ -611,6 +611,17 @@ const DIAGNOSIS_ATTEMPT_TIMEOUT_MS = 5_000;
  */
 const NETLOG_STEP_TIMEOUT_MS = 3_000;
 
+/**
+ * netlog 落盘路径。**日志目录拿不到(含空串)时返回 null,调用方必须跳过抓取**:
+ * initLogger 建目录失败时 getLogDir() 保持空串,`path.join('', name)` 会得到相对路径,
+ * 于是 netlog 落到 process.cwd()——dev 下正是仓库工作区,既违反
+ * credentials-and-local-storage.md 的落盘位置规则,还会在被 Git 跟踪的目录里留生成物。
+ */
+export function resolveEndpointNetLogPath(logDir: string | null): string | null {
+  if (!logDir?.trim()) return null;
+  return path.join(logDir, ENDPOINT_NETLOG_FILE_NAME);
+}
+
 /** netLog 里本模块用到的两个方法(测试注入内存实现,不起 Electron)。 */
 export interface NetLogLike {
   startLogging(file: string, options: { captureMode: 'default' }): Promise<void>;
@@ -678,12 +689,14 @@ export async function captureNetLogAround(
  */
 async function captureEndpointNetLog(): Promise<string | null> {
   try {
-    // 动态 import(仓内先例:mcp-providers / createDesktopProviderService):netLog 只在
-    // 这条诊断路径用到,静态引入会让本模块的所有单测都必须在 electron mock 里补这个 key。
-    const { netLog } = await import('electron');
+    const file = resolveEndpointNetLogPath(getLogDirSafe());
+    if (!file) {
+      log.debug('netlog capture skipped: log directory unavailable');
+      return null;
+    }
     return await captureNetLogAround(
       netLog,
-      path.join(getLogDir(), ENDPOINT_NETLOG_FILE_NAME),
+      file,
       () => fetchManifestViaCdn(DIAGNOSIS_ATTEMPT_TIMEOUT_MS),
       NETLOG_STEP_TIMEOUT_MS,
     );
@@ -718,10 +731,13 @@ async function diagnoseCdnManifestFetch(
   return { summary, logPath: netLogPath ?? getLogDirSafe() };
 }
 
-/** 日志目录取值失败(logger 未初始化)时不要连带炸掉阻断流程。 */
+/**
+ * 日志目录取值失败(logger 未初始化)时不要连带炸掉阻断流程。
+ * **空串也算拿不到**:initLogger 建目录失败时 logRootDir 保持 '',原样用会变成相对路径。
+ */
 function getLogDirSafe(): string | null {
   try {
-    return getLogDir();
+    return getLogDir().trim() || null;
   } catch {
     return null;
   }

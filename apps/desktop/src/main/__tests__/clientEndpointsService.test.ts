@@ -29,6 +29,10 @@ vi.mock('electron', () => ({
   dialog: { showMessageBoxSync: vi.fn() },
   ipcMain: { on: ipcOn },
   net: { request: netRequest },
+  // netLog 是静态 import(architecture-invariants.md §2);captureEndpointNetLog 这条
+  // 路径由 captureNetLogAround 的注入式用例覆盖,这里只需让模块能加载。
+  netLog: { startLogging: vi.fn(async () => {}), stopLogging: vi.fn(async () => {}) },
+  session: { defaultSession: { resolveProxy: vi.fn(async () => 'DIRECT') } },
 }));
 
 vi.mock('../logger', () => ({
@@ -39,6 +43,7 @@ vi.mock('../logger', () => ({
 import {
   activateClientEndpointRealm,
   captureNetLogAround,
+  resolveEndpointNetLogPath,
   classifyManifestFailure,
   getClientEndpoint,
   getClientEndpointForRealm,
@@ -954,6 +959,24 @@ describe('netlog 抓取(captureNetLogAround)', () => {
     reject(new Error('start failed late'));
     await new Promise((r) => setImmediate(r));
     expect(stopLogging).not.toHaveBeenCalled();
+  });
+});
+
+describe('netlog 落盘路径(不得落到 cwd)', () => {
+  it.each([
+    ['null(logger 未初始化)', null],
+    ['空串(initLogger 建目录失败时的实际取值)', ''],
+    ['纯空白', '   '],
+  ])('%s → null,调用方跳过抓取', (_label, logDir) => {
+    // path.join('', name) 会得到相对路径 'endpoint-netlog.json',落到 process.cwd()
+    // ——dev 下正是仓库工作区,会在被 Git 跟踪的目录里留生成物。
+    expect(resolveEndpointNetLogPath(logDir)).toBeNull();
+  });
+
+  it('拿到目录时给出该目录下的绝对路径', () => {
+    const file = resolveEndpointNetLogPath(path.join('/tmp', 'cindy-logs'));
+    expect(file).toBe(path.join('/tmp', 'cindy-logs', 'endpoint-netlog.json'));
+    expect(path.isAbsolute(file as string)).toBe(true);
   });
 });
 

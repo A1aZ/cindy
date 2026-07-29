@@ -22,6 +22,8 @@
 import dns from 'node:dns/promises';
 import { connect } from 'node:net';
 
+import { session } from 'electron';
+
 export interface EndpointFetchProbes {
   /** Chromium 对该 URL 的代理决策,形如 'DIRECT' / 'PROXY 127.0.0.1:7890'。 */
   resolveProxy(url: string): Promise<string>;
@@ -79,9 +81,9 @@ export function withDeadline<T>(promise: Promise<T>, timeoutMs: number, label: s
 
 export function createDefaultProbes(): EndpointFetchProbes {
   return {
-    async resolveProxy(url) {
-      // 动态 import:本模块会被单测直接 import,顶层拉 electron 会让测试必须 mock 它。
-      const { session } = await import('electron');
+    // 静态 import electron(architecture-invariants.md §2:main 禁止运行时动态
+    // import();单测用 vi.mock('electron') 提供 session,不用为它开动态 import 的口子)。
+    resolveProxy(url) {
       return session.defaultSession.resolveProxy(url);
     },
     async lookupHost(hostname) {

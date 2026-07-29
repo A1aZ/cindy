@@ -8,6 +8,12 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 
+// createDefaultProbes 静态 import electron(architecture-invariants.md §2 禁止 main
+// 运行时动态 import);本文件只测注入探针的编排,mock 到能加载模块即可。
+vi.mock('electron', () => ({
+  session: { defaultSession: { resolveProxy: vi.fn(async () => 'DIRECT') } },
+}));
+
 import {
   formatEndpointFetchDiagnosis,
   probeEndpointFetch,

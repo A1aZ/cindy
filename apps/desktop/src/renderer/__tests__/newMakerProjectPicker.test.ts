@@ -301,6 +301,16 @@ describe('Shared create project picker', () => {
     );
   });
 
+  // #807:设备 popover 宽度自适应内容 + 上限截断(2026-07-29 用户裁决)。
+  // 不写死固定宽(会无理由地比 trigger 宽),也不绑 trigger 宽度(trigger 只有 80–200px 且随
+  // 设备名浮动,绑上去会把设备名 + 状态点 + 离线副文案全挤没)。行内 truncate 负责有限展现。
+  it('sizes the device popover to its content with an upper bound, truncating long names', () => {
+    expect(deviceSwitcherPillSource).toContain('w-auto min-w-[200px] max-w-[320px]');
+    // 截断链路:可收缩的 body + 名字/副文案 truncate + 图标与 check 不参与收缩。
+    expect(deviceSwitcherPillSource).toContain('flex min-w-0 flex-1 flex-col items-start');
+    expect(deviceSwitcherPillSource).toContain('min-w-0 truncate text-sm font-medium');
+  });
+
   // #807 review 第三轮:能力缓存命中时必须清掉上一目标遗留的 loading —— 漏了会让
   // capabilitiesLoading 永久为 true,而创建页的 send / goal guard 正是看它。
   it('clears inherited loading state when the capability cache hits', () => {

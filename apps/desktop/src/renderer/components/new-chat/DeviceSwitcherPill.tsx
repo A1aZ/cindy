@@ -129,9 +129,14 @@ export function DeviceSwitcherPill({
         align="end"
         sideOffset={6}
         className={cn(
-          // 宽度与相邻的 FolderPickerPopover 对齐(同 320px):两个 popover 从同一排相邻 pill
-          // 弹出、互斥显示,宽度不一致会显得随意。DESIGN.md §4 Select & Dropdown。
-          'z-[10010] w-[320px] rounded-[12px] p-2',
+          // 宽度**由内容决定 + 设上限**(2026-07-29 用户裁决),而不是写死一个值:
+          // DESIGN.md §4 要求 panel 宽度绑 trigger,那条是为「宽度稳定的单行输入框式 Select」
+          // 写的;这里的 trigger 是 80–200px 的 pill、宽度还随当前设备名浮动,直接绑上去会让
+          // 菜单在 80px 时把「设备名 + 状态点 + 离线副文案」全挤没。所以取自适应:
+          //   下限 200px —— 行内容的实际最小需求(padding 24 + 图标 32 + 副文案约 96 + check 28),
+          //     低于它副文案会折行;这个值也正好是 trigger 的宽度上限,短名字时两者基本齐平。
+          //   上限 320px —— 超长设备名到此为止,由行内的 truncate 有限展现,不让菜单继续摊宽。
+          'z-[10010] w-auto min-w-[200px] max-w-[320px] rounded-[12px] p-2',
           'bg-[var(--folder-picker-bg)]',
           'border border-[var(--folder-picker-border)]',
         )}

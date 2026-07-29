@@ -1117,9 +1117,37 @@ export function NewMakerDraftRoute() {
     calibratedDraftModel,
     capabilityAgentKind,
   ]);
-  const chatInitialProviderId = isDeviceLinkDraft
-    ? (deviceLinkInitial?.providerId ?? null)
-    : localProviderIdForDraft;
+  /**
+   * 传给 ChatInput 的初始来源 / 「新建目标」实际提交的来源。
+   *
+   * 本机分支已经用 effectiveSourceIdForModel 校准过(见 localProviderIdForDraft);**device-link
+   * 分支原来是原样透传** dlSel.providerId —— 那是个漏洞(Codex review P1):被控端把该来源断开 /
+   * 移除、或它不再提供当前模型之后,这个值仍留在草稿里。普通发送不受影响(ChatInput 内部会用
+   * effectiveSourceId 重算,失效即回落),但**「新建目标」是直接拿这个值提交给 maker:create-session**
+   * 的 —— 于是会把一个未认证的来源写进 sessions.provider_id,新目标起不来。
+   *
+   * 所以在**派生处**统一校准,而不是在某个消费点补一次:用与 main 同源、且注释明确要求「新会话 /
+   * 切模型 / worker / schedule 一律用」的 effectiveSourceIdForModel,按**被控端**目录 + 草稿当前
+   * 模型复算。仍有效则原样保留;失效则落到被控端对该模型的原生默认来源 —— 这也正是 ChatInput 高亮
+   * 给用户看的那一个,提交值与界面所见因此一致(比一律置 null 更贴合「所见即所得」)。
+   * 目录尚未加载完时可能解析为 null,无害:发送 / 建目标都被 deviceProvidersLoading 三重 gate 挡着。
+   */
+  const chatInitialProviderId = useMemo<string | null>(() => {
+    if (!isDeviceLinkDraft) return localProviderIdForDraft;
+    return effectiveSourceIdForModel(
+      deviceProviders,
+      deviceLinkInitial?.providerId ?? null,
+      draftInitialModel,
+      capabilityAgentKind,
+    );
+  }, [
+    isDeviceLinkDraft,
+    localProviderIdForDraft,
+    deviceProviders,
+    deviceLinkInitial?.providerId,
+    draftInitialModel,
+    capabilityAgentKind,
+  ]);
 
   // 弹窗确认添加后的落点:SSH 立即建会话 + navigate;device-link 把当前草稿指向被控端项目,
   // 首条消息发出时走既有 create-on-send 链路(见下方 isDeviceLinkDraft 分支)。

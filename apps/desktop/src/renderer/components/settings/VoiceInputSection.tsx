@@ -40,6 +40,7 @@ import {
   findVoiceInputAppShortcutConflict,
   type AppShortcutComboEntry,
 } from '@/voice-input/appShortcutConflict';
+import { shouldShowInputMonitoringBadge } from '@/voice-input/inputMonitoringBadge';
 import {
   createVoiceInputModifierShortcut,
   createVoiceInputShortcutFromEvent,
@@ -1818,11 +1819,13 @@ export function VoiceInputSection() {
         <VoiceInputInlineSettingRow
           label={t('settings.voiceInput.shortcut.label')}
           labelAction={
-            !supportsGlobalShortcutSetting ||
-            !shortcutNeedsKeyboardListenerPermission ||
-            permissions.inputMonitoring.status === 'not-required'
-              ? null
-              : (
+            shouldShowInputMonitoringBadge({
+              supportsGlobalShortcut: supportsGlobalShortcutSetting,
+              shortcutNeedsPermission: shortcutNeedsKeyboardListenerPermission,
+              fnRecordingBlocked,
+              permissionStatus: permissions.inputMonitoring.status,
+            })
+              ? (
                 <VoiceInputPermissionBadge
                   label={t('settings.voiceInput.permissions.inputMonitoring.label')}
                   granted={permissions.inputMonitoring.ok}
@@ -1830,6 +1833,7 @@ export function VoiceInputSection() {
                   tooltip={t('settings.voiceInput.permissions.inputMonitoring.tooltip')}
                 />
               )
+              : null
           }
           hint={
             supportsGlobalShortcutSetting

@@ -4625,6 +4625,7 @@
         "agent": {
           "claudeCode": "Claude Code",
           "codex": "Codex",
+          "pi": "Pi",
           "pending": "Next: {{agent}}"
         }
       },

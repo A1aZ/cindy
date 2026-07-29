@@ -2709,7 +2709,7 @@ export function NewMakerDraftRoute() {
           // seed store,否则勾了计划模式的首条消息可能以 planMode:false 发出
           // (worktree 路径同款 seed;bot review P2)。
           makerChatStore.setSessionRuntime(newSession.id, {
-            agentKind: persistedAgentKind === 'codex' ? 'codex' : 'claude-code',
+            agentKind: capabilityAgentKind,
             fastMode: effectiveFastMode,
             planModeEnabled: effectivePlanMode,
           });

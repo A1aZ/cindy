@@ -290,15 +290,17 @@ export function resolveModelSelectorAgentIdentity(
   runtimeAgentKind: AgentKind | null | undefined,
   pendingTarget: AgentKind | null | undefined,
 ): ModelSelectorAgentIdentity | undefined {
+  const toVendorKey = (kind: AgentKind): 'cc' | 'codex' | 'pi' =>
+    kind === 'codex' ? 'codex' : kind === 'pi' ? 'pi' : 'cc';
   if (pendingTarget) {
     return {
-      vendorKey: pendingTarget === 'codex' ? 'codex' : 'cc',
+      vendorKey: toVendorKey(pendingTarget),
       state: 'pending',
     };
   }
   if (!runtimeAgentKind) return undefined;
   return {
-    vendorKey: runtimeAgentKind === 'codex' ? 'codex' : 'cc',
+    vendorKey: toVendorKey(runtimeAgentKind),
     state: 'current',
   };
 }
@@ -1806,7 +1808,9 @@ export function ModelSelector({
     agentIdentity && !fallbackOption?.active
       ? agentIdentity.vendorKey === 'cc'
         ? t('newChat.modelSelector.trigger.agent.claudeCode')
-        : t('newChat.modelSelector.trigger.agent.codex')
+        : agentIdentity.vendorKey === 'pi'
+          ? t('newChat.modelSelector.trigger.agent.pi')
+          : t('newChat.modelSelector.trigger.agent.codex')
       : null;
   const agentIdentityLabel =
     agentName && agentIdentity?.state === 'pending'

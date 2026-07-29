@@ -24,7 +24,7 @@ import {
 } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { useLocation, useNavigate, useOutletContext, useParams } from 'react-router-dom';
-import { normalizeDbAgentKind } from '../../../shared/agentKindConversion';
+import { dbToMakerAgentKind, normalizeDbAgentKind } from '../../../shared/agentKindConversion';
 import { useTranslation } from 'react-i18next';
 import type { AgentInputReference } from '@cindy/maker-shared/agent-input-projection';
 import {
@@ -714,7 +714,7 @@ export function CCAgentSessionView({
     if (!remoteDeviceId || !remoteModelMemoryScopeKey) return;
     const deviceId = remoteDeviceId;
     const scopeKey = remoteModelMemoryScopeKey;
-    const agent = session?.agentKind === 'codex' ? 'codex' : 'claude-code';
+    const agent = dbToMakerAgentKind(session?.agentKind);
     const vendorSlot = agent === 'codex' ? 'codex' : 'claudeCode';
     let cancelled = false;
 
@@ -1108,7 +1108,7 @@ export function CCAgentSessionView({
   const isRemoteSession = !!session?.remoteHostId;
   useEffect(() => {
     let cancelled = false;
-    const agentKind = session?.agentKind === 'codex' ? 'codex' : 'claude-code';
+    const agentKind = dbToMakerAgentKind(session?.agentKind);
     // SSH remote 显式禁用控制端本机 skill 扫描；本地无 workingDir 时 Claude 仍扫全局 skills。
     const wd = session?.workingDir;
     // 先同步清空:切换会话(尤其 local→remote)时 loadAllCommands 是异步的,清空可避免
@@ -1246,7 +1246,7 @@ export function CCAgentSessionView({
   } = useCCAgentChat(sessionId, handleTitleUpdate, { chatRealtime });
   // 展示引擎可乐观跟随 intent；真实 event reducer 仍只读 store.agentKind。
   const displayAgentKind =
-    agentSwitchIntent?.target ?? (session?.agentKind === 'codex' ? 'codex' : 'claude-code');
+    agentSwitchIntent?.target ?? dbToMakerAgentKind(session?.agentKind);
   const isCodex = displayAgentKind === 'codex';
   // live 供应商目录(含内置 + 自定义,按 agent 挂模型)—— vendor↔model 一致性校验的真源,
   // 与模型选择器同源(见下方 M35 vendor fallback effect)。本地 IPC 极快返回,有模块级缓存。
@@ -1626,7 +1626,7 @@ export function CCAgentSessionView({
   const getHelpCommandsSnapshot = useCallback(async (): Promise<UnifiedCommand[]> => {
     const cached = allCommandsRef.current;
     if (cached.length > 0) return cached;
-    const agentKind = session?.agentKind === 'codex' ? 'codex' : 'claude-code';
+    const agentKind = dbToMakerAgentKind(session?.agentKind);
     try {
       // device-link 远程会话同源:传 remoteDeviceId,fallback 快照也从被控端读(见上方 cache effect 说明)。
       return await loadAllCommands(
@@ -2153,7 +2153,7 @@ export function CCAgentSessionView({
         capabilities: sessionCaps,
         providerId: session?.providerId ?? null,
         modelId: newModelId,
-        agentKind: session?.agentKind === 'codex' ? 'codex' : 'claude-code',
+        agentKind: dbToMakerAgentKind(session?.agentKind),
       });
       if (!supportsFast) {
         const currentFastMode = sessionId ? makerChatStore.getSnapshot(sessionId).fastMode : false;
@@ -2696,7 +2696,7 @@ export function CCAgentSessionView({
     // 远程模型可能只存在于被控端(本地目录查不到 → 误判跨 vendor),且本地 DB 没有该会话行,
     // sessionService.update 会写错 / refreshServerSession 对远程是 no-op。直接跳过(规则:host 为准)。
     if (getSessionDeviceId(sessionId)) return;
-    const agent = isCodex ? 'codex' : 'claude-code';
+    const agent = displayAgentKind;
     if (!shouldFallbackVendorModel(providers, sessionModel, agent)) return;
     const defaultModel = getDefaultModelForVendor(isCodex ? 'codex' : 'cc');
     sessionService
@@ -3541,13 +3541,7 @@ export function CCAgentSessionView({
                   sessionId={sessionId}
                   // session=null 是冷启动 / 直链 GET 尚未回流的合法首帧；显式传 null，
                   // 让 ChatInput 暂不显示 Agent 身份，不能跟随 displayAgentKind 的 cc 回退。
-                  runtimeAgentKind={
-                    session
-                      ? session.agentKind === 'codex'
-                        ? 'codex'
-                        : 'claude-code'
-                      : null
-                  }
+                  runtimeAgentKind={session ? dbToMakerAgentKind(session.agentKind) : null}
                   initialWorkingDir={session?.workingDir}
                   remoteHostId={session?.remoteHostId ?? null}
                   deviceLinkDeviceId={remoteDeviceId}
@@ -3588,7 +3582,7 @@ export function CCAgentSessionView({
                   attachmentState={attachmentState}
                   externalDragOver={isDragOver}
                   onComposerDropHandled={resetFullAreaDragState}
-                  vendorKey={isCodex ? 'codex' : 'cc'}
+                  vendorKey={normalizeDbAgentKind(displayAgentKind)}
                   extraDirs={session?.extraDirs ?? []}
                   onExtraDirsChange={handleExtraDirsChange}
                   compactToolbar={compactToolbar}

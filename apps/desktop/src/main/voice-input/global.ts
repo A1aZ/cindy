@@ -605,16 +605,46 @@ const PENDING_SHORTCUT_RECOVERY_MIN_INTERVAL_MS = 5_000;
 let lastPendingShortcutRecoveryAt = 0;
 let pendingShortcutRecoveryRunning = false;
 
+/**
+ * 当前存盘里那个「需要监听权限、但此刻没在跑」的快捷键，没有就返回 null。
+ *
+ * 预筛和队列内都用它：队列内那次是关键 —— preflight 的 await 期间用户可能已经改了快捷键。
+ */
+function recoverableNativeShortcut(): VoiceInputShortcut | null {
+  const shortcut = voiceInputDataStore.getSettings().shortcut;
+  if (!shortcut || !voiceInputShortcutNeedsMacNativeListener(shortcut, process.platform)) return null;
+  if (macModifierShortcutListener.isRunning()) return null;
+  return shortcut;
+}
+
+/**
+ * 把「自动恢复失败」推给常挂载的 renderer 去提示。
+ *
+ * 一次 App 运行只推一次：触发点是窗口聚焦，helper 真坏掉的话每次切回来都会再失败一遍，
+ * 反复弹同一条提示只会变成骚扰（用户此刻并没有在做这件事）。
+ */
+let pendingShortcutRecoveryFailureNotified = false;
+
+function notifyPendingShortcutRecoveryFailed(): void {
+  if (pendingShortcutRecoveryFailureNotified) return;
+  pendingShortcutRecoveryFailureNotified = true;
+  for (const window of BrowserWindow.getAllWindows()) {
+    try {
+      window.webContents.send('voice-input:shortcut-recovery-failed');
+    } catch {
+      /* renderer 已销毁 */
+    }
+  }
+}
+
 async function recoverPendingNativeShortcutRegistration(): Promise<void> {
   if (process.platform !== 'darwin') return;
   if (pendingShortcutRecoveryRunning) return;
   // 录制期间全局快捷键是刻意挂起的，这里重新注册会把它顶回来，用户正在按键试录就会真的
   // 触发一次语音输入。
   if (modifierShortcutRecordingWebContentsIds.size > 0) return;
-  const shortcut = voiceInputDataStore.getSettings().shortcut;
-  if (!shortcut || !voiceInputShortcutNeedsMacNativeListener(shortcut, process.platform)) return;
-  // 已经在跑就没有什么要恢复的。
-  if (macModifierShortcutListener.isRunning()) return;
+  // 这里只是「值不值得往下走」的预筛。真正要注册的那个必须在队列里现读，见下。
+  if (!recoverableNativeShortcut()) return;
   // preflight 每次都要起一个 helper 进程，而窗口聚焦事件很密集，必须限流。
   const now = Date.now();
   if (now - lastPendingShortcutRecoveryAt < PENDING_SHORTCUT_RECOVERY_MIN_INTERVAL_MS) return;
@@ -623,16 +653,27 @@ async function recoverPendingNativeShortcutRegistration(): Promise<void> {
   try {
     const snapshot = await refreshVoiceInputInputMonitoringPermissionSnapshot();
     if (!snapshot.ok || snapshot.status !== 'granted') return;
-    const result = await queueShortcutMutation(() => setVoiceInputGlobalShortcut(shortcut));
+    // 快捷键在队列里现读、现校验：preflight 那次 await 期间用户完全可能改成别的（比如
+    // F16）。用 await 之前抓的那份，就会在用户的新变更之后把旧的修饰键注册回去 ——
+    // 存盘和界面停在 F16，实际生效的却是旧那个。
+    const result = await queueShortcutMutation(async () => {
+      const shortcut = recoverableNativeShortcut();
+      if (!shortcut) return null;
+      return setVoiceInputGlobalShortcut(shortcut);
+    });
+    if (!result) {
+      log.debug('pending native shortcut recovery skipped: settings changed while checking permission');
+      return;
+    }
     if (result.ok) {
-      log.info('pending native shortcut re-registered after permission was granted', {
-        code: shortcut.code,
-        trigger: shortcut.trigger,
-      });
+      log.info('pending native shortcut re-registered after permission was granted');
       return;
     }
     if (result.errorCode === 'superseded') return;
-    log.warn('pending native shortcut recovery failed', { code: shortcut.code, errorCode: result.errorCode });
+    log.warn('pending native shortcut recovery failed', { errorCode: result.errorCode });
+    // 这条恢复存在的前提就是设置页不在（它的 toast 也就不在），只写日志等于用户被告知
+    // 「授权后自动生效」之后什么都没发生、也无处得知。推给常挂载的 renderer 去提示。
+    notifyPendingShortcutRecoveryFailed();
   } catch (error) {
     log.warn('pending native shortcut recovery threw', { error: stringifyError(error) });
   } finally {

@@ -459,6 +459,54 @@ describe('voice input global shortcut registration', () => {
         expect(mocks.modifierSetShortcut).not.toHaveBeenCalled();
       });
 
+      // preflight 那次 await 期间用户完全可能把快捷键改成别的。拿 await 之前抓的那份去
+      // 注册,就会在用户的新变更之后把旧的修饰键装回去 —— 存盘/界面停在 F16,实际生效的
+      // 却是旧那个。所以要注册的那个必须在队列里现读现校验。
+      it('re-reads the stored shortcut inside the queue instead of using the pre-await snapshot', async () => {
+        setPlatform('darwin');
+        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.modifierIsRunning.mockReturnValue(false);
+        // preflight 卡住,期间用户改成了 F16(不需要 native listener)。
+        let settlePreflight: (snapshot: unknown) => void = () => {};
+        mocks.inputMonitoringSnapshot.mockImplementationOnce(
+          () => new Promise((resolve) => { settlePreflight = resolve; }),
+        );
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        const onFocus = mocks.appListeners.get('browser-window-focus');
+        onFocus?.();
+        await new Promise((resolve) => { setImmediate(resolve); });
+
+        mocks.getSettings.mockReturnValue({
+          shortcut: {
+            trigger: 'keyboard',
+            code: 'F16',
+            key: 'F16',
+            modifiers: { meta: false, ctrl: false, alt: false, shift: false, fn: false },
+          },
+        });
+        settlePreflight({ ok: true, status: 'granted' });
+        await new Promise((resolve) => { setImmediate(resolve); });
+
+        expect(mocks.modifierSetShortcut).not.toHaveBeenCalled();
+      });
+
+      // 这条恢复存在的前提就是设置页不在(它的 toast 也就不在)。只写日志等于用户被告知
+      // 「授权后自动生效」之后什么都没发生、也无处得知,所以要推给常挂载的 renderer。
+      it('pushes a recovery failure to the renderer when the helper still cannot start', async () => {
+        setPlatform('darwin');
+        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.modifierIsRunning.mockReturnValue(false);
+        mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'spawn ENOENT' });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await focusWindow();
+
+        expect(mocks.focusedWindow.webContents.send).toHaveBeenCalledWith('voice-input:shortcut-recovery-failed');
+      });
+
       // 录制期间全局快捷键是刻意挂起的。这里重新注册会把它顶回来,而用户此刻正在按键试录,
       // 会真的触发一次语音输入。
       it('does not re-register while a shortcut recording is in progress', async () => {

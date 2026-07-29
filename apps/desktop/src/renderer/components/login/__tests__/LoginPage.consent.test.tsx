@@ -275,6 +275,52 @@ describe('consent guard(未勾选拦截个人登录链路)', () => {
     expect(acceptPrivacyConsent).toHaveBeenCalled();
   });
 
+  /* 顺序回归(codex 审查 P1,#907):同意记录必须落在 auth:enter-local **之后**。
+     acceptPrivacyConsent 的 handler 会同步广播 allowed,而 allowed 的算式是
+     isAnalyticsAllowed() && !isLocalMode() —— 提前落同意时 isLocalMode() 还是
+     false,广播 allowed:true 会让 tapdbClient 当场 initSdk() 并发出 device_login,
+     与「未登录态不上报」直接冲突。两个入口、勾选与弹窗两条路径都要锁。 */
+  const expectConsentPersistedAfterEnterLocal = () => {
+    expect(authEnterLocal).toHaveBeenCalledTimes(1);
+    expect(acceptPrivacyConsent).toHaveBeenCalledTimes(1);
+    expect(authEnterLocal.mock.invocationCallOrder[0]).toBeLessThan(
+      acceptPrivacyConsent.mock.invocationCallOrder[0],
+    );
+  };
+
+  it('已勾选 + 面板内入口:同意记录落在 enter-local 之后(不给 TapDB 开窗口)', async () => {
+    mount(await identifierState('providers:cn-social'));
+    fireEvent.click(screen.getByTestId('login-consent-radio'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('login-skip-entry'));
+    });
+    expectConsentPersistedAfterEnterLocal();
+  });
+
+  it('弹窗同意 + 面板内入口:同意记录同样落在 enter-local 之后', async () => {
+    mount(await identifierState('providers:cn-social'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('login-skip-entry'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('login-consent-agree'));
+    });
+    expectConsentPersistedAfterEnterLocal();
+  });
+
+  it('其它个人链路不受影响:社交圆钮仍在派发前先落同意记录', async () => {
+    mount(await identifierState('providers:cn-social'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('login-social-apple'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('login-consent-agree'));
+    });
+    // 账号登录链路登录后 isLocalMode() 为 false、allowed 本就该为真,顺序无需延后
+    expect(acceptPrivacyConsent).toHaveBeenCalledTimes(1);
+    expect(authEnterLocal).not.toHaveBeenCalled();
+  });
+
   /* error 步 footer 的逃生入口(login-local-mode)与面板内入口共用 openLocalMode,
      但它是「登录服务不可用时的唯一出路」,协议门接错会把这条路堵死。error 步不渲染
      协议行(radio 只在 identifier 主视图),所以这里只能靠弹窗断言。 */
@@ -295,7 +341,11 @@ describe('consent guard(未勾选拦截个人登录链路)', () => {
       fireEvent.click(screen.getByTestId('login-consent-agree'));
     });
     expect(authEnterLocal).toHaveBeenCalledTimes(1);
-    expect(acceptPrivacyConsent).toHaveBeenCalled();
+    expect(acceptPrivacyConsent).toHaveBeenCalledTimes(1);
+    // 顺序同面板内入口:先切会话再落同意(见下方顺序回归组的注释)
+    expect(authEnterLocal.mock.invocationCallOrder[0]).toBeLessThan(
+      acceptPrivacyConsent.mock.invocationCallOrder[0],
+    );
   });
 
   it('error 步逃生入口不同意 → 关弹窗、留在 error 屏,不进本地模式', async () => {

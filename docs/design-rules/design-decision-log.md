@@ -17,8 +17,13 @@
   面板 440→500、圆钮行删游客——继续有效)。三项决策:
   (1) **跳过登录过协议门**:不登录账号也是在使用 Cindy 客户端,面板内「跳过登录」文字按钮与
   桌面 `error` 步 footer 逃生口都改回经 `requireConsent`——未勾选先弹服务条款 / 隐私协议弹窗,
-  同意后才进未登录状态,并在放行时刻写入统计采集同意。是否真的上报仍由 main 侧闸决定
+  同意后才进未登录状态,并写入统计采集同意。是否真的上报仍由 main 侧闸决定
   (`analyticsSettingsService` 对本地会话一律 `!isLocalMode()` 不放行,该逻辑不动)。
+  ⚠️ 合规实现约束(#907 review 引出,勿改顺序):这条链路的同意记录必须落在
+  `auth:enter-local` **之后**——`acceptPrivacyConsent` 会同步广播 `allowed`,提前落时
+  `isLocalMode()` 还是 false,`allowed:true` 会让 TapDB 当场 init 并发 `device_login`,
+  把「未登录态不上报」破一个窗口。落码 = `deferConsentPersist` 选项 + `openLocalMode`
+  自己落同意,顺序由 consent 测试的 `invocationCallOrder` 断言锁住。
   (2) **协议同意行整行可点**:热区由 radio 的 24px 圈体扩到整行 680×40(原来要瞄准一个小圆点);
   两个内联链接与 radio 自身 `stopPropagation`(前者只开链接,后者防冒泡二次 toggle),
   行容器不加 role / tabIndex(radio 仍是唯一无障碍交互点),整行 `select-none`。

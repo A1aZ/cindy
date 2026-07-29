@@ -125,14 +125,19 @@ export function LoginPage() {
    *
    * **过协议门**(产品拍板 2026-07-29,推翻同年 07-27「跳过登录免协议门」):跳过登录
    * 虽然不创建账号,用户仍在使用 Cindy 客户端,因此与个人账号登录同口径——radio
-   * 未勾选时先弹协议弹窗,同意后才进主界面。调用方一律用 requireConsent 包裹,
-   * 明示同意由它落 persistPrivacyConsent(本函数只负责切会话,不碰 consent)。
+   * 未勾选时先弹协议弹窗,同意后才进主界面。调用方一律用
+   * `requireConsent(..., { deferConsentPersist: true })` 包裹:同意记录由**本函数**
+   * 在会话切过去之后落,不能由 requireConsent 提前落(竞态原因见那里的注释)。
    */
   const openLocalMode = async () => {
     if (isLoading || localModePending || !window.electronAPI?.authEnterLocal) return;
     setLocalModePending(true);
     try {
       await window.electronAPI.authEnterLocal();
+      // 顺序是硬要求:先 enter-local(main 侧 isLocalMode() 转真)再落同意,这样
+      // acceptPrivacyConsent 广播出来的 allowed 恒为 false,TapDB 不会被拉起来发
+      // device_login。反过来会开出一个真实的上报窗口(codex 审查 P1,#907)。
+      persistPrivacyConsent();
       // The auth state event normally redirects through GuestRoute. Keep the
       // transition deterministic when the IPC response wins that race.
       window.location.hash = '#/';
@@ -167,6 +172,8 @@ export function LoginPage() {
   const pendingConsentAction = useRef<{
     action: () => void;
     stamp: ConsentStamp;
+    // true = 同意时不在弹窗回调里落同意记录,由 action 自己落(见 requireConsent)
+    deferConsentPersist: boolean;
   } | null>(null);
 
   /* 把「用户明示同意《隐私政策》」这个事实落到 main。
@@ -183,15 +190,29 @@ export function LoginPage() {
     }
   };
 
-  const requireConsent = (action: () => void) => {
+  /**
+   * @param options.deferConsentPersist
+   *   true = 本次放行**不**在这里落同意记录,交给 action 自己在恰当时刻落。
+   *   目前只有跳过登录用它,原因是一条真实竞态(codex 审查 P1,#907):
+   *   `acceptPrivacyConsent` 的 IPC handler 会同步 broadcastSettingsChange(),而
+   *   `allowed = isAnalyticsAllowed() && !authManager.isLocalMode()`。若在
+   *   `auth:enter-local` 之前落同意,那一刻 isLocalMode() 还是 false → 广播
+   *   allowed:true → renderer 的 tapdbClient 立即 initSdk()(isInitDeviceLogin
+   *   会当场发出 device_login),等 enter-local 完成再广播 allowed:false 已经晚了。
+   *   于是「未登录态不上报」这条承诺在正式包上会被破一个窗口。让 openLocalMode
+   *   先切会话、再落同意即可关掉这个窗口(此时 allowed 恒为 false)。
+   */
+  const requireConsent = (action: () => void, options?: { deferConsentPersist?: boolean }) => {
+    const deferConsentPersist = options?.deferConsentPersist === true;
     if (consentAccepted) {
-      persistPrivacyConsent();
+      if (!deferConsentPersist) persistPrivacyConsent();
       action();
       return;
     }
     pendingConsentAction.current = {
       action,
       stamp: makeConsentStamp(loginState?.step, isLoading, loginState?.step === 'completed'),
+      deferConsentPersist,
     };
     setConsentDialogOpen(true);
   };
@@ -199,10 +220,13 @@ export function LoginPage() {
     // 同意 = 自动勾选 radio + 续接用户刚才点的那条登录链路(产品拍板)
     setConsentAccepted(true);
     setConsentDialogOpen(false);
-    // 点了弹窗上的「同意」即为明示同意,与下面 pending 是否还能续接无关。
-    persistPrivacyConsent();
     const pending = pendingConsentAction.current;
     pendingConsentAction.current = null;
+    // 点了弹窗上的「同意」即为明示同意,与下面 pending 是否还能续接无关——唯一例外
+    // 是 deferConsentPersist 的链路(跳过登录):它必须等会话切过去再落,否则会开出
+    // 上面注释里的上报窗口。代价是 pending 因状态漂移被丢弃时这次同意不落盘,
+    // 属安全一侧(漏记 = 不采集),且 radio 已勾选,下次任一过门入口会补上。
+    if (!pending?.deferConsentPersist) persistPrivacyConsent();
     if (!pending) return;
     // 复验:弹窗期间 auth 状态被异步推进(登录完成/步骤切换/in-flight)则丢弃动作
     const current = makeConsentStamp(loginState?.step, isLoading, loginState?.step === 'completed');
@@ -470,7 +494,9 @@ export function LoginPage() {
           <LoginSkipEntry
             testId="login-skip-entry"
             disabled={isLoading || localModePending}
-            onClick={() => requireConsent(() => void openLocalMode())}
+            onClick={() =>
+              requireConsent(() => void openLocalMode(), { deferConsentPersist: true })
+            }
           >
             {t('login.localModeEntry')}
           </LoginSkipEntry>
@@ -979,7 +1005,7 @@ export function LoginPage() {
         type="button"
         disabled={localModePending || isLoading}
         // error 步逃生入口与面板内文字按钮同口径:过协议门(2026-07-29 拍板)
-        onClick={() => requireConsent(() => void openLocalMode())}
+        onClick={() => requireConsent(() => void openLocalMode(), { deferConsentPersist: true })}
         aria-describedby="login-local-mode-description"
         className="select-none rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-6 py-2.5 text-13 font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring-soft)] disabled:cursor-not-allowed disabled:opacity-60"
         style={{ minHeight: 40 }}

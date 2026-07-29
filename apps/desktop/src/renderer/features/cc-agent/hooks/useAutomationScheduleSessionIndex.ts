@@ -26,11 +26,23 @@ import { subscribeScheduleRunReadSync } from '../../scheduler/lib/scheduleRunRea
 
 const log = createLogger('AutomationScheduleSessionIndex');
 
+/**
+ * refresh 失败后的退避重试节奏。这次拉取同时承担抑制标记的对账(见 refresh 内注释),
+ * 而失败路径原本只 log —— 于是「消费方卸载期间丢了终态事件 + 重新挂载时首次拉取又
+ * 因 scheduler 未 ready / 临时 IPC 或 DB 错误 reject + 此后再没有任何 scheduler 或
+ * read-sync 事件」这条链上,标记会永久残留,该 session 后续手动对话的完成通知会一直
+ * 被静默。有限重试给自愈留出第二次机会;重试耗尽后仍靠后续事件兜。
+ */
+const REFRESH_RETRY_DELAYS_MS = [2_000, 8_000, 30_000] as const;
+
 export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, AutomationScheduleSessionInfo> {
   const [index, setIndex] = useState<ReadonlyMap<string, AutomationScheduleSessionInfo>>(
     () => new Map(),
   );
   const refreshSeqRef = useRef(0);
+  const refreshRef = useRef<() => Promise<void>>(async () => undefined);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryAttemptRef = useRef(0);
 
   const refresh = useCallback(async () => {
     const seq = refreshSeqRef.current + 1;
@@ -76,12 +88,26 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
         });
       }
       setIndex(next);
+      retryAttemptRef.current = 0;
     } catch (error) {
       log.warn('failed to build automation schedule session index', {
         error: error instanceof Error ? error.message : String(error),
       });
+      // 见 REFRESH_RETRY_DELAYS_MS:这次拉取也是标记对账的载体,失败不能只 log。
+      const attempt = retryAttemptRef.current;
+      const delayMs = REFRESH_RETRY_DELAYS_MS[attempt];
+      if (delayMs === undefined) return;
+
+      retryAttemptRef.current = attempt + 1;
+      if (retryTimerRef.current !== null) clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = setTimeout(() => {
+        retryTimerRef.current = null;
+        void refreshRef.current();
+      }, delayMs);
     }
   }, []);
+
+  refreshRef.current = refresh;
 
   useEffect(() => {
     void refresh();
@@ -157,6 +183,10 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
     return () => {
       off();
       offReadSync();
+      if (retryTimerRef.current !== null) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
     };
   }, [refresh]);
 

@@ -245,6 +245,44 @@ describe('useAutomationScheduleSessionIndex marker reconciliation', () => {
     expect(isSessionTerminalNotificationOwnedByScheduler('session-1')).toBe(false);
   });
 
+  /**
+   * 回归(greptile review P1):这次拉取同时是标记对账的载体,失败路径原本只 log。
+   * 「卸载期间丢终态事件 + 重新挂载时首次拉取 reject(scheduler 未 ready / 临时 IPC 或
+   * DB 错误)+ 此后再无任何 scheduler / read-sync 事件」这条链上,标记会永久残留。
+   */
+  it('retries the reconciliation after a failed refresh', async () => {
+    vi.useFakeTimers();
+    try {
+      const listSidebarIndexRuns = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('scheduler not ready'))
+        .mockResolvedValue([indexRun({ runId: 'run-lost', status: 'success' })]);
+      vi.stubGlobal('electronAPI', {
+        maker: { schedule: { listSidebarIndexRuns, onEvent: vi.fn(() => () => undefined) } },
+        notificationMarkSessionAttention: vi.fn().mockResolvedValue(undefined),
+        notificationClearSessionAttention: vi.fn().mockResolvedValue(undefined),
+      });
+      markNextSessionDoneSilenced('run-lost', 'session-1');
+
+      renderHook(() => useAutomationScheduleSessionIndex());
+      // 首次拉取 reject —— 此时标记还留着，且不会再有 scheduler 事件来触发第二次。
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(isSessionDoneSilenced('session-1')).toBe(true);
+
+      // 退避重试到来，对账完成，标记自愈。
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+
+      expect(listSidebarIndexRuns).toHaveBeenCalledTimes(2);
+      expect(isSessionDoneSilenced('session-1')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps markers whose run is still in flight', async () => {
     stubApiWithRuns([
       indexRun({ runId: 'run-live', status: 'running' }),

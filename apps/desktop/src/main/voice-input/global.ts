@@ -8,7 +8,7 @@ import {
   shell,
   systemPreferences,
 } from 'electron';
-import type { Display, NativeImage, Point, Rectangle, WebContents } from 'electron';
+import type { Display, IpcMainInvokeEvent, NativeImage, Point, Rectangle, WebContents } from 'electron';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -488,7 +488,39 @@ export function unregisterActiveInlineVoiceInputWebContents(webContentsId: numbe
   activeInlineVoiceInputWebContentsIds.delete(webContentsId);
 }
 
-export function registerGlobalVoiceInputIpc(): void {
+export type GlobalVoiceInputIpcDeps = {
+  /** 主窗口访问器；语音设置页只在主窗口里，用于把弹系统授权窗的动作锁到它。 */
+  getMainWindow: () => BrowserWindow | null;
+};
+
+/**
+ * 把「会弹 macOS 输入监控授权窗」的两条 IPC 锁到主窗口顶层 frame。
+ *
+ * 为什么不够用 assertTrustedAppRendererEvent：它认的是 appContentWindows 这个较宽的
+ * 注册表，右侧栏窗口与 Ghost 面板窗口也会 markAppContentWindow，而它们同样装着完整的
+ * preload。那两个窗口一旦被 XSS 或恶意内容拿下，就能凭 bridge 在设置流程之外弹出系统
+ * 权限窗。语音设置页只存在于主窗口，所以这里按最小权限收到主窗口 webContents +
+ * mainFrame（同 main/billing/index.ts 的 assertMainWindowSender）。
+ */
+function assertVoiceSettingsMainWindowSender(
+  event: IpcMainInvokeEvent,
+  getMainWindow: () => BrowserWindow | null,
+): void {
+  // 先过通用闸：它额外校验 senderFrame 是顶层 frame 且 URL 属于 Cindy 自有 renderer，
+  // 挡掉子 frame / WebView / 导航到别处的页面。下面再收窄到主窗口。
+  assertTrustedAppRendererEvent(event);
+  const mainWindow = getMainWindow();
+  if (
+    !mainWindow ||
+    mainWindow.isDestroyed() ||
+    event.sender !== mainWindow.webContents ||
+    event.senderFrame !== mainWindow.webContents.mainFrame
+  ) {
+    throwIpcError('PERMISSION_DENIED', '此操作只能从 Cindy 主窗口的设置页发起');
+  }
+}
+
+export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void {
   if (registered) return;
   registered = true;
 
@@ -744,7 +776,7 @@ export function registerGlobalVoiceInputIpc(): void {
   ipcMain.handle('voice-input:open-input-monitoring-settings', async (event): Promise<VoiceInputGlobalResult> => {
     // 同下面的 request handler：这条也会触发 CGRequestListenEventAccess 弹系统授权窗，
     // 攻击面完全相同，所以一并上闸——只给新 handler 加等于没关洞。
-    assertTrustedAppRendererEvent(event);
+    assertVoiceSettingsMainWindowSender(event, deps.getMainWindow);
     if (process.platform !== 'darwin') {
       return {
         ok: false,
@@ -770,15 +802,16 @@ export function registerGlobalVoiceInputIpc(): void {
   // CGRequestListenEventAccess 弹的窗自带「打开系统设置」按钮，想去自己会点。
   //
   // 这是特权动作（会弹系统级授权窗），所以：
-  // - 必须过 sender 闸。语音浮窗、词典 toast 等次级窗口装的是同一份 preload，但它们
-  //   没有登记进 appContentWindows，assertTrustedAppRendererEvent 会挡掉，避免任何
-  //   非设置流程的页面凭 bridge 弹出系统权限窗。
+  // - 必须过 sender 闸，并且收窄到主窗口顶层 frame。语音浮窗、词典 toast、右侧栏窗口、
+  //   Ghost 面板装的都是同一份 preload；后两者还会 markAppContentWindow，所以只过
+  //   assertTrustedAppRendererEvent 仍然放得进来。见
+  //   assertVoiceSettingsMainWindowSender 的注释。
   // - 失败走 throwIpcError 而不是 return { ok: false }：这是动作型 handler，renderer
   //   不需要失败时的结构化 fallback（它随后会重新查权限），按 IPC 错误协议应当抛。
   ipcMain.handle(
     'voice-input:request-input-monitoring-permission',
     async (event): Promise<VoiceInputInputMonitoringRequestResult> => {
-      assertTrustedAppRendererEvent(event);
+      assertVoiceSettingsMainWindowSender(event, deps.getMainWindow);
       if (process.platform !== 'darwin') {
         throwIpcError('UNSUPPORTED_CAPABILITY', 'Input Monitoring permission is only required on macOS.');
       }

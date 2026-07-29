@@ -15,6 +15,21 @@ const mocks = vi.hoisted(() => {
       send: vi.fn(),
     },
   };
+  // 主窗口 + 它的顶层 frame。弹系统授权窗那两条 IPC 只认这一对，右侧栏 / Ghost 面板
+  // 虽然也在 appContentWindows 里，但 sender 对不上就会被拒。
+  const mainWindowMainFrame = { url: 'http://localhost:5173/index.html' };
+  const mainWindow = {
+    id: 1,
+    isDestroyed: vi.fn(() => false),
+    webContents: { id: 7, mainFrame: mainWindowMainFrame },
+  };
+  const settingsEvent = { sender: mainWindow.webContents, senderFrame: mainWindowMainFrame };
+  // 冒充「另一个已登记的应用窗口」（右侧栏 / Ghost 面板就是这种）：通用闸放行，
+  // 但主窗口收窄闸必须拒。
+  const secondaryWindowEvent = {
+    sender: { id: 99, mainFrame: { url: 'http://localhost:5173/index.html' } },
+    senderFrame: { url: 'http://localhost:5173/index.html' },
+  };
   const modifierSetShortcut = vi.fn();
   const modifierStop = vi.fn();
   const modifierIsRunning = vi.fn();
@@ -23,6 +38,9 @@ const mocks = vi.hoisted(() => {
   const requestInputMonitoring = vi.fn();
   const assertTrustedAppRenderer = vi.fn();
   const updateSettings = vi.fn();
+  const getMainWindow = vi.fn(() => mainWindow);
+  // 闸只读 isDestroyed / webContents / mainFrame，没必要拼一整个 BrowserWindow。
+  const ipcDeps = { getMainWindow } as unknown as { getMainWindow: () => never };
   const registerShortcut = vi.fn((accelerator: string) => {
     void accelerator;
     return true;
@@ -32,6 +50,9 @@ const mocks = vi.hoisted(() => {
     handlers,
     registeredShortcuts,
     focusedWindow,
+    mainWindow,
+    settingsEvent,
+    secondaryWindowEvent,
     modifierSetShortcut,
     modifierStop,
     modifierIsRunning,
@@ -39,6 +60,8 @@ const mocks = vi.hoisted(() => {
     inputMonitoringSnapshot,
     requestInputMonitoring,
     assertTrustedAppRenderer,
+    getMainWindow,
+    ipcDeps,
     updateSettings,
     registerShortcut,
   };
@@ -138,8 +161,12 @@ describe('voice input global shortcut registration', () => {
     mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: true, status: 'granted' });
     mocks.requestInputMonitoring.mockReset();
     mocks.requestInputMonitoring.mockResolvedValue({ ok: true, status: 'granted' });
-    // 默认放行 sender 闸；需要验证闸本身时在用例里让它抛。
+    // 默认放行通用 sender 闸；需要验证它本身时在用例里让它抛。
     mocks.assertTrustedAppRenderer.mockReset();
+    mocks.mainWindow.isDestroyed.mockReset();
+    mocks.mainWindow.isDestroyed.mockReturnValue(false);
+    mocks.getMainWindow.mockReset();
+    mocks.getMainWindow.mockReturnValue(mocks.mainWindow);
     mocks.updateSettings.mockReset();
     mocks.updateSettings.mockImplementation((patch: unknown) => ({ shortcut: null, ...(patch as object) }));
     mocks.registerShortcut.mockReset();
@@ -155,7 +182,7 @@ describe('voice input global shortcut registration', () => {
   it('registers F16 through Electron globalShortcut and routes the press to the focused renderer', async () => {
     setPlatform('darwin');
     const { registerGlobalVoiceInputIpc } = await import('../global.js');
-    registerGlobalVoiceInputIpc();
+    registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
     const setShortcut = mocks.handlers.get('voice-input:global-shortcut:set');
     expect(setShortcut).toBeTypeOf('function');
@@ -189,7 +216,7 @@ describe('voice input global shortcut registration', () => {
   it('does not re-register an unchanged native macOS shortcut from multiple windows', async () => {
     setPlatform('darwin');
     const { registerGlobalVoiceInputIpc } = await import('../global.js');
-    registerGlobalVoiceInputIpc();
+    registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
     const setShortcut = mocks.handlers.get('voice-input:global-shortcut:set');
     expect(setShortcut).toBeTypeOf('function');
@@ -216,7 +243,7 @@ describe('voice input global shortcut registration', () => {
   it('re-registers an unchanged native macOS shortcut when the listener is not running', async () => {
     setPlatform('darwin');
     const { registerGlobalVoiceInputIpc } = await import('../global.js');
-    registerGlobalVoiceInputIpc();
+    registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
     const setShortcut = mocks.handlers.get('voice-input:global-shortcut:set');
     expect(setShortcut).toBeTypeOf('function');
@@ -245,7 +272,7 @@ describe('voice input global shortcut registration', () => {
   it('keeps the previous Electron shortcut registered when the replacement is rejected', async () => {
     setPlatform('darwin');
     const { registerGlobalVoiceInputIpc } = await import('../global.js');
-    registerGlobalVoiceInputIpc();
+    registerGlobalVoiceInputIpc(mocks.ipcDeps);
     const setShortcut = mocks.handlers.get('voice-input:global-shortcut:set');
 
     const first: VoiceInputShortcut = {
@@ -285,7 +312,7 @@ describe('voice input global shortcut registration', () => {
       mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'Could not listen for modifier shortcuts.' });
       mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
       const { registerGlobalVoiceInputIpc } = await import('../global.js');
-      registerGlobalVoiceInputIpc();
+      registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
       const result = await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
 
@@ -297,7 +324,7 @@ describe('voice input global shortcut registration', () => {
       mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'Could not listen for modifier shortcuts.' });
       mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
       const { registerGlobalVoiceInputIpc } = await import('../global.js');
-      registerGlobalVoiceInputIpc();
+      registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
       const result = await mocks.handlers.get('voice-input:settings:update-shortcut')?.({}, bareRightOption);
 
@@ -312,7 +339,7 @@ describe('voice input global shortcut registration', () => {
       mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'spawn ENOENT' });
       mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: true, status: 'granted' });
       const { registerGlobalVoiceInputIpc } = await import('../global.js');
-      registerGlobalVoiceInputIpc();
+      registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
       const result = await mocks.handlers.get('voice-input:settings:update-shortcut')?.({}, bareRightOption);
 
@@ -327,7 +354,7 @@ describe('voice input global shortcut registration', () => {
       mocks.modifierStartKeyCapture.mockResolvedValue({ ok: false, error: 'Could not listen for modifier shortcuts.' });
       mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
       const { registerGlobalVoiceInputIpc } = await import('../global.js');
-      registerGlobalVoiceInputIpc();
+      registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
       const result = await mocks.handlers.get('voice-input:modifier-shortcut-recording:start')?.({
         sender: { id: 7, once: vi.fn() },
@@ -336,49 +363,53 @@ describe('voice input global shortcut registration', () => {
       expect(result).toMatchObject({ ok: false, errorCode: 'permission' });
     });
 
-    // 这个 handler 会弹系统级授权窗。语音浮窗等次级窗口装着同一份 preload，所以必须
-    // 过 sender 闸——否则任何拿到 bridge 的页面都能在设置流程之外弹出系统权限窗。
-    it('rejects a permission request that does not come from a trusted app renderer', async () => {
-      setPlatform('darwin');
-      mocks.assertTrustedAppRenderer.mockImplementation(() => {
-        throw new Error('[PERMISSION_DENIED] 此操作只能从 Cindy 主页面发起');
+    // 这两条 handler 会弹系统级授权窗。语音浮窗、词典 toast、右侧栏窗口、Ghost 面板装的
+    // 都是同一份 preload，而后两者还会 markAppContentWindow —— 所以只靠「是不是受信应用
+    // 窗口」不够，必须收窄到主窗口，否则那些窗口被 XSS 拿下就能在设置流程外弹权限窗。
+    for (const channel of [
+      'voice-input:request-input-monitoring-permission',
+      'voice-input:open-input-monitoring-settings',
+    ]) {
+      it(`rejects ${channel} from another registered app window`, async () => {
+        setPlatform('darwin');
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        // 通用闸放行（模拟右侧栏 / Ghost 面板这种已登记窗口），只有主窗口收窄闸拦下它。
+        await expect(
+          mocks.handlers.get(channel)?.(mocks.secondaryWindowEvent),
+        ).rejects.toThrow('[PERMISSION_DENIED]');
+        expect(mocks.requestInputMonitoring).not.toHaveBeenCalled();
       });
-      const { registerGlobalVoiceInputIpc } = await import('../global.js');
-      registerGlobalVoiceInputIpc();
 
-      await expect(
-        mocks.handlers.get('voice-input:request-input-monitoring-permission')?.({ sender: {}, senderFrame: {} }),
-      ).rejects.toThrow('[PERMISSION_DENIED]');
-      expect(mocks.requestInputMonitoring).not.toHaveBeenCalled();
-    });
+      it(`rejects ${channel} when the generic trusted-renderer gate fails`, async () => {
+        setPlatform('darwin');
+        mocks.assertTrustedAppRenderer.mockImplementation(() => {
+          throw new Error('[PERMISSION_DENIED] 此操作只能从 Cindy 主页面发起');
+        });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
-    it('guards the settings-opening variant with the same sender check', async () => {
-      setPlatform('darwin');
-      mocks.assertTrustedAppRenderer.mockImplementation(() => {
-        throw new Error('[PERMISSION_DENIED] 此操作只能从 Cindy 主页面发起');
+        await expect(
+          mocks.handlers.get(channel)?.(mocks.settingsEvent),
+        ).rejects.toThrow('[PERMISSION_DENIED]');
+        expect(mocks.requestInputMonitoring).not.toHaveBeenCalled();
       });
-      const { registerGlobalVoiceInputIpc } = await import('../global.js');
-      registerGlobalVoiceInputIpc();
-
-      await expect(
-        mocks.handlers.get('voice-input:open-input-monitoring-settings')?.({ sender: {}, senderFrame: {} }),
-      ).rejects.toThrow('[PERMISSION_DENIED]');
-      expect(mocks.requestInputMonitoring).not.toHaveBeenCalled();
-    });
+    }
 
     // denied 是正常结果(用户还没在系统设置里打开)，不该当故障抛。
     it('returns the denied status instead of throwing when the user has not granted yet', async () => {
       setPlatform('darwin');
       mocks.requestInputMonitoring.mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
       const { registerGlobalVoiceInputIpc } = await import('../global.js');
-      registerGlobalVoiceInputIpc();
+      registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
-      const result = await mocks.handlers.get('voice-input:request-input-monitoring-permission')?.({
-        sender: {},
-        senderFrame: {},
-      });
+      const result = await mocks.handlers.get('voice-input:request-input-monitoring-permission')?.(
+        mocks.settingsEvent,
+      );
 
       expect(result).toEqual({ ok: true, status: 'denied' });
+      expect(mocks.assertTrustedAppRenderer).toHaveBeenCalled();
     });
 
     // helper 跑不起来时它的 error 里带 swiftc / execFile 的内部绝对路径，既不能当成
@@ -391,12 +422,11 @@ describe('voice input global shortcut registration', () => {
         error: 'spawn /Users/someone/Library/Application Support/Cindy/voice-input/helper ENOENT',
       });
       const { registerGlobalVoiceInputIpc } = await import('../global.js');
-      registerGlobalVoiceInputIpc();
+      registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
-      const call = mocks.handlers.get('voice-input:request-input-monitoring-permission')?.({
-        sender: {},
-        senderFrame: {},
-      });
+      const call = mocks.handlers.get('voice-input:request-input-monitoring-permission')?.(
+        mocks.settingsEvent,
+      );
 
       // 用 ^...$ 锚定完整消息，而不是断言「不含某个路径」——后者容易写成永远为真的空转
       // 断言。锚定后一旦 helper 的原始 error（含内部绝对路径）被拼进去就会失败。
@@ -408,7 +438,7 @@ describe('voice input global shortcut registration', () => {
     it('persists normally when the native listener starts', async () => {
       setPlatform('darwin');
       const { registerGlobalVoiceInputIpc } = await import('../global.js');
-      registerGlobalVoiceInputIpc();
+      registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
       const result = await mocks.handlers.get('voice-input:settings:update-shortcut')?.({}, bareRightOption);
 
@@ -420,7 +450,7 @@ describe('voice input global shortcut registration', () => {
 
   it('rejects settings navigation from a non-overlay sender with a typed IPC error', async () => {
     const { registerGlobalVoiceInputIpc } = await import('../global.js');
-    registerGlobalVoiceInputIpc();
+    registerGlobalVoiceInputIpc(mocks.ipcDeps);
     const openSettings = mocks.handlers.get('voice-input:open-settings');
 
     await expect(openSettings?.({ sender: mocks.focusedWindow.webContents }, 'providers'))

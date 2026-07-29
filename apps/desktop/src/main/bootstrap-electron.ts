@@ -5627,7 +5627,7 @@ app.on('ready', async () => {
   });
   registerLocalThemesIpc();
   registerVoiceInputIpc();
-  registerGlobalVoiceInputIpc();
+  registerGlobalVoiceInputIpc({ getMainWindow: () => mainWindowRef });
   // 老 'usage:get-today-spend' 已退役 —— renderer 走 maker:usage:today('claude-code') 拉。
   // readTodaySpend 仍在 main/usageBroadcaster.ts 内部被 readAgentTodayUsage 用。
   // 主机飞书 token 链已退役(2026-07-17):飞书授权改由 xd-feishu 意识经

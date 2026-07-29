@@ -1236,21 +1236,24 @@ export function VoiceInputSection() {
    * setup 重新挂起，两步都是异步的，中间那个窗口里用户按下旧快捷键就会真的触发一次
    * 语音输入——而他本意只是在录新键。
    */
-  const startFnKeyCapture = useCallback(async (isCancelled?: () => boolean): Promise<void> => {
+  const startFnKeyCapture = useCallback(async (isCancelled: () => boolean): Promise<void> => {
     if (window.electronAPI.platform !== 'darwin') return;
     const result = await window.electronAPI.voiceInput.startModifierShortcutRecording();
-    if (isCancelled?.()) return;
-    if (result.ok) {
-      // 授权后重启成功：清掉「Fn 需要授权」的提示，否则它会一直挂在那。
-      setFnRecordingBlocked(false);
+    if (isCancelled()) {
+      // 录制已经结束，而这次启动是迟到的赢家：main 侧 startChildProcess 在 spawn 之前
+      // 还 await 了一次 helper 解析（dev 下可能现编译几秒），那段时间里 listener 的
+      // child 仍是 null，所以录制 cleanup 发的 stop 什么都没停掉。不在这里补一刀，
+      // helper 会带着刚拿到授权的 event tap 活下去，没人消费却一直监听全局按键。
+      void window.electronAPI.voiceInput.stopModifierShortcutRecording();
       return;
     }
+    // blocked 只表示「确实缺权限」。以前只在成功时清掉，于是缺权限之后再来一次非权限
+    // 失败（listener 坏了）会继续挂着「Fn 需要监听权限」，把用户指向错误的原因。
+    const permissionBlocked = !result.ok && result.errorCode === 'permission';
+    setFnRecordingBlocked(permissionBlocked);
     // 缺权限只挡住 Fn 检测，其它快捷键照录，所以在提示区说明而不是弹错误——
     // 弹错误会让用户以为整个录制坏了，然后放弃。
-    if (result.errorCode === 'permission') {
-      setFnRecordingBlocked(true);
-      return;
-    }
+    if (result.ok || permissionBlocked) return;
     toast.error(result.errorCode === 'failed'
       ? t('settings.voiceInput.shortcut.toast.listenerUnavailable')
       : t('settings.voiceInput.shortcut.toast.recordingFailed', { error: result.error }));
@@ -1269,8 +1272,14 @@ export function VoiceInputSection() {
       // 录制中：全局快捷键必须一直保持挂起，所以这里只补上之前失败的 Fn capture，
       // 绝不碰挂起状态，也不让录制 effect 重跑（那会产生一段旧快捷键被短暂恢复的
       // 窗口，用户此刻正在按键试录，会真的触发一次语音输入）。
-      void startFnKeyCapture();
-      return;
+      //
+      // 必须带取消守卫：录制随时可能在这次 IPC 返回前结束（或组件卸载）。少了它，
+      // 迟到的结果会把只在录制期有意义的提示重新点亮，还会漏掉那个 helper。
+      let cancelled = false;
+      void startFnKeyCapture(() => cancelled);
+      return () => {
+        cancelled = true;
+      };
     }
     if (!shortcutNeedsKeyboardListenerPermission) return;
     void syncVoiceInputGlobalShortcut(settings.shortcut);

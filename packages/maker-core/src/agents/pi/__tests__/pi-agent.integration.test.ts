@@ -239,4 +239,41 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
       }
     },
   );
+
+  it(
+    'setPlanMode toggles plan mode via the bundled plan-mode extension (/plan, no gateway)',
+    { timeout: 60_000 },
+    async () => {
+      const agent = new PiAgent(buildDeps());
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-plan-cwd-'));
+      let handle: AgentSessionHandle | null = null;
+      try {
+        handle = await agent.startSession({
+          sessionId: 'plan-mode-session',
+          workingDir,
+          model: 'pi-test-model',
+        });
+        // 初始关闭。
+        expect(handle.getPlanMode?.()).toBe(false);
+
+        const seenBefore = seenRequests.length;
+        // 开启:/plan 是扩展命令,即时执行,不调模型 → 无网关请求。
+        await handle.setPlanMode?.(true);
+        expect(handle.getPlanMode?.()).toBe(true);
+
+        // 幂等:重复开启不再 toggle。
+        await handle.setPlanMode?.(true);
+        expect(handle.getPlanMode?.()).toBe(true);
+
+        // 关闭恢复。
+        await handle.setPlanMode?.(false);
+        expect(handle.getPlanMode?.()).toBe(false);
+
+        expect(seenRequests.length).toBe(seenBefore);
+      } finally {
+        await handle?.close();
+        rmSync(workingDir, { recursive: true, force: true });
+      }
+    },
+  );
 });

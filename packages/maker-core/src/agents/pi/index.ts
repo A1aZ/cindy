@@ -167,6 +167,10 @@ export class PiAgent extends BaseAgent {
         { id: 'bypassPermissions', displayName: 'Full access', description: '全部工具免询问执行;风险高' },
       ],
       setPermissionModeMidSession: { supported: true },
+      // plan 模式经 pi 自带 plan-mode 扩展(--extension 加载):开启后禁用 edit/write、
+      // bash 仅允许只读白名单;plan 提示词仅在激活时注入(不增基线上下文)。
+      // Cindy 用 setPlanMode 经 /plan 命令 toggle 驱动 enter/exit。
+      planMode: { supported: true },
       multimodal: {
         text: { supported: true },
         image: { supported: true },
@@ -291,18 +295,37 @@ export class PiAgent extends BaseAgent {
     ].filter((s): s is string => !!s && s.length > 0);
     const systemPrompt = promptSections.join('\n\n');
 
+    // plan 模式:挂载 pi 自带的 plan-mode example 扩展(随 pi 分发,版本匹配,免 vendoring)。
+    // 只在文件存在时 --extension;缺失则 plan 模式静默降级(setPlanMode 时 warn)。
+    // 加载本身零副作用:plan 模式默认关,扩展 hook 全早返;仅 /plan 开启后才注入 plan 提示词。
+    const planModeExtPath = path.join(
+      path.dirname(this.deps.binaryPath),
+      'examples', 'extensions', 'plan-mode', 'index.ts',
+    );
+    let planModeExtAvailable = false;
+    try {
+      planModeExtAvailable = (await fs.stat(planModeExtPath)).isFile();
+    } catch {
+      /* 缺失 → 不挂载 plan-mode */
+    }
+
     const args = [
       '--mode', 'rpc',
       '--session-dir', sessionDir,
       '--provider', PI_PROVIDER_ID,
       '--model', opts.model,
       '--system-prompt', systemPrompt,
+      ...(planModeExtAvailable ? ['--extension', planModeExtPath] : []),
     ];
 
     const queue: AsyncQueue<AgentEvent> = createAsyncQueue<AgentEvent>();
     const ctx: PiTranslateContext = createPiTranslateContext(this.deps.logger);
     let interactionResolver: InteractionResolver | null = null;
     let closed = false;
+    // Cindy 侧对 pi plan 模式的镜像态;setPlanMode 经 /plan toggle 驱动,与 pi 内部
+    // planModeEnabled 保持一致(RPC 下 Execute/Refine 选择框被 auto-cancel,pi 不会自行
+    // 翻转,故镜像不漂移)。
+    let planModeActive = false;
 
     const proc = new PiRpcProcess({
       binaryPath: this.deps.binaryPath,
@@ -467,6 +490,25 @@ export class PiAgent extends BaseAgent {
       isTurnRunning(): boolean {
         // ctx.isStreaming 由 agent_start / agent_settled 翻转(translator 维护)。
         return ctx.isStreaming;
+      },
+
+      async setPlanMode(enabled: boolean): Promise<void> {
+        if (!planModeExtAvailable) {
+          deps.logger.warn('pi setPlanMode ignored: plan-mode extension not available');
+          return;
+        }
+        if (enabled === planModeActive) return; // 幂等:已在目标态不重复 toggle
+        // /plan 是扩展命令,pi 即时执行(扩展命令不受 streaming 拒绝约束);toggle 翻转
+        // pi 内部 planModeEnabled(开→禁 edit/write + 只读 bash;关→恢复全权)。
+        const resp = await proc.request({ type: 'prompt', message: '/plan' });
+        if (!resp.success) {
+          throw new Error(`pi setPlanMode(/plan) rejected: ${resp.error ?? 'unknown'}`);
+        }
+        planModeActive = enabled;
+      },
+
+      getPlanMode(): boolean {
+        return planModeActive;
       },
     };
 

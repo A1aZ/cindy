@@ -10411,6 +10411,53 @@ describe('CodexAgent upstream-response-idle watchdog', () => {
     }
   });
 
+  it('等 interrupt 期间用户起了新 turn → 不关 handle、不退役 host', async () => {
+    // 合成收口把 isTurnInFlight 清成 false,所以两次 ack 的 20s 里新 send 不会被拒。
+    // 无条件 close 会掐死这条健康的新 turn,紧随的 host 退役还会连带终止同 host 上的
+    // 其它会话(review #944 第十七轮 P1)。
+    vi.useFakeTimers();
+    try {
+      const agent = new CodexAgent(createDeps());
+      let turnSeq = 0;
+      const host = installFakeHost(agent, (method) => {
+        if (method === Method.TurnStart) return { turn: { id: `turn-${++turnSeq}` } };
+        if (method === Method.TurnInterrupt) return new Promise<never>(() => {});
+        return undefined;
+      });
+      const retireHostKey = vi
+        .spyOn(
+          agent as unknown as { retireHostKey: (...args: unknown[]) => Promise<void> },
+          'retireHostKey',
+        )
+        .mockResolvedValue(undefined);
+      const handle = await startIdleSession(agent, 'session-idle-newer-turn');
+      let eventsEnded = false;
+      void (async () => {
+        for await (const ev of handle.events()) void ev;
+        eventsEnded = true;
+      })();
+      await handle.send({ type: 'user', content: 'go' });
+      const handlers = host.getThreadHandlers();
+      if (!handlers) throw new Error('expected thread handlers');
+      handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-1' } } as never);
+
+      // 看门狗开火 → 合成本地收口(isTurnInFlight 清空),interrupt 挂住
+      await vi.advanceTimersByTimeAsync(IDLE_MS + 1);
+      // 用户在两次 ack 的窗口里起了新 turn
+      await handle.send({ type: 'user', content: 'next' });
+      handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-2' } } as never);
+
+      await vi.advanceTimersByTimeAsync(10_000 * 2 + 10);
+
+      // 新 turn 必须活着:既不关 handle,也不退役 host
+      expect(eventsEnded).toBe(false);
+      expect(retireHostKey).not.toHaveBeenCalled();
+      await handle.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('等 interrupt 期间 host 已被换掉 → 不退役那个新的健康 host', async () => {
     // 两次 interrupt ack 要等 20s,期间别的路径(auth / 凭证重启)完全可能已经把这个 key
     // 下的 host 换成新实例。retireHostKey 只按 key 查删,不加身份闸就会把新 host 退役、

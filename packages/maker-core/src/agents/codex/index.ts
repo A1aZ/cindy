@@ -3624,6 +3624,22 @@ export class CodexAgent extends BaseAgent {
           suppressFailureEvent: true,
         });
         if (interrupted || closed) return;
+        // **两次 ack 要等 20s,期间用户完全可能已经起了新 turn** —— 上面那次合成收口把
+        // isTurnInFlight 清成了 false,所以新的 send 不会被 in-flight guard 拒掉。此时
+        // 无条件 close 会掐死一条完全健康的新 turn,紧随其后的 host 退役还会连带终止同
+        // host 上的其它会话。isCurrentHost 只认得出"host 被换掉",认不出"同一 handle 上
+        // 起了新 turn"(review #944 第十七轮 P1;与第七轮 Session 的 turnGeneration、
+        // 第九轮的 host 身份闸是同一类错误:善后动作没绑定到发起它的那个实体)。
+        //
+        // 判据用 isTurnInFlight / currentTurnId:我们自己那次合成收口已经把它们清空,
+        // 所以只要它们非空,就一定是新活儿。留着这个 host 的风险由新 turn 自己的看门狗兜。
+        if (isTurnInFlight || currentTurnId !== null) {
+          log.warn(
+            'upstream-idle watchdog: a newer turn is running on this handle — skipping close/retire',
+            { threadId, stalledTurnId: turnId, currentTurnId },
+          );
+          return;
+        }
         // 走到这里有两种可能,处置相同:两次 ack 都超时(daemon 哑火),或 host 已被
         // 替换(stale —— 这个 handle 的 send 本来也会被 assertCurrentHost 拒掉)。
         // 两种情况下这个 handle 都已不可用,关掉它让上层重建是唯一正确的出路。

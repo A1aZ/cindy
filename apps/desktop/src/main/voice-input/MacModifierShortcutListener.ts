@@ -69,6 +69,13 @@ type ListenerProcess = ChildProcessByStdio<null, Readable, Readable>;
  */
 export class MacModifierShortcutListener {
   private child: ListenerProcess | null = null;
+  /**
+   * 启动代次。spawn 之前要先 await 解析 helper 路径（dev 下可能现编译几秒），那段时间
+   * `child` 还是 null，所以 stop 光看 `child` 拦不住一个正在飞的启动，重叠的启动之间也
+   * 会互相覆盖 `child` 引用、把前一个变成没人收的孤儿——而它持有全局 event tap。
+   * 每次发起启动都占一个代次，await 回来后代次被顶掉就放弃 spawn。
+   */
+  private startGeneration = 0;
   private shortcut: VoiceInputShortcut | null = null;
   private pressedKeys = new Set<string>();
   private startTimer: NodeJS.Timeout | null = null;
@@ -121,6 +128,9 @@ export class MacModifierShortcutListener {
   }
 
   stop(): void {
+    // 作废正在飞的启动：它可能还停在解析 helper 的 await 上，此刻 child 仍是 null，
+    // 下面的 kill 够不着它。不作废的话它随后会 spawn 出一个没人管的 helper。
+    this.startGeneration += 1;
     const child = this.child;
     this.child = null;
     this.shortcut = null;
@@ -133,7 +143,19 @@ export class MacModifierShortcutListener {
   }
 
   private async startChildProcess(options?: { preserveShortcutOnFailure?: boolean }): Promise<ListenerStartResult> {
+    const generation = ++this.startGeneration;
     const binary = await resolveMacModifierShortcutListenerBinary();
+    // 解析期间被 stop 掉、或被更晚的一次启动顶替：绝不能再 spawn，否则这个进程既不会
+    // 被记进 this.child（会被后者覆盖），也就再没人 kill 它。
+    if (generation !== this.startGeneration) {
+      return { ok: false, error: 'Modifier shortcut listener start was superseded.' };
+    }
+    // 兜底：真有存活的 child 时先收掉再 spawn，杜绝覆盖引用造成的泄漏。
+    const staleChild = this.child;
+    if (staleChild && !staleChild.killed) {
+      this.child = null;
+      staleChild.kill();
+    }
     return new Promise<ListenerStartResult>((resolve) => {
       let settled = false;
       let stdoutBuffer = '';

@@ -1239,14 +1239,11 @@ export function VoiceInputSection() {
   const startFnKeyCapture = useCallback(async (isCancelled: () => boolean): Promise<void> => {
     if (window.electronAPI.platform !== 'darwin') return;
     const result = await window.electronAPI.voiceInput.startModifierShortcutRecording();
-    if (isCancelled()) {
-      // 录制已经结束，而这次启动是迟到的赢家：main 侧 startChildProcess 在 spawn 之前
-      // 还 await 了一次 helper 解析（dev 下可能现编译几秒），那段时间里 listener 的
-      // child 仍是 null，所以录制 cleanup 发的 stop 什么都没停掉。不在这里补一刀，
-      // helper 会带着刚拿到授权的 event tap 活下去，没人消费却一直监听全局按键。
-      void window.electronAPI.voiceInput.stopModifierShortcutRecording();
-      return;
-    }
+    // 只丢弃迟到的结果，不在这里补发 stop：那条 IPC 按 sender id 记账，而同一个设置页
+    // 连续两轮录制用的是同一个 id，第一轮迟到的 stop 会把用户刚开始的第二轮 capture
+    // 一起停掉。启动期间的取消由 main 侧 startChildProcess 的代次校验负责——那里才
+    // 拿得到 child 与启动状态，renderer 猜不了这个时序。
+    if (isCancelled()) return;
     // blocked 只表示「确实缺权限」。以前只在成功时清掉，于是缺权限之后再来一次非权限
     // 失败（listener 坏了）会继续挂着「Fn 需要监听权限」，把用户指向错误的原因。
     const permissionBlocked = !result.ok && result.errorCode === 'permission';

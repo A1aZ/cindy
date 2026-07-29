@@ -2098,9 +2098,21 @@ export class AgentInputCoordinator {
       latest.stickyError = null;
       // 同 handleSendNotDispatched:调度来源的 prompt 不留可被人手动 Retry 的 recovery
       // (review #944 第九轮 P1)。
-      latest.recovery = head.origin?.kind === 'scheduler' ? null : { kind: 'active-turn', item: head };
+      const schedulerOrigin = head.origin?.kind === 'scheduler';
+      latest.recovery = schedulerOrigin ? null : { kind: 'active-turn', item: head };
+      if (schedulerOrigin) {
+        // 摘掉 recovery 就**必须**一并放掉 activeTurn。isDispatchBoundaryBusy 只要
+        // activeTurn 非空就判忙,而这条 active-turn recovery 原本是唯一能清掉它的入口
+        // (用户 Retry / clearError)—— 现在没有了,不主动清就等于把会话永久钉在"有活跃
+        // turn":之后所有用户与调度消息全部积压到 coordinator 被重置
+        // (review #944 第十轮 P1)。
+        latest.activeTurn = null;
+      }
       this.notifyUndispatchedUserTurn(sessionId, head);
       this.emit(sessionId);
+      // 派发边界刚刚放开,队里可能还压着别的消息 —— 用户那条路靠 clearError 顺带唤醒,
+      // scheduler 这条没有人点,必须自己唤一次。
+      if (schedulerOrigin) this.scheduleDrain(sessionId, 'scheduler-prompt-cancelled');
       // Thread 3 fix: item was removed from the queue by drain but not put back
       // (persisted path). If no other work is pending, any deferred completion must
       // be replayed now; otherwise Agent Island stays in "running" indefinitely.
@@ -2172,6 +2184,9 @@ export class AgentInputCoordinator {
       },
     );
     this.emit(sessionId);
+    // activeTurn 上面已置空,但队里可能还压着别的消息 —— 用户那条路靠 clearError 顺带
+    // 唤醒,scheduler 这条没有 recovery、没有人点,必须自己唤一次(review #944 第十轮 P1)。
+    if (schedulerOrigin) this.scheduleDrain(sessionId, 'scheduler-prompt-cancelled');
     // Thread 3 fix: item was removed from the queue by drain but not put back
     // (persisted path). If no other work is pending, any deferred completion must
     // be replayed now; otherwise Agent Island stays in "running" indefinitely.

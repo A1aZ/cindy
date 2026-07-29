@@ -5182,6 +5182,41 @@ describe('AgentInputCoordinator scheduler 排队心跳(review 反馈回归)', ()
     ).toBe(false);
   });
 
+  it('onAccepted 抛错取消 scheduler 项:放掉 activeTurn 并唤醒队列(不把会话钉死)', async () => {
+    // runner 在拿不到 live 会话时会从 onAcceptedQueuedMessage 抛错让 coordinator 回滚,
+    // 于是走 persisted-error 分支。摘掉 scheduler recovery 之后,若不一并放掉 activeTurn,
+    // isDispatchBoundaryBusy 会永久判忙 —— 而那条 recovery 本来是唯一能清掉它的入口
+    // (用户 Retry / clearError),现在没有人点。后续所有消息就此积压
+    // (review #944 第十轮 P1)。
+    const h = createHarness();
+    const sid = 'sched-accept-throw';
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.onAcceptedQueuedMessage.mockImplementationOnce(() => {
+      throw new Error('[SEND_CANCELLED_BEFORE_DISPATCH] queued heartbeat dispatch cancelled');
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'hb', { origin: schedOrigin }));
+    await flush();
+
+    expect(latestProjection(h.projections).recovery).toBeNull();
+    // activeTurn 是内部态(不进 projection),但它正是 isDispatchBoundaryBusy 的判据
+    expect(
+      (h.coordinator as unknown as { getState: (id: string) => { activeTurn: unknown } })
+        .getState(sid).activeTurn,
+    ).toBeNull();
+
+    // 派发边界确实放开了:紧接着入队的消息能被真正派发出去
+    h.sendToAgent.mockImplementationOnce(async () => ({
+      kind: 'session-dispatch',
+      dispatched: true,
+    }) as never);
+    h.coordinator.enqueue(sid, makeItem('c2', 'next one'));
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+  });
+
   it('派发在持久化后被取消:普通用户项仍保留 active-turn recovery', async () => {
     // 上一条只对 scheduler 来源生效 —— 交互输入的重试入口不受影响。
     const h = createHarness();

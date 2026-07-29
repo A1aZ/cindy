@@ -4772,7 +4772,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       } | UtilityTextFailure> => ipcRenderer.invoke('maker:schedule:generate-pre-run-hook', params),
       listRuns: (id: string, limit?: number): Promise<unknown[]> =>
         ipcRenderer.invoke('maker:schedule:list-runs', id, limit),
-      listSidebarIndexRuns: (): Promise<unknown[]> =>
+      // 回传 { runs, inflightRunIds }:后者是引擎内存里的权威 in-flight 集合,renderer 的
+      // 通知抑制标记对账靠它区分「runs 里查不到 = 跑完了」与「= 自删除后行已级联删除、
+      // run 仍在跑」。runId 不是特权数据(renderer 的标记里就存着它)。
+      listSidebarIndexRuns: (): Promise<unknown> =>
         ipcRenderer.invoke('maker:schedule:list-sidebar-index-runs'),
       listCostSummaries: (): Promise<unknown[]> =>
         ipcRenderer.invoke('maker:schedule:list-cost-summaries'),

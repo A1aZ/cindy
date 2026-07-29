@@ -151,6 +151,12 @@ export function hasAnyRunMarker(): boolean {
  *     所有带 sessionId 的 run,所以标记存在就意味着该 run 当时已进入快照范围。异步
  *     拉取的过期结果由调用方的 seq 守卫挡掉,不会走到这里。
  *
+ * **调用方必须先把引擎的 in-flight 快照覆盖成 `running` 再传进来**(见
+ * `scheduler.listInflightRunIds`)。「行不在库里」并不等于「跑完了」:agent 在任务 run
+ * 内调 `schedule_delete` 删自己的 schedule 时,引擎用 `exemptRunId` 豁免 caller run 不
+ * abort,它的行随 schedule 级联删除后仍继续跑到底 —— 那期间把标记清掉,最终 done 就会
+ * 漏出通知。引擎内存态是这件事唯一的权威来源,优先级高于 DB 状态。
+ *
  * **空映射不是异常,一样要对账**:权威查询在库里没有匹配行时合法返回空数组(删掉了
  * 最后一个 schedule、或唯一的 run 被 defer 后删除),而查询失败是 reject、走调用方的
  * catch 与重试,根本不会以空映射的形式到这里。早先那个「空映射整体跳过」的守卫会把

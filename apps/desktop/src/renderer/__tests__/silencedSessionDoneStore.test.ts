@@ -214,6 +214,28 @@ describe('silencedSessionDoneStore', () => {
      * 若对应的 failed / deferred 事件正好丢了(对账要治的正是事件丢失),「不在快照里
      * 就保持」会让标记永久残留。
      */
+    /**
+     * 回归(codex review P1):自删除场景 —— agent 在任务 run 内调 schedule_delete 删掉
+     * 自己的 schedule,引擎用 exemptRunId 豁免 caller run 不 abort,它的 run 行随 schedule
+     * 级联删除后仍继续跑到底(通常还要产出最终回复)。此时「不在 DB 快照里」不等于
+     * 「跑完了」,调用方会把引擎的 in-flight 快照覆盖成 running,标记必须保住 —— 否则
+     * 最终 done 又会漏出通知。这正是心跳类任务的标准收口路径。
+     */
+    it('keeps a marker for a self-deleting run that is gone from the DB but still in flight', () => {
+      vi.useFakeTimers();
+      try {
+        markNextSessionDoneSilenced('run-self-delete', 'session-1');
+
+        // DB 里已无此 run,但引擎报它仍 in-flight → 调用方覆盖为 running。
+        reconcileRunMarkers(new Map([['run-self-delete', 'running' as const]]));
+        vi.advanceTimersByTime(MARKER_TERMINAL_LINGER_MS * 3);
+
+        expect(isSessionDoneSilenced('session-1')).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('clears markers whose run no longer exists in the snapshot', () => {
       vi.useFakeTimers();
       try {

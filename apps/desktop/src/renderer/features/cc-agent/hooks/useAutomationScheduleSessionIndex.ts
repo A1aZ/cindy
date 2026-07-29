@@ -24,7 +24,7 @@ import {
 } from '@/lib/silencedSessionDoneStore';
 import type { AutomationScheduleSessionInfo } from '../lib/automationSidebarGrouping';
 import { isUnreadScheduleRun } from '../../scheduler/lib/runUnread';
-import { loadScheduleSidebarIndexRuns } from '../../scheduler/lib/scheduleSidebarIndexRuns';
+import { loadScheduleSidebarIndexSnapshot } from '../../scheduler/lib/scheduleSidebarIndexRuns';
 import { subscribeScheduleRunReadSync } from '../../scheduler/lib/scheduleRunReadSync';
 
 const log = createLogger('AutomationScheduleSessionIndex');
@@ -51,7 +51,7 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
     const seq = refreshSeqRef.current + 1;
     refreshSeqRef.current = seq;
     try {
-      const runs = await loadScheduleSidebarIndexRuns();
+      const { runs, inflightRunIds } = await loadScheduleSidebarIndexSnapshot();
       if (refreshSeqRef.current !== seq) return;
 
       // 抑制标记的事件丢失自愈:这份列表是 scheduler 落库的权威 run 状态(且包含所有
@@ -62,6 +62,10 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
       for (const run of runs) {
         runStatusByRunId.set(run.runId, run.status === 'running' ? 'running' : 'terminal');
       }
+      // 引擎的 in-flight 快照优先级最高,覆盖 DB 状态:自删除场景下(agent 在 run 内调
+      // schedule_delete 删自己的 schedule)run 行已随 schedule 级联删除、run 却仍在跑,
+      // 只有这份内存态能说明它还活着。见 scheduler.listInflightRunIds。
+      for (const runId of inflightRunIds) runStatusByRunId.set(runId, 'running');
       reconcileRunMarkers(runStatusByRunId);
 
       const next = new Map<string, AutomationScheduleSessionInfo>();

@@ -203,11 +203,11 @@ describe('useAutomationScheduleSessionIndex silence events', () => {
  * 固定时长)都被证明会误判,见 silencedSessionDoneStore 的文件头注释。
  */
 describe('useAutomationScheduleSessionIndex marker reconciliation', () => {
-  function stubApiWithRuns(runs: unknown[]): void {
+  function stubApiWithRuns(runs: unknown[], inflightRunIds: string[] = []): void {
     vi.stubGlobal('electronAPI', {
       maker: {
         schedule: {
-          listSidebarIndexRuns: vi.fn().mockResolvedValue(runs),
+          listSidebarIndexRuns: vi.fn().mockResolvedValue({ runs, inflightRunIds }),
           onEvent: vi.fn(() => () => undefined),
         },
       },
@@ -269,7 +269,7 @@ describe('useAutomationScheduleSessionIndex marker reconciliation', () => {
       const listSidebarIndexRuns = vi
         .fn()
         .mockRejectedValueOnce(new Error('scheduler not ready'))
-        .mockResolvedValue([indexRun({ runId: 'run-lost', status: 'success' })]);
+        .mockResolvedValue({ runs: [indexRun({ runId: 'run-lost', status: 'success' })], inflightRunIds: [] });
       vi.stubGlobal('electronAPI', {
         maker: { schedule: { listSidebarIndexRuns, onEvent: vi.fn(() => () => undefined) } },
         notificationMarkSessionAttention: vi.fn().mockResolvedValue(undefined),
@@ -313,7 +313,7 @@ describe('useAutomationScheduleSessionIndex marker reconciliation', () => {
         .mockRejectedValueOnce(new Error('e2'))
         .mockRejectedValueOnce(new Error('e3'))
         .mockRejectedValueOnce(new Error('e4'))
-        .mockResolvedValue([indexRun({ runId: 'run-lost', status: 'success' })]);
+        .mockResolvedValue({ runs: [indexRun({ runId: 'run-lost', status: 'success' })], inflightRunIds: [] });
       vi.stubGlobal('electronAPI', {
         maker: { schedule: { listSidebarIndexRuns, onEvent: vi.fn(() => () => undefined) } },
         notificationMarkSessionAttention: vi.fn().mockResolvedValue(undefined),
@@ -339,6 +339,30 @@ describe('useAutomationScheduleSessionIndex marker reconciliation', () => {
 
       expect(listSidebarIndexRuns).toHaveBeenCalledTimes(5);
       expect(isSessionDoneSilenced('session-1')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * 回归(codex review P1):自删除 run 的行已随 schedule 级联删除,DB 快照里查不到它,
+   * 但引擎的 in-flight 快照说它还在跑 —— 标记必须保住。
+   */
+  it('keeps markers for a self-deleting run reported in-flight though absent from runs', async () => {
+    vi.useFakeTimers();
+    try {
+      stubApiWithRuns([], ['run-self-delete']);
+      markNextSessionDoneSilenced('run-self-delete', 'session-1');
+
+      renderHook(() => useAutomationScheduleSessionIndex());
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(MARKER_TERMINAL_LINGER_MS * 3);
+      });
+
+      expect(isSessionDoneSilenced('session-1')).toBe(true);
     } finally {
       vi.useRealTimers();
     }

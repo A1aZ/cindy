@@ -52,6 +52,11 @@ const controllableDevicesHookSource = readFileSync(
   'utf8',
 );
 
+const agentCapabilitiesHookSource = readFileSync(
+  resolve(__dirname, '..', 'hooks', 'useAgentCapabilities.ts'),
+  'utf8',
+);
+
 const scheduleFormDialogSource = readFileSync(
   resolve(__dirname, '..', 'features', 'scheduler', 'components', 'ScheduleFormDialog.tsx'),
   'utf8',
@@ -273,6 +278,38 @@ describe('Shared create project picker', () => {
   it('strips filesystem mention chips when switching devices', () => {
     expect(newMakerDraftRouteSource).toContain('const composerDraft = getComposerDraft(NEW_MAKER_DRAFT_KEY);');
     expect(newMakerDraftRouteSource).toContain('text: stripLocalMentionChips(composerDraft.text),');
+  });
+
+  // #807 review 第三轮:点已选中的那一行只是确认当前选择,不能有副作用 —— 否则用户点一下
+  // 就静默丢掉已选项目和部分已写好的消息(mention chip 被剥、workingDir/extraDirs 被清)。
+  it('ignores reselecting the current device before touching either draft store', () => {
+    expect(newMakerDraftRouteSource).toContain(
+      'if (deviceId === (effectiveDeviceLinkDeviceId ?? null)) return;',
+    );
+  });
+
+  // #807 review 第三轮:并发删除时恢复不能按 requestId gate —— 删除按钮不禁用,快速删两行会让
+  // 第二次重写共享 requestIdRef,第一次的恢复被跳过,那一行会一直从选择器消失(对端其实还在)。
+  it('restores concurrently removed rows without gating on the shared request id', () => {
+    const tail = deviceLinkProjectsHookSource.slice(
+      deviceLinkProjectsHookSource.indexOf('const restored = removedRow;'),
+    );
+    expect(tail).not.toContain('requestIdRef.current !== requestId');
+    // 靠 setRows 里的存在性检查保证幂等,而不是靠版本号。
+    expect(deviceLinkProjectsHookSource).toContain(
+      'if (current.some((row) => row.path === restored.path)) return current;',
+    );
+  });
+
+  // #807 review 第三轮:能力缓存命中时必须清掉上一目标遗留的 loading —— 漏了会让
+  // capabilitiesLoading 永久为 true,而创建页的 send / goal guard 正是看它。
+  it('clears inherited loading state when the capability cache hits', () => {
+    const cachedBranch = agentCapabilitiesHookSource.slice(
+      agentCapabilitiesHookSource.indexOf('const cached = cache.get(cacheKey(agentKind, deviceId));'),
+    );
+    const untilReturn = cachedBranch.slice(0, cachedBranch.indexOf('return;'));
+    expect(untilReturn).toContain('setLoading(false);');
+    expect(untilReturn).toContain('setError(null);');
   });
 
   it('keeps recent-folder storage out of project-option selection', () => {

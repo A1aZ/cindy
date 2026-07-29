@@ -116,7 +116,11 @@ export function useDeviceLinkProjects(
           // 回读也失败(对端离线 / 隧道断)。此时**必须把行放回去**:删除既没在对端生效,
           // 权威列表也拿不到,保留乐观移除等于让选择器藏着一个远端仍然存在的项目,而且不给
           // 任何提示 —— 用户只能靠重开 picker 才发现它还在。按原位插回,顺序不乱。
-          if (requestIdRef.current !== requestId) return;
+          //
+          // 这里**刻意不看 requestId**:删除按钮不会禁用后续点击,快速删两行时第二次会重写
+          // 共享的 requestIdRef,若按版本号 gate,第一次的恢复就被跳过,那一行会一直从选择器
+          // 里消失(而它在对端还在)。恢复的是「这一行」这件具体的事,与列表版本无关;下面的
+          // setRows 自带存在性检查,期间真有成功回读把它带回来了也不会插重。
           const restored = removedRow;
           if (!restored) return;
           setRows((current) => {

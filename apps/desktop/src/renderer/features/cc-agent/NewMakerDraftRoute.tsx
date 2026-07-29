@@ -1457,6 +1457,10 @@ export function NewMakerDraftRoute() {
    */
   const handleDeviceChange = useCallback(
     (deviceId: string | null, deviceName: string | null) => {
+      // 点已选中的那一行(包括本机时点「本机」)只是确认当前选择,不该有任何副作用。
+      // 下面会剥 mention chip 并清 workingDir / extraDirs —— 重选同一设备时执行这些,
+      // 等于用户点一下就静默丢掉已选的项目和部分已写好的消息。必须先早返回。
+      if (deviceId === (effectiveDeviceLinkDeviceId ?? null)) return;
       // 换机器 = 换文件系统:草稿里已有的 @file / @dir chip 指的是**上一台**机器(或本机)的路径,
       // 它们会序列化成 MentionedResource 随首条消息发到新设备,在那边指向完全不同的东西。
       // 「添加远程项目」那条交接路径早就为此调 stripLocalMentionChips,直接切设备这条同样要清。
@@ -1475,7 +1479,7 @@ export function NewMakerDraftRoute() {
         extraDirs: [],
       });
     },
-    [],
+    [effectiveDeviceLinkDeviceId],
   );
   const handleOpenRemoteProject = useCallback((deviceId?: string) => {
     setAddRemoteProjectDeviceId(deviceId ?? null);

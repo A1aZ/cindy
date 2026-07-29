@@ -47,6 +47,11 @@ const deviceSwitcherPillSource = readFileSync(
   'utf8',
 );
 
+const controllableDevicesHookSource = readFileSync(
+  resolve(__dirname, '..', 'hooks', 'useControllableDevices.ts'),
+  'utf8',
+);
+
 const scheduleFormDialogSource = readFileSync(
   resolve(__dirname, '..', 'features', 'scheduler', 'components', 'ScheduleFormDialog.tsx'),
   'utf8',
@@ -187,7 +192,9 @@ describe('Shared create project picker', () => {
 
   // #807:设备切换 pill。三条产品裁决写进源码断言,防后续重构悄悄改掉。
   it('wires the device switcher pill and keeps it invisible without paired devices', () => {
-    expect(newMakerDraftRouteSource).toContain('const selectableDevices = useSelectableDevices()');
+    expect(newMakerDraftRouteSource).toContain(
+      'const { devices: selectableDevices, loaded: selectableDevicesLoaded } = useSelectableDevices();',
+    );
     expect(newMakerDraftRouteSource).toContain('<DeviceSwitcherPill');
     // 没有对端设备 → 组件自己返回 null,只有本机的用户看不到任何新增控件。
     expect(deviceSwitcherPillSource).toContain('if (devices.length === 0) return null');
@@ -232,14 +239,40 @@ describe('Shared create project picker', () => {
     expect(newMakerDraftRouteSource).toContain(
       'if (selectableDevices.some((d) => d.deviceId === effectiveDeviceLinkDeviceId)) return;',
     );
-    // 列表为空可能只是首帧未就绪 / device-link 暂不可用,此时不得抹掉用户刚选的设备。
-    expect(newMakerDraftRouteSource).toContain('if (selectableDevices.length === 0) return;');
+    // 判据是「拉到过权威快照」而非「列表非空」—— 详见 distinguishes a loaded-empty… 用例。
+    expect(newMakerDraftRouteSource).toContain('if (!selectableDevicesLoaded) return;');
   });
 
   // #807 review 修复:远程删除失败 + 权威回读也失败时,必须把行放回去,不留幻影删除。
   it('restores the optimistically removed row when both remove and reload fail', () => {
     expect(deviceLinkProjectsHookSource).toContain('const restored = removedRow;');
     expect(deviceLinkProjectsHookSource).toContain('removedIndex');
+  });
+
+  // #807 review 第二轮:远程设备语境下「选择其他项目文件夹」不能开本机原生目录对话框 ——
+  // 选出来的是控制端路径,配上远程 deviceId 发送时要么被 path guard 拒,要么在对端一个
+  // 毫不相关的同名目录里建会话。
+  it('routes folder browsing through the selected device instead of the local native picker', () => {
+    expect(folderPickerPopoverSource).toContain('if (deviceScope && onAddRemoteProject) {');
+    expect(folderPickerPopoverSource).toContain('onAddRemoteProject(deviceScope.deviceId);');
+  });
+
+  // #807 review 第二轮:空列表必须区分「还没拉到」与「拉到了确实没有」。唯一对端被解除配对时
+  // 列表会合法变空,若按「非空」gate,回落永远不触发,草稿会永久指着一台已消失的设备。
+  it('distinguishes a loaded-empty device snapshot from a not-yet-loaded one', () => {
+    expect(controllableDevicesHookSource).toContain(
+      'export function useSelectableDevices(): { devices: SelectableDevice[]; loaded: boolean }',
+    );
+    // 拉取失败(device-link 不可用)的空不作数,不得据此清掉用户选定的设备。
+    expect(controllableDevicesHookSource).toContain('setLoaded(false);');
+    expect(newMakerDraftRouteSource).toContain('if (!selectableDevicesLoaded) return;');
+    expect(newMakerDraftRouteSource).not.toContain('if (selectableDevices.length === 0) return;');
+  });
+
+  // #807 review 第二轮:换机器 = 换文件系统,@file/@dir chip 指的是上一台机器的路径。
+  it('strips filesystem mention chips when switching devices', () => {
+    expect(newMakerDraftRouteSource).toContain('const composerDraft = getComposerDraft(NEW_MAKER_DRAFT_KEY);');
+    expect(newMakerDraftRouteSource).toContain('text: stripLocalMentionChips(composerDraft.text),');
   });
 
   it('keeps recent-folder storage out of project-option selection', () => {

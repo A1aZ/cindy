@@ -387,7 +387,8 @@ export function NewMakerDraftRoute() {
   // 入口渲染在 mode pill 的 FolderPickerPopover 里(Globe 项),点开下面这个弹窗。
   const hasAnyRemoteTarget = useHasAnyRemoteTarget();
   // 设备切换器的数据源(含离线设备);空数组时 DeviceSwitcherPill 整个不渲染。
-  const selectableDevices = useSelectableDevices();
+  // loaded 用来区分「还没拉到」和「拉到了确实没有」—— 见下方失效回落 effect。
+  const { devices: selectableDevices, loaded: selectableDevicesLoaded } = useSelectableDevices();
   const [addRemoteProjectOpen, setAddRemoteProjectOpen] = useState(false);
   const [addRemoteProjectDeviceId, setAddRemoteProjectDeviceId] = useState<string | null>(null);
   const outletContext = useOutletContext<{
@@ -1427,14 +1428,17 @@ export function NewMakerDraftRoute() {
    * 不这么做的后果:pill 上显示的是一个已经不可用的目标,而草稿里还留着那个 deviceId 并会据此
    * 走远程 create-session —— 要么失败,要么在旧设备上建出会话,和界面显示完全不符。
    *
-   * 只在「列表已就绪(非空)且当前设备不在其中」时才回落:
-   *   - 离线设备现在仍留在列表里(见 isSelectableDevice),所以掉线不会误触发这条;
-   *   - 列表为空可能只是首帧还没拉到 / device-link 暂时不可用,此时不动草稿,避免把用户
-   *     刚选好的设备在一次抖动里抹掉。
+   * 判据是 `loaded`(拉到过权威快照)而**不是**「列表非空」:
+   *   - 唯一配对的对端被解除配对 / 关掉被控时,列表会合法地变成空。若按「非空」gate,这条回落
+   *     永远不触发 —— pill 因为没设备而消失,草稿却还指着那台机器,每次发送都发去它,
+   *     用户在 UI 上再也切不回本机(codex review 抓到的);
+   *   - 反过来,首帧未就绪或 device-link 不可用(listDevices 抛错)时的空不置 loaded,不作数,
+   *     避免一次抖动就把用户刚选好的设备抹掉;
+   *   - 离线设备仍留在列表里(见 isSelectableDevice),所以单纯掉线不会误触发这条。
    */
   useEffect(() => {
     if (!effectiveDeviceLinkDeviceId) return;
-    if (selectableDevices.length === 0) return;
+    if (!selectableDevicesLoaded) return;
     if (selectableDevices.some((d) => d.deviceId === effectiveDeviceLinkDeviceId)) return;
     log.warn('[new-maker] selected device is no longer selectable, falling back to local');
     patchDraft({
@@ -1444,7 +1448,7 @@ export function NewMakerDraftRoute() {
       remoteHostId: null,
       extraDirs: [],
     });
-  }, [effectiveDeviceLinkDeviceId, selectableDevices]);
+  }, [effectiveDeviceLinkDeviceId, selectableDevices, selectableDevicesLoaded]);
 
   /**
    * 换设备(#807)。**一并清掉 workingDir 与 extraDirs** —— 上一台机器的路径在新机器上
@@ -1453,6 +1457,16 @@ export function NewMakerDraftRoute() {
    */
   const handleDeviceChange = useCallback(
     (deviceId: string | null, deviceName: string | null) => {
+      // 换机器 = 换文件系统:草稿里已有的 @file / @dir chip 指的是**上一台**机器(或本机)的路径,
+      // 它们会序列化成 MentionedResource 随首条消息发到新设备,在那边指向完全不同的东西。
+      // 「添加远程项目」那条交接路径早就为此调 stripLocalMentionChips,直接切设备这条同样要清。
+      const composerDraft = getComposerDraft(NEW_MAKER_DRAFT_KEY);
+      if (composerDraft?.text) {
+        saveComposerDraft(NEW_MAKER_DRAFT_KEY, {
+          ...composerDraft,
+          text: stripLocalMentionChips(composerDraft.text),
+        });
+      }
       patchDraft({
         deviceLinkDeviceId: deviceId,
         deviceLinkDeviceName: deviceName,

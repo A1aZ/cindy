@@ -92,4 +92,30 @@ describe('#807 端到端状态迁移', () => {
     patchDraft({ deviceLinkDeviceId: null, deviceLinkDeviceName: null, workingDir: null, remoteHostId: null, extraDirs: [] });
     expect(getDraft().deviceLinkDeviceId).toBeNull();
   });
+
+  // #807 review 第二轮:唯一对端被解除配对时列表合法变空 —— 回落必须仍然触发,否则草稿会
+  // 永久指着一台已消失的设备,而 pill 因为没设备而消失,用户在 UI 上再也切不回本机。
+  it('已加载的空列表 → 回落判据成立(不是靠「列表非空」)', async () => {
+    const { getDraft, patchDraft } = await import('@/state/newMakerDraft');
+    patchDraft({ deviceLinkDeviceId: 'dev-a', deviceLinkDeviceName: 'Studio Mac', workingDir: null });
+
+    // 复刻 effect 的判据:loaded 且当前设备不在列表里 → 回落。
+    const shouldFallBack = (loaded: boolean, devices: { deviceId: string }[], cur: string | null) =>
+      cur != null && loaded && !devices.some((d) => d.deviceId === cur);
+
+    const cur = getDraft().deviceLinkDeviceId;
+    // 已加载 + 空列表(设备被解除配对)→ 必须回落
+    expect(shouldFallBack(true, [], cur)).toBe(true);
+    // 未加载(首帧 / device-link 不可用)+ 空列表 → 绝不能动草稿
+    expect(shouldFallBack(false, [], cur)).toBe(false);
+    // 已加载且设备仍在(含离线,离线设备照样留在列表里)→ 不回落
+    expect(shouldFallBack(true, [{ deviceId: 'dev-a' }], cur)).toBe(false);
+
+    // 回落本身:清空设备与工作区,回到本机
+    patchDraft({
+      deviceLinkDeviceId: null, deviceLinkDeviceName: null,
+      workingDir: null, remoteHostId: null, extraDirs: [],
+    });
+    expect(getDraft().deviceLinkDeviceId).toBeNull();
+  });
 });

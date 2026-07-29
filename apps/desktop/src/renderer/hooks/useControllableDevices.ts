@@ -106,9 +106,16 @@ export function sameSelectableList(
  * 故意不与 useControllableDevices 共用订阅:那个 hook 服务「添加远程项目」弹窗与入口 gate,
  * 语义是「现在就能建远程项目的目标」(必须在线),行为不能动。两者同页挂载会各自订阅一次
  * presence —— 代价是一次 listDevices + 一个监听,换来两套语义互不干扰。
+ *
+ * 返回值带 `loaded`:**空列表必须能区分「还没拉到」和「拉到了,确实一台都没有」**。
+ * 唯一配对的对端被解除配对 / 关掉被控时列表会合法地变空,下游要靠这个标志把草稿里的
+ * stale deviceId 收敛回本机 —— 否则 pill 因为没有设备而消失,草稿却还指着那台机器,
+ * 用户在 UI 上再也切不回本机。反过来,首帧未就绪或 device-link 暂时不可用(抛错)时的空
+ * 不能当权威,否则一次抖动就把用户刚选的设备抹掉。
  */
-export function useSelectableDevices(): SelectableDevice[] {
+export function useSelectableDevices(): { devices: SelectableDevice[]; loaded: boolean } {
   const [devices, setDevices] = useState<SelectableDevice[]>([]);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -118,8 +125,14 @@ export function useSelectableDevices(): SelectableDevice[] {
         if (cancelled) return;
         const next = toSelectableDevices(list);
         setDevices((prev) => (sameSelectableList(prev, next) ? prev : next));
+        // 成功拿到快照 —— 哪怕是空的,也是权威的空。
+        setLoaded(true);
       } catch {
-        if (!cancelled) setDevices((prev) => (prev.length === 0 ? prev : []));
+        // device-link 不可用(未登录 / relay 断):清空列表但**不置 loaded**,
+        // 这个空不作数,下游不得据此清掉用户选定的设备。
+        if (cancelled) return;
+        setDevices((prev) => (prev.length === 0 ? prev : []));
+        setLoaded(false);
       }
     };
     void refresh();
@@ -136,7 +149,7 @@ export function useSelectableDevices(): SelectableDevice[] {
     };
   }, []);
 
-  return devices;
+  return { devices, loaded };
 }
 
 export function useControllableDevices(): ControllableDevice[] {

@@ -12,6 +12,7 @@ import {
 import {
   isSessionTerminalNotificationOwnedByScheduler,
   isSessionDoneSilenced,
+  MARKER_TERMINAL_LINGER_MS,
   markNextSessionDoneSilenced,
   markNextSessionTerminalNotificationOwnedByScheduler,
   resetSilencedSessionDoneStoreForTests,
@@ -229,20 +230,32 @@ describe('useAutomationScheduleSessionIndex marker reconciliation', () => {
   }
 
   it('clears markers whose run already reached a terminal status', async () => {
-    stubApiWithRuns([
-      indexRun({ runId: 'run-lost', status: 'success' }),
-    ]);
-    // 标记建立后 completed / failed 事件都没送到(广播断链、或事件早于消费方挂载)。
-    markNextSessionDoneSilenced('run-lost', 'session-1');
-    markNextSessionTerminalNotificationOwnedByScheduler('run-lost', 'session-1');
-    expect(isSessionDoneSilenced('session-1')).toBe(true);
+    vi.useFakeTimers();
+    try {
+      stubApiWithRuns([
+        indexRun({ runId: 'run-lost', status: 'success' }),
+      ]);
+      // 标记建立后 completed / failed 事件都没送到(广播断链、或事件早于消费方挂载)。
+      markNextSessionDoneSilenced('run-lost', 'session-1');
+      markNextSessionTerminalNotificationOwnedByScheduler('run-lost', 'session-1');
+      expect(isSessionDoneSilenced('session-1')).toBe(true);
 
-    renderHook(() => useAutomationScheduleSessionIndex());
-    await waitFor(() => {
+      renderHook(() => useAutomationScheduleSessionIndex());
+      await act(async () => {
+        await Promise.resolve();
+      });
+      // 对账只排下 linger,窗口内标记仍在 —— 留给可能尚未处理的 done transition。
+      expect(isSessionDoneSilenced('session-1')).toBe(true);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(MARKER_TERMINAL_LINGER_MS + 1);
+      });
+
       expect(isSessionDoneSilenced('session-1')).toBe(false);
-    });
-
-    expect(isSessionTerminalNotificationOwnedByScheduler('session-1')).toBe(false);
+      expect(isSessionTerminalNotificationOwnedByScheduler('session-1')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   /**
@@ -271,9 +284,12 @@ describe('useAutomationScheduleSessionIndex marker reconciliation', () => {
       });
       expect(isSessionDoneSilenced('session-1')).toBe(true);
 
-      // 退避重试到来，对账完成，标记自愈。
+      // 退避重试到来，对账排下 linger；再等 linger 到点标记才真正退场。
       await act(async () => {
         await vi.advanceTimersByTimeAsync(2_000);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(MARKER_TERMINAL_LINGER_MS + 1);
       });
 
       expect(listSidebarIndexRuns).toHaveBeenCalledTimes(2);
@@ -316,6 +332,10 @@ describe('useAutomationScheduleSessionIndex marker reconciliation', () => {
           await vi.advanceTimersByTimeAsync(delay);
         });
       }
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(MARKER_TERMINAL_LINGER_MS + 1);
+      });
 
       expect(listSidebarIndexRuns).toHaveBeenCalledTimes(5);
       expect(isSessionDoneSilenced('session-1')).toBe(false);

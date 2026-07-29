@@ -16,6 +16,7 @@ import {
   markNextSessionTerminalNotificationOwnedByScheduler,
   markNextSessionDoneSilenced,
   hasAnyRunMarker,
+  MARKER_TERMINAL_LINGER_MS,
   reconcileRunMarkers,
   rememberScheduleRunSessionAttentionBaseline,
   scheduleClearSchedulerOwnedRun,
@@ -161,7 +162,7 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
           sessionId = getSilencedRunSessionIdForAttentionFallback(event.runId);
         }
         if (sessionId) clearSessionAttention(sessionId);
-        scheduleClearSilencedRun(event.runId, 2000);
+        scheduleClearSilencedRun(event.runId, MARKER_TERMINAL_LINGER_MS);
       } else if (event.type === 'completed') {
         clearSilencedRun(event.runId);
       } else if (event.type === 'failed' || event.type === 'deferred') {
@@ -170,7 +171,7 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
       // completed / failed 可能早于 React transition effect 消费终态，延迟清理；
       // deferred / skipped 没有可接管的 session 终态，立即释放，避免误伤后续 turn。
       if (event.type === 'completed' || event.type === 'failed') {
-        scheduleClearSchedulerOwnedRun(event.runId, 2000);
+        scheduleClearSchedulerOwnedRun(event.runId, MARKER_TERMINAL_LINGER_MS);
       } else if (event.type === 'deferred' || event.type === 'skipped') {
         clearSchedulerOwnedRun(event.runId);
       }

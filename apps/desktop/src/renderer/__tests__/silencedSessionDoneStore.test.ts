@@ -11,6 +11,7 @@ import {
   isSessionDoneSilenced,
   markNextSessionTerminalNotificationOwnedByScheduler,
   markNextSessionDoneSilenced,
+  MARKER_TERMINAL_LINGER_MS,
   reconcileRunMarkers,
   rememberScheduleRunSessionAttentionBaseline,
   resetSilencedSessionDoneStoreForTests,
@@ -155,19 +156,35 @@ describe('silencedSessionDoneStore', () => {
    * 都被证明会误判,详见 store 的文件头注释。
    */
   describe('reconciliation against authoritative run status', () => {
-    it('clears markers whose run already reached a terminal status', () => {
-      markNextSessionDoneSilenced('run-s', 'session-silenced');
-      markNextSessionTerminalNotificationOwnedByScheduler('run-o', 'session-owned');
+    /**
+     * 回归(codex review P1):对账清除必须走同一段 linger,不能立即删。终态事件丢了的
+     * 标记从未排过 linger,而 DB 可能已报终态、React 却还没处理该 session 的
+     * running→done —— 立刻删会让那次 transition 看不到标记、发出不该发的通知。
+     */
+    it('lets terminal markers linger so a pending done transition still sees them', () => {
+      vi.useFakeTimers();
+      try {
+        markNextSessionDoneSilenced('run-s', 'session-silenced');
+        markNextSessionTerminalNotificationOwnedByScheduler('run-o', 'session-owned');
 
-      reconcileRunMarkers(
-        new Map([
-          ['run-s', 'terminal' as const],
-          ['run-o', 'terminal' as const],
-        ]),
-      );
+        reconcileRunMarkers(
+          new Map([
+            ['run-s', 'terminal' as const],
+            ['run-o', 'terminal' as const],
+          ]),
+        );
 
-      expect(isSessionDoneSilenced('session-silenced')).toBe(false);
-      expect(isSessionTerminalNotificationOwnedByScheduler('session-owned')).toBe(false);
+        // 对账当拍不删:还在 linger 窗口内,pending 的 done transition 仍看得到标记。
+        expect(isSessionDoneSilenced('session-silenced')).toBe(true);
+        expect(isSessionTerminalNotificationOwnedByScheduler('session-owned')).toBe(true);
+
+        vi.advanceTimersByTime(MARKER_TERMINAL_LINGER_MS + 1);
+
+        expect(isSessionDoneSilenced('session-silenced')).toBe(false);
+        expect(isSessionTerminalNotificationOwnedByScheduler('session-owned')).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     /**
@@ -198,22 +215,42 @@ describe('silencedSessionDoneStore', () => {
      * 就保持」会让标记永久残留。
      */
     it('clears markers whose run no longer exists in the snapshot', () => {
-      markNextSessionDoneSilenced('run-deleted', 'session-silenced');
-      markNextSessionTerminalNotificationOwnedByScheduler('run-gone', 'session-owned');
+      vi.useFakeTimers();
+      try {
+        markNextSessionDoneSilenced('run-deleted', 'session-silenced');
+        markNextSessionTerminalNotificationOwnedByScheduler('run-gone', 'session-owned');
 
-      // 快照非空,但完全不含这两个 run —— 它们已经被删掉了。
-      reconcileRunMarkers(new Map([['some-live-run', 'running' as const]]));
+        // 快照非空,但完全不含这两个 run —— 它们已经被删掉了。
+        reconcileRunMarkers(new Map([['some-live-run', 'running' as const]]));
+        vi.advanceTimersByTime(MARKER_TERMINAL_LINGER_MS + 1);
 
-      expect(isSessionDoneSilenced('session-silenced')).toBe(false);
-      expect(isSessionTerminalNotificationOwnedByScheduler('session-owned')).toBe(false);
+        expect(isSessionDoneSilenced('session-silenced')).toBe(false);
+        expect(isSessionTerminalNotificationOwnedByScheduler('session-owned')).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
-    it('treats an empty snapshot as a query anomaly and changes nothing', () => {
-      markNextSessionDoneSilenced('run-s', 'session-silenced');
+    /**
+     * 回归(codex + greptile review P1):权威查询在库里没有匹配行时**合法**返回空数组
+     * (删掉最后一个 schedule、或唯一的 run 被 defer 后删除),查询失败走的是 reject +
+     * 调用方 catch,不会以空映射到这里。早先那个「空映射当异常整体跳过」的守卫会把这种
+     * 情况下的标记永久留住。
+     */
+    it('reconciles absent runs even when the snapshot is legitimately empty', () => {
+      vi.useFakeTimers();
+      try {
+        markNextSessionDoneSilenced('run-deleted', 'session-silenced');
+        markNextSessionTerminalNotificationOwnedByScheduler('run-gone', 'session-owned');
 
-      reconcileRunMarkers(new Map());
+        reconcileRunMarkers(new Map());
+        vi.advanceTimersByTime(MARKER_TERMINAL_LINGER_MS + 1);
 
-      expect(isSessionDoneSilenced('session-silenced')).toBe(true);
+        expect(isSessionDoneSilenced('session-silenced')).toBe(false);
+        expect(isSessionTerminalNotificationOwnedByScheduler('session-owned')).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     /**
@@ -251,15 +288,21 @@ describe('silencedSessionDoneStore', () => {
       markNextSessionDoneSilenced('run-a', 'session-a');
       markNextSessionDoneSilenced('run-b', 'session-b');
 
-      reconcileRunMarkers(
-        new Map([
-          ['run-a', 'terminal' as const],
-          ['run-b', 'running' as const],
-        ]),
-      );
+      vi.useFakeTimers();
+      try {
+        reconcileRunMarkers(
+          new Map([
+            ['run-a', 'terminal' as const],
+            ['run-b', 'running' as const],
+          ]),
+        );
+        vi.advanceTimersByTime(MARKER_TERMINAL_LINGER_MS + 1);
 
-      expect(isSessionDoneSilenced('session-a')).toBe(false);
-      expect(isSessionDoneSilenced('session-b')).toBe(true);
+        expect(isSessionDoneSilenced('session-a')).toBe(false);
+        expect(isSessionDoneSilenced('session-b')).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

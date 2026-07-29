@@ -14,10 +14,13 @@
  * **标记的生命周期跟随 run,不是「被第一次 done 消费掉」**:一个 run 内 session
  * 的 running→done 会翻转多次(后台 subagent 完成后 SDK 自动续 turn、silent-stop
  * 守卫 1.5s 后自动续跑、队列自动衔接),标记必须活过每一次中间 done,否则最终那
- * 次真 done 会当成普通完成,把 macOS toast / 飞书 / 手机推送全发一遍。清除只来自
- * scheduler 的 completed / failed / notified 事件(linger 定时器),或 run 已终态后
- * 该 session 又起新 turn。main 侧灵动岛(`main/agent-island/service.ts` 的
- * `isCompletionEventSilenced`)是同一套语义,两边不要再分叉。
+ * 次真 done 会当成普通完成,把 macOS toast / 飞书 / 手机推送全发一遍。
+ *
+ * 清除只有三条路径:scheduler 的 completed / failed / notified 事件、run 已终态后该
+ * session 又起新 turn、以及对账权威 run 状态(`reconcileRunMarkers`,治事件丢失)。前两条
+ * 与第三条统一走 `MARKER_TERMINAL_LINGER_MS` 的退场窗口。main 侧灵动岛
+ * (`main/agent-island/service.ts` 的 `isCompletionEventSilenced`)是同一套语义,
+ * 两边不要再分叉。
  */
 
 const silencedRunSessionIds = new Map<string, string>();
@@ -115,6 +118,19 @@ export function isSessionTerminalNotificationOwnedByScheduler(
 /** 对账用的 run 存活态:只关心「还在飞行」与「不再飞行」。 */
 export type RunLivenessStatus = 'running' | 'terminal';
 
+/**
+ * 标记从「run 已终态」到真正删除之间的退场窗口。
+ *
+ * 这段延迟是留给 renderer 的 done transition 的:scheduler 的终态事件可能早于 React
+ * 处理该 session 的 running→done,立刻删标记会让那次 transition 看不到标记、于是发出
+ * 不该发的(或重复的)通知。事件路径与对账路径都必须走这段 linger —— 对账遇到的恰恰是
+ * 「终态事件丢了、从未排过 linger」的标记,直接清就会踩到同一个坑。
+ *
+ * 于是全模块只有一个统一语义:**linger 定时器存在 = run 已终态、标记进入退场倒计时**,
+ * 不论这个判定来自事件还是来自对账。`clearCompleted*ForNewActivity` 正是拿它当终态判据。
+ */
+export const MARKER_TERMINAL_LINGER_MS = 2000;
+
 /** 是否还有任何标记等待对账。消费方据此决定要不要继续重试拉取快照。 */
 export function hasAnyRunMarker(): boolean {
   return silencedRunSessionIds.size > 0 || schedulerOwnedRunSessionIds.size > 0;
@@ -126,27 +142,30 @@ export function hasAnyRunMarker(): boolean {
  * 误判,见上方「事件丢失的自愈不用定时器」注释。
  *
  * 三种情形:
- *   - 映射里是 `terminal` → 清。它的 completed / failed 事件没送到。
+ *   - 映射里是 `terminal` → 排 linger 退场。它的 completed / failed 事件没送到。
  *   - 映射里是 `running` → 保持。仍在飞行,飞多久都不清。
- *   - **不在映射里** → 清。该 run 已经不存在了:删除 schedule 会级联删掉它的
- *     `schedule_runs` 行,deferred run 也会被显式删除,这两种情况永远等不到一个终态
- *     状态。这里不可能是「标记建好但 run 还没落库」的极早期 —— 引擎先 `updateRun`
- *     写 sessionId、再 emit `session-bound` / `silenced`,而权威快照包含所有带
- *     sessionId 的 run,所以标记存在就意味着该 run 当时已进入快照范围。异步拉取的
- *     过期结果由调用方的 seq 守卫挡掉,不会走到这里。
+ *   - **不在映射里** → 同样排 linger 退场。该 run 已经不存在了:删除 schedule 会级联
+ *     删掉它的 `schedule_runs` 行,deferred run 也会被显式删除,这两种情况永远等不到
+ *     一个终态状态。这里不可能是「标记建好但 run 还没落库」的极早期 —— 引擎先
+ *     `updateRun` 写 sessionId、再 emit `session-bound` / `silenced`,而权威快照包含
+ *     所有带 sessionId 的 run,所以标记存在就意味着该 run 当时已进入快照范围。异步
+ *     拉取的过期结果由调用方的 seq 守卫挡掉,不会走到这里。
  *
- * 空映射当作查询异常(而不是「一条 run 都没有」)整体跳过,避免把所有标记误清。
+ * **空映射不是异常,一样要对账**:权威查询在库里没有匹配行时合法返回空数组(删掉了
+ * 最后一个 schedule、或唯一的 run 被 defer 后删除),而查询失败是 reject、走调用方的
+ * catch 与重试,根本不会以空映射的形式到这里。早先那个「空映射整体跳过」的守卫会把
+ * 这种情况下的标记永久留住。
  *
- * 跳过已排 linger 的标记:那段 linger 正是留给 renderer 的 done transition 消费标记
- * 用的,对账不能抢在它前面清、否则那次终态又会走普通通知路径。
+ * 清除统一走 `MARKER_TERMINAL_LINGER_MS` 的 linger,不立即删 —— 对账面对的正是「终态
+ * 事件丢了、从未排过 linger」的标记,而 DB 可能已报终态、React 却还没处理该 session 的
+ * running→done。已排 linger 的标记跳过,避免重置它的倒计时。
  */
 export function reconcileRunMarkers(
   runStatusByRunId: ReadonlyMap<string, RunLivenessStatus>,
 ): void {
-  if (runStatusByRunId.size === 0) return;
   for (const runId of [...silencedRunSessionIds.keys()]) {
     if (clearTimers.has(runId) || runStatusByRunId.get(runId) === 'running') continue;
-    clearSilencedRun(runId);
+    scheduleClearSilencedRun(runId, MARKER_TERMINAL_LINGER_MS);
   }
   for (const runId of [...schedulerOwnedRunSessionIds.keys()]) {
     if (
@@ -155,7 +174,7 @@ export function reconcileRunMarkers(
     ) {
       continue;
     }
-    clearSchedulerOwnedRun(runId);
+    scheduleClearSchedulerOwnedRun(runId, MARKER_TERMINAL_LINGER_MS);
   }
 }
 

@@ -469,22 +469,15 @@ export async function refreshVoiceInputInputMonitoringPermissionSnapshot(): Prom
 }
 
 /**
- * 判定 native listener 起不来是「缺监听权限」还是别的故障。
- *
- * 两者必须分开：缺权限是可引导的正常状态（存下设置、请用户授权），而 swiftc 编译失败、
- * 二进制缺失、启动超时是真故障（不该把设置存成「待授权」骗用户）。listener 自己的
- * `ListenerStartResult` 只有一句 error 字符串，分不出来，所以这里补查一次权限。
- *
- * 用 preflight（`CGPreflightListenEventAccess`）而不是 request：它只查不弹窗，放在失败
- * 路径上不会给用户额外的系统弹窗。只有明确 denied 才算权限问题——status 为 unknown 时
- * 说明连权限都没查出来（helper 本身有问题），归 failed 更诚实。
- */
-/**
  * 交给 renderer 的统一失败文案。listener 自己的 error 可能是 swiftc stderr、
  * `Modifier shortcut listener source missing at <绝对路径>` 或 `spawn <绝对路径> ENOENT`,
  * 都带内部路径，按 electron-security §5 不能原样过桥；细节只进主进程日志。
  */
 const MAC_NATIVE_LISTENER_FAILURE_MESSAGE = 'Could not start the voice input shortcut listener.';
+
+type MacNativeListenerStartResult =
+  | { ok: true }
+  | { ok: false; error: string; superseded?: true };
 
 /**
  * 包一层 try/catch 再调 listener。
@@ -495,10 +488,6 @@ const MAC_NATIVE_LISTENER_FAILURE_MESSAGE = 'Could not start the voice input sho
  * 不接住的话 IPC handler 直接 reject，原始消息（含内部绝对路径）会过桥给 renderer，
  * 而且调用方精心分好的 errorCode 分支根本走不到。
  */
-type MacNativeListenerStartResult =
-  | { ok: true }
-  | { ok: false; error: string; superseded?: true };
-
 async function startMacNativeListener(
   start: () => Promise<MacNativeListenerStartResult>,
 ): Promise<MacNativeListenerStartResult> {
@@ -510,6 +499,17 @@ async function startMacNativeListener(
   }
 }
 
+/**
+ * 判定 native listener 起不来是「缺监听权限」还是别的故障。
+ *
+ * 两者必须分开：缺权限是可引导的正常状态（存下设置、请用户授权），而 swiftc 编译失败、
+ * 二进制缺失、启动超时是真故障（不该把设置存成「待授权」骗用户）。listener 自己的
+ * `ListenerStartResult` 只有一句 error 字符串，分不出来，所以这里补查一次权限。
+ *
+ * 用 preflight（`CGPreflightListenEventAccess`）而不是 request：它只查不弹窗，放在失败
+ * 路径上不会给用户额外的系统弹窗。只有明确 denied 才算权限问题——status 为 unknown 时
+ * 说明连权限都没查出来（helper 本身有问题），归 failed 更诚实。
+ */
 async function classifyMacNativeListenerFailure(): Promise<VoiceInputGlobalErrorCode> {
   if (process.platform !== 'darwin') return 'failed';
   const snapshot = await refreshVoiceInputInputMonitoringPermissionSnapshot();

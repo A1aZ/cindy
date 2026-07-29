@@ -63,6 +63,7 @@ import {
   createDefaultProbes,
   formatEndpointFetchDiagnosis,
   probeEndpointFetch,
+  withDeadline,
 } from './endpointFetchDiagnostics';
 import {
   formatCacheSavedAt,
@@ -120,6 +121,13 @@ const ATTEMPT_TIMEOUT_MS = 15_000;
  * 15s 超时)约 48s 才弹框——此时网络确实不通,慢比误报好。
  */
 const AUTO_RETRY_DELAYS_MS: readonly number[] = [800, 2400];
+
+/**
+ * 整个诊断阶段的兜底预算。生产实现(diagnoseCdnManifestFetch)内部每一段都已经各自
+ * 有界、并发跑,墙钟约 11s;这里再套一层是因为 diagnose 是**注入点**——阻断路径上
+ * 不允许出现"某个实现忘了设超时,于是启动永远停在这里"的可能。
+ */
+const DIAGNOSIS_TOTAL_BUDGET_MS = 15_000;
 
 export const CLIENT_ENDPOINTS_SYNC_CHANNEL = 'client-endpoints:get-sync';
 
@@ -289,14 +297,28 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 /**
+ * 4xx 里语义上明确是**瞬时**的状态码:重试有意义,也不该被当成配置事故剥掉离线出口。
+ *  - 408 Request Timeout / 425 Too Early:传输层抖动;
+ *  - 429 Too Many Requests:被限流,过一会儿就好——把它判成"配置错"会让一个正被
+ *    限流的用户既不能重试、又用不上手里那份可用缓存,直接开不了应用。
+ * 其余 3xx/4xx 才是路径 / 权限 / 部署配置错。
+ */
+const TRANSIENT_HTTP_STATUSES = new Set([408, 425, 429]);
+
+/** HTTP 状态码是否属于"重试没有意义"的永久性错误(分类与重试预算共用同一判定)。 */
+function isPermanentHttpStatus(status: number): boolean {
+  return status < 500 && !TRANSIENT_HTTP_STATUSES.has(status);
+}
+
+/**
  * 失败 reason → 失败分类(决定文案与是否给离线出口)。
  *
  * 分界不是"有没有拿到正文",而是**重试和离线出口有没有意义**,并且必须与自动重试
- * 循环的永久性判定保持一致:
- *  - 永久性 HTTP 3xx/4xx = 路径 / 权限 / 部署配置错。重试循环已经因此不重试,
- *    这里同样归 config——否则同一个失败被判成"配置错所以不重试"又"网络问题所以
- *    可以用缓存绕过",等于给一次真实的配置事故开了后门(review 抓到的正是这条);
- *  - 5xx 与传输层失败(超时 / DNS / 代理 / ERR_*)才是 network,可重试、可离线;
+ * 循环的永久性判定保持一致(两处共用 isPermanentHttpStatus):
+ *  - 永久性 HTTP(3xx/4xx 去掉 408/425/429)= 路径 / 权限 / 部署配置错。重试循环已经
+ *    因此不重试,这里同样归 config——否则同一个失败被判成"配置错所以不重试"又
+ *    "网络问题所以可以用缓存绕过",等于给一次真实的配置事故开了后门;
+ *  - 5xx、瞬时 4xx 与传输层失败(超时 / DNS / 代理 / ERR_*)才是 network,可重试、可离线;
  *  - 烘焙基址为空是打包事故,同样 config。
  */
 export function classifyManifestFailure(reason: string): EndpointManifestFailureKind {
@@ -304,7 +326,7 @@ export function classifyManifestFailure(reason: string): EndpointManifestFailure
   const detail = reason.slice('fetch-failed'.length).replace(/^:/, '');
   if (detail === 'missing-manifest-base-url') return 'config';
   const httpStatus = /^http-(\d+)$/.exec(detail)?.[1];
-  if (httpStatus && Number(httpStatus) < 500) return 'config';
+  if (httpStatus && isPermanentHttpStatus(Number(httpStatus))) return 'config';
   return 'network';
 }
 
@@ -358,6 +380,8 @@ export interface BlockingResolveDeps {
    * 抛错不影响阻断流程——诊断是排查辅助,绝不能变成新的启动失败源。
    */
   diagnose?(reason: string): Promise<{ summary: string | null; logPath: string | null }>;
+  /** 诊断阶段的兜底预算,默认 DIAGNOSIS_TOTAL_BUDGET_MS;仅测试需要调小。 */
+  diagnosisBudgetMs?: number;
   /**
    * 读取并**严格解析**离线缓存;返回 null = 无可用缓存(缺失 / 损坏 / 清单地址
    * 变化 / region 不符)。只在网络层失败时调用,且结果仅用于点亮弹框上的离线按钮。
@@ -429,9 +453,10 @@ export async function resolveClientEndpointsBlocking(
       reason = fetchFailedReason(fetched.detail);
       // 构建/打包配置事故(基址为空)重试不会改变结果,立即跳出。
       if (fetched.detail === 'missing-manifest-base-url') break;
-      // HTTP 3xx/4xx 是永久性错误(路径/权限/配置),重试同一 URL 不会自愈;仅 5xx 可能是瞬时故障。
+      // 永久性 HTTP(路径/权限/配置)重试同一 URL 不会自愈;5xx 与瞬时 4xx
+      // (408/425/429)可能自愈,继续消耗预算。判定与失败分类共用 isPermanentHttpStatus。
       const httpStatus = /^http-(\d+)$/.exec(fetched.detail)?.[1];
-      if (httpStatus && Number(httpStatus) < 500) break;
+      if (httpStatus && isPermanentHttpStatus(Number(httpStatus))) break;
       const delay = retryDelays[attempt];
       if (delay === undefined) break; // 预算用尽 → 阻断弹框
       log.warn(
@@ -451,7 +476,13 @@ export async function resolveClientEndpointsBlocking(
     let logPath: string | null = null;
     if (kind === 'network' && deps.diagnose) {
       try {
-        const report = await deps.diagnose(reason);
+        // 兜底 deadline:diagnose 的内部各段都已有界,但它是注入点——阻断路径上不能
+        // 存在"实现方忘了设超时就永久卡住启动"的可能。超时按诊断缺失继续弹框。
+        const report = await withDeadline(
+          deps.diagnose(reason),
+          deps.diagnosisBudgetMs ?? DIAGNOSIS_TOTAL_BUDGET_MS,
+          'diagnosis',
+        );
         diagnosis = report.summary;
         logPath = report.logPath;
       } catch (err) {
@@ -554,11 +585,21 @@ function resolveDialogLocale(): EndpointManifestDialogLocale {
 const ENDPOINT_NETLOG_FILE_NAME = 'endpoint-netlog.json';
 /** 诊断用的额外一次请求预算,比正常尝试短——用户已经在等弹框。 */
 const DIAGNOSIS_ATTEMPT_TIMEOUT_MS = 5_000;
+/**
+ * netLog start / stop 各自的预算。Chromium 的 NetworkService 或磁盘出问题时这两个
+ * promise 也可能永不 settle,而它们同样在阻断路径上——不套 deadline 就等于把
+ * "探针已经有超时"这件事白做了(review 抓到的正是这条剩余缺口)。
+ */
+const NETLOG_STEP_TIMEOUT_MS = 3_000;
 
 /**
  * 抓一份 netlog:在录制期间再打一次同样的清单请求,把 Chromium 内部对这次失败的
  * 判定(代理决策、socket、TLS、被谁取消)留在磁盘上。`ERR_FAILED` 这类通用码
  * 单看错误字符串永远得不到这些信息。任何异常都只降级为「没有 netlog」。
+ *
+ * 三个 await 全部有界:start / stop 各 NETLOG_STEP_TIMEOUT_MS,中间那次请求
+ * 走 DIAGNOSIS_ATTEMPT_TIMEOUT_MS。stop 超时只记日志、仍然返回文件路径——
+ * 那份 netlog 已经落了盘(可能是残缺的),对排查仍有价值。
  */
 async function captureEndpointNetLog(): Promise<string | null> {
   try {
@@ -566,11 +607,19 @@ async function captureEndpointNetLog(): Promise<string | null> {
     // 这条诊断路径用到,静态引入会让本模块的所有单测都必须在 electron mock 里补这个 key。
     const { netLog } = await import('electron');
     const file = path.join(getLogDir(), ENDPOINT_NETLOG_FILE_NAME);
-    await netLog.startLogging(file, { captureMode: 'default' });
+    await withDeadline(
+      netLog.startLogging(file, { captureMode: 'default' }),
+      NETLOG_STEP_TIMEOUT_MS,
+      'netlog-start',
+    );
     try {
       await fetchManifestViaCdn(DIAGNOSIS_ATTEMPT_TIMEOUT_MS);
     } finally {
-      await netLog.stopLogging();
+      try {
+        await withDeadline(netLog.stopLogging(), NETLOG_STEP_TIMEOUT_MS, 'netlog-stop');
+      } catch (err) {
+        log.debug('netlog stopLogging did not settle: %s', String(err));
+      }
     }
     return file;
   } catch (err) {
@@ -579,19 +628,28 @@ async function captureEndpointNetLog(): Promise<string | null> {
   }
 }
 
-/** CDN 路径的诊断实现:分阶段探针摘要 + netlog 落盘路径。 */
+/**
+ * CDN 路径的诊断实现:分阶段探针摘要 + netlog 落盘路径。
+ *
+ * 两件事**并发**跑:探针只读网络栈状态、netlog 抓的是 Chromium 内部事件,互不干扰,
+ * 串行只会让用户在阻断框前多等一截(墙钟从 ~15s 降到 ~11s)。
+ */
 async function diagnoseCdnManifestFetch(
   manifestUrl: string,
 ): Promise<{ summary: string | null; logPath: string | null }> {
-  let summary: string | null = null;
-  try {
-    const report = await probeEndpointFetch(manifestUrl, createDefaultProbes());
-    summary = formatEndpointFetchDiagnosis(report);
-    log.warn('endpoint manifest fetch diagnosis: %s (%s)', summary, manifestUrl);
-  } catch (err) {
-    log.debug('endpoint fetch probe failed: %s', String(err));
-  }
-  const netLogPath = await captureEndpointNetLog();
+  const [summary, netLogPath] = await Promise.all([
+    probeEndpointFetch(manifestUrl, createDefaultProbes())
+      .then((report) => {
+        const line = formatEndpointFetchDiagnosis(report);
+        log.warn('endpoint manifest fetch diagnosis: %s (%s)', line, manifestUrl);
+        return line;
+      })
+      .catch((err: unknown) => {
+        log.debug('endpoint fetch probe failed: %s', String(err));
+        return null;
+      }),
+    captureEndpointNetLog(),
+  ]);
   return { summary, logPath: netLogPath ?? getLogDirSafe() };
 }
 

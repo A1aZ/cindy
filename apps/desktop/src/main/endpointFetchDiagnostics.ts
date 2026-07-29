@@ -50,12 +50,15 @@ function describe(err: unknown): string {
 }
 
 /**
- * 给探针套硬 deadline。**每一段都必须套**:系统 PAC / 代理解析与 OS DNS 查询都可能
- * 永不 settle,而这段代码跑在 app.ready 的阻断路径上——只给 TCP 传 timeout 的话,
- * 一个 pending 的 resolveProxy 就能让阻断框(连同新的离线出口)永远不出现,
- * 表现为"启动卡住没反应",比原来只报 ERR_FAILED 更糟。
+ * 给一个 promise 套硬 deadline。**阻断路径上的每一个 await 都必须套**:系统 PAC /
+ * 代理解析、OS DNS 查询、Chromium 的 netLog start/stop 都可能永不 settle,而这些代码
+ * 跑在 app.ready 的阻断路径上——任何一个 pending 的 await 就能让阻断框(连同离线
+ * 出口)永远不出现,表现为"启动卡住没反应",比原来只报 ERR_FAILED 更糟。
+ *
+ * 导出供 clientEndpointsService 的 netlog 抓取复用:同一条不变量只留一份实现,
+ * 免得两处各写一个超时包装后行为悄悄分叉。
  */
-function withDeadline<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+export function withDeadline<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
       () => reject(new Error(`${label}-timeout-${timeoutMs}ms`)),

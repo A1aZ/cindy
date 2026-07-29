@@ -454,6 +454,25 @@ describe('弹框前的自动重试(mac 首装瞬时失败自愈)', () => {
     expect(result).toBeNull();
   });
 
+  it.each([408, 425, 429])('瞬时 HTTP %d 仍消耗重试预算(与分类共用同一判定)', async (status) => {
+    const fetchManifest = vi.fn<BlockingResolveDeps['fetchManifest']>().mockResolvedValue({
+      ok: false,
+      detail: `http-${status}`,
+    });
+    const sleep = vi.fn<(ms: number) => Promise<void>>().mockResolvedValue(undefined);
+
+    await resolveClientEndpointsBlocking({
+      fetchManifest,
+      promptRetry: vi.fn().mockReturnValue('exit'),
+      exitApp: vi.fn(),
+      autoRetryDelaysMs: [10, 20],
+      sleep,
+    });
+
+    expect(fetchManifest).toHaveBeenCalledTimes(3); // 首发 + 2 次自动重试
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
   it('HTTP 502(瞬时服务端错误)仍消耗重试预算', async () => {
     const fetchManifest = vi.fn<BlockingResolveDeps['fetchManifest']>().mockResolvedValue({
       ok: false,
@@ -485,11 +504,17 @@ describe('失败分类与弹框前诊断', () => {
     // 5xx 可能是瞬时故障:重试循环会重试,这里也给离线出口。
     ['fetch-failed:http-500', 'network'],
     ['fetch-failed:http-502', 'network'],
+    // 瞬时 4xx:限流 / 请求超时过一会儿就好,不能当配置事故——那会让一个正被限流的
+    // 用户既不能重试、又用不上手里那份可用缓存。
+    ['fetch-failed:http-408', 'network'],
+    ['fetch-failed:http-425', 'network'],
+    ['fetch-failed:http-429', 'network'],
     // 永久性 HTTP = 路径 / 权限 / 部署配置错。重试循环已因此不重试,分类必须一致,
     // 否则同一失败会"配置错所以不重试"又"网络问题所以能用缓存绕过"。
     ['fetch-failed:http-301', 'config'],
     ['fetch-failed:http-403', 'config'],
     ['fetch-failed:http-404', 'config'],
+    ['fetch-failed:http-451', 'config'],
     ['fetch-failed:missing-manifest-base-url', 'config'],
     ['invalid-json', 'config'],
     ['unsupported-schema-version:9', 'config'],
@@ -571,6 +596,27 @@ describe('失败分类与弹框前诊断', () => {
     expect(promptRetry).toHaveBeenCalledWith(promptedWith('fetch-failed:ENOENT', 'config'));
     expect(diagnose).not.toHaveBeenCalled();
     expect(loadOfflineManifest).not.toHaveBeenCalled();
+  });
+
+  it('诊断永不返回时按兜底 deadline 放弃,阻断框照样弹出', async () => {
+    const promptRetry = vi.fn().mockReturnValue('exit');
+    const exitApp = vi.fn();
+    const startedAt = Date.now();
+
+    const result = await resolveClientEndpointsBlocking({
+      fetchManifest: failFetch('ERR_FAILED'),
+      promptRetry,
+      exitApp,
+      // diagnose 是注入点:实现方忘了设超时不能让启动永久停在这里。
+      diagnose: () => new Promise(() => {}),
+      diagnosisBudgetMs: 30,
+      ...NO_AUTO_RETRY,
+    });
+
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(promptRetry.mock.calls[0][0]).toMatchObject({ diagnosis: null, logPath: null });
+    expect(result).toBeNull();
+    expect(exitApp).toHaveBeenCalledTimes(1);
   });
 
   it('诊断自身抛错不影响阻断流程', async () => {
@@ -696,6 +742,21 @@ describe('用户确认的离线出口', () => {
       });
     },
   );
+
+  it.each([408, 429])('瞬时 HTTP %d 仍给离线出口(被限流不该连缓存都用不上)', async (status) => {
+    const promptRetry = vi.fn().mockReturnValue('offline');
+
+    const result = await resolveClientEndpointsBlocking({
+      fetchManifest: failFetch(`http-${status}`),
+      promptRetry,
+      exitApp: vi.fn(),
+      loadOfflineManifest: offlineCandidate,
+      ...NO_AUTO_RETRY,
+    });
+
+    expect(result?.authApiBaseUrl).toBe('https://auth.cached.example.com');
+    expect(promptRetry.mock.calls[0][0]).toMatchObject({ kind: 'network' });
+  });
 
   it('HTTP 502(瞬时)仍给离线出口', async () => {
     const loadOfflineManifest = vi.fn(offlineCandidate);

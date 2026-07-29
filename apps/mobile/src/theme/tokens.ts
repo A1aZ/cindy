@@ -40,6 +40,20 @@ export interface ThemeColors {
   chatCodeSurface: string;
   /** Chat / task code card 专用描边 */
   chatCodeBorder: string;
+  /**
+   * 代码高亮语法色(6 档)。色值对齐桌面端所用的 GitHub highlight.js 主题
+   * (light = `highlight.js/styles/github.css`,dark = globals.css 里的 GitHub Dark
+   * 覆盖),两端观感一致。移动端不引入 highlight.js —— 依赖会改 runtime
+   * fingerprint 触发冷更,词法分析走仓内 `session/codeHighlight.ts`。
+   * 这 5 档是语义豁免色(语法着色本身就是彩色),不受黑白系约束。
+   */
+  syntaxKeyword: string;
+  syntaxString: string;
+  syntaxComment: string;
+  syntaxNumber: string;
+  syntaxFunction: string;
+  /** 属性名 / 字段名(hljs 的 attr;GitHub 主题里与 number 同色)。 */
+  syntaxProperty: string;
   /** Composer / input focus caret。二次改稿 2026-07-18 晚:撤红改蓝,对齐 Mac caret-accent */
   inputCaret: string;
   /** Bottom sheet root 玻璃面 */
@@ -346,6 +360,13 @@ export const lightColors: ThemeColors = {
   activeGlyph: '#DF0C27',
   chatCodeSurface: '#F8F8F8',
   chatCodeBorder: '#DCDFE3',
+  // GitHub light(highlight.js github.css)原值,与桌面端逐值一致。
+  syntaxKeyword: '#D73A49',
+  syntaxString: '#032F62',
+  syntaxComment: '#6A737D',
+  syntaxNumber: '#005CC5',
+  syntaxFunction: '#6F42C1',
+  syntaxProperty: '#005CC5',
   inputCaret: '#417CDD',
   sheetSurface: 'rgba(248, 248, 248, 0.95)',
   sheetActionSurface: '#F6F6F6',
@@ -409,6 +430,14 @@ export const darkColors: ThemeColors = {
   activeGlyph: '#A61629',
   chatCodeSurface: '#353333',
   chatCodeBorder: '#3C3C3C',
+  // GitHub Dark,取自桌面 globals.css 的 .dark .n* 覆盖(#ff7b72 / #a5d6ff /
+  // #8b949e / #79c0ff / #d2a8ff)。
+  syntaxKeyword: '#FF7B72',
+  syntaxString: '#A5D6FF',
+  syntaxComment: '#8B949E',
+  syntaxNumber: '#79C0FF',
+  syntaxFunction: '#D2A8FF',
+  syntaxProperty: '#79C0FF',
   inputCaret: '#417CDD',
   sheetSurface: 'rgba(59, 59, 59, 0.95)',
   sheetActionSurface: 'rgba(59, 59, 59, 0.5)',

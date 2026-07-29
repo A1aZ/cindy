@@ -4,9 +4,11 @@ import {
   type MobileMarkdownBlock,
   type MobileMarkdownInline,
 } from '@/session/messageMarkdown';
+import { tokenizeCode } from '@/session/codeHighlight';
 import { parseSessionDeepLinkUrl, shortSessionId } from '@/session/sessionLinks';
 import { buildKatexLoaderJs } from '@/session/mathWebViewHtml';
-import { lightColors, typeScale } from '@/theme/tokens';
+// lineHeight 取别名:本模块内 `lineHeight` 是正文行高的局部变量(来自 options)。
+import { lightColors, lineHeight as lineHeightScale, typeScale } from '@/theme/tokens';
 import { i18n } from '@/i18n';
 
 /**
@@ -28,6 +30,15 @@ export interface SelectableMarkdownHtmlOptions {
    * HTML(WebView 无法事后 patch DOM);缺失时降级「会话 <短id>」。
    */
   sessionLinkTitles?: Readonly<Record<string, string>>;
+  /** 代码块语法着色的 6 档颜色(缺省用 light 主题值)。 */
+  syntaxColors?: {
+    comment?: string;
+    function?: string;
+    keyword?: string;
+    number?: string;
+    property?: string;
+    string?: string;
+  };
   tableCellMinWidth?: number;
   textColor?: string;
   /**
@@ -146,6 +157,18 @@ function buildSelectableMarkdownCss(options: SelectableMarkdownHtmlOptions): str
   const fontSize = cssNumber(options.fontSize ?? 16);
   const lineHeight = cssNumber(options.lineHeight ?? 23);
   const codeFontSize = cssNumber(typeScale.code);
+  // 标题两档大号 + 共用行高(20/28、18/28 都是 lineHeight 阶梯里的既有配对)。
+  const headingLargeFontSize = cssNumber(typeScale.title);
+  const headingMediumFontSize = cssNumber(typeScale.subtitle);
+  const headingLineHeight = cssNumber(lineHeightScale.listTitle);
+  const syntax = {
+    comment: cssValue(options.syntaxColors?.comment ?? lightColors.syntaxComment),
+    function: cssValue(options.syntaxColors?.function ?? lightColors.syntaxFunction),
+    keyword: cssValue(options.syntaxColors?.keyword ?? lightColors.syntaxKeyword),
+    number: cssValue(options.syntaxColors?.number ?? lightColors.syntaxNumber),
+    property: cssValue(options.syntaxColors?.property ?? lightColors.syntaxProperty),
+    string: cssValue(options.syntaxColors?.string ?? lightColors.syntaxString),
+  };
   const bodyGap = cssNumber(options.bodyGap ?? 10);
   const markerWidth = cssNumber(options.markerWidth ?? 24);
   const tableCellMinWidth = cssNumber(options.tableCellMinWidth ?? 112);
@@ -203,10 +226,23 @@ function buildSelectableMarkdownCss(options: SelectableMarkdownHtmlOptions): str
     p, h1, h2, h3, h4, h5, h6, blockquote, pre, table, .list-row {
       margin: 0;
     }
+    /* 标题分三档。改前 h1–h6 全部等于正文字号(只有 font-weight:500 撑),文档里
+       完全读不出层级 —— 与聊天消息流同一个缺陷、同一套修法:
+         h1  20/28 = 1.400(= desktop h1 比例)
+         h2  18/28 = 1.556(= desktop h2 比例)
+         h3+ 正文字号,靠 500 字重区分(= desktop 让 h3 贴近正文的处理) */
     h1, h2, h3, h4, h5, h6 {
       font-size: ${fontSize}px;
       font-weight: 500;
       line-height: ${lineHeight}px;
+    }
+    h1 {
+      font-size: ${headingLargeFontSize}px;
+      line-height: ${headingLineHeight}px;
+    }
+    h2 {
+      font-size: ${headingMediumFontSize}px;
+      line-height: ${headingLineHeight}px;
     }
     /* 引用正文与列表 marker 走正文色(不用 mutedColor):mutedColor =
        textSecondary 对底色仅 3.1:1(light)/ 3.4:1(dark),低于 WCAG AA 4.5:1。
@@ -243,12 +279,23 @@ function buildSelectableMarkdownCss(options: SelectableMarkdownHtmlOptions): str
       padding: 10px 12px;
       white-space: pre-wrap;
     }
+    /* 行内 code 与正文同底、只用等宽字体区分(与聊天消息流的
+       markdownInlineCode 同口径):底色会把成段正文切成一片色块,而 id / 路径 /
+       字段名这类内容在文档里非常密集。不给底色也就不需要 border-radius /
+       padding —— 它们只会在字词间挤出无意义的空隙。代码块(pre)另有底色与描边。 */
+    /* 语法着色只作用于代码块内(pre code):行内 code 不着色 —— 一句话里的短标识
+       被染成关键字色反而更吵。与聊天消息流共用 session/codeHighlight 的分词
+       结果,配色同为 GitHub 主题。
+       注意:本文件是模板字符串,注释里不能出现反引号。 */
+    pre code .syn-keyword { color: ${syntax.keyword}; }
+    pre code .syn-string { color: ${syntax.string}; }
+    pre code .syn-comment { color: ${syntax.comment}; }
+    pre code .syn-number { color: ${syntax.number}; }
+    pre code .syn-function { color: ${syntax.function}; }
+    pre code .syn-property { color: ${syntax.property}; }
     code {
-      background: ${chipColor};
-      border-radius: 4px;
       font-family: Menlo, Monaco, Consolas, monospace;
       font-size: ${codeFontSize}px;
-      padding: 0 4px;
     }
     pre code {
       background: transparent;
@@ -354,7 +401,9 @@ function renderBlock(block: MobileMarkdownBlock, ctx: RenderContext): string {
       ].join('');
     }
     case 'code':
-      return `<pre><code>${escapeHtml(block.text)}</code></pre>`;
+      // 与聊天消息流同一个 tokenizer(session/codeHighlight),着色口径一致;
+      // 每个非 plain 片段包一层 <span class="syn-*">,颜色见 css 里的 .syn-* 规则。
+      return `<pre><code>${highlightCodeHtml(block.text, block.language)}</code></pre>`;
     case 'mermaid':
       return `<pre><code>${escapeHtml(`// mermaid\n${block.text}`)}</code></pre>`;
     case 'math':
@@ -431,6 +480,21 @@ function renderInline(inline: MobileMarkdownInline, ctx: RenderContext = {}): st
       return `<img src="${escapeAttribute(inline.url)}" data-xdt-src="${escapeAttribute(inline.url)}" alt="${escapeAttribute(inline.alt)}"${size}>`;
     }
   }
+}
+
+/**
+ * 代码块语法着色 → HTML。走与聊天消息流相同的 tokenizer,颜色由 css 的 .syn-*
+ * 规则给(见 buildSelectableMarkdownCss)。每个片段都经 escapeHtml,不会因为着色
+ * 引入未转义内容。
+ */
+function highlightCodeHtml(source: string, language: string | undefined): string {
+  return tokenizeCode(source, language)
+    .map((token) => (
+      token.kind === 'plain'
+        ? escapeHtml(token.text)
+        : `<span class="syn-${token.kind}">${escapeHtml(token.text)}</span>`
+    ))
+    .join('');
 }
 
 function escapeHtml(value: string): string {

@@ -54,9 +54,18 @@ export function MarkdownFileReader({
     // 字号不动:16 = DESIGN.md 的 Body 档。
     lineHeight: lineHeight.bodyRelaxed,
     mutedColor: colors.textSecondary,
+    // 代码块语法着色随主题走(WebView 里没有 theme context,只能显式注入)。
+    syntaxColors: {
+      comment: colors.syntaxComment,
+      function: colors.syntaxFunction,
+      keyword: colors.syntaxKeyword,
+      number: colors.syntaxNumber,
+      property: colors.syntaxProperty,
+      string: colors.syntaxString,
+    },
     textColor: colors.textPrimary,
     ...(targetLine ? { targetLine } : {}),
-  }), [colors.border, colors.surfaceChip, colors.textPrimary, colors.textSecondary, markdown, targetLine]);
+  }), [colors, markdown, targetLine]);
 
   // 回调走 ref:onQuoteSelection 引用变化(页面重渲)不应重建 handler,
   // 更不应让 WebView 重载。

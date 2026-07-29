@@ -1,0 +1,72 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  __testing,
+  enterForcedUpdate,
+  getForcedUpdateTarget,
+  subscribeForcedUpdate,
+  type ForcedUpdateTarget,
+} from './forcedUpdateStore';
+
+function target(overrides: Partial<ForcedUpdateTarget> = {}): ForcedUpdateTarget {
+  return {
+    version: '2.0.0',
+    runtimeVersion: 'rtv-new',
+    installUrl: 'https://cdn.example/install',
+    itmsUrl: 'itms-services://?action=download-manifest&url=https://cdn.example/m.plist',
+    ...overrides,
+  };
+}
+
+afterEach(() => {
+  __testing.reset();
+});
+
+describe('forcedUpdateStore', () => {
+  it('初始无阻断目标', () => {
+    expect(getForcedUpdateTarget()).toBeNull();
+  });
+
+  it('进入阻断态后可读取目标并通知订阅者', () => {
+    const listener = vi.fn();
+    subscribeForcedUpdate(listener);
+    enterForcedUpdate(target());
+    expect(getForcedUpdateTarget()).toEqual(target());
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  it('同一目标重复进入 → 幂等,不重复通知(resume 每 5 分钟命中一次也不会重渲染)', () => {
+    const listener = vi.fn();
+    subscribeForcedUpdate(listener);
+    enterForcedUpdate(target());
+    enterForcedUpdate(target());
+    enterForcedUpdate({ ...target() });
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  it('目标变化(更高版本)→ 更新并通知', () => {
+    const listener = vi.fn();
+    subscribeForcedUpdate(listener);
+    enterForcedUpdate(target());
+    enterForcedUpdate(target({ version: '2.1.0' }));
+    expect(getForcedUpdateTarget()?.version).toBe('2.1.0');
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it('取消订阅后不再收到通知', () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeForcedUpdate(listener);
+    unsubscribe();
+    enterForcedUpdate(target());
+    expect(listener).not.toHaveBeenCalled();
+    expect(getForcedUpdateTarget()).not.toBeNull();
+  });
+
+  it('单个订阅者抛错不影响其它订阅者', () => {
+    const bad = vi.fn(() => { throw new Error('boom'); });
+    const good = vi.fn();
+    subscribeForcedUpdate(bad);
+    subscribeForcedUpdate(good);
+    expect(() => enterForcedUpdate(target())).not.toThrow();
+    expect(good).toHaveBeenCalledOnce();
+  });
+});

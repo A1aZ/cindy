@@ -19,6 +19,7 @@ import {
   RESEND_COUNTDOWN_SECONDS,
   resendCountdownRemaining,
   resolveDeletionBubbleFrame,
+  resolveDeletionBubbleLinkHitSlop,
   resolveLoginStage,
   resolveLoginSurface,
   resolveLoginSurfaceMode,
@@ -44,29 +45,38 @@ describe('loginSkin 750 stage 布局引擎', () => {
     expect(resolveLoginStage(750, 2000).designHeight).toBe(1800);
   });
 
-  it('短屏档 1334:cindy/slogan/word/loginY 逐字段等于 wave3.5 旧表(2026-07-24 拍板整体上移 40 设计px,hero 不动)', () => {
+  it('短屏档 1334:品牌簇逐字段等于登录改版新稿 figma 705:915 实测值;loginY 仍是 main 的 694', () => {
     const layout = resolveLoginStage(375, 667); // scale 0.5 → dh 1334
     expect(layout.designHeight).toBe(1334);
-    expectBox(layout.cindy, { x: 75, y: 107, w: 599, h: 720 });
-    expectBox(layout.slogan, { x: 462.55, y: 440.33, w: 254.01, h: 72.8 });
-    expectBox(layout.word, { x: 199, y: 554.48, w: 352.93, h: 120.54 });
+    // 立绘 599×720 @(75,60)(新稿 hero y=87,2026-07-27 用户拍板方案 B 再上移 27 避脸)
+    expectBox(layout.cindy, { x: 75, y: 60, w: 599, h: 720 });
+    // slogan 可见图形框 = 容器 @(385,387) + vector(77.55,21.37);尺寸稿内未变
+    expectBox(layout.slogan, { x: 462.55, y: 408.37, w: 254.01, h: 72.8 });
+    // 字标图像框 = 主容器 @(35,422) + WORD_MARK 内字标 @(173,65) = (208,487),335×115
+    expectBox(layout.word, { x: 208, y: 487, w: 335, h: 115 });
+    // 功能区落位不随本轮视觉改版变化(面板几何 = main:组高 560 + 底距,2026-07-24 拍板)
     expect(layout.loginY).toBe(694);
   });
 
-  it('长屏档 1624:双区统一 y=116 的 long 表逐字段命中(2026-07-24 拍板整体上移 40 设计px,hero 不动)', () => {
+  it('长屏档 1624:新稿 figma 705:799 品牌簇逐字段命中(hero y=106);loginY 仍是 main 的 933', () => {
     const layout = resolveLoginStage(375, 812); // scale 0.5 → dh 1624
     expect(layout.designHeight).toBe(1624);
-    expectBox(layout.cindy, { x: 0, y: 116, w: 750, h: 902 });
-    expectBox(layout.slogan, { x: 387, y: 646, w: 321, h: 92 });
-    expectBox(layout.word, { x: 175, y: 774, w: 401, h: 137 });
+    expectBox(layout.cindy, { x: 0, y: 106, w: 750, h: 902 });
+    // slogan 可见图形框 = 容器 @(362.57,545.32) + vector(82.33,22.68),269.66×77.29
+    // (2026-07-27 用户审 demo 拍板:slogan 下移避脸,inner y 536.68 → 568,距字标 24px)
+    expectBox(layout.slogan, { x: 444.9, y: 568, w: 269.66, h: 77.29 });
+    // 字标 = 主容器 @(35,627) + 字标 @(147,42.17) = (182,669.17),387×132.18
+    expectBox(layout.word, { x: 182, y: 669.17, w: 387, h: 132.18 });
     expect(layout.loginY).toBe(933);
   });
 
   it('两档间 lerp:designHeight=1479 中点全字段线性插值(含 loginY)', () => {
     const layout = resolveLoginStage(750, 1479); // scale 1 → dh 1479,t=0.5
-    expectBox(layout.cindy, { x: 37.5, y: 111.5, w: 674.5, h: 811 });
-    expectBox(layout.slogan, { x: 424.775, y: 543.165, w: 287.505, h: 82.4 });
-    expectBox(layout.word, { x: 187, y: 664.24, w: 376.965, h: 128.77 });
+    // 立绘 y 中点 = (60 + 106)/2(短屏档上移 27 后)
+    expectBox(layout.cindy, { x: 37.5, y: 83, w: 674.5, h: 811 });
+    // slogan y 中点 = (408.37 + 568)/2(2026-07-27 LONG 档下移避脸后)
+    expectBox(layout.slogan, { x: 453.725, y: 488.185, w: 261.835, h: 75.045 });
+    expectBox(layout.word, { x: 195, y: 578.085, w: 361, h: 123.59 });
     expect(layout.loginY).toBeCloseTo(813.5, 6);
   });
 
@@ -85,16 +95,51 @@ describe('loginSkin 750 stage 布局引擎', () => {
     expect(layout.loginY).toBe(360);
     expectBox(layout.cindy, {
       x: 211.51226158038146,
-      y: 58.31062670299727,
+      y: 32.697547683923706,
       w: 326.43051771117164,
       h: 392.3705722070845,
     });
     // v 下限 0.25:dh=600 时 v=max(0.25, 0)=0.25,loginY=0
     const floor = resolveLoginStage(750, 600);
     expect(floor.loginY).toBe(0);
-    expectBox(floor.cindy, { x: 300, y: 26.75, w: 149.75, h: 180 });
+    expectBox(floor.cindy, { x: 300, y: 15, w: 149.75, h: 180 });
     // 短屏表仍是压缩基准(锚定回归:防有人把基准换成 long 表)
-    expect(LOGIN_STAGE_SHORT.cindy).toEqual({ x: 75, y: 107, w: 599, h: 720 });
+    expect(LOGIN_STAGE_SHORT.cindy).toEqual({ x: 75, y: 60, w: 599, h: 720 });
+  });
+
+  it('品牌簇不重叠不变式:字标框底不压面板顶、slogan 不压字标(两档)', () => {
+    // 字标可见框底 < 面板顶:两档都留正间距(面板不透明,压上去会盖住字标)
+    expect(LOGIN_STAGE_SHORT.word.y + LOGIN_STAGE_SHORT.word.h).toBeLessThan(
+      LOGIN_STAGE_SHORT.loginY,
+    );
+    expect(LOGIN_STAGE_LONG.word.y + LOGIN_STAGE_LONG.word.h).toBeLessThan(
+      LOGIN_STAGE_LONG.loginY,
+    );
+    // slogan 可见框与字标框不重叠(inner vector 口径下两档均无交叠)
+    expect(LOGIN_STAGE_SHORT.slogan.y + LOGIN_STAGE_SHORT.slogan.h).toBeLessThan(
+      LOGIN_STAGE_SHORT.word.y,
+    );
+    expect(LOGIN_STAGE_LONG.slogan.y + LOGIN_STAGE_LONG.slogan.h).toBeLessThan(
+      LOGIN_STAGE_LONG.word.y,
+    );
+    // 2026-07-27 用户审 demo 拍板:LONG 档 slogan 下移避脸后,底↔字标顶 ≈24 设计px
+    // (钉住下限,防后续再往下挪撞字标)
+    expect(
+      LOGIN_STAGE_LONG.word.y - (LOGIN_STAGE_LONG.slogan.y + LOGIN_STAGE_LONG.slogan.h),
+    ).toBeCloseTo(23.88, 2);
+  });
+
+  it('避脸不变式(2026-07-27 方案 B):短屏立绘上移 27 且可见发顶仍在 Status Bar 下沿之下', () => {
+    // 上移量固定:稿值 87 → 60。像素级实测依据 = 上移后 dh ≤1450 全段 slogan ink ∩ 脸 = 0
+    expect(LOGIN_STAGE_SHORT.cindy.y).toBe(60);
+    // hero 资产(750×902)不透明内容起于 y=86(上方是透明留白),contain 缩放 720/902
+    const heroScale = LOGIN_STAGE_SHORT.cindy.h / 902;
+    const visibleHairTop = LOGIN_STAGE_SHORT.cindy.y + 86 * heroScale;
+    expect(visibleHairTop).toBeCloseTo(128.65, 2);
+    // Status Bar 高 115.67(见 LOGIN_DELETION_BUBBLE 注释的同一权威值):发顶不侵入状态栏
+    expect(visibleHairTop).toBeGreaterThan(115.67);
+    // 长屏档立绘不跟着动(新稿实测值)
+    expect(LOGIN_STAGE_LONG.cindy.y).toBe(106);
   });
 });
 
@@ -169,7 +214,11 @@ describe('loginSkin §3.6 平板/横竖屏 surface 构图(PR4b Step 5b.3;adaptat
     expect(s.offsetX).toBeCloseTo(0, 6);
     expect(s.offsetY).toBeCloseTo(0, 6);
     expect(s.loginGroupScale).toBeCloseTo(0.794117, 6);
+    // pad 帧未参与本轮视觉改版(新稿没有 pad frame):品牌簇与登录组几何、splash 偏移
+    // 全部保持 main 原值。
     expect(s.splashOffset).toBe(158);
+    // 组底(含协议行溢出 62)落 1114.94,在 stage 1133 内 → 消费端安全区抬升不被触发
+    expect(s.loginY + 622 * s.loginGroupScale).toBeCloseTo(1114.94, 2);
     expect(s.phone).toBeNull();
     // 更矮视口按高度等比缩(w 定 744,h=1000<1133 → scale=min(1,0.8826)=0.8826)
     const tall = resolveLoginSurface(744, 1000);
@@ -184,6 +233,8 @@ describe('loginSkin §3.6 平板/横竖屏 surface 构图(PR4b Step 5b.3;adaptat
     expect(base.scale).toBeCloseTo(1, 10);
     expect(base.loginGroupScale).toBeCloseTo(0.655357, 6);
     expect(base.splashOffset).toBe(0);
+    // 横屏组底(含协议行溢出)仍在 stage 820 内 → 几何原值不动
+    expect(base.loginY + 622 * base.loginGroupScale).toBeLessThan(820);
     expect(base.phone).toBeNull();
     // raw<0.85 → 钳到 0.85 下限(§3.6 条3 仅下限;w≥1000∧h≥690∧landscape 命中 pad-landscape 但 raw<0.85)
     const floor = resolveLoginSurface(1100, 690); // min(1100/1180,690/820)=min(0.9322,0.8415)=0.8415
@@ -218,8 +269,10 @@ describe('loginSkin §3.6 平板/横竖屏 surface 构图(PR4b Step 5b.3;adaptat
   });
 });
 
-describe('loginSkin 注销提示气泡浮层布局(figma 678:1075,2026-07-26 用户拍板;物理 pt/dp,不走 stage 缩放)', () => {
-  it('常量契约:圆角/padding/描边/排版/间距/hitSlop/双分支定位参数逐字段命中拍板值', () => {
+describe('loginSkin 注销提示气泡浮层布局(figma 678:1075;**stage 设计单位** × surface.scale)', () => {
+  it('常量契约:内部几何为设计单位,各端落位参数命中 figma 实读值', () => {
+    // 组件内部(670 宽组件坐标系):子元素坐标反算 padding 20 / 标题↔正文 5 / 行高 23,
+    // 无钮变体总高 91 = 20+23+5+23+20(figma 678:1074 实读)
     expect(LOGIN_DELETION_BUBBLE.radius).toBe(22);
     expect(LOGIN_DELETION_BUBBLE.padding).toBe(20);
     expect(LOGIN_DELETION_BUBBLE.borderWidth).toBe(1);
@@ -227,61 +280,95 @@ describe('loginSkin 注销提示气泡浮层布局(figma 678:1075,2026-07-26 用
     expect(LOGIN_DELETION_BUBBLE.lineHeight).toBe(23);
     expect(LOGIN_DELETION_BUBBLE.titleBodyGap).toBe(5);
     expect(LOGIN_DELETION_BUBBLE.bodyLinkGap).toBe(22);
-    expect(LOGIN_DELETION_BUBBLE.sideMargin).toBe(20);
-    expect(LOGIN_DELETION_BUBBLE.phone.maxWidth).toBe(335);
-    expect(LOGIN_DELETION_BUBBLE.pad.width).toBe(556);
-    expect(LOGIN_DELETION_BUBBLE.pad.top).toBe(72);
-    expect(LOGIN_DELETION_BUBBLE.pad.landscapeCenterRatio).toBe(0.75);
-    // 「我知道了」热区 ≥44×44(视觉不变,只扩 hitSlop):23 行高 + 上下 12 → 47
-    const slop = LOGIN_DELETION_BUBBLE.linkHitSlop;
-    expect(LOGIN_DELETION_BUBBLE.lineHeight + slop.top + slop.bottom).toBeGreaterThanOrEqual(44);
-    expect(slop.top).toBe(12);
-    expect(slop.bottom).toBe(12);
-    expect(slop.left).toBe(20);
-    expect(slop.right).toBe(20);
+    const { padding, lineHeight, titleBodyGap } = LOGIN_DELETION_BUBBLE;
+    expect(padding + lineHeight + titleBodyGap + lineHeight + padding).toBe(91);
+    // phone:stage 750 内 x=40 w=670(左右各 40 → 等价水平居中)
+    expect(LOGIN_DELETION_BUBBLE.phone).toEqual({ width: 670, x: 40, stageWidth: 750 });
+    // pad 横屏:556 = WORD_MARK 框宽 @x=607(figma 679:1201),中心 885 与登录组同轴
+    expect(LOGIN_DELETION_BUBBLE.padLandscape).toEqual({ width: 556, x: 607, top: 72 });
+    expect(LOGIN_DELETION_BUBBLE.padLandscape.x + LOGIN_DELETION_BUBBLE.padLandscape.width / 2).toBe(885);
+    // pad 竖屏:字标框宽按可见图形等比反算 269.51 ×(556/297.32)≈ 504
+    expect(LOGIN_DELETION_BUBBLE.padPortrait).toEqual({ width: 504, top: 72 });
+    expect(Math.round(269.51 * (556 / 297.32))).toBe(504);
+    // hitSlop:RN 不会越过父 View 边界,上/下取「气泡内可用空间」钳制(虚标无效);
+    // 手算:scale=0.52(390pt 屏)→ top=min(18, 22×0.52)=11.44、bottom=min(18, 20×0.52)=10.4
+    const s52 = resolveDeletionBubbleLinkHitSlop(0.52);
+    expect(s52.top).toBeCloseTo(11.44, 10);
+    expect(s52.bottom).toBeCloseTo(10.4, 10);
+    expect(s52.left).toBe(20);
+    expect(s52.right).toBe(20);
+    // pad scale=1:间距 22/padding 20 均超 18 上限 → 钳到 18(名义扩张的上限)
+    expect(resolveDeletionBubbleLinkHitSlop(1)).toEqual({ top: 18, bottom: 18, left: 20, right: 20 });
+    // 最窄 320pt(scale=320/750≈0.426667):top=9.386.., bottom=8.533..
+    const narrow = resolveDeletionBubbleLinkHitSlop(320 / 750);
+    expect(narrow.top).toBeCloseTo(22 * (320 / 750), 6);
+    expect(narrow.bottom).toBeCloseTo(20 * (320 / 750), 6);
   });
 
-  it('phone:top=safe-area 顶原样带出,宽 min(335, 屏宽−40),水平屏幕居中', () => {
-    // iPhone 390 宽:335 未满屏宽上限,left=(390-335)/2=27.5;top=insets.top(47)间距 0
+  it('phone:宽 = 670 × 屏宽/750(随屏缩放,不写死),水平居中,top 原样带 safe-area', () => {
+    // 390pt 屏:scale=0.52 → 宽 670×0.52=348.4,left=(390-348.4)/2=20.8(= 设计 40×0.52)
     const frame = resolveDeletionBubbleFrame(resolveLoginSurface(390, 844), 47);
-    expect(frame).toEqual({ left: 27.5, top: 47, width: 335 });
-    // safeTop 原样消费(0/59 等不同机型),不内嵌状态栏高
+    expect(frame.scale).toBeCloseTo(0.52, 10);
+    expect(frame.width).toBeCloseTo(348.4, 6);
+    expect(frame.left).toBeCloseTo(20.8, 6);
+    expect(frame.left).toBeCloseTo(LOGIN_DELETION_BUBBLE.phone.x * frame.scale, 6);
+    expect(frame.top).toBe(47);
+    // 大屏 iPhone 393pt:宽 351.08(写死 335 会偏窄 16pt)
+    const big = resolveDeletionBubbleFrame(resolveLoginSurface(393, 852), 59);
+    expect(big.width).toBeCloseTo(670 * (393 / 750), 6);
+    expect(big.width).toBeCloseTo(351.08, 6);
+    expect(big.top).toBe(59);
+    // safeTop 原样消费,不内嵌状态栏高
     expect(resolveDeletionBubbleFrame(resolveLoginSurface(390, 844), 0).top).toBe(0);
-    expect(resolveDeletionBubbleFrame(resolveLoginSurface(393, 852), 59).top).toBe(59);
-    // 窄屏(Split View 320pt):宽 = 320-40=280,left=20(两侧边距 20)
+    // 窄屏(Split View 320pt):宽 285.867,边距 17.067(= 设计 40 × 0.426667)
     const narrow = resolveDeletionBubbleFrame(resolveLoginSurface(320, 768), 20);
-    expect(narrow).toEqual({ left: 20, top: 20, width: 280 });
+    expect(narrow.width).toBeCloseTo(670 * (320 / 750), 6);
+    expect(narrow.left).toBeCloseTo(40 * (320 / 750), 6);
+    expect(narrow.left + narrow.width).toBeLessThanOrEqual(320);
   });
 
-  it('pad-portrait:top=72 固定,宽 556,中轴 = 屏幕中心(竖排构图,字标/表单居中)', () => {
-    // 744×1133 基准画布:中心 372,left=372-278=94
+  it('pad-portrait:宽 = 504 × scale,水平居中(= 字标轴),top = 72 × scale', () => {
+    // 744×1133 基准画布:scale=1 → 宽 504,left=(744-504)/2=120,top=72
     const frame = resolveDeletionBubbleFrame(resolveLoginSurface(744, 1133), 24);
-    expect(frame).toEqual({ left: 94, top: 72, width: 556 });
-    // 更宽 iPad 竖屏(820×1180):仍屏幕中心 410,left=132
-    const wide = resolveDeletionBubbleFrame(resolveLoginSurface(820, 1180), 24);
-    expect(wide.left).toBeCloseTo(132, 6);
-    expect(wide.top).toBe(72);
-  });
-
-  it('pad-landscape:top=72,宽 556,中轴 = 登录 stage 右半屏中心(左立绘右表单双栏,与字标同轴)', () => {
-    // 1180×820 基准画布:右半屏中心 885,left=885-278=607
-    const frame = resolveDeletionBubbleFrame(resolveLoginSurface(1180, 820), 24);
-    expect(frame).toEqual({ left: 607, top: 72, width: 556 });
-    // iPad mini 横屏(1133×744,height 受限):scale=min(1133/1180,744/820)=0.907317,
-    // offsetX=(1133-1180×scale)/2=31.1829;stage 右半屏中心 = 31.1829+885×scale=834.1585
-    // → left=556.1585(与字标同轴;若错用 viewport×0.75=849.75 会偏 15.6pt)
-    const mini = resolveDeletionBubbleFrame(resolveLoginSurface(1133, 744), 24);
-    expect(mini.left).toBeCloseTo(556.1585, 3);
-    expect(mini.top).toBe(72);
-    expect(mini.width).toBe(556);
-  });
-
-  it('pad-landscape 断点底线(1000×690):left clamp 屏内 margin≥0,气泡不越右缘', () => {
-    // scale clamp 0.85 → 中轴 ≈750.75,未 clamp 时 left=472.75、右缘 1028.75 越屏;
-    // clamp 后 left=1000-556=444,右缘 1000 贴屏边不出屏(退化 viewport 保可读)
-    const frame = resolveDeletionBubbleFrame(resolveLoginSurface(1000, 690), 24);
-    expect(frame.left).toBe(444);
-    expect(frame.left + frame.width).toBe(1000);
+    expect(frame.scale).toBe(1);
+    expect(frame.width).toBe(504);
+    expect(frame.left).toBe(120);
     expect(frame.top).toBe(72);
+    // 820×1180:scale=min(820/744,1180/1133)=1180/1133≈1.041482
+    const wide = resolveDeletionBubbleFrame(resolveLoginSurface(820, 1180), 24);
+    const k = 1180 / 1133;
+    expect(wide.scale).toBeCloseTo(k, 10);
+    expect(wide.width).toBeCloseTo(504 * k, 6);
+    expect(wide.left).toBeCloseTo((820 - 504 * k) / 2, 6);
+    expect(wide.top).toBeCloseTo(72 * k, 6);
+  });
+
+  it('pad-landscape:宽 = 556 × scale,与字标同轴,top = offsetY + 72 × scale', () => {
+    // 1180×820 基准画布:scale=1 → 宽 556,left=607,top=72
+    const frame = resolveDeletionBubbleFrame(resolveLoginSurface(1180, 820), 24);
+    expect(frame).toEqual({ left: 607, top: 72, width: 556, scale: 1 });
+    // iPad mini 横屏 1133×744:scale=min(1133/1180,744/820)=744/820≈0.907317,
+    // offsetX=(1133-1180k)/2=31.1829 → left=31.1829+607k=581.9236,宽 504.468;
+    // 气泡中心 = 581.9236+252.234 = 834.16 与字标轴一致(错用 viewport×0.75 会偏)
+    const mini = resolveDeletionBubbleFrame(resolveLoginSurface(1133, 744), 24);
+    const k = 744 / 820;
+    expect(mini.scale).toBeCloseTo(k, 10);
+    expect(mini.width).toBeCloseTo(556 * k, 6);
+    expect(mini.left).toBeCloseTo((1133 - 1180 * k) / 2 + 607 * k, 4);
+    expect(mini.left + mini.width / 2).toBeCloseTo(834.1585, 3);
+    expect(mini.top).toBeCloseTo(72 * k, 6);
+    expect(mini.left + mini.width).toBeLessThanOrEqual(1133);
+  });
+
+  it('pad-landscape 断点底线(1000×690,scale clamp 0.85):几何随之缩小,气泡不越右缘', () => {
+    // scale=max(0.85,min(1000/1180,690/820))=0.85;offsetX=(1000-1003)/2=-1.5、offsetY=-3.5
+    // → 宽 472.6、left=-1.5+607×0.85=514.45、右缘 987.05 未越屏;top=-3.5+61.2=57.7
+    const frame = resolveDeletionBubbleFrame(resolveLoginSurface(1000, 690), 24);
+    expect(frame.scale).toBeCloseTo(0.85, 10);
+    expect(frame.width).toBeCloseTo(472.6, 6);
+    expect(frame.left).toBeCloseTo(514.45, 6);
+    expect(frame.left + frame.width).toBeLessThanOrEqual(1000);
+    expect(frame.top).toBeCloseTo(57.7, 6);
   });
 });
+

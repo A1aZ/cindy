@@ -28,6 +28,7 @@ import { ensureProjectGitInitialized } from '../../git-snapshot/projectGitBootst
 import { readGitSafetySettings } from '../../maker-host/git-safety-settings-store';
 import * as imageCacheStore from '../../imageCacheStore';
 import { removeSessionRefs as removeSessionMediaRefs } from '../../cindy-media/ledger';
+import { removeWechatSessionAttachmentDir } from '../../im/wechat/mediaStaging';
 import { upsertRecentWorkdir } from './recentWorkdirs';
 import { createLogger } from '../../logger';
 import { DESKTOP_VISIBLE_SESSION_SOURCES } from '../../../shared/sessionSource.js';
@@ -71,15 +72,19 @@ export function broadcastSessionPatched(sessionId: string, patch: Record<string,
 function scheduleWorktreeRecycleForStatusChange(sessionId: string, status: unknown): void {
   if (status !== 'deleted' && status !== 'archived') return;
   void (async () => {
-    const [mh, recycle] = await Promise.all([
+    const [mh, recycle, routeLock] = await Promise.all([
       import('../../maker-host/index.js'),
       import('../../worktree/sessionRemovalRecycle.js'),
+      import('../../maker-ipc/register.js'),
     ]);
     if (!(await recycle.isSessionStillRemovable(sessionId))) return;
-    await mh
-      .getMakerIfReady()
-      ?.closeSession(sessionId)
-      .catch(() => undefined);
+    await routeLock.withSendToSessionLock(sessionId, async () => {
+      if (!(await recycle.isSessionStillRemovable(sessionId))) return;
+      await mh
+        .getMakerIfReady()
+        ?.closeSession(sessionId)
+        .catch(() => undefined);
+    });
     await recycle.recycleWorktreeForRemovedSession(sessionId);
   })().catch((err) => {
     log.warn('worktree recycle after session status change failed', {
@@ -1106,6 +1111,12 @@ export async function patchSessionMetaInDb(
           err: err instanceof Error ? err.message : String(err),
         });
       });
+    void removeWechatSessionAttachmentDir(sessionId).catch((err) => {
+      log.warn('WeChat session attachment cleanup failed', {
+        sessionId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    });
   }
   removeHookAttachmentDir(sessionId, patch.status);
   scheduleWorktreeRecycleForStatusChange(sessionId, patch.status);

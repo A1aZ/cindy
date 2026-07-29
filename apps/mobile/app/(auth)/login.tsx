@@ -40,6 +40,7 @@ import {
   LOGIN_SUBTITLE,
   LOGIN_TITLE,
   resolveDeletionBubbleFrame,
+  resolveDeletionBubbleLinkHitSlop,
   type LoginDeletionBubbleFrame,
   type LoginSurfaceMode,
 } from '@/auth/loginSkinLayout';
@@ -115,6 +116,10 @@ export default function LoginScreen() {
   // 企业 SSO 入口子视图:在 identifier 步骤内输入组织标识(本地展示态)
   const [ssoOrgMode, setSsoOrgMode] = useState(false);
   const [ssoOrg, setSsoOrg] = useState('');
+  const realmConfirmation =
+    auth.loginState?.step === 'realm-confirmation'
+      ? auth.loginState
+      : null;
   /* ── 协议同意链路(consent PR,与桌面 LoginPage 同源语义):radio 状态 +
      未勾选拦截弹窗 + 同意后续接。过门点(产品拍板 2026-07-24 二次):手机号提交、
      邮箱提交(discover 前)、method-choice 个人行发码、社交圆钮(Apple/Google/
@@ -355,7 +360,12 @@ export default function LoginScreen() {
       const submitSsoOrg = () => {
         const value = ssoOrg.trim();
         if (!value) return;
-        void auth.dispatchLoginAction({ type: 'discover-sso-org', org: value });
+        // 先静默发现组织区域；只有跨出安装包区域时 AuthContext 才进入
+        // realm-confirmation，并由页面底部弹窗在继续 SSO 前确认。
+        void auth.dispatchLoginAction({
+          type: 'discover-sso-org',
+          org: value,
+        });
       };
       return (
         <LoginPanel testID="login.panel.ssoOrg">
@@ -1144,7 +1154,9 @@ export default function LoginScreen() {
   // 穿透读到文案、completed 态还能激活「我知道了」);② 入场未完成(opacity/pointerEvents
   // 只管渲染与命中,读屏仍会念出不可见的注销状态)。iOS 走 accessibilityElementsHidden、
   // Android 走 importantForAccessibility,两端都要给(PR #464 codex)。
-  const deletionBubbleA11yHidden = consentDialogOpen || handoffPhase !== 'done';
+  const realmConsentOpen = realmConfirmation !== null;
+  const deletionBubbleA11yHidden =
+    consentDialogOpen || realmConsentOpen || handoffPhase !== 'done';
 
   return (
     <MobileLoginHandoffStage
@@ -1156,7 +1168,9 @@ export default function LoginScreen() {
         collapsable={false}
         // Android 读屏:弹窗打开时隐藏背景登录组(accessibilityViewIsModal 仅 iOS
         // 生效;codex 审查 P2)。iOS 忽略此属性,无副作用。
-        importantForAccessibility={consentDialogOpen ? 'no-hide-descendants' : 'auto'}
+        importantForAccessibility={
+          consentDialogOpen || realmConsentOpen ? 'no-hide-descendants' : 'auto'
+        }
         onLayout={measureBaseline}
         ref={outerGroupRef}
         style={{
@@ -1239,6 +1253,27 @@ export default function LoginScreen() {
           onOpenPrivacy={() => openLegalLink('privacy')}
         />
       ) : null}
+      {realmConfirmation ? (
+        <LoginConsentDialog
+          scale={groupScale}
+          title={loginText('realmConsentTitle')}
+          body={loginText(
+            realmConfirmation.targetRegion === 'cn'
+              ? 'realmConsentBodyCn'
+              : 'realmConsentBodyGlobal',
+          )}
+          agreeLabel={loginText('realmConsentAgree')}
+          disagreeLabel={loginText('realmConsentDisagree')}
+          onAgree={() =>
+            void auth.dispatchLoginAction({ type: 'confirm-sso-realm' })
+          }
+          onDisagree={() =>
+            void auth.dispatchLoginAction({ type: 'cancel-sso-realm' })
+          }
+          onOpenTerms={() => undefined}
+          onOpenPrivacy={() => undefined}
+        />
+      ) : null}
     </MobileLoginHandoffStage>
   );
 }
@@ -1298,6 +1333,15 @@ function usePanelEntrance(
   return { opacity, translateY };
 }
 
+/**
+ * 注销状态提示气泡(figma 678:1075「注销状态」组件集)。
+ *
+ * 浮层:落位与宽度由 `resolveDeletionBubbleFrame` 给出(物理 pt),内部几何(圆角 /
+ * padding / 字号 / 行高 / 间距)是 **stage 设计单位**,与登录组同乘 `frame.scale`
+ * 折算成物理 pt——故 figma 数值可逐字落码,气泡与登录面板保持设计稿里的比例关系。
+ * (2026-07-26 修正:初版把设计单位当物理 pt 用、宽度写死 335,比例失真。)
+ * 描边保持 1pt 物理细线;高度由内容撑开,禁止固定高;无图标 / 阴影 / 动画。
+ */
 function AccountDeletionStatusPanel({
   frame,
   onDismiss,
@@ -1309,22 +1353,44 @@ function AccountDeletionStatusPanel({
 }) {
   const styles = useThemedStyles(makeStyles);
   const pending = status.status === 'pending';
+  const scaled = (designUnits: number) => designUnits * frame.scale;
+  const B = LOGIN_DELETION_BUBBLE;
   return (
     <View
       style={[
         styles.deletionBubble,
-        { left: frame.left, top: frame.top, width: frame.width },
+        {
+          borderRadius: scaled(B.radius),
+          left: frame.left,
+          padding: scaled(B.padding),
+          top: frame.top,
+          width: frame.width,
+        },
       ]}
       testID="login.accountDeletionStatus"
     >
-      <Text style={styles.deletionBubbleTitle}>
+      <Text
+        style={[
+          styles.deletionBubbleTitle,
+          { fontSize: scaled(B.font), lineHeight: scaled(B.lineHeight) },
+        ]}
+      >
         {pending
           ? loginText('accountDeletionPendingTitle')
           : status.status === 'processing'
             ? loginText('accountDeletionProcessingTitle')
             : loginText('accountDeletionCompletedTitle')}
       </Text>
-      <Text style={styles.deletionBubbleCopy}>
+      <Text
+        style={[
+          styles.deletionBubbleCopy,
+          {
+            fontSize: scaled(B.font),
+            lineHeight: scaled(B.lineHeight),
+            marginTop: scaled(B.titleBodyGap),
+          },
+        ]}
+      >
         {pending
           ? loginText('accountDeletionPendingCopy').replace(
               '{date}',
@@ -1337,12 +1403,17 @@ function AccountDeletionStatusPanel({
       {onDismiss ? (
         <Pressable
           accessibilityRole="button"
-          hitSlop={LOGIN_DELETION_BUBBLE.linkHitSlop}
+          hitSlop={resolveDeletionBubbleLinkHitSlop(frame.scale)}
           onPress={onDismiss}
-          style={styles.deletionBubbleLink}
+          style={[styles.deletionBubbleLink, { marginTop: scaled(B.bodyLinkGap) }]}
           testID="login.accountDeletionDismissButton"
         >
-          <Text style={styles.deletionBubbleLinkText}>
+          <Text
+            style={[
+              styles.deletionBubbleLinkText,
+              { fontSize: scaled(B.font), lineHeight: scaled(B.lineHeight) },
+            ]}
+          >
             {loginText('accountDeletionDismiss')}
           </Text>
         </Pressable>
@@ -1459,40 +1530,31 @@ const makeStyles = (colors: ThemeColors) =>
       padding: spacing.lg,
     },
     // 注销提示气泡(figma 678:1075):不透明底 + 1px 描边(浮层盖立绘,必须不透明);
-    // left/top/width 由 resolveDeletionBubbleFrame 行内注入(物理 pt,不走 stage 缩放);
-    // 无图标/阴影/动画,高度内容撑开不固定。
+    // 与缩放相关的几何(圆角/padding/字号/行高/间距)在组件内按 frame.scale 行内折算,
+    // left/top/width 由 resolveDeletionBubbleFrame 注入;描边保持 1pt 物理细线
+    // (设计 1 单位折算后不足半点,会在部分密度下消失);无图标/阴影/动画,高度内容撑开。
     deletionBubble: {
       backgroundColor: colors.login.deletionBubbleBg,
       borderColor: colors.login.deletionBubbleBorder,
-      borderRadius: LOGIN_DELETION_BUBBLE.radius,
       borderWidth: LOGIN_DELETION_BUBBLE.borderWidth,
-      padding: LOGIN_DELETION_BUBBLE.padding,
       position: 'absolute',
     },
     deletionBubbleTitle: {
       color: colors.login.controlText,
-      fontSize: LOGIN_DELETION_BUBBLE.font,
       fontWeight: fontWeight.regular,
-      lineHeight: LOGIN_DELETION_BUBBLE.lineHeight,
       textAlign: 'center',
     },
     deletionBubbleCopy: {
       color: colors.login.secondaryText,
-      fontSize: LOGIN_DELETION_BUBBLE.font,
       fontWeight: fontWeight.regular,
-      lineHeight: LOGIN_DELETION_BUBBLE.lineHeight,
-      marginTop: LOGIN_DELETION_BUBBLE.titleBodyGap,
       textAlign: 'center',
     },
     deletionBubbleLink: {
       alignSelf: 'center',
-      marginTop: LOGIN_DELETION_BUBBLE.bodyLinkGap,
     },
     deletionBubbleLinkText: {
       color: colors.login.controlText,
-      fontSize: LOGIN_DELETION_BUBBLE.font,
       fontWeight: fontWeight.regular,
-      lineHeight: LOGIN_DELETION_BUBBLE.lineHeight,
       textAlign: 'center',
       textDecorationLine: 'underline',
     },

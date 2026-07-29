@@ -1,5 +1,10 @@
-const unitVitestScript = { type: 'packageScript', script: 'test' };
+import os from 'node:os';
+
 const vitestBin = (...args) => ({ type: 'packageBin', bin: 'vitest', args });
+// Workspace-level parallelism owns the global process budget. Keep ordinary
+// Vitest workspaces at one worker each so outer concurrency cannot multiply
+// every child process's default CPU-sized pool.
+const unitVitestCommand = (workers = 1) => vitestBin('run', `--maxWorkers=${workers}`);
 const noCollectableTestsReason = 'No collectable tests yet. Add tests and mark a tier required when this workspace gains testable logic.';
 const desktopDbInclude = [
   'src/main/localDb/**/__tests__/*.test.ts',
@@ -14,6 +19,18 @@ const desktopDbExclude = [
   'src/main/localDb/__tests__/migrationReplay.test.ts',
   'src/main/localDb/__tests__/drizzle-proxy-perf.test.ts',
 ];
+const desktopGitIntegrationInclude = [
+  'src/main/**/*.git-integration.test.ts',
+];
+
+export function desktopUnitWorkerCount(
+  availableParallelism = os.availableParallelism(),
+) {
+  const available = Number.isFinite(availableParallelism)
+    ? Math.floor(availableParallelism)
+    : 1;
+  return Math.max(1, Math.min(8, available));
+}
 
 const noCollectableWorkspace = (name, cwd, reason = noCollectableTestsReason) => ({
   name,
@@ -23,11 +40,17 @@ const noCollectableWorkspace = (name, cwd, reason = noCollectableTestsReason) =>
   tiers: {},
 });
 
-const requiredUnitWorkspace = (name, cwd) => ({
+const requiredUnitWorkspace = (name, cwd, { workers = 1, execution } = {}) => ({
   name,
   cwd,
   status: 'required',
-  tiers: { unit: { status: 'required', command: unitVitestScript } },
+  tiers: {
+    unit: {
+      status: 'required',
+      ...(execution ? { execution } : {}),
+      command: unitVitestCommand(workers),
+    },
+  },
 });
 
 export default {
@@ -39,10 +62,14 @@ export default {
       tiers: {
         unit: {
           status: 'required',
-          // Desktop unit tests spawn many Git/filesystem subprocesses; cap workers so
-          // Windows does not exhaust process and file-lock budgets under full-suite load.
-          command: vitestBin('run', '--maxWorkers=4'),
+          execution: 'exclusive',
+          // Desktop unit tests spawn many Git/filesystem subprocesses. Benchmarking
+          // found eight workers to be the best complexity/resource tradeoff.
+          // Lower-CPU hosts stay capped by their available parallelism.
+          // It runs exclusively so these workers never overlap outer workspaces.
+          command: vitestBin('run', `--maxWorkers=${desktopUnitWorkerCount()}`),
           exclude: [
+            '**/*.git-integration.test.ts',
             'src/main/localDb/**',
             'src/main/__tests__/*Migration.test.ts',
             'src/main/__tests__/schemaDriftRepair.test.ts',
@@ -55,6 +82,14 @@ export default {
             'src/main/__tests__/makerSendToSessionOrdering.test.ts',
             '**/*.bench.ts',
           ],
+        },
+        'git-integration': {
+          status: 'manual',
+          reason: 'Full real-Git coverage is explicit because it spawns hundreds of local subprocesses and is coordinated across worktrees.',
+          execution: 'exclusive',
+          coverage: 'allowlist',
+          command: vitestBin('run', `--maxWorkers=${desktopUnitWorkerCount()}`),
+          include: desktopGitIntegrationInclude,
         },
         db: {
           status: 'manual',
@@ -100,7 +135,9 @@ export default {
         },
       },
     },
-    requiredUnitWorkspace('mobile', 'apps/mobile'),
+    // Mobile has enough test files to become the critical path at one worker.
+    // Give it the full worker budget, but never overlap it with other workspaces.
+    requiredUnitWorkspace('mobile', 'apps/mobile', { workers: 4, execution: 'exclusive' }),
     requiredUnitWorkspace('@cindy/anthropic-compat-proxy', 'packages/anthropic-compat-proxy'),
     requiredUnitWorkspace('@cindy/anthropic-responses-bridge', 'packages/anthropic-responses-bridge'),
     requiredUnitWorkspace('@cindy/responses-chat-bridge', 'packages/responses-chat-bridge'),
@@ -128,7 +165,7 @@ export default {
       tiers: {
         unit: {
           status: 'required',
-          command: unitVitestScript,
+          command: unitVitestCommand(),
           include: ['src/__tests__/**/*.test.ts'],
         },
       },
@@ -136,6 +173,7 @@ export default {
     noCollectableWorkspace('project-context', 'packages/project-context'),
     requiredUnitWorkspace('@cindy/remote-file-service', 'packages/remote-file-service'),
     requiredUnitWorkspace('@cindy/voice-input-core', 'packages/voice-input-core'),
+    requiredUnitWorkspace('@cindy/wechat-ilink', 'packages/wechat-ilink'),
     noCollectableWorkspace('@cindy/device-link-protocol', 'cindy-protocol/packages/device-link-protocol'),
     requiredUnitWorkspace('@cindy/plugin-protocol', 'cindy-protocol/packages/plugin-protocol'),
     requiredUnitWorkspace('@cindy/skill-protocol', 'cindy-protocol/packages/skill-protocol'),

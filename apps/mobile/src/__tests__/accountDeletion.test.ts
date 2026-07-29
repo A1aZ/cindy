@@ -3,7 +3,10 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 function source(path: string): string {
-  return readFileSync(resolve(process.cwd(), path), 'utf8').replace(/\r\n/g, '\n');
+  return readFileSync(resolve(process.cwd(), path), 'utf8').replace(
+    /\r\n/g,
+    '\n',
+  );
 }
 
 describe('mobile account deletion', () => {
@@ -17,7 +20,9 @@ describe('mobile account deletion', () => {
     expect(settings).toContain('testID="settings.deleteAccountButton"');
     expect(settings).toContain('{accountDeletionAvailable ? (');
     expect(settings).toContain('style={styles.accountDeletionLinkText}');
-    expect(settings).not.toContain("testID: 'settings.deleteAccountButton',\n                      tone: 'danger'");
+    expect(settings).not.toContain(
+      "testID: 'settings.deleteAccountButton',\n                      tone: 'danger'",
+    );
     expect(visibilityBlock).toContain('availability.available');
     expect(visibilityBlock).not.toContain('membershipKind');
   });
@@ -41,9 +46,7 @@ describe('mobile account deletion', () => {
       context.indexOf('const dispatchLoginAction', acceptStart),
     );
 
-    expect(context).toContain(
-      "'cindy.mobile.auth.accountDeletionReceipt'",
-    );
+    expect(context).toContain("'cindy.mobile.auth.accountDeletionReceipt'");
     expect(acceptBody).toContain(
       "if (outcome.status === 'ok' || outcome.status === 'select_account')",
     );
@@ -54,7 +57,7 @@ describe('mobile account deletion', () => {
     );
     expect(acceptBody).toContain('pendingAccountDeletionRestoredRef.current =');
     expect(acceptBody).toContain(
-      "outcome.accountDeletionRestored === true ||\n        pendingAccountDeletionRestoredRef.current",
+      'outcome.accountDeletionRestored === true ||\n        pendingAccountDeletionRestoredRef.current',
     );
     expect(acceptBody.indexOf('setToken(outcome.accessToken)')).toBeLessThan(
       acceptBody.indexOf('setAccountDeletionRestored(deletionWasRestored)'),
@@ -62,6 +65,10 @@ describe('mobile account deletion', () => {
     expect(requestBody.indexOf('persistAccountDeletionReceipt')).toBeLessThan(
       requestBody.indexOf('return challenge'),
     );
+    expect(context).toContain(
+      'serializeAccountDeletionReceiptRecord(realm, receiptToken)',
+    );
+    expect(requestBody).toContain('activeAuthRealmRef.current,\n    );');
     expect(confirmBody).toContain('await clearLocalSession();');
     expect(confirmBody).not.toContain(
       'persistAccountDeletionReceipt(input.receiptToken)',
@@ -77,8 +84,21 @@ describe('mobile account deletion', () => {
       logoutStart,
       context.indexOf('const getAccessToken', logoutStart),
     );
-    expect(logoutBody.indexOf('persistAccountDeletionReceipt(null)')).toBeLessThan(
-      logoutBody.indexOf('clearLocalSession()'),
+    expect(
+      logoutBody.indexOf('persistAccountDeletionReceipt(null)'),
+    ).toBeLessThan(logoutBody.indexOf('clearLocalSession()'));
+
+    const statusStart = context.indexOf('const getAccountDeletionStatus');
+    const statusBody = context.slice(
+      statusStart,
+      context.indexOf('const clearAccountDeletionReceipt', statusStart),
+    );
+    expect(statusBody).toContain(
+      'const realm = accountDeletionReceiptRealmRef.current;',
+    );
+    expect(statusBody).toContain('await loadMobileEndpointsForRealm(realm);');
+    expect(statusBody).toContain(
+      'authClientFor(did, realm).getAccountDeletionStatus(receiptToken)',
     );
   });
 
@@ -153,12 +173,10 @@ describe('mobile account deletion', () => {
     expect(loginMessages).toContain('现在重新登录即可取消注销');
     expect(loginMessages).toContain('Sign in now to cancel deletion.');
     expect(login).toContain("cause.code === 'INVALID_RESPONSE'");
-    expect(login).toContain('if (status.status === \'completed\') stopPolling()');
+    expect(login).toContain("if (status.status === 'completed') stopPolling()");
     expect(nativeSocial).toContain('if (!credential.identityToken)');
     expect(nativeSocial).not.toContain('!credential.authorizationCode');
-    expect(nativeSocial).toContain(
-      '...(credential.authorizationCode',
-    );
+    expect(nativeSocial).toContain('...(credential.authorizationCode');
   });
 
   it('renders the deletion status as an opaque overlay bubble with a completed-only underline link (figma 678:1075)', () => {
@@ -172,8 +190,20 @@ describe('mobile account deletion', () => {
     // 浮层定位:frame 由 resolveDeletionBubbleFrame(stage, insets.top) 解析
     // (safe-area 走 insets,不硬编码状态栏高),面板以 absolute 落在 viewport 坐标。
     expect(login).toContain('resolveDeletionBubbleFrame(stage, insets.top)');
-    expect(panel).toContain('{ left: frame.left, top: frame.top, width: frame.width }');
+    expect(panel).toContain('left: frame.left');
+    expect(panel).toContain('top: frame.top');
+    expect(panel).toContain('width: frame.width');
     expect(panel).toContain('styles.deletionBubble');
+    // 内部几何按 frame.scale 折算(设计单位 → 物理 pt),不再写死物理值
+    expect(panel).toContain(
+      'const scaled = (designUnits: number) => designUnits * frame.scale',
+    );
+    expect(panel).toContain('borderRadius: scaled(B.radius)');
+    expect(panel).toContain('padding: scaled(B.padding)');
+    expect(panel).toContain('fontSize: scaled(B.font)');
+    expect(panel).toContain('lineHeight: scaled(B.lineHeight)');
+    expect(panel).toContain('marginTop: scaled(B.titleBodyGap)');
+    expect(panel).toContain('marginTop: scaled(B.bodyLinkGap)');
 
     // 气泡不再渲染在 680 设计 px 缩放容器内(修「被登录面板覆盖」的结构根因):
     // 缩放容器开标签到 {stateContent} 之间不得再出现面板引用。
@@ -192,16 +222,16 @@ describe('mobile account deletion', () => {
 
     // 三状态:pending/processing 无按钮(调用点 onDismiss 仅 completed 才给),
     // completed 渲染「我知道了」下划线文字链,保留原 onPress/testID/accessibilityRole。
-    expect(login).toContain(
-      "accountDeletionStatus.status === 'completed'",
-    );
+    expect(login).toContain("accountDeletionStatus.status === 'completed'");
     expect(login).toContain('() => void auth.clearAccountDeletionReceipt()');
     expect(panel).toContain('{onDismiss ? (');
     expect(panel).toContain('<Pressable');
     expect(panel).toContain('accessibilityRole="button"');
     expect(panel).toContain('onPress={onDismiss}');
     expect(panel).toContain('testID="login.accountDeletionDismissButton"');
-    expect(panel).toContain('hitSlop={LOGIN_DELETION_BUBBLE.linkHitSlop}');
+    expect(panel).toContain(
+      'hitSlop={resolveDeletionBubbleLinkHitSlop(frame.scale)}',
+    );
     expect(panel).toContain('styles.deletionBubbleLinkText');
     expect(login).toContain("textDecorationLine: 'underline'");
 
@@ -209,13 +239,18 @@ describe('mobile account deletion', () => {
     // 全部消费 LOGIN_DELETION_BUBBLE 常量,无固定高、无阴影/elevation、无动画。
     expect(login).toContain('backgroundColor: colors.login.deletionBubbleBg');
     expect(login).toContain('borderColor: colors.login.deletionBubbleBorder');
-    expect(login).toContain('borderRadius: LOGIN_DELETION_BUBBLE.radius');
     expect(login).toContain('borderWidth: LOGIN_DELETION_BUBBLE.borderWidth');
-    expect(login).toContain('padding: LOGIN_DELETION_BUBBLE.padding');
     expect(login).toContain('color: colors.login.controlText');
     expect(login).toContain('color: colors.login.secondaryText');
-    expect(login).toContain('marginTop: LOGIN_DELETION_BUBBLE.titleBodyGap');
-    expect(login).toContain('marginTop: LOGIN_DELETION_BUBBLE.bodyLinkGap');
+    // 缩放相关几何不许留在 StyleSheet 里(会变成未折算的物理值)
+    const styleSlice = login.slice(
+      login.indexOf('deletionBubble: {'),
+      login.indexOf('stepHeader:'),
+    );
+    expect(styleSlice).not.toContain('LOGIN_DELETION_BUBBLE.radius');
+    expect(styleSlice).not.toContain('LOGIN_DELETION_BUBBLE.padding');
+    expect(styleSlice).not.toContain('LOGIN_DELETION_BUBBLE.font');
+    expect(styleSlice).not.toContain('LOGIN_DELETION_BUBBLE.lineHeight');
     const bubbleStyleSlice = login.slice(
       login.indexOf('deletionBubble: {'),
       login.indexOf('stepHeader:'),
@@ -283,15 +318,20 @@ describe('mobile account deletion', () => {
     // 仅 iOS 生效);② 入场未完成(opacity/pointerEvents 只管渲染与命中,读屏照念)。
     // iOS 与 Android 属性都要给,条件收敛到一个常量避免两处漂移。
     expect(login).toContain(
-      "const deletionBubbleA11yHidden = consentDialogOpen || handoffPhase !== 'done';",
+      'const realmConsentOpen = realmConfirmation !== null;',
     );
-    expect(gate).toContain('accessibilityElementsHidden={deletionBubbleA11yHidden}');
+    expect(login).toContain(
+      "const deletionBubbleA11yHidden =\n    consentDialogOpen || realmConsentOpen || handoffPhase !== 'done';",
+    );
+    expect(gate).toContain(
+      'accessibilityElementsHidden={deletionBubbleA11yHidden}',
+    );
     expect(gate).toContain(
       "deletionBubbleA11yHidden ? 'no-hide-descendants' : 'auto'",
     );
     // 登录组那层仍按弹窗条件隐藏(它本身在入场动画容器内,不需要入场条件)。
     expect(login).toContain(
-      "importantForAccessibility={consentDialogOpen ? 'no-hide-descendants' : 'auto'}",
+      "consentDialogOpen || realmConsentOpen ? 'no-hide-descendants' : 'auto'",
     );
   });
 });

@@ -912,9 +912,36 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
 
   ipcMain.handle(
     'voice-input:settings:update-shortcut',
-    async (_event, shortcut: VoiceInputShortcut | null | undefined): Promise<VoiceInputSettingsUpdateResult> => {
+    async (event, shortcut: VoiceInputShortcut | null | undefined): Promise<VoiceInputSettingsUpdateResult> => {
       return queueShortcutMutation(async () => {
         const nextShortcut = shortcut ?? null;
+        // 另一个窗口的录制框还开着（两个设置页可以同时开着录）：现在就注册，会让**那个**窗口
+        // 里的按键真的触发一次语音输入 —— 与恢复/同步两条路上的录制守卫是同一条道理。
+        //
+        // 提交方自己的会话此刻也还在（录制态要等这次响应回去才收口），所以判据是「除我之外
+        // 还有别人在录」。
+        //
+        // 存盘照存，注册往后推：录制期间所有窗口的全局快捷键都是挂起的（没有任何注册），而
+        // 最后关闭的那个录制框在 cleanup 里会 sync 一次存盘值 —— 那时才注册，正是我们要的
+        // 时机。聚焦兜底恢复与 useVoiceInputSettings 的回声都是额外保险。
+        const recordedElsewhere = Array.from(modifierShortcutRecordingSessionIds)
+          .some((webContentsId) => webContentsId !== event.sender.id);
+        if (recordedElsewhere) {
+          log.info('deferring shortcut registration until other recorders close');
+          clearPendingShortcutRecoveryFailure();
+          // 仍然告诉用户「等授权」：preflight 只查不弹窗、也不碰 listener，所以推迟注册不等于
+          // 推迟引导。少了这步，缺权限时用户当场收不到授权请求。
+          const awaitingPermission = Boolean(
+            nextShortcut
+            && voiceInputShortcutNeedsMacNativeListener(nextShortcut, process.platform)
+            && (await refreshVoiceInputInputMonitoringPermissionSnapshot()).status === 'denied',
+          );
+          return {
+            ok: true,
+            settings: voiceInputDataStore.updateSettings({ shortcut: nextShortcut }),
+            ...(awaitingPermission ? { pendingInputMonitoring: true } : {}),
+          };
+        }
         const registration = await setVoiceInputGlobalShortcut(nextShortcut);
         // 只缺监听权限时仍然存盘：用户的选择要留住，快捷键等授权后自动生效（设置页在
         // 权限转为已授权时会重新 sync）。真故障（冲突、不支持、helper 坏了）照旧不存。

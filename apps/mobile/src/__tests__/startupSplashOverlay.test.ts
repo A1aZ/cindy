@@ -21,8 +21,10 @@ describe("startup splash overlay", () => {
     const layout = read("app/_layout.tsx");
 
     expect(layout).toContain("from '@/components/StartupSplashOverlay'");
+    // 常驻实例只能有一个;需要用户交互的闸门屏(端点错误 / 强更阻断)才隐藏它。
+    expect(layout.match(/<StartupSplashOverlay/g)).toHaveLength(1);
     expect(layout).toContain(
-      "<StartupSplashOverlay hidden={endpointGate.status === 'error'}>",
+      "hidden={endpointGate.status === 'error' || forcedUpdate !== null}",
     );
     // 闸门链各关不许再各自渲染 splash 实例(splash-preview 路由是唯一例外)。
     expect(layout).not.toContain('variant="splash"');

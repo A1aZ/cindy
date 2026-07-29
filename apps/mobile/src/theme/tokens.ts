@@ -62,7 +62,7 @@ export interface ThemeColors {
    * (light = `highlight.js/styles/github.css`,dark = globals.css 里的 GitHub Dark
    * 覆盖),两端观感一致。移动端不引入 highlight.js —— 依赖会改 runtime
    * fingerprint 触发冷更,词法分析走仓内 `session/codeHighlight.ts`。
-   * 这 5 档是语义豁免色(语法着色本身就是彩色),不受黑白系约束。
+   * 这 6 档是语义豁免色(语法着色本身就是彩色),不受黑白系约束。
    */
   syntaxKeyword: string;
   syntaxString: string;

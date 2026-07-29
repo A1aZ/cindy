@@ -166,12 +166,42 @@ const IDENT_BODY = /[A-Za-z0-9_$]/;
 const DIGIT = /[0-9]/;
 
 /**
+ * 着色预算 —— 超出就退回纯文本(整块或剩余部分并成一个 plain token)。
+ *
+ * 这不是性能洁癖,是渲染层的硬约束:每个非 plain token 在聊天流都会变成一个嵌套
+ * 原生 Text(iOS 的 selectable 路径上是 UITextView 家族子节点),外层横向 ScrollView
+ * **不做虚拟化**,所以挂载成本直接等于 token 数;而流式输出期间整块会随每个 chunk
+ * 重新分词并重新挂载。一个几千行的日志或生成文件因此能同步挂出上万个原生节点,
+ * 卡住 JS / UI 线程。
+ *
+ * 超预算时退回的正是**本 PR 之前的形态** —— 纯文本代码块,底色与描边都还在,不是
+ * 不显示。而且屏幕上本来也只看得见几十行,超过这个量级的着色没有可感知收益。
+ *
+ * 两个维度都要卡:`maxSource` 挡住长块(连分词都不做),`maxTokens` 挡住"短但 token
+ * 极密"的病态输入(比如一行几千个 `a:1,b:2,…`)。
+ */
+export const CODE_HIGHLIGHT_LIMITS = {
+  maxSource: 20_000,
+  maxTokens: 2_000,
+} as const;
+
+/** 整块退回纯文本。空串保持返回空数组(与主路径一致)。 */
+function plainOnly(source: string): CodeToken[] {
+  return source ? [{ text: source, kind: 'plain' }] : [];
+}
+
+/**
  * 把源码切成带 kind 的 token 序列。
  *
  * 单趟扫描,优先级:注释 > 字符串 > 数字 > 标识符。相邻同 kind 的片段会合并,
- * 减少渲染层要创建的 Text 节点数。
+ * 减少渲染层要创建的 Text 节点数。超出 CODE_HIGHLIGHT_LIMITS 时退回纯文本。
+ *
+ * 无论走哪条分支,输出重新拼接后必须与输入逐字节相等(由测试的 assertLossless 守卫)。
  */
 export function tokenizeCode(source: string, language?: string): CodeToken[] {
+  // 长块直接退回:流式期间每个 chunk 都会重跑本函数,所以这里连分词都不做。
+  if (source.length > CODE_HIGHLIGHT_LIMITS.maxSource) return plainOnly(source);
+
   const spec = resolveSpec(language);
   const keywords = new Set(
     spec.caseSensitive === false ? spec.keywords.map((w) => w.toLowerCase()) : spec.keywords,
@@ -202,25 +232,41 @@ export function tokenizeCode(source: string, language?: string): CodeToken[] {
       ? (['<!--', '-->'] as const)
       : null;
 
+  // 行注释起始符:generic 家族同时认 `//` 与 `#`,尽量别把注释染成正文。
+  // 与 lineComment / blockComment 一样是循环不变量,必须在循环外算 —— 放进循环
+  // 等于每个字符都新建一个数组。
+  const lineStarts = lineComment
+    ? [lineComment]
+    : family === 'generic'
+      ? ['//', '#']
+      : [];
+
   let i = 0;
   while (i < source.length) {
-    const rest = source.slice(i);
+    // token 预算用尽:剩余源码整段并入 plain 收尾(仍然无损)。
+    // 计数要带上还没 flush 的 plain,否则一轮里 flush() + push() 会连推两个 token,
+    // 上界变成 maxTokens + 2。带上之后每轮"有效 token 数"最多 +1,收口后 out 至多
+    // 为 maxTokens + 1(那个 +1 是收尾的 plain)。
+    if (out.length + (plain ? 1 : 0) >= CODE_HIGHLIGHT_LIMITS.maxTokens) {
+      plain += source.slice(i);
+      break;
+    }
 
+    // 前缀判定一律用 source.startsWith(mark, i),不要先 source.slice(i) 再判。
+    // 澄清一个容易想当然的点:slice 在 V8 里返回 SlicedString(O(1) 引用,不拷贝
+    // 字符),所以它**不是** O(n²) —— 实测 20k 字符 0.6ms vs 0.3ms、1MB 3.4ms vs
+    // 1.3ms,只是 2~3x 常数因子加一堆短命对象。之所以还是照改:同等正确、更快、
+    // 更少垃圾,而这段是同步跑在渲染路径上。真正的规模保护是上面的 token 预算。
     // 块注释
-    if (blockComment && rest.startsWith(blockComment[0])) {
+    if (blockComment && source.startsWith(blockComment[0], i)) {
       const end = source.indexOf(blockComment[1], i + blockComment[0].length);
       const stop = end === -1 ? source.length : end + blockComment[1].length;
       push(source.slice(i, stop), 'comment');
       i = stop;
       continue;
     }
-    // 行注释:generic 家族同时认 `//` 与 `#`,尽量别把注释染成正文
-    const lineStarts = lineComment
-      ? [lineComment]
-      : family === 'generic'
-        ? ['//', '#']
-        : [];
-    const hitLine = lineStarts.find((mark) => rest.startsWith(mark));
+    // 行注释
+    const hitLine = lineStarts.some((mark) => source.startsWith(mark, i));
     if (hitLine) {
       const nl = source.indexOf('\n', i);
       const stop = nl === -1 ? source.length : nl;

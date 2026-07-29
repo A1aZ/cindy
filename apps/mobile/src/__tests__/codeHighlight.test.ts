@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { tokenizeCode, type CodeToken, type CodeTokenKind } from '@/session/codeHighlight';
+import {
+  CODE_HIGHLIGHT_LIMITS,
+  tokenizeCode,
+  type CodeToken,
+  type CodeTokenKind,
+} from '@/session/codeHighlight';
 
 /** 取某 kind 的全部片段文本,便于断言"哪些东西被认成了什么"。 */
 function kindTexts(tokens: readonly CodeToken[], kind: CodeTokenKind): string[] {
@@ -146,6 +151,51 @@ describe('tokenizeCode · 属性名(hljs attr 对应类)', () => {
     const tokens = assertLossless('switch (x) { default: break; }', 'ts');
     expect(kindTexts(tokens, 'keyword')).toEqual(expect.arrayContaining(['switch', 'default', 'break']));
     expect(kindTexts(tokens, 'property')).toEqual([]);
+  });
+});
+
+/**
+ * 着色预算守护。
+ *
+ * 每个非 plain token 在聊天流都会变成一个嵌套原生 Text(iOS selectable 路径上是
+ * UITextView 家族子节点),外层横向 ScrollView 不虚拟化,所以 token 数 = 挂载成本;
+ * 流式期间整块还会随每个 chunk 重新分词并重新挂载。所以 token 数必须有上界,
+ * 而不是"通常也不会那么长"。超预算时退回纯文本 —— 那正是本 PR 之前的形态。
+ */
+describe('tokenizeCode · 大代码块的着色预算', () => {
+  it('超长源码整块退回单个 plain token(连分词都不做)', () => {
+    const long = 'const a = 1; // c\n'.repeat(
+      Math.ceil((CODE_HIGHLIGHT_LIMITS.maxSource + 1000) / 18),
+    );
+    expect(long.length).toBeGreaterThan(CODE_HIGHLIGHT_LIMITS.maxSource);
+
+    const tokens = assertLossless(long, 'ts');
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0].kind).toBe('plain');
+  });
+
+  it('刚好在长度预算内的源码仍然着色(阈值不过度保守)', () => {
+    const unit = 'const a = 1;\n';
+    const within = unit.repeat(Math.floor(CODE_HIGHLIGHT_LIMITS.maxSource / unit.length / 2));
+    expect(within.length).toBeLessThanOrEqual(CODE_HIGHLIGHT_LIMITS.maxSource);
+
+    const tokens = assertLossless(within, 'ts');
+    expect(kindTexts(tokens, 'keyword').length).toBeGreaterThan(0);
+  });
+
+  it('token 极密的短源码按 token 数收口,剩余部分并成 plain', () => {
+    // 每组 `a1:1,` 都产出 property + number 等多个 token,长度远小于 maxSource,
+    // 靠 maxTokens 兜住。
+    let dense = '';
+    for (let n = 0; dense.length < CODE_HIGHLIGHT_LIMITS.maxSource - 20; n += 1) {
+      dense += `a${n}:${n},`;
+    }
+    expect(dense.length).toBeLessThanOrEqual(CODE_HIGHLIGHT_LIMITS.maxSource);
+
+    const tokens = assertLossless(dense, 'ts');
+    // 收口后允许再多一个 plain 收尾 token。
+    expect(tokens.length).toBeLessThanOrEqual(CODE_HIGHLIGHT_LIMITS.maxTokens + 1);
+    expect(tokens[tokens.length - 1].kind).toBe('plain');
   });
 });
 

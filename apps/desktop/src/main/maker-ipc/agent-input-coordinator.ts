@@ -1632,12 +1632,23 @@ export class AgentInputCoordinator {
         // 这一轮 run 已由 runner 按 terminal error 收口,克隆重跑只会造出一条不计账的
         // 幽灵消息(第十八轮 P1)。
         const outcome = this.setActiveTurnRecovery(state, active.item);
-        this.emit(sessionId);
-        // 用户那条路靠 clearError / 重试按钮顺带唤醒 drain,scheduler 这条没有人点 ——
-        // recovery 既然不留,队里压着的消息就得自己唤一次。
         if (outcome === 'dropped-scheduler') {
-          this.scheduleDrain(sessionId, 'scheduler-prompt-terminal-error');
+          // **紧随的 done 必须被配对吃掉。**各 agent 的失败收尾都是 terminal error 后再补
+          // 一个 done;普通用户项靠下方"!active && recovery.kind==='active-turn'"那道守卫
+          // 挡住它,而 scheduler 项恰恰没有 recovery 可挡 —— done 会一路落到方法尾部的
+          // `state.error = null`,把刚呈现的失败擦掉,还顺带按"正常完成"放行新队列工作,
+          // 而 scheduler 那边这一轮明明记的是 failed(第二十一轮 P1)。
+          // 复用外部 turn 失败那套配对标记:标记期间派发边界算忙(isDispatchBoundaryBusy),
+          // 配对 done 到达时清标记并保留 error;个别只发 error 不发 done 的收尾由
+          // markPendingExternalTerminalDone 内置的 fallback timer 兜底。
+          this.markPendingExternalTerminalDone(sessionId, state);
+          this.emit(sessionId);
+          // 用户那条路靠 clearError / 重试按钮顺带唤醒 drain,scheduler 这条没有人点 ——
+          // recovery 既然不留,队里压着的消息就得自己唤一次(等边界真空出来再跑)。
+          this.scheduleDrainAfterExternalTurnSettles(sessionId, 'scheduler-prompt-terminal-error');
+          return;
         }
+        this.emit(sessionId);
         return;
       }
       if (active?.persisting) {
@@ -2794,12 +2805,17 @@ export class AgentInputCoordinator {
       // runner 那边已经把这一轮 run 失败收口,克隆重跑只会造出一条不计账的幽灵消息
       // (review #944 第二十轮 P1)。
       const outcome = this.setActiveTurnRecovery(state, active.item);
-      this.emit(sessionId);
-      // recovery 不留 → 没有"用户点 clearError / Retry"这个唤醒源,队里压着的消息得自己唤
-      // 一次(与另外两条路径同款处置)。
       if (outcome === 'dropped-scheduler') {
-        this.scheduleDrain(sessionId, 'scheduler-prompt-terminal-error');
+        // 与 onTurnEvent 的 persisted 分支同款处置:没有 recovery 挡住"紧随的 done",
+        // 必须用配对标记吃掉它,否则失败呈现会被 done 擦成"已完成"(第二十一轮 P1)。
+        // recovery 不留 → 没有"用户点 clearError / Retry"这个唤醒源,队里压着的消息
+        // 得自己唤一次(等派发边界真空出来再跑)。
+        this.markPendingExternalTerminalDone(sessionId, state);
+        this.emit(sessionId);
+        this.scheduleDrainAfterExternalTurnSettles(sessionId, 'scheduler-prompt-terminal-error');
+        return;
       }
+      this.emit(sessionId);
       return;
     }
     state.error = null;

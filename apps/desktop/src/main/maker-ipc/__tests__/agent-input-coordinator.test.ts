@@ -5305,12 +5305,16 @@ describe('AgentInputCoordinator scheduler 排队心跳(review 反馈回归)', ()
       }),
     ).toBe(false);
 
-    // 队列真的被唤醒了:紧接着入队的普通消息能派发出去(recovery 不留就没人点 clearError)
+    // 队列真的被唤醒了(recovery 不留就没人点 clearError,必须自己唤)。注意唤醒是
+    // **等失败收尾的配对 done 到达之后**:第二十一轮起这条路会打配对标记,标记期间派发
+    // 边界算忙 —— 旧 turn 的尾巴还在飞时就起新活,正是那一轮要防的错误归因。
     h.sendToAgent.mockImplementationOnce(async () => ({
       kind: 'session-dispatch',
       dispatched: true,
     }) as never);
     h.coordinator.enqueue(sid, makeItem('c2', 'next one'));
+    await flush();
+    h.coordinator.onTurnEvent(sid, 'done');
     await flush();
     expect(h.sendToAgent).toHaveBeenCalledTimes(2);
   });
@@ -5330,6 +5334,62 @@ describe('AgentInputCoordinator scheduler 排队心跳(review 反馈回归)', ()
     await flush();
 
     expect(latestProjection(h.projections).recovery?.kind).toBe('active-turn');
+  });
+
+  it('scheduler turn 失败后紧随的 done 不擦掉失败呈现', async () => {
+    // 各 agent 的失败收尾都是 terminal error 后再补一个 done。普通用户项靠
+    // "!active && recovery.kind==='active-turn'" 那道守卫挡住它,而 scheduler 项恰恰没有
+    // recovery 可挡 —— done 会落到 onTurnEvent 尾部的 `state.error = null`,把刚呈现的
+    // 失败擦掉,还按"正常完成"放行新队列工作,而 scheduler 那边这一轮记的是 failed
+    // (review #944 第二十一轮 P1)。
+    const h = createHarness();
+    const sid = 'sched-error-then-done';
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'hb', { origin: schedOrigin }));
+    await flush();
+
+    h.coordinator.onTurnEvent(sid, 'error', 'upstream went silent');
+    await flush();
+    expect(latestProjection(h.projections).error).toBe('upstream went silent');
+
+    // 失败收尾的第二拍
+    h.coordinator.onTurnEvent(sid, 'done');
+    await flush();
+
+    // 失败必须还在(不能被 done 擦成"已完成"),且不会凭空长出重试入口
+    expect(latestProjection(h.projections).error).toBe('upstream went silent');
+    expect(latestProjection(h.projections).recovery).toBeNull();
+  });
+
+  it('配对标记不会永久卡住派发边界:done 到达后队列照常放行', async () => {
+    // 配对标记期间 isDispatchBoundaryBusy 为真,这是刻意的(别在旧 turn 的尾巴还在飞时
+    // 就起新活)。但它必须被配对的 done 清掉,否则会话永久判忙。
+    const h = createHarness();
+    const sid = 'sched-error-done-then-drain';
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'hb', { origin: schedOrigin }));
+    await flush();
+    h.coordinator.onTurnEvent(sid, 'error', 'upstream went silent');
+    await flush();
+
+    h.sendToAgent.mockImplementationOnce(async () => ({
+      kind: 'session-dispatch',
+      dispatched: true,
+    }) as never);
+    h.coordinator.enqueue(sid, makeItem('c2', 'next one'));
+    await flush();
+    // 配对标记仍在 → 新消息不该被派发
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+
+    h.coordinator.onTurnEvent(sid, 'done');
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
   });
 
   it('终态 error 撞在持久化中途:落库后结算时 scheduler 项也不留 recovery', async () => {

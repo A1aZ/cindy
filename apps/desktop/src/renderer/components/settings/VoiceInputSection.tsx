@@ -1294,7 +1294,22 @@ export function VoiceInputSection() {
       };
     }
     if (!shortcutNeedsKeyboardListenerPermission) return;
-    void syncVoiceInputGlobalShortcut(settings.shortcut);
+    // 授权拿到了 ≠ 快捷键一定起得来：helper 仍可能 spawn 失败、启动超时、起来就退。
+    // 那时「待授权」说明会随权限转为已授权而消失，用户看到的是一切正常、按键却没反应。
+    // 所以这条路和直接提交那条路一样要把失败说出来（DESIGN.md §11：错误要有下一步）。
+    let cancelled = false;
+    void (async () => {
+      const result = await syncVoiceInputGlobalShortcut(settings.shortcut);
+      // 组件卸载 / 权限又变了：迟到的结果不再弹提示。
+      if (cancelled || result.ok) return;
+      // 'permission' = 权限其实还没到位（比如刚才那次读到的是过期快照）：待授权说明和
+      // 徽章都还在，不用再弹一条错误盖在上面。'superseded' 由顶掉它的那一轮负责报。
+      if (result.errorCode === 'permission' || result.errorCode === 'superseded') return;
+      toast.error(translateRef.current('settings.voiceInput.shortcut.toast.listenerUnavailable'));
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [
     permissions.inputMonitoring.ok,
     recordingShortcut,

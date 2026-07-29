@@ -147,7 +147,14 @@ export type VoiceInputShortcutUpdateResult =
   // 用 IPC 契约的固定联合而不是裸 string，避免误传/误判不存在的 code。
   | { ok: false; error: string; errorCode?: VoiceInputGlobalErrorCode };
 
-export async function syncVoiceInputGlobalShortcut(shortcut: VoiceInputShortcut | null): Promise<{ ok: boolean; error?: string }> {
+/**
+ * 返回类型带上 `errorCode`：调用方要靠它区分「还是缺权限」「helper 真起不来」「被更晚一轮
+ * 顶掉」，只有 ok/error 的话就只能去匹配 main 侧那句英文（而那句已经被统一消毒成固定文案，
+ * 压根区分不出原因）。
+ */
+export async function syncVoiceInputGlobalShortcut(
+  shortcut: VoiceInputShortcut | null,
+): Promise<{ ok: boolean; error?: string; errorCode?: VoiceInputGlobalErrorCode }> {
   try {
     const result = await window.electronAPI.voiceInput.setGlobalShortcut(shortcut);
     if (!result.ok) {

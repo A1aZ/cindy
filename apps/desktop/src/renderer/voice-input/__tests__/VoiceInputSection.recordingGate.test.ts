@@ -66,6 +66,25 @@ describe('VoiceInputSection shortcut recording gate', () => {
     );
   });
 
+  // 授权拿到了 ≠ 快捷键起得来：helper 仍可能 spawn 失败 / 启动超时 / 起来就退。原先这条
+  // 补注册是 fire-and-forget，失败被丢掉，而「待授权」说明会随权限转已授权一起消失 ——
+  // 用户看到一切正常、按键却没反应。直接提交那条路是会报 listenerUnavailable 的。
+  it('surfaces a listener failure when re-registering after the permission is granted', () => {
+    const source = readFileSync(
+      new URL('../../components/settings/VoiceInputSection.tsx', import.meta.url),
+      'utf8',
+    );
+
+    expect(source).toMatch(
+      /const result = await syncVoiceInputGlobalShortcut\(settings\.shortcut\);[\s\S]{0,600}?toast\.error\(translateRef\.current\('settings\.voiceInput\.shortcut\.toast\.listenerUnavailable'\)\)/,
+    );
+    // 仍缺权限 / 被更晚一轮顶掉都不该弹这条错误：前者待授权说明还在，后者由顶掉它的那轮报。
+    expect(source).toContain("if (result.errorCode === 'permission' || result.errorCode === 'superseded') return;");
+    // 迟到的结果不弹提示（权限又变了、或组件已卸载）。
+    expect(source).toContain('if (cancelled || result.ok) return;');
+    expect(source).not.toContain('void syncVoiceInputGlobalShortcut(settings.shortcut);');
+  });
+
   it('clears stale custom ASR form fields when the saved config is removed', () => {
     const source = readFileSync(
       new URL('../../components/settings/VoiceInputSection.tsx', import.meta.url),

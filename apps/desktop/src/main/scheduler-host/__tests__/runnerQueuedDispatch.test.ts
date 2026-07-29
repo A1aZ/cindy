@@ -777,24 +777,76 @@ describe('MakerScheduleRunner queued dispatch (busy bound session)', () => {
 // 永不 drain,`await dispatchGate` 永不 settle —— 4 个心跳 run 各挂 3.5 小时,占满
 // 全部执行槽,其余定时任务全部停摆。
 describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', () => {
-  it('入队即上报纯等待,派发被接受后离开等待(引擎据此把它从并发闸门里摘出去)', async () => {
+  it('入队即让出执行槽,派发被接受时向引擎要回槽位', async () => {
     const harness = createSessionHarness(async () => ({ accepted: true }));
     const queue = createQueueHarness({ busy: true });
     const { runner } = createRunnerHarness(harness.session, queue.deps);
     const ctx = createFireContext();
-    const queueWaitCalls: boolean[] = [];
-    (ctx as { onQueueWaitChanged?: (w: boolean) => void }).onQueueWaitChanged = (w) => {
-      queueWaitCalls.push(w);
+    let started = 0;
+    const ends: boolean[] = [];
+    (ctx as { onQueueWaitStart?: () => void }).onQueueWaitStart = () => { started += 1; };
+    (ctx as { endQueueWait?: (r: boolean) => boolean }).endQueueWait = (r) => {
+      ends.push(r);
+      return true; // 有空槽
     };
 
     const firePromise = runner.fire(heartbeatSchedule(), ctx);
     await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
-    expect(queueWaitCalls).toEqual([true]);
+    expect(started).toBe(1);
+    expect(ends).toEqual([]);
 
     await queue.accept();
-    await vi.waitFor(() => expect(queueWaitCalls).toEqual([true, false]));
+    await vi.waitFor(() => expect(ends).toEqual([true]));
     harness.emit({ type: 'done', data: {}, source: 'claude-code' });
     await expect(firePromise).resolves.toMatchObject({ sessionId: SESSION_ID });
+  });
+
+  it('派发时要不到执行槽 → 在 vendor dispatch 前中断并顺延,不超发', async () => {
+    const harness = createSessionHarness(async () => ({ accepted: true }));
+    const queue = createQueueHarness({ busy: true });
+    const { runner } = createRunnerHarness(harness.session, queue.deps);
+    const ctx = createFireContext();
+    const ends: boolean[] = [];
+    (ctx as { onQueueWaitStart?: () => void }).onQueueWaitStart = () => {};
+    (ctx as { endQueueWait?: (r: boolean) => boolean }).endQueueWait = (r) => {
+      ends.push(r);
+      return r ? false : true; // 要槽被拒；站下时正常复位
+    };
+
+    const firePromise = runner.fire(heartbeatSchedule(), ctx);
+    await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+    await queue.accept();
+
+    // 与撞忙顺延同语义:不留可见失败,下次到点重新排队
+    await expect(firePromise).resolves.toMatchObject({ deferred: true });
+    // 被拒后必须补一次 reclaimSlot=false 复位记账，否则引擎侧永远算它「不占槽」
+    expect(ends).toEqual([true, false]);
+    // turn 在 vendor dispatch 之前就被掐掉
+    expect(harness.session.abort).toHaveBeenCalled();
+  });
+
+  it('排队超时后迟到的 onAccepted 被补杀,不产生未跟踪的执行', async () => {
+    // 撤项对已转 activeTurn 的项是 no-op，coordinator 仍可能之后调 onAccepted。
+    vi.useFakeTimers();
+    try {
+      const harness = createSessionHarness(async () => ({ accepted: true }));
+      // removeTriggersDiscard=false 模拟「项已转 activeTurn，remove 是 no-op」
+      const queue = createQueueHarness({ busy: true, removeTriggersDiscard: false });
+      const { runner } = createRunnerHarness(harness.session, queue.deps);
+
+      const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
+      await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+      await vi.advanceTimersByTimeAsync(QUEUED_DISPATCH_MAX_WAIT_MS + QUEUED_DISPATCH_TRACK_POLL_MS);
+      await expect(firePromise).resolves.toMatchObject({ deferred: true });
+
+      // 超时之后 coordinator 才 drain 到它
+      await queue.accept();
+      expect(harness.session.abort).toHaveBeenCalled();
+      // 迟到派发不得真的发出 prompt
+      expect(harness.send).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('等派发超过上限 → 撤项并顺延(recurring 任务下次到点重新排队)', async () => {
@@ -804,9 +856,12 @@ describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', ()
       const queue = createQueueHarness({ busy: true });
       const { runner } = createRunnerHarness(harness.session, queue.deps);
       const ctx = createFireContext();
-      const queueWaitCalls: boolean[] = [];
-      (ctx as { onQueueWaitChanged?: (w: boolean) => void }).onQueueWaitChanged = (w) => {
-        queueWaitCalls.push(w);
+      let started = 0;
+      const ends: boolean[] = [];
+      (ctx as { onQueueWaitStart?: () => void }).onQueueWaitStart = () => { started += 1; };
+      (ctx as { endQueueWait?: (r: boolean) => boolean }).endQueueWait = (r) => {
+        ends.push(r);
+        return true;
       };
 
       const firePromise = runner.fire(heartbeatSchedule(), ctx);
@@ -816,8 +871,9 @@ describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', ()
 
       await expect(firePromise).resolves.toMatchObject({ deferred: true });
       expect(queue.removeCalls).toEqual([{ sessionId: SESSION_ID, clientId: 'client-1' }]);
-      // 离开等待必须配对上报,否则引擎侧的槽位记账会漏
-      expect(queueWaitCalls).toEqual([true, false]);
+      // 离开等待必须配对上报(reclaimSlot=false),否则引擎侧的槽位记账会漏
+      expect(started).toBe(1);
+      expect(ends).toEqual([false]);
       expect(harness.send).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();

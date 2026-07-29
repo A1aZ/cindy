@@ -62,21 +62,30 @@ export interface FireContext {
    */
   onPreRunHookCompleted?: (result: PreRunHookRunResult) => Promise<void> | void;
   /**
-   * Runner 进入 / 离开「纯等待」状态时上报（waiting=true 进入，false 离开）。
-   * 目前唯一的纯等待场景:心跳 prompt 撞上正忙的目标会话被排进队列,等会话空闲后
-   * 派发 —— 此刻没有 agent 子进程、没有 MCP 注册、不烧 token。
+   * Runner 进入「纯等待」状态时上报。目前唯一的纯等待场景:心跳 prompt 撞上正忙的
+   * 目标会话被排进队列,等会话空闲后派发 —— 此刻没有 agent 子进程、没有 MCP 注册、
+   * 不烧 token。
    *
    * Scheduler 据此把该 run 的 phase 切到 'queued' 并**从并发闸门计数里摘出去**:
    * 并发上限防的是"同时跑太多 agent",纯等待占着配额毫无收益,反而会让一个卡住的
    * 会话拖死整个调度器(2026-07-29 实事故,见 ScheduleRunPhase 注释)。
    *
-   * 约定:
-   * - 必须配对调用 —— 每条离开等待的路径(派发成功 / 撤项 / 失败 / abort)都要 (false)。
-   * - 离开等待时重新占槽是**纯记账**,不再过闸门、不阻塞:此时 run 已经在执行,拒绝
-   *   它没有意义。因此瞬时占用可能略微超过 maxConcurrentRuns,属预期。
-   * - optional;runner 不调则退回旧行为(排队期间照旧占槽)。
+   * 必须与 endQueueWait 配对;optional,runner 不调则退回旧行为(排队期间照旧占槽)。
    */
-  onQueueWaitChanged?: (waiting: boolean) => void;
+  onQueueWaitStart?: () => void;
+  /**
+   * 结束纯等待。**必须**在每条离开等待的路径上调用一次(派发被接受 / 撤项 / 失败 /
+   * abort),否则该 run 会永远被算作"不占槽"。
+   *
+   * @param reclaimSlot true = 本轮要继续执行,需要重新占回执行槽;
+   *                    false = 本轮不再执行(撤项 / 失败 / abort),只复位记账。
+   * @returns reclaimSlot=true 时:false 表示**当前没有空槽**。此时调用方必须在
+   *          vendor dispatch **之前**中断本轮(撤项 + 按顺延收口),不得继续执行 ——
+   *          让出的槽位早已被 tick 补上新任务,继续执行就会突破 maxConcurrentRuns,
+   *          把当初防 OOM 的闸门架空(review #944 第二、三轮)。
+   *          reclaimSlot=false 时返回值无意义(恒 true)。
+   */
+  endQueueWait?: (reclaimSlot: boolean) => boolean;
   /**
    * Runner 收到任何一次执行进展信号（会话事件）时打点。Scheduler 用它做卡死判定:
    * 「多久没有新反馈」而不是「总共跑了多久」—— 后者会误砍真在干活的长任务。

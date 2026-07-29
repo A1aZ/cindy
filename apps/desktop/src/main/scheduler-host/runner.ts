@@ -246,6 +246,13 @@ class QueuedRouteDisabledError extends Error {}
  */
 class QueuedDispatchTimeoutError extends Error {}
 
+/**
+ * 排队心跳在派发被接受的那一刻拿不到执行槽(引擎的 endQueueWait 返回 false)。
+ * 让出的槽早已被别的任务补上,继续执行就会突破 maxConcurrentRuns —— 此刻仍在 vendor
+ * dispatch 之前,按"这轮没轮到"顺延收口(与 QueuedRouteDisabledError 同款中断路径)。
+ */
+class QueuedSlotUnavailableError extends Error {}
+
 /** createTurnCompletionWaiter 的返回:turn 终态等待 + 文本缓冲 + 幂等摘除。 */
 interface TurnCompletionWaiter {
   turnFinished: Promise<void>;
@@ -1339,6 +1346,45 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // TS 控制流分析看不到,裸 let 会被收窄成 null/never。
     const waiterSlot: { current: TurnCompletionWaiter | null } = { current: null };
     let dispatched = false;
+    // ── 纯等待记账 + 派发取消标志 ──────────────────────────────────────────
+    // 必须声明在 enqueuePrompt **之前**:队列此刻恰好空时 onAccepted 可能被同步调用,
+    // 声明在后面会撞 TDZ。
+    //
+    // 从入队到 dispatchGate 结束是纯等待:没有 agent 子进程、没有 MCP 注册、不烧 token。
+    // 告知引擎把本 run 从并发闸门里摘出去,否则一个长时间忙碌(或卡住)的会话会通过它的
+    // 排队者占满全局槽位,拖死所有其它任务(2026-07-29 实事故)。
+    let inQueueWait = false;
+    const startQueueWait = (): void => {
+      if (inQueueWait) return;
+      inQueueWait = true;
+      try {
+        ctx.onQueueWaitStart?.();
+      } catch (err) {
+        this.deps.logger.warn?.('[runner] onQueueWaitStart threw (non-fatal)', err);
+      }
+    };
+    /**
+     * 结束纯等待。reclaimSlot=true 时返回 false 表示引擎给不了槽 —— 调用方必须在
+     * vendor dispatch 之前中断本轮(契约见 FireContext.endQueueWait)。
+     */
+    const endQueueWait = (reclaimSlot: boolean): boolean => {
+      if (!inQueueWait) return true;
+      let ok = true;
+      try {
+        ok = ctx.endQueueWait?.(reclaimSlot) ?? true;
+      } catch (err) {
+        this.deps.logger.warn?.('[runner] endQueueWait threw (non-fatal)', err);
+      }
+      // 拿不到槽时**不**清 inQueueWait:调用方紧接着走中断路径,那里再以
+      // reclaimSlot=false 复位记账。
+      if (ok) inQueueWait = false;
+      return ok;
+    };
+    // 超时撤项对已转入 activeTurn 的队列项是 no-op(register.ts 只移除 pending 行),
+    // 而超时路径刻意不 abort ctx.signal(那是 pause/delete 语义)—— 所以既有的
+    // "accept 时刻补杀"不会触发,仍注册的 onAccepted 之后可能把原 prompt 真发出去,
+    // 造成一次没人跟踪、还可能与顺延重试重叠的执行(review #944 第三轮)。
+    let dispatchCancelled = false;
     let settleDispatch!: () => void;
     let failDispatch!: (err: Error) => void;
     const dispatchGate = new Promise<void>((resolve, reject) => {
@@ -1376,6 +1422,41 @@ export class MakerScheduleRunner implements ScheduleRunner {
               this.deps.logger.warn?.('[runner] late-dispatch abort failed', err);
             });
           }
+          endQueueWait(false);
+          return;
+        }
+        // 排队上限已到、本次派发被撤销(见 dispatchCancelled 声明处):撤项对已转
+        // activeTurn 的项是 no-op,coordinator 仍会把 turn 发出去 —— 这里补杀,
+        // 免得产生一次没人跟踪、可能与顺延重试重叠的执行。
+        if (dispatchCancelled) {
+          this.deps.logger.warn?.('[runner] late accept after queued dispatch was cancelled; killing turn', {
+            scheduleId: schedule.id,
+            runId: ctx.runId,
+            sessionId,
+          });
+          if (live) {
+            void live.abort().catch((err) => {
+              this.deps.logger.warn?.('[runner] cancelled-dispatch abort failed', err);
+            });
+          }
+          endQueueWait(false);
+          return;
+        }
+        // 纯等待结束、要真正开始执行了 —— 先向引擎要回一个执行槽。让出的槽早已被
+        // tick 补上新任务,拿不到就必须在 vendor dispatch **之前**站下(契约见
+        // FireContext.endQueueWait),否则实际并发会突破 maxConcurrentRuns。
+        if (!endQueueWait(true)) {
+          const slotErr = new QueuedSlotUnavailableError(
+            'queued heartbeat could not reclaim an execution slot at dispatch time',
+          );
+          if (live) {
+            void live.abort().catch((err) => {
+              this.deps.logger.warn?.('[runner] slot-unavailable turn abort failed', err);
+            });
+          }
+          endQueueWait(false);
+          failAfterAccept(slotErr);
+          failDispatch(slotErr);
           return;
         }
         // 任务编辑器里选的 model/effort/来源在排队派发时刻热同步到会话(此回调
@@ -1454,17 +1535,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // 不烧 token。告知引擎把本 run 从并发闸门里摘出去,否则一个长时间忙碌(或卡住)
     // 的会话会通过它的排队者占满全局槽位,拖死所有其它任务(2026-07-29 实事故)。
     // 幂等包一层:离开等待的路径有多条(派发成功 / 撤项 / 失败 / abort),重复调用无害。
-    let queueWaitReported = false;
-    const setQueueWait = (waiting: boolean): void => {
-      if (queueWaitReported === waiting) return;
-      queueWaitReported = waiting;
-      try {
-        ctx.onQueueWaitChanged?.(waiting);
-      } catch (err) {
-        this.deps.logger.warn?.('[runner] onQueueWaitChanged threw (non-fatal)', err);
-      }
-    };
-    setQueueWait(true);
+    startQueueWait();
     const queuedAt = Date.now();
 
     // pause/delete abort:等待期撤掉队列项并**直接**解锁派发等待 —— 不依赖
@@ -1524,6 +1595,9 @@ export class MakerScheduleRunner implements ScheduleRunner {
       // onDiscarded → 那里也 failDispatch(一条含 "aborted" 的错误),先撤项就会让
       // dispatchGate 被它抢先 settle,本轮被记成"用户中断"而不是走顺延。
       // 反过来则安全:dispatchGate 已 settle,onDiscarded 的 failDispatch 是 no-op。
+      // 置位取消标志:撤项对已转 activeTurn 的项是 no-op,coordinator 仍可能在之后
+      // 调 onAccepted —— 那里读这个标志把迟到的 turn 杀掉。
+      dispatchCancelled = true;
       failDispatch(
         new QueuedDispatchTimeoutError(
           `queued heartbeat was not dispatched within ${Math.round(QUEUED_DISPATCH_MAX_WAIT_MS / 60_000)}min`,
@@ -1538,11 +1612,12 @@ export class MakerScheduleRunner implements ScheduleRunner {
     } catch (err) {
       clearInterval(trackPoll);
       ctx.signal.removeEventListener('abort', onAbort);
-      setQueueWait(false);
-      // 排队超时不是"这轮失败了",是"这轮没轮到" —— 与撞忙顺延同语义:撤销预插的
-      // running run、不通知不亮红点,下次到点重新排队(会话届时若空闲就直发)。
+      endQueueWait(false);
+      // 排队超时 / 拿不到执行槽都不是"这轮失败了",是"这轮没轮到" —— 与撞忙顺延
+      // 同语义:撤销预插的 running run、不通知不亮红点,下次到点重新排队(会话届时
+      // 若空闲就直发,槽位届时也可能腾出来)。
       // 不能顺延的(一次性 / manual / 已 paused)退回可见失败,否则任务静默消失。
-      if (err instanceof QueuedDispatchTimeoutError) {
+      if (err instanceof QueuedDispatchTimeoutError || err instanceof QueuedSlotUnavailableError) {
         if (this.canDefer(schedule)) {
           return this.deferFire(schedule, sessionId, 'queue-wait-timeout');
         }
@@ -1556,8 +1631,8 @@ export class MakerScheduleRunner implements ScheduleRunner {
       throw err instanceof Error ? err : new Error(String(err));
     }
     clearInterval(trackPoll);
-    // 派发已被接受 → 离开纯等待,重新计入并发槽(纯记账,不过闸门)。
-    setQueueWait(false);
+    // 走到这里说明 onAccepted 已经成功要回了槽位(endQueueWait(true) 返回 true),
+    // 记账早已切回 'running';这里不再重复调用。
 
     let runError: string | undefined;
     let assistantText = '';

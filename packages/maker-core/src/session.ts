@@ -62,6 +62,24 @@ export type InteractionRequestListener = (req: InteractionRequest) => Promise<In
  */
 const DEFAULT_TURN_STALL_MS = 45 * 60_000;
 
+/**
+ * 看门狗 abort 之后复核"turn 真的停了吗"的宽限(ms)。
+ *
+ * 为什么必须复核:各 agent 的 abort 在中断失败时都只记日志、**不改** turn-in-flight
+ * 状态(claude-code 的 `q.interrupt()` 抛错、codex 的 app-server 两次 ack 超时都是
+ * 这样)。此时 handle.isTurnRunning() 恒 true,而终态 error 已经推给上层收口 ——
+ * 之后每一条 send 都被 in-flight guard 拒掉,会话彻底不可用,看门狗等于"报告已恢复
+ * 但什么都没恢复"(review #944 第三轮)。
+ *
+ * 复核发现 turn 仍在跑就关闭会话:下一次 send 由 Maker 的 lazy create 重建 handle
+ * (与 handle 自然死亡后的路径一致,见 runEventLoop 尾部注释),这是唯一不依赖各 agent
+ * 自己实现重建的通用出路。
+ *
+ * 10s 是给 abort 的正常收口留的余量:interrupt 成功后 turn 的终态事件要经 SDK drain
+ * → translator → 事件流才让 isTurnRunning 翻 false,abort() resolve 的那一刻通常还没到。
+ */
+export const STALL_ABORT_RECOVERY_GRACE_MS = 10_000;
+
 function parseTurnStallMs(raw: string | undefined): number {
   if (raw === undefined || raw === '') return DEFAULT_TURN_STALL_MS;
   const n = Number(raw);
@@ -868,9 +886,37 @@ export class Session {
       },
       source: this.agentKind,
     } as AgentEvent);
-    void this.abort().catch((e) => {
-      this.logger.warn('turn stall watchdog abort failed', { error: String(e) });
-    });
+    void this.abort()
+      .catch((e) => {
+        this.logger.warn('turn stall watchdog abort failed', { error: String(e) });
+      })
+      .finally(() => {
+        // abort 只是"请求停止"。各 agent 在中断失败时都不改 turn-in-flight 状态,
+        // 所以必须复核 —— 见 STALL_ABORT_RECOVERY_GRACE_MS。
+        const timer = setTimeout(() => {
+          void this.recoverIfTurnStillRunning();
+        }, STALL_ABORT_RECOVERY_GRACE_MS);
+        (timer as unknown as { unref?: () => void }).unref?.();
+      });
+  }
+
+  /**
+   * 看门狗 abort 的兜底复核:turn 仍在跑说明 agent 层的中断没生效,会话已经不可用
+   * (isTurnRunning 恒 true → 后续 send 全被拒)。关掉它,让下一次 send 走 Maker 的
+   * lazy create 重建 handle。这是所有 agent 共用的恢复出路,不需要各自实现重建。
+   */
+  private async recoverIfTurnStillRunning(): Promise<void> {
+    if (this.status === 'closed' || this.closePromise) return;
+    if (!this.isTurnRunning()) return; // abort 生效了,会话仍可用,什么都不做
+    this.logger.error(
+      'turn still running after stall abort — closing session so the next send can rebuild it',
+      { graceMs: STALL_ABORT_RECOVERY_GRACE_MS },
+    );
+    try {
+      await this.close();
+    } catch (e) {
+      this.logger.warn('turn stall watchdog close failed', { error: String(e) });
+    }
   }
 
   private async runEventLoop(): Promise<void> {

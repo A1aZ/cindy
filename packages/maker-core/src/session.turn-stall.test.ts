@@ -7,7 +7,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 
-import { Session } from './session.js';
+import { STALL_ABORT_RECOVERY_GRACE_MS, Session } from './session.js';
 import type { AgentEvent, SendOrigin } from './types/events.js';
 import type { AgentSessionHandle, BackgroundTaskSnapshot } from './agents/base-agent.js';
 
@@ -23,6 +23,8 @@ const STALL_MS = 60_000;
 
 interface StubOptions {
   backgroundTasks?: BackgroundTaskSnapshot[];
+  /** true = abort 不生效（turn 仍在跑），复刻中断失败的真实形态。 */
+  abortIneffective?: boolean;
 }
 
 /**
@@ -33,7 +35,11 @@ function createStubHandle(opts?: StubOptions) {
   let turnRunning = false;
   const pending: AgentEvent[] = [];
   let notify: (() => void) | null = null;
+  // abortIneffective 模拟各 agent 的真实失败形态:中断请求失败(claude 的
+  // q.interrupt() 抛错 / codex 的 app-server 两次 ack 超时)时它们只记日志,
+  // **不**清 turn-in-flight 状态 —— isTurnRunning() 因此恒为 true。
   const abort = vi.fn(async () => {
+    if (opts?.abortIneffective) return;
     turnRunning = false;
   });
   let interactionResolver:
@@ -262,6 +268,47 @@ describe('Session turn stall watchdog', () => {
       stub.pushEvent({ type: 'status', data: { isRunning: false }, source: 'claude-code' } as AgentEvent);
       await vi.advanceTimersByTimeAsync(0);
       expect(seen.at(-1)!.turnOrigin).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('abort 不生效时关闭会话以真正恢复(review 第三轮)', async () => {
+    // 各 agent 在中断失败时都只记日志、不清 turn-in-flight 状态,于是 isTurnRunning()
+    // 恒 true、后续 send 全被 SESSION_RUNNING 拒 —— 看门狗"报告已恢复"实际什么都没恢复。
+    // 复核发现 turn 仍在跑就关掉会话,下次 send 由 Maker 的 lazy create 重建 handle。
+    vi.useFakeTimers();
+    try {
+      const stub = createStubHandle({ abortIneffective: true });
+      const session = createSession(stub);
+      session.onEvent(() => {});
+
+      await session.send('go');
+      await vi.advanceTimersByTimeAsync(STALL_MS + 1);
+      expect(stub.abort).toHaveBeenCalledTimes(1);
+      // 宽限期内不急着关:interrupt 成功后 turn 的终态事件要走一圈才让 isTurnRunning 翻假
+      expect(session.getStatus()).not.toBe('closed');
+
+      await vi.advanceTimersByTimeAsync(STALL_ABORT_RECOVERY_GRACE_MS + 1);
+      expect(session.getStatus()).toBe('closed');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('abort 生效时不关闭会话(会话仍可用,不该被误关)', async () => {
+    vi.useFakeTimers();
+    try {
+      const stub = createStubHandle(); // abort 正常生效
+      const session = createSession(stub);
+      session.onEvent(() => {});
+
+      await session.send('go');
+      await vi.advanceTimersByTimeAsync(STALL_MS + 1);
+      await vi.advanceTimersByTimeAsync(STALL_ABORT_RECOVERY_GRACE_MS + 1);
+
+      expect(stub.abort).toHaveBeenCalledTimes(1);
+      expect(session.getStatus()).not.toBe('closed');
     } finally {
       vi.useRealTimers();
     }

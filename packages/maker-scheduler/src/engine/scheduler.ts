@@ -622,7 +622,8 @@ export class Scheduler extends EventEmitter {
         onPreRunHookCompleted: this.buildOnPreRunHookCompleted(runId),
         onTurnActive: this.buildOnTurnActive(runId),
         createChildRun: this.buildCreateChildRun(schedule.id, firedAt),
-        onQueueWaitChanged: this.buildOnQueueWaitChanged(runId),
+        onQueueWaitStart: this.buildOnQueueWaitStart(runId),
+        endQueueWait: this.buildEndQueueWait(runId),
         onProgress: this.buildOnProgress(runId),
       });
       sessionId = result.sessionId;
@@ -682,12 +683,17 @@ export class Scheduler extends EventEmitter {
 
     if (stallAborted) {
       // 卡死守卫中断:run 记 'failed'(异常必须可见),且下方重排照常执行。
-      // **不**调 notifyForcedFailure —— runner 走到这里说明它已经 settle,它自己的
-      // finalizeRun 早已按 notify 配置投过通知;引擎再投一次就是重复推送
-      // (review #944 第二轮)。那个 hook 只服务"runner 压根不返回"的强制释放路径。
       const errorMsg = this.describeStallAbort(runError);
       await this.storage.updateRun(runId, { status: 'failed', finishedAt, errorMsg });
       this.emitEvent({ type: 'failed', scheduleId: schedule.id, runId, error: errorMsg });
+      // 通知按 runner 实际投了什么来补:
+      //  - runner 报错(abort 抛 AbortError,常见路径)→ 它已投过失败通知,不重复;
+      //  - runner 无错返回(abort 只 drain 出普通 done)→ 它投的是**成功**通知,而这一轮
+      //    实际记为 failed;必须补一条失败通知纠正,否则用户只看到"成功"
+      //    (review #944 第三轮)。
+      if (runError === undefined) {
+        void this.notifyForcedFailure(schedule.id, runId, errorMsg);
+      }
     } else if (wasAborted) {
       await this.storage.updateRun(runId, {
         status: 'aborted',
@@ -874,7 +880,8 @@ export class Scheduler extends EventEmitter {
         onPreRunHookCompleted: this.buildOnPreRunHookCompleted(runId),
         onTurnActive: this.buildOnTurnActive(runId),
         createChildRun: this.buildCreateChildRun(schedule.id, firedAt),
-        onQueueWaitChanged: this.buildOnQueueWaitChanged(runId),
+        onQueueWaitStart: this.buildOnQueueWaitStart(runId),
+        endQueueWait: this.buildEndQueueWait(runId),
         onProgress: this.buildOnProgress(runId),
       });
       runSessionId = result.sessionId;
@@ -930,10 +937,13 @@ export class Scheduler extends EventEmitter {
 
     if (stallAborted) {
       // 语义同 fireOneInner:守卫中断记 failed(可见)而不是 aborted(伪装成用户操作);
-      // 通知同样交给已经 settle 的 runner,引擎不重复投。
+      // 通知同样只在 runner 无错返回(它投的是成功通知)时补发纠正。
       const errorMsg = this.describeStallAbort(runError);
       await this.storage.updateRun(runId, { status: 'failed', finishedAt, errorMsg });
       this.emitEvent({ type: 'failed', scheduleId: schedule.id, runId, error: errorMsg });
+      if (runError === undefined) {
+        void this.notifyForcedFailure(schedule.id, runId, errorMsg);
+      }
     } else if (wasAborted) {
       await this.storage.updateRun(runId, {
         status: 'aborted',
@@ -1841,47 +1851,21 @@ export class Scheduler extends EventEmitter {
   }
 
   /**
-   * 构造 onQueueWaitChanged 回调:把 run 在「纯等待」与「执行中」之间切换 phase。
+   * 构造 onQueueWaitStart 回调:把 run 切进「纯等待」并让出执行槽。
    * 'queued' 期间该 run 不计入并发闸门(见 countSlotsInUse),也不受卡死守卫判定
    * (等一个忙会话是正常状态,不是卡死;排队本身的上限由 runner 侧负责)。
    *
-   * 离开等待时把 lastProgressAt 推到当下:排队那段时间不该算进"多久没反馈"的额度,
+   * 切换时把 lastProgressAt 推到当下:排队那段时间不该算进"多久没反馈"的额度,
    * 否则一条排了很久才被派发的 run 会在刚开始执行时就被守卫误判。
    */
-  private buildOnQueueWaitChanged(runId: string): (waiting: boolean) => void {
-    return (waiting: boolean) => {
+  private buildOnQueueWaitStart(runId: string): () => void {
+    return () => {
       const attempt = this.inflightAttempts.get(runId);
       if (!attempt) return;
-      // 让槽配额:排队 run 让出的槽会被 tick 立刻补上新任务,而这些 run 之后恢复派发时
-      // 只能记账(turn 已被目标会话接受,拦不住)—— 于是瞬时并发 = 上限 + 让槽数。不设
-      // 界的话让槽数没有上限,实际并发可以远超 maxConcurrentRuns,把当初防 OOM 的闸门
-      // 架空(review #944 P1)。
-      //
-      // 配额取 maxConcurrentRuns,即最坏瞬时并发 2×上限。之所以敢让它超过上限:排队 run
-      // 恢复派发时复用的是**目标会话已有的**上下文(agent 子进程 + MCP 注册都已在内存
-      // 里),不像 ephemeral run 那样新建一整套 —— 闸门真正要防的资源它并不新增。但
-      // token / CPU 仍在消耗,所以必须有界而不是放开。
-      //
-      // 超配额时保持 'running'(继续占槽)= 退回本 PR 之前的行为:安全侧降级,不会比
-      // 原来更糟,只是该 run 暂时享受不到"排队不占槽"的好处。
-      if (waiting && this.countQueuedRuns() >= this.maxConcurrentRuns) {
-        this.logger?.info?.('scheduler: queued-wait slot release declined (quota reached)', {
-          schedulerInstanceId: this.schedulerInstanceId,
-          processId: this.processId,
-          runId,
-          scheduleId: attempt.scheduleId,
-          queuedRuns: this.countQueuedRuns(),
-          quota: this.maxConcurrentRuns,
-        });
-        return;
-      }
-      const nextPhase: ScheduleRunPhase = waiting ? 'queued' : 'running';
-      if (attempt.phase === nextPhase) return;
-      attempt.phase = nextPhase;
+      if (attempt.phase === 'queued') return;
+      attempt.phase = 'queued';
       attempt.lastProgressAt = this.clock.now();
-      // 离开等待即重新占槽,但不过闸门、不阻塞 —— run 已经在执行,拒绝它没有意义
-      // (契约见 FireContext.onQueueWaitChanged)。
-      this.logger?.info?.('scheduler: in-flight run queue-wait changed', {
+      this.logger?.info?.('scheduler: in-flight run entered pure queue wait (slot released)', {
         schedulerInstanceId: this.schedulerInstanceId,
         processId: this.processId,
         ...this.describeInflightRun(attempt, attempt.lastProgressAt),
@@ -1889,6 +1873,57 @@ export class Scheduler extends EventEmitter {
         maxConcurrentRuns: this.maxConcurrentRuns,
       });
       this.emitRuntimeState();
+    };
+  }
+
+  /**
+   * 构造 endQueueWait 回调 —— 契约见 FireContext.endQueueWait。
+   *
+   * reclaimSlot=true 时这是一次**原子的占槽尝试**:让出的槽早已被 tick 补上新任务,
+   * 所以必须重新过闸门。拿不到就返回 false,由 runner 在 vendor dispatch 之前中断本轮
+   * (它有现成的路径:与"目标路由已停用"同款的 abort + rollback)。这样瞬时并发严格
+   * 不超过 maxConcurrentRuns —— 上一轮用"让槽配额"把峰值压到 2× 只是缓解,reviewer
+   * 指出 2×(默认 16)仍然暴露 CPU / token / 宿主过载,确实如此(review #944 第三轮)。
+   *
+   * 检查与占位之间没有 await:main 进程单线程,两个同时恢复的排队 run 不会都拿到
+   * 最后一个槽。
+   */
+  private buildEndQueueWait(runId: string): (reclaimSlot: boolean) => boolean {
+    return (reclaimSlot: boolean) => {
+      const attempt = this.inflightAttempts.get(runId);
+      // attempt 已不在(被强制收口 / 已 settle):没有记账要复位,也不必拦调用方。
+      if (!attempt) return true;
+      if (attempt.phase !== 'queued') return true;
+      if (!reclaimSlot) {
+        // 本轮不再执行。仍把 phase 复位成 'running':它已经不是纯等待了,继续算作
+        // "不占槽"会让卡死守卫看不住它(收口通常几毫秒内完成,占槽无害)。
+        attempt.phase = 'running';
+        attempt.lastProgressAt = this.clock.now();
+        this.emitRuntimeState();
+        return true;
+      }
+      if (this.countSlotsInUse() >= this.maxConcurrentRuns) {
+        this.logger?.info?.('scheduler: queued run cannot reclaim a slot, caller must stand down', {
+          schedulerInstanceId: this.schedulerInstanceId,
+          processId: this.processId,
+          runId,
+          scheduleId: attempt.scheduleId,
+          slotsInUse: this.countSlotsInUse(),
+          maxConcurrentRuns: this.maxConcurrentRuns,
+        });
+        return false;
+      }
+      attempt.phase = 'running';
+      attempt.lastProgressAt = this.clock.now();
+      this.logger?.info?.('scheduler: queued run reclaimed a slot', {
+        schedulerInstanceId: this.schedulerInstanceId,
+        processId: this.processId,
+        ...this.describeInflightRun(attempt, attempt.lastProgressAt),
+        slotsInUse: this.countSlotsInUse(),
+        maxConcurrentRuns: this.maxConcurrentRuns,
+      });
+      this.emitRuntimeState();
+      return true;
     };
   }
 
@@ -1912,15 +1947,6 @@ export class Scheduler extends EventEmitter {
     let n = 0;
     for (const attempt of this.inflightAttempts.values()) {
       if (attempt.phase !== 'queued') n += 1;
-    }
-    return n;
-  }
-
-  /** 当前让出了槽位的排队 run 数（受 maxConcurrentRuns 配额约束，见 buildOnQueueWaitChanged）。 */
-  private countQueuedRuns(): number {
-    let n = 0;
-    for (const attempt of this.inflightAttempts.values()) {
-      if (attempt.phase === 'queued') n += 1;
     }
     return n;
   }
@@ -2045,8 +2071,14 @@ export class Scheduler extends EventEmitter {
         'scheduler: stalled run terminal state not persisted; leaving row to the stale-run sweep',
         { schedulerInstanceId: this.schedulerInstanceId, processId: this.processId, runId, scheduleId },
       );
-      // 仍然广播 'changed' 让 UI 重新拉数(它会读到 DB 真值),但不广播 failed ——
-      // 不制造一个数据库里不存在的终态。
+      // 不广播 failed —— 不制造一个数据库里不存在的终态(UI 会显示失败,DB 行却还是
+      // 'running' 并稍后被清扫改成 interrupted,两边分叉)。
+      //
+      // 但**排期照旧要恢复**:run 行的终态与 schedule 的下次触发是两件独立的事。
+      // 自动 claim 已经清空 nextFireAt,这里若一并跳过重排,周期任务会静默停摆到
+      // 进程重启 —— 上一轮为修"落库失败仍广播 failed"加的 early return 恰好引入了
+      // 这个新问题(review #944 第三轮)。
+      await this.replanAfterStalledClaim(scheduleId, now);
       this.emitEvent({ type: 'changed', scheduleId });
       return;
     }

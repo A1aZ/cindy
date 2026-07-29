@@ -2420,7 +2420,7 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
       runnerImpl: (_s, ctx) =>
         new Promise<FireResult>(() => {
           // 进入纯等待后永不 settle —— 模拟目标会话长时间不空闲。
-          ctx.onQueueWaitChanged?.(true);
+          ctx.onQueueWaitStart?.();
           queued.push(ctx);
         }),
     });
@@ -2453,7 +2453,7 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
       maxConcurrentRuns: 1,
       runnerImpl: (_s, ctx) =>
         new Promise<FireResult>(() => {
-          ctx.onQueueWaitChanged?.(true);
+          ctx.onQueueWaitStart?.();
           ctxRef = ctx;
         }),
     });
@@ -2462,8 +2462,8 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
     await vi.waitFor(() => expect(ctxRef).toBeDefined());
     expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(0);
 
-    // 派发被接受 → 重新计入占槽
-    ctxRef!.onQueueWaitChanged?.(false);
+    // 派发被接受 → 要回槽位（有空槽，必然成功）
+    expect(ctxRef!.endQueueWait?.(true)).toBe(true);
     const snap = h.scheduler.getRuntimeSnapshot();
     expect(snap.slotsInUse).toBe(1);
     expect(snap.inFlightRuns[0]?.phase).toBe('running');
@@ -2476,7 +2476,7 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
       const h = makeHarness({
         runnerImpl: (_s, ctx) =>
           new Promise<FireResult>(() => {
-            ctx.onQueueWaitChanged?.(true);
+            ctx.onQueueWaitStart?.();
           }),
       });
       const touchSpy = vi.spyOn(h.storage, 'touchRunHeartbeats');
@@ -2593,7 +2593,7 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
             ctx.signal.addEventListener('abort', () => {
               sawAbort = true;
             });
-            ctx.onQueueWaitChanged?.(true);
+            ctx.onQueueWaitStart?.();
           }),
       });
       const sch = await h.scheduler.create({ ...baseInput, manual: true });
@@ -2878,9 +2878,9 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
     }
   });
 
-  it('让槽的排队 run 有配额:超出后继续占槽,峰值有界', async () => {
-    // 排队 run 让出的槽会被 tick 补满,而它们恢复派发时只能记账(turn 已被会话接受)。
-    // 不设界的话实际并发可以远超 maxConcurrentRuns,把防 OOM 的闸门架空。
+  it('排队 run 恢复派发时要不到槽 → endQueueWait(true) 返回 false,峰值严格不超上限', async () => {
+    // 排队 run 让出的槽会被 tick 补上新任务。恢复派发时必须重新过闸门:拿不到就由
+    // runner 在 vendor dispatch 之前站下(顺延),否则实际并发突破 maxConcurrentRuns。
     const ctxs: FireContext[] = [];
     const h = makeHarness({
       maxConcurrentRuns: 2,
@@ -2889,19 +2889,34 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
           ctxs.push(ctx);
         }),
     });
-    const schedules = [];
-    for (let i = 0; i < 4; i++) {
-      schedules.push(await h.scheduler.create({ ...baseInput, manual: true }));
-    }
-    for (const s of schedules) void h.scheduler.runNow(s.id);
-    await vi.waitFor(() => expect(ctxs).toHaveLength(4));
+    const a = await h.scheduler.create({ ...baseInput, manual: true });
+    const b = await h.scheduler.create({ ...baseInput, manual: true });
+    void h.scheduler.runNow(a.id);
+    void h.scheduler.runNow(b.id);
+    await vi.waitFor(() => expect(ctxs).toHaveLength(2));
 
-    // 全部请求让槽:配额 = maxConcurrentRuns = 2，只有前两个生效
-    for (const ctx of ctxs) ctx.onQueueWaitChanged?.(true);
-    const snap = h.scheduler.getRuntimeSnapshot();
-    expect(snap.inFlight).toBe(4);
-    expect(snap.inFlightRuns.filter((r) => r.phase === 'queued')).toHaveLength(2);
-    expect(snap.slotsInUse).toBe(2); // 另两个退回占槽（安全侧降级）
+    // 两条都进纯等待 → 槽位全部让出
+    for (const ctx of ctxs) ctx.onQueueWaitStart?.();
+    expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(0);
+
+    // 让出的两个槽被新的自动任务补满
+    const c = await h.scheduler.create({ ...baseInput });
+    const d = await h.scheduler.create({ ...baseInput });
+    h.clock.advance(60_000);
+    void h.scheduler.tick();
+    await vi.waitFor(() => expect(ctxs).toHaveLength(4));
+    expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(2);
+    void c;
+    void d;
+
+    // 此刻两条排队 run 都要不回槽 —— 必须被拒
+    expect(ctxs[0]!.endQueueWait?.(true)).toBe(false);
+    expect(ctxs[1]!.endQueueWait?.(true)).toBe(false);
+    expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(2); // 没有超发
+
+    // 站下(reclaimSlot=false)只复位记账,不占槽
+    expect(ctxs[0]!.endQueueWait?.(false)).toBe(true);
+    expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(3); // 复位成 running 后计入
     await h.scheduler.stop();
   });
 

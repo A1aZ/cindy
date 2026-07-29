@@ -13,6 +13,7 @@ import type { AccountDeletionStatus, SocialProvider, VerificationKind } from '@c
 import { isValidEmail } from '@cindy/auth-client';
 
 import { cn } from '@/lib/utils';
+import { createLogger } from '@/lib/logger';
 import { WindowControls } from '@/components/title-bar/WindowControls';
 import { useLogin } from '@/hooks/useLogin';
 import { endLoginFirstLaunchLightGate, loginFirstLaunchLightActive } from '@/hooks/useTheme';
@@ -80,6 +81,8 @@ const REGION_PILL_KEY: Partial<Record<typeof CURRENT_CINDY_REGION, string>> = {
   dev: 'login.regionPill.dev',
 };
 
+const log = createLogger('LoginPage');
+
 /**
  * LoginPage — 桌面登录(wave4 白底体系 + figma §4 组件库)。
  *
@@ -133,6 +136,12 @@ export function LoginPage() {
       // The auth state event normally redirects through GuestRoute. Keep the
       // transition deterministic when the IPC response wins that race.
       window.location.hash = '#/';
+    } catch (error) {
+      // 两个调用点都是 requireConsent(() => void openLocalMode()):抛出去没人接,
+      // 会变成 unhandled rejection。IPC 失败(main 未就绪/通道异常)时停在登录页
+      // 就是正确兜底——用户可重试或改走正常登录;这里只记日志,不自造错误 UI
+      // (登录页的 errorCode 归 main 的 loginFlowState 所有,renderer 不旁路写)。
+      log.error('enter not-signed-in session failed', error);
     } finally {
       setLocalModePending(false);
     }

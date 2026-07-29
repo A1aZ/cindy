@@ -275,6 +275,41 @@ describe('consent guard(未勾选拦截个人登录链路)', () => {
     expect(acceptPrivacyConsent).toHaveBeenCalled();
   });
 
+  /* error 步 footer 的逃生入口(login-local-mode)与面板内入口共用 openLocalMode,
+     但它是「登录服务不可用时的唯一出路」,协议门接错会把这条路堵死。error 步不渲染
+     协议行(radio 只在 identifier 主视图),所以这里只能靠弹窗断言。 */
+  const errorState = {
+    step: 'error',
+    code: 'NETWORK_ERROR',
+    recoverTo: 'identifier',
+  } as unknown as AuthFlowState;
+
+  it('error 步逃生入口未勾选 → 弹协议弹窗;同意 → 进本地模式并写同意记录', async () => {
+    mount(errorState, { errorCode: 'NETWORK_ERROR' });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('login-local-mode'));
+    });
+    expect(screen.getByTestId('login-consent-dialog')).toBeTruthy();
+    expect(authEnterLocal).not.toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('login-consent-agree'));
+    });
+    expect(authEnterLocal).toHaveBeenCalledTimes(1);
+    expect(acceptPrivacyConsent).toHaveBeenCalled();
+  });
+
+  it('error 步逃生入口不同意 → 关弹窗、留在 error 屏,不进本地模式', async () => {
+    mount(errorState, { errorCode: 'NETWORK_ERROR' });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('login-local-mode'));
+    });
+    fireEvent.click(screen.getByTestId('login-consent-disagree'));
+    expect(screen.queryByTestId('login-consent-dialog')).toBeNull();
+    expect(authEnterLocal).not.toHaveBeenCalled();
+    // 逃生入口本身必须还在(不同意不等于把这条唯一出路关掉)
+    expect(screen.getByTestId('login-local-mode')).toBeTruthy();
+  });
+
   it('旧游客圆钮入口已删除(圆钮行不再渲染 login-social-guest)', async () => {
     mount(await identifierState('providers:cn-social'));
     expect(screen.queryByTestId('login-social-guest')).toBeNull();

@@ -582,11 +582,11 @@
       "fallbackName": "User",
       "avatarAlt": "{{name}} avatar",
       "local": {
-        "exitFailed": "Failed to exit unauthenticated mode, please try again",
+        "exitFailed": "Failed to exit the not-signed-in state, please try again",
         "name": "Not signed in",
         "description": "Data stays on this device without Cindy account services",
         "signIn": "Sign in to Cindy",
-        "exit": "Exit unauthenticated mode"
+        "exit": "Exit the not-signed-in state"
       },
       "copyUserId": {
         "action": "Copy user ID",

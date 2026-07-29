@@ -47,7 +47,7 @@ export function UserInfoSection({ isCollapsed, onOpenUpdateNotice }: UserInfoSec
   const initial = displayName.charAt(0).toUpperCase();
   // 未登录(跳过登录)态没有身份可展示:头像兜底用中性人形图标,而不是拿状态文案
   // 取首字——那会渲染成「未」/「N」这类无意义字符,且四语各不相同。
-  const showGuestGlyph = !user && isLocal;
+  const showNotSignedInGlyph = !user && isLocal;
   const appDisplayVersion = window.electronAPI.appDisplayVersion;
   const appDisplayVersionDetail = window.electronAPI.appDisplayVersionDetail;
   const appRegionLabel = CURRENT_CINDY_REGION === 'global' ? 'Global' : 'CN';
@@ -118,7 +118,7 @@ export function UserInfoSection({ isCollapsed, onOpenUpdateNotice }: UserInfoSec
                     'border border-sidebar-border bg-sidebar-item-hover text-base font-medium text-foreground',
                   )}
                 >
-                  {showGuestGlyph ? (
+                  {showNotSignedInGlyph ? (
                     <UserRound aria-hidden="true" size={18} strokeWidth={1.75} />
                   ) : (
                     initial
@@ -190,7 +190,7 @@ export function UserInfoSection({ isCollapsed, onOpenUpdateNotice }: UserInfoSec
                   'border border-[var(--sidebar-user-card-border)] bg-[var(--sidebar-user-card-bg)] text-[14px] font-medium text-[var(--sidebar-user-card-text)]',
                 )}
               >
-                {showGuestGlyph ? (
+                {showNotSignedInGlyph ? (
                   <UserRound aria-hidden="true" size={15} strokeWidth={1.75} />
                 ) : (
                   initial

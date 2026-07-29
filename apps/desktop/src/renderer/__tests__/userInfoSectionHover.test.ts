@@ -88,10 +88,14 @@ describe('UserInfoSection — 未登录态头像兜底', () => {
   it('未登录(跳过登录)态用中性人形图标,不拿状态文案取首字', () => {
     // 状态名四语各不相同(未登录 / Not signed in / 未ログイン / 로그인하지 않음),
     // 取首字会渲染成「未」/「N」这类无意义字符,所以这里必须走图标分支。
-    expect(source).toContain('const showGuestGlyph = !user && isLocal;');
+    expect(source).toContain('const showNotSignedInGlyph = !user && isLocal;');
     // 折叠 rail(36px 圆)与展开胶囊(27px 圆)两处兜底都要接上
-    expect(source).toMatch(/showGuestGlyph \? \(\s*\n\s*<UserRound aria-hidden="true" size=\{18\}/);
-    expect(source).toMatch(/showGuestGlyph \? \(\s*\n\s*<UserRound aria-hidden="true" size=\{15\}/);
+    expect(source).toMatch(
+      /showNotSignedInGlyph \? \(\s*\n\s*<UserRound aria-hidden="true" size=\{18\}/,
+    );
+    expect(source).toMatch(
+      /showNotSignedInGlyph \? \(\s*\n\s*<UserRound aria-hidden="true" size=\{15\}/,
+    );
   });
 
   it('已登录用户仍使用姓名首字兜底', () => {

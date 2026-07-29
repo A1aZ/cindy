@@ -113,9 +113,9 @@ for Mainland China accounts and `global` for everyone else; do not rely
 on the internal default. Full desktop, mobile, data-isolation, and validation
 workflows are in [`CONTRIBUTING.en.md`](CONTRIBUTING.en.md).
 
-“Skip Sign-In” on the login screen is an unauthenticated local-agent mode (shown
-in the app as “Not signed in”), not a connection to a local server. Server-backed
-capabilities are unavailable in this state.
+“Skip Sign-In” on the login screen runs local agents without a Cindy account
+(shown in the app as “Not signed in”), not a connection to a local server.
+Server-backed capabilities are unavailable in this state.
 
 **About the default servers:** the client connects to Cindy's official cloud
 services by default (endpoint manifests in

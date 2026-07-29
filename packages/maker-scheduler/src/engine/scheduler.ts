@@ -240,8 +240,14 @@ interface InflightAttempt extends SchedulerInflightRun {
    * —— 卡死守卫据此做过相反的处置，见 enforceStallGuard（review #944 第五轮 P1）。
    */
   controllerRegistered?: boolean;
-  /** 前置窗口卡死告警的上次输出时刻；节流用（心跳每 15s 会重入判定）。 */
-  preRegistrationStallLoggedAt?: number;
+  /** 存储卡死告警的上次输出时刻；节流用（心跳每 15s 会重入判定）。 */
+  storageStallLoggedAt?: number;
+  /**
+   * 进入 'finalizing' 的时刻。终态落库卡死从这里起算，而不是从最后一次进展信号：
+   * 守卫 abort 生效的正常路径下 lastProgressAt 已经旧了整个 runStallMs，用它判定会在
+   * 落库刚开始的那一刻就误报卡死。
+   */
+  finalizingSince?: number;
   /** runner 已经投过一条**失败**通知；守卫收口时据此决定是否补发。见 onRunnerNotified。 */
   runnerNotifiedFailure?: boolean;
 }
@@ -1537,6 +1543,9 @@ export class Scheduler extends EventEmitter {
     const current = this.inflightAttempts.get(runId);
     if (!current) return;
     current.phase = phase;
+    if (phase === 'finalizing' && current.finalizingSince === undefined) {
+      current.finalizingSince = this.clock.now();
+    }
     if (schedule) {
       current.scheduleName = schedule.name;
       current.executionMode = schedule.executionMode ?? 'agent';
@@ -2007,21 +2016,29 @@ export class Scheduler extends EventEmitter {
       // (script runner 第一方接 signal,abort 对它有效)。要根治应给 script 补默认超时,
       // 属独立改动,不塞进本 PR。
       if ((attempt.executionMode ?? 'agent') === 'script') continue;
-      if (!attempt.controllerRegistered) {
-        // 先过无进展阈值:正常 fire 也会有几毫秒处于"attempt 已登记、controller 未注册"
-        // 的前置窗口,不能一进这个窗口就报卡死。
-        if (now - attempt.lastProgressAt < this.runStallMs) continue;
-        // controller 只在 run 行插入之后注册。走到这里 = fire 还卡在前置 await 上
-        // (claimDueFire / insertRun / runNow 的 storage.get),runner 根本没启动:
-        //   - abort 无从下手:没有 controller,这些 DB await 也不看 signal;
-        //   - **更不能强制收口** —— forceReleaseStalledRun 会删掉 attempt,而挂起的
-        //     await 一旦返回,fire 会照原路往下走并真的启动 runner。此时它既不计入
-        //     maxConcurrentRuns、也不再受本守卫保护,正是本 PR 要消灭的那种隐形泄漏
-        //     (review #944 第五轮 P1)。
-        // 因此保持追踪(继续占槽、继续出现在诊断快照里)并节流告警。本地 SQLite 写
-        // 卡住一小时意味着整个宿主已经不可用,不是单条 run 能自愈的层级;真值得记的
-        // 是把它暴露出来,而不是悄悄把账做平。
-        this.logPreRegistrationStall(attempt, now);
+      // 强制收口只针对"runner 在场却不理 abort"这一种卡死。runner 不在场的两端都不能
+      // 走强制收口,共同点是 abort 无从下手、而删掉 attempt 会让这条 fire 从槽位记账和
+      // 守卫视野里一起消失 —— 挂起的 await 一旦返回它还会继续往下写:
+      //   - controller 未注册:fire 卡在 claimDueFire / insertRun / runNow 的 storage.get
+      //     上,runner 根本没启动(review #944 第五轮 P1);
+      //   - phase === 'finalizing':runner 已经返回,但终态落库(updateRun / get / update)
+      //     卡住。此时 unregisterInflight 已经摘掉 controller,"controller 缺席"并不等于
+      //     "这条 fire 结束了" —— 第五轮我在 forceReleaseStalledRun 里正是这么断言的,
+      //     于是 finalizing 卡死会被当成已收口而删掉 attempt,run 行停在 'running'、
+      //     自动认领清空的 nextFireAt 也没人补,任务停摆到重启(第六轮 P1)。
+      // 两端一律保持追踪(继续占槽、继续出现在诊断快照里)并节流告警。本地 SQLite 卡住
+      // 一小时意味着整个宿主已经不可用,不是单条 run 能自愈的层级;真值得做的是把它暴露
+      // 出来,而不是悄悄把账做平。
+      if (!attempt.controllerRegistered || attempt.phase === 'finalizing') {
+        // 先过阈值:正常 fire 也会有几毫秒处于这两个窗口,不能一进窗口就报卡死。
+        // finalizing 从进入该阶段起算 —— 守卫 abort 生效的正常路径下 lastProgressAt
+        // 已经旧了整个 runStallMs,用它判定会在落库刚开始那一刻就误报(见 finalizingSince)。
+        const wedgedSince =
+          attempt.phase === 'finalizing'
+            ? attempt.finalizingSince ?? attempt.lastProgressAt
+            : attempt.lastProgressAt;
+        if (now - wedgedSince < this.runStallMs) continue;
+        this.logStorageStall(attempt, now, now - wedgedSince);
         continue;
       }
       if (attempt.stallAbortedAt === undefined) {
@@ -2057,20 +2074,22 @@ export class Scheduler extends EventEmitter {
   }
 
   /**
-   * 前置窗口(controller 尚未注册)卡死的告警。不做处置,只保证可发现 —— 见
-   * enforceStallGuard 里的理由。心跳每 15s 重入,按 runStallMs 节流免刷屏。
+   * runner 不在场的卡死(前置 await 未注册 controller / 终态落库卡住)的告警。不做处置,
+   * 只保证可发现 —— 见 enforceStallGuard 里的理由。心跳每 15s 重入,按 runStallMs 节流。
    */
-  private logPreRegistrationStall(attempt: InflightAttempt, now: number): void {
-    const last = attempt.preRegistrationStallLoggedAt;
+  private logStorageStall(attempt: InflightAttempt, now: number, wedgedMs: number): void {
+    const last = attempt.storageStallLoggedAt;
     if (last !== undefined && now - last < this.runStallMs) return;
-    attempt.preRegistrationStallLoggedAt = now;
+    attempt.storageStallLoggedAt = now;
     this.logger?.error?.(
-      'scheduler: run stalled before its abort controller was registered — storage await appears wedged',
+      attempt.controllerRegistered
+        ? 'scheduler: run stalled while persisting its terminal state — storage await appears wedged'
+        : 'scheduler: run stalled before its abort controller was registered — storage await appears wedged',
       {
         schedulerInstanceId: this.schedulerInstanceId,
         processId: this.processId,
         ...this.describeInflightRun(attempt, now),
-        noProgressMs: now - attempt.lastProgressAt,
+        wedgedMs,
         runStallMs: this.runStallMs,
         slotsInUse: this.countSlotsInUse(),
         maxConcurrentRuns: this.maxConcurrentRuns,
@@ -2094,12 +2113,11 @@ export class Scheduler extends EventEmitter {
     // controller、正在走自己的终态收口。此时不抢 —— 否则会把一次真实成功记成
     // failed。controller 还在 = runner 确实没动静,继续强制收口。
     //
-    // 本分支只在 controllerRegistered=true 时可达(enforceStallGuard 已把"从未注册"
-    // 的前置窗口卡死分流走),所以 controller 缺席唯一的含义就是"已 settle"。
-    if (!this.inflightControllers.has(runId)) {
-      this.inflightAttempts.delete(runId);
-      return;
-    }
+    // 让位时**不删 attempt**:controller 缺席只说明"runner 返回了",不说明"这条 fire
+    // 结束了" —— 它可能正卡在终态落库上。删掉就等于让一条仍在往下写的 fire 从槽位记账
+    // 和守卫视野里一起消失(第六轮 P1)。槽位一律由 fire 自己的 finally 经
+    // finishInflightAttempt 释放;真卡住了就留在账上,由 logStorageStall 持续暴露。
+    if (!this.inflightControllers.has(runId)) return;
     // 先摘 registry:同步完成,保证本轮之后的 tick / 守卫都不再看到这条,不会重复收口。
     this.abandonedRuns.add(runId);
     this.inflightAttempts.delete(runId);
@@ -2156,7 +2174,7 @@ export class Scheduler extends EventEmitter {
       // 自动 claim 已经清空 nextFireAt,这里若一并跳过重排,周期任务会静默停摆到
       // 进程重启 —— 上一轮为修"落库失败仍广播 failed"加的 early return 恰好引入了
       // 这个新问题(review #944 第三轮)。
-      await this.replanAfterStalledClaim(scheduleId, now);
+      await this.replanAfterStalledClaim(attempt, now);
       this.emitEvent({ type: 'changed', scheduleId });
       return;
     }
@@ -2166,7 +2184,7 @@ export class Scheduler extends EventEmitter {
     // 就放弃补排,而同一 schedule 上并发的 runNow 正好构成这种情形;runNow 收口只写
     // lastFinishedAt、从不重排,于是没人恢复排期,任务永久停摆(review P1)。这里明确
     // 知道被弃的是一个自动 claim,直接按 recurring 语义补排。
-    await this.replanAfterStalledClaim(scheduleId, now);
+    await this.replanAfterStalledClaim(attempt, now);
     this.emitEvent({ type: 'changed', scheduleId });
   }
 
@@ -2175,8 +2193,25 @@ export class Scheduler extends EventEmitter {
    * 期间用户可能改过 cron / 暂停 / 删除)、尊重 manual 与已消耗的一次性任务、不覆盖
    * 已 paused 的行。与 rescheduleAfterSweep 的唯一区别:不因"还有别的 running 行"
    * 而放弃 —— 调用方已经确定这条自动 claim 的排期需要恢复。
+   *
+   * **只补偿自动 claim**。runNow 从不认领自动触发、也从不改 nextFireAt(见 runNow 顶注:
+   * "手动触发不应改变下一次按 cron 排定的时间"),所以强制收口一条卡死的手动 run 时不能
+   * 顺手补排:那会替一个自己没持有的 claim 写排期 —— 同 schedule 上真正在跑的自动 run
+   * 可能与新排出来的这次重叠,一次性任务还会因为 lastFiredAt 尚未落定而被当成没消耗过、
+   * 就此复活(第六轮 P1)。手动 run 卡死只收自己的槽位和 run 行。
    */
-  private async replanAfterStalledClaim(scheduleId: string, now: number): Promise<void> {
+  private async replanAfterStalledClaim(attempt: InflightAttempt, now: number): Promise<void> {
+    const { scheduleId } = attempt;
+    if (attempt.source !== 'automatic') {
+      this.logger?.info?.('scheduler: skipping replan for stalled non-automatic run', {
+        schedulerInstanceId: this.schedulerInstanceId,
+        processId: this.processId,
+        scheduleId,
+        runId: attempt.runId,
+        source: attempt.source,
+      });
+      return;
+    }
     try {
       const current = await this.storage.get(scheduleId);
       if (!current) return; // 行已删,无需补排

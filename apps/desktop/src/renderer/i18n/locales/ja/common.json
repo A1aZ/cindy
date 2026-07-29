@@ -4456,7 +4456,8 @@
       "localHint": "このパソコンで実行",
       "onlineHint": "接続済み — 作成できます",
       "offlineHint": "オフライン — 接続後に利用可能",
-      "attachmentsDropped": "添付ファイル {{count}} 件を削除しました（前のデバイス上のファイルです）"
+      "attachmentsDropped": "添付ファイル {{count}} 件を削除しました（前のデバイス上のファイルです）",
+      "attachmentsRemoteUnsupported": "リモートデバイスではファイル添付に未対応のため {{count}} 件をスキップしました（画像は可）"
     }
   },
   "onboarding": {

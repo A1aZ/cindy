@@ -501,6 +501,38 @@ export function NewMakerDraftRoute() {
    * 有没有项目只决定 workspaceKind 是 'project' 还是 'dialogue'。
    */
   const isDeviceLinkDraft = effectiveDeviceLinkDeviceId != null;
+  /**
+   * 远程草稿的附件闸门:**先选设备、之后再拖进来的**路径型附件同样进不了对端(Codex review P1)。
+   *
+   * 换设备时的 cleanupCrossFilesystemDraftContext 只能清掉「切换那一刻已经在托盘里」的,管不到
+   * 之后新加的;而 rehomeDraftAttachments 只重整图片、非图片原样返回,于是那条**控制端**绝对路径
+   * 会随首条消息发到对端 —— 要么读不到,要么读到同路径下一个毫不相关的文件。两者一起才构成
+   * 「远程草稿绝不携带控制端路径附件」这条不变量,少一半就等于留着一条口子。
+   *
+   * 为什么是拒绝而不是「传上去」:把文件送到对端需要一个能在对端写字节的通道,而 device-link
+   * 的 invoke allowlist 里没有、也不该为此加一个写通道 —— 那是权限边界变更,不属于本 PR。
+   * 所以在用户动作发生的那一刻就明确拒绝并说明,而不是等发送时静默丢掉(那才像 bug)。
+   * 图片不受影响:它们走 xdt-image:// 缓存,由 rehomeDraftAttachments 正常搬运。
+   *
+   * 包一层而不是改 useAttachments:这条限制只属于「创建页 + 远程草稿」这个语境,
+   * 会话中途与本机草稿都不该被它影响。ChatInput 与本路由自己的拖拽 / 粘贴入口共用这一份,
+   * 免得又出现「只堵了一半」。
+   */
+  const guardedAttachmentState = useMemo(() => {
+    if (!isDeviceLinkDraft) return attachmentState;
+    return {
+      ...attachmentState,
+      addFiles: async (fileList: FileList | readonly File[]) => {
+        const incoming = Array.from(fileList);
+        const images = incoming.filter((f) => f.type.startsWith('image/'));
+        const skipped = incoming.length - images.length;
+        if (skipped > 0) {
+          toast.warning(t('newChat.deviceSwitcher.attachmentsRemoteUnsupported', { count: skipped }));
+        }
+        if (images.length > 0) await attachmentState.addFiles(images);
+      },
+    };
+  }, [isDeviceLinkDraft, attachmentState, t]);
   // 零可用模型引导卡:device-link 草稿不出(连接态在被控端,本机替它连不上)。
   const providerOnboarding = useProviderOnboarding();
   const showProviderOnboardingCard = providerOnboarding.visible && !isDeviceLinkDraft;
@@ -2630,7 +2662,7 @@ export function NewMakerDraftRoute() {
           if (droppedItems.files.length > 0) {
             e.preventDefault();
             e.stopPropagation();
-            attachmentState.addFiles(droppedItems.files);
+            guardedAttachmentState.addFiles(droppedItems.files);
           }
           if (droppedItems.unclassified.length > 0) {
             // Do not synchronously consume item-less entries: a single
@@ -2641,7 +2673,7 @@ export function NewMakerDraftRoute() {
               classifyPath: (path) =>
                 window.electronAPI.localDb.sessionShare.classifyPath({ path }),
             }).then(({ files }) => {
-              if (files.length > 0) attachmentState.addFiles(files);
+              if (files.length > 0) guardedAttachmentState.addFiles(files);
             });
           }
         }}
@@ -2904,13 +2936,19 @@ export function NewMakerDraftRoute() {
                     }
                     narrowToolbar={isDraftToolbarNarrow}
                     paletteMaxHeight={240}
-                    attachmentState={attachmentState}
+                    attachmentState={guardedAttachmentState}
                     draftKey={NEW_MAKER_DRAFT_KEY}
                     focusOnStorageKeyChange
                     // 「+」始终显示(与对话界面一致):无项目裸态也可加引用目录,作为本次对话的上下文。
                     // createSession 各路径都会带上 extraDirs;workingDir=null 时 ExtraDirsButton 跳过重叠校验。
                     extraDirs={effectiveExtraDirs}
-                    onExtraDirsChange={handleExtraDirsChange}
+                    // 远程草稿不给引用目录入口(Codex review P1):ExtraDirsButton 开的是**控制端**
+                    // 原生目录对话框,选出来的本机路径发到对端后要么被 validateExtraDirs 静默丢掉、
+                    // 要么撞上对端同名的无关目录 —— 界面上那几个 chip 于是并不描述真实授予的上下文。
+                    // 不传 onChange 时 ExtraDirsButton 直接不渲染引用目录段(「新建目标」/ 计划模式 /
+                    // Plugin 入口不受影响)。进入远程设备时 extraDirs 已被清空,不会留下无法删除的残留。
+                    // 恢复这个能力要把 picker 路由到对端(设备域浏览器已有 fs:list-dir),见 follow-up。
+                    onExtraDirsChange={isDeviceLinkDraft ? undefined : handleExtraDirsChange}
                     // 首页「新建目标」入口:草稿态没有 sessionId,由本组件 createSession→setGoal。
                     // ChatInput 把输入框当前文字传上来作默认目标内容。
                     onNewGoal={(text) => {

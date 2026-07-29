@@ -67,6 +67,11 @@ const scheduleChipsSource = readFileSync(
   'utf8',
 );
 
+const extraDirsButtonSource = readFileSync(
+  resolve(__dirname, '..', 'components', 'new-chat', 'ExtraDirsButton.tsx'),
+  'utf8',
+);
+
 const sidebarUpperSource = readFileSync(
   resolve(__dirname, '..', 'features', 'cc-agent', 'CCAgentSidebarUpper.tsx'),
   'utf8',
@@ -745,6 +750,43 @@ describe('Shared create project picker', () => {
     expect(
       (newMakerDraftRouteSource.match(/args: createArgs,/g) ?? []).length,
     ).toBe(2);
+  });
+
+  // #807 review 第二十二轮:换设备时的清理只管「切换那一刻已在托盘里」的附件,**先选设备、之后
+  // 再拖进来**的路径型附件照样会把控制端绝对路径发到对端。两者一起才是「远程草稿绝不携带控制端
+  // 路径附件」这条不变量。
+  it('refuses path-backed attachments added after a remote device is selected', () => {
+    const guard = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const guardedAttachmentState = useMemo('),
+    );
+    const body = guard.slice(0, guard.indexOf('}, ['));
+    // 本机草稿零开销:直接返回原对象,不包装。
+    expect(body).toContain('if (!isDeviceLinkDraft) return attachmentState;');
+    // 只放图片过;非图片计数后 toast 说明,而不是等发送时静默丢掉。
+    expect(body).toContain("f.type.startsWith('image/')");
+    expect(body).toContain("t('newChat.deviceSwitcher.attachmentsRemoteUnsupported'");
+    // 三个入口(ChatInput + 本路由的拖拽 + 延迟分类的拖拽)都必须走闸门,不能有一个直连原对象。
+    expect(newMakerDraftRouteSource).toContain('attachmentState={guardedAttachmentState}');
+    expect(
+      (newMakerDraftRouteSource.match(/guardedAttachmentState\.addFiles\(/g) ?? []).length,
+    ).toBe(2);
+    // 唯一一处直连原对象的 addFiles 必须是闸门内部那次(images 放行);此外一处都不许有。
+    expect(
+      (newMakerDraftRouteSource.match(/(?<!guarded)attachmentState\.addFiles\(/g) ?? []).length,
+    ).toBe(1);
+    expect(body).toContain('await attachmentState.addFiles(images);');
+  });
+
+  // #807 review 第二十二轮:ExtraDirsButton 开的是控制端原生目录对话框,选出来的本机路径发到对端
+  // 会被静默丢掉、或撞上对端同名的无关目录 —— chip 显示的并不是真实授予的上下文。
+  it('hides the reference-directory picker on remote drafts', () => {
+    expect(newMakerDraftRouteSource).toContain(
+      'onExtraDirsChange={isDeviceLinkDraft ? undefined : handleExtraDirsChange}',
+    );
+    // ExtraDirsButton 的契约:没有 onChange 就不渲染引用目录段(其余菜单项不受影响)。
+    expect(extraDirsButtonSource).toContain(
+      '未提供时只显示目标、计划模式或 Plugin 入口，不显示引用目录段',
+    );
   });
 
   it('keeps recent-folder storage out of project-option selection', () => {

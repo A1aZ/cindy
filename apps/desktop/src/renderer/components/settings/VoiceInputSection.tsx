@@ -1609,9 +1609,12 @@ export function VoiceInputSection() {
       shortcutSuspendPromiseRef.current = null;
       delete document.body.dataset.appShortcutRecording;
       window.electronAPI.appShortcuts.setRecording(false);
-      if (window.electronAPI.platform === 'darwin') {
-        void window.electronAPI.voiceInput.stopModifierShortcutRecording();
-      }
+      // 不分平台都要发：挂起那条 IPC 在 main 侧登记了录制会话（它也不分平台），而这条 stop
+      // 是唯一会把它摘掉的。只在 darwin 发的话，Windows 用户按 Esc 取消录制后会话一直挂着，
+      // 随后的恢复同步被 main 的「录制中」守卫拒掉 —— 原来的全局快捷键就一直是停用的，直到
+      // 这个 renderer 被销毁。stop handler 本身与平台无关（非 darwin 上 key capture 压根没起，
+      // stopKeyCapture 是空操作）。
+      void window.electronAPI.voiceInput.stopModifierShortcutRecording();
       // 恢复注册必须等在飞的那次提交落地再读存盘。
       //
       // 切走设置 tab 会卸载本组件，cleanup 立刻跑；此刻提交还没存盘，getVoiceInputSettings()

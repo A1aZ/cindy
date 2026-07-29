@@ -24,6 +24,15 @@ describe('VoiceInputSection shortcut recording gate', () => {
     expect(source).toContain('await shortcutSuspendPromiseRef.current');
     // 挂起必须走显式 intent:main 侧按存盘校验同步请求,而挂起传的 null 故意与存盘不同。
     expect(source).toContain('suspendVoiceInputGlobalShortcut().then(');
+    // stop 不能按平台门控:挂起那条 IPC 不分平台地在 main 登记了录制会话,而 stop 是唯一摘掉它
+    // 的。只在 darwin 发的话,Windows 用户按 Esc 取消后会话一直挂着,恢复同步被「录制中」守卫
+    // 拒掉,原来的全局快捷键就一直停用。
+    // 断言锁的是**缩进层级**而不是「有没有出现 darwin」:出现在 cleanup 体一层(6 空格)才说明它
+    // 无条件执行;一旦被任何 if 包起来缩进就变成 8 空格,两条断言同时翻脸。写成正则匹配
+    // `darwin ... stop` 的形态是不够的——那样只要包裹语句里多一个行尾注释就绕过去了(我第一版
+    // 就是这么写的,负向验证时没能变红)。
+    expect(source).toContain('\n      void window.electronAPI.voiceInput.stopModifierShortcutRecording();');
+    expect(source).not.toContain('\n        void window.electronAPI.voiceInput.stopModifierShortcutRecording();');
     expect(source).not.toContain('syncVoiceInputGlobalShortcut(null)');
     expect(source).toContain('shortcutSuspendPromiseRef.current = suspendPromise');
     expect(source).toContain('syncVoiceInputGlobalShortcut(getVoiceInputSettings().shortcut)');

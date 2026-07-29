@@ -800,6 +800,27 @@ describe('voice input global shortcut registration', () => {
         expect(consume?.(mocks.settingsEvent)).toEqual({ failed: false });
       });
 
+      // Windows 路径: recording:start 是 darwin-only 的, 所以那里只有挂起登记过会话。stop 必须
+      // 照样能摘掉它, 否则随后的恢复同步会被「录制中」守卫一直拒掉、快捷键一直停用。
+      it('releases the recording session on stop even when no capture was ever started', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        mocks.modifierIsRunning.mockReturnValue(false);
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        const sender = { id: mocks.focusedWindow.webContents.id, once: vi.fn() };
+        // 只发挂起(没有 recording:start), 再 stop。
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.({ sender }, null, { suspend: true });
+        await mocks.handlers.get('voice-input:modifier-shortcut-recording:stop')?.({ sender });
+        mocks.modifierSetShortcut.mockClear();
+
+        // 恢复同步必须能落地。
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.({ sender }, bareRightOption);
+
+        expect(mocks.modifierSetShortcut).toHaveBeenCalledWith(bareRightOption);
+      });
+
       // 挂起是录制期的临时状态,不该清掉失败态。
       it('keeps the recovery failure across a recording suspend', async () => {
         setPlatform('darwin');

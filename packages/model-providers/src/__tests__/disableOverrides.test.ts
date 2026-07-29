@@ -78,6 +78,22 @@ describe('buildRegistry 烘焙', () => {
     expect(beta.suspended).toBe(true);
     expect(beta.connected).toBe(true);
   });
+
+  it('disableOverrideCount 统计整组 override,含指向已下架模型的陈旧条目(R26)', () => {
+    const views = buildRegistry(CATALOG, ALL_CONNECTED, {}, {
+      // gone-model 已不在 alpha 目录里:烘不出任何 disabled 行,但计数必须包含它,
+      // 设置页据此保住「全部启用」恢复入口。
+      disabledModels: { 'alpha:claude-opus-5': true, 'alpha:gone-model': true },
+      disabledProviders: { beta: true },
+    });
+    const alpha = views.find((v) => v.id === 'alpha')!;
+    const beta = views.find((v) => v.id === 'beta')!;
+    expect(alpha.disableOverrideCount).toBe(2);
+    expect(beta.disableOverrideCount).toBe(1);
+    // 无任何 override 的视图缺席该字段(纯附加,不给老端塞 0)。
+    const clean = buildRegistry(CATALOG, ALL_CONNECTED, {}, { disabledModels: {}, disabledProviders: {} });
+    expect(clean.find((v) => v.id === 'alpha')!.disableOverrideCount).toBeUndefined();
+  });
 });
 
 describe('rail 过滤(suspended)', () => {

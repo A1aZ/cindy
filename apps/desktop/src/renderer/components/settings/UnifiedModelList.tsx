@@ -738,8 +738,10 @@ export function UnifiedModelList({
         {/* 「已停用」分区:停用的行跨分组沉底;默认展开(区里有东西 = 用户主动停的,
             找回路径要一眼可见),搜索时强制展开。行内「启用此模型」即飞回原分组;
             头部「全部启用」= 组级恢复默认(kind:'reset' 删整组 override,含指向已
-            下架模型的陈旧条目 —— 逐行启用清不掉它们;configuration-and-overrides.md §4)。 */}
-        {disabledRows.length > 0 && (() => {
+            下架模型的陈旧条目 —— 逐行启用清不掉它们;configuration-and-overrides.md §4)。
+            渲染条件独立于当前渲染行:只剩陈旧条目(disabledRows 为空)或搜索过滤后
+            无匹配行时,恢复入口都不能消失(PR #744 review 第二十六轮)。 */}
+        {(disabledRows.length > 0 || (provider.disableOverrideCount ?? 0) > 0) && (() => {
           const collapsed = !query.trim() && isCollapsed(DISABLED_GROUP_KEY);
           return (
             <div className="flex flex-col">
@@ -763,7 +765,9 @@ export function UnifiedModelList({
                     {t('settings.providers.models.disabledGroup')}
                   </span>
                   <span className="text-11 tabular-nums" style={{ color: 'var(--text-tertiary)', opacity: 0.6 }}>
-                    {disabledRows.length}
+                    {/* 行数为 0 而 override 仍在(陈旧条目 / 搜索过滤)时显示 override 数,
+                        让「还有 N 条停用配置」可感知。 */}
+                    {disabledRows.length > 0 ? disabledRows.length : provider.disableOverrideCount ?? 0}
                   </span>
                 </button>
                 <button

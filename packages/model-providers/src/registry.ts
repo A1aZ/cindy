@@ -101,6 +101,13 @@ export interface ProviderView extends Provider {
    * 选择器 / 路由 / IM / device-link 消费方,停用 ≙ 不可用。
    */
   suspended?: boolean;
+  /**
+   * 该供应商名下的停用 override 总数(供应商级标志 + 全部逐模型条目)。与烘进模型
+   * 条目的 `disabled` 标志不同,它**包含指向已下架模型的陈旧条目**。设置页据此在
+   * 「目录里已无对应行」时仍展示组级「全部启用」恢复入口(configuration-and-
+   * overrides.md §4;PR #744 review 第二十六轮)。0 时缺席(纯附加字段,老端忽略)。
+   */
+  disableOverrideCount?: number;
 }
 
 /**
@@ -130,6 +137,12 @@ export function buildRegistry(
     // 再经 device-link 投影给配对控制端。UI 只用 kind。
     const failureView = failure ? stripDiscoveryFailureDetail(failure) : null;
     const suspended = isProviderDisabled(access, p.id);
+    // 该供应商名下的停用 override 总数(供应商级标志 + 全部逐模型条目)。与烘进
+    // 模型条目的 disabled 标志不同,它**包含指向已下架模型的陈旧条目** —— 设置页
+    // 据此决定是否展示「全部启用」组级恢复入口:目录漂移后 override 仍在、却没有
+    // 任何行可渲染时,恢复入口不能消失(PR #744 review 第二十六轮)。
+    const disableOverrideCount =
+      (suspended ? 1 : 0) + disabledKeys.filter((k) => k.startsWith(`${p.id}:`)).length;
     // 停用标志烘焙进模型条目(视图层字段,见 CatalogModel.disabled):renderer 与
     // device-link 控制端直接消费,不需要各自再查一份 override 表。**只有确实带停用
     // 条目的供应商**才重建 models(按 key 前缀判;listProviders 是热路径,其余供应商
@@ -160,6 +173,7 @@ export function buildRegistry(
       ...mediaOverrides,
       connected: connected[p.id] ?? false,
       ...(suspended ? { suspended: true } : {}),
+      ...(disableOverrideCount > 0 ? { disableOverrideCount } : {}),
       ...(failureView ? { modelDiscoveryFailure: failureView } : {}),
     };
   });

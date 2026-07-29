@@ -11,6 +11,7 @@
  */
 
 import {
+  getModel,
   isModelDisabled,
   isProviderDisabled,
   modelSupportsFastMode,
@@ -141,6 +142,37 @@ export async function resolveLenientSessionRoute(
     }
   }
   return route;
+}
+
+/**
+ * 某 (来源, 模型, agent) 拷贝的能力快照(efforts / Fast)。scheduler runner 在停用轴
+ * 隐式改道后按落地拷贝 reconcile effort/fastMode 用(merged capability 分辨不出来源
+ * 差异,PR #744 review 第二十七轮)。查不到 / 目录故障返回 null = 调用方保持既有
+ * merged 口径,不阻断 headless 运行。
+ */
+export async function resolveRouteCopyCapabilities(
+  agent: AgentKind,
+  providerId: string,
+  modelId: string,
+): Promise<{
+  efforts: readonly string[];
+  defaultEffort: string | null;
+  supportsFastMode: boolean;
+} | null> {
+  let views: ProviderView[];
+  try {
+    views = await getDesktopProviderService().listProviders();
+  } catch {
+    return null;
+  }
+  const provider = views.find((p) => p.id === providerId);
+  const copy = provider ? getModel(provider, modelId, agent) : undefined;
+  if (!provider || !copy) return null;
+  return {
+    efforts: copy.efforts,
+    defaultEffort: copy.defaultEffort ?? null,
+    supportsFastMode: modelSupportsFastMode(provider, modelId, agent),
+  };
 }
 
 /**

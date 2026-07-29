@@ -202,6 +202,22 @@ export interface MakerScheduleRunnerDeps {
     | { kind: 'reroute'; providerId: string }
     | { kind: 'reject'; reason: string }
   >;
+  /**
+   * 某 (来源, 模型, agent) 拷贝的能力(efforts / Fast)。effort 与 Fast 支持都是
+   * per-(来源, 模型) 的:停用轴把隐式默认改道到替代来源后,schedule 配置的
+   * effort/fastMode 必须按**落地拷贝**重查,merged capability(reconcileEffortForModel
+   * 的口径)分辨不出来源差异(PR #744 review 第二十七轮)。查不到 / 目录故障返回
+   * null = 不做来源级 reconcile(保持 merged 口径,不阻断 headless 运行)。
+   */
+  resolveRouteCopyCapabilities?: (
+    agent: AgentKind,
+    providerId: string,
+    modelId: string,
+  ) => Promise<{
+    efforts: readonly string[];
+    defaultEffort: string | null;
+    supportsFastMode: boolean;
+  } | null>;
 }
 
 /**
@@ -598,7 +614,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
     const permissionMode = defaultPermissionModeForSchedule();
     // fastMode 只对 codex 有意义（claude-code agent 忽略此字段）；Claude 恒不传，
     // 确保「不影响 Claude」。heartbeat 沿用 session meta 里的 fast 态，非 heartbeat 取 schedule。
-    const fastMode =
+    let fastMode =
       effectiveAgentKind === 'codex'
         ? isHeartbeat
           ? heartbeatFastMode
@@ -627,12 +643,41 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // 模型已声明支持的档原样保留(不降级 —— 保 #352 交互式口径);schedule 配置本身不回写,
     // 只影响本次 fire 的运行值(该模型日后支持该档时自动生效)。直发 / 排队两路径共用
     // reconcileEffortForModel(见其注释),口径一致;lookup 失败不阻断 headless 运行。
-    const reconciledEffort = this.reconcileEffortForModel(
+    let reconciledEffort = this.reconcileEffortForModel(
       effectiveAgentKind,
       model,
       schedule.effort,
       schedule.id,
     );
+    // 隐式改道后的来源级 reconcile(PR #744 review 第二十七轮):上面的 clamp 用的是
+    // merged capability,分辨不出来源差异 —— 改道后的落地拷贝 effort 支持可能更窄、
+    // 可能不支持 Fast,原样透传会被上游拒。按 (verdict.providerId, model) 的拷贝重查:
+    // 仍支持则保留,不支持取该拷贝默认档(与 model-route-guard withEffort 同口径);
+    // Fast 不支持则清掉。查不到 / 目录故障保持 merged 口径,不阻断 headless 运行。
+    if (reroutedProviderId && this.deps.resolveRouteCopyCapabilities) {
+      try {
+        const copy = await this.deps.resolveRouteCopyCapabilities(
+          effectiveAgentKind,
+          reroutedProviderId,
+          model,
+        );
+        if (copy) {
+          if (
+            copy.efforts.length > 0 &&
+            reconciledEffort &&
+            !copy.efforts.includes(reconciledEffort)
+          ) {
+            reconciledEffort =
+              copy.defaultEffort && copy.efforts.includes(copy.defaultEffort)
+                ? (copy.defaultEffort as Effort)
+                : (copy.efforts[copy.efforts.length - 1] as Effort);
+          }
+          if (fastMode === true && !copy.supportsFastMode) fastMode = false;
+        }
+      } catch (err) {
+        this.deps.logger.warn?.('[runner] rerouted copy capability lookup failed (non-fatal)', err);
+      }
+    }
     // 复用判定必须在 createSession 之前取：之后 session 必然在 activeSessions 里,
     // 区分不出"本来就活着(复用, opts 被忽略)"还是"这次 fire 才 spawn(opts 已生效)"。
     // TOCTOU 窗口(判定后、createSession 前 session 恰好关闭)只会把 fresh spawn 误判
@@ -966,6 +1011,26 @@ export class MakerScheduleRunner implements ScheduleRunner {
           );
         }
         if (verdict.kind === 'reroute' && !dispatchProviderId) {
+          // 晚到的隐式改道(createSession 之后目录才变)跨凭证形态时不能只热换
+          // provider store:进程是旧凭证形态 spawn 的,热换后这次 send 仍用旧凭证
+          // 下单或直接鉴权失败。需要关会话重建的组合按明确错误失败收口 —— 下一轮
+          // fire 在入口改道(reroutedProviderId)并经凭证切换重建正确收敛;同凭证
+          // 形态的改道热换即可生效(PR #744 review 第二十七轮)。
+          if (
+            shouldCloseSessionForCredentialSwitch({
+              agentKind: session.agentKind,
+              remoteHostId: session.remoteHostId,
+              currentProviderId: dispatchProviderId,
+              nextProviderId: verdict.providerId,
+              currentModel: runtimeModel,
+              nextModel: runtimeModel,
+              currentCodexProxyActive: session.codexProxyActive,
+            })
+          ) {
+            throw new Error(
+              `schedule route rerouted across credential modes after session creation; failing this run so the next fire rebuilds the session (model "${runtimeModel}" → provider "${verdict.providerId}")`,
+            );
+          }
           setSessionProvider(session.id, verdict.providerId);
         }
       }

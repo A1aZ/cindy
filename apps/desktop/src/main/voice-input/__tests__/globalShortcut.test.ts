@@ -633,6 +633,32 @@ describe('voice input global shortcut registration', () => {
         }
       });
 
+      // 失败之后用户把快捷键换成 F16(或清空), 兜底恢复再也不会跑(没有需要监听权限的快捷键
+      // 了), 这条失败就永远挂着 —— 此后每开一个应用外壳窗口都会取到它, 弹一条与当前状态无关
+      // 的「重启 Cindy 再试」。
+      it('clears a stale recovery failure once the user changes the shortcut', async () => {
+        setPlatform('darwin');
+        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.modifierIsRunning.mockReturnValue(false);
+        mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'spawn ENOENT' });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await focusWindow();
+
+        // 用户改成 F16:走 Electron accelerator,压根不需要监听权限。
+        const update = await mocks.handlers.get('voice-input:settings:update-shortcut')?.({}, {
+          trigger: 'keyboard',
+          code: 'F16',
+          key: 'F16',
+          modifiers: { meta: false, ctrl: false, alt: false, shift: false, fn: false },
+        });
+        expect(update).toMatchObject({ ok: true });
+
+        const consume = mocks.handlers.get('voice-input:consume-shortcut-recovery-failure');
+        expect(consume?.(mocks.settingsEvent)).toEqual({ failed: false });
+      });
+
       // 在飞的那次检查可能刚好在用户点开开关**之前**读到 denied,而这次被丢掉的聚焦正是他
       // 授权完切回来的那一次 —— 应用此后一直在前台,不会再有下一个 focus 事件。
       it('schedules a trailing retry when a focus arrives during an in-flight recovery', async () => {

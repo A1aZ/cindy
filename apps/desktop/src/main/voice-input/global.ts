@@ -659,6 +659,21 @@ let pendingShortcutRecoveryFailure = false;
  */
 const shortcutRecoveryFailureConsumers = new Set<number>();
 
+/**
+ * 清掉待通知状态。
+ *
+ * 除了「恢复成功」，**用户自己改了快捷键**同样要清：他把快捷键换成 F16 或干脆清空之后，兜底
+ * 恢复再也不会跑（没有需要监听权限的快捷键了），这条失败就永远挂着 —— 此后每开一个应用外壳
+ * 窗口都会取到它，弹一条「重启 Cindy 再试」，而当前快捷键其实工作正常或已被关掉。
+ *
+ * 连消费账本一起清：清完之后若又失败，那是一件新事，每个窗口都值得再被提示一次。
+ */
+function clearPendingShortcutRecoveryFailure(): void {
+  if (!pendingShortcutRecoveryFailure && shortcutRecoveryFailureConsumers.size === 0) return;
+  pendingShortcutRecoveryFailure = false;
+  shortcutRecoveryFailureConsumers.clear();
+}
+
 function notifyPendingShortcutRecoveryFailed(): void {
   pendingShortcutRecoveryFailure = true;
   for (const window of BrowserWindow.getAllWindows()) {
@@ -720,9 +735,7 @@ async function recoverPendingNativeShortcutRegistration(): Promise<void> {
     }
     if (result.ok) {
       log.info('pending native shortcut re-registered after permission was granted');
-      // 恢复成功后清账：此后若又失败，那是一件新事，值得再提示一次。
-      pendingShortcutRecoveryFailure = false;
-      shortcutRecoveryFailureConsumers.clear();
+      clearPendingShortcutRecoveryFailure();
       return;
     }
     if (result.errorCode === 'superseded') return;
@@ -775,6 +788,9 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
           // 已有路径里，重抄一遍迟早漏一样。
           await setVoiceInputGlobalShortcut(null);
         }
+        // 用户自己定下了新状态（注册成功 / 换成不需要权限的快捷键 / 清空），之前那条「自动
+        // 恢复失败」就过期了：留着只会让之后新开的窗口弹一条与当前状态无关的故障提示。
+        clearPendingShortcutRecoveryFailure();
         return {
           ok: true,
           settings: voiceInputDataStore.updateSettings({ shortcut: nextShortcut }),

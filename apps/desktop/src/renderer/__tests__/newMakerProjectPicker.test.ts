@@ -22,6 +22,11 @@ const worktreeChipsSource = readFileSync(
   'utf8',
 );
 
+const branchPickSource = readFileSync(
+  resolve(__dirname, '..', 'components', 'new-chat', 'branchPick.ts'),
+  'utf8',
+);
+
 const folderPickerPopoverSource = readFileSync(
   resolve(__dirname, '..', 'components', 'new-chat', 'FolderPickerPopover.tsx'),
   'utf8',
@@ -129,33 +134,43 @@ describe('Shared create project picker', () => {
 
   it('hides worktree controls for pure-dialogue drafts without a selected project', () => {
     // advancedHidden 把 "project 模式 + 无 cwd" 归到 dialogue 上下文,
-    // 让 worktree chip / worktree state effect / effectiveWorktreeEnabled 用同一个 flag 拦掉。
-    // 自动关闭必须走 handleAutoDisable(只关 UI、不写工作端勾选记忆),
-    // 不得回退成直接调 onEnabledChange(那会把环境因素当用户显式切换持久化)。
+    // 让联合控件 / effectiveWorktreeEnabled 用同一个 flag 拦掉。
     expect(worktreeChipsSource).toContain(
       "const advancedHidden = folderPickerMode === 'project' && !cwd",
     );
-    expect(worktreeChipsSource).toContain('if (advancedHidden && enabled) handleAutoDisable()');
-    expect(worktreeChipsSource).toContain('{!advancedHidden && (');
     expect(worktreeChipsSource).toContain(
       'const effectiveWorktreeEnabled = enabled && !advancedHidden && !worktreeDisabled',
     );
   });
 
-  it('persists the worktree preference only on explicit chip toggles (three-tier semantics)', () => {
-    // 2026-07-28「勾选状态保存在工作端」三档语义:
-    //  chip 点击(source='chip')= 显式表态 → 写工作端记忆(本地 patchDraft / 远程写穿);
-    //  分支菜单 enable-worktree(source='branch-pick')= 本次草稿流程副作用 → 不落偏好;
-    //  资格自动关闭(handleAutoDisable)= 仅 UI。
-    expect(worktreeChipsSource).toContain("onToggle(!checked, 'chip')");
-    expect(worktreeChipsSource).toContain("onEnabledChange(true, 'branch-pick')");
-    expect(newMakerDraftRouteSource).toContain("if (source !== 'chip') return;");
+  it('keeps the worktree checkbox owned by the user alone (2026-07-29 invariant)', () => {
+    // 用户裁决:勾选状态只属于用户——
+    //  1) 组件内不存在任何自动改写 enabled 的 effect(资格变化只禁用、不改状态);
+    //  2) 分支选择不承担隐式开关语义(branchPick 无 enable-worktree effect);
+    //  3) 用户点击 checkbox 是唯一改动路径,且必写穿工作端记忆(本地 patchDraft /
+    //     device-link 远程 apply-new-maker-worktree-pref);
+    //  4) checkbox 原样直出记忆(播种无 baseRepo 点亮门槛),发送侧按
+    //     「勾选 && baseRepo 就绪」静默降级,不报错拦截。
+    expect(worktreeChipsSource).not.toMatch(/onEnabledChange\(false\)/);
+    expect(worktreeChipsSource).not.toContain('handleAutoDisable');
+    expect(worktreeChipsSource).toContain('onToggle(!checked)');
+    expect(branchPickSource).not.toContain('enable-worktree');
     expect(newMakerDraftRouteSource).toContain("'maker:apply-new-maker-worktree-pref'");
-    // 播种点亮门槛:enabled=true 必须蕴含 detect 已回填 baseRepo,
-    // 否则「偏好 ON + 挂载后立即发送」会撞 handleSend 的 worktreeMissingRepo 硬错误。
-    expect(newMakerDraftRouteSource).toContain(
-      'setWtEnabled(effectiveWorkingDir != null && wtBaseRepo != null && worktreePref)',
+    expect(newMakerDraftRouteSource).toContain('setWtEnabled(worktreePref)');
+    expect(newMakerDraftRouteSource).toContain('wt.enabled && wt.baseRepo');
+    expect(newMakerDraftRouteSource).not.toContain('worktreeMissingRepo');
+  });
+
+  it('merges branch and worktree into a single joined pill (Claude Code style)', () => {
+    // 2026-07-29 用户裁决:[⎇ 分支 │ ☑ worktree] 是一个 pill、两个点击区。
+    // 未勾时分支区只读(菜单不可开);已勾时分支菜单 = worktree 源分支选择器。
+    expect(worktreeChipsSource).toContain('function BranchWorktreeChip');
+    expect(worktreeChipsSource).toContain('data-testid="create-agent-branch-worktree"');
+    expect(worktreeChipsSource).toContain(
+      'const branchInteractive = !disabled && effectiveWorktreeEnabled',
     );
+    expect(worktreeChipsSource).not.toContain('function BranchChip');
+    expect(worktreeChipsSource).not.toContain('function WorktreeChip(');
   });
 
   it('keeps remote project drafts out of local workspace probes', () => {

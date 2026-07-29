@@ -4039,8 +4039,7 @@
       "loading": "加载分支中…",
       "loadFailed": "分支列表加载失败，点此重试",
       "currentTooltip": "当前分支",
-      "sourceTooltip": "worktree 源分支",
-      "worktreeHint": "选择其他分支将以 worktree 隔离启动"
+      "sourceTooltip": "worktree 源分支"
     },
     "folderPicker": {
       "selectFolder": "选择文件夹",
@@ -5045,8 +5044,6 @@
     "draft": {
       "createSessionFailed": "创建对话失败，请重试",
       "deviceStillLoading": "远程设备仍在加载中，请稍候",
-      "worktreeMissingRepo": "无法开 worktree：缺少当前目录的仓库根",
-      "worktreeRepoHint": "可尝试重新选一次工作目录，等右下角文件夹标识刷新后再试",
       "sessionInactive": "对话已不再处于活跃状态",
       "remoteProjectBanner": "在 {{device}} 的 {{project}} 中新建对话"
     },

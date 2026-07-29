@@ -1,19 +1,20 @@
 /**
- * WorktreeChipsRow — folder chip + 分支 chip + worktree 勾选 chip。
+ * WorktreeChipsRow — folder chip + [分支 │ ☑ worktree] 联合控件。
  *
  * 2026-07(分支外显,Codex 风格)把 Branch 从齿轮 popover 提到独立 chip;
- * 2026-07-28 再把 worktree 开关本身也提为一级勾选 chip,齿轮 Advanced popover
- * 整体移除(popover 里只剩它一项,藏一层纯属多余):
- *   - folder chip 是主操作;分支 chip 常态显示仓库当前 HEAD 分支,
- *     worktree ON 时显示 worktree 源分支(带主色提示,与 worktree chip 同款)
- *   - 点分支 chip 弹分支列表:worktree ON 时改源分支;OFF 时选非当前分支
- *     自动开启 worktree(语义见 branchPick.ts —— 绝不 checkout 用户的 checkout)
- *   - worktree chip 点击即切换;不可用(非 git 仓库等)时禁用并以 tooltip 说明原因
+ * 2026-07-28 把 worktree 开关提为一级勾选 chip、齿轮 Advanced popover 移除;
+ * 2026-07-29 用户裁决(对齐 Claude Code):分支与 worktree 合并为**一个** pill——
+ * 左半分支区、竖分隔线、右半 checkbox + "worktree",两个点击区各管各的。
  *
- * 勾选状态的持久化语义(2026-07-28):onEnabledChange 只承载**用户显式切换**
- * (chip 点击 / 分支菜单触发的 enable-worktree),上层据此写工作端勾选记忆;
- * 资格不满足触发的自动关闭走 onAutoDisable,只关 UI、绝不写穿偏好——
- * 环境因素(切到非 git 目录)不该抹掉用户的选择。
+ * 状态不变量(2026-07-29 用户裁决,最高优先):**勾选状态只属于用户**——
+ *   - checkbox 原样直出工作端勾选记忆;选分支 / 切项目 / 资格变化都不改它;
+ *   - 唯一改动路径 = 用户点击 checkbox 本体(onEnabledChange,上层必持久化);
+ *   - 旧的「选非当前分支自动开 worktree」「资格不满足自动关」全部删除;
+ *   - 环境不合格(已在 worktree 内 / SSH / 探测中)只是禁用 checkbox + tooltip,
+ *     发送时由上层按「勾选 && 合格」静默降级,记忆永不被抹。
+ *
+ * 分支区语义:未勾 = 只读展示仓库当前 HEAD(会话就跑在它上面);已勾 = worktree
+ * 源分支选择器(默认当前分支,点开可换;见 branchPick.ts)。
  *
  * worktree 名称 **自动生成**（不暴露 UI），由 useSuggestName 拉取后透传给上层。
  */
@@ -57,17 +58,10 @@ export interface WorktreeChipsRowProps {
   emptyProjectLabel?: string;
   enabled: boolean;
   /**
-   * 用户切换 worktree。source 区分意图强度,供上层决定是否写工作端勾选记忆:
-   *  - 'chip':点 worktree chip 本体,是对「默认启用 worktree」的显式表态 → 持久化;
-   *  - 'branch-pick':分支菜单选非当前分支的自动开启,是本次草稿的流程副作用 →
-   *    只改本次 UI,不该悄悄改掉全局默认(防误操作口径)。
+   * 用户点击 checkbox 本体切换 worktree——**唯一**的状态改动路径,上层必持久化
+   * (写工作端勾选记忆)。系统任何路径都不得调用它替用户翻状态。
    */
-  onEnabledChange: (v: boolean, source: 'chip' | 'branch-pick') => void;
-  /**
-   * 系统强制关闭(资格不满足 / 入口隐藏 / SSH 禁用)。只应关 UI 态,不写偏好。
-   * 缺省回落 onEnabledChange(false)(兼容旧调用方,但会把自动关闭当显式切换持久化)。
-   */
-  onAutoDisable?: () => void;
+  onEnabledChange: (v: boolean) => void;
   sourceBranch: string;
   onSourceBranchChange: (v: string) => void;
   onBaseRepoChange?: (baseRepo: string | null) => void;
@@ -100,7 +94,6 @@ export function WorktreeChipsRow({
   emptyProjectLabel,
   enabled,
   onEnabledChange,
-  onAutoDisable,
   sourceBranch,
   onSourceBranchChange,
   onBaseRepoChange,
@@ -134,25 +127,8 @@ export function WorktreeChipsRow({
 
   const switchDisabled = disabled || worktreeDisabled || !!cantUseReason || detect.loading || !cwd;
 
-  // 自动关闭统一走 onAutoDisable(只关 UI、不持久化);旧调用方未传时回落 onEnabledChange
-  // (branch-pick 档,同样不该被当成显式表态)。
-  const handleAutoDisable = useCallback(() => {
-    if (onAutoDisable) onAutoDisable();
-    else onEnabledChange(false, 'branch-pick');
-  }, [onAutoDisable, onEnabledChange]);
-
-  useEffect(() => {
-    if (detect.loading) return;
-    if (cantUseReason && enabled) handleAutoDisable();
-  }, [cantUseReason, enabled, handleAutoDisable, detect.loading]);
-
-  useEffect(() => {
-    if (advancedHidden && enabled) handleAutoDisable();
-  }, [advancedHidden, enabled, handleAutoDisable]);
-
-  useEffect(() => {
-    if (worktreeDisabled && enabled) handleAutoDisable();
-  }, [worktreeDisabled, enabled, handleAutoDisable]);
+  // 状态不变量:这里**没有**任何自动改写 enabled 的 effect——勾选状态只属于用户,
+  // 资格不满足只体现为 checkbox 禁用(switchDisabled)+发送侧「勾选 && 合格」降级。
 
   const effectiveWorktreeEnabled = enabled && !advancedHidden && !worktreeDisabled;
   // 分支列表懒加载 latch:worktree 未开时不预拉,首次点开分支 chip 菜单才拉,
@@ -206,8 +182,9 @@ export function WorktreeChipsRow({
     ? sourceBranch || branches.current || 'main'
     : (currentBranch ?? '');
   const showBranchChip = !advancedHidden && !!detect.data?.isGitRepo && branchLabel !== '';
-  // 只读场景:worktree 开不了(已在 worktree 内 / 探测中)时 chip 仅展示不弹菜单。
-  const branchChipInteractive = !disabled && (effectiveWorktreeEnabled || !switchDisabled);
+  // 分支菜单只在 worktree 已勾时可交互(= 源分支选择器);未勾时分支区只读展示当前
+  // HEAD——选分支不再承担任何隐式开关语义(状态不变量,见文件头)。
+  const branchInteractive = !disabled && effectiveWorktreeEnabled;
 
   const handleBranchPick = useCallback(
     (picked: string) => {
@@ -215,53 +192,38 @@ export function WorktreeChipsRow({
         { worktreeEnabled: effectiveWorktreeEnabled, currentBranch, sourceBranch: branchLabel },
         picked,
       );
-      if (effect.kind === 'set-source') {
-        onSourceBranchChange(effect.branch);
-      } else if (effect.kind === 'enable-worktree') {
-        // 同帧一起写:sourceBranch 非空会让"worktree 开启后回填 current"的
-        // effect 自然跳过,不会覆盖用户的选择。
-        onEnabledChange(true, 'branch-pick');
-        onSourceBranchChange(effect.branch);
-      }
+      if (effect.kind === 'set-source') onSourceBranchChange(effect.branch);
     },
-    [effectiveWorktreeEnabled, currentBranch, branchLabel, onSourceBranchChange, onEnabledChange],
+    [effectiveWorktreeEnabled, currentBranch, branchLabel, onSourceBranchChange],
   );
 
-  const branchChip = showBranchChip ? (
-    <BranchChip
-      label={branchLabel}
+  const branchWorktree = showBranchChip ? (
+    <BranchWorktreeChip
+      branchLabel={branchLabel}
       branches={branches.branches}
-      loading={branches.loading}
-      failed={branches.failed}
-      onRetry={branches.refetch}
-      worktreeEnabled={effectiveWorktreeEnabled}
-      interactive={branchChipInteractive}
+      branchesLoading={branches.loading}
+      branchesFailed={branches.failed}
+      onRetryBranches={branches.refetch}
+      checked={enabled}
+      branchInteractive={branchInteractive}
+      checkboxDisabled={switchDisabled}
+      cantUseReason={cantUseReason ?? undefined}
       onPick={handleBranchPick}
       onOpenRequested={() => {
         setBranchListWanted(true);
         // 上次拉取失败的话,重新打开菜单就自动重试一次,不逼用户去点重试项。
         if (branches.failed && !branches.loading) branches.refetch();
       }}
+      onToggle={onEnabledChange}
       compact={compact}
     />
   ) : null;
 
-  // advancedOnly:项目选择交给页面自己的 pill,这里出 [分支 chip][worktree chip]
-  // (cwd 为空时随 advancedHidden 整体不渲染,与 full 变体同一套隐藏/清状态 effect)。
+  // advancedOnly:项目选择交给页面自己的 pill,这里出 [分支 │ ☑ worktree] 联合控件
+  // (cwd 为空 / 非 git 仓库时整体不渲染)。
   if (variant === 'advancedOnly') {
     if (advancedHidden) return null;
-    return (
-      <>
-        {branchChip}
-        <WorktreeChip
-          checked={enabled}
-          onToggle={onEnabledChange}
-          switchDisabled={switchDisabled}
-          cantUseReason={cantUseReason ?? undefined}
-          compact={compact}
-        />
-      </>
-    );
+    return branchWorktree;
   }
 
   return (
@@ -287,16 +249,7 @@ export function WorktreeChipsRow({
         onOpenChange={onFolderPickerOpenChange}
         disabled={disabled}
       />
-      {branchChip}
-      {!advancedHidden && (
-        <WorktreeChip
-          checked={enabled}
-          onToggle={onEnabledChange}
-          switchDisabled={switchDisabled}
-          cantUseReason={cantUseReason ?? undefined}
-          compact={compact}
-        />
-      )}
+      {branchWorktree}
     </div>
   );
 }
@@ -391,107 +344,114 @@ function FolderChipBig({
   );
 }
 
-// ── 分支 chip:常显当前/源分支,点开选分支 ──────────────────
+// ── [分支 │ ☑ worktree] 联合控件(对齐 Claude Code,2026-07-29 用户裁决) ──────
 
-function BranchChip({
-  label,
+function BranchWorktreeChip({
+  branchLabel,
   branches,
-  loading,
-  failed,
-  onRetry,
-  worktreeEnabled,
-  interactive,
+  branchesLoading,
+  branchesFailed,
+  onRetryBranches,
+  checked,
+  branchInteractive,
+  checkboxDisabled,
+  cantUseReason,
   onPick,
   onOpenRequested,
+  onToggle,
   compact,
 }: {
-  label: string;
+  branchLabel: string;
   branches: string[];
-  loading: boolean;
+  branchesLoading: boolean;
   /** 上次分支列表请求失败(区分于"仓库没分支"),菜单给重试入口。 */
-  failed: boolean;
-  onRetry: () => void;
-  worktreeEnabled: boolean;
-  interactive: boolean;
+  branchesFailed: boolean;
+  onRetryBranches: () => void;
+  /** worktree 勾选状态(工作端记忆原样直出;禁用时也照常显示,不做视觉造假)。 */
+  checked: boolean;
+  /** 分支菜单是否可开(仅已勾时 = 源分支选择器;未勾只读展示当前 HEAD)。 */
+  branchInteractive: boolean;
+  checkboxDisabled?: boolean;
+  cantUseReason?: string;
   onPick: (branch: string) => void;
   /** 菜单打开时通知上层解锁分支列表懒加载(失败态由上层顺带自动重试)。 */
   onOpenRequested: () => void;
+  /** 用户点击 checkbox——唯一的状态改动路径(上层持久化到工作端)。 */
+  onToggle: (v: boolean) => void;
   compact?: boolean;
 }) {
   const { t } = useTranslation();
 
-  const trigger = (
+  const branchSegment = (
     <button
       type="button"
-      disabled={!interactive}
+      disabled={!branchInteractive}
       data-testid="create-agent-branch-chip"
       className={cn(
-        'inline-flex items-center rounded-full border transition-colors',
+        'inline-flex h-full min-w-0 items-center transition-colors',
         // 只读态不弹菜单但也不该像 disabled 一样淡出 —— 分支信息本身是有效展示。
-        !interactive && 'cursor-default',
+        !branchInteractive && 'cursor-default',
         compact
-          ? 'h-[30px] max-w-[220px] gap-1.5 border-[var(--create-agent-control-border)] bg-[var(--create-agent-control-bg)] px-3 text-[12px] font-medium leading-[14px] text-[var(--create-agent-control-text)]'
-          : 'h-[42px] max-w-[260px] gap-2.5 border-border bg-[var(--chat-input-bg)] px-[18px] text-[14px] font-medium text-foreground',
-        interactive &&
+          ? 'max-w-[180px] gap-1.5 pl-3 pr-2 text-[12px] font-medium leading-[14px]'
+          : 'max-w-[220px] gap-2.5 pl-[18px] pr-2.5 text-[14px] font-medium',
+        branchInteractive &&
           (compact
             ? 'hover:bg-[var(--create-agent-control-bg-hover)] active:bg-[var(--create-agent-control-bg-pressed)]'
             : 'hover:bg-sidebar-item-hover'),
-        // worktree ON 时与齿轮同款主色提示:一眼看出"这是隔离启动的源分支"。
-        worktreeEnabled && 'border-primary/50 text-primary',
-        worktreeEnabled && interactive && 'hover:bg-primary/10',
+        // 勾选时主色提示与容器边框呼应:一眼看出"这是隔离启动的源分支"。
+        checked && 'text-primary',
+        checked && branchInteractive && 'hover:bg-primary/10',
       )}
       aria-label={t('newChat.branchChip.label')}
     >
       <GitBranch size={compact ? 12 : 15} className="shrink-0" />
-      <span className="min-w-0 truncate">{label}</span>
-      {interactive && (
+      <span className="min-w-0 truncate">{branchLabel}</span>
+      {branchInteractive && (
         <ChevronDown
           size={12}
-          className={cn('shrink-0', worktreeEnabled ? 'text-primary' : 'text-muted-foreground')}
+          className={cn('shrink-0', checked ? 'text-primary' : 'text-muted-foreground')}
         />
       )}
     </button>
   );
 
-  const tipped = (
+  const branchTipped = (
     <Tip
       text={
-        worktreeEnabled
+        checked
           ? t('newChat.branchChip.sourceTooltip')
           : t('newChat.branchChip.currentTooltip')
       }
     >
-      {trigger}
+      {branchSegment}
     </Tip>
   );
 
-  if (!interactive) return tipped;
-
-  return (
+  const branchArea = branchInteractive ? (
     <DropdownMenu
       onOpenChange={(open) => {
         if (open) onOpenRequested();
       }}
     >
-      <DropdownMenuTrigger asChild>{tipped}</DropdownMenuTrigger>
+      <DropdownMenuTrigger asChild>{branchTipped}</DropdownMenuTrigger>
       <DropdownMenuContent
         align="end"
         sideOffset={4}
         className="max-h-[280px] min-w-[200px] overflow-y-auto rounded-xl border border-border bg-popover p-1 shadow-lg"
       >
-        {loading ? (
+        {branchesLoading ? (
           <div className="px-3 py-1.5 text-[13px] text-muted-foreground">
             {t('newChat.branchChip.loading')}
           </div>
-        ) : failed || branches.length === 0 ? (
+        ) : branchesFailed || branches.length === 0 ? (
           /* 失败与空列表都给重试入口(空列表也可能是隧道/瞬时问题);
              onSelect 阻止默认关闭,重试期间菜单留在原地显示 loading。 */
           <DropdownMenuItem
             onSelect={(e) => {
               e.preventDefault();
-              onRetry();
+              onRetryBranches();
             }}
-            className="cursor-pointer rounded-md px-3 py-1.5 text-[13px] text-muted-foreground focus:bg-accent focus:text-accent-foreground"
+            className="cursor-pointer rounded-[8px] px-3 py-1.5 text-[13px] text-muted-foreground focus:bg-accent focus:text-accent-foreground"
           >
             {t('newChat.branchChip.loadFailed')}
           </DropdownMenuItem>
@@ -501,67 +461,42 @@ function BranchChip({
               key={b}
               onSelect={() => onPick(b)}
               className={cn(
-                'cursor-pointer rounded-md px-3 py-1.5 text-[13px] text-foreground',
+                'cursor-pointer rounded-[8px] px-3 py-1.5 text-[13px] text-foreground',
                 'focus:bg-accent focus:text-accent-foreground',
-                b === label && 'bg-accent/60',
+                b === branchLabel && 'bg-accent/60',
               )}
             >
               {b}
             </DropdownMenuItem>
           ))
         )}
-        {/* worktree OFF 时说明点选语义:不动当前 checkout,以 worktree 隔离启动。 */}
-        {!worktreeEnabled && (
-          <div className="mt-1 border-t border-border px-3 pb-1 pt-1.5 text-[11px] leading-snug text-muted-foreground">
-            {t('newChat.branchChip.worktreeHint')}
-          </div>
-        )}
       </DropdownMenuContent>
     </DropdownMenu>
+  ) : (
+    branchTipped
   );
-}
 
-// ── worktree 勾选 chip:一级入口,点击即切换(原齿轮 Advanced popover 已移除) ──────
-
-function WorktreeChip({
-  checked,
-  onToggle,
-  switchDisabled,
-  cantUseReason,
-  compact,
-}: {
-  checked: boolean;
-  /** 用户显式切换(source='chip',上层持久化偏好);disabled 态不触发。 */
-  onToggle: (v: boolean, source: 'chip') => void;
-  switchDisabled?: boolean;
-  cantUseReason?: string;
-  compact?: boolean;
-}) {
-  const { t } = useTranslation();
-
-  const btn = (
+  const checkboxSegment = (
     <button
       type="button"
-      onClick={() => !switchDisabled && onToggle(!checked, 'chip')}
-      disabled={switchDisabled}
+      onClick={() => !checkboxDisabled && onToggle(!checked)}
+      disabled={checkboxDisabled}
       data-testid="create-agent-worktree-chip"
+      aria-pressed={checked}
+      aria-label={t('newChat.worktree.toggleAria')}
       className={cn(
-        'inline-flex items-center rounded-full border transition-colors',
+        'inline-flex h-full items-center transition-colors',
         'disabled:cursor-not-allowed disabled:opacity-50',
-        // compact:30px 紧凑版,取 create-agent 控件 token 与新建页 mode pill / 分支 chip 同排同调
         compact
-          ? 'h-[30px] gap-1.5 border-[var(--create-agent-control-border)] bg-[var(--create-agent-control-bg)] px-3 text-[12px] font-medium leading-[14px] text-[var(--create-agent-control-text)]'
-          : 'h-[42px] gap-2.5 border-border bg-[var(--chat-input-bg)] px-[18px] text-[14px] font-medium text-foreground',
-        !switchDisabled &&
+          ? 'gap-1.5 pl-2 pr-3 text-[12px] font-medium leading-[14px]'
+          : 'gap-2.5 pl-2.5 pr-[18px] text-[14px] font-medium',
+        !checkboxDisabled &&
           (compact
             ? 'hover:bg-[var(--create-agent-control-bg-hover)] active:bg-[var(--create-agent-control-bg-pressed)]'
             : 'hover:bg-sidebar-item-hover'),
-        // ON 时与分支 chip 同款主色提示:一眼看出"这次对话将以 worktree 隔离启动"。
-        checked && 'border-primary/50 text-primary',
-        checked && !switchDisabled && 'hover:bg-primary/10',
+        checked && 'text-primary',
+        checked && !checkboxDisabled && 'hover:bg-primary/10',
       )}
-      aria-pressed={checked}
-      aria-label={t('newChat.worktree.toggleAria')}
     >
       <span
         className={cn(
@@ -592,22 +527,45 @@ function WorktreeChip({
     </button>
   );
 
-  // 不可用时以 tooltip 说明原因(替代旧 popover 内的行内禁用提示);
-  // 可用时 tooltip 解释语义,与分支 chip 的 tooltip 口径一致。
-  if (switchDisabled && cantUseReason) {
-    return (
+  // 不可用时 tooltip 说明原因;可用时解释语义。禁用只针对 checkbox 半区,
+  // 分支信息照常展示——环境不合格不该把整条控件打成灰。
+  const checkboxArea =
+    checkboxDisabled && cantUseReason ? (
       <Tooltip.Root>
         <Tooltip.Trigger asChild>
-          <span className="inline-flex" tabIndex={0}>
-            {btn}
+          <span className="inline-flex h-full" tabIndex={0}>
+            {checkboxSegment}
           </span>
         </Tooltip.Trigger>
         <Tooltip.Content side="top">{cantUseReason}</Tooltip.Content>
       </Tooltip.Root>
+    ) : checkboxDisabled ? (
+      checkboxSegment
+    ) : (
+      <Tip text={t('newChat.worktree.chipTooltip')}>{checkboxSegment}</Tip>
     );
-  }
 
-  if (switchDisabled) return btn;
-
-  return <Tip text={t('newChat.worktree.chipTooltip')}>{btn}</Tip>;
+  return (
+    <div
+      data-testid="create-agent-branch-worktree"
+      className={cn(
+        'inline-flex items-stretch overflow-hidden rounded-full border transition-colors',
+        compact
+          ? 'h-[30px] border-[var(--create-agent-control-border)] bg-[var(--create-agent-control-bg)] text-[var(--create-agent-control-text)]'
+          : 'h-[42px] border-border bg-[var(--chat-input-bg)] text-foreground',
+        // 勾选时与旧分支 chip 同款主色边框提示。
+        checked && 'border-primary/50',
+      )}
+    >
+      {branchArea}
+      <span
+        aria-hidden
+        className={cn(
+          'w-px shrink-0 self-center',
+          compact ? 'h-[14px] bg-[var(--create-agent-control-border)]' : 'h-[18px] bg-border',
+        )}
+      />
+      {checkboxArea}
+    </div>
+  );
 }

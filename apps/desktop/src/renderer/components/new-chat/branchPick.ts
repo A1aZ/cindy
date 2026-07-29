@@ -1,15 +1,16 @@
 /**
- * branchPick — 分支 chip 点选语义的纯函数(与 UI 解耦,便于单测)。
+ * branchPick — 分支区点选语义的纯函数(与 UI 解耦,便于单测)。
  *
- * 语义(Codex 风格「选分支 = 从该分支启动」):
- *  - worktree 已开:选中的分支就是 worktree 源分支,选当前源分支为 no-op;
- *  - worktree 未开:选中仓库当前分支为 no-op(会话本来就跑在它上面);
- *    选其它分支 → 自动开启 worktree 并以该分支为源 —— 绝不 checkout 用户的
- *    checkout(可能有脏改动),隔离启动是唯一安全语义。
+ * 2026-07-29 用户裁决(worktree 勾选状态只属于用户,系统永不隐式改动):
+ *  - worktree 已勾:分支菜单 = worktree 源分支选择器,选当前源分支为 no-op;
+ *  - worktree 未勾:分支区只读展示当前 HEAD,菜单不打开——旧的「选其它分支
+ *    自动开启 worktree」隐式联动已删除,任何路径都不再替用户翻动勾选状态。
+ *    想从别的分支启动 = 先勾 worktree、再选源分支(全部显式)。
+ *  - 永远不产生"checkout 用户 checkout"的效果(effect 种类里根本没有这个选项)。
  */
 
 export interface BranchPickState {
-  /** worktree 开关当前是否开启(effective,即未被 advancedHidden 等禁用)。 */
+  /** worktree 勾选状态(用户记忆原样直出;未勾时分支区只读,不应触达本函数)。 */
   worktreeEnabled: boolean;
   /** 仓库当前 HEAD 分支;detached / 未知时为 null。 */
   currentBranch: string | null;
@@ -19,14 +20,11 @@ export interface BranchPickState {
 
 export type BranchPickEffect =
   | { kind: 'noop' }
-  | { kind: 'set-source'; branch: string }
-  | { kind: 'enable-worktree'; branch: string };
+  | { kind: 'set-source'; branch: string };
 
 export function resolveBranchPick(state: BranchPickState, picked: string): BranchPickEffect {
-  if (state.worktreeEnabled) {
-    if (picked === state.sourceBranch) return { kind: 'noop' };
-    return { kind: 'set-source', branch: picked };
-  }
-  if (state.currentBranch !== null && picked === state.currentBranch) return { kind: 'noop' };
-  return { kind: 'enable-worktree', branch: picked };
+  // 未勾时分支区只读(UI 不开菜单);防御性兜底:即使被触达也绝不改勾选状态。
+  if (!state.worktreeEnabled) return { kind: 'noop' };
+  if (picked === state.sourceBranch) return { kind: 'noop' };
+  return { kind: 'set-source', branch: picked };
 }

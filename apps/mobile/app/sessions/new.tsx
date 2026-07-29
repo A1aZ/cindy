@@ -775,9 +775,9 @@ export default function NewRemoteSessionScreen() {
     eligibility: worktreeEligibility,
   });
   const worktreeToggleDisabled = creating || worktreeEligibility.status !== 'eligible';
-  // 勾选展示 = 用户偏好 × 资格通过:资格不满足时不显示已勾(不误导「会用 worktree」),
-  // 偏好值本身保留 —— 环境因素不抹掉用户选择,换回合格目录即恢复。
-  const worktreeChecked = worktreeEnabled && worktreeEligibility.status === 'eligible';
+  // 勾选展示 = 工作端记忆**原样直出**(2026-07-29 用户裁决:状态只属于用户,系统不做
+  // 视觉折叠);资格不满足只体现为禁用 + caption,创建时按「勾选 && 合格」静默降级。
+  const worktreeChecked = worktreeEnabled;
   const worktreeCaptionKey = worktreeEligibilityCaptionKey(worktreeEligibility);
   const createValidation = useMemo(
     () => validateNewSessionDraft(draft, draftContent),

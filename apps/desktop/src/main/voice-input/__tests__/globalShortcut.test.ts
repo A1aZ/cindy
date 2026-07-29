@@ -628,6 +628,58 @@ describe('voice input global shortcut registration', () => {
         expect(consume?.(mocks.settingsEvent)).toEqual({ failed: true });
       });
 
+      // isRunning() 在 spawn 之后立刻为 true, 早于 helper 报 ready。启动期间来一次聚焦, 只看
+      // isRunning 会判成「已经在跑、没事可做」直接返回; 而那次启动随后可能超时或起来就退(调用
+      // 方只写一行日志), 于是快捷键一直不生效、连提示都没有, 要等下一个 focus 事件。
+      it('waits for an in-flight listener start and retries once it settles', async () => {
+        setPlatform('darwin');
+        setTimeoutSpy?.mockRestore();
+        setTimeoutSpy = null;
+        vi.useFakeTimers();
+        try {
+          mocks.setStoredShortcut(bareRightOption);
+          // helper 已 spawn(isRunning=true)但还没报 ready —— 此刻没有任何注册记录。
+          mocks.modifierIsRunning.mockReturnValue(true);
+          const { registerGlobalVoiceInputIpc } = await import('../global.js');
+          registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+          mocks.appListeners.get('browser-window-focus')?.();
+          await vi.advanceTimersByTimeAsync(0);
+          // 不并发再起一次,也不查权限。
+          expect(mocks.inputMonitoringSnapshot).not.toHaveBeenCalled();
+          expect(mocks.modifierSetShortcut).not.toHaveBeenCalled();
+
+          // 那次启动失败收场(child 已死)。尾跑必须自己回来补上。
+          mocks.modifierIsRunning.mockReturnValue(false);
+          await vi.advanceTimersByTimeAsync(5_000);
+
+          expect(mocks.modifierSetShortcut).toHaveBeenCalledWith(bareRightOption);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      // 已经为这个快捷键注册成功、helper 也活着:真的没事可做,别排尾跑空转。
+      it('does nothing when the stored shortcut is already registered and running', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        mocks.modifierIsRunning.mockReturnValue(false);
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        // 先正常注册一次(存盘一致的同步),此后 helper 保持存活。
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
+        expect(mocks.modifierSetShortcut).toHaveBeenCalledWith(bareRightOption);
+        mocks.modifierIsRunning.mockReturnValue(true);
+        mocks.modifierSetShortcut.mockClear();
+        mocks.inputMonitoringSnapshot.mockClear();
+
+        await focusWindow();
+
+        expect(mocks.inputMonitoringSnapshot).not.toHaveBeenCalled();
+        expect(mocks.modifierSetShortcut).not.toHaveBeenCalled();
+      });
+
       // preflight 走的是同一个 helper: 二进制缺失 / spawn 失败 / swiftc 失败都会让权限状态
       // 压根查不出来(unknown)。那是真故障而不是「还没授权」—— 而下面那条通知原先只在 preflight
       // 成功后才够得着, 于是这种情况下用户什么提示都收不到、「待授权」说明又已随授权消失。

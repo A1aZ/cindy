@@ -644,20 +644,39 @@ let lastPendingShortcutRecoveryAt = 0;
 let pendingShortcutRecoveryRunning = false;
 
 /**
- * 现在可以恢复的那个快捷键，没有（或此刻不该恢复）就返回 null。
+ * 兜底恢复此刻该做什么。
  *
  * 预筛和队列内都调它，**队列内那次才是判据**：preflight 与队列排队都要 await，那段时间里
- * 用户可能已经改了快捷键、也可能已经开始录制。所有「该不该注册」的条件都收在这个函数里，
- * 就不会出现「预筛查了、队列内漏查」的偏差。
+ * 用户可能已经改了快捷键、也可能已经开始录制。所有条件都收在这个函数里，就不会出现「预筛
+ * 查了、队列内漏查」的偏差。
+ *
+ * `wait-for-pending-start` 是必要的第三态：`isRunning()` 在 spawn 之后立刻为 true，**早于**
+ * helper 报 ready。启动期间来一次聚焦，只看 isRunning 会判成「已经在跑、没事可做」直接返回；
+ * 而那次启动随后可能超时或起来就退（它的调用方只写一行日志），于是快捷键一直不生效、连那条
+ * 可行动的提示都不会有 —— 要等下一个 focus 事件。所以这里排个尾跑，等那次启动落定再看。
  */
-function recoverableNativeShortcut(): VoiceInputShortcut | null {
+type PendingShortcutRecoveryTarget =
+  | { kind: 'nothing-to-do' }
+  | { kind: 'wait-for-pending-start' }
+  | { kind: 'register'; shortcut: VoiceInputShortcut };
+
+function pendingNativeShortcutRecoveryTarget(): PendingShortcutRecoveryTarget {
   // 录制期间全局快捷键是刻意挂起的，这里注册会把它顶回来：用户正在按键试录就会真的触发
   // 一次语音输入，并发的 listener 启动还会把 Fn capture 顶掉。
-  if (modifierShortcutRecordingSessionIds.size > 0) return null;
+  if (modifierShortcutRecordingSessionIds.size > 0) return { kind: 'nothing-to-do' };
   const shortcut = voiceInputDataStore.getSettings().shortcut;
-  if (!shortcut || !voiceInputShortcutNeedsMacNativeListener(shortcut, process.platform)) return null;
-  if (macModifierShortcutListener.isRunning()) return null;
-  return shortcut;
+  if (!shortcut || !voiceInputShortcutNeedsMacNativeListener(shortcut, process.platform)) {
+    return { kind: 'nothing-to-do' };
+  }
+  if (macModifierShortcutListener.isRunning()) {
+    const shortcutKey = stableVoiceInputShortcutKey(shortcut);
+    // 已经为这个快捷键注册成功、helper 也活着：真的没事可做。
+    if (registeredNativeShortcutKey === shortcutKey) return { kind: 'nothing-to-do' };
+    // 一个字都还没登记 = 有一次启动正在飞（见上）。并发再起一次没意义，等它落定。
+    if (registeredNativeShortcutKey === null) return { kind: 'wait-for-pending-start' };
+    // 登记的是另一个快捷键（存盘已经变了）：存盘才是权威，直接重注册。
+  }
+  return { kind: 'register', shortcut };
 }
 
 /**
@@ -728,7 +747,12 @@ async function recoverPendingNativeShortcutRegistration(): Promise<void> {
     return;
   }
   // 这里只是「值不值得往下走」的预筛。真正要注册的那个必须在队列里现读，见下。
-  if (!recoverableNativeShortcut()) return;
+  const target = pendingNativeShortcutRecoveryTarget();
+  if (target.kind === 'nothing-to-do') return;
+  if (target.kind === 'wait-for-pending-start') {
+    schedulePendingShortcutRecoveryRetry(PENDING_SHORTCUT_RECOVERY_MIN_INTERVAL_MS);
+    return;
+  }
   // preflight 每次都要起一个 helper 进程，而窗口聚焦事件很密集，必须限流。
   const now = Date.now();
   if (now - lastPendingShortcutRecoveryAt < PENDING_SHORTCUT_RECOVERY_MIN_INTERVAL_MS) {
@@ -761,9 +785,9 @@ async function recoverPendingNativeShortcutRegistration(): Promise<void> {
     // F16）。用 await 之前抓的那份，就会在用户的新变更之后把旧的修饰键注册回去 ——
     // 存盘和界面停在 F16，实际生效的却是旧那个。
     const result = await queueShortcutMutation(async () => {
-      const shortcut = recoverableNativeShortcut();
-      if (!shortcut) return null;
-      return setVoiceInputGlobalShortcut(shortcut);
+      const queued = pendingNativeShortcutRecoveryTarget();
+      if (queued.kind !== 'register') return null;
+      return setVoiceInputGlobalShortcut(queued.shortcut);
     });
     if (!result) {
       log.debug('pending native shortcut recovery skipped: settings changed while checking permission');

@@ -55,13 +55,21 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryAttemptRef = useRef(0);
   const recheckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * 已卸载标记。cleanup 只能清掉「那一刻已存在」的定时器,但卸载时若拉取仍 pending,
+   * 它之后 reject(例如撞上 scheduler readiness 的 30s 超时)会走 catch 再排一个新定时器
+   * —— 于是退避耗尽后每 30s 无限重试,把已卸载的 hook 一直留着、持续发无用 IPC/DB 读,
+   * 重挂载后还会叠加出多条轮询。所有排定时器的地方都必须先看这个标记。
+   * StrictMode 下 mount→unmount→mount,所以在 effect 开头重置。
+   */
+  const cancelledRef = useRef(false);
 
   const refresh = useCallback(async () => {
     const seq = refreshSeqRef.current + 1;
     refreshSeqRef.current = seq;
     try {
       const { runs, inflightRunIds } = await loadScheduleSidebarIndexSnapshot();
-      if (refreshSeqRef.current !== seq) return;
+      if (refreshSeqRef.current !== seq || cancelledRef.current) return;
 
       // 抑制标记的事件丢失自愈:这份列表是 scheduler 落库的权威 run 状态(且包含所有
       // 带 sessionId 的 run,没有 history limit),据它清掉「已终态」和「已不存在」的
@@ -113,6 +121,8 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
       log.warn('failed to build automation schedule session index', {
         error: error instanceof Error ? error.message : String(error),
       });
+      // 卸载后到达的 rejection 不再排新定时器,见 cancelledRef。
+      if (cancelledRef.current) return;
       // 见 REFRESH_RETRY_DELAYS_MS:这次拉取也是标记对账的载体,失败不能只 log。
       // 退避档位用尽后:仍有标记待对账就按最后一档持续重试(否则 scheduler / IPC / DB
       // 连续不可用超过三档窗口、且此后再无事件时,标记会永久残留);没有标记则停手,
@@ -137,6 +147,7 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
   refreshRef.current = refresh;
 
   useEffect(() => {
+    cancelledRef.current = false;
     void refresh();
     const off = window.electronAPI.maker.schedule.onEvent((raw) => {
       const event = raw as SchedulerEvent;
@@ -208,6 +219,7 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
     // (见 scheduleRunReadSync 模块注释)。
     const offReadSync = subscribeScheduleRunReadSync(() => void refresh());
     return () => {
+      cancelledRef.current = true;
       off();
       offReadSync();
       if (retryTimerRef.current !== null) {

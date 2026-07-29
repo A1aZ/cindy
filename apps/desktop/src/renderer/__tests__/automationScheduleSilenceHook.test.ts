@@ -417,6 +417,48 @@ describe('useAutomationScheduleSessionIndex marker reconciliation', () => {
     }
   });
 
+  /**
+   * 回归(codex review P1):卸载时拉取仍 pending,它之后 reject(如撞上 scheduler readiness
+   * 的 30s 超时)会走 catch 再排新定时器 —— cleanup 只清得掉「那一刻已存在」的定时器。有
+   * 标记时退避耗尽后会每 30s 无限重试,拖着已卸载的 hook 持续发无用 IPC/DB 读。
+   */
+  it('does not schedule any retry after the hook unmounts', async () => {
+    vi.useFakeTimers();
+    try {
+      let rejectPending!: (err: Error) => void;
+      const listSidebarIndexRuns = vi.fn(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectPending = reject;
+          }),
+      );
+      vi.stubGlobal('electronAPI', {
+        maker: { schedule: { listSidebarIndexRuns, onEvent: vi.fn(() => () => undefined) } },
+        notificationMarkSessionAttention: vi.fn().mockResolvedValue(undefined),
+        notificationClearSessionAttention: vi.fn().mockResolvedValue(undefined),
+      });
+      // 留一个标记：否则退避耗尽后本来就会停手，测不出问题。
+      markNextSessionDoneSilenced('run-x', 'session-1');
+
+      const { unmount } = renderHook(() => useAutomationScheduleSessionIndex());
+      unmount();
+
+      // 卸载之后 pending 的那次拉取才失败。
+      await act(async () => {
+        rejectPending(new Error('scheduler not ready'));
+        await Promise.resolve();
+      });
+      // 远超所有退避档位：不该再有任何一次拉取。
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120_000);
+      });
+
+      expect(listSidebarIndexRuns).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps markers whose run is still in flight', async () => {
     stubApiWithRuns([indexRun({ runId: 'run-live', status: 'running' })], ['run-live']);
     markNextSessionDoneSilenced('run-live', 'session-1');

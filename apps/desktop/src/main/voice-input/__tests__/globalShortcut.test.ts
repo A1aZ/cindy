@@ -57,8 +57,12 @@ const mocks = vi.hoisted(() => {
   const requestInputMonitoring = vi.fn();
   const assertTrustedAppRenderer = vi.fn();
   const updateSettings = vi.fn();
+  // 存盘里的快捷键。global-shortcut:set 只负责「让运行期对上存盘」,所以非 null 的同步
+  // 必须与它一致 —— 用例要先声明存盘状态,再同步,跟 renderer 的真实用法一致。
+  let storedShortcut: VoiceInputShortcut | null = null;
+  const setStoredShortcut = (shortcut: VoiceInputShortcut | null): void => { storedShortcut = shortcut; };
   // 显式标注返回类型:不标的话会被推成 { shortcut: null },用例里塞真快捷键就编译不过。
-  const getSettings = vi.fn((): { shortcut: VoiceInputShortcut | null } => ({ shortcut: null }));
+  const getSettings = vi.fn((): { shortcut: VoiceInputShortcut | null } => ({ shortcut: storedShortcut }));
   // app.on 的回调要能被用例触发:授权兜底恢复挂在 browser-window-focus 上。
   const appListeners = new Map<string, (...args: unknown[]) => void>();
   // 闸只读 isDestroyed / webContents / mainFrame，没必要拼一整个 BrowserWindow，所以
@@ -100,6 +104,7 @@ const mocks = vi.hoisted(() => {
     listenerOptions,
     updateSettings,
     getSettings,
+    setStoredShortcut,
     appListeners,
     registerShortcut,
   };
@@ -222,8 +227,8 @@ describe('voice input global shortcut registration', () => {
     mocks.isSecondaryAppWindow.mockReturnValue(false);
     mocks.secondaryAppWindowWebContents.once.mockReset();
     mocks.mainWindow.webContents.once.mockReset();
-    mocks.getSettings.mockReset();
-    mocks.getSettings.mockReturnValue({ shortcut: null });
+    mocks.getSettings.mockClear();
+    mocks.setStoredShortcut(null);
     mocks.appListeners.clear();
     mocks.updateSettings.mockReset();
     mocks.updateSettings.mockImplementation((patch: unknown) => ({ shortcut: null, ...(patch as object) }));
@@ -258,6 +263,7 @@ describe('voice input global shortcut registration', () => {
       },
     };
 
+    mocks.setStoredShortcut(f16Shortcut);
     await setShortcut?.({}, f16Shortcut);
 
     expect(mocks.modifierSetShortcut).not.toHaveBeenCalled();
@@ -292,6 +298,7 @@ describe('voice input global shortcut registration', () => {
       },
     };
 
+    mocks.setStoredShortcut(fnShortcut);
     await setShortcut?.({}, fnShortcut);
     await setShortcut?.({}, fnShortcut);
 
@@ -321,6 +328,7 @@ describe('voice input global shortcut registration', () => {
 
     mocks.modifierIsRunning.mockReturnValueOnce(false).mockReturnValueOnce(false);
 
+    mocks.setStoredShortcut(fnShortcut);
     await setShortcut?.({}, fnShortcut);
     await setShortcut?.({}, fnShortcut);
 
@@ -346,8 +354,10 @@ describe('voice input global shortcut registration', () => {
       modifiers: { meta: false, ctrl: false, alt: false, shift: false, fn: false },
     };
 
+    mocks.setStoredShortcut(first);
     await setShortcut?.({}, first);
     mocks.registerShortcut.mockReturnValueOnce(false);
+    mocks.setStoredShortcut(replacement);
     const result = await setShortcut?.({}, replacement);
 
     expect(result).toMatchObject({ ok: false });
@@ -372,6 +382,7 @@ describe('voice input global shortcut registration', () => {
       const { registerGlobalVoiceInputIpc } = await import('../global.js');
       registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
+      mocks.setStoredShortcut(bareRightOption);
       const result = await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
 
       expect(result).toMatchObject({ ok: false, errorCode: 'permission' });
@@ -398,6 +409,12 @@ describe('voice input global shortcut registration', () => {
       const { registerGlobalVoiceInputIpc } = await import('../global.js');
       registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
+      mocks.setStoredShortcut({
+        trigger: 'keyboard',
+        code: 'F16',
+        key: 'F16',
+        modifiers: { meta: false, ctrl: false, alt: false, shift: false, fn: false },
+      });
       await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, {
         trigger: 'keyboard',
         code: 'F16',
@@ -464,7 +481,7 @@ describe('voice input global shortcut registration', () => {
 
       it('re-registers a pending native shortcut when a window regains focus after the grant', async () => {
         setPlatform('darwin');
-        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.setStoredShortcut(bareRightOption);
         mocks.modifierIsRunning.mockReturnValue(false);
         const { registerGlobalVoiceInputIpc } = await import('../global.js');
         registerGlobalVoiceInputIpc(mocks.ipcDeps);
@@ -478,7 +495,7 @@ describe('voice input global shortcut registration', () => {
       // 必须先看快照再决定。
       it('does not start the helper on focus while the permission is still denied', async () => {
         setPlatform('darwin');
-        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.setStoredShortcut(bareRightOption);
         mocks.modifierIsRunning.mockReturnValue(false);
         mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
         const { registerGlobalVoiceInputIpc } = await import('../global.js');
@@ -494,7 +511,7 @@ describe('voice input global shortcut registration', () => {
       // 却是旧那个。所以要注册的那个必须在队列里现读现校验。
       it('re-reads the stored shortcut inside the queue instead of using the pre-await snapshot', async () => {
         setPlatform('darwin');
-        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.setStoredShortcut(bareRightOption);
         mocks.modifierIsRunning.mockReturnValue(false);
         // preflight 卡住,期间用户改成了 F16(不需要 native listener)。
         let settlePreflight: (snapshot: unknown) => void = () => {};
@@ -508,13 +525,11 @@ describe('voice input global shortcut registration', () => {
         onFocus?.();
         await new Promise((resolve) => { setImmediate(resolve); });
 
-        mocks.getSettings.mockReturnValue({
-          shortcut: {
-            trigger: 'keyboard',
-            code: 'F16',
-            key: 'F16',
-            modifiers: { meta: false, ctrl: false, alt: false, shift: false, fn: false },
-          },
+        mocks.setStoredShortcut({
+          trigger: 'keyboard',
+          code: 'F16',
+          key: 'F16',
+          modifiers: { meta: false, ctrl: false, alt: false, shift: false, fn: false },
         });
         settlePreflight({ ok: true, status: 'granted' });
         await new Promise((resolve) => { setImmediate(resolve); });
@@ -526,7 +541,7 @@ describe('voice input global shortcut registration', () => {
       // 「授权后自动生效」之后什么都没发生、也无处得知,所以要推给常挂载的 renderer。
       it('pushes a recovery failure to the renderer when the helper still cannot start', async () => {
         setPlatform('darwin');
-        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.setStoredShortcut(bareRightOption);
         mocks.modifierIsRunning.mockReturnValue(false);
         mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'spawn ENOENT' });
         const { registerGlobalVoiceInputIpc } = await import('../global.js');
@@ -542,7 +557,7 @@ describe('voice input global shortcut registration', () => {
       // 语音输入,并发的 listener 启动还会把 Fn capture 顶掉。
       it('rechecks the recording state inside the queue, not only before the preflight', async () => {
         setPlatform('darwin');
-        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.setStoredShortcut(bareRightOption);
         mocks.modifierIsRunning.mockReturnValue(false);
         let settlePreflight: (snapshot: unknown) => void = () => {};
         mocks.inputMonitoringSnapshot.mockImplementationOnce(
@@ -569,7 +584,7 @@ describe('voice input global shortcut registration', () => {
       // 订阅者、推送就没了。状态必须留在 main 等 renderer 来取,取走才清。
       it('keeps the recovery failure pending until a renderer consumes it', async () => {
         setPlatform('darwin');
-        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.setStoredShortcut(bareRightOption);
         mocks.modifierIsRunning.mockReturnValue(false);
         mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'spawn ENOENT' });
         const { registerGlobalVoiceInputIpc } = await import('../global.js');
@@ -588,7 +603,7 @@ describe('voice input global shortcut registration', () => {
       // 后台、被挡住的副窗口就可能吞掉这唯一一次提示,用户正看着的窗口反而什么都没有。
       it('lets each renderer consume the failure once instead of clearing it globally', async () => {
         setPlatform('darwin');
-        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.setStoredShortcut(bareRightOption);
         mocks.modifierIsRunning.mockReturnValue(false);
         mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'spawn ENOENT' });
         const { registerGlobalVoiceInputIpc } = await import('../global.js');
@@ -610,7 +625,7 @@ describe('voice input global shortcut registration', () => {
         setTimeoutSpy = null;
         vi.useFakeTimers();
         try {
-          mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+          mocks.setStoredShortcut(bareRightOption);
           mocks.modifierIsRunning.mockReturnValue(false);
           mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
           const { registerGlobalVoiceInputIpc } = await import('../global.js');
@@ -638,7 +653,7 @@ describe('voice input global shortcut registration', () => {
       // 已保存的全局快捷键装回去, 用户按键试录会真的触发语音输入。
       it('still treats recording as active after a permission-blocked capture start', async () => {
         setPlatform('darwin');
-        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.setStoredShortcut(bareRightOption);
         mocks.modifierIsRunning.mockReturnValue(false);
         // capture 因缺权限起不来。
         mocks.modifierStartKeyCapture.mockResolvedValue({
@@ -666,7 +681,7 @@ describe('voice input global shortcut registration', () => {
       // 的「重启 Cindy 再试」。
       it('clears a stale recovery failure once the user changes the shortcut', async () => {
         setPlatform('darwin');
-        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.setStoredShortcut(bareRightOption);
         mocks.modifierIsRunning.mockReturnValue(false);
         mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'spawn ENOENT' });
         const { registerGlobalVoiceInputIpc } = await import('../global.js');
@@ -695,7 +710,7 @@ describe('voice input global shortcut registration', () => {
         setTimeoutSpy = null;
         vi.useFakeTimers();
         try {
-          mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+          mocks.setStoredShortcut(bareRightOption);
           mocks.modifierIsRunning.mockReturnValue(false);
           // 第一次检查卡住,由用例决定它何时返回(且返回的是授权前那个 denied)。
           let settleFirstPreflight: (snapshot: unknown) => void = () => {};
@@ -734,7 +749,7 @@ describe('voice input global shortcut registration', () => {
       // 会真的触发一次语音输入。
       it('does not re-register while a shortcut recording is in progress', async () => {
         setPlatform('darwin');
-        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.setStoredShortcut(bareRightOption);
         mocks.modifierIsRunning.mockReturnValue(false);
         const { registerGlobalVoiceInputIpc } = await import('../global.js');
         registerGlobalVoiceInputIpc(mocks.ipcDeps);
@@ -777,6 +792,7 @@ describe('voice input global shortcut registration', () => {
       const { registerGlobalVoiceInputIpc } = await import('../global.js');
       registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
+      mocks.setStoredShortcut(bareRightOption);
       const result = await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
 
       expect(result).toMatchObject({ ok: false, errorCode: 'failed' });
@@ -875,6 +891,73 @@ describe('voice input global shortcut registration', () => {
       });
 
       expect(result).toMatchObject({ ok: false, errorCode: 'permission' });
+    });
+
+    // useVoiceInputSettings 里有个 effect:settings.shortcut 一变就 sync 一次,每个挂载它的
+    // 窗口都会回声。两次提交交错时,先落地那次广播的是**旧**快捷键,后台窗口(渲染被节流、
+    // effect 跑得晚)的回声就可能排在更晚那次提交之后,把旧的重新注册上 —— 存盘和界面显示
+    // 新的、实际生效的是旧那个。
+    describe('stale global shortcut sync echoes', () => {
+      const f16: VoiceInputShortcut = {
+        trigger: 'keyboard',
+        code: 'F16',
+        key: 'F16',
+        modifiers: { meta: false, ctrl: false, alt: false, shift: false, fn: false },
+      };
+
+      it('ignores a non-null sync that does not match the persisted shortcut', async () => {
+        setPlatform('darwin');
+        // 存盘里已经是用户最后选的 F16。
+        mocks.setStoredShortcut(f16);
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        // 迟到的回声还带着旧的裸右 Option。
+        const result = await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
+
+        expect(result).toMatchObject({ ok: true });
+        expect(mocks.modifierSetShortcut).not.toHaveBeenCalled();
+      });
+
+      it('still applies a sync that matches the persisted shortcut', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
+
+        expect(mocks.modifierSetShortcut).toHaveBeenCalledWith(bareRightOption);
+      });
+
+      // 挂起(null)是这条 channel 的另一个正当用途,永远放行 —— 录制期就靠它。
+      it('always applies a suspend request', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        const result = await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, null);
+
+        expect(result).toMatchObject({ ok: true });
+        expect(mocks.modifierStop).toHaveBeenCalled();
+      });
+
+      // 录制期间是刻意挂起的:别的窗口的回声即便与存盘一致,这时也不能把它装回来。
+      it('ignores a matching sync while a shortcut recording is in progress', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        const start = mocks.handlers.get('voice-input:modifier-shortcut-recording:start');
+        await start?.({ sender: { id: mocks.focusedWindow.webContents.id, once: vi.fn() } });
+        mocks.modifierSetShortcut.mockClear();
+
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
+
+        expect(mocks.modifierSetShortcut).not.toHaveBeenCalled();
+      });
     });
 
     // 这两条 handler 会弹系统级授权窗。语音浮窗、词典 toast、右侧栏窗口、Ghost 面板装的

@@ -299,6 +299,20 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
     );
   });
 
+  it('keeps the worktree control visible for a detached HEAD checkout', () => {
+    // currentBranch=null 是合法的 detached HEAD，不等于“不是 git 仓库”。
+    // 未勾选时仍展示 HEAD，用户才能从这里开启 worktree / 选择源分支。
+    expect(worktreeChipsRowSource).toContain(
+      ": (currentBranch ?? 'HEAD');",
+    );
+    expect(worktreeChipsRowSource).toContain(
+      'const showBranchChip = !advancedHidden && !!detect.data?.isGitRepo;',
+    );
+    expect(worktreeChipsRowSource).not.toContain(
+      'const showBranchChip = !advancedHidden && !!branchLabel',
+    );
+  });
+
   it('aligns the real sidebar colors and user capsule with the CREATE AGENT Figma frame', () => {
     expect(sidebarTopNavSource).toContain('text-[var(--sidebar-nav-text)]');
     expect(vendorIconSource).toContain('text-[hsl(var(--sidebar-muted))]');

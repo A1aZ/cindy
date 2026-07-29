@@ -56,10 +56,14 @@ export interface PrecreatedWorktreeRecoveryResult {
   recovered: number;
   deferred: number;
   retained: number;
+  storageReadable: boolean;
 }
 
 let mutationQueue: Promise<void> = Promise.resolve();
 const registrationInFlight = new Map<string, number>();
+// AsyncStorage 写失败时仍保留当前进程的 cleanup obligation。它不是跨进程
+// 持久化替代品；作用是让本进程重连恢复、并阻止下一次创建继续制造孤儿。
+const volatileLedgers = new Map<string, PendingPrecreatedWorktree[]>();
 
 function markRegistrationInFlight(sessionId: string): void {
   registrationInFlight.set(
@@ -109,6 +113,27 @@ function fnv1a(value: string): string {
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }
   return hash.toString(16).padStart(8, '0');
+}
+
+function volatileRecordsForAccount(
+  accountId: string,
+): PendingPrecreatedWorktree[] {
+  const key = storageKeyForAccount(accountId);
+  return key ? (volatileLedgers.get(key) ?? []) : [];
+}
+
+function replaceVolatileRecords(
+  accountId: string,
+  records: readonly PendingPrecreatedWorktree[],
+): void {
+  const key = storageKeyForAccount(accountId);
+  if (!key) return;
+  const normalized = normalizeRecords(records);
+  if (normalized.length === 0) {
+    volatileLedgers.delete(key);
+  } else {
+    volatileLedgers.set(key, normalized);
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -168,16 +193,36 @@ function normalizeRecords(
 async function readRecordsUnserialized(
   accountId: string,
   now = Date.now(),
-): Promise<PendingPrecreatedWorktree[]> {
+): Promise<{
+  records: PendingPrecreatedWorktree[];
+  storageReadable: boolean;
+}> {
   const key = storageKeyForAccount(accountId);
-  if (!key) return [];
-  const raw = await AsyncStorage.getItem(key).catch(() => null);
-  if (!raw) return [];
+  if (!key) return { records: [], storageReadable: false };
+  let raw: string | null;
   try {
-    return normalizeRecords(JSON.parse(raw), now);
+    raw = await AsyncStorage.getItem(key);
   } catch {
-    return [];
+    return {
+      records: normalizeRecords(volatileRecordsForAccount(accountId), now),
+      storageReadable: false,
+    };
   }
+  let persisted: PendingPrecreatedWorktree[] = [];
+  if (raw) {
+    try {
+      persisted = normalizeRecords(JSON.parse(raw), now);
+    } catch {
+      await AsyncStorage.removeItem(key).catch(() => undefined);
+    }
+  }
+  return {
+    records: normalizeRecords(
+      [...volatileRecordsForAccount(accountId), ...persisted],
+      now,
+    ),
+    storageReadable: true,
+  };
 }
 
 async function writeRecordsUnserialized(
@@ -205,28 +250,28 @@ async function writeRecordsUnserialized(
 export async function listPendingPrecreatedWorktrees(
   accountId: string,
 ): Promise<PendingPrecreatedWorktree[]> {
+  const { records } = await readPendingPrecreatedWorktreeLedger(accountId);
+  return records;
+}
+
+async function readPendingPrecreatedWorktreeLedger(
+  accountId: string,
+): Promise<{
+  records: PendingPrecreatedWorktree[];
+  storageReadable: boolean;
+}> {
   return enqueueMutation(async () => {
-    const key = storageKeyForAccount(accountId);
-    if (!key) return [];
-    const raw = await AsyncStorage.getItem(key).catch(() => null);
-    if (!raw) return [];
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      await AsyncStorage.removeItem(key).catch(() => undefined);
-      return [];
-    }
-    const normalized = normalizeRecords(parsed);
-    // 读侧顺手清理过期/损坏条目；失败不影响后续重试。
-    const canonical = JSON.stringify({
-      version: STORAGE_VERSION,
+    const {
       records: normalized,
-    });
-    if (raw !== canonical) {
+      storageReadable,
+    } = await readRecordsUnserialized(accountId);
+    replaceVolatileRecords(accountId, normalized);
+    // 读侧顺手清理过期/损坏条目，并把上次因写盘失败只留在内存的记录
+    // 重新持久化；getItem 本身失败时绝不以“空账本”覆盖未知的磁盘真值。
+    if (storageReadable) {
       await writeRecordsUnserialized(accountId, normalized);
     }
-    return normalized;
+    return { records: normalized, storageReadable };
   });
 }
 
@@ -235,15 +280,28 @@ export async function registerPendingPrecreatedWorktree(
   record: PendingPrecreatedWorktree,
 ): Promise<boolean> {
   const normalized = coerceRecord(record, Date.now());
-  if (!normalized) return false;
+  if (!storageKeyForAccount(accountId) || !normalized) return false;
+  // 必须先于任何 await 写内存镜像：即使 AsyncStorage.setItem 与紧随其后的
+  // discard 同时失败，本进程仍能在重连 / 下次发送时找到这份 obligation。
+  replaceVolatileRecords(accountId, [
+    normalized,
+    ...volatileRecordsForAccount(accountId).filter(
+      (item) => item.sessionId !== normalized.sessionId,
+    ),
+  ]);
   markRegistrationInFlight(normalized.sessionId);
   try {
     return await enqueueMutation(async () => {
-      const current = await readRecordsUnserialized(accountId);
+      const {
+        records: current,
+        storageReadable,
+      } = await readRecordsUnserialized(accountId);
       const next = [
         normalized,
         ...current.filter((item) => item.sessionId !== normalized.sessionId),
       ].slice(0, MAX_RECORDS);
+      replaceVolatileRecords(accountId, next);
+      if (!storageReadable) return false;
       return writeRecordsUnserialized(accountId, next);
     });
   } finally {
@@ -281,14 +339,18 @@ export async function forgetPendingPrecreatedWorktree(
   },
 ): Promise<void> {
   await enqueueMutation(async () => {
-    const current = await readRecordsUnserialized(accountId);
+    const {
+      records: current,
+      storageReadable,
+    } = await readRecordsUnserialized(accountId);
     const next = current.filter(
       (item) =>
         item.sessionId !== target.sessionId ||
         item.path !== target.path ||
         (target.createdAt !== undefined && item.createdAt !== target.createdAt),
     );
-    if (next.length !== current.length) {
+    replaceVolatileRecords(accountId, next);
+    if (storageReadable && next.length !== current.length) {
       await writeRecordsUnserialized(accountId, next);
     }
   });
@@ -333,12 +395,14 @@ export async function recoverPendingPrecreatedWorktrees(
   accountId: string,
   deps: PrecreatedWorktreeRecoveryDeps,
 ): Promise<PrecreatedWorktreeRecoveryResult> {
-  const records = await listPendingPrecreatedWorktrees(accountId);
+  const ledger = await readPendingPrecreatedWorktreeLedger(accountId);
+  const records = ledger.records;
   const result: PrecreatedWorktreeRecoveryResult = {
     attempted: 0,
     recovered: 0,
     deferred: 0,
     retained: 0,
+    storageReadable: ledger.storageReadable,
   };
   for (const record of records) {
     if (deps.shouldDefer?.(record)) {
@@ -395,4 +459,5 @@ export const __testing = {
   normalizeRecords,
   coerceRecord,
   drainMutations: () => mutationQueue,
+  resetVolatileLedgers: () => volatileLedgers.clear(),
 };

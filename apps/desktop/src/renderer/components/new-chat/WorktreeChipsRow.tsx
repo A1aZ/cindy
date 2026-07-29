@@ -183,12 +183,12 @@ export function WorktreeChipsRow({
   const currentBranch = detect.data?.currentBranch ?? null;
   // worktree ON 显源分支,列表加载失败/未返回时回退 'HEAD'(与发送管线的源分支
   // 回退值一致,表示当前 checkout 而不是猜测 main)—— ON 状态下 chip 是唯一的
-  // 分支入口,绝不能因加载失败而消失。OFF 显仓库当前 HEAD 分支,空(detached /
-  // 未探测)则不出 chip。
+  // 分支入口,绝不能因加载失败而消失。OFF 显仓库当前 HEAD 分支；detached HEAD
+  // 没有分支名时仍显示 HEAD，让默认未勾选用户保有开启 worktree 的入口。
   const branchLabel = effectiveWorktreeEnabled
     ? sourceBranch || branches.current || 'HEAD'
-    : (currentBranch ?? '');
-  const showBranchChip = !advancedHidden && !!detect.data?.isGitRepo && branchLabel !== '';
+    : (currentBranch ?? 'HEAD');
+  const showBranchChip = !advancedHidden && !!detect.data?.isGitRepo;
   // 分支菜单永远可点(worktree 开不了的仓库除外——已在 worktree 内等场景选分支
   // 无法产生任何效果,菜单保持只读展示)。
   const branchInteractive = !disabled && (effectiveWorktreeEnabled || !switchDisabled);

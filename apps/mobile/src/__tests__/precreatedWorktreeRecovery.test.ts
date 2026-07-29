@@ -35,11 +35,23 @@ const RECORD = {
 
 describe('precreated worktree recovery ledger', () => {
   beforeEach(async () => {
-    storage.clear();
-    asyncStorage.getItem.mockClear();
-    asyncStorage.setItem.mockClear();
-    asyncStorage.removeItem.mockClear();
     await __testing.drainMutations();
+    storage.clear();
+    asyncStorage.getItem.mockReset();
+    asyncStorage.setItem.mockReset();
+    asyncStorage.removeItem.mockReset();
+    asyncStorage.getItem.mockImplementation(
+      async (key: string) => storage.get(key) ?? null,
+    );
+    asyncStorage.setItem.mockImplementation(
+      async (key: string, value: string) => {
+        storage.set(key, value);
+      },
+    );
+    asyncStorage.removeItem.mockImplementation(async (key: string) => {
+      storage.delete(key);
+    });
+    __testing.resetVolatileLedgers();
   });
 
   it('persists records per account and removes only the matching record', async () => {
@@ -97,6 +109,66 @@ describe('precreated worktree recovery ledger', () => {
     expect(isPrecreatedWorktreeRegistrationInFlight(RECORD.sessionId)).toBe(
       false,
     );
+  });
+
+  it('retains an in-process record when AsyncStorage persistence fails', async () => {
+    asyncStorage.setItem.mockRejectedValueOnce(new Error('disk unavailable'));
+
+    await expect(
+      registerPendingPrecreatedWorktree(ACCOUNT, RECORD),
+    ).resolves.toBe(false);
+    expect(storage.size).toBe(0);
+
+    // 下一次显式读取从 volatile ledger 找回 obligation，并在存储恢复后补写。
+    await expect(listPendingPrecreatedWorktrees(ACCOUNT)).resolves.toEqual([
+      RECORD,
+    ]);
+    expect(storage.size).toBe(1);
+  });
+
+  it('does not overwrite an unknown persisted ledger when AsyncStorage reads fail', async () => {
+    await registerPendingPrecreatedWorktree(ACCOUNT, RECORD);
+    __testing.resetVolatileLedgers();
+    asyncStorage.getItem.mockRejectedValueOnce(new Error('read unavailable'));
+
+    await expect(listPendingPrecreatedWorktrees(ACCOUNT)).resolves.toEqual([]);
+    expect(storage.size).toBe(1);
+    expect(asyncStorage.removeItem).not.toHaveBeenCalled();
+
+    await expect(listPendingPrecreatedWorktrees(ACCOUNT)).resolves.toEqual([
+      RECORD,
+    ]);
+  });
+
+  it('reports an unreadable ledger so callers can block another worktree', async () => {
+    await registerPendingPrecreatedWorktree(ACCOUNT, RECORD);
+    __testing.resetVolatileLedgers();
+    asyncStorage.getItem.mockRejectedValueOnce(new Error('read unavailable'));
+    const discardPrecreated = vi.fn();
+
+    await expect(
+      recoverPendingPrecreatedWorktrees(ACCOUNT, {
+        openLink: vi.fn(),
+        discardPrecreated,
+        isSessionClaimed: vi.fn(),
+        sleep: async () => undefined,
+      }),
+    ).resolves.toMatchObject({
+      attempted: 0,
+      recovered: 0,
+      retained: 0,
+      storageReadable: false,
+    });
+    expect(discardPrecreated).not.toHaveBeenCalled();
+    expect(storage.size).toBe(1);
+  });
+
+  it('refuses to register a record without an account namespace', async () => {
+    await expect(
+      registerPendingPrecreatedWorktree('', RECORD),
+    ).resolves.toBe(false);
+    await expect(listPendingPrecreatedWorktrees('')).resolves.toEqual([]);
+    expect(storage.size).toBe(0);
   });
 
   it('recovers successfully and defers records owned by a live creation task', async () => {

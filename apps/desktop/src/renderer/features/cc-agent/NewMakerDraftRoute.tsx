@@ -136,7 +136,12 @@ import { isGlobalDropIntercepted } from '@/lib/globalDropIntercept';
 import { classifyUnclassifiedDroppedItems, getDroppedFileItems } from '@/lib/fileDrop';
 import { createLogger } from '@/lib/logger';
 import { getRemoteWorkingDirErrorMessage } from './remoteWorkingDirErrors';
-import { createRemoteSessionWithPrecreatedWorktree } from './remotePrecreatedWorktree';
+import {
+  createRemoteSessionWithPrecreatedWorktree,
+  isRemotePrecreatedWorktreeCleanupPendingError,
+  recoverPendingRemotePrecreatedWorktrees,
+  RemotePrecreatedWorktreeCleanupPendingError,
+} from './remotePrecreatedWorktree';
 import { matchNavigationCommandName, tryHandleNavigationCommand } from '@/lib/navigationCommands';
 import {
   useAgentCapabilities,
@@ -1530,6 +1535,8 @@ export function NewMakerDraftRoute() {
           if (isDeviceLinkDraft && effectiveDeviceLinkDeviceId && effectiveWorkingDir) {
             const deviceId = effectiveDeviceLinkDeviceId;
             const deviceName = effectiveDeviceLinkDeviceName ?? deviceId;
+            const invokeRemote = (channel: string, args: unknown[]) =>
+              window.electronAPI.deviceLink.invoke(deviceId, channel, args);
             const wt = selectedWorktree;
             let remoteWorkingDir = effectiveWorkingDir;
             let presetSessionId: string | undefined;
@@ -1538,6 +1545,18 @@ export function NewMakerDraftRoute() {
             // 勾选但环境不合格 / 探测未回时**静默按普通方式启动**,不报错不改勾选记忆
             // ——状态只属于用户,合格性只影响这一次是否真的走 worktree(2026-07-29 裁决)。
             if (wt.enabled && wt.baseRepo) {
+              // 上次两步创建若在 create / probe / discard 都断线后失败，本地账本仍
+              // 承担 cleanup obligation。新建下一份前先恢复；无法确认回收/认领时
+              // 硬挡本次 worktree:create，避免每次重试生成一个新的受管目录。
+              const recovery = await recoverPendingRemotePrecreatedWorktrees({
+                deviceId,
+                invoke: invokeRemote,
+              });
+              // 账本不可读时磁盘上是否还有旧 obligation 未知，也必须 fail
+              // closed；否则一次暂时的 localStorage 故障会绕过同设备串行回收。
+              if (!recovery.storageReadable || recovery.retained > 0) {
+                throw new RemotePrecreatedWorktreeCleanupPendingError();
+              }
               const baseRepo = wt.baseRepo;
               let name = wt.name.trim();
               if (!name) name = `auto-${Date.now().toString(36).slice(-6)}`;
@@ -1601,10 +1620,9 @@ export function NewMakerDraftRoute() {
               // 使新远程会话首个请求即按所选来源路由(P2)。
               providerId,
             });
-            const invokeRemote = (channel: string, args: unknown[]) =>
-              window.electronAPI.deviceLink.invoke(deviceId, channel, args);
             const remoteSessionId = presetSessionId && precreatedWorktreePath
               ? await createRemoteSessionWithPrecreatedWorktree({
+                  deviceId,
                   sessionId: presetSessionId,
                   path: precreatedWorktreePath,
                   createArgs: remoteCreateArgs,
@@ -1986,7 +2004,12 @@ export function NewMakerDraftRoute() {
         } catch (err) {
           log.error('[draft send]', err);
           toast.error(
-            getRemoteWorkingDirErrorMessage(err, t) ?? t('ccAgent.draft.createSessionFailed'),
+            isRemotePrecreatedWorktreeCleanupPendingError(err)
+              ? t('ccAgent.draft.remoteWorktreeCleanupPending')
+              : (
+                  getRemoteWorkingDirErrorMessage(err, t)
+                  ?? t('ccAgent.draft.createSessionFailed')
+                ),
           );
         } finally {
           setWtCreating(false);

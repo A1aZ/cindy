@@ -5306,6 +5306,7 @@
     },
     "draft": {
       "createSessionFailed": "세션 생성에 실패했습니다. 다시 시도하세요",
+      "remoteWorktreeCleanupPending": "이전 원격 worktree가 아직 정리 대기 중입니다. 기기를 다시 연결한 후 재시도하세요.",
       "deviceStillLoading": "원격 기기가 아직 로딩 중입니다. 잠시 기다려 주세요",
       "sessionInactive": "세션이 더 이상 활성 상태가 아닙니다",
       "remoteProjectBanner": "{{device}}의 {{project}}에서 새 세션 만들기"

@@ -154,10 +154,14 @@ import { useTranslation } from 'react-i18next';
 import {
   createNewSessionId,
   drainStashedNewSessionDraft,
+  getNewSessionCreationTask,
   startNewSessionCreation,
 } from '@/session/newSessionCreation';
 import {
+  forgetPendingPrecreatedWorktree,
   holdPrecreatedWorktreeRegistration,
+  isPrecreatedWorktreeRegistrationInFlight,
+  recoverPendingPrecreatedWorktrees,
   registerPendingPrecreatedWorktree,
 } from '@/session/precreatedWorktreeRecovery';
 import { prepareMobileQueuedSessionReferences } from '@/session/sessionReferences';
@@ -326,7 +330,13 @@ export default function NewRemoteSessionScreen() {
   const visualInitialDraft = MOBILE_VISUAL_MOCK_ENABLED ? readRouteString(params.visualDraft) : null;
   const router = useRouter();
   const auth = useAuth();
-  const { invoke, openLink, subscribe } = useDeviceLink();
+  const {
+    invoke,
+    openLink,
+    subscribe,
+    status: deviceLinkStatus,
+    connectionEpoch,
+  } = useDeviceLink();
   const routeDeviceFallback = useMemo<NewSessionDeviceOption | null>(
     () => routeDeviceId ? { deviceId: routeDeviceId, name: routeDeviceName || routeDeviceId } : null,
     [routeDeviceId, routeDeviceName],
@@ -1532,12 +1542,12 @@ export default function NewRemoteSessionScreen() {
 
   // —— worktree 勾选播种:选中设备后读工作端 get-new-maker-defaults 的 worktreeEnabled
   // (vendor 无关,agentKind 只是通道入参,经 ref 读当前值,不因切 agent 重播)。
-  // 设备切换重新播种;老被控端 / 缺字段 → 未勾选。
+  // 设备切换 / 链路重连重新播种;老被控端 / 缺字段 → 未勾选。
   const worktreeSeedAgentKindRef = useRef(draft.agentKind);
   worktreeSeedAgentKindRef.current = draft.agentKind;
   useEffect(() => {
     const seq = ++worktreeSeedSeqRef.current;
-    if (!selectedDeviceId) return;
+    if (!selectedDeviceId || deviceLinkStatus !== 'online') return;
     const preferenceRevisionAtStart =
       remoteSessionStore.getNewMakerWorktreePreference(selectedDeviceId).revision;
     // 与上面 detect effect 同款:先建链再拉,包瞬态重试——app 后台恢复时 relay 常在
@@ -1558,16 +1568,24 @@ export default function NewRemoteSessionScreen() {
           seedWorktreeEnabled(defaults),
         );
       })
-      .catch(() => {
-        // 重试后仍失败(老被控端无通道 / 长断连)→ 按未勾选兜底(防误操作口径)。
+      .catch((error: unknown) => {
+        // 只有已确认的旧端通道不兼容才回落未勾选。断连 / 超时保留最后镜像；
+        // connectionEpoch 变化后 effect 会重拉，不能把工作端拥有的 true 静默抹掉。
         if (seq !== worktreeSeedSeqRef.current) return;
         if (
           remoteSessionStore.getNewMakerWorktreePreference(selectedDeviceId).revision
           !== preferenceRevisionAtStart
         ) return;
+        if (worktreeEligibilityFromError(error).status !== 'unsupported') return;
         remoteSessionStore.setNewMakerWorktreePreference(selectedDeviceId, false);
       });
-  }, [selectedDeviceId, maker, openLink]);
+  }, [
+    connectionEpoch,
+    deviceLinkStatus,
+    selectedDeviceId,
+    maker,
+    openLink,
+  ]);
 
   // 用户显式点击开关:本地翻转 + fire-and-forget 写穿工作端记忆(失败吞掉,仅本次生效)。
   // 资格不满足导致的禁用不会走到这里 —— 环境因素不抹掉用户偏好。
@@ -2492,6 +2510,51 @@ export default function NewRemoteSessionScreen() {
           name: selectedDeviceName || selectedDeviceId,
         },
       });
+      const worktreeAccountId = auth.user?.id?.trim() ?? '';
+      if (
+        effectiveDraft.workspaceKind === 'project'
+        && worktreeEnabled
+        && worktreeEligibility.status === 'eligible'
+      ) {
+        // 两步创建必须先有可归属的账号账本。不能先在工作端落盘，再发现本地
+        // 无法按账号持久化 cleanup obligation。
+        if (!worktreeAccountId) {
+          setError(t('session.new.worktreeRecoveryStateFailed'));
+          return;
+        }
+        const obligationOwnedByLiveTask = (sessionId: string) => (
+          getNewSessionCreationTask(sessionId) !== null
+          || isPrecreatedWorktreeRegistrationInFlight(sessionId)
+        );
+        // 本设备上一次未完成的 obligation 先恢复。其它设备记录、仍被正常创建
+        // task 认领的记录不参与本次阻塞；只有无 owner 且无法回收/确认的旧目录
+        // 会阻止继续创建第二份。
+        const recovery = await recoverPendingPrecreatedWorktrees(worktreeAccountId, {
+          openLink,
+          discardPrecreated: async (_deviceId, input) => (
+            maker.worktree.discardPrecreated(input)
+          ),
+          isSessionClaimed: async (_deviceId, pendingSessionId) => {
+            try {
+              const session = await maker.getSession(pendingSessionId);
+              return session?.id === pendingSessionId;
+            } catch {
+              return false;
+            }
+          },
+          shouldDefer: (record) => (
+            record.deviceId !== selectedDeviceId
+            || obligationOwnedByLiveTask(record.sessionId)
+          ),
+        });
+        if (
+          !recovery.storageReadable
+          || recovery.retained > 0
+        ) {
+          setError(t('session.new.worktreeCleanupPending'));
+          return;
+        }
+      }
       // —— 乐观创建:sessionId 手机端预生成(被控端 createSession 对 provided id
       // 幂等),点创建**立即**进入会话页;openLink / 鉴权 revalidate / createSession
       // / 首条消息 enqueue 全部由 newSessionCreation 模块级后台管线完成(本页
@@ -2529,22 +2592,38 @@ export default function NewRemoteSessionScreen() {
             originalWorkingDir: effectiveDraft.workingDir,
             createdAt,
           };
-          const accountId = auth.user?.id?.trim() ?? '';
           releasePrecreatedRegistration = holdPrecreatedWorktreeRegistration(sessionId);
-          const recoveryRecorded = await registerPendingPrecreatedWorktree(accountId, {
+          const recoveryRecorded = await registerPendingPrecreatedWorktree(worktreeAccountId, {
             sessionId,
             deviceId: selectedDeviceId,
             path: precreatedWorktree.path,
             createdAt,
           });
           if (!recoveryRecorded) {
-            // 没有持久恢复账本就不把两步流程交给后台：否则手机若在
-            // create-session 前被系统杀掉，只能等桌面下次启动对账。
-            await maker.worktree.discardPrecreated({
-              sessionId,
-              path: precreatedWorktree.path,
-            }).catch(() => undefined);
-            setError(t('session.new.worktreeRecoveryStateFailed'));
+            // register 已先留下 volatile ledger。持久写失败时立即补偿；成功则
+            // 清掉内存 obligation，失败则保留并由重连 / 下次发送先恢复。
+            let discarded = false;
+            try {
+              await maker.worktree.discardPrecreated({
+                sessionId,
+                path: precreatedWorktree.path,
+              });
+              discarded = true;
+              await forgetPendingPrecreatedWorktree(worktreeAccountId, {
+                sessionId,
+                path: precreatedWorktree.path,
+                createdAt,
+              });
+            } catch {
+              // volatile ledger 保留，不能吞掉后继续生成第二份 worktree。
+            }
+            setError(
+              t(
+                discarded
+                  ? 'session.new.worktreeRecoveryStateFailed'
+                  : 'session.new.worktreeCleanupPending',
+              ),
+            );
             return;
           }
           effectiveDraft = { ...effectiveDraft, workingDir: resp.meta.path };
@@ -2572,7 +2651,7 @@ export default function NewRemoteSessionScreen() {
         planModeArm: planModeCapability && planModeDraftOn,
         legacyPlanRestore,
         precreatedWorktree,
-        precreatedWorktreeAccountId: auth.user?.id?.trim() ?? '',
+        precreatedWorktreeAccountId: worktreeAccountId,
         // stale-ready 防护(review P1):缓存判 ready/unknown 也可能已过期。管线内
         // 与建链并行 revalidate;verdict 已是 unauthenticated 时上面刚现拉确认过,跳过。
         confirmUnauthenticated: agentAuthVerdict === 'unauthenticated'
@@ -2620,6 +2699,7 @@ export default function NewRemoteSessionScreen() {
     }
   }, [
     agentAuthVerdict,
+    auth.user?.id,
     confirmAgentUnauthenticated,
     selectedDeviceId,
     selectedDeviceName,

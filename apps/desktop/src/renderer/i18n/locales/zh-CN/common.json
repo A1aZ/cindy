@@ -5306,6 +5306,7 @@
     },
     "draft": {
       "createSessionFailed": "创建对话失败，请重试",
+      "remoteWorktreeCleanupPending": "上一次远程 worktree 仍待回收，请重新连接设备后再试。",
       "deviceStillLoading": "远程设备仍在加载中，请稍候",
       "sessionInactive": "对话已不再处于活跃状态",
       "remoteProjectBanner": "在 {{device}} 的 {{project}} 中新建对话"

@@ -5316,6 +5316,7 @@
     },
     "draft": {
       "createSessionFailed": "Failed to create session, please retry",
+      "remoteWorktreeCleanupPending": "The previous remote worktree is still awaiting cleanup. Reconnect the device and try again.",
       "deviceStillLoading": "Remote device is still loading, please wait",
       "sessionInactive": "Session is no longer active",
       "remoteProjectBanner": "New session in {{project}} on {{device}}"

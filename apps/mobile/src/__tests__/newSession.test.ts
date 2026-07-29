@@ -1019,6 +1019,9 @@ describe('new session worktree wiring (source locks)', () => {
 
   it('keeps the workstation-owned preference semantics (seed + explicit write-through)', () => {
     // 播种:openLink + 瞬态重试(app 后台恢复的重连窗口不得把工作端偏好静默播成未勾)。
+    expect(newSource).toContain(
+      "if (!selectedDeviceId || deviceLinkStatus !== 'online') return;",
+    );
     expect(newSource).toContain('return maker.getNewMakerDefaults(worktreeSeedAgentKindRef.current);');
     expect(newSource).toContain(
       'remoteSessionStore.getNewMakerWorktreePreference(selectedDeviceId).revision',
@@ -1029,8 +1032,74 @@ describe('new session worktree wiring (source locks)', () => {
     expect(newSource).toContain(
       'useRemoteNewMakerWorktreePreference(selectedDeviceId)',
     );
+    expect(newSource).toMatch(
+      /if \(worktreeEligibilityFromError\(error\)\.status !== 'unsupported'\) return;\s*remoteSessionStore\.setNewMakerWorktreePreference\(selectedDeviceId, false\);/,
+    );
+    expect(newSource).toMatch(
+      /\}, \[\s*connectionEpoch,\s*deviceLinkStatus,\s*selectedDeviceId,\s*maker,\s*openLink,\s*\]\);/,
+    );
     // 显式点击才写穿工作端记忆;写失败吞掉降级。
     expect(newSource).toContain('void maker.applyNewMakerWorktreePref(next).catch(() => undefined);');
+  });
+
+  it('settles an unowned cleanup obligation before creating another worktree', () => {
+    const recovery = newSource.indexOf(
+      'const recovery = await recoverPendingPrecreatedWorktrees(worktreeAccountId, {',
+    );
+    const pendingGuard = newSource.indexOf(
+      '!recovery.storageReadable',
+      recovery,
+    );
+    const sessionId = newSource.indexOf(
+      'const sessionId = createNewSessionId();',
+      pendingGuard,
+    );
+    const worktreeCreate = newSource.indexOf(
+      'maker.worktree.create(buildWorktreeCreateRequest({',
+      sessionId,
+    );
+
+    expect(recovery).toBeGreaterThan(-1);
+    expect(pendingGuard).toBeGreaterThan(recovery);
+    expect(sessionId).toBeGreaterThan(pendingGuard);
+    expect(worktreeCreate).toBeGreaterThan(sessionId);
+    expect(newSource.slice(recovery, pendingGuard)).toContain(
+      'record.deviceId !== selectedDeviceId',
+    );
+    expect(newSource.slice(pendingGuard, sessionId)).toContain(
+      'recovery.retained > 0',
+    );
+    expect(newSource.slice(pendingGuard, sessionId)).toContain(
+      "setError(t('session.new.worktreeCleanupPending'))",
+    );
+  });
+
+  it('records a volatile obligation before compensating an AsyncStorage failure', () => {
+    const remoteCreate = newSource.indexOf(
+      'maker.worktree.create(buildWorktreeCreateRequest({',
+    );
+    const register = newSource.indexOf(
+      'await registerPendingPrecreatedWorktree(worktreeAccountId',
+      remoteCreate,
+    );
+    const failedPersistence = newSource.indexOf(
+      'if (!recoveryRecorded)',
+      register,
+    );
+    const discard = newSource.indexOf(
+      'await maker.worktree.discardPrecreated({',
+      failedPersistence,
+    );
+
+    expect(register).toBeGreaterThan(remoteCreate);
+    expect(failedPersistence).toBeGreaterThan(register);
+    expect(discard).toBeGreaterThan(failedPersistence);
+    expect(newSource.slice(failedPersistence, discard)).toContain(
+      'let discarded = false;',
+    );
+    expect(newSource.slice(discard, discard + 900)).toContain(
+      "'session.new.worktreeCleanupPending'",
+    );
   });
 
   it('binds eligibility to device/cwd and carries pre-created cleanup metadata into the pipeline', () => {

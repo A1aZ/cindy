@@ -160,7 +160,8 @@
     "worktreeAlreadyInWorktree": "すでに worktree 内です。ネストは禁止です",
     "worktreeDetectFailed": "ディレクトリ環境を確認できません。後でディレクトリを選び直してもう一度お試しください",
     "worktreeCreateFailed": "worktree の作成に失敗しました：{{message}}",
-    "worktreeRecoveryStateFailed": "worktree の復旧状態を保存できませんでした。もう一度お試しください。"
+    "worktreeRecoveryStateFailed": "worktree の復旧状態を保存できませんでした。もう一度お試しください。",
+    "worktreeCleanupPending": "前回の worktree はまだクリーンアップ待ちです。デバイスを再接続してから再試行してください。"
   },
   "menu": {
     "chipPinned": "ピン留め済み",

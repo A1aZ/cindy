@@ -73,6 +73,33 @@ describe('NewMakerDraftRoute worktree send flow', () => {
     expect(pendingHandoff).toBeGreaterThan(refreshCatch);
   });
 
+  it('settles an older remote cleanup obligation before creating another worktree', () => {
+    const remoteBranch = source.indexOf(
+      'if (isDeviceLinkDraft && effectiveDeviceLinkDeviceId && effectiveWorkingDir) {',
+    );
+    const recovery = source.indexOf(
+      'await recoverPendingRemotePrecreatedWorktrees({',
+      remoteBranch,
+    );
+    const retainedGuard = source.indexOf('!recovery.storageReadable', recovery);
+    const worktreeCreate = source.indexOf("'worktree:create'", retainedGuard);
+    const ledgerRegistration = source.indexOf(
+      'createRemoteSessionWithPrecreatedWorktree({',
+      worktreeCreate,
+    );
+
+    expect(recovery).toBeGreaterThan(remoteBranch);
+    expect(source.slice(recovery, worktreeCreate)).toContain(
+      '!recovery.storageReadable || recovery.retained > 0',
+    );
+    expect(retainedGuard).toBeGreaterThan(recovery);
+    expect(worktreeCreate).toBeGreaterThan(retainedGuard);
+    expect(ledgerRegistration).toBeGreaterThan(worktreeCreate);
+    expect(source.slice(ledgerRegistration, ledgerRegistration + 220)).toContain(
+      'deviceId,',
+    );
+  });
+
   it('does not auto-send if the prepared session is no longer active', () => {
     const worktreeCreate = source.indexOf('window.electronAPI.worktreeCreate');
     const latestSession = source.indexOf('const latestSession = await sessionService.get(newSession.id)', worktreeCreate);

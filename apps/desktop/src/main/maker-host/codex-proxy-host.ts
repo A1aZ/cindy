@@ -1529,6 +1529,85 @@ function createTransformRequestChain(): RequestTransform[] {
   return transforms;
 }
 
+/**
+ * threadId → 该 thread 最近一次转发的**实际出口 origin**。
+ *
+ * 「后端不可达」诊断要报的出站路径必须属于这次失败的请求。resolver 侧的快照按上游
+ * origin 分桶,但光有 origin 不够:codex 的出口随会话选定的 provider 变(订阅直连
+ * ChatGPT、网关、xAI、自定义供应商),多会话并发时「按时间戳挑最新」只是猜测,可能
+ * 把另一个会话的判定报到本次故障上。这里在转发前记下每个 thread 的实际出口,诊断按
+ * threadId 精确取。
+ *
+ * 记录点选在 routingTransform 外层而非 responseObserver:observer 要等响应回来才跑,
+ * 而上游不可达时压根没有响应 —— 那恰恰是诊断最需要它的时刻。
+ *
+ * 另一个副产品:只有请求**真的经过本 loopback proxy** 时才会有记录。gateway-key
+ * fallback 下 codexProxyActive=false、codex 直连 gateway,这个 transform 不跑,于是
+ * 查不到映射、诊断退回通用文案 —— 而不是报一条本次根本没走过的陈旧路径。
+ */
+const codexThreadUpstreamOrigin = new Map<string, string>();
+const CODEX_THREAD_UPSTREAM_MAX_ENTRIES = 256;
+
+function recordCodexThreadUpstream(threadId: string, upstream: string): void {
+  let origin: string;
+  try {
+    origin = new URL(upstream).origin;
+  } catch {
+    return;
+  }
+  if (
+    codexThreadUpstreamOrigin.size >= CODEX_THREAD_UPSTREAM_MAX_ENTRIES
+    && !codexThreadUpstreamOrigin.has(threadId)
+  ) {
+    codexThreadUpstreamOrigin.clear();
+  }
+  codexThreadUpstreamOrigin.set(threadId, origin);
+}
+
+/** 诊断用:该 thread 最近一次转发的实际出口 origin;没有记录过 → null。 */
+export function getCodexThreadUpstreamOrigin(threadId: string): string | null {
+  return codexThreadUpstreamOrigin.get(threadId) ?? null;
+}
+
+/** @internal 单测用。 */
+export function resetCodexThreadUpstreamForTest(): void {
+  codexThreadUpstreamOrigin.clear();
+}
+
+/**
+ * 给 routingTransform 包一层「记录本次实际出口」。刻意包在外层而不是往
+ * createModelRoutingTransform 内部逐分支补:那里有六个以上 return(含一个返回
+ * Promise 的 chat-bridge 分支),逐个补必漏。
+ *
+ * 记录异常一律吞掉 —— 这是诊断旁路,绝不能反过来影响转发。
+ */
+export function withCodexUpstreamRecording(
+  inner: RoutingTransform,
+  defaultUpstream: () => string,
+): RoutingTransform {
+  return (body, ctx) => {
+    const result = inner(body, ctx);
+    const record = (decision: RoutingDecision | null): RoutingDecision | null => {
+      try {
+        // localHandler 分支不转发上游(与其余路由字段互斥),没有出口可记。
+        if (!decision?.localHandler) {
+          const threadId = selectedThreadIdFromHeaders(ctx.headers);
+          // selectedThreadIdFromHeaders 对无 thread 的请求(典型: models-manager 的
+          // `GET /models` 轮询)回落到字面量 'unknown' —— 那不是一个 thread,记进去
+          // 只会污染桶,而且诊断永远不会用真实 threadId 查到它。
+          if (threadId && threadId !== 'unknown') {
+            recordCodexThreadUpstream(threadId, decision?.upstreamOverride ?? defaultUpstream());
+          }
+        }
+      } catch {
+        // 诊断旁路:记录失败就不记,转发照常。
+      }
+      return decision;
+    };
+    return result instanceof Promise ? result.then(record) : record(result);
+  };
+}
+
 function createCodexProxyHandle(
   frozenAuthInjection?: CodexProxyAuthInjection,
 ): Promise<ProxyHandle> {
@@ -1538,7 +1617,10 @@ function createCodexProxyHandle(
     transformRequest: createTransformRequestChain(),
     // 常规 session proxy 继续读取当前全局 spawn 形态；control-plane proxy 在创建时
     // 冻结自己的形态，两个 app-server 并行时不会互相改写路由。
-    routingTransform: createModelRoutingTransform(frozenAuthInjection),
+    routingTransform: withCodexUpstreamRecording(
+      createModelRoutingTransform(frozenAuthInjection),
+      () => buildCodexGatewayBaseUrl(),
+    ),
     responseObserver: composeResponseObservers(
       createCodexResponseObserver(),
       createProviderUpstreamErrorObserver({

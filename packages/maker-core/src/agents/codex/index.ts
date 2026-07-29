@@ -4750,12 +4750,16 @@ export class CodexAgent extends BaseAgent {
                 });
               }
               // 出站路径快照只对本地有意义 (远端 daemon 自己出网, 见
-              // buildBackendUnreachableMessage 注释)。读取按 best-effort:
-              // 诊断绝不能反过来把已经在收口的错误路径搞崩。
+              // buildBackendUnreachableMessage 注释)。必须带 threadId: host 侧靠它
+              // 定位本次请求实际打的上游 (codex 的出口随会话 provider 变), 查不到就
+              // 返回 null 而不是拿「最近一条」凑。读取按 best-effort: 诊断绝不能反过来
+              // 把已经在收口的错误路径搞崩。
               let outboundPath = null as OutboundPathFact | null;
               if (!opts.remoteHostId && this.deps.getOutboundPathFact) {
                 try {
-                  outboundPath = this.deps.getOutboundPathFact() ?? null;
+                  outboundPath = this.deps.getOutboundPathFact({
+                    threadId: params.threadId,
+                  }) ?? null;
                 } catch (e) {
                   log.warn('outbound path fact lookup failed (best-effort)', {
                     error: e instanceof Error ? e.message : String(e),

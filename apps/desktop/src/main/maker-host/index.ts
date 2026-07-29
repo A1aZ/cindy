@@ -96,6 +96,7 @@ import {
   getCodexControlPlaneProxyEndpoint,
   getCodexProxyAuthInjectionState,
   getCodexProxyEndpoint,
+  getCodexThreadUpstreamOrigin,
   isCodexControlPlaneProxyHandleReady,
   isCodexProxyHandleReady,
   setCodexProxyAuthInjection,
@@ -133,12 +134,7 @@ import {
   maybeDetachStaleRemoteCcQuery,
 } from './remote-codex-mcp-recovery.js';
 import { CODEX_DISABLED_BUILTIN_PLUGIN_IDS_KEY } from '../mcp-integrations/codexBuiltinToolPolicy.js';
-import {
-  buildCodexGatewayBaseUrl,
-  buildCodexProxySpawnArgs,
-  CODEX_OAUTH_UPSTREAM,
-  CODEX_OPENAI_COMPACT_PROVIDER_ID,
-} from './codex-gateway-config.js';
+import { buildCodexProxySpawnArgs, CODEX_OPENAI_COMPACT_PROVIDER_ID } from './codex-gateway-config.js';
 import { getOutboundPathSnapshotFor } from './outbound-proxy-resolver.js';
 import {
   createDesktopMakerMemoryManager,
@@ -889,17 +885,23 @@ export function getMaker(): Maker {
       onCodexLocalModelsListed: (models) => {
         setDiscoveredCodexModels(mapCodexAppServerModelsToCatalog(models));
       },
-      // 「后端不可达」终局升级时读一次本机出站路径判定,把通用猜测换成实测事实。
+      // 「后端不可达」终局升级时读一次本次请求的出站路径判定,把通用猜测换成实测事实。
       // 快照的 proxy 字段在 resolver 侧已脱敏,可直接进用户可见的错误消息。
       //
-      // 必须按 codex 自己的上游取:那个 resolver 是共享的(anthropic-compat proxy、
-      // 通用 outbound-fetch 也在调),而 NO_PROXY / PAC 可以逐 origin 给出不同判定,
-      // 取「最近一条」会把别的上游的结论报到 codex 的错误里。codex 的实际出口随凭证
-      // 模式变(订阅直连打 ChatGPT,网关模式打 gateway),两个候选都传、现取现算。
-      getOutboundPathFact: () => getOutboundPathSnapshotFor([
-        CODEX_OAUTH_UPSTREAM,
-        buildCodexGatewayBaseUrl(),
-      ]),
+      // 两步定位,缺一不可:
+      //  1. codex-proxy-host 记的 threadId → 本次实际出口 origin。codex 的出口随会话
+      //     选定的 provider 变(订阅直连 ChatGPT、网关、xAI、自定义供应商),猜候选或
+      //     按时间戳挑最新都会把别的会话的判定报到本次故障上。
+      //  2. 该 origin 在 resolver 侧的判定。resolver 是共享的(anthropic-compat proxy、
+      //     通用 outbound-fetch 也在调),按 origin 取才不会串到别的消费方。
+      // 任一步查不到就返回 null,退回通用文案 —— 尤其 gateway-key fallback 下
+      // codexProxyActive=false、codex 直连不经本 proxy 时,这里必然查不到映射,
+      // 于是不会报出一条本次根本没走过的路径。
+      getOutboundPathFact: ({ threadId }) => {
+        if (!threadId) return null;
+        const origin = getCodexThreadUpstreamOrigin(threadId);
+        return origin ? getOutboundPathSnapshotFor([origin]) : null;
+      },
       onAutoPermissionClassifierUnavailable: notifyAutoPermissionClassifierUnavailable,
       prepareCodexLocalCredentialModeSwitch: async (ctx) => {
         const maker = _maker;

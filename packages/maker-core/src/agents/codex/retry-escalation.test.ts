@@ -8,8 +8,10 @@ import { describe, expect, it } from 'vitest';
 import {
   TurnRetryTracker,
   buildBackendUnreachableMessage,
+  describeOutboundPath,
   RETRY_ESCALATION_MAX_COUNT,
   RETRY_ESCALATION_MAX_ELAPSED_MS,
+  type OutboundPathFact,
 } from './retry-escalation.js';
 
 describe('TurnRetryTracker', () => {
@@ -104,5 +106,87 @@ describe('buildBackendUnreachableMessage', () => {
     });
     expect(msg).not.toContain('\nline2');
     expect(msg.length).toBeLessThan(900);
+  });
+
+  it('local variant replaces the generic cause list with the measured outbound path', () => {
+    const msg = buildBackendUnreachableMessage({
+      isRemote: false,
+      retryCount: 30,
+      elapsedMs: 30_000,
+      lastError: 'fetch failed',
+      outboundPath: {
+        source: 'system',
+        kind: 'direct',
+        upstream: 'https://chatgpt.com',
+      },
+    });
+    expect(msg).toContain('direct connection');
+    expect(msg).toContain('https://chatgpt.com');
+    // 通用四选一猜测清单应被实测事实取代,否则两段互相矛盾。
+    expect(msg).not.toContain('Likely causes');
+  });
+
+  it('falls back to the generic cause list when no outbound fact is available', () => {
+    const msg = buildBackendUnreachableMessage({
+      isRemote: false,
+      retryCount: 30,
+      elapsedMs: 30_000,
+      lastError: 'fetch failed',
+      outboundPath: null,
+    });
+    expect(msg).toContain('Likely causes');
+  });
+
+  it('never attaches the local outbound path to a remote failure', () => {
+    // 远端 daemon 在远端机器上自己出网 — 报本机代理判定会把排查指向错误的机器。
+    const msg = buildBackendUnreachableMessage({
+      isRemote: true,
+      remoteHostId: 'gpu-box',
+      retryCount: 30,
+      elapsedMs: 30_000,
+      lastError: 'Network unreachable',
+      outboundPath: {
+        source: 'env',
+        kind: 'proxy',
+        proxy: 'http://127.0.0.1:7890',
+        upstream: 'https://chatgpt.com',
+      },
+    });
+    expect(msg).not.toContain('127.0.0.1:7890');
+    expect(msg).not.toContain("Cindy's outbound path");
+    expect(msg).toContain('Route agent traffic via local proxy');
+  });
+});
+
+describe('describeOutboundPath', () => {
+  const fact = (over: Partial<OutboundPathFact>): OutboundPathFact => ({
+    source: 'system',
+    kind: 'direct',
+    upstream: 'https://chatgpt.com',
+    ...over,
+  });
+
+  it('names the proxy and where the verdict came from', () => {
+    expect(describeOutboundPath(fact({
+      kind: 'proxy', proxy: 'http://127.0.0.1:7890', source: 'env',
+    }))).toContain('via http://127.0.0.1:7890');
+    expect(describeOutboundPath(fact({
+      kind: 'proxy', proxy: 'socks5://127.0.0.1:7891', source: 'system',
+    }))).toContain('system proxy settings');
+  });
+
+  it('states a confirmed direct path as the sufficient explanation', () => {
+    const text = describeOutboundPath(fact({ kind: 'direct' }));
+    expect(text).toContain('direct connection');
+    expect(text).toContain('reported none');
+  });
+
+  it('marks an unresolved path as a guess rather than a confirmed no-proxy', () => {
+    // 这条是整个改动的语义核心:超时兜底不得被读成「确认无代理」。
+    const text = describeOutboundPath(fact({ kind: 'unknown', reason: 'resolve_timeout' }));
+    expect(text).toContain('could not determine');
+    expect(text).toContain('resolve_timeout');
+    expect(text).toContain('a guess');
+    expect(text).not.toContain('reported none');
   });
 });

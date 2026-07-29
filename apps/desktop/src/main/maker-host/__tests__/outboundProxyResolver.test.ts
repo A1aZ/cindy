@@ -40,6 +40,7 @@ vi.mock('electron', async (importOriginal) => {
 });
 
 import {
+  getLastOutboundPathSnapshot,
   parseChromiumProxyResult,
   resetOutboundProxyResolverStateForTest,
   resolveDesktopOutboundProxy,
@@ -168,5 +169,111 @@ describe('resolveDesktopOutboundProxy', () => {
     electronState.resolveProxy.mockReset();
     await expect(resolveDesktopOutboundProxy('https://chatgpt.com:443')).resolves.toBe(null);
     expect(electronState.resolveProxy).not.toHaveBeenCalled();
+  });
+});
+
+describe('getLastOutboundPathSnapshot', () => {
+  it('is null until a resolution happens', () => {
+    expect(getLastOutboundPathSnapshot()).toBe(null);
+  });
+
+  it('records env-sourced proxies with a redacted address', async () => {
+    process.env.HTTPS_PROXY = 'http://user:sekret@127.0.0.1:6152';
+    await resolveDesktopOutboundProxy('https://chatgpt.com:443');
+    const snap = getLastOutboundPathSnapshot();
+    expect(snap).toMatchObject({
+      source: 'env',
+      kind: 'proxy',
+      proxy: 'http://127.0.0.1:6152',
+      // origin 形态由 originForLog 归一;默认端口按 URL.host 语义省略。
+      upstream: 'https://chatgpt.com',
+    });
+    // 快照会进用户可见的错误消息,凭证绝不能出现在里面。
+    expect(JSON.stringify(snap)).not.toContain('sekret');
+  });
+
+  it('records a confirmed direct path when the system proxy reports DIRECT', async () => {
+    electronState.resolveProxy.mockResolvedValue('DIRECT');
+    await resolveDesktopOutboundProxy('https://chatgpt.com:443');
+    expect(getLastOutboundPathSnapshot()).toMatchObject({
+      source: 'system',
+      kind: 'direct',
+    });
+    expect(getLastOutboundPathSnapshot()?.reason).toBeUndefined();
+  });
+
+  it('distinguishes an unresolved path from a confirmed direct one', async () => {
+    // 这是本快照存在的理由:超时/异常下返回的 null 是 fail-open 猜测,不是「确认无代理」。
+    // 报成 direct 会让高墙网络里的用户以为代理判定正常,把排查带向反方向。
+    electronState.resolveProxy.mockImplementation(() => new Promise(() => {}));
+    vi.useFakeTimers();
+    try {
+      const pending = resolveDesktopOutboundProxy('https://chatgpt.com:443');
+      await vi.advanceTimersByTimeAsync(2100);
+      await expect(pending).resolves.toBe(null);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(getLastOutboundPathSnapshot()).toMatchObject({
+      source: 'system',
+      kind: 'unknown',
+      reason: 'resolve_timeout',
+    });
+
+    resetOutboundProxyResolverStateForTest();
+    electronState.resolveProxy.mockReset();
+    electronState.resolveProxy.mockRejectedValue(new Error('boom'));
+    await resolveDesktopOutboundProxy('https://chatgpt.com:443');
+    expect(getLastOutboundPathSnapshot()).toMatchObject({
+      kind: 'unknown',
+      reason: 'resolve_failed',
+    });
+
+    resetOutboundProxyResolverStateForTest();
+    electronState.ready = false;
+    await resolveDesktopOutboundProxy('https://chatgpt.com:443');
+    expect(getLastOutboundPathSnapshot()).toMatchObject({
+      kind: 'unknown',
+      reason: 'app_not_ready',
+    });
+  });
+
+  it('re-resolves a failed lookup on the short TTL, not the 30s success TTL', async () => {
+    // 行为变化(本次改动):原实现只对「超时」用短 TTL,resolveProxy **抛错**时
+    // 落到 30s 长 TTL —— 瞬时故障会让接下来 30 秒一直用直连兜底。两种「没问出来」
+    // 都该快速重试,统一走短 TTL。
+    vi.useFakeTimers();
+    try {
+      electronState.resolveProxy.mockRejectedValue(new Error('boom'));
+      await resolveDesktopOutboundProxy('https://chatgpt.com:443');
+      expect(electronState.resolveProxy).toHaveBeenCalledTimes(1);
+
+      // 短 TTL(5s)内仍复用缓存,不打爆解析路径。
+      await vi.advanceTimersByTimeAsync(4_000);
+      await resolveDesktopOutboundProxy('https://chatgpt.com:443');
+      expect(electronState.resolveProxy).toHaveBeenCalledTimes(1);
+
+      // 越过短 TTL 后重新解析;若仍按 30s 缓存,这里就不会有第二次调用。
+      await vi.advanceTimersByTimeAsync(2_000);
+      electronState.resolveProxy.mockResolvedValue('PROXY 127.0.0.1:7890');
+      await expect(resolveDesktopOutboundProxy('https://chatgpt.com:443')).resolves.toBe('http://127.0.0.1:7890');
+      expect(electronState.resolveProxy).toHaveBeenCalledTimes(2);
+      expect(getLastOutboundPathSnapshot()).toMatchObject({ kind: 'proxy' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the unknown verdict when a cached fallback is reused', async () => {
+    // unknownReason 必须跟着缓存走,否则缓存命中时会把当初的兜底重新报成 direct。
+    electronState.resolveProxy.mockRejectedValue(new Error('boom'));
+    await resolveDesktopOutboundProxy('https://chatgpt.com:443');
+    electronState.resolveProxy.mockClear();
+    await resolveDesktopOutboundProxy('https://chatgpt.com:443');
+    expect(electronState.resolveProxy).not.toHaveBeenCalled();
+    expect(getLastOutboundPathSnapshot()).toMatchObject({
+      kind: 'unknown',
+      reason: 'resolve_failed',
+    });
   });
 });

@@ -17,6 +17,13 @@
  *
  * 解析结果变化时记一条 info(每个 origin 只在值变化时记),排查网络问题时 grep
  * "outbound proxy" 即可看到当前生效路径。
+ *
+ * 除日志外还留一份**旁路快照**(getLastOutboundPathSnapshot):日志用户看不到,而
+ * 「当前到底走没走代理」恰恰是上游不可达时最该告诉用户的一句话。快照只被诊断读取,
+ * 不参与任何转发决策 —— 转发行为与扩展前逐字节一致。快照刻意把「解析超时 / 解析
+ * 失败 / app 未 ready」记成 `unknown` 而不是 `direct`:这三种情况下我们是 fail-open
+ * 猜了直连,而不是确认了无代理,把猜测显示成事实会把排查带向反方向(高墙网络里
+ * 直连必然失败,用户却以为代理判定正常)。
  */
 
 import { app, session } from 'electron';
@@ -72,8 +79,40 @@ export function parseChromiumProxyResult(result: string): string | null {
   return socks5Fallback;
 }
 
+/**
+ * 「没问出系统代理判定」的原因。存在这一态是本模块的诊断前提:这些分支下返回的
+ * `null` 是 fail-open 的猜测,不等于「确认无代理」。
+ */
+export type OutboundPathUnknownReason =
+  | 'resolve_timeout'
+  | 'resolve_failed'
+  | 'app_not_ready'
+  | 'session_unavailable';
+
+/** 出站路径类别。proxy = 走代理;direct = 确认直连;unknown = 没问出来,按直连兜底。 */
+export type OutboundPathKind = 'proxy' | 'direct' | 'unknown';
+
+/** 出站路径旁路快照 —— 仅供诊断展示,不参与转发决策。 */
+export interface OutboundPathSnapshot {
+  /** 判定来源:env = 代理环境变量;system = Electron 系统代理 / PAC。 */
+  source: 'env' | 'system';
+  kind: OutboundPathKind;
+  /** kind='proxy' 时的**脱敏**代理地址(scheme://host:port),绝不含 userinfo。 */
+  proxy?: string;
+  /** kind='unknown' 时的具体原因。 */
+  reason?: OutboundPathUnknownReason;
+  /** 该判定对应的上游 origin(诊断展示时说明这条事实属于哪个上游)。 */
+  upstream: string;
+  at: number;
+}
+
 interface CachedResolution {
   value: string | null;
+  /**
+   * 该缓存值是「问出来的」还是「没问出来的兜底」。必须跟着缓存走:否则缓存命中时
+   * 快照会把当初的 unknown 兜底重新报成 direct。
+   */
+  unknownReason?: OutboundPathUnknownReason;
   expiresAt: number;
 }
 
@@ -138,27 +177,39 @@ async function resolveProxyWithTimeout(
   }
 }
 
-async function resolveViaSystemProxy(upstreamUrl: string): Promise<string | null> {
+interface SystemProxyResolution {
+  value: string | null;
+  /** 有值 = 这次的 null 是 fail-open 兜底,不是「确认无代理」。 */
+  unknownReason?: OutboundPathUnknownReason;
+}
+
+async function resolveViaSystemProxy(upstreamUrl: string): Promise<SystemProxyResolution> {
   const cached = systemProxyCache.get(upstreamUrl);
-  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  if (cached && cached.expiresAt > Date.now()) {
+    return { value: cached.value, unknownReason: cached.unknownReason };
+  }
   if (systemProxyCache.size >= SYSTEM_PROXY_CACHE_MAX_ENTRIES) systemProxyCache.clear();
   // app 未 ready 时 session 不可用;此时按直连处理(splash 极早期,正常请求不会赶在这)。
-  if (!app.isReady()) return null;
+  // 不写缓存:app ready 是单向状态,缓存下来只会让 ready 之后的判定继续用兜底值。
+  if (!app.isReady()) return { value: null, unknownReason: 'app_not_ready' };
   const ses = session.defaultSession;
-  if (!ses || typeof ses.resolveProxy !== 'function') return null;
+  if (!ses || typeof ses.resolveProxy !== 'function') {
+    return { value: null, unknownReason: 'session_unavailable' };
+  }
   let value: string | null = null;
-  let timedOut = false;
+  let unknownReason: OutboundPathUnknownReason | undefined;
   try {
     const resolved = await resolveProxyWithTimeout(ses, upstreamUrl);
     value = resolved.value;
-    timedOut = resolved.timedOut;
-    if (timedOut) {
+    if (resolved.timedOut) {
+      unknownReason = 'resolve_timeout';
       log.warn('system proxy resolution timed out — using direct connection', {
         upstream: originForLog(upstreamUrl),
         timeoutMs: SYSTEM_PROXY_RESOLVE_TIMEOUT_MS,
       });
     }
   } catch (err) {
+    unknownReason = 'resolve_failed';
     log.warn('system proxy resolution failed — using direct connection', {
       upstream: originForLog(upstreamUrl),
       err: err instanceof Error ? err.message : String(err),
@@ -168,10 +219,11 @@ async function resolveViaSystemProxy(upstreamUrl: string): Promise<string | null
   // 超时也写缓存,只是 TTL 短得多 —— 否则后续每个请求都会再打一次已经卡住的解析。
   systemProxyCache.set(upstreamUrl, {
     value,
+    unknownReason,
     expiresAt:
-      Date.now() + (timedOut ? SYSTEM_PROXY_TIMEOUT_CACHE_TTL_MS : SYSTEM_PROXY_CACHE_TTL_MS),
+      Date.now() + (unknownReason ? SYSTEM_PROXY_TIMEOUT_CACHE_TTL_MS : SYSTEM_PROXY_CACHE_TTL_MS),
   });
-  return value;
+  return { value, unknownReason };
 }
 
 // 惰性初始化:单测可能对 @cindy/anthropic-compat-proxy 做部分 mock(如 codexProxyHost
@@ -180,6 +232,38 @@ let _envResolver: ((upstreamUrl: string) => string | null) | null = null;
 function envResolver(upstreamUrl: string): string | null {
   _envResolver ??= createEnvOutboundProxyResolver();
   return _envResolver(upstreamUrl);
+}
+
+// 最近一次出站路径判定。诊断读的是「现在这台机器上到底怎么出去的」,单值即可:
+// 代理判定通常对所有上游一致(NO_PROXY 命中除外),而快照带了 upstream 字段,
+// 展示侧能说明这条事实属于哪个上游,不会张冠李戴。
+let lastOutboundPath: OutboundPathSnapshot | null = null;
+
+function recordOutboundPath(
+  upstreamUrl: string,
+  source: 'env' | 'system',
+  value: string | null,
+  unknownReason?: OutboundPathUnknownReason,
+): void {
+  lastOutboundPath = {
+    source,
+    kind: unknownReason ? 'unknown' : value ? 'proxy' : 'direct',
+    // 快照可能被写进错误消息给用户看,只允许脱敏形态(env 值可能带 user:pass)。
+    ...(unknownReason ? { reason: unknownReason } : {}),
+    ...(value && !unknownReason ? { proxy: redactProxyUrlForLog(value) } : {}),
+    upstream: originForLog(upstreamUrl),
+    at: Date.now(),
+  };
+}
+
+/**
+ * 最近一次出站路径判定的快照(没有解析发生过时为 null)。
+ *
+ * 只读诊断用途:上游不可达时把「当前走的是系统代理 / 直连 / 判定没问出来」这句
+ * 事实交给用户,比让他猜快得多。返回的 proxy 字段已脱敏,可直接进错误消息与日志。
+ */
+export function getLastOutboundPathSnapshot(): OutboundPathSnapshot | null {
+  return lastOutboundPath;
 }
 
 /**
@@ -191,15 +275,18 @@ export const resolveDesktopOutboundProxy: OutboundProxyResolver = async (upstrea
   if (hasProxyEnvConfig()) {
     const fromEnv = envResolver(upstreamUrl);
     logIfChanged(upstreamUrl, 'env', fromEnv);
+    recordOutboundPath(upstreamUrl, 'env', fromEnv);
     return fromEnv;
   }
   const fromSystem = await resolveViaSystemProxy(upstreamUrl);
-  logIfChanged(upstreamUrl, 'system', fromSystem);
-  return fromSystem;
+  logIfChanged(upstreamUrl, 'system', fromSystem.value);
+  recordOutboundPath(upstreamUrl, 'system', fromSystem.value, fromSystem.unknownReason);
+  return fromSystem.value;
 };
 
-/** @internal 单测用:清空系统代理解析缓存与日志去重状态。 */
+/** @internal 单测用:清空系统代理解析缓存、日志去重与路径快照状态。 */
 export function resetOutboundProxyResolverStateForTest(): void {
   systemProxyCache.clear();
   lastLoggedByOrigin.clear();
+  lastOutboundPath = null;
 }

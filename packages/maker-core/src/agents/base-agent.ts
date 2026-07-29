@@ -264,6 +264,18 @@ export interface AgentDeps {
   getRemoteCodexTransport?: (remoteHostId: string) => import('./codex/app-server/transport.js').Transport;
 
   /**
+   * Codex 专用:读本机最近一次「出站代理路径」判定,用于把「后端不可达」的通用猜测
+   * 换成实测事实(走了哪个代理 / 确认直连 / 判定没问出来)。
+   *
+   * 只在**本地** session 的 retry-loop 终局升级时读一次,不进任何热路径;实现必须是
+   * 同步、只读、不抛的内存快照读取(desktop 侧 = outbound-proxy-resolver 的快照)。
+   * 返回的 proxy 字段必须已脱敏 —— 它会进用户可见的错误消息。
+   *
+   * 缺省 / undefined / 返回 null → 保留原有的通用排查文案,不降级任何行为。
+   */
+  getOutboundPathFact?: () => import('./codex/retry-escalation.js').OutboundPathFact | null;
+
+  /**
    * Maker Memory 顶层单例 (host 注入). 当 runtimeConfig.makerMemoryEnabled === true 时,
    * agent.startSession 会从这里拉当前 workdir 的 MEMORY.md 索引拼进 system prompt;
    * cindy_memory MCP server 也通过 host 端的 createDesktopMcpProviders({ memory: { getManager } })

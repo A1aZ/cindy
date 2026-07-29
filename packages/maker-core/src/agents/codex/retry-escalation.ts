@@ -27,6 +27,58 @@ export interface RetryEscalationDecision {
   elapsedMs: number;
 }
 
+/**
+ * 本机出站路径事实(host 注入,来源是 desktop 的 outbound-proxy-resolver 快照)。
+ *
+ * 存在的理由:「后端不可达」时最有用的一句话是「你现在到底走没走代理」,而这件事
+ * Cindy 自己知道、用户看不到 —— 日志在磁盘上,错误消息里只有一串通用猜测。
+ *
+ * `kind='unknown'` 是刻意与 `direct` 分开的:那表示代理判定没问出来、按直连兜底,
+ * 不是确认了无代理。把猜测当事实报给用户会把排查带向反方向。
+ *
+ * 类型在此本地定义(不 import desktop 侧类型):maker-core 零 Electron 依赖。
+ */
+export interface OutboundPathFact {
+  source: 'env' | 'system';
+  kind: 'proxy' | 'direct' | 'unknown';
+  /** 已脱敏的代理地址(scheme://host:port);kind='proxy' 时有值。 */
+  proxy?: string;
+  /** kind='unknown' 时的原因标识(resolve_timeout / resolve_failed / …)。 */
+  reason?: string;
+  upstream: string;
+  /**
+   * 判定时间戳。不进用户消息(对排查没有直接价值),但会进升级日志 —— 系统代理
+   * 判定带 TTL 缓存,读日志的人需要知道这条事实是刚测的还是缓存里的。
+   */
+  at?: number;
+}
+
+/**
+ * 把出站路径事实渲染成一行可操作的诊断。返回空串 = 没有可报的事实(调用方跳过)。
+ * 导出仅供单测。
+ */
+export function describeOutboundPath(fact: OutboundPathFact): string {
+  const from = fact.source === 'env' ? 'proxy env vars' : 'system proxy settings';
+  if (fact.kind === 'proxy') {
+    return (
+      `Cindy's outbound path for ${fact.upstream}: via ${fact.proxy ?? '(unknown address)'} ` +
+      `(from ${from}). If that proxy is down or cannot reach the upstream, this is where it fails.`
+    );
+  }
+  if (fact.kind === 'direct') {
+    return (
+      `Cindy's outbound path for ${fact.upstream}: direct connection — no proxy env var is set ` +
+      `and ${from} reported none. On a network that needs a proxy or VPN to reach the upstream, ` +
+      `this alone explains the failure.`
+    );
+  }
+  return (
+    `Cindy could not determine the outbound path for ${fact.upstream} ` +
+    `(${fact.reason ?? 'unknown reason'}) and fell back to a direct connection. ` +
+    `That fallback is a guess, not a confirmed "no proxy" — on a network that needs a proxy it fails.`
+  );
+}
+
 export class TurnRetryTracker {
   private turnId: string | null = null;
   private count = 0;
@@ -61,6 +113,10 @@ export class TurnRetryTracker {
 /**
  * 升级时合成给用户的终态错误消息。保留末次原始错误 (截断) 作为诊断锚点;
  * 按 local/remote 给出不同的排查指向 (remote 才有 SSH 代理隧道入口)。
+ *
+ * `outboundPath` 只在**本地**场景附加: 远端 daemon 在远端机器上自己出网, 本机的
+ * 出站代理判定与它无关 —— 把本机快照报给远端故障会指错方向 (agentProxy 未开时
+ * 远端根本不经本机)。远端仍走原有的 SSH 代理隧道引导。
  */
 export function buildBackendUnreachableMessage(opts: {
   isRemote: boolean;
@@ -68,6 +124,7 @@ export function buildBackendUnreachableMessage(opts: {
   retryCount: number;
   elapsedMs: number;
   lastError: string;
+  outboundPath?: OutboundPathFact | null;
 }): string {
   const last = opts.lastError.trim().replace(/\s+/g, ' ').slice(0, 300) || '(no error detail)';
   const elapsedS = Math.round(opts.elapsedMs / 1000);
@@ -75,6 +132,13 @@ export function buildBackendUnreachableMessage(opts: {
     `Codex backend unreachable — the daemon retried ${opts.retryCount} times over ${elapsedS}s ` +
     `without success (last error: "${last}").`;
   if (!opts.isRemote) {
+    // 有实测出站事实就用它替掉通用猜测清单 —— 后者把四种原因并列, 等于没有指向。
+    if (opts.outboundPath) {
+      return (
+        `${head}\nThe Codex backend (chatgpt.com) is not responding.\n` +
+        `${describeOutboundPath(opts.outboundPath)}`
+      );
+    }
     return (
       `${head}\nThe Codex backend (chatgpt.com) is not responding. Likely causes: network outage, ` +
       `proxy/VPN required, request blocked (403), or timeout. Check your connection and retry.`

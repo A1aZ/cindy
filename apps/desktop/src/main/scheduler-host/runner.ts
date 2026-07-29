@@ -303,14 +303,21 @@ export class MakerScheduleRunner implements ScheduleRunner {
   }
 
   /**
-   * 顺延只对「能被 tick 真正重试」的 schedule 成立 —— recurring 且 active。
+   * 顺延只对「能被 tick 真正重试」的 schedule 成立 —— recurring、active,且**不是 manual**。
    * 顺延把重试写进 nextFireAt 等下一次 tick/fireOne 接力,而 tick 只遍历 activeSchedules、
-   * 重启只 listActive() 加载 active 行:non-recurring(manual / once)、已 expired、paused
+   * 重启只 listActive() 加载 active 行:non-recurring(once)、已 expired、paused
    * 的行即便写了 nextFireAt 也永不被重试 —— 静默顺延会直接丢任务(见 PR #129 review
    * Thread A / E)。这类撞忙不顺延,回退为可见失败(PR 前行为),让用户看到并可手动重试。
+   *
+   * manual 的问题相反,而且更严重:`manual: true, recurring: true` 的任务契约是**只能经
+   * runNow 触发**(nextFireAt 永不设置,computeNextFireAt 对它返回 undefined)。而顺延分支
+   * 是直接写 `nextFireAt: retryAt` 并把行塞回 activeSchedules 的,绕过了那道语义闸 ——
+   * 于是一次"立即运行"撞忙,就给这条只应手动跑的任务凭空排出一次自动触发
+   * (review #944 第十九轮 P1;本函数原来的注释已经把 manual 算在排除项里,代码没跟上)。
+   * 排除后走可见失败:用户知道这次没跑成,可以自己再点一次,不会莫名多出自动运行。
    */
   private canDefer(schedule: Schedule): boolean {
-    return schedule.recurring === true && schedule.status === 'active';
+    return schedule.recurring === true && schedule.status === 'active' && schedule.manual !== true;
   }
 
   private async failOrDeferSessionRunning(

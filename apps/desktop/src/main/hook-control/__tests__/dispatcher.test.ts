@@ -2158,6 +2158,34 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     expect(secondReopen.requestId).not.toBe(firstReopen);
   });
 
+  it('认领后连接断开 -> 续跑轮的 turn.end 不缓存不补发, 也不再登记可续跑', async () => {
+    const { cr, sig, c, d, sessionId } = await failOneTask();
+    sig.fire(sessionId);
+    await tick();
+    cr.latest().onClaim();
+    const reopened = c.last('turn.reopen')!.payload.requestId;
+    const endsBefore = c.ofType('turn.end').length;
+
+    // 映射已装上、渠道消息已改成进行中, 此时断连: server 侧会做孤儿收口并解绑
+    // 这一轮的 requestId, 所以迟到的 turn.end 只会被当未知 id 丢弃。
+    d.onDisconnected('conn-1');
+    cr.latest().onEnd({ status: 'error', finalText: '', errorMessage: '又崩了', durationMs: 3 });
+    await tick();
+    expect(c.ofType('turn.end')).toHaveLength(endsBefore);
+
+    // 重连不得把它补发出来(普通任务才走 sendOrBuffer 的断线补发)。
+    d.onConnected('conn-1', c.send, REOPEN_FEATURES);
+    await tick();
+    expect(c.ofType('turn.end').filter((m) => m.payload.requestId === reopened)).toHaveLength(0);
+
+    // 也不得再登记可续跑: 那条记账的 reopenOf 已被 server 解绑, 再发只会被忽略。
+    const reopensBefore = c.ofType('turn.reopen').length;
+    sig.fire(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(1);
+    expect(c.ofType('turn.reopen')).toHaveLength(reopensBefore);
+  });
+
   it('续跑轮可被 /stop 精确取消(新 requestId 已登记为在执行的任务)', async () => {
     const aborted: string[] = [];
     const cr = continuationRunner();

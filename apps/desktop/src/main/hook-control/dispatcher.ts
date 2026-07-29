@@ -21,7 +21,9 @@
  *      turn 收口后自动 drain;
  *   4. 回推: turn.end 经当前连接发送; 连接不在线时缓存, 重连(onConnected)
  *      后按序补发 —— server 侧按 requestId 幂等。执行中的渲染快照经
- *      turn.progress 直发(不缓存不补发, 装饰性信息丢了无害)。
+ *      turn.progress 直发(不缓存不补发, 装饰性信息丢了无害)。**例外**: 续跑轮
+ *      (turn.reopen)的 turn.end 也直发不缓存 —— 那条渠道消息在断连瞬间已被
+ *      server 的孤儿收口改写并解绑 requestId, 补发只会被当未知 id 丢弃。
  *
  * 权限模式: dispatch 的 options.permissionMode 对「新建 session」生效 ——
  * runner 校验其属于目标 agent 的能力档位, 合法即用, 非法/缺省落
@@ -701,7 +703,8 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
         );
         // 认领成功后这一轮就等同于一个在执行的任务: 登记进 runningByRequest,
         // 渠道侧的 /stop 才能用新 requestId 命中它。
-        if (claimed) runningByRequest.set(requestKey, { sessionId, connectionId: entry.connectionId });
+        if (claimed)
+          runningByRequest.set(requestKey, { sessionId, connectionId: entry.connectionId });
       },
       onProgress: (text) => {
         if (!claimed || !isCurrentGeneration(entry.accountGeneration)) return;
@@ -714,21 +717,33 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
         if (!claimed || !isCurrentGeneration(entry.accountGeneration)) return;
         const status: 'ok' | 'error' | 'cancelled' = wasCancelled ? 'cancelled' : outcome.status;
         const isError = status === 'error';
-        sendOrBuffer(
-          entry.connectionId,
-          makeTurnEnd({
-            requestId,
-            externalKey: entry.externalKey,
-            sessionId,
-            status,
-            finalText: outcome.finalText,
-            errorMessage: isError ? outcome.errorMessage || 'unknown error' : null,
-            usage: { durationMs: outcome.durationMs },
-            ...(outcome.attachments !== undefined && outcome.attachments.length > 0
-              ? { attachments: outcome.attachments }
-              : {}),
-          }),
-        );
+        // 续跑轮的 turn.end **直发不缓存**, 与普通任务(sendOrBuffer 断线补发)刻意
+        // 相反: 普通任务的消息由 server 建、断线期间没人动它, 补发就能定稿; 而续跑
+        // 轮的消息在断连那一刻已被 server 的孤儿收口改写并解绑 requestId, 迟到的
+        // turn.end 会被当未知 id 丢弃 —— 那反而把"其实跑成功了"显示成"续跑中断"。
+        // 断连即这一轮回流的终局, 由 server 收口单方权威(协议阶段 18)。
+        const send = sendFns.get(entry.connectionId);
+        const delivered =
+          send?.(
+            makeTurnEnd({
+              requestId,
+              externalKey: entry.externalKey,
+              sessionId,
+              status,
+              finalText: outcome.finalText,
+              errorMessage: isError ? outcome.errorMessage || 'unknown error' : null,
+              usage: { durationMs: outcome.durationMs },
+              ...(outcome.attachments !== undefined && outcome.attachments.length > 0
+                ? { attachments: outcome.attachments }
+                : {}),
+            }),
+          ) === true;
+        if (!delivered) {
+          // 没发出去 => server 已把这条消息收口并解绑本轮 requestId, 再拿它当
+          // reopenOf 只会被静默忽略。这条消息线到此为止, 不再登记可续跑。
+          log.warn(`hook continuation turn.end dropped (connection offline): ${requestId}`);
+          return;
+        }
         // 续跑又失败了 -> 允许再续一次(用户还得再点一次重试, 天然限流)。
         // reopenOf 换成这一轮的 requestId: server 侧那条消息现在挂在它上面。
         if (isError) {

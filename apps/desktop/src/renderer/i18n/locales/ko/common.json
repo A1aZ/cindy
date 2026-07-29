@@ -1376,7 +1376,8 @@
         "enableModel": "이 모델 활성화",
         "capabilityGroupHint": "대화 모델 선택에는 표시되지 않으며, 이미지 생성 등 기능에서만 사용됩니다.",
         "accessWriteFailed": "변경 사항을 저장하지 못했습니다. 다시 시도해 주세요.",
-        "disabledGroup": "비활성화됨"
+        "disabledGroup": "비활성화됨",
+        "enableAllModels": "모두 활성화"
       },
       "genericOAuth": {
         "subtitle": "구독 인증 로그인 (OAuth)",

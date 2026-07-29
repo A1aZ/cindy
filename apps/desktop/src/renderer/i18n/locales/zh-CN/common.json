@@ -1376,7 +1376,8 @@
         "enableModel": "启用此模型",
         "capabilityGroupHint": "不会出现在对话模型选择中，仅供图像生成等功能使用",
         "accessWriteFailed": "停用设置未能保存，请重试",
-        "disabledGroup": "已停用"
+        "disabledGroup": "已停用",
+        "enableAllModels": "全部启用"
       },
       "genericOAuth": {
         "subtitle": "订阅授权登录（OAuth）",

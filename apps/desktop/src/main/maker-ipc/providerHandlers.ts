@@ -259,6 +259,12 @@ export interface ProviderHandlerDeps {
   setModelsDisabled(providerId: string, modelIds: readonly string[], disabled: boolean): void;
   setProviderDisabled(providerId: string, disabled: boolean): void;
   /**
+   * 「恢复默认」= 删除该供应商的整组停用 override(供应商级 + 全部逐模型条目,含
+   * 指向已下架模型的陈旧条目)。语义遵循 docs/dev-rules/configuration-and-overrides.md
+   * §4:删 override 跟随默认,不写静态快照。生产 = clearProviderDisableOverrides。
+   */
+  clearProviderDisableOverrides?(providerId: string): void;
+  /**
    * 自定义供应商删除事务内的停用 override 清理(供应商级 + 逐模型):同步清掉并
    * 返回恢复函数 —— 后续删除步骤失败时把停用状态原样写回;清理自身抛错 = 事务未
    * 产生破坏,删除整体中止。否则同 id 重建的新供应商会带着旧停用状态复活
@@ -693,9 +699,12 @@ export function registerProviderHandlers(
     ) {
       throwIpcError('INVALID_PARAMS', 'providerId required');
     }
-    if (typeof i.disabled !== 'boolean') throwIpcError('INVALID_PARAMS', 'disabled required');
-    if (i.kind !== 'model' && i.kind !== 'provider') {
-      throwIpcError('INVALID_PARAMS', 'kind must be "model" or "provider"');
+    if (i.kind !== 'model' && i.kind !== 'provider' && i.kind !== 'reset') {
+      throwIpcError('INVALID_PARAMS', 'kind must be "model", "provider" or "reset"');
+    }
+    // reset = 删除整组 override(恢复默认),无 disabled 语义;其余两种必须显式带方向。
+    if (i.kind !== 'reset' && typeof i.disabled !== 'boolean') {
+      throwIpcError('INVALID_PARAMS', 'disabled required');
     }
     if (
       i.kind === 'model' &&
@@ -741,6 +750,18 @@ export function registerProviderHandlers(
       }
     };
     const run = async () => {
+      if (i.kind === 'reset') {
+        // 恢复默认 = 删除该供应商整组 override(含指向已下架模型的陈旧条目)。删除
+        // 与「恢复启用」同语义,故意不做目录成员校验 —— 目录漂移后也要能清干净
+        // (configuration-and-overrides.md §4;PR #744 review 第二十四轮)。
+        if (!deps.clearProviderDisableOverrides) {
+          throwIpcError('INTERNAL', 'disable override reset is not wired');
+        }
+        assertSameOwner();
+        persist(() => deps.clearProviderDisableOverrides?.(i.providerId as string));
+        deps.broadcastChanged();
+        return { ok: true };
+      }
       if (i.kind === 'model') {
         const modelIds = i.modelIds as string[];
         if (i.disabled) {

@@ -1377,7 +1377,8 @@
         "enableModel": "Enable This Model",
         "capabilityGroupHint": "Not shown in the chat model picker; used only by features like image generation.",
         "accessWriteFailed": "Couldn't save the change. Please try again.",
-        "disabledGroup": "Disabled"
+        "disabledGroup": "Disabled",
+        "enableAllModels": "Enable All"
       },
       "genericOAuth": {
         "subtitle": "Subscription sign-in (OAuth)",

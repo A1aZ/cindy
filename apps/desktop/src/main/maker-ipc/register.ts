@@ -444,6 +444,7 @@ import {
   syncModelVisibilityMirror,
 } from '../maker-host/model-visibility-mirror.js';
 import {
+  clearProviderDisableOverrides,
   setModelsDisabled,
   setProviderDisabled,
   stageProviderDisableOverridesClear,
@@ -3619,6 +3620,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     setProviderDisabled: (providerId, disabled) => setProviderDisabled(providerId, disabled),
     stageClearProviderDisableOverrides: (providerId) =>
       stageProviderDisableOverridesClear(providerId),
+    // 「恢复默认」= 删除该供应商整组停用 override(configuration-and-overrides.md §4)。
+    clearProviderDisableOverrides: (providerId) => clearProviderDisableOverrides(providerId),
     // 停用写入的归属校验:入口捕获 / 持久化前复核,异步窗口内切账号即拒,防 A 的
     // 点击写进 B 的 owner-scoped 偏好文件(PR #744 review 第七轮)。
     currentOwnerId: () => getCurrentDataOwnerId(),

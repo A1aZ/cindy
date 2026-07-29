@@ -357,6 +357,31 @@ export function UnifiedModelList({
     [provider.id, t],
   );
 
+  /** 组级恢复默认(kind:'reset'):删除本供应商整组停用 override —— 供应商级标志、
+   *  全部逐模型条目,以及指向已下架模型的**陈旧条目**(它们不渲染成行,逐行启用永远
+   *  清不掉;若该模型日后回到目录会被静默停用)。乐观覆盖同 setRowDisabled 口径;
+   *  失败整组回滚(只回滚仍属于本次的乐观值)。 */
+  const resetDisableOverrides = useCallback(() => {
+    const rows = unionRows.filter((r) => pendingDisabled[r.id] ?? isRowDisabled(r));
+    setPendingDisabled((prev) => {
+      const next = { ...prev };
+      for (const r of rows) next[r.id] = false;
+      return next;
+    });
+    void window.electronAPI.maker
+      .setModelDisable({ kind: 'reset', providerId: provider.id })
+      .catch(() => {
+        setPendingDisabled((prev) => {
+          const next = { ...prev };
+          for (const r of rows) {
+            if (next[r.id] === false) delete next[r.id];
+          }
+          return next;
+        });
+        toast.error(t('settings.providers.models.accessWriteFailed'));
+      });
+  }, [unionRows, pendingDisabled, provider.id, t]);
+
   // 分组(仅未停用的行)+「已停用」分区(停用的行,跨分组沉底)。搜索两边都过滤。
   // 分组沿用现有口径:用每行第一个可用 agent 的目录条目作代表参与分组。
   const { groups, disabledRows } = useMemo(() => {
@@ -711,33 +736,45 @@ export function UnifiedModelList({
         )}
 
         {/* 「已停用」分区:停用的行跨分组沉底;默认展开(区里有东西 = 用户主动停的,
-            找回路径要一眼可见),搜索时强制展开。行内「启用此模型」即飞回原分组。 */}
+            找回路径要一眼可见),搜索时强制展开。行内「启用此模型」即飞回原分组;
+            头部「全部启用」= 组级恢复默认(kind:'reset' 删整组 override,含指向已
+            下架模型的陈旧条目 —— 逐行启用清不掉它们;configuration-and-overrides.md §4)。 */}
         {disabledRows.length > 0 && (() => {
           const collapsed = !query.trim() && isCollapsed(DISABLED_GROUP_KEY);
           return (
             <div className="flex flex-col">
-              <button
-                type="button"
-                onClick={() => toggleCollapsed(DISABLED_GROUP_KEY)}
-                aria-expanded={!collapsed}
-                className="flex items-center gap-1 self-start pb-0.5 text-left transition-opacity hover:opacity-80"
-              >
-                <span
-                  className="inline-flex transition-transform duration-150"
-                  style={{ color: 'var(--text-tertiary)', transform: collapsed ? 'rotate(-90deg)' : 'none' }}
+              <div className="flex items-center gap-2 pb-0.5">
+                <button
+                  type="button"
+                  onClick={() => toggleCollapsed(DISABLED_GROUP_KEY)}
+                  aria-expanded={!collapsed}
+                  className="flex items-center gap-1 text-left transition-opacity hover:opacity-80"
                 >
-                  <ChevronDown size={12} />
-                </span>
-                <span
-                  className="text-11 font-semibold uppercase"
-                  style={{ color: 'var(--text-tertiary)', letterSpacing: '0.4px' }}
+                  <span
+                    className="inline-flex transition-transform duration-150"
+                    style={{ color: 'var(--text-tertiary)', transform: collapsed ? 'rotate(-90deg)' : 'none' }}
+                  >
+                    <ChevronDown size={12} />
+                  </span>
+                  <span
+                    className="text-11 font-semibold uppercase"
+                    style={{ color: 'var(--text-tertiary)', letterSpacing: '0.4px' }}
+                  >
+                    {t('settings.providers.models.disabledGroup')}
+                  </span>
+                  <span className="text-11 tabular-nums" style={{ color: 'var(--text-tertiary)', opacity: 0.6 }}>
+                    {disabledRows.length}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={resetDisableOverrides}
+                  className="rounded-md px-1.5 py-0.5 text-11 font-medium transition-colors hover:bg-[var(--surface-hover)]"
+                  style={{ color: 'var(--text-tertiary)' }}
                 >
-                  {t('settings.providers.models.disabledGroup')}
-                </span>
-                <span className="text-11 tabular-nums" style={{ color: 'var(--text-tertiary)', opacity: 0.6 }}>
-                  {disabledRows.length}
-                </span>
-              </button>
+                  {t('settings.providers.models.enableAllModels')}
+                </button>
+              </div>
               {!collapsed &&
                 disabledRows.map((row) => {
                   const rep = row.byAgent[row.avail[0]]!;

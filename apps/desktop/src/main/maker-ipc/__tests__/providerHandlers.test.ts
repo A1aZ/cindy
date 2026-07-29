@@ -302,6 +302,33 @@ describe('model-disable:set handler', () => {
     expect(deps.broadcastChanged).not.toHaveBeenCalled();
   });
 
+  it('reset 形态:恢复默认删除整组 override(不做目录成员校验)并广播', async () => {
+    // 恢复默认要能清掉指向已下架模型的陈旧条目 —— 与「恢复启用」同语义,故意不查目录
+    // (configuration-and-overrides.md §4;R24)。
+    const harness = new IpcHarness();
+    const listProviders = vi.fn(async () => [] as ProviderView[]);
+    const deps = makeDeps({
+      listProviders,
+      clearProviderDisableOverrides: vi.fn(() => {}),
+    });
+    registerProviderHandlers(harness, deps);
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, { kind: 'reset', providerId: 'gone-provider' }),
+    ).resolves.toEqual({ ok: true });
+    expect(deps.clearProviderDisableOverrides).toHaveBeenCalledWith('gone-provider');
+    expect(listProviders).not.toHaveBeenCalled();
+    expect(deps.broadcastChanged).toHaveBeenCalledOnce();
+
+    // 未接线时结构化 INTERNAL,不静默吞掉。
+    const harness2 = new IpcHarness();
+    const deps2 = makeDeps({ clearProviderDisableOverrides: undefined });
+    registerProviderHandlers(harness2, deps2);
+    await expect(
+      harness2.invoke(MAKER_INVOKE.MODEL_DISABLE_SET, { kind: 'reset', providerId: 'xd' }),
+    ).rejects.toThrow(/INTERNAL/);
+  });
+
   it('provider 形态:写供应商级停用并广播', async () => {
     const harness = new IpcHarness();
     const deps = makeDeps();

@@ -1376,7 +1376,8 @@
         "enableModel": "このモデルを有効にする",
         "capabilityGroupHint": "チャットのモデル選択には表示されず、画像生成などの機能でのみ使用されます。",
         "accessWriteFailed": "変更を保存できませんでした。もう一度お試しください。",
-        "disabledGroup": "無効"
+        "disabledGroup": "無効",
+        "enableAllModels": "すべて有効にする"
       },
       "genericOAuth": {
         "subtitle": "サブスクリプション認証（OAuth）",

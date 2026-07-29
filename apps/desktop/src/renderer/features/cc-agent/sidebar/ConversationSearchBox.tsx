@@ -1,6 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowDownUp,
   Check,
   ChevronDown,
   Globe,
@@ -29,6 +28,7 @@ import {
 import { cn } from '@/lib/utils';
 import { searchConversations } from '@/lib/conversationSearchService';
 import { formatSidebarTime } from '../lib/formatSidebarTime';
+import { loadSearchSortBy, persistSearchSortBy } from './conversationSearchPrefs';
 import type {
   ConversationSearchAgentFilter,
   ConversationSearchLastActivityFilter,
@@ -57,6 +57,11 @@ type Option<T extends string> = {
   labelKey: string;
 };
 
+/**
+ * 排序三选项。与其它筛选选项同款:纯文字 + 选中勾,不配图标——它们只出现在筛选菜单的
+ * 「排序」子菜单里(见 SearchFilterMenu),当前值已常显在父行右侧,图标不再承担区分职责。
+ * (曾试过靶心/时钟系与箭头排序族图标,前者读不出排序,后者在收进子菜单后成了冗余。)
+ */
 const SORT_OPTIONS: ReadonlyArray<Option<ConversationSearchSortBy>> = [
   { value: 'relevance', labelKey: 'ccAgent.search.sort.relevance' },
   { value: 'activityDesc', labelKey: 'ccAgent.search.sort.activityDesc' },
@@ -125,6 +130,7 @@ export interface UseConversationSearchParams {
  * useConversationSearch —— 会话搜索状态机(query / 排序 / 筛选 / 项目锁定 / 两段防抖搜索)。
  * 从 ConversationSearchBox 抽出,供 popover 形态(rail 图标)与内联形态(展开侧栏首行)复用,
  * 保证两处搜索行为、防抖节奏、结果口径完全一致(不复制逻辑、不引入行为漂移)。
+ * 排序选择跨会话记住(localStorage,见 conversationSearchPrefs);其余筛选每次回到默认。
  */
 export function useConversationSearch({
   enabled,
@@ -135,7 +141,8 @@ export function useConversationSearch({
   onResultChosen,
 }: UseConversationSearchParams) {
   const [query, setQuery] = useState('');
-  const [sortBy, setSortBy] = useState<ConversationSearchSortBy>('relevance');
+  // 排序读上次选择(localStorage),其余筛选每次回到默认——见 conversationSearchPrefs 的取舍说明。
+  const [sortBy, setSortByState] = useState<ConversationSearchSortBy>(() => loadSearchSortBy());
   const [statusFilter, setStatusFilter] = useState<ConversationSearchStatusFilter>('all');
   const [agentFilter, setAgentFilter] = useState<ConversationSearchAgentFilter>('all');
   const [lastActivityFilter, setLastActivityFilter] =
@@ -263,6 +270,12 @@ export function useConversationSearch({
     statusFilter,
     trimmed,
   ]);
+
+  /** 切换排序并记住选择:下次打开搜索 / 重启客户端沿用同一排序。 */
+  const setSortBy = useCallback((next: ConversationSearchSortBy) => {
+    setSortByState(next);
+    persistSearchSortBy(next);
+  }, []);
 
   /** 清空 query / 结果 / 状态(popover 关闭时调用)。项目锁定保留。 */
   const reset = useCallback(() => {
@@ -527,12 +540,12 @@ export function ConversationSearchBox({
             )}
           </div>
           <div className="mt-2 flex items-center gap-2">
-            <SearchSortMenu sortBy={search.sortBy} onChange={search.setSortBy} />
             <SearchFilterMenu
               status={search.statusFilter}
               agentKind={search.agentFilter}
               lastActivity={search.lastActivityFilter}
               projects={search.projectSelection}
+              sortBy={search.sortBy}
               allKnownProjects={allKnownProjects}
               activeCount={search.activeFilterCount}
               lockedProjectKey={search.lockedProjectKey}
@@ -541,6 +554,7 @@ export function ConversationSearchBox({
               onAgentKindChange={search.setAgentFilter}
               onLastActivityChange={search.setLastActivityFilter}
               onProjectsChange={search.setProjectSelection}
+              onSortChange={search.setSortBy}
               onReset={search.resetFilters}
             />
           </div>
@@ -557,58 +571,19 @@ export function ConversationSearchBox({
   );
 }
 
-export function SearchSortMenu({
-  sortBy,
-  onChange,
-  compact,
-  onOpenChange,
-}: {
-  sortBy: ConversationSearchSortBy;
-  onChange: (value: ConversationSearchSortBy) => void;
-  /** 内嵌在搜索框内的紧凑形态:纯图标钮,无边框 / 标签(见 SidebarInlineSearch)。 */
-  compact?: boolean;
-  /** 下拉开合上报(内联搜索框据此在菜单打开时保持展开态,不因鼠标移到菜单而收起)。 */
-  onOpenChange?: (open: boolean) => void;
-}) {
-  const { t } = useTranslation();
-  const label = optionLabel(SORT_OPTIONS, sortBy, t);
-
-  return (
-    <DropdownMenu onOpenChange={onOpenChange}>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          aria-label={t('ccAgent.search.sortAria', { sort: label })}
-          className={compact ? SEARCH_TOOL_ICON_CLASS : SEARCH_TOOL_BUTTON_CLASS}
-        >
-          <ArrowDownUp size={compact ? 14 : 13} className="shrink-0" />
-          {!compact && (
-            <>
-              <span className="truncate">{label}</span>
-              <ChevronDown size={13} className="shrink-0 text-[var(--cmd-palette-item-meta)]" />
-            </>
-          )}
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent side="bottom" align="start" sideOffset={6} className={MENU_CONTENT_CLASS}>
-        {SORT_OPTIONS.map((option) => (
-          <SelectMenuItem
-            key={option.value}
-            label={t(option.labelKey)}
-            selected={sortBy === option.value}
-            onSelect={() => onChange(option.value)}
-          />
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
+/**
+ * SearchFilterMenu —— 搜索框旁**唯一**的选项钮:排序 + 各项筛选都收在这一个菜单里。
+ * 排序曾是搜索框内并排的第二颗钮,已收进本菜单首行子菜单(2026-07 用户拍板):
+ * 搜索框里只留一颗钮更干净,排序也不必在收起态用图标自证身份。
+ * 排序**不计入** activeCount(它不收窄结果集,不该点亮「有筛选」红点);当前排序值
+ * 常显在首行右侧,不用展开子菜单就能看到——这也是排序选项不需要图标的原因。
+ */
 export function SearchFilterMenu({
   status,
   agentKind,
   lastActivity,
   projects,
+  sortBy,
   allKnownProjects,
   activeCount,
   lockedProjectKey,
@@ -617,6 +592,7 @@ export function SearchFilterMenu({
   onAgentKindChange,
   onLastActivityChange,
   onProjectsChange,
+  onSortChange,
   onReset,
   compact,
   onOpenChange,
@@ -625,6 +601,7 @@ export function SearchFilterMenu({
   agentKind: ConversationSearchAgentFilter;
   lastActivity: ConversationSearchLastActivityFilter;
   projects: ProjectSelection;
+  sortBy: ConversationSearchSortBy;
   allKnownProjects: ProjectNodeData[];
   activeCount: number;
   lockedProjectKey: string | null;
@@ -633,6 +610,7 @@ export function SearchFilterMenu({
   onAgentKindChange: (value: ConversationSearchAgentFilter) => void;
   onLastActivityChange: (value: ConversationSearchLastActivityFilter) => void;
   onProjectsChange: (value: ProjectSelection) => void;
+  onSortChange: (value: ConversationSearchSortBy) => void;
   onReset: () => void;
   /** 内嵌在搜索框内的紧凑形态:纯图标钮,无边框 / 标签,激活时右上角红点。 */
   compact?: boolean;
@@ -643,6 +621,7 @@ export function SearchFilterMenu({
   const statusValue = optionLabel(STATUS_OPTIONS, status, t);
   const agentValue = optionLabel(AGENT_OPTIONS, agentKind, t);
   const lastActivityValue = optionLabel(LAST_ACTIVITY_OPTIONS, lastActivity, t);
+  const sortValue = optionLabel(SORT_OPTIONS, sortBy, t);
   const lockedProject = lockedProjectKey
     ? allKnownProjects.find((project) => project.projectKey === lockedProjectKey) ?? null
     : null;
@@ -663,12 +642,13 @@ export function SearchFilterMenu({
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          aria-label={t('ccAgent.search.filterAria', {
+          // 排序也收在本菜单里,故一并读出当前排序(两段都是既有文案,不新增 key)。
+          aria-label={`${t('ccAgent.search.filterAria', {
             status: statusValue,
             agent: agentValue,
             lastActivity: lastActivityValue,
             projects: projectValue,
-          })}
+          })} · ${t('ccAgent.search.sortAria', { sort: sortValue })}`}
           aria-pressed={activeCount > 0}
           className={
             compact
@@ -719,6 +699,18 @@ export function SearchFilterMenu({
             </button>
           )}
         </div>
+
+        {/* 排序放首行:先定「怎么排」,再谈「留哪些」;它总有值,也不参与 activeCount。 */}
+        <MenuSubRow label={t('ccAgent.sidebar.filterSortByHeading')} value={sortValue}>
+          {SORT_OPTIONS.map((option) => (
+            <SelectMenuItem
+              key={option.value}
+              label={t(option.labelKey)}
+              selected={sortBy === option.value}
+              onSelect={() => onSortChange(option.value)}
+            />
+          ))}
+        </MenuSubRow>
 
         <MenuSubRow label={t('ccAgent.sidebar.filterStatusHeading')} value={statusValue}>
           {STATUS_OPTIONS.map((option) => (

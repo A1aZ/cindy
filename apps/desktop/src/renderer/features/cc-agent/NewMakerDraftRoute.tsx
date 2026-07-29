@@ -112,6 +112,7 @@ import { useCollabProjectPolicy } from './hooks/useCollabProjectPolicy';
 import { CrossAgentConvertDialog } from '@/components/ui/cross-agent-convert-dialog';
 import type { MakerVendor } from '@/lib/ccAgent.types';
 import { refreshRemoteDeviceSessions } from '@/features/device-link/refreshRemoteSessions';
+import { remoteProjectsStore } from '@/features/device-link/remoteProjectsStore';
 import {
   ChevronDown,
   Code2,
@@ -1105,6 +1106,13 @@ export function NewMakerDraftRoute() {
               text: stripLocalMentionChips(dlDraft.text),
             });
           }
+          // 路径型附件同样属于上一台机器,与 handleDeviceChange 同口径丢弃(理由见那里)。
+          // 这条路径也会换设备(浏览器可以选到另一台机器上的项目),漏了就等于只修了一半。
+          const stranded = attachmentState.attachments.filter((f) => f.category !== 'image');
+          if (stranded.length > 0) {
+            for (const f of stranded) attachmentState.removeFile(f.id);
+            toast.info(t('newChat.deviceSwitcher.attachmentsDropped', { count: stranded.length }));
+          }
         }
         // 只有 deviceId 真正变化时 effect 才会重跑并消费 skip flag;同设备不设。
         if (deviceChanged) {
@@ -1521,6 +1529,20 @@ export function NewMakerDraftRoute() {
           text: stripLocalMentionChips(composerDraft.text),
         });
       }
+      // 同理,**路径型附件**也留不得(Codex review P1)。attachment-path-passthrough 之后非图片附件
+      // 只把 path 透传给模型(agent 自己用 Read 读),而 rehomeDraftAttachments 只重整图片、非图片
+      // 原样返回 —— 于是上一台机器的路径会随首条消息发到新设备:要么读不到,要么读到同路径下一个
+      // 毫不相关的文件(后者更糟,用户不会发现)。图片走 xdt-image:// 缓存、不依赖对端文件系统,
+      // 行为保持不变。
+      //
+      // 这里给 toast:chip 是可见的文字、重打一次就有,附件从托盘里无声消失只会被当成 bug。
+      const strandedFiles = attachmentState.attachments.filter((f) => f.category !== 'image');
+      if (strandedFiles.length > 0) {
+        for (const f of strandedFiles) attachmentState.removeFile(f.id);
+        toast.info(
+          t('newChat.deviceSwitcher.attachmentsDropped', { count: strandedFiles.length }),
+        );
+      }
       // 换设备前**同步失效上一台的远程默认值快照**。
       //
       // 不做的话会串台:patchDraft 只改 deviceId,而 dlSel / remoteDraftState / dlSeedKeyRef 仍
@@ -1548,7 +1570,7 @@ export function NewMakerDraftRoute() {
         extraDirs: [],
       });
     },
-    [effectiveDeviceLinkDeviceId],
+    [effectiveDeviceLinkDeviceId, attachmentState, t],
   );
   const handleOpenRemoteProject = useCallback((deviceId?: string) => {
     setAddRemoteProjectDeviceId(deviceId ?? null);
@@ -1633,9 +1655,22 @@ export function NewMakerDraftRoute() {
       let policyEnabled = collabPolicy.enabled;
       let policyUnavailable = collabPolicy.unavailable;
       if (effectiveCollab.enabled && policyUnavailable) {
-        const refreshed = await collabPolicy.refresh();
-        policyEnabled = refreshed.enabled;
-        policyUnavailable = refreshed.unavailable;
+        // 这是 handleSend 里**第一个** await,必须先上在途锁(Codex review P1):不上锁的话,协同策略
+        // 重取期间设备 pill / 工作区 pill 仍可点,而本次调用的闭包持有的是旧设备与旧工作区 ——
+        // 会话建在旧目标上,随后 resetDraftWorkspaceAfterSend 又把用户刚选的新目标清掉。
+        // markSendInFlight 同步写 ref(两个 pill 的 handler 据此立即拒绝)并驱动 disabled 渲染。
+        //
+        // 用完即释放是安全的:从这里到下方真正的 markSendInFlight(true) 之间**没有任何 await**,
+        // 同步代码期间不会有用户交互插进来。这样早退路径(策略仍不可用 / 远程草稿未就绪)也不必
+        // 各自记得解锁,少一类漏解锁把发送按钮永久锁死的风险。
+        markSendInFlight(true);
+        try {
+          const refreshed = await collabPolicy.refresh();
+          policyEnabled = refreshed.enabled;
+          policyUnavailable = refreshed.unavailable;
+        } finally {
+          markSendInFlight(false);
+        }
       }
       if (effectiveCollab.enabled && (policyUnavailable || !policyEnabled)) {
         toast.warning(
@@ -1812,6 +1847,12 @@ export function NewMakerDraftRoute() {
             //     被控端会话超过 200 条时会把窗口外已缓存的会话连同标题叠加层一起清掉。
             // 回流失败(gave-up/superseded)也照常交接:sessions:created push 还会触发一次防抖重拉,
             // 不能因为镜像慢一拍就谎报创建失败。
+            //
+            // 但「照常交接」有个前提:归属必须先登记好。回流失败时镜像里没有这条会话,
+            // getSessionDeviceId 返回 undefined,makerApiFor 就把首条消息发给**本机** maker
+            // (Codex review P1)。所以先把「这条会话在那台设备上」这个已确定的事实钉进 store,
+            // 再去回流 —— 钉子只影响 origin 判定,会话进列表仍等权威快照。
+            remoteProjectsStore.pinSessionOrigin(deviceId, remoteSessionId);
             const refreshResult = await refreshRemoteDeviceSessions(deviceId, deviceName);
             if (refreshResult !== 'ok') {
               log.warn('[draft send] remote sessions refresh after create', refreshResult);
@@ -2301,6 +2342,9 @@ export function NewMakerDraftRoute() {
         // 回流失败不能抛 —— 这里抛出去 NewGoalDialog 会内联报错并保持打开,用户再点一次「创建」
         // 就在对端建出第二个目标会话,第一个空着滞留(Codex review P1)。不抛 / 认 epoch /
         // 有界快照按 merge 落库这三条同上,见 handleSend 处的说明。
+        // 同样先钉归属再回流:goalApiFor 按归属路由,回流失败时它会把 setGoal 发给本机 maker,
+        // 对端刚建好的会话则永远拿不到目标(Codex review P1)。
+        remoteProjectsStore.pinSessionOrigin(deviceId, remoteSessionId);
         const refreshResult = await refreshRemoteDeviceSessions(deviceId, deviceName);
         if (refreshResult !== 'ok') {
           log.warn('[draft goal] remote sessions refresh after create', refreshResult);

@@ -4455,7 +4455,8 @@
       "label": "设备",
       "localHint": "在这台电脑上运行",
       "onlineHint": "已连接，可在其上创建",
-      "offlineHint": "离线 · 连上后可用"
+      "offlineHint": "离线 · 连上后可用",
+      "attachmentsDropped": "已移除 {{count}} 个附件：它们是上一台设备上的文件"
     }
   },
   "onboarding": {

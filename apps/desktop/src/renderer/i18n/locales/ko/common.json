@@ -4455,7 +4455,8 @@
       "label": "기기",
       "localHint": "이 컴퓨터에서 실행",
       "onlineHint": "연결됨 — 생성 가능",
-      "offlineHint": "오프라인 — 연결 후 사용 가능"
+      "offlineHint": "오프라인 — 연결 후 사용 가능",
+      "attachmentsDropped": "첨부파일 {{count}}개를 제거했습니다 — 이전 기기에 있는 파일입니다"
     }
   },
   "onboarding": {

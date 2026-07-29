@@ -4456,7 +4456,8 @@
       "label": "Device",
       "localHint": "Runs on this computer",
       "onlineHint": "Connected — available",
-      "offlineHint": "Offline — available once connected"
+      "offlineHint": "Offline — available once connected",
+      "attachmentsDropped": "Removed {{count}} attachment(s) — they live on the previous device"
     }
   },
   "onboarding": {

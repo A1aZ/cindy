@@ -219,7 +219,12 @@ export function FolderPickerPopover({
               handleRemoveProject(project);
             }}
             className={cn(
-              'flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px]',
+              // 圆角走 pill:DESIGN.md §5 只允许 8px(内控件)/ 12px(容器)/ 9999px(pill)三档,
+              // 6px 是被明文禁止的中间值。这里选 pill 而非 8px —— §5 把 8px 限定为「小到无法戴
+              // pill 的交互件」(多行输入、行高亮、块内小格),24×24 的图标按钮戴上 pill 就是个
+              // 正圆,完全成立;而外层行本身已是 8px,内层再用 8px 也不满足「内圆角要比容器小」。
+              // 同款 hover 才显形的小图标按钮在 ChatInput / PendingQueuePanel 里都是 rounded-full。
+              'flex h-6 w-6 shrink-0 items-center justify-center rounded-full',
               'text-[var(--folder-item-path)] opacity-0 transition-opacity',
               'group-hover:opacity-100 focus-visible:opacity-100',
               'hover:bg-[var(--surface-hover)] hover:text-[var(--folder-item-name)]',

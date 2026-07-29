@@ -4455,7 +4455,8 @@
       "label": "デバイス",
       "localHint": "このパソコンで実行",
       "onlineHint": "接続済み — 作成できます",
-      "offlineHint": "オフライン — 接続後に利用可能"
+      "offlineHint": "オフライン — 接続後に利用可能",
+      "attachmentsDropped": "添付ファイル {{count}} 件を削除しました（前のデバイス上のファイルです）"
     }
   },
   "onboarding": {

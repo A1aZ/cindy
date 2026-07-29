@@ -609,6 +609,63 @@ describe('Shared create project picker', () => {
     expect(newMakerDraftRouteSource).not.toContain('setDeviceSessions(');
   });
 
+  // #807 review 第十七轮:归属必须在**回流之前**登记。回流失败(gave-up / superseded)时镜像里
+  // 没有这条会话,getSessionDeviceId 返回 undefined,makerApiFor / goalApiFor 就把首条消息与
+  // setGoal 发给本机 maker。行为契约本身由 remoteProjectsStore.test.ts 覆盖,这里只钉接线顺序。
+  it('pins the remote session origin before refreshing the mirror', () => {
+    const pin = 'remoteProjectsStore.pinSessionOrigin(deviceId, remoteSessionId);';
+    const refresh = 'await refreshRemoteDeviceSessions(deviceId, deviceName)';
+    // 两条远程创建路径都要钉。
+    expect((newMakerDraftRouteSource.match(/pinSessionOrigin\(deviceId, remoteSessionId\)/g) ?? []).length).toBe(2);
+    // 顺序:每一处 pin 都必须在紧随其后的那次 refresh 之前。
+    let cursor = 0;
+    for (let i = 0; i < 2; i++) {
+      const pinAt = newMakerDraftRouteSource.indexOf(pin, cursor);
+      const refreshAt = newMakerDraftRouteSource.indexOf(refresh, pinAt);
+      expect(pinAt).toBeGreaterThan(-1);
+      expect(refreshAt).toBeGreaterThan(pinAt);
+      cursor = refreshAt;
+    }
+  });
+
+  // #807 review 第十七轮:handleSend 的第一个 await 是协同策略重取,它在上锁之前 —— 期间两个
+  // pill 仍可点,而本次调用的闭包持有旧设备 / 旧工作区,会话会建在旧目标上。
+  it('takes the in-flight lock before the first await in handleSend', () => {
+    const handler = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const handleSend = useCallback('),
+    );
+    const lockAt = handler.indexOf('markSendInFlight(true);');
+    const refreshAt = handler.indexOf('await collabPolicy.refresh()');
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(refreshAt).toBeGreaterThan(lockAt);
+    // finally 解锁:早退路径不必各自记得解锁(锁到真正上锁点之间是纯同步代码)。
+    expect(handler.slice(lockAt, refreshAt + 400)).toContain('markSendInFlight(false);');
+  });
+
+  // #807 review 第十七轮:DESIGN.md §5 只允许 8px / 12px / 9999px 三档,6px 是明文禁止的中间值。
+  // 这里取 pill —— §5 把 8px 限定为「小到无法戴 pill 的交互件」,24×24 图标按钮戴 pill 就是正圆。
+  it('keeps the row remove affordance on an allowed radius tier', () => {
+    expect(folderPickerPopoverSource).not.toContain('rounded-[6px]');
+    expect(folderPickerPopoverSource).toContain(
+      'flex h-6 w-6 shrink-0 items-center justify-center rounded-full',
+    );
+  });
+
+  // #807 review 第十七轮:换设备要一并丢掉**路径型**附件。attachment-path-passthrough 之后非图片
+  // 附件只把 path 透传给模型,而 rehomeDraftAttachments 只重整图片 —— 上一台机器的路径会随首条
+  // 消息发到新设备,读不到、或读到同路径下一个毫不相关的文件。
+  it('drops path-backed attachments on every device switch', () => {
+    // 直接切设备 + 浏览器换到另一台机器,两条路径都要做。
+    expect(
+      (newMakerDraftRouteSource.match(/\.filter\(\(f\) => f\.category !== 'image'\)/g) ?? []).length,
+    ).toBe(2);
+    expect(newMakerDraftRouteSource).toContain('attachmentState.removeFile(f.id)');
+    // 图片不动:它们走 xdt-image:// 缓存,不依赖对端文件系统。
+    expect(newMakerDraftRouteSource).toContain(
+      "t('newChat.deviceSwitcher.attachmentsDropped'",
+    );
+  });
+
   it('keeps recent-folder storage out of project-option selection', () => {
     expect(folderPickerPopoverSource).toContain('projectOptions?: readonly FolderPickerOption[]');
     expect(folderPickerPopoverSource).toContain(

@@ -22,6 +22,15 @@ const STORAGE_KEY = 'xdt-maker:lastReadVersion';
  */
 const MAX_AGGREGATED_VERSIONS = 5;
 
+/**
+ * How long the pre-install preview waits for the version index before opening
+ * with the pending version alone. The index contributes only the *in-between*
+ * blocks of a multi-version jump; a slow or unreachable CDN must not turn the
+ * banner's link into a dead click for the full request timeout (15s in
+ * `releaseNotesService`).
+ */
+const PREVIEW_INDEX_BUDGET_MS = 3000;
+
 /** Numeric semver comparison. Returns >0 if a > b, <0 if a < b, 0 if equal. */
 function cmpVersion(a: string, b: string): number {
   const pa = a.split('.').map(Number);
@@ -360,7 +369,11 @@ export function useUpdateNotice(): UseUpdateNoticeReturn {
   }, [t, open]);
 
   const onOpenVersion = useCallback((pendingVersion: string) => {
-    if (open) return;
+    // `open` is state, so two clicks in the same tick both read `false` and both
+    // fan out to the CDN. `dialogOpenedRef` is set synchronously below and stays
+    // true until dismiss (or a failed attempt), so it is the re-entrancy guard
+    // that actually holds for a double-clicked text link.
+    if (open || dialogOpenedRef.current) return;
     if (dismissTimerRef.current !== null) {
       clearTimeout(dismissTimerRef.current);
       dismissTimerRef.current = null;
@@ -369,9 +382,24 @@ export function useUpdateNotice(): UseUpdateNoticeReturn {
     const appVersion = window.electronAPI.appVersion;
 
     (async () => {
-      const index = await fetchReleaseNotesIndex();
+      // Kick off the pending version's notes immediately — it is the one block
+      // that must be there, and the banner's probe usually leaves it cached, so
+      // this resolves ~instantly and overlaps whatever the index costs.
+      const pendingNotes = fetchReleaseNotes(pendingVersion);
+      // The index only adds the *in-between* blocks. Waiting out the full CDN
+      // timeout (15s, releaseNotesService) for them would make the link look
+      // dead, so give it a budget and degrade to the pending version alone —
+      // the same degradation `versionsToPreview` already does for a null index.
+      const index = await Promise.race([
+        fetchReleaseNotesIndex(),
+        new Promise<null>((resolve) => {
+          setTimeout(() => resolve(null), PREVIEW_INDEX_BUDGET_MS);
+        }),
+      ]);
       const targets = versionsToPreview(index, appVersion, pendingVersion);
-      const results = await Promise.all(targets.map((v) => fetchReleaseNotes(v)));
+      const results = await Promise.all(
+        targets.map((v) => (v === pendingVersion ? pendingNotes : fetchReleaseNotes(v))),
+      );
       const notes = results.filter((n): n is ReleaseNotes => n !== null);
 
       // The pending version's own notes are the point of this dialog — if only

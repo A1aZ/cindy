@@ -165,6 +165,42 @@ describe('useUpdateNotice onOpenVersion — pre-install preview', () => {
     expect(result.current.releaseNotes).toBeNull();
   });
 
+  it('dedupes a double click before the dialog has opened', async () => {
+    const { result } = renderHook(() => useUpdateNotice());
+
+    // 同一 tick 两次点击:`open` 还是 false,只有同步 ref 拦得住第二次。
+    act(() => {
+      result.current.onOpenVersion('1.4.2');
+      result.current.onOpenVersion('1.4.2');
+    });
+
+    await waitFor(() => expect(result.current.open).toBe(true));
+    expect(mocks.fetchReleaseNotesIndex).toHaveBeenCalledTimes(1);
+    expect(mocks.fetchReleaseNotes).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens with the pending version alone when the index hangs past its budget', async () => {
+    setInstalled('1.3.9');
+    // index 永不 resolve —— 模拟 CDN 挂住(真实链路要等满 15s 超时)。
+    mocks.fetchReleaseNotesIndex.mockReturnValue(new Promise(() => {}));
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useUpdateNotice());
+
+      act(() => { result.current.onOpenVersion('1.4.2'); });
+
+      // 预算到点前不该开:in-between 版本还有希望赶上。
+      await act(async () => { await vi.advanceTimersByTimeAsync(2999); });
+      expect(result.current.open).toBe(false);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      await vi.waitFor(() => expect(result.current.open).toBe(true));
+      expect(result.current.releaseNotes?.map((n) => n.version)).toEqual(['1.4.2']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('leaves lastReadVersion untouched on dismiss, so the post-restart popup still fires', async () => {
     const { result } = renderHook(() => useUpdateNotice());
 

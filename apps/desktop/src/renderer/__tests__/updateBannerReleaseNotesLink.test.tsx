@@ -87,6 +87,31 @@ describe('UpdateBanner release-notes link', () => {
     expect(screen.queryByText(LINK)).toBeNull();
   });
 
+  it('does not probe at all while the sidebar is collapsed / rail', async () => {
+    render(<UpdateBanner isCollapsed onOpenVersionNotice={vi.fn()} />);
+
+    // 收起态压根不渲染文字链,那就不该为它打一次 CDN 请求。
+    await screen.findByRole('button');
+    expect(fetchReleaseNotes).not.toHaveBeenCalled();
+    expect(screen.queryByText(LINK)).toBeNull();
+  });
+
+  it('probes once the sidebar expands, without re-probing on callback identity churn', async () => {
+    const { rerender } = render(
+      <UpdateBanner isCollapsed onOpenVersionNotice={vi.fn()} />,
+    );
+    expect(fetchReleaseNotes).not.toHaveBeenCalled();
+
+    rerender(<UpdateBanner isCollapsed={false} onOpenVersionNotice={vi.fn()} />);
+    await screen.findByText(LINK);
+    expect(fetchReleaseNotes).toHaveBeenCalledTimes(1);
+
+    // useUpdateNotice 的回调带 `open` 依赖,弹窗开关会换掉它的 identity;探测不该跟着重跑。
+    rerender(<UpdateBanner isCollapsed={false} onOpenVersionNotice={vi.fn()} />);
+    rerender(<UpdateBanner isCollapsed={false} onOpenVersionNotice={vi.fn()} />);
+    expect(fetchReleaseNotes).toHaveBeenCalledTimes(1);
+  });
+
   it('renders no link when the host provides no open-notice callback', async () => {
     render(<UpdateBanner isCollapsed={false} />);
 

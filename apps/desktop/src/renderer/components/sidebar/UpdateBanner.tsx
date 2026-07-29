@@ -128,8 +128,16 @@ export function UpdateBanner({ isCollapsed, onOpenVersionNotice }: UpdateBannerP
   // 上一个已就绪补丁,不是正在下载的新版,拿它探测会给出错版本的入口。
   // fetchReleaseNotes 在 renderer + main 两层都有缓存,所以这次探测同时也是预热:
   // 用户真点开时命中缓存,不会再打一次 CDN。
+  //
+  // 两条刻意的收窄:
+  //   - 收起 / rail 态不渲染文字链,那就别探测;展开时 isCollapsed 变化会让 effect
+  //     重跑,该探测的时候一定会探测到。
+  //   - 依赖里用 canOpenNotice 这个布尔量而不是回调本身 —— 回调来自 useUpdateNotice
+  //     的 useCallback([t, open]),弹窗每次开关都会换掉它的 identity,直接依赖函数会
+  //     让探测跟着弹窗开关反复重跑。
+  const canOpenNotice = Boolean(onOpenVersionNotice);
   useEffect(() => {
-    if (status !== 'ready' || !version || !onOpenVersionNotice) {
+    if (status !== 'ready' || !version || !canOpenNotice || isCollapsed) {
       setHasNotes(false);
       return;
     }
@@ -138,7 +146,7 @@ export function UpdateBanner({ isCollapsed, onOpenVersionNotice }: UpdateBannerP
       .then((notes) => { if (!cancelled) setHasNotes(notes !== null); })
       .catch(() => { if (!cancelled) setHasNotes(false); });
     return () => { cancelled = true; };
-  }, [status, version, onOpenVersionNotice]);
+  }, [status, version, canOpenNotice, isCollapsed]);
 
   // 取消:先打标记再复位,让上面的 effect 在入口按钮重新挂载后把焦点还回去。
   const handleCancelConfirm = () => {

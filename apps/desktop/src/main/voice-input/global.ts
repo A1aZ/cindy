@@ -1365,6 +1365,22 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
   });
 }
 
+/**
+ * 停掉 native 快捷键监听 —— 但还有窗口在录制时，只放弃快捷键、保住 capture。
+ *
+ * 同一个 helper 既服务常驻监听也服务录制页的 Fn 检测。两个设置页同时开着录制框时，一边提交
+ * F16（或清空快捷键）会走到 stop()，把另一边的 keys 来源一起杀掉：那个窗口的录制框还开着，
+ * 却再也收不到 Fn，只能关掉重开。判据用转发名单而不是录制会话集合 —— 需要 helper 的正是
+ * 「capture 真的起来了」的那些窗口。
+ */
+function stopNativeShortcutListenerPreservingCapture(): void {
+  if (modifierShortcutRecordingWebContentsIds.size > 0) {
+    macModifierShortcutListener.releaseShortcutKeepingCapture();
+    return;
+  }
+  macModifierShortcutListener.stop();
+}
+
 async function setVoiceInputGlobalShortcut(shortcut: VoiceInputShortcut | null): Promise<VoiceInputGlobalResult> {
   if (process.platform === 'linux' && shortcut) {
     return {
@@ -1382,7 +1398,7 @@ async function setVoiceInputGlobalShortcut(shortcut: VoiceInputShortcut | null):
     registeredShortcut = null;
     registeredNativeShortcutLabel = null;
     registeredNativeShortcutKey = null;
-    macModifierShortcutListener.stop();
+    stopNativeShortcutListenerPreservingCapture();
     destroyOverlayWindow();
     log.info('global shortcut disabled');
     return { ok: true };
@@ -1462,7 +1478,7 @@ async function setVoiceInputGlobalShortcut(shortcut: VoiceInputShortcut | null):
   registeredShortcut = shortcut;
   registeredNativeShortcutLabel = null;
   registeredNativeShortcutKey = null;
-  macModifierShortcutListener.stop();
+  stopNativeShortcutListenerPreservingCapture();
   log.info('global shortcut registered', { accelerator });
   // First-press warmup: read auth.json now so the very first shortcut press
   // does not pay for it on the critical path.

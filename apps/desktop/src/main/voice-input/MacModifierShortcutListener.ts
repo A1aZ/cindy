@@ -138,6 +138,21 @@ export class MacModifierShortcutListener {
     this.stop();
   }
 
+  /**
+   * 放弃当前快捷键，但**保留** capture 子进程。
+   *
+   * 同一个 helper 既服务「常驻快捷键监听」也服务「录制页的 Fn 检测」。有窗口正在录制时直接
+   * stop() 会把它们的 keys 来源一起杀掉 —— 那个窗口的录制框还开着，却再也收不到 Fn，只能关掉
+   * 重开。所以这里只清快捷键相关的状态，child 交给 stopKeyCapture / stop 去收。
+   */
+  releaseShortcutKeepingCapture(): void {
+    this.shortcut = null;
+    this.clearRestartTimer();
+    this.restartAttempts = 0;
+    this.endActiveTriggerIfNeeded();
+    this.resetState();
+  }
+
   stop(): void {
     // 作废正在飞的启动：它可能还停在解析 helper 的 await 上，此刻 child 仍是 null，
     // 下面的 kill 够不着它。不作废的话它随后会 spawn 出一个没人管的 helper。

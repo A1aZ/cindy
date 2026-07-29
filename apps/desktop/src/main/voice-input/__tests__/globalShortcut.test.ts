@@ -56,6 +56,7 @@ const mocks = vi.hoisted(() => {
   };
   const modifierSetShortcut = vi.fn();
   const modifierStop = vi.fn();
+  const modifierReleaseShortcut = vi.fn();
   const modifierIsRunning = vi.fn();
   const modifierStartKeyCapture = vi.fn();
   const inputMonitoringSnapshot = vi.fn();
@@ -104,6 +105,7 @@ const mocks = vi.hoisted(() => {
     isSecondaryAppWindow,
     modifierSetShortcut,
     modifierStop,
+    modifierReleaseShortcut,
     modifierIsRunning,
     modifierStartKeyCapture,
     inputMonitoringSnapshot,
@@ -184,6 +186,7 @@ vi.mock('../MacModifierShortcutListener.js', () => ({
       setShortcut: mocks.modifierSetShortcut,
       isRunning: mocks.modifierIsRunning,
       stop: mocks.modifierStop,
+      releaseShortcutKeepingCapture: mocks.modifierReleaseShortcut,
       stopKeyCapture: vi.fn(),
       startKeyCapture: mocks.modifierStartKeyCapture,
     };
@@ -224,6 +227,7 @@ describe('voice input global shortcut registration', () => {
     mocks.modifierIsRunning.mockReset();
     mocks.modifierIsRunning.mockReturnValue(true);
     mocks.modifierStop.mockClear();
+    mocks.modifierReleaseShortcut.mockClear();
     mocks.modifierStartKeyCapture.mockReset();
     mocks.modifierStartKeyCapture.mockResolvedValue({ ok: true });
     // 默认已授权:既有用例断言的是「拿得到权限时」的注册行为。
@@ -1196,6 +1200,47 @@ describe('voice input global shortcut registration', () => {
           'voice-input:global-shortcut-trigger',
           expect.objectContaining({ id: expect.any(String) }),
         );
+      });
+
+      // 同一个 helper 既服务常驻监听也服务录制页的 Fn 检测。一边提交 F16(走 accelerator 路径,
+      // 会停掉 native listener)时不能把另一边的 keys 来源一起杀掉 —— 那个窗口的录制框还开着,
+      // 却再也收不到 Fn, 只能关掉重开。
+      it('keeps the shared capture alive for other recorders when committing an accelerator', async () => {
+        setPlatform('darwin');
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        // 另一个窗口的录制框开着,且 capture 真的起来了(转发名单里有它)。
+        const recordingSender = { id: mocks.focusedWindow.webContents.id, once: vi.fn() };
+        await mocks.handlers.get('voice-input:modifier-shortcut-recording:start')?.({ sender: recordingSender });
+        mocks.modifierStop.mockClear();
+
+        await mocks.handlers.get('voice-input:settings:update-shortcut')?.({}, f16);
+
+        // 关键:没有 stop 掉共享 helper,只放弃了快捷键。
+        expect(mocks.modifierStop).not.toHaveBeenCalled();
+        expect(mocks.modifierReleaseShortcut).toHaveBeenCalled();
+
+        // 那个窗口照样收得到 keys。
+        mocks.focusedWindow.webContents.send.mockClear();
+        mocks.listenerOptions.onKeys?.(['Fn']);
+        expect(mocks.focusedWindow.webContents.send).toHaveBeenCalledWith(
+          'voice-input:modifier-shortcut-keys',
+          { keys: ['Fn'] },
+        );
+      });
+
+      // 没有窗口在录时照旧 stop —— 别把 helper 永久留着。
+      it('stops the listener when no recorder needs the shared capture', async () => {
+        setPlatform('darwin');
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+        mocks.modifierStop.mockClear();
+
+        await mocks.handlers.get('voice-input:settings:update-shortcut')?.({}, f16);
+
+        expect(mocks.modifierStop).toHaveBeenCalled();
+        expect(mocks.modifierReleaseShortcut).not.toHaveBeenCalled();
       });
 
       // 按住说话的会话可能在录制框打开**之前**就已经 start 了; 挂起/替换 listener 会调

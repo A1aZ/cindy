@@ -1306,6 +1306,16 @@ export function CCAgentSessionView({
       setErrorTailBannerHiddenFor(null);
     }
   }, [syntheticContinuationPending, errorTailBannerHiddenFor]);
+  // 排队中的续跑项消失(dispatch 成功 → 消息落库,或被取消 / 被拒绝 → 原横幅重现)
+  // 时重算告警:两种结局都需要重新对账 —— 成功时原 error 已不是尾行、红点该灭;
+  // 取消时告警仍在、红点该回来(它在 enqueue 成功时被临时清掉了,见上方 continue
+  // handler)。只在 pending 由 true 落回 false 的边沿触发,不在挂起期间反复重算。
+  const prevSyntheticPendingRef = useRef(false);
+  useEffect(() => {
+    const was = prevSyntheticPendingRef.current;
+    prevSyntheticPendingRef.current = syntheticContinuationPending;
+    if (was && !syntheticContinuationPending) void refreshPendingAlerts();
+  }, [syntheticContinuationPending]);
   const handleErrorTailContinue = useCallback(async () => {
     if (!sessionId || !errorTailMsg) return;
     setErrorTailBannerHiddenFor(errorTailMsg.clientId);
@@ -1319,9 +1329,12 @@ export function CCAgentSessionView({
           ? CONTINUE_AFTER_APP_EXIT_PROMPT
           : CONTINUE_AFTER_ERROR_PROMPT,
       );
-      // 续跑项落库后原 error 行已不是尾行,重算清掉红点 —— 否则 'error' 在侧栏
-      // 状态优先级里高于 running,任务已经跑起来了却还挂着红点。
-      refreshPendingAlerts();
+      // sendUiTrigger 在 enqueue 成功后就 resolve,续跑消息**还没落库** —— 此刻重算
+      // 仍会把原 error 行判为尾行并保留红点,而 syntheticContinuationPending 已经把
+      // 横幅隐藏了(排队被暂停 / 阻塞时可能持续很久)。所以先临时清点让两者一致;
+      // 排队项被取消或拒绝时,下方的 effect 会在 pending 落回 false 时重算恢复
+      // (PR #879 review P1)。
+      ackErrorAlertHandled(sessionId);
     } catch (err) {
       setErrorTailBannerHiddenFor(null);
       toast.error(err instanceof Error ? err.message : String(err));
@@ -1402,9 +1415,10 @@ export function CCAgentSessionView({
       // 续跑 turn 真正启动时会写更新的 started；若再次被 app 退出打断，仍会产生新提示。
       // 本视图先靠内存 acked 即时熄灭，peer 视图靠 dispatch 后的 ack 广播收敛。
       await makerChatStore.sendUiTrigger(sessionId, CONTINUE_AFTER_APP_EXIT_PROMPT);
-      // 同 handleErrorTailContinue:turn 已跑起来,红点必须让位给 running 状态。
-      // durable ack 的广播还要等 dispatch 成功,这里先收敛本地视图。
-      refreshPendingAlerts();
+      // 同 handleErrorTailContinue:enqueue 成功但续跑还没落库、durable ack 也要等
+      // dispatch 成功,而横幅已隐藏 —— 先临时清点保持一致,排队被取消时由 pending
+      // 落回 false 的 effect 重算恢复。
+      ackErrorAlertHandled(sessionId);
     } catch (err) {
       setSessionInterruptAcked(false);
       toast.error(err instanceof Error ? err.message : String(err));
@@ -2446,17 +2460,19 @@ export function CCAgentSessionView({
   // interrupted-turn-resume:main 判定失败 turn 已有 assistant 产出时,会用隐藏的
   // 规范化续跑指令(CONTINUE_AFTER_ERROR_PROMPT)替代重发原文;零产出仍重发原文。
   // 判定与文案都在 main(规则 9),renderer 只发意图。
+  // Retry / silent-stop 继续都**不在这里 ack 红点**(PR #879 review P1):这两个 store
+  // 方法内部吞掉异步失败,点击时就清点会在恢复失败(retry 被拒 / 续跑入队失败)时留下
+  // 「横幅还在、红点没了」,而 live-only 的错误没有任何重算能把它恢复。
+  // 成功路径已经有更可靠的收敛点:turn 真正跑起来 → store 清掉终止错误 →
+  // useSessionRunningStatus 在 running 上升沿把 orphan 的 error 角标 explicit 清掉。
+  // 失败路径则天然保留红点,与仍在展示的横幅一致。
   const handleRetry = useCallback(() => {
-    // 点击 Retry = 处置了这条告警,清红角标(展示本身不算)。
-    if (sessionId) ackErrorAlertHandled(sessionId);
     retryLastError();
-  }, [retryLastError, sessionId]);
+  }, [retryLastError]);
 
-  // silent-stop 耗尽横幅「继续」:同 Retry 算处置,动作走 store(清横幅 + 隐藏续跑指令)。
   const handleSilentStopContinue = useCallback(() => {
-    if (sessionId) ackErrorAlertHandled(sessionId);
     continueAfterSilentStop();
-  }, [continueAfterSilentStop, sessionId]);
+  }, [continueAfterSilentStop]);
 
   // 点击 Cancel 关闭报错 banner 同样是处置(用户选择不管它了)。
   const handleDismissError = useCallback(() => {

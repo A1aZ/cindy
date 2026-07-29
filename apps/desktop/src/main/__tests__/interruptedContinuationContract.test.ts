@@ -81,6 +81,10 @@ describe('interrupted continuation enqueue contract', () => {
     expect(sessionViewSource).toMatch(
       /if \(syntheticContinuationPending && sessionInterruptAcked\) \{\s*setSessionInterruptAcked\(false\);\s*\}/,
     );
-    expect(matchIndexes(sessionViewSource, /!syntheticContinuationPending/)).toHaveLength(2);
+    // 三处消费点,多一处就要回来审视是否绕过了「抑制交给排队/在飞状态」这条契约:
+    //  1-2. error-tail banner 与 interrupted banner 的互斥渲染条件;
+    //  3.   pending 由 true 落回 false 的边沿 → 重算未处理告警红点(PR #879):
+    //       enqueue 成功时红点被临时清掉,排队项被取消时要靠这个边沿恢复。
+    expect(matchIndexes(sessionViewSource, /!syntheticContinuationPending/)).toHaveLength(3);
   });
 });

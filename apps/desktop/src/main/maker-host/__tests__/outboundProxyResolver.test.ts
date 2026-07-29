@@ -81,19 +81,22 @@ afterEach(() => {
 });
 
 describe('parseChromiumProxyResult', () => {
+  /** 只关心选中的地址时的简写(verdict 的另一半 skippedUnsupported 另有专门用例)。 */
+  const urlOf = (result: string) => parseChromiumProxyResult(result).url;
+
   it('parses PROXY entries into http urls', () => {
-    expect(parseChromiumProxyResult('PROXY 127.0.0.1:7890')).toBe('http://127.0.0.1:7890');
+    expect(urlOf('PROXY 127.0.0.1:7890')).toBe('http://127.0.0.1:7890');
   });
 
   it('returns null for DIRECT', () => {
-    expect(parseChromiumProxyResult('DIRECT')).toBe(null);
+    expect(urlOf('DIRECT')).toBe(null);
   });
 
   it('uses SOCKS5 when it is the only usable candidate', () => {
-    expect(parseChromiumProxyResult('SOCKS5 127.0.0.1:7891')).toBe('socks5://127.0.0.1:7891');
+    expect(urlOf('SOCKS5 127.0.0.1:7891')).toBe('socks5://127.0.0.1:7891');
     // 「代理软件只开 SOCKS 出口」的典型形态 —— 此时直连会因本机解不出上游而 ENOTFOUND。
-    expect(parseChromiumProxyResult('SOCKS5 127.0.0.1:7891; DIRECT')).toBe('socks5://127.0.0.1:7891');
-    expect(parseChromiumProxyResult('HTTPS secure.proxy:443; SOCKS5 127.0.0.1:7891'))
+    expect(urlOf('SOCKS5 127.0.0.1:7891; DIRECT')).toBe('socks5://127.0.0.1:7891');
+    expect(urlOf('HTTPS secure.proxy:443; SOCKS5 127.0.0.1:7891'))
       .toBe('socks5://127.0.0.1:7891');
   });
 
@@ -101,27 +104,53 @@ describe('parseChromiumProxyResult', () => {
     // 回归防护:resolver 只能给一个结果,选中的条目连不上就是失败、不会退到下一个。
     // 支持 SOCKS5 之前这两串都选 PROXY(SOCKS5 条目被跳过);若改成选 SOCKS5,
     // 该端点一挂就成 502,凭空多出一种原来不存在的失败模式。
-    expect(parseChromiumProxyResult('SOCKS5 127.0.0.1:7891; PROXY 127.0.0.1:7890; DIRECT'))
+    expect(urlOf('SOCKS5 127.0.0.1:7891; PROXY 127.0.0.1:7890; DIRECT'))
       .toBe('http://127.0.0.1:7890');
-    expect(parseChromiumProxyResult('PROXY 127.0.0.1:7890; SOCKS5 127.0.0.1:7891'))
+    expect(urlOf('PROXY 127.0.0.1:7890; SOCKS5 127.0.0.1:7891'))
       .toBe('http://127.0.0.1:7890');
   });
 
   it('stops at DIRECT and skips unsupported HTTPS/SOCKS(v4) entries', () => {
-    expect(parseChromiumProxyResult('HTTPS secure.proxy:443; DIRECT')).toBe(null);
+    expect(urlOf('HTTPS secure.proxy:443; DIRECT')).toBe(null);
     // DIRECT 之后的条目不再考虑:PAC 里 DIRECT 意味着「到此为止,直连即可」。
-    expect(parseChromiumProxyResult('DIRECT; PROXY 127.0.0.1:7890')).toBe(null);
-    expect(parseChromiumProxyResult('DIRECT; SOCKS5 127.0.0.1:7891')).toBe(null);
+    expect(urlOf('DIRECT; PROXY 127.0.0.1:7890')).toBe(null);
+    expect(urlOf('DIRECT; SOCKS5 127.0.0.1:7891')).toBe(null);
     // Chromium 里裸 SOCKS 前缀就是 v4,不支持。
-    expect(parseChromiumProxyResult('SOCKS 127.0.0.1:1080')).toBe(null);
-    expect(parseChromiumProxyResult('SOCKS 127.0.0.1:1080; PROXY 127.0.0.1:7890'))
+    expect(urlOf('SOCKS 127.0.0.1:1080')).toBe(null);
+    expect(urlOf('SOCKS 127.0.0.1:1080; PROXY 127.0.0.1:7890'))
       .toBe('http://127.0.0.1:7890');
   });
 
+  it('reports whether a configured-but-unusable entry was skipped', () => {
+    // 转发行为不受这个标志影响(照旧直连),但诊断必须能区分「系统说没有代理」和
+    // 「系统列了代理、Cindy 用不了」—— 后者的动作是把那条改成 HTTP/SOCKS5。
+    expect(parseChromiumProxyResult('HTTPS corporate.proxy:443; DIRECT')).toEqual({
+      url: null,
+      skippedUnsupported: true,
+    });
+    expect(parseChromiumProxyResult('SOCKS legacy.proxy:1080')).toEqual({
+      url: null,
+      skippedUnsupported: true,
+    });
+    // 真 DIRECT / 无条目不算「跳过了不支持的条目」。
+    expect(parseChromiumProxyResult('DIRECT')).toEqual({ url: null, skippedUnsupported: false });
+    expect(parseChromiumProxyResult('')).toEqual({ url: null, skippedUnsupported: false });
+    // 有可用候选时标志不影响结果,但仍如实反映扫描过程。
+    expect(parseChromiumProxyResult('HTTPS secure.proxy:443; PROXY 127.0.0.1:7890')).toEqual({
+      url: 'http://127.0.0.1:7890',
+      skippedUnsupported: true,
+    });
+    // DIRECT 之前没有不支持条目 → false(DIRECT 之后的一律不看)。
+    expect(parseChromiumProxyResult('DIRECT; HTTPS secure.proxy:443')).toEqual({
+      url: null,
+      skippedUnsupported: false,
+    });
+  });
+
   it('tolerates malformed input', () => {
-    expect(parseChromiumProxyResult('')).toBe(null);
-    expect(parseChromiumProxyResult(';;')).toBe(null);
-    expect(parseChromiumProxyResult('PROXY')).toBe(null);
+    expect(urlOf('')).toBe(null);
+    expect(urlOf(';;')).toBe(null);
+    expect(urlOf('PROXY')).toBe(null);
   });
 });
 
@@ -307,6 +336,33 @@ describe('getOutboundPathSnapshotFor', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('classifies a configured-but-unusable system proxy as unsupported, not direct', async () => {
+    // 企业环境常见:PAC 只给 HTTPS(TLS-to-proxy)出口。行为上确实直连了,但把它
+    // 报成「系统报告无代理」会让用户以为代理配置正常,真正的动作是换成 HTTP/SOCKS5。
+    electronState.resolveProxy.mockResolvedValue('HTTPS corporate.proxy:443; DIRECT');
+    await expect(resolveDesktopOutboundProxy('https://chatgpt.com:443')).resolves.toBe(null);
+    expect(snapshotFor('https://chatgpt.com:443')).toMatchObject({
+      source: 'system',
+      kind: 'unsupported',
+    });
+
+    // 真 DIRECT 仍是 direct,两者不能混。
+    resetOutboundProxyResolverStateForTest();
+    electronState.resolveProxy.mockResolvedValue('DIRECT');
+    await resolveDesktopOutboundProxy('https://chatgpt.com:443');
+    expect(snapshotFor('https://chatgpt.com:443')).toMatchObject({ kind: 'direct' });
+  });
+
+  it('keeps the unsupported verdict when a cached resolution is reused', async () => {
+    // 与 unknownReason 同理:标志不跟着缓存走,缓存命中时会把 unsupported 降级成 direct。
+    electronState.resolveProxy.mockResolvedValue('HTTPS corporate.proxy:443');
+    await resolveDesktopOutboundProxy('https://chatgpt.com:443');
+    electronState.resolveProxy.mockClear();
+    await resolveDesktopOutboundProxy('https://chatgpt.com:443');
+    expect(electronState.resolveProxy).not.toHaveBeenCalled();
+    expect(snapshotFor('https://chatgpt.com:443')).toMatchObject({ kind: 'unsupported' });
   });
 
   it('keeps the unknown verdict when a cached fallback is reused', async () => {

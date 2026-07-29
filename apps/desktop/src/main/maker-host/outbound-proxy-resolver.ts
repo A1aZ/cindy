@@ -61,9 +61,22 @@ const SYSTEM_PROXY_CACHE_TTL_MS = 30 * 1000;
  *     支持 SOCKS5 的意义所在(此时直连会因本机解不出上游域名而 ENOTFOUND)。
  * DIRECT 之后的条目不再考虑:PAC 里 DIRECT 意味着「到此为止,直连即可」。
  * HTTPS(TLS-to-proxy)与裸 SOCKS(Chromium 里就是 v4)不支持,跳过。
+ *
+ * `skippedUnsupported` 记录「跳过了至少一个配置了但本实现用不了的条目」。它对转发
+ * 决策没有影响(照旧直连),但对诊断是决定性的:`HTTPS corporate.proxy:443` 这种
+ * 结果说明**系统确实配了代理、只是 Cindy 用不了**,与「系统报告无代理」是两回事,
+ * 报成后者会把用户的排查方向带反。
  */
-export function parseChromiumProxyResult(result: string): string | null {
+export interface ChromiumProxyVerdict {
+  /** 选中的代理地址(http:// 或 socks5://);没有可用条目 → null(直连)。 */
+  url: string | null;
+  /** 是否跳过了 HTTPS(TLS-to-proxy)/ 裸 SOCKS(v4)这类不支持的已配置条目。 */
+  skippedUnsupported: boolean;
+}
+
+export function parseChromiumProxyResult(result: string): ChromiumProxyVerdict {
   let socks5Fallback: string | null = null;
+  let skippedUnsupported = false;
   for (const rawEntry of result.split(';')) {
     const entry = rawEntry.trim();
     if (!entry) continue;
@@ -72,11 +85,16 @@ export function parseChromiumProxyResult(result: string): string | null {
     if (kind === 'DIRECT') break;
     const hostPort = spaceIdx === -1 ? '' : entry.slice(spaceIdx + 1).trim();
     if (!hostPort) continue;
-    if (kind === 'PROXY') return `http://${hostPort}`;
+    if (kind === 'PROXY') return { url: `http://${hostPort}`, skippedUnsupported };
     // 先记下第一个 SOCKS5;扫完(或遇到 DIRECT)确认没有 PROXY 候选才用它。
-    if (kind === 'SOCKS5') socks5Fallback ??= `socks5://${hostPort}`;
+    if (kind === 'SOCKS5') {
+      socks5Fallback ??= `socks5://${hostPort}`;
+      continue;
+    }
+    // HTTPS / SOCKS(v4)/ 其它未知前缀:带了地址却用不了 —— 记下来给诊断。
+    skippedUnsupported = true;
   }
-  return socks5Fallback;
+  return { url: socks5Fallback, skippedUnsupported };
 }
 
 /**
@@ -89,8 +107,15 @@ export type OutboundPathUnknownReason =
   | 'app_not_ready'
   | 'session_unavailable';
 
-/** 出站路径类别。proxy = 走代理;direct = 确认直连;unknown = 没问出来,按直连兜底。 */
-export type OutboundPathKind = 'proxy' | 'direct' | 'unknown';
+/**
+ * 出站路径类别。四态刻意分开 —— 它们的**实际行为都是直连或走代理,但原因完全不同**,
+ * 而原因才是诊断要说的话:
+ *   - proxy       走代理
+ *   - direct      确认没有代理配置
+ *   - unsupported 系统**配了**代理,但形态本实现用不了(TLS-to-proxy / SOCKS4),故直连
+ *   - unknown     判定没问出来(超时 / 异常 / app 未 ready),按直连兜底
+ */
+export type OutboundPathKind = 'proxy' | 'direct' | 'unsupported' | 'unknown';
 
 /** 出站路径旁路快照 —— 仅供诊断展示,不参与转发决策。 */
 export interface OutboundPathSnapshot {
@@ -113,6 +138,11 @@ interface CachedResolution {
    * 快照会把当初的 unknown 兜底重新报成 direct。
    */
   unknownReason?: OutboundPathUnknownReason;
+  /**
+   * 该次解析是否跳过了「配了但不支持」的系统代理条目。同样必须跟着缓存走 ——
+   * 否则缓存命中时会把 unsupported 降级报成 direct。
+   */
+  skippedUnsupported?: boolean;
   expiresAt: number;
 }
 
@@ -155,20 +185,34 @@ const SYSTEM_PROXY_RESOLVE_TIMEOUT_MS = 2000;
  */
 const SYSTEM_PROXY_TIMEOUT_CACHE_TTL_MS = 5000;
 
+interface TimedProxyResolution {
+  value: string | null;
+  timedOut: boolean;
+  /** 见 ChromiumProxyVerdict.skippedUnsupported;超时分支下无意义(恒 false)。 */
+  skippedUnsupported: boolean;
+}
+
 /** 给 resolveProxy 套超时:超时返回 null 并告知调用方这是超时(用于短 TTL 缓存)。 */
 async function resolveProxyWithTimeout(
   ses: { resolveProxy(url: string): Promise<string> },
   upstreamUrl: string,
-): Promise<{ value: string | null; timedOut: boolean }> {
+): Promise<TimedProxyResolution> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await Promise.race<{ value: string | null; timedOut: boolean }>([
-      ses.resolveProxy(upstreamUrl).then((result) => ({
-        value: parseChromiumProxyResult(result),
-        timedOut: false,
-      })),
-      new Promise<{ value: string | null; timedOut: boolean }>((resolve) => {
-        timer = setTimeout(() => resolve({ value: null, timedOut: true }), SYSTEM_PROXY_RESOLVE_TIMEOUT_MS);
+    return await Promise.race<TimedProxyResolution>([
+      ses.resolveProxy(upstreamUrl).then((result) => {
+        const verdict = parseChromiumProxyResult(result);
+        return {
+          value: verdict.url,
+          timedOut: false,
+          skippedUnsupported: verdict.skippedUnsupported,
+        };
+      }),
+      new Promise<TimedProxyResolution>((resolve) => {
+        timer = setTimeout(
+          () => resolve({ value: null, timedOut: true, skippedUnsupported: false }),
+          SYSTEM_PROXY_RESOLVE_TIMEOUT_MS,
+        );
         timer.unref?.();
       }),
     ]);
@@ -181,12 +225,18 @@ interface SystemProxyResolution {
   value: string | null;
   /** 有值 = 这次的 null 是 fail-open 兜底,不是「确认无代理」。 */
   unknownReason?: OutboundPathUnknownReason;
+  /** true = 系统列了代理但形态不支持,直连是「用不了」而非「没配」。 */
+  skippedUnsupported?: boolean;
 }
 
 async function resolveViaSystemProxy(upstreamUrl: string): Promise<SystemProxyResolution> {
   const cached = systemProxyCache.get(upstreamUrl);
   if (cached && cached.expiresAt > Date.now()) {
-    return { value: cached.value, unknownReason: cached.unknownReason };
+    return {
+      value: cached.value,
+      unknownReason: cached.unknownReason,
+      skippedUnsupported: cached.skippedUnsupported,
+    };
   }
   if (systemProxyCache.size >= SYSTEM_PROXY_CACHE_MAX_ENTRIES) systemProxyCache.clear();
   // app 未 ready 时 session 不可用;此时按直连处理(splash 极早期,正常请求不会赶在这)。
@@ -198,9 +248,11 @@ async function resolveViaSystemProxy(upstreamUrl: string): Promise<SystemProxyRe
   }
   let value: string | null = null;
   let unknownReason: OutboundPathUnknownReason | undefined;
+  let skippedUnsupported = false;
   try {
     const resolved = await resolveProxyWithTimeout(ses, upstreamUrl);
     value = resolved.value;
+    skippedUnsupported = resolved.skippedUnsupported;
     if (resolved.timedOut) {
       unknownReason = 'resolve_timeout';
       log.warn('system proxy resolution timed out — using direct connection', {
@@ -220,10 +272,11 @@ async function resolveViaSystemProxy(upstreamUrl: string): Promise<SystemProxyRe
   systemProxyCache.set(upstreamUrl, {
     value,
     unknownReason,
+    skippedUnsupported,
     expiresAt:
       Date.now() + (unknownReason ? SYSTEM_PROXY_TIMEOUT_CACHE_TTL_MS : SYSTEM_PROXY_CACHE_TTL_MS),
   });
-  return { value, unknownReason };
+  return { value, unknownReason, skippedUnsupported };
 }
 
 // 惰性初始化:单测可能对 @cindy/anthropic-compat-proxy 做部分 mock(如 codexProxyHost
@@ -250,7 +303,10 @@ function recordOutboundPath(
   upstreamUrl: string,
   source: 'env' | 'system',
   value: string | null,
-  unknownReason?: OutboundPathUnknownReason,
+  opts: {
+    unknownReason?: OutboundPathUnknownReason;
+    skippedUnsupported?: boolean;
+  } = {},
 ): void {
   const origin = originForLog(upstreamUrl);
   if (
@@ -259,12 +315,22 @@ function recordOutboundPath(
   ) {
     outboundPathByOrigin.clear();
   }
+  // 优先级:没问出来(unknown)> 走代理(proxy)> 配了但用不了(unsupported)> 确认无代理。
+  // unsupported 必须压在 direct 之前 —— 两者的实际行为都是直连,但「系统列了代理却
+  // 用不了」和「系统说没有代理」是完全不同的排查方向。
+  const kind: OutboundPathKind = opts.unknownReason
+    ? 'unknown'
+    : value
+      ? 'proxy'
+      : opts.skippedUnsupported
+        ? 'unsupported'
+        : 'direct';
   outboundPathByOrigin.set(origin, {
     source,
-    kind: unknownReason ? 'unknown' : value ? 'proxy' : 'direct',
+    kind,
     // 快照可能被写进错误消息给用户看,只允许脱敏形态(env 值可能带 user:pass)。
-    ...(unknownReason ? { reason: unknownReason } : {}),
-    ...(value && !unknownReason ? { proxy: redactProxyUrlForLog(value) } : {}),
+    ...(opts.unknownReason ? { reason: opts.unknownReason } : {}),
+    ...(value && !opts.unknownReason ? { proxy: redactProxyUrlForLog(value) } : {}),
     upstream: origin,
     at: Date.now(),
   });
@@ -314,7 +380,10 @@ export const resolveDesktopOutboundProxy: OutboundProxyResolver = async (upstrea
   }
   const fromSystem = await resolveViaSystemProxy(upstreamUrl);
   logIfChanged(upstreamUrl, 'system', fromSystem.value);
-  recordOutboundPath(upstreamUrl, 'system', fromSystem.value, fromSystem.unknownReason);
+  recordOutboundPath(upstreamUrl, 'system', fromSystem.value, {
+    unknownReason: fromSystem.unknownReason,
+    skippedUnsupported: fromSystem.skippedUnsupported,
+  });
   return fromSystem.value;
 };
 

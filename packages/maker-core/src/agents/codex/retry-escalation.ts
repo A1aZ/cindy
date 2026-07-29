@@ -40,7 +40,12 @@ export interface RetryEscalationDecision {
  */
 export interface OutboundPathFact {
   source: 'env' | 'system';
-  kind: 'proxy' | 'direct' | 'unknown';
+  /**
+   * 四态的实际行为只有「走代理」与「直连」两种,但**原因**完全不同,而原因才是
+   * 诊断要说的话:direct = 确认没配;unsupported = 配了但形态用不了(TLS-to-proxy
+   * / SOCKS4);unknown = 判定没问出来、按直连兜底。
+   */
+  kind: 'proxy' | 'direct' | 'unsupported' | 'unknown';
   /** 已脱敏的代理地址(scheme://host:port);kind='proxy' 时有值。 */
   proxy?: string;
   /** kind='unknown' 时的原因标识(resolve_timeout / resolve_failed / …)。 */
@@ -70,6 +75,17 @@ export function describeOutboundPath(fact: OutboundPathFact): string {
     return (
       `Cindy's outbound path for ${fact.upstream}: via ${fact.proxy ?? '(unknown address)'} ` +
       `(from ${from}). If that proxy is down or cannot reach the upstream, this is where it fails.`
+    );
+  }
+  if (fact.kind === 'unsupported') {
+    // 系统设置里**有**代理,只是形态本实现用不了(Chromium 的 HTTPS = TLS-to-proxy,
+    // 裸 SOCKS = v4)。报成「没有代理」会让用户以为代理配置正常,而真正的动作是把
+    // 那条改成 HTTP 或 SOCKS5 出口。
+    return (
+      `Cindy's outbound path for ${fact.upstream}: direct connection — the system proxy ` +
+      `settings do list a proxy, but in a form Cindy cannot use (an HTTPS/TLS-to-proxy entry, ` +
+      `or SOCKS4), so the request went out directly. Switch that entry to an HTTP or SOCKS5 ` +
+      `proxy to route Cindy through it.`
     );
   }
   if (fact.kind === 'direct') {

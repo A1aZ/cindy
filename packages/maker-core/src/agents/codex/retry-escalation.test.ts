@@ -196,8 +196,19 @@ describe('describeOutboundPath', () => {
     expect(text).not.toContain('reported none');
   });
 
+  it('renders an unsupported system proxy as configured-but-unusable, not as absent', () => {
+    // 企业 PAC 只给 HTTPS(TLS-to-proxy)出口时,行为上是直连,但原因是「Cindy 用
+    // 不了那个形态」。报成「没有代理」会让用户以为配置正常,而正确动作是换出口类型。
+    const text = describeOutboundPath(fact({ source: 'system', kind: 'unsupported' }));
+    expect(text).toContain('do list a proxy');
+    expect(text).toContain('cannot use');
+    expect(text).toContain('SOCKS5');
+    expect(text).not.toContain('reported none');
+    expect(text).not.toContain('no proxy env var is set');
+  });
+
   it('always returns a non-empty diagnostic for every kind', () => {
-    for (const kind of ['proxy', 'direct', 'unknown'] as const) {
+    for (const kind of ['proxy', 'direct', 'unsupported', 'unknown'] as const) {
       for (const source of ['env', 'system'] as const) {
         expect(describeOutboundPath(fact({ kind, source })).length).toBeGreaterThan(0);
       }

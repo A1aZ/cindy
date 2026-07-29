@@ -888,6 +888,56 @@ describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', ()
     }
   });
 
+  it('排队期间系统挂起:睡着的时间不计入等待额度', async () => {
+    // 排队上限用壁钟量"等了多久",而机器睡觉时定时器不跑、壁钟照走:睡够 30 分钟醒来
+    // 第一拍就会撤掉一条完全健康的排队 prompt(review #944 第十六轮 P1)。
+    vi.useFakeTimers();
+    try {
+      const harness = createSessionHarness(async () => ({ accepted: true }));
+      const queue = createQueueHarness({ busy: true });
+      const { runner } = createRunnerHarness(harness.session, queue.deps);
+
+      const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
+      await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+
+      // 先正常等一拍,建立轮询基准
+      await vi.advanceTimersByTimeAsync(QUEUED_DISPATCH_TRACK_POLL_MS);
+      // 合盖睡 8 小时:壁钟跳,定时器没有按比例推进
+      vi.setSystemTime(Date.now() + 8 * 3_600_000);
+      await vi.advanceTimersByTimeAsync(QUEUED_DISPATCH_TRACK_POLL_MS);
+      // 睡着的时间不算数 → 不得撤项
+      expect(queue.removeCalls).toEqual([]);
+
+      // 醒来后正常派发,照常跑完
+      await queue.accept();
+      harness.emit({ type: 'done', data: {}, source: 'claude-code' });
+      await expect(firePromise).resolves.toMatchObject({ sessionId: SESSION_ID });
+      expect(queue.removeCalls).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('挂起吸收不等于豁免:清醒地等满上限仍要撤项', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createSessionHarness(async () => ({ accepted: true }));
+      const queue = createQueueHarness({ busy: true });
+      const { runner } = createRunnerHarness(harness.session, queue.deps);
+
+      const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
+      const settled = expect(firePromise).resolves.toMatchObject({ deferred: true });
+      await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+
+      // 一路清醒:每拍的真实间隔都等于轮询间隔,额度正常累加
+      await vi.advanceTimersByTimeAsync(QUEUED_DISPATCH_MAX_WAIT_MS + QUEUED_DISPATCH_TRACK_POLL_MS);
+      await settled;
+      expect(queue.removeCalls).toEqual([{ sessionId: SESSION_ID, clientId: 'client-1' }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('不能顺延的任务(一次性)排队超时 → 可见失败,不静默消失', async () => {
     vi.useFakeTimers();
     try {

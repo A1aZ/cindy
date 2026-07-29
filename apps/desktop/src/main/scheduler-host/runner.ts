@@ -118,6 +118,17 @@ export const QUEUED_DISPATCH_TRACK_POLL_MS = 60_000;
 export const QUEUED_DISPATCH_MAX_WAIT_MS = 30 * 60_000;
 
 /**
+ * 两次排队轮询之间的实际间隔超出 QUEUED_DISPATCH_TRACK_POLL_MS 这么多 → 判为进程被系统
+ * 挂起(合盖睡眠)过,这段不计入排队等待额度。
+ *
+ * 排队上限用壁钟量"等了多久",而机器睡觉时进程被冻结、定时器不跑、壁钟照走:睡够 30 分钟
+ * 醒来第一拍就会把一条完全健康的排队 prompt 撤掉 —— recurring 被无谓顺延,Once / manual
+ * 无法顺延、直接记失败且从未执行(review #944 第十六轮 P1)。与 maker-scheduler 的
+ * SUSPEND_GAP_MS、Session / codex 看门狗的分片核对同源。
+ */
+export const QUEUED_DISPATCH_SUSPEND_GAP_MS = 30_000;
+
+/**
  * 后台 subagent 兜底静默窗口(ms)。
  *
  * agent 在 turn 内派出后台 subagent(Agent tool run_in_background)时,主 turn 会先
@@ -1564,7 +1575,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // 不再计入 maxConcurrentRuns(后续 tick 会超发,正是本 PR 要防的)、也被排除在
     // 卡死守卫之外。
     if (!dispatched) startQueueWait();
-    const queuedAt = Date.now();
+    let queuedAt = Date.now();
 
     // pause/delete abort:等待期撤掉队列项并**直接**解锁派发等待 —— 不依赖
     // removeQueuedPrompt 触发 onDiscarded(项若已转入 activeTurn/recovery,remove
@@ -1601,7 +1612,22 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // 同一个轮询顺带兜排队上限:目标会话的 turn 可能长时间不结束(用户在长对话里、
     // 或那个会话自己卡死),队列永不 drain → dispatchGate 永不 settle。撤项后按顺延
     // 收口,别让 run 无限挂 'running'(见 QUEUED_DISPATCH_MAX_WAIT_MS)。
+    let lastTrackPollAt = Date.now();
     const trackPoll = setInterval(() => {
+      // 先把系统挂起的那段从等待额度里剔除:定时器在睡眠期间不跑,壁钟却照走。
+      const pollNow = Date.now();
+      const suspendGap = pollNow - lastTrackPollAt - QUEUED_DISPATCH_TRACK_POLL_MS;
+      lastTrackPollAt = pollNow;
+      if (suspendGap > QUEUED_DISPATCH_SUSPEND_GAP_MS) {
+        queuedAt += suspendGap;
+        this.deps.logger.info?.('[runner] absorbed system-suspend gap into queued dispatch wait', {
+          scheduleId: schedule.id,
+          runId: ctx.runId,
+          sessionId,
+          clientId,
+          suspendGapMs: suspendGap,
+        });
+      }
       if (dispatched) return;
       if (!sq.isPromptTracked(sessionId, clientId)) {
         failDispatch(

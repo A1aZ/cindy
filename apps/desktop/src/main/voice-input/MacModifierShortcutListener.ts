@@ -35,7 +35,13 @@ type ListenerTriggerPhase = 'tap' | 'start' | 'end';
 
 type ListenerStartResult =
   | { ok: true }
-  | { ok: false; error: string };
+  /**
+   * `superseded` = 这次启动在 await 解析 helper 期间被 stop 或更晚的一轮顶掉了。
+   * 它不是故障：更晚的那轮正在负责这个 listener，所以调用方**不该**据此做清理或报错
+   * （录制登记按 sender id 记账，同一个设置页连续两轮用同一个 id，误清会把新一轮的
+   * 登记一起删掉，helper 起来了却没人收 keys）。
+   */
+  | { ok: false; error: string; superseded?: true };
 
 export type MacInputMonitoringPermissionSnapshot =
   | { ok: true; status: string }
@@ -148,7 +154,7 @@ export class MacModifierShortcutListener {
     // 解析期间被 stop 掉、或被更晚的一次启动顶替：绝不能再 spawn，否则这个进程既不会
     // 被记进 this.child（会被后者覆盖），也就再没人 kill 它。
     if (generation !== this.startGeneration) {
-      return { ok: false, error: 'Modifier shortcut listener start was superseded.' };
+      return { ok: false, error: 'Modifier shortcut listener start was superseded.', superseded: true };
     }
     // 兜底：真有存活的 child 时先收掉再 spawn，杜绝覆盖引用造成的泄漏。
     const staleChild = this.child;

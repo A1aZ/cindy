@@ -168,7 +168,7 @@ interface RemoteAgentOneShotResult extends RemoteAgentExecResult {
 type VoiceInputState = import('@cindy/voice-input-core').VoiceInputState;
 type VoiceAudioTrace = import('@cindy/voice-input-core').AudioTrace;
 type VoiceSpeechSegment = import('@cindy/voice-input-core').SpeechSegment;
-type VoiceInputGlobalErrorCode = 'empty' | 'unavailable' | 'unconfirmed' | 'permission' | 'failed';
+type VoiceInputGlobalErrorCode = 'empty' | 'unavailable' | 'unconfirmed' | 'permission' | 'failed' | 'superseded';
 type VoiceInputGlobalResult =
   | { ok: true }
   | { ok: false; error: string; errorCode?: VoiceInputGlobalErrorCode };

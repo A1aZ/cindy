@@ -1244,6 +1244,9 @@ export function VoiceInputSection() {
     // 一起停掉。启动期间的取消由 main 侧 startChildProcess 的代次校验负责——那里才
     // 拿得到 child 与启动状态，renderer 猜不了这个时序。
     if (isCancelled()) return;
+    // 被更晚的一轮顶掉：这次调用已经过时，真正的结果由那一轮给出。不能在这里改提示或
+    // 弹错误，否则用户刚开始的第二轮录制会莫名收到一条上一轮的报错。
+    if (!result.ok && result.errorCode === 'superseded') return;
     // blocked 只表示「确实缺权限」。以前只在成功时清掉，于是缺权限之后再来一次非权限
     // 失败（listener 坏了）会继续挂着「Fn 需要监听权限」，把用户指向错误的原因。
     const permissionBlocked = !result.ok && result.errorCode === 'permission';
@@ -1303,6 +1306,8 @@ export function VoiceInputSection() {
       void (async () => {
         await shortcutSuspendPromiseRef.current;
         const result = await setShortcut(shortcut);
+        // 被更晚的一轮顶掉：那一轮才决定最终结果，这里静默丢弃，不报错也不收口录制态。
+        if (!result.ok && result.errorCode === 'superseded') return;
         if (!result.ok) {
           // 'failed' = 原生 listener 起不来。main 已把细节消毒成固定英文（原文含内部
           // 路径），所以这里改用自带下一步的中文文案，不再把那句英文插进模板。

@@ -90,7 +90,17 @@ type VoiceInputSettingsUpdateResult =
   | { ok: true; settings: VoiceInputSettings; pendingInputMonitoring?: boolean }
   | { ok: false; error: string; errorCode?: VoiceInputGlobalErrorCode };
 
-type VoiceInputGlobalErrorCode = 'empty' | 'unavailable' | 'unconfirmed' | 'permission' | 'failed';
+type VoiceInputGlobalErrorCode =
+  | 'empty'
+  | 'unavailable'
+  | 'unconfirmed'
+  | 'permission'
+  | 'failed'
+  /**
+   * 这次调用在启动 listener 期间被更晚的一轮顶掉了。既不是故障也不该清理状态，
+   * renderer 收到后静默丢弃即可——真正的结果由顶掉它的那一轮给出。
+   */
+  | 'superseded';
 
 export type VoiceInputPermissionSnapshot =
   | { ok: true; status: string }
@@ -485,9 +495,13 @@ const MAC_NATIVE_LISTENER_FAILURE_MESSAGE = 'Could not start the voice input sho
  * 不接住的话 IPC handler 直接 reject，原始消息（含内部绝对路径）会过桥给 renderer，
  * 而且调用方精心分好的 errorCode 分支根本走不到。
  */
+type MacNativeListenerStartResult =
+  | { ok: true }
+  | { ok: false; error: string; superseded?: true };
+
 async function startMacNativeListener(
-  start: () => Promise<{ ok: true } | { ok: false; error: string }>,
-): Promise<{ ok: true } | { ok: false; error: string }> {
+  start: () => Promise<MacNativeListenerStartResult>,
+): Promise<MacNativeListenerStartResult> {
   try {
     return await start();
   } catch (error) {
@@ -599,6 +613,13 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
       // 失败）。不接住的话下面的清理与 errorCode 分类都跑不到，本 renderer 会留在
       // 转发名单里、原始路径还会过桥给它。
       const result = await startMacNativeListener(() => macModifierShortcutListener.startKeyCapture());
+      if (!result.ok && result.superseded) {
+        // 被更晚的一轮顶掉：那一轮正在负责这个 sender 的 capture，这里绝不能动名单。
+        // 录制登记按 sender id 记账，而同一个设置页连续两轮录制用的是同一个 id ——
+        // 在这里删就等于把新一轮刚登记的那条删掉，helper 起来了却没人收 keys，
+        // 用户按 Fn 毫无反应。也不报错：这次调用已经过时，出错的不是用户在做的事。
+        return { ok: false, error: result.error, errorCode: 'superseded' };
+      }
       if (!result.ok) {
         modifierShortcutRecordingWebContentsIds.delete(event.sender.id);
         // 录制期的 key capture 只服务 Fn 检测（macOS 不把 Fn 派发成普通 DOM keydown）。
@@ -979,6 +1000,12 @@ async function setVoiceInputGlobalShortcut(shortcut: VoiceInputShortcut | null):
       return { ok: true };
     }
     const result = await startMacNativeListener(() => macModifierShortcutListener.setShortcut(shortcut));
+    if (!result.ok && result.superseded) {
+      // 被更晚的一轮顶掉：那一轮才决定最终注册结果，这里既不回滚（会踩掉它刚建立的
+      // 状态）也不报故障（这次调用已经过时）。调用方按 'superseded' 静默丢弃即可。
+      log.debug('native global shortcut registration superseded', { code: shortcut.code });
+      return { ok: false, error: result.error, errorCode: 'superseded' };
+    }
     if (!result.ok) {
       // 先落成局部常量：registeredShortcut 是模块级 let，装进闭包后 TS 不再认那层
       // narrowing（延迟执行期间它可能被改），语义上回滚也该锁定进入分支时的那一个。

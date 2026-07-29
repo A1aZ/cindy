@@ -48,6 +48,9 @@ const mocks = vi.hoisted(() => {
   // 断言收窄在这一处；ipcDeps 本身用真实类型，这样 deps 形状变化会在编译期暴露。
   const getMainWindow = vi.fn(() => mainWindow as unknown as BrowserWindow);
   const ipcDeps: GlobalVoiceInputIpcDeps = { getMainWindow };
+  // 抓住 listener 构造时传入的 onKeys。转发名单是模块私有的，onKeys 往哪些窗口 send
+  // 是它唯一的可观察代理 —— 用来验证「被顶掉的那一轮没有把别人的登记删掉」。
+  const listenerOptions: { onKeys?: (keys: string[]) => void } = {};
   const registerShortcut = vi.fn((accelerator: string) => {
     void accelerator;
     return true;
@@ -70,6 +73,7 @@ const mocks = vi.hoisted(() => {
     assertTrustedAppRenderer,
     getMainWindow,
     ipcDeps,
+    listenerOptions,
     updateSettings,
     registerShortcut,
   };
@@ -120,13 +124,16 @@ vi.mock('../index.js', () => ({
 }));
 
 vi.mock('../MacModifierShortcutListener.js', () => ({
-  MacModifierShortcutListener: vi.fn().mockImplementation(() => ({
-    setShortcut: mocks.modifierSetShortcut,
-    isRunning: mocks.modifierIsRunning,
-    stop: mocks.modifierStop,
-    stopKeyCapture: vi.fn(),
-    startKeyCapture: mocks.modifierStartKeyCapture,
-  })),
+  MacModifierShortcutListener: vi.fn().mockImplementation((options: { onKeys?: (keys: string[]) => void }) => {
+    mocks.listenerOptions.onKeys = options?.onKeys;
+    return {
+      setShortcut: mocks.modifierSetShortcut,
+      isRunning: mocks.modifierIsRunning,
+      stop: mocks.modifierStop,
+      stopKeyCapture: vi.fn(),
+      startKeyCapture: mocks.modifierStartKeyCapture,
+    };
+  }),
   getMacInputMonitoringPermissionSnapshot: mocks.inputMonitoringSnapshot,
   requestMacInputMonitoringPermission: mocks.requestInputMonitoring,
 }));
@@ -388,6 +395,69 @@ describe('voice input global shortcut registration', () => {
 
       expect(result).toMatchObject({ ok: false, errorCode: 'failed' });
       expect((result as { error: string }).error).toBe('Could not start the voice input shortcut listener.');
+    });
+
+    // 录制登记按 sender id 记账，而同一个设置页连续两轮录制用的是同一个 id。第一轮在
+    // 启动 listener 期间被第二轮顶掉后，如果仍走「失败就清理」分支，就会把第二轮刚登记
+    // 的那条删掉——helper 起来了却没人收 keys，用户按 Fn 毫无反应。
+    it('keeps the recording registration when a start is superseded by a later one', async () => {
+      setPlatform('darwin');
+      const { registerGlobalVoiceInputIpc } = await import('../global.js');
+      registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+      const start = mocks.handlers.get('voice-input:modifier-shortcut-recording:start');
+      // sender 必须对上 BrowserWindow mock 的 webContents.id，onKeys 才转发得到它。
+      const sender = { id: mocks.focusedWindow.webContents.id, once: vi.fn() };
+
+      // 复现真实交错：第一轮卡在启动 listener 上，第二轮期间成功登记，第一轮才带着
+      // superseded 迟到返回。顺序调用测不到这个 bug——每次 start 都会先 add 一次，
+      // 误删会被下一次 add 自动掩盖。
+      let settleFirst: (result: unknown) => void = () => {};
+      mocks.modifierStartKeyCapture.mockImplementationOnce(
+        () => new Promise((resolve) => { settleFirst = resolve; }),
+      );
+      mocks.modifierStartKeyCapture.mockResolvedValueOnce({ ok: true });
+
+      const first = start?.({ sender });
+      const second = await start?.({ sender });
+      expect(second).toMatchObject({ ok: true });
+
+      settleFirst({
+        ok: false,
+        error: 'Modifier shortcut listener start was superseded.',
+        superseded: true,
+      });
+      expect(await first).toMatchObject({ ok: false, errorCode: 'superseded' });
+      // 被顶掉不是故障，所以不该去问权限状态、也不该报成 permission / failed。
+      expect(mocks.inputMonitoringSnapshot).not.toHaveBeenCalled();
+
+      // 第二轮的登记必须还在：onKeys 能送到这个窗口，才说明名单没被迟到的那轮删掉。
+      mocks.focusedWindow.webContents.send.mockClear();
+      mocks.listenerOptions.onKeys?.(['Fn']);
+      expect(mocks.focusedWindow.webContents.send).toHaveBeenCalledWith(
+        'voice-input:modifier-shortcut-keys',
+        { keys: ['Fn'] },
+      );
+    });
+
+    it('reports a superseded shortcut registration without rolling back or classifying', async () => {
+      setPlatform('darwin');
+      mocks.modifierSetShortcut.mockResolvedValue({
+        ok: false,
+        error: 'Modifier shortcut listener start was superseded.',
+        superseded: true,
+      });
+      const { registerGlobalVoiceInputIpc } = await import('../global.js');
+      registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+      const result = await mocks.handlers.get('voice-input:settings:update-shortcut')?.({}, bareRightOption);
+
+      expect(result).toMatchObject({ ok: false, errorCode: 'superseded' });
+      // 顶掉它的那一轮负责最终状态：这里不回滚（只调用了一次 setShortcut）、不查权限、
+      // 也不落盘。
+      expect(mocks.modifierSetShortcut).toHaveBeenCalledTimes(1);
+      expect(mocks.inputMonitoringSnapshot).not.toHaveBeenCalled();
+      expect(mocks.updateSettings).not.toHaveBeenCalled();
     });
 
     // 录制期的 key capture 只服务 Fn 检测。renderer 靠这个 errorCode 决定「安静地说明 Fn

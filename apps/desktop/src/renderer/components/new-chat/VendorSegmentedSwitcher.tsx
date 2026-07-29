@@ -20,6 +20,7 @@ import { cn } from '@/lib/utils';
 import type { MakerVendor } from '@/lib/ccAgent.types';
 import { CodexMark } from '@/components/icons/CodexMark';
 import { ClaudeMark } from '@/components/icons/ClaudeMark';
+import { PiMark } from '@/components/icons/PiMark';
 
 interface VendorSegmentedSwitcherProps {
   value: MakerVendor;
@@ -62,6 +63,7 @@ interface SegmentOption {
 const OPTIONS: readonly SegmentOption[] = [
   { vendor: 'cc', label: 'Claude', Mark: ClaudeMark },
   { vendor: 'codex', label: 'Codex', Mark: CodexMark },
+  { vendor: 'pi', label: 'Pi', Mark: PiMark },
 ] as const;
 
 export function VendorSegmentedSwitcher({

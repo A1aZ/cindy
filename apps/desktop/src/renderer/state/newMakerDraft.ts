@@ -157,6 +157,18 @@ export interface NewMakerDraft {
  * 在目录里都是默认隐藏的模型 —— 种子默认模型压根不在用户看到的清单里。
  */
 function defaultVendorPrefs(vendor: MakerVendor): VendorPrefs {
+  if (vendor === 'pi') {
+    return {
+      // pi 走 XD 网关(anthropic-messages 可达面),默认给网关中档模型;
+      // 目录未含该 id 时由 ChatInput 的 vendor 回退逻辑纠正。
+      model: 'claude-sonnet-5',
+      effort: 'high',
+      // pi 当前 capabilities 仅暴露完全访问档(ask 档随 cindy-bridge extension 上线)。
+      permissionMode: 'bypassPermissions',
+      planMode: false,
+      providerId: null,
+    };
+  }
   if (vendor === 'codex') {
     return {
       model: getDefaultModelForVendor('codex').id,
@@ -198,6 +210,7 @@ function makeDefault(): NewMakerDraft {
     extraDirs: [],
     lastByVendor: {
       cc: defaultVendorPrefs('cc'),
+      pi: defaultVendorPrefs('pi'),
       orca: defaultVendorPrefs('orca'),
       codex: defaultVendorPrefs('codex'),
     },
@@ -231,7 +244,7 @@ function sanitize(raw: unknown): NewMakerDraft {
   // F-COLLAB (2026-05): 'orca' vendor 已被 ChatInput 底部的 toggle 取代,
   // sanitize 时把历史 localStorage 残留的 'orca' 自动迁移到 'cc',避免空白入口。
   const vendor: MakerVendor =
-    r.vendor === 'codex' ? 'codex' : 'cc';
+    r.vendor === 'codex' || r.vendor === 'pi' ? r.vendor : 'cc';
   const workingDir = normalizeDraftWorkingDir(r.workingDir);
   const remoteHostId =
     typeof r.remoteHostId === 'string' && r.remoteHostId.trim().length > 0
@@ -363,6 +376,7 @@ function sanitize(raw: unknown): NewMakerDraft {
     extraDirs,
     lastByVendor: {
       cc: sanitizeVendorPrefs(lastByVendorRaw.cc, 'cc'),
+      pi: sanitizeVendorPrefs(lastByVendorRaw.pi, 'pi'),
       orca: sanitizeVendorPrefs(lastByVendorRaw.orca, 'orca'),
       codex: sanitizeVendorPrefs(lastByVendorRaw.codex, 'codex'),
     },

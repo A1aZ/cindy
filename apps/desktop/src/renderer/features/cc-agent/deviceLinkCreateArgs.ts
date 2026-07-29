@@ -23,8 +23,8 @@ import type { AgentKind } from '@/hooks/useAgentCapabilities';
 import type { Effort, PermissionMode } from '@/lib/userPreferences.types';
 
 export interface DeviceLinkCreateParams {
-  /** 草稿 vendor 形态:'cc' | 'codex'(persistedAgentKind)。 */
-  agentKind: 'cc' | 'codex';
+  /** 草稿 vendor 形态:'cc' | 'codex' | 'pi'(persistedAgentKind)。 */
+  agentKind: 'cc' | 'codex' | 'pi';
   /**
    * 被控端上的项目目录。缺省 / 空白 = 在该设备上建**不绑项目的 standalone dialogue**,
    * workspaceKind 随之派生为 'dialogue',运行目录由被控端分配。

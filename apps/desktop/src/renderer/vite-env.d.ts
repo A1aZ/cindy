@@ -112,7 +112,7 @@ interface DeviceLinkPresenceSnapshot {
 /** .cshare 导入向导的预览数据(main 侧 SharePreview 的镜像)。 */
 interface SessionSharePreview {
   title: string;
-  agentKind: 'cc' | 'codex';
+  agentKind: 'cc' | 'codex' | 'pi';
   workspaceKind: 'project' | 'dialogue';
   originalWorkingDir: string | null;
   exportedAt: string;
@@ -1860,7 +1860,7 @@ interface ElectronAPI {
   syncNewMakerDraft: (snapshot: {
     lastByVendor: Partial<
       Record<
-        'cc' | 'codex',
+        'cc' | 'codex' | 'pi',
         { model?: string; effort?: string; permissionMode?: string; providerId?: string | null }
       >
     >;
@@ -3424,7 +3424,7 @@ interface ElectronAPI {
         permissionMode?: string;
         fastMode?: boolean;
         planModeEnabled?: boolean;
-        agentKind?: 'cc' | 'codex';
+        agentKind?: 'cc' | 'codex' | 'pi';
         orcaRole?: import('@/lib/ccAgent.types').OrcaRole | null;
         /** 附加只读引用目录列表 (绝对路径); main 端 mapper 会 JSON.stringify 后写库。 */
         extraDirs?: string[];

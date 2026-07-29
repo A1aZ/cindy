@@ -315,6 +315,7 @@ import {
   recordTurnSpend,
 } from '../usageBroadcaster.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
+import { dbToMakerAgentKind, makerToDbAgentKind } from '../../shared/agentKindConversion.js';
 import { readWorkflowProgressForSession } from '../workflow-progress/reader.js';
 import {
   AgentInputCoordinator,
@@ -2018,7 +2019,7 @@ export async function registerPendingCredentialSwitchForSession(
   const prevModel = live?.model ?? prevRow?.model ?? null;
   service.register(sessionId, {
     ...target,
-    ...(dbAgentKind ? { agentKind: dbAgentKind === 'cc' ? 'claude-code' as const : 'codex' as const } : {}),
+    ...(dbAgentKind ? { agentKind: dbToMakerAgentKind(dbAgentKind) } : {}),
     ...(prevModel
       ? {
           previousRoute: {
@@ -2656,7 +2657,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
 
   // session-agent-switch:登记本会话当前引擎,broadcaster / user 行落库据此逐行
   // stamp messages.agent_kind(切换后历史行的 agent_meta 必须按写入时引擎解析)。
-  noteSessionAgentKind(session.id, session.agentKind === 'codex' ? 'codex' : 'cc');
+  noteSessionAgentKind(session.id, makerToDbAgentKind(session.agentKind));
 
   // 订阅槽①旁听 tap(独立监听,叠加在主转发之外互不干扰):AgentEvent →
   // did-turn-*。资格(用户主会话)与自动化轮次过滤都在 tap 内部,这里零逻辑。
@@ -8357,7 +8358,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         const dbAgentKind = getSessionDbAgentKind(sessionId);
         if (dbAgentKind) {
           const reroute = await assertModelRouteUsable(
-            dbAgentKind === 'cc' ? 'claude-code' : 'codex',
+            dbToMakerAgentKind(dbAgentKind),
             model,
             typeof providerId === 'string' ? providerId : null,
           );

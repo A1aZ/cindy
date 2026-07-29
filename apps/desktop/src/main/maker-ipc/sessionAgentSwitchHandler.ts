@@ -36,6 +36,7 @@ import {
   type HandoffSourceMessage,
 } from './agentHandoff.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
+import { dbToMakerAgentKind, makerToDbAgentKind, normalizeDbAgentKind } from '../../shared/agentKindConversion.js';
 
 function throwIfAgentSwitchAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
@@ -50,18 +51,20 @@ export interface ParkedEngineSessionRef {
   watermarkRowid: number;
 }
 
-/** DB 'cc'/'codex' ↔ maker-core 'claude-code'/'codex' 映射(与 register.ts 各处内联口径一致)。 */
+/** DB ↔ maker-core 形态映射 —— 正本在 shared/agentKindConversion.ts,此处仅转发。 */
 export function toDbAgentKind(kind: AgentKind): DbAgentKind {
-  return kind === 'codex' ? 'codex' : 'cc';
+  return makerToDbAgentKind(kind);
 }
 
 export function toMakerAgentKind(dbKind: string): AgentKind {
-  return dbKind === 'codex' ? 'codex' : 'claude-code';
+  return dbToMakerAgentKind(dbKind);
 }
 
 /** 交接 framing 与边界卡展示用的引擎名。 */
 export function agentEngineLabel(dbKind: DbAgentKind): string {
-  return dbKind === 'codex' ? 'Codex' : 'Claude Code';
+  if (dbKind === 'codex') return 'Codex';
+  if (dbKind === 'pi') return 'Pi';
+  return 'Claude Code';
 }
 
 /** role='agent_switch' 边界行的 content 结构(与 renderer AgentSwitchContent 对齐)。 */
@@ -362,8 +365,8 @@ export async function performSessionAgentSwitch(
     throwIpcError('UNSUPPORTED_CAPABILITY', 'agent switch is not supported for Orca sessions');
   }
 
-  const fromDbKind: DbAgentKind = row.agentKind === 'codex' ? 'codex' : 'cc';
-  const toDbKind: DbAgentKind = targetAgentKind === 'codex' ? 'codex' : 'cc';
+  const fromDbKind: DbAgentKind = normalizeDbAgentKind(row.agentKind);
+  const toDbKind: DbAgentKind = makerToDbAgentKind(targetAgentKind);
   if (fromDbKind === toDbKind) {
     // 同引擎 = 纯模型切换,调用方应走 SET_MODEL;这里按 no-op 成功返回。
     // 顺带清 pending:用户先登记了跨引擎切换、又选回当前引擎 = 改主意取消。

@@ -16,6 +16,7 @@ import { sessions, messages } from '../localDb/schema';
 import { sessionToCamel } from '../localDb/mapper';
 import { getMaker } from '../maker-host/index.js';
 import { createBusinessSessionId } from '../sessionIds.js';
+import { normalizeDbAgentKind } from '../../shared/agentKindConversion.js';
 import type { Session } from '../../renderer/lib/ccAgent.types';
 import {
   type ClaudeTranscriptAnchorIndex,
@@ -50,7 +51,7 @@ function normalizePositiveInt(value: unknown): number {
 
 const messageRowid = sql<number>`rowid`;
 
-type DbAgentKind = 'cc' | 'codex';
+type DbAgentKind = 'cc' | 'codex' | 'pi';
 
 interface MessagePosition {
   createdAt: number;
@@ -168,7 +169,7 @@ async function resolveForkNativeSource(
     if (!source.sdkSessionId) {
       throw forkError('SOURCE_NEVER_RAN', '原会话尚未运行，无法 fork');
     }
-    const agentKind: DbAgentKind = source.agentKind === 'codex' ? 'codex' : 'cc';
+    const agentKind: DbAgentKind = normalizeDbAgentKind(source.agentKind);
     return {
       agentKind,
       sdkSessionId: source.sdkSessionId,

@@ -11,7 +11,7 @@ import {
   isSessionDoneSilenced,
   markNextSessionTerminalNotificationOwnedByScheduler,
   markNextSessionDoneSilenced,
-  reconcileRunMarkersWithTerminalRuns,
+  reconcileRunMarkers,
   rememberScheduleRunSessionAttentionBaseline,
   resetSilencedSessionDoneStoreForTests,
   scheduleClearSchedulerOwnedRun,
@@ -159,7 +159,12 @@ describe('silencedSessionDoneStore', () => {
       markNextSessionDoneSilenced('run-s', 'session-silenced');
       markNextSessionTerminalNotificationOwnedByScheduler('run-o', 'session-owned');
 
-      reconcileRunMarkersWithTerminalRuns(new Set(['run-s', 'run-o']));
+      reconcileRunMarkers(
+        new Map([
+          ['run-s', 'terminal' as const],
+          ['run-o', 'terminal' as const],
+        ]),
+      );
 
       expect(isSessionDoneSilenced('session-silenced')).toBe(false);
       expect(isSessionTerminalNotificationOwnedByScheduler('session-owned')).toBe(false);
@@ -175,17 +180,38 @@ describe('silencedSessionDoneStore', () => {
       markNextSessionDoneSilenced('run-s', 'session-silenced');
       markNextSessionTerminalNotificationOwnedByScheduler('run-o', 'session-owned');
 
-      // 终态集合里只有别的 run。
-      reconcileRunMarkersWithTerminalRuns(new Set(['some-other-run']));
+      reconcileRunMarkers(
+        new Map([
+          ['run-s', 'running' as const],
+          ['run-o', 'running' as const],
+        ]),
+      );
 
       expect(isSessionDoneSilenced('session-silenced')).toBe(true);
       expect(isSessionTerminalNotificationOwnedByScheduler('session-owned')).toBe(true);
     });
 
-    it('is a no-op for an empty terminal set', () => {
+    /**
+     * 回归(codex review P1):run 被删除而不是落终态时,它永远不会出现在权威快照里
+     * —— 删除 schedule 会级联删掉 schedule_runs 行,deferred run 也会被显式删除。
+     * 若对应的 failed / deferred 事件正好丢了(对账要治的正是事件丢失),「不在快照里
+     * 就保持」会让标记永久残留。
+     */
+    it('clears markers whose run no longer exists in the snapshot', () => {
+      markNextSessionDoneSilenced('run-deleted', 'session-silenced');
+      markNextSessionTerminalNotificationOwnedByScheduler('run-gone', 'session-owned');
+
+      // 快照非空,但完全不含这两个 run —— 它们已经被删掉了。
+      reconcileRunMarkers(new Map([['some-live-run', 'running' as const]]));
+
+      expect(isSessionDoneSilenced('session-silenced')).toBe(false);
+      expect(isSessionTerminalNotificationOwnedByScheduler('session-owned')).toBe(false);
+    });
+
+    it('treats an empty snapshot as a query anomaly and changes nothing', () => {
       markNextSessionDoneSilenced('run-s', 'session-silenced');
 
-      reconcileRunMarkersWithTerminalRuns(new Set());
+      reconcileRunMarkers(new Map());
 
       expect(isSessionDoneSilenced('session-silenced')).toBe(true);
     });
@@ -204,7 +230,12 @@ describe('silencedSessionDoneStore', () => {
         scheduleClearSchedulerOwnedRun('run-o', 2000);
 
         // run 确实已终态,但 linger 在跑 → 本轮对账必须放过。
-        reconcileRunMarkersWithTerminalRuns(new Set(['run-s', 'run-o']));
+        reconcileRunMarkers(
+          new Map([
+            ['run-s', 'terminal' as const],
+            ['run-o', 'terminal' as const],
+          ]),
+        );
         expect(isSessionDoneSilenced('session-silenced')).toBe(true);
         expect(isSessionTerminalNotificationOwnedByScheduler('session-owned')).toBe(true);
 
@@ -220,7 +251,12 @@ describe('silencedSessionDoneStore', () => {
       markNextSessionDoneSilenced('run-a', 'session-a');
       markNextSessionDoneSilenced('run-b', 'session-b');
 
-      reconcileRunMarkersWithTerminalRuns(new Set(['run-a']));
+      reconcileRunMarkers(
+        new Map([
+          ['run-a', 'terminal' as const],
+          ['run-b', 'running' as const],
+        ]),
+      );
 
       expect(isSessionDoneSilenced('session-a')).toBe(false);
       expect(isSessionDoneSilenced('session-b')).toBe(true);

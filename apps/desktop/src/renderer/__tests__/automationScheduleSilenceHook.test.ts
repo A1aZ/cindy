@@ -283,6 +283,47 @@ describe('useAutomationScheduleSessionIndex marker reconciliation', () => {
     }
   });
 
+  /**
+   * 回归(greptile review P1):退避档位用尽后如果彻底停手,「scheduler / IPC / DB 连续
+   * 不可用超过三档窗口 + 此后再无事件」就会让标记永久残留。仍有标记待对账时按最后一档
+   * 持续重试。
+   */
+  it('keeps retrying past the backoff table while markers still await reconciliation', async () => {
+    vi.useFakeTimers();
+    try {
+      const listSidebarIndexRuns = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('e1'))
+        .mockRejectedValueOnce(new Error('e2'))
+        .mockRejectedValueOnce(new Error('e3'))
+        .mockRejectedValueOnce(new Error('e4'))
+        .mockResolvedValue([indexRun({ runId: 'run-lost', status: 'success' })]);
+      vi.stubGlobal('electronAPI', {
+        maker: { schedule: { listSidebarIndexRuns, onEvent: vi.fn(() => () => undefined) } },
+        notificationMarkSessionAttention: vi.fn().mockResolvedValue(undefined),
+        notificationClearSessionAttention: vi.fn().mockResolvedValue(undefined),
+      });
+      markNextSessionDoneSilenced('run-lost', 'session-1');
+
+      renderHook(() => useAutomationScheduleSessionIndex());
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      // 2s / 8s / 30s 三档全部失败后，第四次失败仍应排下一次（降频持续）。
+      for (const delay of [2_000, 8_000, 30_000, 30_000]) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(delay);
+        });
+      }
+
+      expect(listSidebarIndexRuns).toHaveBeenCalledTimes(5);
+      expect(isSessionDoneSilenced('session-1')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps markers whose run is still in flight', async () => {
     stubApiWithRuns([
       indexRun({ runId: 'run-live', status: 'running' }),

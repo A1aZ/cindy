@@ -47,7 +47,7 @@ const clearTimers = new Map<string, ReturnType<typeof setTimeout>>();
  *      任意长,任何固定窗口都必然误清。
  *
  * 现在改为向权威来源对账:scheduler 落库的 run 状态(见
- * `reconcileRunMarkersWithTerminalRuns`)。不猜,只问。
+ * `reconcileRunMarkers`)。不猜,只问。
  */
 
 export function rememberScheduleRunSessionAttentionBaseline(
@@ -112,29 +112,49 @@ export function isSessionTerminalNotificationOwnedByScheduler(
   return schedulerOwnedSessionRunIds.has(sessionId);
 }
 
+/** 对账用的 run 存活态:只关心「还在飞行」与「不再飞行」。 */
+export type RunLivenessStatus = 'running' | 'terminal';
+
+/** 是否还有任何标记等待对账。消费方据此决定要不要继续重试拉取快照。 */
+export function hasAnyRunMarker(): boolean {
+  return silencedRunSessionIds.size > 0 || schedulerOwnedRunSessionIds.size > 0;
+}
+
 /**
- * 用 scheduler 落库的**权威** run 状态对账标记:标记指向的 run 已经是终态却还留着
- * 标记,说明它的 completed / failed 事件丢了(广播断链、事件早于消费方挂载等),清掉。
- * 这是事件丢失的唯一自愈路径 —— 不猜时间、也不看 renderer 的 running 快照,那几种
- * 判据都会误判,见上方「事件丢失的自愈不用定时器」注释。
+ * 用 scheduler 落库的**权威** run 状态对账标记 —— 事件丢失(广播断链、事件早于消费方
+ * 挂载等)的唯一自愈路径。不猜时间、也不看 renderer 的 running 快照,那几种判据都会
+ * 误判,见上方「事件丢失的自愈不用定时器」注释。
  *
- * 传入的是**终态** runId 集合(`RunStatus` 里只有 `running` 不是终态)。不在集合里的
- * runId 一律保持:可能仍在飞行,也可能是刚建立标记、sessionId 还没落库的极早期,
- * 两种都不能清。
+ * 三种情形:
+ *   - 映射里是 `terminal` → 清。它的 completed / failed 事件没送到。
+ *   - 映射里是 `running` → 保持。仍在飞行,飞多久都不清。
+ *   - **不在映射里** → 清。该 run 已经不存在了:删除 schedule 会级联删掉它的
+ *     `schedule_runs` 行,deferred run 也会被显式删除,这两种情况永远等不到一个终态
+ *     状态。这里不可能是「标记建好但 run 还没落库」的极早期 —— 引擎先 `updateRun`
+ *     写 sessionId、再 emit `session-bound` / `silenced`,而权威快照包含所有带
+ *     sessionId 的 run,所以标记存在就意味着该 run 当时已进入快照范围。异步拉取的
+ *     过期结果由调用方的 seq 守卫挡掉,不会走到这里。
  *
- * 跳过已排 linger 的标记:completed 到达时刻意留了一段 linger,让 renderer 的 done
- * transition 先消费掉标记,对账不能抢在它前面清、否则那次终态又会走普通通知路径。
+ * 空映射当作查询异常(而不是「一条 run 都没有」)整体跳过,避免把所有标记误清。
+ *
+ * 跳过已排 linger 的标记:那段 linger 正是留给 renderer 的 done transition 消费标记
+ * 用的,对账不能抢在它前面清、否则那次终态又会走普通通知路径。
  */
-export function reconcileRunMarkersWithTerminalRuns(
-  terminalRunIds: ReadonlySet<string>,
+export function reconcileRunMarkers(
+  runStatusByRunId: ReadonlyMap<string, RunLivenessStatus>,
 ): void {
-  if (terminalRunIds.size === 0) return;
+  if (runStatusByRunId.size === 0) return;
   for (const runId of [...silencedRunSessionIds.keys()]) {
-    if (!terminalRunIds.has(runId) || clearTimers.has(runId)) continue;
+    if (clearTimers.has(runId) || runStatusByRunId.get(runId) === 'running') continue;
     clearSilencedRun(runId);
   }
   for (const runId of [...schedulerOwnedRunSessionIds.keys()]) {
-    if (!terminalRunIds.has(runId) || schedulerOwnedClearTimers.has(runId)) continue;
+    if (
+      schedulerOwnedClearTimers.has(runId) ||
+      runStatusByRunId.get(runId) === 'running'
+    ) {
+      continue;
+    }
     clearSchedulerOwnedRun(runId);
   }
 }

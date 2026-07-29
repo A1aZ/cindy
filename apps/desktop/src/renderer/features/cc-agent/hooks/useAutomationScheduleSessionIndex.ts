@@ -6,6 +6,7 @@ import {
   clearSessionAttention,
   hasSessionAttention,
 } from '@/lib/sessionAttentionStore';
+import type { RunLivenessStatus } from '@/lib/silencedSessionDoneStore';
 import {
   clearSchedulerOwnedRun,
   clearSilencedRun,
@@ -14,7 +15,8 @@ import {
   getSilencedRunSessionIdForAttentionFallback,
   markNextSessionTerminalNotificationOwnedByScheduler,
   markNextSessionDoneSilenced,
-  reconcileRunMarkersWithTerminalRuns,
+  hasAnyRunMarker,
+  reconcileRunMarkers,
   rememberScheduleRunSessionAttentionBaseline,
   scheduleClearSchedulerOwnedRun,
   scheduleClearSilencedRun,
@@ -52,14 +54,14 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
       if (refreshSeqRef.current !== seq) return;
 
       // 抑制标记的事件丢失自愈:这份列表是 scheduler 落库的权威 run 状态(且包含所有
-      // 带 sessionId 的 run,没有 history limit),凡是标记指向的 run 已经终态,就说明
-      // 它的 completed / failed 事件没送到,清掉标记。RunStatus 里只有 'running' 不是
-      // 终态。刻意不用定时器猜 —— 见 silencedSessionDoneStore 的文件头注释。
-      const terminalRunIds = new Set<string>();
+      // 带 sessionId 的 run,没有 history limit),据它清掉「已终态」和「已不存在」的
+      // 标记。RunStatus 里只有 'running' 不是终态。刻意不用定时器猜 run 还在不在飞行
+      // —— 见 silencedSessionDoneStore 的文件头与 reconcileRunMarkers 注释。
+      const runStatusByRunId = new Map<string, RunLivenessStatus>();
       for (const run of runs) {
-        if (run.status !== 'running') terminalRunIds.add(run.runId);
+        runStatusByRunId.set(run.runId, run.status === 'running' ? 'running' : 'terminal');
       }
-      reconcileRunMarkersWithTerminalRuns(terminalRunIds);
+      reconcileRunMarkers(runStatusByRunId);
 
       const next = new Map<string, AutomationScheduleSessionInfo>();
       for (const run of runs) {
@@ -94,8 +96,15 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
         error: error instanceof Error ? error.message : String(error),
       });
       // 见 REFRESH_RETRY_DELAYS_MS:这次拉取也是标记对账的载体,失败不能只 log。
+      // 退避档位用尽后:仍有标记待对账就按最后一档持续重试(否则 scheduler / IPC / DB
+      // 连续不可用超过三档窗口、且此后再无事件时,标记会永久残留);没有标记则停手,
+      // 侧栏索引本身是 best-effort,交给后续事件。
       const attempt = retryAttemptRef.current;
-      const delayMs = REFRESH_RETRY_DELAYS_MS[attempt];
+      const delayMs =
+        REFRESH_RETRY_DELAYS_MS[attempt] ??
+        (hasAnyRunMarker()
+          ? REFRESH_RETRY_DELAYS_MS[REFRESH_RETRY_DELAYS_MS.length - 1]
+          : undefined);
       if (delayMs === undefined) return;
 
       retryAttemptRef.current = attempt + 1;

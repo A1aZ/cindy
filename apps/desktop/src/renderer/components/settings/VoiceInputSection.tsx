@@ -1236,9 +1236,20 @@ export function VoiceInputSection() {
     const granted = permissions.inputMonitoring.ok;
     const justGranted = granted && !inputMonitoringGrantedRef.current;
     inputMonitoringGrantedRef.current = granted;
-    if (!justGranted || !shortcutNeedsKeyboardListenerPermission) return;
+    if (!justGranted) return;
+    // 录制中不在这里注册：录制期快捷键必须保持挂起，否则用户按键试录时会把旧快捷键
+    // 触发掉。这种情况下的收尾交给录制 effect —— 它依赖同一个权限状态，会重跑一轮
+    // cleanup + setup，既重新挂起快捷键又重启 Fn capture；退出录制时它的 cleanup 也会
+    // 把已保存的快捷键注册回去。
+    if (recordingShortcut) return;
+    if (!shortcutNeedsKeyboardListenerPermission) return;
     void syncVoiceInputGlobalShortcut(settings.shortcut);
-  }, [permissions.inputMonitoring.ok, settings.shortcut, shortcutNeedsKeyboardListenerPermission]);
+  }, [
+    permissions.inputMonitoring.ok,
+    recordingShortcut,
+    settings.shortcut,
+    shortcutNeedsKeyboardListenerPermission,
+  ]);
 
   const showAppShortcutConflict = useCallback(
     (conflictId: AppShortcutId) => {
@@ -1484,6 +1495,12 @@ export function VoiceInputSection() {
     // The cleanup re-syncs the current shortcut value (whatever it is after
     // recording: the new key, unchanged old key on Escape, or null after
     // Backspace clear).
+    //
+    // 依赖里带着 inputMonitoringGranted：用户可能在录制中途点徽章去授权再切回来。
+    // 缺权限那次 startModifierShortcutRecording 失败时，main 已经把本 renderer 从
+    // 转发名单里摘掉了，所以必须重启 capture，否则 UI 还停在录制态、Fn 却永远不来。
+    // 让整个 effect 重跑而不是另写一份「重启」逻辑：cleanup + setup 会重新挂起快捷键
+    // 并重建 capture，正是这里需要的完整状态复位。
     document.body.dataset.appShortcutRecording = '1';
     window.electronAPI.appShortcuts.setRecording(true);
     let cancelled = false;
@@ -1491,7 +1508,12 @@ export function VoiceInputSection() {
       if (!cancelled && window.electronAPI.platform === 'darwin') {
         void window.electronAPI.voiceInput.startModifierShortcutRecording()
           .then((result) => {
-            if (cancelled || result.ok) return;
+            if (cancelled) return;
+            if (result.ok) {
+              // 授权后重启成功：清掉「Fn 需要授权」的提示，否则它会一直挂在那。
+              setFnRecordingBlocked(false);
+              return;
+            }
             // 缺权限只挡住 Fn 检测，其它快捷键照录，所以在提示区说明而不是弹错误——
             // 弹错误会让用户以为整个录制坏了，然后放弃。
             if (result.errorCode === 'permission') {
@@ -1513,7 +1535,7 @@ export function VoiceInputSection() {
       }
       void syncVoiceInputGlobalShortcut(getVoiceInputSettings().shortcut);
     };
-  }, [recordingShortcut, t]);
+  }, [recordingShortcut, permissions.inputMonitoring.ok, t]);
 
   useEffect(() => {
     if (!settings.refinementEnabled) {

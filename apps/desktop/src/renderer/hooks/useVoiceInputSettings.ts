@@ -144,7 +144,8 @@ export type VoiceInputShortcutUpdateResult =
      */
     pendingInputMonitoring?: boolean;
   }
-  | { ok: false; error: string; errorCode?: string };
+  // 用 IPC 契约的固定联合而不是裸 string，避免误传/误判不存在的 code。
+  | { ok: false; error: string; errorCode?: VoiceInputGlobalErrorCode };
 
 export async function syncVoiceInputGlobalShortcut(shortcut: VoiceInputShortcut | null): Promise<{ ok: boolean; error?: string }> {
   try {

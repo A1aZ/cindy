@@ -9,7 +9,9 @@ import { Switch } from '@/components/ui/switch';
 import { Tip } from '@/components/ui/tooltip';
 import { useAuth } from '@/contexts/AuthContext';
 import { SUPPORTED_LOCALES } from '@/i18n';
+import { createLogger } from '@/lib/logger';
 import { cn } from '@/lib/utils';
+import { extractIpcError } from '@/utils/ipcError';
 import { dictionaryTermKey } from '@cindy/voice-input-core';
 import {
   MAX_VOICE_INPUT_REFINEMENT_INSTRUCTIONS_CHARS,
@@ -61,6 +63,7 @@ import {
 } from '../../../shared/voiceInputCustomAsr';
 import type { VoiceInputConnectionTestFailureReason } from '../../../shared/voiceInputConnectionTest';
 
+const log = createLogger('VoiceInputSection');
 const LANGUAGE_OPTIONS: ReadonlyArray<VoiceInputLanguage> = ['auto', ...SUPPORTED_LOCALES];
 const AUTO_MICROPHONE_VALUE = '__auto__';
 const DICTIONARY_FILTERS = ['all', 'automatic', 'manual'] as const;
@@ -1214,9 +1217,15 @@ export function VoiceInputSection() {
     () => voiceInputShortcutNeedsMacNativeListener(settings.shortcut, window.electronAPI.platform),
     [settings.shortcut],
   );
-  /** 待授权 = 当前快捷键需要监听权限但还没拿到，此时按键不会有任何反应。 */
+  /**
+   * 待授权 = 当前快捷键需要监听权限，且权限**明确**被拒。
+   *
+   * 只认 denied、不用 !ok：status 为 unknown 时（helper 跑不起来、权限状态压根问不出来）
+   * ok 同样是 false，但那是故障而非等授权，挂「授权后生效」会把用户引向错误的下一步。
+   * 与 main 侧 classifyMacNativeListenerFailure 的 denied/unknown 分界保持一致。
+   */
   const shortcutAwaitingInputMonitoring =
-    shortcutNeedsKeyboardListenerPermission && !permissions.inputMonitoring.ok;
+    shortcutNeedsKeyboardListenerPermission && permissions.inputMonitoring.status === 'denied';
 
   // 用户去系统设置里打开开关后切回来（window focus 会触发 refreshPermissions），在这里
   // 补一次注册：event tap 跑在独立 helper 子进程里，重新 spawn 就能拿到新授权，不需要
@@ -1258,8 +1267,10 @@ export function VoiceInputSection() {
           toast.info(t('settings.voiceInput.shortcut.toast.pendingInputMonitoring'));
           try {
             await window.electronAPI.voiceInput.requestInputMonitoringPermission();
-          } catch {
+          } catch (error) {
             // 请求本身失败不额外打扰用户：权限徽章与行内说明已经把状态和入口摆在那了。
+            // 但要留下可诊断的痕迹；main 侧已按 IPC 错误协议消毒过 message。
+            log.warn('input monitoring permission request failed:', extractIpcError(error)?.code ?? error);
           }
           schedulePermissionRefresh({ immediate: true });
         }

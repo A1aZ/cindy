@@ -1280,7 +1280,8 @@ interface ElectronAPI {
     }>;
     openMicrophoneSettings: () => Promise<{ ok: true } | { ok: false; error: string }>;
     openInputMonitoringSettings: () => Promise<VoiceInputGlobalResult>;
-    requestInputMonitoringPermission: () => Promise<VoiceInputGlobalResult>;
+    /** 失败走统一 IPC 错误协议（reject），成功路径只有 ok:true + 状态枚举。 */
+    requestInputMonitoringPermission: () => Promise<{ ok: true; status: string }>;
     muteSystemAudio: () => Promise<{ ok: true } | { ok: false; error: string }>;
     restoreSystemAudio: () => Promise<{ ok: true } | { ok: false; error: string }>;
     testConnection: () => Promise<VoiceInputConnectionTestResult>;

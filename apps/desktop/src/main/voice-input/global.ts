@@ -21,6 +21,7 @@ import { createLogger } from '../logger.js';
 import { scheduleMainAppPresenceRestore } from '../appPresence.js';
 import { openMainWindowVoiceSettings } from '../deepLink.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
+import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
 import { prewarmVoiceInputProvider } from './index.js';
 import {
   VOICE_INPUT_DICTIONARY_LEARNING_TRACK_TIMEOUT_MS,
@@ -94,6 +95,13 @@ type VoiceInputGlobalErrorCode = 'empty' | 'unavailable' | 'unconfirmed' | 'perm
 export type VoiceInputPermissionSnapshot =
   | { ok: true; status: string }
   | { ok: false; status: string; error: string };
+
+/**
+ * 请求监听权限的结果。只回状态枚举、不回 error 字符串：真故障已经在 handler 里抛成
+ * 统一 IPC 错误，而 helper 的原始 error 含内部绝对路径，不能过桥（见
+ * `docs/dev-rules/electron-security-and-process-boundaries.md` §5）。
+ */
+type VoiceInputInputMonitoringRequestResult = { ok: true; status: string };
 
 type ClipboardSnapshot = {
   formats: string[];
@@ -733,7 +741,10 @@ export function registerGlobalVoiceInputIpc(): void {
     }
   });
 
-  ipcMain.handle('voice-input:open-input-monitoring-settings', async (): Promise<VoiceInputGlobalResult> => {
+  ipcMain.handle('voice-input:open-input-monitoring-settings', async (event): Promise<VoiceInputGlobalResult> => {
+    // 同下面的 request handler：这条也会触发 CGRequestListenEventAccess 弹系统授权窗，
+    // 攻击面完全相同，所以一并上闸——只给新 handler 加等于没关洞。
+    assertTrustedAppRendererEvent(event);
     if (process.platform !== 'darwin') {
       return {
         ok: false,
@@ -757,31 +768,35 @@ export function registerGlobalVoiceInputIpc(): void {
   // 与上面 open-input-monitoring-settings 的区别：这条只弹系统授权请求，不顺手打开
   // 「系统设置」面板。用户刚设完快捷键时该请求授权，但把设置面板怼到脸上就太重了——
   // CGRequestListenEventAccess 弹的窗自带「打开系统设置」按钮，想去自己会点。
-  ipcMain.handle('voice-input:request-input-monitoring-permission', async (): Promise<VoiceInputGlobalResult> => {
-    if (process.platform !== 'darwin') {
-      return {
-        ok: false,
-        error: 'Input Monitoring permission is only required on macOS.',
-        errorCode: 'unavailable',
-      };
-    }
-    try {
-      cachedInputMonitoringPermission = await requestMacInputMonitoringPermission();
-      return cachedInputMonitoringPermission.ok
-        ? { ok: true }
-        : {
-          ok: false,
-          error: cachedInputMonitoringPermission.error,
-          errorCode: 'permission',
-        };
-    } catch (error) {
-      return {
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-        errorCode: 'failed',
-      };
-    }
-  });
+  //
+  // 这是特权动作（会弹系统级授权窗），所以：
+  // - 必须过 sender 闸。语音浮窗、词典 toast 等次级窗口装的是同一份 preload，但它们
+  //   没有登记进 appContentWindows，assertTrustedAppRendererEvent 会挡掉，避免任何
+  //   非设置流程的页面凭 bridge 弹出系统权限窗。
+  // - 失败走 throwIpcError 而不是 return { ok: false }：这是动作型 handler，renderer
+  //   不需要失败时的结构化 fallback（它随后会重新查权限），按 IPC 错误协议应当抛。
+  ipcMain.handle(
+    'voice-input:request-input-monitoring-permission',
+    async (event): Promise<VoiceInputInputMonitoringRequestResult> => {
+      assertTrustedAppRendererEvent(event);
+      if (process.platform !== 'darwin') {
+        throwIpcError('UNSUPPORTED_CAPABILITY', 'Input Monitoring permission is only required on macOS.');
+      }
+      const snapshot = await requestMacInputMonitoringPermission();
+      cachedInputMonitoringPermission = snapshot;
+      // denied 是正常结果（用户还没在系统设置里打开），不是故障；只有连权限状态都问不出来
+      // 才是真故障——helper 编译/spawn 失败时它的 error 里带 swiftc / execFile 的内部
+      // 绝对路径，不能原样回传 renderer，只留在日志里。
+      if (!snapshot.ok && snapshot.status !== 'denied') {
+        log.warn('input monitoring permission request failed', {
+          status: snapshot.status,
+          error: snapshot.error,
+        });
+        throwIpcError('INTERNAL', 'Could not request the Input Monitoring permission.');
+      }
+      return { ok: true, status: snapshot.status };
+    },
+  );
 
   ipcMain.handle(
     'voice-input:dictionary-toast-show',

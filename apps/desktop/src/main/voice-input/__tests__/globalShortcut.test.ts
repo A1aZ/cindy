@@ -20,6 +20,8 @@ const mocks = vi.hoisted(() => {
   const modifierIsRunning = vi.fn();
   const modifierStartKeyCapture = vi.fn();
   const inputMonitoringSnapshot = vi.fn();
+  const requestInputMonitoring = vi.fn();
+  const assertTrustedAppRenderer = vi.fn();
   const updateSettings = vi.fn();
   const registerShortcut = vi.fn((accelerator: string) => {
     void accelerator;
@@ -35,6 +37,8 @@ const mocks = vi.hoisted(() => {
     modifierIsRunning,
     modifierStartKeyCapture,
     inputMonitoringSnapshot,
+    requestInputMonitoring,
+    assertTrustedAppRenderer,
     updateSettings,
     registerShortcut,
   };
@@ -93,13 +97,17 @@ vi.mock('../MacModifierShortcutListener.js', () => ({
     startKeyCapture: mocks.modifierStartKeyCapture,
   })),
   getMacInputMonitoringPermissionSnapshot: mocks.inputMonitoringSnapshot,
-  requestMacInputMonitoringPermission: vi.fn(() => Promise.resolve({ ok: true, status: 'granted' })),
+  requestMacInputMonitoringPermission: mocks.requestInputMonitoring,
 }));
 
 vi.mock('../VoiceInputDataStore.js', () => ({
   voiceInputDataStore: {
     updateSettings: mocks.updateSettings,
   },
+}));
+
+vi.mock('../../security/trustedAppRenderer.js', () => ({
+  assertTrustedAppRendererEvent: mocks.assertTrustedAppRenderer,
 }));
 
 let setTimeoutSpy: { mockRestore: () => void } | null = null;
@@ -128,6 +136,10 @@ describe('voice input global shortcut registration', () => {
     // 默认已授权:既有用例断言的是「拿得到权限时」的注册行为。
     mocks.inputMonitoringSnapshot.mockReset();
     mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: true, status: 'granted' });
+    mocks.requestInputMonitoring.mockReset();
+    mocks.requestInputMonitoring.mockResolvedValue({ ok: true, status: 'granted' });
+    // 默认放行 sender 闸；需要验证闸本身时在用例里让它抛。
+    mocks.assertTrustedAppRenderer.mockReset();
     mocks.updateSettings.mockReset();
     mocks.updateSettings.mockImplementation((patch: unknown) => ({ shortcut: null, ...(patch as object) }));
     mocks.registerShortcut.mockReset();
@@ -322,6 +334,75 @@ describe('voice input global shortcut registration', () => {
       });
 
       expect(result).toMatchObject({ ok: false, errorCode: 'permission' });
+    });
+
+    // 这个 handler 会弹系统级授权窗。语音浮窗等次级窗口装着同一份 preload，所以必须
+    // 过 sender 闸——否则任何拿到 bridge 的页面都能在设置流程之外弹出系统权限窗。
+    it('rejects a permission request that does not come from a trusted app renderer', async () => {
+      setPlatform('darwin');
+      mocks.assertTrustedAppRenderer.mockImplementation(() => {
+        throw new Error('[PERMISSION_DENIED] 此操作只能从 Cindy 主页面发起');
+      });
+      const { registerGlobalVoiceInputIpc } = await import('../global.js');
+      registerGlobalVoiceInputIpc();
+
+      await expect(
+        mocks.handlers.get('voice-input:request-input-monitoring-permission')?.({ sender: {}, senderFrame: {} }),
+      ).rejects.toThrow('[PERMISSION_DENIED]');
+      expect(mocks.requestInputMonitoring).not.toHaveBeenCalled();
+    });
+
+    it('guards the settings-opening variant with the same sender check', async () => {
+      setPlatform('darwin');
+      mocks.assertTrustedAppRenderer.mockImplementation(() => {
+        throw new Error('[PERMISSION_DENIED] 此操作只能从 Cindy 主页面发起');
+      });
+      const { registerGlobalVoiceInputIpc } = await import('../global.js');
+      registerGlobalVoiceInputIpc();
+
+      await expect(
+        mocks.handlers.get('voice-input:open-input-monitoring-settings')?.({ sender: {}, senderFrame: {} }),
+      ).rejects.toThrow('[PERMISSION_DENIED]');
+      expect(mocks.requestInputMonitoring).not.toHaveBeenCalled();
+    });
+
+    // denied 是正常结果(用户还没在系统设置里打开)，不该当故障抛。
+    it('returns the denied status instead of throwing when the user has not granted yet', async () => {
+      setPlatform('darwin');
+      mocks.requestInputMonitoring.mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
+      const { registerGlobalVoiceInputIpc } = await import('../global.js');
+      registerGlobalVoiceInputIpc();
+
+      const result = await mocks.handlers.get('voice-input:request-input-monitoring-permission')?.({
+        sender: {},
+        senderFrame: {},
+      });
+
+      expect(result).toEqual({ ok: true, status: 'denied' });
+    });
+
+    // helper 跑不起来时它的 error 里带 swiftc / execFile 的内部绝对路径，既不能当成
+    // 「权限被拒」，也不能原样过桥给 renderer。
+    it('throws a sanitized IPC error when the permission status cannot be read at all', async () => {
+      setPlatform('darwin');
+      mocks.requestInputMonitoring.mockResolvedValue({
+        ok: false,
+        status: 'unknown',
+        error: 'spawn /Users/someone/Library/Application Support/Cindy/voice-input/helper ENOENT',
+      });
+      const { registerGlobalVoiceInputIpc } = await import('../global.js');
+      registerGlobalVoiceInputIpc();
+
+      const call = mocks.handlers.get('voice-input:request-input-monitoring-permission')?.({
+        sender: {},
+        senderFrame: {},
+      });
+
+      // 用 ^...$ 锚定完整消息，而不是断言「不含某个路径」——后者容易写成永远为真的空转
+      // 断言。锚定后一旦 helper 的原始 error（含内部绝对路径）被拼进去就会失败。
+      await expect(call).rejects.toThrow(
+        /^\[INTERNAL\] Could not request the Input Monitoring permission\.$/,
+      );
     });
 
     it('persists normally when the native listener starts', async () => {

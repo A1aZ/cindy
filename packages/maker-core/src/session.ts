@@ -258,6 +258,17 @@ export class Session {
   private pendingInteractions = 0;
   /** 最近一次 fan-out 事件的时刻，仅用于日志诊断。 */
   private lastEventAt = 0;
+  /**
+   * turn 代号：每次 send 建立 reservation 时 +1。看门狗的善后动作（尤其
+   * recoverIfTurnStillRunning 的"关掉会话"）必须绑定到超时的那一个 turn，否则宽限期内
+   * 新起的健康 turn 会被误杀 —— `isTurnRunning()` 只回答"有 turn 在跑"，不回答"是不是
+   * 那一个"（review #944 第七轮 P1）。
+   *
+   * 只在 reservation 创建处自增就够：send 入口有 `isTurnRunning()` 守卫，卡死的 turn
+   * 还在跑时新 send 会被 SESSION_RUNNING 拒掉、拿不到 reservation。换句话说代号变了
+   * 就一定意味着"卡死那个 turn 已经停了、这是新活儿"。
+   */
+  private turnGeneration = 0;
   private lastEventType: string | null = null;
 
   constructor(opts: SessionOptions) {
@@ -315,6 +326,9 @@ export class Session {
       abortController: new AbortController(),
     };
     this.sendReservation = reservation;
+    // 新一轮 turn 的代号（见 turnGeneration）：看门狗的善后动作据此判断"还是不是那个
+    // 卡死的 turn"，避免误杀宽限期内新起的健康 turn。
+    this.turnGeneration += 1;
     const cleanupExternalAbort = this.attachExternalCancellation(reservation, handleOpts.signal);
     // originInstalled:已越过 dispatch 边界、把本次 origin 装进 currentTurnOrigin。
     // turnDispatched:handle.send 成功、本次 send 真正成为运行中的 turn。
@@ -892,8 +906,11 @@ export class Session {
     // → finally 永不执行 → 复核永不发生 → 会话永久不可用,恰好是本看门狗要救的场景
     // (review #944 第五轮 Copilot)。recoverIfTurnStillRunning 自己会复核 isTurnRunning,
     // abort 正常生效时它是 no-op,所以无条件排定是安全的。
+    // 绑定到**这一个** turn:宽限期内若 abort 生效、用户/调度器又起了新 turn,复核绝不能
+    // 把那条健康的活儿一起关掉(review #944 第七轮 P1)。
+    const stalledGeneration = this.turnGeneration;
     const timer = setTimeout(() => {
-      void this.recoverIfTurnStillRunning();
+      void this.recoverIfTurnStillRunning(stalledGeneration);
     }, STALL_ABORT_RECOVERY_GRACE_MS);
     (timer as unknown as { unref?: () => void }).unref?.();
     void this.abort().catch((e) => {
@@ -906,8 +923,17 @@ export class Session {
    * (isTurnRunning 恒 true → 后续 send 全被拒)。关掉它,让下一次 send 走 Maker 的
    * lazy create 重建 handle。这是所有 agent 共用的恢复出路,不需要各自实现重建。
    */
-  private async recoverIfTurnStillRunning(): Promise<void> {
+  private async recoverIfTurnStillRunning(stalledGeneration: number): Promise<void> {
     if (this.status === 'closed' || this.closePromise) return;
+    // 代号变了 = 卡死那个 turn 已经停了(否则新 send 会被 SESSION_RUNNING 拒),现在跑的是
+    // 新活儿。abort 生效了,不能拿"有 turn 在跑"当作"还没恢复"去关会话。
+    if (this.turnGeneration !== stalledGeneration) {
+      this.logger.info('turn stall abort took effect; a newer turn is running — not closing session', {
+        stalledGeneration,
+        currentGeneration: this.turnGeneration,
+      });
+      return;
+    }
     if (!this.isTurnRunning()) return; // abort 生效了,会话仍可用,什么都不做
     this.logger.error(
       'turn still running after stall abort — closing session so the next send can rebuild it',

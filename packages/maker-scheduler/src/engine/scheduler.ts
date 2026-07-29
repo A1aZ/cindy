@@ -2118,10 +2118,18 @@ export class Scheduler extends EventEmitter {
     // 和守卫视野里一起消失(第六轮 P1)。槽位一律由 fire 自己的 finally 经
     // finishInflightAttempt 释放;真卡住了就留在账上,由 logStorageStall 持续暴露。
     if (!this.inflightControllers.has(runId)) return;
-    // 先摘 registry:同步完成,保证本轮之后的 tick / 守卫都不再看到这条,不会重复收口。
+    // 摘 controller + 转 'finalizing':同步完成,保证本轮之后的 tick / 守卫都不再重复
+    // 走强制收口(phase='finalizing' 会被守卫分流到 logStorageStall 那条只观测的分支)。
+    //
+    // **attempt 留到收口真正结束再删**(第七轮 P1)。下面的 updateRun / 重排若卡住,提前
+    // 删掉 attempt 就等于:run 行还停在 'running'、自动认领清空的 nextFireAt 还没补,而这
+    // 条 run 已经从槽位记账和守卫视野里一起消失 —— 与第六轮修的 runner-finalization
+    // 同一个坑,只是这次发生在强制收口自己的落库上。槽位统一由下面 finally 里的
+    // finishInflightAttempt 释放;真卡住就留在账上,由 logStorageStall 持续暴露。
     this.abandonedRuns.add(runId);
-    this.inflightAttempts.delete(runId);
     this.inflightControllers.delete(runId);
+    attempt.phase = 'finalizing';
+    attempt.finalizingSince = now;
     const set = this.inflightByschedule.get(scheduleId);
     if (set) {
       set.delete(runId);
@@ -2134,7 +2142,6 @@ export class Scheduler extends EventEmitter {
     }
     this.runIdToBoundSessionId.delete(runId);
     this.silencedRuns.delete(runId);
-    this.stopHeartbeatLoopIfIdle();
     const noProgressMs = now - attempt.lastProgressAt;
     this.logger?.error?.('scheduler: force-releasing stalled run slot (runner never settled)', {
       schedulerInstanceId: this.schedulerInstanceId,
@@ -2142,10 +2149,27 @@ export class Scheduler extends EventEmitter {
       ...this.describeInflightRun(attempt, now),
       noProgressMs,
       abortGraceMs: this.runStallAbortGraceMs,
+      // 槽位在下面的收口结束后才释放,所以这里的 slotsInUse 仍含本条。
       slotsInUse: this.countSlotsInUse(),
+      slotReleasePending: true,
       maxConcurrentRuns: this.maxConcurrentRuns,
     });
     this.emitRuntimeState();
+    try {
+      await this.finishForceReleasedRun(attempt, now, noProgressMs);
+    } finally {
+      // 唯一的槽位释放出口(收口成功 / 落库失败 / 抛错都要走到)。
+      this.finishInflightAttempt(runId);
+    }
+  }
+
+  /** forceReleaseStalledRun 的收口段:落 run 行终态 + 恢复排期。见那里的注释。 */
+  private async finishForceReleasedRun(
+    attempt: InflightAttempt,
+    now: number,
+    noProgressMs: number,
+  ): Promise<void> {
+    const { runId, scheduleId } = attempt;
     const errorMsg =
       `run stalled: no progress for ${Math.round(noProgressMs / 60_000)}min ` +
       `and did not stop within ${Math.round(this.runStallAbortGraceMs / 1000)}s of abort`;
@@ -2199,6 +2223,8 @@ export class Scheduler extends EventEmitter {
    * 顺手补排:那会替一个自己没持有的 claim 写排期 —— 同 schedule 上真正在跑的自动 run
    * 可能与新排出来的这次重叠,一次性任务还会因为 lastFiredAt 尚未落定而被当成没消耗过、
    * 就此复活(第六轮 P1)。手动 run 卡死只收自己的槽位和 run 行。
+   *
+   * recurring=false 的自动 claim 走**过期**而不是重排 —— 见函数体内注释(第七轮 P1)。
    */
   private async replanAfterStalledClaim(attempt: InflightAttempt, now: number): Promise<void> {
     const { scheduleId } = attempt;
@@ -2217,8 +2243,35 @@ export class Scheduler extends EventEmitter {
       if (!current) return; // 行已删,无需补排
       if (current.status !== 'active') return; // paused / expired:resume 时自己会重算
       if (current.nextFireAt !== undefined) return; // 已有排期(别的路径已补),不覆盖
+      // 一次性任务(Once)必须**过期**而不是重排。强制收口没走 fireOneInner 的正常终态段,
+      // lastFiredAt 从未落定,computeNextFireAt 因此把它当成"还没跑过"又排一次 —— 一个
+      // 失败的 Once 任务会自己再跑一遍(第七轮 P1)。这里补上正常路径的那套写入:记下
+      // 这次已消耗的触发 + 置 expired + 清 nextFireAt。
+      // lastFiredAt 用 attempt.startedAt(登记时刻):强制收口路径手里没有 run 行的
+      // firedAt,两者只差一次 claim 的毫秒级延迟。
+      //
+      // manual 排除在外(防御性):manual 的 nextFireAt 永不被设置,tick 也就永远不会产生
+      // 自动 attempt,这个分支理论上到不了 manual 行;但真到了也不能把它标 expired ——
+      // 那会让一个"只按需手动跑"的任务在 UI 上变成已过期。
+      if (!current.recurring && !current.manual) {
+        const updated = await this.storage.update(scheduleId, {
+          lastFiredAt: attempt.startedAt,
+          lastFinishedAt: now,
+          status: 'expired',
+          nextFireAt: undefined,
+        });
+        this.activeSchedules.delete(scheduleId);
+        this.logger?.info?.('scheduler: expired one-shot schedule after stalled run', {
+          schedulerInstanceId: this.schedulerInstanceId,
+          processId: this.processId,
+          scheduleId,
+          runId: attempt.runId,
+          persisted: updated !== null,
+        });
+        return;
+      }
       const next = computeNextFireAt(current, now);
-      if (next === undefined) return; // manual / 已消耗的一次性任务:按语义不续命
+      if (next === undefined) return; // manual:按语义不续命
       const updated = await this.storage.update(scheduleId, { nextFireAt: next });
       if (updated && updated.status === 'active') {
         this.activeSchedules.set(scheduleId, updated);

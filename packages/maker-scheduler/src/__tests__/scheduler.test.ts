@@ -3078,6 +3078,96 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
     }
   });
 
+  it('强制收口一次性任务:过期而不是又排一次', async () => {
+    // 强制收口不走 fireOneInner 的正常终态段,lastFiredAt 从未落定,computeNextFireAt 会
+    // 把 Once 当成"还没跑过"又排一次 —— 一个失败的一次性任务自己再跑一遍(第七轮 P1)。
+    vi.useFakeTimers();
+    try {
+      const h = makeHarness({
+        runStallMs: 60_000,
+        runStallAbortGraceMs: 30_000,
+        runnerImpl: () => new Promise<FireResult>(() => {}), // 卡死且不理 abort
+      });
+      // recurring=false 的一次性任务(cron 到点触发一次就该消耗掉)
+      const sch = await h.scheduler.create({ ...baseInput, recurring: false });
+      h.clock.advance(60_000);
+      void h.scheduler.tick();
+      await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(1));
+      const runId = (await h.storage.listRuns(sch.id))[0].id;
+
+      h.clock.advance(60_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      h.clock.advance(30_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      await vi.waitFor(() => expect(h.storage.runs.get(runId)?.status).toBe('failed'));
+
+      const row = await h.storage.get(sch.id);
+      expect(row?.status).toBe('expired'); // 已消耗
+      expect(row?.nextFireAt).toBeUndefined(); // 不得又排一次
+      expect(row?.lastFiredAt).toBeDefined();
+      expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(0);
+      await h.scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('强制收口自己的落库卡住时也保持追踪', async () => {
+    // forceReleaseStalledRun 曾经先删 attempt 再 await 落库/重排。落库卡住时:run 行还停在
+    // 'running'、自动认领清空的 nextFireAt 还没补,而这条 run 已经从槽位记账和守卫视野里
+    // 一起消失 —— 与第六轮修的 runner-finalization 同一个坑(第七轮 P1)。
+    vi.useFakeTimers();
+    try {
+      const errorLogs: string[] = [];
+      const logger = {
+        debug() {}, info() {}, warn() {},
+        error(msg: string) { errorLogs.push(msg); },
+      } as unknown as Logger;
+      const storage = new InMemoryStorage();
+      let releaseUpdateRun: (() => void) | null = null;
+      const realUpdateRun = storage.updateRun.bind(storage);
+      storage.updateRun = (id: string, patch: Partial<ScheduleRun>) =>
+        new Promise<ScheduleRun | null>((resolve) => {
+          releaseUpdateRun = () => resolve(realUpdateRun(id, patch));
+        });
+      const h = makeHarness({
+        storage,
+        logger,
+        runStallMs: 60_000,
+        runStallAbortGraceMs: 30_000,
+        runnerImpl: () => new Promise<FireResult>(() => {}), // 卡死且不理 abort
+      });
+      const sch = await h.scheduler.create({ ...baseInput, intervalMs: 3_600_000 });
+      h.clock.advance(3_600_000);
+      void h.scheduler.tick();
+      await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(1));
+
+      // 走到强制收口,然后卡在它自己的 updateRun 上
+      h.clock.advance(60_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      h.clock.advance(30_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      await vi.waitFor(() => expect(releaseUpdateRun).not.toBeNull());
+
+      // 收口没结束 → 仍在账上、仍受守卫观测(旧实现这里已经是 0 了)
+      expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(1);
+      expect(h.scheduler.getRuntimeSnapshot().inFlightRuns[0]?.phase).toBe('finalizing');
+
+      // 落库一直卡着 → 超过阈值后要有存储卡死诊断,不能静默
+      h.clock.advance(60_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      expect(errorLogs.filter((m) => m.includes('storage await appears wedged'))).toHaveLength(1);
+
+      // 落库返回后走完收口,槽位由统一出口释放
+      releaseUpdateRun!();
+      await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(0));
+      expect((await h.storage.get(sch.id))?.nextFireAt).toBeDefined(); // 排期已恢复
+      await h.scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('守卫 abort 被响应后的正常落库不报存储卡死', async () => {
     // finalizing 卡死若按 lastProgressAt 判定,守卫 abort 生效的正常路径会在落库刚开始那
     // 一刻就误报:此时 lastProgressAt 已经旧了整个 runStallMs。判定必须从进入 finalizing

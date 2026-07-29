@@ -325,6 +325,32 @@ describe('Session turn stall watchdog', () => {
     }
   });
 
+  it('宽限期内新起的 turn 不被误关(复核绑定到超时那一个 turn)', async () => {
+    // isTurnRunning() 只回答"有 turn 在跑",不回答"是不是那一个"。abort 生效后用户/调度器
+    // 在 10s 宽限内起了新 turn,不加 turn 代号的复核会把这条健康的活儿一起关掉
+    // (review #944 第七轮 P1)。
+    vi.useFakeTimers();
+    try {
+      const stub = createStubHandle(); // abort 生效 → 卡死的 turn 真的停了
+      const session = createSession(stub);
+      session.onEvent(() => {});
+
+      await session.send('go');
+      await vi.advanceTimersByTimeAsync(STALL_MS + 1);
+      expect(stub.abort).toHaveBeenCalledTimes(1);
+
+      // 宽限没走完就起了新 turn(abort 已生效,isTurnRunning 已翻假,send 不会被拒)
+      await session.send('next');
+      await vi.advanceTimersByTimeAsync(STALL_ABORT_RECOVERY_GRACE_MS + 1);
+
+      // 新 turn 还在跑 —— 绝不能因为"有 turn 在跑"就把会话关掉
+      expect(session.getStatus()).not.toBe('closed');
+      expect(session.isTurnRunning()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('abort 生效时不关闭会话(会话仍可用,不该被误关)', async () => {
     vi.useFakeTimers();
     try {

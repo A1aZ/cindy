@@ -258,6 +258,11 @@ interface InflightAttempt extends SchedulerInflightRun {
   finalizingSince?: number;
   /** runner 已经投过一条**失败**通知；守卫收口时据此决定是否补发。见 onRunnerNotified。 */
   runnerNotifiedFailure?: boolean;
+  /**
+   * 强制收口已认领这条 attempt 的清理权。置位期间 finishInflightAttempt 一律让位 ——
+   * 只有 forceReleaseStalledRun 的 finally 能删它（review #944 第十三轮 P1）。
+   */
+  forceReleaseOwnsCleanup?: boolean;
 }
 
 interface InflightRunDiagnostic extends SchedulerInflightRun {
@@ -1588,6 +1593,18 @@ export class Scheduler extends EventEmitter {
   private finishInflightAttempt(runId: string): void {
     const attempt = this.inflightAttempts.get(runId);
     if (!attempt) return;
+    if (attempt.forceReleaseOwnsCleanup) {
+      // 强制收口正在进行:它独占这条 attempt 的清理权(见 forceReleaseStalledRun)。
+      // 迟到 settle 的 fire 走到自己的外层 finally 时必须让位,否则未完成的收口会从
+      // 槽位记账和守卫视野里一起消失(review #944 第十三轮 P1)。
+      this.logger?.info?.('scheduler: deferring attempt cleanup to the in-progress force release', {
+        schedulerInstanceId: this.schedulerInstanceId,
+        processId: this.processId,
+        runId,
+        scheduleId: attempt.scheduleId,
+      });
+      return;
+    }
     const before = this.inflightAttempts.size;
     this.inflightAttempts.delete(runId);
     const now = this.clock.now();
@@ -2224,10 +2241,17 @@ export class Scheduler extends EventEmitter {
       maxConcurrentRuns: this.maxConcurrentRuns,
     });
     this.emitRuntimeState();
+    // 认领 attempt 的清理权,**必须紧贴 try**:此后只有下面的 finally 能删它。
+    // 否则一条迟到 settle 的 runner(在 abandonedRuns 标记之后、收口 await 期间返回)
+    // 会让 fireOne / runNow 自己的外层 finally 先把 attempt 删掉 —— 未完成的收口
+    // 就此从槽位记账和守卫视野里消失,落库若卡住,run 行停在 'running'、自动认领清空的
+    // nextFireAt 也没人补,而新任务照常放行(review #944 第十三轮 P1)。
+    attempt.forceReleaseOwnsCleanup = true;
     try {
       await this.finishForceReleasedRun(attempt, now, noProgressMs);
     } finally {
       // 唯一的槽位释放出口(收口成功 / 落库失败 / 抛错都要走到)。
+      attempt.forceReleaseOwnsCleanup = false;
       this.finishInflightAttempt(runId);
     }
   }

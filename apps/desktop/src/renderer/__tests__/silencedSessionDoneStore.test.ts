@@ -172,6 +172,7 @@ describe('silencedSessionDoneStore', () => {
             ['run-s', 'terminal' as const],
             ['run-o', 'terminal' as const],
           ]),
+          new Set(),
         );
 
         // 对账当拍不删:还在 linger 窗口内,pending 的 done transition 仍看得到标记。
@@ -202,6 +203,7 @@ describe('silencedSessionDoneStore', () => {
           ['run-s', 'running' as const],
           ['run-o', 'running' as const],
         ]),
+        new Set(['run-s', 'run-o']),
       );
 
       expect(isSessionDoneSilenced('session-silenced')).toBe(true);
@@ -226,14 +228,54 @@ describe('silencedSessionDoneStore', () => {
       try {
         markNextSessionDoneSilenced('run-self-delete', 'session-1');
 
-        // DB 里已无此 run,但引擎报它仍 in-flight → 调用方覆盖为 running。
-        reconcileRunMarkers(new Map([['run-self-delete', 'running' as const]]));
+        // DB 里已无此 run(行随 schedule 级联删除),但引擎报它仍 in-flight。
+        reconcileRunMarkers(new Map(), new Set(['run-self-delete']));
         vi.advanceTimersByTime(MARKER_TERMINAL_LINGER_MS * 3);
 
         expect(isSessionDoneSilenced('session-1')).toBe(true);
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    /**
+     * 回归(codex review P1):两份读之间隔着 DB 查询的 await,run 恰好在那个窗口内结束时
+     * DB 行还是 running、controller 已注销。本轮只能保守保持标记(无法区分它是否真的还在
+     * 跑),但必须报告 needsRecheck —— 否则若该 run 的终态事件正是丢掉的那个,就再没有信号
+     * 来清这个标记,自愈保证被打破。
+     */
+    it('reports needsRecheck when the DB says running but the engine does not', () => {
+      vi.useFakeTimers();
+      try {
+        markNextSessionDoneSilenced('run-racing', 'session-1');
+
+        const result = reconcileRunMarkers(
+          new Map([['run-racing', 'running' as const]]),
+          new Set(),
+        );
+
+        expect(result.needsRecheck).toBe(true);
+        // 保守保持,不清。
+        vi.advanceTimersByTime(MARKER_TERMINAL_LINGER_MS * 3);
+        expect(isSessionDoneSilenced('session-1')).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not report needsRecheck when both reads agree', () => {
+      markNextSessionDoneSilenced('run-live', 'session-1');
+      markNextSessionTerminalNotificationOwnedByScheduler('run-done', 'session-2');
+
+      const result = reconcileRunMarkers(
+        new Map([
+          ['run-live', 'running' as const],
+          ['run-done', 'terminal' as const],
+        ]),
+        new Set(['run-live']),
+      );
+
+      expect(result.needsRecheck).toBe(false);
     });
 
     it('clears markers whose run no longer exists in the snapshot', () => {
@@ -243,7 +285,10 @@ describe('silencedSessionDoneStore', () => {
         markNextSessionTerminalNotificationOwnedByScheduler('run-gone', 'session-owned');
 
         // 快照非空,但完全不含这两个 run —— 它们已经被删掉了。
-        reconcileRunMarkers(new Map([['some-live-run', 'running' as const]]));
+        reconcileRunMarkers(
+          new Map([['some-live-run', 'running' as const]]),
+          new Set(['some-live-run']),
+        );
         vi.advanceTimersByTime(MARKER_TERMINAL_LINGER_MS + 1);
 
         expect(isSessionDoneSilenced('session-silenced')).toBe(false);
@@ -265,7 +310,7 @@ describe('silencedSessionDoneStore', () => {
         markNextSessionDoneSilenced('run-deleted', 'session-silenced');
         markNextSessionTerminalNotificationOwnedByScheduler('run-gone', 'session-owned');
 
-        reconcileRunMarkers(new Map());
+        reconcileRunMarkers(new Map(), new Set());
         vi.advanceTimersByTime(MARKER_TERMINAL_LINGER_MS + 1);
 
         expect(isSessionDoneSilenced('session-silenced')).toBe(false);
@@ -294,6 +339,7 @@ describe('silencedSessionDoneStore', () => {
             ['run-s', 'terminal' as const],
             ['run-o', 'terminal' as const],
           ]),
+          new Set(),
         );
         expect(isSessionDoneSilenced('session-silenced')).toBe(true);
         expect(isSessionTerminalNotificationOwnedByScheduler('session-owned')).toBe(true);
@@ -317,6 +363,7 @@ describe('silencedSessionDoneStore', () => {
             ['run-a', 'terminal' as const],
             ['run-b', 'running' as const],
           ]),
+          new Set(['run-b']),
         );
         vi.advanceTimersByTime(MARKER_TERMINAL_LINGER_MS + 1);
 

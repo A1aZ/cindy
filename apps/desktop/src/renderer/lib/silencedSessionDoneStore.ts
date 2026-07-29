@@ -136,52 +136,77 @@ export function hasAnyRunMarker(): boolean {
   return silencedRunSessionIds.size > 0 || schedulerOwnedRunSessionIds.size > 0;
 }
 
+export interface ReconcileRunMarkersResult {
+  /**
+   * 本轮出现了「DB 说还在跑、引擎的 in-flight 快照里却没有」的持标记 run,说明这两份读
+   * 拿到的不是同一时刻的状态。
+   *
+   * 它们由同一次 IPC 取回,但中间隔着 DB 查询的 `await`:run 恰好在那个窗口内结束时,
+   * SQLite 返回的行还是 `running`,而 controller 已被注销 —— 于是本轮只能保守保持标记
+   * (它也可能真的还在跑,无法区分)。问题在于:**如果该 run 的终态事件正是丢掉的那个,
+   * 就再没有任何信号来清这个标记**,自愈保证被打破。
+   *
+   * 所以消费方拿到 true 时必须安排一次快速重新对账 —— 下一轮 DB 已落到终态,不一致自然
+   * 消解。这是 review 指出的竞态的收口方式(race-safe 快照需要在 main 侧忙等重采样,
+   * 代价更大;这里用一次重查换同样的正确性)。
+   */
+  needsRecheck: boolean;
+}
+
 /**
  * 用 scheduler 落库的**权威** run 状态对账标记 —— 事件丢失(广播断链、事件早于消费方
  * 挂载等)的唯一自愈路径。不猜时间、也不看 renderer 的 running 快照,那几种判据都会
  * 误判,见上方「事件丢失的自愈不用定时器」注释。
  *
- * 三种情形:
- *   - 映射里是 `terminal` → 排 linger 退场。它的 completed / failed 事件没送到。
- *   - 映射里是 `running` → 保持。仍在飞行,飞多久都不清。
- *   - **不在映射里** → 同样排 linger 退场。该 run 已经不存在了:删除 schedule 会级联
- *     删掉它的 `schedule_runs` 行,deferred run 也会被显式删除,这两种情况永远等不到
- *     一个终态状态。这里不可能是「标记建好但 run 还没落库」的极早期 —— 引擎先
- *     `updateRun` 写 sessionId、再 emit `session-bound` / `silenced`,而权威快照包含
- *     所有带 sessionId 的 run,所以标记存在就意味着该 run 当时已进入快照范围。异步
- *     拉取的过期结果由调用方的 seq 守卫挡掉,不会走到这里。
+ * **两份数据缺一不可**,且**引擎的 in-flight 快照优先级更高**:
+ *   - `inflightRunIds` 有 → 保持。仍在飞行,飞多久都不清。「行不在库里」并不等于
+ *     「跑完了」——agent 在任务 run 内调 `schedule_delete` 删自己的 schedule 时,引擎用
+ *     `exemptRunId` 豁免 caller run 不 abort,它的行随 schedule 级联删除后仍继续跑到底。
+ *     引擎内存态是这件事唯一的权威来源。
+ *   - `dbRunStatus` 是 `terminal` → 排 linger 退场。它的 completed / failed 事件没送到。
+ *   - 两份都没有 → 同样排 linger 退场。该 run 已经不存在了:删除 schedule 会级联删掉
+ *     它的 `schedule_runs` 行,deferred run 也会被显式删除,这两种情况永远等不到一个终态
+ *     状态。这里不可能是「标记建好但 run 还没落库」的极早期 —— 引擎先 `updateRun` 写
+ *     sessionId、再 emit `session-bound` / `silenced`,而权威快照包含所有带 sessionId 的
+ *     run,所以标记存在就意味着该 run 当时已进入快照范围。异步拉取的过期结果由调用方的
+ *     seq 守卫挡掉,不会走到这里。
  *
- * **调用方必须先把引擎的 in-flight 快照覆盖成 `running` 再传进来**(见
- * `scheduler.listInflightRunIds`)。「行不在库里」并不等于「跑完了」:agent 在任务 run
- * 内调 `schedule_delete` 删自己的 schedule 时,引擎用 `exemptRunId` 豁免 caller run 不
- * abort,它的行随 schedule 级联删除后仍继续跑到底 —— 那期间把标记清掉,最终 done 就会
- * 漏出通知。引擎内存态是这件事唯一的权威来源,优先级高于 DB 状态。
- *
- * **空映射不是异常,一样要对账**:权威查询在库里没有匹配行时合法返回空数组(删掉了
- * 最后一个 schedule、或唯一的 run 被 defer 后删除),而查询失败是 reject、走调用方的
- * catch 与重试,根本不会以空映射的形式到这里。早先那个「空映射整体跳过」的守卫会把
- * 这种情况下的标记永久留住。
+ * **空的 dbRunStatus 不是异常,一样要对账**:权威查询在库里没有匹配行时合法返回空数组
+ * (删掉了最后一个 schedule、或唯一的 run 被 defer 后删除),而查询失败是 reject、走调用方
+ * 的 catch 与重试,根本不会以空映射的形式到这里。
  *
  * 清除统一走 `MARKER_TERMINAL_LINGER_MS` 的 linger,不立即删 —— 对账面对的正是「终态
  * 事件丢了、从未排过 linger」的标记,而 DB 可能已报终态、React 却还没处理该 session 的
  * running→done。已排 linger 的标记跳过,避免重置它的倒计时。
+ *
+ * 返回 `needsRecheck`:见 `ReconcileRunMarkersResult`。
  */
 export function reconcileRunMarkers(
-  runStatusByRunId: ReadonlyMap<string, RunLivenessStatus>,
-): void {
+  dbRunStatus: ReadonlyMap<string, RunLivenessStatus>,
+  inflightRunIds: ReadonlySet<string>,
+): ReconcileRunMarkersResult {
+  let needsRecheck = false;
+  const resolve = (runId: string): 'running' | 'terminal' | 'inconsistent' => {
+    if (inflightRunIds.has(runId)) return 'running';
+    // DB 说还在跑、引擎却说没在跑 —— 两份读之间那个 await 窗口里 run 刚好结束了。
+    if (dbRunStatus.get(runId) === 'running') return 'inconsistent';
+    return 'terminal';
+  };
   for (const runId of [...silencedRunSessionIds.keys()]) {
-    if (clearTimers.has(runId) || runStatusByRunId.get(runId) === 'running') continue;
+    if (clearTimers.has(runId)) continue;
+    const state = resolve(runId);
+    if (state === 'inconsistent') needsRecheck = true;
+    if (state !== 'terminal') continue;
     scheduleClearSilencedRun(runId, MARKER_TERMINAL_LINGER_MS);
   }
   for (const runId of [...schedulerOwnedRunSessionIds.keys()]) {
-    if (
-      schedulerOwnedClearTimers.has(runId) ||
-      runStatusByRunId.get(runId) === 'running'
-    ) {
-      continue;
-    }
+    if (schedulerOwnedClearTimers.has(runId)) continue;
+    const state = resolve(runId);
+    if (state === 'inconsistent') needsRecheck = true;
+    if (state !== 'terminal') continue;
     scheduleClearSchedulerOwnedRun(runId, MARKER_TERMINAL_LINGER_MS);
   }
+  return { needsRecheck };
 }
 
 export function scheduleClearSchedulerOwnedRun(runId: string, delayMs: number): void {

@@ -368,10 +368,57 @@ describe('useAutomationScheduleSessionIndex marker reconciliation', () => {
     }
   });
 
+  /**
+   * 回归(codex review P1):DB 说 running、引擎的 in-flight 快照里却没有 —— 两份读之间那个
+   * await 窗口里 run 刚好结束了。本轮保守保持标记,但必须自己排一次重查,否则若该 run 的
+   * 终态事件正是丢掉的那个就再没信号来清它。下一轮 DB 已落终态,标记正常退场。
+   */
+  it('rechecks by itself when the two reads disagree, then clears on the next round', async () => {
+    vi.useFakeTimers();
+    try {
+      const listSidebarIndexRuns = vi
+        .fn()
+        // 第一轮:行还是 running,但 controller 已注销 → 不一致。
+        .mockResolvedValueOnce({
+          runs: [indexRun({ runId: 'run-racing', status: 'running' })],
+          inflightRunIds: [],
+        })
+        // 重查:DB 已落终态。
+        .mockResolvedValue({
+          runs: [indexRun({ runId: 'run-racing', status: 'success' })],
+          inflightRunIds: [],
+        });
+      vi.stubGlobal('electronAPI', {
+        maker: { schedule: { listSidebarIndexRuns, onEvent: vi.fn(() => () => undefined) } },
+        notificationMarkSessionAttention: vi.fn().mockResolvedValue(undefined),
+        notificationClearSessionAttention: vi.fn().mockResolvedValue(undefined),
+      });
+      markNextSessionDoneSilenced('run-racing', 'session-1');
+
+      renderHook(() => useAutomationScheduleSessionIndex());
+      await act(async () => {
+        await Promise.resolve();
+      });
+      // 第一轮不清 —— 无法区分它是否真的还在跑。
+      expect(isSessionDoneSilenced('session-1')).toBe(true);
+
+      // 重查 + 退场 linger。
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(MARKER_TERMINAL_LINGER_MS + 1);
+      });
+
+      expect(listSidebarIndexRuns.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(isSessionDoneSilenced('session-1')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps markers whose run is still in flight', async () => {
-    stubApiWithRuns([
-      indexRun({ runId: 'run-live', status: 'running' }),
-    ]);
+    stubApiWithRuns([indexRun({ runId: 'run-live', status: 'running' })], ['run-live']);
     markNextSessionDoneSilenced('run-live', 'session-1');
 
     renderHook(() => useAutomationScheduleSessionIndex());

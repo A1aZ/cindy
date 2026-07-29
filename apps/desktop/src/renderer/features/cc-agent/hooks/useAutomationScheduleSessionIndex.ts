@@ -38,6 +38,14 @@ const log = createLogger('AutomationScheduleSessionIndex');
  */
 const REFRESH_RETRY_DELAYS_MS = [2_000, 8_000, 30_000] as const;
 
+/**
+ * 快照内部不一致时的重查延迟。见 `ReconcileRunMarkersResult.needsRecheck`:run 恰好在
+ * DB 查询的 await 窗口内结束时,DB 行还是 running 而 controller 已注销,本轮只能保守保持
+ * 标记;若该 run 的终态事件正是丢掉的那个,就要靠这次重查来清。与失败重试分开计时,也不
+ * 占用它的退避配额 —— 这不是失败,只是需要一份更新的快照。
+ */
+const RECONCILE_RECHECK_DELAY_MS = 1_500;
+
 export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, AutomationScheduleSessionInfo> {
   const [index, setIndex] = useState<ReadonlyMap<string, AutomationScheduleSessionInfo>>(
     () => new Map(),
@@ -46,6 +54,7 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
   const refreshRef = useRef<() => Promise<void>>(async () => undefined);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryAttemptRef = useRef(0);
+  const recheckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refresh = useCallback(async () => {
     const seq = refreshSeqRef.current + 1;
@@ -58,15 +67,19 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
       // 带 sessionId 的 run,没有 history limit),据它清掉「已终态」和「已不存在」的
       // 标记。RunStatus 里只有 'running' 不是终态。刻意不用定时器猜 run 还在不在飞行
       // —— 见 silencedSessionDoneStore 的文件头与 reconcileRunMarkers 注释。
-      const runStatusByRunId = new Map<string, RunLivenessStatus>();
+      const dbRunStatus = new Map<string, RunLivenessStatus>();
       for (const run of runs) {
-        runStatusByRunId.set(run.runId, run.status === 'running' ? 'running' : 'terminal');
+        dbRunStatus.set(run.runId, run.status === 'running' ? 'running' : 'terminal');
       }
-      // 引擎的 in-flight 快照优先级最高,覆盖 DB 状态:自删除场景下(agent 在 run 内调
-      // schedule_delete 删自己的 schedule)run 行已随 schedule 级联删除、run 却仍在跑,
-      // 只有这份内存态能说明它还活着。见 scheduler.listInflightRunIds。
-      for (const runId of inflightRunIds) runStatusByRunId.set(runId, 'running');
-      reconcileRunMarkers(runStatusByRunId);
+      // 两份数据分别传进去 —— 对账内部让 in-flight 优先(自删除场景下 run 行已消失却仍
+      // 在跑),并识别「DB 说 running、引擎说没在跑」的不一致,交由下面的重查收口。
+      const { needsRecheck } = reconcileRunMarkers(dbRunStatus, new Set(inflightRunIds));
+      if (needsRecheck && recheckTimerRef.current === null) {
+        recheckTimerRef.current = setTimeout(() => {
+          recheckTimerRef.current = null;
+          void refreshRef.current();
+        }, RECONCILE_RECHECK_DELAY_MS);
+      }
 
       const next = new Map<string, AutomationScheduleSessionInfo>();
       for (const run of runs) {
@@ -200,6 +213,10 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
       if (retryTimerRef.current !== null) {
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;
+      }
+      if (recheckTimerRef.current !== null) {
+        clearTimeout(recheckTimerRef.current);
+        recheckTimerRef.current = null;
       }
     };
   }, [refresh]);

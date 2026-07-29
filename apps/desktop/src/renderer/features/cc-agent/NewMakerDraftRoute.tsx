@@ -1403,13 +1403,27 @@ export function NewMakerDraftRoute() {
         deviceLinkDeviceId: draft.deviceLinkDeviceId,
         deviceLinkDeviceName: draft.deviceLinkDeviceName,
       };
+      // 换工作区 = 换 repo,worktree 三态必须一起作废(Codex review P1)。它们全是**上一个**
+      // 项目的描述:
+      //   · baseRepo 由 WorktreeChipsRow 经 detect-cwd 异步回填(远程还要走一次隧道往返),
+      //     这个窗口内发送会把 worktree 建到上一个 repo 里;
+      //   · sourceBranch 只在为空时才被自动填充,用户在 A 上显式选过的分支会一直跟到 B ——
+      //     B 上不存在就报错,恰好存在就在一条毫不相关的分支上开工。
+      // 浏览器路径(handleRemoteProjectAdded)早就这么重置了,picker 路径漏了 —— 而 picker 才是
+      // #807 之后换项目的主路径。
+      // 只在路径真的变了时重置:重选当前项目不该把用户刚打开的 worktree 开关又关掉。
+      if (dir !== draft.workingDir) {
+        setWtEnabled(false);
+        setWtBaseRepo(null);
+        setWtSourceBranch('');
+      }
       if (dir == null) {
         patchDraft({ workingDir: null, remoteHostId: null, extraDirs: [], ...keepDevice });
         return;
       }
       patchDraft({ workingDir: dir, remoteHostId: null, ...keepDevice });
     },
-    [draft.deviceLinkDeviceId, draft.deviceLinkDeviceName],
+    [draft.workingDir, draft.deviceLinkDeviceId, draft.deviceLinkDeviceName],
   );
 
   // ─── 新草稿入场:引用目录清零 ──────────────────────────────────────────

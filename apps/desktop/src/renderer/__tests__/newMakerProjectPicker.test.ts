@@ -335,6 +335,24 @@ describe('Shared create project picker', () => {
     expect(bareSetRows.length).toBe(0);
   });
 
+  // #807 review 第十五轮:picker 换项目也必须作废 worktree 三态。baseRepo 由 WorktreeChipsRow
+  // 经 detect-cwd 异步回填(远程还要走隧道),回填前发送会把 worktree 建到上一个 repo;
+  // sourceBranch 只在为空时才自动填充,用户在 A 上显式选的分支会一直跟到 B。浏览器路径早就重置
+  // 了,picker 路径漏了 —— 而 picker 才是 #807 之后换项目的主路径。
+  it('invalidates worktree state when the project picker switches workspaces', () => {
+    const handler = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const handleWorkingDirChange = useCallback('),
+    );
+    const body = handler.slice(0, handler.indexOf('if (dir == null) {'));
+    // 只在路径真的变了时重置 —— 重选当前项目不该把 worktree 开关关掉。
+    expect(body).toContain('if (dir !== draft.workingDir) {');
+    expect(body).toContain('setWtEnabled(false);');
+    expect(body).toContain('setWtBaseRepo(null);');
+    expect(body).toContain("setWtSourceBranch('');");
+    // 判据依赖 draft.workingDir,必须在依赖数组里,否则闭包里比的是上一次渲染的值。
+    expect(handler.slice(0, handler.indexOf('  );'))).toContain('draft.workingDir,');
+  });
+
   // #807 review 第十四轮:compact 模式下按钮只剩图标 + 状态点,不渲染设备名 —— aria-label 只报
   // 「设备」的话读屏用户无从得知当前选的是哪台机器。
   it('announces the selected device in the switcher aria-label', () => {

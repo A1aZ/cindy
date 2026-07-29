@@ -1165,9 +1165,40 @@ export function NewMakerDraftRoute() {
         // 权限模式和加好的引用目录静默打回默认值,下一次发送用的是回退后的配置。
         const deviceChanged = target.deviceId !== effectiveDeviceLinkDeviceId;
         dlSeedKeyRef.current = `${target.deviceId}:${capabilityAgentKind}`;
-        // 同设备:保留用户已选的 model / provider / effort / permission。
         if (deviceChanged) {
           setDlSel(resolveDeviceLinkDraftDefaults(freshCaps, freshDefaults, undefined, capabilityAgentKind));
+        } else {
+          // 同设备:保留用户已选的 model / provider / effort / permission,但**必须拿 freshCaps
+          // 重新校准一遍**(Codex review P1)。这一行上方刚把 dlSeedKeyRef 记成「该设备已 seed」,
+          // 于是后续 capabilities 更新不会再重种 —— 若被控端此间改了模型目录 / 权限档(删掉了用户
+          // 选中的模型、不再支持某个 permission),那个已失效的值就会一直留在草稿里:发送被 gate 拦住
+          // 变成「点了没反应」,而「新建目标」更糟,会把失效值直接提交给 maker:create-session。
+          //
+          // 复用 resolveDeviceLinkDraftDefaults(不另写一套 clamp):把**用户当前的选择**当作
+          // remoteDraft 传进去 —— 它的字段与 RemoteDraftDefaults 一一对应,函数本来就是「按 caps
+          // 校准一组值」,于是仍合法的原样保留、失效的按目标模型能力回落。dlSel 为空(尚未 seed)
+          // 时退回正常 seed 路径。
+          setDlSel((prev) =>
+            prev
+              ? resolveDeviceLinkDraftDefaults(
+                  freshCaps,
+                  {
+                    model: prev.model,
+                    effort: prev.effort,
+                    fastMode: prev.fastMode,
+                    permissionMode: prev.permissionMode,
+                    providerId: prev.providerId,
+                  },
+                  undefined,
+                  capabilityAgentKind,
+                )
+              : resolveDeviceLinkDraftDefaults(
+                  freshCaps,
+                  freshDefaults,
+                  undefined,
+                  capabilityAgentKind,
+                ),
+          );
         }
         // remoteDraftState 照常刷新:同设备时它也是那台机器的最新值(provider model memory 的来源)。
         setRemoteDraftState({ loaded: true, value: freshDefaults });

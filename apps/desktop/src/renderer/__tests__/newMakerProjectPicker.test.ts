@@ -856,6 +856,44 @@ describe('Shared create project picker', () => {
     );
   });
 
+  // #807 review 第二十七轮:同机换项目保留用户已选是对的(第十三轮加的),但这条路径同时把
+  // dlSeedKeyRef 记成「该设备已 seed」,后续 capabilities 更新不会再重种 —— 被控端此间删掉了用户
+  // 选中的模型 / 不再支持某个 permission 时,失效值会一直留在草稿里:发送被 gate 拦住变成「点了
+  // 没反应」,「新建目标」更糟,直接把失效值提交给 maker:create-session。
+  it('revalidates a preserved remote selection against the freshly fetched capabilities', () => {
+    const handoff = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf(
+        'const deviceChanged = target.deviceId !== effectiveDeviceLinkDeviceId;',
+      ),
+    );
+    const untilPatch = handoff.slice(0, handoff.indexOf('patchDraft('));
+    // 同设备分支不能什么都不做 —— 必须拿 freshCaps 重新校准。
+    expect(untilPatch).toContain('} else {');
+    expect(untilPatch).toContain('setDlSel((prev) =>');
+    // 复用既有纯函数做 clamp,不另写一套;把用户当前选择当 remoteDraft 传进去。
+    expect(untilPatch).toContain('model: prev.model,');
+    expect(untilPatch).toContain('permissionMode: prev.permissionMode,');
+    // 三处调用:换设备重种、同设备按 prev 校准、prev 为空时退回正常 seed。
+    expect(
+      (untilPatch.match(/resolveDeviceLinkDraftDefaults\(/g) ?? []).length,
+    ).toBeGreaterThanOrEqual(3);
+  });
+
+  // #807 review 第二十七轮:设备菜单行原来只有 hover / disabled 两态,且 outline-none 去掉了浏览器
+  // 默认焦点圈 —— 键盘走这个菜单时完全看不出焦点落在哪一行。
+  it('shows a token-backed focus ring on device menu rows', () => {
+    const row = deviceSwitcherPillSource.slice(
+      deviceSwitcherPillSource.indexOf('function DeviceRow('),
+    );
+    expect(row).toContain(
+      'focus-visible:ring-2 focus-visible:ring-[var(--create-agent-focus-ring)]',
+    );
+    // 与 pill trigger 同 token(同一控件的键盘表现应一致)。
+    expect(deviceSwitcherPillSource).toContain(
+      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--create-agent-focus-ring)]',
+    );
+  });
+
   it('keeps recent-folder storage out of project-option selection', () => {
     expect(folderPickerPopoverSource).toContain('projectOptions?: readonly FolderPickerOption[]');
     expect(folderPickerPopoverSource).toContain(

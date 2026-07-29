@@ -207,6 +207,12 @@ function DeviceRow({ icon, name, hint, online, disabled, selected, onSelect }: R
       className={cn(
         'flex w-full items-center gap-3 rounded-[8px] px-3 py-[10px] text-left',
         'transition-colors outline-none',
+        // 键盘焦点必须看得见(Codex review P1):原来只有 hover / disabled 两种态,`outline-none`
+        // 又把浏览器默认焦点圈去掉了 —— 用 Tab 走这个菜单时,当前落在哪一行完全没有提示,
+        // 用户不知道 Enter / Space 会激活哪台设备。token 用 --create-agent-focus-ring:pill 的
+        // trigger 与 VendorSegmentedSwitcher 都用它,同一控件的键盘焦点表现应当一致
+        // (DESIGN.md §2 把 focus ring 列为少数被批准的彩色语义之一)。
+        'focus-visible:ring-2 focus-visible:ring-[var(--create-agent-focus-ring)]',
         disabled ? 'cursor-not-allowed opacity-50' : 'hover:bg-[var(--folder-item-hover)]',
       )}
     >

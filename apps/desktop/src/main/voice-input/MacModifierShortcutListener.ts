@@ -36,12 +36,17 @@ type ListenerTriggerPhase = 'tap' | 'start' | 'end';
 type ListenerStartResult =
   | { ok: true }
   /**
-   * `superseded` = 这次启动在 await 解析 helper 期间被 stop 或更晚的一轮顶掉了。
+   * `superseded` = 这次启动被 stop 或更晚的一轮顶掉了（解析 helper 期间、或 spawn 之后
+   * 报 ready 之前都算）。
    * 它不是故障：更晚的那轮正在负责这个 listener，所以调用方**不该**据此做清理或报错
    * （录制登记按 sender id 记账，同一个设置页连续两轮用同一个 id，误清会把新一轮的
    * 登记一起删掉，helper 起来了却没人收 keys）。
    */
   | { ok: false; error: string; superseded?: true };
+
+function supersededStart(): ListenerStartResult {
+  return { ok: false, error: 'Modifier shortcut listener start was superseded.', superseded: true };
+}
 
 export type MacInputMonitoringPermissionSnapshot =
   | { ok: true; status: string }
@@ -150,11 +155,19 @@ export class MacModifierShortcutListener {
 
   private async startChildProcess(options?: { preserveShortcutOnFailure?: boolean }): Promise<ListenerStartResult> {
     const generation = ++this.startGeneration;
-    const binary = await resolveMacModifierShortcutListenerBinary();
+    let binary: string;
+    try {
+      binary = await resolveMacModifierShortcutListenerBinary();
+    } catch (error) {
+      // 解析/编译失败也要看这次启动还算不算数：已被 stop 或被更晚一次顶掉时，这个失败
+      // 跟用户当前在做的事无关，报成普通故障会让调用方拿它去清理新一轮的登记。
+      if (generation !== this.startGeneration) return supersededStart();
+      throw error;
+    }
     // 解析期间被 stop 掉、或被更晚的一次启动顶替：绝不能再 spawn，否则这个进程既不会
     // 被记进 this.child（会被后者覆盖），也就再没人 kill 它。
     if (generation !== this.startGeneration) {
-      return { ok: false, error: 'Modifier shortcut listener start was superseded.', superseded: true };
+      return supersededStart();
     }
     // 兜底：真有存活的 child 时先收掉再 spawn，杜绝覆盖引用造成的泄漏。
     const staleChild = this.child;
@@ -173,6 +186,11 @@ export class MacModifierShortcutListener {
         if (settled) return;
         settled = true;
         if (startTimer) clearTimeout(startTimer);
+        // spawn 之后才被作废的启动同样要标 superseded：stop() 会 kill 掉这个 child，
+        // 随后的 exit 走到这里就是一条「启动失败」，而代次只在 spawn 之前查过一次。
+        // 不标的话调用方会把它当真故障，去清理更晚一轮刚建立的登记（转发名单按 sender
+        // id 记账，同一个设置页连续两轮录制共用一个 id，删掉就等于新一轮收不到 keys）。
+        const outcome = !result.ok && generation !== this.startGeneration ? supersededStart() : result;
         if (!result.ok && this.child === child) {
           this.child = null;
           this.endActiveTriggerIfNeeded();
@@ -184,7 +202,7 @@ export class MacModifierShortcutListener {
             this.restartAttempts = 0;
           }
         }
-        resolve(result);
+        resolve(outcome);
       };
 
       startTimer = setTimeout(() => {

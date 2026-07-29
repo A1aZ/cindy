@@ -372,6 +372,42 @@ describe('voice input global shortcut registration', () => {
       expect(mocks.registeredShortcuts.has('F16')).toBe(false);
     });
 
+    // 两次提交交错时,旧的那次会拿着过时的选择走完后半段:注销掉新那次刚注册成功的
+    // accelerator,再把自己存盘覆盖用户最新的选择。handler 内部有多个 await,而 Electron
+    // 不替我们排队,录制按钮在第一次提交 await 期间也仍可点,所以这个交错是真能发生的。
+    it('does not let an overlapping stale shortcut update overwrite a newer successful one', async () => {
+      setPlatform('darwin');
+      const f16: VoiceInputShortcut = {
+        trigger: 'keyboard',
+        code: 'F16',
+        key: 'F16',
+        modifiers: { meta: false, ctrl: false, alt: false, shift: false, fn: false },
+      };
+      // 第一次提交卡在启动 listener 上,由用例决定何时返回。
+      let settleFirstStart: (result: unknown) => void = () => {};
+      mocks.modifierSetShortcut.mockImplementationOnce(
+        () => new Promise((resolve) => { settleFirstStart = resolve; }),
+      );
+      mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
+      const { registerGlobalVoiceInputIpc } = await import('../global.js');
+      registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+      const update = mocks.handlers.get('voice-input:settings:update-shortcut');
+      const stale = update?.({}, bareRightOption);
+      const newer = update?.({}, f16);
+
+      // 等第一次变更真正跑到「await 启动 listener」那一步:串行队列按微任务派发,
+      // 不给它一次事件循环的话 settleFirstStart 还是那个空实现。
+      await new Promise((resolve) => { setImmediate(resolve); });
+      settleFirstStart({ ok: false, error: 'Could not listen for modifier shortcuts.' });
+      await stale;
+      await newer;
+
+      // 用户最后选的是 F16:它必须仍然注册着,存盘也必须是它。
+      expect(mocks.registeredShortcuts.has('F16')).toBe(true);
+      expect(mocks.updateSettings).toHaveBeenLastCalledWith({ shortcut: f16 });
+    });
+
     // 权限没问题却起不来 = swiftc 编译失败 / 二进制缺失 / 启动超时,是真故障。
     // 这种情况存盘会骗用户「设上了,等授权就好」,所以必须走回原来的失败路径。
     it('treats a listener failure with granted permission as a real failure and does not persist', async () => {

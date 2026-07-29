@@ -10,26 +10,35 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  */
 
 const mocks = vi.hoisted(() => {
-  // 把 swiftc 的 execFile 回调扣在手里，由用例决定「解析 helper」何时完成，
+  // 把 swiftc 的 execFile 回调扣在手里，由用例决定「解析 helper」何时完成（或失败），
   // 从而精确复现 spawn 之前那段窗口。
-  const pendingCompilations: Array<() => void> = [];
+  const pendingCompilations: Array<(error?: Error) => void> = [];
   const execFile = vi.fn((
     _file: string,
     _args: string[],
     _options: unknown,
     callback: (error: Error | null, stdout: string, stderr: string) => void,
   ) => {
-    pendingCompilations.push(() => callback(null, '', ''));
+    pendingCompilations.push((error?: Error) => callback(error ?? null, '', ''));
   });
   const kill = vi.fn();
-  const spawn = vi.fn(() => ({
-    kill,
-    killed: false,
-    stdout: { setEncoding: vi.fn(), on: vi.fn() },
-    stderr: { setEncoding: vi.fn(), on: vi.fn() },
-    on: vi.fn(),
-  }));
-  return { pendingCompilations, execFile, spawn, kill };
+  // 记下每个 child 的事件回调，用例才能自己触发 exit —— spawn 之后到报 ready 之前那段
+  // 窗口只有靠它才能复现。
+  const spawnedChildren: Array<Map<string, (...args: unknown[]) => void>> = [];
+  const spawn = vi.fn(() => {
+    const handlers = new Map<string, (...args: unknown[]) => void>();
+    spawnedChildren.push(handlers);
+    return {
+      kill,
+      killed: false,
+      stdout: { setEncoding: vi.fn(), on: vi.fn() },
+      stderr: { setEncoding: vi.fn(), on: vi.fn() },
+      on: vi.fn((event: string, callback: (...args: unknown[]) => void) => {
+        handlers.set(event, callback);
+      }),
+    };
+  });
+  return { pendingCompilations, execFile, spawn, kill, spawnedChildren };
 });
 
 vi.mock('electron', () => ({
@@ -66,6 +75,7 @@ describe('MacModifierShortcutListener start race', () => {
     mocks.execFile.mockClear();
     mocks.spawn.mockClear();
     mocks.kill.mockClear();
+    mocks.spawnedChildren.length = 0;
   });
 
   afterEach(() => {
@@ -112,5 +122,48 @@ describe('MacModifierShortcutListener start race', () => {
     await flush();
     expect(mocks.spawn).toHaveBeenCalledTimes(1);
     void second;
+  });
+
+  /**
+   * 代次原先只在 spawn 之前查一次，spawn 之后的落点（exit / error / 启动超时）一律报成
+   * 普通失败。于是「录制结束 → stop kill 掉还没报 ready 的 helper」会给出一条 ok:false，
+   * 调用方当成真故障，就会去清理更晚一轮刚建立的转发登记（按 sender id 记账，同一个设置页
+   * 连续两轮共用一个 id）——新 helper 在跑，用户按 Fn 却没反应。
+   */
+  it('reports a superseded start when the spawned helper is killed by stop before it reports ready', async () => {
+    const { MacModifierShortcutListener } = await import('../MacModifierShortcutListener.js');
+    const listener = new MacModifierShortcutListener({ onTrigger: vi.fn() });
+
+    const starting = listener.startKeyCapture();
+    await flush();
+    mocks.pendingCompilations[0]();
+    await flush();
+    expect(mocks.spawn).toHaveBeenCalledTimes(1);
+    expect(mocks.spawnedChildren).toHaveLength(1);
+
+    // 录制在 helper 报 ready 之前结束。
+    listener.stop();
+    expect(mocks.kill).toHaveBeenCalled();
+
+    // 被 kill 的进程随后 exit —— 这才是这次启动真正的落点。
+    mocks.spawnedChildren[0].get('exit')?.(null, 'SIGTERM');
+
+    await expect(starting).resolves.toMatchObject({ ok: false, superseded: true });
+  });
+
+  // 同一个漏洞的另一半：解析 helper 抛异常（dev 下 swiftc 失败）时压根没查代次，
+  // 已被作废的启动会把编译错误当成这次操作的故障报出去。
+  it('reports a superseded start when the dev helper compilation fails after the start was stopped', async () => {
+    const { MacModifierShortcutListener } = await import('../MacModifierShortcutListener.js');
+    const listener = new MacModifierShortcutListener({ onTrigger: vi.fn() });
+
+    const starting = listener.startKeyCapture();
+    await flush();
+    listener.stop();
+
+    mocks.pendingCompilations[0](new Error('swiftc failed'));
+
+    await expect(starting).resolves.toMatchObject({ ok: false, superseded: true });
+    expect(mocks.spawn).not.toHaveBeenCalled();
   });
 });

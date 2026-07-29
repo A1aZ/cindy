@@ -569,6 +569,27 @@ function assertVoiceSettingsMainWindowSender(
   }
 }
 
+/**
+ * 快捷键变更的串行队列。
+ *
+ * 两个变更 handler 内部都有多个 await（起 helper、失败后补查权限），而 Electron 不替我们
+ * 排队；录制按钮在第一次提交 await 期间仍可点，所以两次提交真的能交错。交错之后旧的那次
+ * 会拿着过时的选择继续往下走：注销掉新那次刚注册成功的 accelerator，再把自己存盘覆盖掉
+ * 用户最新的选择——用户看到的是「我明明改成了 F16，怎么变回右 Option 且什么都不响应」。
+ *
+ * 串行化让「最后提交的赢」成为确定行为。相比给每次变更编代次再让旧的中途放弃，这里不需要
+ * 判断「放弃到哪一步算干净」：每次变更都在前一次完整收尾后才开始，没有中间态可踩。
+ */
+let shortcutMutationChain: Promise<unknown> = Promise.resolve();
+
+function queueShortcutMutation<T>(task: () => Promise<T>): Promise<T> {
+  const run = shortcutMutationChain.then(task, task);
+  // 链上存的是吞掉异常的版本：某次变更抛了不该让后面所有变更跟着 reject。异常本身照常
+  // 交给它自己的调用方。
+  shortcutMutationChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
 export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void {
   if (registered) return;
   registered = true;
@@ -576,35 +597,37 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
   ipcMain.handle(
     'voice-input:global-shortcut:set',
     async (_event, shortcut: VoiceInputShortcut | null | undefined): Promise<VoiceInputGlobalResult> => {
-      return setVoiceInputGlobalShortcut(shortcut ?? null);
+      return queueShortcutMutation(() => setVoiceInputGlobalShortcut(shortcut ?? null));
     },
   );
 
   ipcMain.handle(
     'voice-input:settings:update-shortcut',
     async (_event, shortcut: VoiceInputShortcut | null | undefined): Promise<VoiceInputSettingsUpdateResult> => {
-      const nextShortcut = shortcut ?? null;
-      const registration = await setVoiceInputGlobalShortcut(nextShortcut);
-      // 只缺监听权限时仍然存盘：用户的选择要留住，快捷键等授权后自动生效（设置页在
-      // 权限转为已授权时会重新 sync）。真故障（冲突、不支持、helper 坏了）照旧不存。
-      if (!registration.ok && registration.errorCode !== 'permission') return registration;
-      if (!registration.ok) {
-        // 存盘意味着「当前快捷键就是这个新的、只是等授权」，所以旧的必须当场停掉。
-        //
-        // setVoiceInputGlobalShortcut 注销旧 accelerator 只发生在成功路径上，缺权限时
-        // 它在那之前就返回了。少了这步：原本绑 F16，改成右 Option 而权限被拒 → 设置页
-        // 显示「右 Option 待授权」，但按 F16 这一整个会话里仍会触发语音输入。
-        //
-        // 交给 setVoiceInputGlobalShortcut(null) 统一收口，别在这里手抠 registered*
-        // 那几个模块级变量：注销 accelerator、清 native 状态、停 helper 三件事都在那条
-        // 已有路径里，重抄一遍迟早漏一样。
-        await setVoiceInputGlobalShortcut(null);
-      }
-      return {
-        ok: true,
-        settings: voiceInputDataStore.updateSettings({ shortcut: nextShortcut }),
-        ...(registration.ok ? {} : { pendingInputMonitoring: true }),
-      };
+      return queueShortcutMutation(async () => {
+        const nextShortcut = shortcut ?? null;
+        const registration = await setVoiceInputGlobalShortcut(nextShortcut);
+        // 只缺监听权限时仍然存盘：用户的选择要留住，快捷键等授权后自动生效（设置页在
+        // 权限转为已授权时会重新 sync）。真故障（冲突、不支持、helper 坏了）照旧不存。
+        if (!registration.ok && registration.errorCode !== 'permission') return registration;
+        if (!registration.ok) {
+          // 存盘意味着「当前快捷键就是这个新的、只是等授权」，所以旧的必须当场停掉。
+          //
+          // setVoiceInputGlobalShortcut 注销旧 accelerator 只发生在成功路径上，缺权限时
+          // 它在那之前就返回了。少了这步：原本绑 F16，改成右 Option 而权限被拒 → 设置页
+          // 显示「右 Option 待授权」，但按 F16 这一整个会话里仍会触发语音输入。
+          //
+          // 交给 setVoiceInputGlobalShortcut(null) 统一收口，别在这里手抠 registered*
+          // 那几个模块级变量：注销 accelerator、清 native 状态、停 helper 三件事都在那条
+          // 已有路径里，重抄一遍迟早漏一样。
+          await setVoiceInputGlobalShortcut(null);
+        }
+        return {
+          ok: true,
+          settings: voiceInputDataStore.updateSettings({ shortcut: nextShortcut }),
+          ...(registration.ok ? {} : { pendingInputMonitoring: true }),
+        };
+      });
     },
   );
 

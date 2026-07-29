@@ -1119,7 +1119,7 @@ interface OrcaCollabService {
     { ok: true; workerId?: string } | { ok: false; errorCode: string; message: string }
   >;
   listAvailableModels: (params: { agent?: AgentKind }) => Promise<
-    { ok: true; codex?: Array<{ id: string; label: string }>; claude_code?: Array<{ id: string; label: string }> }
+    { ok: true; codex?: Array<{ id: string; label: string }>; claude_code?: Array<{ id: string; label: string }>; pi?: Array<{ id: string; label: string }> }
     | { ok: false; errorCode: string; message: string }
   >;
 }
@@ -6078,16 +6078,19 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     createDraftSession: async (params) => {
       // draft 跟随用户在 New Maker 面板的当前选择,与用户手建草稿的默认体验
       // 一致。main 侧缓存没有"当前激活 vendor"信号,取有选择记录的一档:
-      // cc 有记录用 cc;cc 无记录而 codex 有则整套跟 codex(agentKind 一起切,
-      // 避免给 codex-only 用户建出带 Claude 默认值的 cc 会话);都没有走
-      // mapper 兜底。
+      // cc 有记录用 cc;cc 无则 codex;再无则 pi(整套跟随,避免给 pi-only 用户
+      // 建出带 Claude 默认值的会话);都没有走 mapper 兜底。
       const ccDefaults = getWorkerDefaultsFromNewMaker('claude-code');
       const codexDefaults = ccDefaults.model ? null : getWorkerDefaultsFromNewMaker('codex');
+      const piDefaults =
+        ccDefaults.model || codexDefaults?.model ? null : getWorkerDefaultsFromNewMaker('pi');
       const picked = ccDefaults.model
         ? { agentKind: 'cc' as const, d: ccDefaults }
         : codexDefaults?.model
           ? { agentKind: 'codex' as const, d: codexDefaults }
-          : null;
+          : piDefaults?.model
+            ? { agentKind: 'pi' as const, d: piDefaults }
+            : null;
       const sessionId = await createPluginDraftSession({
         ...params,
         ...(picked
@@ -6622,7 +6625,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       if (!leadRow) return null;
       return {
         id: leadRow.id,
-        agentKind: leadRow.agentKind === 'codex' ? 'codex' : 'claude-code',
+        // 走转换正本:pi lead 不能被压成 claude-code,否则 input.agent===lead.agentKind
+        // 判等失效,pi-lead 建 pi-worker 会走错默认分支(见 orcaWorkerCreationService)。
+        agentKind: dbToMakerAgentKind(leadRow.agentKind),
         workingDir: leadRow.workingDir,
         model: leadRow.model,
         effort: leadRow.effort,
@@ -7047,11 +7052,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
     listAvailableModels: async ({ agent }) => {
       try {
-        const agents: AgentKind[] = agent ? [agent] : ['codex', 'claude-code'];
+        const agents: AgentKind[] = agent ? [agent] : ['codex', 'claude-code', 'pi'];
         const result: Record<string, Array<{ id: string; label: string }>> = {};
         for (const a of agents) {
           const caps = maker.getCapabilities(a);
-          result[a === 'codex' ? 'codex' : 'claude_code'] = caps.availableModels.map((m) => ({ id: m.id, label: m.displayName }));
+          // key 必须区分 pi,否则 pi 模型会被塞进 claude_code 键与 CC 模型混淆。
+          const key = a === 'codex' ? 'codex' : a === 'pi' ? 'pi' : 'claude_code';
+          result[key] = caps.availableModels.map((m) => ({ id: m.id, label: m.displayName }));
         }
         return { ok: true, ...result };
       } catch (err) {

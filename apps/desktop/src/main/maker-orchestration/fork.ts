@@ -16,7 +16,7 @@ import { sessions, messages } from '../localDb/schema';
 import { sessionToCamel } from '../localDb/mapper';
 import { getMaker } from '../maker-host/index.js';
 import { createBusinessSessionId } from '../sessionIds.js';
-import { normalizeDbAgentKind } from '../../shared/agentKindConversion.js';
+import { dbToMakerAgentKind, normalizeDbAgentKind } from '../../shared/agentKindConversion.js';
 import type { Session } from '../../renderer/lib/ccAgent.types';
 import {
   type ClaudeTranscriptAnchorIndex,
@@ -509,6 +509,10 @@ export async function forkSessionAtMessage(
   // Codex: 从当前时间线倒扫 agent_switch，把 copy boundary 之后、确实写入所选
   // 原生 thread 的 user turn 计为 rollback 数；其它引擎片段不能混算。
   const isCodex = forkSource.agentKind === 'codex';
+  // pi 复用 codex 的粗粒度 tail-turn fork:countCodexTailTurns 只按 sdkSessionId
+  // 数边界后的 user turn(引擎无关),pi 的 forkSdkSession 按 tailTurnsToDrop rewind
+  // 到目标 user 消息。只有 Claude(cc)走 message-uuid 锚点路径。
+  const usesTailTurnFork = isCodex || forkSource.agentKind === 'pi';
   let assistantUuid: string | undefined;
   let tailTurnsToDrop: number | undefined;
   let claudeAnchorIndex: ClaudeTranscriptAnchorIndex | null = null;
@@ -517,7 +521,7 @@ export async function forkSessionAtMessage(
     target.role,
     forkSource.agentKind,
   );
-  if (!isCodex) {
+  if (!usesTailTurnFork) {
     claudeAnchorIndex = await loadClaudeTranscriptAnchorIndex({
       sdkSessionId: forkSource.sdkSessionId,
       workingDir: source.workingDir,
@@ -551,8 +555,8 @@ export async function forkSessionAtMessage(
   let newSdkSessionId: string | null = null;
   let uuidMap = new Map<string, string>();
   let initialContextTokens: number | undefined;
-  if (isCodex || assistantUuid) {
-    const agentKind = isCodex ? 'codex' : 'claude-code';
+  if (usesTailTurnFork || assistantUuid) {
+    const agentKind = dbToMakerAgentKind(forkSource.agentKind);
     const forkResult = await getMaker().forkSdkSession(agentKind, {
       sourceSdkSessionId: forkSource.sdkSessionId,
       upToMessageId: assistantUuid,
@@ -577,13 +581,15 @@ export async function forkSessionAtMessage(
   const newSessionId = createBusinessSessionId();
 
   const newMessageIds = sourceMessages.map(() => ({ id: createId(), clientId: createId() }));
-  const txUuidMap = isCodex
+  // pi 与 codex 一样:uuidMap 空、无 Claude transcript 锚点,跳过 Claude 专用的
+  // synthetic uuid 补全 / parentUuid 采集(只有 Claude cc 需要)。
+  const txUuidMap = usesTailTurnFork
     ? uuidMap
     : augmentClaudeForkUuidMapForSyntheticRows(sourceMessages, uuidMap, claudeAnchorIndex);
-  const legacyTranscriptParentUuids = isCodex
+  const legacyTranscriptParentUuids = usesTailTurnFork
     ? []
     : collectLegacyClaudeTranscriptParentUuids(sourceMessages, claudeAnchorIndex);
-  const toolParentUuids = isCodex
+  const toolParentUuids = usesTailTurnFork
     ? []
     : collectClaudeToolParentUuids(sourceMessages, claudeAnchorIndex);
   await getDbClient().tx('fork.session', {

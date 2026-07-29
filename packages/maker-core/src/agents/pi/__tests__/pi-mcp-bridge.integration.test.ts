@@ -44,10 +44,12 @@ const PI_BINARY = path.join(
 const piAvailable = existsSync(PI_BINARY);
 
 const noopLogger: Logger = {
+  trace: () => {},
   debug: () => {},
   info: () => {},
   warn: () => {},
   error: () => {},
+  fatal: () => {},
   child: () => noopLogger,
 };
 

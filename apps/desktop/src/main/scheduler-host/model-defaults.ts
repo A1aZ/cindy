@@ -12,5 +12,9 @@
 import type { AgentKind } from '@cindy/maker-scheduler';
 
 export function defaultModelFor(agentKind: AgentKind): string {
-  return agentKind === 'codex' ? 'gpt-5.5' : 'claude-sonnet-4-6';
+  // 显式分支:pi 经网关路由 Claude 系模型,冷启动兜底同样走成本保守的 sonnet
+  // (与 cc 一致但独立声明,避免将来改 cc 默认时 pi 静默跟随)。
+  if (agentKind === 'codex') return 'gpt-5.5';
+  if (agentKind === 'pi') return 'claude-sonnet-4-6';
+  return 'claude-sonnet-4-6';
 }

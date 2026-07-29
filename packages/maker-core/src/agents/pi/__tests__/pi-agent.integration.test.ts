@@ -34,10 +34,12 @@ const PI_BINARY = path.join(
 const piAvailable = existsSync(PI_BINARY);
 
 const noopLogger: Logger = {
+  trace: () => {},
   debug: () => {},
   info: () => {},
   warn: () => {},
   error: () => {},
+  fatal: () => {},
   child: () => noopLogger,
 };
 
@@ -184,6 +186,53 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         // usage:input 42 + output 7(anthropic 流里的 usage 记账)
         const usage = handle.getUsageSnapshot();
         expect(usage.tokenUsage).toBeGreaterThan(0);
+      } finally {
+        await handle?.close();
+        rmSync(workingDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'forkSdkSession clones a live session into a new session file (offline, no gateway)',
+    { timeout: 60_000 },
+    async () => {
+      const agent = new PiAgent(buildDeps());
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-fork-cwd-'));
+      let handle: AgentSessionHandle | null = null;
+      try {
+        handle = await agent.startSession({
+          sessionId: 'fork-src-session',
+          workingDir,
+          model: 'pi-test-model',
+        });
+        // 跑一轮让源 session 落盘内容(fork 读的是持久化的 jsonl)。
+        const done = (async () => {
+          for await (const ev of handle!.events()) {
+            if (ev.type === 'done') break;
+          }
+        })();
+        await handle.send({ type: 'user', content: 'seed message for fork' });
+        await done;
+
+        const sourceId = handle.id;
+        expect(sourceId.length).toBeGreaterThan(0);
+
+        // 整条 fork(tailTurnsToDrop 省略 = 0 → clone)。fork 进程 --offline,不打网关。
+        const seenBefore = seenRequests.length;
+        const forked = await agent.forkSdkSession({
+          sourceSdkSessionId: sourceId,
+          upToMessageId: undefined,
+          title: 'forked branch',
+        });
+
+        expect(forked.newSdkSessionId.length).toBeGreaterThan(0);
+        expect(forked.newSdkSessionId).not.toBe(sourceId);
+        expect(existsSync(forked.newSdkSessionId)).toBe(true);
+        // 与 Codex 一致:pi 不落 SDK message uuid,uuidMap 为空。
+        expect(forked.uuidMap.size).toBe(0);
+        // fork 是纯本地文件操作,不应产生任何网关请求。
+        expect(seenRequests.length).toBe(seenBefore);
       } finally {
         await handle?.close();
         rmSync(workingDir, { recursive: true, force: true });

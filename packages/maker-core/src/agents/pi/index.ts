@@ -42,8 +42,16 @@ import type {
   ModelDescriptor,
 } from '../../types/capabilities.js';
 import { NotSupportedError } from '../../types/capabilities.js';
-import type { AgentEvent, InteractionResolver, UsageSnapshot } from '../../types/events.js';
+import type {
+  AgentEvent,
+  ForkSdkSessionOptions,
+  ForkSdkSessionResult,
+  InteractionResolver,
+  UsageSnapshot,
+} from '../../types/events.js';
 import type { AgentKind, Effort, UserMessage, UserContentBlock } from '../../types/common.js';
+import type { ListAgentSkillsOptions, ListAgentSkillsResult } from '../../types/palette.js';
+import { scanPiCustomizations } from './customization-scanner.js';
 import { createAsyncQueue, type AsyncQueue } from '../shared/async-queue.js';
 import { resolveAgentCredentialMode } from '../credential-mode.js';
 import { PiRpcProcess, type PiRpcEvent } from './rpc-client.js';
@@ -69,6 +77,12 @@ Guidelines:
 /** cindy Effort → pi thinking level(pi 无 ultra;cindy 无 off)。 */
 function effortToPiThinkingLevel(effort: Effort): string {
   return effort === 'ultra' ? 'max' : effort;
+}
+
+/** fork 尾部丢弃 turn 数归一:非有限/负值 → 0。 */
+function normalizeTailTurnsToDrop(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(value);
 }
 
 function guessImageMime(filePath: string, explicit?: string): string {
@@ -158,8 +172,11 @@ export class PiAgent extends BaseAgent {
         image: { supported: true },
         file: { supported: false, reason: 'not-implemented' },
       },
-      fork: { supported: false, reason: 'not-implemented', upstreamRef: 'pi rpc fork(entryId)' },
-      rewind: { supported: false, reason: 'sdk-missing', message: 'pi has no file checkpointing' },
+      // fork:整条克隆(clone)或按 tailTurnsToDrop rewind 到某条 user 消息(fork{entryId}),
+      // 与 Codex 粗粒度 fork 同构(uuidMap 空、upToMessageId 忽略)。见 forkSdkSession。
+      fork: { supported: true },
+      // 对话分支可做,但 pi 无文件级 checkpoint —— 文件回滚型 rewind 真做不了,诚实降级。
+      rewind: { supported: false, reason: 'sdk-missing', message: 'pi 无文件级 checkpoint;对话分支走 fork' },
       abort: { supported: true },
       sameTurnSteer: { supported: true },
       memory: { supported: { supported: false, reason: 'sdk-missing' } },
@@ -348,6 +365,15 @@ export class PiAgent extends BaseAgent {
       }
     }
 
+    // 显式保证 auto-compaction 开 —— 这是"pi 保持轻上下文"的不变量:上下文接近满时
+    // pi 自动压缩(与 CC/Codex 一致)。pi 默认即开,这里显式化并兜底(幂等,失败不致命)。
+    {
+      const resp = await proc.request({ type: 'set_auto_compaction', enabled: true });
+      if (!resp.success) {
+        this.deps.logger.warn('pi set_auto_compaction failed (non-fatal)', { error: resp.error });
+      }
+    }
+
     const state = await proc.request({ type: 'get_state' });
     const stateData = (state.data ?? {}) as {
       sessionFile?: string | null;
@@ -437,9 +463,158 @@ export class PiAgent extends BaseAgent {
         permissionMode = normalizePermissionMode(mode);
         await writePermissionFile();
       },
+
+      isTurnRunning(): boolean {
+        // ctx.isStreaming 由 agent_start / agent_settled 翻转(translator 维护)。
+        return ctx.isStreaming;
+      },
     };
 
     return handle;
+  }
+
+  /**
+   * 会话分支(fork）—— 与 Codex 粗粒度 fork 同构。
+   *
+   * pi 的会话是 append-only entry 树,提供两条纯文件操作(不调模型):
+   *   - clone:整条复制当前活动分支成新 session 文件并切过去(get_state.sessionFile 给新路径)
+   *   - fork{entryId}:rewind 到某条 user 消息之前,同样落新 session 文件
+   * 二者都离线,故这里 spawn 一个短命 `pi --mode rpc --offline` one-shot 进程完成,
+   * 无需网关、无需真凭证。
+   *
+   * 语义映射(对齐 ForkSdkSessionOptions):
+   *   - tailTurnsToDrop=0 → clone(整条 fork)
+   *   - tailTurnsToDrop=N → fork 到倒数第 N 条 user 消息(丢掉尾部 N 个 turn);越界退化为 clone
+   *   - upToMessageId 被忽略(pi 的锚点是 entry id,非 SDK message uuid;与 Codex 一致)
+   *   - uuidMap 返回空(pi agentMeta 不落 SDK uuid,host 无处可 remap,不会 break 再 fork)
+   */
+  async forkSdkSession(opts: ForkSdkSessionOptions): Promise<ForkSdkSessionResult> {
+    const log = this.deps.logger;
+    const agentHome = this.resolveAgentHome();
+    // 保证 models.json 里 provider `cindy` 可解析(pi 启动会校验 --provider)。
+    await this.writeModelsJson(agentHome);
+    const sessionDir = path.join(agentHome, 'sessions');
+
+    // fork 全程离线(clone/fork 是纯 session 文件操作),真凭证拿不到也不影响;
+    // 尽量取真 authEnv(含网关相关变量),失败则占位。
+    const credentialMode = resolveAgentCredentialMode({ agentKind: 'pi' }) ?? 'gateway-key';
+    let authEnv: Record<string, string | undefined> = {};
+    try {
+      authEnv = await this.deps.auth.getAuthEnv({ credentialMode });
+    } catch {
+      /* offline fork 不需要真凭证 */
+    }
+
+    // 模型 id 必须在 models.json 内(pi 启动校验 --model);用 host 注入的首个可用模型。
+    const forkModel = this.capabilities.availableModels[0]?.id ?? 'claude-sonnet-5';
+
+    const proc = new PiRpcProcess({
+      binaryPath: this.deps.binaryPath,
+      args: [
+        '--mode', 'rpc',
+        '--session-dir', sessionDir,
+        '--session', opts.sourceSdkSessionId,
+        '--provider', PI_PROVIDER_ID,
+        '--model', forkModel,
+        '--no-context-files',
+        '--offline',
+      ],
+      cwd: opts.workingDir && opts.workingDir.trim().length > 0 ? opts.workingDir : sessionDir,
+      env: {
+        ...process.env,
+        ...authEnv,
+        [PI_API_KEY_ENV]: authEnv[PI_API_KEY_ENV] ?? 'pi-fork-offline',
+        PI_CODING_AGENT_DIR: agentHome,
+      },
+      logger: log,
+      onEvent: () => {},
+      onExit: () => {},
+    });
+
+    try {
+      // 首个 get_state 兼作"进程就绪"探测。
+      const ready = await proc.request({ type: 'get_state' });
+      if (!ready.success) {
+        throw new Error(`pi fork: session load failed: ${ready.error ?? 'unknown'}`);
+      }
+
+      const tailDrop = normalizeTailTurnsToDrop(opts.tailTurnsToDrop);
+      if (tailDrop > 0) {
+        const fm = await proc.request({ type: 'get_fork_messages' });
+        const messages =
+          (fm.data as { messages?: Array<{ entryId?: string }> } | undefined)?.messages ?? [];
+        const idx = messages.length - tailDrop;
+        const target = idx >= 0 ? messages[idx]?.entryId : undefined;
+        if (target) {
+          const fk = await proc.request({ type: 'fork', entryId: target });
+          if (!fk.success) throw new Error(`pi fork(entryId) failed: ${fk.error ?? 'unknown'}`);
+        } else {
+          // 越界(要丢的 turn 比 user 消息还多）→ 退化为整条 clone,不静默丢语义。
+          log.warn('pi fork: tailTurnsToDrop out of range, falling back to full clone', {
+            tailTurnsToDrop: tailDrop,
+            userMessageCount: messages.length,
+          });
+          const cl = await proc.request({ type: 'clone' });
+          if (!cl.success) throw new Error(`pi clone failed: ${cl.error ?? 'unknown'}`);
+        }
+      } else {
+        const cl = await proc.request({ type: 'clone' });
+        if (!cl.success) throw new Error(`pi clone failed: ${cl.error ?? 'unknown'}`);
+      }
+
+      const st = await proc.request({ type: 'get_state' });
+      const newPath = (st.data as { sessionFile?: string } | undefined)?.sessionFile;
+      if (!newPath || newPath.trim().length === 0) {
+        throw new Error('pi fork: forked session file path unavailable');
+      }
+
+      if (opts.title && opts.title.trim().length > 0) {
+        await proc
+          .request({ type: 'set_session_name', name: opts.title })
+          .catch((err: unknown) =>
+            log.warn('pi fork: set_session_name failed (non-fatal)', {
+              message: err instanceof Error ? err.message : String(err),
+            }),
+          );
+      }
+
+      log.info('pi forkSdkSession ◀', {
+        source: opts.sourceSdkSessionId,
+        newSdkSessionId: newPath,
+        tailTurnsToDrop: tailDrop,
+      });
+      // uuidMap 空:与 Codex 一致,pi agentMeta 不存 SDK message uuid。
+      return { newSdkSessionId: newPath, uuidMap: new Map() };
+    } finally {
+      await proc.close();
+    }
+  }
+
+  /**
+   * ChatInput `/` palette 的 agent-skill 类目 —— 纯文件系统发现,与 CC/Codex 对齐。
+   *
+   * 扫共享根 ~/.agents/skills(cc/codex 同源,pi 因此看到一致的技能包)+ pi 原生
+   * ~/.pi/agent/skills + 项目目录。只暴露技能"存在"(name/description),技能正文仅
+   * 在 /skill:name 被调用时进上下文 —— 故此发现层零基线上下文增长(契合精简 pi)。
+   */
+  override async listAgentSkills(opts: ListAgentSkillsOptions): Promise<ListAgentSkillsResult> {
+    const { items, errors } = await scanPiCustomizations({ workingDirs: [opts.workingDir] });
+    const out: ListAgentSkillsResult = {
+      skills: items
+        .filter((it) => it.kind === 'skill' && it.enabled !== false)
+        .map((it) => ({
+          kind: 'agent-skill' as const,
+          name: it.name,
+          description: it.description,
+          source: 'skill' as const,
+          path: it.absolutePath,
+          scope: (it.scope === 'repo' ? 'repo' : 'user') as 'user' | 'repo',
+          enabled: it.enabled ?? true,
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    };
+    if (errors.length > 0) out.errors = errors;
+    return out;
   }
 
   /**

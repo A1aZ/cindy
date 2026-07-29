@@ -17,6 +17,23 @@ import { isActiveWorkerStatus } from '../../../shared/orca-worker-status';
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const WORKER_SESSION_ID = '123e4567-e89b-42d3-a456-426614174000';
 
+describe('buildNoProviderMessage (pi first-class)', () => {
+  const snap = (name: string): OrcaWorkerProviderSnapshot => ({ name }) as OrcaWorkerProviderSnapshot;
+  it('names Pi (not Claude Code) when pi has no connected provider', () => {
+    const msg = buildNoProviderMessage('pi', { 'claude-code': [], codex: [], pi: [] });
+    expect(msg).toContain('Pi 当前没有可用的模型供应商');
+    expect(msg).not.toContain('Claude Code 当前没有');
+  });
+  it('suggests pi as a fallback agent when pi alone has a connected provider', () => {
+    const msg = buildNoProviderMessage('codex', {
+      'claude-code': [],
+      codex: [],
+      pi: [snap('Cindy AI')],
+    });
+    expect(msg).toContain('Pi(已连接:Cindy AI)');
+  });
+});
+
 describe('providerRouteRequiresExplicitSelection', () => {
   it.each(['api-key-header', 'oauth-token', 'none'] as const)(
     'keeps %s routes pinned to the selected provider',

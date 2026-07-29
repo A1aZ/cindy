@@ -42,6 +42,11 @@ export interface PiTranslateContext {
   contextWindow: number;
   /** turn 内累计 input+output;turn 结束 reset。 */
   turnTokens: number;
+  /** turn 内 usage 分量累计(did-turn-end / ghost 订阅上报用);agent_start reset。 */
+  turnInput: number;
+  turnOutput: number;
+  turnCacheRead: number;
+  turnCacheWrite: number;
   /** 最后一次 API call 的 context 占用(input + cacheRead + cacheWrite)。 */
   contextTokens: number;
   /** 跨 turn 累计成本。 */
@@ -59,6 +64,10 @@ export function createPiTranslateContext(logger: Logger): PiTranslateContext {
     logger,
     contextWindow: 0,
     turnTokens: 0,
+    turnInput: 0,
+    turnOutput: 0,
+    turnCacheRead: 0,
+    turnCacheWrite: 0,
     contextTokens: 0,
     costUsd: 0,
     isStreaming: false,
@@ -96,6 +105,10 @@ function applyUsage(ctx: PiTranslateContext, usage: PiUsage | undefined): void {
   const cacheRead = usage.cacheRead ?? 0;
   const cacheWrite = usage.cacheWrite ?? 0;
   ctx.turnTokens += input + output;
+  ctx.turnInput += input;
+  ctx.turnOutput += output;
+  ctx.turnCacheRead += cacheRead;
+  ctx.turnCacheWrite += cacheWrite;
   ctx.contextTokens = input + cacheRead + cacheWrite;
   const cost = usage.cost?.total;
   if (typeof cost === 'number' && Number.isFinite(cost)) ctx.costUsd += cost;
@@ -134,6 +147,10 @@ export function translatePiEvent(
     case 'agent_start': {
       ctx.isStreaming = true;
       ctx.turnTokens = 0;
+      ctx.turnInput = 0;
+      ctx.turnOutput = 0;
+      ctx.turnCacheRead = 0;
+      ctx.turnCacheWrite = 0;
       pushStatus(queue, ctx, 'Working…', true);
       return;
     }
@@ -221,7 +238,17 @@ export function translatePiEvent(
       ctx.isStreaming = false;
       queue.push({
         type: 'done',
-        data: { type: 'pi/agent_settled' },
+        data: {
+          type: 'pi/agent_settled',
+          // ghost 订阅 did-turn-end 的 usage 上报(subscriptionGateway.normalizeTurnUsage
+          // 认 camelCase);与 CC/Codex 的 done.usage 对齐,让插件能显示 pi turn 的用量。
+          usage: {
+            inputTokens: ctx.turnInput,
+            outputTokens: ctx.turnOutput,
+            cacheReadTokens: ctx.turnCacheRead,
+            cacheCreationTokens: ctx.turnCacheWrite,
+          },
+        },
         source: 'pi',
       });
       pushStatus(queue, ctx, 'Idle', false);

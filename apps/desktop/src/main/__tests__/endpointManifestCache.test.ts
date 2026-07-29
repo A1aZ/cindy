@@ -77,23 +77,45 @@ describe('endpointManifestCache', () => {
   });
 
   it('文件字节数超上限时读前就拒绝(不把大文件读进内存)', () => {
-    fs.writeFileSync(cacheFile(), 'x'.repeat(64 * 1024 * 2 + 1), 'utf8');
+    fs.writeFileSync(cacheFile(), 'x'.repeat(128 * 1024 + 1), 'utf8');
     expect(readEndpointManifestCache(dir)).toBeNull();
   });
 
   it('多字节 UTF-8 内容按字节而非字符数判断', () => {
     // 每个汉字 3 字节:字符数远小于上限,字节数刚好越界。用 string.length 判断会放行。
-    const cjk = '配'.repeat(64 * 1024 * 2 / 3 + 10);
-    expect(Buffer.byteLength(cjk, 'utf8')).toBeGreaterThan(64 * 1024 * 2);
-    expect(cjk.length).toBeLessThan(64 * 1024 * 2);
+    const cjk = '配'.repeat(128 * 1024 / 3 + 10);
+    expect(Buffer.byteLength(cjk, 'utf8')).toBeGreaterThan(128 * 1024);
+    expect(cjk.length).toBeLessThan(128 * 1024);
     fs.writeFileSync(cacheFile(), cjk, 'utf8');
     expect(readEndpointManifestCache(dir)).toBeNull();
   });
 
-  it('清单原文超上限时拒绝写入', () => {
-    const huge = { ...ENTRY, manifestText: 'x'.repeat(64 * 1024 + 1) };
+  it('最终落盘 JSON 超上限时拒绝写入', () => {
+    const huge = { ...ENTRY, manifestText: 'x'.repeat(128 * 1024 + 1) };
     expect(writeEndpointManifestCache(dir, huge)).toBe(false);
     expect(fs.existsSync(cacheFile())).toBe(false);
+  });
+
+  it('写检查量的是序列化后的字节:全转义字符不会"写得进、读不回"', () => {
+    // manifestText 本身 64KiB(旧实现的上限之内),但每个 `"` 被 JSON 转义成 `\\"`,
+    // 落盘 payload 翻倍越过 128KiB。旧实现会写成功、读路径再按文件字节数拒掉。
+    const quoted = { ...ENTRY, manifestText: '"'.repeat(64 * 1024) };
+    expect(Buffer.byteLength(quoted.manifestText, 'utf8')).toBeLessThanOrEqual(128 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(quoted, null, 2), 'utf8')).toBeGreaterThan(128 * 1024);
+
+    expect(writeEndpointManifestCache(dir, quoted)).toBe(false);
+    expect(fs.existsSync(cacheFile())).toBe(false);
+  });
+
+  it('写得进的一定读得回(读写共用同一上限)', () => {
+    // 贴着上限:序列化后不超过 128KiB 就必须写成功且原样读回。
+    let text = 'y'.repeat(100 * 1024);
+    while (Buffer.byteLength(JSON.stringify({ ...ENTRY, manifestText: text }, null, 2), 'utf8') > 128 * 1024) {
+      text = text.slice(0, -1024);
+    }
+    const big = { ...ENTRY, manifestText: text };
+    expect(writeEndpointManifestCache(dir, big)).toBe(true);
+    expect(readEndpointManifestCache(dir)).toEqual(big);
   });
 
   it('formatCacheSavedAt 解析不了就原样回显', () => {

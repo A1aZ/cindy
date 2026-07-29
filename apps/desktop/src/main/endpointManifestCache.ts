@@ -32,8 +32,16 @@ import type { SupportedLocale } from '../shared/locale.js';
 
 export const ENDPOINT_MANIFEST_CACHE_FILE_NAME = 'endpoint-manifest-cache.json';
 
-/** 清单原文体积上限;超过即视为异常文件,不读也不写。 */
-const MAX_MANIFEST_BYTES = 64 * 1024;
+/**
+ * 缓存**文件**体积上限;超过即视为异常文件,不读也不写。
+ *
+ * 读写共用同一个常量,而且写路径校验的是**最终序列化结果**的字节数(review 抓到):
+ * 上一版写路径只量 `manifestText`(≤64 KiB),落盘的却是把它当 JSON 字符串再包一层
+ * (转义 + savedAt / sourceUrl + 缩进)。原文里全是需转义字符时,转义后体积会翻倍,
+ * 于是存在一个区间——写检查放行、写成功了,读检查却按文件字节数拒掉,表现为
+ * "明明写过缓存,下次离线按钮却点不亮"。两端量同一个东西就不会有这种自相矛盾。
+ */
+const MAX_CACHE_FILE_BYTES = 128 * 1024;
 
 export interface CachedEndpointManifest {
   /** 写入时刻(ISO 8601)。 */
@@ -59,8 +67,15 @@ function cacheFilePath(userDataDir: string): string {
  * 因此三道:
  *  1. `lstatSync` + `isFile()`:symlink / FIFO / 设备 / 目录全部在打开之前就拒掉
  *     (lstat 不跟随 symlink,对 symlink 而言 isFile() 为 false);
- *  2. 打开后再用 `fstatSync` 复核类型与大小,关掉 lstat 与 open 之间被换掉的 TOCTOU 窗口;
+ *  2. 打开后用 `fstatSync` 复核类型与大小,并在两端 dev/ino 都可用时比对,**尽力**发现
+ *     lstat 与 open 之间路径被替换的情况;
  *  3. 只读 fstat 报告的字节数,不给"打开后又变大"留口子。
+ *
+ * 第 2 条的措辞是刻意收紧的(review 指出过上一版说法过头):`fstatSync` 只能证明"我手上
+ * 这个 fd 是常规文件、多大",并不能证明 `openSync` 没有跟随一个在窗口内刚被换上的
+ * symlink;dev/ino 比对能查出"打开的不是 lstat 看到的那个 inode",但 Node 没有跨平台的
+ * `O_NOFOLLOW` 等价物,所以这不是密闭保证,只是让实现与声明一致。Windows 上 ino
+ * 可能为 0,那种情况跳过比对。
  */
 function readRegularFileWithin(file: string, maxBytes: number): string | null {
   let fd: number | null = null;
@@ -70,6 +85,8 @@ function readRegularFileWithin(file: string, maxBytes: number): string | null {
     fd = fs.openSync(file, 'r');
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size > maxBytes) return null;
+    // best-effort:两端 ino 都拿得到才比对(Windows 上可能是 0)。
+    if (pre.ino && stat.ino && (pre.ino !== stat.ino || pre.dev !== stat.dev)) return null;
     const buffer = Buffer.allocUnsafe(stat.size);
     const read = fs.readSync(fd, buffer, 0, stat.size, 0);
     return buffer.subarray(0, read).toString('utf8');
@@ -92,7 +109,7 @@ function readRegularFileWithin(file: string, maxBytes: number): string | null {
  */
 export function readEndpointManifestCache(userDataDir: string): CachedEndpointManifest | null {
   const file = cacheFilePath(userDataDir);
-  const raw = readRegularFileWithin(file, MAX_MANIFEST_BYTES * 2);
+  const raw = readRegularFileWithin(file, MAX_CACHE_FILE_BYTES);
   if (raw === null) return null;
   let parsed: unknown;
   try {
@@ -135,14 +152,17 @@ export function writeEndpointManifestCache(
   userDataDir: string,
   entry: CachedEndpointManifest,
 ): boolean {
-  if (Buffer.byteLength(entry.manifestText, 'utf8') > MAX_MANIFEST_BYTES) return false;
+  // 量最终落盘的那份字节,并用同一份结果写入:读路径按文件字节数卡同一上限,
+  // 两端量同一个东西才不会出现"写得进、读不回"。
+  const payload = JSON.stringify(entry, null, 2);
+  if (Buffer.byteLength(payload, 'utf8') > MAX_CACHE_FILE_BYTES) return false;
   const target = cacheFilePath(userDataDir);
   const tmp = `${target}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
   let fd: number | null = null;
   try {
     fs.mkdirSync(userDataDir, { recursive: true });
     fd = fs.openSync(tmp, 'wx', 0o600);
-    fs.writeFileSync(fd, JSON.stringify(entry, null, 2), 'utf8');
+    fs.writeFileSync(fd, payload, 'utf8');
     fs.closeSync(fd);
     fd = null;
     fs.renameSync(tmp, target);

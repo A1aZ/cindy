@@ -297,28 +297,32 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 /**
- * 4xx 里语义上明确是**瞬时**的状态码:重试有意义,也不该被当成配置事故剥掉离线出口。
- *  - 408 Request Timeout / 425 Too Early:传输层抖动;
- *  - 429 Too Many Requests:被限流,过一会儿就好——把它判成"配置错"会让一个正被
- *    限流的用户既不能重试、又用不上手里那份可用缓存,直接开不了应用。
+ * **不该被当成"清单配置错"的 4xx**。两类,理由不同但结论相同:
+ *  - 瞬时:408 Request Timeout / 425 Too Early(传输层抖动)、429 Too Many Requests
+ *    (被限流,过一会儿就好)——把它们判成配置错会让一个正被限流的用户既不能重试、
+ *    又用不上手里那份可用缓存,直接开不了应用;
+ *  - 环境侧:407 Proxy Authentication Required。按 RFC 9110 §15.5.8 它**只可能来自
+ *    代理**,永远不会由源站发出,所以它描述的是这台机器的网络环境(代理凭据缺失或
+ *    过期),不是清单的部署错。这恰恰是离线出口最该生效的场景——公司代理没登录时
+ *    正好该允许用上次的配置把应用打开。它同时也会拿到重试预算,这是有意的:代价只有
+ *    约 3.2s,而这期间系统/代理有可能把凭据补上。
  * 其余 3xx/4xx 才是路径 / 权限 / 部署配置错。
  */
-const TRANSIENT_HTTP_STATUSES = new Set([408, 425, 429]);
+const NON_CONFIG_4XX_STATUSES = new Set([407, 408, 425, 429]);
 
 /** HTTP 状态码是否属于"重试没有意义"的永久性错误(分类与重试预算共用同一判定)。 */
 function isPermanentHttpStatus(status: number): boolean {
-  return status < 500 && !TRANSIENT_HTTP_STATUSES.has(status);
+  return status < 500 && !NON_CONFIG_4XX_STATUSES.has(status);
 }
 
 /**
  * 失败 reason → 失败分类(决定文案与是否给离线出口)。
  *
- * 分界不是"有没有拿到正文",而是**重试和离线出口有没有意义**,并且必须与自动重试
- * 循环的永久性判定保持一致(两处共用 isPermanentHttpStatus):
- *  - 永久性 HTTP(3xx/4xx 去掉 408/425/429)= 路径 / 权限 / 部署配置错。重试循环已经
- *    因此不重试,这里同样归 config——否则同一个失败被判成"配置错所以不重试"又
- *    "网络问题所以可以用缓存绕过",等于给一次真实的配置事故开了后门;
- *  - 5xx、瞬时 4xx 与传输层失败(超时 / DNS / 代理 / ERR_*)才是 network,可重试、可离线;
+ * 分界不是"有没有拿到正文",而是**这次失败是不是我们的配置错**,并且与自动重试循环
+ * 共用同一判定(isPermanentHttpStatus),避免同一个失败被判成"配置错所以不重试"又
+ * "网络问题所以可以用缓存绕过":
+ *  - 永久性 HTTP(3xx/4xx 去掉 NON_CONFIG_4XX_STATUSES)= 路径 / 权限 / 部署配置错 → config;
+ *  - 5xx、407/408/425/429 与传输层失败(超时 / DNS / 代理 / ERR_*)→ network,可重试、可离线;
  *  - 烘焙基址为空是打包事故,同样 config。
  */
 export function classifyManifestFailure(reason: string): EndpointManifestFailureKind {
@@ -453,8 +457,9 @@ export async function resolveClientEndpointsBlocking(
       reason = fetchFailedReason(fetched.detail);
       // 构建/打包配置事故(基址为空)重试不会改变结果,立即跳出。
       if (fetched.detail === 'missing-manifest-base-url') break;
-      // 永久性 HTTP(路径/权限/配置)重试同一 URL 不会自愈;5xx 与瞬时 4xx
-      // (408/425/429)可能自愈,继续消耗预算。判定与失败分类共用 isPermanentHttpStatus。
+      // 永久性 HTTP(路径/权限/配置)重试同一 URL 不会自愈;5xx 与
+      // NON_CONFIG_4XX_STATUSES(407/408/425/429)可能自愈,继续消耗预算。
+      // 判定与失败分类共用 isPermanentHttpStatus,两处不会分叉。
       const httpStatus = /^http-(\d+)$/.exec(fetched.detail)?.[1];
       if (httpStatus && isPermanentHttpStatus(Number(httpStatus))) break;
       const delay = retryDelays[attempt];

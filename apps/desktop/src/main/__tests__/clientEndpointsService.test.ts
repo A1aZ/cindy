@@ -455,7 +455,7 @@ describe('弹框前的自动重试(mac 首装瞬时失败自愈)', () => {
     expect(result).toBeNull();
   });
 
-  it.each([408, 425, 429])('瞬时 HTTP %d 仍消耗重试预算(与分类共用同一判定)', async (status) => {
+  it.each([407, 408, 425, 429])('非配置错 HTTP %d 仍消耗重试预算(与分类共用同一判定)', async (status) => {
     const fetchManifest = vi.fn<BlockingResolveDeps['fetchManifest']>().mockResolvedValue({
       ok: false,
       detail: `http-${status}`,
@@ -510,6 +510,9 @@ describe('失败分类与弹框前诊断', () => {
     ['fetch-failed:http-408', 'network'],
     ['fetch-failed:http-425', 'network'],
     ['fetch-failed:http-429', 'network'],
+    // 407 按 RFC 9110 §15.5.8 只可能来自代理,描述的是本机网络环境(代理凭据缺失/
+    // 过期)而不是清单部署错;公司代理没登录恰恰是离线出口最该生效的场景。
+    ['fetch-failed:http-407', 'network'],
     // 永久性 HTTP = 路径 / 权限 / 部署配置错。重试循环已因此不重试,分类必须一致,
     // 否则同一失败会"配置错所以不重试"又"网络问题所以能用缓存绕过"。
     ['fetch-failed:http-301', 'config'],
@@ -744,7 +747,7 @@ describe('用户确认的离线出口', () => {
     },
   );
 
-  it.each([408, 429])('瞬时 HTTP %d 仍给离线出口(被限流不该连缓存都用不上)', async (status) => {
+  it.each([407, 408, 429])('非配置错 HTTP %d 仍给离线出口(代理没登录/被限流不该连缓存都用不上)', async (status) => {
     const promptRetry = vi.fn().mockReturnValue('offline');
 
     const result = await resolveClientEndpointsBlocking({

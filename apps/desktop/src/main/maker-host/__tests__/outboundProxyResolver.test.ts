@@ -338,6 +338,30 @@ describe('getOutboundPathSnapshotFor', () => {
     }
   });
 
+  it('does not claim a proxy path for env values the forwarding layer rejects', async () => {
+    // envResolver 只做「哪个变量适用」,不校验值可用性。转发层的 parseOutboundProxyUrl
+    // 会拒收 https://(TLS-to-proxy)与 socks4://,实际走直连 —— 此时报「已经过该代理」
+    // 就是谎报。判定必须用转发层同一个解析器。
+    for (const bad of ['https://corporate.proxy:443', 'socks4://legacy.proxy:1080']) {
+      resetOutboundProxyResolverStateForTest();
+      process.env.HTTPS_PROXY = bad;
+      await resolveDesktopOutboundProxy('https://chatgpt.com:443');
+      const snap = snapshotFor('https://chatgpt.com:443');
+      expect(snap).toMatchObject({ source: 'env', kind: 'unsupported' });
+      // 谎报的地址绝不能出现。
+      expect(snap?.proxy).toBeUndefined();
+    }
+
+    // 可用形态照旧记 proxy。
+    resetOutboundProxyResolverStateForTest();
+    process.env.HTTPS_PROXY = 'socks5://127.0.0.1:7891';
+    await resolveDesktopOutboundProxy('https://chatgpt.com:443');
+    expect(snapshotFor('https://chatgpt.com:443')).toMatchObject({
+      kind: 'proxy',
+      proxy: 'socks5://127.0.0.1:7891',
+    });
+  });
+
   it('classifies a configured-but-unusable system proxy as unsupported, not direct', async () => {
     // 企业环境常见:PAC 只给 HTTPS(TLS-to-proxy)出口。行为上确实直连了,但把它
     // 报成「系统报告无代理」会让用户以为代理配置正常,真正的动作是换成 HTTP/SOCKS5。

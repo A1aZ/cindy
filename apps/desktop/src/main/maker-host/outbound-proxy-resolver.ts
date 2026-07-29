@@ -31,6 +31,7 @@ import { app, session } from 'electron';
 import {
   createEnvOutboundProxyResolver,
   hasProxyEnvConfig,
+  parseOutboundProxyUrl,
   redactProxyUrlForLog,
   type OutboundProxyResolver,
 } from '@cindy/anthropic-compat-proxy';
@@ -108,12 +109,17 @@ export type OutboundPathUnknownReason =
   | 'session_unavailable';
 
 /**
- * 出站路径类别。四态刻意分开 —— 它们的**实际行为都是直连或走代理,但原因完全不同**,
- * 而原因才是诊断要说的话:
- *   - proxy       走代理
- *   - direct      确认没有代理配置
- *   - unsupported 系统**配了**代理,但形态本实现用不了(TLS-to-proxy / SOCKS4),故直连
+ * 出站路径类别。四态刻意分开 —— 它们的**实际行为只有直连或走代理两种,但原因完全
+ * 不同**,而原因才是诊断要说的话:
+ *   - proxy       走代理,且该地址**转发层确实能用**
+ *   - direct      没有代理配置(env 无、系统解析器给了直连)
+ *   - unsupported 配了代理但转发层用不了,故实际直连。两种来源:系统侧返回
+ *                 HTTPS(TLS-to-proxy)/ SOCKS(v4)条目;env 侧写了同类形态的值
+ *                 (`HTTPS_PROXY=https://…`、`socks4://…`),被 parseOutboundProxyUrl 拒收。
  *   - unknown     判定没问出来(超时 / 异常 / app 未 ready),按直连兜底
+ *
+ * 判定 proxy 的唯一依据是转发层的 parseOutboundProxyUrl —— resolver 返回了字符串
+ * 不代表转发层能用它,按字符串非空就报 proxy 会让诊断谎称走了代理。
  */
 export type OutboundPathKind = 'proxy' | 'direct' | 'unsupported' | 'unknown';
 
@@ -315,22 +321,28 @@ function recordOutboundPath(
   ) {
     outboundPathByOrigin.clear();
   }
-  // 优先级:没问出来(unknown)> 走代理(proxy)> 配了但用不了(unsupported)> 确认无代理。
-  // unsupported 必须压在 direct 之前 —— 两者的实际行为都是直连,但「系统列了代理却
-  // 用不了」和「系统说没有代理」是完全不同的排查方向。
+  // 关键:kind 必须反映**转发层实际会做什么**,不是 resolver 返回了什么字符串。
+  // resolver 可以返回一个转发层根本用不了的地址(env 里写 HTTPS_PROXY=https://…
+  // 的 TLS-to-proxy,或 socks4://),转发层的 parseOutboundProxyUrl 会拒收并直连 ——
+  // 此时报「已经过 X 代理」就是在撒谎。用同一个解析器判定,谎报不了。
+  const usable = value ? parseOutboundProxyUrl(value) : null;
+  // 优先级:没问出来(unknown)> 转发层能用的代理(proxy)> 配了但用不了(unsupported)
+  // > 确认没有代理配置(direct)。unsupported 必须压在 direct 之前 —— 两者的实际行为
+  // 都是直连,但「列了代理却用不了」和「没有代理」是完全不同的排查方向。
   const kind: OutboundPathKind = opts.unknownReason
     ? 'unknown'
-    : value
+    : usable
       ? 'proxy'
-      : opts.skippedUnsupported
+      : value || opts.skippedUnsupported
         ? 'unsupported'
         : 'direct';
   outboundPathByOrigin.set(origin, {
     source,
     kind,
-    // 快照可能被写进错误消息给用户看,只允许脱敏形态(env 值可能带 user:pass)。
+    // 只在转发层真能用时报地址,且只报脱敏形态(env 值可能带 user:pass)。
+    // usable.url 已是规范化后的无 userinfo 形态,再过一次脱敏是纵深防御。
     ...(opts.unknownReason ? { reason: opts.unknownReason } : {}),
-    ...(value && !opts.unknownReason ? { proxy: redactProxyUrlForLog(value) } : {}),
+    ...(usable && !opts.unknownReason ? { proxy: redactProxyUrlForLog(usable.url) } : {}),
     upstream: origin,
     at: Date.now(),
   });

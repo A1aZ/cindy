@@ -63,11 +63,13 @@ export interface OutboundPathFact {
  * 导出仅供单测。
  *
  * `direct` 必须按 source 分叉,两者是**语义相反**的结论:
- *  - source='system':走到系统代理这一层的前提是一个代理环境变量都没设
- *    (resolver 的 env 优先分层),所以这是「确实没有配代理」。
- *  - source='env':前提恰恰相反 —— 有代理 env 才会走 env 分支。此时的 direct
- *    意味着**配了代理却对这个上游不生效**(NO_PROXY 豁免了它,或没有覆盖该
- *    scheme 的变量)。说成「没设代理」会盖掉真正的原因,把用户推向反方向。
+ *  - source='env':有代理 env 才会走 env 分支,所以这里的 direct 意味着**配了代理
+ *    却对这个上游不生效**(NO_PROXY 豁免了它,或没有覆盖该 scheme 的变量)。说成
+ *    「没设代理」会盖掉真正的原因,把用户推向反方向。
+ *  - source='system':只能断言「没有代理 env」(走到这一层的前提),**不能**断言
+ *    系统侧没有代理配置 —— `session.resolveProxy` 是逐 URL 解析,系统完全可以配了
+ *    代理、只是 PAC / bypass 规则豁免了这个上游,那时它对该 URL 就返回 DIRECT。
+ *    所以这一支只陈述「系统解析器为这个上游给了直连」,并提示 bypass 的可能。
  */
 export function describeOutboundPath(fact: OutboundPathFact): string {
   if (fact.kind === 'proxy') {
@@ -78,14 +80,21 @@ export function describeOutboundPath(fact: OutboundPathFact): string {
     );
   }
   if (fact.kind === 'unsupported') {
-    // 系统设置里**有**代理,只是形态本实现用不了(Chromium 的 HTTPS = TLS-to-proxy,
-    // 裸 SOCKS = v4)。报成「没有代理」会让用户以为代理配置正常,而真正的动作是把
-    // 那条改成 HTTP 或 SOCKS5 出口。
+    // 配了代理,但形态转发层用不了(TLS-to-proxy 的 https / SOCKS4),所以实际直连。
+    // 报成「没有代理」会让用户以为配置正常,真正的动作是把出口换成 HTTP 或 SOCKS5。
+    // 两种来源的修改位置不同 —— env 改变量值,system 改系统/PAC 里的那一条。
+    if (fact.source === 'env') {
+      return (
+        `Cindy's outbound path for ${fact.upstream}: direct connection — a proxy env var is set, ` +
+        `but its value is not a form Cindy can use (an https:// TLS-to-proxy or socks4:// URL), ` +
+        `so it was rejected and the request went out directly. Use an http:// or socks5:// proxy URL.`
+      );
+    }
     return (
       `Cindy's outbound path for ${fact.upstream}: direct connection — the system proxy ` +
-      `settings do list a proxy, but in a form Cindy cannot use (an HTTPS/TLS-to-proxy entry, ` +
-      `or SOCKS4), so the request went out directly. Switch that entry to an HTTP or SOCKS5 ` +
-      `proxy to route Cindy through it.`
+      `settings do list a proxy for this upstream, but in a form Cindy cannot use (an HTTPS/` +
+      `TLS-to-proxy entry, or SOCKS4), so the request went out directly. Switch that entry to ` +
+      `an HTTP or SOCKS5 proxy to route Cindy through it.`
     );
   }
   if (fact.kind === 'direct') {
@@ -98,9 +107,10 @@ export function describeOutboundPath(fact: OutboundPathFact): string {
       );
     }
     return (
-      `Cindy's outbound path for ${fact.upstream}: direct connection — no proxy env var is set ` +
-      `and the system proxy settings reported none. On a network that needs a proxy or VPN to ` +
-      `reach the upstream, this alone explains the failure.`
+      `Cindy's outbound path for ${fact.upstream}: direct connection — no proxy env var is set, ` +
+      `and the system proxy resolver returned a direct route for this upstream (a system proxy ` +
+      `may still be configured but bypassing this host). On a network that needs a proxy or VPN ` +
+      `to reach the upstream, this explains the failure.`
     );
   }
   return (

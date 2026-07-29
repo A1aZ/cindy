@@ -175,13 +175,16 @@ describe('describeOutboundPath', () => {
     }))).toContain('system proxy settings');
   });
 
-  it('states a system-sourced direct path as a confirmed absence of proxy config', () => {
-    // source='system' 的前提是一个代理 env 都没设(resolver 的 env 优先分层),
-    // 所以「没配代理」在这一支才是成立的。
+  it('states a system-sourced direct path without asserting the system has no proxy', () => {
+    // 只有「没有代理 env」可以断言(走到 system 分支的前提)。系统侧不能断言 ——
+    // resolveProxy 是逐 URL 解析,系统可能配了代理、只是 PAC/bypass 豁免了这个上游,
+    // 那时它对该 URL 就返回 DIRECT。说成「系统报告无代理」会盖掉这种 bypass。
     const text = describeOutboundPath(fact({ source: 'system', kind: 'direct' }));
     expect(text).toContain('direct connection');
     expect(text).toContain('no proxy env var is set');
-    expect(text).toContain('reported none');
+    expect(text).toContain('returned a direct route for this upstream');
+    expect(text).toContain('bypassing this host');
+    expect(text).not.toContain('reported none');
   });
 
   it('renders an env-sourced direct path as a bypass, never as missing proxy config', () => {
@@ -203,8 +206,16 @@ describe('describeOutboundPath', () => {
     expect(text).toContain('do list a proxy');
     expect(text).toContain('cannot use');
     expect(text).toContain('SOCKS5');
-    expect(text).not.toContain('reported none');
     expect(text).not.toContain('no proxy env var is set');
+  });
+
+  it('points env-sourced unsupported values at the variable, not the system settings', () => {
+    // unsupported 也可能来自 env(HTTPS_PROXY=https://… / socks4://),此时该改的是
+    // 变量值而不是系统设置 —— 指错位置等于没给动作。
+    const text = describeOutboundPath(fact({ source: 'env', kind: 'unsupported' }));
+    expect(text).toContain('proxy env var is set');
+    expect(text).toContain('http:// or socks5://');
+    expect(text).not.toContain('system proxy settings');
   });
 
   it('always returns a non-empty diagnostic for every kind', () => {

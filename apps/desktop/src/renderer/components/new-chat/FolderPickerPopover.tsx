@@ -14,11 +14,30 @@ export interface RecentFolder {
 }
 
 export interface FolderPickerOption {
+  /** Stable key across machines. Falls back to path for local-only callers. */
+  key?: string;
   path: string;
   name: string;
   description?: string;
   /** true = 目录已不在磁盘上(迁移/删除),行置灰并提示,仍可选(磁盘可能重新挂载)。 */
   missing?: boolean;
+  /** Present only when this path belongs to a paired device. */
+  remoteDevice?: {
+    deviceId: string;
+    deviceName: string;
+  };
+}
+
+/**
+ * 项目区当前所属的设备(#807 方案 B)。设备由创建页的设备 pill 选定,这里只负责在**该设备的
+ * 语境内**渲染「对话 + 项目」:所以不需要跨设备分组,列表长度不随设备数膨胀,「对话」也只出现
+ * 一次(它归属当前设备,而不是悬在所有设备之上)。
+ */
+export interface FolderPickerDeviceScope {
+  deviceId: string;
+  deviceName: string;
+  /** 正在经隧道取该设备的最近项目。 */
+  loading?: boolean;
 }
 
 export type FolderPickerSelectSource = 'project' | 'recent' | 'browse' | 'dialogue';
@@ -77,15 +96,24 @@ function handleFolderPickerWheel(e: React.WheelEvent<HTMLElement>) {
 interface FolderPickerPopoverProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onSelect: (folderPath: string, source: FolderPickerSelectSource) => void;
+  onSelect: (
+    folderPath: string,
+    source: FolderPickerSelectSource,
+    option?: FolderPickerOption,
+  ) => void;
   projectOptions?: readonly FolderPickerOption[];
+  /**
+   * 非空 = 项目区列的是这台对端设备的项目(本机时不传)。只用于空态文案与「浏览文件夹」
+   * 的目标设备,行本身的归属仍看每个 option 的 remoteDevice。
+   */
+  deviceScope?: FolderPickerDeviceScope;
+  onRemoveRemoteProject?: (option: FolderPickerOption) => void | Promise<void>;
   /**
    * 仅 isProjectPicker 模式下生效, 且只在传入时显示。回调激发 = 用户想从远端
    * 添加一个新的项目目录;调用方应关闭 popover 并打开 AddRemoteProjectDialog。
-   * 上层的可见性 gate (至少一台 host 勾了 autoConnect) 由调用方决定是否传入,
-   * 这里不做判断。
+   * 上层按当前可用的 SSH / device-link 目标决定是否传入,这里不做判断。
    */
-  onAddRemoteProject?: () => void;
+  onAddRemoteProject?: (deviceId?: string) => void;
   side?: 'top' | 'right' | 'bottom' | 'left';
   align?: 'start' | 'center' | 'end';
   sideOffset?: number;
@@ -98,6 +126,8 @@ export function FolderPickerPopover({
   onOpenChange,
   onSelect,
   projectOptions,
+  deviceScope,
+  onRemoveRemoteProject,
   onAddRemoteProject,
   side,
   align = 'end',
@@ -110,9 +140,97 @@ export function FolderPickerPopover({
   const effectiveProjectOptions = projectOptions ?? [];
   const recentFolders = open && !isProjectPicker ? getRecentFolders() : [];
 
-  const handleSelectPath = (folderPath: string, source: FolderPickerSelectSource) => {
-    onSelect(folderPath, source);
+  const handleSelectPath = (
+    folderPath: string,
+    source: FolderPickerSelectSource,
+    option?: FolderPickerOption,
+  ) => {
+    onSelect(folderPath, source, option);
     onOpenChange(false);
+  };
+
+  const handleRemoveProject = (project: FolderPickerOption) => {
+    if (project.remoteDevice) {
+      void onRemoveRemoteProject?.(project);
+      return;
+    }
+    void recentWorkdirsStore.remove(project.path);
+  };
+
+  const renderProject = (project: FolderPickerOption) => {
+    const canRemove = !project.remoteDevice || onRemoveRemoteProject !== undefined;
+    return (
+      /* 行内有嵌套的删除按钮,外层不能再用 <button>(非法嵌套),
+         改 div[role=button] + 键盘激活,视觉与其它行一致。 */
+      <div
+        key={project.key ?? project.path}
+        role="button"
+        tabIndex={0}
+        onClick={() => handleSelectPath(project.path, 'project', project)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            handleSelectPath(project.path, 'project', project);
+          }
+        }}
+        className={cn(
+          'group flex w-full cursor-pointer items-center gap-3 rounded-[8px] px-3 py-[10px] text-left',
+          'transition-colors outline-none',
+          'hover:bg-[var(--folder-item-hover)]',
+        )}
+      >
+        <Folder
+          size={20}
+          className={cn('shrink-0 text-[var(--folder-item-icon)]', project.missing && 'opacity-50')}
+        />
+        <div className="flex min-w-0 flex-1 flex-col items-start">
+          <span
+            className={cn(
+              'w-full truncate text-sm font-medium text-[var(--folder-item-name)]',
+              project.missing && 'opacity-50',
+            )}
+          >
+            {project.name}
+          </span>
+          {(project.description || project.missing) && (
+            <span
+              className={cn(
+                'w-full truncate text-xs text-[var(--folder-item-path)]',
+                project.missing && 'opacity-50',
+              )}
+            >
+              {project.missing && (
+                <span className="text-[var(--error-fg)]">
+                  {t('newChat.folderPicker.missingDir')}
+                  {project.description ? ' · ' : ''}
+                </span>
+              )}
+              {project.description}
+            </span>
+          )}
+        </div>
+        {canRemove && (
+          <button
+            type="button"
+            aria-label={t('newChat.folderPicker.removeFromList')}
+            onKeyDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              handleRemoveProject(project);
+            }}
+            className={cn(
+              'flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px]',
+              'text-[var(--folder-item-path)] opacity-0 transition-opacity',
+              'group-hover:opacity-100 focus-visible:opacity-100',
+              'hover:bg-[var(--surface-hover)] hover:text-[var(--folder-item-name)]',
+              'outline-none',
+            )}
+          >
+            <X size={14} />
+          </button>
+        )}
+      </div>
+    );
   };
 
   const handleChooseDifferent = async () => {
@@ -169,88 +287,30 @@ export function FolderPickerPopover({
               data-folder-picker-scroll="true"
               className="pending-queue-scroll -mr-2 max-h-[224px] overflow-x-hidden overflow-y-auto overscroll-contain pr-2"
             >
-              {effectiveProjectOptions.length > 0 ? (
-                effectiveProjectOptions.map((project) => (
-                  /* 行内有嵌套的删除按钮,外层不能再用 <button>(非法嵌套),
-                     改 div[role=button] + 键盘激活,视觉与其它行一致。 */
-                  <div
-                    key={project.path}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => handleSelectPath(project.path, 'project')}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        handleSelectPath(project.path, 'project');
-                      }
+              {deviceScope?.loading ? (
+                <div className="px-3 py-[10px] text-sm text-[var(--folder-item-path)]">
+                  {t('newChat.addRemoteProject.existingLoading')}
+                </div>
+              ) : effectiveProjectOptions.length > 0 ? (
+                effectiveProjectOptions.map(renderProject)
+              ) : deviceScope && onAddRemoteProject ? (
+                /* 对端设备上一个项目都没有:空态里直接给「浏览文件夹」,并带着设备身份进弹窗 ——
+                   否则用户得自己退出去找入口,而这台机器恰恰是最可能需要新建目录的。 */
+                <div className="flex items-center justify-between gap-3 px-3 py-[10px]">
+                  <span className="min-w-0 text-xs text-[var(--folder-item-path)]">
+                    {t('newChat.addRemoteProject.existingEmpty')}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onAddRemoteProject(deviceScope.deviceId);
+                      onOpenChange(false);
                     }}
-                    className={cn(
-                      'group flex w-full cursor-pointer items-center gap-3 rounded-[8px] px-3 py-[10px] text-left',
-                      'transition-colors outline-none',
-                      'hover:bg-[var(--folder-item-hover)]',
-                    )}
+                    className="shrink-0 text-xs font-medium text-[var(--folder-item-name)] hover:underline"
                   >
-                    <Folder
-                      size={20}
-                      className={cn(
-                        'shrink-0 text-[var(--folder-item-icon)]',
-                        project.missing && 'opacity-50',
-                      )}
-                    />
-                    <div className="flex min-w-0 flex-1 flex-col items-start">
-                      {/* w-full 缺失 → truncate 不生效;长 UUID / 长路径会撑爆容器
-                          触发横向滚动条。description 那行已有 w-full 是对的,这里
-                          补上。 */}
-                      <span
-                        className={cn(
-                          'w-full truncate text-sm font-medium text-[var(--folder-item-name)]',
-                          project.missing && 'opacity-50',
-                        )}
-                      >
-                        {project.name}
-                      </span>
-                      {(project.description || project.missing) && (
-                        <span
-                          className={cn(
-                            'w-full truncate text-xs text-[var(--folder-item-path)]',
-                            project.missing && 'opacity-50',
-                          )}
-                        >
-                          {project.missing && (
-                            <span className="text-[var(--error-fg)]">
-                              {t('newChat.folderPicker.missingDir')}
-                              {project.description ? ' · ' : ''}
-                            </span>
-                          )}
-                          {project.description}
-                        </span>
-                      )}
-                    </div>
-                    {/* hover / 键盘聚焦时浮现;删除 = 从最近列表移除(main 侧
-                        recent_workdirs 行),不动 sessions / 磁盘。 */}
-                    <button
-                      type="button"
-                      aria-label={t('newChat.folderPicker.removeFromList')}
-                      // 键盘事件也要拦:Enter/Space 的 keydown 会先冒泡到外层
-                      // div[role=button] 触发"选中项目",必须在按钮层截断。
-                      onKeyDown={(e) => e.stopPropagation()}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void recentWorkdirsStore.remove(project.path);
-                      }}
-                      className={cn(
-                        'flex h-6 w-6 shrink-0 items-center justify-center rounded-[6px]',
-                        'text-[var(--folder-item-path)] opacity-0 transition-opacity',
-                        'group-hover:opacity-100 focus-visible:opacity-100',
-                        // 行 hover 已是 --folder-item-hover,内层按钮要再深一档才可辨
-                        'hover:bg-[var(--surface-hover)] hover:text-[var(--folder-item-name)]',
-                        'outline-none',
-                      )}
-                    >
-                      <X size={14} />
-                    </button>
-                  </div>
-                ))
+                    {t('newChat.addRemoteProject.tabBrowse')}
+                  </button>
+                </div>
               ) : (
                 <div className="px-3 py-[10px] text-sm text-[var(--folder-item-path)]">
                   {t('newChat.folderPicker.noProjects')}

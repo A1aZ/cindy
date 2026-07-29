@@ -53,11 +53,18 @@ type RemoteTarget =
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Device group that opened the dialog; falls back to the first available target. */
+  initialDeviceId?: string | null;
   /** vendor 不在 dialog 里选 —— 由父层根据当前 draft / segmented switcher 决定。 */
   onProjectAdded: (target: RemoteProjectTarget) => void | Promise<void>;
 }
 
-export function AddRemoteProjectDialog({ open, onOpenChange, onProjectAdded }: Props) {
+export function AddRemoteProjectDialog({
+  open,
+  onOpenChange,
+  initialDeviceId,
+  onProjectAdded,
+}: Props) {
   const { t } = useTranslation();
   const { confirm } = useConfirmDialog();
   // 打开时把焦点交给主输入(目标选择器),不落在关闭 X 上(DESIGN §14.2)。
@@ -149,8 +156,13 @@ export function AddRemoteProjectDialog({ open, onOpenChange, onProjectAdded }: P
       return;
     }
     if (selectedKey && targets.some((tg) => tg.key === selectedKey)) return;
-    setSelectedKey(targets[0]?.key ?? null);
-  }, [open, targets, selectedKey]);
+    const preferredKey = initialDeviceId ? `device:${initialDeviceId}` : null;
+    setSelectedKey(
+      (preferredKey && targets.some((target) => target.key === preferredKey)
+        ? preferredKey
+        : targets[0]?.key) ?? null,
+    );
+  }, [open, targets, selectedKey, initialDeviceId]);
 
   const refreshList = useCallback(
     async (browseApi: RemoteBrowseAdapter, targetPath: string) => {

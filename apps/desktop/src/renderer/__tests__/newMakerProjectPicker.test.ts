@@ -37,6 +37,16 @@ const projectPickerOptionsHookSource = readFileSync(
   'utf8',
 );
 
+const deviceLinkProjectsHookSource = readFileSync(
+  resolve(__dirname, '..', 'hooks', 'useDeviceLinkProjects.ts'),
+  'utf8',
+);
+
+const deviceSwitcherPillSource = readFileSync(
+  resolve(__dirname, '..', 'components', 'new-chat', 'DeviceSwitcherPill.tsx'),
+  'utf8',
+);
+
 const scheduleFormDialogSource = readFileSync(
   resolve(__dirname, '..', 'features', 'scheduler', 'components', 'ScheduleFormDialog.tsx'),
   'utf8',
@@ -158,15 +168,47 @@ describe('Shared create project picker', () => {
       'const hasAnyRemoteTarget = useHasAnyRemoteTarget()',
     );
     expect(newMakerDraftRouteSource).toContain('onAddRemoteProject={hasAnyRemoteTarget ?');
+    // #807 方案 B:设备提成 pill 上的一级维度,项目区只列**当前设备**的项目(不再跨设备分组)。
+    expect(newMakerDraftRouteSource).toContain('projectOptions={activeProjectOptions}');
+    expect(newMakerDraftRouteSource).toContain('deviceScope={folderPickerDeviceScope}');
+    expect(deviceLinkProjectsHookSource).toContain('loadDeviceLinkExistingProjects(deviceId)');
+    expect(deviceLinkProjectsHookSource).toContain('removeDeviceLinkExistingProject(');
     // 弹窗统一两类来源:SSH ready hosts + device-link 可控设备(optgroup 区分)。
     expect(addRemoteProjectDialogSource).toContain("res.hosts.filter((h) => h.status === 'ready')");
     expect(addRemoteProjectDialogSource).toContain('useControllableDevices()');
     expect(addRemoteProjectDialogSource).toContain('sourceGroupSsh');
     expect(addRemoteProjectDialogSource).toContain('sourceGroupDevice');
     expect(addRemoteProjectDialogSource).not.toContain('res.hosts.filter((h) => h.autoConnect)');
-    // 归属一致:device-link 建会话参数走纯函数 buildDeviceLinkCreateArgs(workspaceKind:'project'),
-    // 行为由 deviceLinkCreateArgs.test.ts 断言;此处锁「route 确实经该纯函数」,防有人再内联错 workspaceKind。
+    // 归属一致:device-link 建会话参数走纯函数 buildDeviceLinkCreateArgs(workspaceKind 由
+    // workingDir 派生),行为由 deviceLinkCreateArgs.test.ts 断言;此处锁「route 确实经该纯函数」,
+    // 防有人再内联错 workspaceKind。
     expect(newMakerDraftRouteSource).toContain('buildDeviceLinkCreateArgs({');
+  });
+
+  // #807:设备切换 pill。三条产品裁决写进源码断言,防后续重构悄悄改掉。
+  it('wires the device switcher pill and keeps it invisible without paired devices', () => {
+    expect(newMakerDraftRouteSource).toContain('const selectableDevices = useSelectableDevices()');
+    expect(newMakerDraftRouteSource).toContain('<DeviceSwitcherPill');
+    // 没有对端设备 → 组件自己返回 null,只有本机的用户看不到任何新增控件。
+    expect(deviceSwitcherPillSource).toContain('if (devices.length === 0) return null');
+    // 离线设备列出但禁用 —— 掉线时从列表消失会让用户以为配对丢了。
+    expect(deviceSwitcherPillSource).toContain('disabled={!device.online}');
+    // 换设备一并清掉上一台的 workingDir/extraDirs(旧路径在新机器上不存在)。
+    expect(newMakerDraftRouteSource).toContain('const handleDeviceChange = useCallback(');
+    expect(newMakerDraftRouteSource).toContain('deviceLinkDeviceId: deviceId,');
+  });
+
+  // #807:跨设备纯对话。放宽后「选了设备」单独成立即可整套走对端(能力/provider/创建同口径),
+  // 修掉「模型列表来自对端、会话却建在本机」的不一致。
+  it('treats a picked device alone as a device-link draft so cross-device dialogues work', () => {
+    expect(newMakerDraftRouteSource).toContain(
+      'const isDeviceLinkDraft = effectiveDeviceLinkDeviceId != null',
+    );
+    expect(newMakerDraftRouteSource).toContain(
+      'if (isDeviceLinkDraft && effectiveDeviceLinkDeviceId) {',
+    );
+    // 远程纯对话没有 repo:即使 wtEnabled 残留 true 也必须跳过 worktree 分支。
+    expect(newMakerDraftRouteSource).toContain('if (effectiveWorkingDir && wt.enabled) {');
   });
 
   it('keeps recent-folder storage out of project-option selection', () => {

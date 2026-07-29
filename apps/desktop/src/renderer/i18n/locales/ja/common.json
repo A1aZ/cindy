@@ -4450,6 +4450,12 @@
       "alwaysAllowScopedHint": "このセッション全体に適用され、ここに挙げた範囲にのみ及びます。",
       "alwaysAllowSessionHint": "この 1 回のリクエストだけでなく、このセッション全体に適用されます。",
       "ruleSeparator": "、"
+    },
+    "deviceSwitcher": {
+      "label": "デバイス",
+      "localHint": "このパソコンで実行",
+      "onlineHint": "接続済み — 作成できます",
+      "offlineHint": "オフライン — 接続後に利用可能"
     }
   },
   "onboarding": {
@@ -5309,7 +5315,8 @@
       "worktreeMissingRepo": "worktree を作成できません：現在のディレクトリのリポジトリルートがありません",
       "worktreeRepoHint": "作業ディレクトリを再選択し、右下のフォルダ表示が更新されてから再試行してください",
       "sessionInactive": "セッションはすでにアクティブではありません",
-      "remoteProjectBanner": "{{device}} の {{project}} で新しいセッションを作成"
+      "remoteProjectBanner": "{{device}} の {{project}} で新しいセッションを作成",
+      "remoteDialogueBanner": "{{device}} で新しい対話（プロジェクトなし）"
     },
     "jumpSession": {
       "emptyId": "移動先の sessionId を入力してください",

@@ -4451,6 +4451,12 @@
       "alwaysAllowScopedHint": "Applies to the whole session, and only to what is listed here.",
       "alwaysAllowSessionHint": "Applies to the whole session, not just this one request.",
       "ruleSeparator": ", "
+    },
+    "deviceSwitcher": {
+      "label": "Device",
+      "localHint": "Runs on this computer",
+      "onlineHint": "Connected — available",
+      "offlineHint": "Offline — available once connected"
     }
   },
   "onboarding": {
@@ -5319,7 +5325,8 @@
       "worktreeMissingRepo": "Cannot create worktree: missing repository root for the current directory",
       "worktreeRepoHint": "Try re-selecting the working directory and wait for the folder badge to refresh, then retry",
       "sessionInactive": "Session is no longer active",
-      "remoteProjectBanner": "New session in {{project}} on {{device}}"
+      "remoteProjectBanner": "New session in {{project}} on {{device}}",
+      "remoteDialogueBanner": "New dialogue on {{device}} (no project)"
     },
     "jumpSession": {
       "emptyId": "Enter a sessionId to jump to",

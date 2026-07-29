@@ -46,14 +46,17 @@ import { ChatInput } from '@/components/new-chat/ChatInput';
 import { WorktreeChipsRow } from '@/components/new-chat/WorktreeChipsRow';
 import {
   FolderPickerPopover,
+  type FolderPickerDeviceScope,
   type FolderPickerSelectSource,
 } from '@/components/new-chat/FolderPickerPopover';
+import { DeviceSwitcherPill } from '@/components/new-chat/DeviceSwitcherPill';
 import { RightSidebarToggle } from '@/components/layout/RightSidebarToggle';
 import {
   AddRemoteProjectDialog,
   type RemoteProjectTarget,
 } from '@/components/new-chat/AddRemoteProjectDialog';
 import { useHasAnyRemoteTarget } from '@/hooks/useHasAnyReadyRemoteHost';
+import { useSelectableDevices } from '@/hooks/useControllableDevices';
 import { useProviderOnboarding } from '@/hooks/useProviderOnboarding';
 import { ConnectProviderCard } from '@/components/onboarding/ConnectProviderCard';
 import { buildDeviceLinkCreateArgs } from './deviceLinkCreateArgs';
@@ -151,6 +154,7 @@ import {
   getProjectPickerDisplayName,
   useProjectPickerOptions,
 } from '@/hooks/useProjectPickerOptions';
+import { useDeviceLinkProjects } from '@/hooks/useDeviceLinkProjects';
 import {
   resolveFastSupported,
   deriveModelsFromProviders,
@@ -382,7 +386,10 @@ export function NewMakerDraftRoute() {
   // 「添加远程项目」入口:gate = 至少一台 ready SSH 主机 或 一台可控 device-link 设备。
   // 入口渲染在 mode pill 的 FolderPickerPopover 里(Globe 项),点开下面这个弹窗。
   const hasAnyRemoteTarget = useHasAnyRemoteTarget();
+  // 设备切换器的数据源(含离线设备);空数组时 DeviceSwitcherPill 整个不渲染。
+  const selectableDevices = useSelectableDevices();
   const [addRemoteProjectOpen, setAddRemoteProjectOpen] = useState(false);
+  const [addRemoteProjectDeviceId, setAddRemoteProjectDeviceId] = useState<string | null>(null);
   const outletContext = useOutletContext<{
     rightSidebarCollapsed?: boolean;
     onToggleRightSidebar?: () => void;
@@ -417,6 +424,8 @@ export function NewMakerDraftRoute() {
     });
   }, []);
   const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+  // 设备切换器(#807)。与项目 picker 互斥打开 —— 两个 popover 同时浮着会互相遮挡。
+  const [devicePickerOpen, setDevicePickerOpen] = useState(false);
   // 整页拖入的视觉反馈(与 CCAgentSessionView 聊天区同款):enter/leave 计数
   // 配对驱动 isDragOver,亮全区虚线遮罩 + 透传 ChatInput 卡内提示文案。
   const pageDragCounterRef = useRef(0);
@@ -453,7 +462,16 @@ export function NewMakerDraftRoute() {
   // 下面 isDeviceLinkDraft 与 create 分支的真值收窄对 undefined 同样成立)。
   const effectiveDeviceLinkDeviceId = draft.deviceLinkDeviceId ?? undefined;
   const effectiveDeviceLinkDeviceName = draft.deviceLinkDeviceName;
-  const isDeviceLinkDraft = effectiveWorkingDir != null && effectiveDeviceLinkDeviceId != null;
+  /**
+   * 「这份草稿要建到对端设备上」—— 只看 deviceId,**不再要求 workingDir**(#807)。
+   *
+   * 改前是 `workingDir != null && deviceId != null`,于是「在对端设备上开个不绑项目的对话」
+   * 永远判不成 device-link 草稿,必然掉到本机分支创建;更糟的是下面的能力 / provider 只看
+   * effectiveDeviceLinkDeviceId(不看本旗标),所以那种状态下**模型列表来自对端、会话却建在本机**。
+   * 现在三处口径统一到同一个字段:选了设备就整套走对端(能力、provider、创建),
+   * 有没有项目只决定 workspaceKind 是 'project' 还是 'dialogue'。
+   */
+  const isDeviceLinkDraft = effectiveDeviceLinkDeviceId != null;
   // 零可用模型引导卡:device-link 草稿不出(连接态在被控端,本机替它连不上)。
   const providerOnboarding = useProviderOnboarding();
   const showProviderOnboardingCard = providerOnboarding.visible && !isDeviceLinkDraft;
@@ -468,9 +486,39 @@ export function NewMakerDraftRoute() {
     skipQuery: effectiveRemoteHostId != null,
   });
   const projectPickerOptions = useProjectPickerOptions();
+  /**
+   * 项目 picker 的数据源随**当前设备**切换(#807 方案 B):本机 → 本机最近项目;
+   * 对端 → 经隧道拉那台设备的 recent_workdirs。两者不并列显示,列表长度因此恒定。
+   */
+  const {
+    projects: deviceLinkProjects,
+    loading: deviceLinkProjectsLoading,
+    removeProject: removeRemoteProject,
+  } = useDeviceLinkProjects(
+    effectiveDeviceLinkDeviceId ?? null,
+    effectiveDeviceLinkDeviceName ?? null,
+    folderPickerOpen,
+  );
+  const activeProjectOptions = effectiveDeviceLinkDeviceId
+    ? deviceLinkProjects
+    : projectPickerOptions;
+  const folderPickerDeviceScope = useMemo<FolderPickerDeviceScope | undefined>(
+    () =>
+      effectiveDeviceLinkDeviceId
+        ? {
+            deviceId: effectiveDeviceLinkDeviceId,
+            deviceName: effectiveDeviceLinkDeviceName ?? effectiveDeviceLinkDeviceId,
+            loading: deviceLinkProjectsLoading,
+          }
+        : undefined,
+    [effectiveDeviceLinkDeviceId, effectiveDeviceLinkDeviceName, deviceLinkProjectsLoading],
+  );
   const createAgentModeLabel =
-    getProjectPickerDisplayName(effectiveWorkingDir, projectPickerOptions) ??
-    t('newChat.folderPicker.dialogue');
+    getProjectPickerDisplayName(
+      effectiveWorkingDir,
+      activeProjectOptions,
+      effectiveDeviceLinkDeviceId,
+    ) ?? t('newChat.folderPicker.dialogue');
   const draftRightSidebar = useMemo(
     () =>
       resolveNewMakerDraftRightSidebar({
@@ -1323,6 +1371,11 @@ export function NewMakerDraftRoute() {
   // picker 选 "对话(不在项目中)" 时 dir=null,此时一并清掉 extraDirs,行为对齐
   // 侧边栏 DialogueSection 的 handleCreateDialogue —— 进入对话草稿不应保留
   // 上一个项目的 extra 目录上下文。
+  //
+  // 刻意**不动** deviceLinkDeviceId(#807):设备是独立的一级维度,由设备 pill 掌管;
+  // 这里只在「当前设备」的语境内换工作区。所以选「对话」= 在当前设备上开不绑项目的对话,
+  // 而不是退回本机 —— 后者由设备 pill 选「本机」来表达。picker 现在只列当前设备的项目,
+  // 传进来的 path 必然属于当前设备,语义自洽。
   const handleWorkingDirChange = useCallback((dir: string | null) => {
     if (dir == null) {
       patchDraft({ workingDir: null, remoteHostId: null, extraDirs: [] });
@@ -1350,7 +1403,39 @@ export function NewMakerDraftRoute() {
 
   const handleFolderPickerOpenChange = useCallback((open: boolean) => {
     setFolderPickerOpen(open);
+    // 打开项目 picker 时收掉设备 picker(两个 popover 都是 absolute 浮层,会互相遮挡)。
+    if (open) setDevicePickerOpen(false);
   }, []);
+  const handleDevicePickerOpenChange = useCallback((open: boolean) => {
+    setDevicePickerOpen(open);
+    if (open) setFolderPickerOpen(false);
+  }, []);
+  /**
+   * 换设备(#807)。**一并清掉 workingDir 与 extraDirs** —— 上一台机器的路径在新机器上
+   * 基本不存在,留着会让用户以为项目跟过来了,发送时才在被控端 path guard 上失败。
+   * 换完停在这台设备的「对话」,与 mobile 切设备后工作区回落的行为一致。
+   */
+  const handleDeviceChange = useCallback(
+    (deviceId: string | null, deviceName: string | null) => {
+      patchDraft({
+        deviceLinkDeviceId: deviceId,
+        deviceLinkDeviceName: deviceName,
+        workingDir: null,
+        remoteHostId: null,
+        extraDirs: [],
+      });
+    },
+    [],
+  );
+  const handleOpenRemoteProject = useCallback((deviceId?: string) => {
+    setAddRemoteProjectDeviceId(deviceId ?? null);
+    setAddRemoteProjectOpen(true);
+  }, []);
+  /**
+   * 选工作区。设备维度已经由设备 pill 定好(#807 方案 B),所以这里**只换 workingDir** ——
+   * 不再需要「选中远程行 → 异步切设备」那套隧道往返,也因此不再需要期间禁用输入框。
+   * picker 里列的项目必然属于当前设备,path 直接写进 draft 即可。
+   */
   const handleModePickerSelect = useCallback(
     (path: string, source: FolderPickerSelectSource) => {
       handleWorkingDirChange(source === 'dialogue' ? null : path);
@@ -1474,13 +1559,19 @@ export function NewMakerDraftRoute() {
           // 所以顺序反过来 —— 先同步等被控端建好 worktree 拿到路径,再以该路径 + 预生成
           // sessionId 建会话;sessionId 两步共用,被控端 close-session 时才能按
           // worktreeStore 绑定回收 worktree。
-          if (isDeviceLinkDraft && effectiveDeviceLinkDeviceId && effectiveWorkingDir) {
+          // #807:不再要求 effectiveWorkingDir —— 选了设备就走对端建会话。没有项目目录时
+          // buildDeviceLinkCreateArgs 会把 workspaceKind 派生成 'dialogue',被控端自行分配
+          // 运行目录(隧道侧 path guard 对「缺 workingDir」本来就是放行的,不放宽任何边界)。
+          if (isDeviceLinkDraft && effectiveDeviceLinkDeviceId) {
             const deviceId = effectiveDeviceLinkDeviceId;
             const deviceName = effectiveDeviceLinkDeviceName ?? deviceId;
             const wt = wtRef.current;
-            let remoteWorkingDir = effectiveWorkingDir;
+            let remoteWorkingDir = effectiveWorkingDir ?? undefined;
             let presetSessionId: string | undefined;
-            if (wt.enabled) {
+            // worktree 是项目专属能力:远程纯对话没有 repo,即使 wtEnabled 还残留着上一个
+            // 项目草稿的 true(切「对话」不会重置它),也必须跳过,否则会拿 null baseRepo
+            // 撞进 worktreeMissingRepo 报错、把一次正常的对话创建拦掉。
+            if (effectiveWorkingDir && wt.enabled) {
               // baseRepo 来自被控端 worktree:detect-cwd 的 repoRoot(hooks 已按 deviceId 路由)。
               const baseRepo = wt.baseRepo;
               if (!baseRepo) {
@@ -2389,13 +2480,27 @@ export function NewMakerDraftRoute() {
                     : 'absolute right-0 top-[22px] z-10',
                 )}
               >
+                {/* 设备切换器(#807):设备是一级维度,排在 mode pill 左边;没有对端设备时
+                    组件自己返回 null —— 只有本机的用户看不到任何新增控件。 */}
+                <DeviceSwitcherPill
+                  devices={selectableDevices}
+                  value={effectiveDeviceLinkDeviceId ?? null}
+                  onChange={handleDeviceChange}
+                  open={devicePickerOpen}
+                  onOpenChange={handleDevicePickerOpenChange}
+                  // 窄屏 pill 排会进正常流并 flex-wrap;多台时收成图标 + 状态点少占一行。
+                  compact={isDraftNarrow && selectableDevices.length > 1}
+                  disabled={wtCreating}
+                />
                 <FolderPickerPopover
                   open={folderPickerOpen}
                   onOpenChange={handleFolderPickerOpenChange}
                   onSelect={handleModePickerSelect}
-                  projectOptions={projectPickerOptions}
+                  projectOptions={activeProjectOptions}
+                  deviceScope={folderPickerDeviceScope}
+                  onRemoveRemoteProject={removeRemoteProject}
                   // 仅在有可用远程目标时暴露「添加远程项目」入口(SSH ready 主机 / device-link 可控设备)。
-                  onAddRemoteProject={hasAnyRemoteTarget ? () => setAddRemoteProjectOpen(true) : undefined}
+                  onAddRemoteProject={hasAnyRemoteTarget ? handleOpenRemoteProject : undefined}
                   side="bottom"
                   align="end"
                   sideOffset={6}
@@ -2403,7 +2508,7 @@ export function NewMakerDraftRoute() {
                   <button
                     type="button"
                     data-testid="create-agent-mode-pill"
-                    className="inline-flex h-[30px] min-w-20 max-w-[220px] items-center justify-center gap-1.5 rounded-full border border-[var(--create-agent-control-border)] bg-[var(--create-agent-control-bg)] px-3 text-[12px] font-medium leading-[14px] text-[var(--create-agent-control-text)] transition-colors hover:bg-[var(--create-agent-control-bg-hover)] active:bg-[var(--create-agent-control-bg-pressed)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--create-agent-focus-ring)]"
+                    className="inline-flex h-[30px] min-w-20 max-w-[220px] items-center justify-center gap-1.5 rounded-full border border-[var(--create-agent-control-border)] bg-[var(--create-agent-control-bg)] px-3 text-[12px] font-medium leading-[14px] text-[var(--create-agent-control-text)] transition-colors hover:bg-[var(--create-agent-control-bg-hover)] active:bg-[var(--create-agent-control-bg-pressed)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--create-agent-focus-ring)] disabled:cursor-not-allowed disabled:opacity-60"
                     aria-label={t('newChat.collaboration.modeLabel')}
                   >
                     <MessageSquare
@@ -2573,13 +2678,20 @@ export function NewMakerDraftRoute() {
                       className="shrink-0 text-[var(--folder-item-icon)]"
                     />
                     <span className="min-w-0 truncate">
-                      {t('ccAgent.draft.remoteProjectBanner', {
-                        device: effectiveDeviceLinkDeviceName ?? effectiveDeviceLinkDeviceId ?? '',
-                        project:
-                          effectiveWorkingDir?.split(/[\\/]/).filter(Boolean).pop() ??
-                          effectiveWorkingDir ??
-                          '',
-                      })}
+                      {/* 有项目走原文案;跨设备纯对话没有 project 可填(#807),原句写死了
+                          「的 {{project}} 中」会留个空洞,所以走另一条无项目文案。 */}
+                      {effectiveWorkingDir
+                        ? t('ccAgent.draft.remoteProjectBanner', {
+                            device:
+                              effectiveDeviceLinkDeviceName ?? effectiveDeviceLinkDeviceId ?? '',
+                            project:
+                              effectiveWorkingDir.split(/[\\/]/).filter(Boolean).pop() ??
+                              effectiveWorkingDir,
+                          })
+                        : t('ccAgent.draft.remoteDialogueBanner', {
+                            device:
+                              effectiveDeviceLinkDeviceName ?? effectiveDeviceLinkDeviceId ?? '',
+                          })}
                     </span>
                   </div>
                 )}
@@ -2700,6 +2812,7 @@ export function NewMakerDraftRoute() {
         <AddRemoteProjectDialog
           open={addRemoteProjectOpen}
           onOpenChange={setAddRemoteProjectOpen}
+          initialDeviceId={addRemoteProjectDeviceId}
           onProjectAdded={handleRemoteProjectAdded}
         />
       </div>

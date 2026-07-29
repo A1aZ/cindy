@@ -4450,6 +4450,12 @@
       "alwaysAllowScopedHint": "作用于整个对话，且只限这里列出的范围。",
       "alwaysAllowSessionHint": "作用于整个对话，不只是这一次请求。",
       "ruleSeparator": "、"
+    },
+    "deviceSwitcher": {
+      "label": "设备",
+      "localHint": "在这台电脑上运行",
+      "onlineHint": "已连接，可在其上创建",
+      "offlineHint": "离线 · 连上后可用"
     }
   },
   "onboarding": {
@@ -5309,7 +5315,8 @@
       "worktreeMissingRepo": "无法开 worktree：缺少当前目录的仓库根",
       "worktreeRepoHint": "可尝试重新选一次工作目录，等右下角文件夹标识刷新后再试",
       "sessionInactive": "对话已不再处于活跃状态",
-      "remoteProjectBanner": "在 {{device}} 的 {{project}} 中新建对话"
+      "remoteProjectBanner": "在 {{device}} 的 {{project}} 中新建对话",
+      "remoteDialogueBanner": "在 {{device}} 上新建对话（不绑定项目）"
     },
     "jumpSession": {
       "emptyId": "请输入要跳转的对话 ID",

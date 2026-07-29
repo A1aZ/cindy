@@ -4450,6 +4450,12 @@
       "alwaysAllowScopedHint": "이 세션 전체에 적용되며, 여기에 표시된 범위에만 해당합니다.",
       "alwaysAllowSessionHint": "이번 요청 한 번이 아니라 이 세션 전체에 적용됩니다.",
       "ruleSeparator": ", "
+    },
+    "deviceSwitcher": {
+      "label": "기기",
+      "localHint": "이 컴퓨터에서 실행",
+      "onlineHint": "연결됨 — 생성 가능",
+      "offlineHint": "오프라인 — 연결 후 사용 가능"
     }
   },
   "onboarding": {
@@ -5309,7 +5315,8 @@
       "worktreeMissingRepo": "worktree를 만들 수 없음: 현재 디렉터리의 리포지토리 루트가 없습니다",
       "worktreeRepoHint": "작업 디렉터리를 다시 선택하고 우측 하단의 폴더 표시가 갱신된 후 다시 시도하세요",
       "sessionInactive": "세션이 더 이상 활성 상태가 아닙니다",
-      "remoteProjectBanner": "{{device}}의 {{project}}에서 새 세션 만들기"
+      "remoteProjectBanner": "{{device}}의 {{project}}에서 새 세션 만들기",
+      "remoteDialogueBanner": "{{device}}에서 새 대화(프로젝트 없음)"
     },
     "jumpSession": {
       "emptyId": "이동할 sessionId를 입력하세요",

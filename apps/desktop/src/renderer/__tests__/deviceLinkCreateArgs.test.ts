@@ -3,7 +3,11 @@
  *
  * 锁住历史上真实出过的 bug:控制端在远程项目下建会话,被控端却把它建成项目外的独立会话。
  * 根因是 create 参数 workspaceKind 没传 'project'。这里直接对组装函数做行为断言(而非 grep
- * 源码接线),确保只要走 device-link 建会话,workspaceKind 恒为 'project' → 两端归属一致。
+ * 源码接线),确保带项目目录时 workspaceKind 必为 'project' → 两端归属一致。
+ *
+ * 2026-07(#807)起 workingDir 可缺省:「在对端设备上开不绑项目的对话」是合法意图。
+ * 归属一致的断言因此变成**双向**的 —— 有目录必 'project',无目录必 'dialogue',
+ * 且无目录时不能把 workingDir 塞进 payload(否则被控端会拿空串去校验路径)。
  */
 import { describe, it, expect } from 'vitest';
 
@@ -112,5 +116,50 @@ describe('buildDeviceLinkCreateArgs', () => {
 
   it('缺省 id 不出现在 args(非 worktree 流程由被控端自行生成)', () => {
     expect('id' in buildDeviceLinkCreateArgs(base)).toBe(false);
+  });
+
+  // #807:跨设备纯对话。每台设备都有自己的一批对话,「在对端开个不绑项目的对话」必须走通。
+  describe('无项目目录 = 在该设备上建 standalone dialogue', () => {
+    const noDir = {
+      agentKind: 'cc' as const,
+      model: 'claude-sonnet-4-6',
+      effort: 'medium' as const,
+      permissionMode: 'acceptEdits' as const,
+      fastMode: false,
+    };
+
+    it('缺省 workingDir → workspaceKind 为 dialogue,且不带 workingDir 字段', () => {
+      const args = buildDeviceLinkCreateArgs(noDir);
+      expect(args.workspaceKind).toBe('dialogue');
+      expect('workingDir' in args).toBe(false);
+    });
+
+    it('空串 / 纯空白 workingDir 同样落到 dialogue(不把脏值当真实路径送去被控端校验)', () => {
+      for (const dir of ['', '   ', '\t']) {
+        const args = buildDeviceLinkCreateArgs({ ...noDir, workingDir: dir });
+        expect(args.workspaceKind).toBe('dialogue');
+        expect('workingDir' in args).toBe(false);
+      }
+    });
+
+    it('归属一致是双向的:两个字段同源派生,不可能出现「带目录却标 dialogue」', () => {
+      expect(buildDeviceLinkCreateArgs({ ...noDir, workingDir: '/host/proj' }).workspaceKind).toBe('project');
+      expect(buildDeviceLinkCreateArgs(noDir).workspaceKind).toBe('dialogue');
+    });
+
+    it('workingDir 两端去空白后透传(避免被控端 guard 因首尾空格判成不同目录)', () => {
+      expect(buildDeviceLinkCreateArgs({ ...noDir, workingDir: '  /host/proj  ' }).workingDir).toBe('/host/proj');
+    });
+
+    it('dialogue 也照样透传 extraDirs / providerId(对话同样可带引用目录与指定来源)', () => {
+      const args = buildDeviceLinkCreateArgs({
+        ...noDir,
+        extraDirs: ['/host/refs'],
+        providerId: 'anthropic',
+      });
+      expect(args.workspaceKind).toBe('dialogue');
+      expect(args.extraDirs).toEqual(['/host/refs']);
+      expect(args.providerId).toBe('anthropic');
+    });
   });
 });

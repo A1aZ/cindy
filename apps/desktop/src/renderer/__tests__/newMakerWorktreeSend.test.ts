@@ -51,6 +51,28 @@ describe('NewMakerDraftRoute worktree send flow', () => {
     expect(source).not.toContain('patchDraft({ workingDir: newDir })');
   });
 
+  it('uses the current checkout as the safe source when branch discovery is not ready', () => {
+    expect(source.match(/sourceBranch: wt\.sourceBranch\.trim\(\) \|\| 'HEAD'/g)).toHaveLength(2);
+    expect(source).not.toContain("sourceBranch: wt.sourceBranch.trim() || 'main'");
+  });
+
+  it('treats remote session creation as committed before the ancillary list refresh', () => {
+    const remoteSessionId = source.indexOf('const remoteSessionId = presetSessionId');
+    const commitPoint = source.indexOf('maker:create-session 回包是事务提交点', remoteSessionId);
+    const listRefresh = source.indexOf("'local-db:sessions:list'", commitPoint);
+    const refreshCatch = source.indexOf(
+      '[remote draft send] session created but list refresh failed; requesting reseed',
+      listRefresh,
+    );
+    const pendingHandoff = source.indexOf('setPending(remoteSessionId', refreshCatch);
+
+    expect(remoteSessionId).toBeGreaterThan(-1);
+    expect(commitPoint).toBeGreaterThan(remoteSessionId);
+    expect(listRefresh).toBeGreaterThan(commitPoint);
+    expect(refreshCatch).toBeGreaterThan(listRefresh);
+    expect(pendingHandoff).toBeGreaterThan(refreshCatch);
+  });
+
   it('does not auto-send if the prepared session is no longer active', () => {
     const worktreeCreate = source.indexOf('window.electronAPI.worktreeCreate');
     const latestSession = source.indexOf('const latestSession = await sessionService.get(newSession.id)', worktreeCreate);

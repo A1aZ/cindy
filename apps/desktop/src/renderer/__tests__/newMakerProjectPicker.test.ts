@@ -186,6 +186,26 @@ describe('Shared create project picker', () => {
     expect(worktreeChipsSource).toContain(
       'useDetectCwd(worktreeDisabled ? null : (cwd ?? null), deviceLinkDeviceId)',
     );
+    expect(worktreeChipsSource).toContain(
+      "sourceBranch || branches.current || 'HEAD'",
+    );
+    expect(worktreeChipsSource).not.toContain(
+      "sourceBranch || branches.current || 'main'",
+    );
+  });
+
+  it('invalidates worktree probe-derived fields when the selected project changes', () => {
+    const start = newMakerDraftRouteSource.indexOf('const handleWorkingDirChange');
+    const end = newMakerDraftRouteSource.indexOf(
+      '// ─── 新草稿入场',
+      start,
+    );
+    const handler = newMakerDraftRouteSource.slice(start, end);
+
+    expect(handler).toContain('if (dir !== effectiveWorkingDir)');
+    expect(handler).toContain('setWtBaseRepo(null)');
+    expect(handler).toContain("setWtSourceBranch('')");
+    expect(handler).toContain("setWtName('')");
   });
 
   it('wires the remote project entry into the CREATE AGENT mode-pill picker', () => {

@@ -404,13 +404,16 @@ const EXTENDED_INVOKE_CHANNELS: readonly string[] = [
   // validateWorktreeName 白名单校验,不接受任意路径),且 baseRepo 在被控端 dispatch
   // 层过 remote-workdir-guard 同款收敛(见 dispatch.ts PATH_GUARDED)。device-link
   // 已是同账号 + remoteControlEnabled 显式 opt-in,控制端本就能在项目目录跑 agent
-  // (任意 exec),不扩大攻击面。removal-preview 只读、用于删除前警告；实际删除路径不放行
-  // (removeWorktreeForSession 只在被控端状态变更流程内部触发)。老被控端无这些 channel →
-  // CHANNEL_NOT_ALLOWED → 控制端保持"worktree 不可用"降级。
+  // (任意 exec),不扩大攻击面。removal-preview 只读、用于删除前警告；通用删除路径仍不放行。
+  // discard-precreated 是唯一窄删除例外：只收 sessionId + create 回包的精确 path，被控端
+  // 重新核对 store 归属、无 DB/live session、无 dirty/keep/live-ref 后才删，且与
+  // maker:create-session 共用 session 锁，专门补偿两步创建的失败窗口。
+  // 老被控端无这些 channel → CHANNEL_NOT_ALLOWED → 控制端按对应能力降级。
   'worktree:detect-cwd',
   'worktree:list-branches',
   'worktree:suggest-name',
   'worktree:create',
+  'worktree:discard-precreated',
   'worktree:removal-preview',
 ];
 
@@ -487,6 +490,8 @@ export const INVOKE_TIMEOUT_OVERRIDES_MS: Readonly<Record<string, number>> = {
   // 被控端 worktree:create 含 git worktree add(--no-checkout)+ 白名单文件选择性
   // checkout + .claude/.sivi 拷贝;大仓库 / 慢盘上可能超默认 30s,给足执行预算 + 回程余量。
   'worktree:create': 60_000,
+  // 可能先等待同 sessionId 的晚到 create 释放互斥锁，再执行 git worktree remove。
+  'worktree:discard-precreated': 60_000,
 };
 
 /**

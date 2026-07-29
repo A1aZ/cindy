@@ -108,7 +108,10 @@ import { getCollaborationStartErrorMessage } from './collaborationErrors';
 import { useCollabProjectPolicy } from './hooks/useCollabProjectPolicy';
 import { CrossAgentConvertDialog } from '@/components/ui/cross-agent-convert-dialog';
 import type { MakerVendor, Session } from '@/lib/ccAgent.types';
-import { remoteProjectsStore } from '@/features/device-link/remoteProjectsStore';
+import {
+  remoteProjectsStore,
+  requestRemoteReseed,
+} from '@/features/device-link/remoteProjectsStore';
 import {
   ChevronDown,
   Code2,
@@ -133,6 +136,7 @@ import { isGlobalDropIntercepted } from '@/lib/globalDropIntercept';
 import { classifyUnclassifiedDroppedItems, getDroppedFileItems } from '@/lib/fileDrop';
 import { createLogger } from '@/lib/logger';
 import { getRemoteWorkingDirErrorMessage } from './remoteWorkingDirErrors';
+import { createRemoteSessionWithPrecreatedWorktree } from './remotePrecreatedWorktree';
 import { matchNavigationCommandName, tryHandleNavigationCommand } from '@/lib/navigationCommands';
 import {
   useAgentCapabilities,
@@ -1312,13 +1316,23 @@ export function NewMakerDraftRoute() {
   // picker 选 "对话(不在项目中)" 时 dir=null,此时一并清掉 extraDirs,行为对齐
   // 侧边栏 DialogueSection 的 handleCreateDialogue —— 进入对话草稿不应保留
   // 上一个项目的 extra 目录上下文。
-  const handleWorkingDirChange = useCallback((dir: string | null) => {
-    if (dir == null) {
-      patchDraft({ workingDir: null, remoteHostId: null, extraDirs: [] });
-      return;
-    }
-    patchDraft({ workingDir: dir, remoteHostId: null });
-  }, []);
+  const handleWorkingDirChange = useCallback(
+    (dir: string | null) => {
+      if (dir !== effectiveWorkingDir) {
+        // repoRoot / 分支 / 建议名都属于探测目标，切项目时同步失效；否则发送按钮
+        // 可能在新目标探测完成前复用上一仓库的创建参数。
+        setWtBaseRepo(null);
+        setWtSourceBranch('');
+        setWtName('');
+      }
+      if (dir == null) {
+        patchDraft({ workingDir: null, remoteHostId: null, extraDirs: [] });
+        return;
+      }
+      patchDraft({ workingDir: dir, remoteHostId: null });
+    },
+    [effectiveWorkingDir],
+  );
 
   // ─── 新草稿入场:引用目录清零 ──────────────────────────────────────────
   // 引用目录是"这次给 agent 额外看哪"的单次授权,不是"我常用哪个"的偏好记忆:
@@ -1463,6 +1477,10 @@ export function NewMakerDraftRoute() {
       // workingDir 为空就是 standalone dialogue;main 端按 workspaceKind='dialogue'
       // 自动分配运行目录。项目不是必填项,只是同一创建页里的可切换上下文。
       const selectedWorkingDir = effectiveWorkingDir?.trim() || undefined;
+      // 发送语义以用户按下 Send 的那一帧为准。鉴权检查期间项目/分支仍可能被 UI
+      // 改动；若异步块稍后再读 live ref，会把旧 workingDir 与新 baseRepo 拼成一次
+      // 混合目标创建。这里与 selectedWorkingDir 同步快照，保证整笔创建目标一致。
+      const selectedWorktree = { ...wtRef.current };
 
       sendInFlightRef.current = true;
       void (async () => {
@@ -1486,9 +1504,10 @@ export function NewMakerDraftRoute() {
           if (isDeviceLinkDraft && effectiveDeviceLinkDeviceId && effectiveWorkingDir) {
             const deviceId = effectiveDeviceLinkDeviceId;
             const deviceName = effectiveDeviceLinkDeviceName ?? deviceId;
-            const wt = wtRef.current;
+            const wt = selectedWorktree;
             let remoteWorkingDir = effectiveWorkingDir;
             let presetSessionId: string | undefined;
+            let precreatedWorktreePath: string | undefined;
             // 生效条件 = 勾选 && baseRepo 已就绪(被控端 detect-cwd 的 repoRoot)。
             // 勾选但环境不合格 / 探测未回时**静默按普通方式启动**,不报错不改勾选记忆
             // ——状态只属于用户,合格性只影响这一次是否真的走 worktree(2026-07-29 裁决)。
@@ -1507,7 +1526,7 @@ export function NewMakerDraftRoute() {
                       sessionId: presetSessionId,
                       baseRepo,
                       name,
-                      sourceBranch: wt.sourceBranch.trim() || 'main',
+                      sourceBranch: wt.sourceBranch.trim() || 'HEAD',
                     },
                   ],
                 )) as CreateWorktreeResp | null;
@@ -1520,6 +1539,7 @@ export function NewMakerDraftRoute() {
                   return;
                 }
                 remoteWorkingDir = resp.meta.path;
+                precreatedWorktreePath = resp.meta.path;
               } catch (err) {
                 const remoteWorkdirMessage = getRemoteWorkingDirErrorMessage(err, t);
                 if (remoteWorkdirMessage) {
@@ -1536,44 +1556,62 @@ export function NewMakerDraftRoute() {
                 setWtCreating(false);
               }
             }
-            const createResult = await window.electronAPI.deviceLink.invoke(
-              deviceId,
-              'maker:create-session',
-              [
-                // workspaceKind 恒 'project'(归属一致)+ agentKind 归一,见 buildDeviceLinkCreateArgs。
-                // extraDirs 一并透传(与本地 create 对齐):被控端 bootstrapSession 按 set-extra-dirs
-                // 同款 validateExtraDirs 校验后只存通过的子集,控制端镜像随被控端真相回流。
-                buildDeviceLinkCreateArgs({
-                  agentKind: persistedAgentKind,
-                  // 远程 worktree:workingDir 换成刚建好的 worktree 路径(真实存在,被控端
-                  // remote-workdir-guard 按"存在的目录"放行);id 与 worktree 绑定同值。
-                  // 非 worktree 流程两者保持原值 / 缺省。
-                  id: presetSessionId,
-                  workingDir: remoteWorkingDir,
-                  model,
-                  effort,
-                  permissionMode,
-                  fastMode: effectiveFastMode,
-                  extraDirs: effectiveExtraDirs,
-                  // 草稿选定的来源(被控端供应商;null=跟随默认路由)。被控端 create 时落 sessions.provider_id,
-                  // 使新远程会话首个请求即按所选来源路由(P2)。
-                  providerId,
-                }),
-              ],
-            );
-            const remoteSessionId = (createResult as { sessionId?: string } | null)?.sessionId;
+            // workspaceKind 恒 'project'(归属一致)+ agentKind 归一,见 buildDeviceLinkCreateArgs。
+            // extraDirs 一并透传(与本地 create 对齐):被控端 bootstrapSession 按 set-extra-dirs
+            // 同款 validateExtraDirs 校验后只存通过的子集,控制端镜像随被控端真相回流。
+            const remoteCreateArgs = buildDeviceLinkCreateArgs({
+              agentKind: persistedAgentKind,
+              // 远程 worktree:workingDir 换成刚建好的 worktree 路径(真实存在,被控端
+              // remote-workdir-guard 按"存在的目录"放行);id 与 worktree 绑定同值。
+              // 非 worktree 流程两者保持原值 / 缺省。
+              id: presetSessionId,
+              workingDir: remoteWorkingDir,
+              model,
+              effort,
+              permissionMode,
+              fastMode: effectiveFastMode,
+              extraDirs: effectiveExtraDirs,
+              // 草稿选定的来源(被控端供应商;null=跟随默认路由)。被控端 create 时落 sessions.provider_id,
+              // 使新远程会话首个请求即按所选来源路由(P2)。
+              providerId,
+            });
+            const invokeRemote = (channel: string, args: unknown[]) =>
+              window.electronAPI.deviceLink.invoke(deviceId, channel, args);
+            const remoteSessionId = presetSessionId && precreatedWorktreePath
+              ? await createRemoteSessionWithPrecreatedWorktree({
+                  sessionId: presetSessionId,
+                  path: precreatedWorktreePath,
+                  createArgs: remoteCreateArgs,
+                  invoke: invokeRemote,
+                })
+              : ((
+                  await invokeRemote('maker:create-session', [remoteCreateArgs])
+                ) as { sessionId?: string } | null)?.sessionId;
             if (!remoteSessionId) {
               toast.error(t('ccAgent.draft.createSessionFailed'));
               return;
             }
-            // 重拉该设备会话列表(含字段完整的新会话)→ 注册 origin + 出现在项目下。
-            const list = await window.electronAPI.deviceLink.invoke(
-              deviceId,
-              'local-db:sessions:list',
-              [200, 'active', { includePinned: true }],
-            );
-            if (Array.isArray(list)) {
-              remoteProjectsStore.setDeviceSessions(deviceId, deviceName, list as Session[]);
+            // maker:create-session 回包是事务提交点：此后列表刷新只是镜像补全，失败不能
+            // 再落入外层「创建失败」分支，否则草稿留在原地、用户重试会创建第二个真实
+            // session（worktree 路径还会再建一个受管目录）。拉取失败时继续交接并请求
+            // listing tier 重拉；sessions:created push / reconnect 也会继续兜底注入 origin。
+            try {
+              const list = await window.electronAPI.deviceLink.invoke(
+                deviceId,
+                'local-db:sessions:list',
+                [200, 'active', { includePinned: true }],
+              );
+              if (Array.isArray(list)) {
+                remoteProjectsStore.setDeviceSessions(deviceId, deviceName, list as Session[]);
+              } else {
+                requestRemoteReseed(deviceId);
+              }
+            } catch (err) {
+              log.warn(
+                '[remote draft send] session created but list refresh failed; requesting reseed',
+                err,
+              );
+              requestRemoteReseed(deviceId);
             }
             const rehydratedFiles = await rehomeDraftAttachments(files, remoteSessionId);
             setPending(remoteSessionId, {
@@ -1622,7 +1660,7 @@ export function NewMakerDraftRoute() {
 
           const sessionId = makeDraftSessionId();
           const workingDir = selectedWorkingDir;
-          const wt = wtRef.current;
+          const wt = selectedWorktree;
           // 生效条件 = 勾选 && baseRepo 已就绪;不合格时静默普通启动(同 device-link 分支,
           // 见 2026-07-29 状态不变量:勾选记忆永不因环境被改动或报错拦截)。
           if (!isRemoteProjectDraft && wt.enabled && wt.baseRepo) {
@@ -1711,7 +1749,7 @@ export function NewMakerDraftRoute() {
                   sessionId: newSession.id,
                   baseRepo,
                   name,
-                  sourceBranch: wt.sourceBranch.trim() || 'main',
+                  sourceBranch: wt.sourceBranch.trim() || 'HEAD',
                 });
                 if (!resp.ok) {
                   worktreeCreationStore.set(newSession.id, {

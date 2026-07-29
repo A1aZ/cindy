@@ -161,7 +161,11 @@ import {
   readNewSessionPreferences,
   saveNewSessionPreferences,
 } from '@/session/newSessionPreferenceStore';
-import { remoteSessionStore, useRemoteSessions } from '@/session/remoteSessionStore';
+import {
+  remoteSessionStore,
+  useRemoteNewMakerWorktreePreference,
+  useRemoteSessions,
+} from '@/session/remoteSessionStore';
 import { buildSessionComposerLayout } from '@/session/sessionComposerLayout';
 import { keyboardAvoidingBehaviorForPlatform } from '@/session/mobileNativeShellLayout';
 import type { RemoteSerializedAttachment, RemoteSession } from '@/session/types';
@@ -261,9 +265,10 @@ import {
   resolveWorktreeEligibility,
   seedWorktreeEnabled,
   shouldShowWorktreeToggle,
+  worktreeEligibilityForTarget,
   worktreeEligibilityCaptionKey,
   worktreeEligibilityFromError,
-  type NewSessionWorktreeEligibility,
+  type NewSessionWorktreeProbeSnapshot,
 } from '@/session/newSessionWorktree';
 import { MobileModelIconMark } from '@/session/MobileProviderMark';
 import { draftModelMemoryFor, hydrateDraftModelMemory } from '@/session/draftModelMemory';
@@ -350,6 +355,8 @@ export default function NewRemoteSessionScreen() {
   );
   const selectedDeviceLabel = selectedDeviceOption?.name || selectedDeviceName || selectedDeviceId || t('session.new.selectDevice');
   const maker = useMobileMakerTransport(selectedDeviceId);
+  const worktreePreference = useRemoteNewMakerWorktreePreference(selectedDeviceId);
+  const worktreeEnabled = worktreePreference.enabled;
   const sessions = useRemoteSessions();
   const recentWorkspaces = useMemo(
     () => buildRecentWorkspaceOptions(
@@ -393,8 +400,7 @@ export default function NewRemoteSessionScreen() {
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
   // worktree 开关(project 模式 + 已选目录时显示):勾选值存工作端(get-new-maker-defaults
   // 播种 / 显式点击写穿),资格由 worktree:detect-cwd 探测(目录变化即重探,seq 防竞态)。
-  const [worktreeEnabled, setWorktreeEnabled] = useState(false);
-  const [worktreeEligibility, setWorktreeEligibility] = useState<NewSessionWorktreeEligibility>({ status: 'probing' });
+  const [worktreeProbe, setWorktreeProbe] = useState<NewSessionWorktreeProbeSnapshot | null>(null);
   const worktreeDetectSeqRef = useRef(0);
   const worktreeSeedSeqRef = useRef(0);
   const [attachments, setAttachments] = useState<RemoteSerializedAttachment[]>([]);
@@ -776,6 +782,12 @@ export default function NewRemoteSessionScreen() {
   );
   const WorkspaceIcon = draft.workspaceKind === 'dialogue' ? MessageCircle : Folder;
   const agentLabel = draft.agentKind === 'codex' ? 'Codex' : 'Claude';
+  // effect 在 commit 后才会把旧探测结果重置为 probing；render 期先按设备 + cwd 同步
+  // 对齐 target，切项目/设备后立即创建也拿不到上一仓库的 baseRepo/sourceBranch。
+  const worktreeEligibility = worktreeEligibilityForTarget(worktreeProbe, {
+    deviceId: selectedDeviceId ?? '',
+    workingDir: draft.workspaceKind === 'project' ? draft.workingDir.trim() : '',
+  });
   // worktree 开关行:project + 已选目录才显示;老被控端(unsupported)整行隐藏。
   const worktreeRowVisible = shouldShowWorktreeToggle({
     workspaceKind: draft.workspaceKind,
@@ -1491,7 +1503,8 @@ export default function NewRemoteSessionScreen() {
   useEffect(() => {
     const cwd = draft.workspaceKind === 'project' ? draft.workingDir.trim() : '';
     const seq = ++worktreeDetectSeqRef.current;
-    setWorktreeEligibility({ status: 'probing' });
+    const target = { deviceId: selectedDeviceId ?? '', workingDir: cwd };
+    setWorktreeProbe({ target, eligibility: { status: 'probing' } });
     if (!selectedDeviceId || !cwd) return;
     void withTransientRemoteRetry(async () => {
       await openLink(selectedDeviceId);
@@ -1499,11 +1512,17 @@ export default function NewRemoteSessionScreen() {
     }, { maxAttempts: 2 })
       .then((result) => {
         if (seq !== worktreeDetectSeqRef.current) return;
-        setWorktreeEligibility(resolveWorktreeEligibility(result, cwd));
+        setWorktreeProbe({
+          target,
+          eligibility: resolveWorktreeEligibility(result, cwd),
+        });
       })
       .catch((err: unknown) => {
         if (seq !== worktreeDetectSeqRef.current) return;
-        setWorktreeEligibility(worktreeEligibilityFromError(err));
+        setWorktreeProbe({
+          target,
+          eligibility: worktreeEligibilityFromError(err),
+        });
       });
   }, [selectedDeviceId, draft.workspaceKind, draft.workingDir, maker, openLink]);
 
@@ -1514,10 +1533,9 @@ export default function NewRemoteSessionScreen() {
   worktreeSeedAgentKindRef.current = draft.agentKind;
   useEffect(() => {
     const seq = ++worktreeSeedSeqRef.current;
-    if (!selectedDeviceId) {
-      setWorktreeEnabled(false);
-      return;
-    }
+    if (!selectedDeviceId) return;
+    const preferenceRevisionAtStart =
+      remoteSessionStore.getNewMakerWorktreePreference(selectedDeviceId).revision;
     // 与上面 detect effect 同款:先建链再拉,包瞬态重试——app 后台恢复时 relay 常在
     // 重连窗口,裸调会抛 NOT_CONNECTED 并把工作端持久化的勾选偏好静默播种成未勾。
     void withTransientRemoteRetry(async () => {
@@ -1526,24 +1544,37 @@ export default function NewRemoteSessionScreen() {
     }, { maxAttempts: 2 })
       .then((defaults) => {
         if (seq !== worktreeSeedSeqRef.current) return;
-        setWorktreeEnabled(seedWorktreeEnabled(defaults));
+        // 请求发出后若已收到更晚的 push / 用户点击，旧 pull 不再有覆盖权。
+        if (
+          remoteSessionStore.getNewMakerWorktreePreference(selectedDeviceId).revision
+          !== preferenceRevisionAtStart
+        ) return;
+        remoteSessionStore.setNewMakerWorktreePreference(
+          selectedDeviceId,
+          seedWorktreeEnabled(defaults),
+        );
       })
       .catch(() => {
         // 重试后仍失败(老被控端无通道 / 长断连)→ 按未勾选兜底(防误操作口径)。
         if (seq !== worktreeSeedSeqRef.current) return;
-        setWorktreeEnabled(false);
+        if (
+          remoteSessionStore.getNewMakerWorktreePreference(selectedDeviceId).revision
+          !== preferenceRevisionAtStart
+        ) return;
+        remoteSessionStore.setNewMakerWorktreePreference(selectedDeviceId, false);
       });
   }, [selectedDeviceId, maker, openLink]);
 
   // 用户显式点击开关:本地翻转 + fire-and-forget 写穿工作端记忆(失败吞掉,仅本次生效)。
   // 资格不满足导致的禁用不会走到这里 —— 环境因素不抹掉用户偏好。
   const toggleWorktree = useCallback(() => {
+    if (!selectedDeviceId) return;
     const next = !worktreeEnabled;
-    setWorktreeEnabled(next);
+    remoteSessionStore.setNewMakerWorktreePreference(selectedDeviceId, next);
     // 播种在途回包不得覆盖用户显式选择(seq 作废旧回包)。
     worktreeSeedSeqRef.current += 1;
     void maker.applyNewMakerWorktreePref(next).catch(() => undefined);
-  }, [maker, worktreeEnabled]);
+  }, [maker, selectedDeviceId, worktreeEnabled]);
 
   useEffect(() => {
     const tracker = createMobileVoiceDictionaryLearningTracker({
@@ -2461,6 +2492,7 @@ export default function NewRemoteSessionScreen() {
       // / 首条消息 enqueue 全部由 newSessionCreation 模块级后台管线完成(本页
       // unmount 不终止),失败重试面在会话页(横幅:重试 / 返回编辑)。
       const sessionId = createNewSessionId();
+      let precreatedWorktree: { path: string; originalWorkingDir: string } | undefined;
       // —— worktree 两步流第一步(对齐桌面远程流程 NewMakerDraftRoute:远程没有改已建
       // 会话 workingDir 的通道,顺序反过来 —— 先同步等工作端建好 worktree 拿路径,再以
       // 该路径 + 同一预生成 sessionId 走乐观管线)。worktree:create 对同 sessionId 重跑
@@ -2482,6 +2514,10 @@ export default function NewRemoteSessionScreen() {
             setError(formatWorktreeCreateFailure(resp.error));
             return;
           }
+          precreatedWorktree = {
+            path: resp.meta.path,
+            originalWorkingDir: effectiveDraft.workingDir,
+          };
           effectiveDraft = { ...effectiveDraft, workingDir: resp.meta.path };
         } catch (err) {
           setError(t('session.new.worktreeCreateFailed', { message: formatRemoteError(err) }));
@@ -2506,6 +2542,7 @@ export default function NewRemoteSessionScreen() {
         attachments: sendAttachments,
         planModeArm: planModeCapability && planModeDraftOn,
         legacyPlanRestore,
+        precreatedWorktree,
         // stale-ready 防护(review P1):缓存判 ready/unknown 也可能已过期。管线内
         // 与建链并行 revalidate;verdict 已是 unauthenticated 时上面刚现拉确认过,跳过。
         confirmUnauthenticated: agentAuthVerdict === 'unauthenticated'

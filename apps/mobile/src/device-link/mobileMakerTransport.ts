@@ -439,6 +439,14 @@ export interface MobileMakerTransport {
       name: string;
       sourceBranch: string;
     }): Promise<MobileWorktreeCreateResult>;
+    /**
+     * 两步创建的第二步确定失败、用户放弃返回编辑时，补偿回收尚未被 session 认领的
+     * 精确 worktree。被控端会再次校验 sessionId/path/dirty/live ownership。
+     */
+    discardPrecreated(input: {
+      sessionId: string;
+      path: string;
+    }): Promise<{ discarded: true; branchDeleted?: boolean }>;
   };
   listAgentCommands(agentKind: MobileAgentKind): Promise<MobileAgentCommandListResult>;
   /** 被控端 desktop 自有 slash 命令清单(palette 展示;移动端只放行可执行子集)。 */
@@ -636,6 +644,7 @@ export function createMobileMakerTransport({
       detectCwd: (cwd) => call('worktree:detect-cwd', [{ cwd }]),
       suggestName: (baseRepo) => call('worktree:suggest-name', [{ baseRepo }]),
       create: (req) => call('worktree:create', [req]),
+      discardPrecreated: (input) => call('worktree:discard-precreated', [input]),
     },
     listAgentCommands: (agentKind) => call('maker:list-agent-commands', [agentKind]),
     listDesktopCommands: () => call('maker:list-desktop-commands', []),

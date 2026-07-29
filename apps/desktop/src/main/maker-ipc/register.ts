@@ -306,6 +306,7 @@ import { validateExtraDirs } from './extraDirsValidator.js';
 import { prepareHandoffWorktree, shouldRecycleHandoffWorktreeOnFailure } from './handoffWorktree.js';
 import { validateHandoffWorkingDir } from './handoffWorkingDir.js';
 import { registerProjectPluginPolicyHandlers } from './projectPluginPolicyHandlers.js';
+import { registerPrecreatedWorktreeDiscardHandler } from './precreatedWorktreeDiscardHandler.js';
 import {
   restoreMissingManagedWorktreeForSession,
   WorktreeManager as worktreeManager,
@@ -4364,6 +4365,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       allocateDialogueWorkspace: ensureDialogueWorkspaceDir,
       createSessionId: createId,
       now: Date.now,
+      withSessionLock: withSendToSessionLock,
       sendWorkerReadyMessage: (session) => {
         // Orca worker 首次创建时发一条初始化消息，强制 codex 写 rollout 文件，
         // 避免 app 重启后 thread/resume 因 rollout 缺失而失败。
@@ -4384,6 +4386,30 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       warnStderr: (agentKind, line) => log.warn(`[${agentKind}/stderr] ${line}`),
     },
   );
+
+  registerPrecreatedWorktreeDiscardHandler(makerSessionRegistry, {
+    assertCaller: (event) => {
+      // device-link 的真实调用身份由 invoke async context + allowlist 证明；本机直调仍
+      // 必须来自 Cindy 自有顶层 Renderer，不能把删除能力交给 WebView/Ghost。
+      if (!isDeviceLinkInvoke()) {
+        assertTrustedAppRendererEvent(
+          event as Parameters<typeof assertTrustedAppRendererEvent>[0],
+        );
+      }
+    },
+    withSessionLock: withSendToSessionLock,
+    isSessionClaimed: async (sessionId) => {
+      if (maker.getSession(sessionId)) return true;
+      const [row] = await getDbClient()
+        .drizzle.select({ id: sessions.id })
+        .from(sessions)
+        .where(eq(sessions.id, sessionId))
+        .limit(1);
+      return !!row;
+    },
+    discard: (sessionId, expectedPath, options) =>
+      worktreeManager.discardPrecreatedWorktree(sessionId, expectedPath, options),
+  });
 
   // turn 运行中登记的切换意图(下一条消息发送时刻由 send 事务 apply)。
   const agentSwitchPending = createPendingAgentSwitchRegistry();

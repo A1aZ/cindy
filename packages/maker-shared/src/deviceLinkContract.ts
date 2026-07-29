@@ -359,13 +359,15 @@ export const MOBILE_REMOTE_INVOKE_CHANNELS = [
   //  - detect-cwd:资格探测(git 已装 / 是 git 仓库 / 未在 worktree 内)+ repoRoot/currentBranch;
   //  - suggest-name:工作端按仓库上下文生成 worktree 名;
   //  - create:两步建会话第一步——同预生成 sessionId 先建 worktree 拿路径,再以该路径调
-  //    maker:create-session(与桌面控制端 NewMakerDraftRoute 的远程流程同构)。
-  // 三者均已在被控端 REMOTE_INVOKE_ALLOWLIST(worktree:create 的 60s 超时见
+  //    maker:create-session(与桌面控制端 NewMakerDraftRoute 的远程流程同构)；
+  //  - discard-precreated:第二步确定失败且用户放弃时，按 sessionId + 精确 path 补偿回收。
+  // 四者均已在被控端 REMOTE_INVOKE_ALLOWLIST(create / discard 的 60s 超时见
   // INVOKE_TIMEOUT_OVERRIDES_MS,移动端 invoke 必须带同一映射)。
   // 老被控端无这些 channel → CHANNEL_NOT_ALLOWED → 手机端按「worktree 不可用」降级。
   'worktree:detect-cwd',
   'worktree:suggest-name',
   'worktree:create',
+  'worktree:discard-precreated',
   'text-file:read-preview',
   // 完整文件浏览(网格/预览/缩略图/大文件导出)走桌面同款聚合通道,
   // op 分发与响应形状见 apps/desktop/src/main/file-browser/device-op.ts。

@@ -855,7 +855,7 @@ describe('new session composer surface', () => {
     expect(sendButtonDisabledStyle).toContain('borderColor: colors.border');
     // 模型浮窗(ModelPickerSheet):composer 上方 drop-up 面板不回潮。2026-07-28 起
     // 权限从浮窗二级视图提为工具排独立药丸(permissionIndicator)+ 独立 sheet,
-    // 浮窗在新建页隐藏 header 权限入口(hidePermissionTrigger,会话页不变);
+    // 新建页与会话页都隐藏浮窗 header 权限入口(hidePermissionTrigger),避免双入口;
     // 旧的 permissionButton/permissionPanel 形态仍不允许回潮。
     expect(newSource).toContain('<ModelPickerSheet');
     expect(newSource).toContain('testID="newSession.modelSheet"');
@@ -1020,9 +1020,25 @@ describe('new session worktree wiring (source locks)', () => {
   it('keeps the workstation-owned preference semantics (seed + explicit write-through)', () => {
     // 播种:openLink + 瞬态重试(app 后台恢复的重连窗口不得把工作端偏好静默播成未勾)。
     expect(newSource).toContain('return maker.getNewMakerDefaults(worktreeSeedAgentKindRef.current);');
-    expect(newSource).toContain('setWorktreeEnabled(seedWorktreeEnabled(defaults));');
+    expect(newSource).toContain(
+      'remoteSessionStore.getNewMakerWorktreePreference(selectedDeviceId).revision',
+    );
+    expect(newSource).toContain(
+      'remoteSessionStore.setNewMakerWorktreePreference(',
+    );
+    expect(newSource).toContain(
+      'useRemoteNewMakerWorktreePreference(selectedDeviceId)',
+    );
     // 显式点击才写穿工作端记忆;写失败吞掉降级。
     expect(newSource).toContain('void maker.applyNewMakerWorktreePref(next).catch(() => undefined);');
+  });
+
+  it('binds eligibility to device/cwd and carries pre-created cleanup metadata into the pipeline', () => {
+    expect(newSource).toContain('const worktreeEligibility = worktreeEligibilityForTarget(worktreeProbe, {');
+    expect(newSource).toContain('deviceId: selectedDeviceId ??');
+    expect(newSource).toContain('precreatedWorktree = {');
+    expect(newSource).toContain('originalWorkingDir: effectiveDraft.workingDir,');
+    expect(newSource).toContain('precreatedWorktree,');
   });
 
   it('applies the protocol timeout override map to mobile invokes (worktree:create needs 60s)', () => {

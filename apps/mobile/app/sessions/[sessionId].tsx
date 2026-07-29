@@ -142,6 +142,7 @@ import { ImageLightbox } from '@/session/ImageLightbox';
 import { pickWriteFields, retryPatchWhileLatest, writeGuardFields } from '@/session/swipeRowRegistry';
 import {
   dismissNewSessionCreation,
+  prepareNewSessionCreationForEdit,
   retryNewSessionCreation,
   shouldBlockSessionSync,
   stashNewSessionDraftForEdit,
@@ -700,6 +701,16 @@ export default function SessionScreen() {
   const [contextSheetView, setContextSheetView] = useState<'main' | 'screenshots' | 'goal'>('main');
   // 模型 + 权限浮窗(ContextSheet 同款 Modal,含二级「模型选项 / 权限」叠层)。
   const [modelSheetOpen, setModelSheetOpen] = useState(false);
+  // 权限模式独立浮窗(composer 左侧图标钮点开,与模型浮窗同属 composer 激活态)。
+  const [permissionSheetOpen, setPermissionSheetOpen] = useState(false);
+  const [permissionSheetSnap, setPermissionSheetSnap] = useState<ContextSheetSnap>('half');
+  const permissionSheetHeights = useMemo(
+    () => computeContextSheetSnapHeights({
+      safeAreaTopInset: insets.top,
+      screenHeight: windowDimensions.height,
+    }),
+    [insets.top, windowDimensions.height],
+  );
   // 已建会话的模型浮窗可先浏览另一 Agent；只改此浏览态不触碰会话，选模型才登记 intent。
   const [modelSheetAgentKind, setModelSheetAgentKind] = useState<MobileSessionAgentKind>('claude-code');
   const [attachments, setAttachments] = useState<RemoteSerializedAttachment[]>([]);
@@ -1702,6 +1713,7 @@ export default function SessionScreen() {
   });
   const composerCardActive = (canUseComposer && composerFocused)
     || modelSheetOpen
+    || permissionSheetOpen
     || voiceIsBusy
     || composerVoiceHoldActive;
   useComposerCardTransition(composerCardActive);
@@ -2156,6 +2168,7 @@ export default function SessionScreen() {
   useEffect(() => {
     if (canUseComposer) return;
     setModelSheetOpen(false);
+    setPermissionSheetOpen(false);
   }, [canUseComposer]);
 
   useEffect(() => {
@@ -2816,9 +2829,32 @@ export default function SessionScreen() {
           style: 'cancel',
           onPress: () => {
             if (!creationTask) return;
-            stashNewSessionDraftForEdit(creationTask);
-            dismissNewSessionCreation(sessionId, { removeSyntheticRow: true });
-            router.replace({ pathname: '/sessions/new', params: { deviceId, deviceName } });
+            void prepareNewSessionCreationForEdit(sessionId)
+              .then((prepared) => {
+                if (!prepared) return;
+                stashNewSessionDraftForEdit(prepared);
+                dismissNewSessionCreation(sessionId, { removeSyntheticRow: true });
+                router.replace({ pathname: '/sessions/new', params: { deviceId, deviceName } });
+              })
+              .catch((err: unknown) => {
+                // 补偿回收失败时保留 task + 合成行，绝不先跳回表单再创建第二个孤儿
+                // worktree。用户可取消等待连接恢复，或直接复用同 sessionId 重试创建。
+                const cleanupError = formatRemoteError(err);
+                setError(t('session.screen.createFailedNotice', { message: cleanupError }));
+                Alert.alert(t('session.screen.createFailedTitle'), cleanupError, [
+                  {
+                    text: t('session.common.cancel'),
+                    style: 'cancel',
+                  },
+                  {
+                    text: t('session.screen.retry'),
+                    onPress: () => {
+                      setError(null);
+                      retryNewSessionCreation(sessionId);
+                    },
+                  },
+                ]);
+              });
           },
         },
         {
@@ -5527,15 +5563,6 @@ export default function SessionScreen() {
     : currentSession?.permissionMode ?? 'ask';
   // 权限模式独立浮窗(2026-07-29 用户裁决,对齐 Codex 与新建页):composer 左侧图标钮
   // 点开;选择走既有 confirmFullAccessChange + maker:set-permission-mode 链路。
-  const [permissionSheetOpen, setPermissionSheetOpen] = useState(false);
-  const [permissionSheetSnap, setPermissionSheetSnap] = useState<ContextSheetSnap>('half');
-  const permissionSheetHeights = useMemo(
-    () => computeContextSheetSnapHeights({
-      safeAreaTopInset: insets.top,
-      screenHeight: windowDimensions.height,
-    }),
-    [insets.top, windowDimensions.height],
-  );
   const displayPermissionLabel =
     runtimeOptions?.permissionOptions.find((option) => option.id === displayPermissionMode)?.label
       ?? displayPermissionMode;

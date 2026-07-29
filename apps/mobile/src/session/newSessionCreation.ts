@@ -43,6 +43,7 @@ import {
   type NewSessionDraft,
 } from '@/session/newSession';
 import { remoteSessionStore } from '@/session/remoteSessionStore';
+import { worktreeEligibilityFromError } from '@/session/newSessionWorktree';
 import type {
   InputProjection,
   QueuedRemoteMessage,
@@ -73,6 +74,14 @@ export interface NewSessionCreationParams {
   /** 老协议 plan 档一次性语义:enqueue 后要恢复的底层权限档(null = 不需要)。 */
   legacyPlanRestore: string | null;
   /**
+   * 手机两步 worktree 流程第一步已创建的受管目录。create-failed 重试继续复用它；
+   * 用户放弃返回编辑时先按 sessionId + path 补偿回收，再把原项目目录回填表单。
+   */
+  precreatedWorktree?: {
+    path: string;
+    originalWorkingDir: string;
+  };
+  /**
    * createSession 前的鉴权 fresh revalidate(与建链并行跑)。返回 true = 确认
    * 未鉴权 → create-failed(文案用 authGateHint)并触发 onUnauthenticated
    * (页面闭包驱逐 provider 缓存)。
@@ -94,6 +103,10 @@ export interface NewSessionCreationTask {
   readonly draft: NewSessionDraft;
   readonly attachments: readonly RemoteSerializedAttachment[];
   readonly firstMessageClientId: string;
+  readonly precreatedWorktree?: {
+    path: string;
+    originalWorkingDir: string;
+  };
 }
 
 interface InternalTask extends NewSessionCreationTask {
@@ -220,6 +233,7 @@ export function startNewSessionCreation(params: NewSessionCreationParams): void 
     draft: params.draft,
     attachments: params.attachments,
     firstMessageClientId,
+    precreatedWorktree: params.precreatedWorktree,
     firstMessageSessionRefs,
     params,
   };
@@ -263,6 +277,38 @@ export function dismissNewSessionCreation(sessionId: string, opts: { removeSynth
     remoteSessionStore.setInputProjection(sessionId, null);
   }
   emit();
+}
+
+/**
+ * create-failed「返回编辑」的异步前置：先补偿回收未被 session 认领的预创建 worktree。
+ *
+ * 成功后调用方才可 stash + dismiss + 跳页，避免用户很快再次提交时与仍在执行的删除并发，
+ * 重复生成第二个 worktree。老被控端没有窄回收 channel 时保留兼容降级：放行返回编辑，
+ * 由其既有启动期 orphan reconcile 兜底；其它失败抛给会话页保持 task，不静默制造副本。
+ */
+export async function prepareNewSessionCreationForEdit(
+  sessionId: string,
+): Promise<NewSessionCreationTask | null> {
+  const task = tasks.get(sessionId);
+  if (!task || task.status !== 'create-failed') return null;
+  const precreated = task.precreatedWorktree;
+  if (precreated) {
+    try {
+      await withTransientRemoteRetry(async () => {
+        await task.params.transport.openLink(task.deviceId);
+        await task.params.transport.maker.worktree.discardPrecreated({
+          sessionId,
+          path: precreated.path,
+        });
+      }, { maxAttempts: 2 });
+    } catch (err) {
+      if (worktreeEligibilityFromError(err).status !== 'unsupported') throw err;
+      // 混合版本：新手机 + 老被控端。老端没有精确补偿口，只能沿用其启动期孤儿对账。
+    }
+  }
+  const current = tasks.get(sessionId);
+  if (!current || current !== task || current.status !== 'create-failed') return null;
+  return { ...current };
 }
 
 export function getNewSessionCreationTask(sessionId: string): NewSessionCreationTask | null {
@@ -316,7 +362,12 @@ export function stashNewSessionDraftForEdit(task: NewSessionCreationTask): void 
   stashedDraft = {
     deviceId: task.deviceId,
     deviceName: task.deviceName,
-    draft: task.draft,
+    draft: task.precreatedWorktree
+      ? {
+          ...task.draft,
+          workingDir: task.precreatedWorktree.originalWorkingDir,
+        }
+      : task.draft,
     attachments: task.attachments,
   };
 }

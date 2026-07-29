@@ -111,6 +111,7 @@ describe('mobile maker transport', () => {
       'worktree:detect-cwd',
       'worktree:suggest-name',
       'worktree:create',
+      'worktree:discard-precreated',
       'text-file:read-preview',
       'file-browser:remote-op',
     ]);
@@ -362,6 +363,10 @@ describe('mobile maker transport', () => {
       name: 'auto-abc123',
       sourceBranch: 'main',
     });
+    await maker.worktree.discardPrecreated({
+      sessionId: 'preset-session-1',
+      path: '/repo/.cindy-worktrees/auto-abc123',
+    });
 
     expect(calls.map((call) => [call.channel, call.args])).toEqual([
       ['maker:get-new-maker-defaults', ['claude-code']],
@@ -373,6 +378,10 @@ describe('mobile maker transport', () => {
         baseRepo: '/repo',
         name: 'auto-abc123',
         sourceBranch: 'main',
+      }]],
+      ['worktree:discard-precreated', [{
+        sessionId: 'preset-session-1',
+        path: '/repo/.cindy-worktrees/auto-abc123',
       }]],
     ]);
   });

@@ -17,9 +17,12 @@ vi.mock('expo-crypto', () => ({
 }));
 import {
   dismissNewSessionCreation,
+  drainStashedNewSessionDraft,
   getNewSessionCreationTask,
+  prepareNewSessionCreationForEdit,
   retryNewSessionCreation,
   shouldBlockSessionSync,
+  stashNewSessionDraftForEdit,
   startNewSessionCreation,
   type NewSessionCreationParams,
 } from '@/session/newSessionCreation';
@@ -44,6 +47,9 @@ interface MakerMock {
   listMessages: ReturnType<typeof vi.fn>;
   setPlanMode: ReturnType<typeof vi.fn>;
   setPermissionMode: ReturnType<typeof vi.fn>;
+  worktree: {
+    discardPrecreated: ReturnType<typeof vi.fn>;
+  };
   input: {
     enqueue: ReturnType<typeof vi.fn>;
     getProjection: ReturnType<typeof vi.fn>;
@@ -59,6 +65,9 @@ function makeMaker(overrides: Partial<MakerMock> = {}): MakerMock {
     listMessages: vi.fn(async () => []),
     setPlanMode: vi.fn(async () => undefined),
     setPermissionMode: vi.fn(async () => undefined),
+    worktree: {
+      discardPrecreated: vi.fn(async () => ({ discarded: true })),
+    },
     ...overrides,
     input: {
       enqueue: vi.fn(async () => ({ sessionId: 's', pendingQueue: [] })),
@@ -102,8 +111,25 @@ async function flushPipeline(): Promise<void> {
 describe('newSessionCreation pipeline', () => {
   beforeEach(() => {
     remoteSessionStore.clear();
+    drainStashedNewSessionDraft();
     // 清残留 task(上个用例失败态)。
-    for (const id of ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's10', 's11', 's12']) dismissNewSessionCreation(id);
+    for (const id of [
+      's1',
+      's2',
+      's3',
+      's4',
+      's5',
+      's6',
+      's7',
+      's8',
+      's9',
+      's10',
+      's11',
+      's12',
+      's13',
+      's14',
+      's15',
+    ]) dismissNewSessionCreation(id);
   });
 
   it('start 同步段即入 store:合成行带 pendingLocalCreation,首条消息以排队气泡上屏', () => {
@@ -354,5 +380,104 @@ describe('newSessionCreation pipeline', () => {
     // store 对 status:'deleted' 的 patch 是直接把行移出 shard(首页不再可见)。
     expect(remoteSessionStore.getSessions().find((s) => s.id === 's1')).toBeUndefined();
     expect(remoteSessionStore.getInputProjection('s1').pendingQueue).toHaveLength(0);
+  });
+
+  it('create-failed 返回编辑前回收预创建 worktree，并把原项目目录放回草稿', async () => {
+    const maker = makeMaker({
+      createSession: vi.fn(async () => {
+        throw new Error('INVALID_PARAMS: cannot create session');
+      }),
+    });
+    const params = makeParams('s13', maker, {
+      draft: {
+        ...DRAFT,
+        workingDir: '/repo/.cindy-worktrees/auto-one',
+      },
+      precreatedWorktree: {
+        path: '/repo/.cindy-worktrees/auto-one',
+        originalWorkingDir: '/repo',
+      },
+    });
+    startNewSessionCreation(params);
+    await flushPipeline();
+
+    const failed = getNewSessionCreationTask('s13');
+    expect(failed?.status).toBe('create-failed');
+
+    const prepared = await prepareNewSessionCreationForEdit('s13');
+    expect(prepared).not.toBeNull();
+    expect(params.transport.openLink).toHaveBeenCalledWith('dev-1');
+    expect(maker.worktree.discardPrecreated).toHaveBeenCalledWith({
+      sessionId: 's13',
+      path: '/repo/.cindy-worktrees/auto-one',
+    });
+
+    stashNewSessionDraftForEdit(prepared!);
+    expect(drainStashedNewSessionDraft()?.draft.workingDir).toBe('/repo');
+  });
+
+  it('create-failed cleanup preserves the task when the new channel fails', async () => {
+    const maker = makeMaker({
+      createSession: vi.fn(async () => {
+        throw new Error('INVALID_PARAMS: cannot create session');
+      }),
+      worktree: {
+        discardPrecreated: vi.fn(async () => {
+          throw Object.assign(new Error('registered path mismatch'), {
+            code: 'PERMISSION_DENIED',
+          });
+        }),
+      },
+    });
+    startNewSessionCreation(makeParams('s14', maker, {
+      draft: {
+        ...DRAFT,
+        workingDir: '/repo/.cindy-worktrees/auto-two',
+      },
+      precreatedWorktree: {
+        path: '/repo/.cindy-worktrees/auto-two',
+        originalWorkingDir: '/repo',
+      },
+    }));
+    await flushPipeline();
+
+    await expect(
+      prepareNewSessionCreationForEdit('s14'),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    expect(getNewSessionCreationTask('s14')?.status).toBe('create-failed');
+  });
+
+  it('old desktop without discard-precreated falls back to startup orphan reconciliation', async () => {
+    const maker = makeMaker({
+      createSession: vi.fn(async () => {
+        throw new Error('INVALID_PARAMS: cannot create session');
+      }),
+      worktree: {
+        discardPrecreated: vi.fn(async () => {
+          throw Object.assign(new Error('channel not allowed remotely'), {
+            code: 'CHANNEL_NOT_ALLOWED',
+          });
+        }),
+      },
+    });
+    startNewSessionCreation(makeParams('s15', maker, {
+      draft: {
+        ...DRAFT,
+        workingDir: '/repo/.cindy-worktrees/auto-three',
+      },
+      precreatedWorktree: {
+        path: '/repo/.cindy-worktrees/auto-three',
+        originalWorkingDir: '/repo',
+      },
+    }));
+    await flushPipeline();
+
+    await expect(
+      prepareNewSessionCreationForEdit('s15'),
+    ).resolves.toMatchObject({
+      sessionId: 's15',
+      status: 'create-failed',
+    });
+    expect(maker.worktree.discardPrecreated).toHaveBeenCalledTimes(1);
   });
 });

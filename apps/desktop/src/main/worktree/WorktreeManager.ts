@@ -5,8 +5,9 @@
  * detectCwd / suggestName / listBranches / getForSession / listAll / reveal,
  * 都收口到这里。
  *
- * removeWorktreeForSession 故意不暴露 IPC, 只在 cc-agent:close-session handler
- * 内部调用(fire-and-forget)。
+ * removeWorktreeForSession 不暴露通用删除 IPC；唯一远程例外是
+ * discardPrecreatedWorktree，它只回收「会话尚未落库」且路径与 create 回包精确匹配的
+ * 预创建 worktree，调用方还必须注入实时 ownership guard。
  */
 
 import path from 'node:path';
@@ -708,6 +709,11 @@ const removeWorktreeQueues = new Map<string, Promise<void>>();
 export interface RemoveWorktreeOptions {
   /** destructive remove 前确认 owning session 仍处于允许回收的状态。 */
   canRemove?: () => Promise<boolean>;
+  /**
+   * 预创建补偿回收不能把用户可能已经手动写入的内容变成无会话可恢复的快照；
+   * 命中 dirty 时保留整个 worktree，而不是走常规删除/归档的 auto-stash 流程。
+   */
+  preserveDirty?: boolean;
 }
 
 /**
@@ -818,13 +824,22 @@ async function removeWorktreeForSessionInner(
 
     let removedByGit = false;
     try {
-      await gitExec(['worktree', 'remove', '--force', meta.path], meta.baseRepo);
+      // 预创建补偿回收必须让 git 在删除瞬间再次确认 worktree 仍然干净：
+      // preserveDirty 的前置探测与这里之间可能有人刚写入文件，非强制 remove 会拒绝，
+      // 从而保留目录。普通会话删除已经有 auto-stash 保护，仍沿用 --force。
+      const removeArgs = options.preserveDirty
+        ? ['worktree', 'remove', meta.path]
+        : ['worktree', 'remove', '--force', meta.path];
+      await gitExec(removeArgs, meta.baseRepo);
       removedByGit = true;
     } catch (err) {
       log.warn(
         `[worktree] git worktree remove failed for ${meta.path}:`,
         err instanceof Error ? err.message : String(err),
       );
+      // preserveDirty 是补偿口的“绝不丢用户新写内容”承诺。git 拒绝非强制删除时
+      // 不能再用 fs.rm 绕过它，否则会重新打开 dirty check 后写入的竞态窗口。
+      if (options.preserveDirty) return;
       // fallback: fs.rm —— 必须三条校验通过
       if (isManagedWorktreePath(meta.path, meta.baseRepo, [...store.getAllPaths(), meta.path])) {
         try {
@@ -867,6 +882,12 @@ async function removeWorktreeForSessionInner(
   };
 
   if (await isWorktreeDirty(meta.path)) {
+    if (options.preserveDirty) {
+      log.info(
+        `[worktree] preserved worktree at ${meta.path}: uncommitted changes block pre-created cleanup`,
+      );
+      return;
+    }
     await withWorktreeRestoreMutation(sessionId, async () => {
       if (!(await autoStashDirtyWorktree(meta.path, sessionId))) {
         log.warn(
@@ -879,6 +900,83 @@ async function removeWorktreeForSessionInner(
     return;
   }
   await finishRemoval(false);
+}
+
+export type DiscardPrecreatedWorktreeResult =
+  | { status: 'absent' }
+  | { status: 'path-mismatch' }
+  | { status: 'preserved' }
+  | { status: 'discarded'; branchDeleted: boolean };
+
+/**
+ * 回收「先 worktree:create、后 maker:create-session」中第二步失败后被放弃的预创建目录。
+ *
+ * 这是通用删除流程之外的窄补偿口：
+ * - expectedPath 必须与 store 中该 sessionId 的受管路径精确匹配，控制端不能指定任意目录；
+ * - ephemeral / dirty / keep sentinel / include-file 变化 / live-ref 冲突一律保留；
+ * - canRemove 由宿主反复核对「session 未落库且无 live handle」，挡住晚到的 create；
+ * - 正常创建后尚无独有 commit 的 xdt/* 分支才随目录删除；存在独有 commit 时保留分支。
+ */
+export async function discardPrecreatedWorktree(
+  sessionId: string,
+  expectedPath: string,
+  options: Pick<RemoveWorktreeOptions, 'canRemove'> = {},
+): Promise<DiscardPrecreatedWorktreeResult> {
+  const meta = store.get(sessionId);
+  if (!meta) return { status: 'absent' };
+  if (path.resolve(meta.path) !== path.resolve(expectedPath)) {
+    return { status: 'path-mismatch' };
+  }
+  if (meta.ephemeral) return { status: 'preserved' };
+
+  await removeWorktreeForSession(sessionId, {
+    ...options,
+    preserveDirty: true,
+  });
+  if (store.get(sessionId)) return { status: 'preserved' };
+
+  // 目录成功移除后再读分支，封住用户在 dirty check 与 worktree remove 之间刚完成
+  // commit 的窗口。store 元数据损坏时也绝不删除非本记录自动推导出的分支。
+  const isGeneratedBranch = meta.branch === getBranchName(meta.name);
+  let branchTipToDelete: string | null = null;
+  if (isGeneratedBranch) {
+    try {
+      const branchRef = `refs/heads/${meta.branch}`;
+      const { stdout: branchTip } = await gitExec(
+        ['rev-parse', '--verify', `${branchRef}^{commit}`],
+        meta.baseRepo,
+      );
+      const { stdout } = await gitExec(
+        ['rev-list', '--count', `${meta.sourceBranch}..${meta.branch}`],
+        meta.baseRepo,
+      );
+      if (stdout.trim() === '0' && branchTip.trim()) {
+        branchTipToDelete = branchTip.trim();
+      }
+    } catch {
+      branchTipToDelete = null;
+    }
+  }
+
+  let branchDeleted = false;
+  if (branchTipToDelete) {
+    try {
+      // expected-old-value 让 ref 删除原子化：rev-list 后若别的进程刚给分支写入 commit，
+      // update-ref 会拒绝，而不是用 `branch -D` 抹掉新 tip。
+      await gitExec(
+        ['update-ref', '-d', `refs/heads/${meta.branch}`, branchTipToDelete],
+        meta.baseRepo,
+      );
+      branchDeleted = true;
+    } catch (err) {
+      // 目录和 store 已回收；分支删除失败按保守方向留下可恢复引用，不反向报整笔失败。
+      log.warn(
+        `[worktree] discarded pre-created directory but preserved branch ${meta.branch}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+  return { status: 'discarded', branchDeleted };
 }
 
 async function canRemoveWorktree(

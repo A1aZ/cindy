@@ -35,12 +35,42 @@ export type NewSessionWorktreeEligibility =
   | { status: 'unsupported' }
   | { status: 'detect-failed' };
 
+export interface NewSessionWorktreeProbeTarget {
+  deviceId: string;
+  workingDir: string;
+}
+
+/** 探测结果与发起时的设备/目录绑定，防切换目标后的首帧误用上一仓库结果。 */
+export interface NewSessionWorktreeProbeSnapshot {
+  target: NewSessionWorktreeProbeTarget;
+  eligibility: NewSessionWorktreeEligibility;
+}
+
+/**
+ * 只向当前选择暴露同 target 的结果。React effect 要到 commit 后才会把 state 重置为
+ * probing；render 阶段先做这道同步 fence，用户切项目/设备后立即创建也不会拿旧 baseRepo。
+ */
+export function worktreeEligibilityForTarget(
+  snapshot: NewSessionWorktreeProbeSnapshot | null,
+  target: NewSessionWorktreeProbeTarget,
+): NewSessionWorktreeEligibility {
+  if (
+    !snapshot
+    || snapshot.target.deviceId !== target.deviceId
+    || snapshot.target.workingDir.trim() !== target.workingDir.trim()
+  ) {
+    return { status: 'probing' };
+  }
+  return snapshot.eligibility;
+}
+
 /**
  * 把工作端 detect-cwd 回包归并为资格状态。判定顺序对齐桌面 WorktreeChipsRow:
  * gitInstalled → isGitRepo → isInsideWorktree 逐项短路。
  * baseRepo 取 repoRoot(工作端 git rev-parse --show-toplevel),缺失回落 workingDir;
  * sourceBranch 取当前分支(手机没有分支选择 UI,等价于桌面分支 chip 回填 current),
- * 缺失回落 'main'(对齐桌面 sourceBranch 兜底)。
+ * detached HEAD 时 currentBranch 缺失，必须回落 'HEAD' 才能从当前 commit 派生；
+ * 不能猜 main（仓库未必有 main，也不能静默偏离当前 checkout）。
  */
 export function resolveWorktreeEligibility(
   result: MobileWorktreeDetectCwdResult,
@@ -52,7 +82,7 @@ export function resolveWorktreeEligibility(
   return {
     status: 'eligible',
     baseRepo: result.repoRoot?.trim() || workingDir,
-    sourceBranch: result.currentBranch?.trim() || 'main',
+    sourceBranch: result.currentBranch?.trim() || 'HEAD',
   };
 }
 

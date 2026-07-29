@@ -21,7 +21,7 @@
  * worktree 名称 **自动生成**（不暴露 UI），由 useSuggestName 拉取后透传给上层。
  */
 
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { GitBranch, ChevronDown, Folder, MessageCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -116,7 +116,9 @@ export function WorktreeChipsRow({
   const detect = useDetectCwd(worktreeDisabled ? null : (cwd ?? null), deviceLinkDeviceId);
   const baseRepo = detect.data?.repoRoot ?? null;
 
-  useEffect(() => {
+  // repoRoot 参与发送侧 worktree 创建，必须在 paint / 下一次用户输入前同步收敛；
+  // useDetectCwd 同时按 {cwd, deviceId} 做 render 阶段 fence，切目标时这里先写 null。
+  useLayoutEffect(() => {
     onBaseRepoChange?.(baseRepo);
   }, [baseRepo, onBaseRepoChange]);
 
@@ -179,12 +181,12 @@ export function WorktreeChipsRow({
 
   // ── 分支 chip 状态 ──
   const currentBranch = detect.data?.currentBranch ?? null;
-  // worktree ON 显源分支,列表加载失败/未返回时回退 'main'(与发送管线的源分支
-  // 回退值一致,也是旧 Advanced popover 的默认显示)—— ON 状态下 chip 是唯一的
+  // worktree ON 显源分支,列表加载失败/未返回时回退 'HEAD'(与发送管线的源分支
+  // 回退值一致,表示当前 checkout 而不是猜测 main)—— ON 状态下 chip 是唯一的
   // 分支入口,绝不能因加载失败而消失。OFF 显仓库当前 HEAD 分支,空(detached /
   // 未探测)则不出 chip。
   const branchLabel = effectiveWorktreeEnabled
-    ? sourceBranch || branches.current || 'main'
+    ? sourceBranch || branches.current || 'HEAD'
     : (currentBranch ?? '');
   const showBranchChip = !advancedHidden && !!detect.data?.isGitRepo && branchLabel !== '';
   // 分支菜单永远可点(worktree 开不了的仓库除外——已在 worktree 内等场景选分支

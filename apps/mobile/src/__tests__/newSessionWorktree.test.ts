@@ -1,7 +1,8 @@
 /**
  * 新建会话 worktree 纯决策逻辑测试(newSessionWorktree):
  *  - 资格判定:detect-cwd 回包按 gitInstalled → isGitRepo → isInsideWorktree 短路,
- *    eligible 携带 baseRepo(repoRoot 缺失回落 workingDir)与 sourceBranch(缺失回落 main);
+ *    eligible 携带 baseRepo(repoRoot 缺失回落 workingDir)与 sourceBranch(detached 回落 HEAD);
+ *  - 探测结果绑定 device/cwd,切目标后的同步 render 不暴露旧 eligible;
  *  - 探测抛错归并:CHANNEL_NOT_ALLOWED(老被控端)→ unsupported 整行隐藏,其余 detect-failed;
  *  - 播种归并:worktreeEnabled 严格 === true 才算勾选;
  *  - 两步流第一步入参:suggest-name 结果归一(空/非法走 auto- 兜底,过工作端名字白名单);
@@ -17,6 +18,7 @@ import {
   resolveWorktreeEligibility,
   seedWorktreeEnabled,
   shouldShowWorktreeToggle,
+  worktreeEligibilityForTarget,
   worktreeEligibilityCaptionKey,
   worktreeEligibilityFromError,
   type NewSessionWorktreeEligibility,
@@ -60,15 +62,44 @@ describe('resolveWorktreeEligibility', () => {
     });
   });
 
-  it('repoRoot 缺失回落 workingDir;currentBranch 缺失回落 main(对齐桌面兜底)', () => {
+  it('repoRoot 缺失回落 workingDir;detached HEAD 回落 HEAD(不猜 main)', () => {
     expect(resolveWorktreeEligibility(
       { isGitRepo: true, isInsideWorktree: false, gitInstalled: true },
       '/repo/app',
-    )).toEqual({ status: 'eligible', baseRepo: '/repo/app', sourceBranch: 'main' });
+    )).toEqual({ status: 'eligible', baseRepo: '/repo/app', sourceBranch: 'HEAD' });
     expect(resolveWorktreeEligibility(
       { ...DETECT_OK, repoRoot: '  ', currentBranch: '' },
       '/repo/app',
-    )).toEqual({ status: 'eligible', baseRepo: '/repo/app', sourceBranch: 'main' });
+    )).toEqual({ status: 'eligible', baseRepo: '/repo/app', sourceBranch: 'HEAD' });
+  });
+});
+
+describe('worktreeEligibilityForTarget', () => {
+  const snapshot = {
+    target: { deviceId: 'dev-a', workingDir: '/repo/a' },
+    eligibility: {
+      status: 'eligible' as const,
+      baseRepo: '/repo/a',
+      sourceBranch: 'feature/a',
+    },
+  };
+
+  it('只向同设备 + 同 cwd 暴露探测结果', () => {
+    expect(worktreeEligibilityForTarget(snapshot, {
+      deviceId: 'dev-a',
+      workingDir: ' /repo/a ',
+    })).toEqual(snapshot.eligibility);
+  });
+
+  it('切项目或设备后的首帧同步回落 probing,不等待 effect 重置', () => {
+    expect(worktreeEligibilityForTarget(snapshot, {
+      deviceId: 'dev-a',
+      workingDir: '/repo/b',
+    })).toEqual({ status: 'probing' });
+    expect(worktreeEligibilityForTarget(snapshot, {
+      deviceId: 'dev-b',
+      workingDir: '/repo/a',
+    })).toEqual({ status: 'probing' });
   });
 });
 

@@ -742,6 +742,20 @@ async function recoverPendingNativeShortcutRegistration(): Promise<void> {
   pendingShortcutRecoveryRunning = true;
   try {
     const snapshot = await refreshVoiceInputInputMonitoringPermissionSnapshot();
+    // 连权限状态都查不出来（unknown）= helper 本身有问题：preflight 走的就是同一个 helper，
+    // 二进制缺失、spawn 失败、swiftc 编译失败都落在这里。这是真故障，不是「还没授权」——
+    // 与 classifyMacNativeListenerFailure 的 denied / unknown 分界保持一致。
+    //
+    // 少了这条：用户在设置页之外授权完，快捷键起不来且**一句提示都没有**（下面那条通知只在
+    // preflight 成功后才够得着），而「待授权」说明又随权限转已授权一起消失了。
+    if (!snapshot.ok && snapshot.status !== 'denied') {
+      log.warn('pending native shortcut recovery failed: permission status unavailable', {
+        status: snapshot.status,
+      });
+      notifyPendingShortcutRecoveryFailed();
+      return;
+    }
+    // denied = 用户还没在系统设置里打开，正常等待，不提示。
     if (!snapshot.ok || snapshot.status !== 'granted') return;
     // 快捷键在队列里现读、现校验：preflight 那次 await 期间用户完全可能改成别的（比如
     // F16）。用 await 之前抓的那份，就会在用户的新变更之后把旧的修饰键注册回去 ——

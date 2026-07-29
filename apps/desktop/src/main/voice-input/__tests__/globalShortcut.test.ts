@@ -628,6 +628,44 @@ describe('voice input global shortcut registration', () => {
         expect(consume?.(mocks.settingsEvent)).toEqual({ failed: true });
       });
 
+      // preflight 走的是同一个 helper: 二进制缺失 / spawn 失败 / swiftc 失败都会让权限状态
+      // 压根查不出来(unknown)。那是真故障而不是「还没授权」—— 而下面那条通知原先只在 preflight
+      // 成功后才够得着, 于是这种情况下用户什么提示都收不到、「待授权」说明又已随授权消失。
+      it('reports a recovery failure when the permission status cannot be read at all', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        mocks.modifierIsRunning.mockReturnValue(false);
+        mocks.inputMonitoringSnapshot.mockResolvedValue({
+          ok: false,
+          status: 'unknown',
+          error: 'helper unavailable',
+        });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await focusWindow();
+
+        // 没去起 helper(权限都没查出来),但用户拿到了可行动的提示。
+        expect(mocks.modifierSetShortcut).not.toHaveBeenCalled();
+        const consume = mocks.handlers.get('voice-input:consume-shortcut-recovery-failure');
+        expect(consume?.(mocks.settingsEvent)).toEqual({ failed: true });
+      });
+
+      // denied 是正常等待状态(用户还没在系统设置里打开),不该弹故障提示。
+      it('does not report a recovery failure while the permission is merely denied', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        mocks.modifierIsRunning.mockReturnValue(false);
+        mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await focusWindow();
+
+        const consume = mocks.handlers.get('voice-input:consume-shortcut-recovery-failure');
+        expect(consume?.(mocks.settingsEvent)).toEqual({ failed: false });
+      });
+
       // 限流窗口内的那次聚焦可能正是「用户刚授权完切回来」的那一次,而应用此后一直在前台、
       // 不会再有第二个 focus 事件。直接丢掉就等于快捷键一直不生效。
       it('schedules a trailing retry when a focus lands inside the throttle window', async () => {

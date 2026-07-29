@@ -32,7 +32,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { isTerminalAgentErrorEvent } from '@cindy/maker-core';
-import type { Maker, AgentEvent, AgentKind, Effort, PermissionMode } from '@cindy/maker-core';
+import type { Maker, AgentEvent, AgentKind, Effort, PermissionMode, Session } from '@cindy/maker-core';
 import { clampEffortToSupported } from '@cindy/model-providers';
 import type {
   Schedule,
@@ -1399,6 +1399,37 @@ export class MakerScheduleRunner implements ScheduleRunner {
     });
     void postAcceptFailed.catch(() => undefined);
 
+    /**
+     * onAccepted 里"本轮绝不能真的跑起来"的统一阻断出口。
+     *
+     * 阻断手段是 `live.abort()`,但它拦的**不是"已经在跑的 turn"** —— 此刻 vendor 还没
+     * 派发。这个回调运行在 `Session.send` 的 onAccepted 链里(register.ts 把
+     * persistUserMessage 装在那儿,coordinator 的 onPersisted 又挂在它下面),而
+     * `Session.abort()` 的第一件事就是同步 `cancelSendReservation`:回调返回后 send 立刻
+     * 复核 `reservation.cancelled`,以 cancelled-before-dispatch 收场,coordinator 走
+     * handleSendNotDispatched 干净回滚(activeTurn 置空)。所以它取消的是**这次派发本身**。
+     *
+     * 拿不到 live 时没有这个手段:正常返回就等于放行,coordinator 紧接着把 turn 交给
+     * vendor,产生一次没人跟踪、还可能与顺延重试重叠的执行(review #944 第八轮 P1)。
+     * 此时只能抛错让 coordinator 回滚 —— 但抛错走的是它 catch 里的 persisted 分支,
+     * 不置空 activeTurn(与 handleSendNotDispatched 不同),所以只在别无选择时用。
+     */
+    const blockAcceptedDispatch = (live: Session | undefined, why: string): void => {
+      if (live) {
+        void live.abort().catch((err) => {
+          this.deps.logger.warn?.(`[runner] ${why} turn abort failed`, err);
+        });
+        return;
+      }
+      this.deps.logger.warn?.(
+        '[runner] no live session to cancel the accepted dispatch; throwing so the coordinator rolls it back',
+        { scheduleId: schedule.id, runId: ctx.runId, sessionId, why },
+      );
+      throw new Error(
+        `[SEND_CANCELLED_BEFORE_DISPATCH] queued heartbeat dispatch cancelled before vendor dispatch (${why})`,
+      );
+    };
+
     const enqueueResult = await sq.enqueuePrompt({
       sessionId,
       text: promptToSend,
@@ -1417,12 +1448,8 @@ export class MakerScheduleRunner implements ScheduleRunner {
         // run 已按 aborted 收口(onAbort 已 failDispatch),刚起步的 turn 立即中断,
         // 不让已暂停/删除的任务在会话里继续执行(PR #972 review P2)。
         if (ctx.signal.aborted) {
-          if (live) {
-            void live.abort().catch((err) => {
-              this.deps.logger.warn?.('[runner] late-dispatch abort failed', err);
-            });
-          }
           endQueueWait(false);
+          blockAcceptedDispatch(live, 'late-dispatch after pause/delete');
           return;
         }
         // 排队上限已到、本次派发被撤销(见 dispatchCancelled 声明处):撤项对已转
@@ -1434,12 +1461,8 @@ export class MakerScheduleRunner implements ScheduleRunner {
             runId: ctx.runId,
             sessionId,
           });
-          if (live) {
-            void live.abort().catch((err) => {
-              this.deps.logger.warn?.('[runner] cancelled-dispatch abort failed', err);
-            });
-          }
           endQueueWait(false);
+          blockAcceptedDispatch(live, 'queued dispatch cancelled');
           return;
         }
         // 纯等待结束、要真正开始执行了 —— 先向引擎要回一个执行槽。让出的槽早已被
@@ -1449,14 +1472,10 @@ export class MakerScheduleRunner implements ScheduleRunner {
           const slotErr = new QueuedSlotUnavailableError(
             'queued heartbeat could not reclaim an execution slot at dispatch time',
           );
-          if (live) {
-            void live.abort().catch((err) => {
-              this.deps.logger.warn?.('[runner] slot-unavailable turn abort failed', err);
-            });
-          }
           endQueueWait(false);
           failAfterAccept(slotErr);
           failDispatch(slotErr);
+          blockAcceptedDispatch(live, 'slot unavailable');
           return;
         }
         // 任务编辑器里选的 model/effort/来源在排队派发时刻热同步到会话(此回调
@@ -1470,13 +1489,11 @@ export class MakerScheduleRunner implements ScheduleRunner {
             if (err instanceof QueuedRouteDisabledError) {
               // 停用轴准入拒绝(PR #744 review 第六轮):这次排队心跳是新的付费调用,
               // 目标路由已被停用时不能"保持 live 路由继续派发"。此刻仍在 vendor
-              // dispatch 之前 —— 中断刚 accept 的 turn(同 late-dispatch abort 路径),
-              // run 以明确错误失败收口(不含 abort 字样 ⇒ 引擎按 failed 记录)。
-              void live.abort().catch((abortErr) => {
-                this.deps.logger.warn?.('[runner] route-disabled turn abort failed', abortErr);
-              });
+              // dispatch 之前 —— 取消这次派发(同 late-dispatch 路径),run 以明确错误
+              // 失败收口(不含 abort 字样 ⇒ 引擎按 failed 记录)。
               failAfterAccept(err);
               failDispatch(err);
+              blockAcceptedDispatch(live, 'route disabled');
               return;
             }
             this.deps.logger.warn?.('[runner] queued heartbeat routing sync failed (non-fatal)', err);

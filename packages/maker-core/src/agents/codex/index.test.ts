@@ -10372,6 +10372,45 @@ describe('CodexAgent upstream-response-idle watchdog', () => {
     }
   });
 
+  it('interrupt 始终不 ack → 连共享 app-server host 一起退役', async () => {
+    // handle.close() 只放掉本 thread 的订阅并结束自己的事件队列,共享的 AppServerHost 仍
+    // 留在缓存里 —— 下一次 lazy create 会连回同一个已确诊无响应的 app-server,立刻再卡
+    // 一遍,等于没恢复(review #944 第八轮 P1)。
+    vi.useFakeTimers();
+    try {
+      const agent = new CodexAgent(createDeps());
+      let turnSeq = 0;
+      const host = installFakeHost(agent, (method) => {
+        if (method === Method.TurnStart) return { turn: { id: `turn-${++turnSeq}` } };
+        if (method === Method.TurnInterrupt) return new Promise<never>(() => {});
+        return undefined;
+      });
+      const retireHostKey = vi
+        .spyOn(
+          agent as unknown as { retireHostKey: (...args: unknown[]) => Promise<void> },
+          'retireHostKey',
+        )
+        .mockResolvedValue(undefined);
+      const handle = await startIdleSession(agent, 'session-idle-retire-host');
+      void (async () => {
+        for await (const ev of handle.events()) void ev;
+      })();
+      await handle.send({ type: 'user', content: 'go' });
+      const handlers = host.getThreadHandlers();
+      if (!handlers) throw new Error('expected thread handlers');
+      handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-1' } } as never);
+
+      await vi.advanceTimersByTimeAsync(IDLE_MS + 10_000 * 2 + 10);
+      // 两次 ack 都超时 → 必须把 host 缓存条目退役,下一个会话才会重建一个新的 app-server。
+      // failIfActive:false —— 别的会话可能还挂在这个 host 上,退役要广播强制退役的终态
+      // transport error 让它们各自收口,而不是抛错放着不管。
+      expect(retireHostKey).toHaveBeenCalledTimes(1);
+      expect(retireHostKey.mock.calls[0]?.[2]).toMatchObject({ failIfActive: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('interrupt 被 ack 时不作废 host(daemon 还活着,会话继续可用)', async () => {
     vi.useFakeTimers();
     try {

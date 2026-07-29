@@ -934,6 +934,54 @@ describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', ()
     }
   });
 
+  it('排队超时后迟到的 accept:有 live 会话时取消这次派发(不抛错)', async () => {
+    // 阻断手段是 live.abort() 同步取消 Session.send 的 send reservation —— 这个回调正
+    // 运行在 Session.send 的 onAccepted 链里,返回后 send 会以 cancelled-before-dispatch
+    // 收场,coordinator 干净回滚。所以有 live 时不需要抛错(抛错那条路不置空 activeTurn)。
+    vi.useFakeTimers();
+    try {
+      const harness = createSessionHarness(async () => ({ accepted: true }));
+      const queue = createQueueHarness({ busy: true, removeTriggersDiscard: false });
+      const { runner } = createRunnerHarness(harness.session, queue.deps);
+
+      const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
+      const settled = expect(firePromise).resolves.toMatchObject({ deferred: true });
+      await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+      await vi.advanceTimersByTimeAsync(QUEUED_DISPATCH_MAX_WAIT_MS + QUEUED_DISPATCH_TRACK_POLL_MS);
+      await settled;
+
+      // 迟到的 accept 不抛(coordinator 靠 reservation 取消回滚),但必须取消这次派发
+      await expect(queue.accept()).resolves.toBeUndefined();
+      expect(harness.session.abort).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('排队超时后迟到的 accept:拿不到 live 会话时抛错让 coordinator 回滚', async () => {
+    // 没有 live 就没有"取消 send reservation"这个手段,正常返回等于放行 —— coordinator
+    // 紧接着把 turn 交给 vendor,产生一次没人跟踪、还可能与顺延重试重叠的执行
+    // (review #944 第八轮 P1)。此时只能抛错。
+    vi.useFakeTimers();
+    try {
+      const harness = createSessionHarness(async () => ({ accepted: true }));
+      const queue = createQueueHarness({ busy: true, removeTriggersDiscard: false });
+      const { runner, maker } = createRunnerHarness(harness.session, queue.deps);
+
+      const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
+      const settled = expect(firePromise).resolves.toMatchObject({ deferred: true });
+      await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+      await vi.advanceTimersByTimeAsync(QUEUED_DISPATCH_MAX_WAIT_MS + QUEUED_DISPATCH_TRACK_POLL_MS);
+      await settled;
+
+      // 会话此刻已不在内存里(ephemeral 关闭 / 进程重建)
+      (maker.getSession as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
+      await expect(queue.accept()).rejects.toThrow(/SEND_CANCELLED_BEFORE_DISPATCH/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('accept 早于入队 resolve 时,不得把已在执行的 run 标成 queued(review 第四轮)', async () => {
     // 目标会话在 metadata / 崩溃恢复 await 期间恰好空闲 → coordinator 可以在
     // enqueuePrompt resolve 之前就 drain 并 onAccepted。此时 run 已经在执行,若还

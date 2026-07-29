@@ -3468,6 +3468,15 @@ export class CodexAgent extends BaseAgent {
       }, upstreamIdleTimeoutMs);
       (upstreamIdleTimer as unknown as { unref?: () => void }).unref?.();
     }
+    /**
+     * 退役这个已确诊无响应的共享 app-server。写成箭头函数:下面的看门狗是 function
+     * 声明,拿不到实例 this。
+     */
+    const retireUnresponsiveHost = (reason: string): Promise<void> =>
+      this.retireHostKey(currentHostKey, reason, {
+        failIfActive: false,
+        logPrefix: 'codex upstream-idle watchdog',
+      });
     /** turn 结束 / 中断时收表并清工具项(终态可能先于 item completed 到达)。 */
     function resetUpstreamIdleForTurnEnd(): void {
       clearUpstreamIdle();
@@ -3572,6 +3581,22 @@ export class CodexAgent extends BaseAgent {
           await handle.close();
         } catch (e) {
           log.warn('upstream-idle watchdog close threw', { error: String(e) });
+        }
+        // close() 只放掉本 thread 的订阅并结束自己的事件队列,**共享的 AppServerHost 仍
+        // 留在 this.hosts 缓存里** —— 下一次 lazy create 会经 getHost 拿到同一个已确诊
+        // 无响应的 app-server,立刻再卡一遍,等于没恢复(review #944 第八轮 P1)。
+        // turn/interrupt 是控制面 RPC,两次 ack 都超时说明整个 host 而不只是这个 thread
+        // 出了问题,所以要连 host 一起退役。
+        //
+        // 放在 close 之后:retireHostKey(failIfActive:false) 会向仍挂着的订阅者广播强制
+        // 退役的终态 transport error(让它们各自收口 turn 状态,见那里的注释);本会话已经
+        // 推过自己的终态 error 并在 close 里解除了订阅,不必再收一遍。
+        try {
+          await retireUnresponsiveHost(
+            `codex app-server unresponsive: no upstream activity for ${Math.round(idleMs / 1000)}s and turn/interrupt was never acknowledged`,
+          );
+        } catch (e) {
+          log.warn('upstream-idle watchdog host retire threw', { error: String(e) });
         }
       })();
     }

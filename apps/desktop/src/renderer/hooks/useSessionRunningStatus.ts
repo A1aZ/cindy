@@ -52,8 +52,8 @@ import {
   clearCompletedSilencedRunForNewActivity,
   isSessionTerminalNotificationOwnedByScheduler,
   isSessionDoneSilenced,
-  noteSchedulerOwnedRunStillActive,
-  noteSilencedRunStillActive,
+  listRunMarkerSessionIds,
+  syncRunMarkerFallback,
 } from '@/lib/silencedSessionDoneStore';
 
 // Codex maker 化后, codex session 也走 makerChatStore;
@@ -147,13 +147,11 @@ export function useSessionRunningStatus(
     // --- 1. Detect new turn starts ---
     for (const sessionId of currentRunningSet) {
       if (!prevRunning.has(sessionId)) {
+        // 只清「run 已终态」的标记(用户手动起的新对话或下一个 run);run 还在跑时
+        // 是 subagent 续 turn / silent-stop 自动续跑,标记必须留着。兜底定时器不在
+        // 这里动 —— 统一由本 effect 末尾的对账按当前 running 状态处理。
         clearCompletedSilencedRunForNewActivity(sessionId);
         clearCompletedSchedulerOwnedRunForNewActivity(sessionId);
-        // 上面两行只清「run 已终态」的标记(用户手动起的新对话)。run 还在跑时这里
-        // 是另一层意思:后台 subagent 续 turn / silent-stop 自动续跑 —— run 显然
-        // 活着,撤掉标记的兜底自愈定时器,别让它在长 run 中途把标记清了。
-        noteSilencedRunStillActive(sessionId);
-        noteSchedulerOwnedRunStillActive(sessionId);
         // error 红角标与真实错误态同步:新 turn 启动会清掉 store 的终止错误
         // (staleErrorClearedOnTurnStart),若此时角标还是 'error' 就成了 orphan——
         // 活跃会话的 done 分支不覆写它,角标会永久残留。错误已不存在,这里显式清除
@@ -306,6 +304,17 @@ export function useSessionRunningStatus(
         // error 终止,branch 2 刚挂上的红角标不能被这条自动清理吞掉)。
         clearSessionAttention(sessionId);
       }
+    }
+
+    // --- 5. 自动任务标记的兜底自愈对账 ---
+    // 兜底定时器只有一个含义:「标记还在、session 当前 not-running」持续超过窗口期
+    // → scheduler 的终态事件丢了,自愈清掉标记。判据必须取**当前** running 状态,
+    // 不能靠事件先后顺序推断(agent 在 turn 内调 schedule_silence_current_run 时,
+    // 标记建立时该 turn 已经 running;而只在新 turn 起时撤销兜底的话,本 hook 卸载
+    // 后就再没人重新武装)。放在 effect 末尾:section 1/2 可能刚清掉标记,对账要基于
+    // 最终状态。挂载后的第一次 effect 天然完成一次全量对账。
+    for (const markedSessionId of listRunMarkerSessionIds()) {
+      syncRunMarkerFallback(markedSessionId, currentRunningSet.has(markedSessionId));
     }
 
     prevRunningRef.current = new Set(currentRunningSet);

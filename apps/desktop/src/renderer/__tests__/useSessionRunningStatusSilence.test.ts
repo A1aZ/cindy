@@ -4,9 +4,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { SessionStatusInfo } from '@/lib/makerChatStore';
 import {
+  isSessionDoneSilenced,
   markNextSessionTerminalNotificationOwnedByScheduler,
   markNextSessionDoneSilenced,
   resetSilencedSessionDoneStoreForTests,
+  RUN_MARKER_IDLE_FALLBACK_MS,
   scheduleClearSchedulerOwnedRun,
   scheduleClearSilencedRun,
 } from '@/lib/silencedSessionDoneStore';
@@ -436,6 +438,60 @@ describe('useSessionRunningStatus silenced completion handling', () => {
     // attention 仍照常挂(schedulerOwned 只抑制外发通知,不抑制角标)。
     expect(vi.mocked(addSessionAttention)).toHaveBeenCalledWith('session-owned-multi', 'done');
     expect(onSessionDone).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  // 回归(codex review P1):agent 在自己 turn 内调 schedule_silence_current_run 时,
+  // 标记建立时该 turn 已经 running、renderer 早过了 rising edge。兜底若在建标记时
+  // 就武装,就再没有信号能撤销它,该 turn 只要还剩一个窗口期以上就会被误清,最终
+  // done 又走普通通知路径。兜底的判据必须是当前 running 状态。
+  it('keeps suppressing when the marker is created mid-turn and that turn runs long', async () => {
+    vi.useFakeTimers();
+    const onSessionDone = vi.fn();
+    renderHook(() => useSessionRunningStatus(undefined, { onSessionDone }));
+
+    // turn 先跑起来，之后 agent 才在 turn 内部请求静默。
+    await emitSnapshot(new Map([['session-mid', status(true)]]));
+    markNextSessionDoneSilenced('run-mid', 'session-mid');
+    // 刻意不再 emit 任何快照：agent 请求静默后继续跑一个很长的工具调用，running
+    // 状态毫无变化，effect 不会重跑、也就没有任何对账机会。这正是「mark 时就武装
+    // 兜底」会失守的最坏情形。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(RUN_MARKER_IDLE_FALLBACK_MS * 2);
+    });
+    expect(isSessionDoneSilenced('session-mid')).toBe(true);
+
+    // turn 真正结束。
+    await emitSnapshot(new Map([['session-mid', status(false)]]));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+
+    expect(onSessionDone).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  // 回归(greptile review P1):新 turn 启动后本 hook 卸载,done 与 scheduler 终态事件
+  // 都落在卸载期间且不回放 —— 那时没有任何人重新武装兜底。重新挂载时的第一次 effect
+  // 必须完成一次全量对账,否则标记永久残留,该 session 后续手动对话的完成通知会一直
+  // 被静默。
+  it('re-arms the fallback after remount so an orphaned marker still self-heals', async () => {
+    vi.useFakeTimers();
+    const { unmount } = renderHook(() => useSessionRunningStatus(undefined));
+
+    markNextSessionDoneSilenced('run-orphan', 'session-orphan');
+    await emitSnapshot(new Map([['session-orphan', status(true)]]));
+    unmount();
+
+    // 卸载期间 turn 结束、completed 事件也丢了：没有人观察到这次终态。
+    storeMock.snapshot = new Map([['session-orphan', status(false)]]);
+
+    renderHook(() => useSessionRunningStatus(undefined));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(RUN_MARKER_IDLE_FALLBACK_MS + 1);
+    });
+
+    expect(isSessionDoneSilenced('session-orphan')).toBe(false);
     vi.useRealTimers();
   });
 });

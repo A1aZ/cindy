@@ -2,8 +2,10 @@
  * 自动任务(scheduler)终态通知的抑制标记。
  *
  * 两组标记语义刻意分开:
- *   - silenced:静默运行(`Schedule.silentWhenIdle`)的成功 run —— 完全不发通知、
- *     不亮角标。
+ *   - silenced:静默运行的成功 run —— 完全不发通知、不亮角标。来源有两条:
+ *     `Schedule.silentWhenIdle` 预设(run 开始、session-bound 时就静默),以及 agent
+ *     在自己 turn 内调 `schedule_silence_current_run`(引擎 `silenceRun`)。两条都走
+ *     `silenced` 事件,但**建立标记的时机相对 turn 完全不同**,见下方兜底注释。
  *   - schedulerOwned:普通自动任务 —— scheduler notifier 已按 `schedule.notify`
  *     发过这次终态通知,renderer 不能再发第二条;但侧栏 / Dock attention 仍按
  *     普通 done/error 逻辑保留。
@@ -38,7 +40,7 @@ const silencedFallbackTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const schedulerOwnedFallbackTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 /**
- * 兜底自愈窗口:只防 scheduler 事件丢失(广播断链、事件早于 renderer 挂载等)导致
+ * 兜底自愈窗口:只防 scheduler 事件丢失(广播断链、renderer 在 run 中途重载等)导致
  * 标记永久残留,把该 session 后续**手动**对话的 done 也误静默。正常路径不依赖它。
  *
  * 12 分钟是有依据的下限,不要随意缩短:main 侧 runner 对「主 turn 已 done 但后台
@@ -47,10 +49,9 @@ const schedulerOwnedFallbackTimers = new Map<string, ReturnType<typeof setTimeou
  * completed;否则慢 subagent 续 turn 时标记已被自愈清掉,最终 done 又会弹系统
  * 通知 —— 正是本模块要防的那个 bug。改动 runner 那个常量时一并复核这里。
  *
- * 定时器在 session 起新 turn 时取消(run 明显还活着)、在每次 done 转换时重置,
- * 所以跑很久的单个 turn 不会被它误清。
+ * 命名刻意中性:两类标记共用这一个窗口,不要改回带 silenced 字样的名字。
  */
-export const SILENCED_RUN_IDLE_FALLBACK_MS = 12 * 60_000;
+export const RUN_MARKER_IDLE_FALLBACK_MS = 12 * 60_000;
 
 export function rememberScheduleRunSessionAttentionBaseline(
   runId: string,
@@ -78,33 +79,23 @@ export function markNextSessionDoneSilenced(
     silencedRunSessionIds.delete(previousRunId);
     silencedRunHadAttention.delete(previousRunId);
     clearSilencedFallbackTimer(previousRunId);
+    // 被顶替的 run 不会再有人调 clearSilencedRun(它已不在 silencedRunSessionIds
+    // 里,scheduleClearSilencedRun 会直接 return),baseline 必须在这里一起清,
+    // 否则 runAttentionBaselines 会随 session 复用无界增长。
+    runAttentionBaselines.delete(previousRunId);
   }
   clearPendingTimer(previousRunId);
   clearPendingTimer(runId);
   silencedRunSessionIds.set(runId, sessionId);
   silencedSessionRunIds.set(sessionId, runId);
   silencedRunHadAttention.set(runId, hadSessionAttention);
-  // run 若从此再没产生任何 turn(创建后就崩/被杀),标记不能永久占住这个 session。
-  armSilencedFallbackTimer(runId);
+  // 兜底定时器不在这里武装 —— 由 syncRunMarkerFallback 按 session 的**当前**
+  // running 状态决定,见该函数注释。
 }
 
-/**
- * 纯查询,无副作用:同一个 run 内每次 done 转换都要得到 true(见文件头注释)。
- * 顺带重置兜底定时器 —— 刚观察到一次终态,说明 run 仍在正常产出事件。
- */
+/** 纯查询:同一个 run 内每次 done 转换都要得到 true(见文件头注释)。 */
 export function isSessionDoneSilenced(sessionId: string): boolean {
-  const runId = silencedSessionRunIds.get(sessionId);
-  if (!runId) return false;
-  // 已进入 completed linger 的标记不再续期,否则兜底会把 linger 往后推。
-  if (!clearTimers.has(runId)) armSilencedFallbackTimer(runId);
-  return true;
-}
-
-/** session 起了新 turn:run 显然还活着,撤掉兜底自愈,交回事件驱动。 */
-export function noteSilencedRunStillActive(sessionId: string): void {
-  const runId = silencedSessionRunIds.get(sessionId);
-  if (!runId) return;
-  clearSilencedFallbackTimer(runId);
+  return silencedSessionRunIds.has(sessionId);
 }
 
 export function markNextSessionTerminalNotificationOwnedByScheduler(
@@ -121,24 +112,59 @@ export function markNextSessionTerminalNotificationOwnedByScheduler(
   clearSchedulerOwnedTimer(runId);
   schedulerOwnedRunSessionIds.set(runId, sessionId);
   schedulerOwnedSessionRunIds.set(sessionId, runId);
-  armSchedulerOwnedFallbackTimer(runId);
 }
 
 /** 与 `isSessionDoneSilenced` 同款语义:纯查询,run 内多次 done 都命中。 */
 export function isSessionTerminalNotificationOwnedByScheduler(
   sessionId: string,
 ): boolean {
-  const runId = schedulerOwnedSessionRunIds.get(sessionId);
-  if (!runId) return false;
-  if (!schedulerOwnedClearTimers.has(runId)) armSchedulerOwnedFallbackTimer(runId);
-  return true;
+  return schedulerOwnedSessionRunIds.has(sessionId);
 }
 
-/** 与 `noteSilencedRunStillActive` 对称。 */
-export function noteSchedulerOwnedRunStillActive(sessionId: string): void {
-  const runId = schedulerOwnedSessionRunIds.get(sessionId);
-  if (!runId) return;
-  clearSchedulerOwnedFallbackTimer(runId);
+/** 当前持有任一标记的 sessionId。供消费方逐个对账兜底定时器。 */
+export function listRunMarkerSessionIds(): string[] {
+  if (silencedSessionRunIds.size === 0 && schedulerOwnedSessionRunIds.size === 0) return [];
+  const ids = new Set<string>(silencedSessionRunIds.keys());
+  for (const id of schedulerOwnedSessionRunIds.keys()) ids.add(id);
+  return [...ids];
+}
+
+/**
+ * 按 session 的**当前** running 状态对账兜底定时器 —— 这是兜底唯一的武装/撤销入口。
+ *
+ * 为什么不能靠「事件先后顺序」推断 run 是否活着(两个方向都会错):
+ *   - agent 在自己 turn 内调 `schedule_silence_current_run` 时,标记建立时该 turn
+ *     已经 running、renderer 早过了 rising edge。若在建立标记时就武装兜底,便再没有
+ *     任何信号来撤销它,turn 只要还剩 12 分钟以上就会被误清、通知照旧漏出。
+ *   - 反过来,若只在「新 turn 起」时撤销兜底,消费方组件在那之后卸载(done 与
+ *     scheduler 终态事件都落在卸载期间,且事件不回放)就永远没有兜底,标记永久残留。
+ *
+ * 所以判据取当前 running 状态,而不是事件序:running → 撤掉(run 活着,长 turn 也
+ * 不会被误清);not-running → 武装(若尚未武装)。消费方在每次 running 快照变化时
+ * 逐个 session 调一次即可,挂载后的第一次调用天然完成对账。
+ *
+ * 已进入 completed linger 的标记不武装:清理由 linger 定时器负责。
+ */
+export function syncRunMarkerFallback(sessionId: string, isRunning: boolean): void {
+  const silencedRunId = silencedSessionRunIds.get(sessionId);
+  if (silencedRunId) {
+    if (isRunning) {
+      clearSilencedFallbackTimer(silencedRunId);
+    } else if (!silencedFallbackTimers.has(silencedRunId) && !clearTimers.has(silencedRunId)) {
+      armSilencedFallbackTimer(silencedRunId);
+    }
+  }
+  const ownedRunId = schedulerOwnedSessionRunIds.get(sessionId);
+  if (ownedRunId) {
+    if (isRunning) {
+      clearSchedulerOwnedFallbackTimer(ownedRunId);
+    } else if (
+      !schedulerOwnedFallbackTimers.has(ownedRunId) &&
+      !schedulerOwnedClearTimers.has(ownedRunId)
+    ) {
+      armSchedulerOwnedFallbackTimer(ownedRunId);
+    }
+  }
 }
 
 export function scheduleClearSchedulerOwnedRun(runId: string, delayMs: number): void {
@@ -258,7 +284,7 @@ function armSilencedFallbackTimer(runId: string): void {
   const timer = setTimeout(() => {
     silencedFallbackTimers.delete(runId);
     clearSilencedRun(runId);
-  }, SILENCED_RUN_IDLE_FALLBACK_MS);
+  }, RUN_MARKER_IDLE_FALLBACK_MS);
   silencedFallbackTimers.set(runId, timer);
 }
 
@@ -275,7 +301,7 @@ function armSchedulerOwnedFallbackTimer(runId: string): void {
   const timer = setTimeout(() => {
     schedulerOwnedFallbackTimers.delete(runId);
     clearSchedulerOwnedRun(runId);
-  }, SILENCED_RUN_IDLE_FALLBACK_MS);
+  }, RUN_MARKER_IDLE_FALLBACK_MS);
   schedulerOwnedFallbackTimers.set(runId, timer);
 }
 

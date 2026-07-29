@@ -9,15 +9,13 @@ import {
   getSilencedRunSessionIdForAttentionFallback,
   isSessionTerminalNotificationOwnedByScheduler,
   isSessionDoneSilenced,
-  listRunMarkerSessionIds,
   markNextSessionTerminalNotificationOwnedByScheduler,
   markNextSessionDoneSilenced,
+  reconcileRunMarkersWithTerminalRuns,
   rememberScheduleRunSessionAttentionBaseline,
   resetSilencedSessionDoneStoreForTests,
-  RUN_MARKER_IDLE_FALLBACK_MS,
   scheduleClearSchedulerOwnedRun,
   scheduleClearSilencedRun,
-  syncRunMarkerFallback,
 } from '@/lib/silencedSessionDoneStore';
 
 describe('silencedSessionDoneStore', () => {
@@ -113,11 +111,6 @@ describe('silencedSessionDoneStore', () => {
     expect(isSessionTerminalNotificationOwnedByScheduler('session-owned')).toBe(false);
   });
 
-  /**
-   * 回归:一个 run 内 running→done 会翻转多次(后台 subagent 完成后续 turn、
-   * silent-stop 守卫自动续跑)。标记以前被第一次中间 done 消费掉,最终那次真 done
-   * 就走了普通完成路径,把 macOS toast / 飞书 / 手机推送全发一遍。
-   */
   it('clears the attention baseline of a run replaced by a newer one', () => {
     // 被顶替的 run 之后不会再有人调 clearSilencedRun(scheduleClearSilencedRun 的
     // has 检查会直接 return),baseline 必须在顶替时就清掉,否则随 session 复用无界增长。
@@ -129,19 +122,11 @@ describe('silencedSessionDoneStore', () => {
     expect(getScheduleRunSessionAttentionBaseline('run-1')).toBeUndefined();
   });
 
-  it('lists sessions holding either marker for fallback reconciliation', () => {
-    markNextSessionDoneSilenced('run-s', 'session-silenced');
-    markNextSessionTerminalNotificationOwnedByScheduler('run-o', 'session-owned');
-
-    expect([...listRunMarkerSessionIds()].sort()).toEqual([
-      'session-owned',
-      'session-silenced',
-    ]);
-
-    clearSilencedRun('run-s');
-    expect(listRunMarkerSessionIds()).toEqual(['session-owned']);
-  });
-
+  /**
+   * 回归:一个 run 内 running→done 会翻转多次(后台 subagent 完成后续 turn、
+   * silent-stop 守卫自动续跑)。标记以前被第一次中间 done 消费掉,最终那次真 done
+   * 就走了普通完成路径,把 macOS toast / 飞书 / 手机推送全发一遍。
+   */
   describe('multi-turn run (regression: silenced automation leaked a system push)', () => {
     it('keeps suppressing after an intermediate done and a resumed turn', () => {
       markNextSessionDoneSilenced('run-1', 'session-1');
@@ -149,7 +134,6 @@ describe('silencedSessionDoneStore', () => {
       // 主 turn done —— 只是中间态,runner 仍在等在途 subagent。
       expect(isSessionDoneSilenced('session-1')).toBe(true);
       // subagent 完成 → SDK 自动续 turn。
-      syncRunMarkerFallback('session-1', true);
       clearCompletedSilencedRunForNewActivity('session-1');
       // 最终 done 必须仍然静默。
       expect(isSessionDoneSilenced('session-1')).toBe(true);
@@ -159,123 +143,87 @@ describe('silencedSessionDoneStore', () => {
       markNextSessionTerminalNotificationOwnedByScheduler('run-1', 'session-1');
 
       expect(isSessionTerminalNotificationOwnedByScheduler('session-1')).toBe(true);
-      syncRunMarkerFallback('session-1', true);
       clearCompletedSchedulerOwnedRunForNewActivity('session-1');
       // 漏了这条会变成 renderer + scheduler notifier 各发一条,用户收到两次通知。
       expect(isSessionTerminalNotificationOwnedByScheduler('session-1')).toBe(true);
     });
   });
 
-  describe('idle fallback self-heal', () => {
-    beforeEach(() => {
+  /**
+   * 事件丢失的自愈:靠 scheduler 落库的权威 run 状态对账,而不是任何定时器。
+   * 三种「猜 run 还在不在飞行」的判据(事件序 / renderer running 快照 / 固定时长)
+   * 都被证明会误判,详见 store 的文件头注释。
+   */
+  describe('reconciliation against authoritative run status', () => {
+    it('clears markers whose run already reached a terminal status', () => {
+      markNextSessionDoneSilenced('run-s', 'session-silenced');
+      markNextSessionTerminalNotificationOwnedByScheduler('run-o', 'session-owned');
+
+      reconcileRunMarkersWithTerminalRuns(new Set(['run-s', 'run-o']));
+
+      expect(isSessionDoneSilenced('session-silenced')).toBe(false);
+      expect(isSessionTerminalNotificationOwnedByScheduler('session-owned')).toBe(false);
+    });
+
+    /**
+     * 关键:run 仍在飞行时绝不能清。这覆盖了 renderer running 快照不可信的那些
+     * 情形 —— remote_agent / local_bash / 未知 task_type 的后台任务在跑时快照
+     * 刻意为 false,device-link 远程会话整体豁免;runner 的 10 分钟兜底也只是事件
+     * 静默超时、不是最大 run 时长,所以 run 可以合法飞行任意长。
+     */
+    it('keeps markers whose run is still in flight, however long it runs', () => {
+      markNextSessionDoneSilenced('run-s', 'session-silenced');
+      markNextSessionTerminalNotificationOwnedByScheduler('run-o', 'session-owned');
+
+      // 终态集合里只有别的 run。
+      reconcileRunMarkersWithTerminalRuns(new Set(['some-other-run']));
+
+      expect(isSessionDoneSilenced('session-silenced')).toBe(true);
+      expect(isSessionTerminalNotificationOwnedByScheduler('session-owned')).toBe(true);
+    });
+
+    it('is a no-op for an empty terminal set', () => {
+      markNextSessionDoneSilenced('run-s', 'session-silenced');
+
+      reconcileRunMarkersWithTerminalRuns(new Set());
+
+      expect(isSessionDoneSilenced('session-silenced')).toBe(true);
+    });
+
+    /**
+     * completed 已到达并排了 linger 时,对账不能抢在 linger 前面清 —— 那段 linger
+     * 正是留给 renderer 的 done transition 消费标记用的,提前清掉这次终态又会走
+     * 普通通知路径。
+     */
+    it('defers to a pending completed linger instead of clearing early', () => {
       vi.useFakeTimers();
+      try {
+        markNextSessionDoneSilenced('run-s', 'session-silenced');
+        markNextSessionTerminalNotificationOwnedByScheduler('run-o', 'session-owned');
+        scheduleClearSilencedRun('run-s', 2000);
+        scheduleClearSchedulerOwnedRun('run-o', 2000);
+
+        // run 确实已终态,但 linger 在跑 → 本轮对账必须放过。
+        reconcileRunMarkersWithTerminalRuns(new Set(['run-s', 'run-o']));
+        expect(isSessionDoneSilenced('session-silenced')).toBe(true);
+        expect(isSessionTerminalNotificationOwnedByScheduler('session-owned')).toBe(true);
+
+        vi.advanceTimersByTime(2001);
+        expect(isSessionDoneSilenced('session-silenced')).toBe(false);
+        expect(isSessionTerminalNotificationOwnedByScheduler('session-owned')).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
-    afterEach(() => {
-      vi.useRealTimers();
-    });
+    it('leaves an unrelated session untouched', () => {
+      markNextSessionDoneSilenced('run-a', 'session-a');
+      markNextSessionDoneSilenced('run-b', 'session-b');
 
-    it('drops a silenced marker whose completed event never arrived', () => {
-      markNextSessionDoneSilenced('run-1', 'session-1');
-      syncRunMarkerFallback('session-1', false);
+      reconcileRunMarkersWithTerminalRuns(new Set(['run-a']));
 
-      vi.advanceTimersByTime(RUN_MARKER_IDLE_FALLBACK_MS + 1);
-
-      expect(isSessionDoneSilenced('session-1')).toBe(false);
-    });
-
-    it('drops a scheduler-owned marker whose completed event never arrived', () => {
-      markNextSessionTerminalNotificationOwnedByScheduler('run-1', 'session-1');
-      syncRunMarkerFallback('session-1', false);
-
-      vi.advanceTimersByTime(RUN_MARKER_IDLE_FALLBACK_MS + 1);
-
-      expect(isSessionTerminalNotificationOwnedByScheduler('session-1')).toBe(false);
-    });
-
-    it('never arms the fallback while the session is running, however long the turn', () => {
-      markNextSessionDoneSilenced('run-1', 'session-1');
-      syncRunMarkerFallback('session-1', true);
-
-      vi.advanceTimersByTime(RUN_MARKER_IDLE_FALLBACK_MS * 3);
-
-      expect(isSessionDoneSilenced('session-1')).toBe(true);
-    });
-
-    /**
-     * 回归(codex review P1):agent 在自己 turn 内调 schedule_silence_current_run
-     * 时,标记建立时该 turn 已经 running、renderer 早过了 rising edge,之后不会再有
-     * 新 turn 起始信号。若在 mark 时就武装兜底,便再没有任何信号能撤销它,turn 只要
-     * 还剩 12 分钟以上就会被误清、最终 done 又走普通通知路径。
-     */
-    it('does not self-heal a marker created mid-turn until that turn actually ends', () => {
-      markNextSessionDoneSilenced('run-1', 'session-1');
-      // 对账发现 session 仍在跑 —— 不武装。
-      syncRunMarkerFallback('session-1', true);
-
-      vi.advanceTimersByTime(RUN_MARKER_IDLE_FALLBACK_MS * 2);
-      expect(isSessionDoneSilenced('session-1')).toBe(true);
-
-      // turn 真的结束后才开始计时。
-      syncRunMarkerFallback('session-1', false);
-      vi.advanceTimersByTime(RUN_MARKER_IDLE_FALLBACK_MS + 1);
-
-      expect(isSessionDoneSilenced('session-1')).toBe(false);
-    });
-
-    /**
-     * 消费方每次 running 快照变化都会对账,重复的 idle 对账绝不能重置计时 ——
-     * 否则频繁的快照更新会让兜底永远不 fire,自愈失效。
-     */
-    it('does not restart the countdown on repeated idle syncs', () => {
-      markNextSessionDoneSilenced('run-1', 'session-1');
-      syncRunMarkerFallback('session-1', false);
-
-      vi.advanceTimersByTime(RUN_MARKER_IDLE_FALLBACK_MS - 1000);
-      syncRunMarkerFallback('session-1', false);
-      syncRunMarkerFallback('session-1', false);
-      vi.advanceTimersByTime(2000);
-
-      expect(isSessionDoneSilenced('session-1')).toBe(false);
-    });
-
-    it('re-arms after the session goes idle again following a resumed turn', () => {
-      markNextSessionDoneSilenced('run-1', 'session-1');
-      syncRunMarkerFallback('session-1', false);
-
-      // subagent 续 turn:撤掉兜底。
-      vi.advanceTimersByTime(RUN_MARKER_IDLE_FALLBACK_MS - 1000);
-      syncRunMarkerFallback('session-1', true);
-      vi.advanceTimersByTime(RUN_MARKER_IDLE_FALLBACK_MS * 2);
-      expect(isSessionDoneSilenced('session-1')).toBe(true);
-
-      // 再次 idle:重新计时,满窗后自愈。
-      syncRunMarkerFallback('session-1', false);
-      vi.advanceTimersByTime(RUN_MARKER_IDLE_FALLBACK_MS + 1);
-
-      expect(isSessionDoneSilenced('session-1')).toBe(false);
-    });
-
-    it('lets the completed linger win over the fallback', () => {
-      markNextSessionDoneSilenced('run-1', 'session-1');
-      syncRunMarkerFallback('session-1', false);
-      // completed 到达 → 2s linger,兜底应被撤掉,清理由 linger 负责。
-      scheduleClearSilencedRun('run-1', 2000);
-
-      vi.advanceTimersByTime(2001);
-
-      expect(isSessionDoneSilenced('session-1')).toBe(false);
-    });
-
-    it('does not re-arm the fallback while a completed linger is pending', () => {
-      markNextSessionDoneSilenced('run-1', 'session-1');
-      scheduleClearSilencedRun('run-1', 2000);
-
-      // linger 期间的对账不能武装兜底,否则会把 linger 语义搅乱。
-      syncRunMarkerFallback('session-1', false);
-      vi.advanceTimersByTime(2001);
-
-      expect(isSessionDoneSilenced('session-1')).toBe(false);
+      expect(isSessionDoneSilenced('session-a')).toBe(false);
+      expect(isSessionDoneSilenced('session-b')).toBe(true);
     });
   });
 });

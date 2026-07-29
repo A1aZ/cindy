@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SchedulerEvent } from '@cindy/maker-scheduler';
 
 import { createLogger } from '@/lib/logger';
-import { makerChatStore } from '@/lib/makerChatStore';
 import {
   clearSessionAttention,
   hasSessionAttention,
@@ -15,10 +14,10 @@ import {
   getSilencedRunSessionIdForAttentionFallback,
   markNextSessionTerminalNotificationOwnedByScheduler,
   markNextSessionDoneSilenced,
+  reconcileRunMarkersWithTerminalRuns,
   rememberScheduleRunSessionAttentionBaseline,
   scheduleClearSchedulerOwnedRun,
   scheduleClearSilencedRun,
-  syncRunMarkerFallback,
 } from '@/lib/silencedSessionDoneStore';
 import type { AutomationScheduleSessionInfo } from '../lib/automationSidebarGrouping';
 import { isUnreadScheduleRun } from '../../scheduler/lib/runUnread';
@@ -39,6 +38,16 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
     try {
       const runs = await loadScheduleSidebarIndexRuns();
       if (refreshSeqRef.current !== seq) return;
+
+      // 抑制标记的事件丢失自愈:这份列表是 scheduler 落库的权威 run 状态(且包含所有
+      // 带 sessionId 的 run,没有 history limit),凡是标记指向的 run 已经终态,就说明
+      // 它的 completed / failed 事件没送到,清掉标记。RunStatus 里只有 'running' 不是
+      // 终态。刻意不用定时器猜 —— 见 silencedSessionDoneStore 的文件头注释。
+      const terminalRunIds = new Set<string>();
+      for (const run of runs) {
+        if (run.status !== 'running') terminalRunIds.add(run.runId);
+      }
+      reconcileRunMarkersWithTerminalRuns(terminalRunIds);
 
       const next = new Map<string, AutomationScheduleSessionInfo>();
       for (const run of runs) {
@@ -76,19 +85,6 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
 
   useEffect(() => {
     void refresh();
-    /**
-     * 标记刚开始生效时立刻按当前 running 状态对账一次兜底自愈定时器。
-     * scheduler 事件不改 makerChatStore 的 running 快照,useSessionRunningStatus 的
-     * effect 未必会因此重跑,所以不能只靠它那边的对账 —— 否则标记可能一直没有兜底
-     * 看护。running 判定与 deriveRunningSet 同口径(info.isRunning)。
-     */
-    const syncFallbackForSession = (sessionId: string): void => {
-      if (!sessionId) return;
-      syncRunMarkerFallback(
-        sessionId,
-        makerChatStore.getRunningSnapshot().get(sessionId)?.isRunning === true,
-      );
-    };
     const off = window.electronAPI.maker.schedule.onEvent((raw) => {
       const event = raw as SchedulerEvent;
       if (event.type === 'session-bound') {
@@ -100,7 +96,6 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
           event.sessionId,
           hasSessionAttention(event.sessionId),
         );
-        syncFallbackForSession(event.sessionId);
       }
       if (event.type === 'silenced') {
         const baseline = getScheduleRunSessionAttentionBaseline(event.runId);
@@ -111,11 +106,6 @@ export function useAutomationScheduleSessionIndex(): ReadonlyMap<string, Automat
             ? baseline.hadSessionAttention
             : hasSessionAttention(event.sessionId),
         );
-        // 两条来源在这里汇合,且 running 状态截然不同:silentWhenIdle 预设静默时
-        // turn 还没起(not-running → 武装兜底);agent 在自己 turn 内调
-        // schedule_silence_current_run 时该 turn 正在跑(running → 不武装,避免
-        // 长 turn 被误清)。
-        syncFallbackForSession(event.sessionId);
         return;
       }
       if (event.type === 'notified') {

@@ -52,8 +52,6 @@ import {
   clearCompletedSilencedRunForNewActivity,
   isSessionTerminalNotificationOwnedByScheduler,
   isSessionDoneSilenced,
-  listRunMarkerSessionIds,
-  syncRunMarkerFallback,
 } from '@/lib/silencedSessionDoneStore';
 
 // Codex maker 化后, codex session 也走 makerChatStore;
@@ -304,17 +302,6 @@ export function useSessionRunningStatus(
         // error 终止,branch 2 刚挂上的红角标不能被这条自动清理吞掉)。
         clearSessionAttention(sessionId);
       }
-    }
-
-    // --- 5. 自动任务标记的兜底自愈对账 ---
-    // 兜底定时器只有一个含义:「标记还在、session 当前 not-running」持续超过窗口期
-    // → scheduler 的终态事件丢了,自愈清掉标记。判据必须取**当前** running 状态,
-    // 不能靠事件先后顺序推断(agent 在 turn 内调 schedule_silence_current_run 时,
-    // 标记建立时该 turn 已经 running;而只在新 turn 起时撤销兜底的话,本 hook 卸载
-    // 后就再没人重新武装)。放在 effect 末尾:section 1/2 可能刚清掉标记,对账要基于
-    // 最终状态。挂载后的第一次 effect 天然完成一次全量对账。
-    for (const markedSessionId of listRunMarkerSessionIds()) {
-      syncRunMarkerFallback(markedSessionId, currentRunningSet.has(markedSessionId));
     }
 
     prevRunningRef.current = new Set(currentRunningSet);

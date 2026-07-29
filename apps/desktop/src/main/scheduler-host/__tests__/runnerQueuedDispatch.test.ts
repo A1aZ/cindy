@@ -17,6 +17,8 @@
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
+import { AcceptedCallbackDispatchCancelled } from '../../maker-ipc/acceptedCallbackRunner.js';
+
 import type {
   AgentEvent,
   Maker,
@@ -976,6 +978,9 @@ describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', ()
 
       // 会话此刻已不在内存里(ephemeral 关闭 / 进程重建)
       (maker.getSession as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
+      // 必须是 AcceptedCallbackDispatchCancelled:普通 Error 会被 runAcceptedCallback
+      // 当成副作用失败吞掉,turn 照样发出去(review #944 第十一轮 P1)。
+      await expect(queue.accept()).rejects.toBeInstanceOf(AcceptedCallbackDispatchCancelled);
       await expect(queue.accept()).rejects.toThrow(/SEND_CANCELLED_BEFORE_DISPATCH/);
     } finally {
       vi.useRealTimers();

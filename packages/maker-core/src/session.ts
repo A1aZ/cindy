@@ -80,6 +80,16 @@ const DEFAULT_TURN_STALL_MS = 45 * 60_000;
  */
 export const STALL_ABORT_RECOVERY_GRACE_MS = 10_000;
 
+/**
+ * 手动 abort(用户按 Stop)之后的复核宽限。
+ *
+ * 比看门狗那条(10s)长得多是刻意的:看门狗开火前已经确诊"整条链路零事件"，可以果断;
+ * 手动 Stop 只说明用户想停，transport 很可能完全健康，只是这一次 interrupt 往返慢
+ * (远端 daemon / SSH 隧道)。用 10s 判它"没生效"会把正常会话误关。60s 远超任何健康
+ * 往返，又给"按了 Stop 却永远停不下来"留了有界出路(review #944 第十一轮 P1)。
+ */
+export const MANUAL_ABORT_RECOVERY_GRACE_MS = 60_000;
+
 function parseTurnStallMs(raw: string | undefined): number {
   if (raw === undefined || raw === '') return DEFAULT_TURN_STALL_MS;
   const n = Number(raw);
@@ -269,6 +279,8 @@ export class Session {
    * 就一定意味着"卡死那个 turn 已经停了、这是新活儿"。
    */
   private turnGeneration = 0;
+  /** 已为哪个 turn 代号排过 abort 复核；同一 turn 上重复 abort 不重复排。 */
+  private abortRecoveryScheduledFor: number | null = null;
   private lastEventType: string | null = null;
 
   constructor(opts: SessionOptions) {
@@ -430,6 +442,16 @@ export class Session {
     this.cancelSendReservation(this.sendReservation);
     // 中断已在进行:不再计 stall 额度(下一个 turn 的 send 会重新起表)。
     this.clearTurnStallWatchdog();
+    // 但**不能就这么放手**:用户按 Stop 时若 transport 已经不响应,codex 的
+    // turn/interrupt 可能永久悬挂、claude 的 q.interrupt() 可能失败且不清 turn-in-flight
+    // 标记。这一行刚把 Session 层唯一的复核定时器关掉,agent 层的 idle watchdog 也随
+    // turn 中断一起收表 —— 没人再管的话 isTurnRunning() 恒 true,之后每一条 send 都被拒,
+    // 会话永久不可用(review #944 第十一轮 P1)。
+    //
+    // 所以这里也排一次与 turn 绑定的复核,且**不挂在 abort 的 promise 上**(它自己就可能
+    // 永不 settle,理由同 onTurnStallTimeout)。宽限比看门狗那条长得多:手动 Stop 背后
+    // 没有别的兜底,而健康的 interrupt 往返远不需要这么久,宁可多等也不误关正常会话。
+    this.scheduleAbortRecoveryCheck(MANUAL_ABORT_RECOVERY_GRACE_MS);
     this.setStatus('aborting');
     try {
       await this.handle.abort();
@@ -906,16 +928,28 @@ export class Session {
     // → finally 永不执行 → 复核永不发生 → 会话永久不可用,恰好是本看门狗要救的场景
     // (review #944 第五轮 Copilot)。recoverIfTurnStillRunning 自己会复核 isTurnRunning,
     // abort 正常生效时它是 no-op,所以无条件排定是安全的。
-    // 绑定到**这一个** turn:宽限期内若 abort 生效、用户/调度器又起了新 turn,复核绝不能
-    // 把那条健康的活儿一起关掉(review #944 第七轮 P1)。
-    const stalledGeneration = this.turnGeneration;
-    const timer = setTimeout(() => {
-      void this.recoverIfTurnStillRunning(stalledGeneration);
-    }, STALL_ABORT_RECOVERY_GRACE_MS);
-    (timer as unknown as { unref?: () => void }).unref?.();
+    // 复核由 abort() 内部统一排(见 scheduleAbortRecoveryCheck),这里只需要用看门狗
+    // 自己的短宽限覆盖它:本路径已经确诊卡死,不必再等手动 Stop 那样长的时间。
+    this.scheduleAbortRecoveryCheck(STALL_ABORT_RECOVERY_GRACE_MS);
     void this.abort().catch((e) => {
       this.logger.warn('turn stall watchdog abort failed', { error: String(e) });
     });
+  }
+
+  /**
+   * 排一次"abort 到底生效了吗"的复核。中断请求本身可能永不 settle(codex 的
+   * turn/interrupt 悬挂),所以定时器**不挂在 abort 的 promise 上**;也必须绑定当时的
+   * turn 代号,否则宽限期内新起的健康 turn 会被误杀(见 turnGeneration)。
+   * 幂等:同一 turn 上重复 abort 只保留最早排定的那次复核。
+   */
+  private scheduleAbortRecoveryCheck(graceMs: number): void {
+    const generation = this.turnGeneration;
+    if (this.abortRecoveryScheduledFor === generation) return;
+    this.abortRecoveryScheduledFor = generation;
+    const timer = setTimeout(() => {
+      void this.recoverIfTurnStillRunning(generation);
+    }, graceMs);
+    (timer as unknown as { unref?: () => void }).unref?.();
   }
 
   /**

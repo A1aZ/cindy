@@ -7,7 +7,11 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 
-import { STALL_ABORT_RECOVERY_GRACE_MS, Session } from './session.js';
+import {
+  MANUAL_ABORT_RECOVERY_GRACE_MS,
+  STALL_ABORT_RECOVERY_GRACE_MS,
+  Session,
+} from './session.js';
 import type { AgentEvent, SendOrigin } from './types/events.js';
 import type { AgentSessionHandle, BackgroundTaskSnapshot } from './agents/base-agent.js';
 
@@ -99,7 +103,10 @@ function createStubHandle(opts?: StubOptions) {
   };
 }
 
-function createSession(stub: ReturnType<typeof createStubHandle>) {
+function createSession(
+  stub: ReturnType<typeof createStubHandle>,
+  opts?: { turnStallMs?: number },
+) {
   return new Session({
     id: 'session-1',
     agentKind: 'claude-code',
@@ -107,7 +114,7 @@ function createSession(stub: ReturnType<typeof createStubHandle>) {
     handle: stub.handle,
     capabilities: {} as never,
     logger: createLogger() as never,
-    turnStallMs: STALL_MS,
+    turnStallMs: opts?.turnStallMs ?? STALL_MS,
   });
 }
 
@@ -364,6 +371,69 @@ describe('Session turn stall watchdog', () => {
 
       expect(stub.abort).toHaveBeenCalledTimes(1);
       expect(session.getStatus()).not.toBe('closed');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('手动 abort 不生效时也会复核并关闭会话', async () => {
+    // 用户按 Stop 时 abort() 会先 clearTurnStallWatchdog()。若 transport 已不响应
+    // (codex 的 turn/interrupt 悬挂 / claude 的 interrupt 失败且不清 turn-in-flight),
+    // Session 层唯一的复核定时器就这么被关掉了、agent 层的 idle 表也随中断收了 ——
+    // isTurnRunning() 恒 true,之后每条 send 都被拒(review #944 第十一轮 P1)。
+    vi.useFakeTimers();
+    try {
+      // 关掉零事件看门狗:本用例只验手动 abort 这条恢复路径,否则两个定时器阈值
+      // 撞在一起(都是 60s),分不清是谁开的火。
+      const stub = createStubHandle({ abortIneffective: true });
+      const session = createSession(stub, { turnStallMs: 0 });
+      session.onEvent(() => {});
+
+      await session.send('go');
+      await session.abort(); // 用户按 Stop;中断没生效
+      expect(session.isTurnRunning()).toBe(true);
+      // 手动路径的宽限远比看门狗长 —— 健康但慢的 interrupt 不该被误判
+      await vi.advanceTimersByTimeAsync(STALL_ABORT_RECOVERY_GRACE_MS + 1);
+      expect(session.getStatus()).not.toBe('closed');
+
+      await vi.advanceTimersByTimeAsync(MANUAL_ABORT_RECOVERY_GRACE_MS + 1);
+      expect(session.getStatus()).toBe('closed');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('手动 abort 生效后新起的 turn 不被误关', async () => {
+    vi.useFakeTimers();
+    try {
+      const stub = createStubHandle(); // abort 正常生效
+      const session = createSession(stub, { turnStallMs: 0 });
+      session.onEvent(() => {});
+
+      await session.send('go');
+      await session.abort();
+      // 宽限没走完就发下一条(abort 已生效,不会被 SESSION_RUNNING 拒)
+      await session.send('next');
+      await vi.advanceTimersByTimeAsync(MANUAL_ABORT_RECOVERY_GRACE_MS + 1);
+
+      expect(session.getStatus()).not.toBe('closed');
+      expect(session.isTurnRunning()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('手动 abort() 自己悬挂时仍会复核', async () => {
+    vi.useFakeTimers();
+    try {
+      const stub = createStubHandle({ abortHangs: true });
+      const session = createSession(stub, { turnStallMs: 0 });
+      session.onEvent(() => {});
+
+      await session.send('go');
+      void session.abort(); // 永不 settle
+      await vi.advanceTimersByTimeAsync(MANUAL_ABORT_RECOVERY_GRACE_MS + 1);
+      expect(session.getStatus()).toBe('closed');
     } finally {
       vi.useRealTimers();
     }

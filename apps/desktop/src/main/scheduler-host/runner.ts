@@ -59,6 +59,7 @@ import {
   shouldCloseSessionForCredentialSwitch,
 } from '../maker-host/codex-credential-switch.js';
 import { ensureDialogueWorkspaceDir } from '../localDb/dialogueWorkspace';
+import { AcceptedCallbackDispatchCancelled } from '../maker-ipc/acceptedCallbackRunner.js';
 import { wireSessionToIpc, isSessionInTurn, noteSilentStopUserSend, onSilentStopSettled } from '../maker-ipc/register.js';
 import { agentHandoffPending } from '../maker-ipc/agentHandoffPendingSingleton.js';
 import { prependHandoffToUserMessage } from '../maker-ipc/agentHandoff.js';
@@ -1411,8 +1412,11 @@ export class MakerScheduleRunner implements ScheduleRunner {
      *
      * 拿不到 live 时没有这个手段:正常返回就等于放行,coordinator 紧接着把 turn 交给
      * vendor,产生一次没人跟踪、还可能与顺延重试重叠的执行(review #944 第八轮 P1)。
-     * 此时只能抛错让 coordinator 回滚 —— 但抛错走的是它 catch 里的 persisted 分支,
-     * 不置空 activeTurn(与 handleSendNotDispatched 不同),所以只在别无选择时用。
+     * 此时抛 AcceptedCallbackDispatchCancelled —— **必须是这个类**:accepted 回调的普通
+     * 异常被 runAcceptedCallback 刻意吞掉(副作用失败不该毁掉已受理的 turn),第八轮我抛
+     * 的普通 Error 因此根本没到 coordinator,turn 照样发了出去(review #944 第十一轮 P1)。
+     * 这条通道会被原样上抛,coordinator 走 persisted 分支回滚;那条分支对 scheduler 项
+     * 已经会放掉 activeTurn 并唤醒队列(第十轮)。
      */
     const blockAcceptedDispatch = (live: Session | undefined, why: string): void => {
       if (live) {
@@ -1422,10 +1426,10 @@ export class MakerScheduleRunner implements ScheduleRunner {
         return;
       }
       this.deps.logger.warn?.(
-        '[runner] no live session to cancel the accepted dispatch; throwing so the coordinator rolls it back',
+        '[runner] no live session to cancel the accepted dispatch; signalling the coordinator to roll it back',
         { scheduleId: schedule.id, runId: ctx.runId, sessionId, why },
       );
-      throw new Error(
+      throw new AcceptedCallbackDispatchCancelled(
         `[SEND_CANCELLED_BEFORE_DISPATCH] queued heartbeat dispatch cancelled before vendor dispatch (${why})`,
       );
     };

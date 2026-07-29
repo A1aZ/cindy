@@ -82,6 +82,10 @@ describe('NewMakerDraftRoute worktree send flow', () => {
       remoteBranch,
     );
     const retainedGuard = source.indexOf('!recovery.storageReadable', recovery);
+    const reservationGuard = source.indexOf(
+      'if (!registerPendingRemotePrecreatedWorktree(reservation))',
+      retainedGuard,
+    );
     const worktreeCreate = source.indexOf("'worktree:create'", retainedGuard);
     const ledgerRegistration = source.indexOf(
       'createRemoteSessionWithPrecreatedWorktree({',
@@ -93,11 +97,39 @@ describe('NewMakerDraftRoute worktree send flow', () => {
       '!recovery.storageReadable || recovery.retained > 0',
     );
     expect(retainedGuard).toBeGreaterThan(recovery);
+    expect(reservationGuard).toBeGreaterThan(retainedGuard);
+    expect(worktreeCreate).toBeGreaterThan(reservationGuard);
     expect(worktreeCreate).toBeGreaterThan(retainedGuard);
+    expect(source.slice(worktreeCreate, worktreeCreate + 420)).toContain(
+      'recoveryKey,',
+    );
     expect(ledgerRegistration).toBeGreaterThan(worktreeCreate);
     expect(source.slice(ledgerRegistration, ledgerRegistration + 220)).toContain(
       'deviceId,',
     );
+  });
+
+  it('retries remote draft defaults after the relay or selected workstation reconnects', () => {
+    const epochHook = source.indexOf(
+      'useDeviceLinkReconnectEpoch(',
+    );
+    const defaultsFetch = source.indexOf(
+      "'maker:get-new-maker-defaults'",
+      epochHook,
+    );
+    const effectDependencies = source.indexOf(
+      'remoteDraftRefreshEpoch,',
+      defaultsFetch,
+    );
+    const transientPreserve = source.indexOf(
+      'value: unsupported ? null : previous.value',
+      defaultsFetch,
+    );
+
+    expect(epochHook).toBeGreaterThan(-1);
+    expect(defaultsFetch).toBeGreaterThan(epochHook);
+    expect(effectDependencies).toBeGreaterThan(defaultsFetch);
+    expect(transientPreserve).toBeGreaterThan(defaultsFetch);
   });
 
   it('does not auto-send if the prepared session is no longer active', () => {

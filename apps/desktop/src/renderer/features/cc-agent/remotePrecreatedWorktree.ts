@@ -3,17 +3,32 @@ export type RemoteWorktreeInvoke = (
   args: unknown[],
 ) => Promise<unknown>;
 
-export interface PendingRemotePrecreatedWorktree {
+interface PendingRemotePrecreatedWorktreeBase {
   deviceId: string;
   sessionId: string;
-  path: string;
   createdAt: number;
 }
+
+export type PendingRemotePrecreatedWorktree =
+  PendingRemotePrecreatedWorktreeBase & (
+    | {
+        /** worktree:create 回包后可用；旧账本只有该定位符。 */
+        path: string;
+        recoveryKey?: string;
+      }
+    | {
+        path?: never;
+        /** worktree:create 前持久化的新定位符。 */
+        recoveryKey: string;
+      }
+  );
 
 export interface CreateRemoteSessionWithPrecreatedWorktreeInput {
   deviceId: string;
   sessionId: string;
   path: string;
+  recoveryKey: string;
+  createdAt?: number;
   createArgs: unknown;
   invoke: RemoteWorktreeInvoke;
 }
@@ -42,6 +57,9 @@ const MAX_RECORD_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_DEVICE_ID_LENGTH = 256;
 const MAX_SESSION_ID_LENGTH = 256;
 const MAX_PATH_LENGTH = 4_096;
+const MIN_RECOVERY_KEY_LENGTH = 16;
+const MAX_RECOVERY_KEY_LENGTH = 256;
+const RECOVERY_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
 const CLEANUP_PENDING_CODE = 'REMOTE_PRECREATED_WORKTREE_CLEANUP_PENDING';
 
 // localStorage 被浏览器策略、磁盘故障等暂时禁用时，当前 renderer 进程仍须记住
@@ -90,6 +108,15 @@ function readString(value: unknown, maxLength: number): string | null {
     : null;
 }
 
+function readRecoveryKey(value: unknown): string | null {
+  const normalized = readString(value, MAX_RECOVERY_KEY_LENGTH);
+  return normalized
+    && normalized.length >= MIN_RECOVERY_KEY_LENGTH
+    && RECOVERY_KEY_PATTERN.test(normalized)
+    ? normalized
+    : null;
+}
+
 function coercePendingRecord(
   value: unknown,
   now = Date.now(),
@@ -98,14 +125,24 @@ function coercePendingRecord(
   const deviceId = readString(value.deviceId, MAX_DEVICE_ID_LENGTH);
   const sessionId = readString(value.sessionId, MAX_SESSION_ID_LENGTH);
   const path = readString(value.path, MAX_PATH_LENGTH);
+  const recoveryKey = readRecoveryKey(value.recoveryKey);
   const createdAt =
     typeof value.createdAt === 'number' && Number.isFinite(value.createdAt)
       ? value.createdAt
       : 0;
-  if (!deviceId || !sessionId || !path || createdAt <= 0) return null;
+  if (!deviceId || !sessionId || (!path && !recoveryKey) || createdAt <= 0) return null;
   if (createdAt > now + 5 * 60 * 1000) return null;
   if (now - createdAt > MAX_RECORD_AGE_MS) return null;
-  return { deviceId, sessionId, path, createdAt };
+  const base = { deviceId, sessionId, createdAt };
+  if (path) {
+    return {
+      ...base,
+      path,
+      ...(recoveryKey ? { recoveryKey } : {}),
+    };
+  }
+  if (!recoveryKey) return null;
+  return { ...base, recoveryKey };
 }
 
 function normalizeRecords(
@@ -236,7 +273,9 @@ export function registerPendingRemotePrecreatedWorktree(
 }
 
 export function forgetPendingRemotePrecreatedWorktree(
-  target: Pick<PendingRemotePrecreatedWorktree, 'deviceId' | 'sessionId' | 'path'> & {
+  target: Pick<PendingRemotePrecreatedWorktree, 'deviceId' | 'sessionId'> & {
+    path?: string;
+    recoveryKey?: string;
     createdAt?: number;
   },
 ): void {
@@ -245,14 +284,22 @@ export function forgetPendingRemotePrecreatedWorktree(
     storageReadable,
   } = loadPendingRemotePrecreatedWorktrees();
   const next = current.filter(
-    (item) =>
-      item.deviceId !== target.deviceId
-      || item.sessionId !== target.sessionId
-      || item.path !== target.path
-      || (
+    (item) => {
+      if (
+        item.deviceId !== target.deviceId
+        || item.sessionId !== target.sessionId
+      ) {
+        return true;
+      }
+      const locatorMatches = target.recoveryKey !== undefined
+        ? item.recoveryKey === target.recoveryKey
+        : target.path !== undefined && item.path === target.path;
+      if (!locatorMatches) return true;
+      return (
         target.createdAt !== undefined
         && item.createdAt !== target.createdAt
-      ),
+      );
+    },
   );
   replaceMemoryRecords(next);
   if (storageReadable) persistRecords(next);
@@ -298,10 +345,10 @@ async function discardPendingRecord(
     return true;
   }
   try {
-    await invoke('worktree:discard-precreated', [{
-      sessionId: record.sessionId,
-      path: record.path,
-    }]);
+    const locator = typeof record.path === 'string'
+      ? { sessionId: record.sessionId, path: record.path }
+      : { sessionId: record.sessionId, recoveryKey: record.recoveryKey };
+    await invoke('worktree:discard-precreated', [locator]);
     forgetPendingRemotePrecreatedWorktree(record);
     return true;
   } catch (error) {
@@ -366,7 +413,8 @@ export async function createRemoteSessionWithPrecreatedWorktree(
     deviceId: input.deviceId,
     sessionId: input.sessionId,
     path: input.path,
-    createdAt: Date.now(),
+    recoveryKey: input.recoveryKey,
+    createdAt: input.createdAt ?? Date.now(),
   };
   // localStorage 写失败时 register 已先留下 memory mirror；返回值只代表是否
   // 持久化成功，不影响当前进程继续承担这份 obligation。

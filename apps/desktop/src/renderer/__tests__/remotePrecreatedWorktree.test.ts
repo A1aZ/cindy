@@ -14,6 +14,7 @@ import {
 const DEVICE_ID = 'device-1';
 const SESSION_ID = 'session-1';
 const WORKTREE_PATH = '/repo/.cindy-worktrees/session-1';
+const RECOVERY_KEY = 'recovery-key-123456';
 const CREATE_ARGS = { id: SESSION_ID, workingDir: WORKTREE_PATH };
 
 function callWith(invoke: ReturnType<typeof vi.fn>) {
@@ -21,6 +22,7 @@ function callWith(invoke: ReturnType<typeof vi.fn>) {
     deviceId: DEVICE_ID,
     sessionId: SESSION_ID,
     path: WORKTREE_PATH,
+    recoveryKey: RECOVERY_KEY,
     createArgs: CREATE_ARGS,
     invoke,
   });
@@ -33,7 +35,17 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
   });
 
   it('returns immediately when create adopts the preset id', async () => {
-    const invoke = vi.fn(async () => ({ sessionId: SESSION_ID }));
+    const invoke = vi.fn(async () => {
+      expect(listPendingRemotePrecreatedWorktrees()).toEqual([
+        expect.objectContaining({
+          deviceId: DEVICE_ID,
+          sessionId: SESSION_ID,
+          path: WORKTREE_PATH,
+          recoveryKey: RECOVERY_KEY,
+        }),
+      ]);
+      return { sessionId: SESSION_ID };
+    });
 
     await expect(callWith(invoke)).resolves.toBe(SESSION_ID);
     expect(invoke).toHaveBeenCalledTimes(1);
@@ -154,6 +166,40 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
       retained: 0,
       storageReadable: true,
     });
+    expect(listPendingRemotePrecreatedWorktrees()).toEqual([]);
+  });
+
+  it('recovers a pre-response reservation by recovery key after restart', async () => {
+    registerPendingRemotePrecreatedWorktree({
+      deviceId: DEVICE_ID,
+      sessionId: SESSION_ID,
+      recoveryKey: RECOVERY_KEY,
+      createdAt: Date.now(),
+    });
+    __testing.resetMemoryRecords();
+    const invoke = vi.fn(async (channel: string) => {
+      if (channel === 'local-db:sessions:get') {
+        throw new Error('[NOT_FOUND] Session 不存在');
+      }
+      if (channel === 'worktree:discard-precreated') return { discarded: true };
+      throw new Error(`unexpected ${channel}`);
+    });
+
+    await expect(
+      recoverPendingRemotePrecreatedWorktrees({
+        deviceId: DEVICE_ID,
+        invoke,
+      }),
+    ).resolves.toMatchObject({
+      attempted: 1,
+      recovered: 1,
+      retained: 0,
+      storageReadable: true,
+    });
+    expect(invoke).toHaveBeenCalledWith('worktree:discard-precreated', [{
+      sessionId: SESSION_ID,
+      recoveryKey: RECOVERY_KEY,
+    }]);
     expect(listPendingRemotePrecreatedWorktrees()).toEqual([]);
   });
 

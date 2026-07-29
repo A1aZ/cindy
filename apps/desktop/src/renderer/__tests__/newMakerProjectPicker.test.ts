@@ -42,6 +42,16 @@ const deviceLinkProjectsHookSource = readFileSync(
   'utf8',
 );
 
+const remoteSessionHandoffSource = readFileSync(
+  resolve(__dirname, '..', 'features', 'cc-agent', 'remoteSessionHandoff.ts'),
+  'utf8',
+);
+
+const deviceLinkCreateArgsSource = readFileSync(
+  resolve(__dirname, '..', 'features', 'cc-agent', 'deviceLinkCreateArgs.ts'),
+  'utf8',
+);
+
 const deviceSwitcherPillSource = readFileSync(
   resolve(__dirname, '..', 'components', 'new-chat', 'DeviceSwitcherPill.tsx'),
   'utf8',
@@ -205,10 +215,12 @@ describe('Shared create project picker', () => {
     expect(addRemoteProjectDialogSource).toContain('sourceGroupSsh');
     expect(addRemoteProjectDialogSource).toContain('sourceGroupDevice');
     expect(addRemoteProjectDialogSource).not.toContain('res.hosts.filter((h) => h.autoConnect)');
-    // 归属一致:device-link 建会话参数走纯函数 buildDeviceLinkCreateArgs(workspaceKind 由
-    // workingDir 派生),行为由 deviceLinkCreateArgs.test.ts 断言;此处锁「route 确实经该纯函数」,
-    // 防有人再内联错 workspaceKind。
-    expect(newMakerDraftRouteSource).toContain('buildDeviceLinkCreateArgs({');
+    // 归属一致:device-link 建会话参数只经 resolveDeviceLinkSubmission 组装(它内部转调
+    // buildDeviceLinkCreateArgs 派生 workspaceKind),行为由 deviceLinkCreateArgs.test.ts 断言;
+    // 此处锁「route 确实经那个唯一入口」,防有人再内联错 workspaceKind 或绕过来源校准。
+    expect(newMakerDraftRouteSource).toContain('resolveDeviceLinkSubmission({');
+    // 组件不得直接调底层组装函数 —— 那样就绕开了来源校准这一步(第 25 轮缺陷的形状)。
+    expect(newMakerDraftRouteSource).not.toContain('buildDeviceLinkCreateArgs({');
   });
 
   // #807:设备切换 pill。三条产品裁决写进源码断言,防后续重构悄悄改掉。
@@ -221,9 +233,12 @@ describe('Shared create project picker', () => {
     expect(deviceSwitcherPillSource).toContain('if (devices.length === 0) return null');
     // 离线设备列出但禁用 —— 掉线时从列表消失会让用户以为配对丢了。
     expect(deviceSwitcherPillSource).toContain('disabled={!device.online}');
-    // 换设备一并清掉上一台的 workingDir/extraDirs(旧路径在新机器上不存在)。
+    // 换设备后停在这台设备的「对话」:上一台的项目路径在新机器上基本不存在,
+    // 留着会让用户以为项目跟过来了、发送时才在被控端 path guard 上失败。
     expect(newMakerDraftRouteSource).toContain('const handleDeviceChange = useCallback(');
-    expect(newMakerDraftRouteSource).toContain('deviceLinkDeviceId: deviceId,');
+    expect(newMakerDraftRouteSource).toContain(
+      'applyDraftTarget({ deviceId, deviceName, workingDir: null });',
+    );
   });
 
   // #807:跨设备纯对话。放宽后「选了设备」单独成立即可整套走对端(能力/provider/创建同口径),
@@ -251,8 +266,20 @@ describe('Shared create project picker', () => {
   // #807 review 修复:换工作区必须显式回传当前设备。store 的不变量是「改 workingDir 又不带
   // 设备字段就清设备」,不显式带会让选「对话」/换项目把设备悄悄清回本机。
   it('carries the current device when only the workspace changes', () => {
-    expect(newMakerDraftRouteSource).toContain('const keepDevice = {');
-    expect(newMakerDraftRouteSource).toContain('deviceLinkDeviceId: draft.deviceLinkDeviceId,');
+    // 工作区 picker 原样回传当前设备 → 转移动作判出 deviceChanged=false,只处理「换项目」那一半。
+    const handler = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const handleWorkingDirChange = useCallback('),
+    );
+    const body = handler.slice(0, handler.indexOf('    [applyDraftTarget'));
+    expect(body).toContain('deviceId: draft.deviceLinkDeviceId,');
+    expect(body).toContain('workingDir: dir,');
+    // 而那个动作**总是**显式带上设备字段,所以这条不变量对四条路径一次性成立,
+    // 不再依赖每个调用方各自记得拼一个 keepDevice。
+    const action = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const applyDraftTarget = useCallback('),
+    );
+    expect(action).toContain('deviceLinkDeviceId: req.deviceId,');
+    expect(action).toContain('deviceLinkDeviceName: req.deviceName,');
   });
 
   // #807 review 修复:设备真正从可选列表消失时把草稿收敛回本机,避免显示与实际目标不一致。
@@ -364,17 +391,17 @@ describe('Shared create project picker', () => {
   // sourceBranch 只在为空时才自动填充,用户在 A 上显式选的分支会一直跟到 B。浏览器路径早就重置
   // 了,picker 路径漏了 —— 而 picker 才是 #807 之后换项目的主路径。
   it('invalidates worktree state when the project picker switches workspaces', () => {
-    const handler = newMakerDraftRouteSource.slice(
-      newMakerDraftRouteSource.indexOf('const handleWorkingDirChange = useCallback('),
+    // 换工作区 = 换 repo,worktree 三态必须一起作废;但只在路径真的变了时 —— 重选当前项目不该
+    // 把用户刚打开的 worktree 开关又关掉。这条判据原先只补进了工作区 picker,设备域浏览器那条
+    // 路径漏了(它无条件重置);收敛之后两条都由同一个条件驱动。
+    const action = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const applyDraftTarget = useCallback('),
     );
-    const body = handler.slice(0, handler.indexOf('if (dir == null) {'));
-    // 只在路径真的变了时重置 —— 重选当前项目不该把 worktree 开关关掉。
-    expect(body).toContain('if (dir !== draft.workingDir) {');
-    expect(body).toContain('setWtEnabled(false);');
-    expect(body).toContain('setWtBaseRepo(null);');
-    expect(body).toContain("setWtSourceBranch('');");
-    // 判据依赖 draft.workingDir,必须在依赖数组里,否则闭包里比的是上一次渲染的值。
-    expect(handler.slice(0, handler.indexOf('  );'))).toContain('draft.workingDir,');
+    const wt = action.slice(action.indexOf('if (deviceChanged || workingDirChanged) {'));
+    const block = wt.slice(0, wt.indexOf('      }'));
+    expect(block).toContain('setWtEnabled(false);');
+    expect(block).toContain('setWtBaseRepo(null);');
+    expect(block).toContain("setWtSourceBranch('');");
   });
 
   // #807 review 第十四轮:compact 模式下按钮只剩图标 + 状态点,不渲染设备名 —— aria-label 只报
@@ -399,16 +426,18 @@ describe('Shared create project picker', () => {
   // mention chip,dlSel 与 extraDirs 仍被无条件打回默认值,用户选的远程模型/来源/权限和加好的
   // 引用目录会静默丢失。
   it('preserves runtime selection and extra dirs when browsing the same device', () => {
-    const handoff = newMakerDraftRouteSource.slice(
-      newMakerDraftRouteSource.indexOf('const deviceChanged = target.deviceId !== effectiveDeviceLinkDeviceId;'),
+    const action = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const applyDraftTarget = useCallback('),
     );
-    const untilReturn = handoff.slice(0, handoff.indexOf('return;'));
-    // dlSel 只在换设备时重种。
-    expect(untilReturn).toContain('if (deviceChanged) {\n          setDlSel(');
-    // extraDirs 只在换设备时清(不传则 store 保持原值)。
-    expect(untilReturn).toContain('...(deviceChanged ? { extraDirs: [] } : {}),');
+    // dlSel 只在换设备时重种;同机保留用户选择(下一条断言它还会按新能力重校)。
+    expect(action).toContain('if (deviceChanged) {\n          setDlSel(\n');
+    // extraDirs 只在换设备、或进入「对话」时清 —— 同机换项目那些目录仍然有效,
+    // 不传则 store 保持原值。
+    expect(action).toContain(
+      "...(deviceChanged || req.workingDir == null ? { extraDirs: [] } : {}),",
+    );
     // 但 worktree 三态照常重置 —— 换项目就是换 repo。
-    expect(untilReturn).toContain('setWtEnabled(false);');
+    expect(action).toContain('if (deviceChanged || workingDirChanged) {');
   });
 
   // #807 review 第十二轮:in-flight 保护要覆盖**工作区** pill,不只是设备 pill —— 否则用户点了
@@ -426,17 +455,37 @@ describe('Shared create project picker', () => {
     );
   });
 
-  // #807 review 第十二轮:同一台机器上换项目不该剥 mention chip —— 文件系统没变,
-  // 把用户写好的 @file/@dir/@agent 无声清掉是功能退化。
-  it('only strips mention chips when the target device actually changes', () => {
-    const handoff = newMakerDraftRouteSource.slice(
-      newMakerDraftRouteSource.indexOf('清除草稿中基于本地 / **上一台**设备文件系统'),
+  /**
+   * ⚠️ 这条的结论在第 29 轮被**推翻**了,保留原委作为记录。
+   *
+   * 第十二轮我判断「同一台机器上换项目不该剥 mention chip —— 文件系统没变」,并据此加了 gate。
+   * 那个判断建立在一个错误前提上:以为 chip 存绝对路径。实际上 ChatInput 把 file/dir chip 的
+   * `path` 存成**项目相对**路径(`attrs.path = item.relPath`,源码注释原文「for files/dirs we
+   * stash the relative path as-is」),agent chip 是 `.claude/agents/<name>.md`,同样相对。
+   *
+   * 于是解析基准是 workingDir 而不是文件系统:同机从项目 X 换到 Y,`@src/foo.ts` 会解析到 Y 里的
+   * 同名文件。这比换设备更隐蔽 —— `src/index.ts`、`.claude/agents/reviewer.md` 这类路径在同机两个
+   * 项目间恰好都存在的概率相当高,agent 于是读到毫不相关的内容而没有任何报错。
+   *
+   * 现在 chip 按 `deviceChanged || workingDirChanged` 剥;而路径型**附件**(存绝对路径)仍然只在
+   * 换设备时丢 —— 原先两件事共用一个条件,所以必然有一边是错的。
+   */
+  it('strips project-relative mention chips whenever the project changes, not just the device', () => {
+    const action = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const applyDraftTarget = useCallback('),
     );
-    const untilPatch = handoff.slice(0, handoff.indexOf('skipDefaultsRefetchRef'));
-    // 判据现在收在 deviceChanged 变量里(同一 handler 内多处复用)。
-    expect(untilPatch).toContain('if (deviceChanged) {');
-    // chip 剥离 + 路径型附件丢弃都在 helper 里(第十八轮收拢),这里只断言它被 gate 住地调到。
-    expect(untilPatch).toContain('cleanupCrossFilesystemDraftContext();');
+    expect(action).toContain(
+      'if (deviceChanged || workingDirChanged) stripProjectRelativeMentions();',
+    );
+    // 附件是另一个条件 —— 别再把这两件事合回一个 gate。
+    expect(action).toContain('if (deviceChanged) dropPathBackedAttachments();');
+    // 拆分后的两个函数各自绑住自己的解析基准,注释里写明了理由。
+    expect(newMakerDraftRouteSource).toContain('const stripProjectRelativeMentions = useCallback(');
+    expect(newMakerDraftRouteSource).toContain('const dropPathBackedAttachments = useCallback(');
+    // 旧的合并式 helper 必须消失,否则又会有人按单一条件调它。断言声明与调用两种形态,
+    // 而不是裸名字 —— 拆分后的函数注释里会提到这个旧名作为历史记录。
+    expect(newMakerDraftRouteSource).not.toContain('const cleanupCrossFilesystemDraftContext');
+    expect(newMakerDraftRouteSource).not.toContain('cleanupCrossFilesystemDraftContext()');
   });
 
   // #807 review 第十二轮:pending 删除集合按设备分层,否则 A 上未结束的 /x 会被当成 B 的待删除项,
@@ -502,13 +551,22 @@ describe('Shared create project picker', () => {
   // #807 review 第八轮:两处对称性缺口,都是前几轮修复的直接后果。
   it('resets worktree state during the automatic local fallback too', () => {
     // 远程项目开过 worktree、设备随后被解除配对 → wtEnabled/wtBaseRepo 残留 → 下一次本机发送会进
-    // worktree 分支,拿上一台设备的仓库路径去建。与 handleDeviceChange 对称。
+    // worktree 分支,拿上一台设备的仓库路径去建。
+    //
+    // 回落路径历史上漏得最多(chip、附件、worktree 三态各漏过一次),而且它原先还**隐式**依赖
+    // seed effect 的 !isDeviceLinkDraft 分支去清远程运行配置 —— 能跑,但没人能一眼看出为什么。
+    // 现在它只是「转移到 本机 + 对话」,所有连带清理由同一个动作按 deviceChanged 推导。
     const effect = newMakerDraftRouteSource.slice(
       newMakerDraftRouteSource.indexOf('selected device is no longer selectable'),
     );
-    const body = effect.slice(0, effect.indexOf('patchDraft('));
-    expect(body).toContain('setWtEnabled(false);');
-    expect(body).toContain('setWtBaseRepo(null);');
+    const body = effect.slice(0, effect.indexOf('  }, ['));
+    expect(body).toContain(
+      'applyDraftTarget({ deviceId: null, deviceName: null, workingDir: null });',
+    );
+    // 依赖数组要带上那个动作,否则闭包吃旧的 draft.workingDir / attachments。
+    expect(effect.slice(effect.indexOf('  }, ['), effect.indexOf('  }, [') + 200)).toContain(
+      'applyDraftTarget',
+    );
   });
 
   it('gates the failed-delete restoration by current device as well', () => {
@@ -543,15 +601,17 @@ describe('Shared create project picker', () => {
   // capabilities/defaults 种下新设备的 dlSel 并把它记成「已 seed」,新设备真值到达后又被 guard
   // 挡住重种 —— composer 于是向新设备提交上一台的 model / provider / permission。
   it('invalidates the previous device remote-default snapshots before switching', () => {
-    const handler = newMakerDraftRouteSource.slice(
-      newMakerDraftRouteSource.indexOf('const handleDeviceChange = useCallback('),
+    const action = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const applyDraftTarget = useCallback('),
     );
-    const body = handler.slice(0, handler.indexOf('patchDraft('));
-    expect(body).toContain('setDlSel(null);');
-    expect(body).toContain('dlSeedKeyRef.current = null;');
-    expect(body).toContain('setRemoteDraftState({ loaded: false, value: null });');
-    // worktree 上下文同属上一台机器。
-    expect(body).toContain('setWtEnabled(false);');
+    const body = action.slice(0, action.indexOf('      patchDraft({'));
+    // 没有 inline 快照(设备 pill / 回落两条路径)且换了设备 → 打回未加载,交给 seed effect。
+    const fallback = body.slice(body.indexOf('} else if (deviceChanged) {'));
+    expect(fallback).toContain('setDlSel(null);');
+    expect(fallback).toContain('dlSeedKeyRef.current = null;');
+    expect(fallback).toContain('setRemoteDraftState({ loaded: false, value: null });');
+    // 有 inline 快照(设备域浏览器)则当场 seed,并置 skip flag 避免 effect 再拉一次覆盖掉。
+    expect(body).toContain('skipDefaultsRefetchRef.current = true;');
   });
 
   // #807 review 第四轮:四个死角,都是前几轮修复留下的。
@@ -567,13 +627,18 @@ describe('Shared create project picker', () => {
   });
 
   it('strips remote mention chips during the automatic local fallback too', () => {
-    // 回落 effect 绕过 handleDeviceChange,要自己做同款清理,否则对着远程机器建的 @file/@dir
-    // 会留在 composer,下一次本机发送被当成本机路径送进去。
+    // 回落时草稿里对着远程机器建的 @file/@dir 必须剥掉,否则下一次本机发送被当成本机路径送进去。
+    // 这条以前要求回落 effect **自己**调清理(它绕过了两个显式 handler);现在它走同一个转移动作,
+    // 于是「回落 = deviceChanged」这一个事实就同时保证了 chip 与附件都被处理 —— 不必再逐条盯。
     const effect = newMakerDraftRouteSource.slice(
       newMakerDraftRouteSource.indexOf('selected device is no longer selectable'),
     );
-    expect(effect.slice(0, effect.indexOf('patchDraft('))).toContain(
-      'cleanupCrossFilesystemDraftContext();',
+    expect(effect.slice(0, effect.indexOf('  }, ['))).toContain('applyDraftTarget({ deviceId: null');
+    const action = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const applyDraftTarget = useCallback('),
+    );
+    expect(action).toContain(
+      'if (deviceChanged || workingDirChanged) stripProjectRelativeMentions();',
     );
   });
 
@@ -623,36 +688,54 @@ describe('Shared create project picker', () => {
   // 会话、第一个空着永久滞留。回流必须走 refreshRemoteDeviceSessions:它不抛(瞬态退避重试、
   // 永久错误返回 'gave-up'),且认 snapshot epoch、有界快照按 merge 落库。
   it('routes post-create mirror refresh through the non-throwing shared helper', () => {
-    expect(newMakerDraftRouteSource).toContain(
-      'const refreshResult = await refreshRemoteDeviceSessions(deviceId, deviceName);',
+    // 回流本体现在住在 commitRemoteSessionHandoff 里(见下一条断言:两条路径都只调它)。
+    expect(remoteSessionHandoffSource).toContain(
+      'const refreshResult = await refreshRemoteDeviceSessions(p.deviceId, p.deviceName);',
     );
-    // 两条远程创建路径都得换掉 —— 只改一半等于留着另一条同样的路。
-    expect(
-      newMakerDraftRouteSource.match(/await refreshRemoteDeviceSessions\(deviceId, deviceName\)/g)
-        ?.length,
-    ).toBe(2);
     // 手写回流必须彻底消失,否则提交点后仍有可抛的一步。
     expect(newMakerDraftRouteSource).not.toContain("'local-db:sessions:list'");
     expect(newMakerDraftRouteSource).not.toContain('setDeviceSessions(');
+    // 组件也不该再自己 import 回流函数 —— 它只经 handoff 使用。
+    expect(newMakerDraftRouteSource).not.toContain('refreshRemoteDeviceSessions');
   });
 
   // #807 review 第十七轮:归属必须在**回流之前**登记。回流失败(gave-up / superseded)时镜像里
   // 没有这条会话,getSessionDeviceId 返回 undefined,makerApiFor / goalApiFor 就把首条消息与
   // setGoal 发给本机 maker。行为契约本身由 remoteProjectsStore.test.ts 覆盖,这里只钉接线顺序。
   it('pins the remote session origin before refreshing the mirror', () => {
-    const pin = 'remoteProjectsStore.pinSessionOrigin(deviceId, remoteSessionId);';
-    const refresh = 'await refreshRemoteDeviceSessions(deviceId, deviceName)';
-    // 两条远程创建路径都要钉。
-    expect((newMakerDraftRouteSource.match(/pinSessionOrigin\(deviceId, remoteSessionId\)/g) ?? []).length).toBe(2);
-    // 顺序:每一处 pin 都必须在紧随其后的那次 refresh 之前。
-    let cursor = 0;
-    for (let i = 0; i < 2; i++) {
-      const pinAt = newMakerDraftRouteSource.indexOf(pin, cursor);
-      const refreshAt = newMakerDraftRouteSource.indexOf(refresh, pinAt);
-      expect(pinAt).toBeGreaterThan(-1);
-      expect(refreshAt).toBeGreaterThan(pinAt);
-      cursor = refreshAt;
-    }
+    // 顺序不变量现在只有一处可改。原来这条断言在组件源码上数「pin 出现 2 次」并逐处校验顺序 ——
+    // 那锁的是**重复本身**:两处逐字重复的代码,漏改一处不会有任何编译或测试信号,而这三条
+    // 不变量恰好各自都曾只在一条路径上被修好过(第 14 / 17 / 20 轮)。收敛之后改锁两件事:
+    // ① handoff 内部三步顺序正确;② 两条创建路径都只经 handoff(见下一条)。
+    const pinAt = remoteSessionHandoffSource.indexOf(
+      'remoteProjectsStore.pinSessionOrigin(p.deviceId, p.remoteSessionId)',
+    );
+    const rowAt = remoteSessionHandoffSource.indexOf('remoteProjectsStore.mergeDeviceSessions(');
+    const refreshAt = remoteSessionHandoffSource.indexOf('await refreshRemoteDeviceSessions(');
+    expect(pinAt).toBeGreaterThan(-1);
+    // 钉子必须在临时行之前,临时行必须在回流之前。
+    expect(rowAt).toBeGreaterThan(pinAt);
+    expect(refreshAt).toBeGreaterThan(rowAt);
+  });
+
+  // 替代原先「两处各自都得有 pin + merge + refresh」的三组计数断言。锁的东西没减少反而更强:
+  // 那三条不变量的**内容**由上一条断言在 handoff 里钉死,这里只需要保证没有哪条创建路径绕过它。
+  // 将来第三条远程创建路径(例如侧边栏直建)漏调 handoff 时,这条会直接失败。
+  it('routes every remote create path through the shared handoff', () => {
+    const handoffCalls =
+      newMakerDraftRouteSource.match(/await commitRemoteSessionHandoff\(\{/g) ?? [];
+    expect(handoffCalls.length).toBe(2);
+    // 组件不得自己碰这三步中的任何一步 —— 那就等于又开了一条绕过不变量的路。
+    expect(newMakerDraftRouteSource).not.toContain('pinSessionOrigin(');
+    expect(newMakerDraftRouteSource).not.toContain('mergeDeviceSessions(');
+    expect(newMakerDraftRouteSource).not.toContain('buildProvisionalRemoteSession(');
+    // 两处都得把实际提交的 args 交给 handoff:临时行按它组装,不各自再推一遍
+    // model / permission / workspaceKind。
+    expect((newMakerDraftRouteSource.match(/\n\s+createArgs,\n/g) ?? []).length).toBe(2);
+    // workDir 取 create 响应(纯对话的运行目录由对端分配,控制端猜不到)。
+    expect(
+      (newMakerDraftRouteSource.match(/workDir: created\?\.workDir,/g) ?? []).length,
+    ).toBe(2);
   });
 
   // #807 review 第十七轮:handleSend 的第一个 await 是协同策略重取,它在上锁之前 —— 期间两个
@@ -682,19 +765,20 @@ describe('Shared create project picker', () => {
   // 附件只把 path 透传给模型,而 rehomeDraftAttachments 只重整图片 —— 上一台机器的路径会随首条
   // 消息发到新设备,读不到、或读到同路径下一个毫不相关的文件。
   it('drops path-backed attachments on every device switch', () => {
-    // 换文件系统的清理只有一份实现(第十八轮收成 helper):三条路径此前分别漏过 chip / 附件 /
-    // 两样都漏,每次都是同一件事只做了一部分。
     const helper = newMakerDraftRouteSource.slice(
-      newMakerDraftRouteSource.indexOf('const cleanupCrossFilesystemDraftContext = useCallback('),
+      newMakerDraftRouteSource.indexOf('const dropPathBackedAttachments = useCallback('),
     );
     const body = helper.slice(0, helper.indexOf('}, ['));
-    // chip 与附件在同一个函数里一起做。
-    expect(body).toContain('stripLocalMentionChips(composerDraft.text)');
     expect(body).toContain(".filter((f) => f.category !== 'image')");
     expect(body).toContain('attachmentState.removeFile(f.id)');
     // 图片不动:它们走 xdt-image:// 缓存,不依赖对端文件系统。
     expect(body).toContain("t('newChat.deviceSwitcher.attachmentsDropped'");
-    // 全文恰好两处非图片过滤,各有明确分工:① 这个换文件系统的同步清理;② 第二十四轮加的不变量
+    // chip 剥离在**另一个**函数里(不同的解析基准,不同的触发条件)。
+    expect(body).not.toContain('stripLocalMentionChips');
+    expect(newMakerDraftRouteSource).toContain(
+      'const stripProjectRelativeMentions = useCallback(() => {',
+    );
+    // 全文恰好两处非图片过滤,各有明确分工:① 这个换设备时的同步清理;② 第二十四轮加的不变量
     // 收敛 effect(兜住在途摄入等所有入口)。出现第三处就说明又有人在某条路径上手写了一份。
     expect(
       (newMakerDraftRouteSource.match(/\.filter\(\(f\) => f\.category !== 'image'\)/g) ?? []).length,
@@ -702,24 +786,64 @@ describe('Shared create project picker', () => {
     expect(newMakerDraftRouteSource).toContain('「远程草稿绝不携带控制端路径附件」的**收敛器**');
   });
 
-  // #807 review 第十八轮:换文件系统的三条路径必须都调同一个清理 —— ① 设备 pill 直接切;
-  // ② 设备域浏览器换到另一台机器上的项目;③ 所选设备失效后自动回落本机。第三条绕过前两个
-  // 显式 handler,前一轮只补了 ①②,回落路径的远程绝对路径会被当成本机路径送进下一次发送。
-  it('runs the cross-filesystem cleanup on all three device-switch paths', () => {
-    const calls = newMakerDraftRouteSource.match(/cleanupCrossFilesystemDraftContext\(\)/g) ?? [];
-    // 1 处声明体外的调用 ×3(声明本身是 `= useCallback(() => {`,不匹配这个模式)。
-    expect(calls.length).toBe(3);
-    // ③ 自动回落:effect 里必须调,且它的依赖数组要带上 helper(否则闭包吃旧 attachments)。
-    const effect = newMakerDraftRouteSource.slice(
-      newMakerDraftRouteSource.indexOf(
-        "log.warn('[new-maker] selected device is no longer selectable",
-      ),
+  /**
+   * ─── 草稿运行目标的转移:两条主不变量 ────────────────────────────────────────
+   *
+   * 这两条替代了先前十余条按「路径 × 状态」逐格 pin 的断言。那种写法锁的是矩阵的每一格,
+   * 而矩阵本身就是缺陷来源:4 条转移路径 × 9 处连带状态,漏掉一格既不会编译失败也不会有测试
+   * 变红,#807 的 review 里约十轮都在补格子(切设备漏 worktree 三态、同机换项目误重置运行配置、
+   * 指向设备前忘了作废快照、回落路径两样清理都漏、picker 换项目不作废 worktree……)。
+   *
+   * 收敛之后只需要锁两件事:① 四条路径都**只声明目标**,不自己做副作用;② 每处连带状态绑对了
+   * 它真正依赖的那一半(设备 / 项目)。第五条路径出现时,①会直接失败,而②保证它自动是对的。
+   */
+  it('routes every draft-target transition through the single action', () => {
+    // 四条路径:设备 pill、设备域浏览器选项目、工作区 picker、所选设备失效后的自动回落。
+    // 声明本身是 `= useCallback(` 不匹配这个模式,所以数出来的就是调用点。
+    const calls = newMakerDraftRouteSource.match(/applyDraftTarget\(\{/g) ?? [];
+    expect(calls.length).toBe(4);
+    // 组件里不得再有任何一处手写这些副作用 —— 手写一处就等于又开了一条绕过推导的路。
+    // patchDraft 仍可出现(入场清 extraDirs、发送后复位),但不得再带设备字段。
+    expect(newMakerDraftRouteSource).not.toContain('deviceLinkDeviceId: deviceId,');
+    expect(newMakerDraftRouteSource).not.toContain('deviceLinkDeviceId: target.deviceId,');
+    expect(newMakerDraftRouteSource).not.toContain('deviceLinkDeviceId: null,');
+    // worktree 三态与三个 evict 只能出现在那个动作里(各 1 处)。
+    // 注:`setRemoteDraftState({ loaded: false, … })` 不在此列 —— defaults effect 自己的早返回与
+    // 重拉前重置也用它,那是它自身的正常逻辑,不是转移路径的重复实现。
+    for (const marker of [
+      'setWtEnabled(false);',
+      'setWtBaseRepo(null);',
+      'evictDeviceCapabilities(',
+      'evictDeviceProviders(',
+      'evictDeviceGitSafetySettings(',
+    ]) {
+      const n = newMakerDraftRouteSource.split(marker).length - 1;
+      expect({ marker, n }).toEqual({ marker, n: 1 });
+    }
+  });
+
+  it('binds each connected state to the half of the target it actually depends on', () => {
+    const action = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const applyDraftTarget = useCallback('),
     );
-    const untilDeps = effect.slice(0, effect.indexOf('}, ['));
-    expect(untilDeps).toContain('cleanupCrossFilesystemDraftContext();');
-    expect(effect.slice(effect.indexOf('}, ['), effect.indexOf('}, [') + 220)).toContain(
-      'cleanupCrossFilesystemDraftContext,',
+    const body = action.slice(0, action.indexOf('      patchDraft({'));
+    // 变化判据本身。
+    expect(body).toContain('const deviceChanged = req.deviceId !== prevDeviceId;');
+    expect(body).toContain('const workingDirChanged = req.workingDir !== draft.workingDir;');
+    // mention chip 存**项目相对**路径 → 设备或项目任一变化都要剥(第 29 轮 P1)。
+    expect(body).toContain(
+      'if (deviceChanged || workingDirChanged) stripProjectRelativeMentions();',
     );
+    // 路径型附件存**绝对**路径 → 只有换设备才失效,同机换项目不该丢用户的附件。
+    expect(body).toContain('if (deviceChanged) dropPathBackedAttachments();');
+    // 三个无 TTL 快照绑**目标**设备:指过去之前一律作废(回落本机时 req.deviceId 为 null → no-op)。
+    expect(body).toContain('if (req.deviceId) {');
+    expect(body).toContain('evictDeviceCapabilities(req.deviceId);');
+    // worktree 三态绑 (设备, 项目) 二元组 = 绑 repo。
+    expect(body).toContain('if (deviceChanged || workingDirChanged) {');
+    // 判据读 draft.workingDir,必须在依赖数组里,否则闭包比的是上一次渲染的值。
+    const deps = action.slice(action.indexOf('    [', action.indexOf('patchDraft({')));
+    expect(deps.slice(0, deps.indexOf('  );'))).toContain('draft.workingDir,');
   });
 
   // #807 review 第十九轮:被控端能力 / 供应商 / Git safety 快照是「拉一次、无 TTL、只在设备下线
@@ -727,18 +851,30 @@ describe('Shared create project picker', () => {
   // effect 虽因 deviceId 变化重跑,却直接命中旧缓存,composer 会向它提交已不支持的 model /
   // provider。**每一条**把草稿指向某台被控设备的路径都必须先 evict。
   it('evicts the target device snapshots on every path that points the draft at a device', () => {
-    // ① 设备 pill 直接切:早返回已排除「重选同一设备」,所以 evict 后必然 cache miss 自行 fetch,
-    //    不需要像浏览器路径那样再 prefetch。
-    const handler = newMakerDraftRouteSource.slice(
-      newMakerDraftRouteSource.indexOf('const handleDeviceChange = useCallback('),
+    // 本路由的三条转移路径现在共用一处 evict —— 它绑「目标设备」,所以只要走了转移动作就一定做到。
+    const action = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const applyDraftTarget = useCallback('),
     );
-    const untilPatch = handler.slice(0, handler.indexOf('patchDraft('));
-    expect(untilPatch).toContain('evictDeviceCapabilities(deviceId);');
-    expect(untilPatch).toContain('evictDeviceProviders(deviceId);');
-    expect(untilPatch).toContain('evictDeviceGitSafetySettings(deviceId);');
-    // ② 设备域浏览器路径既有的 evict 不许被删。
-    expect(newMakerDraftRouteSource).toContain('evictDeviceCapabilities(target.deviceId);');
-    // ③ 侧边栏点远程项目进草稿(既有路径,同类缺口)。
+    const evictBlock = action.slice(action.indexOf('if (req.deviceId) {'));
+    expect(evictBlock.slice(0, evictBlock.indexOf('      }'))).toContain(
+      'evictDeviceCapabilities(req.deviceId);',
+    );
+    expect(evictBlock.slice(0, evictBlock.indexOf('      }'))).toContain(
+      'evictDeviceProviders(req.deviceId);',
+    );
+    expect(evictBlock.slice(0, evictBlock.indexOf('      }'))).toContain(
+      'evictDeviceGitSafetySettings(req.deviceId);',
+    );
+    // 设备域浏览器那条额外 prefetch(它允许「目标就是当前设备」,deps 不变 → hook effect 不重跑,
+    // 只有 subscriber 能送新数据),且必须排在转移动作**之后** —— 否则刚 prefetch 的又被 evict 掉。
+    const handler = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const handleRemoteProjectAdded = useCallback('),
+    );
+    const applyAt = handler.indexOf('applyDraftTarget({');
+    const prefetchAt = handler.indexOf('prefetchDeviceCapabilities(target.deviceId)');
+    expect(applyAt).toBeGreaterThan(-1);
+    expect(prefetchAt).toBeGreaterThan(applyAt);
+    // 侧边栏点远程项目进草稿是**另一个组件**的路径,不经本路由的转移动作,自己 evict。
     expect(sidebarUpperSource).toContain('evictDeviceCapabilities(project.deviceLinkDeviceId);');
     expect(sidebarUpperSource).toContain('evictDeviceProviders(project.deviceLinkDeviceId);');
     expect(sidebarUpperSource).toContain(
@@ -750,22 +886,16 @@ describe('Shared create project picker', () => {
   // (delayed-create effect 要 `session` 非空且 workingDir 非空)。回流失败、尤其老被控端永久
   // 拿不到 sessions:list 时永远不会有权威快照,那条消息就永久不发,而草稿已经清掉。
   it('seeds a provisional session row so the first message can hand off without the snapshot', () => {
-    // 两条远程创建路径都要补,且都必须在回流之前(回流成功会整片替换,顺序无所谓;
-    // 回流失败时只有先补的这条行能救交接)。
-    const seeds =
-      newMakerDraftRouteSource.match(/buildProvisionalRemoteSession\(\{/g) ?? [];
-    expect(seeds.length).toBe(2);
+    // 补行这一步同样搬进了 handoff(两条路径都走它,见上)。这里锁它的三条细节:
     // workDir 必须取 create 响应,不能拿草稿的 workingDir 顶替 —— 纯对话的运行目录由对端分配。
-    expect(newMakerDraftRouteSource).toContain('workDir: created.workDir,');
-    expect(newMakerDraftRouteSource).toContain('if (created?.workDir) {');
+    expect(remoteSessionHandoffSource).toContain('workDir: p.workDir,');
+    // 缺 workDir 时跳过补行,而不是编一个目录:delayed-create 的门槛正是它非空。
+    expect(remoteSessionHandoffSource).toContain('if (p.workDir) {');
     // 用 merge 而非 set:不能把该设备已缓存的其它会话冲掉。
-    expect(
-      (newMakerDraftRouteSource.match(/remoteProjectsStore\.mergeDeviceSessions\(/g) ?? []).length,
-    ).toBe(2);
-    // 临时行按**实际提交的** args 组装,不各自再推一遍 model / permission / workspaceKind。
-    expect(
-      (newMakerDraftRouteSource.match(/args: createArgs,/g) ?? []).length,
-    ).toBe(2);
+    expect(remoteSessionHandoffSource).toContain('remoteProjectsStore.mergeDeviceSessions(');
+    expect(remoteSessionHandoffSource).not.toContain('setDeviceSessions(');
+    // 临时行按**实际提交的** args 组装,不再推一遍 model / permission / workspaceKind。
+    expect(remoteSessionHandoffSource).toContain('args: p.createArgs,');
   });
 
   // #807 review 第二十二轮:换设备时的清理只管「切换那一刻已在托盘里」的附件,**先选设备、之后
@@ -778,19 +908,28 @@ describe('Shared create project picker', () => {
     const body = guard.slice(0, guard.indexOf('}, ['));
     // 本机草稿零开销:直接返回原对象,不包装。
     expect(body).toContain('if (!isDeviceLinkDraft) return attachmentState;');
-    // 只放图片过;非图片计数后 toast 说明,而不是等发送时静默丢掉。
-    expect(body).toContain("f.type.startsWith('image/')");
+    // 判据必须与下游**同口径**(第 29 轮 P1):useAttachments 的分类完全不看 MIME —— 先按扩展名
+    // categorizeFile,认不出来才 peekFileHeader 按魔数推断。原来这里用 `f.type.startsWith('image/')`,
+    // 于是 Electron 给空 / 通用 File.type 时(某些平台与拖拽源如此,重命名过的图片更是必然),
+    // 一张下游明明能识别的图片会被拦掉,而且只在远程草稿下如此,用户切回本机就能加。
+    // 断言旧代码形态而非裸片段 —— 上面那段注释里会逐字提到它作为历史记录。
+    expect(body).not.toContain("incoming.filter((f) => f.type.startsWith('image/'))");
+    expect(body).toContain('const ext = extractExt(f.name);');
+    expect(body).toContain('const category = ext ? categorizeFile(ext) : categorizeByFilename(f.name);');
+    // 认不出类别时**放行**,交给下游的文件头推断 + 收敛器兜底 —— 闸门宁可放过,绝不误拒。
+    expect(body).toContain('if (!category) return false;');
+    expect(body).toContain("return category !== 'image';");
     expect(body).toContain("t('newChat.deviceSwitcher.attachmentsRemoteUnsupported'");
     // 三个入口(ChatInput + 本路由的拖拽 + 延迟分类的拖拽)都必须走闸门,不能有一个直连原对象。
     expect(newMakerDraftRouteSource).toContain('attachmentState={guardedAttachmentState}');
     expect(
       (newMakerDraftRouteSource.match(/guardedAttachmentState\.addFiles\(/g) ?? []).length,
     ).toBe(2);
-    // 唯一一处直连原对象的 addFiles 必须是闸门内部那次(images 放行);此外一处都不许有。
+    // 唯一一处直连原对象的 addFiles 必须是闸门内部那次(放行的那批);此外一处都不许有。
     expect(
       (newMakerDraftRouteSource.match(/(?<!guarded)attachmentState\.addFiles\(/g) ?? []).length,
     ).toBe(1);
-    expect(body).toContain('await attachmentState.addFiles(images);');
+    expect(body).toContain('await attachmentState.addFiles(passed);');
   });
 
   // #807 review 第二十二轮:ExtraDirsButton 开的是控制端原生目录对话框,选出来的本机路径发到对端
@@ -861,22 +1000,19 @@ describe('Shared create project picker', () => {
   // 选中的模型 / 不再支持某个 permission 时,失效值会一直留在草稿里:发送被 gate 拦住变成「点了
   // 没反应」,「新建目标」更糟,直接把失效值提交给 maker:create-session。
   it('revalidates a preserved remote selection against the freshly fetched capabilities', () => {
-    const handoff = newMakerDraftRouteSource.slice(
-      newMakerDraftRouteSource.indexOf(
-        'const deviceChanged = target.deviceId !== effectiveDeviceLinkDeviceId;',
-      ),
+    const action = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const applyDraftTarget = useCallback('),
     );
-    const untilPatch = handoff.slice(0, handoff.indexOf('patchDraft('));
-    // 同设备分支不能什么都不做 —— 必须拿 freshCaps 重新校准。
-    expect(untilPatch).toContain('} else {');
-    expect(untilPatch).toContain('setDlSel((prev) =>');
+    const body = action.slice(0, action.indexOf('      patchDraft({'));
+    // 同设备分支不能什么都不做 —— 上面刚把 seedKey 记成「已 seed」,后续 capabilities 更新不会
+    // 再重种,失效值会一直留着:发送被 gate 拦住变成「点了没反应」,建目标更糟,会直接提交出去。
+    expect(body).toContain('} else {');
+    expect(body).toContain('setDlSel((prev) =>');
     // 复用既有纯函数做 clamp,不另写一套;把用户当前选择当 remoteDraft 传进去。
-    expect(untilPatch).toContain('model: prev.model,');
-    expect(untilPatch).toContain('permissionMode: prev.permissionMode,');
+    expect(body).toContain('model: prev.model,');
+    expect(body).toContain('permissionMode: prev.permissionMode,');
     // 三处调用:换设备重种、同设备按 prev 校准、prev 为空时退回正常 seed。
-    expect(
-      (untilPatch.match(/resolveDeviceLinkDraftDefaults\(/g) ?? []).length,
-    ).toBeGreaterThanOrEqual(3);
+    expect((body.match(/resolveDeviceLinkDraftDefaults\(/g) ?? []).length).toBeGreaterThanOrEqual(3);
   });
 
   // #807 review 第二十七轮:设备菜单行原来只有 hover / disabled 两态,且 outline-none 去掉了浏览器

@@ -16,7 +16,10 @@
  * agentKind 归一到 maker-core 形态('cc' → 'claude-code');其余字段原样透传。
  */
 
+import { effectiveSourceIdForModel, type ProviderView } from '@cindy/model-providers';
+
 import type { Session, WorkspaceKind } from '@/lib/ccAgent.types';
+import type { AgentKind } from '@/hooks/useAgentCapabilities';
 import type { Effort, PermissionMode } from '@/lib/userPreferences.types';
 
 export interface DeviceLinkCreateParams {
@@ -90,6 +93,73 @@ export function buildDeviceLinkCreateArgs(p: DeviceLinkCreateParams): DeviceLink
     // providerId 同理:仅非空显式来源才放进 args;null/空 → 不带 → 被控端 provider_id 留 NULL(默认路由)。
     ...(p.providerId ? { providerId: p.providerId } : {}),
   };
+}
+
+/**
+ * 一次远程建会话要提交的「候选值」。两个来源:
+ *   · 普通发送 —— ChatInput 回传的实时值(用户界面上此刻看到的那一组);
+ *   · 新建目标 —— 组件级派生值(弹窗独立于 ChatInput,拿不到回传)。
+ * 两者形状相同,于是能过同一道校准。
+ */
+export interface DeviceLinkSubmissionCandidate {
+  model: string;
+  effort: Effort;
+  permissionMode: PermissionMode;
+  fastMode: boolean;
+  /** 用户显式选中的被控端来源;null / 省略 = 跟随被控端默认路由。 */
+  providerId?: string | null;
+}
+
+export interface DeviceLinkSubmissionParams {
+  agentKind: 'cc' | 'codex';
+  workingDir?: string;
+  id?: string;
+  extraDirs?: string[];
+  candidate: DeviceLinkSubmissionCandidate;
+  /** **被控端**供应商目录(useDeviceProviders 经隧道拉到的那一份)。 */
+  deviceProviders: ProviderView[];
+  capabilityAgentKind: AgentKind;
+}
+
+/**
+ * 远程建会话参数的**唯一入口**:校准候选值 → 组装 args。
+ *
+ * 为什么必须只有一个入口(#807 review 第 25 轮的结构性教训):在此之前「发送」与「新建目标」
+ * 各自推导这组值 —— 发送用 ChatInput 回传的实时值,新建目标用组件级派生值 —— 最后才汇进同一个
+ * buildDeviceLinkCreateArgs。于是任何一条校准规则只要漏加在一边,就会长出一个**只在其中一条路径
+ * 上复现**的缺陷:那一轮的 providerId 正是如此,普通发送没事(ChatInput 内部会用 effectiveSourceId
+ * 重算、失效即回落),新建目标却把一个未认证的来源直接写进被控端 sessions.provider_id,新目标起不来。
+ * 同一个模具还压出过「新建目标不支持 device-only 草稿」(第 11 轮)与另外两处对称性缺口。
+ *
+ * 所以两条路径现在都只提供**候选值**,校准与组装都发生在这里 —— 规则改一次,两条路径同时受益,
+ * 想只改一边都做不到。
+ *
+ * 为什么发送路径也要在这里再校准一次(它以前靠 ChatInput 内部重算):那等于把正确性寄托在**另一个
+ * 组件的实现细节**上。ChatInput 今天恰好会重算,不代表它有义务永远重算;而这里离 `maker:create-session`
+ * 只有一步,是「提交什么就校准什么」最后也最可靠的位置。重复校准无副作用:仍有效的来源原样返回。
+ *
+ * 用 effectiveSourceIdForModel 而不是 actualSourceIdForModel —— 后者的注释明确要求「新路由选择
+ * (新会话 / 切模型 / worker / schedule)一律用前者」,而建会话与建目标都是新路由选择。失效时落到
+ * 被控端对该模型的原生默认来源(也正是 ChatInput 高亮给用户看的那一个),比一律置 null 更贴合所见即所得。
+ */
+export function resolveDeviceLinkSubmission(p: DeviceLinkSubmissionParams): DeviceLinkCreateArgs {
+  const providerId = effectiveSourceIdForModel(
+    p.deviceProviders,
+    p.candidate.providerId ?? null,
+    p.candidate.model,
+    p.capabilityAgentKind,
+  );
+  return buildDeviceLinkCreateArgs({
+    agentKind: p.agentKind,
+    id: p.id,
+    workingDir: p.workingDir,
+    model: p.candidate.model,
+    effort: p.candidate.effort,
+    permissionMode: p.candidate.permissionMode,
+    fastMode: p.candidate.fastMode,
+    extraDirs: p.extraDirs,
+    providerId,
+  });
 }
 
 export interface ProvisionalRemoteSessionParams {

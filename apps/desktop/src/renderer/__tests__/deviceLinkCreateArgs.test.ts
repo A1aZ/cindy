@@ -11,10 +11,43 @@
  */
 import { describe, it, expect } from 'vitest';
 
+import type { CatalogModel, ProviderView } from '@cindy/model-providers';
+
 import {
   buildDeviceLinkCreateArgs,
   buildProvisionalRemoteSession,
+  resolveDeviceLinkSubmission,
 } from '@/features/cc-agent/deviceLinkCreateArgs';
+
+function catalogModel(id: string): CatalogModel {
+  return {
+    id,
+    name: id,
+    group: 'test',
+    sortOrder: 0,
+    contextWindow: 200_000,
+    efforts: [],
+    defaultEffort: null,
+    supportsFastMode: false,
+    status: 'active',
+  } as CatalogModel;
+}
+
+/** 被控端供应商目录的最小形态(与 draftModelCalibration.test.ts 同款构造)。 */
+function deviceProvider(id: string, connected: boolean, modelIds: string[]): ProviderView {
+  return {
+    id,
+    name: id,
+    source: 'builtin',
+    agents: ['claude-code'],
+    models: { 'claude-code': modelIds.map(catalogModel) },
+    routing: {
+      'claude-code': { upstream: 'https://provider.test', authStrategy: 'none' },
+    },
+    auth: { method: 'oauth' },
+    connected,
+  } as unknown as ProviderView;
+}
 
 describe('buildDeviceLinkCreateArgs', () => {
   it('归属一致核心:workspaceKind 恒为 project(被控端据此挂到项目下,不独立)', () => {
@@ -264,5 +297,122 @@ describe('buildProvisionalRemoteSession', () => {
     });
     expect(row.providerId).toBeNull();
     expect(row.extraDirs).toEqual([]);
+  });
+});
+
+/**
+ * resolveDeviceLinkSubmission —— 远程建会话参数的**唯一入口**。
+ *
+ * 这组断言存在的理由是结构性的:在它之前,「普通发送」与「新建目标」各自推导这组值,于是任何
+ * 一条校准规则漏加在一边就长出一个只在其中一条路径上复现的缺陷 —— 第 25 轮的 providerId
+ * 正是如此(发送有 ChatInput 兜底、建目标直接把未认证来源写进被控端 sessions.provider_id)。
+ * 最后一条断言把「两条路径必须等价」本身变成可执行的检查。
+ */
+describe('resolveDeviceLinkSubmission', () => {
+  const AGENT = 'claude-code' as const;
+  const candidate = {
+    model: 'claude-sonnet-4-6',
+    effort: 'medium' as const,
+    permissionMode: 'default' as const,
+    fastMode: false,
+  };
+
+  it('仍然有效的显式来源原样保留', () => {
+    const args = resolveDeviceLinkSubmission({
+      agentKind: 'cc',
+      workingDir: '/peer/proj',
+      candidate: { ...candidate, providerId: 'anthropic' },
+      deviceProviders: [deviceProvider('anthropic', true, ['claude-sonnet-4-6'])],
+      capabilityAgentKind: AGENT,
+    });
+    expect(args.providerId).toBe('anthropic');
+    // 转调底层组装:归属一致的派生不受影响。
+    expect(args.workspaceKind).toBe('project');
+    expect(args.workingDir).toBe('/peer/proj');
+  });
+
+  it('被控端已断开该来源时不得原样透传 —— 回落到该模型的原生默认来源', () => {
+    const args = resolveDeviceLinkSubmission({
+      agentKind: 'cc',
+      candidate: { ...candidate, providerId: 'stale-source' },
+      deviceProviders: [deviceProvider('anthropic', true, ['claude-sonnet-4-6'])],
+      capabilityAgentKind: AGENT,
+    });
+    // 关键反向断言:绝不能等于那个已失效的显式选择。
+    expect(args.providerId).not.toBe('stale-source');
+    expect(args.providerId).toBe('anthropic');
+  });
+
+  it('来源仍在但已不提供当前模型时同样回落', () => {
+    const args = resolveDeviceLinkSubmission({
+      agentKind: 'cc',
+      candidate: { ...candidate, providerId: 'other' },
+      deviceProviders: [
+        deviceProvider('other', true, ['some-other-model']),
+        deviceProvider('anthropic', true, ['claude-sonnet-4-6']),
+      ],
+      capabilityAgentKind: AGENT,
+    });
+    expect(args.providerId).toBe('anthropic');
+  });
+
+  it('没有任何来源提供该模型 → 不带 providerId(交回被控端默认路由,provider_id 留 NULL)', () => {
+    const args = resolveDeviceLinkSubmission({
+      agentKind: 'cc',
+      candidate: { ...candidate, providerId: 'stale-source' },
+      deviceProviders: [deviceProvider('other', true, ['some-other-model'])],
+      capabilityAgentKind: AGENT,
+    });
+    expect(args.providerId).toBeUndefined();
+  });
+
+  it('目录尚未加载完(空数组)时不带 providerId,而不是把失效值送出去', () => {
+    const args = resolveDeviceLinkSubmission({
+      agentKind: 'cc',
+      candidate: { ...candidate, providerId: 'anything' },
+      deviceProviders: [],
+      capabilityAgentKind: AGENT,
+    });
+    expect(args.providerId).toBeUndefined();
+  });
+
+  it('无项目目录 → dialogue,且不把 workingDir 塞进 payload(转调派生未被绕过)', () => {
+    const args = resolveDeviceLinkSubmission({
+      agentKind: 'codex',
+      candidate: { ...candidate, providerId: null },
+      deviceProviders: [deviceProvider('anthropic', true, ['claude-sonnet-4-6'])],
+      capabilityAgentKind: AGENT,
+      extraDirs: ['/peer/ref'],
+      id: 'preset-id',
+    });
+    expect(args.workspaceKind).toBe('dialogue');
+    expect('workingDir' in args).toBe(false);
+    expect(args.agentKind).toBe('codex');
+    expect(args.extraDirs).toEqual(['/peer/ref']);
+    expect(args.id).toBe('preset-id');
+  });
+
+  it('同一组候选值:发送路径与建目标路径的输出必须完全一致', () => {
+    // 两条路径的差别只在候选值**从哪来**(ChatInput 回传 / 组件派生),不在如何校准与组装。
+    // 喂同一组值就必须得到同一份 args —— 这正是第 25 轮那类「只在一条路径上复现」的缺陷
+    // 在结构上不可能再出现的原因。
+    const shared = {
+      agentKind: 'cc' as const,
+      workingDir: '/peer/proj',
+      extraDirs: ['/peer/ref'],
+      deviceProviders: [deviceProvider('anthropic', true, ['claude-sonnet-4-6'])],
+      capabilityAgentKind: AGENT,
+    };
+    const fromSend = resolveDeviceLinkSubmission({
+      ...shared,
+      candidate: { ...candidate, providerId: 'stale-source' },
+    });
+    const fromGoal = resolveDeviceLinkSubmission({
+      ...shared,
+      candidate: { ...candidate, providerId: 'stale-source' },
+    });
+    expect(fromGoal).toEqual(fromSend);
+    // 且两者都已被校准(不是「一致地都错」)。
+    expect(fromSend.providerId).toBe('anthropic');
   });
 });

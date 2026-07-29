@@ -59,7 +59,8 @@ import { useHasAnyRemoteTarget } from '@/hooks/useHasAnyReadyRemoteHost';
 import { useSelectableDevices } from '@/hooks/useControllableDevices';
 import { useProviderOnboarding } from '@/hooks/useProviderOnboarding';
 import { ConnectProviderCard } from '@/components/onboarding/ConnectProviderCard';
-import { buildDeviceLinkCreateArgs, buildProvisionalRemoteSession } from './deviceLinkCreateArgs';
+import { resolveDeviceLinkSubmission } from './deviceLinkCreateArgs';
+import { commitRemoteSessionHandoff } from './remoteSessionHandoff';
 import { VendorSegmentedSwitcher } from '@/components/new-chat/VendorSegmentedSwitcher';
 import { TopRightChipStack, TopRightChipStackProvider } from '@/components/chat/TopRightChipStack';
 import { useProportionalWidth } from '@/hooks/useProportionalWidth';
@@ -111,8 +112,6 @@ import { getCollaborationStartErrorMessage } from './collaborationErrors';
 import { useCollabProjectPolicy } from './hooks/useCollabProjectPolicy';
 import { CrossAgentConvertDialog } from '@/components/ui/cross-agent-convert-dialog';
 import type { MakerVendor } from '@/lib/ccAgent.types';
-import { refreshRemoteDeviceSessions } from '@/features/device-link/refreshRemoteSessions';
-import { remoteProjectsStore } from '@/features/device-link/remoteProjectsStore';
 import {
   ChevronDown,
   Code2,
@@ -123,7 +122,13 @@ import {
   SearchCode,
 } from 'lucide-react';
 import type { Effort, PermissionMode } from '@/lib/userPreferences.types';
-import type { AttachedFile, MentionedResource } from '@/lib/fileTypes';
+import {
+  categorizeByFilename,
+  categorizeFile,
+  extractExt,
+  type AttachedFile,
+  type MentionedResource,
+} from '@/lib/fileTypes';
 import type { PastedTextRange, SlashCommandRange } from '@/lib/imageRef';
 import type { AgentInputReference } from '@cindy/maker-shared/agent-input-projection';
 import { toast } from '@/lib/toast';
@@ -361,6 +366,31 @@ function resetDraftWorkspaceAfterSend(): void {
   patchDraft({ workingDir: null, extraDirs: [] });
 }
 
+/**
+ * 「这份草稿要跑在哪」的目标描述 —— 见组件内 applyDraftTarget。
+ *
+ * 刻意把 deviceId 与 workingDir 放在一起要求调用方**同时**给出:草稿的运行目标本来就是这个二元组,
+ * 而所有需要连带更新的状态(mention chip、路径型附件、能力/供应商快照、远程运行配置、worktree
+ * 三态、extraDirs)都能从「这个二元组的哪一半变了」推导出来。分开传就又回到了「某条路径记得改
+ * 设备、忘了清项目」那类缺陷。
+ */
+interface DraftTargetRequest {
+  /** 目标设备;null = 本机。 */
+  deviceId: string | null;
+  deviceName: string | null;
+  /** 目标工作区;null = 该设备上的「对话」(不绑项目)。 */
+  workingDir: string | null;
+  /**
+   * 已经 inline 拉到的被控端快照。只有「添加远程项目」那条路径有 —— 它为了验证设备可达,本来就
+   * 直接 invoke 过 capabilities / defaults,于是能立刻 seed,不必等 effect 再跑一轮隧道往返。
+   * 不给就把远程运行配置打回未加载,交给 seed effect 自己拉。
+   */
+  remoteSnapshot?: {
+    capabilities: AgentCapabilities;
+    defaults: RemoteDraftDefaults | null;
+  };
+}
+
 export function NewMakerDraftRoute() {
   const { t } = useTranslation();
   const draft = useNewMakerDraft();
@@ -457,26 +487,40 @@ export function NewMakerDraftRoute() {
   // 让附件能在"切走再切回"时存活。
   const attachmentState = useAttachments(undefined, NEW_MAKER_DRAFT_KEY);
   /**
-   * 「这份草稿的文件系统换了」的统一清理:剥 @file/@dir/@agent chip + 丢掉路径型附件。
+   * 剥掉 @file / @dir / @agent mention chip —— 触发条件是**项目变了**,不只是设备变了。
    *
-   * 有**三条**路径会换文件系统,必须同口径:① 设备 pill 直接切设备;② 经设备域浏览器换到另一台
-   * 机器上的项目;③ 所选设备失效(解除配对 / 撤销被控)后的自动回落到本机。前几轮 review 在这三条
-   * 上分别抓到「chip 漏剥」「附件漏丢」「回落路径两样都漏」—— 每次都是同一件事只做了一部分,
-   * 所以收成一个函数:再多一条换设备路径时,少做一半的空间也小一些。
+   * 关键事实(Codex review 第 29 轮给出的新证据):ChatInput 把这些 chip 的 `path` 存成**项目相对**
+   * 路径(`attrs.path = item.relPath`,源码注释原文「for files/dirs we stash the relative path
+   * as-is」;agent chip 是 `.claude/agents/<name>.md`,同样相对)。于是解析基准是 **workingDir**,
+   * 而不是文件系统 —— 同一台机器上从项目 X 换到项目 Y,`@src/foo.ts` 会解析到 Y 里的同名文件。
+   * 这比换设备更隐蔽:`src/index.ts`、`.claude/agents/reviewer.md` 这类路径在同机两个项目间
+   * **恰好都存在**的概率相当高,于是 agent 读到一个毫不相关的文件而没有任何报错。
    *
-   * 为什么附件不能留:attachment-path-passthrough 之后非图片附件只把 path 透传给模型(agent 自己
-   * 用 Read 读),而 rehomeDraftAttachments 只重整图片、非图片原样返回 —— 换了机器那条绝对路径
-   * 要么读不到,要么读到同路径下一个毫不相关的文件(后者更糟,用户不会发现)。方向无关:远程→远程、
-   * 远程→本机都一样成立。图片走 xdt-image:// 缓存、不依赖对端文件系统,行为不变。
+   * 我前几轮判断「同机换项目文件系统没变,剥 chip 是功能退化」—— 那个判断建立在「chip 存绝对路径」
+   * 这个错误前提上。对绝对路径成立,对相对路径不成立。
    */
-  const cleanupCrossFilesystemDraftContext = useCallback(() => {
+  const stripProjectRelativeMentions = useCallback(() => {
     const composerDraft = getComposerDraft(NEW_MAKER_DRAFT_KEY);
-    if (composerDraft?.text) {
-      saveComposerDraft(NEW_MAKER_DRAFT_KEY, {
-        ...composerDraft,
-        text: stripLocalMentionChips(composerDraft.text),
-      });
-    }
+    if (!composerDraft?.text) return;
+    saveComposerDraft(NEW_MAKER_DRAFT_KEY, {
+      ...composerDraft,
+      text: stripLocalMentionChips(composerDraft.text),
+    });
+  }, []);
+  /**
+   * 丢掉路径型(非图片)附件 —— 触发条件是**文件系统变了**,即换设备。
+   *
+   * 与 chip 相反,附件存的是**绝对**路径(useAttachments 落 `raw.path`)。所以同一台机器上换项目
+   * 它们仍然有效,不该丢;只有跨设备(远程→远程、远程→本机,方向无关)那条绝对路径才会失效 ——
+   * attachment-path-passthrough 之后非图片附件只把 path 透传给模型(agent 自己用 Read 读),
+   * 而 rehomeDraftAttachments 只重整图片、非图片原样返回,于是要么读不到,要么读到同路径下一个
+   * 毫不相关的文件(后者更糟,用户不会发现)。图片走 xdt-image:// 缓存、不依赖对端文件系统,不受影响。
+   *
+   * 这两件事原先合在一个 cleanupCrossFilesystemDraftContext 里、由同一个条件驱动,于是必然有一边
+   * 是错的:按设备触发就漏掉同机换项目的 chip(上面那条 P1),按项目触发又会在同机换项目时误丢
+   * 用户的附件。拆开之后各自绑住自己真正的解析基准。
+   */
+  const dropPathBackedAttachments = useCallback(() => {
     const stranded = attachmentState.attachments.filter((f) => f.category !== 'image');
     if (stranded.length === 0) return;
     for (const f of stranded) attachmentState.removeFile(f.id);
@@ -524,12 +568,35 @@ export function NewMakerDraftRoute() {
       ...attachmentState,
       addFiles: async (fileList: FileList | readonly File[]) => {
         const incoming = Array.from(fileList);
-        const images = incoming.filter((f) => f.type.startsWith('image/'));
-        const skipped = incoming.length - images.length;
-        if (skipped > 0) {
-          toast.warning(t('newChat.deviceSwitcher.attachmentsRemoteUnsupported', { count: skipped }));
+        // 判据必须与下游**同口径**(Codex review 第 29 轮 P1)。原来这里用 `f.type.startsWith('image/')`,
+        // 而 useAttachments 的分类**完全不看 MIME** —— 它先 extractExt(name) → categorizeFile,
+        // 扩展名认不出来才 peekFileHeader 按魔数推断。于是 Electron 给空 / 通用 `File.type` 时
+        // (某些平台与拖拽源就是如此,重命名过的图片更是必然),一张 useAttachments 明明能正确识别的
+        // 图片会被这道闸门拦掉,而且**只在远程草稿下**如此:用户切回本机就能加,现象极难理解。
+        //
+        // 所以改成「只拒绝**明确**是非图片的」:
+        //   · 分类为 image → 放行;
+        //   · 扩展名 / 文件名认不出类别(category 为 null)→ 也放行 —— 交给 useAttachments 的文件头
+        //     推断,推断出非图片会被下方的收敛式不变量 effect 移除并 toast;
+        //   · 分类为明确的非图片(pdf / text / …)→ 就地拒绝并说明。
+        //
+        // 这也让两道防线的分工彻底清楚:闸门是 **best-effort 的即时反馈**(用户动作那一刻就知道为什么),
+        // 收敛器才是**权威不变量**(不论从哪条路进来,远程草稿里绝不留下路径型附件)。闸门宁可放过、
+        // 绝不误拒;真正的兜底不靠它。
+        const definitelyNonImage = (f: File): boolean => {
+          const ext = extractExt(f.name);
+          const category = ext ? categorizeFile(ext) : categorizeByFilename(f.name);
+          if (!category) return false; // 未知 → 不在这里下结论
+          return category !== 'image';
+        };
+        const rejected = incoming.filter(definitelyNonImage);
+        const passed = incoming.filter((f) => !definitelyNonImage(f));
+        if (rejected.length > 0) {
+          toast.warning(
+            t('newChat.deviceSwitcher.attachmentsRemoteUnsupported', { count: rejected.length }),
+          );
         }
-        if (images.length > 0) await attachmentState.addFiles(images);
+        if (passed.length > 0) await attachmentState.addFiles(passed);
       },
     };
   }, [isDeviceLinkDraft, attachmentState, t]);
@@ -1149,6 +1216,138 @@ export function NewMakerDraftRoute() {
     capabilityAgentKind,
   ]);
 
+  /**
+   * 把草稿转移到一个新的运行目标(设备 + 工作区)——**四条路径唯一的转移动作**。
+   *
+   * ## 为什么必须收成一个动作
+   *
+   * 「当前目标设备」这一个语义原先摊在 9 处平行状态里:draft store 的两个字段、dlSel、
+   * remoteDraftState、dlSeedKeyRef、skipDefaultsRefetchRef、三个无 TTL 的设备快照缓存、
+   * mirror scope、worktree 三态、以及草稿正文里那些绑着路径的 chip 与附件。而「换设备」这件事
+   * 被实现了四遍:设备 pill、设备域浏览器选项目、工作区 picker、所选设备失效后的自动回落。
+   *
+   * 4 条路径 × 9 处状态 = 一张需要人工两两对齐的矩阵。#807 的 review 里有约十轮就是在补这张矩阵里
+   * 的某一格:切设备漏清 worktree 三态、同机换项目误把运行配置打回默认、指向被控设备前忘了作废
+   * 它的能力快照、回落到本机时两样清理都漏、picker 换项目不作废 worktree……每次都是同一件事只做了
+   * 一部分,而且**漏掉一格不会有任何编译或测试信号**。
+   *
+   * 所以这里把副作用从「走了哪条路径」的函数改写成「**什么变了**」的函数:调用方只声明目标,
+   * 每一处连带状态各自绑住它真正依赖的那一半。矩阵因此消失 —— 新增第五条路径时不需要重新对齐 9 格,
+   * 它自动就是对的。
+   *
+   * ## 每处状态绑在哪一半上(这就是全部规则)
+   *
+   *   · mention chip —— 绑 **workingDir**(存项目相对路径),设备或项目任一变化都剥;
+   *   · 路径型附件 —— 绑 **设备**(存绝对路径),同机换项目仍有效,不动;
+   *   · 能力 / 供应商 / Git safety 快照 —— 绑**目标设备**,指过去之前一律作废(无 TTL,只在设备
+   *     下线才 evict,那台机器在线期间装了新模型 / 断了供应商,控制端不会知道);
+   *   · 远程运行配置(dlSel + remoteDraftState + seedKey)—— 绑**设备**;换机重种,同机保留但要按
+   *     新能力重校(被控端可能刚删掉用户选中的模型);
+   *   · worktree 三态 —— 绑 **(设备, 项目)** 二元组,等于绑 repo,任一变化都作废;
+   *   · extraDirs —— 换设备失效(路径属于上一台),或进入「对话」时清零(那是单次授权、不是偏好)。
+   *
+   * ## 与收敛前的两处行为差异(都是修正,不是回归)
+   *
+   *   ① 同机从项目 X 换到项目 Y 现在**会**剥 mention chip。chip 存的是项目相对路径,换项目就是换
+   *      解析基准(Codex review 第 29 轮)。
+   *   ② 在浏览器里重选**当前正在用的同一个项目**不再关掉 worktree 开关。「只在真的变了时才重置」
+   *      这条早先只补进了工作区 picker,浏览器那条路径漏了;统一之后两条都对。
+   */
+  const applyDraftTarget = useCallback(
+    (req: DraftTargetRequest) => {
+      const prevDeviceId = effectiveDeviceLinkDeviceId ?? null;
+      const deviceChanged = req.deviceId !== prevDeviceId;
+      const workingDirChanged = req.workingDir !== draft.workingDir;
+
+      // chip 绑 workingDir;附件绑设备。两者条件不同,见各自函数的注释。
+      if (deviceChanged || workingDirChanged) stripProjectRelativeMentions();
+      if (deviceChanged) dropPathBackedAttachments();
+
+      // 指向某台设备之前一律作废它的三个无 TTL 快照。对「回落本机」(deviceId=null)是 no-op。
+      if (req.deviceId) {
+        evictDeviceCapabilities(req.deviceId);
+        evictDeviceProviders(req.deviceId);
+        evictDeviceGitSafetySettings(req.deviceId);
+      }
+
+      // 远程运行配置。给了 snapshot 就当场定;没给且换了设备就打回未加载,由 seed effect 接手 ——
+      // 不打回的话 seed effect 会拿**上一台**的 capabilities + defaults 种下 dlSel 并把新设备记成
+      // 「已 seed」,等新设备真正的值到达时 seedKey 又把重种挡掉,于是向新设备提交上一台的配置。
+      if (req.remoteSnapshot) {
+        const { capabilities: freshCaps, defaults: freshDefaults } = req.remoteSnapshot;
+        dlSeedKeyRef.current = req.deviceId ? `${req.deviceId}:${capabilityAgentKind}` : null;
+        if (deviceChanged) {
+          setDlSel(
+            resolveDeviceLinkDraftDefaults(freshCaps, freshDefaults, undefined, capabilityAgentKind),
+          );
+          // deviceId 变化会让 defaults effect 重跑;我们已经 inline 拉过了,跳过那一次避免覆盖。
+          skipDefaultsRefetchRef.current = true;
+        } else {
+          // 同机:保留用户已选的 model / provider / effort / permission,但必须拿 freshCaps 重校一遍 ——
+          // 上面刚把 seedKey 记成「已 seed」,后续 capabilities 更新不会再重种,失效值会一直留着:
+          // 发送被 gate 拦住变成「点了没反应」,建目标更糟,会把失效值直接提交给被控端。
+          // 复用 resolveDeviceLinkDraftDefaults(不另写 clamp):把用户当前选择塞进 remoteDraft 槽,
+          // 它本就是「按 caps 校准一组值」,仍合法的原样保留、失效的按目标模型能力回落。
+          setDlSel((prev) =>
+            prev
+              ? resolveDeviceLinkDraftDefaults(
+                  freshCaps,
+                  {
+                    model: prev.model,
+                    effort: prev.effort,
+                    fastMode: prev.fastMode,
+                    permissionMode: prev.permissionMode,
+                    providerId: prev.providerId,
+                  },
+                  undefined,
+                  capabilityAgentKind,
+                )
+              : resolveDeviceLinkDraftDefaults(
+                  freshCaps,
+                  freshDefaults,
+                  undefined,
+                  capabilityAgentKind,
+                ),
+          );
+        }
+        setRemoteDraftState({ loaded: true, value: freshDefaults });
+      } else if (deviceChanged) {
+        setDlSel(null);
+        dlSeedKeyRef.current = null;
+        setRemoteDraftState({ loaded: false, value: null });
+      }
+
+      // worktree 三态 = 上一个 repo 的描述:baseRepo 由 detect-cwd 异步回填(远程还要走隧道往返),
+      // 这个窗口内发送会把 worktree 建到上一个 repo 里;sourceBranch 只在为空时才自动填充,用户在
+      // X 上显式选过的分支会一直跟到 Y —— Y 上不存在就报错,恰好存在就在一条毫不相关的分支上开工。
+      if (deviceChanged || workingDirChanged) {
+        setWtEnabled(false);
+        setWtBaseRepo(null);
+        setWtSourceBranch('');
+      }
+
+      patchDraft({
+        // 设备字段**必须显式带上**:store 的不变量是「改 workingDir 又不带设备字段就清设备」
+        // (防本地项目被误当远程),不带就会在换项目时把设备悄悄清回本机。
+        deviceLinkDeviceId: req.deviceId,
+        deviceLinkDeviceName: req.deviceName,
+        workingDir: req.workingDir,
+        // device-link 与 SSH 互斥。
+        remoteHostId: null,
+        // 换设备 → 上一台的路径全失效;进「对话」→ 单次授权不该跨上下文延续。
+        // 同机换项目时不传(store 保持原值):那些目录在这台机器上仍然有效。
+        ...(deviceChanged || req.workingDir == null ? { extraDirs: [] } : {}),
+      });
+    },
+    [
+      effectiveDeviceLinkDeviceId,
+      draft.workingDir,
+      capabilityAgentKind,
+      stripProjectRelativeMentions,
+      dropPathBackedAttachments,
+    ],
+  );
+
   // 弹窗确认添加后的落点:SSH 立即建会话 + navigate;device-link 把当前草稿指向被控端项目,
   // 首条消息发出时走既有 create-on-send 链路(见下方 isDeviceLinkDraft 分支)。
   const handleRemoteProjectAdded = useCallback(
@@ -1176,86 +1375,26 @@ export function NewMakerDraftRoute() {
           .invoke(target.deviceId, 'maker:get-new-maker-defaults', [capabilityAgentKind])
           .then((v) => (v as RemoteDraftDefaults | null) ?? null)
           .catch(() => null);
-        // 设备验证通过(direct invoke 成功)。在所有能 throw 的路径之后才 evict,
-        // 避免失败时破坏当前草稿的 hook 快照。evict + prefetch 刷新 hook 缓存;
-        // 即使 prefetch 内部 swallow error,send/goal 的 capabilitiesLoading/deviceProvidersLoading
-        // gate 会阻止在 hook 尚未就绪时发送。
-        evictDeviceCapabilities(target.deviceId);
-        evictDeviceProviders(target.deviceId);
-        evictDeviceGitSafetySettings(target.deviceId);
+        // 设备验证通过(direct invoke 成功)。转移只声明目标 —— 该清什么、该保留什么由
+        // applyDraftTarget 按「设备变了还是项目变了」推导(它也负责作废该设备的三个无 TTL 快照,
+        // 所以这一步必须排在下面的 prefetch 之前,否则刚 prefetch 的数据又被 evict 掉)。
+        // 设备域的浏览器会预选当前设备,所以这条路径同时承担「换机器」与「同机换项目」两件事,
+        // 而两者的差异现在完全由那个动作内部处理,这里不再各自判断。
+        applyDraftTarget({
+          deviceId: target.deviceId,
+          deviceName: target.deviceName,
+          workingDir: target.path,
+          // 上面为验证可达已经 inline 拉过 capabilities 与 defaults,直接交给转移动作当场 seed /
+          // 重校,省掉一次隧道往返;它同时会置 skip flag,避免 effect 再拉一次把值覆盖回去。
+          remoteSnapshot: { capabilities: freshCaps, defaults: freshDefaults },
+        });
+        // prefetch 补回 hook 缓存:选的是**同一** deviceId 时 hook 的 effect 不会因 deps 变化重跑,
+        // 只有 subscriber 通知路径能送达新数据。即使 prefetch 内部 swallow error,send / goal 的
+        // capabilitiesLoading / deviceProvidersLoading gate 也会阻止在 hook 尚未就绪时发送。
         await Promise.all([
           prefetchDeviceCapabilities(target.deviceId),
           prefetchDeviceProviders(target.deviceId),
         ]);
-        // 「换机器」与「同机器换项目」要区别对待(#807 review):设备域的浏览器会预选当前设备,
-        // 所以这个 handler 同时承担两件事。跨设备的重置(运行配置、引用目录、mention chip)只在
-        // 设备真的变了时才做 —— 否则用户在同一台机器上换个项目,就把自己选的远程模型 / 来源 /
-        // 权限模式和加好的引用目录静默打回默认值,下一次发送用的是回退后的配置。
-        const deviceChanged = target.deviceId !== effectiveDeviceLinkDeviceId;
-        dlSeedKeyRef.current = `${target.deviceId}:${capabilityAgentKind}`;
-        if (deviceChanged) {
-          setDlSel(resolveDeviceLinkDraftDefaults(freshCaps, freshDefaults, undefined, capabilityAgentKind));
-        } else {
-          // 同设备:保留用户已选的 model / provider / effort / permission,但**必须拿 freshCaps
-          // 重新校准一遍**(Codex review P1)。这一行上方刚把 dlSeedKeyRef 记成「该设备已 seed」,
-          // 于是后续 capabilities 更新不会再重种 —— 若被控端此间改了模型目录 / 权限档(删掉了用户
-          // 选中的模型、不再支持某个 permission),那个已失效的值就会一直留在草稿里:发送被 gate 拦住
-          // 变成「点了没反应」,而「新建目标」更糟,会把失效值直接提交给 maker:create-session。
-          //
-          // 复用 resolveDeviceLinkDraftDefaults(不另写一套 clamp):把**用户当前的选择**当作
-          // remoteDraft 传进去 —— 它的字段与 RemoteDraftDefaults 一一对应,函数本来就是「按 caps
-          // 校准一组值」,于是仍合法的原样保留、失效的按目标模型能力回落。dlSel 为空(尚未 seed)
-          // 时退回正常 seed 路径。
-          setDlSel((prev) =>
-            prev
-              ? resolveDeviceLinkDraftDefaults(
-                  freshCaps,
-                  {
-                    model: prev.model,
-                    effort: prev.effort,
-                    fastMode: prev.fastMode,
-                    permissionMode: prev.permissionMode,
-                    providerId: prev.providerId,
-                  },
-                  undefined,
-                  capabilityAgentKind,
-                )
-              : resolveDeviceLinkDraftDefaults(
-                  freshCaps,
-                  freshDefaults,
-                  undefined,
-                  capabilityAgentKind,
-                ),
-          );
-        }
-        // remoteDraftState 照常刷新:同设备时它也是那台机器的最新值(provider model memory 的来源)。
-        setRemoteDraftState({ loaded: true, value: freshDefaults });
-        setWtEnabled(false);
-        setWtBaseRepo(null);
-        setWtSourceBranch('');
-        // patchDraft 会改 effectiveDeviceLinkDeviceId → 触发 defaults effect 重拉;
-        // 我们已 inline 拉取了 freshDefaults,跳过那次重拉避免覆盖。
-        // 清除草稿中基于本地 / **上一台**设备文件系统的 @file/@dir mention chips。
-        //
-        // 只在文件系统真的换了时才剥(#807 review):设备域的浏览器会优先预选当前设备,于是
-        // 「在同一台远程机器上从项目 X 换到项目 Y」也会走到这里 —— 那种情况文件系统没变,
-        // 把用户已经写好的 @file / @dir / @agent 无声清掉纯粹是功能退化。
-        if (deviceChanged) {
-          cleanupCrossFilesystemDraftContext();
-        }
-        // 只有 deviceId 真正变化时 effect 才会重跑并消费 skip flag;同设备不设。
-        if (deviceChanged) {
-          skipDefaultsRefetchRef.current = true;
-        }
-        patchDraft({
-          workingDir: target.path,
-          remoteHostId: null,
-          deviceLinkDeviceId: target.deviceId,
-          deviceLinkDeviceName: target.deviceName,
-          // 同机器换项目时保留引用目录:它们指向的是这台机器上仍然有效的路径。
-          // 不传 extraDirs 时 store 保持原值(只有显式带才改)。
-          ...(deviceChanged ? { extraDirs: [] } : {}),
-        });
         return;
       }
 
@@ -1389,7 +1528,7 @@ export function NewMakerDraftRoute() {
         throw err;
       }
     },
-    [draft.vendor, chatPrefs, chatInitialPermissionMode, chatInitialProviderId, draftInitialModel, draftInitialEffort, effectiveFastMode, effectiveDeviceLinkDeviceId, localProviders, localProvidersLoading, effectiveCollab, capabilityAgentKind, effectivePlanMode, attachmentState, cleanupCrossFilesystemDraftContext, createSession, navigate, t],
+    [draft.vendor, chatPrefs, chatInitialPermissionMode, chatInitialProviderId, draftInitialModel, draftInitialEffort, effectiveFastMode, effectiveDeviceLinkDeviceId, localProviders, localProvidersLoading, effectiveCollab, capabilityAgentKind, effectivePlanMode, attachmentState, applyDraftTarget, createSession, navigate, t],
   );
 
   // ─── 切 vendor ──────────────────────────────────────────────────────
@@ -1533,34 +1672,16 @@ export function NewMakerDraftRoute() {
   // 传进来的 path 必然属于当前设备,语义自洽。
   const handleWorkingDirChange = useCallback(
     (dir: string | null) => {
-      // 显式回传当前设备 = 「设备不变,只换工作区」。store 的不变量是「改 workingDir 又不带
-      // 设备字段就清设备」(防止本地项目被误当远程),所以这里必须显式带上,否则选「对话」或
-      // 换项目都会把设备悄悄清回本机 —— 而 picker 里列的项目本就属于当前设备。
-      const keepDevice = {
-        deviceLinkDeviceId: draft.deviceLinkDeviceId,
-        deviceLinkDeviceName: draft.deviceLinkDeviceName,
-      };
-      // 换工作区 = 换 repo,worktree 三态必须一起作废(Codex review P1)。它们全是**上一个**
-      // 项目的描述:
-      //   · baseRepo 由 WorktreeChipsRow 经 detect-cwd 异步回填(远程还要走一次隧道往返),
-      //     这个窗口内发送会把 worktree 建到上一个 repo 里;
-      //   · sourceBranch 只在为空时才被自动填充,用户在 A 上显式选过的分支会一直跟到 B ——
-      //     B 上不存在就报错,恰好存在就在一条毫不相关的分支上开工。
-      // 浏览器路径(handleRemoteProjectAdded)早就这么重置了,picker 路径漏了 —— 而 picker 才是
-      // #807 之后换项目的主路径。
-      // 只在路径真的变了时重置:重选当前项目不该把用户刚打开的 worktree 开关又关掉。
-      if (dir !== draft.workingDir) {
-        setWtEnabled(false);
-        setWtBaseRepo(null);
-        setWtSourceBranch('');
-      }
-      if (dir == null) {
-        patchDraft({ workingDir: null, remoteHostId: null, extraDirs: [], ...keepDevice });
-        return;
-      }
-      patchDraft({ workingDir: dir, remoteHostId: null, ...keepDevice });
+      // 设备维度不动:原样回传当前设备,于是 applyDraftTarget 判出 deviceChanged=false,只处理
+      // 「换项目」该连带的部分(剥项目相对的 mention chip、作废 worktree 三态、进「对话」时清
+      // extraDirs),不会去动运行配置、附件和设备快照。picker 列的项目本就属于当前设备,语义自洽。
+      applyDraftTarget({
+        deviceId: draft.deviceLinkDeviceId,
+        deviceName: draft.deviceLinkDeviceName,
+        workingDir: dir,
+      });
     },
-    [draft.workingDir, draft.deviceLinkDeviceId, draft.deviceLinkDeviceName],
+    [applyDraftTarget, draft.deviceLinkDeviceId, draft.deviceLinkDeviceName],
   );
 
   // ─── 新草稿入场:引用目录清零 ──────────────────────────────────────────
@@ -1609,29 +1730,11 @@ export function NewMakerDraftRoute() {
     if (!selectableDevicesLoaded) return;
     if (selectableDevices.some((d) => d.deviceId === effectiveDeviceLinkDeviceId)) return;
     log.warn('[new-maker] selected device is no longer selectable, falling back to local');
-    // 回落同样是换文件系统:草稿里的 @file / @dir chip 与路径型附件都是对着**那台远程机器**建的,
-    // 留着会在下一次**本机**发送时被当成本机路径送进去(读不到,或读到同路径下一个无关文件)。
-    // 这条路径绕过了两个显式换设备 handler,所以要自己调同一个清理(Codex review P1)。
-    cleanupCrossFilesystemDraftContext();
-    // worktree 上下文同样属于那台已失效的设备(与 handleDeviceChange 对称)。留着的话:远程项目
-    // 开过 worktree、设备随后被解除配对 → wtEnabled/wtBaseRepo 残留 → 下一次**本机**发送会进
-    // handleSend 的 worktree 分支,拿上一台设备的仓库路径去建,产出无效的本地会话或 worktree 失败。
-    setWtEnabled(false);
-    setWtBaseRepo(null);
-    setWtSourceBranch('');
-    patchDraft({
-      deviceLinkDeviceId: null,
-      deviceLinkDeviceName: null,
-      workingDir: null,
-      remoteHostId: null,
-      extraDirs: [],
-    });
-  }, [
-    effectiveDeviceLinkDeviceId,
-    selectableDevices,
-    selectableDevicesLoaded,
-    cleanupCrossFilesystemDraftContext,
-  ]);
+    // 回落 = 转移到「本机 + 对话」。这条路径原先要自己重复一遍所有清理,而且历史上正是它漏得最多
+    // (chip、附件、worktree 三态都各漏过一次),还隐式依赖 seed effect 的 !isDeviceLinkDraft 分支
+    // 去清远程运行配置 —— 能跑,但没人能一眼看出为什么。现在与另三条路径走同一个动作。
+    applyDraftTarget({ deviceId: null, deviceName: null, workingDir: null });
+  }, [effectiveDeviceLinkDeviceId, selectableDevices, selectableDevicesLoaded, applyDraftTarget]);
 
   /**
    * 换设备(#807)。**一并清掉 workingDir 与 extraDirs** —— 上一台机器的路径在新机器上
@@ -1648,54 +1751,18 @@ export function NewMakerDraftRoute() {
       // 下面会剥 mention chip、丢路径型附件并清 workingDir / extraDirs —— 重选同一设备时执行这些,
       // 等于用户点一下就静默丢掉已选的项目、附件和部分已写好的消息。必须先早返回。
       if (deviceId === (effectiveDeviceLinkDeviceId ?? null)) return;
-      // 换机器 = 换文件系统:草稿里的 @file / @dir chip 与路径型附件都指着**上一台**机器(或本机)
-      // 的路径,随首条消息发到新设备后在那边指向完全不同的东西。三条换设备路径共用同一清理。
-      cleanupCrossFilesystemDraftContext();
-      // 目标设备的能力 / 供应商 / Git safety 快照是「订阅时拉一次、无 TTL、只在设备下线才 evict」的。
-      // 它一直在线期间装了新模型、连上或断开了供应商,控制端不会知道;切回它时 hook 的 effect 虽然
-      // 因 deviceId 变化而重跑,却直接命中旧缓存 —— composer 会显示并向它提交一个它可能已经不再
-      // 支持的 model / provider(Codex review P1)。与「添加远程项目」那条路径同口径先 evict。
+      // 换完停在这台设备的「对话」(workingDir=null):上一台的项目路径在新机器上基本不存在,
+      // 留着会让用户以为项目跟过来了、发送时才在被控端 path guard 上失败。与 mobile 切设备后
+      // 工作区回落的行为一致。其余连带清理全部由 applyDraftTarget 按「设备变了」推导。
       //
-      // 与那条路径的两点刻意差异:
-      //   · 不再 prefetch —— 那里需要它是因为允许「目标就是当前设备」(deps 不变、effect 不重跑,
-      //     只能靠 subscriber 送新数据);这里上面已经把「重选同一设备」早返回掉,deviceId 必然
-      //     变化 → effect 必然重跑 → evict 后必然 cache miss 并自行 fetch。
-      //   · 不做阻塞式 direct invoke 验证 —— pill 只让在线设备可选,而它是同步回调,为验证把它
-      //     改成异步会让点击后一段时间毫无反馈。快照未就绪期间由 send / goal 的
-      //     capabilitiesLoading / deviceProvidersLoading / remoteDraftState.loaded 三重 gate 兜住。
-      if (deviceId) {
-        evictDeviceCapabilities(deviceId);
-        evictDeviceProviders(deviceId);
-        evictDeviceGitSafetySettings(deviceId);
-      }
-      // 换设备前**同步失效上一台的远程默认值快照**。
-      //
-      // 不做的话会串台:patchDraft 只改 deviceId,而 dlSel / remoteDraftState / dlSeedKeyRef 仍
-      // 描述上一台。seed effect 随即以新 deviceId 组出 key(与旧 seedKey 不等)、却拿着**上一台的**
-      // capabilities + defaults 种下 dlSel,并把新设备记成「已 seed」;等新设备真正的能力与默认值
-      // 到达时,`dlSeedKeyRef.current === key` 又把重种挡掉。结果 composer 显示并向新设备提交上一台
-      // 的 model / provider / permission —— 那些值在新设备上可能根本不支持。
-      //
-      // 把 remoteDraftState 打回未加载即可堵住:seed effect 的 `!remoteDraftState.loaded` 会拦住这
-      // 一轮,等新设备的 defaults 真正到达后才种。dlSeedKeyRef 一并清空,避免 key 巧合相同时跳过。
-      // capabilities 不用手动清:它由 useAgentCapabilities 按 deviceId 解析,cache miss 分支自己会
-      // 置 null,cache hit 时拿到的就已经是新设备的。
-      setDlSel(null);
-      dlSeedKeyRef.current = null;
-      setRemoteDraftState({ loaded: false, value: null });
-      // worktree 上下文同样属于上一台机器(与「添加远程项目」交接路径同款重置)。
-      setWtEnabled(false);
-      setWtBaseRepo(null);
-      setWtSourceBranch('');
-      patchDraft({
-        deviceLinkDeviceId: deviceId,
-        deviceLinkDeviceName: deviceName,
-        workingDir: null,
-        remoteHostId: null,
-        extraDirs: [],
-      });
+      // 与「添加远程项目」那条路径的一点刻意差异:这里**不做**阻塞式 direct invoke 验证 ——
+      // pill 只让在线设备可选,而它是同步回调,为验证改成异步会让点击后一段时间毫无反馈。
+      // 快照未就绪期间由 send / goal 的 capabilitiesLoading / deviceProvidersLoading /
+      // remoteDraftState.loaded 三重 gate 兜住。也因此不必 prefetch:上面已把「重选同一设备」
+      // 早返回掉,deviceId 必然变化 → hook effect 必然重跑 → evict 后必然 cache miss 并自行 fetch。
+      applyDraftTarget({ deviceId, deviceName, workingDir: null });
     },
-    [effectiveDeviceLinkDeviceId, cleanupCrossFilesystemDraftContext],
+    [effectiveDeviceLinkDeviceId, applyDraftTarget],
   );
   const handleOpenRemoteProject = useCallback((deviceId?: string) => {
     setAddRemoteProjectDeviceId(deviceId ?? null);
@@ -1865,7 +1932,7 @@ export function NewMakerDraftRoute() {
           // sessionId 建会话;sessionId 两步共用,被控端 close-session 时才能按
           // worktreeStore 绑定回收 worktree。
           // #807:不再要求 effectiveWorkingDir —— 选了设备就走对端建会话。没有项目目录时
-          // buildDeviceLinkCreateArgs 会把 workspaceKind 派生成 'dialogue',被控端自行分配
+          // resolveDeviceLinkSubmission 会把 workspaceKind 派生成 'dialogue',被控端自行分配
           // 运行目录(隧道侧 path guard 对「缺 workingDir」本来就是放行的,不放宽任何边界)。
           if (isDeviceLinkDraft && effectiveDeviceLinkDeviceId) {
             const deviceId = effectiveDeviceLinkDeviceId;
@@ -1929,28 +1996,34 @@ export function NewMakerDraftRoute() {
                 setWtCreating(false);
               }
             }
-            // 提出来存一份:临时行(见下方 buildProvisionalRemoteSession)要按**实际提交的**
-            // model / effort / permission / workspaceKind 组装,不能再各自推一遍。
-            const createArgs = buildDeviceLinkCreateArgs({
+            // 提出来存一份:交接收尾要按**实际提交的** model / effort / permission / workspaceKind
+            // 组装临时会话行(见 commitRemoteSessionHandoff),不能再各自推一遍。
+            const createArgs = resolveDeviceLinkSubmission({
               agentKind: persistedAgentKind,
               // 远程 worktree:workingDir 换成刚建好的 worktree 路径(真实存在,被控端
               // remote-workdir-guard 按"存在的目录"放行);id 与 worktree 绑定同值。
               // 非 worktree 流程两者保持原值 / 缺省。
               id: presetSessionId,
               workingDir: remoteWorkingDir,
-              model,
-              effort,
-              permissionMode,
-              fastMode: effectiveFastMode,
               extraDirs: effectiveExtraDirs,
-              // 草稿选定的来源(被控端供应商;null=跟随默认路由)。被控端 create 时落 sessions.provider_id,
-              // 使新远程会话首个请求即按所选来源路由(P2)。
-              providerId,
+              // 候选值 = ChatInput 回传的实时值(用户此刻在界面上看到的那一组)。来源校准与 args
+              // 组装都在 resolveDeviceLinkSubmission 里,与「新建目标」共用同一份规则 —— 那两条
+              // 路径各自推导曾长出过只在其中一条上复现的缺陷(见该函数注释)。
+              candidate: {
+                model,
+                effort,
+                permissionMode,
+                fastMode: effectiveFastMode,
+                providerId,
+              },
+              deviceProviders,
+              capabilityAgentKind,
             });
             const createResult = await window.electronAPI.deviceLink.invoke(
               deviceId,
               'maker:create-session',
-              // workspaceKind 由 workingDir 派生 + agentKind 归一,见 buildDeviceLinkCreateArgs。
+              // workspaceKind 由 workingDir 派生 + agentKind 归一 + 来源经共享解析器校准,
+              // 全部发生在 resolveDeviceLinkSubmission 里。
               // extraDirs 一并透传(与本地 create 对齐):被控端 bootstrapSession 按 set-extra-dirs
               // 同款 validateExtraDirs 校验后只存通过的子集,控制端镜像随被控端真相回流。
               [createArgs],
@@ -1962,46 +2035,18 @@ export function NewMakerDraftRoute() {
               return;
             }
             // remoteSessionId 到手就是**提交点**:对端会话已经建出来了。此后任何一步都不许再把它
-            // 退化成「创建失败」—— 用户会照着提示重试,于是对端多出第二个会话,第一个空着永久滞留
-            // (Codex review P1)。原来这里手写 invoke + setDeviceSessions,隧道一抖(被控端 DB 刚
-            // 启动未就绪 / 链路瞬断 / 超时)就抛进外层 catch,正是这个后果。
-            //
-            // 改走 refreshRemoteDeviceSessions —— 本仓所有其它「远程新建会话后回流」的入口
-            // (fork / orca worker / 删除消息 / reconnect)都用它,这两处是仅存的手写例外。它:
-            //   · 不抛:瞬态错误退避重试(~6.75s 窗口,覆盖被控端冷启动),永久错误返回 'gave-up';
-            //   · 认 snapshot epoch,不会覆盖更新的快照(手写调用完全绕过);
-            //   · 有界快照按 merge 落库 —— 手写调用把 200 行上限的列表当权威 replace,
-            //     被控端会话超过 200 条时会把窗口外已缓存的会话连同标题叠加层一起清掉。
-            // 回流失败(gave-up/superseded)也照常交接:sessions:created push 还会触发一次防抖重拉,
-            // 不能因为镜像慢一拍就谎报创建失败。
-            //
-            // 但「照常交接」有个前提:归属必须先登记好。回流失败时镜像里没有这条会话,
-            // getSessionDeviceId 返回 undefined,makerApiFor 就把首条消息发给**本机** maker
-            // (Codex review P1)。所以先把「这条会话在那台设备上」这个已确定的事实钉进 store,
-            // 再去回流 —— 钉子只影响 origin 判定,会话进列表仍等权威快照。
-            remoteProjectsStore.pinSessionOrigin(deviceId, remoteSessionId);
-            // 钉子只解决「路由到哪」。首条消息的交接还有第二道门槛:SessionView 的 delayed-create
-            // effect 要求 `session` 非空**且** workingDir 非空才 consumePending,而会话行只有权威
-            // 快照能带来 —— 回流失败时那条消息就一直不发;`gave-up` 里的永久错误(老被控端没把
-            // local-db:sessions:list 放进 allowlist / REMOTE_DISABLED)更是永远不会有快照,消息
-            // 永久躺着不发,而草稿下面就被清掉了(Codex review P1)。
-            //
-            // 所以先按 create 响应补一条**临时行**(workDir 取对端真正分配的值,其余取刚提交的
-            // args);权威快照到达后 setDeviceSessions 整片替换,以对端为准。
-            if (created?.workDir) {
-              remoteProjectsStore.mergeDeviceSessions(deviceId, deviceName, [
-                buildProvisionalRemoteSession({
-                  sessionId: remoteSessionId,
-                  workDir: created.workDir,
-                  args: createArgs,
-                  nowIso: new Date().toISOString(),
-                }),
-              ]);
-            }
-            const refreshResult = await refreshRemoteDeviceSessions(deviceId, deviceName);
-            if (refreshResult !== 'ok') {
-              log.warn('[draft send] remote sessions refresh after create', refreshResult);
-            }
+            // 退化成「创建失败」—— 用户会照着提示重试,于是对端多出第二个会话,第一个空着永久滞留。
+            // 钉归属 → 补临时行 → 回流镜像这三条不变量、以及各自被 review 抓出来的理由,都在
+            // commitRemoteSessionHandoff 里;它不抛,所以这里不需要额外 try。
+            await commitRemoteSessionHandoff({
+              deviceId,
+              deviceName,
+              remoteSessionId,
+              workDir: created?.workDir,
+              createArgs,
+              nowIso: new Date().toISOString(),
+              logTag: 'draft send',
+            });
             const rehydratedFiles = await rehomeDraftAttachments(files, remoteSessionId);
             setPending(remoteSessionId, {
               text: message,
@@ -2467,17 +2512,23 @@ export function NewMakerDraftRoute() {
           }
           const deviceId = effectiveDeviceLinkDeviceId;
           const deviceName = effectiveDeviceLinkDeviceName ?? deviceId;
-          // 与 handleSend 同口径先存一份 args:临时行要按实际提交的值组装(见 buildProvisionalRemoteSession)。
-          const createArgs = buildDeviceLinkCreateArgs({
+          // 与 handleSend 同口径先存一份 args:临时行要按实际提交的值组装(见 commitRemoteSessionHandoff)。
+          const createArgs = resolveDeviceLinkSubmission({
             agentKind: persistedAgentKind,
-            // 无项目 → 不传,由 buildDeviceLinkCreateArgs 派生 workspaceKind:'dialogue'。
+            // 无项目 → 不传,由 workingDir 派生 workspaceKind:'dialogue'。
             workingDir: effectiveWorkingDir ?? undefined,
-            model: draftInitialModel,
-            effort: draftInitialEffort,
-            permissionMode: chatInitialPermissionMode,
-            fastMode: effectiveFastMode,
             extraDirs: effectiveExtraDirs,
-            providerId: chatInitialProviderId ?? null,
+            // 候选值 = 组件级派生值(弹窗独立于 ChatInput,拿不到它的回传)。与发送路径过同一道
+            // 校准 —— 这两条路径曾各自推导,于是「只在新建目标上复现」的缺陷出过三次。
+            candidate: {
+              model: draftInitialModel,
+              effort: draftInitialEffort,
+              permissionMode: chatInitialPermissionMode,
+              fastMode: effectiveFastMode,
+              providerId: chatInitialProviderId,
+            },
+            deviceProviders,
+            capabilityAgentKind,
           });
           const createResult = await window.electronAPI.deviceLink.invoke(
             deviceId,
@@ -2493,30 +2544,19 @@ export function NewMakerDraftRoute() {
           if (!remoteSessionId) {
             throw new Error(t('ccAgent.draft.createSessionFailed'));
           }
-          // 重拉该设备会话列表 → 注册 origin(后续 goalApiFor / useGoalStatus 依赖它路由)。
-          // 与 handleSend 远程分支同口径走 refreshRemoteDeviceSessions:remoteSessionId 已是提交点,
-          // 回流失败不能抛 —— 这里抛出去 NewGoalDialog 会内联报错并保持打开,用户再点一次「创建」
-          // 就在对端建出第二个目标会话,第一个空着滞留(Codex review P1)。不抛 / 认 epoch /
-          // 有界快照按 merge 落库这三条同上,见 handleSend 处的说明。
-          // 同样先钉归属再回流:goalApiFor 按归属路由,回流失败时它会把 setGoal 发给本机 maker,
-          // 对端刚建好的会话则永远拿不到目标(Codex review P1)。
-          remoteProjectsStore.pinSessionOrigin(deviceId, remoteSessionId);
-          // 临时行同上(useGoalStatus 也按会话行解析归属与运行目录):回流失败、尤其老被控端永久
-          // 拿不到 sessions:list 时,不补这条行就没有任何东西能让 SessionView 完成交接。
-          if (created?.workDir) {
-            remoteProjectsStore.mergeDeviceSessions(deviceId, deviceName, [
-              buildProvisionalRemoteSession({
-                sessionId: remoteSessionId,
-                workDir: created.workDir,
-                args: createArgs,
-                nowIso: new Date().toISOString(),
-              }),
-            ]);
-          }
-          const refreshResult = await refreshRemoteDeviceSessions(deviceId, deviceName);
-          if (refreshResult !== 'ok') {
-            log.warn('[draft goal] remote sessions refresh after create', refreshResult);
-          }
+          // 与发送路径共用同一段交接收尾(钉归属 → 补临时行 → 回流镜像)。三条不变量对目标路径
+          // 同样成立,只是后果换了个形状:goalApiFor 也按归属路由,漏了钉子它就把 setGoal 发给本机
+          // maker、对端刚建好的会话永远拿不到目标;而它不抛这条在这里更要紧 —— 抛出去 NewGoalDialog
+          // 会内联报错并保持打开,用户再点一次「创建」就在对端建出第二个目标会话。
+          await commitRemoteSessionHandoff({
+            deviceId,
+            deviceName,
+            remoteSessionId,
+            workDir: created?.workDir,
+            createArgs,
+            nowIso: new Date().toISOString(),
+            logTag: 'draft goal',
+          });
           // setGoal 不在这里发:重 topic session:<id> 订阅要等 CCAgentSessionView
           // mount 才建立,在 /cc-agent/new 就起 goal 首轮会让 maker:event/status 推送
           // 掉在订阅建立前的窗口里(Codex review #548)。与首条消息同款交接 ——

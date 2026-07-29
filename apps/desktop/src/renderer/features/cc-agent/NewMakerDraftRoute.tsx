@@ -59,7 +59,7 @@ import { useHasAnyRemoteTarget } from '@/hooks/useHasAnyReadyRemoteHost';
 import { useSelectableDevices } from '@/hooks/useControllableDevices';
 import { useProviderOnboarding } from '@/hooks/useProviderOnboarding';
 import { ConnectProviderCard } from '@/components/onboarding/ConnectProviderCard';
-import { buildDeviceLinkCreateArgs } from './deviceLinkCreateArgs';
+import { buildDeviceLinkCreateArgs, buildProvisionalRemoteSession } from './deviceLinkCreateArgs';
 import { VendorSegmentedSwitcher } from '@/components/new-chat/VendorSegmentedSwitcher';
 import { TopRightChipStack, TopRightChipStackProvider } from '@/components/chat/TopRightChipStack';
 import { useProportionalWidth } from '@/hooks/useProportionalWidth';
@@ -1814,32 +1814,34 @@ export function NewMakerDraftRoute() {
                 setWtCreating(false);
               }
             }
+            // 提出来存一份:临时行(见下方 buildProvisionalRemoteSession)要按**实际提交的**
+            // model / effort / permission / workspaceKind 组装,不能再各自推一遍。
+            const createArgs = buildDeviceLinkCreateArgs({
+              agentKind: persistedAgentKind,
+              // 远程 worktree:workingDir 换成刚建好的 worktree 路径(真实存在,被控端
+              // remote-workdir-guard 按"存在的目录"放行);id 与 worktree 绑定同值。
+              // 非 worktree 流程两者保持原值 / 缺省。
+              id: presetSessionId,
+              workingDir: remoteWorkingDir,
+              model,
+              effort,
+              permissionMode,
+              fastMode: effectiveFastMode,
+              extraDirs: effectiveExtraDirs,
+              // 草稿选定的来源(被控端供应商;null=跟随默认路由)。被控端 create 时落 sessions.provider_id,
+              // 使新远程会话首个请求即按所选来源路由(P2)。
+              providerId,
+            });
             const createResult = await window.electronAPI.deviceLink.invoke(
               deviceId,
               'maker:create-session',
-              [
-                // workspaceKind 恒 'project'(归属一致)+ agentKind 归一,见 buildDeviceLinkCreateArgs。
-                // extraDirs 一并透传(与本地 create 对齐):被控端 bootstrapSession 按 set-extra-dirs
-                // 同款 validateExtraDirs 校验后只存通过的子集,控制端镜像随被控端真相回流。
-                buildDeviceLinkCreateArgs({
-                  agentKind: persistedAgentKind,
-                  // 远程 worktree:workingDir 换成刚建好的 worktree 路径(真实存在,被控端
-                  // remote-workdir-guard 按"存在的目录"放行);id 与 worktree 绑定同值。
-                  // 非 worktree 流程两者保持原值 / 缺省。
-                  id: presetSessionId,
-                  workingDir: remoteWorkingDir,
-                  model,
-                  effort,
-                  permissionMode,
-                  fastMode: effectiveFastMode,
-                  extraDirs: effectiveExtraDirs,
-                  // 草稿选定的来源(被控端供应商;null=跟随默认路由)。被控端 create 时落 sessions.provider_id,
-                  // 使新远程会话首个请求即按所选来源路由(P2)。
-                  providerId,
-                }),
-              ],
+              // workspaceKind 由 workingDir 派生 + agentKind 归一,见 buildDeviceLinkCreateArgs。
+              // extraDirs 一并透传(与本地 create 对齐):被控端 bootstrapSession 按 set-extra-dirs
+              // 同款 validateExtraDirs 校验后只存通过的子集,控制端镜像随被控端真相回流。
+              [createArgs],
             );
-            const remoteSessionId = (createResult as { sessionId?: string } | null)?.sessionId;
+            const created = createResult as { sessionId?: string; workDir?: string } | null;
+            const remoteSessionId = created?.sessionId;
             if (!remoteSessionId) {
               toast.error(t('ccAgent.draft.createSessionFailed'));
               return;
@@ -1863,6 +1865,24 @@ export function NewMakerDraftRoute() {
             // (Codex review P1)。所以先把「这条会话在那台设备上」这个已确定的事实钉进 store,
             // 再去回流 —— 钉子只影响 origin 判定,会话进列表仍等权威快照。
             remoteProjectsStore.pinSessionOrigin(deviceId, remoteSessionId);
+            // 钉子只解决「路由到哪」。首条消息的交接还有第二道门槛:SessionView 的 delayed-create
+            // effect 要求 `session` 非空**且** workingDir 非空才 consumePending,而会话行只有权威
+            // 快照能带来 —— 回流失败时那条消息就一直不发;`gave-up` 里的永久错误(老被控端没把
+            // local-db:sessions:list 放进 allowlist / REMOTE_DISABLED)更是永远不会有快照,消息
+            // 永久躺着不发,而草稿下面就被清掉了(Codex review P1)。
+            //
+            // 所以先按 create 响应补一条**临时行**(workDir 取对端真正分配的值,其余取刚提交的
+            // args);权威快照到达后 setDeviceSessions 整片替换,以对端为准。
+            if (created?.workDir) {
+              remoteProjectsStore.mergeDeviceSessions(deviceId, deviceName, [
+                buildProvisionalRemoteSession({
+                  sessionId: remoteSessionId,
+                  workDir: created.workDir,
+                  args: createArgs,
+                  nowIso: new Date().toISOString(),
+                }),
+              ]);
+            }
             const refreshResult = await refreshRemoteDeviceSessions(deviceId, deviceName);
             if (refreshResult !== 'ok') {
               log.warn('[draft send] remote sessions refresh after create', refreshResult);
@@ -2322,28 +2342,29 @@ export function NewMakerDraftRoute() {
         }
         const deviceId = effectiveDeviceLinkDeviceId;
         const deviceName = effectiveDeviceLinkDeviceName ?? deviceId;
+        // 与 handleSend 同口径先存一份 args:临时行要按实际提交的值组装(见 buildProvisionalRemoteSession)。
+        const createArgs = buildDeviceLinkCreateArgs({
+          agentKind: persistedAgentKind,
+          // 无项目 → 不传,由 buildDeviceLinkCreateArgs 派生 workspaceKind:'dialogue'。
+          workingDir: effectiveWorkingDir ?? undefined,
+          model: draftInitialModel,
+          effort: draftInitialEffort,
+          permissionMode: chatInitialPermissionMode,
+          fastMode: effectiveFastMode,
+          extraDirs: effectiveExtraDirs,
+          providerId: chatInitialProviderId ?? null,
+        });
         const createResult = await window.electronAPI.deviceLink.invoke(
           deviceId,
           'maker:create-session',
-          [
-            buildDeviceLinkCreateArgs({
-              agentKind: persistedAgentKind,
-              // 无项目 → 不传,由 buildDeviceLinkCreateArgs 派生 workspaceKind:'dialogue'。
-              workingDir: effectiveWorkingDir ?? undefined,
-              model: draftInitialModel,
-              effort: draftInitialEffort,
-              permissionMode: chatInitialPermissionMode,
-              fastMode: effectiveFastMode,
-              extraDirs: effectiveExtraDirs,
-              providerId: chatInitialProviderId ?? null,
-            }),
-          ],
+          [createArgs],
         ).catch((err) => {
           const remoteWorkdirMessage = getRemoteWorkingDirErrorMessage(err, t);
           if (remoteWorkdirMessage) throw new Error(remoteWorkdirMessage);
           throw err;
         });
-        const remoteSessionId = (createResult as { sessionId?: string } | null)?.sessionId;
+        const created = createResult as { sessionId?: string; workDir?: string } | null;
+        const remoteSessionId = created?.sessionId;
         if (!remoteSessionId) {
           throw new Error(t('ccAgent.draft.createSessionFailed'));
         }
@@ -2355,6 +2376,18 @@ export function NewMakerDraftRoute() {
         // 同样先钉归属再回流:goalApiFor 按归属路由,回流失败时它会把 setGoal 发给本机 maker,
         // 对端刚建好的会话则永远拿不到目标(Codex review P1)。
         remoteProjectsStore.pinSessionOrigin(deviceId, remoteSessionId);
+        // 临时行同上(useGoalStatus 也按会话行解析归属与运行目录):回流失败、尤其老被控端永久
+        // 拿不到 sessions:list 时,不补这条行就没有任何东西能让 SessionView 完成交接。
+        if (created?.workDir) {
+          remoteProjectsStore.mergeDeviceSessions(deviceId, deviceName, [
+            buildProvisionalRemoteSession({
+              sessionId: remoteSessionId,
+              workDir: created.workDir,
+              args: createArgs,
+              nowIso: new Date().toISOString(),
+            }),
+          ]);
+        }
         const refreshResult = await refreshRemoteDeviceSessions(deviceId, deviceName);
         if (refreshResult !== 'ok') {
           log.warn('[draft goal] remote sessions refresh after create', refreshResult);

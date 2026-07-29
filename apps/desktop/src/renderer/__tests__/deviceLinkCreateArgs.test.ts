@@ -11,7 +11,10 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { buildDeviceLinkCreateArgs } from '@/features/cc-agent/deviceLinkCreateArgs';
+import {
+  buildDeviceLinkCreateArgs,
+  buildProvisionalRemoteSession,
+} from '@/features/cc-agent/deviceLinkCreateArgs';
 
 describe('buildDeviceLinkCreateArgs', () => {
   it('归属一致核心:workspaceKind 恒为 project(被控端据此挂到项目下,不独立)', () => {
@@ -161,5 +164,105 @@ describe('buildDeviceLinkCreateArgs', () => {
       expect(args.extraDirs).toEqual(['/host/refs']);
       expect(args.providerId).toBe('anthropic');
     });
+  });
+});
+
+describe('buildProvisionalRemoteSession', () => {
+  const NOW = '2026-07-30T03:00:00.000Z';
+  const project = buildDeviceLinkCreateArgs({
+    agentKind: 'codex',
+    workingDir: '/peer/proj',
+    model: 'gpt-5.4',
+    effort: 'high',
+    permissionMode: 'plan',
+    fastMode: true,
+    extraDirs: ['/peer/refs'],
+    providerId: 'openai',
+  });
+  const dialogue = buildDeviceLinkCreateArgs({
+    agentKind: 'cc',
+    model: 'sonnet',
+    effort: 'medium',
+    permissionMode: 'default',
+    fastMode: false,
+  });
+
+  it('workingDir 取被控端 create 响应的 workDir —— 纯对话的运行目录控制端根本猜不到', () => {
+    // 这条是整个临时行存在的理由:SessionView 的 delayed-create 交接要求 workingDir 非空,
+    // 而 dialogue 的运行目录由被控端分配,只能从响应里拿。
+    const row = buildProvisionalRemoteSession({
+      sessionId: 's-1',
+      workDir: '/peer/.cindy/dialogues/s-1',
+      args: dialogue,
+      nowIso: NOW,
+    });
+    expect(row.workingDir).toBe('/peer/.cindy/dialogues/s-1');
+    expect(row.workspaceKind).toBe('dialogue');
+  });
+
+  it('运行配置照抄刚提交的 args,不另推一遍(否则临时行会和对端实际建的不一致)', () => {
+    const row = buildProvisionalRemoteSession({
+      sessionId: 's-2',
+      workDir: '/peer/proj',
+      args: project,
+      nowIso: NOW,
+    });
+    expect(row.model).toBe('gpt-5.4');
+    expect(row.effort).toBe('high');
+    expect(row.permissionMode).toBe('plan');
+    expect(row.fastMode).toBe(true);
+    expect(row.providerId).toBe('openai');
+    expect(row.extraDirs).toEqual(['/peer/refs']);
+    expect(row.workspaceKind).toBe('project');
+  });
+
+  it('agentKind 转回本机形态(args 里是 maker-core 形态)', () => {
+    expect(
+      buildProvisionalRemoteSession({ sessionId: 's', workDir: '/w', args: project, nowIso: NOW })
+        .agentKind,
+    ).toBe('codex');
+    expect(
+      buildProvisionalRemoteSession({ sessionId: 's', workDir: '/w', args: dialogue, nowIso: NOW })
+        .agentKind,
+    ).toBe('cc');
+  });
+
+  it('新会话的确定初值:active / 未置顶 / 计数为 0 / 标题与被控端 create 的默认值一致', () => {
+    const row = buildProvisionalRemoteSession({
+      sessionId: 's-3',
+      workDir: '/w',
+      args: dialogue,
+      nowIso: NOW,
+    });
+    expect(row.status).toBe('active');
+    expect(row.pinnedAt).toBeNull();
+    expect(row.clearedAt).toBeNull();
+    expect(row.sdkSessionId).toBeNull();
+    expect(row.totalTokenUsage).toBe(0);
+    // 被控端 create 出来的标题正是 'New Maker'(auto-title 的覆写判据也认这个值)。
+    expect(row.title).toBe('New Maker');
+  });
+
+  it('userSendAt 置为当下:用户此刻正在发第一条,侧边栏该立刻浮到顶部(与本机路径同口径)', () => {
+    const row = buildProvisionalRemoteSession({
+      sessionId: 's-4',
+      workDir: '/w',
+      args: dialogue,
+      nowIso: NOW,
+    });
+    expect(row.userSendAt).toBe(NOW);
+    expect(row.createdAt).toBe(NOW);
+    expect(row.updatedAt).toBe(NOW);
+  });
+
+  it('providerId 缺省(跟随默认路由)时落 null,不留 undefined', () => {
+    const row = buildProvisionalRemoteSession({
+      sessionId: 's-5',
+      workDir: '/w',
+      args: dialogue,
+      nowIso: NOW,
+    });
+    expect(row.providerId).toBeNull();
+    expect(row.extraDirs).toEqual([]);
   });
 });

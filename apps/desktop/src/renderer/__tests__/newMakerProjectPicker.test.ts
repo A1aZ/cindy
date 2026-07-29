@@ -725,6 +725,28 @@ describe('Shared create project picker', () => {
     );
   });
 
+  // #807 review 第二十轮:归属钉子只解决路由,首条消息的交接还要求 SessionView 拿到一条会话行
+  // (delayed-create effect 要 `session` 非空且 workingDir 非空)。回流失败、尤其老被控端永久
+  // 拿不到 sessions:list 时永远不会有权威快照,那条消息就永久不发,而草稿已经清掉。
+  it('seeds a provisional session row so the first message can hand off without the snapshot', () => {
+    // 两条远程创建路径都要补,且都必须在回流之前(回流成功会整片替换,顺序无所谓;
+    // 回流失败时只有先补的这条行能救交接)。
+    const seeds =
+      newMakerDraftRouteSource.match(/buildProvisionalRemoteSession\(\{/g) ?? [];
+    expect(seeds.length).toBe(2);
+    // workDir 必须取 create 响应,不能拿草稿的 workingDir 顶替 —— 纯对话的运行目录由对端分配。
+    expect(newMakerDraftRouteSource).toContain('workDir: created.workDir,');
+    expect(newMakerDraftRouteSource).toContain('if (created?.workDir) {');
+    // 用 merge 而非 set:不能把该设备已缓存的其它会话冲掉。
+    expect(
+      (newMakerDraftRouteSource.match(/remoteProjectsStore\.mergeDeviceSessions\(/g) ?? []).length,
+    ).toBe(2);
+    // 临时行按**实际提交的** args 组装,不各自再推一遍 model / permission / workspaceKind。
+    expect(
+      (newMakerDraftRouteSource.match(/args: createArgs,/g) ?? []).length,
+    ).toBe(2);
+  });
+
   it('keeps recent-folder storage out of project-option selection', () => {
     expect(folderPickerPopoverSource).toContain('projectOptions?: readonly FolderPickerOption[]');
     expect(folderPickerPopoverSource).toContain(

@@ -16,7 +16,7 @@
  * agentKind 归一到 maker-core 形态('cc' → 'claude-code');其余字段原样透传。
  */
 
-import type { WorkspaceKind } from '@/lib/ccAgent.types';
+import type { Session, WorkspaceKind } from '@/lib/ccAgent.types';
 import type { Effort, PermissionMode } from '@/lib/userPreferences.types';
 
 export interface DeviceLinkCreateParams {
@@ -89,5 +89,68 @@ export function buildDeviceLinkCreateArgs(p: DeviceLinkCreateParams): DeviceLink
     ...(p.extraDirs && p.extraDirs.length > 0 ? { extraDirs: p.extraDirs } : {}),
     // providerId 同理:仅非空显式来源才放进 args;null/空 → 不带 → 被控端 provider_id 留 NULL(默认路由)。
     ...(p.providerId ? { providerId: p.providerId } : {}),
+  };
+}
+
+export interface ProvisionalRemoteSessionParams {
+  /** 被控端 create 响应里的会话 id。 */
+  sessionId: string;
+  /**
+   * 被控端**真正分配**的运行目录(create 响应的 `workDir`)。纯对话由对端分配,控制端猜不到,
+   * 所以只能取响应值 —— 而 SessionView 的 delayed-create 交接又硬要求 workingDir 非空。
+   */
+  workDir: string;
+  /** 刚提交给被控端的那份 args:model / effort / permission / workspaceKind 等都以它为准。 */
+  args: DeviceLinkCreateArgs;
+  /** 当前时刻 ISO 串。由调用方注入,便于单测固定时间。 */
+  nowIso: string;
+}
+
+/**
+ * 远程会话的**临时行**:create 成功、权威快照(sessions:list 回流)还没到时先塞进镜像。
+ *
+ * 为什么必须有:origin 钉子只让「这条会话属于哪台设备」立刻可判定,但首条消息的交接另有门槛 ——
+ * CCAgentSessionView 的 delayed-create effect 要求 `session` 非空**且** `session.workingDir`
+ * 非空才会 consumePending。镜像里的会话行只有权威快照能带来,所以回流失败时那条消息就一直不发;
+ * 而 `gave-up` 里的永久错误(老被控端没把 `local-db:sessions:list` 放进 allowlist、
+ * REMOTE_DISABLED)意味着这一轮**永远**不会有快照,首条消息就永久躺着不发,草稿又已经清掉。
+ *
+ * 为什么不算编造:workDir 取 create 响应(对端真正分配的);model / effort / permissionMode /
+ * workspaceKind / extraDirs / providerId 就是我们刚提交给它的值;title / 计数 / 时间戳是新会话的
+ * 确定初值(被控端 create 出来的标题也正是 'New Maker')。权威快照到达后 setDeviceSessions 整片
+ * 替换该设备分片,一切以对端为准。
+ *
+ * userId 是唯一取不到的字段(那是被控端库里的行主键关联),留空串:镜像消费方(侧边栏分组 /
+ * SessionView / 传输层)都不读它,权威快照也会立刻覆盖。
+ */
+export function buildProvisionalRemoteSession(p: ProvisionalRemoteSessionParams): Session {
+  return {
+    id: p.sessionId,
+    userId: '',
+    // 被控端 create 的默认标题就是这个;auto-title 随后会按需覆盖(两端同一判据)。
+    title: 'New Maker',
+    workingDir: p.workDir,
+    workspaceKind: p.args.workspaceKind,
+    model: p.args.model,
+    effort: p.args.effort,
+    permissionMode: p.args.permissionMode,
+    providerId: p.args.providerId ?? null,
+    sdkSessionId: null,
+    totalTokenUsage: 0,
+    totalCostUsd: 0,
+    contextTokens: 0,
+    contextWindow: 0,
+    fastMode: p.args.fastMode,
+    clearedAt: null,
+    pinnedAt: null,
+    // 用户此刻正在发第一条消息 —— 与本机路径建完会话就写 userSendAt 同口径,
+    // 侧边栏按这条时间轴排序,新会话该立刻浮到顶部。
+    userSendAt: p.nowIso,
+    status: 'active',
+    // Session.agentKind 是本机形态('cc' | 'codex'),args 里是 maker-core 形态,这里转回来。
+    agentKind: p.args.agentKind === 'codex' ? 'codex' : 'cc',
+    extraDirs: p.args.extraDirs ?? [],
+    createdAt: p.nowIso,
+    updatedAt: p.nowIso,
   };
 }

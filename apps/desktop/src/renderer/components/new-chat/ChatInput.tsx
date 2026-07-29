@@ -3621,7 +3621,7 @@ export function ChatInput({
       }
       const kinds: readonly AgentKind[] = currentModelAgentKind
         ? [currentModelAgentKind]
-        : ['claude-code', 'codex'];
+        : ['claude-code', 'codex', 'pi'];
       for (const kind of kinds) {
         const found = deriveModelsFromProviders(providers, kind).find((x) => x.id === modelId);
         if (found) return { efforts: found.efforts, defaultEffort: found.defaultEffort ?? null };
@@ -3884,7 +3884,7 @@ export function ChatInput({
   );
   const performAgentSwitch = useCallback(
     async (
-      targetAgentKind: 'claude-code' | 'codex',
+      targetAgentKind: 'claude-code' | 'codex' | 'pi',
       newModelId: string,
       providerId: string | null = null,
       // 意图期内的档位/Fast 改动经此显式覆盖(用户手选优先于记忆/默认解析)。

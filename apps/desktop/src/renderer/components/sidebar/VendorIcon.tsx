@@ -18,7 +18,7 @@ import { ClaudeMark } from '@/components/icons/ClaudeMark';
 import { CodexMark } from '@/components/icons/CodexMark';
 
 interface VendorIconProps {
-  vendor: 'cc' | 'codex';
+  vendor: 'cc' | 'codex' | 'pi';
   size?: number;
   /** true → 切 Thinking Orange + 呼吸动画,复用 .session-status-breathing */
   running?: boolean;
@@ -46,7 +46,19 @@ export function VendorIcon({
 
   return (
     <span className={wrapperClassName}>
-      {vendor === 'codex' ? <CodexMark size={size} /> : <ClaudeMark size={size} />}
+      {vendor === 'codex' ? (
+        <CodexMark size={size} />
+      ) : vendor === 'pi' ? (
+        <span
+          aria-hidden
+          style={{ fontSize: size * 0.86, lineHeight: `${size}px`, width: size, height: size }}
+          className="inline-flex items-center justify-center font-semibold"
+        >
+          π
+        </span>
+      ) : (
+        <ClaudeMark size={size} />
+      )}
     </span>
   );
 }

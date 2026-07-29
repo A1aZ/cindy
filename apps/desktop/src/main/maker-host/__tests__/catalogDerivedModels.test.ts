@@ -171,10 +171,13 @@ describe('deriveAvailableModels — dynamic-first catalog contract', () => {
   it('runtime refresh replaces both agent model lists in place so existing sessions keep the live reference', () => {
     const claudeModels: ModelDescriptor[] = [{ id: 'stale-claude', displayName: 'Stale', contextWindow: 1, efforts: [], defaultEffort: null }];
     const codexModels: ModelDescriptor[] = [{ id: 'stale-codex', displayName: 'Stale', contextWindow: 1, efforts: [], defaultEffort: null }];
+    const piModels: ModelDescriptor[] = [{ id: 'stale-pi', displayName: 'Stale', contextWindow: 1, efforts: [], defaultEffort: null }];
     const claudeRef = claudeModels;
     const codexRef = codexModels;
+    const piRef = piModels;
     const target = {
-      getCapabilities(agent: 'claude-code' | 'codex') {
+      getCapabilities(agent: 'claude-code' | 'codex' | 'pi') {
+        if (agent === 'pi') return { availableModels: piModels };
         return { availableModels: agent === 'claude-code' ? claudeModels : codexModels };
       },
     };
@@ -183,8 +186,10 @@ describe('deriveAvailableModels — dynamic-first catalog contract', () => {
 
     expect(claudeModels).toBe(claudeRef);
     expect(codexModels).toBe(codexRef);
+    expect(piModels).toBe(piRef);
     expect(claudeModels).toEqual(deriveAvailableModels(injectedCatalog(), 'claude-code'));
     expect(codexModels).toEqual(deriveAvailableModels(injectedCatalog(), 'codex'));
+    expect(piModels).toEqual(deriveAvailableModels(injectedCatalog(), 'pi'));
   });
 });
 

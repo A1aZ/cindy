@@ -142,7 +142,13 @@ const VALID_EFFORTS: ReadonlySet<string> = new Set([
 type Effort = CatalogModel['efforts'][number];
 
 function xdGatewayTargetAgents(model: XdGatewayModelInfo): AgentKind[] {
-  return model.agents && model.agents.length > 0 ? model.agents : ['claude-code'];
+  const agents: AgentKind[] = model.agents && model.agents.length > 0
+    ? [...model.agents]
+    : ['claude-code'];
+  // Pi 走网关 anthropic-messages 协议，可达面与 claude-code 相同；服务端目录
+  // 尚无 pi 概念时按 claude-code 归属镜像，显式声明 pi 后自然不重复。
+  if (agents.includes('claude-code') && !agents.includes('pi')) agents.push('pi');
+  return agents;
 }
 
 function deriveXdCodexAnthropicBridgeModelIds(

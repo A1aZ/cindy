@@ -112,8 +112,14 @@ export function refreshCatalogDerivedModels(
   target: ModelCapabilitiesTarget,
   catalog: Catalog,
 ): void {
-  for (const agent of ['claude-code', 'codex'] as const) {
-    const availableModels = target.getCapabilities(agent).availableModels;
+  for (const agent of ['claude-code', 'codex', 'pi'] as const) {
+    let availableModels: ModelDescriptor[];
+    try {
+      availableModels = target.getCapabilities(agent).availableModels;
+    } catch {
+      // pi 是可选 agent(二进制缺失时不注册),getCapabilities 抛错则跳过。
+      continue;
+    }
     availableModels.splice(0, availableModels.length, ...deriveAvailableModels(catalog, agent));
   }
 }

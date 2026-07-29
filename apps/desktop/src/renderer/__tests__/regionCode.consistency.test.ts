@@ -16,6 +16,9 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import type { CindyRegion } from '@cindy/maker-shared/brand-identity';
 
 import { CINDY_REGION_CODE, shouldLabelRegion } from '../../shared/regionCode';
@@ -42,9 +45,13 @@ function regionCodeKeyFor(region: string): string {
  * 消费区域代号的各条链路:i18n key 所在对象 + 该链路的 key 命名。
  *
  * 登录页徽标的 key 命名与另两条不同(`login.regionPill.cn` 而非 `regionCodeCn`),
- * 所以 keyFor 可按链路覆盖——它必须在表里:徽标的「标不标」虽已过
- * shouldLabelRegion,但「哪个区域用哪个 key」仍由 LoginPage 的 REGION_PILL_KEY
- * 自己维护,漏补 key 会让该区域拿不到文案而静默不显示。
+ * 所以 keyFor 可按链路覆盖。
+ *
+ * ⚠️ 本表只覆盖 **i18n bundle 侧**:某个区域在四语包里有没有 key、取值对不对。
+ * 「组件里有没有真的引用到那个 key」是另一回事,由下面的 SOURCE_CONSUMERS 用源码
+ * 字面量扫描覆盖(各组件都把 key 写成字面量分支而非动态拼接,为的是 `pnpm check:i18n`
+ * 的静态提取能看到——正好也让这种扫描可行)。两者缺一都留口子:只有 bundle 就防不住
+ * 组件漏引用,只有源码扫描就防不住 bundle 缺 key 或取值被译走。
  */
 const CONSUMERS: ReadonlyArray<{
   label: string;
@@ -73,6 +80,40 @@ const CONSUMERS: ReadonlyArray<{
 /** 取某条链路上该区域的 i18n key 名。 */
 function keyOf(consumer: (typeof CONSUMERS)[number], region: string): string {
   return (consumer.keyFor ?? regionCodeKeyFor)(region);
+}
+
+/**
+ * 各消费点组件源码 + 它引用 i18n key 的完整路径写法。
+ *
+ * 为什么要扫源码:三条链路的「哪个区域用哪个 key」都由组件自己维护(LoginPage 的
+ * REGION_PILL_KEY 映射表、侧栏与 issue 卡片的三元字面量分支)。新增区域时只补了
+ * CINDY_REGION_CODE 与四语 bundle、忘了补组件分支,上面的 bundle 断言照样全绿,而
+ * 该区域在界面上拿不到文案 —— 这一组断言补的就是那道信号。
+ */
+const SOURCE_CONSUMERS: ReadonlyArray<{
+  label: string;
+  file: string;
+  keyPathFor: (region: string) => string;
+}> = [
+  {
+    label: '登录页标题旁区域徽标',
+    file: 'components/login/LoginPage.tsx',
+    keyPathFor: (region) => `login.regionPill.${region}`,
+  },
+  {
+    label: '侧栏用户卡片版本行',
+    file: 'components/sidebar/UserInfoSection.tsx',
+    keyPathFor: (region) => `sidebar.user.${regionCodeKeyFor(region)}`,
+  },
+  {
+    label: 'issue 提交确认卡片',
+    file: 'features/cc-agent/IssueConfirmCard.tsx',
+    keyPathFor: (region) => `issueAgent.confirm.${regionCodeKeyFor(region)}`,
+  },
+];
+
+function readConsumerSource(file: string): string {
+  return readFileSync(resolve(__dirname, '..', file), 'utf8');
 }
 
 describe('区域代号:界面 i18n 与常量一致', () => {
@@ -116,6 +157,41 @@ describe('区域代号:界面 i18n 与常量一致', () => {
     expect(shouldLabelRegion(undefined)).toBe(false);
     expect(shouldLabelRegion('cn')).toBe(true);
     expect(shouldLabelRegion('dev')).toBe(true);
+  });
+
+  it('每个消费点组件都真的引用了各自的 key —— 只补 bundle 不补组件分支要能被发现', () => {
+    const labeled = Object.keys(CINDY_REGION_CODE).filter(
+      (region) => CINDY_REGION_CODE[region as CindyRegion] !== null,
+    );
+    expect(labeled.length).toBeGreaterThan(0);
+    expect(SOURCE_CONSUMERS.length).toBeGreaterThan(0);
+    for (const consumer of SOURCE_CONSUMERS) {
+      const source = readConsumerSource(consumer.file);
+      for (const region of labeled) {
+        const keyPath = consumer.keyPathFor(region);
+        expect(
+          source.includes(`'${keyPath}'`),
+          `${consumer.file}(${consumer.label})应引用 '${keyPath}'——${region} 有代号却没在组件里落地,界面会拿不到文案`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('不标注的区域不得在任何消费点组件里出现 key 引用', () => {
+    const unlabeled = Object.keys(CINDY_REGION_CODE).filter(
+      (region) => CINDY_REGION_CODE[region as CindyRegion] === null,
+    );
+    expect(unlabeled.length).toBeGreaterThan(0);
+    for (const consumer of SOURCE_CONSUMERS) {
+      const source = readConsumerSource(consumer.file);
+      for (const region of unlabeled) {
+        const keyPath = consumer.keyPathFor(region);
+        expect(
+          source.includes(`'${keyPath}'`),
+          `${consumer.file}(${consumer.label})不应引用 '${keyPath}'——${region} 按产品规则不标注(DESIGN.md §16.3)`,
+        ).toBe(false);
+      }
+    }
   });
 
   it('未知 region 按不标处理 —— 表里取不到值时不得落进「有代号」分支', () => {

@@ -1433,6 +1433,18 @@ export class Scheduler extends EventEmitter {
     return true;
   }
 
+  /**
+   * 该 run 是否已被卡死守卫强制收口(runner 在投通知前查询)。
+   *
+   * 命中说明引擎已经把这一轮记成 failed 并按任务配置投过通知了。迟到 settle 的 runner
+   * 若再走自己的 finalizeRun / notifyFailureSilent,用户会为同一轮收到两条通知
+   * (review #944 第十四轮 P1)。常见顺序正是"引擎先投、runner 几分钟后才 settle",
+   * 所以只靠引擎侧的 needsForcedFailureNotification 挡不住,必须 runner 侧也自查。
+   */
+  isRunAbandoned(runId: string): boolean {
+    return this.abandonedRuns.has(runId);
+  }
+
   /** run 是否被标记静默(runner 在完成通知前查询)。 */
   isRunSilenced(runId: string): boolean {
     return this.silencedRuns.has(runId);
@@ -1514,7 +1526,10 @@ export class Scheduler extends EventEmitter {
    */
   private startHeartbeatLoopIfNeeded(): void {
     if (this.heartbeatHandle !== null) return;
-    this.lastHeartbeatAt = 0;
+    // 基准必须在这里就播种,不能等第一拍回调:run 起来之后、第一拍心跳(15s)之前机器就
+    // 睡下去的话,醒来那一拍还没有可比的间隔,整段睡眠会被 enforceStallGuard 当成无反馈
+    // 直接砍掉一条健康 run(review #944 第十四轮 P1)。
+    this.lastHeartbeatAt = this.clock.now();
     this.heartbeatHandle = setInterval(() => {
       const runIds = [...this.inflightControllers.keys()];
       const now = this.clock.now();
@@ -2051,7 +2066,8 @@ export class Scheduler extends EventEmitter {
   private absorbSuspendGap(now: number): void {
     const last = this.lastHeartbeatAt;
     this.lastHeartbeatAt = now;
-    if (last === 0) return; // 本轮是心跳 loop 的第一拍,没有可比的间隔
+    // 基准由 startHeartbeatLoopIfNeeded 播种,正常不会是 0;留作防御(stop 后的迟到回调)。
+    if (last === 0) return;
     if (this.suspendGapMs <= 0) return; // 显式关闭(测试默认)
     const gap = now - last - RUN_HEARTBEAT_INTERVAL_MS;
     if (gap <= this.suspendGapMs) return;
@@ -2296,7 +2312,13 @@ export class Scheduler extends EventEmitter {
       return;
     }
     this.emitEvent({ type: 'failed', scheduleId, runId, error: errorMsg });
-    void this.notifyForcedFailure(scheduleId, runId, errorMsg);
+    // 迟到 settle 的 runner 可能已经先投过失败通知(第十三轮起 attempt 在收口期间保留,
+    // 所以 onRunnerNotified 的记录此刻是可读的)。两侧都自查才能做到"恰好一条":
+    // runner 先投 → 这里跳过;这里先投 → runner 经 isRunAbandoned 跳过
+    // (review #944 第十四轮 P1)。
+    if (this.needsForcedFailureNotification(runId)) {
+      void this.notifyForcedFailure(scheduleId, runId, errorMsg);
+    }
     // 重排:**不能**复用 rescheduleAfterSweep —— 它遇到"该 schedule 仍有 running 行"
     // 就放弃补排,而同一 schedule 上并发的 runNow 正好构成这种情形;runNow 收口只写
     // lastFinishedAt、从不重排,于是没人恢复排期,任务永久停摆(review P1)。这里明确

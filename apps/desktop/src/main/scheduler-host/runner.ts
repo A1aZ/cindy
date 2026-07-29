@@ -1878,7 +1878,16 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // 失败不豁免 —— 异常必须可见,通知照发(fail-safe)。
     const silenced =
       finalRun.status === 'success' && !!this.scheduler?.isRunSilenced(ctx.runId);
-    if (silenced) {
+    // 已被卡死守卫强制收口的 run:引擎早就把这一轮记成 failed 并按配置投过通知了。
+    // 迟到 settle 的我们再投一条,用户会为同一轮收到两条(review #944 第十四轮 P1)。
+    // 常见顺序恰好是"引擎先投、runner 几分钟后才 settle",所以只靠引擎侧挡不住。
+    const abandoned = !!this.scheduler?.isRunAbandoned?.(ctx.runId);
+    if (abandoned) {
+      this.deps.logger.info?.(
+        '[runner] run was force-released by the stall guard; skipping duplicate notification',
+        { scheduleId: schedule.id, runId: ctx.runId },
+      );
+    } else if (silenced) {
       this.deps.logger.info?.('[runner] run silenced; skipping completion notification', {
         scheduleId: schedule.id,
         runId: ctx.runId,
@@ -2045,6 +2054,14 @@ export class MakerScheduleRunner implements ScheduleRunner {
     ctx: FireContext,
     errMsg: string,
   ): Promise<void> {
+    // 见 finalizeRun 同名判断:已被卡死守卫强制收口的 run,引擎已经投过失败通知。
+    if (this.scheduler?.isRunAbandoned?.(ctx.runId)) {
+      this.deps.logger.info?.(
+        '[runner] run was force-released by the stall guard; skipping duplicate failure notification',
+        { scheduleId: schedule.id, runId: ctx.runId },
+      );
+      return;
+    }
     const fauxRun: ScheduleRun = {
       id: ctx.runId,
       scheduleId: schedule.id,

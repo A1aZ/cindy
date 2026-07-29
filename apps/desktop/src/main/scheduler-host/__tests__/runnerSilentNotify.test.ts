@@ -121,7 +121,10 @@ function createFireContext(): FireContext {
   };
 }
 
-function createRunnerHarness(session: Session, opts: { silenced: boolean }) {
+function createRunnerHarness(
+  session: Session,
+  opts: { silenced: boolean; abandoned?: boolean },
+) {
   const notifier: Notifier & { notify: ReturnType<typeof vi.fn> } = {
     notify: vi.fn(async () => undefined),
   };
@@ -139,8 +142,9 @@ function createRunnerHarness(session: Session, opts: { silenced: boolean }) {
     logger,
   });
   const isRunSilenced = vi.fn(() => opts.silenced);
-  runner.attachScheduler({ isRunSilenced } as unknown as Scheduler);
-  return { runner, notifier, isRunSilenced };
+  const isRunAbandoned = vi.fn(() => opts.abandoned === true);
+  runner.attachScheduler({ isRunSilenced, isRunAbandoned } as unknown as Scheduler);
+  return { runner, notifier, isRunSilenced, isRunAbandoned };
 }
 
 /** send 接受 + onAccepted 落库,emit done 后 fire 才会 resolve */
@@ -238,6 +242,49 @@ describe('MakerScheduleRunner silent-run notification skip', () => {
     const { runner, notifier } = createRunnerHarness(h.session, { silenced: true });
 
     await expect(runner.fire(baseSchedule(), createFireContext())).rejects.toThrow();
+
+    expect(notifier.notify).toHaveBeenCalledTimes(1);
+  });
+
+  it('已被卡死守卫强制收口的 run:success 迟到 settle 不重复通知', async () => {
+    // 引擎强制收口时已按任务配置投过失败通知。常见顺序是"引擎先投、runner 几分钟后才
+    // settle",runner 若照常走 finalizeRun,用户会为同一轮收到两条
+    // (review #944 第十四轮 P1)。
+    const h = createSessionHarness(acceptingSend());
+    const { runner, notifier, isRunAbandoned } = createRunnerHarness(h.session, {
+      silenced: false,
+      abandoned: true,
+    });
+
+    await fireToCompletion(runner, h);
+
+    expect(isRunAbandoned).toHaveBeenCalled();
+    expect(notifier.notify).not.toHaveBeenCalled();
+  });
+
+  it('已被卡死守卫强制收口的 run:失败路径也不重复通知', async () => {
+    const h = createSessionHarness(async (_message, opts) => {
+      await opts?.onAccepted?.();
+      throw new Error('send blew up');
+    });
+    const { runner, notifier } = createRunnerHarness(h.session, {
+      silenced: false,
+      abandoned: true,
+    });
+
+    await expect(runner.fire(baseSchedule(), createFireContext())).rejects.toThrow();
+
+    expect(notifier.notify).not.toHaveBeenCalled();
+  });
+
+  it('未被强制收口时通知照发(去重不能变成永久静默)', async () => {
+    const h = createSessionHarness(acceptingSend());
+    const { runner, notifier } = createRunnerHarness(h.session, {
+      silenced: false,
+      abandoned: false,
+    });
+
+    await fireToCompletion(runner, h);
 
     expect(notifier.notify).toHaveBeenCalledTimes(1);
   });

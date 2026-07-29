@@ -3085,6 +3085,36 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
     }
   });
 
+  it('第一拍心跳之前就睡下去,醒来同样不判卡死', async () => {
+    // 基准若等第一拍回调才播种,醒来那一拍还没有可比的间隔 → 整段睡眠被当成无反馈,
+    // 一条健康 run 直接被砍(review #944 第十四轮 P1)。
+    vi.useFakeTimers();
+    try {
+      let sawAbort = false;
+      const h = makeHarness({
+        runStallMs: 60_000,
+        runStallAbortGraceMs: 30_000,
+        suspendGapMs: 30_000,
+        runnerImpl: (_s, ctx) =>
+          new Promise<FireResult>(() => {
+            ctx.signal.addEventListener('abort', () => { sawAbort = true; });
+          }),
+      });
+      await h.scheduler.create({ ...baseInput, intervalMs: 24 * 3_600_000 });
+      h.clock.advance(24 * 3_600_000);
+      void h.scheduler.tick();
+      await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(1));
+
+      // 还没跑过任何一拍心跳就合盖睡 8 小时,醒来第一拍
+      h.clock.advance(8 * 3_600_000);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      expect(sawAbort).toBe(false);
+      await h.scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('系统挂起(合盖睡眠)醒来后不把睡着的时间当成无反馈', async () => {
     // 判据用壁钟:机器睡 8 小时,醒来第一次心跳看到的 noProgressMs 就是 8 小时,于是把
     // 一条完全健康、睡前正在跑长工具的 run 直接 abort(review #944 第十二轮 P1)。
@@ -3200,6 +3230,62 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
       expect(row?.lastFiredAt).toBeDefined();
       expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(0);
       await h.scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('强制收口已投通知后,迟到 settle 的 runner 不再重复投', async () => {
+    // 常见顺序:引擎先投失败通知,runner 几分钟后才 settle 并走自己的 finalizeRun ——
+    // 用户为同一轮收到两条通知。runner 侧必须自查 isRunAbandoned(review #944 第十四轮 P1)。
+    vi.useFakeTimers();
+    try {
+      const notified: unknown[] = [];
+      const storage = new InMemoryStorage();
+      const clock = new FakeClock();
+      let settleRunner: (() => void) | null = null;
+      let abandonedSeenByRunner: boolean | null = null;
+      const scheduler = new Scheduler({
+        storage,
+        runner: {
+          fire: (_s, ctx) =>
+            new Promise<FireResult>((resolve) => {
+              settleRunner = () => {
+                // runner 在真正投通知前查询引擎(生产里就是 finalizeRun 的那次自查)
+                abandonedSeenByRunner = scheduler.isRunAbandoned(ctx.runId);
+                resolve({ sessionId: 'sess-late' });
+              };
+            }),
+        },
+        clock,
+        generateId: makeIdGen(),
+        tickIntervalMs: 60_000_000,
+        suspendGapMs: 0,
+        runStallMs: 60_000,
+        runStallAbortGraceMs: 30_000,
+        notifyForcedFailure: (input) => {
+          notified.push(input);
+        },
+        instanceId: 'test-no-late-dup-notify',
+      });
+      const sch = await scheduler.create({ ...baseInput, manual: true });
+      const p = scheduler.runNow(sch.id);
+      await vi.waitFor(() => expect(scheduler.getRuntimeSnapshot().slotsInUse).toBe(1));
+
+      clock.advance(60_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      clock.advance(30_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      // 引擎已强制收口并投过通知
+      await vi.waitFor(() => expect(notified).toHaveLength(1));
+
+      // runner 现在才 settle:它自查到本轮已被强制收口 → 生产里据此跳过自己的通知
+      settleRunner!();
+      await p;
+      expect(abandonedSeenByRunner).toBe(true);
+      // 引擎侧也没有再补第二条
+      expect(notified).toHaveLength(1);
+      await scheduler.stop();
     } finally {
       vi.useRealTimers();
     }

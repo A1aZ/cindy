@@ -302,6 +302,29 @@ describe('Shared create project picker', () => {
     );
   });
 
+  // #807 review 第八轮:两处对称性缺口,都是前几轮修复的直接后果。
+  it('resets worktree state during the automatic local fallback too', () => {
+    // 远程项目开过 worktree、设备随后被解除配对 → wtEnabled/wtBaseRepo 残留 → 下一次本机发送会进
+    // worktree 分支,拿上一台设备的仓库路径去建。与 handleDeviceChange 对称。
+    const effect = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('selected device is no longer selectable'),
+    );
+    const body = effect.slice(0, effect.indexOf('patchDraft('));
+    expect(body).toContain('setWtEnabled(false);');
+    expect(body).toContain('setWtBaseRepo(null);');
+  });
+
+  it('gates the failed-delete restoration by current device as well', () => {
+    // 上一轮为修并发删除去掉了 requestId gate,但没补设备 gate:请求在飞时切到别的设备,
+    // 会把 A 的行插进 B 的列表并被标成属于 B —— 选中它就把 A 的路径发给 B。
+    const restore = deviceLinkProjectsHookSource.slice(
+      deviceLinkProjectsHookSource.indexOf('const restored = removedRow;'),
+    );
+    expect(restore.slice(0, restore.indexOf('setRows('))).toContain(
+      'if (currentDeviceIdRef.current !== target.deviceId) return;',
+    );
+  });
+
   // #807 review 第六轮:发送在途时不能换设备 —— 那次调用的闭包持有旧设备,draft 却切到新设备,
   // 结果会话建在旧设备上并导航过去,同时把刚选的新设备上下文重置掉。
   it('rejects and disables device switching while a send is in flight', () => {

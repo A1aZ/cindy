@@ -134,6 +134,10 @@ export function useDeviceLinkProjects(
           // setRows 自带存在性检查,期间真有成功回读把它带回来了也不会插重。
           const restored = removedRow;
           if (!restored) return;
+          // 也要按当前设备 gate:若这两次请求还在飞时用户已切到别的设备,把 A 的行插进 B 的 rows
+          // 会被 toDeviceProjectOptions 标成属于 B —— 选中它就把 A 的路径发给 B 了。
+          // 这与「并发删除不能互相取消」不冲突:设备身份只排除「已切走」,不排除同设备内的并发。
+          if (currentDeviceIdRef.current !== target.deviceId) return;
           setRows((current) => {
             if (current.some((row) => row.path === restored.path)) return current;
             const at = removedIndex >= 0 && removedIndex <= current.length

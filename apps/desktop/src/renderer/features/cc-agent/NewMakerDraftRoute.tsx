@@ -1450,6 +1450,12 @@ export function NewMakerDraftRoute() {
         text: stripLocalMentionChips(composerDraft.text),
       });
     }
+    // worktree 上下文同样属于那台已失效的设备(与 handleDeviceChange 对称)。留着的话:远程项目
+    // 开过 worktree、设备随后被解除配对 → wtEnabled/wtBaseRepo 残留 → 下一次**本机**发送会进
+    // handleSend 的 worktree 分支,拿上一台设备的仓库路径去建,产出无效的本地会话或 worktree 失败。
+    setWtEnabled(false);
+    setWtBaseRepo(null);
+    setWtSourceBranch('');
     patchDraft({
       deviceLinkDeviceId: null,
       deviceLinkDeviceName: null,

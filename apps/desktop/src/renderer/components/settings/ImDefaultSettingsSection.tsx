@@ -109,6 +109,8 @@ export function ImDefaultSettingsSection({
       codex: fromProviders.codex.length
         ? fromProviders.codex
         : (codex.capabilities?.availableModels ?? []),
+      // pi(实验性):IM 设置 UI 暂不提供 pi 选项卡,空清单仅满足满射类型。
+      pi: [],
     };
   }, [providers, cc.capabilities, codex.capabilities]);
 

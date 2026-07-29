@@ -20,6 +20,7 @@ function deps(over?: Partial<HookDefaultsDeps>): HookDefaultsDeps {
       agents: {
         'claude-code': { providerId: null, model: 'claude-opus-4-8', effort: 'xhigh' },
         codex: { providerId: 'xd', model: 'gpt-5.5', effort: 'high' },
+        pi: { providerId: null, model: 'claude-sonnet-5', effort: 'high' },
       },
     }),
     getModels: (agentKind) =>
@@ -96,6 +97,7 @@ describe('resolveHookSessionConfig', () => {
           agents: {
             'claude-code': { providerId: null, model: 'claude-opus-4-8', effort: 'ultra-draft' },
             codex: { providerId: null, model: 'gpt-5.5', effort: 'high' },
+            pi: { providerId: null, model: 'claude-sonnet-5', effort: 'high' },
           },
         }),
       }),
@@ -117,6 +119,7 @@ describe('resolveHookSessionConfig', () => {
           agents: {
             'claude-code': { providerId: null, model: 'gone-model', effort: 'high' },
             codex: { providerId: null, model: 'gpt-5.5', effort: 'high' },
+            pi: { providerId: null, model: 'claude-sonnet-5', effort: 'high' },
           },
         }),
       }),
@@ -181,6 +184,7 @@ describe('resolveHookSessionConfig', () => {
           agents: {
             'claude-code': { providerId: null, model: 'claude-opus-4-8', effort: 'xhigh' },
             codex: { providerId: '  ', model: 'gpt-5.5', effort: 'high' },
+            pi: { providerId: null, model: 'claude-sonnet-5', effort: 'high' },
           },
         }),
       }),

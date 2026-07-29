@@ -128,7 +128,7 @@ export function normalizeWorkflowProgressEntries(
 }
 
 export interface AgentTaskUpdate {
-  provider: 'claude-code' | 'codex';
+  provider: 'claude-code' | 'codex' | 'pi';
   taskId: string;
   parentToolUseId?: string;
   status: AgentTaskStatus;
@@ -163,7 +163,7 @@ export function isAgentTaskToolName(toolName: string): boolean {
  */
 export function normalizeAgentTaskUpdate(
   data: unknown,
-  source?: 'claude-code' | 'codex',
+  source?: 'claude-code' | 'codex' | 'pi',
 ): AgentTaskUpdate | null {
   if (!data || typeof data !== 'object') return null;
   const raw = data as Record<string, unknown>;
@@ -254,7 +254,7 @@ export function isSameAgentTaskAlias(left: AgentTaskUpdate, right: AgentTaskUpda
 export function applyAgentTaskUpdateEvent(
   prevMap: ReadonlyMap<string, AgentTaskUpdate> | undefined,
   data: unknown,
-  source: 'claude-code' | 'codex' | undefined,
+  source: 'claude-code' | 'codex' | 'pi' | undefined,
   nowIso: string,
 ): Map<string, AgentTaskUpdate> | null {
   const update = normalizeAgentTaskUpdate(data, source);
@@ -309,7 +309,7 @@ export function findAgentTaskUpdate(
  */
 export interface AgentTaskCardModel {
   status: AgentTaskStatus;
-  provider: 'claude-code' | 'codex';
+  provider: 'claude-code' | 'codex' | 'pi';
   /** Best title, or null when nothing usable was found (caller supplies its own fallback). */
   title: string | null;
   description?: string;
@@ -329,7 +329,7 @@ export function buildAgentTaskCardModel(input: {
 }): AgentTaskCardModel {
   const { toolName, toolInput, update, result } = input;
   const status: AgentTaskStatus = update?.status ?? (result ? 'completed' : 'running');
-  const provider: 'claude-code' | 'codex' =
+  const provider: 'claude-code' | 'codex' | 'pi' =
     update?.provider ?? (toolName?.startsWith('collab:') ? 'codex' : 'claude-code');
   const title = compactText(
     update?.title

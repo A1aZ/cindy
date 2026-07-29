@@ -6683,6 +6683,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         availability: {
           'claude-code': availabilityFor('claude-code'),
           codex: availabilityFor('codex'),
+          pi: availabilityFor('pi'),
         },
         resolveDefaultProviderIdForModel: (agent, model) => (
           effectiveSourceIdForModel(views, null, model, agent)

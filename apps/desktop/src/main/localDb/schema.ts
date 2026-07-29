@@ -723,7 +723,7 @@ export const schedules = sqliteTable(
      * 引擎 fireOne 优先用 intervalMs 算 nextFireAt；旧 cron 数据 0015 migration 自动回填。
      */
     intervalMs: integer('interval_ms'),
-    agentKind: text('agent_kind', { enum: ['claude-code', 'codex'] }).notNull(),
+    agentKind: text('agent_kind', { enum: ['claude-code', 'codex', 'pi'] }).notNull(),
     model: text('model'),
     /**
      * 显式选定的供应商(来源)id。NULL = 回落该 agent 原生默认来源(no-break,
@@ -841,7 +841,7 @@ export const sessionGoals = sqliteTable(
     /** usageLimited 时记录的限额重置时刻(unix ms);到点自动续跑。其它状态为 null。 */
     usageResetAt: integer('usage_reset_at'),
     lastReason: text('last_reason'),
-    agentKind: text('agent_kind', { enum: ['claude-code', 'codex'] }).notNull(),
+    agentKind: text('agent_kind', { enum: ['claude-code', 'codex', 'pi'] }).notNull(),
     startedAt: integer('started_at').notNull(),
     updatedAt: integer('updated_at').notNull(),
   },
@@ -1124,7 +1124,7 @@ export const skillUsageSources = sqliteTable(
     rawFilePath: text('raw_file_path').primaryKey(),
     /** 当前源文件最后一次用哪个解析器版本扫描。用于 analyzer 升级时渐进重建。 */
     analyzerVersion: text('analyzer_version').notNull().default('6'),
-    agentKind: text('agent_kind', { enum: ['claude-code', 'codex'] }).notNull(),
+    agentKind: text('agent_kind', { enum: ['claude-code', 'codex', 'pi'] }).notNull(),
     sessionId: text('session_id').notNull(),
     sdkSessionId: text('sdk_session_id').notNull(),
     mtimeMs: integer('mtime_ms').notNull().default(0),
@@ -1154,7 +1154,7 @@ export const skillUsageExposures = sqliteTable(
     rawLineNo: integer('raw_line_no').notNull(),
     sessionId: text('session_id').notNull(),
     sdkSessionId: text('sdk_session_id').notNull(),
-    agentKind: text('agent_kind', { enum: ['claude-code', 'codex'] }).notNull(),
+    agentKind: text('agent_kind', { enum: ['claude-code', 'codex', 'pi'] }).notNull(),
     skillName: text('skill_name').notNull(),
     skillPath: text('skill_path'),
     /** 规范 SKILL.md 文档 hash；拿不到规范文档时为 NULL，不参与版本聚合。 */

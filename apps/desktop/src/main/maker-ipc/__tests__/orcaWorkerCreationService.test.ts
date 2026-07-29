@@ -34,8 +34,13 @@ describe('providerRouteRequiresExplicitSelection', () => {
 });
 
 function providerRoutingContext(
-  availability: Record<AgentKind, OrcaWorkerProviderSnapshot[]>,
+  partial: Partial<Record<AgentKind, OrcaWorkerProviderSnapshot[]>>,
 ): OrcaWorkerProviderRoutingContext {
+  const availability: Record<AgentKind, OrcaWorkerProviderSnapshot[]> = {
+    'claude-code': partial['claude-code'] ?? [],
+    codex: partial.codex ?? [],
+    pi: partial.pi ?? [],
+  };
   return {
     availability,
     resolveDefaultProviderIdForModel: (agent, model) => (
@@ -1038,6 +1043,7 @@ describe('OrcaWorkerCreationService', () => {
         { id: 'custom-codex', name: 'Custom Codex', models: ['gpt-5.5'] },
         { id: 'xd', name: 'XD Gateway', models: ['gpt-5.4'] },
       ],
+      pi: [],
     } satisfies Record<AgentKind, OrcaWorkerProviderSnapshot[]>;
     const { deps, service } = createDeps({
       getWorkerDefaults: vi.fn(() => ({ model: 'gpt-5.5', providerId: 'custom-codex' })),
@@ -1309,6 +1315,7 @@ describe('buildNoProviderMessage', () => {
   it('suggests the other agent when it has a connected provider', () => {
     const msg = buildNoProviderMessage('codex', {
       'claude-code': [{ id: 'xd', name: 'XD Gateway', models: ['claude-sonnet-4-6'] }],
+      pi: [],
       codex: [],
     });
     expect(msg).toContain('Codex 当前没有可用的模型供应商');
@@ -1317,7 +1324,7 @@ describe('buildNoProviderMessage', () => {
   });
 
   it('omits the agent suggestion when no agent has a connected provider', () => {
-    const msg = buildNoProviderMessage('claude-code', { 'claude-code': [], codex: [] });
+    const msg = buildNoProviderMessage('claude-code', { 'claude-code': [], codex: [], pi: [] });
     expect(msg).toContain('Claude Code 当前没有可用的模型供应商');
     expect(msg).toContain('设置 → 模型供应商');
     expect(msg).not.toContain('改用');

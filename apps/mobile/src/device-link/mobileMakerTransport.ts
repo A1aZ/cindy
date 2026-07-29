@@ -90,7 +90,7 @@ export interface CreateSessionResult {
   usedProjectContext?: boolean;
 }
 
-export type MobileAgentKind = 'claude-code' | 'codex';
+export type MobileAgentKind = 'claude-code' | 'codex' | 'pi';
 
 export type MobileSlashCommand =
   | { kind: 'agent-builtin'; name: string; description: string }

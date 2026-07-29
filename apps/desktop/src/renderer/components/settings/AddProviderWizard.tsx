@@ -72,6 +72,7 @@ type PresetBaseUrls = Partial<Record<AgentKind, string>>;
 const AGENT_LABEL: Record<AgentKind, string> = {
   'claude-code': 'Claude Code',
   codex: 'Codex',
+  pi: 'Pi',
 };
 
 function presetRuntimeBaseUrl(

@@ -397,7 +397,7 @@ export function registerScheduleHandlers(getMaker?: () => Maker | null): void {
       ? body.targetSessionId.trim()
       : undefined;
     let providerId = typeof body.providerId === 'string' ? body.providerId : undefined;
-    let agentKind = requestedAgentKind;
+    let agentKind: AgentKind | undefined = requestedAgentKind;
     let model = typeof body.model === 'string' ? body.model : undefined;
     if (targetSessionId && shouldResolveBoundSessionGenerationRoute({ targetSessionId, providerId, model })) {
       const session = await maker.getSessionMeta(targetSessionId).catch(() => null);

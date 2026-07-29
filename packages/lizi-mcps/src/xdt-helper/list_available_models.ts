@@ -41,7 +41,7 @@ function tagTier(models: ModelDescriptor[] | undefined): TaggedModel[] | undefin
 
 export interface ListAvailableModelsDeps {
   listAvailableModels: (params: {
-    agent?: 'claude-code' | 'codex';
+    agent?: 'claude-code' | 'codex' | 'pi';
   }) => Promise<ControlResult<{
     codex?: ModelDescriptor[];
     claude_code?: ModelDescriptor[];

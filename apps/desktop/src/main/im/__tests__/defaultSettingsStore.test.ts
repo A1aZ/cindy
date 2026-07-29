@@ -152,6 +152,12 @@ describe('im default settings store', () => {
         model: 'gpt-5.5',
         effort: 'high',
       },
+      // legacy root mirror 是 resolved 满射快照(global 才做 diff),pi 槽为系统默认。
+      pi: {
+        providerId: null,
+        model: 'claude-sonnet-5',
+        effort: 'high',
+      },
     });
   });
 

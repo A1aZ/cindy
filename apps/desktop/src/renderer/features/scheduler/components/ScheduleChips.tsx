@@ -45,7 +45,7 @@ import { PENDING_SESSION_ID } from '../lib/scheduleFormLogic';
 import type { SessionReference } from '../../../../shared/sessionReference';
 
 export type Destination = 'local' | 'worktree' | 'thread';
-export type AgentKind = 'claude-code' | 'codex';
+export type AgentKind = 'claude-code' | 'codex' | 'pi';
 
 interface ChipButtonProps {
   icon?: React.ReactNode;
@@ -160,9 +160,10 @@ export function ProjectChip({
   );
 }
 
-const AGENT_META: Record<AgentKind, { label: string; vendor: 'cc' | 'codex' }> = {
+const AGENT_META: Record<AgentKind, { label: string; vendor: 'cc' | 'codex' | 'pi' }> = {
   'claude-code': { label: 'Claude Code', vendor: 'cc' },
   codex: { label: 'Codex', vendor: 'codex' },
+  pi: { label: 'Pi', vendor: 'pi' },
 };
 
 export function AgentTabs({ value, onChange, disabled }: { value: AgentKind; onChange: (v: AgentKind) => void; disabled?: boolean }) {

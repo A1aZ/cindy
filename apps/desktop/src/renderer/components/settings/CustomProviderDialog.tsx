@@ -62,11 +62,14 @@ import type {
   ProviderWireProtocol,
 } from '@cindy/model-providers';
 
-const AGENTS: AgentKind[] = ['claude-code', 'codex'];
+/** 本面板只配置 claude/codex 两个 runtime;pi 的模型走网关目录,不在自定义 provider 范畴。 */
+type DialogAgentKind = Extract<AgentKind, 'claude-code' | 'codex'>;
 
-const VISIBLE_AGENTS: AgentKind[] = AGENTS;
+const AGENTS: DialogAgentKind[] = ['claude-code', 'codex'];
 
-const TAB_META: Record<AgentKind, { Mark: typeof ClaudeMark; labelKey: string; helpKey: string }> =
+const VISIBLE_AGENTS: DialogAgentKind[] = AGENTS;
+
+const TAB_META: Record<DialogAgentKind, { Mark: typeof ClaudeMark; labelKey: string; helpKey: string }> =
   {
     'claude-code': {
       Mark: ClaudeMark,
@@ -113,7 +116,7 @@ interface TestState {
 }
 const IDLE_TEST: TestState = { status: 'idle' };
 
-function emptyRuntime(agent: AgentKind): RuntimeFields {
+function emptyRuntime(agent: DialogAgentKind): RuntimeFields {
   return {
     baseUrl: '',
     requestPath: '',
@@ -125,8 +128,8 @@ function emptyRuntime(agent: AgentKind): RuntimeFields {
   };
 }
 
-function initRuntimes(initial?: CustomProviderConfig): Record<AgentKind, RuntimeFields> {
-  const out: Record<AgentKind, RuntimeFields> = {
+function initRuntimes(initial?: CustomProviderConfig): Record<DialogAgentKind, RuntimeFields> {
+  const out: Record<DialogAgentKind, RuntimeFields> = {
     'claude-code': emptyRuntime('claude-code'),
     codex: emptyRuntime('codex'),
   };
@@ -311,12 +314,12 @@ export function CustomProviderDialog({
   const initialOAuth = initial?.auth?.method === 'oauth' ? initial.auth.oauth : undefined;
 
   const [name, setName] = useState(initial?.name ?? '');
-  const [rt, setRt] = useState<Record<AgentKind, RuntimeFields>>(() => initRuntimes(initial));
-  const [activeTab, setActiveTab] = useState<AgentKind>(
+  const [rt, setRt] = useState<Record<DialogAgentKind, RuntimeFields>>(() => initRuntimes(initial));
+  const [activeTab, setActiveTab] = useState<DialogAgentKind>(
     () => (initial && VISIBLE_AGENTS.find((a) => initial.runtimes[a])) || 'claude-code',
   );
   const [showKey, setShowKey] = useState(false);
-  const [hasKey, setHasKey] = useState<Record<AgentKind, boolean>>({
+  const [hasKey, setHasKey] = useState<Record<DialogAgentKind, boolean>>({
     'claude-code': false,
     codex: false,
   });
@@ -357,18 +360,18 @@ export function CustomProviderDialog({
   const [presets, setPresets] = useState<ProviderPreset[]>([]);
   const [appliedPreset, setAppliedPreset] = useState<string | null>(null);
   // per-runtime 测试连接状态。
-  const [test, setTest] = useState<Record<AgentKind, TestState>>({
+  const [test, setTest] = useState<Record<DialogAgentKind, TestState>>({
     'claude-code': IDLE_TEST,
     codex: IDLE_TEST,
   });
   // per-runtime「获取模型列表」进行中标记（按钮瞬态 spinner）。
-  const [fetchingModels, setFetchingModels] = useState<Record<AgentKind, boolean>>({
+  const [fetchingModels, setFetchingModels] = useState<Record<DialogAgentKind, boolean>>({
     'claude-code': false,
     codex: false,
   });
   // 拉取成功后的勾选弹层：行集合 = 拉取结果 ∪ 表单已填（后者默认勾选、保留用户显示名）。
   const [picker, setPicker] = useState<{
-    agent: AgentKind;
+    agent: DialogAgentKind;
     models: ModelRow[];
     selected: Set<string>;
     query: string;
@@ -380,7 +383,7 @@ export function CustomProviderDialog({
   const rtRef = useRef(rt);
   /** 唯一的 rt 写入口：状态更新的同时同步镜像进 rtRef（updater 幂等，StrictMode 双调无害）。 */
   const setRtSynced = useCallback(
-    (fn: (prev: Record<AgentKind, RuntimeFields>) => Record<AgentKind, RuntimeFields>) => {
+    (fn: (prev: Record<DialogAgentKind, RuntimeFields>) => Record<DialogAgentKind, RuntimeFields>) => {
       setRt((prev) => {
         const next = fn(prev);
         rtRef.current = next;
@@ -457,8 +460,8 @@ export function CustomProviderDialog({
     if (!editing || !initial) return;
     let cancelled = false;
     void (async () => {
-      const nextHas: Record<AgentKind, boolean> = { 'claude-code': false, codex: false };
-      const fetched: Partial<Record<AgentKind, string>> = {};
+      const nextHas: Record<DialogAgentKind, boolean> = { 'claude-code': false, codex: false };
+      const fetched: Partial<Record<DialogAgentKind, string>> = {};
       for (const a of AGENTS) {
         if (!initial.runtimes[a]) continue;
         const k = await readCustomProviderKey(initial.id, a);
@@ -483,7 +486,7 @@ export function CustomProviderDialog({
   }, [editing, initial]);
 
   const patch = useCallback(
-    (agent: AgentKind, fn: (f: RuntimeFields) => RuntimeFields) => {
+    (agent: DialogAgentKind, fn: (f: RuntimeFields) => RuntimeFields) => {
       setRtSynced((prev) => ({ ...prev, [agent]: fn(prev[agent]) }));
       setTest((prev) => ({ ...prev, [agent]: IDLE_TEST }));
     },
@@ -1589,9 +1592,9 @@ function ModelPickerOverlay({
   onConfirm,
   onClose,
 }: {
-  picker: { agent: AgentKind; models: ModelRow[]; selected: Set<string>; query: string };
+  picker: { agent: DialogAgentKind; models: ModelRow[]; selected: Set<string>; query: string };
   onChange: (next: {
-    agent: AgentKind;
+    agent: DialogAgentKind;
     models: ModelRow[];
     selected: Set<string>;
     query: string;

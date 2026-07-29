@@ -122,8 +122,10 @@ describe('mobile home desktop-first surface', () => {
     // ——箭头统一后依赖图标区分 agent 类型的场景(创建自动化 chips / 侧栏混排)全部失效。
     expect(desktopVendorIconSource).toContain('ClaudeMark');
     expect(desktopVendorIconSource).toContain('CodexMark');
-    expect(desktopVendorIconSource).toContain("vendor === 'codex' ? <CodexMark size={size} /> : <ClaudeMark size={size} />");
-    expect(desktopVendorIconSource).toContain("vendor: 'cc' | 'codex'");
+    expect(desktopVendorIconSource).toContain("vendor === 'codex' ? (");
+    expect(desktopVendorIconSource).toContain('<CodexMark size={size} />');
+    expect(desktopVendorIconSource).toContain('<ClaudeMark size={size} />');
+    expect(desktopVendorIconSource).toContain("vendor: 'cc' | 'codex' | 'pi'");
     expect(desktopVendorIconSource).toContain('session-status-breathing');
     expect(vendorIconSource).not.toContain('XD_SYMBOL_PATHS');
     expect(vendorIconSource).not.toContain('XD_INC_MARK_ASPECT_RATIO');

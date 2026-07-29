@@ -83,6 +83,7 @@ function defaultScheduleFormPrefs(): ScheduleFormPrefs {
     lastByAgent: {
       'claude-code': EMPTY_AGENT_PREFS,
       codex: EMPTY_AGENT_PREFS,
+      pi: EMPTY_AGENT_PREFS,
     },
   };
 }
@@ -104,6 +105,7 @@ function loadScheduleFormPrefs(): ScheduleFormPrefs {
       lastByAgent: {
         'claude-code': sanitizeAgentPrefs(parsed.lastByAgent?.['claude-code']),
         codex: sanitizeAgentPrefs(parsed.lastByAgent?.codex),
+        pi: sanitizeAgentPrefs(parsed.lastByAgent?.pi),
       },
     };
   } catch {

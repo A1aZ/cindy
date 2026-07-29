@@ -1,4 +1,4 @@
-export type ImDefaultAgentKind = 'claude-code' | 'codex';
+export type ImDefaultAgentKind = 'claude-code' | 'codex' | 'pi';
 export type ImDefaultPermissionMode =
   'ask' | 'default' | 'acceptEdits' | 'plan' | 'auto' | 'bypassPermissions';
 export type ImDefaultEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
@@ -46,6 +46,12 @@ export const IM_DEFAULT_SETTINGS: ImDefaultSettings = {
     codex: {
       providerId: null,
       model: 'codex/gpt-5.5',
+      effort: 'high',
+    },
+    // pi(实验性):IM 渠道设置 UI 尚未暴露 pi,此项仅满足满射类型;走网关中档模型。
+    pi: {
+      providerId: null,
+      model: 'claude-sonnet-5',
       effort: 'high',
     },
   },

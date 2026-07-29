@@ -57,6 +57,7 @@ import type { AgentKind, CatalogModel, ProviderView } from '@cindy/model-provide
 const AGENT_LABEL: Record<AgentKind, string> = {
   'claude-code': 'Claude Code',
   codex: 'Codex',
+  pi: 'Pi',
 };
 
 /**

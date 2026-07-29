@@ -15,7 +15,8 @@ const sessionViewSource = readFileSync(
 
 describe('NewMakerDraftRoute worktree send flow', () => {
   it('enters a real session before creating the worktree in the background', () => {
-    const worktreeBranch = source.indexOf('if (!isRemoteProjectDraft && wt.enabled) {');
+    // 2026-07-29 状态契约:生效条件 = 勾选 && baseRepo 就绪(不合格静默普通启动)。
+    const worktreeBranch = source.indexOf('if (!isRemoteProjectDraft && wt.enabled && wt.baseRepo) {');
     const createSession = source.indexOf('const newSession = await createSession', worktreeBranch);
     const touchUserSend = source.indexOf('sessionService.touchUserSend', createSession);
     // worktree 创建期的视觉反馈走 worktreeCreationStore(由 CCAgentSessionView 底部

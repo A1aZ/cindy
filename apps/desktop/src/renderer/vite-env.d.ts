@@ -3164,8 +3164,8 @@ interface ElectronAPI {
       touchUserSend: (id: string, atMs?: number) => Promise<void>;
       /** interrupted-turn-resume:「疑似中断」(startedAt > endedAt)的 active 会话 id。 */
       interruptedPending: () => Promise<string[]>;
-      /** 红点派生真源:存在未处理告警(中断 ∪ 未 dismissed 错误尾行)的 active 会话 id。 */
-      pendingAlerts: () => Promise<string[]>;
+      /** 红点派生的周期性重算源:尾部停在未 dismissed 错误行的 active 会话 id。 */
+      errorTailPending: () => Promise<string[]>;
       /** 批量处置未处理告警(「全部标为已读」):等价于逐个在横幅上点「忽略」。 */
       dismissPendingAlerts: (sessionIds: string[]) => Promise<{ dismissed: number }>;
       ackInterrupted: (id: string) => Promise<void>;

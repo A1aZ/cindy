@@ -525,32 +525,32 @@ describe('sessionActiveTurn', () => {
     ]);
   });
 
-  it('listPendingAlertSessionIds unions interrupted and error-tail legs without duplicates', async () => {
-    const { listPendingAlertSessionIds } = await import('../sessionActiveTurn.js');
+  // 两条腿相互独立:错误尾行腿**不得**因为「会话有飞行中的 turn」而命中。
+  // 回归(PR #879 review P1):中断腿的 startedAt > endedAt 对正在跑的 turn 天然成立,
+  // 所以它只能在启动首拉消费;错误尾行腿与 turn 是否在跑无关,可以周期性重跑。
+  it('error-tail leg is independent of in-flight turns (safe to re-run periodically)', async () => {
+    const { listErrorTailPendingSessionIds, listInterruptedPendingSessionIds } = await import(
+      '../sessionActiveTurn.js'
+    );
     const client = createTestDbClient();
     const now = Date.now();
 
-    // 只中断。
-    await seedSession(client, 's-only-interrupted', { startedAt: now - 1000 });
-    // 只错误尾行。
-    await seedSession(client, 's-only-error');
+    // 飞行中的 turn(startedAt > endedAt):中断腿会命中它 —— 这正是它不能周期性
+    // 重跑的原因;错误尾行腿则不该命中(尾行是 user 行,不是 error 行)。
+    await seedSession(client, 's-live-turn', { startedAt: now });
     await client.exec(
       'INSERT INTO messages (id, client_id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-      ['x1', 'x1', 's-only-error', 'error', '{"message":"boom"}', now],
+      ['live-1', 'live-1', 's-live-turn', 'user', '{}', now],
     );
-    // 两条腿同时命中 → 并集去重,只出现一次。
-    await seedSession(client, 's-both', { startedAt: now - 1000 });
-    await client.exec(
-      'INSERT INTO messages (id, client_id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-      ['x2', 'x2', 's-both', 'error', '{"message":"boom"}', now],
-    );
-    // 都不命中。
-    await seedSession(client, 's-clean', { startedAt: now - 5000, endedAt: now - 1000 });
 
-    expect((await listPendingAlertSessionIds()).sort()).toEqual([
-      's-both',
-      's-only-error',
-      's-only-interrupted',
-    ]);
+    // 停在错误尾行且没有飞行中的 turn:只该被错误尾行腿命中。
+    await seedSession(client, 's-error-tail', { startedAt: now - 5000, endedAt: now - 1000 });
+    await client.exec(
+      'INSERT INTO messages (id, client_id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      ['tail-1', 'tail-1', 's-error-tail', 'error', '{"message":"boom"}', now],
+    );
+
+    expect(await listErrorTailPendingSessionIds()).toEqual(['s-error-tail']);
+    expect(await listInterruptedPendingSessionIds()).toEqual(['s-live-turn']);
   });
 });

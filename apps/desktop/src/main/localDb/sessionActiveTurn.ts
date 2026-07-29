@@ -211,7 +211,8 @@ function enqueueEndedWrite(sessionId: string, endedAt: number): Promise<void> {
  * 「疑似中断」(startedAt > endedAt,未被 /clear 越过,桌面可见来源)的 active
  * 会话 id。继续 / 忽略都会写 ended,自然不再命中。
  *
- * 这是 listPendingAlertSessionIds 的两条腿之一;红点语义见后者的文件内注释。
+ * 这是红点派生的两条腿之一(另一条是 listErrorTailPendingSessionIds)。
+ * ⚠️ **只在启动首拉时消费**:见下方两条腿消费周期的说明。
  */
 export async function listInterruptedPendingSessionIds(): Promise<string[]> {
   const db = getDbClient().drizzle;
@@ -301,24 +302,14 @@ export async function listErrorTailPendingSessionIds(): Promise<string[]> {
 }
 
 /**
- * 红点派生的唯一权威真源:存在**未处理告警**的 active 会话 id(中断 ∪ 错误尾行)。
- *
- * 语义(2026-07 统一决策):红点不再是「未读标记」,而是未处理告警集合的投影 ——
- * 只要输入框上方的红色横幅还在(没被继续 / 重试 / 关闭处置掉),列表红点就一直在,
- * 不存在「看到了但没处理」的中间态。renderer 侧 usePendingAlertAttention 启动拉取
- * 本查询并在收敛触发点重算,对结果集做差分打点 / 清点。
- *
- * 两条腿都是纯 DB 判定,故对未打开的会话同样成立 —— 这是把红点从内存态改为派生态
- * 的前提。live error(尾行落库前的过渡窗口)仍由 renderer 即时打点,落库后由本查询
- * 接管,交接处红点不掉。
+ * ⚠️ 两条腿的消费周期必须分开,**不要**再提供一个「合集」入口:
+ * 中断腿的判定(startedAt > endedAt)对**正在跑的 turn** 天然成立,只在启动时刻可靠
+ * (那时飞行中的 turn 必然是上一个进程留下的)。若每次 turn 结束 / 错误落库都重跑它,
+ * 运行中的会话会被误判为中断而亮红点(PR #879 review P1)。
+ * renderer 因此分开消费:中断腿只在启动首拉一次(listInterruptedPendingSessionIds),
+ * 错误尾行腿参与每轮重算(listErrorTailPendingSessionIds);批量处置需要 clientId,
+ * 直接用 listErrorTailPendingRows。
  */
-export async function listPendingAlertSessionIds(): Promise<string[]> {
-  const [interrupted, errorTail] = await Promise.all([
-    listInterruptedPendingSessionIds(),
-    listErrorTailPendingSessionIds(),
-  ]);
-  return [...new Set([...interrupted, ...errorTail])];
-}
 
 /**
  * 错误重试续跑判定(agent-input-coordinator 的 hasAssistantProgressAfter dep):

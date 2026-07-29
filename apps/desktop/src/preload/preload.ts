@@ -3353,9 +3353,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       /** interrupted-turn-resume:「疑似中断」(startedAt > endedAt)的 active 会话 id。 */
       interruptedPending: (): Promise<string[]> =>
         ipcRenderer.invoke('local-db:sessions:interrupted-pending'),
-      /** 红点派生真源:存在未处理告警(中断 ∪ 未 dismissed 错误尾行)的 active 会话 id。 */
-      pendingAlerts: (): Promise<string[]> =>
-        ipcRenderer.invoke('local-db:sessions:pending-alerts'),
+      /** 红点派生的周期性重算源:尾部停在未 dismissed 错误行的 active 会话 id。
+       *  与 interruptedPending 分开消费——后者只在启动首拉一次(它对正在跑的 turn
+       *  天然成立,周期性重跑会把运行中的会话误判为中断)。 */
+      errorTailPending: (): Promise<string[]> =>
+        ipcRenderer.invoke('local-db:sessions:error-tail-pending'),
       /** 批量处置未处理告警(「全部标为已读」):等价于逐个在横幅上点「忽略」。 */
       dismissPendingAlerts: (sessionIds: string[]): Promise<{ dismissed: number }> =>
         ipcRenderer.invoke('local-db:sessions:dismiss-pending-alerts', sessionIds),

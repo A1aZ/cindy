@@ -39,8 +39,8 @@ import { noteSessionClearBoundary } from '../../messagePersistBroadcaster';
 import {
   ackSessionTurnEndedDurable,
   listErrorTailPendingRows,
+  listErrorTailPendingSessionIds,
   listInterruptedPendingSessionIds,
-  listPendingAlertSessionIds,
   setOnSessionTurnEndedPersisted,
 } from '../sessionActiveTurn';
 import { dismissErrorMessage, rebroadcastAgentSwitchBoundary } from './messages';
@@ -742,22 +742,21 @@ export function registerSessionIpc(): void {
     return sessionToCamel({ ...row, messageCount: 0 });
   });
 
-  // interrupted-turn-resume:「疑似中断」(startedAt > endedAt)的 active 会话 id,
-  // 纯读查询。红点已改为 pending-alerts 的派生(见下),本 channel 保留:它在
-  // device-link allowlist 里是既有跨端契约,删掉会让老控制端拿到 CHANNEL_NOT_ALLOWED。
+  // interrupted-turn-resume:「疑似中断」(startedAt > endedAt)的 active 会话 id。
+  // ⚠️ 只在**启动首拉**时消费:该判定对正在跑的 turn 天然成立,只有启动时刻才能
+  // 断定飞行中的 turn 来自上一个进程。周期性重跑会把运行中的会话误判为中断。
   ipcMain.handle('local-db:sessions:interrupted-pending', async () => {
     return listInterruptedPendingSessionIds();
   });
 
-  // 红点派生的唯一真源:存在未处理告警(中断 ∪ 未 dismissed 的错误尾行)的 active
-  // 会话 id。纯读查询,renderer 的 usePendingAlertAttention 启动拉取 + 收敛触发点
-  // 重算,对结果集差分打点/清点(语义见 sessionActiveTurn.ts 的
-  // listPendingAlertSessionIds)。
+  // 「尾部停在未 dismissed 错误行」的 active 会话 id —— 红点派生的周期性重算源。
+  // 与中断腿不同,这条判定与 turn 是否在跑无关(turn 一跑起来就会插入新的 user 行,
+  // error 行不再是尾行,自然不命中),因此可以在每个收敛触发点安全重跑。
   // 故意**不**进 device-link allowlist:renderer 只查本机(远程会话的告警由被控端
   // 自己的派生收敛负责,控制端的处置动作经既有 ack-interrupted / dismiss-error 窄写
   // 落被控端 DB 后触发)。没有跨端调用方就不扩协议面。
-  ipcMain.handle('local-db:sessions:pending-alerts', async () => {
-    return listPendingAlertSessionIds();
+  ipcMain.handle('local-db:sessions:error-tail-pending', async () => {
+    return listErrorTailPendingSessionIds();
   });
 
   // 批量处置未处理告警(自动化分组右键「全部标为已读」)。红点是告警的派生投影,
@@ -766,9 +765,17 @@ export function registerSessionIpc(): void {
   // 广播),中断态写 last_turn_ended_at 消化掉。
   // 只处置**当前真的命中告警**的会话:一次全量查询后按传入集合取交集,避免对
   // 无告警会话空写 lastTurnEndedAt 造成无意义的 patch 广播。
+  // 输入有界(review 反馈):不接受无上限数组,也不静默吞掉畸形元素 —— 越界或元素
+  // 不合法直接 INVALID_PARAMS 拒绝,避免异常调用方让 main 侧分配任意大的集合并跑
+  // 一轮数据库写。上限取 sidebar 可能的自动化会话量级的宽松倍数。
+  const MAX_DISMISS_SESSION_IDS = 500;
   ipcMain.handle('local-db:sessions:dismiss-pending-alerts', async (_e, ids: unknown) => {
     if (!Array.isArray(ids)) throwIpcError('INVALID_PARAMS', 'sessionIds 必须是数组');
-    const wanted = new Set(ids.filter((v): v is string => typeof v === 'string' && v.length > 0));
+    if (ids.length > MAX_DISMISS_SESSION_IDS) {
+      throwIpcError('INVALID_PARAMS', `sessionIds 超过上限 ${MAX_DISMISS_SESSION_IDS}`);
+    }
+    for (const id of ids) requireString(id, 'sessionId');
+    const wanted = new Set(ids as string[]);
     if (wanted.size === 0) return { dismissed: 0 };
     const [tailRows, interrupted] = await Promise.all([
       listErrorTailPendingRows(),

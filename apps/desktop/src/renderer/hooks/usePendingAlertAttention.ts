@@ -9,18 +9,24 @@
  * explicit 清点,于是「红点已灭、横幅仍在」—— 用户反馈的割裂点。现在展示不再产生
  * 已读,只有处置才收敛。
  *
- * 数据源是 main 侧纯 DB 查询 listPendingAlertSessionIds()(中断态时间戳 ∪ 未
- * dismissed 的错误尾行),因此对**未打开的会话同样成立** —— 这是把红点从 renderer
- * 内存态改为派生态的前提。makerChatStore 的 live error 有两个不可靠处(LRU 驱逐、
- * 错误落库后主动清 live error),单靠它红点会在横幅仍在时消失。
+ * 数据源是 main 侧纯 DB 查询,因此对**未打开的会话同样成立** —— 这是把红点从
+ * renderer 内存态改为派生态的前提。makerChatStore 的 live error 有两个不可靠处
+ * (LRU 驱逐、错误落库后主动清 live error),单靠它红点会在横幅仍在时消失。
  *
- * 收敛触发点(每次都全量重查 + 差分,不做增量推断):
- *  - 启动首拉(带退避重试:localDb 在登录后才 ready);
- *  - sessions:patched 里带 lastTurnEndedAt —— 中断提示的「继续 / 忽略」ack,含其它
- *    窗口与 device-link 控制端发起的;
+ * ⚠️ 两条腿的消费周期**必须分开**(PR #879 review P1):
+ *  - **中断腿**(interruptedPending,startedAt > endedAt):只在启动首拉一次。该判定
+ *    对**正在跑的 turn** 天然成立,只有启动时刻才能断定飞行中的 turn 来自上一个进程。
+ *    周期性重跑会把运行中的会话误判为中断而亮红点。清除靠 sessions:patched 里的
+ *    lastTurnEndedAt(用户点「继续 / 忽略」、其它窗口或 device-link 控制端的 ack)。
+ *  - **错误尾行腿**(errorTailPending):参与每轮重算。它与 turn 是否在跑无关 ——
+ *    turn 一跑起来就插入新的 user 行,error 行不再是尾行,自然不命中。
+ *
+ * 两个账本因此独立:重算只差分错误尾行那本,不会顺手清掉中断点。
+ *
+ * 重算触发点(全量重查 + 差分,不做增量推断):
  *  - 错误行落库脏信号(local-db:session:error-persisted)—— 正是 makerChatStore 清掉
  *    live error 的同一个信号,交接窗口红点不掉;
- *  - refreshPendingAlerts() 显式调用 —— 横幅处置(dismiss / 继续)后由调用点触发。
+ *  - refreshPendingAlerts() 显式调用 —— 横幅处置(dismiss / 继续 / 批量已读)后触发。
  *
  * 打点范围限定:只清**本 hook 自己打过**且当前仍是 'error' 的点,不误伤 live error、
  * done、awaiting 等其它来源。
@@ -40,43 +46,68 @@ const log = createLogger('pending-alert-attention');
 
 const MAX_INITIAL_ATTEMPTS = 5;
 let _startedThisWindow = false;
-/** 上一轮 pending-alerts 命中的会话 —— 用于差分出「告警已消失」的清点范围,
- *  不作为「是否需要打点」的短路依据(见 fetchAndReconcile 的无条件重打点)。 */
-const _ownedSessionIds = new Set<string>();
+/** 启动首拉打的**中断**点 —— 只由 lastTurnEndedAt patch 清除,不参与周期性重算。 */
+const _interruptedOwned = new Set<string>();
+/** 上一轮**错误尾行**查询命中的会话 —— 用于差分出「告警已消失」的清点范围,
+ *  不作为「是否需要打点」的短路依据(见 reconcileErrorTail 的无条件重打点)。 */
+const _errorTailOwned = new Set<string>();
 /** 重查合流:进行中再来请求只置脏,完成后补跑一次(避免 turn 起落时打爆 IPC)。 */
 let _refreshInFlight: Promise<void> | null = null;
 let _refreshDirty = false;
+/**
+ * 查询代数:每次发起查询自增,结果回来时若已不是最新一代就整个丢弃。
+ * 首拉(带退避重试,不经合流)与重算可能并发,较早开始的查询若后返回,会用过期
+ * 结果重新添加已处置会话的红点、或清掉刚产生的告警点(PR #879 review P1)。
+ */
+let _queryGen = 0;
 
 /** 测试专用:重置单例守卫与打点账本。 */
 export function _resetPendingAlertAttentionForTests(): void {
   _startedThisWindow = false;
-  _ownedSessionIds.clear();
+  _interruptedOwned.clear();
+  _errorTailOwned.clear();
   _refreshInFlight = null;
   _refreshDirty = false;
+  _queryGen = 0;
 }
 
-async function fetchAndReconcile(): Promise<void> {
-  const ids = await window.electronAPI.localDb.sessions.pendingAlerts();
+/** 打点:无条件调用(store 幂等),让被别的 explicit 路径清掉的点能重新建立。 */
+function markAlert(sessionId: string): void {
+  addSessionAttention(sessionId, 'error');
+}
+
+/** 清点:只清仍是 'error' 的 —— 会话可能已升级成 awaiting / done,那是别的语义。 */
+function clearAlertIfStillError(sessionId: string): void {
+  if (getSessionAttentionKind(sessionId) !== 'error') return;
+  clearSessionAttention(sessionId, { intent: 'explicit' });
+}
+
+/**
+ * 重算**错误尾行**告警并收敛红点。中断腿不参与(见文件头 ⚠️)。
+ * 过期结果(有更晚的查询已启动)整个丢弃,不打点也不清点。
+ */
+async function reconcileErrorTail(): Promise<void> {
+  const gen = ++_queryGen;
+  const ids = await window.electronAPI.localDb.sessions.errorTailPending();
+  if (gen !== _queryGen) return;
   const next = new Set(ids);
 
-  // 每轮**无条件**重打点,不做「已 owned 就跳过」的短路:红点是查询结果的投影,
-  // 每次重算都要对齐。别的 explicit 路径(Retry / 关闭 live ErrorBanner / turn 启动
-  // 的 orphan 清理 / worktree 横幅处置)会清掉共享的那条 attention 条目,若这里
-  // 短路跳过,未 dismissed 的横幅仍在而红点再也不会回来 —— 正是本次要消灭的割裂。
-  // addSessionAttention 自身幂等(kind 未变时直接 return,不 emit、不发 IPC),
-  // 所以无条件调用没有额外开销。
+  // 无条件重打点,不做「已 owned 就跳过」的短路:红点是查询结果的投影,每次重算都要
+  // 对齐。别的 explicit 路径(Retry / 关闭 live ErrorBanner / turn 启动的 orphan 清理 /
+  // worktree 横幅处置)会清掉共享的 attention 条目,若这里短路跳过,未 dismissed 的
+  // 横幅仍在而红点再也不会回来 —— 正是本次要消灭的割裂。addSessionAttention 自身幂等
+  // (kind 未变时直接 return,不 emit、不发 IPC),所以无额外开销。
   for (const id of next) {
-    _ownedSessionIds.add(id);
-    addSessionAttention(id, 'error');
+    _errorTailOwned.add(id);
+    markAlert(id);
   }
 
-  for (const id of [..._ownedSessionIds]) {
+  for (const id of [..._errorTailOwned]) {
     if (next.has(id)) continue;
-    _ownedSessionIds.delete(id);
-    // 只清仍是 'error' 的:本 hook 打点后该会话可能已升级成 awaiting(等待权限 /
-    // AskUserQuestion)或 done,那是别的来源的语义,不能被告警收敛顺手清掉。
-    if (getSessionAttentionKind(id) !== 'error') continue;
-    clearSessionAttention(id, { intent: 'explicit' });
+    _errorTailOwned.delete(id);
+    // 中断腿仍认领的会话不清:它的告警还没被处置,只是不在错误尾行结果里。
+    if (_interruptedOwned.has(id)) continue;
+    clearAlertIfStillError(id);
   }
 }
 
@@ -92,9 +123,9 @@ export function refreshPendingAlerts(): Promise<void> {
     _refreshDirty = true;
     return _refreshInFlight;
   }
-  const run = fetchAndReconcile()
+  const run = reconcileErrorTail()
     .catch((err) => {
-      log.warn('pending-alerts refresh failed:', err);
+      log.warn('error-tail refresh failed:', err);
     })
     .then(() => {
       _refreshInFlight = null;
@@ -108,15 +139,44 @@ export function refreshPendingAlerts(): Promise<void> {
   return run;
 }
 
+/** 清掉本 hook 首拉打的中断点(不是本 hook 打的 → no-op)。 */
+function clearInterruptedIfOwned(sessionId: string): void {
+  if (!_interruptedOwned.delete(sessionId)) return;
+  // 错误尾行腿仍认领时不清:同一会话可能同时停在未 dismissed 的错误行上。
+  if (_errorTailOwned.has(sessionId)) return;
+  clearAlertIfStillError(sessionId);
+}
+
+/** 启动首拉:中断腿 + 错误尾行腿各拉一次,分别记账。 */
+async function initialFetch(): Promise<void> {
+  const gen = ++_queryGen;
+  const sessions = window.electronAPI.localDb.sessions;
+  const [interrupted, errorTail] = await Promise.all([
+    sessions.interruptedPending(),
+    sessions.errorTailPending(),
+  ]);
+  if (gen !== _queryGen) return;
+  for (const id of interrupted) {
+    _interruptedOwned.add(id);
+    markAlert(id);
+  }
+  for (const id of errorTail) {
+    _errorTailOwned.add(id);
+    markAlert(id);
+  }
+  const total = new Set([...interrupted, ...errorTail]).size;
+  if (total > 0) log.info(`marked ${total} session(s) with pending alerts`);
+}
+
 export function usePendingAlertAttention(): void {
   useEffect(() => {
     if (_startedThisWindow) return;
     _startedThisWindow = true;
     // 首拉带线性退避重试(2s / 4s / 6s / 8s):localDb 在登录后才 ready,过早会被
-    // handler reject。走 fetchAndReconcile 而非 refreshPendingAlerts —— 需要看到
-    // 真实 reject 才能决定是否重试。
+    // handler reject。走 initialFetch 而非 refreshPendingAlerts —— 需要看到真实
+    // reject 才能决定是否重试;并发安全由 _queryGen 保证(过期结果整个丢弃)。
     const tryFetch = (attempt: number): void => {
-      fetchAndReconcile().catch((err) => {
+      initialFetch().catch((err) => {
         if (attempt >= MAX_INITIAL_ATTEMPTS) {
           log.warn('pending-alerts initial fetch gave up:', err);
           return;
@@ -128,13 +188,13 @@ export function usePendingAlertAttention(): void {
   }, []);
 
   // 中断提示的 ack(本窗口 / 其它窗口 / device-link 控制端)会写 lastTurnEndedAt
-  // 并广播 patch —— 收到即重算。
+  // 并广播 patch —— 中断点据此收敛。不重跑中断查询(那会误判运行中的会话)。
   useEffect(() => {
     const sessionsPush = window.electronAPI?.localDb?.sessionsPush;
     if (!sessionsPush) return;
-    return sessionsPush.onPatched(({ patch }) => {
+    return sessionsPush.onPatched(({ sessionId, patch }) => {
       if (patch && typeof patch === 'object' && 'lastTurnEndedAt' in patch) {
-        void refreshPendingAlerts();
+        clearInterruptedIfOwned(sessionId);
       }
     });
   }, []);

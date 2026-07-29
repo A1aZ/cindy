@@ -3,11 +3,13 @@
  * 红点派生语义的行为规格(2026-07 统一):红点是「未处理告警」集合的投影 ——
  * 横幅不被处置就不消失。这些用例正是用户反馈的割裂点的回归护栏。
  */
+import { renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   _resetPendingAlertAttentionForTests,
   refreshPendingAlerts,
+  usePendingAlertAttention,
 } from '@/hooks/usePendingAlertAttention';
 import {
   addSessionAttention,
@@ -24,11 +26,12 @@ vi.mock('@/lib/sessionAttentionStore', () => ({
 const addMock = vi.mocked(addSessionAttention);
 const clearMock = vi.mocked(clearSessionAttention);
 const kindMock = vi.mocked(getSessionAttentionKind);
-const pendingAlertsMock = vi.fn<() => Promise<string[]>>();
+const errorTailPendingMock = vi.fn<() => Promise<string[]>>();
+const interruptedPendingMock = vi.fn<() => Promise<string[]>>();
 
-/** 驱动一次重算并等它收敛完成。 */
+/** 驱动一次错误尾行重算并等它收敛完成。 */
 async function reconcile(ids: string[]): Promise<void> {
-  pendingAlertsMock.mockResolvedValue(ids);
+  errorTailPendingMock.mockResolvedValue(ids);
   await refreshPendingAlerts();
 }
 
@@ -36,10 +39,16 @@ describe('usePendingAlertAttention (派生收敛)', () => {
   beforeEach(() => {
     _resetPendingAlertAttentionForTests();
     (window as unknown as { electronAPI: unknown }).electronAPI = {
-      localDb: { sessions: { pendingAlerts: pendingAlertsMock } },
+      localDb: {
+        sessions: {
+          errorTailPending: errorTailPendingMock,
+          interruptedPending: interruptedPendingMock,
+        },
+      },
     };
     kindMock.mockReturnValue('error');
-    pendingAlertsMock.mockResolvedValue([]);
+    errorTailPendingMock.mockResolvedValue([]);
+    interruptedPendingMock.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -105,7 +114,7 @@ describe('usePendingAlertAttention (派生收敛)', () => {
     await reconcile(['s1']);
     clearMock.mockClear();
 
-    pendingAlertsMock.mockRejectedValue(new Error('db not ready'));
+    errorTailPendingMock.mockRejectedValue(new Error('db not ready'));
     await refreshPendingAlerts();
     // 查不到结果时绝不能当成「告警都消失了」把红点清光。
     expect(clearMock).not.toHaveBeenCalled();
@@ -113,24 +122,50 @@ describe('usePendingAlertAttention (派生收敛)', () => {
 
   it('并发重算合流,不打爆 IPC', async () => {
     await reconcile([]);
-    pendingAlertsMock.mockClear();
+    errorTailPendingMock.mockClear();
     let resolveFirst: ((v: string[]) => void) | undefined;
-    pendingAlertsMock.mockReturnValueOnce(
+    errorTailPendingMock.mockReturnValueOnce(
       new Promise<string[]>((res) => {
         resolveFirst = res;
       }),
     );
-    pendingAlertsMock.mockResolvedValue([]);
+    errorTailPendingMock.mockResolvedValue([]);
 
     const settled = refreshPendingAlerts();
     void refreshPendingAlerts();
     void refreshPendingAlerts();
     // 第一次在飞时,后续请求只置脏 → 此刻只发出过 1 次。
-    expect(pendingAlertsMock).toHaveBeenCalledTimes(1);
+    expect(errorTailPendingMock).toHaveBeenCalledTimes(1);
 
     resolveFirst?.([]);
     await settled;
     // 合流后补跑一次即可,不是 3 次。
-    expect(pendingAlertsMock).toHaveBeenCalledTimes(2);
+    expect(errorTailPendingMock).toHaveBeenCalledTimes(2);
+  });
+
+  // 回归(PR #879 review P1):首拉(带退避重试、不经合流)与重算可能并发。较早开始
+  // 的首拉若后返回,会用过期结果重新添加已处置会话的红点。代数守卫让它整个丢弃。
+  it('首拉与重算并发时,后返回的过期首拉结果被丢弃', async () => {
+    let resolveInitial: ((v: string[]) => void) | undefined;
+    interruptedPendingMock.mockReturnValueOnce(
+      new Promise<string[]>((res) => {
+        resolveInitial = res;
+      }),
+    );
+    errorTailPendingMock.mockResolvedValue([]);
+
+    renderHook(() => usePendingAlertAttention()); // 首拉在飞(等 interruptedPending)
+
+    // 期间一次重算完成 → 代数推进,首拉那一代已过期。
+    await refreshPendingAlerts();
+    addMock.mockClear();
+
+    // 首拉现在才返回,结果必须被整个丢弃。
+    resolveInitial?.(['s-stale-interrupted']);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(addMock).not.toHaveBeenCalledWith('s-stale-interrupted', 'error');
   });
 });

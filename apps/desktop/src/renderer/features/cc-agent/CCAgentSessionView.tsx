@@ -1330,13 +1330,20 @@ export function CCAgentSessionView({
   const handleErrorTailDismiss = useCallback(() => {
     if (!sessionId || !errorTailMsg) return;
     // store 乐观置 errorDismissed(banner 即刻熄灭、切会话回来不复现)+ 持久化
-    // (main 侧 merge dismissed:true,不丢 sdkError 等原字段;远程会话仅内存态)。
-    // 必须**等落库完成**再重算:dismiss 落库无广播,而 pending-alerts 是纯 DB 查询,
+    // (main 侧 merge dismissed:true,不丢 sdkError 等原字段)。落库失败会回滚乐观态。
+    // 必须**等落库完成**再重算:dismiss 落库无广播,而告警查询是纯 DB 读,
     // 抢在写入前读会仍判定告警存在 —— 横幅已熄灭、红点却卡住。
     void makerChatStore
       .dismissErrorTailMessage(sessionId, errorTailMsg.clientId)
-      .then(() => refreshPendingAlerts());
-  }, [errorTailMsg, sessionId]);
+      .then(() => {
+        // device-link 远程会话:dismiss 经隧道写到**被控端** DB,控制端本机库里没有
+        // 这个会话的行,派生腿查不到、也从未认领它 —— 必须显式 ack(explicit 清本机
+        // 角标 + 隧道回执清被控端未读)。删掉展示型 ack 后这是唯一的清除路径
+        // (PR #879 review P1)。本机会话由下面的重算收敛,不重复 ack。
+        if (remoteDeviceId) ackErrorAlertHandled(sessionId);
+        return refreshPendingAlerts();
+      });
+  }, [errorTailMsg, remoteDeviceId, sessionId]);
   // interrupted-turn-resume(简化版):「疑似中断」由 session 行的双时间戳驱动
   // (startedAt > endedAt 且未被 /clear 越过,见 sessionActiveTurn.ts 文件头),
   // 不再依赖持久化中断消息行。判定是打开会话时的一次性快照:本窗口 turn 一旦
@@ -1404,8 +1411,15 @@ export function CCAgentSessionView({
   const handleSessionInterruptDismiss = useCallback(() => {
     if (!sessionId) return;
     setSessionInterruptAcked(true);
-    void ackInterruptedTurnFor(sessionId).catch(() => undefined);
-  }, [sessionId]);
+    void ackInterruptedTurnFor(sessionId)
+      .then(() => {
+        // 远程会话同 handleErrorTailDismiss:ack 落的是被控端 DB,控制端本机库里没有
+        // 这个会话,派生腿管不到它的红点 —— 显式 ack。本机会话靠 ended 落库广播的
+        // sessions:patched(lastTurnEndedAt)收敛,不重复 ack。
+        if (remoteDeviceId) ackErrorAlertHandled(sessionId);
+      })
+      .catch(() => undefined);
+  }, [remoteDeviceId, sessionId]);
   // device-link 远程会话首屏:历史/元数据经隧道往返(网络),慢网下 historyLoaded=false
   // 期间消息区空白。仅远程 + 延迟防闪后给「正在从被控端加载」提示(本机会话恒 false)。
   const showRemoteLoading = useRemoteSessionLoading(remoteDeviceId, historyLoaded);

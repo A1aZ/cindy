@@ -66,6 +66,8 @@ import {
   withDeadline,
 } from './endpointFetchDiagnostics';
 import {
+  deriveTrustedEndpointDomains,
+  findUntrustedCachedEndpoint,
   formatCacheSavedAt,
   readEndpointManifestCache,
   writeEndpointManifestCache,
@@ -100,6 +102,18 @@ const DEFAULT_REALM_MANIFEST_BASE_URLS: RealmManifestBaseUrls =
         cn: ENDPOINT_MANIFEST_BASE_URL,
         global: ENDPOINT_MANIFEST_PEER_BASE_URL,
       };
+/**
+ * **缓存**端点允许落在的域(编译期锚点)。两份自举基址都由构建脚本注入二进制,
+ * userData 里的任何写入都改不了它们,所以它是"这个构建被编译成信任哪些域"的唯一事实。
+ * 取两份而不只取本区:CN 清单的 slack / telegram hook 在 cindy.app、其余在
+ * cindy.com.cn,只取本区会把这两个合法端点判成不可信。仅约束缓存路径,理由见
+ * endpointManifestCache.ts 的 findUntrustedCachedEndpoint。
+ */
+const TRUSTED_ENDPOINT_DOMAINS = deriveTrustedEndpointDomains([
+  ENDPOINT_MANIFEST_BASE_URL,
+  ENDPOINT_MANIFEST_PEER_BASE_URL,
+]);
+
 /** 单次请求的网络超时——只用于触发错误框,不是静默降级。 */
 const ATTEMPT_TIMEOUT_MS = 15_000;
 
@@ -747,6 +761,18 @@ function loadOfflineManifestCandidate(
       'cached endpoint manifest ignored: region %s != build %s',
       parsed.region,
       BUILD_AUTH_REGION,
+    );
+    return null;
+  }
+  // 安全边界:这个文件在 userData、可被其他进程写,严格解析只管语法不管来源。
+  // 用编译期烘焙的两份自举基址推导受信任域,拒掉攻击者自选的主机——否则一份被改过的
+  // 缓存 + 一次 CDN 不可达,就能让 authManager 把 Bearer token 发到对方主机。
+  const untrusted = findUntrustedCachedEndpoint(parsed.endpoints, TRUSTED_ENDPOINT_DOMAINS);
+  if (untrusted) {
+    log.error(
+      'cached endpoint manifest rejected: endpoint %s outside trusted domains [%s]',
+      untrusted,
+      TRUSTED_ENDPOINT_DOMAINS.join(', '),
     );
     return null;
   }

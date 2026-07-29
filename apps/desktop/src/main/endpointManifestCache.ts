@@ -10,7 +10,15 @@
  *  - 只在**网络层**失败时才允许作为出口;JSON / schema / 非法值 / region 不匹配这类
  *    配置事故照旧硬阻断(给出口等于帮用户绕过一次真实的配置错);
  *  - 读回来的原文必须重新走同一套严格解析,磁盘内容不被信任;
- *  - 记录写入时的清单地址,升级或换区导致自举基址变化时缓存直接作废。
+ *  - 记录写入时的清单地址,升级或换区导致自举基址变化时缓存直接作废;
+ *  - **端点主机必须落在烘焙的受信任域内**(见 deriveTrustedEndpointDomains)。
+ *
+ * 最后一条是安全边界,不是洁癖(review 抓到):这个文件位于 userData,可被其他进程
+ * 写。严格解析只保证**语法**合法,不保证来源可信——攻击者写一份把 authApiBaseUrl
+ * 指向自己 https 主机的缓存,再让清单 CDN 不可达,用户点「用上次配置启动」之后
+ * authManager 就会把 Bearer token 发到那台主机(凭证泄露)。真正的修法是服务端签名,
+ * 但那是跨仓改动;在此之前用**编译期锚点**把爆炸半径收掉:受信任域由构建期注入的
+ * 两份自举基址(本区 + 对端)推导,任何 userData 写入都改不了它。
  *
  * 存储位置按 credentials-and-local-storage.md:Desktop 持久数据放
  * `app.getPath('userData')`。清单本身是 CDN 上公开可读的配置,不含任何凭证。
@@ -102,6 +110,71 @@ export function writeEndpointManifestCache(
     }
     return false;
   }
+}
+
+// ── 缓存端点的受信任域约束 ──────────────────────────────────────────────────
+
+/**
+ * 从**构建期注入**的自举基址推导受信任域。传入本区 + 对端两份基址(两者都烘焙在
+ * 二进制里,userData 写入无法影响),因此这个集合就是"这个构建被编译成信任哪些域"。
+ *
+ * 推导规则:主机 ≥3 段时去掉最左一段(`hotfix.cindy.app` → `cindy.app`,
+ * `hotfix.cindy.com.cn` → `cindy.com.cn`);只有 2 段时用它自己。**不查公共后缀表**,
+ * 所以对 `a.b.example.com` 这种更深的基址会得到偏窄的 `b.example.com`——偏窄是安全的
+ * 方向:最坏结果只是"离线按钮不出现",而不是放宽信任。
+ *
+ * 需要两份基址是因为 CN 清单里 slack / telegram hook 落在 cindy.app、其余在
+ * cindy.com.cn:只取本区基址会把这两个合法端点判成不可信。
+ */
+export function deriveTrustedEndpointDomains(
+  bootstrapBaseUrls: readonly string[],
+): string[] {
+  const domains = new Set<string>();
+  for (const baseUrl of bootstrapBaseUrls) {
+    if (!baseUrl?.trim()) continue;
+    let host: string;
+    try {
+      host = new URL(baseUrl).hostname.toLowerCase();
+    } catch {
+      continue;
+    }
+    const labels = host.split('.').filter(Boolean);
+    if (labels.length < 2) continue;
+    const domain = labels.length >= 3 ? labels.slice(1).join('.') : host;
+    if (domain.split('.').filter(Boolean).length >= 2) domains.add(domain);
+  }
+  return [...domains];
+}
+
+function isWithinTrustedDomains(rawUrl: string, trustedDomains: readonly string[]): boolean {
+  let host: string;
+  try {
+    host = new URL(rawUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return trustedDomains.some(
+    (domain) => host === domain || host.endsWith(`.${domain}`),
+  );
+}
+
+/**
+ * 检查一份**缓存**端点集合是否全部落在受信任域内。返回第一个越界的 key(供日志),
+ * 全部合规返回 null。空值跳过(缺失端点本就归一成空串)。
+ *
+ * 只用于缓存路径:网络路径的清单来自烘焙 https 基址、由 TLS 认证来源,不需要这层
+ * 约束,加上反而会在合法改配置时误伤。
+ */
+export function findUntrustedCachedEndpoint(
+  endpoints: Readonly<Record<string, string>>,
+  trustedDomains: readonly string[],
+): string | null {
+  if (trustedDomains.length === 0) return 'trusted-domains-unavailable';
+  for (const [key, value] of Object.entries(endpoints)) {
+    if (!value) continue;
+    if (!isWithinTrustedDomains(value, trustedDomains)) return key;
+  }
+  return null;
 }
 
 /** 缓存时间戳 → 弹框里给用户看的本地时间;解析不了就原样回显。 */

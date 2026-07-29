@@ -13,6 +13,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   ENDPOINT_MANIFEST_CACHE_FILE_NAME,
+  deriveTrustedEndpointDomains,
+  findUntrustedCachedEndpoint,
   formatCacheSavedAt,
   readEndpointManifestCache,
   writeEndpointManifestCache,
@@ -95,5 +97,71 @@ describe('endpointManifestCache', () => {
   it('formatCacheSavedAt 解析不了就原样回显', () => {
     expect(formatCacheSavedAt('not-a-date', 'zh-CN')).toBe('not-a-date');
     expect(formatCacheSavedAt(ENTRY.savedAt, 'zh-CN')).not.toBe('');
+  });
+});
+
+describe('缓存端点的受信任域约束(安全边界)', () => {
+  // 生产实际取值:两份自举基址都由构建脚本注入,userData 写入改不了。
+  const GLOBAL_BASE = 'https://hotfix.cindy.app/cindy';
+  const CN_BASE = 'https://hotfix.cindy.com.cn/cindy';
+  const TRUSTED = deriveTrustedEndpointDomains([GLOBAL_BASE, CN_BASE]);
+
+  it('从自举基址推导注册域(多段去掉最左一段,两段用自己)', () => {
+    expect(deriveTrustedEndpointDomains([GLOBAL_BASE])).toEqual(['cindy.app']);
+    expect(deriveTrustedEndpointDomains([CN_BASE])).toEqual(['cindy.com.cn']);
+    expect(deriveTrustedEndpointDomains(['https://cindy.app'])).toEqual(['cindy.app']);
+    expect(TRUSTED.sort()).toEqual(['cindy.app', 'cindy.com.cn']);
+  });
+
+  it.each([
+    ['空值', ''],
+    ['非 URL', 'not a url'],
+    ['单段主机', 'https://localhost'],
+  ])('%s 不产出受信任域', (_label, baseUrl) => {
+    expect(deriveTrustedEndpointDomains([baseUrl])).toEqual([]);
+  });
+
+  it('仓内两份清单的真实端点全部合规(含 CN 跨域的 hook 端点)', () => {
+    // CN 清单里 slack / telegram hook 落在 cindy.app、其余在 cindy.com.cn:
+    // 只取本区基址会把这两个合法端点判成不可信,所以受信任域必须取两份。
+    expect(
+      findUntrustedCachedEndpoint(
+        {
+          authApiBaseUrl: 'https://auth.cindy.com.cn',
+          slackHookWsUrl: 'wss://slack-hook.cindy.app',
+          telegramHookWsUrl: 'wss://telegram-hook.cindy.app',
+          websiteUrl: 'https://cindy.com.cn',
+          cdnBaseUrl: 'https://hotfix.cindy.com.cn/cindy',
+          authDesktopCallbackUrl: 'https://auth.cindy.com.cn/api/auth/desktop/callback',
+        },
+        TRUSTED,
+      ),
+    ).toBeNull();
+  });
+
+  it.each([
+    ['攻击者自选主机', 'https://evil.example.com'],
+    ['受信任域作为子串但不是后缀', 'https://cindy.app.evil.com'],
+    ['受信任域拼在主机名里', 'https://notcindy.app'],
+    ['末尾多一段', 'https://auth.cindy.app.attacker.net'],
+  ])('%s 被拒(返回越界的 key)', (_label, hostile) => {
+    expect(
+      findUntrustedCachedEndpoint(
+        { authApiBaseUrl: hostile, websiteUrl: 'https://cindy.app' },
+        TRUSTED,
+      ),
+    ).toBe('authApiBaseUrl');
+  });
+
+  it('空值端点跳过检查(缺失端点本就归一成空串)', () => {
+    expect(
+      findUntrustedCachedEndpoint({ authApiBaseUrl: '', heartbeatUrl: '' }, TRUSTED),
+    ).toBeNull();
+  });
+
+  it('推导不出受信任域时一律拒绝(fail closed,不是放行)', () => {
+    expect(findUntrustedCachedEndpoint({ authApiBaseUrl: 'https://auth.cindy.app' }, [])).toBe(
+      'trusted-domains-unavailable',
+    );
   });
 });

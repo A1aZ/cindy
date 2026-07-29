@@ -2918,9 +2918,14 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
     expect(ctxs[1]!.endQueueWait?.(true)).toBe(false);
     expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(2); // 没有超发
 
-    // 站下(reclaimSlot=false)只复位记账,不占槽
+    // 站下(reclaimSlot=false)只复位记账:转 'cancelling' —— 卡死守卫看得住它,但它
+    // 明确不会执行,所以**不占槽**。曾经复位成 'running',于是这里会变成 3/2、UI 上冒出
+    // 9/8,也与 endQueueWait 契约里"只复位记账"矛盾(review #944 第十五轮)。
     expect(ctxs[0]!.endQueueWait?.(false)).toBe(true);
-    expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(3); // 复位成 running 后计入
+    expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(2);
+    expect(
+      h.scheduler.getRuntimeSnapshot().inFlightRuns.filter((r) => r.phase === 'cancelling'),
+    ).toHaveLength(1);
     await h.scheduler.stop();
   });
 
@@ -3230,6 +3235,50 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
       expect(row?.lastFiredAt).toBeDefined();
       expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(0);
       await h.scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('强制收口的终态落库失败时仍要投失败通知', async () => {
+    // 不广播 'failed' 事件是为了不让 UI 和 DB 分叉,但通知是另一条通道:这一轮确实失败了,
+    // 用户配的桌面 / 飞书提醒不该因为一次写盘失败就消失。尤其当 runner 迟到 settle 并已
+    // 因 isRunAbandoned 主动让出通知权时,这里再跳过就等于两边都不投
+    // (review #944 第十五轮 P1)。
+    vi.useFakeTimers();
+    try {
+      const notified: unknown[] = [];
+      const storage = new InMemoryStorage();
+      storage.updateRun = () => Promise.resolve(null); // 行不存在 / 写失败
+      const clock = new FakeClock();
+      const scheduler = new Scheduler({
+        storage,
+        runner: { fire: () => new Promise<FireResult>(() => {}) }, // 卡死且不理 abort
+        clock,
+        generateId: makeIdGen(),
+        tickIntervalMs: 60_000_000,
+        suspendGapMs: 0,
+        runStallMs: 60_000,
+        runStallAbortGraceMs: 30_000,
+        notifyForcedFailure: (input) => {
+          notified.push(input);
+        },
+        instanceId: 'test-notify-on-persist-fail',
+      });
+      const sch = await scheduler.create({ ...baseInput, intervalMs: 3_600_000 });
+      clock.advance(3_600_000);
+      void scheduler.tick();
+      await vi.waitFor(() => expect(scheduler.getRuntimeSnapshot().slotsInUse).toBe(1));
+
+      clock.advance(60_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      clock.advance(30_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+
+      // 落库失败 → 不广播 failed,但通知照投,且排期照恢复
+      await vi.waitFor(() => expect(notified).toHaveLength(1));
+      expect((await storage.get(sch.id))?.nextFireAt).toBeDefined();
+      await scheduler.stop();
     } finally {
       vi.useRealTimers();
     }

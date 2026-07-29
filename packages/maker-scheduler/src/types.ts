@@ -24,6 +24,13 @@ export type ScheduleRunPhase =
   | 'persisting'
   | 'running'
   | 'queued'
+  /**
+   * 排队者已决定**本轮不再执行**（endQueueWait(false)：撤项 / 失败 / abort），正在走
+   * 自己的收口。既不算纯等待（卡死守卫要看得住它），也不该占并发槽（它明确不会执行）——
+   * 复位成 'running' 会让 slotsInUse 临时超过 maxConcurrentRuns，UI 上冒出 9/8
+   * （review #944 第十五轮）。
+   */
+  | 'cancelling'
   | 'finalizing';
 
 /** 当前 Scheduler 实例中的一条结构化 in-flight 记录。 */

@@ -1987,9 +1987,11 @@ export class Scheduler extends EventEmitter {
       if (!attempt) return true;
       if (attempt.phase !== 'queued') return true;
       if (!reclaimSlot) {
-        // 本轮不再执行。仍把 phase 复位成 'running':它已经不是纯等待了,继续算作
-        // "不占槽"会让卡死守卫看不住它(收口通常几毫秒内完成,占槽无害)。
-        attempt.phase = 'running';
+        // 本轮不再执行 → 'cancelling':它已经不是纯等待(卡死守卫照常看得住),但也明确
+        // 不会执行,所以不该占并发槽 —— 复位成 'running' 会让 slotsInUse 临时超过
+        // maxConcurrentRuns、UI 冒出 9/8,也与 endQueueWait 契约里"只复位记账"矛盾
+        // (review #944 第十五轮)。
+        attempt.phase = 'cancelling';
         attempt.lastProgressAt = this.clock.now();
         this.emitRuntimeState();
         return true;
@@ -2089,11 +2091,12 @@ export class Scheduler extends EventEmitter {
     });
   }
 
-  /** 真正占用并发槽的 run 数：'queued' 的纯等待项不计入。 */
+  /** 真正占用并发槽的 run 数：'queued'（纯等待）与 'cancelling'（已放弃执行）都不计入。 */
   private countSlotsInUse(): number {
     let n = 0;
     for (const attempt of this.inflightAttempts.values()) {
-      if (attempt.phase !== 'queued') n += 1;
+      // 'queued' = 纯等待;'cancelling' = 已决定本轮不执行、正在收口。两者都不占槽。
+      if (attempt.phase !== 'queued' && attempt.phase !== 'cancelling') n += 1;
     }
     return n;
   }
@@ -2309,6 +2312,14 @@ export class Scheduler extends EventEmitter {
       // 这个新问题(review #944 第三轮)。
       await this.replanAfterStalledClaim(attempt, now);
       this.emitEvent({ type: 'changed', scheduleId });
+      // **通知也照旧要投**。它与 'failed' 事件是两条独立通道:不广播事件是为了不让 UI
+      // 和 DB 分叉,但这一轮确实失败了,用户配的桌面 / 飞书提醒不该因为一次写盘失败就
+      // 消失。尤其是 runner 迟到 settle 的那条竞态:它已经因为 isRunAbandoned 而主动
+      // 让出了通知权,这里再跳过就等于两边都不投,用户什么都收不到
+      // (review #944 第十五轮 P1)。
+      if (this.needsForcedFailureNotification(runId)) {
+        void this.notifyForcedFailure(scheduleId, runId, errorMsg);
+      }
       return;
     }
     this.emitEvent({ type: 'failed', scheduleId, runId, error: errorMsg });

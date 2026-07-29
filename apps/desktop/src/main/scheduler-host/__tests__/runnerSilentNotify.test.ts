@@ -277,6 +277,37 @@ describe('MakerScheduleRunner silent-run notification skip', () => {
     expect(notifier.notify).not.toHaveBeenCalled();
   });
 
+  it('通知权在投递开始之前就已认领(不是投递完才认领)', async () => {
+    // abandoned 预检只在进入 notify 之前有效。notifier.notify 是 await,期间强制收口完全
+    // 可能把这一轮标成 abandoned,并因为 runnerNotifiedFailure 还是 false 而并发投出第二
+    // 条通知。认领必须早于投递,引擎的 needsForcedFailureNotification 才看得见
+    // (review #944 第十五轮 P1)。
+    const h = createSessionHarness(acceptingSend());
+    const { runner, notifier } = createRunnerHarness(h.session, { silenced: false });
+    const notified: string[] = [];
+    const ctx = createFireContext();
+    (ctx as { onRunnerNotified?: (k: string) => void }).onRunnerNotified = (k) => {
+      notified.push(k);
+    };
+    // 投递卡住:此刻若还没认领,就存在竞态窗口
+    let releaseNotify!: () => void;
+    notifier.notify.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { releaseNotify = resolve; }),
+    );
+
+    const firePromise = runner.fire(baseSchedule(), ctx);
+    await vi.waitFor(() => expect(mocks.createMessage).toHaveBeenCalled());
+    h.emit({ type: 'done', data: {} });
+
+    // 投递仍挂着,但认领已经发生
+    await vi.waitFor(() => expect(notifier.notify).toHaveBeenCalled());
+    expect(notified).toEqual(['success']);
+
+    releaseNotify();
+    await firePromise;
+    expect(notified).toEqual(['success']);
+  });
+
   it('未被强制收口时通知照发(去重不能变成永久静默)', async () => {
     const h = createSessionHarness(acceptingSend());
     const { runner, notifier } = createRunnerHarness(h.session, {

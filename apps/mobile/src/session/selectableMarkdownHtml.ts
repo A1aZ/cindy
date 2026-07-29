@@ -208,9 +208,14 @@ function buildSelectableMarkdownCss(options: SelectableMarkdownHtmlOptions): str
       font-weight: 500;
       line-height: ${lineHeight}px;
     }
+    /* 引用正文与列表 marker 走正文色(不用 mutedColor):mutedColor =
+       textSecondary 对底色仅 3.1:1(light)/ 3.4:1(dark),低于 WCAG AA 4.5:1。
+       引用语义由左侧竖线表达,编号与列表项正文同色。与聊天消息流
+       (MessageRenderer 的 markdownQuoteText / markdownListMarker)保持一致。
+       th 仍用 mutedColor —— 表头是元信息且有 font-weight 500 区分。 */
     blockquote {
       border-left: 2px solid ${borderColor};
-      color: ${mutedColor};
+      color: ${textColor};
       padding-left: 8px;
     }
     .list-row {
@@ -218,7 +223,7 @@ function buildSelectableMarkdownCss(options: SelectableMarkdownHtmlOptions): str
       gap: 8px;
     }
     #xdt-content .list-marker {
-      color: ${mutedColor};
+      color: ${textColor};
       flex: 0 0 ${markerWidth}px;
       text-align: right;
     }

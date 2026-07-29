@@ -69,8 +69,9 @@ registerColor('md-table-bg', {
 // ── Markdown 正文语义色(标题 h1-h6 + 加粗)──
 // 默认值刻意是 `inherit` 而不是 var(--text-primary):这些元素在引入 token 之前
 // 的颜色就是从容器继承来的(baseComponents 只给字号字重,不给 color)。若默认改成
-// 具体色槽,blockquote / tool card / secondary 文字区里的 Markdown 标题与加粗会
-// 由弱化色变回主色 —— 那才是真的改动现有观感。`inherit` 让默认主题渲染结果逐
+// 具体色槽,tool card / secondary 文字区里的 Markdown 标题与加粗会由弱化色变回
+// 主色 —— 那才是真的改动现有观感。(blockquote 已不在此列:引用正文本身改为
+// --text-primary,见 msg-blockquote-text。)`inherit` 让默认主题渲染结果逐
 // 像素不变,同时给外部主题导入(VSCode markup.heading / Obsidian --hN-color)留出
 // 可覆盖的槽位。详见 docs/design-rules/DESIGN.md §10「外部主题导入」。
 registerColor('md-h1-fg', {
@@ -1154,14 +1155,24 @@ registerColor('msg-table-header-bg', {
   light: 'var(--surface)',
   dark: 'var(--surface)',
 }, 'Surface');
+// ── 引用块:正文主色 + 与全局 left rail 统一的竖线 ──
+// 模型常用 `>` 承载本轮最该看的内容(引述的原始需求、报错原文、待确认结论),
+// 弱化色让它在扫读时反而最先被跳过 —— 这是引用块唯一要修的问题,故正文改主色。
+// 竖线刻意跟随 --agent-actions-rail(WorkGroupBlock / ThinkingCard /
+// AgentTaskCard / AgentActionsBlock 都用它 + border-l-2):界面里「块引导竖线」
+// 是一套统一的视觉语言,淡是它的设计意图,不是缺陷。引用块的识别由「内缩 +
+// 这条 rail + 正文主色」共同承担,不靠加深竖线。
+// 注:该 rail 对 surface 约 1.36:1(light)/ 1.64:1(dark),低于 WCAG 非文本
+// 3:1 —— 这是全局既有设计语言的既定取舍,引用块与之统一优先;要调就整套 rail
+// 一起调,不在引用块这里单独加深(否则引用块会比工具块更抢眼)。
 registerColor('msg-blockquote-border', {
-  light: 'var(--border-default)',
-  dark: 'var(--border-default)',
-}, 'Board');
+  light: 'var(--agent-actions-rail)',
+  dark: 'var(--agent-actions-rail)',
+}, 'Left rail — 与 agent actions / thinking 卡片竖线统一');
 registerColor('msg-blockquote-text', {
-  light: 'var(--text-secondary-mid)',
-  dark: 'var(--text-secondary-mid)',
-}, 'Dark Gray — secondary');
+  light: 'var(--text-primary)',
+  dark: 'var(--text-primary)',
+}, 'Near Black — 引用正文与正文同权重');
 registerColor('msg-hr-border', {
   light: 'var(--border-default)',
   dark: 'var(--border-default)',

@@ -600,8 +600,13 @@ const baseComponents: Components = {
     return (
       <blockquote
         className={cn(
+          // border-l-2 + --msg-blockquote-border(= --agent-actions-rail):与
+          // WorkGroupBlock / ThinkingCard / AgentActionsBlock 的 left rail 完全
+          // 统一,宽度和颜色都不在引用块这里另搞一套。
+          // 不用斜体:中文没有真斜体,机械倾斜反而降低可读性;引用语义由 rail +
+          // 内缩表达已经足够。
           'my-2 border-l-2 border-[var(--msg-blockquote-border)] pl-4',
-          'italic text-[var(--msg-blockquote-text)]',
+          'text-[var(--msg-blockquote-text)]',
         )}
         {...props}
       >

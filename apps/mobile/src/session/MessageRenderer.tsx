@@ -5864,21 +5864,30 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     fontSize: typeScale.caption,
     lineHeight: lineHeight.caption,
   },
+  // 竖线对齐本文件 styles.rail(chatCodeBorder + 2px)——界面里「块引导竖线」是
+  // 一套统一的视觉语言,淡是设计意图;引用块不另搞一套(desktop 侧同样跟随
+  // --agent-actions-rail)。
   markdownQuote: {
-    borderLeftColor: colors.borderStrong,
+    borderLeftColor: colors.chatCodeBorder,
     borderLeftWidth: 2,
     paddingLeft: spacing.sm,
   },
+  // 引用正文与正文同色:textSecondary 对 surface 仅 3.1:1(light)/ 3.4:1(dark),
+  // 低于 WCAG AA 4.5:1,而 `>` 常承载本轮最该看的内容 —— 这是引用块唯一要修的
+  // 问题。「这是引用」由 rail + 内缩表达,不靠压低正文对比度。
   markdownQuoteText: {
-    color: colors.textSecondary,
+    color: colors.textPrimary,
   },
   markdownListRow: { flexDirection: 'row', gap: spacing.sm },
-  // text_run 合并树里的列表 marker 前缀(不占固定列宽,颜色弱化与原 marker 一致)。
+  // text_run 合并树里的列表 marker 前缀(不占固定列宽,颜色与原 marker 一致)。
   markdownListMarkerInline: {
-    color: colors.textSecondary,
+    color: colors.textPrimary,
   },
+  // 编号/项目符号与列表项正文同色(对齐 desktop 的 list-decimal / list-disc:
+  // 那边 marker 本就继承正文色)。编号在实际使用中承担段落引导,弱化到
+  // 3.1:1 会让扫读整段丢失。
   markdownListMarker: {
-    color: colors.textSecondary,
+    color: colors.textPrimary,
     fontSize: typeScale.bodyLarge,
     lineHeight: lineHeight.bodyLarge,
     textAlign: 'right',

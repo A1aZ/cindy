@@ -1228,6 +1228,11 @@ export function VoiceInputSection() {
   const shortcutAwaitingInputMonitoring =
     shortcutNeedsKeyboardListenerPermission && permissions.inputMonitoring.status === 'denied';
 
+  // 只给 startFnKeyCapture 用：它的依赖数组必须为空（见下方说明），但仍要拿到当前语言的
+  // 文案。渲染期同步赋值，取到的就是本次渲染的 t，不会滞后一帧。
+  const translateRef = useRef(t);
+  translateRef.current = t;
+
   /**
    * 启动录制期的 Fn key capture，并把结果反映到提示区。
    *
@@ -1235,6 +1240,10 @@ export function VoiceInputSection() {
    * effect：重跑会先跑 cleanup 里的 syncVoiceInputGlobalShortcut(已保存快捷键)，再由
    * setup 重新挂起，两步都是异步的，中间那个窗口里用户按下旧快捷键就会真的触发一次
    * 语音输入——而他本意只是在录新键。
+   *
+   * 同理，这个 callback 的依赖必须**为空**：录制 effect 依赖它，任何依赖项变化都会
+   * 经由它的身份变化把整个录制 effect 重跑一遍，打开上面那段窗口。文案函数 `t` 的
+   * 身份随界面语言变化，所以走 ref 取最新值，不进依赖数组。
    */
   const startFnKeyCapture = useCallback(async (isCancelled: () => boolean): Promise<void> => {
     if (window.electronAPI.platform !== 'darwin') return;
@@ -1254,10 +1263,11 @@ export function VoiceInputSection() {
     // 缺权限只挡住 Fn 检测，其它快捷键照录，所以在提示区说明而不是弹错误——
     // 弹错误会让用户以为整个录制坏了，然后放弃。
     if (result.ok || permissionBlocked) return;
+    const translate = translateRef.current;
     toast.error(result.errorCode === 'failed'
-      ? t('settings.voiceInput.shortcut.toast.listenerUnavailable')
-      : t('settings.voiceInput.shortcut.toast.recordingFailed', { error: result.error }));
-  }, [t]);
+      ? translate('settings.voiceInput.shortcut.toast.listenerUnavailable')
+      : translate('settings.voiceInput.shortcut.toast.recordingFailed', { error: result.error }));
+  }, []);
 
   // 用户去系统设置里打开开关后切回来（window focus 会触发 refreshPermissions），在这里
   // 补一次注册：event tap 跑在独立 helper 子进程里，重新 spawn 就能拿到新授权，不需要

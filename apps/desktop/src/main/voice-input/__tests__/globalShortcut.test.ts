@@ -347,6 +347,31 @@ describe('voice input global shortcut registration', () => {
       expect(mocks.updateSettings).toHaveBeenCalledWith({ shortcut: bareRightOption });
     });
 
+    // 存盘就等于宣布「当前快捷键是这个新的」,那旧的必须同时失效。旧 accelerator 的注销
+    // 只写在成功路径上,缺权限时在那之前就返回了 —— 于是设置页显示「右 Option 待授权」,
+    // 而按 F16 整个会话里仍会触发语音输入。
+    it('deactivates the previously registered accelerator when persisting a pending shortcut', async () => {
+      setPlatform('darwin');
+      const { registerGlobalVoiceInputIpc } = await import('../global.js');
+      registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+      await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, {
+        trigger: 'keyboard',
+        code: 'F16',
+        key: 'F16',
+        modifiers: { meta: false, ctrl: false, alt: false, shift: false, fn: false },
+      });
+      expect(mocks.registeredShortcuts.has('F16')).toBe(true);
+
+      mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'Could not listen for modifier shortcuts.' });
+      mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
+
+      const result = await mocks.handlers.get('voice-input:settings:update-shortcut')?.({}, bareRightOption);
+
+      expect(result).toMatchObject({ ok: true, pendingInputMonitoring: true });
+      expect(mocks.registeredShortcuts.has('F16')).toBe(false);
+    });
+
     // 权限没问题却起不来 = swiftc 编译失败 / 二进制缺失 / 启动超时,是真故障。
     // 这种情况存盘会骗用户「设上了,等授权就好」,所以必须走回原来的失败路径。
     it('treats a listener failure with granted permission as a real failure and does not persist', async () => {

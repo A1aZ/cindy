@@ -588,6 +588,18 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
       // 只缺监听权限时仍然存盘：用户的选择要留住，快捷键等授权后自动生效（设置页在
       // 权限转为已授权时会重新 sync）。真故障（冲突、不支持、helper 坏了）照旧不存。
       if (!registration.ok && registration.errorCode !== 'permission') return registration;
+      if (!registration.ok) {
+        // 存盘意味着「当前快捷键就是这个新的、只是等授权」，所以旧的必须当场停掉。
+        //
+        // setVoiceInputGlobalShortcut 注销旧 accelerator 只发生在成功路径上，缺权限时
+        // 它在那之前就返回了。少了这步：原本绑 F16，改成右 Option 而权限被拒 → 设置页
+        // 显示「右 Option 待授权」，但按 F16 这一整个会话里仍会触发语音输入。
+        //
+        // 交给 setVoiceInputGlobalShortcut(null) 统一收口，别在这里手抠 registered*
+        // 那几个模块级变量：注销 accelerator、清 native 状态、停 helper 三件事都在那条
+        // 已有路径里，重抄一遍迟早漏一样。
+        await setVoiceInputGlobalShortcut(null);
+      }
       return {
         ok: true,
         settings: voiceInputDataStore.updateSettings({ shortcut: nextShortcut }),

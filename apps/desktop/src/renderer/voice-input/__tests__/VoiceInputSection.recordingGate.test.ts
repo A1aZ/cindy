@@ -34,6 +34,22 @@ describe('VoiceInputSection shortcut recording gate', () => {
     expect(source).not.toContain('}, [recordingShortcut, permissions.inputMonitoring.ok, t]);');
   });
 
+  // 上面那条只锁住 effect 自己的依赖数组，但它依赖 startFnKeyCapture —— 后者的依赖一旦
+  // 非空（最初是 [t]，身份随界面语言变化），录制期切语言就会经由它的身份变化把整个录制
+  // effect 重跑，照样打开「旧快捷键被短暂恢复」的窗口。所以那个 callback 的依赖必须为空，
+  // 文案走 translateRef 取最新值。
+  it('keeps the Fn capture callback identity stable so the recording effect never re-runs mid-recording', () => {
+    const source = readFileSync(
+      new URL('../../components/settings/VoiceInputSection.tsx', import.meta.url),
+      'utf8',
+    );
+
+    expect(source).toMatch(/const startFnKeyCapture = useCallback\([\s\S]*?\n {2}\}, \[\]\);/);
+    expect(source).not.toMatch(/const startFnKeyCapture = useCallback\([\s\S]*?\n {2}\}, \[t\]\);/);
+    expect(source).toContain('const translateRef = useRef(t);');
+    expect(source).toContain('translateRef.current = t;');
+  });
+
   it('clears stale custom ASR form fields when the saved config is removed', () => {
     const source = readFileSync(
       new URL('../../components/settings/VoiceInputSection.tsx', import.meta.url),

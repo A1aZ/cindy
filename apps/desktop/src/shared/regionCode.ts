@@ -37,7 +37,15 @@ export const CINDY_REGION_CODE: Readonly<Record<CindyRegion, string | null>> = O
   dev: 'Dev',
 });
 
-/** 该区域是否需要在界面与非界面文本里标注(global / 未知一律 false)。 */
+/**
+ * 该区域是否需要在界面与非界面文本里标注(global / 缺失 / 未知一律 false)。
+ *
+ * ⚠️ 判定用「取到的是字符串」而不是「!== null」:未知 region 在表里取不到值,拿到的是
+ * `undefined`,而 `undefined !== null` 成立——那样会把未知区域误判成要标注,继续走进
+ * 有代号的渲染分支。类型上 `CindyRegion` 已穷举,但 issue 链路的 region 来自 IPC
+ * payload,运行期不受类型保证,这里必须自己 fail-closed(呼应 IssueConfirmCard 的
+ * 「region 缺失时按不标处理,不猜」)。
+ */
 export function shouldLabelRegion(region: CindyRegion | undefined): boolean {
-  return !!region && CINDY_REGION_CODE[region] !== null;
+  return !!region && typeof CINDY_REGION_CODE[region] === 'string';
 }

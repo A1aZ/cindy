@@ -16,6 +16,8 @@
 
 import { describe, expect, it } from 'vitest';
 
+import type { CindyRegion } from '@cindy/maker-shared/brand-identity';
+
 import { CINDY_REGION_CODE, shouldLabelRegion } from '../../shared/regionCode';
 import en from '../i18n/locales/en/common.json';
 import ja from '../i18n/locales/ja/common.json';
@@ -114,5 +116,16 @@ describe('区域代号:界面 i18n 与常量一致', () => {
     expect(shouldLabelRegion(undefined)).toBe(false);
     expect(shouldLabelRegion('cn')).toBe(true);
     expect(shouldLabelRegion('dev')).toBe(true);
+  });
+
+  it('未知 region 按不标处理 —— 表里取不到值时不得落进「有代号」分支', () => {
+    // issue 链路的 region 来自 IPC payload,运行期不受 CindyRegion 类型保证。
+    // 旧实现用 `!== null` 判定,undefined !== null 成立 → 未知区域被误判为要标注。
+    for (const bogus of ['xx', 'GLOBAL', 'Cn', '', 'production']) {
+      expect(
+        shouldLabelRegion(bogus as CindyRegion),
+        `未知 region ${JSON.stringify(bogus)} 必须 fail-closed 到不标注`,
+      ).toBe(false);
+    }
   });
 });

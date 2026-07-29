@@ -44,6 +44,10 @@ const mocks = vi.hoisted(() => {
   const requestInputMonitoring = vi.fn();
   const assertTrustedAppRenderer = vi.fn();
   const updateSettings = vi.fn();
+  // 显式标注返回类型:不标的话会被推成 { shortcut: null },用例里塞真快捷键就编译不过。
+  const getSettings = vi.fn((): { shortcut: VoiceInputShortcut | null } => ({ shortcut: null }));
+  // app.on 的回调要能被用例触发:授权兜底恢复挂在 browser-window-focus 上。
+  const appListeners = new Map<string, (...args: unknown[]) => void>();
   // 闸只读 isDestroyed / webContents / mainFrame，没必要拼一整个 BrowserWindow，所以
   // 断言收窄在这一处；ipcDeps 本身用真实类型，这样 deps 形状变化会在编译期暴露。
   const getMainWindow = vi.fn(() => mainWindow as unknown as BrowserWindow);
@@ -75,6 +79,8 @@ const mocks = vi.hoisted(() => {
     ipcDeps,
     listenerOptions,
     updateSettings,
+    getSettings,
+    appListeners,
     registerShortcut,
   };
 });
@@ -85,6 +91,9 @@ vi.mock('electron', () => ({
     getPath: vi.fn(() => '/tmp/xdt-maker-test'),
     isPackaged: false,
     once: vi.fn(),
+    on: vi.fn((event: string, callback: (...args: unknown[]) => void) => {
+      mocks.appListeners.set(event, callback);
+    }),
   },
   BrowserWindow: {
     getAllWindows: vi.fn(() => [mocks.focusedWindow]),
@@ -141,6 +150,7 @@ vi.mock('../MacModifierShortcutListener.js', () => ({
 vi.mock('../VoiceInputDataStore.js', () => ({
   voiceInputDataStore: {
     updateSettings: mocks.updateSettings,
+    getSettings: mocks.getSettings,
   },
 }));
 
@@ -182,6 +192,9 @@ describe('voice input global shortcut registration', () => {
     mocks.mainWindowIsDestroyed.mockReturnValue(false);
     mocks.getMainWindow.mockReset();
     mocks.getMainWindow.mockReturnValue(mocks.mainWindow as unknown as BrowserWindow);
+    mocks.getSettings.mockReset();
+    mocks.getSettings.mockReturnValue({ shortcut: null });
+    mocks.appListeners.clear();
     mocks.updateSettings.mockReset();
     mocks.updateSettings.mockImplementation((patch: unknown) => ({ shortcut: null, ...(patch as object) }));
     mocks.registerShortcut.mockReset();
@@ -406,6 +419,62 @@ describe('voice input global shortcut registration', () => {
       // 用户最后选的是 F16:它必须仍然注册着,存盘也必须是它。
       expect(mocks.registeredShortcuts.has('F16')).toBe(true);
       expect(mocks.updateSettings).toHaveBeenLastCalledWith({ shortcut: f16 });
+    });
+
+    // 设置页是条件渲染的:用户切走 tab(或关掉设置页)再去系统设置里打开开关,设置页那条
+    // 权限 effect 压根不会跑。所以兜底恢复必须挂在 app 生命周期上,否则快捷键要等到下次
+    // 进语音输入 tab 或重启 Cindy 才生效 —— 而我们对用户的说法是「授权后自动生效」。
+    describe('pending shortcut recovery outside the settings page', () => {
+      async function focusWindow(): Promise<void> {
+        const onFocus = mocks.appListeners.get('browser-window-focus');
+        expect(onFocus).toBeTypeOf('function');
+        onFocus?.();
+        await new Promise((resolve) => { setImmediate(resolve); });
+      }
+
+      it('re-registers a pending native shortcut when a window regains focus after the grant', async () => {
+        setPlatform('darwin');
+        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.modifierIsRunning.mockReturnValue(false);
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await focusWindow();
+
+        expect(mocks.modifierSetShortcut).toHaveBeenCalledWith(bareRightOption);
+      });
+
+      // 还没授权就起 helper = 白起一个必然失败的进程,而 preflight 只查不弹窗,所以这里
+      // 必须先看快照再决定。
+      it('does not start the helper on focus while the permission is still denied', async () => {
+        setPlatform('darwin');
+        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.modifierIsRunning.mockReturnValue(false);
+        mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await focusWindow();
+
+        expect(mocks.modifierSetShortcut).not.toHaveBeenCalled();
+      });
+
+      // 录制期间全局快捷键是刻意挂起的。这里重新注册会把它顶回来,而用户此刻正在按键试录,
+      // 会真的触发一次语音输入。
+      it('does not re-register while a shortcut recording is in progress', async () => {
+        setPlatform('darwin');
+        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.modifierIsRunning.mockReturnValue(false);
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        const start = mocks.handlers.get('voice-input:modifier-shortcut-recording:start');
+        await start?.({ sender: { id: mocks.focusedWindow.webContents.id, once: vi.fn() } });
+
+        await focusWindow();
+
+        expect(mocks.modifierSetShortcut).not.toHaveBeenCalled();
+      });
     });
 
     // 权限没问题却起不来 = swiftc 编译失败 / 二进制缺失 / 启动超时,是真故障。

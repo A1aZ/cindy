@@ -590,9 +590,65 @@ function queueShortcutMutation<T>(task: () => Promise<T>): Promise<T> {
   return run;
 }
 
+/**
+ * 「待授权」快捷键的兜底恢复：用户在设置页外拿到监听权限后，把它重新注册上。
+ *
+ * 为什么必须放在 main：原来这条恢复挂在设置页的权限 effect 上，而设置页是条件渲染的 ——
+ * 用户切走 tab（甚至关掉设置页）再去系统设置里打开开关，那个 effect 压根不会跑，快捷键就
+ * 一直不生效，直到他再进一次语音输入 tab 或重启 Cindy。而我们给用户的说法是「授权后自动
+ * 生效」，所以这条恢复不能依赖某个界面还开着。
+ *
+ * 用 preflight（只查不弹窗）判断，且只在明确 granted 时才起 helper —— 不会给用户凭空多出
+ * 一个系统弹窗。
+ */
+const PENDING_SHORTCUT_RECOVERY_MIN_INTERVAL_MS = 5_000;
+let lastPendingShortcutRecoveryAt = 0;
+let pendingShortcutRecoveryRunning = false;
+
+async function recoverPendingNativeShortcutRegistration(): Promise<void> {
+  if (process.platform !== 'darwin') return;
+  if (pendingShortcutRecoveryRunning) return;
+  // 录制期间全局快捷键是刻意挂起的，这里重新注册会把它顶回来，用户正在按键试录就会真的
+  // 触发一次语音输入。
+  if (modifierShortcutRecordingWebContentsIds.size > 0) return;
+  const shortcut = voiceInputDataStore.getSettings().shortcut;
+  if (!shortcut || !voiceInputShortcutNeedsMacNativeListener(shortcut, process.platform)) return;
+  // 已经在跑就没有什么要恢复的。
+  if (macModifierShortcutListener.isRunning()) return;
+  // preflight 每次都要起一个 helper 进程，而窗口聚焦事件很密集，必须限流。
+  const now = Date.now();
+  if (now - lastPendingShortcutRecoveryAt < PENDING_SHORTCUT_RECOVERY_MIN_INTERVAL_MS) return;
+  lastPendingShortcutRecoveryAt = now;
+  pendingShortcutRecoveryRunning = true;
+  try {
+    const snapshot = await refreshVoiceInputInputMonitoringPermissionSnapshot();
+    if (!snapshot.ok || snapshot.status !== 'granted') return;
+    const result = await queueShortcutMutation(() => setVoiceInputGlobalShortcut(shortcut));
+    if (result.ok) {
+      log.info('pending native shortcut re-registered after permission was granted', {
+        code: shortcut.code,
+        trigger: shortcut.trigger,
+      });
+      return;
+    }
+    if (result.errorCode === 'superseded') return;
+    log.warn('pending native shortcut recovery failed', { code: shortcut.code, errorCode: result.errorCode });
+  } catch (error) {
+    log.warn('pending native shortcut recovery threw', { error: stringifyError(error) });
+  } finally {
+    pendingShortcutRecoveryRunning = false;
+  }
+}
+
 export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void {
   if (registered) return;
   registered = true;
+
+  // 从系统设置切回 Cindy 就会走到这里 —— 这正是用户刚打开开关的那一刻，且与设置页开着
+  // 没关系。设置页自己那条权限 effect 保留：它还负责录制期只补 Fn capture 那条路。
+  app.on('browser-window-focus', () => {
+    void recoverPendingNativeShortcutRegistration();
+  });
 
   ipcMain.handle(
     'voice-input:global-shortcut:set',

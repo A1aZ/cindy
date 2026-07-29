@@ -210,6 +210,11 @@ function createQueueHarness(opts: {
   removeTriggersDiscard?: boolean;
   /** isPromptTracked 的返回(默认 true)。 */
   tracked?: () => boolean;
+  /**
+   * true = coordinator 在 enqueuePrompt **resolve 之前**就 drain 并调用 onAccepted。
+   * 复刻「目标会话在入队前的 await 期间恰好空闲」这条既有注释明确允许的顺序。
+   */
+  acceptBeforeEnqueueResolves?: boolean;
 }): QueueHarness {
   const enqueueCalls: QueueHarness['enqueueCalls'] = [];
   const removeCalls: QueueHarness['removeCalls'] = [];
@@ -223,6 +228,7 @@ function createQueueHarness(opts: {
         if (opts.enqueueRetry) return { retry: true as const };
         if (opts.enqueueDuplicate) return { duplicate: true as const };
         enqueueCalls.push(req);
+        if (opts.acceptBeforeEnqueueResolves) await req.onAccepted();
         return { clientId: `client-${enqueueCalls.length}` };
       }),
       removeQueuedPrompt: (sessionId, clientId) => {
@@ -926,6 +932,31 @@ describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', ()
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('accept 早于入队 resolve 时,不得把已在执行的 run 标成 queued(review 第四轮)', async () => {
+    // 目标会话在 metadata / 崩溃恢复 await 期间恰好空闲 → coordinator 可以在
+    // enqueuePrompt resolve 之前就 drain 并 onAccepted。此时 run 已经在执行,若还
+    // 无条件切进 'queued',它会永久不计入 maxConcurrentRuns、也被排除在卡死守卫外。
+    const harness = createSessionHarness(async () => ({ accepted: true }));
+    const queue = createQueueHarness({ busy: true, acceptBeforeEnqueueResolves: true });
+    const { runner } = createRunnerHarness(harness.session, queue.deps);
+    const ctx = createFireContext();
+    let startCalls = 0;
+    const ends: boolean[] = [];
+    (ctx as { onQueueWaitStart?: () => void }).onQueueWaitStart = () => { startCalls += 1; };
+    (ctx as { endQueueWait?: (r: boolean) => boolean }).endQueueWait = (r) => {
+      ends.push(r);
+      return true;
+    };
+
+    const firePromise = runner.fire(heartbeatSchedule(), ctx);
+    await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+    harness.emit({ type: 'done', data: {}, source: 'claude-code' });
+    await expect(firePromise).resolves.toMatchObject({ sessionId: SESSION_ID });
+
+    // 关键断言:从未进入纯等待 —— run 全程占着槽（它确实一直在执行）
+    expect(startCalls).toBe(0);
   });
 
   it('turn 事件经 onProgress 上报给引擎的卡死守卫', async () => {

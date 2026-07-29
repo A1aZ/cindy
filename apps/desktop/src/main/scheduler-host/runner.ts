@@ -1534,8 +1534,15 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // 从这里到 dispatchGate 结束是**纯等待**:没有 agent 子进程、没有 MCP 注册、
     // 不烧 token。告知引擎把本 run 从并发闸门里摘出去,否则一个长时间忙碌(或卡住)
     // 的会话会通过它的排队者占满全局槽位,拖死所有其它任务(2026-07-29 实事故)。
-    // 幂等包一层:离开等待的路径有多条(派发成功 / 撤项 / 失败 / abort),重复调用无害。
-    startQueueWait();
+    //
+    // **只在还没被派发时进入纯等待**(review #944 第四轮):目标会话若在上面那些
+    // metadata / 崩溃恢复 await 期间恰好空闲下来,coordinator 可以在 enqueuePrompt
+    // resolve **之前**就 drain 掉该项并调用 onAccepted(既有注释明确允许这个顺序)。
+    // 那时 onAccepted 里的 endQueueWait(true) 因 inQueueWait 还是 false 而 no-op,
+    // 若这里再无条件切进 'queued',这条**已经在执行**的 run 就永久停在 queued ——
+    // 不再计入 maxConcurrentRuns(后续 tick 会超发,正是本 PR 要防的)、也被排除在
+    // 卡死守卫之外。
+    if (!dispatched) startQueueWait();
     const queuedAt = Date.now();
 
     // pause/delete abort:等待期撤掉队列项并**直接**解锁派发等待 —— 不依赖

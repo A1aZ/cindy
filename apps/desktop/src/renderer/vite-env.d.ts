@@ -1280,6 +1280,7 @@ interface ElectronAPI {
     }>;
     openMicrophoneSettings: () => Promise<{ ok: true } | { ok: false; error: string }>;
     openInputMonitoringSettings: () => Promise<VoiceInputGlobalResult>;
+    requestInputMonitoringPermission: () => Promise<VoiceInputGlobalResult>;
     muteSystemAudio: () => Promise<{ ok: true } | { ok: false; error: string }>;
     restoreSystemAudio: () => Promise<{ ok: true } | { ok: false; error: string }>;
     testConnection: () => Promise<VoiceInputConnectionTestResult>;
@@ -1356,7 +1357,12 @@ interface ElectronAPI {
     }) => VoiceInputDataSnapshot;
     updateSettings: (patch: Partial<VoiceInputSettingsData>) => Promise<VoiceInputSettingsData>;
     updateShortcutSetting: (shortcut: VoiceInputShortcut | null) => Promise<
-      | { ok: true; settings: VoiceInputSettingsData }
+      | {
+        ok: true;
+        settings: VoiceInputSettingsData;
+        /** 已存盘但 macOS 监听权限未授权，快捷键要等授权后才生效。 */
+        pendingInputMonitoring?: boolean;
+      }
       | { ok: false; error: string; errorCode?: VoiceInputGlobalErrorCode }
     >;
     deleteDictionaryEntries: (entryIds: string[]) => Promise<VoiceInputSettingsData>;

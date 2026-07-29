@@ -1071,6 +1071,9 @@ export function VoiceInputSection() {
   const [microphones, setMicrophones] = useState<MediaDeviceInfo[]>([]);
   const [recordingShortcut, setRecordingShortcut] = useState(false);
   const [recordingShortcutPreview, setRecordingShortcutPreview] = useState<VoiceInputShortcut | null>(null);
+  // 录制期缺监听权限：Fn 类快捷键录不了（Fn 不走 DOM keydown，只能靠原生 listener 上报），
+  // 但裸修饰键和普通组合键仍然正常。所以这不是错误，只在提示区说明，不弹 toast。
+  const [fnRecordingBlocked, setFnRecordingBlocked] = useState(false);
   const [historyExpanded, setHistoryExpanded] = useState(false);
   const [refinementRulesExpanded, setRefinementRulesExpanded] = useState(false);
   const [customDictionaryExpanded, setCustomDictionaryExpanded] = useState(false);
@@ -1211,6 +1214,21 @@ export function VoiceInputSection() {
     () => voiceInputShortcutNeedsMacNativeListener(settings.shortcut, window.electronAPI.platform),
     [settings.shortcut],
   );
+  /** 待授权 = 当前快捷键需要监听权限但还没拿到，此时按键不会有任何反应。 */
+  const shortcutAwaitingInputMonitoring =
+    shortcutNeedsKeyboardListenerPermission && !permissions.inputMonitoring.ok;
+
+  // 用户去系统设置里打开开关后切回来（window focus 会触发 refreshPermissions），在这里
+  // 补一次注册：event tap 跑在独立 helper 子进程里，重新 spawn 就能拿到新授权，不需要
+  // 重启 App。少了这步，用户授权完会发现快捷键依然没反应，那个「去授权」入口就等于白点。
+  const inputMonitoringGrantedRef = useRef(permissions.inputMonitoring.ok);
+  useEffect(() => {
+    const granted = permissions.inputMonitoring.ok;
+    const justGranted = granted && !inputMonitoringGrantedRef.current;
+    inputMonitoringGrantedRef.current = granted;
+    if (!justGranted || !shortcutNeedsKeyboardListenerPermission) return;
+    void syncVoiceInputGlobalShortcut(settings.shortcut);
+  }, [permissions.inputMonitoring.ok, settings.shortcut, shortcutNeedsKeyboardListenerPermission]);
 
   const showAppShortcutConflict = useCallback(
     (conflictId: AppShortcutId) => {
@@ -1234,9 +1252,20 @@ export function VoiceInputSection() {
         }
         setRecordingShortcutPreview(null);
         setRecordingShortcut(false);
+        // 快捷键已存下来但还缺监听权限：这是用户刚做完的动作，正是请求授权最自然的时机。
+        // 只弹系统授权请求，不额外打开「系统设置」面板（那个窗自带跳转按钮）。
+        if (result.pendingInputMonitoring) {
+          toast.info(t('settings.voiceInput.shortcut.toast.pendingInputMonitoring'));
+          try {
+            await window.electronAPI.voiceInput.requestInputMonitoringPermission();
+          } catch {
+            // 请求本身失败不额外打扰用户：权限徽章与行内说明已经把状态和入口摆在那了。
+          }
+          schedulePermissionRefresh({ immediate: true });
+        }
       })();
     },
-    [setShortcut, t],
+    [schedulePermissionRefresh, setShortcut, t],
   );
 
   const getAppShortcutEntries = useCallback(
@@ -1431,6 +1460,7 @@ export function VoiceInputSection() {
     nativeFnShortcutActiveRef.current = false;
     nativeFnComboSeenRef.current = false;
     setRecordingShortcutPreview(null);
+    setFnRecordingBlocked(false);
   }, [recordingShortcut]);
 
   useEffect(() => {
@@ -1449,9 +1479,14 @@ export function VoiceInputSection() {
       if (!cancelled && window.electronAPI.platform === 'darwin') {
         void window.electronAPI.voiceInput.startModifierShortcutRecording()
           .then((result) => {
-            if (!cancelled && !result.ok) {
-              toast.error(result.error);
+            if (cancelled || result.ok) return;
+            // 缺权限只挡住 Fn 检测，其它快捷键照录，所以在提示区说明而不是弹错误——
+            // 弹错误会让用户以为整个录制坏了，然后放弃。
+            if (result.errorCode === 'permission') {
+              setFnRecordingBlocked(true);
+              return;
             }
+            toast.error(t('settings.voiceInput.shortcut.toast.recordingFailed', { error: result.error }));
           });
       }
     });
@@ -1466,7 +1501,7 @@ export function VoiceInputSection() {
       }
       void syncVoiceInputGlobalShortcut(getVoiceInputSettings().shortcut);
     };
-  }, [recordingShortcut]);
+  }, [recordingShortcut, t]);
 
   useEffect(() => {
     if (!settings.refinementEnabled) {
@@ -1787,7 +1822,22 @@ export function VoiceInputSection() {
           }
           hint={
             supportsGlobalShortcutSetting
-              ? t('settings.voiceInput.shortcut.hint')
+              ? (
+                <>
+                  {t('settings.voiceInput.shortcut.hint')}
+                  {/* 录制中缺权限 → 解释 Fn 为什么按了没反应；已保存但待授权 → 解释快捷键
+                      为什么不生效。前者是用户当下正在做的事，优先显示。 */}
+                  {fnRecordingBlocked ? (
+                    <span className="mt-1 block">
+                      {t('settings.voiceInput.shortcut.fnNeedsInputMonitoring')}
+                    </span>
+                  ) : shortcutAwaitingInputMonitoring ? (
+                    <span className="mt-1 block">
+                      {t('settings.voiceInput.shortcut.awaitingInputMonitoring')}
+                    </span>
+                  ) : null}
+                </>
+              )
               : t('settings.voiceInput.shortcut.linuxUnsupported')
           }
         >

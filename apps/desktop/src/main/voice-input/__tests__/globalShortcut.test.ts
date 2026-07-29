@@ -18,6 +18,9 @@ const mocks = vi.hoisted(() => {
   const modifierSetShortcut = vi.fn();
   const modifierStop = vi.fn();
   const modifierIsRunning = vi.fn();
+  const modifierStartKeyCapture = vi.fn();
+  const inputMonitoringSnapshot = vi.fn();
+  const updateSettings = vi.fn();
   const registerShortcut = vi.fn((accelerator: string) => {
     void accelerator;
     return true;
@@ -30,6 +33,9 @@ const mocks = vi.hoisted(() => {
     modifierSetShortcut,
     modifierStop,
     modifierIsRunning,
+    modifierStartKeyCapture,
+    inputMonitoringSnapshot,
+    updateSettings,
     registerShortcut,
   };
 });
@@ -84,10 +90,16 @@ vi.mock('../MacModifierShortcutListener.js', () => ({
     isRunning: mocks.modifierIsRunning,
     stop: mocks.modifierStop,
     stopKeyCapture: vi.fn(),
-    startKeyCapture: vi.fn(() => Promise.resolve({ ok: true })),
+    startKeyCapture: mocks.modifierStartKeyCapture,
   })),
-  getMacInputMonitoringPermissionSnapshot: vi.fn(() => Promise.resolve({ ok: true, status: 'granted' })),
+  getMacInputMonitoringPermissionSnapshot: mocks.inputMonitoringSnapshot,
   requestMacInputMonitoringPermission: vi.fn(() => Promise.resolve({ ok: true, status: 'granted' })),
+}));
+
+vi.mock('../VoiceInputDataStore.js', () => ({
+  voiceInputDataStore: {
+    updateSettings: mocks.updateSettings,
+  },
 }));
 
 let setTimeoutSpy: { mockRestore: () => void } | null = null;
@@ -111,6 +123,13 @@ describe('voice input global shortcut registration', () => {
     mocks.modifierIsRunning.mockReset();
     mocks.modifierIsRunning.mockReturnValue(true);
     mocks.modifierStop.mockClear();
+    mocks.modifierStartKeyCapture.mockReset();
+    mocks.modifierStartKeyCapture.mockResolvedValue({ ok: true });
+    // 默认已授权:既有用例断言的是「拿得到权限时」的注册行为。
+    mocks.inputMonitoringSnapshot.mockReset();
+    mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: true, status: 'granted' });
+    mocks.updateSettings.mockReset();
+    mocks.updateSettings.mockImplementation((patch: unknown) => ({ shortcut: null, ...(patch as object) }));
     mocks.registerShortcut.mockReset();
     mocks.registerShortcut.mockReturnValue(true);
   });
@@ -237,6 +256,85 @@ describe('voice input global shortcut registration', () => {
     expect(result).toMatchObject({ ok: false });
     expect(mocks.registeredShortcuts.has('F16')).toBe(true);
     expect(mocks.registeredShortcuts.has('F17')).toBe(false);
+  });
+
+  // 未授权时用户是设不上裸修饰键的:注册失败 → 设置不落盘 → 权限徽章(显示条件依赖已保存的
+  // shortcut)永远不出现 → 没有授权入口。所以「缺权限」必须与真故障区分开,并且照样存盘。
+  describe('input monitoring permission handling', () => {
+    const bareRightOption: VoiceInputShortcut = {
+      trigger: 'modifier',
+      code: 'AltRight',
+      key: 'AltRight',
+      modifiers: { meta: false, ctrl: false, alt: false, shift: false, fn: false },
+    };
+
+    it('reports a permission error code when the native listener cannot start without Input Monitoring', async () => {
+      setPlatform('darwin');
+      mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'Could not listen for modifier shortcuts.' });
+      mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
+      const { registerGlobalVoiceInputIpc } = await import('../global.js');
+      registerGlobalVoiceInputIpc();
+
+      const result = await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
+
+      expect(result).toMatchObject({ ok: false, errorCode: 'permission' });
+    });
+
+    it('still persists the shortcut when only Input Monitoring is missing', async () => {
+      setPlatform('darwin');
+      mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'Could not listen for modifier shortcuts.' });
+      mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
+      const { registerGlobalVoiceInputIpc } = await import('../global.js');
+      registerGlobalVoiceInputIpc();
+
+      const result = await mocks.handlers.get('voice-input:settings:update-shortcut')?.({}, bareRightOption);
+
+      expect(result).toMatchObject({ ok: true, pendingInputMonitoring: true });
+      expect(mocks.updateSettings).toHaveBeenCalledWith({ shortcut: bareRightOption });
+    });
+
+    // 权限没问题却起不来 = swiftc 编译失败 / 二进制缺失 / 启动超时,是真故障。
+    // 这种情况存盘会骗用户「设上了,等授权就好」,所以必须走回原来的失败路径。
+    it('treats a listener failure with granted permission as a real failure and does not persist', async () => {
+      setPlatform('darwin');
+      mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'spawn ENOENT' });
+      mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: true, status: 'granted' });
+      const { registerGlobalVoiceInputIpc } = await import('../global.js');
+      registerGlobalVoiceInputIpc();
+
+      const result = await mocks.handlers.get('voice-input:settings:update-shortcut')?.({}, bareRightOption);
+
+      expect(result).toMatchObject({ ok: false, errorCode: 'failed' });
+      expect(mocks.updateSettings).not.toHaveBeenCalled();
+    });
+
+    // 录制期的 key capture 只服务 Fn 检测。renderer 靠这个 errorCode 决定「安静地说明 Fn
+    // 不可用」还是「报错」——裸修饰键走 DOM 事件,缺权限时照样录得上。
+    it('tags a permission-blocked recording start so the renderer can explain Fn instead of erroring', async () => {
+      setPlatform('darwin');
+      mocks.modifierStartKeyCapture.mockResolvedValue({ ok: false, error: 'Could not listen for modifier shortcuts.' });
+      mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
+      const { registerGlobalVoiceInputIpc } = await import('../global.js');
+      registerGlobalVoiceInputIpc();
+
+      const result = await mocks.handlers.get('voice-input:modifier-shortcut-recording:start')?.({
+        sender: { id: 7, once: vi.fn() },
+      });
+
+      expect(result).toMatchObject({ ok: false, errorCode: 'permission' });
+    });
+
+    it('persists normally when the native listener starts', async () => {
+      setPlatform('darwin');
+      const { registerGlobalVoiceInputIpc } = await import('../global.js');
+      registerGlobalVoiceInputIpc();
+
+      const result = await mocks.handlers.get('voice-input:settings:update-shortcut')?.({}, bareRightOption);
+
+      expect(result).toMatchObject({ ok: true });
+      expect(result).not.toHaveProperty('pendingInputMonitoring');
+      expect(mocks.updateSettings).toHaveBeenCalledWith({ shortcut: bareRightOption });
+    });
   });
 
   it('rejects settings navigation from a non-overlay sender with a typed IPC error', async () => {

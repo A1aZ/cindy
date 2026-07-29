@@ -83,7 +83,10 @@ type VoiceInputGlobalResult =
   | { ok: false; error: string; errorCode?: VoiceInputGlobalErrorCode };
 
 type VoiceInputSettingsUpdateResult =
-  | { ok: true; settings: VoiceInputSettings }
+  // `pendingInputMonitoring` = 设置已存下来，但 macOS 监听权限还没给，所以快捷键暂不生效。
+  // 这不是失败：不把用户的选择存住，设置页那个「去授权」入口就永远出不来（它的显示条件
+  // 依赖已保存的 shortcut），用户会被锁在「要授权得先设快捷键、设快捷键得先授权」里。
+  | { ok: true; settings: VoiceInputSettings; pendingInputMonitoring?: boolean }
   | { ok: false; error: string; errorCode?: VoiceInputGlobalErrorCode };
 
 type VoiceInputGlobalErrorCode = 'empty' | 'unavailable' | 'unconfirmed' | 'permission' | 'failed';
@@ -447,6 +450,23 @@ export async function refreshVoiceInputInputMonitoringPermissionSnapshot(): Prom
   return cachedInputMonitoringPermission;
 }
 
+/**
+ * 判定 native listener 起不来是「缺监听权限」还是别的故障。
+ *
+ * 两者必须分开：缺权限是可引导的正常状态（存下设置、请用户授权），而 swiftc 编译失败、
+ * 二进制缺失、启动超时是真故障（不该把设置存成「待授权」骗用户）。listener 自己的
+ * `ListenerStartResult` 只有一句 error 字符串，分不出来，所以这里补查一次权限。
+ *
+ * 用 preflight（`CGPreflightListenEventAccess`）而不是 request：它只查不弹窗，放在失败
+ * 路径上不会给用户额外的系统弹窗。只有明确 denied 才算权限问题——status 为 unknown 时
+ * 说明连权限都没查出来（helper 本身有问题），归 failed 更诚实。
+ */
+async function classifyMacNativeListenerFailure(): Promise<VoiceInputGlobalErrorCode> {
+  if (process.platform !== 'darwin') return 'failed';
+  const snapshot = await refreshVoiceInputInputMonitoringPermissionSnapshot();
+  return snapshot.ok || snapshot.status !== 'denied' ? 'failed' : 'permission';
+}
+
 export function registerActiveInlineVoiceInputWebContents(sender: WebContents): void {
   if (isGlobalVoiceInputOverlaySender(sender)) return;
   if (activeInlineVoiceInputWebContentsIds.has(sender.id)) return;
@@ -476,10 +496,13 @@ export function registerGlobalVoiceInputIpc(): void {
     async (_event, shortcut: VoiceInputShortcut | null | undefined): Promise<VoiceInputSettingsUpdateResult> => {
       const nextShortcut = shortcut ?? null;
       const registration = await setVoiceInputGlobalShortcut(nextShortcut);
-      if (!registration.ok) return registration;
+      // 只缺监听权限时仍然存盘：用户的选择要留住，快捷键等授权后自动生效（设置页在
+      // 权限转为已授权时会重新 sync）。真故障（冲突、不支持、helper 坏了）照旧不存。
+      if (!registration.ok && registration.errorCode !== 'permission') return registration;
       return {
         ok: true,
         settings: voiceInputDataStore.updateSettings({ shortcut: nextShortcut }),
+        ...(registration.ok ? {} : { pendingInputMonitoring: true }),
       };
     },
   );
@@ -500,6 +523,10 @@ export function registerGlobalVoiceInputIpc(): void {
       const result = await macModifierShortcutListener.startKeyCapture();
       if (!result.ok) {
         modifierShortcutRecordingWebContentsIds.delete(event.sender.id);
+        // 录制期的 key capture 只服务 Fn 检测（macOS 不把 Fn 派发成普通 DOM keydown）。
+        // 起不来时 renderer 要靠 errorCode 区分「缺权限所以 Fn 录不了」和真故障，
+        // 前者不该当成错误弹出来——裸修饰键走 DOM 事件，此时照样能正常录。
+        return { ...result, errorCode: await classifyMacNativeListenerFailure() };
       }
       return result;
     },
@@ -727,6 +754,35 @@ export function registerGlobalVoiceInputIpc(): void {
     }
   });
 
+  // 与上面 open-input-monitoring-settings 的区别：这条只弹系统授权请求，不顺手打开
+  // 「系统设置」面板。用户刚设完快捷键时该请求授权，但把设置面板怼到脸上就太重了——
+  // CGRequestListenEventAccess 弹的窗自带「打开系统设置」按钮，想去自己会点。
+  ipcMain.handle('voice-input:request-input-monitoring-permission', async (): Promise<VoiceInputGlobalResult> => {
+    if (process.platform !== 'darwin') {
+      return {
+        ok: false,
+        error: 'Input Monitoring permission is only required on macOS.',
+        errorCode: 'unavailable',
+      };
+    }
+    try {
+      cachedInputMonitoringPermission = await requestMacInputMonitoringPermission();
+      return cachedInputMonitoringPermission.ok
+        ? { ok: true }
+        : {
+          ok: false,
+          error: cachedInputMonitoringPermission.error,
+          errorCode: 'permission',
+        };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        errorCode: 'failed',
+      };
+    }
+  });
+
   ipcMain.handle(
     'voice-input:dictionary-toast-show',
     (_event, payload: unknown): { ok: true } | { ok: false; error: string } => {
@@ -837,12 +893,14 @@ async function setVoiceInputGlobalShortcut(shortcut: VoiceInputShortcut | null):
       if (registeredShortcut && voiceInputShortcutNeedsMacNativeListener(registeredShortcut, process.platform)) {
         await macModifierShortcutListener.setShortcut(registeredShortcut);
       }
+      const errorCode = await classifyMacNativeListenerFailure();
       log.warn('native global shortcut registration failed', {
         code: shortcut.code,
         modifiers: shortcut.modifiers,
         error: result.error,
+        errorCode,
       });
-      return result;
+      return { ...result, errorCode };
     }
     if (registeredAccelerator) {
       globalShortcut.unregister(registeredAccelerator);

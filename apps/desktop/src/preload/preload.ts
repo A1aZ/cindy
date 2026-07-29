@@ -157,7 +157,12 @@ type VoiceInputGlobalResult =
   | { ok: true }
   | { ok: false; error: string; errorCode?: 'empty' | 'unavailable' | 'unconfirmed' | 'permission' | 'failed' };
 type VoiceInputSettingsUpdateResult =
-  | { ok: true; settings: import('../shared/voiceInputData').VoiceInputSettings }
+  | {
+    ok: true;
+    settings: import('../shared/voiceInputData').VoiceInputSettings;
+    /** 已存盘但 macOS 监听权限未授权，快捷键要等授权后才生效。 */
+    pendingInputMonitoring?: boolean;
+  }
   | { ok: false; error: string; errorCode?: 'empty' | 'unavailable' | 'unconfirmed' | 'permission' | 'failed' };
 type VoiceInputReadinessWire = {
   ok: boolean;
@@ -995,6 +1000,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('voice-input:open-microphone-settings'),
     openInputMonitoringSettings: (): Promise<VoiceInputGlobalResult> =>
       ipcRenderer.invoke('voice-input:open-input-monitoring-settings'),
+    requestInputMonitoringPermission: (): Promise<VoiceInputGlobalResult> =>
+      ipcRenderer.invoke('voice-input:request-input-monitoring-permission'),
     muteSystemAudio: (): Promise<{ ok: true } | { ok: false; error: string }> =>
       ipcRenderer.invoke('voice-input:mute-system-audio'),
     restoreSystemAudio: (): Promise<{ ok: true } | { ok: false; error: string }> =>

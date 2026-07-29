@@ -135,7 +135,15 @@ export function subscribeVoiceInputSettings(
 }
 
 export type VoiceInputShortcutUpdateResult =
-  | { ok: true; settings: VoiceInputSettings }
+  | {
+    ok: true;
+    settings: VoiceInputSettings;
+    /**
+     * 快捷键已存盘，但 macOS 监听权限还没拿到，所以按键暂时不会有反应。设置页据此
+     * 请求授权并标注「待授权」，而不是当成注册失败报错。
+     */
+    pendingInputMonitoring?: boolean;
+  }
   | { ok: false; error: string; errorCode?: string };
 
 export async function syncVoiceInputGlobalShortcut(shortcut: VoiceInputShortcut | null): Promise<{ ok: boolean; error?: string }> {

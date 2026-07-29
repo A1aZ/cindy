@@ -38,6 +38,9 @@ export function toDeviceProjectOptions(
   }));
 }
 
+/** 复用的空集合,免得每次取数都新建一个。 */
+const EMPTY_PATHS: ReadonlySet<string> = new Set<string>();
+
 export function useDeviceLinkProjects(
   deviceId: string | null,
   deviceName: string | null,
@@ -101,6 +104,52 @@ export function useDeviceLinkProjects(
    * 如果 B 上恰好也有同名 `/x`,B 的权威列表会把它错误过滤掉、让那个项目从 B 的选择器里消失。
    */
   const pendingRemovalsRef = useRef<Map<string, Set<string>>>(new Map());
+  /**
+   * 每次**向对端发起**取数(effect 取数 / 删除失败的兜底回读)时自增。用来回答「这份快照是什么
+   * 时候取的」—— 墓碑的退休判据要用它,见 tombstonesRef。与 requestIdRef 不同:那个只管「哪次
+   * effect 取数是最新的」,这个管「快照的新鲜度」,两者语义不同,不能合并。
+   */
+  const fetchSeqRef = useRef(0);
+  /**
+   * 删除**已在对端成功**的路径 → 墓碑,按设备分层(deviceId → path → 成功时的 fetchSeq)。
+   *
+   * 为什么需要(Greptile review P1):A、B 两个删除并发,B 失败后的兜底回读可能取到「A 还在」的
+   * 快照;等它落库时 A 其实已经删成了。A 的成功路径只清 pending 标记、不再更新列表,于是那份旧
+   * 快照把 A 显示回来,而且**再没有任何东西会把它移除** —— 一个对端已经不存在的项目一直挂在选择器
+   * 里,直到重开 picker。乐观删除的 pending 集合挡不住它:A 成功后就从 pending 里出去了。
+   *
+   * 「墓碑什么时候可以丢」这个生命周期问题由 fetchSeq 回答,而不是靠计时器或永久累积:
+   * 任何**发起时刻晚于**该成功的取数,其快照已经反映了这次删除,一旦落库这块墓碑就退休。
+   * 所以墓碑最多活到下一次取数返回,不会无限增长,也不需要人工清理。
+   */
+  const tombstonesRef = useRef<Map<string, Map<string, number>>>(new Map());
+  /**
+   * 落库一份对端快照:统一扣掉「仍在飞的乐观删除」与「尚未被更新快照证实的墓碑」,并顺手让
+   * 已被证实的墓碑退休。两个取数点(effect / 回读)都必须经这里,否则过滤规则会再次分叉。
+   */
+  const applySnapshot = useCallback(
+    (
+      ownerDeviceId: string,
+      issueSeq: number,
+      list: readonly ExistingRemoteProject[],
+      hiddenPaths: ReadonlySet<string>,
+    ) => {
+      const tomb = tombstonesRef.current.get(ownerDeviceId);
+      if (tomb) {
+        // 这份快照发起于墓碑之后 → 它已经反映了那次删除,墓碑可以退休。
+        for (const [path, seq] of [...tomb]) if (seq < issueSeq) tomb.delete(path);
+        if (tomb.size === 0) tombstonesRef.current.delete(ownerDeviceId);
+      }
+      const stillTombstoned = tombstonesRef.current.get(ownerDeviceId);
+      const drop = (path: string) =>
+        hiddenPaths.has(path) || stillTombstoned?.has(path) === true;
+      commitRows(
+        ownerDeviceId,
+        list.some((row) => drop(row.path)) ? list.filter((row) => !drop(row.path)) : [...list],
+      );
+    },
+    [commitRows],
+  );
 
   useEffect(() => {
     currentDeviceIdRef.current = deviceId;
@@ -113,6 +162,7 @@ export function useDeviceLinkProjects(
     let cancelled = false;
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
+    const issueSeq = ++fetchSeqRef.current;
     // 立刻清空上一台设备的行(#807 review):projects memo 依赖 [deviceId, deviceName, rows],
     // deviceId 已经变成 B 而 rows 还是 A 的,于是加载窗口里会渲染出「标着 B 的 A 的项目」——
     // 用户此时选中就把 A 的路径发给 B,撞 path guard 或打开 B 上同名的无关目录。
@@ -124,11 +174,8 @@ export function useDeviceLinkProjects(
         // 减去这台设备上仍在飞的乐观删除:取数可能在某次删除进行中回来,原样落库会把用户刚
         // 点掉的行贴回去。以前靠删除路径自增 requestIdRef 作废取数来避免,但那个共享版本号会
         // 顺带把**别的设备**的取数误判成过期(见 requestIdRef 的说明),所以改成在这里过滤。
-        const pending = pendingRemovalsRef.current.get(deviceId);
-        commitRows(
-          deviceId,
-          pending && pending.size > 0 ? list.filter((row) => !pending.has(row.path)) : list,
-        );
+        // 墓碑(已成功删除但快照可能更旧)由 applySnapshot 一并扣掉。
+        applySnapshot(deviceId, issueSeq, list, pendingRemovalsRef.current.get(deviceId) ?? EMPTY_PATHS);
         setLoading(false);
       })
       .catch(() => {
@@ -168,11 +215,18 @@ export function useDeviceLinkProjects(
 
       try {
         await removeDeviceLinkExistingProject(target.deviceId, option.path);
+        // 删成了 → 立墓碑。此刻可能已有一次「A 还在」的旧回读在飞,它落库会把这一行显示回来,
+        // 而成功路径本身不再更新列表(行早就被乐观移除了)—— 墓碑就是那道防线,见 tombstonesRef。
+        const deviceTombstones =
+          tombstonesRef.current.get(target.deviceId) ?? new Map<string, number>();
+        deviceTombstones.set(option.path, fetchSeqRef.current);
+        tombstonesRef.current.set(target.deviceId, deviceTombstones);
       } catch {
         // 老被控端可能没有 remove channel。回读一次收敛到被控端真相,
         // 而不是留下一个「本地看着删了、对端其实还在」的幻影删除。
         // 同样不动 requestIdRef:晚到的 effect 取数即使覆盖这次回读也无害 —— 两者都是被控端
         // 真相,且都会减去仍在飞的乐观删除,结果一致。作废它只会误伤新设备的取数。
+        const readbackSeq = ++fetchSeqRef.current;
         try {
           const list = await loadDeviceLinkExistingProjects(target.deviceId);
           // gate 用**设备身份**:只要设备没切走,这份回读就是被控端真相,该应用。不用版本号 ——
@@ -185,10 +239,7 @@ export function useDeviceLinkProjects(
               (path) => path !== option.path,
             ),
           );
-          commitRows(
-            target.deviceId,
-            othersPending.size === 0 ? list : list.filter((row) => !othersPending.has(row.path)),
-          );
+          applySnapshot(target.deviceId, readbackSeq, list, othersPending);
         } catch {
           // 回读也失败(对端离线 / 隧道断)。此时**必须把行放回去**:删除既没在对端生效,
           // 权威列表也拿不到,保留乐观移除等于让选择器藏着一个远端仍然存在的项目,而且不给

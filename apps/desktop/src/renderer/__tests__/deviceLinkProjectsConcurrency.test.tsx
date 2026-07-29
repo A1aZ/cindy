@@ -353,4 +353,90 @@ describe('useDeviceLinkProjects 取数 / 删除并发', () => {
     });
     expect(seen.projects.map((p) => p.path).sort()).toEqual(['/a/one', '/a/three', '/a/two']);
   });
+
+  it('已在对端删除成功的项目,不会被更旧的失败回读快照复活', async () => {
+    // Greptile 抓到的方向:A、B 并发删除,B 失败后的兜底回读取到「A 还在」的旧快照;等它落库时
+    // A 其实已经删成了。A 的成功路径不再更新列表(行早被乐观移除),所以旧快照会把 A 显示回来,
+    // 且此后没有任何东西会再移除它 —— 一个对端已不存在的项目一直挂在选择器里。
+    const first = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => first.promise);
+    const { seen } = mountHook();
+    await act(async () => {
+      first.resolve([row('/a/keep'), row('/a/gone'), row('/a/fails')]);
+    });
+
+    const delGone = deferred<void>();
+    const delFails = deferred<void>();
+    removeMock
+      .mockImplementationOnce(() => delGone.promise)
+      .mockImplementationOnce(() => delFails.promise);
+    // /a/fails 失败后的回读:快照是「/a/gone 还在」的旧世界。
+    const readback = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => readback.promise);
+
+    const pending: Promise<void>[] = [];
+    act(() => {
+      pending.push(seen.remove('/a/gone', 'dev-a'));
+      pending.push(seen.remove('/a/fails', 'dev-a'));
+    });
+    expect(seen.projects.map((p) => p.path)).toEqual(['/a/keep']);
+
+    // /a/fails 先失败 → 回读发起(此刻 /a/gone 的删除还没回来)。
+    await act(async () => {
+      delFails.reject(new Error('CHANNEL_NOT_ALLOWED'));
+      await Promise.resolve();
+    });
+    // /a/gone 随后**删除成功** → 立墓碑。
+    await act(async () => {
+      delGone.resolve();
+      await Promise.resolve();
+    });
+
+    // 旧回读现在才落库,它的快照里 /a/gone 仍然存在。
+    await act(async () => {
+      readback.resolve([row('/a/keep'), row('/a/gone'), row('/a/fails')]);
+      await Promise.all(pending.map((pr) => pr.catch(() => undefined)));
+    });
+
+    // /a/fails 该回来(它没删成),/a/gone 不该被复活。
+    expect(seen.projects.map((p) => p.path).sort()).toEqual(['/a/fails', '/a/keep']);
+  });
+
+  it('墓碑在更新的快照落库后退休,不会永久隐藏对端重新出现的同名项目', async () => {
+    // 墓碑的生命周期由 fetchSeq 回答:发起时刻晚于该成功的取数,其快照已反映删除 → 墓碑退休。
+    // 否则用户之后在对端重新打开同一个目录,它会被永久过滤掉。
+    const first = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => first.promise);
+    const { seen, setEnabled } = mountHook();
+    await act(async () => {
+      first.resolve([row('/a/one'), row('/a/two')]);
+    });
+
+    const del = deferred<void>();
+    removeMock.mockImplementationOnce(() => del.promise);
+    let removal!: Promise<void>;
+    act(() => {
+      removal = seen.remove('/a/one', 'dev-a');
+    });
+    await act(async () => {
+      del.resolve();
+      await removal;
+    });
+    expect(seen.projects.map((p) => p.path)).toEqual(['/a/two']);
+
+    // 之后对端又出现了 /a/one(用户在那边重新打开该目录)。重开 picker → 新取数。
+    const reload = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => reload.promise);
+    await act(async () => {
+      setEnabled(false);
+    });
+    await act(async () => {
+      setEnabled(true);
+    });
+    await act(async () => {
+      reload.resolve([row('/a/one'), row('/a/two')]);
+    });
+    // 这次取数发起于成功之后 → 快照权威,/a/one 必须显示出来。
+    expect(seen.projects.map((p) => p.path).sort()).toEqual(['/a/one', '/a/two']);
+  });
 });

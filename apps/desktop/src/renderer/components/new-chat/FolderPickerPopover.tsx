@@ -160,64 +160,64 @@ export function FolderPickerPopover({
   const renderProject = (project: FolderPickerOption) => {
     const canRemove = !project.remoteDevice || onRemoveRemoteProject !== undefined;
     return (
-      /* 行内有嵌套的删除按钮,外层不能再用 <button>(非法嵌套),
-         改 div[role=button] + 键盘激活,视觉与其它行一致。 */
+      /* 行容器**不可交互**(Codex review P1):选择与删除是**兄弟**控件。
+         之前为了避开 <button> 里嵌 <button> 的非法 HTML,把外层改成 div[role="button"] ——
+         那只换掉了 HTML 层面的问题:ARIA 同样不允许 role="button" 里再有交互后代,读屏可能把删除
+         按钮压平进项目按钮、或当成激活它的一部分,于是「删除」要么读不到、要么按下就选中了项目。
+         现在容器只负责布局与 hover 视觉(group),里面两个真正的 <button> 并列 —— 合法 HTML、
+         语义清晰,也不再需要 stopPropagation 去拦冒泡。 */
       <div
         key={project.key ?? project.path}
-        role="button"
-        tabIndex={0}
-        onClick={() => handleSelectPath(project.path, 'project', project)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            handleSelectPath(project.path, 'project', project);
-          }
-        }}
         className={cn(
-          'group flex w-full cursor-pointer items-center gap-3 rounded-[8px] px-3 py-[10px] text-left',
-          'transition-colors outline-none',
+          'group flex w-full items-center gap-3 rounded-[8px] px-3 py-[10px]',
+          'transition-colors',
           'hover:bg-[var(--folder-item-hover)]',
         )}
       >
-        <Folder
-          size={20}
-          className={cn('shrink-0 text-[var(--folder-item-icon)]', project.missing && 'opacity-50')}
-        />
-        <div className="flex min-w-0 flex-1 flex-col items-start">
-          <span
-            className={cn(
-              'w-full truncate text-sm font-medium text-[var(--folder-item-name)]',
-              project.missing && 'opacity-50',
-            )}
-          >
-            {project.name}
-          </span>
-          {(project.description || project.missing) && (
+        <button
+          type="button"
+          onClick={() => handleSelectPath(project.path, 'project', project)}
+          className={cn(
+            'flex min-w-0 flex-1 cursor-pointer items-center gap-3 text-left',
+            'outline-none',
+          )}
+        >
+          <Folder
+            size={20}
+            className={cn('shrink-0 text-[var(--folder-item-icon)]', project.missing && 'opacity-50')}
+          />
+          <div className="flex min-w-0 flex-1 flex-col items-start">
             <span
               className={cn(
-                'w-full truncate text-xs text-[var(--folder-item-path)]',
+                'w-full truncate text-sm font-medium text-[var(--folder-item-name)]',
                 project.missing && 'opacity-50',
               )}
             >
-              {project.missing && (
-                <span className="text-[var(--error-fg)]">
-                  {t('newChat.folderPicker.missingDir')}
-                  {project.description ? ' · ' : ''}
-                </span>
-              )}
-              {project.description}
+              {project.name}
             </span>
-          )}
-        </div>
+            {(project.description || project.missing) && (
+              <span
+                className={cn(
+                  'w-full truncate text-xs text-[var(--folder-item-path)]',
+                  project.missing && 'opacity-50',
+                )}
+              >
+                {project.missing && (
+                  <span className="text-[var(--error-fg)]">
+                    {t('newChat.folderPicker.missingDir')}
+                    {project.description ? ' · ' : ''}
+                  </span>
+                )}
+                {project.description}
+              </span>
+            )}
+          </div>
+        </button>
         {canRemove && (
           <button
             type="button"
             aria-label={t('newChat.folderPicker.removeFromList')}
-            onKeyDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.stopPropagation();
-              handleRemoveProject(project);
-            }}
+            onClick={() => handleRemoveProject(project)}
             className={cn(
               // 圆角走 pill:DESIGN.md §5 只允许 8px(内控件)/ 12px(容器)/ 9999px(pill)三档,
               // 6px 是被明文禁止的中间值。这里选 pill 而非 8px —— §5 把 8px 限定为「小到无法戴

@@ -54,22 +54,37 @@ export interface OutboundPathFact {
 }
 
 /**
- * 把出站路径事实渲染成一行可操作的诊断。返回空串 = 没有可报的事实(调用方跳过)。
+ * 把出站路径事实渲染成一行可操作的诊断。恒返回非空串 —— 三种 kind 各有话可说。
  * 导出仅供单测。
+ *
+ * `direct` 必须按 source 分叉,两者是**语义相反**的结论:
+ *  - source='system':走到系统代理这一层的前提是一个代理环境变量都没设
+ *    (resolver 的 env 优先分层),所以这是「确实没有配代理」。
+ *  - source='env':前提恰恰相反 —— 有代理 env 才会走 env 分支。此时的 direct
+ *    意味着**配了代理却对这个上游不生效**(NO_PROXY 豁免了它,或没有覆盖该
+ *    scheme 的变量)。说成「没设代理」会盖掉真正的原因,把用户推向反方向。
  */
 export function describeOutboundPath(fact: OutboundPathFact): string {
-  const from = fact.source === 'env' ? 'proxy env vars' : 'system proxy settings';
   if (fact.kind === 'proxy') {
+    const from = fact.source === 'env' ? 'proxy env vars' : 'system proxy settings';
     return (
       `Cindy's outbound path for ${fact.upstream}: via ${fact.proxy ?? '(unknown address)'} ` +
       `(from ${from}). If that proxy is down or cannot reach the upstream, this is where it fails.`
     );
   }
   if (fact.kind === 'direct') {
+    if (fact.source === 'env') {
+      return (
+        `Cindy's outbound path for ${fact.upstream}: direct connection — proxy env vars are set, ` +
+        `but none of them applies to this upstream (NO_PROXY exempts it, or no variable covers ` +
+        `its scheme), so the configured proxy is being bypassed. On a network that needs a proxy ` +
+        `to reach the upstream, that bypass alone explains the failure.`
+      );
+    }
     return (
       `Cindy's outbound path for ${fact.upstream}: direct connection — no proxy env var is set ` +
-      `and ${from} reported none. On a network that needs a proxy or VPN to reach the upstream, ` +
-      `this alone explains the failure.`
+      `and the system proxy settings reported none. On a network that needs a proxy or VPN to ` +
+      `reach the upstream, this alone explains the failure.`
     );
   }
   return (

@@ -175,10 +175,33 @@ describe('describeOutboundPath', () => {
     }))).toContain('system proxy settings');
   });
 
-  it('states a confirmed direct path as the sufficient explanation', () => {
-    const text = describeOutboundPath(fact({ kind: 'direct' }));
+  it('states a system-sourced direct path as a confirmed absence of proxy config', () => {
+    // source='system' 的前提是一个代理 env 都没设(resolver 的 env 优先分层),
+    // 所以「没配代理」在这一支才是成立的。
+    const text = describeOutboundPath(fact({ source: 'system', kind: 'direct' }));
     expect(text).toContain('direct connection');
+    expect(text).toContain('no proxy env var is set');
     expect(text).toContain('reported none');
+  });
+
+  it('renders an env-sourced direct path as a bypass, never as missing proxy config', () => {
+    // 走 env 分支的前提恰恰是**有**代理 env。此时的 direct 意味着配了代理却对这个
+    // 上游不生效(NO_PROXY 豁免 / 没有覆盖该 scheme 的变量)。说成「没设代理」会
+    // 盖掉真正的故障原因,把用户推向反方向。
+    const text = describeOutboundPath(fact({ source: 'env', kind: 'direct' }));
+    expect(text).toContain('proxy env vars are set');
+    expect(text).toContain('NO_PROXY');
+    expect(text).toContain('bypassed');
+    expect(text).not.toContain('no proxy env var is set');
+    expect(text).not.toContain('reported none');
+  });
+
+  it('always returns a non-empty diagnostic for every kind', () => {
+    for (const kind of ['proxy', 'direct', 'unknown'] as const) {
+      for (const source of ['env', 'system'] as const) {
+        expect(describeOutboundPath(fact({ kind, source })).length).toBeGreaterThan(0);
+      }
+    }
   });
 
   it('marks an unresolved path as a guess rather than a confirmed no-proxy', () => {

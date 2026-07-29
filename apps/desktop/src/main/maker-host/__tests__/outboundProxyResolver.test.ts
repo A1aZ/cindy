@@ -40,11 +40,14 @@ vi.mock('electron', async (importOriginal) => {
 });
 
 import {
-  getLastOutboundPathSnapshot,
+  getOutboundPathSnapshotFor,
   parseChromiumProxyResult,
   resetOutboundProxyResolverStateForTest,
   resolveDesktopOutboundProxy,
 } from '../outbound-proxy-resolver.js';
+
+/** 单 origin 查询的简写(快照按上游分桶,测试里绝大多数断言只关心一个上游)。 */
+const snapshotFor = (origin: string) => getOutboundPathSnapshotFor([origin]);
 
 const PROXY_ENV_KEYS = [
   'HTTPS_PROXY', 'https_proxy',
@@ -172,15 +175,57 @@ describe('resolveDesktopOutboundProxy', () => {
   });
 });
 
-describe('getLastOutboundPathSnapshot', () => {
+describe('getOutboundPathSnapshotFor', () => {
   it('is null until a resolution happens', () => {
-    expect(getLastOutboundPathSnapshot()).toBe(null);
+    expect(snapshotFor('https://chatgpt.com:443')).toBe(null);
+  });
+
+  it('keys snapshots by upstream so a shared resolver cannot cross-contaminate', async () => {
+    // 回归防护:这个 resolver 由 codex proxy / anthropic-compat proxy / 通用
+    // outbound-fetch 共用。曾经存单值槽,最后完成解析的请求会覆盖它 —— 于是
+    // codex 的错误消息里可能出现属于 Anthropic 上游的判定。NO_PROXY 逐 origin
+    // 生效时两者结论甚至相反(如下:chatgpt 被豁免直连,api.anthropic 走代理)。
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:7890';
+    process.env.NO_PROXY = 'chatgpt.com';
+    await resolveDesktopOutboundProxy('https://chatgpt.com:443');
+    await resolveDesktopOutboundProxy('https://api.anthropic.com:443');
+
+    expect(snapshotFor('https://chatgpt.com:443')).toMatchObject({ kind: 'direct', source: 'env' });
+    expect(snapshotFor('https://api.anthropic.com:443')).toMatchObject({
+      kind: 'proxy',
+      proxy: 'http://127.0.0.1:7890',
+    });
+    // 没解析过的上游不会借用别人的判定。
+    expect(snapshotFor('https://api.x.ai:443')).toBe(null);
+  });
+
+  it('accepts full base URLs and returns the newest among candidate origins', async () => {
+    // 调用方(maker-host)手里是带 path 的 base URL,不归一成 origin 会永远查不中。
+    electronState.resolveProxy.mockResolvedValue('PROXY 127.0.0.1:7890');
+    await resolveDesktopOutboundProxy('https://chatgpt.com:443');
+    expect(getOutboundPathSnapshotFor(['https://chatgpt.com/backend-api/codex']))
+      .toMatchObject({ kind: 'proxy' });
+
+    // 多候选:codex 的出口随凭证模式在 ChatGPT / gateway 间切换,取最新那条。
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(1_000);
+      electronState.resolveProxy.mockResolvedValue('DIRECT');
+      await resolveDesktopOutboundProxy('https://gateway.example:443');
+      const picked = getOutboundPathSnapshotFor([
+        'https://chatgpt.com/backend-api/codex',
+        'https://gateway.example/v1',
+      ]);
+      expect(picked).toMatchObject({ kind: 'direct', upstream: 'https://gateway.example' });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('records env-sourced proxies with a redacted address', async () => {
     process.env.HTTPS_PROXY = 'http://user:sekret@127.0.0.1:6152';
     await resolveDesktopOutboundProxy('https://chatgpt.com:443');
-    const snap = getLastOutboundPathSnapshot();
+    const snap = snapshotFor('https://chatgpt.com:443');
     expect(snap).toMatchObject({
       source: 'env',
       kind: 'proxy',
@@ -195,11 +240,11 @@ describe('getLastOutboundPathSnapshot', () => {
   it('records a confirmed direct path when the system proxy reports DIRECT', async () => {
     electronState.resolveProxy.mockResolvedValue('DIRECT');
     await resolveDesktopOutboundProxy('https://chatgpt.com:443');
-    expect(getLastOutboundPathSnapshot()).toMatchObject({
+    expect(snapshotFor('https://chatgpt.com:443')).toMatchObject({
       source: 'system',
       kind: 'direct',
     });
-    expect(getLastOutboundPathSnapshot()?.reason).toBeUndefined();
+    expect(snapshotFor('https://chatgpt.com:443')?.reason).toBeUndefined();
   });
 
   it('distinguishes an unresolved path from a confirmed direct one', async () => {
@@ -214,7 +259,7 @@ describe('getLastOutboundPathSnapshot', () => {
     } finally {
       vi.useRealTimers();
     }
-    expect(getLastOutboundPathSnapshot()).toMatchObject({
+    expect(snapshotFor('https://chatgpt.com:443')).toMatchObject({
       source: 'system',
       kind: 'unknown',
       reason: 'resolve_timeout',
@@ -224,7 +269,7 @@ describe('getLastOutboundPathSnapshot', () => {
     electronState.resolveProxy.mockReset();
     electronState.resolveProxy.mockRejectedValue(new Error('boom'));
     await resolveDesktopOutboundProxy('https://chatgpt.com:443');
-    expect(getLastOutboundPathSnapshot()).toMatchObject({
+    expect(snapshotFor('https://chatgpt.com:443')).toMatchObject({
       kind: 'unknown',
       reason: 'resolve_failed',
     });
@@ -232,7 +277,7 @@ describe('getLastOutboundPathSnapshot', () => {
     resetOutboundProxyResolverStateForTest();
     electronState.ready = false;
     await resolveDesktopOutboundProxy('https://chatgpt.com:443');
-    expect(getLastOutboundPathSnapshot()).toMatchObject({
+    expect(snapshotFor('https://chatgpt.com:443')).toMatchObject({
       kind: 'unknown',
       reason: 'app_not_ready',
     });
@@ -258,7 +303,7 @@ describe('getLastOutboundPathSnapshot', () => {
       electronState.resolveProxy.mockResolvedValue('PROXY 127.0.0.1:7890');
       await expect(resolveDesktopOutboundProxy('https://chatgpt.com:443')).resolves.toBe('http://127.0.0.1:7890');
       expect(electronState.resolveProxy).toHaveBeenCalledTimes(2);
-      expect(getLastOutboundPathSnapshot()).toMatchObject({ kind: 'proxy' });
+      expect(snapshotFor('https://chatgpt.com:443')).toMatchObject({ kind: 'proxy' });
     } finally {
       vi.useRealTimers();
     }
@@ -271,7 +316,7 @@ describe('getLastOutboundPathSnapshot', () => {
     electronState.resolveProxy.mockClear();
     await resolveDesktopOutboundProxy('https://chatgpt.com:443');
     expect(electronState.resolveProxy).not.toHaveBeenCalled();
-    expect(getLastOutboundPathSnapshot()).toMatchObject({
+    expect(snapshotFor('https://chatgpt.com:443')).toMatchObject({
       kind: 'unknown',
       reason: 'resolve_failed',
     });

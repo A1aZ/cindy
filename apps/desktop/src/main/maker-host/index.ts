@@ -133,8 +133,13 @@ import {
   maybeDetachStaleRemoteCcQuery,
 } from './remote-codex-mcp-recovery.js';
 import { CODEX_DISABLED_BUILTIN_PLUGIN_IDS_KEY } from '../mcp-integrations/codexBuiltinToolPolicy.js';
-import { buildCodexProxySpawnArgs, CODEX_OPENAI_COMPACT_PROVIDER_ID } from './codex-gateway-config.js';
-import { getLastOutboundPathSnapshot } from './outbound-proxy-resolver.js';
+import {
+  buildCodexGatewayBaseUrl,
+  buildCodexProxySpawnArgs,
+  CODEX_OAUTH_UPSTREAM,
+  CODEX_OPENAI_COMPACT_PROVIDER_ID,
+} from './codex-gateway-config.js';
+import { getOutboundPathSnapshotFor } from './outbound-proxy-resolver.js';
 import {
   createDesktopMakerMemoryManager,
   attachAgentsToMakerMemory,
@@ -886,7 +891,15 @@ export function getMaker(): Maker {
       },
       // 「后端不可达」终局升级时读一次本机出站路径判定,把通用猜测换成实测事实。
       // 快照的 proxy 字段在 resolver 侧已脱敏,可直接进用户可见的错误消息。
-      getOutboundPathFact: () => getLastOutboundPathSnapshot(),
+      //
+      // 必须按 codex 自己的上游取:那个 resolver 是共享的(anthropic-compat proxy、
+      // 通用 outbound-fetch 也在调),而 NO_PROXY / PAC 可以逐 origin 给出不同判定,
+      // 取「最近一条」会把别的上游的结论报到 codex 的错误里。codex 的实际出口随凭证
+      // 模式变(订阅直连打 ChatGPT,网关模式打 gateway),两个候选都传、现取现算。
+      getOutboundPathFact: () => getOutboundPathSnapshotFor([
+        CODEX_OAUTH_UPSTREAM,
+        buildCodexGatewayBaseUrl(),
+      ]),
       onAutoPermissionClassifierUnavailable: notifyAutoPermissionClassifierUnavailable,
       prepareCodexLocalCredentialModeSwitch: async (ctx) => {
         const maker = _maker;

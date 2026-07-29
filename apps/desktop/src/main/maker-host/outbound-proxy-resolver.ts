@@ -234,10 +234,17 @@ function envResolver(upstreamUrl: string): string | null {
   return _envResolver(upstreamUrl);
 }
 
-// 最近一次出站路径判定。诊断读的是「现在这台机器上到底怎么出去的」,单值即可:
-// 代理判定通常对所有上游一致(NO_PROXY 命中除外),而快照带了 upstream 字段,
-// 展示侧能说明这条事实属于哪个上游,不会张冠李戴。
-let lastOutboundPath: OutboundPathSnapshot | null = null;
+/**
+ * 出站路径判定快照,**按上游 origin 分桶**。
+ *
+ * 必须分桶而不能存单值:这个 resolver 是共享的(codex proxy、anthropic-compat
+ * proxy、通用 outbound-fetch 都在调),单值槽会被最后一个完成解析的请求覆盖。
+ * 而 `NO_PROXY` 与 PAC 都可以逐 origin 给出不同判定,于是诊断可能报出一条属于
+ * 无关上游、甚至与故障上游结论相反的路径。消费方按自己关心的 origin 取。
+ *
+ * 上限与 systemProxyCache 同量级;满了整体清空(下一轮请求会重新填)。
+ */
+const outboundPathByOrigin = new Map<string, OutboundPathSnapshot>();
 
 function recordOutboundPath(
   upstreamUrl: string,
@@ -245,25 +252,52 @@ function recordOutboundPath(
   value: string | null,
   unknownReason?: OutboundPathUnknownReason,
 ): void {
-  lastOutboundPath = {
+  const origin = originForLog(upstreamUrl);
+  if (
+    outboundPathByOrigin.size >= SYSTEM_PROXY_CACHE_MAX_ENTRIES
+    && !outboundPathByOrigin.has(origin)
+  ) {
+    outboundPathByOrigin.clear();
+  }
+  outboundPathByOrigin.set(origin, {
     source,
     kind: unknownReason ? 'unknown' : value ? 'proxy' : 'direct',
     // 快照可能被写进错误消息给用户看,只允许脱敏形态(env 值可能带 user:pass)。
     ...(unknownReason ? { reason: unknownReason } : {}),
     ...(value && !unknownReason ? { proxy: redactProxyUrlForLog(value) } : {}),
-    upstream: originForLog(upstreamUrl),
+    upstream: origin,
     at: Date.now(),
-  };
+  });
 }
 
 /**
- * 最近一次出站路径判定的快照(没有解析发生过时为 null)。
+ * 取**指定上游**最近一次出站路径判定;给多个候选 origin 时返回其中最新的一条,
+ * 都没有记录过则返回 null。
  *
- * 只读诊断用途:上游不可达时把「当前走的是系统代理 / 直连 / 判定没问出来」这句
- * 事实交给用户,比让他猜快得多。返回的 proxy 字段已脱敏,可直接进错误消息与日志。
+ * 之所以收候选列表而不是单个 origin:调用方的实际上游可能随凭证模式动态切换
+ * (codex 订阅直连打 ChatGPT,网关模式打 gateway),但两者都属于同一个消费方。
+ * 传全部候选既能拿到真正用过的那条,又不会串到别的消费方的上游。
+ *
+ * 只读诊断用途:上游不可达时把「当前走的是代理 / 直连 / 判定没问出来」这句事实
+ * 交给用户,比让他猜快得多。返回的 proxy 字段已脱敏,可直接进错误消息与日志。
  */
-export function getLastOutboundPathSnapshot(): OutboundPathSnapshot | null {
-  return lastOutboundPath;
+export function getOutboundPathSnapshotFor(
+  upstreamOrigins: readonly string[],
+): OutboundPathSnapshot | null {
+  let best: OutboundPathSnapshot | null = null;
+  for (const raw of upstreamOrigins) {
+    const snap = outboundPathByOrigin.get(normalizeOriginKey(raw));
+    if (snap && (!best || snap.at > best.at)) best = snap;
+  }
+  return best;
+}
+
+/**
+ * 把调用方给的 URL / origin 归一成 recordOutboundPath 用的键。调用方手里通常是
+ * 完整 base URL(带 path),而键是 origin 形态,不归一会永远查不中。
+ */
+function normalizeOriginKey(raw: string): string {
+  return originForLog(raw);
 }
 
 /**
@@ -288,5 +322,5 @@ export const resolveDesktopOutboundProxy: OutboundProxyResolver = async (upstrea
 export function resetOutboundProxyResolverStateForTest(): void {
   systemProxyCache.clear();
   lastLoggedByOrigin.clear();
-  lastOutboundPath = null;
+  outboundPathByOrigin.clear();
 }

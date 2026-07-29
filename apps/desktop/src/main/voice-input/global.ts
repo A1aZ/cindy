@@ -469,6 +469,33 @@ export async function refreshVoiceInputInputMonitoringPermissionSnapshot(): Prom
  * 路径上不会给用户额外的系统弹窗。只有明确 denied 才算权限问题——status 为 unknown 时
  * 说明连权限都没查出来（helper 本身有问题），归 failed 更诚实。
  */
+/**
+ * 交给 renderer 的统一失败文案。listener 自己的 error 可能是 swiftc stderr、
+ * `Modifier shortcut listener source missing at <绝对路径>` 或 `spawn <绝对路径> ENOENT`,
+ * 都带内部路径，按 electron-security §5 不能原样过桥；细节只进主进程日志。
+ */
+const MAC_NATIVE_LISTENER_FAILURE_MESSAGE = 'Could not start the voice input shortcut listener.';
+
+/**
+ * 包一层 try/catch 再调 listener。
+ *
+ * setShortcut / startKeyCapture 不只会返回 { ok: false }，还会**抛**：dev 下
+ * resolveMacModifierShortcutListenerBinary 在源码缺失时直接 throw，swiftc 失败时
+ * execFile 的 reject 会带 stderr，而 startChildProcess 里那个 await 没有 try/catch。
+ * 不接住的话 IPC handler 直接 reject，原始消息（含内部绝对路径）会过桥给 renderer，
+ * 而且调用方精心分好的 errorCode 分支根本走不到。
+ */
+async function startMacNativeListener(
+  start: () => Promise<{ ok: true } | { ok: false; error: string }>,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    return await start();
+  } catch (error) {
+    log.warn('native shortcut listener threw while starting', { error: stringifyError(error) });
+    return { ok: false, error: MAC_NATIVE_LISTENER_FAILURE_MESSAGE };
+  }
+}
+
 async function classifyMacNativeListenerFailure(): Promise<VoiceInputGlobalErrorCode> {
   if (process.platform !== 'darwin') return 'failed';
   const snapshot = await refreshVoiceInputInputMonitoringPermissionSnapshot();
@@ -565,13 +592,20 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
           macModifierShortcutListener.stopKeyCapture();
         }
       });
-      const result = await macModifierShortcutListener.startKeyCapture();
+      // 走 startMacNativeListener：startKeyCapture 也会抛（helper 源码缺失 / swiftc
+      // 失败）。不接住的话下面的清理与 errorCode 分类都跑不到，本 renderer 会留在
+      // 转发名单里、原始路径还会过桥给它。
+      const result = await startMacNativeListener(() => macModifierShortcutListener.startKeyCapture());
       if (!result.ok) {
         modifierShortcutRecordingWebContentsIds.delete(event.sender.id);
         // 录制期的 key capture 只服务 Fn 检测（macOS 不把 Fn 派发成普通 DOM keydown）。
         // 起不来时 renderer 要靠 errorCode 区分「缺权限所以 Fn 录不了」和真故障，
         // 前者不该当成错误弹出来——裸修饰键走 DOM 事件，此时照样能正常录。
-        return { ...result, errorCode: await classifyMacNativeListenerFailure() };
+        return {
+          ok: false,
+          error: MAC_NATIVE_LISTENER_FAILURE_MESSAGE,
+          errorCode: await classifyMacNativeListenerFailure(),
+        };
       }
       return result;
     },
@@ -941,10 +975,14 @@ async function setVoiceInputGlobalShortcut(shortcut: VoiceInputShortcut | null):
     if (registeredNativeShortcutKey === nativeShortcutKey && macModifierShortcutListener.isRunning()) {
       return { ok: true };
     }
-    const result = await macModifierShortcutListener.setShortcut(shortcut);
+    const result = await startMacNativeListener(() => macModifierShortcutListener.setShortcut(shortcut));
     if (!result.ok) {
-      if (registeredShortcut && voiceInputShortcutNeedsMacNativeListener(registeredShortcut, process.platform)) {
-        await macModifierShortcutListener.setShortcut(registeredShortcut);
+      // 先落成局部常量：registeredShortcut 是模块级 let，装进闭包后 TS 不再认那层
+      // narrowing（延迟执行期间它可能被改），语义上回滚也该锁定进入分支时的那一个。
+      const previousShortcut = registeredShortcut;
+      if (previousShortcut && voiceInputShortcutNeedsMacNativeListener(previousShortcut, process.platform)) {
+        // 回滚同样可能抛（helper 已经坏掉），不能让它把整个 handler 掀了。
+        await startMacNativeListener(() => macModifierShortcutListener.setShortcut(previousShortcut));
       }
       const errorCode = await classifyMacNativeListenerFailure();
       log.warn('native global shortcut registration failed', {
@@ -953,7 +991,9 @@ async function setVoiceInputGlobalShortcut(shortcut: VoiceInputShortcut | null):
         error: result.error,
         errorCode,
       });
-      return { ...result, errorCode };
+      // 原始 error 只进日志：它可能是 swiftc stderr 或 `spawn <绝对路径> ENOENT`，
+      // 带着 helper 源码/二进制的内部路径，不能过 IPC 边界。
+      return { ok: false, error: MAC_NATIVE_LISTENER_FAILURE_MESSAGE, errorCode };
     }
     if (registeredAccelerator) {
       globalShortcut.unregister(registeredAccelerator);

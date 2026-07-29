@@ -1267,7 +1267,11 @@ export function VoiceInputSection() {
         await shortcutSuspendPromiseRef.current;
         const result = await setShortcut(shortcut);
         if (!result.ok) {
-          toast.error(t('settings.voiceInput.shortcut.toast.registrationFailed', { error: result.error }));
+          // 'failed' = 原生 listener 起不来。main 已把细节消毒成固定英文（原文含内部
+          // 路径），所以这里改用自带下一步的中文文案，不再把那句英文插进模板。
+          toast.error(result.errorCode === 'failed'
+            ? t('settings.voiceInput.shortcut.toast.listenerUnavailable')
+            : t('settings.voiceInput.shortcut.toast.registrationFailed', { error: result.error }));
           if (shortcut) setRecordingShortcutPreview(shortcut);
           return;
         }
@@ -1520,7 +1524,9 @@ export function VoiceInputSection() {
               setFnRecordingBlocked(true);
               return;
             }
-            toast.error(t('settings.voiceInput.shortcut.toast.recordingFailed', { error: result.error }));
+            toast.error(result.errorCode === 'failed'
+              ? t('settings.voiceInput.shortcut.toast.listenerUnavailable')
+              : t('settings.voiceInput.shortcut.toast.recordingFailed', { error: result.error }));
           });
       }
     });

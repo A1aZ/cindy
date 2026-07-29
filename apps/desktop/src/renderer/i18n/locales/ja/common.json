@@ -884,6 +884,7 @@
           "systemReserved": "このショートカットはシステムまたは一般的な編集ショートカットと競合します",
           "registrationFailed": "ショートカットを登録できませんでした: {{error}}",
           "recordingFailed": "ショートカットの記録を開始できませんでした: {{error}}",
+          "listenerUnavailable": "ショートカット監視を開始できませんでした。Cindy を再起動してから再試行してください",
           "pendingInputMonitoring": "ショートカットを保存しました。ショートカット監視を許可すると有効になります"
         }
       },

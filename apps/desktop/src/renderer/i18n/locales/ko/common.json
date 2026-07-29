@@ -884,6 +884,7 @@
           "systemReserved": "이 단축키는 시스템 또는 일반 편집 단축키와 충돌합니다",
           "registrationFailed": "단축키를 등록할 수 없습니다: {{error}}",
           "recordingFailed": "단축키 기록을 시작할 수 없습니다: {{error}}",
+          "listenerUnavailable": "단축키 감지를 시작할 수 없습니다. Cindy를 재시작한 후 다시 시도하세요",
           "pendingInputMonitoring": "단축키를 저장했습니다. 단축키 감지 권한을 허용하면 적용됩니다"
         }
       },

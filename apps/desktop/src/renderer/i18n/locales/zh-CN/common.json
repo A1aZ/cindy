@@ -884,6 +884,7 @@
           "systemReserved": "这个快捷键会和系统或常用编辑快捷键冲突",
           "registrationFailed": "无法注册此快捷键：{{error}}",
           "recordingFailed": "无法开始录制快捷键：{{error}}",
+          "listenerUnavailable": "无法启动快捷键监听器，请重启 Cindy 后再试",
           "pendingInputMonitoring": "快捷键已保存，授权监听权限后生效"
         }
       },

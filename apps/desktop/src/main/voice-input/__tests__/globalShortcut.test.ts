@@ -355,6 +355,41 @@ describe('voice input global shortcut registration', () => {
       expect(mocks.updateSettings).not.toHaveBeenCalled();
     });
 
+    // listener 不只会返回 { ok: false }，还会抛：dev 下 helper 源码缺失直接 throw、
+    // swiftc 失败时 execFile 的 reject 带 stderr，两者都含内部绝对路径。不接住的话
+    // handler 直接 reject，原始消息过桥给 renderer，errorCode 分支也走不到。
+    const INTERNAL_PATH = '/Users/someone/Library/Application Support/Cindy/voice-input/helper';
+
+    it('does not leak internal paths when the listener throws while setting a shortcut', async () => {
+      setPlatform('darwin');
+      mocks.modifierSetShortcut.mockRejectedValue(
+        new Error(`Modifier shortcut listener source missing at ${INTERNAL_PATH}`),
+      );
+      mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: true, status: 'granted' });
+      const { registerGlobalVoiceInputIpc } = await import('../global.js');
+      registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+      const result = await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
+
+      expect(result).toMatchObject({ ok: false, errorCode: 'failed' });
+      expect((result as { error: string }).error).toBe('Could not start the voice input shortcut listener.');
+    });
+
+    it('does not leak internal paths when the listener throws while starting key capture', async () => {
+      setPlatform('darwin');
+      mocks.modifierStartKeyCapture.mockRejectedValue(new Error(`spawn ${INTERNAL_PATH} ENOENT`));
+      mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: true, status: 'granted' });
+      const { registerGlobalVoiceInputIpc } = await import('../global.js');
+      registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+      const result = await mocks.handlers.get('voice-input:modifier-shortcut-recording:start')?.({
+        sender: { id: 7, once: vi.fn() },
+      });
+
+      expect(result).toMatchObject({ ok: false, errorCode: 'failed' });
+      expect((result as { error: string }).error).toBe('Could not start the voice input shortcut listener.');
+    });
+
     // 录制期的 key capture 只服务 Fn 检测。renderer 靠这个 errorCode 决定「安静地说明 Fn
     // 不可用」还是「报错」——裸修饰键走 DOM 事件,缺权限时照样录得上。
     it('tags a permission-blocked recording start so the renderer can explain Fn instead of erroring', async () => {

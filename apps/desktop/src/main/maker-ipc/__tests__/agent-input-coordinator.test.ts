@@ -5281,6 +5281,131 @@ describe('AgentInputCoordinator scheduler 排队心跳(review 反馈回归)', ()
     expect(h.sendToAgent).toHaveBeenCalledTimes(2);
   });
 
+  it('已派发的 scheduler turn 收到终态 error:不留 recovery,且队列被唤醒', async () => {
+    // 摘掉 scheduler recovery 的前两轮只改了「派发失败」那条路。turn 已经派发出去、之后
+    // 才收到终态 error 时,onTurnEvent 的 persisted 分支照样造出 active-turn recovery ——
+    // 而这一轮 run 已由 runner 按 terminal error 收口了。用户点 Retry 会克隆这条 prompt
+    // 重跑:没有 FireContext 回调、不计 run 账(review #944 第十八轮 P1)。
+    const h = createHarness();
+    const sid = 'sched-terminal-error';
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'hb', { origin: schedOrigin }));
+    await flush();
+
+    h.coordinator.onTurnEvent(sid, 'error', 'upstream went silent');
+    await flush();
+
+    expect(latestProjection(h.projections).recovery).toBeNull();
+    expect(
+      h.coordinator.hasQueuedItemWhere(sid, (item) => item.clientId === 'c1', {
+        includeRecovery: true,
+      }),
+    ).toBe(false);
+
+    // 队列真的被唤醒了:紧接着入队的普通消息能派发出去(recovery 不留就没人点 clearError)
+    h.sendToAgent.mockImplementationOnce(async () => ({
+      kind: 'session-dispatch',
+      dispatched: true,
+    }) as never);
+    h.coordinator.enqueue(sid, makeItem('c2', 'next one'));
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it('普通用户项收到终态 error 时仍保留 active-turn recovery', async () => {
+    // 上一条只对 scheduler 来源生效 —— 交互输入的重试入口不受影响。
+    const h = createHarness();
+    const sid = 'user-terminal-error';
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'typed by hand'));
+    await flush();
+
+    h.coordinator.onTurnEvent(sid, 'error', 'upstream went silent');
+    await flush();
+
+    expect(latestProjection(h.projections).recovery?.kind).toBe('active-turn');
+  });
+
+  it('派发前会话被关闭:已持久化的 scheduler 项不留 recovery', async () => {
+    // 第三条漏掉的终态路径(onSessionClosed → handleActiveTurnClosedBeforeDispatch)。
+    // 生产里它命中的是"持久化已过、vendor 派发还没起"的那一瞬,单测里从外部制造这个
+    // 时序不稳,所以直接把 activeTurn 摆成那个形态再关会话 —— 断言的是分支行为本身
+    // (review #944 第十八轮 P1)。
+    const h = createHarness();
+    const sid = 'sched-closed-before-dispatch';
+    let releaseSend!: () => void;
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      await new Promise<void>((resolve) => {
+        releaseSend = resolve;
+      });
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'hb', { origin: schedOrigin }));
+    await flush();
+
+    const state = (
+      h.coordinator as unknown as {
+        getState: (id: string) => {
+          activeTurn: { persisted: boolean; sendStarted: boolean } | null;
+        };
+      }
+    ).getState(sid);
+    expect(state.activeTurn).not.toBeNull();
+    state.activeTurn!.persisted = true;
+    state.activeTurn!.sendStarted = false; // 走 closed-before-dispatch 那条分支
+
+    h.coordinator.onSessionClosed(sid);
+    await flush();
+
+    expect(latestProjection(h.projections).recovery).toBeNull();
+    expect(
+      h.coordinator.hasQueuedItemWhere(sid, (item) => item.clientId === 'c1', {
+        includeRecovery: true,
+      }),
+    ).toBe(false);
+    releaseSend();
+    await flush();
+  });
+
+  it('派发前会话被关闭:普通用户项仍保留 active-turn recovery', async () => {
+    const h = createHarness();
+    const sid = 'user-closed-before-dispatch';
+    let releaseSend!: () => void;
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      await new Promise<void>((resolve) => {
+        releaseSend = resolve;
+      });
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'typed by hand'));
+    await flush();
+
+    const state = (
+      h.coordinator as unknown as {
+        getState: (id: string) => {
+          activeTurn: { persisted: boolean; sendStarted: boolean } | null;
+        };
+      }
+    ).getState(sid);
+    state.activeTurn!.persisted = true;
+    state.activeTurn!.sendStarted = false;
+
+    h.coordinator.onSessionClosed(sid);
+    await flush();
+
+    expect(latestProjection(h.projections).recovery?.kind).toBe('active-turn');
+    releaseSend();
+    await flush();
+  });
+
   it('派发在持久化后被取消:普通用户项仍保留 active-turn recovery', async () => {
     // 上一条只对 scheduler 来源生效 —— 交互输入的重试入口不受影响。
     const h = createHarness();

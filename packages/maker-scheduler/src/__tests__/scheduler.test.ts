@@ -3210,6 +3210,53 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
     }
   });
 
+  it('补排本身失败时挂进重试队列,后续 tick 就地修好(不停摆到重启)', async () => {
+    // 补排的存储调用抛瞬时错误时,旧实现只记一行 warn 就放手,理由写的是"周期清扫 / 重启
+    // 归一会兜底" —— 那是错的:周期 DB sync 只把行重新灌进内存,nextFireAt 仍是空、tick
+    // 永远选不到它;僵尸清扫只看 'running' 的 run 行,而这条已是终态。于是一条活跃的
+    // recurring 任务静默停摆到**进程重启**(第十八轮 P1)。
+    vi.useFakeTimers();
+    try {
+      const h = makeHarness({
+        runStallMs: 60_000,
+        runStallAbortGraceMs: 30_000,
+        runnerImpl: () => new Promise<FireResult>(() => {}), // 卡死且不理 abort
+      });
+      const sch = await h.scheduler.create({ ...baseInput, intervalMs: 3_600_000 });
+      const realUpdate = h.storage.update.bind(h.storage);
+      let failNextReplanWrite = true;
+      h.storage.update = (id: string, patch: Partial<Schedule>) => {
+        // 只打掉补排那一次写(nextFireAt),别的写照常
+        if (failNextReplanWrite && patch.nextFireAt !== undefined) {
+          failNextReplanWrite = false;
+          return Promise.reject(new Error('database is locked'));
+        }
+        return realUpdate(id, patch);
+      };
+
+      h.clock.advance(3_600_000);
+      void h.scheduler.tick();
+      await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(1));
+
+      h.clock.advance(60_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      h.clock.advance(30_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+
+      // 槽位已收回,但补排那次写被打掉 → 这条 recurring 任务此刻没有排期
+      await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(0));
+      expect((await h.storage.get(sch.id))?.nextFireAt).toBeUndefined();
+      expect((await h.storage.get(sch.id))?.status).toBe('active'); // 仍是活跃任务,不是过期
+
+      // 下一个 tick 就地重试 → 排期被修好
+      await h.scheduler.tick();
+      expect((await h.storage.get(sch.id))?.nextFireAt).toBeDefined();
+      await h.scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('强制收口一次性任务:过期而不是又排一次', async () => {
     // 强制收口不走 fireOneInner 的正常终态段,lastFiredAt 从未落定,computeNextFireAt 会
     // 把 Once 当成"还没跑过"又排一次 —— 一个失败的一次性任务自己再跑一遍(第七轮 P1)。

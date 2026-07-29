@@ -407,6 +407,22 @@ function isActiveTurnDispatched(active: ActiveTurn): boolean {
   return active.dispatchLifecycle === 'dispatched';
 }
 
+/**
+ * 这条消息是自动任务(scheduler)投进来的吗。
+ *
+ * 用途只有一个:**不给它留 active-turn 重试入口**。scheduler 的 prompt 属于某一轮
+ * run —— runner 已经按自己的语义把那一轮 finalize / defer 掉了,而「重试」按钮会把
+ * prompt 克隆成一条普通用户消息重跑:没有 FireContext 回调、不计 run 账、通知与
+ * 运行历史全部对不上,用户还会莫名看到一条自己没发过的消息在跑。
+ *
+ * 判据抽成函数是因为它必须覆盖**所有**终态路径:派发失败、turn 终态 error、
+ * 派发前会话关闭。前两轮只改了派发失败那一条,漏掉的两条照样造出重试入口
+ * (review #944 第十八轮 P1)。
+ */
+function isSchedulerOriginItem(item: AgentInputQueuedMessage | null | undefined): boolean {
+  return item?.origin?.kind === 'scheduler';
+}
+
 function isActiveTurnBeforeVendorDispatch(active: ActiveTurn): boolean {
   return (
     !isActiveTurnDispatched(active) &&
@@ -1612,8 +1628,16 @@ export class AgentInputCoordinator {
         state.activeTurn = null;
         state.error = message ?? state.error;
         state.stickyError = null;
-        state.recovery = active.item ? { kind: 'active-turn', item: active.item } : null;
+        // scheduler 投进来的 prompt 不留重试入口(理由见 isSchedulerOriginItem):
+        // 这一轮 run 已由 runner 按 terminal error 收口,克隆重跑只会造出一条不计账的
+        // 幽灵消息(第十八轮 P1)。
+        const schedulerOrigin = isSchedulerOriginItem(active.item);
+        state.recovery =
+          active.item && !schedulerOrigin ? { kind: 'active-turn', item: active.item } : null;
         this.emit(sessionId);
+        // 用户那条路靠 clearError / 重试按钮顺带唤醒 drain,scheduler 这条没有人点 ——
+        // recovery 既然不留,队里压着的消息就得自己唤一次。
+        if (schedulerOrigin) this.scheduleDrain(sessionId, 'scheduler-prompt-terminal-error');
         return;
       }
       if (active?.persisting) {
@@ -2103,7 +2127,7 @@ export class AgentInputCoordinator {
       latest.stickyError = null;
       // 同 handleSendNotDispatched:调度来源的 prompt 不留可被人手动 Retry 的 recovery
       // (review #944 第九轮 P1)。
-      const schedulerOrigin = head.origin?.kind === 'scheduler';
+      const schedulerOrigin = isSchedulerOriginItem(head);
       latest.recovery = schedulerOrigin ? null : { kind: 'active-turn', item: head };
       if (schedulerOrigin) {
         // 摘掉 recovery 就**必须**一并放掉 activeTurn。isDispatchBoundaryBusy 只要
@@ -2172,7 +2196,7 @@ export class AgentInputCoordinator {
     // 失败本身经 scheduler 自己的运行历史 + 通知呈现,不靠这里的重试入口。
     // 注:isPromptTracked 用的 hasQueuedItemWhere 默认不含 recovery,所以摘掉它不会影响
     // runner 的排队存活探测。
-    const schedulerOrigin = item.origin?.kind === 'scheduler';
+    const schedulerOrigin = isSchedulerOriginItem(item);
     latest.recovery = schedulerOrigin ? null : { kind: 'active-turn', item };
     this.notifyUndispatchedUserTurn(sessionId, item);
     if (latest.queueAbortPending && result.kind === 'session-dispatch' && result.reason === 'cancelled-before-dispatch') {
@@ -2451,12 +2475,21 @@ export class AgentInputCoordinator {
       state.activeTurn = null;
       state.error = message;
       state.stickyError = null;
-      state.recovery = { kind: 'active-turn', item };
+      // 同 onTurnEvent / handleSendNotDispatched:scheduler 的 prompt 不留重试入口
+      // (理由见 isSchedulerOriginItem,第十八轮 P1)。
+      const schedulerOrigin = isSchedulerOriginItem(item);
+      state.recovery = schedulerOrigin ? null : { kind: 'active-turn', item };
       this.notifyUndispatchedUserTurn(sessionId, item);
-      log.warn('session closed before dispatch after persistence; kept active-turn recovery', {
-        sessionId,
-        clientId: item.clientId,
-      });
+      log.warn(
+        schedulerOrigin
+          ? 'session closed before dispatch after persistence; dropped scheduler prompt (no user retry)'
+          : 'session closed before dispatch after persistence; kept active-turn recovery',
+        {
+          sessionId,
+          clientId: item.clientId,
+        },
+      );
+      if (schedulerOrigin) this.scheduleDrain(sessionId, 'scheduler-prompt-session-closed');
       return;
     }
 

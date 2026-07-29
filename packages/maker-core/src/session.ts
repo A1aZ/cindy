@@ -998,12 +998,44 @@ export class Session {
     const generation = this.turnGeneration;
     if (this.abortRecoveryScheduledFor === generation) return;
     this.abortRecoveryScheduledFor = generation;
+    // 宽限也要**排除系统挂起**:合盖睡眠期间 transport 一个字节都收不到,而裸定时器一旦在
+    // 唤醒后到期就立刻开火 —— 一次午休就能让"给 interrupt 的 10s / 60s"变成 0s 有效时间,
+    // 复核于是关掉一条其实还响应得动的会话(第十八轮 P1)。与 armTurnStallSlice、codex 的
+    // armUpstreamIdleSlice、scheduler 的 absorbSuspendGap、排队派发的
+    // QUEUED_DISPATCH_SUSPEND_GAP_MS 同源:壁钟差 ≠ 清醒时间。
+    this.armAbortRecoverySlice(generation, graceMs, graceMs, trigger);
+  }
+
+  /** 宽限的分片计时:片尾核对壁钟,发现被冻结过就把那一片作废重开(额度不扣)。 */
+  private armAbortRecoverySlice(
+    generation: number,
+    remainingMs: number,
+    graceMs: number,
+    trigger: 'stall-watchdog' | 'manual-abort',
+  ): void {
+    const slice = Math.min(remainingMs, TURN_STALL_SLICE_MS);
+    const startedAt = Date.now();
     const timer = setTimeout(() => {
+      const elapsed = Date.now() - startedAt;
+      if (elapsed > slice + TURN_STALL_SUSPEND_GAP_MS) {
+        this.logger.info('abort recovery skipped a suspended slice', {
+          trigger,
+          sliceMs: slice,
+          elapsedMs: elapsed,
+        });
+        this.armAbortRecoverySlice(generation, remainingMs, graceMs, trigger);
+        return;
+      }
+      const left = remainingMs - Math.max(0, elapsed);
+      if (left > 0) {
+        this.armAbortRecoverySlice(generation, left, graceMs, trigger);
+        return;
+      }
       // 把真正生效的宽限与触发来源带进复核:两条路径的宽限不同(手动 60s / 看门狗 10s),
       // 幂等又只保留最早排定的那一次 —— 日志里写死任一常量都会误导事故排查
       // (review #944 第十八轮 Copilot)。
       void this.recoverIfTurnStillRunning(generation, { graceMs, trigger });
-    }, graceMs);
+    }, slice);
     (timer as unknown as { unref?: () => void }).unref?.();
   }
 

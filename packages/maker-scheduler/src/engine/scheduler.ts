@@ -6,6 +6,7 @@ import type {
   UpdateScheduleInput,
   ListFilter,
   SchedulerEvent,
+  ScheduleFireSource,
   SchedulerInflightRun,
   SchedulerRuntimeSnapshot,
   SchedulerWaitingSchedule,
@@ -235,6 +236,18 @@ export const RUN_LEGACY_STALE_MS = 2 * 60 * 60 * 1000;
 const DB_SYNC_INTERVAL_MS = 30_000;
 
 /** 公开快照字段之外，再保留最近一次长跑诊断时间用于日志节流。 */
+/**
+ * 排期补偿只需要这四项。单独抽出来是为了让"补排失败后的重试凭据"能纯内存留存:
+ * 整个 InflightAttempt 在收口时就被删了,而重试要在之后的 tick 里发生
+ * (见 pendingReplans / retryPendingReplans,review #944 第十八轮 P1)。
+ */
+interface StalledClaimPlan {
+  scheduleId: string;
+  runId: string;
+  startedAt: number;
+  source: ScheduleFireSource;
+}
+
 interface InflightAttempt extends SchedulerInflightRun {
   lastLongRunningLogAt?: number;
   /** 卡死判定命中并已发出 abort 的时刻；用于计算强制收回槽位的宽限。 */
@@ -341,6 +354,13 @@ export class Scheduler extends EventEmitter {
    * 只存内存:进程重启后这些 run 行已是终态,不需要再记。
    */
   private readonly abandonedRuns = new Set<string>();
+  /**
+   * 排期补偿失败待重试的 schedule（key = scheduleId）。存储瞬时错误不能让一条活跃的
+   * recurring 任务停摆到进程重启 —— 周期 DB sync 只重灌行、不会补 nextFireAt，僵尸清扫
+   * 也只看 'running' 的 run 行（第十八轮 P1）。每个 tick 就地重试，成功即摘除。
+   * 只存内存：真到了重启，start() 的归一本来就会补上。
+   */
+  private readonly pendingReplans = new Map<string, StalledClaimPlan>();
 
   constructor(opts: SchedulerOptions) {
     super();
@@ -508,6 +528,9 @@ export class Scheduler extends EventEmitter {
       // excludeRunIds 兜底排除本进程 in-flight(即使自家心跳续期停摆也绝不自伤)。
       await this.sweepStaleRunningRuns(now);
     }
+    // 补排重试要排在挑选 due 之前:本次刚补上的 nextFireAt 若已到期,同一个 tick 就能
+    // 把它捞进 due,不必再等一整个 tick 间隔。
+    await this.retryPendingReplans(now);
     const due: Schedule[] = [];
     for (const sch of this.activeSchedules.values()) {
       if (sch.nextFireAt !== undefined && sch.nextFireAt <= now) {
@@ -2379,7 +2402,7 @@ export class Scheduler extends EventEmitter {
    *
    * recurring=false 的自动 claim 走**过期**而不是重排 —— 见函数体内注释(第七轮 P1)。
    */
-  private async replanAfterStalledClaim(attempt: InflightAttempt, now: number): Promise<void> {
+  private async replanAfterStalledClaim(attempt: StalledClaimPlan, now: number): Promise<void> {
     const { scheduleId } = attempt;
     if (attempt.source !== 'automatic') {
       this.logger?.info?.('scheduler: skipping replan for stalled non-automatic run', {
@@ -2436,11 +2459,40 @@ export class Scheduler extends EventEmitter {
         nextFireAt: next,
       });
     } catch (err) {
-      // 补排失败不阻塞收口;下一轮清扫 / 任一实例重启的 start() 归一仍会兜底。
-      this.logger?.warn?.('scheduler: replan after stalled run failed', {
+      // 补排失败不阻塞收口,但**必须留下重试凭据**。此前只记一行 warn 就放手,理由写的是
+      // "下一轮清扫 / 重启归一会兜底" —— 那是错的:周期 DB sync 只是把行重新灌进内存,
+      // nextFireAt 仍是空,tick 永远选不到它;僵尸清扫只看 'running' 的 run 行,这条已是
+      // 终态。于是一条 recurring 任务会静默停摆到**进程重启**,而 Once 任务因为消耗字段
+      // 从未落定,重启后还会再跑一遍(第十八轮 P1)。
+      // 挂进重试队列,由后续 tick 就地重试(纯内存、幂等:成功条件里已有
+      // "nextFireAt 已被别的路径补上则不覆盖")。
+      this.pendingReplans.set(scheduleId, {
         scheduleId,
+        runId: attempt.runId,
+        startedAt: attempt.startedAt,
+        source: attempt.source,
+      });
+      this.logger?.warn?.('scheduler: replan after stalled run failed — queued for retry', {
+        scheduleId,
+        runId: attempt.runId,
         error: String(err),
       });
+      return;
+    }
+    // 走到这里说明本次补排已定论(补上了 / 行已删 / 已 paused / 已消耗),清掉遗留凭据。
+    this.pendingReplans.delete(scheduleId);
+  }
+
+  /**
+   * 重试上一次因存储瞬时错误而没做成的排期补偿。每个 tick 跑一次,顺序、串行、不并发 ——
+   * 队列通常是空的,非空时也只有个别条目(卡死本身是罕见事件)。
+   * 仍失败的条目留在队列里等下一个 tick;成功或确定无需补排的由 replanAfterStalledClaim
+   * 自己摘除。
+   */
+  private async retryPendingReplans(now: number): Promise<void> {
+    if (this.pendingReplans.size === 0) return;
+    for (const pending of [...this.pendingReplans.values()]) {
+      await this.replanAfterStalledClaim(pending, now);
     }
   }
 

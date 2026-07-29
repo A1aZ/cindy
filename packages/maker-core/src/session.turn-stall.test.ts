@@ -459,6 +459,31 @@ describe('Session turn stall watchdog', () => {
     }
   });
 
+  it('宽限期内系统挂起 → 不吃掉给 interrupt 的清醒时间,醒来不立刻关会话', async () => {
+    // 合盖睡眠期间 transport 一个字节都收不到,而裸定时器一旦在唤醒后到期就立刻开火:
+    // 一次午休能把"给 interrupt 的 60s"变成 0s 有效时间,复核于是关掉一条其实还响应得动
+    // 的会话(第十八轮 P1)。宽限也要走分片计时,与看门狗本体同源。
+    vi.useFakeTimers();
+    try {
+      const stub = createStubHandle({ abortIneffective: true });
+      const session = createSession(stub, { turnStallMs: 0 });
+      session.onEvent(() => {});
+
+      await session.send('go');
+      await session.abort();
+      // 合盖睡 8 小时:壁钟前进,定时器没按比例推进
+      vi.setSystemTime(Date.now() + 8 * 3_600_000);
+      await vi.advanceTimersByTimeAsync(MANUAL_ABORT_RECOVERY_GRACE_MS + 1);
+      expect(session.getStatus()).not.toBe('closed'); // 那一片作废,宽限重新开始
+
+      // 吸收不等于豁免:醒来后清醒地走满宽限,该关照样关
+      await vi.advanceTimersByTimeAsync(MANUAL_ABORT_RECOVERY_GRACE_MS + 1);
+      expect(session.getStatus()).toBe('closed');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('复核日志写的是真正生效的宽限与触发来源', async () => {
     // 复核定时器被两条路径共用(手动 60s / 看门狗 10s),且幂等只保留最早排定的那一次。
     // 诊断字段写死任一常量,事故日志就会把手动 Stop 说成看门狗、把 60s 说成 10s ——

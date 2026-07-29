@@ -467,7 +467,7 @@ export class Session {
     // 所以这里也排一次与 turn 绑定的复核,且**不挂在 abort 的 promise 上**(它自己就可能
     // 永不 settle,理由同 onTurnStallTimeout)。宽限比看门狗那条长得多:手动 Stop 背后
     // 没有别的兜底,而健康的 interrupt 往返远不需要这么久,宁可多等也不误关正常会话。
-    this.scheduleAbortRecoveryCheck(MANUAL_ABORT_RECOVERY_GRACE_MS);
+    this.scheduleAbortRecoveryCheck(MANUAL_ABORT_RECOVERY_GRACE_MS, 'manual-abort');
     this.setStatus('aborting');
     try {
       await this.handle.abort();
@@ -982,7 +982,7 @@ export class Session {
     // abort 正常生效时它是 no-op,所以无条件排定是安全的。
     // 复核由 abort() 内部统一排(见 scheduleAbortRecoveryCheck),这里只需要用看门狗
     // 自己的短宽限覆盖它:本路径已经确诊卡死,不必再等手动 Stop 那样长的时间。
-    this.scheduleAbortRecoveryCheck(STALL_ABORT_RECOVERY_GRACE_MS);
+    this.scheduleAbortRecoveryCheck(STALL_ABORT_RECOVERY_GRACE_MS, 'stall-watchdog');
     void this.abort().catch((e) => {
       this.logger.warn('turn stall watchdog abort failed', { error: String(e) });
     });
@@ -994,27 +994,34 @@ export class Session {
    * turn 代号,否则宽限期内新起的健康 turn 会被误杀(见 turnGeneration)。
    * 幂等:同一 turn 上重复 abort 只保留最早排定的那次复核。
    */
-  private scheduleAbortRecoveryCheck(graceMs: number): void {
+  private scheduleAbortRecoveryCheck(graceMs: number, trigger: 'stall-watchdog' | 'manual-abort'): void {
     const generation = this.turnGeneration;
     if (this.abortRecoveryScheduledFor === generation) return;
     this.abortRecoveryScheduledFor = generation;
     const timer = setTimeout(() => {
-      void this.recoverIfTurnStillRunning(generation);
+      // 把真正生效的宽限与触发来源带进复核:两条路径的宽限不同(手动 60s / 看门狗 10s),
+      // 幂等又只保留最早排定的那一次 —— 日志里写死任一常量都会误导事故排查
+      // (review #944 第十八轮 Copilot)。
+      void this.recoverIfTurnStillRunning(generation, { graceMs, trigger });
     }, graceMs);
     (timer as unknown as { unref?: () => void }).unref?.();
   }
 
   /**
-   * 看门狗 abort 的兜底复核:turn 仍在跑说明 agent 层的中断没生效,会话已经不可用
-   * (isTurnRunning 恒 true → 后续 send 全被拒)。关掉它,让下一次 send 走 Maker 的
-   * lazy create 重建 handle。这是所有 agent 共用的恢复出路,不需要各自实现重建。
+   * abort 的兜底复核(看门狗中断与手动 abort 共用):turn 仍在跑说明 agent 层的中断没生效,
+   * 会话已经不可用(isTurnRunning 恒 true → 后续 send 全被拒)。关掉它,让下一次 send 走
+   * Maker 的 lazy create 重建 handle。这是所有 agent 共用的恢复出路,不需要各自实现重建。
    */
-  private async recoverIfTurnStillRunning(stalledGeneration: number): Promise<void> {
+  private async recoverIfTurnStillRunning(
+    stalledGeneration: number,
+    ctx: { graceMs: number; trigger: 'stall-watchdog' | 'manual-abort' },
+  ): Promise<void> {
     if (this.status === 'closed' || this.closePromise) return;
     // 代号变了 = 卡死那个 turn 已经停了(否则新 send 会被 SESSION_RUNNING 拒),现在跑的是
     // 新活儿。abort 生效了,不能拿"有 turn 在跑"当作"还没恢复"去关会话。
     if (this.turnGeneration !== stalledGeneration) {
-      this.logger.info('turn stall abort took effect; a newer turn is running — not closing session', {
+      this.logger.info('abort took effect; a newer turn is running — not closing session', {
+        trigger: ctx.trigger,
         stalledGeneration,
         currentGeneration: this.turnGeneration,
       });
@@ -1022,13 +1029,13 @@ export class Session {
     }
     if (!this.isTurnRunning()) return; // abort 生效了,会话仍可用,什么都不做
     this.logger.error(
-      'turn still running after stall abort — closing session so the next send can rebuild it',
-      { graceMs: STALL_ABORT_RECOVERY_GRACE_MS },
+      'turn still running after abort — closing session so the next send can rebuild it',
+      { trigger: ctx.trigger, graceMs: ctx.graceMs },
     );
     try {
       await this.close();
     } catch (e) {
-      this.logger.warn('turn stall watchdog close failed', { error: String(e) });
+      this.logger.warn('abort recovery close failed', { trigger: ctx.trigger, error: String(e) });
     }
   }
 

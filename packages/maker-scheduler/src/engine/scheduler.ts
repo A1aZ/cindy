@@ -727,16 +727,23 @@ export class Scheduler extends EventEmitter {
       if (stallAborted) {
         // 卡死守卫中断:run 记 'failed'(异常必须可见),且下方重排照常执行。
         const errorMsg = this.describeStallAbort(runError);
-        await this.storage.updateRun(runId, { status: 'failed', finishedAt, errorMsg });
-        this.emitEvent({ type: 'failed', scheduleId: schedule.id, runId, error: errorMsg });
-        // 补发判据只看 runner 有没有真的投过**失败**通知(onRunnerNotified),不再用
-        // "有没有 runError"推断:守卫的 abort 可能落在前置检查 / 会话创建这类 setup
-        // await 上,runner 会在走到任何 notifier 调用之前抛错 —— 有 runError 却一条
-        // 通知都没发,旧判据会静默吞掉唯一的失败提醒(review #944 第五轮 P1)。
-        // runner 无错返回时它投的是**成功**通知,与本轮记为 failed 矛盾,照样要补
-        // (第三轮已确立)。
-        if (this.needsForcedFailureNotification(runId)) {
-          void this.notifyForcedFailure(schedule.id, runId, errorMsg);
+        // finally 而不是顺序执行:落库抛存储瞬时错误时,控制流会直接跳到外层 catch,
+        // 补发通知被整段跳过 —— 而"守卫在 setup 阶段就中断、runner 一条通知都没投过"
+        // 恰恰是最需要补发的场景,用户配了桌面/飞书通知却什么都收不到(第十八轮 P1)。
+        // 通知权认领与终态落库是两件独立的事,不能让前者依赖后者成功。
+        try {
+          await this.storage.updateRun(runId, { status: 'failed', finishedAt, errorMsg });
+          this.emitEvent({ type: 'failed', scheduleId: schedule.id, runId, error: errorMsg });
+        } finally {
+          // 补发判据只看 runner 有没有真的投过**失败**通知(onRunnerNotified),不再用
+          // "有没有 runError"推断:守卫的 abort 可能落在前置检查 / 会话创建这类 setup
+          // await 上,runner 会在走到任何 notifier 调用之前抛错 —— 有 runError 却一条
+          // 通知都没发,旧判据会静默吞掉唯一的失败提醒(review #944 第五轮 P1)。
+          // runner 无错返回时它投的是**成功**通知,与本轮记为 failed 矛盾,照样要补
+          // (第三轮已确立)。
+          if (this.needsForcedFailureNotification(runId)) {
+            void this.notifyForcedFailure(schedule.id, runId, errorMsg);
+          }
         }
       } else if (wasAborted) {
         await this.storage.updateRun(runId, {
@@ -996,10 +1003,15 @@ export class Scheduler extends EventEmitter {
       // 语义同 fireOneInner:守卫中断记 failed(可见)而不是 aborted(伪装成用户操作);
       // 通知按 runner 有没有真的投过失败通知补发(判据理由见 fireOneInner 同名分支)。
       const errorMsg = this.describeStallAbort(runError);
-      await this.storage.updateRun(runId, { status: 'failed', finishedAt, errorMsg });
-      this.emitEvent({ type: 'failed', scheduleId: schedule.id, runId, error: errorMsg });
-      if (this.needsForcedFailureNotification(runId)) {
-        void this.notifyForcedFailure(schedule.id, runId, errorMsg);
+      // try/finally 的理由同 fireOneInner:落库失败不能把唯一的失败提醒一起吞掉。
+      // 这里刻意不 catch —— runNow 是用户主动触发,落库失败照旧向调用方冒泡。
+      try {
+        await this.storage.updateRun(runId, { status: 'failed', finishedAt, errorMsg });
+        this.emitEvent({ type: 'failed', scheduleId: schedule.id, runId, error: errorMsg });
+      } finally {
+        if (this.needsForcedFailureNotification(runId)) {
+          void this.notifyForcedFailure(schedule.id, runId, errorMsg);
+        }
       }
     } else if (wasAborted) {
       await this.storage.updateRun(runId, {

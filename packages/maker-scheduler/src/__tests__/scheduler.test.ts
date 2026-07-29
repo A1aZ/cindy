@@ -3284,6 +3284,110 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
     }
   });
 
+  it('守卫 abort 被响应后终态落库抛错:通知不被外层 catch 一起吞掉', async () => {
+    // 上一个用例走的是"runner 完全不理 abort → 强制收口"那条路;这里 runner 老实响应
+    // abort,走的是 fireOneInner 自己的 stallAborted 分支。该分支整段包在一层 catch 里
+    // (职责是保住 claimDueFire 清空的排期),落库一抛错控制流就跳出分支 —— 补发通知被
+    // 顺带跳过,而"abort 落在 setup、runner 一条通知都没投"恰恰是最需要补发的场景:
+    // 用户配了桌面 / 飞书通知却什么都收不到(review #944 第十八轮 P1)。
+    vi.useFakeTimers();
+    try {
+      const notified: { scheduleId: string; runId: string; errorMsg: string }[] = [];
+      const storage = new InMemoryStorage();
+      storage.updateRun = () => Promise.reject(new Error('database is locked'));
+      const clock = new FakeClock();
+      const scheduler = new Scheduler({
+        storage,
+        runner: {
+          fire: (_s, ctx) =>
+            new Promise<FireResult>((_resolve, reject) => {
+              // 响应 abort 并 settle,但**不**调 onRunnerNotified:复刻"还没走到通知
+              // 就被打断"的 setup 阶段失败。
+              ctx.signal.addEventListener('abort', () =>
+                reject(new Error('aborted while creating the session')),
+              );
+            }),
+        },
+        clock,
+        generateId: makeIdGen(),
+        tickIntervalMs: 60_000_000,
+        suspendGapMs: 0,
+        runStallMs: 60_000,
+        runStallAbortGraceMs: 30_000,
+        notifyForcedFailure: (input) => {
+          notified.push(input);
+        },
+        instanceId: 'test-notify-when-terminal-write-throws',
+      });
+      const sch = await scheduler.create({ ...baseInput, intervalMs: 3_600_000 });
+      clock.advance(3_600_000);
+      void scheduler.tick();
+      await vi.waitFor(() => expect(scheduler.getRuntimeSnapshot().slotsInUse).toBe(1));
+
+      clock.advance(60_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+
+      await vi.waitFor(() => expect(notified).toHaveLength(1));
+      expect(notified[0]?.scheduleId).toBe(sch.id);
+      // 外层 catch 的既有职责不能因这次改动回归:排期照恢复、槽位照释放
+      expect((await storage.get(sch.id))?.nextFireAt).toBeDefined();
+      expect(scheduler.getRuntimeSnapshot().slotsInUse).toBe(0);
+      await scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('runNow 守卫 abort:落库抛错照旧向调用方冒泡,但通知已经投出', async () => {
+    // runNow 那条分支没有(也不该有)吞错的 catch —— 用户主动触发,写盘失败必须让调用方
+    // 知道。补发通知因此要放在 finally,而不是靠"落库成功"顺序执行(第十八轮 P1)。
+    vi.useFakeTimers();
+    try {
+      const notified: { scheduleId: string; runId: string; errorMsg: string }[] = [];
+      const storage = new InMemoryStorage();
+      storage.updateRun = () => Promise.reject(new Error('database is locked'));
+      const clock = new FakeClock();
+      const scheduler = new Scheduler({
+        storage,
+        runner: {
+          fire: (_s, ctx) =>
+            new Promise<FireResult>((_resolve, reject) => {
+              ctx.signal.addEventListener('abort', () =>
+                reject(new Error('aborted while creating the session')),
+              );
+            }),
+        },
+        clock,
+        generateId: makeIdGen(),
+        tickIntervalMs: 60_000_000,
+        suspendGapMs: 0,
+        runStallMs: 60_000,
+        runStallAbortGraceMs: 30_000,
+        notifyForcedFailure: (input) => {
+          notified.push(input);
+        },
+        instanceId: 'test-runnow-notify-when-write-throws',
+      });
+      const sch = await scheduler.create({ ...baseInput, manual: true });
+      // 立刻挂 handler:落库的拒绝发生在下面推时钟的那一拍,晚接会被记成 unhandled rejection
+      const settled = scheduler.runNow(sch.id).then(
+        () => null,
+        (err: unknown) => err,
+      );
+      await vi.waitFor(() => expect(scheduler.getRuntimeSnapshot().slotsInUse).toBe(1));
+
+      clock.advance(60_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+
+      expect(String(await settled)).toMatch(/database is locked/);
+      expect(notified).toHaveLength(1);
+      expect(notified[0]?.runId).toBeDefined();
+      await scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('强制收口已投通知后,迟到 settle 的 runner 不再重复投', async () => {
     // 常见顺序:引擎先投失败通知,runner 几分钟后才 settle 并走自己的 finalizeRun ——
     // 用户为同一轮收到两条通知。runner 侧必须自查 isRunAbandoned(review #944 第十四轮 P1)。

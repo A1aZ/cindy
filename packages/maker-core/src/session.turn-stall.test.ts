@@ -15,9 +15,14 @@ import {
 import type { AgentEvent, SendOrigin } from './types/events.js';
 import type { AgentSessionHandle, BackgroundTaskSnapshot } from './agents/base-agent.js';
 
-function createLogger() {
+type LoggedError = { msg: string; meta?: Record<string, unknown> };
+
+function createLogger(sink?: LoggedError[]) {
   const logger = {
-    trace() {}, debug() {}, info() {}, warn() {}, error() {}, fatal() {},
+    trace() {}, debug() {}, info() {}, warn() {}, fatal() {},
+    error(msg: string, meta?: Record<string, unknown>) {
+      sink?.push({ msg, meta });
+    },
     child() { return logger; },
   };
   return logger;
@@ -105,7 +110,7 @@ function createStubHandle(opts?: StubOptions) {
 
 function createSession(
   stub: ReturnType<typeof createStubHandle>,
-  opts?: { turnStallMs?: number },
+  opts?: { turnStallMs?: number; errorSink?: LoggedError[] },
 ) {
   return new Session({
     id: 'session-1',
@@ -113,7 +118,7 @@ function createSession(
     workDir: '/repo',
     handle: stub.handle,
     capabilities: {} as never,
-    logger: createLogger() as never,
+    logger: createLogger(opts?.errorSink) as never,
     turnStallMs: opts?.turnStallMs ?? STALL_MS,
   });
 }
@@ -449,6 +454,31 @@ describe('Session turn stall watchdog', () => {
 
       await vi.advanceTimersByTimeAsync(MANUAL_ABORT_RECOVERY_GRACE_MS + 1);
       expect(session.getStatus()).toBe('closed');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('复核日志写的是真正生效的宽限与触发来源', async () => {
+    // 复核定时器被两条路径共用(手动 60s / 看门狗 10s),且幂等只保留最早排定的那一次。
+    // 诊断字段写死任一常量,事故日志就会把手动 Stop 说成看门狗、把 60s 说成 10s ——
+    // 这条日志正是真机排查唯一的线索(review #944 第十八轮 Copilot)。
+    vi.useFakeTimers();
+    try {
+      const errors: LoggedError[] = [];
+      const stub = createStubHandle({ abortIneffective: true });
+      const session = createSession(stub, { turnStallMs: 0, errorSink: errors });
+      session.onEvent(() => {});
+
+      await session.send('go');
+      await session.abort();
+      await vi.advanceTimersByTimeAsync(MANUAL_ABORT_RECOVERY_GRACE_MS + 1);
+
+      const recovery = errors.find((e) => e.msg.includes('turn still running after abort'));
+      expect(recovery?.meta).toMatchObject({
+        trigger: 'manual-abort',
+        graceMs: MANUAL_ABORT_RECOVERY_GRACE_MS,
+      });
     } finally {
       vi.useRealTimers();
     }

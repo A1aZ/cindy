@@ -66,11 +66,12 @@ export interface SchedulerWaitingSchedule {
 export interface SchedulerRuntimeSnapshot {
   schedulerInstanceId: string;
   processId?: number;
-  /** in-flight 记录总数（含 'queued' 的纯等待项）。 */
+  /** in-flight 记录总数（含 'queued' 纯等待与 'cancelling' 收口中的项）。 */
   inFlight: number;
   /**
-   * 真正占用并发槽的 run 数（排除 'queued'）。UI 显示"N/max"要用本字段：
-   * inFlight 含排队项，直接拿它显示会出现"满负荷"却没有任务在跑的错觉。
+   * 真正占用并发槽的 run 数（判据以 Scheduler.countSlotsInUse 为准：排除 'queued'
+   * 纯等待与 'cancelling' 已决定本轮不执行的收口项）。UI 显示"N/max"要用本字段：
+   * inFlight 含这两类不占槽的记录，直接拿它显示会出现"满负荷"却没有任务在跑的错觉。
    */
   slotsInUse: number;
   maxConcurrentRuns: number;

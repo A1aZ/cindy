@@ -1306,16 +1306,6 @@ export function CCAgentSessionView({
       setErrorTailBannerHiddenFor(null);
     }
   }, [syntheticContinuationPending, errorTailBannerHiddenFor]);
-  // 排队中的续跑项消失(dispatch 成功 → 消息落库,或被取消 / 被拒绝 → 原横幅重现)
-  // 时重算告警:两种结局都需要重新对账 —— 成功时原 error 已不是尾行、红点该灭;
-  // 取消时告警仍在、红点该回来(它在 enqueue 成功时被临时清掉了,见上方 continue
-  // handler)。只在 pending 由 true 落回 false 的边沿触发,不在挂起期间反复重算。
-  const prevSyntheticPendingRef = useRef(false);
-  useEffect(() => {
-    const was = prevSyntheticPendingRef.current;
-    prevSyntheticPendingRef.current = syntheticContinuationPending;
-    if (was && !syntheticContinuationPending) void refreshPendingAlerts();
-  }, [syntheticContinuationPending]);
   const handleErrorTailContinue = useCallback(async () => {
     if (!sessionId || !errorTailMsg) return;
     setErrorTailBannerHiddenFor(errorTailMsg.clientId);
@@ -1334,7 +1324,9 @@ export function CCAgentSessionView({
       // 横幅隐藏了(排队被暂停 / 阻塞时可能持续很久)。所以先临时清点让两者一致;
       // 排队项被取消或拒绝时,下方的 effect 会在 pending 落回 false 时重算恢复
       // (PR #879 review P1)。
-      ackErrorAlertHandled(sessionId);
+      // 本机会话才清:远程会话的红点靠隧道回执清被控端,而本机库里没有它的行,
+      // 重算恢复不了 —— 那条腿延后到 pending 落回 false 且横幅确实消失后再 ack。
+      if (!remoteDeviceId) ackErrorAlertHandled(sessionId);
     } catch (err) {
       setErrorTailBannerHiddenFor(null);
       toast.error(err instanceof Error ? err.message : String(err));
@@ -1406,6 +1398,27 @@ export function CCAgentSessionView({
   useEffect(() => {
     if (sessionId && session && !interruptedFromSession) refreshPendingAlerts();
   }, [sessionId, session, interruptedFromSession]);
+  // 排队中的续跑项消失(dispatch 成功 → 消息落库,或被取消 / 被拒绝 → 原横幅重现)
+  // 时重算告警:两种结局都需要重新对账 —— 成功时原 error 已不是尾行、红点该灭;
+  // 取消时告警仍在、红点该回来(本机会话的点在 enqueue 成功时被临时清掉了)。
+  // 只在挂起状态由 true 落回 false 的边沿触发,不在挂起期间反复重算。
+  const prevSyntheticPendingRef = useRef(false);
+  // 边沿处理要读「横幅此刻是否还在」,但把这些值写进 deps 会让 effect 在挂起期间反复
+  // 重跑;用 ref 持有最新值,effect 只由挂起状态驱动。
+  const alertStillPresentRef = useRef(false);
+  alertStillPresentRef.current = Boolean(errorTailMsg) || interruptedFromSession;
+  useEffect(() => {
+    const was = prevSyntheticPendingRef.current;
+    prevSyntheticPendingRef.current = syntheticContinuationPending;
+    if (!was || syntheticContinuationPending) return;
+    // 远程会话的 ack 延后到这里:本机库里没有它的行,重算无法恢复红点,所以必须先
+    // 确认横幅**真的消失了**(dispatch 成功、续跑已落库)才发隧道回执;若横幅重现
+    // (排队被取消 / 拒绝)就什么都不做,红点原样留着与横幅一致(review P1)。
+    if (remoteDeviceId && sessionId && !alertStillPresentRef.current) {
+      ackErrorAlertHandled(sessionId);
+    }
+    void refreshPendingAlerts();
+  }, [syntheticContinuationPending, remoteDeviceId, sessionId]);
   const handleSessionInterruptContinue = useCallback(async () => {
     if (!sessionId) return;
     setSessionInterruptAcked(true);
@@ -1417,8 +1430,8 @@ export function CCAgentSessionView({
       await makerChatStore.sendUiTrigger(sessionId, CONTINUE_AFTER_APP_EXIT_PROMPT);
       // 同 handleErrorTailContinue:enqueue 成功但续跑还没落库、durable ack 也要等
       // dispatch 成功,而横幅已隐藏 —— 先临时清点保持一致,排队被取消时由 pending
-      // 落回 false 的 effect 重算恢复。
-      ackErrorAlertHandled(sessionId);
+      // 落回 false 的 effect 重算恢复。远程会话同样延后(见那里的说明)。
+      if (!remoteDeviceId) ackErrorAlertHandled(sessionId);
     } catch (err) {
       setSessionInterruptAcked(false);
       toast.error(err instanceof Error ? err.message : String(err));

@@ -229,4 +229,17 @@ export function usePendingAlertAttention(): void {
       void refreshPendingAlerts();
     });
   }, []);
+
+  // error 行的**更新**广播(peer 收敛):另一个窗口 / device-link 端点点「忽略」时,
+  // dismissErrorMessage 会把 merge 后的行经 messages:created 广播出去,peer 的横幅
+  // 据此即时熄灭 —— 但 error-persisted 只在错误**首次落库**时发,peer 的红点因此会
+  // 一直残留到某个无关的重算(PR #879 review P1)。这里按 role 过滤后重算,把
+  // dismiss / 新错误行两种情况都收敛掉;非 error 行不触发,避免每条消息都查一次库。
+  useEffect(() => {
+    const onCreated = window.electronAPI?.localDb?.messages?.onCreated;
+    if (!onCreated) return;
+    return onCreated(({ message }) => {
+      if (message?.role === 'error') void refreshPendingAlerts();
+    });
+  }, []);
 }

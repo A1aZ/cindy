@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { BrowserWindow } from 'electron';
+
 import type { VoiceInputShortcut } from '../../../shared/voiceInputData.js';
+import type { GlobalVoiceInputIpcDeps } from '../global.js';
 
 const mocks = vi.hoisted(() => {
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
@@ -18,12 +21,15 @@ const mocks = vi.hoisted(() => {
   // 主窗口 + 它的顶层 frame。弹系统授权窗那两条 IPC 只认这一对，右侧栏 / Ghost 面板
   // 虽然也在 appContentWindows 里，但 sender 对不上就会被拒。
   const mainWindowMainFrame = { url: 'http://localhost:5173/index.html' };
+  // 单独留一份 Mock 引用，好在 beforeEach 里重置；断言成 BrowserWindow 后就取不到 Mock 了。
+  const mainWindowIsDestroyed = vi.fn(() => false);
+  const mainWindowWebContents = { id: 7, mainFrame: mainWindowMainFrame };
   const mainWindow = {
     id: 1,
-    isDestroyed: vi.fn(() => false),
-    webContents: { id: 7, mainFrame: mainWindowMainFrame },
+    isDestroyed: mainWindowIsDestroyed,
+    webContents: mainWindowWebContents,
   };
-  const settingsEvent = { sender: mainWindow.webContents, senderFrame: mainWindowMainFrame };
+  const settingsEvent = { sender: mainWindowWebContents, senderFrame: mainWindowMainFrame };
   // 冒充「另一个已登记的应用窗口」（右侧栏 / Ghost 面板就是这种）：通用闸放行，
   // 但主窗口收窄闸必须拒。
   const secondaryWindowEvent = {
@@ -38,9 +44,10 @@ const mocks = vi.hoisted(() => {
   const requestInputMonitoring = vi.fn();
   const assertTrustedAppRenderer = vi.fn();
   const updateSettings = vi.fn();
-  const getMainWindow = vi.fn(() => mainWindow);
-  // 闸只读 isDestroyed / webContents / mainFrame，没必要拼一整个 BrowserWindow。
-  const ipcDeps = { getMainWindow } as unknown as { getMainWindow: () => never };
+  // 闸只读 isDestroyed / webContents / mainFrame，没必要拼一整个 BrowserWindow，所以
+  // 断言收窄在这一处；ipcDeps 本身用真实类型，这样 deps 形状变化会在编译期暴露。
+  const getMainWindow = vi.fn(() => mainWindow as unknown as BrowserWindow);
+  const ipcDeps: GlobalVoiceInputIpcDeps = { getMainWindow };
   const registerShortcut = vi.fn((accelerator: string) => {
     void accelerator;
     return true;
@@ -51,6 +58,7 @@ const mocks = vi.hoisted(() => {
     registeredShortcuts,
     focusedWindow,
     mainWindow,
+    mainWindowIsDestroyed,
     settingsEvent,
     secondaryWindowEvent,
     modifierSetShortcut,
@@ -163,10 +171,10 @@ describe('voice input global shortcut registration', () => {
     mocks.requestInputMonitoring.mockResolvedValue({ ok: true, status: 'granted' });
     // 默认放行通用 sender 闸；需要验证它本身时在用例里让它抛。
     mocks.assertTrustedAppRenderer.mockReset();
-    mocks.mainWindow.isDestroyed.mockReset();
-    mocks.mainWindow.isDestroyed.mockReturnValue(false);
+    mocks.mainWindowIsDestroyed.mockReset();
+    mocks.mainWindowIsDestroyed.mockReturnValue(false);
     mocks.getMainWindow.mockReset();
-    mocks.getMainWindow.mockReturnValue(mocks.mainWindow);
+    mocks.getMainWindow.mockReturnValue(mocks.mainWindow as unknown as BrowserWindow);
     mocks.updateSettings.mockReset();
     mocks.updateSettings.mockImplementation((patch: unknown) => ({ shortcut: null, ...(patch as object) }));
     mocks.registerShortcut.mockReset();

@@ -1000,7 +1000,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('voice-input:open-microphone-settings'),
     openInputMonitoringSettings: (): Promise<VoiceInputGlobalResult> =>
       ipcRenderer.invoke('voice-input:open-input-monitoring-settings'),
-    // 失败走统一 IPC 错误协议（reject），所以成功路径只有 ok:true + 状态枚举。
+    // 失败走统一 IPC 错误协议（reject），所以成功路径只有 ok:true + 权限状态。
+    // status 沿用 VoiceInputPermissionSnapshot 的 string 形状（granted / denied / …）：
+    // 那是 microphone、accessibility 共用的既有类型，单独在这里收成字面量联合会与它们
+    // 不一致，收紧要整条一起动，超出本次改动范围。
     requestInputMonitoringPermission: (): Promise<{ ok: true; status: string }> =>
       ipcRenderer.invoke('voice-input:request-input-monitoring-permission'),
     muteSystemAudio: (): Promise<{ ok: true } | { ok: false; error: string }> =>

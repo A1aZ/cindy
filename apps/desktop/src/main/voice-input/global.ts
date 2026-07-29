@@ -516,7 +516,12 @@ function assertVoiceSettingsMainWindowSender(
     event.sender !== mainWindow.webContents ||
     event.senderFrame !== mainWindow.webContents.mainFrame
   ) {
-    throwIpcError('PERMISSION_DENIED', '此操作只能从 Cindy 主窗口的设置页发起');
+    // 与本模块其它 throwIpcError 一致用英文：这句是给日志/调试看的，renderer 侧要展示
+    // 时走 code → i18n 映射，不消费这里的原文。
+    throwIpcError(
+      'PERMISSION_DENIED',
+      'Input Monitoring permission can only be requested from the main window settings page.',
+    );
   }
 }
 

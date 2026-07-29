@@ -1101,6 +1101,8 @@ export function VoiceInputSection() {
   const pendingModifierShortcutCodeRef = useRef<string | null>(null);
   const pendingKeyboardShortcutRef = useRef<VoiceInputShortcut | null>(null);
   const shortcutSuspendPromiseRef = useRef<Promise<void> | null>(null);
+  // 快捷键提交的代次，见 commitRecordedShortcut。
+  const shortcutSubmissionRef = useRef(0);
   const nativeFnShortcutActiveRef = useRef(false);
   const nativeFnComboSeenRef = useRef(false);
   const externalDictionaryLearningSupported = window.electronAPI.platform === 'darwin';
@@ -1313,9 +1315,17 @@ export function VoiceInputSection() {
 
   const commitRecordedShortcut = useCallback(
     (shortcut: VoiceInputShortcut | null) => {
+      // 提交代次。录制框在这次提交 await 期间仍然开着，用户可以再录一个键提交第二次；
+      // main 侧的串行队列只保证最终存盘是最后那次，两次的**结果**照旧都会回到这里。
+      //
+      // 少了这道闸，过时那次的副作用会照常执行：收口录制框、弹它自己的提示，甚至在用户
+      // 最新选的快捷键根本不需要监听权限时（比如改成了 F16）弹出 macOS 授权窗。
+      const submission = (shortcutSubmissionRef.current += 1);
+      const isStaleSubmission = (): boolean => shortcutSubmissionRef.current !== submission;
       void (async () => {
         await shortcutSuspendPromiseRef.current;
         const result = await setShortcut(shortcut);
+        if (isStaleSubmission()) return;
         // 被更晚的一轮顶掉：那一轮才决定最终结果，这里静默丢弃，不报错也不收口录制态。
         if (!result.ok && result.errorCode === 'superseded') return;
         if (!result.ok) {

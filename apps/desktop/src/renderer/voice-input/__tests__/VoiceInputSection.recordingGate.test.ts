@@ -50,6 +50,22 @@ describe('VoiceInputSection shortcut recording gate', () => {
     expect(source).toContain('translateRef.current = t;');
   });
 
+  // main 侧的串行队列只保证最终存盘是最后一次提交，两次提交的结果照旧都会回到 renderer。
+  // 过时那次必须在动手之前被挡掉：否则它会收口录制框、弹自己的提示，甚至在用户最新选的
+  // 快捷键根本不需要监听权限时（改成了 F16）弹出 macOS 授权窗。
+  it('discards a stale shortcut submission before running its side effects', () => {
+    const source = readFileSync(
+      new URL('../../components/settings/VoiceInputSection.tsx', import.meta.url),
+      'utf8',
+    );
+
+    expect(source).toContain('const submission = (shortcutSubmissionRef.current += 1);');
+    // 闸必须在 superseded 判断和所有副作用之前：先 return 才谈得上「不动手」。
+    expect(source).toMatch(
+      /const result = await setShortcut\(shortcut\);\s*\n\s*if \(isStaleSubmission\(\)\) return;/,
+    );
+  });
+
   it('clears stale custom ASR form fields when the saved config is removed', () => {
     const source = readFileSync(
       new URL('../../components/settings/VoiceInputSection.tsx', import.meta.url),

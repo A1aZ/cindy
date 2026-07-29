@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 import { createPiTranslateContext, translatePiEvent, usageSnapshotOf } from '../translator.js';
 import type { AgentEvent } from '../../../types/events.js';
-import type { AsyncQueue } from '../shared/async-queue.js';
+import type { AsyncQueue } from '../../shared/async-queue.js';
 import type { Logger } from '../../../interfaces/logger.js';
 import type { PiRpcEvent } from '../rpc-client.js';
 

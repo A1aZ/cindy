@@ -40,6 +40,7 @@ import {
 import { DrizzleScheduleStorage, type SchedulerDrizzleDb } from './storage';
 import { ProjectAutomationLoader } from './project-automation-loader';
 import { MakerScheduleRunner } from './runner';
+import { buildForcedFailureRun } from './forcedFailureRun';
 import { ScriptScheduleRunner } from './script-runner';
 import { SchedulerScriptCapabilityBroker } from './script-capability-broker';
 import { DesktopNotifier } from './notifier';
@@ -142,16 +143,11 @@ export async function startScheduler(deps: StartSchedulerDeps): Promise<Schedule
       const schedule = await storage.get(scheduleId);
       if (!schedule) return;
       const run = (await storage.listRuns(scheduleId, 20)).find((r) => r.id === runId);
+      // 读回的行**不一定是终态**(落库失败时它还停在 'running'),判据与理由见
+      // buildForcedFailureRun。
       await notifier.notify(
         schedule,
-        run ?? {
-          id: runId,
-          scheduleId,
-          firedAt: Date.now(),
-          finishedAt: Date.now(),
-          status: 'failed',
-          errorMsg,
-        },
+        buildForcedFailureRun({ scheduleId, runId, errorMsg, run, now: Date.now() }),
       );
     },
   });

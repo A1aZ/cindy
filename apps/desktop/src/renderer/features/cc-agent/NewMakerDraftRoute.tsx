@@ -1617,7 +1617,17 @@ export function NewMakerDraftRoute() {
         effectiveCollab.enabled && collabPolicyEligible && policyEnabled;
       // device-link 切设备后,capabilities/providers hook 可能还没 re-render 到新设备快照;
       // 此时 effectiveFastMode / supportsFastMode / sendProviderId 仍基于旧设备。
-      if (isDeviceLinkDraft && (capabilitiesLoading || deviceProvidersLoading)) return false;
+      // remoteDraftState.loaded 必须一起看:换设备时我们会把它打回未加载(防上一台的默认值串台),
+      // 而 capabilities / providers 若已缓存则这两个 loading 立刻就是 false —— 只看它们会在
+      // maker:get-new-maker-defaults 还没回来时放行,于是提交的是 deviceLinkInitial 的 capability
+      // 兜底值(model / effort / permission / provider),而不是那台设备自己保存的草稿值;
+      // 会话一旦建出来,晚到的响应也修不回去了。
+      if (
+        isDeviceLinkDraft &&
+        (capabilitiesLoading || deviceProvidersLoading || !remoteDraftState.loaded)
+      ) {
+        return false;
+      }
       // 草稿里选定的来源(供应商):ChatInput 在发送时把"仍连接的显式选择"经 opts 传上来
       // (未选 / 已断开 → null = 跟随默认路由)。透传给 createSession 落盘 sessions.provider_id,
       // 让新会话首个请求就走对来源,与"会话内切来源"行为一致。device-link 远程会话不支持(下方分支跳过)。
@@ -2135,6 +2145,7 @@ export function NewMakerDraftRoute() {
       isRemoteProjectDraft,
       isDeviceLinkDraft,
       capabilitiesLoading,
+      remoteDraftState.loaded,
       deviceProvidersLoading,
       effectiveDeviceLinkDeviceId,
       effectiveDeviceLinkDeviceName,
@@ -2196,7 +2207,12 @@ export function NewMakerDraftRoute() {
       }
       const shouldEnableCollab =
         effectiveCollab.enabled && collabPolicyEligible && policyEnabled;
-      if (isDeviceLinkDraft && (capabilitiesLoading || deviceProvidersLoading)) {
+      // 同 handleSend:remoteDraftState 未就绪时不得放行,否则提交 capability 兜底值而非该设备的
+      // 草稿值(缓存已热时另两个 loading 会立刻为 false,拦不住)。
+      if (
+        isDeviceLinkDraft &&
+        (capabilitiesLoading || deviceProvidersLoading || !remoteDraftState.loaded)
+      ) {
         throw new Error(t('ccAgent.draft.deviceStillLoading'));
       }
       const { proceed } = await vendorAuthGate.checkAndConfirm(authVendor, {
@@ -2385,6 +2401,7 @@ export function NewMakerDraftRoute() {
     [
       isDeviceLinkDraft,
       capabilitiesLoading,
+      remoteDraftState.loaded,
       deviceProvidersLoading,
       vendorAuthGate,
       authVendor,

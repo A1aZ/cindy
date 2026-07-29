@@ -302,6 +302,20 @@ describe('Shared create project picker', () => {
     );
   });
 
+  // #807 review 第十轮:两个创建 guard 必须把 remoteDraftState.loaded 一起看。换设备时我们把它
+  // 打回未加载(防上一台默认值串台),而 capabilities/providers 若已缓存则那两个 loading 立刻为
+  // false —— 只看它们会在 maker:get-new-maker-defaults 回来前放行,提交 capability 兜底值而不是
+  // 该设备保存的草稿值,会话建出来后晚到的响应也修不回去。
+  it('waits for remote defaults before allowing send or goal creation', () => {
+    const guards = newMakerDraftRouteSource.match(
+      /capabilitiesLoading \|\| deviceProvidersLoading \|\| !remoteDraftState\.loaded/g,
+    ) ?? [];
+    expect(guards.length).toBe(2);
+    expect(newMakerDraftRouteSource).not.toContain(
+      'if (isDeviceLinkDraft && (capabilitiesLoading || deviceProvidersLoading)) return false;',
+    );
+  });
+
   // #807 review 第九轮:设备列表刷新要按请求序号丢弃过期响应。首次加载与两个监听会并发调
   // refresh,REST 响应可能乱序 —— 更早的 listDevices 晚到会把新的权威快照覆盖掉,把刚被解除配对
   // 的设备连同 loaded=true 一起写回来,于是回落认为目标仍有效、picker 也允许再次选中它。

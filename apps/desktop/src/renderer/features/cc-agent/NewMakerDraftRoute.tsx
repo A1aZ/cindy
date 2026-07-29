@@ -1536,6 +1536,23 @@ export function NewMakerDraftRoute() {
       // 换机器 = 换文件系统:草稿里的 @file / @dir chip 与路径型附件都指着**上一台**机器(或本机)
       // 的路径,随首条消息发到新设备后在那边指向完全不同的东西。三条换设备路径共用同一清理。
       cleanupCrossFilesystemDraftContext();
+      // 目标设备的能力 / 供应商 / Git safety 快照是「订阅时拉一次、无 TTL、只在设备下线才 evict」的。
+      // 它一直在线期间装了新模型、连上或断开了供应商,控制端不会知道;切回它时 hook 的 effect 虽然
+      // 因 deviceId 变化而重跑,却直接命中旧缓存 —— composer 会显示并向它提交一个它可能已经不再
+      // 支持的 model / provider(Codex review P1)。与「添加远程项目」那条路径同口径先 evict。
+      //
+      // 与那条路径的两点刻意差异:
+      //   · 不再 prefetch —— 那里需要它是因为允许「目标就是当前设备」(deps 不变、effect 不重跑,
+      //     只能靠 subscriber 送新数据);这里上面已经把「重选同一设备」早返回掉,deviceId 必然
+      //     变化 → effect 必然重跑 → evict 后必然 cache miss 并自行 fetch。
+      //   · 不做阻塞式 direct invoke 验证 —— pill 只让在线设备可选,而它是同步回调,为验证把它
+      //     改成异步会让点击后一段时间毫无反馈。快照未就绪期间由 send / goal 的
+      //     capabilitiesLoading / deviceProvidersLoading / remoteDraftState.loaded 三重 gate 兜住。
+      if (deviceId) {
+        evictDeviceCapabilities(deviceId);
+        evictDeviceProviders(deviceId);
+        evictDeviceGitSafetySettings(deviceId);
+      }
       // 换设备前**同步失效上一台的远程默认值快照**。
       //
       // 不做的话会串台:patchDraft 只改 deviceId,而 dlSel / remoteDraftState / dlSeedKeyRef 仍

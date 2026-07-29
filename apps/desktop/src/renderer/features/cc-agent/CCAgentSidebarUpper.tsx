@@ -162,6 +162,9 @@ import {
 } from './lib/pinnedSidebarOrder';
 import { createLogger } from '@/lib/logger';
 import { useProjectPickerOptions } from '@/hooks/useProjectPickerOptions';
+import { evictDeviceCapabilities } from '@/hooks/useAgentCapabilities';
+import { evictDeviceProviders } from '@/hooks/useDeviceProviders';
+import { evictDeviceGitSafetySettings } from '@/hooks/useGitSafetySettings';
 import { recentWorkdirsStore } from '@/lib/recentWorkdirsStore';
 import { useRemoteProjectSessions } from '@/features/device-link/remoteProjectsStore';
 import {
@@ -1492,6 +1495,15 @@ function ExpandedView({
       // device-link 远程项目:与本地一致先跳草稿页(主页)。草稿带上 deviceLink 目标
       // (workingDir + deviceId),草稿页显示"为远程设备新建"横幅,首条消息发出时再经
       // 隧道在被控端建会话(NewMakerDraftRoute 的 handleSend 远程分支)。
+      // 与创建页两条换设备路径同口径:被控端的能力 / 供应商 / Git safety 快照「拉一次、无 TTL、
+      // 只在设备下线才 evict」,它一直在线期间装了新模型或改了供应商,控制端不会知道 —— 草稿页
+      // 挂载时 hook 直接命中旧缓存,composer 会显示并向它提交可能已不支持的 model / provider。
+      // 这条路径是既有的(#807 未改动它),但缺口同类,一并补上,免得只有创建页那两条是对的。
+      if (project.deviceLinkDeviceId) {
+        evictDeviceCapabilities(project.deviceLinkDeviceId);
+        evictDeviceProviders(project.deviceLinkDeviceId);
+        evictDeviceGitSafetySettings(project.deviceLinkDeviceId);
+      }
       patchNewMakerDraft({
         workingDir: project.workingDir,
         remoteHostId: project.deviceLinkDeviceId ? null : project.remoteHostId,

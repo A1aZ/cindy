@@ -67,6 +67,11 @@ const scheduleChipsSource = readFileSync(
   'utf8',
 );
 
+const sidebarUpperSource = readFileSync(
+  resolve(__dirname, '..', 'features', 'cc-agent', 'CCAgentSidebarUpper.tsx'),
+  'utf8',
+);
+
 describe('Shared create project picker', () => {
   it('builds project options from the persistent recent_workdirs table, not from live sessions', () => {
     // 0031 起创建页草稿的"项目"下拉脱离 sessions 列表,改读 recent_workdirs
@@ -693,6 +698,30 @@ describe('Shared create project picker', () => {
     expect(untilDeps).toContain('cleanupCrossFilesystemDraftContext();');
     expect(effect.slice(effect.indexOf('}, ['), effect.indexOf('}, [') + 220)).toContain(
       'cleanupCrossFilesystemDraftContext,',
+    );
+  });
+
+  // #807 review 第十九轮:被控端能力 / 供应商 / Git safety 快照是「拉一次、无 TTL、只在设备下线
+  // 才 evict」的,设备一直在线期间装了新模型或改了供应商,控制端不会知道 —— 切回它时 hook 的
+  // effect 虽因 deviceId 变化重跑,却直接命中旧缓存,composer 会向它提交已不支持的 model /
+  // provider。**每一条**把草稿指向某台被控设备的路径都必须先 evict。
+  it('evicts the target device snapshots on every path that points the draft at a device', () => {
+    // ① 设备 pill 直接切:早返回已排除「重选同一设备」,所以 evict 后必然 cache miss 自行 fetch,
+    //    不需要像浏览器路径那样再 prefetch。
+    const handler = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const handleDeviceChange = useCallback('),
+    );
+    const untilPatch = handler.slice(0, handler.indexOf('patchDraft('));
+    expect(untilPatch).toContain('evictDeviceCapabilities(deviceId);');
+    expect(untilPatch).toContain('evictDeviceProviders(deviceId);');
+    expect(untilPatch).toContain('evictDeviceGitSafetySettings(deviceId);');
+    // ② 设备域浏览器路径既有的 evict 不许被删。
+    expect(newMakerDraftRouteSource).toContain('evictDeviceCapabilities(target.deviceId);');
+    // ③ 侧边栏点远程项目进草稿(既有路径,同类缺口)。
+    expect(sidebarUpperSource).toContain('evictDeviceCapabilities(project.deviceLinkDeviceId);');
+    expect(sidebarUpperSource).toContain('evictDeviceProviders(project.deviceLinkDeviceId);');
+    expect(sidebarUpperSource).toContain(
+      'evictDeviceGitSafetySettings(project.deviceLinkDeviceId);',
     );
   });
 

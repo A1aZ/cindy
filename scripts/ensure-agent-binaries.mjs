@@ -26,10 +26,12 @@ const LFS_POINTER_HEADER = 'version https://git-lfs.github.com/spec/v1';
 const MIN_EXPECTED_BYTES = 1024;
 
 // kind → 本地落点 + 提供 ensurePlatform/readPinnedVersion 的下载模块
+// dirDist: 产物是"目录 + 主执行文件"（非单文件），sibling-worktree 单文件复用不适用
 const KINDS = {
   claude: { binDir: 'claude-code-bin', base: 'claude', module: '../tools/claude/update.mjs' },
   codex: { binDir: 'codex-bin', base: 'codex', module: '../tools/codex/update.mjs' },
   ripgrep: { binDir: 'ripgrep-bin', base: 'rg', module: '../tools/ripgrep/update.mjs' },
+  pi: { binDir: 'pi-bin', base: 'pi', module: '../tools/pi/update.mjs', dirDist: true },
 };
 
 const log = (msg) => console.log(`\x1b[36m[ensure-agent-binaries]\x1b[0m ${msg}`);
@@ -178,7 +180,8 @@ export async function ensureBinary(kind, platformKey = currentPlatformKey(), { f
   // 磁盘），弱网/断网时这是唯一不用等超时的路径。force 语义是"强制重新获取"，
   // 保持走正宗下载不复用。
   let reusedFrom = null;
-  if (!force) {
+  // dirDist kind 的产物含主执行文件之外的运行时资产，单文件复用会产出缺资产的坏安装。
+  if (!force && !cfg.dirDist) {
     reusedFrom = tryReuseFromSiblingWorktree({
       candidates: listSiblingWorktreeRoots(ROOT).map((root) =>
         path.join(root, 'apps', cfg.binDir, platformKey),

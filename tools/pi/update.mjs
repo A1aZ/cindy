@@ -1,0 +1,378 @@
+#!/usr/bin/env node
+
+/**
+ * update.mjs — 下载 earendil-works/pi GitHub Release 各平台产物
+ *
+ * 用法：
+ *   node tools/pi/update.mjs            # 拉最新版
+ *   node tools/pi/update.mjs 0.82.1     # 指定版本（裸版本号，内部拼 v 前缀）
+ *
+ * 与 claude / codex 的关键差异：pi 的 release 归档不是单文件二进制，而是一个
+ * `pi/` 目录（bun compile 主执行文件 + theme / docs / native prebuilds / wasm 等
+ * 运行时资产；实测缺 theme/ 时 RPC 模式启动即崩）。因此：
+ *   - updates/<version>/<platform>/ 与 apps/pi-bin/<platform>/ 存放的是**整目录内容**，
+ *     主执行文件为其中的 pi(.exe)，binaryPath 语义与单文件 kind 一致（指向可执行文件）。
+ *   - promote 是目录同步（先清目标再拷贝，避免升级残留旧资产）。
+ *   - scripts/ensure-agent-binaries.mjs 对 dirDist kind 跳过 sibling-worktree 单文件复用。
+ *
+ * 供应链加固：与 codex 同策略——解压前用 GitHub Release asset 元数据的 digest
+ * (sha256:<hex>) 校验归档，不符 / 拿不到一律删归档 exit 1（fail-closed）。
+ *
+ * win32 说明：pi 的 windows 产物是 .zip；本脚本用 `tar -xf` 解压（macOS / Win10+
+ * 自带 bsdtar 支持 zip；GNU tar 不支持——在 Linux 上解 win32 产物会失败，目前
+ * 没有这条路径的需求）。
+ */
+
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+import { fetchJsonWithTimeout, downloadToFileWithTimeout, createDownloadProgressLogger } from '../shared/fetch-with-timeout.mjs';
+import { normalizeExpectedSha256, verifyFileSha256OrRemove, sha256File } from '../shared/verify-sha256.mjs';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = path.resolve(__dirname, '../..');
+
+const RELEASES_LATEST_URL = 'https://api.github.com/repos/earendil-works/pi/releases/latest';
+const RELEASES_BY_TAG_URL = (tag) => `https://api.github.com/repos/earendil-works/pi/releases/tags/${tag}`;
+const CACHE_FILE = path.join(__dirname, 'latest.json');
+const UPDATES_DIR = path.join(__dirname, 'updates');
+const BIN_DIR = path.join(PROJECT_ROOT, 'apps', 'pi-bin');
+
+// 平台 → GitHub Release 资产文件名 + 归档内主执行文件名
+const PLATFORMS = [
+  { key: 'darwin-arm64', asset: 'pi-darwin-arm64.tar.gz', binFile: 'pi' },
+  { key: 'darwin-x64', asset: 'pi-darwin-x64.tar.gz', binFile: 'pi' },
+  { key: 'linux-x64', asset: 'pi-linux-x64.tar.gz', binFile: 'pi' },
+  { key: 'linux-arm64', asset: 'pi-linux-arm64.tar.gz', binFile: 'pi' },
+  { key: 'win32-x64', asset: 'pi-windows-x64.zip', binFile: 'pi.exe' },
+];
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function ghHeaders() {
+  const headers = { 'User-Agent': 'cindy-pi-update' };
+  if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+  return headers;
+}
+
+async function fetchReleaseMeta(tag) {
+  const url = tag ? RELEASES_BY_TAG_URL(tag) : RELEASES_LATEST_URL;
+  return fetchJsonWithTimeout(url, { headers: ghHeaders() });
+}
+
+function versionFromTag(tag) {
+  const m = tag.match(/^v(\d+\.\d+\.\d+)$/);
+  if (!m) throw new Error(`Unexpected tag format: ${tag} (expected vX.Y.Z)`);
+  return m[1];
+}
+
+function readCachedVersion() {
+  if (!fs.existsSync(CACHE_FILE)) return null;
+  try {
+    const json = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
+    return json.version || null;
+  } catch {
+    return null;
+  }
+}
+
+function runtimeAssetPins(meta, version) {
+  return Object.fromEntries(PLATFORMS.map(({ key, asset: assetName }) => {
+    const asset = (meta.assets || []).find((candidate) => candidate.name === assetName);
+    const sha256 = normalizeExpectedSha256(asset?.digest);
+    if (!asset || typeof asset.browser_download_url !== 'string' || !sha256) {
+      throw new Error(`Cannot pin pi ${version} ${key}: release asset metadata is incomplete`);
+    }
+    return [key, {
+      url: asset.browser_download_url,
+      sha256,
+      ...(typeof asset.size === 'number' && asset.size > 0 ? { size: asset.size } : {}),
+    }];
+  }));
+}
+
+function saveCache(meta, version) {
+  const cache = {
+    version,
+    tag_name: meta.tag_name,
+    name: meta.name,
+    published_at: meta.published_at,
+    runtimeAssets: runtimeAssetPins(meta, version),
+  };
+  fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2) + '\n');
+}
+
+function formatMB(bytes) {
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+const LFS_POINTER_HEADER = 'version https://git-lfs.github.com/spec/v1';
+
+function isUsableCache(filePath) {
+  try {
+    if (fs.statSync(filePath).size < 1024) return false;
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const buf = Buffer.alloc(64);
+      const n = fs.readSync(fd, buf, 0, buf.length, 0);
+      if (buf.subarray(0, n).toString('utf8').startsWith(LFS_POINTER_HEADER)) return false;
+    } finally {
+      fs.closeSync(fd);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 指定版本下，目标平台的 updates/<version>/<platform>/<binFile> 是否都已是可用缓存。 */
+function targetsExist(version, targets) {
+  return targets.every(({ key, binFile }) => isUsableCache(path.join(UPDATES_DIR, version, key, binFile)));
+}
+
+/** 用 bsdtar 解压归档（tar.gz / zip 皆可识别）到 destDir。 */
+async function extractArchive(archivePath, destDir) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('tar', ['-xf', '-'], { cwd: destDir, stdio: ['pipe', 'inherit', 'inherit'] });
+    child.on('error', reject);
+    child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`tar exited with code ${code}`))));
+    fs.createReadStream(archivePath).pipe(child.stdin);
+  });
+}
+
+/**
+ * pi 归档解压出唯一的 `pi/` 目录；把其内容上移到 extractDir 本级并删除空壳，
+ * 使 updates/<version>/<platform>/ 直接就是可运行的产物目录。
+ */
+function flattenExtractedDir(extractDir, expectedBinName) {
+  const innerOriginal = path.join(extractDir, 'pi');
+  if (!fs.existsSync(innerOriginal) || !fs.statSync(innerOriginal).isDirectory()) {
+    const entries = fs.readdirSync(extractDir);
+    throw new Error(`No pi/ directory found after extracting to ${extractDir}; got: ${entries.join(', ')}`);
+  }
+  // 归档内目录名 pi/ 与其中的主二进制 pi 同名——直接上移会撞名（EISDIR），
+  // 先把内层目录改成临时名再逐个上移。
+  const inner = path.join(extractDir, '.pi-extract-tmp');
+  fs.renameSync(innerOriginal, inner);
+  for (const name of fs.readdirSync(inner)) {
+    fs.renameSync(path.join(inner, name), path.join(extractDir, name));
+  }
+  fs.rmdirSync(inner);
+  const binPath = path.join(extractDir, expectedBinName);
+  if (!fs.existsSync(binPath)) {
+    throw new Error(`Extracted pi dist missing main executable: ${binPath}`);
+  }
+  return binPath;
+}
+
+async function downloadAsset(meta, version, platformKey, assetName, finalBinName, { force = false, throughputGuard = false } = {}) {
+  const asset = (meta.assets || []).find((a) => a.name === assetName);
+  if (!asset) throw new Error(`Asset not found in release: ${assetName} (tag ${meta.tag_name})`);
+
+  const destDir = path.join(UPDATES_DIR, version, platformKey);
+  const finalBinPath = path.join(destDir, finalBinName);
+
+  if (!force && isUsableCache(finalBinPath)) {
+    const sha256Path = finalBinPath + '.sha256.bin';
+    if (fs.existsSync(sha256Path)) {
+      const storedHash = fs.readFileSync(sha256Path, 'utf8').trim();
+      verifyFileSha256OrRemove(finalBinPath, storedHash, `pi ${platformKey} binary v${version} (cached)`);
+      const size = fs.statSync(finalBinPath).size;
+      console.log(`  [${platformKey}] skip (cached, sha256 ok, ${formatMB(size)})`);
+      return;
+    }
+    console.log(`  [${platformKey}] cached binary missing sha256 marker, re-downloading for verification...`);
+  }
+
+  // 目录形态：重下前清空平台目录，避免旧版本资产残留混入新版本。
+  fs.rmSync(destDir, { recursive: true, force: true });
+  fs.mkdirSync(destDir, { recursive: true });
+
+  const url = asset.browser_download_url;
+  const expectedDigest = asset.digest;
+  if (!expectedDigest) {
+    throw new Error(
+      `pi ${platformKey} asset ${assetName}@${version}: digest field absent — ` +
+      `GitHub only provides asset digests for releases published after 2025-06-03.`,
+    );
+  }
+  console.log(`  [${platformKey}] ${url}`);
+
+  const archiveExt = assetName.endsWith('.zip') ? 'zip' : 'tar.gz';
+  const tmpArchive = path.join(os.tmpdir(), `pi-${version}-${platformKey}-${Date.now()}.${archiveExt}`);
+  const progress = createDownloadProgressLogger(platformKey);
+  try {
+    await downloadToFileWithTimeout(url, tmpArchive, { headers: ghHeaders() }, {
+      onProgress: progress.onProgress,
+      minThroughputBytesPerSec: throughputGuard ? undefined : 0,
+    });
+  } finally {
+    progress.finish();
+  }
+
+  try {
+    verifyFileSha256OrRemove(tmpArchive, expectedDigest, `pi ${platformKey} asset ${assetName}@${version}`);
+    console.log(`    [${platformKey}] sha256 ok`);
+
+    await extractArchive(tmpArchive, destDir);
+    flattenExtractedDir(destDir, finalBinName);
+    fs.writeFileSync(finalBinPath + '.sha256.bin', sha256File(finalBinPath) + '\n');
+
+    if (!finalBinName.endsWith('.exe')) {
+      try { fs.chmodSync(finalBinPath, 0o755); } catch { /* ignore */ }
+    }
+
+    const size = fs.statSync(finalBinPath).size;
+    console.log(`    → ${finalBinPath} (${formatMB(size)})`);
+  } finally {
+    try { fs.unlinkSync(tmpArchive); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * 把 updates/<version>/<platform>/（整目录）同步到 apps/pi-bin/<platform>/。
+ * 先清目标目录再拷贝（升级不留旧资产）；目标被占用（app 运行中）warn 跳过。
+ */
+function promoteOnePlatform(version, key, binFile) {
+  const srcDir = path.join(UPDATES_DIR, version, key);
+  const srcBin = path.join(srcDir, binFile);
+  const destDir = path.join(BIN_DIR, key);
+  const destBin = path.join(destDir, binFile);
+
+  if (!fs.existsSync(srcBin)) {
+    console.warn(`  [${key}] WARN: source missing, skipping (${srcBin})`);
+    return;
+  }
+
+  try {
+    fs.rmSync(destDir, { recursive: true, force: true });
+    fs.mkdirSync(destDir, { recursive: true });
+    fs.cpSync(srcDir, destDir, { recursive: true });
+  } catch (err) {
+    if (err.code === 'EBUSY' || err.code === 'ETXTBSY' || err.code === 'EPERM') {
+      console.warn(`  [${key}] WARN: target locked (probably running). Close the app and re-run, or copy manually:`);
+      console.warn(`         cp -R "${srcDir}/" "${destDir}/"`);
+      return;
+    }
+    throw err;
+  }
+  if (!binFile.endsWith('.exe')) {
+    try { fs.chmodSync(destBin, 0o755); } catch { /* ignore */ }
+  }
+
+  // 写版本标记，供 scripts/ensure-agent-binaries.mjs 判断是否需要随 pin 升级刷新
+  try { fs.writeFileSync(path.join(destDir, '.version'), version + '\n'); } catch { /* ignore */ }
+
+  const size = fs.statSync(destBin).size;
+  console.log(`  [${key}] → ${destBin} (${formatMB(size)})`);
+}
+
+function promoteToVendorBin(version, platforms = PLATFORMS) {
+  console.log('');
+  console.log(`==> Promoting to apps/pi-bin/ ...`);
+  for (const { key, binFile } of platforms) {
+    promoteOnePlatform(version, key, binFile);
+  }
+}
+
+// ── Programmatic API（供 scripts/ensure-agent-binaries.mjs 复用） ─────────────
+
+/** 读 latest.json 里 pin 的版本号（按需下载以此为准，不取 upstream latest）。 */
+export function readPinnedVersion() {
+  return readCachedVersion();
+}
+
+/**
+ * 确保单个平台的产物就位：解析对应 release tag、下载并 promote 到 apps/pi-bin/<platformKey>/。
+ */
+export async function ensurePlatform({ version, platformKey, force = false }) {
+  const entry = PLATFORMS.find((p) => p.key === platformKey);
+  if (!entry) throw new Error(`Unknown platform key for pi: ${platformKey}`);
+  const meta = await fetchReleaseMeta(`v${version}`);
+  await downloadAsset(meta, version, platformKey, entry.asset, entry.binFile, { force, throughputGuard: true });
+  promoteOnePlatform(version, platformKey, entry.binFile);
+}
+
+// ── Args ───────────────────────────────────────────────────────────────────
+
+function parseArgs(argv) {
+  const args = { version: null, force: false, platform: null };
+  for (const a of argv) {
+    if (a === '--force' || a === '-f') args.force = true;
+    else if (a.startsWith('--platform=')) args.platform = a.slice('--platform='.length);
+    else if (a.startsWith('--version=')) args.version = a.slice('--version='.length);
+    else if (!a.startsWith('-')) args.version = a;
+  }
+  return args;
+}
+
+function resolvePlatforms(platformKey) {
+  if (!platformKey) return PLATFORMS;
+  const entry = PLATFORMS.find((p) => p.key === platformKey);
+  if (!entry) throw new Error(`Unknown --platform=${platformKey} (known: ${PLATFORMS.map((p) => p.key).join(', ')})`);
+  return [entry];
+}
+
+// ── Main ───────────────────────────────────────────────────────────────────
+
+async function main() {
+  const { version: requestedVersion, force, platform } = parseArgs(process.argv.slice(2));
+  const targets = resolvePlatforms(platform);
+
+  if (requestedVersion) {
+    const tag = `v${requestedVersion}`;
+    console.log(`==> Pinning pi to ${requestedVersion} (specified, tag=${tag})...`);
+    const meta = await fetchReleaseMeta(tag);
+    for (const { key, asset, binFile } of targets) {
+      await downloadAsset(meta, requestedVersion, key, asset, binFile, { force });
+    }
+    promoteToVendorBin(requestedVersion, targets);
+    saveCache(meta, requestedVersion);
+    console.log('');
+    console.log('=== Done ===');
+    console.log(`Version: ${requestedVersion}`);
+    console.log(`Output:  ${path.join(UPDATES_DIR, requestedVersion)}`);
+    console.log(`Bin:     ${BIN_DIR}`);
+    return;
+  }
+
+  console.log('==> Fetching latest release from GitHub (earendil-works/pi)...');
+  const meta = await fetchReleaseMeta(null);
+  const latestVersion = versionFromTag(meta.tag_name);
+
+  const cachedVersion = readCachedVersion();
+  console.log(`    Latest: ${latestVersion} (${meta.tag_name})`);
+  console.log(`    Cached: ${cachedVersion ?? '(none)'}`);
+
+  if (cachedVersion === latestVersion && !force && targetsExist(latestVersion, targets)) {
+    saveCache(meta, latestVersion);
+    promoteToVendorBin(latestVersion, targets);
+    console.log('==> Already up to date.');
+    return;
+  }
+
+  console.log(`==> New version detected (${cachedVersion ?? 'none'} → ${latestVersion}), downloading...`);
+  for (const { key, asset, binFile } of targets) {
+    await downloadAsset(meta, latestVersion, key, asset, binFile, { force });
+  }
+
+  saveCache(meta, latestVersion);
+  promoteToVendorBin(latestVersion, targets);
+
+  console.log('');
+  console.log('=== Done ===');
+  console.log(`Version: ${latestVersion}`);
+  console.log(`Output:  ${path.join(UPDATES_DIR, latestVersion)}`);
+  console.log(`Bin:     ${BIN_DIR}`);
+}
+
+const isMain = import.meta.url === pathToFileURL(process.argv[1] ?? '').href;
+if (isMain) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

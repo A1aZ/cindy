@@ -1464,6 +1464,13 @@ export class MakerScheduleRunner implements ScheduleRunner {
         // 不让已暂停/删除的任务在会话里继续执行(PR #972 review P2)。
         if (ctx.signal.aborted) {
           endQueueWait(false);
+          // **自己把等待门收口**。abort 若在本回调执行期间到达(第一行就已经把 dispatched
+          // 置 true),onAbort 走的是"中断 live turn"那条分支、不会 failDispatch;而
+          // trackPoll 见 dispatched 也直接早退 —— 两边都不收口,dispatchGate 就永不 settle,
+          // 这条 run 会一直挂 running 直到卡死守卫兜底(review #944 第十七轮 P1)。
+          // failDispatch 对已 settle 的 promise 是 no-op,重复调用安全(见 onAbort 顶注)。
+          // 错误文案保留 "aborted" 字样:引擎据此把本轮记为用户中断而不是 failed。
+          failDispatch(new Error('queued heartbeat aborted by schedule pause/delete'));
           blockAcceptedDispatch(live, 'late-dispatch after pause/delete');
           return;
         }

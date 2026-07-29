@@ -888,6 +888,31 @@ describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', ()
     }
   });
 
+  it('abort 撞在 onAccepted 执行期间:等待门自己收口,run 不永久挂 running', async () => {
+    // onAccepted 第一行就把 dispatched 置 true。abort 若在此之后到达:
+    //   - onAbort 走"中断 live turn"分支,不 failDispatch;
+    //   - trackPoll 见 dispatched 直接早退,也不 failDispatch。
+    // 两边都不收口 → dispatchGate 永不 settle → run 一直挂 running 到卡死守卫兜底
+    // (review #944 第十七轮 P1)。取消分支必须自己 failDispatch。
+    const harness = createSessionHarness(async () => ({ accepted: true }));
+    const queue = createQueueHarness({ busy: true, removeTriggersDiscard: false });
+    const { runner, maker } = createRunnerHarness(harness.session, queue.deps);
+    const ctx = createFireContext();
+    // getSession 在 dispatched=true 之后、ctx.signal.aborted 复核之前被调用 ——
+    // 借它精确复刻"abort 撞在回调执行期间"这个窗口。
+    (maker.getSession as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      ctx.abortController.abort();
+      return harness.session;
+    });
+
+    const firePromise = runner.fire(heartbeatSchedule(), ctx);
+    await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+    await queue.accept();
+
+    // 修复前这里永不 settle(fire 挂死);修复后以"用户中断"收口
+    await expect(firePromise).rejects.toThrow(/abort/i);
+  });
+
   it('排队期间系统挂起:睡着的时间不计入等待额度', async () => {
     // 排队上限用壁钟量"等了多久",而机器睡觉时定时器不跑、壁钟照走:睡够 30 分钟醒来
     // 第一拍就会撤掉一条完全健康的排队 prompt(review #944 第十六轮 P1)。

@@ -123,6 +123,19 @@ export interface SchedulerOptions {
    * forceReleaseStalledRun)。默认 RUN_STALL_ABORT_GRACE_MS。
    */
   runStallAbortGraceMs?: number;
+  /**
+   * 卡死收口的通知出口。通知投递本来住在 host 的两个 runner 里(它们各自持有
+   * Notifier),而卡死收口刻意绕过了 runner —— 要么 runner 压根不返回、要么它把守卫
+   * abort 当普通中断处理。没有这个回调,用户配了 desktop/feishu 通知也只会看到一个
+   * 未读红点(review #944 P1)。
+   *
+   * 由 host 注入,内部自行处理失败;引擎 fire-and-forget 调用,绝不因通知失败影响收口。
+   */
+  notifyForcedFailure?: (input: {
+    scheduleId: string;
+    runId: string;
+    errorMsg: string;
+  }) => Promise<void> | void;
   /** 宿主注入的 Scheduler 实例标识，用于区分同机多实例日志。 */
   instanceId?: string;
   /** 可选宿主进程标识；package 本身不读取 process，保持运行环境解耦。 */
@@ -267,6 +280,7 @@ export class Scheduler extends EventEmitter {
   // silenceRun(runId) 已经锁定了 run,可用该 sessionId 尽早广播静默抑制信号。
   private readonly runIdToBoundSessionId = new Map<string, string>();
 
+  private readonly notifyForcedFailureHook?: SchedulerOptions['notifyForcedFailure'];
   private readonly isManagedWorkspaceDir?: (dir: string) => boolean;
   private readonly passive: boolean;
   private lastDbSyncAt = 0;
@@ -299,6 +313,7 @@ export class Scheduler extends EventEmitter {
     this.tickIntervalMs = opts.tickIntervalMs ?? DEFAULT_TICK_MS;
     this.generateId = opts.generateId ?? defaultGenerateId;
     this.isManagedWorkspaceDir = opts.isManagedWorkspaceDir;
+    this.notifyForcedFailureHook = opts.notifyForcedFailure;
     this.passive = opts.passive ?? false;
     this.maxConcurrentRuns = Math.max(1, opts.maxConcurrentRuns ?? DEFAULT_MAX_CONCURRENT_RUNS);
     // 0 / 负值 = 关闭卡死守卫(逃生阀:守卫误伤时宿主可一键停掉,不必回滚版本)。
@@ -411,9 +426,9 @@ export class Scheduler extends EventEmitter {
     this.waitingSchedules.clear();
     this.inflightControllers.clear();
     this.inflightByschedule.clear();
-    // 全部 in-flight 已被清空,不再有"迟到 settle 需要丢弃"的对象;留着只会让下次
-    // 复用同一 runId(理论上不会)时误伤。
-    this.abandonedRuns.clear();
+    // abandonedRuns **刻意不清**:stop 只是发出 abort,被强制收口过的 run 的 runner
+    // 可能仍在跑、几分钟后才 settle。清掉保护会让那次迟到 settle 覆写用户已看到的
+    // failed 并二次重排 schedule(review #944 P1)。集合只存 runId,留到进程退出无成本。
     this.stopHeartbeatLoopIfIdle();
     this.sessionIdToRunId.clear();
     this.runIdToSessionId.clear();
@@ -631,6 +646,9 @@ export class Scheduler extends EventEmitter {
     // 如果是被 delete/pause 主动 abort 的,把 run 标 'aborted' 而非 'failed' —— 让 UI
     // 用 RunHistoryCard 渲染时能区分"用户中断"和"agent 自爆"。判定见 wasRunAborted。
     const wasAborted = this.wasRunAborted(schedule, controller.signal, runError);
+    // 守卫 abort 与用户 abort 的收口语义相反(见 wasStallAborted):必须在写 run 行与
+    // 决定是否重排之前把两者分开。
+    const stallAborted = this.wasStallAborted(runId);
 
     // Mark the run row (schedule_runs table). The schedule row update below is a SEPARATE
     // table — do not collapse the two storage.update calls.
@@ -659,7 +677,13 @@ export class Scheduler extends EventEmitter {
       return;
     }
 
-    if (wasAborted) {
+    if (stallAborted) {
+      // 卡死守卫中断:异常必须可见(红点 + 按 notify 配置提醒),且下方重排照常执行。
+      const errorMsg = this.describeStallAbort(runError);
+      await this.storage.updateRun(runId, { status: 'failed', finishedAt, errorMsg });
+      this.emitEvent({ type: 'failed', scheduleId: schedule.id, runId, error: errorMsg });
+      void this.notifyForcedFailure(schedule.id, runId, errorMsg);
+    } else if (wasAborted) {
       await this.storage.updateRun(runId, {
         status: 'aborted',
         finishedAt,
@@ -720,7 +744,10 @@ export class Scheduler extends EventEmitter {
     // Aborted 路径不更新 schedule 行 —— schedule 大概率已被 delete(行已不存在,update
     // 是 no-op)或 pause(status='paused',activeSchedules 已被摘出)。重排 nextFireAt
     // 会引入幽灵下次触发,resume 时 resume() 自己会重算,这里跳过最干净。
-    if (wasAborted) {
+    //
+    // **例外:守卫 abort**。此时 schedule 既没被删也没被停,只是这一轮卡死了;
+    // claimDueFire 已清空 nextFireAt,必须往下走重排,否则任务永久停摆(review P1)。
+    if (wasAborted && !stallAborted) {
       return;
     }
 
@@ -865,6 +892,7 @@ export class Scheduler extends EventEmitter {
     }
 
     const wasAborted = this.wasRunAborted(schedule, controller.signal, runError);
+    const stallAborted = this.wasStallAborted(runId);
 
     // 顺延(手动触发撞忙也礼让,与 cron 路径一致):撤销预插的 running run、不通知。
     // runNow 正常路径不动 nextFireAt;但顺延必须把 nextFireAt 前移到短延后,让 cron
@@ -895,7 +923,13 @@ export class Scheduler extends EventEmitter {
       return { runId };
     }
 
-    if (wasAborted) {
+    if (stallAborted) {
+      // 语义同 fireOneInner:守卫中断记 failed(可见)而不是 aborted(伪装成用户操作)。
+      const errorMsg = this.describeStallAbort(runError);
+      await this.storage.updateRun(runId, { status: 'failed', finishedAt, errorMsg });
+      this.emitEvent({ type: 'failed', scheduleId: schedule.id, runId, error: errorMsg });
+      void this.notifyForcedFailure(schedule.id, runId, errorMsg);
+    } else if (wasAborted) {
       await this.storage.updateRun(runId, {
         status: 'aborted',
         finishedAt,
@@ -947,8 +981,9 @@ export class Scheduler extends EventEmitter {
     this.silencedRuns.delete(runId);
 
     // Aborted 路径同 fireOne:schedule 大概率已被 delete/pause,不要重写 lastFinishedAt
-    // (避免污染已删除/已暂停 schedule 的字段)。
-    if (!wasAborted) {
+    // (避免污染已删除/已暂停 schedule 的字段)。守卫 abort 例外:schedule 仍在,
+    // "跑完了一次(以失败收场)"该如实反映到列表。
+    if (!wasAborted || stallAborted) {
       // runNow 跟 cron 路径一致：把 lastFinishedAt 写到 schedule row，让 UI 列表
       // 立刻反映"刚跑完了一次"。nextFireAt 不动（manual 触发不该改 cron 排定时间）。
       await this.storage.update(schedule.id, { lastFinishedAt: finishedAt });
@@ -1575,6 +1610,20 @@ export class Scheduler extends EventEmitter {
   }
 
   /**
+   * 本轮的 abort 是否由卡死守卫发起(而非用户 delete/pause)。
+   *
+   * 两者收口语义相反,必须分开:用户中断 → run 记 'aborted' 且**不重排**(schedule
+   * 大概率已被删/停);守卫中断 → run 记 'failed' 且**照常重排** —— claimDueFire 已
+   * 把 nextFireAt 清空,不补排的话 recurring 任务会静默停摆到进程重启。
+   *
+   * 这正是 review #944 抓到的 P1:守卫 abort 生效(runner 在宽限内老实响应)时,
+   * 原实现把它当成用户中断,于是守卫"正常工作"反而让任务永久停摆 —— 比不加守卫更糟。
+   */
+  private wasStallAborted(runId: string): boolean {
+    return this.inflightAttempts.get(runId)?.stallAbortedAt !== undefined;
+  }
+
+  /**
    * 一次 fire 是否属于"被 delete/pause 主动中断"(fireOne/runNow 共用判定)。
    * controller.signal.aborted 是 source of truth;runError 文本里的 'abort' 只是
    * **agent 模式**的兜底(runner 没接 signal 但 Session.abort 已经触发了——agent
@@ -1798,6 +1847,29 @@ export class Scheduler extends EventEmitter {
     return (waiting: boolean) => {
       const attempt = this.inflightAttempts.get(runId);
       if (!attempt) return;
+      // 让槽配额:排队 run 让出的槽会被 tick 立刻补上新任务,而这些 run 之后恢复派发时
+      // 只能记账(turn 已被目标会话接受,拦不住)—— 于是瞬时并发 = 上限 + 让槽数。不设
+      // 界的话让槽数没有上限,实际并发可以远超 maxConcurrentRuns,把当初防 OOM 的闸门
+      // 架空(review #944 P1)。
+      //
+      // 配额取 maxConcurrentRuns,即最坏瞬时并发 2×上限。之所以敢让它超过上限:排队 run
+      // 恢复派发时复用的是**目标会话已有的**上下文(agent 子进程 + MCP 注册都已在内存
+      // 里),不像 ephemeral run 那样新建一整套 —— 闸门真正要防的资源它并不新增。但
+      // token / CPU 仍在消耗,所以必须有界而不是放开。
+      //
+      // 超配额时保持 'running'(继续占槽)= 退回本 PR 之前的行为:安全侧降级,不会比
+      // 原来更糟,只是该 run 暂时享受不到"排队不占槽"的好处。
+      if (waiting && this.countQueuedRuns() >= this.maxConcurrentRuns) {
+        this.logger?.info?.('scheduler: queued-wait slot release declined (quota reached)', {
+          schedulerInstanceId: this.schedulerInstanceId,
+          processId: this.processId,
+          runId,
+          scheduleId: attempt.scheduleId,
+          queuedRuns: this.countQueuedRuns(),
+          quota: this.maxConcurrentRuns,
+        });
+        return;
+      }
       const nextPhase: ScheduleRunPhase = waiting ? 'queued' : 'running';
       if (attempt.phase === nextPhase) return;
       attempt.phase = nextPhase;
@@ -1839,6 +1911,15 @@ export class Scheduler extends EventEmitter {
     return n;
   }
 
+  /** 当前让出了槽位的排队 run 数（受 maxConcurrentRuns 配额约束，见 buildOnQueueWaitChanged）。 */
+  private countQueuedRuns(): number {
+    let n = 0;
+    for (const attempt of this.inflightAttempts.values()) {
+      if (attempt.phase === 'queued') n += 1;
+    }
+    return n;
+  }
+
   /**
    * 卡死守卫。挂在已有的 15s 心跳 loop 上(不新增定时器),两段式:
    *   1. 无进展超过 runStallMs → abort,给 runner 一个体面收口的机会(它若响应
@@ -1851,6 +1932,14 @@ export class Scheduler extends EventEmitter {
     if (this.runStallMs <= 0) return;
     for (const attempt of [...this.inflightAttempts.values()]) {
       if (attempt.phase === 'queued') continue;
+      // script 模式不参与本守卫(review #944 P1)。本守卫的判据是"事件静默",而 script
+      // run 的正常形态就是长时间不出声——静默跑两小时的 build / 同步脚本很常见,按"无
+      // 反馈"判它卡死是错的语义。script 的超时治理归它自己的 scriptConfig.timeoutMs
+      // (用户显式配置,ScriptScheduleRunner 第一方执行)。
+      // 残留缺口:没配 timeoutMs 又真卡死的 script 仍会长期占槽,只能靠用户 pause/delete
+      // (script runner 第一方接 signal,abort 对它有效)。要根治应给 script 补默认超时,
+      // 属独立改动,不塞进本 PR。
+      if ((attempt.executionMode ?? 'agent') === 'script') continue;
       if (attempt.stallAbortedAt === undefined) {
         if (now - attempt.lastProgressAt < this.runStallMs) continue;
         attempt.stallAbortedAt = now;
@@ -1869,7 +1958,17 @@ export class Scheduler extends EventEmitter {
         continue;
       }
       if (now - attempt.stallAbortedAt < this.runStallAbortGraceMs) continue;
-      void this.forceReleaseStalledRun(attempt, now);
+      // fire-and-forget 必须自带 catch:本函数跑在心跳定时器回调里,emitEvent 的
+      // listener 抛错会变成 unhandled rejection 并可能拖垮宿主进程(review P2)。
+      void this.forceReleaseStalledRun(attempt, now).catch((err) => {
+        this.logger?.error?.('scheduler: forceReleaseStalledRun threw', {
+          schedulerInstanceId: this.schedulerInstanceId,
+          processId: this.processId,
+          runId: attempt.runId,
+          scheduleId: attempt.scheduleId,
+          error: String(err),
+        });
+      });
     }
   }
 
@@ -1923,16 +2022,96 @@ export class Scheduler extends EventEmitter {
     const errorMsg =
       `run stalled: no progress for ${Math.round(noProgressMs / 60_000)}min ` +
       `and did not stop within ${Math.round(this.runStallAbortGraceMs / 1000)}s of abort`;
+    // 终态落库失败时**不能**继续按"已收口"广播:那样 UI 会显示 failed,而 DB 行仍是
+    // 'running' 并稍后被僵尸清扫改成 interrupted,两边对不上(review P1)。此时槽位已经
+    // 收回(目的达到),run 行交给心跳过期后的清扫兜底,并显式告警。
+    let persisted = false;
     try {
-      await this.storage.updateRun(runId, { status: 'failed', finishedAt: now, errorMsg });
+      persisted = (await this.storage.updateRun(runId, {
+        status: 'failed',
+        finishedAt: now,
+        errorMsg,
+      })) !== null;
     } catch (err) {
       this.logger?.warn?.('scheduler: stalled run updateRun failed', { runId, error: String(err) });
     }
+    if (!persisted) {
+      this.logger?.error?.(
+        'scheduler: stalled run terminal state not persisted; leaving row to the stale-run sweep',
+        { schedulerInstanceId: this.schedulerInstanceId, processId: this.processId, runId, scheduleId },
+      );
+      // 仍然广播 'changed' 让 UI 重新拉数(它会读到 DB 真值),但不广播 failed ——
+      // 不制造一个数据库里不存在的终态。
+      this.emitEvent({ type: 'changed', scheduleId });
+      return;
+    }
     this.emitEvent({ type: 'failed', scheduleId, runId, error: errorMsg });
-    // 重排:沿用 rescheduleAfterSweep 的语义(读回真实行、尊重 manual / 一次性任务的
-    // "不续命"、不覆盖已 paused/deleted 的行)。
-    await this.rescheduleAfterSweep(scheduleId, now);
+    void this.notifyForcedFailure(scheduleId, runId, errorMsg);
+    // 重排:**不能**复用 rescheduleAfterSweep —— 它遇到"该 schedule 仍有 running 行"
+    // 就放弃补排,而同一 schedule 上并发的 runNow 正好构成这种情形;runNow 收口只写
+    // lastFinishedAt、从不重排,于是没人恢复排期,任务永久停摆(review P1)。这里明确
+    // 知道被弃的是一个自动 claim,直接按 recurring 语义补排。
+    await this.replanAfterStalledClaim(scheduleId, now);
     this.emitEvent({ type: 'changed', scheduleId });
+  }
+
+  /**
+   * 卡死自动 claim 的排期补偿。语义与 fireOneInner 的正常重排一致:读回真实行(run
+   * 期间用户可能改过 cron / 暂停 / 删除)、尊重 manual 与已消耗的一次性任务、不覆盖
+   * 已 paused 的行。与 rescheduleAfterSweep 的唯一区别:不因"还有别的 running 行"
+   * 而放弃 —— 调用方已经确定这条自动 claim 的排期需要恢复。
+   */
+  private async replanAfterStalledClaim(scheduleId: string, now: number): Promise<void> {
+    try {
+      const current = await this.storage.get(scheduleId);
+      if (!current) return; // 行已删,无需补排
+      if (current.status !== 'active') return; // paused / expired:resume 时自己会重算
+      if (current.nextFireAt !== undefined) return; // 已有排期(别的路径已补),不覆盖
+      const next = computeNextFireAt(current, now);
+      if (next === undefined) return; // manual / 已消耗的一次性任务:按语义不续命
+      const updated = await this.storage.update(scheduleId, { nextFireAt: next });
+      if (updated && updated.status === 'active') {
+        this.activeSchedules.set(scheduleId, updated);
+      }
+      this.logger?.info?.('scheduler: replanned schedule after stalled run', {
+        schedulerInstanceId: this.schedulerInstanceId,
+        processId: this.processId,
+        scheduleId,
+        nextFireAt: next,
+      });
+    } catch (err) {
+      // 补排失败不阻塞收口;下一轮清扫 / 任一实例重启的 start() 归一仍会兜底。
+      this.logger?.warn?.('scheduler: replan after stalled run failed', {
+        scheduleId,
+        error: String(err),
+      });
+    }
+  }
+
+  /** 卡死收口的 run 错误文案(强制释放与"守卫 abort 被 runner 响应"两条路径共用)。 */
+  private describeStallAbort(runError: string | undefined): string {
+    const base =
+      `run aborted by stall guard: no progress for over ` +
+      `${Math.round(this.runStallMs / 60_000)}min`;
+    return runError ? `${base} (${runError})` : base;
+  }
+
+  /** 把卡死收口经 host 注入的出口投出去;通知失败绝不影响收口。 */
+  private async notifyForcedFailure(
+    scheduleId: string,
+    runId: string,
+    errorMsg: string,
+  ): Promise<void> {
+    if (!this.notifyForcedFailureHook) return;
+    try {
+      await this.notifyForcedFailureHook({ scheduleId, runId, errorMsg });
+    } catch (err) {
+      this.logger?.warn?.('scheduler: notifyForcedFailure hook threw', {
+        scheduleId,
+        runId,
+        error: String(err),
+      });
+    }
   }
 
   /**

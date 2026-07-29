@@ -134,6 +134,26 @@ export async function startScheduler(deps: StartSchedulerDeps): Promise<Schedule
       const rel = path.relative(dialogueWorkspaceRootDir(), dir);
       return !rel.startsWith('..') && !path.isAbsolute(rel);
     },
+    // 卡死收口的通知出口。通知投递平时住在两个 runner 里(它们各自持 notifier),而
+    // 卡死收口刻意绕过 runner —— 要么它压根不返回、要么它把守卫 abort 当普通中断处理。
+    // 没有这条线,用户配了桌面/飞书通知也只会看到一个未读红点(PR #944 review P1)。
+    // notify() 自身保证不 throw;这里再读回真实 run 行,让通知内容与历史一致。
+    notifyForcedFailure: async ({ scheduleId, runId, errorMsg }) => {
+      const schedule = await storage.get(scheduleId);
+      if (!schedule) return;
+      const run = (await storage.listRuns(scheduleId, 20)).find((r) => r.id === runId);
+      await notifier.notify(
+        schedule,
+        run ?? {
+          id: runId,
+          scheduleId,
+          firedAt: Date.now(),
+          finishedAt: Date.now(),
+          status: 'failed',
+          errorMsg,
+        },
+      );
+    },
   });
   const loader = new ProjectAutomationLoader({
     scheduler,

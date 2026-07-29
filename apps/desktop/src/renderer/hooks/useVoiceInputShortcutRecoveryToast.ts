@@ -9,20 +9,40 @@
  * 复用设置页那条文案：故障与成因完全相同（自带「重启 Cindy 再试」的下一步），两处给不同
  * 说法只会让人以为是两种问题。
  *
- * main 侧一次 App 运行只推一次（触发点是窗口聚焦，helper 真坏掉会每次切回来都失败），这里
- * 不再额外去重。
+ * 为什么挂载时要主动 consume 一次、而不是只听推送：恢复可能发生在本组件挂载之前（登录门、
+ * 数据库门还在前面），那时 fan-out 没有订阅者，推送就没了。状态留在 main、被取走才清，
+ * 所以两条路都指向同一个 consume —— 取到才提示，重复取只会得到 false，不会弹第二次。
  */
 
 import { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { createLogger } from '@/lib/logger';
 import { toast } from '@/lib/toast';
+
+const log = createLogger('useVoiceInputShortcutRecoveryToast');
 
 export function useVoiceInputShortcutRecoveryToast(): void {
   const { t } = useTranslation();
   useEffect(() => {
-    return window.electronAPI.voiceInput.onShortcutRecoveryFailed(() => {
-      toast.error(t('settings.voiceInput.shortcut.toast.listenerUnavailable'), { duration: 10000 });
+    let cancelled = false;
+    const showIfPending = async (): Promise<void> => {
+      try {
+        const result = await window.electronAPI.voiceInput.consumeShortcutRecoveryFailure();
+        if (cancelled || !result.failed) return;
+        toast.error(t('settings.voiceInput.shortcut.toast.listenerUnavailable'), { duration: 10000 });
+      } catch (error) {
+        // 取不到不额外打扰用户：设置页里的徽章与行内说明仍然摆着状态和入口。
+        log.warn('failed to consume voice input shortcut recovery failure:', error);
+      }
+    };
+    void showIfPending();
+    const unsubscribe = window.electronAPI.voiceInput.onShortcutRecoveryFailed(() => {
+      void showIfPending();
     });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
   }, [t]);
 }

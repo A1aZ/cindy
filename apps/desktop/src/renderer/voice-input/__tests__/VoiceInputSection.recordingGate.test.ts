@@ -28,6 +28,13 @@ describe('VoiceInputSection shortcut recording gate', () => {
     // 直接恢复会在提交之后把旧的注册回去(存盘/界面指新的、实际生效旧的)。
     expect(source).toContain('const pendingCommit = shortcutCommitPromiseRef.current;');
     expect(source).toContain('void pendingCommit.then(restoreRegistration, restoreRegistration);');
+    // 而且要让位给新一轮录制:第一轮提交没落地就结束、紧接着开始第二轮时,这条恢复会经同一条
+    // main 队列排在第二轮的挂起之后,把旧快捷键启用回来 —— 用户在第二轮按键试录就会真的触发
+    // 一次语音输入。轮次对不上就放弃,那一轮自己会在结束时恢复。
+    expect(source).toContain('const recordingSession = (recordingSessionRef.current += 1);');
+    expect(source).toMatch(
+      /const restoreRegistration = \(\): void => \{\s*\n\s*if \(recordingSessionRef\.current !== recordingSession\) return;/,
+    );
     // 录制 effect 刻意**不**依赖监听权限：录制中途授权只需补一次 Fn capture（由权限
     // effect 直接调 startFnKeyCapture），让本 effect 重跑会先由 cleanup 异步恢复已保存
     // 的全局快捷键、再由 setup 挂起，中间那段窗口里用户按下旧快捷键会真的触发语音输入。

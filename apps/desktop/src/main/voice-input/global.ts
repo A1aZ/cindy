@@ -606,11 +606,16 @@ let lastPendingShortcutRecoveryAt = 0;
 let pendingShortcutRecoveryRunning = false;
 
 /**
- * 当前存盘里那个「需要监听权限、但此刻没在跑」的快捷键，没有就返回 null。
+ * 现在可以恢复的那个快捷键，没有（或此刻不该恢复）就返回 null。
  *
- * 预筛和队列内都用它：队列内那次是关键 —— preflight 的 await 期间用户可能已经改了快捷键。
+ * 预筛和队列内都调它，**队列内那次才是判据**：preflight 与队列排队都要 await，那段时间里
+ * 用户可能已经改了快捷键、也可能已经开始录制。所有「该不该注册」的条件都收在这个函数里，
+ * 就不会出现「预筛查了、队列内漏查」的偏差。
  */
 function recoverableNativeShortcut(): VoiceInputShortcut | null {
+  // 录制期间全局快捷键是刻意挂起的，这里注册会把它顶回来：用户正在按键试录就会真的触发
+  // 一次语音输入，并发的 listener 启动还会把 Fn capture 顶掉。
+  if (modifierShortcutRecordingWebContentsIds.size > 0) return null;
   const shortcut = voiceInputDataStore.getSettings().shortcut;
   if (!shortcut || !voiceInputShortcutNeedsMacNativeListener(shortcut, process.platform)) return null;
   if (macModifierShortcutListener.isRunning()) return null;
@@ -618,16 +623,21 @@ function recoverableNativeShortcut(): VoiceInputShortcut | null {
 }
 
 /**
- * 把「自动恢复失败」推给常挂载的 renderer 去提示。
+ * 「自动恢复失败」的待通知状态。
  *
- * 一次 App 运行只推一次：触发点是窗口聚焦，helper 真坏掉的话每次切回来都会再失败一遍，
- * 反复弹同一条提示只会变成骚扰（用户此刻并没有在做这件事）。
+ * 只推不记状态是不行的：恢复可能发生在 MainLayout 还没挂载的时候（登录门、数据库门还在
+ * 前面），此时 fan-out 没有订阅者，这一推就没了。所以状态留在 main，由 renderer 挂载后
+ * 主动 consume —— **状态在被真正取走时才清**，推送只是「已经挂着的 renderer 早点收到」。
+ *
+ * 一次 App 运行只提示一次（consume 后清零、后续失败不再置位）：触发点是窗口聚焦，helper
+ * 真坏掉会每次切回来都失败一遍，反复弹同一条只会变成骚扰 —— 用户此刻并没有在做这件事。
  */
-let pendingShortcutRecoveryFailureNotified = false;
+let pendingShortcutRecoveryFailure = false;
+let pendingShortcutRecoveryFailureConsumed = false;
 
 function notifyPendingShortcutRecoveryFailed(): void {
-  if (pendingShortcutRecoveryFailureNotified) return;
-  pendingShortcutRecoveryFailureNotified = true;
+  if (pendingShortcutRecoveryFailureConsumed) return;
+  pendingShortcutRecoveryFailure = true;
   for (const window of BrowserWindow.getAllWindows()) {
     try {
       window.webContents.send('voice-input:shortcut-recovery-failed');
@@ -637,17 +647,31 @@ function notifyPendingShortcutRecoveryFailed(): void {
   }
 }
 
+let pendingShortcutRecoveryRetryTimer: NodeJS.Timeout | null = null;
+
+function schedulePendingShortcutRecoveryRetry(delayMs: number): void {
+  // 已经排了就不再叠：尾跑只需要一个。
+  if (pendingShortcutRecoveryRetryTimer) return;
+  pendingShortcutRecoveryRetryTimer = setTimeout(() => {
+    pendingShortcutRecoveryRetryTimer = null;
+    void recoverPendingNativeShortcutRegistration();
+  }, Math.max(0, delayMs));
+}
+
 async function recoverPendingNativeShortcutRegistration(): Promise<void> {
   if (process.platform !== 'darwin') return;
   if (pendingShortcutRecoveryRunning) return;
-  // 录制期间全局快捷键是刻意挂起的，这里重新注册会把它顶回来，用户正在按键试录就会真的
-  // 触发一次语音输入。
-  if (modifierShortcutRecordingWebContentsIds.size > 0) return;
   // 这里只是「值不值得往下走」的预筛。真正要注册的那个必须在队列里现读，见下。
   if (!recoverableNativeShortcut()) return;
   // preflight 每次都要起一个 helper 进程，而窗口聚焦事件很密集，必须限流。
   const now = Date.now();
-  if (now - lastPendingShortcutRecoveryAt < PENDING_SHORTCUT_RECOVERY_MIN_INTERVAL_MS) return;
+  if (now - lastPendingShortcutRecoveryAt < PENDING_SHORTCUT_RECOVERY_MIN_INTERVAL_MS) {
+    // 但不能就这么丢掉：这次聚焦可能正是「用户刚授权完切回来」的那一次，而应用此后就一直
+    // 在前台，不会再有第二个 focus 事件 —— 快捷键会一直不生效，直到他切走再切回或重启。
+    // 所以补一个尾跑，等限流窗口过去再试一次。
+    schedulePendingShortcutRecoveryRetry(PENDING_SHORTCUT_RECOVERY_MIN_INTERVAL_MS - (now - lastPendingShortcutRecoveryAt));
+    return;
+  }
   lastPendingShortcutRecoveryAt = now;
   pendingShortcutRecoveryRunning = true;
   try {
@@ -966,6 +990,23 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
         errorCode: 'failed',
       };
     }
+  });
+
+  /**
+   * renderer 挂载后来取「有没有一条自动恢复失败要提示」。
+   *
+   * 有它才能保证不漏：失败可能发生在 MainLayout 挂载之前（登录门 / 数据库门还在前面），
+   * 那时推送没有订阅者。状态在这里被取走才清，所以推送丢了也补得回来。
+   *
+   * 闸用通用的可信 renderer 校验（不是主窗口收窄闸）：MainLayout 在每个应用窗口里都挂着，
+   * 而这条只读一个布尔、不触发任何系统弹窗。
+   */
+  ipcMain.handle('voice-input:consume-shortcut-recovery-failure', (event): { failed: boolean } => {
+    assertTrustedAppRendererEvent(event);
+    if (!pendingShortcutRecoveryFailure) return { failed: false };
+    pendingShortcutRecoveryFailure = false;
+    pendingShortcutRecoveryFailureConsumed = true;
+    return { failed: true };
   });
 
   ipcMain.handle('voice-input:open-input-monitoring-settings', async (event): Promise<VoiceInputGlobalResult> => {

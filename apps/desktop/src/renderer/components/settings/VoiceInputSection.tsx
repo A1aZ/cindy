@@ -1105,6 +1105,8 @@ export function VoiceInputSection() {
   const shortcutSubmissionRef = useRef(0);
   // 正在飞的那次提交，见 commitRecordedShortcut 与录制 effect 的 cleanup。
   const shortcutCommitPromiseRef = useRef<Promise<void> | null>(null);
+  // 录制轮次，见录制 effect 的 cleanup：迟到的恢复不能踩到新一轮的挂起。
+  const recordingSessionRef = useRef(0);
   const nativeFnShortcutActiveRef = useRef(false);
   const nativeFnComboSeenRef = useRef(false);
   const externalDictionaryLearningSupported = window.electronAPI.platform === 'darwin';
@@ -1591,6 +1593,9 @@ export function VoiceInputSection() {
     // 触发一次语音输入。
     document.body.dataset.appShortcutRecording = '1';
     window.electronAPI.appShortcuts.setRecording(true);
+    // 录制轮次。cleanup 里的恢复是异步的（要等在飞的提交），这期间用户可能已经开始下一轮
+    // 录制 —— 那一轮才拥有「挂起」这个状态，上一轮的恢复必须让位，见下。
+    const recordingSession = (recordingSessionRef.current += 1);
     let cancelled = false;
     const suspendPromise = syncVoiceInputGlobalShortcut(null).then(() => {
       if (cancelled) return;
@@ -1613,7 +1618,12 @@ export function VoiceInputSection() {
       //
       // 等它落地就能对上：提交成功时读到的是新快捷键（重复注册同一个是幂等的），提交失败时
       // 读到的仍是旧那个，而那正是此时该生效的。所以两条路都不需要额外判断。
+      //
+      // 而且必须让位给新一轮录制：第一轮提交没落地就结束录制、紧接着开始第二轮时，这条恢复
+      // 会经同一条 main 队列排在第二轮的「挂起」之后 —— 把旧快捷键又启用回来，用户在第二轮
+      // 按键试录就会真的触发一次语音输入。轮次对不上就直接放弃：那一轮自己会在结束时恢复。
       const restoreRegistration = (): void => {
+        if (recordingSessionRef.current !== recordingSession) return;
         void syncVoiceInputGlobalShortcut(getVoiceInputSettings().shortcut);
       };
       const pendingCommit = shortcutCommitPromiseRef.current;

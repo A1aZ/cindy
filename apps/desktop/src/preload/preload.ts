@@ -1104,6 +1104,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('voice-input:modifier-shortcut-recording:stop'),
     onModifierShortcutKeys: fanOutVoiceInputModifierShortcutKeys,
     onShortcutRecoveryFailed: fanOutVoiceInputShortcutRecoveryFailed,
+    consumeShortcutRecoveryFailure: () =>
+      ipcRenderer.invoke('voice-input:consume-shortcut-recovery-failure'),
     onGlobalShortcutTrigger: fanOutVoiceInputGlobalShortcutTrigger,
     claimGlobalShortcutTrigger: (id: string): void =>
       ipcRenderer.send('voice-input:global-shortcut-claim', { id }),

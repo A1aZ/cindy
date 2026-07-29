@@ -1387,8 +1387,13 @@ interface ElectronAPI {
     startModifierShortcutRecording: () => Promise<VoiceInputGlobalResult>;
     stopModifierShortcutRecording: () => Promise<VoiceInputGlobalResult>;
     onModifierShortcutKeys: (callback: (payload: { keys: string[] }) => void) => () => void;
-    /** 「待授权」快捷键在设置页之外自动恢复失败（helper 起不来）。一次 App 运行只推一次。 */
+    /** 「待授权」快捷键在设置页之外自动恢复失败（helper 起不来）。 */
     onShortcutRecoveryFailed: (callback: () => void) => () => void;
+    /**
+     * 取走「自动恢复失败」这条待通知状态（取走即清，一次 App 运行只提示一次）。
+     * 挂载时也要主动取一次：失败可能发生在常挂载 UI 之前，那时推送没有订阅者。
+     */
+    consumeShortcutRecoveryFailure: () => Promise<{ failed: boolean }>;
     onGlobalShortcutTrigger: (callback: (payload?: { id?: string; phase?: 'start' | 'tap' | 'end' }) => void) => () => void;
     claimGlobalShortcutTrigger: (id: string) => void;
     onGlobalOverlayCommand: (callback: (command: { type: 'start' | 'submit' | 'cancel' }) => void) => () => void;

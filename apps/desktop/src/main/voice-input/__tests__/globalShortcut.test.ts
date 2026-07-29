@@ -507,6 +507,84 @@ describe('voice input global shortcut registration', () => {
         expect(mocks.focusedWindow.webContents.send).toHaveBeenCalledWith('voice-input:shortcut-recovery-failed');
       });
 
+      // 预筛通过之后、队列内那次执行之前,用户完全可以开始录制。队列内只重校验了快捷键
+      // 而没重校验录制状态的话,就会在录制期把全局快捷键装回去 —— 用户按键试录会真的触发
+      // 语音输入,并发的 listener 启动还会把 Fn capture 顶掉。
+      it('rechecks the recording state inside the queue, not only before the preflight', async () => {
+        setPlatform('darwin');
+        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.modifierIsRunning.mockReturnValue(false);
+        let settlePreflight: (snapshot: unknown) => void = () => {};
+        mocks.inputMonitoringSnapshot.mockImplementationOnce(
+          () => new Promise((resolve) => { settlePreflight = resolve; }),
+        );
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        mocks.appListeners.get('browser-window-focus')?.();
+        await new Promise((resolve) => { setImmediate(resolve); });
+
+        // preflight 还没回来,用户开始录制。
+        const start = mocks.handlers.get('voice-input:modifier-shortcut-recording:start');
+        await start?.({ sender: { id: mocks.focusedWindow.webContents.id, once: vi.fn() } });
+        mocks.modifierSetShortcut.mockClear();
+
+        settlePreflight({ ok: true, status: 'granted' });
+        await new Promise((resolve) => { setImmediate(resolve); });
+
+        expect(mocks.modifierSetShortcut).not.toHaveBeenCalled();
+      });
+
+      // 恢复可能发生在 MainLayout 挂载之前(登录门 / 数据库门还在前面),那时 fan-out 没有
+      // 订阅者、推送就没了。状态必须留在 main 等 renderer 来取,取走才清。
+      it('keeps the recovery failure pending until a renderer consumes it', async () => {
+        setPlatform('darwin');
+        mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+        mocks.modifierIsRunning.mockReturnValue(false);
+        mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'spawn ENOENT' });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await focusWindow();
+
+        const consume = mocks.handlers.get('voice-input:consume-shortcut-recovery-failure');
+        expect(consume).toBeTypeOf('function');
+        // 第一次取到,第二次就没了 —— 一次 App 运行只提示一次。
+        expect(consume?.(mocks.settingsEvent)).toEqual({ failed: true });
+        expect(consume?.(mocks.settingsEvent)).toEqual({ failed: false });
+      });
+
+      // 限流窗口内的那次聚焦可能正是「用户刚授权完切回来」的那一次,而应用此后一直在前台、
+      // 不会再有第二个 focus 事件。直接丢掉就等于快捷键一直不生效。
+      it('schedules a trailing retry when a focus lands inside the throttle window', async () => {
+        setPlatform('darwin');
+        setTimeoutSpy?.mockRestore();
+        setTimeoutSpy = null;
+        vi.useFakeTimers();
+        try {
+          mocks.getSettings.mockReturnValue({ shortcut: bareRightOption });
+          mocks.modifierIsRunning.mockReturnValue(false);
+          mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
+          const { registerGlobalVoiceInputIpc } = await import('../global.js');
+          registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+          const onFocus = mocks.appListeners.get('browser-window-focus');
+          onFocus?.();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(mocks.inputMonitoringSnapshot).toHaveBeenCalledTimes(1);
+
+          // 限流窗口内又来一次聚焦：不该立刻查,但也不能丢。
+          onFocus?.();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(mocks.inputMonitoringSnapshot).toHaveBeenCalledTimes(1);
+
+          await vi.advanceTimersByTimeAsync(5_000);
+          expect(mocks.inputMonitoringSnapshot).toHaveBeenCalledTimes(2);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       // 录制期间全局快捷键是刻意挂起的。这里重新注册会把它顶回来,而用户此刻正在按键试录,
       // 会真的触发一次语音输入。
       it('does not re-register while a shortcut recording is in progress', async () => {

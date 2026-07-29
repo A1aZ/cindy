@@ -6,10 +6,12 @@
  * i18n,便于日后改判为可译文案;issue 正文直接落常量,因为读者是维护者、不跟随界面
  * 语言)。机制不同就没有编译期约束——改了一边的取值、或新增区域 / 新增消费链路只补了
  * 一边,typecheck 与各自的单测都不会响。issue 链路还额外有「卡片展示的就是最终写进
- * issue 正文的内容」这条契约,漂移会直接骗到用户;侧栏版本行则会让同一个构建在不同
- * 界面报出不同的区域身份。这一测就是补上那道缺失的信号。
+ * issue 正文的内容」这条契约,漂移会直接骗到用户;侧栏版本行与登录页徽标则会让同一个
+ * 构建在不同界面报出不同的区域身份。这一测就是补上那道缺失的信号。
  *
- * 新增消费链路时把它的 i18n 命名空间加进 CONSUMERS 即可,不要另写一份平行断言。
+ * 当前覆盖三条消费链路:issue 提交确认卡片、侧栏用户卡片版本行、登录页标题旁区域
+ * 徽标。**新增消费链路时把它的 i18n 命名空间加进 CONSUMERS 即可**,不要另写一份平行
+ * 断言——漏进表就等于那条链路不受约束(2026-07-29 review 即因此漏掉登录页徽标)。
  */
 
 import { describe, expect, it } from 'vitest';
@@ -29,11 +31,25 @@ const LOCALES: Record<string, Bundle> = {
   ko: ko as Bundle,
 };
 
+/** region → 多数链路的 i18n key 后缀(cn → regionCodeCn)。 */
+function regionCodeKeyFor(region: string): string {
+  return `regionCode${region.charAt(0).toUpperCase()}${region.slice(1)}`;
+}
+
 /**
- * 消费区域代号的各条链路:i18n key 前缀 + 取到该组 key 所在对象的方式。
- * `regionCode<Region>` 后缀在各链路统一(cn → regionCodeCn)。
+ * 消费区域代号的各条链路:i18n key 所在对象 + 该链路的 key 命名。
+ *
+ * 登录页徽标的 key 命名与另两条不同(`login.regionPill.cn` 而非 `regionCodeCn`),
+ * 所以 keyFor 可按链路覆盖——它必须在表里:徽标的「标不标」虽已过
+ * shouldLabelRegion,但「哪个区域用哪个 key」仍由 LoginPage 的 REGION_PILL_KEY
+ * 自己维护,漏补 key 会让该区域拿不到文案而静默不显示。
  */
-const CONSUMERS: ReadonlyArray<{ label: string; prefix: string; pick: (b: Bundle) => Bundle }> = [
+const CONSUMERS: ReadonlyArray<{
+  label: string;
+  prefix: string;
+  pick: (b: Bundle) => Bundle;
+  keyFor?: (region: string) => string;
+}> = [
   {
     label: 'issue 提交确认卡片',
     prefix: 'issueAgent.confirm',
@@ -44,11 +60,17 @@ const CONSUMERS: ReadonlyArray<{ label: string; prefix: string; pick: (b: Bundle
     prefix: 'sidebar.user',
     pick: (b) => (b.sidebar as { user: Bundle }).user,
   },
+  {
+    label: '登录页标题旁区域徽标',
+    prefix: 'login.regionPill',
+    pick: (b) => (b.login as { regionPill: Bundle }).regionPill,
+    keyFor: (region) => region,
+  },
 ];
 
-/** region → i18n key 后缀(cn → regionCodeCn)。 */
-function regionKeyFor(region: string): string {
-  return `regionCode${region.charAt(0).toUpperCase()}${region.slice(1)}`;
+/** 取某条链路上该区域的 i18n key 名。 */
+function keyOf(consumer: (typeof CONSUMERS)[number], region: string): string {
+  return (consumer.keyFor ?? regionCodeKeyFor)(region);
 }
 
 describe('区域代号:界面 i18n 与常量一致', () => {
@@ -60,7 +82,7 @@ describe('区域代号:界面 i18n 与常量一致', () => {
     for (const [region, code] of labeled) {
       for (const consumer of CONSUMERS) {
         for (const [locale, bundle] of Object.entries(LOCALES)) {
-          const key = regionKeyFor(region);
+          const key = keyOf(consumer, region);
           expect(
             consumer.pick(bundle)[key],
             `${locale} 的 ${consumer.prefix}.${key}(${consumer.label})应为 ${code}(区域代号四语同文、不翻译)`,
@@ -76,7 +98,7 @@ describe('区域代号:界面 i18n 与常量一致', () => {
     for (const [region] of unlabeled) {
       for (const consumer of CONSUMERS) {
         for (const [locale, bundle] of Object.entries(LOCALES)) {
-          const key = regionKeyFor(region);
+          const key = keyOf(consumer, region);
           expect(
             consumer.pick(bundle)[key],
             `${locale} 不应有 ${consumer.prefix}.${key}——${region} 按产品规则不标注(DESIGN.md §16.3)`,

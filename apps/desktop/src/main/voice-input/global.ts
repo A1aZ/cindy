@@ -773,6 +773,13 @@ async function recoverPendingNativeShortcutRegistration(): Promise<void> {
     // 少了这条：用户在设置页之外授权完，快捷键起不来且**一句提示都没有**（下面那条通知只在
     // preflight 成功后才够得着），而「待授权」说明又随权限转已授权一起消失了。
     if (!snapshot.ok && snapshot.status !== 'denied') {
+      // 发这条通知之前必须重新看一眼该恢复什么：preflight 那次 await 期间用户完全可能把快捷键
+      // 换成 F16 或干脆清掉（那次成功的 update-shortcut 已经清掉过期失败态了）。无条件发就会
+      // 凭一个已经不存在的目标重新造出一条「重启 Cindy 再试」，而当前快捷键其实工作正常。
+      if (pendingNativeShortcutRecoveryTarget().kind !== 'register') {
+        log.debug('pending native shortcut recovery target changed while checking permission');
+        return;
+      }
       log.warn('pending native shortcut recovery failed: permission status unavailable', {
         status: snapshot.status,
       });

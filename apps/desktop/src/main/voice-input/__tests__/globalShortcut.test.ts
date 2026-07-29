@@ -703,6 +703,40 @@ describe('voice input global shortcut registration', () => {
         expect(consume?.(mocks.settingsEvent)).toEqual({ failed: true });
       });
 
+      // preflight 期间用户把快捷键换成 F16(不需要监听权限)并成功存盘 —— 那条失败态已经被清掉,
+      // 迟到的 unknown 不该再凭一个已经不存在的目标重新造一条「重启 Cindy 再试」。
+      it('does not publish a preflight failure after the pending shortcut was replaced', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        mocks.modifierIsRunning.mockReturnValue(false);
+        let settlePreflight: (snapshot: unknown) => void = () => {};
+        mocks.inputMonitoringSnapshot.mockImplementationOnce(
+          () => new Promise((resolve) => { settlePreflight = resolve; }),
+        );
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        mocks.appListeners.get('browser-window-focus')?.();
+        await new Promise((resolve) => { setImmediate(resolve); });
+
+        // 期间用户改成 F16 并成功存盘。
+        const f16: VoiceInputShortcut = {
+          trigger: 'keyboard',
+          code: 'F16',
+          key: 'F16',
+          modifiers: { meta: false, ctrl: false, alt: false, shift: false, fn: false },
+        };
+        mocks.setStoredShortcut(f16);
+        await mocks.handlers.get('voice-input:settings:update-shortcut')?.({}, f16);
+
+        // preflight 这才带着 unknown 迟到返回。
+        settlePreflight({ ok: false, status: 'unknown', error: 'helper unavailable' });
+        await new Promise((resolve) => { setImmediate(resolve); });
+
+        const consume = mocks.handlers.get('voice-input:consume-shortcut-recovery-failure');
+        expect(consume?.(mocks.settingsEvent)).toEqual({ failed: false });
+      });
+
       // denied 是正常等待状态(用户还没在系统设置里打开),不该弹故障提示。
       it('does not report a recovery failure while the permission is merely denied', async () => {
         setPlatform('darwin');

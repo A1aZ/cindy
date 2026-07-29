@@ -19,10 +19,14 @@ import type { SupportedLocale } from '../shared/locale.js';
 export type EndpointManifestDialogLocale = SupportedLocale;
 
 /**
- * 失败分类(判定规则见 clientEndpointsService 的 classifyManifestFailure)。
- * network = 传输层没拿到清单(超时 / DNS / 代理 / 5xx),可重试、可能给离线出口;
- * config = 拿不到**可用**清单且重试无意义——正文内容不合法、region 不匹配、烘焙基址
- * 为空,以及永久性 HTTP(3xx/4xx:路径 / 权限 / 部署错)。这一类不给离线出口。
+ * 失败分类。**判定规则的唯一事实源是 clientEndpointsService 的
+ * classifyManifestFailure**;下面只是举例说明两类的意图,不要按举例反推边界。
+ *
+ * network = 拿不到清单但重试 / 离线出口有意义:传输层失败(超时 / DNS / 代理 / ERR_*)、
+ * 5xx,以及 407 / 408 / 425 / 429 这类**非配置 4xx**(407 只可能来自代理,描述的是本机
+ * 网络环境;其余是瞬时)。可重试、可能给离线出口。
+ * config = 拿不到**可用**清单且重试无意义:正文内容不合法、region 不匹配、烘焙基址为空,
+ * 以及**永久性** HTTP 3xx/4xx(路径 / 权限 / 部署错)。这一类不给离线出口。
  */
 export type EndpointManifestFailureKind = 'network' | 'config';
 

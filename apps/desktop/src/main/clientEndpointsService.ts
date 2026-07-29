@@ -592,36 +592,82 @@ const DIAGNOSIS_ATTEMPT_TIMEOUT_MS = 5_000;
  */
 const NETLOG_STEP_TIMEOUT_MS = 3_000;
 
+/** netLog 里本模块用到的两个方法(测试注入内存实现,不起 Electron)。 */
+export interface NetLogLike {
+  startLogging(file: string, options: { captureMode: 'default' }): Promise<void>;
+  stopLogging(): Promise<unknown>;
+}
+
+/**
+ * 围绕一次请求抓 netlog。成功返回文件路径,任何异常都降级为 null(没有 netlog)。
+ *
+ * 三个 await 全部有界:start / stop 各 stepTimeoutMs,中间那次请求由调用方自带预算。
+ * stop 超时只记日志、仍然返回文件路径——那份 netlog 已经落了盘(可能残缺),
+ * 对排查仍有价值。
+ *
+ * **迟到成功的 start 必须补一次 stop**(review 抓到的第三条):withDeadline 只解除
+ * 我们这边的等待,并不能取消 Electron 侧的操作。如果 startLogging 在超时之后才成功,
+ * 一次**进程级**抓包就在无人收尾的情况下跑起来了——它会持续记录后续所有应用流量,
+ * 让 endpoint-netlog.json 无界增长(顺带把与本次诊断无关的请求也录进去)。
+ * 所以放弃等待时把收尾挂回原 promise 上,谁先到都保证有一次配对的 stop。
+ */
+export async function captureNetLogAround(
+  netLogApi: NetLogLike,
+  file: string,
+  runWhileRecording: () => Promise<unknown>,
+  stepTimeoutMs: number,
+): Promise<string | null> {
+  let stopped = false;
+  const stopOnce = async (): Promise<void> => {
+    if (stopped) return;
+    stopped = true;
+    try {
+      await withDeadline(netLogApi.stopLogging(), stepTimeoutMs, 'netlog-stop');
+    } catch (err) {
+      log.debug('netlog stopLogging did not settle: %s', String(err));
+    }
+  };
+
+  const startPromise = netLogApi.startLogging(file, { captureMode: 'default' });
+  try {
+    await withDeadline(startPromise, stepTimeoutMs, 'netlog-start');
+  } catch (err) {
+    // 放弃等待,但不放弃收尾:start 迟到成功时仍要把这次进程级抓包关掉。
+    // startPromise 已 settle 时 then 会立即排上,所以不存在"标志位还没置好"的竞态。
+    void startPromise.then(
+      () => stopOnce(),
+      () => {
+        // start 本身失败 → 没有 capture 需要关闭;这里只是消化 rejection。
+      },
+    );
+    log.debug('netlog capture failed: %s', String(err));
+    return null;
+  }
+
+  try {
+    await runWhileRecording();
+  } finally {
+    await stopOnce();
+  }
+  return file;
+}
+
 /**
  * 抓一份 netlog:在录制期间再打一次同样的清单请求,把 Chromium 内部对这次失败的
  * 判定(代理决策、socket、TLS、被谁取消)留在磁盘上。`ERR_FAILED` 这类通用码
- * 单看错误字符串永远得不到这些信息。任何异常都只降级为「没有 netlog」。
- *
- * 三个 await 全部有界:start / stop 各 NETLOG_STEP_TIMEOUT_MS,中间那次请求
- * 走 DIAGNOSIS_ATTEMPT_TIMEOUT_MS。stop 超时只记日志、仍然返回文件路径——
- * 那份 netlog 已经落了盘(可能是残缺的),对排查仍有价值。
+ * 单看错误字符串永远得不到这些信息。
  */
 async function captureEndpointNetLog(): Promise<string | null> {
   try {
     // 动态 import(仓内先例:mcp-providers / createDesktopProviderService):netLog 只在
     // 这条诊断路径用到,静态引入会让本模块的所有单测都必须在 electron mock 里补这个 key。
     const { netLog } = await import('electron');
-    const file = path.join(getLogDir(), ENDPOINT_NETLOG_FILE_NAME);
-    await withDeadline(
-      netLog.startLogging(file, { captureMode: 'default' }),
+    return await captureNetLogAround(
+      netLog,
+      path.join(getLogDir(), ENDPOINT_NETLOG_FILE_NAME),
+      () => fetchManifestViaCdn(DIAGNOSIS_ATTEMPT_TIMEOUT_MS),
       NETLOG_STEP_TIMEOUT_MS,
-      'netlog-start',
     );
-    try {
-      await fetchManifestViaCdn(DIAGNOSIS_ATTEMPT_TIMEOUT_MS);
-    } finally {
-      try {
-        await withDeadline(netLog.stopLogging(), NETLOG_STEP_TIMEOUT_MS, 'netlog-stop');
-      } catch (err) {
-        log.debug('netlog stopLogging did not settle: %s', String(err));
-      }
-    }
-    return file;
   } catch (err) {
     log.debug('netlog capture failed: %s', String(err));
     return null;

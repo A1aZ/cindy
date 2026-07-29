@@ -38,6 +38,7 @@ vi.mock('../logger', () => ({
 
 import {
   activateClientEndpointRealm,
+  captureNetLogAround,
   classifyManifestFailure,
   getClientEndpoint,
   getClientEndpointForRealm,
@@ -855,6 +856,101 @@ describe('用户确认的离线出口', () => {
       sleep: async () => {},
     });
     expect(loadOfflineManifest).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('netlog 抓取(captureNetLogAround)', () => {
+  const deferred = () => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  };
+
+  it('正常路径:返回文件路径,start/stop 配对', async () => {
+    const startLogging = vi.fn(async () => {});
+    const stopLogging = vi.fn(async () => {});
+    const run = vi.fn(async () => {});
+
+    const file = await captureNetLogAround({ startLogging, stopLogging }, '/tmp/n.json', run, 50);
+
+    expect(file).toBe('/tmp/n.json');
+    expect(startLogging).toHaveBeenCalledWith('/tmp/n.json', { captureMode: 'default' });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(stopLogging).toHaveBeenCalledTimes(1);
+  });
+
+  it('录制期间的请求抛错也照样 stop,并仍返回路径', async () => {
+    const stopLogging = vi.fn(async () => {});
+    const file = await captureNetLogAround(
+      { startLogging: async () => {}, stopLogging },
+      '/tmp/n.json',
+      async () => {
+        throw new Error('fetch blew up');
+      },
+      50,
+    ).catch(() => 'threw');
+
+    // runWhileRecording 的异常向上抛,但 finally 里的 stop 必须已经发出。
+    expect(file).toBe('threw');
+    expect(stopLogging).toHaveBeenCalledTimes(1);
+  });
+
+  it('stop 永不返回时不卡住,仍返回文件路径', async () => {
+    const startedAt = Date.now();
+    const file = await captureNetLogAround(
+      { startLogging: async () => {}, stopLogging: () => new Promise(() => {}) },
+      '/tmp/n.json',
+      async () => {},
+      20,
+    );
+    expect(file).toBe('/tmp/n.json');
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
+  it('start 迟到成功时补发 stop(否则进程级抓包无人收尾、文件无界增长)', async () => {
+    const gate = deferred();
+    const stopLogging = vi.fn(async () => {});
+    const run = vi.fn(async () => {});
+
+    const file = await captureNetLogAround(
+      { startLogging: () => gate.promise, stopLogging },
+      '/tmp/n.json',
+      run,
+      10,
+    );
+
+    // 超时先到:本次诊断放弃 netlog。
+    expect(file).toBeNull();
+    expect(run).not.toHaveBeenCalled();
+    expect(stopLogging).not.toHaveBeenCalled();
+
+    // start 之后才成功 —— withDeadline 只解除等待,不取消 Electron 侧操作,
+    // 所以这里必须补一次 stop,否则抓包会一直录后续所有应用流量。
+    gate.resolve();
+    await new Promise((r) => setImmediate(r));
+    expect(stopLogging).toHaveBeenCalledTimes(1);
+  });
+
+  it('start 迟到失败时不补发 stop(没有 capture 需要关闭)', async () => {
+    let reject!: (err: Error) => void;
+    const startPromise = new Promise<void>((_r, rj) => {
+      reject = rj;
+    });
+    const stopLogging = vi.fn(async () => {});
+
+    const file = await captureNetLogAround(
+      { startLogging: () => startPromise, stopLogging },
+      '/tmp/n.json',
+      async () => {},
+      10,
+    );
+    expect(file).toBeNull();
+
+    reject(new Error('start failed late'));
+    await new Promise((r) => setImmediate(r));
+    expect(stopLogging).not.toHaveBeenCalled();
   });
 });
 

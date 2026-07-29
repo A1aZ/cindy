@@ -3257,6 +3257,55 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
     }
   });
 
+  it('重试发现别的路径已补好排期:凭据必须摘除,不能永久上膛', async () => {
+    // 重试的每一个"确定性结论"(补上了 / 行已删 / 已 paused / 已消耗 / 别人已补过)都要摘
+    // 凭据。留着的话它永久上膛:等那次合法触发被认领、nextFireAt 又被清空时,重叠的 tick
+    // 会把这条陈旧重试再应用一次,凭空排出一次触发并与正在跑的那一轮重叠
+    // (第十八轮 P1 —— 这是我上一版修法自己引入的洞:早退分支绕过了 delete)。
+    vi.useFakeTimers();
+    try {
+      const h = makeHarness({
+        runStallMs: 60_000,
+        runStallAbortGraceMs: 30_000,
+        runnerImpl: () => new Promise<FireResult>(() => {}), // 卡死且不理 abort
+      });
+      const sch = await h.scheduler.create({ ...baseInput, intervalMs: 3_600_000 });
+      const realUpdate = h.storage.update.bind(h.storage);
+      let failNextReplanWrite = true;
+      h.storage.update = (id: string, patch: Partial<Schedule>) => {
+        if (failNextReplanWrite && patch.nextFireAt !== undefined) {
+          failNextReplanWrite = false;
+          return Promise.reject(new Error('database is locked'));
+        }
+        return realUpdate(id, patch);
+      };
+
+      h.clock.advance(3_600_000);
+      void h.scheduler.tick();
+      await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(1));
+      h.clock.advance(60_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      h.clock.advance(30_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(0));
+
+      // 别的路径先把排期补好(用户改了 cron / 另一实例重排),重试于是走"已有排期"早退
+      const repairedAt = h.clock.now() + 3_600_000;
+      await h.storage.update(sch.id, { nextFireAt: repairedAt });
+      await h.scheduler.tick();
+      expect((await h.storage.get(sch.id))?.nextFireAt).toBe(repairedAt); // 没被覆盖
+
+      // 那次合法触发被认领 → nextFireAt 又成空。此刻若凭据还在,tick 会凭空补一次触发。
+      h.clock.advance(3_600_001);
+      await h.storage.update(sch.id, { nextFireAt: undefined });
+      await h.scheduler.tick();
+      expect((await h.storage.get(sch.id))?.nextFireAt).toBeUndefined();
+      await h.scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('强制收口一次性任务:过期而不是又排一次', async () => {
     // 强制收口不走 fireOneInner 的正常终态段,lastFiredAt 从未落定,computeNextFireAt 会
     // 把 Once 当成"还没跑过"又排一次 —— 一个失败的一次性任务自己再跑一遍(第七轮 P1)。

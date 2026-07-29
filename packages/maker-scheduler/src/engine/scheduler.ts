@@ -2404,6 +2404,33 @@ export class Scheduler extends EventEmitter {
    */
   private async replanAfterStalledClaim(attempt: StalledClaimPlan, now: number): Promise<void> {
     const { scheduleId } = attempt;
+    try {
+      await this.applyStalledClaimReplan(attempt, now);
+      // **任何确定性结论都要摘除重试凭据**:补上了 / 行已删 / 已 paused / 已消耗 /
+      // 别的路径已经补过。只要还留着,这条凭据就永久上膛 —— 等那次合法触发被认领、
+      // nextFireAt 又被清空时,重叠的 tick 会把这条陈旧重试再应用一次,凭空排出一次
+      // 触发,与正在跑的那一轮重叠(第十八轮 P1:上一版只在 try 尾部 delete,函数体里
+      // 每一个早退分支都绕过了它)。
+      this.pendingReplans.delete(scheduleId);
+    } catch (err) {
+      // 只有"这次没做成"才保留/上膛,由后续 tick 重试(见 retryPendingReplans)。
+      this.pendingReplans.set(scheduleId, {
+        scheduleId,
+        runId: attempt.runId,
+        startedAt: attempt.startedAt,
+        source: attempt.source,
+      });
+      this.logger?.warn?.('scheduler: replan after stalled run failed — queued for retry', {
+        scheduleId,
+        runId: attempt.runId,
+        error: String(err),
+      });
+    }
+  }
+
+  /** replanAfterStalledClaim 的函数体;抛错即"本次没做成",由调用方决定重试。 */
+  private async applyStalledClaimReplan(attempt: StalledClaimPlan, now: number): Promise<void> {
+    const { scheduleId } = attempt;
     if (attempt.source !== 'automatic') {
       this.logger?.info?.('scheduler: skipping replan for stalled non-automatic run', {
         schedulerInstanceId: this.schedulerInstanceId,
@@ -2414,7 +2441,7 @@ export class Scheduler extends EventEmitter {
       });
       return;
     }
-    try {
+    {
       const current = await this.storage.get(scheduleId);
       if (!current) return; // 行已删,无需补排
       if (current.status !== 'active') return; // paused / expired:resume 时自己会重算
@@ -2458,29 +2485,7 @@ export class Scheduler extends EventEmitter {
         scheduleId,
         nextFireAt: next,
       });
-    } catch (err) {
-      // 补排失败不阻塞收口,但**必须留下重试凭据**。此前只记一行 warn 就放手,理由写的是
-      // "下一轮清扫 / 重启归一会兜底" —— 那是错的:周期 DB sync 只是把行重新灌进内存,
-      // nextFireAt 仍是空,tick 永远选不到它;僵尸清扫只看 'running' 的 run 行,这条已是
-      // 终态。于是一条 recurring 任务会静默停摆到**进程重启**,而 Once 任务因为消耗字段
-      // 从未落定,重启后还会再跑一遍(第十八轮 P1)。
-      // 挂进重试队列,由后续 tick 就地重试(纯内存、幂等:成功条件里已有
-      // "nextFireAt 已被别的路径补上则不覆盖")。
-      this.pendingReplans.set(scheduleId, {
-        scheduleId,
-        runId: attempt.runId,
-        startedAt: attempt.startedAt,
-        source: attempt.source,
-      });
-      this.logger?.warn?.('scheduler: replan after stalled run failed — queued for retry', {
-        scheduleId,
-        runId: attempt.runId,
-        error: String(err),
-      });
-      return;
     }
-    // 走到这里说明本次补排已定论(补上了 / 行已删 / 已 paused / 已消耗),清掉遗留凭据。
-    this.pendingReplans.delete(scheduleId);
   }
 
   /**

@@ -67,6 +67,11 @@ const scheduleChipsSource = readFileSync(
   'utf8',
 );
 
+const newGoalDialogSource = readFileSync(
+  resolve(__dirname, '..', 'components', 'new-chat', 'NewGoalDialog.tsx'),
+  'utf8',
+);
+
 const extraDirsButtonSource = readFileSync(
   resolve(__dirname, '..', 'components', 'new-chat', 'ExtraDirsButton.tsx'),
   'utf8',
@@ -689,10 +694,12 @@ describe('Shared create project picker', () => {
     expect(body).toContain('attachmentState.removeFile(f.id)');
     // 图片不动:它们走 xdt-image:// 缓存,不依赖对端文件系统。
     expect(body).toContain("t('newChat.deviceSwitcher.attachmentsDropped'");
-    // 全文只此一处非图片过滤 —— 再出现第二处就说明又有人在某条路径上手写了一份。
+    // 全文恰好两处非图片过滤,各有明确分工:① 这个换文件系统的同步清理;② 第二十四轮加的不变量
+    // 收敛 effect(兜住在途摄入等所有入口)。出现第三处就说明又有人在某条路径上手写了一份。
     expect(
       (newMakerDraftRouteSource.match(/\.filter\(\(f\) => f\.category !== 'image'\)/g) ?? []).length,
-    ).toBe(1);
+    ).toBe(2);
+    expect(newMakerDraftRouteSource).toContain('「远程草稿绝不携带控制端路径附件」的**收敛器**');
   });
 
   // #807 review 第十八轮:换文件系统的三条路径必须都调同一个清理 —— ① 设备 pill 直接切;
@@ -796,6 +803,39 @@ describe('Shared create project picker', () => {
     expect(extraDirsButtonSource).toContain(
       '未提供时只显示目标、计划模式或 Plugin 入口，不显示引用目录段',
     );
+  });
+
+  // #807 review 第二十四轮:`useAttachments.addFiles` 对未知扩展名要先 await peekFileHeader,附件是
+  // IPC 回来后才进 state 的 —— 本机草稿下拖入 → 期间切到远程 → 切换清理找不到它 → IPC 回来后被追加,
+  // 且那次调用握的是切换前的真 addFiles,绕过闸门。按入口逐个堵已经漏了三次,改成维护不变量。
+  it('converges the no-controller-path invariant regardless of which entry added the file', () => {
+    const effect = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('「远程草稿绝不携带控制端路径附件」的**收敛器**'),
+    );
+    const body = effect.slice(0, effect.indexOf('}, ['));
+    expect(body).toContain('if (!isDeviceLinkDraft) return;');
+    expect(body).toContain(".filter((f) => f.category !== 'image')");
+    expect(body).toContain('attachmentState.removeFile(f.id)');
+    // 依赖 attachments 本身(而非整个 attachmentState 对象)才能在附件晚到时重跑。
+    expect(effect.slice(effect.indexOf('}, ['), effect.indexOf('}, [') + 160)).toContain(
+      'attachmentState.attachments',
+    );
+  });
+
+  // #807 review 第二十四轮:handleCreateGoal 必须整段持在途锁。上一轮我以为「模态遮罩挡住 pill」就
+  // 够了 —— 只考虑了指针输入,AlertDialog 默认拦外部点击但 Esc 照样能关。
+  it('holds the in-flight lock for the whole goal creation', () => {
+    const handler = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const handleCreateGoal = useCallback('),
+    );
+    const head = handler.slice(0, handler.indexOf('let policyEnabled'));
+    expect(head).toContain('if (sendInFlightRef.current) return;');
+    expect(head).toContain('markSendInFlight(true);');
+    expect(head).toContain('try {');
+    // finally 释放,覆盖所有 throw / 早退。
+    expect(handler.slice(0, handler.indexOf('\n    },'))).toContain('markSendInFlight(false);');
+    // 弹窗侧:saving 期间不许 Esc 关掉(别让 UI 假装取消了)。
+    expect(newGoalDialogSource).toContain('if (saving) event.preventDefault();');
   });
 
   it('keeps recent-folder storage out of project-option selection', () => {

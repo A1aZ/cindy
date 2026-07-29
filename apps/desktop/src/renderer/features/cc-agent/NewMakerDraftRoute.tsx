@@ -533,6 +533,30 @@ export function NewMakerDraftRoute() {
       },
     };
   }, [isDeviceLinkDraft, attachmentState, t]);
+  /**
+   * 「远程草稿绝不携带控制端路径附件」的**收敛器** —— 兜住所有按路径逐个堵会漏掉的入口。
+   *
+   * 为什么单靠上面那个 addFiles 闸门不够(Codex review P1):`useAttachments.addFiles` 对未知扩展名
+   * 的文件要先 await `peekFileHeader` 猜类型,附件是在那次 IPC 回来之后才进 state 的。于是存在这条
+   * 时序 —— 本机草稿下拖入一个未知扩展名文件 → 在 IPC 往返期间切到远程设备 → 切换时的清理找不到它
+   * (还没进 state)→ IPC 回来后它被追加进去,而那次调用握的是**切换前**取到的真 addFiles,绕过了
+   * 闸门。下一次发送就把控制端绝对路径发给对端。
+   *
+   * 这个 hook 在本 PR 的 review 里已经按「入口」被抓漏三次(切换时清理 → 加时闸门 → 这条在途摄入),
+   * 所以这次不再补第四个入口,改成维护**不变量**:只要远程草稿里出现了非图片附件,不论它从哪条路
+   * 进来的,都移除并说明。之后任何新入口都自动被覆盖。
+   *
+   * 与另两处的关系(别当成重复删掉任何一个):闸门让用户在动作发生那一刻就得到明确拒绝、文件根本
+   * 不进 state;切换时的同步清理让附件在下一帧之前就消失、且顺带处理 mention chip;这条是最后一道
+   * 网,只在前两者都没拦住时才动。
+   */
+  useEffect(() => {
+    if (!isDeviceLinkDraft) return;
+    const stranded = attachmentState.attachments.filter((f) => f.category !== 'image');
+    if (stranded.length === 0) return;
+    for (const f of stranded) attachmentState.removeFile(f.id);
+    toast.info(t('newChat.deviceSwitcher.attachmentsDropped', { count: stranded.length }));
+  }, [isDeviceLinkDraft, attachmentState.attachments, attachmentState.removeFile, t]);
   // 零可用模型引导卡:device-link 草稿不出(连接态在被控端,本机替它连不上)。
   const providerOnboarding = useProviderOnboarding();
   const showProviderOnboardingCard = providerOnboarding.visible && !isDeviceLinkDraft;
@@ -2333,233 +2357,247 @@ export function NewMakerDraftRoute() {
   // 失败抛错 → NewGoalDialog 内联报错并保持打开。
   const handleCreateGoal = useCallback(
     async (objective: string, limits: GoalLimitValues): Promise<void> => {
-      let policyEnabled = collabPolicy.enabled;
-      if (effectiveCollab.enabled && collabPolicyEligible) {
-        if (collabPolicy.loading) {
-          throw new Error(t('newChat.collaboration.loadingHint'));
-        }
-        if (collabPolicy.unavailable) {
-          const refreshed = await collabPolicy.refresh();
-          if (refreshed.unavailable) {
-            throw new Error(t('newChat.collaboration.unavailableHint'));
+      // 整段持在途锁(Codex review P1)。我上一轮判断「弹窗是模态遮罩、pill 点不到,所以不需要锁」
+      // ——**只考虑了指针输入**:AlertDialog 默认拦外部点击,但 Esc 照样能关。用户在「策略重取 →
+      // 授权 → 建会话 → 回流」这段异步里按 Esc 关掉弹窗,就能去改设备 / 工作区,而这次调用的闭包
+      // 持有的还是旧目标 —— 会话建在旧设备上、导航过去,同时把刚选的新目标重置掉。
+      // 锁写 ref(两个 pill 的 handler 即时拒绝)并驱动 disabled 渲染,与 handleSend 同一机制;
+      // 因此无论弹窗怎么消失都拦得住(NewGoalDialog 另外禁掉了 saving 期间的 Esc,那只是别让 UI
+      // 假装取消了)。finally 释放,覆盖所有 throw / 早退路径。
+      if (sendInFlightRef.current) return;
+      markSendInFlight(true);
+      try {
+        let policyEnabled = collabPolicy.enabled;
+        if (effectiveCollab.enabled && collabPolicyEligible) {
+          if (collabPolicy.loading) {
+            throw new Error(t('newChat.collaboration.loadingHint'));
           }
-          policyEnabled = refreshed.enabled;
+          if (collabPolicy.unavailable) {
+            const refreshed = await collabPolicy.refresh();
+            if (refreshed.unavailable) {
+              throw new Error(t('newChat.collaboration.unavailableHint'));
+            }
+            policyEnabled = refreshed.enabled;
+          }
+          if (!policyEnabled) {
+            patchCollab({ enabled: false });
+            throw new Error(t('newChat.collaboration.disabledHint'));
+          }
         }
-        if (!policyEnabled) {
-          patchCollab({ enabled: false });
-          throw new Error(t('newChat.collaboration.disabledHint'));
+        const shouldEnableCollab =
+          effectiveCollab.enabled && collabPolicyEligible && policyEnabled;
+        // 同 handleSend:remoteDraftState 未就绪时不得放行,否则提交 capability 兜底值而非该设备的
+        // 草稿值(缓存已热时另两个 loading 会立刻为 false,拦不住)。
+        if (
+          isDeviceLinkDraft &&
+          (capabilitiesLoading || deviceProvidersLoading || !remoteDraftState.loaded)
+        ) {
+          throw new Error(t('ccAgent.draft.deviceStillLoading'));
         }
-      }
-      const shouldEnableCollab =
-        effectiveCollab.enabled && collabPolicyEligible && policyEnabled;
-      // 同 handleSend:remoteDraftState 未就绪时不得放行,否则提交 capability 兜底值而非该设备的
-      // 草稿值(缓存已热时另两个 loading 会立刻为 false,拦不住)。
-      if (
-        isDeviceLinkDraft &&
-        (capabilitiesLoading || deviceProvidersLoading || !remoteDraftState.loaded)
-      ) {
-        throw new Error(t('ccAgent.draft.deviceStillLoading'));
-      }
-      const { proceed } = await vendorAuthGate.checkAndConfirm(authVendor, {
-        deviceId: effectiveDeviceLinkDeviceId,
-      });
-      if (!proceed) return; // 用户取消授权:弹窗关闭即可,不算错误。
-      if (isDeviceLinkDraft) {
-        // partial state 防御:只要 deviceId 就够 —— #807 起「选了设备但没选项目」是合法状态
-        // (在对端建 standalone dialogue),不能再要求 workingDir,否则新建目标在远程纯对话下
-        // 直接抛 createSessionFailed,而同一状态的普通发送是走得通的(两条路必须同口径)。
-        // 仍然保留 deviceId 缺失的报错:那才是真正的 partial state,静默落到本地会把目标建错机器。
-        if (!effectiveDeviceLinkDeviceId) {
-          throw new Error(t('ccAgent.draft.createSessionFailed'));
-        }
-        const deviceId = effectiveDeviceLinkDeviceId;
-        const deviceName = effectiveDeviceLinkDeviceName ?? deviceId;
-        // 与 handleSend 同口径先存一份 args:临时行要按实际提交的值组装(见 buildProvisionalRemoteSession)。
-        const createArgs = buildDeviceLinkCreateArgs({
-          agentKind: persistedAgentKind,
-          // 无项目 → 不传,由 buildDeviceLinkCreateArgs 派生 workspaceKind:'dialogue'。
-          workingDir: effectiveWorkingDir ?? undefined,
-          model: draftInitialModel,
-          effort: draftInitialEffort,
-          permissionMode: chatInitialPermissionMode,
-          fastMode: effectiveFastMode,
-          extraDirs: effectiveExtraDirs,
-          providerId: chatInitialProviderId ?? null,
+        const { proceed } = await vendorAuthGate.checkAndConfirm(authVendor, {
+          deviceId: effectiveDeviceLinkDeviceId,
         });
-        const createResult = await window.electronAPI.deviceLink.invoke(
-          deviceId,
-          'maker:create-session',
-          [createArgs],
-        ).catch((err) => {
-          const remoteWorkdirMessage = getRemoteWorkingDirErrorMessage(err, t);
-          if (remoteWorkdirMessage) throw new Error(remoteWorkdirMessage);
-          throw err;
-        });
-        const created = createResult as { sessionId?: string; workDir?: string } | null;
-        const remoteSessionId = created?.sessionId;
-        if (!remoteSessionId) {
-          throw new Error(t('ccAgent.draft.createSessionFailed'));
-        }
-        // 重拉该设备会话列表 → 注册 origin(后续 goalApiFor / useGoalStatus 依赖它路由)。
-        // 与 handleSend 远程分支同口径走 refreshRemoteDeviceSessions:remoteSessionId 已是提交点,
-        // 回流失败不能抛 —— 这里抛出去 NewGoalDialog 会内联报错并保持打开,用户再点一次「创建」
-        // 就在对端建出第二个目标会话,第一个空着滞留(Codex review P1)。不抛 / 认 epoch /
-        // 有界快照按 merge 落库这三条同上,见 handleSend 处的说明。
-        // 同样先钉归属再回流:goalApiFor 按归属路由,回流失败时它会把 setGoal 发给本机 maker,
-        // 对端刚建好的会话则永远拿不到目标(Codex review P1)。
-        remoteProjectsStore.pinSessionOrigin(deviceId, remoteSessionId);
-        // 临时行同上(useGoalStatus 也按会话行解析归属与运行目录):回流失败、尤其老被控端永久
-        // 拿不到 sessions:list 时,不补这条行就没有任何东西能让 SessionView 完成交接。
-        if (created?.workDir) {
-          remoteProjectsStore.mergeDeviceSessions(deviceId, deviceName, [
-            buildProvisionalRemoteSession({
-              sessionId: remoteSessionId,
-              workDir: created.workDir,
-              args: createArgs,
-              nowIso: new Date().toISOString(),
-            }),
-          ]);
-        }
-        const refreshResult = await refreshRemoteDeviceSessions(deviceId, deviceName);
-        if (refreshResult !== 'ok') {
-          log.warn('[draft goal] remote sessions refresh after create', refreshResult);
-        }
-        // setGoal 不在这里发:重 topic session:<id> 订阅要等 CCAgentSessionView
-        // mount 才建立,在 /cc-agent/new 就起 goal 首轮会让 maker:event/status 推送
-        // 掉在订阅建立前的窗口里(Codex review #548)。与首条消息同款交接 ——
-        // setPendingGoal → navigate → SessionView 消费时订阅已就绪再 setGoal。
-        setPendingGoal(remoteSessionId, { objective, limits });
-        // 自动起名:goal 首轮走 GoalController 的 session.send、不经 maker:input:enqueue,
-        // 被控端 deviceLinkAutoTitle 不会触发(Codex review #548)—— 与本地分支的
-        // autoNameSession 对位:先立即用目标文案截断占位(Codex 式,侧边栏不停留在
-        // 'New Maker'),再经隧道生成智能标题窄口径覆盖。fire-and-forget;
-        // 覆盖前 re-read,仅在标题仍是占位/默认时落盘(用户手动改名 wins)。
-        const titleAgentKind = persistedAgentKind === 'codex' ? 'codex' : 'claude-code';
-        // 先折叠空白并 trim 再截断,避免前导空白吃满 40 字符得到空占位(PR #296 review)。
-        const placeholderTitle = objective.replace(/\s+/g, ' ').trim().slice(0, 40).trimEnd();
-        void (async () => {
-          try {
-            // 无文本目标(理论不可达,goal 对话框必填)不起名:被控端旧版本的
-            // maker:generate-title 没有空消息防线,LLM 会把"请提供内容"当标题。
-            if (!placeholderTitle) return;
-            // 覆写守卫:仅当远端标题仍是默认占位时才自动起名(user rename wins,
-            // PR #296 review)。刚 create-session 建出的会话标题必为 'New Maker',
-            // 此检查防御极端 race;读取失败时按默认占位继续,不中断起名。
+        if (!proceed) return; // 用户取消授权:弹窗关闭即可,不算错误。
+        if (isDeviceLinkDraft) {
+          // partial state 防御:只要 deviceId 就够 —— #807 起「选了设备但没选项目」是合法状态
+          // (在对端建 standalone dialogue),不能再要求 workingDir,否则新建目标在远程纯对话下
+          // 直接抛 createSessionFailed,而同一状态的普通发送是走得通的(两条路必须同口径)。
+          // 仍然保留 deviceId 缺失的报错:那才是真正的 partial state,静默落到本地会把目标建错机器。
+          if (!effectiveDeviceLinkDeviceId) {
+            throw new Error(t('ccAgent.draft.createSessionFailed'));
+          }
+          const deviceId = effectiveDeviceLinkDeviceId;
+          const deviceName = effectiveDeviceLinkDeviceName ?? deviceId;
+          // 与 handleSend 同口径先存一份 args:临时行要按实际提交的值组装(见 buildProvisionalRemoteSession)。
+          const createArgs = buildDeviceLinkCreateArgs({
+            agentKind: persistedAgentKind,
+            // 无项目 → 不传,由 buildDeviceLinkCreateArgs 派生 workspaceKind:'dialogue'。
+            workingDir: effectiveWorkingDir ?? undefined,
+            model: draftInitialModel,
+            effort: draftInitialEffort,
+            permissionMode: chatInitialPermissionMode,
+            fastMode: effectiveFastMode,
+            extraDirs: effectiveExtraDirs,
+            providerId: chatInitialProviderId ?? null,
+          });
+          const createResult = await window.electronAPI.deviceLink.invoke(
+            deviceId,
+            'maker:create-session',
+            [createArgs],
+          ).catch((err) => {
+            const remoteWorkdirMessage = getRemoteWorkingDirErrorMessage(err, t);
+            if (remoteWorkdirMessage) throw new Error(remoteWorkdirMessage);
+            throw err;
+          });
+          const created = createResult as { sessionId?: string; workDir?: string } | null;
+          const remoteSessionId = created?.sessionId;
+          if (!remoteSessionId) {
+            throw new Error(t('ccAgent.draft.createSessionFailed'));
+          }
+          // 重拉该设备会话列表 → 注册 origin(后续 goalApiFor / useGoalStatus 依赖它路由)。
+          // 与 handleSend 远程分支同口径走 refreshRemoteDeviceSessions:remoteSessionId 已是提交点,
+          // 回流失败不能抛 —— 这里抛出去 NewGoalDialog 会内联报错并保持打开,用户再点一次「创建」
+          // 就在对端建出第二个目标会话,第一个空着滞留(Codex review P1)。不抛 / 认 epoch /
+          // 有界快照按 merge 落库这三条同上,见 handleSend 处的说明。
+          // 同样先钉归属再回流:goalApiFor 按归属路由,回流失败时它会把 setGoal 发给本机 maker,
+          // 对端刚建好的会话则永远拿不到目标(Codex review P1)。
+          remoteProjectsStore.pinSessionOrigin(deviceId, remoteSessionId);
+          // 临时行同上(useGoalStatus 也按会话行解析归属与运行目录):回流失败、尤其老被控端永久
+          // 拿不到 sessions:list 时,不补这条行就没有任何东西能让 SessionView 完成交接。
+          if (created?.workDir) {
+            remoteProjectsStore.mergeDeviceSessions(deviceId, deviceName, [
+              buildProvisionalRemoteSession({
+                sessionId: remoteSessionId,
+                workDir: created.workDir,
+                args: createArgs,
+                nowIso: new Date().toISOString(),
+              }),
+            ]);
+          }
+          const refreshResult = await refreshRemoteDeviceSessions(deviceId, deviceName);
+          if (refreshResult !== 'ok') {
+            log.warn('[draft goal] remote sessions refresh after create', refreshResult);
+          }
+          // setGoal 不在这里发:重 topic session:<id> 订阅要等 CCAgentSessionView
+          // mount 才建立,在 /cc-agent/new 就起 goal 首轮会让 maker:event/status 推送
+          // 掉在订阅建立前的窗口里(Codex review #548)。与首条消息同款交接 ——
+          // setPendingGoal → navigate → SessionView 消费时订阅已就绪再 setGoal。
+          setPendingGoal(remoteSessionId, { objective, limits });
+          // 自动起名:goal 首轮走 GoalController 的 session.send、不经 maker:input:enqueue,
+          // 被控端 deviceLinkAutoTitle 不会触发(Codex review #548)—— 与本地分支的
+          // autoNameSession 对位:先立即用目标文案截断占位(Codex 式,侧边栏不停留在
+          // 'New Maker'),再经隧道生成智能标题窄口径覆盖。fire-and-forget;
+          // 覆盖前 re-read,仅在标题仍是占位/默认时落盘(用户手动改名 wins)。
+          const titleAgentKind = persistedAgentKind === 'codex' ? 'codex' : 'claude-code';
+          // 先折叠空白并 trim 再截断,避免前导空白吃满 40 字符得到空占位(PR #296 review)。
+          const placeholderTitle = objective.replace(/\s+/g, ' ').trim().slice(0, 40).trimEnd();
+          void (async () => {
             try {
-              const preCheck = (await window.electronAPI.deviceLink.invoke(
+              // 无文本目标(理论不可达,goal 对话框必填)不起名:被控端旧版本的
+              // maker:generate-title 没有空消息防线,LLM 会把"请提供内容"当标题。
+              if (!placeholderTitle) return;
+              // 覆写守卫:仅当远端标题仍是默认占位时才自动起名(user rename wins,
+              // PR #296 review)。刚 create-session 建出的会话标题必为 'New Maker',
+              // 此检查防御极端 race;读取失败时按默认占位继续,不中断起名。
+              try {
+                const preCheck = (await window.electronAPI.deviceLink.invoke(
+                  deviceId,
+                  'local-db:sessions:get',
+                  [remoteSessionId],
+                )) as { title?: string | null } | null;
+                const preTitle = preCheck?.title?.trim();
+                if (preTitle && preTitle !== 'New Maker') return;
+              } catch {
+                // 读不到当前标题时按"仍是默认占位"继续。
+              }
+              // 占位写入失败(旧被控端无此窄口径 / 瞬时通道错误)单独吞掉,不中断
+              // 后续智能起名——生成与写回不依赖占位成功(PR #296 review P1)。
+              try {
+                await window.electronAPI.deviceLink.invoke(
+                  deviceId,
+                  'local-db:sessions:patch-meta',
+                  [remoteSessionId, { title: placeholderTitle }],
+                );
+              } catch {
+                // 占位失败仅暂留默认名,智能标题仍会尝试生成并写回。
+              }
+              const gen = (await window.electronAPI.deviceLink.invoke(
+                deviceId,
+                'maker:generate-title',
+                [{ message: objective, agentKind: titleAgentKind, sessionId: remoteSessionId }],
+              )) as { title: string | null } | null;
+              const title = gen?.title?.trim();
+              // 智能标题与占位相同也照走写回:占位写入允许失败(上方 catch),
+              // 此时远端仍是 'New Maker',跳过会让标题永久停在默认名(PR #296
+              // review P1);占位已成功时重写同值幂等无害。
+              if (!title) return;
+              const current = (await window.electronAPI.deviceLink.invoke(
                 deviceId,
                 'local-db:sessions:get',
                 [remoteSessionId],
               )) as { title?: string | null } | null;
-              const preTitle = preCheck?.title?.trim();
-              if (preTitle && preTitle !== 'New Maker') return;
+              const existingTitle = current?.title?.trim();
+              // 占位标题与 'New Maker'(maker:create-session 的默认占位符)都允许覆写;
+              // 用户已手动改过的真实标题则保留(user rename wins)。
+              if (
+                existingTitle &&
+                existingTitle !== 'New Maker' &&
+                existingTitle !== placeholderTitle
+              ) {
+                return;
+              }
+              await window.electronAPI.deviceLink.invoke(deviceId, 'local-db:sessions:patch-meta', [
+                remoteSessionId,
+                { title },
+              ]);
             } catch {
-              // 读不到当前标题时按"仍是默认占位"继续。
+              // 起名失败不影响目标流程,侧边栏保留占位/默认名。
             }
-            // 占位写入失败(旧被控端无此窄口径 / 瞬时通道错误)单独吞掉,不中断
-            // 后续智能起名——生成与写回不依赖占位成功(PR #296 review P1)。
-            try {
-              await window.electronAPI.deviceLink.invoke(
-                deviceId,
-                'local-db:sessions:patch-meta',
-                [remoteSessionId, { title: placeholderTitle }],
-              );
-            } catch {
-              // 占位失败仅暂留默认名,智能标题仍会尝试生成并写回。
-            }
-            const gen = (await window.electronAPI.deviceLink.invoke(
-              deviceId,
-              'maker:generate-title',
-              [{ message: objective, agentKind: titleAgentKind, sessionId: remoteSessionId }],
-            )) as { title: string | null } | null;
-            const title = gen?.title?.trim();
-            // 智能标题与占位相同也照走写回:占位写入允许失败(上方 catch),
-            // 此时远端仍是 'New Maker',跳过会让标题永久停在默认名(PR #296
-            // review P1);占位已成功时重写同值幂等无害。
-            if (!title) return;
-            const current = (await window.electronAPI.deviceLink.invoke(
-              deviceId,
-              'local-db:sessions:get',
-              [remoteSessionId],
-            )) as { title?: string | null } | null;
-            const existingTitle = current?.title?.trim();
-            // 占位标题与 'New Maker'(maker:create-session 的默认占位符)都允许覆写;
-            // 用户已手动改过的真实标题则保留(user rename wins)。
-            if (
-              existingTitle &&
-              existingTitle !== 'New Maker' &&
-              existingTitle !== placeholderTitle
-            ) {
-              return;
-            }
-            await window.electronAPI.deviceLink.invoke(deviceId, 'local-db:sessions:patch-meta', [
-              remoteSessionId,
-              { title },
-            ]);
-          } catch {
-            // 起名失败不影响目标流程,侧边栏保留占位/默认名。
+          })();
+          clearComposerDraftAndNotify(NEW_MAKER_DRAFT_KEY);
+          resetDraftWorkspaceAfterSend();
+          navigate(`/cc-agent/${remoteSessionId}`, { replace: true });
+          return;
+        }
+        const selectedWorkingDir = effectiveWorkingDir?.trim() || undefined;
+        const newSession = await createSession({
+          id: makeDraftSessionId(),
+          agentKind: persistedAgentKind,
+          model: draftInitialModel,
+          effort: draftInitialEffort,
+          permissionMode: chatInitialPermissionMode,
+          fastMode: effectiveFastMode,
+          workingDir: selectedWorkingDir,
+          workspaceKind: selectedWorkingDir ? 'project' : 'dialogue',
+          remoteHostId: selectedWorkingDir ? (effectiveRemoteHostId ?? undefined) : undefined,
+          extraDirs: effectiveExtraDirs,
+          providerId: chatInitialProviderId ?? null,
+        });
+        if (!newSession) {
+          throw new Error(t('ccAgent.draft.createSessionFailed'));
+        }
+        {
+          const iso = new Date().toISOString();
+          sessionsStore.patchLocal(newSession.id, { userSendAt: iso, updatedAt: iso });
+        }
+        // 草稿开了协同 → 新建目标路径也要拉起 Worker(与 Send 路径同口径);否则用户开了协同
+        // 却走「新建目标」会得到一个没有 Worker 的 lead session(codex P2)。失败 toast + 降级
+        // 单会话,不阻断目标创建。仅本地项目 draft 可达(device-link 分支上面已 return)。
+        // reveal 不在此处直接 dispatch:当前路由还在 /cc-agent/new,分离侧栏控制器会因
+        // session 不匹配返回 stale-context(codex P2)——与 Send 路径同口径,把 reveal
+        // 塞进 navigate state,由 CCAgentSessionView mount 后消费。
+        let orcaWorkersRevealState: { focusWorkerSessionId: string } | null = null;
+        if (shouldEnableCollab) {
+          try {
+            const result = await window.electronAPI.maker.enableOrca(
+              newSession.id,
+              draftEnableOrcaOptions(effectiveCollab, localProviders, !localProvidersLoading),
+            );
+            orcaWorkersRevealState = { focusWorkerSessionId: result.workerSessionId };
+          } catch (err) {
+            log.error('[draft goal] enableOrca failed (continuing as single session)', err);
+            toast.error(getCollaborationStartErrorMessage(err, t, { continueAsSingleSession: true }));
           }
-        })();
+        }
+        // setGoal 内部 ensureSession(拉起 agent)+ 发首轮(带目标指令)。
+        await window.electronAPI.maker.setGoal({ sessionId: newSession.id, objective, limits });
+        // 自动起名:/goal 新建的会话不经普通发送路径,scheduleAutoName 漏触发 → 标题会停在默认。
+        // 这里用目标文案补一次,与普通会话同款(立即占位 + 智能标题后台覆盖 + 不覆盖手动改名)。
+        makerChatStore.autoNameSession(newSession.id, objective, capabilityAgentKind);
         clearComposerDraftAndNotify(NEW_MAKER_DRAFT_KEY);
         resetDraftWorkspaceAfterSend();
-        navigate(`/cc-agent/${remoteSessionId}`, { replace: true });
-        return;
+        navigate(`/cc-agent/${newSession.id}`, {
+          replace: true,
+          state: orcaWorkersRevealState
+            ? { orcaWorkersReveal: orcaWorkersRevealState }
+            : undefined,
+        });
+      } finally {
+        markSendInFlight(false);
       }
-      const selectedWorkingDir = effectiveWorkingDir?.trim() || undefined;
-      const newSession = await createSession({
-        id: makeDraftSessionId(),
-        agentKind: persistedAgentKind,
-        model: draftInitialModel,
-        effort: draftInitialEffort,
-        permissionMode: chatInitialPermissionMode,
-        fastMode: effectiveFastMode,
-        workingDir: selectedWorkingDir,
-        workspaceKind: selectedWorkingDir ? 'project' : 'dialogue',
-        remoteHostId: selectedWorkingDir ? (effectiveRemoteHostId ?? undefined) : undefined,
-        extraDirs: effectiveExtraDirs,
-        providerId: chatInitialProviderId ?? null,
-      });
-      if (!newSession) {
-        throw new Error(t('ccAgent.draft.createSessionFailed'));
-      }
-      {
-        const iso = new Date().toISOString();
-        sessionsStore.patchLocal(newSession.id, { userSendAt: iso, updatedAt: iso });
-      }
-      // 草稿开了协同 → 新建目标路径也要拉起 Worker(与 Send 路径同口径);否则用户开了协同
-      // 却走「新建目标」会得到一个没有 Worker 的 lead session(codex P2)。失败 toast + 降级
-      // 单会话,不阻断目标创建。仅本地项目 draft 可达(device-link 分支上面已 return)。
-      // reveal 不在此处直接 dispatch:当前路由还在 /cc-agent/new,分离侧栏控制器会因
-      // session 不匹配返回 stale-context(codex P2)——与 Send 路径同口径,把 reveal
-      // 塞进 navigate state,由 CCAgentSessionView mount 后消费。
-      let orcaWorkersRevealState: { focusWorkerSessionId: string } | null = null;
-      if (shouldEnableCollab) {
-        try {
-          const result = await window.electronAPI.maker.enableOrca(
-            newSession.id,
-            draftEnableOrcaOptions(effectiveCollab, localProviders, !localProvidersLoading),
-          );
-          orcaWorkersRevealState = { focusWorkerSessionId: result.workerSessionId };
-        } catch (err) {
-          log.error('[draft goal] enableOrca failed (continuing as single session)', err);
-          toast.error(getCollaborationStartErrorMessage(err, t, { continueAsSingleSession: true }));
-        }
-      }
-      // setGoal 内部 ensureSession(拉起 agent)+ 发首轮(带目标指令)。
-      await window.electronAPI.maker.setGoal({ sessionId: newSession.id, objective, limits });
-      // 自动起名:/goal 新建的会话不经普通发送路径,scheduleAutoName 漏触发 → 标题会停在默认。
-      // 这里用目标文案补一次,与普通会话同款(立即占位 + 智能标题后台覆盖 + 不覆盖手动改名)。
-      makerChatStore.autoNameSession(newSession.id, objective, capabilityAgentKind);
-      clearComposerDraftAndNotify(NEW_MAKER_DRAFT_KEY);
-      resetDraftWorkspaceAfterSend();
-      navigate(`/cc-agent/${newSession.id}`, {
-        replace: true,
-        state: orcaWorkersRevealState
-          ? { orcaWorkersReveal: orcaWorkersRevealState }
-          : undefined,
-      });
     },
     [
+      markSendInFlight,
       isDeviceLinkDraft,
       capabilitiesLoading,
       remoteDraftState.loaded,

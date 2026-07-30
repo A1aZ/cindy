@@ -1584,6 +1584,22 @@ describe('voice input global shortcut registration', () => {
         const { registerGlobalVoiceInputIpc } = await import('../global.js');
         registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
+        // 有一个正在跑的 inline 语音输入会话 —— start / end 都会路由给它, 这既是可观察的投递
+        // 代理, 也正是「孤立的 end」会误伤的那个对象。
+        const { registerActiveInlineVoiceInputWebContents } = await import('../global.js');
+        registerActiveInlineVoiceInputWebContents(
+          mocks.focusedWindow.webContents as unknown as Parameters<typeof registerActiveInlineVoiceInputWebContents>[0],
+        );
+
+        // 按住说话的那次必须发生在录制框打开**之前** —— 这才是这条用例要守的场景。原来它在挂起
+        // 之后才发 start, 模拟出来的其实是「被挡掉的 start」, 于是这条用例反而把「孤立的 end 也
+        // 照送」钉成了正确行为(下面那条用例就是它漏掉的那个 bug)。
+        mocks.listenerOptions.onTrigger?.('start');
+        expect(mocks.focusedWindow.webContents.send).toHaveBeenCalledWith(
+          'voice-input:global-shortcut-trigger',
+          expect.objectContaining({ phase: 'start' }),
+        );
+
         await mocks.handlers.get('voice-input:global-shortcut:set')?.(
           mocks.settingsEvent,
           null,
@@ -1591,18 +1607,75 @@ describe('voice input global shortcut registration', () => {
         );
         mocks.focusedWindow.webContents.send.mockClear();
 
-        mocks.listenerOptions.onTrigger?.('start');
+        // 录制期间的新激活照旧挡掉。
         mocks.listenerOptions.onTrigger?.('tap');
         expect(mocks.focusedWindow.webContents.send).not.toHaveBeenCalledWith(
           'voice-input:global-shortcut-trigger',
           expect.anything(),
         );
 
-        // 录制框打开之前就已经按下的那次, 它的 end 必须送到。
+        // 而先前那次按住的 end 必须送到 —— 挂起会调 endActiveTriggerIfNeeded() 补发它, 丢掉
+        // 那个会话就永远停不下来。
         mocks.listenerOptions.onTrigger?.('end');
         expect(mocks.focusedWindow.webContents.send).toHaveBeenCalledWith(
           'voice-input:global-shortcut-trigger',
           { phase: 'end' },
+        );
+      });
+
+      // listener 的 triggered 是它自己的内部时序: 被投递层挡掉的 start, 用户按住过阈值再松手照样
+      // 会给出一条 end。而 end 在下游就是「停止并提交」—— 正在跑的 inline 语音输入会话会被这条
+      // 没有配对 start 的 end 直接提交掉, 用户只是按了一下本该被吞掉的键。
+      it('drops the end of an activation whose start was suppressed', async () => {
+        setPlatform('darwin');
+        const { registerGlobalVoiceInputIpc, registerActiveInlineVoiceInputWebContents } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+        // 有它在, 一条孤立的 end 会被真的投递出去 —— 断言因此有区分力。
+        registerActiveInlineVoiceInputWebContents(
+          mocks.focusedWindow.webContents as unknown as Parameters<typeof registerActiveInlineVoiceInputWebContents>[0],
+        );
+
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.(
+          mocks.settingsEvent,
+          null,
+          { suspend: true },
+        );
+        mocks.focusedWindow.webContents.send.mockClear();
+
+        // 录制期间按下 → start 被挡; 按住过阈值再松手 → listener 照样发 end。
+        mocks.listenerOptions.onTrigger?.('start');
+        mocks.listenerOptions.onTrigger?.('end');
+
+        expect(mocks.focusedWindow.webContents.send).not.toHaveBeenCalledWith(
+          'voice-input:global-shortcut-trigger',
+          expect.anything(),
+        );
+      });
+
+      // 配对判据不能退化成「此刻还在不在录制」: 录制框关掉之后姗姗来迟的那条 end, 只要它的 start
+      // 被挡过, 就同样不该送。
+      it('drops a late end from a suppressed start even after the recording stopped', async () => {
+        setPlatform('darwin');
+        const { registerGlobalVoiceInputIpc, registerActiveInlineVoiceInputWebContents } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+        registerActiveInlineVoiceInputWebContents(
+          mocks.focusedWindow.webContents as unknown as Parameters<typeof registerActiveInlineVoiceInputWebContents>[0],
+        );
+
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.(
+          mocks.settingsEvent,
+          null,
+          { suspend: true },
+        );
+        mocks.listenerOptions.onTrigger?.('start');
+        await mocks.handlers.get('voice-input:modifier-shortcut-recording:stop')?.(mocks.settingsEvent);
+        mocks.focusedWindow.webContents.send.mockClear();
+
+        mocks.listenerOptions.onTrigger?.('end');
+
+        expect(mocks.focusedWindow.webContents.send).not.toHaveBeenCalledWith(
+          'voice-input:global-shortcut-trigger',
+          expect.anything(),
         );
       });
 

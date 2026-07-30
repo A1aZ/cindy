@@ -78,17 +78,40 @@ const activeInlineVoiceInputWebContentsIds = new Set<number>();
  * `end` 是例外，必须照常投递：按住说话的会话可能在录制框打开**之前**就已经 start 了，而挂起
  * （或替换）listener 会调 endActiveTriggerIfNeeded() 补发一次 end。把这个 end 也丢掉，那个
  * 会话就永远停不下来 —— listener 已经停了，它还在录。所以只挡新激活（start / tap）。
+ *
+ * 但「照常投递」要按**配对**来判，不是按「此刻还在不在录制」，见 nativeActivationStartDelivered。
  */
 function hasActiveShortcutRecordingSession(): boolean {
   return modifierShortcutRecordingSessionIds.size > 0;
 }
 
+/**
+ * 上一次 native 激活的 start 有没有真的投递到下游。
+ *
+ * listener 的 triggered / end 是它自己的内部时序，与这里的投递层抑制无关：被上面那条守卫挡掉的
+ * start，用户按住超过阈值再松手时照样会给出一条 end（endActiveTriggerIfNeeded 补发的那条同理）。
+ * 而 end 在下游就是「停止并提交」—— 一个正在跑的 inline 语音输入会话会被这条**没有配对 start**
+ * 的 end 直接提交掉，而用户只是按了一下本该被吞掉的键。
+ *
+ * 所以 end 的投递条件是「配对的 start 投递过没有」。这也覆盖了录制框已经关掉、end 才姗姗来迟的
+ * 情形 —— 那时录制守卫早就不生效了，只有配对关系还算数。
+ */
+let nativeActivationStartDelivered = false;
+
 const macModifierShortcutListener = new MacModifierShortcutListener({
   onTrigger: (phase) => {
     if (phase !== 'end' && hasActiveShortcutRecordingSession()) {
+      // 挡掉 start 就等于这次激活在下游不存在，它后面那条配对的 end 也必须一起挡掉。
+      if (phase === 'start') nativeActivationStartDelivered = false;
       log.debug('ignoring native global shortcut activation while recording', { phase });
       return;
     }
+    if (phase === 'end' && !nativeActivationStartDelivered) {
+      log.debug('ignoring native global shortcut end without a delivered start');
+      return;
+    }
+    // tap 没有配对的 end；end 到这里就算消费掉了。两种都把配对状态清干净。
+    nativeActivationStartDelivered = phase === 'start';
     log.debug('native global shortcut triggered', { phase });
     if (phase === 'tap') {
       handleGlobalVoiceInputShortcutTap();

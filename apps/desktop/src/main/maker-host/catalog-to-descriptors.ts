@@ -7,7 +7,9 @@
  * BUNDLED_CATALOG 派生每个 agent 的模型列表，经 capabilityAdditions 注入。
  *
  * union 规则：跳过 `routing[agent].disabled` 的 runtime，再按 `catalog.providers` 数组序
- * flatMap 各 provider 的 `models[agent]`，按 id **首见胜出**去重（provider 序即
+ * flatMap 各 provider 的 `models[agent]`，跳过非聊天模型(isAgentSelectableModel,issue #882 第 3 点:
+ * 网关多返回的图像/视频/TTS/STT/实时/Embedding/压缩模型不进 Agent availableModels,但仍在
+ * 模型管理设置页可见——那边走完整 catalog,不走这个函数),按 id **首见胜出**去重（provider 序即
  * anthropic → openai → xd）。禁用来源不占 seen，同 id 仍可由后续可用来源补上。
  *
  * 顺序契约（no-break）：派生结果必须逐字逐序复现迁移前的有效列表
@@ -15,7 +17,7 @@
  * 由 maker-host 的 catalogDerivedModels.test.ts 守。
  */
 
-import type { Catalog, CatalogModel, AgentKind } from '@cindy/model-providers';
+import { isAgentSelectableModel, type Catalog, type CatalogModel, type AgentKind } from '@cindy/model-providers';
 import type { ModelDescriptor } from '@cindy/maker-core';
 
 /** Maker 能力读取面的最小形状；保留数组引用以让已创建 Session 同步看到新目录。 */
@@ -37,6 +39,7 @@ function toDescriptor(m: CatalogModel): ModelDescriptor {
   if (m.supportsFastMode !== undefined) d.supportsFastMode = m.supportsFastMode;
   if (m.group !== undefined) d.group = m.group;
   if (m.sortOrder !== undefined) d.sortOrder = m.sortOrder;
+  if (m.mode !== undefined) d.mode = m.mode;
   // 默认可见性要透传：渲染层的种子默认模型取「排序第一**且默认可见**」的那个，没有它就会
   // 把默认收起的 legacy 模型选成默认 —— 用户在选择器里根本看不到自己的默认模型。
   if (m.defaultEnabled !== undefined) d.defaultEnabled = m.defaultEnabled;
@@ -51,6 +54,10 @@ export function deriveAvailableModels(catalog: Catalog, agent: AgentKind): Model
     if (provider.routing[agent]?.disabled === true) continue;
     for (const m of provider.models[agent] ?? []) {
       if (seen.has(m.id)) continue;
+      // provider-aware 谓词:合并目录里 source:'user' 的自定义供应商显式配置的模型带
+      // 未知 group,id 撞上能力启发式(如 flux-image-x)时不能被误杀(2026-07 review 第
+      // 25 轮)。非聊天模型不占 seen,同 id 若被其它来源标为 chat 仍可补上。
+      if (!isAgentSelectableModel(m, { userProvider: provider.source === 'user' })) continue;
       seen.add(m.id);
       out.push(toDescriptor(m));
     }

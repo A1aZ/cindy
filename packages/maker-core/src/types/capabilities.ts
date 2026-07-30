@@ -161,6 +161,14 @@ export interface ModelDescriptor {
    */
   sortOrder?: number;
   /**
+   * Gateway 原生 mode（issue #882，纯展示/判定元数据，源自目录 CatalogModel.mode）。
+   * availableModels 派生时已经过 isChatEligible 过滤，这里透传只是为了让下游（如
+   * resolveSourceSwitch 之类按 model 二次判定分组的逻辑）拿到 mode 而不必回读目录——
+   * 2026-07 review：ModelDescriptor 曾经丢弃 mode，下游对象只能靠 id/group 猜，
+   * 与本条目"已经聊天可用"的事实脱节。maker-core 运行时不读它。
+   */
+  mode?: string;
+  /**
    * 该模型在选择器里**默认是否可见**（源自目录 `defaultEnabled`，host 派生时透传；
    * 缺省 ⇒ 可见）。渲染层取种子默认模型时据它跳过默认收起的 legacy 模型 ——
    * 否则默认模型可能是用户在清单里根本看不到的那个。maker-core 运行时不读它。

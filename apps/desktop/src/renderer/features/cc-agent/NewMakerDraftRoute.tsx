@@ -296,7 +296,13 @@ function draftEnableOrcaOptions(
     // 显式路由过去。「隐藏」不再收窄 —— 隐藏只是陈列过滤,记忆来源被隐藏仍然合法可用
     // (2026-07 启用/显示双轴拆分)。suspended 供应商已被 connectedProvidersForAgent 剔除。
     const catalogModel = getModel(provider, cfg.model, workerAgent);
-    return catalogModel && catalogModel.disabled !== true ? cfg.providerId : undefined;
+    // 非聊天模型不该被当成持久化草稿的有效来源(issue #882 第 3 点,2026-07 review),
+    // 与 CreateWorkerPopover.narrowProviderSource 同规则同理由。
+    return catalogModel &&
+      catalogModel.disabled !== true &&
+      isAgentSelectableModel(catalogModel, { userProvider: provider.source === 'user' })
+      ? cfg.providerId
+      : undefined;
   })();
   return {
     workerAgent,

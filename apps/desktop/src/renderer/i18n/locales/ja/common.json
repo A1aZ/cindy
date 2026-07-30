@@ -1743,6 +1743,134 @@
         }
       }
     },
+    "telegramBot": {
+      "title": "Telegram ボット",
+      "description": "自分で作成した Telegram ボットを連携します。デスクトップが Telegram に直接接続し、DM でもグループでも {{appName}} を使えます。",
+      "statusAria": "Telegram ボットの状態: {{status}}",
+      "status": {
+        "needsConfig": "設定が必要",
+        "connecting": "接続中…",
+        "connected": "接続済み",
+        "conflict": "別のデバイスで使用中",
+        "error": "接続に失敗"
+      },
+      "connected": {
+        "heading": "Telegram Bot 接続済み",
+        "note": "Bot への DM やグループでのメンションは、このマシンの {{appName}} にルーティングされます。グループの直近の会話はコンテキストとして添付されます。",
+        "botLabel": "Bot アカウント",
+        "ownerLabel": "自分のユーザー ID"
+      },
+      "tokenLabel": "Bot Token",
+      "tokenPlaceholder": "BotFather が生成した Token を貼り付け",
+      "ownerUserIdLabel": "自分の Telegram ユーザー ID",
+      "ownerUserIdPlaceholder": "数字の ID（@userinfobot で確認）",
+      "showToken": "Token を表示",
+      "hideToken": "Token を非表示",
+      "formHint": "ユーザー ID は数字です。@userinfobot に DM すると自分の ID を確認できます。",
+      "connect": "接続",
+      "connectingAction": "接続中…",
+      "disconnect": "連携解除",
+      "disconnectingAction": "解除中…",
+      "disconnectAria": "Telegram ボットの連携を解除",
+      "disconnectConfirm": {
+        "title": "Telegram ボットの連携を解除しますか？",
+        "description": "連携を解除すると接続が切れ、ローカルに保存された Bot Token と Telegram ユーザー ID が削除されます。",
+        "confirm": "連携解除",
+        "cancel": "キャンセル"
+      },
+      "ownerNotice": {
+        "linked": "✅ 連携できました。準備できたらそのまま話しかけてください。",
+        "disconnected": "🔌 連携を解除しました。必要になったらまたつないでください。"
+      },
+      "guide": {
+        "title": "設定ガイド",
+        "openBotFather": "BotFather を開く ↗",
+        "step1": {
+          "title": "Bot を作成",
+          "body": "Telegram で @BotFather に /newbot を送り、指示に従って作成し、生成された Bot Token をコピーします。"
+        },
+        "step2": {
+          "title": "自分のユーザー ID を確認",
+          "body": "@userinfobot に DM して数字のユーザー ID を取得します。この ID からのメッセージだけが処理されます。"
+        },
+        "step3": {
+          "title": "グループコンテキスト（任意）",
+          "body": "Bot をグループに追加したら、BotFather で /setprivacy を Disable にする（または Bot をグループ管理者にする）と、全メッセージを見てコンテキストを組み立てられます。返信するのはメンションか Bot への返信のときだけです。"
+        },
+        "step4": {
+          "title": "接続",
+          "body": "上に Token とユーザー ID を入力して接続を押します。デスクトップが Telegram に直接接続し、{{appName}} のサーバーは経由しません。"
+        }
+      },
+      "commandMenu": {
+        "start": "ようこそと使い方を表示",
+        "new": "新しいセッションを開始",
+        "help": "コマンドヘルプを表示",
+        "stop": "現在のタスクを停止",
+        "session": "最近のセッション一覧から続行",
+        "project": "プロジェクトワークスペースを切り替え",
+        "model": "モデルを表示・切り替え",
+        "permission": "権限モードを表示・切り替え",
+        "ctr": "デスクトップセッションをリモート操作",
+        "exctr": "リモート操作を終了"
+      },
+      "behavior": {
+        "title": "リアクションと引用",
+        "emojiLabel": "絵文字リアクション",
+        "emojiOption": {
+          "off": "オフ",
+          "minimal": "ベーシック",
+          "expressive": "生き生き"
+        },
+        "emojiHint": {
+          "off": "絵文字リアクションを一切付けません。",
+          "minimal": "受信時 👀、成功 👍、失敗 👎。",
+          "expressive": "完了/失敗は利用可能な全リアクションからランダムに（ポジ/ネガはプール分離）。"
+        },
+        "groupQuoteLabel": "グループで質問を引用して返信",
+        "quoteOption": {
+          "off": "しない",
+          "first": "最初のみ",
+          "all": "毎回"
+        },
+        "groupQuoteHint": {
+          "off": "グループの回答を質問に紐付けません。",
+          "first": "各回答の最初のメッセージが質問を引用します（推奨）。",
+          "all": "回答のすべてのメッセージが質問を引用します。"
+        },
+        "dmQuoteLabel": "DM でメッセージを引用して返信",
+        "dmQuoteHint": {
+          "off": "DM の回答は引用なしで送ります（デフォルト）。",
+          "first": "最初の返信があなたのメッセージを引用します。"
+        }
+      },
+      "persona": {
+        "title": "ペルソナ",
+        "nameLabel": "名前",
+        "namePlaceholder": "ボットに名前を（Telegram プロフィールに同期）",
+        "soulLabel": "Soul（基本人格）",
+        "soulPlaceholder": "性格・口調・口ぐせ・境界線などを書くと、毎回の返信にこの人格が宿ります。",
+        "syncHint": "名前を Telegram プロフィールへ書き込み（BotFather 不要）",
+        "sync": {
+          "idle": "プロフィール同期",
+          "syncing": "同期中…",
+          "done": "同期済み ✓",
+          "failed": "同期失敗、後でもう一度"
+        }
+      },
+      "groups": {
+        "title": "グループ参加モード",
+        "hint": "ボットが参加したグループが表示されます。「アクティブ」= 全メッセージを読み、自分で発言するか判断します（各メッセージでトークンを消費）。",
+        "empty": "まだグループがありません。ボットをグループに追加して誰かが話すと表示されます。",
+        "contactsOn": "グループで発言した人はスマート連絡先に自動登録されます（マスタースイッチはオン）。",
+        "contactsOff": "スマート連絡先がオフのため、グループで発言した人は自動的に記憶されません。",
+        "contactsEnable": "オンにする",
+        "mode": {
+          "mention": "@ のみ",
+          "always": "アクティブ"
+        }
+      }
+    },
     "logout": {
       "button": "ログアウト",
       "aria": "ログアウト"
@@ -2413,7 +2541,7 @@
       },
       "tips": {
         "cindy": "Cindy は公式提供の共有ボットです。認証情報の申請は不要で、Slack を連携して @Cindy にメンションするだけでタスクを任せられます。",
-        "personal": "個人接続には WeChat のスキャン認証と、自分の Feishu / Discord 認証情報を使用する接続があります。新規会話設定はチャネルごとに保存されます。",
+        "personal": "個人接続には WeChat のスキャン認証と、自分の Feishu / Discord / Telegram 認証情報を使用する接続があります。新規会話設定はチャネルごとに保存されます。",
         "personalFeishuOnly": "個人接続には WeChat のスキャン認証と、自分の Feishu 認証情報を使用する接続があります。新規会話設定はチャネルごとに保存されます。"
       },
       "defaults": {
@@ -2422,7 +2550,8 @@
           "feishu": "Feishu の新規会話では、この Agent とモデルを使用します。既存の DM には /new で適用します。",
           "slack": "Slack の新しいスレッドでは、この Agent とモデルを使用します。",
           "discord": "Discord の新規会話では、この Agent とモデルを使用します。既存の DM には /new で適用します。",
-          "wechat": "WeChat の新規会話では、この Agent・モデル・権限モードを使用します。既存のチャットには /new で適用します。"
+          "wechat": "WeChat の新規会話では、この Agent・モデル・権限モードを使用します。既存のチャットには /new で適用します。",
+          "telegram": "Telegram の新規会話では、この Agent とモデルを使用します。既存の会話には /new で適用します。"
         },
         "agentLabel": "Agent",
         "modelLabel": "モデル設定",
@@ -7273,7 +7402,12 @@
       "migrationFailed": "移行に失敗しました。後でもう一度お試しください",
       "fetchUpdateNoticeFailed": "更新通知の取得に失敗しました",
       "corruptionRestored": "{{time}} のスナップショットからデータベースを復元しました。期間中のチャットが失われた可能性があります",
-      "schemaDriftWarning": "ローカルデータベースのバージョン記録に不整合があります。最新版に更新し、更新後もこの警告が繰り返し表示される場合はサポートに連絡してください。アプリがローカルデータを自動的に削除することはありません。"
+      "schemaDriftWarning": "ローカルデータベースのバージョン記録に不整合があります。最新版に更新し、更新後もこの警告が繰り返し表示される場合はサポートに連絡してください。アプリがローカルデータを自動的に削除することはありません。",
+      "telegramBotConnected": "Telegram ボット設定を保存しました",
+      "telegramBotConnectFailed": "Telegram ボットの接続に失敗しました。Token とネットワークを確認してください",
+      "telegramBotSaveFailed": "保存に失敗しました：{{message}}",
+      "telegramBotDisconnected": "Telegram ボットの連携を解除しました",
+      "telegramBotDisconnectFailed": "連携解除に失敗しました：{{message}}"
     },
     "errors": {
       "openFileFailed": "システムでファイルを開けません",
@@ -7295,7 +7429,10 @@
       "feishuFieldsRequired": "App ID と App Secret の両方を入力してください",
       "feishuAppIdFormat": "App ID の形式は cli_xxxxxxxxxxxxxxxx である必要があります",
       "discordFieldsRequired": "Bot Token と Discord ユーザー ID の両方を入力してください",
-      "discordOwnerUserIdFormat": "Discord ユーザー ID は 17-20 桁の数字である必要があります"
+      "discordOwnerUserIdFormat": "Discord ユーザー ID は 17-20 桁の数字である必要があります",
+      "telegramFieldsRequired": "Bot Token と Telegram ユーザー ID の両方を入力してください",
+      "telegramTokenFormat": "Token の形式が不正です。BotFather が生成する「数字:シークレット」の形にしてください",
+      "telegramOwnerUserIdFormat": "Telegram ユーザー ID は数字である必要があります"
     },
     "confirm": {
       "logoutTitle": "ログアウト",

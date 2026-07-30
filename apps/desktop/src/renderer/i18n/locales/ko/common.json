@@ -1743,6 +1743,134 @@
         }
       }
     },
+    "telegramBot": {
+      "title": "Telegram 봇",
+      "description": "직접 만든 Telegram 봇을 연결하세요. 데스크톱이 Telegram에 직접 연결되어 DM과 그룹 채팅에서 {{appName}}를 사용할 수 있습니다.",
+      "statusAria": "Telegram 봇 상태: {{status}}",
+      "status": {
+        "needsConfig": "설정 필요",
+        "connecting": "연결 중…",
+        "connected": "연결됨",
+        "conflict": "다른 기기에서 사용 중",
+        "error": "연결 실패"
+      },
+      "connected": {
+        "heading": "Telegram 봇 연결됨",
+        "note": "봇에게 DM을 보내거나 그룹에서 멘션하면 이 기기의 {{appName}}로 전달됩니다. 그룹의 최근 대화는 컨텍스트로 함께 전달됩니다.",
+        "botLabel": "봇 계정",
+        "ownerLabel": "내 사용자 ID"
+      },
+      "tokenLabel": "Bot Token",
+      "tokenPlaceholder": "BotFather가 생성한 Token 붙여넣기",
+      "ownerUserIdLabel": "내 Telegram 사용자 ID",
+      "ownerUserIdPlaceholder": "숫자 ID (@userinfobot으로 확인)",
+      "showToken": "Token 표시",
+      "hideToken": "Token 숨기기",
+      "formHint": "사용자 ID는 숫자입니다. @userinfobot에게 DM을 보내면 자신의 ID를 확인할 수 있습니다.",
+      "connect": "연결",
+      "connectingAction": "연결 중…",
+      "disconnect": "연동 해제",
+      "disconnectingAction": "해제 중…",
+      "disconnectAria": "Telegram 봇 연동 해제",
+      "disconnectConfirm": {
+        "title": "Telegram 봇 연동을 해제하시겠습니까?",
+        "description": "연동을 해제하면 연결이 끊기고 로컬에 저장된 Bot Token과 Telegram 사용자 ID가 삭제됩니다.",
+        "confirm": "연동 해제",
+        "cancel": "취소"
+      },
+      "ownerNotice": {
+        "linked": "✅ 연동됐어요. 준비되면 바로 말을 걸어 주세요.",
+        "disconnected": "🔌 연동을 해제했어요. 필요할 때 다시 연결하면 됩니다."
+      },
+      "guide": {
+        "title": "설정 가이드",
+        "openBotFather": "BotFather 열기 ↗",
+        "step1": {
+          "title": "봇 만들기",
+          "body": "Telegram에서 @BotFather에게 /newbot을 보내고 안내에 따라 만든 뒤, 생성된 Bot Token을 복사하세요."
+        },
+        "step2": {
+          "title": "내 사용자 ID 확인",
+          "body": "@userinfobot에게 DM을 보내 숫자 사용자 ID를 확인하세요. 이 ID가 보낸 메시지만 처리됩니다."
+        },
+        "step3": {
+          "title": "그룹 컨텍스트 (선택)",
+          "body": "봇을 그룹에 추가한 뒤 BotFather에서 /setprivacy를 Disable로 설정하거나 봇을 그룹 관리자로 지정하면, 봇이 모든 그룹 메시지를 보고 컨텍스트를 구성합니다. 멘션하거나 봇의 메시지에 답장할 때만 응답합니다."
+        },
+        "step4": {
+          "title": "연결",
+          "body": "위에 Token과 사용자 ID를 입력하고 연결을 누르세요. 데스크톱이 Telegram에 직접 연결되며 {{appName}} 서버를 거치지 않습니다."
+        }
+      },
+      "commandMenu": {
+        "start": "환영 메시지와 사용법 보기",
+        "new": "새 세션 시작",
+        "help": "명령어 도움말 보기",
+        "stop": "현재 작업 중지",
+        "session": "최근 세션 목록에서 이어서 대화",
+        "project": "프로젝트 워크스페이스 전환",
+        "model": "모델 보기·전환",
+        "permission": "권한 모드 보기·전환",
+        "ctr": "데스크톱 세션 원격 제어",
+        "exctr": "원격 제어 종료"
+      },
+      "behavior": {
+        "title": "리액션과 인용",
+        "emojiLabel": "이모지 리액션",
+        "emojiOption": {
+          "off": "끄기",
+          "minimal": "기본",
+          "expressive": "생동감"
+        },
+        "emojiHint": {
+          "off": "이모지 리액션을 전혀 달지 않습니다.",
+          "minimal": "수신 시 👀, 성공 👍, 실패 👎.",
+          "expressive": "완료/실패 시 사용 가능한 전체 리액션에서 랜덤 선택(긍정/부정 풀 분리)."
+        },
+        "groupQuoteLabel": "그룹에서 질문 인용해 답장",
+        "quoteOption": {
+          "off": "안 함",
+          "first": "첫 답장만",
+          "all": "매번"
+        },
+        "groupQuoteHint": {
+          "off": "그룹 답변을 질문에 연결하지 않습니다.",
+          "first": "각 답변의 첫 메시지가 질문을 인용합니다(권장).",
+          "all": "답변의 모든 메시지가 질문을 인용합니다."
+        },
+        "dmQuoteLabel": "DM에서 메시지 인용해 답장",
+        "dmQuoteHint": {
+          "off": "DM 답변은 인용 없이 보냅니다(기본).",
+          "first": "첫 답장이 보낸 메시지를 인용합니다."
+        }
+      },
+      "persona": {
+        "title": "페르소나",
+        "nameLabel": "이름",
+        "namePlaceholder": "봇 이름 짓기(Telegram 프로필에 동기화)",
+        "soulLabel": "Soul(기본 인격)",
+        "soulPlaceholder": "성격, 말투, 입버릇, 경계를 적어 두면 모든 답장에 이 인격이 담깁니다.",
+        "syncHint": "이름을 Telegram 프로필에 기록(BotFather 불필요)",
+        "sync": {
+          "idle": "프로필 동기화",
+          "syncing": "동기화 중…",
+          "done": "동기화 완료 ✓",
+          "failed": "동기화 실패, 나중에 다시"
+        }
+      },
+      "groups": {
+        "title": "그룹 참여 모드",
+        "hint": "봇이 들어간 그룹이 여기에 표시됩니다. \"활성\" = 모든 메시지를 읽고 끼어들지 스스로 판단합니다(메시지마다 토큰 소모).",
+        "empty": "아직 그룹이 없습니다. 봇을 그룹에 추가하고 누군가 말하면 표시됩니다.",
+        "contactsOn": "그룹에서 말한 사람은 스마트 연락처에 자동 등록됩니다(마스터 스위치 켜짐).",
+        "contactsOff": "스마트 연락처가 꺼져 있어 그룹에서 말한 사람이 자동으로 기억되지 않습니다.",
+        "contactsEnable": "켜기",
+        "mode": {
+          "mention": "@만",
+          "always": "활성"
+        }
+      }
+    },
     "logout": {
       "button": "로그아웃",
       "aria": "로그아웃"
@@ -2413,7 +2541,7 @@
       },
       "tips": {
         "cindy": "Cindy는 공식 제공 공유 봇입니다. 자격 증명을 신청할 필요 없이 Slack을 연결하고 @Cindy를 멘션하면 바로 작업을 맡길 수 있습니다.",
-        "personal": "개인 연결에는 WeChat 스캔 인증과 직접 발급한 Feishu / Discord 인증 정보 연결이 포함됩니다. 새 대화 설정은 채널별로 저장됩니다.",
+        "personal": "개인 연결에는 WeChat 스캔 인증과 직접 발급한 Feishu / Discord / Telegram 인증 정보 연결이 포함됩니다. 새 대화 설정은 채널별로 저장됩니다.",
         "personalFeishuOnly": "개인 연결에는 WeChat 스캔 인증과 직접 발급한 Feishu 인증 정보 연결이 포함됩니다. 새 대화 설정은 채널별로 저장됩니다."
       },
       "defaults": {
@@ -2422,7 +2550,8 @@
           "feishu": "새 Feishu 대화는 이 Agent와 모델을 사용합니다. 기존 DM에는 /new를 보내 적용하세요.",
           "slack": "새 Slack 스레드는 이 Agent와 모델을 사용합니다.",
           "discord": "새 Discord 대화는 이 Agent와 모델을 사용합니다. 기존 DM에는 /new를 보내 적용하세요.",
-          "wechat": "새 WeChat 대화는 이 Agent, 모델, 권한 모드를 사용합니다. 기존 채팅에는 /new를 보내 적용하세요."
+          "wechat": "새 WeChat 대화는 이 Agent, 모델, 권한 모드를 사용합니다. 기존 채팅에는 /new를 보내 적용하세요.",
+          "telegram": "새 Telegram 대화는 이 Agent와 모델을 사용합니다. 기존 대화에는 /new를 보내 적용하세요."
         },
         "agentLabel": "Agent",
         "modelLabel": "모델 설정",
@@ -7273,7 +7402,12 @@
       "migrationFailed": "마이그레이션 실패. 잠시 후 다시 시도하세요",
       "fetchUpdateNoticeFailed": "업데이트 알림 가져오기 실패",
       "corruptionRestored": "{{time}}의 스냅샷에서 데이터베이스가 복원됨. 그 사이의 채팅이 손실되었을 수 있습니다",
-      "schemaDriftWarning": "로컬 데이터베이스 버전 기록이 일치하지 않습니다. 최신 버전으로 업데이트한 뒤에도 이 경고가 계속 표시되면 지원팀에 문의해 주세요. 앱은 로컬 데이터를 자동으로 삭제하지 않습니다."
+      "schemaDriftWarning": "로컬 데이터베이스 버전 기록이 일치하지 않습니다. 최신 버전으로 업데이트한 뒤에도 이 경고가 계속 표시되면 지원팀에 문의해 주세요. 앱은 로컬 데이터를 자동으로 삭제하지 않습니다.",
+      "telegramBotConnected": "Telegram 봇 구성이 저장됨",
+      "telegramBotConnectFailed": "Telegram 봇 연결 실패. Token과 네트워크를 확인하세요",
+      "telegramBotSaveFailed": "저장 실패: {{message}}",
+      "telegramBotDisconnected": "Telegram 봇 연동이 해제됨",
+      "telegramBotDisconnectFailed": "연동 해제 실패: {{message}}"
     },
     "errors": {
       "openFileFailed": "시스템에서 파일을 열 수 없습니다",
@@ -7295,7 +7429,10 @@
       "feishuFieldsRequired": "App ID와 App Secret 둘 다 입력해야 합니다",
       "feishuAppIdFormat": "App ID 형식은 cli_xxxxxxxxxxxxxxxx여야 합니다",
       "discordFieldsRequired": "Bot Token과 Discord 사용자 ID 둘 다 입력해야 합니다",
-      "discordOwnerUserIdFormat": "Discord 사용자 ID는 17-20자리 숫자여야 합니다"
+      "discordOwnerUserIdFormat": "Discord 사용자 ID는 17-20자리 숫자여야 합니다",
+      "telegramFieldsRequired": "Bot Token과 Telegram 사용자 ID 둘 다 입력해야 합니다",
+      "telegramTokenFormat": "Token 형식이 잘못되었습니다. BotFather가 생성한 \"숫자:시크릿\" 형태여야 합니다",
+      "telegramOwnerUserIdFormat": "Telegram 사용자 ID는 숫자여야 합니다"
     },
     "confirm": {
       "logoutTitle": "로그아웃",

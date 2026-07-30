@@ -1743,6 +1743,134 @@
         }
       }
     },
+    "telegramBot": {
+      "title": "Telegram 机器人",
+      "description": "绑定你自建的 Telegram Bot，桌面端直连 Telegram，私聊和群聊都能找 {{appName}}。",
+      "statusAria": "Telegram 机器人状态：{{status}}",
+      "status": {
+        "needsConfig": "需要配置",
+        "connecting": "连接中…",
+        "connected": "已连接",
+        "conflict": "已被另一台设备使用",
+        "error": "连接失败"
+      },
+      "connected": {
+        "heading": "已连接 Telegram Bot",
+        "note": "私聊 Bot 或在群里 @ 它，消息会路由到本机的 {{appName}}；群里最近的消息会作为上下文一起带上。",
+        "botLabel": "Bot 账号",
+        "ownerLabel": "我的用户 ID"
+      },
+      "tokenLabel": "Bot Token",
+      "tokenPlaceholder": "粘贴 BotFather 生成的 Token",
+      "ownerUserIdLabel": "我的 Telegram 用户 ID",
+      "ownerUserIdPlaceholder": "纯数字 ID（向 @userinfobot 查询）",
+      "showToken": "显示 Token",
+      "hideToken": "隐藏 Token",
+      "formHint": "用户 ID 是纯数字；私聊 @userinfobot 可以查到自己的 ID。",
+      "connect": "连接",
+      "connectingAction": "连接中…",
+      "disconnect": "解绑",
+      "disconnectingAction": "解绑中…",
+      "disconnectAria": "解绑 Telegram 机器人",
+      "disconnectConfirm": {
+        "title": "解绑 Telegram 机器人？",
+        "description": "解绑后会断开连接，并清除本机保存的 Bot Token 和 Telegram 用户 ID。",
+        "confirm": "解绑",
+        "cancel": "取消"
+      },
+      "ownerNotice": {
+        "linked": "✅ 关联好啦，直接开聊就行~",
+        "disconnected": "🔌 已断开关联啦，需要时再连上就行~"
+      },
+      "guide": {
+        "title": "配置引导",
+        "openBotFather": "打开 BotFather ↗",
+        "step1": {
+          "title": "创建 Bot",
+          "body": "在 Telegram 里找 @BotFather，发送 /newbot 按提示创建，复制生成的 Bot Token。"
+        },
+        "step2": {
+          "title": "查自己的用户 ID",
+          "body": "私聊 @userinfobot 获取自己的数字用户 ID；只有这个 ID 发来的消息会被处理。"
+        },
+        "step3": {
+          "title": "群聊上下文（可选）",
+          "body": "把 Bot 拉进群后，在 BotFather 里发送 /setprivacy 选 Disable（或把 Bot 设为群管理员），Bot 才能看到全部群消息、拼出群上下文；群里 @ 它或回复它的消息才会触发回答。"
+        },
+        "step4": {
+          "title": "连接",
+          "body": "把 Token 和用户 ID 填到上面，点连接。桌面端会直连 Telegram，不经 {{appName}} 服务器。"
+        }
+      },
+      "commandMenu": {
+        "start": "查看欢迎信息和用法",
+        "new": "开启新对话",
+        "help": "查看命令帮助",
+        "stop": "停止当前任务",
+        "session": "最近对话列表，选中即续聊",
+        "project": "切换项目工作区",
+        "model": "查看或切换模型",
+        "permission": "查看或切换权限模式",
+        "ctr": "接管桌面端的对话",
+        "exctr": "退出远程控制"
+      },
+      "behavior": {
+        "title": "回应与引用",
+        "emojiLabel": "表情回应",
+        "emojiOption": {
+          "off": "关闭",
+          "minimal": "基础",
+          "expressive": "生动"
+        },
+        "emojiHint": {
+          "off": "不放任何表情回应。",
+          "minimal": "收到消息 👀，完成 👍，失败 👎。",
+          "expressive": "完成/失败从全量可用表情里随机挑（正负分池，成功不会随机出翻车表情）。"
+        },
+        "groupQuoteLabel": "群里回复时引用提问",
+        "quoteOption": {
+          "off": "不引用",
+          "first": "首条引用",
+          "all": "每条引用"
+        },
+        "groupQuoteHint": {
+          "off": "群里的回答不挂回提问消息。",
+          "first": "每次触发的第一条回答挂回提问，多人群里对得上号（推荐）。",
+          "all": "本次回答的每条消息都挂回提问。"
+        },
+        "dmQuoteLabel": "私聊回复时引用消息",
+        "dmQuoteHint": {
+          "off": "私聊回答不引用你的消息（默认，更清爽）。",
+          "first": "第一条回答引用你发的那条消息。"
+        }
+      },
+      "persona": {
+        "title": "人格",
+        "nameLabel": "名字",
+        "namePlaceholder": "给 bot 起个名字（同步到 Telegram 资料页）",
+        "soulLabel": "Soul（基础人格）",
+        "soulPlaceholder": "写下 TA 的性格、语气、口头禅、边界……每次回复都会带着这份人格。",
+        "syncHint": "把名字写进 Telegram 资料页（BotFather 免操作）",
+        "sync": {
+          "idle": "同步资料页",
+          "syncing": "同步中…",
+          "done": "已同步 ✓",
+          "failed": "同步失败，稍后再试"
+        }
+      },
+      "groups": {
+        "title": "群聊参与模式",
+        "hint": "bot 进过的群会出现在这里。「全响应」= 每条消息都看，bot 自己判断要不要插话（每条都会消耗 token）。",
+        "empty": "还没有群。把 bot 拉进群、有人说话后就会出现在这里。",
+        "contactsOn": "群里说话的人会自动记入智能通讯录（总开关已开启）。",
+        "contactsOff": "智能通讯录未开启，群里说话的人不会被自动记住。",
+        "contactsEnable": "开启",
+        "mode": {
+          "mention": "仅 @",
+          "always": "全响应"
+        }
+      }
+    },
     "logout": {
       "button": "退出登录",
       "aria": "退出登录"
@@ -2413,7 +2541,7 @@
       },
       "tips": {
         "cindy": "Cindy 是官方提供的共享机器人：无需申请任何凭证，连接 Slack 后 @Cindy 即可直接派活。",
-        "personal": "个人连接包括微信扫码，以及使用自有凭证接入飞书 / Discord；各渠道独立保存新对话配置。",
+        "personal": "个人连接包括微信扫码，以及使用自有凭证接入飞书 / Discord / Telegram；各渠道独立保存新对话配置。",
         "personalFeishuOnly": "个人连接包括微信扫码，以及使用自有凭证接入飞书；各渠道独立保存新对话配置。"
       },
       "defaults": {
@@ -2422,7 +2550,8 @@
           "feishu": "飞书新对话会使用这组 Agent 和模型；已有私聊发送 /new 后应用。",
           "slack": "Slack 新 thread 会使用这组 Agent 和模型。",
           "discord": "Discord 新对话会使用这组 Agent 和模型；已有私聊发送 /new 后应用。",
-          "wechat": "微信新对话会使用这组 Agent、模型和权限模式；已有私聊发送 /new 后应用。"
+          "wechat": "微信新对话会使用这组 Agent、模型和权限模式；已有私聊发送 /new 后应用。",
+          "telegram": "Telegram 新对话会使用这组 Agent 和模型；已有对话发送 /new 后应用。"
         },
         "agentLabel": "Agent",
         "modelLabel": "模型配置",
@@ -7273,7 +7402,12 @@
       "migrationFailed": "迁移失败，请稍后重试",
       "fetchUpdateNoticeFailed": "获取更新公告失败",
       "corruptionRestored": "数据库已从 {{time}} 的快照恢复，期间的对话可能丢失",
-      "schemaDriftWarning": "本地数据库版本记录不一致。请升级到最新版；如果更新后仍反复出现，请联系支持。应用不会自动删除本地数据"
+      "schemaDriftWarning": "本地数据库版本记录不一致。请升级到最新版；如果更新后仍反复出现，请联系支持。应用不会自动删除本地数据",
+      "telegramBotConnected": "Telegram 机器人配置已保存",
+      "telegramBotConnectFailed": "Telegram 机器人连接失败，请检查 Token 和网络",
+      "telegramBotSaveFailed": "保存失败：{{message}}",
+      "telegramBotDisconnected": "已解绑 Telegram 机器人",
+      "telegramBotDisconnectFailed": "解绑失败：{{message}}"
     },
     "errors": {
       "openFileFailed": "无法在系统中打开文件",
@@ -7295,7 +7429,10 @@
       "feishuFieldsRequired": "App ID 和 App Secret 都需要填写",
       "feishuAppIdFormat": "App ID 格式应为 cli_xxxxxxxxxxxxxxxx",
       "discordFieldsRequired": "Bot Token 和 Discord 用户 ID 都需要填写",
-      "discordOwnerUserIdFormat": "Discord 用户 ID 必须是 17-20 位纯数字"
+      "discordOwnerUserIdFormat": "Discord 用户 ID 必须是 17-20 位纯数字",
+      "telegramFieldsRequired": "Bot Token 和 Telegram 用户 ID 都需要填写",
+      "telegramTokenFormat": "Token 格式不对：应为 BotFather 生成的「1234567:xxxx」形态",
+      "telegramOwnerUserIdFormat": "Telegram 用户 ID 必须是纯数字"
     },
     "confirm": {
       "logoutTitle": "退出登录",

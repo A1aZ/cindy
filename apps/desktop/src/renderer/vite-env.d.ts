@@ -382,6 +382,20 @@ type DiscordBotTransportStatus =
   | { kind: 'conflict'; appId: string }
   | { kind: 'error'; reason: string };
 
+/** @cindy/im TelegramIM 的 transport 状态(IMStatus union 的 mirror)。 */
+interface TelegramBotBehavior {
+  emojiReactions: 'off' | 'minimal' | 'expressive';
+  replyQuoteGroup: 'off' | 'first' | 'all';
+  replyQuoteDm: 'off' | 'first';
+}
+
+type TelegramBotTransportStatus =
+  | { kind: 'idle' }
+  | { kind: 'connecting' }
+  | { kind: 'connected'; appId: string }
+  | { kind: 'conflict'; appId: string }
+  | { kind: 'error'; reason: string };
+
 type WechatBotPhase =
   | 'disconnected'
   | 'authorizing'
@@ -1687,6 +1701,43 @@ interface ElectronAPI {
     onStatusChange: (
       callback: (update: {
         status: DiscordBotTransportStatus;
+      }) => void,
+    ) => () => void;
+  };
+
+  // ── Personal Telegram Bot (Settings → IM Bot → Personal) ──
+  telegramBot: {
+    getStatus: () => Promise<{
+      status: TelegramBotTransportStatus;
+      ownerUserId: string | null;
+      botUsername: string | null;
+    }>;
+    setConfig: (payload: { token: string; ownerUserId: string }) => Promise<{
+      status: TelegramBotTransportStatus;
+      saveErrorStatus?: TelegramBotTransportStatus;
+      ownerUserId: string | null;
+      botUsername: string | null;
+    }>;
+    disconnect: () => Promise<{
+      status: TelegramBotTransportStatus;
+    }>;
+    checkSessionAuth: () => Promise<DiscordBotSessionAuthCheckResult>;
+    getBehavior: () => Promise<TelegramBotBehavior>;
+    setBehavior: (patch: Partial<TelegramBotBehavior>) => Promise<TelegramBotBehavior>;
+    listGroups: () => Promise<{
+      groups: Array<{ chatId: string; chatName: string | null; activation: 'mention' | 'always' }>;
+    }>;
+    setGroupActivation: (payload: { chatId: string; mode: 'mention' | 'always' }) => Promise<unknown>;
+    getPersona: () => Promise<{ botName: string; soul: string }>;
+    setPersona: (payload: {
+      botName?: string;
+      soul?: string;
+      syncProfile?: boolean;
+    }) => Promise<{ persona: { botName: string; soul: string }; profileSynced?: boolean }>;
+    onStatusChange: (
+      callback: (update: {
+        status: TelegramBotTransportStatus;
+        botUsername: string | null;
       }) => void,
     ) => () => void;
   };

@@ -159,7 +159,7 @@ import { RendererBootGuard } from './renderer-boot-guard';
 import yaml from 'js-yaml';
 import matter from 'gray-matter';
 import type { Maker } from '@cindy/maker-core';
-import { im, feishuIm, startImOrchestrators, startImConnection, stopImConnection } from './im';
+import { im, feishuIm, registerTelegramBotConfigIpc, startImOrchestrators, startImConnection, stopImConnection } from './im';
 import * as authManager from './authManager';
 import { hasPersistedSessionHint } from './authSessionHint';
 import { createAccountDeletionIpcHandlers } from './accountDeletionIpc';
@@ -1003,9 +1003,14 @@ initStartupDiagnostics();
 //
 // packaged 下绝不开 — 任何带 9222 端口的 Chromium 进程都能被本机其他程序
 // 注入 JS, 是远程代码执行口子。dev 机器自然不在 attack surface 内。
+//
+// 端口可用 XDT_CDP_PORT 覆写(仅数字生效):并行多开沙箱时 9222 只有先起的
+// 实例能绑上, 后起实例要保住 CDP 调试面就换个端口。
 
 if (!app.isPackaged) {
-  app.commandLine.appendSwitch('remote-debugging-port', '9222');
+  const cdpPortOverride = process.env.XDT_CDP_PORT;
+  const cdpPort = cdpPortOverride && /^\d{2,5}$/.test(cdpPortOverride) ? cdpPortOverride : '9222';
+  app.commandLine.appendSwitch('remote-debugging-port', cdpPort);
 }
 
 // ── Webview hardener (RSB Phase 4) ──────────────────────────────────────
@@ -5699,6 +5704,9 @@ app.on('ready', async () => {
   // IPC handlers 必须无条件注册:用户在 Settings 页保存凭证时, renderer 走这些
   // channel 跟 main 通信, 跟用户登录态无关。
   im.registerIpc();
+  // Telegram 个人 bot 行为/人格/群参与配置的 IPC(设置卡数据面),与 im.registerIpc
+  // 同期无条件注册;不能放 host.ts 模块顶层(mock electron 的单测收集期会炸)。
+  registerTelegramBotConfigIpc();
   // 挂业务 orchestrator: 订阅 feishuIm.onMessage / .onCardAction。orchestrator
   // 必须在 createWindow 前挂好,避免 renderer 起来后第一波 IPC / event 找不到
   // handler。FeishuBot 的 WS 长连接必须等当前用户 localDb ready 后再启动。

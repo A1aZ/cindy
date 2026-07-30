@@ -383,6 +383,8 @@ const fanOutFeishuBotConflict = createIpcFanOut('feishuBot:conflict');
 const fanOutFeishuBotRegistrationStatus = createIpcFanOut('feishuBot:registration-status');
 // Discord Bot：本机凭证模式；这里只暴露 @cindy/im DiscordIM 的 transport 状态。
 const fanOutDiscordBotStatusChange = createIpcFanOut('discordBot:status-change');
+// 个人 Telegram Bot：本机凭证模式(BotFather token 直连);同上只暴露 transport 状态。
+const fanOutTelegramBotStatusChange = createIpcFanOut('telegramBot:status-change');
 // Personal WeChat: main owns auth/polling and broadcasts a credential-free state snapshot.
 const fanOutWechatBotStateChange = createIpcFanOut('wechatBot:state-changed');
 const fanOutVoiceInputEvent = createIpcFanOut('voice-input:event');
@@ -1490,6 +1492,81 @@ contextBridge.exposeInMainWorld('electronAPI', {
     checkSessionAuth: (): Promise<DiscordBotSessionAuthCheckWire> =>
       ipcRenderer.invoke('discordBot:check-session-auth'),
     onStatusChange: fanOutDiscordBotStatusChange,
+  },
+
+  // ── Personal Telegram Bot (Settings → IM Bot → Personal) ──
+  // 用户在 BotFather 自建 bot;token + owner user id 保存在本机 secrets,
+  // 桌面端直连 Telegram Bot API 长轮询, 不经 Cindy 服务器。
+  telegramBot: {
+    getStatus: (): Promise<{
+      status:
+        | { kind: 'idle' }
+        | { kind: 'connecting' }
+        | { kind: 'connected'; appId: string }
+        | { kind: 'conflict'; appId: string }
+        | { kind: 'error'; reason: string };
+      ownerUserId: string | null;
+      botUsername: string | null;
+    }> => ipcRenderer.invoke('telegramBot:get-status'),
+    setConfig: (payload: { token: string; ownerUserId: string }): Promise<{
+      status:
+        | { kind: 'idle' }
+        | { kind: 'connecting' }
+        | { kind: 'connected'; appId: string }
+        | { kind: 'conflict'; appId: string }
+        | { kind: 'error'; reason: string };
+      saveErrorStatus?:
+        | { kind: 'idle' }
+        | { kind: 'connecting' }
+        | { kind: 'connected'; appId: string }
+        | { kind: 'conflict'; appId: string }
+        | { kind: 'error'; reason: string };
+      ownerUserId: string | null;
+      botUsername: string | null;
+    }> => ipcRenderer.invoke('telegramBot:set-config', payload),
+    disconnect: (): Promise<{
+      status:
+        | { kind: 'idle' }
+        | { kind: 'connecting' }
+        | { kind: 'connected'; appId: string }
+        | { kind: 'conflict'; appId: string }
+        | { kind: 'error'; reason: string };
+    }> => ipcRenderer.invoke('telegramBot:disconnect'),
+    checkSessionAuth: (): Promise<DiscordBotSessionAuthCheckWire> =>
+      ipcRenderer.invoke('telegramBot:check-session-auth'),
+    // 行为配置(emoji 回应等级 / 回复引用) — 设置卡可视化操作面, 改动即生效。
+    getBehavior: (): Promise<{
+      emojiReactions: 'off' | 'minimal' | 'expressive';
+      replyQuoteGroup: 'off' | 'first' | 'all';
+      replyQuoteDm: 'off' | 'first';
+    }> => ipcRenderer.invoke('telegramBot:get-behavior'),
+    setBehavior: (patch: {
+      emojiReactions?: 'off' | 'minimal' | 'expressive';
+      replyQuoteGroup?: 'off' | 'first' | 'all';
+      replyQuoteDm?: 'off' | 'first';
+    }): Promise<{
+      emojiReactions: 'off' | 'minimal' | 'expressive';
+      replyQuoteGroup: 'off' | 'first' | 'all';
+      replyQuoteDm: 'off' | 'first';
+    }> => ipcRenderer.invoke('telegramBot:set-behavior', patch),
+    // 人格(soul + 名字); syncProfile=true 时顺带 setMyName 同步资料页。
+    getPersona: (): Promise<{ botName: string; soul: string }> =>
+      ipcRenderer.invoke('telegramBot:get-persona'),
+    setPersona: (payload: {
+      botName?: string;
+      soul?: string;
+      syncProfile?: boolean;
+    }): Promise<{ persona: { botName: string; soul: string }; profileSynced?: boolean }> =>
+      ipcRenderer.invoke('telegramBot:set-persona', payload),
+    // 群聊节: 已知群 + per-chat 参与模式(仅@ / 全响应·自主判断)。
+    listGroups: (): Promise<{
+      groups: Array<{ chatId: string; chatName: string | null; activation: 'mention' | 'always' }>;
+    }> => ipcRenderer.invoke('telegramBot:list-groups'),
+    setGroupActivation: (payload: {
+      chatId: string;
+      mode: 'mention' | 'always';
+    }): Promise<unknown> => ipcRenderer.invoke('telegramBot:set-group-activation', payload),
+    onStatusChange: fanOutTelegramBotStatusChange,
   },
 
   // ── Personal WeChat (Settings → IM Bot → Personal) ──

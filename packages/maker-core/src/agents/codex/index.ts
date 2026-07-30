@@ -73,6 +73,7 @@ import type {
   ConsumeAccountRateLimitResetCreditResponse,
 } from '../../types/account-rate-limits.js';
 import { createAsyncQueue, type AsyncQueue } from '../shared/async-queue.js';
+import { reviewAction, type ReviewableAction } from '../shared/auto-review.js';
 import { UsageTracker } from '../shared/usage-tracker.js';
 import { getDefaultImageResizer } from '../shared/image-resizer.js';
 import { pickTurnStartStatus, type OneShotState } from '../shared/turn-start-phrases.js';
@@ -2700,6 +2701,11 @@ export class CodexAgent extends BaseAgent {
         : path.join(this.codexHome ?? '', sub);
     const codexExtraWritableRoots = this.codexHome ? [joinCodexHome('memories')] : [];
     const runtimeWorkspaceRoots = (): string[] => [opts.workingDir, ...mutableExtraDirs];
+    // Auto-review 传给 core 的会话平台(决定是否抹平 macOS /private firmlink)。远端会话的 host
+    // process.platform 不代表远端 OS(host 可能 macOS、远端 Linux)——远端 OS 未接入前保守传 'linux'
+    // 关掉抹平 → fail-closed(不把远端 /private/tmp 误当 /tmp 区内)。本地用真实 process.platform。
+    // 定义在此(startSession 作用域,opts=session)以避开 awaitApprovalDecision 内层 opts 的遮蔽。
+    const sessionReviewPlatform: NodeJS.Platform = opts.remoteHostId ? 'linux' : process.platform;
     const readonlyReferencesConfig: Record<string, unknown> = {
       [`permissions.${READONLY_REFERENCES_PERMISSION_PROFILE}`]: {
         filesystem: {
@@ -3625,9 +3631,9 @@ export class CodexAgent extends BaseAgent {
       requestId: string,
       kind: 'commandExecution' | 'fileChange' | 'mcpServerElicitation',
       req: InteractionRequest,
-      opts?: { forcePrompt?: boolean },
+      opts?: { forcePrompt?: boolean; autoReviewAction?: ReviewableAction },
     ): Promise<ApprovalDecision> {
-      const forcePrompt =
+      let forcePrompt =
         opts?.forcePrompt === true ||
         (req.kind === 'permission' &&
           forceTurnConfirmation(req.toolName, req.input));
@@ -3642,15 +3648,55 @@ export class CodexAgent extends BaseAgent {
       ) {
         return Promise.resolve('accept');
       }
-      // Policy turns deliberately route otherwise-unattended Auto actions back
-      // through the host. Preserve Auto semantics by accepting non-forced
-      // callbacks without opening Desktop UI.
+      // Policy turns (unattended: feishu bot / 定时任务) 以 untrusted + read-only 发射,把命令/文件
+      // 升级请求发回 host 后自动接受非强制回调 —— 保留该无人值守语义,但**仍对危险桶 fail-closed**:
+      // 无人值守时没有人能批准一个 destructive / 凭证 / 远程执行动作,应拒绝,而不是让它逃出 read-only
+      // 沙箱静默执行(与交互式 Auto 共用同一张 Cindy core 安全网)。安全 / 仅需升级的动作照常自动
+      // 接受,不影响正常无人值守自动化(真需要跑危险命令的自动化应走 bypassPermissions,不受此影响)。
       if (
         !forcePrompt &&
         activeTurnPermissionPolicy &&
         mutablePermissionMode === 'auto'
       ) {
+        if (opts?.autoReviewAction) {
+          const verdict = reviewAction(
+            opts.autoReviewAction,
+            runtimeWorkspaceRoots().filter((d): d is string => typeof d === 'string' && d.length > 0),
+            { platform: sessionReviewPlatform },
+          );
+          // 无人值守:只接受 core 判为 auto-approve 的安全动作。prompt / prompt-each-time 都意味着
+          // "需人确认"而此路径无人在场 → 一律 fail-closed decline(AGENTS.md 无人值守安全底线)。
+          return verdict === 'auto-approve' ? Promise.resolve('accept') : Promise.resolve('decline');
+        }
+        // 命令/文件类审批却没有可分类的 action(如 permissions 能力升级)——无法审查的高权限动作 →
+        // 同样 fail-closed 拒绝。mcpServerElicitation(交互输入)有自己的 forceConfirmToolCall 门,保留 auto-accept。
+        if (kind === 'commandExecution' || kind === 'fileChange') {
+          return Promise.resolve('decline');
+        }
         return Promise.resolve('accept');
+      }
+      // Auto-review 兜底路径:非 OAuth 路由下 approvalsReviewer='user',app-server 把越界/网络
+      // 等审批请求发回 host(OAuth 原生 auto_review 则由 server 内部裁决、根本不到这里 —— 天然
+      // "原生优先、Cindy 兜底")。这些请求不再一律转发用户,先过 harness 无关的 Cindy core:
+      // 安全的(如 curl 抓取)静默放行、危险的必问、其余升级。与 Claude 侧同一套 core,模型无关。
+      // **仅在有 interactionResolver 时生效**:没有 resolver = 没有能撤销误判的人在场,与 Claude
+      // canUseTool 的 no-resolver 分支一致 fail-closed(下面 dispatchInteraction 无 resolver 直接
+      // deny),不做任何自动放行。
+      if (
+        interactionResolver &&
+        !forcePrompt &&
+        mutablePermissionMode === 'auto' &&
+        opts?.autoReviewAction
+      ) {
+        const verdict = reviewAction(
+          opts.autoReviewAction,
+          runtimeWorkspaceRoots().filter((d): d is string => typeof d === 'string' && d.length > 0),
+          { platform: sessionReviewPlatform },
+        );
+        if (verdict === 'auto-approve') return Promise.resolve('accept');
+        // prompt-each-time:高风险,强制逐次弹窗且剥离会话级 suggestion(不许"总是允许")。
+        if (verdict === 'prompt-each-time') forcePrompt = true;
+        // 'prompt':落到下面的 dispatchInteraction,照常升级用户(可"本会话记住")。
       }
       const routedRequest =
         forcePrompt && req.kind === 'permission'
@@ -4111,7 +4157,7 @@ export class CodexAgent extends BaseAgent {
         description: params.reason ?? undefined,
         suggestions: commandSupportsAcceptForSession(params) ? codexSessionApprovalSuggestions() : undefined,
         metadata: params.reason ? { reason: params.reason } : undefined,
-      });
+      }, { autoReviewAction: { kind: 'exec', command: params.command ?? '' } });
       return { decision };
     };
 
@@ -4132,7 +4178,7 @@ export class CodexAgent extends BaseAgent {
         description: params.reason ?? undefined,
         suggestions: codexSessionApprovalSuggestions(),
         metadata: params.reason ? { reason: params.reason } : undefined,
-      });
+      }, { autoReviewAction: { kind: 'file-write', path: params.grantRoot ?? undefined } });
       return { decision };
     };
 
@@ -4307,6 +4353,8 @@ export class CodexAgent extends BaseAgent {
       if (turnGate === false) return { permissions: {}, scope: 'turn' };
       if (turnGate instanceof Promise && !(await turnGate)) return { permissions: {}, scope: 'turn' };
       const requestId = params.itemId ?? params.turnId;
+      // kind 借用 'commandExecution' 仅为复用其 fail-closed 语义(见 awaitApprovalDecision:无 action /
+      // 无人值守时 decline)——权限升级请求本就该 fail-closed。此处不是命令执行,只是共用同一条兜底路径。
       const decision = await awaitApprovalDecision(requestId, 'commandExecution', {
         kind: 'permission',
         requestId,

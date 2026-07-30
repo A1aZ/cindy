@@ -3698,13 +3698,17 @@ export class CodexAgent extends BaseAgent {
       upstreamIdleRemainingMs = 0;
       upstreamIdleSliceStartedAt = 0;
     }
-    function armUpstreamIdle(): void {
+    function armUpstreamIdle(opts?: { preserveBudget?: boolean }): void {
+      // 先抄下额度再 clear —— clearUpstreamIdle 会把 upstreamIdleRemainingMs 归零。
+      const carriedRemainingMs = opts?.preserveBudget ? upstreamIdleRemainingMs : 0;
       clearUpstreamIdle();
       if (upstreamIdleTimeoutMs <= 0) return;
       if (closed || !isTurnInFlight) return;
       // 工具执行 / 等审批期间 ball 不在上游,不计 idle 配额。
       if (pendingToolItemIds.size > 0) return;
-      upstreamIdleRemainingMs = upstreamIdleTimeoutMs;
+      // preserveBudget 只给挂起恢复用:那条路要的是"重新核对起表条件",而**不是**把额度
+      // 退回满格。默认(收到事件)照旧重置 —— 那正是"任何事件都重新计时"的语义。
+      upstreamIdleRemainingMs = carriedRemainingMs > 0 ? carriedRemainingMs : upstreamIdleTimeoutMs;
       armUpstreamIdleSlice();
     }
     /**
@@ -3724,9 +3728,12 @@ export class CodexAgent extends BaseAgent {
             threadId,
             sliceMs: slice,
             elapsedMs: elapsed,
+            remainingMs: upstreamIdleRemainingMs,
           });
-          // 唤醒后状态可能已变(turn 结束 / 又有工具在跑),走完整重判。
-          armUpstreamIdle();
+          // 唤醒后状态可能已变(turn 结束 / 又有工具在跑),走完整重判 —— 但**保留已累计
+          // 的清醒额度**。走默认重置会把睡前攒下的静默时间一并退还,与"额度不扣"的语义
+          // 相反,也把恢复推迟最多一个完整阈值(第二十二轮 Copilot;Session 层同款修法)。
+          armUpstreamIdle({ preserveBudget: true });
           return;
         }
         upstreamIdleRemainingMs -= Math.max(0, elapsed);

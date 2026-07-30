@@ -14311,6 +14311,51 @@ describe('CodexAgent upstream-response-idle watchdog', () => {
     }
   });
 
+  it('挂起恢复保留已累计的清醒额度,不把额度退回满格', async () => {
+    // 挂起分支要的是"重新核对起表条件",不是"重新发一份额度"。走默认重置会把睡前攒下的
+    // 静默时间一并退还,与"额度不扣"的语义相反,也把恢复推迟最多一个完整阈值
+    // (第二十二轮 Copilot;Session 层同款用例)。阈值取 150s(2.5 片)才看得出部分累计。
+    vi.stubEnv('XDT_CODEX_IDLE_TIMEOUT_MS', String(150_000));
+    vi.useFakeTimers();
+    try {
+      const agent = new CodexAgent(createDeps());
+      const host = installIdleHost(agent);
+      const handle = await startIdleSession(agent, 'session-idle-budget-carry');
+      const seen = collectEvents(handle);
+      await handle.send({ type: 'user', content: 'go' });
+      const handlers = host.getThreadHandlers();
+      if (!handlers) throw new Error('expected thread handlers');
+      handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-1' } } as never);
+
+      const tripped = () =>
+        seen.some(
+          (ev) =>
+            ev.type === 'error' &&
+            (ev.data as { reason?: string } | null)?.reason === 'upstream_response_idle_timeout',
+        );
+
+      // 清醒地先烧掉一片(60s),剩 90s
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(tripped()).toBe(false);
+
+      // 合盖睡 8 小时:那一片作废,剩余额度应保持 90s
+      vi.setSystemTime(Date.now() + 8 * 3_600_000);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(tripped()).toBe(false);
+
+      // 醒来后清醒地走 89s:还差 1s
+      await vi.advanceTimersByTimeAsync(89_000);
+      expect(tripped()).toBe(false);
+
+      // 补满 90s → 开火。若挂起把额度退回满格(150s),这里不会开火。
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(tripped()).toBe(true);
+      await handle.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('系统挂起期间不计额度,醒来不立刻开火', async () => {
     // 与 Session 层同源的问题:一个 30 分钟的长定时器在唤醒后到期就立刻开火,一次午休
     // 足以中断一条完全健康的 turn(review #944 第十二轮 P1)。

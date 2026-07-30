@@ -871,7 +871,9 @@ export class Session {
    *   - 有后台任务在跑 —— run_in_background 的 Bash、后台 subagent 期间安静是正常的
    * 后两条是误杀防护(见 DEFAULT_TURN_STALL_MS)。
    */
-  private armTurnStallWatchdog(): void {
+  private armTurnStallWatchdog(opts?: { preserveBudget?: boolean }): void {
+    // 先抄下额度再 clear —— clearTurnStallWatchdog 会把 turnStallRemainingMs 归零。
+    const carriedRemainingMs = opts?.preserveBudget ? this.turnStallRemainingMs : 0;
     this.clearTurnStallWatchdog();
     if (this.turnStallMs <= 0) return;
     if (this.status !== 'active') return;
@@ -879,7 +881,9 @@ export class Session {
     if (!this.isTurnRunning()) return;
     if (this.pendingInteractions > 0) return;
     if (this.hasRunningBackgroundTasks()) return;
-    this.turnStallRemainingMs = this.turnStallMs;
+    // preserveBudget 只给挂起恢复用:那条路要的是"重新核对起表条件",而**不是**把额度退回
+    // 满格。默认(收到事件、turn 起来)照旧重置 —— 那正是"任何事件都重新计时"的语义。
+    this.turnStallRemainingMs = carriedRemainingMs > 0 ? carriedRemainingMs : this.turnStallMs;
     this.armTurnStallSlice();
   }
 
@@ -905,9 +909,13 @@ export class Session {
         this.logger.info('turn stall watchdog skipped a suspended slice', {
           sliceMs: slice,
           elapsedMs: elapsed,
+          remainingMs: this.turnStallRemainingMs,
         });
-        // 唤醒后的状态可能已经变了(turn 结束 / 冒出交互 / 起了后台任务),走完整重判。
-        this.armTurnStallWatchdog();
+        // 唤醒后的状态可能已经变了(turn 结束 / 冒出交互 / 起了后台任务),走完整重判 ——
+        // 但**保留已累计的清醒额度**。走默认重置会把睡前已经攒下的静默时间一并退还:
+        // 一条本已逼近阈值的卡死 turn,睡一觉就重新获得整个阈值,与"额度不扣"的语义
+        // 相反,也把恢复推迟最多一个完整阈值(第二十二轮 Copilot)。
+        this.armTurnStallWatchdog({ preserveBudget: true });
         return;
       }
       this.turnStallRemainingMs -= Math.max(0, elapsed);

@@ -416,6 +416,39 @@ describe('Session turn stall watchdog', () => {
     }
   });
 
+  it('挂起恢复保留已累计的清醒额度,不把额度退回满格', async () => {
+    // 挂起分支要的是"重新核对起表条件",不是"重新发一份额度"。走默认重置会把睡前已经攒下
+    // 的静默时间一并退还:一条本已逼近阈值的卡死 turn,睡一觉就重新获得整个阈值,与注释
+    // 写的"额度不扣"相反,也把恢复推迟最多一个完整阈值(第二十二轮 Copilot)。
+    // 阈值取 150s(2.5 片)才看得出部分累计;60s 只有一片,分不出重置与保留。
+    vi.useFakeTimers();
+    try {
+      const stub = createStubHandle();
+      const session = createSession(stub, { turnStallMs: 150_000 });
+      session.onEvent(() => {});
+
+      await session.send('go');
+      // 清醒地先烧掉一片(60s),剩 90s
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(stub.abort).not.toHaveBeenCalled();
+
+      // 合盖睡 8 小时:那一片作废,剩余额度应保持 90s
+      vi.setSystemTime(Date.now() + 8 * 3_600_000);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(stub.abort).not.toHaveBeenCalled();
+
+      // 醒来后清醒地走 89s:还差 1s,不该开火
+      await vi.advanceTimersByTimeAsync(89_000);
+      expect(stub.abort).not.toHaveBeenCalled();
+
+      // 补满 90s → 开火。若挂起把额度退回满格(150s),这里不会开火。
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(stub.abort).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('清醒状态下的长时间静默照常开火(分片不该变成永久豁免)', async () => {
     vi.useFakeTimers();
     try {

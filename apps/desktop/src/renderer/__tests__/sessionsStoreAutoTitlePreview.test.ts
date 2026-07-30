@@ -205,6 +205,44 @@ describe('sessionsStore — 预览必须活过全量刷新', () => {
     expect(currentTitle()).toBe('我自己起的名字');
   });
 
+  it('权威标题晚于在飞的 list 请求写入 → 旧快照不许把它冲回哨兵', async () => {
+    // 真实时序:sessions:created push → forceRefreshAll 起飞(DB 快照里还是哨兵)
+    // → main 写完占位、sessions:patched 落进缓存 → 那个更早的请求才回来。
+    // 没有版本化 override 的话,整桶覆盖会把权威标题冲掉,界面退到「未命名对话」
+    // 直到下一次刷新;乐观预览此刻已按「权威值到达即回收」的规则让位(review P1)。
+    await seed(session());
+
+    let releaseStale: (rows: Session[]) => void = () => {};
+    list.mockImplementationOnce(() => new Promise<Session[]>((resolve) => {
+      releaseStale = resolve;
+    }));
+    const staleRefresh = sessionsStore.forceRefreshAll();
+
+    // 权威标题在旧请求回来之前到达。注意 forceRefresh 已经把桶 drop 了(见其实现),
+    // 此刻缓存里根本没有这一行 —— patchLocal 无处可合并,唯一能救回它的就是 override。
+    // 这也是「解除在飞请求的认领」救不了场的原因:桶是空的,必须让那个请求提交,
+    // 再由 override 把标题补回去。
+    expect(sessionsStore.findById(SESSION_ID)).toBeNull();
+    sessionsStore.patchLocal(SESSION_ID, { title: '帮我排查登录失败' });
+
+    // 旧请求带着 pre-write 快照回来。
+    releaseStale([session()]);
+    await staleRefresh;
+
+    expect(currentTitle()).toBe('帮我排查登录失败');
+  });
+
+  it('新请求发起于标题写入之后 → override 不再插手,DB 值说了算', async () => {
+    // override 只对「发起早于本次写入」的请求生效,否则用户之后在别处改的名会被顶回来。
+    await seed(session());
+    sessionsStore.patchLocal(SESSION_ID, { title: '帮我排查登录失败' });
+
+    list.mockResolvedValue([session({ title: '别处改的新名字' })]);
+    await sessionsStore.forceRefreshAll();
+
+    expect(currentTitle()).toBe('别处改的新名字');
+  });
+
   it('权威标题恰好等于预览时,后续刷新同样不残留叠加', async () => {
     // 常见路径:main 写的占位与预览逐字相同(两端共用 normalizeAutoTitle)。
     await seed(session());

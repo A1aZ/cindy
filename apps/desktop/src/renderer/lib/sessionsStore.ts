@@ -143,6 +143,43 @@ function applyAutoTitlePreviews(list: Session[]): Session[] {
   return changed ? next : list;
 }
 
+/**
+ * 权威标题的「防旧快照」叠加层(sessionId → 标题 + 本地事件版本)。
+ *
+ * 与 {@link sessionSpendOverrides} 同一套机制、同一个理由:进行中的 `sessions:list`
+ * 请求发起于这次标题变更**之前**,它的快照里还是旧标题,回来会 `cache.set` 整桶覆盖,
+ * 把刚 patch 进去的权威标题冲掉。
+ *
+ * 典型时序(新建会话):`sessions:created` push → `forceRefreshAll()` 起飞(快照里是
+ * 哨兵)→ main 写完占位 → `sessions:patched` 落进缓存 → 那个更早的请求才回来,把哨兵
+ * 写回去,界面退到「未命名对话」直到下一次刷新。乐观预览叠加层此刻已按权威值到达的
+ * 规则回收,没人再替它顶回来(PR #1031 review P1)。
+ *
+ * 方向与 {@link autoTitlePreviews} 互补:那一层管「请求发起于乐观写入**之后**、DB 里还
+ * 没有值」,这一层管「请求发起于权威写入**之前**、快照里还是旧值」。
+ */
+interface SessionTitleOverride {
+  revision: number;
+  title: string;
+}
+
+const sessionTitleOverrides = new Map<string, SessionTitleOverride>();
+let sessionTitleRevision = 0;
+
+/** 仅重放请求启动后到达的标题事件,避免旧事件覆盖未来数据库刷新。 */
+function applySessionTitleOverrides(list: Session[], afterRevision: number): Session[] {
+  if (sessionTitleOverrides.size === 0) return list;
+  let changed = false;
+  const next = list.map((session) => {
+    const override = sessionTitleOverrides.get(session.id);
+    if (!override || override.revision <= afterRevision) return session;
+    if (override.title === session.title) return session;
+    changed = true;
+    return mergeSession(session, { title: override.title });
+  });
+  return changed ? next : list;
+}
+
 /** 仅重放请求启动后到达的费用事件，避免旧事件覆盖未来数据库刷新。 */
 function applySessionSpendOverrides(list: Session[], afterRevision: number): Session[] {
   let changed = false;
@@ -170,8 +207,16 @@ async function fetchFilter(filter: ListStatusFilter): Promise<Session[]> {
   // chat-data-localization round-5：IPC 'all'/undefined 与 HTTP 旧默认行为
   // 不一致，必须把 filter 原样透传，由 IPC handler 决定过滤语义。
   const spendRevisionAtStart = sessionSpendRevision;
+  const titleRevisionAtStart = sessionTitleRevision;
   const sessions = await sessionService.list(DEFAULT_LIMIT, filter);
-  return applyAutoTitlePreviews(applySessionSpendOverrides(sessions, spendRevisionAtStart));
+  // 顺序:先把「请求发起之后到达的权威标题」补回去,再叠乐观预览。反过来的话预览会先
+  // 盖在旧标题上、随后又被权威值挤掉,中间多一次跳变。
+  return applyAutoTitlePreviews(
+    applySessionTitleOverrides(
+      applySessionSpendOverrides(sessions, spendRevisionAtStart),
+      titleRevisionAtStart,
+    ),
+  );
 }
 
 export const sessionsStore = {
@@ -289,8 +334,17 @@ export const sessionsStore = {
     if (typeof patch.title === 'string' && !isDefaultDraftSessionTitle(patch.title)) {
       autoTitlePreviews.delete(id);
     }
+    // 每一次标题写入(权威回流 / 用户改名 / 乐观预览 / 撤回)都登记版本化 override:
+    // 发起于本次写入之前的 list 请求回来时,快照里还是旧标题,必须被这一层挡住,
+    // 否则整桶覆盖会把刚写进缓存的标题冲掉(见 sessionTitleOverrides 的说明)。
+    // 每次写入都登记 = 最新一次写入总是最高版本,先后顺序天然正确。
+    if (typeof patch.title === 'string') {
+      sessionTitleRevision += 1;
+      sessionTitleOverrides.set(id, { revision: sessionTitleRevision, title: patch.title });
+    }
     if (patch.status === 'deleted') {
       autoTitlePreviews.delete(id);
+      sessionTitleOverrides.delete(id);
       sessionSpendOverrides.delete(id);
       // 删除前发出的请求可能仍会返回包含该 session 的旧快照。先解除这些
       // request 对桶的认领，再为对应桶发起替代请求，避免旧响应重新写回。
@@ -402,6 +456,7 @@ export const sessionsStore = {
     inflight.clear();
     sessionSpendOverrides.clear();
     autoTitlePreviews.clear();
+    sessionTitleOverrides.clear();
     notify('reset');
   },
 };

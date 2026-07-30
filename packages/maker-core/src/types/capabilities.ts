@@ -168,7 +168,7 @@ export interface ModelDescriptor {
    */
   sortOrder?: number;
   /**
-   * Gateway 原生 mode（issue #882，纯展示/判定元数据，源自目录 CatalogModel.mode）。
+  * Gateway 原生 mode（issue #882，纯展示/判定元数据，源自目录 CatalogModel.mode）。
    * availableModels 派生时已经过 isChatEligible 过滤，这里透传只是为了让下游（如
    * resolveSourceSwitch 之类按 model 二次判定分组的逻辑）拿到 mode 而不必回读目录——
    * 2026-07 review：ModelDescriptor 曾经丢弃 mode，下游对象只能靠 id/group 猜，
@@ -179,8 +179,15 @@ export interface ModelDescriptor {
    * 该模型在选择器里**默认是否可见**（源自目录 `defaultEnabled`，host 派生时透传；
    * 缺省 ⇒ 可见）。渲染层取种子默认模型时据它跳过默认收起的 legacy 模型 ——
    * 否则默认模型可能是用户在清单里根本看不到的那个。maker-core 运行时不读它。
-   */
+  */
   defaultEnabled?: boolean;
+  /**
+   * 模型计费($/1M tokens,源自目录/网关刷新,host 派生时透传)。pi 用它生成
+   * models.json 的 cost 让 pi 自行计价;缺省按 0 计(用量页不显示钱数)。
+   */
+  cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  /** 最大输出 tokens(源自目录 maxOutput)。缺省时各 agent 用自身默认值。 */
+  maxOutputTokens?: number;
 }
 
 /**

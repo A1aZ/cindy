@@ -236,8 +236,14 @@ export class PiAgent extends BaseAgent {
       reasoning: m.efforts.length > 0,
       input: ['text', 'image'],
       contextWindow: m.contextWindow > 0 ? m.contextWindow : 200_000,
-      maxTokens: 32_000,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      maxTokens: m.maxOutputTokens && m.maxOutputTokens > 0 ? m.maxOutputTokens : 32_000,
+      // 计费单位与目录一致($/1M tokens);pi 按此自行计价,usage 事件的 cost 才有真值。
+      cost: {
+        input: m.cost?.input ?? 0,
+        output: m.cost?.output ?? 0,
+        cacheRead: m.cost?.cacheRead ?? 0,
+        cacheWrite: m.cost?.cacheWrite ?? 0,
+      },
     }));
     const config = {
       providers: {

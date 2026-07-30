@@ -95,7 +95,15 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
       logger: noopLogger,
       capabilityAdditions: {
         availableModels: [
-          { id: 'm', displayName: 'M', contextWindow: 200_000, efforts: [], defaultEffort: null },
+          {
+            id: 'm',
+            displayName: 'M',
+            contextWindow: 200_000,
+            efforts: [],
+            defaultEffort: null,
+            cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+            maxOutputTokens: 64_000,
+          },
         ],
       },
       resolvePiAgentHome: () => agentHome,
@@ -136,6 +144,17 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
       expect(noProxy).toContain(entry);
     }
     expect(captured.env.no_proxy).toBeUndefined();
+  });
+
+  it('models.json carries real cost and maxTokens from the model descriptor', async () => {
+    await start();
+    const { readFileSync } = await import('node:fs');
+    const config = JSON.parse(readFileSync(path.join(agentHome, 'models.json'), 'utf8')) as {
+      providers: { cindy: { models: Array<{ id: string; maxTokens: number; cost: Record<string, number> }> } };
+    };
+    const m = config.providers.cindy.models.find((x) => x.id === 'm');
+    expect(m?.maxTokens).toBe(64_000);
+    expect(m?.cost).toEqual({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 });
   });
 
   it('auto mode silently approves in-workspace writes without consulting the resolver', async () => {

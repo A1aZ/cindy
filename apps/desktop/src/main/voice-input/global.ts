@@ -597,13 +597,10 @@ export type GlobalVoiceInputIpcDeps = {
  * 能查的就这些：路由 / 页面无从可靠断言（hash 路由随手就能改），所以措辞和日志都只说窗口，
  * 不说「设置页」——写成设置页会让日志读起来像做了更强的检查（对齐 billing 的口径）。
  */
-function assertVoiceSettingsWindowSender(
+function appShellTopLevelSenderWindow(
   event: IpcMainInvokeEvent,
   deps: GlobalVoiceInputIpcDeps,
-): void {
-  // 先过通用闸：它额外校验 senderFrame 是顶层 frame 且 URL 属于 Cindy 自有 renderer，
-  // 挡掉子 frame / WebView / 导航到别处的页面。下面再收窄到承载应用外壳的窗口。
-  assertTrustedAppRendererEvent(event);
+): BrowserWindow | null {
   const senderWindow = BrowserWindow.fromWebContents(event.sender);
   // 必须是某个窗口自己的顶层 webContents + 顶层 frame，而不是它内嵌的什么东西。
   const isWindowTopLevelSender = Boolean(
@@ -612,11 +609,53 @@ function assertVoiceSettingsWindowSender(
     event.sender === senderWindow.webContents &&
     event.senderFrame === senderWindow.webContents.mainFrame,
   );
+  if (!senderWindow || !isWindowTopLevelSender) return null;
   const mainWindow = deps.getMainWindow();
   const isMainWindow = Boolean(mainWindow && !mainWindow.isDestroyed() && senderWindow === mainWindow);
-  const isAppShellWindow = senderWindow !== null && (isMainWindow || deps.isSecondaryAppWindow(senderWindow));
-  const allowed = isWindowTopLevelSender && isAppShellWindow && senderWindow.isFocused();
-  if (!allowed) {
+  if (!isMainWindow && !deps.isSecondaryAppWindow(senderWindow)) return null;
+  return senderWindow;
+}
+
+/**
+ * 把录制期那两条**会改动全局监听状态**的 IPC 锁到应用外壳窗口的顶层 frame。
+ *
+ * 不要求聚焦（那是弹系统授权窗才需要的第三层）。这里挡的是**信任级别**：右侧栏与 Ghost 面板
+ * 同样带着完整 preload，但 Ghost 面板装的是插件内容。少了这道闸，那种 renderer 一次调用就能：
+ *
+ * - `setGlobalShortcut(null, { suspend: true })` —— 把自己登记成「正在录制」。这个登记只在它
+ *   自己发 stop 或窗口销毁时才摘掉，期间快捷键被注销、触发被丢弃、同步与兜底恢复都会被
+ *   「录制中」守卫拒掉：一次调用就能让语音快捷键在那个窗口的整个生命周期里失效。
+ * - `startModifierShortcutRecording()` —— 把自己登记进 keys 转发名单。而 helper 的 keys 事件
+ *   不止修饰键：非修饰键会以 `KeyCode:<n>` 一起发出来（helper 的 handleNonModifierKey），
+ *   也就是一路系统级按键流。这条比上面那条严重得多。
+ *
+ * 为什么这里不要求聚焦：合法录制确实发生在聚焦窗口里，但把聚焦也算进来会让「系统授权窗关闭后
+ * 焦点异步回到窗口」这类时序把 Fn capture 静默挡掉（用户只看到录制框对 Fn 没反应）。而对
+ * 「外壳窗口内容被 XSS 拿下」这一档威胁，聚焦在这里也换不来什么：那种 renderer 本来就能直接
+ * 调 update-shortcut 把快捷键改掉。收益在于挡住低信任 renderer，那部分与聚焦无关。
+ */
+function assertVoiceShortcutRecordingSender(
+  event: IpcMainInvokeEvent,
+  deps: GlobalVoiceInputIpcDeps,
+): void {
+  assertTrustedAppRendererEvent(event);
+  if (appShellTopLevelSenderWindow(event, deps) === null) {
+    throwIpcError(
+      'PERMISSION_DENIED',
+      'Shortcut recording is only available to app shell windows',
+    );
+  }
+}
+
+function assertVoiceSettingsWindowSender(
+  event: IpcMainInvokeEvent,
+  deps: GlobalVoiceInputIpcDeps,
+): void {
+  // 先过通用闸：它额外校验 senderFrame 是顶层 frame 且 URL 属于 Cindy 自有 renderer，
+  // 挡掉子 frame / WebView / 导航到别处的页面。下面再收窄到承载应用外壳的窗口。
+  assertTrustedAppRendererEvent(event);
+  const senderWindow = appShellTopLevelSenderWindow(event, deps);
+  if (senderWindow === null || !senderWindow.isFocused()) {
     // 与本模块其它 throwIpcError 一致用英文：这句是给日志/调试看的，renderer 侧要展示
     // 时走 code → i18n 映射，不消费这里的原文。
     //
@@ -918,7 +957,15 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
       // 恢复排在挂起之后执行时，录制会话还没登记，于是它照常把已保存的快捷键注册上；随后
       // startKeyCapture 看见 child 已在跑就直接返回成功、不会清掉那个 shortcut —— 用户在
       // 录制框里按键会真的触发一次语音输入。用挂起这个 intent 当会话起点，窗口就消失了。
-      if (suspending) markModifierShortcutRecordingSession(event.sender);
+      //
+      // 登记之前先校验 sender：这个登记会让快捷键在该窗口的整个生命周期里失效，是低信任
+      // renderer 一次调用就能造成的持久影响。**只校验挂起**——不带 suspend 的同步是
+      // 「让运行期对上存盘」的回声，每个挂载 useVoiceInputSettings 的窗口（含右侧栏里的
+      // ChatInput、overlay）都会发，且已经按存盘值校验过、落不下任何新状态。
+      if (suspending) {
+        assertVoiceShortcutRecordingSender(event, deps);
+        markModifierShortcutRecordingSession(event.sender);
+      }
       return queueShortcutMutation(async () => {
         if (!suspending) {
           const storedShortcut = voiceInputDataStore.getSettings().shortcut;
@@ -985,6 +1032,9 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
   ipcMain.handle(
     'voice-input:modifier-shortcut-recording:start',
     async (event): Promise<VoiceInputGlobalResult> => {
+      // 授权先于一切：这条 IPC 会把 sender 登记进 keys 转发名单，而转发出去的不止修饰键
+      // （helper 对非修饰键发 `KeyCode:<n>`），等于一路系统级按键流。平台判断放在它后面。
+      assertVoiceShortcutRecordingSender(event, deps);
       if (process.platform !== 'darwin') {
         return { ok: false, error: 'Modifier shortcut recording is only available on macOS.' };
       }

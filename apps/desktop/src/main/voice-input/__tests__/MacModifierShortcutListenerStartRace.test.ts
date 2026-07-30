@@ -186,6 +186,71 @@ describe('MacModifierShortcutListener start race', () => {
     expect(listener.isReady()).toBe(false);
   });
 
+  /**
+   * releaseShortcutKeepingCapture 会**故意**保留一个还没报 ready 的 capture child（有窗口正在
+   * 录制时不能把它们的 keys 来源杀掉）。于是复用方只要看见 child 就报成功的话会说谎：
+   *
+   * A 的 capture 还在启动 → B 挂起（child 被保留）→ B 提交快捷键，setShortcut 报成功 → 快捷键
+   * 存盘、界面显示已注册 → A 那次启动随后超时/exit，settle 的失败路径把 child 置空（这条路
+   * 不会 scheduleRestart）→ 快捷键写着「已注册」,实际没人监听,要等下次窗口聚焦才被救回来。
+   */
+  it('does not accept a spawned-but-not-ready capture child as a working listener', async () => {
+    const { MacModifierShortcutListener } = await import('../MacModifierShortcutListener.js');
+    const listener = new MacModifierShortcutListener({ onTrigger: vi.fn() });
+
+    // A 窗口的 capture:进程起来了,但还没报 ready。
+    const capture = listener.startKeyCapture();
+    await flush();
+    mocks.pendingCompilations[0]();
+    await flush();
+    expect(mocks.spawn).toHaveBeenCalledTimes(1);
+    expect(listener.isRunning()).toBe(true);
+    expect(listener.isReady()).toBe(false);
+
+    // B 窗口挂起:child 被刻意保留。
+    listener.releaseShortcutKeepingCapture();
+
+    // B 提交快捷键 —— 此刻绝不能报成功。
+    const setting = listener.setShortcut({
+      trigger: 'modifier',
+      code: 'AltRight',
+      key: 'Alt',
+      modifiers: { meta: false, ctrl: false, alt: true, shift: false, fn: false },
+    } as never);
+
+    // A 那次启动最终失败(进程 exit)。
+    mocks.spawnedChildren[0].get('exit')?.(3, null);
+
+    await expect(setting).resolves.toMatchObject({ ok: false });
+    await expect(capture).resolves.toMatchObject({ ok: false });
+  });
+
+  // 别把上面那条修成「有 child 就一律失败」:那次启动报了 ready 之后,复用方必须拿到成功。
+  it('accepts the preserved capture child once the in-flight start reports ready', async () => {
+    const { MacModifierShortcutListener } = await import('../MacModifierShortcutListener.js');
+    const listener = new MacModifierShortcutListener({ onTrigger: vi.fn() });
+
+    const capture = listener.startKeyCapture();
+    await flush();
+    mocks.pendingCompilations[0]();
+    await flush();
+    listener.releaseShortcutKeepingCapture();
+
+    const setting = listener.setShortcut({
+      trigger: 'modifier',
+      code: 'AltRight',
+      key: 'Alt',
+      modifiers: { meta: false, ctrl: false, alt: true, shift: false, fn: false },
+    } as never);
+
+    mocks.stdoutDataHandlers[0]?.('{"type":"ready"}\n');
+
+    await expect(setting).resolves.toMatchObject({ ok: true });
+    await expect(capture).resolves.toMatchObject({ ok: true });
+    // 复用没有再 spawn 一个 helper。
+    expect(mocks.spawn).toHaveBeenCalledTimes(1);
+  });
+
   // 同一个漏洞的另一半：解析 helper 抛异常（dev 下 swiftc 失败）时压根没查代次，
   // 已被作废的启动会把编译错误当成这次操作的故障报出去。
   it('reports a superseded start when the dev helper compilation fails after the start was stopped', async () => {

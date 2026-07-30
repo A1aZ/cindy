@@ -1254,7 +1254,16 @@ export function VoiceInputSection() {
    */
   const startFnKeyCapture = useCallback(async (isCancelled: () => boolean): Promise<void> => {
     if (window.electronAPI.platform !== 'darwin') return;
-    const result = await window.electronAPI.voiceInput.startModifierShortcutRecording();
+    // main 侧那条 IPC 现在会对非应用外壳窗口的 sender 抛（授权闸）。合法路径不会走到，但不接住
+    // 就会变成 effect 里的 unhandled rejection —— 收成一次普通失败，走下面既有的分类。
+    const result = await window.electronAPI.voiceInput
+      .startModifierShortcutRecording()
+      .catch((error: unknown) => ({
+        ok: false as const,
+        error: error instanceof Error ? error.message : String(error),
+        // 归到 'failed'（helper 起不来那档）:被闸拒不是缺权限,不该显示「Fn 需要监听权限」。
+        errorCode: 'failed' as const,
+      }));
     // 只丢弃迟到的结果，不在这里补发 stop：那条 IPC 按 sender id 记账，而同一个设置页
     // 连续两轮录制用的是同一个 id，第一轮迟到的 stop 会把用户刚开始的第二轮 capture
     // 一起停掉。启动期间的取消由 main 侧 startChildProcess 的代次校验负责——那里才

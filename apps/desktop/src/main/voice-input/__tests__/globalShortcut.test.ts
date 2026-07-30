@@ -8,15 +8,25 @@ import type { GlobalVoiceInputIpcDeps } from '../global.js';
 const mocks = vi.hoisted(() => {
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const registeredShortcuts = new Map<string, () => void>();
+  // 录制/挂起那两条 IPC 的合法发起方,同时也是 keys 转发的收件人 —— 建模成一个会话副窗口
+  // （设置页在副窗口里照样打得开）。所以它要有顶层 frame 与 once,好过得了那道授权闸。
+  const focusedWindowMainFrame = { url: 'http://localhost:5173/index.html' };
   const focusedWindow = {
     id: 10,
     isDestroyed: vi.fn(() => false),
     isVisible: vi.fn(() => true),
+    isFocused: vi.fn(() => true),
     webContents: {
       id: 42,
       isDestroyed: vi.fn(() => false),
       send: vi.fn(),
+      mainFrame: focusedWindowMainFrame,
+      once: vi.fn(),
     },
+  };
+  const recordingEvent = {
+    sender: focusedWindow.webContents,
+    senderFrame: focusedWindowMainFrame,
   };
   // 主窗口 + 它的顶层 frame。弹系统授权窗那两条 IPC 只认这一对，右侧栏 / Ghost 面板
   // 虽然也在 appContentWindows 里，但 sender 对不上就会被拒。
@@ -47,12 +57,29 @@ const mocks = vi.hoisted(() => {
     sender: secondaryAppWindowWebContents,
     senderFrame: secondaryAppWindowMainFrame,
   };
-  const isSecondaryAppWindow = vi.fn(() => false);
-  // 冒充「另一个已登记的应用窗口」（右侧栏 / Ghost 面板就是这种）：通用闸放行，
-  // 但主窗口收窄闸必须拒。
+  // 默认只认 focusedWindow 是会话副窗口：录制那两条 IPC 的用例需要一个合法发起方,而
+  // secondaryAppWindow 要留着专门验「isSecondaryAppWindow 说不是就拒」。
+  const isSecondaryAppWindow = vi.fn((win: unknown) => win === focusedWindow);
+  // 「另一个已登记的应用窗口」（右侧栏 / Ghost 面板就是这种）：通用闸放行，但它不承载路由,
+  // 收窄闸必须拒。建模成一个完整窗口(有 send / once / 顶层 frame、也进 getAllWindows),这样
+  // 「被拒」才是**唯一**能让调用失败的原因 —— 缺 once 的话 markModifierShortcutRecordingSession
+  // 自己就会抛 TypeError,rejects 断言就通过得没有意义了(第一版正是如此)。
+  const ghostPanelMainFrame = { url: 'http://localhost:5173/index.html' };
+  const ghostPanelWindow = {
+    id: 5,
+    isDestroyed: vi.fn(() => false),
+    isFocused: vi.fn(() => true),
+    webContents: {
+      id: 99,
+      isDestroyed: vi.fn(() => false),
+      send: vi.fn(),
+      mainFrame: ghostPanelMainFrame,
+      once: vi.fn(),
+    },
+  };
   const secondaryWindowEvent = {
-    sender: { id: 99, mainFrame: { url: 'http://localhost:5173/index.html' } },
-    senderFrame: { url: 'http://localhost:5173/index.html' },
+    sender: ghostPanelWindow.webContents,
+    senderFrame: ghostPanelMainFrame,
   };
   const modifierSetShortcut = vi.fn();
   const modifierStop = vi.fn();
@@ -94,12 +121,14 @@ const mocks = vi.hoisted(() => {
     handlers,
     registeredShortcuts,
     focusedWindow,
+    recordingEvent,
     mainWindow,
     mainWindowIsDestroyed,
     mainWindowIsFocused,
     secondaryAppWindowIsFocused,
     settingsEvent,
     secondaryWindowEvent,
+    ghostPanelWindow,
     secondaryAppWindow,
     secondaryAppWindowWebContents,
     secondaryAppWindowEvent,
@@ -135,12 +164,14 @@ vi.mock('electron', () => ({
     }),
   },
   BrowserWindow: {
-    getAllWindows: vi.fn(() => [mocks.focusedWindow]),
+    getAllWindows: vi.fn(() => [mocks.focusedWindow, mocks.mainWindow, mocks.ghostPanelWindow]),
     getFocusedWindow: vi.fn(() => mocks.focusedWindow),
     // 闸要从 sender 反查它所属的窗口,才能判断「是不是某个窗口自己的顶层 webContents」。
     fromWebContents: vi.fn((contents: unknown) => {
       if (contents === mocks.mainWindow.webContents) return mocks.mainWindow;
       if (contents === mocks.secondaryAppWindowWebContents) return mocks.secondaryAppWindow;
+      if (contents === mocks.focusedWindow.webContents) return mocks.focusedWindow;
+      if (contents === mocks.ghostPanelWindow.webContents) return mocks.ghostPanelWindow;
       return null;
     }),
   },
@@ -225,6 +256,7 @@ describe('voice input global shortcut registration', () => {
     mocks.handlers.clear();
     mocks.registeredShortcuts.clear();
     mocks.focusedWindow.webContents.send.mockClear();
+    mocks.ghostPanelWindow.webContents.send.mockClear();
     mocks.modifierSetShortcut.mockReset();
     mocks.modifierSetShortcut.mockResolvedValue({ ok: true });
     mocks.modifierIsRunning.mockReset();
@@ -252,7 +284,7 @@ describe('voice input global shortcut registration', () => {
     mocks.getMainWindow.mockReset();
     mocks.getMainWindow.mockReturnValue(mocks.mainWindow as unknown as BrowserWindow);
     mocks.isSecondaryAppWindow.mockReset();
-    mocks.isSecondaryAppWindow.mockReturnValue(false);
+    mocks.isSecondaryAppWindow.mockImplementation((win: unknown) => win === mocks.focusedWindow);
     mocks.secondaryAppWindowWebContents.once.mockReset();
     mocks.mainWindow.webContents.once.mockReset();
     mocks.getSettings.mockClear();
@@ -599,7 +631,7 @@ describe('voice input global shortcut registration', () => {
 
         // preflight 还没回来,用户开始录制。
         const start = mocks.handlers.get('voice-input:modifier-shortcut-recording:start');
-        await start?.({ sender: { id: mocks.focusedWindow.webContents.id, once: vi.fn() } });
+        await start?.(mocks.recordingEvent);
         mocks.modifierSetShortcut.mockClear();
 
         settlePreflight({ ok: true, status: 'granted' });
@@ -873,14 +905,13 @@ describe('voice input global shortcut registration', () => {
         const { registerGlobalVoiceInputIpc } = await import('../global.js');
         registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
-        const sender = { id: mocks.focusedWindow.webContents.id, once: vi.fn() };
         // 只发挂起(没有 recording:start), 再 stop。
-        await mocks.handlers.get('voice-input:global-shortcut:set')?.({ sender }, null, { suspend: true });
-        await mocks.handlers.get('voice-input:modifier-shortcut-recording:stop')?.({ sender });
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.(mocks.recordingEvent, null, { suspend: true });
+        await mocks.handlers.get('voice-input:modifier-shortcut-recording:stop')?.(mocks.recordingEvent);
         mocks.modifierSetShortcut.mockClear();
 
         // 恢复同步必须能落地。
-        await mocks.handlers.get('voice-input:global-shortcut:set')?.({ sender }, bareRightOption);
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.(mocks.recordingEvent, bareRightOption);
 
         expect(mocks.modifierSetShortcut).toHaveBeenCalledWith(bareRightOption);
       });
@@ -897,7 +928,7 @@ describe('voice input global shortcut registration', () => {
         await focusWindow();
 
         await mocks.handlers.get('voice-input:global-shortcut:set')?.(
-          { sender: { id: mocks.focusedWindow.webContents.id, once: vi.fn() } },
+          mocks.recordingEvent,
           null,
           { suspend: true },
         );
@@ -1009,7 +1040,7 @@ describe('voice input global shortcut registration', () => {
         registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
         const start = mocks.handlers.get('voice-input:modifier-shortcut-recording:start');
-        const startResult = await start?.({ sender: { id: mocks.focusedWindow.webContents.id, once: vi.fn() } });
+        const startResult = await start?.(mocks.recordingEvent);
         expect(startResult).toMatchObject({ ok: false, errorCode: 'permission' });
 
         // 用户去系统设置里打开开关后切回来:此刻录制框仍开着,不该注册全局快捷键。
@@ -1099,7 +1130,7 @@ describe('voice input global shortcut registration', () => {
         registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
         const start = mocks.handlers.get('voice-input:modifier-shortcut-recording:start');
-        await start?.({ sender: { id: mocks.focusedWindow.webContents.id, once: vi.fn() } });
+        await start?.(mocks.recordingEvent);
 
         await focusWindow();
 
@@ -1150,9 +1181,7 @@ describe('voice input global shortcut registration', () => {
       const { registerGlobalVoiceInputIpc } = await import('../global.js');
       registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
-      const result = await mocks.handlers.get('voice-input:modifier-shortcut-recording:start')?.({
-        sender: { id: 7, once: vi.fn() },
-      });
+      const result = await mocks.handlers.get('voice-input:modifier-shortcut-recording:start')?.(mocks.recordingEvent);
 
       expect(result).toMatchObject({ ok: false, errorCode: 'failed' });
       expect((result as { error: string }).error).toBe('Could not start the voice input shortcut listener.');
@@ -1168,7 +1197,6 @@ describe('voice input global shortcut registration', () => {
 
       const start = mocks.handlers.get('voice-input:modifier-shortcut-recording:start');
       // sender 必须对上 BrowserWindow mock 的 webContents.id，onKeys 才转发得到它。
-      const sender = { id: mocks.focusedWindow.webContents.id, once: vi.fn() };
 
       // 复现真实交错：第一轮卡在启动 listener 上，第二轮期间成功登记，第一轮才带着
       // superseded 迟到返回。顺序调用测不到这个 bug——每次 start 都会先 add 一次，
@@ -1179,8 +1207,8 @@ describe('voice input global shortcut registration', () => {
       );
       mocks.modifierStartKeyCapture.mockResolvedValueOnce({ ok: true });
 
-      const first = start?.({ sender });
-      const second = await start?.({ sender });
+      const first = start?.(mocks.recordingEvent);
+      const second = await start?.(mocks.recordingEvent);
       expect(second).toMatchObject({ ok: true });
 
       settleFirst({
@@ -1230,9 +1258,7 @@ describe('voice input global shortcut registration', () => {
       const { registerGlobalVoiceInputIpc } = await import('../global.js');
       registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
-      const result = await mocks.handlers.get('voice-input:modifier-shortcut-recording:start')?.({
-        sender: { id: 7, once: vi.fn() },
-      });
+      const result = await mocks.handlers.get('voice-input:modifier-shortcut-recording:start')?.(mocks.recordingEvent);
 
       expect(result).toMatchObject({ ok: false, errorCode: 'permission' });
     });
@@ -1241,7 +1267,6 @@ describe('voice input global shortcut registration', () => {
     // 堵在注册 —— 推迟注册会让「F16 被别的应用占了」这类失败没法在提交时报给用户, 界面和存盘
     // 就留着一个永远不生效的快捷键。
     describe('trigger suppression while a recorder is open', () => {
-      const otherSender = { id: 4242, once: vi.fn() };
       const f16: VoiceInputShortcut = {
         trigger: 'keyboard',
         code: 'F16',
@@ -1254,7 +1279,7 @@ describe('voice input global shortcut registration', () => {
       // 注销掉, 回调压根取不到, 「没触发」自然成立却什么都没测到(我第一版就是这么写的)。
       async function recordElsewhereThenCommitF16(): Promise<void> {
         await mocks.handlers.get('voice-input:global-shortcut:set')?.(
-          { sender: otherSender },
+          mocks.settingsEvent,
           null,
           { suspend: true },
         );
@@ -1284,7 +1309,7 @@ describe('voice input global shortcut registration', () => {
         registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
         await recordElsewhereThenCommitF16();
-        await mocks.handlers.get('voice-input:modifier-shortcut-recording:stop')?.({ sender: otherSender });
+        await mocks.handlers.get('voice-input:modifier-shortcut-recording:stop')?.(mocks.settingsEvent);
         mocks.focusedWindow.webContents.send.mockClear();
 
         mocks.registeredShortcuts.get('F16')?.();
@@ -1304,8 +1329,7 @@ describe('voice input global shortcut registration', () => {
         registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
         // 另一个窗口的录制框开着,且 capture 真的起来了(转发名单里有它)。
-        const recordingSender = { id: mocks.focusedWindow.webContents.id, once: vi.fn() };
-        await mocks.handlers.get('voice-input:modifier-shortcut-recording:start')?.({ sender: recordingSender });
+        await mocks.handlers.get('voice-input:modifier-shortcut-recording:start')?.(mocks.recordingEvent);
         mocks.modifierStop.mockClear();
 
         await mocks.handlers.get('voice-input:settings:update-shortcut')?.({}, f16);
@@ -1345,7 +1369,7 @@ describe('voice input global shortcut registration', () => {
         registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
         await mocks.handlers.get('voice-input:global-shortcut:set')?.(
-          { sender: otherSender },
+          mocks.settingsEvent,
           null,
           { suspend: true },
         );
@@ -1374,7 +1398,7 @@ describe('voice input global shortcut registration', () => {
         registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
         await mocks.handlers.get('voice-input:global-shortcut:set')?.(
-          { sender: otherSender },
+          mocks.settingsEvent,
           null,
           { suspend: true },
         );
@@ -1385,6 +1409,86 @@ describe('voice input global shortcut registration', () => {
 
         expect(result).toMatchObject({ ok: false });
         expect(mocks.updateSettings).not.toHaveBeenCalled();
+      });
+    });
+
+    // 录制期那两条 IPC 会改动全局监听状态,所以要挡住低信任 renderer。Ghost 面板装的是插件
+    // 内容,却同样带着完整 preload —— 用 secondaryWindowEvent 冒充它(fromWebContents 查不到
+    // 对应窗口)。
+    describe('recording IPC sender authorization', () => {
+      // 挂起会把 sender 登记成「正在录制」,而这个登记只在它自己发 stop 或窗口销毁时才摘掉:
+      // 期间快捷键被注销、同步与兜底恢复都会被「录制中」守卫拒掉。一次调用就能让语音快捷键
+      // 在那个窗口的整个生命周期里失效。
+      it('rejects a suspend from a renderer that is not an app shell window', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        mocks.modifierIsRunning.mockReturnValue(false);
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await expect(
+          mocks.handlers.get('voice-input:global-shortcut:set')?.(
+            mocks.secondaryWindowEvent,
+            null,
+            { suspend: true },
+          ),
+        ).rejects.toThrow(/app shell windows/);
+
+        // 关键:被拒的调用不能留下录制会话,否则合法的同步会一直被「录制中」守卫拒掉。
+        mocks.modifierSetShortcut.mockClear();
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
+        expect(mocks.modifierSetShortcut).toHaveBeenCalledWith(bareRightOption);
+      });
+
+      // 这条比上面那条严重:登记进 keys 转发名单就会收到 helper 的 keys 事件,而它不止修饰键
+      // —— 非修饰键会以 `KeyCode:<n>` 一起发出来,等于一路系统级按键流。
+      it('rejects a recording start from a renderer that is not an app shell window', async () => {
+        setPlatform('darwin');
+        mocks.modifierStartKeyCapture.mockResolvedValue({ ok: true });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await expect(
+          mocks.handlers.get('voice-input:modifier-shortcut-recording:start')?.(mocks.secondaryWindowEvent),
+        ).rejects.toThrow(/app shell windows/);
+
+        // 真正要守的后果:它没进 keys 转发名单。这个窗口在 getAllWindows 里查得到,所以一旦
+        // 登记成功 onKeys 就会真的往它 send —— 断言因此有区分力。
+        mocks.listenerOptions.onKeys?.(['Fn']);
+        expect(mocks.ghostPanelWindow.webContents.send).not.toHaveBeenCalled();
+      });
+
+      // 防止把闸修成「谁都拒」:合法的会话副窗口照样能录、照样收得到 keys。
+      it('still lets an app shell window record and receive keys', async () => {
+        setPlatform('darwin');
+        mocks.modifierStartKeyCapture.mockResolvedValue({ ok: true });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        const result = await mocks.handlers
+          .get('voice-input:modifier-shortcut-recording:start')?.(mocks.recordingEvent);
+
+        expect(result).toMatchObject({ ok: true });
+        mocks.listenerOptions.onKeys?.(['Fn']);
+        expect(mocks.focusedWindow.webContents.send).toHaveBeenCalledWith(
+          'voice-input:modifier-shortcut-keys',
+          { keys: ['Fn'] },
+        );
+      });
+
+      // 不带 suspend 的同步是「让运行期对上存盘」的回声,右侧栏里的 ChatInput、overlay 都会发。
+      // 把它一起关掉会让那些窗口的回声全变成异常,所以这道闸只管挂起。
+      it('does not gate the plain sync echo', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        mocks.modifierIsRunning.mockReturnValue(false);
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        const result = await mocks.handlers
+          .get('voice-input:global-shortcut:set')?.(mocks.secondaryWindowEvent, bareRightOption);
+
+        expect(result).toMatchObject({ ok: true });
       });
     });
 
@@ -1434,7 +1538,7 @@ describe('voice input global shortcut registration', () => {
 
         // 挂起故意与存盘不同,所以必须显式带 intent 才放行。
         const result = await mocks.handlers.get('voice-input:global-shortcut:set')?.(
-          { sender: { id: mocks.focusedWindow.webContents.id, once: vi.fn() } },
+          mocks.recordingEvent,
           null,
           { suspend: true },
         );
@@ -1454,8 +1558,7 @@ describe('voice input global shortcut registration', () => {
         const { registerGlobalVoiceInputIpc } = await import('../global.js');
         registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
-        const sender = { id: mocks.focusedWindow.webContents.id, once: vi.fn() };
-        await mocks.handlers.get('voice-input:global-shortcut:set')?.({ sender }, null, { suspend: true });
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.(mocks.recordingEvent, null, { suspend: true });
         mocks.modifierSetShortcut.mockClear();
 
         // recording:start 还没发出来就来了一次聚焦。
@@ -1473,9 +1576,8 @@ describe('voice input global shortcut registration', () => {
         const { registerGlobalVoiceInputIpc } = await import('../global.js');
         registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
-        const sender = { id: mocks.focusedWindow.webContents.id, once: vi.fn() };
-        await mocks.handlers.get('voice-input:global-shortcut:set')?.({ sender }, null, { suspend: true });
-        await mocks.handlers.get('voice-input:modifier-shortcut-recording:stop')?.({ sender });
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.(mocks.recordingEvent, null, { suspend: true });
+        await mocks.handlers.get('voice-input:modifier-shortcut-recording:stop')?.(mocks.recordingEvent);
         mocks.modifierSetShortcut.mockClear();
 
         mocks.appListeners.get('browser-window-focus')?.();
@@ -1521,7 +1623,7 @@ describe('voice input global shortcut registration', () => {
         registerGlobalVoiceInputIpc(mocks.ipcDeps);
 
         const start = mocks.handlers.get('voice-input:modifier-shortcut-recording:start');
-        await start?.({ sender: { id: mocks.focusedWindow.webContents.id, once: vi.fn() } });
+        await start?.(mocks.recordingEvent);
         mocks.modifierSetShortcut.mockClear();
 
         await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);

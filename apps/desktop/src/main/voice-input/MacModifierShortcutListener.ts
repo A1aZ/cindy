@@ -97,6 +97,13 @@ export class MacModifierShortcutListener {
    * 每次发起启动都占一个代次，await 回来后代次被顶掉就放弃 spawn。
    */
   private startGeneration = 0;
+  /**
+   * 正在飞的那次启动的 promise（spawn 完成、但还没报 ready 的那段也算）。
+   *
+   * 有它才能回答「child 在跑，但它到底能不能用」——见 awaitInFlightChild 的说明。settle 之后
+   * 清空：那时 ready / child 已经反映了真实落点，不需要再等。
+   */
+  private pendingStart: Promise<ListenerStartResult> | null = null;
   private shortcut: VoiceInputShortcut | null = null;
   private pressedKeys = new Set<string>();
   private startTimer: NodeJS.Timeout | null = null;
@@ -129,7 +136,7 @@ export class MacModifierShortcutListener {
     this.endActiveTriggerIfNeeded();
     this.resetState();
     if (this.child) {
-      return { ok: true };
+      return this.awaitInFlightChild();
     }
 
     return this.startChildProcess();
@@ -140,9 +147,41 @@ export class MacModifierShortcutListener {
     this.restartAttempts = 0;
     this.resetState();
     if (this.child) {
-      return { ok: true };
+      return this.awaitInFlightChild();
     }
     return this.startChildProcess({ preserveShortcutOnFailure: true });
+  }
+
+  /**
+   * 复用一个已存在的 child 时，判定它到底能不能用。
+   *
+   * 光看 `this.child` 非 null 是不够的：spawn 之后到报 ready 之前那段，进程在跑但 event tap
+   * 还没建立起来。而 releaseShortcutKeepingCapture 会**故意**保留这种还没就绪的 child（有窗口
+   * 正在录制时不能把它们的 keys 来源杀掉）。两件事凑在一起就会说谎：
+   *
+   * A 窗口的 capture 还在启动 → B 窗口挂起（child 被保留）→ B 提交快捷键，setShortcut 看见
+   * child 就报成功 → 快捷键存盘、界面显示已注册 → A 那次启动随后超时或 exit，settle 的失败
+   * 路径把 child 置空（且这条路不会 scheduleRestart）→ 快捷键写着「已注册」，其实没人在监听，
+   * 要等下一次窗口聚焦触发兜底恢复才被救回来。
+   *
+   * 所以：已 ready 才算成功，否则等那次启动的**真实落点**再判。等待有上界（启动超时）。
+   */
+  private async awaitInFlightChild(): Promise<ListenerStartResult> {
+    if (this.isReady()) return { ok: true };
+    const pending = this.pendingStart;
+    // child 在跑却没有启动在飞：settle 过的成功启动会把 ready 置真（上面已返回），失败的会把
+    // child 置空。也就是说这里到不了；真到了就维持旧行为，别把状态判死。
+    if (!pending) return { ok: true };
+    const result = await pending;
+    // 被更晚一轮顶掉：那一轮才决定最终结果，这里照约定原样上报，调用方静默丢弃。
+    if (!result.ok && result.superseded) return result;
+    // 等回来之后重新读状态，而不是直接用 result.ok —— 那次启动报了 ready 但随即被 stop 杀掉
+    // 的情况下，此刻真相是「没有在监听」。
+    if (this.isReady()) return { ok: true };
+    return {
+      ok: false,
+      error: result.ok ? 'Modifier shortcut listener did not start.' : result.error,
+    };
   }
 
   stopKeyCapture(): void {
@@ -184,7 +223,21 @@ export class MacModifierShortcutListener {
     child.kill();
   }
 
-  private async startChildProcess(options?: { preserveShortcutOnFailure?: boolean }): Promise<ListenerStartResult> {
+  /**
+   * 记账版入口：把这次启动挂到 pendingStart 上，好让并发的复用方等到真实落点
+   * （见 awaitInFlightChild）。只有比自己更晚的启动能覆盖它，收尾时也只清自己那一份。
+   */
+  private startChildProcess(options?: { preserveShortcutOnFailure?: boolean }): Promise<ListenerStartResult> {
+    const started = this.runChildProcessStart(options);
+    this.pendingStart = started;
+    void started.then(
+      () => { if (this.pendingStart === started) this.pendingStart = null; },
+      () => { if (this.pendingStart === started) this.pendingStart = null; },
+    );
+    return started;
+  }
+
+  private async runChildProcessStart(options?: { preserveShortcutOnFailure?: boolean }): Promise<ListenerStartResult> {
     const generation = ++this.startGeneration;
     let binary: string;
     try {

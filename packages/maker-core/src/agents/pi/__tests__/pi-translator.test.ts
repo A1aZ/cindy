@@ -3,7 +3,7 @@
  * 重点:compaction 边界事件、turn 级 usage 累计与 done 上报、reset 时机。
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { createPiTranslateContext, translatePiEvent, usageSnapshotOf } from '../translator.js';
 import type { AgentEvent } from '../../../types/events.js';
@@ -106,5 +106,236 @@ describe('pi translator', () => {
     expect(ctx.turnOutput).toBe(0);
     expect(ctx.turnCacheRead).toBe(0);
     expect(ctx.turnCacheWrite).toBe(0);
+  });
+
+  it('preserves pi redacted thinking as a structured redacted event', () => {
+    const ctx = createPiTranslateContext(noopLogger);
+    const { queue, events } = makeQueue();
+
+    translatePiEvent(ev({ type: 'message_start' }), queue, ctx);
+    translatePiEvent(
+      ev({
+        type: 'message_update',
+        assistantMessageEvent: {
+          type: 'thinking_start',
+          contentIndex: 0,
+          partial: {
+            role: 'assistant',
+            content: [{ type: 'thinking', thinking: '', redacted: true }],
+          },
+        },
+      }),
+      queue,
+      ctx,
+    );
+    translatePiEvent(
+      ev({
+        type: 'message_update',
+        assistantMessageEvent: {
+          type: 'thinking_delta',
+          contentIndex: 0,
+          delta: '[Reasoning redacted]',
+          partial: {
+            role: 'assistant',
+            content: [{ type: 'thinking', thinking: '[Reasoning redacted]', redacted: true }],
+          },
+        },
+      }),
+      queue,
+      ctx,
+    );
+    translatePiEvent(
+      ev({
+        type: 'message_update',
+        assistantMessageEvent: {
+          type: 'thinking_end',
+          contentIndex: 0,
+          content: '[Reasoning redacted]',
+          partial: {
+            role: 'assistant',
+            content: [{ type: 'thinking', thinking: '[Reasoning redacted]', redacted: true }],
+          },
+        },
+      }),
+      queue,
+      ctx,
+    );
+
+    expect(events).toEqual([{
+      type: 'thinking',
+      data: { stage: 'redacted', blockId: 'pi-think-1' },
+      source: 'pi',
+    }]);
+  });
+
+  it('cleans up a visible placeholder when redaction is only known at thinking_end', () => {
+    const ctx = createPiTranslateContext(noopLogger);
+    const { queue, events } = makeQueue();
+
+    translatePiEvent(
+      ev({
+        type: 'message_update',
+        assistantMessageEvent: {
+          type: 'thinking_start',
+          contentIndex: 0,
+          partial: {
+            role: 'assistant',
+            content: [{ type: 'thinking', thinking: '' }],
+          },
+        },
+      }),
+      queue,
+      ctx,
+    );
+    translatePiEvent(
+      ev({
+        type: 'message_update',
+        assistantMessageEvent: {
+          type: 'thinking_end',
+          contentIndex: 0,
+          content: '[Reasoning redacted]',
+        },
+      }),
+      queue,
+      ctx,
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'thinking',
+        data: expect.objectContaining({ stage: 'start', blockId: 'pi-think-1' }),
+      }),
+      {
+        type: 'thinking',
+        data: { stage: 'redacted', blockId: 'pi-think-1' },
+        source: 'pi',
+      },
+    ]);
+  });
+
+  it('keeps interleaved text and multiple redacted blocks in one assistant message hidden', () => {
+    const ctx = createPiTranslateContext(noopLogger);
+    const { queue, events } = makeQueue();
+    const firstPartialContent = [
+      { type: 'text', text: 'first section' },
+      { type: 'thinking', thinking: '[Reasoning redacted]', redacted: true },
+    ];
+    const secondPartialContent = [
+      ...firstPartialContent,
+      { type: 'text', text: 'second section' },
+      { type: 'thinking', thinking: '[Reasoning redacted]', redacted: true },
+    ];
+
+    translatePiEvent(ev({ type: 'message_start' }), queue, ctx);
+    translatePiEvent(ev({
+      type: 'message_update',
+      assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'first section' },
+    }), queue, ctx);
+    for (const [contentIndex, content] of [
+      [1, firstPartialContent],
+      [3, secondPartialContent],
+    ] as const) {
+      translatePiEvent(ev({
+        type: 'message_update',
+        assistantMessageEvent: {
+          type: 'thinking_start',
+          contentIndex,
+          partial: { role: 'assistant', content },
+        },
+      }), queue, ctx);
+      translatePiEvent(ev({
+        type: 'message_update',
+        assistantMessageEvent: {
+          type: 'thinking_end',
+          contentIndex,
+          content: '[Reasoning redacted]',
+          partial: { role: 'assistant', content },
+        },
+      }), queue, ctx);
+      if (contentIndex === 1) {
+        translatePiEvent(ev({
+          type: 'message_update',
+          assistantMessageEvent: { type: 'text_delta', contentIndex: 2, delta: 'second section' },
+        }), queue, ctx);
+      }
+    }
+    translatePiEvent(ev({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        content: secondPartialContent,
+        model: 'xai/grok-4.5',
+        stopReason: 'stop',
+      },
+    }), queue, ctx);
+
+    expect(events.filter((event) => event.type === 'thinking')).toEqual([
+      {
+        type: 'thinking',
+        data: { stage: 'redacted', blockId: 'pi-think-1' },
+        source: 'pi',
+      },
+      {
+        type: 'thinking',
+        data: { stage: 'redacted', blockId: 'pi-think-2' },
+        source: 'pi',
+      },
+    ]);
+    expect(events.filter((event) => event.type === 'text')).toEqual([
+      { type: 'text', data: { text: 'first section', isFinal: false }, source: 'pi' },
+      { type: 'text', data: { text: 'second section', isFinal: false }, source: 'pi' },
+      expect.objectContaining({
+        type: 'text',
+        data: { text: 'first section\n\nsecond section', isFinal: true },
+      }),
+    ]);
+  });
+
+  it('keeps ordinary pi thinking_end as visible final thinking', () => {
+    const ctx = createPiTranslateContext(noopLogger);
+    const { queue, events } = makeQueue();
+
+    translatePiEvent(
+      ev({
+        type: 'message_update',
+        assistantMessageEvent: {
+          type: 'thinking_end',
+          contentIndex: 0,
+          content: 'visible reasoning',
+          partial: {
+            role: 'assistant',
+            content: [{ type: 'thinking', thinking: 'visible reasoning' }],
+          },
+        },
+      }),
+      queue,
+      ctx,
+    );
+
+    expect(events.at(-1)).toEqual({
+      type: 'thinking',
+      data: expect.objectContaining({
+        stage: 'final',
+        blockId: 'pi-think-1',
+        text: 'visible reasoning',
+      }),
+      source: 'pi',
+    });
+  });
+
+  it('accepts the thinking-level status notification without warning', () => {
+    const warn = vi.fn();
+    const logger: Logger = { ...noopLogger, warn };
+    const ctx = createPiTranslateContext(logger);
+    const { queue, events } = makeQueue();
+
+    translatePiEvent(
+      ev({ type: 'thinking_level_changed', thinkingLevel: 'high' }),
+      queue,
+      ctx,
+    );
+
+    expect(events).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
   });
 });

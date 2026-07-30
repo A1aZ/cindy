@@ -36,6 +36,12 @@ interface PiAssistantMessage {
   stopReason?: string;
 }
 
+interface PiThinkingBlock {
+  blockId: string;
+  startedAt: number;
+  redacted: boolean;
+}
+
 export interface PiTranslateContext {
   logger: Logger;
   /** get_state 拿到的 contextWindow(模型切换时更新)。 */
@@ -55,8 +61,8 @@ export interface PiTranslateContext {
   isStreaming: boolean;
   /** thinking 块序号(blockId 生成)。 */
   thinkingSeq: number;
-  /** contentIndex → blockId/startedAt(当前消息内)。 */
-  thinkingBlocks: Map<number, { blockId: string; startedAt: number }>;
+  /** contentIndex → 当前消息内的 thinking block 状态。 */
+  thinkingBlocks: Map<number, PiThinkingBlock>;
 }
 
 export function createPiTranslateContext(logger: Logger): PiTranslateContext {
@@ -135,6 +141,30 @@ function toolResultFullText(result: unknown): string {
     }
   }
   return parts.join('\n');
+}
+
+/**
+ * pi 的 thinking 事件把 redacted 标记放在 partial 的当前 AssistantMessage block 上。
+ * 必须恢复成结构化 stage:redacted，否则占位文本会被当成普通 thinking 落库并显示。
+ * 字符串判定兼容未附 partial 的旧版 thinking_end RPC 帧。
+ */
+function isRedactedThinkingDelta(delta: Record<string, unknown>, contentIndex: number): boolean {
+  const partial = delta.partial;
+  if (typeof partial === 'object' && partial !== null) {
+    const content = (partial as { content?: unknown }).content;
+    if (Array.isArray(content)) {
+      const block = content[contentIndex];
+      if (
+        typeof block === 'object'
+        && block !== null
+        && (block as { type?: unknown }).type === 'thinking'
+        && (block as { redacted?: unknown }).redacted === true
+      ) {
+        return true;
+      }
+    }
+  }
+  return delta.content === '[Reasoning redacted]';
 }
 
 /** 主入口:一帧 pi RPC 事件 → 0..n 个 AgentEvent。 */
@@ -307,6 +337,7 @@ export function translatePiEvent(
     }
 
     case 'queue_update':
+    case 'thinking_level_changed':
     case 'summarization_retry_scheduled':
     case 'summarization_retry_attempt_start':
     case 'summarization_retry_finished':
@@ -343,19 +374,28 @@ function handleAssistantDelta(
     }
 
     case 'thinking_start': {
-      const blockId = `pi-think-${++ctx.thinkingSeq}`;
-      const startedAt = Date.now();
-      ctx.thinkingBlocks.set(contentIndex, { blockId, startedAt });
-      queue.push({
-        type: 'thinking',
-        data: { stage: 'start', blockId, startedAt },
-        source: 'pi',
-      });
+      ensureThinkingBlock(
+        contentIndex,
+        queue,
+        ctx,
+        isRedactedThinkingDelta(delta, contentIndex),
+      );
       return;
     }
 
     case 'thinking_delta': {
-      const block = ensureThinkingBlock(contentIndex, queue, ctx);
+      const redacted = isRedactedThinkingDelta(delta, contentIndex);
+      const block = ensureThinkingBlock(contentIndex, queue, ctx, redacted);
+      if (redacted && !block.redacted) {
+        block.redacted = true;
+        queue.push({
+          type: 'thinking',
+          data: { stage: 'redacted', blockId: block.blockId },
+          source: 'pi',
+        });
+        return;
+      }
+      if (block.redacted) return;
       if (typeof delta.delta === 'string' && delta.delta.length > 0) {
         queue.push({
           type: 'thinking',
@@ -367,8 +407,17 @@ function handleAssistantDelta(
     }
 
     case 'thinking_end': {
-      const block = ensureThinkingBlock(contentIndex, queue, ctx);
+      const redacted = isRedactedThinkingDelta(delta, contentIndex);
+      const block = ensureThinkingBlock(contentIndex, queue, ctx, redacted);
       ctx.thinkingBlocks.delete(contentIndex);
+      if (redacted || block.redacted) {
+        queue.push({
+          type: 'thinking',
+          data: { stage: 'redacted', blockId: block.blockId },
+          source: 'pi',
+        });
+        return;
+      }
       queue.push({
         type: 'thinking',
         data: {
@@ -402,15 +451,22 @@ function ensureThinkingBlock(
   contentIndex: number,
   queue: AsyncQueue<AgentEvent>,
   ctx: PiTranslateContext,
-): { blockId: string; startedAt: number } {
+  redacted = false,
+): PiThinkingBlock {
   const existing = ctx.thinkingBlocks.get(contentIndex);
   if (existing) return existing;
-  const block = { blockId: `pi-think-${++ctx.thinkingSeq}`, startedAt: Date.now() };
+  const block = {
+    blockId: `pi-think-${++ctx.thinkingSeq}`,
+    startedAt: Date.now(),
+    redacted,
+  };
   ctx.thinkingBlocks.set(contentIndex, block);
-  queue.push({
-    type: 'thinking',
-    data: { stage: 'start', blockId: block.blockId, startedAt: block.startedAt },
-    source: 'pi',
-  });
+  if (!redacted) {
+    queue.push({
+      type: 'thinking',
+      data: { stage: 'start', blockId: block.blockId, startedAt: block.startedAt },
+      source: 'pi',
+    });
+  }
   return block;
 }

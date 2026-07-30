@@ -2116,6 +2116,11 @@ export function isOmittedThinkingPlaceholder(text: string, durationMs: number): 
   return text === '' && durationMs === 0;
 }
 
+/** pi 旧版 translator 把结构化 redacted 块误存成了这条可见占位文本。 */
+function isLegacyRedactedThinkingPlaceholder(m: Message, text: string): boolean {
+  return m.agentKind === 'pi' && text.trim() === '[Reasoning redacted]';
+}
+
 // F1-a: 所有 agent 消息(assistant/tool_use/tool_result/thinking/ask_user/plan_review)
 // 的落库已收口 main(messagePersistBroadcaster),handleStreamEvent 退化为纯 UI reducer、
 // 不再写库 → 不再需要 sessionId 形参(已从签名移除,各调用点同步去掉第三个实参)。
@@ -2351,7 +2356,9 @@ export function handleStreamEvent(
         };
       }
 
-      // stage === 'redacted' —— 加密推理不进渲染列表。
+      // stage === 'redacted' —— 加密推理不进渲染列表。部分 vendor（如 pi）会先发
+      // thinking start、到 end 才能从 partial block 确认 redacted；因此还要删掉同
+      // blockId 的瞬时占位，不能只阻止新增。
       //
       // 这类块没有任何明文可读,卡片只能显示"无法显示的思考过程";上游(如 Grok 开了
       // 服务端搜索)一轮能产出十几条,会把真实产出淹掉。落库仍由 main(onThinkingEvent)
@@ -2361,7 +2368,19 @@ export function handleStreamEvent(
       // 不展示 ≠ 丢事件:仍按本函数开头的不变量刷新 lastAgentMeta(带 agentMeta 的事件都要刷,
       // mid-turn 抢救 assistant 累积流时拿它当 fallback)。否则这条事件携带的 model /
       // parentUuid 会被静默吞掉。
-      return incomingMeta ? { ...state, lastAgentMeta: incomingMeta } : state;
+      const hasLivePlaceholder = state.messages.some(
+        (m) => m.clientId === data.blockId && m.role === 'thinking',
+      );
+      if (!hasLivePlaceholder) {
+        return incomingMeta ? { ...state, lastAgentMeta: incomingMeta } : state;
+      }
+      return {
+        ...state,
+        messages: state.messages.filter(
+          (m) => !(m.clientId === data.blockId && m.role === 'thinking'),
+        ),
+        ...(incomingMeta ? { lastAgentMeta: incomingMeta } : {}),
+      };
     }
 
     case 'agent_task_update': {
@@ -9642,10 +9661,12 @@ function isSyntheticTriggerRow(m: Message): boolean {
 /**
  * 该 thinking 服务端行是否**不进渲染列表**(DB 行照旧保留,只是不展示)。
  *
- * 两类:
+ * 三类:
  *   - `isRedacted` 加密推理:没有任何明文可读,卡片只能显示"无法显示的思考过程",对用户是
  *     纯噪音;上游开服务端工具后一轮能出十几条,会淹掉真实产出。与 live 路径
  *     (handleStreamEvent 的 stage==='redacted')同判定。
+ *   - pi 旧版 translator 丢失 redacted 标记后落下的精确 `[Reasoning redacted]` 占位:
+ *     无需改库,历史恢复时按同一语义隐藏。
  *   - omitted-display 占位行(空文本 + 0 时长,非 redacted):不复原成 "Thought for 1s" 卡片。
  *     上游恢复明文下发后新数据自然不再命中。
  *
@@ -9657,6 +9678,7 @@ function isHiddenThinkingRow(m: Message): boolean {
   const c = m.content as Record<string, unknown>;
   if (c.isRedacted === true) return true;
   const text = typeof c.text === 'string' ? c.text : '';
+  if (isLegacyRedactedThinkingPlaceholder(m, text)) return true;
   const durationMs = typeof c.durationMs === 'number' ? c.durationMs : 0;
   return isOmittedThinkingPlaceholder(text, durationMs);
 }

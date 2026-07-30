@@ -177,19 +177,6 @@ export class GhostInstallReceiptStore {
     if (!skillSourceDir) {
       throw new Error('approved skill snapshot is missing');
     }
-    // 快照缺失、要从可变安装目录重建:先逐字节对上批准时点钉住的指纹。
-    // 只校验 SKILL.md frontmatter 不够 —— name/description 保持不变、改写正文或
-    // 往技能目录塞辅助文件，同样会让一份没人确认过的技能指令被固化成已批准快照
-    // 并全局挂链，而 skill 槽是以用户全部权限执行的。对不上就拒，让它退回完整
-    // 重新确认，而不是就地"自愈"成新批准。
-    const actualSkillContent = await hashApprovedSkillContent(receipt.manifest, skillSourceDir);
-    for (const item of items) {
-      if (actualSkillContent[item.dir] !== receipt.skillContentSha256[item.dir]) {
-        throw new Error(
-          `approved skill ${item.dir} no longer matches the bytes approved at install time`,
-        );
-      }
-    }
     const parent = path.dirname(target);
     const temp = path.join(
       parent,
@@ -198,26 +185,74 @@ export class GhostInstallReceiptStore {
     await fs.promises.mkdir(parent, { recursive: true });
     try {
       await fs.promises.mkdir(temp, { recursive: false });
+
+      // 顺序是安全要点,不要改回"先校验源目录、再复制":源目录随时可被同权限进程
+      // 改写,校验和复制各读一次就有一个可换字节的窗口,复制出来的快照可能不是被
+      // 校验过的那一份。因此**先复制到 temp,再对 temp 里(即将成为快照的)那份字节
+      // 做全部权威校验**,校验通过才 rename 就位。
       for (const item of items) {
         const source = path.join(skillSourceDir, ...item.dir.split('/'));
-        // 取字节的来源是可变的安装目录(快照缺失时从 dir 重建),所以这里要自己
-        // 复现装入侧的门槛:先 lstat 定长再读，不然本机进程往安装目录塞一个超大
-        // SKILL.md 就能让 Host 整份读进内存。lstat 而非 stat —— 与本文件其余
-        // 位置一致地拒绝软链与非普通文件,不留跟随软链的绕过口。
-        const skillMdPath = path.join(source, 'SKILL.md');
-        const skillMdStat = await fs.promises.lstat(skillMdPath);
-        if (!skillMdStat.isFile() || skillMdStat.size > GHOST_SKILL_MD_MAX_BYTES) {
+        // 复制前的便宜预检:只为早失败、少做无用功(避免整份拷一个超大 SKILL.md)。
+        // **这不是安全边界** —— 它读的是可变源目录,结论随时可能过期,真正说话的是
+        // 下面对 temp 的校验。
+        const sourceSkillMdStat = await fs.promises
+          .lstat(path.join(source, 'SKILL.md'))
+          .catch(() => null);
+        if (
+          sourceSkillMdStat &&
+          (!sourceSkillMdStat.isFile() || sourceSkillMdStat.size > GHOST_SKILL_MD_MAX_BYTES)
+        ) {
           throw new Error(
             `approved skill ${item.dir}/SKILL.md is not a regular file or exceeds ${GHOST_SKILL_MD_MAX_BYTES} bytes`,
           );
         }
-        const skillMd = await fs.promises.readFile(skillMdPath, 'utf8');
-        const consistencyError = checkSkillMdConsistency(skillMd, item);
+        await copyRegularDirectory(source, path.join(temp, ...item.dir.split('/')));
+      }
+
+      // 权威校验一律针对 temp:此刻这些字节已经脱离可变安装目录,复制期间被换过也
+      // 会在这里暴露。**尺寸上限必须排在算指纹之前** —— 源目录那道预检不是安全边界
+      // (预检后可被换成超大文件),若先算指纹就等于上限在权威路径上一次都没生效。
+      for (const item of items) {
+        const copiedSkillMdPath = path.join(temp, ...item.dir.split('/'), 'SKILL.md');
+        // 包一层领域错误:这一段现在排在算指纹之前,SKILL.md 缺失时若直接抛裸 ENOENT,
+        // 日志里就看不出是"技能内容被动过"这件事(只有被篡改时才可达,两种写法都
+        // fail closed,纯粹为可读性)。
+        const copiedSkillMdStat = await fs.promises.lstat(copiedSkillMdPath).catch((error) => {
+          throw new Error(
+            `approved skill ${item.dir}/SKILL.md is unreadable in the snapshot: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        });
+        if (!copiedSkillMdStat.isFile() || copiedSkillMdStat.size > GHOST_SKILL_MD_MAX_BYTES) {
+          throw new Error(
+            `approved skill ${item.dir}/SKILL.md is not a regular file or exceeds ${GHOST_SKILL_MD_MAX_BYTES} bytes`,
+          );
+        }
+      }
+      const copiedSkillContent = await hashApprovedSkillContent(receipt.manifest, temp);
+      for (const item of items) {
+        if (copiedSkillContent[item.dir] !== receipt.skillContentSha256[item.dir]) {
+          throw new Error(
+            `approved skill ${item.dir} no longer matches the bytes approved at install time`,
+          );
+        }
+        // 指纹相符已经蕴含 frontmatter 一致(批准时点那份过过这道校验),这里重跑一遍
+        // 是防止钉指纹那条路径本身有 bug,并给出更具体的错误。
+        const consistencyError = checkSkillMdConsistency(
+          await fs.promises.readFile(path.join(temp, ...item.dir.split('/'), 'SKILL.md'), 'utf8'),
+          item,
+        );
         if (consistencyError) {
           throw new Error(`approved skill ${item.dir} is inconsistent: ${consistencyError}`);
         }
-        await copyRegularDirectory(source, path.join(temp, ...item.dir.split('/')));
       }
+
+      // 残留窗口(已知、未关):rename 之前 temp 位于状态根内,同权限进程仍可改写它。
+      // 本地校验能保证"被校验的就是被复制的",保证不到"rename 的就是被校验的"。这属于
+      // 「批准状态根自身没有写保护」那一类,已正式登记在
+      // docs/dev-rules/plugin-security-and-authoring.md 第 6 节(与"内容根字节可变"
+      // 是两条并列的不同缺口),不在本函数能关掉的范围内。
       await fs.promises.rename(temp, target);
     } finally {
       await fs.promises.rm(temp, { recursive: true, force: true }).catch(() => undefined);
@@ -325,7 +360,11 @@ export async function hashApprovedSkillContent(
     for (const relativePath of files) {
       hash.update(relativePath);
       hash.update('\0');
-      hash.update(await fs.promises.readFile(path.join(itemRoot, ...relativePath.split('/'))));
+      // 流式喂给 hash,不整份读进内存:技能目录里除 SKILL.md 之外的文件没有尺寸上限
+      // (SKILL.md 的上限在调用方 ensureSkillSnapshot 里先判),整份 readFile 会让
+      // 一个塞进来的超大辅助文件把 Host 撑爆。摘要与逐份读取完全一致。
+      const stream = fs.createReadStream(path.join(itemRoot, ...relativePath.split('/')));
+      for await (const chunk of stream) hash.update(chunk as Buffer);
       hash.update('\0');
     }
     result[item.dir] = hash.digest('hex');

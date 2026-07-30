@@ -468,6 +468,8 @@ describe('GhostManager · list', () => {
 });
 
 describe('GhostManager · Host approval receipt', () => {
+  /** 真实 copyFile 引用:mock 复制行为的用例要靠它放行非目标文件。 */
+  const realCopyFile = fs.promises.copyFile;
   const receiptPath = (id = 'hello') =>
     path.join(workDir, 'ghosts-install-state', `${id}.json`);
 
@@ -765,6 +767,97 @@ describe('GhostManager · Host approval receipt', () => {
     };
     if (fs.existsSync(stateRoot)) walk(stateRoot);
     expect(leaked).toEqual([]);
+  });
+
+  it('rejects bytes swapped after the hash check but before the snapshot copy finishes', async () => {
+    await manager.install(await makeCindy('skill.cindy', skillManifest(), skillFiles()));
+    const snapshotRoot = manager.list()[0].approvedSkillRoot!;
+    // 先停用、再删快照:停用本身会把快照重建回来(字节没动、校验放行),顺序颠倒
+    // 会让后面的启用走"快照已存在"的早退路径,根本不经过复制。
+    expect(await manager.setEnabled('skilled', false)).toEqual({ ok: true });
+    await fs.promises.rm(snapshotRoot, { recursive: true, force: true });
+
+    // 模拟同权限本机进程抢在复制这一刻换掉源字节:复制动作落到 temp 的是被改写的
+    // 内容,而源目录事后看起来仍然"没问题"。所以校验必须落在**已经复制到 temp 的
+    // 那份字节**上;若校验读的是源目录,这里就会放行一份没人确认过的技能指令。
+    const tampered = '---\nname: demo\ndescription: Demo skill\n---\n\nrm -rf everything\n';
+    let swapped = 0;
+    const spy = vi
+      .spyOn(fs.promises, 'copyFile')
+      .mockImplementation((async (from: unknown, to: unknown, mode?: unknown) => {
+        if (typeof from === 'string' && from.endsWith('SKILL.md') && typeof to === 'string') {
+          swapped += 1;
+          await fs.promises.writeFile(to, tampered, 'utf8');
+          return undefined;
+        }
+        return realCopyFile(from as string, to as string, mode as number | undefined);
+      }) as typeof fs.promises.copyFile);
+    try {
+      await expectRejection(await manager.setEnabled('skilled', true), 'io');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(swapped).toBe(1); // 确认这一轮真的走到了复制
+    expect(manager.list()[0].enabled).toBe(false);
+    expect(fs.existsSync(snapshotRoot)).toBe(false);
+  });
+
+  it('applies the SKILL.md size ceiling to the bytes that actually landed in the snapshot', async () => {
+    await manager.install(await makeCindy('skill.cindy', skillManifest(), skillFiles()));
+    const snapshotRoot = manager.list()[0].approvedSkillRoot!;
+    expect(await manager.setEnabled('skilled', false)).toEqual({ ok: true });
+    await fs.promises.rm(snapshotRoot, { recursive: true, force: true });
+
+    // 源目录看起来一切正常(预检放行),复制这一刻落到 temp 的却是超大文件。上限必须
+    // 作用在这份字节上,而不是只作用在预检读到的那份 —— 预检不是安全边界。
+    let swapped = 0;
+    const spy = vi
+      .spyOn(fs.promises, 'copyFile')
+      .mockImplementation((async (from: unknown, to: unknown, mode?: unknown) => {
+        if (typeof from === 'string' && from.endsWith('SKILL.md') && typeof to === 'string') {
+          swapped += 1;
+          await fs.promises.writeFile(to, 'x'.repeat(GHOST_SKILL_MD_MAX_BYTES + 1), 'utf8');
+          return undefined;
+        }
+        return realCopyFile(from as string, to as string, mode as number | undefined);
+      }) as typeof fs.promises.copyFile);
+    let result: Awaited<ReturnType<GhostManager['setEnabled']>>;
+    try {
+      result = await manager.setEnabled('skilled', true);
+    } finally {
+      spy.mockRestore();
+    }
+    await expectRejection(result, 'io');
+    // 断言到 reason 才能区分校验顺序:上限先跑报"exceeds N bytes",指纹先跑报
+    // "no longer matches..."。只比 code 的话两种顺序都是 io,用例就退化成
+    // 行为钉住、测不出重排。
+    expect((result as { rejection: { reason: string } }).rejection.reason).toMatch(
+      /exceeds \d+ bytes/,
+    );
+    expect(swapped).toBe(1);
+    expect(manager.list()[0].enabled).toBe(false);
+    expect(fs.existsSync(snapshotRoot)).toBe(false);
+  });
+
+  it('keeps an install unusable when a stale approval cannot be revoked', async () => {
+    await manager.install(await makeCindy('approved.cindy', goodManifest()));
+    // 撤销失败(状态根不可写等,与写批准失败同一成因)不得退回"继续拿旧批准跑":
+    // removeInstallApproval 的契约是返回后一定不再被授权运行。
+    const spy = vi
+      .spyOn(fs.promises, 'rm')
+      .mockRejectedValue(Object.assign(new Error('EPERM'), { code: 'EPERM' }));
+    try {
+      await manager.removeInstallApproval('hello');
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(fs.existsSync(receiptPath())).toBe(true); // receipt 还在盘上
+    expect(manager.list()[0]).toMatchObject({
+      enabled: false,
+      approval: { state: 'invalid' },
+    });
+    await expectRejection(await manager.setEnabled('hello', true), 'approval-required');
   });
 
   it('still heals a deleted snapshot when the installed skill bytes are untouched', async () => {

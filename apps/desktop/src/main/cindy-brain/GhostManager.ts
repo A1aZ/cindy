@@ -60,6 +60,8 @@ const TRUST_METADATA_FILE = '.cindy-trust.json';
 export interface GhostManagerLogger {
   info(message: string, meta?: Record<string, unknown>): void;
   warn(message: string, meta?: Record<string, unknown>): void;
+  /** 可选:仅用于"本该收敛却失败"的状态(如撤销批准失败后转进程内隔离)。 */
+  error?(message: string, meta?: Record<string, unknown>): void;
 }
 
 export interface GhostManagerOptions {
@@ -110,6 +112,15 @@ export type UninstallRejection =
 export class GhostManager {
   private readonly receiptStore: GhostInstallReceiptStore;
   private mutationTail: Promise<void> = Promise.resolve();
+  /**
+   * 本进程内被判定"批准状态不可信"的插件 id。
+   *
+   * 用途只有一个:撤销陈旧批准**失败**时的兜底。撤销失败的成因(状态根不可写)与
+   * 写批准失败的成因是同一个,所以不能再指望往状态根写任何东西来表达"已失效" ——
+   * 内存标记是此时唯一还能用的机制。下次启动重新对账,成功即自愈;仍然失败就仍然
+   * 隔离,始终 fail closed。
+   */
+  private readonly untrustedApprovals = new Set<string>();
 
   constructor(private readonly options: GhostManagerOptions) {
     this.receiptStore = new GhostInstallReceiptStore(
@@ -136,6 +147,20 @@ export class GhostManager {
 
   approvalStateRoot(): string {
     return this.receiptStore.rootDir();
+  }
+
+  /**
+   * 读批准状态的**唯一入口**:进程内隔离优先于磁盘上的 receipt。
+   *
+   * 所有消费方(list / setEnabled / update 的 token 比对)都必须走这里 —— 各自直接
+   * 调 receiptStore.read() 会让隔离在某条路径上失效,那类"同一判定散落多处"的分叉
+   * 正是本 PR 前几轮反复出问题的原因。
+   */
+  private readApproval(id: string): GhostInstallReceiptReadResult {
+    if (this.untrustedApprovals.has(id)) {
+      return { state: 'invalid', reason: '批准状态已被判定不可信(撤销失败)' };
+    }
+    return this.receiptStore.read(id);
   }
 
   /** Serialize content-directory and approval-receipt mutations as one Host transaction lane. */
@@ -173,7 +198,7 @@ export class GhostManager {
         this.options.log?.warn('ghost dir skipped: invalid directory id', { dir });
         continue;
       }
-      const approvalResult = this.receiptStore.read(entry.name);
+      const approvalResult = this.readApproval(entry.name);
       if (approvalResult.state === 'approved') {
         const receipt = approvalResult.receipt;
         const localizedManifest = this.localizeApprovedManifest(receipt);
@@ -324,7 +349,7 @@ export class GhostManager {
     if (!(await pathExists(dir))) {
       return { rejection: { code: 'not-installed', reason: `意识 ${id} 未装入` } };
     }
-    const receiptResult = this.receiptStore.read(id);
+    const receiptResult = this.readApproval(id);
     if (receiptResult.state !== 'approved' && enabled) {
       return {
         rejection: {
@@ -797,6 +822,7 @@ export class GhostManager {
           ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
         });
         await this.receiptStore.write(receipt, { skillSourceDir: finalDir });
+        this.untrustedApprovals.delete(manifest.id);
       } catch (error) {
         await fs.promises.rm(finalDir, { recursive: true, force: true }).catch(() => undefined);
         throw error;
@@ -874,7 +900,7 @@ export class GhostManager {
     if (!(await pathExists(finalDir))) {
       return { rejection: { code: 'not-installed', reason: `意识 ${manifest.id} 未装入,无从更新` } };
     }
-    const approvalResult = this.receiptStore.read(manifest.id);
+    const approvalResult = this.readApproval(manifest.id);
     const actualApproval = approvalTokenFor(approvalResult);
     if (actualApproval !== opts.expectedInstalledApproval) {
       return {
@@ -958,6 +984,7 @@ export class GhostManager {
         ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
       });
       await this.receiptStore.write(receipt, { skillSourceDir: finalDir });
+      this.untrustedApprovals.delete(manifest.id);
     } catch (err) {
       await fs.promises.rm(finalDir, { recursive: true, force: true }).catch(() => undefined);
       await fs.promises.rename(backupDir, finalDir).catch(() => undefined);
@@ -997,7 +1024,7 @@ export class GhostManager {
       publisherVerified: false,
       reviewed: true,
     };
-    const current = this.receiptStore.read(manifest.id);
+    const current = this.readApproval(manifest.id);
     if (
       current.state === 'approved' &&
       isDeepStrictEqual(current.receipt.manifest, manifest) &&
@@ -1012,6 +1039,7 @@ export class GhostManager {
           ...current.receipt,
           enabled,
         });
+        this.untrustedApprovals.delete(manifest.id);
         return true;
       }
       return false;
@@ -1028,12 +1056,30 @@ export class GhostManager {
       }),
       { skillSourceDir: dir },
     );
+    this.untrustedApprovals.delete(manifest.id);
     return true;
   }
 
-  /** Remove Host approval for content deleted by the trusted seed provisioner. */
+  /**
+   * 撤销 Host 批准。**契约是"调用返回后该插件一定不再被授权运行"**：正常路径删掉
+   * receipt 与技能快照；删不掉(状态根不可写等)时退回进程内隔离，不把失败原样抛给
+   * 调用方去自己 fail closed —— 那正是上一版留下 fail-open 的地方。
+   */
   async removeInstallApproval(id: string): Promise<void> {
-    await this.receiptStore.remove(id);
+    try {
+      await this.receiptStore.remove(id);
+      this.untrustedApprovals.delete(id);
+    } catch (err) {
+      this.untrustedApprovals.add(id);
+      // 这行是"插件已转进程内隔离"的唯一可观测信号,不能因为注入的 logger 没实现
+      // error 就静默丢掉 —— 退化到 warn。
+      const log = this.options.log;
+      (log?.error ?? log?.warn)?.call(
+        log,
+        'ghost approval could not be removed; kept untrusted in-process',
+        { id, error: err instanceof Error ? err.message : String(err) },
+      );
+    }
   }
 
   private readApprovedLocaleResources(
@@ -1125,17 +1171,10 @@ export class GhostManager {
     } catch (err) {
       return { rejection: { code: 'io', reason: err instanceof Error ? err.message : String(err) } };
     }
-    try {
-      await this.receiptStore.remove(id);
-    } catch (err) {
-      // 内容目录已经删除，插件不可能再运行。此时把卸载视为成功，让上层继续
-      // 清凭证/KV/私有文件；孤立 receipt 与 skill snapshot 仅是待回收状态，
-      // 不能把“清理延后”误报成“插件仍已安装”。
-      this.options.log?.warn('ghost approval cleanup deferred after uninstall', {
-        id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+    // 走同一个撤销入口:成功即清掉隔离记录,失败由该入口转进程内隔离并记日志。
+    // 内容目录已经删除，插件不可能再运行；孤立 receipt 与 skill snapshot 仅是待回收
+    // 状态，不能把“清理延后”误报成“插件仍已安装”。
+    await this.removeInstallApproval(id);
     this.options.log?.info('ghost uninstalled', { id });
     if (options.notify !== false) this.options.onChanged?.(this.list());
     return { ok: true };
@@ -1247,9 +1286,17 @@ async function hashApprovedDirectory(root: string): Promise<string> {
       const relativePath = relativeDir
         ? `${relativeDir}/${entry.name}`
         : entry.name;
-      if (entry.isDirectory()) {
+      // 判据与姊妹函数 hashApprovedSkillContent 对齐:逐条 lstat、链接显式拒,不依赖
+      // Dirent 的类型位。这里本身只是漂移检测器(packageSha256 不作授权判据),跟随
+      // 链接最多多写一次批准、不构成绕过;对齐是因为"同一判据散落两处且两处不一致"
+      // 本身就是缺陷温床。
+      const entryStat = await fs.promises.lstat(path.join(absoluteDir, entry.name));
+      if (entryStat.isSymbolicLink()) {
+        throw new Error(`bundled Plugin contains a link entry: ${relativePath}`);
+      }
+      if (entryStat.isDirectory()) {
         await collect(relativePath);
-      } else if (entry.isFile()) {
+      } else if (entryStat.isFile()) {
         files.push(relativePath);
       } else {
         throw new Error(`bundled Plugin contains a non-regular entry: ${relativePath}`);
@@ -1262,7 +1309,9 @@ async function hashApprovedDirectory(root: string): Promise<string> {
   for (const relativePath of files) {
     hash.update(relativePath);
     hash.update('\0');
-    hash.update(await fs.promises.readFile(path.join(root, ...relativePath.split('/'))));
+    // 同 hashApprovedSkillContent:流式喂 hash,不让安装目录里的超大文件整份进内存。
+    const stream = fs.createReadStream(path.join(root, ...relativePath.split('/')));
+    for await (const chunk of stream) hash.update(chunk as Buffer);
     hash.update('\0');
   }
   return hash.digest('hex');

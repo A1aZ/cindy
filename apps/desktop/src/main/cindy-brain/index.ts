@@ -787,22 +787,23 @@ async function reconcileBuiltinGhostsLocked(
     } catch (err) {
       // 走到这里内容目录可能已经换成新种子字节，旧 receipt 却还是授权事实 ——
       // 留着它就是拿旧批准跑新代码(新版删掉的 slot 仍被授予、版本与技能快照
-      // 也停在旧 revision)。撤掉批准 fail closed 到 legacy-unapproved:随包
-      // 插件下一轮启动对账会重新补批准，自愈，不需要用户介入。
-      let approvalCleared = false;
-      try {
-        await manager.removeInstallApproval(manifest.id);
-        approvalCleared = true;
-        approvalChanged = true;
-      } catch (cleanupErr) {
-        log.error('builtin ghost stale approval could not be revoked', {
-          id: manifest.id,
-          error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
-        });
-      }
-      log.warn('builtin ghost approval receipt failed', {
+      // 也停在旧 revision)。
+      //
+      // removeInstallApproval 的契约是"返回后该插件一定不再被授权运行":删得掉就
+      // 删 receipt，删不掉(状态根不可写 —— 与这里写批准失败同一个成因)就转进程内
+      // 隔离。所以这里不需要、也不应该再自己判断撤销成不成功:那正是上一版在
+      // cleanup 失败时留下 fail-open 的地方。随包插件下一轮启动对账会重新补批准，
+      // 自愈，不需要用户介入。
+      await manager.removeInstallApproval(manifest.id);
+      // 撤销只让后续的 Host 能力调用与技能落链失效,不会自己结束已经跑起来的沙箱
+      // 进程 —— 登录触发对账时插件可能正在运行。与 beforeRemove 同款三连熄灯,
+      // 让"撤销后不再被授权运行"这句话对运行中的实例也成立。
+      getGhostRuntime().stop(manifest.id);
+      getGhostNodeRuntimeBroker().stop(manifest.id);
+      getGhostAgentSlot().clearGhost(manifest.id);
+      approvalChanged = true;
+      log.warn('builtin ghost approval receipt failed; approval revoked', {
         id: manifest.id,
-        approvalCleared,
         error: err instanceof Error ? err.message : String(err),
       });
     }

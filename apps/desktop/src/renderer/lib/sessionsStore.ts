@@ -45,9 +45,17 @@
 import type { Session } from '@/lib/ccAgent.types';
 import * as sessionService from '@/lib/sessionService';
 import type { ListStatusFilter } from '@/lib/sessionService';
-import { isDefaultDraftSessionTitle } from '@cindy/maker-shared/session-title';
+import {
+  DEFAULT_DRAFT_SESSION_TITLE,
+  isDefaultDraftSessionTitle,
+} from '@cindy/maker-shared/session-title';
 
-import { onAutoTitlePreview, onPatch, onRefresh } from '@/lib/sessionsBus';
+import {
+  onAutoTitlePreview,
+  onAutoTitlePreviewCleared,
+  onPatch,
+  onRefresh,
+} from '@/lib/sessionsBus';
 
 // V1.7：取消 16 条上限，全量拉取由 Sidebar 中部滚动条承载。
 // 后端硬上限 1000，覆盖几乎所有真实用户的 Session 总数。
@@ -419,6 +427,20 @@ if (typeof window !== 'undefined') {
     if (current && !isDefaultDraftSessionTitle(current.title)) return;
     autoTitlePreviews.set(sessionId, title);
     if (current) sessionsStore.patchLocal(sessionId, { title });
+  });
+
+  // 起名彻底失败 → 撤回预览。叠加层的失效条件是「权威标题落地」,失败时那个条件永远
+  // 不成立,预览会在每次全量刷新后继续顶着 DB 里的哨兵,会话永久显示一个库里不存在的
+  // 标题(重启后又变回兜底文案)。见 sessionsBus.emitAutoTitlePreviewCleared。
+  onAutoTitlePreviewCleared((sessionId) => {
+    const preview = autoTitlePreviews.get(sessionId);
+    if (preview === undefined) return;
+    autoTitlePreviews.delete(sessionId);
+    // 只在缓存里那行仍显示着**这次**预览时才还原:权威标题已经回流(或用户手动改名)
+    // 时缓存里是别的串,迟到的撤回不许把它冲掉。
+    const current = sessionsStore.findById(sessionId);
+    if (current?.title !== preview) return;
+    sessionsStore.patchLocal(sessionId, { title: DEFAULT_DRAFT_SESSION_TITLE });
   });
 
   window.electronAPI?.onUsageSessionSpendChanged?.(

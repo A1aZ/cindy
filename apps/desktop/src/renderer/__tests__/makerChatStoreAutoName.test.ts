@@ -24,9 +24,11 @@ vi.mock('@/lib/sessionService', () => ({
 }));
 
 const emitAutoTitlePreview = vi.fn();
+const emitAutoTitlePreviewCleared = vi.fn();
 vi.mock('@/lib/sessionsBus', () => ({
   emitPatch: vi.fn(),
   emitAutoTitlePreview: (id: string, title: string) => emitAutoTitlePreview(id, title),
+  emitAutoTitlePreviewCleared: (id: string) => emitAutoTitlePreviewCleared(id),
 }));
 vi.mock('@/lib/userPromptStore', () => ({ getUserPrompt: () => '' }));
 vi.mock('@/lib/memorySettingsStore', () => ({ getMakerMemoryEnabled: () => true }));
@@ -194,6 +196,42 @@ describe('makerChatStore auto-name — 本机会话', () => {
     await flushPromises();
 
     expect(autoTitle).toHaveBeenCalledTimes(1);
+  });
+
+  it('起名失败 → 撤回预览,不让会话永久顶着库里不存在的标题', async () => {
+    // 预览是「马上会有权威标题回流」的赌注;赌输了必须还原,否则叠加层永不失效。
+    autoTitle.mockRejectedValueOnce(new Error('ipc failed'));
+
+    makerChatStore.autoNameSession(SESSION_ID, '帮我排查登录失败', 'claude-code');
+    await flushPromises();
+
+    expect(emitAutoTitlePreview).toHaveBeenCalledWith(SESSION_ID, '帮我排查登录失败');
+    expect(emitAutoTitlePreviewCleared).toHaveBeenCalledWith(SESSION_ID);
+  });
+
+  it('起名成功时不撤回(否则真实标题会被打回哨兵)', async () => {
+    makerChatStore.autoNameSession(SESSION_ID, '帮我排查登录失败', 'claude-code');
+    await flushPromises();
+
+    expect(emitAutoTitlePreviewCleared).not.toHaveBeenCalled();
+  });
+
+  it('IPC 同步抛错(桥接缺失)同样撤回预览', async () => {
+    const w = globalThis as unknown as { window: Record<string, unknown> };
+    w.window = {
+      electronAPI: {
+        maker: {
+          autoTitle: () => {
+            throw new Error('bridge missing');
+          },
+        },
+      },
+    };
+
+    makerChatStore.autoNameSession(SESSION_ID, '帮我排查登录失败', 'claude-code');
+    await flushPromises();
+
+    expect(emitAutoTitlePreviewCleared).toHaveBeenCalledWith(SESSION_ID);
   });
 
   it('后续消息不是用户文字(纯附件 / 纯 @mention)时不补起名', async () => {

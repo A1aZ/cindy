@@ -21,7 +21,7 @@ vi.mock('@/lib/sessionService', () => ({
   list: (...args: unknown[]) => list(...args),
 }));
 
-import { emitAutoTitlePreview } from '@/lib/sessionsBus';
+import { emitAutoTitlePreview, emitAutoTitlePreviewCleared } from '@/lib/sessionsBus';
 import { sessionsStore } from '@/lib/sessionsStore';
 
 const SESSION_ID = 's-preview';
@@ -140,6 +140,48 @@ describe('sessionsStore — 预览必须活过全量刷新', () => {
     await sessionsStore.forceRefreshAll();
 
     expect(currentTitle()).toBe('登录失败排查');
+  });
+
+  it('起名失败 → 撤回预览,标题退回哨兵(不再永久顶着库里不存在的标题)', async () => {
+    // 叠加层的失效条件是「权威标题落地」。起名 IPC 失败时那个条件永远不成立,
+    // 没有撤回路径的话会话就永久显示首条消息、重启后又变回兜底文案(review P1)。
+    await seed(session());
+    emitAutoTitlePreview(SESSION_ID, '帮我排查登录失败');
+    expect(currentTitle()).toBe('帮我排查登录失败');
+
+    emitAutoTitlePreviewCleared(SESSION_ID);
+
+    expect(currentTitle()).toBe(DEFAULT_DRAFT_SESSION_TITLE);
+  });
+
+  it('撤回后连叠加层一起回收:后续全量刷新不会把预览翻出来', async () => {
+    await seed(session());
+    emitAutoTitlePreview(SESSION_ID, '帮我排查登录失败');
+    emitAutoTitlePreviewCleared(SESSION_ID);
+
+    list.mockResolvedValue([session()]); // DB 侧仍是哨兵
+    await sessionsStore.forceRefreshAll();
+
+    expect(currentTitle()).toBe(DEFAULT_DRAFT_SESSION_TITLE);
+  });
+
+  it('迟到的撤回不许冲掉已经回流的权威标题', async () => {
+    // 「写库成功但响应丢了」的时序:main 已广播权威标题,撤回才到。
+    await seed(session());
+    emitAutoTitlePreview(SESSION_ID, '帮我排查登录失败');
+    sessionsStore.patchLocal(SESSION_ID, { title: '登录失败排查' });
+
+    emitAutoTitlePreviewCleared(SESSION_ID);
+
+    expect(currentTitle()).toBe('登录失败排查');
+  });
+
+  it('没有登记过预览时撤回是 no-op(不把用户手动改的名打回哨兵)', async () => {
+    await seed(session({ title: '我自己起的名字' }));
+
+    emitAutoTitlePreviewCleared(SESSION_ID);
+
+    expect(currentTitle()).toBe('我自己起的名字');
   });
 
   it('权威标题恰好等于预览时,后续刷新同样不残留叠加', async () => {

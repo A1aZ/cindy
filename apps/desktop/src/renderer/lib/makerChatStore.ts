@@ -88,7 +88,11 @@ import {
 import { setMirrorEffort, setMirrorFast } from '@/state/deviceLinkModelMirror';
 import type { AgentKind } from '@/hooks/useAgentCapabilities';
 import type { Effort } from '@/lib/userPreferences.types';
-import { emitAutoTitlePreview, emitPatch } from '@/lib/sessionsBus';
+import {
+  emitAutoTitlePreview,
+  emitAutoTitlePreviewCleared,
+  emitPatch,
+} from '@/lib/sessionsBus';
 import { createLogger } from '@/lib/logger';
 import { getUserPrompt } from '@/lib/userPromptStore';
 import { getMakerMemoryEnabled } from '@/lib/memorySettingsStore';
@@ -6767,9 +6771,32 @@ function scheduleAutoName(
       .catch((err) => {
         // 不登记 settled —— 下一条带文字的消息会重试。
         log.warn('Failed to auto-name session:', err);
+        clearAutoTitlePreviewSafely(sessionId);
       });
   } catch (err) {
     log.warn('Failed to invoke auto-title IPC:', err);
+    clearAutoTitlePreviewSafely(sessionId);
+  }
+}
+
+/**
+ * 起名失败 → 撤回上面那次乐观预览。
+ *
+ * 预览是「马上会有权威标题回流」的赌注,它的失效条件是权威标题落地。起名彻底失败时
+ * 那个条件永远不成立:叠加层会在每次全量刷新后继续顶着 DB 里的哨兵,会话永久显示一个
+ * **库里并不存在**的标题(重启后又变回「未命名对话」,同一会话两种标题)。宁可退回可
+ * 解释的兜底文案 —— 而且没登记 `autoNameSettled`,下一条带文字的消息会重试起名。
+ *
+ * 万一 IPC 是「写库成功、响应丢了」,撤回也不会造成错误状态:main 已经广播过
+ * `sessions:patched`,store 那边的迟到撤回守卫(比对缓存里是否仍是这次预览)会让位。
+ *
+ * 同上契约:撤回自身失败只记日志,绝不外抛打断发送主流程。
+ */
+function clearAutoTitlePreviewSafely(sessionId: string): void {
+  try {
+    emitAutoTitlePreviewCleared(sessionId);
+  } catch (err) {
+    log.warn('Failed to clear auto-title preview:', err);
   }
 }
 

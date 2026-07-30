@@ -78,6 +78,45 @@ function anthropicStreamBody(text: string): string {
   ]);
 }
 
+/** 让"模型"发起一次工具调用的 SSE 流(stop_reason=tool_use)。 */
+function anthropicToolUseBody(toolName: string, input: Record<string, unknown>): string {
+  return sse([
+    {
+      event: 'message_start',
+      data: {
+        type: 'message_start',
+        message: {
+          id: 'msg_tool_1',
+          type: 'message',
+          role: 'assistant',
+          model: 'pi-test-model',
+          content: [],
+          stop_reason: null,
+          usage: { input_tokens: 42, output_tokens: 0 },
+        },
+      },
+    },
+    {
+      event: 'content_block_start',
+      data: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 'toolu_itest_1', name: toolName, input: {} },
+      },
+    },
+    {
+      event: 'content_block_delta',
+      data: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(input) } },
+    },
+    { event: 'content_block_stop', data: { type: 'content_block_stop', index: 0 } },
+    {
+      event: 'message_delta',
+      data: { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 9 } },
+    },
+    { event: 'message_stop', data: { type: 'message_stop' } },
+  ]);
+}
+
 describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gateway)', () => {
   let server: Server;
   let endpoint = '';
@@ -88,6 +127,8 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
     sessionId: string | undefined;
     body: string;
   }> = [];
+  // 权限测试用的脚本化响应队列:非空时按序出队,空了回落默认 pong 文本。
+  const scriptedResponses: string[] = [];
 
   beforeAll(async () => {
     agentHome = mkdtempSync(path.join(tmpdir(), 'pi-agent-int-'));
@@ -105,7 +146,7 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
           'content-type': 'text/event-stream',
           'cache-control': 'no-cache',
         });
-        res.end(anthropicStreamBody('pong from fake gateway'));
+        res.end(scriptedResponses.shift() ?? anthropicStreamBody('pong from fake gateway'));
       });
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -370,6 +411,141 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         await handle?.close();
         await resumed?.close();
         rmSync(workingDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // ── auto 档权限端到端:真 pi + 真 cindy-bridge + 假模型发真工具调用 ────────────
+
+  /** 起会话 + 计数 resolver + 跑一轮到 done,返回观测结果。 */
+  async function runPermissionTurn(opts: {
+    sessionId: string;
+    workingDir: string;
+    permissionMode: 'ask' | 'auto';
+    resolverBehavior: 'allow' | 'deny';
+  }): Promise<{ resolverTools: string[]; finalText: string }> {
+    const agent = new PiAgent(buildDeps());
+    const resolverTools: string[] = [];
+    let handle: AgentSessionHandle | null = null;
+    try {
+      handle = await agent.startSession({
+        sessionId: opts.sessionId,
+        workingDir: opts.workingDir,
+        model: 'pi-test-model',
+        permissionMode: opts.permissionMode,
+      });
+      handle.setInteractionResolver?.(async (req) => {
+        resolverTools.push((req as { toolName?: string }).toolName ?? '?');
+        return { kind: 'permission', requestId: (req as { requestId: string }).requestId, behavior: opts.resolverBehavior } as never;
+      });
+      const events: AgentEvent[] = [];
+      const done = (async () => {
+        for await (const ev of handle!.events()) {
+          events.push(ev);
+          if (ev.type === 'done') break;
+        }
+      })();
+      await handle.send({ type: 'user', content: 'go' });
+      await done;
+      const finalText = events
+        .filter((e) => e.type === 'text')
+        .map((e) => e.data as { text: string; isFinal?: boolean })
+        .filter((d) => d.isFinal)
+        .map((d) => d.text)
+        .join('');
+      return { resolverTools, finalText };
+    } finally {
+      await handle?.close();
+    }
+  }
+
+  it(
+    'auto mode: safe bash executes end-to-end without prompting (real bridge intercept)',
+    { timeout: 60_000 },
+    async () => {
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-safe-'));
+      writeFileSync(path.join(workingDir, 'marker-safe-ls.txt'), 'seed');
+      try {
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('bash', { command: 'ls' }),
+          anthropicStreamBody('safe turn finished'),
+        );
+        const reqBefore = seenRequests.length;
+        const { resolverTools, finalText } = await runPermissionTurn({
+          sessionId: 'perm-auto-safe',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'deny', // 若误弹窗会被 deny,下面的 tool_result 断言就会失败 → 弹窗即测试红
+        });
+        // 没有任何审批弹窗
+        expect(resolverTools).toEqual([]);
+        // 工具真的执行了:第二个请求的 tool_result 里带回了 ls 输出(含 seed 文件名)
+        const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
+        expect(followUp.some((b) => b.includes('marker-safe-ls.txt'))).toBe(true);
+        expect(finalText).toContain('safe turn finished');
+      } finally {
+        rmSync(workingDir, { recursive: true, force: true });
+        scriptedResponses.length = 0;
+      }
+    },
+  );
+
+  it(
+    'auto mode: dangerous bash escalates to the resolver and deny really blocks it',
+    { timeout: 60_000 },
+    async () => {
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-danger-'));
+      try {
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('bash', { command: 'sudo rm -rf /tmp/definitely-not-run' }),
+          anthropicStreamBody('danger turn finished'),
+        );
+        const reqBefore = seenRequests.length;
+        const { resolverTools } = await runPermissionTurn({
+          sessionId: 'perm-auto-danger',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'deny',
+        });
+        // 升级到了审批,且只问了一次
+        expect(resolverTools).toEqual(['bash']);
+        // deny 真的拦下了:回给模型的 tool_result 带 bridge 的拒绝理由
+        const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
+        expect(followUp.some((b) => b.includes('User denied this tool call via Cindy.'))).toBe(true);
+      } finally {
+        rmSync(workingDir, { recursive: true, force: true });
+        scriptedResponses.length = 0;
+      }
+    },
+  );
+
+  it(
+    'auto mode: in-workspace write is silently approved and the file really lands on disk',
+    { timeout: 60_000 },
+    async () => {
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-write-'));
+      const target = path.join(workingDir, 'auto-note.txt');
+      try {
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('write', { path: target, content: 'hello-from-auto-review' }),
+          anthropicStreamBody('write turn finished'),
+        );
+        const { resolverTools } = await runPermissionTurn({
+          sessionId: 'perm-auto-write',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'deny', // 同上:误弹窗会导致文件写不出来,断言即红
+        });
+        expect(resolverTools).toEqual([]);
+        expect(existsSync(target)).toBe(true);
+        const { readFileSync } = await import('node:fs');
+        expect(readFileSync(target, 'utf8')).toContain('hello-from-auto-review');
+      } finally {
+        rmSync(workingDir, { recursive: true, force: true });
+        scriptedResponses.length = 0;
       }
     },
   );

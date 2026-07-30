@@ -222,8 +222,14 @@ export class MacModifierShortcutListener {
         // 随后的 exit 走到这里就是一条「启动失败」，而代次只在 spawn 之前查过一次。
         // 不标的话调用方会把它当真故障，去清理更晚一轮刚建立的登记（转发名单按 sender
         // id 记账，同一个设置页连续两轮录制共用一个 id，删掉就等于新一轮收不到 keys）。
-        const outcome = !result.ok && generation !== this.startGeneration ? supersededStart() : result;
-        if (result.ok && this.child === child) this.ready = true;
+        //
+        // 成功的 ready 也要一起判：child 被 kill 的同时它可能刚把 ready 写进 stdout，缓冲区里
+        // 那行随后才被读到。报成 { ok: true } 的话，recording:start 会留着转发登记、并告诉
+        // 界面「capture 一切正常」，而 helper 其实已经没了 —— 用户按 Fn 毫无反应，只能关掉
+        // 录制框重开。就绪状态同理：只认当前 child 报的 ready。
+        const stale = generation !== this.startGeneration || this.child !== child;
+        const outcome = stale ? supersededStart() : result;
+        if (result.ok && !stale) this.ready = true;
         if (!result.ok && this.child === child) {
           this.child = null;
           this.ready = false;

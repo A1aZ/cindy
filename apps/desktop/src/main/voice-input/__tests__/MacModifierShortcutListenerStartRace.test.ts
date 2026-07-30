@@ -25,20 +25,28 @@ const mocks = vi.hoisted(() => {
   // 记下每个 child 的事件回调，用例才能自己触发 exit —— spawn 之后到报 ready 之前那段
   // 窗口只有靠它才能复现。
   const spawnedChildren: Array<Map<string, (...args: unknown[]) => void>> = [];
+  // 每个 child 的 stdout data 回调也要抓住:helper 报 ready 是从 stdout 写一行 JSON 过来的,
+  // 用例要能模拟「被 kill 的同时那行 ready 才被读到」。
+  const stdoutDataHandlers: Array<(chunk: string) => void> = [];
   const spawn = vi.fn(() => {
     const handlers = new Map<string, (...args: unknown[]) => void>();
     spawnedChildren.push(handlers);
     return {
       kill,
       killed: false,
-      stdout: { setEncoding: vi.fn(), on: vi.fn() },
+      stdout: {
+        setEncoding: vi.fn(),
+        on: vi.fn((event: string, callback: (chunk: string) => void) => {
+          if (event === 'data') stdoutDataHandlers.push(callback);
+        }),
+      },
       stderr: { setEncoding: vi.fn(), on: vi.fn() },
       on: vi.fn((event: string, callback: (...args: unknown[]) => void) => {
         handlers.set(event, callback);
       }),
     };
   });
-  return { pendingCompilations, execFile, spawn, kill, spawnedChildren };
+  return { pendingCompilations, execFile, spawn, kill, spawnedChildren, stdoutDataHandlers };
 });
 
 vi.mock('electron', () => ({
@@ -76,6 +84,7 @@ describe('MacModifierShortcutListener start race', () => {
     mocks.spawn.mockClear();
     mocks.kill.mockClear();
     mocks.spawnedChildren.length = 0;
+    mocks.stdoutDataHandlers.length = 0;
   });
 
   afterEach(() => {
@@ -149,6 +158,32 @@ describe('MacModifierShortcutListener start race', () => {
     mocks.spawnedChildren[0].get('exit')?.(null, 'SIGTERM');
 
     await expect(starting).resolves.toMatchObject({ ok: false, superseded: true });
+  });
+
+  /**
+   * child 被 kill 的同时它可能刚把 ready 写进 stdout，缓冲区里那行随后才被读到。
+   *
+   * 报成 { ok: true } 的话，recording:start 会留着转发登记、并告诉界面「capture 一切正常」，
+   * 而 helper 其实已经没了 —— 用户按 Fn 毫无反应，只能关掉录制框重开。
+   */
+  it('reports a superseded start when a killed helper reports ready late', async () => {
+    const { MacModifierShortcutListener } = await import('../MacModifierShortcutListener.js');
+    const listener = new MacModifierShortcutListener({ onTrigger: vi.fn() });
+
+    const starting = listener.startKeyCapture();
+    await flush();
+    mocks.pendingCompilations[0]();
+    await flush();
+    expect(mocks.spawn).toHaveBeenCalledTimes(1);
+
+    // 录制结束 → stop 作废这次启动并 kill child。
+    listener.stop();
+
+    // 缓冲里那行 ready 这才被读到。
+    mocks.stdoutDataHandlers[0]?.('{"type":"ready"}\n');
+
+    await expect(starting).resolves.toMatchObject({ ok: false, superseded: true });
+    expect(listener.isReady()).toBe(false);
   });
 
   // 同一个漏洞的另一半：解析 helper 抛异常（dev 下 swiftc 失败）时压根没查代次，

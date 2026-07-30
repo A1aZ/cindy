@@ -1016,13 +1016,50 @@ describe('Shared create project picker', () => {
       newMakerDraftRouteSource.indexOf('const handleCreateGoal = useCallback('),
     );
     const head = handler.slice(0, handler.indexOf('let policyEnabled'));
-    expect(head).toContain('if (sendInFlightRef.current) return;');
     expect(head).toContain('markSendInFlight(true);');
     expect(head).toContain('try {');
     // finally 释放,覆盖所有 throw / 早退。
     expect(handler.slice(0, handler.indexOf('\n    },'))).toContain('markSendInFlight(false);');
     // 弹窗侧:saving 期间不许 Esc 关掉(别让 UI 假装取消了)。
     expect(newGoalDialogSource).toContain('if (saving) event.preventDefault();');
+  });
+
+  /**
+   * #807 review 第 31 轮 P1:上一处的锁本身是对的,但**早退方式**错了 —— `return` 会被
+   * NewGoalDialog 当成成功。
+   *
+   * 与第 30 轮那条 evict 同一个模式:同时钉住上游那个事实与下游那条规则,任何一端被改动都会
+   * 在这里失败,而不是等到用户的目标文案被静默丢掉。
+   */
+  it('rejects duplicate goal creation instead of resolving as success', () => {
+    // 上游事实:save() 把 `await onCreate(...)` 正常 resolve 一律当成成功 —— 紧接着清 composer
+    // 并关掉弹窗;只有抛出才会走 catch 内联显示原因、保住用户已写的 objective。
+    const save = newGoalDialogSource.slice(
+      newGoalDialogSource.indexOf('const save = async () => {'),
+    );
+    const saveBody = save.slice(0, save.indexOf('\n  };'));
+    expect(saveBody).toContain('await onCreate(trimmed, limits);');
+    expect(saveBody).toContain('onCreated?.();');
+    expect(saveBody).toContain('onOpenChange(false);');
+    expect(saveBody).toContain('} catch (err) {');
+    // 下游规则:锁被占用时必须抛,不能 return。
+    const handler = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const handleCreateGoal = useCallback('),
+    );
+    const guard = handler.slice(0, handler.indexOf('markSendInFlight(true);'));
+    expect(guard).toContain("throw new Error(t('goal.newGoalDialog.busy'));");
+    expect(guard).not.toContain('if (sendInFlightRef.current) return;');
+    // 抛出必须发生在**上锁之前**,否则 finally 会把仍在跑的那次操作的锁解掉。
+    expect(guard.indexOf('throw new Error')).toBeGreaterThan(
+      guard.indexOf('if (sendInFlightRef.current)'),
+    );
+    // 发送路径相反:它返回 false 让 ChatInput 保留草稿(那是它的既定契约,不要跟着改成 throw)。
+    const send = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const handleSend = useCallback('),
+    );
+    expect(send.slice(0, send.indexOf('if (effectiveCollab.enabled'))).toContain(
+      'if (sendInFlightRef.current) return false;',
+    );
   });
 
   // #807 review 第二十五轮:上一轮把「指名设备离线就不回落到别的目标」改对了,但受控 select 的

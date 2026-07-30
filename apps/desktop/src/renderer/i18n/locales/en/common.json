@@ -7362,7 +7362,8 @@
       "start": "Start",
       "starting": "Starting…",
       "cancel": "Cancel",
-      "failed": "Failed to create goal"
+      "failed": "Failed to create goal",
+      "busy": "Another creation is already in progress. Please try again in a moment."
     },
     "usageLimitedUntil": "resumes {{time}}",
     "usageResumeNotice": "Usage limit reset — resuming the goal",

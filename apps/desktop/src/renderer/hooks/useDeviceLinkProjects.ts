@@ -124,8 +124,20 @@ export function useDeviceLinkProjects(
    */
   const tombstonesRef = useRef<Map<string, Map<string, number>>>(new Map());
   /**
+   * 每台设备**已落库**快照的发起序号。用来丢弃过期快照,见 applySnapshot。
+   *
+   * 不需要在切设备时清理:fetchSeqRef 全局单调递增,切回旧设备时新取数的序号必然更大。
+   */
+  const appliedSeqRef = useRef<Map<string, number>>(new Map());
+  /**
    * 落库一份对端快照:统一扣掉「仍在飞的乐观删除」与「尚未被更新快照证实的墓碑」,并顺手让
    * 已被证实的墓碑退休。两个取数点(effect / 回读)都必须经这里,否则过滤规则会再次分叉。
+   *
+   * **返回是否真的落库了**(Codex review 第 31 轮 P1):更旧的快照必须丢弃 —— 设备 gate 只排除
+   * 「已切走」,不给同一台设备的多个响应排序。真实序列:删除失败发起回读(seq=5)→ 用户关掉再
+   * 打开 picker,新 effect 取数(seq=6)先回并落库 → 若对端在这两次快照之间新增/重开了一个项目,
+   * 那个新项目只存在于 seq=6 的快照里 → 旧回读(seq=5)后到并整片覆盖,新项目就从选择器里消失,
+   * 直到下一次刷新。tombstonesRef 挡不住它:墓碑只针对**已成功删除**的路径。
    */
   const applySnapshot = useCallback(
     (
@@ -133,7 +145,10 @@ export function useDeviceLinkProjects(
       issueSeq: number,
       list: readonly ExistingRemoteProject[],
       hiddenPaths: ReadonlySet<string>,
-    ) => {
+    ): boolean => {
+      // 序号检查必须在最前面:被丢弃的快照不作数,不能让它顺带把墓碑退休掉。
+      if (issueSeq < (appliedSeqRef.current.get(ownerDeviceId) ?? 0)) return false;
+      appliedSeqRef.current.set(ownerDeviceId, issueSeq);
       const tomb = tombstonesRef.current.get(ownerDeviceId);
       if (tomb) {
         // 这份快照发起于墓碑之后 → 它已经反映了那次删除,墓碑可以退休。
@@ -147,6 +162,7 @@ export function useDeviceLinkProjects(
         ownerDeviceId,
         list.some((row) => drop(row.path)) ? list.filter((row) => !drop(row.path)) : [...list],
       );
+      return true;
     },
     [commitRows],
   );
@@ -213,6 +229,34 @@ export function useDeviceLinkProjects(
         ]);
       }
 
+      /**
+       * 把乐观移除的那一行按原位插回。
+       *
+       * 「这次删除失败了,所以这一行该在」是一件**与快照版本无关的局部事实**,所以两种情况都用它:
+       *   ① 权威回读本身也失败(拿不到任何真相);
+       *   ② 回读拿到了快照,但它比已落库的更旧而被丢弃 —— 这一条是 seq gate 的代价:不补的话
+       *      并发失败删除就不再收敛(先回的那份快照隐藏了仍在飞的自己,后回的自己又被丢弃,
+       *      于是自己那一行永远回不来),而「并发失败删除必须各自收敛」是既有不变量。
+       *
+       * 刻意**不看**取数版本号:期间用户重开 picker / 切回本设备都会推进版本号,按它 gate 会把这次
+       * 恢复跳过,那一行就一直从选择器里消失(而它在对端还在)。自带存在性检查,期间真有成功回读把
+       * 它带回来了也不会插重。
+       */
+      const restoreRemovedRow = () => {
+        const restored = removedRow;
+        if (!restored) return;
+        // 按当前设备 gate:若请求还在飞时用户已切到别的设备,把 A 的行插进 B 的 rows 会被
+        // toDeviceProjectOptions 标成属于 B —— 选中它就把 A 的路径发给 B 了。这与「并发删除不能
+        // 互相取消」不冲突:设备身份只排除「已切走」,不排除同设备内的并发。
+        if (currentDeviceIdRef.current !== target.deviceId) return;
+        if (loadedRef.current.deviceId !== target.deviceId) return;
+        const current = loadedRef.current.rows;
+        if (current.some((row) => row.path === restored.path)) return;
+        const at =
+          removedIndex >= 0 && removedIndex <= current.length ? removedIndex : current.length;
+        commitRows(target.deviceId, [...current.slice(0, at), restored, ...current.slice(at)]);
+      };
+
       try {
         await removeDeviceLinkExistingProject(target.deviceId, option.path);
         // 删成了 → 立墓碑。此刻可能已有一次「A 还在」的旧回读在飞,它落库会把这一行显示回来,
@@ -239,28 +283,15 @@ export function useDeviceLinkProjects(
               (path) => path !== option.path,
             ),
           );
-          applySnapshot(target.deviceId, readbackSeq, list, othersPending);
+          // 快照比已落库的更旧 → 被丢弃。此时仍要让自己那一行回来,否则并发失败删除不再收敛。
+          if (!applySnapshot(target.deviceId, readbackSeq, list, othersPending)) {
+            restoreRemovedRow();
+          }
         } catch {
           // 回读也失败(对端离线 / 隧道断)。此时**必须把行放回去**:删除既没在对端生效,
           // 权威列表也拿不到,保留乐观移除等于让选择器藏着一个远端仍然存在的项目,而且不给
-          // 任何提示 —— 用户只能靠重开 picker 才发现它还在。按原位插回,顺序不乱。
-          //
-          // 这里**刻意不看 requestId**:恢复的是「这一行」这件具体的事,与取数版本无关 ——
-          // 期间用户重开 picker / 切回本设备都会推进版本号,按它 gate 会把这次恢复跳过,那一行
-          // 就一直从选择器里消失(而它在对端还在)。下面自带存在性检查,期间真有成功回读把它
-          // 带回来了也不会插重。
-          const restored = removedRow;
-          if (!restored) return;
-          // 也要按当前设备 gate:若这两次请求还在飞时用户已切到别的设备,把 A 的行插进 B 的 rows
-          // 会被 toDeviceProjectOptions 标成属于 B —— 选中它就把 A 的路径发给 B 了。
-          // 这与「并发删除不能互相取消」不冲突:设备身份只排除「已切走」,不排除同设备内的并发。
-          if (currentDeviceIdRef.current !== target.deviceId) return;
-          if (loadedRef.current.deviceId !== target.deviceId) return;
-          const current = loadedRef.current.rows;
-          if (current.some((row) => row.path === restored.path)) return;
-          const at =
-            removedIndex >= 0 && removedIndex <= current.length ? removedIndex : current.length;
-          commitRows(target.deviceId, [...current.slice(0, at), restored, ...current.slice(at)]);
+          // 任何提示 —— 用户只能靠重开 picker 才发现它还在。
+          restoreRemovedRow();
         }
       } finally {
         const set = pendingRemovalsRef.current.get(target.deviceId);

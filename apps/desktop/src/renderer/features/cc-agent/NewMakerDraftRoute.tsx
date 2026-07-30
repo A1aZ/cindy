@@ -2479,7 +2479,15 @@ export function NewMakerDraftRoute() {
       // 锁写 ref(两个 pill 的 handler 即时拒绝)并驱动 disabled 渲染,与 handleSend 同一机制;
       // 因此无论弹窗怎么消失都拦得住(NewGoalDialog 另外禁掉了 saving 期间的 Esc,那只是别让 UI
       // 假装取消了)。finally 释放,覆盖所有 throw / 早退路径。
-      if (sendInFlightRef.current) return;
+      //
+      // 锁被占用时必须 **throw 而不是 return**(Codex review 第 31 轮 P1):NewGoalDialog.save()
+      // 把 `await onCreate(...)` 正常 resolve 一律当成成功 —— 紧接着就 onCreated?.() 清空 composer
+      // 并 onOpenChange(false) 关掉弹窗。于是「发送在途时打开新建目标并点开始」会静默丢掉用户刚写
+      // 的目标文案,连错误都不显示;更糟的是它还会盖掉那次仍在跑的操作后续可能报出的失败。
+      // 抛出去则走 save() 的 catch:弹窗保持打开、内联显示原因、objective 原样留在输入框。
+      if (sendInFlightRef.current) {
+        throw new Error(t('goal.newGoalDialog.busy'));
+      }
       markSendInFlight(true);
       try {
         let policyEnabled = collabPolicy.enabled;

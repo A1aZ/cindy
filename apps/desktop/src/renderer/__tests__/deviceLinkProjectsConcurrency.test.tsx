@@ -439,4 +439,107 @@ describe('useDeviceLinkProjects 取数 / 删除并发', () => {
     // 这次取数发起于成功之后 → 快照权威,/a/one 必须显示出来。
     expect(seen.projects.map((p) => p.path).sort()).toEqual(['/a/one', '/a/two']);
   });
+
+  /**
+   * #807 review 第 31 轮 P1:设备 gate 只排除「已切走」,不给同一台设备的多个响应排序。
+   * 于是「删除失败发起的回读」可以晚于「后发起的 effect 取数」落库,整片覆盖掉更新的快照 ——
+   * 对端在两次快照之间新增 / 重开的项目就会从选择器里消失,直到下一次刷新。
+   */
+  it('删除失败的回读晚于更新的取数返回时被丢弃,不抹掉期间对端新增的项目', async () => {
+    const first = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => first.promise);
+    const { seen, setEnabled } = mountHook();
+    await act(async () => {
+      first.resolve([row('/a/one'), row('/a/two')]);
+    });
+    expect(seen.projects.map((p) => p.path)).toEqual(['/a/one', '/a/two']);
+
+    // 删除 /a/one 失败 → 发起权威回读(挂住,先不 resolve)。
+    const removeCall = deferred<void>();
+    removeMock.mockImplementationOnce(() => removeCall.promise);
+    const readback = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => readback.promise);
+    let removal!: Promise<void>;
+    act(() => {
+      removal = seen.remove('/a/one', 'dev-a');
+    });
+    await act(async () => {
+      removeCall.reject(new Error('CHANNEL_NOT_ALLOWED'));
+    });
+
+    // 用户关掉再打开 picker → 新 effect 取数(发起序号更大)。对端此间新增了 /a/three。
+    const reopen = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => reopen.promise);
+    await act(async () => {
+      setEnabled(false);
+    });
+    await act(async () => {
+      setEnabled(true);
+    });
+    await act(async () => {
+      reopen.resolve([row('/a/one'), row('/a/two'), row('/a/three')]);
+    });
+    // /a/one 此刻仍在 pending 集合里(removeProject 的 finally 要等回读 settle 才跑),所以这份
+    // 快照会正确地把它减掉;新增的 /a/three 则如实出现。
+    expect(seen.projects.map((p) => p.path).sort()).toEqual(['/a/three', '/a/two']);
+
+    // 现在那个**更早发起**的回读才回来,而且它的快照里没有 /a/three(当时对端还没有它)。
+    await act(async () => {
+      readback.resolve([row('/a/one'), row('/a/two')]);
+      await removal;
+    });
+
+    // 两件事同时成立:① 旧回读被丢弃,/a/three 不能消失(没有 seq gate 时它会被整片覆盖掉);
+    // ② 丢弃之后按行恢复补上 /a/one —— 那次删除失败了,它在对端仍然存在。
+    expect(seen.projects.map((p) => p.path).sort()).toEqual(['/a/one', '/a/three', '/a/two']);
+  });
+
+  /**
+   * 上一条的代价必须被补上:seq gate 会丢弃「自己那份」回读,而并发失败删除各自要靠自己的回读
+   * 让被乐观移除的行回来。丢弃后必须退回「按行恢复」,否则那一行永远回不来 —— 这是既有不变量
+   * (同设备并发失败删除全部收敛),不能被这次修复破坏。
+   */
+  it('回读被丢弃时仍按行恢复,并发失败删除依旧全部收敛', async () => {
+    const first = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => first.promise);
+    const { seen, setEnabled } = mountHook();
+    await act(async () => {
+      first.resolve([row('/a/one'), row('/a/two'), row('/a/three')]);
+    });
+
+    // 两个删除都失败,各自发起回读。
+    const del1 = deferred<void>();
+    const del2 = deferred<void>();
+    removeMock.mockImplementationOnce(() => del1.promise).mockImplementationOnce(() => del2.promise);
+    const rb1 = deferred<ExistingRemoteProject[]>();
+    const rb2 = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => rb1.promise).mockImplementationOnce(() => rb2.promise);
+    let r1!: Promise<void>;
+    let r2!: Promise<void>;
+    act(() => {
+      r1 = seen.remove('/a/one', 'dev-a');
+    });
+    act(() => {
+      r2 = seen.remove('/a/two', 'dev-a');
+    });
+    await act(async () => {
+      del1.reject(new Error('boom'));
+      del2.reject(new Error('boom'));
+    });
+
+    // 让**后发起**的 rb2 先落库(它把仍在飞的 /a/one 减掉),再让更早的 rb1 回来 —— rb1 会被
+    // seq gate 丢弃,于是 /a/one 只能靠按行恢复回到列表。
+    await act(async () => {
+      rb2.resolve([row('/a/one'), row('/a/two'), row('/a/three')]);
+      await r2;
+    });
+    await act(async () => {
+      rb1.resolve([row('/a/one'), row('/a/two'), row('/a/three')]);
+      await r1;
+    });
+
+    // 两个删除都失败 → 两行都该在对端仍然存在,必须都回到列表。
+    expect(seen.projects.map((p) => p.path).sort()).toEqual(['/a/one', '/a/three', '/a/two']);
+    void setEnabled;
+  });
 });

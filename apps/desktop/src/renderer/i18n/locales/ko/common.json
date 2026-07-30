@@ -7351,7 +7351,8 @@
       "start": "시작",
       "starting": "생성 중…",
       "cancel": "취소",
-      "failed": "목표 생성 실패"
+      "failed": "목표 생성 실패",
+      "busy": "생성이 진행 중입니다. 잠시 후 다시 시도해 주세요."
     },
     "usageLimitedUntil": "{{time}} 재개",
     "usageResumeNotice": "사용량이 회복되어 목표를 재개합니다",

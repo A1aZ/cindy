@@ -7351,7 +7351,8 @@
       "start": "開始",
       "starting": "作成中…",
       "cancel": "キャンセル",
-      "failed": "目標の作成に失敗しました"
+      "failed": "目標の作成に失敗しました",
+      "busy": "作成処理が進行中です。しばらくしてからもう一度お試しください。"
     },
     "usageLimitedUntil": "{{time}} に再開",
     "usageResumeNotice": "利用枠が回復しました。目標を再開します",

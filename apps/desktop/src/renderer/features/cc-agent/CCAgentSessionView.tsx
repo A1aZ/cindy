@@ -2388,7 +2388,8 @@ export function CCAgentSessionView({
       // confirm dialog and settings navigation path as voice input.
       // device-link:远程会话就绪态以被控端为准(传 remoteDeviceId 走隧道查被控端
       // maker:agent:status);本地会话 remoteDeviceId 为 undefined → 走本机检查(行为不变)。
-      const { proceed } = await vendorAuthGate.checkAndConfirm(isCodex ? 'codex' : 'cc', {
+      const authVendor = displayAgentKind === 'pi' ? 'pi' : isCodex ? 'codex' : 'cc';
+      const { proceed } = await vendorAuthGate.checkAndConfirm(authVendor, {
         deviceId: remoteDeviceId,
         // 已建会话:suspended 来源计入(停用不打断运行中会话,门禁只看凭证连接态,
         // PR #744 review 第十七轮)。

@@ -64,6 +64,7 @@ import {
 
 const PI_PROVIDER_ID = 'cindy';
 const PI_API_KEY_ENV = 'CINDY_PI_API_KEY';
+const PI_SESSION_ID_ENV = 'CINDY_PI_SESSION_ID';
 
 /** pi 内置 prompt 被 --system-prompt 整体替换后的最小基底段。 */
 const PI_SYSTEM_PROMPT_BASE = `You are a coding agent running inside the pi coding agent harness (github.com/earendil-works/pi), embedded into Cindy. You help users by reading files, executing commands, editing code, and writing new files.
@@ -220,6 +221,9 @@ export class PiAgent extends BaseAgent {
           baseUrl: endpoint ?? 'http://127.0.0.1:0',
           api: 'anthropic-messages',
           apiKey: `$${PI_API_KEY_ENV}`,
+          headers: {
+            'x-cindy-pi-session-id': `$${PI_SESSION_ID_ENV}`,
+          },
           models,
         },
       },
@@ -237,14 +241,27 @@ export class PiAgent extends BaseAgent {
       });
     }
 
+    const authProviderId =
+      opts.providerId ??
+      (opts.model.startsWith('chatgpt/')
+        ? 'openai'
+        : opts.model.startsWith('xai/')
+          ? 'xai'
+          : null);
     const credentialMode =
-      resolveAgentCredentialMode({ agentKind: 'pi', providerId: opts.providerId, model: opts.model }) ??
+      resolveAgentCredentialMode({ agentKind: 'pi', providerId: authProviderId, model: opts.model }) ??
       'gateway-key';
-    const authState = await this.deps.auth.getState({ credentialMode });
+    const authState = await this.deps.auth.getState({
+      credentialMode,
+      providerId: authProviderId,
+    });
     if (!authState.authenticated) {
       throw new AgentNotAuthenticatedError('pi');
     }
-    const authEnv = await this.deps.auth.getAuthEnv({ credentialMode });
+    const authEnv = await this.deps.auth.getAuthEnv({
+      credentialMode,
+      providerId: authProviderId,
+    });
 
     const agentHome = this.resolveAgentHome();
     await this.writeModelsJson(agentHome);
@@ -348,6 +365,7 @@ export class PiAgent extends BaseAgent {
         env: {
           ...process.env,
           ...authEnv,
+          [PI_SESSION_ID_ENV]: opts.sessionId ?? '',
           PI_CODING_AGENT_DIR: agentHome,
           CINDY_PI_PERMISSION_FILE: permissionFile,
           ...(mcpBridge && mcpBridge.servers.length > 0

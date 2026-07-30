@@ -53,6 +53,7 @@ import {
   readClaudeSessionRoute,
   resetClaudeSessionRouteRegistryForTest,
 } from '../claude-session-route-registry';
+import { setProviderOAuthTokenReader } from '../provider-route';
 
 const SESSION_HEADER = { 'x-claude-code-session-id': 'sdk-grok' };
 
@@ -147,5 +148,36 @@ describe('cc routingTransform — xAI 会话的辅助请求回落默认路由 (i
       ctxWith({ ...SESSION_HEADER, authorization: 'Bearer sk-ant-oat01' }),
     );
     expect(readClaudeSessionRoute('sess-grok')).toBe('gateway');
+  });
+});
+
+describe('pi routingTransform — xdt session header selects the Pi provider route', () => {
+  afterEach(() => {
+    clearSessionProvider('sess-pi');
+    setProviderOAuthTokenReader(() => null);
+  });
+
+  it('routes an Anthropic Pi request with host-managed OAuth and strips Pi placeholder auth', async () => {
+    setClaudeProxyGatewayKeyReader(() => 'sk-gw');
+    setSessionProvider('sess-pi', 'anthropic');
+    setProviderOAuthTokenReader((providerId, agent) =>
+      providerId === 'anthropic' && agent === 'pi' ? Promise.resolve('pi-claude-token') : null,
+    );
+    const decision = createModelRoutingTransform()(
+      { model: 'claude-opus-5' },
+      ctxWith({
+        'x-cindy-pi-session-id': 'sess-pi',
+        'x-api-key': 'cindy-pi-provider-auth-placeholder',
+      }),
+    );
+    await expect(Promise.resolve(decision)).resolves.toEqual({
+      upstreamOverride: 'https://api.anthropic.com',
+      headerOverride: {
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'oauth-2025-04-20',
+        authorization: 'Bearer pi-claude-token',
+      },
+      headerDelete: ['x-api-key'],
+    });
   });
 });

@@ -139,7 +139,9 @@ export function deriveRemoteReadiness(
     authReady: boolean | null;
   },
 ): Readiness {
-  if (vendor === 'codex' && input.binaryReady === false) return 'binary-missing';
+  if (vendor !== 'cc' && input.binaryReady === false) {
+    return vendor === 'codex' ? 'binary-missing' : 'unauthenticated';
+  }
   if (input.sourceReady !== null) return input.sourceReady ? 'ready' : 'unauthenticated';
   if (input.authReady !== null) return input.authReady ? 'ready' : 'unauthenticated';
   return 'ready';
@@ -196,6 +198,7 @@ export function useVendorAuthGate(): UseVendorAuthGateReturn {
   const copy = useMemo(() => buildCopy(t), [t]);
   const cc = useVendorReadiness('cc');
   const codex = useVendorReadiness('codex');
+  const pi = useVendorReadiness('pi');
 
   const checkAndConfirm = useCallback(
     async (
@@ -229,7 +232,8 @@ export function useVendorAuthGate(): UseVendorAuthGateReturn {
       // 全部失败放行交给被控端 create-session / send 做权威校验(host = 单一真相源)。
       const deviceId = options?.deviceId;
       if (deviceId) {
-        const providerAgent: ProviderAgentKind = vendor === 'codex' ? 'codex' : 'claude-code';
+        const providerAgent: ProviderAgentKind =
+          vendor === 'codex' ? 'codex' : vendor === 'pi' ? 'pi' : 'claude-code';
         const [statusRes, providersRes] = await Promise.allSettled([
           window.electronAPI.deviceLink.invoke(deviceId, 'maker:agent:status', [providerAgent]),
           window.electronAPI.deviceLink.invoke(deviceId, 'maker:provider:list', []),
@@ -278,7 +282,7 @@ export function useVendorAuthGate(): UseVendorAuthGateReturn {
       }
 
       // 触发一次最新检查——避免 stale state 误放行。
-      const target = vendor === 'codex' ? codex : cc;
+      const target = vendor === 'codex' ? codex : vendor === 'pi' ? pi : cc;
       // 已建会话的发送门禁计入 suspended 来源(见 useVendorReadiness 注释);草稿不传。
       const readiness = await target.revalidate({
         includeSuspended: options?.existingSessionRoute === true,
@@ -300,7 +304,7 @@ export function useVendorAuthGate(): UseVendorAuthGateReturn {
       }
       return { proceed: false };
     },
-    [cc, codex, confirm, copy, navigate, t],
+    [cc, codex, pi, confirm, copy, navigate, t],
   );
 
   return { checkAndConfirm };

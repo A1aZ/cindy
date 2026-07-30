@@ -38,7 +38,7 @@ interface EstimatedValueTurnCostPayload {
   clientId: string;
   turnMoney?: unknown;
   turnCostUsd?: number;
-  turnCostIsEstimate: boolean;
+  turnCostIsEstimate?: boolean;
   turnUsageDetails?: unknown;
 }
 

@@ -287,8 +287,10 @@ import {
 } from '../sessionSpendBroadcaster.js';
 import {
   codexUsageToTokens,
+  piUsageToTokens,
   recordSchedulerTurnCost,
   recordTurnCostOnMessage,
+  recordTurnUsageOnMessage,
 } from '../turnCostBroadcaster.js';
 import { recordModelMismatchOnMessage } from '../modelMismatchBroadcaster.js';
 import { detectClaudeModelMismatch } from '../../shared/modelMismatch.js';
@@ -2771,7 +2773,10 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           // agent 跑在远端;device-link 被控会话不进本进程 maker-core,天然不经过。
           markSessionTurnStarted(session.id);
         }
-        if ((event.source === 'claude-code' || event.source === 'codex') && !turnModelPromiseBySession.has(session.id)) {
+        if (
+          (event.source === 'claude-code' || event.source === 'codex' || event.source === 'pi')
+          && !turnModelPromiseBySession.has(session.id)
+        ) {
           turnModelPromiseBySession.set(session.id, readSessionModelForUsage(session.id));
         }
       } else if (data.isRunning === false) {
@@ -3539,6 +3544,116 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             error: err instanceof Error ? err.message : String(err),
           });
         });
+      }
+    }
+    // Pi done 事件同样携带 per-turn token/cache 明细。Pi 复用 Cindy 的 provider
+    // 路由，因此计费形态必须看 session provider，而不是把它当成一个新的计费方：
+    //   openai / anthropic / xai → 用户订阅，显示剩余窗口 + 本对话价值；
+    //   xd / 默认网关            → 实际 gateway cost。
+    // usage 事实无论价格是否可解析都持久化，保证新模型也能看到 cache 命中明细。
+    if (event.type === 'done' && event.source === 'pi') {
+      const sessionProvider = getSessionProvider(session.id);
+      const modelPromise =
+        turnModelPromiseBySession.get(session.id) ?? readSessionModelForUsage(session.id);
+      turnModelPromiseBySession.delete(session.id);
+      const rawUsage = (event.data as { usage?: unknown } | undefined)?.usage;
+      if (rawUsage && typeof rawUsage === 'object') {
+        const tokens = piUsageToTokens(rawUsage as {
+          inputTokens?: number;
+          outputTokens?: number;
+          cacheReadTokens?: number;
+          cacheCreationTokens?: number;
+        });
+        const totalTokens =
+          tokens.inputTokens +
+          tokens.outputTokens +
+          tokens.cacheReadTokens +
+          tokens.cacheCreateTokens;
+        void recordSessionTurnTokens(session.id, totalTokens);
+        void (async () => {
+          let turnModel = 'unknown';
+          try {
+            turnModel = await modelPromise;
+          } catch {
+            // 模型读取失败仍持久化 token/cache，模型显示为 unknown。
+          }
+          const pricingModel = normalizeModelIdForPricing(turnModel);
+          const effectiveProvider =
+            sessionProvider ??
+            (pricingModel.startsWith(CHATGPT_MODEL_PREFIX)
+              ? 'openai'
+              : pricingModel.startsWith(XAI_MODEL_PREFIX)
+                ? 'xai'
+                : null);
+          const isSubscriptionValue =
+            effectiveProvider === 'openai'
+            || effectiveProvider === 'anthropic'
+            || effectiveProvider === 'xai'
+            || isSubscriptionDirectModel(pricingModel);
+          const turnUsageDetails = buildTurnUsageDetails({
+            ...tokens,
+            model: turnModel,
+          });
+
+          try {
+            const pricing =
+              isSubscriptionValue
+                ? null
+                : await getModelPricingForModel('xd', pricingModel);
+            const price =
+              effectiveProvider === 'openai'
+              || effectiveProvider === 'anthropic'
+              || effectiveProvider === 'xai'
+                ? getModelPriceQuote(null, effectiveProvider, pricingModel)
+                : isSubscriptionDirectModel(pricingModel)
+                  ? getSubscriptionDirectValuePrice(pricingModel)
+                  : getModelPriceQuote(pricing, 'xd', pricingModel);
+            const money = computePriceQuoteTurnMoney(
+              tokens,
+              price ?? undefined,
+              CURRENT_CINDY_REGION,
+            );
+            if (money && money.amount > 0) {
+              if (!isSubscriptionValue) {
+                void recordTurnSpend(money);
+                void recordSessionTurnSpend(session.id, money);
+              }
+              const changedScheduleId = await recordSchedulerTurnCost({
+                sessionId: session.id,
+                clientId: turnAssistantPersistId,
+                money,
+                turnUsageDetails,
+                turnOrigin: event.turnOrigin,
+              });
+              if (changedScheduleId) broadcastSchedulerChanged(changedScheduleId);
+            } else if (turnAssistantPersistId && turnUsageDetails) {
+              await recordTurnUsageOnMessage({
+                sessionId: session.id,
+                clientId: turnAssistantPersistId,
+                turnUsageDetails,
+              });
+            }
+          } catch {
+            // 价格读取失败不能连带丢失 token/cache 事实。
+            if (turnAssistantPersistId && turnUsageDetails) {
+              await recordTurnUsageOnMessage({
+                sessionId: session.id,
+                clientId: turnAssistantPersistId,
+                turnUsageDetails,
+              });
+            }
+          }
+
+          if (effectiveProvider === 'openai') {
+            triggerCodexAccountUsageRefresh();
+          } else if (effectiveProvider === 'anthropic') {
+            triggerClaudeSubscriptionUsageRefresh();
+          } else if (effectiveProvider === 'xd' || effectiveProvider == null) {
+            void triggerClaudeAccountUsageRefresh();
+          }
+          // xAI 没有独立订阅窗口端点；Responses bridge 从响应 headers 实时更新
+          // useXaiRateLimit 消费的快照，无需额外网络请求。
+        })();
       }
     }
   }));

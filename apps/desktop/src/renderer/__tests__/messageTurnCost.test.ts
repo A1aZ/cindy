@@ -330,6 +330,25 @@ describe('makerChatStore per-turn 费用', () => {
     expect(msg?.turnCostIsEstimate).toBe(true);
   });
 
+  it('实时推送:没有价格时仍补 token/cache 明细', async () => {
+    vi.mocked(messageService.list).mockResolvedValueOnce([
+      serverMessage({ clientId: 'a-usage-only' }),
+    ]);
+    makerChatStore.ensureInitialMessages(SID);
+    await flush();
+    await flush();
+
+    getTurnCostCb()?.({
+      sessionId: SID,
+      clientId: 'a-usage-only',
+      turnUsageDetails: DETAILS,
+    });
+
+    const msg = makerChatStore.getSnapshot(SID).messages.find((m) => m.clientId === 'a-usage-only');
+    expect(msg?.turnUsageDetails).toEqual(DETAILS);
+    expect(msg?.turnMoney).toBeUndefined();
+  });
+
   it('实时推送:订阅估算值不像旧 full-cache 口径时保留原始 live pricing 值', async () => {
     vi.mocked(messageService.list).mockResolvedValueOnce([
       serverMessage({ clientId: 'a-live-pricing-preserved' }),

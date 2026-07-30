@@ -36,8 +36,10 @@ vi.mock('../messagePersistBroadcaster.js', () => ({
 
 import {
   recordTurnCostOnMessage,
+  recordTurnUsageOnMessage,
   recordSchedulerTurnCost,
   codexUsageToTokens,
+  piUsageToTokens,
   type TurnCostDeps,
   type MessageTurnCostPayload,
 } from '../turnCostBroadcaster.js';
@@ -179,6 +181,21 @@ describe('recordTurnCostOnMessage', () => {
       userTurnMoney: usdMoney(0.042),
       userTurnCostUsd: 0.042,
       userTurnCostIsEstimate: false,
+      turnUsageDetails: DETAILS,
+    });
+  });
+
+  it('价格未知时仍可单独持久化并广播 token/cache 明细', async () => {
+    const { deps, broadcasts, patchCalls } = makeDeps(true);
+    await expect(recordTurnUsageOnMessage({
+      sessionId: 's1',
+      clientId: 'm1',
+      turnUsageDetails: DETAILS,
+    }, deps)).resolves.toBe(true);
+    expect(patchCalls[0]?.patch).toEqual({ turnUsageDetails: DETAILS });
+    expect(broadcasts[0]).toEqual({
+      sessionId: 's1',
+      clientId: 'm1',
       turnUsageDetails: DETAILS,
     });
   });
@@ -447,6 +464,22 @@ describe('codexUsageToTokens', () => {
       outputTokens: 0,
       cacheReadTokens: 0,
       cacheCreateTokens: 0,
+    });
+  });
+});
+
+describe('piUsageToTokens', () => {
+  it('maps Pi camelCase usage including cache create', () => {
+    expect(piUsageToTokens({
+      inputTokens: 100,
+      outputTokens: 20,
+      cacheReadTokens: 500,
+      cacheCreationTokens: 30,
+    })).toEqual({
+      inputTokens: 100,
+      outputTokens: 20,
+      cacheReadTokens: 500,
+      cacheCreateTokens: 30,
     });
   });
 });

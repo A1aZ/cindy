@@ -295,7 +295,7 @@ function toChatgptBridgeModel(model: CatalogModel): CatalogModel {
  * 以生效 Codex 列表校正 bridge 的展示名称 / 排序，同时保留 bridge 自己的 context、effort、
  * defaultEnabled 等 runtime 能力。这样旧远端目录里曾固化的本地化后缀也不会继续泄漏。
  */
-function projectCodexModelsToClaude(p: Provider): Provider {
+function projectCodexModelsToBridges(p: Provider): Provider {
   const codex = p.models.codex ?? [];
   const canonical = new Map(codex.map((model) => [model.id, model]));
   const existing = p.models['claude-code'] ?? [];
@@ -311,7 +311,13 @@ function projectCodexModelsToClaude(p: Provider): Provider {
   const withAligned = aligned
     ? { ...p, models: { ...p.models, 'claude-code': alignedExisting } }
     : p;
-  return augmentModels(withAligned, 'claude-code', codex.map(toChatgptBridgeModel), true);
+  const withClaude = augmentModels(
+    withAligned,
+    'claude-code',
+    codex.map(toChatgptBridgeModel),
+    true,
+  );
+  return augmentModels(withClaude, 'pi', codex.map(toChatgptBridgeModel), true);
 }
 
 /** 清单来源唯一化的动态供应商:目录(bundled/远端)里的静态模型一律忽略,清单只来自运行时注入。 */
@@ -485,7 +491,20 @@ function withEmptyModels(p: Provider): Provider {
 
 function computeMerged(): Catalog {
   const b = base ?? BUNDLED_CATALOG;
-  let providers = b.providers;
+  let providers: Provider[] = b.providers.map((provider): Provider => {
+    if (provider.id !== 'xai') return provider;
+    const claudeRoute = provider.routing['claude-code'];
+    const claudeModels = provider.models['claude-code'] ?? [];
+    if (!claudeRoute) return provider;
+    return {
+      ...provider,
+      agents: provider.agents.includes('pi')
+        ? provider.agents
+        : [...provider.agents, 'pi' as AgentKind],
+      routing: { ...provider.routing, pi: provider.routing.pi ?? claudeRoute },
+      models: { ...provider.models, pi: provider.models.pi ?? claudeModels },
+    };
+  });
 
   // 动态清单供应商先清零静态模型(2026-07-19 统一重构):无论目录来自 bundled 还是
   // 远端(含仍带静态段的旧版 v1 OSS 文件),这三家的清单**只信运行时注入**——
@@ -500,7 +519,7 @@ function computeMerged(): Catalog {
   const withCodexProjection = providers.map((p) => {
     if (p.id !== 'openai') return p;
     const withDiscovered = augmentModels(p, 'codex', discoveredCodex, true);
-    return projectCodexModelsToClaude(withDiscovered);
+    return projectCodexModelsToBridges(withDiscovered);
   });
   if (withCodexProjection.some((p, index) => p !== providers[index])) {
     providers = withCodexProjection;
@@ -545,6 +564,7 @@ function computeMerged(): Catalog {
               ...p.models,
               'claude-code': overlaid,
               codex: codexBridgeModels,
+              pi: overlaid,
             },
           }
         : p,

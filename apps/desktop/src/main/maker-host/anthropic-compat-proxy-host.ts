@@ -155,22 +155,25 @@ function headerValue(headers: Readonly<Record<string, string>>, name: string): s
  */
 export function createModelRoutingTransform(): RoutingTransform {
   return (body, ctx) => {
+    const piSessionId = headerValue(ctx.headers, 'x-cindy-pi-session-id');
+    const requestAgent = piSessionId ? 'pi' : 'claude-code';
     // 后台活动检测(claude-session-background-activity):凡带 cc 会话标头的请求
     // 都记一笔活动时刻。注意 routingTransform 只在 JSON POST 上被调用(server.ts
     // 按 content-type 门控),GET / 非 JSON 请求不经过这里 —— 它们由响应侧的
     // createClaudeSessionActivityResponseObserver 覆盖(观察器对所有响应生效)。
     // 开销 = 一次 header 读 + 一次活跃会话表反解 + Map.set,非 per-token 路径。
     const sdkSessionId = ctx.headers['x-claude-code-session-id'];
-    const sessionId = sdkSessionId && _resolveCcSessionId
+    const ccSessionId = sdkSessionId && _resolveCcSessionId
       ? _resolveCcSessionId(sdkSessionId)
       : null;
+    const sessionId = piSessionId ?? ccSessionId;
     if (sdkSessionId) {
       recordClaudeApiActivity(
         sdkSessionId,
-        sessionId,
+        ccSessionId,
       );
     }
-    if (sessionId) noteClaudeSessionRequest(sessionId, ctx.reqId);
+    if (ccSessionId) noteClaudeSessionRequest(ccSessionId, ctx.reqId);
     if (!isPlainObject(body)) return null;
     const wireModel = typeof body.model === 'string' ? body.model : '';
 
@@ -207,9 +210,13 @@ export function createModelRoutingTransform(): RoutingTransform {
       // wireModel 传给 scope 门:cc 内部辅助调用(权限 auto 分类器等 claude-* 小模型请求)
       // 不在订阅直连供应商(xai / openai-cc)声明的 modelPrefixes 范围内 → 返回 null,
       // 落到下方 ② 段 spawn 默认路由,分类器照常走网关/直连(issue #886)。
-      const perSession = resolveSessionRouteDecision(sessionId, 'claude-code', gatewayKey, wireModel);
+      const perSession = resolveSessionRouteDecision(sessionId, requestAgent, gatewayKey, wireModel);
       const recordSelectedRoute = <T extends object | null>(route: T): T => {
-        if (route && (selectedProviderId === 'xd' || selectedProviderId === 'anthropic')) {
+        if (
+          requestAgent === 'claude-code'
+          && route
+          && (selectedProviderId === 'xd' || selectedProviderId === 'anthropic')
+        ) {
           recordClaudeRequestRoute(
             ctx.reqId,
             sessionId,
@@ -226,7 +233,10 @@ export function createModelRoutingTransform(): RoutingTransform {
     // 计费路由旁路只记「未显式选供应商」的会话(registry 声明的语义,消费方也只在
     // providerId=null 时读)——显式选了供应商但被 scope 门放下来的辅助请求(如 xai 会话
     // 的 claude-* 分类器调用)不该往表里写死记录。
-    const recordDefaultRoute = sessionId !== null && getSessionProvider(sessionId) == null;
+    const recordDefaultRoute =
+      requestAgent === 'claude-code'
+      && sessionId !== null
+      && getSessionProvider(sessionId) == null;
     const recordResolvedDefaultRoute = (route: ClaudeSessionBillingRoute): void => {
       if (!recordDefaultRoute) return;
       recordClaudeSessionRoute(sessionId, route);
@@ -242,7 +252,7 @@ export function createModelRoutingTransform(): RoutingTransform {
       apiKeyHeader !== null && apiKeyHeader !== CLAUDE_PROVIDER_AUTH_PLACEHOLDER_KEY;
     if (hasUsableApiKey) {
       // gateway-spawn:自带网关 key,passthrough。
-      if (sessionId && selectedProviderId === 'xd') {
+      if (requestAgent === 'claude-code' && sessionId && selectedProviderId === 'xd') {
         // 显式 XD 会话在 live gateway key 被清除后,仍可能携带 spawn 时冻结的 x-api-key。
         // resolveSessionRouteDecision 会因缺 key 返回 null,但这条 passthrough 仍实际进入 XD Gateway。
         recordClaudeRequestRoute(ctx.reqId, sessionId, 'gateway');
@@ -251,7 +261,7 @@ export function createModelRoutingTransform(): RoutingTransform {
       }
       return null;
     }
-    const decision = gatewayDefaultRouteDecision('claude-code', gatewayKey);
+    const decision = gatewayDefaultRouteDecision(requestAgent, gatewayKey);
     if (decision) {
       // oauth-spawn 默认:全量换网关 key(防订阅 token 泄漏到网关)。
       recordResolvedDefaultRoute('gateway');

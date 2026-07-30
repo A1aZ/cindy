@@ -83,6 +83,10 @@ describe('pi translator', () => {
     expect(usage.cacheCreationTokens).toBe(3);
     // 快照累计 input+output。
     expect(usageSnapshotOf(ctx).tokenUsage).toBe(120);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'status',
+      data: expect.objectContaining({ status: 'Done', isRunning: false }),
+    }));
   });
 
   it('resets turn usage counters on the next agent_start', () => {

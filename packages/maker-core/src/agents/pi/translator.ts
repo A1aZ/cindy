@@ -251,7 +251,9 @@ export function translatePiEvent(
         },
         source: 'pi',
       });
-      pushStatus(queue, ctx, 'Idle', false);
+      // 与 Claude/Codex 的 turn-end status 契约一致：Desktop main 以
+      // isRunning=false + status=Done 持久化 context 快照。
+      pushStatus(queue, ctx, 'Done', false);
       return;
     }
 

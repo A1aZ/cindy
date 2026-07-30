@@ -251,7 +251,12 @@ function DetailHeader({
   const singleAgentNote =
     provider && provider.agents.length === 1
       ? t('settings.providers.detail.singleAgentNote', {
-          agent: provider.agents[0] === 'claude-code' ? 'Claude Code' : 'Codex',
+          agent:
+            provider.agents[0] === 'claude-code'
+              ? 'Claude Code'
+              : provider.agents[0] === 'pi'
+                ? 'Pi'
+                : 'Codex',
         })
       : null;
 

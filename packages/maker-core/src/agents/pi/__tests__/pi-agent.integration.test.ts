@@ -82,7 +82,12 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
   let server: Server;
   let endpoint = '';
   let agentHome = '';
-  const seenRequests: Array<{ url: string; auth: string | undefined; body: string }> = [];
+  const seenRequests: Array<{
+    url: string;
+    auth: string | undefined;
+    sessionId: string | undefined;
+    body: string;
+  }> = [];
 
   beforeAll(async () => {
     agentHome = mkdtempSync(path.join(tmpdir(), 'pi-agent-int-'));
@@ -93,6 +98,7 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         seenRequests.push({
           url: req.url ?? '',
           auth: (req.headers['x-api-key'] as string | undefined) ?? (req.headers.authorization as string | undefined),
+          sessionId: req.headers['x-cindy-pi-session-id'] as string | undefined,
           body,
         });
         res.writeHead(200, {
@@ -183,6 +189,7 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         // 请求真的打到了假网关,且带上了 env 插值出来的 key
         expect(seenRequests.length).toBeGreaterThan(0);
         expect(seenRequests.some((r) => (r.auth ?? '').includes('test-key-123'))).toBe(true);
+        expect(seenRequests.some((r) => r.sessionId === 'itest-session')).toBe(true);
 
         // usage:input 42 + output 7(anthropic 流里的 usage 记账)
         const usage = handle.getUsageSnapshot();

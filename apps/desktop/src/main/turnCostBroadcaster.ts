@@ -44,14 +44,15 @@ export interface MessageTurnCostPayload {
   sessionId: string;
   /** 该轮最后一条 assistant 的 messages.client_id。 */
   clientId: string;
-  turnMoney: RegionalMoney;
+  /** 价格可解析时携带；usage-only 更新（例如未知新模型）可以省略。 */
+  turnMoney?: RegionalMoney;
   turnCostUsd?: number;
-  turnCostIsEstimate: boolean;
+  turnCostIsEstimate?: boolean;
   /** User-visible cumulative cost from the latest real user prompt through this message. */
-  userTurnMoney: RegionalMoney;
+  userTurnMoney?: RegionalMoney;
   userTurnCostUsd?: number;
   /** True when any segment in userTurnCostUsd is a subscription-value estimate. */
-  userTurnCostIsEstimate: boolean;
+  userTurnCostIsEstimate?: boolean;
   /** 本轮 token/cache 明细;旧消息或取不到 usage 时缺省。 */
   turnUsageDetails?: TurnUsageDetails;
 }
@@ -90,6 +91,34 @@ const defaultDeps: TurnCostDeps = {
     }
   },
 };
+
+/**
+ * 只挂 token/cache 明细，不要求模型已有可用价格。
+ *
+ * 新模型可能先出现在订阅目录、晚一点才进入参考价表；usage 是事实，不能因为
+ * 价格暂缺就一起丢掉。沿用 turn-cost channel 让历史落库与当前窗口实时刷新同源。
+ */
+export async function recordTurnUsageOnMessage(
+  args: {
+    sessionId: string;
+    clientId: string;
+    turnUsageDetails: TurnUsageDetails;
+  },
+  deps: TurnCostDeps = defaultDeps,
+): Promise<boolean> {
+  const { sessionId, clientId, turnUsageDetails } = args;
+  if (!sessionId || !clientId || !turnUsageDetails) return false;
+  try {
+    const patched = await deps.enqueue(`turn-usage:${sessionId}:${clientId}`, async () =>
+      deps.patchAgentMeta(sessionId, clientId, { turnUsageDetails }));
+    if (!patched) return false;
+    deps.broadcast({ sessionId, clientId, turnUsageDetails });
+    return true;
+  } catch (err) {
+    log.warn('recordTurnUsageOnMessage failed:', err instanceof Error ? err.message : String(err));
+    return false;
+  }
+}
 
 /**
  * 把一笔 SDK 分段费用写到指定消息，并同时写入从本轮用户消息累计的展示费用。
@@ -252,5 +281,20 @@ export function codexUsageToTokens(usage: {
     outputTokens: usage.completionTokens || 0,
     cacheReadTokens: usage.cachedTokens || 0,
     cacheCreateTokens: 0,
+  };
+}
+
+/** Pi done.data.usage → unified turn token fields. */
+export function piUsageToTokens(usage: {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+}): { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreateTokens: number } {
+  return {
+    inputTokens: Number(usage.inputTokens) || 0,
+    outputTokens: Number(usage.outputTokens) || 0,
+    cacheReadTokens: Number(usage.cacheReadTokens) || 0,
+    cacheCreateTokens: Number(usage.cacheCreationTokens) || 0,
   };
 }

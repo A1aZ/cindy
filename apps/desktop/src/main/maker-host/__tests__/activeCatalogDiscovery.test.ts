@@ -24,7 +24,7 @@ import {
   setDiscoveredCodexModels,
 } from '../active-catalog.js';
 
-function openaiIds(agent: 'claude-code' | 'codex'): string[] {
+function openaiIds(agent: 'claude-code' | 'codex' | 'pi'): string[] {
   const openai = getActiveCatalog().providers.find((p) => p.id === 'openai');
   return (openai?.models[agent] ?? []).map((m) => m.id);
 }
@@ -62,11 +62,20 @@ describe('active-catalog discovered augment', () => {
     setDiscoveredCodexModels([]);
   });
 
-  it('新 discovered id 同时进入 openai.codex 与 openai.claude-code bridge', () => {
+  it('新 discovered id 同时进入 openai.codex 与 Claude/Pi bridge', () => {
     setActiveCatalog(BUNDLED_CATALOG);
     setDiscoveredCodexModels([fake('gpt-5.7')]);
     expect(openaiIds('codex')).toContain('gpt-5.7');
     expect(openaiIds('claude-code')).toContain('chatgpt/gpt-5.7');
+    expect(openaiIds('pi')).toContain('chatgpt/gpt-5.7');
+  });
+
+  it('SuperGrok 静态清单投影到独立 Pi 通道', () => {
+    setActiveCatalog(BUNDLED_CATALOG);
+    const xai = getActiveCatalog().providers.find((provider) => provider.id === 'xai');
+    expect(xai?.agents).toContain('pi');
+    expect(xai?.routing.pi?.modelPrefixes).toEqual(['xai/']);
+    expect(xai?.models.pi).toEqual(xai?.models['claude-code']);
   });
 
   it('bridge 投影剔除 max/ultra:codex 侧保留、claude-code 侧封顶 xhigh(issue #352)', () => {
@@ -93,6 +102,7 @@ describe('active-catalog discovered augment', () => {
     setDiscoveredCodexModels([fake('gpt-5.7', 17), fake('gpt-5.5', 20)]);
     expect(openaiIds('codex')).toEqual(['gpt-5.7', 'gpt-5.5']);
     expect(openaiIds('claude-code')).toEqual(['chatgpt/gpt-5.7', 'chatgpt/gpt-5.5']);
+    expect(openaiIds('pi')).toEqual(['chatgpt/gpt-5.7', 'chatgpt/gpt-5.5']);
     // 快照的元数据就是权威(没有静态条目掩盖)。
     const openai = getActiveCatalog().providers.find((p) => p.id === 'openai');
     expect((openai?.models.codex ?? []).find((m) => m.id === 'gpt-5.5')?.contextWindow).toBe(400000);
@@ -204,6 +214,7 @@ describe('anthropic 发现条目的 cindyModelMeta 元数据基线', () => {
         supportsFastMode: false,
       })),
     );
+    expect(anthropicList('pi')).toEqual(anthropicList('claude-code'));
     expect(Object.fromEntries([
       'claude-fable-5',
       'claude-opus-5',

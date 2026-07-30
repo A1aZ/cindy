@@ -2496,18 +2496,63 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     expect(c.ofType('turn.reopen')).toHaveLength(0);
   });
 
-  it('已认领的续跑轮不因别的 dispatch 被撤(排在它后面的消息不该动渠道消息)', async () => {
+  it('已认领的那一轮被别的 dispatch 顶掉 -> 就地收口, 不挂到硬超时', async () => {
+    // coordinator 的派发边界(activeTurn 非空或 isTurnRunning)不放行任何并发 dispatch,
+    // 插话走 steer 也不发这条信号 —— 所以"另一条用户轮居然 dispatch 了"等价于"我们这一轮
+    // 已经不是活跃轮"。正常收口的话观察器早在终态事件上 settle 并出表了, 还在表里就说明它
+    // 是被 Stop 之类抢在 vendor dispatch 与收口检查之间顶掉的, 而 coordinator 那条路径不发
+    // undispatched。不就地收口, 渠道消息会停在"进行中"直到 1 小时硬超时。
     const { cr, sig, c, sessionId } = await failOneTask();
     sig.retry(sessionId);
     await tick();
-    expect(c.ofType('turn.reopen')).toHaveLength(1);
+    const reopened = c.ofType('turn.reopen')[0]?.payload.requestId;
+    expect(reopened).toBeTruthy();
 
     sig.dispatchTurn(sessionId, 'unrelated-client');
     await tick();
-    expect(cr.cancels).toHaveLength(0);
-    cr.latest().onProgress('续跑进度');
+    expect(cr.cancels).toHaveLength(1);
+
+    // 撤销让 runner 以"已取消"收口, 那条 turn.end 必须真的发出去(连接还在)。
+    cr.latest().onEnd({
+      status: 'error',
+      finalText: '',
+      errorMessage: '被顶掉了',
+      durationMs: 5,
+    });
     await tick();
-    expect(c.ofType('turn.progress')).toHaveLength(1);
+    const ends = c.ofType('turn.end').filter((m) => m.payload.requestId === reopened);
+    expect(ends).toHaveLength(1);
+    expect(ends[0]?.payload.status).toBe('error');
+
+    // 这条消息线已经交给别人了 -> 不再记待续跑, 之后的重试不该再改写它。
+    sig.retry(sessionId);
+    await tick();
+    expect(c.ofType('turn.reopen')).toHaveLength(1);
+  });
+
+  it('新 hook 任务接管时清掉在等的意图(迟到的重试不能改写已过期的消息)', async () => {
+    // 意图记下后还没 dispatch(远端冷启动 / 凭证切换都在 dispatch 之前), 这时同一会话来了
+    // 新 hook 任务。它接管了消息线, 那条意图自带的 entry 已经过期 —— 不清掉的话, 新任务失败
+    // 登记自己的记账之后, 那条迟到的重试会匹配上陈旧意图, 拿已被 server 解绑的旧 reopenOf
+    // 去认领, 还顺带把新记账删掉。
+    const { cr, sig, c, d, sessionId } = await failOneTask();
+    sig.fire(sessionId);
+    await tick();
+
+    // 同一 externalKey 的新 hook 任务跑起来, 并同样以失败收口 -> 记账换成它的 requestId。
+    // (让 inspect 看见这个 session, 第二条派发才会落到同一个会话上。)
+    cr.sessions[sessionId] = { workingDir: WS_DIR, usable: true };
+    d.handleDispatch('conn-1', dispatch({ requestId: 'req-take-over', prompt: '新任务' }), c.send);
+    await tick();
+    cr.finish({ status: 'error', finalText: '', errorMessage: '又失败了' });
+    await tick();
+
+    // 那条迟到的重试终于 dispatch —— 不该认领任何东西。
+    const reopensBefore = c.ofType('turn.reopen').length;
+    sig.dispatchTurn(sessionId);
+    await tick();
+    expect(c.ofType('turn.reopen')).toHaveLength(reopensBefore);
+    expect(cr.watches).toHaveLength(0);
   });
 
   it('已认领的续跑轮不因无关消息被撤(它已在往渠道写, 后来的消息只会排队)', async () => {

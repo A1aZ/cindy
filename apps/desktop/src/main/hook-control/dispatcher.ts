@@ -680,9 +680,24 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       // failure registration")。
       //
       // hook turn 自己不经 coordinator(session-runner 直接 session.send), 所以不会误伤:
-      // 到这里的 dispatch 一定是桌面端发起的用户轮。已认领的那一轮也不受影响 —— 它有
-      // 自己的生命周期, 由收口 / 撤销 / 硬超时管。
-      if (activeContinuations.has(sessionId)) return;
+      // 到这里的 dispatch 一定是桌面端发起的用户轮。
+      if (activeContinuations.has(sessionId)) {
+        // 已认领的那一轮**被顶掉了**, 而且不会再有终态事件 —— 就地收口。
+        //
+        // 判据是 coordinator 的派发边界: activeTurn 非空或 isTurnRunning 为真时它不放行
+        // 任何 dispatch(插话走 steer, 不发本信号)。所以"另一条用户轮居然 dispatch 了"
+        // 等价于"我们这一轮已经不是活跃轮了"。正常收口的话观察器早已在终态事件上 settle
+        // 并把自己从表里删掉, 所以还在表里 = 它是被 Stop 之类抢在 vendor dispatch 与
+        // sendToAgent 收口检查之间顶掉的 —— coordinator 那条路径直接 return, 不发
+        // undispatched(它不能发: 那会顺带 abort 新 turn 的 git 快照)。
+        // 不收口就会让渠道消息停在"进行中"直到 1 小时硬超时(review: "Stop 后续跑仍被认领")。
+        //
+        // 语义与"新 hook 任务接管"完全一致: 发收口帧把那条消息定稿, 但不再记待续跑
+        // —— 这条消息线已经交给别人了。
+        log.info(`hook continuation superseded by another desktop turn (${sessionId})`);
+        dropContinuation(sessionId, { silent: false, remember: false });
+        return;
+      }
       if (pendingClaims.delete(sessionId)) {
         log.info(`hook pending claim dropped: an unrelated desktop turn dispatched (${sessionId})`);
       }
@@ -772,7 +787,14 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     opts: { silent?: boolean; remember?: boolean } = {},
   ): void {
     const { silent = false, remember = false } = opts;
-    if (!remember) pendingReopens.delete(sessionId);
+    if (!remember) {
+      pendingReopens.delete(sessionId);
+      // 在等 dispatch 的意图一起清掉。它自带一份 entry 快照, 留着的话: 新任务失败后登记了
+      // 自己的记账, 而那条迟到的重试(远端冷启动 / 凭证切换期间一直没 dispatch)最终匹配上
+      // 这条陈旧意图, 就会拿已被 server 解绑的旧 reopenOf 去认领, 顺带把**新**记账删掉
+      // (review: "Clear stale retry claims when hook tasks take over")。
+      pendingClaims.delete(sessionId);
+    }
     const watching = activeContinuations.get(sessionId);
     if (!watching) return;
     activeContinuations.delete(sessionId);

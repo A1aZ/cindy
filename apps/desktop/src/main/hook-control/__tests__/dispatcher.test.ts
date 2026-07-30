@@ -2530,6 +2530,42 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     expect(c.ofType('turn.reopen')).toHaveLength(1);
   });
 
+  it('迟到的收口只删自己那一轮, 不把后来注册的那一轮从表里抹掉', async () => {
+    // 成功收口要先异步收集出站附件, 所以 onEnd 可能落在"本轮已被接管、用户又续了一次、
+    // 新一轮已注册"之后。按 sessionId 无条件删就会把**新**那一轮抹掉 —— 它的观察器于是
+    // 躲过断连与后续接管的撤销, 拿已被 server 解绑的 requestId 继续发帧。
+    const { cr, sig, c, d, sessionId } = await failOneTask();
+    sig.retry(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(1);
+
+    // 新 hook 任务接管(第一轮的 onEnd 还压在附件收集里没发出来)。
+    cr.sessions[sessionId] = { workingDir: WS_DIR, usable: true };
+    d.handleDispatch('conn-1', dispatch({ requestId: 'req-take-over', prompt: '新任务' }), c.send);
+    await tick();
+    expect(cr.cancels).toContain(0);
+    cr.finish({ status: 'error', finalText: '', errorMessage: '又失败了' });
+    await tick();
+
+    // 用户又续了一次 -> 第二轮注册。
+    sig.retry(sessionId, 'retry-client-2');
+    await tick();
+    expect(cr.watches).toHaveLength(2);
+
+    // 第一轮那条迟到的成功收口现在才到。
+    cr.watches[0]!.onEnd({
+      status: 'ok',
+      finalText: '早先那轮的结果',
+      errorMessage: null,
+      durationMs: 9,
+    });
+    await tick();
+
+    // 第二轮必须还在表里 —— 断连时它得能被撤掉。
+    d.onDisconnected('conn-1');
+    expect(cr.cancels).toContain(1);
+  });
+
   it('新 hook 任务接管时清掉在等的意图(迟到的重试不能改写已过期的消息)', async () => {
     // 意图记下后还没 dispatch(远端冷启动 / 凭证切换都在 dispatch 之前), 这时同一会话来了
     // 新 hook 任务。它接管了消息线, 那条意图自带的 entry 已经过期 —— 不清掉的话, 新任务失败

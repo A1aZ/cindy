@@ -898,11 +898,23 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
      * 所以钉在闭包里 —— 不依赖任何时序假设。
      */
     let denyRemember = false;
+    /**
+     * 本轮在 activeContinuations 里的那条记录(注册后赋值)。
+     *
+     * 收口时**只能按实例删**, 不能只按 sessionId: 成功收口要先异步收集出站附件, onEnd
+     * 因此可能落在"这一轮已被接管、用户又续了一次、新一轮已注册"之后。那时无条件
+     * delete(sessionId) 会把**新**那一轮从表里抹掉 —— 它的观察器于是躲过断连与后续接管的
+     * 撤销, 拿一个已被 server 解绑的 requestId 继续发帧
+     * (review: "Delete only the continuation instance being settled")。
+     */
+    let handle: NonNullable<ReturnType<typeof activeContinuations.get>> | null = null;
     const cleanup = (): void => {
       settledEarly = true;
       runningByRequest.delete(requestKey);
       cancelRequested.delete(requestKey);
-      activeContinuations.delete(sessionId);
+      if (handle && activeContinuations.get(sessionId) === handle) {
+        activeContinuations.delete(sessionId);
+      }
     };
     const cancelWatch = watch({
       sessionId,
@@ -1011,7 +1023,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       return;
     }
     if (!settledEarly) {
-      activeContinuations.set(sessionId, {
+      handle = {
         connectionId: entry.connectionId,
         clientId,
         isClaimed: () => claimed,
@@ -1021,7 +1033,8 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
           if (noRemember) denyRemember = true;
           cancelWatch();
         },
-      });
+      };
+      activeContinuations.set(sessionId, handle);
     }
   }
 

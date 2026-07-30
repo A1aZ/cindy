@@ -336,39 +336,52 @@ export class PiAgent extends BaseAgent {
     // 翻转,故镜像不漂移)。
     let planModeActive = false;
 
-    const proc = new PiRpcProcess({
-      binaryPath: this.deps.binaryPath,
-      args,
-      cwd: opts.workingDir,
-      env: {
-        ...process.env,
-        ...authEnv,
-        PI_CODING_AGENT_DIR: agentHome,
-        CINDY_PI_PERMISSION_FILE: permissionFile,
-        ...(mcpBridge && mcpBridge.servers.length > 0
-          ? { CINDY_PI_MCP_BRIDGE: JSON.stringify(mcpBridge) }
-          : {}),
-      },
-      logger: this.deps.logger,
-      onEvent: (event: PiRpcEvent) => {
-        if (event.type === 'extension_ui_request') {
-          this.handleExtensionUiRequest(event, proc, () => interactionResolver);
-          return;
-        }
-        translatePiEvent(event, queue, ctx);
-      },
-      onExit: ({ code, signal }) => {
-        if (!closed) {
-          // 非用户 close 的进程死亡:terminal error + 收尾,避免 UI 永久 running。
-          queue.push({
-            type: 'error',
-            data: { message: `pi process exited unexpectedly (code=${code}, signal=${signal})`, isTerminal: true },
-            source: 'pi',
-          });
-        }
-        queue.end();
-      },
-    });
+    // proc 构造即 spawn 子进程 —— spawn 参数非法等会**同步**抛。此刻 ctx 已在
+    // preparePiExtraSpawnConfig 注册、但 handle 尚未交出,close() 不会跑 → 单独
+    // 兜底注销 ctx 再抛(构造失败没有 proc 可关)。catch 必抛,故其后 proc 恒已赋值。
+    let proc: PiRpcProcess;
+    try {
+      proc = new PiRpcProcess({
+        binaryPath: this.deps.binaryPath,
+        args,
+        cwd: opts.workingDir,
+        env: {
+          ...process.env,
+          ...authEnv,
+          PI_CODING_AGENT_DIR: agentHome,
+          CINDY_PI_PERMISSION_FILE: permissionFile,
+          ...(mcpBridge && mcpBridge.servers.length > 0
+            ? { CINDY_PI_MCP_BRIDGE: JSON.stringify(mcpBridge) }
+            : {}),
+        },
+        logger: this.deps.logger,
+        onEvent: (event: PiRpcEvent) => {
+          if (event.type === 'extension_ui_request') {
+            this.handleExtensionUiRequest(event, proc, () => interactionResolver);
+            return;
+          }
+          translatePiEvent(event, queue, ctx);
+        },
+        onExit: ({ code, signal }) => {
+          if (!closed) {
+            // 非用户 close 的进程死亡:terminal error + 收尾,避免 UI 永久 running。
+            queue.push({
+              type: 'error',
+              data: { message: `pi process exited unexpectedly (code=${code}, signal=${signal})`, isTerminal: true },
+              source: 'pi',
+            });
+          }
+          queue.end();
+        },
+      });
+    } catch (err) {
+      try {
+        disposeSessionCtx?.();
+      } catch {
+        /* best-effort:注销失败不掩盖原始构造错误 */
+      }
+      throw err;
+    }
 
     // startSession 在把 handle 交给调用方之前若失败(resume 硬失败、启动期 RPC
     // 超时/进程夭折等),close() 永远不会被调用。这里 try/catch 兜底:注销 bridge
@@ -431,14 +444,24 @@ export class PiAgent extends BaseAgent {
       if (planModeExtAvailable) {
         try {
           const entriesResp = await proc.request({ type: 'get_entries' });
-          const entries =
-            (entriesResp.data as { entries?: Array<{ customType?: string; data?: { enabled?: boolean } }> } | undefined)
-              ?.entries ?? [];
-          for (let i = entries.length - 1; i >= 0; i--) {
-            if (entries[i]?.customType === 'plan-mode') {
-              const enabled = entries[i]?.data?.enabled;
-              if (typeof enabled === 'boolean') planModeActive = enabled;
-              break;
+          // request() 对业务失败是 resolve({success:false}) 而非 reject。不查 success
+          // 就会静默落 entries=[]、镜像默认 false —— 若 pi 实际 planModeEnabled=true,
+          // 后续 setPlanMode 的幂等短路会误判、/plan toggle 方向反转。显式查并 warn;
+          // 镜像保持默认 false(宁可不声称保护,也不谎报),与兄弟 RPC 调用的 success 检查一致。
+          if (!entriesResp.success) {
+            this.deps.logger.warn('pi plan-mode state sync: get_entries failed; plan mirror unverified (defaulting off)', {
+              error: entriesResp.error,
+            });
+          } else {
+            const entries =
+              (entriesResp.data as { entries?: Array<{ customType?: string; data?: { enabled?: boolean } }> } | undefined)
+                ?.entries ?? [];
+            for (let i = entries.length - 1; i >= 0; i--) {
+              if (entries[i]?.customType === 'plan-mode') {
+                const enabled = entries[i]?.data?.enabled;
+                if (typeof enabled === 'boolean') planModeActive = enabled;
+                break;
+              }
             }
           }
         } catch (err) {

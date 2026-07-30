@@ -301,8 +301,8 @@ function draftEnableOrcaOptions(
   providers: ProviderView[],
   providersReady: boolean,
 ) {
-  const preferredAgent: 'claude-code' | 'codex' =
-    collab.worker === 'codex' ? 'codex' : 'claude-code';
+  const preferredAgent: 'claude-code' | 'codex' | 'pi' =
+    collab.worker === 'codex' ? 'codex' : collab.worker === 'pi' ? 'pi' : 'claude-code';
   // Worker 类型也是**设备作用域**的(codex review P2):在只连了 Codex 的设备 A 选了 Codex
   // Worker,切到只连 Claude 的设备 B 时,workerConfig 虽然被清了,collab.worker 仍是 codex,
   // 透传过去必撞被控端的 NO_PROVIDER_FOR_AGENT 预检,协同又静默降级成单会话。
@@ -310,12 +310,13 @@ function draftEnableOrcaOptions(
   // 没有已连接供应商、而另一个有,就改用另一个;两个都没有则原样透传,由 main 的精确
   // preflight 报可操作错误(不在这里编一个同样跑不起来的值)。
   // 仅在目录就绪时收窄,理由同下方 providerId:未就绪的空快照会误判成"都没有"。
-  const workerAgent: 'claude-code' | 'codex' = (() => {
+  const workerAgent: 'claude-code' | 'codex' | 'pi' = (() => {
     if (!providersReady) return preferredAgent;
     if (connectedProvidersForAgent(providers, preferredAgent).length > 0) return preferredAgent;
-    const fallback: 'claude-code' | 'codex' =
-      preferredAgent === 'codex' ? 'claude-code' : 'codex';
-    return connectedProvidersForAgent(providers, fallback).length > 0 ? fallback : preferredAgent;
+    const fallback = (['claude-code', 'codex', 'pi'] as const).find(
+      (agent) => agent !== preferredAgent && connectedProvidersForAgent(providers, agent).length > 0,
+    );
+    return fallback ?? preferredAgent;
   })();
   const cfg = collab.workerConfig;
   if (!cfg) return { workerAgent };
@@ -3691,7 +3692,7 @@ export function NewMakerDraftRoute() {
           onCreate={(form: CreateWorkerForm) => {
             patchCollab({
               enabled: true,
-              worker: form.agent === 'codex' ? 'codex' : 'cc',
+              worker: form.agent === 'codex' ? 'codex' : form.agent === 'pi' ? 'pi' : 'cc',
               workerConfig: {
                 role: form.role,
                 model: form.model,

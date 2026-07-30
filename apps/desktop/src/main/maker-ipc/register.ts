@@ -6387,7 +6387,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       fast?: unknown;
       providerId?: unknown;
     };
-    const workerAgent: AgentKind = body.workerAgent === 'codex' ? 'codex' : 'claude-code';
+    const workerAgent: AgentKind =
+      body.workerAgent === 'codex' ? 'codex' : body.workerAgent === 'pi' ? 'pi' : 'claude-code';
     const delegateTask = typeof body.delegateTask === 'string' ? body.delegateTask : undefined;
     return enableOrcaInternal(leadSessionId, {
       workerAgent,
@@ -6531,7 +6532,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     if (typeof b.label !== 'string') throwIpcError('INVALID_PARAMS', 'label required');
     const label = normalizeOrcaWorkerLabel(b.label);
     if (!label.ok) throwIpcError('INVALID_PARAMS', label.message);
-    const agent = b.agent === 'codex' ? 'codex' as const : 'claude-code' as const;
+    const agent =
+      b.agent === 'codex' ? ('codex' as const) : b.agent === 'pi' ? ('pi' as const) : ('claude-code' as const);
     const model = typeof b.model === 'string' && b.model.length > 0 ? b.model : undefined;
     await assertLeadCollabProjectEnabled(b.leadSessionId);
     const result = await orcaLifecycleService.createWorker({

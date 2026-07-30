@@ -94,9 +94,13 @@ Cindy 显式设置:models.json、`--append-system-prompt`、`--session-dir`、�
   HTML 导出、回合运行中禁用。良性「nothing to compact / too small」→ `noop`(不报失败)。
   见 `Capabilities.manualCompact` / `Session.compactSession` / `MAKER_INVOKE.COMPACT_SESSION`。
   注:pi 斜杠转义后用户无法手输 `/compact`,此菜单是 pi 会话手动压缩的唯一入口。
+- ✅ **subagent 接 pi 轻量引擎**(已交付):Orca worker 可选 `pi` 引擎。核心链路(MCP
+  schema / worker 创建服务 / 默认模型 claude-sonnet-4-6 / PiAgent 注册)本已按 AgentKind
+  接通;本次补齐 UI(CreateWorkerPopover / CollaborationModeToggle / draft 映射)、两个
+  main IPC coercion(WORKER_CREATE / SESSION_ENABLE_ORCA)、worker 展示(π 而非 Claude 脸)。
+  注:pi 二进制缺失时 buildPiAgent 返回 null,pi 不进 agents map,建 pi worker 会抛错。
 - **压缩即记忆**:bridge 接 `session_before_compact` → cindy_memory 管道。需 LLM 摘要
   决策(裸 dump 会污染 memory),不能纯机械转存 —— 设计待定。
-- **subagent 接 pi 轻量引擎**。
 - **BYOM / 本地模型**:走 pi 原生 provider(见设计原则),设置页开自定义/本地模型入口,仅对 pi 生效。
 - **会话树**:按现有 fork/分支功能的树状升级迭代(pi 原生 append-only entry 树 + 分支摘要),
   不引入新概念。

@@ -582,11 +582,11 @@
       "fallbackName": "用户",
       "avatarAlt": "{{name}} 的头像",
       "local": {
-        "exitFailed": "退出本地模式失败，请重试",
-        "name": "本地模式",
+        "exitFailed": "退出未登录状态失败，请重试",
+        "name": "未登录",
         "description": "数据仅保存在本机，不使用 Cindy 账号服务",
         "signIn": "登录 Cindy",
-        "exit": "退出本地模式"
+        "exit": "退出未登录状态"
       },
       "copyUserId": {
         "action": "复制用户 ID",
@@ -756,7 +756,7 @@
       "serviceSource": {
         "label": "语音服务",
         "hint": "默认使用 Cindy 语音服务；也可以连接支持实时 ASR 的服务，并使用独立的语音凭证。",
-        "localHint": "本地模式不使用 Cindy 账号服务；请连接支持实时 ASR 的服务并配置独立语音凭证。",
+        "localHint": "未登录状态不使用 Cindy 账号服务；请连接支持实时 ASR 的服务并配置独立语音凭证。",
         "ariaLabel": "语音服务来源选择",
         "options": {
           "cindy": "Cindy 官方服务",
@@ -3136,7 +3136,7 @@
     "ssoRequired": "该企业要求通过 SSO 登录",
     "ssoEntry": "使用企业 SSO 登录",
     "localModeEntry": "跳过登录",
-    "localModeOpening": "正在打开本地模式…",
+    "localModeOpening": "正在跳过登录…",
     "localModeDescription": "无需 Cindy 账号，数据保存在本机。云模型、跨设备与市场服务不可用。",
     "consentStatement": "我已阅读并同意 <terms>服务条款</terms> 和 <privacy>隐私协议</privacy>",
     "consentDialog": {
@@ -3849,6 +3849,8 @@
     "banner": {
       "title": "已更新到 {{version}}",
       "subtitle": "重启以应用更新",
+      "viewNotes": "查看更新公告",
+      "viewNotesAria": "查看 {{version}} 的更新公告",
       "button": "立即重启",
       "tooltipReady": "更新已就绪 — 点击重启{{versionSuffix}}",
       "ariaCollapsed": "更新已就绪，点击重启到版本 {{version}}",
@@ -4130,7 +4132,9 @@
         "addFailed": "添加项目失败",
         "pathEmpty": "请输入项目路径",
         "pathIsFile": "{{path}} 是文件，不是目录"
-      }
+      },
+      "selectTargetPlaceholder": "请选择目标…",
+      "requestedDeviceUnavailable": "指定的设备当前不可用，请选择其它目标"
     },
     "projectPicker": {
       "addRemoteProject": "添加远程项目"
@@ -4453,6 +4457,14 @@
       "alwaysAllowScopedHint": "作用于整个对话，且只限这里列出的范围。",
       "alwaysAllowSessionHint": "作用于整个对话，不只是这一次请求。",
       "ruleSeparator": "、"
+    },
+    "deviceSwitcher": {
+      "label": "设备",
+      "localHint": "在这台电脑上运行",
+      "onlineHint": "已连接，可在其上创建",
+      "offlineHint": "离线 · 连上后可用",
+      "attachmentsDropped": "已移除 {{count}} 个附件：它们是上一台设备上的文件",
+      "attachmentsRemoteUnsupported": "远程设备暂不支持文件附件，已跳过 {{count}} 个（图片可以）"
     }
   },
   "onboarding": {
@@ -5315,7 +5327,8 @@
       "worktreeMissingRepo": "无法开 worktree：缺少当前目录的仓库根",
       "worktreeRepoHint": "可尝试重新选一次工作目录，等右下角文件夹标识刷新后再试",
       "sessionInactive": "对话已不再处于活跃状态",
-      "remoteProjectBanner": "在 {{device}} 的 {{project}} 中新建对话"
+      "remoteProjectBanner": "在 {{device}} 的 {{project}} 中新建对话",
+      "remoteDialogueBanner": "在 {{device}} 上新建对话（不绑定项目）"
     },
     "jumpSession": {
       "emptyId": "请输入要跳转的对话 ID",
@@ -7350,7 +7363,8 @@
       "start": "开始",
       "starting": "创建中…",
       "cancel": "取消",
-      "failed": "新建目标失败"
+      "failed": "新建目标失败",
+      "busy": "已有创建正在进行，请稍候再试"
     },
     "usageLimitedUntil": "{{time}} 恢复",
     "capacityRetryAt": "{{time}} 重试",

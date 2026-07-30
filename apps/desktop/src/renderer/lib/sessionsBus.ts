@@ -16,7 +16,9 @@
  *                              条件**：只有标题仍是「尚未起名」哨兵时才生效,由持有
  *                              缓存的 sessionsStore 自己裁决(见其订阅处)。
  *
- * sessionsStore 通过 onRefresh / onPatch / onAutoTitlePreview 订阅，是唯一的消费者。
+ * sessionsStore 通过 onRefresh / onPatch / onAutoTitlePreview 订阅，是列表数据的权威
+ * 消费者；个别 UI 另有自己的局部订阅（如 CCAgentSidebarUpper 用 onPatch 做项目自动
+ * 展开），所以 emit 的副作用不止于 store 缓存。
  */
 
 import type { Session } from '@/lib/ccAgent.types';

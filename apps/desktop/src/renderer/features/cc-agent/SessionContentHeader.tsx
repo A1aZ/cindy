@@ -52,7 +52,11 @@ import { WINDOW_NO_DRAG_STYLE, useManualWindowDrag } from '@/components/layout/w
 import { recentWorkdirsStore } from '@/lib/recentWorkdirsStore';
 import { useRegisterContentHeader } from '../feature-context';
 import { useSessionLifecycleActions } from './hooks/useSessionLifecycleActions';
-import { getSessionDisplayTitle, isEmptyDraftSession } from './lib/sessionDisplayTitle';
+import {
+  getSessionDisplayTitle,
+  isEmptyDraftSession,
+  toStoredSessionTitle,
+} from './lib/sessionDisplayTitle';
 import {
   getVisibleSidebarSessionIds,
   pickSessionIdAfterRemoval,
@@ -205,12 +209,16 @@ export function SessionContentHeader({
         return;
       }
       if (unchanged) return;
+      // 预填是**显示标题**(legacy automation 会话已剥掉 `[Schedule] ` 前缀),落库前还原,
+      // 否则 isAutomationGeneratedSession 认不出它、会话从 automation 分组消失
+      // (PR #1031 review P1)。
+      const stored = toStoredSessionTitle(session, trimmed);
       const oldTitle = session.title;
-      patchLocal(session.id, { title: trimmed });
+      patchLocal(session.id, { title: stored });
       try {
         // 远程会话:patch-meta 经隧道写被控端 → 广播 sessions:patched → applyPatch 更新远程分片
         // (纯镜像,无需重拉);本机会话 patchLocal 已乐观反映。
-        await sessionService.patchMeta(session.id, { title: trimmed });
+        await sessionService.patchMeta(session.id, { title: stored });
       } catch (err) {
         log.error('[session rename]', err);
         toast.error(t('ccAgent.sidebar.renameFailed'));

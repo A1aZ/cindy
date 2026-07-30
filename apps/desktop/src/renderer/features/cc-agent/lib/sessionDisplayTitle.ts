@@ -14,7 +14,11 @@ import { isDefaultDraftSessionTitle } from '@cindy/maker-shared/session-title';
 
 import type { Session } from '@/lib/ccAgent.types';
 
-import { getAutomationSessionDisplayTitle, isScheduledSession } from './scheduledSessionGrouping';
+import {
+  getAutomationSessionDisplayTitle,
+  isScheduledSession,
+  SCHEDULE_TITLE_PREFIX,
+} from './scheduledSessionGrouping';
 
 /**
  * 「空草稿会话」—— 标题仍是哨兵且一条消息都没有。
@@ -40,6 +44,29 @@ export function isEmptyDraftSession(session: Session): boolean {
 export function getSessionDisplayTitle(session: Session, unnamedLabel: string): string {
   if (isDefaultDraftSessionTitle(session.title)) return unnamedLabel;
   return getAutomationSessionDisplayTitle(session);
+}
+
+/**
+ * 把用户在重命名输入框里编辑的结果还原成**可落库的存储标题**。
+ *
+ * 存在的理由:`getSessionDisplayTitle` 是**只读投影** —— 它对 legacy automation 会话
+ * 剥掉了 `[Schedule] ` 前缀、对未起名会话把哨兵换成了兜底文案。重命名预填用的是这个
+ * 投影值(否则输入框里会出现内部前缀或英文哨兵),因此提交时必须把变换还原回去,否则
+ * 写进 DB 的是**投影后**的串:
+ *
+ *   - legacy automation 会话(只靠 `[Schedule] ` 前缀识别、没有 `source='scheduler'`)
+ *     一旦被存成无前缀标题,`isAutomationGeneratedSession` 再也认不出它,会话就从
+ *     automation 分组和相关 UI 里消失(PR #1031 review P1)。
+ *   - 哨兵会话若被存成兜底文案,自动起名的哨兵匹配失效、永久跳过该会话。后者由调用方
+ *     的「没改就不落库」判据挡住(编辑结果等于预填值时直接 return),这里只负责前缀。
+ *
+ * 新数据带 `source='scheduler'`,不依赖前缀,所以只需给仍带前缀的行补回去。
+ */
+export function toStoredSessionTitle(session: Session, editedTitle: string): string {
+  if (!isScheduledSession(session)) return editedTitle;
+  // 用户手动把前缀打回来了(或压根没删)→ 不重复叠加。
+  if (editedTitle.startsWith(SCHEDULE_TITLE_PREFIX)) return editedTitle;
+  return `${SCHEDULE_TITLE_PREFIX}${editedTitle}`;
 }
 
 /**

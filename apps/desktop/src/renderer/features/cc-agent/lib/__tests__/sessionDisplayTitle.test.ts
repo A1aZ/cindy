@@ -8,6 +8,7 @@ import {
   canHighlightSessionDisplayTitle,
   getSessionDisplayTitle,
   isEmptyDraftSession,
+  toStoredSessionTitle,
 } from '../sessionDisplayTitle';
 
 const UNNAMED = '未命名对话';
@@ -60,6 +61,36 @@ describe('isEmptyDraftSession', () => {
   it('有消息或已起名都不算空草稿', () => {
     expect(isEmptyDraftSession(session({ _count: { messages: 1 } } as Partial<Session>))).toBe(false);
     expect(isEmptyDraftSession(session({ title: '已起名' }))).toBe(false);
+  });
+});
+
+describe('toStoredSessionTitle — 显示投影必须还原成存储值', () => {
+  it('legacy automation 会话补回 [Schedule] 前缀', () => {
+    // 预填给用户的是剥掉前缀的 'nightly'。若原样落库,isAutomationGeneratedSession
+    // (legacy 数据只靠前缀识别)再也认不出它,会话从 automation 分组消失。
+    const s = session({ title: '[Schedule] nightly' });
+    expect(getSessionDisplayTitle(s, UNNAMED)).toBe('nightly');
+    expect(toStoredSessionTitle(s, '每晚构建')).toBe('[Schedule] 每晚构建');
+  });
+
+  it('用户自己把前缀打回来时不重复叠加', () => {
+    expect(toStoredSessionTitle(session({ title: '[Schedule] nightly' }), '[Schedule] x')).toBe(
+      '[Schedule] x',
+    );
+  });
+
+  it('普通会话原样返回', () => {
+    expect(toStoredSessionTitle(session({ title: '帮我排查登录失败' }), '新名字')).toBe('新名字');
+  });
+
+  it('新数据(source=scheduler,无前缀)不被塞前缀', () => {
+    // 新数据靠 source 字段识别,标题里不该出现内部前缀。
+    const s = session({ title: 'nightly', source: 'scheduler' } as Partial<Session>);
+    expect(toStoredSessionTitle(s, '每晚构建')).toBe('每晚构建');
+  });
+
+  it('哨兵会话原样返回 —— 兜底文案由调用方的「没改」判据挡住', () => {
+    expect(toStoredSessionTitle(session(), '真的改名了')).toBe('真的改名了');
   });
 });
 

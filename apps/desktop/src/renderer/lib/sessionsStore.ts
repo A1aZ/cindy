@@ -98,6 +98,43 @@ function mergeSession(prev: Session, patch: Partial<Session>): Session {
   return next;
 }
 
+/**
+ * 自动起名的「即时标题预览」叠加层（sessionId → 预览标题）。
+ *
+ * 为什么必须是叠加层、而不是一次性 patchLocal：新建会话的 `sessions:created` push 会
+ * 触发 `forceRefreshAll`，那次重拉从 DB 拿回的行**仍带默认哨兵**（权威标题要等
+ * `maker:auto-title` 落库才有），会把只写进缓存的乐观标题冲掉 —— 表现为标题先显示
+ * 用户那句话、又退回「未命名对话」，直到 IPC 回来（PR #1031 review P1）。
+ *
+ * 语义与 device-link 远程侧的 `remoteProjectsStore.pendingTitlePreview` 对称：只在
+ * **权威标题仍是哨兵**时顶替显示，权威标题一到就自动让位并回收条目，不需要显式失效。
+ */
+const autoTitlePreviews = new Map<string, string>();
+
+/**
+ * 把预览叠加到「权威标题仍是哨兵」的行上；已经拿到权威标题的行顺手回收条目。
+ *
+ * 与 {@link applySessionSpendOverrides} 同构：都在 fetch 结果回填进缓存前跑一遍，
+ * 让本地 override 活过全量刷新。
+ */
+function applyAutoTitlePreviews(list: Session[]): Session[] {
+  if (autoTitlePreviews.size === 0) return list;
+  let changed = false;
+  const next = list.map((session) => {
+    const preview = autoTitlePreviews.get(session.id);
+    if (!preview) return session;
+    // 权威标题已落地（不再是哨兵）→ 预览让位并回收，避免长期顶着真实标题。
+    if (!isDefaultDraftSessionTitle(session.title)) {
+      autoTitlePreviews.delete(session.id);
+      return session;
+    }
+    if (session.title === preview) return session;
+    changed = true;
+    return mergeSession(session, { title: preview });
+  });
+  return changed ? next : list;
+}
+
 /** 仅重放请求启动后到达的费用事件，避免旧事件覆盖未来数据库刷新。 */
 function applySessionSpendOverrides(list: Session[], afterRevision: number): Session[] {
   let changed = false;
@@ -126,7 +163,7 @@ async function fetchFilter(filter: ListStatusFilter): Promise<Session[]> {
   // 不一致，必须把 filter 原样透传，由 IPC handler 决定过滤语义。
   const spendRevisionAtStart = sessionSpendRevision;
   const sessions = await sessionService.list(DEFAULT_LIMIT, filter);
-  return applySessionSpendOverrides(sessions, spendRevisionAtStart);
+  return applyAutoTitlePreviews(applySessionSpendOverrides(sessions, spendRevisionAtStart));
 }
 
 export const sessionsStore = {
@@ -230,7 +267,14 @@ export const sessionsStore = {
    */
   patchLocal(id: string, patch: Partial<Session>): void {
     if (!id || !patch) return;
+    // 权威标题落地(main 写完占位 / 智能标题后经 sessions:patched 回流,或用户手动改名)
+    // → 回收预览条目。留着它会在下一次全量刷新时把真实标题又顶掉。
+    if (typeof patch.title === 'string' && !isDefaultDraftSessionTitle(patch.title)) {
+      const preview = autoTitlePreviews.get(id);
+      if (preview !== undefined && preview !== patch.title) autoTitlePreviews.delete(id);
+    }
     if (patch.status === 'deleted') {
+      autoTitlePreviews.delete(id);
       sessionSpendOverrides.delete(id);
       // 删除前发出的请求可能仍会返回包含该 session 的旧快照。先解除这些
       // request 对桶的认领，再为对应桶发起替代请求，避免旧响应重新写回。
@@ -341,6 +385,7 @@ export const sessionsStore = {
     cache.clear();
     inflight.clear();
     sessionSpendOverrides.clear();
+    autoTitlePreviews.clear();
     notify('reset');
   },
 };
@@ -360,15 +405,20 @@ if (typeof window !== 'undefined') {
   //   - 标题仍是「尚未起名」哨兵 → 乐观写入,侧边栏 / 会话头 / tab 立刻显示用户刚写
   //     的话,不必干等 `maker:auto-title` 的 IPC 往返 + DB 广播回流;
   //   - 已经起过名 / 用户手动改过名 / fork 与纯附件的合成占位 → 一律不动。能否覆写
-  //     那几类占位由 main 的归属表裁决,这里猜错会把用户的标题在 UI 上顶掉;
-  //   - 缓存里没有这一行(桶未加载)→ 不动,交给权威广播回填。
+  //     那几类占位由 main 的归属表裁决,这里猜错会把用户的标题在 UI 上顶掉。
+  //
+  // 先记进 autoTitlePreviews 叠加层再 patch:光 patch 缓存会被随后的 forceRefreshAll
+  // (新建会话的 sessions:created push 触发)用仍带哨兵的 DB 快照冲掉。**登记不看当前
+  // 缓存**——桶未加载时 findById 拿不到行,但那之后的首次 fetch 同样需要叠加。
   //
   // 只改本地缓存、不写 DB:权威标题仍由 main 落库后经 sessions:patched 广播回来,
   // 那个串与这里预览的是同一个(共用 normalizeAutoTitle),所以回流时不跳变。
   onAutoTitlePreview((sessionId, title) => {
     const current = sessionsStore.findById(sessionId);
-    if (!current || !isDefaultDraftSessionTitle(current.title)) return;
-    sessionsStore.patchLocal(sessionId, { title });
+    // 已有权威标题(非哨兵)→ 连叠加层都不登记,免得之后顶掉它。
+    if (current && !isDefaultDraftSessionTitle(current.title)) return;
+    autoTitlePreviews.set(sessionId, title);
+    if (current) sessionsStore.patchLocal(sessionId, { title });
   });
 
   window.electronAPI?.onUsageSessionSpendChanged?.(

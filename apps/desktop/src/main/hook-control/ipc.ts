@@ -335,7 +335,7 @@ function ensureInstances(): { store: SlackHookStore; manager: HookControlManager
       // 交互卡按钮回流的配对出口(interaction.decision -> 挂起决策 resolve)
       resolveInteraction: resolveHookInteraction,
       // 「用户在桌面端点了重试 / 继续任务」信号 -> 把那一轮接回渠道原消息
-      // (turn.reopen, 协议第 14 条)。信号由 maker 的发送事务发布。
+      // (turn.reopen, 协议阶段 18)。信号由 maker 的发送事务发布。
       subscribeUiContinuation: onUiContinuation,
       subscribeUiSessionIntervention: onUiSessionIntervention,
       subscribeUiTurnDispatching: onUiTurnDispatching,

@@ -2343,7 +2343,7 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     expect(c.ofType('turn.reopen')).toHaveLength(0);
   });
 
-  it('别的 turn 先跑起来也不会被误认(clientId 对不上就什么都不发生)', async () => {
+  it('别的 turn 先跑起来也不会被误认(clientId 对不上就不认领)', async () => {
     // 这条锁的是本 PR 最核心的保证。观察器是会话级的、分不清事件属于哪条用户消息,
     // 所以归属**不能**靠"首个事件"或 isBusy 快照去猜 —— 绕过 coordinator 的路径
     // (silent-stop 自动续跑)照样能直接 session.send, 任何快照都拦不住它。
@@ -2358,11 +2358,14 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     expect(cr.watches).toHaveLength(0);
     expect(c.ofType('turn.reopen')).toHaveLength(0);
 
-    // 目标那条真的 dispatch 时才接上 —— 意图没被那次无关派发消耗掉。
+    // 而且它同时作废了意图与记账: 与 enqueue 侧同一条规则 —— 这个会话被无关内容推进过,
+    // 就不再把任何结果接回那条旧消息。哪怕目标那条随后真的 dispatch 也不接。
+    // 取舍是明确的: 这里判错的代价是"渠道消息停在失败上"(本能力之前的状态), 反过来
+    // 放行则是"把无关输出写进用户那条消息", 后者是真的错。
     sig.dispatchTurn(sessionId);
     await tick();
-    expect(cr.watches).toHaveLength(1);
-    expect(c.ofType('turn.reopen')).toHaveLength(1);
+    expect(cr.watches).toHaveLength(0);
+    expect(c.ofType('turn.reopen')).toHaveLength(0);
   });
 
   it('会话正忙也不再是拒绝理由(归属由 clientId 保证, 不靠忙闲快照)', async () => {
@@ -2460,6 +2463,51 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     await tick();
     expect(cr.watches).toHaveLength(0);
     expect(c.ofType('turn.reopen')).toHaveLength(0);
+  });
+
+  it('意图死在落库之前 -> 记账留着, 用户再点一次仍然接得上', async () => {
+    // 被意识钩挡掉 / 落库失败 / 排队被丢的那条消息, 既走不到 dispatching 也不会发
+    // undispatched(它压根没跨过持久化边界)。记账若在记意图时就被转移走, 这类静默失败
+    // 会把它吃掉, 之后谁也接不回来 —— 所以记账要留到 claim 帧真的发出才作废。
+    const { cr, sig, c, sessionId } = await failOneTask();
+    sig.fire(sessionId, 'client-blocked');
+    await tick();
+    expect(cr.watches).toHaveLength(0);
+    expect(c.ofType('turn.reopen')).toHaveLength(0);
+
+    // 用户再点一次(是条新消息, 于是新 clientId)。
+    sig.retry(sessionId, 'client-second');
+    await tick();
+    expect(cr.watches).toHaveLength(1);
+    expect(c.ofType('turn.reopen')).toHaveLength(1);
+  });
+
+  it('失败登记之前就进队的无关消息 -> 它 dispatch 时作废记账', async () => {
+    // 那条消息在 hook turn 还没收口时就 enqueue 了, 介入信号在"记账还不存在"时发过一次
+    // 就不再发第二次。只靠 enqueue 侧作废会漏掉它, 于是它跑完之后用户点重试, 会把这个
+    // 无关 turn 的输出写进渠道那条旧消息。dispatch 侧同样观测"会话被推进"即可关掉。
+    const { cr, sig, c, sessionId } = await failOneTask();
+    sig.dispatchTurn(sessionId, 'unrelated-client');
+    await tick();
+
+    sig.retry(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(0);
+    expect(c.ofType('turn.reopen')).toHaveLength(0);
+  });
+
+  it('已认领的续跑轮不因别的 dispatch 被撤(排在它后面的消息不该动渠道消息)', async () => {
+    const { cr, sig, c, sessionId } = await failOneTask();
+    sig.retry(sessionId);
+    await tick();
+    expect(c.ofType('turn.reopen')).toHaveLength(1);
+
+    sig.dispatchTurn(sessionId, 'unrelated-client');
+    await tick();
+    expect(cr.cancels).toHaveLength(0);
+    cr.latest().onProgress('续跑进度');
+    await tick();
+    expect(c.ofType('turn.progress')).toHaveLength(1);
   });
 
   it('已认领的续跑轮不因无关消息被撤(它已在往渠道写, 后来的消息只会排队)', async () => {

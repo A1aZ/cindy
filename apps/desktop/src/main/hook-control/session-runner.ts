@@ -998,6 +998,9 @@ function beginContinuationWatch(
       settled = true;
       clearTimers();
       observer.stop();
+      // 已停止观察 —— 成功那一路还要 await 收集出站附件, 所以先同步告知一声, 让
+      // dispatcher 把这一轮从"在观察"的账上摘掉(见 onSettling 的说明)。
+      req.onSettling?.();
       if (!claimed) {
         // 从没认领过 -> server 侧对这条消息一无所知, 静默退场。
         req.onAbandon();

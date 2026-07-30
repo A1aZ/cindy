@@ -2530,6 +2530,75 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     expect(c.ofType('turn.reopen')).toHaveLength(1);
   });
 
+  it('附件收集期间排在后面的桌面消息 dispatch -> 不算顶替, 成功结果照样如实收口', async () => {
+    // 成功那一路要先异步收集出站附件, onEnd 因此晚于"停止观察"。这段时间里若还把这一轮
+    // 算作"在观察", 排在后面的桌面消息一 dispatch 就会命中顶替判定 —— 而它其实已经跑完了。
+    // runner 在 settle 的同步段就发 onSettling, dispatcher 据此摘账, 于是「表里还有这一轮」
+    // 严格等价于「它仍在观察」, 顶替判定的前提才成立。
+    const { cr, sig, c, sessionId } = await failOneTask();
+    sig.retry(sessionId);
+    await tick();
+    expect(c.ofType('turn.reopen')).toHaveLength(1);
+    const reopened = c.last('turn.reopen')!.payload.requestId;
+
+    // 观察结束(附件还在收集中), 随后排在后面的那条桌面消息 dispatch。
+    cr.watches[0]!.onSettling?.();
+    sig.dispatchTurn(sessionId, 'queued-after-client');
+    await tick();
+    // 关键断言: 它没被当成"被顶掉"而撤销。少了 onSettling 这一步, 这里会记下一次撤销
+    // (log 里也会留一条 superseded), 即对一轮**已经跑完**的续跑做无谓的撤销记账。
+    expect(cr.cancels).toHaveLength(0);
+
+    // 迟到的成功收口如实发出去 —— 不是 cancelled, 也没被撤掉。
+    cr.watches[0]!.onEnd({
+      status: 'ok',
+      finalText: '续跑的结果',
+      errorMessage: null,
+      durationMs: 12,
+    });
+    await tick();
+    const ends = c.ofType('turn.end').filter((m) => m.payload.requestId === reopened);
+    expect(ends).toHaveLength(1);
+    expect(ends[0]!.payload.status).toBe('ok');
+    expect(ends[0]!.payload.finalText).toBe('续跑的结果');
+  });
+
+  it('turn 跑到一半断连 -> 失败收口仍记待续跑(重连后点重试接得上)', async () => {
+    // 失败的 turn.end 走 sendOrBuffer, 重连后补发, 渠道里确实会显示失败。但收口那一刻
+    // 连接已断、能力快照已被 onDisconnected 清掉, 若在那时才查能力就不会记待续跑 ——
+    // 用户点重试便接不回来。能力要在**接活时**取快照。
+    const cr = continuationRunner();
+    const sig = signalSource();
+    const c = collector();
+    const { d } = makeDispatcher({
+      runner: cr.runner,
+      subscribeUiContinuation: sig.subscribe,
+      subscribeUiSessionIntervention: sig.subscribeIntervention,
+      subscribeUiTurnDispatching: sig.subscribeDispatching,
+      subscribeUiTurnUndispatched: sig.subscribeUndispatched,
+    });
+    d.onConnected('conn-1', c.send, REOPEN_FEATURES);
+    d.handleDispatch('conn-1', dispatch(), c.send);
+    await tick();
+    const sessionId = c.last('task.ack')!.payload.sessionId!;
+
+    // turn 跑到一半 socket 断了, 然后它以失败收口(turn.end 进缓存)。
+    d.onDisconnected('conn-1');
+    cr.finish({ status: 'error', finalText: '', errorMessage: 'boom' });
+    await tick();
+
+    // 重连(dispatchId 稳定, 同一个 connectionId): 缓存的失败被补发。
+    d.onConnected('conn-1', c.send, REOPEN_FEATURES);
+    await tick();
+    expect(c.last('turn.end')!.payload.status).toBe('error');
+
+    // 现在点重试 —— 记账在, 能接上。
+    sig.retry(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(1);
+    expect(c.ofType('turn.reopen')).toHaveLength(1);
+  });
+
   it('迟到的收口只删自己那一轮, 不把后来注册的那一轮从表里抹掉', async () => {
     // 成功收口要先异步收集出站附件, 所以 onEnd 可能落在"本轮已被接管、用户又续了一次、
     // 新一轮已注册"之后。按 sessionId 无条件删就会把**新**那一轮抹掉 —— 它的观察器于是

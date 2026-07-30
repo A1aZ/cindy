@@ -130,6 +130,16 @@ export function useDeviceLinkProjects(
    */
   const appliedSeqRef = useRef<Map<string, number>>(new Map());
   /**
+   * 每台设备**最后一次已落库快照的原始路径集合**(未经 pending / 墓碑过滤)。
+   *
+   * 只服务一件事:判断「更新的权威快照有没有**否证**过某一行」。必须存原始集合而不是落库后的行 ——
+   * 落库时会扣掉仍在飞的乐观删除,于是「落库后的行里没有它」有两种截然不同的原因:
+   *   ① 对端确实没有这个项目(权威否证);
+   *   ② 对端有,只是被 pending 过滤掉了(它的删除还在飞)。
+   * 只有 ① 才能阻止按行恢复;拿落库后的行去判会把 ② 也一并挡掉,直接破坏「并发失败删除全部收敛」。
+   */
+  const lastSnapshotPathsRef = useRef<Map<string, ReadonlySet<string>>>(new Map());
+  /**
    * 落库一份对端快照:统一扣掉「仍在飞的乐观删除」与「尚未被更新快照证实的墓碑」,并顺手让
    * 已被证实的墓碑退休。两个取数点(effect / 回读)都必须经这里,否则过滤规则会再次分叉。
    *
@@ -149,6 +159,8 @@ export function useDeviceLinkProjects(
       // 序号检查必须在最前面:被丢弃的快照不作数,不能让它顺带把墓碑退休掉。
       if (issueSeq < (appliedSeqRef.current.get(ownerDeviceId) ?? 0)) return false;
       appliedSeqRef.current.set(ownerDeviceId, issueSeq);
+      // 原始路径集合(过滤前)—— 按行恢复要靠它判断这一行是否已被权威否证,见 lastSnapshotPathsRef。
+      lastSnapshotPathsRef.current.set(ownerDeviceId, new Set(list.map((r) => r.path)));
       const tomb = tombstonesRef.current.get(ownerDeviceId);
       if (tomb) {
         // 这份快照发起于墓碑之后 → 它已经反映了那次删除,墓碑可以退休。
@@ -243,11 +255,19 @@ export function useDeviceLinkProjects(
        *      并发失败删除就不再收敛(先回的那份快照隐藏了仍在飞的自己,后回的自己又被丢弃,
        *      于是自己那一行永远回不来),而「并发失败删除必须各自收敛」是既有不变量。
        *
-       * 刻意**不看**取数版本号:期间用户重开 picker / 切回本设备都会推进版本号,按它 gate 会把这次
-       * 恢复跳过,那一行就一直从选择器里消失(而它在对端还在)。自带存在性检查,期间真有成功回读把
-       * 它带回来了也不会插重。
+       * 刻意**不按取数版本号一刀切**:期间用户重开 picker / 切回本设备都会推进版本号,按它直接
+       * gate 会把这次恢复跳过,那一行就一直从选择器里消失(而它在对端还在)。自带存在性检查,
+       * 期间真有成功回读把它带回来了也不会插重。
+       *
+       * 但**必须尊重更新快照的否证**(Greptile review):上一轮为保住收敛性而在「回读被 seq gate
+       * 拒绝」时也走这里,那条路径当时只查设备归属与存在性 —— 于是当对端其实已经没有这个项目了
+       * (用户在对端删了 / 删除实际成功只是响应失败),更新的权威快照如实不含它,旧回读却仍能把它
+       * 插回选择器;用户选中就撞 path guard,或打开对端同名但无关的目录。
+       *
+       * 判据用**原始**快照集合而不是落库后的行,见 lastSnapshotPathsRef —— 落库会扣掉仍在飞的
+       * 乐观删除,拿它判会把「对端有、只是被 pending 过滤」也当成否证,直接废掉并发收敛。
        */
-      const restoreRemovedRow = () => {
+      const restoreRemovedRow = (readbackSeq?: number) => {
         const restored = removedRow;
         if (!restored) return;
         // 按当前设备 gate:若请求还在飞时用户已切到别的设备,把 A 的行插进 B 的 rows 会被
@@ -255,6 +275,14 @@ export function useDeviceLinkProjects(
         // 互相取消」不冲突:设备身份只排除「已切走」,不排除同设备内的并发。
         if (currentDeviceIdRef.current !== target.deviceId) return;
         if (loadedRef.current.deviceId !== target.deviceId) return;
+        // 已有**更新**的权威快照,且它的原始列表里没有这一行 → 对端确实没有,不恢复。
+        if (readbackSeq !== undefined) {
+          const applied = appliedSeqRef.current.get(target.deviceId) ?? 0;
+          const snapshotPaths = lastSnapshotPathsRef.current.get(target.deviceId);
+          if (applied > readbackSeq && snapshotPaths && !snapshotPaths.has(restored.path)) return;
+        }
+        // 删除其实已在对端成功过(墓碑)→ 同样不恢复,那一行不该再出现。
+        if (tombstonesRef.current.get(target.deviceId)?.has(restored.path)) return;
         const current = loadedRef.current.rows;
         if (current.some((row) => row.path === restored.path)) return;
         const at =
@@ -288,9 +316,10 @@ export function useDeviceLinkProjects(
               (path) => path !== option.path,
             ),
           );
-          // 快照比已落库的更旧 → 被丢弃。此时仍要让自己那一行回来,否则并发失败删除不再收敛。
+          // 快照比已落库的更旧 → 被丢弃。此时仍要让自己那一行回来,否则并发失败删除不再收敛;
+          // 但要带上 readbackSeq,好让恢复尊重「更新快照已否证这一行」的情形(见 restoreRemovedRow)。
           if (!applySnapshot(target.deviceId, readbackSeq, list, othersPending)) {
-            restoreRemovedRow();
+            restoreRemovedRow(readbackSeq);
           }
         } catch {
           // 回读也失败(对端离线 / 隧道断)。此时**必须把行放回去**:删除既没在对端生效,

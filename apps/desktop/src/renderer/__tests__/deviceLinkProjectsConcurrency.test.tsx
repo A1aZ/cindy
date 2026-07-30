@@ -600,6 +600,59 @@ describe('useDeviceLinkProjects 取数 / 删除并发', () => {
     expect(seen.loading).toBe(false);
   });
 
+  /**
+   * Greptile review(第 33 轮之后):按行恢复**绕过了新鲜度检查**。
+   *
+   * 上一轮为了保住「并发失败删除全部收敛」,在回读被 seq gate 拒绝时改走 restoreRemovedRow()。
+   * 但那条路径只查设备归属与存在性,不查「更新的权威快照是否已经否证过这一行」—— 于是当对端那边
+   * 其实已经没有这个项目了(用户在对端删了 / 删除实际成功只是响应失败),更新快照如实不含它,
+   * 旧回读却仍能把它插回选择器。用户选中就撞 path guard,或打开对端同名但无关的目录。
+   */
+  it('更新快照已否证该项目时,过期回读不得把它恢复回列表', async () => {
+    const first = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => first.promise);
+    const { seen, setEnabled } = mountHook();
+    await act(async () => {
+      first.resolve([row('/a/one'), row('/a/two')]);
+    });
+
+    // 删除 /a/one 失败 → 回读在飞(挂住)。
+    const removeCall = deferred<void>();
+    removeMock.mockImplementationOnce(() => removeCall.promise);
+    const readback = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => readback.promise);
+    let removal!: Promise<void>;
+    act(() => {
+      removal = seen.remove('/a/one', 'dev-a');
+    });
+    await act(async () => {
+      removeCall.reject(new Error('CHANNEL_NOT_ALLOWED'));
+    });
+
+    // 关掉再打开 picker → 新 effect 取数,而**对端此间真的没有 /a/one 了**(用户在那边删掉了)。
+    const reopen = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => reopen.promise);
+    await act(async () => {
+      setEnabled(false);
+    });
+    await act(async () => {
+      setEnabled(true);
+    });
+    await act(async () => {
+      reopen.resolve([row('/a/two')]);
+    });
+    expect(seen.projects.map((p) => p.path)).toEqual(['/a/two']);
+
+    // 旧回读(它的快照还带着 /a/one)现在才回来 → 被 seq gate 拒绝。
+    await act(async () => {
+      readback.resolve([row('/a/one'), row('/a/two')]);
+      await removal;
+    });
+
+    // 不得恢复:更新的权威快照已经证明对端没有 /a/one 了。
+    expect(seen.projects.map((p) => p.path)).toEqual(['/a/two']);
+  });
+
   it('首次取数就失败时仍提交空列表(没有可保留的快照,空态里有浏览文件夹兜底)', async () => {
     const first = deferred<ExistingRemoteProject[]>();
     loadMock.mockImplementationOnce(() => first.promise);

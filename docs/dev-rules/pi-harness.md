@@ -87,6 +87,8 @@ Cindy 显式设置:models.json、`--append-system-prompt`、`--session-dir`、�
 
 ## 7. 上线后路线图(已与 Chris 对齐)
 
+> 续做指南(每项怎么接着做 + file:line 锚点 + 坑)见 `docs/dev-rules/pi-remaining-work.md`。
+
 - ✅ **HTML 导出**(已交付):`export_html` RPC 全链路,会话头部菜单「导出为 HTML」,
   仅当前打开的本地 pi 会话可见。见 `Capabilities.sessionHtmlExport` /
   `Session.exportSessionHtml` / `MAKER_INVOKE.EXPORT_SESSION_HTML`。

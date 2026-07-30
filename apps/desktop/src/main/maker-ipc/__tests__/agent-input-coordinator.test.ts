@@ -2085,6 +2085,22 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(h.onUserEnqueue).toHaveBeenCalledWith(sid);
   });
 
+  it('a deduplicated resend does not report a user enqueue', async () => {
+    // 弱网 / 移动端的重传带同一个 clientId, 会被幂等去重丢弃 —— 它压根没推进会话。
+    // 若在去重**之前**作废记账, 一条延迟到达的旧重传就会删掉之后才装上的、更新的
+    // 那笔待续跑记账, 于是下一次显式重试跑成了却不回流。
+    const h = createHarness();
+    const sid = 'enqueue-dup-no-signal';
+    h.coordinator.enqueue(sid, makeItem('q-dup', 'first'));
+    await flush();
+    expect(h.onUserEnqueue).toHaveBeenCalledTimes(1);
+
+    h.onUserEnqueue.mockClear();
+    h.coordinator.enqueue(sid, makeItem('q-dup', 'first'));
+    await flush();
+    expect(h.onUserEnqueue).not.toHaveBeenCalled();
+  });
+
   it('does not signal a UI retry when there is nothing to recover', async () => {
     const h = createHarness();
     await h.coordinator.retryLastError('retry-signal-noop');

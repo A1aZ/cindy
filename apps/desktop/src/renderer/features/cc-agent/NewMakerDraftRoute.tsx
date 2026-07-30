@@ -101,7 +101,7 @@ import { showWorktreeError } from '@/lib/worktreeToast';
 import type { CreateWorktreeResp } from '@/lib/worktree.types';
 import * as sessionService from '@/lib/sessionService';
 import { sessionsStore } from '@/lib/sessionsStore';
-import { emitAutoTitlePreview } from '@/lib/sessionsBus';
+import { emitAutoTitlePreview, emitAutoTitlePreviewCleared } from '@/lib/sessionsBus';
 import { NewGoalDialog } from '@/components/new-chat/NewGoalDialog';
 import type { GoalLimitValues } from '@/components/new-chat/GoalAdvancedLimits';
 import { makerChatStore } from '@/lib/makerChatStore';
@@ -2247,6 +2247,11 @@ export function NewMakerDraftRoute() {
                   text: preNavDraftDoc ?? plainTextToTiptapDoc(message),
                   attachments: rehomedFiles ?? [],
                 });
+                // 第一条消息退回草稿 = 它没被交出去,也就永远不会有权威标题回流。
+                // 不撤回的话标题预览会一直盖着 DB 里的哨兵(每次全量刷新后重新盖上),
+                // 会话永久显示一句**没发出去**的话(PR #1031 review P1)。
+                // 放在这里而不是各 return 前:所有「交接失败 → 还原草稿」的分支都过这一处。
+                emitAutoTitlePreviewCleared(newSession.id);
               };
               try {
                 rehomedFiles = await rehomeDraftAttachments(files, newSession.id);
@@ -2738,13 +2743,13 @@ export function NewMakerDraftRoute() {
         if (!newSession) {
           throw new Error(t('ccAgent.draft.createSessionFailed'));
         }
+        // 目标文案是纯文本(goal 对话框没有附件 / mention 入口),直接即时预览 ——
+        // 与下面 autoNameSession(objective) 最终写入的占位是同一个串。
+        const optimisticGoalTitle = normalizeAutoTitle(objective);
         {
           const iso = new Date().toISOString();
           sessionsStore.patchLocal(newSession.id, { userSendAt: iso, updatedAt: iso });
-          // 目标文案是纯文本(goal 对话框没有附件 / mention 入口),直接即时预览 ——
-          // 与下面 autoNameSession(objective) 最终写入的占位是同一个串。
-          const optimisticTitle = normalizeAutoTitle(objective);
-          if (optimisticTitle) emitAutoTitlePreview(newSession.id, optimisticTitle);
+          if (optimisticGoalTitle) emitAutoTitlePreview(newSession.id, optimisticGoalTitle);
         }
         // 草稿开了协同 → 新建目标路径也要拉起 Worker(与 Send 路径同口径);否则用户开了协同
         // 却走「新建目标」会得到一个没有 Worker 的 lead session(codex P2)。失败 toast + 降级
@@ -2766,7 +2771,15 @@ export function NewMakerDraftRoute() {
           }
         }
         // setGoal 内部 ensureSession(拉起 agent)+ 发首轮(带目标指令)。
-        await window.electronAPI.maker.setGoal({ sessionId: newSession.id, objective, limits });
+        try {
+          await window.electronAPI.maker.setGoal({ sessionId: newSession.id, objective, limits });
+        } catch (err) {
+          // 首轮没发出去 → 下面的 autoNameSession 也不会跑,权威标题永不回流。
+          // 不撤回的话标题预览会永久盖着 DB 里的哨兵(理由同 worktree 分支的
+          // restoreFirstMessageDraft)。异常照旧抛给调用方展示。
+          if (optimisticGoalTitle) emitAutoTitlePreviewCleared(newSession.id);
+          throw err;
+        }
         // 自动起名:/goal 新建的会话不经普通发送路径,scheduleAutoName 漏触发 → 标题会停在默认。
         // 这里用目标文案补一次,与普通会话同款(立即占位 + 智能标题后台覆盖 + 不覆盖手动改名)。
         makerChatStore.autoNameSession(newSession.id, objective, capabilityAgentKind);

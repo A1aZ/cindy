@@ -6702,6 +6702,16 @@ function updateQueueItem(sessionId: string, clientId: string, newText: string): 
  */
 const autoNameSettled = new Set<string>();
 
+/**
+ * 每个会话最近一次起名尝试的轮次号(sessionId → attempt)。
+ *
+ * 用户在首次 `maker:auto-title` 返回前连着发两条文字时,两次都会通过 `autoNameSettled`
+ * 检查、各起一次尝试。若**较早**那次失败,它的撤回不能动预览 —— 更晚的尝试仍在飞,
+ * 预览还有主人,撤回会让标题白闪一次「未命名对话」(PR #1031 review P1)。
+ * 与 SessionMenuSheet 的 `renameSeqRef`、搜索框的 `requestSeqRef` 同款守卫。
+ */
+const autoNameAttempts = new Map<string, number>();
+
 /** 纯附件消息合成占位标题时的类别兜底词(拿不到任何文件名时才用)。 */
 function autoTitleFallbackLabels(): AutoTitleFallbackLabels {
   return {
@@ -6770,9 +6780,14 @@ function scheduleAutoName(
   //
   // `applied: false, done: true`(用户已手动改过名)同样撤回:DB 里是用户的标题,
   // 叠加层不该继续盖着;store 那边的守卫会发现缓存里已不是这次预览而自动让位。
+  const attempt = (autoNameAttempts.get(sessionId) ?? 0) + 1;
+  autoNameAttempts.set(sessionId, attempt);
   const settleAutoName = (result?: { applied?: boolean; done?: boolean }): void => {
     if (result?.done) autoNameSettled.add(sessionId);
-    if (!result?.applied) clearAutoTitlePreviewSafely(sessionId);
+    if (result?.applied) return;
+    // 更晚的尝试已经起飞 → 预览归它,本次失败不撤回(否则标题白闪一次兜底文案)。
+    if (autoNameAttempts.get(sessionId) !== attempt) return;
+    clearAutoTitlePreviewSafely(sessionId);
   };
   // 整条链路对发送主流程必须是无副作用的:起名失败(桥接缺失 / IPC 抛错)只记日志,
   // 绝不能把异常抛回 sendMessageCore 打断消息入队。
@@ -8927,6 +8942,7 @@ export const makerChatStore = {
   /** Exposed for tests only: 清空「已确认无需起名」缓存,隔离用例间状态。 */
   __resetAutoNameStateForTest: (): void => {
     autoNameSettled.clear();
+    autoNameAttempts.clear();
   },
   /** Exposed for tests only: 把 stream event 打进真实 store(驱动 getRunningSnapshot 等)。 */
   __applyStreamEventForTest: (sessionId: string, event: CCAgentStreamEvent): void =>

@@ -262,6 +262,41 @@ describe('makerChatStore auto-name — 本机会话', () => {
     expect(emitAutoTitlePreviewCleared).toHaveBeenCalledWith(SESSION_ID);
   });
 
+  it('较早那次尝试失败时不撤回预览 —— 更晚的尝试仍在飞', async () => {
+    // 用户在首次 auto-title 返回前连发两条:两次都通过 autoNameSettled 检查各起一次尝试。
+    // 早的那次失败若按 sessionId 直接撤回,会把仍在飞的那次的预览一起revoke,标题白闪
+    // 一次「未命名对话」。
+    let failFirst: (v: { applied: boolean; done: boolean }) => void = () => {};
+    autoTitle.mockImplementationOnce(() => new Promise((resolve) => {
+      failFirst = resolve;
+    }));
+    autoTitle.mockImplementationOnce(() => new Promise(() => {
+      /* 第二次一直在飞 */
+    }));
+
+    makerChatStore.autoNameSession(SESSION_ID, '第一句', 'claude-code');
+    makerChatStore.autoNameSession(SESSION_ID, '第二句', 'claude-code');
+    await flushPromises();
+
+    // 早的那次失败(正常 resolve 但什么都没写)。
+    failFirst({ applied: false, done: false });
+    await flushPromises();
+
+    expect(emitAutoTitlePreviewCleared).not.toHaveBeenCalled();
+  });
+
+  it('最后一次尝试失败时照常撤回', async () => {
+    // 与上一条互为对照:轮次号相等 → 预览没有别的主人,该撤回。
+    autoTitle.mockResolvedValue({ applied: false, done: false });
+
+    makerChatStore.autoNameSession(SESSION_ID, '第一句', 'claude-code');
+    await flushPromises();
+    makerChatStore.autoNameSession(SESSION_ID, '第二句', 'claude-code');
+    await flushPromises();
+
+    expect(emitAutoTitlePreviewCleared).toHaveBeenCalledWith(SESSION_ID);
+  });
+
   it('后续消息不是用户文字(纯附件 / 纯 @mention)时不补起名', async () => {
     // 合成描述不该把已有占位换成另一个文件名,更不该被送进标题模型。
     makerChatStore.__autoNameUnnamedSessionForTest(SESSION_ID, null, 'claude-code');

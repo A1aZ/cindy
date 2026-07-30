@@ -26,6 +26,7 @@ const railNav = read('features/cc-agent/sidebar/RailNav.tsx');
 const linkChip = read('components/chat/SessionLinkChip.tsx');
 const waitBanner = read('components/chat/CredentialSwitchWaitBanner.tsx');
 const sidebarUpper = read('features/cc-agent/CCAgentSidebarUpper.tsx');
+const draftRoute = read('features/cc-agent/NewMakerDraftRoute.tsx');
 
 describe('desktop 会话标题投影出口', () => {
   it('rail 置顶瓷砖、aria-label 与悬浮预览卡都用显示标题', () => {
@@ -50,6 +51,23 @@ describe('desktop 会话标题投影出口', () => {
     // 投影固化进 state 就意味着切语言后要重新拉一遍标题才会变(本 PR 第 8 条不变量)。
     expect(waitBanner).toContain('setBlockerTitles(titles.filter(');
     expect(waitBanner).toContain('.then((session) => session.title?.trim() || null)');
+  });
+
+  // 乐观预览必须有失败路径:交接失败(消息退回草稿 / setGoal 抛错)时权威标题永不回流,
+  // 不撤回就会永久盖着 DB 里的哨兵,会话显示一句**没发出去**的话。
+  it('新建会话的两条交接失败路径都撤回标题预览', () => {
+    // worktree 分支:所有「交接失败 → 还原草稿」的 return 都过 restoreFirstMessageDraft,
+    // 撤回放在那一处而不是各 return 前。
+    expect(draftRoute).toContain('emitAutoTitlePreviewCleared(newSession.id);');
+    const restoreFn = draftRoute.indexOf('const restoreFirstMessageDraft = () => {');
+    const clearInRestore = draftRoute.indexOf('emitAutoTitlePreviewCleared(newSession.id);', restoreFn);
+    const restoreFnEnd = draftRoute.indexOf('};', restoreFn);
+    expect(restoreFn).toBeGreaterThan(-1);
+    expect(clearInRestore).toBeGreaterThan(restoreFn);
+    expect(clearInRestore).toBeLessThan(restoreFnEnd);
+
+    // goal 分支:setGoal 抛错时撤回后照旧把异常抛给调用方。
+    expect(draftRoute).toContain('if (optimisticGoalTitle) emitAutoTitlePreviewCleared(newSession.id);');
   });
 
   it('系统通知 / 飞书 / 手机推送的标题过投影,且语言走 ref 不被钉在首次渲染', () => {

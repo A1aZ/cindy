@@ -23,6 +23,7 @@ import { createPortal } from 'react-dom';
 import { Archive, ChevronRight, CirclePlus, Folder, Plug, SquarePen, Timer, Trash2, X } from 'lucide-react';
 import { useNavigate, useMatch } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { projectDraftSessionTitle } from '@cindy/maker-shared/session-title';
 
 import { cn } from '@/lib/utils';
 import { toast } from '@/lib/toast';
@@ -780,6 +781,10 @@ function ExpandedView({
   // 也要标记当前 session 需要关注；真正的 toast / 飞书仍然服从各自开关。
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
+  // 通知文案里的「尚未起名」兜底。走 ref 与 sessionsRef 同款:fireSessionNotification
+  // 是 `[]` 依赖的稳定回调,直接闭包 t 会钉住首次渲染的语言。
+  const unnamedLabelRef = useRef('');
+  unnamedLabelRef.current = t('ccAgent.common.unnamedSession');
   const fireSessionNotification = useCallback((sessionId: string, kind: 'done' | 'error' | 'needs-reply') => {
     // 灵动岛启用时,完成提示由灵动岛承载,不再走系统 toast,避免同一事件双重打扰;
     // 灵动岛未启用(或平台不支持)时,继续用系统通知。飞书是独立外发通道,不受影响。
@@ -794,7 +799,10 @@ function ExpandedView({
     // 查看，而非跳到 worker 实现细节；与 effectiveRunningSessionIds 的角色聚合口径一致。
     if (session && isOrcaWorkerSession(session)) return;
     void window.electronAPI.notificationMarkSessionAttention(sessionId);
-    const title = session?.title ?? '';
+    // 哨兵过投影:toast / 飞书 / 手机推送里都不能出现内部哨兵 "New Maker"。
+    // (手机推送用的是**桌面侧**语言 —— 标题在 wire payload 里是字面量,让手机按自己
+    //  locale 投影要改协议,超出本 PR 范围;但无论如何都比露出哨兵好。)
+    const title = projectDraftSessionTitle(session?.title, unnamedLabelRef.current);
     // mobile 通道恒开:桌面侧不设第二个开关,是否收到由手机端注册/注销推送 token
     // 决定;发送侧防打扰(远程正在看该会话 / 去重 / relay 能力)在 main 收口。
     // 因此桌面/飞书都关时也要 invoke(不再提前 return)。

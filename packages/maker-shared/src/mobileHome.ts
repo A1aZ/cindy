@@ -1,5 +1,6 @@
 import {
   groupAutomationListItems,
+  remoteSessionDisplayTitle,
   sessionRowMessagePreview,
   toRemoteSessionListItem,
   type RemoteSessionLiveActivity,
@@ -158,6 +159,7 @@ export function buildMobileHomePresentation({
       liveActivityIndex,
       pendingInteractionIndex,
       scheduleIndex,
+      unnamedLabel,
     ))
     .sort(compareSessionsByStatusThenActivityDesc);
   const items = filteredSessions.map((session) => toRemoteSessionListItem(
@@ -510,11 +512,15 @@ function matchesSearchQuery(
   liveActivityIndex: ReadonlyMap<string, RemoteSessionLiveActivity> | undefined,
   pendingInteractionIndex: ReadonlyMap<string, number> | undefined,
   scheduleIndex: ReadonlyMap<string, RemoteSessionScheduleInfo> | undefined,
+  unnamedLabel: string | undefined,
 ): boolean {
   if (!query) return true;
   const scheduleInfo = scheduleIndex?.get(session.id) ?? fallbackScheduleInfo(session);
   const haystack = [
-    session.title,
+    // 与首页行展示同源到函数级(同 sessionList 的 matchesSearchQuery):行上显示的就是
+    // remoteSessionDisplayTitle 的结果,haystack 直接调同一个函数。放原始哨兵会让
+    // 「搜得到的」与「看得到的」错位 —— 两个方向都错(见 sessionList 那条注释)。
+    remoteSessionDisplayTitle(session, unnamedLabel),
     session.workingDir,
     session.model,
     session.agentKind,

@@ -151,6 +151,44 @@ describe('sessionList', () => {
     expect(section.data[0].title).toBe('Untitled session');
   });
 
+  // 搜索 haystack 与行上显示的串必须同源(PR #1031 review P1)。两条断言方向相反,
+  // 缺哪一条都会留下一半的错位:只补 label 会让内部哨兵继续可搜,只删哨兵会让
+  // 界面上看得见的文案搜不到。
+  it('未起名会话能按行上显示的兜底文案搜到', () => {
+    const sections = buildRemoteSessionSections(
+      [
+        session('s-sentinel', { title: 'New Maker', workingDir: '/repo' }),
+        session('s-named', { title: '修 Orca 心跳', workingDir: '/other' }),
+      ],
+      new Date('2026-01-01T00:10:00.000Z').getTime(),
+      { searchQuery: 'Untitled', unnamedLabel: 'Untitled session' },
+    );
+    expect(sections.flatMap((s) => s.data).map((item) => item.session.id)).toEqual(['s-sentinel']);
+  });
+
+  it('内部哨兵不进 haystack:搜 "New Maker" 只命中标题里真有这个词的会话', () => {
+    const sections = buildRemoteSessionSections(
+      [
+        session('s-sentinel', { title: 'New Maker', workingDir: '/repo' }),
+        session('s-named', { title: 'Fix New Maker draft route', workingDir: '/other' }),
+      ],
+      new Date('2026-01-01T00:10:00.000Z').getTime(),
+      { searchQuery: 'new maker', unnamedLabel: 'Untitled session' },
+    );
+    expect(sections.flatMap((s) => s.data).map((item) => item.session.id)).toEqual(['s-named']);
+  });
+
+  it('automation 会话按剥掉前缀后的可见标题可搜', () => {
+    // 投影替掉的是原始 title 那一项;`[Schedule] ` 前缀本来就不显示,剥掉后的串
+    // 由 haystack 里的 automationDisplayTitle 继续覆盖。
+    const sections = buildRemoteSessionSections(
+      [session('s-auto', { title: '[Schedule] 每日巡检', workingDir: '/repo' })],
+      new Date('2026-01-01T00:10:00.000Z').getTime(),
+      { searchQuery: '每日巡检', unnamedLabel: 'Untitled session' },
+    );
+    expect(sections.flatMap((s) => s.data).map((item) => item.session.id)).toEqual(['s-auto']);
+  });
+
   it('builds compact display metadata for a session row', () => {
     const item = toRemoteSessionListItem(session('s1', {
       title: '',

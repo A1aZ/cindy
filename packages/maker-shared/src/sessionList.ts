@@ -181,6 +181,7 @@ export function buildRemoteSessionSections(
       liveActivityIndex: options.liveActivityIndex,
       pendingInteractionIndex: options.pendingInteractionIndex,
       scheduleIndex: options.scheduleIndex,
+      unnamedLabel: options.unnamedLabel,
     }))
     .sort(compareSessions)
     .map((session) => toRemoteSessionListItem(
@@ -689,12 +690,18 @@ function matchesSearchQuery(
     liveActivityIndex?: ReadonlyMap<string, RemoteSessionLiveActivity>;
     pendingInteractionIndex?: ReadonlyMap<string, number>;
     scheduleIndex?: ReadonlyMap<string, RemoteSessionScheduleInfo>;
+    unnamedLabel?: string;
   } = {},
 ): boolean {
   if (!query) return true;
   const scheduleInfo = options.scheduleIndex?.get(session.id) ?? fallbackScheduleInfo(session);
   const haystack = [
-    session.title,
+    // 与列表展示**同源到函数级**:行上显示的就是 remoteSessionDisplayTitle 的结果
+    // (见 toRemoteSessionListItem),haystack 直接调同一个函数。放原始 title 会两头错位
+    // —— 搜界面上看得见的兜底文案一条都搜不到,搜内部哨兵 "New Maker" 反而命中一堆
+    // 不显示这个词的行(PR #1031 review P1)。副作用:`[Schedule] ` 这个**不显示**的
+    // 内部前缀不再可搜,自动化任务名另有 scheduleInfo.scheduleName 那条覆盖。
+    remoteSessionDisplayTitle(session, options.unnamedLabel),
     session.workingDir,
     session.model,
     session.agentKind,
@@ -703,7 +710,8 @@ function matchesSearchQuery(
     session.worktreePath,
     sessionWorktreeLabel(session),
     scheduleInfo?.scheduleName,
-    automationDisplayTitle(session),
+    // automationDisplayTitle 不单列:非自动化会话它就等于原始 title(哨兵会从这条漏回
+    // haystack),自动化会话的剥前缀标题已由上面的 remoteSessionDisplayTitle 覆盖。
     sessionCollaborationLabel(session),
     (options.pendingInteractionIndex?.get(session.id) ?? 0) > 0 ? '等待处理 waiting attention pending' : null,
     sessionRowMessagePreview(session),

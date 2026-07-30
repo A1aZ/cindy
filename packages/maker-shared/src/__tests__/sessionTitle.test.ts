@@ -4,6 +4,7 @@ import {
   DEFAULT_DRAFT_SESSION_TITLE,
   isDefaultDraftSessionTitle,
   normalizeAutoTitle,
+  projectDraftSessionTitle,
 } from '../sessionTitle.js';
 
 describe('normalizeAutoTitle', () => {
@@ -49,5 +50,36 @@ describe('isDefaultDraftSessionTitle', () => {
     // 它是 SQLite 列默认值,又要跨设备 / 跨语言逐字比对,还是条件写的期望值。
     // 本地化会让哨兵匹配失效、自动起名永久跳过。
     expect(DEFAULT_DRAFT_SESSION_TITLE).toBe('New Maker');
+  });
+});
+
+describe('projectDraftSessionTitle', () => {
+  it('哨兵 + 已解析文案 → 换成那个文案', () => {
+    expect(projectDraftSessionTitle(DEFAULT_DRAFT_SESSION_TITLE, '未命名对话')).toBe('未命名对话');
+    expect(projectDraftSessionTitle(DEFAULT_DRAFT_SESSION_TITLE, 'Untitled session')).toBe('Untitled session');
+  });
+
+  it('非哨兵标题原样返回,不被 label 顶掉', () => {
+    expect(projectDraftSessionTitle('修 Orca 心跳', '未命名对话')).toBe('修 Orca 心跳');
+    // 用户手动改成近似串仍是合法自定义标题(判据不做归一,见上)。
+    expect(projectDraftSessionTitle('new maker', '未命名对话')).toBe('new maker');
+  });
+
+  it('没给 label 时退回原串,由调用方自己接兜底链', () => {
+    // 共享层刻意不兜任何具体文案:写死中文会让 en / ja / ko 端悄悄显示中文。
+    expect(projectDraftSessionTitle(DEFAULT_DRAFT_SESSION_TITLE, undefined)).toBe(DEFAULT_DRAFT_SESSION_TITLE);
+    expect(projectDraftSessionTitle(DEFAULT_DRAFT_SESSION_TITLE, '')).toBe(DEFAULT_DRAFT_SESSION_TITLE);
+  });
+
+  it('空标题归一成空串,方便调用方直接接 `||` 兜底', () => {
+    expect(projectDraftSessionTitle(null, '未命名对话')).toBe('');
+    expect(projectDraftSessionTitle(undefined, '未命名对话')).toBe('');
+    expect(projectDraftSessionTitle('', '未命名对话')).toBe('');
+  });
+
+  it('幂等:对投影结果再投影一次不变', () => {
+    // 渲染与搜索 haystack 各自调一次,两次都必须收敛到同一个串。
+    const once = projectDraftSessionTitle(DEFAULT_DRAFT_SESSION_TITLE, '未命名对话');
+    expect(projectDraftSessionTitle(once, '未命名对话')).toBe(once);
   });
 });

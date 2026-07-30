@@ -85,11 +85,14 @@ Cindy 显式设置:models.json、`--append-system-prompt`、`--session-dir`、�
 - [ ] **resume 边界**:pi 二进制升级后旧 session JSONL 兼容、invalid resume 回退、fork 后再 resume。
 - [ ] **prompt cache**:模型矩阵测完后评估 `PI_CACHE_RETENTION=long`(网关支持则默认开 + 不支持退档)。
 
-## 7. 上线后路线图(本里程碑不做,已与 Chris 对齐)
+## 7. 上线后路线图(已与 Chris 对齐)
 
+- ✅ **HTML 导出**(已交付):`export_html` RPC 全链路,会话头部菜单「导出为 HTML」,
+  仅当前打开的本地 pi 会话可见。见 `Capabilities.sessionHtmlExport` /
+  `Session.exportSessionHtml` / `MAKER_INVOKE.EXPORT_SESSION_HTML`。
+- **压缩即记忆**:bridge 接 `session_before_compact` → cindy_memory 管道。需 LLM 摘要
+  决策(裸 dump 会污染 memory),不能纯机械转存 —— 设计待定。
+- **subagent 接 pi 轻量引擎**。
 - **BYOM / 本地模型**:走 pi 原生 provider(见设计原则),设置页开自定义/本地模型入口,仅对 pi 生效。
 - **会话树**:按现有 fork/分支功能的树状升级迭代(pi 原生 append-only entry 树 + 分支摘要),
   不引入新概念。
-- **压缩即记忆**:bridge 接 `session_before_compact` → cindy_memory 管道。
-- **HTML 导出**:复用 pi 自带 export-html。
-- **subagent 接 pi 轻量引擎**。

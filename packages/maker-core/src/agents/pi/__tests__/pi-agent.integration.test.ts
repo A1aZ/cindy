@@ -455,6 +455,39 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
     },
   );
 
+  it(
+    'compactSession returns a benign noop for a too-small session (not an error)',
+    { timeout: 60_000 },
+    async () => {
+      const agent = new PiAgent(buildDeps());
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-compact-noop-cwd-'));
+      let handle: AgentSessionHandle | null = null;
+      try {
+        handle = await agent.startSession({
+          sessionId: 'manual-compact-noop-session',
+          workingDir,
+          model: 'pi-test-model',
+        });
+        // 跑一小轮:上下文远低于压缩门槛,pi 会拒绝「nothing to compact (too small)」。
+        const done = (async () => {
+          for await (const ev of handle!.events()) {
+            if (ev.type === 'done') break;
+          }
+        })();
+        await handle.send({ type: 'user', content: 'tiny' });
+        await done;
+
+        expect(agent.capabilities.manualCompact?.supported).toBe(true);
+        // 关键契约:小会话压缩是良性 noop,不抛错(否则 UI 会误报「压缩失败」)。
+        const result = await handle.compactSession?.();
+        expect(result?.noop).toBe(true);
+      } finally {
+        await handle?.close();
+        rmSync(workingDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   // ── auto 档权限端到端:真 pi + 真 cindy-bridge + 假模型发真工具调用 ────────────
 
   /** 起会话 + 计数 resolver + 跑一轮到 done,返回观测结果。 */

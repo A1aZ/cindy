@@ -40,6 +40,7 @@ import {
 import { classifyPiToolForAutoReview } from './auto-review-policy.js';
 import type {
   Capabilities,
+  ManualCompactResult,
   ModelDescriptor,
 } from '../../types/capabilities.js';
 import { NotSupportedError } from '../../types/capabilities.js';
@@ -66,6 +67,8 @@ import {
 const PI_PROVIDER_ID = 'cindy';
 const PI_API_KEY_ENV = 'CINDY_PI_API_KEY';
 const PI_SESSION_ID_ENV = 'CINDY_PI_SESSION_ID';
+/** 手动压缩 = 一次完整 LLM 摘要调用(大上下文 + 网关排队),远超默认 30s RPC 超时。 */
+const PI_COMPACT_TIMEOUT_MS = 600_000;
 
 /**
  * NO_PROXY 兜底:pi 的模型请求打的是 Cindy 本地 compat proxy(loopback),bridge 的
@@ -215,6 +218,9 @@ export class PiAgent extends BaseAgent {
       extraDirs: { supported: false, reason: 'sdk-missing' },
       // pi 原生 export_html RPC:自带 export-html 渲染器,离线、无网关。
       sessionHtmlExport: { supported: true },
+      // pi 原生 compact RPC:手动压缩(可带聚焦指令,调 LLM 生成摘要)。
+      // 斜杠转义后用户无法手输 /compact,此能力是 pi 会话手动压缩的唯一入口。
+      manualCompact: { supported: true },
     };
   }
 
@@ -669,6 +675,28 @@ export class PiAgent extends BaseAgent {
           throw new Error('pi export_html: output path unavailable');
         }
         return path;
+      },
+
+      async compactSession(instructions?: string): Promise<ManualCompactResult> {
+        // pi 原生 compact:调 LLM 生成摘要(耗时数秒起),压缩边界经
+        // compaction_start/end 事件流上报,translator 映射成 compact_boundary。
+        // 压缩请求本身可能远超 RPC 默认 30s 超时(大上下文 + 网关排队),放宽到 10 分钟。
+        const command: Record<string, unknown> = { type: 'compact' };
+        if (instructions && instructions.trim().length > 0) command.customInstructions = instructions.trim();
+        const resp = await proc.request(command, { timeoutMs: PI_COMPACT_TIMEOUT_MS });
+        if (!resp.success) {
+          // 良性拒绝:上下文太小 / 无内容可压缩 —— 不是错误,返回 noop 让 UI 给信息性提示。
+          const err = (resp.error ?? '').toLowerCase();
+          if (err.includes('nothing to compact') || err.includes('too small')) {
+            return { noop: true };
+          }
+          throw new Error(`pi compact failed: ${resp.error ?? 'unknown'}`);
+        }
+        const data = (resp.data ?? {}) as { tokensBefore?: number; estimatedTokensAfter?: number };
+        const result: ManualCompactResult = {};
+        if (typeof data.tokensBefore === 'number') result.tokensBefore = data.tokensBefore;
+        if (typeof data.estimatedTokensAfter === 'number') result.estimatedTokensAfter = data.estimatedTokensAfter;
+        return result;
       },
     };
 

@@ -6097,6 +6097,12 @@
         "exportHtml": "Export to HTML…",
         "exportHtmlSuccess": "Session exported to HTML",
         "exportHtmlFailed": "HTML export failed",
+        "compact": "Compact context",
+        "compacting": "Compacting…",
+        "compactSuccess": "Context compacted",
+        "compactSuccessWithTokens": "Context compacted: {{before}}k → {{after}}k tokens",
+        "compactFailed": "Compaction failed",
+        "compactNothing": "Nothing to compact yet",
         "copySessionLink": "Copy session link"
       },
       "projectAction": {

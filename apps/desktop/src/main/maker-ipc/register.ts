@@ -8607,6 +8607,29 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return written;
   });
 
+  ipcMain.handle(MAKER_INVOKE.COMPACT_SESSION, async (_e, sessionId: unknown, instructions: unknown) => {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+      throwIpcError('INVALID_PARAMS', 'sessionId required');
+    }
+    if (instructions !== undefined && typeof instructions !== 'string') {
+      throwIpcError('INVALID_PARAMS', 'instructions must be a string when provided');
+    }
+    const sess = maker.getSession(sessionId);
+    if (!sess) {
+      log.debug('compact-session: session not found, no-op', { sessionId });
+      return null;
+    }
+    if (!sess.capabilities.manualCompact?.supported) {
+      // 调用方应先按 capabilities 隐藏入口,这里兜底 no-op。
+      log.debug('compact-session: agent does not support manual compact, no-op', {
+        sessionId,
+        agentKind: sess.agentKind,
+      });
+      return null;
+    }
+    return sess.compactSession(instructions);
+  });
+
   ipcMain.handle(MAKER_INVOKE.SET_FAST_MODE, async (_e, sessionId: unknown, enabled: unknown) => {
     if (typeof sessionId !== 'string' || typeof enabled !== 'boolean') {
       throwIpcError('INVALID_PARAMS', 'sessionId + enabled required');

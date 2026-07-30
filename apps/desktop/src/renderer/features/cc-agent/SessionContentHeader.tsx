@@ -161,6 +161,11 @@ export function SessionContentHeader({
     !session.remoteHostId &&
     !session.deviceLinkDeviceId &&
     !isArchived;
+  // 手动压缩:pi 原生 compact,同一 live 本地 pi 会话前提(斜杠转义后用户无法手输
+  // /compact,这是 pi 会话手动压缩的唯一入口)。回合运行中 pi 拒绝压缩 → 禁用而非隐藏。
+  const canCompact = canExportHtml;
+  const [compacting, setCompacting] = useState(false);
+  const compactDisabled = compacting || runningSessionIds.has(session.id);
   const projectOptions = useProjectPickerOptions();
   // heartbeat schedule 绑定标识,与 SessionItem 同源数据;删除/过期后自动消失。
   const boundSchedules = useSessionBoundSchedules(session.id);
@@ -388,6 +393,37 @@ export function SessionContentHeader({
 
   /* ---- 导出会话(.cshare)---- 弹窗仅打开时挂载,与 SessionItem 同款。 */
   const [shareExportOpen, setShareExportOpen] = useState(false);
+
+  /* ---- 手动压缩(pi 原生 compact)---- 长操作(LLM 摘要),压缩边界经事件流自动进聊天;
+   * 回合运行中 pi 会拒绝,菜单项据 running 态禁用。compacting 状态在上方派生区声明。 */
+  const handleCompactSession = useCallback(async () => {
+    if (compacting) return;
+    setCompacting(true);
+    try {
+      const result = await window.electronAPI.maker.compactSession(session.id);
+      if (result?.noop) {
+        // 良性:上下文太小,无可压缩内容。信息性提示,不是失败。
+        toast.info(t('ccAgent.sidebar.sessionMenu.compactNothing'));
+      } else if (result) {
+        const hasNumbers =
+          typeof result.tokensBefore === 'number' && typeof result.estimatedTokensAfter === 'number';
+        toast.success(
+          hasNumbers
+            ? t('ccAgent.sidebar.sessionMenu.compactSuccessWithTokens', {
+                before: Math.round((result.tokensBefore ?? 0) / 1000),
+                after: Math.round((result.estimatedTokensAfter ?? 0) / 1000),
+              })
+            : t('ccAgent.sidebar.sessionMenu.compactSuccess'),
+        );
+      }
+      // null:会话无 live 进程 / 不支持(入口已按 gate 隐藏,极少走到)。静默即可。
+    } catch (err) {
+      log.warn('manual compact failed', err);
+      toast.warning(t('ccAgent.sidebar.sessionMenu.compactFailed'));
+    } finally {
+      setCompacting(false);
+    }
+  }, [compacting, session.id, t]);
 
   /* ---- 导出 HTML(pi 原生 export_html)---- 主进程弹保存对话框 + 导出 + 在文件管理器显示。 */
   const [exportingHtml, setExportingHtml] = useState(false);
@@ -760,6 +796,17 @@ export function SessionContentHeader({
                     className={MENU_ITEM_CLASS}
                   >
                     {t('ccAgent.sidebar.sessionMenu.exportHtml')}
+                  </DropdownMenuItem>
+                )}
+                {canCompact && (
+                  <DropdownMenuItem
+                    disabled={compactDisabled}
+                    onSelect={() => void handleCompactSession()}
+                    className={MENU_ITEM_CLASS}
+                  >
+                    {compacting
+                      ? t('ccAgent.sidebar.sessionMenu.compacting')
+                      : t('ccAgent.sidebar.sessionMenu.compact')}
                   </DropdownMenuItem>
                 )}
                 <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />

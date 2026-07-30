@@ -6086,6 +6086,12 @@
         "exportHtml": "HTML にエクスポート…",
         "exportHtmlSuccess": "セッションを HTML にエクスポートしました",
         "exportHtmlFailed": "HTML エクスポートに失敗しました",
+        "compact": "コンテキストを圧縮",
+        "compacting": "圧縮中…",
+        "compactSuccess": "コンテキストを圧縮しました",
+        "compactSuccessWithTokens": "コンテキストを圧縮しました:{{before}}k → {{after}}k tokens",
+        "compactFailed": "圧縮に失敗しました",
+        "compactNothing": "圧縮できる内容がまだありません",
         "copySessionLink": "セッションリンクをコピー"
       },
       "projectAction": {

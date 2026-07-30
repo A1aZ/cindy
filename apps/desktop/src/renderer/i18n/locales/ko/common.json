@@ -6086,6 +6086,12 @@
         "exportHtml": "HTML로 내보내기…",
         "exportHtmlSuccess": "세션을 HTML로 내보냈습니다",
         "exportHtmlFailed": "HTML 내보내기 실패",
+        "compact": "컨텍스트 압축",
+        "compacting": "압축 중…",
+        "compactSuccess": "컨텍스트를 압축했습니다",
+        "compactSuccessWithTokens": "컨텍스트를 압축했습니다: {{before}}k → {{after}}k tokens",
+        "compactFailed": "압축 실패",
+        "compactNothing": "아직 압축할 내용이 없습니다",
         "copySessionLink": "세션 링크 복사"
       },
       "projectAction": {

@@ -22,7 +22,7 @@ import type {
   AgentKind,
   UserMessage,
 } from './types/common.js';
-import type { Capabilities } from './types/capabilities.js';
+import type { Capabilities, ManualCompactResult } from './types/capabilities.js';
 import { NotSupportedError } from './types/capabilities.js';
 import type {
   AgentEvent,
@@ -679,6 +679,21 @@ export class Session {
       throw new NotSupportedError('sessionHtmlExport', { supported: false, reason: 'not-implemented' });
     }
     return this.handle.exportSessionHtml(outputPath);
+  }
+
+  /** 手动压缩会话上下文(capability 见 Capabilities.manualCompact)。 */
+  async compactSession(instructions?: string): Promise<ManualCompactResult> {
+    this.ensureActive();
+    if (!this.capabilities.manualCompact?.supported) {
+      throw new NotSupportedError(
+        'manualCompact',
+        this.capabilities.manualCompact ?? { supported: false, reason: 'not-implemented' },
+      );
+    }
+    if (!this.handle.compactSession) {
+      throw new NotSupportedError('manualCompact', { supported: false, reason: 'not-implemented' });
+    }
+    return this.handle.compactSession(instructions);
   }
 
   getFastMode(): boolean | null {

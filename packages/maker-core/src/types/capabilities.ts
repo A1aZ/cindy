@@ -107,6 +107,23 @@ export interface Capabilities {
    * CC/Codex 无对应能力(缺省视为不支持)。
    */
   sessionHtmlExport?: CapabilityStatus;
+  /**
+   * 手动压缩会话上下文 —— pi 原生 compact RPC(可带聚焦指令,调 LLM 生成摘要)。
+   * 支持时 handle 实现 compactSession;UI 据此决定是否显示「压缩会话」入口。
+   * CC/Codex 的 /compact 走各自 agent 内置斜杠命令,不经此能力(缺省视为不支持)。
+   */
+  manualCompact?: CapabilityStatus;
+}
+
+/** 手动压缩结果(数值可缺省:自定义压缩 handler 可能不上报)。 */
+export interface ManualCompactResult {
+  tokensBefore?: number;
+  estimatedTokensAfter?: number;
+  /**
+   * 良性空操作:上下文太小 / 无可压缩内容,agent 拒绝压缩但这不是错误。
+   * UI 应给信息性提示(「暂无可压缩内容」),而非「压缩失败」。
+   */
+  noop?: boolean;
 }
 
 /**

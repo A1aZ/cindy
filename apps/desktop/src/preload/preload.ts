@@ -4579,6 +4579,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 返回写入的绝对路径;用户取消对话框或 agent 不支持时返回 null。
     exportSessionHtml: (sessionId: string): Promise<string | null> =>
       ipcRenderer.invoke('maker:export-session-html', sessionId),
+    // 手动压缩会话上下文(pi 原生 compact,可带聚焦指令)。压缩边界经事件流自动进聊天。
+    // 返回 {tokensBefore?, estimatedTokensAfter?};会话不在 / agent 不支持时返回 null。
+    compactSession: (
+      sessionId: string,
+      instructions?: string,
+    ): Promise<{ tokensBefore?: number; estimatedTokensAfter?: number; noop?: boolean } | null> =>
+      ipcRenderer.invoke('maker:compact-session', sessionId, instructions),
     // 附加只读引用目录的 closure 推送; DB 持久化由 renderer 同步调
     // sessionService.update({ extraDirs }) (跟 setModel + sessionService.update 双 IPC 协调先例一致)。
     // session 不在 / agent capability=false 都 no-op, 不会抛错。

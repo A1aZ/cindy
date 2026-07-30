@@ -187,6 +187,8 @@ export const MAKER_INVOKE = {
   SET_PLAN_MODE: 'maker:set-plan-mode',
   /** 会话导出 HTML(pi 原生 export_html)。主进程弹保存对话框 + 导出 + 在文件管理器中显示;返回写入路径或 null(取消)。 */
   EXPORT_SESSION_HTML: 'maker:export-session-html',
+  /** 手动压缩会话上下文(pi 原生 compact,可带聚焦指令)。返回 {tokensBefore?, estimatedTokensAfter?} 或 null(会话不在/不支持)。 */
+  COMPACT_SESSION: 'maker:compact-session',
   /**
    * 旧控制端的会话模型预设写穿兼容 channel。新控制端统一经 APPLY_NEW_MAKER_DRAFT_PREF 写被控端
    * providerModelMemory 全局预设;旧控制端仍发此 invoke 时,被控端 renderer 也会将其收敛到同一

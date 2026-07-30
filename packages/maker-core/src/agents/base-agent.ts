@@ -27,7 +27,7 @@ import {
   type SessionPermissionUpdate,
 } from '../types/permissions.js';
 import type { AgentKind, Effort, PermissionMode, ReasoningDisplay, UserMessage, WorkspaceKind } from '../types/common.js';
-import type { Capabilities, EffortDescriptor, ModelDescriptor } from '../types/capabilities.js';
+import type { Capabilities, EffortDescriptor, ManualCompactResult, ModelDescriptor } from '../types/capabilities.js';
 import type { CapabilityRoutingPolicy } from '../types/capability-routing.js';
 import { NotSupportedError } from '../types/capabilities.js';
 import type { AgentCredentialMode, AuthLoginOptions } from '../interfaces/auth-adapter.js';
@@ -1030,6 +1030,13 @@ export interface AgentSessionHandle {
    * 支持的 agent(pi)实现;不支持的 agent 不实现。
    */
   exportSessionHtml?(outputPath?: string): Promise<string>;
+
+  /**
+   * 手动压缩会话上下文(可带聚焦指令,由 agent 调 LLM 生成摘要,压缩边界经事件流
+   * 上报 —— pi 为 compaction_start/end → compact_boundary)。仅
+   * Capabilities.manualCompact 支持的 agent(pi)实现;不支持的 agent 不实现。
+   */
+  compactSession?(instructions?: string): Promise<ManualCompactResult>;
 
   /** 运行时切换 Fast mode；不支持的 agent 不实现。 */
   setFastMode?(enabled: boolean): Promise<void>;

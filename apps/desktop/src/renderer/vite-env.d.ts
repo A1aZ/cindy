@@ -4350,6 +4350,11 @@ interface ElectronAPI {
     setPlanMode: (sessionId: string, enabled: boolean) => Promise<void>;
     /** 会话导出 HTML(pi 原生); 主进程弹保存对话框 + 导出 + 在文件管理器显示; 返回路径或 null(取消/不支持) */
     exportSessionHtml: (sessionId: string) => Promise<string | null>;
+    /** 手动压缩会话上下文(pi 原生, 可带聚焦指令); 返回压缩前后 token 数 / {noop} / null(会话不在/不支持) */
+    compactSession: (
+      sessionId: string,
+      instructions?: string,
+    ) => Promise<{ tokensBefore?: number; estimatedTokensAfter?: number; noop?: boolean } | null>;
     /**
      * 附加只读引用目录的 closure 推送; DB 持久化要 renderer 同步调
      * sessionService.update({ extraDirs }) (跟 setModel + sessionService.update 双 IPC 协调先例一致)。

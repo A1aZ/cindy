@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitest/config';
 import path from 'node:path';
 import { desktopClientBuildEnv } from '../../scripts/shared/client-endpoint-build-env.mjs';
+import { nodeWebstorageEnabled } from '../../scripts/shared/node-webstorage.mjs';
 import { parseVitestCliExclude } from './src/test/vitest/cliExclude';
 
 const clientBuildEnv = desktopClientBuildEnv({ allowEnvOverride: false });
@@ -72,12 +73,20 @@ export default defineConfig({
     // --localstorage-file 时方法全缺的残缺对象:node 环境下骗过
     // `typeof localStorage !== 'undefined'` 探测,jsdom 环境下又因 key 已存在
     // 顶掉 jsdom 注入的可用实现(vitest 填充全局时跳过已存在的 key)。统一在
-    // worker 进程关掉该全局(flag 自 Node 22 起有效),恢复两种环境的原语义;
-    // CI(Node 22,webstorage 默认关)上本为 no-op。配置放这里(而非 test 脚本
-    // 注 NODE_OPTIONS)是因为根 test-workspaces runner 走 `exec vitest run`
-    // 直调、不经 package.json 脚本,只有 config 层对所有入口一致生效。
+    // worker 里关掉该全局(flag 自 Node 22 起有效),恢复两种环境的原语义。
+    // 配置放这里(而非 test 脚本注 NODE_OPTIONS)是因为根 test-workspaces runner
+    // 走 `exec vitest run` 直调、不经 package.json 脚本,只有 config 层对所有
+    // 入口一致生效。
+    //
+    // threads 池只在真的需要时才拿这个 execArgv: 给 worker thread 传自定义
+    // execArgv 会让 isolate 销毁时段错误(详见 node-webstorage.mjs 的实测数据),
+    // 而 Node 22(本机与 CI)根本没有 webstorage 全局、flag 纯属空转。两者互斥,
+    // 由 nodeWebstorageEnabled() 二选一:需要 flag 的 Node 上 manifest 会把
+    // unit tier 留在 forks,不需要的 Node 上才切 threads。
     poolOptions: {
-      threads: { execArgv: ['--no-experimental-webstorage'] },
+      ...(nodeWebstorageEnabled()
+        ? { threads: { execArgv: ['--no-experimental-webstorage'] } }
+        : {}),
       forks: { execArgv: ['--no-experimental-webstorage'] },
     },
     // Main-process code is pure Node — no DOM needed. Renderer tests (if/when

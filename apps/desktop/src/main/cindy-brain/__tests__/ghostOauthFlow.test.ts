@@ -15,6 +15,7 @@ import {
   startGhostOauthFlow,
   type GhostOauthBrokerClient,
   type GhostOauthClientConfig,
+  type GhostOauthFlowResult,
 } from '../ghostOauthFlow.js';
 
 const BASE_CONFIG: GhostOauthClientConfig = {
@@ -44,7 +45,7 @@ function browserRedirect(authorizeUrl: string, params: (u: URL) => Record<string
   });
 }
 
-/** 探一个当前空闲的 loopback 端口(探测与后续使用之间有极小竞态,可接受)。 */
+/** 探一个当前空闲的 loopback 端口。它只保证"探测那一刻"空闲,见 pinnedPortCase。 */
 async function probeFreePort(): Promise<number> {
   const probe = http.createServer();
   const port = await new Promise<number>((resolve) => {
@@ -55,6 +56,35 @@ async function probeFreePort(): Promise<number> {
   });
   await new Promise((r) => probe.close(r));
   return port;
+}
+
+/**
+ * 钉死端口(redirectPort)的用例统一走这里。probeFreePort 关掉探测 socket 之后,
+ * 端口在引擎真正 listen 之前可能被并发用例抢走 —— threads 池下同一进程里跑着
+ * 多个测试文件,这个窗口不再可以忽略。引擎把"钉死端口绑不上"精确报成
+ * LISTEN_FAILED,所以只在命中该错误时换端口重跑整段;其它任何失败都原样返回给
+ * 断言,不会把真实回归重试掉。body 返回本轮需要判定的全部结果。
+ */
+async function pinnedPortCase<T extends readonly unknown[]>(
+  body: (port: number) => Promise<T>,
+  attempts = 5,
+): Promise<T> {
+  let last!: T;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    last = await body(await probeFreePort());
+    if (!last.some(isListenFailed)) return last;
+  }
+  return last;
+}
+
+/** 只认引擎明确报出的 LISTEN_FAILED;形状不符的值一律不算"端口被抢"。 */
+function isListenFailed(value: unknown): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as { ok?: unknown }).ok === false &&
+    (value as { error?: unknown }).error === 'LISTEN_FAILED'
+  );
 }
 
 describe('startGhostOauthFlow', () => {
@@ -306,25 +336,17 @@ describe('startGhostOauthFlow', () => {
   });
 
   it('redirectPort:回调钉死声明端口(Atlassian 精确匹配场景)', async () => {
-    // 先探一个空闲端口再钉给引擎(端口探测与 listen 之间有极小竞态,可接受)。
-    const probe = http.createServer();
-    const freePort = await new Promise<number>((resolve) => {
-      probe.listen(0, '127.0.0.1', () => {
-        const addr = probe.address();
-        resolve(typeof addr === 'object' && addr ? addr.port : 0);
-      });
-    });
-    await new Promise((r) => probe.close(r));
-
-    const result = await startGhostOauthFlow({
-      config: { ...BASE_CONFIG, pkce: false, redirectPort: freePort },
-      fetchImpl: vi.fn(async () => jsonResponse({ access_token: 'at-fixed' })) as unknown as typeof fetch,
-      openExternal: (url) => {
-        const u = new URL(url);
-        expect(u.searchParams.get('redirect_uri')).toBe(`http://127.0.0.1:${freePort}/callback`);
-        browserRedirect(url, (au) => ({ code: 'c-fixed', state: au.searchParams.get('state') ?? '' }));
-      },
-    });
+    const [result] = await pinnedPortCase(async (freePort) => [
+      await startGhostOauthFlow({
+        config: { ...BASE_CONFIG, pkce: false, redirectPort: freePort },
+        fetchImpl: vi.fn(async () => jsonResponse({ access_token: 'at-fixed' })) as unknown as typeof fetch,
+        openExternal: (url) => {
+          const u = new URL(url);
+          expect(u.searchParams.get('redirect_uri')).toBe(`http://127.0.0.1:${freePort}/callback`);
+          browserRedirect(url, (au) => ({ code: 'c-fixed', state: au.searchParams.get('state') ?? '' }));
+        },
+      }),
+    ]);
     expect(result).toMatchObject({ ok: true });
   });
 
@@ -352,54 +374,60 @@ describe('startGhostOauthFlow', () => {
   });
 
   it('钉死端口:第二单顶掉第一单后立刻复用同一端口(自家僵尸监听自愈,无需回收器)', async () => {
-    const fixedPort = await probeFreePort();
-    let secondDone: Promise<unknown> = Promise.resolve();
-    const first = startGhostOauthFlow({
-      config: { ...BASE_CONFIG, pkce: false, redirectPort: fixedPort },
-      fetchImpl: vi.fn() as unknown as typeof fetch,
-      openExternal: () => {
-        // 第一单占着钉死端口等回调时,第二单同端口进场——必须等到第一单的
-        // 监听真正关闭后成功 listen,而不是 LISTEN_FAILED。
-        secondDone = startGhostOauthFlow({
-          config: { ...BASE_CONFIG, pkce: false, redirectPort: fixedPort },
-          fetchImpl: vi.fn(async () => jsonResponse({ access_token: 'at-heal' })) as unknown as typeof fetch,
-          openExternal: (url2) => {
-            browserRedirect(url2, (au) => ({ code: 'c-heal', state: au.searchParams.get('state') ?? '' }));
-          },
-        });
-      },
+    const [firstResult, secondResult] = await pinnedPortCase(async (fixedPort) => {
+      let secondDone: Promise<unknown> = Promise.resolve();
+      const first = await startGhostOauthFlow({
+        config: { ...BASE_CONFIG, pkce: false, redirectPort: fixedPort },
+        fetchImpl: vi.fn() as unknown as typeof fetch,
+        openExternal: () => {
+          // 第一单占着钉死端口等回调时,第二单同端口进场——必须等到第一单的
+          // 监听真正关闭后成功 listen,而不是 LISTEN_FAILED。
+          secondDone = startGhostOauthFlow({
+            config: { ...BASE_CONFIG, pkce: false, redirectPort: fixedPort },
+            fetchImpl: vi.fn(async () => jsonResponse({ access_token: 'at-heal' })) as unknown as typeof fetch,
+            openExternal: (url2) => {
+              browserRedirect(url2, (au) => ({ code: 'c-heal', state: au.searchParams.get('state') ?? '' }));
+            },
+          });
+        },
+      });
+      return [first, await secondDone];
     });
-    await expect(first).resolves.toMatchObject({ ok: false, error: 'CANCELLED' });
-    await expect(secondDone).resolves.toMatchObject({ ok: true });
+    expect(firstResult).toMatchObject({ ok: false, error: 'CANCELLED' });
+    expect(secondResult).toMatchObject({ ok: true });
   });
 
   it('钉死端口:第二单还在排队时第三单进场——前两单 CANCELLED,最后一单赢', async () => {
-    const fixedPort = await probeFreePort();
-    let secondDone: Promise<unknown> = Promise.resolve();
-    let thirdDone: Promise<unknown> = Promise.resolve();
     const neverOpen = vi.fn();
-    const first = startGhostOauthFlow({
-      config: { ...BASE_CONFIG, pkce: false, redirectPort: fixedPort },
-      fetchImpl: vi.fn() as unknown as typeof fetch,
-      openExternal: () => {
-        // 第二单进场(排队等第一单收尾),紧接着第三单进场顶掉排队中的第二单。
-        secondDone = startGhostOauthFlow({
+    const [firstResult, secondResult, thirdResult] = await pinnedPortCase(
+      async (fixedPort) => {
+        let secondDone: Promise<unknown> = Promise.resolve();
+        let thirdDone: Promise<unknown> = Promise.resolve();
+        const first = await startGhostOauthFlow({
           config: { ...BASE_CONFIG, pkce: false, redirectPort: fixedPort },
           fetchImpl: vi.fn() as unknown as typeof fetch,
-          openExternal: neverOpen,
-        });
-        thirdDone = startGhostOauthFlow({
-          config: { ...BASE_CONFIG, pkce: false, redirectPort: fixedPort },
-          fetchImpl: vi.fn(async () => jsonResponse({ access_token: 'at-third' })) as unknown as typeof fetch,
-          openExternal: (url3) => {
-            browserRedirect(url3, (au) => ({ code: 'c-third', state: au.searchParams.get('state') ?? '' }));
+          openExternal: () => {
+            // 第二单进场(排队等第一单收尾),紧接着第三单进场顶掉排队中的第二单。
+            secondDone = startGhostOauthFlow({
+              config: { ...BASE_CONFIG, pkce: false, redirectPort: fixedPort },
+              fetchImpl: vi.fn() as unknown as typeof fetch,
+              openExternal: neverOpen,
+            });
+            thirdDone = startGhostOauthFlow({
+              config: { ...BASE_CONFIG, pkce: false, redirectPort: fixedPort },
+              fetchImpl: vi.fn(async () => jsonResponse({ access_token: 'at-third' })) as unknown as typeof fetch,
+              openExternal: (url3) => {
+                browserRedirect(url3, (au) => ({ code: 'c-third', state: au.searchParams.get('state') ?? '' }));
+              },
+            });
           },
         });
+        return [first, await secondDone, await thirdDone];
       },
-    });
-    await expect(first).resolves.toMatchObject({ ok: false, error: 'CANCELLED' });
-    await expect(secondDone).resolves.toMatchObject({ ok: false, error: 'CANCELLED' });
-    await expect(thirdDone).resolves.toMatchObject({ ok: true });
+    );
+    expect(firstResult).toMatchObject({ ok: false, error: 'CANCELLED' });
+    expect(secondResult).toMatchObject({ ok: false, error: 'CANCELLED' });
+    expect(thirdResult).toMatchObject({ ok: true });
     // 排队期即被顶掉的单不该拉起浏览器(不弹无主授权页)。
     expect(neverOpen).not.toHaveBeenCalled();
   });
@@ -560,38 +588,44 @@ describe('startGhostOauthFlow', () => {
   });
 
   it('publicRedirectUri:authorize URL 与 broker exchange 都用公网弹跳地址,本地监听仍在 loopback', async () => {
-    const fixedPort = await probeFreePort();
     const PUBLIC_URI = 'https://broker.example.com/jira/bounce';
-    let capturedRedirectParam: string | null = null;
-    const broker: GhostOauthBrokerClient = {
-      exchange: vi.fn(async (slug: string, params: { code: string; redirectUri: string }) => {
-        expect(slug).toBe('jira');
-        expect(params.code).toBe('c-pub');
-        // 双地址模型:code 交换带的 redirect_uri 必须与 authorize 时一致 = 公网弹跳地址。
-        expect(params.redirectUri).toBe(PUBLIC_URI);
-        return {
-          ok: true as const,
-          bundle: { accessToken: 'at-pub', refreshToken: 'rt-pub', expiresAt: Date.now() + 1000, grantedScope: null },
+    const [result, broker, capturedRedirectParam] = await pinnedPortCase(
+      async (
+        fixedPort,
+      ): Promise<[GhostOauthFlowResult, GhostOauthBrokerClient, string | null]> => {
+        let captured: string | null = null;
+        const brokerClient: GhostOauthBrokerClient = {
+          exchange: vi.fn(async (slug: string, params: { code: string; redirectUri: string }) => {
+            expect(slug).toBe('jira');
+            expect(params.code).toBe('c-pub');
+            // 双地址模型:code 交换带的 redirect_uri 必须与 authorize 时一致 = 公网弹跳地址。
+            expect(params.redirectUri).toBe(PUBLIC_URI);
+            return {
+              ok: true as const,
+              bundle: { accessToken: 'at-pub', refreshToken: 'rt-pub', expiresAt: Date.now() + 1000, grantedScope: null },
+            };
+          }),
+          refresh: vi.fn(),
         };
-      }),
-      refresh: vi.fn(),
-    };
-    const result = await startGhostOauthFlow({
-      config: { ...BASE_CONFIG, tokenBroker: 'jira', redirectPort: fixedPort, publicRedirectUri: PUBLIC_URI },
-      fetchImpl: vi.fn() as unknown as typeof fetch,
-      broker,
-      openExternal: (url) => {
-        capturedRedirectParam = new URL(url).searchParams.get('redirect_uri');
-        // 假浏览器模拟弹跳路由的 302:公网地址打不通,直接回打本机 loopback
-        // 缺省 /callback(未声明 callbackPath 时监听路径不变)。
-        const cb = new URL(`http://127.0.0.1:${fixedPort}/callback`);
-        cb.searchParams.set('code', 'c-pub');
-        cb.searchParams.set('state', new URL(url).searchParams.get('state') ?? '');
-        setImmediate(() => {
-          void fetch(cb.toString()).catch(() => undefined);
+        const flowResult = await startGhostOauthFlow({
+          config: { ...BASE_CONFIG, tokenBroker: 'jira', redirectPort: fixedPort, publicRedirectUri: PUBLIC_URI },
+          fetchImpl: vi.fn() as unknown as typeof fetch,
+          broker: brokerClient,
+          openExternal: (url) => {
+            captured = new URL(url).searchParams.get('redirect_uri');
+            // 假浏览器模拟弹跳路由的 302:公网地址打不通,直接回打本机 loopback
+            // 缺省 /callback(未声明 callbackPath 时监听路径不变)。
+            const cb = new URL(`http://127.0.0.1:${fixedPort}/callback`);
+            cb.searchParams.set('code', 'c-pub');
+            cb.searchParams.set('state', new URL(url).searchParams.get('state') ?? '');
+            setImmediate(() => {
+              void fetch(cb.toString()).catch(() => undefined);
+            });
+          },
         });
+        return [flowResult, brokerClient, captured];
       },
-    });
+    );
     expect(result).toMatchObject({ ok: true });
     if (result.ok) expect(result.bundle.accessToken).toBe('at-pub');
     // 报给服务商的 redirect_uri 是公网弹跳地址,而不是 loopback。

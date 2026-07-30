@@ -1189,13 +1189,28 @@ describe('netlog 产物事后核对(verifyEndpointNetLogCapture)', () => {
     expect(verifyEndpointNetLogCapture(capture)).toBe(true);
   });
 
-  it('目录项在交接期被换成别的目录 → 不通过(产物丢弃)', () => {
+  it('目录项被换成 symlink → 不通过(产物丢弃)', () => {
+    // 这是攻击的真实形状:把我们创建的目录项换成指向别处的 symlink,好让 Chromium
+    // 写到别的地方去。lstat 不跟随 symlink,所以 isDirectory() 为 false。
+    if (process.platform === 'win32') return;
     const capture = prepareEndpointNetLogFile(logDir)!;
     const captureDir = path.dirname(capture.file);
+    const elsewhere = fs.mkdtempSync(path.join(logDir, 'elsewhere-'));
     fs.rmSync(captureDir, { recursive: true, force: true });
-    fs.mkdirSync(captureDir, { recursive: true, mode: 0o700 }); // 同名不同 inode
+    fs.symlinkSync(elsewhere, captureDir);
     fs.writeFileSync(capture.file, '{}', 'utf8');
     expect(verifyEndpointNetLogCapture(capture)).toBe(false);
+  });
+
+  it('目录项换成了别的 inode → 不通过', () => {
+    // 用改过的 dirIno 直接表达"目录项已经不是我们创建的那个 inode"。
+    // 不通过 rm + mkdir 复现:那样在 ext4 上常常**复用同一个 inode 号**,断言会随文件
+    // 系统摇摆(CI 上就是这么红的)。inode 号复用也正是这道核对的已知局限:
+    // 它能抓住 symlink / 类型变化,抓不住"号被回收后重建"。
+    const capture = prepareEndpointNetLogFile(logDir)!;
+    fs.writeFileSync(capture.file, '{}', 'utf8');
+    expect(verifyEndpointNetLogCapture({ ...capture, dirIno: capture.dirIno + 1 })).toBe(false);
+    expect(verifyEndpointNetLogCapture({ ...capture, dirDev: capture.dirDev + 1 })).toBe(false);
   });
 
   it('目标被换成 symlink → 不通过', () => {

@@ -752,6 +752,10 @@ export function prepareEndpointNetLogFile(logDir: string | null): PreparedNetLog
 /**
  * 抓完之后核对产物:目录项必须还是我们创建的那个 inode,目标必须是常规文件。
  * 不符就返回 false,调用方丢弃这份产物——被换过的路径既不能当证据,也不该展示给用户。
+ *
+ * 已知局限(写清楚,不要当成密闭):这是**事后检测**,不是阻止——Chromium 那次写已经
+ * 发生了;而且 inode 号会被文件系统回收复用(ext4 上 rm + mkdir 常常拿到同一个号),
+ * 所以"号相同"并不等于"没被换过"。它稳定抓得住的是 symlink 与类型变化这类形状。
  * ino 拿不到(Windows 上可能是 0)时跳过 inode 比对,仍然检查目录与文件类型。
  */
 export function verifyEndpointNetLogCapture(capture: PreparedNetLogCapture): boolean {

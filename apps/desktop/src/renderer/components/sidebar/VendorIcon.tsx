@@ -17,8 +17,19 @@ import { cn } from '@/lib/utils';
 import { ClaudeMark } from '@/components/icons/ClaudeMark';
 import { CodexMark } from '@/components/icons/CodexMark';
 
+export type VendorIconKind = 'cc' | 'codex' | 'pi';
+
+/**
+ * agentKind → VendorIcon vendor 的唯一映射。所有渲染 agent 身份图标的调用点
+ * 必须走这里,禁止各自写 `=== 'codex' ? 'codex' : 'cc'` 二元三元(那会把 pi
+ * 吞成 Claude 脸,2026-07-30 实测 bug)。兼容 'claude-code' 别名与 null。
+ */
+export function agentKindToVendor(kind: string | null | undefined): VendorIconKind {
+  return kind === 'codex' ? 'codex' : kind === 'pi' ? 'pi' : 'cc';
+}
+
 interface VendorIconProps {
-  vendor: 'cc' | 'codex' | 'pi';
+  vendor: VendorIconKind;
   size?: number;
   /** true → 切 Thinking Orange + 呼吸动画,复用 .session-status-breathing */
   running?: boolean;

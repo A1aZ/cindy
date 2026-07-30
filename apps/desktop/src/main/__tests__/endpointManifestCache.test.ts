@@ -13,8 +13,9 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  CROSS_REGION_ENDPOINT_KEYS,
   ENDPOINT_MANIFEST_CACHE_FILE_NAME,
-  TRUSTED_ENDPOINT_DOMAINS,
+  REGION_ENDPOINT_DOMAIN,
   findBootstrapHostOutsideTrustedDomains,
   findUntrustedCachedEndpoint,
   formatCacheSavedAt,
@@ -128,12 +129,52 @@ describe('缓存端点的受信任域约束(安全边界)', () => {
   // 生产实际取值:两份自举基址都由构建脚本注入,userData 写入改不了。
   const GLOBAL_BASE = 'https://hotfix.cindy.app/cindy';
   const CN_BASE = 'https://hotfix.cindy.com.cn/cindy';
-  const TRUSTED = TRUSTED_ENDPOINT_DOMAINS;
+  const TRUSTED = Object.values(REGION_ENDPOINT_DOMAIN);
+  /** CN 构建的策略:非跨区端点锁 cindy.com.cn,slack/telegram hook 才允许 cindy.app。 */
+  const CN_POLICY = { regionDomain: REGION_ENDPOINT_DOMAIN.cn, crossRegionDomain: REGION_ENDPOINT_DOMAIN.global };
+  const GLOBAL_POLICY = { regionDomain: REGION_ENDPOINT_DOMAIN.global, crossRegionDomain: REGION_ENDPOINT_DOMAIN.global };
 
-  it('受信任域是显式写死的两个产品域(不从基址推导)', () => {
+  it('区域域名是显式写死的(不从基址推导)', () => {
     // 上一版从自举基址「去掉最左一段」推导,在多段公共后缀上会**放宽**信任:
     // https://example.co.uk → co.uk,于是任何 attacker.co.uk 都成了可信。
     expect([...TRUSTED].sort()).toEqual(['cindy.app', 'cindy.com.cn']);
+    expect(REGION_ENDPOINT_DOMAIN.cn).toBe('cindy.com.cn');
+    expect(REGION_ENDPOINT_DOMAIN.global).toBe('cindy.app');
+  });
+
+  it('跨区例外只有 slack / telegram hook 两个 key', () => {
+    // 每加一个 key 就等于允许该端点跨区,而跨区 token 误发正是要防的事。
+    expect([...CROSS_REGION_ENDPOINT_KEYS].sort()).toEqual(['slackHookWsUrl', 'telegramHookWsUrl']);
+  });
+
+  it('CN 构建拒绝换成 Global 真实服务的伪造缓存(跨区 token 误发)', () => {
+    // 线上两份清单都没有 region 字段、region 本身也是清单里未认证的数据,所以
+    // 「两域并集」会让这份缓存通过:sourceUrl 匹配 CN、主机是 Global 的**真实**服务。
+    expect(
+      findUntrustedCachedEndpoint(
+        {
+          authApiBaseUrl: 'https://auth.cindy.app',
+          websiteUrl: 'https://cindy.com.cn',
+        },
+        CN_POLICY,
+      ),
+    ).toBe('authApiBaseUrl');
+  });
+
+  it.each([
+    'deviceLinkApiBaseUrl',
+    'oauthBrokerApiBaseUrl',
+    'modelAccessApiBaseUrl',
+    'voiceApiBaseUrl',
+    'authDesktopCallbackUrl',
+  ])('CN 构建下 %s 也不允许落在 Global 域', (key) => {
+    expect(findUntrustedCachedEndpoint({ [key]: 'https://x.cindy.app' }, CN_POLICY)).toBe(key);
+  });
+
+  it('Global 构建下本区端点必须是 cindy.app,不接受 CN 域', () => {
+    expect(
+      findUntrustedCachedEndpoint({ authApiBaseUrl: 'https://auth.cindy.com.cn' }, GLOBAL_POLICY),
+    ).toBe('authApiBaseUrl');
   });
 
   it('自检:两份自举基址都落在受信任域内', () => {
@@ -152,9 +193,7 @@ describe('缓存端点的受信任域约束(安全边界)', () => {
     expect(findBootstrapHostOutsideTrustedDomains([GLOBAL_BASE, '', '   '], TRUSTED)).toBeNull();
   });
 
-  it('仓内两份清单的真实端点全部合规(含 CN 跨域的 hook 端点)', () => {
-    // CN 清单里 slack / telegram hook 落在 cindy.app、其余在 cindy.com.cn:
-    // 只取本区基址会把这两个合法端点判成不可信,所以受信任域必须取两份。
+  it('仓内 CN 清单的真实端点全部合规(hook 走跨区例外,其余锁本区)', () => {
     expect(
       findUntrustedCachedEndpoint(
         {
@@ -165,7 +204,21 @@ describe('缓存端点的受信任域约束(安全边界)', () => {
           cdnBaseUrl: 'https://hotfix.cindy.com.cn/cindy',
           authDesktopCallbackUrl: 'https://auth.cindy.com.cn/api/auth/desktop/callback',
         },
-        TRUSTED,
+        CN_POLICY,
+      ),
+    ).toBeNull();
+  });
+
+  it('仓内 Global 清单的真实端点全部合规', () => {
+    expect(
+      findUntrustedCachedEndpoint(
+        {
+          authApiBaseUrl: 'https://auth.cindy.app',
+          slackHookWsUrl: 'wss://slack-hook.cindy.app',
+          websiteUrl: 'https://cindy.app',
+          cdnBaseUrl: 'https://hotfix.cindy.app/cindy',
+        },
+        GLOBAL_POLICY,
       ),
     ).toBeNull();
   });
@@ -179,21 +232,24 @@ describe('缓存端点的受信任域约束(安全边界)', () => {
     expect(
       findUntrustedCachedEndpoint(
         { authApiBaseUrl: hostile, websiteUrl: 'https://cindy.app' },
-        TRUSTED,
+        GLOBAL_POLICY,
       ),
     ).toBe('authApiBaseUrl');
   });
 
   it('空值端点跳过检查(缺失端点本就归一成空串)', () => {
     expect(
-      findUntrustedCachedEndpoint({ authApiBaseUrl: '', heartbeatUrl: '' }, TRUSTED),
+      findUntrustedCachedEndpoint({ authApiBaseUrl: '', heartbeatUrl: '' }, GLOBAL_POLICY),
     ).toBeNull();
   });
 
-  it('受信任域清单为空时一律拒绝(fail closed,不是放行)', () => {
-    expect(findUntrustedCachedEndpoint({ authApiBaseUrl: 'https://auth.cindy.app' }, [])).toBe(
-      'trusted-domains-unavailable',
-    );
+  it('策略缺域名时一律拒绝(fail closed,不是放行)', () => {
+    expect(
+      findUntrustedCachedEndpoint(
+        { authApiBaseUrl: 'https://auth.cindy.app' },
+        { regionDomain: '', crossRegionDomain: '' },
+      ),
+    ).toBe('origin-policy-unavailable');
   });
 });
 

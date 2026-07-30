@@ -10,10 +10,12 @@
  * **用户显式确认的离线出口**(仅网络层失败给,配置事故绝不给)、
  * file 模式的 allowHttp 放行、init 前 getter 抛错(启动时序守卫)、sendSync IPC 形状。
  */
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TEST_CLIENT_ENDPOINTS } from '../../test/vitest/clientEndpointsFixture';
 
@@ -43,7 +45,7 @@ vi.mock('../logger', () => ({
 import {
   activateClientEndpointRealm,
   captureNetLogAround,
-  resolveEndpointNetLogPath,
+  prepareEndpointNetLogFile,
   classifyManifestFailure,
   getClientEndpoint,
   getClientEndpointForRealm,
@@ -960,21 +962,54 @@ describe('netlog 抓取(captureNetLogAround)', () => {
   });
 });
 
-describe('netlog 落盘路径(不得落到 cwd)', () => {
+describe('netlog 落盘路径(不得落到 cwd、不得用可预测名)', () => {
+  let logDir: string;
+  beforeEach(() => {
+    logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-netlog-'));
+  });
+  afterEach(() => {
+    fs.rmSync(logDir, { recursive: true, force: true });
+  });
+
   it.each([
     ['null(logger 未初始化)', null],
     ['空串(initLogger 建目录失败时的实际取值)', ''],
     ['纯空白', '   '],
-  ])('%s → null,调用方跳过抓取', (_label, logDir) => {
-    // path.join('', name) 会得到相对路径 'endpoint-netlog.json',落到 process.cwd()
-    // ——dev 下正是仓库工作区,会在被 Git 跟踪的目录里留生成物。
-    expect(resolveEndpointNetLogPath(logDir)).toBeNull();
+  ])('%s → null,调用方跳过抓取', (_label, dir) => {
+    // path.join('', name) 会得到相对路径,落到 process.cwd()——dev 下正是仓库工作区,
+    // 会在被 Git 跟踪的目录里留生成物。
+    expect(prepareEndpointNetLogFile(dir)).toBeNull();
   });
 
-  it('拿到目录时给出该目录下的绝对路径', () => {
-    const file = resolveEndpointNetLogPath(path.join('/tmp', 'cindy-logs'));
-    expect(file).toBe(path.join('/tmp', 'cindy-logs', 'endpoint-netlog.json'));
+  it('给出该目录下的绝对路径,且文件已被独占创建成常规文件', () => {
+    const file = prepareEndpointNetLogFile(logDir);
+    expect(file).not.toBeNull();
     expect(path.isAbsolute(file as string)).toBe(true);
+    expect(path.dirname(file as string)).toBe(logDir);
+    // 先独占创建再交给 netLog:保证这个路径不是别人预置的 symlink / FIFO。
+    expect(fs.lstatSync(file as string).isFile()).toBe(true);
+  });
+
+  it('文件名不可预测(带 pid + 随机后缀),两次调用不同名', () => {
+    const a = prepareEndpointNetLogFile(logDir) as string;
+    const b = prepareEndpointNetLogFile(logDir) as string;
+    expect(path.basename(a)).not.toBe('endpoint-netlog.json');
+    expect(path.basename(a)).toContain(`endpoint-netlog.${process.pid}.`);
+    expect(a).not.toBe(b);
+  });
+
+  it('每次准备前清掉本前缀旧文件(唯一名不会无界堆积)', () => {
+    // 含上一版的固定名,升级后残留的那份也要被清掉。
+    fs.writeFileSync(path.join(logDir, 'endpoint-netlog.json'), 'old', 'utf8');
+    const first = prepareEndpointNetLogFile(logDir) as string;
+    const second = prepareEndpointNetLogFile(logDir) as string;
+    const left = fs.readdirSync(logDir).filter((n) => n.startsWith('endpoint-netlog'));
+    expect(left).toEqual([path.basename(second)]);
+    expect(fs.existsSync(first)).toBe(false);
+  });
+
+  it('目录不存在时返回 null,不抛错', () => {
+    expect(prepareEndpointNetLogFile(path.join(logDir, 'missing'))).toBeNull();
   });
 });
 

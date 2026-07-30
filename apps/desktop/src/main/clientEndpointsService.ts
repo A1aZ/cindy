@@ -45,6 +45,7 @@
  * isDev 语义在此内联为 !app.isPackaged。
  */
 
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -71,7 +72,7 @@ import {
   formatCacheSavedAt,
   readEndpointManifestCache,
   writeEndpointManifestCache,
-  TRUSTED_ENDPOINT_DOMAINS,
+  REGION_ENDPOINT_DOMAIN,
 } from './endpointManifestCache';
 import {
   buildEndpointManifestDialogContent,
@@ -103,6 +104,19 @@ const DEFAULT_REALM_MANIFEST_BASE_URLS: RealmManifestBaseUrls =
         cn: ENDPOINT_MANIFEST_BASE_URL,
         global: ENDPOINT_MANIFEST_PEER_BASE_URL,
       };
+/**
+ * **缓存**端点的来源策略(编译期锚点):非跨区端点必须落在本构建区域的域内。
+ *
+ * 按区域收紧、而不是「两个域都信」:线上两份清单都没有 region 字段、region 本身也是
+ * 清单里未认证的数据,所以并集会让 CN 构建接受一份把 authApiBaseUrl 换成 Global 真实
+ * 服务的伪造缓存,离线启动后把 CN 的 token 发去 Global(review 抓到)。
+ * 详见 endpointManifestCache.ts 的 REGION_ENDPOINT_DOMAIN / CROSS_REGION_ENDPOINT_KEYS。
+ */
+const CACHED_ENDPOINT_ORIGIN_POLICY = {
+  regionDomain: REGION_ENDPOINT_DOMAIN[BUILD_AUTH_REGION],
+  crossRegionDomain: REGION_ENDPOINT_DOMAIN.global,
+} as const;
+
 /** 单次请求的网络超时——只用于触发错误框,不是静默降级。 */
 const ATTEMPT_TIMEOUT_MS = 15_000;
 
@@ -589,8 +603,14 @@ function resolveDialogLocale(): EndpointManifestDialogLocale {
   return resolvePreferredSystemLocale(langs.length > 0 ? langs : [app.getLocale()]);
 }
 
-/** netlog 固定文件名:每次失败覆盖同一份,避免在日志目录里无界堆积。 */
-const ENDPOINT_NETLOG_FILE_NAME = 'endpoint-netlog.json';
+/**
+ * netlog 文件名前缀。**不能用固定名**(review 抓到:endpointManifestCache 的写路径修好了,
+ * 这条独立的 netlog 路径还敞着):别的进程能写日志目录时,可以在启动诊断跑之前把
+ * `endpoint-netlog.json` 预置成 symlink(Chromium 覆写链接目标)或 FIFO(Chromium 的
+ * open 卡住,而 NETLOG_STEP_TIMEOUT_MS 只解除我们的等待、并不取消它的文件系统副作用)。
+ * 所以每次用带 pid + 随机后缀的唯一名,并先独占创建成常规文件再交给 netLog。
+ */
+const ENDPOINT_NETLOG_PREFIX = 'endpoint-netlog';
 /** 诊断用的额外一次请求预算,比正常尝试短——用户已经在等弹框。 */
 const DIAGNOSIS_ATTEMPT_TIMEOUT_MS = 5_000;
 /**
@@ -601,14 +621,48 @@ const DIAGNOSIS_ATTEMPT_TIMEOUT_MS = 5_000;
 const NETLOG_STEP_TIMEOUT_MS = 3_000;
 
 /**
- * netlog 落盘路径。**日志目录拿不到(含空串)时返回 null,调用方必须跳过抓取**:
- * initLogger 建目录失败时 getLogDir() 保持空串,`path.join('', name)` 会得到相对路径,
- * 于是 netlog 落到 process.cwd()——dev 下正是仓库工作区,既违反
- * credentials-and-local-storage.md 的落盘位置规则,还会在被 Git 跟踪的目录里留生成物。
+ * 准备一个可以安全交给 `netLog.startLogging()` 的 netlog 文件路径。
+ *
+ * **日志目录拿不到(含空串)时返回 null,调用方必须跳过抓取**:initLogger 建目录失败时
+ * getLogDir() 保持空串,`path.join('', name)` 会得到相对路径,于是 netlog 落到
+ * process.cwd()——dev 下正是仓库工作区,既违反 credentials-and-local-storage.md 的落盘
+ * 位置规则,还会在被 Git 跟踪的目录里留生成物。
+ *
+ * 拿到目录后做两件事:
+ *  1. **先清掉本前缀的旧文件**。唯一名意味着不再自动覆盖同一份,不清理就会每次失败留一个
+ *     新文件、在日志目录里无界堆积(reviewer 要求的 "clean up or rotate");
+ *  2. 用 pid + 随机后缀生成唯一名,并以 `'wx'`(O_CREAT|O_EXCL)**独占创建**后立刻关闭。
+ *     独占创建保证这个路径不是别人预置的 symlink / FIFO;交给 netLog 时它覆写的是我们
+ *     刚建的常规文件。随机名让"先占位"这条路本身失效。
+ * 任何异常都返回 null(诊断是辅助,绝不能变成启动失败源)。
  */
-export function resolveEndpointNetLogPath(logDir: string | null): string | null {
-  if (!logDir?.trim()) return null;
-  return path.join(logDir, ENDPOINT_NETLOG_FILE_NAME);
+export function prepareEndpointNetLogFile(logDir: string | null): string | null {
+  const dir = logDir?.trim();
+  if (!dir) return null;
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.startsWith(`${ENDPOINT_NETLOG_PREFIX}.`) && name !== `${ENDPOINT_NETLOG_PREFIX}.json`) {
+        continue;
+      }
+      try {
+        fs.rmSync(path.join(dir, name), { force: true });
+      } catch {
+        // 删不掉旧的不影响本次抓取,最多多留一份。
+      }
+    }
+  } catch {
+    // 目录列不出来(权限/竞态)不阻断:下面的独占创建仍然是安全的。
+  }
+  const file = path.join(
+    dir,
+    `${ENDPOINT_NETLOG_PREFIX}.${process.pid}.${randomBytes(6).toString('hex')}.json`,
+  );
+  try {
+    fs.closeSync(fs.openSync(file, 'wx', 0o600));
+    return file;
+  } catch {
+    return null;
+  }
 }
 
 /** netLog 里本模块用到的两个方法(测试注入内存实现,不起 Electron)。 */
@@ -682,7 +736,7 @@ export async function captureNetLogAround(
  */
 async function captureEndpointNetLog(): Promise<string | null> {
   try {
-    const file = resolveEndpointNetLogPath(getLogDirSafe());
+    const file = prepareEndpointNetLogFile(getLogDirSafe());
     if (!file) {
       log.debug('netlog capture skipped: log directory unavailable');
       return null;
@@ -774,16 +828,19 @@ function loadOfflineManifestCandidate(
     return null;
   }
   // 安全边界:这个文件在 userData、可被其他进程写,严格解析只管语法不管来源。
-  // 按源码里写死的 TRUSTED_ENDPOINT_DOMAINS 拒掉攻击者自选的主机——否则一份被改过的
-  // 缓存 + 一次 CDN 不可达,就能让 authManager 把 access token 发到对方主机。
-  // (曾经是"从自举基址去掉最左一段推导",那在多段公共后缀上会放宽信任,已废弃;
-  //  勿改回推导,理由见 endpointManifestCache.ts 的 TRUSTED_ENDPOINT_DOMAINS。)
-  const untrusted = findUntrustedCachedEndpoint(parsed.endpoints, TRUSTED_ENDPOINT_DOMAINS);
+  // 按 CACHED_ENDPOINT_ORIGIN_POLICY 逐 key 校验来源域,拒掉攻击者自选的主机,也拒掉
+  // 「换成另一区域的真实服务」——否则一份被改过的缓存 + 一次 CDN 不可达,就能让
+  // authManager 把 access token 发到对方主机或对方区域。
+  // 两条废弃做法都别改回去(理由见 endpointManifestCache.ts):从自举基址推导域(多段
+  // 公共后缀上会放宽信任)、以及只给一个「两区域并集」的域清单(线上清单没有 region,
+  // 并集等于允许跨区替换)。
+  const untrusted = findUntrustedCachedEndpoint(parsed.endpoints, CACHED_ENDPOINT_ORIGIN_POLICY);
   if (untrusted) {
     log.error(
-      'cached endpoint manifest rejected: endpoint %s outside trusted domains [%s]',
+      'cached endpoint manifest rejected: endpoint %s outside build-region domain %s (cross-region keys allow %s)',
       untrusted,
-      TRUSTED_ENDPOINT_DOMAINS.join(', '),
+      CACHED_ENDPOINT_ORIGIN_POLICY.regionDomain,
+      CACHED_ENDPOINT_ORIGIN_POLICY.crossRegionDomain,
     );
     return null;
   }
@@ -832,18 +889,19 @@ export async function initClientEndpoints(): Promise<boolean> {
   const manifestUrl = `${ENDPOINT_MANIFEST_BASE_URL}/${MANIFEST_FILE_NAME}`;
   const sourceLabel = source.kind === 'cdn' ? manifestUrl : source.filePath;
   const dialogLocale = resolveDialogLocale();
-  // 自检:写死的受信任域必须覆盖本构建实际使用的两个自举基址。域名迁移时忘了更新
-  // TRUSTED_ENDPOINT_DOMAINS 的后果是离线出口 fail closed(新域名的缓存判不可信),
+  // 自检:写死的区域域名必须覆盖本构建实际使用的两个自举基址。域名迁移时忘了更新
+  // REGION_ENDPOINT_DOMAIN 的后果是离线出口 fail closed(新域名的缓存判不可信),
   // 这条 error 日志保证它不会静默失效到没人知道。不阻断启动:主路径不消费该清单。
+  const knownRegionDomains = Object.values(REGION_ENDPOINT_DOMAIN);
   const untrustedBootstrap = findBootstrapHostOutsideTrustedDomains(
     [ENDPOINT_MANIFEST_BASE_URL, ENDPOINT_MANIFEST_PEER_BASE_URL],
-    TRUSTED_ENDPOINT_DOMAINS,
+    knownRegionDomains,
   );
   if (untrustedBootstrap) {
     log.error(
-      'bootstrap host %s is outside TRUSTED_ENDPOINT_DOMAINS [%s]; offline start will be unavailable until the list is updated',
+      'bootstrap host %s is outside REGION_ENDPOINT_DOMAIN [%s]; offline start will be unavailable until the list is updated',
       untrustedBootstrap,
-      TRUSTED_ENDPOINT_DOMAINS.join(', '),
+      knownRegionDomains.join(', '),
     );
   }
   // The resolver reports the parsed manifest through a callback. Keep it in a

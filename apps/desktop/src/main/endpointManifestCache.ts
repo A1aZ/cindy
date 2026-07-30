@@ -13,14 +13,15 @@
  *    绕过一次真实的配置错);
  *  - 读回来的原文必须重新走同一套严格解析,磁盘内容不被信任;
  *  - 记录写入时的清单地址,升级或换区导致自举基址变化时缓存直接作废;
- *  - **端点主机必须落在写死的受信任域内**(见 TRUSTED_ENDPOINT_DOMAINS)。
+ *  - **端点主机必须落在写死的、按构建区域收紧的域内**(见 REGION_ENDPOINT_DOMAIN;
+ *    只有 slack / telegram hook 这两个跨区共享服务例外)。
  *
  * 最后一条是安全边界,不是洁癖(review 抓到):这个文件位于 userData,可被其他进程
  * 写。严格解析只保证**语法**合法,不保证来源可信——攻击者写一份把 authApiBaseUrl
  * 指向自己 https 主机的缓存,再让清单 CDN 不可达,用户点「用上次配置启动」之后
  * authManager 就会把 access token 发到那台主机(凭证泄露)。真正的修法是服务端签名,
- * 但那是跨仓改动;在此之前用**编译期锚点**把爆炸半径收掉:受信任域是源码里写死的
- * 产品域(TRUSTED_ENDPOINT_DOMAINS),任何 userData 写入都改不了它。
+ * 但那是跨仓改动;在此之前用**编译期锚点**把爆炸半径收掉:允许的域是源码里写死的、
+ * 且按构建区域收紧的(REGION_ENDPOINT_DOMAIN),任何 userData 写入都改不了它。
  *
  * 存储位置按 credentials-and-local-storage.md:Desktop 持久数据放
  * `app.getPath('userData')`。清单本身是 CDN 上公开可读的配置,不含任何凭证。
@@ -189,26 +190,55 @@ export function writeEndpointManifestCache(
 // ── 缓存端点的受信任域约束 ──────────────────────────────────────────────────
 
 /**
- * **显式写死的受信任域**——离线缓存唯一的信任锚点。
+ * **各构建区域的端点域**——离线缓存的信任锚点,写死在源码里。
  *
- * 为什么不从自举基址「去掉最左一段」推导(review 抓到,这是上一版的真实漏洞):那样做
- * 在多段公共后缀上会**放宽**信任。`https://example.co.uk` 去掉一段得到 `co.uk`,于是
- * 任何人注册的 `attacker.co.uk` 都被判成可信,改缓存的进程又能把凭证引走。要正确推导
- * 注册域必须查公共后缀表(PSL);为一处启动期校验引入 PSL 数据不划算,而且推导本身
- * 并不比一份显式清单更可靠。
+ * 为什么不从自举基址「去掉最左一段」推导(第一次 review 抓到):那样做在多段公共后缀上
+ * 会**放宽**信任。`https://example.co.uk` 去掉一段得到 `co.uk`,于是任何人注册的
+ * `attacker.co.uk` 都被判成可信。要正确推导注册域必须查公共后缀表(PSL);为一处启动期
+ * 校验引入 PSL 数据不划算,而且推导本身并不比一份显式清单更可靠。
  *
- * 所以这里写死两个产品域。它是**安全常量**(性质同证书固定),不是"生产端点地址"——
- * shared/endpoints.ts 不保存业务端点是为了让端点能远程改;信任锚点恰恰**不能**远程改,
- * 否则它就不是锚点了。
+ * 为什么必须**按区域分开**、不能给一个「两个域都信」的并集(第二次 review 抓到,这是
+ * 上一版的真实漏洞):两份线上清单都**没有** `region` 字段,而 `region` 本身也是清单里
+ * 的、未认证的数据。并集 + 缺失 region 的组合意味着——CN 构建下,攻击者只要伪造一份
+ * sourceUrl 匹配 CN 的缓存、把 `authApiBaseUrl` 换成 Global 的**真实**服务
+ * (`https://auth.cindy.app`),就能通过全部校验;用户点离线启动后,CN 的 token 会被
+ * 发到 Global 区域。跨区 token 误发正是 auth-realm 设计里最要防的事。
  *
- * 两个域都要:CN 清单里 slack / telegram hook 落在 cindy.app、其余在 cindy.com.cn,
- * 只留本区那个会把这两个合法端点判成不可信。
+ * 这些常量是**安全常量**(性质同证书固定),不是"生产端点地址"——shared/endpoints.ts
+ * 不保存业务端点是为了让端点能远程改;信任锚点恰恰**不能**远程改,否则它就不是锚点。
  *
  * 域名迁移时必须同步更新这里。忘了更新的后果是 fail closed——新域名的缓存被判不可信、
  * 离线按钮消失,并由 findBootstrapHostOutsideTrustedDomains 在启动日志里报出来;
- * 绝不会反过来继续信任旧域名之外的东西。
+ * 绝不会反过来继续信任别的东西。
  */
-export const TRUSTED_ENDPOINT_DOMAINS: readonly string[] = ['cindy.app', 'cindy.com.cn'];
+export const REGION_ENDPOINT_DOMAIN: Readonly<Record<'cn' | 'global', string>> = {
+  cn: 'cindy.com.cn',
+  global: 'cindy.app',
+};
+
+/**
+ * 跨区共享的 hook 服务:两份清单(含 CN)都指向 cindy.app,所以只有这两个 key 允许
+ * 落在 Global 域。**别往这里加 key** —— 每加一个就等于允许该端点跨区,而这个集合之外
+ * 的所有端点(尤其 auth / device-link / oauth-broker / model-access / voice)必须锁在
+ * 本构建区域,否则就回到上面说的跨区 token 误发。
+ */
+export const CROSS_REGION_ENDPOINT_KEYS: ReadonlySet<string> = new Set([
+  'slackHookWsUrl',
+  'telegramHookWsUrl',
+]);
+
+/** 缓存端点的来源策略:按 key 决定它允许落在哪个域。 */
+export interface CachedEndpointOriginPolicy {
+  /** 本构建区域的端点域(REGION_ENDPOINT_DOMAIN[buildRegion])。 */
+  regionDomain: string;
+  /** 跨区共享 hook 允许落在的域(固定是 Global 域)。 */
+  crossRegionDomain: string;
+}
+
+/** 某个 key 允许落在的域。 */
+function allowedDomainForKey(key: string, policy: CachedEndpointOriginPolicy): string {
+  return CROSS_REGION_ENDPOINT_KEYS.has(key) ? policy.crossRegionDomain : policy.regionDomain;
+}
 
 function hostOf(rawUrl: string): string | null {
   try {
@@ -227,24 +257,19 @@ function hostOf(rawUrl: string): string | null {
  */
 export function findBootstrapHostOutsideTrustedDomains(
   bootstrapBaseUrls: readonly string[],
-  trustedDomains: readonly string[] = TRUSTED_ENDPOINT_DOMAINS,
+  trustedDomains: readonly string[] = Object.values(REGION_ENDPOINT_DOMAIN),
 ): string | null {
   for (const baseUrl of bootstrapBaseUrls) {
     if (!baseUrl?.trim()) continue;
     const host = hostOf(baseUrl);
     if (!host) return baseUrl;
-    if (!isHostWithinDomains(host, trustedDomains)) return host;
+    if (!isHostWithinDomain(host, trustedDomains)) return host;
   }
   return null;
 }
 
-function isHostWithinDomains(host: string, trustedDomains: readonly string[]): boolean {
-  return trustedDomains.some((domain) => host === domain || host.endsWith(`.${domain}`));
-}
-
-function isWithinTrustedDomains(rawUrl: string, trustedDomains: readonly string[]): boolean {
-  const host = hostOf(rawUrl);
-  return host !== null && isHostWithinDomains(host, trustedDomains);
+function isHostWithinDomain(host: string, domains: readonly string[]): boolean {
+  return domains.some((domain) => host === domain || host.endsWith(`.${domain}`));
 }
 
 /**
@@ -256,12 +281,14 @@ function isWithinTrustedDomains(rawUrl: string, trustedDomains: readonly string[
  */
 export function findUntrustedCachedEndpoint(
   endpoints: Readonly<Record<string, string>>,
-  trustedDomains: readonly string[] = TRUSTED_ENDPOINT_DOMAINS,
+  policy: CachedEndpointOriginPolicy,
 ): string | null {
-  if (trustedDomains.length === 0) return 'trusted-domains-unavailable';
+  if (!policy.regionDomain || !policy.crossRegionDomain) return 'origin-policy-unavailable';
   for (const [key, value] of Object.entries(endpoints)) {
     if (!value) continue;
-    if (!isWithinTrustedDomains(value, trustedDomains)) return key;
+    const host = hostOf(value);
+    if (host === null) return key;
+    if (!isHostWithinDomain(host, [allowedDomainForKey(key, policy)])) return key;
   }
   return null;
 }

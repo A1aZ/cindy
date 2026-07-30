@@ -195,11 +195,13 @@ function createHarness() {
     NonNullable<AgentInputCoordinatorDeps['persistQueueSnapshot']>
   >();
   const onUiRetry = vi.fn<NonNullable<AgentInputCoordinatorDeps['onUiRetry']>>(() => {});
+  const onUserEnqueue = vi.fn<NonNullable<AgentInputCoordinatorDeps['onUserEnqueue']>>(() => {});
   const coordinator = new AgentInputCoordinator({
     sendToAgent,
     steerToAgent,
     abortSession,
     onUiRetry,
+    onUserEnqueue,
     isTurnRunning: () => running,
     reconcileTurnIdle,
     hasPendingInteraction: () => pendingInteraction,
@@ -244,6 +246,7 @@ function createHarness() {
     emitProjection,
     projections,
     onUiRetry,
+    onUserEnqueue,
     setRunning(value: boolean) {
       running = value;
     },
@@ -2041,6 +2044,29 @@ describe('AgentInputCoordinator send transaction', () => {
       expect(h.onUiRetry).toHaveBeenCalledWith(sid);
       expect(h.onUiRetry).toHaveBeenCalledTimes(1);
     }
+  });
+
+  it('retry does not report a user enqueue (it must not invalidate its own reopen)', async () => {
+    // 防漂移锁: 渠道回流的作废判据一度按**消息文本**做(非续跑指令即视为无关介入),
+    // 而零产出重试重发的是原文 —— 那会让它撤掉自己刚挂上的观察器, 把本能力最主要的
+    // 场景又打回原样。判据因此改成**入口**: enqueue 才算新消息, retry 走 unshift。
+    const h = createHarness();
+    const sid = 'retry-not-enqueue';
+    h.setHasAssistantProgressAfter(async () => false);
+
+    h.coordinator.enqueue(sid, makeItem('q-first', 'original task'));
+    await flush();
+    expect(h.onUserEnqueue).toHaveBeenCalledWith(sid);
+    h.onUserEnqueue.mockClear();
+
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'error', 'turn failed');
+    await flush();
+    await h.coordinator.retryLastError(sid);
+    await flush();
+
+    expect(h.onUiRetry).toHaveBeenCalledWith(sid);
+    expect(h.onUserEnqueue).not.toHaveBeenCalled();
   });
 
   it('does not signal a UI retry when there is nothing to recover', async () => {

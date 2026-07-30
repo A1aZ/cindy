@@ -1679,6 +1679,23 @@ describe('watchContinuation: 观察桌面端续跑并回流', () => {
     }
   });
 
+  it('账号级事件(account_usage)不算首个 turn 事件 -> 不认领', () => {
+    // session 事件流里混着账号级 fan-out。空闲 Codex 会话在观察器挂上后、排队的重试
+    // 还没开跑时就可能发一条 —— 若把它当成首个事件, 渠道消息会立刻被改成"进行中"
+    // 并撤掉 2 分钟空转兜底, 万一那次重试随后被挡就假"进行中"到 1 小时硬超时。
+    fakeMaker.getSession.mockReturnValueOnce(makeManualSession('sess-live'));
+    const runner = createMakerHookSessionRunner({ log });
+    const { req, events } = watchReq();
+    runner.watchContinuation!(req as never);
+
+    const cb = h.eventCbs.get('sess-live')!;
+    cb({ type: 'account_usage', data: { credits: 1 } });
+    expect(events).toEqual([]);
+    // 真正属于这一轮的事件才认领。
+    cb({ type: 'text', data: { text: '继续', isFinal: false } });
+    expect(events).toEqual(['claim']);
+  });
+
   it('会话在等待窗口内被 lazy-create -> 照常挂上观察, 不丢这一轮', () => {
     // 失败的那一轮若同时终止了 CLI 流 / 远端 daemon, maker 会先移除 session, 而重试
     // 信号是 coordinator 在真正 drain 之前同步发的 —— 替代实例还没建出来。

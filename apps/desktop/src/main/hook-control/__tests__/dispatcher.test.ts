@@ -2137,7 +2137,7 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     expect(c.ofType('turn.reopen')).toHaveLength(1);
   });
 
-  it('一个事件都没等到(onAbandon) -> 不发任何帧, 记账已消耗不重试', async () => {
+  it('一个事件都没等到(onAbandon) -> 不发任何帧, 但记账还回去让下次重试还能接上', async () => {
     const { cr, sig, c, sessionId } = await failOneTask();
     sig.fire(sessionId);
     await tick();
@@ -2146,7 +2146,34 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     expect(c.ofType('turn.reopen')).toHaveLength(0);
     expect(c.ofType('turn.end').filter((m) => m.payload.requestId !== 'req-1')).toHaveLength(0);
 
-    // 记账是一次性的: 同一条不会被第二个信号重复认领。
+    // 渠道那条消息**没被改写过**, 所以这笔记账仍然有效: 远端会话重建慢于等待窗口
+    // (SSH 重连 / 凭证切换)时, 不还回去回流就永久丢了 —— 正是本能力要修的症状。
+    sig.fire(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(2);
+  });
+
+  it('认领**前**被外部撤销 -> onAbandon 不还记账(那条消息线已交给新任务)', async () => {
+    // 与上一条的区别: 那条是"没人撤、只是没等到事件"(记账该还); 这条是"被撤销"
+    // (记账不该还, 否则一次续跑信号会把用户带回一条早已过期的消息)。撤销发生在
+    // onClaim 之前, 走的是 onAbandon + revoked 这条路径。
+    const { cr, sig, c, d, sessionId } = await failOneTask();
+    cr.sessions[sessionId] = { workingDir: WS_DIR, usable: true };
+    sig.fire(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(1);
+
+    // 新任务接管 -> dropContinuation -> 撤销(此时还没认领)。
+    d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
+    await tick();
+    expect(cr.cancels).toEqual([0]);
+    // runner 按契约在撤销后收口; 未认领即 onAbandon。
+    cr.watches[0]!.onAbandon();
+    await tick();
+
+    // 新任务成功收口后再来一次续跑信号: 不该有任何"等着被续跑"的记账复活。
+    cr.finish({ status: 'ok', finalText: '这次好了', errorMessage: null });
+    await tick();
     sig.fire(sessionId);
     await tick();
     expect(cr.watches).toHaveLength(1);

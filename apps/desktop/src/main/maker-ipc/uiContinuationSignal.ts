@@ -71,24 +71,22 @@ export function publishUiContinuation(sessionId: string): void {
  * content: prompt }), 数组形态一律不是续跑, 不必展平。
  */
 export function noteUserMessageForContinuation(sessionId: string, content: unknown): void {
-  if (typeof content === 'string' && syntheticTriggerKind(content) === 'continue') {
-    publishUiContinuation(sessionId);
-    return;
-  }
-  // 不是续跑指令 = 用户在这个会话里做了**别的**事。渠道那条失败消息的续跑记账到此
-  // 作废: 会话已经被无关内容推进, 之后再把结果接回去只会用无关输出改写那条消息。
-  publishUiSessionIntervention(sessionId);
+  if (typeof content !== 'string') return;
+  if (syntheticTriggerKind(content) !== 'continue') return;
+  publishUiContinuation(sessionId);
 }
 
 /**
- * 订阅「桌面端在某会话里做了与续跑无关的事」。
+ * 订阅「某会话被一条**新**消息推进了」(coordinator 的 enqueue 入口)。
  *
- * hook-control 用它作废待续跑记账。为什么需要单独一条信号: 记账只按 sessionId 记,
- * 而普通桌面 turn 不经 hook-control —— 没有它, 一笔失败记账会一直躺着, 直到用户在
- * 跑过别的 turn **之后**点重试, 那时观察器会把那个无关 turn 的输出写进渠道原消息。
+ * hook-control 用它作废待续跑记账与尚未认领的观察器。为什么需要单独一条信号: 记账
+ * 只按 sessionId 记, 而普通桌面 turn 不经 hook-control —— 没有它, 一笔失败记账会一直
+ * 躺着, 直到用户在跑过别的 turn **之后**点重试, 那时观察器会把那个无关 turn 的输出
+ * 写进渠道原消息。
  *
- * 时序上安全: coordinator 的重试信号是在 drain **之前**同步发的, 所以真正的续跑
- * 重试先发 continuation 信号(记账已被消耗), 随后那条原文消息落到本信号时已是 no-op。
+ * 判据必须是**入口**而不是消息文本: retryLastError 的零产出分支重发的是原文, 文本上
+ * 与一条新消息无从区分。早先按文本判(非续跑指令即视为介入)会让零产出重试**撤掉自己**
+ * 正在等 live session 的那个观察器 —— 恰好把本能力最主要的场景又打回原样。
  */
 export function onUiSessionIntervention(listener: UiContinuationListener): () => void {
   interventionListeners.add(listener);

@@ -207,6 +207,15 @@ export interface AgentInputCoordinatorDeps {
    */
   onUiRetry?: (sessionId: string) => void;
   /**
+   * 用户/上游把一条**新**消息排进了这个会话(enqueue 入口)。
+   *
+   * hook-control 用它作废该会话的待续跑记账: 会话已经被别的内容推进, 再把结果接回
+   * 渠道那条旧消息只会显示无关输出。判据刻意用**入口**而不是消息文本 ——
+   * retryLastError 的零产出分支重发的是原文, 文本上与新消息无从区分, 而它走的是
+   * pendingQueue.unshift、不经本入口, 于是不会自我作废。
+   */
+  onUserEnqueue?: (sessionId: string) => void;
+  /**
    * 派发失败后队列可能已空(项目已从队列移除但未被放回时)回调。
    * host 用它触发 notifyQueueEmptied, 让 AgentIsland 中因队列非空而延迟的完成事件得到补发。
    * Thread 3 fix: drain/dispatchCompact 失败路径在 item 未回退到队列时调用。
@@ -756,6 +765,9 @@ export class AgentInputCoordinator {
   ): AgentInputProjection {
     const state = this.getState(sessionId);
     item = captureOriginalSyntheticTrigger(item);
+    // 新消息进队 = 这个会话被别的内容推进(见 deps.onUserEnqueue)。放在幂等去重
+    // **之前**无害: 重复投递的是同一条消息, 作废记账本就该发生一次以上也无副作用。
+    this.deps.onUserEnqueue?.(sessionId);
     // 幂等去重(弱网重发防线,PR #881):同 clientId 重复投递说明是控制端(手机
     // 断连自动重试 / 用户对 ack 丢失的消息重发)在补发同一条消息,不是新消息。
     // 直接返回当前 projection、不再入队——否则同一条消息双入队、agent 跑两轮。

@@ -822,7 +822,18 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
           });
         }
       },
-      onAbandon: cleanup,
+      onAbandon: () => {
+        cleanup();
+        // 一个事件都没等到(排队被挡 / 凭证切换 / live session 迟迟没起来)。渠道那条
+        // 消息**没有被改写过**, 所以这笔记账仍然有效 —— 还回去, 让用户再点一次重试
+        // 还能接上。不还的话, 远端会话重建慢于等待窗口(SSH 重连 / 凭证切换)时回流就
+        // 永久丢了, 而那正是本能力要修的症状。
+        // 被外部撤销的不还(revoked): 那条消息线已经交给别人了, 见 dropContinuation。
+        // 刻意不刷新 expiresAt: 原 TTL 到点即失效, 避免反复 abandon 无限延期。
+        if (revoked || !isCurrentGeneration(entry.accountGeneration)) return;
+        if (Date.now() > entry.expiresAt) return;
+        pendingReopens.set(sessionId, entry);
+      },
     });
     if (!settledEarly) {
       activeContinuations.set(sessionId, {

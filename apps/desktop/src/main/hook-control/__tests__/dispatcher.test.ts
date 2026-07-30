@@ -2349,6 +2349,40 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     expect(c.ofType('turn.progress')).toHaveLength(1);
   });
 
+  it('观察器已挂但**未认领**时来了无关消息 -> 撤掉它, 不让无关 turn 认领', async () => {
+    // 认领要等首个事件。目标续跑还在排队 / 冷启动时, 同一会话的新桌面消息若先跑起来,
+    // 会话级观察器会把它的首个事件当成目标续跑 —— 用无关内容改写渠道原消息。
+    const { cr, sig, c, sessionId } = await failOneTask();
+    sig.fire(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(1);
+    expect(cr.cancels).toHaveLength(0);
+
+    sig.intervene(sessionId);
+    expect(cr.cancels).toHaveLength(1);
+
+    // 撤销后即使无关 turn 的事件到了, 也不该认领、不该发帧。
+    cr.latest().onClaim();
+    cr.latest().onProgress('无关内容');
+    await tick();
+    expect(c.ofType('turn.reopen')).toHaveLength(0);
+    expect(c.ofType('turn.progress')).toHaveLength(0);
+  });
+
+  it('已认领的续跑轮不因无关消息被撤(它已在往渠道写, 后来的消息只会排队)', async () => {
+    const { cr, sig, c, sessionId } = await failOneTask();
+    sig.fire(sessionId);
+    await tick();
+    cr.latest().onClaim();
+    expect(c.ofType('turn.reopen')).toHaveLength(1);
+
+    sig.intervene(sessionId);
+    expect(cr.cancels).toHaveLength(0);
+    cr.latest().onProgress('续跑进度');
+    await tick();
+    expect(c.ofType('turn.progress')).toHaveLength(1);
+  });
+
   it('dispose() 退订信号源(不只是清记账)', async () => {
     // 直接断言订阅数, 不看下游行为: dispose 同时清了 pendingReopens, 只看
     // "有没有起观察" 的话, 即使退订漏了也照样为 0 —— 那样这条锁就是假的。

@@ -572,7 +572,10 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
    * 记归属连接是为了在该连接断开时精确撤掉它们 —— 断连是续跑回流的终局
    * (见 onDisconnected), 不能让观察器活到重连后继续用已被 server 解绑的 id 发帧。
    */
-  const activeContinuations = new Map<string, { connectionId: string; cancel: () => void }>();
+  const activeContinuations = new Map<
+    string,
+    { connectionId: string; isClaimed: () => boolean; cancel: () => void }
+  >();
   /** 正在因"新任务接管"而撤销的 session —— 它的收口不得再记待续跑(见 dropContinuation)。 */
   let suppressReopenFor: string | null = null;
   // 退订句柄由 dispose() 消费。刻意**不**在 deactivateAccount 里退订: 换账号后
@@ -586,6 +589,16 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
   // (它的事件流就是渠道消息的当前内容), 由收口 / 撤销 / 超时管。
   const unsubscribeUiIntervention =
     subscribeUiSessionIntervention?.((sessionId) => {
+      // 还挂着但**尚未认领**的观察器也要撤: 它还没绑定到任何具体 turn, 而这条无关
+      // 消息的 turn 很可能先产生首个事件 —— 那就会被当成目标续跑认领, 用无关内容
+      // 改写渠道原消息。已认领的不动: 那一轮确实在跑且已经在往渠道写, 后来的消息
+      // 只会排在它后面(会话忙), 观察器看到的仍是它自己的事件。
+      const watching = activeContinuations.get(sessionId);
+      if (watching && !watching.isClaimed()) {
+        dropContinuation(sessionId);
+        log.info(`hook continuation dropped before claim: an unrelated desktop turn intervened`);
+        return;
+      }
       if (pendingReopens.delete(sessionId)) {
         log.info(
           `hook pending reopen dropped: an unrelated desktop turn intervened (${sessionId})`,
@@ -740,7 +753,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       ...(entry.source ? { source: entry.source } : {}),
       laneKind: deriveLaneKind(entry.externalKey),
       onClaim: () => {
-        if (!isCurrentGeneration(entry.accountGeneration)) return;
+        if (revoked || !isCurrentGeneration(entry.accountGeneration)) return;
         const send = sendFns.get(entry.connectionId);
         // 连接不在线: reopen 是"把消息接回来"的即时动作, 缓存补发没有意义
         // (等重连时那轮早跑完了)。不认领 = 消息保持原样, 与旧行为一致。
@@ -814,6 +827,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     if (!settledEarly) {
       activeContinuations.set(sessionId, {
         connectionId: entry.connectionId,
+        isClaimed: () => claimed,
         cancel: () => {
           revoked = true;
           cancelWatch();

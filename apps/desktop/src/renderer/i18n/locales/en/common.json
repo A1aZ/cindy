@@ -5035,7 +5035,21 @@
         "aria": "Conversation compacted"
       },
       "autoResume": {
+        "label": "Reconnected",
+        "labelFailed": "Reconnect failed",
+        "labelNeutral": "Reconnect",
+        "detail": {
+          "reason": "Interruption reason",
+          "attempt": "Attempt {{attempt}}/{{total}}",
+          "sessionTotal": "{{count}} reconnects in this conversation"
+        }
+      },
+      "autoResumeSeparator": {
         "label": "Connection interrupted — resumed automatically"
+      },
+      "autoResumePending": {
+        "label": "Reconnecting",
+        "labelWithProgress": "Reconnecting {{attempt}}/{{total}}"
       },
       "agentSwitch": {
         "label": "Switched from {{from}} to {{to}}",

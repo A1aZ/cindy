@@ -90,6 +90,10 @@ Cindy 显式设置:models.json、`--append-system-prompt`、`--session-dir`、�
 - ✅ **HTML 导出**(已交付):`export_html` RPC 全链路,会话头部菜单「导出为 HTML」,
   仅当前打开的本地 pi 会话可见。见 `Capabilities.sessionHtmlExport` /
   `Session.exportSessionHtml` / `MAKER_INVOKE.EXPORT_SESSION_HTML`。
+- ✅ **手动压缩**(已交付):`compact` RPC 全链路,会话头部菜单「压缩上下文」,gate 同
+  HTML 导出、回合运行中禁用。良性「nothing to compact / too small」→ `noop`(不报失败)。
+  见 `Capabilities.manualCompact` / `Session.compactSession` / `MAKER_INVOKE.COMPACT_SESSION`。
+  注:pi 斜杠转义后用户无法手输 `/compact`,此菜单是 pi 会话手动压缩的唯一入口。
 - **压缩即记忆**:bridge 接 `session_before_compact` → cindy_memory 管道。需 LLM 摘要
   决策(裸 dump 会污染 memory),不能纯机械转存 —— 设计待定。
 - **subagent 接 pi 轻量引擎**。

@@ -130,6 +130,7 @@ function makeDispatcher(overrides?: {
   dialogue?: HookDispatcherDeps['dialogue'];
   abortSession?: HookDispatcherDeps['abortSession'];
   subscribeUiContinuation?: HookDispatcherDeps['subscribeUiContinuation'];
+  subscribeUiSessionIntervention?: HookDispatcherDeps['subscribeUiSessionIntervention'];
   accountInitiallyActive?: boolean;
 }) {
   const bindings = overrides?.bindings ?? memoryBindings();
@@ -143,6 +144,7 @@ function makeDispatcher(overrides?: {
     dialogue: overrides?.dialogue,
     abortSession: overrides?.abortSession,
     subscribeUiContinuation: overrides?.subscribeUiContinuation,
+    subscribeUiSessionIntervention: overrides?.subscribeUiSessionIntervention,
     accountInitiallyActive: overrides?.accountInitiallyActive,
     log: noopLog,
   });
@@ -1966,14 +1968,23 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     };
   }
 
-  /** 一个信号源(测试手动触发"用户在桌面端续跑了")。 */
+  /** 一个信号源(测试手动触发"用户在桌面端续跑了" / "做了别的事")。 */
   function signalSource() {
     const listeners = new Set<(sessionId: string) => void>();
+    const interveners = new Set<(sessionId: string) => void>();
     return {
       subscribe: ((listener) => {
         listeners.add(listener);
         return () => listeners.delete(listener);
       }) as NonNullable<HookDispatcherDeps['subscribeUiContinuation']>,
+      subscribeIntervention: ((listener) => {
+        interveners.add(listener);
+        return () => interveners.delete(listener);
+      }) as NonNullable<HookDispatcherDeps['subscribeUiSessionIntervention']>,
+      /** 模拟"桌面端在这个会话里做了与续跑无关的事"。 */
+      intervene: (sessionId: string) => {
+        for (const l of [...interveners]) l(sessionId);
+      },
       fire: (sessionId: string) => {
         for (const l of [...listeners]) l(sessionId);
       },
@@ -1989,7 +2000,11 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     const cr = continuationRunner();
     const sig = signalSource();
     const c = collector();
-    const { d } = makeDispatcher({ runner: cr.runner, subscribeUiContinuation: sig.subscribe });
+    const { d } = makeDispatcher({
+      runner: cr.runner,
+      subscribeUiContinuation: sig.subscribe,
+      subscribeUiSessionIntervention: sig.subscribeIntervention,
+    });
     d.onConnected('conn-1', c.send, opts?.features ?? REOPEN_FEATURES);
     d.handleDispatch('conn-1', dispatch(), c.send);
     await tick();
@@ -2304,6 +2319,34 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     sig.fire(sessionId);
     await tick();
     expect(c.ofType('turn.reopen')).toHaveLength(reopensBefore);
+  });
+
+  it('中间跑过无关的桌面 turn -> 记账作废, 之后的重试不再改写渠道原消息', async () => {
+    // 记账只按 sessionId 记, 而普通桌面 turn 不经本模块。没有这条作废, 用户在跑过
+    // 别的 turn 之后点重试, 观察器会把那个无关 turn 的输出写进渠道那条旧消息。
+    // isBusy 守卫挡不住它: 点重试时会话并不忙。
+    const { cr, sig, c, sessionId } = await failOneTask();
+    sig.intervene(sessionId);
+    sig.fire(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(0);
+    expect(c.ofType('turn.reopen')).toHaveLength(0);
+  });
+
+  it('续跑本身的原文重发不会自我作废(信号先于发送事务)', async () => {
+    // coordinator 是在 drain **之前**同步发重试信号的, 所以真正的续跑先认领(记账
+    // 已消耗), 随后那条原文消息落到"无关介入"通道时只是 no-op。
+    const { cr, sig, c, sessionId } = await failOneTask();
+    sig.fire(sessionId);
+    await tick();
+    cr.latest().onClaim();
+    expect(c.ofType('turn.reopen')).toHaveLength(1);
+
+    // 模拟零产出重试重发的原文走到发送事务。
+    sig.intervene(sessionId);
+    cr.latest().onProgress('干活中');
+    await tick();
+    expect(c.ofType('turn.progress')).toHaveLength(1);
   });
 
   it('dispose() 退订信号源(不只是清记账)', async () => {

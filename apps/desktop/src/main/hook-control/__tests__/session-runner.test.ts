@@ -1662,13 +1662,43 @@ describe('watchContinuation: 观察桌面端续跑并回流', () => {
     for (let i = 0; i < times; i++) await Promise.resolve();
   }
 
-  it('会话已不在进程里 -> 同步 onAbandon, 撤销函数不炸', () => {
-    fakeMaker.getSession.mockReturnValueOnce(undefined);
-    const runner = createMakerHookSessionRunner({ log });
-    const { req, events } = watchReq();
-    const cancel = runner.watchContinuation!(req as never);
-    expect(events).toEqual(['abandon']);
-    expect(() => cancel()).not.toThrow();
+  it('会话一直不在进程里 -> 等满窗口才 onAbandon, 撤销函数不炸', () => {
+    vi.useFakeTimers();
+    try {
+      fakeMaker.getSession.mockReturnValue(undefined);
+      const runner = createMakerHookSessionRunner({ log });
+      const { req, events } = watchReq();
+      const cancel = runner.watchContinuation!(req as never);
+      // 立刻判死会把回流丢掉: 记账一次性, 而零产出重试重发原文、之后不会再有信号。
+      expect(events).toEqual([]);
+      vi.advanceTimersByTime(5_000);
+      expect(events).toEqual(['abandon']);
+      expect(() => cancel()).not.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('会话在等待窗口内被 lazy-create -> 照常挂上观察, 不丢这一轮', () => {
+    // 失败的那一轮若同时终止了 CLI 流 / 远端 daemon, maker 会先移除 session, 而重试
+    // 信号是 coordinator 在真正 drain 之前同步发的 —— 替代实例还没建出来。
+    vi.useFakeTimers();
+    try {
+      fakeMaker.getSession.mockReturnValueOnce(undefined);
+      fakeMaker.getSession.mockReturnValue(makeManualSession('sess-live'));
+      const runner = createMakerHookSessionRunner({ log });
+      const { req, events } = watchReq();
+      runner.watchContinuation!(req as never);
+      expect(events).toEqual([]);
+
+      vi.advanceTimersByTime(100);
+      // 观察器已挂上(还没认领 —— 认领要等首个事件)。
+      expect(events).toEqual([]);
+      h.eventCbs.get('sess-live')!({ type: 'text', data: { text: '继续', isFinal: false } });
+      expect(events).toEqual(['claim']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('首个事件才认领; 收口带最终正文', async () => {

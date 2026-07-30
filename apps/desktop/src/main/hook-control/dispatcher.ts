@@ -241,6 +241,13 @@ export interface HookDispatcherDeps {
    */
   subscribeUiContinuation?: (listener: (sessionId: string) => void) => () => void;
   /**
+   * 可选: 订阅「桌面端在某会话里做了与续跑无关的事」(生产为 maker-ipc 的
+   * onUiSessionIntervention)。命中即作废该会话的待续跑记账 —— 记账只按 sessionId
+   * 记, 而普通桌面 turn 不经本模块; 没有这条, 一笔失败记账会一直躺着, 直到用户在
+   * 跑过别的 turn **之后**点重试, 那时会把那个无关 turn 的输出写进渠道原消息。
+   */
+  subscribeUiSessionIntervention?: (listener: (sessionId: string) => void) => () => void;
+  /**
    * Production keeps ingress closed until the owner DB-ready callback opens
    * the account boundary. Tests and standalone consumers retain the historical
    * eager behavior unless they opt out explicitly.
@@ -473,6 +480,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     archiveSessionRow,
     resolveInteraction,
     subscribeUiContinuation,
+    subscribeUiSessionIntervention,
     accountInitiallyActive,
     log,
   } = deps;
@@ -573,6 +581,16 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
   const unsubscribeUiContinuation =
     subscribeUiContinuation?.((sessionId) => {
       onUiContinuation(sessionId);
+    }) ?? null;
+  // 无关介入只作废**记账**, 不碰在观察的那一轮: 已认领的续跑轮有自己的生命周期
+  // (它的事件流就是渠道消息的当前内容), 由收口 / 撤销 / 超时管。
+  const unsubscribeUiIntervention =
+    subscribeUiSessionIntervention?.((sessionId) => {
+      if (pendingReopens.delete(sessionId)) {
+        log.info(
+          `hook pending reopen dropped: an unrelated desktop turn intervened (${sessionId})`,
+        );
+      }
     }) ?? null;
   let accountActive = accountInitiallyActive ?? true;
   let accountGeneration = 0;
@@ -1629,6 +1647,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     },
     dispose() {
       unsubscribeUiContinuation?.();
+      unsubscribeUiIntervention?.();
       for (const sessionId of [...activeContinuations.keys()]) dropContinuation(sessionId);
       pendingReopens.clear();
       serverFeatures.clear();

@@ -27,7 +27,10 @@ import { getDesktopProviderService } from '../maker-host/createDesktopProviderSe
 import { getModelVisibilityOverride } from '../maker-host/model-visibility-mirror.js';
 import { WorktreeManager } from '../worktree/index.js';
 import { prepareHandoffWorktree } from '../maker-ipc/handoffWorktree.js';
-import { onUiContinuation } from '../maker-ipc/uiContinuationSignal.js';
+import {
+  onUiContinuation,
+  onUiSessionIntervention,
+} from '../maker-ipc/uiContinuationSignal.js';
 import { throwIpcError, requireObject, requireString } from '../utils/ipcValidate.js';
 import {
   listWorkspaceProviderSources,
@@ -332,6 +335,7 @@ function ensureInstances(): { store: SlackHookStore; manager: HookControlManager
       // 「用户在桌面端点了重试 / 继续任务」信号 -> 把那一轮接回渠道原消息
       // (turn.reopen, 协议第 14 条)。信号由 maker 的发送事务发布。
       subscribeUiContinuation: onUiContinuation,
+      subscribeUiSessionIntervention: onUiSessionIntervention,
       accountInitiallyActive: false,
       log,
     });

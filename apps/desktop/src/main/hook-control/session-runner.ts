@@ -87,7 +87,11 @@ import { getDesktopProviderService } from '../maker-host/createDesktopProviderSe
 import { beginHeadlessGhostSetupTurn } from '../mcp-integrations/ghostSetupInteractionSurface.js';
 import { observeHookTurn } from './turnObserver.js';
 
-import type { HookRunOutcome, HookSessionRunner } from './dispatcher.js';
+import type {
+  HookContinuationWatchRequest,
+  HookRunOutcome,
+  HookSessionRunner,
+} from './dispatcher.js';
 import { resolveHookSessionConfig, type ResolvedHookSessionConfig } from './defaults.js';
 import { decodeAttachments, sanitizeAttachmentName } from './attachments.js';
 import {
@@ -219,6 +223,17 @@ const TURN_HARD_TIMEOUT_MS = 60 * 60_000;
  * 渠道那条消息保持原样(与本改动之前完全一致)。
  */
 const CONTINUATION_IDLE_TIMEOUT_MS = 2 * 60_000;
+
+/**
+ * 续跑观察挂载前等待 live session 出现的窗口。
+ *
+ * 失败的那一轮若同时终止了 CLI 流 / 远端 daemon, maker 会先移除 session, 而重试信号
+ * 是 coordinator 在真正 drain 那条消息**之前**同步发的 —— 替代实例还没被 lazy-create。
+ * 立刻判死会把回流丢掉(记账一次性, 且零产出重试重发原文、后面不会再有可识别信号)。
+ * 窗口只需盖住"排队 + 建实例"这点时间, 取 5s; 到点仍没有就是真的没起来。
+ */
+const CONTINUATION_SESSION_WAIT_MS = 5_000;
+const CONTINUATION_SESSION_POLL_MS = 100;
 
 /**
  * 从 tool_result 全文抽出可外发的 xdt-image URL —— 与 IM turnRunner 的
@@ -932,101 +947,144 @@ export function createMakerHookSessionRunner(deps: {
     },
 
     watchContinuation(req) {
-      const session = getMaker().getSession(req.sessionId);
-      if (!session) {
-        // 会话已不在进程里(被关掉 / 换账号): 续跑的事件流无从观察。
-        req.onAbandon();
-        return () => undefined;
-      }
-      const startedAt = Date.now();
-      const extraImageAbsPaths: string[] = [];
-      let claimed = false;
-      let settled = false;
-      let idleTimer: NodeJS.Timeout | undefined;
-      let hardTimer: NodeJS.Timeout | undefined;
+      // live session 可能**暂时**不存在: 失败的那一轮若同时终止了 CLI 流 / 远端
+      // daemon, maker 会先把 session 移除, 而重试信号是 coordinator 在真正 drain
+      // 那条消息**之前**同步发的 —— 此刻替代实例还没被 lazy-create。这里立刻放弃
+      // 就等于把回流丢掉: 记账是一次性的, 而零产出重试重发的是原文, 后面不会再有
+      // 可识别的信号。所以短暂等一会儿再判死。
+      const live = getMaker().getSession(req.sessionId);
+      if (live) return beginContinuationWatch(live, req, log);
 
-      const clearTimers = (): void => {
-        if (idleTimer) clearTimeout(idleTimer);
-        if (hardTimer) clearTimeout(hardTimer);
-        idleTimer = undefined;
-        hardTimer = undefined;
-      };
-
-      const observer = observeHookTurn(session, {
-        // 与 run() 同一判据: Telegram DM 只流正文, 群/topic 走完整过程卡。
-        answerOnlyProgress: req.source?.im === 'telegram' && req.laneKind !== 'group',
-        onProgress: (text) => {
-          // 认领之前不发进度: 那时 server 还没把这条消息挂到新 requestId 上。
-          if (claimed) req.onProgress(text);
-        },
-        onFirstEvent: () => {
-          if (settled) return;
-          claimed = true;
-          if (idleTimer) clearTimeout(idleTimer);
-          idleTimer = undefined;
-          req.onClaim();
-        },
-        onToolResult: (fullText) => collectOutboundImages(fullText, extraImageAbsPaths, log),
-        onSilentStopSettled,
-        log,
-      });
-
-      /** 收口一次(幂等)。errorMessage 非空 = 这一轮失败。 */
-      const settle = (errorMessage: string | null): void => {
-        if (settled) return;
-        settled = true;
-        clearTimers();
-        observer.stop();
-        if (!claimed) {
-          // 从没认领过 -> server 侧对这条消息一无所知, 静默退场。
+      let cancelled = false;
+      let waited = 0;
+      let inner: (() => void) | null = null;
+      const poll = setInterval(() => {
+        if (cancelled) {
+          clearInterval(poll);
+          return;
+        }
+        const s = getMaker().getSession(req.sessionId);
+        if (s) {
+          clearInterval(poll);
+          inner = beginContinuationWatch(s, req, log);
+          return;
+        }
+        waited += CONTINUATION_SESSION_POLL_MS;
+        if (waited >= CONTINUATION_SESSION_WAIT_MS) {
+          clearInterval(poll);
+          // 真的没起来(会话被关掉 / 换账号): 事件流无从观察, 静默退场。
           req.onAbandon();
-          return;
         }
-        if (errorMessage !== null) {
-          // 与 run() 的失败收口同形(finalText 空, 错误交给渠道渲染)。
-          req.onEnd({
-            status: 'error',
-            finalText: '',
-            errorMessage,
-            durationMs: Date.now() - startedAt,
-          });
-          return;
-        }
-        void (async () => {
-          // workDir 以 live session 为权威(会话可能被移动过), 与 run() 里
-          // isDirAuthorized 用 session.workDir 复核同理。
-          const collected = await collectOutboundForFinalText(
-            observer.text(),
-            extraImageAbsPaths,
-            [session.workDir],
-            log,
-          );
-          req.onEnd({
-            status: 'ok',
-            finalText: collected.finalText,
-            errorMessage: null,
-            durationMs: Date.now() - startedAt,
-            ...(collected.attachments !== undefined ? { attachments: collected.attachments } : {}),
-          });
-        })();
-      };
-
-      idleTimer = setTimeout(() => settle(null), CONTINUATION_IDLE_TIMEOUT_MS);
-      idleTimer.unref?.();
-      hardTimer = setTimeout(
-        () => settle(`hook continuation hard timeout (${TURN_HARD_TIMEOUT_MS}ms)`),
-        TURN_HARD_TIMEOUT_MS,
-      );
-      hardTimer.unref?.();
-      observer.finished.then(
-        () => settle(null),
-        (err: unknown) => settle(err instanceof Error ? err.message : String(err)),
-      );
+      }, CONTINUATION_SESSION_POLL_MS);
+      poll.unref?.();
 
       return () => {
-        // 撤销: 已认领的必须收口(否则渠道消息停在假的"进行中"), 未认领的静默退场。
-        settle(claimed ? 'hook continuation cancelled' : null);
+        cancelled = true;
+        clearInterval(poll);
+        inner?.();
       };
     },
   };
+}
+
+/**
+ * 挂上一次续跑观察(live session 已确定存在)。
+ *
+ * 与 run() 共用 observeHookTurn, 所以收口语义、文本累积形态、过程区渲染判据都只有
+ * 一份实现(见 turnObserver.ts)。
+ */
+function beginContinuationWatch(
+  session: NonNullable<ReturnType<ReturnType<typeof getMaker>['getSession']>>,
+  req: HookContinuationWatchRequest,
+  log: { info(msg: string): void; warn(msg: string): void },
+): () => void {
+    const startedAt = Date.now();
+    const extraImageAbsPaths: string[] = [];
+    let claimed = false;
+    let settled = false;
+    let idleTimer: NodeJS.Timeout | undefined;
+    let hardTimer: NodeJS.Timeout | undefined;
+
+    const clearTimers = (): void => {
+      if (idleTimer) clearTimeout(idleTimer);
+      if (hardTimer) clearTimeout(hardTimer);
+      idleTimer = undefined;
+      hardTimer = undefined;
+    };
+
+    const observer = observeHookTurn(session, {
+      // 与 run() 同一判据: Telegram DM 只流正文, 群/topic 走完整过程卡。
+      answerOnlyProgress: req.source?.im === 'telegram' && req.laneKind !== 'group',
+      onProgress: (text) => {
+        // 认领之前不发进度: 那时 server 还没把这条消息挂到新 requestId 上。
+        if (claimed) req.onProgress(text);
+      },
+      onFirstEvent: () => {
+        if (settled) return;
+        claimed = true;
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = undefined;
+        req.onClaim();
+      },
+      onToolResult: (fullText) => collectOutboundImages(fullText, extraImageAbsPaths, log),
+      onSilentStopSettled,
+      log,
+    });
+
+    /** 收口一次(幂等)。errorMessage 非空 = 这一轮失败。 */
+    const settle = (errorMessage: string | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+      observer.stop();
+      if (!claimed) {
+        // 从没认领过 -> server 侧对这条消息一无所知, 静默退场。
+        req.onAbandon();
+        return;
+      }
+      if (errorMessage !== null) {
+        // 与 run() 的失败收口同形(finalText 空, 错误交给渠道渲染)。
+        req.onEnd({
+          status: 'error',
+          finalText: '',
+          errorMessage,
+          durationMs: Date.now() - startedAt,
+        });
+        return;
+      }
+      void (async () => {
+        // workDir 以 live session 为权威(会话可能被移动过), 与 run() 里
+        // isDirAuthorized 用 session.workDir 复核同理。
+        const collected = await collectOutboundForFinalText(
+          observer.text(),
+          extraImageAbsPaths,
+          [session.workDir],
+          log,
+        );
+        req.onEnd({
+          status: 'ok',
+          finalText: collected.finalText,
+          errorMessage: null,
+          durationMs: Date.now() - startedAt,
+          ...(collected.attachments !== undefined ? { attachments: collected.attachments } : {}),
+        });
+      })();
+    };
+
+    idleTimer = setTimeout(() => settle(null), CONTINUATION_IDLE_TIMEOUT_MS);
+    idleTimer.unref?.();
+    hardTimer = setTimeout(
+      () => settle(`hook continuation hard timeout (${TURN_HARD_TIMEOUT_MS}ms)`),
+      TURN_HARD_TIMEOUT_MS,
+    );
+    hardTimer.unref?.();
+    observer.finished.then(
+      () => settle(null),
+      (err: unknown) => settle(err instanceof Error ? err.message : String(err)),
+    );
+
+    return () => {
+      // 撤销: 已认领的必须收口(否则渠道消息停在假的"进行中"), 未认领的静默退场。
+      settle(claimed ? 'hook continuation cancelled' : null);
+    };
 }

@@ -214,16 +214,6 @@ function broadcastSessionCreated(sessionId: string): void {
  */
 const TURN_HARD_TIMEOUT_MS = 60 * 60_000;
 
-/**
- * 续跑观察的空转兜底: 已经认领了、agent 却一个事件都没发出来。
- *
- * dispatch 已经不可逆(本观察挂在 beforeDispatchUserTurn 里), 所以正常情况下必有事件;
- * 这条只兜"vendor 接了活却彻底静默"。取值要盖住"冷 resume + 首 token"的最坏情况
- * (重开 CLI 子进程、恢复大 transcript), 又不能长到让监听白挂 —— 2 分钟。
- * 触发即按失败收口, 渠道那条消息不会停在假的"进行中"。
- */
-const CONTINUATION_IDLE_TIMEOUT_MS = 2 * 60_000;
-
 
 /**
  * 从 tool_result 全文抽出可外发的 xdt-image URL —— 与 IM turnRunner 的
@@ -977,13 +967,10 @@ function beginContinuationWatch(
     const extraImageAbsPaths: string[] = [];
     let claimed = false;
     let settled = false;
-    let idleTimer: NodeJS.Timeout | undefined;
     let hardTimer: NodeJS.Timeout | undefined;
 
     const clearTimers = (): void => {
-      if (idleTimer) clearTimeout(idleTimer);
       if (hardTimer) clearTimeout(hardTimer);
-      idleTimer = undefined;
       hardTimer = undefined;
     };
 
@@ -1045,11 +1032,9 @@ function beginContinuationWatch(
       })();
     };
 
-    idleTimer = setTimeout(
-      () => settle(`hook continuation idle timeout (${CONTINUATION_IDLE_TIMEOUT_MS}ms)`),
-      CONTINUATION_IDLE_TIMEOUT_MS,
-    );
-    idleTimer.unref?.();
+    // 兜底只有硬超时, 与 run() 完全一致 —— 刻意**不**加更短的"空转"超时: 认领之后
+    // 这一轮已经在跑, 而一个正常的长 turn 完全可能几分钟不出事件(或只出被本观察器
+    // 忽略的账号级事件), 用短超时去判死会把它误杀成 error 并把那条错误写进渠道。
     hardTimer = setTimeout(
       () => settle(`hook continuation hard timeout (${TURN_HARD_TIMEOUT_MS}ms)`),
       TURN_HARD_TIMEOUT_MS,

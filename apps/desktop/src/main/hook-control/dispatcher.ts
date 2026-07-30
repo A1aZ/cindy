@@ -606,7 +606,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
    */
   const activeContinuations = new Map<
     string,
-    { connectionId: string; isClaimed: () => boolean; cancel: () => void }
+    { connectionId: string; clientId: string; isClaimed: () => boolean; cancel: () => void }
   >();
   /** 正在因"新任务接管"而撤销的 session —— 它的收口不得再记待续跑(见 dropContinuation)。 */
   let suppressReopenFor: string | null = null;
@@ -660,14 +660,24 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       const claim = pendingClaims.get(sessionId);
       if (!claim || claim.clientId !== clientId) return;
       pendingClaims.delete(sessionId);
-      beginContinuation(sessionId, claim.entry);
+      beginContinuation(sessionId, clientId, claim.entry);
     }) ?? null;
   const unsubscribeUiTurnUndispatched =
     subscribeUiTurnUndispatched?.((sessionId, clientId) => {
       const claim = pendingClaims.get(sessionId);
-      if (!claim || claim.clientId !== clientId) return;
-      log.info(`hook pending claim released: the target turn never dispatched (${sessionId})`);
-      dropPendingClaim(sessionId, true);
+      if (claim && claim.clientId === clientId) {
+        log.info(`hook pending claim released: the target turn never dispatched (${sessionId})`);
+        dropPendingClaim(sessionId, true);
+        return;
+      }
+      // 已经认领了才收到 undispatched: dispatching 信号发在 vendor dispatch **之前**,
+      // 而它之后仍有会失败的环节(Stop 抢在持久化之后、gitSnapshotCoordinator.onTurnStart
+      // 之类的 pre-vendor hook 抛错)。那一轮压根没跑起来, 但渠道消息已经被改成
+      // "进行中" —— 必须撤掉观察让它按失败收口, 否则要挂到 1 小时硬超时。
+      const watching = activeContinuations.get(sessionId);
+      if (!watching || watching.clientId !== clientId) return;
+      log.info(`hook continuation revoked: the claimed turn never dispatched (${sessionId})`);
+      dropContinuation(sessionId);
     }) ?? null;
   let accountActive = accountInitiallyActive ?? true;
   let accountGeneration = 0;
@@ -784,7 +794,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
    *   - 监听挂在 vendor dispatch **之前**, 不丢正文开头;
    *   - live session 必然已就绪(马上就要 dispatch), 不需要等它出现。
    */
-  function beginContinuation(sessionId: string, entry: PendingReopen): void {
+  function beginContinuation(sessionId: string, clientId: string, entry: PendingReopen): void {
     const watch = runner.watchContinuation;
     if (!watch) return;
     if (!isCurrentGeneration(entry.accountGeneration)) return;
@@ -929,6 +939,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     if (!settledEarly) {
       activeContinuations.set(sessionId, {
         connectionId: entry.connectionId,
+        clientId,
         isClaimed: () => claimed,
         cancel: () => {
           revoked = true;

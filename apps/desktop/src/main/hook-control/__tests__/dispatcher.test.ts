@@ -2472,6 +2472,32 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     expect(c.ofType('turn.progress')).toHaveLength(1);
   });
 
+  it('认领后才发现没能 dispatch -> 撤掉观察并按失败收口(不挂到硬超时)', async () => {
+    // dispatching 信号发在 vendor dispatch **之前**, 之后仍有会失败的环节(Stop 抢在
+    // 持久化之后、pre-vendor hook 抛错)。那一轮压根没跑起来, 但渠道消息已被改成
+    // "进行中" —— 必须撤掉观察让它按失败收口。
+    const { cr, sig, c, sessionId } = await failOneTask();
+    sig.retry(sessionId);
+    await tick();
+    expect(c.ofType('turn.reopen')).toHaveLength(1);
+    expect(cr.cancels).toHaveLength(0);
+
+    sig.undispatchTurn(sessionId);
+    await tick();
+    expect(cr.cancels).toHaveLength(1);
+  });
+
+  it('undispatched 的 clientId 对不上时不动已认领的那一轮', async () => {
+    const { cr, sig, c, sessionId } = await failOneTask();
+    sig.retry(sessionId);
+    await tick();
+    expect(c.ofType('turn.reopen')).toHaveLength(1);
+
+    sig.undispatchTurn(sessionId, 'some-other-client-id');
+    await tick();
+    expect(cr.cancels).toHaveLength(0);
+  });
+
   it('dispose() 退订信号源(不只是清记账)', async () => {
     // 直接断言订阅数, 不看下游行为: dispose 同时清了 pendingReopens, 只看
     // "有没有起观察" 的话, 即使退订漏了也照样为 0 —— 那样这条锁就是假的。

@@ -1784,21 +1784,43 @@ describe('watchContinuation: 观察桌面端续跑并回流', () => {
     expect(ends[0]?.errorMessage).toBe('hook continuation cancelled');
   });
 
-  it('已认领却一个事件都没来 -> 空转超时后按失败收口, 摘掉监听', async () => {
-    // dispatch 已不可逆, 正常必有事件; 这条只兜"vendor 接了活却彻底静默"。
-    // 收口而不是静默退场 —— 渠道消息此刻是"进行中", 不能停在那里。
+  it('长 turn 不被误杀: 几分钟不出事件也不该收口(兜底只有硬超时)', async () => {
+    // 曾经有过一条 2 分钟"空转"超时, 但它从不在有事件时清除 —— 任何跑过 2 分钟的
+    // 正常续跑都会被强制判成 error 并把那条错误写进渠道。现在兜底与 run() 一致,
+    // 只保留 1 小时硬超时: 认领之后这一轮已经在跑, 长 turn 几分钟不出事件很正常
+    // (或只出被本观察器忽略的账号级事件)。
+    vi.useFakeTimers();
+    try {
+      fakeMaker.getSession.mockReturnValueOnce(makeManualSession('sess-live'));
+      const runner = createMakerHookSessionRunner({ log });
+      const { req, events } = watchReq();
+      runner.watchContinuation!(req as never);
+      expect(events).toEqual(['claim']);
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(events).toEqual(['claim']);
+      expect(h.eventCbs.has('sess-live')).toBe(true);
+
+      // 正常收口照样成立。
+      h.eventCbs.get('sess-live')!({ type: 'done', data: null });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(events.at(-1)).toBe('end:ok');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('彻底静默的一轮由硬超时收口, 摘掉监听', async () => {
     vi.useFakeTimers();
     try {
       fakeMaker.getSession.mockReturnValueOnce(makeManualSession('sess-live'));
       const runner = createMakerHookSessionRunner({ log });
       const { req, events, ends } = watchReq();
       runner.watchContinuation!(req as never);
-      expect(events).toEqual(['claim']);
-      expect(h.eventCbs.has('sess-live')).toBe(true);
 
-      await vi.advanceTimersByTimeAsync(2 * 60_000 + 1);
+      await vi.advanceTimersByTimeAsync(60 * 60_000 + 1);
       expect(events).toEqual(['claim', 'end:error']);
-      expect(ends[0]?.errorMessage).toContain('idle timeout');
+      expect(ends[0]?.errorMessage).toContain('hard timeout');
       expect(h.eventCbs.has('sess-live')).toBe(false);
     } finally {
       vi.useRealTimers();

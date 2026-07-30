@@ -860,8 +860,12 @@ describe('voice input global shortcut registration', () => {
         expect(consume?.(mocks.settingsEvent)).toEqual({ failed: false });
       });
 
-      // Windows 路径: recording:start 是 darwin-only 的, 所以那里只有挂起登记过会话。stop 必须
-      // 照样能摘掉它, 否则随后的恢复同步会被「录制中」守卫一直拒掉、快捷键一直停用。
+      // 会话只被挂起登记过、capture 从没启动的状态: stop 必须照样能摘掉它, 否则随后的恢复同步
+      // 会被「录制中」守卫一直拒掉、快捷键一直停用。
+      //
+      // 动机来自 Windows —— 那里 recording:start 是 darwin-only 的, 只有挂起会登记会话。但这个
+      // 状态本身不是 Windows 独占: darwin 上 capture 启动失败也一样。而 win32 下裸修饰键会在
+      // global.ts 的平台守卫处就被判为不支持、压根走不到会话登记, 所以只能在 darwin 上构造它。
       it('releases the recording session on stop even when no capture was ever started', async () => {
         setPlatform('darwin');
         mocks.setStoredShortcut(bareRightOption);

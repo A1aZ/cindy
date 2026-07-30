@@ -88,6 +88,19 @@ function effortToPiThinkingLevel(effort: Effort): string {
   return effort === 'ultra' ? 'max' : effort;
 }
 
+/**
+ * pi 的 RPC prompt 会**执行**扩展命令(实测:/plan 直接被 plan-mode 扩展吃掉,零 LLM
+ * 请求)并展开 /skill: 与 /template;内置 TUI 命令(/help、/model 等)则按字面进模型。
+ * 用户输入以 / 开头时,除显式技能调用(/skill:)外一律前置空格转义成字面文本(实测
+ * 有效)—— 防止误触扩展命令让 Cindy 侧状态镜像脱同步(如 /plan),也堵住未来扩展/包
+ * 新增命令带来的攻击面。内部控制路径(setPlanMode 的 /plan)不走本函数。
+ */
+function escapeLeadingSlashCommand(text: string): string {
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith('/') && !trimmed.startsWith('/skill:')) return ' ' + text;
+  return text;
+}
+
 /** fork 尾部丢弃 turn 数归一:非有限/负值 → 0。 */
 function normalizeTailTurnsToDrop(value: number | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return 0;
@@ -532,7 +545,7 @@ export class PiAgent extends BaseAgent {
       async send(message: UserMessage, sendOpts?: SendOptions): Promise<void> {
         void sendOpts;
         const { text, images } = await buildPiPrompt(message);
-        const command: Record<string, unknown> = { type: 'prompt', message: text };
+        const command: Record<string, unknown> = { type: 'prompt', message: escapeLeadingSlashCommand(text) };
         if (images.length > 0) command.images = images;
         // send 语义 = 排队开新 turn;pi streaming 中裸 prompt 会被拒,补 followUp。
         if (ctx.isStreaming) command.streamingBehavior = 'followUp';
@@ -544,7 +557,7 @@ export class PiAgent extends BaseAgent {
 
       async steer(message: UserMessage): Promise<void> {
         const { text, images } = await buildPiPrompt(message);
-        const command: Record<string, unknown> = { type: 'steer', message: text };
+        const command: Record<string, unknown> = { type: 'steer', message: escapeLeadingSlashCommand(text) };
         if (images.length > 0) command.images = images;
         const resp = await proc.request(command);
         if (!resp.success) {

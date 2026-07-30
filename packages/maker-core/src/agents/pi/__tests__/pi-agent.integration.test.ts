@@ -522,6 +522,101 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
   );
 
   it(
+    'credential read escalates through the real bridge even though read is a readonly builtin',
+    { timeout: 60_000 },
+    async () => {
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-cred-'));
+      try {
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('read', { path: '/Users/nobody/.ssh/id_rsa' }),
+          anthropicStreamBody('cred turn finished'),
+        );
+        const reqBefore = seenRequests.length;
+        const { resolverTools } = await runPermissionTurn({
+          sessionId: 'perm-auto-cred',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'deny',
+        });
+        // 只读工具不再无条件直通:凭证路径升级弹窗,deny 真拦截
+        expect(resolverTools).toEqual(['read']);
+        const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
+        expect(followUp.some((b) => b.includes('User denied this tool call via Cindy.'))).toBe(true);
+      } finally {
+        rmSync(workingDir, { recursive: true, force: true });
+        scriptedResponses.length = 0;
+      }
+    },
+  );
+
+  it(
+    'plain reads still pass the bridge untouched (no popup, tool executes)',
+    { timeout: 60_000 },
+    async () => {
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-read-'));
+      const seedPath = path.join(workingDir, 'readable.txt');
+      writeFileSync(seedPath, 'plain-read-marker-content');
+      try {
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('read', { path: seedPath }),
+          anthropicStreamBody('read turn finished'),
+        );
+        const reqBefore = seenRequests.length;
+        const { resolverTools } = await runPermissionTurn({
+          sessionId: 'perm-auto-read',
+          workingDir,
+          permissionMode: 'auto',
+          resolverBehavior: 'deny',
+        });
+        expect(resolverTools).toEqual([]);
+        const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
+        expect(followUp.some((b) => b.includes('plain-read-marker-content'))).toBe(true);
+      } finally {
+        rmSync(workingDir, { recursive: true, force: true });
+        scriptedResponses.length = 0;
+      }
+    },
+  );
+
+  it(
+    'leading-slash user input is escaped to literal text (extension commands not triggered)',
+    { timeout: 60_000 },
+    async () => {
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-slash-cwd-'));
+      const agent = new PiAgent(buildDeps());
+      let handle: AgentSessionHandle | null = null;
+      try {
+        scriptedResponses.length = 0;
+        handle = await agent.startSession({
+          sessionId: 'slash-escape-session',
+          workingDir,
+          model: 'pi-test-model',
+        });
+        const reqBefore = seenRequests.length;
+        const done = (async () => {
+          for await (const ev of handle!.events()) {
+            if (ev.type === 'done') break;
+          }
+        })();
+        // 未转义时 /plan 会被 plan-mode 扩展当命令吃掉:零网关请求、plan 状态被翻转。
+        await handle.send({ type: 'user', content: '/plan' });
+        await done;
+        const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
+        // 转义后按字面文本进模型:产生网关请求,且请求体里带 "/plan" 原文
+        expect(followUp.length).toBeGreaterThan(0);
+        expect(followUp.some((b) => b.includes('/plan'))).toBe(true);
+        // Cindy 侧 plan 镜像未被翻转
+        expect(handle.getPlanMode?.()).toBe(false);
+      } finally {
+        await handle?.close();
+        rmSync(workingDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
     'auto mode: in-workspace write is silently approved and the file really lands on disk',
     { timeout: 60_000 },
     async () => {

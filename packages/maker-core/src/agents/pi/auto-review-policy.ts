@@ -3,17 +3,17 @@
  * `ReviewableAction`,交 harness 无关的 Cindy Auto-Review Core(`../shared/auto-review.ts`)
  * 裁决。判定档语义见 core 文件头。
  *
- * pi 侧的到达面与 CC 不同:bridge 在 pi 进程内已放行只读内置四件套
- * (read/grep/find/ls,见 cindy-bridge-source.ts READONLY_BUILTINS),`bypassPermissions`
- * 全放行 —— 能到这里的只有 bash / edit / write / 桥接 MCP 工具 / 未来新增内置工具。
- * 只读分支仍保留映射:一是防御 bridge 白名单与本文件漂移,二是凭证路径的读仍应必问
- * (bridge 白名单目前会放行凭证读,这是 bridge 侧的已知缺口,修复归 bridge)。
+ * pi 侧的到达面与 CC 不同:bridge 在 pi 进程内直通「只读内置四件套且入参不碰凭证
+ * 路径」(见 cindy-bridge-source.ts READONLY_BUILTINS + touchesCredentialPath),
+ * `bypassPermissions` 全放行 —— 能到这里的是 bash / edit / write / 桥接 MCP 工具 /
+ * 凭证路径的只读调用 / 未来新增内置工具。只读分支扫全部字符串入参判凭证,与 bridge
+ * 同判定:bridge 升级上来的凭证读在 auto 档必须落弹窗,不能被 path 字段缺失反向放行。
  *
  * MCP 工具(`mcp__*`)一律 fail-closed 走 `other` → 弹窗,与 ask 档行为一致;
  * 按 host MCP 审批策略细分是后续工作,不在本 adapter 猜测各 server 的安全性。
  */
 
-import { reviewAction, type ReviewVerdict } from '../shared/auto-review.js';
+import { isSensitiveCredentialPath, reviewAction, type ReviewVerdict } from '../shared/auto-review.js';
 
 export type PiAutoReviewVerdict = ReviewVerdict;
 
@@ -45,7 +45,12 @@ export function classifyPiToolForAutoReview(ctx: PiAutoReviewContext): PiAutoRev
   const { toolName, input, workspaceRoots } = ctx;
 
   if (READ_ONLY_TOOLS.has(toolName)) {
-    return reviewAction({ kind: 'read', path: stringField(input, 'path') }, workspaceRoots);
+    // 凭证特征可能落在任意字符串入参(grep 的 pattern、find 的表达式等),与 bridge
+    // 的 touchesCredentialPath 同口径扫全字段;命中的字符串作为 path 交 core 判必问。
+    const credentialHit = Object.values(input).find(
+      (v): v is string => typeof v === 'string' && isSensitiveCredentialPath(v),
+    );
+    return reviewAction({ kind: 'read', path: credentialHit ?? stringField(input, 'path') }, workspaceRoots);
   }
   if (FILE_WRITE_TOOLS.has(toolName)) {
     return reviewAction({ kind: 'file-write', path: stringField(input, 'path') }, workspaceRoots);

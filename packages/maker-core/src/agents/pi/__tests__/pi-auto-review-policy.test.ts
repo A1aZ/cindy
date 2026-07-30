@@ -35,6 +35,9 @@ describe('classifyPiToolForAutoReview', () => {
     expect(verdict('read', { path: `${WS}/src/a.ts` })).toBe('auto-approve');
     expect(verdict('read', { path: '/Users/t/.ssh/id_rsa' })).toBe('prompt-each-time');
     expect(verdict('grep', { path: '/Users/t/.aws' })).toBe('prompt-each-time');
+    // 凭证特征在非 path 字段(grep pattern / find 表达式)同样必问 —— 与 bridge 全字段扫描同口径
+    expect(verdict('grep', { pattern: 'token', path: '/Users/t/.gnupg' })).toBe('prompt-each-time');
+    expect(verdict('find', { expression: '~/.ssh/id_ed25519' })).toBe('prompt-each-time');
   });
 
   it('fails closed for MCP and unknown tools', () => {

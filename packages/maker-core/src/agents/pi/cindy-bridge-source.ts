@@ -32,6 +32,29 @@ import { readFileSync } from 'node:fs';
 const PERMISSION_TITLE = 'cindy:permission';
 const READONLY_BUILTINS = new Set(['read', 'grep', 'find', 'ls']);
 
+// 凭证/密钥路径特征 —— 与 maker-core shared/auto-review.ts 的 CREDENTIAL_PATH_PATTERNS
+// 保持同步(bridge 自包含,不能 import;改那边记得改这边)。只读工具入参命中即不再
+// 直通,升级走 Cindy 审批:读 ~/.ssh、~/.aws 等即使是"只读"也是侦察面。
+const CREDENTIAL_PATH_PATTERNS = [
+  /(?:^|[\\/\s'"~])\.(?:ssh|aws|gnupg|kube|docker|claude|codex)\b/i,
+  /(?:^|[\\/\s'"~])\.(?:netrc|npmrc|pgpass|pypirc)\b/i,
+  /\bapplication_default_credentials\b/i,
+  /\bcredentials\.json\b/i,
+  /[\\/](?:codex|claude|gcloud)[\\/]auth\.json\b/i,
+  /\/proc\/[^/\s]*\/environ\b/i,
+  /\bid_rsa\b|\bid_ed25519\b|\bid_ecdsa\b|\bid_dsa\b|\.pem\b|\.p12\b/i,
+];
+
+function touchesCredentialPath(input: unknown): boolean {
+  if (!input || typeof input !== 'object') return false;
+  for (const value of Object.values(input as Record<string, unknown>)) {
+    if (typeof value === 'string' && CREDENTIAL_PATH_PATTERNS.some((re) => re.test(value))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function currentPermissionMode(): 'ask' | 'bypassPermissions' {
   const file = process.env.CINDY_PI_PERMISSION_FILE ?? '';
   if (!file) return 'ask';
@@ -194,7 +217,7 @@ export default async function cindyBridge(pi: any) {
   // ── 权限门 ────────────────────────────────────────────────────────────────
   pi.on('tool_call', async (event: any, ctx: any) => {
     if (currentPermissionMode() === 'bypassPermissions') return;
-    if (READONLY_BUILTINS.has(event.toolName)) return;
+    if (READONLY_BUILTINS.has(event.toolName) && !touchesCredentialPath(event.input)) return;
     let approved = false;
     try {
       approved = await ctx.ui.confirm(

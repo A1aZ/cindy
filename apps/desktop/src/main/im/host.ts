@@ -19,6 +19,7 @@ import {
   createDingTalkIM,
   createFeishuIM,
   createTelegramIM,
+  createWecomIM,
   type IMHost,
 } from '@cindy/im';
 import { TencentIlinkTransport } from '@cindy/wechat-ilink';
@@ -70,6 +71,7 @@ const host: IMHost = {
     feishuMediaDir: path.join(app.getPath('userData'), 'cc-agent', 'feishu-media'),
     discordMediaDir: path.join(app.getPath('userData'), 'cc-agent', 'discord-media'),
     telegramMediaDir: path.join(app.getPath('userData'), 'cc-agent', 'telegram-media'),
+    wecomMediaDir: path.join(app.getPath('userData'), 'cc-agent', 'wecom-media'),
   },
   // cindy-media 媒体总仓回调(规则 25):IM 入站图片按平台 token
   // 免重下、内容寻址去重、isCache=true 吃缓存回收策略;包侧只摸字节和字符串。
@@ -170,6 +172,7 @@ export const telegramIm = createTelegramIM(host, {
 export const dingtalkIm = createDingTalkIM(host, {
   fetcher: (input, init) => net.fetch(input instanceof URL ? input.toString() : input, init),
 });
+export const wecomIm = createWecomIM(host);
 /**
  * Telegram 个人 bot 的行为/人格/群参与配置 IPC(设置卡数据通道)。
  * 必须由 bootstrap 显式调用(与 im.registerIpc() 同期) — 不能放模块顶层:
@@ -272,4 +275,11 @@ wechatCompatibilityPolicy.subscribe((decision) => {
     log.warn('failed to apply personal WeChat compatibility policy');
   });
 });
-export const im = createIM([feishuIm, discordIm, wechatIm, telegramIm, dingtalkIm]);
+export const im = createIM([
+  feishuIm,
+  discordIm,
+  wechatIm,
+  telegramIm,
+  dingtalkIm,
+  wecomIm,
+]);

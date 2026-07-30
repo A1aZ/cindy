@@ -6760,29 +6760,41 @@ function scheduleAutoName(
   } catch (err) {
     log.warn('Failed to emit auto-title preview:', err);
   }
+  // 一次起名尝试的**唯一**收尾:三种结束方式(正常 resolve / IPC reject / 同步抛错)
+  // 都走这里,判据只有一条 —— **main 没确认写入(`applied` 不为 true)就撤回预览**。
+  //
+  // reject 与同步抛错建模成「没有结果」,与 `{ applied: false }` 落在同一分支:
+  // `runSessionAutoTitle` 在「资格读失败 / 占位与智能标题两段都没写进去」时是
+  // **正常 resolve** 出 `applied: false` 的,只挂 `.catch` 会漏掉这一整类
+  // (PR #1031 review P1)。把收尾收敛成一个函数,是为了不再出现第四条漏掉的路径。
+  //
+  // `applied: false, done: true`(用户已手动改过名)同样撤回:DB 里是用户的标题,
+  // 叠加层不该继续盖着;store 那边的守卫会发现缓存里已不是这次预览而自动让位。
+  const settleAutoName = (result?: { applied?: boolean; done?: boolean }): void => {
+    if (result?.done) autoNameSettled.add(sessionId);
+    if (!result?.applied) clearAutoTitlePreviewSafely(sessionId);
+  };
   // 整条链路对发送主流程必须是无副作用的:起名失败(桥接缺失 / IPC 抛错)只记日志,
   // 绝不能把异常抛回 sendMessageCore 打断消息入队。
   try {
     void window.electronAPI.maker
       .autoTitle({ sessionId, text, agentKind, isUserText })
-      .then((result) => {
-        if (result?.done) autoNameSettled.add(sessionId);
-      })
+      .then(settleAutoName)
       .catch((err) => {
         // 不登记 settled —— 下一条带文字的消息会重试。
         log.warn('Failed to auto-name session:', err);
-        clearAutoTitlePreviewSafely(sessionId);
+        settleAutoName();
       });
   } catch (err) {
     log.warn('Failed to invoke auto-title IPC:', err);
-    clearAutoTitlePreviewSafely(sessionId);
+    settleAutoName();
   }
 }
 
 /**
- * 起名失败 → 撤回上面那次乐观预览。
+ * main 没确认写入 → 撤回上面那次乐观预览。
  *
- * 预览是「马上会有权威标题回流」的赌注,它的失效条件是权威标题落地。起名彻底失败时
+ * 预览是「马上会有权威标题回流」的赌注,它的失效条件是权威标题落地。起名没写成时
  * 那个条件永远不成立:叠加层会在每次全量刷新后继续顶着 DB 里的哨兵,会话永久显示一个
  * **库里并不存在**的标题(重启后又变回「未命名对话」,同一会话两种标题)。宁可退回可
  * 解释的兜底文案 —— 而且没登记 `autoNameSettled`,下一条带文字的消息会重试起名。

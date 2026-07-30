@@ -216,6 +216,34 @@ describe('makerChatStore auto-name — 本机会话', () => {
     expect(emitAutoTitlePreviewCleared).not.toHaveBeenCalled();
   });
 
+  it('正常 resolve 但 applied=false(资格读失败 / 两段都没写进去)同样撤回', async () => {
+    // runSessionAutoTitle 在这类瞬时失败下是**正常 resolve** 的,只挂 .catch 会整类漏掉。
+    autoTitle.mockResolvedValue({ applied: false, done: false });
+
+    makerChatStore.autoNameSession(SESSION_ID, '帮我排查登录失败', 'claude-code');
+    await flushPromises();
+
+    expect(emitAutoTitlePreviewCleared).toHaveBeenCalledWith(SESSION_ID);
+  });
+
+  it('applied=false + done=true(用户已手动改过名)也撤回,叠加层不许盖着用户标题', async () => {
+    autoTitle.mockResolvedValue({ applied: false, done: true });
+
+    makerChatStore.autoNameSession(SESSION_ID, '帮我排查登录失败', 'claude-code');
+    await flushPromises();
+
+    expect(emitAutoTitlePreviewCleared).toHaveBeenCalledWith(SESSION_ID);
+  });
+
+  it('applied=true + done=false(占位已落库、智能标题还在路上)不撤回', async () => {
+    autoTitle.mockResolvedValue({ applied: true, done: false });
+
+    makerChatStore.autoNameSession(SESSION_ID, '帮我排查登录失败', 'claude-code');
+    await flushPromises();
+
+    expect(emitAutoTitlePreviewCleared).not.toHaveBeenCalled();
+  });
+
   it('IPC 同步抛错(桥接缺失)同样撤回预览', async () => {
     const w = globalThis as unknown as { window: Record<string, unknown> };
     w.window = {

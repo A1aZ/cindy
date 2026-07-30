@@ -380,6 +380,31 @@ type DiscordBotTransportStatus =
   | { kind: 'conflict'; appId: string }
   | { kind: 'error'; reason: string };
 
+type WechatBotPhase =
+  | 'disconnected'
+  | 'authorizing'
+  | 'waiting_confirmation'
+  | 'connected'
+  | 'reconnecting'
+  | 'needs_reauth'
+  | 'disabled_by_policy'
+  | 'error';
+
+interface WechatBotState {
+  phase: WechatBotPhase;
+  bound: boolean;
+  connectedAt?: number;
+  lastInboundAt?: number;
+  queuedTasks: number;
+  errorCode?: string;
+}
+
+interface WechatChannelSettingsState {
+  version: 1;
+  workingDir: string | null;
+  workingDirAvailable: boolean;
+}
+
 type DiscordBotSessionAuthCheckResult = {
   ok: boolean;
   missing: 'gateway-key' | 'agent-oauth' | 'provider-key' | 'provider-disconnected' | null;
@@ -1664,6 +1689,21 @@ interface ElectronAPI {
     ) => () => void;
   };
 
+  // ── Personal WeChat (Settings → IM Bot → Personal) ──
+  wechatBot: {
+    getState: () => Promise<WechatBotState>;
+    authorize: () => Promise<{ started: true }>;
+    cancelAuthorization: () => Promise<{ ok: true }>;
+    unbind: () => Promise<{ ok: true }>;
+    getChannelSettings: () => Promise<WechatChannelSettingsState>;
+    chooseWorkingDirectory: () => Promise<{
+      canceled: boolean;
+      state: WechatChannelSettingsState;
+    }>;
+    resetWorkingDirectory: () => Promise<WechatChannelSettingsState>;
+    onStateChange: (callback: (state: WechatBotState) => void) => () => void;
+  };
+
   /**
    * Renderer → main signal that the user is logged in and localDb is open.
    * Triggers FeishuBot WS connection (gated; otherwise the bot would come
@@ -2498,7 +2538,7 @@ interface ElectronAPI {
       force?: boolean;
       /** 完整安装目标路径。不传 → global scope 默认路径。*/
       installPath?: string;
-      /** force 覆盖时跳过 XDMaker 持久备份,直接 rmrf 旧目录(完整替换)。 */
+      /** force 覆盖时跳过 Cindy 持久备份,直接 rmrf 旧目录(完整替换)。 */
       skipBackup?: boolean;
     }) => Promise<
       | { success: true; name: string; version: string; absolutePath: string }
@@ -2931,6 +2971,13 @@ interface ElectronAPI {
     reason?: 'gone' | 'no-worktree' | 'git-error';
     detail?: string;
   }>;
+  /**
+   * 「worktree 回收链已跑完」推送。归档/删除后 main 侧的回收是 fire-and-forget 的
+   * 异步链，store 条目移除远晚于状态 IPC 返回，renderer 必须等这条才能拿到真实快照。
+   */
+  onWorktreeChanged: (
+    callback: (payload: { sessionId: string }) => void,
+  ) => () => void;
 
   // ── Slack Hook(中心 slack-hook-server 接入) ── 类型正本在 shared/hookControlIpc.ts
   hookControl: {
@@ -3183,8 +3230,14 @@ interface ElectronAPI {
        * fire-and-forget；renderer 应在 emitPatch userSendAt 之后调用，作为持久化兜底。
        */
       touchUserSend: (id: string, atMs?: number) => Promise<void>;
-      /** interrupted-turn-resume:尾部停在未忽略中断标记行的 active 会话 id(启动红点)。 */
+      /** interrupted-turn-resume:「疑似中断」(startedAt > endedAt)的 active 会话 id。 */
       interruptedPending: () => Promise<string[]>;
+      /** 红点派生的周期性重算源:尾部停在未 dismissed 错误行的 active 会话 id。 */
+      errorTailPending: () => Promise<string[]>;
+      /** 批量处置未处理告警(「全部标为已读」)。failed = 未处置成功的会话 id。 */
+      dismissPendingAlerts: (
+        sessionIds: string[],
+      ) => Promise<{ dismissed: number; processed: string[]; failed: string[] }>;
       ackInterrupted: (id: string) => Promise<void>;
       // Stage 2 C2: fork 已迁到 electronAPI.maker.fork (走 maker:fork IPC)。
     };
@@ -3477,9 +3530,10 @@ interface ElectronAPI {
   };
 
   /**
-   * Browser backend toggle (Phase 5): 切换 MCP `browser` 工具实际控制的浏览器。
-   * - `external`: vendored Playwright + 独立 Chrome(老行为)
-   * - `rsb-webview`: 右侧栏内置 webview tab(新默认)
+   * Browser backend toggle: 切换 MCP `browser` 工具实际控制的浏览器。
+   * - `external`: vendored Playwright + 独立 Chrome(**系统默认**)
+   * - `rsb-webview`: 右侧栏内置 webview tab
+   * 默认值口径与两次翻转的 override 语义见 main/browser-backend-settings-store.ts。
    */
   browserBackend: {
     getState: () => Promise<{
@@ -3685,6 +3739,17 @@ interface ElectronAPI {
      * 让 IM /model 在 main 侧复用同一套可见性过滤,与应用内模型列表逐模型一致。fire-and-forget。
      */
     syncModelVisibility: (map: Record<string, boolean>) => Promise<void>;
+    /**
+     * 「模型 / 供应商停用」override 写入(main 侧 model-disable-store);成功后 main 广播
+     * PROVIDER_CHANGED,useProviders 快照刷新后 UI 拿到新的 suspended / disabled 标志。
+     */
+    setModelDisable: (
+      input:
+        | { kind: 'model'; providerId: string; modelIds: string[]; disabled: boolean }
+        | { kind: 'provider'; providerId: string; disabled: boolean }
+        // reset = 恢复默认:删除该供应商整组停用 override(含指向已下架模型的陈旧条目)。
+        | { kind: 'reset'; providerId: string },
+    ) => Promise<{ ok: true }>;
 
     // 「在新窗口打开」会话多开
     openSessionInNewWindow: (sessionId: string) => Promise<void>;
@@ -4521,7 +4586,8 @@ interface ElectronAPI {
         };
       } | UtilityTextFailure>;
       listRuns: (id: string, limit?: number) => Promise<unknown[]>;
-      listSidebarIndexRuns: () => Promise<unknown[]>;
+      /** { runs, inflightRunIds } —— 形态见 features/scheduler/lib/scheduleSidebarIndexRuns。 */
+      listSidebarIndexRuns: () => Promise<unknown>;
       listCostSummaries: () => Promise<unknown[]>;
       deleteRun: (runId: string) => Promise<void>;
       getInflightCount: (id: string) => Promise<number>;

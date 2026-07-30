@@ -41,13 +41,18 @@ import {
   promoteTrailingPlainListParagraph,
 } from './ComposerListNodes';
 import { WindowsSelectionReplacement } from './WindowsSelectionReplacement';
+import { EmptyDocSelectionGuard } from './EmptyDocSelectionGuard';
 import {
   setVoiceInputDraftDecoration,
   VoiceInputDraftDecoration,
   type VoiceInputCaretState,
 } from './VoiceInputDraftDecoration';
 import { MentionDragCaretDecoration, setMentionDragCaret } from './MentionDragCaretDecoration';
-import { GhostCommandDecoration, setGhostCommandRoster } from './GhostCommandDecoration';
+import {
+  applyGhostCommandBackspace,
+  GhostCommandDecoration,
+  setGhostCommandRoster,
+} from './GhostCommandDecoration';
 import {
   replaceSlashCommandRunWithText,
   setSlashCommandRoster,
@@ -1255,8 +1260,14 @@ export function ChatInput({
     currentModelAgentKind,
     activeModel,
   );
+  // 已建会话(sessionId 在)按实际路由口径判(includeDisabled):运行中的会话不因
+  // 停用打断,请求仍走原路由,把停用当「无来源」会误禁 Send(PR #744 review 第十轮)。
+  // 草稿是新路由选择,保持准入口径(停用拷贝不算可发送来源)。
   const hasConnectedSendSource = currentModelAgentKind
-    ? sourcesForModel(sendProviders, activeModel, currentModelAgentKind, { onlyConnected: true }).length > 0
+    ? sourcesForModel(sendProviders, activeModel, currentModelAgentKind, {
+        onlyConnected: true,
+        includeDisabled: !!sessionId,
+      }).length > 0
     : false;
   const noConnectedSource = !!currentModelAgentKind && !providersLoading && !hasConnectedSendSource;
 
@@ -1379,6 +1390,9 @@ export function ChatInput({
       WindowsSelectionReplacement.configure({
         enabled: window.electronAPI.platform === 'win32',
       }),
+      // 空输入框全选 / 全选后删空都会在行首留一块幽灵高亮(空 paragraph 被整体框进
+      // AllSelection,删空后 Chromium 的 DOM selection 也不跟着折叠)。见模块头注释。
+      EmptyDocSelectionGuard,
       CjkPunctDecoration,
       ComposerListIndentDecoration,
       VoiceInputDraftDecoration,
@@ -1799,6 +1813,8 @@ export function ChatInput({
         // Backspace — structured list items exit through the schema command;
         // legacy plain Markdown rows keep the prefix-deletion fallback so
         // pasted and restored text remains editable without a migration pass.
+        // 意识指令胶囊排最后:只在胶囊亮起且光标停在胶囊外(尾随空格之后)才
+        // 接管,胶囊内一律原样落回原生逐字删。
         if (
           event.key === 'Backspace' &&
           !event.metaKey &&
@@ -1806,7 +1822,9 @@ export function ChatInput({
           !event.altKey &&
           !event.shiftKey &&
           !event.isComposing &&
-          (handleStructuredListBackspace(view) || applyListBackspace(view))
+          (handleStructuredListBackspace(view) ||
+            applyListBackspace(view) ||
+            applyGhostCommandBackspace(view))
         ) {
           event.preventDefault();
           return true;
@@ -3360,8 +3378,12 @@ export function ChatInput({
       // 只有「确实零已连接来源」才拦截;≥1 个直接放行(无弹窗)。currentModelAgentKind
       // 解析不出(罕见:capabilities 未就绪)时不拦,交给下游处理,不误伤。
       if (currentModelAgentKind) {
+        // 已建会话按实际路由口径判(includeDisabled,与上方 hasConnectedSendSource
+        // 同则):运行中会话不因停用打断,最终 preflight 若按准入 rail 判会在全停时
+        // 弹「去连接来源」把继续发送挡死(PR #744 review 第十八轮)。草稿保持准入口径。
         const connectedSources = sourcesForModel(providers, activeModel, currentModelAgentKind, {
           onlyConnected: true,
+          includeDisabled: !!sessionId,
         });
         if (connectedSources.length === 0) {
           const goConnect = await confirmDialog({
@@ -5328,6 +5350,9 @@ export function ChatInput({
                     // 意图期显示用户在浏览态选中的来源(null = flat 退化行,跟随默认路由)。
                     currentProviderId={activeProviderId}
                     sourceDisconnected={selectedSourceDisconnected}
+                    // 已建会话按实际路由口径解析当前来源(含停用拷贝,跟真实扣费路由);
+                    // 草稿是新路由选择,保持准入口径(PR #744 review 第十轮)。
+                    actualRoute={!!sessionId}
                     onProviderChange={handleProviderChange}
                     onNavigateToProviders={handleNavigateToProviders}
                     switching={remoteSwitchInFlight}

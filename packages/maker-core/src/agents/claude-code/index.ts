@@ -39,10 +39,22 @@ import {
 } from './subagent-model-default.js';
 import Anthropic, { APIError } from '@anthropic-ai/sdk';
 
-import { BaseAgent, OneShotError, AgentNotAuthenticatedError, type AgentSessionHandle, type AgentDeps, type StartSessionOptions, type OneShotOptions, type SendOptions } from '../base-agent.js';
+import {
+  BaseAgent,
+  OneShotError,
+  AgentNotAuthenticatedError,
+  TurnPermissionPolicyUnsupportedError,
+  type AgentSessionHandle,
+  type AgentDeps,
+  type StartSessionOptions,
+  type OneShotOptions,
+  type SendOptions,
+  type TurnPermissionPolicy,
+} from '../base-agent.js';
 import { SYSTEM_PROMPT_APPEND as MAKER_SYSTEM_PROMPT_APPEND } from './system-prompt-append.js';
 import { MAKER_MEMORY_RULES } from '../../memory/system-prompt.js';
 import { MemoryFlushController } from '../../memory/flush-controller.js';
+import { buildMemoryScopeKey } from '../../memory/storage.js';
 import type {
   Capabilities,
   EffortDescriptor,
@@ -501,6 +513,12 @@ const CAPABILITIES: Capabilities = {
   reasoningDisplay: ['off', 'summarized', 'full'],
   permissionModes: CLAUDE_PERMISSION_MODES,
   setPermissionModeMidSession: { supported: true },
+  turnPermissionPolicy: {
+    supported: { supported: true },
+    // Both modes can execute mutations without invoking canUseTool. Reject the
+    // combination instead of presenting a false forced-confirmation promise.
+    unsupportedPermissionModes: ['acceptEdits', 'bypassPermissions'],
+  },
   // 计划模式一级开关: SDK plan mode + ExitPlanMode → plan_review 审批, 批准后自动退出
   planMode: { supported: true },
   multimodal: {
@@ -797,8 +815,17 @@ export class ClaudeCodeAgent extends BaseAgent {
     // prompt 缓存(见 docs/dev-rules/maker-core-and-agent-behavior.md §3.1)。
     // 诊断只落日志与 host 回调,**不进模型上下文**(理由见 subagent-model-default.ts 模块头)。
     // 扫描失败(含触发 IO 预算)一律降级成「照旧设 env」= 本改动前的行为,绝不阻断会话启动。
+    //
+    // 候选默认值从路由感知入口取:子代理请求跑在父会话来源上,覆写在**该来源**下不可
+    // 路由(被停用)时 host 返回 undefined = 不注入(PR #744 review 第十九/二十轮)。
+    // 缺席 subagentModelForRoute 时退回静态 subagentModel(旧 host / CLI 行为不变)。
+    const configuredSubagentDefault =
+      (this.deps.runtimeConfig.subagentModelForRoute
+        ? this.deps.runtimeConfig.subagentModelForRoute(opts.providerId ?? null, credentialMode)
+        : this.deps.runtimeConfig.subagentModel
+      )?.trim() || undefined;
     let subagentDefault: ResolveSubagentModelDefaultResult = {
-      envSubagentModel: this.deps.runtimeConfig.subagentModel?.trim() || undefined,
+      envSubagentModel: configuredSubagentDefault,
       diagnostics: [],
     };
     // 远端(SSH)会话**不做**本地扫描:opts.workingDir 是远端机器上的路径(本地不存在),
@@ -813,7 +840,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           env,
         });
         subagentDefault = resolveSubagentModelDefault({
-          configuredDefault: this.deps.runtimeConfig.subagentModel,
+          configuredDefault: configuredSubagentDefault,
           discovered,
           // 校验 agent 声明的 model 是否真的可用 —— 清单就是 host 从目录派生的那份。
           availableModelIds: this.capabilities.availableModels.map((m) => m.id),
@@ -842,7 +869,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           credentialMode,
           mode: 'remote',
           modelContextWindows: providerRoutedModels,
-          // 远端不做本地扫描(见上),这里的值就是设置原值 —— 保持改动前的 env 强制覆盖语义。
+          // 远端不做本地扫描(见上),这里的值就是路由感知后的设置值 —— 保持 env 强制覆盖语义。
           subagentModel: subagentDefault.envSubagentModel ?? null,
         })
       : null;
@@ -897,15 +924,18 @@ export class ClaudeCodeAgent extends BaseAgent {
       opts.makerMemoryEnabled ?? this.deps.runtimeConfig.makerMemoryEnabled ?? false;
     const makerMemory = this.deps.makerMemory;
     const makerMemoryEnabled = makerMemoryFlag === true && !!makerMemory;
+    // SSH remote 的 workingDir 是远端路径 — store 定位统一经 scope key,
+    // 键规则与理由见 buildMemoryScopeKey (memory/storage.ts)。
+    const memoryScopeKey = buildMemoryScopeKey(opts.workingDir, opts.remoteHostId);
     // This per-session injection flag must not mutate the shared manager.
     if (makerMemoryEnabled && makerMemory) {
       try {
-        const store = await makerMemory.getStore(opts.workingDir);
+        const store = await makerMemory.getStore(memoryScopeKey);
         makerMemoryRules = MAKER_MEMORY_RULES;
         makerMemoryIndex = await store.getIndex();
         memoryFlushController = new MemoryFlushController({
           logger: log.child('memory-flush'),
-          workdir: opts.workingDir,
+          workdir: memoryScopeKey,
           agentKind: 'claude-code',
         });
         log.debug('maker memory loaded for session', {
@@ -953,6 +983,9 @@ export class ClaudeCodeAgent extends BaseAgent {
       // 普通字符串键。
       const out: Record<string, McpServerConfig> = Object.create(null);
       for (const provider of providers) {
+        // cindy_memory: per-session flag 关 → 不注册; remote → in-process sdk 实例
+        // 不可序列化, 这里跳过, 由 host 的 remoteCcQueryFactory 按同一 flag 以
+        // http 形态经 bridge 注入 (见 cc-remote-mcp.ts)。
         if (provider.name === 'cindy_memory' && (!makerMemoryEnabled || opts.remoteHostId)) continue;
         if (provider.isEnabled && !provider.isEnabled(context)) continue;
         // 同名 provider 先注册者胜 —— host 把用户自定义 MCP **追加**在内置之后, 后写
@@ -999,6 +1032,24 @@ export class ClaudeCodeAgent extends BaseAgent {
     let inputQueue = createAsyncQueue<SdkUserInput>();
     let abortController = new AbortController();
     let interactionResolver: InteractionResolver | null = null;
+    // Keep the policy across Claude task_notification auto-continue turns,
+    // which do not call handle.send again. The next explicit send replaces it.
+    let activeTurnPermissionPolicy: TurnPermissionPolicy | null = null;
+    const forceTurnConfirmation = (toolName: string, input: unknown): boolean => {
+      const policy = activeTurnPermissionPolicy;
+      if (!policy) return false;
+      try {
+        return policy.forceConfirmToolCall(toolName, input) === true;
+      } catch (error) {
+        // A safety classifier failure cannot become an approval bypass.
+        log.error('turn permission policy threw -> force confirmation', {
+          toolName,
+          origin: policy.origin,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return true;
+      }
+    };
     // 事件队列预先声明 —— canUseTool 路径要 push interaction_dismissed 事件
     const eventQueue = createAsyncQueue<AgentEvent>();
 
@@ -1265,11 +1316,13 @@ export class ClaudeCodeAgent extends BaseAgent {
       }
 
       // 3a. MCP 工具过 host 审批策略(本地与远端会话共用 classifyMcpApprovalPolicy)。
+      const turnPolicyForcePrompt = forceTurnConfirmation(toolName, input);
       const mcpApprovalPolicy = classifyMcpApprovalPolicy(toolName, input);
-      if (mcpApprovalPolicy === 'auto-approve') {
+      if (mcpApprovalPolicy === 'auto-approve' && !turnPolicyForcePrompt) {
         return { behavior: 'allow', updatedInput: input };
       }
-      const forcePrompt = mcpApprovalPolicy === 'prompt-each-time';
+      const forcePrompt =
+        turnPolicyForcePrompt || mcpApprovalPolicy === 'prompt-each-time';
       const decision = await dispatchInteraction({
         kind: 'permission',
         requestId: options.toolUseID,
@@ -1338,9 +1391,11 @@ export class ClaudeCodeAgent extends BaseAgent {
     const buildSettings = (): Settings =>
       buildClaudeFlagSettings({
         showThinkingSummaries,
-        // Maker Memory is not available on SSH targets. Do not carry the local
-        // manager's native-memory suppression across that boundary: the remote
-        // host must retain its own Claude memory configuration.
+        // Do not carry the local manager's native-memory suppression across the
+        // SSH boundary: the remote host retains its own Claude memory
+        // configuration. Maker Memory on remote sessions is injected via the
+        // host bridge (prompt + http MCP), which coexists with — but does not
+        // rewrite — the remote machine's native memory settings.
         memoryOverride: opts.remoteHostId ? undefined : this.memoryOverride,
         // Fast 模式:进 flag settings 层(= --settings),解锁 cc 二进制在 Agent SDK 通道下的
         // fast(否则二进制按 "Agent SDK 不可用" 拒绝)。是否 Opus/官方/firstParty 由二进制把关,
@@ -1792,10 +1847,9 @@ export class ClaudeCodeAgent extends BaseAgent {
           const dropped = Object.keys(mcpServers).filter((k) => !(k in remoteMcpServers));
           log.warn('cc remote: dropping in-process MCP servers (MVP not supported)', { dropped });
         }
-        // 远端会话实际只装到 remoteMcpServers 这一批, 被 filter 掉的 in-process server
-        // 在远端不存在 —— 审批归属必须按远端真实清单判, 否则策略会对远端根本不可能
-        // 出现的 server 名做判定。
-        registeredMcpServerNames = new Set(Object.keys(remoteMcpServers ?? {}));
+        // 远端会话的 server 基线是 remoteMcpServers (被 filter 掉的 in-process server
+        // 在远端不存在); 但 factory 还可能注入 host 侧 http server (协同恢复通道),
+        // 所以审批归属快照不在此处定稿, 挪到 factory 调用后按 startParams 重算。
         // 计划模式开启时远端 SDK 同样跑 plan; 读 mutable 值让 rewind 重建也拿到当前档。
         const remotePermissionMode = extra?.permissionMode ?? effectiveSdkPermissionMode();
         sdkInPlanMode = remotePermissionMode === 'plan';
@@ -1866,6 +1920,13 @@ export class ClaudeCodeAgent extends BaseAgent {
           remoteHostId: opts.remoteHostId,
           sessionId: opts.sessionId,
           startParams,
+          // 协同身份以 session 自己的 vendorOptions 为准 (worker 首次创建时
+          // DB 标记尚未写入, host 现场查库会拿到空角色)。见 base-agent.ts
+          // remoteCcQueryFactory 的 vendorOptions 注释。
+          vendorOptions: vo,
+          // per-session Maker Memory 开关 — host 据此决定是否把 cindy_memory
+          // 以 http 形态注进远端 startParams.mcpServers (cc-remote-mcp.ts)。
+          makerMemoryEnabled,
           onApprovalRequest: async (rawParams: unknown) => {
             // 110s timeout — must respond before daemon's 120s server-request timeout.
             // On timeout, dismiss the pending interaction (clears UI) and reject to
@@ -1954,14 +2015,19 @@ export class ClaudeCodeAgent extends BaseAgent {
             }
             // 远端会话走同一份 host MCP 策略 —— 否则 SSH 会话里可信 server 又要逐次
             // 弹窗, prompt-each-time 的"禁止持久化授权"保护也整套缺失。
+            const remoteTurnPolicyForcePrompt = forceTurnConfirmation(
+              params.toolName ?? 'unknown',
+              params.input ?? {},
+            );
             const remoteMcpPolicy = classifyMcpApprovalPolicy(
               params.toolName ?? '',
               params.input ?? {},
             );
-            if (remoteMcpPolicy === 'auto-approve') {
+            if (remoteMcpPolicy === 'auto-approve' && !remoteTurnPolicyForcePrompt) {
               return { kind: 'permission', behavior: 'allow' };
             }
-            const remoteForcePrompt = remoteMcpPolicy === 'prompt-each-time';
+            const remoteForcePrompt =
+              remoteTurnPolicyForcePrompt || remoteMcpPolicy === 'prompt-each-time';
             const decision = await dispatchWithTimeout({
               kind: 'permission',
               requestId: params.requestId,
@@ -1992,6 +2058,13 @@ export class ClaudeCodeAgent extends BaseAgent {
             };
           },
         });
+        // factory 可能注入 host 侧 http server (远端 cc 协同恢复通道的
+        // cindy_orca / orca_worker_bridge, 见 maker-host remoteCcQueryFactory),
+        // 审批归属快照必须按注入后的最终清单定稿, 否则 canUseTool 的
+        // resolveMcpToolTarget 认不出 orca server 名, 归属判定缺失。
+        registeredMcpServerNames = new Set(
+          Object.keys((startParams as { mcpServers?: Record<string, unknown> }).mcpServers ?? {}),
+        );
         // 记入 closure: handle.close / U2 兜底需要 await remoteQuery.close()。
         activeRemoteQuery = remoteQuery as unknown as { close: () => Promise<void>; detach?: () => Promise<void> };
 
@@ -3111,6 +3184,19 @@ export class ClaudeCodeAgent extends BaseAgent {
       agentKind: 'claude-code',
       get model() { return mutableModel; },
 
+      validateSendOptions(sendOpts: SendOptions) {
+        if (
+          sendOpts.turnPermissionPolicy &&
+          (mutablePermissionMode === 'acceptEdits' ||
+            mutablePermissionMode === 'bypassPermissions')
+        ) {
+          throw new TurnPermissionPolicyUnsupportedError(
+            'claude-code',
+            mutablePermissionMode,
+          );
+        }
+      },
+
       async send(message: UserMessage, sendOpts?: SendOptions) {
         // idle resume fallback 正在重建(亚秒窗):等它完成再走正常受理。重建成功时
         // 消息透明跑在新会话上;重建失败/close 竞态时 push 撞上已 end 的队列,由下方
@@ -3121,6 +3207,8 @@ export class ClaudeCodeAgent extends BaseAgent {
         if (sendOpts?.signal?.aborted) {
           throw new Error('Claude send cancelled before acceptance');
         }
+        if (sendOpts) handle.validateSendOptions?.(sendOpts);
+        activeTurnPermissionPolicy = sendOpts?.turnPermissionPolicy ?? null;
         // 仅用于诊断日志: 调用方每次 send 都可以带 logTitle (取自 storage 的最新值);
         // 缺省时保留上一次的值 (没传不等于"清空")。
         if (sendOpts?.logTitle !== undefined) lastSendTitle = sendOpts.logTitle;

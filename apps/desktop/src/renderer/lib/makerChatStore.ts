@@ -6570,7 +6570,6 @@ function buildCreateOptsForCurrentSession(
 ): AgentInputCreateOpts {
   const current = getOrCreateState(sessionId);
   const deviceLinkRemote = isRemoteSession(sessionId);
-  const sshRemote = Boolean(current.remoteHostId);
   return {
     agentKind: current.agentKind,
     workingDir,
@@ -6581,12 +6580,12 @@ function buildCreateOptsForCurrentSession(
     planMode: current.planModeEnabled,
     displayReasoning: 'summarized',
     userPrompt: getUserPrompt(),
-    // device-link routes to the target desktop, so omit the controller setting;
-    // SSH still starts the agent through this process and must not inherit the
-    // controller's default-enabled Maker Memory for a remote working directory.
-    ...(deviceLinkRemote
-      ? {}
-      : { makerMemoryEnabled: sshRemote ? false : getMakerMemoryEnabled() }),
+    // device-link routes to the target desktop, so omit the controller setting.
+    // SSH remote follows the controller's global setting like local sessions:
+    // memory lives on this machine, scoped per hostId+remote path
+    // (maker-core buildMemoryScopeKey), and reaches the remote agent via the
+    // host HTTP MCP bridge.
+    ...(deviceLinkRemote ? {} : { makerMemoryEnabled: getMakerMemoryEnabled() }),
     ...(current.remoteHostId ? { remoteHostId: current.remoteHostId } : {}),
     ...(opts?.vendorOptions ? { vendorOptions: opts.vendorOptions } : {}),
     ...(current.sdkSessionId ? { resumeSessionId: current.sdkSessionId } : {}),
@@ -7451,17 +7450,36 @@ function continueAfterSilentStop(sessionId: string): void {
  * dismissErrorMessageFor 按会话来源路由:远程会话经隧道写到被控端 DB(allowlist
  * 窄口径写),重连/历史重拉后不复活;老被控端不识别该 channel 时 catch 吞错,
  * 退化为本视图内存隐藏。
+ *
+ * 返回值 = **是否落库成功**(不会 reject):红点是告警查询的派生投影,调用方必须
+ * 等落库完成再重算,否则重算会与这次异步写竞态 —— 读到旧状态就仍判定告警存在,
+ * 横幅已消失而红点卡住。远程会话的调用方还要靠这个布尔决定是否发 explicit ack:
+ * 隧道写失败时不能清红点,否则横幅已回滚重现而红点没了(PR #879 review P1)。
+ *
+ * 落库失败时**回滚乐观更新**(errorDismissed 置回 false):否则横幅已被乐观隐藏、
+ * 而库里的告警仍在,重算会把红点恢复,用户看到「红点在但没有横幅可处置」,只能重载
+ * 才恢复。回滚后横幅重新出现,与红点重新一致,用户可以再试。
  */
-function dismissErrorTailMessage(sessionId: string, clientId: string): void {
-  if (!sessionId || !clientId) return;
-  setState(sessionId, (s) => ({
-    ...s,
-    messages: s.messages.map((m) =>
-      m.clientId === clientId && m.role === 'error' ? { ...m, errorDismissed: true } : m,
-    ),
-  }));
-  dismissErrorMessageFor(sessionId, clientId).catch((err) =>
-    log.warn('persist error dismiss failed:', err),
+function dismissErrorTailMessage(sessionId: string, clientId: string): Promise<boolean> {
+  if (!sessionId || !clientId) return Promise.resolve(false);
+  const setDismissed = (dismissed: boolean): void => {
+    setState(sessionId, (s) => ({
+      ...s,
+      messages: s.messages.map((m) =>
+        m.clientId === clientId && m.role === 'error' ? { ...m, errorDismissed: dismissed } : m,
+      ),
+    }));
+  };
+  setDismissed(true);
+  // 收敛成 Promise<boolean>:dismissErrorMessageFor 返回 Promise<unknown>(IPC 结果),
+  // 调用方只关心「写成功了没有」。
+  return dismissErrorMessageFor(sessionId, clientId).then(
+    () => true,
+    (err: unknown) => {
+      log.warn('persist error dismiss failed, rolling back optimistic dismiss:', err);
+      setDismissed(false);
+      return false;
+    },
   );
 }
 
@@ -8523,10 +8541,9 @@ function sendUiTrigger(sessionId: string, prompt: string): Promise<void> {
         ...((session.sdkSessionId ?? state.sdkSessionId)
           ? { resumeSessionId: (session.sdkSessionId ?? state.sdkSessionId) as string }
           : {}),
-        // buildQueuedMessage may have used a pre-hydration store snapshot.
-        // The DB row is authoritative here: SSH lazy-create must not inherit
-        // controller-local Cindy Memory. Device-link keeps target ownership.
-        ...(session.remoteHostId && !deviceLinkRemote ? { makerMemoryEnabled: false } : {}),
+        // SSH remote 与本地同语义: Maker Memory 跟随控制端全局开关 (scope 由
+        // maker-core 按 remoteHostId+workingDir 隔离), 这里不再强制关闭;
+        // device-link 仍由目标端自己的设置决定 (buildQueuedMessage 已省略)。
         // 远端 SSH 会话:重启后 lazy-create 缺它会把远端 workingDir 当本地路径。
         ...(session.remoteHostId ? { remoteHostId: session.remoteHostId } : {}),
       };

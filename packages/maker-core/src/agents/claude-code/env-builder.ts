@@ -39,10 +39,17 @@ interface ClaudeEnvBuildOptions {
   /** 本次子进程明确要走的凭证形态。undefined 时保持 adapter 既有 fallback。 */
   credentialMode?: AgentCredentialMode;
   /**
+   * 本次 spawn 的会话来源(显式 providerId;null/undefined = 隐式默认路由)。
+   * 供 runtimeConfig.subagentModelForRoute 按父会话来源判定 subagent 覆写是否可路由
+   * (options.subagentModel 省略、走 runtimeConfig 回落分支时消费)。
+   */
+  sessionProviderId?: string | null;
+  /**
    * 调用方已解析好的 `CLAUDE_CODE_SUBAGENT_MODEL` 决定(见 subagent-model-default.ts)。
    *   - 字符串 → 设该值;
    *   - `null`  → 明确**不要设**(让用户手写 agent 的 frontmatter `model:` 生效);
-   *   - 省略    → 回落读 `runtimeConfig.subagentModel`(未接该解析的调用方保持旧行为)。
+   *   - 省略    → 回落读 `runtimeConfig`(未接该解析的调用方保持旧行为;有
+   *     subagentModelForRoute 时按 sessionProviderId/credentialMode 走路由感知入口)。
    */
   subagentModel?: string | null;
 }
@@ -88,7 +95,7 @@ export const SENSITIVE_ANTHROPIC_ENV_KEYS = [
   'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
   'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
   // 订阅身份元数据(与 OAUTH_TOKEN 配套,cc env-token 分支消费):不剥离的话,从
-  // 带这些变量的 shell 启动 XDMaker(典型:终端里的 cc 会话内跑 dev)会把**别人的
+  // 带这些变量的 shell 启动 Cindy(典型:终端里的 cc 会话内跑 dev)会把**别人的
   // 档位/scopes**漏进子进程 —— 凭证库没提供时 getAuthEnv 不注入对应 key,继承残留
   // 会顶上,订阅会话以错误 scopes/tier 起跑。
   'CLAUDE_CODE_OAUTH_SCOPES',
@@ -261,11 +268,19 @@ export async function buildClaudeEnv(
   //   - `null`  → 明确「不要设」—— 用户手写 agent 自己声明了 model,设了会把它静默盖掉;
   //   - 省略    → 回落读 runtimeConfig(未接入该解析的调用方保持旧行为)。
   // 该 env 在平台解析顺序里是最高优先级,所以「不设」是让 frontmatter 生效的唯一办法。
+  // runtimeConfig 回落分支里路由感知版优先:子代理请求跑在父会话来源上,覆写是否可注入
+  // 要按该来源判(host 的停用轴按 (来源, 模型) 记账;PR #744 review 第十九轮)。
   applySubagentModelEnv(
     env,
     options.subagentModel !== undefined
       ? options.subagentModel
-      : (runtimeConfig.subagentModel?.trim() || undefined),
+      : ((runtimeConfig.subagentModelForRoute
+          ? runtimeConfig.subagentModelForRoute(
+              options.sessionProviderId ?? null,
+              options.credentialMode,
+            )
+          : runtimeConfig.subagentModel
+        )?.trim() || undefined),
   );
 
   // 第三道防线: 告诉 CC CLI "provider 路由由 host 接管"。

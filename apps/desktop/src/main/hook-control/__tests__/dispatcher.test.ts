@@ -2530,6 +2530,28 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     expect(c.ofType('turn.reopen')).toHaveLength(1);
   });
 
+  it('claim 帧发不出去 -> 撤观察、留记账, 且一帧都不带这个未认领的 requestId 出去', async () => {
+    // WS 已进 CLOSING 但 onDisconnected 还没到时, send 返回 false。此时:
+    //   - 不能"只是不认领": runner 那边按契约认为认领发生过, 不会再给第二次机会,
+    //     观察器留着就要挂到 1 小时硬超时 —— 所以要撤;
+    //   - 记账必须留着: 渠道那条消息此刻仍是原来的失败态, 没被改写过;
+    //   - 一帧都不能带这个 requestId 出去: server 从没把消息挂到它上面。
+    // 用户那一轮**照常跑**: 回流是增强, 不是关键路径(信号 fan-out 吞掉监听方异常,
+    // 结构上就不可能让它 abort 掉 pre-vendor dispatch)。
+    const { cr, sig, c, sessionId } = await failOneTask();
+    c.setOnline(false);
+    sig.retry(sessionId);
+    await tick();
+    expect(c.ofType('turn.reopen')).toHaveLength(0);
+    expect(cr.cancels).toContain(0);
+
+    // 记账还在: 连接恢复后再点一次重试就能接上。
+    c.setOnline(true);
+    sig.retry(sessionId, 'retry-client-2');
+    await tick();
+    expect(c.ofType('turn.reopen')).toHaveLength(1);
+  });
+
   it('附件收集期间排在后面的桌面消息 dispatch -> 不算顶替, 成功结果照样如实收口', async () => {
     // 成功那一路要先异步收集出站附件, onEnd 因此晚于"停止观察"。这段时间里若还把这一轮
     // 算作"在观察", 排在后面的桌面消息一 dispatch 就会命中顶替判定 —— 而它其实已经跑完了。

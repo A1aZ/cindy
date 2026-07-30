@@ -1504,7 +1504,26 @@ async function setVoiceInputGlobalShortcut(shortcut: VoiceInputShortcut | null):
       const previousShortcut = registeredShortcut;
       if (previousShortcut && voiceInputShortcutNeedsMacNativeListener(previousShortcut, process.platform)) {
         // 回滚同样可能抛（helper 已经坏掉），不能让它把整个 handler 掀了。
-        await startMacNativeListener(() => macModifierShortcutListener.setShortcut(previousShortcut));
+        const restored = await startMacNativeListener(
+          () => macModifierShortcutListener.setShortcut(previousShortcut),
+        );
+        // 回滚目标与本次请求是**同一个**快捷键时（对得上存盘的同步就是这种：previousShortcut
+        // 正是用户当前那个），这次「回滚」其实是同键重试。它成功了就意味着请求的快捷键此刻真的
+        // 在监听，再报失败会让调用方不去清持久失败态、界面还弹一句「重启 Cindy 再试」——而快捷键
+        // 本身是好的。
+        //
+        // 只在 key 相同时这样收：真回滚到**另一个**快捷键时，用户请求的那个确实没注册上，必须
+        // 照旧报失败，否则他会以为换成功了。
+        if (restored.ok && stableVoiceInputShortcutKey(previousShortcut) === nativeShortcutKey) {
+          log.info('native global shortcut recovered by retrying the same shortcut', {
+            code: shortcut.code,
+          });
+          // 这一路不重跑 prewarm：那是首次注册时做的事，同键重试没有新东西要预热。
+          registeredShortcut = shortcut;
+          registeredNativeShortcutLabel = getNativeShortcutLogLabel(shortcut);
+          registeredNativeShortcutKey = nativeShortcutKey;
+          return { ok: true };
+        }
       }
       const errorCode = await classifyMacNativeListenerFailure();
       log.warn('native global shortcut registration failed', {

@@ -920,6 +920,71 @@ describe('voice input global shortcut registration', () => {
         expect(mocks.modifierSetShortcut).toHaveBeenCalledWith(bareRightOption);
       });
 
+      // 注册失败后会「回滚到上一个快捷键」。而对得上存盘的同步里, 上一个就是请求的那一个 ——
+      // 这时的回滚其实是同键重试。它成功了就说明请求的快捷键此刻真的在监听, 再报失败会让失败态
+      // 不被清掉、界面还弹一句「重启 Cindy 再试」, 而快捷键本身是好的。
+      it('reports success when the rollback retried the same shortcut and it started', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: true, status: 'granted' });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        // 先成功注册一次, 让 registeredShortcut / registeredNativeShortcutKey 都是这一个。
+        mocks.modifierIsRunning.mockReturnValue(false);
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
+
+        // 造一条持久失败态, 用来观察它有没有被清掉。
+        mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'spawn ENOENT' });
+        await focusWindow();
+        const consume = mocks.handlers.get('voice-input:consume-shortcut-recovery-failure');
+
+        // 替补在起、还没就绪 → 同步落不到快路; 第一次 setShortcut 撞上那次失败的启动, 紧接着的
+        // 同键重试成功。
+        mocks.modifierIsRunning.mockReturnValue(true);
+        mocks.modifierIsReady.mockReturnValue(false);
+        mocks.modifierSetShortcut.mockReset();
+        mocks.modifierSetShortcut
+          .mockResolvedValueOnce({ ok: false, error: 'Modifier shortcut listener did not start.' })
+          .mockResolvedValue({ ok: true });
+
+        const result = await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
+
+        expect(result).toMatchObject({ ok: true });
+        // 报成功之后失败态也就过期了。
+        expect(consume?.(mocks.settingsEvent)).toEqual({ failed: false });
+      });
+
+      // 防止把上面那条修成「回滚成功就算成功」: 回滚到**另一个**快捷键时, 用户请求的那个确实没
+      // 注册上, 必须照旧报失败 —— 否则他以为换成功了。
+      it('still reports a failure when the rollback restored a different shortcut', async () => {
+        setPlatform('darwin');
+        const otherBareModifier: VoiceInputShortcut = {
+          trigger: 'modifier',
+          code: 'ControlRight',
+          key: 'ControlRight',
+          modifiers: { meta: false, ctrl: false, alt: false, shift: false, fn: false },
+        };
+        mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: true, status: 'granted' });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        // 当前注册着的是右 Option。
+        mocks.modifierIsRunning.mockReturnValue(false);
+        mocks.setStoredShortcut(bareRightOption);
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
+
+        // 换成右 Control: 新的起不来, 回滚到右 Option 成功。
+        mocks.modifierSetShortcut.mockReset();
+        mocks.modifierSetShortcut
+          .mockResolvedValueOnce({ ok: false, error: 'spawn ENOENT' })
+          .mockResolvedValue({ ok: true });
+
+        const result = await mocks.handlers.get('voice-input:settings:update-shortcut')?.({}, otherBareModifier);
+
+        expect(result).toMatchObject({ ok: false, errorCode: 'failed' });
+      });
+
       // scheduleRestart 起的替补不经过 setShortcut, 所以 registeredNativeShortcutKey 一直是旧值。
       // 复用条件只看「进程在跑」的话, 替补还没报 ready 时一次对得上存盘的同步就会被判成功, 于是
       // 持久失败态被清掉 —— 而替补及其重试全失败时只写日志、不会重新发布失败态, 用户就只剩一个

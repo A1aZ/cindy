@@ -187,10 +187,12 @@ export class PiAgent extends BaseAgent {
       // auto 档:bridge 行为同 ask(非只读全部冒泡),Cindy 侧 dispatcher 先过
       // Auto-Review Core(shared/auto-review.ts)—— 区内写/安全命令静默放行,
       // 越界写/危险命令/MCP 工具仍弹窗(见 handleExtensionUiRequest)。
+      // displayName/description 为英文 fallback,真实文案走 i18n
+      // newChat.permissionSelector.modes.pi.*(与 cc/codex 同结构)。
       permissionModes: [
-        { id: 'ask', displayName: 'Default permissions', description: '只读工具直通;写文件、跑命令与 MCP 工具逐次询问' },
-        { id: 'auto', displayName: 'Auto-review', description: '工作区内写与安全命令自动放行;越界写、危险命令与 MCP 工具仍询问' },
-        { id: 'bypassPermissions', displayName: 'Full access', description: '全部工具免询问执行;风险高' },
+        { id: 'ask', displayName: 'Default permissions', description: 'Read-only tools run directly; writing files, running commands, and MCP tools ask each time.' },
+        { id: 'auto', displayName: 'Auto-review', description: 'In-workspace writes and safe commands run automatically; out-of-workspace writes, risky commands, and MCP tools still ask.' },
+        { id: 'bypassPermissions', displayName: 'Full access', description: 'Every tool runs without asking. Highest risk; use only for trusted tasks.' },
       ],
       setPermissionModeMidSession: { supported: true },
       // plan 模式经 pi 自带 plan-mode 扩展(--extension 加载):开启后禁用 edit/write、

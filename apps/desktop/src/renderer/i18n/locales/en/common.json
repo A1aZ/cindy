@@ -4706,6 +4706,20 @@
             "label": "Full access",
             "description": "Allows editing any file and running networked commands without another confirmation. Highest risk; use only for trusted tasks."
           }
+        },
+        "pi": {
+          "ask": {
+            "label": "Default permissions",
+            "description": "Read-only tools run directly; writing files, running commands, and MCP tools ask each time."
+          },
+          "auto": {
+            "label": "Auto-review",
+            "description": "In-workspace writes and safe commands run automatically; out-of-workspace writes, risky commands, and MCP tools still ask."
+          },
+          "bypassPermissions": {
+            "label": "Full access",
+            "description": "Every tool runs without asking. Highest risk; use only for trusted tasks."
+          }
         }
       }
     },

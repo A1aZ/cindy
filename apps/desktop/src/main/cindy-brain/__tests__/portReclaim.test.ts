@@ -106,11 +106,12 @@ describe('portReclaim', () => {
         await new Promise((r) => srv.close(r));
       }
       // 端口已空闲:查无占用者 → 返回 true 让调用方直接重试 listen。
-      if (await reclaimLoopbackPort(port)) return;
+      // 只调一次并对这一次的结果下断言:reclaimLoopbackPort 依赖当次的端口归属,
+      // 重新调用会让断言看到另一个时刻的状态,既可能自己抖动、也会掩盖真正的失败态。
+      const reclaimed = await reclaimLoopbackPort(port);
+      if (reclaimed) return;
       // 关掉后被并发用例抢走(见 PORT_ATTEMPTS 说明):整对场景换端口重来。
-      if (attempt === PORT_ATTEMPTS) {
-        await expect(reclaimLoopbackPort(port)).resolves.toBe(true);
-      }
+      if (attempt === PORT_ATTEMPTS) expect(reclaimed).toBe(true);
     }
   });
 });

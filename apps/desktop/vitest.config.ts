@@ -1,7 +1,6 @@
 import { defineConfig } from 'vitest/config';
 import path from 'node:path';
 import { desktopClientBuildEnv } from '../../scripts/shared/client-endpoint-build-env.mjs';
-import { nodeWebstorageEnabled } from '../../scripts/shared/node-webstorage.mjs';
 import { parseVitestCliExclude } from './src/test/vitest/cliExclude';
 
 const clientBuildEnv = desktopClientBuildEnv({ allowEnvOverride: false });
@@ -78,15 +77,12 @@ export default defineConfig({
     // 走 `exec vitest run` 直调、不经 package.json 脚本,只有 config 层对所有
     // 入口一致生效。
     //
-    // threads 池只在真的需要时才拿这个 execArgv: 给 worker thread 传自定义
-    // execArgv 会让 isolate 销毁时段错误(详见 node-webstorage.mjs 的实测数据),
-    // 而 Node 22(本机与 CI)根本没有 webstorage 全局、flag 纯属空转。两者互斥,
-    // 由 nodeWebstorageEnabled() 二选一:需要 flag 的 Node 上 manifest 会把
-    // unit tier 留在 forks,不需要的 Node 上才切 threads。
+    // 只给 forks 池配这个 execArgv,threads 池一律不配:给 worker thread 传自定义
+    // execArgv 会让 isolate 销毁时段错误(实测数据见 scripts/shared/node-webstorage.mjs),
+    // 所以哪怕有人手动 `--pool=threads` 也不该拿到这份配置。需要这个 flag 的 Node 上,
+    // 根 manifest 会用同一个 nodeWebstorageEnabled() 判据把 unit tier 留在 forks,
+    // 两者不会同时生效;不需要 flag 的 Node(本机与 CI 的 22)上压根没有 webstorage 全局。
     poolOptions: {
-      ...(nodeWebstorageEnabled()
-        ? { threads: { execArgv: ['--no-experimental-webstorage'] } }
-        : {}),
       forks: { execArgv: ['--no-experimental-webstorage'] },
     },
     // Main-process code is pure Node — no DOM needed. Renderer tests (if/when

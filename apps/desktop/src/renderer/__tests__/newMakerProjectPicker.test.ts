@@ -62,6 +62,11 @@ const controllableDevicesHookSource = readFileSync(
   'utf8',
 );
 
+const deviceLinkRemoteProjectsSource = readFileSync(
+  resolve(__dirname, '..', 'features', 'device-link', 'useDeviceLinkRemoteProjects.ts'),
+  'utf8',
+);
+
 const deviceProvidersHookSource = readFileSync(
   resolve(__dirname, '..', 'hooks', 'useDeviceProviders.ts'),
   'utf8',
@@ -882,12 +887,56 @@ describe('Shared create project picker', () => {
     const prefetchAt = handler.indexOf('prefetchDeviceCapabilities(target.deviceId)');
     expect(applyAt).toBeGreaterThan(-1);
     expect(prefetchAt).toBeGreaterThan(applyAt);
-    // 侧边栏点远程项目进草稿是**另一个组件**的路径,不经本路由的转移动作,自己 evict。
-    expect(sidebarUpperSource).toContain('evictDeviceCapabilities(project.deviceLinkDeviceId);');
-    expect(sidebarUpperSource).toContain('evictDeviceProviders(project.deviceLinkDeviceId);');
-    expect(sidebarUpperSource).toContain(
-      'evictDeviceGitSafetySettings(project.deviceLinkDeviceId);',
+    // 侧边栏点远程项目进草稿是**另一个组件**的路径,不经本路由的转移动作,自己 evict + prefetch。
+    // ⚠️ 这里原来只断言那三行 evict 存在 —— 于是它**保护住了**第 32 轮那个 P1(见下一条用例)。
+    expect(sidebarUpperSource).toContain('evictDeviceCapabilities(targetDeviceId);');
+    expect(sidebarUpperSource).toContain('evictDeviceProviders(targetDeviceId);');
+    expect(sidebarUpperSource).toContain('evictDeviceGitSafetySettings(targetDeviceId);');
+  });
+
+  /**
+   * #807 review 第 32 轮 P1 —— 与第 30 轮**同一个根因的第三处**,而且我上一轮的测试恰好把它锁住了:
+   * 那条断言只要求侧边栏那三行 evict 存在,于是「无条件 evict」被写成了不变量去保护。
+   *
+   * 规则的完整表述应该是:**capabilities / providers 的 evict 必须配对一次会真正重取的动作** ——
+   * 它们 notify `{ status: 'loading' }` 把已挂载的 hook 推进加载态,而 fetch effect 的 deps 是
+   * `[agentKind, deviceId]`。配对方式有两种,按 deviceId 是否变化选:
+   *   · 换设备 → effect 自己会重跑(applyDraftTarget 走这条);
+   *   · deviceId 可能不变 → 必须显式 prefetch(设备域浏览器与侧边栏这两条走这条)。
+   *
+   * 本仓早有正确范例:useDeviceLinkRemoteProjects 处理 `maker:provider:changed` push 时就是
+   * evict 紧跟 prefetch。反之,「设备撤销 / 断开 / 禁用 / hook 卸载」那几处 evict **不需要**配对 ——
+   * 那台设备已经不可用,没有「永久 loading」的受害者。
+   */
+  it('pairs every eviction of a still-usable device with a refetch', () => {
+    // ① 侧边栏「+ 新建」:deviceId 可能与当前草稿相同 → 必须显式 prefetch 三个。
+    const handler = sidebarUpperSource.slice(
+      sidebarUpperSource.indexOf('const handleCreateInProject = useCallback('),
     );
+    const body = handler.slice(0, handler.indexOf('navigate('));
+    for (const call of [
+      'prefetchDeviceCapabilities(targetDeviceId)',
+      'prefetchDeviceProviders(targetDeviceId)',
+      'prefetchDeviceGitSafetySettings(targetDeviceId)',
+    ]) {
+      expect(body).toContain(call);
+    }
+    // prefetch 必须在 evict 之后,否则刚取回的又被作废。
+    expect(body.indexOf('prefetchDeviceCapabilities')).toBeGreaterThan(
+      body.indexOf('evictDeviceCapabilities'),
+    );
+    // ② 设备域浏览器:同样可能是同一台设备,三个都要 prefetch(gitSafety 少了会让 Rewind 入口隐藏)。
+    const added = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const handleRemoteProjectAdded = useCallback('),
+    );
+    const addedHead = added.slice(0, added.indexOf('return;'));
+    expect(addedHead).toContain('prefetchDeviceCapabilities(target.deviceId)');
+    expect(addedHead).toContain('prefetchDeviceProviders(target.deviceId)');
+    expect(addedHead).toContain('prefetchDeviceGitSafetySettings(target.deviceId)');
+    // ③ 「设备已不可用」类的 evict 不需要配对 —— 那几处刻意不 prefetch,别被这条规则误改。
+    //    这里只锁「本仓存在那个正确范例」,它是这条规则的出处。
+    expect(deviceLinkRemoteProjectsSource).toContain('evictDeviceProviders(push.deviceId);');
+    expect(deviceLinkRemoteProjectsSource).toContain('void prefetchDeviceProviders(push.deviceId);');
   });
 
   /**

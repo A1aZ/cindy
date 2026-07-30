@@ -155,7 +155,10 @@ import {
   evictDeviceProviders,
   prefetchDeviceProviders,
 } from '@/hooks/useDeviceProviders';
-import { evictDeviceGitSafetySettings } from '@/hooks/useGitSafetySettings';
+import {
+  evictDeviceGitSafetySettings,
+  prefetchDeviceGitSafetySettings,
+} from '@/hooks/useGitSafetySettings';
 import {
   getProjectPickerDisplayName,
   useProjectPickerOptions,
@@ -1402,9 +1405,12 @@ export function NewMakerDraftRoute() {
         // prefetch 补回 hook 缓存:选的是**同一** deviceId 时 hook 的 effect 不会因 deps 变化重跑,
         // 只有 subscriber 通知路径能送达新数据。即使 prefetch 内部 swallow error,send / goal 的
         // capabilitiesLoading / deviceProvidersLoading gate 也会阻止在 hook 尚未就绪时发送。
+        // gitSafety 一并补(第 32 轮):它的 evict 不 notify loading、不会卡住发送,但 effect deps
+        // 同样是 `[deviceId]`,同设备不会自动重拉 —— 少这一个会让 Codex Rewind 入口一直隐藏。
         await Promise.all([
           prefetchDeviceCapabilities(target.deviceId),
           prefetchDeviceProviders(target.deviceId),
+          prefetchDeviceGitSafetySettings(target.deviceId),
         ]);
         return;
       }

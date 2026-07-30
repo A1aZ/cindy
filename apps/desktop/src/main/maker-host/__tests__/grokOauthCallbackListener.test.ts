@@ -10,7 +10,7 @@
  *   - 首个终态结果落定后,重试回调不得覆盖 pendingRes / 登录结果。
  */
 
-import { createServer, request as httpRequest } from 'node:http';
+import { request as httpRequest } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({
@@ -89,37 +89,45 @@ describe('xaiCallbackCorsHeaders', () => {
 });
 
 /**
- * close() 同步返回,端口却是异步释放的:server.close() 只停止接受新连接,监听
- * socket 要等真正关闭才交还。而 56121 是 xAI 要求精确匹配的固定端口,换不了,
- * 于是下一个用例的 beforeEach 会立刻重绑同一个端口 —— 上一个用例还没释放完就是
- * 「xAI OAuth 回调端口 56121 被占用」。等到真能绑上再往下走,才是确定的。
- * 上面 send() 里 agent:false 治的是同一个不变量的客户端那一半(死 socket 被复用)。
+ * 绑 56121 时它可能短暂被别人占着,有两个来源:
+ *   1. 文件内部:close() 同步返回但端口是异步释放的,上一个用例「调过 close」
+ *      不等于端口已交还,下一个用例立刻重绑就撞上;
+ *   2. 文件外部:56121 落在临时端口段内(macOS 49152–65535 / Linux 32768–60999),
+ *      任何用 listen(0) 拿端口的并发用例都可能被内核分到它。desktop unit tier
+ *      一轮 1330 个文件、threads 池下还共享同一个进程,这不是理论风险 —— CI 上
+ *      两轮分别撞在不同用例的 beforeEach 上。而 xAI 只接受
+ *      http://127.0.0.1:56121/callback,端口换不了。
+ *
+ * 两者是同一句话,所以只留一个判据:仅在引擎明确报出「端口被占用」时短暂重试,
+ * 其它启动失败原样抛出,不掩盖真正的问题。每次重试用全新实例,免得复用一个
+ * listen 失败过的 server。同族的客户端那一半由 send() 的 agent:false 处理。
  */
-async function waitForPortRelease(): Promise<void> {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    const released = await new Promise<boolean>((resolve) => {
-      const probe = createServer();
-      probe.once('error', () => resolve(false));
-      // close 的回调在 socket 完全关闭后才触发,所以探测本身不会留下占用。
-      probe.listen(PORT, '127.0.0.1', () => probe.close(() => resolve(true)));
-    });
-    if (released) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
+async function startFreshListener(): Promise<CallbackListener> {
+  for (let attempt = 1; ; attempt += 1) {
+    const candidate = new CallbackListener();
+    try {
+      await candidate.start();
+      return candidate;
+    } catch (err) {
+      candidate.close();
+      // 引擎把 EADDRINUSE 映射成带端口号的人话提示(见 grok-oauth-login.ts),
+      // 这也是本文件「端口被占用时报可读错误」那条用例依赖的同一个判据。
+      const occupied = err instanceof Error && err.message.includes(String(PORT));
+      if (!occupied || attempt >= 100) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
   }
-  throw new Error(`端口 ${PORT} 在 2s 内未被释放`);
 }
 
 describe('CallbackListener(xAI loopback 回调)', () => {
   let listener: CallbackListener;
 
   beforeEach(async () => {
-    listener = new CallbackListener();
-    await listener.start();
+    listener = await startFreshListener();
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     listener.close();
-    await waitForPortRelease();
   });
 
   it('OPTIONS preflight 回 204 + CORS/PNA 头,且不终止登录流', async () => {

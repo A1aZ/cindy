@@ -542,4 +542,72 @@ describe('useDeviceLinkProjects 取数 / 删除并发', () => {
     expect(seen.projects.map((p) => p.path).sort()).toEqual(['/a/one', '/a/three', '/a/two']);
     void setEnabled;
   });
+
+  /**
+   * #807 review 第 33 轮 P1:取数**瞬时失败**不得把已知良好的快照打成空列表。
+   *
+   * 时序(我最初推错过一次,所以这条用真实渲染复现):effect 开头确实会先 commitRows([]) 清空,
+   * 但删除失败的回读是在那之后才 apply 的 —— 于是「回读带回一份好数据」与「新 effect 取数失败」
+   * 之间存在一个真实窗口,catch 里的无条件 commitRows([]) 会把它抹掉。用户看到「没有项目」,
+   * 而几秒前那次回读刚证明它们存在,直到下一次成功重开才恢复。
+   */
+  it('取数瞬时失败时保留上一次已应用的快照,不提交权威空列表', async () => {
+    const first = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => first.promise);
+    const { seen, setEnabled } = mountHook();
+    await act(async () => {
+      first.resolve([row('/a/one'), row('/a/two')]);
+    });
+
+    // 删除 /a/one 失败 → 回读在飞(先不 resolve)。
+    const removeCall = deferred<void>();
+    removeMock.mockImplementationOnce(() => removeCall.promise);
+    const readback = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => readback.promise);
+    let removal!: Promise<void>;
+    act(() => {
+      removal = seen.remove('/a/one', 'dev-a');
+    });
+    await act(async () => {
+      removeCall.reject(new Error('CHANNEL_NOT_ALLOWED'));
+    });
+
+    // 关掉再打开 picker → 新 effect 取数在飞。
+    const reopen = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => reopen.promise);
+    await act(async () => {
+      setEnabled(false);
+    });
+    await act(async () => {
+      setEnabled(true);
+    });
+
+    // 回读先成功 apply 一份好数据(删除失败了,所以 /a/one 仍在对端)。
+    await act(async () => {
+      readback.resolve([row('/a/one'), row('/a/two')]);
+      await removal;
+    });
+    expect(seen.projects.map((p) => p.path).sort()).toEqual(['/a/one', '/a/two']);
+
+    // 然后那次新 effect 取数**瞬时失败**(隧道抖动)。
+    await act(async () => {
+      reopen.reject(new Error('DEVICE_LINK_TIMEOUT'));
+    });
+
+    // 已知良好的快照必须保留 —— 不能因为一次瞬时失败就显示「没有项目」。
+    expect(seen.projects.map((p) => p.path).sort()).toEqual(['/a/one', '/a/two']);
+    // 且不能卡在 loading。
+    expect(seen.loading).toBe(false);
+  });
+
+  it('首次取数就失败时仍提交空列表(没有可保留的快照,空态里有浏览文件夹兜底)', async () => {
+    const first = deferred<ExistingRemoteProject[]>();
+    loadMock.mockImplementationOnce(() => first.promise);
+    const { seen } = mountHook();
+    await act(async () => {
+      first.reject(new Error('DEVICE_OFFLINE'));
+    });
+    expect(seen.projects).toEqual([]);
+    expect(seen.loading).toBe(false);
+  });
 });

@@ -195,9 +195,14 @@ export function useDeviceLinkProjects(
         setLoading(false);
       })
       .catch(() => {
-        // 被控端离线 / 老版本没这个 channel → 当作空列表,空态里仍有「浏览文件夹」兜底。
+        // 被控端离线 / 老版本没这个 channel → 空态里仍有「浏览文件夹」兜底。
         if (cancelled || requestIdRef.current !== requestId) return;
-        commitRows(deviceId, []);
+        // **刻意不 commitRows([])**(Codex review 第 33 轮 P1)。这个 effect 开头已经把行设成了
+        // 「(这台设备, 空)」,所以失败时什么都不做,显示的就已经是空态 —— 再提交一次是冗余的,
+        // 而且会踩掉一个真实窗口:删除失败的兜底回读**在 effect 开头那次清空之后**才 apply,
+        // 于是「回读刚带回一份好数据」与「本次取数瞬时失败(隧道抖动 / 超时)」可以同时成立。
+        // 无条件清空会把那份刚被证明存在的列表抹成「没有项目」,直到用户再成功重开一次才恢复。
+        // 归属正确性不依赖这里:effect 开头的清空已经保证当前行属于这台设备。
         setLoading(false);
       });
     return () => {

@@ -2053,9 +2053,11 @@ export function NewMakerDraftRoute() {
             }
             // remoteSessionId 到手就是**提交点**:对端会话已经建出来了。此后任何一步都不许再把它
             // 退化成「创建失败」—— 用户会照着提示重试,于是对端多出第二个会话,第一个空着永久滞留。
-            // 钉归属 → 补临时行 → 回流镜像这三条不变量、以及各自被 review 抓出来的理由,都在
-            // commitRemoteSessionHandoff 里;它不抛,所以这里不需要额外 try。
-            await commitRemoteSessionHandoff({
+            // 钉归属 → 补临时行 → 触发回流这三条不变量、以及各自被 review 抓出来的理由,都在
+            // commitRemoteSessionHandoff 里;它同步返回且不抛,所以这里既不 await 也不需要 try ——
+            // **回流不能挡在 setPending 前面**:那段退避重试最长约 6.75 秒,应用在窗口内被关掉就会
+            // 丢掉用户的首条消息,而对端会话已经建好了(第 33 轮 P1)。
+            commitRemoteSessionHandoff({
               deviceId,
               deviceName,
               remoteSessionId,
@@ -2569,11 +2571,13 @@ export function NewMakerDraftRoute() {
           if (!remoteSessionId) {
             throw new Error(t('ccAgent.draft.createSessionFailed'));
           }
-          // 与发送路径共用同一段交接收尾(钉归属 → 补临时行 → 回流镜像)。三条不变量对目标路径
+          // 与发送路径共用同一段交接收尾(钉归属 → 补临时行 → 触发回流)。三条不变量对目标路径
           // 同样成立,只是后果换了个形状:goalApiFor 也按归属路由,漏了钉子它就把 setGoal 发给本机
           // maker、对端刚建好的会话永远拿不到目标;而它不抛这条在这里更要紧 —— 抛出去 NewGoalDialog
           // 会内联报错并保持打开,用户再点一次「创建」就在对端建出第二个目标会话。
-          await commitRemoteSessionHandoff({
+          // 同样不 await 回流:目标路径的损失更大 —— 那段窗口里应用被关掉,除了对端多出一个空会话,
+          // 用户在弹窗里刚写好的目标文案也只存在于内存里,一起丢(第 33 轮 P1)。
+          commitRemoteSessionHandoff({
             deviceId,
             deviceName,
             remoteSessionId,

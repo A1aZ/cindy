@@ -698,9 +698,10 @@ describe('Shared create project picker', () => {
   // 会话、第一个空着永久滞留。回流必须走 refreshRemoteDeviceSessions:它不抛(瞬态退避重试、
   // 永久错误返回 'gave-up'),且认 snapshot epoch、有界快照按 merge 落库。
   it('routes post-create mirror refresh through the non-throwing shared helper', () => {
-    // 回流本体现在住在 commitRemoteSessionHandoff 里(见下一条断言:两条路径都只调它)。
+    // 回流本体现在住在 commitRemoteSessionHandoff 里(见下一条断言:两条路径都只调它),
+    // 且是 fire-and-forget —— 见 does not block the handoff on the mirror refresh 那条用例。
     expect(remoteSessionHandoffSource).toContain(
-      'const refreshResult = await refreshRemoteDeviceSessions(p.deviceId, p.deviceName);',
+      'void refreshRemoteDeviceSessions(p.deviceId, p.deviceName)',
     );
     // 手写回流必须彻底消失,否则提交点后仍有可抛的一步。
     expect(newMakerDraftRouteSource).not.toContain("'local-db:sessions:list'");
@@ -721,11 +722,45 @@ describe('Shared create project picker', () => {
       'remoteProjectsStore.pinSessionOrigin(p.deviceId, p.remoteSessionId)',
     );
     const rowAt = remoteSessionHandoffSource.indexOf('remoteProjectsStore.mergeDeviceSessions(');
-    const refreshAt = remoteSessionHandoffSource.indexOf('await refreshRemoteDeviceSessions(');
+    const refreshAt = remoteSessionHandoffSource.indexOf('void refreshRemoteDeviceSessions(');
     expect(pinAt).toBeGreaterThan(-1);
-    // 钉子必须在临时行之前,临时行必须在回流之前。
+    // 钉子必须在临时行之前,临时行必须在触发回流之前。
     expect(rowAt).toBeGreaterThan(pinAt);
     expect(refreshAt).toBeGreaterThan(rowAt);
+  });
+
+  /**
+   * #807 review 第 33 轮 P1:回流**不得**挡在 setPending / navigate 前面。
+   *
+   * refreshRemoteDeviceSessions 对瞬态错误退避重试,窗口最长约 6.75 秒。原来 handoff `await` 它才
+   * 返回,于是这段时间里应用被关掉 → 对端**已经**有了新会话,而用户的首条消息(或目标弹窗里刚写的
+   * 内容)还没被 setPending / setPendingGoal 记录下来 → 重开再试就在对端建出第二个会话,第一个空着
+   * 滞留;建目标那条还会连同只存在于弹窗内存里的编辑一起丢。
+   *
+   * 交接本来就不需要等权威快照 —— 临时行(带对端真正分配的 workDir)已经足够让 SessionView 的
+   * delayed-create 完成 consumePending。所以 handoff 改为同步返回、回流 fire-and-forget。
+   */
+  it('does not block the handoff on the mirror refresh', () => {
+    // 同步签名:没有 async / 不返回 Promise。
+    expect(remoteSessionHandoffSource).toContain(
+      'export function commitRemoteSessionHandoff(p: RemoteSessionHandoffParams): void {',
+    );
+    expect(remoteSessionHandoffSource).not.toContain('export async function commitRemoteSessionHandoff');
+    // 回流不被 await。
+    expect(remoteSessionHandoffSource).not.toContain('await refreshRemoteDeviceSessions(');
+    // 两处调用点都不得 await 它 —— await 一个同步函数不报错,但会把「不要等」这个意图悄悄改回去。
+    expect(newMakerDraftRouteSource).not.toContain('await commitRemoteSessionHandoff(');
+    // 而 setPending / setPendingGoal 必须在各自的 handoff 之后仍然发生(交接本体没被搬走)。
+    const sendPart = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf("logTag: 'draft send'"),
+    );
+    expect(sendPart.slice(0, sendPart.indexOf('navigate('))).toContain('setPending(remoteSessionId');
+    const goalPart = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf("logTag: 'draft goal'"),
+    );
+    expect(goalPart.slice(0, goalPart.indexOf('navigate('))).toContain(
+      'setPendingGoal(remoteSessionId',
+    );
   });
 
   // 替代原先「两处各自都得有 pin + merge + refresh」的三组计数断言。锁的东西没减少反而更强:
@@ -733,7 +768,7 @@ describe('Shared create project picker', () => {
   // 将来第三条远程创建路径(例如侧边栏直建)漏调 handoff 时,这条会直接失败。
   it('routes every remote create path through the shared handoff', () => {
     const handoffCalls =
-      newMakerDraftRouteSource.match(/await commitRemoteSessionHandoff\(\{/g) ?? [];
+      newMakerDraftRouteSource.match(/\n\s+commitRemoteSessionHandoff\(\{/g) ?? [];
     expect(handoffCalls.length).toBe(2);
     // 组件不得自己碰这三步中的任何一步 —— 那就等于又开了一条绕过不变量的路。
     expect(newMakerDraftRouteSource).not.toContain('pinSessionOrigin(');

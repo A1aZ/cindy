@@ -52,9 +52,19 @@ export interface RemoteSessionHandoffParams {
 }
 
 /**
- * 钉归属 → 补临时行 → 回流镜像。**不抛**:调用方到这一步已经过了提交点。
+ * 钉归属 → 补临时行 → 触发回流。**同步返回、不抛**:调用方到这一步已经过了提交点。
+ *
+ * 为什么是同步的(Codex review 第 33 轮 P1):这个函数原来 `await` 回流才返回,于是调用方要等它
+ * 结束才 `setPending` / `setPendingGoal` 并 navigate。而 refreshRemoteDeviceSessions 对瞬态错误
+ * 会退避重试,窗口最长约 6.75 秒 —— 应用在这段时间里被关掉,对端**已经**有了那个新会话,而用户
+ * 的首条消息(或目标弹窗里刚写的内容)还没被记录下来。用户重开后再试一次,对端就多出第二个会话,
+ * 第一个空着永久滞留;建目标那条还会连同只存在于弹窗里的编辑一起丢。
+ *
+ * 而交接**本来就不需要等权威快照** —— 上面第 ② 步补的临时行正是为此存在的(它带着对端真正分配的
+ * workDir,足够 SessionView 的 delayed-create effect 完成 consumePending)。所以回流改为
+ * fire-and-forget:先把用户的工作登记好、导航过去,镜像慢一拍无所谓。
  */
-export async function commitRemoteSessionHandoff(p: RemoteSessionHandoffParams): Promise<void> {
+export function commitRemoteSessionHandoff(p: RemoteSessionHandoffParams): void {
   // ① 归属先落地:回流失败时它是首条消息能路由到对端的唯一依据。
   remoteProjectsStore.pinSessionOrigin(p.deviceId, p.remoteSessionId);
   // ② 临时行:让 SessionView 的 delayed-create 交接不必等权威快照。
@@ -68,10 +78,16 @@ export async function commitRemoteSessionHandoff(p: RemoteSessionHandoffParams):
       }),
     ]);
   }
-  // ③ 权威快照回流:失败只记日志 —— sessions:created push 还会触发一次防抖重拉,
-  // 不能因为镜像慢一拍就谎报创建失败。
-  const refreshResult = await refreshRemoteDeviceSessions(p.deviceId, p.deviceName);
-  if (refreshResult !== 'ok') {
-    log.warn(`[${p.logTag}] remote sessions refresh after create`, refreshResult);
-  }
+  // ③ 权威快照回流:**不等它**(见上)。失败只记日志 —— sessions:created push 还会触发一次
+  // 防抖重拉,不能因为镜像慢一拍就影响交接。refreshRemoteDeviceSessions 本身不抛,
+  // catch 只是防御它未来变成会抛的形态。
+  void refreshRemoteDeviceSessions(p.deviceId, p.deviceName)
+    .then((refreshResult) => {
+      if (refreshResult !== 'ok') {
+        log.warn(`[${p.logTag}] remote sessions refresh after create`, refreshResult);
+      }
+    })
+    .catch((err) => {
+      log.warn(`[${p.logTag}] remote sessions refresh after create threw`, err);
+    });
 }

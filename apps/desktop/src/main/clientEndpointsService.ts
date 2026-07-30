@@ -626,16 +626,34 @@ const NETLOG_STEP_TIMEOUT_MS = 3_000;
  */
 const NETLOG_STOP_ATTEMPTS = 2;
 /**
- * 前台重试都没停下之后,**后台**继续尝试收尾的节奏与次数。
+ * 前台重试都没停下之后,**后台**继续尝试收尾的节奏。
  *
  * 为什么必须有(review 抓到的第四条):前台重试是有界的,而 `withDeadline` 只解除我们的
  * 等待——两次都超时后,一次进程级抓包就处在"还在录、且没有任何后续收尾触发点"的状态,
  * 会把启动后的全部流量录进去、文件无界增长。所以耗尽前台预算后不是放弃,而是把收尾
  * 挪到后台定时重试:启动流程一秒都不多等,抓包却仍然有人负责关掉。
- * 定时器 unref,不拖住进程退出;次数同样有界(约 1 分钟),避免留下永不停止的循环。
+ *
+ * **退出条件是"确认停止",不是"试够次数"**(review 抓到的第五条):上一版给后台重试也
+ * 设了 12 次上限,于是 NetworkService 卡了一分多钟再恢复的情况下,抓包在无人收尾的状态
+ * 下录满整个进程生命周期——正是这条兜底本来要防的事。现在改成节奏递增、次数不设上限:
+ * 5s × 6 → 30s × 6 → 之后每 5 分钟一次,直到 stopLogging 成功或 currentlyLogging 变 false。
+ * 定时器 unref,不拖住进程退出;长间隔阶段的成本可以忽略,而"抓包还在录"必须有人收。
  */
-const NETLOG_BACKGROUND_STOP_DELAY_MS = 5_000;
-const NETLOG_BACKGROUND_STOP_ATTEMPTS = 12;
+const NETLOG_BACKGROUND_STOP_SCHEDULE_MS: readonly number[] = [
+  5_000,
+  5_000,
+  5_000,
+  5_000,
+  5_000,
+  5_000,
+  30_000,
+  30_000,
+  30_000,
+  30_000,
+  30_000,
+  30_000,
+];
+const NETLOG_BACKGROUND_STOP_LONG_DELAY_MS = 300_000;
 
 /**
  * 准备一个可以安全交给 `netLog.startLogging()` 的 netlog 文件路径。
@@ -645,23 +663,67 @@ const NETLOG_BACKGROUND_STOP_ATTEMPTS = 12;
  * process.cwd()——dev 下正是仓库工作区,既违反 credentials-and-local-storage.md 的落盘
  * 位置规则,还会在被 Git 跟踪的目录里留生成物。
  *
- * 路径安全靠**私有子目录**,不是靠预创建文件(review 连着抓了两轮):
+ * 路径安全靠**私有子目录 + 目录本身的准入检查 + 事后核对**,不是靠预创建文件
+ * (review 连着抓了三轮,每轮都把窗口往外推了一层):
  *  - 第一版用固定名 `endpoint-netlog.json`,别的进程能预置 symlink / FIFO;
  *  - 第二版改成唯一名 + `'wx'` 独占创建,但 `wx` 只保护到 `closeSync` 返回 ——
  *    Chromium 之后是**按路径名重新打开**的,这中间的 close-then-reopen 窗口里文件仍可
  *    被换成 symlink / FIFO,而 deadline 取消不了 Chromium 那边的文件系统副作用;
- *  - 现在用 `mkdtempSync` 开一个随机名、权限 0700 的**新目录**,netlog 落在它里面。
- *    目录是我们刚原子创建的,攻击者既猜不到名字、也没法在里面预置任何东西,所以从
- *    准备到 Chromium 打开的整个交接期都不存在可替换的路径;文件本身**不预创建**,
- *    交给 Chromium 在这个私有目录里建。
+ *  - 第三版用 `mkdtempSync` 开随机名 0700 目录,文件不预创建。但 0700 只保护目录的
+ *    **内容**,保护不了它在父目录里的那条**目录项**:对父目录有写权限的进程可以把这个
+ *    子目录 rename 掉、在同名位置放一个 symlink,于是 Chromium 又被引到别处。
+ *
+ * 这一层的诚实结论:**只要 API 只能接受路径名(Electron 的 netLog 没有 fd 形态,Node
+ * 也没有跨平台的 openat/O_PATH),同 uid 进程就没法用路径方案彻底排除**。所以这里按
+ * "把能关的关掉 + 剩下的说清楚"处理:
+ *  1. **准入检查**:日志目录必须是常规目录、属主是当前 uid、且 group/other 都不可写。
+ *     这条把**别的用户**(以及被 chmod 放开的目录)整类攻击关在门外——那才是真正需要
+ *     防的边界;不满足就直接跳过抓取,而不是硬着头皮抓。
+ *  2. **不可预测的名字**:攻击者不能预置,只能现场抢 rename,难度与噪声都高一个量级。
+ *  3. **事后核对**(verifyEndpointNetLogCapture):抓完后核对目录项还是我们创建的那个
+ *     inode、目标仍是常规文件;不符就丢弃这份产物并 warn,不把可能被换过的路径展示
+ *     给用户或当证据用。
+ * 同 uid 进程不在威胁模型内:它本来就能改 userData 里的配置、替换应用自己的文件、
+ * attach 调试器——为它把整条诊断能力砍掉,换不来安全,只会把线上那次 ERR_FAILED 重新
+ * 变成没有任何现场证据的失败。
  *
  * 每次准备前先清掉本前缀的旧产物(旧目录 + 两个历史版本留下的固定名/唯一名文件):
  * 唯一名意味着不再自动覆盖同一份,不清理就会在日志目录里无界堆积。
  * 任何异常都返回 null(诊断是辅助,绝不能变成启动失败源)。
  */
-export function prepareEndpointNetLogFile(logDir: string | null): string | null {
+/** 抓包产物的身份:file 给 netLog,dev/ino 用于抓完之后核对目录项没被换过。 */
+export interface PreparedNetLogCapture {
+  file: string;
+  dirDev: number;
+  dirIno: number;
+}
+
+/**
+ * 日志目录是否可以安全用来放抓包产物:必须是目录、属主是当前 uid、group/other 不可写。
+ * 拿不到 uid(Windows 上 process.getuid 不存在)时跳过属主与权限位判断——那边的
+ * ACL 语义与 POSIX 位不对应,用 mode 判会得出无意义的结论。
+ */
+function isLogDirSafeForCapture(dir: string): boolean {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(dir);
+  } catch {
+    return false;
+  }
+  if (!stat.isDirectory()) return false;
+  const getuid = process.getuid?.bind(process);
+  if (!getuid) return true;
+  if (stat.uid !== getuid()) return false;
+  return (stat.mode & 0o022) === 0;
+}
+
+export function prepareEndpointNetLogFile(logDir: string | null): PreparedNetLogCapture | null {
   const dir = logDir?.trim();
   if (!dir) return null;
+  if (!isLogDirSafeForCapture(dir)) {
+    log.debug('netlog capture skipped: log directory is not private (%s)', dir);
+    return null;
+  }
   try {
     for (const name of fs.readdirSync(dir)) {
       if (!name.startsWith(ENDPOINT_NETLOG_PREFIX)) continue;
@@ -676,9 +738,32 @@ export function prepareEndpointNetLogFile(logDir: string | null): string | null 
   }
   try {
     const captureDir = fs.mkdtempSync(path.join(dir, `${ENDPOINT_NETLOG_PREFIX}-`));
-    return path.join(captureDir, ENDPOINT_NETLOG_FILE_NAME);
+    const stat = fs.lstatSync(captureDir);
+    return {
+      file: path.join(captureDir, ENDPOINT_NETLOG_FILE_NAME),
+      dirDev: stat.dev,
+      dirIno: stat.ino,
+    };
   } catch {
     return null;
+  }
+}
+
+/**
+ * 抓完之后核对产物:目录项必须还是我们创建的那个 inode,目标必须是常规文件。
+ * 不符就返回 false,调用方丢弃这份产物——被换过的路径既不能当证据,也不该展示给用户。
+ * ino 拿不到(Windows 上可能是 0)时跳过 inode 比对,仍然检查目录与文件类型。
+ */
+export function verifyEndpointNetLogCapture(capture: PreparedNetLogCapture): boolean {
+  try {
+    const dirStat = fs.lstatSync(path.dirname(capture.file));
+    if (!dirStat.isDirectory()) return false;
+    if (capture.dirIno && dirStat.ino && (dirStat.ino !== capture.dirIno || dirStat.dev !== capture.dirDev)) {
+      return false;
+    }
+    return fs.lstatSync(capture.file).isFile();
+  } catch {
+    return false;
   }
 }
 
@@ -742,35 +827,35 @@ export async function captureNetLogAround(
   };
 
   /**
-   * 前台预算耗尽后的后台收尾:不 await,只保证"还有下一个触发点"。
-   * 定时器 unref,免得为了一次诊断抓包把进程退出拖住。
+   * 前台预算耗尽后的后台收尾:不 await,只保证"还有下一个触发点",而且这个触发点
+   * **一直存在到确认停止为止**。定时器 unref,免得为了一次诊断抓包把进程退出拖住。
    */
   const scheduleBackgroundStop = (): void => {
     if (stopped || backgroundStopScheduled) return;
     backgroundStopScheduled = true;
     let attempt = 0;
+    const delayFor = (nextAttempt: number): number =>
+      NETLOG_BACKGROUND_STOP_SCHEDULE_MS[nextAttempt] ?? NETLOG_BACKGROUND_STOP_LONG_DELAY_MS;
     const tick = (): void => {
       if (stopped) return;
       attempt += 1;
-      void tryStop(`background attempt ${attempt}/${NETLOG_BACKGROUND_STOP_ATTEMPTS}`).then(
-        (ok) => {
-          if (ok) {
-            log.debug('netlog capture stopped by background retry (attempt %d)', attempt);
-            return;
-          }
-          if (attempt >= NETLOG_BACKGROUND_STOP_ATTEMPTS) {
-            log.warn(
-              'netlog capture may still be running: stopLogging never settled after %d background attempts',
-              attempt,
-            );
-            return;
-          }
-          arm();
-        },
-      );
+      void tryStop(`background attempt ${attempt}`).then((ok) => {
+        if (ok) {
+          log.debug('netlog capture stopped by background retry (attempt %d)', attempt);
+          return;
+        }
+        if (attempt === NETLOG_BACKGROUND_STOP_SCHEDULE_MS.length) {
+          // 快节奏阶段用完还没停下:提醒一次,然后转长间隔继续盯,不放弃。
+          log.warn(
+            'netlog capture still running after %d background stop attempts; keeping a slow retry alive',
+            attempt,
+          );
+        }
+        arm();
+      });
     };
     const arm = (): void => {
-      const timer = setTimeout(tick, NETLOG_BACKGROUND_STOP_DELAY_MS);
+      const timer = setTimeout(tick, delayFor(attempt));
       timer.unref?.();
     };
     arm();
@@ -823,17 +908,23 @@ export async function captureNetLogAround(
  */
 async function captureEndpointNetLog(): Promise<string | null> {
   try {
-    const file = prepareEndpointNetLogFile(getLogDirSafe());
-    if (!file) {
-      log.debug('netlog capture skipped: log directory unavailable');
+    const capture = prepareEndpointNetLogFile(getLogDirSafe());
+    if (!capture) {
+      log.debug('netlog capture skipped: log directory unavailable or not private');
       return null;
     }
-    return await captureNetLogAround(
+    const file = await captureNetLogAround(
       netLog,
-      file,
+      capture.file,
       () => fetchManifestViaCdn(DIAGNOSIS_ATTEMPT_TIMEOUT_MS),
       NETLOG_STEP_TIMEOUT_MS,
     );
+    if (file && !verifyEndpointNetLogCapture(capture)) {
+      // 目录项在交接期被换过:这份产物来源不明,既不展示也不当证据。
+      log.warn('netlog capture discarded: capture directory changed during handoff');
+      return null;
+    }
+    return file;
   } catch (err) {
     log.debug('netlog capture failed: %s', String(err));
     return null;

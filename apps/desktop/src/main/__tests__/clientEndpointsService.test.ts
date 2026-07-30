@@ -46,6 +46,7 @@ import {
   activateClientEndpointRealm,
   captureNetLogAround,
   prepareEndpointNetLogFile,
+  verifyEndpointNetLogCapture,
   classifyManifestFailure,
   getClientEndpoint,
   getClientEndpointForRealm,
@@ -984,23 +985,41 @@ describe('netlog 抓取(captureNetLogAround)', () => {
     }
   });
 
-  it('后台重试次数有界(不留永不停止的循环)', async () => {
+  it('后台重试不设次数上限:节奏放缓但一直盯到确认停止', async () => {
+    // review 抓到:给后台重试设 12 次上限,等于"NetworkService 卡过一分钟再恢复"时
+    // 抓包在无人收尾的状态下录满整个进程生命周期 —— 正是这条兜底要防的事。
     vi.useFakeTimers();
     try {
+      let logging = true;
       const stopLogging = vi.fn(async () => {
-        throw new Error('stop boom');
+        if (logging) throw new Error('stop boom');
+        return undefined;
       });
-      const pending = captureNetLogAround(
-        { startLogging: async () => {}, stopLogging },
-        '/tmp/n.json',
-        async () => {},
-        20,
-      );
+      const netLogApi = {
+        startLogging: async () => {},
+        stopLogging,
+        get currentlyLogging() {
+          return logging;
+        },
+      };
+      const pending = captureNetLogAround(netLogApi, '/tmp/n.json', async () => {}, 20);
       await vi.advanceTimersByTimeAsync(0);
       await pending;
+      expect(stopLogging).toHaveBeenCalledTimes(2); // 前台预算
+
+      // 快节奏 6 次 + 慢节奏 6 次都失败之后,仍然有下一个触发点。
+      await vi.advanceTimersByTimeAsync(6 * 5_000 + 6 * 30_000);
+      const afterFastPhase = stopLogging.mock.calls.length;
+      expect(afterFastPhase).toBe(2 + 12);
+      await vi.advanceTimersByTimeAsync(20 * 60 * 1000);
+      expect(stopLogging.mock.calls.length).toBeGreaterThan(afterFastPhase);
+
+      // NetworkService 恢复后:确认停止,循环收手。
+      logging = false;
       await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
-      // 2 次前台 + 12 次后台(NETLOG_BACKGROUND_STOP_ATTEMPTS),然后彻底停手并 warn。
-      expect(stopLogging).toHaveBeenCalledTimes(14);
+      const settled = stopLogging.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+      expect(stopLogging.mock.calls.length).toBe(settled);
     } finally {
       vi.useRealTimers();
     }
@@ -1095,7 +1114,7 @@ describe('netlog 落盘路径(不得落到 cwd、不得用可预测名)', () => 
   });
 
   it('落在一个新建的私有子目录里(交接期路径不可被替换)', () => {
-    const file = prepareEndpointNetLogFile(logDir) as string;
+    const file = prepareEndpointNetLogFile(logDir)!.file;
     expect(file).not.toBeNull();
     expect(path.isAbsolute(file)).toBe(true);
 
@@ -1112,13 +1131,13 @@ describe('netlog 落盘路径(不得落到 cwd、不得用可预测名)', () => 
 
   it('私有目录仅属主可访问(POSIX)', () => {
     if (process.platform === 'win32') return; // Windows 权限模型不同,目录名随机仍有效
-    const file = prepareEndpointNetLogFile(logDir) as string;
+    const file = prepareEndpointNetLogFile(logDir)!.file;
     expect(fs.statSync(path.dirname(file)).mode & 0o777).toBe(0o700);
   });
 
   it('目录名不可预测,两次调用不同目录', () => {
-    const a = prepareEndpointNetLogFile(logDir) as string;
-    const b = prepareEndpointNetLogFile(logDir) as string;
+    const a = prepareEndpointNetLogFile(logDir)!.file;
+    const b = prepareEndpointNetLogFile(logDir)!.file;
     expect(path.dirname(a)).not.toBe(path.dirname(b));
   });
 
@@ -1126,8 +1145,8 @@ describe('netlog 落盘路径(不得落到 cwd、不得用可预测名)', () => 
     // 第一版固定名与第二版唯一名的残留都要被清掉,否则唯一名会无界堆积。
     fs.writeFileSync(path.join(logDir, 'endpoint-netlog.json'), 'v1', 'utf8');
     fs.writeFileSync(path.join(logDir, `endpoint-netlog.${process.pid}.abc123.json`), 'v2', 'utf8');
-    const first = prepareEndpointNetLogFile(logDir) as string;
-    const second = prepareEndpointNetLogFile(logDir) as string;
+    const first = prepareEndpointNetLogFile(logDir)!.file;
+    const second = prepareEndpointNetLogFile(logDir)!.file;
 
     const left = fs.readdirSync(logDir).filter((n) => n.startsWith('endpoint-netlog'));
     expect(left).toEqual([path.basename(path.dirname(second))]);
@@ -1136,6 +1155,61 @@ describe('netlog 落盘路径(不得落到 cwd、不得用可预测名)', () => 
 
   it('目录不存在时返回 null,不抛错', () => {
     expect(prepareEndpointNetLogFile(path.join(logDir, 'missing'))).toBeNull();
+  });
+
+  it('日志目录 group/other 可写时跳过抓取(别的用户能抢目录项)', () => {
+    // 0700 子目录只保护内容,保护不了它在父目录里的目录项:父目录对别人可写,
+    // 别的用户就能把它 rename 掉、换上 symlink,把 Chromium 引到别处。
+    if (process.platform === 'win32') return; // Windows 用 ACL,mode 位判断无意义
+    fs.chmodSync(logDir, 0o777);
+    expect(prepareEndpointNetLogFile(logDir)).toBeNull();
+    fs.chmodSync(logDir, 0o700);
+    expect(prepareEndpointNetLogFile(logDir)).not.toBeNull();
+  });
+
+  it('日志"目录"其实是文件时跳过抓取', () => {
+    const asFile = path.join(logDir, 'not-a-dir');
+    fs.writeFileSync(asFile, 'x', 'utf8');
+    expect(prepareEndpointNetLogFile(asFile)).toBeNull();
+  });
+});
+
+describe('netlog 产物事后核对(verifyEndpointNetLogCapture)', () => {
+  let logDir: string;
+  beforeEach(() => {
+    logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-netlog-verify-'));
+  });
+  afterEach(() => {
+    fs.rmSync(logDir, { recursive: true, force: true });
+  });
+
+  it('目录项没被换过、目标是常规文件 → 通过', () => {
+    const capture = prepareEndpointNetLogFile(logDir)!;
+    fs.writeFileSync(capture.file, '{}', 'utf8'); // 模拟 Chromium 写出的产物
+    expect(verifyEndpointNetLogCapture(capture)).toBe(true);
+  });
+
+  it('目录项在交接期被换成别的目录 → 不通过(产物丢弃)', () => {
+    const capture = prepareEndpointNetLogFile(logDir)!;
+    const captureDir = path.dirname(capture.file);
+    fs.rmSync(captureDir, { recursive: true, force: true });
+    fs.mkdirSync(captureDir, { recursive: true, mode: 0o700 }); // 同名不同 inode
+    fs.writeFileSync(capture.file, '{}', 'utf8');
+    expect(verifyEndpointNetLogCapture(capture)).toBe(false);
+  });
+
+  it('目标被换成 symlink → 不通过', () => {
+    if (process.platform === 'win32') return;
+    const capture = prepareEndpointNetLogFile(logDir)!;
+    const real = path.join(logDir, 'elsewhere.json');
+    fs.writeFileSync(real, '{}', 'utf8');
+    fs.symlinkSync(real, capture.file);
+    expect(verifyEndpointNetLogCapture(capture)).toBe(false);
+  });
+
+  it('产物根本不存在 → 不通过', () => {
+    const capture = prepareEndpointNetLogFile(logDir)!;
+    expect(verifyEndpointNetLogCapture(capture)).toBe(false);
   });
 });
 

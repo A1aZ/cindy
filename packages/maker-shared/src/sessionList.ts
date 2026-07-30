@@ -4,6 +4,7 @@ import { isSyntheticTriggerText } from './syntheticTrigger.js';
 import type { RemoteSchedule, RemoteScheduleRun, RemoteScheduleRunStatus } from './scheduleTypes.js';
 import { toMillis } from './scheduleModel.js';
 import { sessionCollaborationLabel, sessionWorktreeLabel } from './sessionIdentity.js';
+import { isDefaultDraftSessionTitle } from './sessionTitle.js';
 import { getSessionListCollapseView } from './sessionListCollapse.js';
 import { collapseWorktreeDirForGrouping } from './worktreePaths.js';
 
@@ -743,6 +744,10 @@ function isAutomationSession(
 }
 
 function automationDisplayTitle(session: RemoteSession): string {
+  // 标题仍是「尚未起名」的哨兵时按**无标题**处理,交给调用方的
+  // `|| workingDir || '未命名会话'` 兜底链。哨兵是 locale-independent 的英文字面量
+  // (见 ./sessionTitle.ts),原样显示会在手机上直接露出 "New Maker"。
+  if (isDefaultDraftSessionTitle(session.title)) return '';
   if (!isAutomationGeneratedSession(session)) return session.title || '';
   return session.title.startsWith(SCHEDULE_PREFIX)
     ? session.title.slice(SCHEDULE_PREFIX.length)

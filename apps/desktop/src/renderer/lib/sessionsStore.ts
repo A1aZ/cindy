@@ -45,7 +45,9 @@
 import type { Session } from '@/lib/ccAgent.types';
 import * as sessionService from '@/lib/sessionService';
 import type { ListStatusFilter } from '@/lib/sessionService';
-import { onPatch, onRefresh } from '@/lib/sessionsBus';
+import { isDefaultDraftSessionTitle } from '@cindy/maker-shared/session-title';
+
+import { onAutoTitlePreview, onPatch, onRefresh } from '@/lib/sessionsBus';
 
 // V1.7：取消 16 条上限，全量拉取由 Sidebar 中部滚动条承载。
 // 后端硬上限 1000，覆盖几乎所有真实用户的 Session 总数。
@@ -138,6 +140,22 @@ export const sessionsStore = {
   /** 当前桶快照；null 表示该桶尚未加载过（hook 据此判定 isLoading 初值）。 */
   getByFilter(filter: ListStatusFilter): Session[] | null {
     return cache.get(filter) ?? null;
+  },
+
+  /**
+   * 跨桶按 id 取当前缓存行；未加载 / 不在任何桶里时返回 null。
+   *
+   * 只读快照，给"下笔前先看一眼当前值"的乐观更新用（例如自动起名的即时标题预览
+   * 要先确认标题仍是系统占位，别把用户手动改的名在 UI 上顶掉）。不触发拉取——
+   * 拿不到就不做乐观更新，交给权威广播回填。
+   */
+  findById(id: string): Session | null {
+    if (!id) return null;
+    for (const bucket of cache.values()) {
+      const hit = bucket.find((s) => s.id === id);
+      if (hit) return hit;
+    }
+    return null;
   },
 
   /**
@@ -335,6 +353,22 @@ if (typeof window !== 'undefined') {
   onPatch((sessionId, patch) => sessionsStore.patchLocal(sessionId, patch));
   onRefresh(() => {
     void sessionsStore.forceRefreshAll();
+  });
+
+  // 自动起名的即时标题预览 —— 条件更新,判定放在这里是因为**本模块持有列表缓存**:
+  //
+  //   - 标题仍是「尚未起名」哨兵 → 乐观写入,侧边栏 / 会话头 / tab 立刻显示用户刚写
+  //     的话,不必干等 `maker:auto-title` 的 IPC 往返 + DB 广播回流;
+  //   - 已经起过名 / 用户手动改过名 / fork 与纯附件的合成占位 → 一律不动。能否覆写
+  //     那几类占位由 main 的归属表裁决,这里猜错会把用户的标题在 UI 上顶掉;
+  //   - 缓存里没有这一行(桶未加载)→ 不动,交给权威广播回填。
+  //
+  // 只改本地缓存、不写 DB:权威标题仍由 main 落库后经 sessions:patched 广播回来,
+  // 那个串与这里预览的是同一个(共用 normalizeAutoTitle),所以回流时不跳变。
+  onAutoTitlePreview((sessionId, title) => {
+    const current = sessionsStore.findById(sessionId);
+    if (!current || !isDefaultDraftSessionTitle(current.title)) return;
+    sessionsStore.patchLocal(sessionId, { title });
   });
 
   window.electronAPI?.onUsageSessionSpendChanged?.(

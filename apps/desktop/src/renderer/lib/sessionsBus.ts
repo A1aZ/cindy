@@ -11,17 +11,28 @@
  *                              都走这条：rename / pin / title 生成 / updatedAt
  *                              更新 / workingDir / model / effort / clearSession 等。
  *
- * useCCSessions 通过 onRefresh / onPatch 订阅，是唯一的消费者。
+ *   emitAutoTitlePreview(id, title)
+ *                              自动起名的即时标题预览。与 emitPatch 的区别是它**带
+ *                              条件**：只有标题仍是「尚未起名」哨兵时才生效,由持有
+ *                              缓存的 sessionsStore 自己裁决(见其订阅处)。
+ *
+ * sessionsStore 通过 onRefresh / onPatch / onAutoTitlePreview 订阅，是唯一的消费者。
  */
 
 import type { Session } from '@/lib/ccAgent.types';
 
 const REFRESH_EVENT = 'cc-sessions-refresh';
 const PATCH_EVENT = 'cc-session-patch';
+const AUTO_TITLE_PREVIEW_EVENT = 'cc-session-auto-title-preview';
 
 interface PatchDetail {
   sessionId: string;
   patch: Partial<Session>;
+}
+
+interface AutoTitlePreviewDetail {
+  sessionId: string;
+  title: string;
 }
 
 export function emitRefresh(): void {
@@ -32,6 +43,25 @@ export function emitPatch(sessionId: string, patch: Partial<Session>): void {
   if (!sessionId || !patch) return;
   window.dispatchEvent(
     new CustomEvent<PatchDetail>(PATCH_EVENT, { detail: { sessionId, patch } }),
+  );
+}
+
+/**
+ * 自动起名的即时标题预览:让侧边栏 / 会话头立刻显示用户刚写下的话,不等
+ * `maker:auto-title` 的 IPC 往返 + DB 广播回流。
+ *
+ * 刻意与 `emitPatch` 分开:这是**条件**更新 —— 只有标题仍是「尚未起名」的哨兵时才
+ * 该生效,否则会把用户手动改过的名在 UI 上顶掉。判定交给持有列表缓存的
+ * sessionsStore,发起方(makerChatStore)不必也不该去读会话行。
+ *
+ * 不写 DB:权威标题仍由 main 落库并经 sessions:patched 广播回来。
+ */
+export function emitAutoTitlePreview(sessionId: string, title: string): void {
+  if (!sessionId || !title) return;
+  window.dispatchEvent(
+    new CustomEvent<AutoTitlePreviewDetail>(AUTO_TITLE_PREVIEW_EVENT, {
+      detail: { sessionId, title },
+    }),
   );
 }
 
@@ -50,4 +80,16 @@ export function onPatch(
   };
   window.addEventListener(PATCH_EVENT, wrapped);
   return () => window.removeEventListener(PATCH_EVENT, wrapped);
+}
+
+export function onAutoTitlePreview(
+  handler: (sessionId: string, title: string) => void,
+): () => void {
+  const wrapped = (ev: Event) => {
+    const detail = (ev as CustomEvent<AutoTitlePreviewDetail>).detail;
+    if (!detail || !detail.sessionId || !detail.title) return;
+    handler(detail.sessionId, detail.title);
+  };
+  window.addEventListener(AUTO_TITLE_PREVIEW_EVENT, wrapped);
+  return () => window.removeEventListener(AUTO_TITLE_PREVIEW_EVENT, wrapped);
 }

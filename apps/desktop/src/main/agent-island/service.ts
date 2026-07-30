@@ -10,6 +10,7 @@ import {
 } from '@cindy/maker-core';
 import type { SchedulerEvent } from '@cindy/maker-scheduler';
 import { BRAND_NAME } from '@cindy/maker-shared/branding';
+import { isDefaultDraftSessionTitle } from '@cindy/maker-shared/session-title';
 import type { ApplicationMenuCommand } from '../../shared/applicationMenuCommands.js';
 
 import { hasSessionAttention as hasAppBadgeSessionAttention } from '../appBadgeService.js';
@@ -1124,7 +1125,7 @@ export class AgentIslandService {
     const cached = this.metadataCache.get(meta.sessionId);
     return {
       ...meta,
-      title: cached?.title ?? null,
+      title: localizePlaceholderSessionTitle(cached?.title ?? null),
       workingDir: cached?.workingDir ?? meta.workingDir,
       workspaceKind: cached?.workspaceKind ?? meta.workspaceKind,
     };
@@ -2200,4 +2201,20 @@ function isPlaceholderSessionTitle(title: string | null): boolean {
   if (!title) return true;
   const normalized = title.trim().toLowerCase();
   return normalized === '' || normalized === 'new maker' || normalized === 'untitled';
+}
+
+/**
+ * 下发给灵动岛前把「尚未起名」的哨兵标题换成本地化文案。
+ *
+ * 会话的 title 列同时是哨兵(见 `@cindy/maker-shared/session-title`),必须保持英文
+ * 字面量;native 侧拿到的是显示值,不做这层映射就会在灵动岛上直接露出 "New Maker"。
+ *
+ * 刻意**只映射裸哨兵**、不复用上面 `isPlaceholderSessionTitle` 的宽判定:那个函数
+ * 服务于「缓存是否需要重新拉取」,把 `untitled` 和空串也算占位;拿它做显示映射会把
+ * 用户手动改成 "Untitled" 的标题也顶掉。null / 空标题保持原样透传,由 native 走它
+ * 自己既有的空标题分支(不改 null 语义)。
+ */
+function localizePlaceholderSessionTitle(title: string | null): string | null {
+  if (!isDefaultDraftSessionTitle(title)) return title;
+  return t('ccAgent.common.unnamedSession');
 }

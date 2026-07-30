@@ -5,6 +5,8 @@
  * 置顶 / 归档 / 删除)+「会话信息」二级入口;二级 = 用量 / 工作目录 / 附加引用目录 / 标识。
  * 全部为纯函数,不碰 IO;交互副作用(clipboard / Alert / 远端写)由组件层承担。
  */
+import { isDefaultDraftSessionTitle } from '@cindy/maker-shared/session-title';
+
 import { i18n } from '@/i18n';
 import { sessionCollaborationLabel } from '@/session/collaboration';
 import { normalizeExtraDirs } from '@/session/newSession';
@@ -56,7 +58,12 @@ export function buildSessionMenuHeader(
   if (collabLabel) chips.push({ id: 'collab', label: collabLabel });
 
   return {
-    title: session.title || workspaceName(session) || i18n.t('session.menu.titleFallback'),
+    // 哨兵标题(尚未起名)按无标题处理,走 workspaceName / titleFallback 兜底 ——
+    // 它是 locale-independent 的英文字面量,原样显示会露出 "New Maker"。
+    title:
+      (isDefaultDraftSessionTitle(session.title) ? '' : session.title) ||
+      workspaceName(session) ||
+      i18n.t('session.menu.titleFallback'),
     chips,
     metaLine: buildSessionMenuMetaLine(session),
     usageSummary: buildSessionMenuUsageSummary(session),

@@ -2,7 +2,8 @@
  * makerChatStoreAutoName.test.ts
  * ---------------------------------------------------------------------------
  * renderer 侧自动起名的职责边界(权威逻辑在 main 的 maker:auto-title):
- *   - 本机会话:把素材与 isUserText 透传给 main,不自己读写标题;
+ *   - 本机会话:把素材与 isUserText 透传给 main,**不写 DB**;标题仍是哨兵时额外在
+ *     store 里做一次乐观预览(不等 IPC 往返 + 广播),与远程分支对称;
  *   - 远程会话:不发 IPC,只在投影层登记即时标题预览;
  *   - main 返回 done=true 才缓存「无需再起名」,瞬时失败必须可重试。
  */
@@ -22,7 +23,11 @@ vi.mock('@/lib/sessionService', () => ({
   touchUserSend: vi.fn(async () => ({})),
 }));
 
-vi.mock('@/lib/sessionsBus', () => ({ emitPatch: vi.fn() }));
+const emitAutoTitlePreview = vi.fn();
+vi.mock('@/lib/sessionsBus', () => ({
+  emitPatch: vi.fn(),
+  emitAutoTitlePreview: (id: string, title: string) => emitAutoTitlePreview(id, title),
+}));
 vi.mock('@/lib/userPromptStore', () => ({ getUserPrompt: () => '' }));
 vi.mock('@/lib/memorySettingsStore', () => ({ getMakerMemoryEnabled: () => true }));
 
@@ -81,6 +86,40 @@ describe('makerChatStore auto-name — 本机会话', () => {
     // 标题落库与广播都归 main —— renderer 不再直接写 DB。
     expect(sessionService.update).not.toHaveBeenCalled();
     expect(sessionService.get).not.toHaveBeenCalled();
+  });
+
+  it('发出即时标题预览:与 main 随后写入的占位是同一个串,且不碰 DB', async () => {
+    makerChatStore.autoNameSession(SESSION_ID, '  帮我\n排查  登录失败 ', 'claude-code');
+    await flushPromises();
+
+    // 共用 normalizeAutoTitle → 权威标题回流时不跳变。
+    expect(emitAutoTitlePreview).toHaveBeenCalledWith(SESSION_ID, '帮我 排查 登录失败');
+    // 权威标题仍归 main:renderer 不写 DB。
+    expect(sessionService.update).not.toHaveBeenCalled();
+    // 「标题是否仍是哨兵」由 sessionsStore 在订阅处裁决,不在这里读会话行。
+    expect(sessionService.get).not.toHaveBeenCalled();
+  });
+
+  it('预览抛错既不打断起名 IPC,也不冒泡出去打断发送主流程', async () => {
+    // 预览纯属锦上添花:bus / 订阅方出任何问题都不能让 sendMessageCore 的入队被
+    // 异常打断(与本函数其余副作用同一条契约)。
+    emitAutoTitlePreview.mockImplementationOnce(() => {
+      throw new Error('bus down');
+    });
+
+    expect(() =>
+      makerChatStore.autoNameSession(SESSION_ID, '第一句话', 'claude-code'),
+    ).not.toThrow();
+    await flushPromises();
+
+    expect(autoTitle).toHaveBeenCalled();
+  });
+
+  it('素材为空时既不发 IPC 也不发预览', async () => {
+    makerChatStore.autoNameSession(SESSION_ID, '   ', 'claude-code');
+    await flushPromises();
+
+    expect(emitAutoTitlePreview).not.toHaveBeenCalled();
   });
 
   it('合成描述带上 isUserText=false,由 main 决定不调标题模型', async () => {

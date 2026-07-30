@@ -28,6 +28,7 @@ import {
   normalizeWorkflowProgressEntries,
   type WorkflowProgressEntry,
 } from '@cindy/maker-shared/agent-task';
+import { normalizeAutoTitle } from '@cindy/maker-shared/session-title';
 import type { MessageRole, Message, MessageAutomationOrigin } from '@/lib/ccAgent.types';
 import type { AttachedFile, MentionedResource, SerializedAttachedFile } from '@/lib/fileTypes';
 import type {
@@ -87,7 +88,7 @@ import {
 import { setMirrorEffort, setMirrorFast } from '@/state/deviceLinkModelMirror';
 import type { AgentKind } from '@/hooks/useAgentCapabilities';
 import type { Effort } from '@/lib/userPreferences.types';
-import { emitPatch } from '@/lib/sessionsBus';
+import { emitAutoTitlePreview, emitPatch } from '@/lib/sessionsBus';
 import { createLogger } from '@/lib/logger';
 import { getUserPrompt } from '@/lib/userPromptStore';
 import { getMakerMemoryEnabled } from '@/lib/memorySettingsStore';
@@ -6725,8 +6726,8 @@ function scheduleAutoName(
   agentKind: 'claude-code' | 'codex',
   isUserText = true,
 ): void {
-  // 与 main 的 normalizeAutoTitle 同一套规则,两端算出的占位串一致,回流时不跳变。
-  const fallbackTitle = text.replace(/\s+/g, ' ').trim().slice(0, 40).trimEnd();
+  // 与 main 共用 normalizeAutoTitle,两端算出的占位串逐字一致,回流时不跳变。
+  const fallbackTitle = normalizeAutoTitle(text);
   // 连描述都合成不出来(既无文字也无可命名附件):保留默认标题,留给下一条消息。
   if (!fallbackTitle) return;
   if (isRemoteSession(sessionId)) {
@@ -6736,6 +6737,25 @@ function scheduleAutoName(
     return;
   }
   if (autoNameSettled.has(sessionId)) return;
+  // 本机会话的即时标题预览 —— 与上面远程分支的 setPendingTitlePreview 对称。
+  //
+  // 没有这一步,标题要等「IPC 往返 → main 读库 → 写占位 → 广播 sessions:patched」
+  // 整条链路走完才更新:用户明明已经按下回车,侧边栏 / 会话头却还显示着建会话时的
+  // 默认占位。main 随后写入的就是这里的 fallbackTitle(同一套 deriveAutoTitleSeed
+  // 素材 + 同一个 normalizeAutoTitle),所以回流时不跳变。
+  //
+  // 「标题是否仍是哨兵」的判定在 sessionsStore 的订阅处(它持有列表缓存);本函数
+  // 也被「补起名」路径调用(每条带文字的消息都来一次),无条件写会把用户手动改过的
+  // 名在 UI 上顶掉。走 bus 而不是直接 import sessionsStore:后者会把它的模块级
+  // 订阅副作用拉进所有 import 本模块的加载链。
+  //
+  // 单独 try:预览纯属锦上添花,它失败既不能打断下面的起名 IPC,更不能把异常抛回
+  // sendMessageCore 打断消息入队(与本函数其余副作用同一条契约)。
+  try {
+    emitAutoTitlePreview(sessionId, fallbackTitle);
+  } catch (err) {
+    log.warn('Failed to emit auto-title preview:', err);
+  }
   // 整条链路对发送主流程必须是无副作用的:起名失败(桥接缺失 / IPC 抛错)只记日志,
   // 绝不能把异常抛回 sendMessageCore 打断消息入队。
   try {

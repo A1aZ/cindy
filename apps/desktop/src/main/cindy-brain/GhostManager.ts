@@ -31,6 +31,7 @@ import { checkSkillMdConsistency } from './skillSlot.js';
 import {
   createGhostInstallReceipt,
   GhostInstallReceiptStore,
+  hashApprovedSkillContent,
   type GhostInstallReceipt,
   type GhostInstallReceiptReadResult,
 } from './ghostInstallReceipt.js';
@@ -771,14 +772,9 @@ export class GhostManager {
 
     // 5) 解压到 staging(zip-slip / zip bomb 防御),全过才切正式目录
     const stagingDir = path.join(root, `.cindy-installing-${manifest.id}-${crypto.randomBytes(4).toString('hex')}`);
-    const receipt = createGhostInstallReceipt({
-      manifest: approvedManifest,
-      localeResources,
-      enabled: initiallyEnabled,
-      trust,
-      packageSha256,
-      ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
-    });
+    // receipt 在内容落到 finalDir 之后才创建:技能字节指纹必须从这次批准的内容
+    // 目录现算,不能凭空构造。
+    let receipt: GhostInstallReceipt | undefined;
     try {
       // 初始沉睡:标记在 staging 阶段就位,rename 后首个广播即沉睡态,
       // 不存在"先启用一帧再熄灯"的跳变(规则 7)。
@@ -791,6 +787,15 @@ export class GhostManager {
       });
       await fs.promises.rename(stagingDir, finalDir);
       try {
+        receipt = createGhostInstallReceipt({
+          manifest: approvedManifest,
+          localeResources,
+          enabled: initiallyEnabled,
+          trust,
+          skillContentSha256: await hashApprovedSkillContent(approvedManifest, finalDir),
+          packageSha256,
+          ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
+        });
         await this.receiptStore.write(receipt, { skillSourceDir: finalDir });
       } catch (error) {
         await fs.promises.rm(finalDir, { recursive: true, force: true }).catch(() => undefined);
@@ -802,6 +807,9 @@ export class GhostManager {
         return { rejection: { code: 'file-invalid', reason: err.message } };
       }
       return { rejection: { code: 'io', reason: err instanceof Error ? err.message : String(err) } };
+    }
+    if (!receipt) {
+      return { rejection: { code: 'io', reason: '安装批准状态未能生成' } };
     }
 
     const ghost: InstalledGhost = {
@@ -907,14 +915,6 @@ export class GhostManager {
     const rand = crypto.randomBytes(4).toString('hex');
     const stagingDir = path.join(root, `.cindy-installing-${manifest.id}-${rand}`);
     const backupDir = path.join(root, `.cindy-updating-${manifest.id}-${rand}`);
-    const receipt = createGhostInstallReceipt({
-      manifest: approvedManifest,
-      localeResources,
-      enabled,
-      trust,
-      packageSha256,
-      ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
-    });
     try {
       await this.extractToStaging(allEntries, prefix, stagingDir, {
         disabled: !enabled,
@@ -945,7 +945,18 @@ export class GhostManager {
       await fs.promises.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
       return { rejection: { code: 'io', reason: err instanceof Error ? err.message : String(err) } };
     }
+    // 与 install 同理:技能字节指纹从这次换入的内容目录现算。
+    let receipt: GhostInstallReceipt;
     try {
+      receipt = createGhostInstallReceipt({
+        manifest: approvedManifest,
+        localeResources,
+        enabled,
+        trust,
+        skillContentSha256: await hashApprovedSkillContent(approvedManifest, finalDir),
+        packageSha256,
+        ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
+      });
       await this.receiptStore.write(receipt, { skillSourceDir: finalDir });
     } catch (err) {
       await fs.promises.rm(finalDir, { recursive: true, force: true }).catch(() => undefined);
@@ -979,6 +990,7 @@ export class GhostManager {
     const localeResources = this.readApprovedLocaleResources(dir, manifest);
     const iconDataUrl = this.readInstalledIconDataUrl(dir, manifest) ?? undefined;
     const packageSha256 = await hashApprovedDirectory(dir);
+    const skillContentSha256 = await hashApprovedSkillContent(manifest, dir);
     const trust: GhostTrustInfo = {
       level: 'cindy-official',
       publisherSigned: false,
@@ -991,6 +1003,7 @@ export class GhostManager {
       isDeepStrictEqual(current.receipt.manifest, manifest) &&
       isDeepStrictEqual(current.receipt.localeResources, localeResources) &&
       isDeepStrictEqual(current.receipt.trust, trust) &&
+      isDeepStrictEqual(current.receipt.skillContentSha256, skillContentSha256) &&
       current.receipt.packageSha256 === packageSha256 &&
       current.receipt.iconDataUrl === iconDataUrl
     ) {
@@ -1009,6 +1022,7 @@ export class GhostManager {
         localeResources,
         enabled,
         trust,
+        skillContentSha256,
         packageSha256,
         ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
       }),

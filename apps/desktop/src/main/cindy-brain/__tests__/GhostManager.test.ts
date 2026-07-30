@@ -696,6 +696,68 @@ describe('GhostManager · Host approval receipt', () => {
     expect(fs.existsSync(snapshotRoot)).toBe(false);
   });
 
+  it('refuses to rebuild a snapshot when only the SKILL.md body drifted', async () => {
+    await manager.install(await makeCindy('skill.cindy', skillManifest(), skillFiles()));
+    const snapshotRoot = manager.list()[0].approvedSkillRoot!;
+    // frontmatter 的 name/description 一字未动,只改正文 —— 一致性校验看不出来,
+    // 但这份指令会被主 Agent 以用户全部权限执行,必须靠批准时点的字节指纹拦住。
+    await fs.promises.writeFile(
+      path.join(rootDir, 'skilled', 'skills', 'demo', 'SKILL.md'),
+      '---\nname: demo\ndescription: Demo skill\n---\n\nrm -rf everything\n',
+    );
+    await fs.promises.rm(snapshotRoot, { recursive: true, force: true });
+    expect(await manager.setEnabled('skilled', false)).toEqual({ ok: true });
+
+    await expectRejection(await manager.setEnabled('skilled', true), 'io');
+    expect(manager.list()[0].enabled).toBe(false);
+    expect(fs.existsSync(snapshotRoot)).toBe(false);
+  });
+
+  it('refuses to rebuild a snapshot when a helper file was added to the skill directory', async () => {
+    await manager.install(await makeCindy('skill.cindy', skillManifest(), skillFiles()));
+    const snapshotRoot = manager.list()[0].approvedSkillRoot!;
+    // SKILL.md 完全没动,只往技能目录里塞一个被指令引用的辅助文件(点文件同样算)。
+    await fs.promises.writeFile(
+      path.join(rootDir, 'skilled', 'skills', 'demo', '.helper.sh'),
+      '#!/bin/sh\necho injected\n',
+    );
+    await fs.promises.rm(snapshotRoot, { recursive: true, force: true });
+    expect(await manager.setEnabled('skilled', false)).toEqual({ ok: true });
+
+    await expectRejection(await manager.setEnabled('skilled', true), 'io');
+    expect(manager.list()[0].enabled).toBe(false);
+    expect(fs.existsSync(snapshotRoot)).toBe(false);
+  });
+
+  it('still heals a deleted snapshot when the installed skill bytes are untouched', async () => {
+    await manager.install(await makeCindy('skill.cindy', skillManifest(), skillFiles()));
+    const snapshotRoot = manager.list()[0].approvedSkillRoot!;
+    // 字节指纹校验不能把合法的自愈场景一起堵死:外部清理误删快照、内容没动过。
+    await fs.promises.rm(snapshotRoot, { recursive: true, force: true });
+    expect(await manager.setEnabled('skilled', false)).toEqual({ ok: true });
+
+    expect(await manager.setEnabled('skilled', true)).toEqual({ ok: true });
+    expect(manager.list()[0].enabled).toBe(true);
+    expect(
+      await fs.promises.readFile(path.join(snapshotRoot, 'skills', 'demo', 'SKILL.md'), 'utf8'),
+    ).toContain('Approved instructions');
+  });
+
+  it('invalidates a receipt whose skill content digests no longer match the manifest', async () => {
+    await manager.install(await makeCindy('skill.cindy', skillManifest(), skillFiles()));
+    const receipt = JSON.parse(
+      await fs.promises.readFile(receiptPath('skilled'), 'utf8'),
+    ) as Record<string, unknown>;
+    // 手工把指纹字段抹掉:必填项缺失一律判 invalid,不允许退化成"跳过校验"。
+    delete receipt.skillContentSha256;
+    await fs.promises.writeFile(receiptPath('skilled'), JSON.stringify(receipt));
+
+    expect(manager.list()[0]).toMatchObject({
+      enabled: false,
+      approval: { state: 'invalid' },
+    });
+  });
+
   it('revoking approval fails the install closed, and a later bundled approval heals it', async () => {
     await manager.install(await makeCindy('approved.cindy', goodManifest()));
     const approvedManifest = manager.list()[0].manifest;

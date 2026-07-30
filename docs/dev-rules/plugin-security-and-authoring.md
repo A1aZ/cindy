@@ -84,11 +84,18 @@
 - `skill` 槽是唯一**越出沙箱**的能力：技能指令由主 Agent 以用户全部权限执行、全局
   生效、不随 workdir 级停用隐藏。其安全边界是**声明一致性**（manifest 里的
   name／description 必须与 SKILL.md frontmatter 逐字一致，`skillSlot.ts` 的
-  `checkSkillMdConsistency` 是唯一裁判，打包与装入、以及批准快照三侧共用）+
-  **批准快照**（确认时把技能目录逐字节拷进
-  `<状态根>/skill-snapshots/<id>/<revision>`，只收普通文件；确认框看到的 SKILL.md
-  必须就是 Agent 之后读到的那份，所以共享技能根的链接指快照而不是可被改写的
-  `cindy-brain/<id>/<dir>`）+ **链接对账**（`reconcileGhostSkillLinks` 只增删"目标落在
+  `checkSkillMdConsistency` 是唯一裁判，打包与装入、以及批准快照三侧共用；注意它**只**
+  校验 frontmatter 的 name／description，正文与辅助文件不在它的判据里）+
+  **批准快照与字节指纹**（确认时把技能目录逐字节拷进
+  `<状态根>/skill-snapshots/<id>/<revision>`，只收普通文件，同时把逐 item 的内容
+  指纹钉进 receipt 的 `skillContentSha256`；确认框看到的 SKILL.md 必须就是 Agent 之后
+  读到的那份，所以共享技能根的链接指快照而不是可被改写的 `cindy-brain/<id>/<dir>`。
+  快照缺失需要从安装目录重建时**必须先重算指纹并逐字节对上**——只靠
+  `checkSkillMdConsistency` 拦不住"frontmatter 不动、改写正文或塞辅助文件"，那会把
+  一份没人确认过的指令在一次启用里固化成已批准快照并全局挂链。对不上一律拒、退回
+  完整重新确认，不许就地自愈成新批准；`skillContentSha256` 因此是**运行期判据**，与
+  只作审计用的 `packageSha256` 不同，且必填——留"字段缺失就跳过校验"的可选口子等于
+  给漂移开一条绕过路径）+ **链接对账**（`reconcileGhostSkillLinks` 只增删"目标落在
   安装根或批准状态根内的 symlink／junction"，绝不触碰真实目录与外来链接；
   启用挂链、停用／卸载撤链、断链自愈）。快照目标带 revision，因此每次更新都换目标、
   靠对账重指，旧 revision 在 receipt 提交后回收。改动技能落链、命名
@@ -179,6 +186,8 @@ topic 路由；产品层多端语义见
 3. 运行授权是否只取自 Host receipt，而不是可变安装目录？无批准／损坏批准是否 fail
    closed（列为停用、不许启用、不落技能链），且 UI 如实说明并给出重新确认入口？停用
    方向是否无论环境如何都能成功？改了技能落链或快照时 `approvalStateRoot` 是否仍必填？
+   任何"从安装目录取字节"的路径（快照重建等）是否都复现了装入侧的门槛——字节指纹逐项
+   对上、SKILL.md 定长后再读？失败时是拒绝并退回重新确认，而不是就地自愈成新批准？
 4. 网络是否限白名单域名、凭证无明文读回？附件／媒体／目录是否经归属校验的
    grant／deposit／ledger 交接，未暴露宿主绝对路径？
 5. 内联凭证是否只走 trusted Desktop 专用 IPC，未登记 device-link？Main 是否重新校验

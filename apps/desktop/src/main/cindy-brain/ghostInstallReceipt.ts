@@ -44,6 +44,16 @@ export interface GhostInstallReceipt {
    * 随包种子是内容目录哈希。**运行时不校验它**，不要据此认为安装内容持续完整。
    */
   packageSha256?: string;
+  /**
+   * 按 skill item 目录钉住的批准字节指纹(`item.dir` → sha256)。声明了 skill 槽
+   * 时逐项必填，没声明时是空对象。
+   *
+   * 这一项**是运行期判据**，与只作审计用的 `packageSha256` 不同：快照缺失需要从
+   * 可变安装目录重建时，必须先重算并逐字节对上才允许重建。少了它，改写 SKILL.md
+   * 正文或往技能目录塞辅助文件就能在一次"启用"里被固化成已批准快照并全局挂链，
+   * 而 frontmatter 一致性校验只看 name/description，拦不住这类漂移。
+   */
+  skillContentSha256: Record<string, string>;
   iconDataUrl?: string;
 }
 
@@ -167,6 +177,19 @@ export class GhostInstallReceiptStore {
     if (!skillSourceDir) {
       throw new Error('approved skill snapshot is missing');
     }
+    // 快照缺失、要从可变安装目录重建:先逐字节对上批准时点钉住的指纹。
+    // 只校验 SKILL.md frontmatter 不够 —— name/description 保持不变、改写正文或
+    // 往技能目录塞辅助文件，同样会让一份没人确认过的技能指令被固化成已批准快照
+    // 并全局挂链，而 skill 槽是以用户全部权限执行的。对不上就拒，让它退回完整
+    // 重新确认，而不是就地"自愈"成新批准。
+    const actualSkillContent = await hashApprovedSkillContent(receipt.manifest, skillSourceDir);
+    for (const item of items) {
+      if (actualSkillContent[item.dir] !== receipt.skillContentSha256[item.dir]) {
+        throw new Error(
+          `approved skill ${item.dir} no longer matches the bytes approved at install time`,
+        );
+      }
+    }
     const parent = path.dirname(target);
     const temp = path.join(
       parent,
@@ -236,6 +259,8 @@ export function createGhostInstallReceipt(input: {
   localeResources: Record<string, GhostManifestLocaleResource>;
   enabled: boolean;
   trust: GhostTrustInfo;
+  /** 由 `hashApprovedSkillContent` 从**这次批准的内容目录**现算，不可沿用旧值。 */
+  skillContentSha256: Record<string, string>;
   packageSha256?: string;
   iconDataUrl?: string;
 }): GhostInstallReceipt {
@@ -247,9 +272,57 @@ export function createGhostInstallReceipt(input: {
     localeResources: input.localeResources,
     enabled: input.enabled,
     trust: input.trust,
+    skillContentSha256: input.skillContentSha256,
     ...(input.packageSha256 ? { packageSha256: input.packageSha256 } : {}),
     ...(input.iconDataUrl ? { iconDataUrl: input.iconDataUrl } : {}),
   };
+}
+
+/**
+ * 逐 skill item 目录算规范化内容指纹(排序后的相对路径 + 字节)。
+ *
+ * 与 `hashApprovedDirectory` 的差别：技能目录**不跳过点文件**——技能指令可以引用
+ * 目录里的任意文件，漏掉一类就是漏掉一条改写通道；非普通条目一律拒，与快照拷贝
+ * 侧 `copyRegularDirectory` 同一判据。
+ */
+export async function hashApprovedSkillContent(
+  manifest: GhostManifest,
+  sourceDir: string | undefined,
+): Promise<Record<string, string>> {
+  const items = manifest.skill?.items ?? [];
+  if (items.length === 0) return {};
+  if (!sourceDir) throw new Error('skill content hash requires a source directory');
+  const result: Record<string, string> = {};
+  for (const item of items) {
+    const itemRoot = path.join(sourceDir, ...item.dir.split('/'));
+    const files: string[] = [];
+    const collect = async (relativeDir: string): Promise<void> => {
+      const entries = await fs.promises.readdir(path.join(itemRoot, relativeDir), {
+        withFileTypes: true,
+      });
+      for (const entry of entries) {
+        const relativePath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          await collect(relativePath);
+        } else if (entry.isFile()) {
+          files.push(relativePath);
+        } else {
+          throw new Error(`approved skill rejects non-regular entry: ${item.dir}/${relativePath}`);
+        }
+      }
+    };
+    await collect('');
+    files.sort();
+    const hash = crypto.createHash('sha256');
+    for (const relativePath of files) {
+      hash.update(relativePath);
+      hash.update('\0');
+      hash.update(await fs.promises.readFile(path.join(itemRoot, ...relativePath.split('/'))));
+      hash.update('\0');
+    }
+    result[item.dir] = hash.digest('hex');
+  }
+  return result;
 }
 
 function validateReceipt(
@@ -286,6 +359,32 @@ function validateReceipt(
     (typeof value.packageSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.packageSha256))
   ) {
     return { ok: false, reason: 'receipt packageSha256 不合法' };
+  }
+  // 技能字节指纹是运行期判据,必填且键集必须与清单声明严格一致 —— 留"字段缺失就
+  // 跳过校验"的可选口子等于给漂移留一条绕过路径。receipt 格式尚未随任何版本发布,
+  // 不存在需要兼容的旧 receipt。
+  const skillContentSha256: Record<string, string> = {};
+  {
+    const raw = value.skillContentSha256;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return { ok: false, reason: 'receipt skillContentSha256 不合法' };
+    }
+    const expectedDirs = (manifestResult.manifest.skill?.items ?? [])
+      .map((item) => item.dir)
+      .sort();
+    const actualDirs = Object.keys(raw as Record<string, unknown>).sort();
+    if (
+      expectedDirs.length !== actualDirs.length ||
+      expectedDirs.some((dir, index) => dir !== actualDirs[index])
+    ) {
+      return { ok: false, reason: 'receipt skillContentSha256 与 manifest 声明不一致' };
+    }
+    for (const [dir, digest] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest)) {
+        return { ok: false, reason: `receipt skillContentSha256 不合法:${dir}` };
+      }
+      skillContentSha256[dir] = digest;
+    }
   }
   if (
     value.iconDataUrl !== undefined &&
@@ -333,6 +432,7 @@ function validateReceipt(
       localeResources,
       enabled: value.enabled,
       trust,
+      skillContentSha256,
       ...(typeof value.packageSha256 === 'string'
         ? { packageSha256: value.packageSha256 }
         : {}),

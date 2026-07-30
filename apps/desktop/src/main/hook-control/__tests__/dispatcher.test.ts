@@ -1977,6 +1977,8 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
       fire: (sessionId: string) => {
         for (const l of [...listeners]) l(sessionId);
       },
+      /** 当前订阅数 —— 用于直接断言 dispose 真的退订了。 */
+      listenerCount: () => listeners.size,
     };
   }
 
@@ -2246,5 +2248,41 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     await tick();
     expect(cr.watches).toHaveLength(0);
     expect(c.ofType('turn.reopen')).toHaveLength(0);
+  });
+
+  it('会话正在跑别的 turn -> 不接回(观察器分不清事件属于哪条用户消息)', async () => {
+    // 观察器是会话级的, 首个事件会被当成目标续跑轮。会话此刻正忙(桌面端用户自己
+    // 的 turn / silent-stop 自动续跑, 都不经本模块记账)时, 这次重试的消息其实还在
+    // 排队, 先到的是那个无关 turn 的进度与正文 —— 认领就会用无关内容改写渠道原消息。
+    const { cr, sig, c, sessionId } = await failOneTask();
+    cr.busy.add(sessionId);
+    sig.fire(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(0);
+    expect(c.ofType('turn.reopen')).toHaveLength(0);
+  });
+
+  it('断连后能力快照即失效 -> 不再为这条连接白挂观察器', async () => {
+    // serverFeatures 只在握手时权威。断连后不清, supportsReopen 会拿上一次的快照
+    // 继续放行: 观察器照挂、记账照消耗, 而 sendFns 早已删掉 —— 帧根本发不出去,
+    // 白挂一个要空转 2 分钟才退场的监听, 且这条消息线的续跑机会被无谓吃掉。
+    const { cr, sig, d, sessionId } = await failOneTask();
+    d.onDisconnected('conn-1');
+    sig.fire(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(0);
+  });
+
+  it('dispose() 退订信号源(不只是清记账)', async () => {
+    // 直接断言订阅数, 不看下游行为: dispose 同时清了 pendingReopens, 只看
+    // "有没有起观察" 的话, 即使退订漏了也照样为 0 —— 那样这条锁就是假的。
+    const cr = continuationRunner();
+    const sig = signalSource();
+    const c = collector();
+    const { d } = makeDispatcher({ runner: cr.runner, subscribeUiContinuation: sig.subscribe });
+    d.onConnected('conn-1', c.send, REOPEN_FEATURES);
+    expect(sig.listenerCount()).toBe(1);
+    d.dispose();
+    expect(sig.listenerCount()).toBe(0);
   });
 });

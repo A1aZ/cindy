@@ -289,6 +289,12 @@ export interface HookDispatcher {
   activateAccount(): void;
   /** Close ingress, abort old-account turns and await their final async boundary. */
   deactivateAccount(): Promise<void>;
+  /**
+   * 彻底弃用本 dispatcher(退订进程级信号源)。与 deactivateAccount 不同:
+   * 后者是账号边界、之后还会 activate 回来, 本方法之后这个实例不再被使用。
+   * 幂等。
+   */
+  dispose(): void;
 }
 
 /** 单 session 排队上限 —— 超过按 rejected(invalid) 打回, 防失控上游刷爆。 */
@@ -557,11 +563,13 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
   const activeContinuations = new Map<string, () => void>();
   /** 正在因"新任务接管"而撤销的 session —— 它的收口不得再记待续跑(见 dropContinuation)。 */
   let suppressReopenFor: string | null = null;
-  // dispatcher 是进程级单例(ipc.ts), 与信号源同生命周期 —— 没有 dispose 通道,
-  // 也就不持有退订句柄; 测试注入自己的 subscribe, 不会跨用例串台。
-  subscribeUiContinuation?.((sessionId) => {
-    onUiContinuation(sessionId);
-  });
+  // 退订句柄由 dispose() 消费。刻意**不**在 deactivateAccount 里退订: 换账号后
+  // 同一个 dispatcher 还要继续服务新账号, 订阅必须跨账号存活(账号边界由记账里的
+  // accountGeneration 与 isCurrentGeneration 把关, 不靠摘监听)。
+  const unsubscribeUiContinuation =
+    subscribeUiContinuation?.((sessionId) => {
+      onUiContinuation(sessionId);
+    }) ?? null;
   let accountActive = accountInitiallyActive ?? true;
   let accountGeneration = 0;
   const executing = new Set<Promise<void>>();
@@ -662,6 +670,19 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     if (Date.now() > entry.expiresAt) return;
     // 本模块正跑这个 session 的 hook turn: 那一轮才是这条消息线的主人。
     if (running.has(sessionId) || activeContinuations.has(sessionId)) return;
+    // 会话此刻正在跑**别的** turn(桌面端用户自己发的、silent-stop 自动续跑等,
+    // 都不经本模块记账)时也不认领: 观察器是会话级的, 拿不到"这个事件属于哪条用户
+    // 消息"(AgentEvent 没有该关联), 于是首个事件会被当成目标续跑轮 —— 而这次重试
+    // 的消息其实还在排队, 真正先到的是那个无关 turn 的进度与正文, 渠道原消息就被
+    // 无关内容改写了。放弃是安全方向: 消息保持原样, 与本能力上线前一致。
+    // 正常路径不受影响 —— 用户点重试时那个失败 turn 已经收口(否则不会有错误横幅),
+    // 且 coordinator 是在 scheduleDrain **之前**同步发信号的, 此刻 turn 还没起。
+    if (runner.isBusy(sessionId)) {
+      log.info(
+        `hook continuation skipped: the session is busy with another turn (reopenOf=${entry.requestId})`,
+      );
+      return;
+    }
     if (!supportsReopen(entry.connectionId)) return;
     // 目录授权按现场重算(与 execute 同一道收口): 排队/等待期间映射可能已被改删。
     if (!dirStillAllowed(entry.connectionId, entry.workingDir)) {
@@ -1391,6 +1412,9 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       queues.clear();
       sendFns.clear();
       pendingTurnEnds.clear();
+      // 能力快照按连接存, 而连接身份含账号指纹 —— 换账号后旧条目永远不会再被
+      // 命中, 但留着会让 supportsReopen 对"同名连接"给出上一个账号的答案。
+      serverFeatures.clear();
       // 续跑记账与在观察的续跑轮都属于上一个账号, 一并清掉(记账里带
       // accountGeneration 只是第二道防线, 表本身不该跨账号留存)。
       for (const sessionId of [...activeContinuations.keys()]) dropContinuation(sessionId);
@@ -1569,6 +1593,17 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
     },
     onDisconnected(connectionId) {
       sendFns.delete(connectionId);
+      // 能力集只在握手时才权威。断连后不清会留下"上一次连上的那个 server 实例"
+      // 的快照: 滚动发布时重连可能落到不宣告 turn.reopen 的老实例上, 而在
+      // onConnected 重设之前, supportsReopen 会按旧快照放行发帧。
+      serverFeatures.delete(connectionId);
+    },
+    dispose() {
+      unsubscribeUiContinuation?.();
+      for (const sessionId of [...activeContinuations.keys()]) dropContinuation(sessionId);
+      pendingReopens.clear();
+      serverFeatures.clear();
+      sendFns.clear();
     },
     onConnected(connectionId, send, features) {
       if (!accountActive) return;

@@ -196,6 +196,17 @@ export interface AgentInputCoordinatorDeps {
    */
   onDiscardedQueuedMessage?: (sessionId: string, item: AgentInputQueuedMessage) => void;
   /**
+   * 用户在桌面端**显式重试**了这个会话的失败 turn(错误横幅「重试」)。
+   *
+   * hook-control 用它把那一轮的结果接回渠道里那条已经收口的消息(turn.reopen)。
+   * 之所以要 coordinator 显式回调、而不是在发送路径上按文本认续跑指令:
+   * retryLastError 只在失败 turn **已有产出**时才改发 CONTINUE_AFTER_ERROR_PROMPT,
+   * 零产出(派发即失败 / 首个 API 调用就挂, 也就是上游过载最典型的形态)走的是
+   * 克隆重发原文 —— 那条消息文本上与普通用户消息毫无区别, 从文本无法认出重试意图。
+   * 只靠文本嗅探会让最需要回流的那类失败恰好没有信号。
+   */
+  onUiRetry?: (sessionId: string) => void;
+  /**
    * 派发失败后队列可能已空(项目已从队列移除但未被放回时)回调。
    * host 用它触发 notifyQueueEmptied, 让 AgentIsland 中因队列非空而延迟的完成事件得到补发。
    * Thread 3 fix: drain/dispatchCompact 失败路径在 item 未回退到队列时调用。
@@ -1364,6 +1375,10 @@ export class AgentInputCoordinator {
     }
     this.touchUserSend(sessionId);
     this.emit(sessionId);
+    // 「用户显式重试」信号: 两条分支都发 —— 有产出走续跑指令、零产出走克隆重发,
+    // 但对渠道回流而言意图完全相同(把这一轮接回那条已收口的消息)。放在这里而非
+    // 上面的分支内, 是因为 queue-head 重试同样是用户点的同一个按钮。
+    this.deps.onUiRetry?.(sessionId);
     this.scheduleDrain(sessionId, 'retry');
     this.scheduleExternalTurnRetryIfNeeded(sessionId, state, 'retry');
     return this.getProjection(sessionId);

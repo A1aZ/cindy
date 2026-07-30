@@ -194,10 +194,12 @@ function createHarness() {
   const persistQueueSnapshot = vi.fn<
     NonNullable<AgentInputCoordinatorDeps['persistQueueSnapshot']>
   >();
+  const onUiRetry = vi.fn<NonNullable<AgentInputCoordinatorDeps['onUiRetry']>>(() => {});
   const coordinator = new AgentInputCoordinator({
     sendToAgent,
     steerToAgent,
     abortSession,
+    onUiRetry,
     isTurnRunning: () => running,
     reconcileTurnIdle,
     hasPendingInteraction: () => pendingInteraction,
@@ -241,6 +243,7 @@ function createHarness() {
     resolveSessionReferences,
     emitProjection,
     projections,
+    onUiRetry,
     setRunning(value: boolean) {
       running = value;
     },
@@ -2012,6 +2015,39 @@ describe('AgentInputCoordinator send transaction', () => {
 
     expect(h.sendToAgent).toHaveBeenCalledTimes(2);
     expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({ type: 'user', content: 'original task' });
+    // 重发的是原文, 文本上与普通用户消息无异 —— 所以「用户显式重试」只能靠这个
+    // 回调传出去。hook 侧的渠道回流(turn.reopen)依赖它: 零产出失败恰是上游过载
+    // 最典型的形态, 也最需要把结果接回渠道那条消息。
+    expect(h.onUiRetry).toHaveBeenCalledWith(sid);
+  });
+
+  it('signals an explicit UI retry on both retry shapes (continue prompt and original resend)', async () => {
+    // 防漂移锁: 回流信号一度只在发送路径上按文本认 CONTINUE_AFTER_ERROR_PROMPT,
+    // 于是零产出重试(重发原文)完全没有信号 —— 最需要回流的那类失败恰好漏掉。
+    for (const hasProgress of [true, false]) {
+      const h = createHarness();
+      const sid = `retry-signal-${String(hasProgress)}`;
+      h.setHasAssistantProgressAfter(async () => hasProgress);
+
+      h.coordinator.enqueue(sid, makeItem('q-first', 'original task'));
+      await flush();
+      h.setRunning(false);
+      h.coordinator.onTurnEvent(sid, 'error', 'turn failed');
+      await flush();
+
+      expect(h.onUiRetry).not.toHaveBeenCalled();
+      await h.coordinator.retryLastError(sid);
+      await flush();
+      expect(h.onUiRetry).toHaveBeenCalledWith(sid);
+      expect(h.onUiRetry).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('does not signal a UI retry when there is nothing to recover', async () => {
+    const h = createHarness();
+    await h.coordinator.retryLastError('retry-signal-noop');
+    await flush();
+    expect(h.onUiRetry).not.toHaveBeenCalled();
   });
 
   it('queue-head retry never substitutes the continue prompt and redrains the original head', async () => {

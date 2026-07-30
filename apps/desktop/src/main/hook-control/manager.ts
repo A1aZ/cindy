@@ -917,8 +917,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     return {
       enabled,
       url,
-      status:
-        enabled && url.length === 0 ? 'error' : toViewStatus(lane.status, enabled),
+      status: enabled && url.length === 0 ? 'error' : toViewStatus(lane.status, enabled),
       lastError:
         enabled && url.length === 0
           ? lane.config.notConfiguredError
@@ -2728,6 +2727,10 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     dispose() {
       disposed = true;
       stopAll();
+      // dispatcher 由本 manager 独占持有(ipc.ts 在同一处创建两者), 所以它的
+      // 进程级信号订阅也随本次 dispose 一起退掉, 否则重建 manager 会叠加一个
+      // 对着废弃 dispatcher 状态跑的续跑监听。
+      dispatcher?.dispose();
     },
   };
 }

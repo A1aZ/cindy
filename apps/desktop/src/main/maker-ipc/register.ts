@@ -516,7 +516,7 @@ import {
   SILENT_STOP_RESUME_PROMPT,
   SilentStopAutoResumeGuard,
 } from './silentStopAutoResume.js';
-import { noteUserMessageForContinuation } from './uiContinuationSignal.js';
+import { noteUserMessageForContinuation, publishUiContinuation } from './uiContinuationSignal.js';
 import { readSilentStopAutoResumeSettings } from '../maker-host/silent-stop-auto-resume-store.js';
 import {
   broadcastGhostMessageBlocked,
@@ -6932,6 +6932,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
     },
     noteSessionClearBoundary,
+    // 用户点了错误横幅的「重试」→ hook 侧把这一轮接回渠道那条已收口的消息。
+    // 这是权威来源: 零产出重试重发的是原文, 从文本认不出重试意图(见 deps 注释)。
+    onUiRetry: publishUiContinuation,
     // 队列项未派发即被丢弃(stop/remove/clearSession) → 释放暂存的 accepted 副作用, 防回调表泄漏。
     onDiscardedQueuedMessage: (_sessionId, item) => {
       orcaInterAgentDispatcher.discardQueuedOrcaInterAgentAcceptedCallback(item.clientId);

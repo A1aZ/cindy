@@ -3,10 +3,19 @@
  * ---------------------------------------------------------------------------
  * 「用户在桌面端显式续跑了某个会话」的进程内信号。
  *
- * 唯一生产者是 maker 的发送事务(register.ts 的 prepareSendUserMessage 接缝):
- * 那里能同时看到 sessionId 与即将发给 agent 的文本, 于是可以精确认出错误横幅
- * 「重试」/ 中断横幅「继续任务」发出的那条隐藏续跑指令
- * (maker-shared 的 CONTINUE_AFTER_* 常量, syntheticTriggerKind === 'continue')。
+ * 有**两个**生产者, 各自覆盖一类续跑, 缺一不可:
+ *
+ *   1. `agent-input-coordinator.retryLastError()` 的 `onUiRetry` 回调 —— 错误横幅
+ *      「重试」的权威来源。**必须走回调而不能靠文本认**: retryLastError 只在失败
+ *      turn 已有产出时才改发 CONTINUE_AFTER_ERROR_PROMPT, 零产出(派发即失败 /
+ *      首个 API 调用就挂 —— 上游过载最典型、也最需要回流的形态)走的是克隆重发
+ *      原文, 那条消息文本上与普通用户消息毫无区别。
+ *   2. 发送事务(register.ts 的 prepareSendUserMessage 接缝)上的文本判定 ——
+ *      覆盖中断横幅「继续任务」: 它由 renderer 的 sendUiTrigger 直接发
+ *      CONTINUE_AFTER_APP_EXIT_PROMPT, 不经 coordinator 的 retry 路径, 只能在
+ *      看得见文本的地方认(该常量是精确匹配, 无歧义)。
+ *
+ * 两者对同一次续跑都发信号时天然幂等: 消费方的记账是一次性的(命中即摘表)。
  *
  * 唯一消费者是 hook-control: 一个 hook 任务以失败收口后, 渠道里那条消息就停在
  * 失败上; 用户往往转头在桌面端点「重试」, 那会在同一会话里起一个新 turn, 但它

@@ -178,6 +178,12 @@ import {
   resetCollaborationSettings,
   writeCollaborationSetting,
 } from '../maker-host/collaboration-settings-store.js';
+import {
+  readAgentResourceSettingsState,
+  resetAgentResourceSettings,
+  writeAgentResourceSetting,
+} from '../maker-host/agent-resource-settings-store.js';
+import { createAgentResourceSettingsIpc } from './agent-resource-settings-ipc.js';
 import { createGitSnapshotCoordinator } from '../maker-host/git-snapshot-host.js';
 import {
   cancelCodexAuthModeChange,
@@ -722,6 +728,17 @@ function collaborationSettingsWire() {
     defaults: state.defaults,
   };
 }
+
+// agent-resource-settings 的 key 白名单/校验/wire 组装已抽到
+// agent-resource-settings-ipc.ts(可注入依赖免 Electron 直测,含 sender 校验、
+// 逐 key 校验、存储失败转 INTERNAL 的全套测试)。这里只保留 adapter 接线。
+const agentResourceSettingsIpc = createAgentResourceSettingsIpc({
+  assertTrustedSender: (event) =>
+    assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
+  readState: readAgentResourceSettingsState,
+  write: writeAgentResourceSetting,
+  reset: resetAgentResourceSettings,
+});
 
 function memorySettingsWire() {
   const state = readMemorySettingsState();
@@ -6524,6 +6541,19 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     resetCollaborationSettings();
     return collaborationSettingsWire();
   });
+
+  // ─── Agent resource settings IPC(命令并发/进程优先级/工具链限核)──────────
+  // 业务体在 agent-resource-settings-ipc.ts(sender 校验/逐 key 校验/存储失败
+  // 转 INTERNAL),这里是纯 adapter。
+  ipcMain.handle(MAKER_INVOKE.AGENT_RESOURCE_SETTINGS_GET, async (e) =>
+    agentResourceSettingsIpc.get(e),
+  );
+  ipcMain.handle(MAKER_INVOKE.AGENT_RESOURCE_SETTINGS_SET, async (e, body: unknown) =>
+    agentResourceSettingsIpc.set(e, body),
+  );
+  ipcMain.handle(MAKER_INVOKE.AGENT_RESOURCE_SETTINGS_RESET, async (e) =>
+    agentResourceSettingsIpc.reset(e),
+  );
 
   // ─── Idle watcher ────────────────────────────────────────────────────────
   // 只扫描 active team/session，避免已归档 Worker 被终态筛选重新捞起。

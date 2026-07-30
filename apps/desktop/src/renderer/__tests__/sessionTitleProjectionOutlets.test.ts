@@ -68,6 +68,13 @@ describe('desktop 会话标题投影出口', () => {
 
     // goal 分支:setGoal 抛错时撤回后照旧把异常抛给调用方。
     expect(draftRoute).toContain('if (optimisticGoalTitle) emitAutoTitlePreviewCleared(newSession.id);');
+
+    // 普通 send 分支:rehomeDraftAttachments / setPending / navigate 在登记之后抛错时,
+    // 由外层 catch 撤回(它拿不到 newSession,靠 optimisticTitleSessionId 记住)。
+    expect(draftRoute).toContain('let optimisticTitleSessionId: string | null = null;');
+    expect(draftRoute).toContain(
+      'if (optimisticTitleSessionId) emitAutoTitlePreviewCleared(optimisticTitleSessionId);',
+    );
   });
 
   it('系统通知 / 飞书 / 手机推送的标题过投影,且语言走 ref 不被钉在首次渲染', () => {

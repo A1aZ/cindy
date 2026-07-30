@@ -271,6 +271,23 @@ describe('sessionsStore — 预览必须活过全量刷新', () => {
     expect(currentTitle()).toBe('帮我排查登录失败');
   });
 
+  it('用户手动把标题改成字面量哨兵 → 也算权威写入,预览必须让位', async () => {
+    // main 侧专门有 manuallyRenamed 记号支持这种同值改名,所以它是合法的用户标题。
+    // 回收判据若排除哨兵值,刷新时会先重放权威值、紧接着又被陈旧预览盖回第一句话,
+    // 用户的标题根本显示不出来(review P1)。
+    await seed(session());
+    emitAutoTitlePreview(SESSION_ID, '帮我排查登录失败');
+
+    // 用户改名成 "New Maker" → 经 sessions:patched 回流。
+    sessionsStore.patchLocal(SESSION_ID, { title: DEFAULT_DRAFT_SESSION_TITLE });
+    expect(currentTitle()).toBe(DEFAULT_DRAFT_SESSION_TITLE);
+
+    // 关键:叠加层已回收,后续刷新不许把第一句话盖回来。
+    list.mockResolvedValue([session({ title: DEFAULT_DRAFT_SESSION_TITLE })]);
+    await sessionsStore.forceRefreshAll();
+    expect(currentTitle()).toBe(DEFAULT_DRAFT_SESSION_TITLE);
+  });
+
   it('权威标题恰好等于预览时,后续刷新同样不残留叠加', async () => {
     // 常见路径:main 写的占位与预览逐字相同(两端共用 normalizeAutoTitle)。
     await seed(session());

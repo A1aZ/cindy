@@ -1971,6 +1971,11 @@ export function NewMakerDraftRoute() {
       const selectedWorkingDir = effectiveWorkingDir?.trim() || undefined;
 
       markSendInFlight(true);
+      // 已登记乐观标题预览的会话 id。交接链路(rehomeDraftAttachments / setPending /
+      // navigate)在登记之后抛错时,消息没被交出去、权威标题永不回流,预览必须在下面的
+      // catch 里撤回,否则空会话会跨列表刷新一直显示一句**没发出去**的话
+      // (PR #1031 review P1;worktree 与 goal 两条路径各有自己的撤回点)。
+      let optimisticTitleSessionId: string | null = null;
       void (async () => {
         try {
           // device-link:远程草稿就绪态以被控端为准(传 deviceId 走隧道查被控端 maker:agent:status);
@@ -2416,7 +2421,10 @@ export function NewMakerDraftRoute() {
             const iso = new Date().toISOString();
             sessionsStore.patchLocal(newSession.id, { userSendAt: iso, updatedAt: iso });
             const optimisticTitle = optimisticFirstMessageTitle(message, files, mentions, opts);
-            if (optimisticTitle) emitAutoTitlePreview(newSession.id, optimisticTitle);
+            if (optimisticTitle) {
+              emitAutoTitlePreview(newSession.id, optimisticTitle);
+              optimisticTitleSessionId = newSession.id;
+            }
           }
 
           // F-COLLAB: draft 阶段开了协同 toggle → createSession 之后立刻 enableOrca
@@ -2474,6 +2482,8 @@ export function NewMakerDraftRoute() {
           });
         } catch (err) {
           log.error('[draft send]', err);
+          // 交接失败 → 撤回乐观标题预览(理由见上面 optimisticTitleSessionId 的注释)。
+          if (optimisticTitleSessionId) emitAutoTitlePreviewCleared(optimisticTitleSessionId);
           toast.error(
             getRemoteWorkingDirErrorMessage(err, t) ?? t('ccAgent.draft.createSessionFailed'),
           );

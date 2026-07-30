@@ -366,7 +366,12 @@ export const sessionsStore = {
     //
     // 乐观预览不走这个门(见 {@link applyOptimisticTitle}),所以这里见到的标题一律是
     // main 说过的权威值 —— 判据不必、也无法再去分辨来源。
-    if (typeof patch.title === 'string' && !isDefaultDraftSessionTitle(patch.title)) {
+    //
+    // **不看值、只看「是不是权威写入」**:用户完全可以手动把标题改成字面量 "New Maker"
+    // (main 侧专门有 manuallyRenamed 记号处理这种同值改名),那也是一次权威写入。曾经
+    // 在这里排除过哨兵值,结果是那种改名之后预览还留着,下一次刷新先重放权威值、紧接着
+    // 又被陈旧预览盖回第一句话,用户的标题显示不出来(PR #1031 review P1)。
+    if (typeof patch.title === 'string') {
       autoTitlePreviews.delete(id);
     }
     // 每一次**权威**标题写入(占位 / 智能标题回流、用户改名)都登记版本化 override:

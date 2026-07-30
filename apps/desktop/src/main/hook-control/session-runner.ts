@@ -998,6 +998,16 @@ function beginContinuationWatch(
   req: HookContinuationWatchRequest,
   log: { info(msg: string): void; warn(msg: string): void },
 ): () => void {
+  // live 实例可能仍跑在搬迁前的旧目录里(与 run() 的同名校验同理, 见 PR #733)。
+  // 记账里存的是失败那一轮的持久化目录, 只查它会让"旧目录已被移出映射、新目录仍在"
+  // 的会话放行 —— 那样续跑的输出与文件会从一个已撤销的目录回流到渠道。
+  if (req.isDirAuthorized && !req.isDirAuthorized(session.workDir)) {
+    log.info(
+      `hook continuation skipped: the live session runs in a directory that is no longer in the workspace map (${session.id})`,
+    );
+    req.onAbandon();
+    return () => undefined;
+  }
     const startedAt = Date.now();
     const extraImageAbsPaths: string[] = [];
     let claimed = false;

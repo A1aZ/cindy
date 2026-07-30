@@ -767,7 +767,14 @@ export class AgentInputCoordinator {
     item = captureOriginalSyntheticTrigger(item);
     // 新消息进队 = 这个会话被别的内容推进(见 deps.onUserEnqueue)。放在幂等去重
     // **之前**无害: 重复投递的是同一条消息, 作废记账本就该发生一次以上也无副作用。
-    this.deps.onUserEnqueue?.(sessionId);
+    //
+    // 续跑指令本身豁免: 中断横幅「继续任务」由 renderer 直发
+    // CONTINUE_AFTER_APP_EXIT_PROMPT, 它**先**经本入口、之后才在 drain 时被
+    // prepareSendUserMessage 认成续跑 —— 无条件作废会把它自己的记账删掉, 于是那条
+    // 续跑跑成了却不回流。(错误横幅那条走 retryLastError, 压根不经本入口。)
+    if (item.originalSyntheticTrigger !== 'continue') {
+      this.deps.onUserEnqueue?.(sessionId);
+    }
     // 幂等去重(弱网重发防线,PR #881):同 clientId 重复投递说明是控制端(手机
     // 断连自动重试 / 用户对 ack 丢失的消息重发)在补发同一条消息,不是新消息。
     // 直接返回当前 projection、不再入队——否则同一条消息双入队、agent 跑两轮。

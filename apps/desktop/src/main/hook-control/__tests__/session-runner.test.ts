@@ -1679,6 +1679,21 @@ describe('watchContinuation: 观察桌面端续跑并回流', () => {
     }
   });
 
+  it('live session 跑在已撤销的目录里 -> 不观察(记账里的目录不算权威)', () => {
+    // 记账存的是失败那一轮的**持久化**目录, 而 live 实例可能仍跑在搬迁前的旧目录。
+    // 旧目录被移出映射、新目录仍在时, 只查记账就会放行 —— 续跑的输出与文件会从一个
+    // 已撤销的目录回流到渠道。run() 早已有这道校验(PR #733), 续跑路径必须同款。
+    fakeMaker.getSession.mockReturnValueOnce(makeManualSession('sess-live'));
+    const runner = createMakerHookSessionRunner({ log });
+    const { req, events } = watchReq();
+    const cancel = runner.watchContinuation!({
+      ...(req as Record<string, unknown>),
+      isDirAuthorized: (dir: string) => dir !== 'D:/repo',
+    } as never);
+    expect(events).toEqual(['abandon']);
+    expect(() => cancel()).not.toThrow();
+  });
+
   it('账号级事件(account_usage)不算首个 turn 事件 -> 不认领', () => {
     // session 事件流里混着账号级 fan-out。空闲 Codex 会话在观察器挂上后、排队的重试
     // 还没开跑时就可能发一条 —— 若把它当成首个事件, 渠道消息会立刻被改成"进行中"

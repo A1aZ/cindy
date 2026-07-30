@@ -96,6 +96,15 @@ export interface HookContinuationWatchRequest {
   source?: TaskSource;
   /** 原任务的渠道形态; 与 run() 同判据地决定进度只发正文还是带过程区。 */
   laneKind?: 'dm' | 'group';
+  /**
+   * "这个目录此刻还在本连接的工作目录映射内吗" —— 与 run() 的同名回调同语义, 用来
+   * 复核**真正要观察的那个 live session 的 workDir**。
+   *
+   * 必须复核: 记账里存的是失败那一轮的持久化目录, 而 live 实例可能仍跑在搬迁前的
+   * 旧目录里(run() 因 PR #733 review 已加这道校验)。若旧目录已被移出映射、而新目录
+   * 仍在, 只查记账就会放行, 于是续跑的输出与文件从一个已撤销的目录回流到渠道。
+   */
+  isDirAuthorized?: (dir: string) => boolean;
   /** 这一轮真的跑起来了 —— 此刻才认领渠道那条消息。 */
   onClaim: () => void;
   /** 执行中渲染快照(仅 onClaim 之后)。 */
@@ -752,6 +761,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       workingDir: entry.workingDir,
       ...(entry.source ? { source: entry.source } : {}),
       laneKind: deriveLaneKind(entry.externalKey),
+      isDirAuthorized: (dir) => dirStillAllowed(entry.connectionId, dir),
       onClaim: () => {
         if (revoked || !isCurrentGeneration(entry.accountGeneration)) return;
         const send = sendFns.get(entry.connectionId);

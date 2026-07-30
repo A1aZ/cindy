@@ -2069,6 +2069,22 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(h.onUserEnqueue).not.toHaveBeenCalled();
   });
 
+  it('a continuation prompt enqueue is not reported as an unrelated intervention', async () => {
+    // 中断横幅「继续任务」由 renderer 直发 CONTINUE_AFTER_APP_EXIT_PROMPT, 它**先**经
+    // enqueue、之后才在 drain 时被认成续跑。无条件作废会把它自己的待续跑记账删掉,
+    // 于是那条续跑跑成了却不回流。
+    const h = createHarness();
+    const sid = 'enqueue-continue-exempt';
+    h.coordinator.enqueue(sid, makeItem('q-continue', CONTINUE_AFTER_APP_EXIT_PROMPT));
+    await flush();
+    expect(h.onUserEnqueue).not.toHaveBeenCalled();
+
+    // 普通消息照常上报。
+    h.coordinator.enqueue(sid, makeItem('q-normal', '顺手问个别的'));
+    await flush();
+    expect(h.onUserEnqueue).toHaveBeenCalledWith(sid);
+  });
+
   it('does not signal a UI retry when there is nothing to recover', async () => {
     const h = createHarness();
     await h.coordinator.retryLastError('retry-signal-noop');

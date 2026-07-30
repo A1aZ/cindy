@@ -7566,7 +7566,7 @@
         "cancelFailed": "取消订阅失败，请稍后重试。"
       },
       "topupCard": {
-        "action": "充值"
+        "action": "余额充值"
       }
     },
     "balance": {

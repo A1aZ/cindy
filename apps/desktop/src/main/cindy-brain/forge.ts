@@ -25,6 +25,7 @@ import {
   type GhostManifest,
 } from '../../shared/ghost.js';
 import { validateGhostLocaleResourcesInDirectory } from './ghostLocaleFiles.js';
+import { isPathInsideDir } from './dirDeposit.js';
 import { checkSkillMdConsistency } from './skillSlot.js';
 
 /** 与 GhostManager 装入侧同一量级的上限(打包侧提前拦,fail fast)。 */
@@ -47,7 +48,13 @@ export type ForgePackResult =
   | { ok: true; cindyPath: string; manifest: GhostManifest }
   | {
       ok: false;
-      errorCode: 'DIR_NOT_FOUND' | 'MANIFEST_INVALID' | 'ENTRY_MISSING' | 'TOO_LARGE' | 'INTERNAL';
+      errorCode:
+        | 'DIR_NOT_FOUND'
+        | 'SOURCE_IS_INSTALLED_PLUGIN'
+        | 'MANIFEST_INVALID'
+        | 'ENTRY_MISSING'
+        | 'TOO_LARGE'
+        | 'INTERNAL';
       message: string;
     };
 
@@ -400,10 +407,14 @@ function hasFsErrorCode(err: unknown, code: string): boolean {
  *
  * 文件先写进同目录临时文件夹，全部成功后再一次 rename 到目标；目标已经
  * 存在时直接拒绝，因此并发调用也不会把用户原文件覆盖一半。
+ *
+ * `forbiddenRootDirs` 与打包侧同源(Host 受管的安装根 + 批准状态根):骨架也不
+ * 许落进已安装插件或状态目录 —— 那既会改写已批准插件的内容(随包种子还会因此
+ * 翻转播种指纹被整目录换回),又会诱导作者继续在安装目录里改代码。
  */
 export async function scaffoldGhostDir(
   input: ForgeScaffoldInput,
-  options?: { sessionWorkdir?: string | null },
+  options?: { sessionWorkdir?: string | null; forbiddenRootDirs?: readonly string[] },
 ): Promise<ForgeScaffoldResult> {
   const template = input.template;
   if (!FORGE_SCAFFOLD_TEMPLATES.includes(template)) {
@@ -452,6 +463,26 @@ export async function scaffoldGhostDir(
   const realTarget = path.join(realAncestor, ...pendingSegments);
   if (!realTarget.startsWith(`${realWorkdir}${path.sep}`) && realTarget !== realWorkdir) {
     return { ok: false, errorCode: 'INVALID_INPUT', message: 'dir 必须在当前会话工作目录内' };
+  }
+  for (const forbiddenRoot of options?.forbiddenRootDirs ?? []) {
+    let resolvedForbiddenRoot: string;
+    try {
+      resolvedForbiddenRoot = await resolveThroughExistingAncestor(forbiddenRoot);
+    } catch (err) {
+      return {
+        ok: false,
+        errorCode: 'INTERNAL',
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+    if (isPathInsideDir(resolvedForbiddenRoot, realTarget)) {
+      return {
+        ok: false,
+        errorCode: 'INVALID_INPUT',
+        message:
+          'dir 不能落在已安装插件目录或 Host 管理的状态目录内;请在工作目录里换一个独立的作者目录',
+      };
+    }
   }
   const files = scaffoldFiles(input);
   // 显式收窄而非 as 断言:manifest 恒为 JSON 字符串,二进制项(占位图标)另存;
@@ -541,7 +572,10 @@ export async function scaffoldGhostDir(
  * 同名覆盖——同 id 同版本重打包语义上就是同一个包),用户在自己的意识目录里
  * 就能拿到成品;出错返回结构化分类,agent 按 message 修源码即可,不抛异常。
  */
-export async function packGhostDir(dir: string): Promise<ForgePackResult> {
+export async function packGhostDir(
+  dir: string,
+  options: { forbiddenRootDirs?: readonly string[] } = {},
+): Promise<ForgePackResult> {
   try {
     let stat: fs.Stats;
     try {
@@ -551,6 +585,18 @@ export async function packGhostDir(dir: string): Promise<ForgePackResult> {
     }
     if (!stat.isDirectory()) {
       return { ok: false, errorCode: 'DIR_NOT_FOUND', message: `不是目录:${dir}` };
+    }
+    const realSourceDir = await fs.promises.realpath(dir);
+    for (const forbiddenRoot of options.forbiddenRootDirs ?? []) {
+      const resolvedForbiddenRoot = await resolveThroughExistingAncestor(forbiddenRoot);
+      if (isPathInsideDir(resolvedForbiddenRoot, realSourceDir)) {
+        return {
+          ok: false,
+          errorCode: 'SOURCE_IS_INSTALLED_PLUGIN',
+          message:
+            'Forge source must not be an installed Plugin or a Host-managed state directory; copy the source into the current session workdir first',
+        };
+      }
     }
 
     // 1) 清单先行:与装入侧同一套校验,错在打包期就报清楚。
@@ -699,6 +745,27 @@ export async function packGhostDir(dir: string): Promise<ForgePackResult> {
       errorCode: 'INTERNAL',
       message: err instanceof Error ? err.message : String(err),
     };
+  }
+}
+
+/**
+ * Resolve symlinks/junctions in the existing prefix while retaining a
+ * non-existent tail. This keeps managed roots comparable before first use.
+ */
+async function resolveThroughExistingAncestor(inputPath: string): Promise<string> {
+  let cursor = path.resolve(inputPath);
+  const tail: string[] = [];
+  while (true) {
+    try {
+      const real = await fs.promises.realpath(cursor);
+      return path.join(real, ...tail);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      const parent = path.dirname(cursor);
+      if (parent === cursor) return path.resolve(inputPath);
+      tail.unshift(path.basename(cursor));
+      cursor = parent;
+    }
   }
 }
 
@@ -2552,13 +2619,19 @@ const ensured = await cindy.workspace({
 ## 7. 打包与测试
 
 1. 新插件先调 \`ghost_forge_scaffold\` 生成骨架，或把已有源码放在用户工作目录下的
-   一个文件夹里(如 \`my-ghost/\`)；脚手架目标必须是新目录，绝不覆盖已有文件；
-2. 调 \`ghost_forge_pack({ dir: '<绝对路径>' })\`——校验 + 打包 + 弹装入确认框;
+   一个文件夹里(如 \`my-ghost/\`)；脚手架目标必须是新目录，绝不覆盖已有文件，
+   也不能落在已安装插件目录或 Host 状态目录内(会被拒，理由同下一条)；
+2. **Forge 源码必须是当前会话工作目录里的独立作者目录**。已安装插件目录以及
+   Host 管理的状态目录都不是源码区，禁止直接修改、打包或用路径别名绕过；若要继续
+   开发已有插件，先把源码复制/迁出到工作目录中的新目录，再从该副本制作；
+3. 调 \`ghost_forge_pack({ dir: '<绝对路径>' })\`——校验 + 打包 + 弹装入确认框;
    产物落在源码目录里(\`<id>-<version>.cindy\`,同版本覆盖,下次打包自动跳过);
-3. **告知用户去点弹窗**(装入默认沉睡,提醒用户勾"立即开启"或到主界面侧边栏「插件」中唤醒);
-4. 改代码后重新 pack:同 id 会弹"更新 vX → vY",唤醒状态与面板位置自动保留
+   若返回 \`SOURCE_IS_INSTALLED_PLUGIN\`，不要重试或换大小写、软链接、junction 绕过，
+   按上一步迁出源码后再打包；
+4. **告知用户去点弹窗**(装入默认沉睡,提醒用户勾"立即开启"或到主界面侧边栏「插件」中唤醒);
+5. 改代码后重新 pack:同 id 会弹"更新 vX → vY",唤醒状态与面板位置自动保留
    (记得 bump ghost.json 的 version);
-5. 验证:让用户 \`$<command> <内容>\` 试一单,看聊天图卡/面板是否符合预期。
+6. 验证:让用户 \`$<command> <内容>\` 试一单,看聊天图卡/面板是否符合预期。
 
 ## 8. 发布签名与审核
 

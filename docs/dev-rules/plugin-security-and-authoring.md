@@ -28,6 +28,7 @@
 | 身份卡字段与校验、管子协议类型 | `apps/desktop/src/shared/ghost.ts`（`validateGhostManifest`、`cindy.send` / `cindy.onHostMessage` 类型） |
 | 打包限制 | `apps/desktop/src/main/cindy-brain/forge.ts` 的 `packGhostDir` |
 | 运行时、沙箱进程与生命周期 | `apps/desktop/src/main/cindy-brain/runtime/GhostRuntime.ts`、`GhostManager.ts` |
+| 安装批准事实(receipt / 技能快照 / revision) | `apps/desktop/src/main/cindy-brain/ghostInstallReceipt.ts`，批准态投影见 `shared/ghost.ts` 的 `GhostInstallApproval` |
 | 能力 slot（网络／通知／文件系统／技能／宿主等） | `apps/desktop/src/main/cindy-brain/networkSlot.ts`、`notifySlot.ts`、`fsSlot.ts`、`cindySlot.ts`、`skillSlot.ts` |
 | 面板供片、注入主题 token 与协议 | `apps/desktop/src/renderer/cindy-brain/ghostPanelTheme.ts`、`cindy-ghost://` 分支 |
 | 权限注入／更新确认 UI | `apps/desktop/src/renderer/cindy-brain/GhostPermissionList.tsx` |
@@ -60,14 +61,42 @@
   也不构成授权。
 - 新增或修改 slot 时，除同步编写手册与校验（下节 5）外，还必须同步 shared 类型、
   preload／host handler、权限 UI（`GhostPermissionList.tsx`）、错误边界和测试。
+- **授权事实由 Host receipt 持有，不由安装目录持有。** 一次明确的安装／更新确认写出
+  一份 receipt（`ghostInstallReceipt.ts`），落在**安装根之外**的 owner-scoped 状态根里，
+  钉住这次批准过的 manifest、trust、启停态和一个随机 `revision`；`GhostManager.list()`
+  只从 receipt 取这些字段，安装目录里的 `ghost.json` / `.cindy-trust.json` / `.disabled`
+  退化为旧版本兼容镜像。理由是可变安装目录曾经就是授权事实本身：就地改写
+  `ghost.json` 能让权限 diff 显示"无新增"，未确认的 slot 因此拿到运行授权。
+  - 没有 receipt（旧安装）或 receipt 损坏 = **不构成运行授权**：一律按停用列出、
+    不许启用、不参与技能落链；恢复只能走一次完整重新确认（`diffInstalledGhostPermissionItems`
+    在无批准基线时把候选包的**全部**权限当新增项展示）。UI 必须如实说出这个状态并
+    给出恢复入口，不能让它看起来只是"被用户关掉了"。
+  - 跨进程更新事务用 `ghostInstallApprovalToken()` 把批准态投影成 token：Renderer 把
+    确认时看到的 token 回传，Main 重新读状态比对，不一致就拒（`state-changed`）。
+    token 是前置条件不是凭证——真值一律由 Main 现读。
+  - receipt 保证的是**授权事实**，**不是安装内容此后一直没被改过**：逻辑页代码仍从可变
+    安装目录加载，`packageSha256` 只是批准时点的来源指纹、运行时不校验（见第 6 节）。
+- **Forge 的源码区与 Host 受管根互斥。** `ghost_forge_scaffold` / `ghost_forge_pack` 的目标
+  必须是当前会话工作目录里的独立作者目录；命中安装根或批准状态根一律拒
+  （pack 返回 `SOURCE_IS_INSTALLED_PLUGIN`）。判定按 realpath 比对受管根，同时挡住大小写
+  折叠与软链／junction 别名。理由不是洁癖：在已安装目录里就地制作"更新包"会让版本与
+  权限 diff 以被改过的现场为基线，把未经确认的 manifest 送进运行时授权。
 - `skill` 槽是唯一**越出沙箱**的能力：技能指令由主 Agent 以用户全部权限执行、全局
   生效、不随 workdir 级停用隐藏。其安全边界是**声明一致性**（manifest 里的
   name／description 必须与 SKILL.md frontmatter 逐字一致，`skillSlot.ts` 的
-  `checkSkillMdConsistency` 是唯一裁判，打包与装入两侧共用）+ **链接对账**
-  （`reconcileGhostSkillLinks` 只增删"目标落在 cindy-brain 安装根内的
-  symlink／junction"，绝不触碰真实目录与外来链接；启用挂链、停用／卸载撤链、
-  断链自愈）。改动技能落链、命名（`<id>--<name>`，name 侧禁 `--`）或对账判据前，
-  必须先读 `skillSlot.ts` 头注释并保持上述不变量。
+  `checkSkillMdConsistency` 是唯一裁判，打包与装入、以及批准快照三侧共用）+
+  **批准快照**（确认时把技能目录逐字节拷进
+  `<状态根>/skill-snapshots/<id>/<revision>`，只收普通文件；确认框看到的 SKILL.md
+  必须就是 Agent 之后读到的那份，所以共享技能根的链接指快照而不是可被改写的
+  `cindy-brain/<id>/<dir>`）+ **链接对账**（`reconcileGhostSkillLinks` 只增删"目标落在
+  安装根或批准状态根内的 symlink／junction"，绝不触碰真实目录与外来链接；
+  启用挂链、停用／卸载撤链、断链自愈）。快照目标带 revision，因此每次更新都换目标、
+  靠对账重指，旧 revision 在 receipt 提交后回收。改动技能落链、命名
+  （`<id>--<name>`，name 侧禁 `--`）、快照或对账判据前，必须先读 `skillSlot.ts`
+  头注释并保持上述不变量；`approvalStateRoot` 是必填项——漏给会让指向快照的活链接被
+  判成外来链接而永不撤链，停用／卸载后技能仍对主 Agent 生效。
+- 收敛方向不对称：**启用需要有效批准状态，停用必须永远能成功**。停用是安全方向，不
+  能因为快照缺失之类的环境问题把插件卡在"既不能用也不能关"。
 
 ## 4. 网络、凭证与资源交接
 
@@ -125,6 +154,13 @@
 - SSH 远程场景必须让 `LiziMcpSessionContext` 携带 remote 标识；目录过户不得回退读取本机
   同名路径，无法证明来源时 **fail closed**。
 - 手机版仍需把历史 mivo 动作按钮降级为纯展示。
+- **安装内容字节仍可变、且加载时不校验。** 批准 receipt 钉住的是授权事实
+  （manifest／trust／启停／revision），逻辑页代码仍从 `cindy-brain/<id>/` 现读；
+  `packageSha256` 只是批准时点的来源指纹（市场／本地包 = `.cindy` 文件哈希，随包种子 =
+  内容目录哈希），**没有任何运行期校验消费它**。因此能写这个目录的本机进程仍可替换
+  代码，只是被限制在**此前已批准的权限集**内运行，且不能借改写 `ghost.json` 扩权。
+  技能目录因为越出沙箱已单独拷成快照（第 3 节），其余内容的持续完整性校验仍未做——
+  改动装入链路时不得声称已有内容完整性保证。
 
 ## 7. 远程与手机版
 
@@ -140,16 +176,21 @@ topic 路由；产品层多端语义见
 1. 沙箱是否保持进程隔离、专属 partition、无 Node／宿主 FS／网络直连？身份是否由主机
    反查而非信任 sender 自报？
 2. 新能力是否先在 manifest 声明 slot、走同一套校验、在确认框如实展示后才由 host 授权？
-3. 网络是否限白名单域名、凭证无明文读回？附件／媒体／目录是否经归属校验的
+3. 运行授权是否只取自 Host receipt，而不是可变安装目录？无批准／损坏批准是否 fail
+   closed（列为停用、不许启用、不落技能链），且 UI 如实说明并给出重新确认入口？停用
+   方向是否无论环境如何都能成功？改了技能落链或快照时 `approvalStateRoot` 是否仍必填？
+4. 网络是否限白名单域名、凭证无明文读回？附件／媒体／目录是否经归属校验的
    grant／deposit／ledger 交接，未暴露宿主绝对路径？
-4. 内联凭证是否只走 trusted Desktop 专用 IPC，未登记 device-link？Main 是否重新校验
+5. 内联凭证是否只走 trusted Desktop 专用 IPC，未登记 device-link？Main 是否重新校验
    sender、request、revision、action、精确字段集合与 manifest 绑定，且没有把 Renderer
    字段 id 直接当作 Secret key／路径？保险库写失败是否不 emit，写成功后是否仍重新
    assessment，而不是把“提交完成”当作 ready？
-5. 改动是否命中作者可见契约（身份卡／管子／模型 slot／面板供片／打包）？命中就必须
+6. Forge（scaffold／pack）是否排除了 Host 受管根（安装根 + 批准状态根），且按 realpath
+   判定、挡住大小写与软链／junction 别名？
+7. 改动是否命中作者可见契约（身份卡／管子／模型 slot／面板供片／打包）？命中就必须
    同步 `FORGE_GUIDE` 并在 PR 说明；漏同步 = P1。
-6. 第 6 节的已知缺口是否被触及？触及是否一并修复或留了正式跟踪？
-7. 新增 IPC／推送是否需要远程／手机版？需要就登记 device-link 白名单与 topic 路由。
+8. 第 6 节的已知缺口是否被触及？触及是否一并修复或留了正式跟踪？
+9. 新增 IPC／推送是否需要远程／手机版？需要就登记 device-link 白名单与 topic 路由。
 
 最小验证入口：
 

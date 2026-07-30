@@ -13,6 +13,7 @@ import {
   GHOST_CARD_HEIGHT_MIN,
   GHOST_NETWORK_MAX_CONNECTIONS_PER_DECL,
   GHOST_NOTIFY_MIN_INTERVAL_MS,
+  isGhostInstallApprovalToken,
   ghostWebviewEntryPaths,
   isCindyAccountGhostId,
   isOfficialGhostId,
@@ -692,6 +693,15 @@ function migrateGhostKvOnRename(fromId: string, toId: string): void {
 /** 单轮对账:播种 → (有变化时)广播 + 首装停靠 + 常驻点火。 */
 async function reconcileBuiltinGhosts(reason: string): Promise<void> {
   const manager = getGhostManager();
+  await manager.runExclusiveMutation(() =>
+    reconcileBuiltinGhostsLocked(reason, manager),
+  );
+}
+
+async function reconcileBuiltinGhostsLocked(
+  reason: string,
+  manager: GhostManager,
+): Promise<void> {
   // 改名前置:用户自主状态(墓碑=卸载过 / .disabled=停用)随改名带到新 id,
   // 不能让"明确卸载/停用过"的用户在升级后被以新 id 重新装上并点亮(播种器
   // "用户自主权豁免"支柱)。墓碑:旧 id 有 → 给新 id 记墓碑并清掉旧墓碑
@@ -720,10 +730,11 @@ async function reconcileBuiltinGhosts(reason: string): Promise<void> {
       repoRootDir: brainRootDir(),
       identity: currentProvisionIdentity(),
       // 回收先熄灯沙箱再删目录(Windows 文件锁:运行中的电子脑可能占着句柄)。
-      beforeRemove: (id) => {
+      beforeRemove: async (id) => {
         getGhostRuntime().stop(id);
         getGhostNodeRuntimeBroker().stop(id);
         getGhostAgentSlot().clearGhost(id);
+        await manager.removeInstallApproval(id);
       },
       onApplyStart: () => {
         tipShown = true;
@@ -765,12 +776,35 @@ async function reconcileBuiltinGhosts(reason: string): Promise<void> {
       });
     }
   }
-  if (outcome.installed.length === 0 && outcome.updated.length === 0 && outcome.removed.length === 0) return;
+  let approvalChanged = false;
+  for (const manifest of outcome.approved) {
+    try {
+      approvalChanged =
+        (await manager.approveTrustedBundledInstall(
+          manifest,
+          !fs.existsSync(path.join(brainRootDir(), manifest.id, '.disabled')),
+        )) || approvalChanged;
+    } catch (err) {
+      log.warn('builtin ghost approval receipt failed', {
+        id: manifest.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  if (
+    outcome.installed.length === 0 &&
+    outcome.updated.length === 0 &&
+    outcome.removed.length === 0 &&
+    !approvalChanged
+  ) {
+    return;
+  }
   log.info('builtin ghost reconcile applied changes', {
     reason,
     installed: outcome.installed.map((m) => m.id),
     updated: outcome.updated.map((m) => m.id),
     removed: outcome.removed,
+    approvalChanged,
   });
   // 播种绕过 manager 写盘,广播由这里补上(renderer 首帧 sendSync 早于对账
   // 完成时,靠 ghosts:changed 热更新兜底,多窗口同一套通道)。
@@ -797,6 +831,7 @@ export function getGhostManager(): GhostManager {
   if (!managerSingleton) {
     managerSingleton = new GhostManager({
       getRootDir: brainRootDir,
+      getStateDir: () => ownerScopedUserDataPath('ghost-install-state'),
       onChanged: broadcastGhostsChanged,
       getLocale: getResolvedMainLocale,
       trustRegistry: loadGhostTrustRegistry(),
@@ -2429,6 +2464,8 @@ function throwInstallError(rejection: InstallRejection): never {
       throwIpcError('NOT_FOUND', rejection.reason);
     case 'command-conflict':
       throwIpcError('GHOST_COMMAND_CONFLICT', rejection.reason);
+    case 'state-changed':
+      throwIpcError('PRECONDITION_FAILED', rejection.reason);
     default:
       throwIpcError('INTERNAL', rejection.reason);
   }
@@ -2441,6 +2478,8 @@ function throwUninstallError(rejection: UninstallRejection): never {
       throwIpcError('INVALID_PARAMS', rejection.reason);
     case 'not-installed':
       throwIpcError('NOT_FOUND', rejection.reason);
+    case 'approval-required':
+      throwIpcError('PRECONDITION_FAILED', rejection.reason);
     default:
       throwIpcError('INTERNAL', rejection.reason);
   }
@@ -2494,6 +2533,7 @@ export async function installOrUpdateMarketGhostPackage(
   expected: {
     ghostId: string;
     version: string;
+    expectedInstalledApproval?: string;
   },
 ): Promise<InstalledGhost> {
   const mutationOwner = captureGhostMutationOwner();
@@ -2536,7 +2576,15 @@ export async function installOrUpdateMarketGhostPackage(
     getGhostAgentSlot().clearGhost(expected.ghostId);
     let result: Awaited<ReturnType<typeof manager.update>>;
     try {
-      result = await manager.update(cindyFilePath);
+      if (!expected.expectedInstalledApproval) {
+        throwIpcError(
+          'PRECONDITION_FAILED',
+          'Plugin approval state was not bound to the market update',
+        );
+      }
+      result = await manager.update(cindyFilePath, {
+        expectedInstalledApproval: expected.expectedInstalledApproval,
+      });
     } catch (error) {
       spawnIfResident(installed);
       throw error;
@@ -3535,13 +3583,25 @@ export function registerGhostIpc(): void {
     if (typeof lizFilePath !== 'string' || lizFilePath.trim().length === 0) {
       throwIpcError('INVALID_PARAMS', 'lizFilePath must be a non-empty string');
     }
-    const expectedPackageSha256 = (opts as { expectedPackageSha256?: unknown } | undefined)
-      ?.expectedPackageSha256;
+    const updateOptions = opts as
+      | {
+          expectedPackageSha256?: unknown;
+          expectedInstalledApproval?: unknown;
+        }
+      | undefined;
+    const expectedPackageSha256 = updateOptions?.expectedPackageSha256;
+    const expectedInstalledApproval = updateOptions?.expectedInstalledApproval;
     if (
       typeof expectedPackageSha256 !== 'string' ||
       !/^[a-f0-9]{64}$/.test(expectedPackageSha256)
     ) {
       throwIpcError('INVALID_PARAMS', 'expectedPackageSha256 must come from ghosts:inspect');
+    }
+    if (!isGhostInstallApprovalToken(expectedInstalledApproval)) {
+      throwIpcError(
+        'INVALID_PARAMS',
+        'expectedInstalledApproval must come from ghosts:list',
+      );
     }
     const inspected = await manager.inspect(lizFilePath);
     if ('rejection' in inspected) throwInstallError(inspected.rejection);
@@ -3556,7 +3616,10 @@ export function registerGhostIpc(): void {
     getGhostAgentSlot().clearGhost(inspected.manifest.id);
     let result: Awaited<ReturnType<typeof manager.update>>;
     try {
-      result = await manager.update(lizFilePath, { expectedPackageSha256 });
+      result = await manager.update(lizFilePath, {
+        expectedPackageSha256,
+        expectedInstalledApproval,
+      });
     } catch (err) {
       // 更新失败:恢复旧版本的常驻 Node 工作进程(如果是 resident 且已启用)
       if (previousGhost) spawnIfResident(previousGhost);
@@ -3612,7 +3675,14 @@ export function registerGhostIpc(): void {
     // 官方前缀在 inspect 就拒(确认弹窗都不该弹出来),install/update 双保险再拦。
     rejectReservedGhostId(result.manifest.id);
     rejectUnauthorizedTokenBroker(result.manifest);
-    return result;
+    return {
+      manifest: result.manifest,
+      trust: result.trust,
+      packageSha256: result.packageSha256,
+      ...(result.iconDataUrl !== undefined
+        ? { iconDataUrl: result.iconDataUrl }
+        : {}),
+    };
   });
 
   ipcMain.handle('ghosts:uninstall', async (_event, id: unknown) => {
@@ -3908,6 +3978,7 @@ function scheduleGhostSkillReconcile(): void {
           const result = await reconcileGhostSkillLinks({
             ghosts: getGhostManager().list(),
             brainRoot: brainRootDir(),
+            approvalStateRoot: getGhostManager().approvalStateRoot(),
           });
           if (result.warnings.length > 0) {
             log.warn('ghost skill reconcile warnings', { warnings: result.warnings });

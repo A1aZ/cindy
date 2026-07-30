@@ -5,7 +5,10 @@ import path from 'node:path';
 import JSZip from 'jszip';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { InstalledGhost } from '../../../shared/ghost';
+import {
+  ghostInstallApprovalToken,
+  type InstalledGhost,
+} from '../../../shared/ghost';
 import { GhostManager } from '../GhostManager';
 
 /** 每个用例独立的临时仓库根 + 源文件目录(规则 23:测试路径一律 os.tmpdir)。 */
@@ -76,11 +79,24 @@ async function makeCindy(
 }
 
 async function expectRejection(
-  result: Awaited<ReturnType<GhostManager['install']>>,
+  result: unknown,
   code: string,
 ): Promise<void> {
-  expect('rejection' in result, JSON.stringify(result)).toBe(true);
+  expect(
+    typeof result === 'object' && result !== null && 'rejection' in result,
+    JSON.stringify(result),
+  ).toBe(true);
   expect((result as { rejection: { code: string } }).rejection.code).toBe(code);
+}
+
+async function updateGhost(
+  cindyPath: string,
+  id = 'hello',
+): ReturnType<GhostManager['update']> {
+  const installed = manager.list().find((ghost) => ghost.manifest.id === id);
+  return manager.update(cindyPath, {
+    expectedInstalledApproval: ghostInstallApprovalToken(installed?.approval),
+  });
 }
 
 describe('GhostManager · install', () => {
@@ -129,7 +145,7 @@ describe('GhostManager · install', () => {
     });
   });
 
-  it('已安装 locale 或其父目录被替换为目录外软链时拒绝读取并回退基础清单', async () => {
+  it('installed locale symlinks cannot replace the Host-approved locale snapshot', async () => {
     hostLocale = 'en';
     const manifest = {
       ...goodManifest(),
@@ -155,9 +171,9 @@ describe('GhostManager · install', () => {
     }
 
     expect(manager.list()[0].manifest).toMatchObject({
-      name: 'Base name',
+      name: 'Packaged name',
       resolvedLocale: 'en',
-      tools: [{ name: 'do_thing', description: '做点事' }],
+      tools: [{ name: 'do_thing', description: 'Localized tool' }],
     });
 
     const localesDir = path.dirname(localePath);
@@ -171,7 +187,7 @@ describe('GhostManager · install', () => {
       process.platform === 'win32' ? 'junction' : 'dir',
     );
     expect(manager.list()[0].manifest).toMatchObject({
-      name: 'Base name',
+      name: 'Packaged name',
       resolvedLocale: 'en',
     });
   });
@@ -450,6 +466,234 @@ describe('GhostManager · list', () => {
   });
 });
 
+describe('GhostManager · Host approval receipt', () => {
+  const receiptPath = (id = 'hello') =>
+    path.join(workDir, 'ghosts-install-state', `${id}.json`);
+
+  /** 带 skill 槽的清单 + 配套包内文件(技能快照相关用例共用)。 */
+  const skillManifest = (): Record<string, unknown> => ({
+    ...goodManifest('skilled'),
+    slots: ['tool', 'skill'],
+    skill: {
+      items: [{ dir: 'skills/demo', name: 'demo', description: 'Demo skill' }],
+    },
+  });
+  const skillFiles = (): Record<string, string> => ({
+    'skills/demo/SKILL.md':
+      '---\nname: demo\ndescription: Demo skill\n---\n\nApproved instructions\n',
+  });
+
+  it('keeps manifest, enabled state, and trust independent from mutable install files', async () => {
+    await manager.install(await makeCindy('approved.cindy', goodManifest()));
+    const before = manager.list()[0];
+    expect(fs.existsSync(receiptPath())).toBe(true);
+    expect(path.dirname(receiptPath())).not.toBe(rootDir);
+
+    await fs.promises.writeFile(
+      path.join(rootDir, 'hello', 'ghost.json'),
+      JSON.stringify({
+        ...goodManifest(),
+        version: '99.0.0',
+        slots: ['node'],
+        node: { entry: 'evil.cjs', protocol: 'json-rpc-stdio' },
+      }),
+    );
+    await fs.promises.writeFile(path.join(rootDir, 'hello', '.disabled'), '');
+    await fs.promises.writeFile(
+      path.join(rootDir, 'hello', '.cindy-trust.json'),
+      JSON.stringify({
+        level: 'cindy-official',
+        publisherSigned: true,
+        publisherVerified: true,
+        reviewed: true,
+      }),
+    );
+
+    const after = manager.list()[0];
+    expect(after.manifest).toEqual(before.manifest);
+    expect(after.enabled).toBe(true);
+    expect(after.trust).toEqual(before.trust);
+    expect(after.approval.state).toBe('approved');
+  });
+
+  it('fails legacy and corrupt receipts closed until a fully reviewed update replaces them', async () => {
+    const legacyDir = path.join(rootDir, 'hello');
+    await fs.promises.mkdir(legacyDir, { recursive: true });
+    await fs.promises.writeFile(
+      path.join(legacyDir, 'ghost.json'),
+      JSON.stringify(goodManifest()),
+    );
+    await fs.promises.writeFile(path.join(legacyDir, 'main.js'), '// legacy');
+
+    expect(manager.list()[0]).toMatchObject({
+      enabled: false,
+      approval: { state: 'legacy-unapproved' },
+    });
+    await expectRejection(await manager.setEnabled('hello', true), 'approval-required');
+
+    const reviewed = await updateGhost(
+      await makeCindy('reviewed.cindy', { ...goodManifest(), version: '2.0.0' }),
+    );
+    expect(reviewed).toMatchObject({
+      ghost: {
+        manifest: { version: '2.0.0' },
+        approval: { state: 'approved' },
+      },
+    });
+
+    await fs.promises.writeFile(receiptPath(), '{ broken');
+    expect(manager.list()[0]).toMatchObject({
+      enabled: false,
+      approval: { state: 'invalid' },
+    });
+    await expectRejection(await manager.setEnabled('hello', true), 'approval-required');
+  });
+
+  it('rejects an update when the approved revision changed after review', async () => {
+    await manager.install(await makeCindy('v1.cindy', goodManifest()));
+    const staleApproval = ghostInstallApprovalToken(manager.list()[0].approval);
+    const v2 = await makeCindy('v2.cindy', {
+      ...goodManifest(),
+      version: '2.0.0',
+    });
+    const first = await manager.update(v2, {
+      expectedInstalledApproval: staleApproval,
+    });
+    expect(first).toMatchObject({ ghost: { manifest: { version: '2.0.0' } } });
+
+    const v3 = await makeCindy('v3.cindy', {
+      ...goodManifest(),
+      version: '3.0.0',
+    });
+    await expectRejection(
+      await manager.update(v3, {
+        expectedInstalledApproval: staleApproval,
+      }),
+      'state-changed',
+    );
+    expect(manager.list()[0].manifest.version).toBe('2.0.0');
+  });
+
+  it('removes the receipt and approved skill snapshots on uninstall', async () => {
+    const manifest = {
+      ...goodManifest('skilled'),
+      slots: ['tool', 'skill'],
+      skill: {
+        items: [{ dir: 'skills/demo', name: 'demo', description: 'Demo skill' }],
+      },
+    };
+    const cindy = await makeCindy('skill.cindy', manifest, {
+      'skills/demo/SKILL.md':
+        '---\nname: demo\ndescription: Demo skill\n---\n\nApproved instructions\n',
+    });
+    await manager.install(cindy);
+    const listed = manager.list()[0];
+    expect(listed.approvedSkillRoot).toBeTruthy();
+    expect(fs.existsSync(listed.approvedSkillRoot!)).toBe(true);
+
+    await manager.uninstall('skilled');
+    expect(fs.existsSync(receiptPath('skilled'))).toBe(false);
+    expect(fs.existsSync(listed.approvedSkillRoot!)).toBe(false);
+  });
+
+  it('treats receipt cleanup failure after content removal as a completed uninstall', async () => {
+    await manager.install(await makeCindy('approved.cindy', goodManifest()));
+    await fs.promises.rm(receiptPath());
+    await fs.promises.mkdir(receiptPath());
+    await fs.promises.writeFile(path.join(receiptPath(), 'blocked'), 'x');
+
+    const result = await manager.uninstall('hello');
+
+    expect(result).toEqual({ ok: true });
+    expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(false);
+    expect(manager.list()).toEqual([]);
+  });
+
+  it('keeps disabling possible when the approved skill snapshot is gone, and rebuilds it on enable', async () => {
+    await manager.install(await makeCindy('skill.cindy', skillManifest(), skillFiles()));
+    const snapshotRoot = manager.list()[0].approvedSkillRoot!;
+    // 外部把快照删掉:停用是安全方向,必须仍然成功,不能把插件卡在既不能用也不能关。
+    await fs.promises.rm(snapshotRoot, { recursive: true, force: true });
+
+    expect(await manager.setEnabled('skilled', false)).toEqual({ ok: true });
+    expect(manager.list()[0]).toMatchObject({
+      enabled: false,
+      approval: { state: 'approved' },
+    });
+
+    // 重新启用时从当前安装目录重建快照,不需要用户重新走一次确认。
+    expect(await manager.setEnabled('skilled', true)).toEqual({ ok: true });
+    const healed = manager.list()[0];
+    expect(healed.enabled).toBe(true);
+    expect(healed.approvedSkillRoot).toBe(snapshotRoot);
+    expect(
+      await fs.promises.readFile(path.join(snapshotRoot, 'skills', 'demo', 'SKILL.md'), 'utf8'),
+    ).toContain('Approved instructions');
+  });
+
+  it('refuses to rebuild an enable-time snapshot from install bytes that drifted from the approved manifest', async () => {
+    await manager.install(await makeCindy('skill.cindy', skillManifest(), skillFiles()));
+    const snapshotRoot = manager.list()[0].approvedSkillRoot!;
+    // 安装目录里的 SKILL.md 与批准 manifest 声明的 description 不再一致,快照也没了:
+    // 停用照样成功(安全方向),但重建快照必须拒——否则启用就等于批准一份用户
+    // 没看过的技能指令。
+    await fs.promises.writeFile(
+      path.join(rootDir, 'skilled', 'skills', 'demo', 'SKILL.md'),
+      '---\nname: demo\ndescription: Silently widened skill\n---\n\nTampered instructions\n',
+    );
+    await fs.promises.rm(snapshotRoot, { recursive: true, force: true });
+    expect(await manager.setEnabled('skilled', false)).toEqual({ ok: true });
+
+    await expectRejection(await manager.setEnabled('skilled', true), 'io');
+    expect(manager.list()[0].enabled).toBe(false);
+    expect(fs.existsSync(snapshotRoot)).toBe(false);
+  });
+
+  it('prunes skill snapshots left behind by superseded approval revisions', async () => {
+    await manager.install(await makeCindy('skill-v1.cindy', skillManifest(), skillFiles()));
+    const firstSnapshot = manager.list()[0].approvedSkillRoot!;
+    const snapshotParent = path.dirname(firstSnapshot);
+
+    await updateGhost(
+      await makeCindy(
+        'skill-v2.cindy',
+        { ...skillManifest(), version: '2.0.0' },
+        skillFiles(),
+      ),
+      'skilled',
+    );
+    const secondSnapshot = manager.list()[0].approvedSkillRoot!;
+
+    expect(secondSnapshot).not.toBe(firstSnapshot);
+    expect(await fs.promises.readdir(snapshotParent)).toEqual([
+      path.basename(secondSnapshot),
+    ]);
+  });
+
+  it('invalidates a receipt whose locale snapshot keys no longer match the manifest', async () => {
+    hostLocale = 'en';
+    const manifest = {
+      ...goodManifest(),
+      locales: { en: 'locales/en.json' },
+    };
+    await manager.install(
+      await makeCindy('localized.cindy', manifest, {
+        'locales/en.json': JSON.stringify({ name: 'Approved English name' }),
+      }),
+    );
+    const receipt = JSON.parse(
+      await fs.promises.readFile(receiptPath(), 'utf8'),
+    ) as Record<string, unknown>;
+    receipt.localeResources = {};
+    await fs.promises.writeFile(receiptPath(), JSON.stringify(receipt));
+
+    expect(manager.list()[0]).toMatchObject({
+      enabled: false,
+      approval: { state: 'invalid' },
+    });
+  });
+});
+
 describe('GhostManager · setEnabled(启用/停用)', () => {
   it('停用:目录里出现 .disabled 标记、list 报 enabled=false、onChanged 广播;启用即恢复', async () => {
     await manager.install(await makeCindy('a.cindy', goodManifest()));
@@ -562,13 +806,13 @@ describe('GhostManager · author / icon(身份卡展示字段)', () => {
     await expectRejection(await manager.install(cindy), 'file-invalid');
   });
 
-  it('已装意识的 icon 文件事后丢失 → list 降级为无图标,不影响意识本体', async () => {
+  it('installed icon removal cannot replace the Host-approved icon snapshot', async () => {
     const cindy = await makeCindy('icon2.cindy', iconManifest(), { 'assets/icon.png': 'PNGDATA' });
     await manager.install(cindy);
     await fs.promises.rm(path.join(rootDir, 'hello', 'assets', 'icon.png'));
     const listed = manager.list();
     expect(listed).toHaveLength(1);
-    expect(listed[0].iconDataUrl).toBeUndefined();
+    expect(listed[0].iconDataUrl).toBe('data:image/png;base64,UE5HREFUQQ==');
     expect(listed[0].manifest.author).toBe('Lizi');
   });
 
@@ -586,7 +830,7 @@ describe('GhostManager · update(原位换版)', () => {
     onChanged.mockClear();
 
     const v2 = await makeCindy('v2.cindy', { ...goodManifest(), version: '2.0.0' }, { 'new.txt': 'v2' });
-    const result = await manager.update(v2);
+    const result = await updateGhost(v2);
     expect('ghost' in result, JSON.stringify(result)).toBe(true);
     const { ghost } = result as { ghost: InstalledGhost };
     expect(ghost.manifest.version).toBe('2.0.0');
@@ -601,18 +845,18 @@ describe('GhostManager · update(原位换版)', () => {
 
   it('唤醒状态延续:沉睡中更新仍沉睡,唤醒中更新仍唤醒', async () => {
     await manager.install(await makeCindy('v1.cindy', goodManifest()), { initiallyEnabled: false });
-    const r1 = await manager.update(await makeCindy('v2.cindy', { ...goodManifest(), version: '2.0.0' }));
+    const r1 = await updateGhost(await makeCindy('v2.cindy', { ...goodManifest(), version: '2.0.0' }));
     expect((r1 as { ghost: InstalledGhost }).ghost.enabled).toBe(false);
     expect(fs.existsSync(path.join(rootDir, 'hello', '.disabled'))).toBe(true);
 
     await manager.setEnabled('hello', true);
-    const r2 = await manager.update(await makeCindy('v3.cindy', { ...goodManifest(), version: '3.0.0' }));
+    const r2 = await updateGhost(await makeCindy('v3.cindy', { ...goodManifest(), version: '3.0.0' }));
     expect((r2 as { ghost: InstalledGhost }).ghost.enabled).toBe(true);
     expect(fs.existsSync(path.join(rootDir, 'hello', '.disabled'))).toBe(false);
   });
 
   it('未装入 → not-installed 拒绝', async () => {
-    await expectRejection(await manager.update(await makeCindy('a.cindy', goodManifest())), 'not-installed');
+    await expectRejection(await updateGhost(await makeCindy('a.cindy', goodManifest())), 'not-installed');
   });
 
   it('指令查重豁免自己,但仍拦别人的指令', async () => {
@@ -620,15 +864,17 @@ describe('GhostManager · update(原位换版)', () => {
     await manager.install(await makeCindy('b.cindy', chipManifestWithCommand('beta', 'Paint')));
 
     // 自己沿用自己的指令 → 放行。
-    const keep = await manager.update(
+    const keep = await updateGhost(
       await makeCindy('a2.cindy', { ...chipManifestWithCommand('alpha', 'draw'), version: '2.0.0' }),
+      'alpha',
     );
     expect('ghost' in keep, JSON.stringify(keep)).toBe(true);
 
     // 新版本改用别人占用的指令 → 拒,且旧版原样在位。
     await expectRejection(
-      await manager.update(
+      await updateGhost(
         await makeCindy('a3.cindy', { ...chipManifestWithCommand('alpha', 'paint'), version: '3.0.0' }),
+        'alpha',
       ),
       'command-conflict',
     );
@@ -640,7 +886,7 @@ describe('GhostManager · update(原位换版)', () => {
     await manager.install(await makeCindy('v1.cindy', goodManifest()));
     const bad = path.join(workDir, 'bad.cindy');
     await fs.promises.writeFile(bad, 'nope');
-    await expectRejection(await manager.update(bad), 'file-invalid');
+    await expectRejection(await updateGhost(bad), 'file-invalid');
     expect(manager.list().find((g) => g.manifest.id === 'hello')?.manifest.version).toBe('1.0.0');
   });
 });

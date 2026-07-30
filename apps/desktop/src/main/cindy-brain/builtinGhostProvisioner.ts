@@ -106,6 +106,8 @@ export interface ProvisionDeps {
 }
 
 export interface ProvisionOutcome {
+  /** First-party seed manifests whose installed bytes reconciled successfully. */
+  approved: GhostManifest[];
   /** 本次首装的意识(装完默认唤醒;调用方负责停靠面板 + 广播 + 常驻点火)。 */
   installed: GhostManifest[];
   /** 本次覆盖更新的意识(`.disabled` 已保留;调用方负责广播)。 */
@@ -303,7 +305,13 @@ function readProvisioningConfig(
 export async function provisionBuiltinGhosts(deps: ProvisionDeps): Promise<ProvisionOutcome> {
   const { seedRootDirs, repoRootDir, log } = deps;
   const identity = deps.identity ?? null;
-  const outcome: ProvisionOutcome = { installed: [], updated: [], removed: [], skipped: [] };
+  const outcome: ProvisionOutcome = {
+    approved: [],
+    installed: [],
+    updated: [],
+    removed: [],
+    skipped: [],
+  };
 
   // 每根独立列种子 + 读配置。空根不读配置(未初始化 submodule 的目录里连
   // provisioning.json 都没有,读了必 warn,徒增噪音)。
@@ -386,6 +394,7 @@ export async function provisionBuiltinGhosts(deps: ProvisionDeps): Promise<Provi
           const seedHash = await hashDirContent(seedDir);
           const installedHash = await hashDirContent(installedDir);
           if (seedHash === installedHash) {
+            outcome.approved.push(manifest);
             outcome.skipped.push(id);
             continue;
           }
@@ -393,12 +402,14 @@ export async function provisionBuiltinGhosts(deps: ProvisionDeps): Promise<Provi
           markApplyStart();
           await swapInSeed(seedDir, installedDir, repoRootDir, id, { disabled: wasDisabled });
           seeded.add(id);
+          outcome.approved.push(manifest);
           outcome.updated.push(manifest);
           log?.info('builtin ghost updated to bundled content', { id, version: manifest.version });
         } else {
           markApplyStart();
           await swapInSeed(seedDir, installedDir, repoRootDir, id, { disabled: false });
           seeded.add(id);
+          outcome.approved.push(manifest);
           outcome.installed.push(manifest);
           log?.info('builtin ghost installed', { id, version: manifest.version });
         }

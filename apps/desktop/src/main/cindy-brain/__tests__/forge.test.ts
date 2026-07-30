@@ -47,6 +47,69 @@ async function makeSrcDir(files: Record<string, string>): Promise<string> {
 }
 
 describe('packGhostDir', () => {
+  it('rejects Host-managed roots, descendants, case aliases, and junction aliases', async () => {
+    const managedRoot = path.join(workDir, 'managed');
+    const installedDir = path.join(managedRoot, 'demo');
+    await fs.promises.mkdir(installedDir, { recursive: true });
+    await fs.promises.writeFile(
+      path.join(installedDir, 'ghost.json'),
+      JSON.stringify(GOOD_MANIFEST),
+    );
+    await fs.promises.writeFile(path.join(installedDir, 'main.js'), '// installed');
+
+    await expect(
+      packGhostDir(managedRoot, { forbiddenRootDirs: [managedRoot] }),
+    ).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'SOURCE_IS_INSTALLED_PLUGIN',
+    });
+    await expect(
+      packGhostDir(installedDir, { forbiddenRootDirs: [managedRoot] }),
+    ).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'SOURCE_IS_INSTALLED_PLUGIN',
+    });
+
+    if (process.platform === 'win32') {
+      await expect(
+        packGhostDir(installedDir.toUpperCase(), {
+          forbiddenRootDirs: [managedRoot.toLowerCase()],
+        }),
+      ).resolves.toMatchObject({
+        ok: false,
+        errorCode: 'SOURCE_IS_INSTALLED_PLUGIN',
+      });
+    }
+
+    const alias = path.join(workDir, 'installed-alias');
+    try {
+      await fs.promises.symlink(
+        installedDir,
+        alias,
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+    } catch {
+      return;
+    }
+    await expect(
+      packGhostDir(alias, { forbiddenRootDirs: [managedRoot] }),
+    ).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'SOURCE_IS_INSTALLED_PLUGIN',
+    });
+  });
+
+  it('allows an independent authoring directory outside managed roots', async () => {
+    const dir = await makeSrcDir({
+      'ghost.json': JSON.stringify(GOOD_MANIFEST),
+      'main.js': '// authoring source',
+    });
+    const result = await packGhostDir(dir, {
+      forbiddenRootDirs: [path.join(workDir, 'managed')],
+    });
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+  });
+
   it('happy path:产物落源码目录(id-version.cindy),且能被装入侧 inspect 认可', async () => {
     const dir = await makeSrcDir({
       'ghost.json': JSON.stringify(GOOD_MANIFEST),
@@ -335,6 +398,72 @@ describe('scaffoldGhostDir', () => {
     await expect(fs.promises.stat(invalid)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('拒绝把骨架落进 Host 受管根:根内、后代、大小写别名与 junction 别名都不行', async () => {
+    // 受管根恰好落在会话工作目录里(用户把 userData 当工作目录打开的情形):
+    // 工作目录检查放行,受管根检查必须接着挡住。
+    const managedRoot = path.join(workDir, 'cindy-brain');
+    const installedDir = path.join(managedRoot, 'demo');
+    await fs.promises.mkdir(installedDir, { recursive: true });
+    const scaffold = (dir: string, forbidden: readonly string[]) =>
+      scaffoldGhostDir(
+        { dir, template: 'plain', id: 'managed-demo', name: 'Managed demo' },
+        { sessionWorkdir: workDir, forbiddenRootDirs: forbidden },
+      );
+
+    expect(await scaffold(path.join(managedRoot, 'fresh'), [managedRoot])).toMatchObject({
+      ok: false,
+      errorCode: 'INVALID_INPUT',
+    });
+    expect(
+      await scaffold(path.join(installedDir, 'src'), [managedRoot]),
+    ).toMatchObject({ ok: false, errorCode: 'INVALID_INPUT' });
+    expect(fs.existsSync(path.join(installedDir, 'src'))).toBe(false);
+
+    // 状态根还没建出来也要挡住(首次装入前就该拒)。
+    const stateRoot = path.join(workDir, 'ghost-install-state');
+    expect(await scaffold(path.join(stateRoot, 'nested'), [stateRoot])).toMatchObject({
+      ok: false,
+      errorCode: 'INVALID_INPUT',
+    });
+
+    if (process.platform === 'win32') {
+      expect(
+        await scaffold(path.join(managedRoot.toUpperCase(), 'fresh'), [
+          managedRoot.toLowerCase(),
+        ]),
+      ).toMatchObject({ ok: false, errorCode: 'INVALID_INPUT' });
+    }
+
+    // junction/软链别名:字面在别处,realpath 落在受管根内。
+    const alias = path.join(workDir, 'managed-alias');
+    try {
+      fs.symlinkSync(installedDir, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    } catch {
+      return; // Windows 无特权时建不出夹具,守卫仍在
+    }
+    expect(await scaffold(path.join(alias, 'src'), [managedRoot])).toMatchObject({
+      ok: false,
+      errorCode: 'INVALID_INPUT',
+    });
+    expect(fs.existsSync(path.join(installedDir, 'src'))).toBe(false);
+  });
+
+  it('工作目录里的独立作者目录不受受管根禁区影响', async () => {
+    const dir = path.join(workDir, 'my-plugin');
+    expect(
+      await scaffoldGhostDir(
+        { dir, template: 'plain', id: 'my-plugin', name: 'My plugin' },
+        {
+          sessionWorkdir: workDir,
+          forbiddenRootDirs: [
+            path.join(workDir, 'cindy-brain'),
+            path.join(workDir, 'ghost-install-state'),
+          ],
+        },
+      ),
+    ).toMatchObject({ ok: true, dir });
+  });
+
   it('软链祖先把字面在工作目录内的路径引到外面 → 拒绝且外面不落盘', async () => {
     // Windows 无特权时目录软链可能 EPERM,建不出夹具就跳过(守卫仍在)。
     const outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-forge-outside-'));
@@ -362,6 +491,15 @@ describe('scaffoldGhostDir', () => {
 });
 
 describe('FORGE_GUIDE', () => {
+  it('documents installed-directory isolation and the structured refusal', () => {
+    expect(FORGE_GUIDE).toContain('已安装插件目录');
+    expect(FORGE_GUIDE).toContain('SOURCE_IS_INSTALLED_PLUGIN');
+    // 脚手架侧的同一禁区也要写进手册,否则 agent 会先把骨架建进安装目录再撞墙。
+    expect(FORGE_GUIDE).toContain('也不能落在已安装插件目录或 Host 状态目录内');
+    expect(FORGE_GUIDE).toContain('复制/迁出');
+    expect(FORGE_GUIDE).toContain('junction');
+  });
+
   it('分章体量守卫:每个 ## 章节须留在单次工具结果安全体量内(#890 分章投递的不变量)', () => {
     // 手册"随主机版本演进"持续增长;任一章越过单次 MCP 结果上限会静默复现 #890 于该章。
     // 上限取 32KB:当前最大章 ~22KB,余量 ~45%,越线即该拆小节。

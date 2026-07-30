@@ -905,6 +905,52 @@ describe('netlog 抓取(captureNetLogAround)', () => {
     expect(stopLogging).toHaveBeenCalledTimes(1);
   });
 
+  it('stop 超时不会锁死收尾:迟到成功的 start 仍会再尝试停止', async () => {
+    // 上一版一进 stopOnce 就把 stopped 置 true,于是 stop 超时后就再也不试了——
+    // 而 withDeadline 取消不了 Electron 侧操作,没停下的进程级抓包会继续录流量。
+    const gate = (() => {
+      let resolve!: () => void;
+      const promise = new Promise<void>((r) => {
+        resolve = r;
+      });
+      return { promise, resolve };
+    })();
+    let stopCalls = 0;
+    const stopLogging = vi.fn(async () => {
+      stopCalls += 1;
+      if (stopCalls <= 2) return new Promise(() => {}); // 前两次(有界重试)都不 settle
+      return undefined;
+    });
+
+    const file = await captureNetLogAround(
+      { startLogging: () => gate.promise, stopLogging },
+      "/tmp/n.json",
+      async () => {},
+      10,
+    );
+    expect(file).toBeNull(); // start 超时,本次放弃 netlog
+
+    gate.resolve(); // start 迟到成功 → 必须补一次 stop
+    await new Promise((r) => setTimeout(r, 60));
+    expect(stopCalls).toBeGreaterThanOrEqual(1);
+  });
+
+  it('stop 在预算内失败时有界重试(不无限试)', async () => {
+    let calls = 0;
+    const stopLogging = vi.fn(async () => {
+      calls += 1;
+      throw new Error('stop boom');
+    });
+    const file = await captureNetLogAround(
+      { startLogging: async () => {}, stopLogging },
+      "/tmp/n.json",
+      async () => {},
+      20,
+    );
+    expect(file).toBe("/tmp/n.json");
+    expect(calls).toBe(2); // NETLOG_STOP_ATTEMPTS
+  });
+
   it('stop 永不返回时不卡住,仍返回文件路径', async () => {
     const startedAt = Date.now();
     const file = await captureNetLogAround(
@@ -981,31 +1027,44 @@ describe('netlog 落盘路径(不得落到 cwd、不得用可预测名)', () => 
     expect(prepareEndpointNetLogFile(dir)).toBeNull();
   });
 
-  it('给出该目录下的绝对路径,且文件已被独占创建成常规文件', () => {
-    const file = prepareEndpointNetLogFile(logDir);
+  it('落在一个新建的私有子目录里(交接期路径不可被替换)', () => {
+    const file = prepareEndpointNetLogFile(logDir) as string;
     expect(file).not.toBeNull();
-    expect(path.isAbsolute(file as string)).toBe(true);
-    expect(path.dirname(file as string)).toBe(logDir);
-    // 先独占创建再交给 netLog:保证这个路径不是别人预置的 symlink / FIFO。
-    expect(fs.lstatSync(file as string).isFile()).toBe(true);
+    expect(path.isAbsolute(file)).toBe(true);
+
+    const captureDir = path.dirname(file);
+    // 不是直接落在日志目录里,而是落在我们刚原子创建的随机名子目录里。
+    expect(captureDir).not.toBe(logDir);
+    expect(path.dirname(captureDir)).toBe(logDir);
+    expect(path.basename(captureDir).startsWith('endpoint-netlog-')).toBe(true);
+    expect(fs.lstatSync(captureDir).isDirectory()).toBe(true);
+    // 文件本身刻意不预创建:交给 Chromium 在这个私有目录里建,
+    // 所以不存在「独占创建后 close、Chromium 再按名字打开」那段可替换窗口。
+    expect(fs.existsSync(file)).toBe(false);
   });
 
-  it('文件名不可预测(带 pid + 随机后缀),两次调用不同名', () => {
+  it('私有目录仅属主可访问(POSIX)', () => {
+    if (process.platform === 'win32') return; // Windows 权限模型不同,目录名随机仍有效
+    const file = prepareEndpointNetLogFile(logDir) as string;
+    expect(fs.statSync(path.dirname(file)).mode & 0o777).toBe(0o700);
+  });
+
+  it('目录名不可预测,两次调用不同目录', () => {
     const a = prepareEndpointNetLogFile(logDir) as string;
     const b = prepareEndpointNetLogFile(logDir) as string;
-    expect(path.basename(a)).not.toBe('endpoint-netlog.json');
-    expect(path.basename(a)).toContain(`endpoint-netlog.${process.pid}.`);
-    expect(a).not.toBe(b);
+    expect(path.dirname(a)).not.toBe(path.dirname(b));
   });
 
-  it('每次准备前清掉本前缀旧文件(唯一名不会无界堆积)', () => {
-    // 含上一版的固定名,升级后残留的那份也要被清掉。
-    fs.writeFileSync(path.join(logDir, 'endpoint-netlog.json'), 'old', 'utf8');
+  it('每次准备前清掉本前缀旧产物(旧目录 + 两个历史版本的文件名)', () => {
+    // 第一版固定名与第二版唯一名的残留都要被清掉,否则唯一名会无界堆积。
+    fs.writeFileSync(path.join(logDir, 'endpoint-netlog.json'), 'v1', 'utf8');
+    fs.writeFileSync(path.join(logDir, `endpoint-netlog.${process.pid}.abc123.json`), 'v2', 'utf8');
     const first = prepareEndpointNetLogFile(logDir) as string;
     const second = prepareEndpointNetLogFile(logDir) as string;
+
     const left = fs.readdirSync(logDir).filter((n) => n.startsWith('endpoint-netlog'));
-    expect(left).toEqual([path.basename(second)]);
-    expect(fs.existsSync(first)).toBe(false);
+    expect(left).toEqual([path.basename(path.dirname(second))]);
+    expect(fs.existsSync(path.dirname(first))).toBe(false);
   });
 
   it('目录不存在时返回 null,不抛错', () => {

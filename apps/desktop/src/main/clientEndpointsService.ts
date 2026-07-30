@@ -45,7 +45,6 @@
  * isDev 语义在此内联为 !app.isPackaged。
  */
 
-import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -611,6 +610,8 @@ function resolveDialogLocale(): EndpointManifestDialogLocale {
  * 所以每次用带 pid + 随机后缀的唯一名,并先独占创建成常规文件再交给 netLog。
  */
 const ENDPOINT_NETLOG_PREFIX = 'endpoint-netlog';
+/** 私有抓包目录内的文件名;目录名已经是随机的,这里不需要再随机。 */
+const ENDPOINT_NETLOG_FILE_NAME = 'capture.json';
 /** 诊断用的额外一次请求预算,比正常尝试短——用户已经在等弹框。 */
 const DIAGNOSIS_ATTEMPT_TIMEOUT_MS = 5_000;
 /**
@@ -619,6 +620,11 @@ const DIAGNOSIS_ATTEMPT_TIMEOUT_MS = 5_000;
  * "探针已经有超时"这件事白做了(review 抓到的正是这条剩余缺口)。
  */
 const NETLOG_STEP_TIMEOUT_MS = 3_000;
+/**
+ * stopLogging 的尝试次数(有界)。一次没停下的进程级抓包会继续录所有流量,所以值得再试
+ * 一次;但不能无限重试——那会把阻断框继续往后拖。
+ */
+const NETLOG_STOP_ATTEMPTS = 2;
 
 /**
  * 准备一个可以安全交给 `netLog.startLogging()` 的 netlog 文件路径。
@@ -628,12 +634,18 @@ const NETLOG_STEP_TIMEOUT_MS = 3_000;
  * process.cwd()——dev 下正是仓库工作区,既违反 credentials-and-local-storage.md 的落盘
  * 位置规则,还会在被 Git 跟踪的目录里留生成物。
  *
- * 拿到目录后做两件事:
- *  1. **先清掉本前缀的旧文件**。唯一名意味着不再自动覆盖同一份,不清理就会每次失败留一个
- *     新文件、在日志目录里无界堆积(reviewer 要求的 "clean up or rotate");
- *  2. 用 pid + 随机后缀生成唯一名,并以 `'wx'`(O_CREAT|O_EXCL)**独占创建**后立刻关闭。
- *     独占创建保证这个路径不是别人预置的 symlink / FIFO;交给 netLog 时它覆写的是我们
- *     刚建的常规文件。随机名让"先占位"这条路本身失效。
+ * 路径安全靠**私有子目录**,不是靠预创建文件(review 连着抓了两轮):
+ *  - 第一版用固定名 `endpoint-netlog.json`,别的进程能预置 symlink / FIFO;
+ *  - 第二版改成唯一名 + `'wx'` 独占创建,但 `wx` 只保护到 `closeSync` 返回 ——
+ *    Chromium 之后是**按路径名重新打开**的,这中间的 close-then-reopen 窗口里文件仍可
+ *    被换成 symlink / FIFO,而 deadline 取消不了 Chromium 那边的文件系统副作用;
+ *  - 现在用 `mkdtempSync` 开一个随机名、权限 0700 的**新目录**,netlog 落在它里面。
+ *    目录是我们刚原子创建的,攻击者既猜不到名字、也没法在里面预置任何东西,所以从
+ *    准备到 Chromium 打开的整个交接期都不存在可替换的路径;文件本身**不预创建**,
+ *    交给 Chromium 在这个私有目录里建。
+ *
+ * 每次准备前先清掉本前缀的旧产物(旧目录 + 两个历史版本留下的固定名/唯一名文件):
+ * 唯一名意味着不再自动覆盖同一份,不清理就会在日志目录里无界堆积。
  * 任何异常都返回 null(诊断是辅助,绝不能变成启动失败源)。
  */
 export function prepareEndpointNetLogFile(logDir: string | null): string | null {
@@ -641,25 +653,19 @@ export function prepareEndpointNetLogFile(logDir: string | null): string | null 
   if (!dir) return null;
   try {
     for (const name of fs.readdirSync(dir)) {
-      if (!name.startsWith(`${ENDPOINT_NETLOG_PREFIX}.`) && name !== `${ENDPOINT_NETLOG_PREFIX}.json`) {
-        continue;
-      }
+      if (!name.startsWith(ENDPOINT_NETLOG_PREFIX)) continue;
       try {
-        fs.rmSync(path.join(dir, name), { force: true });
+        fs.rmSync(path.join(dir, name), { recursive: true, force: true });
       } catch {
         // 删不掉旧的不影响本次抓取,最多多留一份。
       }
     }
   } catch {
-    // 目录列不出来(权限/竞态)不阻断:下面的独占创建仍然是安全的。
+    // 目录列不出来(权限/竞态)不阻断:下面的 mkdtemp 仍然是安全的。
   }
-  const file = path.join(
-    dir,
-    `${ENDPOINT_NETLOG_PREFIX}.${process.pid}.${randomBytes(6).toString('hex')}.json`,
-  );
   try {
-    fs.closeSync(fs.openSync(file, 'wx', 0o600));
-    return file;
+    const captureDir = fs.mkdtempSync(path.join(dir, `${ENDPOINT_NETLOG_PREFIX}-`));
+    return path.join(captureDir, ENDPOINT_NETLOG_FILE_NAME);
   } catch {
     return null;
   }
@@ -694,14 +700,34 @@ export async function captureNetLogAround(
   runWhileRecording: () => Promise<unknown>,
   stepTimeoutMs: number,
 ): Promise<string | null> {
+  // stopped 只在**确认停止**后置位。上一版一进函数就置 true,于是 stopLogging 超时或
+  // 抛错之后,后续路径(迟到成功的 start 补的那次收尾)全部直接 return —— 而
+  // withDeadline 取消不了 Electron 侧的操作,一次没停下的**进程级**抓包会继续记录
+  // 启动后的所有网络流量、文件无界增长(review 抓到的"收尾被锁死")。
   let stopped = false;
+  let stopping = false;
   const stopOnce = async (): Promise<void> => {
-    if (stopped) return;
-    stopped = true;
+    if (stopped || stopping) return;
+    stopping = true;
     try {
-      await withDeadline(netLogApi.stopLogging(), stepTimeoutMs, 'netlog-stop');
-    } catch (err) {
-      log.debug('netlog stopLogging did not settle: %s', String(err));
+      for (let attempt = 0; attempt < NETLOG_STOP_ATTEMPTS; attempt += 1) {
+        try {
+          await withDeadline(netLogApi.stopLogging(), stepTimeoutMs, 'netlog-stop');
+          stopped = true;
+          return;
+        } catch (err) {
+          log.debug(
+            'netlog stopLogging did not settle (attempt %d/%d): %s',
+            attempt + 1,
+            NETLOG_STOP_ATTEMPTS,
+            String(err),
+          );
+        }
+      }
+      // 两次都没停下:抓包可能还在跑,这比"收尾慢"严重,按 warn 记而不是 debug。
+      log.warn('netlog capture may still be running: stopLogging never settled');
+    } finally {
+      stopping = false;
     }
   };
 

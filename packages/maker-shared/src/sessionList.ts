@@ -158,6 +158,11 @@ export interface RemoteSessionListOptions {
    * 折叠会让被计入「查看全部 N 条」的其余 run 无法点开,故那里传 false 让每个 run 各自成行。
    */
   groupAutomations?: boolean;
+  /**
+   * 「尚未起名」会话的显示文案(已解析的 i18n 值)。不传则回落 workingDir → 「未命名会话」;
+   * 共享层刻意不兜中文串,见 {@link remoteSessionDisplayTitle}。
+   */
+  unnamedLabel?: string;
 }
 
 export function buildRemoteSessionSections(
@@ -185,6 +190,7 @@ export function buildRemoteSessionSections(
       options.pendingInteractionIndex?.get(session.id) ?? 0,
       options.messagePreviewIndex?.get(session.id) ?? sessionRowMessagePreview(session),
       options.liveActivityIndex?.get(session.id) ?? null,
+      options.unnamedLabel,
     ));
 
   const pinned = items.filter((item) => !!item.session.pinnedAt);
@@ -429,8 +435,14 @@ function buildDateSections(
  *
  * 空标题(非哨兵)保持既有兜底链 workingDir → 「未命名会话」不变。
  */
-export function remoteSessionDisplayTitle(session: RemoteSession, unnamedLabel: string): string {
-  if (isDefaultDraftSessionTitle(session.title)) return unnamedLabel;
+export function remoteSessionDisplayTitle(session: RemoteSession, unnamedLabel?: string): string {
+  if (isDefaultDraftSessionTitle(session.title)) {
+    // 调用方给了**已解析的 i18n 文案**就用它;没给则按「无标题」走既有兜底链
+    // (workingDir → '未命名会话'),即本 PR 之前的行为 —— 但无论如何都不把英文哨兵
+    // 原样显示出去。刻意不在共享层兜一个中文串:mobile 支持 en / ja / ko,那会让未接
+    // i18n 的调用方悄悄显示中文(PR #1031 review P1)。
+    return unnamedLabel || session.workingDir || '未命名会话';
+  }
   return automationDisplayTitle(session) || session.workingDir || '未命名会话';
 }
 
@@ -441,16 +453,15 @@ export function toRemoteSessionListItem(
   pendingInteractionCount = 0,
   messagePreview: string | null = null,
   liveActivity: RemoteSessionLiveActivity | null = null,
+  /** 「尚未起名」会话的显示文案,由调用方传已解析的 i18n 值(见 remoteSessionDisplayTitle)。 */
+  unnamedLabel?: string,
 ): RemoteSessionListItem {
   const lastActivityAt = session.userSendAt ?? session.updatedAt ?? session.createdAt;
   const scheduleInfo = scheduleIndex?.get(session.id) ?? fallbackScheduleInfo(session);
   const worktreeLabel = sessionWorktreeLabel(session);
   return {
     session,
-    // 本模块的展示文案整体是硬编码中文(相邻的 '未命名会话' / '置顶' / '活跃' 同理),
-    // 这里沿用同一现状,不在本 PR 里把整个模块 i18n 化(独立议题)。真正 i18n 化的调用方
-    // (mobile 的 sessionMenu)自己传 i18n 解析值,见 remoteSessionDisplayTitle。
-    title: remoteSessionDisplayTitle(session, '未命名对话'),
+    title: remoteSessionDisplayTitle(session, unnamedLabel),
     subtitle: [
       sessionCollaborationLabel(session),
       worktreeLabel,

@@ -1120,30 +1120,25 @@ export class AgentIslandService {
   }
 
   /**
-   * 会话元数据的**唯一写出口**:落 cache + 发布给灵动岛。
+   * 会话元数据的**唯一写出口**:落 cache + patch state + 发布。
    *
-   * 不变量:**cache 存原始标题,进 state 的标题必须先过显示投影**。
+   * 这里**只存原始标题**,不做本地化投影 —— 投影统一推迟到 {@link localizeDisplayState}
+   * (构建送给 native 的 payload 那一刻)。两个理由:
    *
-   *   - cache 必须是原始值 —— {@link ensureMetadata} 靠 `isPlaceholderSessionTitle(cached.title)`
-   *     判断「还没拿到权威标题、需要重拉」。若把本地化文案写进 cache,那个判定恒为 false,
-   *     权威标题永远不会再被加载。
-   *   - 进 state 的值必须是投影 —— state 直通 native,原样发布会在灵动岛上露出英文哨兵。
-   *
-   * 两条写入路径(metadata patch 与 cache-miss 加载)都必须走这里;此前只在读路径
-   * {@link hydrateMeta} 做了投影,cache-miss 那条仍把 `New Maker` 发给了 native
-   * (PR #1031 review P1)。
+   *   - `metadataCache` 必须是原始值 —— {@link ensureMetadata} 靠
+   *     `isPlaceholderSessionTitle(cached.title)` 判断「还没拿到权威标题、需要重拉」。
+   *     把本地化文案写进 cache 会让该判定恒为 false,权威标题永远不会再被加载。
+   *   - `state` 也必须是原始值 —— 否则切换应用语言时,`refreshLocalization()` 只重建
+   *     `state.strings` 并 republish,不会重新投影 metadata,灵动岛会一直显示旧语言的
+   *     兜底文案,直到下一次 metadata 事件才纠正(PR #1031 review P1)。存原始值 +
+   *     publish 时投影,切语言后的那次 republish 自然就是新语言,不需要任何重投影逻辑。
    */
   private commitMetadata(
     sessionId: string,
     meta: { title: string | null; workingDir: string | null; workspaceKind: string | null },
   ): void {
     this.metadataCache.set(sessionId, meta);
-    const patched = patchAgentIslandMetadata(this.state, {
-      sessionId,
-      ...meta,
-      title: localizePlaceholderSessionTitle(meta.title),
-    });
-    if (!patched) return;
+    if (!patchAgentIslandMetadata(this.state, { sessionId, ...meta })) return;
     this.publish();
   }
 
@@ -1151,7 +1146,8 @@ export class AgentIslandService {
     const cached = this.metadataCache.get(meta.sessionId);
     return {
       ...meta,
-      title: localizePlaceholderSessionTitle(cached?.title ?? null),
+      // 原始标题:投影只在 publish 构建 payload 时做(见 commitMetadata 的说明)。
+      title: cached?.title ?? null,
       workingDir: cached?.workingDir ?? meta.workingDir,
       workspaceKind: cached?.workspaceKind ?? meta.workspaceKind,
     };
@@ -1410,10 +1406,12 @@ export class AgentIslandService {
     }
 
     this.hiddenPublished = false;
-    const displayState = withAgentIslandConfig(
-      buildAgentIslandDisplayState(this.state, now),
-      this.soundSettings,
-      this.mascotSkin,
+    const displayState = this.localizeDisplayState(
+      withAgentIslandConfig(
+        buildAgentIslandDisplayState(this.state, now),
+        this.soundSettings,
+        this.mascotSkin,
+      ),
     );
     this.emitSessionActivityToRenderer();
     this.scheduleNextPublish(now);
@@ -1434,6 +1432,32 @@ export class AgentIslandService {
     )) {
       this.logNativeRendererUnavailable(displayState);
     }
+  }
+
+  /**
+   * 哨兵标题 → 本地化文案的**唯一投影点**:构建送给 native 的 payload 那一刻。
+   *
+   * 不变量:`metadataCache` 与 `state` 一律存**原始**标题,只有这里把哨兵换成兜底文案。
+   *
+   * 放在这里(而不是写 cache / 写 state 时)换来两个性质:
+   *   - **切语言即时生效**:`refreshLocalization()` 只重建 `strings` 再 publish,而 publish
+   *     每次都重新走本函数,所以那次 republish 自然带新语言 —— 不需要「本地化刷新时重投影
+   *     metadata」这类额外逻辑(PR #1031 review P1)。
+   *   - **判定不被污染**:`ensureMetadata` 仍能用 `isPlaceholderSessionTitle(cached.title)`
+   *     判断该不该重拉权威标题。
+   *
+   * 只投影哨兵;真实标题与 null 原样透传(null 由 native 走它自己的空标题分支)。
+   */
+  private localizeDisplayState(state: AgentIslandDisplayState): AgentIslandDisplayState {
+    if (!state.sessions.some((s) => isDefaultDraftSessionTitle(s.title))) return state;
+    return {
+      ...state,
+      sessions: state.sessions.map((session) =>
+        isDefaultDraftSessionTitle(session.title)
+          ? { ...session, title: t('ccAgent.common.unnamedSession') }
+          : session,
+      ),
+    };
   }
 
   private scheduleNextPublish(now: number): void {
@@ -2225,18 +2249,3 @@ function isPlaceholderSessionTitle(title: string | null): boolean {
   return normalized === '' || normalized === 'new maker' || normalized === 'untitled';
 }
 
-/**
- * 下发给灵动岛前把「尚未起名」的哨兵标题换成本地化文案。
- *
- * 会话的 title 列同时是哨兵(见 `@cindy/maker-shared/session-title`),必须保持英文
- * 字面量;native 侧拿到的是显示值,不做这层映射就会在灵动岛上直接露出 "New Maker"。
- *
- * 刻意**只映射裸哨兵**、不复用上面 `isPlaceholderSessionTitle` 的宽判定:那个函数
- * 服务于「缓存是否需要重新拉取」,把 `untitled` 和空串也算占位;拿它做显示映射会把
- * 用户手动改成 "Untitled" 的标题也顶掉。null / 空标题保持原样透传,由 native 走它
- * 自己既有的空标题分支(不改 null 语义)。
- */
-function localizePlaceholderSessionTitle(title: string | null): string | null {
-  if (!isDefaultDraftSessionTitle(title)) return title;
-  return t('ccAgent.common.unnamedSession');
-}

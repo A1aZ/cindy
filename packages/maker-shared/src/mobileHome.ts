@@ -116,6 +116,11 @@ export interface MobileHomeOptions {
   selectedDeviceId?: string | null;
   sessions: readonly MobileHomeSessionLike[];
   statusFilter?: RemoteSessionStatusFilter;
+  /**
+   * 「尚未起名」会话的显示文案(已解析的 i18n 值)。不传则回落 workingDir → 「未命名会话」;
+   * 共享层刻意不兜中文串,见 sessionList 的 remoteSessionDisplayTitle。
+   */
+  unnamedLabel?: string;
 }
 
 export function buildMobileHomePresentation({
@@ -129,6 +134,7 @@ export function buildMobileHomePresentation({
   selectedDeviceId = null,
   sessions,
   statusFilter = 'active',
+  unnamedLabel,
 }: MobileHomeOptions): MobileHomePresentation {
   // 设备身份归一化在管线源头对每个会话算出 canonicalDeviceId(写入字段,不改 deviceLinkDeviceId):
   // 后续设备筛选统计、matchesSelectedDevice 过滤、项目分组、概览、卡片 deviceId 全部按 canonicalDeviceId
@@ -163,6 +169,7 @@ export function buildMobileHomePresentation({
     // (sessionRowMessagePreview 读取),与 buildRemoteSessionSections 同一套兜底。
     messagePreviewIndex?.get(session.id) ?? sessionRowMessagePreview(session),
     liveActivityIndex?.get(session.id) ?? null,
+    unnamedLabel,
   ));
   const pinned = items.filter((item) => !!item.session.pinnedAt);
   const rest = items.filter((item) => !item.session.pinnedAt);

@@ -798,8 +798,10 @@ export default function HomeScreen() {
       selectedDeviceId,
       sessions: homeSessions,
       statusFilter,
+      // 未起名会话的显示文案:共享层不兜中文串,由这里给已解析的 i18n 值。
+      unnamedLabel: t('session.menu.unnamedTitle'),
     }),
-    [deviceModels, liveActivityIndex, messagePreviewIndex, pendingInteractionIndex, scheduleIndex, selectedDeviceId, homeSessions, statusFilter],
+    [deviceModels, liveActivityIndex, messagePreviewIndex, pendingInteractionIndex, scheduleIndex, selectedDeviceId, homeSessions, statusFilter, t],
   );
   const sections = useMemo(
     () => buildHomeSections(home, groupByProject, pinnedCollapsed),

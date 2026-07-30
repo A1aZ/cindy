@@ -108,20 +108,47 @@ describe('sessionList', () => {
     expect(sections[0].data[0].worktreeLabel).toBe('Worktree serene-lovelace');
   });
 
-  it('未起名会话显示本地化兜底,不回落工作目录路径', () => {
+  it('未起名会话用调用方给的本地化文案,不回落工作目录路径', () => {
     // 哨兵若按「无标题」处理,会回落 workingDir 把完整路径当标题显示,与 desktop 的
-    // 「未命名对话」不一致(PR #1031 review P1)。空标题(非哨兵)仍保持既有兜底链。
-    const sentinel = toRemoteSessionListItem(
-      session('s-sentinel', { title: 'New Maker', workingDir: '/Users/dash/Code/Cindy/cindy' }),
-      new Date('2026-01-01T00:10:00.000Z').getTime(),
-    );
-    expect(sentinel.title).toBe('未命名对话');
+    // 「未命名对话」不一致(PR #1031 review P1)。文案由调用方按当前 locale 传入 ——
+    // 共享层不能兜中文串,mobile 还支持 en / ja / ko。
+    const now = new Date('2026-01-01T00:10:00.000Z').getTime();
+    const sentinel = session('s-sentinel', {
+      title: 'New Maker',
+      workingDir: '/Users/dash/Code/Cindy/cindy',
+    });
 
+    expect(
+      toRemoteSessionListItem(sentinel, now, undefined, 0, null, null, '未命名对话').title,
+    ).toBe('未命名对话');
+    // 同一条会话换 locale → 换文案(锁住「不在共享层写死中文」)。
+    expect(
+      toRemoteSessionListItem(sentinel, now, undefined, 0, null, null, 'Untitled session').title,
+    ).toBe('Untitled session');
+    // 调用方没给文案时回落既有链(workingDir),而不是悄悄显示中文。
+    expect(toRemoteSessionListItem(sentinel, now).title).toBe('/Users/dash/Code/Cindy/cindy');
+
+    // 空标题(非哨兵)不受影响,仍走既有兜底链。
     const emptyTitle = toRemoteSessionListItem(
       session('s-empty', { title: '', workingDir: '/Users/dash/Code/Cindy/cindy' }),
-      new Date('2026-01-01T00:10:00.000Z').getTime(),
+      now,
+      undefined,
+      0,
+      null,
+      null,
+      '未命名对话',
     );
     expect(emptyTitle.title).toBe('/Users/dash/Code/Cindy/cindy');
+  });
+
+  it('buildRemoteSessionSections 把 unnamedLabel 透传到列表行', () => {
+    // 设备详情页与首页都经 options 传 locale 文案;漏传就会在 en/ja/ko 下露出中文或路径。
+    const [section] = buildRemoteSessionSections(
+      [session('s-sentinel', { title: 'New Maker', workingDir: '/repo' })],
+      new Date('2026-01-01T00:10:00.000Z').getTime(),
+      { unnamedLabel: 'Untitled session' },
+    );
+    expect(section.data[0].title).toBe('Untitled session');
   });
 
   it('builds compact display metadata for a session row', () => {

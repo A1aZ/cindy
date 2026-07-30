@@ -1263,8 +1263,19 @@ export function NewMakerDraftRoute() {
       if (deviceChanged || workingDirChanged) stripProjectRelativeMentions();
       if (deviceChanged) dropPathBackedAttachments();
 
-      // 指向某台设备之前一律作废它的三个无 TTL 快照。对「回落本机」(deviceId=null)是 no-op。
-      if (req.deviceId) {
+      // 作废那三个无 TTL 快照 —— 但**不是**「指向设备就做」(Codex review 第 30 轮 P1,我上一轮
+      // 收敛时写错的条件)。evict 不是幂等清理,而是一次**有副作用的状态转移**:它 notify
+      // `{ status: 'loading' }` 让已挂载的 hook 立刻进入加载态,必须有配对的 fetch 才能收敛。
+      // 而 useAgentCapabilities / useDeviceProviders 的 effect deps 是 `[agentKind, deviceId]`,
+      // **不含项目** —— 于是同一台设备上换个项目时 evict 之后没有任何东西会去重拉:
+      // capabilitiesLoading 永久为真,send / goal 的三重 gate 永久拒绝创建,用户必须切设备或
+      // 重进路由才能恢复。这是功能完全阻塞。
+      //
+      // 正确的触发条件是「指向一台**新**设备」,或「用户主动重新验证了这台设备」——
+      // 后者恰好等价于 remoteSnapshot 存在:只有设备域浏览器那条路径会带它,而它为了验证可达
+      // 本来就 inline 拉过新的 capabilities / defaults,并在本动作之后紧接着 prefetch 补回 hook 缓存。
+      // 换项目本身不改变那台设备的能力目录,所以工作区 picker 这条路径不该 evict。
+      if (req.deviceId && (deviceChanged || req.remoteSnapshot)) {
         evictDeviceCapabilities(req.deviceId);
         evictDeviceProviders(req.deviceId);
         evictDeviceGitSafetySettings(req.deviceId);

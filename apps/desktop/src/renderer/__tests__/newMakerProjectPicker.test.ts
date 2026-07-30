@@ -62,6 +62,11 @@ const controllableDevicesHookSource = readFileSync(
   'utf8',
 );
 
+const deviceProvidersHookSource = readFileSync(
+  resolve(__dirname, '..', 'hooks', 'useDeviceProviders.ts'),
+  'utf8',
+);
+
 const agentCapabilitiesHookSource = readFileSync(
   resolve(__dirname, '..', 'hooks', 'useAgentCapabilities.ts'),
   'utf8',
@@ -836,8 +841,9 @@ describe('Shared create project picker', () => {
     );
     // 路径型附件存**绝对**路径 → 只有换设备才失效,同机换项目不该丢用户的附件。
     expect(body).toContain('if (deviceChanged) dropPathBackedAttachments();');
-    // 三个无 TTL 快照绑**目标**设备:指过去之前一律作废(回落本机时 req.deviceId 为 null → no-op)。
-    expect(body).toContain('if (req.deviceId) {');
+    // 三个无 TTL 快照:绑「指向一台**新**设备」或「用户主动重新验证了这台设备」,
+    // **不是**「指向设备就作废」—— 详见下面 does not evict… 那条用例的机制说明。
+    expect(body).toContain('if (req.deviceId && (deviceChanged || req.remoteSnapshot)) {');
     expect(body).toContain('evictDeviceCapabilities(req.deviceId);');
     // worktree 三态绑 (设备, 项目) 二元组 = 绑 repo。
     expect(body).toContain('if (deviceChanged || workingDirChanged) {');
@@ -851,11 +857,13 @@ describe('Shared create project picker', () => {
   // effect 虽因 deviceId 变化重跑,却直接命中旧缓存,composer 会向它提交已不支持的 model /
   // provider。**每一条**把草稿指向某台被控设备的路径都必须先 evict。
   it('evicts the target device snapshots on every path that points the draft at a device', () => {
-    // 本路由的三条转移路径现在共用一处 evict —— 它绑「目标设备」,所以只要走了转移动作就一定做到。
+    // 本路由的转移路径共用一处 evict;条件见下一条用例(不是「指向设备就作废」)。
     const action = newMakerDraftRouteSource.slice(
       newMakerDraftRouteSource.indexOf('const applyDraftTarget = useCallback('),
     );
-    const evictBlock = action.slice(action.indexOf('if (req.deviceId) {'));
+    const evictBlock = action.slice(
+      action.indexOf('if (req.deviceId && (deviceChanged || req.remoteSnapshot)) {'),
+    );
     expect(evictBlock.slice(0, evictBlock.indexOf('      }'))).toContain(
       'evictDeviceCapabilities(req.deviceId);',
     );
@@ -880,6 +888,46 @@ describe('Shared create project picker', () => {
     expect(sidebarUpperSource).toContain(
       'evictDeviceGitSafetySettings(project.deviceLinkDeviceId);',
     );
+  });
+
+  /**
+   * #807 review 第 30 轮 P1 —— 这是**上一轮收敛时我自己引入的回归**,而全量门禁 54 PASS 没抓到:
+   * 那时的断言只锁「有没有 evict」,不锁**触发条件**。
+   *
+   * 机制:evict 不是幂等清理,而是一次有副作用的状态转移 —— `evictDeviceCapabilities` /
+   * `evictDeviceProviders` 都会 notify `{ status: 'loading' }`(为了让已挂载的 hook 立刻知道旧
+   * 快照失效,否则 provider 新快照先到时会拿旧 capabilities 算 fallback 并覆盖用户偏好)。
+   * 它必须有配对的 fetch 才能收敛,而两个 hook 的 effect deps 是 `[agentKind, deviceId]`、
+   * **不含项目** —— 于是同一台设备上换个项目时,evict 之后没有任何东西会去重拉:
+   * `capabilitiesLoading` 永久为真,send / New Goal 的三重 gate 永久拒绝创建,用户必须切设备
+   * 或重进路由才能恢复。功能完全阻塞。
+   *
+   * 所以这条同时钉住上游那个**事实**(evict 会 notify loading)与下游那条**规则**(因此需要配对
+   * fetch):任何一端被改动都会在这里失败,而不是等到用户发不出消息。
+   */
+  it('does not evict same-device snapshots when only the workspace changes', () => {
+    // 上游事实:evict 会把已挂载的 hook 推进 loading 态。
+    expect(agentCapabilitiesHookSource).toContain(
+      "notifyRemoteCapabilities(deviceId, agentKind, { status: 'loading' });",
+    );
+    expect(deviceProvidersHookSource).toContain(
+      "notifyDeviceProviders(deviceId, { status: 'loading' });",
+    );
+    // 上游事实:fetch effect 只按 (agentKind, deviceId) 重跑,换项目不会触发它。
+    expect(agentCapabilitiesHookSource).toContain('}, [agentKind, deviceId]);');
+    expect(deviceProvidersHookSource).toContain('}, [deviceId]);');
+    // 下游规则:因此只在「换了设备」或「调用方已带来新快照并会紧接着 prefetch」时才 evict。
+    const action = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const applyDraftTarget = useCallback('),
+    );
+    expect(action).toContain('if (req.deviceId && (deviceChanged || req.remoteSnapshot)) {');
+    // 工作区 picker 这条路径既不换设备也不带快照 → 必然不 evict。
+    const handler = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const handleWorkingDirChange = useCallback('),
+    );
+    const body = handler.slice(0, handler.indexOf('    [applyDraftTarget'));
+    expect(body).not.toContain('remoteSnapshot');
+    expect(body).not.toContain('evictDevice');
   });
 
   // #807 review 第二十轮:归属钉子只解决路由,首条消息的交接还要求 SessionView 拿到一条会话行

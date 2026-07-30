@@ -1372,13 +1372,16 @@ export class AgentInputCoordinator {
       }
       state.pendingQueue.unshift(item);
       this.prependPendingCompactWaitClientId(state, item.clientId);
+      // 「用户显式重试」信号 —— **只在 active-turn recovery 上发**。这一支重试的是
+      // 那个真正跑起来又失败的 turn, 所以它可能正是渠道那条消息线的延续: 有产出走
+      // 续跑指令、零产出走克隆重发, 但对回流而言意图相同。
+      // queue-head recovery 刻意不发: 那条消息在**派发前**就失败了(它自己从未成为
+      // 一个 turn), 与之前失败的 hook turn 无关。同一会话若还留着上一次渠道失败的
+      // 待续跑记账, 在那上面发信号会让一条无关的排队桌面消息认领并改写那条旧消息。
+      this.deps.onUiRetry?.(sessionId);
     }
     this.touchUserSend(sessionId);
     this.emit(sessionId);
-    // 「用户显式重试」信号: 两条分支都发 —— 有产出走续跑指令、零产出走克隆重发,
-    // 但对渠道回流而言意图完全相同(把这一轮接回那条已收口的消息)。放在这里而非
-    // 上面的分支内, 是因为 queue-head 重试同样是用户点的同一个按钮。
-    this.deps.onUiRetry?.(sessionId);
     this.scheduleDrain(sessionId, 'retry');
     this.scheduleExternalTurnRetryIfNeeded(sessionId, state, 'retry');
     return this.getProjection(sessionId);

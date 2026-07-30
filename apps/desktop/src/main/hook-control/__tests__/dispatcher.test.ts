@@ -2273,6 +2273,39 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     expect(cr.watches).toHaveLength(0);
   });
 
+  it('已认领的续跑轮在其连接断开时被撤掉 -> 重连后不再用 stale id 发帧', async () => {
+    // 断连是续跑回流的终局: server 此刻收口那条消息并解绑这一轮的 requestId。
+    // 观察器若活到重连后, progress / turn.end 会带着已解绑的 id 发到新 socket
+    // (dispatchId 在重连间稳定, 所以真发得出去), 更糟的是 error 收口还会把这个
+    // stale id 登记成下一轮的 reopenOf。
+    const { cr, sig, c, d, sessionId } = await failOneTask();
+    sig.fire(sessionId);
+    await tick();
+    cr.latest().onClaim();
+    const reopened = c.last('turn.reopen')!.payload.requestId;
+    expect(cr.cancels).toHaveLength(0);
+
+    d.onDisconnected('conn-1');
+    // 撤销即收口 -> 观察器被取消(cancels 记录了它)。
+    expect(cr.cancels).toHaveLength(1);
+
+    // 重连后即使那一轮还想发东西, 也不该再有帧带着 stale id 出去。
+    d.onConnected('conn-1', c.send, REOPEN_FEATURES);
+    cr.latest().onProgress('迟到的进度');
+    cr.latest().onEnd({ status: 'error', finalText: '', errorMessage: '又崩了', durationMs: 3 });
+    await tick();
+    expect(c.ofType('turn.progress').filter((m) => m.payload.requestId === reopened)).toHaveLength(
+      0,
+    );
+    expect(c.ofType('turn.end').filter((m) => m.payload.requestId === reopened)).toHaveLength(0);
+
+    // 也不该把这个已被 server 解绑的 id 记成下一轮的 reopenOf。
+    const reopensBefore = c.ofType('turn.reopen').length;
+    sig.fire(sessionId);
+    await tick();
+    expect(c.ofType('turn.reopen')).toHaveLength(reopensBefore);
+  });
+
   it('dispose() 退订信号源(不只是清记账)', async () => {
     // 直接断言订阅数, 不看下游行为: dispose 同时清了 pendingReopens, 只看
     // "有没有起观察" 的话, 即使退订漏了也照样为 0 —— 那样这条锁就是假的。

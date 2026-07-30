@@ -2050,6 +2050,35 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(h.onUiRetry).not.toHaveBeenCalled();
   });
 
+  it('does not signal a UI retry for queue-head recovery (never became a turn)', async () => {
+    // queue-head 的那条消息在**派发前**就失败了, 与之前失败的 hook turn 无关。
+    // 在它上面发信号会让一条无关的排队桌面消息认领并改写渠道那条旧消息。
+    const h = createHarness();
+    const sid = 'retry-signal-queue-head';
+    const lookupStarted = deferred<void>();
+    const lookup = deferred<string | undefined>();
+    h.getSdkSessionId.mockImplementationOnce(async () => {
+      lookupStarted.resolve();
+      return lookup.promise;
+    });
+
+    // 会话在派发前被关闭 -> 队头消息回到队列并留下 queue-head recovery。
+    h.coordinator.enqueue(sid, makeItem('q-first', 'first'));
+    await lookupStarted.promise;
+    h.coordinator.onSessionClosed(sid);
+    lookup.resolve('sdk-session');
+    await flush();
+
+    expect(h.sendToAgent).not.toHaveBeenCalled();
+    expect(latestProjection(h.projections).recovery).toEqual({
+      kind: 'queue-head',
+      clientId: 'q-first',
+    });
+    await h.coordinator.retryLastError(sid);
+    await flush();
+    expect(h.onUiRetry).not.toHaveBeenCalled();
+  });
+
   it('queue-head retry never substitutes the continue prompt and redrains the original head', async () => {
     const h = createHarness();
     const sid = 'retry-continue-queue-head';

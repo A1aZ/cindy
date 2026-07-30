@@ -302,9 +302,17 @@ export async function hashApprovedSkillContent(
       });
       for (const entry of entries) {
         const relativePath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
-        if (entry.isDirectory()) {
+        // 逐条 lstat 而不是信 Dirent 的类型位:当前 libuv 把 reparse point(软链与
+        // Windows junction)都报成 link,但那是实现细节、Node 公开契约没保证。判据
+        // 自己拿 lstat 说话,链接一律显式拒 —— 否则哪天类型位把 junction 报成
+        // directory,这里就会跟进去把技能目录之外的字节算进批准指纹。
+        const entryStat = await fs.promises.lstat(path.join(itemRoot, relativeDir, entry.name));
+        if (entryStat.isSymbolicLink()) {
+          throw new Error(`approved skill rejects link entry: ${item.dir}/${relativePath}`);
+        }
+        if (entryStat.isDirectory()) {
           await collect(relativePath);
-        } else if (entry.isFile()) {
+        } else if (entryStat.isFile()) {
           files.push(relativePath);
         } else {
           throw new Error(`approved skill rejects non-regular entry: ${item.dir}/${relativePath}`);
@@ -455,9 +463,15 @@ async function copyRegularDirectory(source: string, target: string): Promise<voi
   for (const entry of entries) {
     const from = path.join(source, entry.name);
     const to = path.join(target, entry.name);
-    if (entry.isDirectory()) {
+    // 判据与 hashApprovedSkillContent 同形:逐条 lstat、链接显式拒,不依赖 Dirent
+    // 的类型位。两侧必须同形,否则指纹算的和快照拷的可能不是同一组字节。
+    const entryStat = await fs.promises.lstat(from);
+    if (entryStat.isSymbolicLink()) {
+      throw new Error(`skill snapshot rejects link entry: ${from}`);
+    }
+    if (entryStat.isDirectory()) {
       await copyRegularDirectory(from, to);
-    } else if (entry.isFile()) {
+    } else if (entryStat.isFile()) {
       await fs.promises.copyFile(from, to, fs.constants.COPYFILE_EXCL);
     } else {
       throw new Error(`skill snapshot rejects non-regular entry: ${from}`);

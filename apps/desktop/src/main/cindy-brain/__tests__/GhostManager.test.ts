@@ -729,6 +729,44 @@ describe('GhostManager · Host approval receipt', () => {
     expect(fs.existsSync(snapshotRoot)).toBe(false);
   });
 
+  it('refuses to follow a link planted inside the skill directory when rebuilding', async () => {
+    await manager.install(await makeCindy('skill.cindy', skillManifest(), skillFiles()));
+    const snapshotRoot = manager.list()[0].approvedSkillRoot!;
+    const outside = path.join(workDir, 'outside-skill');
+    await fs.promises.mkdir(outside, { recursive: true });
+    await fs.promises.writeFile(path.join(outside, 'leak.txt'), 'bytes from outside the skill dir');
+    // Windows junction 不需要管理员权限即可创建,是本平台成本最低的一条"把技能目录
+    // 之外的字节拉进批准快照"的路子。判据不能建立在 Dirent 类型位的实现细节上,
+    // 所以这条用例把行为钉住:planted link 一律拒,快照不落地。
+    try {
+      await fs.promises.symlink(
+        outside,
+        path.join(rootDir, 'skilled', 'skills', 'demo', 'linked'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+    } catch {
+      return; // 该环境建不了链接(无权限),跳过;判定逻辑与其他平台同源。
+    }
+    await fs.promises.rm(snapshotRoot, { recursive: true, force: true });
+    expect(await manager.setEnabled('skilled', false)).toEqual({ ok: true });
+
+    await expectRejection(await manager.setEnabled('skilled', true), 'io');
+    expect(manager.list()[0].enabled).toBe(false);
+    expect(fs.existsSync(snapshotRoot)).toBe(false);
+    // 状态根里不该出现任何来自技能目录之外的字节(含崩溃残留的 .tmp)。
+    const stateRoot = manager.approvalStateRoot();
+    const leaked: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const child = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(child);
+        else if (entry.name === 'leak.txt') leaked.push(child);
+      }
+    };
+    if (fs.existsSync(stateRoot)) walk(stateRoot);
+    expect(leaked).toEqual([]);
+  });
+
   it('still heals a deleted snapshot when the installed skill bytes are untouched', async () => {
     await manager.install(await makeCindy('skill.cindy', skillManifest(), skillFiles()));
     const snapshotRoot = manager.list()[0].approvedSkillRoot!;

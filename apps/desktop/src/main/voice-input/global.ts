@@ -1476,7 +1476,19 @@ async function setVoiceInputGlobalShortcut(shortcut: VoiceInputShortcut | null):
       return { ok: false, error: 'Function/modifier voice input shortcuts are only available on macOS.' };
     }
     const nativeShortcutKey = stableVoiceInputShortcutKey(shortcut);
-    if (registeredNativeShortcutKey === nativeShortcutKey && macModifierShortcutListener.isRunning()) {
+    // 复用已注册的那次要求**已就绪**,不是「进程在跑」。scheduleRestart 起的替补不经过
+    // setShortcut,所以 registeredNativeShortcutKey 一直是旧值:替补还没报 ready 时用 isRunning
+    // 判断就会在这里返回成功,而此刻没人在监听。两处后果:
+    //
+    // - 调用方(renderer)被告知快捷键是活的;
+    // - handler 会据此 clearPendingShortcutRecoveryFailure() 把持久失败态清掉。而替补及其重试
+    //   全失败时只写日志、**不会**重新发布失败态(scheduleRestart 耗尽重试那一支),于是快捷键
+    //   静静地不工作,唯一能提示用户的那条通知也被提前擦掉了。
+    //
+    // 落到这里之后走 setShortcut:child 还在但没就绪时它会等那次启动的真实落点
+    // （MacModifierShortcutListener.awaitInFlightChild）,所以这里不会凭空多 spawn 一个 helper。
+    // 兜底恢复的 pendingNativeShortcutRecoveryTarget 用的也是 isReady,两条路口径至此一致。
+    if (registeredNativeShortcutKey === nativeShortcutKey && macModifierShortcutListener.isReady()) {
       return { ok: true };
     }
     const result = await startMacNativeListener(() => macModifierShortcutListener.setShortcut(shortcut));

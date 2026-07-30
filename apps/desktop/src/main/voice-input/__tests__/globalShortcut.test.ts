@@ -263,7 +263,11 @@ describe('voice input global shortcut registration', () => {
     mocks.modifierIsRunning.mockReturnValue(true);
     // 默认「已就绪」:既有用例断言的是正常运行态。
     mocks.modifierIsReady.mockReset();
-    mocks.modifierIsReady.mockReturnValue(true);
+    // 真实实现是 `ready && isRunning()`,所以默认让它跟着 isRunning —— 固定成 true 的话用例能
+    // 造出「没在跑却已就绪」这种真机上不存在的状态,断言就会测到一条不存在的路径(复用条件从
+    // isRunning 改成 isReady 时正是这个 mock 让新用例假绿)。要单独表达「进程在、还没报 ready」
+    // 的用例照旧显式覆盖它。
+    mocks.modifierIsReady.mockImplementation(() => mocks.modifierIsRunning() as boolean);
     mocks.modifierStop.mockClear();
     mocks.modifierReleaseShortcut.mockClear();
     mocks.modifierStartKeyCapture.mockReset();
@@ -914,6 +918,59 @@ describe('voice input global shortcut registration', () => {
         await mocks.handlers.get('voice-input:global-shortcut:set')?.(mocks.recordingEvent, bareRightOption);
 
         expect(mocks.modifierSetShortcut).toHaveBeenCalledWith(bareRightOption);
+      });
+
+      // scheduleRestart 起的替补不经过 setShortcut, 所以 registeredNativeShortcutKey 一直是旧值。
+      // 复用条件只看「进程在跑」的话, 替补还没报 ready 时一次对得上存盘的同步就会被判成功, 于是
+      // 持久失败态被清掉 —— 而替补及其重试全失败时只写日志、不会重新发布失败态, 用户就只剩一个
+      // 静静不工作的快捷键。
+      it('keeps the recovery failure when a matching sync arrives before the restarted listener is ready', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: true, status: 'granted' });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        // 先成功注册一次, 让 registeredNativeShortcutKey 与存盘对上。
+        mocks.modifierIsRunning.mockReturnValue(false);
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
+
+        // helper 挂了、兜底恢复也没救回来 → 记下持久失败态。
+        mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'spawn ENOENT' });
+        await focusWindow();
+        const consume = mocks.handlers.get('voice-input:consume-shortcut-recovery-failure');
+
+        // 替补被 scheduleRestart 拉起来了: 进程在, 但还没报 ready。此刻来一次对得上存盘的同步。
+        mocks.modifierIsRunning.mockReturnValue(true);
+        mocks.modifierIsReady.mockReturnValue(false);
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
+
+        // 关键: 失败态还在, 那条「重启 Cindy 再试」的提示不能凭一个未就绪的替补被擦掉。
+        expect(consume?.(mocks.settingsEvent)).toEqual({ failed: true });
+      });
+
+      // 防止把上面那条修成「永远不清」: 替补真的就绪之后, 对得上存盘的同步照旧要清掉失败态,
+      // 否则用户会一直看到一条早已过期的错误提示。
+      it('still clears the recovery failure once the listener is ready', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: true, status: 'granted' });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        mocks.modifierIsRunning.mockReturnValue(false);
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
+
+        mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'spawn ENOENT' });
+        await focusWindow();
+        const consume = mocks.handlers.get('voice-input:consume-shortcut-recovery-failure');
+
+        // 替补起来了并且报了 ready。
+        mocks.modifierIsRunning.mockReturnValue(true);
+        mocks.modifierIsReady.mockReturnValue(true);
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
+
+        expect(consume?.(mocks.settingsEvent)).toEqual({ failed: false });
       });
 
       // 挂起是录制期的临时状态,不该清掉失败态。

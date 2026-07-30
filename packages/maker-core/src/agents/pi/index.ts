@@ -10,9 +10,9 @@
  * 本地 proxy),apiKey 走 env 插值($CINDY_PI_API_KEY,由 auth.getAuthEnv 提供),
  * 凭证不落盘。
  *
- * system prompt 拼接顺序(前缀稳定,对齐缓存规则):
- *   PI_SYSTEM_PROMPT_BASE → runtimeConfig.systemPrompt(host 产品段)→ opts.userPrompt
- * 经 `--system-prompt` 整体替换 pi 内置 prompt(pi 的 contextFiles/skills 仍会追加)。
+ * system prompt:保留 pi 内置默认 prompt(工具用法/工程约定是 pi 自己调好的),
+ * 经 `--append-system-prompt` 追加 runtimeConfig.systemPrompt(host 产品段)→
+ * opts.userPrompt。前缀稳定(默认 prompt 静态),对齐缓存规则。
  *
  * P0 骨架已支持:流式文本/thinking/工具事件、steer、abort、set_model/set_thinking_level、
  * resume(switch_session)、usage/cost 快照。
@@ -37,6 +37,7 @@ import {
   CINDY_BRIDGE_EXTENSION_FILENAME,
   CINDY_BRIDGE_EXTENSION_SOURCE,
 } from './cindy-bridge-source.js';
+import { classifyPiToolForAutoReview } from './auto-review-policy.js';
 import type {
   Capabilities,
   ModelDescriptor,
@@ -66,14 +67,21 @@ const PI_PROVIDER_ID = 'cindy';
 const PI_API_KEY_ENV = 'CINDY_PI_API_KEY';
 const PI_SESSION_ID_ENV = 'CINDY_PI_SESSION_ID';
 
-/** pi 内置 prompt 被 --system-prompt 整体替换后的最小基底段。 */
-const PI_SYSTEM_PROMPT_BASE = `You are a coding agent running inside the pi coding agent harness (github.com/earendil-works/pi), embedded into Cindy. You help users by reading files, executing commands, editing code, and writing new files.
-
-Your agent harness is pi. When asked which harness, agent, or CLI framework you run in, answer "pi" — not Claude Code or Codex. Your underlying language model may come from any provider routed through Cindy's gateway; that is separate from the harness, which is pi.
-
-Guidelines:
-- Be concise in your responses
-- Show file paths clearly when working with files`;
+/**
+ * NO_PROXY 兜底:pi 的模型请求打的是 Cindy 本地 compat proxy(loopback),bridge 的
+ * MCP fetch 也是 localhost —— 用户设了全局 HTTP_PROXY 时这些请求不能进代理隧道。
+ * 合并用户已有 NO_PROXY,同时吞并小写 no_proxy 并删除,防止大小写双份互相覆盖
+ * (与 codex/env-builder.ts 同一策略)。
+ */
+function mergeLoopbackNoProxy(env: NodeJS.ProcessEnv): void {
+  const existing = [env.NO_PROXY, env.no_proxy]
+    .filter((v): v is string => typeof v === 'string')
+    .flatMap((s) => s.split(','))
+    .map((s) => s.trim())
+    .filter(Boolean);
+  env.NO_PROXY = Array.from(new Set([...existing, '127.0.0.1', 'localhost', '::1'])).join(',');
+  delete env.no_proxy;
+}
 
 /** cindy Effort → pi thinking level(pi 无 ultra;cindy 无 off)。 */
 function effortToPiThinkingLevel(effort: Effort): string {
@@ -163,8 +171,12 @@ export class PiAgent extends BaseAgent {
       // 权限执行层在 cindy-bridge extension 的 tool_call 拦截:ask 档下只读内置
       // 工具放行,bash/edit/write 与全部桥接 MCP 工具逐次经 cindy 审批;
       // bypassPermissions 全放行。档位从权限文件热读,setPermissionMode 即时生效。
+      // auto 档:bridge 行为同 ask(非只读全部冒泡),Cindy 侧 dispatcher 先过
+      // Auto-Review Core(shared/auto-review.ts)—— 区内写/安全命令静默放行,
+      // 越界写/危险命令/MCP 工具仍弹窗(见 handleExtensionUiRequest)。
       permissionModes: [
         { id: 'ask', displayName: 'Default permissions', description: '只读工具直通;写文件、跑命令与 MCP 工具逐次询问' },
+        { id: 'auto', displayName: 'Auto-review', description: '工作区内写与安全命令自动放行;越界写、危险命令与 MCP 工具仍询问' },
         { id: 'bypassPermissions', displayName: 'Full access', description: '全部工具免询问执行;风险高' },
       ],
       setPermissionModeMidSession: { supported: true },
@@ -283,8 +295,10 @@ export class PiAgent extends BaseAgent {
       runtimeDir,
       `perm-${opts.sessionId ?? `anon-${process.pid}-${Date.now()}`}.json`,
     );
-    const normalizePermissionMode = (mode: string | undefined): 'ask' | 'bypassPermissions' =>
-      mode === 'bypassPermissions' ? 'bypassPermissions' : 'ask';
+    // auto 保留(Cindy 侧 dispatcher 用);bridge 只特判 bypassPermissions,auto 在
+    // 桥内行为同 ask(非只读全部冒泡)。其余档(default/acceptEdits/plan)归 ask 最严。
+    const normalizePermissionMode = (mode: string | undefined): 'ask' | 'auto' | 'bypassPermissions' =>
+      mode === 'bypassPermissions' ? 'bypassPermissions' : mode === 'auto' ? 'auto' : 'ask';
     let permissionMode = normalizePermissionMode(opts.permissionMode);
     const writePermissionFile = async (): Promise<void> => {
       await fs.writeFile(permissionFile, JSON.stringify({ mode: permissionMode }) + '\n');
@@ -313,13 +327,13 @@ export class PiAgent extends BaseAgent {
       }
     }
 
-    // 前缀稳定拼接:base → host 产品段 → 用户段。易变内容禁止进入(缓存规则 3.1)。
-    const promptSections = [
-      PI_SYSTEM_PROMPT_BASE,
+    // 追加而非替换:pi 默认 prompt(工具用法/工程约定)原样保留,只追加 host 产品段
+    // 与用户段。前缀稳定(默认 prompt 静态),易变内容禁止进入(缓存规则 3.1)。
+    const appendSections = [
       this.deps.runtimeConfig.systemPrompt?.trim(),
       opts.userPrompt?.trim(),
     ].filter((s): s is string => !!s && s.length > 0);
-    const systemPrompt = promptSections.join('\n\n');
+    const appendSystemPrompt = appendSections.join('\n\n');
 
     // plan 模式:挂载 pi 自带的 plan-mode example 扩展(随 pi 分发,版本匹配,免 vendoring)。
     // 只在文件存在时 --extension;缺失则 plan 模式静默降级(setPlanMode 时 warn)。
@@ -340,7 +354,7 @@ export class PiAgent extends BaseAgent {
       '--session-dir', sessionDir,
       '--provider', PI_PROVIDER_ID,
       '--model', opts.model,
-      '--system-prompt', systemPrompt,
+      ...(appendSystemPrompt.length > 0 ? ['--append-system-prompt', appendSystemPrompt] : []),
       ...(planModeExtAvailable ? ['--extension', planModeExtPath] : []),
     ];
 
@@ -358,24 +372,33 @@ export class PiAgent extends BaseAgent {
     // 兜底注销 ctx 再抛(构造失败没有 proc 可关)。catch 必抛,故其后 proc 恒已赋值。
     let proc: PiRpcProcess;
     try {
+      const spawnEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        ...authEnv,
+        [PI_SESSION_ID_ENV]: opts.sessionId ?? '',
+        PI_CODING_AGENT_DIR: agentHome,
+        CINDY_PI_PERMISSION_FILE: permissionFile,
+        // 嵌入式 runtime 不做启动期联网:关掉 pi 的版本检查与安装遥测
+        // (pi.dev/api/latest-version、report-install)。LLM 请求走 provider 通道不受影响。
+        PI_OFFLINE: '1',
+        ...(mcpBridge && mcpBridge.servers.length > 0
+          ? { CINDY_PI_MCP_BRIDGE: JSON.stringify(mcpBridge) }
+          : {}),
+      };
+      mergeLoopbackNoProxy(spawnEnv);
       proc = new PiRpcProcess({
         binaryPath: this.deps.binaryPath,
         args,
         cwd: opts.workingDir,
-        env: {
-          ...process.env,
-          ...authEnv,
-          [PI_SESSION_ID_ENV]: opts.sessionId ?? '',
-          PI_CODING_AGENT_DIR: agentHome,
-          CINDY_PI_PERMISSION_FILE: permissionFile,
-          ...(mcpBridge && mcpBridge.servers.length > 0
-            ? { CINDY_PI_MCP_BRIDGE: JSON.stringify(mcpBridge) }
-            : {}),
-        },
+        env: spawnEnv,
         logger: this.deps.logger,
         onEvent: (event: PiRpcEvent) => {
           if (event.type === 'extension_ui_request') {
-            this.handleExtensionUiRequest(event, proc, () => interactionResolver);
+            this.handleExtensionUiRequest(event, proc, () => ({
+              resolver: interactionResolver,
+              permissionMode,
+              workspaceRoots: [opts.workingDir],
+            }));
             return;
           }
           translatePiEvent(event, queue, ctx);
@@ -580,7 +603,8 @@ export class PiAgent extends BaseAgent {
       },
 
       async setPermissionMode(mode): Promise<void> {
-        // 非 bypass 一律归 ask(最严);extension 每次 tool_call 现读,写完即生效。
+        // ask/auto/bypass 三档;extension 每次 tool_call 现读,写完即生效。
+        // auto 的差异在 Cindy 侧 dispatcher(handleExtensionUiRequest),bridge 无感知。
         permissionMode = normalizePermissionMode(mode);
         await writePermissionFile();
       },
@@ -769,11 +793,20 @@ export class PiAgent extends BaseAgent {
    * {toolName, input}),映射成 InteractionRequest(kind='permission')交给
    * cindy 审批 UI;resolver 缺失或抛错一律 deny(fail-closed —— ask 档没人接
    * 不得放行)。其它 dialog 请求 cancelled 兜底,不挂死 agent loop。
+   *
+   * auto 档 dispatcher:弹窗前先过 Cindy Auto-Review Core(pi adapter 见
+   * auto-review-policy.ts)—— `auto-approve` 静默放行,`prompt`/`prompt-each-time`
+   * 照常升级弹窗(pi 无 allow-always 记忆,两档在此收敛为同一弹窗)。分类抛错按
+   * 未分类处理(弹窗,不放行)。
    */
   private handleExtensionUiRequest(
     event: PiRpcEvent,
     proc: PiRpcProcess,
-    getResolver: () => InteractionResolver | null,
+    getPermissionCtx: () => {
+      resolver: InteractionResolver | null;
+      permissionMode: 'ask' | 'auto' | 'bypassPermissions';
+      workspaceRoots: string[];
+    },
   ): void {
     const method = typeof event.method === 'string' ? event.method : '';
     const id = typeof event.id === 'string' ? event.id : undefined;
@@ -792,7 +825,20 @@ export class PiAgent extends BaseAgent {
       } catch {
         /* keep defaults */
       }
-      const resolver = getResolver();
+      const { resolver, permissionMode, workspaceRoots } = getPermissionCtx();
+      if (permissionMode === 'auto') {
+        try {
+          if (classifyPiToolForAutoReview({ toolName, input, workspaceRoots }) === 'auto-approve') {
+            proc.send({ type: 'extension_ui_response', id, confirmed: true });
+            return;
+          }
+        } catch (err) {
+          this.deps.logger.warn('pi auto-review classification failed; escalating to prompt', {
+            toolName,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       if (!resolver) {
         this.deps.logger.warn('pi permission request denied: no interaction resolver', { toolName });
         proc.send({ type: 'extension_ui_response', id, confirmed: false });

@@ -902,6 +902,46 @@ describe('voice input global shortcut registration', () => {
         expect(consume?.(mocks.settingsEvent)).toEqual({ failed: true });
       });
 
+      // 授权可能在 preflight(granted)之后、注册完成之前又被撤掉: 那仍是「等授权」这个正常状态,
+      // 能修好它的只有重新授权。报 listenerUnavailable 会让用户去重启 Cindy —— 指错方向, 而且
+      // 这条通知记下来之后, 新开的窗口还会重复这个错误建议。
+      it('does not report a helper failure when the permission is revoked mid-registration', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        mocks.modifierIsRunning.mockReturnValue(false);
+        // preflight 说已授权, 但真正注册时 listener 起不来, 且此刻权限已是 denied。
+        mocks.inputMonitoringSnapshot
+          .mockResolvedValueOnce({ ok: true, status: 'granted' })
+          .mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
+        mocks.modifierSetShortcut.mockResolvedValue({
+          ok: false,
+          error: 'Could not listen for modifier shortcuts.',
+        });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await focusWindow();
+
+        const consume = mocks.handlers.get('voice-input:consume-shortcut-recovery-failure');
+        expect(consume?.(mocks.settingsEvent)).toEqual({ failed: false });
+      });
+
+      // 真故障(权限没问题但 helper 起不来)照旧要提示 —— 别把上面那条写成「什么都不报」。
+      it('still reports a helper failure when the permission is fine', async () => {
+        setPlatform('darwin');
+        mocks.setStoredShortcut(bareRightOption);
+        mocks.modifierIsRunning.mockReturnValue(false);
+        mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: true, status: 'granted' });
+        mocks.modifierSetShortcut.mockResolvedValue({ ok: false, error: 'spawn ENOENT' });
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        await focusWindow();
+
+        const consume = mocks.handlers.get('voice-input:consume-shortcut-recovery-failure');
+        expect(consume?.(mocks.settingsEvent)).toEqual({ failed: true });
+      });
+
       // denied 是正常等待状态(用户还没在系统设置里打开),不该弹故障提示。
       it('does not report a recovery failure while the permission is merely denied', async () => {
         setPlatform('darwin');

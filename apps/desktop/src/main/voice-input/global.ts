@@ -844,6 +844,14 @@ async function recoverPendingNativeShortcutRegistration(): Promise<void> {
       return;
     }
     if (result.errorCode === 'superseded') return;
+    // 'permission' = 授权在 preflight 之后、注册完成之前又被撤了。那仍然是「等授权」这个正常
+    // 状态：此刻能修好它的只有重新授权，而 listenerUnavailable 让用户去重启 Cindy —— 指错了
+    // 方向，而且这条通知一旦记下来，之后新开的窗口还会重复这个错误建议。与 preflight 读到
+    // denied 那条路一视同仁：静默等授权，待授权说明与徽章会把状态和入口摆在那。
+    if (result.errorCode === 'permission') {
+      log.info('pending native shortcut still awaiting Input Monitoring after a granted preflight');
+      return;
+    }
     log.warn('pending native shortcut recovery failed', { errorCode: result.errorCode });
     // 这条恢复存在的前提就是设置页不在（它的 toast 也就不在），只写日志等于用户被告知
     // 「授权后自动生效」之后什么都没发生、也无处得知。推给常挂载的 renderer 去提示。

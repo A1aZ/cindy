@@ -40,6 +40,11 @@ describe('getSessionDisplayTitle', () => {
   it('哨兵 + 已有消息也兜底 —— 判定口径比 isEmptyDraftSession 宽', () => {
     // 自动起名失败(离线 / 模型不可用)时会话有消息但标题仍停在哨兵上,
     // 那种情况同样不能把英文哨兵漏给用户看。
+    //
+    // 已知代价(明确取舍,见 getSessionDisplayTitle 的文档):用户手动把标题改成
+    // 字面量 "New Maker" 时也会显示成兜底文案 —— 要区分得给标题带 provenance,
+    // 而 main 的 manuallyRenamed 是进程内存态、不落库、不过 device-link。
+    // 这条断言就是那个取舍本身,改它之前先读那段文档(PR #1031 review 第 11 轮)。
     const s = session({ _count: { messages: 3 } } as Partial<Session>);
     expect(isEmptyDraftSession(s)).toBe(false);
     expect(getSessionDisplayTitle(s, UNNAMED)).toBe(UNNAMED);

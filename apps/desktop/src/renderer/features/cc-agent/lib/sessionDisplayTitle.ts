@@ -40,6 +40,14 @@ export function isEmptyDraftSession(session: Session): boolean {
  * 兜底条件**只看标题是不是哨兵、不看消息数**,比 {@link isEmptyDraftSession} 更宽:
  * 自动起名失败(离线 / 模型不可用)或纯附件首条消息连描述都合成不出来时,会话有消息
  * 但标题仍停在哨兵上。那种情况照样不能把英文哨兵漏给用户看。
+ *
+ * **已知代价(明确取舍,不是漏判)**:用户如果手动把标题改成字面量 `New Maker`,这里
+ * 也会显示成兜底文案。要区分「用户写的这个串」与「建会话时的哨兵」,只能给标题带上
+ * provenance —— 而 main 的 `manuallyRenamed` 是进程内存态、不落库、不过 device-link,
+ * renderer 无从得知。真要支持得先持久化一个 `titleSource` 位,再把它透到桌面 / 共享列表 /
+ * 搜索 / mobile 四处投影,并进跨端 wire protocol。换来的只是「有人刻意把对话命名为内部
+ * 英文占位、且在意它逐字显示」这一种情形;而放宽条件换掉的是自动起名失败时英文哨兵
+ * 直接漏给用户看 —— 那是本 PR 存在的理由。故按现状取舍(PR #1031 review,第 11 轮)。
  */
 export function getSessionDisplayTitle(session: Session, unnamedLabel: string): string {
   if (isDefaultDraftSessionTitle(session.title)) return unnamedLabel;

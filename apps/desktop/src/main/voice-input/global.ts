@@ -692,8 +692,17 @@ function pendingNativeShortcutRecoveryTarget(): PendingShortcutRecoveryTarget {
   }
   if (macModifierShortcutListener.isRunning()) {
     const shortcutKey = stableVoiceInputShortcutKey(shortcut);
-    // 已经为这个快捷键注册成功、helper 也活着：真的没事可做。
-    if (registeredNativeShortcutKey === shortcutKey) return { kind: 'nothing-to-do' };
+    // 已经为这个快捷键注册成功、helper 也**报过 ready**：真的没事可做。
+    //
+    // 必须看 ready 而不只看 isRunning：helper 退出后 scheduleRestart 会起一个替补，那段时间
+    // isRunning 已是 true、而 registeredNativeShortcutKey 还是旧的（重启不经过 setShortcut），
+    // 只看这两个就会把「替补正在起」误判成一切正常。替补及其重试全失败时只写日志，这次聚焦
+    // 恢复又被丢掉，快捷键就一直不生效、也没有提示。
+    if (registeredNativeShortcutKey === shortcutKey) {
+      return macModifierShortcutListener.isReady()
+        ? { kind: 'nothing-to-do' }
+        : { kind: 'wait-for-pending-start' };
+    }
     // 一个字都还没登记 = 有一次启动正在飞（见上）。并发再起一次没意义，等它落定。
     if (registeredNativeShortcutKey === null) return { kind: 'wait-for-pending-start' };
     // 登记的是另一个快捷键（存盘已经变了）：存盘才是权威，直接重注册。

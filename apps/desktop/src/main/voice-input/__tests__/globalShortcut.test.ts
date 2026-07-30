@@ -58,6 +58,7 @@ const mocks = vi.hoisted(() => {
   const modifierStop = vi.fn();
   const modifierReleaseShortcut = vi.fn();
   const modifierIsRunning = vi.fn();
+  const modifierIsReady = vi.fn();
   const modifierStartKeyCapture = vi.fn();
   const inputMonitoringSnapshot = vi.fn();
   const requestInputMonitoring = vi.fn();
@@ -107,6 +108,7 @@ const mocks = vi.hoisted(() => {
     modifierStop,
     modifierReleaseShortcut,
     modifierIsRunning,
+    modifierIsReady,
     modifierStartKeyCapture,
     inputMonitoringSnapshot,
     requestInputMonitoring,
@@ -185,6 +187,7 @@ vi.mock('../MacModifierShortcutListener.js', () => ({
     return {
       setShortcut: mocks.modifierSetShortcut,
       isRunning: mocks.modifierIsRunning,
+      isReady: mocks.modifierIsReady,
       stop: mocks.modifierStop,
       releaseShortcutKeepingCapture: mocks.modifierReleaseShortcut,
       stopKeyCapture: vi.fn(),
@@ -226,6 +229,9 @@ describe('voice input global shortcut registration', () => {
     mocks.modifierSetShortcut.mockResolvedValue({ ok: true });
     mocks.modifierIsRunning.mockReset();
     mocks.modifierIsRunning.mockReturnValue(true);
+    // 默认「已就绪」:既有用例断言的是正常运行态。
+    mocks.modifierIsReady.mockReset();
+    mocks.modifierIsReady.mockReturnValue(true);
     mocks.modifierStop.mockClear();
     mocks.modifierReleaseShortcut.mockClear();
     mocks.modifierStartKeyCapture.mockReset();
@@ -746,6 +752,49 @@ describe('voice input global shortcut registration', () => {
 
         const consume = mocks.handlers.get('voice-input:consume-shortcut-recovery-failure');
         expect(consume?.(mocks.settingsEvent)).toEqual({ failed: false });
+      });
+
+      // helper 退出后 scheduleRestart 会起一个替补: 那段时间 isRunning 已是 true、而注册记录还是
+      // 旧的(重启不经过 setShortcut)。只看这两个会把「替补正在起」误判成一切正常 —— 替补及其重试
+      // 全失败时只写日志, 这次聚焦恢复又被丢掉, 快捷键就一直不生效、也没有提示。
+      it('waits for a matching restart to report ready instead of assuming all is well', async () => {
+        setPlatform('darwin');
+        const { registerGlobalVoiceInputIpc } = await import('../global.js');
+        registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+        // 先正常注册一次(此后 registeredNativeShortcutKey 与存盘一致)。这一步刻意放在切换假
+        // 定时器**之前**:假定时器会连 queueMicrotask 一起接管, 那之后直接 await handler 会卡住。
+        mocks.setStoredShortcut(bareRightOption);
+        mocks.modifierIsRunning.mockReturnValue(false);
+        await mocks.handlers.get('voice-input:global-shortcut:set')?.({}, bareRightOption);
+        expect(mocks.modifierSetShortcut).toHaveBeenCalledWith(bareRightOption);
+
+        setTimeoutSpy?.mockRestore();
+        setTimeoutSpy = null;
+        vi.useFakeTimers();
+        try {
+          // helper 挂了又被 scheduleRestart 顶上来: 进程在, 但还没报 ready。
+          mocks.modifierIsRunning.mockReturnValue(true);
+          mocks.modifierIsReady.mockReturnValue(false);
+          mocks.modifierSetShortcut.mockClear();
+          mocks.inputMonitoringSnapshot.mockClear();
+
+          mocks.appListeners.get('browser-window-focus')?.();
+          await vi.advanceTimersByTimeAsync(0);
+          // 不当作「一切正常」直接返回, 也不并发再起一次。
+          expect(mocks.inputMonitoringSnapshot).not.toHaveBeenCalled();
+          expect(mocks.modifierSetShortcut).not.toHaveBeenCalled();
+
+          // 替补最终失败收场 → 尾跑回来补注册。
+          mocks.modifierIsRunning.mockReturnValue(false);
+          mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: true, status: 'granted' });
+          await vi.advanceTimersByTimeAsync(5_000);
+          await vi.advanceTimersByTimeAsync(0);
+
+          expect(mocks.modifierSetShortcut).toHaveBeenCalledWith(bareRightOption);
+        } finally {
+          vi.useRealTimers();
+        }
       });
 
       // preflight 返回 unknown, 但此刻有一次 renderer 发起的启动正在飞: 它可能成功(不该报错),

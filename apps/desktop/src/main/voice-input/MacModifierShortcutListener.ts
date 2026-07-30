@@ -81,6 +81,16 @@ type ListenerProcess = ChildProcessByStdio<null, Readable, Readable>;
 export class MacModifierShortcutListener {
   private child: ListenerProcess | null = null;
   /**
+   * child 是否**已经报过 ready**。
+   *
+   * 与 isRunning() 的区别很关键：后者在 spawn 之后立刻为 true，而这中间那段（编译好、进程起
+   * 来了，但还没建立 event tap / 还没报 ready）它其实什么都收不到。exit 之后 scheduleRestart
+   * 起的替补也走这一段，而重启不经过 setShortcut，所以调用方那边的「已注册」记录一直是旧的 ——
+   * 光看 isRunning + 已注册会把「替补正在起」误判成「一切正常」，替补及其重试全失败时就没人
+   * 兜底了。
+   */
+  private ready = false;
+  /**
    * 启动代次。spawn 之前要先 await 解析 helper 路径（dev 下可能现编译几秒），那段时间
    * `child` 还是 null，所以 stop 光看 `child` 拦不住一个正在飞的启动，重叠的启动之间也
    * 会互相覆盖 `child` 引用、把前一个变成没人收的孤儿——而它持有全局 event tap。
@@ -101,6 +111,11 @@ export class MacModifierShortcutListener {
 
   isRunning(): boolean {
     return Boolean(this.child && !this.child.killed);
+  }
+
+  /** child 已经报过 ready（真的在监听了），而不只是「进程起来了」。见 `ready` 的说明。 */
+  isReady(): boolean {
+    return this.ready && this.isRunning();
   }
 
   async setShortcut(shortcut: VoiceInputShortcut): Promise<ListenerStartResult> {
@@ -159,6 +174,7 @@ export class MacModifierShortcutListener {
     this.startGeneration += 1;
     const child = this.child;
     this.child = null;
+    this.ready = false;
     this.shortcut = null;
     this.clearRestartTimer();
     this.restartAttempts = 0;
@@ -195,6 +211,7 @@ export class MacModifierShortcutListener {
       let stdoutBuffer = '';
       const child = spawn(binary, [], { stdio: ['ignore', 'pipe', 'pipe'] });
       this.child = child;
+      this.ready = false;
 
       let startTimer: NodeJS.Timeout | null = null;
       const settle = (result: ListenerStartResult): void => {
@@ -206,8 +223,10 @@ export class MacModifierShortcutListener {
         // 不标的话调用方会把它当真故障，去清理更晚一轮刚建立的登记（转发名单按 sender
         // id 记账，同一个设置页连续两轮录制共用一个 id，删掉就等于新一轮收不到 keys）。
         const outcome = !result.ok && generation !== this.startGeneration ? supersededStart() : result;
+        if (result.ok && this.child === child) this.ready = true;
         if (!result.ok && this.child === child) {
           this.child = null;
+          this.ready = false;
           this.endActiveTriggerIfNeeded();
           this.resetState();
           if (!child.killed) child.kill();
@@ -256,6 +275,7 @@ export class MacModifierShortcutListener {
         const wasCurrentChild = this.child === child;
         if (this.child === child) {
           this.child = null;
+          this.ready = false;
           this.endActiveTriggerIfNeeded();
           this.resetState();
         }

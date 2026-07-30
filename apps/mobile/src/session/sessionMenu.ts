@@ -5,7 +5,6 @@
  * 置顶 / 归档 / 删除)+「会话信息」二级入口;二级 = 用量 / 工作目录 / 附加引用目录 / 标识。
  * 全部为纯函数,不碰 IO;交互副作用(clipboard / Alert / 远端写)由组件层承担。
  */
-import { UNNAMED_SESSION_TITLE } from '@cindy/maker-shared/session-list';
 import { isDefaultDraftSessionTitle } from '@cindy/maker-shared/session-title';
 
 import { i18n } from '@/i18n';
@@ -60,9 +59,10 @@ export function buildSessionMenuHeader(
 
   return {
     // 哨兵(尚未起名)直接给本地化兜底,**不回落 workspaceName** —— 回落会把目录名当标题,
-    // 与 desktop 的「未命名对话」不一致(PR #1031 review P1)。与列表侧同一口径。
+    // 与 desktop 的「未命名对话」不一致(PR #1031 review P1)。文案走 i18n:本模块四语言
+    // 都在用 i18n.t,不能塞硬编码中文(mobile 支持 en / ja / ko)。
     title: isDefaultDraftSessionTitle(session.title)
-      ? UNNAMED_SESSION_TITLE
+      ? i18n.t('session.menu.unnamedTitle')
       : session.title || workspaceName(session) || i18n.t('session.menu.titleFallback'),
     chips,
     metaLine: buildSessionMenuMetaLine(session),

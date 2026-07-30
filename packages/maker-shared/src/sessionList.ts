@@ -416,23 +416,21 @@ function buildDateSections(
 }
 
 /**
- * 「尚未起名」会话在手机端显示的标题。与 desktop 的 `ccAgent.common.unnamedSession`
- * 对齐(该 key 的 zh-CN 值),并遵循 i18n/GLOSSARY.md 的裁决:面向用户的 Session 一律
- * 叫「对话」。列表与会话菜单共用这一个来源,避免两处各写一份而漂移。
- */
-export const UNNAMED_SESSION_TITLE = '未命名对话';
-
-/**
  * 远程会话在列表 / 菜单上应显示的标题。
  *
- * 「尚未起名」的哨兵**直接给本地化兜底、不回落 workingDir**:回落会把完整工作目录路径
- * 当标题显示,与 desktop 侧的「未命名对话」不一致(PR #1031 review P1)。哨兵本身是
- * locale-independent 的英文字面量(见 ./sessionTitle.ts),原样显示会露出 "New Maker"。
+ * 「尚未起名」的哨兵**直接用调用方给的本地化兜底、不回落 workingDir**:回落会把完整
+ * 工作目录路径当标题显示,与 desktop 侧的「未命名对话」不一致(PR #1031 review P1)。
+ * 哨兵本身是 locale-independent 的英文字面量(见 ./sessionTitle.ts),原样显示会露出
+ * "New Maker"。
+ *
+ * `unnamedLabel` 由调用方传入已解析的 i18n 文案(mobile 支持 en / ja / ko,本模块不能
+ * 导出中文 UI 串),与 desktop 的 `getSessionDisplayTitle(session, unnamedLabel)` 同款
+ * 签名。
  *
  * 空标题(非哨兵)保持既有兜底链 workingDir → 「未命名会话」不变。
  */
-export function remoteSessionDisplayTitle(session: RemoteSession): string {
-  if (isDefaultDraftSessionTitle(session.title)) return UNNAMED_SESSION_TITLE;
+export function remoteSessionDisplayTitle(session: RemoteSession, unnamedLabel: string): string {
+  if (isDefaultDraftSessionTitle(session.title)) return unnamedLabel;
   return automationDisplayTitle(session) || session.workingDir || '未命名会话';
 }
 
@@ -449,7 +447,10 @@ export function toRemoteSessionListItem(
   const worktreeLabel = sessionWorktreeLabel(session);
   return {
     session,
-    title: remoteSessionDisplayTitle(session),
+    // 本模块的展示文案整体是硬编码中文(相邻的 '未命名会话' / '置顶' / '活跃' 同理),
+    // 这里沿用同一现状,不在本 PR 里把整个模块 i18n 化(独立议题)。真正 i18n 化的调用方
+    // (mobile 的 sessionMenu)自己传 i18n 解析值,见 remoteSessionDisplayTitle。
+    title: remoteSessionDisplayTitle(session, '未命名对话'),
     subtitle: [
       sessionCollaborationLabel(session),
       worktreeLabel,

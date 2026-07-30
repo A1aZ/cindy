@@ -1112,13 +1112,39 @@ export class AgentIslandService {
       workingDir: patch.workingDir !== undefined ? patch.workingDir : current.workingDir,
       workspaceKind: patch.workspaceKind !== undefined ? patch.workspaceKind : current.workspaceKind,
     };
-    this.metadataCache.set(sessionId, next);
-    if (!patchAgentIslandMetadata(this.state, { sessionId, ...next })) return;
-    this.publish();
+    this.commitMetadata(sessionId, next);
   }
 
   replaySessionActivity(): void {
     this.sessionActivityRelay.replay(this.buildSessionActivityPayload());
+  }
+
+  /**
+   * 会话元数据的**唯一写出口**:落 cache + 发布给灵动岛。
+   *
+   * 不变量:**cache 存原始标题,进 state 的标题必须先过显示投影**。
+   *
+   *   - cache 必须是原始值 —— {@link ensureMetadata} 靠 `isPlaceholderSessionTitle(cached.title)`
+   *     判断「还没拿到权威标题、需要重拉」。若把本地化文案写进 cache,那个判定恒为 false,
+   *     权威标题永远不会再被加载。
+   *   - 进 state 的值必须是投影 —— state 直通 native,原样发布会在灵动岛上露出英文哨兵。
+   *
+   * 两条写入路径(metadata patch 与 cache-miss 加载)都必须走这里;此前只在读路径
+   * {@link hydrateMeta} 做了投影,cache-miss 那条仍把 `New Maker` 发给了 native
+   * (PR #1031 review P1)。
+   */
+  private commitMetadata(
+    sessionId: string,
+    meta: { title: string | null; workingDir: string | null; workspaceKind: string | null },
+  ): void {
+    this.metadataCache.set(sessionId, meta);
+    const patched = patchAgentIslandMetadata(this.state, {
+      sessionId,
+      ...meta,
+      title: localizePlaceholderSessionTitle(meta.title),
+    });
+    if (!patched) return;
+    this.publish();
   }
 
   private hydrateMeta(meta: AgentIslandSessionMeta): AgentIslandSessionMeta & { title?: string | null } {
@@ -1189,15 +1215,11 @@ export class AgentIslandService {
     this.metadataLoading.add(sessionId);
     void getSessionRowSnapshot(sessionId)
       .then((row) => {
-        const metadata = {
+        this.commitMetadata(sessionId, {
           title: row?.title ?? null,
           workingDir: row?.workingDir ?? null,
           workspaceKind: row?.workspaceKind ?? null,
-        };
-        this.metadataCache.set(sessionId, metadata);
-        if (patchAgentIslandMetadata(this.state, { sessionId, ...metadata })) {
-          this.publish();
-        }
+        });
       })
       .catch((err) => {
         log.warn('session metadata load failed', {

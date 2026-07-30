@@ -185,6 +185,8 @@ export const MAKER_INVOKE = {
   SET_FAST_MODE: 'maker:set-fast-mode',
   /** 计划模式一级开关(与 permissionMode 正交), runtime-only; 持久化由 renderer sessions:update / device-link 回流负责 */
   SET_PLAN_MODE: 'maker:set-plan-mode',
+  /** 会话导出 HTML(pi 原生 export_html)。主进程弹保存对话框 + 导出 + 在文件管理器中显示;返回写入路径或 null(取消)。 */
+  EXPORT_SESSION_HTML: 'maker:export-session-html',
   /**
    * 旧控制端的会话模型预设写穿兼容 channel。新控制端统一经 APPLY_NEW_MAKER_DRAFT_PREF 写被控端
    * providerModelMemory 全局预设;旧控制端仍发此 invoke 时,被控端 renderer 也会将其收敛到同一

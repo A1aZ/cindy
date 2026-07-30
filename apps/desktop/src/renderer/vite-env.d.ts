@@ -4348,6 +4348,8 @@ interface ElectronAPI {
     setFastMode: (sessionId: string, enabled: boolean) => Promise<void>;
     /** 计划模式一级开关(与 permissionMode 正交); DB 持久化由调用方另调 sessionService.update({ planModeEnabled }) */
     setPlanMode: (sessionId: string, enabled: boolean) => Promise<void>;
+    /** 会话导出 HTML(pi 原生); 主进程弹保存对话框 + 导出 + 在文件管理器显示; 返回路径或 null(取消/不支持) */
+    exportSessionHtml: (sessionId: string) => Promise<string | null>;
     /**
      * 附加只读引用目录的 closure 推送; DB 持久化要 renderer 同步调
      * sessionService.update({ extraDirs }) (跟 setModel + sessionService.update 双 IPC 协调先例一致)。

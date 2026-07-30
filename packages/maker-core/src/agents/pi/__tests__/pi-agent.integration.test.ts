@@ -415,6 +415,46 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
     },
   );
 
+  it(
+    'exportSessionHtml writes a real HTML file via pi export_html (offline, no gateway)',
+    { timeout: 60_000 },
+    async () => {
+      const agent = new PiAgent(buildDeps());
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-export-cwd-'));
+      let handle: AgentSessionHandle | null = null;
+      try {
+        handle = await agent.startSession({
+          sessionId: 'export-html-session',
+          workingDir,
+          model: 'pi-test-model',
+        });
+        // 先跑一轮让会话有内容可导出。
+        const done = (async () => {
+          for await (const ev of handle!.events()) {
+            if (ev.type === 'done') break;
+          }
+        })();
+        await handle.send({ type: 'user', content: 'seed content for html export' });
+        await done;
+
+        expect(agent.capabilities.sessionHtmlExport?.supported).toBe(true);
+        const outPath = path.join(workingDir, 'session-export.html');
+        const seenBefore = seenRequests.length;
+        const written = await handle.exportSessionHtml?.(outPath);
+        expect(written).toBe(outPath);
+        expect(existsSync(outPath)).toBe(true);
+        const { readFileSync } = await import('node:fs');
+        const html = readFileSync(outPath, 'utf8');
+        expect(html.toLowerCase()).toContain('<html');
+        // 导出是纯本地渲染,不打网关。
+        expect(seenRequests.length).toBe(seenBefore);
+      } finally {
+        await handle?.close();
+        rmSync(workingDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   // ── auto 档权限端到端:真 pi + 真 cindy-bridge + 假模型发真工具调用 ────────────
 
   /** 起会话 + 计数 resolver + 跑一轮到 done,返回观测结果。 */

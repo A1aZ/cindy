@@ -6085,6 +6085,9 @@
         "moveToProjectRemoteUnsupported": "暂不支持移动远程任务",
         "openInNewWindow": "在新窗口打开",
         "exportShare": "导出任务…",
+        "exportHtml": "导出为 HTML…",
+        "exportHtmlSuccess": "会话已导出为 HTML",
+        "exportHtmlFailed": "HTML 导出失败",
         "copySessionLink": "复制任务链接"
       },
       "projectAction": {

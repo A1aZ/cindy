@@ -32,7 +32,7 @@ import { redactSensitiveText } from '@cindy/maker-shared/error-redaction';
 import { permissionModeOrAsk } from '@cindy/maker-shared/permission-mode';
 import { DL_SESSION_REFERENCE_CAPABILITY_CHANNEL } from '@cindy/device-link';
 import { and, desc, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
-import { BrowserWindow, ipcMain, type IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from 'electron';
 import { getActiveAppSession } from '../appSessionState.js';
 import type { AgentMeta } from '../../renderer/lib/ccAgent.types';
 import {
@@ -8573,6 +8573,38 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       return;
     }
     await sess.setPlanMode(enabled);
+  });
+
+  ipcMain.handle(MAKER_INVOKE.EXPORT_SESSION_HTML, async (e, sessionId: unknown) => {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+      throwIpcError('INVALID_PARAMS', 'sessionId required');
+    }
+    const sess = maker.getSession(sessionId);
+    if (!sess) {
+      log.debug('export-session-html: session not found, no-op', { sessionId });
+      return null;
+    }
+    if (!sess.capabilities.sessionHtmlExport?.supported) {
+      // agent 不支持导出(CC/Codex):调用方应先按 capabilities 隐藏入口,这里兜底 no-op。
+      log.debug('export-session-html: agent does not support export, no-op', {
+        sessionId,
+        agentKind: sess.agentKind,
+      });
+      return null;
+    }
+    // 主进程弹原生保存对话框选落盘位置(renderer 只发起,不碰文件系统)。
+    const parent = BrowserWindow.fromWebContents(e.sender) ?? BrowserWindow.getFocusedWindow() ?? undefined;
+    const defaultPath = path.join(app.getPath('documents'), 'cindy-session.html');
+    const picked = await dialog.showSaveDialog(parent!, {
+      title: 'Export session to HTML',
+      defaultPath,
+      filters: [{ name: 'HTML', extensions: ['html'] }],
+    });
+    if (picked.canceled || !picked.filePath) return null;
+    const written = await sess.exportSessionHtml(picked.filePath);
+    // 导出完成后在文件管理器中高亮该文件(与常见「导出并显示」体验一致)。
+    shell.showItemInFolder(written);
+    return written;
   });
 
   ipcMain.handle(MAKER_INVOKE.SET_FAST_MODE, async (_e, sessionId: unknown, enabled: unknown) => {

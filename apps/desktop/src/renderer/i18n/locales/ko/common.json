@@ -6083,6 +6083,9 @@
         "moveToProjectRemoteUnsupported": "원격 세션 이동은 아직 지원하지 않습니다",
         "openInNewWindow": "새 창에서 열기",
         "exportShare": "세션 내보내기…",
+        "exportHtml": "HTML로 내보내기…",
+        "exportHtmlSuccess": "세션을 HTML로 내보냈습니다",
+        "exportHtmlFailed": "HTML 내보내기 실패",
         "copySessionLink": "세션 링크 복사"
       },
       "projectAction": {

@@ -4575,6 +4575,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 同步调 sessionService.update({ planModeEnabled })(与 setModel 双 IPC 协调先例一致)。
     setPlanMode: (sessionId: string, enabled: boolean): Promise<void> =>
       ipcRenderer.invoke('maker:set-plan-mode', sessionId, enabled),
+    // 会话导出 HTML(pi 原生)。主进程弹保存对话框 + 导出 + 在文件管理器中显示。
+    // 返回写入的绝对路径;用户取消对话框或 agent 不支持时返回 null。
+    exportSessionHtml: (sessionId: string): Promise<string | null> =>
+      ipcRenderer.invoke('maker:export-session-html', sessionId),
     // 附加只读引用目录的 closure 推送; DB 持久化由 renderer 同步调
     // sessionService.update({ extraDirs }) (跟 setModel + sessionService.update 双 IPC 协调先例一致)。
     // session 不在 / agent capability=false 都 no-op, 不会抛错。

@@ -6094,6 +6094,9 @@
         "moveToProjectRemoteUnsupported": "Moving remote sessions is not supported yet",
         "openInNewWindow": "Open in new window",
         "exportShare": "Export session…",
+        "exportHtml": "Export to HTML…",
+        "exportHtmlSuccess": "Session exported to HTML",
+        "exportHtmlFailed": "HTML export failed",
         "copySessionLink": "Copy session link"
       },
       "projectAction": {

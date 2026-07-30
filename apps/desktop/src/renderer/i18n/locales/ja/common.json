@@ -6083,6 +6083,9 @@
         "moveToProjectRemoteUnsupported": "リモートセッションの移動はまだサポートされていません",
         "openInNewWindow": "新しいウィンドウで開く",
         "exportShare": "セッションをエクスポート…",
+        "exportHtml": "HTML にエクスポート…",
+        "exportHtmlSuccess": "セッションを HTML にエクスポートしました",
+        "exportHtmlFailed": "HTML エクスポートに失敗しました",
         "copySessionLink": "セッションリンクをコピー"
       },
       "projectAction": {

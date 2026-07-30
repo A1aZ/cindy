@@ -666,6 +666,21 @@ export class Session {
     return this.handle.getPlanMode?.() ?? null;
   }
 
+  /** 导出当前会话为 HTML,返回写入路径(capability 见 Capabilities.sessionHtmlExport)。 */
+  async exportSessionHtml(outputPath?: string): Promise<string> {
+    this.ensureActive();
+    if (!this.capabilities.sessionHtmlExport?.supported) {
+      throw new NotSupportedError(
+        'sessionHtmlExport',
+        this.capabilities.sessionHtmlExport ?? { supported: false, reason: 'not-implemented' },
+      );
+    }
+    if (!this.handle.exportSessionHtml) {
+      throw new NotSupportedError('sessionHtmlExport', { supported: false, reason: 'not-implemented' });
+    }
+    return this.handle.exportSessionHtml(outputPath);
+  }
+
   getFastMode(): boolean | null {
     return this.handle.getFastMode?.() ?? null;
   }

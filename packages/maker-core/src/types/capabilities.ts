@@ -101,6 +101,12 @@ export interface Capabilities {
    * UI 据此决定是否在 ChatInput 显示 ExtraDirsButton。
    */
   extraDirs: CapabilityStatus;
+  /**
+   * 会话导出为 HTML —— pi 原生 export_html RPC(自带 export-html 渲染器,离线、无网关)。
+   * 支持时 handle 实现 exportSessionHtml;UI 据此决定是否显示「导出 HTML」入口。
+   * CC/Codex 无对应能力(缺省视为不支持)。
+   */
+  sessionHtmlExport?: CapabilityStatus;
 }
 
 /**

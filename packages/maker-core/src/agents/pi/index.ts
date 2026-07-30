@@ -213,6 +213,8 @@ export class PiAgent extends BaseAgent {
       sameTurnSteer: { supported: true },
       memory: { supported: { supported: false, reason: 'sdk-missing' } },
       extraDirs: { supported: false, reason: 'sdk-missing' },
+      // pi 原生 export_html RPC:自带 export-html 渲染器,离线、无网关。
+      sessionHtmlExport: { supported: true },
     };
   }
 
@@ -652,6 +654,21 @@ export class PiAgent extends BaseAgent {
 
       getPlanMode(): boolean {
         return planModeActive;
+      },
+
+      async exportSessionHtml(outputPath?: string): Promise<string> {
+        // pi 原生 export_html:纯本地渲染,不调网关。省略 outputPath 时 pi 自选默认位置。
+        const command: Record<string, unknown> = { type: 'export_html' };
+        if (outputPath && outputPath.trim().length > 0) command.outputPath = outputPath;
+        const resp = await proc.request(command);
+        if (!resp.success) {
+          throw new Error(`pi export_html failed: ${resp.error ?? 'unknown'}`);
+        }
+        const path = (resp.data as { path?: string } | undefined)?.path;
+        if (!path || path.trim().length === 0) {
+          throw new Error('pi export_html: output path unavailable');
+        }
+        return path;
       },
     };
 

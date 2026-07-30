@@ -2203,22 +2203,25 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     expect(c.ofType('turn.reopen')).toHaveLength(1);
   });
 
-  it('认领**前**被外部撤销 -> onAbandon 不还记账(那条消息线已交给新任务)', async () => {
-    // 与上一条的区别: 那条是"没人撤、只是没等到事件"(记账该还); 这条是"被撤销"
-    // (记账不该还, 否则一次续跑信号会把用户带回一条早已过期的消息)。撤销发生在
-    // onClaim 之前, 走的是 onAbandon + revoked 这条路径。
+  it('新任务接管导致的撤销不还记账(那条消息线已交给别人)', async () => {
+    // 与"目标轮没能 dispatch"那条的区别: 那条该还记账(用户马上会再点重试), 这条不该
+    // (消息线已经交给新任务, 还了会让之后的续跑信号把用户带回一条过期消息)。
+    // 撤销后 runner 按契约收口 —— 已认领的走 onEnd, 而它不得据此重新登记。
     const { cr, sig, c, d, sessionId } = await failOneTask();
     cr.sessions[sessionId] = { workingDir: WS_DIR, usable: true };
     sig.retry(sessionId);
     await tick();
     expect(cr.watches).toHaveLength(1);
 
-    // 新任务接管 -> dropContinuation -> 撤销(此时还没认领)。
     d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
     await tick();
     expect(cr.cancels).toEqual([0]);
-    // runner 按契约在撤销后收口; 未认领即 onAbandon。
-    cr.watches[0]!.onAbandon();
+    cr.watches[0]!.onEnd({
+      status: 'error',
+      finalText: '',
+      errorMessage: 'hook continuation cancelled',
+      durationMs: 1,
+    });
     await tick();
 
     // 新任务成功收口后再来一次续跑信号: 不该有任何"等着被续跑"的记账复活。
@@ -2482,9 +2485,26 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     expect(c.ofType('turn.reopen')).toHaveLength(1);
     expect(cr.cancels).toHaveLength(0);
 
+    const reopened = c.last('turn.reopen')!.payload.requestId;
     sig.undispatchTurn(sessionId);
     await tick();
     expect(cr.cancels).toHaveLength(1);
+
+    // 连接还在 -> 撤销后的收口帧**必须发得出去**, 否则渠道那条消息停在假的"进行中"
+    // 直到 1 小时硬超时。(只有连接已断才静默, 那时 server 已做过孤儿收口。)
+    cr.latest().onEnd({
+      status: 'error',
+      finalText: '',
+      errorMessage: 'hook continuation cancelled',
+      durationMs: 1,
+    });
+    await tick();
+    expect(c.ofType('turn.end').filter((m) => m.payload.requestId === reopened)).toHaveLength(1);
+
+    // 且记账还回去了: 这一轮压根没跑起来, 用户马上会再点一次重试。
+    sig.retry(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(2);
   });
 
   it('undispatched 的 clientId 对不上时不动已认领的那一轮', async () => {

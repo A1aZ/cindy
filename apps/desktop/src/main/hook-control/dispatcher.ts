@@ -606,7 +606,13 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
    */
   const activeContinuations = new Map<
     string,
-    { connectionId: string; clientId: string; isClaimed: () => boolean; cancel: () => void }
+    {
+      connectionId: string;
+      clientId: string;
+      isClaimed: () => boolean;
+      /** silent=true 时连收口帧都不发(仅连接已断时用, 见 dropContinuation)。 */
+      cancel: (silent: boolean, noRemember: boolean) => void;
+    }
   >();
   /** 正在因"新任务接管"而撤销的 session —— 它的收口不得再记待续跑(见 dropContinuation)。 */
   let suppressReopenFor: string | null = null;
@@ -677,7 +683,9 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       const watching = activeContinuations.get(sessionId);
       if (!watching || watching.clientId !== clientId) return;
       log.info(`hook continuation revoked: the claimed turn never dispatched (${sessionId})`);
-      dropContinuation(sessionId);
+      // 连接还在 -> 必须发收口帧(否则渠道消息停在假的"进行中"); 且这一轮压根没跑起来,
+      // coordinator 那边还留着 active-turn recovery, 用户马上会再点一次重试 —— 记一笔。
+      dropContinuation(sessionId, { silent: false, remember: true });
     }) ?? null;
   let accountActive = accountInitiallyActive ?? true;
   let accountGeneration = 0;
@@ -733,22 +741,30 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
    * 观察器若还挂着, 新 turn 的事件会被当成续跑的继续, 把上一条消息改写成不相干
    * 的内容。
    */
-  function dropContinuation(sessionId: string): void {
-    pendingReopens.delete(sessionId);
+  function dropContinuation(
+    sessionId: string,
+    opts: { silent?: boolean; remember?: boolean } = {},
+  ): void {
+    const { silent = false, remember = false } = opts;
+    if (!remember) pendingReopens.delete(sessionId);
     const watching = activeContinuations.get(sessionId);
     if (!watching) return;
     activeContinuations.delete(sessionId);
-    // 撤销会让 runner 以"已取消"收口, 那条 turn.end 是 error —— 但**不能**据此再记
-    // 一笔待续跑: 这条消息线已经交给新任务了, 留下记账会让之后的一次续跑信号把
-    // 用户带回一条早已过期的消息。suppress 覆盖同步收口, 尾随的 delete 兜住同一
-    // tick 内的异步收口。
-    suppressReopenFor = sessionId;
+    // 撤销让 runner 以"已取消"收口(那条 turn.end 是 error)。两个维度要分场景:
+    //
+    //   silent  —— 连帧都不发。只用于**连接已断**: server 那边已经做过孤儿收口并解绑
+    //              这一轮的 requestId, 迟到的帧只会被当未知 id 丢弃(协议阶段 18)。
+    //              连接还在的场景一律不能 silent, 否则渠道消息停在假的"进行中"。
+    //   remember —— 收口后是否再记一笔待续跑。新任务接管时**不**记(消息线已经交给
+    //              别人, 记了会让之后的续跑信号把用户带回一条过期消息); 而"这一轮
+    //              压根没 dispatch 起来"时要记, 用户马上就会再点一次重试。
+    if (!remember) suppressReopenFor = sessionId;
     try {
-      watching.cancel();
+      watching.cancel(silent, !remember);
     } finally {
       suppressReopenFor = null;
     }
-    pendingReopens.delete(sessionId);
+    if (!remember) pendingReopens.delete(sessionId);
   }
 
   /** 失败收口后登记"等着被续跑"。只有 server 支持回流时才记, 否则纯占内存。 */
@@ -822,6 +838,14 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
      * 其中 error 收口还会把它记成下一轮的 reopenOf。置位后一切回调直接短路。
      */
     let revoked = false;
+    /**
+     * 这一轮收口后**不得**再记一笔待续跑。
+     *
+     * 与全局 suppressReopenFor 的区别: 那个只在 dropContinuation 的同步窗口内有效,
+     * 一旦 runner 的收口跨了微任务就漏。撤销是否允许重新登记属于"这一轮"的属性,
+     * 所以钉在闭包里 —— 不依赖任何时序假设。
+     */
+    let denyRemember = false;
     const cleanup = (): void => {
       settledEarly = true;
       runningByRequest.delete(requestKey);
@@ -907,7 +931,7 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
         }
         // 续跑又失败了 -> 允许再续一次(用户还得再点一次重试, 天然限流)。
         // reopenOf 换成这一轮的 requestId: server 侧那条消息现在挂在它上面。
-        if (isError) {
+        if (isError && !denyRemember) {
           rememberForReopen(sessionId, {
             connectionId: entry.connectionId,
             requestId,
@@ -924,8 +948,11 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
         // 消息**没有被改写过**, 所以这笔记账仍然有效 —— 还回去, 让用户再点一次重试
         // 还能接上。不还的话, 远端会话重建慢于等待窗口(SSH 重连 / 凭证切换)时回流就
         // 永久丢了, 而那正是本能力要修的症状。
-        // 被外部撤销的不还(revoked): 那条消息线已经交给别人了, 见 dropContinuation。
+        // 被外部撤销时不还: suppressReopenFor 是"这条消息线已经交给别人了"的信号
+        // (新任务接管 / 换账号 / dispose), 与 rememberForReopen 用同一个判据; revoked
+        // 则是连接已断(server 已解绑这一轮的 id, 记账里的 reopenOf 也就没意义了)。
         // 刻意不刷新 expiresAt: 原 TTL 到点即失效, 避免反复 abandon 无限延期。
+        if (denyRemember || suppressReopenFor === sessionId) return;
         if (revoked || !isCurrentGeneration(entry.accountGeneration)) return;
         if (Date.now() > entry.expiresAt) return;
         pendingReopens.set(sessionId, entry);
@@ -941,8 +968,10 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
         connectionId: entry.connectionId,
         clientId,
         isClaimed: () => claimed,
-        cancel: () => {
-          revoked = true;
+        cancel: (silent: boolean, noRemember: boolean) => {
+          // revoked 是"连迟到的帧都别发"的开关 —— 只有连接已断时才该置位。
+          if (silent) revoked = true;
+          if (noRemember) denyRemember = true;
           cancelWatch();
         },
       });
@@ -957,8 +986,9 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       running.delete(sessionId);
       return;
     }
-    // 这条消息线交给新任务了: 撤掉上一轮失败留下的续跑观察与记账。
-    dropContinuation(sessionId);
+    // 这条消息线交给新任务了: 撤掉上一轮失败留下的续跑观察与记账。连接还在, 所以要
+    // 发收口帧把那条旧消息定稿; 但不再记待续跑(它已经不是"最新一轮"了)。
+    dropContinuation(sessionId, { silent: false, remember: false });
     runningByRequest.set(requestKey, { sessionId, connectionId: task.connectionId });
 
     // 进度快照直发不缓存: 断线期间的中间帧没有补发价值(turn.end 会带最终
@@ -1583,7 +1613,9 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       serverFeatures.clear();
       // 续跑记账与在观察的续跑轮都属于上一个账号, 一并清掉(记账里带
       // accountGeneration 只是第二道防线, 表本身不该跨账号留存)。
-      for (const sessionId of [...activeContinuations.keys()]) dropContinuation(sessionId);
+      for (const sessionId of [...activeContinuations.keys()]) {
+        dropContinuation(sessionId, { silent: true, remember: false });
+      }
       pendingReopens.clear();
 
       const drain = (async (): Promise<void> => {
@@ -1765,7 +1797,10 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       // 未知 id 丢弃; 更糟的是 error 收口还会把这个 stale id 登记成下一轮的
       // reopenOf。所以在这里就撤掉, 与"turn.end 直发不缓存"同一个决定。
       for (const [sessionId, watching] of [...activeContinuations]) {
-        if (watching.connectionId === connectionId) dropContinuation(sessionId);
+        // 连接已断: server 那边已孤儿收口并解绑 requestId, 迟到的帧只会被丢弃。
+        if (watching.connectionId === connectionId) {
+          dropContinuation(sessionId, { silent: true, remember: false });
+        }
       }
       // 能力集只在握手时才权威。断连后不清会留下"上一次连上的那个 server 实例"
       // 的快照: 滚动发布时重连可能落到不宣告 turn.reopen 的老实例上, 而在
@@ -1778,7 +1813,9 @@ export function createHookDispatcher(deps: HookDispatcherDeps): HookDispatcher {
       unsubscribeUiTurnDispatching?.();
       unsubscribeUiTurnUndispatched?.();
       pendingClaims.clear();
-      for (const sessionId of [...activeContinuations.keys()]) dropContinuation(sessionId);
+      for (const sessionId of [...activeContinuations.keys()]) {
+        dropContinuation(sessionId, { silent: true, remember: false });
+      }
       pendingReopens.clear();
       serverFeatures.clear();
       sendFns.clear();

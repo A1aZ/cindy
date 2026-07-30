@@ -785,8 +785,24 @@ async function reconcileBuiltinGhostsLocked(
           !fs.existsSync(path.join(brainRootDir(), manifest.id, '.disabled')),
         )) || approvalChanged;
     } catch (err) {
+      // 走到这里内容目录可能已经换成新种子字节，旧 receipt 却还是授权事实 ——
+      // 留着它就是拿旧批准跑新代码(新版删掉的 slot 仍被授予、版本与技能快照
+      // 也停在旧 revision)。撤掉批准 fail closed 到 legacy-unapproved:随包
+      // 插件下一轮启动对账会重新补批准，自愈，不需要用户介入。
+      let approvalCleared = false;
+      try {
+        await manager.removeInstallApproval(manifest.id);
+        approvalCleared = true;
+        approvalChanged = true;
+      } catch (cleanupErr) {
+        log.error('builtin ghost stale approval could not be revoked', {
+          id: manifest.id,
+          error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+        });
+      }
       log.warn('builtin ghost approval receipt failed', {
         id: manifest.id,
+        approvalCleared,
         error: err instanceof Error ? err.message : String(err),
       });
     }

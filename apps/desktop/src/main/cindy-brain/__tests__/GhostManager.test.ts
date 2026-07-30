@@ -6,6 +6,7 @@ import JSZip from 'jszip';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  GHOST_SKILL_MD_MAX_BYTES,
   ghostInstallApprovalToken,
   type InstalledGhost,
 } from '../../../shared/ghost';
@@ -668,6 +669,54 @@ describe('GhostManager · Host approval receipt', () => {
     expect(await fs.promises.readdir(snapshotParent)).toEqual([
       path.basename(secondSnapshot),
     ]);
+  });
+
+  it('holds the install-time SKILL.md size ceiling when rebuilding from mutable install bytes', async () => {
+    await manager.install(await makeCindy('skill.cindy', skillManifest(), skillFiles()));
+    const snapshotRoot = manager.list()[0].approvedSkillRoot!;
+    const installedSkillMd = path.join(rootDir, 'skilled', 'skills', 'demo', 'SKILL.md');
+    // 快照缺失时取字节的来源是可变安装目录。这里塞的 SKILL.md frontmatter 与批准
+    // manifest 完全一致(躲过一致性校验),只是正文超过装入侧上限 —— 重建必须照样拒,
+    // 否则启用这条路会批准一份装入/更新永远不会接受的超大技能指令,而且要先整份
+    // 读进内存。
+    await fs.promises.writeFile(
+      installedSkillMd,
+      `---\nname: demo\ndescription: Demo skill\n---\n\nApproved instructions\n${'padding '.repeat(
+        GHOST_SKILL_MD_MAX_BYTES / 4,
+      )}`,
+    );
+    expect((await fs.promises.lstat(installedSkillMd)).size).toBeGreaterThan(
+      GHOST_SKILL_MD_MAX_BYTES,
+    );
+    await fs.promises.rm(snapshotRoot, { recursive: true, force: true });
+    expect(await manager.setEnabled('skilled', false)).toEqual({ ok: true });
+
+    await expectRejection(await manager.setEnabled('skilled', true), 'io');
+    expect(manager.list()[0].enabled).toBe(false);
+    expect(fs.existsSync(snapshotRoot)).toBe(false);
+  });
+
+  it('revoking approval fails the install closed, and a later bundled approval heals it', async () => {
+    await manager.install(await makeCindy('approved.cindy', goodManifest()));
+    const approvedManifest = manager.list()[0].manifest;
+
+    // 随包对账在换入新种子字节后写批准失败时走的收敛动作:撤掉陈旧批准。
+    // 撤掉之后插件必须彻底不可运行,而不是继续拿旧批准跑新代码。
+    await manager.removeInstallApproval('hello');
+
+    expect(fs.existsSync(receiptPath())).toBe(false);
+    expect(manager.list()[0]).toMatchObject({
+      enabled: false,
+      approval: { state: 'legacy-unapproved' },
+    });
+    await expectRejection(await manager.setEnabled('hello', true), 'approval-required');
+
+    // 下一轮启动对账重新补批准即自愈,不需要用户介入。
+    expect(await manager.approveTrustedBundledInstall(approvedManifest, true)).toBe(true);
+    expect(manager.list()[0]).toMatchObject({
+      enabled: true,
+      approval: { state: 'approved' },
+    });
   });
 
   it('invalidates a receipt whose locale snapshot keys no longer match the manifest', async () => {

@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import {
   GHOST_LOCALE_MAX_BYTES,
+  GHOST_SKILL_MD_MAX_BYTES,
   isValidGhostId,
   validateGhostManifest,
   validateGhostManifestLocaleResource,
@@ -176,7 +177,18 @@ export class GhostInstallReceiptStore {
       await fs.promises.mkdir(temp, { recursive: false });
       for (const item of items) {
         const source = path.join(skillSourceDir, ...item.dir.split('/'));
-        const skillMd = await fs.promises.readFile(path.join(source, 'SKILL.md'), 'utf8');
+        // 取字节的来源是可变的安装目录(快照缺失时从 dir 重建),所以这里要自己
+        // 复现装入侧的门槛:先 lstat 定长再读，不然本机进程往安装目录塞一个超大
+        // SKILL.md 就能让 Host 整份读进内存。lstat 而非 stat —— 与本文件其余
+        // 位置一致地拒绝软链与非普通文件,不留跟随软链的绕过口。
+        const skillMdPath = path.join(source, 'SKILL.md');
+        const skillMdStat = await fs.promises.lstat(skillMdPath);
+        if (!skillMdStat.isFile() || skillMdStat.size > GHOST_SKILL_MD_MAX_BYTES) {
+          throw new Error(
+            `approved skill ${item.dir}/SKILL.md is not a regular file or exceeds ${GHOST_SKILL_MD_MAX_BYTES} bytes`,
+          );
+        }
+        const skillMd = await fs.promises.readFile(skillMdPath, 'utf8');
         const consistencyError = checkSkillMdConsistency(skillMd, item);
         if (consistencyError) {
           throw new Error(`approved skill ${item.dir} is inconsistent: ${consistencyError}`);

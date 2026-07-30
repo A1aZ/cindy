@@ -67,25 +67,42 @@ function cacheFilePath(userDataDir: string): string {
  * 会让 readFileSync 一直读到内存耗尽,FIFO 会让它**直接阻塞**——而这段代码跑在启动
  * 阻断路径上,阻塞等于启动卡死。
  *
- * 因此三道:
+ * 因此四道:
  *  1. `lstatSync` + `isFile()`:symlink / FIFO / 设备 / 目录全部在打开之前就拒掉
  *     (lstat 不跟随 symlink,对 symlink 而言 isFile() 为 false);
- *  2. 打开后用 `fstatSync` 复核类型与大小,并在两端 dev/ino 都可用时比对,**尽力**发现
+ *  2. **打开本身带 `O_NONBLOCK`**,这样即使 lstat 与 open 之间路径刚被换成 FIFO,
+ *     `openSync` 也会立刻返回而不是等一个 writer(见下);
+ *  3. 打开后用 `fstatSync` 复核类型与大小,并在两端 dev/ino 都可用时比对,**尽力**发现
  *     lstat 与 open 之间路径被替换的情况;
- *  3. 只读 fstat 报告的字节数,不给"打开后又变大"留口子。
+ *  4. 只读 fstat 报告的字节数,不给"打开后又变大"留口子。
  *
- * 第 2 条的措辞是刻意收紧的(review 指出过上一版说法过头):`fstatSync` 只能证明"我手上
+ * 第 2 条是 review 抓到的剩余缺口:第 1 道只关掉了"打开之前就是 FIFO"这一半,TOCTOU
+ * 窗口内被换上 FIFO 时,不带 O_NONBLOCK 的 `open(O_RDONLY)` 在 POSIX 下会**阻塞**到有
+ * writer 为止——而这段跑在启动阻断路径上,阻塞意味着连弹框都出不来。带上 O_NONBLOCK
+ * 后 open 立即成功,随后第 3 道的 `isFile()` 把这个 fd 拒掉。常规文件不受 O_NONBLOCK
+ * 影响,所以正常路径行为不变。Windows 上没有这个标志(常量缺失),退回 `'r'`——那边也
+ * 没有 FIFO 的 open 阻塞语义。
+ *
+ * 第 3 条的措辞是刻意收紧的(review 指出过上一版说法过头):`fstatSync` 只能证明"我手上
  * 这个 fd 是常规文件、多大",并不能证明 `openSync` 没有跟随一个在窗口内刚被换上的
  * symlink;dev/ino 比对能查出"打开的不是 lstat 看到的那个 inode",但 Node 没有跨平台的
  * `O_NOFOLLOW` 等价物,所以这不是密闭保证,只是让实现与声明一致。Windows 上 ino
  * 可能为 0,那种情况跳过比对。
  */
+function openReadOnlyNonBlocking(file: string): number {
+  const nonBlock = fs.constants.O_NONBLOCK;
+  if (typeof nonBlock === 'number' && nonBlock !== 0) {
+    return fs.openSync(file, fs.constants.O_RDONLY | nonBlock);
+  }
+  return fs.openSync(file, 'r');
+}
+
 function readRegularFileWithin(file: string, maxBytes: number): string | null {
   let fd: number | null = null;
   try {
     const pre = fs.lstatSync(file);
     if (!pre.isFile() || pre.size > maxBytes) return null;
-    fd = fs.openSync(file, 'r');
+    fd = openReadOnlyNonBlocking(file);
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size > maxBytes) return null;
     // best-effort:两端 ino 都拿得到才比对(Windows 上可能是 0)。

@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   CROSS_REGION_ENDPOINT_KEYS,
@@ -273,6 +273,25 @@ describe('缓存读取只接受常规文件(阻断路径不能被挂住)', () =>
     const startedAt = Date.now();
     expect(readEndpointManifestCache(dir)).toBeNull();
     expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
+  it('lstat 通过之后路径才变成 FIFO(TOCTOU 窗口)时,open 也不阻塞', () => {
+    // review 抓到:lstat 那道只挡住"打开前就是 FIFO";窗口内被换上 FIFO 时,
+    // 不带 O_NONBLOCK 的 open(O_RDONLY) 在 POSIX 下会等到有 writer 为止 —— 而这段
+    // 跑在启动阻断路径上,等于连弹框都出不来。这里把 lstat 结果伪造成常规文件来
+    // 精确复现那个窗口:实现必须靠 O_NONBLOCK + fstat 复核活着回来。
+    const mkfifo = spawnSync('mkfifo', [cacheFile()]);
+    if (mkfifo.status !== 0) return; // 平台没有 mkfifo(Windows)时跳过
+    const spy = vi
+      .spyOn(fs, 'lstatSync')
+      .mockReturnValue({ isFile: () => true, size: 16, ino: 0, dev: 0 } as unknown as fs.Stats);
+    try {
+      const startedAt = Date.now();
+      expect(readEndpointManifestCache(dir)).toBeNull();
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

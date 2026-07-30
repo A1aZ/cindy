@@ -951,6 +951,73 @@ describe('netlog 抓取(captureNetLogAround)', () => {
     expect(calls).toBe(2); // NETLOG_STOP_ATTEMPTS
   });
 
+  it('前台重试耗尽后由后台定时重试兜底,直到确认停止', async () => {
+    // review 抓到:前台重试有界,耗尽后如果没有新的触发点,一次没停下的**进程级**抓包
+    // 就会继续录启动后的全部流量、文件无界增长。后台重试不占启动路径,但保证有人收尾。
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const stopLogging = vi.fn(async () => {
+        calls += 1;
+        if (calls < 4) throw new Error('stop boom');
+        return undefined;
+      });
+
+      const pending = captureNetLogAround(
+        { startLogging: async () => {}, stopLogging },
+        '/tmp/n.json',
+        async () => {},
+        20,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await pending).toBe('/tmp/n.json');
+      expect(calls).toBe(2); // 前台预算就此用尽,启动流程不再多等
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(calls).toBe(3); // 后台第 1 次
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(calls).toBe(4); // 后台第 2 次成功
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(calls).toBe(4); // 停下之后不再排下一次
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('后台重试次数有界(不留永不停止的循环)', async () => {
+    vi.useFakeTimers();
+    try {
+      const stopLogging = vi.fn(async () => {
+        throw new Error('stop boom');
+      });
+      const pending = captureNetLogAround(
+        { startLogging: async () => {}, stopLogging },
+        '/tmp/n.json',
+        async () => {},
+        20,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      await pending;
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      // 2 次前台 + 12 次后台(NETLOG_BACKGROUND_STOP_ATTEMPTS),然后彻底停手并 warn。
+      expect(stopLogging).toHaveBeenCalledTimes(14);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('currentlyLogging=false 时不空转重试', async () => {
+    const stopLogging = vi.fn(async () => {});
+    const file = await captureNetLogAround(
+      { startLogging: async () => {}, stopLogging, currentlyLogging: false },
+      '/tmp/n.json',
+      async () => {},
+      20,
+    );
+    expect(file).toBe('/tmp/n.json');
+    expect(stopLogging).not.toHaveBeenCalled();
+  });
+
   it('stop 永不返回时不卡住,仍返回文件路径', async () => {
     const startedAt = Date.now();
     const file = await captureNetLogAround(

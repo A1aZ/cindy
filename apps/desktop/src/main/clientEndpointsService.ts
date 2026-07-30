@@ -625,6 +625,17 @@ const NETLOG_STEP_TIMEOUT_MS = 3_000;
  * 一次;但不能无限重试——那会把阻断框继续往后拖。
  */
 const NETLOG_STOP_ATTEMPTS = 2;
+/**
+ * 前台重试都没停下之后,**后台**继续尝试收尾的节奏与次数。
+ *
+ * 为什么必须有(review 抓到的第四条):前台重试是有界的,而 `withDeadline` 只解除我们的
+ * 等待——两次都超时后,一次进程级抓包就处在"还在录、且没有任何后续收尾触发点"的状态,
+ * 会把启动后的全部流量录进去、文件无界增长。所以耗尽前台预算后不是放弃,而是把收尾
+ * 挪到后台定时重试:启动流程一秒都不多等,抓包却仍然有人负责关掉。
+ * 定时器 unref,不拖住进程退出;次数同样有界(约 1 分钟),避免留下永不停止的循环。
+ */
+const NETLOG_BACKGROUND_STOP_DELAY_MS = 5_000;
+const NETLOG_BACKGROUND_STOP_ATTEMPTS = 12;
 
 /**
  * 准备一个可以安全交给 `netLog.startLogging()` 的 netlog 文件路径。
@@ -675,6 +686,12 @@ export function prepareEndpointNetLogFile(logDir: string | null): string | null 
 export interface NetLogLike {
   startLogging(file: string, options: { captureMode: 'default' }): Promise<void>;
   stopLogging(): Promise<unknown>;
+  /**
+   * Electron 的 `netLog.currentlyLogging`。用来在重试前确认"是不是其实已经停了",
+   * 避免对着一个早已停止的抓包空转重试。拿不到(测试注入的实现没提供)就按"可能还在录"
+   * 处理,继续重试——这个方向是安全的。
+   */
+  readonly currentlyLogging?: boolean;
 }
 
 /**
@@ -706,26 +723,70 @@ export async function captureNetLogAround(
   // 启动后的所有网络流量、文件无界增长(review 抓到的"收尾被锁死")。
   let stopped = false;
   let stopping = false;
+  let backgroundStopScheduled = false;
+
+  /** 一次有界的收尾尝试;确认停止(或抓包已经不在录)返回 true。 */
+  const tryStop = async (label: string): Promise<boolean> => {
+    if (netLogApi.currentlyLogging === false) {
+      stopped = true;
+      return true;
+    }
+    try {
+      await withDeadline(netLogApi.stopLogging(), stepTimeoutMs, 'netlog-stop');
+      stopped = true;
+      return true;
+    } catch (err) {
+      log.debug('netlog stopLogging did not settle (%s): %s', label, String(err));
+      return false;
+    }
+  };
+
+  /**
+   * 前台预算耗尽后的后台收尾:不 await,只保证"还有下一个触发点"。
+   * 定时器 unref,免得为了一次诊断抓包把进程退出拖住。
+   */
+  const scheduleBackgroundStop = (): void => {
+    if (stopped || backgroundStopScheduled) return;
+    backgroundStopScheduled = true;
+    let attempt = 0;
+    const tick = (): void => {
+      if (stopped) return;
+      attempt += 1;
+      void tryStop(`background attempt ${attempt}/${NETLOG_BACKGROUND_STOP_ATTEMPTS}`).then(
+        (ok) => {
+          if (ok) {
+            log.debug('netlog capture stopped by background retry (attempt %d)', attempt);
+            return;
+          }
+          if (attempt >= NETLOG_BACKGROUND_STOP_ATTEMPTS) {
+            log.warn(
+              'netlog capture may still be running: stopLogging never settled after %d background attempts',
+              attempt,
+            );
+            return;
+          }
+          arm();
+        },
+      );
+    };
+    const arm = (): void => {
+      const timer = setTimeout(tick, NETLOG_BACKGROUND_STOP_DELAY_MS);
+      timer.unref?.();
+    };
+    arm();
+  };
+
   const stopOnce = async (): Promise<void> => {
     if (stopped || stopping) return;
     stopping = true;
     try {
       for (let attempt = 0; attempt < NETLOG_STOP_ATTEMPTS; attempt += 1) {
-        try {
-          await withDeadline(netLogApi.stopLogging(), stepTimeoutMs, 'netlog-stop');
-          stopped = true;
-          return;
-        } catch (err) {
-          log.debug(
-            'netlog stopLogging did not settle (attempt %d/%d): %s',
-            attempt + 1,
-            NETLOG_STOP_ATTEMPTS,
-            String(err),
-          );
-        }
+        if (await tryStop(`attempt ${attempt + 1}/${NETLOG_STOP_ATTEMPTS}`)) return;
       }
-      // 两次都没停下:抓包可能还在跑,这比"收尾慢"严重,按 warn 记而不是 debug。
-      log.warn('netlog capture may still be running: stopLogging never settled');
+      // 前台两次都没停下:抓包可能还在跑,这比"收尾慢"严重,按 warn 记而不是 debug,
+      // 并把后续收尾交给后台重试(review 抓到:上一版到这里就彻底没有触发点了)。
+      log.warn('netlog capture still running after foreground stop attempts; retrying in background');
+      scheduleBackgroundStop();
     } finally {
       stopping = false;
     }

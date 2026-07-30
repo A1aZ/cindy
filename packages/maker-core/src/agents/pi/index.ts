@@ -275,11 +275,20 @@ export class PiAgent extends BaseAgent {
     await writePermissionFile();
 
     // MCP 桥:host 把 in-process MCP providers 暴露成 localhost streamable-HTTP。
+    // 传 session 身份(sessionId/workingDir/vendorOptions)让 host 在 bridge 上注册
+    // 身份 ctx + 给 server URL 打 `?session=` 路由 —— orca/会话身份类工具据此绑定
+    // 当前 pi 会话。disposeSessionCtx 在 close() 注销该注册(幂等)。
     let mcpBridge: PiExtraSpawnConfig['mcpBridge'] = null;
+    let disposeSessionCtx: (() => void) | undefined;
     if (this.deps.preparePiExtraSpawnConfig) {
       try {
-        const extra = await this.deps.preparePiExtraSpawnConfig(this.deps.mcpProviders ?? []);
+        const extra = await this.deps.preparePiExtraSpawnConfig(this.deps.mcpProviders ?? [], {
+          sessionId: opts.sessionId,
+          workingDir: opts.workingDir,
+          vendorOptions: opts.vendorOptions,
+        });
         mcpBridge = extra?.mcpBridge ?? null;
+        disposeSessionCtx = extra?.disposeSessionCtx;
       } catch (err) {
         this.deps.logger.error('pi MCP bridge prep failed, continuing without cindy tools', {
           message: err instanceof Error ? err.message : String(err),
@@ -361,76 +370,91 @@ export class PiAgent extends BaseAgent {
       },
     });
 
-    // Resume:pi 的会话钥匙是 session JSONL 绝对路径(get_state.sessionFile),
-    // 落库 sdk_session_id 存的就是它;切换失败走 invalid-resume CAS 协定。
-    if (opts.resumeSessionId) {
-      const switched = await proc.request({ type: 'switch_session', sessionPath: opts.resumeSessionId });
-      if (!switched.success) {
-        const mayFallback = (await opts.onInvalidResumeSession?.(opts.resumeSessionId)) ?? true;
-        if (!mayFallback) {
-          await proc.close();
-          throw new Error(`pi resume failed and fallback rejected: ${switched.error ?? 'unknown'}`);
-        }
-        this.deps.logger.warn('pi resume failed, starting fresh session', {
-          resumeSessionId: opts.resumeSessionId,
-          error: switched.error,
-        });
-      }
-    }
-
-    if (opts.effort) {
-      const resp = await proc.request({
-        type: 'set_thinking_level',
-        level: effortToPiThinkingLevel(opts.effort),
-      });
-      if (!resp.success) {
-        this.deps.logger.warn('pi set_thinking_level rejected', { effort: opts.effort, error: resp.error });
-      }
-    }
-
-    // 显式保证 auto-compaction 开 —— 这是"pi 保持轻上下文"的不变量:上下文接近满时
-    // pi 自动压缩(与 CC/Codex 一致)。pi 默认即开,这里显式化并兜底(幂等,失败不致命)。
-    {
-      const resp = await proc.request({ type: 'set_auto_compaction', enabled: true });
-      if (!resp.success) {
-        this.deps.logger.warn('pi set_auto_compaction failed (non-fatal)', { error: resp.error });
-      }
-    }
-
-    const state = await proc.request({ type: 'get_state' });
-    const stateData = (state.data ?? {}) as {
-      sessionFile?: string | null;
-      sessionId?: string;
-      model?: { contextWindow?: number } | null;
-    };
-    if (typeof stateData.model?.contextWindow === 'number' && stateData.model.contextWindow > 0) {
-      ctx.contextWindow = stateData.model.contextWindow;
-    }
-    const sdkSessionId = stateData.sessionFile || stateData.sessionId || `pi-${Date.now()}`;
-    queue.push({ type: 'session_id', data: sdkSessionId, source: 'pi' });
-
-    // plan 镜像与 pi 持久态对齐(resume 关键):pi 的 plan-mode 扩展在 session_start 会从
-    // session entry 自恢复 planModeEnabled,但不发 notify。若镜像固定为 false 而 pi 实为 true,
-    // 由于 /plan 是 toggle + setPlanMode 幂等短路,会导致方向反转或关不掉。故从 get_entries
-    // 读最后一条 plan-mode custom entry 的 enabled 校正镜像(get_entries 已验证暴露该 entry)。
-    if (planModeExtAvailable) {
-      try {
-        const entriesResp = await proc.request({ type: 'get_entries' });
-        const entries =
-          (entriesResp.data as { entries?: Array<{ customType?: string; data?: { enabled?: boolean } }> } | undefined)
-            ?.entries ?? [];
-        for (let i = entries.length - 1; i >= 0; i--) {
-          if (entries[i]?.customType === 'plan-mode') {
-            const enabled = entries[i]?.data?.enabled;
-            if (typeof enabled === 'boolean') planModeActive = enabled;
-            break;
+    // startSession 在把 handle 交给调用方之前若失败(resume 硬失败、启动期 RPC
+    // 超时/进程夭折等),close() 永远不会被调用。这里 try/catch 兜底:注销 bridge
+    // 身份注册(否则 ?session= ctx 泄漏)+ 关掉可能已 spawn 的子进程(否则僵尸 pi
+    // 仍持有本会话的 MCP 路由),再把原始错误抛给调用方。
+    let sdkSessionId = '';
+    try {
+      // Resume:pi 的会话钥匙是 session JSONL 绝对路径(get_state.sessionFile),
+      // 落库 sdk_session_id 存的就是它;切换失败走 invalid-resume CAS 协定。
+      if (opts.resumeSessionId) {
+        const switched = await proc.request({ type: 'switch_session', sessionPath: opts.resumeSessionId });
+        if (!switched.success) {
+          const mayFallback = (await opts.onInvalidResumeSession?.(opts.resumeSessionId)) ?? true;
+          if (!mayFallback) {
+            // proc 关闭 + ctx 注销由下面的 catch 统一处理,这里只抛。
+            throw new Error(`pi resume failed and fallback rejected: ${switched.error ?? 'unknown'}`);
           }
+          this.deps.logger.warn('pi resume failed, starting fresh session', {
+            resumeSessionId: opts.resumeSessionId,
+            error: switched.error,
+          });
         }
-      } catch (err) {
-        this.deps.logger.warn('pi plan-mode state sync failed (non-fatal)', {
-          message: err instanceof Error ? err.message : String(err),
-        });
       }
+
+      if (opts.effort) {
+        const resp = await proc.request({
+          type: 'set_thinking_level',
+          level: effortToPiThinkingLevel(opts.effort),
+        });
+        if (!resp.success) {
+          this.deps.logger.warn('pi set_thinking_level rejected', { effort: opts.effort, error: resp.error });
+        }
+      }
+
+      // 显式保证 auto-compaction 开 —— 这是"pi 保持轻上下文"的不变量:上下文接近满时
+      // pi 自动压缩(与 CC/Codex 一致)。pi 默认即开,这里显式化并兜底(幂等,失败不致命)。
+      {
+        const resp = await proc.request({ type: 'set_auto_compaction', enabled: true });
+        if (!resp.success) {
+          this.deps.logger.warn('pi set_auto_compaction failed (non-fatal)', { error: resp.error });
+        }
+      }
+
+      const state = await proc.request({ type: 'get_state' });
+      const stateData = (state.data ?? {}) as {
+        sessionFile?: string | null;
+        sessionId?: string;
+        model?: { contextWindow?: number } | null;
+      };
+      if (typeof stateData.model?.contextWindow === 'number' && stateData.model.contextWindow > 0) {
+        ctx.contextWindow = stateData.model.contextWindow;
+      }
+      sdkSessionId = stateData.sessionFile || stateData.sessionId || `pi-${Date.now()}`;
+      queue.push({ type: 'session_id', data: sdkSessionId, source: 'pi' });
+
+      // plan 镜像与 pi 持久态对齐(resume 关键):pi 的 plan-mode 扩展在 session_start 会从
+      // session entry 自恢复 planModeEnabled,但不发 notify。若镜像固定为 false 而 pi 实为 true,
+      // 由于 /plan 是 toggle + setPlanMode 幂等短路,会导致方向反转或关不掉。故从 get_entries
+      // 读最后一条 plan-mode custom entry 的 enabled 校正镜像(get_entries 已验证暴露该 entry)。
+      if (planModeExtAvailable) {
+        try {
+          const entriesResp = await proc.request({ type: 'get_entries' });
+          const entries =
+            (entriesResp.data as { entries?: Array<{ customType?: string; data?: { enabled?: boolean } }> } | undefined)
+              ?.entries ?? [];
+          for (let i = entries.length - 1; i >= 0; i--) {
+            if (entries[i]?.customType === 'plan-mode') {
+              const enabled = entries[i]?.data?.enabled;
+              if (typeof enabled === 'boolean') planModeActive = enabled;
+              break;
+            }
+          }
+        } catch (err) {
+          this.deps.logger.warn('pi plan-mode state sync failed (non-fatal)', {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    } catch (err) {
+      try {
+        disposeSessionCtx?.();
+      } catch {
+        /* best-effort:注销失败不掩盖原始启动错误 */
+      }
+      await proc.close().catch(() => {});
+      throw err;
     }
 
     const deps = this.deps;
@@ -473,6 +497,15 @@ export class PiAgent extends BaseAgent {
 
       async close(): Promise<void> {
         closed = true;
+        // 先注销 bridge 身份注册(幂等),再关子进程。放前面:即便 proc.close 抛错
+        // 也不泄漏 ctx —— 该 sessionId 的 `?session=` 路由必须随会话结束失效。
+        try {
+          disposeSessionCtx?.();
+        } catch (err) {
+          deps.logger.warn('pi disposeSessionCtx failed (non-fatal)', {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
         await proc.close();
       },
 

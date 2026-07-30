@@ -135,6 +135,6 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
     capabilityAdditions: opts.capabilityAdditions,
     mcpProviders: opts.mcpProviders,
     resolvePiAgentHome: () => path.join(app.getPath('userData'), 'pi-agent-home'),
-    preparePiExtraSpawnConfig: (providers) => getPiExtraSpawnConfig(providers, opts.logger),
+    preparePiExtraSpawnConfig: (providers, ctx) => getPiExtraSpawnConfig(providers, opts.logger, ctx),
   });
 }

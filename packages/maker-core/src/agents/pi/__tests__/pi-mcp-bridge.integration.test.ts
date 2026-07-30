@@ -122,6 +122,9 @@ describe.skipIf(!piAvailable)('PiAgent × cindy-bridge (real pi + MCP bridge + p
   const MCP_TOKEN = 'bridge-token-xyz';
   let agentHome = '';
   const echoCalls: Array<{ text: unknown }> = [];
+  // 记录假 MCP server 收到的请求 URL —— 断言真 pi(经 cindy-bridge fetch)把
+  // host 下发的 `?session=<id>` 原样带到每个 MCP 请求上(orca 身份路由的 pi 侧半)。
+  const seenMcpUrls: string[] = [];
 
   beforeAll(async () => {
     agentHome = mkdtempSync(path.join(tmpdir(), 'pi-mcp-int-'));
@@ -139,6 +142,7 @@ describe.skipIf(!piAvailable)('PiAgent × cindy-bridge (real pi + MCP bridge + p
 
     // 假 MCP server(streamable-HTTP + bearer + 单工具 echo),与 codexHttpBridge 同构。
     mcpHttp = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      seenMcpUrls.push(req.url ?? '');
       const auth = req.headers.authorization ?? '';
       if (auth !== `Bearer ${MCP_TOKEN}`) {
         res.writeHead(401).end('unauthorized');
@@ -187,9 +191,21 @@ describe.skipIf(!piAvailable)('PiAgent × cindy-bridge (real pi + MCP bridge + p
         ],
       },
       resolvePiAgentHome: () => agentHome,
-      // host MCP bridge 出口:直接指向本测试的假 MCP server。
-      preparePiExtraSpawnConfig: async () => ({
-        mcpBridge: { token: MCP_TOKEN, servers: [{ name: 'cindy_echo', url: mcpUrl }] },
+      // host MCP bridge 出口:指向本测试的假 MCP server。把 ctx.sessionId 打进
+      // `?session=` —— 既验 PiAgent.startSession 把 opts.sessionId 透传进 ctx,
+      // 又让假 server 能观察到真 pi 是否原样转发该 query(见 seenMcpUrls 断言)。
+      preparePiExtraSpawnConfig: async (_providers, ctx) => ({
+        mcpBridge: {
+          token: MCP_TOKEN,
+          servers: [
+            {
+              name: 'cindy_echo',
+              url: ctx?.sessionId
+                ? `${mcpUrl}?session=${encodeURIComponent(ctx.sessionId)}`
+                : mcpUrl,
+            },
+          ],
+        },
       }),
     };
   }
@@ -234,6 +250,7 @@ describe.skipIf(!piAvailable)('PiAgent × cindy-bridge (real pi + MCP bridge + p
     { timeout: 90_000 },
     async () => {
       echoCalls.length = 0;
+      seenMcpUrls.length = 0;
       const { events, permissionAsked } = await runOneTurn('ask', async (req) => {
         expect(req.kind).toBe('permission');
         if (req.kind === 'permission') {
@@ -245,6 +262,11 @@ describe.skipIf(!piAvailable)('PiAgent × cindy-bridge (real pi + MCP bridge + p
       expect(permissionAsked).toBe(true);
       expect(echoCalls.length).toBeGreaterThan(0);
       expect(echoCalls[0]?.text).toBe('hello-pi');
+
+      // 真 pi(经 cindy-bridge)必须把 host 下发的 `?session=<sessionId>` 原样带到
+      // MCP 请求上 —— 这是 orca 身份路由能在真 pi 上生效的 pi 侧前提。
+      expect(seenMcpUrls.length).toBeGreaterThan(0);
+      expect(seenMcpUrls.every((u) => u.includes('session=mcp-itest-ask'))).toBe(true);
 
       const finalText = events
         .filter((e) => e.type === 'text')

@@ -109,6 +109,29 @@ export interface PiExtraSpawnConfig {
     token: string;
     servers: Array<{ name: string; url: string }>;
   } | null;
+  /**
+   * 注销本 session 在 bridge 上注册的身份 ctx。PiAgent 在 close() 时调,幂等。
+   * 仅当本次带 sessionId 且 host 在 bridge 上做了 `?session=` 身份注册时才提供;
+   * 匿名会话 / 无 bridge → undefined(无需注销)。
+   */
+  disposeSessionCtx?: () => void;
+}
+
+/**
+ * pi MCP 桥的 per-session 身份上下文(host 用它在 bridge 上注册当前 pi 会话)。
+ *
+ * 为什么需要:pi 是独立子进程,其 MCP 请求不带 codex 那样的 _meta.threadId。控制类
+ * 工具(orca start_team/create_worker、会话身份类)靠 `getLiziMcpSessionContext()`
+ * 拿"当前是哪个 session";没有身份注册时该 ctx 为空,工具回落 LEAD_NOT_SUPPORTED。
+ * host 据此把 sessionId 注册到 bridge 并给该 session 的 server URL 打 `?session=`
+ * 路由 —— 与远端 Claude Code 的身份通道同机制。
+ *
+ * sessionId 缺省 → host 不注册、URL 不带 query(匿名会话走无 ctx 兜底,行为同改动前)。
+ */
+export interface PiExtraSpawnConfigContext {
+  sessionId?: string;
+  workingDir: string;
+  vendorOptions?: Record<string, unknown>;
 }
 
 export interface CodexExtraSpawnConfig {
@@ -200,8 +223,15 @@ export interface AgentDeps {
    * agentHome/extensions/cindy-bridge.ts,由它在 pi 内注册成工具。
    *
    * 缺省 / 返回 null → pi 跑纯内置工具(read/bash/edit/write),仍能基础对话。
+   *
+   * ctx(可选):本次 session 的身份上下文。host 用它在 bridge 上注册 sessionId +
+   * 给该 session 的 server URL 打 `?session=` 路由,让 orca / 会话身份类工具能绑定
+   * 到当前 pi 会话(否则回落 LEAD_NOT_SUPPORTED)。缺省 → 匿名注入(无 ctx 兜底)。
    */
-  preparePiExtraSpawnConfig?: (providers: McpProvider[]) => Promise<PiExtraSpawnConfig | null>;
+  preparePiExtraSpawnConfig?: (
+    providers: McpProvider[],
+    ctx?: PiExtraSpawnConfigContext,
+  ) => Promise<PiExtraSpawnConfig | null>;
 
   /**
    * Host-provided capability descriptor additions.

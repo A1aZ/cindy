@@ -135,7 +135,14 @@ export interface ModelDescriptor {
   id: string;
   displayName: string;
   description?: string;
-  /** 上下文窗口大小 (tokens), SDK result.modelUsage 缺值时的 fallback。 */
+  /**
+   * 上下文窗口大小 (tokens), SDK result.modelUsage 缺值时的 fallback。
+   *
+   * **只用于展示与兜底,不要拿它去收敛运行期上报的窗口**: 这张清单是跨 provider 去重后的
+   * 扁平表, 同一 model id 由多个 provider 提供时归属已丢, 而且这里的值可能是派生时补的
+   * 兜底常量(上游不给元数据时)。收敛需要「该路由已核实的上限」,走
+   * AgentDeps.resolveVerifiedContextWindow。
+   */
   contextWindow: number;
   /** 该模型支持的 effort 列表; 空数组表示不支持 effort 切换 (如 Haiku)。 */
   efforts: readonly Effort[];

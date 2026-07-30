@@ -4735,6 +4735,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
       input: import('../shared/helpTypes').HelpFeedbackDraftInput,
     ): Promise<import('../shared/helpTypes').HelpFeedbackDraft> =>
       ipcRenderer.invoke('maker:help:feedback:create', input),
+    // /issues 页面的「我的 Issue」列表;force=true 绕过 main 侧 60s TTL(手动刷新)。
+    listMyIssues: (
+      options?: { force?: boolean },
+    ): Promise<
+      | ({ success: true } & import('../shared/myIssues').MyIssuesResult)
+      | {
+          success: false;
+          /** 稳定脱敏码,不是原始错误文本。 */
+          error: import('../shared/myIssues').MyIssuesErrorCode;
+          items: [];
+          githubEnhancement: null;
+          degraded: null;
+          truncated: false;
+        }
+    > => ipcRenderer.invoke('maker:issues:list-mine', options ?? {}),
     writePlanFile: (params: {
       requestId: string;
       planFilePath: string;

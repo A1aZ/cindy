@@ -1365,6 +1365,11 @@ cindy.onHostMessage(async function (msg) {
 - 卡片上方主机画一枚小 chip(你的头像 + 名字 + 运行/完成状态点;可点开看本次
   调用参数),你画不了也冒充不了——它是"这块内容由某意识渲染"的信任签名;chip
   以下整块画布归你,主机不再叠边框/底色/内边距;
+- **不铺底色 = 真透明**(全出血海报的推荐姿势):主机不叠底色,同时在上面那段注入块
+  里声明了 \`color-scheme: light|dark\`(跟宿主主题实时切),卡片画布因此在两种模式下
+  都是透明的、直接透出聊天背景。所以图片顶满卡片、四边不留边是安全的,**不需要**
+  为了"避免白底"去自己铺一层 \`--msg-tool-card-bg\`;反过来,别自己写死
+  \`color-scheme\`,那会让卡内原生控件在另一种模式下反档;
 - 供卡的调用,聊天不再渲染 \`xdt_image_urls\` 的通用图卡(被你的卡替换);其它
   工具/其它调用不受影响。**但 \`xdt_image_urls\` 本身仍必须照发**(数据通道,
   IM/远程会话出站与手机端靠它),图画进卡时结果带 \`xdt_images_in_card: true\`
@@ -2527,6 +2532,10 @@ const ensured = await cindy.workspace({
   \`var(--surface, #f7f7f5)\`、\`var(--text-primary, #1a1a1a)\`、
   \`var(--border-default, #e4e4e0)\`;面板/侧边栏背景用 \`--panel-bg\`(已注册,
   alias 到 --surface,与宿主面板同源);
+- **明暗档主机已代你声明**:注入块里带了 \`color-scheme: light|dark\`(跟宿主主题
+  实时切),所以你不写一行样式,原生控件(滚动条、\`<input>\`/\`<select>\`/复选框、
+  日期选择器)也会落在正确的明暗档上。别自己写死 \`color-scheme\`,否则暗色主题下
+  这些控件会反档;真要覆盖就跟着主机主题一起换;
 - 滚动条统一规范:12px 槽 + 6px 圆角 thumb,滚动时加 \`.is-scrolling\` 显形
   (颜色用 \`var(--msg-scrollbar)\` / \`var(--msg-scrollbar-hover)\`),2 秒无活动移除。
 

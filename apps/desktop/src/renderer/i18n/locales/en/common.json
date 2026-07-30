@@ -7548,7 +7548,7 @@
     }
   },
   "billing": {
-    "sidebar": "Balance & plans",
+    "sidebar": "Balance & Plans",
     "settings": {
       "title": "Usage and billing",
       "subscriptionCard": {
@@ -7577,20 +7577,20 @@
         "cancelFailed": "Could not cancel the subscription. Try again later."
       },
       "topupCard": {
-        "action": "Add funds"
+        "action": "Add Funds"
       }
     },
     "balance": {
       "title": "Available balance",
-      "plan": "Plan balance",
-      "purchased": "Top-up balance",
-      "promotional": "Promotional balance",
+      "plan": "Plan Balance",
+      "purchased": "Top-up Balance",
+      "promotional": "Promotional Balance",
       "notProvisioned": "Balance has not been enabled for this account.",
       "notSupported": "Balance lookup is not supported for this account.",
       "unavailable": "Balance is temporarily unavailable. Refresh to try again."
     },
     "usage": {
-      "title": "Balance usage",
+      "title": "Balance Usage",
       "observedAt": "Balance updated {{date}}",
       "poolDetail": "Used {{used}} · Total {{total}}",
       "remaining": "Remaining",
@@ -7603,7 +7603,7 @@
         "count": "{{count}} grants",
         "empty": "No promotional grants are available.",
         "incomplete": "There are many grant records. Only the latest {{count}} are shown.",
-        "unnamed": "Promotional grant",
+        "unnamed": "Promotional Grant",
         "original": "Original",
         "used": "Used",
         "remaining": "Remaining",
@@ -7621,7 +7621,7 @@
         "title": "Choose a subscription plan"
       },
       "topup": {
-        "title": "Add funds"
+        "title": "Add Funds"
       }
     },
     "steps": {
@@ -7691,7 +7691,7 @@
       "failedTitle": "Unable to complete",
       "expiredTitle": "Payment expired",
       "canceledTitle": "Payment canceled",
-      "topupSubtitle": "Balance top-up",
+      "topupSubtitle": "Balance Top-up",
       "subscriptionSubtitle": "Subscription",
       "creatingBody": "Confirming the order with the payment service…",
       "qrAlt": "Payment QR code",

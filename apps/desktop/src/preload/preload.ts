@@ -2379,18 +2379,37 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onNotificationFocusSession: fanOutNotificationFocusSession,
 
   // RSB web-browser plugin popup 路由 — main 端 webview-security 推送
-  // `{ url, disposition }`,renderer 端 RightSidebarShell 订阅 → addTab。
+  // `{ url, disposition, openerTabId?, openerSessionId? }`,renderer 端
+  // RightSidebarShell 订阅 → addTab(落进 opener 所属 session 的 bucket)。
   onRsbBrowserPopup: (
-    callback: (payload: { url: string; disposition: string }) => void,
+    callback: (payload: {
+      url: string;
+      disposition: string;
+      openerTabId?: string;
+      openerSessionId?: string;
+    }) => void,
   ): (() => void) =>
     fanOutRsbBrowserPopup((payload) => {
-      if (
-        payload &&
-        typeof payload === 'object' &&
-        typeof (payload as { url?: unknown }).url === 'string'
-      ) {
-        callback(payload as { url: string; disposition: string });
-      }
+      // 形状校验后才回调:opener 字段直接进 renderer 的分支(ensureHydrated /
+      // addTab 目标 session),异常 payload 拒收而不是让运行时错误往上冒。
+      if (!payload || typeof payload !== 'object') return;
+      const p = payload as {
+        url?: unknown;
+        disposition?: unknown;
+        openerTabId?: unknown;
+        openerSessionId?: unknown;
+      };
+      if (typeof p.url !== 'string' || typeof p.disposition !== 'string') return;
+      if (p.openerTabId !== undefined && typeof p.openerTabId !== 'string') return;
+      if (p.openerSessionId !== undefined && typeof p.openerSessionId !== 'string') return;
+      callback(
+        p as {
+          url: string;
+          disposition: string;
+          openerTabId?: string;
+          openerSessionId?: string;
+        },
+      );
     }),
 
   // RSB web-browser plugin:guest webview 内 Cmd/Ctrl+L 命中 → 让 active 的

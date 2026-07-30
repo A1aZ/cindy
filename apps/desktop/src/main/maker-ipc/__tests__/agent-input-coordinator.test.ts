@@ -2021,7 +2021,7 @@ describe('AgentInputCoordinator send transaction', () => {
     // 重发的是原文, 文本上与普通用户消息无异 —— 所以「用户显式重试」只能靠这个
     // 回调传出去。hook 侧的渠道回流(turn.reopen)依赖它: 零产出失败恰是上游过载
     // 最典型的形态, 也最需要把结果接回渠道那条消息。
-    expect(h.onUiRetry).toHaveBeenCalledWith(sid);
+    expect(h.onUiRetry).toHaveBeenCalledWith(sid, expect.any(String));
   });
 
   it('signals an explicit UI retry on both retry shapes (continue prompt and original resend)', async () => {
@@ -2041,7 +2041,7 @@ describe('AgentInputCoordinator send transaction', () => {
       expect(h.onUiRetry).not.toHaveBeenCalled();
       await h.coordinator.retryLastError(sid);
       await flush();
-      expect(h.onUiRetry).toHaveBeenCalledWith(sid);
+      expect(h.onUiRetry).toHaveBeenCalledWith(sid, expect.any(String));
       expect(h.onUiRetry).toHaveBeenCalledTimes(1);
     }
   });
@@ -2065,7 +2065,7 @@ describe('AgentInputCoordinator send transaction', () => {
     await h.coordinator.retryLastError(sid);
     await flush();
 
-    expect(h.onUiRetry).toHaveBeenCalledWith(sid);
+    expect(h.onUiRetry).toHaveBeenCalledWith(sid, expect.any(String));
     expect(h.onUserEnqueue).not.toHaveBeenCalled();
   });
 

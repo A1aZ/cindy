@@ -517,9 +517,10 @@ import {
   SilentStopAutoResumeGuard,
 } from './silentStopAutoResume.js';
 import {
-  noteUserMessageForContinuation,
   publishUiContinuation,
   publishUiSessionIntervention,
+  publishUiTurnDispatching,
+  publishUiTurnUndispatched,
 } from './uiContinuationSignal.js';
 import { readSilentStopAutoResumeSettings } from '../maker-host/silent-stop-auto-resume-store.js';
 import {
@@ -6617,17 +6618,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     bootstrapSession,
     markOrcaRoleIfNeeded,
     broadcastSessionCreated,
-    prepareSendUserMessage: (sessionId, message) => {
-      // 「用户在桌面端点了错误横幅的重试 / 中断横幅的继续任务」信号。发在这里
-      // 而不是 createDbMessage: 这一步在 sess.send 之前, hook 侧的续跑观察器能
-      // 赶在首个事件之前挂上监听, 不丢正文开头。判定只认那两条隐藏续跑指令,
-      // 桌面端在同一会话里聊的其它内容不会把渠道消息改写掉(见该模块注释)。
-      noteUserMessageForContinuation(
-        sessionId,
-        (message as { content?: unknown } | null)?.content,
-      );
-      return prepareUserMessageForAgent(sessionId, message, 'send');
-    },
+    prepareSendUserMessage: (sessionId, message) =>
+      prepareUserMessageForAgent(sessionId, message, 'send'),
     createDbMessage: async (sessionId, message, opts) => {
       // 真实用户消息(renderer 发送事务)→ 给 silent-stop 守卫充值自动续跑额度。
       // 自动补发的「继续」不走本路径(直接 session.send),不会自我充值。
@@ -6990,8 +6982,19 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }),
     onUserMessageRewritten: (sessionId, item, info) =>
       broadcastGhostMessageRewritten({ sessionId, clientId: item.clientId, ...info }),
-    beforeDispatchUserTurn: (sessionId) => gitSnapshotCoordinator?.onTurnStart(sessionId),
-    onUndispatchedUserTurn: (sessionId) => gitSnapshotCoordinator?.onTurnAbort(sessionId),
+    beforeDispatchUserTurn: (sessionId, item) => {
+      // hook 续跑回流的**权威归属点**: 在 vendor dispatch 之前(本回调被 await), 所以
+      // 观察器挂上就不丢正文开头, 而 live session 此刻必然已就绪。clientId 对得上的
+      // 才是目标续跑轮 —— 绕过 coordinator 的 turn(silent-stop 自动续跑)不走这里,
+      // 结构上不可能被误认。详见 uiContinuationSignal 的模块注释。
+      publishUiTurnDispatching(sessionId, item.clientId);
+      return gitSnapshotCoordinator?.onTurnStart(sessionId);
+    },
+    onUndispatchedUserTurn: (sessionId, item) => {
+      // 目标轮落库了却没能 dispatch(取消 / 失败): 记账该立刻还回去, 而不是等超时。
+      publishUiTurnUndispatched(sessionId, item.clientId);
+      gitSnapshotCoordinator?.onTurnAbort(sessionId);
+    },
     // Thread 3 fix: called from drain/dispatchCompact failure paths where the item
     // was removed from the queue but not put back (persisted-failure case). If no
     // other work is pending, any deferred completion must be replayed so Agent

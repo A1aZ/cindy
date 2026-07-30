@@ -205,7 +205,7 @@ export interface AgentInputCoordinatorDeps {
    * 克隆重发原文 —— 那条消息文本上与普通用户消息毫无区别, 从文本无法认出重试意图。
    * 只靠文本嗅探会让最需要回流的那类失败恰好没有信号。
    */
-  onUiRetry?: (sessionId: string) => void;
+  onUiRetry?: (sessionId: string, clientId: string) => void;
   /**
    * 用户/上游把一条**新**消息排进了这个会话(enqueue 入口)。
    *
@@ -784,11 +784,14 @@ export class AgentInputCoordinator {
     // 东西, 若在它上面作废记账, 一条延迟到达的旧重传就会把之后才装上的、更新的那笔
     // 待续跑记账删掉, 于是下一次显式重试跑成了却不回流。
     //
-    // 续跑指令本身豁免: 中断横幅「继续任务」由 renderer 直发
-    // CONTINUE_AFTER_APP_EXIT_PROMPT, 它**先**经本入口、之后才在 drain 时被
-    // prepareSendUserMessage 认成续跑 —— 无条件作废会把它自己的记账删掉, 于是那条
-    // 续跑跑成了却不回流。(错误横幅那条走 retryLastError, 压根不经本入口。)
-    if (item.originalSyntheticTrigger !== 'continue') {
+    // 续跑指令走的是另一条语义: 中断横幅「继续任务」由 renderer 直发
+    // CONTINUE_AFTER_APP_EXIT_PROMPT 并经本入口入队。它不是"无关的新消息"(那会作废
+    // 渠道回流的记账), 而**就是**一次续跑意图 —— 所以在这里发续跑信号并带上 clientId,
+    // 让消费方按 clientId 做权威归属(见 deps.onUiRetry 的说明)。
+    // (错误横幅那条走 retryLastError, 压根不经本入口。)
+    if (item.originalSyntheticTrigger === 'continue') {
+      this.deps.onUiRetry?.(sessionId, item.clientId);
+    } else {
       this.deps.onUserEnqueue?.(sessionId);
     }
     // 崩溃恢复暂停队列的死锁解除(2026-07-14):恢复暂停只防"重启后自动替用户
@@ -1399,7 +1402,10 @@ export class AgentInputCoordinator {
       // queue-head recovery 刻意不发: 那条消息在**派发前**就失败了(它自己从未成为
       // 一个 turn), 与之前失败的 hook turn 无关。同一会话若还留着上一次渠道失败的
       // 待续跑记账, 在那上面发信号会让一条无关的排队桌面消息认领并改写那条旧消息。
-      this.deps.onUiRetry?.(sessionId);
+      //
+      // 带上这条重试消息的 clientId: 消费方(hook-control)用它做**权威归属** ——
+      // 只有 clientId 对得上的那次 dispatch 才是目标续跑轮, 不再靠"首个事件"猜。
+      this.deps.onUiRetry?.(sessionId, item.clientId);
     }
     this.touchUserSend(sessionId);
     this.emit(sessionId);

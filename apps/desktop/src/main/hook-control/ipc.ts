@@ -30,6 +30,8 @@ import { prepareHandoffWorktree } from '../maker-ipc/handoffWorktree.js';
 import {
   onUiContinuation,
   onUiSessionIntervention,
+  onUiTurnDispatching,
+  onUiTurnUndispatched,
 } from '../maker-ipc/uiContinuationSignal.js';
 import { throwIpcError, requireObject, requireString } from '../utils/ipcValidate.js';
 import {
@@ -336,6 +338,8 @@ function ensureInstances(): { store: SlackHookStore; manager: HookControlManager
       // (turn.reopen, 协议第 14 条)。信号由 maker 的发送事务发布。
       subscribeUiContinuation: onUiContinuation,
       subscribeUiSessionIntervention: onUiSessionIntervention,
+      subscribeUiTurnDispatching: onUiTurnDispatching,
+      subscribeUiTurnUndispatched: onUiTurnUndispatched,
       accountInitiallyActive: false,
       log,
     });

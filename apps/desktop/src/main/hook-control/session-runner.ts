@@ -215,25 +215,15 @@ function broadcastSessionCreated(sessionId: string): void {
 const TURN_HARD_TIMEOUT_MS = 60 * 60_000;
 
 /**
- * 续跑观察的空转兜底: 收到信号后等多久还没有任何事件就放弃认领。
+ * 续跑观察的空转兜底: 已经认领了、agent 却一个事件都没发出来。
  *
- * 桌面端的续跑发送可能根本没被接受(排队被挡 / 凭证切换 / 会话被关), 那时一个
- * 事件都不会来。取值要盖住"冷 resume + 首 token"的最坏情况(重开 CLI 子进程、
- * 恢复大 transcript), 又不能长到让记账与监听白挂 —— 2 分钟。放弃是安全方向:
- * 渠道那条消息保持原样(与本改动之前完全一致)。
+ * dispatch 已经不可逆(本观察挂在 beforeDispatchUserTurn 里), 所以正常情况下必有事件;
+ * 这条只兜"vendor 接了活却彻底静默"。取值要盖住"冷 resume + 首 token"的最坏情况
+ * (重开 CLI 子进程、恢复大 transcript), 又不能长到让监听白挂 —— 2 分钟。
+ * 触发即按失败收口, 渠道那条消息不会停在假的"进行中"。
  */
 const CONTINUATION_IDLE_TIMEOUT_MS = 2 * 60_000;
 
-/**
- * 续跑观察挂载前等待 live session 出现的窗口。
- *
- * 失败的那一轮若同时终止了 CLI 流 / 远端 daemon, maker 会先移除 session, 而重试信号
- * 是 coordinator 在真正 drain 那条消息**之前**同步发的 —— 替代实例还没被 lazy-create。
- * 立刻判死会把回流丢掉(记账一次性, 且零产出重试重发原文、后面不会再有可识别信号)。
- * 窗口只需盖住"排队 + 建实例"这点时间, 取 5s; 到点仍没有就是真的没起来。
- */
-const CONTINUATION_SESSION_WAIT_MS = 5_000;
-const CONTINUATION_SESSION_POLL_MS = 100;
 
 /**
  * 从 tool_result 全文抽出可外发的 xdt-image URL —— 与 IM turnRunner 的
@@ -947,42 +937,17 @@ export function createMakerHookSessionRunner(deps: {
     },
 
     watchContinuation(req) {
-      // live session 可能**暂时**不存在: 失败的那一轮若同时终止了 CLI 流 / 远端
-      // daemon, maker 会先把 session 移除, 而重试信号是 coordinator 在真正 drain
-      // 那条消息**之前**同步发的 —— 此刻替代实例还没被 lazy-create。这里立刻放弃
-      // 就等于把回流丢掉: 记账是一次性的, 而零产出重试重发的是原文, 后面不会再有
-      // 可识别的信号。所以短暂等一会儿再判死。
-      const live = getMaker().getSession(req.sessionId);
-      if (live) return beginContinuationWatch(live, req, log);
-
-      let cancelled = false;
-      let waited = 0;
-      let inner: (() => void) | null = null;
-      const poll = setInterval(() => {
-        if (cancelled) {
-          clearInterval(poll);
-          return;
-        }
-        const s = getMaker().getSession(req.sessionId);
-        if (s) {
-          clearInterval(poll);
-          inner = beginContinuationWatch(s, req, log);
-          return;
-        }
-        waited += CONTINUATION_SESSION_POLL_MS;
-        if (waited >= CONTINUATION_SESSION_WAIT_MS) {
-          clearInterval(poll);
-          // 真的没起来(会话被关掉 / 换账号): 事件流无从观察, 静默退场。
-          req.onAbandon();
-        }
-      }, CONTINUATION_SESSION_POLL_MS);
-      poll.unref?.();
-
-      return () => {
-        cancelled = true;
-        clearInterval(poll);
-        inner?.();
-      };
+      // 归属已由 dispatcher 用 clientId 确认(见 uiContinuationSignal), 且本调用发生在
+      // vendor dispatch **之前** —— live session 必然已就绪, 不需要等它出现, 也不需要
+      // 靠"首个事件"猜这一轮是不是目标轮。
+      const session = getMaker().getSession(req.sessionId);
+      if (!session) {
+        // 理论上不该发生(马上就要 dispatch)。保守放弃, 让 dispatcher 把记账还回去。
+        log.warn(`hook continuation: live session vanished right before dispatch (${req.sessionId})`);
+        req.onAbandon();
+        return () => undefined;
+      }
+      return beginContinuationWatch(session, req, log);
     },
   };
 }
@@ -1029,17 +994,16 @@ function beginContinuationWatch(
         // 认领之前不发进度: 那时 server 还没把这条消息挂到新 requestId 上。
         if (claimed) req.onProgress(text);
       },
-      onFirstEvent: () => {
-        if (settled) return;
-        claimed = true;
-        if (idleTimer) clearTimeout(idleTimer);
-        idleTimer = undefined;
-        req.onClaim();
-      },
       onToolResult: (fullText) => collectOutboundImages(fullText, extraImageAbsPaths, log),
       onSilentStopSettled,
       log,
     });
+
+    // **立刻认领**: 归属已由 clientId 确认, 且 dispatch 即将不可逆 —— 不需要再等首个
+    // 事件来判断"这一轮到底是不是目标轮"。早先那套(等首个事件)恰恰是误认的来源:
+    // 会话级观察器分不清事件属于哪条用户消息, 绕过 coordinator 的 turn 会顶替进来。
+    claimed = true;
+    req.onClaim();
 
     /** 收口一次(幂等)。errorMessage 非空 = 这一轮失败。 */
     const settle = (errorMessage: string | null): void => {
@@ -1081,7 +1045,10 @@ function beginContinuationWatch(
       })();
     };
 
-    idleTimer = setTimeout(() => settle(null), CONTINUATION_IDLE_TIMEOUT_MS);
+    idleTimer = setTimeout(
+      () => settle(`hook continuation idle timeout (${CONTINUATION_IDLE_TIMEOUT_MS}ms)`),
+      CONTINUATION_IDLE_TIMEOUT_MS,
+    );
     idleTimer.unref?.();
     hardTimer = setTimeout(
       () => settle(`hook continuation hard timeout (${TURN_HARD_TIMEOUT_MS}ms)`),

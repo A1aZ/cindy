@@ -33,25 +33,6 @@ import {
 } from '../im/shared/turnActivity.js';
 import { overloadFailureNotice, overloadRetryNotice } from '../im/shared/turnRetryNotice.js';
 
-/**
- * 可归因于「这一轮 turn」的事件类型 —— onFirstEvent 只在它们上触发。
- *
- * session 的事件流里混着账号级 fan-out(如 account_usage, 见 usageBroadcaster):
- * 一个空闲 Codex 会话在观察器挂上后、排队的重试还没开跑时就可能发一条。若把它当成
- * 首个事件, 续跑观察会立刻认领渠道那条消息(改成"进行中")并撤掉 2 分钟空转兜底 ——
- * 万一那次重试随后被挡, 消息就假"进行中"直到 1 小时硬超时。
- * 这里列的正是本观察器真正消费的那些类型(其余一律忽略)。
- */
-const TURN_ATTRIBUTABLE_EVENTS: ReadonlySet<string> = new Set([
-  'text',
-  'thinking',
-  'tool_use',
-  'tool_result_full',
-  'error',
-  'done',
-  'agent_task_update',
-]);
-
 /** 后台 subagent 事件静默兜底(同 scheduler BG_TASK_IDLE_FALLBACK_MS 语义)。 */
 const BG_TASK_IDLE_FALLBACK_MS = 10 * 60_000;
 
@@ -143,15 +124,6 @@ export interface HookTurnObserverDeps {
   answerOnlyProgress: boolean;
   /** 渲染快照出口(turn.progress); 省略 = 不发进度, 零开销路径。 */
   onProgress?: (text: string) => void;
-  /**
-   * 本 turn 的**第一个**有意义事件到达时回调一次。
-   *
-   * 续跑观察器靠它决定"什么时候才认领渠道那条消息": 桌面端的续跑发送可能根本
-   * 没被接受(排队被挡 / 凭证切换), 那时一个事件都不会来。先认领再发现没动静,
-   * 渠道消息就会永远停在假的"进行中"上; 等第一个事件到了再认领, 没起来的话
-   * 观察器静默自撤, 消息保持原状(与本改动之前完全一致)。
-   */
-  onFirstEvent?: () => void;
   /** tool_result 全文旁路(出站图片收集留在调用方, 观察器不碰 IO)。 */
   onToolResult?: (fullText: string) => void;
   /** silent-stop 自动续跑守卫的 settle 订阅(生产为 maker-ipc 的同名函数)。 */
@@ -176,8 +148,7 @@ export function observeHookTurn(
   session: ObservableSession,
   deps: HookTurnObserverDeps,
 ): HookTurnObserver {
-  const { answerOnlyProgress, onProgress, onFirstEvent, onToolResult, onSilentStopSettled, log } =
-    deps;
+  const { answerOnlyProgress, onProgress, onToolResult, onSilentStopSettled, log } = deps;
   // 文本累积语义(2026-07-28 修订): translator 的 isFinal 是**逐条**
   // agent_message 的完成信号(每条完成都携带该条全文), 不是整个 turn 的
   // 终稿 —— 用它整体替换累积文本, 会让"先回一句 → 思考 → 终答"的多消息
@@ -198,7 +169,6 @@ export function observeHookTurn(
         : streamTail
       : finalizedText;
   };
-  let sawFirstEvent = false;
   // 进度快照(turn.progress 链路): 过程区时间线与 IM 流式卡同一套纯逻辑
   // (turnActivity), 合成规则同 composeStreamingView —— 有正文时过程区在
   // 上正文在下, done/error 后 stop, 不再发射。
@@ -246,10 +216,6 @@ export function observeHookTurn(
       bgFallbackTimer.unref?.();
     };
     const off = session.onEvent((ev: AgentEvent) => {
-      if (!sawFirstEvent && TURN_ATTRIBUTABLE_EVENTS.has(ev.type)) {
-        sawFirstEvent = true;
-        onFirstEvent?.();
-      }
       if (waitingForBgTasks) armBgTimer();
       if (ev.type === 'agent_task_update') {
         const data = ev.data as { taskId?: string; status?: string } | null;

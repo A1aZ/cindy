@@ -1662,21 +1662,16 @@ describe('watchContinuation: 观察桌面端续跑并回流', () => {
     for (let i = 0; i < times; i++) await Promise.resolve();
   }
 
-  it('会话一直不在进程里 -> 等满窗口才 onAbandon, 撤销函数不炸', () => {
-    vi.useFakeTimers();
-    try {
-      fakeMaker.getSession.mockReturnValue(undefined);
-      const runner = createMakerHookSessionRunner({ log });
-      const { req, events } = watchReq();
-      const cancel = runner.watchContinuation!(req as never);
-      // 立刻判死会把回流丢掉: 记账一次性, 而零产出重试重发原文、之后不会再有信号。
-      expect(events).toEqual([]);
-      vi.advanceTimersByTime(5_000);
-      expect(events).toEqual(['abandon']);
-      expect(() => cancel()).not.toThrow();
-    } finally {
-      vi.useRealTimers();
-    }
+  it('会话不在进程里 -> 立刻 onAbandon(dispatcher 会把记账还回去), 撤销函数不炸', () => {
+    // 本调用发生在 vendor dispatch **之前**, live session 正常必然已就绪, 所以这是
+    // 兜底而非常规路径。放弃是安全方向, 且 dispatcher 收到 onAbandon 会还记账 ——
+    // 不需要在这里等任何窗口(等待发生在"意图 -> dispatch"那一段, 由 dispatch 信号收口)。
+    fakeMaker.getSession.mockReturnValue(undefined);
+    const runner = createMakerHookSessionRunner({ log });
+    const { req, events } = watchReq();
+    const cancel = runner.watchContinuation!(req as never);
+    expect(events).toEqual(['abandon']);
+    expect(() => cancel()).not.toThrow();
   });
 
   it('live session 跑在已撤销的目录里 -> 不观察(记账里的目录不算权威)', () => {
@@ -1694,57 +1689,17 @@ describe('watchContinuation: 观察桌面端续跑并回流', () => {
     expect(() => cancel()).not.toThrow();
   });
 
-  it('账号级事件(account_usage)不算首个 turn 事件 -> 不认领', () => {
-    // session 事件流里混着账号级 fan-out。空闲 Codex 会话在观察器挂上后、排队的重试
-    // 还没开跑时就可能发一条 —— 若把它当成首个事件, 渠道消息会立刻被改成"进行中"
-    // 并撤掉 2 分钟空转兜底, 万一那次重试随后被挡就假"进行中"到 1 小时硬超时。
-    fakeMaker.getSession.mockReturnValueOnce(makeManualSession('sess-live'));
-    const runner = createMakerHookSessionRunner({ log });
-    const { req, events } = watchReq();
-    runner.watchContinuation!(req as never);
-
-    const cb = h.eventCbs.get('sess-live')!;
-    cb({ type: 'account_usage', data: { credits: 1 } });
-    expect(events).toEqual([]);
-    // 真正属于这一轮的事件才认领。
-    cb({ type: 'text', data: { text: '继续', isFinal: false } });
-    expect(events).toEqual(['claim']);
-  });
-
-  it('会话在等待窗口内被 lazy-create -> 照常挂上观察, 不丢这一轮', () => {
-    // 失败的那一轮若同时终止了 CLI 流 / 远端 daemon, maker 会先移除 session, 而重试
-    // 信号是 coordinator 在真正 drain 之前同步发的 —— 替代实例还没建出来。
-    vi.useFakeTimers();
-    try {
-      fakeMaker.getSession.mockReturnValueOnce(undefined);
-      fakeMaker.getSession.mockReturnValue(makeManualSession('sess-live'));
-      const runner = createMakerHookSessionRunner({ log });
-      const { req, events } = watchReq();
-      runner.watchContinuation!(req as never);
-      expect(events).toEqual([]);
-
-      vi.advanceTimersByTime(100);
-      // 观察器已挂上(还没认领 —— 认领要等首个事件)。
-      expect(events).toEqual([]);
-      h.eventCbs.get('sess-live')!({ type: 'text', data: { text: '继续', isFinal: false } });
-      expect(events).toEqual(['claim']);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('首个事件才认领; 收口带最终正文', async () => {
+  it('挂上即认领; 收口带最终正文', async () => {
+    // 归属已由 clientId 在 dispatch 前确认(见 uiContinuationSignal), 所以不必再等
+    // 首个事件来判断"这一轮是不是目标轮" —— 那套等待恰恰是误认的来源。
     fakeMaker.getSession.mockReturnValueOnce(makeManualSession('sess-live'));
     const runner = createMakerHookSessionRunner({ log });
     const { req, events, ends } = watchReq();
     runner.watchContinuation!(req as never);
-    // 挂上了监听但还没有任何事件 -> 不认领(桌面端那条续跑可能没被接受)
-    expect(events).toEqual([]);
+    expect(events).toEqual(['claim']);
 
     const cb = h.eventCbs.get('sess-live')!;
     cb({ type: 'text', data: { text: '接着干', isFinal: false } });
-    expect(events).toEqual(['claim']);
-
     cb({ type: 'text', data: { text: '完成了。', isFinal: true } });
     cb({ type: 'done', data: null });
     await flush();
@@ -1815,27 +1770,35 @@ describe('watchContinuation: 观察桌面端续跑并回流', () => {
     expect(events.filter((e) => e.startsWith('end:'))).toHaveLength(1);
   });
 
-  it('认领之前被撤销 -> 静默退场(onAbandon), 不发任何收口', async () => {
+  it('被撤销 -> 以 error 收口(渠道消息已改成进行中, 不能就这么撂下)', async () => {
+    // 认领现在是立即的, 所以撤销必然发生在认领之后: 渠道那条消息已经被改成"进行中",
+    // 静默退场会把它永久留在假的进行中 —— 必须发一条终态帧收口。
     fakeMaker.getSession.mockReturnValueOnce(makeManualSession('sess-live'));
     const runner = createMakerHookSessionRunner({ log });
-    const { req, events } = watchReq();
+    const { req, events, ends } = watchReq();
     const cancel = runner.watchContinuation!(req as never);
+    expect(events).toEqual(['claim']);
     cancel();
     await flush();
-    expect(events).toEqual(['abandon']);
+    expect(events).toEqual(['claim', 'end:error']);
+    expect(ends[0]?.errorMessage).toBe('hook continuation cancelled');
   });
 
-  it('一直等不到事件 -> 空转超时后放弃, 摘掉监听', async () => {
+  it('已认领却一个事件都没来 -> 空转超时后按失败收口, 摘掉监听', async () => {
+    // dispatch 已不可逆, 正常必有事件; 这条只兜"vendor 接了活却彻底静默"。
+    // 收口而不是静默退场 —— 渠道消息此刻是"进行中", 不能停在那里。
     vi.useFakeTimers();
     try {
       fakeMaker.getSession.mockReturnValueOnce(makeManualSession('sess-live'));
       const runner = createMakerHookSessionRunner({ log });
-      const { req, events } = watchReq();
+      const { req, events, ends } = watchReq();
       runner.watchContinuation!(req as never);
+      expect(events).toEqual(['claim']);
       expect(h.eventCbs.has('sess-live')).toBe(true);
 
       await vi.advanceTimersByTimeAsync(2 * 60_000 + 1);
-      expect(events).toEqual(['abandon']);
+      expect(events).toEqual(['claim', 'end:error']);
+      expect(ends[0]?.errorMessage).toContain('idle timeout');
       expect(h.eventCbs.has('sess-live')).toBe(false);
     } finally {
       vi.useRealTimers();

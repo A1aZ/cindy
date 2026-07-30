@@ -131,6 +131,8 @@ function makeDispatcher(overrides?: {
   abortSession?: HookDispatcherDeps['abortSession'];
   subscribeUiContinuation?: HookDispatcherDeps['subscribeUiContinuation'];
   subscribeUiSessionIntervention?: HookDispatcherDeps['subscribeUiSessionIntervention'];
+  subscribeUiTurnDispatching?: HookDispatcherDeps['subscribeUiTurnDispatching'];
+  subscribeUiTurnUndispatched?: HookDispatcherDeps['subscribeUiTurnUndispatched'];
   accountInitiallyActive?: boolean;
 }) {
   const bindings = overrides?.bindings ?? memoryBindings();
@@ -145,6 +147,8 @@ function makeDispatcher(overrides?: {
     abortSession: overrides?.abortSession,
     subscribeUiContinuation: overrides?.subscribeUiContinuation,
     subscribeUiSessionIntervention: overrides?.subscribeUiSessionIntervention,
+    subscribeUiTurnDispatching: overrides?.subscribeUiTurnDispatching,
+    subscribeUiTurnUndispatched: overrides?.subscribeUiTurnUndispatched,
     accountInitiallyActive: overrides?.accountInitiallyActive,
     log: noopLog,
   });
@@ -1955,6 +1959,10 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
       watchContinuation: (req) => {
         watches.push(req);
         const index = watches.length - 1;
+        // 真实 runner 现在**立即认领**: 归属已由 clientId 在 dispatch 前确认, 不再等
+        // 首个事件来猜这一轮是不是目标轮(见 uiContinuationSignal)。fixture 照此模拟,
+        // 否则用例会测一个生产上不存在的"已挂未认领"中间态。
+        req.onClaim();
         return () => cancels.push(index);
       },
     };
@@ -1968,30 +1976,65 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     };
   }
 
-  /** 一个信号源(测试手动触发"用户在桌面端续跑了" / "做了别的事")。 */
+  /**
+   * 信号源: 模拟 coordinator 侧那四条通道。
+   *
+   * 归属键是 clientId —— 续跑意图(fire)与"那条消息即将 dispatch"(dispatchTurn)必须带
+   * 同一个 clientId 才算同一轮, 这正是本 PR 用来替掉"首个事件 + isBusy 快照"的东西。
+   */
   function signalSource() {
-    const listeners = new Set<(sessionId: string) => void>();
+    const retryListeners = new Set<(sessionId: string, clientId: string) => void>();
+    const dispatchListeners = new Set<(sessionId: string, clientId: string) => void>();
+    const undispatchListeners = new Set<(sessionId: string, clientId: string) => void>();
     const interveners = new Set<(sessionId: string) => void>();
     return {
       subscribe: ((listener) => {
-        listeners.add(listener);
-        return () => listeners.delete(listener);
+        retryListeners.add(listener);
+        return () => retryListeners.delete(listener);
       }) as NonNullable<HookDispatcherDeps['subscribeUiContinuation']>,
       subscribeIntervention: ((listener) => {
         interveners.add(listener);
         return () => interveners.delete(listener);
       }) as NonNullable<HookDispatcherDeps['subscribeUiSessionIntervention']>,
+      subscribeDispatching: ((listener) => {
+        dispatchListeners.add(listener);
+        return () => dispatchListeners.delete(listener);
+      }) as NonNullable<HookDispatcherDeps['subscribeUiTurnDispatching']>,
+      subscribeUndispatched: ((listener) => {
+        undispatchListeners.add(listener);
+        return () => undispatchListeners.delete(listener);
+      }) as NonNullable<HookDispatcherDeps['subscribeUiTurnUndispatched']>,
       /** 模拟"桌面端在这个会话里做了与续跑无关的事"。 */
       intervene: (sessionId: string) => {
         for (const l of [...interveners]) l(sessionId);
       },
-      fire: (sessionId: string) => {
-        for (const l of [...listeners]) l(sessionId);
+      /** 用户点了重试 —— 只是意图, 还没确定是哪一轮。 */
+      fire: (sessionId: string, clientId = DEFAULT_RETRY_CLIENT_ID) => {
+        for (const l of [...retryListeners]) l(sessionId, clientId);
+      },
+      /** 那条消息即将 vendor dispatch —— 归属在这一刻成立。 */
+      dispatchTurn: (sessionId: string, clientId = DEFAULT_RETRY_CLIENT_ID) => {
+        for (const l of [...dispatchListeners]) l(sessionId, clientId);
+      },
+      /** 那条消息落库了却没能 dispatch。 */
+      undispatchTurn: (sessionId: string, clientId = DEFAULT_RETRY_CLIENT_ID) => {
+        for (const l of [...undispatchListeners]) l(sessionId, clientId);
+      },
+      /**
+       * 走完整一轮续跑: 意图 + 归属确认。绝大多数用例只关心"续跑接上了没有",
+       * 用它即可; 只有专门验证两阶段语义的用例才分开调 fire / dispatchTurn。
+       */
+      retry: (sessionId: string, clientId = DEFAULT_RETRY_CLIENT_ID) => {
+        for (const l of [...retryListeners]) l(sessionId, clientId);
+        for (const l of [...dispatchListeners]) l(sessionId, clientId);
       },
       /** 当前订阅数 —— 用于直接断言 dispose 真的退订了。 */
-      listenerCount: () => listeners.size,
+      listenerCount: () => retryListeners.size,
     };
   }
+
+  /** 绝大多数用例只关心"同一轮", 用同一个 clientId 即可。 */
+  const DEFAULT_RETRY_CLIENT_ID = 'retry-client-id';
 
   const REOPEN_FEATURES = [HOOK_FEATURE_TURN_REOPEN];
 
@@ -2004,6 +2047,8 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
       runner: cr.runner,
       subscribeUiContinuation: sig.subscribe,
       subscribeUiSessionIntervention: sig.subscribeIntervention,
+      subscribeUiTurnDispatching: sig.subscribeDispatching,
+      subscribeUiTurnUndispatched: sig.subscribeUndispatched,
     });
     d.onConnected('conn-1', c.send, opts?.features ?? REOPEN_FEATURES);
     d.handleDispatch('conn-1', dispatch(), c.send);
@@ -2018,17 +2063,19 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
   it('续跑信号 -> turn.reopen(新 requestId + reopenOf) -> 进度与结果都走新 id', async () => {
     const { cr, sig, c, sessionId } = await failOneTask();
 
+    // 意图到达时**还不**挂观察、不发帧: 归属要等那条消息真的要 dispatch 才成立。
     sig.fire(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(0);
+    expect(c.ofType('turn.reopen')).toHaveLength(0);
+
+    // 归属确认(clientId 对得上)-> 挂观察 + 立即认领 + 发 reopen。
+    sig.dispatchTurn(sessionId);
     await tick();
     expect(cr.watches).toHaveLength(1);
     expect(cr.latest().sessionId).toBe(sessionId);
-    // 认领之前不发任何帧: 桌面端那条续跑可能根本没被接受。
-    expect(c.ofType('turn.reopen')).toHaveLength(0);
+    expect(c.ofType('turn.reopen')).toHaveLength(1);
 
-    cr.latest().onProgress('太早了, 不该发出去');
-    expect(c.ofType('turn.progress')).toHaveLength(0);
-
-    cr.latest().onClaim();
     const reopen = c.last('turn.reopen')!.payload;
     expect(reopen.reopenOf).toBe('req-1');
     expect(reopen.requestId).not.toBe('req-1');
@@ -2058,7 +2105,7 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
 
   it('server 没宣告 turn-reopen 能力时完全不启用(不记账, 信号空转)', async () => {
     const { cr, sig, c, sessionId } = await failOneTask({ features: [] });
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
     expect(cr.watches).toHaveLength(0);
     expect(c.ofType('turn.reopen')).toHaveLength(0);
@@ -2083,7 +2130,7 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
       }
       cr.finish({ ...outcome, durationMs: 1 });
       await tick();
-      sig.fire(sessionId);
+      sig.retry(sessionId);
       await tick();
       expect(c.ofType('turn.reopen')).toHaveLength(0);
       expect(cr.watches).toHaveLength(0);
@@ -2094,9 +2141,8 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     const { cr, sig, c, d, sessionId } = await failOneTask();
     // 让后续 dispatch 沿 binding 落回同一个会话(否则 inspect 查不到会重建)。
     cr.sessions[sessionId] = { workingDir: WS_DIR, usable: true };
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
-    cr.latest().onClaim();
     expect(c.ofType('turn.reopen')).toHaveLength(1);
 
     // 新任务接管这条消息线: 旧观察器必须被撤销, 否则新 turn 的事件会被当成
@@ -2108,20 +2154,18 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     // 记账也作废: 再来一次续跑信号不会重开旧消息。
     cr.finish({ status: 'error', finalText: '', errorMessage: 'again' });
     await tick();
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
     // 新一轮(req-2)自己失败后重新记账, 于是这次接回的是 req-2 那条消息。
     expect(cr.watches).toHaveLength(2);
-    cr.latest().onClaim();
     expect(c.ofType('turn.reopen').at(-1)!.payload.reopenOf).toBe('req-2');
   });
 
   it('接管导致的撤销不留新记账(否则续跑会把用户带回一条过期消息)', async () => {
     const { cr, sig, c, d, sessionId } = await failOneTask();
     cr.sessions[sessionId] = { workingDir: WS_DIR, usable: true };
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
-    cr.latest().onClaim();
 
     // 新任务接管 -> 撤销续跑。撤销的收口是 error, 但这条消息线已经归新任务了。
     d.handleDispatch('conn-1', dispatch({ requestId: 'req-2' }), c.send);
@@ -2131,26 +2175,32 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     // 新任务成功收口 -> 全程没有任何"等着被续跑"的东西。
     cr.finish({ status: 'ok', finalText: '这次好了', errorMessage: null });
     await tick();
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
     expect(cr.watches).toHaveLength(1);
     expect(c.ofType('turn.reopen')).toHaveLength(1);
   });
 
-  it('一个事件都没等到(onAbandon) -> 不发任何帧, 但记账还回去让下次重试还能接上', async () => {
+  it('目标那条消息始终没能 dispatch -> 不发任何帧, 记账还回去让下次重试还能接上', async () => {
+    // 取消 / 派发失败(凭证切换被放弃、队列被清等)。渠道那条消息**没被改写过**, 所以
+    // 记账仍然有效 —— 不还回去, 回流就永久丢了, 而这正是本能力要修的症状。
+    // 这里也是"慢启动"的收口方式: 意图可以等任意长时间(远端 SSH 重连、凭证切换都在
+    // dispatch 之前), 不再有任何固定窗口会把它提前判死。
     const { cr, sig, c, sessionId } = await failOneTask();
     sig.fire(sessionId);
     await tick();
-    cr.latest().onAbandon();
+    expect(cr.watches).toHaveLength(0);
+
+    sig.undispatchTurn(sessionId);
     await tick();
     expect(c.ofType('turn.reopen')).toHaveLength(0);
     expect(c.ofType('turn.end').filter((m) => m.payload.requestId !== 'req-1')).toHaveLength(0);
 
-    // 渠道那条消息**没被改写过**, 所以这笔记账仍然有效: 远端会话重建慢于等待窗口
-    // (SSH 重连 / 凭证切换)时, 不还回去回流就永久丢了 —— 正是本能力要修的症状。
-    sig.fire(sessionId);
+    // 记账已还回去: 用户再点一次重试, 照样能接上。
+    sig.retry(sessionId);
     await tick();
-    expect(cr.watches).toHaveLength(2);
+    expect(cr.watches).toHaveLength(1);
+    expect(c.ofType('turn.reopen')).toHaveLength(1);
   });
 
   it('认领**前**被外部撤销 -> onAbandon 不还记账(那条消息线已交给新任务)', async () => {
@@ -2159,7 +2209,7 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     // onClaim 之前, 走的是 onAbandon + revoked 这条路径。
     const { cr, sig, c, d, sessionId } = await failOneTask();
     cr.sessions[sessionId] = { workingDir: WS_DIR, usable: true };
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
     expect(cr.watches).toHaveLength(1);
 
@@ -2174,16 +2224,15 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     // 新任务成功收口后再来一次续跑信号: 不该有任何"等着被续跑"的记账复活。
     cr.finish({ status: 'ok', finalText: '这次好了', errorMessage: null });
     await tick();
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
     expect(cr.watches).toHaveLength(1);
   });
 
   it('续跑又失败 -> 允许再续一次, reopenOf 指向上一轮的新 id(成链)', async () => {
     const { cr, sig, c, sessionId } = await failOneTask();
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
-    cr.latest().onClaim();
     const firstReopen = c.last('turn.reopen')!.payload.requestId;
     cr.latest().onEnd({
       status: 'error',
@@ -2193,10 +2242,9 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     });
     await tick();
 
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
     expect(cr.watches).toHaveLength(2);
-    cr.latest().onClaim();
     const secondReopen = c.ofType('turn.reopen').at(-1)!.payload;
     expect(secondReopen.reopenOf).toBe(firstReopen);
     expect(secondReopen.requestId).not.toBe(firstReopen);
@@ -2204,9 +2252,8 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
 
   it('认领后连接断开 -> 续跑轮的 turn.end 不缓存不补发, 也不再登记可续跑', async () => {
     const { cr, sig, c, d, sessionId } = await failOneTask();
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
-    cr.latest().onClaim();
     const reopened = c.last('turn.reopen')!.payload.requestId;
     const endsBefore = c.ofType('turn.end').length;
 
@@ -2224,7 +2271,7 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
 
     // 也不得再登记可续跑: 那条记账的 reopenOf 已被 server 解绑, 再发只会被忽略。
     const reopensBefore = c.ofType('turn.reopen').length;
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
     expect(cr.watches).toHaveLength(1);
     expect(c.ofType('turn.reopen')).toHaveLength(reopensBefore);
@@ -2238,6 +2285,8 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     const { d } = makeDispatcher({
       runner: cr.runner,
       subscribeUiContinuation: sig.subscribe,
+      subscribeUiTurnDispatching: sig.subscribeDispatching,
+      subscribeUiTurnUndispatched: sig.subscribeUndispatched,
       abortSession: async (id) => void aborted.push(id),
     });
     d.onConnected('conn-1', c.send, REOPEN_FEATURES);
@@ -2247,9 +2296,8 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     cr.finish({ status: 'error', finalText: '', errorMessage: 'boom' });
     await tick();
 
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
-    cr.latest().onClaim();
     const requestId = c.last('turn.reopen')!.payload.requestId;
 
     d.cancel('conn-1', requestId);
@@ -2286,22 +2334,43 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     await tick();
 
     config = { ...CONFIG, workspaces: {} };
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
     expect(cr.watches).toHaveLength(0);
     expect(c.ofType('turn.reopen')).toHaveLength(0);
   });
 
-  it('会话正在跑别的 turn -> 不接回(观察器分不清事件属于哪条用户消息)', async () => {
-    // 观察器是会话级的, 首个事件会被当成目标续跑轮。会话此刻正忙(桌面端用户自己
-    // 的 turn / silent-stop 自动续跑, 都不经本模块记账)时, 这次重试的消息其实还在
-    // 排队, 先到的是那个无关 turn 的进度与正文 —— 认领就会用无关内容改写渠道原消息。
+  it('别的 turn 先跑起来也不会被误认(clientId 对不上就什么都不发生)', async () => {
+    // 这条锁的是本 PR 最核心的保证。观察器是会话级的、分不清事件属于哪条用户消息,
+    // 所以归属**不能**靠"首个事件"或 isBusy 快照去猜 —— 绕过 coordinator 的路径
+    // (silent-stop 自动续跑)照样能直接 session.send, 任何快照都拦不住它。
+    // 现在归属键是 clientId: 对不上就连观察器都不挂, 于是结构上不可能被误认。
     const { cr, sig, c, sessionId } = await failOneTask();
-    cr.busy.add(sessionId);
     sig.fire(sessionId);
+    await tick();
+
+    // 会话里先跑起来的是**另一条**消息(clientId 不同)。
+    sig.dispatchTurn(sessionId, 'some-unrelated-client-id');
     await tick();
     expect(cr.watches).toHaveLength(0);
     expect(c.ofType('turn.reopen')).toHaveLength(0);
+
+    // 目标那条真的 dispatch 时才接上 —— 意图没被那次无关派发消耗掉。
+    sig.dispatchTurn(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(1);
+    expect(c.ofType('turn.reopen')).toHaveLength(1);
+  });
+
+  it('会话正忙也不再是拒绝理由(归属由 clientId 保证, 不靠忙闲快照)', async () => {
+    // 旧实现用 isBusy 拒绝, 那既拦不住绕过 coordinator 的 turn, 又会把"排队后才跑"
+    // 的合法续跑误杀。远端慢启动尤其常见: 点重试时会话可能仍在收尾上一轮。
+    const { cr, sig, c, sessionId } = await failOneTask();
+    cr.busy.add(sessionId);
+    sig.retry(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(1);
+    expect(c.ofType('turn.reopen')).toHaveLength(1);
   });
 
   it('断连后能力快照即失效 -> 不再为这条连接白挂观察器', async () => {
@@ -2310,7 +2379,7 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     // 白挂一个要空转 2 分钟才退场的监听, 且这条消息线的续跑机会被无谓吃掉。
     const { cr, sig, d, sessionId } = await failOneTask();
     d.onDisconnected('conn-1');
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
     expect(cr.watches).toHaveLength(0);
   });
@@ -2321,9 +2390,8 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     // (dispatchId 在重连间稳定, 所以真发得出去), 更糟的是 error 收口还会把这个
     // stale id 登记成下一轮的 reopenOf。
     const { cr, sig, c, d, sessionId } = await failOneTask();
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
-    cr.latest().onClaim();
     const reopened = c.last('turn.reopen')!.payload.requestId;
     expect(cr.cancels).toHaveLength(0);
 
@@ -2343,7 +2411,7 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
 
     // 也不该把这个已被 server 解绑的 id 记成下一轮的 reopenOf。
     const reopensBefore = c.ofType('turn.reopen').length;
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
     expect(c.ofType('turn.reopen')).toHaveLength(reopensBefore);
   });
@@ -2354,7 +2422,7 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     // isBusy 守卫挡不住它: 点重试时会话并不忙。
     const { cr, sig, c, sessionId } = await failOneTask();
     sig.intervene(sessionId);
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
     expect(cr.watches).toHaveLength(0);
     expect(c.ofType('turn.reopen')).toHaveLength(0);
@@ -2364,9 +2432,8 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     // coordinator 是在 drain **之前**同步发重试信号的, 所以真正的续跑先认领(记账
     // 已消耗), 随后那条原文消息落到"无关介入"通道时只是 no-op。
     const { cr, sig, c, sessionId } = await failOneTask();
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
-    cr.latest().onClaim();
     expect(c.ofType('turn.reopen')).toHaveLength(1);
 
     // 模拟零产出重试重发的原文走到发送事务。
@@ -2376,31 +2443,26 @@ describe('turn.reopen: 失败任务在桌面端被续跑后接回原消息', () 
     expect(c.ofType('turn.progress')).toHaveLength(1);
   });
 
-  it('观察器已挂但**未认领**时来了无关消息 -> 撤掉它, 不让无关 turn 认领', async () => {
-    // 认领要等首个事件。目标续跑还在排队 / 冷启动时, 同一会话的新桌面消息若先跑起来,
-    // 会话级观察器会把它的首个事件当成目标续跑 —— 用无关内容改写渠道原消息。
+  it('还在等 dispatch 时来了无关消息 -> 意图作废, 之后那条 dispatch 也不再接上', async () => {
+    // "重试哪一轮"与"渠道消息对应哪一轮"是两件事: 用户跑过无关 turn 之后点重试,
+    // 重试的是那个无关 turn, 不该把它的输出写进渠道那条旧消息。
     const { cr, sig, c, sessionId } = await failOneTask();
     sig.fire(sessionId);
     await tick();
-    expect(cr.watches).toHaveLength(1);
-    expect(cr.cancels).toHaveLength(0);
 
     sig.intervene(sessionId);
-    expect(cr.cancels).toHaveLength(1);
-
-    // 撤销后即使无关 turn 的事件到了, 也不该认领、不该发帧。
-    cr.latest().onClaim();
-    cr.latest().onProgress('无关内容');
     await tick();
+    // 意图已作废: 即使那条消息随后真的 dispatch 了, 也不该挂观察、不该发帧。
+    sig.dispatchTurn(sessionId);
+    await tick();
+    expect(cr.watches).toHaveLength(0);
     expect(c.ofType('turn.reopen')).toHaveLength(0);
-    expect(c.ofType('turn.progress')).toHaveLength(0);
   });
 
   it('已认领的续跑轮不因无关消息被撤(它已在往渠道写, 后来的消息只会排队)', async () => {
     const { cr, sig, c, sessionId } = await failOneTask();
-    sig.fire(sessionId);
+    sig.retry(sessionId);
     await tick();
-    cr.latest().onClaim();
     expect(c.ofType('turn.reopen')).toHaveLength(1);
 
     sig.intervene(sessionId);

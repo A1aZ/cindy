@@ -176,6 +176,27 @@ describe('sessionsStore — 预览必须活过全量刷新', () => {
     expect(currentTitle()).toBe('登录失败排查');
   });
 
+  it('权威标题与预览逐字相同后再撤回 → 不许把已落库的标题打回哨兵', async () => {
+    // 最常见的时序:main 写的占位与预览本来就一样(两端共用 normalizeAutoTitle)。
+    // 若 patchLocal 在「同值」时保留叠加层,缓存里那个串就分不出是乐观值还是权威值,
+    // 随后的失败撤回会把**已经落库**的标题打回哨兵、界面与 DB 不一致(review P1)。
+    await seed(session());
+    emitAutoTitlePreview(SESSION_ID, '帮我排查登录失败');
+
+    // main 写完占位 → sessions:patched 回流,值与预览逐字相同。
+    sessionsStore.patchLocal(SESSION_ID, { title: '帮我排查登录失败' });
+
+    // 之后智能标题那步失败(或响应丢了)→ 撤回到达,但权威值已经落库。
+    emitAutoTitlePreviewCleared(SESSION_ID);
+
+    expect(currentTitle()).toBe('帮我排查登录失败');
+
+    // 且叠加层已回收:后续刷新按 DB 值走,不会再被撤回或预览影响。
+    list.mockResolvedValue([session({ title: '帮我排查登录失败' })]);
+    await sessionsStore.forceRefreshAll();
+    expect(currentTitle()).toBe('帮我排查登录失败');
+  });
+
   it('没有登记过预览时撤回是 no-op(不把用户手动改的名打回哨兵)', async () => {
     await seed(session({ title: '我自己起的名字' }));
 

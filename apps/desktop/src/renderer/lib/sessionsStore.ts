@@ -276,10 +276,18 @@ export const sessionsStore = {
   patchLocal(id: string, patch: Partial<Session>): void {
     if (!id || !patch) return;
     // 权威标题落地(main 写完占位 / 智能标题后经 sessions:patched 回流,或用户手动改名)
-    // → 回收预览条目。留着它会在下一次全量刷新时把真实标题又顶掉。
+    // → 无条件回收预览条目。留着它会在下一次全量刷新时把真实标题又顶掉。
+    //
+    // **包括「权威标题与预览逐字相同」的常见情形**(两端共用 normalizeAutoTitle,占位本来
+    // 就该一样)。曾经在这里放过 `preview !== patch.title` 的例外,结果是缓存里那个串到底
+    // 是「叠加上去的乐观值」还是「已落库的权威值」再也分不出来 —— 随后的失败撤回会把
+    // **已经落库**的标题打回哨兵、界面退到「未命名对话」并与 DB 不一致(PR #1031 review P1)。
+    // 语义上也该无条件回收:DB 已经有值,叠加层的唯一用途(盖住仍是哨兵的行)已经消失。
+    //
+    // 预览自己那次乐观 patch 不会被这条规则吃掉:`onAutoTitlePreview` 先 patch、后登记
+    // 叠加层(见那里的注释),这一刻 autoTitlePreviews 里还没有条目。
     if (typeof patch.title === 'string' && !isDefaultDraftSessionTitle(patch.title)) {
-      const preview = autoTitlePreviews.get(id);
-      if (preview !== undefined && preview !== patch.title) autoTitlePreviews.delete(id);
+      autoTitlePreviews.delete(id);
     }
     if (patch.status === 'deleted') {
       autoTitlePreviews.delete(id);
@@ -425,8 +433,11 @@ if (typeof window !== 'undefined') {
     const current = sessionsStore.findById(sessionId);
     // 已有权威标题(非哨兵)→ 连叠加层都不登记,免得之后顶掉它。
     if (current && !isDefaultDraftSessionTitle(current.title)) return;
-    autoTitlePreviews.set(sessionId, title);
+    // 顺序要紧:先做乐观 patch、再登记叠加层。patchLocal 见到非哨兵标题会无条件回收
+    // 叠加层(它分不清、也不该去分辨这个串是乐观值还是权威值),反过来写就会把刚登记的
+    // 条目立刻删掉,预览活不过随后的 forceRefreshAll。
     if (current) sessionsStore.patchLocal(sessionId, { title });
+    autoTitlePreviews.set(sessionId, title);
   });
 
   // 起名彻底失败 → 撤回预览。叠加层的失效条件是「权威标题落地」,失败时那个条件永远

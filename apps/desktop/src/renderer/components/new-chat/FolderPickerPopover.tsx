@@ -399,8 +399,19 @@ export function FolderPickerPopover({
 
         {/* Phase D: 添加远程项目入口。仅 isProjectPicker 且上层传了
             onAddRemoteProject (即至少一台 host 勾了 autoConnect) 时显示,
-            位置紧贴「选择其他项目文件夹」下方 — 跟用户要求一致。 */}
-        {isProjectPicker && onAddRemoteProject && (
+            位置紧贴「选择其他项目文件夹」下方 — 跟用户要求一致。
+
+            **已选定远程设备时不出现**(2026-07-30 用户裁决)。三条理由:
+              · 职责已被上面那项承担 —— deviceScope 存在时「选择其他项目文件夹」点下去就是浏览
+                这台设备的文件夹(见 handleBrowse),两个入口并列只是让人以为它们是两件事;
+              · 它**不带 deviceId**,弹窗会让用户从头重选目标 —— 于是可以从设备 A 的语境里点一个
+                叫「添加远程项目」的入口、选到设备 B,等于绕过设备 pill 改掉了设备这一级维度。
+                #807 方案 B 的前提就是「设备是一级维度、由设备 pill 独占」,这条路径与之冲突;
+              · SSH 与 device-link 本就互斥(remoteHostId / deviceLinkDeviceId 二者只能有一个),
+                所以「在对端设备的语境里添加 SSH 项目」本身是语境错位;要用 SSH 先把设备切回本机,
+                与设备 pill 的语义一致。
+            对端一个项目都没有时的空态入口不受影响 —— 那条走 tabBrowse 且**带**设备身份。 */}
+        {isProjectPicker && onAddRemoteProject && !deviceScope && (
           <button
             type="button"
             onClick={() => {

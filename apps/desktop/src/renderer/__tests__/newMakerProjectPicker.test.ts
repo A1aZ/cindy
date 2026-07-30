@@ -315,6 +315,35 @@ describe('Shared create project picker', () => {
     expect(folderPickerPopoverSource).toContain('onAddRemoteProject?.(deviceScope.deviceId);');
   });
 
+  /**
+   * 2026-07-30 用户真机反馈:选定远程设备后不该再出现「添加远程项目」。
+   *
+   * 不只是文案冗余 —— 那一项调 `onAddRemoteProject()` **不带 deviceId**,弹窗会让用户从头重选
+   * 目标,于是可以从设备 A 的语境里点一个叫「添加远程项目」的入口、选到设备 B,等于绕过设备 pill
+   * 改掉了设备这一级维度,而 #807 方案 B 的前提正是「设备由设备 pill 独占」。
+   * 同一语境下「选择其他项目文件夹」已经承担了浏览对端文件夹的职责(见上一条用例)。
+   */
+  it('hides the add-remote-project entry once a device is selected', () => {
+    // 条件里必须有 !deviceScope —— 这是这条行为的全部实现。
+    expect(folderPickerPopoverSource).toContain(
+      '{isProjectPicker && onAddRemoteProject && !deviceScope && (',
+    );
+    // 那一项就是不带设备身份的那次调用;它只应出现在本机语境。
+    expect(folderPickerPopoverSource).toContain('onAddRemoteProject();');
+    // 空态入口不受影响:仍然渲染,且**带**设备身份(否则又变成一个能换设备的入口)。
+    const emptyState = folderPickerPopoverSource.slice(
+      folderPickerPopoverSource.indexOf('deviceScope && onAddRemoteProject ? ('),
+    );
+    expect(emptyState.slice(0, emptyState.indexOf(') : ('))).toContain(
+      'onAddRemoteProject(deviceScope.deviceId);',
+    );
+    // 上层仍要在已选设备时下发 onAddRemoteProject —— 入口 1 与空态入口都靠它,
+    // 只是那个 Globe 项不再渲染。别顺手把这个 gate 一起收掉。
+    expect(newMakerDraftRouteSource).toContain(
+      'hasAnyRemoteTarget || folderPickerDeviceScope ? handleOpenRemoteProject : undefined',
+    );
+  });
+
   // #807 review 第二轮:空列表必须区分「还没拉到」与「拉到了确实没有」。唯一对端被解除配对时
   // 列表会合法变空,若按「非空」gate,回落永远不触发,草稿会永久指着一台已消失的设备。
   it('distinguishes a loaded-empty device snapshot from a not-yet-loaded one', () => {

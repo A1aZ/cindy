@@ -243,6 +243,34 @@ describe('sessionsStore — 预览必须活过全量刷新', () => {
     expect(currentTitle()).toBe('别处改的新名字');
   });
 
+  it('乐观值不许经 override 层洗成「权威标题」把叠加层误回收', async () => {
+    // 时序:一个桶的刷新先起飞(快照里是哨兵),会话同时还在另一个桶的缓存里 → 预览
+    // 登记 + 乐观写入 → 那个更早的请求回来。若乐观值也登记了权威 override,它会被
+    // override 层重放成非哨兵标题,applyAutoTitlePreviews 便把自己写上去的值当成权威
+    // 标题、回收叠加层;之后又一次(仍返回哨兵的)刷新就再没人保护标题(review P1)。
+    list.mockResolvedValue([session()]);
+    await sessionsStore.ensureByFilter('active');
+    await sessionsStore.ensureByFilter('all');
+
+    let releaseStale: (rows: Session[]) => void = () => {};
+    list.mockImplementationOnce(() => new Promise<Session[]>((resolve) => {
+      releaseStale = resolve;
+    }));
+    const staleRefresh = sessionsStore.forceRefresh('active');
+
+    emitAutoTitlePreview(SESSION_ID, '帮我排查登录失败');
+    expect(currentTitle()).toBe('帮我排查登录失败');
+
+    releaseStale([session()]); // 旧请求带回 DB 里的哨兵
+    await staleRefresh;
+    expect(currentTitle()).toBe('帮我排查登录失败');
+
+    // 关键:叠加层必须还在。main 仍未落库时的下一次刷新还要靠它。
+    list.mockResolvedValue([session()]);
+    await sessionsStore.forceRefreshAll();
+    expect(currentTitle()).toBe('帮我排查登录失败');
+  });
+
   it('权威标题恰好等于预览时,后续刷新同样不残留叠加', async () => {
     // 常见路径:main 写的占位与预览逐字相同(两端共用 normalizeAutoTitle)。
     await seed(session());

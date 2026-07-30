@@ -124,6 +124,11 @@ const autoTitlePreviews = new Map<string, string>();
  *
  * 与 {@link applySessionSpendOverrides} 同构：都在 fetch 结果回填进缓存前跑一遍，
  * 让本地 override 活过全量刷新。
+ *
+ * **前置条件**:传进来的 list 里只能有「DB 值」与「权威 override 重放的值」——
+ * 乐观值绝不能出现在这里,否则下面那条「非哨兵 → 回收」会把自己写上去的乐观值当成
+ * 权威标题、把叠加层误回收(PR #1031 review P1)。这条前置由「乐观写入走
+ * {@link applyOptimisticTitle}、不进 patchLocal」保证。
  */
 function applyAutoTitlePreviews(list: Session[]): Session[] {
   if (autoTitlePreviews.size === 0) return list;
@@ -201,6 +206,36 @@ function applySessionSpendOverrides(list: Session[], afterRevision: number): Ses
     return mergeSession(session, patch);
   });
   return changed ? next : list;
+}
+
+/**
+ * **乐观标题的唯一写入口**:只把标题合并进各桶,什么簿记都不做。
+ *
+ * 与 `patchLocal`(权威写入口)刻意分开 —— 这是本 PR 反复栽的那个坑的结构性修法:
+ * 两者共用一个门时,缓存里的串就分不出「乐观值」还是「权威值」,于是
+ *
+ *   - `patchLocal` 会给乐观值也登记 {@link sessionTitleOverrides},那层重放出来的乐观值
+ *     又被 {@link applyAutoTitlePreviews} 当成权威标题、把叠加层误回收,后一次仍返回
+ *     哨兵的刷新就再没人保护标题(PR #1031 review P1);
+ *   - 反过来「权威值与乐观值同值」时也分不出来,失败撤回会把已落库的标题打回哨兵。
+ *
+ * 分门之后两层各自的判据都重新成立:override 里只有 main 说过的值,叠加层只对 DB 值
+ * 让位。也因此不再需要「先 patch 后登记」那种依赖调用顺序的写法。
+ */
+function applyOptimisticTitle(id: string, title: string): void {
+  let touched = false;
+  for (const [filter, list] of cache) {
+    const idx = list.findIndex((s) => s.id === id);
+    if (idx === -1) continue;
+    if (list[idx].title === title) continue;
+    cache.set(filter, [
+      ...list.slice(0, idx),
+      mergeSession(list[idx], { title }),
+      ...list.slice(idx + 1),
+    ]);
+    touched = true;
+  }
+  if (touched) notify();
 }
 
 async function fetchFilter(filter: ListStatusFilter): Promise<Session[]> {
@@ -329,12 +364,12 @@ export const sessionsStore = {
     // **已经落库**的标题打回哨兵、界面退到「未命名对话」并与 DB 不一致(PR #1031 review P1)。
     // 语义上也该无条件回收:DB 已经有值,叠加层的唯一用途(盖住仍是哨兵的行)已经消失。
     //
-    // 预览自己那次乐观 patch 不会被这条规则吃掉:`onAutoTitlePreview` 先 patch、后登记
-    // 叠加层(见那里的注释),这一刻 autoTitlePreviews 里还没有条目。
+    // 乐观预览不走这个门(见 {@link applyOptimisticTitle}),所以这里见到的标题一律是
+    // main 说过的权威值 —— 判据不必、也无法再去分辨来源。
     if (typeof patch.title === 'string' && !isDefaultDraftSessionTitle(patch.title)) {
       autoTitlePreviews.delete(id);
     }
-    // 每一次标题写入(权威回流 / 用户改名 / 乐观预览 / 撤回)都登记版本化 override:
+    // 每一次**权威**标题写入(占位 / 智能标题回流、用户改名)都登记版本化 override:
     // 发起于本次写入之前的 list 请求回来时,快照里还是旧标题,必须被这一层挡住,
     // 否则整桶覆盖会把刚写进缓存的标题冲掉(见 sessionTitleOverrides 的说明)。
     // 每次写入都登记 = 最新一次写入总是最高版本,先后顺序天然正确。
@@ -488,11 +523,9 @@ if (typeof window !== 'undefined') {
     const current = sessionsStore.findById(sessionId);
     // 已有权威标题(非哨兵)→ 连叠加层都不登记,免得之后顶掉它。
     if (current && !isDefaultDraftSessionTitle(current.title)) return;
-    // 顺序要紧:先做乐观 patch、再登记叠加层。patchLocal 见到非哨兵标题会无条件回收
-    // 叠加层(它分不清、也不该去分辨这个串是乐观值还是权威值),反过来写就会把刚登记的
-    // 条目立刻删掉,预览活不过随后的 forceRefreshAll。
-    if (current) sessionsStore.patchLocal(sessionId, { title });
+    // 乐观写入走专门的门:不登记权威 override、不回收叠加层,顺序无所谓。
     autoTitlePreviews.set(sessionId, title);
+    if (current) applyOptimisticTitle(sessionId, title);
   });
 
   // 起名彻底失败 → 撤回预览。叠加层的失效条件是「权威标题落地」,失败时那个条件永远
@@ -506,7 +539,9 @@ if (typeof window !== 'undefined') {
     // 时缓存里是别的串,迟到的撤回不许把它冲掉。
     const current = sessionsStore.findById(sessionId);
     if (current?.title !== preview) return;
-    sessionsStore.patchLocal(sessionId, { title: DEFAULT_DRAFT_SESSION_TITLE });
+    // 撤回是**本地回滚**(把乐观值抹掉、露出 DB 里的哨兵),不是权威写入:同样走乐观门,
+    // 免得往 override 层里塞一个 main 从没说过的值。
+    applyOptimisticTitle(sessionId, DEFAULT_DRAFT_SESSION_TITLE);
   });
 
   window.electronAPI?.onUsageSessionSpendChanged?.(

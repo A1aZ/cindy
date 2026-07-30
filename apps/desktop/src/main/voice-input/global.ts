@@ -520,6 +520,45 @@ type MacNativeListenerStartResult =
  * 不接住的话 IPC handler 直接 reject，原始消息（含内部绝对路径）会过桥给 renderer，
  * 而且调用方精心分好的 errorCode 分支根本走不到。
  */
+/**
+ * 被顶掉的那一轮 capture 启动，顺着「接手链」等出一个确定结果。
+ *
+ * 为什么需要：两个窗口的录制框可以同时开着。A 的 startKeyCapture 还没 spawn 时 B 又来一次，A 就
+ * 拿到 superseded。原来到这里就返回了，理由是「更晚那轮在负责」—— 但那只在 B **成功**时成立。
+ * B 失败或被取消时，A 仍留在转发名单里、只拿到一个 renderer 会静默丢弃的 superseded：没有 helper
+ * 给它送 Fn，界面上既没有「需要监听权限」的说明、也没有故障提示。那正是本 PR 要消灭的那种沉默。
+ *
+ * 判据只读共享状态，不猜：在飞的启动就等它；没有在飞的就看此刻是否真的就绪。
+ */
+const MAX_SUPERSEDED_START_HANDOFFS = 5;
+
+async function resolveSupersededRecordingStart(
+  superseded: MacNativeListenerStartResult,
+): Promise<MacNativeListenerStartResult> {
+  for (let handoff = 0; handoff < MAX_SUPERSEDED_START_HANDOFFS; handoff += 1) {
+    const pending = macModifierShortcutListener.pendingStartResult();
+    if (!pending) {
+      // 没有在飞的启动了：接手那轮已经落定。就绪 = 有 helper 在监听，这个录制框照样收得到 keys。
+      if (macModifierShortcutListener.isReady()) return { ok: true };
+      return { ok: false, error: 'Modifier shortcut listener did not start.' };
+    }
+    let result: MacNativeListenerStartResult;
+    try {
+      result = await pending;
+    } catch (error) {
+      // 解析/编译 helper 抛出来的（dev 下 swiftc 失败）。当成故障往下走，让调用方去分类。
+      log.warn('shared listener start threw while a superseded recorder was waiting', {
+        error: stringifyError(error),
+      });
+      return { ok: false, error: MAC_NATIVE_LISTENER_FAILURE_MESSAGE };
+    }
+    // 接手那轮自己又被顶掉了：跟着下一轮继续等。代次只增不减，所以这个循环必然推进。
+    if (result.ok || !result.superseded) return result;
+  }
+  log.warn('gave up following superseded listener start handoffs');
+  return superseded;
+}
+
 async function startMacNativeListener(
   start: () => Promise<MacNativeListenerStartResult>,
 ): Promise<MacNativeListenerStartResult> {
@@ -1051,12 +1090,17 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
       // 走 startMacNativeListener：startKeyCapture 也会抛（helper 源码缺失 / swiftc
       // 失败）。不接住的话下面的清理与 errorCode 分类都跑不到，本 renderer 会留在
       // 转发名单里、原始路径还会过桥给它。
-      const result = await startMacNativeListener(() => macModifierShortcutListener.startKeyCapture());
+      const started = await startMacNativeListener(() => macModifierShortcutListener.startKeyCapture());
+      // 被更晚的一轮顶掉时不能就此收工：helper 是共享的，接手那一轮的落点就是这个录制框的落点。
+      // 接手成功 → 这里也算成功（名单没动过，keys 照样送到）；接手失败 → 这个录制框同样需要
+      // 知道，否则它收不到 Fn 却一句解释都没有（renderer 对 'superseded' 是静默丢弃的）。
+      const result = !started.ok && started.superseded
+        ? await resolveSupersededRecordingStart(started)
+        : started;
       if (!result.ok && result.superseded) {
-        // 被更晚的一轮顶掉：那一轮正在负责这个 sender 的 capture，这里绝不能动名单。
-        // 录制登记按 sender id 记账，而同一个设置页连续两轮录制用的是同一个 id ——
-        // 在这里删就等于把新一轮刚登记的那条删掉，helper 起来了却没人收 keys，
-        // 用户按 Fn 毫无反应。也不报错：这次调用已经过时，出错的不是用户在做的事。
+        // 顺着接手链也没等出确定结果（罕见：连着好几轮互相顶）。维持原来的静默语义，且绝不动
+        // 名单 —— 录制登记按 sender id 记账，同一个设置页连续两轮录制用的是同一个 id，在这里
+        // 删就等于把新一轮刚登记的那条删掉，helper 起来了却没人收 keys。
         return { ok: false, error: result.error, errorCode: 'superseded' };
       }
       if (!result.ok) {

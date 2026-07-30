@@ -87,6 +87,8 @@ const mocks = vi.hoisted(() => {
   const modifierIsRunning = vi.fn();
   const modifierIsReady = vi.fn();
   const modifierStartKeyCapture = vi.fn();
+  // 被顶掉的那一轮要顺着「接手链」等共享启动的落点, 所以这个访问器也得能被用例摆布。
+  const modifierPendingStartResult = vi.fn((): Promise<unknown> | null => null);
   const inputMonitoringSnapshot = vi.fn();
   const requestInputMonitoring = vi.fn();
   const assertTrustedAppRenderer = vi.fn();
@@ -139,6 +141,7 @@ const mocks = vi.hoisted(() => {
     modifierIsRunning,
     modifierIsReady,
     modifierStartKeyCapture,
+    modifierPendingStartResult,
     inputMonitoringSnapshot,
     requestInputMonitoring,
     assertTrustedAppRenderer,
@@ -223,6 +226,7 @@ vi.mock('../MacModifierShortcutListener.js', () => ({
       releaseShortcutKeepingCapture: mocks.modifierReleaseShortcut,
       stopKeyCapture: vi.fn(),
       startKeyCapture: mocks.modifierStartKeyCapture,
+      pendingStartResult: mocks.modifierPendingStartResult,
     };
   }),
   getMacInputMonitoringPermissionSnapshot: mocks.inputMonitoringSnapshot,
@@ -262,6 +266,8 @@ describe('voice input global shortcut registration', () => {
     mocks.modifierIsRunning.mockReset();
     mocks.modifierIsRunning.mockReturnValue(true);
     // 默认「已就绪」:既有用例断言的是正常运行态。
+    mocks.modifierPendingStartResult.mockReset();
+    mocks.modifierPendingStartResult.mockReturnValue(null);
     mocks.modifierIsReady.mockReset();
     // 真实实现是 `ready && isRunning()`,所以默认让它跟着 isRunning —— 固定成 true 的话用例能
     // 造出「没在跑却已就绪」这种真机上不存在的状态,断言就会测到一条不存在的路径(复用条件从
@@ -1309,6 +1315,88 @@ describe('voice input global shortcut registration', () => {
       expect((result as { error: string }).error).toBe('Could not start the voice input shortcut listener.');
     });
 
+    // 两个窗口的录制框可以同时开着。A 的 capture 启动被 B 顶掉后, 原来只拿到一个 renderer 会静默
+    // 丢弃的 'superseded' —— 而这只在 B **成功**时说得过去。B 失败时 A 既没有 helper 送 Fn, 界面上
+    // 也没有任何解释, 正是本 PR 要消灭的那种沉默。
+    it('reports the shared failure to a recorder whose start was superseded', async () => {
+      setPlatform('darwin');
+      // 两个窗口都算合法的应用外壳窗口。
+      mocks.isSecondaryAppWindow.mockImplementation(
+        (win: unknown) => win === mocks.focusedWindow || win === mocks.secondaryAppWindow,
+      );
+      // 缺监听权限 —— A 应该被告知这一点, 好让录制框说明「Fn 需要监听权限」。
+      mocks.inputMonitoringSnapshot.mockResolvedValue({ ok: false, status: 'denied', error: 'denied' });
+      const { registerGlobalVoiceInputIpc } = await import('../global.js');
+      registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+      const start = mocks.handlers.get('voice-input:modifier-shortcut-recording:start');
+      let settleA: (result: unknown) => void = () => {};
+      mocks.modifierStartKeyCapture.mockImplementationOnce(
+        () => new Promise((resolve) => { settleA = resolve; }),
+      );
+      // B 是更晚那一轮, 它自己起不来。
+      mocks.modifierStartKeyCapture.mockResolvedValueOnce({ ok: false, error: 'spawn ENOENT' });
+
+      const a = start?.(mocks.recordingEvent);
+      const b = await start?.(mocks.secondaryAppWindowEvent);
+      expect(b).toMatchObject({ ok: false, errorCode: 'permission' });
+
+      // B 已经落定(失败), 所以 A 醒来时没有在飞的启动, 也没有就绪的 helper。
+      mocks.modifierIsRunning.mockReturnValue(false);
+      settleA({
+        ok: false,
+        error: 'Modifier shortcut listener start was superseded.',
+        superseded: true,
+      });
+
+      // 关键: A 拿到的是真实结果, 而不是被静默丢弃的 'superseded'。
+      expect(await a).toMatchObject({ ok: false, errorCode: 'permission' });
+
+      // 也不该继续留在转发名单里 —— 没有 helper 可转发; 授权后 renderer 会重新登记。
+      mocks.focusedWindow.webContents.send.mockClear();
+      mocks.listenerOptions.onKeys?.(['Fn']);
+      expect(mocks.focusedWindow.webContents.send).not.toHaveBeenCalled();
+    });
+
+    // 防止把上面那条修成「被顶掉就一律报失败」: 接手那轮还在飞时要等它, 它成功则被顶掉的这轮
+    // 同样算成功(共享 helper 在跑, 名单也没动过)。
+    it('reports success to a superseded recorder when the in-flight shared start succeeds', async () => {
+      setPlatform('darwin');
+      mocks.isSecondaryAppWindow.mockImplementation(
+        (win: unknown) => win === mocks.focusedWindow || win === mocks.secondaryAppWindow,
+      );
+      const { registerGlobalVoiceInputIpc } = await import('../global.js');
+      registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+      const start = mocks.handlers.get('voice-input:modifier-shortcut-recording:start');
+      let settleA: (result: unknown) => void = () => {};
+      mocks.modifierStartKeyCapture.mockImplementationOnce(
+        () => new Promise((resolve) => { settleA = resolve; }),
+      );
+
+      const a = start?.(mocks.recordingEvent);
+      // 接手那一轮还在飞, 随后成功。
+      mocks.modifierPendingStartResult.mockReturnValue(Promise.resolve({ ok: true }));
+      mocks.modifierIsRunning.mockReturnValue(true);
+
+      settleA({
+        ok: false,
+        error: 'Modifier shortcut listener start was superseded.',
+        superseded: true,
+      });
+
+      expect(await a).toMatchObject({ ok: true });
+      // 权限没问题也没故障, 不该去查权限状态。
+      expect(mocks.inputMonitoringSnapshot).not.toHaveBeenCalled();
+      // 登记还在, keys 送得到。
+      mocks.focusedWindow.webContents.send.mockClear();
+      mocks.listenerOptions.onKeys?.(['Fn']);
+      expect(mocks.focusedWindow.webContents.send).toHaveBeenCalledWith(
+        'voice-input:modifier-shortcut-keys',
+        { keys: ['Fn'] },
+      );
+    });
+
     // 录制登记按 sender id 记账，而同一个设置页连续两轮录制用的是同一个 id。第一轮在
     // 启动 listener 期间被第二轮顶掉后，如果仍走「失败就清理」分支，就会把第二轮刚登记
     // 的那条删掉——helper 起来了却没人收 keys，用户按 Fn 毫无反应。
@@ -1333,12 +1421,18 @@ describe('voice input global shortcut registration', () => {
       const second = await start?.(mocks.recordingEvent);
       expect(second).toMatchObject({ ok: true });
 
+      // 第二轮成功 = 共享 helper 真的在跑。mock 要跟着反映这一点, 否则会造出「接手那轮成功了、
+      // 可 listener 又没在跑」这种自相矛盾的状态。
+      mocks.modifierIsRunning.mockReturnValue(true);
+
       settleFirst({
         ok: false,
         error: 'Modifier shortcut listener start was superseded.',
         superseded: true,
       });
-      expect(await first).toMatchObject({ ok: false, errorCode: 'superseded' });
+      // 接手那轮成功, 被顶掉的这轮也就有 helper 可用 —— 报成功而不是让 renderer 静默丢弃一个
+      // 'superseded'(那样它的录制框既收不到 Fn 提示、也不知道到底成没成)。
+      expect(await first).toMatchObject({ ok: true });
       // 被顶掉不是故障，所以不该去问权限状态、也不该报成 permission / failed。
       expect(mocks.inputMonitoringSnapshot).not.toHaveBeenCalled();
 

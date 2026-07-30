@@ -125,6 +125,17 @@ export class MacModifierShortcutListener {
     return this.ready && this.isRunning();
   }
 
+  /**
+   * 当前在飞的那次启动；没有就返回 null。
+   *
+   * 给「被顶掉的那一轮」用：helper 是共享的，被顶掉不等于它的诉求落空了 —— 接手的那一轮成功，
+   * 它也就有 helper 可用；接手的那一轮失败，它同样需要知道，否则录制框收不到 Fn 却一句解释都
+   * 没有。调用方据此等共享启动的真实落点，见 global.ts 的 resolveSupersededRecordingStart。
+   */
+  pendingStartResult(): Promise<ListenerStartResult> | null {
+    return this.pendingStart;
+  }
+
   async setShortcut(shortcut: VoiceInputShortcut): Promise<ListenerStartResult> {
     if (!isVoiceInputModifierShortcut(shortcut) && !isVoiceInputMacNativeKeyboardShortcut(shortcut)) {
       this.stop();

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { Buffer } from 'node:buffer';
+import { createHash } from 'node:crypto';
 import type { DingTalkIM, RichChannelIM } from '@cindy/im';
 import { decodeDingTalkLaneUserId } from '@cindy/im';
 
@@ -10,10 +11,15 @@ import { createDingTalkTurnPermissionPolicy } from './permissionPolicy';
 import { ui } from './uiText';
 
 function ensureWorkingDir(appKey: string): string {
-  const safeKey = appKey.replace(/[^a-zA-Z0-9_-]/g, '-').slice(-64) || 'bot';
-  const dir = ownerScopedImUserDataPath('im-working-dir', `dingtalk-${safeKey}`);
+  const dir = ownerScopedImUserDataPath('im-working-dir', dingtalkManagedWorkingDirName(appKey));
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+export function dingtalkManagedWorkingDirName(appKey: string): string {
+  if (/^[A-Za-z0-9_-]{1,128}$/.test(appKey)) return `dingtalk-${appKey}`;
+  const digest = createHash('sha256').update(appKey, 'utf8').digest('hex').slice(0, 24);
+  return `dingtalk-external-${digest}`;
 }
 
 export function dingtalkSessionIdFor(appKey: string, userId: string): string {

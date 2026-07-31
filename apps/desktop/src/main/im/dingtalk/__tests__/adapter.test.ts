@@ -1,7 +1,31 @@
 import { Buffer } from 'node:buffer';
 import { describe, expect, it } from 'vitest';
 
-import { dingtalkSessionIdFor } from '../adapter';
+import { dingtalkManagedWorkingDirName, dingtalkSessionIdFor } from '../adapter';
+
+describe('dingtalk managed working directory identity', () => {
+  it('keeps normal app keys readable and backward compatible', () => {
+    expect(dingtalkManagedWorkingDirName('ding_app-123')).toBe('dingtalk-ding_app-123');
+  });
+
+  it('hashes unsafe app keys instead of collapsing replacement collisions', () => {
+    const slashKey = dingtalkManagedWorkingDirName('ding/app');
+    const dashKey = dingtalkManagedWorkingDirName('ding-app');
+
+    expect(slashKey).toMatch(/^dingtalk-external-[a-f0-9]{24}$/);
+    expect(slashKey).not.toBe(dashKey);
+  });
+
+  it('hashes long app keys instead of collapsing suffix truncation collisions', () => {
+    const sharedSuffix = 'x'.repeat(128);
+    const first = dingtalkManagedWorkingDirName(`first-${sharedSuffix}`);
+    const second = dingtalkManagedWorkingDirName(`second-${sharedSuffix}`);
+
+    expect(first).toMatch(/^dingtalk-external-[a-f0-9]{24}$/);
+    expect(first).not.toBe(second);
+    expect(dingtalkManagedWorkingDirName(`first-${sharedSuffix}`)).toBe(first);
+  });
+});
 
 describe('dingtalk session identity', () => {
   it('keeps distinct lane ids distinct after encoding', () => {

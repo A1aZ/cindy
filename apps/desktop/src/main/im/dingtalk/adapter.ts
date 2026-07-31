@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { Buffer } from 'node:buffer';
 import type { DingTalkIM, RichChannelIM } from '@cindy/im';
 import { decodeDingTalkLaneUserId } from '@cindy/im';
 
@@ -15,13 +16,16 @@ function ensureWorkingDir(appKey: string): string {
   return dir;
 }
 
-function sessionSafeUserId(userId: string): string {
-  return userId.replace(/[^a-zA-Z0-9_-]/g, '-');
+export function dingtalkSessionIdFor(appKey: string, userId: string): string {
+  const encodedIdentity = Buffer.from(JSON.stringify([appKey, userId]), 'utf8').toString(
+    'base64url',
+  );
+  return `dingtalk_${encodedIdentity}`;
 }
 
 function sanitizeSpeaker(value: string): string {
-  // eslint-disable-next-line no-control-regex
   return value
+    // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f\u200b]/g, ' ')
     .trim()
     .slice(0, 64);
@@ -45,8 +49,7 @@ export function buildDingTalkAdapter(
     ui,
     sessions: {
       source: 'dingtalk',
-      sessionIdFor: (appKey, userId) =>
-        `dingtalk_${sessionSafeUserId(appKey)}_${sessionSafeUserId(userId)}`,
+      sessionIdFor: dingtalkSessionIdFor,
       defaultTitle: (userId) =>
         decodeDingTalkLaneUserId(userId)
           ? `钉钉群聊 · ${userId.slice(-6)}`

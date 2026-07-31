@@ -501,6 +501,7 @@ import {
   setClaudeBackgroundActivityBroadcaster,
 } from '../maker-host/claude-session-background-activity.js';
 import { readClaudeSessionRoute } from '../maker-host/claude-session-route-registry.js';
+import { consumeClaudeGatewayOpusPlanMismatch } from '../maker-host/claude-gateway-error-observer.js';
 import { setLiveCcSessionBridge } from '../maker-host/claude-transcript-relocation.js';
 import {
   CredentialModeSwitchBusyError,
@@ -2668,7 +2669,27 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
   // 转发事件到所有 window。interaction_dismissed 单独走专用 channel,
   // 让 renderer chat store 不必扫所有 vendor-raw 找它。
   registration.disposers.push(session.onEvent((event: AgentEvent) => {
-    const broadcastEvent = redactEventForRenderer(event);
+    let attributedEvent = event;
+    if (event.type === 'error' && isTerminalTurnErrorEvent(event)) {
+      const reason = !session.remoteHostId && session.agentKind === 'claude-code'
+        ? consumeClaudeGatewayOpusPlanMismatch(session.id)
+        : null;
+      if (reason) {
+        const eventData = event.data && typeof event.data === 'object' && !Array.isArray(event.data)
+          ? (event.data as Record<string, unknown>)
+          : {};
+        attributedEvent = {
+          ...event,
+          data: { ...eventData, reason },
+        };
+        log.warn('Claude Opus plan error attributed to XD Gateway route', {
+          sessionId: session.id,
+          model: session.model,
+          reason,
+        });
+      }
+    }
+    const broadcastEvent = redactEventForRenderer(attributedEvent);
     if (event.type === 'interaction_dismissed') {
       const data = event.data as { requestId?: unknown; reason?: unknown };
       if (typeof data.requestId === 'string') {
@@ -2812,8 +2833,8 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       if (event.source === 'claude-code' || event.source === 'codex') {
         turnModelPromiseBySession.delete(session.id);
       }
-      const errData = event.type === 'error'
-        ? (event.data as
+      const errData = attributedEvent.type === 'error'
+        ? (attributedEvent.data as
             | { message?: unknown; reason?: unknown; sdkError?: unknown; errorStatus?: unknown }
             | undefined)
         : undefined;
@@ -3015,14 +3036,18 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       ) {
         onTurnErrorEvent(
           session.id,
-          event.data as { message?: unknown; reason?: unknown; sdkError?: unknown } | null,
+          attributedEvent.data as {
+            message?: unknown;
+            reason?: unknown;
+            sdkError?: unknown;
+          } | null,
           eventAgentMeta,
         );
       }
       // 压住的错误详情必须在这里存一份:决策推迟场景下 onResumableTurnError 还没被调用过
       // (它自己那份 set 发生在接管成立时),不存就无从补落。同 clientId 内容,覆盖无害。
       if (autoResumeSuppressesPersist) {
-        autoResumeBookkeeping.stashSuppressedError(session.id, event.data);
+        autoResumeBookkeeping.stashSuppressedError(session.id, attributedEvent.data);
       }
       // deferred 路径保存 turn 开始时刻:isRemoteAuthRetry 时 onTurnErrorEvent 被跳过，
       // renderer 会稍后调 persistTurnErrorDeferred IPC。在 resetTurnPersistState 清掉

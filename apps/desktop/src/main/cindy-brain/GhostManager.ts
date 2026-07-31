@@ -78,6 +78,12 @@ export interface GhostManagerOptions {
   onChanged?: (ghosts: InstalledGhost[]) => void;
   /** 当前宿主语言；插件未提供时由 shared 契约固定回退英文。 */
   getLocale?: () => string;
+  /**
+   * `approveTrustedBundledInstall` 的 builtin-only 边界:id 是否对应一颗随包种子。
+   * 生产接线必须提供 —— 该入口不经用户确认就铸出批准,此前这条边界只靠"唯一
+   * 调用者是随包对账"的纪律,没有运行期强制。未注入时不加门(单测直接驱动)。
+   */
+  isTrustedBundledId?: (id: string) => boolean;
   /** Cindy 维护的发布者/审核公钥表；缺省为空，签名仍验完整性但不抬身份等级。 */
   trustRegistry?: GhostTrustRegistry;
   log?: GhostManagerLogger;
@@ -1050,12 +1056,25 @@ export class GhostManager {
 
   /**
    * 随包种子已经由 provisioning 层逐字节对账后，为其建立 Host 批准状态。
-   * 该入口不得用于市场包或任意本地目录；它不替代用户安装确认。
+   * 该入口不得用于市场包或任意本地目录；它不替代用户安装确认。id 必须落在注入的
+   * 随包种子清单里(`isTrustedBundledId`)。
+   *
+   * `markerEnabled` 是安装目录 `.disabled` 兼容镜像的读数,**只往停用方向合并,
+   * 不往启用方向翻**:receipt 才是授权事实,镜像文件可被外部因素移除(AV 隔离
+   * 恢复/同步冲突解析/手动清理),拿它覆写 receipt 会让用户显式停用的插件在下一轮
+   * 对账被静默重新启用 —— 无确认、无审计,且带 skill 槽的插件会随之重新挂进全局
+   * 技能链。反方向(镜像说停用、receipt 说启用)必须照办:停用是安全方向,而且
+   * 旧客户端只会写镜像文件。重新启用只有用户显式 `setEnabled(true)` 一条路。
    */
   async approveTrustedBundledInstall(
     manifest: GhostManifest,
-    enabled: boolean,
+    markerEnabled: boolean,
   ): Promise<boolean> {
+    if (this.options.isTrustedBundledId?.(manifest.id) === false) {
+      throw new Error(
+        `approveTrustedBundledInstall 只服务随包种子插件:${manifest.id} 不在种子清单里`,
+      );
+    }
     const dir = path.join(this.options.getRootDir(), manifest.id);
     const localeResources = this.readApprovedLocaleResources(dir, manifest);
     const iconDataUrl = this.readInstalledIconDataUrl(dir, manifest) ?? undefined;
@@ -1068,6 +1087,27 @@ export class GhostManager {
       reviewed: true,
     };
     const current = this.readApproval(manifest.id);
+    // priorEnabled 直接读盘上的 receipt 而不是 readApproval 的投影:进程内隔离态的
+    // receipt 不可作授权事实,但"曾经停用"这个位只用于往下拉,是 fail closed 方向,
+    // 采纳它只会更保守 —— 否则"隔离 + 镜像同时丢失"的组合会让自愈把插件带回启用。
+    const persisted =
+      current.state === 'approved' ? current : this.receiptStore.read(manifest.id);
+    const priorEnabled =
+      persisted.state === 'approved' ? persisted.receipt.enabled : undefined;
+    const enabled =
+      priorEnabled === undefined ? markerEnabled : markerEnabled && priorEnabled;
+    if (enabled !== markerEnabled) {
+      // receipt 钉着停用而镜像丢了:把 `.disabled` 补写回去,守住"回滚到旧客户端时
+      // 按镜像判启停"的降级承诺。写不进不影响批准事实,receipt 仍是权威。
+      try {
+        fs.writeFileSync(path.join(dir, DISABLED_MARKER_FILE), '');
+      } catch (err) {
+        this.options.log?.warn('ghost disabled mirror rewrite failed', {
+          id: manifest.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     if (
       current.state === 'approved' &&
       isDeepStrictEqual(current.receipt.manifest, manifest) &&

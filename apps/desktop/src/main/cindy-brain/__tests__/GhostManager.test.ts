@@ -1012,6 +1012,75 @@ describe('GhostManager · Host approval receipt', () => {
     });
   });
 
+  it('keeps a receipt-pinned disable when the .disabled mirror was lost, and rewrites the mirror', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const { manifest: approvedManifest } = JSON.parse(
+      await fs.promises.readFile(receiptPath(), 'utf8'),
+    ) as { manifest: InstalledGhost['manifest'] };
+    // 随包对账首轮把安装收编成 bundled 批准(trust 归一),后续轮次走稳态分支。
+    expect(await manager.approveTrustedBundledInstall(approvedManifest, true)).toBe(true);
+    expect('ok' in (await manager.setEnabled('hello', false))).toBe(true);
+
+    // 外部因素(AV 隔离恢复 / 同步冲突解析 / 手动清理)移除了兼容镜像文件。
+    await fs.promises.rm(path.join(rootDir, 'hello', '.disabled'));
+
+    // 下一轮对账把镜像读数(启用)喂进来:不得据此翻转 receipt —— 否则用户显式
+    // 停用的插件被静默重新启用,无确认、无审计。重新启用只有 setEnabled 一条路。
+    expect(await manager.approveTrustedBundledInstall(approvedManifest, true)).toBe(false);
+    expect(manager.list()[0].enabled).toBe(false);
+    // 镜像被补写回去:回滚到旧客户端(只认镜像文件)时仍按停用对待。
+    expect(fs.existsSync(path.join(rootDir, 'hello', '.disabled'))).toBe(true);
+  });
+
+  it('an old-client style .disabled marker still turns a bundled receipt off', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const { manifest: approvedManifest } = JSON.parse(
+      await fs.promises.readFile(receiptPath(), 'utf8'),
+    ) as { manifest: InstalledGhost['manifest'] };
+    expect(await manager.approveTrustedBundledInstall(approvedManifest, true)).toBe(true);
+
+    // 旧客户端只会写镜像文件、不会写 receipt。停用是安全方向,合并必须照办 ——
+    // 非对称的另一半:镜像只能把启停态往下拉,不能往上翻。
+    await fs.promises.writeFile(path.join(rootDir, 'hello', '.disabled'), '');
+    expect(await manager.approveTrustedBundledInstall(approvedManifest, false)).toBe(true);
+    expect(manager.list()[0].enabled).toBe(false);
+  });
+
+  it('a bundled update keeps the receipt-pinned disable even when the marker was lost', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const { manifest: approvedManifest } = JSON.parse(
+      await fs.promises.readFile(receiptPath(), 'utf8'),
+    ) as { manifest: InstalledGhost['manifest'] };
+    expect(await manager.approveTrustedBundledInstall(approvedManifest, true)).toBe(true);
+    expect('ok' in (await manager.setEnabled('hello', false))).toBe(true);
+    await fs.promises.rm(path.join(rootDir, 'hello', '.disabled'));
+
+    // 随包更新那一轮走的是"建全新 receipt"分支,与稳态分支共用同一条合并规则:
+    // 只堵稳态分支的话,镜像在更新 tick 之前丢失仍会静默重新启用,同一个洞换条路。
+    const bumped = { ...approvedManifest, version: '1.0.1' };
+    expect(await manager.approveTrustedBundledInstall(bumped, true)).toBe(true);
+    expect(manager.list()[0]).toMatchObject({
+      enabled: false,
+      manifest: { version: '1.0.1' },
+    });
+    expect(fs.existsSync(path.join(rootDir, 'hello', '.disabled'))).toBe(true);
+  });
+
+  it('refuses to mint a bundled approval for an id outside the seed roster', async () => {
+    // 该入口不经用户确认就铸出批准;builtin-only 边界必须运行期强制,不能只靠
+    // "唯一调用者是随包对账"这条纪律。
+    const guarded = new GhostManager({
+      getRootDir: () => rootDir,
+      getLocale: () => hostLocale,
+      isTrustedBundledId: () => false,
+    });
+    const validated = validateGhostManifest(goodManifest());
+    if (!validated.ok) throw new Error(validated.reason);
+    await expect(
+      guarded.approveTrustedBundledInstall(validated.manifest, true),
+    ).rejects.toThrow(/种子清单/);
+  });
+
   it('invalidates a receipt whose locale snapshot keys no longer match the manifest', async () => {
     hostLocale = 'en';
     const manifest = {

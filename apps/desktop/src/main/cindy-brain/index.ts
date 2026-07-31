@@ -791,6 +791,9 @@ async function reconcileBuiltinGhostsLocked(
       approvalChanged =
         (await manager.approveTrustedBundledInstall(
           manifest,
+          // `.disabled` 镜像的读数只作停用方向的输入:receipt 已钉停用时,镜像被
+          // 外部移除不会把插件翻回启用(合并规则见 approveTrustedBundledInstall
+          // 头注释;重新启用只有用户显式 setEnabled 一条路)。
           !fs.existsSync(path.join(brainRootDir(), manifest.id, '.disabled')),
         )) || approvalChanged;
     } catch (err) {
@@ -864,6 +867,9 @@ export function getGhostManager(): GhostManager {
       onChanged: broadcastGhostsChanged,
       getLocale: getResolvedMainLocale,
       trustRegistry: loadGhostTrustRegistry(),
+      // 随包批准入口的 builtin-only 边界:id 必须对应一颗随包种子。该入口不经用户
+      // 确认就铸出批准,不能只靠"唯一调用者是随包对账"这条纪律。
+      isTrustedBundledId: (id) => listBuiltinSeedIds(builtinSeedRootDirs()).includes(id),
       log,
     });
     getGhostSetupManifestTracker().seed(managerSingleton.list());

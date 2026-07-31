@@ -15,6 +15,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
 import JSZip from 'jszip';
 
@@ -407,6 +408,13 @@ function hasFsErrorCode(err: unknown, code: string): boolean {
 }
 
 /**
+ * realpath 一律走 `.native` 变体:与 dirDeposit / ghostLocalPathGrant 等其余钳制点
+ * 同一口径(受管根判定的最终比较虽已做 win32 大小写折叠,但解析器本身也不该是
+ * 全仓唯一的例外)。`fs.promises.realpath` 没有 native 变体,promisify 一次。
+ */
+const realpathNative = promisify(fs.realpath.native);
+
+/**
  * 创建一份不覆盖任何现有内容的插件源码骨架。
  *
  * 文件先写进同目录临时文件夹，全部成功后再一次 rename 到目标；目标已经
@@ -440,31 +448,22 @@ export async function scaffoldGhostDir(
   // 就取「已存在的最深祖先」的真身再拼回剩余段。
   let realWorkdir: string;
   try {
-    realWorkdir = await fs.promises.realpath(path.resolve(workdir));
+    realWorkdir = await realpathNative(path.resolve(workdir));
   } catch {
     return { ok: false, errorCode: 'INVALID_INPUT', message: '会话工作目录不存在,无法确定骨架输出位置' };
   }
-  let realAncestor = resolved;
-  const pendingSegments: string[] = [];
-  for (;;) {
-    try {
-      realAncestor = await fs.promises.realpath(realAncestor);
-      break;
-    } catch (err) {
-      if (!hasFsErrorCode(err, 'ENOENT')) {
-        return {
-          ok: false,
-          errorCode: 'INTERNAL',
-          message: err instanceof Error ? err.message : String(err),
-        };
-      }
-      const parent = path.dirname(realAncestor);
-      if (parent === realAncestor) break; // 到根了,根一定存在,防御性兜底
-      pendingSegments.unshift(path.basename(realAncestor));
-      realAncestor = parent;
-    }
+  // 「已存在的最深祖先取真身再拼回剩余段」与打包侧受管根解析共用同一个 helper ——
+  // 这段 walk 原来在这里手写了一份,同一判定两份实现正是这条链路反复出问题的形态。
+  let realTarget: string;
+  try {
+    realTarget = await resolveThroughExistingAncestor(resolved);
+  } catch (err) {
+    return {
+      ok: false,
+      errorCode: 'INTERNAL',
+      message: err instanceof Error ? err.message : String(err),
+    };
   }
-  const realTarget = path.join(realAncestor, ...pendingSegments);
   if (!realTarget.startsWith(`${realWorkdir}${path.sep}`) && realTarget !== realWorkdir) {
     return { ok: false, errorCode: 'INVALID_INPUT', message: 'dir 必须在当前会话工作目录内' };
   }
@@ -597,7 +596,7 @@ export async function packGhostDir(
     if (!stat.isDirectory()) {
       return { ok: false, errorCode: 'DIR_NOT_FOUND', message: `不是目录:${dir}` };
     }
-    const realSourceDir = await fs.promises.realpath(dir);
+    const realSourceDir = await realpathNative(dir);
     for (const forbiddenRoot of options.forbiddenRootDirs ?? []) {
       const resolvedForbiddenRoot = await resolveThroughExistingAncestor(forbiddenRoot);
       // 判定必须**双向**:源目录落在受管根内要拒(拿已安装插件当源码),源目录是受管根的
@@ -787,7 +786,7 @@ async function resolveThroughExistingAncestor(inputPath: string): Promise<string
   const tail: string[] = [];
   while (true) {
     try {
-      const real = await fs.promises.realpath(cursor);
+      const real = await realpathNative(cursor);
       return path.join(real, ...tail);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;

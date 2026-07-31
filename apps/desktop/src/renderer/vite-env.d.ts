@@ -2708,6 +2708,34 @@ interface ElectronAPI {
       | { success: true }
       | { success: false; errorCode: string; message: string }
     >;
+    /** 在 main 内选择并检查本地包，成功时签发绑定当前 renderer 的短期导入授权。 */
+    pickLocal: () => Promise<
+      | { success: true; canceled: true }
+      | {
+          success: true;
+          canceled: false;
+          grantToken: string;
+          name: string;
+          description: string;
+          version: string;
+        }
+      | { success: false; errorCode: string; message: string }
+    >;
+    /** 使用 main 签发的文件授权导入；registry origin=imported。 */
+    importLocal: (params: {
+      grantToken: string;
+      installPath?: string;
+      force?: boolean;
+    }) => Promise<
+      | {
+          success: true;
+          name: string;
+          description: string;
+          version: string;
+          absolutePath: string;
+        }
+      | { success: false; errorCode: string; message: string }
+    >;
     onInstallProgress: (
       callback: (event: {
         phase:
@@ -4916,8 +4944,8 @@ interface StoredInstall {
   installedAt: number;
   /** unix seconds。update / publish 同步时刷新。 */
   updatedAt: number;
-  /** 本地来源：installed=从市场安装，published=本地创建后发布，learned=/learn 蒸馏产物。历史数据无此字段。 */
-  origin?: 'installed' | 'published' | 'learned';
+  /** 本地来源：installed=从市场安装，published=本地创建后发布，learned=/learn 蒸馏产物，imported=本地 zip/SKILL.md 导入。历史数据无此字段。 */
+  origin?: 'installed' | 'published' | 'learned' | 'imported';
   /** 是否由产品自动同步流程安装。用于区分普通市场安装与用户可 opt-out 的自动同步安装。 */
   autoSynced?: boolean;
   /** /learn 蒸馏产物的溯源(仅 origin='learned')。personal=true ⇒ publish 拦截。 */

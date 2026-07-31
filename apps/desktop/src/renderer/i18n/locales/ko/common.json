@@ -3696,7 +3696,15 @@
     "maximizeAria": "패널 최대화",
     "restoreAria": "패널 크기 복원",
     "detachAria": "새 창에서 열기",
-    "minimizeAria": "플로팅 버블로 최소화"
+    "minimizeAria": "플로팅 버블로 최소화",
+    "closeAria": "패널 닫기 및 플러그인 비활성화"
+  },
+  "ghostPanel": {
+    "disableConfirm": {
+      "title": "\"{{name}}\" 플러그인을 비활성화할까요?",
+      "body": "이 패널을 닫으면 플러그인 전체가 비활성화되어 패널과 기능이 중지됩니다. 사이드바의 '플러그인'에서 언제든지 다시 활성화할 수 있습니다.",
+      "confirm": "비활성화"
+    }
   },
   "ghostPanelWindow": {
     "mergeBack": "메인 창으로 되돌리기",

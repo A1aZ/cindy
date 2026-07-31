@@ -3697,7 +3697,15 @@
     "maximizeAria": "Maximize panel",
     "restoreAria": "Restore panel size",
     "detachAria": "Open in a new window",
-    "minimizeAria": "Minimize to floating bubble"
+    "minimizeAria": "Minimize to floating bubble",
+    "closeAria": "Close panel and disable plugin"
+  },
+  "ghostPanel": {
+    "disableConfirm": {
+      "title": "Disable \"{{name}}\"?",
+      "body": "Closing this panel disables the whole plugin — its panel and capabilities will pause. You can re-enable it anytime from Plugins in the sidebar.",
+      "confirm": "Disable"
+    }
   },
   "ghostPanelWindow": {
     "mergeBack": "Merge back into main window",

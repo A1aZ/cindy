@@ -3696,7 +3696,15 @@
     "maximizeAria": "パネルを最大化",
     "restoreAria": "パネルのサイズを元に戻す",
     "detachAria": "新しいウィンドウで開く",
-    "minimizeAria": "フローティングバブルに最小化"
+    "minimizeAria": "フローティングバブルに最小化",
+    "closeAria": "パネルを閉じてプラグインを無効化"
+  },
+  "ghostPanel": {
+    "disableConfirm": {
+      "title": "「{{name}}」を無効にしますか？",
+      "body": "このパネルを閉じるとプラグイン全体が無効になり、パネルと機能が停止します。サイドバーの「プラグイン」からいつでも再度有効にできます。",
+      "confirm": "無効にする"
+    }
   },
   "ghostPanelWindow": {
     "mergeBack": "メインウィンドウに戻す",

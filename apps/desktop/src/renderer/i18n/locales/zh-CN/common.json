@@ -3696,7 +3696,15 @@
     "maximizeAria": "撑满内容区",
     "restoreAria": "还原面板大小",
     "detachAria": "在独立窗口中打开",
-    "minimizeAria": "最小化为浮动气泡"
+    "minimizeAria": "最小化为浮动气泡",
+    "closeAria": "关闭面板并停用插件"
+  },
+  "ghostPanel": {
+    "disableConfirm": {
+      "title": "停用「{{name}}」？",
+      "body": "关闭这个面板会停用整个插件，它的面板和能力都会暂停。之后可以随时在侧边栏「插件」里重新开启。",
+      "confirm": "停用"
+    }
   },
   "ghostPanelWindow": {
     "mergeBack": "合并回主窗口",

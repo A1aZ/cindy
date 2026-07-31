@@ -482,7 +482,7 @@ describe('newSessionCreation pipeline', () => {
     expect(getNewSessionCreationTask('s14')?.status).toBe('create-failed');
   });
 
-  it('old desktop without discard-precreated falls back to startup orphan reconciliation', async () => {
+  it('old desktop without discard-precreated keeps the cleanup obligation fail-closed', async () => {
     const maker = makeMaker({
       createSession: vi.fn(async () => {
         throw new Error('INVALID_PARAMS: cannot create session');
@@ -510,11 +510,9 @@ describe('newSessionCreation pipeline', () => {
 
     await expect(
       prepareNewSessionCreationForEdit('s15'),
-    ).resolves.toMatchObject({
-      sessionId: 's15',
-      status: 'create-failed',
-    });
+    ).rejects.toMatchObject({ code: 'CHANNEL_NOT_ALLOWED' });
     expect(maker.worktree.discardPrecreated).toHaveBeenCalledTimes(1);
+    expect(getNewSessionCreationTask('s15')?.status).toBe('create-failed');
   });
 
   it('回收发现会话已认领时重新对账真实会话，不把用户困在 create-failed', async () => {

@@ -363,7 +363,7 @@ describe('precreated worktree recovery ledger', () => {
     ]);
   });
 
-  it('drops unsupported or mismatched records, but retains transient failures', async () => {
+  it('retains unsupported records, but drops mismatched records and retains transient failures', async () => {
     await registerPendingPrecreatedWorktree(ACCOUNT, RECORD);
     await expect(
       recoverPendingPrecreatedWorktrees(ACCOUNT, {
@@ -371,6 +371,23 @@ describe('precreated worktree recovery ledger', () => {
         discardPrecreated: vi.fn(async () => {
           throw Object.assign(new Error('old desktop'), {
             code: 'CHANNEL_NOT_ALLOWED',
+          });
+        }),
+        isSessionClaimed: vi.fn(async () => false),
+        sleep: async () => undefined,
+      }),
+    ).resolves.toMatchObject({ recovered: 0, retained: 1 });
+    await expect(listPendingPrecreatedWorktrees(ACCOUNT)).resolves.toEqual([
+      RECORD,
+    ]);
+
+    await registerPendingPrecreatedWorktree(ACCOUNT, RECORD);
+    await expect(
+      recoverPendingPrecreatedWorktrees(ACCOUNT, {
+        openLink: vi.fn(async () => undefined),
+        discardPrecreated: vi.fn(async () => {
+          throw Object.assign(new Error('registered path mismatch'), {
+            code: 'PERMISSION_DENIED',
           });
         }),
         isSessionClaimed: vi.fn(async () => false),

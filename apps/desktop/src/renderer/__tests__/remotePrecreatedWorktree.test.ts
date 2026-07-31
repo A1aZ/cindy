@@ -123,7 +123,7 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
     ]);
   });
 
-  it('keeps mixed-version fallback when the old desktop has no discard channel', async () => {
+  it('keeps the cleanup obligation fail-closed when the old desktop has no discard channel', async () => {
     const createError = new Error('[INVALID_PARAMS] bad create');
     const invoke = vi.fn(async (channel: string) => {
       if (channel === 'maker:create-session') throw createError;
@@ -136,8 +136,15 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
       throw new Error(`unexpected ${channel}`);
     });
 
-    await expect(callWith(invoke)).rejects.toBe(createError);
-    expect(listPendingRemotePrecreatedWorktrees()).toEqual([]);
+    const failure = await callWith(invoke).catch((error: unknown) => error);
+    expect(isRemotePrecreatedWorktreeCleanupPendingError(failure)).toBe(true);
+    expect(listPendingRemotePrecreatedWorktrees()).toEqual([
+      expect.objectContaining({
+        deviceId: DEVICE_ID,
+        sessionId: SESSION_ID,
+        path: WORKTREE_PATH,
+      }),
+    ]);
   });
 
   it('recovers a retained obligation before another worktree is created', async () => {
@@ -212,6 +219,37 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
     });
     const invoke = vi.fn(async () => {
       throw new Error('[DEVICE_LINK_TIMEOUT] timed out');
+    });
+
+    await expect(
+      recoverPendingRemotePrecreatedWorktrees({
+        deviceId: DEVICE_ID,
+        invoke,
+      }),
+    ).resolves.toEqual({
+      attempted: 1,
+      recovered: 0,
+      retained: 1,
+      storageReadable: true,
+    });
+    expect(listPendingRemotePrecreatedWorktrees()).toHaveLength(1);
+  });
+
+  it('keeps the obligation when next-send recovery reaches an old desktop', async () => {
+    registerPendingRemotePrecreatedWorktree({
+      deviceId: DEVICE_ID,
+      sessionId: SESSION_ID,
+      path: WORKTREE_PATH,
+      createdAt: Date.now(),
+    });
+    const invoke = vi.fn(async (channel: string) => {
+      if (channel === 'local-db:sessions:get') {
+        throw new Error('[NOT_FOUND] Session 不存在');
+      }
+      if (channel === 'worktree:discard-precreated') {
+        throw new Error('[CHANNEL_NOT_ALLOWED] unsupported');
+      }
+      throw new Error(`unexpected ${channel}`);
     });
 
     await expect(

@@ -422,10 +422,9 @@ function errorCode(error: unknown): string {
   return `${code} ${message}`.toUpperCase();
 }
 
-function isUnsupportedOrPathMismatch(error: unknown): boolean {
+function isNonRetryableLocatorFailure(error: unknown): boolean {
   const text = errorCode(error);
   return (
-    text.includes('CHANNEL_NOT_ALLOWED') ||
     text.includes('PERMISSION_DENIED') ||
     text.includes('INVALID_PARAMS')
   );
@@ -442,8 +441,8 @@ async function removeIfCurrent(
  * 冷启动 / 重连时主动处理没有当前内存 task 认领的记录。
  *
  * 处理策略是保守的：成功回收或确认 session 已认领才删账；网络失败、设备不可用、
- * worktree 有改动/保留标记都留账，下一次链路恢复继续尝试。老被控端没有新 channel
- * 时删账并交给桌面既有启动期 orphan reconcile，避免每次启动重复报错。
+ * worktree 有改动/保留标记，以及老被控端缺少精确回收 channel 都留账，下一次
+ * 链路恢复或被控端升级后继续尝试。
  */
 export async function recoverPendingPrecreatedWorktrees(
   accountId: string,
@@ -504,9 +503,9 @@ export async function recoverPendingPrecreatedWorktrees(
         result.retained += 1;
         continue;
       }
-      if (isUnsupportedOrPathMismatch(error)) {
-        // 旧被控端会在自身启动时做 orphan reconcile；路径不匹配也不应
-        // 永久制造无效重试。
+      if (isNonRetryableLocatorFailure(error)) {
+        // 已确认的定位符不匹配不应永久制造无效重试。CHANNEL_NOT_ALLOWED
+        // 不属于该类：旧端启动期对账已经错过时，只有保留义务才能等升级后回收。
         await removeIfCurrent(accountId, record);
         result.recovered += 1;
         continue;

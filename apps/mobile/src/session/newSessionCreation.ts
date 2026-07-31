@@ -45,7 +45,6 @@ import {
 } from '@/session/newSession';
 import { remoteSessionStore } from '@/session/remoteSessionStore';
 import { forgetPendingPrecreatedWorktree } from '@/session/precreatedWorktreeRecovery';
-import { worktreeEligibilityFromError } from '@/session/newSessionWorktree';
 import type {
   InputProjection,
   QueuedRemoteMessage,
@@ -335,8 +334,8 @@ async function reconcileClaimedSessionForEdit(task: InternalTask): Promise<boole
  * create-failed「返回编辑」的异步前置：先补偿回收未被 session 认领的预创建 worktree。
  *
  * 成功后调用方才可 stash + dismiss + 跳页，避免用户很快再次提交时与仍在执行的删除并发，
- * 重复生成第二个 worktree。老被控端没有窄回收 channel 时保留兼容降级：放行返回编辑，
- * 由其既有启动期 orphan reconcile 兜底；其它失败抛给会话页保持 task，不静默制造副本。
+ * 重复生成第二个 worktree。任何未完成的回收（包括老被控端没有窄回收 channel）
+ * 都抛给会话页并保留 task，不把启动期 orphan reconcile 当作当前运行期的完成凭据。
  */
 export async function prepareNewSessionCreationForEdit(
   sessionId: string,
@@ -345,7 +344,6 @@ export async function prepareNewSessionCreationForEdit(
   if (!task || task.status !== 'create-failed') return null;
   const precreated = task.precreatedWorktree;
   if (precreated) {
-    let cleanupAccepted = false;
     try {
       await withTransientRemoteRetry(async () => {
         await task.params.transport.openLink(task.deviceId);
@@ -354,19 +352,16 @@ export async function prepareNewSessionCreationForEdit(
           path: precreated.path,
         });
       }, { maxAttempts: 2 });
-      cleanupAccepted = true;
     } catch (err) {
       if (isPreconditionFailedRemoteError(err)) {
         // discard 与 create 共用 session 锁；ownership 拒绝通常意味着
         // create 已提交但回包丢失。按真实会话收敛，不能把用户留在失败页。
         if (await reconcileClaimedSessionForEdit(task)) return null;
       }
-      if (worktreeEligibilityFromError(err).status !== 'unsupported') throw err;
-      // 混合版本：新手机 + 老被控端。老端没有精确补偿口，只能沿用其启动期孤儿对账。
-      cleanupAccepted = true;
+      throw err;
     }
     const accountId = task.params.precreatedWorktreeAccountId?.trim();
-    if (cleanupAccepted && accountId) {
+    if (accountId) {
       await forgetPendingPrecreatedWorktree(accountId, {
         sessionId,
         recoveryKey: precreated.recoveryKey,

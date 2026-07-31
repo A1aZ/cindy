@@ -310,18 +310,6 @@ function matchingSessionId(value: unknown, expectedId: string): string | null {
   return typeof sessionId === 'string' && sessionId === expectedId ? sessionId : null;
 }
 
-function isUnsupportedDiscardChannel(error: unknown): boolean {
-  const code =
-    isRecord(error) && typeof error.code === 'string' ? error.code : '';
-  const message =
-    error instanceof Error
-      ? error.message
-      : typeof error === 'string'
-        ? error
-        : '';
-  return `${code} ${message}`.toUpperCase().includes('CHANNEL_NOT_ALLOWED');
-}
-
 async function probeClaimedSession(
   invoke: RemoteWorktreeInvoke,
   sessionId: string,
@@ -350,16 +338,10 @@ async function discardPendingRecord(
     await invoke('worktree:discard-precreated', [locator]);
     forgetPendingRemotePrecreatedWorktree(record);
     return true;
-  } catch (error) {
+  } catch {
     // discard 与 create 共用被控端 session 锁。若拒绝来自一次已成功但丢回包的
     // create，权威 session 行会存在；dirty/keep 等其它拒绝则继续留账。
     if (await probeClaimedSession(invoke, record.sessionId)) {
-      forgetPendingRemotePrecreatedWorktree(record);
-      return true;
-    }
-    if (isUnsupportedDiscardChannel(error)) {
-      // 混合版本下老被控端没有窄回收口，只能沿用其启动期 orphan reconcile；
-      // 不让控制端账本永久锁死之后的远程 worktree 创建。
       forgetPendingRemotePrecreatedWorktree(record);
       return true;
     }
@@ -447,10 +429,6 @@ export async function createRemoteSessionWithPrecreatedWorktree(
     if (await probeClaimedSession(input.invoke, input.sessionId)) {
       forgetPendingRemotePrecreatedWorktree(pending);
       return input.sessionId;
-    }
-    if (isUnsupportedDiscardChannel(cleanupFailure)) {
-      forgetPendingRemotePrecreatedWorktree(pending);
-      throw createFailure;
     }
     throw new RemotePrecreatedWorktreeCleanupPendingError({
       cause: cleanupFailure,

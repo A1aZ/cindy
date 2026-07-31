@@ -4725,7 +4725,9 @@
       "detecting": "環境を検出中…",
       "gitMissing": "git が検出されません。先にインストールしてください",
       "notGitRepo": "現在のディレクトリは git リポジトリではありません",
-      "alreadyInWorktree": "すでに worktree 内です。ネストは禁止です"
+      "alreadyInWorktree": "すでに worktree 内です。ネストは禁止です",
+      "toggleAria": "worktree 分離を使用",
+      "chipTooltip": "独立した worktree でこのチャットを開始し、現在のブランチには影響しません"
     },
     "branchChip": {
       "label": "ブランチ",
@@ -4733,7 +4735,8 @@
       "loadFailed": "ブランチの読み込みに失敗しました。タップして再試行",
       "currentTooltip": "現在のブランチ",
       "sourceTooltip": "worktree のソースブランチ",
-      "worktreeHint": "別のブランチを選択すると worktree 分離で開始します"
+      "worktreeHint": "別のブランチを選ぶと worktree 分離で開始します",
+      "exitWorktreeHint": "現在のブランチを選ぶと worktree を解除し、そのまま開始します"
     },
     "folderPicker": {
       "selectFolder": "フォルダを選択",
@@ -5820,12 +5823,11 @@
     },
     "draft": {
       "createSessionFailed": "セッションの作成に失敗しました。再試行してください",
+      "remoteWorktreeCleanupPending": "前回のリモート worktree はまだクリーンアップ待ちです。デバイスを再接続してから再試行してください。",
       "remoteProviderUpdating": "プロバイダーの認証情報を更新中です。しばらくしてから再試行してください",
       "remoteProviderUnsupported": "このプロバイダーは SSH リモートセッションに対応していません。別のソースを選択してください",
       "remoteNativeOauthUnavailable": "Claude.ai サブスクリプションが未接続です。先に接続するか、ゲートウェイモデルを選択してください",
       "deviceStillLoading": "リモートデバイスの読み込み中です。しばらくお待ちください",
-      "worktreeMissingRepo": "worktree を作成できません：現在のディレクトリのリポジトリルートがありません",
-      "worktreeRepoHint": "作業ディレクトリを再選択し、右下のフォルダ表示が更新されてから再試行してください",
       "sessionInactive": "セッションはすでにアクティブではありません",
       "remoteProjectBanner": "{{device}} の {{project}} で新しいセッションを作成",
       "remoteDialogueBanner": "{{device}} で新しい対話（プロジェクトなし）"

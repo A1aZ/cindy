@@ -34,6 +34,12 @@ type DesktopAccountDeletionConfirmResult =
   import('../shared/authIpc').DesktopAccountDeletionConfirmResult;
 type DesktopAccountDeletionStatusResult =
   import('../shared/authIpc').DesktopAccountDeletionStatusResult;
+type PendingRemotePrecreatedWorktree =
+  import('../shared/remotePrecreatedWorktreeLedger').PendingRemotePrecreatedWorktree;
+type PendingRemotePrecreatedWorktreeTarget =
+  import('../shared/remotePrecreatedWorktreeLedger').PendingRemotePrecreatedWorktreeTarget;
+type RemotePrecreatedWorktreeLedgerSnapshot =
+  import('../shared/remotePrecreatedWorktreeLedger').RemotePrecreatedWorktreeLedgerSnapshot;
 
 /* ── Environment check ── */
 
@@ -1860,6 +1866,8 @@ interface ElectronAPI {
     >;
     fastModeByModel: Record<string, boolean>;
     effortByModel: Record<string, string>;
+    /** 「新建会话默认启用 worktree」勾选记忆(vendor 无关根字段,远程草稿播种用)。 */
+    worktreeEnabled: boolean;
   }) => void;
 
   /** 被控端 renderer → 自身 main:providerModelMemory 全量快照镜像(草稿列表行真实读源)。 */
@@ -1889,6 +1897,11 @@ interface ElectronAPI {
       effort?: string;
       fast?: boolean;
     }) => void,
+  ) => () => void;
+
+  /** 被控端本地 main → 自身 renderer:控制端写穿的「新建会话默认启用 worktree」(patchDraft 写真实草稿)。 */
+  onMakerWorktreePrefApply: (
+    cb: (payload: { worktreeEnabled: boolean }) => void,
   ) => () => void;
 
   /** 被控端本地 main → 自身 renderer:控制端写穿的会话「模型 effort/fast」pref(调本地 setter)。 */
@@ -3321,6 +3334,16 @@ interface ElectronAPI {
   sidebarSettingsLoadPinnedOrderSync: () => string[];
   sidebarSettingsSavePinnedOrder: (order: readonly string[]) => Promise<void>;
   sidebarSettingsOnPinnedOrderChanged: (cb: (order: string[]) => void) => () => void;
+
+  remotePrecreatedWorktreeLedger: {
+    list: () => Promise<RemotePrecreatedWorktreeLedgerSnapshot>;
+    register: (
+      record: PendingRemotePrecreatedWorktree,
+    ) => Promise<{ persisted: boolean }>;
+    forget: (
+      target: PendingRemotePrecreatedWorktreeTarget,
+    ) => Promise<{ persisted: boolean }>;
+  };
 
   // ── session 级"终身累计 cost"变化 (per-session, 不是 today-aggregate) ──
   // today aggregate 已搬到 electronAPI.maker.usage.* (Claude USD + Codex token 统一)。

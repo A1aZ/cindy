@@ -340,6 +340,8 @@ import { validateExtraDirs } from './extraDirsValidator.js';
 import { prepareHandoffWorktree, shouldRecycleHandoffWorktreeOnFailure } from './handoffWorktree.js';
 import { validateHandoffWorkingDir } from './handoffWorkingDir.js';
 import { registerProjectPluginPolicyHandlers } from './projectPluginPolicyHandlers.js';
+import { registerPrecreatedWorktreeDiscardHandler } from './precreatedWorktreeDiscardHandler.js';
+import { registerNewMakerWorktreePreferenceHandler } from './newMakerWorktreePreferenceHandler.js';
 import {
   restoreMissingManagedWorktreeForSession,
   WorktreeManager as worktreeManager,
@@ -3651,6 +3653,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       lastByVendor: p.lastByVendor,
       fastModeByModel: p.fastModeByModel,
       effortByModel: p.effortByModel,
+      // worktree 勾选记忆(vendor 无关根字段):旧 renderer 不推此字段 → false 兜底。
+      worktreeEnabled: p.worktreeEnabled === true,
     });
     broadcastNewMakerDraftChanged();
   });
@@ -3842,6 +3846,19 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       ...(p.effort !== undefined ? { effort: p.effort } : {}),
       ...(p.fast !== undefined ? { fast: p.fast } : {}),
     });
+  });
+
+  // device-link 草稿「新建会话默认启用 worktree」写穿:与上面的模型 pref 同款转发模式——
+  // 被控端不直接改 newMakerDefaultsCache(那只是镜像、renderer 才是真相),把布尔转发给
+  // 自身 renderer(WORKTREE_PREF_APPLY,仅本地窗口),renderer patchDraft 写真实草稿;
+  // 变更经既有 SYNC_NEW_MAKER_DRAFT re-mirror + NEW_MAKER_DRAFT_CHANGED 回流控制端。
+  registerNewMakerWorktreePreferenceHandler(createElectronIpcHandlerRegistry(), {
+    isDeviceLinkInvoke,
+    assertTrustedCaller: (event) =>
+      assertTrustedAppRendererEvent(
+        event as Parameters<typeof assertTrustedAppRendererEvent>[0],
+      ),
+    broadcast: broadcastToAllWindows,
   });
 
   // 旧控制端的 device-link 会话模型预设写穿兼容入口。转发给被控端 renderer 后,renderer 将值
@@ -4898,6 +4915,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       allocateDialogueWorkspace: ensureDialogueWorkspaceDir,
       createSessionId: createId,
       now: Date.now,
+      withSessionLock: withSendToSessionLock,
       sendWorkerReadyMessage: (session) => {
         // Orca worker 首次创建时发一条初始化消息，强制 codex 写 rollout 文件，
         // 避免 app 重启后 thread/resume 因 rollout 缺失而失败。
@@ -4918,6 +4936,36 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       warnStderr: (agentKind, line) => log.warn(`[${agentKind}/stderr] ${line}`),
     },
   );
+
+  registerPrecreatedWorktreeDiscardHandler(makerSessionRegistry, {
+    assertCaller: (event) => {
+      // device-link 的真实调用身份由 invoke async context + allowlist 证明；本机直调仍
+      // 必须来自 Cindy 自有顶层 Renderer，不能把删除能力交给 WebView/Ghost。
+      if (!isDeviceLinkInvoke()) {
+        assertTrustedAppRendererEvent(
+          event as Parameters<typeof assertTrustedAppRendererEvent>[0],
+        );
+      }
+    },
+    withSessionLock: withSendToSessionLock,
+    isSessionClaimed: async (sessionId) => {
+      if (maker.getSession(sessionId)) return true;
+      const [row] = await getDbClient()
+        .drizzle.select({ id: sessions.id })
+        .from(sessions)
+        .where(eq(sessions.id, sessionId))
+        .limit(1);
+      return !!row;
+    },
+    discard: (sessionId, expectedPath, options) =>
+      worktreeManager.discardPrecreatedWorktree(sessionId, expectedPath, options),
+    discardByRecoveryKey: (sessionId, recoveryKey, options) =>
+      worktreeManager.discardPrecreatedWorktreeByRecoveryKey(
+        sessionId,
+        recoveryKey,
+        options,
+      ),
+  });
 
   // turn 运行中登记的切换意图(下一条消息发送时刻由 send 事务 apply)。
   const agentSwitchPending = createPendingAgentSwitchRegistry();

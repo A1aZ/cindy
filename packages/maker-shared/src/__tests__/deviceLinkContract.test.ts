@@ -39,6 +39,7 @@ describe('device-link shared contract', () => {
     expect(MOBILE_REMOTE_INVOKE_CHANNELS).toContain('maker:schedule:delete-run');
     expect(MOBILE_REMOTE_INVOKE_CHANNELS).toContain('maker:usage:codex-rate-limits');
     expect(MOBILE_REMOTE_INVOKE_CHANNELS).toContain('maker:usage:codex-rate-limit-reset');
+    expect(MOBILE_REMOTE_INVOKE_CHANNELS).toContain('worktree:discard-precreated');
     expect(MOBILE_REMOTE_INVOKE_CHANNELS).not.toContain(DEVICE_LINK_VOICE_CREDENTIAL_SYNC_CHANNEL);
     expect(MOBILE_REMOTE_INVOKE_CHANNELS).toContain(DEVICE_LINK_VOICE_DICTIONARY_LEARNING_CHANNEL);
     expect(MOBILE_REMOTE_INVOKE_CHANNELS).toContain('text-file:read-preview');

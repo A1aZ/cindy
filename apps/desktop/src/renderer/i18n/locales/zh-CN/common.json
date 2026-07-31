@@ -4725,7 +4725,9 @@
       "detecting": "检测环境中…",
       "gitMissing": "未检测到 git，请先安装",
       "notGitRepo": "当前目录不是 git 仓库",
-      "alreadyInWorktree": "已在 worktree 中，禁止嵌套"
+      "alreadyInWorktree": "已在 worktree 中，禁止嵌套",
+      "toggleAria": "启用 worktree 隔离",
+      "chipTooltip": "在独立 worktree 中开始这次对话，不影响当前分支"
     },
     "branchChip": {
       "label": "分支",
@@ -4733,7 +4735,8 @@
       "loadFailed": "分支列表加载失败，点此重试",
       "currentTooltip": "当前分支",
       "sourceTooltip": "worktree 源分支",
-      "worktreeHint": "选择其他分支将以 worktree 隔离启动"
+      "worktreeHint": "选择其他分支将以 worktree 隔离启动",
+      "exitWorktreeHint": "选择当前分支将退出 worktree，直接在当前分支上启动"
     },
     "folderPicker": {
       "selectFolder": "选择文件夹",
@@ -5820,6 +5823,7 @@
     },
     "draft": {
       "createSessionFailed": "创建任务失败，请重试",
+      "remoteWorktreeCleanupPending": "上一次远程 worktree 仍待回收，请重新连接设备后再试。",
       "remoteProviderUpdating": "供应商凭证正在更新，请稍后重试",
       "remoteProviderUnsupported": "该供应商不支持 SSH 远程会话，请更换来源",
       "remoteNativeOauthUnavailable": "未连接 Claude.ai 订阅，请先连接或选择网关模型",

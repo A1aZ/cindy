@@ -4727,7 +4727,9 @@
       "detecting": "Detecting environment…",
       "gitMissing": "git not detected, please install it first",
       "notGitRepo": "Current directory is not a git repository",
-      "alreadyInWorktree": "Already inside a worktree, nesting is not allowed"
+      "alreadyInWorktree": "Already inside a worktree, nesting is not allowed",
+      "toggleAria": "Use worktree isolation",
+      "chipTooltip": "Start this chat in an isolated worktree without touching the current branch"
     },
     "branchChip": {
       "label": "Branch",
@@ -4735,7 +4737,8 @@
       "loadFailed": "Failed to load branches — tap to retry",
       "currentTooltip": "Current branch",
       "sourceTooltip": "Worktree source branch",
-      "worktreeHint": "Picking another branch starts in an isolated worktree"
+      "worktreeHint": "Picking another branch starts this chat in an isolated worktree",
+      "exitWorktreeHint": "Picking the current branch leaves worktree and starts directly on it"
     },
     "folderPicker": {
       "selectFolder": "Select folder",
@@ -5831,12 +5834,11 @@
     },
     "draft": {
       "createSessionFailed": "Failed to create session, please retry",
+      "remoteWorktreeCleanupPending": "The previous remote worktree is still awaiting cleanup. Reconnect the device and try again.",
       "remoteProviderUpdating": "Provider credentials are being updated — retry in a moment",
       "remoteProviderUnsupported": "This provider is not supported in SSH remote sessions — pick another source",
       "remoteNativeOauthUnavailable": "Claude.ai subscription is not connected — connect it first or pick a gateway model",
       "deviceStillLoading": "Remote device is still loading, please wait",
-      "worktreeMissingRepo": "Cannot create worktree: missing repository root for the current directory",
-      "worktreeRepoHint": "Try re-selecting the working directory and wait for the folder badge to refresh, then retry",
       "sessionInactive": "Session is no longer active",
       "remoteProjectBanner": "New session in {{project}} on {{device}}",
       "remoteDialogueBanner": "New chat on {{device}} (no project)"

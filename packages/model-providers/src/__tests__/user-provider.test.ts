@@ -287,7 +287,7 @@ describe('buildUserProvider (per-runtime)', () => {
     expect(p.auth).toEqual({ method: 'none' });
     expect((p.models.pi ?? []).map((m) => m.id)).toEqual(['qwen3:8b']);
     // pi 自定义模型给 effort 档(与 claude 同档,默认 high)。
-    expect((p.models.pi ?? [])[0]?.efforts).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+    expect((p.models.pi ?? [])[0]?.efforts).toEqual(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
     expect((p.models.pi ?? [])[0]?.defaultEffort).toBe('high');
     expect((p.models.pi ?? [])[0]?.group).toBe('custom:localollama');
   });

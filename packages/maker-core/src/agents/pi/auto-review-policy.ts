@@ -24,6 +24,8 @@ export interface PiAutoReviewContext {
   input: Record<string, unknown>;
   /** 会话工作区根:cwd,绝对路径(pi 无 extraDirs)。 */
   workspaceRoots: string[];
+  /** 可读根:工作区 + Pi 附加只读引用目录。写操作仍只看 workspaceRoots。 */
+  readRoots?: string[];
 }
 
 /** pi 只读内置工具(与 cindy-bridge READONLY_BUILTINS 同集)。入参路径字段统一为 `path`。 */
@@ -65,13 +67,13 @@ function findCredentialLeaf(input: unknown, depth = 0): string | undefined {
  * (见 pi/index.ts handleExtensionUiRequest 的 dispatcher)。纯映射,判定逻辑全在 core。
  */
 export function classifyPiToolForAutoReview(ctx: PiAutoReviewContext): PiAutoReviewVerdict {
-  const { toolName, input, workspaceRoots } = ctx;
+  const { toolName, input, workspaceRoots, readRoots = workspaceRoots } = ctx;
 
   if (READ_ONLY_TOOLS.has(toolName)) {
     // 凭证特征可能落在任意字符串入参(grep 的 pattern、find 的表达式等),与 bridge
     // 的 touchesCredentialPath 同口径递归扫全字段;命中的字符串作为 path 交 core 判必问。
     const credentialHit = findCredentialLeaf(input);
-    return reviewAction({ kind: 'read', path: credentialHit ?? stringField(input, 'path') }, workspaceRoots);
+    return reviewAction({ kind: 'read', path: credentialHit ?? stringField(input, 'path') }, readRoots);
   }
   if (FILE_WRITE_TOOLS.has(toolName)) {
     return reviewAction({ kind: 'file-write', path: stringField(input, 'path') }, workspaceRoots);

@@ -30,6 +30,15 @@ const PI_BINARY = path.join(
   `${process.platform}-${process.arch}`,
   process.platform === 'win32' ? 'pi.exe' : 'pi',
 );
+const PREVIOUS_PI_BINARY = path.join(
+  REPO_ROOT,
+  'tools',
+  'pi',
+  'updates',
+  '0.82.1',
+  `${process.platform}-${process.arch}`,
+  process.platform === 'win32' ? 'pi.exe' : 'pi',
+);
 
 const piAvailable = existsSync(PI_BINARY);
 
@@ -290,6 +299,121 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
   );
 
   it(
+    'precise rewind forks at the selected Pi turn and the replacement session resumes',
+    { timeout: 60_000 },
+    async () => {
+      const agent = new PiAgent(buildDeps());
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-rewind-cwd-'));
+      let handle: AgentSessionHandle | null = null;
+      let resumed: AgentSessionHandle | null = null;
+      const sendAndWait = async (target: AgentSessionHandle, text: string) => {
+        const done = (async () => {
+          for await (const event of target.events()) if (event.type === 'done') break;
+        })();
+        await target.send({ type: 'user', content: text });
+        await done;
+      };
+      try {
+        handle = await agent.startSession({ sessionId: 'rewind-source', workingDir, model: 'pi-test-model' });
+        await sendAndWait(handle, 'turn one');
+        await sendAndWait(handle, 'turn two');
+        expect(await handle.previewRewindFiles?.('')).toMatchObject({ canRewind: true });
+
+        const result = await handle.commitRewindFiles?.('', '', { tailTurnsToDrop: 1 });
+        expect(result?.sdkSessionId).toBeTruthy();
+        expect(result?.sdkSessionId).not.toBe(handle.id);
+        await handle.close();
+        handle = null;
+
+        resumed = await agent.startSession({
+          sessionId: 'rewind-resume',
+          workingDir,
+          model: 'pi-test-model',
+          resumeSessionId: result?.sdkSessionId,
+        });
+        await sendAndWait(resumed, 'replacement turn two');
+      } finally {
+        await handle?.close();
+        await resumed?.close();
+        rmSync(workingDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'falls back from an invalid resume only when the host CAS allows it',
+    { timeout: 60_000 },
+    async () => {
+      const agent = new PiAgent(buildDeps());
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-invalid-resume-'));
+      let handle: AgentSessionHandle | null = null;
+      try {
+        handle = await agent.startSession({
+          sessionId: 'invalid-resume-allowed',
+          workingDir,
+          model: 'pi-test-model',
+          resumeSessionId: path.join(workingDir, 'missing.jsonl'),
+          onInvalidResumeSession: async () => true,
+        });
+        expect(handle.id).toBeTruthy();
+        await handle.close();
+        handle = null;
+        await expect(agent.startSession({
+          sessionId: 'invalid-resume-rejected',
+          workingDir,
+          model: 'pi-test-model',
+          resumeSessionId: path.join(workingDir, 'still-missing.jsonl'),
+          onInvalidResumeSession: async () => false,
+        })).rejects.toThrow('fallback rejected');
+      } finally {
+        await handle?.close();
+        rmSync(workingDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!existsSync(PREVIOUS_PI_BINARY))(
+    'resumes a v0.82.1 session after upgrading the embedded runtime to v0.83.0',
+    { timeout: 60_000 },
+    async () => {
+      const oldDeps = buildDeps();
+      oldDeps.binaryPath = PREVIOUS_PI_BINARY;
+      const oldAgent = new PiAgent(oldDeps);
+      const newAgent = new PiAgent(buildDeps());
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-upgrade-resume-'));
+      let oldHandle: AgentSessionHandle | null = null;
+      let newHandle: AgentSessionHandle | null = null;
+      try {
+        oldHandle = await oldAgent.startSession({ sessionId: 'pre-upgrade', workingDir, model: 'pi-test-model' });
+        const done = (async () => {
+          for await (const event of oldHandle!.events()) if (event.type === 'done') break;
+        })();
+        await oldHandle.send({ type: 'user', content: 'created by the previous runtime' });
+        await done;
+        const resumeSessionId = oldHandle.id;
+        await oldHandle.close();
+        oldHandle = null;
+
+        newHandle = await newAgent.startSession({
+          sessionId: 'post-upgrade',
+          workingDir,
+          model: 'pi-test-model',
+          resumeSessionId,
+        });
+        const tree = await newHandle.getSessionTree?.();
+        const flattened = tree?.roots.flatMap(function flatten(node): typeof tree.roots {
+          return [node, ...node.children.flatMap(flatten)];
+        }) ?? [];
+        expect(flattened.some((node) => node.role === 'user')).toBe(true);
+      } finally {
+        await oldHandle?.close();
+        await newHandle?.close();
+        rmSync(workingDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
     'reads and navigates the native session tree without calling the model',
     { timeout: 60_000 },
     async () => {
@@ -372,6 +496,45 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
       } finally {
         await handle?.close();
         rmSync(workingDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'sends file attachments and hot-updated Extra Dirs as read-only references',
+    { timeout: 60_000 },
+    async () => {
+      const agent = new PiAgent(buildDeps());
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-file-cwd-'));
+      const referenceDir = mkdtempSync(path.join(tmpdir(), 'pi-extra-ref-'));
+      const filePath = path.join(referenceDir, 'spec.txt');
+      writeFileSync(filePath, 'reference material');
+      let handle: AgentSessionHandle | null = null;
+      try {
+        handle = await agent.startSession({
+          sessionId: 'file-extra-session',
+          workingDir,
+          model: 'pi-test-model',
+        });
+        await handle.setExtraDirs?.([referenceDir]);
+        const before = seenRequests.length;
+        const done = (async () => {
+          for await (const event of handle!.events()) if (event.type === 'done') break;
+        })();
+        await handle.send({
+          type: 'user',
+          content: [{ type: 'file', path: filePath }, { type: 'text', text: 'summarize it' }],
+        });
+        await done;
+        const bodies = seenRequests.slice(before).map((request) => request.body).join('\n');
+        expect(bodies).toContain(filePath);
+        expect(bodies).toContain(referenceDir);
+        expect(agent.capabilities.multimodal.file.supported).toBe(true);
+        expect(agent.capabilities.extraDirs.supported).toBe(true);
+      } finally {
+        await handle?.close();
+        rmSync(workingDir, { recursive: true, force: true });
+        rmSync(referenceDir, { recursive: true, force: true });
       }
     },
   );
@@ -481,6 +644,14 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
       const nativeUrl = typeof nativeAddr === 'object' && nativeAddr ? `http://127.0.0.1:${nativeAddr.port}` : '';
 
       const deps = buildDeps();
+      const authProviderIds: Array<string | null | undefined> = [];
+      deps.auth.getState = async (options) => {
+        authProviderIds.push(options?.providerId);
+        return options?.providerId === 'localbyom'
+          ? { authenticated: true, identity: 'Local BYOM', authSource: 'api-key' as const }
+          : { authenticated: false };
+      };
+      deps.auth.getAuthEnv = async () => ({ CINDY_PI_API_KEY: 'gateway-unavailable-placeholder' });
       deps.resolvePiNativeProviders = async () => ({
         providers: [
           {
@@ -516,6 +687,7 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         expect(config.providers.localbyom.models.some((m) => m.id === 'byom-model')).toBe(true);
         // 网关 provider cindy 仍在(网关模型不受影响)。
         expect(config.providers.cindy).toBeDefined();
+        expect(authProviderIds).toContain('localbyom');
 
         const done = (async () => {
           for await (const ev of handle!.events()) {

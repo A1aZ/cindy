@@ -26,12 +26,17 @@ interface ModelCapabilitiesTarget {
 }
 
 /** CatalogModel → ModelDescriptor。仅透传 ModelDescriptor 需要的字段；可选字段缺省时不写键。 */
-function toDescriptor(m: CatalogModel): ModelDescriptor {
+function toDescriptor(m: CatalogModel, agent: AgentKind): ModelDescriptor {
+  // Pi runtime 原生接受 minimal thinking level。目录里的同一模型常从 CC/Codex
+  // 投影而来而未声明该档；只要模型有 reasoning 档，就把 Pi 的最小档补在最前。
+  const efforts = agent === 'pi' && m.efforts.length > 0 && !m.efforts.includes('minimal')
+    ? (['minimal', ...m.efforts] as const)
+    : m.efforts;
   const d: ModelDescriptor = {
     id: m.id,
     displayName: m.name,
     contextWindow: m.contextWindow,
-    efforts: m.efforts,
+    efforts,
     defaultEffort: m.defaultEffort,
   };
   // 刻意**不**透传 contextWindowVerified:availableModels 是跨 provider 去重后的扁平表,
@@ -65,7 +70,7 @@ export function deriveAvailableModels(catalog: Catalog, agent: AgentKind): Model
       // 25 轮)。非聊天模型不占 seen,同 id 若被其它来源标为 chat 仍可补上。
       if (!isAgentSelectableModel(m, { userProvider: provider.source === 'user' })) continue;
       seen.add(m.id);
-      out.push(toDescriptor(m));
+      out.push(toDescriptor(m, agent));
     }
   }
   return out;

@@ -59,6 +59,12 @@ function injectedCatalog(): Catalog {
 }
 
 describe('deriveAvailableModels — dynamic-first catalog contract', () => {
+  it('adds native minimal thinking to reasoning-capable Pi models only', () => {
+    const pi = deriveAvailableModels(BUNDLED_CATALOG, 'pi');
+    expect(pi.find((m) => m.id === 'xai/grok-4.3')?.efforts[0]).toBe('minimal');
+    expect(pi.find((m) => m.id === 'xai/grok-code-fast')?.efforts).toEqual([]);
+  });
+
   it('bundled(未注入)派生 = 仅 xai 静态清单,动态供应商不贡献任何条目', () => {
     const cc = deriveAvailableModels(BUNDLED_CATALOG, 'claude-code');
     const codex = deriveAvailableModels(BUNDLED_CATALOG, 'codex');

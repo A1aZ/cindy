@@ -6,9 +6,36 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 
+vi.mock('electron', () => ({
+  app: {
+    isPackaged: false,
+    getAppPath: () => process.cwd(),
+    getPath: () => '/tmp/cindy-pi-auth-test',
+  },
+}));
+
 vi.mock('../auth-adapters.js', () => ({
   readClaudeApiKey: () => 'REAL-GATEWAY-KEY',
   desktopCodexAuthAdapter: { getState: async () => ({ authenticated: false }) },
+}));
+vi.mock('../custom-provider-store.js', () => ({
+  listCustomProviders: async () => [
+    {
+      id: 'ollama-local',
+      name: 'Local Ollama',
+      auth: { method: 'none' },
+      runtimes: { pi: { baseUrl: 'http://127.0.0.1:11434/v1', models: [{ id: 'qwen' }] } },
+    },
+    {
+      id: 'my-vllm',
+      name: 'My vLLM',
+      auth: { method: 'apiKey' },
+      runtimes: { pi: { baseUrl: 'https://vllm.example/v1', models: [{ id: 'model' }] } },
+    },
+  ],
+}));
+vi.mock('../../secrets/providerSecretStore.js', () => ({
+  readCustomProviderKey: (id: string) => (id === 'my-vllm' ? 'BYOM-KEY' : null),
 }));
 
 import { desktopPiAuthAdapter } from '../pi-host.js';
@@ -34,5 +61,16 @@ describe('DesktopPiAuthAdapter.getAuthEnv', () => {
   it('gives the gateway key when no providerId / xd', async () => {
     expect((await desktopPiAuthAdapter.getAuthEnv())[PI_API_KEY_ENV]).toBe('REAL-GATEWAY-KEY');
     expect((await desktopPiAuthAdapter.getAuthEnv({ providerId: 'xd' }))[PI_API_KEY_ENV]).toBe('REAL-GATEWAY-KEY');
+  });
+
+  it('authenticates keyless and keyed native providers independently of Cindy auth', async () => {
+    expect(await desktopPiAuthAdapter.getState({ providerId: 'ollama-local' })).toMatchObject({
+      authenticated: true,
+      identity: 'Local Ollama',
+    });
+    expect(await desktopPiAuthAdapter.getState({ providerId: 'my-vllm' })).toMatchObject({
+      authenticated: true,
+      identity: 'My vLLM',
+    });
   });
 });

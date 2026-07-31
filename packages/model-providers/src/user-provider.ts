@@ -39,7 +39,7 @@ const CUSTOM_EFFORTS: Partial<Record<AgentKind, Effort[]>> = {
   codex: ['low', 'medium', 'high', 'xhigh'],
   // pi 经 thinking level 表达推理强度(off/minimal/low/medium/high/xhigh/max);选择器给
   // 与 claude 同档,实际是否生效由自定义模型后端决定(BYOM 本地模型可能不支持,无害)。
-  pi: ['low', 'medium', 'high', 'xhigh', 'max'],
+  pi: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
 };
 /** 自定义模型默认选中的 effort（与内置旗舰一致）。 */
 const DEFAULT_CUSTOM_EFFORT: Effort = 'high';

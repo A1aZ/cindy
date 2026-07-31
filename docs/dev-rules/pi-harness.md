@@ -74,18 +74,25 @@ Cindy 显式设置:models.json、`--append-system-prompt`、`--session-dir`、�
   覆盖安全命令静默执行 / 危险命令升级并 deny 拦截 / 区内写落盘 / 凭证读升级 / 普通读直通 /
   斜杠转义 / models.json 计费透传。
 
-## 6. 上线前手工清单(需真凭证/额度,自动化测不了)
+## 6. 上线门禁
 
-- [ ] **平台覆盖**:`apps/pi-bin/` 目前仅 `darwin-arm64`。Windows / Linux / Intel Mac 二进制
-      分发 + 路径/shell 差异(bridge 路径判定、NO_PROXY、权限文件)逐平台过。
-- [ ] **模型兼容矩阵**:每个经网关的真实模型(chatgpt/、xai/、glm、deepseek、kimi…)在
+- [x] **平台分发**:pin 已升级到 Pi `v0.83.0`，darwin arm64/x64、linux arm64/x64、
+      win32 arm64/x64 六份官方资产都进入 digest pin；下载器兼容 Unix `pi/` 嵌套包与
+      Windows 根目录平铺 zip。Forge 按目标平台下载、校验并把**完整目录分发**打进
+      `resources/pi/<platform>`，Windows `pi.exe` 进入签名扫描。当前 Mac 已完成六资产
+      SHA-256 下载验收；非本机 OS 的最终启动 smoke 仍由对应发布 runner 执行。
+- [x] **协议/模型兼容自动矩阵**:Anthropic Messages、OpenAI Responses、OpenAI Chat 三种
+      Pi 原生 BYOM 映射均有契约测试；真实 Pi + fake gateway 覆盖 thinking/tool streaming、
+      MCP bridge、redacted/usage 翻译，ChatGPT 订阅已做真实请求与 cacheRead 验收。发布账号的
+      每个真实模型(chatgpt/、xai/、glm、deepseek、kimi…)仍建议在 release candidate 上
       anthropic-compat 下至少跑一轮**带工具调用**的回合,逐个确认 thinking 格式 / tool
-      streaming / redacted thinking 正确(redacted 的坑就是这类 per-model 差异)。测完据此定
-      「默认开哪些 / 全开 + 不支持自动退档」。
-- [ ] **长会话 compaction**:逼近上下文窗口触发自动压缩,核对 UI / usage / 会话状态。
-- [ ] **无人值守**:定时任务选 pi(默认 `bypassPermissions`)完整跑一轮;auto 档无 resolver 时
-      安全动作执行、其余 fail-closed deny 的体验确认。
-- [ ] **resume 边界**:pi 二进制升级后旧 session JSONL 兼容、invalid resume 回退、fork 后再 resume。
+      streaming / redacted thinking 正确；这是额度/账号发布 smoke，不再是功能缺口。
+- [x] **compaction**:启动显式开启 auto-compaction；手动 compact、boundary/usage 翻译、
+      compaction digest 写入与缓存命中均有测试。长上下文压力仍属于 RC soak。
+- [x] **无人值守**:scheduler 对 `agentKind=pi` 使用 Pi 默认模型与
+      `bypassPermissions` 的契约测试已补；Pi bridge 的 auto allow/deny 也用真二进制覆盖。
+- [x] **resume 边界**:已用 Pi v0.82.1 真二进制创建 JSONL，再由 v0.83.0 恢复；
+      invalid resume 在适配层先校验文件存在并遵守 CAS，precise rewind/fork 后 resume 有真二进制测试。
 - [x] **prompt cache**:Pi 子进程默认注入 `PI_CACHE_RETENTION=long`；不支持的 provider
       忽略该选项。已用 ChatGPT 订阅实例确认 `cacheRead` 命中会端到端落库与展示。
 

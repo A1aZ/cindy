@@ -1317,6 +1317,7 @@ export function getMaker(): Maker {
         availableModels: deriveAvailableModels(getDesktopSelectableCatalog(), 'pi'),
       },
       mcpProviders: piMcpProviders,
+      makerMemory: makerMemoryManager,
     });
 
     _maker = new Maker({

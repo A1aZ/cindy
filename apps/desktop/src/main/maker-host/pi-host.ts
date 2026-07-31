@@ -105,6 +105,32 @@ class DesktopPiAuthAdapter implements AuthAdapter {
         ? { authenticated: true, identity: 'SuperGrok', authSource: 'oauth' }
         : { authenticated: false, errorReason: 'xai_oauth_unavailable' };
     }
+    if (providerId) {
+      try {
+        const custom = (await listCustomProviders()).find(
+          (provider) => provider.id === providerId && provider.runtimes.pi,
+        );
+        if (custom) {
+          const method = custom.auth?.method ?? 'apiKey';
+          if (method === 'none') {
+            // AuthState 只有 oauth/api-key 两种“子进程凭证族”；keyless native provider
+            // 归入 provider-key 族即可，实际 models.json 使用固定 dummy key。
+            return { authenticated: true, identity: custom.name, authSource: 'api-key' };
+          }
+          if (method === 'apiKey') {
+            return readCustomProviderKey(providerId, 'pi')
+              ? { authenticated: true, identity: custom.name, authSource: 'api-key' }
+              : { authenticated: false, errorReason: 'pi_native_api_key_unavailable' };
+          }
+          return { authenticated: false, errorReason: 'pi_native_oauth_unsupported' };
+        }
+      } catch (err) {
+        log.warn('pi auth: custom provider lookup failed', {
+          providerId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     const key = readClaudeApiKey();
     if (!key) {
       return { authenticated: false, errorReason: 'cindy_gateway_key_unavailable' };
@@ -122,13 +148,14 @@ class DesktopPiAuthAdapter implements AuthAdapter {
   }
 
   async getAuthEnv(options?: AuthAdapterOptions): Promise<Record<string, string>> {
-    // 仅订阅 OAuth provider 用占位符(真凭证由 compat proxy 注入)。BYOM / 自定义 provider
-    // 及网关本身都要拿真网关 key,否则网关 cindy 块被毒化(中途切网关模型会 401)。
+    // 订阅 OAuth provider 用占位符(真凭证由 compat proxy 注入)。
     if (options?.providerId && PI_OAUTH_SUBSCRIPTION_PROVIDERS.has(options.providerId)) {
       return { [PI_API_KEY_ENV]: PI_PROVIDER_AUTH_PLACEHOLDER_KEY };
     }
     const key = readClaudeApiKey();
-    return key ? { [PI_API_KEY_ENV]: key } : {};
+    // 纯 BYOM 不依赖 Cindy 登录。models.json 始终包含 gateway `cindy` 块，Pi 启动
+    // 会解析它，所以无网关 key 时给不可用占位值；当前原生 provider 使用独立 key。
+    return { [PI_API_KEY_ENV]: key ?? PI_PROVIDER_AUTH_PLACEHOLDER_KEY };
   }
 }
 
@@ -165,6 +192,7 @@ export interface BuildPiAgentOpts {
   capabilityAdditions?: AgentDeps['capabilityAdditions'];
   /** Cindy MCP providers(与 claude/codex 同源工厂产物);经 HTTP bridge 暴露给 pi。 */
   mcpProviders?: AgentDeps['mcpProviders'];
+  makerMemory?: AgentDeps['makerMemory'];
 }
 
 /** Cindy wire protocol → pi models.json api 形态。 */
@@ -295,6 +323,7 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
     logger: opts.logger,
     capabilityAdditions: opts.capabilityAdditions,
     mcpProviders: opts.mcpProviders,
+    makerMemory: opts.makerMemory,
     resolvePiAgentHome: () => path.join(app.getPath('userData'), 'pi-agent-home'),
     preparePiExtraSpawnConfig: (providers, ctx) => getPiExtraSpawnConfig(providers, opts.logger, ctx),
     resolvePiNativeProviders: () => resolvePiNativeProviders(),

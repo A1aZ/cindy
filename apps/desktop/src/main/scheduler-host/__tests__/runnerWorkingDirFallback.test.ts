@@ -229,6 +229,24 @@ describe('MakerScheduleRunner workingDir fallback(未指定目录回退 dialogue
     );
   });
 
+  it('creates unattended Pi schedules with the Pi default model and non-blocking permission mode', async () => {
+    const h = createSessionHarness();
+    const { runner, createSession } = createRunnerHarness(h.session);
+
+    await fireToCompletion(
+      runner,
+      baseSchedule({ agentKind: 'pi', model: undefined, workingDir: '/repo/pi-project' }),
+      h,
+    );
+
+    expect(createSession).toHaveBeenCalledWith(expect.objectContaining({
+      agentKind: 'pi',
+      model: 'claude-sonnet-4-6',
+      permissionMode: 'bypassPermissions',
+      workingDir: '/repo/pi-project',
+    }));
+  });
+
   it('workspaceKind 已是 dialogue → 不重复落库自愈', async () => {
     const h = createSessionHarness();
     const { runner, schedulerUpdate } = createRunnerHarness(h.session);

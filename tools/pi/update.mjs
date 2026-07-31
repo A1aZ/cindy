@@ -48,6 +48,7 @@ const PLATFORMS = [
   { key: 'linux-x64', asset: 'pi-linux-x64.tar.gz', binFile: 'pi' },
   { key: 'linux-arm64', asset: 'pi-linux-arm64.tar.gz', binFile: 'pi' },
   { key: 'win32-x64', asset: 'pi-windows-x64.zip', binFile: 'pi.exe' },
+  { key: 'win32-arm64', asset: 'pi-windows-arm64.zip', binFile: 'pi.exe' },
 ];
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -147,7 +148,13 @@ async function extractArchive(archivePath, destDir) {
  * pi 归档解压出唯一的 `pi/` 目录；把其内容上移到 extractDir 本级并删除空壳，
  * 使 updates/<version>/<platform>/ 直接就是可运行的产物目录。
  */
-function flattenExtractedDir(extractDir, expectedBinName) {
+export function flattenExtractedDir(extractDir, expectedBinName) {
+  // 新版 Windows zip(v0.83+)已直接把完整 dist 平铺在归档根；Unix tar 仍包在
+  // pi/ 目录。两种都是官方布局，先接受已平铺且主程序存在的形态。
+  const alreadyFlatBin = path.join(extractDir, expectedBinName);
+  if (fs.existsSync(alreadyFlatBin) && fs.statSync(alreadyFlatBin).isFile()) {
+    return alreadyFlatBin;
+  }
   const innerOriginal = path.join(extractDir, 'pi');
   if (!fs.existsSync(innerOriginal) || !fs.statSync(innerOriginal).isDirectory()) {
     const entries = fs.readdirSync(extractDir);

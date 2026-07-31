@@ -22,6 +22,16 @@ describe('classifyPiToolForAutoReview', () => {
     expect(verdict('edit', {})).toBe('prompt');
   });
 
+  it('allows reads but not writes in extra read-only roots', () => {
+    const readRoots = [WS, '/Users/t/reference'];
+    expect(classifyPiToolForAutoReview({
+      toolName: 'read', input: { path: '/Users/t/reference/spec.md' }, workspaceRoots: roots, readRoots,
+    })).toBe('auto-approve');
+    expect(classifyPiToolForAutoReview({
+      toolName: 'write', input: { path: '/Users/t/reference/spec.md' }, workspaceRoots: roots, readRoots,
+    })).toBe('prompt');
+  });
+
   it('routes bash through the shell classifier', () => {
     expect(verdict('bash', { command: 'ls -la' })).toBe('auto-approve');
     expect(verdict('bash', { command: 'git status' })).toBe('auto-approve');

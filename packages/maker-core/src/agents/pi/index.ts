@@ -53,8 +53,10 @@ import type {
   ForkSdkSessionOptions,
   ForkSdkSessionResult,
   InteractionResolver,
+  RewindFilesResult,
   UsageSnapshot,
 } from '../../types/events.js';
+import type { MemoryResetResult, MemorySetResult, MemoryStatus } from '../../types/memory.js';
 import type { AgentKind, Effort, UserMessage, UserContentBlock } from '../../types/common.js';
 import type { ListAgentSkillsOptions, ListAgentSkillsResult } from '../../types/palette.js';
 import { scanPiCustomizations } from './customization-scanner.js';
@@ -189,7 +191,7 @@ async function buildPiPrompt(message: UserMessage): Promise<{ text: string; imag
         textParts.push(`\`${block.path}\``);
         break;
       case 'file':
-        textParts.push(`\`${block.path}\``);
+        textParts.push(`Attached file (read-only reference): \`${block.path}\``);
         break;
       case 'image': {
         try {
@@ -207,6 +209,16 @@ async function buildPiPrompt(message: UserMessage): Promise<{ text: string; imag
     }
   }
   return { text: textParts.join(' ').trim(), images };
+}
+
+function piExtraDirsPrompt(dirs: readonly string[]): string {
+  if (dirs.length === 0) return '';
+  return [
+    '<cindy-extra-reference-directories>',
+    'The following absolute directories are available as read-only references. Do not modify them:',
+    ...dirs.map((dir) => `- ${dir}`),
+    '</cindy-extra-reference-directories>',
+  ].join('\n');
 }
 
 export class PiAgent extends BaseAgent {
@@ -228,6 +240,7 @@ export class PiAgent extends BaseAgent {
       hasFastMode: true,
       effort: { supported: true },
       effortLevels: [
+        { id: 'minimal', displayName: 'Minimal' },
         { id: 'low', displayName: 'Low' },
         { id: 'medium', displayName: 'Medium' },
         { id: 'high', displayName: 'High' },
@@ -256,19 +269,32 @@ export class PiAgent extends BaseAgent {
       multimodal: {
         text: { supported: true },
         image: { supported: true },
-        file: { supported: false, reason: 'not-implemented' },
+        // Pi 的 read 工具可直接消费 host 归一化后的本地附件路径。
+        file: { supported: true },
       },
       // fork:整条克隆(clone)或按 tailTurnsToDrop rewind 到某条 user 消息(fork{entryId}),
       // 与 Codex 粗粒度 fork 同构(uuidMap 空、upToMessageId 忽略)。见 forkSdkSession。
       fork: { supported: true },
-      // 对话分支可做,但 pi 无文件级 checkpoint —— 文件回滚型 rewind 真做不了,诚实降级。
-      rewind: { supported: false, reason: 'sdk-missing', message: 'pi 无文件级 checkpoint;对话分支走 fork' },
+      // 对话精确裁剪走 Pi 原生 fork(entryId)，文件恢复复用 Cindy Git savepoint。
+      rewind: { supported: true },
       // pi JSONL 原生 append-only entry tree:get_tree + bridge navigateTree。
       sessionTree: { supported: true },
       abort: { supported: true },
       sameTurnSteer: { supported: true },
-      memory: { supported: { supported: false, reason: 'sdk-missing' } },
-      extraDirs: { supported: false, reason: 'sdk-missing' },
+      memory: {
+        supported: { supported: true },
+        displayName: 'Pi Auto Memory',
+        description: 'Preserve compacted context as searchable Cindy memory.',
+        stage: 'stable',
+        defaultEnabled: true,
+        resettable: true,
+        setEnabledMidSession: {
+          supported: false,
+          reason: 'not-implemented',
+          message: 'The updated Pi Auto Memory setting applies to new sessions.',
+        },
+      },
+      extraDirs: { supported: true },
       // pi 原生 export_html RPC:自带 export-html 渲染器,离线、无网关。
       sessionHtmlExport: { supported: true },
       // pi 原生 compact RPC:手动压缩(可带聚焦指令,调 LLM 生成摘要)。
@@ -380,28 +406,6 @@ export class PiAgent extends BaseAgent {
       });
     }
 
-    const authProviderId =
-      opts.providerId ??
-      (opts.model.startsWith('chatgpt/')
-        ? 'openai'
-        : opts.model.startsWith('xai/')
-          ? 'xai'
-          : null);
-    const credentialMode =
-      resolveAgentCredentialMode({ agentKind: 'pi', providerId: authProviderId, model: opts.model }) ??
-      'gateway-key';
-    const authState = await this.deps.auth.getState({
-      credentialMode,
-      providerId: authProviderId,
-    });
-    if (!authState.authenticated) {
-      throw new AgentNotAuthenticatedError('pi');
-    }
-    const authEnv = await this.deps.auth.getAuthEnv({
-      credentialMode,
-      providerId: authProviderId,
-    });
-
     // BYOM:host 解析当前会话可用的原生 provider(用户自定义/本地模型)+ 需注入的 env(keys)。
     // 缺省 → 空,只有网关 provider `cindy`(现状不变)。失败不致命,降级为无原生 provider。
     let nativeProviders: PiNativeProviderSpec[] = [];
@@ -425,6 +429,24 @@ export class PiAgent extends BaseAgent {
     const resolveProviderForModel = (model: string): string =>
       modelProviderMap.get(model) ?? PI_PROVIDER_ID;
     const initialProvider = resolveProviderForModel(opts.model);
+
+    // 先解析 native provider 再做 auth：老会话/远端控制端可能没有持久化 providerId，
+    // 仍必须能从 model→provider 映射识别纯 BYOM，不能误落 Cindy gateway 登录门。
+    const authProviderId =
+      opts.providerId ??
+      (initialProvider !== PI_PROVIDER_ID
+        ? initialProvider
+        : opts.model.startsWith('chatgpt/')
+          ? 'openai'
+          : opts.model.startsWith('xai/')
+            ? 'xai'
+            : null);
+    const credentialMode =
+      resolveAgentCredentialMode({ agentKind: 'pi', providerId: authProviderId, model: opts.model }) ??
+      'gateway-key';
+    const authState = await this.deps.auth.getState({ credentialMode, providerId: authProviderId });
+    if (!authState.authenticated) throw new AgentNotAuthenticatedError('pi');
+    const authEnv = await this.deps.auth.getAuthEnv({ credentialMode, providerId: authProviderId });
 
     const agentHome = this.resolveAgentHome();
     await this.writeModelsJson(agentHome, nativeProviders);
@@ -451,8 +473,12 @@ export class PiAgent extends BaseAgent {
     const normalizePermissionMode = (mode: string | undefined): 'ask' | 'auto' | 'bypassPermissions' =>
       mode === 'bypassPermissions' ? 'bypassPermissions' : mode === 'auto' ? 'auto' : 'ask';
     let permissionMode = normalizePermissionMode(opts.permissionMode);
+    let mutableExtraDirs = [...(opts.extraDirs ?? [])];
     const writePermissionFile = async (): Promise<void> => {
-      await fs.writeFile(permissionFile, JSON.stringify({ mode: permissionMode }) + '\n');
+      await fs.writeFile(
+        permissionFile,
+        JSON.stringify({ mode: permissionMode, readOnlyRoots: mutableExtraDirs }) + '\n',
+      );
     };
     await writePermissionFile();
 
@@ -483,6 +509,7 @@ export class PiAgent extends BaseAgent {
     // curated 记忆)。gate 与 CC 同口径;best-effort,失败只 warn,绝不阻断会话。
     const compactionMemoryEnabled =
       (opts.makerMemoryEnabled ?? this.deps.runtimeConfig.makerMemoryEnabled ?? false) === true &&
+      (this.memoryOverride ?? true) === true &&
       !!this.deps.makerMemory;
     const memoryScopeKey = buildMemoryScopeKey(opts.workingDir, opts.remoteHostId);
     const digestSlugBase = slugifyForMemory(opts.sessionId ?? `pi-${process.pid}`, 24);
@@ -517,6 +544,7 @@ export class PiAgent extends BaseAgent {
     const appendSections = [
       this.deps.runtimeConfig.systemPrompt?.trim(),
       opts.userPrompt?.trim(),
+      piExtraDirsPrompt(mutableExtraDirs),
     ].filter((s): s is string => !!s && s.length > 0);
     const appendSystemPrompt = appendSections.join('\n\n');
 
@@ -588,6 +616,7 @@ export class PiAgent extends BaseAgent {
               resolver: interactionResolver,
               permissionMode,
               workspaceRoots: [opts.workingDir],
+              readRoots: [opts.workingDir, ...mutableExtraDirs],
             }));
             return;
           }
@@ -632,17 +661,35 @@ export class PiAgent extends BaseAgent {
       // Resume:pi 的会话钥匙是 session JSONL 绝对路径(get_state.sessionFile),
       // 落库 sdk_session_id 存的就是它;切换失败走 invalid-resume CAS 协定。
       if (opts.resumeSessionId) {
-        const switched = await proc.request({ type: 'switch_session', sessionPath: opts.resumeSessionId });
-        if (!switched.success) {
+        // Pi 对不存在的路径会“成功”创建一条同名空会话，不能把历史丢失伪装成
+        // resume 成功。Cindy 先做本地文件存在性检查，再决定是否允许 fresh fallback。
+        let resumeFileExists = false;
+        try {
+          resumeFileExists = (await fs.stat(opts.resumeSessionId)).isFile();
+        } catch {
+          resumeFileExists = false;
+        }
+        if (!resumeFileExists) {
           const mayFallback = (await opts.onInvalidResumeSession?.(opts.resumeSessionId)) ?? true;
           if (!mayFallback) {
-            // proc 关闭 + ctx 注销由下面的 catch 统一处理,这里只抛。
-            throw new Error(`pi resume failed and fallback rejected: ${switched.error ?? 'unknown'}`);
+            throw new Error('pi resume failed and fallback rejected: session file missing');
           }
-          this.deps.logger.warn('pi resume failed, starting fresh session', {
+          this.deps.logger.warn('pi resume session file missing, starting fresh session', {
             resumeSessionId: opts.resumeSessionId,
-            error: switched.error,
           });
+        } else {
+          const switched = await proc.request({ type: 'switch_session', sessionPath: opts.resumeSessionId });
+          if (!switched.success) {
+            const mayFallback = (await opts.onInvalidResumeSession?.(opts.resumeSessionId)) ?? true;
+            if (!mayFallback) {
+              // proc 关闭 + ctx 注销由下面的 catch 统一处理,这里只抛。
+              throw new Error(`pi resume failed and fallback rejected: ${switched.error ?? 'unknown'}`);
+            }
+            this.deps.logger.warn('pi resume failed, starting fresh session', {
+              resumeSessionId: opts.resumeSessionId,
+              error: switched.error,
+            });
+          }
         }
       }
 
@@ -731,7 +778,11 @@ export class PiAgent extends BaseAgent {
       async send(message: UserMessage, sendOpts?: SendOptions): Promise<void> {
         void sendOpts;
         const { text, images } = await buildPiPrompt(message);
-        const command: Record<string, unknown> = { type: 'prompt', message: escapeLeadingSlashCommand(text) };
+        // setExtraDirs 是热更新；Pi 没有独立的 mid-session system-prompt RPC，所以在
+        // 后续 user turn 前附上短引用目录段。初始目录也在稳定 system suffix 中声明。
+        const refs = piExtraDirsPrompt(mutableExtraDirs);
+        const promptText = refs ? `${refs}\n\n${text}` : text;
+        const command: Record<string, unknown> = { type: 'prompt', message: escapeLeadingSlashCommand(promptText) };
         if (images.length > 0) command.images = images;
         // send 语义 = 排队开新 turn;pi streaming 中裸 prompt 会被拒,补 followUp。
         if (ctx.isStreaming) command.streamingBehavior = 'followUp';
@@ -743,7 +794,9 @@ export class PiAgent extends BaseAgent {
 
       async steer(message: UserMessage): Promise<void> {
         const { text, images } = await buildPiPrompt(message);
-        const command: Record<string, unknown> = { type: 'steer', message: escapeLeadingSlashCommand(text) };
+        const refs = piExtraDirsPrompt(mutableExtraDirs);
+        const promptText = refs ? `${refs}\n\n${text}` : text;
+        const command: Record<string, unknown> = { type: 'steer', message: escapeLeadingSlashCommand(promptText) };
         if (images.length > 0) command.images = images;
         const resp = await proc.request(command);
         if (!resp.success) {
@@ -810,6 +863,11 @@ export class PiAgent extends BaseAgent {
         await writePermissionFile();
       },
 
+      async setExtraDirs(dirs: string[]): Promise<void> {
+        mutableExtraDirs = [...dirs];
+        await writePermissionFile();
+      },
+
       isTurnRunning(): boolean {
         // ctx.isStreaming 由 agent_start / agent_settled 翻转(translator 维护)。
         return ctx.isStreaming;
@@ -869,6 +927,40 @@ export class PiAgent extends BaseAgent {
         if (typeof data.tokensBefore === 'number') result.tokensBefore = data.tokensBefore;
         if (typeof data.estimatedTokensAfter === 'number') result.estimatedTokensAfter = data.estimatedTokensAfter;
         return result;
+      },
+
+      async previewRewindFiles(): Promise<RewindFilesResult> {
+        // 文件变化由 Desktop 的 Cindy Git savepoint 预览；Pi 原生层只负责对话裁剪。
+        return { canRewind: true, filesChanged: [], insertions: 0, deletions: 0 };
+      },
+
+      async commitRewindFiles(_userUuid, _priorAssistantUuid, rewindOpts) {
+        const tailTurnsToDrop = normalizeTailTurnsToDrop(rewindOpts?.tailTurnsToDrop);
+        if (tailTurnsToDrop <= 0) return { sdkSessionId };
+        if (ctx.isStreaming) throw new Error('SESSION_RUNNING: 会话进行中，无法 rewind');
+
+        const forkMessages = await proc.request({ type: 'get_fork_messages' });
+        if (!forkMessages.success) {
+          throw new Error(`pi rewind get_fork_messages failed: ${forkMessages.error ?? 'unknown'}`);
+        }
+        const messages =
+          (forkMessages.data as { messages?: Array<{ entryId?: string }> } | undefined)?.messages ?? [];
+        const targetIndex = messages.length - tailTurnsToDrop;
+        const entryId = targetIndex >= 0 ? messages[targetIndex]?.entryId : undefined;
+        if (!entryId) {
+          throw new Error(
+            `pi rewind target unavailable (drop=${tailTurnsToDrop}, userMessages=${messages.length})`,
+          );
+        }
+        const forked = await proc.request({ type: 'fork', entryId });
+        if (!forked.success) throw new Error(`pi rewind fork failed: ${forked.error ?? 'unknown'}`);
+        const state = await proc.request({ type: 'get_state' });
+        if (!state.success) throw new Error(`pi rewind get_state failed: ${state.error ?? 'unknown'}`);
+        const replacement = (state.data as { sessionFile?: string } | undefined)?.sessionFile;
+        if (!replacement) throw new Error('pi rewind replacement session path unavailable');
+        sdkSessionId = replacement;
+        queue.push({ type: 'session_id', data: replacement, source: 'pi' });
+        return { sdkSessionId: replacement };
       },
 
       async getSessionTree(): Promise<SessionTreeSnapshot> {
@@ -941,6 +1033,27 @@ export class PiAgent extends BaseAgent {
     };
 
     return handle;
+  }
+
+  async getMemoryStatus(): Promise<MemoryStatus> {
+    const manager = this.deps.makerMemory;
+    const state = manager?.getState();
+    return {
+      enabled: (this.memoryOverride ?? true) && (manager?.isEnabled() ?? false),
+      source: this.memoryOverride === undefined ? 'agent-default' : 'host-runtime',
+      ...(state ? { stats: { entryCount: state.activeWorkdirs.length } } : {}),
+    };
+  }
+
+  async setMemory(enabled: boolean): Promise<MemorySetResult> {
+    this.memoryOverride = enabled;
+    // Live session 已捕获 compaction callback；下一次 session 采用新值。
+    return { effective: 'next-session' };
+  }
+
+  async resetMemory(): Promise<MemoryResetResult> {
+    const result = await this.deps.makerMemory?.resetAll();
+    return { removedEntries: result?.removedCount ?? 0 };
   }
 
   /**
@@ -1112,6 +1225,7 @@ export class PiAgent extends BaseAgent {
       resolver: InteractionResolver | null;
       permissionMode: 'ask' | 'auto' | 'bypassPermissions';
       workspaceRoots: string[];
+      readRoots: string[];
     },
   ): void {
     const method = typeof event.method === 'string' ? event.method : '';
@@ -1131,10 +1245,10 @@ export class PiAgent extends BaseAgent {
       } catch {
         /* keep defaults */
       }
-      const { resolver, permissionMode, workspaceRoots } = getPermissionCtx();
+      const { resolver, permissionMode, workspaceRoots, readRoots } = getPermissionCtx();
       if (permissionMode === 'auto') {
         try {
-          if (classifyPiToolForAutoReview({ toolName, input, workspaceRoots }) === 'auto-approve') {
+          if (classifyPiToolForAutoReview({ toolName, input, workspaceRoots, readRoots }) === 'auto-approve') {
             proc.send({ type: 'extension_ui_response', id, confirmed: true });
             return;
           }

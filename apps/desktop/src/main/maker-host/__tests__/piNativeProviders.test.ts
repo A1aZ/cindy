@@ -2,7 +2,15 @@
  * BYOM host 解析 —— 自定义 provider(pi runtime)→ pi 原生 provider spec + env。
  * 覆盖:wire protocol → pi api 映射、apiKey/none/oauth 三态、缺 key 跳过、env key 名。
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+vi.mock('electron', () => ({
+  app: {
+    isPackaged: false,
+    getAppPath: () => process.cwd(),
+    getPath: () => '/tmp/cindy-pi-native-provider-test',
+  },
+}));
 
 import { buildPiNativeProvidersFromConfigs, piNativeKeyEnvVar } from '../pi-host.js';
 

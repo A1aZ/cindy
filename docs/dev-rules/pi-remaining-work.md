@@ -2,7 +2,21 @@
 
 > 本文件是 `sandbox/pi-live` 分支的交接记录:已交付什么、还差什么、每一项**怎么接着做**
 > (含具体 file:line 锚点与坑)。配合 `docs/dev-rules/pi-harness.md`(架构、维护不变量、
-> 上线清单)一起看。最后更新:2026-07-31。
+> 上线清单)一起看。最后更新:2026-08-01。
+
+## 2026-08-01 收口状态
+
+本文下方保留历史调研与实现过程，当前非核心缺口已收口：
+
+- Pi pin 升至 v0.83.0；Mac Intel/Apple Silicon、Linux x64/arm64、Windows x64/arm64
+  六平台资产有官方 digest pin，Forge 按目标平台 provision 完整目录并打包。
+- 文件附件、Extra Dirs（结构化写工具只读保护）、minimal thinking、纯 BYOM 无 Cindy 登录已开放。
+- 精确 rewind 由 Pi `fork(entryId)` 裁剪对话，文件恢复复用 Cindy Git savepoint；与原会话树共用入口。
+- Pi Auto Memory 控制面已开放，自动/手动 compaction summary 写 searchable digest；reset 复用
+  Maker Memory manager。
+- 真二进制覆盖 v0.82.1 → v0.83.0 resume、invalid resume CAS、rewind/fork 后 resume；scheduler
+  Pi 无人值守参数有契约测试。剩余的异构 OS 启动和逐真实模型额度 smoke 是 release runner/RC
+  门禁，不再需要产品代码。
 
 ## 分支与运行
 
@@ -61,9 +75,9 @@ auto fail-closed、成本派生链、弹窗正文 harness 无关)。
   `agentKindToVendor`,pi 会话显示 π)。
 
 **已评估暂不修(设计权衡 / 边缘,后续按需)**:
-- **#2 BYOM 仍依赖网关 key**:`getState` 对自定义 providerId 走 default 分支校验网关 key;
-  无 Cindy 账号的纯 BYOM 独立使用尚不支持(pi 当前整体基于网关账号)。彻底解耦需让 auth
-  adapter 按 model→provider 解析各自凭证,属较大改动。登录 Cindy 的用户恒有网关 key,不阻塞上线。
+- **#2 已解决 — 纯 BYOM 不依赖网关 key**:`getState` 按 custom provider runtime 校验自身
+  apiKey/keyless 状态；即使旧会话没有 providerId，PiAgent 也会先解析 model→native provider
+  再过 auth。models.json 的 `cindy` block 在无网关 key 时只拿不可用占位值，不会发往 BYOM endpoint。
 - **#4 resolvePiNativeProviders 失败降级**:抛错 → gateway-only。纯 BYOM 模型此时不在任何 block
   → pi `--model` 校验失败(fail-closed,会失败而非静默错路由),可接受;已 warn 日志。
 - **#5 `managed` 鉴权自定义 provider**:当前按 keyless 写 dummy key,若指远端会 401。取决于
@@ -215,20 +229,19 @@ fork(散落成平级会话)。升级成「同一会话内可切换的分支树�
 
 ---
 
-## 还差:上线前手工 QA(需真凭证/额度/构建基建 —— 非 agent 可自动完成)
+## 已收口:上线 QA 自动化与发布门禁
 
 见 `pi-harness.md §6`。要点:
-1. **平台二进制**:`apps/pi-bin/` 现仅 `darwin-arm64`。Windows / Linux / Intel Mac 的 pi
-   二进制分发 + 逐平台过(bridge 路径判定、NO_PROXY、权限文件、shell 差异)。**全量上线最硬门槛。**
-2. **模型兼容矩阵**:每个网关模型(chatgpt/ / xai/ / glm / deepseek / kimi …)在
-   anthropic-compat 下跑一轮**带工具调用**,逐个确认 thinking 格式 / tool streaming / redacted，
-   并记录各 provider 对已默认开启的 `PI_CACHE_RETENTION=long` 是命中还是安全忽略。
-3. **实机联调**:长会话自动压缩、无人值守(定时任务跑 pi)、resume 边界(pi 二进制升级后旧
-   session JSONL 兼容 / invalid resume 回退 / fork 后再 resume)。
+1. **平台二进制**:v0.83.0 六平台 digest pin + Forge stage/签名路径已完成；异构 OS 启动 smoke
+   由各平台发布 runner 做，不能在 Apple Silicon Mac 上伪装成实机结果。
+2. **模型兼容矩阵**:三种 wire protocol、真 Pi bridge/tool/usage/cache 自动测试已完成；逐个真实
+   商业模型只剩 RC 账号额度 smoke。
+3. **实机联调**:compaction、scheduler 参数、v0.82.1→v0.83.0 resume、invalid fallback、
+   rewind/fork 后 resume 已自动覆盖。
 
 ## 顺手可做的小项
 
-- **minimal effort 档**:pi 支持 `minimal` thinking,当前 PiAgent effortLevels 未暴露;需 per-model
-  `thinkingLevelMap`(与模型矩阵一起做,否则部分网关模型不支持会报错)。
+- **minimal effort 档（已完成）**:Pi capability 与所有 reasoning-capable Pi model descriptor
+  暴露 `minimal`；具体模型是否接受该档仍由 Pi v0.83 的 provider mapping 决定。
 - **settings.json 钉值**:目前没写 pi settings.json,retry/超时全 pi 默认;若发现某默认值需防
   二进制升级漂移,在 `pi/index.ts` 加 `writeSettingsJson`(与 models.json 同机制)。

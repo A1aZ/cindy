@@ -52,4 +52,18 @@ describe('PiAgent capabilities contract', () => {
   it('declares Fast support so supported ChatGPT models can expose the toggle', () => {
     expect(buildAgent().capabilities.hasFastMode).toBe(true);
   });
+
+  it('exposes Pi native minimal thinking', () => {
+    expect(buildAgent().capabilities.effortLevels.map((level) => level.id)).toContain('minimal');
+  });
+
+  it('exposes attachments, precise rewind, Extra Dirs, and compaction memory', () => {
+    const capabilities = buildAgent().capabilities;
+    expect(capabilities.multimodal.file.supported).toBe(true);
+    expect(capabilities.rewind.supported).toBe(true);
+    expect(capabilities.extraDirs.supported).toBe(true);
+    expect(capabilities.memory.supported.supported).toBe(true);
+    expect(capabilities.memory.resettable).toBe(true);
+    expect(capabilities.memory.setEnabledMidSession?.supported).toBe(false);
+  });
 });

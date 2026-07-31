@@ -99,6 +99,82 @@ describe('packGhostDir', () => {
     });
   });
 
+  it('rejects a source directory that contains a Host-managed root', async () => {
+    // 源目录是受管根的**祖先**:单向判定放行时,递归打包会走进 cindy-brain /
+    // ghost-install-state,把已安装插件字节、批准 receipt 与技能快照一并打进 .cindy。
+    // 只要在 owner 数据目录里放一个 ghost.json 就能触发,所以判定必须双向。
+    const ownerData = path.join(workDir, 'owner-data');
+    const managedRoot = path.join(ownerData, 'cindy-brain');
+    await fs.promises.mkdir(managedRoot, { recursive: true });
+    await fs.promises.writeFile(
+      path.join(managedRoot, 'receipt.json'),
+      JSON.stringify({ secret: 'approved state' }),
+    );
+    await fs.promises.writeFile(
+      path.join(ownerData, 'ghost.json'),
+      JSON.stringify(GOOD_MANIFEST),
+    );
+    await fs.promises.writeFile(path.join(ownerData, 'main.js'), '// authoring source');
+
+    await expect(
+      packGhostDir(ownerData, { forbiddenRootDirs: [managedRoot] }),
+    ).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'SOURCE_IS_INSTALLED_PLUGIN',
+    });
+  });
+
+  it('does not follow a link inside the source dir into a Host-managed root', async () => {
+    // **契约用例,不是回归用例**:改动前 Dirent 的类型位也把 junction 报成 link,
+    // 所以这条在旧实现下同样是绿的。钉住的是契约本身 —— 双向包含判定挡的是"源目录是
+    // 受管根的祖先",这条挡的是另一半(源目录里放一条指向受管根的链接);判类型一律
+    // lstat、不信 Dirent 类型位之后,这一半不再依赖 libuv 的实现细节。
+    const managedRoot = path.join(workDir, 'managed');
+    await fs.promises.mkdir(managedRoot, { recursive: true });
+    await fs.promises.writeFile(
+      path.join(managedRoot, 'receipt.json'),
+      JSON.stringify({ secret: 'approved state' }),
+    );
+    const dir = await makeSrcDir({
+      'ghost.json': JSON.stringify(GOOD_MANIFEST),
+      'main.js': '// authoring source',
+    });
+    try {
+      await fs.promises.symlink(
+        managedRoot,
+        path.join(dir, 'state'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+    } catch {
+      return; // 该环境建不了链接(无权限),跳过;判定逻辑与其他平台同源。
+    }
+
+    const result = await packGhostDir(dir, { forbiddenRootDirs: [managedRoot] });
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    if (!result.ok) return;
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(await fs.promises.readFile(result.cindyPath));
+    expect(Object.keys(zip.files).sort()).toEqual(['ghost.json', 'main.js']);
+  });
+
+  it('rejects a declared file that is a link instead of packing a package without it', async () => {
+    // `stat` 会穿透链接让声明检查过关,而收集步按类型跳过链接 —— 包里就少了 main.js,
+    // 错误延迟到用户装入时才现形。打包期直接拒,报清楚。
+    const dir = await makeSrcDir({ 'ghost.json': JSON.stringify(GOOD_MANIFEST) });
+    const realEntry = path.join(workDir, 'real-main.js');
+    await fs.promises.writeFile(realEntry, '// outside');
+    try {
+      await fs.promises.symlink(realEntry, path.join(dir, 'main.js'), 'file');
+    } catch {
+      return; // 该环境建不了链接(无权限),跳过;判定逻辑与其他平台同源。
+    }
+
+    await expect(packGhostDir(dir)).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'ENTRY_MISSING',
+    });
+  });
+
   it('allows an independent authoring directory outside managed roots', async () => {
     const dir = await makeSrcDir({
       'ghost.json': JSON.stringify(GOOD_MANIFEST),

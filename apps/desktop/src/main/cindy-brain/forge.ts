@@ -24,6 +24,10 @@ import {
   validateGhostManifest,
   type GhostManifest,
 } from '../../shared/ghost.js';
+import {
+  classifyGhostDirEntry,
+  resolveGhostContentPath,
+} from './ghostContentTree.js';
 import { validateGhostLocaleResourcesInDirectory } from './ghostLocaleFiles.js';
 import { isPathInsideDir } from './dirDeposit.js';
 import { checkSkillMdConsistency } from './skillSlot.js';
@@ -475,12 +479,19 @@ export async function scaffoldGhostDir(
         message: err instanceof Error ? err.message : String(err),
       };
     }
-    if (isPathInsideDir(resolvedForbiddenRoot, realTarget)) {
+    // 与打包侧同形的双向判定。祖先方向这一半在这里是 defense-in-depth 而不是修洞:
+    // 骨架目标若是受管根的祖先,该目录必然已存在,最终 rename 会以 TARGET_EXISTS 拒掉。
+    // 仍然写出来,是为了不让"上游守卫够不够用"依赖读者去推断下游 rename 的语义 ——
+    // 判定散落且各自只覆盖一半,正是这条链路反复出问题的成因。
+    if (
+      isPathInsideDir(resolvedForbiddenRoot, realTarget) ||
+      isPathInsideDir(realTarget, resolvedForbiddenRoot)
+    ) {
       return {
         ok: false,
         errorCode: 'INVALID_INPUT',
         message:
-          'dir 不能落在已安装插件目录或 Host 管理的状态目录内;请在工作目录里换一个独立的作者目录',
+          'dir 不能落在已安装插件目录或 Host 管理的状态目录内,也不能是它们的上级目录;请在工作目录里换一个独立的作者目录',
       };
     }
   }
@@ -589,7 +600,14 @@ export async function packGhostDir(
     const realSourceDir = await fs.promises.realpath(dir);
     for (const forbiddenRoot of options.forbiddenRootDirs ?? []) {
       const resolvedForbiddenRoot = await resolveThroughExistingAncestor(forbiddenRoot);
-      if (isPathInsideDir(resolvedForbiddenRoot, realSourceDir)) {
+      // 判定必须**双向**:源目录落在受管根内要拒(拿已安装插件当源码),源目录是受管根的
+      // 祖先也要拒 —— 后者下面的递归打包会走进 cindy-brain / ghost-install-state,把
+      // 已安装插件字节、批准 receipt 与技能快照一并打进 .cindy。单向判定时,只要在
+      // owner 数据目录里放一个 ghost.json 就能触发。
+      if (
+        isPathInsideDir(resolvedForbiddenRoot, realSourceDir) ||
+        isPathInsideDir(realSourceDir, resolvedForbiddenRoot)
+      ) {
         return {
           ok: false,
           errorCode: 'SOURCE_IS_INSTALLED_PLUGIN',
@@ -638,10 +656,16 @@ export async function packGhostDir(
     for (const item of manifest.skill?.items ?? []) mustExist.push(`${item.dir}/SKILL.md`);
     for (const rel of mustExist) {
       try {
-        const st = await fs.promises.stat(path.join(dir, rel));
-        if (!st.isFile()) throw new Error('not a file');
+        // 逐段解析(判据同装入侧 ghostContentTree):`stat` 会穿透链接,让"声明的
+        // 文件是链接"通过检查,而下面的收集步按类型跳过链接 —— 包就少了这个文件,
+        // 错误延迟到用户装入时才现形。这里直接拒,报清楚。
+        await resolveGhostContentPath(dir, rel, { expect: 'file', label: 'forge source' });
       } catch {
-        return { ok: false, errorCode: 'ENTRY_MISSING', message: `清单声明的文件不存在:${rel}` };
+        return {
+          ok: false,
+          errorCode: 'ENTRY_MISSING',
+          message: `清单声明的文件不存在或不是普通文件(链接不可打包):${rel}`,
+        };
       }
     }
 
@@ -697,10 +721,16 @@ export async function packGhostDir(
           };
         }
         seenPackPaths.add(foldedRel);
-        if (e.isDirectory()) {
+        // 类型判定走 ghostContentTree(一律 lstat,不信 Dirent 类型位):非普通条目
+        // 既不递归也不收集 —— 递归进一条指向 cindy-brain / ghost-install-state 的
+        // 链接就会把已安装插件字节、批准 receipt 与技能快照打进 .cindy。源目录与
+        // 受管根的**双向**包含判定挡住了"源目录是受管根祖先"那一半,这里挡的是
+        // "源目录里放一条链接指进去"那一半,两半都要在。
+        const kind = await classifyGhostDirEntry(abs);
+        if (kind === 'directory') {
           const bad = await walk(abs, rel);
           if (bad) return bad;
-        } else if (e.isFile()) {
+        } else if (kind === 'file') {
           files.push({ rel, abs });
           totalBytes += (await fs.promises.stat(abs)).size;
           if (files.length > maxFiles) {

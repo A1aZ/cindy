@@ -31,6 +31,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ClaudeMark } from '@/components/icons/ClaudeMark';
 import { CodexMark } from '@/components/icons/CodexMark';
+import { PiMark } from '@/components/icons/PiMark';
 import { extractIpcError } from '@/utils/ipcError';
 import {
   createCustomProvider,
@@ -50,7 +51,6 @@ import {
 import {
   CUSTOM_PROVIDER_CODEX_WIRE_PROTOCOLS,
   customProviderCodexWireProtocolOption,
-  type CustomProviderCodexWireProtocol,
 } from '@/lib/customProviderWireProtocols';
 
 import { isProviderRequestPath, sortPresetsForLocale } from '@cindy/model-providers';
@@ -62,10 +62,13 @@ import type {
   ProviderWireProtocol,
 } from '@cindy/model-providers';
 
-/** 本面板只配置 claude/codex 两个 runtime;pi 的模型走网关目录,不在自定义 provider 范畴。 */
-type DialogAgentKind = Extract<AgentKind, 'claude-code' | 'codex'>;
+/**
+ * 本面板配置 claude / codex / pi 三个 runtime。pi 是多协议 harness:BYOM 自定义/本地模型
+ * 走 pi 原生 provider 直连(不过 anthropic-compat 代理),故 pi tab 额外提供显式 api 选择器。
+ */
+type DialogAgentKind = Extract<AgentKind, 'claude-code' | 'codex' | 'pi'>;
 
-const AGENTS: DialogAgentKind[] = ['claude-code', 'codex'];
+const AGENTS: DialogAgentKind[] = ['claude-code', 'codex', 'pi'];
 
 const VISIBLE_AGENTS: DialogAgentKind[] = AGENTS;
 
@@ -81,7 +84,22 @@ const TAB_META: Record<DialogAgentKind, { Mark: typeof ClaudeMark; labelKey: str
       labelKey: 'settings.providers.custom.protocol.codex',
       helpKey: 'settings.providers.custom.protocol.codexDesc',
     },
+    pi: {
+      Mark: PiMark,
+      labelKey: 'settings.providers.custom.protocol.pi',
+      helpKey: 'settings.providers.custom.protocol.piDesc',
+    },
   };
+
+/** pi 默认 wire protocol:BYOM 本地端点(Ollama/vLLM 的 /v1/chat/completions)最常见。 */
+const PI_DEFAULT_WIRE: ProviderWireProtocol = 'openai-chat';
+
+/** 某 agent runtime 的默认 wire protocol。 */
+function defaultWireFor(agent: DialogAgentKind): ProviderWireProtocol {
+  if (agent === 'claude-code') return 'anthropic-messages';
+  if (agent === 'pi') return PI_DEFAULT_WIRE;
+  return 'openai-responses';
+}
 
 interface CustomProviderDialogProps {
   initial?: CustomProviderConfig;
@@ -121,7 +139,7 @@ function emptyRuntime(agent: DialogAgentKind): RuntimeFields {
     baseUrl: '',
     requestPath: '',
     apiKey: '',
-    wireProtocol: agent === 'claude-code' ? 'anthropic-messages' : 'openai-responses',
+    wireProtocol: defaultWireFor(agent),
     models: [{ id: '', name: '' }],
     headers: [{ name: '', value: '' }],
     modelsUrl: '',
@@ -132,6 +150,7 @@ function initRuntimes(initial?: CustomProviderConfig): Record<DialogAgentKind, R
   const out: Record<DialogAgentKind, RuntimeFields> = {
     'claude-code': emptyRuntime('claude-code'),
     codex: emptyRuntime('codex'),
+    pi: emptyRuntime('pi'),
   };
   if (initial) {
     for (const a of AGENTS) {
@@ -141,8 +160,7 @@ function initRuntimes(initial?: CustomProviderConfig): Record<DialogAgentKind, R
         baseUrl: rc.baseUrl,
         requestPath: rc.requestPath ?? '',
         apiKey: '',
-        wireProtocol:
-          rc.wireProtocol ?? (a === 'claude-code' ? 'anthropic-messages' : 'openai-responses'),
+        wireProtocol: rc.wireProtocol ?? defaultWireFor(a),
         models: rc.models.length ? rc.models.map((m) => ({ ...m })) : [{ id: '', name: '' }],
         headers:
           rc.headers && Object.keys(rc.headers).length > 0
@@ -322,6 +340,7 @@ export function CustomProviderDialog({
   const [hasKey, setHasKey] = useState<Record<DialogAgentKind, boolean>>({
     'claude-code': false,
     codex: false,
+    pi: false,
   });
   const [saving, setSaving] = useState(false);
   // 鉴权形态：API key（默认）/ OAuth / 无鉴权（本机或受信自托管代理）。
@@ -363,11 +382,13 @@ export function CustomProviderDialog({
   const [test, setTest] = useState<Record<DialogAgentKind, TestState>>({
     'claude-code': IDLE_TEST,
     codex: IDLE_TEST,
+    pi: IDLE_TEST,
   });
   // per-runtime「获取模型列表」进行中标记（按钮瞬态 spinner）。
   const [fetchingModels, setFetchingModels] = useState<Record<DialogAgentKind, boolean>>({
     'claude-code': false,
     codex: false,
+    pi: false,
   });
   // 拉取成功后的勾选弹层：行集合 = 拉取结果 ∪ 表单已填（后者默认勾选、保留用户显示名）。
   const [picker, setPicker] = useState<{
@@ -430,8 +451,7 @@ export function CustomProviderDialog({
             baseUrl: rc.baseUrl,
             requestPath: rc.requestPath ?? '',
             apiKey: prev[a].apiKey, // 已填的 key 保留
-            wireProtocol:
-              rc.wireProtocol ?? (a === 'claude-code' ? 'anthropic-messages' : 'openai-responses'),
+            wireProtocol: rc.wireProtocol ?? defaultWireFor(a),
             models: rc.models.length ? rc.models.map((m) => ({ ...m })) : [{ id: '', name: '' }],
             headers:
               rc.headers && Object.keys(rc.headers).length > 0
@@ -442,7 +462,7 @@ export function CustomProviderDialog({
         }
         return next;
       });
-      setTest({ 'claude-code': IDLE_TEST, codex: IDLE_TEST });
+      setTest({ 'claude-code': IDLE_TEST, codex: IDLE_TEST, pi: IDLE_TEST });
       // 预设整体替换所有 runtime 的 models 数组(含清空未声明的 runtime),旧行号
       // 全部失效——不清空的话陈旧草稿(如 -5)会挂在无关的新行、或挂在被预设清空
       // 的 runtime 上,handleSave 的守卫拦不住"用户已经看不到"的这条草稿,表单
@@ -460,7 +480,7 @@ export function CustomProviderDialog({
     if (!editing || !initial) return;
     let cancelled = false;
     void (async () => {
-      const nextHas: Record<DialogAgentKind, boolean> = { 'claude-code': false, codex: false };
+      const nextHas: Record<DialogAgentKind, boolean> = { 'claude-code': false, codex: false, pi: false };
       const fetched: Partial<Record<DialogAgentKind, string>> = {};
       for (const a of AGENTS) {
         if (!initial.runtimes[a]) continue;
@@ -494,13 +514,13 @@ export function CustomProviderDialog({
   );
 
   /** 切换协议时保留用户已填写的 endpoint，仅使旧测试结果失效。 */
-  const changeCodexWireProtocol = useCallback(
-    (wireProtocol: CustomProviderCodexWireProtocol) => {
+  const changeWireProtocol = useCallback(
+    (agent: DialogAgentKind, wireProtocol: ProviderWireProtocol) => {
       setRtSynced((prev) => ({
         ...prev,
-        codex: { ...prev.codex, wireProtocol },
+        [agent]: { ...prev[agent], wireProtocol },
       }));
-      setTest((prev) => ({ ...prev, codex: IDLE_TEST }));
+      setTest((prev) => ({ ...prev, [agent]: IDLE_TEST }));
     },
     [setRtSynced],
   );
@@ -823,7 +843,7 @@ export function CustomProviderDialog({
         if (n) headers[n] = h.value.trim();
       }
       const savedHeaders = authMode === 'none' ? stripCredentialHeaders(headers) : headers;
-      const defaultProtocol = a === 'claude-code' ? 'anthropic-messages' : 'openai-responses';
+      const defaultProtocol = defaultWireFor(a);
       runtimes[a] = {
         baseUrl: rf.baseUrl.trim(),
         ...(requestPath ? { requestPath } : {}),
@@ -1026,7 +1046,7 @@ export function CustomProviderDialog({
                   type="button"
                   onClick={() => {
                     setAuthMode(m);
-                    setTest({ 'claude-code': IDLE_TEST, codex: IDLE_TEST });
+                    setTest({ 'claude-code': IDLE_TEST, codex: IDLE_TEST, pi: IDLE_TEST });
                   }}
                   className={cn(
                     'rounded-full border px-3 py-1.5 text-12 font-medium transition-colors',
@@ -1164,7 +1184,7 @@ export function CustomProviderDialog({
               border: '1px solid var(--settings-theme-card-border)',
             }}
           >
-            {activeTab === 'codex' && (
+            {(activeTab === 'codex' || activeTab === 'pi') && (
               <div className="flex flex-col gap-[7px]">
                 <FieldLabel>{t('settings.providers.custom.fields.wireProtocol')}</FieldLabel>
                 <div className="flex flex-wrap gap-1.5">
@@ -1172,7 +1192,7 @@ export function CustomProviderDialog({
                     <button
                       key={option.value}
                       type="button"
-                      onClick={() => changeCodexWireProtocol(option.value)}
+                      onClick={() => changeWireProtocol(activeTab, option.value)}
                       className={cn(
                         'rounded-full border px-3 py-1.5 text-12 font-medium transition-colors',
                         f.wireProtocol === option.value
@@ -1185,12 +1205,28 @@ export function CustomProviderDialog({
                           : undefined
                       }
                     >
-                      {t(option.labelKey)}
+                      {t(activeTab === 'pi'
+                        ? `settings.providers.custom.wireProtocol.pi${
+                            option.value === 'anthropic-messages'
+                              ? 'Anthropic'
+                              : option.value === 'openai-responses'
+                                ? 'Responses'
+                                : 'Chat'
+                          }`
+                        : option.labelKey)}
                     </button>
                   ))}
                 </div>
                 <span className="text-12 leading-snug text-[var(--text-tertiary)]">
-                  {t(customProviderCodexWireProtocolOption(f.wireProtocol).helpKey)}
+                  {t(activeTab === 'pi'
+                    ? `settings.providers.custom.wireProtocol.pi${
+                        f.wireProtocol === 'anthropic-messages'
+                          ? 'AnthropicHelp'
+                          : f.wireProtocol === 'openai-chat'
+                            ? 'ChatHelp'
+                            : 'ResponsesHelp'
+                      }`
+                    : customProviderCodexWireProtocolOption(f.wireProtocol).helpKey)}
                 </span>
               </div>
             )}
@@ -1212,7 +1248,7 @@ export function CustomProviderDialog({
                 value={f.requestPath}
                 onChange={(v) => patch(activeTab, (x) => ({ ...x, requestPath: v }))}
                 placeholder={
-                  activeTab === 'claude-code'
+                  activeTab === 'claude-code' || f.wireProtocol === 'anthropic-messages'
                     ? '/v1/messages'
                     : customProviderCodexWireProtocolOption(f.wireProtocol).defaultRequestPath
                 }

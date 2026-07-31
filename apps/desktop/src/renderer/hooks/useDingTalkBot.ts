@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 
 import { createLogger } from '@/lib/logger';
 import { toast } from '@/lib/toast';
+import { extractIpcError } from '@/utils/ipcError';
 
 const log = createLogger('useDingTalkBot');
 
@@ -14,6 +15,19 @@ interface CachedState {
 }
 
 let cachedState: CachedState | null = null;
+
+function connectFailureToastKey(error: unknown): string {
+  switch (extractIpcError(error)?.code) {
+    case 'DINGTALK_AUTH_FAILED':
+      return 'logic.toasts.dingtalkBotAuthFailed';
+    case 'DINGTALK_NETWORK_FAILED':
+      return 'logic.toasts.dingtalkBotNetworkFailed';
+    case 'DINGTALK_STREAM_CONNECTION_FAILED':
+      return 'logic.toasts.dingtalkBotStreamFailed';
+    default:
+      return 'logic.toasts.dingtalkBotConnectFailed';
+  }
+}
 
 export function useDingTalkBot() {
   const { t } = useTranslation();
@@ -112,12 +126,9 @@ export function useDingTalkBot() {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       log.error('save failed:', message);
-      try {
-        updateState(await window.electronAPI.dingtalkBot.getState());
-      } catch {
-        // Preserve the actionable connection error when state refresh also fails.
-      }
-      toast.error(t('logic.toasts.dingtalkBotConnectFailed'));
+      // saveAndConnect restores the last persisted connection on failure. Keep
+      // the user's current credential draft so they can correct and retry it.
+      toast.error(t(connectFailureToastKey(error)));
       return false;
     } finally {
       setIsSaving(false);
@@ -139,7 +150,7 @@ export function useDingTalkBot() {
       } catch {
         // The toast below remains the user-facing fallback.
       }
-      toast.error(t('logic.toasts.dingtalkBotConnectFailed'));
+      toast.error(t(connectFailureToastKey(error)));
       return false;
     } finally {
       setIsSaving(false);

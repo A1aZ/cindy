@@ -36,10 +36,15 @@ const DEDUP_CAPACITY = 2_048;
 const STATUS_POLL_MS = 2_000;
 const INTERACTION_TIMEOUT_MS = 30 * 60 * 1_000;
 const OUTBOUND_CHUNK_SIZE = 3_500;
-const REGISTRATION_TIMEOUT_MS = 10_000;
+const CONNECTION_ERROR_CODES = [
+  "DINGTALK_AUTH_FAILED",
+  "DINGTALK_NETWORK_FAILED",
+  "DINGTALK_STREAM_CONNECTION_FAILED",
+] as const;
 
 type MessageHandler = (event: IMMessageEvent) => void;
 type StatusHandler = (status: IMStatus) => void;
+type DingTalkConnectionErrorCode = (typeof CONNECTION_ERROR_CODES)[number];
 
 export interface DingTalkStreamClient {
   readonly connected: boolean;
@@ -217,36 +222,48 @@ export class DingTalkIM extends BaseIM implements ChannelIM {
   }
 
   async sendFile(
-    _userId: string,
-    _absPath: string,
-    _displayName?: string,
+    userId: string,
+    absPath: string,
+    displayName?: string,
   ): Promise<SendFileResult> {
+    void userId;
+    void absPath;
+    void displayName;
     return { ok: false, reason: "SEND_FAIL" };
   }
 
   sendInteractiveCard(
-    _userId: string,
-    _spec: InteractiveCardSpec,
+    userId: string,
+    spec: InteractiveCardSpec,
   ): Promise<{ messageId: string }> {
+    void userId;
+    void spec;
     return Promise.reject(new Error("DINGTALK_RICH_OUTPUT_UNSUPPORTED"));
   }
 
   updateInteractiveCard(
-    _messageId: string,
-    _spec: InteractiveCardSpec,
+    messageId: string,
+    spec: InteractiveCardSpec,
   ): Promise<void> {
+    void messageId;
+    void spec;
     return Promise.reject(new Error("DINGTALK_RICH_OUTPUT_UNSUPPORTED"));
   }
 
-  patchMarkdownCard(_messageId: string, _markdown: string): Promise<void> {
+  patchMarkdownCard(messageId: string, markdown: string): Promise<void> {
+    void messageId;
+    void markdown;
     return Promise.reject(new Error("DINGTALK_RICH_OUTPUT_UNSUPPORTED"));
   }
 
   startStreamingText(
-    _userId: string,
-    _initial?: string,
-    _opts?: { threadTs?: string },
+    userId: string,
+    initial?: string,
+    opts?: { threadTs?: string },
   ): Promise<StreamingTextHandle> {
+    void userId;
+    void initial;
+    void opts;
     return Promise.reject(new Error("DINGTALK_RICH_OUTPUT_UNSUPPORTED"));
   }
 
@@ -346,6 +363,21 @@ export class DingTalkIM extends BaseIM implements ChannelIM {
     await this.stopConnection();
     const version = this.connectionVersion;
     this.setStatus({ kind: "connecting" });
+    const api = new DingTalkApiClient(
+      credentials.appKey,
+      credentials.appSecret,
+      this.options.fetcher,
+    );
+    try {
+      await api.validateCredentials();
+    } catch (error) {
+      api.close();
+      throw createConnectionError(
+        isCredentialRejection(error)
+          ? "DINGTALK_AUTH_FAILED"
+          : "DINGTALK_NETWORK_FAILED",
+      );
+    }
     const client = (this.options.clientFactory ?? defaultClientFactory)(
       credentials,
     );
@@ -357,23 +389,27 @@ export class DingTalkIM extends BaseIM implements ChannelIM {
       if (this.host.accountScope && accountToken === null) return;
       void this.acceptDownstream(message, version, accountToken);
     });
-    await client.connect();
+    try {
+      await client.connect();
+    } catch {
+      client.disconnect();
+      api.close();
+      throw createConnectionError("DINGTALK_STREAM_CONNECTION_FAILED");
+    }
     if (version !== this.connectionVersion) {
       client.disconnect();
+      api.close();
       throw new Error("DINGTALK_CONNECTION_REPLACED");
     }
-    if (!client.connected || !(await waitForRegistration(client))) {
+    if (!client.connected) {
       client.disconnect();
-      throw new Error("DINGTALK_CONNECTION_FAILED");
+      api.close();
+      throw createConnectionError("DINGTALK_STREAM_CONNECTION_FAILED");
     }
     client.config.autoReconnect = true;
     this.client = client;
     this.appKey = credentials.appKey;
-    this.api = new DingTalkApiClient(
-      credentials.appKey,
-      credentials.appSecret,
-      this.options.fetcher,
-    );
+    this.api = api;
     this.setStatus({ kind: "connected", appId: credentials.appKey });
     this.startStatusMonitor(version);
   }
@@ -396,7 +432,7 @@ export class DingTalkIM extends BaseIM implements ChannelIM {
     this.stopStatusMonitor();
     this.statusTimer = setInterval(() => {
       if (version !== this.connectionVersion || !this.client) return;
-      if (this.client.connected && this.client.registered) {
+      if (this.client.connected) {
         if (this.status.kind !== "connected") {
           this.setStatus({ kind: "connected", appId: this.appKey });
         }
@@ -743,22 +779,25 @@ function normalizeFinalText(text: string): string {
 
 function safeConnectionError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  if (message === "DINGTALK_CONNECTION_FAILED") {
-    return "DINGTALK_CONNECTION_FAILED";
+  for (const code of CONNECTION_ERROR_CODES) {
+    if (message.startsWith(`[${code}]`)) return code;
   }
   return "DINGTALK_CONNECTION_ERROR";
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+function createConnectionError(code: DingTalkConnectionErrorCode): Error {
+  return new Error(`[${code}] ${code}`);
 }
 
-async function waitForRegistration(
-  client: DingTalkStreamClient,
-): Promise<boolean> {
-  const deadline = Date.now() + REGISTRATION_TIMEOUT_MS;
-  while (client.connected && !client.registered && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  return client.connected && client.registered;
+function isCredentialRejection(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    /\bHTTP (?:400|401|403)\b/.test(message) ||
+    message === "dingtalk API request returned an error" ||
+    message === "dingtalk access token response is invalid"
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

@@ -2686,7 +2686,8 @@
           "slack": "New Slack threads use this Agent and model.",
           "discord": "New Discord conversations use this Agent and model. Send /new in an existing DM to apply it.",
           "wechat": "New WeChat conversations use this Agent, model, and permission mode. Send /new in an existing chat to apply them.",
-          "telegram": "New Telegram conversations use this Agent and model. Send /new in an existing conversation to apply it."
+          "telegram": "New Telegram conversations use this Agent and model. Send /new in an existing conversation to apply it.",
+          "dingtalk": "New DingTalk conversations use this Agent and model. Send /new in an existing conversation to apply it."
         },
         "agentLabel": "Agent",
         "modelLabel": "Model Configuration",
@@ -7623,6 +7624,9 @@
       "telegramBotDisconnectFailed": "Unbind failed: {{message}}",
       "dingtalkBotConnected": "DingTalk bot connected",
       "dingtalkBotConnectFailed": "DingTalk bot connection failed; check credentials, Stream mode, and your network",
+      "dingtalkBotAuthFailed": "DingTalk rejected the credentials. Confirm that the Client ID and Client Secret belong to the same app",
+      "dingtalkBotNetworkFailed": "Cannot reach DingTalk Open Platform. Check your network or proxy and try again",
+      "dingtalkBotStreamFailed": "Credentials are valid, but the Stream connection was not established. Enable the bot, select Stream mode, and publish the app version",
       "dingtalkBotDisconnected": "DingTalk bot unbound",
       "dingtalkBotDisconnectFailed": "Failed to unbind DingTalk bot"
     },

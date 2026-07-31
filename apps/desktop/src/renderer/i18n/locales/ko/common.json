@@ -2685,7 +2685,8 @@
           "slack": "새 Slack 스레드는 이 Agent와 모델을 사용합니다.",
           "discord": "새 Discord 대화는 이 Agent와 모델을 사용합니다. 기존 DM에는 /new를 보내 적용하세요.",
           "wechat": "새 WeChat 대화는 이 Agent, 모델, 권한 모드를 사용합니다. 기존 채팅에는 /new를 보내 적용하세요.",
-          "telegram": "새 Telegram 대화는 이 Agent와 모델을 사용합니다. 기존 대화에는 /new를 보내 적용하세요."
+          "telegram": "새 Telegram 대화는 이 Agent와 모델을 사용합니다. 기존 대화에는 /new를 보내 적용하세요.",
+          "dingtalk": "새 DingTalk 대화는 이 Agent와 모델을 사용합니다. 기존 대화에는 /new를 보내 적용하세요."
         },
         "agentLabel": "Agent",
         "modelLabel": "모델 설정",
@@ -7612,6 +7613,9 @@
       "telegramBotDisconnectFailed": "연동 해제 실패: {{message}}",
       "dingtalkBotConnected": "DingTalk 봇이 연결됨",
       "dingtalkBotConnectFailed": "DingTalk 봇 연결 실패. 자격 증명, Stream 모드, 네트워크를 확인하세요",
+      "dingtalkBotAuthFailed": "DingTalk에서 자격 증명을 거부했습니다. Client ID와 Client Secret이 동일한 앱의 것인지 확인하세요",
+      "dingtalkBotNetworkFailed": "DingTalk 오픈 플랫폼에 연결할 수 없습니다. 네트워크 또는 프록시를 확인한 후 다시 시도하세요",
+      "dingtalkBotStreamFailed": "자격 증명은 유효하지만 Stream 연결이 설정되지 않았습니다. 봇을 활성화하고 Stream 모드를 선택한 뒤 앱 버전을 게시하세요",
       "dingtalkBotDisconnected": "DingTalk 봇 연동이 해제됨",
       "dingtalkBotDisconnectFailed": "DingTalk 봇 연동 해제 실패"
     },

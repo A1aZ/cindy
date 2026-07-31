@@ -69,6 +69,15 @@ function makeHost() {
   return { host, secrets, handlers, broadcasts };
 }
 
+function validCredentialFetcher() {
+  return vi.fn<typeof fetch>(
+    async () =>
+      new Response(
+        JSON.stringify({ accessToken: "test-token", expireIn: 7200 }),
+      ),
+  );
+}
+
 function directMessage(overrides: Record<string, unknown> = {}) {
   return {
     conversationId: "direct-chat",
@@ -88,7 +97,10 @@ describe("DingTalkIM", () => {
   it("claims the first direct sender, acknowledges immediately, and drops other direct users", async () => {
     const { host, secrets } = makeHost();
     const client = new FakeClient();
-    const im = new DingTalkIM(host, { clientFactory: () => client });
+    const im = new DingTalkIM(host, {
+      clientFactory: () => client,
+      fetcher: validCredentialFetcher(),
+    });
     const received: IMMessageEvent[] = [];
     im.onMessage((event) => received.push(event));
     await im.init();
@@ -120,7 +132,10 @@ describe("DingTalkIM", () => {
   it("routes mentioned group messages to one lane with speaker metadata", async () => {
     const { host } = makeHost();
     const client = new FakeClient();
-    const im = new DingTalkIM(host, { clientFactory: () => client });
+    const im = new DingTalkIM(host, {
+      clientFactory: () => client,
+      fetcher: validCredentialFetcher(),
+    });
     const received: IMMessageEvent[] = [];
     im.onMessage((event) => received.push(event));
     await im.init();
@@ -151,7 +166,10 @@ describe("DingTalkIM", () => {
   it("does not expose the app secret through public state", async () => {
     const { host } = makeHost();
     const client = new FakeClient();
-    const im = new DingTalkIM(host, { clientFactory: () => client });
+    const im = new DingTalkIM(host, {
+      clientFactory: () => client,
+      fetcher: validCredentialFetcher(),
+    });
     im.registerIpc();
     await im.init();
     const state = im.getPublicState();
@@ -162,6 +180,67 @@ describe("DingTalkIM", () => {
       ownerUserId: null,
     });
     expect(state).not.toHaveProperty("appSecret");
+  });
+
+  it("accepts an open Stream socket without waiting for a REGISTERED system message", async () => {
+    const { host } = makeHost();
+    const client = new FakeClient();
+    client.connect = vi.fn(async () => {
+      client.connected = true;
+      client.registered = false;
+    });
+    const im = new DingTalkIM(host, {
+      clientFactory: () => client,
+      fetcher: validCredentialFetcher(),
+    });
+
+    await im.init();
+
+    expect(im.getPublicState().status).toEqual({
+      kind: "connected",
+      appId: "app-key",
+    });
+  });
+
+  it("classifies rejected credentials before opening the Stream socket", async () => {
+    const { host } = makeHost();
+    const client = new FakeClient();
+    client.connect = vi.fn();
+    const fetcher = vi.fn<typeof fetch>(
+      async () =>
+        new Response(JSON.stringify({ code: "InvalidParameter" }), {
+          status: 401,
+        }),
+    );
+    const im = new DingTalkIM(host, {
+      clientFactory: () => client,
+      fetcher,
+    });
+
+    await im.init();
+
+    expect(client.connect).not.toHaveBeenCalled();
+    expect(im.getPublicState().status).toEqual({
+      kind: "error",
+      reason: "DINGTALK_AUTH_FAILED",
+    });
+  });
+
+  it("classifies a Stream socket that never opens", async () => {
+    const { host } = makeHost();
+    const client = new FakeClient();
+    client.connect = vi.fn(async () => undefined);
+    const im = new DingTalkIM(host, {
+      clientFactory: () => client,
+      fetcher: validCredentialFetcher(),
+    });
+
+    await im.init();
+
+    expect(im.getPublicState().status).toEqual({
+      kind: "error",
+      reason: "DINGTALK_STREAM_CONNECTION_FAILED",
+    });
   });
 
   it("does not emit a slow media callback after the connection is disposed", async () => {

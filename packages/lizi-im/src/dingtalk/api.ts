@@ -43,6 +43,10 @@ export class DingTalkApiClient {
     this.activeRequests.clear();
   }
 
+  async validateCredentials(): Promise<void> {
+    await this.getAccessToken();
+  }
+
   async sendText(target: DingTalkOutboundTarget, text: string): Promise<void> {
     if (target.sessionWebhook && this.isWebhookUsable(target)) {
       try {

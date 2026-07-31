@@ -331,6 +331,9 @@ describe('precreated worktree recovery ledger', () => {
 
   it('removes a record only when a precondition failure is confirmed as a claimed session', async () => {
     await registerPendingPrecreatedWorktree(ACCOUNT, RECORD);
+    const claimedAfterFailure = vi.fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
     await expect(
       recoverPendingPrecreatedWorktrees(ACCOUNT, {
         openLink: vi.fn(async () => undefined),
@@ -339,10 +342,11 @@ describe('precreated worktree recovery ledger', () => {
             code: 'PRECONDITION_FAILED',
           });
         }),
-        isSessionClaimed: vi.fn(async () => true),
+        isSessionClaimed: claimedAfterFailure,
         sleep: async () => undefined,
       }),
     ).resolves.toMatchObject({ recovered: 1, retained: 0 });
+    expect(claimedAfterFailure).toHaveBeenCalledTimes(2);
     await expect(listPendingPrecreatedWorktrees(ACCOUNT)).resolves.toEqual([]);
 
     await registerPendingPrecreatedWorktree(ACCOUNT, RECORD);
@@ -361,6 +365,50 @@ describe('precreated worktree recovery ledger', () => {
     await expect(listPendingPrecreatedWorktrees(ACCOUNT)).resolves.toEqual([
       RECORD,
     ]);
+  });
+
+  it('clears an already claimed record before calling an unsupported discard channel', async () => {
+    await registerPendingPrecreatedWorktree(ACCOUNT, RECORD);
+    const discardPrecreated = vi.fn();
+    const isSessionClaimed = vi.fn(async () => true);
+
+    await expect(
+      recoverPendingPrecreatedWorktrees(ACCOUNT, {
+        openLink: vi.fn(async () => undefined),
+        discardPrecreated,
+        isSessionClaimed,
+        sleep: async () => undefined,
+      }),
+    ).resolves.toMatchObject({ recovered: 1, retained: 0 });
+
+    expect(isSessionClaimed).toHaveBeenCalledWith('device-1', 'session-1');
+    expect(discardPrecreated).not.toHaveBeenCalled();
+    await expect(listPendingPrecreatedWorktrees(ACCOUNT)).resolves.toEqual([]);
+  });
+
+  it('reconciles ownership after an old desktop rejects the discard channel', async () => {
+    await registerPendingPrecreatedWorktree(ACCOUNT, RECORD);
+    const isSessionClaimed = vi.fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const discardPrecreated = vi.fn(async () => {
+      throw Object.assign(new Error('old desktop'), {
+        code: 'CHANNEL_NOT_ALLOWED',
+      });
+    });
+
+    await expect(
+      recoverPendingPrecreatedWorktrees(ACCOUNT, {
+        openLink: vi.fn(async () => undefined),
+        discardPrecreated,
+        isSessionClaimed,
+        sleep: async () => undefined,
+      }),
+    ).resolves.toMatchObject({ recovered: 1, retained: 0 });
+
+    expect(discardPrecreated).toHaveBeenCalledTimes(1);
+    expect(isSessionClaimed).toHaveBeenCalledTimes(2);
+    await expect(listPendingPrecreatedWorktrees(ACCOUNT)).resolves.toEqual([]);
   });
 
   it('retains unsupported records, but drops mismatched records and retains transient failures', async () => {

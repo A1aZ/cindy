@@ -1,27 +1,16 @@
+import {
+  normalizePendingRemotePrecreatedWorktrees,
+  type PendingRemotePrecreatedWorktree,
+  type PendingRemotePrecreatedWorktreeTarget,
+  type RemotePrecreatedWorktreeLedgerSnapshot,
+} from '../../../shared/remotePrecreatedWorktreeLedger';
+
+export type { PendingRemotePrecreatedWorktree } from '../../../shared/remotePrecreatedWorktreeLedger';
+
 export type RemoteWorktreeInvoke = (
   channel: string,
   args: unknown[],
 ) => Promise<unknown>;
-
-interface PendingRemotePrecreatedWorktreeBase {
-  deviceId: string;
-  sessionId: string;
-  createdAt: number;
-}
-
-export type PendingRemotePrecreatedWorktree =
-  PendingRemotePrecreatedWorktreeBase & (
-    | {
-        /** worktree:create 回包后可用；旧账本只有该定位符。 */
-        path: string;
-        recoveryKey?: string;
-      }
-    | {
-        path?: never;
-        /** worktree:create 前持久化的新定位符。 */
-        recoveryKey: string;
-      }
-  );
 
 export interface CreateRemoteSessionWithPrecreatedWorktreeInput {
   deviceId: string;
@@ -45,26 +34,20 @@ export interface RecoverPendingRemotePrecreatedWorktreesResult {
   storageReadable: boolean;
 }
 
-interface StoredRemotePrecreatedWorktreeLedger {
-  version: typeof STORAGE_VERSION;
-  records: PendingRemotePrecreatedWorktree[];
-}
-
 const STORAGE_KEY = 'xdt.desktop.remote-precreated-worktree-recovery.v1';
-const STORAGE_VERSION = 1;
-const MAX_RECORDS = 32;
-const MAX_RECORD_AGE_MS = 30 * 24 * 60 * 60 * 1000;
-const MAX_DEVICE_ID_LENGTH = 256;
-const MAX_SESSION_ID_LENGTH = 256;
-const MAX_PATH_LENGTH = 4_096;
-const MIN_RECOVERY_KEY_LENGTH = 16;
-const MAX_RECOVERY_KEY_LENGTH = 256;
-const RECOVERY_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
 const CLEANUP_PENDING_CODE = 'REMOTE_PRECREATED_WORKTREE_CLEANUP_PENDING';
 
-// localStorage 被浏览器策略、磁盘故障等暂时禁用时，当前 renderer 进程仍须记住
-// cleanup obligation，至少能阻止下一次发送继续制造第二个孤儿 worktree。
-const memoryRecords = new Map<string, PendingRemotePrecreatedWorktree>();
+interface RemotePrecreatedWorktreeLedgerApi {
+  list(): Promise<RemotePrecreatedWorktreeLedgerSnapshot>;
+  register(
+    record: PendingRemotePrecreatedWorktree,
+  ): Promise<{ persisted: boolean }>;
+  forget(
+    target: PendingRemotePrecreatedWorktreeTarget,
+  ): Promise<{ persisted: boolean }>;
+}
+
+let ledgerApiOverride: RemotePrecreatedWorktreeLedgerApi | null = null;
 
 /** 标记旧预创建目录尚未安全回收，调用方据此展示本地化提示并阻止重复创建。 */
 export class RemotePrecreatedWorktreeCleanupPendingError extends Error {
@@ -90,218 +73,85 @@ export function isRemotePrecreatedWorktreeCleanupPendingError(
   );
 }
 
-function recordKey(
-  record: Pick<PendingRemotePrecreatedWorktree, 'deviceId' | 'sessionId'>,
-): string {
-  return `${record.deviceId}\u0000${record.sessionId}`;
+function getLedgerApi(): RemotePrecreatedWorktreeLedgerApi {
+  return ledgerApiOverride ?? window.electronAPI.remotePrecreatedWorktreeLedger;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
-function readString(value: unknown, maxLength: number): string | null {
-  if (typeof value !== 'string') return null;
-  const normalized = value.trim();
-  return normalized.length > 0 && normalized.length <= maxLength
-    ? normalized
-    : null;
-}
-
-function readRecoveryKey(value: unknown): string | null {
-  const normalized = readString(value, MAX_RECOVERY_KEY_LENGTH);
-  return normalized
-    && normalized.length >= MIN_RECOVERY_KEY_LENGTH
-    && RECOVERY_KEY_PATTERN.test(normalized)
-    ? normalized
-    : null;
-}
-
-function coercePendingRecord(
-  value: unknown,
-  now = Date.now(),
-): PendingRemotePrecreatedWorktree | null {
-  if (!isRecord(value)) return null;
-  const deviceId = readString(value.deviceId, MAX_DEVICE_ID_LENGTH);
-  const sessionId = readString(value.sessionId, MAX_SESSION_ID_LENGTH);
-  const path = readString(value.path, MAX_PATH_LENGTH);
-  const recoveryKey = readRecoveryKey(value.recoveryKey);
-  const createdAt =
-    typeof value.createdAt === 'number' && Number.isFinite(value.createdAt)
-      ? value.createdAt
-      : 0;
-  if (!deviceId || !sessionId || (!path && !recoveryKey) || createdAt <= 0) return null;
-  if (createdAt > now + 5 * 60 * 1000) return null;
-  if (now - createdAt > MAX_RECORD_AGE_MS) return null;
-  const base = { deviceId, sessionId, createdAt };
-  if (path) {
-    return {
-      ...base,
-      path,
-      ...(recoveryKey ? { recoveryKey } : {}),
-    };
-  }
-  if (!recoveryKey) return null;
-  return { ...base, recoveryKey };
-}
-
-function normalizeRecords(
-  value: unknown,
-  now = Date.now(),
-): PendingRemotePrecreatedWorktree[] {
-  const rawRecords =
-    isRecord(value) && Array.isArray(value.records)
-      ? value.records
-      : Array.isArray(value)
-        ? value
-        : [];
-  const byKey = new Map<string, PendingRemotePrecreatedWorktree>();
-  for (const raw of rawRecords) {
-    const record = coercePendingRecord(raw, now);
-    if (!record) continue;
-    const key = recordKey(record);
-    const existing = byKey.get(key);
-    if (!existing || record.createdAt >= existing.createdAt) {
-      byKey.set(key, record);
-    }
-  }
-  return [...byKey.values()]
-    .sort((left, right) => right.createdAt - left.createdAt)
-    .slice(0, MAX_RECORDS);
-}
-
-function readPersistedRecords(): {
-  records: PendingRemotePrecreatedWorktree[];
-  storageReadable: boolean;
-} {
+/**
+ * 旧版本 Renderer localStorage → Main electron-store 一次性迁移。
+ *
+ * 每条都由 Main 原子 register；全部确认持久化后才删旧 key。多窗口同时迁移只会
+ * 幂等覆盖同一 device/session 记录，不会再产生整表 last-writer-wins。
+ */
+async function migrateLegacyLedger(): Promise<boolean> {
   let raw: string | null;
   try {
     raw = localStorage.getItem(STORAGE_KEY);
   } catch {
-    return { records: [], storageReadable: false };
+    return false;
   }
-  if (!raw) return { records: [], storageReadable: true };
-  try {
-    return {
-      records: normalizeRecords(JSON.parse(raw)),
-      storageReadable: true,
-    };
-  } catch {
-    // 无法解析时不能把未知的持久状态当成空账本，否则后续读取会覆盖原值并
-    // 丢失 cleanup obligation。按不可读处理，让创建流程 fail closed。
-    return { records: [], storageReadable: false };
-  }
-}
+  if (!raw) return true;
 
-function persistRecords(
-  records: readonly PendingRemotePrecreatedWorktree[],
-): boolean {
+  let records: PendingRemotePrecreatedWorktree[];
   try {
-    if (records.length === 0) {
-      localStorage.removeItem(STORAGE_KEY);
-    } else {
-      const ledger: StoredRemotePrecreatedWorktreeLedger = {
-        version: STORAGE_VERSION,
-        records: normalizeRecords(records),
-      };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(ledger));
+    records = normalizePendingRemotePrecreatedWorktrees(JSON.parse(raw));
+  } catch {
+    // 未知旧真值不能按空账本覆盖；保留 key 并让创建 fail closed。
+    return false;
+  }
+
+  try {
+    for (const record of records) {
+      const result = await getLedgerApi().register(record);
+      if (!result.persisted) return false;
     }
+    localStorage.removeItem(STORAGE_KEY);
     return true;
   } catch {
     return false;
   }
 }
 
-function replaceMemoryRecords(
-  records: readonly PendingRemotePrecreatedWorktree[],
-): void {
-  memoryRecords.clear();
-  for (const record of records) {
-    memoryRecords.set(recordKey(record), record);
+export async function listPendingRemotePrecreatedWorktrees(): Promise<
+  PendingRemotePrecreatedWorktree[]
+> {
+  return (await readPendingRemotePrecreatedWorktreeLedger()).records;
+}
+
+async function readPendingRemotePrecreatedWorktreeLedger(): Promise<
+  RemotePrecreatedWorktreeLedgerSnapshot
+> {
+  const legacyMigrated = await migrateLegacyLedger();
+  try {
+    const snapshot = await getLedgerApi().list();
+    return {
+      records: snapshot.records,
+      storageReadable: legacyMigrated && snapshot.storageReadable,
+    };
+  } catch {
+    return { records: [], storageReadable: false };
   }
 }
 
-function loadPendingRemotePrecreatedWorktrees(): {
-  records: PendingRemotePrecreatedWorktree[];
-  storageReadable: boolean;
-} {
-  const persisted = readPersistedRecords();
-  const merged = normalizeRecords([
-    ...memoryRecords.values(),
-    ...persisted.records,
-  ]);
-  replaceMemoryRecords(merged);
-  return {
-    records: merged,
-    storageReadable: persisted.storageReadable,
-  };
-}
-
-export function listPendingRemotePrecreatedWorktrees(): PendingRemotePrecreatedWorktree[] {
-  const { records } = readPendingRemotePrecreatedWorktreeLedger();
-  return records;
-}
-
-function readPendingRemotePrecreatedWorktreeLedger(): {
-  records: PendingRemotePrecreatedWorktree[];
-  storageReadable: boolean;
-} {
-  const { records, storageReadable } = loadPendingRemotePrecreatedWorktrees();
-  // 显式读取时顺手清理可解析的过期/无效条目，并把上次仅留在内存的记录重新
-  // 落盘。读取或解析失败时绝不以“空账本”覆盖未知的磁盘真值。
-  if (storageReadable) persistRecords(records);
-  return { records, storageReadable };
-}
-
-export function registerPendingRemotePrecreatedWorktree(
+export async function registerPendingRemotePrecreatedWorktree(
   record: PendingRemotePrecreatedWorktree,
-): boolean {
-  const normalized = coercePendingRecord(record);
-  if (!normalized) return false;
-  const {
-    records: current,
-    storageReadable,
-  } = loadPendingRemotePrecreatedWorktrees();
-  const next = normalizeRecords([
-    normalized,
-    ...current.filter((item) => recordKey(item) !== recordKey(normalized)),
-  ]);
-  replaceMemoryRecords(next);
-  if (!storageReadable) return false;
-  return persistRecords(next);
+): Promise<boolean> {
+  if (!(await migrateLegacyLedger())) return false;
+  try {
+    return (await getLedgerApi().register(record)).persisted;
+  } catch {
+    return false;
+  }
 }
 
-export function forgetPendingRemotePrecreatedWorktree(
-  target: Pick<PendingRemotePrecreatedWorktree, 'deviceId' | 'sessionId'> & {
-    path?: string;
-    recoveryKey?: string;
-    createdAt?: number;
-  },
-): void {
-  const {
-    records: current,
-    storageReadable,
-  } = loadPendingRemotePrecreatedWorktrees();
-  const next = current.filter(
-    (item) => {
-      if (
-        item.deviceId !== target.deviceId
-        || item.sessionId !== target.sessionId
-      ) {
-        return true;
-      }
-      const locatorMatches = target.recoveryKey !== undefined
-        ? item.recoveryKey === target.recoveryKey
-        : target.path !== undefined && item.path === target.path;
-      if (!locatorMatches) return true;
-      return (
-        target.createdAt !== undefined
-        && item.createdAt !== target.createdAt
-      );
-    },
-  );
-  replaceMemoryRecords(next);
-  if (storageReadable) persistRecords(next);
+export async function forgetPendingRemotePrecreatedWorktree(
+  target: PendingRemotePrecreatedWorktreeTarget,
+): Promise<boolean> {
+  try {
+    return (await getLedgerApi().forget(target)).persisted;
+  } catch {
+    return false;
+  }
 }
 
 function matchingSessionId(value: unknown, expectedId: string): string | null {
@@ -328,22 +178,19 @@ async function discardPendingRecord(
   invoke: RemoteWorktreeInvoke,
 ): Promise<boolean> {
   if (await probeClaimedSession(invoke, record.sessionId)) {
-    forgetPendingRemotePrecreatedWorktree(record);
-    return true;
+    return forgetPendingRemotePrecreatedWorktree(record);
   }
   try {
     const locator = typeof record.path === 'string'
       ? { sessionId: record.sessionId, path: record.path }
       : { sessionId: record.sessionId, recoveryKey: record.recoveryKey };
     await invoke('worktree:discard-precreated', [locator]);
-    forgetPendingRemotePrecreatedWorktree(record);
-    return true;
+    return forgetPendingRemotePrecreatedWorktree(record);
   } catch {
     // discard 与 create 共用被控端 session 锁。若拒绝来自一次已成功但丢回包的
     // create，权威 session 行会存在；dirty/keep 等其它拒绝则继续留账。
     if (await probeClaimedSession(invoke, record.sessionId)) {
-      forgetPendingRemotePrecreatedWorktree(record);
-      return true;
+      return forgetPendingRemotePrecreatedWorktree(record);
     }
     return false;
   }
@@ -357,7 +204,7 @@ async function discardPendingRecord(
 export async function recoverPendingRemotePrecreatedWorktrees(
   input: RecoverPendingRemotePrecreatedWorktreesInput,
 ): Promise<RecoverPendingRemotePrecreatedWorktreesResult> {
-  const ledger = readPendingRemotePrecreatedWorktreeLedger();
+  const ledger = await readPendingRemotePrecreatedWorktreeLedger();
   const records = ledger.records.filter(
     (record) => record.deviceId === input.deviceId,
   );
@@ -397,16 +244,16 @@ export async function createRemoteSessionWithPrecreatedWorktree(
     recoveryKey: input.recoveryKey,
     createdAt: input.createdAt ?? Date.now(),
   };
-  // localStorage 写失败时 register 已先留下 memory mirror；返回值只代表是否
-  // 持久化成功，不影响当前进程继续承担这份 obligation。
-  registerPendingRemotePrecreatedWorktree(pending);
+  // Main 账本在首次 worktree:create 前已经按 recoveryKey 登记；这里补齐 path。
+  // 写盘失败时 Main 仍保留内存镜像，后续流程继续按 cleanup obligation 收敛。
+  await registerPendingRemotePrecreatedWorktree(pending);
 
   let createFailure: unknown;
   try {
     const result = await input.invoke('maker:create-session', [input.createArgs]);
     const sessionId = matchingSessionId(result, input.sessionId);
     if (sessionId) {
-      forgetPendingRemotePrecreatedWorktree(pending);
+      await forgetPendingRemotePrecreatedWorktree(pending);
       return sessionId;
     }
     createFailure = new Error('Remote session creation returned no matching session id');
@@ -415,7 +262,7 @@ export async function createRemoteSessionWithPrecreatedWorktree(
   }
 
   if (await probeClaimedSession(input.invoke, input.sessionId)) {
-    forgetPendingRemotePrecreatedWorktree(pending);
+    await forgetPendingRemotePrecreatedWorktree(pending);
     return input.sessionId;
   }
 
@@ -424,10 +271,10 @@ export async function createRemoteSessionWithPrecreatedWorktree(
       sessionId: input.sessionId,
       path: input.path,
     }]);
-    forgetPendingRemotePrecreatedWorktree(pending);
+    await forgetPendingRemotePrecreatedWorktree(pending);
   } catch (cleanupFailure) {
     if (await probeClaimedSession(input.invoke, input.sessionId)) {
-      forgetPendingRemotePrecreatedWorktree(pending);
+      await forgetPendingRemotePrecreatedWorktree(pending);
       return input.sessionId;
     }
     throw new RemotePrecreatedWorktreeCleanupPendingError({
@@ -440,5 +287,7 @@ export async function createRemoteSessionWithPrecreatedWorktree(
 
 export const __testing = {
   storageKey: STORAGE_KEY,
-  resetMemoryRecords: () => memoryRecords.clear(),
+  setLedgerApi: (api: RemotePrecreatedWorktreeLedgerApi | null): void => {
+    ledgerApiOverride = api;
+  },
 };

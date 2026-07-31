@@ -100,6 +100,12 @@ import type {
   DesktopLoginActionResult,
 } from '../shared/authIpc';
 import { BILLING_INVOKE, type BillingRendererApi } from '../shared/billing';
+import {
+  REMOTE_PRECREATED_WORKTREE_LEDGER_CHANNELS,
+  type PendingRemotePrecreatedWorktree,
+  type PendingRemotePrecreatedWorktreeTarget,
+  type RemotePrecreatedWorktreeLedgerSnapshot,
+} from '../shared/remotePrecreatedWorktreeLedger';
 
 // Codex 元 IPC 全部升级到 maker.* (agentKind 参数化), preload 不再 import vendor/codex/ipcChannels。
 //   auth      → maker:auth:*(agentKind)
@@ -3541,6 +3547,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
         cb(payload);
       }
     }),
+
+  remotePrecreatedWorktreeLedger: {
+    list: (): Promise<RemotePrecreatedWorktreeLedgerSnapshot> =>
+      ipcRenderer.invoke(REMOTE_PRECREATED_WORKTREE_LEDGER_CHANNELS.LIST),
+    register: (
+      record: PendingRemotePrecreatedWorktree,
+    ): Promise<{ persisted: boolean }> =>
+      ipcRenderer.invoke(
+        REMOTE_PRECREATED_WORKTREE_LEDGER_CHANNELS.REGISTER,
+        record,
+      ),
+    forget: (
+      target: PendingRemotePrecreatedWorktreeTarget,
+    ): Promise<{ persisted: boolean }> =>
+      ipcRenderer.invoke(
+        REMOTE_PRECREATED_WORKTREE_LEDGER_CHANNELS.FORGET,
+        target,
+      ),
+  },
 
   // ── session 级"终身累计 cost"变化 (per-session, 不是 today-aggregate) ──
   // 今日累计 (Claude USD + Codex token) 已搬到 electronAPI.maker.usage.* (取代老

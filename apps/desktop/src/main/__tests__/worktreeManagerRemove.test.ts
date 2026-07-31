@@ -18,6 +18,7 @@ const isWorktreeDirtyMock = vi.fn();
 const autoStashMock = vi.fn();
 const restoreAutoStashMock = vi.fn();
 const clearSnapshotRefMock = vi.fn();
+const ignoredFilesMock = vi.fn();
 const changedIncludeFilesMock = vi.fn();
 const storeSetMock = vi.fn();
 const storeMap = new Map<string, WorktreeMeta>();
@@ -38,6 +39,7 @@ vi.mock('../worktree/dirty', () => ({
   autoStashDirtyWorktree: (...args: unknown[]) => autoStashMock(...args),
   restoreAutoStashToPreservedWorktree: (...args: unknown[]) => restoreAutoStashMock(...args),
   clearSnapshotRef: (...args: unknown[]) => clearSnapshotRefMock(...args),
+  listNonReproducibleIgnoredFiles: (...args: unknown[]) => ignoredFilesMock(...args),
 }));
 
 vi.mock('../worktree/includePatternsEngine', () => ({
@@ -94,6 +96,7 @@ describe('removeWorktreeForSession', () => {
     autoStashMock.mockReset().mockResolvedValue(true);
     restoreAutoStashMock.mockReset().mockResolvedValue(true);
     clearSnapshotRefMock.mockReset().mockResolvedValue(undefined);
+    ignoredFilesMock.mockReset().mockResolvedValue([]);
     changedIncludeFilesMock.mockReset().mockResolvedValue([]);
     storeSetMock.mockReset().mockImplementation(async (sessionId: string, meta: WorktreeMeta) => {
       storeMap.set(sessionId, meta);
@@ -561,6 +564,41 @@ describe('removeWorktreeForSession', () => {
       BASE_REPO,
     );
     expect(storeMap.get('s1')).toBe(meta);
+  });
+
+  it('discard pre-created: preserves non-reproducible ignored files before removal', async () => {
+    const meta = makeMeta('s1');
+    storeMap.set('s1', meta);
+    isWorktreeDirtyMock.mockResolvedValue(false);
+    ignoredFilesMock.mockResolvedValue(['.env']);
+
+    await expect(manager.discardPrecreatedWorktree('s1', meta.path)).resolves.toEqual({
+      status: 'preserved',
+    });
+
+    expect(ignoredFilesMock).toHaveBeenCalledWith(BASE_REPO, meta.path);
+    expect(gitExecMock).not.toHaveBeenCalledWith(
+      ['worktree', 'remove', meta.path],
+      BASE_REPO,
+    );
+    expect(storeMap.get('s1')).toBe(meta);
+  });
+
+  it('discard pre-created: ignored files mirrored exactly in base do not block removal', async () => {
+    const meta = makeMeta('s1');
+    storeMap.set('s1', meta);
+    isWorktreeDirtyMock.mockResolvedValue(false);
+    ignoredFilesMock.mockResolvedValue([]);
+
+    await expect(manager.discardPrecreatedWorktree('s1', meta.path)).resolves.toMatchObject({
+      status: 'discarded',
+    });
+
+    expect(ignoredFilesMock).toHaveBeenCalledWith(BASE_REPO, meta.path);
+    expect(gitExecMock).toHaveBeenCalledWith(
+      ['worktree', 'remove', meta.path],
+      BASE_REPO,
+    );
   });
 
   it('discard pre-created: removes a clean worktree and its commit-equivalent generated branch', async () => {

@@ -467,6 +467,9 @@ export async function recoverPendingPrecreatedWorktrees(
       await withTransientRemoteRetry(
         async () => {
           await deps.openLink(record.deviceId);
+          if (await deps.isSessionClaimed(record.deviceId, record.sessionId)) {
+            return;
+          }
           if (typeof record.path === 'string') {
             await deps.discardPrecreated(record.deviceId, {
               sessionId: record.sessionId,
@@ -490,16 +493,18 @@ export async function recoverPendingPrecreatedWorktrees(
       result.recovered += 1;
       continue;
     } catch (error) {
-      if (isPreconditionFailedRemoteError(error)) {
-        try {
-          if (await deps.isSessionClaimed(record.deviceId, record.sessionId)) {
-            await removeIfCurrent(accountId, record);
-            result.recovered += 1;
-            continue;
-          }
-        } catch {
-          // 无法确认 ownership 时保留账本，下一次恢复再试。
+      // 旧工作端可能已经成功创建 session，但不认识新的 discard channel。无论
+      // discard 以何种错误返回都再对账一次，不能只在 PRECONDITION_FAILED 时查询。
+      try {
+        if (await deps.isSessionClaimed(record.deviceId, record.sessionId)) {
+          await removeIfCurrent(accountId, record);
+          result.recovered += 1;
+          continue;
         }
+      } catch {
+        // 无法确认 ownership 时按原错误分类；未知状态仍保留账本。
+      }
+      if (isPreconditionFailedRemoteError(error)) {
         result.retained += 1;
         continue;
       }

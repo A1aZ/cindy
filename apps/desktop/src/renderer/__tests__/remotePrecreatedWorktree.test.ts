@@ -10,12 +10,36 @@ import {
   recoverPendingRemotePrecreatedWorktrees,
   registerPendingRemotePrecreatedWorktree,
 } from '../features/cc-agent/remotePrecreatedWorktree';
+import {
+  normalizePendingRemotePrecreatedWorktrees,
+  remotePrecreatedWorktreeRecordKey,
+  type PendingRemotePrecreatedWorktree,
+  type PendingRemotePrecreatedWorktreeTarget,
+} from '../../shared/remotePrecreatedWorktreeLedger';
 
 const DEVICE_ID = 'device-1';
 const SESSION_ID = 'session-1';
 const WORKTREE_PATH = '/repo/.cindy-worktrees/session-1';
 const RECOVERY_KEY = 'recovery-key-123456';
 const CREATE_ARGS = { id: SESSION_ID, workingDir: WORKTREE_PATH };
+let ledgerRecords: PendingRemotePrecreatedWorktree[] = [];
+let ledgerReadable = true;
+let ledgerWritable = true;
+
+function targetMatches(
+  item: PendingRemotePrecreatedWorktree,
+  target: PendingRemotePrecreatedWorktreeTarget,
+): boolean {
+  if (
+    item.deviceId !== target.deviceId
+    || item.sessionId !== target.sessionId
+  ) return false;
+  const locatorMatches = target.recoveryKey !== undefined
+    ? item.recoveryKey === target.recoveryKey
+    : target.path !== undefined && item.path === target.path;
+  return locatorMatches
+    && (target.createdAt === undefined || target.createdAt === item.createdAt);
+}
 
 function callWith(invoke: ReturnType<typeof vi.fn>) {
   return createRemoteSessionWithPrecreatedWorktree({
@@ -31,12 +55,36 @@ function callWith(invoke: ReturnType<typeof vi.fn>) {
 describe('createRemoteSessionWithPrecreatedWorktree', () => {
   beforeEach(() => {
     localStorage.clear();
-    __testing.resetMemoryRecords();
+    ledgerRecords = [];
+    ledgerReadable = true;
+    ledgerWritable = true;
+    __testing.setLedgerApi({
+      list: async () => ({
+        records: ledgerRecords,
+        storageReadable: ledgerReadable,
+      }),
+      register: async (record) => {
+        ledgerRecords = normalizePendingRemotePrecreatedWorktrees([
+          record,
+          ...ledgerRecords.filter(
+            (item) =>
+              remotePrecreatedWorktreeRecordKey(item)
+              !== remotePrecreatedWorktreeRecordKey(record),
+          ),
+        ]);
+        return { persisted: ledgerReadable && ledgerWritable };
+      },
+      forget: async (target) => {
+        if (!ledgerReadable || !ledgerWritable) return { persisted: false };
+        ledgerRecords = ledgerRecords.filter((item) => !targetMatches(item, target));
+        return { persisted: true };
+      },
+    });
   });
 
   it('returns immediately when create adopts the preset id', async () => {
     const invoke = vi.fn(async () => {
-      expect(listPendingRemotePrecreatedWorktrees()).toEqual([
+      await expect(listPendingRemotePrecreatedWorktrees()).resolves.toEqual([
         expect.objectContaining({
           deviceId: DEVICE_ID,
           sessionId: SESSION_ID,
@@ -49,7 +97,7 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
 
     await expect(callWith(invoke)).resolves.toBe(SESSION_ID);
     expect(invoke).toHaveBeenCalledTimes(1);
-    expect(listPendingRemotePrecreatedWorktrees()).toEqual([]);
+    await expect(listPendingRemotePrecreatedWorktrees()).resolves.toEqual([]);
   });
 
   it('recovers a successful create whose response was lost', async () => {
@@ -61,7 +109,7 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
 
     await expect(callWith(invoke)).resolves.toBe(SESSION_ID);
     expect(invoke).not.toHaveBeenCalledWith('worktree:discard-precreated', expect.anything());
-    expect(listPendingRemotePrecreatedWorktrees()).toEqual([]);
+    await expect(listPendingRemotePrecreatedWorktrees()).resolves.toEqual([]);
   });
 
   it('discards the exact pre-created path after a confirmed create failure', async () => {
@@ -78,7 +126,7 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
       sessionId: SESSION_ID,
       path: WORKTREE_PATH,
     }]);
-    expect(listPendingRemotePrecreatedWorktrees()).toEqual([]);
+    await expect(listPendingRemotePrecreatedWorktrees()).resolves.toEqual([]);
   });
 
   it('re-probes when discard loses the race to a successful create', async () => {
@@ -98,7 +146,7 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
 
     await expect(callWith(invoke)).resolves.toBe(SESSION_ID);
     expect(probes).toBe(2);
-    expect(listPendingRemotePrecreatedWorktrees()).toEqual([]);
+    await expect(listPendingRemotePrecreatedWorktrees()).resolves.toEqual([]);
   });
 
   it('retains the cleanup obligation when discard and ownership probes cannot settle it', async () => {
@@ -114,7 +162,7 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
 
     const failure = await callWith(invoke).catch((error: unknown) => error);
     expect(isRemotePrecreatedWorktreeCleanupPendingError(failure)).toBe(true);
-    expect(listPendingRemotePrecreatedWorktrees()).toEqual([
+    await expect(listPendingRemotePrecreatedWorktrees()).resolves.toEqual([
       expect.objectContaining({
         deviceId: DEVICE_ID,
         sessionId: SESSION_ID,
@@ -138,7 +186,7 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
 
     const failure = await callWith(invoke).catch((error: unknown) => error);
     expect(isRemotePrecreatedWorktreeCleanupPendingError(failure)).toBe(true);
-    expect(listPendingRemotePrecreatedWorktrees()).toEqual([
+    await expect(listPendingRemotePrecreatedWorktrees()).resolves.toEqual([
       expect.objectContaining({
         deviceId: DEVICE_ID,
         sessionId: SESSION_ID,
@@ -148,7 +196,7 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
   });
 
   it('recovers a retained obligation before another worktree is created', async () => {
-    registerPendingRemotePrecreatedWorktree({
+    await registerPendingRemotePrecreatedWorktree({
       deviceId: DEVICE_ID,
       sessionId: SESSION_ID,
       path: WORKTREE_PATH,
@@ -173,17 +221,16 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
       retained: 0,
       storageReadable: true,
     });
-    expect(listPendingRemotePrecreatedWorktrees()).toEqual([]);
+    await expect(listPendingRemotePrecreatedWorktrees()).resolves.toEqual([]);
   });
 
   it('recovers a pre-response reservation by recovery key after restart', async () => {
-    registerPendingRemotePrecreatedWorktree({
+    await registerPendingRemotePrecreatedWorktree({
       deviceId: DEVICE_ID,
       sessionId: SESSION_ID,
       recoveryKey: RECOVERY_KEY,
       createdAt: Date.now(),
     });
-    __testing.resetMemoryRecords();
     const invoke = vi.fn(async (channel: string) => {
       if (channel === 'local-db:sessions:get') {
         throw new Error('[NOT_FOUND] Session 不存在');
@@ -207,11 +254,11 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
       sessionId: SESSION_ID,
       recoveryKey: RECOVERY_KEY,
     }]);
-    expect(listPendingRemotePrecreatedWorktrees()).toEqual([]);
+    await expect(listPendingRemotePrecreatedWorktrees()).resolves.toEqual([]);
   });
 
   it('keeps the obligation when next-send recovery is still offline', async () => {
-    registerPendingRemotePrecreatedWorktree({
+    await registerPendingRemotePrecreatedWorktree({
       deviceId: DEVICE_ID,
       sessionId: SESSION_ID,
       path: WORKTREE_PATH,
@@ -232,11 +279,11 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
       retained: 1,
       storageReadable: true,
     });
-    expect(listPendingRemotePrecreatedWorktrees()).toHaveLength(1);
+    await expect(listPendingRemotePrecreatedWorktrees()).resolves.toHaveLength(1);
   });
 
   it('keeps the obligation when next-send recovery reaches an old desktop', async () => {
-    registerPendingRemotePrecreatedWorktree({
+    await registerPendingRemotePrecreatedWorktree({
       deviceId: DEVICE_ID,
       sessionId: SESSION_ID,
       path: WORKTREE_PATH,
@@ -263,25 +310,21 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
       retained: 1,
       storageReadable: true,
     });
-    expect(listPendingRemotePrecreatedWorktrees()).toHaveLength(1);
+    await expect(listPendingRemotePrecreatedWorktrees()).resolves.toHaveLength(1);
   });
 
-  it('uses the memory mirror when localStorage writes fail', async () => {
-    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(
-      () => {
-        throw new Error('quota exceeded');
-      },
-    );
-    expect(
+  it('uses the Main memory mirror when its persistent write fails', async () => {
+    ledgerWritable = false;
+    await expect(
       registerPendingRemotePrecreatedWorktree({
         deviceId: DEVICE_ID,
         sessionId: SESSION_ID,
         path: WORKTREE_PATH,
         createdAt: Date.now(),
       }),
-    ).toBe(false);
-    expect(listPendingRemotePrecreatedWorktrees()).toHaveLength(1);
-    setItem.mockRestore();
+    ).resolves.toBe(false);
+    await expect(listPendingRemotePrecreatedWorktrees()).resolves.toHaveLength(1);
+    ledgerWritable = true;
 
     const invoke = vi.fn(async (channel: string) => {
       if (channel === 'local-db:sessions:get') return { id: SESSION_ID };
@@ -293,18 +336,20 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
         invoke,
       }),
     ).resolves.toMatchObject({ recovered: 1, retained: 0 });
-    expect(listPendingRemotePrecreatedWorktrees()).toEqual([]);
+    await expect(listPendingRemotePrecreatedWorktrees()).resolves.toEqual([]);
   });
 
-  it('does not overwrite an unknown persisted ledger when localStorage reads fail', () => {
-    registerPendingRemotePrecreatedWorktree({
-      deviceId: DEVICE_ID,
-      sessionId: SESSION_ID,
-      path: WORKTREE_PATH,
-      createdAt: Date.now(),
-    });
+  it('does not overwrite an unknown legacy ledger when localStorage reads fail', async () => {
+    localStorage.setItem(__testing.storageKey, JSON.stringify({
+      version: 1,
+      records: [{
+        deviceId: DEVICE_ID,
+        sessionId: SESSION_ID,
+        path: WORKTREE_PATH,
+        createdAt: Date.now(),
+      }],
+    }));
     const persisted = localStorage.getItem(__testing.storageKey);
-    __testing.resetMemoryRecords();
 
     const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(
       () => {
@@ -313,7 +358,7 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
     );
     const setItem = vi.spyOn(Storage.prototype, 'setItem');
     const removeItem = vi.spyOn(Storage.prototype, 'removeItem');
-    expect(listPendingRemotePrecreatedWorktrees()).toEqual([]);
+    await expect(listPendingRemotePrecreatedWorktrees()).resolves.toEqual([]);
     expect(setItem).not.toHaveBeenCalled();
     expect(removeItem).not.toHaveBeenCalled();
 
@@ -321,17 +366,20 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
     setItem.mockRestore();
     removeItem.mockRestore();
     expect(localStorage.getItem(__testing.storageKey)).toBe(persisted);
-    expect(listPendingRemotePrecreatedWorktrees()).toHaveLength(1);
+    await expect(listPendingRemotePrecreatedWorktrees()).resolves.toHaveLength(1);
+    expect(localStorage.getItem(__testing.storageKey)).toBeNull();
   });
 
   it('fails closed before recovery when the persisted ledger cannot be read', async () => {
-    registerPendingRemotePrecreatedWorktree({
-      deviceId: DEVICE_ID,
-      sessionId: SESSION_ID,
-      path: WORKTREE_PATH,
-      createdAt: Date.now(),
-    });
-    __testing.resetMemoryRecords();
+    localStorage.setItem(__testing.storageKey, JSON.stringify({
+      version: 1,
+      records: [{
+        deviceId: DEVICE_ID,
+        sessionId: SESSION_ID,
+        path: WORKTREE_PATH,
+        createdAt: Date.now(),
+      }],
+    }));
     const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(
       () => {
         throw new Error('read unavailable');
@@ -372,21 +420,15 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
     expect(invoke).not.toHaveBeenCalled();
     expect(localStorage.getItem(__testing.storageKey)).toBe('{{{');
 
-    expect(
+    await expect(
       registerPendingRemotePrecreatedWorktree({
         deviceId: DEVICE_ID,
         sessionId: SESSION_ID,
         path: WORKTREE_PATH,
         createdAt: Date.now(),
       }),
-    ).toBe(false);
+    ).resolves.toBe(false);
     expect(localStorage.getItem(__testing.storageKey)).toBe('{{{');
-    expect(listPendingRemotePrecreatedWorktrees()).toEqual([
-      expect.objectContaining({
-        deviceId: DEVICE_ID,
-        sessionId: SESSION_ID,
-        path: WORKTREE_PATH,
-      }),
-    ]);
+    await expect(listPendingRemotePrecreatedWorktrees()).resolves.toEqual([]);
   });
 });

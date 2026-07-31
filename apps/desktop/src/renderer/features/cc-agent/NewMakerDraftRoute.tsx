@@ -2153,8 +2153,8 @@ export function NewMakerDraftRoute() {
               };
               // 远端副作用之前先持久化 recoveryKey reservation。首次写盘失败时
               // 绝不调用 worktree:create；内存镜像不能冒充跨进程恢复保证。
-              if (!registerPendingRemotePrecreatedWorktree(reservation)) {
-                forgetPendingRemotePrecreatedWorktree(reservation);
+              if (!(await registerPendingRemotePrecreatedWorktree(reservation))) {
+                await forgetPendingRemotePrecreatedWorktree(reservation);
                 throw new RemotePrecreatedWorktreeCleanupPendingError();
               }
               setWtCreating(true);
@@ -2176,7 +2176,7 @@ export function NewMakerDraftRoute() {
                   throw new RemotePrecreatedWorktreeCleanupPendingError();
                 }
                 if (!resp.ok) {
-                  forgetPendingRemotePrecreatedWorktree(reservation);
+                  await forgetPendingRemotePrecreatedWorktree(reservation);
                   showWorktreeError(resp.error);
                   return;
                 }
@@ -2188,7 +2188,7 @@ export function NewMakerDraftRoute() {
                 };
                 // 回包后尽力补 path；即使更新失败，首次已确认落盘的 recoveryKey
                 // reservation 仍足够让重启后的控制端精确恢复。
-                registerPendingRemotePrecreatedWorktree({
+                await registerPendingRemotePrecreatedWorktree({
                   ...reservation,
                   path: resp.meta.path,
                 });

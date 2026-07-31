@@ -108,9 +108,14 @@ export interface NewMakerDraft {
    * maker:apply-new-maker-worktree-pref 写穿)。
    * 只在用户**显式**切换开关时写入;资格探测失败(非 git 仓库 / 已在 worktree 内等)
    * 触发的自动关闭只改 UI 态、不写这里,避免环境因素抹掉用户偏好。
-   * 出厂默认 false(防误操作);老 localStorage 缺字段 → false。
+   * 有效值由系统默认 + worktreePreferenceCustomized override 合成。
    */
   worktreeEnabled: boolean;
+  /**
+   * worktreeEnabled 是否来自用户显式选择。false 时持久化快照里的布尔只是一份
+   * 旧系统默认缓存，加载时必须按当前系统默认重新合成，不能把默认永久固化。
+   */
+  worktreePreferenceCustomized: boolean;
   /**
    * New Maker 的 Fast Mode 记忆,按模型分开。
    * 缺省 false;实际是否可用还要由 UI 结合 capabilities 判定。
@@ -176,6 +181,8 @@ function defaultCollab(): CollabDraft {
   return { enabled: false, worker: 'codex' };
 }
 
+const DEFAULT_WORKTREE_ENABLED = false;
+
 function makeDefault(): NewMakerDraft {
   return {
     vendor: 'cc',
@@ -184,7 +191,8 @@ function makeDefault(): NewMakerDraft {
     deviceLinkDeviceId: null,
     deviceLinkDeviceName: null,
     collab: defaultCollab(),
-    worktreeEnabled: false,
+    worktreeEnabled: DEFAULT_WORKTREE_ENABLED,
+    worktreePreferenceCustomized: false,
     fastModeByModel: {},
     effortByModel: {},
     extraDirs: [],
@@ -323,6 +331,20 @@ function sanitize(raw: unknown): NewMakerDraft {
   for (const v of ['cc', 'orca', 'codex'] as const) {
     if (modelChosenRaw[v] === true) modelChosenByVendor[v] = true;
   }
+  // 2026-07 已落盘但尚无显式标记的 true，只可能来自用户把当时默认 false 切到 true，
+  // 可安全迁移为 override；旧 false 无法区分“默认快照”与“明确关闭”，按未自定义处理。
+  const worktreePreferenceCustomized =
+    (
+      r.worktreePreferenceCustomized === true
+      && typeof r.worktreeEnabled === 'boolean'
+    )
+    || (
+      r.worktreePreferenceCustomized === undefined
+      && r.worktreeEnabled === true
+    );
+  const worktreeEnabled = worktreePreferenceCustomized
+    ? r.worktreeEnabled === true
+    : DEFAULT_WORKTREE_ENABLED;
   return {
     vendor,
     workingDir,
@@ -331,10 +353,11 @@ function sanitize(raw: unknown): NewMakerDraft {
     deviceLinkDeviceId: null,
     deviceLinkDeviceName: null,
     collab,
-    // worktree 勾选记忆:严格 === true 才恢复(脏值/缺字段一律 false)。注意历史残留的
+    // worktree 勾选记忆:系统默认 + 显式 override 合成。注意历史残留的
     // wtEnabled/wtName/wtSourceBranch/wtBaseRepo 根字段(2026-07 前的短暂持久化实验)
     // 仍被忽略丢弃——本字段是新契约,不做旧值迁移(不猜测用户意图)。
-    worktreeEnabled: r.worktreeEnabled === true,
+    worktreeEnabled,
+    worktreePreferenceCustomized,
     fastModeByModel,
     effortByModel,
     extraDirs,
@@ -375,9 +398,29 @@ function parseStoredDraftRecord(raw: string | null): StoredDraftRecord | undefin
   }
 }
 
-function parseStoredWorktreePreference(raw: string | null): boolean | undefined {
+interface StoredWorktreePreference {
+  worktreeEnabled: boolean;
+  worktreePreferenceCustomized: boolean;
+}
+
+function parseStoredWorktreePreference(
+  raw: string | null,
+): StoredWorktreePreference | undefined {
   const parsed = parseStoredDraftRecord(raw);
-  return parsed ? parsed.worktreeEnabled === true : undefined;
+  if (
+    !parsed
+    || (
+      !('worktreeEnabled' in parsed)
+      && !('worktreePreferenceCustomized' in parsed)
+    )
+  ) {
+    return undefined;
+  }
+  const sanitized = sanitize(parsed);
+  return {
+    worktreeEnabled: sanitized.worktreeEnabled,
+    worktreePreferenceCustomized: sanitized.worktreePreferenceCustomized,
+  };
 }
 
 function readStoredDraftRecord(): StoredDraftRecord | undefined {
@@ -389,9 +432,13 @@ function readStoredDraftRecord(): StoredDraftRecord | undefined {
   }
 }
 
-function readStoredWorktreePreference(): boolean | undefined {
-  const parsed = readStoredDraftRecord();
-  return parsed ? parsed.worktreeEnabled === true : undefined;
+function readStoredWorktreePreference(): StoredWorktreePreference | undefined {
+  if (typeof window === 'undefined') return undefined;
+  try {
+    return parseStoredWorktreePreference(window.localStorage.getItem(storageKey()));
+  } catch {
+    return undefined;
+  }
 }
 
 type PreferenceSyncFallback = 'full-draft' | 'worktree-only' | null;
@@ -415,9 +462,13 @@ function scheduleWrite(
     : undefined;
   if (
     storedWorktreePreference !== undefined &&
-    storedWorktreePreference !== currentDraft.worktreeEnabled
+    (
+      storedWorktreePreference.worktreeEnabled !== currentDraft.worktreeEnabled
+      || storedWorktreePreference.worktreePreferenceCustomized
+        !== currentDraft.worktreePreferenceCustomized
+    )
   ) {
-    currentDraft = { ...currentDraft, worktreeEnabled: storedWorktreePreference };
+    currentDraft = { ...currentDraft, ...storedWorktreePreference };
   }
   try {
     window.localStorage.setItem(storageKey(), JSON.stringify(currentDraft));
@@ -445,11 +496,25 @@ const removeStorageListener = (() => {
     const livePreference = readStoredWorktreePreference();
     const nextPreference =
       livePreference ??
-      (event.newValue == null ? false : parseStoredWorktreePreference(event.newValue));
-    if (nextPreference === undefined || nextPreference === currentDraft.worktreeEnabled) return;
+      (
+        event.newValue == null
+          ? {
+              worktreeEnabled: DEFAULT_WORKTREE_ENABLED,
+              worktreePreferenceCustomized: false,
+            }
+          : parseStoredWorktreePreference(event.newValue)
+      );
+    if (
+      nextPreference === undefined
+      || (
+        nextPreference.worktreeEnabled === currentDraft.worktreeEnabled
+        && nextPreference.worktreePreferenceCustomized
+          === currentDraft.worktreePreferenceCustomized
+      )
+    ) return;
     // Only this workstation-wide preference is cross-window shared. Keep transient per-window
     // draft targets (deviceLinkDeviceId/extraDirs, etc.) untouched.
-    currentDraft = { ...currentDraft, worktreeEnabled: nextPreference };
+    currentDraft = { ...currentDraft, ...nextPreference };
     emit();
   };
   window.addEventListener('storage', onStorage);
@@ -479,7 +544,11 @@ export function getDraftForPreferenceSync(): NewMakerDraft {
   if (!stored || preferenceSyncFallback === 'full-draft') return currentDraft;
   const persistedDraft = sanitize(stored);
   return preferenceSyncFallback === 'worktree-only'
-    ? { ...persistedDraft, worktreeEnabled: currentDraft.worktreeEnabled }
+    ? {
+        ...persistedDraft,
+        worktreeEnabled: currentDraft.worktreeEnabled,
+        worktreePreferenceCustomized: currentDraft.worktreePreferenceCustomized,
+      }
     : persistedDraft;
 }
 
@@ -502,14 +571,22 @@ export function setNewMakerDraftOwner(ownerId: string | null): void {
  */
 export function setWorktreePreference(enabled: boolean): void {
   const worktreeEnabled = enabled === true;
+  const worktreePreferenceCustomized = true;
   if (typeof window !== 'undefined') {
     const stored = readStoredDraftRecord();
     const base = stored ?? currentDraft;
-    if (stored?.worktreeEnabled !== worktreeEnabled) {
+    if (
+      stored?.worktreeEnabled !== worktreeEnabled
+      || stored?.worktreePreferenceCustomized !== worktreePreferenceCustomized
+    ) {
       try {
         window.localStorage.setItem(
           storageKey(),
-          JSON.stringify({ ...base, worktreeEnabled }),
+          JSON.stringify({
+            ...base,
+            worktreeEnabled,
+            worktreePreferenceCustomized,
+          }),
         );
         preferenceSyncFallback = null;
       } catch {
@@ -521,7 +598,11 @@ export function setWorktreePreference(enabled: boolean): void {
       preferenceSyncFallback = null;
     }
   }
-  currentDraft = { ...currentDraft, worktreeEnabled };
+  currentDraft = {
+    ...currentDraft,
+    worktreeEnabled,
+    worktreePreferenceCustomized,
+  };
   emit();
 }
 
@@ -571,7 +652,9 @@ export function patchDraft(patch: Partial<NewMakerDraft>): void {
   // remoteHostId,远端 MCP 注入两端落地),不再按 vendor 强制关闭。
   currentDraft = next;
   scheduleWrite({
-    preserveStoredWorktreePreference: !('worktreeEnabled' in patch),
+    preserveStoredWorktreePreference:
+      !('worktreeEnabled' in patch)
+      && !('worktreePreferenceCustomized' in patch),
   });
   emit();
 }

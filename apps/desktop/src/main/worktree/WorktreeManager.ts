@@ -31,6 +31,7 @@ import {
 import { hasKeepSentinel, isManagedWorktreePath } from './safety';
 import {
   isWorktreeDirty,
+  listNonReproducibleIgnoredFiles,
   autoStashDirtyWorktree,
   restoreAutoStashToPreservedWorktree,
 } from './dirty';
@@ -879,6 +880,29 @@ async function removeWorktreeForSessionInner(
         }
       }
       return;
+    }
+
+    if (options.preserveDirty) {
+      let ignoredFiles: string[];
+      try {
+        ignoredFiles = await listNonReproducibleIgnoredFiles(meta.baseRepo, meta.path);
+      } catch (err) {
+        log.warn(
+          `[worktree] preserve worktree at ${meta.path}: ignored-file check failed`,
+          err instanceof Error ? err.message : String(err),
+        );
+        return;
+      }
+      if (ignoredFiles.length > 0) {
+        log.warn(
+          `[worktree] preserved worktree at ${meta.path}: non-reproducible ignored files`,
+          ignoredFiles.slice(0, 10),
+        );
+        return;
+      }
+      // ignored-file 对比可能读盘；完成后再核对一次 ownership，避免检查期间晚到的
+      // maker:create-session 已认领目录却仍继续删除。
+      if (!(await canRemoveWorktree(options, meta.path, sessionId))) return;
     }
 
     let removedByGit = false;

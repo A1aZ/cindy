@@ -82,7 +82,7 @@ describe('NewMakerDraftRoute worktree send flow', () => {
     );
     const retainedGuard = source.indexOf('!recovery.storageReadable', recovery);
     const reservationGuard = source.indexOf(
-      'if (!registerPendingRemotePrecreatedWorktree(reservation))',
+      'if (!(await registerPendingRemotePrecreatedWorktree(reservation)))',
       retainedGuard,
     );
     const worktreeCreate = source.indexOf("'worktree:create'", retainedGuard);

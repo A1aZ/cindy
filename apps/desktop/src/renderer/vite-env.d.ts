@@ -34,6 +34,12 @@ type DesktopAccountDeletionConfirmResult =
   import('../shared/authIpc').DesktopAccountDeletionConfirmResult;
 type DesktopAccountDeletionStatusResult =
   import('../shared/authIpc').DesktopAccountDeletionStatusResult;
+type PendingRemotePrecreatedWorktree =
+  import('../shared/remotePrecreatedWorktreeLedger').PendingRemotePrecreatedWorktree;
+type PendingRemotePrecreatedWorktreeTarget =
+  import('../shared/remotePrecreatedWorktreeLedger').PendingRemotePrecreatedWorktreeTarget;
+type RemotePrecreatedWorktreeLedgerSnapshot =
+  import('../shared/remotePrecreatedWorktreeLedger').RemotePrecreatedWorktreeLedgerSnapshot;
 
 /* ── Environment check ── */
 
@@ -3223,6 +3229,16 @@ interface ElectronAPI {
   sidebarSettingsLoadPinnedOrderSync: () => string[];
   sidebarSettingsSavePinnedOrder: (order: readonly string[]) => Promise<void>;
   sidebarSettingsOnPinnedOrderChanged: (cb: (order: string[]) => void) => () => void;
+
+  remotePrecreatedWorktreeLedger: {
+    list: () => Promise<RemotePrecreatedWorktreeLedgerSnapshot>;
+    register: (
+      record: PendingRemotePrecreatedWorktree,
+    ) => Promise<{ persisted: boolean }>;
+    forget: (
+      target: PendingRemotePrecreatedWorktreeTarget,
+    ) => Promise<{ persisted: boolean }>;
+  };
 
   // ── session 级"终身累计 cost"变化 (per-session, 不是 today-aggregate) ──
   // today aggregate 已搬到 electronAPI.maker.usage.* (Claude USD + Codex token 统一)。

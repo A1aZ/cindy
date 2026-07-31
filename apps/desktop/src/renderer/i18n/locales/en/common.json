@@ -3030,12 +3030,10 @@
           "model": "Model",
           "permission": "Write access",
           "permissionDisabled": "Not available for errand sessions",
-          "resetFollow": "Reset to follow default",
           "workdir": "Working folder",
           "workdirDefault": "Plugin's dedicated folder (default)",
           "workdirPick": "Choose…",
-          "workdirClear": "Reset to default folder",
-          "followDefault": "Follow default"
+          "workdirClear": "Reset to default folder"
         },
         "toolsTitle": "Tools",
         "permissionsTitle": "Permissions",

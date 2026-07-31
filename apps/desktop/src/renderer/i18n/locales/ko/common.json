@@ -3029,12 +3029,10 @@
           "model": "모델",
           "permission": "쓰기 권한",
           "permissionDisabled": "대행 세션에서는 선택할 수 없음",
-          "resetFollow": "기본값 따르기로 되돌리기",
           "workdir": "작업 폴더",
           "workdirDefault": "플러그인 전용 폴더(기본)",
           "workdirPick": "선택…",
-          "workdirClear": "기본 폴더로 되돌리기",
-          "followDefault": "기본값 따르기"
+          "workdirClear": "기본 폴더로 되돌리기"
         },
         "toolsTitle": "Tools",
         "permissionsTitle": "권한",

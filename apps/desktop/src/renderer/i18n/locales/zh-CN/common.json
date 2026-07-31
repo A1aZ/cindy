@@ -3029,12 +3029,10 @@
           "model": "模型",
           "permission": "动手权限",
           "permissionDisabled": "派活时不提供这一档",
-          "resetFollow": "恢复跟随默认",
           "workdir": "工作目录",
           "workdirDefault": "插件专属文件夹(默认)",
           "workdirPick": "选择…",
-          "workdirClear": "恢复默认目录",
-          "followDefault": "跟随默认"
+          "workdirClear": "恢复默认目录"
         },
         "toolsTitle": "Tools",
         "permissionsTitle": "权限",

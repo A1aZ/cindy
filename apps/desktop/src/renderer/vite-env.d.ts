@@ -3174,7 +3174,7 @@ interface ElectronAPI {
       enabled: boolean,
     ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
     setProviderEnabled: (
-      provider: 'telegram',
+      provider: 'telegram' | 'x',
       enabled: boolean,
     ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
     setWorkspaces: (
@@ -3191,11 +3191,18 @@ interface ElectronAPI {
       teamId: string,
     ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
     cancelPendingBind: () => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
-    providerBindStart: () => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
-    providerBindCancel: () => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
-    providerBindRevoke: () => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
-    openTelegramAction: (
-      action: import('../shared/hookControlIpc').TelegramOpenAction,
+    providerBindStart: (
+      provider: 'telegram' | 'x',
+    ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
+    providerBindCancel: (
+      provider: 'telegram' | 'x',
+    ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
+    providerBindRevoke: (
+      provider: 'telegram' | 'x',
+    ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
+    openProviderAction: (
+      provider: 'telegram' | 'x',
+      action: import('../shared/hookControlIpc').ProviderOpenAction,
     ) => Promise<{ ok: true }>;
     getWorkspacePrefs: () => Promise<{
       prefs: import('../shared/hookControlIpc').HookPrefsView;
@@ -3205,10 +3212,11 @@ interface ElectronAPI {
       patch: import('../shared/hookControlIpc').HookPrefsPatch,
       teamId?: string | null,
     ) => Promise<{ prefs: import('../shared/hookControlIpc').HookPrefsView }>;
-    getProviderWorkspacePrefs: () => Promise<{
+    getProviderWorkspacePrefs: (provider: 'telegram' | 'x') => Promise<{
       prefs: import('../shared/hookControlIpc').ProviderPrefsView;
     }>;
     setProviderWorkspacePrefs: (
+      provider: 'telegram' | 'x',
       workspace: string,
       patch: import('../shared/hookControlIpc').HookPrefsPatch,
     ) => Promise<{ prefs: import('../shared/hookControlIpc').ProviderPrefsView }>;
@@ -3216,7 +3224,7 @@ interface ElectronAPI {
       entries: import('../shared/hookControlIpc').HookWorkspaceProviderSourceEntry[];
     }>;
     setWorkspaceProviderSource: (payload: {
-      channel: 'slack' | 'telegram';
+      channel: 'slack' | 'telegram' | 'x';
       teamId: string | null;
       workspace: string;
       providerId: string | null;

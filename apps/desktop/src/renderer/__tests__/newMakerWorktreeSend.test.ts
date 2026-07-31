@@ -56,26 +56,25 @@ describe('NewMakerDraftRoute worktree send flow', () => {
     expect(source).not.toContain("sourceBranch: wt.sourceBranch.trim() || 'main'");
   });
 
-  it('treats remote session creation as committed before the ancillary list refresh', () => {
+  it('treats remote session creation as committed before the shared non-blocking handoff', () => {
     const remoteSessionId = source.indexOf('const remoteSessionId = presetSessionId');
-    const commitPoint = source.indexOf('maker:create-session 回包是事务提交点', remoteSessionId);
-    const listRefresh = source.indexOf("'local-db:sessions:list'", commitPoint);
-    const refreshCatch = source.indexOf(
-      '[remote draft send] session created but list refresh failed; requesting reseed',
-      listRefresh,
+    const commitPoint = source.indexOf('remoteSessionId 到手就是**提交点**', remoteSessionId);
+    const handoff = source.indexOf(
+      'commitRemoteSessionHandoff({',
+      commitPoint,
     );
-    const pendingHandoff = source.indexOf('setPending(remoteSessionId', refreshCatch);
+    const pendingHandoff = source.indexOf('setPending(remoteSessionId', handoff);
 
     expect(remoteSessionId).toBeGreaterThan(-1);
     expect(commitPoint).toBeGreaterThan(remoteSessionId);
-    expect(listRefresh).toBeGreaterThan(commitPoint);
-    expect(refreshCatch).toBeGreaterThan(listRefresh);
-    expect(pendingHandoff).toBeGreaterThan(refreshCatch);
+    expect(handoff).toBeGreaterThan(commitPoint);
+    expect(pendingHandoff).toBeGreaterThan(handoff);
+    expect(source).not.toContain("'local-db:sessions:list'");
   });
 
   it('settles an older remote cleanup obligation before creating another worktree', () => {
     const remoteBranch = source.indexOf(
-      'if (isDeviceLinkDraft && effectiveDeviceLinkDeviceId && effectiveWorkingDir) {',
+      'if (isDeviceLinkDraft && effectiveDeviceLinkDeviceId) {',
     );
     const recovery = source.indexOf(
       'await recoverPendingRemotePrecreatedWorktrees({',

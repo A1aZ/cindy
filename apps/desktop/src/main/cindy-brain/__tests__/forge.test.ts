@@ -533,6 +533,29 @@ describe('FORGE_GUIDE', () => {
       '发布到官方插件仓的额外门禁',
       'makecindy/cindy-official-plugins',
       '四语言 locale 缺一不可',
+      // 2026-07-29 寄存通道(#784):§2 的 media 类目 + §4.0.1 章节,
+      // 以及 §6 沙箱红线里"改图只认名下媒体"的口径更新。
+      "kind: 'deposit_media'",
+      "kind: 'release_media'",
+      '"cindy": { "media": ["deposit"] }',
+      '每意识配额 1GB',
+      '寄存物不是产物',
+      // 2026-07-29 媒体代办画面参数:edit_image 放开 aspectRatio,视频四参数
+      // (ratio/resolution/duration/fps)+ 实际生效参数回执 videoParams。
+      '图像可选画幅 aspectRatio',
+      '视频画面参数(四项全可选',
+      'videoParams',
+      '各型号支持集不同',
+      // 2026-07-31 设计对齐章(§0):动手前用带选项的提问卡片摆出"隐藏"设计
+      // 选项(界面形态/点名词/启动模式/联网等),用户确认设计小结后才动手;
+      // 小结须告知源码目录位置(知情即可,不需要用户选)。
+      '设计对齐',
+      '提问卡片',
+      '推荐项',
+      '"隐藏"设计选项',
+      '设计小结',
+      '源码会放在工作目录的哪个文件夹',
+      '让用户知情即可',
     ]) {
       expect(FORGE_GUIDE).toContain(marker);
     }

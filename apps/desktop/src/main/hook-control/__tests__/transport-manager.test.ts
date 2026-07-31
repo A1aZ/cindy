@@ -45,7 +45,11 @@ import {
   providerForTaskDispatch,
   type HookControlManagerDeps,
 } from '../manager';
-import { createHookTransport, type HookTransportOpts } from '../transport';
+import {
+  computeBackoffDelayMs,
+  createHookTransport,
+  type HookTransportOpts,
+} from '../transport';
 import type { SlackHookStore, SlackHookConfigState } from '../store';
 
 const noopLog = { info: () => {}, warn: () => {} };
@@ -107,6 +111,7 @@ function makeManager(
     deviceInfo: () => ({ deviceId: 'dev-1', deviceName: 'TestBox' }),
     agents: ['claude-code', 'codex'],
     notifyStatus: () => {},
+    autoBindDeferMs: 5,
     log: noopLog,
     ...overrides,
   });
@@ -389,6 +394,60 @@ describe('hook-control transport handshake recovery', () => {
     await expect.poll(() => upgrades, { timeout: 3000 }).toBeGreaterThanOrEqual(2);
     expect(statuses).toContain('error');
     expect(statuses).not.toContain('standby');
+  });
+});
+
+describe('hook-control transport backoff jitter', () => {
+  const BASE = 1000;
+  const MAX = 30_000;
+
+  it('抖动落在退避值的 [0.7, 1.0] 区间内', () => {
+    // random 的两个极端决定区间端点；中点用于确认是线性插值而非跳变。
+    expect(computeBackoffDelayMs(0, BASE, MAX, () => 0)).toBe(700);
+    expect(computeBackoffDelayMs(0, BASE, MAX, () => 0.5)).toBe(850);
+    // random() 取不到 1，但末尾 Math.round 会把逼近满值的比例舍入上去，
+    // 所以上端是闭的：延迟可以恰好等于退避值（这也是 maxMs 仍不被越过的边界）。
+    expect(computeBackoffDelayMs(0, BASE, MAX, () => 0.999999)).toBe(BASE);
+  });
+
+  it('指数增长仍然成立，且 maxMs 是真实上限（抖动只向下）', () => {
+    // 高位 attempt 会让指数项远超 MAX，封顶后再抖动，绝不越过 MAX。
+    for (const attempt of [0, 1, 2, 3, 4, 5, 10, 30]) {
+      for (const r of [0, 0.25, 0.5, 0.75, 0.999999]) {
+        const delay = computeBackoffDelayMs(attempt, BASE, MAX, () => r);
+        expect(delay).toBeLessThanOrEqual(MAX);
+        expect(delay).toBeGreaterThan(0);
+      }
+    }
+    // 同一 random 下，未封顶区间应严格递增（抖动不掩盖退避本身）。
+    const at = (n: number) => computeBackoffDelayMs(n, BASE, MAX, () => 0.5);
+    expect(at(1)).toBeGreaterThan(at(0));
+    expect(at(2)).toBeGreaterThan(at(1));
+    // 封顶后不再增长。
+    expect(computeBackoffDelayMs(30, BASE, MAX, () => 0.5)).toBe(
+      computeBackoffDelayMs(10, BASE, MAX, () => 0.5),
+    );
+  });
+
+  it('同一 attempt 的不同随机源给出不同延迟（真正打散齐步重连）', () => {
+    const spread = new Set(
+      [0, 0.2, 0.4, 0.6, 0.8].map((r) => computeBackoffDelayMs(5, BASE, MAX, () => r)),
+    );
+    expect(spread.size).toBeGreaterThan(1);
+  });
+
+  it('生产缺省不注入 random 时也能建连（Math.random 兜底）', async () => {
+    const { wss, url } = await startServer();
+    const statuses: string[] = [];
+    const transport = createHookTransport({
+      ...transportOpts(url, { onStatus: (status) => statuses.push(status) }),
+      random: undefined,
+    });
+    cleanups.push(() => transport.dispose());
+
+    const [sock] = (await once(wss, 'connection')) as [ServerSocket];
+    sock.send(serializeHookMessage(makeWelcome({ serverName: 'mock', features: [] })));
+    await expect.poll(() => statuses.at(-1), { timeout: 3000 }).toBe('connected');
   });
 });
 
@@ -3193,7 +3252,7 @@ describe('多 workspace 绑定(multi-team)', () => {
     });
     manager.armAutoBind();
     sock.send(serializeHookMessage(makeBindState({ bindings: [] })));
-    // 延迟窗(300ms)后发起
+    // 测试注入 5ms 延迟窗后发起；生产默认仍为 300ms。
     const bind = await server.waitFor('bind.start');
     expect(bind.type).toBe('bind.start');
     const authorizeUrl = 'https://slack.example.com/authorize?state=first';
@@ -3213,41 +3272,57 @@ describe('多 workspace 绑定(multi-team)', () => {
 
   it('armAutoBind + 空 bind.state 后紧跟 pending 回放: 重新发起换新链接, 不用旧链接弹浏览器', async () => {
     const opened: string[] = [];
-    const { manager, sock, server } = await connectMulti({
-      managerOverrides: { openExternalUrl: (u) => opened.push(u) },
+    let resolveOpened!: () => void;
+    const openedPromise = new Promise<void>((resolve) => {
+      resolveOpened = resolve;
     });
-    manager.armAutoBind();
-    sock.send(serializeHookMessage(makeBindState({ bindings: [] })));
-    // server 回放旧的进行中授权(旧链接) —— 在延迟窗内先到
-    sock.send(
-      serializeHookMessage(
-        makeBindUpdate({
-          state: 'pending',
-          slackUserId: null,
-          slackUserName: null,
-          message: null,
-          authorizeUrl: 'https://slack.example.com/authorize?state=stale',
-        }),
-      ),
-    );
-    await server.waitFor('bind.start');
-    expect(opened).toEqual([]); // 旧链接不弹
-    const freshUrl = 'https://slack.example.com/authorize?state=fresh';
-    sock.send(
-      serializeHookMessage(
-        makeBindUpdate({
-          state: 'pending',
-          slackUserId: null,
-          slackUserName: null,
-          message: null,
-          authorizeUrl: freshUrl,
-        }),
-      ),
-    );
-    await expect.poll(() => opened, { timeout: 3000 }).toEqual([freshUrl]);
-    // 延迟窗过去后也不会再多发一次 bind.start(意图已消费)
-    await new Promise((r) => setTimeout(r, 400));
-    expect(server.frames.filter((f) => f.type === 'bind.start')).toHaveLength(1);
+    const { manager, sock, server } = await connectMulti({
+      managerOverrides: {
+        openExternalUrl: (u) => {
+          opened.push(u);
+          resolveOpened();
+        },
+      },
+    });
+    vi.useFakeTimers();
+    try {
+      manager.armAutoBind();
+      sock.send(serializeHookMessage(makeBindState({ bindings: [] })));
+      // server 回放旧的进行中授权(旧链接) —— 在延迟窗内先到
+      sock.send(
+        serializeHookMessage(
+          makeBindUpdate({
+            state: 'pending',
+            slackUserId: null,
+            slackUserName: null,
+            message: null,
+            authorizeUrl: 'https://slack.example.com/authorize?state=stale',
+          }),
+        ),
+      );
+      await server.waitFor('bind.start');
+      expect(opened).toEqual([]); // 旧链接不弹
+      const freshUrl = 'https://slack.example.com/authorize?state=fresh';
+      sock.send(
+        serializeHookMessage(
+          makeBindUpdate({
+            state: 'pending',
+            slackUserId: null,
+            slackUserName: null,
+            message: null,
+            authorizeUrl: freshUrl,
+          }),
+        ),
+      );
+      await openedPromise;
+      expect(opened).toEqual([freshUrl]);
+      // 精确推进测试注入的延迟窗；旧 timer 已在 pending 回放路径清除,
+      // 因此不会再发第二个 bind.start。
+      await vi.advanceTimersByTimeAsync(5);
+      expect(server.frames.filter((f) => f.type === 'bind.start')).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('首绑终止态(denied): 开关弹回后快照保留 pendingBind 终止态(设置页兜底行数据源)', async () => {

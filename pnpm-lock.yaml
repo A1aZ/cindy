@@ -962,12 +962,12 @@ importers:
       '@larksuiteoapi/node-sdk':
         specifier: ^1.60.0
         version: 1.71.1
-      dingtalk-stream:
-        specifier: ^2.1.5
-        version: 2.1.5
       '@wecom/aibot-node-sdk':
         specifier: 1.0.7
         version: 1.0.7
+      dingtalk-stream:
+        specifier: ^2.1.5
+        version: 2.1.5
       discord.js:
         specifier: ^14.16.0
         version: 14.27.0
@@ -14630,7 +14630,7 @@ snapshots:
 
   '@wecom/aibot-node-sdk@1.0.7':
     dependencies:
-      axios: 1.18.1
+      axios: 1.18.1(debug@4.4.3)
       eventemitter3: 5.0.4
       ws: 8.21.1
     transitivePeerDependencies:

@@ -1318,6 +1318,7 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
         terminal: 'done',
         threadTs: undefined,
         mediaAbsPaths: ['C:\\cindy-media\\generated.png'],
+        allowedFileRoots: ['F:\\XDMaker'],
       });
     } finally {
       fakeAdapter.output = previousOutput;

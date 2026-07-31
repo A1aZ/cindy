@@ -101,7 +101,12 @@ export function createSlashHandlers(
     const [cmd, ...commandArgs] = text.trim().split(/\s+/);
     log.info(`slash cmd=${cmd} userId=...${ctx.userId.slice(-8)}`);
 
-    if (adapter.output.kind === 'chunked-text' && INTERACTIVE_SLASH_COMMANDS.has(cmd)) {
+    const supportsTextPermissionCommand = channel === 'wecom' && cmd === '/permission';
+    if (
+      adapter.output.kind === 'chunked-text' &&
+      INTERACTIVE_SLASH_COMMANDS.has(cmd) &&
+      !supportsTextPermissionCommand
+    ) {
       await safeSendText(
         ctx.userId,
         ui.slash.interactiveCommandUnsupported?.(cmd) ?? ui.slash.unknownCommand(cmd),

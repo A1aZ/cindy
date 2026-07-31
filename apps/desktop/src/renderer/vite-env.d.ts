@@ -1832,6 +1832,7 @@ interface ElectronAPI {
       callback: (update: { status: DingTalkBotTransportStatus }) => void,
     ) => () => void;
     onOwnerChange: (callback: (update: { ownerUserId: string }) => void) => () => void;
+  };
 
   wecomBot: {
     getStatus: () => Promise<{

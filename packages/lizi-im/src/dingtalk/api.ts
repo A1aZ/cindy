@@ -5,6 +5,7 @@ const DIRECT_SEND_URL =
   "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend";
 const GROUP_SEND_URL = "https://api.dingtalk.com/v1.0/robot/groupMessages/send";
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_MEDIA_REDIRECTS = 3;
 const HTTP_TIMEOUT_MS = 30_000;
 
 export type DingTalkFetch = typeof fetch;
@@ -94,12 +95,7 @@ export class DingTalkApiClient {
     const downloadUrl = stringField(response, "downloadUrl");
     if (!downloadUrl)
       throw new Error("dingtalk media response missing downloadUrl");
-    const parsed = new URL(downloadUrl);
-    if (!isAllowedMediaHost(parsed)) {
-      throw new Error("dingtalk media response returned an untrusted URL");
-    }
-
-    const res = await this.fetchWithTimeout(downloadUrl, { redirect: "error" });
+    const res = await this.fetchTrustedMedia(downloadUrl);
     if (!res.ok)
       throw new Error(`dingtalk media download failed: HTTP ${res.status}`);
     const declaredLength = Number(res.headers.get("content-length") ?? 0);
@@ -115,6 +111,29 @@ export class DingTalkApiClient {
       throw new Error("dingtalk media is not an image");
     }
     return { buffer: bytes, mimeType };
+  }
+
+  private async fetchTrustedMedia(downloadUrl: string): Promise<Response> {
+    let currentUrl = new URL(downloadUrl);
+    for (let redirects = 0; redirects <= MAX_MEDIA_REDIRECTS; redirects += 1) {
+      if (!isAllowedMediaHost(currentUrl)) {
+        throw new Error("dingtalk media response returned an untrusted URL");
+      }
+      const response = await this.fetchWithTimeout(currentUrl, {
+        redirect: "manual",
+      });
+      if (!isRedirectResponse(response)) return response;
+      const location = response.headers.get("location");
+      await response.body?.cancel();
+      if (!location) {
+        throw new Error("dingtalk media redirect is missing a location");
+      }
+      if (redirects === MAX_MEDIA_REDIRECTS) {
+        throw new Error("dingtalk media response has too many redirects");
+      }
+      currentUrl = new URL(location, currentUrl);
+    }
+    throw new Error("dingtalk media response has too many redirects");
   }
 
   private isWebhookUsable(target: DingTalkOutboundTarget): boolean {
@@ -215,6 +234,10 @@ function isAllowedMediaHost(url: URL): boolean {
     hostname === "alicdn.com" ||
     hostname.endsWith(".alicdn.com")
   );
+}
+
+function isRedirectResponse(response: Response): boolean {
+  return [301, 302, 303, 307, 308].includes(response.status);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

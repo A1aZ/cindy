@@ -9,6 +9,10 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+const PNG_BYTES = Uint8Array.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+]);
+
 describe("DingTalkApiClient", () => {
   it("never posts to an untrusted session webhook and falls back to the fixed API", async () => {
     const fetcher = vi
@@ -50,5 +54,62 @@ describe("DingTalkApiClient", () => {
       /untrusted URL/,
     );
     expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("follows a bounded redirect between trusted DingTalk media hosts", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ accessToken: "token", expireIn: 7200 }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          downloadUrl: "https://media.dingtalk.com/temporary/image",
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 302,
+          headers: {
+            location: "https://download.dingtalk.com/final/image.png",
+          },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(PNG_BYTES));
+    const api = new DingTalkApiClient("app-key", "app-secret", fetcher);
+
+    await expect(api.downloadImage("download-code")).resolves.toEqual({
+      buffer: PNG_BYTES,
+      mimeType: "image/png",
+    });
+    expect(fetcher.mock.calls.slice(2).map(([url]) => String(url))).toEqual([
+      "https://media.dingtalk.com/temporary/image",
+      "https://download.dingtalk.com/final/image.png",
+    ]);
+  });
+
+  it("rejects a trusted media URL that redirects outside the allowlist", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ accessToken: "token", expireIn: 7200 }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          downloadUrl: "https://media.dingtalk.com/temporary/image",
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://example.invalid/collect" },
+        }),
+      );
+    const api = new DingTalkApiClient("app-key", "app-secret", fetcher);
+
+    await expect(api.downloadImage("download-code")).rejects.toThrow(
+      /untrusted URL/,
+    );
+    expect(fetcher).toHaveBeenCalledTimes(3);
   });
 });

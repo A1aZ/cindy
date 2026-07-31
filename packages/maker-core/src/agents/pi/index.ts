@@ -211,7 +211,10 @@ export class PiAgent extends BaseAgent {
     return {
       switchModel: { supported: true },
       availableModels: [],
-      hasFastMode: false,
+      // Pi 的 ChatGPT 模型经 Desktop responses bridge 调用。Fast 状态由 host 按
+      // sessionId 注入 bridge prefs,再映射为 Codex `service_tier: priority`；实际
+      // 是否显示开关仍由目录里该 (provider, model, pi) 的 supportsFastMode 门控。
+      hasFastMode: true,
       effort: { supported: true },
       effortLevels: [
         { id: 'low', displayName: 'Low' },

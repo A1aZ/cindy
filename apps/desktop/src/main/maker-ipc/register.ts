@@ -8644,6 +8644,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       log.debug('set-fast-mode: session not found, no-op', { sessionId });
       return;
     }
+    if (sess.agentKind === 'pi') {
+      // Pi 的 ChatGPT 请求不从 pi 请求体携带 Fast，而是由上面的 session store
+      // 在 compat-proxy 决策点闭包进 responses bridge prefs。到这里已经即时生效，
+      // 无需向 pi RPC 再发一份不存在的 set_fast_mode 控制命令。
+      log.debug('set-fast-mode: pi responses bridge state updated', { sessionId, enabled });
+      return;
+    }
     if (sess.agentKind !== 'codex') {
       log.debug('set-fast-mode: agent does not implement fast mode, no-op', {
         sessionId,

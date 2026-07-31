@@ -48,4 +48,8 @@ describe('PiAgent capabilities contract', () => {
       expect(/[一-鿿]/.test(`${m.displayName}${m.description}`)).toBe(false);
     }
   });
+
+  it('declares Fast support so supported ChatGPT models can expose the toggle', () => {
+    expect(buildAgent().capabilities.hasFastMode).toBe(true);
+  });
 });

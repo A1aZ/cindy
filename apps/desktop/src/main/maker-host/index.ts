@@ -1313,6 +1313,7 @@ export function getMaker(): Maker {
     ];
     const piAgent = buildPiAgent({
       logger: desktopMakerLogger,
+      reviewAutoPermissionAction,
       capabilityAdditions: {
         availableModels: deriveAvailableModels(getDesktopSelectableCatalog(), 'pi'),
       },

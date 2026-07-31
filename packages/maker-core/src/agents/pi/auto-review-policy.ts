@@ -9,11 +9,16 @@
  * 凭证路径的只读调用 / 未来新增内置工具。只读分支扫全部字符串入参判凭证,与 bridge
  * 同判定:bridge 升级上来的凭证读在 auto 档必须落弹窗,不能被 path 字段缺失反向放行。
  *
- * MCP 工具(`mcp__*`)一律 fail-closed 走 `other` → 弹窗,与 ask 档行为一致;
- * 按 host MCP 审批策略细分是后续工作,不在本 adapter 猜测各 server 的安全性。
+ * MCP 工具(`mcp__*`)一律走 `other`,由当前会话模型结合完整工具名/入参轻量诊断；
+ * 本 adapter 不猜测各 server 的安全性。reviewer 缺失/失败仍由共享决策层 fail-closed。
  */
 
-import { isSensitiveCredentialPath, reviewAction, type ReviewVerdict } from '../shared/auto-review.js';
+import {
+  isSensitiveCredentialPath,
+  reviewAction,
+  type ReviewableAction,
+  type ReviewVerdict,
+} from '../shared/auto-review.js';
 
 export type PiAutoReviewVerdict = ReviewVerdict;
 
@@ -26,6 +31,15 @@ export interface PiAutoReviewContext {
   workspaceRoots: string[];
   /** 可读根:工作区 + Pi 附加只读引用目录。写操作仍只看 workspaceRoots。 */
   readRoots?: string[];
+}
+
+/** 给当前模型 reviewer 的完整 MCP/未知工具证据；输入来自 JSON RPC，可安全序列化。 */
+function describeOtherTool(toolName: string, input: Record<string, unknown>): string {
+  try {
+    return JSON.stringify({ toolName, input });
+  } catch {
+    return JSON.stringify({ toolName });
+  }
 }
 
 /** pi 只读内置工具(与 cindy-bridge READONLY_BUILTINS 同集)。入参路径字段统一为 `path`。 */
@@ -66,21 +80,25 @@ function findCredentialLeaf(input: unknown, depth = 0): string | undefined {
  * Auto-review 下对一个 pi 工具调用给出审查档位。仅在权限档为 `auto` 时调用
  * (见 pi/index.ts handleExtensionUiRequest 的 dispatcher)。纯映射,判定逻辑全在 core。
  */
-export function classifyPiToolForAutoReview(ctx: PiAutoReviewContext): PiAutoReviewVerdict {
-  const { toolName, input, workspaceRoots, readRoots = workspaceRoots } = ctx;
+export function normalizePiToolForAutoReview(ctx: PiAutoReviewContext): ReviewableAction {
+  const { toolName, input } = ctx;
 
   if (READ_ONLY_TOOLS.has(toolName)) {
     // 凭证特征可能落在任意字符串入参(grep 的 pattern、find 的表达式等),与 bridge
     // 的 touchesCredentialPath 同口径递归扫全字段;命中的字符串作为 path 交 core 判必问。
     const credentialHit = findCredentialLeaf(input);
-    return reviewAction({ kind: 'read', path: credentialHit ?? stringField(input, 'path') }, readRoots);
+    return { kind: 'read', path: credentialHit ?? stringField(input, 'path') };
   }
   if (FILE_WRITE_TOOLS.has(toolName)) {
-    return reviewAction({ kind: 'file-write', path: stringField(input, 'path') }, workspaceRoots);
+    return { kind: 'file-write', path: stringField(input, 'path') };
   }
   if (toolName === 'bash') {
-    return reviewAction({ kind: 'exec', command: stringField(input, 'command') ?? '' }, workspaceRoots);
+    return { kind: 'exec', command: stringField(input, 'command') ?? '' };
   }
-  // MCP / 自定义 / 未知工具 → fail-closed 升级。
-  return reviewAction({ kind: 'other' }, workspaceRoots);
+  // MCP / 自定义 / 未知工具进入灰区，同时把完整工具名与入参交给轻量 reviewer。
+  return { kind: 'other', description: describeOtherTool(toolName, input) };
+}
+
+export function classifyPiToolForAutoReview(ctx: PiAutoReviewContext): PiAutoReviewVerdict {
+  return reviewAction(normalizePiToolForAutoReview(ctx), ctx.readRoots ?? ctx.workspaceRoots);
 }

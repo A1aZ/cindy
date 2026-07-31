@@ -4,8 +4,8 @@
  *   1. spawn args:改用 --append-system-prompt(保留 pi 默认 prompt),不再 --system-prompt;
  *   2. spawn env:PI_OFFLINE=1(嵌入式不做启动期联网)、PI_CACHE_RETENTION=long、
  *      NO_PROXY 含 loopback 且吞并小写 no_proxy;
- *   3. auto 档:区内写静默 confirmed:true(不弹 resolver);越界写/MCP 工具仍走 resolver;
- *      resolver 缺失时 fail-closed deny;
+ *   3. auto 档:区内写静默 confirmed:true;灰区交当前模型 reviewer,仅 reviewer 明确
+ *      ask / 本地红线才弹 resolver;reviewer 缺失时 fail-closed deny;
  *   4. ask 档:区内写照旧弹 resolver(auto 的差异只在 auto 档生效)。
  */
 
@@ -83,7 +83,9 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     if (savedNoProxyLower === undefined) delete process.env.no_proxy; else process.env.no_proxy = savedNoProxyLower;
   });
 
-  function buildDeps(): AgentDeps {
+  function buildDeps(
+    reviewAutoPermissionAction?: AgentDeps['reviewAutoPermissionAction'],
+  ): AgentDeps {
     return {
       auth: {
         getState: async () => ({ authenticated: true, identity: 'test', authSource: 'api-key' as const }),
@@ -108,11 +110,15 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
         ],
       },
       resolvePiAgentHome: () => agentHome,
+      reviewAutoPermissionAction,
     };
   }
 
-  async function start(permissionMode?: string): Promise<AgentSessionHandle> {
-    const agent = new PiAgent(buildDeps());
+  async function start(
+    permissionMode?: string,
+    reviewAutoPermissionAction?: AgentDeps['reviewAutoPermissionAction'],
+  ): Promise<AgentSessionHandle> {
+    const agent = new PiAgent(buildDeps(reviewAutoPermissionAction));
     return agent.startSession({
       sessionId: 's1',
       workingDir: cwd,
@@ -172,26 +178,66 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     expect(resolverCalls).toBe(0);
   });
 
-  it('auto mode escalates out-of-workspace writes and MCP tools to the resolver', async () => {
-    const handle = await start('auto');
-    const promptedTools: string[] = [];
-    handle.setInteractionResolver?.(async (req) => {
-      promptedTools.push((req as { toolName: string }).toolName);
+  it('auto mode lets the current-model reviewer allow a gray write without prompting', async () => {
+    const review = vi.fn(async () => ({ verdict: 'allow' as const }));
+    const handle = await start('auto', review);
+    let resolverCalls = 0;
+    handle.setInteractionResolver?.(async () => {
+      resolverCalls++;
       return { kind: 'permission', behavior: 'deny' } as never;
     });
+    await handle.send({ role: 'user', content: 'Update the system hosts mapping for this test.' });
     firePermissionRequest('r2', 'write', { path: '/etc/hosts' });
-    firePermissionRequest('r3', 'mcp__cindy_orca__start_team', {});
     await flush();
-    expect(promptedTools).toEqual(['write', 'mcp__cindy_orca__start_team']);
-    expect(captured.sent).toContainEqual({ type: 'extension_ui_response', id: 'r2', confirmed: false });
-    expect(captured.sent).toContainEqual({ type: 'extension_ui_response', id: 'r3', confirmed: false });
+    expect(review).toHaveBeenCalledWith(expect.objectContaining({
+      agentKind: 'pi',
+      model: 'm',
+      userIntent: 'Update the system hosts mapping for this test.',
+      action: { kind: 'file-write', path: '/etc/hosts' },
+    }));
+    expect(resolverCalls).toBe(0);
+    expect(captured.sent).toContainEqual({ type: 'extension_ui_response', id: 'r2', confirmed: true });
   });
 
-  it('auto mode fails closed when escalation has no resolver', async () => {
-    await start('auto');
-    firePermissionRequest('r4', 'bash', { command: 'rm -rf /' });
+  it('auto mode gives the current-model reviewer complete MCP tool evidence', async () => {
+    const review = vi.fn(async () => ({ verdict: 'allow' as const }));
+    const handle = await start('auto', review);
+    await handle.send({ role: 'user', content: 'Start a review team.' });
+    firePermissionRequest('r3', 'mcp__cindy_orca__start_team', {});
     await flush();
-    expect(captured.sent).toContainEqual({ type: 'extension_ui_response', id: 'r4', confirmed: false });
+    expect(review).toHaveBeenCalledWith(expect.objectContaining({
+      action: {
+        kind: 'other',
+        description: JSON.stringify({ toolName: 'mcp__cindy_orca__start_team', input: {} }),
+      },
+    }));
+    expect(captured.sent).toContainEqual({ type: 'extension_ui_response', id: 'r3', confirmed: true });
+  });
+
+  it('auto mode prompts only when the current-model reviewer explicitly asks', async () => {
+    const handle = await start('auto', async () => ({ verdict: 'ask' }));
+    let resolverCalls = 0;
+    handle.setInteractionResolver?.(async () => {
+      resolverCalls++;
+      return { kind: 'permission', behavior: 'allow' } as never;
+    });
+    firePermissionRequest('r4', 'write', { path: '/etc/hosts' });
+    await flush();
+    expect(resolverCalls).toBe(1);
+    expect(captured.sent).toContainEqual({ type: 'extension_ui_response', id: 'r4', confirmed: true });
+  });
+
+  it('auto mode silently blocks gray actions when the current-model reviewer is unavailable', async () => {
+    const handle = await start('auto');
+    let resolverCalls = 0;
+    handle.setInteractionResolver?.(async () => {
+      resolverCalls++;
+      return { kind: 'permission', behavior: 'allow' } as never;
+    });
+    firePermissionRequest('r7', 'write', { path: '/etc/hosts' });
+    await flush();
+    expect(resolverCalls).toBe(0);
+    expect(captured.sent).toContainEqual({ type: 'extension_ui_response', id: 'r7', confirmed: false });
   });
 
   it('ask mode still prompts for in-workspace writes (auto shortcut is auto-only)', async () => {

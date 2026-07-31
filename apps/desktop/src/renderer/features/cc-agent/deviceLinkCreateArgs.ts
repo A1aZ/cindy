@@ -111,7 +111,7 @@ export interface DeviceLinkSubmissionCandidate {
 }
 
 export interface DeviceLinkSubmissionParams {
-  agentKind: 'cc' | 'codex';
+  agentKind: 'cc' | 'codex' | 'pi';
   workingDir?: string;
   id?: string;
   extraDirs?: string[];

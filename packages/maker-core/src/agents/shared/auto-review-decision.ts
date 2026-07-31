@@ -41,6 +41,8 @@ export function getAutoReviewActionTextLength(action: ReviewableAction): number 
       return action.path?.length ?? 0;
     case 'network':
       return (action.target?.length ?? 0) + (action.operation?.length ?? 0);
+    case 'other':
+      return action.description?.length ?? 0;
     default:
       return 0;
   }
@@ -78,7 +80,9 @@ function missingReviewEvidence(action: ReviewableAction): string | null {
         ? null
         : 'Network review needs a concrete destination or query.';
     case 'other':
-      return 'Unknown actions cannot be reviewed without concrete action details.';
+      return action.description?.trim()
+        ? null
+        : 'Unknown actions cannot be reviewed without concrete action details.';
     default:
       return null;
   }

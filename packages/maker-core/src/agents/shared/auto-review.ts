@@ -54,7 +54,7 @@ export type ReviewableAction =
   | { kind: 'file-write'; path: string | undefined }
   | { kind: 'exec'; command: string }
   | { kind: 'network'; target?: string; operation?: string }
-  | { kind: 'other' };
+  | { kind: 'other'; description?: string };
 
 /**
  * 核心裁决。纯函数、确定性、无副作用(不触文件系统 —— 探文件存在性会变侧信道,且对远端

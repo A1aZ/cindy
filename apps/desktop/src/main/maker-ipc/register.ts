@@ -3628,7 +3628,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             const money = computePriceQuoteTurnMoney(
               tokens,
               price ?? undefined,
-              CURRENT_CINDY_REGION,
+              currentLedgerCurrency(),
             );
             if (money && money.amount > 0) {
               if (!isSubscriptionValue) {

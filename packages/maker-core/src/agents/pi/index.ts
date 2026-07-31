@@ -37,7 +37,13 @@ import {
   CINDY_BRIDGE_EXTENSION_FILENAME,
   CINDY_BRIDGE_EXTENSION_SOURCE,
 } from './cindy-bridge-source.js';
-import { classifyPiToolForAutoReview } from './auto-review-policy.js';
+import { normalizePiToolForAutoReview } from './auto-review-policy.js';
+import {
+  extractAutoReviewUserIntent,
+  resolveAutoReviewDecision,
+  type AutoReviewDecision,
+} from '../shared/auto-review-decision.js';
+import type { ReviewableAction } from '../shared/auto-review.js';
 import { buildMemoryScopeKey } from '../../memory/storage.js';
 import type {
   Capabilities,
@@ -253,7 +259,8 @@ export class PiAgent extends BaseAgent {
       // bypassPermissions 全放行。档位从权限文件热读,setPermissionMode 即时生效。
       // auto 档:bridge 行为同 ask(非只读全部冒泡),Cindy 侧 dispatcher 先过
       // Auto-Review Core(shared/auto-review.ts)—— 区内写/安全命令静默放行,
-      // 越界写/危险命令/MCP 工具仍弹窗(见 handleExtensionUiRequest)。
+      // 灰区由当前会话模型轻量诊断；仅确定性红线或 reviewer 明确 ask 才弹窗
+      // (见 handleExtensionUiRequest)。
       // displayName/description 为英文 fallback,真实文案走 i18n
       // newChat.permissionSelector.modes.pi.*(与 cc/codex 同结构)。
       permissionModes: [
@@ -574,6 +581,33 @@ export class PiAgent extends BaseAgent {
     const queue: AsyncQueue<AgentEvent> = createAsyncQueue<AgentEvent>();
     const ctx: PiTranslateContext = createPiTranslateContext(this.deps.logger);
     let interactionResolver: InteractionResolver | null = null;
+    let mutableModel = opts.model;
+    let mutableProviderId: string | null | undefined = opts.providerId ?? authProviderId;
+    let currentAutoReviewIntent = '';
+    const autoReviewDecisionCache = new Map<string, Promise<AutoReviewDecision>>();
+    const setAutoReviewIntent = (content: UserMessage['content']): void => {
+      currentAutoReviewIntent = extractAutoReviewUserIntent(content);
+      autoReviewDecisionCache.clear();
+    };
+    const reviewAutoAction = (action: ReviewableAction): Promise<AutoReviewDecision> => {
+      const request = {
+        sessionId: opts.sessionId,
+        agentKind: 'pi' as const,
+        providerId: mutableProviderId,
+        model: mutableModel,
+        userIntent: currentAutoReviewIntent,
+        action,
+        workspaceRoots: [opts.workingDir, ...mutableExtraDirs],
+        platform: opts.remoteHostId ? 'linux' as const : process.platform,
+      };
+      const cacheKey = JSON.stringify(request);
+      let pending = autoReviewDecisionCache.get(cacheKey);
+      if (!pending) {
+        pending = resolveAutoReviewDecision(request, this.deps.reviewAutoPermissionAction);
+        autoReviewDecisionCache.set(cacheKey, pending);
+      }
+      return pending;
+    };
     let closed = false;
     // Cindy 侧对 pi plan 模式的镜像态;setPlanMode 经 /plan toggle 驱动,与 pi 内部
     // planModeEnabled 保持一致(RPC 下 Execute/Refine 选择框被 auto-cancel,pi 不会自行
@@ -617,6 +651,7 @@ export class PiAgent extends BaseAgent {
               permissionMode,
               workspaceRoots: [opts.workingDir],
               readRoots: [opts.workingDir, ...mutableExtraDirs],
+              reviewAutoAction,
             }));
             return;
           }
@@ -777,6 +812,7 @@ export class PiAgent extends BaseAgent {
 
       async send(message: UserMessage, sendOpts?: SendOptions): Promise<void> {
         void sendOpts;
+        setAutoReviewIntent(message.content);
         const { text, images } = await buildPiPrompt(message);
         // setExtraDirs 是热更新；Pi 没有独立的 mid-session system-prompt RPC，所以在
         // 后续 user turn 前附上短引用目录段。初始目录也在稳定 system suffix 中声明。
@@ -793,6 +829,7 @@ export class PiAgent extends BaseAgent {
       },
 
       async steer(message: UserMessage): Promise<void> {
+        setAutoReviewIntent(message.content);
         const { text, images } = await buildPiPrompt(message);
         const refs = piExtraDirsPrompt(mutableExtraDirs);
         const promptText = refs ? `${refs}\n\n${text}` : text;
@@ -837,11 +874,14 @@ export class PiAgent extends BaseAgent {
         interactionResolver = resolver;
       },
 
-      async setModel(model: string): Promise<void> {
+      async setModel(model: string, setOpts?: { providerId?: string | null }): Promise<void> {
         // BYOM:按 model→provider 路由(原生模型走其 provider,其余走网关 cindy)。
         const provider = resolveProviderForModel(model);
         const resp = await proc.request({ type: 'set_model', provider, modelId: model });
         if (!resp.success) throw new Error(`pi set_model failed: ${resp.error ?? 'unknown'}`);
+        mutableModel = model;
+        if (setOpts && Object.hasOwn(setOpts, 'providerId')) mutableProviderId = setOpts.providerId;
+        autoReviewDecisionCache.clear();
         const data = (resp.data ?? {}) as { contextWindow?: number };
         if (typeof data.contextWindow === 'number' && data.contextWindow > 0) {
           ctx.contextWindow = data.contextWindow;
@@ -1186,7 +1226,9 @@ export class PiAgent extends BaseAgent {
    * 在 /skill:name 被调用时进上下文 —— 故此发现层零基线上下文增长(契合精简 pi)。
    */
   override async listAgentSkills(opts: ListAgentSkillsOptions): Promise<ListAgentSkillsResult> {
-    const { items, errors } = await scanPiCustomizations({ workingDirs: [opts.workingDir] });
+    const { items, errors } = await scanPiCustomizations({
+      workingDirs: opts.workingDir ? [opts.workingDir] : [],
+    });
     const out: ListAgentSkillsResult = {
       skills: items
         .filter((it) => it.kind === 'skill' && it.enabled !== false)
@@ -1214,9 +1256,9 @@ export class PiAgent extends BaseAgent {
    * 不得放行)。其它 dialog 请求 cancelled 兜底,不挂死 agent loop。
    *
    * auto 档 dispatcher:弹窗前先过 Cindy Auto-Review Core(pi adapter 见
-   * auto-review-policy.ts)—— `auto-approve` 静默放行,`prompt`/`prompt-each-time`
-   * 照常升级弹窗(pi 无 allow-always 记忆,两档在此收敛为同一弹窗)。分类抛错按
-   * 未分类处理(弹窗,不放行)。
+   * auto-review-policy.ts)—— 本地绿灯静默放行,灰区交当前会话模型轻量诊断,
+   * 确定性红线或 reviewer 明确 `ask` 才升级弹窗。reviewer 缺失/超时/抛错均
+   * 静默 deny,让主 Agent 改用更安全的做法。
    */
   private handleExtensionUiRequest(
     event: PiRpcEvent,
@@ -1226,6 +1268,7 @@ export class PiAgent extends BaseAgent {
       permissionMode: 'ask' | 'auto' | 'bypassPermissions';
       workspaceRoots: string[];
       readRoots: string[];
+      reviewAutoAction: (action: ReviewableAction) => Promise<AutoReviewDecision>;
     },
   ): void {
     const method = typeof event.method === 'string' ? event.method : '';
@@ -1245,26 +1288,18 @@ export class PiAgent extends BaseAgent {
       } catch {
         /* keep defaults */
       }
-      const { resolver, permissionMode, workspaceRoots, readRoots } = getPermissionCtx();
-      if (permissionMode === 'auto') {
-        try {
-          if (classifyPiToolForAutoReview({ toolName, input, workspaceRoots, readRoots }) === 'auto-approve') {
-            proc.send({ type: 'extension_ui_response', id, confirmed: true });
-            return;
-          }
-        } catch (err) {
-          this.deps.logger.warn('pi auto-review classification failed; escalating to prompt', {
-            toolName,
-            message: err instanceof Error ? err.message : String(err),
-          });
+      const {
+        resolver,
+        permissionMode,
+        workspaceRoots,
+        readRoots,
+        reviewAutoAction,
+      } = getPermissionCtx();
+      const requestUserConfirmation = async (): Promise<boolean> => {
+        if (!resolver) {
+          this.deps.logger.warn('pi permission request denied: no interaction resolver', { toolName });
+          return false;
         }
-      }
-      if (!resolver) {
-        this.deps.logger.warn('pi permission request denied: no interaction resolver', { toolName });
-        proc.send({ type: 'extension_ui_response', id, confirmed: false });
-        return;
-      }
-      void (async () => {
         try {
           const decision = await resolver({
             kind: 'permission',
@@ -1272,10 +1307,53 @@ export class PiAgent extends BaseAgent {
             toolName,
             input,
           });
-          const allow = decision.kind === 'permission' && decision.behavior === 'allow';
-          proc.send({ type: 'extension_ui_response', id, confirmed: allow });
+          return decision.kind === 'permission' && decision.behavior === 'allow';
         } catch (err) {
           this.deps.logger.warn('pi permission resolver failed; denying', {
+            toolName,
+            message: err instanceof Error ? err.message : String(err),
+          });
+          return false;
+        }
+      };
+      void (async () => {
+        if (permissionMode !== 'auto') {
+          proc.send({
+            type: 'extension_ui_response',
+            id,
+            confirmed: await requestUserConfirmation(),
+          });
+          return;
+        }
+        try {
+          const action = normalizePiToolForAutoReview({
+            toolName,
+            input,
+            workspaceRoots,
+            readRoots,
+          });
+          const decision = await reviewAutoAction(action);
+          if (decision.verdict === 'ask') {
+            proc.send({
+              type: 'extension_ui_response',
+              id,
+              confirmed: await requestUserConfirmation(),
+            });
+            return;
+          }
+          if (decision.verdict === 'block') {
+            this.deps.logger.debug('pi auto-review blocked tool call', {
+              toolName,
+              reason: decision.reason,
+            });
+          }
+          proc.send({
+            type: 'extension_ui_response',
+            id,
+            confirmed: decision.verdict === 'allow',
+          });
+        } catch (err) {
+          this.deps.logger.warn('pi auto-review failed; denying', {
             toolName,
             message: err instanceof Error ? err.message : String(err),
           });

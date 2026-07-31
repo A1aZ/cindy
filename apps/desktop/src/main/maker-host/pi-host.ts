@@ -190,6 +190,7 @@ function buildDesktopPiRuntimeConfig(): AgentRuntimeConfig {
 export interface BuildPiAgentOpts {
   logger: AgentDeps['logger'];
   capabilityAdditions?: AgentDeps['capabilityAdditions'];
+  reviewAutoPermissionAction?: AgentDeps['reviewAutoPermissionAction'];
   /** Cindy MCP providers(与 claude/codex 同源工厂产物);经 HTTP bridge 暴露给 pi。 */
   mcpProviders?: AgentDeps['mcpProviders'];
   makerMemory?: AgentDeps['makerMemory'];
@@ -322,6 +323,7 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
     binaryPath,
     logger: opts.logger,
     capabilityAdditions: opts.capabilityAdditions,
+    reviewAutoPermissionAction: opts.reviewAutoPermissionAction,
     mcpProviders: opts.mcpProviders,
     makerMemory: opts.makerMemory,
     resolvePiAgentHome: () => path.join(app.getPath('userData'), 'pi-agent-home'),

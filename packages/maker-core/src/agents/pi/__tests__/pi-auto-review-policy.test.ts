@@ -36,7 +36,9 @@ describe('classifyPiToolForAutoReview', () => {
     expect(verdict('bash', { command: 'ls -la' })).toBe('auto-approve');
     expect(verdict('bash', { command: 'git status' })).toBe('auto-approve');
     expect(verdict('bash', { command: 'sudo whoami' })).toBe('prompt-each-time');
-    expect(verdict('bash', { command: 'rm -rf /' })).toBe('prompt-each-time');
+    // Destructive but replaceable actions are gray: the current-model reviewer
+    // should block or ask with the actual user intent instead of always interrupting.
+    expect(verdict('bash', { command: 'rm -rf /' })).toBe('prompt');
     // 入参缺失/非字符串 → 空命令 → 无法判定,升级
     expect(verdict('bash', {})).not.toBe('auto-approve');
   });

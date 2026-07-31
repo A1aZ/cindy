@@ -19,9 +19,18 @@ import fs from 'node:fs';
 import { app } from 'electron';
 
 import { PiAgent, type AgentDeps, type AuthAdapter, type AuthState } from '@cindy/maker-core';
-import type { AgentRuntimeConfig, AuthAdapterOptions } from '@cindy/maker-core';
+import type {
+  AgentRuntimeConfig,
+  AuthAdapterOptions,
+  PiNativeApi,
+  PiNativeProviderSpec,
+  PiNativeProvidersResult,
+} from '@cindy/maker-core';
+import type { ProviderWireProtocol } from '@cindy/model-providers';
 
 import { getPiExtraSpawnConfig } from '../mcp-integrations/piEnvironment.js';
+import { listCustomProviders } from './custom-provider-store.js';
+import { readCustomProviderKey } from '../secrets/providerSecretStore.js';
 import { desktopCodexAuthAdapter, readClaudeApiKey } from './auth-adapters.js';
 import { getClaudeEndpoint } from './anthropic-compat-proxy-host.js';
 import { hasClaudeAiOAuth } from './claude-credentials-store.js';
@@ -140,6 +149,101 @@ export interface BuildPiAgentOpts {
   mcpProviders?: AgentDeps['mcpProviders'];
 }
 
+/** Cindy wire protocol → pi models.json api 形态。 */
+function wireProtocolToPiApi(wp: ProviderWireProtocol | undefined): PiNativeApi {
+  switch (wp) {
+    case 'anthropic-messages':
+      return 'anthropic-messages';
+    case 'openai-responses':
+      return 'openai-responses';
+    case 'openai-chat':
+    case undefined:
+    default:
+      // 缺省 openai-completions:BYOM 本地端点(Ollama/vLLM 的 /v1/chat/completions)最常见。
+      return 'openai-completions';
+  }
+}
+
+/** env 变量名(该 provider 的 api key):CINDY_PI_KEY_<ID>,ID 规整成 [A-Z0-9_]。 */
+export function piNativeKeyEnvVar(providerId: string): string {
+  return `CINDY_PI_KEY_${providerId.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`;
+}
+
+/**
+ * 纯映射:自定义 provider 配置(含 pi runtime)→ pi 原生 provider spec + env。
+ * key 读取经 `readKey` 注入(便于单测)。规则:
+ *  - 无 pi runtime → 跳过;
+ *  - oauth 形态 → 跳过(pi models.json 仅支持 radius oauth,不通用);
+ *  - apiKey 形态但读不到 key → 跳过(pi 无 key 不显示该模型,避免半可用);
+ *  - none(keyless,本机 Ollama 等)→ apiKeyEnvVar 留空,models.json 写 dummy key。
+ * 直连用户端点,不过 anthropic-compat 代理(设计原则:pi 主导,禁双重转义)。
+ */
+export function buildPiNativeProvidersFromConfigs(
+  configs: Array<{
+    id: string;
+    name: string;
+    auth?: { method?: string };
+    runtimes: {
+      pi?: {
+        baseUrl: string;
+        wireProtocol?: ProviderWireProtocol;
+        headers?: Record<string, string>;
+        models: Array<{ id: string; name?: string; contextWindow?: number }>;
+      };
+    };
+  }>,
+  readKey: (providerId: string, agent: string) => string | null,
+  onSkip?: (id: string, reason: string) => void,
+): PiNativeProvidersResult {
+  const providers: PiNativeProviderSpec[] = [];
+  const env: Record<string, string> = {};
+  for (const cfg of configs) {
+    const rt = cfg.runtimes.pi;
+    if (!rt) continue;
+    const authMethod = cfg.auth?.method ?? 'apiKey';
+    if (authMethod === 'oauth') {
+      onSkip?.(cfg.id, 'oauth not supported for pi native');
+      continue;
+    }
+    let apiKeyEnvVar: string | undefined;
+    if (authMethod === 'apiKey') {
+      const key = readKey(cfg.id, 'pi');
+      if (!key) {
+        onSkip?.(cfg.id, 'apiKey provider missing pi key');
+        continue;
+      }
+      apiKeyEnvVar = piNativeKeyEnvVar(cfg.id);
+      env[apiKeyEnvVar] = key;
+    }
+    providers.push({
+      id: cfg.id,
+      name: cfg.name,
+      baseUrl: rt.baseUrl,
+      api: wireProtocolToPiApi(rt.wireProtocol),
+      apiKeyEnvVar,
+      ...(rt.headers && Object.keys(rt.headers).length > 0 ? { headers: rt.headers } : {}),
+      models: rt.models.map((m) => ({ id: m.id, name: m.name, contextWindow: m.contextWindow })),
+    });
+  }
+  return { providers, env };
+}
+
+/** BYOM:读 DB 自定义 provider + safeStorage key → pi 原生 provider spec。IO 外壳,逻辑在上面。 */
+async function resolvePiNativeProviders(): Promise<PiNativeProvidersResult> {
+  let configs;
+  try {
+    configs = await listCustomProviders();
+  } catch (err) {
+    log.warn('resolvePiNativeProviders: listCustomProviders failed, gateway-only', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return { providers: [], env: {} };
+  }
+  return buildPiNativeProvidersFromConfigs(configs, readCustomProviderKey, (id, reason) =>
+    log.warn('resolvePiNativeProviders: skipped custom provider', { id, reason }),
+  );
+}
+
 /** pi 二进制缺失时返回 null(调用方跳过注册);其余情况构造 PiAgent。 */
 export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
   const binaryPath = resolvePiBinaryPath();
@@ -157,5 +261,6 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
     mcpProviders: opts.mcpProviders,
     resolvePiAgentHome: () => path.join(app.getPath('userData'), 'pi-agent-home'),
     preparePiExtraSpawnConfig: (providers, ctx) => getPiExtraSpawnConfig(providers, opts.logger, ctx),
+    resolvePiNativeProviders: () => resolvePiNativeProviders(),
   });
 }

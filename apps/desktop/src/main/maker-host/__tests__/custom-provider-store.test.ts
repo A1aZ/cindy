@@ -149,6 +149,34 @@ describe('validateCustomProviderConfig (per-runtime)', () => {
       }).ok,
     ).toBe(false);
   });
+
+  it('accepts a pi runtime (BYOM) with any of pi wire protocols', () => {
+    for (const wp of ['anthropic-messages', 'openai-responses', 'openai-chat']) {
+      expect(
+        validateCustomProviderConfig({
+          id: 'localpi',
+          name: 'Local pi',
+          auth: { method: 'none' },
+          runtimes: {
+            pi: { baseUrl: 'http://127.0.0.1:11434/v1', wireProtocol: wp, models: [{ id: 'm', name: 'M' }] },
+          },
+        }).ok,
+      ).toBe(true);
+    }
+  });
+
+  it('rejects an invalid wireProtocol on a pi runtime', () => {
+    expect(
+      validateCustomProviderConfig({
+        id: 'localpi',
+        name: 'Local pi',
+        auth: { method: 'none' },
+        runtimes: {
+          pi: { baseUrl: 'http://127.0.0.1:11434/v1', wireProtocol: 'bogus-proto', models: [{ id: 'm', name: 'M' }] },
+        },
+      }).ok,
+    ).toBe(false);
+  });
 });
 
 describe('custom-provider-store CRUD (per-runtime)', () => {

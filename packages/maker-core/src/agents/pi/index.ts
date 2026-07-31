@@ -263,7 +263,12 @@ export class PiAgent extends BaseAgent {
     if (!endpoint) {
       this.deps.logger.warn('pi: runtimeConfig.endpoint missing — models.json will have no usable provider');
     }
-    const models = this.capabilities.availableModels.map((m: ModelDescriptor) => ({
+    // 原生 provider 的模型只进各自 provider 块,**不进网关 cindy 块** —— 否则 catalog 派生
+    // 出的自定义 pi 模型会同时出现在网关块(指向 compat 代理),造成双重路由/双重转义。
+    const nativeModelIds = new Set(nativeProviders.flatMap((np) => np.models.map((m) => m.id)));
+    const models = this.capabilities.availableModels
+      .filter((m: ModelDescriptor) => !nativeModelIds.has(m.id))
+      .map((m: ModelDescriptor) => ({
       id: m.id,
       name: m.displayName,
       reasoning: m.efforts.length > 0,

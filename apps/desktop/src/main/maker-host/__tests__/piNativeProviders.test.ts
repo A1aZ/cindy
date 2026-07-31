@@ -1,0 +1,94 @@
+/**
+ * BYOM host 解析 —— 自定义 provider(pi runtime)→ pi 原生 provider spec + env。
+ * 覆盖:wire protocol → pi api 映射、apiKey/none/oauth 三态、缺 key 跳过、env key 名。
+ */
+import { describe, expect, it } from 'vitest';
+
+import { buildPiNativeProvidersFromConfigs, piNativeKeyEnvVar } from '../pi-host.js';
+
+type Cfg = Parameters<typeof buildPiNativeProvidersFromConfigs>[0][number];
+
+const piRuntime = (over: Partial<NonNullable<Cfg['runtimes']['pi']>> = {}) => ({
+  baseUrl: 'http://127.0.0.1:11434/v1',
+  models: [{ id: 'qwen3:8b', name: 'Qwen3 8B' }],
+  ...over,
+});
+
+describe('buildPiNativeProvidersFromConfigs', () => {
+  it('maps wire protocols to pi api forms (openai-chat→openai-completions, undefined→openai-completions)', () => {
+    const cases: Array<[string | undefined, string]> = [
+      ['anthropic-messages', 'anthropic-messages'],
+      ['openai-responses', 'openai-responses'],
+      ['openai-chat', 'openai-completions'],
+      [undefined, 'openai-completions'],
+    ];
+    for (const [wp, api] of cases) {
+      const { providers } = buildPiNativeProvidersFromConfigs(
+        [{ id: 'p', name: 'P', auth: { method: 'none' }, runtimes: { pi: piRuntime({ wireProtocol: wp as never }) } }],
+        () => null,
+      );
+      expect(providers[0]?.api).toBe(api);
+    }
+  });
+
+  it('keyless (none) → no env, no apiKeyEnvVar (models.json writes dummy)', () => {
+    const { providers, env } = buildPiNativeProvidersFromConfigs(
+      [{ id: 'ollama', name: 'Ollama', auth: { method: 'none' }, runtimes: { pi: piRuntime() } }],
+      () => null,
+    );
+    expect(providers).toHaveLength(1);
+    expect(providers[0].apiKeyEnvVar).toBeUndefined();
+    expect(env).toEqual({});
+  });
+
+  it('apiKey → env injected under CINDY_PI_KEY_<ID>, referenced by apiKeyEnvVar', () => {
+    const { providers, env } = buildPiNativeProvidersFromConfigs(
+      [{ id: 'my-vllm', name: 'vLLM', auth: { method: 'apiKey' }, runtimes: { pi: piRuntime() } }],
+      (id, agent) => (id === 'my-vllm' && agent === 'pi' ? 'secret-123' : null),
+    );
+    const envVar = piNativeKeyEnvVar('my-vllm');
+    expect(envVar).toBe('CINDY_PI_KEY_MY_VLLM');
+    expect(providers[0].apiKeyEnvVar).toBe(envVar);
+    expect(env[envVar]).toBe('secret-123');
+  });
+
+  it('apiKey provider with no stored key is skipped (avoid half-usable)', () => {
+    const skips: string[] = [];
+    const { providers } = buildPiNativeProvidersFromConfigs(
+      [{ id: 'nokey', name: 'NoKey', auth: { method: 'apiKey' }, runtimes: { pi: piRuntime() } }],
+      () => null,
+      (id) => skips.push(id),
+    );
+    expect(providers).toHaveLength(0);
+    expect(skips).toContain('nokey');
+  });
+
+  it('oauth custom provider is skipped for pi native', () => {
+    const skips: string[] = [];
+    const { providers } = buildPiNativeProvidersFromConfigs(
+      [{ id: 'oauthp', name: 'OAuthP', auth: { method: 'oauth' }, runtimes: { pi: piRuntime() } }],
+      () => 'k',
+      (id) => skips.push(id),
+    );
+    expect(providers).toHaveLength(0);
+    expect(skips).toContain('oauthp');
+  });
+
+  it('ignores configs without a pi runtime; passes headers + models through', () => {
+    const { providers } = buildPiNativeProvidersFromConfigs(
+      [
+        { id: 'codexonly', name: 'C', runtimes: {} },
+        {
+          id: 'withhdr',
+          name: 'H',
+          auth: { method: 'none' },
+          runtimes: { pi: piRuntime({ headers: { 'x-org': 'acme' }, models: [{ id: 'm1', name: 'M1', contextWindow: 8000 }] }) },
+        },
+      ],
+      () => null,
+    );
+    expect(providers.map((p) => p.id)).toEqual(['withhdr']);
+    expect(providers[0].headers).toEqual({ 'x-org': 'acme' });
+    expect(providers[0].models[0]).toMatchObject({ id: 'm1', name: 'M1', contextWindow: 8000 });
+  });
+});

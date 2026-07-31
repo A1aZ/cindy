@@ -33,7 +33,7 @@ import { customProviders } from '../localDb/schema.js';
 export const CUSTOM_PROVIDER_ID_RE = /^[a-z0-9_-]+$/;
 /** 不可占用的内置来源 id。 */
 const RESERVED_IDS = new Set(['anthropic', 'openai', 'xd']);
-const VALID_AGENTS: readonly AgentKind[] = ['claude-code', 'codex'];
+const VALID_AGENTS: readonly AgentKind[] = ['claude-code', 'codex', 'pi'];
 const MAX_ID_LEN = 40;
 const MAX_NAME_LEN = 60;
 
@@ -111,6 +111,8 @@ function validateRuntime(agent: string, rt: unknown): ValidationResult {
     }
   }
   if (r.wireProtocol !== undefined) {
+    // Pi 是多协议 harness；Codex 也具备 Responses / Chat / Anthropic bridge。
+    // Claude Code 只接受原生 Anthropic Messages。
     const allowed = agent === 'claude-code'
       ? ['anthropic-messages']
       : ['openai-responses', 'openai-chat', 'anthropic-messages'];

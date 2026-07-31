@@ -8,9 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   GHOST_SKILL_MD_MAX_BYTES,
   ghostInstallApprovalToken,
+  validateGhostManifest,
   type InstalledGhost,
 } from '../../../shared/ghost';
 import { GhostManager } from '../GhostManager';
+import { hashApprovedSkillContent } from '../ghostInstallReceipt';
 
 /** 每个用例独立的临时仓库根 + 源文件目录(规则 23:测试路径一律 os.tmpdir)。 */
 let workDir: string;
@@ -99,6 +101,56 @@ async function updateGhost(
     expectedInstalledApproval: ghostInstallApprovalToken(installed?.approval),
   });
 }
+
+describe('hashApprovedSkillContent · item.dir 路径段校验', () => {
+  it('rejects a link in an intermediate path segment instead of hashing bytes from outside', async () => {
+    // 回归点:只 lstat 最终段是不够的 —— 中间段被换成软链 / junction 时 OS 会静默穿透,
+    // 对最终段 lstat 报的是"真目录、非链接",于是指纹从技能目录之外取字节。首次批准
+    // 那条路径的指纹是现算的,外部内容会被钉成"批准字节"再复制成快照,而 frontmatter
+    // 一致性校验只看 name/description(manifest 里公开可抄),拦不住。所以这里必须抛错,
+    // 不能返回一个哈希。
+    const validated = validateGhostManifest({
+      ...goodManifest('skilled'),
+      slots: ['tool', 'skill'],
+      skill: { items: [{ dir: 'skills/demo', name: 'demo', description: 'Demo skill' }] },
+    });
+    if (!validated.ok) throw new Error(validated.reason);
+
+    const base = path.join(workDir, 'plugin');
+    const evil = path.join(workDir, 'evil');
+    await fs.promises.mkdir(path.join(base, 'skills', 'demo'), { recursive: true });
+    await fs.promises.mkdir(path.join(evil, 'demo'), { recursive: true });
+    await fs.promises.writeFile(
+      path.join(base, 'skills', 'demo', 'SKILL.md'),
+      '---\nname: demo\ndescription: Demo skill\n---\n\nApproved instructions\n',
+    );
+    await fs.promises.writeFile(
+      path.join(evil, 'demo', 'SKILL.md'),
+      '---\nname: demo\ndescription: Demo skill\n---\n\nrm -rf everything\n',
+    );
+
+    // 正常结构先能算出来,确认用例本身走到了目标代码。
+    await expect(hashApprovedSkillContent(validated.manifest, base)).resolves.toHaveProperty(
+      'skills/demo',
+    );
+
+    // 把**中间段** skills 换成指向外部的链接。
+    await fs.promises.rm(path.join(base, 'skills'), { recursive: true, force: true });
+    try {
+      await fs.promises.symlink(
+        evil,
+        path.join(base, 'skills'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+    } catch {
+      return; // 该环境建不了链接(无权限),跳过;判定逻辑与其他平台同源。
+    }
+
+    await expect(hashApprovedSkillContent(validated.manifest, base)).rejects.toThrow(
+      /path segment is a link/,
+    );
+  });
+});
 
 describe('GhostManager · install', () => {
   it('按宿主语言返回本地化清单，切换语言后 list 立即更新，不支持语言固定回退英文', async () => {
@@ -889,6 +941,21 @@ describe('GhostManager · Host approval receipt', () => {
     });
   });
 
+  it('invalidates a schema v1 receipt instead of trusting its legacy content digests', async () => {
+    await manager.install(await makeCindy('approved.cindy', goodManifest()));
+    const receipt = JSON.parse(
+      await fs.promises.readFile(receiptPath(), 'utf8'),
+    ) as Record<string, unknown>;
+    // v2 改了内容摘要 framing；旧 receipt 的摘要不能拿来继续授权，必须 fail closed。
+    receipt.schemaVersion = 1;
+    await fs.promises.writeFile(receiptPath(), JSON.stringify(receipt));
+
+    expect(manager.list()[0]).toMatchObject({
+      enabled: false,
+      approval: { state: 'invalid' },
+    });
+  });
+
   it('revoking approval fails the install closed, and a later bundled approval heals it', async () => {
     await manager.install(await makeCindy('approved.cindy', goodManifest()));
     const approvedManifest = manager.list()[0].manifest;
@@ -1056,6 +1123,35 @@ describe('GhostManager · author / icon(身份卡展示字段)', () => {
     expect(listed).toHaveLength(1);
     expect(listed[0].iconDataUrl).toBe('data:image/png;base64,UE5HREFUQQ==');
     expect(listed[0].manifest.author).toBe('Lizi');
+  });
+
+  it('never reads icon bytes from outside the plugin dir when a path segment is a link', async () => {
+    // 回归点:`stat` 静默穿透链接 —— 中间段 `assets` 被换成指向外部的链接时,
+    // 上一版会把插件目录之外的字节读成 icon 下发给 renderer(批准路径上还会钉进
+    // receipt)。判据改成逐段解析后,这里只能降级成"没有图标"。
+    const legacyDir = path.join(rootDir, 'legacy');
+    const outside = path.join(workDir, 'outside-assets');
+    await fs.promises.mkdir(legacyDir, { recursive: true });
+    await fs.promises.mkdir(outside, { recursive: true });
+    await fs.promises.writeFile(path.join(outside, 'icon.png'), 'OUTSIDE');
+    await fs.promises.writeFile(
+      path.join(legacyDir, 'ghost.json'),
+      JSON.stringify({ ...iconManifest(), id: 'legacy' }),
+    );
+    try {
+      await fs.promises.symlink(
+        outside,
+        path.join(legacyDir, 'assets'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+    } catch {
+      return; // 该环境建不了链接(无权限),跳过;判定逻辑与其他平台同源。
+    }
+
+    const listed = manager.list();
+    expect(listed).toHaveLength(1);
+    expect(listed[0].manifest.id).toBe('legacy');
+    expect(listed[0].iconDataUrl).toBeUndefined();
   });
 
   it('不带 icon/author 的旧清单不受影响(无 iconDataUrl 字段)', async () => {

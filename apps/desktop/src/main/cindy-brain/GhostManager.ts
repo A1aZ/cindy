@@ -27,6 +27,11 @@ import {
   type GhostTrustRegistry,
 } from './ghostSignature.js';
 import { isPathInsideDir } from './dirDeposit.js';
+import {
+  collectGhostContentFiles,
+  hashGhostContentFiles,
+  resolveGhostContentPathSync,
+} from './ghostContentTree.js';
 import { checkSkillMdConsistency } from './skillSlot.js';
 import {
   createGhostInstallReceipt,
@@ -294,17 +299,18 @@ export class GhostManager {
     const candidates = [...new Set([localePath, fallbackPath].filter((value): value is string => Boolean(value)))];
     for (const candidatePath of candidates) {
       try {
-        const absPath = path.join(dir, ...candidatePath.split('/'));
+        // 逐段解析(判据与批准侧 readApprovedLocaleResources、技能目录同源)。
+        // 上一版在这里用 realpath + 目录钳制自成一套:同一件事两种写法,改了一处
+        // 忘另一处正是这条链路反复出问题的形态,现在统一成"链接一律拒"。
+        const absPath = resolveGhostContentPathSync(dir, candidatePath, {
+          expect: 'file',
+          label: 'ghost locale',
+        });
         const stat = fs.lstatSync(absPath);
-        if (!stat.isFile() || stat.size > GHOST_LOCALE_MAX_BYTES) {
+        if (stat.size > GHOST_LOCALE_MAX_BYTES) {
           throw new Error(`locale 文件缺失或超过 ${GHOST_LOCALE_MAX_BYTES} 字节`);
         }
-        const realDir = fs.realpathSync.native(dir);
-        const realLocalePath = fs.realpathSync.native(absPath);
-        if (!isPathInsideDir(realDir, realLocalePath)) {
-          throw new Error('locale 文件经软链解析后位于插件目录之外');
-        }
-        const raw = JSON.parse(fs.readFileSync(realLocalePath, 'utf8'));
+        const raw = JSON.parse(fs.readFileSync(absPath, 'utf8'));
         const validated = validateGhostManifestLocaleResource(raw, manifest);
         if (!validated.ok) throw new Error(validated.reason);
         return resolveGhostManifestLocale(runtimeManifest, validated.resource);
@@ -397,10 +403,15 @@ export class GhostManager {
    */
   private readInstalledIconDataUrl(dir: string, manifest: GhostManifest): string | null {
     if (manifest.icon === undefined) return null;
-    const iconPath = path.join(dir, ...manifest.icon.split('/'));
     try {
-      const stat = fs.statSync(iconPath);
-      if (!stat.isFile() || stat.size > MAX_GHOST_ICON_BYTES) {
+      // 逐段解析而不是 `stat` 直读:`stat` 静默穿透链接,会把插件目录之外的字节
+      // 读成 icon 下发给 renderer 并钉进 receipt。判据与技能目录 / locale 同源。
+      const iconPath = resolveGhostContentPathSync(dir, manifest.icon, {
+        expect: 'file',
+        label: 'ghost icon',
+      });
+      const stat = fs.lstatSync(iconPath);
+      if (stat.size > MAX_GHOST_ICON_BYTES) {
         this.options.log?.warn('ghost icon skipped: missing or oversize', { dir, icon: manifest.icon });
         return null;
       }
@@ -1089,9 +1100,14 @@ export class GhostManager {
     const resources: Record<string, GhostManifestLocaleResource> = {};
     for (const localePath of Object.values(manifest.locales ?? {})) {
       if (!localePath) continue;
-      const absPath = path.join(dir, ...localePath.split('/'));
+      // 逐段解析:只 lstat 最终段挡不住"中间段被换成链接"——那会把插件目录之外的
+      // JSON 读成已批准的界面文案钉进 receipt。判据与技能目录同源。
+      const absPath = resolveGhostContentPathSync(dir, localePath, {
+        expect: 'file',
+        label: 'bundled locale',
+      });
       const stat = fs.lstatSync(absPath);
-      if (!stat.isFile() || stat.size > GHOST_LOCALE_MAX_BYTES) {
+      if (stat.size > GHOST_LOCALE_MAX_BYTES) {
         throw new Error(`bundled locale missing or oversized: ${localePath}`);
       }
       const raw = JSON.parse(fs.readFileSync(absPath, 'utf8')) as unknown;
@@ -1276,45 +1292,22 @@ async function pathExists(p: string): Promise<boolean> {
   }
 }
 
+/**
+ * 安装目录内容指纹(`packageSha256`,审计用的漂移检测器,不作授权判据)。
+ *
+ * 遍历、类型判定与指纹格式全部取自 `ghostContentTree`,与技能指纹
+ * `hashApprovedSkillContent`、随包种子指纹 `fingerprintDirContent` 同一份实现;
+ * 这里的显式策略是"点开头条目不算内容、非普通条目一律拒"。跟随链接在这条路径上
+ * 最多多写一次批准、不构成绕过,判据对齐是因为"同一判据散落多处且各处不一致"
+ * 本身就是缺陷温床。
+ */
 async function hashApprovedDirectory(root: string): Promise<string> {
-  const files: string[] = [];
-  const collect = async (relativeDir: string): Promise<void> => {
-    const absoluteDir = path.join(root, relativeDir);
-    const entries = await fs.promises.readdir(absoluteDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.name.startsWith('.')) continue;
-      const relativePath = relativeDir
-        ? `${relativeDir}/${entry.name}`
-        : entry.name;
-      // 判据与姊妹函数 hashApprovedSkillContent 对齐:逐条 lstat、链接显式拒,不依赖
-      // Dirent 的类型位。这里本身只是漂移检测器(packageSha256 不作授权判据),跟随
-      // 链接最多多写一次批准、不构成绕过;对齐是因为"同一判据散落两处且两处不一致"
-      // 本身就是缺陷温床。
-      const entryStat = await fs.promises.lstat(path.join(absoluteDir, entry.name));
-      if (entryStat.isSymbolicLink()) {
-        throw new Error(`bundled Plugin contains a link entry: ${relativePath}`);
-      }
-      if (entryStat.isDirectory()) {
-        await collect(relativePath);
-      } else if (entryStat.isFile()) {
-        files.push(relativePath);
-      } else {
-        throw new Error(`bundled Plugin contains a non-regular entry: ${relativePath}`);
-      }
-    }
-  };
-  await collect('');
-  files.sort();
-  const hash = crypto.createHash('sha256');
-  for (const relativePath of files) {
-    hash.update(relativePath);
-    hash.update('\0');
-    // 同 hashApprovedSkillContent:流式喂 hash,不让安装目录里的超大文件整份进内存。
-    const stream = fs.createReadStream(path.join(root, ...relativePath.split('/')));
-    for await (const chunk of stream) hash.update(chunk as Buffer);
-    hash.update('\0');
-  }
-  return hash.digest('hex');
+  const { files } = await collectGhostContentFiles(root, {
+    dotEntries: 'skip',
+    nonRegular: 'throw',
+    label: 'bundled Plugin',
+  });
+  return hashGhostContentFiles(root, files);
 }
 
 /**

@@ -12,9 +12,20 @@ import {
   type GhostManifestLocaleResource,
   type GhostTrustInfo,
 } from '../../shared/ghost.js';
+import {
+  classifyGhostDirEntry,
+  collectGhostContentFiles,
+  hashGhostContentFiles,
+  isRegularGhostDirEntry,
+  resolveGhostContentPath,
+} from './ghostContentTree.js';
 import { checkSkillMdConsistency } from './skillSlot.js';
 
-const RECEIPT_SCHEMA_VERSION = 1;
+// v2 pairs receipts with the unambiguous ghostContentTree framing. Keeping v1
+// readable would let an old ambiguous digest authorize a snapshot under the
+// new verifier, so old receipts intentionally fail closed and require approval
+// to be written again.
+const RECEIPT_SCHEMA_VERSION = 2;
 const MAX_RECEIPT_BYTES = 2 * 1024 * 1024;
 const MAX_ICON_DATA_URL_BYTES = 768 * 1024;
 /**
@@ -191,7 +202,13 @@ export class GhostInstallReceiptStore {
       // 校验过的那一份。因此**先复制到 temp,再对 temp 里(即将成为快照的)那份字节
       // 做全部权威校验**,校验通过才 rename 就位。
       for (const item of items) {
-        const source = path.join(skillSourceDir, ...item.dir.split('/'));
+        // 与算指纹同一个解析入口:逐段确认真目录,挡住"中间段被换成链接"这条从技能
+        // 目录之外取字节的路子。两侧必须共用,否则一侧穿透、一侧不穿透,复制的和
+        // 算指纹的就不是同一组字节。
+        const source = await resolveGhostContentPath(skillSourceDir, item.dir, {
+          expect: 'directory',
+          label: 'approved skill',
+        });
         // 复制前的便宜预检:只为早失败、少做无用功(避免整份拷一个超大 SKILL.md)。
         // **这不是安全边界** —— 它读的是可变源目录,结论随时可能过期,真正说话的是
         // 下面对 temp 的校验。
@@ -316,9 +333,11 @@ export function createGhostInstallReceipt(input: {
 /**
  * 逐 skill item 目录算规范化内容指纹(排序后的相对路径 + 字节)。
  *
- * 与 `hashApprovedDirectory` 的差别：技能目录**不跳过点文件**——技能指令可以引用
- * 目录里的任意文件，漏掉一类就是漏掉一条改写通道；非普通条目一律拒，与快照拷贝
- * 侧 `copyRegularDirectory` 同一判据。
+ * 判据全部取自 `ghostContentTree`(路径逐段解析 + 条目类型判定 + 指纹格式),与
+ * 快照拷贝侧 `copyRegularDirectory`、安装目录漂移指纹 `hashApprovedDirectory`、
+ * 随包种子指纹 `fingerprintDirContent` 共用同一份实现。差异只有显式策略:技能
+ * 目录**不跳过点开头条目**(技能指令可以引用目录里的任意文件,漏掉一类就是漏掉
+ * 一条改写通道),非普通条目一律拒。
  */
 export async function hashApprovedSkillContent(
   manifest: GhostManifest,
@@ -329,45 +348,16 @@ export async function hashApprovedSkillContent(
   if (!sourceDir) throw new Error('skill content hash requires a source directory');
   const result: Record<string, string> = {};
   for (const item of items) {
-    const itemRoot = path.join(sourceDir, ...item.dir.split('/'));
-    const files: string[] = [];
-    const collect = async (relativeDir: string): Promise<void> => {
-      const entries = await fs.promises.readdir(path.join(itemRoot, relativeDir), {
-        withFileTypes: true,
-      });
-      for (const entry of entries) {
-        const relativePath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
-        // 逐条 lstat 而不是信 Dirent 的类型位:当前 libuv 把 reparse point(软链与
-        // Windows junction)都报成 link,但那是实现细节、Node 公开契约没保证。判据
-        // 自己拿 lstat 说话,链接一律显式拒 —— 否则哪天类型位把 junction 报成
-        // directory,这里就会跟进去把技能目录之外的字节算进批准指纹。
-        const entryStat = await fs.promises.lstat(path.join(itemRoot, relativeDir, entry.name));
-        if (entryStat.isSymbolicLink()) {
-          throw new Error(`approved skill rejects link entry: ${item.dir}/${relativePath}`);
-        }
-        if (entryStat.isDirectory()) {
-          await collect(relativePath);
-        } else if (entryStat.isFile()) {
-          files.push(relativePath);
-        } else {
-          throw new Error(`approved skill rejects non-regular entry: ${item.dir}/${relativePath}`);
-        }
-      }
-    };
-    await collect('');
-    files.sort();
-    const hash = crypto.createHash('sha256');
-    for (const relativePath of files) {
-      hash.update(relativePath);
-      hash.update('\0');
-      // 流式喂给 hash,不整份读进内存:技能目录里除 SKILL.md 之外的文件没有尺寸上限
-      // (SKILL.md 的上限在调用方 ensureSkillSnapshot 里先判),整份 readFile 会让
-      // 一个塞进来的超大辅助文件把 Host 撑爆。摘要与逐份读取完全一致。
-      const stream = fs.createReadStream(path.join(itemRoot, ...relativePath.split('/')));
-      for await (const chunk of stream) hash.update(chunk as Buffer);
-      hash.update('\0');
-    }
-    result[item.dir] = hash.digest('hex');
+    const itemRoot = await resolveGhostContentPath(sourceDir, item.dir, {
+      expect: 'directory',
+      label: 'approved skill',
+    });
+    const { files } = await collectGhostContentFiles(itemRoot, {
+      dotEntries: 'include',
+      nonRegular: 'throw',
+      label: `approved skill ${item.dir}`,
+    });
+    result[item.dir] = await hashGhostContentFiles(itemRoot, files);
   }
   return result;
 }
@@ -495,25 +485,26 @@ function isRevision(value: string): boolean {
 }
 
 async function copyRegularDirectory(source: string, target: string): Promise<void> {
-  const sourceStat = await fs.promises.lstat(source);
-  if (!sourceStat.isDirectory()) throw new Error(`skill source is not a directory: ${source}`);
+  // 类型判据与 hashApprovedSkillContent 同源(ghostContentTree):两侧必须同形,
+  // 否则指纹算的和快照拷的可能不是同一组字节。
+  if ((await classifyGhostDirEntry(source)) !== 'directory') {
+    throw new Error(`skill source is not a directory: ${source}`);
+  }
   await fs.promises.mkdir(target, { recursive: true });
   const entries = await fs.promises.readdir(source, { withFileTypes: true });
   for (const entry of entries) {
     const from = path.join(source, entry.name);
     const to = path.join(target, entry.name);
-    // 判据与 hashApprovedSkillContent 同形:逐条 lstat、链接显式拒,不依赖 Dirent
-    // 的类型位。两侧必须同形,否则指纹算的和快照拷的可能不是同一组字节。
-    const entryStat = await fs.promises.lstat(from);
-    if (entryStat.isSymbolicLink()) {
-      throw new Error(`skill snapshot rejects link entry: ${from}`);
+    const kind = await classifyGhostDirEntry(from);
+    if (!isRegularGhostDirEntry(kind)) {
+      throw new Error(
+        `skill snapshot rejects ${kind === 'link' ? 'link' : 'non-regular'} entry: ${from}`,
+      );
     }
-    if (entryStat.isDirectory()) {
+    if (kind === 'directory') {
       await copyRegularDirectory(from, to);
-    } else if (entryStat.isFile()) {
-      await fs.promises.copyFile(from, to, fs.constants.COPYFILE_EXCL);
     } else {
-      throw new Error(`skill snapshot rejects non-regular entry: ${from}`);
+      await fs.promises.copyFile(from, to, fs.constants.COPYFILE_EXCL);
     }
   }
 }

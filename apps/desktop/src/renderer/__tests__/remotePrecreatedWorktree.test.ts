@@ -6,6 +6,7 @@ import {
   __testing,
   createRemoteSessionWithPrecreatedWorktree,
   isRemotePrecreatedWorktreeCleanupPendingError,
+  isRemotePrecreatedWorktreeOwnerChangedError,
   listPendingRemotePrecreatedWorktrees,
   recoverPendingRemotePrecreatedWorktrees,
   registerPendingRemotePrecreatedWorktree,
@@ -41,7 +42,10 @@ function targetMatches(
     && (target.createdAt === undefined || target.createdAt === item.createdAt);
 }
 
-function callWith(invoke: ReturnType<typeof vi.fn>) {
+function callWith(
+  invoke: ReturnType<typeof vi.fn>,
+  patch: Partial<Parameters<typeof createRemoteSessionWithPrecreatedWorktree>[0]> = {},
+) {
   return createRemoteSessionWithPrecreatedWorktree({
     deviceId: DEVICE_ID,
     sessionId: SESSION_ID,
@@ -49,6 +53,7 @@ function callWith(invoke: ReturnType<typeof vi.fn>) {
     recoveryKey: RECOVERY_KEY,
     createArgs: CREATE_ARGS,
     invoke,
+    ...patch,
   });
 }
 
@@ -98,6 +103,32 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
     await expect(callWith(invoke)).resolves.toBe(SESSION_ID);
     expect(invoke).toHaveBeenCalledTimes(1);
     await expect(listPendingRemotePrecreatedWorktrees()).resolves.toEqual([]);
+  });
+
+  it('stops after an owner switch without probing, discarding, or removing the old ledger', async () => {
+    let currentOwner = 'owner-a';
+    const invoke = vi.fn(async (channel: string) => {
+      if (channel === 'maker:create-session') {
+        currentOwner = 'owner-b';
+        return { sessionId: SESSION_ID };
+      }
+      throw new Error(`unexpected ${channel}`);
+    });
+
+    const failure = await callWith(invoke, {
+      dataOwnerId: 'owner-a',
+      isCurrent: () => currentOwner === 'owner-a',
+    }).catch((error: unknown) => error);
+
+    expect(isRemotePrecreatedWorktreeOwnerChangedError(failure)).toBe(true);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(ledgerRecords).toEqual([
+      expect.objectContaining({
+        dataOwnerId: 'owner-a',
+        sessionId: SESSION_ID,
+        path: WORKTREE_PATH,
+      }),
+    ]);
   });
 
   it('recovers a successful create whose response was lost', async () => {
@@ -336,6 +367,35 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
       storageReadable: true,
     });
     expect(invoke).not.toHaveBeenCalled();
+    expect(ledgerRecords).toHaveLength(1);
+  });
+
+  it('stops in-flight recovery after an owner switch and preserves the old ledger', async () => {
+    ledgerRecords = [{
+      dataOwnerId: 'owner-a',
+      deviceId: DEVICE_ID,
+      sessionId: SESSION_ID,
+      path: WORKTREE_PATH,
+      createdAt: Date.now(),
+    }];
+    let currentOwner = 'owner-a';
+    const invoke = vi.fn(async (channel: string) => {
+      if (channel === 'local-db:sessions:get') {
+        currentOwner = 'owner-b';
+        throw new Error('[NOT_FOUND] Session 不存在');
+      }
+      throw new Error(`unexpected ${channel}`);
+    });
+
+    const failure = await recoverPendingRemotePrecreatedWorktrees({
+      deviceId: DEVICE_ID,
+      dataOwnerId: 'owner-a',
+      invoke,
+      isCurrent: () => currentOwner === 'owner-a',
+    }).catch((error: unknown) => error);
+
+    expect(isRemotePrecreatedWorktreeOwnerChangedError(failure)).toBe(true);
+    expect(invoke).toHaveBeenCalledTimes(1);
     expect(ledgerRecords).toHaveLength(1);
   });
 

@@ -32,6 +32,7 @@ import { isSidebarWindow } from '@/lib/sidebarWindow';
 import { isGhostPanelWindow } from '@/lib/ghostPanelWindow';
 import { setNewMakerDraftOwner } from '@/state/newMakerDraft';
 import { setComposerDraftOwner } from '@/lib/composerDraftStore';
+import { setDataOwnerGeneration } from './dataOwnerGeneration';
 
 /**
  * 登录态上下文：user / isAuthenticated / isCanary / deviceId 全部来自 main 的
@@ -112,6 +113,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const applyIncomingState = useCallback(
     (state: AuthState) => {
       const ownerChanged = activeDataOwnerIdRef.current !== state.dataOwnerId;
+      setDataOwnerGeneration(state.dataOwnerId);
       if (ownerChanged) {
         sessionsStore.reset();
         clearWorkersCache();
@@ -183,6 +185,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setCanEnterApp(false);
         setMode('signed-out');
         setDataOwnerId(null);
+        setDataOwnerGeneration(null);
         activeDataOwnerIdRef.current = null;
         activeUserIdRef.current = null;
         setLoginState(null);
@@ -220,6 +223,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return window.electronAPI.onAuthSessionExpired((payload) => {
       if (handling) return;
       handling = true;
+      // Invalidate in-flight remote sends before the confirmation dialog resolves.
+      setDataOwnerGeneration(null);
       // main 只给客户端内部分类(不透传服务端原文),按 reason 选本地化文案,
       // 让用户区分「被顶下线 / 凭证被外部实例清除 / 自然过期 / 账号不可用」。
       const descriptionKey =
@@ -269,13 +274,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const logout = useCallback(async () => {
+    setDataOwnerGeneration(null);
     await authServiceRef.current!.logout();
     sessionsStore.reset();
     clearWorkersCache();
   }, []);
 
   const enterLocalMode = useCallback(async () => {
+    setDataOwnerGeneration(null);
     const state = await authServiceRef.current!.enterLocalMode();
+    setDataOwnerGeneration(state.dataOwnerId);
     setComposerDraftOwner(state.dataOwnerId);
     setMode(state.mode);
     setDataOwnerId(state.dataOwnerId);
@@ -285,7 +293,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const exitLocalMode = useCallback(async () => {
+    setDataOwnerGeneration(null);
     const state = await authServiceRef.current!.exitLocalMode();
+    setDataOwnerGeneration(state.dataOwnerId);
     setComposerDraftOwner(state.dataOwnerId);
     setMode(state.mode);
     setDataOwnerId(state.dataOwnerId);

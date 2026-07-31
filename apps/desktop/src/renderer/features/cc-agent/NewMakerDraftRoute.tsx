@@ -158,10 +158,16 @@ import {
   createRemoteSessionWithPrecreatedWorktree,
   forgetPendingRemotePrecreatedWorktree,
   isRemotePrecreatedWorktreeCleanupPendingError,
+  isRemotePrecreatedWorktreeOwnerChangedError,
   registerPendingRemotePrecreatedWorktree,
   recoverPendingRemotePrecreatedWorktrees,
   RemotePrecreatedWorktreeCleanupPendingError,
+  RemotePrecreatedWorktreeOwnerChangedError,
 } from './remotePrecreatedWorktree';
+import {
+  getDataOwnerGeneration,
+  isDataOwnerGenerationCurrent,
+} from '@/contexts/dataOwnerGeneration';
 import { useDeviceLinkReconnectEpoch } from '@/features/device-link/useDeviceLinkReconnectEpoch';
 import { extractIpcError } from '@/utils/ipcError';
 import { matchNavigationCommandName, tryHandleNavigationCommand } from '@/lib/navigationCommands';
@@ -2091,6 +2097,11 @@ export function NewMakerDraftRoute() {
       // 改动；若异步块稍后再读 live ref，会把旧 workingDir 与新 baseRepo 拼成一次
       // 混合目标创建。这里与 selectedWorkingDir 同步快照，保证整笔创建目标一致。
       const selectedWorktree = { ...wtRef.current };
+      const dataOwnerAtSend = getDataOwnerGeneration();
+      const isCurrentDataOwner = () => (
+        dataOwnerAtSend.dataOwnerId === dataOwnerId
+        && isDataOwnerGenerationCurrent(dataOwnerAtSend)
+      );
 
       markSendInFlight(true);
       // 已登记乐观标题预览的会话 id。交接链路(rehomeDraftAttachments / setPending /
@@ -2100,11 +2111,13 @@ export function NewMakerDraftRoute() {
       let optimisticTitleSessionId: string | null = null;
       void (async () => {
         try {
+          if (isDeviceLinkDraft && !isCurrentDataOwner()) return;
           // device-link:远程草稿就绪态以被控端为准(传 deviceId 走隧道查被控端 maker:agent:status);
           // 本地草稿 effectiveDeviceLinkDeviceId 为 undefined → 仍走控制端本机就绪检查(行为不变)。
           const { proceed } = await vendorAuthGate.checkAndConfirm(authVendor, {
             deviceId: effectiveDeviceLinkDeviceId,
           });
+          if (isDeviceLinkDraft && !isCurrentDataOwner()) return;
           if (!proceed) return;
 
           // device-link 远程项目:在被控端走校验过的 maker:create-session 建会话(写被控 DB,
@@ -2122,10 +2135,18 @@ export function NewMakerDraftRoute() {
           if (isDeviceLinkDraft && effectiveDeviceLinkDeviceId) {
             const deviceId = effectiveDeviceLinkDeviceId;
             const deviceName = effectiveDeviceLinkDeviceName ?? deviceId;
-            const invokeRemote = (channel: string, args: unknown[]) =>
-              window.electronAPI.deviceLink.invoke(deviceId, channel, args);
+            const invokeRemote = async (channel: string, args: unknown[]) => {
+              if (!isCurrentDataOwner()) {
+                throw new RemotePrecreatedWorktreeOwnerChangedError();
+              }
+              const result = await window.electronAPI.deviceLink.invoke(deviceId, channel, args);
+              if (!isCurrentDataOwner()) {
+                throw new RemotePrecreatedWorktreeOwnerChangedError();
+              }
+              return result;
+            };
             const wt = selectedWorktree;
-            const ownerAtSend = dataOwnerId;
+            const ownerAtSend = dataOwnerAtSend.dataOwnerId;
             let remoteWorkingDir = effectiveWorkingDir?.trim() || undefined;
             let presetSessionId: string | undefined;
             let precreatedWorktree: {
@@ -2154,7 +2175,11 @@ export function NewMakerDraftRoute() {
                 deviceId,
                 dataOwnerId: ownerAtSend,
                 invoke: invokeRemote,
+                isCurrent: isCurrentDataOwner,
               });
+              if (!isCurrentDataOwner()) {
+                throw new RemotePrecreatedWorktreeOwnerChangedError();
+              }
               // 账本不可读时磁盘上是否还有旧 obligation 未知，也必须 fail
               // closed；否则一次暂时的 localStorage 故障会绕过同设备串行回收。
               if (!recovery.storageReadable || recovery.retained > 0) {
@@ -2175,14 +2200,23 @@ export function NewMakerDraftRoute() {
               };
               // 远端副作用之前先持久化 recoveryKey reservation。首次写盘失败时
               // 绝不调用 worktree:create；内存镜像不能冒充跨进程恢复保证。
-              if (!(await registerPendingRemotePrecreatedWorktree(reservation))) {
-                await forgetPendingRemotePrecreatedWorktree(reservation);
+              if (!isCurrentDataOwner()) {
+                throw new RemotePrecreatedWorktreeOwnerChangedError();
+              }
+              const reservationRecorded = await registerPendingRemotePrecreatedWorktree(
+                reservation,
+                isCurrentDataOwner,
+              );
+              if (!isCurrentDataOwner()) {
+                throw new RemotePrecreatedWorktreeOwnerChangedError();
+              }
+              if (!reservationRecorded) {
+                await forgetPendingRemotePrecreatedWorktree(reservation, isCurrentDataOwner);
                 throw new RemotePrecreatedWorktreeCleanupPendingError();
               }
               setWtCreating(true);
               try {
-                const resp = (await window.electronAPI.deviceLink.invoke(
-                  deviceId,
+                const resp = (await invokeRemote(
                   'worktree:create',
                   [
                     {
@@ -2198,7 +2232,13 @@ export function NewMakerDraftRoute() {
                   throw new RemotePrecreatedWorktreeCleanupPendingError();
                 }
                 if (!resp.ok) {
-                  await forgetPendingRemotePrecreatedWorktree(reservation);
+                  if (!isCurrentDataOwner()) {
+                    throw new RemotePrecreatedWorktreeOwnerChangedError();
+                  }
+                  await forgetPendingRemotePrecreatedWorktree(reservation, isCurrentDataOwner);
+                  if (!isCurrentDataOwner()) {
+                    throw new RemotePrecreatedWorktreeOwnerChangedError();
+                  }
                   showWorktreeError(resp.error);
                   return;
                 }
@@ -2210,11 +2250,21 @@ export function NewMakerDraftRoute() {
                 };
                 // 回包后尽力补 path；即使更新失败，首次已确认落盘的 recoveryKey
                 // reservation 仍足够让重启后的控制端精确恢复。
-                await registerPendingRemotePrecreatedWorktree({
-                  ...reservation,
-                  path: resp.meta.path,
-                });
+                if (!isCurrentDataOwner()) {
+                  throw new RemotePrecreatedWorktreeOwnerChangedError();
+                }
+                await registerPendingRemotePrecreatedWorktree(
+                  {
+                    ...reservation,
+                    path: resp.meta.path,
+                  },
+                  isCurrentDataOwner,
+                );
+                if (!isCurrentDataOwner()) {
+                  throw new RemotePrecreatedWorktreeOwnerChangedError();
+                }
               } catch (err) {
+                if (isRemotePrecreatedWorktreeOwnerChangedError(err)) throw err;
                 if (isRemotePrecreatedWorktreeCleanupPendingError(err)) throw err;
                 log.warn(
                   '[remote worktree:create] response not confirmed; retaining recovery reservation',
@@ -2261,6 +2311,7 @@ export function NewMakerDraftRoute() {
                   createdAt: precreatedWorktree.createdAt,
                   createArgs: createArgs,
                   invoke: invokeRemote,
+                  isCurrent: isCurrentDataOwner,
                 })
               : (created = (await invokeRemote('maker:create-session', [createArgs])) as {
                   sessionId?: string;
@@ -2274,6 +2325,9 @@ export function NewMakerDraftRoute() {
               // 不应读 state 里的 REMOTE_* code(copilot review #1035)。
               toast.error(t('ccAgent.draft.createSessionFailed'));
               return;
+            }
+            if (!isCurrentDataOwner()) {
+              throw new RemotePrecreatedWorktreeOwnerChangedError();
             }
             // remoteSessionId 到手就是**提交点**:对端会话已经建出来了。此后任何一步都不许再把它
             // 退化成「创建失败」—— 用户会照着提示重试,于是对端多出第二个会话,第一个空着永久滞留。
@@ -2291,6 +2345,9 @@ export function NewMakerDraftRoute() {
               logTag: 'draft send',
             });
             const rehydratedFiles = await rehomeDraftAttachments(files, remoteSessionId);
+            if (!isCurrentDataOwner()) {
+              throw new RemotePrecreatedWorktreeOwnerChangedError();
+            }
             setPending(remoteSessionId, {
               text: message,
               files: rehydratedFiles,
@@ -2653,6 +2710,7 @@ export function NewMakerDraftRoute() {
               : undefined,
           });
         } catch (err) {
+          if (isRemotePrecreatedWorktreeOwnerChangedError(err)) return;
           log.error('[draft send]', err);
           // 交接失败 → 撤回乐观标题预览(理由见上面 optimisticTitleSessionId 的注释)。
           if (optimisticTitleSessionId) emitAutoTitlePreviewCleared(optimisticTitleSessionId);

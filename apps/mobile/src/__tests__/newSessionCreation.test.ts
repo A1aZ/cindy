@@ -10,6 +10,21 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MobileMakerTransport } from '@/device-link/mobileMakerTransport';
 
+const recoveryStorage = vi.hoisted(() => new Map<string, string>());
+const recoveryAsyncStorage = vi.hoisted(() => ({
+  getItem: vi.fn(async (key: string) => recoveryStorage.get(key) ?? null),
+  setItem: vi.fn(async (key: string, value: string) => {
+    recoveryStorage.set(key, value);
+  }),
+  removeItem: vi.fn(async (key: string) => {
+    recoveryStorage.delete(key);
+  }),
+}));
+
+vi.mock('@react-native-async-storage/async-storage', () => ({
+  default: recoveryAsyncStorage,
+}));
+
 // expo-crypto 是原生模块(createUuid 的 CSPRNG 兜底;node 环境有 crypto.randomUUID
 // 不会走到),node 下 import 副作用不可控,mock 掉。
 vi.mock('expo-crypto', () => ({
@@ -28,6 +43,11 @@ import {
 } from '@/session/newSessionCreation';
 import { remoteSessionStore } from '@/session/remoteSessionStore';
 import { sessionFromCreateResult, type NewSessionDraft } from '@/session/newSession';
+import {
+  __testing as recoveryTesting,
+  listPendingPrecreatedWorktrees,
+  registerPendingPrecreatedWorktree,
+} from '@/session/precreatedWorktreeRecovery';
 
 const DRAFT: NewSessionDraft = {
   agentKind: 'claude-code',
@@ -110,7 +130,10 @@ async function flushPipeline(): Promise<void> {
 }
 
 describe('newSessionCreation pipeline', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await recoveryTesting.drainMutations();
+    recoveryStorage.clear();
+    recoveryTesting.resetVolatileLedgers();
     remoteSessionStore.clear();
     drainStashedNewSessionDraft();
     // 清残留 task(上个用例失败态)。
@@ -131,6 +154,7 @@ describe('newSessionCreation pipeline', () => {
       's14',
       's15',
       's16',
+      's17',
     ]) dismissNewSessionCreation(id);
   });
 
@@ -553,5 +577,52 @@ describe('newSessionCreation pipeline', () => {
       pendingLocalCreation: false,
     });
     expect(remoteSessionStore.getInputProjection('s16').pendingQueue).toHaveLength(0);
+  });
+
+  it('账号在 create retry 等待期间切换时停止旧任务并保留旧账号 recovery ledger', async () => {
+    const record = {
+      sessionId: 's17',
+      deviceId: 'dev-1',
+      path: '/repo/.cindy-worktrees/auto-owner-a',
+      recoveryKey: 'recovery-key-owner-a-123456',
+      createdAt: Date.now(),
+    };
+    await expect(
+      registerPendingPrecreatedWorktree('owner-a', record),
+    ).resolves.toBe(true);
+
+    let currentOwner = 'owner-a';
+    const maker = makeMaker({
+      createSession: vi.fn(async () => {
+        throw new Error('INVOKE_TIMEOUT');
+      }),
+      getSession: vi.fn(async () => {
+        throw new Error('NOT_FOUND');
+      }),
+    });
+    const sleep = vi.fn(async () => {
+      currentOwner = 'owner-b';
+    });
+
+    startNewSessionCreation(makeParams('s17', maker, {
+      draft: { ...DRAFT, workingDir: record.path },
+      precreatedWorktree: {
+        path: record.path,
+        recoveryKey: record.recoveryKey,
+        originalWorkingDir: '/repo',
+        createdAt: record.createdAt,
+      },
+      precreatedWorktreeAccountId: 'owner-a',
+      isCurrentOwner: () => currentOwner === 'owner-a',
+      sleep,
+    }));
+    await flushPipeline();
+
+    expect(maker.createSession).toHaveBeenCalledTimes(1);
+    expect(maker.getSession).toHaveBeenCalledTimes(1);
+    expect(maker.input.enqueue).not.toHaveBeenCalled();
+    expect(getNewSessionCreationTask('s17')).toBeNull();
+    expect(remoteSessionStore.getSessions().find((session) => session.id === 's17')).toBeUndefined();
+    await expect(listPendingPrecreatedWorktrees('owner-a')).resolves.toEqual([record]);
   });
 });

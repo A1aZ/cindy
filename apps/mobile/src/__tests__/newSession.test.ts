@@ -1091,6 +1091,25 @@ describe('new session worktree wiring (source locks)', () => {
     );
   });
 
+  it('binds the new-screen recovery and background pipeline to the auth-owner generation', () => {
+    const ownerCapture = newSource.indexOf('const authOwnerAtCreate = getMobileAuthOwner();');
+    const ownerCheck = newSource.indexOf('const isCurrentOwner = () => (', ownerCapture);
+    const recovery = newSource.indexOf(
+      'const recovery = await recoverPendingPrecreatedWorktrees(worktreeAccountId, {',
+      ownerCheck,
+    );
+    const recoveryFence = newSource.indexOf('isCurrent: isCurrentOwner,', recovery);
+    const pipeline = newSource.indexOf('startNewSessionCreation({', recoveryFence);
+    const pipelineFence = newSource.indexOf('isCurrentOwner,', pipeline);
+
+    expect(ownerCapture).toBeGreaterThan(-1);
+    expect(ownerCheck).toBeGreaterThan(ownerCapture);
+    expect(recovery).toBeGreaterThan(ownerCheck);
+    expect(recoveryFence).toBeGreaterThan(recovery);
+    expect(pipeline).toBeGreaterThan(recoveryFence);
+    expect(pipelineFence).toBeGreaterThan(pipeline);
+  });
+
   it('persists a recoveryKey reservation before allowing remote worktree creation', () => {
     const hold = newSource.indexOf(
       'releasePrecreatedRegistration = holdPrecreatedWorktreeRegistration(sessionId);',

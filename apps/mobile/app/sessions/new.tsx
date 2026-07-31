@@ -149,6 +149,10 @@ import {
 } from '@/session/newSession';
 import { newSessionText } from '@/session/newSessionMessages';
 import { i18n } from '@/i18n';
+import {
+  getMobileAuthOwner,
+  isMobileAuthOwnerCurrent,
+} from '@/auth/authOwnerGeneration';
 import { useTranslation } from 'react-i18next';
 import {
   createNewSessionId,
@@ -2488,10 +2492,18 @@ export default function NewRemoteSessionScreen() {
     // 回来的是新 mount,creatingRef 天然复位。
     let handedOff = false;
     let releasePrecreatedRegistration: (() => void) | null = null;
+    const accountIdAtCreate = auth.user?.id?.trim() ?? '';
+    const authOwnerAtCreate = getMobileAuthOwner();
+    const isCurrentOwner = () => (
+      authOwnerAtCreate.accountId === accountIdAtCreate
+      && isMobileAuthOwnerCurrent(authOwnerAtCreate)
+    );
     try {
+      if (!isCurrentOwner()) return;
       let effectiveDraft = draft;
       if (voiceRecordingActiveRef.current || voiceState === 'listening') {
         const latestDraftText = await finishVoiceRecording();
+        if (!isCurrentOwner()) return;
         if (latestDraftText === null) return;
         effectiveDraft = { ...draft, firstMessage: latestDraftText };
       }
@@ -2499,6 +2511,7 @@ export default function NewRemoteSessionScreen() {
       // 有失败就中止创建——错误文案已由上传回调写入 attachmentError,让用户处理;
       // 此时不该带着残缺附件去开新会话。
       const { failedCount } = await waitForPendingUploads();
+      if (!isCurrentOwner()) return;
       if (failedCount > 0) return;
       // await 之后闭包里的 attachments 是旧值,经 ref 拿含刚落定图片的最新列表。
       const sendAttachments = attachmentsRef.current;
@@ -2512,11 +2525,14 @@ export default function NewRemoteSessionScreen() {
       // (已连接 / 空目录 / 拉失败)时缓存判死已不可信,清掉重取并放行。
       if (agentAuthVerdict === 'unauthenticated') {
         if (await confirmAgentUnauthenticated(effectiveDraft.agentKind)) {
+          if (!isCurrentOwner()) return;
           setError(agentAuthGateHint(effectiveDraft.agentKind));
           return;
         }
+        if (!isCurrentOwner()) return;
         evictDeviceProviders(selectedDeviceId);
       }
+      if (!isCurrentOwner()) return;
       void saveNewSessionPreferences({
         agentKind: effectiveDraft.agentKind,
         device: {
@@ -2524,7 +2540,7 @@ export default function NewRemoteSessionScreen() {
           name: selectedDeviceName || selectedDeviceId,
         },
       });
-      const worktreeAccountId = auth.user?.id?.trim() ?? '';
+      const worktreeAccountId = authOwnerAtCreate.accountId;
       if (
         effectiveDraft.workspaceKind === 'project'
         && worktreeEnabled
@@ -2560,7 +2576,9 @@ export default function NewRemoteSessionScreen() {
             record.deviceId !== selectedDeviceId
             || obligationOwnedByLiveTask(record.sessionId)
           ),
+          isCurrent: isCurrentOwner,
         });
+        if (!isCurrentOwner()) return;
         if (
           !recovery.storageReadable
           || recovery.retained > 0
@@ -2588,10 +2606,16 @@ export default function NewRemoteSessionScreen() {
       if (effectiveDraft.workspaceKind === 'project' && worktreeEnabled && worktreeEligibility.status === 'eligible') {
         try {
           // suggest-name 失败不阻断:走 auto- 兜底名(对齐桌面 :1316)。
-          const suggested = await maker.worktree
-            .suggestName(worktreeEligibility.baseRepo)
-            .then((result) => result.name)
-            .catch(() => null);
+          if (!isCurrentOwner()) return;
+          let suggested: string | null = null;
+          try {
+            suggested = await maker.worktree
+              .suggestName(worktreeEligibility.baseRepo)
+              .then((result) => result.name);
+          } catch {
+            suggested = null;
+          }
+          if (!isCurrentOwner()) return;
           const recoveryKey = createNewSessionId();
           const createdAt = Date.now();
           releasePrecreatedRegistration = holdPrecreatedWorktreeRegistration(sessionId);
@@ -2607,22 +2631,26 @@ export default function NewRemoteSessionScreen() {
               createdAt,
             },
           );
+          if (!isCurrentOwner()) return;
           if (!reservationRecorded) {
             setError(t('session.new.worktreeRecoveryStateFailed'));
             return;
           }
+          if (!isCurrentOwner()) return;
           const resp = await maker.worktree.create(buildWorktreeCreateRequest({
             sessionId,
             eligibility: worktreeEligibility,
             suggestedName: suggested,
             recoveryKey,
           }));
+          if (!isCurrentOwner()) return;
           if (!resp.ok) {
             await forgetPendingPrecreatedWorktree(worktreeAccountId, {
               sessionId,
               recoveryKey,
               createdAt,
             });
+            if (!isCurrentOwner()) return;
             setError(formatWorktreeCreateFailure(resp.error));
             return;
           }
@@ -2641,8 +2669,10 @@ export default function NewRemoteSessionScreen() {
             recoveryKey,
             createdAt,
           });
+          if (!isCurrentOwner()) return;
           effectiveDraft = { ...effectiveDraft, workingDir: resp.meta.path };
         } catch {
+          if (!isCurrentOwner()) return;
           // invoke 抛错时无法判断工作端是否已经完成创建；保留 reservation，
           // 交给当前进程重连或下次冷启动按 recoveryKey 精确对账。
           setError(t('session.new.worktreeCleanupPending'));
@@ -2659,6 +2689,7 @@ export default function NewRemoteSessionScreen() {
           return remembered && remembered !== 'plan' ? remembered : fallback;
         })()
         : null;
+      if (!isCurrentOwner()) return;
       startNewSessionCreation({
         sessionId,
         deviceId: deviceIdSnapshot,
@@ -2676,6 +2707,7 @@ export default function NewRemoteSessionScreen() {
           : () => confirmAgentUnauthenticated(agentKindSnapshot),
         authGateHint: agentAuthGateHint(agentKindSnapshot),
         onUnauthenticated: () => evictDeviceProviders(deviceIdSnapshot),
+        isCurrentOwner,
         transport: {
           maker,
           openLink,
@@ -2688,6 +2720,7 @@ export default function NewRemoteSessionScreen() {
           ),
         },
       });
+      if (!isCurrentOwner()) return;
       if (planModeCapability) {
         // 一次性语义:chip 状态只影响这一次创建,创建后复位草稿态。
         setPlanModeDraftOn(false);
@@ -2703,6 +2736,7 @@ export default function NewRemoteSessionScreen() {
         params: { sessionId, deviceId: deviceIdSnapshot, deviceName: selectedDeviceName },
       });
     } catch (err) {
+      if (!isCurrentOwner()) return;
       // agent 未鉴权(电脑端没配 key / 没登录)是新会话失败的高频原因,
       // 换成带引导的中文提示;其它错误维持原文。
       const raw = formatRemoteError(err);

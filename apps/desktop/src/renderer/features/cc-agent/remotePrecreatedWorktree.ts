@@ -22,6 +22,7 @@ export interface CreateRemoteSessionWithPrecreatedWorktreeInput {
   createdAt?: number;
   createArgs: unknown;
   invoke: RemoteWorktreeInvoke;
+  isCurrent?: () => boolean;
 }
 
 export interface RecoverPendingRemotePrecreatedWorktreesInput {
@@ -29,6 +30,7 @@ export interface RecoverPendingRemotePrecreatedWorktreesInput {
   /** Owner whose obligations may be reconciled; prevents account-switch bleed. */
   dataOwnerId?: string;
   invoke: RemoteWorktreeInvoke;
+  isCurrent?: () => boolean;
 }
 
 export interface RecoverPendingRemotePrecreatedWorktreesResult {
@@ -41,6 +43,7 @@ export interface RecoverPendingRemotePrecreatedWorktreesResult {
 const STORAGE_KEY = 'xdt.desktop.remote-precreated-worktree-recovery.v1';
 const STORAGE_OWNER_KEY = `${STORAGE_KEY}.owner`;
 const CLEANUP_PENDING_CODE = 'REMOTE_PRECREATED_WORKTREE_CLEANUP_PENDING';
+const OWNER_CHANGED_CODE = 'REMOTE_PRECREATED_WORKTREE_OWNER_CHANGED';
 
 interface RemotePrecreatedWorktreeLedgerApi {
   list(): Promise<RemotePrecreatedWorktreeLedgerSnapshot>;
@@ -78,6 +81,36 @@ export function isRemotePrecreatedWorktreeCleanupPendingError(
   );
 }
 
+/** The auth/data owner changed while a remote two-step create was in flight. */
+export class RemotePrecreatedWorktreeOwnerChangedError extends Error {
+  readonly code = OWNER_CHANGED_CODE;
+
+  constructor() {
+    super(OWNER_CHANGED_CODE);
+    this.name = 'RemotePrecreatedWorktreeOwnerChangedError';
+  }
+}
+
+export function isRemotePrecreatedWorktreeOwnerChangedError(
+  error: unknown,
+): error is RemotePrecreatedWorktreeOwnerChangedError {
+  return (
+    error instanceof RemotePrecreatedWorktreeOwnerChangedError
+    || (
+      !!error
+      && typeof error === 'object'
+      && 'code' in error
+      && (error as { code?: unknown }).code === OWNER_CHANGED_CODE
+    )
+  );
+}
+
+function assertCurrent(isCurrent?: () => boolean): void {
+  if (isCurrent && !isCurrent()) {
+    throw new RemotePrecreatedWorktreeOwnerChangedError();
+  }
+}
+
 function getLedgerApi(): RemotePrecreatedWorktreeLedgerApi {
   return ledgerApiOverride ?? window.electronAPI.remotePrecreatedWorktreeLedger;
 }
@@ -88,7 +121,11 @@ function getLedgerApi(): RemotePrecreatedWorktreeLedgerApi {
  * 每条都由 Main 原子 register；全部确认持久化后才删旧 key。多窗口同时迁移只会
  * 幂等覆盖同一 device/session 记录，不会再产生整表 last-writer-wins。
  */
-async function migrateLegacyLedger(dataOwnerId?: string): Promise<boolean> {
+async function migrateLegacyLedger(
+  dataOwnerId?: string,
+  isCurrent?: () => boolean,
+): Promise<boolean> {
+  assertCurrent(isCurrent);
   let raw: string | null;
   try {
     raw = localStorage.getItem(STORAGE_KEY);
@@ -106,10 +143,12 @@ async function migrateLegacyLedger(dataOwnerId?: string): Promise<boolean> {
   }
   if (records.length === 0) {
     try {
+      assertCurrent(isCurrent);
       localStorage.removeItem(STORAGE_KEY);
       localStorage.removeItem(STORAGE_OWNER_KEY);
       return true;
-    } catch {
+    } catch (error) {
+      if (isRemotePrecreatedWorktreeOwnerChangedError(error)) throw error;
       return false;
     }
   }
@@ -118,6 +157,7 @@ async function migrateLegacyLedger(dataOwnerId?: string): Promise<boolean> {
   }
 
   try {
+    assertCurrent(isCurrent);
     const storedOwner = localStorage.getItem(STORAGE_OWNER_KEY)?.trim() || null;
     if (storedOwner && storedOwner !== dataOwnerId) {
       // The legacy key was first observed under another owner. Keep it
@@ -138,16 +178,20 @@ async function migrateLegacyLedger(dataOwnerId?: string): Promise<boolean> {
       localStorage.setItem(STORAGE_OWNER_KEY, dataOwnerId);
     }
     for (const record of records) {
+      assertCurrent(isCurrent);
       const result = await getLedgerApi().register({
         ...record,
         dataOwnerId,
       });
+      assertCurrent(isCurrent);
       if (!result.persisted) return false;
     }
+    assertCurrent(isCurrent);
     localStorage.removeItem(STORAGE_KEY);
     localStorage.removeItem(STORAGE_OWNER_KEY);
     return true;
-  } catch {
+  } catch (error) {
+    if (isRemotePrecreatedWorktreeOwnerChangedError(error)) throw error;
     return false;
   }
 }
@@ -181,21 +225,32 @@ async function readPendingRemotePrecreatedWorktreeLedger(
 
 export async function registerPendingRemotePrecreatedWorktree(
   record: PendingRemotePrecreatedWorktree,
+  isCurrent?: () => boolean,
 ): Promise<boolean> {
-  if (!(await migrateLegacyLedger(record.dataOwnerId))) return false;
+  assertCurrent(isCurrent);
+  if (!(await migrateLegacyLedger(record.dataOwnerId, isCurrent))) return false;
   try {
-    return (await getLedgerApi().register(record)).persisted;
-  } catch {
+    assertCurrent(isCurrent);
+    const result = await getLedgerApi().register(record);
+    assertCurrent(isCurrent);
+    return result.persisted;
+  } catch (error) {
+    if (isRemotePrecreatedWorktreeOwnerChangedError(error)) throw error;
     return false;
   }
 }
 
 export async function forgetPendingRemotePrecreatedWorktree(
   target: PendingRemotePrecreatedWorktreeTarget,
+  isCurrent?: () => boolean,
 ): Promise<boolean> {
   try {
-    return (await getLedgerApi().forget(target)).persisted;
-  } catch {
+    assertCurrent(isCurrent);
+    const result = await getLedgerApi().forget(target);
+    assertCurrent(isCurrent);
+    return result.persisted;
+  } catch (error) {
+    if (isRemotePrecreatedWorktreeOwnerChangedError(error)) throw error;
     return false;
   }
 }
@@ -209,12 +264,16 @@ function matchingSessionId(value: unknown, expectedId: string): string | null {
 async function probeClaimedSession(
   invoke: RemoteWorktreeInvoke,
   sessionId: string,
+  isCurrent?: () => boolean,
 ): Promise<boolean> {
   try {
+    assertCurrent(isCurrent);
     const value = await invoke('local-db:sessions:get', [sessionId]);
+    assertCurrent(isCurrent);
     if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
     return (value as { id?: unknown }).id === sessionId;
-  } catch {
+  } catch (error) {
+    if (isRemotePrecreatedWorktreeOwnerChangedError(error)) throw error;
     return false;
   }
 }
@@ -222,21 +281,28 @@ async function probeClaimedSession(
 async function discardPendingRecord(
   record: PendingRemotePrecreatedWorktree,
   invoke: RemoteWorktreeInvoke,
+  isCurrent?: () => boolean,
 ): Promise<boolean> {
-  if (await probeClaimedSession(invoke, record.sessionId)) {
-    return forgetPendingRemotePrecreatedWorktree(record);
+  assertCurrent(isCurrent);
+  if (await probeClaimedSession(invoke, record.sessionId, isCurrent)) {
+    assertCurrent(isCurrent);
+    return forgetPendingRemotePrecreatedWorktree(record, isCurrent);
   }
   try {
     const locator = typeof record.path === 'string'
       ? { sessionId: record.sessionId, path: record.path }
       : { sessionId: record.sessionId, recoveryKey: record.recoveryKey };
+    assertCurrent(isCurrent);
     await invoke('worktree:discard-precreated', [locator]);
-    return forgetPendingRemotePrecreatedWorktree(record);
-  } catch {
+    assertCurrent(isCurrent);
+    return forgetPendingRemotePrecreatedWorktree(record, isCurrent);
+  } catch (error) {
+    if (isRemotePrecreatedWorktreeOwnerChangedError(error)) throw error;
     // discard 与 create 共用被控端 session 锁。若拒绝来自一次已成功但丢回包的
     // create，权威 session 行会存在；dirty/keep 等其它拒绝则继续留账。
-    if (await probeClaimedSession(invoke, record.sessionId)) {
-      return forgetPendingRemotePrecreatedWorktree(record);
+    if (await probeClaimedSession(invoke, record.sessionId, isCurrent)) {
+      assertCurrent(isCurrent);
+      return forgetPendingRemotePrecreatedWorktree(record, isCurrent);
     }
     return false;
   }
@@ -250,10 +316,13 @@ async function discardPendingRecord(
 export async function recoverPendingRemotePrecreatedWorktrees(
   input: RecoverPendingRemotePrecreatedWorktreesInput,
 ): Promise<RecoverPendingRemotePrecreatedWorktreesResult> {
-  const legacyMigrated = await migrateLegacyLedger(input.dataOwnerId);
+  assertCurrent(input.isCurrent);
+  const legacyMigrated = await migrateLegacyLedger(input.dataOwnerId, input.isCurrent);
+  assertCurrent(input.isCurrent);
   let ledger: RemotePrecreatedWorktreeLedgerSnapshot;
   try {
     const snapshot = await getLedgerApi().list();
+    assertCurrent(input.isCurrent);
     ledger = {
       records: snapshot.records.filter(
         (record) =>
@@ -261,7 +330,8 @@ export async function recoverPendingRemotePrecreatedWorktrees(
       ),
       storageReadable: legacyMigrated && snapshot.storageReadable,
     };
-  } catch {
+  } catch (error) {
+    if (isRemotePrecreatedWorktreeOwnerChangedError(error)) throw error;
     ledger = { records: [], storageReadable: false };
   }
   const records = ledger.records.filter(
@@ -276,8 +346,9 @@ export async function recoverPendingRemotePrecreatedWorktrees(
     storageReadable: ledger.storageReadable,
   };
   for (const record of records) {
+    assertCurrent(input.isCurrent);
     result.attempted += 1;
-    if (await discardPendingRecord(record, input.invoke)) {
+    if (await discardPendingRecord(record, input.invoke, input.isCurrent)) {
       result.recovered += 1;
     } else {
       result.retained += 1;
@@ -298,6 +369,7 @@ export async function recoverPendingRemotePrecreatedWorktrees(
 export async function createRemoteSessionWithPrecreatedWorktree(
   input: CreateRemoteSessionWithPrecreatedWorktreeInput,
 ): Promise<string> {
+  assertCurrent(input.isCurrent);
   const pending: PendingRemotePrecreatedWorktree = {
     deviceId: input.deviceId,
     sessionId: input.sessionId,
@@ -308,35 +380,45 @@ export async function createRemoteSessionWithPrecreatedWorktree(
   };
   // Main 账本在首次 worktree:create 前已经按 recoveryKey 登记；这里补齐 path。
   // 写盘失败时 Main 仍保留内存镜像，后续流程继续按 cleanup obligation 收敛。
-  await registerPendingRemotePrecreatedWorktree(pending);
+  await registerPendingRemotePrecreatedWorktree(pending, input.isCurrent);
+  assertCurrent(input.isCurrent);
 
   let createFailure: unknown;
   try {
+    assertCurrent(input.isCurrent);
     const result = await input.invoke('maker:create-session', [input.createArgs]);
+    assertCurrent(input.isCurrent);
     const sessionId = matchingSessionId(result, input.sessionId);
     if (sessionId) {
-      await forgetPendingRemotePrecreatedWorktree(pending);
+      assertCurrent(input.isCurrent);
+      await forgetPendingRemotePrecreatedWorktree(pending, input.isCurrent);
       return sessionId;
     }
     createFailure = new Error('Remote session creation returned no matching session id');
   } catch (err) {
+    if (isRemotePrecreatedWorktreeOwnerChangedError(err)) throw err;
     createFailure = err;
   }
 
-  if (await probeClaimedSession(input.invoke, input.sessionId)) {
-    await forgetPendingRemotePrecreatedWorktree(pending);
+  if (await probeClaimedSession(input.invoke, input.sessionId, input.isCurrent)) {
+    assertCurrent(input.isCurrent);
+    await forgetPendingRemotePrecreatedWorktree(pending, input.isCurrent);
     return input.sessionId;
   }
 
   try {
+    assertCurrent(input.isCurrent);
     await input.invoke('worktree:discard-precreated', [{
       sessionId: input.sessionId,
       path: input.path,
     }]);
-    await forgetPendingRemotePrecreatedWorktree(pending);
+    assertCurrent(input.isCurrent);
+    await forgetPendingRemotePrecreatedWorktree(pending, input.isCurrent);
   } catch (cleanupFailure) {
-    if (await probeClaimedSession(input.invoke, input.sessionId)) {
-      await forgetPendingRemotePrecreatedWorktree(pending);
+    if (isRemotePrecreatedWorktreeOwnerChangedError(cleanupFailure)) throw cleanupFailure;
+    if (await probeClaimedSession(input.invoke, input.sessionId, input.isCurrent)) {
+      assertCurrent(input.isCurrent);
+      await forgetPendingRemotePrecreatedWorktree(pending, input.isCurrent);
       return input.sessionId;
     }
     throw new RemotePrecreatedWorktreeCleanupPendingError({

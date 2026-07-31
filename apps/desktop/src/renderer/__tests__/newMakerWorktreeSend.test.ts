@@ -82,7 +82,7 @@ describe('NewMakerDraftRoute worktree send flow', () => {
     );
     const retainedGuard = source.indexOf('!recovery.storageReadable', recovery);
     const reservationGuard = source.indexOf(
-      'if (!(await registerPendingRemotePrecreatedWorktree(reservation)))',
+      'const reservationRecorded = await registerPendingRemotePrecreatedWorktree(',
       retainedGuard,
     );
     const worktreeCreate = source.indexOf("'worktree:create'", retainedGuard);
@@ -106,6 +106,29 @@ describe('NewMakerDraftRoute worktree send flow', () => {
     expect(source.slice(ledgerRegistration, ledgerRegistration + 220)).toContain(
       'deviceId,',
     );
+  });
+
+  it('fences every remote create side effect by the data-owner generation', () => {
+    const ownerCapture = source.indexOf('const dataOwnerAtSend = getDataOwnerGeneration();');
+    const currentCheck = source.indexOf('const isCurrentDataOwner = () => (', ownerCapture);
+    const invokeWrapper = source.indexOf('const invokeRemote = async', currentCheck);
+    const recoveryFence = source.indexOf('isCurrent: isCurrentDataOwner,', invokeWrapper);
+    const helperFence = source.indexOf('isCurrent: isCurrentDataOwner,', recoveryFence + 1);
+    const handoffFence = source.indexOf('if (!isCurrentDataOwner()) {', helperFence);
+    const handoff = source.indexOf('commitRemoteSessionHandoff({', handoffFence);
+    const silentCatch = source.indexOf(
+      'if (isRemotePrecreatedWorktreeOwnerChangedError(err)) return;',
+      handoff,
+    );
+
+    expect(ownerCapture).toBeGreaterThan(-1);
+    expect(currentCheck).toBeGreaterThan(ownerCapture);
+    expect(invokeWrapper).toBeGreaterThan(currentCheck);
+    expect(recoveryFence).toBeGreaterThan(invokeWrapper);
+    expect(helperFence).toBeGreaterThan(recoveryFence);
+    expect(handoffFence).toBeGreaterThan(helperFence);
+    expect(handoff).toBeGreaterThan(handoffFence);
+    expect(silentCatch).toBeGreaterThan(handoff);
   });
 
   it('retries remote draft defaults after the relay or selected workstation reconnects', () => {

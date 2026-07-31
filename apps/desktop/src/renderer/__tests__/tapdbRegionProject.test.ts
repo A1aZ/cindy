@@ -9,8 +9,9 @@
  * 端点写死),国际项目因此没有任何 user_login,服务端按区域上报的充值(charge)
  * 事件全部因 user_id 无效不计入收入统计。
  *
- * 这里把「appId 与采集端点同区配对、且与服务端 model-access-server 的
- * TAPDB_PROJECTS 一致」钉成回归测试:两侧任何一侧单改 ID 都会先在这里爆掉。
+ * 这里把 desktop 侧「appId 与采集端点同区配对」钉成回归测试。配对值需与服务端
+ * model-access-server 的 TAPDB_PROJECTS 人工同步维护——本仓测试无法校验服务端
+ * 常量,它只保证 desktop 内部不再出现"global 落回国内项目"的回退。
  */
 
 import { describe, expect, it, vi } from 'vitest';

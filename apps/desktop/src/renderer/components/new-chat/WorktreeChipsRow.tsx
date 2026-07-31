@@ -79,6 +79,11 @@ export interface WorktreeChipsRowProps {
    */
   deviceLinkDeviceId?: string | null;
   /**
+   * relay 或目标设备重连代次。变化时重试远端 git 资格探测，避免一次断线
+   * 或超时把 worktree 资格永久缓存成不可用。
+   */
+  deviceLinkReconnectEpoch?: number;
+  /**
    * 渲染变体(2026-07-19 恢复 worktree 入口):统一创建页对齐 Figma 后项目选择
    * 由页面自己的 mode pill 承担,'advancedOnly' 只渲染 [分支 chip][worktree chip]
    * (git 探测/分支/建议名逻辑全保留);缺省 'full' = folder chip + 两 chip 原样。
@@ -106,6 +111,7 @@ export function WorktreeChipsRow({
   worktreeDisabled,
   disabled,
   deviceLinkDeviceId,
+  deviceLinkReconnectEpoch = 0,
   variant = 'full',
   compact = false,
 }: WorktreeChipsRowProps) {
@@ -113,7 +119,11 @@ export function WorktreeChipsRow({
   // 统一创建页的 project-picker 模式下, cwd 为空表示即将创建纯对话。
   // worktree/branch 依赖真实项目目录,这里隐藏 Advanced 并清掉残留状态。
   const advancedHidden = folderPickerMode === 'project' && !cwd;
-  const detect = useDetectCwd(worktreeDisabled ? null : (cwd ?? null), deviceLinkDeviceId);
+  const detect = useDetectCwd(
+    worktreeDisabled ? null : (cwd ?? null),
+    deviceLinkDeviceId,
+    deviceLinkReconnectEpoch,
+  );
   const baseRepo = detect.data?.repoRoot ?? null;
 
   // repoRoot 参与发送侧 worktree 创建，必须在 paint / 下一次用户输入前同步收敛；

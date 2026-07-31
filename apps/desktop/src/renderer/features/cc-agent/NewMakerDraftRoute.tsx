@@ -2587,6 +2587,7 @@ export function NewMakerDraftRoute() {
                   // 探测/建议名/创建全部经隧道在被控端执行(与 488cb33 前口径一致)。
                   worktreeDisabled={isRemoteProjectDraft}
                   deviceLinkDeviceId={effectiveDeviceLinkDeviceId ?? null}
+                  deviceLinkReconnectEpoch={remoteDraftRefreshEpoch}
                   disabled={wtCreating}
                 />
               </div>

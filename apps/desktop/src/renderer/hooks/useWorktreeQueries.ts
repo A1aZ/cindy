@@ -1,6 +1,6 @@
 /**
  * useWorktreeQueries — 三个一次性 IPC hook（M3）：
- *   - useDetectCwd(cwd, deviceLinkDeviceId?)     → 探测当前 cwd 是否合法 git 仓库
+ *   - useDetectCwd(cwd, deviceLinkDeviceId?, refreshEpoch?) → 探测当前 cwd 是否合法 git 仓库
  *   - useBranches(baseRepo, deviceLinkDeviceId?) → 拉分支列表 + current
  *   - useSuggestName(baseRepo, deviceLinkDeviceId?) → 让 main 生成一个友好的 worktree 名
  *
@@ -99,6 +99,7 @@ export function detectCwdStateForTarget(
 export function useDetectCwd(
   cwd: string | null | undefined,
   deviceLinkDeviceId?: string | null,
+  refreshEpoch = 0,
 ): DetectCwdState {
   const [snapshot, setSnapshot] = useState<DetectCwdSnapshot>({
     target: null,
@@ -133,7 +134,7 @@ export function useDetectCwd(
     return () => {
       cancelled = true;
     };
-  }, [cwd, deviceLinkDeviceId]);
+  }, [cwd, deviceLinkDeviceId, refreshEpoch]);
 
   return detectCwdStateForTarget(snapshot, target);
 }

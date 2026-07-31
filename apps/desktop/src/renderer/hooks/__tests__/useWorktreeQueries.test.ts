@@ -1,9 +1,13 @@
-import { describe, expect, it } from 'vitest';
+// @vitest-environment jsdom
+
+import { renderHook, waitFor } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   branchesStateForTarget,
   detectCwdStateForTarget,
   suggestNameStateForTarget,
+  useDetectCwd,
   type BranchesSnapshot,
   type DetectCwdSnapshot,
   type SuggestNameSnapshot,
@@ -49,6 +53,38 @@ describe('detectCwdStateForTarget', () => {
         deviceLinkDeviceId: 'device-b',
       }),
     ).toEqual({ data: null, loading: true });
+  });
+});
+
+describe('useDetectCwd', () => {
+  it('retries the remote probe when the reconnect epoch changes', async () => {
+    const invoke = vi.fn()
+      .mockRejectedValueOnce(new Error('relay offline'))
+      .mockResolvedValueOnce(REPO_A);
+    Object.defineProperty(window, 'electronAPI', {
+      configurable: true,
+      value: {
+        deviceLink: { invoke },
+      },
+    });
+
+    const { result, rerender } = renderHook(
+      ({ reconnectEpoch }: { reconnectEpoch: number }) =>
+        useDetectCwd('/repo-a', 'device-a', reconnectEpoch),
+      { initialProps: { reconnectEpoch: 0 } },
+    );
+
+    await waitFor(() => {
+      expect(result.current).toEqual({ data: null, loading: false });
+    });
+    expect(invoke).toHaveBeenCalledTimes(1);
+
+    rerender({ reconnectEpoch: 1 });
+
+    await waitFor(() => {
+      expect(result.current).toEqual({ data: REPO_A, loading: false });
+    });
+    expect(invoke).toHaveBeenCalledTimes(2);
   });
 });
 

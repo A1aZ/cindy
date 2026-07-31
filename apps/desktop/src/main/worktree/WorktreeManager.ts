@@ -10,6 +10,7 @@
  * 记录精确匹配的预创建 worktree，调用方还必须注入实时 ownership guard。
  */
 
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 
@@ -859,6 +860,29 @@ async function removeWorktreeForSessionInner(
 
   if (!(await canRemoveWorktree(options, meta.path, sessionId))) return;
 
+  if (options.preserveDirty) {
+    let ignoredFiles: string[];
+    try {
+      ignoredFiles = await listNonReproducibleIgnoredFiles(meta.baseRepo, meta.path);
+    } catch (err) {
+      log.warn(
+        `[worktree] preserve worktree at ${meta.path}: ignored-file check failed`,
+        err instanceof Error ? err.message : String(err),
+      );
+      return;
+    }
+    if (ignoredFiles.length > 0) {
+      log.warn(
+        `[worktree] preserved worktree at ${meta.path}: non-reproducible ignored files`,
+        ignoredFiles.slice(0, 10),
+      );
+      return;
+    }
+    // ignored-file 对比可能读盘；完成后再核对一次 ownership，避免检查期间晚到的
+    // maker:create-session 已认领目录却仍继续删除。
+    if (!(await canRemoveWorktree(options, meta.path, sessionId))) return;
+  }
+
   const finishRemoval = async (snapshotted: boolean): Promise<void> => {
     if (snapshotted) {
       // The shared mutation lock is already installed before auto-stash starts. Unregister only
@@ -882,27 +906,77 @@ async function removeWorktreeForSessionInner(
       return;
     }
 
-    if (options.preserveDirty) {
-      let ignoredFiles: string[];
+    let removalPath = meta.path;
+    let quarantinePath: string | null = null;
+    const restoreQuarantine = async (): Promise<boolean> => {
+      if (!quarantinePath) return true;
+      const currentQuarantinePath = quarantinePath;
       try {
-        ignoredFiles = await listNonReproducibleIgnoredFiles(meta.baseRepo, meta.path);
+        await gitExec(
+          ['worktree', 'move', currentQuarantinePath, meta.path],
+          meta.baseRepo,
+        );
+        quarantinePath = null;
+        return true;
+      } catch (err) {
+        log.error(
+          `[worktree] failed to restore quarantined worktree ${currentQuarantinePath}:`,
+          err instanceof Error ? err.message : String(err),
+        );
+        // Preserve the actual path if the move-back itself fails; losing the
+        // store entry would make the quarantined user data unreachable.
+        await store.set(sessionId, { ...meta, path: currentQuarantinePath });
+        return false;
+      }
+    };
+
+    if (options.preserveDirty && await pathExists(meta.path)) {
+      const candidate = `${meta.path}.xdt-removing-${randomUUID()}`;
+      try {
+        // Atomically move the registered worktree out of its user-visible path
+        // before the final ignored-file scan. New writes through the old path
+        // can no longer race the scan and the subsequent remove.
+        await gitExec(['worktree', 'move', meta.path, candidate], meta.baseRepo);
+        quarantinePath = candidate;
+        removalPath = candidate;
       } catch (err) {
         log.warn(
-          `[worktree] preserve worktree at ${meta.path}: ignored-file check failed`,
+          `[worktree] preserve worktree at ${meta.path}: quarantine move failed`,
           err instanceof Error ? err.message : String(err),
         );
         return;
       }
-      if (ignoredFiles.length > 0) {
-        log.warn(
-          `[worktree] preserved worktree at ${meta.path}: non-reproducible ignored files`,
-          ignoredFiles.slice(0, 10),
-        );
+
+      // The move updates Git's worktree metadata, so both the final ownership
+      // check and ignored-file scan can use the quarantined path.
+      if (!(await canRemoveWorktree(options, removalPath, sessionId))) {
+        await restoreQuarantine();
         return;
       }
-      // ignored-file 对比可能读盘；完成后再核对一次 ownership，避免检查期间晚到的
-      // maker:create-session 已认领目录却仍继续删除。
-      if (!(await canRemoveWorktree(options, meta.path, sessionId))) return;
+
+      let ignoredFiles: string[];
+      try {
+        ignoredFiles = await listNonReproducibleIgnoredFiles(meta.baseRepo, removalPath);
+      } catch (err) {
+        log.warn(
+          `[worktree] preserve worktree at ${removalPath}: ignored-file check failed`,
+          err instanceof Error ? err.message : String(err),
+        );
+        await restoreQuarantine();
+        return;
+      }
+      if (ignoredFiles.length > 0) {
+        log.warn(
+          `[worktree] preserved worktree at ${removalPath}: non-reproducible ignored files`,
+          ignoredFiles.slice(0, 10),
+        );
+        await restoreQuarantine();
+        return;
+      }
+      if (!(await canRemoveWorktree(options, removalPath, sessionId))) {
+        await restoreQuarantine();
+        return;
+      }
     }
 
     let removedByGit = false;
@@ -911,7 +985,7 @@ async function removeWorktreeForSessionInner(
       // preserveDirty 的前置探测与这里之间可能有人刚写入文件，非强制 remove 会拒绝，
       // 从而保留目录。普通会话删除已经有 auto-stash 保护，仍沿用 --force。
       const removeArgs = options.preserveDirty
-        ? ['worktree', 'remove', meta.path]
+        ? ['worktree', 'remove', removalPath]
         : ['worktree', 'remove', '--force', meta.path];
       await gitExec(removeArgs, meta.baseRepo);
       removedByGit = true;
@@ -922,7 +996,10 @@ async function removeWorktreeForSessionInner(
       );
       // preserveDirty 是补偿口的“绝不丢用户新写内容”承诺。git 拒绝非强制删除时
       // 不能再用 fs.rm 绕过它，否则会重新打开 dirty check 后写入的竞态窗口。
-      if (options.preserveDirty) return;
+      if (options.preserveDirty) {
+        await restoreQuarantine();
+        return;
+      }
       // fallback: fs.rm —— 必须三条校验通过
       if (isManagedWorktreePath(meta.path, meta.baseRepo, [...store.getAllPaths(), meta.path])) {
         try {

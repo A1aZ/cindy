@@ -39,6 +39,7 @@ export interface RecoverPendingRemotePrecreatedWorktreesResult {
 }
 
 const STORAGE_KEY = 'xdt.desktop.remote-precreated-worktree-recovery.v1';
+const STORAGE_OWNER_KEY = `${STORAGE_KEY}.owner`;
 const CLEANUP_PENDING_CODE = 'REMOTE_PRECREATED_WORKTREE_CLEANUP_PENDING';
 
 interface RemotePrecreatedWorktreeLedgerApi {
@@ -106,28 +107,45 @@ async function migrateLegacyLedger(dataOwnerId?: string): Promise<boolean> {
   if (records.length === 0) {
     try {
       localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(STORAGE_OWNER_KEY);
       return true;
     } catch {
       return false;
     }
   }
-  // A legacy global key has no trustworthy account context. Never attach an
-  // unowned record (or one belonging to another owner) to the currently
-  // signed-in account; retaining the key makes the obligation fail closed
-  // until a caller with an explicit matching owner can migrate it.
-  if (
-    !dataOwnerId
-    || records.some((record) => record.dataOwnerId !== dataOwnerId)
-  ) {
+  if (!dataOwnerId) {
     return false;
   }
 
   try {
+    const storedOwner = localStorage.getItem(STORAGE_OWNER_KEY)?.trim() || null;
+    if (storedOwner && storedOwner !== dataOwnerId) {
+      // The legacy key was first observed under another owner. Keep it
+      // quarantined until that owner can complete the migration; otherwise an
+      // account switch would attach old path-only records to the wrong user.
+      return false;
+    }
+    if (
+      records.some(
+        (record) => record.dataOwnerId !== undefined && record.dataOwnerId !== dataOwnerId,
+      )
+    ) {
+      return false;
+    }
+    if (!storedOwner) {
+      // Bind the one-time migration before registering any record. A failed
+      // write leaves the marker behind, so a later account cannot claim it.
+      localStorage.setItem(STORAGE_OWNER_KEY, dataOwnerId);
+    }
     for (const record of records) {
-      const result = await getLedgerApi().register(record);
+      const result = await getLedgerApi().register({
+        ...record,
+        dataOwnerId,
+      });
       if (!result.persisted) return false;
     }
     localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(STORAGE_OWNER_KEY);
     return true;
   } catch {
     return false;
@@ -331,6 +349,7 @@ export async function createRemoteSessionWithPrecreatedWorktree(
 
 export const __testing = {
   storageKey: STORAGE_KEY,
+  storageOwnerKey: STORAGE_OWNER_KEY,
   setLedgerApi: (api: RemotePrecreatedWorktreeLedgerApi | null): void => {
     ledgerApiOverride = api;
   },

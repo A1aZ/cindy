@@ -601,6 +601,45 @@ describe('removeWorktreeForSession', () => {
     );
   });
 
+  it('quarantines the worktree before the final ignored-file scan', async () => {
+    const tmpRoot = fsSync.mkdtempSync(path.join(os.tmpdir(), 'xdt-wt-quarantine-'));
+    try {
+      const base = path.join(tmpRoot, 'repo');
+      const worktreePath = path.join(base, '.xdt-worktrees', 's1');
+      fsSync.mkdirSync(worktreePath, { recursive: true });
+      const meta: WorktreeMeta = {
+        ...makeMeta('s1'),
+        baseRepo: base,
+        path: worktreePath,
+      };
+      storeMap.set('s1', meta);
+      ignoredFilesMock
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce(['.env']);
+
+      await expect(
+        manager.discardPrecreatedWorktree('s1', meta.path),
+      ).resolves.toEqual({ status: 'preserved' });
+
+      const moves = gitExecMock.mock.calls.filter(
+        ([args]) => Array.isArray(args) && args[0] === 'worktree' && args[1] === 'move',
+      );
+      expect(moves).toHaveLength(2);
+      const quarantinePath = moves[0][0][3] as string;
+      expect(moves[0][0]).toEqual(['worktree', 'move', meta.path, quarantinePath]);
+      expect(moves[1][0]).toEqual(['worktree', 'move', quarantinePath, meta.path]);
+      expect(ignoredFilesMock).toHaveBeenNthCalledWith(1, base, meta.path);
+      expect(ignoredFilesMock).toHaveBeenNthCalledWith(2, base, quarantinePath);
+      expect(gitExecMock).not.toHaveBeenCalledWith(
+        ['worktree', 'remove', quarantinePath],
+        base,
+      );
+      expect(storeMap.get('s1')).toBe(meta);
+    } finally {
+      fsSync.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
   it('discard pre-created: removes a clean worktree and its commit-equivalent generated branch', async () => {
     const meta = makeMeta('s1');
     storeMap.set('s1', meta);

@@ -339,7 +339,7 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
     expect(ledgerRecords).toHaveLength(1);
   });
 
-  it('does not attach an unowned legacy record to the current owner', async () => {
+  it('migrates a path-only legacy record under an explicit owner binding', async () => {
     localStorage.setItem(__testing.storageKey, JSON.stringify({
       version: 1,
       records: [{
@@ -358,8 +358,37 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
         path: WORKTREE_PATH,
         createdAt: Date.now(),
       }),
+    ).resolves.toBe(true);
+    expect(localStorage.getItem(__testing.storageKey)).toBeNull();
+    expect(localStorage.getItem(__testing.storageOwnerKey)).toBeNull();
+    expect(ledgerRecords).toEqual([
+      expect.objectContaining({ dataOwnerId: 'owner-b' }),
+    ]);
+  });
+
+  it('does not let another owner claim a legacy key already bound to the first owner', async () => {
+    localStorage.setItem(__testing.storageKey, JSON.stringify({
+      version: 1,
+      records: [{
+        deviceId: DEVICE_ID,
+        sessionId: SESSION_ID,
+        path: WORKTREE_PATH,
+        createdAt: Date.now(),
+      }],
+    }));
+    localStorage.setItem(__testing.storageOwnerKey, 'owner-a');
+
+    await expect(
+      registerPendingRemotePrecreatedWorktree({
+        dataOwnerId: 'owner-b',
+        deviceId: DEVICE_ID,
+        sessionId: SESSION_ID,
+        path: WORKTREE_PATH,
+        createdAt: Date.now(),
+      }),
     ).resolves.toBe(false);
     expect(localStorage.getItem(__testing.storageKey)).not.toBeNull();
+    expect(localStorage.getItem(__testing.storageOwnerKey)).toBe('owner-a');
     expect(ledgerRecords).toEqual([]);
   });
 

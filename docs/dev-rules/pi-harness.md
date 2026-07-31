@@ -107,6 +107,9 @@ Cindy 显式设置:models.json、`--append-system-prompt`、`--session-dir`、�
   gate 同 CC(makerMemoryEnabled + manager),fire-and-forget。见 `memory/types.ts`
   (MEMORY_TYPES / CURATED_MEMORY_TYPES)、`memory/storage.ts rebuildIndex`、`pi/index.ts`
   writeCompactionDigest。
-- **BYOM / 本地模型**:走 pi 原生 provider(见设计原则),设置页开自定义/本地模型入口,仅对 pi 生效。
+- ✅ **BYOM / 本地模型**(已交付):自定义/本地模型走 pi 原生 provider 块直连,不过 compat 代理。
+  链路:CustomProviderDialog pi tab(+ api 选择器)→ custom-provider-store(pi runtime)→
+  user-provider 派生 → pi-host `resolvePiNativeProviders` → PiAgent writeModelsJson 原生块 +
+  provider 感知 setModel。真二进制测试证明直连原生端点、网关零请求。
 - **会话树**:按现有 fork/分支功能的树状升级迭代(pi 原生 append-only entry 树 + 分支摘要),
   不引入新概念。

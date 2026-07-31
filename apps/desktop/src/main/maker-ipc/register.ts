@@ -1346,7 +1346,7 @@ const renameSessionsConfirmBridge = new RenameSessionsConfirmBridge({
   broadcast: (channel, payload) => broadcastToAllWindows(channel, payload),
   logger: log,
   onDesktopOnlyConfirmPending: (sessionId) =>
-    desktopConfirmImNotifier(sessionId, '「批量重命名会话」的确认卡'),
+    desktopConfirmImNotifier(sessionId, '「批量重命名任务」的确认卡'),
 });
 
 /**
@@ -5328,7 +5328,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               return {
                 ok: false,
                 errorCode: 'INVALID_ARGS',
-                message: 'working_dir 暂不支持远程会话(远端路径无法在本机校验)',
+                message: 'working_dir 暂不支持远程任务(远端路径无法在本机校验)',
               };
             }
             const checked = await validateHandoffWorkingDir(workingDirOverride);
@@ -5911,7 +5911,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       return {
         ok: false,
         errorCode: 'NO_PRIOR_ASSISTANT',
-        message: '原会话还没有可用于分叉的 Agent 回复',
+        message: '原任务还没有可用于分叉的 Agent 回复',
       };
     }
 

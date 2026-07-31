@@ -92,7 +92,34 @@ onEvent 钩子。下方原设计说明保留作背景。
 runtime 带 `baseUrl` + `models` + auth。所以「自定义 provider 能不能挂 pi tab」在数据层已
 成立;缺的是 pi 侧把它写成**原生 provider 块**、以及 UI 是否允许添加 pi runtime。
 
-**缺口 = pi 特有**:
+**✅ 已交付:maker-core 核心(2026-07-30,commit 4c0b269b)** —— 原生 provider 块 +
+provider 感知路由 + 端到端真二进制测试(BYOM 模型直连原生端点、网关零请求)。契约:
+`AgentDeps.resolvePiNativeProviders` + `PiNativeProviderSpec`(base-agent.ts);
+`writeModelsJson` 写多 provider;`buildModelProviderMap` + provider 感知 `setModel`/`--provider`
+(pi/index.ts)。**host 侧只要实现 `resolvePiNativeProviders` 把 custom provider 喂进来即可。**
+
+**剩余 = host 接线 + UI(按依赖顺序,均在 desktop / model-providers 侧)**:
+
+1. **`packages/model-providers/src/custom-provider-store.ts:36`** `VALID_AGENTS` 加 `'pi'`;
+   `:113-119` wireProtocol 白名单加 pi 分支(pi 允许 anthropic-messages / openai-chat /
+   openai-responses)。加 pi 是**增量**——CC/Codex custom provider 只有 cc/codex runtime,
+   不受影响;但要加测试确认。
+2. **`packages/model-providers/src/user-provider.ts:44`** `AGENT_ORDER` 加 `'pi'`;`:36`
+   `CUSTOM_EFFORTS` 加 pi 档位;`:66` `defaultWireProtocol` 加 pi 默认。这样 custom provider
+   的 pi runtime 才进 `deriveAvailableModels('pi')`。
+3. **`apps/desktop/src/main/maker-host/pi-host.ts`** 实现 `resolvePiNativeProviders`:从
+   `getActiveCatalog()` 筛 `source==='user'` 且有 pi runtime 的 provider,映射
+   wireProtocol→PiNativeApi(`openai-chat`→`openai-completions`、`openai-responses`→同名、
+   `anthropic-messages`→同名),读 `readCustomProviderKey(id,'pi')` 填进 `env`(键名
+   `CINDY_PI_KEY_<ID>`,与 spec.apiKeyEnvVar 对应),models 带 baseUrl/models[]。接到
+   `buildPiAgent` 的 deps。**注意**:原生路径不经 provider-route / compat-proxy,loopback/剥
+   凭证那套对它不生效——安全边界(禁 none+远程等)由 store 的 validate 与本 resolver 把关。
+4. **UI**:`apps/desktop/src/renderer/components/settings/CustomProviderDialog.tsx:60-63`
+   `DialogAgentKind` 加 `'pi'`、`AGENTS`/`TAB_META` 加 pi 项;pi 需要**显式 api 类型选择器**
+   (anthropic-messages / openai-completions / …,cc/codex 是按 agent 隐含的);补全按
+   `DialogAgentKind` 展开的 state 字典 + i18n。
+
+**原设计说明(缺口 = pi 特有)**:
 1. **`writeModelsJson`(`packages/maker-core/src/agents/pi/index.ts:203`)现在只写单一
    `cindy` provider,baseUrl 全指向 compat 代理。** 要让它对「自定义/本地 provider」额外写出
    **原生 pi provider 块**:`{ name, baseUrl:<用户端点>, api:'openai-completions'|'anthropic-messages'|'google-generative-ai', apiKey:<env 插值或占位>, models:[...] }`,

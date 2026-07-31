@@ -38,6 +38,7 @@ import {
   CINDY_BRIDGE_EXTENSION_SOURCE,
 } from './cindy-bridge-source.js';
 import { classifyPiToolForAutoReview } from './auto-review-policy.js';
+import { buildMemoryScopeKey } from '../../memory/storage.js';
 import type {
   Capabilities,
   ManualCompactResult,
@@ -69,6 +70,21 @@ const PI_API_KEY_ENV = 'CINDY_PI_API_KEY';
 const PI_SESSION_ID_ENV = 'CINDY_PI_SESSION_ID';
 /** 手动压缩 = 一次完整 LLM 摘要调用(大上下文 + 网关排队),远超默认 30s RPC 超时。 */
 const PI_COMPACT_TIMEOUT_MS = 600_000;
+
+/** digest 分片 body 留点 headroom(硬上限 8192),摘要过长时截断。 */
+const PI_DIGEST_MAX_BODY = 7000;
+
+/** 任意串 → memory slug 片段([a-z0-9-],截断)。 */
+function slugifyForMemory(input: string, maxLen: number): string {
+  const s = input.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return (s || 'anon').slice(0, maxLen);
+}
+
+/** 摘要正文 → 一行 description(折叠空白、去换行、截断)。 */
+function oneLineDescription(text: string, maxLen: number): string {
+  const line = text.replace(/\s+/g, ' ').trim();
+  return line.length > maxLen ? line.slice(0, maxLen - 1) + '…' : line;
+}
 
 /**
  * NO_PROXY 兜底:pi 的模型请求打的是 Cindy 本地 compat proxy(loopback),bridge 的
@@ -356,6 +372,39 @@ export class PiAgent extends BaseAgent {
       }
     }
 
+    // 压缩即记忆:makerMemory 开启时,把 pi 压缩上下文时丢弃内容的摘要沉淀成 `digest`
+    // 记忆(进 FTS 可 memory_search 检索,但排除出 MEMORY.md / system prompt,不污染
+    // curated 记忆)。gate 与 CC 同口径;best-effort,失败只 warn,绝不阻断会话。
+    const compactionMemoryEnabled =
+      (opts.makerMemoryEnabled ?? this.deps.runtimeConfig.makerMemoryEnabled ?? false) === true &&
+      !!this.deps.makerMemory;
+    const memoryScopeKey = buildMemoryScopeKey(opts.workingDir, opts.remoteHostId);
+    const digestSlugBase = slugifyForMemory(opts.sessionId ?? `pi-${process.pid}`, 24);
+    let digestSeq = 0;
+    const writeCompactionDigest = async (summary: string, reason: string): Promise<void> => {
+      const manager = this.deps.makerMemory;
+      if (!compactionMemoryEnabled || !manager) return;
+      const body = summary.length > PI_DIGEST_MAX_BODY ? summary.slice(0, PI_DIGEST_MAX_BODY) + '\n…' : summary;
+      const seq = ++digestSeq;
+      // slug 唯一:sessionId 片段 + 递增序号;resume/跨会话用 Date.now 防撞名(create 模式撞名会抛)。
+      const slug = slugifyForMemory(`digest-${digestSlugBase}-${Date.now()}-${seq}`, 64);
+      try {
+        await manager.write(memoryScopeKey, {
+          type: 'digest',
+          name: slug,
+          title: `PI compaction digest (${reason})`,
+          description: oneLineDescription(summary, 180),
+          body,
+          mode: 'create',
+        });
+        this.deps.logger.debug('pi compaction digest saved to memory', { slug, reason });
+      } catch (err) {
+        this.deps.logger.warn('pi compaction digest write failed (non-fatal)', {
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    };
+
     // 追加而非替换:pi 默认 prompt(工具用法/工程约定)原样保留,只追加 host 产品段
     // 与用户段。前缀稳定(默认 prompt 静态),易变内容禁止进入(缓存规则 3.1)。
     const appendSections = [
@@ -429,6 +478,15 @@ export class PiAgent extends BaseAgent {
               workspaceRoots: [opts.workingDir],
             }));
             return;
+          }
+          // 压缩即记忆:compaction_end 带摘要正文时沉淀 digest(auto/manual 都触发,pi
+          // 文档:两种压缩都发此事件)。fire-and-forget,不阻塞事件流。
+          if (event.type === 'compaction_end' && compactionMemoryEnabled) {
+            const summary = (event.result as { summary?: unknown } | null)?.summary;
+            if (typeof summary === 'string' && summary.trim().length > 0) {
+              const reason = typeof event.reason === 'string' ? event.reason : 'auto';
+              void writeCompactionDigest(summary.trim(), reason);
+            }
           }
           translatePiEvent(event, queue, ctx);
         },

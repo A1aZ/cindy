@@ -53,6 +53,7 @@ import {
   WECHAT_COMPATIBILITY_POLICY_PRODUCTION_CONFIG,
   WechatCompatibilityPolicyService,
 } from './wechat/compatibilityPolicy';
+import { fetchPublicImageBytes } from './publicImageFetch';
 
 const log = createLogger('im/host');
 
@@ -111,6 +112,7 @@ const host: IMHost = {
         return null;
       }
     },
+    fetchRemoteImage: (url, maxBytes) => fetchPublicImageBytes(url, maxBytes),
   },
   secrets: ownerScopedImSecrets,
   ipc: {

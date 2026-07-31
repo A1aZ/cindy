@@ -1,3 +1,7 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 import type { DWClientDownStream } from "dingtalk-stream";
 
@@ -78,6 +82,33 @@ function validCredentialFetcher() {
   );
 }
 
+function outboundImageFetcher() {
+  return vi.fn<typeof fetch>(async (input) => {
+    const url = String(input);
+    if (url === "https://api.dingtalk.com/v1.0/oauth2/accessToken") {
+      return new Response(
+        JSON.stringify({ accessToken: "api-token", expireIn: 7200 }),
+      );
+    }
+    if (url.startsWith("https://oapi.dingtalk.com/gettoken")) {
+      return new Response(
+        JSON.stringify({
+          errcode: 0,
+          access_token: "oapi-token",
+          expires_in: 7200,
+        }),
+      );
+    }
+    if (url.startsWith("https://oapi.dingtalk.com/media/upload")) {
+      return new Response(JSON.stringify({ errcode: 0, media_id: "@media-1" }));
+    }
+    if (url === "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend") {
+      return new Response(JSON.stringify({}));
+    }
+    throw new Error(`unexpected URL: ${url}`);
+  });
+}
+
 function directMessage(overrides: Record<string, unknown> = {}) {
   return {
     conversationId: "direct-chat",
@@ -94,6 +125,105 @@ function directMessage(overrides: Record<string, unknown> = {}) {
 }
 
 describe("DingTalkIM", () => {
+  it("uploads remote Markdown images and sends native image messages", async () => {
+    const { host } = makeHost();
+    const fetchRemoteImage = vi.fn(async () => ({
+      buffer: Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      mimeType: "image/png",
+    }));
+    host.media = {
+      getCachedImage: vi.fn(async () => null),
+      cacheImage: vi.fn(async () => ({
+        absPath: "/media/image.png",
+        url: "cindy-media://image.png",
+      })),
+      resolveMediaUrl: vi.fn(() => null),
+      fetchRemoteImage,
+    };
+    const fetcher = outboundImageFetcher();
+    const client = new FakeClient();
+    const im = new DingTalkIM(host, {
+      clientFactory: () => client,
+      fetcher,
+    });
+    await im.init();
+
+    await im.commitFinal({
+      userId: "owner-1",
+      text: ["给你一张图：", "![测试图片](https://cdn.example/image.png)"].join(
+        "\n",
+      ),
+      terminal: "done",
+    });
+
+    expect(fetchRemoteImage).toHaveBeenCalledWith(
+      "https://cdn.example/image.png",
+      20 * 1024 * 1024,
+    );
+    const outboundBodies = fetcher.mock.calls
+      .filter(
+        ([url]) =>
+          String(url) ===
+          "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
+      )
+      .map(([, init]) => JSON.parse(String(init?.body)));
+    expect(outboundBodies).toEqual([
+      {
+        robotCode: "app-key",
+        userIds: ["owner-1"],
+        msgKey: "sampleText",
+        msgParam: JSON.stringify({ content: "给你一张图：\n测试图片" }),
+      },
+      {
+        robotCode: "app-key",
+        userIds: ["owner-1"],
+        msgKey: "sampleImageMsg",
+        msgParam: JSON.stringify({ photoURL: "@media-1" }),
+      },
+    ]);
+  });
+
+  it("uploads managed local output images carried by commitFinal", async () => {
+    const { host } = makeHost();
+    const client = new FakeClient();
+    const fetcher = outboundImageFetcher();
+    const im = new DingTalkIM(host, {
+      clientFactory: () => client,
+      fetcher,
+    });
+    const tempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "dingtalk-outbound-"),
+    );
+    const imagePath = path.join(tempDir, "generated.png");
+    fs.writeFileSync(
+      imagePath,
+      Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
+    try {
+      await im.init();
+      await im.commitFinal({
+        userId: "owner-1",
+        text: "生成完成",
+        terminal: "done",
+        mediaAbsPaths: [imagePath],
+      });
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+
+    const outboundMessageTypes = fetcher.mock.calls
+      .filter(
+        ([url]) =>
+          String(url) ===
+          "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
+      )
+      .map(([, init]) => {
+        const body = JSON.parse(String(init?.body)) as { msgKey: string };
+        return body.msgKey;
+      });
+    expect(outboundMessageTypes).toEqual(["sampleText", "sampleImageMsg"]);
+  });
+
   it("claims the first direct sender, acknowledges immediately, and drops other direct users", async () => {
     const { host, secrets } = makeHost();
     const client = new FakeClient();

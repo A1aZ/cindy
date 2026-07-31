@@ -1,10 +1,12 @@
 const ACCESS_TOKEN_URL = "https://api.dingtalk.com/v1.0/oauth2/accessToken";
+const OAPI_ACCESS_TOKEN_URL = "https://oapi.dingtalk.com/gettoken";
+const OAPI_MEDIA_UPLOAD_URL = "https://oapi.dingtalk.com/media/upload";
 const DOWNLOAD_URL =
   "https://api.dingtalk.com/v1.0/robot/messageFiles/download";
 const DIRECT_SEND_URL =
   "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend";
 const GROUP_SEND_URL = "https://api.dingtalk.com/v1.0/robot/groupMessages/send";
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+export const MAX_DINGTALK_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_MEDIA_REDIRECTS = 3;
 const HTTP_TIMEOUT_MS = 30_000;
 
@@ -24,6 +26,7 @@ export interface DingTalkOutboundTarget {
 
 export class DingTalkApiClient {
   private accessToken: AccessTokenCache | null = null;
+  private oapiAccessToken: AccessTokenCache | null = null;
   private readonly activeRequests = new Set<AbortController>();
   private closed = false;
 
@@ -35,11 +38,13 @@ export class DingTalkApiClient {
 
   clearAccessToken(): void {
     this.accessToken = null;
+    this.oapiAccessToken = null;
   }
 
   close(): void {
     this.closed = true;
     this.accessToken = null;
+    this.oapiAccessToken = null;
     for (const controller of this.activeRequests) controller.abort();
     this.activeRequests.clear();
   }
@@ -83,6 +88,54 @@ export class DingTalkApiClient {
     );
   }
 
+  async sendImage(
+    target: DingTalkOutboundTarget,
+    bytes: Uint8Array,
+    filename?: string,
+  ): Promise<void> {
+    const mediaId = await this.uploadImage(bytes, filename);
+    await this.sendUploadedImage(target, mediaId);
+  }
+
+  async uploadImage(bytes: Uint8Array, filename?: string): Promise<string> {
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_DINGTALK_IMAGE_BYTES) {
+      throw new Error("dingtalk outbound image has an invalid size");
+    }
+    const mimeType = detectImageMime(bytes);
+    if (!mimeType) throw new Error("dingtalk outbound media is not an image");
+    return this.uploadImageBytes(
+      bytes,
+      mimeType,
+      filename || `image.${extensionForMime(mimeType)}`,
+    );
+  }
+
+  async sendUploadedImage(
+    target: DingTalkOutboundTarget,
+    mediaId: string,
+  ): Promise<void> {
+    const token = await this.getAccessToken();
+    const body =
+      target.kind === "group"
+        ? {
+            robotCode: this.appKey,
+            openConversationId: target.id,
+            msgKey: "sampleImageMsg",
+            msgParam: JSON.stringify({ photoURL: `@${mediaId}` }),
+          }
+        : {
+            robotCode: this.appKey,
+            userIds: [target.id],
+            msgKey: "sampleImageMsg",
+            msgParam: JSON.stringify({ photoURL: `@${mediaId}` }),
+          };
+    await this.postJson(
+      target.kind === "group" ? GROUP_SEND_URL : DIRECT_SEND_URL,
+      body,
+      token,
+    );
+  }
+
   async downloadImage(
     downloadCode: string,
   ): Promise<{ buffer: Uint8Array; mimeType: string }> {
@@ -99,10 +152,10 @@ export class DingTalkApiClient {
     if (!res.ok)
       throw new Error(`dingtalk media download failed: HTTP ${res.status}`);
     const declaredLength = Number(res.headers.get("content-length") ?? 0);
-    if (declaredLength > MAX_IMAGE_BYTES) {
+    if (declaredLength > MAX_DINGTALK_IMAGE_BYTES) {
       throw new Error("dingtalk media exceeds the image size limit");
     }
-    const bytes = await readBodyLimited(res, MAX_IMAGE_BYTES);
+    const bytes = await readBodyLimited(res, MAX_DINGTALK_IMAGE_BYTES);
     if (bytes.byteLength === 0) {
       throw new Error("dingtalk media has an invalid image size");
     }
@@ -172,6 +225,64 @@ export class DingTalkApiClient {
       expiresAt: Date.now() + Math.max(60, expiresIn) * 1_000,
     };
     return value;
+  }
+
+  private async getOapiAccessToken(): Promise<string> {
+    if (
+      this.oapiAccessToken &&
+      this.oapiAccessToken.expiresAt - 60_000 > Date.now()
+    ) {
+      return this.oapiAccessToken.value;
+    }
+    const url = new URL(OAPI_ACCESS_TOKEN_URL);
+    url.searchParams.set("appkey", this.appKey);
+    url.searchParams.set("appsecret", this.appSecret);
+    const res = await this.fetchWithTimeout(url, {
+      method: "GET",
+      redirect: "error",
+    });
+    const payload = (await res.json().catch(() => null)) as unknown;
+    if (!res.ok)
+      throw new Error(`dingtalk OAPI auth failed: HTTP ${res.status}`);
+    const value = stringField(payload, "access_token");
+    const errorCode = numberField(payload, "errcode");
+    if (!value || (errorCode !== null && errorCode !== 0)) {
+      throw new Error("dingtalk OAPI access token response is invalid");
+    }
+    const expiresIn = numberField(payload, "expires_in") ?? 7_200;
+    this.oapiAccessToken = {
+      value,
+      expiresAt: Date.now() + Math.max(60, expiresIn) * 1_000,
+    };
+    return value;
+  }
+
+  private async uploadImageBytes(
+    bytes: Uint8Array,
+    mimeType: string,
+    filename: string,
+  ): Promise<string> {
+    const token = await this.getOapiAccessToken();
+    const url = new URL(OAPI_MEDIA_UPLOAD_URL);
+    url.searchParams.set("access_token", token);
+    url.searchParams.set("type", "image");
+    const form = new FormData();
+    const arrayBuffer = bytes.slice().buffer as ArrayBuffer;
+    form.append("media", new Blob([arrayBuffer], { type: mimeType }), filename);
+    const res = await this.fetchWithTimeout(url, {
+      method: "POST",
+      redirect: "error",
+      body: form,
+    });
+    const payload = (await res.json().catch(() => null)) as unknown;
+    if (!res.ok)
+      throw new Error(`dingtalk media upload failed: HTTP ${res.status}`);
+    const errorCode = numberField(payload, "errcode");
+    const rawMediaId = stringField(payload, "media_id");
+    if (!rawMediaId || (errorCode !== null && errorCode !== 0)) {
+      throw new Error("dingtalk media upload response is invalid");
+    }
+    return rawMediaId.startsWith("@") ? rawMediaId.slice(1) : rawMediaId;
   }
 
   private async postJson(
@@ -319,4 +430,17 @@ function detectImageMime(bytes: Uint8Array): string | null {
     return "image/webp";
   }
   return null;
+}
+
+function extensionForMime(mimeType: string): string {
+  switch (mimeType) {
+    case "image/jpeg":
+      return "jpg";
+    case "image/gif":
+      return "gif";
+    case "image/webp":
+      return "webp";
+    default:
+      return "png";
+  }
 }

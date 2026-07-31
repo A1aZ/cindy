@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+
 import {
   DWClient,
   TOPIC_ROBOT,
@@ -17,6 +20,7 @@ import type {
 } from "../types.js";
 import {
   DingTalkApiClient,
+  MAX_DINGTALK_IMAGE_BYTES,
   type DingTalkFetch,
   type DingTalkOutboundTarget,
 } from "./api.js";
@@ -27,6 +31,10 @@ import {
   parseInboundEnvelope,
   type DingTalkInboundEnvelope,
 } from "./inbound.js";
+import {
+  collectRemoteMarkdownImages,
+  replaceUploadedRemoteImages,
+} from "./outbound.js";
 
 const APP_KEY_SECRET = "dingtalk-bot-app-key";
 const APP_SECRET_SECRET = "dingtalk-bot-app-secret";
@@ -36,6 +44,7 @@ const DEDUP_CAPACITY = 2_048;
 const STATUS_POLL_MS = 2_000;
 const INTERACTION_TIMEOUT_MS = 30 * 60 * 1_000;
 const OUTBOUND_CHUNK_SIZE = 3_500;
+const MAX_OUTBOUND_IMAGES = 4;
 const CONNECTION_ERROR_CODES = [
   "DINGTALK_AUTH_FAILED",
   "DINGTALK_NETWORK_FAILED",
@@ -268,7 +277,67 @@ export class DingTalkIM extends BaseIM implements ChannelIM {
   }
 
   async commitFinal(output: ImFinalOutput): Promise<void> {
-    await this.sendText(output.userId, normalizeFinalText(output.text));
+    const api = this.requireApi();
+    const target = this.resolveTarget(output.userId);
+    const uploadedMedia: Array<{ mediaId: string; fallbackUrl?: string }> = [];
+
+    for (const absPath of Array.from(new Set(output.mediaAbsPaths ?? []))) {
+      if (uploadedMedia.length >= MAX_OUTBOUND_IMAGES) break;
+      try {
+        const stat = await fs.promises.stat(absPath);
+        if (!stat.isFile() || stat.size > MAX_DINGTALK_IMAGE_BYTES) {
+          throw new Error("dingtalk outbound image has an invalid size");
+        }
+        const bytes = await fs.promises.readFile(absPath);
+        uploadedMedia.push({
+          mediaId: await api.uploadImage(bytes, path.basename(absPath)),
+        });
+      } catch {
+        this.log.warn("dingtalk outbound managed image upload failed");
+      }
+    }
+
+    const uploadedRemoteUrls = new Set<string>();
+    const fetchRemoteImage = this.host.media?.fetchRemoteImage;
+    if (fetchRemoteImage && uploadedMedia.length < MAX_OUTBOUND_IMAGES) {
+      const remoteImages = collectRemoteMarkdownImages(
+        output.text,
+        MAX_OUTBOUND_IMAGES - uploadedMedia.length,
+      );
+      for (const image of remoteImages) {
+        try {
+          const fetched = await fetchRemoteImage(
+            image.url,
+            MAX_DINGTALK_IMAGE_BYTES,
+          );
+          uploadedMedia.push({
+            mediaId: await api.uploadImage(fetched.buffer),
+            fallbackUrl: image.url,
+          });
+          uploadedRemoteUrls.add(image.url);
+        } catch {
+          this.log.warn("dingtalk outbound remote image upload failed");
+        }
+      }
+    }
+
+    const finalText = replaceUploadedRemoteImages(
+      output.text,
+      uploadedRemoteUrls,
+    );
+    await this.sendText(output.userId, normalizeFinalText(finalText));
+    const failedRemoteUrls: string[] = [];
+    for (const media of uploadedMedia) {
+      try {
+        await api.sendUploadedImage(target, media.mediaId);
+      } catch {
+        this.log.warn("dingtalk outbound image send failed");
+        if (media.fallbackUrl) failedRemoteUrls.push(media.fallbackUrl);
+      }
+    }
+    if (failedRemoteUrls.length > 0) {
+      await this.sendText(output.userId, failedRemoteUrls.join("\n"));
+    }
   }
 
   async requestTextReply<T>(

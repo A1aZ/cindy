@@ -14,6 +14,74 @@ const PNG_BYTES = Uint8Array.from([
 ]);
 
 describe("DingTalkApiClient", () => {
+  it("uploads image bytes and sends a native direct image message", async () => {
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.startsWith("https://oapi.dingtalk.com/gettoken")) {
+        return jsonResponse({
+          errcode: 0,
+          access_token: "oapi-token",
+          expires_in: 7200,
+        });
+      }
+      if (url.startsWith("https://oapi.dingtalk.com/media/upload")) {
+        expect(init?.method).toBe("POST");
+        expect(init?.body).toBeInstanceOf(FormData);
+        return jsonResponse({ errcode: 0, media_id: "@media-1" });
+      }
+      if (url === "https://api.dingtalk.com/v1.0/oauth2/accessToken") {
+        return jsonResponse({ accessToken: "api-token", expireIn: 7200 });
+      }
+      if (url === "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend") {
+        return jsonResponse({});
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const api = new DingTalkApiClient("app-key", "app-secret", fetcher);
+
+    await api.sendImage(
+      {
+        kind: "direct",
+        id: "owner-1",
+        sessionWebhook: null,
+        sessionWebhookExpiresAt: null,
+      },
+      PNG_BYTES,
+      "picture.png",
+    );
+
+    const sendCall = fetcher.mock.calls.find(
+      ([url]) =>
+        String(url) ===
+        "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
+    );
+    expect(sendCall).toBeDefined();
+    expect(JSON.parse(String(sendCall?.[1]?.body))).toEqual({
+      robotCode: "app-key",
+      userIds: ["owner-1"],
+      msgKey: "sampleImageMsg",
+      msgParam: JSON.stringify({ photoURL: "@media-1" }),
+    });
+  });
+
+  it("rejects non-image outbound bytes before making a request", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const api = new DingTalkApiClient("app-key", "app-secret", fetcher);
+
+    await expect(
+      api.sendImage(
+        {
+          kind: "direct",
+          id: "owner-1",
+          sessionWebhook: null,
+          sessionWebhookExpiresAt: null,
+        },
+        new TextEncoder().encode("<html>not an image</html>"),
+      ),
+    ).rejects.toThrow(/not an image/);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("never posts to an untrusted session webhook and falls back to the fixed API", async () => {
     const fetcher = vi
       .fn<typeof fetch>()

@@ -98,6 +98,14 @@ export interface IMHostMediaCache {
   ): Promise<{ absPath: string; url: string; mimeType: string } | null>;
   /** host 托管媒体 URL(cindy-media://)→ 绝对路径;认不出返回 null(出站上传用)。 */
   resolveMediaUrl(url: string): string | null;
+  /**
+   * 下载公开 HTTPS 图片供 IM 出站上传。host 必须逐跳执行 SSRF / DNS
+   * rebinding 防护并在读取过程中执行 maxBytes 上限；返回字节不落盘。
+   */
+  fetchRemoteImage?(
+    url: string,
+    maxBytes: number,
+  ): Promise<{ buffer: Uint8Array; mimeType?: string }>;
 }
 
 export interface IMAttachment {

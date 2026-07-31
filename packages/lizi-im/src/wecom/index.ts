@@ -270,6 +270,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     userId: string,
     absPath: string,
     displayName?: string,
+    opts?: { threadTs?: string; usePendingFrame?: boolean },
   ): Promise<SendFileResult> {
     let uploaded = false;
     try {
@@ -281,7 +282,8 @@ export class WecomIM extends BaseIM implements TextChannelIM {
       });
       uploaded = true;
       const lane = decodeWecomLane(userId);
-      const frame = this.claimNewestFrame(userId);
+      const frame =
+        opts?.usePendingFrame === false ? null : this.claimNewestFrame(userId);
       if (frame) {
         try {
           await client.replyMedia(frame, local.mediaType, result.media_id);
@@ -355,6 +357,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
       });
     };
     let rejectedFileCount = 0;
+    let unresolvedImageCount = 0;
     for (const link of fileLinks) {
       const resolved = await resolveAllowedWecomOutboundFile(
         link.absPath,
@@ -372,6 +375,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
       if (absPath) {
         addAttachment(absPath);
       } else {
+        unresolvedImageCount += 1;
         this.log.warn("failed to resolve terminal managed image", { url });
       }
     }
@@ -387,10 +391,14 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     const rejectedFileNotice = rejectedFileCount
       ? `⚠️ 有 ${rejectedFileCount} 个文件附件未发送（不在当前工作目录内或无法验证）。`
       : "";
+    const unresolvedImageNotice = unresolvedImageCount
+      ? `⚠️ 有 ${unresolvedImageCount} 张图片未发送（图片已不存在或无法读取）。`
+      : "";
     const visibleText = [
       stripXdtFileLinks(stripXdtImageLinks(output.text)).trim(),
       attachmentNotice,
       rejectedFileNotice,
+      unresolvedImageNotice,
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -404,6 +412,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
         output.userId,
         attachment.absPath,
         attachment.displayName,
+        { usePendingFrame: false },
       );
       if (!result.ok) {
         failedAttachmentCount += 1;

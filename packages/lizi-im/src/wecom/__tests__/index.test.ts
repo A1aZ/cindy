@@ -222,6 +222,64 @@ describe("WecomIM routing and ownership", () => {
     expect(client.sendMessage).not.toHaveBeenCalled();
   });
 
+  it("keeps later inbound frames available while terminal attachments use active send", async () => {
+    const { host, secrets } = createHost();
+    secrets.set("wecom-owner-user-id", "owner");
+    const client = new FakeClient();
+    const mediaDir = join(tmpdir(), `cindy-wecom-frame-${randomUUID()}`);
+    const filePath = join(mediaDir, "report.txt");
+    const im = new WecomIM(host, { clientFactory: () => client as never });
+
+    await mkdir(mediaDir, { recursive: true });
+    await writeFile(filePath, "report");
+    try {
+      await im.init();
+      const firstFrame = message({
+        id: "m-first",
+        sender: "owner",
+        text: "first",
+      });
+      const secondFrame = message({
+        id: "m-second",
+        sender: "owner",
+        text: "second",
+      });
+      client.emit("message.text", firstFrame);
+      await flush();
+      await im.beginReply("owner");
+      client.uploadMedia.mockImplementationOnce(async () => {
+        client.emit("message.text", secondFrame);
+        await flush();
+        return { media_id: "media-2" };
+      });
+
+      const fileUrl = `xdt-file:///${encodeURI(filePath.replaceAll("\\", "/"))}`;
+      await im.commitFinal({
+        userId: "owner",
+        text: `done\n[report](${fileUrl})`,
+        terminal: "done",
+        allowedFileRoots: [mediaDir],
+      });
+
+      expect(client.replyMedia).not.toHaveBeenCalled();
+      expect(client.sendMediaMessage).toHaveBeenCalledWith(
+        "owner",
+        "file",
+        "media-2",
+      );
+      await im.sendMarkdownText("owner", "second reply");
+      expect(client.replyStream).toHaveBeenLastCalledWith(
+        secondFrame,
+        expect.any(String),
+        "second reply",
+        true,
+      );
+    } finally {
+      await im.dispose();
+      await rm(mediaDir, { recursive: true, force: true });
+    }
+  });
+
   it("falls back to active send after the passive stream safety window", async () => {
     const { host, secrets } = createHost();
     secrets.set("wecom-owner-user-id", "owner");
@@ -298,6 +356,34 @@ describe("WecomIM routing and ownership", () => {
       await im.dispose();
       await rm(mediaDir, { recursive: true, force: true });
     }
+  });
+
+  it("reports managed images that cannot be resolved before removing their links", async () => {
+    const { host, secrets } = createHost();
+    secrets.set("wecom-owner-user-id", "owner");
+    const client = new FakeClient();
+    const imageUrl = "cindy-media://blobs/missing.png";
+    host.media = {
+      getCachedImage: async () => null,
+      cacheImage: async () => ({ absPath: "unused", url: imageUrl }),
+      resolveMediaUrl: vi.fn(() => null),
+    };
+    const im = new WecomIM(host, { clientFactory: () => client as never });
+
+    await im.init();
+    await im.commitFinal({
+      userId: "owner",
+      text: `done\n![missing](${imageUrl})`,
+      terminal: "done",
+    });
+
+    expect(client.uploadMedia).not.toHaveBeenCalled();
+    expect(client.sendMessage).toHaveBeenCalledWith("owner", {
+      msgtype: "markdown",
+      markdown: {
+        content: "done\n\n⚠️ 有 1 张图片未发送（图片已不存在或无法读取）。",
+      },
+    });
   });
 
   it("does not upload model-authored xdt-file links outside allowed roots", async () => {

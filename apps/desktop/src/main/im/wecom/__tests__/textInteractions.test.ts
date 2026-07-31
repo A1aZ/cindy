@@ -55,7 +55,7 @@ describe('formatWecomInteractionPrompt', () => {
     expect(prompt).toContain('\\u0060\\u0060\\u0060markdown');
   });
 
-  it('通过 Markdown 通道发送审批模板', async () => {
+  it('通过 Markdown 通道发送审批模板，并在终止状态下拒绝待审批请求', async () => {
     const sendMarkdownText = vi.fn(async () => ({ messageId: 'message-1' }));
     const sendText = vi.fn(async () => ({ messageId: 'message-2' }));
     const onStatusChange = vi.fn((handler: (status: IMStatus) => void) => {
@@ -70,13 +70,25 @@ describe('formatWecomInteractionPrompt', () => {
     } as unknown as WecomIM;
     const interactions = new WecomTextInteractions(im);
 
-    const result = interactions.handle('owner', permissionRequest({ command: 'pnpm test' }));
-    await vi.waitFor(() => expect(sendMarkdownText).toHaveBeenCalledOnce());
-    expect(sendText).not.toHaveBeenCalled();
     const statusHandler = onStatusChange.mock.calls[0]?.[0];
     expect(statusHandler).toBeDefined();
-    statusHandler?.({ kind: 'idle' });
-    await result;
+    const terminalStatuses: IMStatus[] = [
+      { kind: 'idle' },
+      { kind: 'conflict', appId: 'bot-1' },
+      { kind: 'error', reason: 'connection_failed' },
+    ];
+
+    for (const [index, status] of terminalStatuses.entries()) {
+      const result = interactions.handle('owner', permissionRequest({ command: 'pnpm test' }));
+      await vi.waitFor(() => expect(sendMarkdownText).toHaveBeenCalledTimes(index + 1));
+      statusHandler?.(status);
+      await expect(result).resolves.toEqual({
+        kind: 'permission',
+        behavior: 'deny',
+        reason: 'wecom_interaction_disconnected',
+      });
+    }
+    expect(sendText).not.toHaveBeenCalled();
   });
 
   it('待审批时让 !stop 绕过拦截器并收口当前请求', async () => {

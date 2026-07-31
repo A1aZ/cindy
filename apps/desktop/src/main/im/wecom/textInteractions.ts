@@ -18,7 +18,9 @@ export class WecomTextInteractions {
   constructor(private readonly im: WecomIM) {
     im.onTextMessageIntercept((event) => this.consume(event));
     im.onStatusChange((status) => {
-      if (status.kind === 'idle') this.cancelAll('wecom_interaction_disconnected');
+      if (status.kind === 'idle' || status.kind === 'conflict' || status.kind === 'error') {
+        this.cancelAll('wecom_interaction_disconnected');
+      }
     });
   }
 

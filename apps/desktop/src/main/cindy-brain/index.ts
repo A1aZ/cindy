@@ -805,11 +805,14 @@ async function reconcileBuiltinGhostsLocked(
       // 自愈，不需要用户介入。
       await manager.removeInstallApproval(manifest.id);
       // 撤销只让后续的 Host 能力调用与技能落链失效,不会自己结束已经跑起来的沙箱
-      // 进程 —— 登录触发对账时插件可能正在运行。与 beforeRemove 同款三连熄灯,
-      // 让"撤销后不再被授权运行"这句话对运行中的实例也成立。
+      // 进程 —— 登录触发对账时插件可能正在运行。与 beforeRemove 同款四连熄灯
+      // (含 errand slot:漏掉它会让节流状态与在途任务记录留到同会话的自愈之后,
+      // 变成不必要的 rate-limit／"已有在途任务"阻塞),让"撤销后不再被授权运行"
+      // 这句话对运行中的实例也成立。
       getGhostRuntime().stop(manifest.id);
       getGhostNodeRuntimeBroker().stop(manifest.id);
       getGhostAgentSlot().clearGhost(manifest.id);
+      getGhostErrandSlot().clearGhost(manifest.id);
       approvalChanged = true;
       log.warn('builtin ghost approval receipt failed; approval revoked', {
         id: manifest.id,

@@ -330,6 +330,97 @@ describe('MyIssuesService.list', () => {
     expect(result.githubEnhancementFailed).toBe(true);
   });
 
+  describe('首屏快照写入', () => {
+    it('落地成功后写快照,只带 items 与身份', async () => {
+      const writeSnapshot = vi.fn();
+      const service = new MyIssuesService(
+        makeDeps({
+          now: () => Date.parse('2026-07-31T12:00:00.000Z'),
+          readLedger: () => [ledgerRecord()],
+          resolveGithubEnhancement: async () => GHOST_VIEWER,
+          searchAuthoredIssues: async () => ({ issues: [remoteIssue({ number: 7 })], totalCount: 1 }),
+          writeSnapshot,
+        }),
+      );
+
+      await service.list();
+      expect(writeSnapshot).toHaveBeenCalledTimes(1);
+      const snapshot = writeSnapshot.mock.calls[0]![0];
+      expect(snapshot.items.map((i: { number: number }) => i.number)).toEqual([7, 1001]);
+      expect(snapshot.githubEnhancement).toEqual({ login: 'octocat', source: 'ghost' });
+      expect(snapshot.cachedAt).toBe('2026-07-31T12:00:00.000Z');
+      // 「这一次查得怎么样」不进快照 —— 否则用户进页面就看到一条过期的错误提示。
+      expect(snapshot).not.toHaveProperty('degraded');
+      expect(snapshot).not.toHaveProperty('githubEnhancementFailed');
+      expect(snapshot).not.toHaveProperty('truncated');
+    });
+
+    it('落地时账号已切换 → 不写快照(结果本身也被拒绝交付)', async () => {
+      let scope = 'owner-a:1';
+      const writeSnapshot = vi.fn();
+      const service = new MyIssuesService(
+        makeDeps({
+          readScope: () => scope,
+          fetchPlatformIssues: async () => {
+            scope = 'owner-b:2';
+            return { ok: true as const, page: { issues: [remoteIssue()], totalCount: 1 } };
+          },
+          writeSnapshot,
+        }),
+      );
+
+      await expect(service.list()).rejects.toSatisfy(isStaleAccountScopeError);
+      // 快照按 owner 路径落盘,写进去就等于把 A 的 issue 塞进 B 的首屏。
+      expect(writeSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('期间有提交成功(epoch 变了)→ 不写快照,与内存缓存同一判据', async () => {
+      const writeSnapshot = vi.fn();
+      let release: (() => void) | null = null;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const service = new MyIssuesService(
+        makeDeps({
+          fetchPlatformIssues: async () => {
+            await gate;
+            return { ok: true as const, page: { issues: [remoteIssue()], totalCount: 1 } };
+          },
+          writeSnapshot,
+        }),
+      );
+
+      const pending = service.list();
+      service.invalidate(); // 提交成功 → 账本变了
+      release!();
+      await pending;
+
+      // 落一份已知过时的首屏镜像没有收益(下次进页面反正要查)。
+      expect(writeSnapshot).not.toHaveBeenCalled();
+    });
+
+    it('写快照抛错不影响这一次查询的结果', async () => {
+      const service = new MyIssuesService(
+        makeDeps({
+          readLedger: () => [ledgerRecord()],
+          writeSnapshot: () => {
+            throw new Error('ENOSPC: no space left on device');
+          },
+        }),
+      );
+
+      await expect(service.list()).resolves.toMatchObject({
+        items: [expect.objectContaining({ number: 1001 })],
+      });
+    });
+
+    it('没注入 writeSnapshot 时照常工作(快照是可选加速)', async () => {
+      const service = new MyIssuesService(makeDeps({ readLedger: () => [ledgerRecord()] }));
+      const result = await service.list();
+      expect(result.items.map((i) => i.number)).toEqual([1001]);
+    });
+  });
+
   describe('主通道搜不到时的兜底', () => {
     /**
      * 现实成因(实测):插件 PAT 是 fine-grained token,`get_current_user` 正常、搜本仓

@@ -16,7 +16,11 @@
 
 import { GithubClient } from '@cindy/github-client';
 
-import { MY_ISSUES_REPOSITORY, type MyIssuesDegradedReason } from '../../shared/myIssues.js';
+import {
+  MY_ISSUES_REPOSITORY,
+  type MyIssuesDegradedReason,
+  type MyIssuesSnapshot,
+} from '../../shared/myIssues.js';
 import { getAppCapabilities } from '../appCapabilities.js';
 import { activeOwnerScopeKey } from '../appSessionState.js';
 import { getClientEndpoint } from '../clientEndpointsService';
@@ -39,6 +43,7 @@ import {
   type RemoteIssuePage,
 } from './myIssuesService.js';
 import { listSubmittedIssues } from './submittedIssueLedger.js';
+import { readMyIssuesSnapshot, writeMyIssuesSnapshot } from './myIssuesSnapshotStore.js';
 
 const log = createLogger('github-issue/my-issues-runtime');
 
@@ -74,10 +79,16 @@ export function getMyIssuesService(): MyIssuesService {
       resolveGithubEnhancement: resolveGithubEnhancement,
       searchAuthoredIssues: searchAuthoredIssues,
       searchAuthoredIssuesFallback: searchAuthoredIssuesFallback,
+      writeSnapshot: writeMyIssuesSnapshot,
       readScope: activeOwnerScopeKey,
     });
   }
   return serviceInstance;
+}
+
+/** 首屏快照:进页面先渲染上次结果,不用空等远端。没有 / 坏掉返回 null。 */
+export function getMyIssuesSnapshot(): MyIssuesSnapshot | null {
+  return readMyIssuesSnapshot();
 }
 
 /** 提交成功后让列表缓存立即失效,不然新提交的那条最多要等 60s 才出现。 */

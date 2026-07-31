@@ -10,10 +10,13 @@
  *
  * 一条都没有时,页面退回原来的引导形态(告诉用户怎么用 /issue 提交)。
  *
- * **取数期间不换界面**(engineering-conventions §7):首屏加载不显示 loading 文案,
- * 正文保持引导内容 —— 平台通道的总 deadline 可达 12s,换成一行「加载中」会造成
- * 引导 → loading → 列表 两次跳变;而一条都没有的用户(最常见)看到的引导页更是
- * 从头到尾不该动过。进度反馈只放在 header 的刷新图标上(零布局变化)。
+ * **取数期间不换界面**(engineering-conventions §7),分两层做到:
+ *  1. 有落盘快照时首屏直接渲染上次的列表(useMyIssues 的 hydrate),内容立刻可读可点,
+ *     fresh 一到原子替换 —— 常见路径上根本不存在「等待态」。
+ *  2. 没有快照(首次使用)时保留引导正文,但**不显示标题** —— 标题是结论,而这时还没查完。
+ *     上一版在这里显示「暂时查不到你的 Issue」,于是 GitHub 上有几十条的用户先被告知
+ *     查不到、再跳成列表:比 loading 文案更糟,因为它是错的。
+ * 进度反馈一律只放在 header 的刷新图标上(零布局变化)。
  *
  * 左侧 app 侧栏沿用 cc-agent 项目/对话列表(显式注册,避免冷启动直接进 /issues
  * 时左栏空白,详见 useRegisterCCAgentSidebar)。
@@ -41,7 +44,7 @@ export function IssueTrackerFeatureLayout() {
   const navigate = useNavigate();
   // 沿用 cc-agent 侧栏;冷启动直接进 /issues 时也能播种,不留空白左栏。
   useRegisterCCAgentSidebar();
-  const { data, loading, refreshing, error, refresh } = useMyIssues();
+  const { data, hasFreshData, loading, refreshing, error, refresh } = useMyIssues();
 
   const items = data?.items ?? [];
   const hasItems = items.length > 0;
@@ -102,7 +105,7 @@ export function IssueTrackerFeatureLayout() {
         ) : (
           <>
             <Notices data={data} />
-            <EmptyGuide onStartIssueChat={startIssueChat} data={data} />
+            <EmptyGuide onStartIssueChat={startIssueChat} data={data} hasFreshData={hasFreshData} />
           </>
         )}
       </div>
@@ -271,22 +274,29 @@ function SubmitHintBar({ onStartIssueChat }: { onStartIssueChat: () => void }) {
 function EmptyGuide({
   onStartIssueChat,
   data,
+  hasFreshData,
 }: {
   onStartIssueChat: () => void;
   data: MyIssuesResult | null;
+  hasFreshData: boolean;
 }) {
   const { t } = useTranslation();
-  // data 为 null = 首屏还没拿到结果,同样不能断言「没有提交过」。
-  const trustable = data ? canTrustEmptyList(data) : false;
+  // 这一轮还没查完(或数据来自落盘快照)时**整个标题不渲染**:引导正文与 CTA 无论有没有
+  // issue 都成立,标题却是个结论。上一版在这里显示「暂时查不到你的 Issue」,于是有 35 条
+  // 的用户先被告知查不到、再跳成列表 —— 比 loading 文案更糟,因为它是错的。
+  // 标题从无到有是内容增加,不是形态替换。
+  const trustable = hasFreshData && data ? canTrustEmptyList(data) : false;
   return (
     <div className="flex flex-col items-center gap-4 px-8 py-16 text-center">
       <div className="flex size-16 items-center justify-center rounded-full bg-sidebar-item-hover">
         <Bug size={28} className="text-sidebar-muted" strokeWidth={1.5} />
       </div>
 
-      <h2 className="text-lg font-medium text-foreground">
-        {t(trustable ? 'issueTracker.mine.emptyTitle' : 'issueTracker.mine.emptyTitleUnverified')}
-      </h2>
+      {hasFreshData ? (
+        <h2 className="text-lg font-medium text-foreground">
+          {t(trustable ? 'issueTracker.mine.emptyTitle' : 'issueTracker.mine.emptyTitleUnverified')}
+        </h2>
+      ) : null}
 
       <p className="max-w-md text-sm text-sidebar-muted">
         {t('issueAgent.redirect.descriptionBefore')}

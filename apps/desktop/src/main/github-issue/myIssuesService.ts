@@ -22,6 +22,7 @@ import type {
   MyIssueSource,
   MyIssuesDegradedReason,
   MyIssuesResult,
+  MyIssuesSnapshot,
   SubmittedIssueRecord,
 } from '../../shared/myIssues.js';
 import { myIssueUrl } from '../../shared/myIssues.js';
@@ -99,6 +100,11 @@ export interface MyIssuesServiceDeps {
    * 「主通道失败必须换通道再试」这条不变量只有放这一层才钉得住。
    */
   searchAuthoredIssuesFallback?: (login: string) => Promise<RemoteIssuePage | null>;
+  /**
+   * 落地成功后写首屏快照(下次进页面先渲染它,不用空等远端)。
+   * 注入而非直接 import,是为了让本模块保持 electron-free、单测不碰磁盘。
+   */
+  writeSnapshot?: (snapshot: MyIssuesSnapshot) => void;
   /**
    * 当前账号作用域标识(data owner + session generation)。**这是安全边界**:
    * issue 列表含标题、编号与 GitHub 用户名,属于账号私有数据。服务是进程级单例,
@@ -207,8 +213,30 @@ export class MyIssuesService {
     }
     if (this.cacheEpoch === epochAtStart) {
       this.cache = { at: this.now(), scope, result };
+      // 落盘快照与内存缓存**同一个判据**,不为它另立一套:epoch 变了说明期间有提交成功过,
+      // 落一份已知过时的首屏镜像没有收益(下次进页面反正要查)。刻意只带 items 与身份 ——
+      // degraded / failed / truncated 是「这一次查得怎么样」,缓存它们会让用户进页面
+      // 就看到过期的错误提示。
+      this.persistSnapshot(result);
     }
     return result;
+  }
+
+  /** 快照是 best-effort 的首屏加速:写失败只记日志,绝不能把一次成功的查询翻成失败。 */
+  private persistSnapshot(result: MyIssuesResult): void {
+    const write = this.deps.writeSnapshot;
+    if (!write) return;
+    try {
+      write({
+        items: result.items,
+        githubEnhancement: result.githubEnhancement,
+        cachedAt: new Date(this.now()).toISOString(),
+      });
+    } catch (err) {
+      log.warn('writing the my-issues snapshot failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**

@@ -4553,6 +4553,14 @@ interface ElectronAPI {
       input: import('../shared/helpTypes').HelpFeedbackDraftInput,
     ) => Promise<import('../shared/helpTypes').HelpFeedbackDraft>;
     /** /issues 页面的「我的 Issue」列表;force=true 绕过 main 侧 60s TTL(手动刷新)。 */
+    /**
+     * /issues 首屏快照(上次查询成功时落盘的列表镜像)。进页面先渲染它,避免空等远端;
+     * fresh 一到即整体接管。**非权威**:里面没有本次查询的健康状况,它的空列表也不构成
+     * 「查证过的空」(详见 main/github-issue/myIssuesSnapshotStore.ts)。
+     */
+    getMyIssuesSnapshot: () => Promise<
+      import('../shared/myIssues').MyIssuesSnapshot | null
+    >;
     listMyIssues: (options?: { force?: boolean }) => Promise<
       | ({ success: true } & import('../shared/myIssues').MyIssuesResult)
       | {
@@ -4561,6 +4569,7 @@ interface ElectronAPI {
           error: import('../shared/myIssues').MyIssuesErrorCode;
           items: [];
           githubEnhancement: null;
+          githubEnhancementFailed: false;
           degraded: null;
           truncated: false;
         }

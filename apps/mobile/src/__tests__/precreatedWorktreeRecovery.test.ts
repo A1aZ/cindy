@@ -461,4 +461,66 @@ describe('precreated worktree recovery ledger', () => {
       RECORD,
     ]);
   });
+
+  it('cancels an old owner while retrying and lets the new owner recover its own ledger', async () => {
+    await registerPendingPrecreatedWorktree(ACCOUNT, RECORD);
+    const accountB = 'account-b';
+    const recordB = {
+      ...RECORD,
+      sessionId: 'session-b',
+    };
+    await registerPendingPrecreatedWorktree(accountB, recordB);
+
+    let currentOwner = ACCOUNT;
+    const openLinkA = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('device offline'), {
+        code: 'DEVICE_OFFLINE',
+      }))
+      .mockResolvedValue(undefined);
+    const sleepA = vi.fn(async () => {
+      currentOwner = accountB;
+    });
+    const isSessionClaimedA = vi.fn(async () => false);
+    const discardA = vi.fn(async () => ({ discarded: true }));
+
+    await expect(
+      recoverPendingPrecreatedWorktrees(ACCOUNT, {
+        openLink: openLinkA,
+        discardPrecreated: discardA,
+        isSessionClaimed: isSessionClaimedA,
+        sleep: sleepA,
+        isCurrent: () => currentOwner === ACCOUNT,
+      }),
+    ).resolves.toMatchObject({
+      attempted: 1,
+      recovered: 0,
+      retained: 0,
+    });
+    expect(openLinkA).toHaveBeenCalledTimes(1);
+    expect(isSessionClaimedA).not.toHaveBeenCalled();
+    expect(discardA).not.toHaveBeenCalled();
+    await expect(listPendingPrecreatedWorktrees(ACCOUNT)).resolves.toEqual([
+      RECORD,
+    ]);
+
+    const discardB = vi.fn(async () => ({ discarded: true }));
+    await expect(
+      recoverPendingPrecreatedWorktrees(accountB, {
+        openLink: vi.fn(async () => undefined),
+        discardPrecreated: discardB,
+        isSessionClaimed: vi.fn(async () => false),
+        sleep: async () => undefined,
+        isCurrent: () => currentOwner === accountB,
+      }),
+    ).resolves.toMatchObject({
+      attempted: 1,
+      recovered: 1,
+      retained: 0,
+    });
+    expect(discardB).toHaveBeenCalledWith('device-1', {
+      sessionId: recordB.sessionId,
+      path: recordB.path,
+    });
+    await expect(listPendingPrecreatedWorktrees(accountB)).resolves.toEqual([]);
+  });
 });

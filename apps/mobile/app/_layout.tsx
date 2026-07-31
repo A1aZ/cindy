@@ -172,6 +172,14 @@ function PrecreatedWorktreeRecoveryBridge() {
     promise: Promise<void>;
   } | null>(null);
   const accountId = auth.user?.id?.trim() ?? '';
+  const ownerGenerationRef = useRef({ accountId: '', generation: 0 });
+  if (ownerGenerationRef.current.accountId !== accountId) {
+    ownerGenerationRef.current = {
+      accountId,
+      generation: ownerGenerationRef.current.generation + 1,
+    };
+  }
+  const ownerGeneration = ownerGenerationRef.current.generation;
 
   const runRecovery = useCallback(async () => {
     if (
@@ -217,6 +225,13 @@ function PrecreatedWorktreeRecoveryBridge() {
         getNewSessionCreationTask(record.sessionId) !== null
         || isPrecreatedWorktreeRegistrationInFlight(record.sessionId)
       ),
+      // Account selection updates user/token while the AuthProvider stays mounted.
+      // Fence this run against that owner generation so stable Device Link callbacks
+      // cannot retarget an old account's recovery to the new client.
+      isCurrent: () => (
+        ownerGenerationRef.current.accountId === accountId
+        && ownerGenerationRef.current.generation === ownerGeneration
+      ),
     });
     const tracked = {
       accountId,
@@ -235,6 +250,7 @@ function PrecreatedWorktreeRecoveryBridge() {
     deviceLinkStatus,
     invoke,
     openLink,
+    ownerGeneration,
   ]);
 
   useEffect(() => {

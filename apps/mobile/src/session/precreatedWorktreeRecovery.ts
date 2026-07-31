@@ -66,6 +66,12 @@ export interface PrecreatedWorktreeRecoveryDeps {
   sleep?: (ms: number) => Promise<void>;
   /** 任务仍在当前进程内时延后，避免恢复 bridge 与创建管线竞态。 */
   shouldDefer?: (record: PendingPrecreatedWorktree) => boolean;
+  /**
+   * 账号 owner generation fence。账号切换后旧 run 必须在下一次远程 ownership
+   * probe / discard 前停止；否则稳定的 Device Link callback 可能取到新账号的
+   * client，对旧账号的 recoveryKey 执行 destructive discard。
+   */
+  isCurrent?: () => boolean;
 }
 
 export interface PrecreatedWorktreeRecoveryResult {
@@ -437,6 +443,10 @@ async function removeIfCurrent(
   await forgetPendingPrecreatedWorktree(accountId, record);
 }
 
+function isRecoveryCurrent(deps: PrecreatedWorktreeRecoveryDeps): boolean {
+  return deps.isCurrent?.() ?? true;
+}
+
 /**
  * 冷启动 / 重连时主动处理没有当前内存 task 认领的记录。
  *
@@ -458,6 +468,7 @@ export async function recoverPendingPrecreatedWorktrees(
     storageReadable: ledger.storageReadable,
   };
   for (const record of records) {
+    if (!isRecoveryCurrent(deps)) break;
     if (deps.shouldDefer?.(record)) {
       result.deferred += 1;
       continue;
@@ -466,10 +477,16 @@ export async function recoverPendingPrecreatedWorktrees(
     try {
       await withTransientRemoteRetry(
         async () => {
+          // Check immediately before every remote operation. The recovery bridge's
+          // openLink/invoke callbacks are stable and resolve the current client at
+          // call time, so an owner switch can otherwise retarget this old run.
+          if (!isRecoveryCurrent(deps)) return;
           await deps.openLink(record.deviceId);
+          if (!isRecoveryCurrent(deps)) return;
           if (await deps.isSessionClaimed(record.deviceId, record.sessionId)) {
             return;
           }
+          if (!isRecoveryCurrent(deps)) return;
           if (typeof record.path === 'string') {
             await deps.discardPrecreated(record.deviceId, {
               sessionId: record.sessionId,
@@ -489,14 +506,20 @@ export async function recoverPendingPrecreatedWorktrees(
           ...(deps.sleep ? { sleep: deps.sleep } : {}),
         },
       );
+      if (!isRecoveryCurrent(deps)) break;
       await removeIfCurrent(accountId, record);
       result.recovered += 1;
       continue;
     } catch (error) {
+      // Do not let the old owner's catch path perform a second ownership probe or
+      // remove the old ledger after the auth owner has changed.
+      if (!isRecoveryCurrent(deps)) break;
       // 旧工作端可能已经成功创建 session，但不认识新的 discard channel。无论
       // discard 以何种错误返回都再对账一次，不能只在 PRECONDITION_FAILED 时查询。
       try {
+        if (!isRecoveryCurrent(deps)) break;
         if (await deps.isSessionClaimed(record.deviceId, record.sessionId)) {
+          if (!isRecoveryCurrent(deps)) break;
           await removeIfCurrent(accountId, record);
           result.recovered += 1;
           continue;

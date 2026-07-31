@@ -101,8 +101,12 @@ Cindy 显式设置:models.json、`--append-system-prompt`、`--session-dir`、�
   接通;本次补齐 UI(CreateWorkerPopover / CollaborationModeToggle / draft 映射)、两个
   main IPC coercion(WORKER_CREATE / SESSION_ENABLE_ORCA)、worker 展示(π 而非 Claude 脸)。
   注:pi 二进制缺失时 buildPiAgent 返回 null,pi 不进 agents map,建 pi worker 会抛错。
-- **压缩即记忆**:bridge 接 `session_before_compact` → cindy_memory 管道。需 LLM 摘要
-  决策(裸 dump 会污染 memory),不能纯机械转存 —— 设计待定。
+- ✅ **压缩即记忆**(已交付):新增 `digest` 记忆类型(与 curated 解耦)。pi `compaction_end`
+  带 `result.summary` 时经 `deps.makerMemory.write` 写 digest —— 进 FTS 可 `memory_search`,
+  但排除出 MEMORY.md / system prompt / LLM 的 memory_write 工具,**不污染 curated 记忆**。
+  gate 同 CC(makerMemoryEnabled + manager),fire-and-forget。见 `memory/types.ts`
+  (MEMORY_TYPES / CURATED_MEMORY_TYPES)、`memory/storage.ts rebuildIndex`、`pi/index.ts`
+  writeCompactionDigest。
 - **BYOM / 本地模型**:走 pi 原生 provider(见设计原则),设置页开自定义/本地模型入口,仅对 pi 生效。
 - **会话树**:按现有 fork/分支功能的树状升级迭代(pi 原生 append-only entry 树 + 分支摘要),
   不引入新概念。

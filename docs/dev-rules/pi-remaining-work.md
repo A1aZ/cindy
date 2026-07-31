@@ -34,7 +34,14 @@ auto fail-closed、成本派生链、弹窗正文 harness 无关)。
 
 ---
 
-## 还差 1:压缩即记忆(需先定设计)
+## ✅ 已交付:压缩即记忆(2026-07-30,Option 1)
+
+新增 `digest` 记忆类型:pi `compaction_end.result.summary` → `deps.makerMemory.write` 写 digest,
+进 FTS 可 `memory_search`,但排除出 MEMORY.md / system prompt / LLM memory_write 工具。见
+`memory/types.ts`、`memory/storage.ts rebuildIndex`、`pi/index.ts` writeCompactionDigest +
+onEvent 钩子。下方原设计说明保留作背景。
+
+### (原调研)压缩即记忆的设计取舍
 
 **目标**:pi 压缩上下文时,把被丢弃内容的要点沉淀进 Cindy 记忆,新会话可召回。
 

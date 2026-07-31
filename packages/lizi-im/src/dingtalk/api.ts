@@ -12,6 +12,11 @@ const HTTP_TIMEOUT_MS = 30_000;
 
 export type DingTalkFetch = typeof fetch;
 
+export type DingTalkMediaFetcher = (
+  url: string,
+  maxBytes: number,
+) => Promise<{ buffer: Uint8Array; mimeType?: string }>;
+
 interface AccessTokenCache {
   value: string;
   expiresAt: number;
@@ -138,6 +143,7 @@ export class DingTalkApiClient {
 
   async downloadImage(
     downloadCode: string,
+    guardedMediaFetcher?: DingTalkMediaFetcher,
   ): Promise<{ buffer: Uint8Array; mimeType: string }> {
     const token = await this.getAccessToken();
     const response = await this.postJson(
@@ -148,22 +154,31 @@ export class DingTalkApiClient {
     const downloadUrl = stringField(response, "downloadUrl");
     if (!downloadUrl)
       throw new Error("dingtalk media response missing downloadUrl");
-    const res = await this.fetchTrustedMedia(downloadUrl);
+    const normalizedDownloadUrl = normalizeMediaDownloadUrl(downloadUrl);
+    if (guardedMediaFetcher) {
+      let downloaded: Awaited<ReturnType<DingTalkMediaFetcher>>;
+      try {
+        downloaded = await guardedMediaFetcher(
+          normalizedDownloadUrl,
+          MAX_DINGTALK_IMAGE_BYTES,
+        );
+      } catch {
+        // Signed media URLs may contain temporary credentials in their query.
+        // Do not propagate host errors that could echo the full URL into logs.
+        throw new Error("dingtalk guarded media download failed");
+      }
+      return validateDownloadedImage(downloaded.buffer);
+    }
+    const res = await this.fetchTrustedMedia(normalizedDownloadUrl);
     if (!res.ok)
       throw new Error(`dingtalk media download failed: HTTP ${res.status}`);
     const declaredLength = Number(res.headers.get("content-length") ?? 0);
     if (declaredLength > MAX_DINGTALK_IMAGE_BYTES) {
       throw new Error("dingtalk media exceeds the image size limit");
     }
-    const bytes = await readBodyLimited(res, MAX_DINGTALK_IMAGE_BYTES);
-    if (bytes.byteLength === 0) {
-      throw new Error("dingtalk media has an invalid image size");
-    }
-    const mimeType = detectImageMime(bytes);
-    if (!mimeType) {
-      throw new Error("dingtalk media is not an image");
-    }
-    return { buffer: bytes, mimeType };
+    return validateDownloadedImage(
+      await readBodyLimited(res, MAX_DINGTALK_IMAGE_BYTES),
+    );
   }
 
   private async fetchTrustedMedia(downloadUrl: string): Promise<Response> {
@@ -336,7 +351,11 @@ export class DingTalkApiClient {
 
 function isAllowedMediaHost(url: URL): boolean {
   if (url.protocol !== "https:") return false;
-  const hostname = url.hostname.toLowerCase();
+  return isKnownDingTalkMediaHostname(url.hostname);
+}
+
+function isKnownDingTalkMediaHostname(value: string): boolean {
+  const hostname = value.toLowerCase();
   return (
     hostname === "dingtalk.com" ||
     hostname.endsWith(".dingtalk.com") ||
@@ -345,6 +364,26 @@ function isAllowedMediaHost(url: URL): boolean {
     hostname === "alicdn.com" ||
     hostname.endsWith(".alicdn.com")
   );
+}
+
+function normalizeMediaDownloadUrl(value: string): string {
+  const url = new URL(value);
+  if (url.protocol === "http:" && isKnownDingTalkMediaHostname(url.hostname)) {
+    url.protocol = "https:";
+  }
+  return url.toString();
+}
+
+function validateDownloadedImage(bytes: Uint8Array): {
+  buffer: Uint8Array;
+  mimeType: string;
+} {
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_DINGTALK_IMAGE_BYTES) {
+    throw new Error("dingtalk media has an invalid image size");
+  }
+  const mimeType = detectImageMime(bytes);
+  if (!mimeType) throw new Error("dingtalk media is not an image");
+  return { buffer: bytes, mimeType };
 }
 
 function isRedirectResponse(response: Response): boolean {

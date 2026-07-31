@@ -648,7 +648,12 @@ export class DingTalkIM extends BaseIM implements ChannelIM {
     if (cached) {
       return imageAttachment(cached.absPath, cached.url, cached.mimeType);
     }
-    const downloaded = await this.requireApi().downloadImage(downloadCode);
+    const downloaded = await this.requireApi().downloadImage(
+      downloadCode,
+      media.fetchRemoteImage
+        ? (url, maxBytes) => media.fetchRemoteImage!(url, maxBytes)
+        : undefined,
+    );
     if (connectionVersion !== this.connectionVersion) return null;
     const stored = await media.cacheImage({
       integration: "dingtalk",

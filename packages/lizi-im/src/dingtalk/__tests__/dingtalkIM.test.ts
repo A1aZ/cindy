@@ -293,6 +293,62 @@ describe("DingTalkIM", () => {
     });
   });
 
+  it("downloads inbound images through the host SSRF guard", async () => {
+    const { host, secrets } = makeHost();
+    secrets.set("dingtalk-bot-owner-user-id", "owner-1");
+    const fetchRemoteImage = vi.fn(async () => ({
+      buffer: Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      mimeType: "application/octet-stream",
+    }));
+    host.media = {
+      getCachedImage: vi.fn(async () => null),
+      cacheImage: vi.fn(async () => ({
+        absPath: "/media/image.png",
+        url: "cindy-media://image.png",
+      })),
+      resolveMediaUrl: vi.fn(() => null),
+      fetchRemoteImage,
+    };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ accessToken: "token", expireIn: 7200 })),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            downloadUrl: "https://temporary-media.example-cdn.net/signed/image",
+          }),
+        ),
+      );
+    const client = new FakeClient();
+    const im = new DingTalkIM(host, { clientFactory: () => client, fetcher });
+    const received: IMMessageEvent[] = [];
+    im.onMessage((event) => received.push(event));
+    await im.init();
+
+    client.emit(
+      directMessage({
+        msgId: "picture-1",
+        msgtype: "picture",
+        content: { downloadCode: "download-1" },
+      }),
+    );
+
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    expect(fetchRemoteImage).toHaveBeenCalledWith(
+      "https://temporary-media.example-cdn.net/signed/image",
+      20 * 1024 * 1024,
+    );
+    expect(received[0]?.attachments).toEqual([
+      expect.objectContaining({
+        kind: "image",
+        absPath: "/media/image.png",
+        mimeType: "image/png",
+      }),
+    ]);
+  });
+
   it("accepts an unmentioned owner reply for a pending group interaction", async () => {
     const { host } = makeHost();
     const client = new FakeClient();

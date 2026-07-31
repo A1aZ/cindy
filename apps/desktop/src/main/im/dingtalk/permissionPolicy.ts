@@ -8,9 +8,11 @@ function record(value: unknown): Record<string, unknown> | null {
 }
 
 /**
- * Every remote DingTalk turn carries an explicit confirmation boundary for
- * destructive or opaque writes. Sessions configured with an incompatible
- * unattended permission mode fail closed in maker-core.
+ * DingTalk group turns carry an explicit confirmation boundary for destructive
+ * or opaque writes. Owner DMs do not use this per-turn policy and instead obey
+ * the session permission mode, matching Feishu and Telegram private chats.
+ * Group sessions configured with an incompatible unattended permission mode
+ * fail closed in maker-core.
  */
 export function createDingTalkTurnPermissionPolicy(taskId: string): TurnPermissionPolicy {
   return {

@@ -124,6 +124,52 @@ describe("DingTalkApiClient", () => {
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
+  it("delegates temporary media URLs to a host guarded downloader", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ accessToken: "token", expireIn: 7200 }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          downloadUrl:
+            "http://wukong-file-im-zjk.oss-cn-zhangjiakou.aliyuncs.com/signed/image?signature=secret",
+        }),
+      );
+    const guardedMediaFetcher = vi.fn(async () => ({
+      buffer: PNG_BYTES,
+      mimeType: "application/octet-stream",
+    }));
+    const api = new DingTalkApiClient("app-key", "app-secret", fetcher);
+
+    await expect(
+      api.downloadImage("download-code", guardedMediaFetcher),
+    ).resolves.toEqual({ buffer: PNG_BYTES, mimeType: "image/png" });
+    expect(guardedMediaFetcher).toHaveBeenCalledWith(
+      "https://wukong-file-im-zjk.oss-cn-zhangjiakou.aliyuncs.com/signed/image?signature=secret",
+      20 * 1024 * 1024,
+    );
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("validates media bytes returned by the host guarded downloader", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ accessToken: "token", expireIn: 7200 }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ downloadUrl: "https://cdn.example/image" }),
+      );
+    const api = new DingTalkApiClient("app-key", "app-secret", fetcher);
+
+    await expect(
+      api.downloadImage("download-code", async () => ({
+        buffer: new TextEncoder().encode("not an image"),
+      })),
+    ).rejects.toThrow(/not an image/);
+  });
+
   it("follows a bounded redirect between trusted DingTalk media hosts", async () => {
     const fetcher = vi
       .fn<typeof fetch>()

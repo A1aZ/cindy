@@ -293,6 +293,92 @@ describe("DingTalkIM", () => {
     });
   });
 
+  it("accepts an unmentioned owner reply for a pending group interaction", async () => {
+    const { host } = makeHost();
+    const client = new FakeClient();
+    const im = new DingTalkIM(host, {
+      clientFactory: () => client,
+      fetcher: validCredentialFetcher(),
+    });
+    const received: IMMessageEvent[] = [];
+    im.onMessage((event) => received.push(event));
+    await im.init();
+    client.emit(directMessage());
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+
+    client.emit(
+      directMessage({
+        conversationId: "group/a",
+        conversationType: "2",
+        msgId: "group-message-1",
+        senderStaffId: "guest-1",
+        senderNick: "Guest",
+        isInAtList: true,
+        text: { content: "group question" },
+      }),
+      "callback-2",
+    );
+    await vi.waitFor(() => expect(received).toHaveLength(2));
+
+    const reply = im.requestTextReply(
+      "g/group%2Fa",
+      "请选择 1 或 2",
+      (text) => (text === "1" ? "accepted" : null),
+      1_000,
+    );
+    let settled = false;
+    void reply.finally(() => {
+      settled = true;
+    });
+
+    client.emit(
+      directMessage({
+        conversationId: "group/a",
+        conversationType: "2",
+        msgId: "group-message-2",
+        senderStaffId: "guest-1",
+        senderNick: "Guest",
+        isInAtList: false,
+        text: { content: "1" },
+      }),
+      "callback-3",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe(false);
+    expect(received).toHaveLength(2);
+
+    client.emit(
+      directMessage({
+        conversationId: "group/a",
+        conversationType: "2",
+        msgId: "group-message-3",
+        senderStaffId: "owner-1",
+        senderNick: "Owner",
+        isInAtList: false,
+        text: { content: "1" },
+      }),
+      "callback-4",
+    );
+
+    await expect(reply).resolves.toBe("accepted");
+    expect(received).toHaveLength(2);
+
+    client.emit(
+      directMessage({
+        conversationId: "group/a",
+        conversationType: "2",
+        msgId: "group-message-4",
+        senderStaffId: "owner-1",
+        senderNick: "Owner",
+        isInAtList: false,
+        text: { content: "ordinary message" },
+      }),
+      "callback-5",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(received).toHaveLength(2);
+  });
+
   it("does not expose the app secret through public state", async () => {
     const { host } = makeHost();
     const client = new FakeClient();

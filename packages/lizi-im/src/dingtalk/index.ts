@@ -584,7 +584,6 @@ export class DingTalkIM extends BaseIM implements ChannelIM {
       if (isGroup || !this.claimOwner(envelope.senderId)) return;
     }
     if (!isGroup && envelope.senderId !== this.ownerUserId) return;
-    if (isGroup && !envelope.mentioned) return;
 
     const content = parseInboundContent(envelope);
     if (
@@ -593,6 +592,7 @@ export class DingTalkIM extends BaseIM implements ChannelIM {
     ) {
       return;
     }
+    if (isGroup && !envelope.mentioned) return;
 
     const attachments = [];
     const unsupported = [...content.unsupported];

@@ -328,6 +328,7 @@ import { prepareHandoffWorktree, shouldRecycleHandoffWorktreeOnFailure } from '.
 import { validateHandoffWorkingDir } from './handoffWorkingDir.js';
 import { registerProjectPluginPolicyHandlers } from './projectPluginPolicyHandlers.js';
 import { registerPrecreatedWorktreeDiscardHandler } from './precreatedWorktreeDiscardHandler.js';
+import { registerNewMakerWorktreePreferenceHandler } from './newMakerWorktreePreferenceHandler.js';
 import {
   restoreMissingManagedWorktreeForSession,
   WorktreeManager as worktreeManager,
@@ -3720,15 +3721,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // 被控端不直接改 newMakerDefaultsCache(那只是镜像、renderer 才是真相),把布尔转发给
   // 自身 renderer(WORKTREE_PREF_APPLY,仅本地窗口),renderer patchDraft 写真实草稿;
   // 变更经既有 SYNC_NEW_MAKER_DRAFT re-mirror + NEW_MAKER_DRAFT_CHANGED 回流控制端。
-  ipcMain.handle(MAKER_INVOKE.APPLY_NEW_MAKER_WORKTREE_PREF, (_e, pref: unknown) => {
-    if (!pref || typeof pref !== 'object') throwIpcError('INVALID_PARAMS', 'pref required');
-    const p = pref as { worktreeEnabled?: unknown };
-    if (typeof p.worktreeEnabled !== 'boolean') {
-      throwIpcError('INVALID_PARAMS', 'worktreeEnabled must be boolean');
-    }
-    broadcastToAllWindows(MAKER_PUSH.WORKTREE_PREF_APPLY, {
-      worktreeEnabled: p.worktreeEnabled,
-    });
+  registerNewMakerWorktreePreferenceHandler(createElectronIpcHandlerRegistry(), {
+    isDeviceLinkInvoke,
+    assertTrustedCaller: (event) =>
+      assertTrustedAppRendererEvent(
+        event as Parameters<typeof assertTrustedAppRendererEvent>[0],
+      ),
+    broadcast: broadcastToAllWindows,
   });
 
   // 旧控制端的 device-link 会话模型预设写穿兼容入口。转发给被控端 renderer 后,renderer 将值

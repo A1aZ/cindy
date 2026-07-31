@@ -132,7 +132,7 @@ export const MAKER_INVOKE = {
    * 是 vendor 无关的 newMakerDraft 根字段,校验形状与模型 pref 完全不同(无 modelId/providerId),
    * 硬塞进 APPLY_NEW_MAKER_DRAFT_PREF 会破坏其形状校验语义,故独立窄 channel。
    * 被控端 handler 校验布尔后转发给**自身 renderer**(WORKTREE_PREF_APPLY),renderer
-   * patchDraft({worktreeEnabled}) 写真实草稿;变更经既有 SYNC_NEW_MAKER_DRAFT re-mirror +
+   * setWorktreePreference 按字段写真实草稿;变更经既有 SYNC_NEW_MAKER_DRAFT re-mirror +
    * NEW_MAKER_DRAFT_CHANGED 广播回控制端。入参 = { worktreeEnabled: boolean }。
    * 旧被控端无此 channel → CHANNEL_NOT_ALLOWED → 控制端吞掉降级(勾选仅本次草稿生效)。
    */

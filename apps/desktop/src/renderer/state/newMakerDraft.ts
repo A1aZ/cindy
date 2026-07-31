@@ -362,25 +362,40 @@ function loadFromStorage(): NewMakerDraft {
 // 之前的 100ms debounce 在 release 的"热更新→relaunch"路径上会丢失最近一次
 // 改动 (lifecycle 走 app.exit() 强退, 来不及 fire 这个 setTimeout), 直接同步
 // 落盘最稳。
-function parseStoredWorktreePreference(raw: string | null): boolean | undefined {
+type StoredDraftRecord = Record<string, unknown>;
+
+function parseStoredDraftRecord(raw: string | null): StoredDraftRecord | undefined {
   if (raw == null) return undefined;
   try {
-    const parsed = JSON.parse(raw) as Partial<NewMakerDraft> | null;
-    if (!parsed || typeof parsed !== 'object') return undefined;
-    return parsed.worktreeEnabled === true;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    return parsed as StoredDraftRecord;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseStoredWorktreePreference(raw: string | null): boolean | undefined {
+  const parsed = parseStoredDraftRecord(raw);
+  return parsed ? parsed.worktreeEnabled === true : undefined;
+}
+
+function readStoredDraftRecord(): StoredDraftRecord | undefined {
+  if (typeof window === 'undefined') return undefined;
+  try {
+    return parseStoredDraftRecord(window.localStorage.getItem(storageKey()));
   } catch {
     return undefined;
   }
 }
 
 function readStoredWorktreePreference(): boolean | undefined {
-  if (typeof window === 'undefined') return undefined;
-  try {
-    return parseStoredWorktreePreference(window.localStorage.getItem(storageKey()));
-  } catch {
-    return undefined;
-  }
+  const parsed = readStoredDraftRecord();
+  return parsed ? parsed.worktreeEnabled === true : undefined;
 }
+
+type PreferenceSyncFallback = 'full-draft' | 'worktree-only' | null;
+let preferenceSyncFallback: PreferenceSyncFallback = null;
 
 /**
  * Persist a complete draft snapshot without letting another renderer's stale in-memory copy
@@ -406,8 +421,10 @@ function scheduleWrite(
   }
   try {
     window.localStorage.setItem(storageKey(), JSON.stringify(currentDraft));
+    preferenceSyncFallback = null;
   } catch {
     // localStorage 满 / 私密窗口禁写——忽略,不影响内存状态。
+    preferenceSyncFallback = 'full-draft';
   }
 }
 
@@ -449,12 +466,62 @@ export function getDraft(): NewMakerDraft {
   return currentDraft;
 }
 
+/**
+ * App 向 main 镜像偏好时读取的共享快照。
+ *
+ * 每个 Electron 窗口都有独立 currentDraft；跨窗口事件触发 emit 后，直接读本窗口内存会把
+ * 旧 model / workingDir 等字段覆盖进 main 缓存。localStorage 是这些持久偏好的跨窗口真相，
+ * 因此同步时优先读并 sanitize 它；完整草稿落盘失败才回退整份内存，单字段 worktree 写失败
+ * 只覆盖该布尔，避免失败路径重新带回其它旧字段。
+ */
+export function getDraftForPreferenceSync(): NewMakerDraft {
+  const stored = readStoredDraftRecord();
+  if (!stored || preferenceSyncFallback === 'full-draft') return currentDraft;
+  const persistedDraft = sanitize(stored);
+  return preferenceSyncFallback === 'worktree-only'
+    ? { ...persistedDraft, worktreeEnabled: currentDraft.worktreeEnabled }
+    : persistedDraft;
+}
+
 /** Switch the persistent draft namespace together with the active data owner. */
 export function setNewMakerDraftOwner(ownerId: string | null): void {
   const normalized = typeof ownerId === 'string' && ownerId.trim().length > 0 ? ownerId : null;
   if (activeDataOwnerId === normalized) return;
   activeDataOwnerId = normalized;
   currentDraft = loadFromStorage();
+  preferenceSyncFallback = null;
+  emit();
+}
+
+/**
+ * 按字段更新工作端级 worktree 偏好。
+ *
+ * main 会把远程写穿广播给所有 renderer。这里必须从共享 localStorage 的最新对象合并目标
+ * 字段，而不能让每个窗口用各自完整 currentDraft 回写；否则最后响应的旧窗口会回滚其它偏好。
+ * 当前窗口内存也只更新该字段，保留 device-link / extraDirs 等窗口内临时草稿。
+ */
+export function setWorktreePreference(enabled: boolean): void {
+  const worktreeEnabled = enabled === true;
+  if (typeof window !== 'undefined') {
+    const stored = readStoredDraftRecord();
+    const base = stored ?? currentDraft;
+    if (stored?.worktreeEnabled !== worktreeEnabled) {
+      try {
+        window.localStorage.setItem(
+          storageKey(),
+          JSON.stringify({ ...base, worktreeEnabled }),
+        );
+        preferenceSyncFallback = null;
+      } catch {
+        // 单字段落盘失败时仅让 main 从本窗口内存取 worktree 布尔；其它偏好继续使用共享
+        // 持久快照，避免旧窗口借失败兜底重新带回整份旧草稿。
+        preferenceSyncFallback = 'worktree-only';
+      }
+    } else {
+      preferenceSyncFallback = null;
+    }
+  }
+  currentDraft = { ...currentDraft, worktreeEnabled };
   emit();
 }
 

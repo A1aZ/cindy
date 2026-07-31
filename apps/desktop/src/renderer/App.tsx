@@ -39,11 +39,11 @@ import {
   useResyncAgentIslandSettingsAfterLogin,
 } from '@/hooks/useAgentIslandSettings';
 import {
-  getDraft,
+  getDraftForPreferenceSync,
   subscribeDraft,
   setEffortForModel,
   setFastModeForModel,
-  patchDraft,
+  setWorktreePreference,
   patchVendorPrefs,
   patchVendorPrefsPreservingModelChoice,
 } from '@/state/newMakerDraft';
@@ -128,7 +128,9 @@ export function App() {
     //  - syncNewMakerDraft: 给 collab mode spawn worker 用 (双 vendor + 按模型记忆)
     // 都是 ipcRenderer.send fire-and-forget; handler 在 createWindow 前已注册。
     const syncPrefs = () => {
-      const draft = getDraft();
+      // 多 renderer 的模块内存彼此独立；跨窗口通知必须从共享持久快照同步，避免旧窗口把
+      // 自己的 model / workingDir 等完整旧草稿覆盖进 main 缓存。
+      const draft = getDraftForPreferenceSync();
       const cc = draft.lastByVendor.cc;
       window.electronAPI.syncDesktopCcPrefs({
         model: cc.model,
@@ -225,10 +227,10 @@ export function App() {
         });
       },
     );
-    // 控制端写穿的「新建会话默认启用 worktree」:renderer 是草稿真相,直接 patchDraft 落
-    // localStorage;写入触发 subscribeDraft → SYNC_NEW_MAKER_DRAFT re-mirror → 广播回流。
+    // 控制端写穿的「新建会话默认启用 worktree」:按共享 localStorage 的最新对象只合并
+    // 该字段;写入触发 subscribeDraft → SYNC_NEW_MAKER_DRAFT re-mirror → 广播回流。
     const offWorktree = window.electronAPI.onMakerWorktreePrefApply(({ worktreeEnabled }) => {
-      patchDraft({ worktreeEnabled: worktreeEnabled === true });
+      setWorktreePreference(worktreeEnabled === true);
     });
     return () => {
       offDraft();

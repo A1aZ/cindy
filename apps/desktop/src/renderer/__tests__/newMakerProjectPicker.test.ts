@@ -162,7 +162,7 @@ describe('Shared create project picker', () => {
     // 用户裁决(实测后第二版):勾选状态只属于用户——
     //  1) 组件内不存在任何 useEffect 自动改写 enabled 的路径(资格变化只禁用、
     //     不改状态;旧 handleAutoDisable 机制不得复活);
-    //  2) 用户点击 checkbox(source='chip')→ 写穿工作端记忆(本地 patchDraft /
+    //  2) 用户点击 checkbox(source='chip')→ 写穿工作端记忆(本地专用单字段 setter /
     //     device-link 远程 apply-new-maker-worktree-pref);
     //  3) 用户选分支(source='branch-pick')→ 勾选双向联动但仅本次草稿、不落记忆
     //     (route 侧 source !== 'chip' 直接 return);
@@ -176,6 +176,7 @@ describe('Shared create project picker', () => {
     expect(branchPickSource).toContain("kind: 'disable-worktree'");
     expect(newMakerDraftRouteSource).toContain("if (source !== 'chip') return;");
     expect(newMakerDraftRouteSource).toContain("'maker:apply-new-maker-worktree-pref'");
+    expect(newMakerDraftRouteSource).toContain('setWorktreePreference(enabled)');
     expect(newMakerDraftRouteSource).toContain('setWtEnabled(worktreePref)');
     expect(newMakerDraftRouteSource).toContain('wt.enabled && wt.baseRepo');
     expect(newMakerDraftRouteSource).not.toContain('worktreeMissingRepo');

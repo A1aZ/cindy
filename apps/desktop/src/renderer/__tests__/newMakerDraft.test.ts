@@ -434,12 +434,12 @@ describe('newMakerDraft store', () => {
   });
 
   it('schema:worktreeEnabled 持久化往返,脏值/缺字段归一 false', async () => {
-    // 勾选记忆是「工作端一份」的根级布尔:patchDraft 写入 → 重载后恢复。
+    // 勾选记忆是「工作端一份」的根级布尔:专用 setter 写入 → 重载后恢复。
     vi.resetModules();
     {
-      const { getDraft, patchDraft } = await loadModule();
+      const { getDraft, setWorktreePreference } = await loadModule();
       expect(getDraft().worktreeEnabled).toBe(false); // 出厂默认不勾选(防误操作)
-      patchDraft({ worktreeEnabled: true });
+      setWorktreePreference(true);
       expect(getDraft().worktreeEnabled).toBe(true);
     }
     vi.resetModules();
@@ -465,7 +465,7 @@ describe('newMakerDraft store', () => {
     vi.resetModules();
     const activeWindow = await loadModule();
 
-    activeWindow.patchDraft({ worktreeEnabled: true });
+    activeWindow.setWorktreePreference(true);
     expect(staleWindow.getDraft().worktreeEnabled).toBe(false);
 
     // storage event 尚未送达时,旧窗口修改任意其它字段；写入前必须从共享持久值
@@ -476,6 +476,69 @@ describe('newMakerDraft store', () => {
     expect(
       JSON.parse(memStorage.getItem(staleWindow.__STORAGE_KEY) ?? '{}').worktreeEnabled,
     ).toBe(true);
+  });
+
+  it('远程 worktree 广播不会让旧窗口回滚持久草稿或 main 偏好镜像', async () => {
+    // 先让附属窗口持有旧的模型/目录，再由活跃窗口保存新值；两个模块实例模拟两个 renderer。
+    const staleWindow = await loadModule();
+    staleWindow.patchDraft({ workingDir: '/projects/stale' });
+    staleWindow.patchVendorPrefs('cc', { model: 'claude-stale' });
+
+    vi.resetModules();
+    const activeWindow = await loadModule();
+    activeWindow.patchDraft({ workingDir: '/projects/current' });
+    activeWindow.patchVendorPrefs('cc', { model: 'claude-current' });
+
+    expect(staleWindow.getDraft().workingDir).toBe('/projects/stale');
+    expect(staleWindow.getDraft().lastByVendor.cc.model).toBe('claude-stale');
+
+    // main 广播会让所有窗口依次执行 setter。每个窗口都只能基于共享持久对象合并布尔字段，
+    // 不能把各自完整 currentDraft 写回。
+    activeWindow.setWorktreePreference(true);
+    staleWindow.setWorktreePreference(true);
+
+    const persisted = JSON.parse(
+      memStorage.getItem(staleWindow.__STORAGE_KEY) ?? '{}',
+    ) as {
+      workingDir?: string;
+      worktreeEnabled?: boolean;
+      lastByVendor?: { cc?: { model?: string } };
+    };
+    expect(persisted.workingDir).toBe('/projects/current');
+    expect(persisted.lastByVendor?.cc?.model).toBe('claude-current');
+    expect(persisted.worktreeEnabled).toBe(true);
+
+    // 旧窗口的临时内存仍可保持不同，但 App 向 main 同步时必须读取同一份持久真相。
+    expect(staleWindow.getDraft().workingDir).toBe('/projects/stale');
+    expect(staleWindow.getDraftForPreferenceSync().workingDir).toBe('/projects/current');
+    expect(staleWindow.getDraftForPreferenceSync().lastByVendor.cc.model).toBe(
+      'claude-current',
+    );
+    expect(activeWindow.getDraftForPreferenceSync()).toEqual(
+      staleWindow.getDraftForPreferenceSync(),
+    );
+  });
+
+  it('worktree 单字段落盘失败时 main 只回退该布尔，不回退旧窗口整份草稿', async () => {
+    const staleWindow = await loadModule();
+    staleWindow.patchDraft({ workingDir: '/projects/stale' });
+    staleWindow.patchVendorPrefs('cc', { model: 'claude-stale' });
+
+    vi.resetModules();
+    const activeWindow = await loadModule();
+    activeWindow.patchDraft({ workingDir: '/projects/current' });
+    activeWindow.patchVendorPrefs('cc', { model: 'claude-current' });
+
+    vi.spyOn(memStorage, 'setItem').mockImplementationOnce(() => {
+      throw new Error('quota exceeded');
+    });
+    staleWindow.setWorktreePreference(true);
+
+    const syncDraft = staleWindow.getDraftForPreferenceSync();
+    expect(syncDraft.worktreeEnabled).toBe(true);
+    expect(syncDraft.workingDir).toBe('/projects/current');
+    expect(syncDraft.lastByVendor.cc.model).toBe('claude-current');
+    expect(staleWindow.getDraft().workingDir).toBe('/projects/stale');
   });
 
   it('storage event 会把其它窗口保存的 worktree 偏好同步进当前 store 并通知订阅者', async () => {

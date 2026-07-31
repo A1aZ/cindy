@@ -79,6 +79,7 @@ import {
   getFastModeForModel,
   setFastModeForModel,
   setEffortForModel,
+  setWorktreePreference,
   type VendorPrefs,
   type CollabDraft,
 } from '@/state/newMakerDraft';
@@ -1950,7 +1951,7 @@ export function NewMakerDraftRoute() {
         });
       return;
     }
-    patchDraft({ worktreeEnabled: enabled });
+    setWorktreePreference(enabled);
   }, [isDeviceLinkDraft, effectiveDeviceLinkDeviceId]);
   const handleWtSourceBranchChange = useCallback((sourceBranch: string) => {
     setWtSourceBranch(sourceBranch);

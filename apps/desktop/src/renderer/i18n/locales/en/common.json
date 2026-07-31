@@ -3674,6 +3674,8 @@
       "addAria": "Add tab",
       "addFailed": "Failed to add tab",
       "tabCloseAria": "Close tab",
+      "pinAria": "Pin — keep in all conversations",
+      "unpinAria": "Unpin — keep only in this conversation",
       "menu": {
         "addLabel": "Add tab",
         "comingSoon": "Coming soon",
@@ -3699,7 +3701,9 @@
       "contextMenu": {
         "close": "Close",
         "closeOthers": "Close others",
-        "closeAll": "Close all"
+        "closeAll": "Close all",
+        "pin": "Pin",
+        "unpin": "Unpin"
       },
       "empty": {
         "eyebrow": "Right Sidebar",

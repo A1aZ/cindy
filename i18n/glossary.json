@@ -598,6 +598,17 @@
       "exempt": []
     },
     {
+      "id": "pin",
+      "status": "proposed",
+      "en": "Pin",
+      "translations": {
+        "zh-CN": "钉住",
+        "ja": "ピン留め",
+        "ko": "고정"
+      },
+      "note": "右侧栏插件面板页签的图钉:钉住 = 面板在所有对话中保留。动词对:Pin=钉住 / Unpin=取消钉住。2026-07-31 随图钉功能提出,待裁决。"
+    },
+    {
       "id": "project",
       "status": "decided",
       "en": "Project",

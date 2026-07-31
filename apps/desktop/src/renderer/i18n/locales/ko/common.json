@@ -3673,6 +3673,8 @@
       "addAria": "탭 추가",
       "addFailed": "탭을 추가하지 못했습니다",
       "tabCloseAria": "탭 닫기",
+      "pinAria": "고정 — 모든 세션에서 유지",
+      "unpinAria": "고정 해제 — 현재 세션에서만 유지",
       "menu": {
         "addLabel": "탭 추가",
         "comingSoon": "지원 예정",
@@ -3698,7 +3700,9 @@
       "contextMenu": {
         "close": "닫기",
         "closeOthers": "다른 탭 닫기",
-        "closeAll": "모두 닫기"
+        "closeAll": "모두 닫기",
+        "pin": "고정",
+        "unpin": "고정 해제"
       },
       "empty": {
         "eyebrow": "오른쪽 사이드바",

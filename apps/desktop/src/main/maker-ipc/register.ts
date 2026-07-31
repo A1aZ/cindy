@@ -286,12 +286,17 @@ import {
 import { recordModelMismatchOnMessage } from '../modelMismatchBroadcaster.js';
 import { detectClaudeModelMismatch } from '../../shared/modelMismatch.js';
 import { triggerClaudeAccountUsageRefresh } from '../usage/claudeAccountUsage.js';
-import { getCodexSubscriptionValuePrice, getModelPriceQuote, getModelPricing, getModelPricingForModel, getSubscriptionDirectValuePrice } from '../usage/modelPricing.js';
+import { getCodexSubscriptionValuePrice, getGatewayAccountCurrency, getModelPriceQuote, getModelPricing, getModelPricingForModel, getSubscriptionDirectValuePrice } from '../usage/modelPricing.js';
 import { computeModelUsageDeltas, type ModelUsageCumulative, type ModelUsageDeltaEntry } from '../usage/modelUsageDelta.js';
 import { claudeSubscriptionUsageModelKey, codexApiUsageModelKey, codexSubscriptionUsageModelKey } from '../usage/usageHistory.js';
 import { buildClaudeTurnUsageDetails, computePriceQuoteTurnMoney, estimateClaudeSubscriptionTurnValue, isAnthropicModel, normalizeModelIdForPricing, resolveClaudeTurnCostSinks, type BillingRoute } from '../usage/turnCostCalculator.js';
 import { CHATGPT_MODEL_PREFIX, XAI_MODEL_PREFIX, isSubscriptionDirectModel } from '../../shared/subscriptionModels.js';
-import { addRegionalMoney, regionalizeUsd, type RegionalMoney } from '../../shared/regionalMoney.js';
+import {
+  addRegionalMoney,
+  usdToLedgerCurrency,
+  type RegionalMoney,
+} from '../../shared/regionalMoney.js';
+import { currentLedgerCurrency } from '../usage/ledgerCurrency.js';
 import { CURRENT_CINDY_REGION } from '../../shared/brandRegion.js';
 import { triggerClaudeSubscriptionUsageRefresh, triggerCodexAccountUsageRefresh } from './usage.js';
 import {
@@ -426,7 +431,10 @@ import {
 import { getActiveCatalog, setDiscoveredProviderModels } from '../maker-host/active-catalog.js';
 import { testProviderConnection } from '../maker-host/provider-diagnostics.js';
 import { fetchProviderModels } from '../maker-host/provider-model-fetch.js';
-import { beginProviderRouteMutation } from '../maker-host/provider-route.js';
+import {
+  beginProviderRouteMutation,
+  isUserProviderSession,
+} from '../maker-host/provider-route.js';
 import {
   getAnthropicModelDiscoveryFailure,
   refreshAnthropicModelsFromHttp,
@@ -3199,14 +3207,14 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
               const value = computePriceQuoteTurnMoney(
                 m.deltas,
                 quote ?? undefined,
-                CURRENT_CINDY_REGION,
+                currentLedgerCurrency(),
               );
               if (value?.amount) estimatedValues.push(value);
             }
             if (isClaudeSubscriptionSession) {
               const claudeEstimated = estimateClaudeSubscriptionTurnValue(
                 perModel,
-                CURRENT_CINDY_REGION,
+                currentLedgerCurrency(),
               );
               if (claudeEstimated?.amount) estimatedValues.push(claudeEstimated);
             }
@@ -3255,7 +3263,9 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
                     ? 'provider-api'
                     : 'unknown';
             if (route === 'subscription' || route === 'xd-gateway') return;
-            const money = regionalizeUsd(rawDelta, CURRENT_CINDY_REGION);
+            const ledgerCurrency =
+              (await getGatewayAccountCurrency()) ?? currentLedgerCurrency();
+            const money = usdToLedgerCurrency(rawDelta, ledgerCurrency);
             const turnUsageDetails = buildClaudeTurnUsageDetails(doneData?.usage, undefined, resolvedModel);
             recordTurnSpend(money);
             recordSessionTurnSpend(session.id, money);
@@ -3293,6 +3303,8 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       // 「是否走订阅(不计网关费)」改由 spawn 注入 + 该会话是否显式选了 XD 网关决定。
       const sessionProvider = getSessionProvider(session.id);
       const isRemoteCodexSession = Boolean(session.remoteHostId);
+      const isCustomProviderRoute =
+        !isRemoteCodexSession && isUserProviderSession(session.id);
       const codexAuthInjection = isRemoteCodexSession ? null : getCodexProxyAuthInjection();
       const modelPromise = turnModelPromiseBySession.get(session.id) ?? readSessionModelForUsage(session.id);
       turnModelPromiseBySession.delete(session.id);
@@ -3326,11 +3338,18 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           } catch {
             // 模型读取失败时仍记录 token, 聚合 UI 会归到 unknown。
           }
-          const isCodexBudgetRoute = pricingModel.startsWith('codex/');
-          const isCodexXaiProviderRoute = pricingModel.startsWith(XAI_MODEL_PREFIX);
+          const isCodexBudgetRoute =
+            (sessionProvider == null || sessionProvider === 'xd')
+            && pricingModel.startsWith('codex/');
+          const isCodexXaiProviderRoute =
+            (sessionProvider == null || sessionProvider === 'xai')
+            && pricingModel.startsWith(XAI_MODEL_PREFIX);
+          const isCodexOpenAiProviderRoute =
+            sessionProvider == null || sessionProvider === 'openai';
           const hasGatewayKey = Boolean(readClaudeApiKey());
           const hasEffectiveGatewayRoute =
             !isRemoteCodexSession &&
+            !isCustomProviderRoute &&
             (
               codexAuthInjection === 'env-key' ||
               isCodexBudgetRoute ||
@@ -3338,7 +3357,11 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             );
           const isSubscriptionValue = isRemoteCodexSession ||
             isCodexXaiProviderRoute ||
-            (codexAuthInjection === 'oauth-bearer' && !hasEffectiveGatewayRoute);
+            (
+              isCodexOpenAiProviderRoute
+              && codexAuthInjection === 'oauth-bearer'
+              && !hasEffectiveGatewayRoute
+            );
           const modelUsageKey = isSubscriptionValue
             ? codexSubscriptionUsageModelKey(pricingModel)
             : codexApiUsageModelKey(pricingModel);
@@ -3362,18 +3385,20 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           try {
             const pricing = isSubscriptionValue && !isCodexXaiProviderRoute
               ? await getModelPricing()
-              : isSubscriptionValue
-                ? null
-                : await getModelPricingForModel('xd', pricingModel);
+              : hasEffectiveGatewayRoute
+                ? await getModelPricingForModel('xd', pricingModel)
+                : null;
             const price = isCodexXaiProviderRoute
               ? getSubscriptionDirectValuePrice(pricingModel)
               : isSubscriptionValue
                 ? getCodexSubscriptionValuePrice(pricingModel, pricing)
-                : getModelPriceQuote(pricing, 'xd', pricingModel);
+                : hasEffectiveGatewayRoute
+                  ? getModelPriceQuote(pricing, 'xd', pricingModel)
+                  : undefined;
             const money = computePriceQuoteTurnMoney(
               codexUsageToTokens(u),
               price ?? undefined,
-              CURRENT_CINDY_REGION,
+              currentLedgerCurrency(),
             );
             if (!isSubscriptionValue && money) {
               await recordModelTurnUsage({
@@ -3419,6 +3444,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         .then((model) => {
           const hasGatewayKey = Boolean(readClaudeApiKey());
           if (!isRemoteCodexSession &&
+            !isCustomProviderRoute &&
             !model.startsWith(XAI_MODEL_PREFIX) &&
             (codexAuthInjection === 'env-key' || model.startsWith('codex/') || (sessionProvider === 'xd' && hasGatewayKey))) {
             void triggerClaudeAccountUsageRefresh();

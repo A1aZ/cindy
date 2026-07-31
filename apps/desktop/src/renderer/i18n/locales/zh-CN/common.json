@@ -3560,6 +3560,7 @@
     },
     "dailyLimitLabel": "今日 {{spend}}/{{limit}}",
     "monthlyLimitLabel": "本周期 {{spend}}/{{limit}}",
+    "creditLabel": "{{used}}/{{total}}",
     "sessionCostLabel": "本对话 {{cost}}",
     "codex": {
       "waiting": "Codex --",
@@ -3604,6 +3605,7 @@
     "tooltip": {
       "todayUsedSoftLimit": "今日已用 ${{today}} / 软限额 ${{limit}} ({{pct}}%)",
       "sessionUsed": "本对话已用 {{cost}}",
+      "creditUsed": "账号已用 {{used}} · 总额 {{total}}",
       "monthlyUnavailable": "⚠️ 月度配额暂时不可用",
       "dailyUnavailable": "⚠️ 今日用量明细暂时不可用",
       "softLimitFormula": "软限额口径：月度配额 ÷ 30 × {{factor}}",

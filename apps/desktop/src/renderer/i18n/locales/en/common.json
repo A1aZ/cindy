@@ -3561,6 +3561,7 @@
     },
     "dailyLimitLabel": "Today {{spend}}/{{limit}}",
     "monthlyLimitLabel": "Cycle {{spend}}/{{limit}}",
+    "creditLabel": "{{used}}/{{total}}",
     "sessionCostLabel": "Session {{cost}}",
     "codex": {
       "waiting": "Codex --",
@@ -3605,6 +3606,7 @@
     "tooltip": {
       "todayUsedSoftLimit": "Today used ${{today}} / soft limit ${{limit}} ({{pct}}%)",
       "sessionUsed": "This session used {{cost}}",
+      "creditUsed": "Account used {{used}} · total {{total}}",
       "monthlyUnavailable": "⚠️ Monthly quota is temporarily unavailable",
       "dailyUnavailable": "⚠️ Today's usage details are temporarily unavailable",
       "softLimitFormula": "Soft limit formula: monthly quota ÷ 30 × {{factor}}",

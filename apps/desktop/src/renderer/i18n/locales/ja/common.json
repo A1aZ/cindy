@@ -3560,6 +3560,7 @@
     },
     "dailyLimitLabel": "本日 {{spend}}/{{limit}}",
     "monthlyLimitLabel": "周期 {{spend}}/{{limit}}",
+    "creditLabel": "{{used}}/{{total}}",
     "sessionCostLabel": "セッション {{cost}}",
     "codex": {
       "waiting": "Codex --",
@@ -3604,6 +3605,7 @@
     "tooltip": {
       "todayUsedSoftLimit": "本日使用 ${{today}} / ソフト上限 ${{limit}} ({{pct}}%)",
       "sessionUsed": "このセッションで {{cost}} 使用",
+      "creditUsed": "アカウント 使用 {{used}} · 合計 {{total}}",
       "monthlyUnavailable": "⚠️ 月次クォータを一時的に取得できません",
       "dailyUnavailable": "⚠️ 本日の使用量明細を一時的に取得できません",
       "softLimitFormula": "ソフト上限の式: 月次クォータ ÷ 30 × {{factor}}",

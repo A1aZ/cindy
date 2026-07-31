@@ -573,6 +573,7 @@ import {
   readGhostErrandSessionId,
   writeGhostErrandSessionId,
 } from '../cindy-brain/errandPrefsStore.js';
+import { isGhostPickedDir } from '../cindy-brain/pickGrantsStore.js';
 import { createGhostErrandRunner } from './ghostErrandRunner.js';
 import {
   createGhostErrandSession,
@@ -5906,6 +5907,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       getGhostName: getInstalledGhostName,
       getDraftDefaults: getWorkerDefaultsFromNewMaker,
       normalizeWorkingDir: (dir) => normalizeWorkingDirForStorage(dir),
+      isUserPickedDir: isGhostPickedDir,
       isSessionBusy: isSessionInTurn,
       dispatch: async ({ targetSessionId, message }) => {
         const r = await sendToSessionInternal({ targetSessionId, message });

@@ -256,7 +256,12 @@ async function readRecordsUnserialized(
     try {
       persisted = normalizeRecords(JSON.parse(raw), now);
     } catch {
-      await AsyncStorage.removeItem(key).catch(() => undefined);
+      // 损坏的账本可能仍代表未完成的回收义务。不能删除后当空账本继续创建，
+      // 保留原值并让调用方按不可读状态 fail closed。
+      return {
+        records: normalizeRecords(volatileRecordsForAccount(accountId), now),
+        storageReadable: false,
+      };
     }
   }
   return {
@@ -309,8 +314,8 @@ async function readPendingPrecreatedWorktreeLedger(
       storageReadable,
     } = await readRecordsUnserialized(accountId);
     replaceVolatileRecords(accountId, normalized);
-    // 读侧顺手清理过期/损坏条目，并把上次因写盘失败只留在内存的记录
-    // 重新持久化；getItem 本身失败时绝不以“空账本”覆盖未知的磁盘真值。
+    // 读侧顺手清理可解析的过期/无效条目，并把上次因写盘失败只留在内存的
+    // 记录重新持久化；读取或解析失败时绝不以“空账本”覆盖未知的磁盘真值。
     if (storageReadable) {
       await writeRecordsUnserialized(accountId, normalized);
     }

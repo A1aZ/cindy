@@ -316,8 +316,23 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
     getItem.mockRestore();
   });
 
-  it('repairs malformed persisted JSON instead of disabling future persistence', () => {
+  it('preserves malformed persisted JSON and fails closed before another worktree', async () => {
     localStorage.setItem(__testing.storageKey, '{{{');
+    const invoke = vi.fn();
+
+    await expect(
+      recoverPendingRemotePrecreatedWorktrees({
+        deviceId: DEVICE_ID,
+        invoke,
+      }),
+    ).resolves.toEqual({
+      attempted: 0,
+      recovered: 0,
+      retained: 0,
+      storageReadable: false,
+    });
+    expect(invoke).not.toHaveBeenCalled();
+    expect(localStorage.getItem(__testing.storageKey)).toBe('{{{');
 
     expect(
       registerPendingRemotePrecreatedWorktree({
@@ -326,16 +341,14 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
         path: WORKTREE_PATH,
         createdAt: Date.now(),
       }),
-    ).toBe(true);
-    expect(JSON.parse(localStorage.getItem(__testing.storageKey) ?? '')).toEqual({
-      version: 1,
-      records: [
-        expect.objectContaining({
-          deviceId: DEVICE_ID,
-          sessionId: SESSION_ID,
-          path: WORKTREE_PATH,
-        }),
-      ],
-    });
+    ).toBe(false);
+    expect(localStorage.getItem(__testing.storageKey)).toBe('{{{');
+    expect(listPendingRemotePrecreatedWorktrees()).toEqual([
+      expect.objectContaining({
+        deviceId: DEVICE_ID,
+        sessionId: SESSION_ID,
+        path: WORKTREE_PATH,
+      }),
+    ]);
   });
 });

@@ -187,9 +187,9 @@ function readPersistedRecords(): {
       storageReadable: true,
     };
   } catch {
-    // 存储介质可读，只是这一项内容损坏；按空账本返回，让显式 list/register
-    // 调用用 canonical payload 修复，而不是让坏 JSON 永久禁用跨重启恢复。
-    return { records: [], storageReadable: true };
+    // 无法解析时不能把未知的持久状态当成空账本，否则后续读取会覆盖原值并
+    // 丢失 cleanup obligation。按不可读处理，让创建流程 fail closed。
+    return { records: [], storageReadable: false };
   }
 }
 
@@ -238,7 +238,7 @@ function loadPendingRemotePrecreatedWorktrees(): {
 }
 
 export function listPendingRemotePrecreatedWorktrees(): PendingRemotePrecreatedWorktree[] {
-  const { records, storageReadable } = readPendingRemotePrecreatedWorktreeLedger();
+  const { records } = readPendingRemotePrecreatedWorktreeLedger();
   return records;
 }
 
@@ -247,9 +247,8 @@ function readPendingRemotePrecreatedWorktreeLedger(): {
   storageReadable: boolean;
 } {
   const { records, storageReadable } = loadPendingRemotePrecreatedWorktrees();
-  // 显式读取时顺手修复坏数据 / 把上次仅留在内存的记录重新落盘。失败时
-  // memoryRecords 仍是当前进程的保底真值。getItem 本身失败时绝不以
-  // “空账本”覆盖未知的磁盘真值。
+  // 显式读取时顺手清理可解析的过期/无效条目，并把上次仅留在内存的记录重新
+  // 落盘。读取或解析失败时绝不以“空账本”覆盖未知的磁盘真值。
   if (storageReadable) persistRecords(records);
   return { records, storageReadable };
 }

@@ -250,6 +250,35 @@ describe('precreated worktree recovery ledger', () => {
     expect(storage.size).toBe(1);
   });
 
+  it('preserves malformed persisted JSON and reports it as unreadable', async () => {
+    const key = __testing.storageKeyForAccount(ACCOUNT);
+    expect(key).not.toBeNull();
+    storage.set(key as string, '{{{');
+    const discardPrecreated = vi.fn();
+
+    await expect(
+      recoverPendingPrecreatedWorktrees(ACCOUNT, {
+        openLink: vi.fn(),
+        discardPrecreated,
+        isSessionClaimed: vi.fn(),
+        sleep: async () => undefined,
+      }),
+    ).resolves.toMatchObject({
+      attempted: 0,
+      recovered: 0,
+      retained: 0,
+      storageReadable: false,
+    });
+    expect(discardPrecreated).not.toHaveBeenCalled();
+    expect(storage.get(key as string)).toBe('{{{');
+    expect(asyncStorage.removeItem).not.toHaveBeenCalled();
+
+    await expect(
+      registerPendingPrecreatedWorktree(ACCOUNT, RECORD),
+    ).resolves.toBe(false);
+    expect(storage.get(key as string)).toBe('{{{');
+  });
+
   it('refuses to register a record without an account namespace', async () => {
     await expect(
       registerPendingPrecreatedWorktree('', RECORD),

@@ -362,10 +362,50 @@ function loadFromStorage(): NewMakerDraft {
 // 之前的 100ms debounce 在 release 的"热更新→relaunch"路径上会丢失最近一次
 // 改动 (lifecycle 走 app.exit() 强退, 来不及 fire 这个 setTimeout), 直接同步
 // 落盘最稳。
-function scheduleWrite(snapshot: NewMakerDraft) {
-  if (typeof window === 'undefined') return;
+function parseStoredWorktreePreference(raw: string | null): boolean | undefined {
+  if (raw == null) return undefined;
   try {
-    window.localStorage.setItem(storageKey(), JSON.stringify(snapshot));
+    const parsed = JSON.parse(raw) as Partial<NewMakerDraft> | null;
+    if (!parsed || typeof parsed !== 'object') return undefined;
+    return parsed.worktreeEnabled === true;
+  } catch {
+    return undefined;
+  }
+}
+
+function readStoredWorktreePreference(): boolean | undefined {
+  if (typeof window === 'undefined') return undefined;
+  try {
+    return parseStoredWorktreePreference(window.localStorage.getItem(storageKey()));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Persist a complete draft snapshot without letting another renderer's stale in-memory copy
+ * overwrite the workstation-wide worktree preference.
+ *
+ * Electron windows do not share this module instance. A storage event normally refreshes the
+ * other windows below, but that event is asynchronous; rebasing this one shared field at write
+ * time also closes the race where a secondary/sidebar window mutates another draft field before
+ * it has received the event.
+ */
+function scheduleWrite(
+  options: { preserveStoredWorktreePreference?: boolean } = {},
+): void {
+  if (typeof window === 'undefined') return;
+  const storedWorktreePreference = options.preserveStoredWorktreePreference !== false
+    ? readStoredWorktreePreference()
+    : undefined;
+  if (
+    storedWorktreePreference !== undefined &&
+    storedWorktreePreference !== currentDraft.worktreeEnabled
+  ) {
+    currentDraft = { ...currentDraft, worktreeEnabled: storedWorktreePreference };
+  }
+  try {
+    window.localStorage.setItem(storageKey(), JSON.stringify(currentDraft));
   } catch {
     // localStorage 满 / 私密窗口禁写——忽略,不影响内存状态。
   }
@@ -376,6 +416,33 @@ const listeners = new Set<() => void>();
 
 function emit() {
   for (const l of listeners) l();
+}
+
+const removeStorageListener = (() => {
+  if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return null;
+  const onStorage = (event: StorageEvent) => {
+    if (event.key !== storageKey()) return;
+    if (event.storageArea && event.storageArea !== window.localStorage) return;
+    // A queued storage event can arrive after this window has already written a newer value.
+    // Re-read the shared storage truth first so the event payload itself cannot roll state back.
+    const livePreference = readStoredWorktreePreference();
+    const nextPreference =
+      livePreference ??
+      (event.newValue == null ? false : parseStoredWorktreePreference(event.newValue));
+    if (nextPreference === undefined || nextPreference === currentDraft.worktreeEnabled) return;
+    // Only this workstation-wide preference is cross-window shared. Keep transient per-window
+    // draft targets (deviceLinkDeviceId/extraDirs, etc.) untouched.
+    currentDraft = { ...currentDraft, worktreeEnabled: nextPreference };
+    emit();
+  };
+  window.addEventListener('storage', onStorage);
+  return () => window.removeEventListener('storage', onStorage);
+})();
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    removeStorageListener?.();
+  });
 }
 
 export function getDraft(): NewMakerDraft {
@@ -436,7 +503,9 @@ export function patchDraft(patch: Partial<NewMakerDraft>): void {
   // remote 项目 draft 的协同 codex / cc 均已接通(worker 创建已继承
   // remoteHostId,远端 MCP 注入两端落地),不再按 vendor 强制关闭。
   currentDraft = next;
-  scheduleWrite(currentDraft);
+  scheduleWrite({
+    preserveStoredWorktreePreference: !('worktreeEnabled' in patch),
+  });
   emit();
 }
 
@@ -478,7 +547,7 @@ export function switchVendor(next: MakerVendor, currentPrefs: VendorPrefs): void
       [prev]: currentPrefs,
     },
   };
-  scheduleWrite(currentDraft);
+  scheduleWrite();
   emit();
 }
 
@@ -518,7 +587,7 @@ function patchVendorPrefsInternal(
       [vendor]: { ...currentDraft.lastByVendor[vendor], ...patch },
     },
   };
-  scheduleWrite(currentDraft);
+  scheduleWrite();
   emit();
 }
 
@@ -559,7 +628,7 @@ export function setEffortForModel(modelId: string, effort: Effort): void {
       [modelId]: effort,
     },
   };
-  scheduleWrite(currentDraft);
+  scheduleWrite();
   emit();
 }
 
@@ -577,13 +646,15 @@ export function setFastModeForModel(modelId: string, enabled: boolean): void {
       [modelId]: enabled,
     },
   };
-  scheduleWrite(currentDraft);
+  scheduleWrite();
   emit();
 }
 
 export function clearDraft(): void {
   currentDraft = makeDefault();
-  scheduleWrite(currentDraft);
+  scheduleWrite({
+    preserveStoredWorktreePreference: false,
+  });
   emit();
 }
 

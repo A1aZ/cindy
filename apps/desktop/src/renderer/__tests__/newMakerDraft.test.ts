@@ -459,6 +459,72 @@ describe('newMakerDraft store', () => {
     }
   });
 
+  it('附属窗口的过期草稿写入不会覆盖另一个窗口刚保存的 worktree 偏好', async () => {
+    // 两次 import 模拟两个 Electron renderer:模块内存独立,localStorage 共享。
+    const staleWindow = await loadModule();
+    vi.resetModules();
+    const activeWindow = await loadModule();
+
+    activeWindow.patchDraft({ worktreeEnabled: true });
+    expect(staleWindow.getDraft().worktreeEnabled).toBe(false);
+
+    // storage event 尚未送达时,旧窗口修改任意其它字段；写入前必须从共享持久值
+    // rebase worktreeEnabled,不能把旧 false 随完整草稿快照覆盖回去。
+    staleWindow.patchVendorPrefs('cc', { effort: 'high' });
+
+    expect(staleWindow.getDraft().worktreeEnabled).toBe(true);
+    expect(
+      JSON.parse(memStorage.getItem(staleWindow.__STORAGE_KEY) ?? '{}').worktreeEnabled,
+    ).toBe(true);
+  });
+
+  it('storage event 会把其它窗口保存的 worktree 偏好同步进当前 store 并通知订阅者', async () => {
+    let onStorage: ((event: StorageEvent) => void) | undefined;
+    const removeEventListener = vi.fn();
+    vi.stubGlobal('window', {
+      localStorage: memStorage,
+      addEventListener: (
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+      ) => {
+        if (type === 'storage' && typeof listener === 'function') {
+          onStorage = listener as (event: StorageEvent) => void;
+        }
+      },
+      removeEventListener,
+    });
+    vi.resetModules();
+
+    const draftStore = await loadModule();
+    const subscriber = vi.fn();
+    draftStore.subscribeDraft(subscriber);
+    const serialized = JSON.stringify({
+      ...draftStore.getDraft(),
+      worktreeEnabled: true,
+    });
+    memStorage.setItem(draftStore.__STORAGE_KEY, serialized);
+
+    onStorage?.({
+      key: draftStore.__STORAGE_KEY,
+      newValue: serialized,
+    } as StorageEvent);
+
+    expect(draftStore.getDraft().worktreeEnabled).toBe(true);
+    expect(subscriber).toHaveBeenCalledTimes(1);
+
+    // 旧 false 事件若迟到,当前 localStorage 的 true 仍是权威值,不得回滚内存或 main 镜像。
+    subscriber.mockClear();
+    onStorage?.({
+      key: draftStore.__STORAGE_KEY,
+      newValue: JSON.stringify({
+        ...draftStore.getDraft(),
+        worktreeEnabled: false,
+      }),
+    } as StorageEvent);
+    expect(draftStore.getDraft().worktreeEnabled).toBe(true);
+    expect(subscriber).not.toHaveBeenCalled();
+  });
+
   it('vendor 字段非合法值(非 cc/codex)→ 回退 cc', async () => {
     memStorage.setItem('xdt:newMakerDraft:v1', JSON.stringify({ vendor: 'gemini' }));
     vi.resetModules();

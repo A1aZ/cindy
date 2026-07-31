@@ -610,7 +610,9 @@ import {
 import { installNewMakerWindowShortcut } from './app-shortcuts/new-maker-window-shortcut.js';
 import { registerLayoutIpc } from './layout/index.js';
 import {
+  getGhostCindySlot,
   getGhostManager,
+  getGhostSessionActivityTracker,
   isGhostAvailableForActiveSession,
   refreshGhostLocalization,
   registerGhostIpc,
@@ -618,6 +620,8 @@ import {
   suspendAllGhosts,
   waitForGhostMutations,
 } from './cindy-brain/index.js';
+import { listActiveClaudeBackgroundActivitySessions } from './maker-host/claude-session-background-activity.js';
+import { registerRelaunchBusyActivityIpc } from './relaunchBusyActivityIpc.js';
 import { getGhostSetupChangeBus } from './cindy-brain/ghostSetupChangeBus.js';
 import { getGhostSetupInteractionBridge } from './cindy-brain/ghostSetupInteractionBridge.js';
 import { registerPluginMarketIpc } from './plugin-market/registerIpc.js';
@@ -3811,6 +3815,30 @@ const registerIpcHandlers = () => {
           readScheduleBusy: () => readUpdateRelaunchScheduleBusy(getScheduleStorageIfInitialized()),
         });
       });
+      // 手动更新重启(侧栏 UpdateBanner)的阻断判定。与上面那个**无人值守**探针刻意分开:
+      // 无人值守要连「有远程设备在看会话」都让路,手动重启是用户主动发起的,只该关心
+      // 「这一下会打断哪些正在跑的活」。四个活动来源的聚合与 fail-closed 口径见
+      // relaunchBusyActivity.ts,handler 与 sender 断言见 relaunchBusyActivityIpc.ts;
+      // 这里只提供来源 —— 本进程唯一能同时看到 maker、cindy-brain 与 scheduler 三侧的位置。
+      //
+      // 不进 device-link allowlist:updater 类 channel 按 allowlist 顶部注释属「永不放行」,
+      // 且远程控制端不会代替用户点被控端的更新重启。
+      registerRelaunchBusyActivityIpc(() => ({
+        anySessionInTurn: () => anySessionInTurn(getMakerCore()),
+        listClaudeBackgroundSessions: () => listActiveClaudeBackgroundActivitySessions(),
+        anyGhostSessionBusy: () => getGhostSessionActivityTracker().anySessionBusy(),
+        // run_in_background 的 Bash 不调模型、也不折算 running,前两个来源都看不到它。
+        anyBackgroundBashRunning: () =>
+          getMakerCore()
+            .listActiveSessions()
+            .some((session) => session.listBackgroundTasks().length > 0),
+        // Cindy slot 的全部在途工作:异步(mode:'submit' 的图 / 视频)与同步代办各自独立记账,
+        // 都可能不伴随任何 turn 或 card-action,只查一半就漏一半。
+        anyCindySlotJobRunning: () => getGhostCindySlot().anyInflightWork(),
+        // script 模式 / pre-run hook 阶段的 run 不创建 session,内存来源看不到它们。
+        anySchedulerRunRunning: () =>
+          readUpdateRelaunchScheduleBusy(getScheduleStorageIfInitialized()),
+      }));
       // getMakerCore() 首次调用触发 Maker 构造，同时发起自定义 MCP 初始加载。
       // await 确保第一个会话的 mcpProviders 数组已填入已保存的自定义 MCP（P2 冷启动竞态修复）。
       getMakerCore();

@@ -114,10 +114,17 @@ provider 感知路由 + 端到端真二进制测试(BYOM 模型直连原生端�
    `CINDY_PI_KEY_<ID>`,与 spec.apiKeyEnvVar 对应),models 带 baseUrl/models[]。接到
    `buildPiAgent` 的 deps。**注意**:原生路径不经 provider-route / compat-proxy,loopback/剥
    凭证那套对它不生效——安全边界(禁 none+远程等)由 store 的 validate 与本 resolver 把关。
-4. **UI**:`apps/desktop/src/renderer/components/settings/CustomProviderDialog.tsx:60-63`
-   `DialogAgentKind` 加 `'pi'`、`AGENTS`/`TAB_META` 加 pi 项;pi 需要**显式 api 类型选择器**
-   (anthropic-messages / openai-completions / …,cc/codex 是按 agent 隐含的);补全按
-   `DialogAgentKind` 展开的 state 字典 + i18n。
+4. **UI(唯一剩余增量)**:`apps/desktop/src/renderer/components/settings/CustomProviderDialog.tsx`。
+   **✅ 后端全通(commit 见 pi BYOM host 接线):store 收 pi runtime、user-provider 派生 pi 模型、
+   pi-host resolvePiNativeProviders 产出原生块——只差这个对话框能让用户添加 pi runtime。**
+   做法(用 typecheck 当 34 处的穷举清单):`DialogAgentKind` 加 `'pi'` → tsc 会逐个报出所有
+   `Record<DialogAgentKind,...>` 缺 pi 的位置,逐个补齐:
+   - `AGENTS`/`VISIBLE_AGENTS`/`TAB_META`(加 PiMark + i18n label/desc);
+   - 每-runtime 表单 state(init/read/handlers 的 agent 字典);
+   - `wireProtocol` 默认(pi 建议 openai-chat)+ **pi 专属 api 选择器**(3 选:anthropic-messages/
+     openai-responses/openai-chat;cc 锁 anthropic、codex 锁 responses/chat,pi 三选);
+   - i18n 四语(`settings.providers.custom.protocol.pi*` + api 选择器文案),过 check:i18n/glossary。
+   验证:desktop typecheck + CustomProviderDialog.test.tsx。
 
 **原设计说明(缺口 = pi 特有)**:
 1. **`writeModelsJson`(`packages/maker-core/src/agents/pi/index.ts:203`)现在只写单一

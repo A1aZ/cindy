@@ -70,6 +70,11 @@ export interface WorktreeChipsRowProps {
   sourceBranch: string;
   onSourceBranchChange: (v: string) => void;
   onBaseRepoChange?: (baseRepo: string | null) => void;
+  /**
+   * 被控端是否支持 recoveryKey 预创建回收。null 表示当前探测结果尚未就绪；
+   * 上层发送侧必须把非 true 视为不具备该能力。
+   */
+  onRecoveryKeyDiscardSupportChange?: (supported: boolean | null) => void;
   onSuggestedNameChange?: (name: string) => void;
   worktreeDisabled?: boolean;
   disabled?: boolean;
@@ -107,6 +112,7 @@ export function WorktreeChipsRow({
   sourceBranch,
   onSourceBranchChange,
   onBaseRepoChange,
+  onRecoveryKeyDiscardSupportChange,
   onSuggestedNameChange,
   worktreeDisabled,
   disabled,
@@ -130,7 +136,15 @@ export function WorktreeChipsRow({
   // useDetectCwd 同时按 {cwd, deviceId} 做 render 阶段 fence，切目标时这里先写 null。
   useLayoutEffect(() => {
     onBaseRepoChange?.(baseRepo);
-  }, [baseRepo, onBaseRepoChange]);
+    onRecoveryKeyDiscardSupportChange?.(
+      detect.data ? detect.data.supportsRecoveryKeyDiscard === true : null,
+    );
+  }, [
+    baseRepo,
+    detect.data,
+    onBaseRepoChange,
+    onRecoveryKeyDiscardSupportChange,
+  ]);
 
   const cantUseReason = useMemo<string | null>(() => {
     if (detect.loading) return t('newChat.worktree.detecting');

@@ -290,7 +290,13 @@ describe('Shared create project picker', () => {
     );
     // 远程纯对话没有 repo:即使 wtEnabled 残留 true 也必须跳过 worktree 分支。
     expect(newMakerDraftRouteSource).toContain(
-      'if (effectiveWorkingDir && wt.enabled && wt.baseRepo) {',
+      '&& wt.supportsRecoveryKeyDiscard === true',
+    );
+    expect(newMakerDraftRouteSource).toContain(
+      'onRecoveryKeyDiscardSupportChange={handleWtRecoveryKeyDiscardSupportChange}',
+    );
+    expect(worktreeChipsSource).toContain(
+      'detect.data.supportsRecoveryKeyDiscard === true',
     );
   });
 

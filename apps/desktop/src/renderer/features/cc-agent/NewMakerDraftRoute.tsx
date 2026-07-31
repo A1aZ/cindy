@@ -554,6 +554,7 @@ export function NewMakerDraftRoute() {
   const [wtName, setWtName] = useState('');
   const [wtSourceBranch, setWtSourceBranch] = useState('');
   const [wtBaseRepo, setWtBaseRepo] = useState<string | null>(null);
+  const [wtSupportsRecoveryKeyDiscard, setWtSupportsRecoveryKeyDiscard] = useState<boolean | null>(null);
   // F-COLLAB: 协同模式状态(enabled + worker 类型)直接读自 draft store,
   // 和 workingDir 走同一份 localStorage,重启 / 切走再回都能恢复。
   // 互斥约束(本组件 enforce):
@@ -1469,6 +1470,7 @@ export function NewMakerDraftRoute() {
         // Keep it across target changes; only invalidate the probed repository/branch.
         setWtBaseRepo(null);
         setWtSourceBranch('');
+        setWtSupportsRecoveryKeyDiscard(null);
       }
 
       patchDraft({
@@ -1961,6 +1963,9 @@ export function NewMakerDraftRoute() {
   const handleWtBaseRepoChange = useCallback((baseRepo: string | null) => {
     setWtBaseRepo(baseRepo);
   }, []);
+  const handleWtRecoveryKeyDiscardSupportChange = useCallback((supported: boolean | null) => {
+    setWtSupportsRecoveryKeyDiscard(supported);
+  }, []);
   const handleWtNameChange = useCallback((name: string) => {
     setWtName(name);
   }, []);
@@ -1981,12 +1986,14 @@ export function NewMakerDraftRoute() {
     name: wtName,
     sourceBranch: wtSourceBranch,
     baseRepo: wtBaseRepo,
+    supportsRecoveryKeyDiscard: wtSupportsRecoveryKeyDiscard,
   });
   wtRef.current = {
     enabled: wtEnabled,
     name: wtName,
     sourceBranch: wtSourceBranch,
     baseRepo: wtBaseRepo,
+    supportsRecoveryKeyDiscard: wtSupportsRecoveryKeyDiscard,
   };
 
   // ─── Send 拦截:vendorAuthGate → createSession → send / background worktree ──
@@ -2126,10 +2133,15 @@ export function NewMakerDraftRoute() {
               recoveryKey: string;
               createdAt: number;
             } | undefined;
-            // 生效条件 = 勾选 && baseRepo 已就绪(被控端 detect-cwd 的 repoRoot)。
-            // 勾选但环境不合格 / 探测未回时**静默按普通方式启动**,不报错不改勾选记忆
-            // ——状态只属于用户,合格性只影响这一次是否真的走 worktree(2026-07-29 裁决)。
-            if (effectiveWorkingDir && wt.enabled && wt.baseRepo) {
+            // 生效条件 = 勾选 && baseRepo 已就绪 && 被控端明确支持 recoveryKey discard。
+            // 旧 Desktop 可能接受未知 recoveryKey 却不持久化，不能把它当成支持端发起
+            // 预创建；能力不合格 / 探测未回时静默按普通方式启动，不报错不改勾选记忆。
+            if (
+              effectiveWorkingDir
+              && wt.enabled
+              && wt.baseRepo
+              && wt.supportsRecoveryKeyDiscard === true
+            ) {
               // 账本必须绑定发起时的账号/本地数据 owner。账号在后续 await
               // 期间切换时，Main 会拒绝把这笔义务落入新 owner 的命名空间。
               if (!ownerAtSend) {
@@ -3238,6 +3250,7 @@ export function NewMakerDraftRoute() {
                   sourceBranch={wtSourceBranch}
                   onSourceBranchChange={handleWtSourceBranchChange}
                   onBaseRepoChange={handleWtBaseRepoChange}
+                  onRecoveryKeyDiscardSupportChange={handleWtRecoveryKeyDiscardSupportChange}
                   onSuggestedNameChange={handleWtNameChange}
                   // SSH 远程仍禁用 worktree(远端 git 探测未落地);device-link 远程可用:
                   // 探测/建议名/创建全部经隧道在被控端执行(与 488cb33 前口径一致)。

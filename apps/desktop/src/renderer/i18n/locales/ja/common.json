@@ -6714,6 +6714,7 @@
     "mine": {
       "refresh": "更新",
       "emptyTitle": "送信した Issue はまだありません",
+      "emptyTitleUnverified": "現在 Issue を取得できません",
       "startIssueChat": "/issue で新しいチャットを開始",
       "statusUnknown": "ステータス不明",
       "sourceCindy": "Cindy から送信",
@@ -6726,6 +6727,7 @@
       "notSignedInHint": "Cindy アカウントにサインインすると、送信したすべての Issue と最新のステータスを表示できます。",
       "fetchFailedHint": "最新ステータスを取得できませんでした。この端末に記録された送信分のみを表示しているため、一覧が不完全な場合があります。",
       "fetchFailedPartialHint": "最新ステータスを取得できませんでした。一部の Issue はステータスが不完全な場合があります。",
+      "enhancementFailedHint": "あなたの GitHub アカウントで作成した Issue を読み取れませんでした。Cindy GitHub プラグインのアクセストークンの権限が不足している可能性があります。プラグインページで確認してください。",
       "truncatedHint": "Issue が多いため一部のみ表示しています。全件は GitHub で確認してください。"
     },
     "redirect": {

@@ -27,6 +27,7 @@ export type MyIssuesListResponse =
       error: MyIssuesErrorCode;
       items: [];
       githubEnhancement: null;
+      githubEnhancementFailed: false;
       degraded: null;
       truncated: false;
     };
@@ -62,6 +63,7 @@ export async function handleMyIssuesList(
       error: stale ? 'stale-account-scope' : 'unexpected',
       items: [],
       githubEnhancement: null,
+      githubEnhancementFailed: false,
       degraded: null,
       truncated: false,
     };

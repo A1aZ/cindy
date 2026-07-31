@@ -4473,6 +4473,7 @@ interface ElectronAPI {
           error: import('../shared/myIssues').MyIssuesErrorCode;
           items: [];
           githubEnhancement: null;
+          githubEnhancementFailed: false;
           degraded: null;
           truncated: false;
         }

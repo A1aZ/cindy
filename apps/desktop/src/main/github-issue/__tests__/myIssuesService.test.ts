@@ -326,6 +326,151 @@ describe('MyIssuesService.list', () => {
     // 身份查到了就如实回传,只是这一次没并进内容。
     expect(result.githubEnhancement).toEqual({ login: 'octocat', source: 'ghost' });
     expect(result.items).toEqual([]);
+    // 没有兜底通道可用 ⇒ 这一路算「配了却没用上」,UI 要能据此说明。
+    expect(result.githubEnhancementFailed).toBe(true);
+  });
+
+  describe('主通道搜不到时的兜底', () => {
+    /**
+     * 现实成因(实测):插件 PAT 是 fine-grained token,`get_current_user` 正常、搜本仓
+     * 却被 GitHub 以 422 拒绝(未显式授权的仓库即使公开也搜不到)。上一版就此整路放弃,
+     * 而本机 gh CLI 明明有权限 —— 用户于是在页面上看到「还没有提交过 Issue」,
+     * 而他 GitHub 名下有 34 条。
+     */
+    it('主通道失败 → 换兜底通道,拿到的内容照常并入,且不算失败', async () => {
+      const searchAuthoredIssues = vi.fn(async () => {
+        throw new Error('HTTP 422 Validation Failed');
+      });
+      const searchAuthoredIssuesFallback = vi.fn(async () => ({
+        issues: [remoteIssue({ number: 34 })],
+        totalCount: 1,
+      }));
+      const service = new MyIssuesService(
+        makeDeps({
+          resolveGithubEnhancement: async () => GHOST_VIEWER,
+          searchAuthoredIssues,
+          searchAuthoredIssuesFallback,
+        }),
+      );
+
+      const result = await service.list();
+      expect(searchAuthoredIssuesFallback).toHaveBeenCalledWith('octocat');
+      expect(result.items.map((i) => i.number)).toEqual([34]);
+      expect(result.items[0]!.sources).toEqual(['github-account']);
+      // 回退成功 = 用户拿到了数据,没有可见损失,不该提示。
+      expect(result.githubEnhancementFailed).toBe(false);
+      expect(result.degraded).toBeNull();
+    });
+
+    it('兜底通道不可用(没装 / 没登录 gh)→ 标记失败,主列表照常', async () => {
+      const service = new MyIssuesService(
+        makeDeps({
+          readLedger: () => [ledgerRecord()],
+          resolveGithubEnhancement: async () => GHOST_VIEWER,
+          searchAuthoredIssues: async () => {
+            throw new Error('HTTP 422');
+          },
+          searchAuthoredIssuesFallback: async () => null,
+        }),
+      );
+
+      const result = await service.list();
+      expect(result.githubEnhancementFailed).toBe(true);
+      // 账本那一半照常出 —— 增强失败绝不拖累主列表。
+      expect(result.items.map((i) => i.number)).toEqual([1001]);
+      expect(result.degraded).toBeNull();
+    });
+
+    it('兜底通道自己也抛错 → 标记失败,不把整页打挂', async () => {
+      const service = new MyIssuesService(
+        makeDeps({
+          resolveGithubEnhancement: async () => GHOST_VIEWER,
+          searchAuthoredIssues: async () => {
+            throw new Error('HTTP 422');
+          },
+          searchAuthoredIssuesFallback: async () => {
+            throw new Error('gh exploded');
+          },
+        }),
+      );
+
+      await expect(service.list()).resolves.toMatchObject({
+        githubEnhancementFailed: true,
+        degraded: null,
+        items: [],
+      });
+    });
+
+    it('gh-cli 主通道失败时不调兜底 —— 它自己就是兜底,没有下一条可换', async () => {
+      const searchAuthoredIssuesFallback = vi.fn(async () => ({
+        issues: [remoteIssue({ number: 99 })],
+        totalCount: 1,
+      }));
+      const service = new MyIssuesService(
+        makeDeps({
+          resolveGithubEnhancement: async () => ({ source: 'gh-cli', login: 'octocat', token: 't' }),
+          searchAuthoredIssues: async () => {
+            throw new Error('network down');
+          },
+          searchAuthoredIssuesFallback,
+        }),
+      );
+
+      const result = await service.list();
+      expect(searchAuthoredIssuesFallback).not.toHaveBeenCalled();
+      expect(result.githubEnhancementFailed).toBe(true);
+    });
+
+    it('主通道成功时不碰兜底通道', async () => {
+      const searchAuthoredIssuesFallback = vi.fn(async () => null);
+      const service = new MyIssuesService(
+        makeDeps({
+          resolveGithubEnhancement: async () => GHOST_VIEWER,
+          searchAuthoredIssues: async () => ({ issues: [remoteIssue()], totalCount: 1 }),
+          searchAuthoredIssuesFallback,
+        }),
+      );
+
+      const result = await service.list();
+      expect(searchAuthoredIssuesFallback).not.toHaveBeenCalled();
+      expect(result.githubEnhancementFailed).toBe(false);
+    });
+
+    it('没配增强时既不搜也不算失败 —— 没配是正常状态', async () => {
+      const searchAuthoredIssuesFallback = vi.fn(async () => null);
+      const service = new MyIssuesService(
+        makeDeps({ resolveGithubEnhancement: async () => null, searchAuthoredIssuesFallback }),
+      );
+
+      const result = await service.list();
+      expect(searchAuthoredIssuesFallback).not.toHaveBeenCalled();
+      expect(result.githubEnhancement).toBeNull();
+      expect(result.githubEnhancementFailed).toBe(false);
+    });
+
+    it('兜底也算在同一次总 deadline 内,不给增强第二份预算', async () => {
+      // 两段各起计时器的写法会让页面最坏等两倍时长(#1103 review 里出现过)。
+      const service = new MyIssuesService(
+        makeDeps({
+          readLedger: () => [ledgerRecord()],
+          enhancementTimeoutMs: 40,
+          resolveGithubEnhancement: async () => GHOST_VIEWER,
+          searchAuthoredIssues: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 30));
+            throw new Error('HTTP 422');
+          },
+          // 主通道已用掉 30ms,兜底再要 60ms —— 合计必须被 40ms 的总预算切断。
+          searchAuthoredIssuesFallback: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 60));
+            return { issues: [remoteIssue({ number: 34 })], totalCount: 1 };
+          },
+        }),
+      );
+
+      const result = await service.list();
+      expect(result.items.map((i) => i.number)).toEqual([1001]);
+      expect(result.githubEnhancementFailed).toBe(true);
+    });
   });
 
   it('任一路远端总数多于返回条数时标 truncated', async () => {

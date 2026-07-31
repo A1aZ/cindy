@@ -31,7 +31,7 @@ import { useRegisterCCAgentSidebar } from '@/features/cc-agent/useRegisterCCAgen
 
 import { MyIssueList } from './MyIssueList';
 import { useMyIssues } from './hooks/useMyIssues';
-import { selectMyIssuesNotices } from './lib/myIssuesNotices';
+import { canTrustEmptyList, selectMyIssuesNotices } from './lib/myIssuesNotices';
 import { prefillIssueCommandDraft } from './lib/startIssueChat';
 
 const GITHUB_ISSUES_URL = 'https://github.com/makecindy/cindy/issues';
@@ -102,7 +102,7 @@ export function IssueTrackerFeatureLayout() {
         ) : (
           <>
             <Notices data={data} />
-            <EmptyGuide onStartIssueChat={startIssueChat} />
+            <EmptyGuide onStartIssueChat={startIssueChat} data={data} />
           </>
         )}
       </div>
@@ -263,16 +263,30 @@ function SubmitHintBar({ onStartIssueChat }: { onStartIssueChat: () => void }) {
  * 一条都没有时的引导:怎么提、去哪看。正文与 CTA 沿用改版前的整页引导;
  * 标题换成空态该说的话 —— 原来那句「Issue 已迁移至 GitHub」是整页引导时代的说法,
  * 现在这一页本身就是能用的列表,再说「已迁移」会让人以为页面没做。
+ *
+ * 标题分两版:只有三路查询都成功、确实为空时才敢说「还没有提交过 Issue」。任一路
+ * 降级或失败时它就是一句错误断言 —— 用户在 GitHub 上有几十条 issue、只是这次没查到,
+ * 页面却告诉他从没提交过(实际发生过,见 canTrustEmptyList)。
  */
-function EmptyGuide({ onStartIssueChat }: { onStartIssueChat: () => void }) {
+function EmptyGuide({
+  onStartIssueChat,
+  data,
+}: {
+  onStartIssueChat: () => void;
+  data: MyIssuesResult | null;
+}) {
   const { t } = useTranslation();
+  // data 为 null = 首屏还没拿到结果,同样不能断言「没有提交过」。
+  const trustable = data ? canTrustEmptyList(data) : false;
   return (
     <div className="flex flex-col items-center gap-4 px-8 py-16 text-center">
       <div className="flex size-16 items-center justify-center rounded-full bg-sidebar-item-hover">
         <Bug size={28} className="text-sidebar-muted" strokeWidth={1.5} />
       </div>
 
-      <h2 className="text-lg font-medium text-foreground">{t('issueTracker.mine.emptyTitle')}</h2>
+      <h2 className="text-lg font-medium text-foreground">
+        {t(trustable ? 'issueTracker.mine.emptyTitle' : 'issueTracker.mine.emptyTitleUnverified')}
+      </h2>
 
       <p className="max-w-md text-sm text-sidebar-muted">
         {t('issueAgent.redirect.descriptionBefore')}

@@ -93,6 +93,17 @@ export interface MyIssuesResult {
    * UI 不得因此提示「你需要 GitHub 账号」。
    */
   githubEnhancement: { login: string; source: GithubEnhancementSource } | null;
+  /**
+   * 可选增强这一路**配置了却没能用上**(搜索被拒 / 超时,且兜底通道也没救回来)。
+   *
+   * 与「没配」必须分开:没配是正常状态,配了用不上要让用户知道 —— 否则列表静静少掉
+   * 一部分内容,列表为空时还会被说成「还没有提交过 Issue」。实测过的典型成因:插件 PAT
+   * 是 fine-grained token,能读身份但搜不了本仓(GitHub 对未显式授权的仓库返回 422,
+   * 即使仓库是公开的)。
+   *
+   * 回退成功时为 false —— 用户已经拿到数据,没有可见损失就不打扰他。
+   */
+  githubEnhancementFailed: boolean;
   degraded: MyIssuesDegradedReason | null;
   /** true = 结果超出单页上限被截断,UI 必须明说而不是静默丢。 */
   truncated: boolean;

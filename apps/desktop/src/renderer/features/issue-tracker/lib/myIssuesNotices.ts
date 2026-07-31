@@ -40,6 +40,17 @@ function platformNoticeKey(data: MyIssuesResult, reason: 'unavailable' | 'fetchF
   return `issueTracker.mine.${base}${suffix}`;
 }
 
+/**
+ * 列表是否**可被确证是完整的** —— 三路查询都成功才算。
+ *
+ * 空态标题靠它决定能不能说「还没有提交过 Issue」:任一路降级或失败时,空列表只说明
+ * 「这次没查到」,不能推出「你从未提交」。同一条判据也让接口未上线期间的空列表
+ * 不再对用户撒谎(平台 404 恒成立 ⇒ 恒不可确证)。
+ */
+export function canTrustEmptyList(data: MyIssuesResult): boolean {
+  return data.degraded === null && !data.githubEnhancementFailed;
+}
+
 export function selectMyIssuesNotices(data: MyIssuesResult): string[] {
   const notices: string[] = [];
 
@@ -53,6 +64,11 @@ export function selectMyIssuesNotices(data: MyIssuesResult): string[] {
   }
   if (data.degraded === 'fetch-failed') {
     notices.push(platformNoticeKey(data, 'fetchFailed'));
+  }
+  // 可选增强配了却没用上:主来源的提示在前,这条补充说明「你 GitHub 那部分也没进来」。
+  // 只在**兜底通道也没救回来**时出现 —— 回退成功就没有可见损失,不打扰用户。
+  if (data.githubEnhancementFailed) {
+    notices.push('issueTracker.mine.enhancementFailedHint');
   }
   if (data.truncated) {
     notices.push('issueTracker.mine.truncatedHint');

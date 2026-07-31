@@ -51,8 +51,15 @@ function item(over: Partial<MyIssueItem> = {}): MyIssueItem {
   };
 }
 
-function result(items: MyIssueItem[]): MyIssuesResult {
-  return { items, githubEnhancement: null, degraded: null, truncated: false };
+function result(items: MyIssueItem[], over: Partial<MyIssuesResult> = {}): MyIssuesResult {
+  return {
+    items,
+    githubEnhancement: null,
+    githubEnhancementFailed: false,
+    degraded: null,
+    truncated: false,
+    ...over,
+  };
 }
 
 function state(over: Record<string, unknown> = {}) {
@@ -118,19 +125,44 @@ describe('IssueTrackerFeatureLayout 内容区分支', () => {
     useMyIssuesMock.mockReturnValue(state({ loading: true, data: null }));
     render(<IssueTrackerFeatureLayout />);
 
-    expect(screen.getByText('issueTracker.mine.emptyTitle')).toBeTruthy();
+    // 引导正文在场(那段「怎么提交」的说明),但标题用的是「查不到」那版 ——
+    // 首屏还没拿到结果,同样不能断言「还没有提交过」。
+    expect(screen.getByText('issueTracker.mine.emptyTitleUnverified')).toBeTruthy();
+    expect(screen.queryByText('issueTracker.mine.emptyTitle')).toBeNull();
     expect(screen.queryByText('issueTracker.detail.loading')).toBeNull();
   });
 
   it('首屏取数完成后引导原子切成列表 —— 中间不经过第三种形态', () => {
     useMyIssuesMock.mockReturnValue(state({ loading: true, data: null }));
     const view = render(<IssueTrackerFeatureLayout />);
-    expect(screen.getByText('issueTracker.mine.emptyTitle')).toBeTruthy();
+    expect(screen.getByText('issueTracker.mine.emptyTitleUnverified')).toBeTruthy();
 
     useMyIssuesMock.mockReturnValue(state({ loading: false, data: result([item()]) }));
     view.rerender(<IssueTrackerFeatureLayout />);
-    expect(screen.queryByText('issueTracker.mine.emptyTitle')).toBeNull();
+    expect(screen.queryByText('issueTracker.mine.emptyTitleUnverified')).toBeNull();
     expect(screen.getByText('已经加载出来的那条 issue')).toBeTruthy();
+  });
+
+  it('空列表:三路都查询成功才敢说「还没有提交过」', () => {
+    useMyIssuesMock.mockReturnValue(state({ data: result([]) }));
+    render(<IssueTrackerFeatureLayout />);
+    expect(screen.getByText('issueTracker.mine.emptyTitle')).toBeTruthy();
+  });
+
+  it('空列表 + 任一路没查成:改说「暂时查不到」,不断言用户从未提交', () => {
+    // 用户在 GitHub 上有几十条 issue、只是这次没查到,页面却说「还没有提交过」——
+    // 这正是本次要修的现场(平台接口未上线 + 插件 PAT 搜不动本仓)。
+    for (const over of [
+      { degraded: 'platform-unavailable' as const },
+      { degraded: 'fetch-failed' as const },
+      { githubEnhancementFailed: true },
+    ]) {
+      useMyIssuesMock.mockReturnValue(state({ data: result([], over) }));
+      const view = render(<IssueTrackerFeatureLayout />);
+      expect(screen.getByText('issueTracker.mine.emptyTitleUnverified')).toBeTruthy();
+      expect(screen.queryByText('issueTracker.mine.emptyTitle')).toBeNull();
+      view.unmount();
+    }
   });
 
   it('一条都没有:显示空态引导,不显示常驻说明条(避免与引导里的说明重复)', () => {

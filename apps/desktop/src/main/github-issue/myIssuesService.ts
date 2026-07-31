@@ -89,6 +89,17 @@ export interface MyIssuesServiceDeps {
     login: string,
   ) => Promise<RemoteIssuePage>;
   /**
+   * 主通道搜索失败时的**兜底通道**(本机 gh CLI)。返回 null = 没有兜底可用。
+   *
+   * 为什么必须有:身份能报出来 ≠ 这一路能查到数据。插件 PAT 若是 fine-grained
+   * token,`get_current_user` 正常、搜本仓却被 GitHub 以 422 拒绝(未显式授权的仓库
+   * 即使公开也搜不到)—— 上一版就此整路放弃,而本机 gh CLI 明明有权限。
+   *
+   * 分开注入而不是让 searchAuthoredIssues 内部消化:runtime 是真实接线、不进单测,
+   * 「主通道失败必须换通道再试」这条不变量只有放这一层才钉得住。
+   */
+  searchAuthoredIssuesFallback?: (login: string) => Promise<RemoteIssuePage | null>;
+  /**
    * 当前账号作用域标识(data owner + session generation)。**这是安全边界**:
    * issue 列表含标题、编号与 GitHub 用户名,属于账号私有数据。服务是进程级单例,
    * 缓存与在途请求都必须按它键控,否则 60s TTL 内切号会让新账号看到上一个账号的
@@ -224,6 +235,7 @@ export class MyIssuesService {
       githubEnhancement: enhancement.viewer
         ? { login: enhancement.viewer.login, source: enhancement.viewer.source }
         : null,
+      githubEnhancementFailed: enhancement.failed,
       degraded: platform.degraded,
       truncated: platform.truncated || enhancement.truncated,
     };
@@ -291,13 +303,16 @@ export class MyIssuesService {
    * 整页遮住。超时、失败、没配置三种情况对用户是同一个结果 ——「这次没有增强」,
    * 主列表照常出。
    *
-   * 注:runtime 侧另给插件调用传了各自的 timeoutMs(身份 5s / 搜索 6s),那是让**通道
-   * 自己了结**,与这里的页面等待上限目的不同,不能互相替代。
+   * 注:runtime 侧另给插件调用传了各自的 timeoutMs(身份 5s / 搜索 4s),那是让**通道
+   * 自己了结**,与这里的页面等待上限目的不同,不能互相替代。搜索那档留 4s 而不是占满,
+   * 是为了给下面的兜底通道留出预算 —— 两段合计仍在这一次总 deadline 内。
    */
   private async loadGithubEnhancement(): Promise<{
     viewer: GithubEnhancementViewer | null;
     issues: RemoteIssue[];
     truncated: boolean;
+    /** 配置了却没能用上(主通道失败且兜底也没救回来)。没配 / 回退成功都是 false。 */
+    failed: boolean;
   }> {
     // 总超时触发时也要能回传已经解析成功的身份:header 照常显示并入了谁名下的 issue,
     // 只是这一次没并进内容。所以把它记在闭包外。
@@ -306,20 +321,60 @@ export class MyIssuesService {
       return await this.withDeadline(async () => {
         resolved = await this.deps.resolveGithubEnhancement();
         const viewer = resolved;
-        if (!viewer) return { viewer: null, issues: [], truncated: false };
+        // 没配增强是**正常状态**,不是失败。
+        if (!viewer) return { viewer: null, issues: [], truncated: false, failed: false };
         try {
           const page = await this.deps.searchAuthoredIssues(viewer, viewer.login);
-          return { viewer, issues: page.issues, truncated: isTruncated(page) };
+          return { viewer, issues: page.issues, truncated: isTruncated(page), failed: false };
         } catch (err) {
-          // 搜索失败(非超时)不算列表降级 —— 主路径是平台通道。
-          log.debug('github enhancement search failed', { error: errorText(err) });
-          return { viewer, issues: [], truncated: false };
+          // 提到 warn:身份能报出来却搜不到是异常,而这条路的失败对用户是静默的 ——
+          // 记 debug 等于线上不可诊断(排查这个 bug 时日志里就只有平台通道的 404)。
+          log.warn('github enhancement search failed; trying the fallback channel', {
+            source: viewer.source,
+            error: errorText(err),
+          });
+          return await this.searchViaFallback(viewer);
         }
       }, this.deps.enhancementTimeoutMs ?? DEFAULT_ENHANCEMENT_TIMEOUT_MS, 'enhancement');
     } catch (err) {
       // 没有 GitHub 身份是正常状态;解析失败与总超时同样只是「这次没有增强」。
       log.debug('github enhancement unavailable', { error: errorText(err) });
-      return { viewer: resolved, issues: [], truncated: false };
+      // 身份已经解析出来却走到这里 = 配了但这次用不上(搜索连兜底一起超时),
+      // 要让 UI 有机会说明;身份都没拿到时无从区分「没配」与「配了失效」,保持静默。
+      return { viewer: resolved, issues: [], truncated: false, failed: resolved !== null };
+    }
+  }
+
+  /**
+   * 主通道搜不到时换本机 gh CLI 再试一次。
+   *
+   * 只对 `ghost` 主通道有意义 —— `gh-cli` 自己就是兜底,失败了没有下一条通道可换。
+   * 兜底不可用(没装 / 没登录 gh)或它也失败 ⇒ `failed: true`,让 UI 说明这一路
+   * 配了却没用上;回退成功 ⇒ `failed: false`,用户已经拿到数据,没有可见损失就不提示。
+   */
+  private async searchViaFallback(viewer: GithubEnhancementViewer): Promise<{
+    viewer: GithubEnhancementViewer;
+    issues: RemoteIssue[];
+    truncated: boolean;
+    failed: boolean;
+  }> {
+    const fallback = this.deps.searchAuthoredIssuesFallback;
+    if (!fallback || viewer.source !== 'ghost') {
+      return { viewer, issues: [], truncated: false, failed: true };
+    }
+    try {
+      const page = await fallback(viewer.login);
+      if (!page) {
+        log.warn('no fallback channel available for the github enhancement');
+        return { viewer, issues: [], truncated: false, failed: true };
+      }
+      log.info('github enhancement recovered through the fallback channel', {
+        count: page.issues.length,
+      });
+      return { viewer, issues: page.issues, truncated: isTruncated(page), failed: false };
+    } catch (err) {
+      log.warn('github enhancement fallback search failed too', { error: errorText(err) });
+      return { viewer, issues: [], truncated: false, failed: true };
     }
   }
 

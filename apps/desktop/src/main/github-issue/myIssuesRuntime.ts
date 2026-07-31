@@ -58,8 +58,11 @@ const GHOST_IDENTITY_TIMEOUT_MS = 5_000;
 /**
  * 增强搜索的插件通道超时。service 层另有一道整体超时兜着,但这里也必须传 ——
  * 那道只是放弃等待,这道才真正让插件调用自己了结(通道默认 330s)。
+ *
+ * 刻意不占满 service 那 8s 预算:插件搜不到时还要走 gh CLI 兜底,两段合计必须留在
+ * 同一次总 deadline 内。权限类失败是立即 422,所以正常情况下兜底有近 8s 可用。
  */
-const GHOST_SEARCH_TIMEOUT_MS = 6_000;
+const GHOST_SEARCH_TIMEOUT_MS = 4_000;
 
 let serviceInstance: MyIssuesService | null = null;
 
@@ -70,6 +73,7 @@ export function getMyIssuesService(): MyIssuesService {
       fetchPlatformIssues: fetchPlatformIssues,
       resolveGithubEnhancement: resolveGithubEnhancement,
       searchAuthoredIssues: searchAuthoredIssues,
+      searchAuthoredIssuesFallback: searchAuthoredIssuesFallback,
       readScope: activeOwnerScopeKey,
     });
   }
@@ -119,6 +123,13 @@ function mapPlatformFailure(err: unknown): MyIssuesDegradedReason {
   return 'fetch-failed';
 }
 
+/**
+ * 身份解析:插件优先,本机 gh CLI 兜底。
+ *
+ * 这里锁定的只是**身份来源**,不代表数据也只能从那条通道取 —— 两者曾被混为一谈:
+ * 插件报出身份后 gh CLI 就再也不会被尝试,于是 PAT 搜不动本仓时整路放弃。取数的回退
+ * 在 service 层(searchAuthoredIssuesFallback),与身份来源解耦。
+ */
 async function resolveGithubEnhancement(): Promise<GithubEnhancementViewer | null> {
   const ghostDeps = getSharedGithubUserSubmitterDeps();
   // workdir 传 null:/issues 是全局页面,没有会话工作目录上下文。
@@ -159,16 +170,33 @@ async function readGhostViewerLogin(
   }
 }
 
-async function searchAuthoredIssues(
-  viewer: GithubEnhancementViewer,
-  login: string,
-): Promise<RemoteIssuePage> {
+/**
+ * 两条通道共用同一份查询参数 —— 各写一份迟早会漂移(而且 login 的校验漏在哪条上,
+ * 那条就能把 login 里的空格 / 冒号当查询限定符送出去)。
+ */
+function authoredSearchParams(login: string): {
+  q: string;
+  sort: string;
+  order: 'desc';
+  per_page: number;
+} {
   if (!GITHUB_LOGIN_RE.test(login)) {
     throw new Error(`refusing to search with a malformed GitHub login: ${login}`);
   }
   const { owner, repo } = MY_ISSUES_REPOSITORY;
-  const q = `repo:${owner}/${repo} is:issue author:${login}`;
-  const params = { q, sort: 'created', order: 'desc' as const, per_page: SEARCH_PAGE_SIZE };
+  return {
+    q: `repo:${owner}/${repo} is:issue author:${login}`,
+    sort: 'created',
+    order: 'desc',
+    per_page: SEARCH_PAGE_SIZE,
+  };
+}
+
+async function searchAuthoredIssues(
+  viewer: GithubEnhancementViewer,
+  login: string,
+): Promise<RemoteIssuePage> {
+  const params = authoredSearchParams(login);
 
   if (viewer.source === 'ghost') {
     const operation = await callCindyGithubOperation(
@@ -182,6 +210,20 @@ async function searchAuthoredIssues(
   }
 
   return parseIssuePage(await repoScopedClient(requireToken(viewer)).searchIssuesAndPRs(params));
+}
+
+/**
+ * 兜底通道:本机 `gh auth token`。插件 PAT 搜不动本仓时(fine-grained token 对未显式
+ * 授权的仓库返回 422,即使仓库公开)由它接手 —— gh 的 OAuth token 权限完整。
+ *
+ * 返回 null = 没装 / 没登录 gh,没有兜底可用。ghCliTokenSource 会探测 homebrew 等绝对
+ * 路径,所以 GUI 启动的正式版(PATH 精简)同样能找到 gh。
+ */
+async function searchAuthoredIssuesFallback(login: string): Promise<RemoteIssuePage | null> {
+  const token = await getSharedGhCliTokenSource().readToken();
+  if (!token) return null;
+  const page = await repoScopedClient(token).searchIssuesAndPRs(authoredSearchParams(login));
+  return parseIssuePage(page);
 }
 
 function requireToken(viewer: GithubEnhancementViewer): string {

@@ -49,6 +49,7 @@ export function useMyIssues(): UseMyIssuesState {
           setData({
             items: response.items,
             githubEnhancement: response.githubEnhancement,
+            githubEnhancementFailed: response.githubEnhancementFailed,
             degraded: response.degraded,
             truncated: response.truncated,
           });

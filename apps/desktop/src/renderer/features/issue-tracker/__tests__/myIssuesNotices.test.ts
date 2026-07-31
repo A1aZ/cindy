@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { MyIssueItem, MyIssuesResult } from '@/../shared/myIssues';
 
-import { selectMyIssuesNotices } from '../lib/myIssuesNotices';
+import { canTrustEmptyList, selectMyIssuesNotices } from '../lib/myIssuesNotices';
 
 function item(over: Partial<MyIssueItem> = {}): MyIssueItem {
   return {
@@ -27,6 +27,7 @@ function result(over: Partial<MyIssuesResult> = {}): MyIssuesResult {
   return {
     items: [],
     githubEnhancement: null,
+    githubEnhancementFailed: false,
     degraded: null,
     truncated: false,
     ...over,
@@ -117,6 +118,43 @@ describe('selectMyIssuesNotices', () => {
       items: [item({ sources: ['cindy-tool', 'github-account'], state: 'unknown' })],
     });
     expect(selectMyIssuesNotices(ledgerGithubUser)).toEqual(['issueTracker.mine.fetchFailedHint']);
+  });
+
+  it('增强配了却没用上:单独一条提示,排在主来源之后', () => {
+    expect(selectMyIssuesNotices(result({ githubEnhancementFailed: true }))).toEqual([
+      'issueTracker.mine.enhancementFailedHint',
+    ]);
+    // 两路各自出问题时两条都要说,顺序稳定(平台是主来源,排前面)。
+    expect(
+      selectMyIssuesNotices(
+        result({ degraded: 'platform-unavailable', githubEnhancementFailed: true }),
+      ),
+    ).toEqual([
+      'issueTracker.mine.platformUnavailableHint',
+      'issueTracker.mine.enhancementFailedHint',
+    ]);
+  });
+
+  it('回退救回来时不提示 —— 没有可见损失就不打扰用户', () => {
+    // service 在兜底通道拿到数据后会把 githubEnhancementFailed 置回 false。
+    expect(
+      selectMyIssuesNotices(
+        result({ githubEnhancementFailed: false, items: [item({ state: 'open' })] }),
+      ),
+    ).toEqual([]);
+  });
+
+  describe('canTrustEmptyList', () => {
+    it('三路都查询成功才可确证「真的没有」', () => {
+      expect(canTrustEmptyList(result())).toBe(true);
+    });
+
+    it('任一路降级或失败就不可确证', () => {
+      expect(canTrustEmptyList(result({ degraded: 'platform-unavailable' }))).toBe(false);
+      expect(canTrustEmptyList(result({ degraded: 'not-signed-in' }))).toBe(false);
+      expect(canTrustEmptyList(result({ degraded: 'fetch-failed' }))).toBe(false);
+      expect(canTrustEmptyList(result({ githubEnhancementFailed: true }))).toBe(false);
+    });
   });
 
   it('截断与降级可以同时提示', () => {

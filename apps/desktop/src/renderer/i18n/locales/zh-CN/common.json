@@ -3701,7 +3701,9 @@
     "unavailable": "该插件面板当前不可用"
   },
   "ghostPanelBubble": {
-    "restoreAria": "恢复 {{name}} 面板"
+    "restoreAria": "恢复 {{name}} 面板",
+    "stackExpandAria": "已收起 {{count}} 个插件面板，点击展开",
+    "stackCollapseAria": "收拢插件面板列表"
   },
   "rightSidebar": {
     "ariaLabel": "右侧边栏",

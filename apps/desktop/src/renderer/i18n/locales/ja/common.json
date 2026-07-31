@@ -3701,7 +3701,9 @@
     "unavailable": "このプラグインパネルは現在利用できません"
   },
   "ghostPanelBubble": {
-    "restoreAria": "{{name}} パネルを元に戻す"
+    "restoreAria": "{{name}} パネルを元に戻す",
+    "stackExpandAria": "{{count}} 個のプラグインパネルを最小化中。クリックで展開",
+    "stackCollapseAria": "プラグインパネルの一覧を畳む"
   },
   "rightSidebar": {
     "ariaLabel": "右サイドバー",

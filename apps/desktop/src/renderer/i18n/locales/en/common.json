@@ -3702,7 +3702,9 @@
     "unavailable": "This plugin panel is currently unavailable"
   },
   "ghostPanelBubble": {
-    "restoreAria": "Restore {{name}} panel"
+    "restoreAria": "Restore {{name}} panel",
+    "stackExpandAria": "{{count}} plugin panels minimized. Click to expand",
+    "stackCollapseAria": "Collapse the plugin panel list"
   },
   "rightSidebar": {
     "ariaLabel": "Right sidebar",

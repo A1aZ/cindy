@@ -3701,7 +3701,9 @@
     "unavailable": "이 플러그인 패널은 현재 사용할 수 없습니다"
   },
   "ghostPanelBubble": {
-    "restoreAria": "{{name}} 패널 복원"
+    "restoreAria": "{{name}} 패널 복원",
+    "stackExpandAria": "플러그인 패널 {{count}}개가 최소화됨. 클릭하여 펼치기",
+    "stackCollapseAria": "플러그인 패널 목록 접기"
   },
   "rightSidebar": {
     "ariaLabel": "오른쪽 사이드바",

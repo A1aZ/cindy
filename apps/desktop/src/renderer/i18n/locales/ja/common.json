@@ -3009,16 +3009,9 @@
           "desc": "このプラグインが Cindy Agent にタスクを任せるときの実行設定です。未設定の項目は新規ドラフトの選択に従います。既定では読み取り専用で、専用フォルダー内で作業します。",
           "agent": "Agent",
           "model": "モデル",
-          "effort": "推論強度",
-          "fast": "Fast モード",
-          "fastOn": "オン",
-          "fastOff": "オフ",
           "permission": "書き込み権限",
-          "permissionMode": {
-            "plan": "読み取り専用(既定):閲覧と思考のみで、変更はできません",
-            "acceptEdits": "ファイル編集可:作業フォルダー内のファイルを変更できます",
-            "auto": "自動:作業フォルダー内の通常操作は毎回確認しません"
-          },
+          "permissionDisabled": "代行セッションでは選べません",
+          "resetFollow": "既定に従うに戻す",
           "workdir": "作業フォルダー",
           "workdirDefault": "プラグイン専用フォルダー(既定)",
           "workdirPick": "選択…",

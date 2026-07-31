@@ -3010,16 +3010,9 @@
           "desc": "How this plugin's tasks run when it hands work to the Cindy Agent. Unset fields follow your new-draft preferences; the helper is read-only by default and works in a dedicated folder.",
           "agent": "Agent",
           "model": "Model",
-          "effort": "Reasoning effort",
-          "fast": "Fast mode",
-          "fastOn": "On",
-          "fastOff": "Off",
           "permission": "Write access",
-          "permissionMode": {
-            "plan": "Read-only (default): can look and think, cannot change anything",
-            "acceptEdits": "Can edit files: may modify files in the working folder",
-            "auto": "Auto: routine actions in the working folder no longer ask each time"
-          },
+          "permissionDisabled": "Not available for errand sessions",
+          "resetFollow": "Reset to follow default",
           "workdir": "Working folder",
           "workdirDefault": "Plugin's dedicated folder (default)",
           "workdirPick": "Choose…",

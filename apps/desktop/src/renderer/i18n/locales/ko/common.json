@@ -3009,16 +3009,9 @@
           "desc": "이 플러그인이 Cindy Agent에게 작업을 맡길 때 사용하는 실행 설정입니다. 설정하지 않은 항목은 새 초안 선택을 따르며, 기본은 읽기 전용이고 전용 폴더에서 작업합니다.",
           "agent": "Agent",
           "model": "모델",
-          "effort": "추론 강도",
-          "fast": "Fast 모드",
-          "fastOn": "켬",
-          "fastOff": "끔",
           "permission": "쓰기 권한",
-          "permissionMode": {
-            "plan": "읽기 전용(기본): 보고 생각만 할 수 있고 변경은 불가",
-            "acceptEdits": "파일 수정 가능: 작업 폴더 안의 파일을 수정할 수 있음",
-            "auto": "자동: 작업 폴더 안의 일반 작업은 매번 묻지 않음"
-          },
+          "permissionDisabled": "대행 세션에서는 선택할 수 없음",
+          "resetFollow": "기본값 따르기로 되돌리기",
           "workdir": "작업 폴더",
           "workdirDefault": "플러그인 전용 폴더(기본)",
           "workdirPick": "선택…",

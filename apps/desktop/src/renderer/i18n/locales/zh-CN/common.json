@@ -3009,16 +3009,9 @@
           "desc": "这个插件把任务交给 Cindy Agent 时用哪套配置干活。不配就跟随你新建草稿时的选择；帮工默认只能看不能改，工作目录默认是插件专属文件夹。",
           "agent": "Agent",
           "model": "模型",
-          "effort": "推理强度",
-          "fast": "Fast 模式",
-          "fastOn": "开",
-          "fastOff": "关",
           "permission": "动手权限",
-          "permissionMode": {
-            "plan": "只读(默认)：只能看和想，不能改东西",
-            "acceptEdits": "可改文件：允许修改工作目录里的文件",
-            "auto": "自动：工作目录内的常规操作不再逐次询问"
-          },
+          "permissionDisabled": "派活时不提供这一档",
+          "resetFollow": "恢复跟随默认",
           "workdir": "工作目录",
           "workdirDefault": "插件专属文件夹(默认)",
           "workdirPick": "选择…",

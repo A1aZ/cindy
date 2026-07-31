@@ -268,10 +268,7 @@ import { reapClaudeOrphansSync } from './claude-orphan-reaper';
 import { startAgentProcessPriorityWatcher } from './agent-process-priority';
 import { initAppBadgeService, clearAllSessionAttention } from './appBadgeService';
 import { initNotificationService } from './notificationService';
-import {
-  initWecomGroupNotificationIpc,
-  wecomGroupNotificationService,
-} from './wecomGroupNotification';
+import { initWecomGroupNotificationIpc } from './wecomGroupNotification';
 import { getAgentIslandService, initAgentIslandService } from './agent-island/service.js';
 import {
   isAppContentWindow,
@@ -2562,7 +2559,6 @@ const registerIpcHandlers = () => {
   initNotificationService({
     getWindow: () => getWindow() ?? null,
     feishuIm,
-    wecomGroupPublisher: wecomGroupNotificationService,
   });
   initWecomGroupNotificationIpc();
   initAgentIslandService({

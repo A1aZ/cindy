@@ -6100,7 +6100,26 @@
         "compactSuccessWithTokens": "컨텍스트를 압축했습니다: {{before}}k → {{after}}k tokens",
         "compactFailed": "압축 실패",
         "compactNothing": "아직 압축할 내용이 없습니다",
+        "sessionBranches": "세션 분기",
         "copySessionLink": "세션 링크 복사"
+      },
+      "sessionBranches": {
+        "title": "세션 분기",
+        "close": "세션 분기 닫기",
+        "description": "Cindy 세션 포크와 Pi 세션 내부 분기를 하나의 트리에서 표시합니다.",
+        "current": "현재",
+        "empty": "전환할 수 있는 Pi 분기가 아직 없습니다.",
+        "emptyEntry": "표시할 내용 없음",
+        "loadFailed": "세션 분기를 불러오지 못했습니다",
+        "switchFailed": "분기 전환에 실패했습니다",
+        "switched": "세션 분기를 전환했습니다",
+        "switchedWithDraft": "분기를 전환하고 원래 프롬프트를 입력창에 복원했습니다",
+        "runningBlocked": "현재 턴이 끝난 후 분기를 전환할 수 있습니다.",
+        "remoteBlocked": "분기를 전환하기 전에 제어 중인 데스크톱을 다시 연결하거나 업데이트하세요.",
+        "filesWarning": "전환은 대화 컨텍스트만 변경하며 작업 파일은 되돌리지 않습니다.",
+        "summarize": "떠나는 분기 요약 생성(모델 사용)",
+        "summaryFocus": "선택 사항: 요약 초점(예: 오류 처리 결론 유지)",
+        "role": { "user": "사용자", "assistant": "Agent", "tool": "도구", "summary": "분기 요약", "system": "상태" }
       },
       "projectAction": {
         "rename": "프로젝트 이름 변경",

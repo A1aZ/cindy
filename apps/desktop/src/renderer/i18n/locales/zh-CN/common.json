@@ -6102,7 +6102,26 @@
         "compactSuccessWithTokens": "上下文已压缩：{{before}}k → {{after}}k tokens",
         "compactFailed": "压缩失败",
         "compactNothing": "暂无可压缩内容",
+        "sessionBranches": "会话分支",
         "copySessionLink": "复制任务链接"
+      },
+      "sessionBranches": {
+        "title": "会话分支",
+        "close": "关闭会话分支",
+        "description": "Cindy 会话分叉与 Pi 会话内分支统一显示在这里。",
+        "current": "当前",
+        "empty": "当前会话还没有可切换的 Pi 分支。",
+        "emptyEntry": "无可见内容",
+        "loadFailed": "读取会话分支失败",
+        "switchFailed": "切换分支失败",
+        "switched": "已切换会话分支",
+        "switchedWithDraft": "已切换分支，原问题已放回输入框",
+        "runningBlocked": "会话运行中，结束后才能切换分支。",
+        "remoteBlocked": "请先重连或升级被控桌面端，再切换分支。",
+        "filesWarning": "切换只改变对话上下文，不会回滚工作区文件。",
+        "summarize": "离开当前分支时生成摘要（会调用模型）",
+        "summaryFocus": "可选：摘要重点，例如保留错误处理结论",
+        "role": { "user": "用户", "assistant": "Agent", "tool": "工具", "summary": "分支摘要", "system": "状态" }
       },
       "projectAction": {
         "rename": "重命名项目",

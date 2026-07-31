@@ -513,7 +513,7 @@ export async function runMessagesListImportSideEffects(
  * handleMessageCreatedRaw 对已存在 clientId 走 merge/替换语义,因此**更新**行
  * (如 dismiss)复用同一事件即可让 peer 视图刷新,无需新增 onUpdated 通道。
  */
-function broadcastMessageRow(sessionId: string, msg: Message): void {
+export function broadcastMessageRow(sessionId: string, msg: Message): void {
   tapWindowBroadcast('local-db:messages:created', { sessionId, message: msg });
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) continue;

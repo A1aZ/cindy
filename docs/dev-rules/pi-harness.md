@@ -61,6 +61,9 @@ Cindy 显式设置:models.json、`--append-system-prompt`、`--session-dir`、�
    派生链 `catalog-to-descriptors.ts` → `capabilities.availableModels` → `writeModelsJson`。
 6. **权限弹窗正文**:`PermissionPrompt.formatToolInput` 必须 harness 无关(pi 小写工具名 +
    path/command 字段,CC 大写 + file_path),由 `formatToolInput.test.ts` 守。
+7. **统一会话树真相**:Cindy `parentSessionId` 是外层独立会话分叉;Pi JSONL entry tree 是当前
+   Pi 会话内分支。Pi 导航后必须通过 `session.treeRehydrate` 原子替换 SQLite 可见投影,旧行仅
+   soft-hide;切换只改对话上下文,不得声称或尝试回滚工作区文件。
 
 ## 5. 已交付(2026-07 里程碑)
 
@@ -111,5 +114,7 @@ Cindy 显式设置:models.json、`--append-system-prompt`、`--session-dir`、�
   链路:CustomProviderDialog pi tab(+ api 选择器)→ custom-provider-store(pi runtime)→
   user-provider 派生 → pi-host `resolvePiNativeProviders` → PiAgent writeModelsJson 原生块 +
   provider 感知 setModel。真二进制测试证明直连原生端点、网关零请求。
-- **会话树**:按现有 fork/分支功能的树状升级迭代(pi 原生 append-only entry 树 + 分支摘要),
-  不引入新概念。
+- ✅ **统一会话树**(已交付):会话头部「会话分支」把 Cindy 原有 session fork 与当前 Pi
+  append-only entry tree 嵌在同一棵树中。支持原生分支切换、可选分支摘要、选中 user entry
+  回填原 prompt、SQLite 可见时间线原子重投影与上下文 usage 恢复;device-link / mobile
+  transport contract 同步开放。切换不回滚工作区文件。

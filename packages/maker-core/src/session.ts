@@ -22,7 +22,13 @@ import type {
   AgentKind,
   UserMessage,
 } from './types/common.js';
-import type { Capabilities, ManualCompactResult } from './types/capabilities.js';
+import type {
+  Capabilities,
+  ManualCompactResult,
+  NavigateSessionTreeOptions,
+  NavigateSessionTreeResult,
+  SessionTreeSnapshot,
+} from './types/capabilities.js';
 import { NotSupportedError } from './types/capabilities.js';
 import type {
   AgentEvent,
@@ -694,6 +700,34 @@ export class Session {
       throw new NotSupportedError('manualCompact', { supported: false, reason: 'not-implemented' });
     }
     return this.handle.compactSession(instructions);
+  }
+
+  async getSessionTree(): Promise<SessionTreeSnapshot> {
+    this.ensureActive();
+    const status = this.capabilities.sessionTree ?? { supported: false as const, reason: 'not-implemented' as const };
+    if (!status.supported) throw new NotSupportedError('sessionTree', status);
+    if (!this.handle.getSessionTree) {
+      throw new NotSupportedError('sessionTree', { supported: false, reason: 'not-implemented' });
+    }
+    return this.handle.getSessionTree();
+  }
+
+  async navigateSessionTree(
+    entryId: string,
+    options?: NavigateSessionTreeOptions,
+  ): Promise<NavigateSessionTreeResult> {
+    this.ensureActive();
+    const status = this.capabilities.sessionTree ?? { supported: false as const, reason: 'not-implemented' as const };
+    if (!status.supported) throw new NotSupportedError('sessionTree', status);
+    if (!this.handle.navigateSessionTree) {
+      throw new NotSupportedError('sessionTree', { supported: false, reason: 'not-implemented' });
+    }
+    if (this.isTurnRunning()) {
+      const err = new Error('SESSION_RUNNING: 会话进行中，无法切换分支');
+      (err as { code?: string }).code = 'SESSION_RUNNING';
+      throw err;
+    }
+    return this.handle.navigateSessionTree(entryId, options);
   }
 
   getFastMode(): boolean | null {

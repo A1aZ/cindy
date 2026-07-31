@@ -290,6 +290,50 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
   );
 
   it(
+    'reads and navigates the native session tree without calling the model',
+    { timeout: 60_000 },
+    async () => {
+      const agent = new PiAgent(buildDeps());
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-tree-cwd-'));
+      let handle: AgentSessionHandle | null = null;
+      try {
+        handle = await agent.startSession({
+          sessionId: 'tree-session',
+          workingDir,
+          model: 'pi-test-model',
+        });
+        const done = (async () => {
+          for await (const ev of handle!.events()) {
+            if (ev.type === 'done') break;
+          }
+        })();
+        await handle.send({ type: 'user', content: 'seed prompt for native tree' });
+        await done;
+
+        const before = await handle.getSessionTree?.();
+        expect(before?.leafId).toBeTruthy();
+        const user = before?.roots
+          .flatMap(function flatten(node): typeof before.roots {
+            return [node, ...node.children.flatMap(flatten)];
+          })
+          .find((node) => node.role === 'user');
+        expect(user).toBeDefined();
+
+        const gatewayBefore = seenRequests.length;
+        const switched = await handle.navigateSessionTree?.(user!.id, { summarize: false });
+        expect(switched?.draftText).toBe('seed prompt for native tree');
+        expect(switched?.tree.leafId).not.toBe(before?.leafId);
+        expect(switched?.messages.some((message) => message.role === 'user')).toBe(false);
+        expect(switched?.contextWindow).toBeGreaterThan(0);
+        expect(seenRequests.length).toBe(gatewayBefore);
+      } finally {
+        await handle?.close();
+        rmSync(workingDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
     'forwards an image attachment through pi to the gateway (multimodal image)',
     { timeout: 60_000 },
     async () => {

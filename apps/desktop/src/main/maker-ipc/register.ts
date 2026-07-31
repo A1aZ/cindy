@@ -130,6 +130,7 @@ import {
 import { ensureDialogueWorkspaceDir, dialogueWorkspaceRootDir } from '../localDb/dialogueWorkspace.js';
 import { healMissingDialogueWorkdir } from '../localDb/dialogueWorkdirSelfHeal.js';
 import {
+  broadcastMessageRow,
   broadcastMessageDeleted,
   commitMessageDeletion,
   createMessage as createDbMessage,
@@ -137,6 +138,7 @@ import {
   getMessageDeletionTarget,
   listMessagesForAgentHandoff,
 } from '../localDb/ipc/messages.js';
+import { messageToCamel } from '../localDb/mapper.js';
 import { visibleMessageTextForConversationSearch } from '../localDb/conversationSearch.pure.js';
 import {
   applyAgentSwitchToSessionRow,
@@ -8631,6 +8633,150 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     }
     return sess.compactSession(instructions);
   });
+
+  /**
+   * 会话树是历史浏览入口，不能要求用户先发一条消息把旧 Pi 会话唤醒。
+   * 这里按持久化元数据恢复同一原生 session；Maker.createSession 自带 per-id singleflight。
+   */
+  async function getOrResumeSessionTreeSession(sessionId: string) {
+    const live = maker.getSession(sessionId);
+    if (live) return live;
+    const meta = await maker.getSessionMeta(sessionId).catch(() => null);
+    if (!meta || meta.agentKind !== 'pi') return null;
+    const db = getDbClient().drizzle;
+    const [row] = await db
+      .select({
+        providerId: sessions.providerId,
+        effort: sessions.effort,
+        fastMode: sessions.fastMode,
+        permissionMode: sessions.permissionMode,
+        remoteHostId: sessions.remoteHostId,
+        orcaRole: sessions.orcaRole,
+      })
+      .from(sessions)
+      .where(eq(sessions.id, sessionId))
+      .limit(1);
+    if (!row) return null;
+    const createOpts = buildCreateOptsWithStderr({
+      id: sessionId,
+      agentKind: 'pi',
+      workingDir: meta.workDir,
+      model: meta.model,
+      providerId: row.providerId ?? undefined,
+      resumeSessionId: meta.sdkSessionId,
+      effort: row.effort as CreateOpts['effort'],
+      fastMode: !!row.fastMode,
+      permissionMode: permissionModeOrAsk(row.permissionMode),
+      title: meta.title,
+      remoteHostId: row.remoteHostId ?? undefined,
+      orcaRole: row.orcaRole as CreateOpts['orcaRole'],
+    });
+    const workDirReady = await checkWorkDirExists(
+      sessionId,
+      createOpts.workingDir,
+      createOpts.agentKind,
+      createOpts.remoteHostId,
+    );
+    if (!workDirReady) return null;
+    await synthesizeOrcaVendorOptionsFromDb(sessionId, createOpts);
+    const extraDirs = await readSessionExtraDirsFromDb(sessionId).catch(() => []);
+    if (extraDirs.length > 0) createOpts.extraDirs = extraDirs;
+    await ensureRemoteReadyForSessionStart({ createOpts });
+    const { session: resumed } = await bootstrapSession(createOpts);
+    await markOrcaRoleIfNeeded(resumed.id, createOpts.orcaRole);
+    log.info('session-tree: lazily resumed Pi session', {
+      sessionId,
+      sdkSessionId: meta.sdkSessionId ?? null,
+    });
+    return resumed;
+  }
+
+  ipcMain.handle(MAKER_INVOKE.GET_SESSION_TREE, async (_e, sessionId: unknown) => {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+      throwIpcError('INVALID_PARAMS', 'sessionId required');
+    }
+    const sess = await getOrResumeSessionTreeSession(sessionId);
+    if (!sess || !sess.capabilities.sessionTree?.supported) return null;
+    return sess.getSessionTree();
+  });
+
+  ipcMain.handle(
+    MAKER_INVOKE.NAVIGATE_SESSION_TREE,
+    async (_e, sessionId: unknown, entryId: unknown, options: unknown) => {
+      if (typeof sessionId !== 'string' || !sessionId || typeof entryId !== 'string' || !entryId) {
+        throwIpcError('INVALID_PARAMS', 'sessionId + entryId required');
+      }
+      const rawOptions = options == null ? {} : options;
+      if (typeof rawOptions !== 'object' || Array.isArray(rawOptions)) {
+        throwIpcError('INVALID_PARAMS', 'options must be an object');
+      }
+      const parsed = rawOptions as Record<string, unknown>;
+      if (parsed.summarize !== undefined && typeof parsed.summarize !== 'boolean') {
+        throwIpcError('INVALID_PARAMS', 'summarize must be boolean');
+      }
+      if (parsed.customInstructions !== undefined && typeof parsed.customInstructions !== 'string') {
+        throwIpcError('INVALID_PARAMS', 'customInstructions must be string');
+      }
+      const sess = await getOrResumeSessionTreeSession(sessionId);
+      if (!sess || !sess.capabilities.sessionTree?.supported) return null;
+      const oldRows = await getDbClient().drizzle
+        .select({ clientId: messages.clientId })
+        .from(messages)
+        .where(and(eq(messages.sessionId, sessionId), isNull(messages.rewindAt)));
+      const result = await sess.navigateSessionTree(entryId, {
+        summarize: parsed.summarize === true,
+        ...(typeof parsed.customInstructions === 'string'
+          ? { customInstructions: parsed.customInstructions }
+          : {}),
+      });
+      const now = Date.now();
+      await getDbClient().tx('session.treeRehydrate', {
+        sessionId,
+        now,
+        contextTokens: result.contextTokens,
+        contextWindow: result.contextWindow,
+        messages: result.messages.map((message) => ({
+          id: createId(),
+          clientId: message.clientId,
+          role: message.role,
+          content: JSON.stringify(message.content),
+          toolUseId: message.toolUseId ?? null,
+          agentMeta: message.agentMeta ? JSON.stringify(message.agentMeta) : null,
+          agentKind: 'pi',
+          createdAt: message.createdAt,
+        })),
+      });
+      resetTurnPersistState(sessionId);
+
+      // 多窗口与 device-link 控制端先清旧投影，再按 DB 真相补当前活动路径。
+      const oldClientIds = oldRows.map((row) => row.clientId);
+      if (oldClientIds.length > 0) {
+        broadcastMessageDeleted({
+          sessionId,
+          clientId: oldClientIds[0],
+          clientIds: oldClientIds,
+        });
+      }
+      const visibleRows = await getDbClient().drizzle
+        .select()
+        .from(messages)
+        .where(and(eq(messages.sessionId, sessionId), isNull(messages.rewindAt)))
+        .orderBy(messages.createdAt);
+      for (const row of visibleRows) broadcastMessageRow(sessionId, messageToCamel(row));
+      broadcastSessionPatched(sessionId, {
+        clearedAt: null,
+        contextTokens: result.contextTokens,
+        contextWindow: result.contextWindow,
+        updatedAt: new Date(now).toISOString(),
+        _count: { messages: visibleRows.length },
+      });
+      return {
+        tree: result.tree,
+        draftText: result.draftText,
+        cancelled: result.cancelled === true,
+      };
+    },
+  );
 
   ipcMain.handle(MAKER_INVOKE.SET_FAST_MODE, async (_e, sessionId: unknown, enabled: unknown) => {
     if (typeof sessionId !== 'string' || typeof enabled !== 'boolean') {

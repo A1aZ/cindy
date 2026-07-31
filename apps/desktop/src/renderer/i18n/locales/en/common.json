@@ -6111,7 +6111,26 @@
         "compactSuccessWithTokens": "Context compacted: {{before}}k → {{after}}k tokens",
         "compactFailed": "Compaction failed",
         "compactNothing": "Nothing to compact yet",
+        "sessionBranches": "Session branches",
         "copySessionLink": "Copy session link"
+      },
+      "sessionBranches": {
+        "title": "Session branches",
+        "close": "Close session branches",
+        "description": "Cindy session forks and Pi's in-session branches live in one tree.",
+        "current": "Current",
+        "empty": "This session has no Pi branches to switch yet.",
+        "emptyEntry": "No visible content",
+        "loadFailed": "Failed to load session branches",
+        "switchFailed": "Failed to switch branch",
+        "switched": "Session branch switched",
+        "switchedWithDraft": "Branch switched and the original prompt was restored to the composer",
+        "runningBlocked": "Wait for the current turn to finish before switching branches.",
+        "remoteBlocked": "Reconnect or upgrade the controlled desktop before switching branches.",
+        "filesWarning": "Switching changes conversation context only; workspace files are not rolled back.",
+        "summarize": "Summarize the branch you leave (uses the model)",
+        "summaryFocus": "Optional summary focus, e.g. preserve error-handling conclusions",
+        "role": { "user": "User", "assistant": "Agent", "tool": "Tool", "summary": "Branch summary", "system": "State" }
       },
       "projectAction": {
         "rename": "Rename project",

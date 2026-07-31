@@ -76,6 +76,8 @@ export interface Capabilities {
   /** Session 操作 */
   fork: CapabilityStatus;
   rewind: CapabilityStatus;
+  /** 同一 SDK session 内的原生分支树；与创建独立 Cindy 会话的 fork 正交。 */
+  sessionTree?: CapabilityStatus;
 
   /** 中断当前 turn */
   abort: CapabilityStatus;
@@ -124,6 +126,63 @@ export interface ManualCompactResult {
    * UI 应给信息性提示(「暂无可压缩内容」),而非「压缩失败」。
    */
   noop?: boolean;
+}
+
+export type SessionTreeEntryKind =
+  | 'message'
+  | 'compaction'
+  | 'branch_summary'
+  | 'model_change'
+  | 'thinking_level_change'
+  | 'label'
+  | 'custom'
+  | 'other';
+
+export interface SessionTreeNode {
+  id: string;
+  parentId: string | null;
+  kind: SessionTreeEntryKind;
+  role?: 'user' | 'assistant' | 'tool' | 'summary' | 'system';
+  preview: string;
+  timestamp?: string;
+  label?: string;
+  labelTimestamp?: string;
+  children: SessionTreeNode[];
+}
+
+/** 当前 SDK 会话的完整树；activePathIds 从根到当前活动 leaf。 */
+export interface SessionTreeSnapshot {
+  roots: SessionTreeNode[];
+  leafId: string | null;
+  activePathIds: string[];
+}
+
+/** 分支切换后供 host 重建可见聊天时间线的安全、harness-neutral 消息。 */
+export interface SessionTreeHistoryMessage {
+  clientId: string;
+  role: 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'thinking';
+  content: unknown;
+  toolUseId?: string;
+  createdAt: number;
+  agentMeta?: Record<string, unknown> | null;
+}
+
+export interface NavigateSessionTreeOptions {
+  summarize?: boolean;
+  customInstructions?: string;
+  label?: string;
+}
+
+export interface NavigateSessionTreeResult {
+  tree: SessionTreeSnapshot;
+  messages: SessionTreeHistoryMessage[];
+  /** 当前活动分支最后一次模型调用占用的上下文(input + cache read/write)。 */
+  contextTokens: number;
+  /** 当前活动分支模型的上下文窗口。 */
+  contextWindow: number;
+  /** 选中 user entry 时 Pi 回到其 parent，并把原 prompt 放回编辑器。 */
+  draftText?: string;
+  cancelled?: boolean;
 }
 
 /**

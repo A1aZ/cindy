@@ -4586,6 +4586,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       instructions?: string,
     ): Promise<{ tokensBefore?: number; estimatedTokensAfter?: number; noop?: boolean } | null> =>
       ipcRenderer.invoke('maker:compact-session', sessionId, instructions),
+    getSessionTree: (sessionId: string) =>
+      ipcRenderer.invoke('maker:get-session-tree', sessionId),
+    navigateSessionTree: (
+      sessionId: string,
+      entryId: string,
+      options?: { summarize?: boolean; customInstructions?: string },
+    ) => ipcRenderer.invoke('maker:navigate-session-tree', sessionId, entryId, options),
     // 附加只读引用目录的 closure 推送; DB 持久化由 renderer 同步调
     // sessionService.update({ extraDirs }) (跟 setModel + sessionService.update 双 IPC 协调先例一致)。
     // session 不在 / agent capability=false 都 no-op, 不会抛错。

@@ -24,6 +24,7 @@ type VoiceInputConnectionTestResult =
 type DesktopLoginAction = import('../shared/authIpc').DesktopLoginAction;
 type DesktopLoginActionResult = import('../shared/authIpc').DesktopLoginActionResult;
 type UtilityTextFailure = import('../shared/utilityTextResult').UtilityTextFailure;
+type MakerSessionTreeSnapshot = import('@cindy/maker-core').SessionTreeSnapshot;
 type DesktopAccountDeletionConfirmInput =
   import('../shared/authIpc').DesktopAccountDeletionConfirmInput;
 type DesktopAccountDeletionAvailabilityResult =
@@ -4355,6 +4356,18 @@ interface ElectronAPI {
       sessionId: string,
       instructions?: string,
     ) => Promise<{ tokensBefore?: number; estimatedTokensAfter?: number; noop?: boolean } | null>;
+    /** 同会话原生分支树；旧 Pi 会话会在 main 侧按持久化元数据懒恢复。 */
+    getSessionTree: (sessionId: string) => Promise<MakerSessionTreeSnapshot | null>;
+    /** 切换原生分支并同步 Cindy 可见时间线。 */
+    navigateSessionTree: (
+      sessionId: string,
+      entryId: string,
+      options?: { summarize?: boolean; customInstructions?: string },
+    ) => Promise<{
+      tree: MakerSessionTreeSnapshot;
+      draftText?: string;
+      cancelled?: boolean;
+    } | null>;
     /**
      * 附加只读引用目录的 closure 推送; DB 持久化要 renderer 同步调
      * sessionService.update({ extraDirs }) (跟 setModel + sessionService.update 双 IPC 协调先例一致)。

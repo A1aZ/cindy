@@ -35,6 +35,8 @@ describe('device-link shared contract', () => {
     expect(MOBILE_REMOTE_INVOKE_CHANNELS).toContain('maker:input:compact');
     expect(MOBILE_REMOTE_INVOKE_CHANNELS).toContain('local-db:messages:around-client-id');
     expect(MOBILE_REMOTE_INVOKE_CHANNELS).toContain('maker:message:delete');
+    expect(MOBILE_REMOTE_INVOKE_CHANNELS).toContain('maker:get-session-tree');
+    expect(MOBILE_REMOTE_INVOKE_CHANNELS).toContain('maker:navigate-session-tree');
     expect(MOBILE_REMOTE_INVOKE_CHANNELS).toContain('maker:schedule:create-from-template');
     expect(MOBILE_REMOTE_INVOKE_CHANNELS).toContain('maker:schedule:delete-run');
     expect(MOBILE_REMOTE_INVOKE_CHANNELS).toContain('maker:usage:codex-rate-limits');

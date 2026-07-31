@@ -16,8 +16,7 @@
  *
  * P0 骨架已支持:流式文本/thinking/工具事件、steer、abort、set_model/set_thinking_level、
  * resume(switch_session)、usage/cost 快照。
- * 尚未支持(capabilities 声明降级):fork/rewind/planMode/后台任务/远端 host/
- * 权限审批(P0-4 经 cindy-bridge extension 接 interactionResolver)。
+ * 尚未支持(capabilities 声明降级):文件级 rewind/后台任务/远端 host。
  */
 
 import os from 'node:os';
@@ -44,6 +43,9 @@ import type {
   Capabilities,
   ManualCompactResult,
   ModelDescriptor,
+  NavigateSessionTreeOptions,
+  NavigateSessionTreeResult,
+  SessionTreeSnapshot,
 } from '../../types/capabilities.js';
 import { NotSupportedError } from '../../types/capabilities.js';
 import type {
@@ -65,12 +67,21 @@ import {
   usageSnapshotOf,
   type PiTranslateContext,
 } from './translator.js';
+import {
+  activePiHistoryFromTree,
+  findPiTreeEntry,
+  normalizePiSessionTree,
+  piContextTokensFromTree,
+  userDraftTextFromPiEntry,
+} from './session-tree.js';
 
 const PI_PROVIDER_ID = 'cindy';
 const PI_API_KEY_ENV = 'CINDY_PI_API_KEY';
 const PI_SESSION_ID_ENV = 'CINDY_PI_SESSION_ID';
 /** 手动压缩 = 一次完整 LLM 摘要调用(大上下文 + 网关排队),远超默认 30s RPC 超时。 */
 const PI_COMPACT_TIMEOUT_MS = 600_000;
+/** 分支摘要同样可能触发一次完整 LLM 调用。 */
+const PI_BRANCH_NAVIGATION_TIMEOUT_MS = 600_000;
 
 /**
  * digest 分片 body 的**字节**上限(硬上限 8192,留 headroom)。存储层按 UTF-8 字节
@@ -252,6 +263,8 @@ export class PiAgent extends BaseAgent {
       fork: { supported: true },
       // 对话分支可做,但 pi 无文件级 checkpoint —— 文件回滚型 rewind 真做不了,诚实降级。
       rewind: { supported: false, reason: 'sdk-missing', message: 'pi 无文件级 checkpoint;对话分支走 fork' },
+      // pi JSONL 原生 append-only entry tree:get_tree + bridge navigateTree。
+      sessionTree: { supported: true },
       abort: { supported: true },
       sameTurnSteer: { supported: true },
       memory: { supported: { supported: false, reason: 'sdk-missing' } },
@@ -853,6 +866,74 @@ export class PiAgent extends BaseAgent {
         if (typeof data.tokensBefore === 'number') result.tokensBefore = data.tokensBefore;
         if (typeof data.estimatedTokensAfter === 'number') result.estimatedTokensAfter = data.estimatedTokensAfter;
         return result;
+      },
+
+      async getSessionTree(): Promise<SessionTreeSnapshot> {
+        const resp = await proc.request({ type: 'get_tree' });
+        if (!resp.success) throw new Error(`pi get_tree failed: ${resp.error ?? 'unknown'}`);
+        return normalizePiSessionTree(resp.data);
+      },
+
+      async navigateSessionTree(
+        entryId: string,
+        options: NavigateSessionTreeOptions = {},
+      ): Promise<NavigateSessionTreeResult> {
+        if (!entryId || entryId.length > 128) throw new Error('pi session tree: invalid entry id');
+        if (ctx.isStreaming) throw new Error('SESSION_RUNNING: 会话进行中，无法切换分支');
+        const customInstructions = options.customInstructions?.trim();
+        if (customInstructions && customInstructions.length > 4_000) {
+          throw new Error('pi session tree: summary instructions too long');
+        }
+        const label = options.label?.trim();
+        if (label && label.length > 120) throw new Error('pi session tree: label too long');
+
+        const before = await proc.request({ type: 'get_tree' });
+        if (!before.success) throw new Error(`pi get_tree failed: ${before.error ?? 'unknown'}`);
+        const selected = findPiTreeEntry(before.data, entryId);
+        if (!selected) throw new Error(`pi session tree entry not found: ${entryId}`);
+        const payload = encodeURIComponent(JSON.stringify({
+          entryId,
+          summarize: options.summarize === true,
+          ...(customInstructions ? { customInstructions } : {}),
+          ...(label ? { label } : {}),
+        }));
+        const switched = await proc.request(
+          { type: 'prompt', message: `/cindy-branch-switch ${payload}` },
+          { timeoutMs: PI_BRANCH_NAVIGATION_TIMEOUT_MS },
+        );
+        if (!switched.success) {
+          throw new Error(`pi branch navigation failed: ${switched.error ?? 'unknown'}`);
+        }
+
+        const after = await proc.request({ type: 'get_tree' });
+        if (!after.success) throw new Error(`pi get_tree after navigation failed: ${after.error ?? 'unknown'}`);
+        const tree = normalizePiSessionTree(after.data);
+        const draftText = userDraftTextFromPiEntry(selected);
+        // get_session_stats.contextUsage 是 pi 自己用于 compaction/footer 的权威估算，
+        // 比从最后一条 assistant usage 反推更准确（尤其是 compaction/branch summary 后）。
+        const stats = await proc.request({ type: 'get_session_stats' });
+        const contextUsage = stats.success
+          ? (stats.data as {
+              contextUsage?: { tokens?: number | null; contextWindow?: number | null };
+            } | undefined)?.contextUsage
+          : undefined;
+        const contextTokens = typeof contextUsage?.tokens === 'number' && contextUsage.tokens >= 0
+          ? contextUsage.tokens
+          : stats.success
+            ? 0
+            : piContextTokensFromTree(after.data, tree);
+        const contextWindow = typeof contextUsage?.contextWindow === 'number' && contextUsage.contextWindow > 0
+          ? contextUsage.contextWindow
+          : ctx.contextWindow;
+        ctx.contextTokens = contextTokens;
+        ctx.contextWindow = contextWindow;
+        return {
+          tree,
+          messages: activePiHistoryFromTree(after.data, tree),
+          contextTokens,
+          contextWindow,
+          ...(draftText ? { draftText } : {}),
+        };
       },
     };
 

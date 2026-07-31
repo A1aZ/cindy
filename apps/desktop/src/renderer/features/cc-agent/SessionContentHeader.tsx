@@ -78,6 +78,7 @@ import {
 import { SessionProjectMoveSubmenu } from './sidebar/SessionProjectMoveSubmenu';
 import type { SessionMoveTarget } from './sidebar/sessionMoveTarget';
 import { SessionShareExportDialog } from './sidebar/SessionShareExportDialog';
+import { SessionBranchTreeDialog } from './SessionBranchTreeDialog';
 import { useRemoteProjectSessions } from '@/features/device-link/remoteProjectsStore';
 import { isRemoteSessionWriteBlocked } from './lib/remoteSessionWriteGuard';
 import { Tip } from '@/components/ui/tooltip';
@@ -393,6 +394,17 @@ export function SessionContentHeader({
 
   /* ---- 导出会话(.cshare)---- 弹窗仅打开时挂载,与 SessionItem 同款。 */
   const [shareExportOpen, setShareExportOpen] = useState(false);
+  const [branchTreeOpen, setBranchTreeOpen] = useState(false);
+  const allKnownSessions = useMemo(
+    () => [...sessions, ...remoteProjectSessions],
+    [remoteProjectSessions, sessions],
+  );
+  const hasSessionFamily = useMemo(
+    () => allKnownSessions.some((item) =>
+      item.parentSessionId === session.id || item.id === session.parentSessionId),
+    [allKnownSessions, session.id, session.parentSessionId],
+  );
+  const canShowBranchTree = !isEmpty && (session.agentKind === 'pi' || hasSessionFamily);
 
   /* ---- 手动压缩(pi 原生 compact)---- 长操作(LLM 摘要),压缩边界经事件流自动进聊天;
    * 回合运行中 pi 会拒绝,菜单项据 running 态禁用。compacting 状态在上方派生区声明。 */
@@ -682,6 +694,14 @@ export function SessionContentHeader({
                 >
                   {t('ccAgent.sidebar.sessionMenu.copySessionLink')}
                 </DropdownMenuItem>
+                {canShowBranchTree && (
+                  <DropdownMenuItem
+                    onSelect={() => setBranchTreeOpen(true)}
+                    className={MENU_ITEM_CLASS}
+                  >
+                    {t('ccAgent.sidebar.sessionMenu.sessionBranches')}
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
                 <DropdownMenuItem
                   disabled={remoteWritesBlocked}
@@ -781,6 +801,14 @@ export function SessionContentHeader({
                 >
                   {t('ccAgent.sidebar.sessionMenu.openInNewWindow')}
                 </DropdownMenuItem>
+                {canShowBranchTree && (
+                  <DropdownMenuItem
+                    onSelect={() => setBranchTreeOpen(true)}
+                    className={MENU_ITEM_CLASS}
+                  >
+                    {t('ccAgent.sidebar.sessionMenu.sessionBranches')}
+                  </DropdownMenuItem>
+                )}
                 {canExportShare && (
                   <DropdownMenuItem
                     onSelect={() => setShareExportOpen(true)}
@@ -839,6 +867,16 @@ export function SessionContentHeader({
           open={shareExportOpen}
           sessionId={session.id}
           onOpenChange={setShareExportOpen}
+        />
+      )}
+      {branchTreeOpen && (
+        <SessionBranchTreeDialog
+          open={branchTreeOpen}
+          onOpenChange={setBranchTreeOpen}
+          session={session}
+          sessions={allKnownSessions}
+          running={runningSessionIds.has(session.id)}
+          writeBlocked={remoteWritesBlocked}
         />
       )}
     </div>

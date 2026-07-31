@@ -2,7 +2,7 @@
 
 > 本文件是 `sandbox/pi-live` 分支的交接记录:已交付什么、还差什么、每一项**怎么接着做**
 > (含具体 file:line 锚点与坑)。配合 `docs/dev-rules/pi-harness.md`(架构、维护不变量、
-> 上线清单)一起看。最后更新:2026-07-30。
+> 上线清单)一起看。最后更新:2026-07-31。
 
 ## 分支与运行
 
@@ -190,7 +190,7 @@ provider 感知路由 + 端到端真二进制测试(BYOM 模型直连原生端�
 
 ---
 
-## 还差 3:会话树(fork/分支树状升级)
+## ✅ 已交付:统一会话树(fork/分支树状升级,2026-07-31)
 
 **目标**:pi 原生是 append-only entry 树,支持分支、树导航、分支摘要。现在 Cindy 只用了最粗的
 fork(散落成平级会话)。升级成「同一会话内可切换的分支树」,**不引入新概念**,按现有 fork/分支
@@ -200,16 +200,22 @@ fork(散落成平级会话)。升级成「同一会话内可切换的分支树�
 已在 `PiAgent.forkSdkSession` 用;`get_entries` 可读分支条目;`branchSummary` 设置控制分支
 摘要。
 
-**落地路径(大特性,需 UI 设计,建议先出 2-3 个方向让 Chris 选)**:
-- maker-core:给 PiAgent 加 `getSessionTree()`(调 `get_tree`)+ 分支切换/摘要 handle 方法 +
-  capability flag。
-- IPC + preload + renderer:会话树可视化 UI(分支切换、分支摘要展示)。参考现有 fork 入口
-  (`apps/desktop/src/main/maker-orchestration/fork.ts`、会话头部/侧栏 fork 动作)。
-- 这是四个里 UI 最重的,单独排期。
+**已落地**:
+- 统一成一个「会话分支」入口:外层继续展示 Cindy 原有 `parentSessionId` 会话分叉,当前 Pi
+  会话节点内嵌 Pi append-only entry 树,没有再造第二套分支概念。
+- maker-core 增加 harness-neutral `sessionTree` capability / snapshot / navigate 契约;Pi 通过
+  `get_tree` 读取,私有 bridge command 调 `ctx.navigateTree`,可选离开分支时调用模型生成摘要。
+- 切换 Pi 分支后,Cindy SQLite 在一笔事务内 soft-hide 旧可见投影并恢复活动路径;旧分支不删除。
+  选中 user entry 时原 prompt 回填编辑器;上下文占用从 Pi `get_session_stats.contextUsage`
+  权威估算恢复。
+- IPC / preload / desktop remote transport / device-link allowlist / mobile transport contract 已全链路接通;
+  老被控端仍按 `CHANNEL_NOT_ALLOWED` 能力降级。桌面 UI 用设计 token,Light/Dark 共用。
+- 明确边界:Pi 分支切换只改变模型对话上下文,不回滚工作区文件;Cindy fork 仍是独立会话/
+  worktree 的粗粒度分叉。
 
 ---
 
-## 还差 4:上线前手工 QA(需真凭证/额度/构建基建 —— 非 agent 可自动完成)
+## 还差:上线前手工 QA(需真凭证/额度/构建基建 —— 非 agent 可自动完成)
 
 见 `pi-harness.md §6`。要点:
 1. **平台二进制**:`apps/pi-bin/` 现仅 `darwin-arm64`。Windows / Linux / Intel Mac 的 pi

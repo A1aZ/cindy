@@ -533,6 +533,90 @@ describe('db worker tx handlers', () => {
     });
   });
 
+  it('session.treeRehydrate atomically replaces the visible projection and preserves old branches', async () => {
+    await withClient(async (client) => {
+      await seedSession(client, 's1', { contextTokens: 999, clearedAt: 50 });
+      await client.exec(
+        `INSERT INTO messages
+          (id, client_id, session_id, role, content, agent_meta, agent_kind, created_at, rewind_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          'old-visible',
+          'shared-client',
+          's1',
+          'assistant',
+          JSON.stringify('old branch'),
+          null,
+          'pi',
+          100,
+          null,
+          'old-hidden',
+          'hidden-client',
+          's1',
+          'assistant',
+          JSON.stringify('already hidden'),
+          null,
+          'pi',
+          90,
+          500,
+        ],
+      );
+
+      await expect(client.tx('session.treeRehydrate', {
+        sessionId: 's1',
+        now: 1000,
+        contextTokens: 69,
+        contextWindow: 200000,
+        messages: [
+          {
+            id: 'ignored-on-upsert',
+            clientId: 'shared-client',
+            role: 'assistant',
+            content: JSON.stringify('active branch'),
+            toolUseId: null,
+            agentMeta: JSON.stringify({ uuid: 'assistant-a' }),
+            agentKind: 'pi',
+            createdAt: 200,
+          },
+          {
+            id: 'new-active',
+            clientId: 'new-client',
+            role: 'user',
+            content: JSON.stringify({ text: 'new path' }),
+            toolUseId: null,
+            agentMeta: JSON.stringify({ uuid: 'user-b' }),
+            agentKind: 'pi',
+            createdAt: 201,
+          },
+        ],
+      })).resolves.toEqual({ messageCount: 2 });
+
+      await expect(client.query(
+        'SELECT id, client_id, content, created_at, rewind_at FROM messages WHERE session_id = ? ORDER BY id',
+        ['s1'],
+      )).resolves.toEqual([
+        {
+          id: 'new-active', client_id: 'new-client', content: JSON.stringify({ text: 'new path' }),
+          created_at: 201, rewind_at: null,
+        },
+        {
+          id: 'old-hidden', client_id: 'hidden-client', content: JSON.stringify('already hidden'),
+          created_at: 90, rewind_at: 500,
+        },
+        {
+          id: 'old-visible', client_id: 'shared-client', content: JSON.stringify('active branch'),
+          created_at: 200, rewind_at: null,
+        },
+      ]);
+      await expect(client.queryOne(
+        'SELECT cleared_at, context_tokens, context_window, updated_at FROM sessions WHERE id = ?',
+        ['s1'],
+      )).resolves.toEqual({
+        cleared_at: null, context_tokens: 69, context_window: 200000, updated_at: 1000,
+      });
+    });
+  });
+
   it('sessions.renameTitles applies title changes atomically with preconditions', async () => {
     await withClient(async (client) => {
       await seedSession(client, 's1', {

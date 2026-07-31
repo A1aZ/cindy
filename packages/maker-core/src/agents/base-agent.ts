@@ -27,7 +27,15 @@ import {
   type SessionPermissionUpdate,
 } from '../types/permissions.js';
 import type { AgentKind, Effort, PermissionMode, ReasoningDisplay, UserMessage, WorkspaceKind } from '../types/common.js';
-import type { Capabilities, EffortDescriptor, ManualCompactResult, ModelDescriptor } from '../types/capabilities.js';
+import type {
+  Capabilities,
+  EffortDescriptor,
+  ManualCompactResult,
+  ModelDescriptor,
+  NavigateSessionTreeOptions,
+  NavigateSessionTreeResult,
+  SessionTreeSnapshot,
+} from '../types/capabilities.js';
 import type { CapabilityRoutingPolicy } from '../types/capability-routing.js';
 import { NotSupportedError } from '../types/capabilities.js';
 import type { AgentCredentialMode, AuthLoginOptions } from '../interfaces/auth-adapter.js';
@@ -1093,6 +1101,13 @@ export interface AgentSessionHandle {
    * Capabilities.manualCompact 支持的 agent(pi)实现;不支持的 agent 不实现。
    */
   compactSession?(instructions?: string): Promise<ManualCompactResult>;
+
+  /** 读取 / 切换同一 SDK session 内的原生分支树。 */
+  getSessionTree?(): Promise<SessionTreeSnapshot>;
+  navigateSessionTree?(
+    entryId: string,
+    options?: NavigateSessionTreeOptions,
+  ): Promise<NavigateSessionTreeResult>;
 
   /** 运行时切换 Fast mode；不支持的 agent 不实现。 */
   setFastMode?(enabled: boolean): Promise<void>;

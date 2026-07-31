@@ -29,6 +29,7 @@ const NON_MENU_KEYS = new Set(['moreActions']);
 const HEADER_ONLY_KEYS = new Set([
   'exportHtml', 'exportHtmlSuccess',
   'compact', 'compacting', 'compactSuccess', 'compactSuccessWithTokens',
+  'sessionBranches',
 ]);
 
 function collectSessionMenuKeys(source: string): Set<string> {

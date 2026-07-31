@@ -274,6 +274,8 @@ function dispatchTx(readyDb, payload) {
       return claudeImportMessages(readyDb, request.args);
     case 'rewind.commit':
       return rewindCommit(readyDb, request.args);
+    case 'session.treeRehydrate':
+      return sessionTreeRehydrate(readyDb, request.args);
     case 'fork.session':
       return forkSession(readyDb, request.args);
     case 'embedding.markDone':
@@ -943,6 +945,45 @@ function rewindCommit(readyDb, args) {
       readyDb.prepare('UPDATE sessions SET user_send_at = ?, updated_at = ?, context_tokens = 0, context_window = 0 WHERE id = ?').run(now, now, sessionId);
     }
   })();
+}
+
+function sessionTreeRehydrate(readyDb, args) {
+  const payload = asRecord(args, 'session.treeRehydrate args');
+  const sessionId = expectString(payload.sessionId, 'sessionId');
+  const now = expectNumber(payload.now, 'now');
+  const contextTokens = expectNumber(payload.contextTokens, 'contextTokens');
+  if (contextTokens < 0) throw new TypeError('contextTokens must be non-negative');
+  const contextWindow = expectNumber(payload.contextWindow, 'contextWindow');
+  if (contextWindow < 0) throw new TypeError('contextWindow must be non-negative');
+  const rows = expectArray(payload.messages, 'messages').map((raw, index) => {
+    const row = asRecord(raw, 'messages.' + index);
+    return {
+      id: expectString(row.id, 'messages.' + index + '.id'),
+      clientId: expectString(row.clientId, 'messages.' + index + '.clientId'),
+      role: expectString(row.role, 'messages.' + index + '.role'),
+      content: expectString(row.content, 'messages.' + index + '.content'),
+      toolUseId: nullableString(row.toolUseId),
+      agentMeta: nullableString(row.agentMeta),
+      agentKind: expectString(row.agentKind, 'messages.' + index + '.agentKind'),
+      createdAt: expectNumber(row.createdAt, 'messages.' + index + '.createdAt'),
+    };
+  });
+  const hideVisible = readyDb.prepare(
+    'UPDATE messages SET rewind_at = ? WHERE session_id = ? AND rewind_at IS NULL',
+  );
+  const upsert = readyDb.prepare(
+    'INSERT INTO messages (id, client_id, session_id, role, content, tool_use_id, agent_meta, agent_kind, created_at, rewind_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL) ON CONFLICT(session_id, client_id) DO UPDATE SET role = excluded.role, content = excluded.content, tool_use_id = excluded.tool_use_id, agent_meta = excluded.agent_meta, agent_kind = excluded.agent_kind, created_at = excluded.created_at, rewind_at = NULL',
+  );
+  readyDb.transaction(() => {
+    const session = readyDb.prepare('SELECT id FROM sessions WHERE id = ? LIMIT 1').get(sessionId);
+    if (!session) throw Object.assign(new Error('Session 不存在: ' + sessionId), { code: 'NOT_FOUND' });
+    hideVisible.run(now, sessionId);
+    for (const row of rows) {
+      upsert.run(row.id, row.clientId, sessionId, row.role, row.content, row.toolUseId, row.agentMeta, row.agentKind, row.createdAt);
+    }
+    readyDb.prepare('UPDATE sessions SET cleared_at = NULL, context_tokens = ?, context_window = ?, updated_at = ? WHERE id = ?').run(contextTokens, contextWindow, now, sessionId);
+  })();
+  return { messageCount: rows.length };
 }
 
 function selectRewindMessageIds(rows, opts) {

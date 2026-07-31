@@ -350,6 +350,12 @@ export type MobileWorktreeCreateResult =
 export interface MobileMakerTransport {
   createSession(opts: CreateSessionOptions): Promise<CreateSessionResult>;
   getCapabilities(agentKind: MobileAgentKind): Promise<unknown>;
+  getSessionTree(sessionId: string): Promise<unknown | null>;
+  navigateSessionTree(
+    sessionId: string,
+    entryId: string,
+    options?: { summarize?: boolean; customInstructions?: string },
+  ): Promise<{ tree: unknown; draftText?: string; cancelled?: boolean } | null>;
   /**
    * 列被控端的供应商(来源)结构,用于 provider-aware 模型下拉(隧道 maker:provider:list)。
    * modelVisibilityOverrides = 被控端「模型显示/隐藏」override 快照(旧被控端不回传)。
@@ -595,6 +601,9 @@ export function createMobileMakerTransport({
   return {
     createSession: (opts) => call('maker:create-session', [opts]),
     getCapabilities: (agentKind) => call('maker:get-capabilities', [agentKind]),
+    getSessionTree: (sessionId) => call('maker:get-session-tree', [sessionId]),
+    navigateSessionTree: (sessionId, entryId, options) =>
+      call('maker:navigate-session-tree', [sessionId, entryId, options]),
     listProviders: () => call('maker:provider:list', [{
       capabilities: [CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2],
     }]),

@@ -43,6 +43,8 @@ export interface RoutableMaker {
   setPermissionMode: FullMaker['setPermissionMode'];
   setFastMode: FullMaker['setFastMode'];
   setPlanMode: FullMaker['setPlanMode'];
+  getSessionTree: FullMaker['getSessionTree'];
+  navigateSessionTree: FullMaker['navigateSessionTree'];
   resolveInteraction: FullMaker['resolveInteraction'];
   getPendingInteractions: FullMaker['getPendingInteractions'];
   deleteMessage: FullMaker['deleteMessage'];
@@ -96,6 +98,8 @@ function remoteMakerApi(deviceId: string): RoutableMaker {
     setPermissionMode: t('maker:set-permission-mode') as FullMaker['setPermissionMode'],
     setFastMode: t('maker:set-fast-mode') as FullMaker['setFastMode'],
     setPlanMode: t('maker:set-plan-mode') as FullMaker['setPlanMode'],
+    getSessionTree: t('maker:get-session-tree') as FullMaker['getSessionTree'],
+    navigateSessionTree: t('maker:navigate-session-tree') as FullMaker['navigateSessionTree'],
     resolveInteraction: t('maker:resolve-interaction') as FullMaker['resolveInteraction'],
     getPendingInteractions: t(
       'maker:get-pending-interactions',

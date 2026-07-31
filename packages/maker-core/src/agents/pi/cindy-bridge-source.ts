@@ -12,6 +12,7 @@
  *     localhost streamable-HTTP MCP bridge;对每个 server 走 initialize →
  *     tools/list,把工具注册成 pi 工具(mcp__<server>__<tool>),execute 转发
  *     tools/call。
+ *  3. 会话树:注册 Cindy 私有 command，把 RPC prompt 桥到 ctx.navigateTree。
  *
  * 协议说明(@modelcontextprotocol/sdk StreamableHTTPServerTransport):
  *  - POST 单条 JSON-RPC;Accept 必须同时含 application/json 与 text/event-stream;
@@ -216,6 +217,41 @@ async function connectServer(pi: any, server: McpServerRef, token: string): Prom
 }
 
 export default async function cindyBridge(pi: any) {
+  // ── 原生会话树桥 ──────────────────────────────────────────────────────────
+  // RPC 没有 navigate_tree command；ExtensionCommandContext 才暴露 navigateTree。
+  // 参数用 percent-encoded JSON，避免 prompt 命令的空格/斜杠解析污染 payload。
+  pi.registerCommand('cindy-branch-switch', {
+    description: 'Cindy internal session branch navigation',
+    handler: async (args: string, ctx: any) => {
+      let payload: {
+        entryId?: unknown;
+        summarize?: unknown;
+        customInstructions?: unknown;
+        label?: unknown;
+      };
+      try {
+        payload = JSON.parse(decodeURIComponent(args.trim()));
+      } catch {
+        throw new Error('Invalid Cindy branch payload');
+      }
+      if (typeof payload.entryId !== 'string' || payload.entryId.length === 0 || payload.entryId.length > 128) {
+        throw new Error('Invalid Cindy branch entry id');
+      }
+      const customInstructions = typeof payload.customInstructions === 'string'
+        ? payload.customInstructions.trim().slice(0, 4000)
+        : undefined;
+      const label = typeof payload.label === 'string'
+        ? payload.label.trim().slice(0, 120)
+        : undefined;
+      await ctx.waitForIdle();
+      await ctx.navigateTree(payload.entryId, {
+        summarize: payload.summarize === true,
+        ...(customInstructions ? { customInstructions } : {}),
+        ...(label ? { label } : {}),
+      });
+    },
+  });
+
   // ── 权限门 ────────────────────────────────────────────────────────────────
   pi.on('tool_call', async (event: any, ctx: any) => {
     if (currentPermissionMode() === 'bypassPermissions') return;

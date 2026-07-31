@@ -6100,7 +6100,26 @@
         "compactSuccessWithTokens": "コンテキストを圧縮しました:{{before}}k → {{after}}k tokens",
         "compactFailed": "圧縮に失敗しました",
         "compactNothing": "圧縮できる内容がまだありません",
+        "sessionBranches": "セッション分岐",
         "copySessionLink": "セッションリンクをコピー"
+      },
+      "sessionBranches": {
+        "title": "セッション分岐",
+        "close": "セッション分岐を閉じる",
+        "description": "Cindy のセッション分岐と Pi のセッション内分岐を同じツリーに表示します。",
+        "current": "現在",
+        "empty": "切り替え可能な Pi 分岐はまだありません。",
+        "emptyEntry": "表示できる内容がありません",
+        "loadFailed": "セッション分岐を読み込めませんでした",
+        "switchFailed": "分岐の切り替えに失敗しました",
+        "switched": "セッション分岐を切り替えました",
+        "switchedWithDraft": "分岐を切り替え、元のプロンプトを入力欄に戻しました",
+        "runningBlocked": "現在のターンが終了してから分岐を切り替えてください。",
+        "remoteBlocked": "分岐を切り替える前に、操作対象のデスクトップを再接続または更新してください。",
+        "filesWarning": "切り替わるのは会話コンテキストだけで、作業ファイルは巻き戻りません。",
+        "summarize": "離れる分岐を要約する（モデルを使用）",
+        "summaryFocus": "任意：要約の重点（例：エラー処理の結論を残す）",
+        "role": { "user": "ユーザー", "assistant": "Agent", "tool": "ツール", "summary": "分岐要約", "system": "状態" }
       },
       "projectAction": {
         "rename": "プロジェクト名を変更",

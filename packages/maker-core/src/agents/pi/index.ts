@@ -30,6 +30,7 @@ import {
   type AgentDeps,
   type AgentSessionHandle,
   type PiExtraSpawnConfig,
+  type PiNativeProviderSpec,
   type SendOptions,
   type StartSessionOptions,
 } from '../base-agent.js';
@@ -248,10 +249,16 @@ export class PiAgent extends BaseAgent {
   }
 
   /**
-   * 生成 agentHome/models.json:host 模型清单 → provider `cindy`。
-   * apiKey 用 env 插值形式,凭证本体只进子进程 env,不落盘。
+   * 生成 agentHome/models.json:
+   *   - 网关模型 → 单一 provider `cindy`(baseUrl = compat proxy);
+   *   - BYOM 原生 provider(nativeProviders)→ **各自独立 provider 块**,baseUrl 直连用户端点,
+   *     不过 compat 代理(设计原则:pi 主导,禁双重转义)。
+   * apiKey 一律用 `$ENV` 插值,凭证本体只进子进程 env,不落盘。
    */
-  private async writeModelsJson(agentHome: string): Promise<void> {
+  private async writeModelsJson(
+    agentHome: string,
+    nativeProviders: PiNativeProviderSpec[] = [],
+  ): Promise<void> {
     const endpoint = this.deps.runtimeConfig.endpoint;
     if (!endpoint) {
       this.deps.logger.warn('pi: runtimeConfig.endpoint missing — models.json will have no usable provider');
@@ -271,22 +278,56 @@ export class PiAgent extends BaseAgent {
         cacheWrite: m.cost?.cacheWrite ?? 0,
       },
     }));
-    const config = {
-      providers: {
-        [PI_PROVIDER_ID]: {
-          name: 'Cindy AI',
-          baseUrl: endpoint ?? 'http://127.0.0.1:0',
-          api: 'anthropic-messages',
-          apiKey: `$${PI_API_KEY_ENV}`,
-          headers: {
-            'x-cindy-pi-session-id': `$${PI_SESSION_ID_ENV}`,
-          },
-          models,
+    const providers: Record<string, unknown> = {
+      [PI_PROVIDER_ID]: {
+        name: 'Cindy AI',
+        baseUrl: endpoint ?? 'http://127.0.0.1:0',
+        api: 'anthropic-messages',
+        apiKey: `$${PI_API_KEY_ENV}`,
+        headers: {
+          'x-cindy-pi-session-id': `$${PI_SESSION_ID_ENV}`,
         },
+        models,
       },
     };
+    for (const np of nativeProviders) {
+      if (np.id === PI_PROVIDER_ID) {
+        this.deps.logger.warn('pi: native provider id collides with gateway provider "cindy" — skipped', { id: np.id });
+        continue;
+      }
+      providers[np.id] = {
+        name: np.name,
+        baseUrl: np.baseUrl,
+        api: np.api,
+        // keyless(本机 Ollama 等)也要给 dummy key,否则 pi /model 不显示该模型。
+        apiKey: np.apiKeyEnvVar ? `$${np.apiKeyEnvVar}` : 'pi-native-keyless',
+        ...(np.headers && Object.keys(np.headers).length > 0 ? { headers: np.headers } : {}),
+        models: np.models.map((m) => ({
+          id: m.id,
+          name: m.name ?? m.id,
+          reasoning: m.reasoning ?? false,
+          input: m.input ?? ['text'],
+          contextWindow: m.contextWindow && m.contextWindow > 0 ? m.contextWindow : 128_000,
+          maxTokens: m.maxTokens && m.maxTokens > 0 ? m.maxTokens : 16_000,
+        })),
+      };
+    }
     await fs.mkdir(agentHome, { recursive: true });
-    await fs.writeFile(path.join(agentHome, 'models.json'), JSON.stringify(config, null, 2) + '\n');
+    await fs.writeFile(path.join(agentHome, 'models.json'), JSON.stringify({ providers }, null, 2) + '\n');
+  }
+
+  /**
+   * model id → provider id 路由表。网关模型 → `cindy`;BYOM 原生模型 → 各自 provider id
+   * (撞 id 时原生优先——用户显式配置)。setModel / 初始 --provider 据此选对 provider。
+   */
+  private buildModelProviderMap(nativeProviders: PiNativeProviderSpec[]): Map<string, string> {
+    const map = new Map<string, string>();
+    for (const m of this.capabilities.availableModels) map.set(m.id, PI_PROVIDER_ID);
+    for (const np of nativeProviders) {
+      if (np.id === PI_PROVIDER_ID) continue;
+      for (const m of np.models) map.set(m.id, np.id);
+    }
+    return map;
   }
 
   async startSession(opts: StartSessionOptions): Promise<AgentSessionHandle> {
@@ -320,8 +361,32 @@ export class PiAgent extends BaseAgent {
       providerId: authProviderId,
     });
 
+    // BYOM:host 解析当前会话可用的原生 provider(用户自定义/本地模型)+ 需注入的 env(keys)。
+    // 缺省 → 空,只有网关 provider `cindy`(现状不变)。失败不致命,降级为无原生 provider。
+    let nativeProviders: PiNativeProviderSpec[] = [];
+    let nativeEnv: Record<string, string> = {};
+    if (this.deps.resolvePiNativeProviders) {
+      try {
+        const resolved = await this.deps.resolvePiNativeProviders({
+          workingDir: opts.workingDir,
+          remoteHostId: opts.remoteHostId,
+        });
+        nativeProviders = resolved?.providers ?? [];
+        nativeEnv = resolved?.env ?? {};
+      } catch (err) {
+        this.deps.logger.warn('pi resolvePiNativeProviders failed, continuing gateway-only', {
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    const modelProviderMap = this.buildModelProviderMap(nativeProviders);
+    // 选定模型所属 provider(BYOM 模型 → 其原生 provider;其余 → 网关 cindy)。
+    const resolveProviderForModel = (model: string): string =>
+      modelProviderMap.get(model) ?? PI_PROVIDER_ID;
+    const initialProvider = resolveProviderForModel(opts.model);
+
     const agentHome = this.resolveAgentHome();
-    await this.writeModelsJson(agentHome);
+    await this.writeModelsJson(agentHome, nativeProviders);
     const sessionDir = path.join(agentHome, 'sessions');
     await fs.mkdir(sessionDir, { recursive: true });
 
@@ -430,7 +495,7 @@ export class PiAgent extends BaseAgent {
     const args = [
       '--mode', 'rpc',
       '--session-dir', sessionDir,
-      '--provider', PI_PROVIDER_ID,
+      '--provider', initialProvider,
       '--model', opts.model,
       ...(appendSystemPrompt.length > 0 ? ['--append-system-prompt', appendSystemPrompt] : []),
       ...(planModeExtAvailable ? ['--extension', planModeExtPath] : []),
@@ -453,6 +518,8 @@ export class PiAgent extends BaseAgent {
       const spawnEnv: NodeJS.ProcessEnv = {
         ...process.env,
         ...authEnv,
+        // BYOM 原生 provider 的 api keys(键名对应 spec.apiKeyEnvVar,models.json 用 $ENV 引用)。
+        ...nativeEnv,
         [PI_SESSION_ID_ENV]: opts.sessionId ?? '',
         PI_CODING_AGENT_DIR: agentHome,
         CINDY_PI_PERMISSION_FILE: permissionFile,
@@ -673,7 +740,9 @@ export class PiAgent extends BaseAgent {
       },
 
       async setModel(model: string): Promise<void> {
-        const resp = await proc.request({ type: 'set_model', provider: PI_PROVIDER_ID, modelId: model });
+        // BYOM:按 model→provider 路由(原生模型走其 provider,其余走网关 cindy)。
+        const provider = resolveProviderForModel(model);
+        const resp = await proc.request({ type: 'set_model', provider, modelId: model });
         if (!resp.success) throw new Error(`pi set_model failed: ${resp.error ?? 'unknown'}`);
         const data = (resp.data ?? {}) as { contextWindow?: number };
         if (typeof data.contextWindow === 'number' && data.contextWindow > 0) {

@@ -117,6 +117,51 @@ export interface PiExtraSpawnConfig {
   disposeSessionCtx?: () => void;
 }
 
+/** pi models.json 原生 provider 的 api 形态(BYOM 用;不过 anthropic-compat 代理)。 */
+export type PiNativeApi =
+  | 'anthropic-messages'
+  | 'openai-responses'
+  | 'openai-completions'
+  | 'google-generative-ai';
+
+/** BYOM:写进 pi models.json 的一个模型(原生 provider 块内)。 */
+export interface PiNativeModelSpec {
+  id: string;
+  name?: string;
+  reasoning?: boolean;
+  contextWindow?: number;
+  maxTokens?: number;
+  input?: Array<'text' | 'image'>;
+}
+
+/**
+ * BYOM:一个**原生 pi provider**(用户自定义/本地模型)—— 直连用户端点,不经 Cindy 的
+ * anthropic-compat 代理(设计原则:pi 主导,禁双重转义)。host 从 custom-provider-store
+ * 解析产出;PiAgent 写进 models.json 的独立 provider 块,并按 model→provider 路由 set_model。
+ */
+export interface PiNativeProviderSpec {
+  /** provider id(slug,禁与网关 provider `cindy` 撞名)。 */
+  id: string;
+  name: string;
+  baseUrl: string;
+  api: PiNativeApi;
+  /**
+   * 存放该 provider api key 的 env 变量名;models.json 用 `$<envVar>` 插值引用(与网关
+   * CINDY_PI_API_KEY 同机制,密钥只进子进程 env、不落盘)。keyless(本机 Ollama 等)留空 →
+   * 写 dummy key(pi 要求有 key 才在 /model 显示)。
+   */
+  apiKeyEnvVar?: string;
+  headers?: Record<string, string>;
+  models: PiNativeModelSpec[];
+}
+
+/** host 解析出的 pi 原生 provider + 需注入子进程的 env(api keys)。 */
+export interface PiNativeProvidersResult {
+  providers: PiNativeProviderSpec[];
+  /** 注入 spawn env 的键值(通常是各 provider 的 api key,键名对应 spec.apiKeyEnvVar)。 */
+  env: Record<string, string>;
+}
+
 /**
  * pi MCP 桥的 per-session 身份上下文(host 用它在 bridge 上注册当前 pi 会话)。
  *
@@ -232,6 +277,17 @@ export interface AgentDeps {
     providers: McpProvider[],
     ctx?: PiExtraSpawnConfigContext,
   ) => Promise<PiExtraSpawnConfig | null>;
+
+  /**
+   * BYOM:host 解析出当前会话可用的 pi **原生 provider**(用户自定义/本地模型)+ 需注入的
+   * env(api keys)。PiAgent 把这些写进 models.json 的独立 provider 块(直连用户端点,不过
+   * anthropic-compat 代理),并按 model→provider 路由 set_model / 初始 --provider。
+   *
+   * 缺省 / 返回空 → 只有网关 provider `cindy`(现状,行为不变)。keyless provider 的 key 可省。
+   */
+  resolvePiNativeProviders?: (
+    ctx: { workingDir: string; remoteHostId?: string | null },
+  ) => Promise<PiNativeProvidersResult | null>;
 
   /**
    * Host-provided capability descriptor additions.

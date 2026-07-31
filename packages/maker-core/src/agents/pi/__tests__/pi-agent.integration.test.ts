@@ -416,6 +416,84 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
   );
 
   it(
+    'BYOM: a native provider model routes directly to its own endpoint, not the gateway proxy',
+    { timeout: 60_000 },
+    async () => {
+      // 独立的「原生端点」假服务器,扮演用户自建的 anthropic 兼容端点。
+      const nativeSeen: Array<{ auth: string | undefined; url: string }> = [];
+      const nativeServer = createServer((req, res) => {
+        req.on('data', () => {}); // 排空请求体(不需要正文,只看 header/路由)
+        req.on('end', () => {
+          nativeSeen.push({
+            auth: (req.headers['x-api-key'] as string | undefined) ?? (req.headers.authorization as string | undefined),
+            url: req.url ?? '',
+          });
+          res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+          res.end(anthropicStreamBody('pong from NATIVE endpoint'));
+        });
+      });
+      await new Promise<void>((r) => nativeServer.listen(0, '127.0.0.1', r));
+      const nativeAddr = nativeServer.address();
+      const nativeUrl = typeof nativeAddr === 'object' && nativeAddr ? `http://127.0.0.1:${nativeAddr.port}` : '';
+
+      const deps = buildDeps();
+      deps.resolvePiNativeProviders = async () => ({
+        providers: [
+          {
+            id: 'localbyom',
+            name: 'Local BYOM',
+            baseUrl: nativeUrl,
+            api: 'anthropic-messages',
+            apiKeyEnvVar: 'CINDY_PI_KEY_LOCALBYOM',
+            models: [{ id: 'byom-model', name: 'BYOM Model' }],
+          },
+        ],
+        env: { CINDY_PI_KEY_LOCALBYOM: 'byom-secret-key' },
+      });
+      const agent = new PiAgent(deps);
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-byom-cwd-'));
+      let handle: AgentSessionHandle | null = null;
+      try {
+        const gatewayBefore = seenRequests.length;
+        handle = await agent.startSession({
+          sessionId: 'byom-session',
+          workingDir,
+          model: 'byom-model', // 属于原生 provider,不是网关模型
+        });
+        // models.json 里有独立的 localbyom provider 块,baseUrl 直连原生端点。
+        const { readFileSync } = await import('node:fs');
+        const config = JSON.parse(readFileSync(path.join(agentHome, 'models.json'), 'utf8')) as {
+          providers: Record<string, { baseUrl: string; api: string; apiKey: string; models: Array<{ id: string }> }>;
+        };
+        expect(config.providers.localbyom).toBeDefined();
+        expect(config.providers.localbyom.baseUrl).toBe(nativeUrl);
+        expect(config.providers.localbyom.api).toBe('anthropic-messages');
+        expect(config.providers.localbyom.apiKey).toBe('$CINDY_PI_KEY_LOCALBYOM');
+        expect(config.providers.localbyom.models.some((m) => m.id === 'byom-model')).toBe(true);
+        // 网关 provider cindy 仍在(网关模型不受影响)。
+        expect(config.providers.cindy).toBeDefined();
+
+        const done = (async () => {
+          for await (const ev of handle!.events()) {
+            if (ev.type === 'done') break;
+          }
+        })();
+        await handle.send({ type: 'user', content: 'hi byom' });
+        await done;
+
+        // 关键:请求打到了原生端点(直连),带原生 key;网关一个请求都没多。
+        expect(nativeSeen.length).toBeGreaterThan(0);
+        expect(nativeSeen.some((r) => (r.auth ?? '').includes('byom-secret-key'))).toBe(true);
+        expect(seenRequests.length).toBe(gatewayBefore);
+      } finally {
+        await handle?.close();
+        await new Promise<void>((r) => nativeServer.close(() => r()));
+        rmSync(workingDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
     'exportSessionHtml writes a real HTML file via pi export_html (offline, no gateway)',
     { timeout: 60_000 },
     async () => {

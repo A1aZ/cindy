@@ -95,13 +95,15 @@ const host: IMHost = {
         integration,
         buffer,
         mimeType,
-        // IM 入站媒体与图片同属不可再生的用户附件，不参与缓存回收。
-        isCache: false,
+        // IM 入站媒体最终属于用户附件；在消息落库挂 session owner 前先按
+        // 可回收暂存处理，失效账户只回滚本次新增的 cache ref。
+        isCache: true,
       });
       return {
         absPath: hit.absPath,
         url: hit.url,
         mimeType: hit.mimeType,
+        discard: hit.rollbackRef,
       };
     },
     getCachedImage: async (integration, token, options) => {

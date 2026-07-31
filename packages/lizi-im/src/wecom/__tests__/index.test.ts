@@ -882,6 +882,64 @@ describe("WecomIM routing and ownership", () => {
     expect(cacheMedia).not.toHaveBeenCalled();
   });
 
+  it("discards video staging when the owning account closes during the write", async () => {
+    const { host, secrets } = createHost();
+    secrets.set("wecom-owner-user-id", "owner");
+    const accountToken = { id: 1 };
+    let accountActive = true;
+    host.accountScope = {
+      capture: () => (accountActive ? accountToken : null),
+      isCurrent: (token) => accountActive && token === accountToken,
+      run: async (_token, operation) => operation(),
+    };
+    const client = new FakeClient();
+    client.downloadFile.mockResolvedValueOnce({
+      buffer: Buffer.from("video"),
+      filename: "clip.mp4",
+    });
+    const staged = deferred<{
+      absPath: string;
+      url: string;
+      mimeType: string;
+      discard: () => Promise<void>;
+    }>();
+    const discard = vi.fn(async () => {});
+    const cacheMedia = vi.fn(() => staged.promise);
+    host.media = {
+      cacheImage: vi.fn(),
+      cacheMedia,
+      getCachedImage: vi.fn(async () => null),
+      resolveMediaUrl: vi.fn(() => null),
+    };
+    const im = new WecomIM(host, { clientFactory: () => client as never });
+    const received: IMMessageEvent[] = [];
+    im.onMessage((event) => received.push(event));
+
+    await im.init();
+    client.emit("message.video", {
+      body: {
+        msgid: "stale-staged-video",
+        aibotid: "bot-1",
+        chattype: "single",
+        from: { userid: "owner" },
+        msgtype: "video",
+        video: { url: "https://example.invalid/video" },
+      },
+    });
+    await vi.waitFor(() => expect(cacheMedia).toHaveBeenCalledOnce());
+
+    accountActive = false;
+    staged.resolve({
+      absPath: "C:\\managed\\clip.mp4",
+      url: `cindy-media://blobs/${"a".repeat(64)}.mp4`,
+      mimeType: "video/mp4",
+      discard,
+    });
+    await vi.waitFor(() => expect(discard).toHaveBeenCalledOnce());
+
+    expect(received).toEqual([]);
+  });
+
   it("routes inbound video bytes through the host media ledger", async () => {
     const { host, secrets } = createHost();
     secrets.set("wecom-owner-user-id", "owner");

@@ -674,6 +674,10 @@ export class WecomIM extends BaseIM implements TextChannelIM {
           buffer: downloaded.buffer,
           mimeType: mimeTypeForFilename(originalName),
         });
+        if (!this.isCurrent(client, generation)) {
+          await this.discardStagedMedia(stored.discard);
+          return unsupportedPayload("video:stale", "视频下载已取消");
+        }
         return {
           text: "",
           attachments: [
@@ -686,6 +690,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
             },
           ],
           unsupported: [],
+          discard: stored.discard,
         };
       } catch (error) {
         this.log.warn("failed to stage inbound video", safeError(error));
@@ -702,6 +707,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
       text: string;
       attachments: IMAttachment[];
       unsupported: IMUnsupportedEntry[];
+      discard?: () => Promise<void>;
     }>,
   ): Promise<void> {
     if (!this.isCurrent(client, generation)) return;
@@ -724,7 +730,10 @@ export class WecomIM extends BaseIM implements TextChannelIM {
       this.log.warn("failed to normalize inbound message", safeError(error));
       normalized = unsupportedPayload(body.msgtype, `${body.msgtype} 处理失败`);
     }
-    if (!this.isCurrent(client, generation)) return;
+    if (!this.isCurrent(client, generation)) {
+      await this.discardStagedMedia(normalized.discard);
+      return;
+    }
 
     const quoted = quoteContext(body);
     const event: IMMessageEvent = {
@@ -755,6 +764,15 @@ export class WecomIM extends BaseIM implements TextChannelIM {
       return;
     }
     for (const handler of this.messageHandlers) handler(event);
+  }
+
+  private async discardStagedMedia(discard?: () => Promise<void>): Promise<void> {
+    if (!discard) return;
+    try {
+      await discard();
+    } catch (error) {
+      this.log.warn("failed to discard stale inbound media", safeError(error));
+    }
   }
 
   private async acceptOwner(body: BaseMessage): Promise<boolean> {

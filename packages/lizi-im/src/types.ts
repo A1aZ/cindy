@@ -100,7 +100,13 @@ export interface IMHostMediaCache {
     token: string;
     buffer: Uint8Array;
     mimeType: string;
-  }): Promise<{ absPath: string; url: string; mimeType: string }>;
+  }): Promise<{
+    absPath: string;
+    url: string;
+    mimeType: string;
+    /** Release host-side staging when the originating account becomes stale. */
+    discard?: () => Promise<void>;
+  }>;
   /** 按 token 查已缓存图片;未缓存返回 null(调用方去真下载)。 */
   getCachedImage(
     integration: 'feishu' | 'discord' | 'telegram' | 'dingtalk' | 'wecom',

@@ -568,6 +568,9 @@ export class PiAgent extends BaseAgent {
         // 嵌入式 runtime 不做启动期联网:关掉 pi 的版本检查与安装遥测
         // (pi.dev/api/latest-version、report-install)。LLM 请求走 provider 通道不受影响。
         PI_OFFLINE: '1',
+        // 保留稳定 system/tool 前缀的长缓存。不支持的 provider 会忽略该选项；
+        // 支持者（如 Anthropic）可避免较长会话在短 TTL 后重新计费。
+        PI_CACHE_RETENTION: 'long',
         ...(mcpBridge && mcpBridge.servers.length > 0
           ? { CINDY_PI_MCP_BRIDGE: JSON.stringify(mcpBridge) }
           : {}),

@@ -221,8 +221,8 @@ fork(散落成平级会话)。升级成「同一会话内可切换的分支树�
 1. **平台二进制**:`apps/pi-bin/` 现仅 `darwin-arm64`。Windows / Linux / Intel Mac 的 pi
    二进制分发 + 逐平台过(bridge 路径判定、NO_PROXY、权限文件、shell 差异)。**全量上线最硬门槛。**
 2. **模型兼容矩阵**:每个网关模型(chatgpt/ / xai/ / glm / deepseek / kimi …)在
-   anthropic-compat 下跑一轮**带工具调用**,逐个确认 thinking 格式 / tool streaming / redacted。
-   测完据此定 prompt cache「默认开 + 不支持自动退档」(`PI_CACHE_RETENTION=long`)。
+   anthropic-compat 下跑一轮**带工具调用**,逐个确认 thinking 格式 / tool streaming / redacted，
+   并记录各 provider 对已默认开启的 `PI_CACHE_RETENTION=long` 是命中还是安全忽略。
 3. **实机联调**:长会话自动压缩、无人值守(定时任务跑 pi)、resume 边界(pi 二进制升级后旧
    session JSONL 兼容 / invalid resume 回退 / fork 后再 resume)。
 

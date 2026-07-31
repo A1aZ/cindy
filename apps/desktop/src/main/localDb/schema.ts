@@ -1081,6 +1081,7 @@ export const dailySpend = sqliteTable('daily_spend', {
  *     costUsd 为 SDK 实报美元。
  *   - codex: done.data.usage 的 per-turn token 数 (SDK 不报 cost, costUsd 恒 0,
  *     美元在读取时用 modelPricing 价格表估算 — 价格会变, 不在写入时冻结)。
+ *   - pi: done.data.usage 的 per-turn token/cache 数；订阅路由读时估值，API 路由写时记费。
  *
  * 与 daily_spend 的关系: daily_spend 仍是日总额 canonical 来源 (热力图 / streak 用它);
  * 本表只做按模型的拆分展示, 两边求和因舍入可能有微小差异 — 设计取舍。
@@ -1092,7 +1093,7 @@ export const dailyModelUsage = sqliteTable(
   {
     /** 本地时区 YYYY-MM-DD 字符串 (localDayKey)。 */
     day: text('day').notNull(),
-    /** 'claude-code' | 'codex' — 网关模型 id 可能跨 agent 撞名, 需区分。 */
+    /** 'claude-code' | 'codex' | 'pi' — 网关模型 id 可能跨 agent 撞名, 需区分。 */
     agentKind: text('agent_kind').notNull(),
     /** SDK 模型 id; 拿不到时兜底 'unknown'。 */
     model: text('model').notNull(),

@@ -2,7 +2,8 @@
  * pi auto 档 dispatcher + spawn 配置回归 —— mock PiRpcProcess(不 spawn 真 pi),
  * 捕获构造参数与 send() 帧,验证:
  *   1. spawn args:改用 --append-system-prompt(保留 pi 默认 prompt),不再 --system-prompt;
- *   2. spawn env:PI_OFFLINE=1(嵌入式不做启动期联网)、NO_PROXY 含 loopback 且吞并小写 no_proxy;
+ *   2. spawn env:PI_OFFLINE=1(嵌入式不做启动期联网)、PI_CACHE_RETENTION=long、
+ *      NO_PROXY 含 loopback 且吞并小写 no_proxy;
  *   3. auto 档:区内写静默 confirmed:true(不弹 resolver);越界写/MCP 工具仍走 resolver;
  *      resolver 缺失时 fail-closed deny;
  *   4. ask 档:区内写照旧弹 resolver(auto 的差异只在 auto 档生效)。
@@ -139,6 +140,7 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     expect(idx).toBeGreaterThan(-1);
     expect(captured.args[idx + 1]).toBe('You are Cindy.');
     expect(captured.env.PI_OFFLINE).toBe('1');
+    expect(captured.env.PI_CACHE_RETENTION).toBe('long');
     const noProxy = (captured.env.NO_PROXY ?? '').split(',');
     for (const entry of ['corp.internal', '127.0.0.1', 'localhost', '::1']) {
       expect(noProxy).toContain(entry);

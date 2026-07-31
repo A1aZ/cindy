@@ -299,7 +299,7 @@ import { detectClaudeModelMismatch } from '../../shared/modelMismatch.js';
 import { triggerClaudeAccountUsageRefresh } from '../usage/claudeAccountUsage.js';
 import { getCodexSubscriptionValuePrice, getGatewayAccountCurrency, getModelPriceQuote, getModelPricing, getModelPricingForModel, getSubscriptionDirectValuePrice } from '../usage/modelPricing.js';
 import { computeModelUsageDeltas, type ModelUsageCumulative, type ModelUsageDeltaEntry } from '../usage/modelUsageDelta.js';
-import { claudeSubscriptionUsageModelKey, codexApiUsageModelKey, codexSubscriptionUsageModelKey } from '../usage/usageHistory.js';
+import { claudeSubscriptionUsageModelKey, codexApiUsageModelKey, codexSubscriptionUsageModelKey, piSubscriptionUsageModelKey } from '../usage/usageHistory.js';
 import { buildClaudeTurnUsageDetails, computePriceQuoteTurnMoney, estimateClaudeSubscriptionTurnValue, isAnthropicModel, normalizeModelIdForPricing, resolveClaudeTurnCostSinks, type BillingRoute } from '../usage/turnCostCalculator.js';
 import { CHATGPT_MODEL_PREFIX, XAI_MODEL_PREFIX, isSubscriptionDirectModel } from '../../shared/subscriptionModels.js';
 import {
@@ -3597,6 +3597,21 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             model: turnModel,
           });
 
+          // Pi 也必须进 daily_model_usage，否则首页仪表盘会把 Pi 的
+          // token/cache 全部漏掉。先落 usage 事实，价格解析失败也不影响。
+          const modelUsageKey = isSubscriptionValue
+            ? piSubscriptionUsageModelKey(pricingModel)
+            : pricingModel;
+          await recordModelTurnUsage({
+            agentKind: 'pi',
+            model: modelUsageKey,
+            inputTokensDelta: tokens.inputTokens,
+            outputTokensDelta: tokens.outputTokens,
+            cacheReadTokensDelta: tokens.cacheReadTokens,
+            cacheCreateTokensDelta: tokens.cacheCreateTokens,
+          });
+          void rebroadcastTodaySpend();
+
           try {
             const pricing =
               isSubscriptionValue
@@ -3617,6 +3632,17 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             );
             if (money && money.amount > 0) {
               if (!isSubscriptionValue) {
+                // token 已在上方入库；这里只补真实 API/gateway 费用，
+                // 避免重复累加 token。订阅价值则由 #billing=subscription 读时估算。
+                await recordModelTurnUsage({
+                  agentKind: 'pi',
+                  model: modelUsageKey,
+                  money,
+                  inputTokensDelta: 0,
+                  outputTokensDelta: 0,
+                  cacheReadTokensDelta: 0,
+                  cacheCreateTokensDelta: 0,
+                });
                 void recordTurnSpend(money);
                 void recordSessionTurnSpend(session.id, money);
               }

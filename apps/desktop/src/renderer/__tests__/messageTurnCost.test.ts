@@ -209,6 +209,10 @@ describe('makerChatStore per-turn 费用', () => {
         },
       }),
       serverMessage({ clientId: 'a-no-cost' }),
+      serverMessage({
+        clientId: 'a-usage-only',
+        agentMeta: { turnUsageDetails: GPT_DETAILS },
+      }),
     ]);
     makerChatStore.ensureInitialMessages(SID);
     await flush();
@@ -220,6 +224,7 @@ describe('makerChatStore per-turn 费用', () => {
     const staleEstimateMetaModel = snap.messages.find((m) => m.clientId === 'a-stale-estimate-meta-model');
     const livePricingPreserved = snap.messages.find((m) => m.clientId === 'a-live-pricing-preserved');
     const noCost = snap.messages.find((m) => m.clientId === 'a-no-cost');
+    const usageOnly = snap.messages.find((m) => m.clientId === 'a-usage-only');
     expect(withCost?.turnMoney).toEqual(legacyMoney(0.05));
     expect(withCost?.turnCostIsEstimate).toBe(true);
     expect(withCost?.userTurnMoney).toEqual(legacyMoney(12.34));
@@ -232,6 +237,9 @@ describe('makerChatStore per-turn 费用', () => {
     expect(staleEstimateMetaModel?.turnMoney).toEqual(legacyMoney(2.011));
     expect(livePricingPreserved?.turnMoney).toEqual(legacyMoney(3.14));
     expect(noCost?.turnMoney).toBeUndefined();
+    expect(usageOnly?.turnMoney).toBeUndefined();
+    expect(usageOnly?.turnUsageDetails).toEqual(GPT_DETAILS);
+    expect(usageOnly?.turnCompleted).toBe(true);
   });
 
   it('device-link 旧历史:缺少持久化累计值时按完整用户轮投影', async () => {

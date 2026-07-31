@@ -10057,10 +10057,14 @@ function mapServerMessages(serverMsgs: Message[]): ChatMessage[] {
       // assistant 等价可推导，直接补投影让本修复对历史复现会话立即生效。
       ...(m.role === 'assistant' && (
         agentMeta?.turnCompleted === true ||
-        (persistedTurnMoney?.amount ?? 0) > 0
+        (persistedTurnMoney?.amount ?? 0) > 0 ||
+        turnUsageDetails != null
       )
         ? { turnCompleted: true }
         : {}),
+      // usage 是独立于价格的事实。Pi/新模型可能已有 token/cache 明细，
+      // 但参考价尚未上线；历史加载也必须恢复该明细，不能绑在 money 分支。
+      ...(m.role === 'assistant' && turnUsageDetails ? { turnUsageDetails } : {}),
       // assistant 上挂的 per-turn 费用(main turn 结束时 patch 进 agent_meta)
       ...(m.role === 'assistant' &&
       agentMeta &&
@@ -10091,7 +10095,6 @@ function mapServerMessages(serverMsgs: Message[]): ChatMessage[] {
                     userTurnCostIsEstimate: agentMeta.userTurnCostIsEstimate === true,
                   }
                 : {}),
-              ...(turnUsageDetails ? { turnUsageDetails } : {}),
             };
           })()
         : {}),

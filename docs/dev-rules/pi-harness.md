@@ -86,7 +86,8 @@ Cindy 显式设置:models.json、`--append-system-prompt`、`--session-dir`、�
 - [ ] **无人值守**:定时任务选 pi(默认 `bypassPermissions`)完整跑一轮;auto 档无 resolver 时
       安全动作执行、其余 fail-closed deny 的体验确认。
 - [ ] **resume 边界**:pi 二进制升级后旧 session JSONL 兼容、invalid resume 回退、fork 后再 resume。
-- [ ] **prompt cache**:模型矩阵测完后评估 `PI_CACHE_RETENTION=long`(网关支持则默认开 + 不支持退档)。
+- [x] **prompt cache**:Pi 子进程默认注入 `PI_CACHE_RETENTION=long`；不支持的 provider
+      忽略该选项。已用 ChatGPT 订阅实例确认 `cacheRead` 命中会端到端落库与展示。
 
 ## 7. 上线后路线图(已与 Chris 对齐)
 

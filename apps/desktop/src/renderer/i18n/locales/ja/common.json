@@ -3672,7 +3672,7 @@
     "close": "閉じる",
     "menuItems": {
       "help": "ヘルプ",
-      "issues": "問題",
+      "issues": "フィードバック",
       "checkForUpdates": "更新を確認"
     },
     "updateCheckToast": {

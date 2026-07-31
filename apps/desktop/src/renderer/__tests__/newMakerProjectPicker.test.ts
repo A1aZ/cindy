@@ -456,20 +456,18 @@ describe('Shared create project picker', () => {
     expect(bareSet.length).toBe(0);
   });
 
-  // #807 review 第十五轮:picker 换项目也必须作废 worktree 三态。baseRepo 由 WorktreeChipsRow
-  // 经 detect-cwd 异步回填(远程还要走隧道),回填前发送会把 worktree 建到上一个 repo;
-  // sourceBranch 只在为空时才自动填充,用户在 A 上显式选的分支会一直跟到 B。浏览器路径早就重置
-  // 了,picker 路径漏了 —— 而 picker 才是 #807 之后换项目的主路径。
+  // #807 review 第十五轮:picker 换项目必须作废 worktree 的 repo/branch 探测结果。baseRepo
+  // 由 WorktreeChipsRow 经 detect-cwd 异步回填(远程还要走隧道),回填前发送不能把 worktree 建到
+  // 上一个 repo;sourceBranch 只在为空时才自动填充,用户在 A 上显式选的分支不能跟到 B。
   it('invalidates worktree state when the project picker switches workspaces', () => {
-    // 换工作区 = 换 repo,worktree 三态必须一起作废;但只在路径真的变了时 —— 重选当前项目不该
-    // 把用户刚打开的 worktree 开关又关掉。这条判据原先只补进了工作区 picker,设备域浏览器那条
-    // 路径漏了(它无条件重置);收敛之后两条都由同一个条件驱动。
+    // 换工作区 = 换 repo,只清掉 repo/branch 探测态;worktreeEnabled 是工作端拥有的用户偏好,
+    // 不能因换项目被静默抹掉。
     const action = newMakerDraftRouteSource.slice(
       newMakerDraftRouteSource.indexOf('const applyDraftTarget = useCallback('),
     );
     const wt = action.slice(action.indexOf('if (deviceChanged || workingDirChanged) {'));
     const block = wt.slice(0, wt.indexOf('      }'));
-    expect(block).toContain('setWtEnabled(false);');
+    expect(block).not.toContain('setWtEnabled(false);');
     expect(block).toContain('setWtBaseRepo(null);');
     expect(block).toContain("setWtSourceBranch('');");
   });
@@ -504,8 +502,9 @@ describe('Shared create project picker', () => {
     expect(action).toContain(
       '...(deviceChanged || req.workingDir == null ? { extraDirs: [] } : {}),',
     );
-    // 但 worktree 三态照常重置 —— 换项目就是换 repo。
+    // 但 worktree 的 repo/branch 探测态照常重置 —— 换项目就是换 repo；用户偏好保留。
     expect(action).toContain('if (deviceChanged || workingDirChanged) {');
+    expect(action).not.toContain('setWtEnabled(false);');
   });
 
   // #807 review 第十二轮:in-flight 保护要覆盖**工作区** pill,不只是设备 pill —— 否则用户点了
@@ -916,11 +915,10 @@ describe('Shared create project picker', () => {
     expect(newMakerDraftRouteSource).not.toContain('deviceLinkDeviceId: deviceId,');
     expect(newMakerDraftRouteSource).not.toContain('deviceLinkDeviceId: target.deviceId,');
     expect(newMakerDraftRouteSource).not.toContain('deviceLinkDeviceId: null,');
-    // worktree 三态与三个 evict 只能出现在那个动作里(各 1 处)。
+    // worktree repo/branch 探测态与三个 evict 只能出现在那个动作里(各 1 处)。
     // 注:`setRemoteDraftState({ loaded: false, … })` 不在此列 —— defaults effect 自己的早返回与
     // 重拉前重置也用它,那是它自身的正常逻辑,不是转移路径的重复实现。
     for (const marker of [
-      'setWtEnabled(false);',
       'setWtBaseRepo(null);',
       'evictDeviceCapabilities(',
       'evictDeviceProviders(',

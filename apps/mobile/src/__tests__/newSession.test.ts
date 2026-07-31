@@ -1036,7 +1036,7 @@ describe('new session worktree wiring (source locks)', () => {
       /if \(worktreeEligibilityFromError\(error\)\.status !== 'unsupported'\) return;\s*remoteSessionStore\.setNewMakerWorktreePreference\(selectedDeviceId, false\);/,
     );
     expect(newSource).toMatch(
-      /\}, \[\s*connectionEpoch,\s*deviceLinkStatus,\s*selectedDeviceId,\s*maker,\s*openLink,\s*\]\);/,
+      /\}, \[\s*connectionEpoch,\s*deviceLinkStatus,\s*presenceVersion,\s*selectedDeviceId,\s*maker,\s*openLink,\s*\]\);/,
     );
     // 显式点击才写穿工作端记忆;写失败吞掉降级。
     expect(newSource).toContain('void maker.applyNewMakerWorktreePref(next).catch(() => undefined);');

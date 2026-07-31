@@ -1462,7 +1462,8 @@ export function NewMakerDraftRoute() {
       // 这个窗口内发送会把 worktree 建到上一个 repo 里;sourceBranch 只在为空时才自动填充,用户在
       // X 上显式选过的分支会一直跟到 Y —— Y 上不存在就报错,恰好存在就在一条毫不相关的分支上开工。
       if (deviceChanged || workingDirChanged) {
-        setWtEnabled(false);
+        // worktreeEnabled is the user's working-device preference, not repo metadata.
+        // Keep it across target changes; only invalidate the probed repository/branch.
         setWtBaseRepo(null);
         setWtSourceBranch('');
       }

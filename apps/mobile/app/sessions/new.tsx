@@ -1595,6 +1595,7 @@ export default function NewRemoteSessionScreen() {
   }, [
     connectionEpoch,
     deviceLinkStatus,
+    presenceVersion,
     selectedDeviceId,
     maker,
     openLink,

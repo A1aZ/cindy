@@ -2998,7 +2998,8 @@
             "image.generate": "이미지 생성",
             "image.edit": "이미지 편집",
             "video.generate": "영상 생성",
-            "video.edit": "이미지로 영상"
+            "video.edit": "이미지로 영상",
+            "text.oneshot": "빠른 답변(텍스트)"
           },
           "defaultOption": "{{model}} (기본값)",
           "noModels": "사용 가능한 모델 없음"

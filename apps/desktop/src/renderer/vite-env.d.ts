@@ -1117,6 +1117,8 @@ interface ElectronAPI {
       overrides: Record<string, string>;
       image: { options: Array<{ id: string; label: string }>; defaultModel: { id: string; label: string } | null };
       video: { options: Array<{ id: string; label: string }>; defaultModel: { id: string; label: string } | null };
+      /** 文本类(快问快答):选项是轻量任务模型链的档位(供应商×模型),不是媒体目录模型。 */
+      text: { options: Array<{ id: string; label: string }>; defaultModel: { id: string; label: string } | null };
     };
     /** 写/清一项覆盖(model=null 即恢复跟随默认);返回该意识最新覆盖表。 */
     setCindyPref: (

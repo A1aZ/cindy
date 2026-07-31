@@ -2998,7 +2998,8 @@
             "image.generate": "出图",
             "image.edit": "改图",
             "video.generate": "生成视频",
-            "video.edit": "图生视频"
+            "video.edit": "图生视频",
+            "text.oneshot": "快问快答(文字)"
           },
           "defaultOption": "{{model}}(默认)",
           "noModels": "暂无可用模型"

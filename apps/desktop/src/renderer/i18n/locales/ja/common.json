@@ -2998,7 +2998,8 @@
             "image.generate": "画像生成",
             "image.edit": "画像編集",
             "video.generate": "動画生成",
-            "video.edit": "画像から動画"
+            "video.edit": "画像から動画",
+            "text.oneshot": "クイック回答(テキスト)"
           },
           "defaultOption": "{{model}}(既定)",
           "noModels": "利用可能なモデルなし"

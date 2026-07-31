@@ -175,6 +175,8 @@ import { projectProviderCatalogForBuildRegion } from '../maker-host/provider-acc
 import { isModelDisabled, isProviderDisabled } from '@cindy/model-providers';
 import { readModelDisableOverrides } from '../maker-host/model-disable-store.js';
 import { outboundFetch } from '../maker-host/outbound-fetch.js';
+import { getUtilityModelChainProfiles } from '../utility-model/UtilityModelSelection.js';
+import { utilityModelPinOptions } from '../../shared/utilityModelProfiles.js';
 import {
   CINDY_CAPABILITY_KEYS,
   readGhostCindyOverrides,
@@ -2029,12 +2031,16 @@ export function getGhostCindySlot(): GhostCindySlot {
       // 模块顶层读 electron app 路径,静态引入会把这条链拽进所有 import 本
       // 模块的单测(hook-script-generator 同款做法)。失败面折叠成 slot 层
       // 的三档 reason;attempts 细节只进日志,不给沙箱探测面。
-      oneshotText: async ({ prompt, maxTokens, timeoutMs }) => {
+      oneshotText: async ({ prompt, maxTokens, timeoutMs, pinnedProfileId }) => {
         const [{ requestUtilityText }, { getMaker }] = await Promise.all([
           import('../utility-model/oneShotCandidates.js'),
           import('../maker-host/index.js'),
         ]);
-        const r = await requestUtilityText(getMaker(), prompt, { maxTokens, timeoutMs });
+        const r = await requestUtilityText(getMaker(), prompt, {
+          maxTokens,
+          timeoutMs,
+          pinnedProfileId,
+        });
         if (r.ok) {
           return { ok: true, text: r.text, model: `${r.providerId}/${r.model}` };
         }
@@ -3602,10 +3608,21 @@ export function registerGhostIpc(): void {
           standard === undefined ? null : (cfg.models.find((m) => m.id === standard) ?? null),
       };
     };
+    // 文本类(快问快答)的可选项不来自媒体目录,而是轻量任务模型链的档位表
+    // ——每一项就是一组供应商×模型。defaultModel = 当前"跟随默认"实际会用的
+    // 那一档(链首),让用户看得见跟的是谁。
+    const textChain = getUtilityModelChainProfiles();
+    const textOptions = utilityModelPinOptions();
+    const textDefaultId = textChain[0]?.id ?? null;
     event.returnValue = {
       overrides,
       image: byKind(getCatalogImageConfig()),
       video: byKind(getCatalogVideoConfig()),
+      text: {
+        options: textOptions,
+        defaultModel:
+          textDefaultId === null ? null : (textOptions.find((o) => o.id === textDefaultId) ?? null),
+      },
     };
   });
   // ── 目录级禁用(ghostWorkdirPrefs;插件页的项目范围视图)──

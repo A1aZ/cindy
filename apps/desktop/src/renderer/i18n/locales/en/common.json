@@ -2999,7 +2999,8 @@
             "image.generate": "Image generation",
             "image.edit": "Image editing",
             "video.generate": "Video generation",
-            "video.edit": "Image-to-video"
+            "video.edit": "Image-to-video",
+            "text.oneshot": "Quick answer (text)"
           },
           "defaultOption": "{{model}} (default)",
           "noModels": "No models available"

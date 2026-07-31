@@ -864,6 +864,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
        */
       image: { options: Array<{ id: string; label: string }>; defaultModel: { id: string; label: string } | null };
       video: { options: Array<{ id: string; label: string }>; defaultModel: { id: string; label: string } | null };
+      /** 文本类(快问快答):选项是轻量任务模型链的档位(供应商×模型),不是媒体目录模型。 */
+      text: { options: Array<{ id: string; label: string }>; defaultModel: { id: string; label: string } | null };
     } => ipcRenderer.sendSync('ghosts:cindy-prefs', id),
     setCindyPref: (id: string, capability: string, model: string | null): Promise<{ overrides: Record<string, string> }> =>
       ipcRenderer.invoke('ghosts:cindy-prefs:set', id, capability, model),

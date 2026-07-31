@@ -106,8 +106,13 @@ export async function materializeLocalMarkdownImages(
   const materializedByRealPath = new Map<string, string>();
   for (const existingPath of params.existingAbsPaths ?? []) {
     // 键必须与下面的查询同口径(pathKey(sourceReal),即 realpath 之后)。按原样入表
-    // 会让含符号链接的入参查不中——macOS 的 /var 是 /private/var 的软链,tool_result
-    // 收集到的临时目录路径正是这种形态,于是同一张受管图片被判成新图重复追加。
+    // 会让含符号链接的入参查不中,同一张受管图片被判成新图重复追加。
+    //
+    // 入参不保证已规范化:它们来自 turnRunner 的 handleToolResultFullEvent,经
+    // blobStore / imageCacheStore 的 resolveSafe 用 path.join / path.resolve 拼出
+    // `<userData>/cindy-media/blobs/…` 与 `<userData>/cc-agent/images/…`,两处都不做
+    // realpath。所以只要 userData 路径链上有软链或 junction(home 被重定位、Windows
+    // AppData 重定向、macOS home 挂在别的卷),生产上就会命中。
     let existingKey = existingPath;
     try {
       existingKey = await deps.realpath(existingPath);

@@ -313,6 +313,56 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
     await expect(listPendingRemotePrecreatedWorktrees()).resolves.toHaveLength(1);
   });
 
+  it('does not recover another owner’s obligation after an account switch', async () => {
+    ledgerRecords = [{
+      dataOwnerId: 'owner-a',
+      deviceId: DEVICE_ID,
+      sessionId: SESSION_ID,
+      path: WORKTREE_PATH,
+      createdAt: Date.now(),
+    }];
+    const invoke = vi.fn();
+
+    await expect(
+      recoverPendingRemotePrecreatedWorktrees({
+        deviceId: DEVICE_ID,
+        dataOwnerId: 'owner-b',
+        invoke,
+      }),
+    ).resolves.toEqual({
+      attempted: 0,
+      recovered: 0,
+      retained: 0,
+      storageReadable: true,
+    });
+    expect(invoke).not.toHaveBeenCalled();
+    expect(ledgerRecords).toHaveLength(1);
+  });
+
+  it('does not attach an unowned legacy record to the current owner', async () => {
+    localStorage.setItem(__testing.storageKey, JSON.stringify({
+      version: 1,
+      records: [{
+        deviceId: DEVICE_ID,
+        sessionId: SESSION_ID,
+        path: WORKTREE_PATH,
+        createdAt: Date.now(),
+      }],
+    }));
+
+    await expect(
+      registerPendingRemotePrecreatedWorktree({
+        dataOwnerId: 'owner-b',
+        deviceId: DEVICE_ID,
+        sessionId: SESSION_ID,
+        path: WORKTREE_PATH,
+        createdAt: Date.now(),
+      }),
+    ).resolves.toBe(false);
+    expect(localStorage.getItem(__testing.storageKey)).not.toBeNull();
+    expect(ledgerRecords).toEqual([]);
+  });
+
   it('uses the Main memory mirror when its persistent write fails', async () => {
     ledgerWritable = false;
     await expect(
@@ -343,6 +393,7 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
     localStorage.setItem(__testing.storageKey, JSON.stringify({
       version: 1,
       records: [{
+        dataOwnerId: 'owner-a',
         deviceId: DEVICE_ID,
         sessionId: SESSION_ID,
         path: WORKTREE_PATH,
@@ -366,7 +417,7 @@ describe('createRemoteSessionWithPrecreatedWorktree', () => {
     setItem.mockRestore();
     removeItem.mockRestore();
     expect(localStorage.getItem(__testing.storageKey)).toBe(persisted);
-    await expect(listPendingRemotePrecreatedWorktrees()).resolves.toHaveLength(1);
+    await expect(listPendingRemotePrecreatedWorktrees('owner-a')).resolves.toHaveLength(1);
     expect(localStorage.getItem(__testing.storageKey)).toBeNull();
   });
 

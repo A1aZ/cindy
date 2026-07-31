@@ -17,6 +17,8 @@ export interface CreateRemoteSessionWithPrecreatedWorktreeInput {
   sessionId: string;
   path: string;
   recoveryKey: string;
+  /** Owner captured when the remote worktree operation started. */
+  dataOwnerId?: string;
   createdAt?: number;
   createArgs: unknown;
   invoke: RemoteWorktreeInvoke;
@@ -24,6 +26,8 @@ export interface CreateRemoteSessionWithPrecreatedWorktreeInput {
 
 export interface RecoverPendingRemotePrecreatedWorktreesInput {
   deviceId: string;
+  /** Owner whose obligations may be reconciled; prevents account-switch bleed. */
+  dataOwnerId?: string;
   invoke: RemoteWorktreeInvoke;
 }
 
@@ -83,7 +87,7 @@ function getLedgerApi(): RemotePrecreatedWorktreeLedgerApi {
  * 每条都由 Main 原子 register；全部确认持久化后才删旧 key。多窗口同时迁移只会
  * 幂等覆盖同一 device/session 记录，不会再产生整表 last-writer-wins。
  */
-async function migrateLegacyLedger(): Promise<boolean> {
+async function migrateLegacyLedger(dataOwnerId?: string): Promise<boolean> {
   let raw: string | null;
   try {
     raw = localStorage.getItem(STORAGE_KEY);
@@ -99,6 +103,24 @@ async function migrateLegacyLedger(): Promise<boolean> {
     // 未知旧真值不能按空账本覆盖；保留 key 并让创建 fail closed。
     return false;
   }
+  if (records.length === 0) {
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  // A legacy global key has no trustworthy account context. Never attach an
+  // unowned record (or one belonging to another owner) to the currently
+  // signed-in account; retaining the key makes the obligation fail closed
+  // until a caller with an explicit matching owner can migrate it.
+  if (
+    !dataOwnerId
+    || records.some((record) => record.dataOwnerId !== dataOwnerId)
+  ) {
+    return false;
+  }
 
   try {
     for (const record of records) {
@@ -112,20 +134,26 @@ async function migrateLegacyLedger(): Promise<boolean> {
   }
 }
 
-export async function listPendingRemotePrecreatedWorktrees(): Promise<
+export async function listPendingRemotePrecreatedWorktrees(
+  dataOwnerId?: string,
+): Promise<
   PendingRemotePrecreatedWorktree[]
 > {
-  return (await readPendingRemotePrecreatedWorktreeLedger()).records;
+  return (await readPendingRemotePrecreatedWorktreeLedger(dataOwnerId)).records;
 }
 
-async function readPendingRemotePrecreatedWorktreeLedger(): Promise<
+async function readPendingRemotePrecreatedWorktreeLedger(
+  dataOwnerId?: string,
+): Promise<
   RemotePrecreatedWorktreeLedgerSnapshot
 > {
-  const legacyMigrated = await migrateLegacyLedger();
+  const legacyMigrated = await migrateLegacyLedger(dataOwnerId);
   try {
     const snapshot = await getLedgerApi().list();
     return {
-      records: snapshot.records,
+      records: snapshot.records.filter(
+        (record) => !dataOwnerId || record.dataOwnerId === dataOwnerId,
+      ),
       storageReadable: legacyMigrated && snapshot.storageReadable,
     };
   } catch {
@@ -136,7 +164,7 @@ async function readPendingRemotePrecreatedWorktreeLedger(): Promise<
 export async function registerPendingRemotePrecreatedWorktree(
   record: PendingRemotePrecreatedWorktree,
 ): Promise<boolean> {
-  if (!(await migrateLegacyLedger())) return false;
+  if (!(await migrateLegacyLedger(record.dataOwnerId))) return false;
   try {
     return (await getLedgerApi().register(record)).persisted;
   } catch {
@@ -204,9 +232,24 @@ async function discardPendingRecord(
 export async function recoverPendingRemotePrecreatedWorktrees(
   input: RecoverPendingRemotePrecreatedWorktreesInput,
 ): Promise<RecoverPendingRemotePrecreatedWorktreesResult> {
-  const ledger = await readPendingRemotePrecreatedWorktreeLedger();
+  const legacyMigrated = await migrateLegacyLedger(input.dataOwnerId);
+  let ledger: RemotePrecreatedWorktreeLedgerSnapshot;
+  try {
+    const snapshot = await getLedgerApi().list();
+    ledger = {
+      records: snapshot.records.filter(
+        (record) =>
+          (!input.dataOwnerId || record.dataOwnerId === input.dataOwnerId),
+      ),
+      storageReadable: legacyMigrated && snapshot.storageReadable,
+    };
+  } catch {
+    ledger = { records: [], storageReadable: false };
+  }
   const records = ledger.records.filter(
-    (record) => record.deviceId === input.deviceId,
+    (record) =>
+      record.deviceId === input.deviceId
+      && (!input.dataOwnerId || record.dataOwnerId === input.dataOwnerId),
   );
   const result: RecoverPendingRemotePrecreatedWorktreesResult = {
     attempted: 0,
@@ -243,6 +286,7 @@ export async function createRemoteSessionWithPrecreatedWorktree(
     path: input.path,
     recoveryKey: input.recoveryKey,
     createdAt: input.createdAt ?? Date.now(),
+    ...(input.dataOwnerId ? { dataOwnerId: input.dataOwnerId } : {}),
   };
   // Main 账本在首次 worktree:create 前已经按 recoveryKey 登记；这里补齐 path。
   // 写盘失败时 Main 仍保留内存镜像，后续流程继续按 cleanup obligation 收敛。

@@ -8,6 +8,13 @@ interface PendingRemotePrecreatedWorktreeBase {
   deviceId: string;
   sessionId: string;
   createdAt: number;
+  /**
+   * Cindy account/local-data owner that created the obligation.
+   *
+   * Optional only for the one-time migration of records written by older
+   * renderers. New records must carry this field before Main persists them.
+   */
+  dataOwnerId?: string;
 }
 
 export type PendingRemotePrecreatedWorktree =
@@ -26,6 +33,7 @@ export type PendingRemotePrecreatedWorktree =
 
 export type PendingRemotePrecreatedWorktreeTarget =
   Pick<PendingRemotePrecreatedWorktree, 'deviceId' | 'sessionId'> & {
+    dataOwnerId?: string;
     path?: string;
     recoveryKey?: string;
     createdAt?: number;
@@ -40,6 +48,7 @@ const MAX_RECORDS = 32;
 const MAX_RECORD_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_DEVICE_ID_LENGTH = 256;
 const MAX_SESSION_ID_LENGTH = 256;
+const MAX_DATA_OWNER_ID_LENGTH = 256;
 const MAX_PATH_LENGTH = 4_096;
 const MIN_RECOVERY_KEY_LENGTH = 16;
 const MAX_RECOVERY_KEY_LENGTH = 256;
@@ -67,9 +76,11 @@ function readRecoveryKey(value: unknown): string | null {
 }
 
 export function remotePrecreatedWorktreeRecordKey(
-  record: Pick<PendingRemotePrecreatedWorktree, 'deviceId' | 'sessionId'>,
+  record: Pick<PendingRemotePrecreatedWorktree, 'deviceId' | 'sessionId'> & {
+    dataOwnerId?: string;
+  },
 ): string {
-  return `${record.deviceId}\u0000${record.sessionId}`;
+  return `${record.dataOwnerId ?? 'legacy'}\u0000${record.deviceId}\u0000${record.sessionId}`;
 }
 
 export function coercePendingRemotePrecreatedWorktree(
@@ -79,16 +90,31 @@ export function coercePendingRemotePrecreatedWorktree(
   if (!isRecord(value)) return null;
   const deviceId = readString(value.deviceId, MAX_DEVICE_ID_LENGTH);
   const sessionId = readString(value.sessionId, MAX_SESSION_ID_LENGTH);
+  const dataOwnerId =
+    value.dataOwnerId === undefined
+      ? undefined
+      : readString(value.dataOwnerId, MAX_DATA_OWNER_ID_LENGTH);
   const path = readString(value.path, MAX_PATH_LENGTH);
   const recoveryKey = readRecoveryKey(value.recoveryKey);
   const createdAt =
     typeof value.createdAt === 'number' && Number.isFinite(value.createdAt)
       ? value.createdAt
       : 0;
-  if (!deviceId || !sessionId || (!path && !recoveryKey) || createdAt <= 0) return null;
+  if (
+    !deviceId
+    || !sessionId
+    || (value.dataOwnerId !== undefined && !dataOwnerId)
+    || (!path && !recoveryKey)
+    || createdAt <= 0
+  ) return null;
   if (createdAt > now + 5 * 60 * 1000) return null;
   if (now - createdAt > MAX_RECORD_AGE_MS) return null;
-  const base = { deviceId, sessionId, createdAt };
+  const base = {
+    deviceId,
+    sessionId,
+    createdAt,
+    ...(dataOwnerId ? { dataOwnerId } : {}),
+  };
   if (path) {
     return {
       ...base,
@@ -131,9 +157,18 @@ export function coercePendingRemotePrecreatedWorktreeTarget(
   if (!isRecord(value)) return null;
   const deviceId = readString(value.deviceId, MAX_DEVICE_ID_LENGTH);
   const sessionId = readString(value.sessionId, MAX_SESSION_ID_LENGTH);
+  const dataOwnerId =
+    value.dataOwnerId === undefined
+      ? undefined
+      : readString(value.dataOwnerId, MAX_DATA_OWNER_ID_LENGTH);
   const path = readString(value.path, MAX_PATH_LENGTH);
   const recoveryKey = readRecoveryKey(value.recoveryKey);
-  if (!deviceId || !sessionId || (!path && !recoveryKey)) return null;
+  if (
+    !deviceId
+    || !sessionId
+    || (value.dataOwnerId !== undefined && !dataOwnerId)
+    || (!path && !recoveryKey)
+  ) return null;
   const createdAt =
     typeof value.createdAt === 'number' && Number.isFinite(value.createdAt)
       ? value.createdAt
@@ -141,6 +176,7 @@ export function coercePendingRemotePrecreatedWorktreeTarget(
   return {
     deviceId,
     sessionId,
+    ...(dataOwnerId ? { dataOwnerId } : {}),
     ...(path ? { path } : {}),
     ...(recoveryKey ? { recoveryKey } : {}),
     ...(createdAt !== undefined ? { createdAt } : {}),

@@ -7,6 +7,10 @@
 import { ipcMain } from 'electron';
 import Store from 'electron-store';
 
+import {
+  getActiveAppSession,
+  ownerScopedUserDataPath,
+} from './appSessionState.js';
 import { assertTrustedAppRendererEvent } from './security/trustedAppRenderer.js';
 import { throwIpcError } from './utils/ipcValidate.js';
 import {
@@ -33,12 +37,30 @@ interface LedgerStoreLike {
 }
 
 let storeInstance: LedgerStoreLike | null = null;
-const memoryRecords = new Map<string, PendingRemotePrecreatedWorktree>();
+let storePath: string | null = null;
+const memoryRecordsByOwner = new Map<
+  string,
+  Map<string, PendingRemotePrecreatedWorktree>
+>();
+
+function currentOwnerId(): string | null {
+  const ownerId = getActiveAppSession().dataOwnerId;
+  return typeof ownerId === 'string' && ownerId.trim().length > 0
+    ? ownerId
+    : null;
+}
+
+function currentStorePath(): string {
+  return ownerScopedUserDataPath('remote-precreated-worktree-ledger');
+}
 
 function getStore(): LedgerStoreLike {
-  if (!storeInstance) {
+  if (storeInstance && storePath === '__testing__') return storeInstance;
+  const nextPath = currentStorePath();
+  if (!storeInstance || storePath !== nextPath) {
     storeInstance = new Store<RemotePrecreatedWorktreeLedgerShape>({
       name: 'remote-precreated-worktree-ledger',
+      cwd: nextPath,
       defaults: { records: [] },
       schema: {
         records: {
@@ -47,11 +69,25 @@ function getStore(): LedgerStoreLike {
         },
       },
     });
+    storePath = nextPath;
   }
   return storeInstance;
 }
 
-function replaceMemoryRecords(records: readonly PendingRemotePrecreatedWorktree[]): void {
+function memoryRecordsFor(ownerId: string): Map<string, PendingRemotePrecreatedWorktree> {
+  let records = memoryRecordsByOwner.get(ownerId);
+  if (!records) {
+    records = new Map();
+    memoryRecordsByOwner.set(ownerId, records);
+  }
+  return records;
+}
+
+function replaceMemoryRecords(
+  ownerId: string,
+  records: readonly PendingRemotePrecreatedWorktree[],
+): void {
+  const memoryRecords = memoryRecordsFor(ownerId);
   memoryRecords.clear();
   for (const record of records) {
     memoryRecords.set(remotePrecreatedWorktreeRecordKey(record), record);
@@ -59,6 +95,11 @@ function replaceMemoryRecords(records: readonly PendingRemotePrecreatedWorktree[
 }
 
 function readMergedRecords(): RemotePrecreatedWorktreeLedgerSnapshot {
+  const ownerId = currentOwnerId();
+  if (!ownerId) {
+    return { records: [], storageReadable: false };
+  }
+  const memoryRecords = memoryRecordsFor(ownerId);
   let persisted: PendingRemotePrecreatedWorktree[];
   try {
     persisted = normalizePendingRemotePrecreatedWorktrees(
@@ -66,19 +107,36 @@ function readMergedRecords(): RemotePrecreatedWorktreeLedgerSnapshot {
     );
   } catch {
     return {
-      records: normalizePendingRemotePrecreatedWorktrees([...memoryRecords.values()]),
+      records: normalizePendingRemotePrecreatedWorktrees(
+        [...memoryRecords.values()].filter((record) => record.dataOwnerId === ownerId),
+      ),
       storageReadable: false,
     };
   }
-  const records = normalizePendingRemotePrecreatedWorktrees([
+  const mergedRecords = normalizePendingRemotePrecreatedWorktrees([
     ...memoryRecords.values(),
     ...persisted,
   ]);
-  replaceMemoryRecords(records);
-  return { records, storageReadable: true };
+  // A record without an owner can only come from an old global/localStorage
+  // ledger. Do not guess which account created it: quarantine it and fail
+  // closed instead of letting the current account delete another account's
+  // worktree.
+  const hasForeignOrLegacyRecords = mergedRecords.some(
+    (record) => record.dataOwnerId !== ownerId,
+  );
+  const records = mergedRecords.filter((record) => record.dataOwnerId === ownerId);
+  replaceMemoryRecords(ownerId, records);
+  return {
+    records,
+    storageReadable: !hasForeignOrLegacyRecords,
+  };
 }
 
-function writeRecords(records: readonly PendingRemotePrecreatedWorktree[]): boolean {
+function writeRecords(
+  ownerId: string,
+  records: readonly PendingRemotePrecreatedWorktree[],
+): boolean {
+  if (records.some((record) => record.dataOwnerId !== ownerId)) return false;
   try {
     getStore().set(
       'records',
@@ -95,7 +153,8 @@ export function listRemotePrecreatedWorktreeLedger(): RemotePrecreatedWorktreeLe
   if (snapshot.storageReadable) {
     // 顺手清理过期/损坏条目。写失败不把一次成功读取伪装成不可读；后续 register
     // 会明确返回 persisted=false，阻止新的远端副作用。
-    writeRecords(snapshot.records);
+    const ownerId = currentOwnerId();
+    if (ownerId) writeRecords(ownerId, snapshot.records);
   }
   return snapshot;
 }
@@ -103,8 +162,10 @@ export function listRemotePrecreatedWorktreeLedger(): RemotePrecreatedWorktreeLe
 export function registerRemotePrecreatedWorktreeLedgerRecord(
   value: unknown,
 ): boolean {
-  const record = coercePendingRemotePrecreatedWorktree(value);
-  if (!record) return false;
+  const ownerId = currentOwnerId();
+  const rawRecord = coercePendingRemotePrecreatedWorktree(value);
+  if (!ownerId || !rawRecord || rawRecord.dataOwnerId !== ownerId) return false;
+  const record = rawRecord;
   const current = readMergedRecords();
   const next = normalizePendingRemotePrecreatedWorktrees([
     record,
@@ -116,9 +177,9 @@ export function registerRemotePrecreatedWorktreeLedgerRecord(
   ]);
   // 即使磁盘暂时不可用，也在 Main 内存镜像中承担 obligation；返回 false 只表示
   // 尚未取得跨进程恢复保证，调用方不得创建远端 worktree。
-  replaceMemoryRecords(next);
+  replaceMemoryRecords(ownerId, next);
   if (!current.storageReadable) return false;
-  return writeRecords(next);
+  return writeRecords(ownerId, next);
 }
 
 function targetMatches(
@@ -126,7 +187,8 @@ function targetMatches(
   target: PendingRemotePrecreatedWorktreeTarget,
 ): boolean {
   if (
-    item.deviceId !== target.deviceId
+    item.dataOwnerId !== target.dataOwnerId
+    || item.deviceId !== target.deviceId
     || item.sessionId !== target.sessionId
   ) {
     return false;
@@ -141,17 +203,18 @@ function targetMatches(
 export function forgetRemotePrecreatedWorktreeLedgerRecord(
   value: unknown,
 ): boolean {
+  const ownerId = currentOwnerId();
   const target = coercePendingRemotePrecreatedWorktreeTarget(value);
-  if (!target) return false;
+  if (!ownerId || !target || target.dataOwnerId !== ownerId) return false;
   const current = readMergedRecords();
   if (!current.storageReadable) return false;
   const next = current.records.filter((item) => !targetMatches(item, target));
-  if (!writeRecords(next)) {
+  if (!writeRecords(ownerId, next)) {
     // 删除落盘失败时继续在内存保留，防止当前进程把未确认的持久账本当成已清。
-    replaceMemoryRecords(current.records);
+    replaceMemoryRecords(ownerId, current.records);
     return false;
   }
-  replaceMemoryRecords(next);
+  replaceMemoryRecords(ownerId, next);
   return true;
 }
 
@@ -192,8 +255,9 @@ export function registerRemotePrecreatedWorktreeLedgerIpc(): void {
 export const __testing = {
   setStore: (store: LedgerStoreLike | null): void => {
     storeInstance = store;
+    storePath = store ? '__testing__' : null;
   },
   resetMemory: (): void => {
-    memoryRecords.clear();
+    memoryRecordsByOwner.clear();
   },
 };

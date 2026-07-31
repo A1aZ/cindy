@@ -39,6 +39,7 @@ import { createWorkerLabel } from './workerLabel';
 import { useNavigate, useOutletContext } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
+import { useAuth } from '@/contexts/AuthContext';
 import { themeService } from '@/themes/theme-service';
 import type { Theme as ColorTheme } from '@/themes/types';
 import { ThemeBrandLockup } from '@/components/branding/ThemeBrandLockup';
@@ -458,6 +459,7 @@ interface DraftTargetRequest {
 
 export function NewMakerDraftRoute() {
   const { t } = useTranslation();
+  const { dataOwnerId } = useAuth();
   const draft = useNewMakerDraft();
   const navigate = useNavigate();
   // 首参 914=内容封顶宽(→ inputWidth 封顶 934):大屏留出左右呼吸空间,不再顶满全宽;
@@ -2116,6 +2118,7 @@ export function NewMakerDraftRoute() {
             const invokeRemote = (channel: string, args: unknown[]) =>
               window.electronAPI.deviceLink.invoke(deviceId, channel, args);
             const wt = selectedWorktree;
+            const ownerAtSend = dataOwnerId;
             let remoteWorkingDir = effectiveWorkingDir?.trim() || undefined;
             let presetSessionId: string | undefined;
             let precreatedWorktree: {
@@ -2127,11 +2130,17 @@ export function NewMakerDraftRoute() {
             // 勾选但环境不合格 / 探测未回时**静默按普通方式启动**,不报错不改勾选记忆
             // ——状态只属于用户,合格性只影响这一次是否真的走 worktree(2026-07-29 裁决)。
             if (effectiveWorkingDir && wt.enabled && wt.baseRepo) {
+              // 账本必须绑定发起时的账号/本地数据 owner。账号在后续 await
+              // 期间切换时，Main 会拒绝把这笔义务落入新 owner 的命名空间。
+              if (!ownerAtSend) {
+                throw new RemotePrecreatedWorktreeCleanupPendingError();
+              }
               // 上次两步创建若在 create / probe / discard 都断线后失败，本地账本仍
               // 承担 cleanup obligation。新建下一份前先恢复；无法确认回收/认领时
               // 硬挡本次 worktree:create，避免每次重试生成一个新的受管目录。
               const recovery = await recoverPendingRemotePrecreatedWorktrees({
                 deviceId,
+                dataOwnerId: ownerAtSend,
                 invoke: invokeRemote,
               });
               // 账本不可读时磁盘上是否还有旧 obligation 未知，也必须 fail
@@ -2148,6 +2157,7 @@ export function NewMakerDraftRoute() {
               const reservation = {
                 deviceId,
                 sessionId: presetSessionId,
+                dataOwnerId: ownerAtSend,
                 recoveryKey,
                 createdAt,
               };
@@ -2235,6 +2245,7 @@ export function NewMakerDraftRoute() {
                   sessionId: presetSessionId,
                   path: precreatedWorktree.path,
                   recoveryKey: precreatedWorktree.recoveryKey,
+                  ...(ownerAtSend ? { dataOwnerId: ownerAtSend } : {}),
                   createdAt: precreatedWorktree.createdAt,
                   createArgs: createArgs,
                   invoke: invokeRemote,
@@ -2661,6 +2672,7 @@ export function NewMakerDraftRoute() {
       deviceProvidersLoading,
       effectiveDeviceLinkDeviceId,
       effectiveDeviceLinkDeviceName,
+      dataOwnerId,
       effectiveExtraDirs,
       authVendor,
       persistedAgentKind,

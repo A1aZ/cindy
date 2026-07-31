@@ -3059,6 +3059,58 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onControlTargetChanged: fanOutDeviceLinkControlTargetChanged,
     /** 「保持电脑唤醒」在其它共享 userData 实例被翻转后推送,payload: { keepAwake: boolean } */
     onKeepAwakeChanged: fanOutDeviceLinkKeepAwakeChanged,
+    /**
+     * 控制端:远程会话镜像的本地冷缓存(main 落 userData,见 main/device-link/mirrorCacheStore.ts)。
+     * 只做首屏加速,非权威;fresh 数据一到由 renderer 整体接管。
+     */
+    mirrorCache: {
+      /** 读某 (设备, 会话) 缓存的最近一页消息(未命中返回空数组) */
+      getMessages: (
+        deviceId: string,
+        sessionId: string,
+      ): Promise<{ messages: Record<string, unknown>[]; invalidation?: number }> =>
+        ipcRenderer.invoke('device-link:mirror-cache:messages:get', { deviceId, sessionId }),
+      /**
+       * 写某 (设备, 会话) 的最近一页消息;空数组 = 清掉该条缓存。
+       * `expectedInvalidation` = 取到这批内容时 main 侧的会话级作废计数(由 get / put 带回,
+       * renderer 缓存):不一致说明期间**任意窗口 / 进程**作废过这个会话,main 会丢弃这次写。
+       */
+      putMessages: (
+        deviceId: string,
+        sessionId: string,
+        messages: readonly Record<string, unknown>[],
+        expectedInvalidation?: number,
+      ): Promise<{ ok: true; invalidation?: number }> =>
+        ipcRenderer.invoke('device-link:mirror-cache:messages:put', {
+          deviceId,
+          sessionId,
+          messages,
+          expectedInvalidation,
+        }),
+      /** 读侧边栏远程会话列表快照 */
+      getSessionList: (): Promise<{
+        devices: Array<{
+          deviceId: string;
+          deviceName: string;
+          sessions: Record<string, unknown>[];
+        }>;
+      }> => ipcRenderer.invoke('device-link:mirror-cache:session-list:get'),
+      /** 写侧边栏远程会话列表快照 */
+      putSessionList: (
+        devices: ReadonlyArray<{
+          deviceId: string;
+          deviceName: string;
+          sessions: readonly Record<string, unknown>[];
+        }>,
+      ): Promise<{ ok: true }> =>
+        ipcRenderer.invoke('device-link:mirror-cache:session-list:put', { devices }),
+      /**
+       * 清掉一台设备的缓存(撤销 / 关被控 / 禁用控制)。deviceId 必填 ——
+       * 登出的整体清理由 main 在账号边界自己做,renderer 不持有那个能力。
+       */
+      clear: (deviceId: string): Promise<{ ok: true }> =>
+        ipcRenderer.invoke('device-link:mirror-cache:clear', { deviceId }),
+    },
   },
 
   // ── Remote SSH (Phase A) ───────────────────────────────────────────────

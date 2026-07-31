@@ -4264,6 +4264,8 @@ function scheduleGhostSkillReconcile(): void {
             ghosts: getGhostManager().list(),
             brainRoot: brainRootDir(),
             approvalStateRoot: getGhostManager().approvalStateRoot(),
+            validateApprovedSkillSnapshot: (ghost) =>
+              getGhostManager().verifyApprovedSkillSnapshot(ghost),
           });
           if (result.warnings.length > 0) {
             log.warn('ghost skill reconcile warnings', { warnings: result.warnings });

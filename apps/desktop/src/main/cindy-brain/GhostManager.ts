@@ -168,6 +168,38 @@ export class GhostManager {
     return this.receiptStore.read(id);
   }
 
+  /**
+   * 技能链接对账前重新核验批准快照。
+   *
+   * `list()` 是首帧同步 API,不能在里面流式重算目录摘要；因此由异步 reconciler
+   * 对每个准备挂链的插件调用本入口。receipt revision 若已变化、快照缺失/不可读、
+   * 含非普通条目或字节不符一律 false,让对账器撤掉已有链接并拒绝新建。
+   */
+  async verifyApprovedSkillSnapshot(ghost: InstalledGhost): Promise<boolean> {
+    if (
+      ghost.approval.state !== 'approved' ||
+      !ghost.manifest.skill?.items.length ||
+      !ghost.approvedSkillRoot
+    ) {
+      return false;
+    }
+    const current = this.readApproval(ghost.manifest.id);
+    if (
+      current.state !== 'approved' ||
+      current.receipt.revision !== ghost.approval.revision
+    ) {
+      return false;
+    }
+    const expectedRoot = this.receiptStore.skillSnapshotRoot(
+      current.receipt.id,
+      current.receipt.revision,
+    );
+    if (path.resolve(ghost.approvedSkillRoot) !== path.resolve(expectedRoot)) {
+      return false;
+    }
+    return this.receiptStore.skillSnapshotMatchesReceipt(current.receipt, expectedRoot);
+  }
+
   /** Serialize content-directory and approval-receipt mutations as one Host transaction lane. */
   async runExclusiveMutation<T>(operation: () => Promise<T>): Promise<T> {
     const previous = this.mutationTail;

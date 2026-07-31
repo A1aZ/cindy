@@ -101,6 +101,11 @@ interface ReconcileOptions {
    * 必填:漏给会让指向快照的活链接被判成外来链接而永不撤链(见头注释)。
    */
   approvalStateRoot: string;
+  /**
+   * 在把批准快照投影成共享链接前重算其完整内容摘要。必填:只检查 SKILL.md
+   * frontmatter 拦不住正文/辅助文件被改写,而已有链接目标不变时也不能直接 kept。
+   */
+  validateApprovedSkillSnapshot: (ghost: InstalledGhost) => Promise<boolean>;
   /** 覆盖 home 目录(仅测试)。 */
   homeDir?: string;
 }
@@ -189,6 +194,20 @@ export async function reconcileGhostSkillLinks(
     )
     .sort((a, b) => a.manifest.id.localeCompare(b.manifest.id));
   for (const ghost of eligible) {
+    let snapshotValid = false;
+    try {
+      snapshotValid = await opts.validateApprovedSkillSnapshot(ghost);
+    } catch (err) {
+      warnings.push(
+        `批准技能快照校验失败 ${ghost.manifest.id}:${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    if (!snapshotValid) {
+      warnings.push(`批准技能快照字节不可信,撤链并等待修复:${ghost.manifest.id}`);
+      continue;
+    }
     const sortedItems = [...(ghost.manifest.skill?.items ?? [])].sort((a, b) =>
       a.name.localeCompare(b.name),
     );

@@ -912,6 +912,39 @@ describe('GhostManager · Host approval receipt', () => {
     await expectRejection(await manager.setEnabled('hello', true), 'approval-required');
   });
 
+  it('does not trust an already-present snapshot whose bytes were rewritten in place', async () => {
+    await manager.install(await makeCindy('skill.cindy', skillManifest(), skillFiles()));
+    const snapshotRoot = manager.list()[0].approvedSkillRoot!;
+    const snapshotSkillMd = path.join(snapshotRoot, 'skills', 'demo', 'SKILL.md');
+    // 快照就位后被就地改写(状态根没有写保护)。主 Agent 是顺着共享链接持续读它的,
+    // 所以"快照已存在"不能当成"仍是被批准的那份字节"直接早退信任。
+    await fs.promises.writeFile(
+      snapshotSkillMd,
+      '---\nname: demo\ndescription: Demo skill\n---\n\nrm -rf everything\n',
+    );
+
+    // 安装目录里的字节没动过 → 删掉坏快照后能按批准字节重建,自愈。
+    expect(await manager.setEnabled('skilled', false)).toEqual({ ok: true });
+    expect(await manager.setEnabled('skilled', true)).toEqual({ ok: true });
+    expect(await fs.promises.readFile(snapshotSkillMd, 'utf8')).toContain('Approved instructions');
+  });
+
+  it('refuses to keep a rewritten snapshot when the installed bytes drifted too', async () => {
+    await manager.install(await makeCindy('skill.cindy', skillManifest(), skillFiles()));
+    const snapshotRoot = manager.list()[0].approvedSkillRoot!;
+    const tampered = '---\nname: demo\ndescription: Demo skill\n---\n\nrm -rf everything\n';
+    // 快照与安装目录都被改成同一份未批准内容:此时没有任何可信来源可重建,必须拒。
+    await fs.promises.writeFile(path.join(snapshotRoot, 'skills', 'demo', 'SKILL.md'), tampered);
+    await fs.promises.writeFile(
+      path.join(rootDir, 'skilled', 'skills', 'demo', 'SKILL.md'),
+      tampered,
+    );
+
+    expect(await manager.setEnabled('skilled', false)).toEqual({ ok: true });
+    await expectRejection(await manager.setEnabled('skilled', true), 'io');
+    expect(manager.list()[0].enabled).toBe(false);
+  });
+
   it('still heals a deleted snapshot when the installed skill bytes are untouched', async () => {
     await manager.install(await makeCindy('skill.cindy', skillManifest(), skillFiles()));
     const snapshotRoot = manager.list()[0].approvedSkillRoot!;

@@ -179,11 +179,24 @@ export class GhostInstallReceiptStore {
     const items = receipt.manifest.skill?.items ?? [];
     if (items.length === 0) return;
     const target = this.skillSnapshotRoot(receipt.id, receipt.revision);
+    let existing: fs.Stats | null;
     try {
-      if ((await fs.promises.lstat(target)).isDirectory()) return;
-      throw new Error('approved skill snapshot target is not a directory');
+      existing = await fs.promises.lstat(target);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      existing = null;
+    }
+    if (existing) {
+      if (!existing.isDirectory()) {
+        throw new Error('approved skill snapshot target is not a directory');
+      }
+      // 快照已存在**不等于**它还是被批准的那份字节:状态根里的目录同样可被同权限
+      // 进程改写,而主 Agent 是顺着共享技能链接持续读它的。所以这里必须重算,
+      // 不能像上一版那样直接早退信任它。
+      if (await this.skillSnapshotMatchesReceipt(receipt, target)) return;
+      // 对不上的快照一律不可信:删掉,退回下面的重建路径 —— 重建本身仍要过安装
+      // 目录的字节校验,所以"损坏快照"能自愈,"安装字节已漂移"仍然拒。
+      await fs.promises.rm(target, { recursive: true, force: true });
     }
     if (!skillSourceDir) {
       throw new Error('approved skill snapshot is missing');
@@ -247,13 +260,14 @@ export class GhostInstallReceiptStore {
           );
         }
       }
-      const copiedSkillContent = await hashApprovedSkillContent(receipt.manifest, temp);
+      // 指纹判定走与"接受既有快照""发布后复核"同一个 helper:同一判据只有一份实现,
+      // 否则三处各写一遍、日后只改其中一处,就是这条链路前几轮反复出问题的形态。
+      if (!(await this.skillSnapshotMatchesReceipt(receipt, temp))) {
+        throw new Error(
+          `approved skill content for ${receipt.id} no longer matches the bytes approved at install time`,
+        );
+      }
       for (const item of items) {
-        if (copiedSkillContent[item.dir] !== receipt.skillContentSha256[item.dir]) {
-          throw new Error(
-            `approved skill ${item.dir} no longer matches the bytes approved at install time`,
-          );
-        }
         // 指纹相符已经蕴含 frontmatter 一致(批准时点那份过过这道校验),这里重跑一遍
         // 是防止钉指纹那条路径本身有 bug,并给出更具体的错误。
         const consistencyError = checkSkillMdConsistency(
@@ -265,15 +279,43 @@ export class GhostInstallReceiptStore {
         }
       }
 
-      // 残留窗口(已知、未关):rename 之前 temp 位于状态根内,同权限进程仍可改写它。
-      // 本地校验能保证"被校验的就是被复制的",保证不到"rename 的就是被校验的"。这属于
-      // 「批准状态根自身没有写保护」那一类,已正式登记在
-      // docs/dev-rules/plugin-security-and-authoring.md 第 6 节(与"内容根字节可变"
-      // 是两条并列的不同缺口),不在本函数能关掉的范围内。
       await fs.promises.rename(temp, target);
+
+      // rename 之前 temp 位于状态根内、同权限进程仍可改写它,所以就位之后再核一遍:
+      // 这一步把"校验通过 → rename"之间那段窗口收掉 —— 在那段里被换过的字节到这里
+      // 会暴露,并且不会留在盘上。
+      //
+      // 残留窗口(已知、未关):这次核对之后、主 Agent 顺着共享技能链接读取之前,快照
+      // 仍可被改写。要真正关掉需要给状态根写保护或在消费侧校验,都不在本函数范围内;
+      // 该缺口已正式登记在 docs/dev-rules/plugin-security-and-authoring.md 第 6 节
+      // (与"内容根字节可变"是两条并列的不同缺口)。
+      if (!(await this.skillSnapshotMatchesReceipt(receipt, target))) {
+        await fs.promises.rm(target, { recursive: true, force: true }).catch(() => undefined);
+        throw new Error('approved skill snapshot changed while being published');
+      }
     } finally {
       await fs.promises.rm(temp, { recursive: true, force: true }).catch(() => undefined);
     }
+  }
+
+  /**
+   * 快照目录里的字节是否仍等于 receipt 钉住的批准指纹。
+   *
+   * 三处调用共用同一判据(接受既有快照 / 复制后发布前 / 发布后复核) —— 这类判定散落
+   * 多处再各写一遍,就是本 PR 前几轮反复出问题的成因。读不动或含非普通条目一律按
+   * 不匹配处理:调用方对"不匹配"的收敛动作都是删掉重建或拒绝,始终 fail closed。
+   */
+  async skillSnapshotMatchesReceipt(
+    receipt: GhostInstallReceipt,
+    snapshotDir: string,
+  ): Promise<boolean> {
+    const actual = await hashApprovedSkillContent(receipt.manifest, snapshotDir).catch(
+      () => null,
+    );
+    if (!actual) return false;
+    return (receipt.manifest.skill?.items ?? []).every(
+      (item) => actual[item.dir] === receipt.skillContentSha256[item.dir],
+    );
   }
 
   /**

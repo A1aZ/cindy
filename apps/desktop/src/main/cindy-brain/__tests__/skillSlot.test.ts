@@ -10,7 +10,7 @@ import { GhostManager } from '../GhostManager';
 import {
   checkSkillMdConsistency,
   ghostSkillLinkName,
-  reconcileGhostSkillLinks,
+  reconcileGhostSkillLinks as reconcileGhostSkillLinksRaw,
 } from '../skillSlot';
 
 /** 规则 23:测试路径一律 os.tmpdir;伪 home + 伪 brainRoot,互不污染。 */
@@ -35,6 +35,22 @@ afterEach(async () => {
 
 const sharedDir = () => path.join(homeDir, '.agents', 'skills');
 const claudeDir = () => path.join(homeDir, '.claude', 'skills');
+
+/**
+ * 结构对账用例默认把夹具视为已经过完整快照摘要校验；摘要失配的安全回归单独
+ * 调 raw reconciler，避免每个链接行为用例重复搭 receipt。
+ */
+function reconcileGhostSkillLinks(
+  options: Omit<
+    Parameters<typeof reconcileGhostSkillLinksRaw>[0],
+    'validateApprovedSkillSnapshot'
+  >,
+) {
+  return reconcileGhostSkillLinksRaw({
+    ...options,
+    validateApprovedSkillSnapshot: async () => true,
+  });
+}
 
 /** reconciler 只消费 manifest 数据,不跑校验——手工拼最小清单即可。 */
 function ghost(
@@ -203,9 +219,36 @@ describe('skillSlot · reconcileGhostSkillLinks', () => {
   });
 
   it('漏传批准状态根在类型层就被挡住(否则指向快照的活链接会被判成外来链接而永不撤链)', () => {
-    // @ts-expect-error approvalStateRoot 必填:这行编译不报错就说明保护没了。
-    const missingStateRoot = () => reconcileGhostSkillLinks({ ghosts: [], brainRoot, homeDir });
+    const missingStateRoot = () =>
+      // @ts-expect-error approvalStateRoot 必填:这行编译不报错就说明保护没了。
+      reconcileGhostSkillLinksRaw({
+        ghosts: [],
+        brainRoot,
+        homeDir,
+        validateApprovedSkillSnapshot: async () => true,
+      });
     expect(typeof missingStateRoot).toBe('function');
+  });
+
+  it('完整摘要校验不通过时撤掉已有托管链接，不因目标未变而 kept', async () => {
+    await writeSkillDir('my-ghost', 'skills/foo', 'foo');
+    const ghosts = [ghost('my-ghost', [{ dir: 'skills/foo', name: 'foo' }])];
+    await reconcileGhostSkillLinks({ ghosts, brainRoot, approvalStateRoot, homeDir });
+    const linkName = ghostSkillLinkName('my-ghost', 'foo');
+    expect(fs.existsSync(path.join(sharedDir(), linkName))).toBe(true);
+
+    const result = await reconcileGhostSkillLinksRaw({
+      ghosts,
+      brainRoot,
+      approvalStateRoot,
+      homeDir,
+      validateApprovedSkillSnapshot: async () => false,
+    });
+
+    expect(result.changed).toBe(true);
+    expect(result.warnings.some((warning) => warning.includes('字节不可信'))).toBe(true);
+    expect(fs.existsSync(path.join(sharedDir(), linkName))).toBe(false);
+    expect(fs.existsSync(path.join(claudeDir(), linkName))).toBe(false);
   });
 
   it('外来链接(目标不在任何受管根内)→ 活链断链都不碰', async () => {
@@ -358,12 +401,14 @@ describe('skillSlot · 全链路(打包 → 装入 → 对账 → 双端可见)'
     const installed = await manager.install(packed.cindyPath);
     expect('ghost' in installed, JSON.stringify(installed)).toBe(true);
 
-    // 3) 对账:共享根与 .claude 双端可见,realpath 落在安装目录
-    await reconcileGhostSkillLinks({
+    // 3) 对账:共享根与 .claude 双端可见,realpath 落在批准快照目录
+    await reconcileGhostSkillLinksRaw({
       ghosts: manager.list(),
       brainRoot,
       approvalStateRoot: manager.approvalStateRoot(),
       homeDir,
+      validateApprovedSkillSnapshot: (candidate) =>
+        manager.verifyApprovedSkillSnapshot(candidate),
     });
     const linkName = ghostSkillLinkName('e2e-ghost', 'demo');
     const approvedSkillRoot = manager.list()[0].approvedSkillRoot;
@@ -382,6 +427,24 @@ describe('skillSlot · 全链路(打包 → 装入 → 对账 → 双端可见)'
     expect(
       await fs.promises.readFile(path.join(sharedDir(), linkName, 'SKILL.md'), 'utf8'),
     ).not.toContain('篡改后的指令');
+
+    // 改写批准状态根里的快照正文，保持 frontmatter 不变。下一轮正常对账必须重算
+    // 整棵快照摘要并撤链，不能因链接目标没变而直接 kept。
+    await fs.promises.writeFile(
+      path.join(target, 'SKILL.md'),
+      '---\nname: demo\ndescription: 演示技能\n---\n\n篡改批准快照\n',
+    );
+    const tampered = await reconcileGhostSkillLinksRaw({
+      ghosts: manager.list(),
+      brainRoot,
+      approvalStateRoot: manager.approvalStateRoot(),
+      homeDir,
+      validateApprovedSkillSnapshot: (candidate) =>
+        manager.verifyApprovedSkillSnapshot(candidate),
+    });
+    expect(tampered.warnings.some((warning) => warning.includes('字节不可信'))).toBe(true);
+    expect(fs.existsSync(path.join(sharedDir(), linkName))).toBe(false);
+    expect(fs.existsSync(path.join(claudeDir(), linkName))).toBe(false);
 
     // 4) 卸载 → 对账 → 双端链接消失
     const removed = await manager.uninstall('e2e-ghost');

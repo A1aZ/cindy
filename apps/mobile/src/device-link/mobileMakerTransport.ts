@@ -323,6 +323,11 @@ export interface MobileWorktreeDetectCwdResult {
   currentBranch?: string;
   /** git rev-parse --show-toplevel 结果(被控端绝对路径);worktree:create 的 baseRepo 用它。 */
   repoRoot?: string;
+  /**
+   * 新版 Desktop 才会返回 true。旧端可能接受 worktree:create 的未知 recoveryKey
+   * 字段却不把它写入元数据，因此省略必须在副作用前视为不支持。
+   */
+  supportsRecoveryKeyDiscard?: boolean;
 }
 
 /** 工作端 worktree:create 元信息(形状对齐被控端 WorktreeMeta)。 */

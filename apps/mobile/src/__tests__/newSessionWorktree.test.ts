@@ -30,6 +30,7 @@ const DETECT_OK: MobileWorktreeDetectCwdResult = {
   gitInstalled: true,
   currentBranch: 'feature/x',
   repoRoot: '/repo/root',
+  supportsRecoveryKeyDiscard: true,
 };
 
 describe('resolveWorktreeEligibility', () => {
@@ -64,13 +65,20 @@ describe('resolveWorktreeEligibility', () => {
 
   it('repoRoot 缺失回落 workingDir;detached HEAD 回落 HEAD(不猜 main)', () => {
     expect(resolveWorktreeEligibility(
-      { isGitRepo: true, isInsideWorktree: false, gitInstalled: true },
+      { ...DETECT_OK, repoRoot: undefined, currentBranch: undefined },
       '/repo/app',
     )).toEqual({ status: 'eligible', baseRepo: '/repo/app', sourceBranch: 'HEAD' });
     expect(resolveWorktreeEligibility(
       { ...DETECT_OK, repoRoot: '  ', currentBranch: '' },
       '/repo/app',
     )).toEqual({ status: 'eligible', baseRepo: '/repo/app', sourceBranch: 'HEAD' });
+  });
+
+  it('旧 Desktop 省略 recoveryKey discard 能力时，在创建副作用前 fail closed', () => {
+    const { supportsRecoveryKeyDiscard: _ignored, ...legacyResult } = DETECT_OK;
+    expect(resolveWorktreeEligibility(legacyResult, '/repo/app')).toEqual({
+      status: 'unsupported',
+    });
   });
 });
 

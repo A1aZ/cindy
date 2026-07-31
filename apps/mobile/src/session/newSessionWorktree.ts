@@ -71,6 +71,10 @@ export function worktreeEligibilityForTarget(
  * sourceBranch 取当前分支(手机没有分支选择 UI,等价于桌面分支 chip 回填 current),
  * detached HEAD 时 currentBranch 缺失，必须回落 'HEAD' 才能从当前 commit 派生；
  * 不能猜 main（仓库未必有 main，也不能静默偏离当前 checkout）。
+ *
+ * recoveryKey discard 能力也是资格的一部分：旧 Desktop 可能接受 recoveryKey
+ * 字段却不持久化，create 回包丢失后无法恢复。新端通过 detect-cwd 显式返回 true；
+ * 旧端省略该字段时必须在任何 worktree:create 副作用前 fail closed。
  */
 export function resolveWorktreeEligibility(
   result: MobileWorktreeDetectCwdResult,
@@ -79,6 +83,7 @@ export function resolveWorktreeEligibility(
   if (!result.gitInstalled) return { status: 'ineligible', reason: 'gitMissing' };
   if (!result.isGitRepo) return { status: 'ineligible', reason: 'notGitRepo' };
   if (result.isInsideWorktree) return { status: 'ineligible', reason: 'alreadyInWorktree' };
+  if (result.supportsRecoveryKeyDiscard !== true) return { status: 'unsupported' };
   return {
     status: 'eligible',
     baseRepo: result.repoRoot?.trim() || workingDir,

@@ -28,6 +28,11 @@ export interface WorktreeMeta {
    * 对应本记录；不授予通用删除能力。
    */
   recoveryKey?: string;
+  /**
+   * 隔离回收期间的实际 worktree 路径。保留原 path 作为外部账本的稳定定位，
+   * 进程崩溃后可从该字段继续回收 quarantine 目录。
+   */
+  quarantinePath?: string;
   /** true = scheduler 创建的临时 worktree，session 关闭时可池化复用而非销毁。 */
   ephemeral?: boolean;
 }
@@ -79,6 +84,11 @@ export interface DetectCwdResp {
   currentBranch?: string;
   /** git rev-parse --show-toplevel 的结果，绝对路径。 */
   repoRoot?: string;
+  /**
+   * 当前被控端是否会把 recoveryKey 持久化到 worktree 元数据，并支持按键回收。
+   * 旧 Desktop 会省略该字段；控制端必须在创建副作用前把省略视为不支持。
+   */
+  supportsRecoveryKeyDiscard?: boolean;
 }
 
 export interface ListBranchesReq {

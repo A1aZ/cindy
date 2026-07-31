@@ -50,7 +50,9 @@ vi.mock('../worktree/includePatternsEngine', () => ({
 vi.mock('../worktree/worktreeStore', () => ({
   get: (sessionId: string) => storeMap.get(sessionId) ?? null,
   getAll: () => [...storeMap.values()],
-  getAllPaths: () => [...storeMap.values()].map((m) => m.path),
+  getAllPaths: () => [...storeMap.values()].flatMap((m) => (
+    m.quarantinePath ? [m.path, m.quarantinePath] : [m.path]
+  )),
   set: (...args: unknown[]) => storeSetMock(...args),
   del: vi.fn((sessionId: string) => storeMap.delete(sessionId)),
 }));
@@ -632,6 +634,72 @@ describe('removeWorktreeForSession', () => {
       expect(ignoredFilesMock).toHaveBeenNthCalledWith(2, base, quarantinePath);
       expect(gitExecMock).not.toHaveBeenCalledWith(
         ['worktree', 'remove', quarantinePath],
+        base,
+      );
+      expect(storeMap.get('s1')).toEqual(meta);
+      expect(storeSetMock).toHaveBeenCalledWith(
+        's1',
+        expect.objectContaining({ quarantinePath }),
+      );
+    } finally {
+      fsSync.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('resumes a persisted quarantine path after restart while accepting the original ledger path', async () => {
+    const tmpRoot = fsSync.mkdtempSync(path.join(os.tmpdir(), 'xdt-wt-quarantine-restart-'));
+    try {
+      const base = path.join(tmpRoot, 'repo');
+      const worktreePath = path.join(base, '.xdt-worktrees', 's1');
+      const quarantinePath = `${worktreePath}.xdt-removing-crashed`;
+      fsSync.mkdirSync(quarantinePath, { recursive: true });
+      const meta: WorktreeMeta = {
+        ...makeMeta('s1'),
+        baseRepo: base,
+        path: worktreePath,
+        quarantinePath,
+      };
+      storeMap.set('s1', meta);
+
+      await expect(
+        manager.discardPrecreatedWorktree('s1', worktreePath),
+      ).resolves.toEqual({ status: 'discarded', branchDeleted: false });
+
+      expect(ignoredFilesMock).toHaveBeenCalledWith(base, quarantinePath);
+      expect(gitExecMock).toHaveBeenCalledWith(
+        ['worktree', 'remove', quarantinePath],
+        base,
+      );
+      expect(gitExecMock).not.toHaveBeenCalledWith(
+        ['worktree', 'move', worktreePath, quarantinePath],
+        base,
+      );
+      expect(storeMap.has('s1')).toBe(false);
+    } finally {
+      fsSync.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('does not move a worktree when quarantine state cannot be persisted', async () => {
+    const tmpRoot = fsSync.mkdtempSync(path.join(os.tmpdir(), 'xdt-wt-quarantine-persist-'));
+    try {
+      const base = path.join(tmpRoot, 'repo');
+      const worktreePath = path.join(base, '.xdt-worktrees', 's1');
+      fsSync.mkdirSync(worktreePath, { recursive: true });
+      const meta: WorktreeMeta = {
+        ...makeMeta('s1'),
+        baseRepo: base,
+        path: worktreePath,
+      };
+      storeMap.set('s1', meta);
+      storeSetMock.mockRejectedValueOnce(new Error('disk full'));
+
+      await expect(
+        manager.discardPrecreatedWorktree('s1', worktreePath),
+      ).resolves.toEqual({ status: 'preserved' });
+
+      expect(gitExecMock).not.toHaveBeenCalledWith(
+        ['worktree', 'move', worktreePath, expect.any(String)],
         base,
       );
       expect(storeMap.get('s1')).toBe(meta);

@@ -83,11 +83,14 @@ onEvent 钩子。下方原设计说明保留作背景。
 **目标**:用户配自定义/本地模型(Ollama / vLLM / 自建端点),pi 直连,**不过 anthropic-compat
 代理**(设计原则:禁止「先转 Claude 再转 pi」双重转义)。
 
-**现状(可复用的基建)**:Cindy 已有完整自定义 provider 体系 ——
+**现状(可复用的基建 —— 比预想的多)**:Cindy 已有完整自定义 provider 体系 ——
 `apps/desktop/src/main/maker-host/custom-provider-store.ts`(CRUD + DB schema)、
 `buildUserProvider`、`createDesktopProviderService.ts:384 setCustomProviders`、
-`active-catalog.ts`(base + custom 合并进目录,下游选择器/路由统一消费)。用户能配
-baseUrl/api/key 的本机 provider,已流进 catalog。
+`active-catalog.ts`(base + custom 合并进目录,下游选择器/路由统一消费)。
+**关键发现**:`CustomProviderConfig.runtimes` 是 `Partial<Record<AgentKind, CustomProviderRuntimeConfig>>`
+(custom-provider-store.ts:51),**数据模型天生支持 per-agent runtime,包括 `pi`**;每个
+runtime 带 `baseUrl` + `models` + auth。所以「自定义 provider 能不能挂 pi tab」在数据层已
+成立;缺的是 pi 侧把它写成**原生 provider 块**、以及 UI 是否允许添加 pi runtime。
 
 **缺口 = pi 特有**:
 1. **`writeModelsJson`(`packages/maker-core/src/agents/pi/index.ts:203`)现在只写单一

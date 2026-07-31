@@ -105,6 +105,28 @@ describe('PiAgent compaction → memory digest', () => {
     await handle.close();
   });
 
+  it('truncates a long CJK summary by UTF-8 bytes (≤ shard headroom), not chars', async () => {
+    const handle = await start(true);
+    // 5000 汉字 ≈ 15000 字节:按字符截断(阈值 7000 字符)不会触发,但会超存储 8192 字节硬上限。
+    const bigCjk = '摘'.repeat(5000);
+    fireCompaction(bigCjk);
+    await flush();
+    expect(writeMock).toHaveBeenCalledTimes(1);
+    const [, opts] = writeMock.mock.calls[0];
+    expect(Buffer.byteLength(opts.body, 'utf8')).toBeLessThanOrEqual(7000);
+    expect(opts.body.endsWith('…')).toBe(true);
+    await handle.close();
+  });
+
+  it('keeps title within limit even if pi reports a long reason', async () => {
+    const handle = await start(true);
+    fireCompaction('summary', 'x'.repeat(300));
+    await flush();
+    const [, opts] = writeMock.mock.calls[0];
+    expect(opts.title.length).toBeLessThanOrEqual(100);
+    await handle.close();
+  });
+
   it('does not write when memory is disabled', async () => {
     const handle = await start(false);
     fireCompaction('some summary');

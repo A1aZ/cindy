@@ -92,6 +92,8 @@ describe('validateCustomProviderConfig (per-runtime)', () => {
   it('rejects bad / reserved ids', () => {
     expect(validateCustomProviderConfig({ ...valid, id: 'Bad Id' }).ok).toBe(false);
     expect(validateCustomProviderConfig({ ...valid, id: 'xd' }).ok).toBe(false);
+    // 'cindy' 撞 pi 网关 provider id,必须保留
+    expect(validateCustomProviderConfig({ ...valid, id: 'cindy' }).ok).toBe(false);
   });
 
   it('rejects empty runtimes / invalid runtime key', () => {

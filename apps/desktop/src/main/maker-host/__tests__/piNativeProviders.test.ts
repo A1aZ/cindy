@@ -52,6 +52,25 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     expect(env[envVar]).toBe('secret-123');
   });
 
+  it('disambiguates env var names when ids collapse to the same key (no cross-provider key leak)', () => {
+    // `my-vllm` 与 `my_vllm` 都归一成 CINDY_PI_KEY_MY_VLLM;必须各拿独立 env 名,否则后写覆盖 → 串号。
+    const { providers, env } = buildPiNativeProvidersFromConfigs(
+      [
+        { id: 'my-vllm', name: 'A', auth: { method: 'apiKey' }, runtimes: { pi: piRuntime() } },
+        { id: 'my_vllm', name: 'B', auth: { method: 'apiKey' }, runtimes: { pi: piRuntime() } },
+      ],
+      (id) => (id === 'my-vllm' ? 'KEY-A' : id === 'my_vllm' ? 'KEY-B' : null),
+    );
+    expect(providers).toHaveLength(2);
+    const [a, b] = providers;
+    // 两个 provider 的 env 名互不相同
+    expect(a.apiKeyEnvVar).not.toBe(b.apiKeyEnvVar);
+    // 各自 env 变量存的是各自的 key,没有互相覆盖
+    expect(env[a.apiKeyEnvVar!]).toBe('KEY-A');
+    expect(env[b.apiKeyEnvVar!]).toBe('KEY-B');
+    expect(Object.keys(env)).toHaveLength(2);
+  });
+
   it('apiKey provider with no stored key is skipped (avoid half-usable)', () => {
     const skips: string[] = [];
     const { providers } = buildPiNativeProvidersFromConfigs(

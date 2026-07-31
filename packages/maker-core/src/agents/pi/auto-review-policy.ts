@@ -38,6 +38,29 @@ function stringField(input: Record<string, unknown>, key: string): string | unde
 }
 
 /**
+ * 递归找第一个触碰凭证路径的字符串叶子(含数组 / 嵌套对象),深度上限防环。与 bridge 的
+ * touchesCredentialPath 同口径:凭证路径若藏在 { paths:[...] } / { opts:{path} } 里也命中。
+ */
+function findCredentialLeaf(input: unknown, depth = 0): string | undefined {
+  if (depth > 6 || input == null) return undefined;
+  if (typeof input === 'string') return isSensitiveCredentialPath(input) ? input : undefined;
+  if (Array.isArray(input)) {
+    for (const v of input) {
+      const hit = findCredentialLeaf(v, depth + 1);
+      if (hit) return hit;
+    }
+    return undefined;
+  }
+  if (typeof input === 'object') {
+    for (const v of Object.values(input as Record<string, unknown>)) {
+      const hit = findCredentialLeaf(v, depth + 1);
+      if (hit) return hit;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Auto-review 下对一个 pi 工具调用给出审查档位。仅在权限档为 `auto` 时调用
  * (见 pi/index.ts handleExtensionUiRequest 的 dispatcher)。纯映射,判定逻辑全在 core。
  */
@@ -46,10 +69,8 @@ export function classifyPiToolForAutoReview(ctx: PiAutoReviewContext): PiAutoRev
 
   if (READ_ONLY_TOOLS.has(toolName)) {
     // 凭证特征可能落在任意字符串入参(grep 的 pattern、find 的表达式等),与 bridge
-    // 的 touchesCredentialPath 同口径扫全字段;命中的字符串作为 path 交 core 判必问。
-    const credentialHit = Object.values(input).find(
-      (v): v is string => typeof v === 'string' && isSensitiveCredentialPath(v),
-    );
+    // 的 touchesCredentialPath 同口径递归扫全字段;命中的字符串作为 path 交 core 判必问。
+    const credentialHit = findCredentialLeaf(input);
     return reviewAction({ kind: 'read', path: credentialHit ?? stringField(input, 'path') }, workspaceRoots);
   }
   if (FILE_WRITE_TOOLS.has(toolName)) {

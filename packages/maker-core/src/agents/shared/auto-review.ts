@@ -145,7 +145,7 @@ const CREDENTIAL_PATH_PATTERNS: readonly RegExp[] = [
   /\bcredentials\.json\b/i,                               // Claude 等的 OAuth 凭证文件(.credentials.json)
   /[\\/](?:codex|claude|gcloud|containers)[\\/]auth\.json\b/i, // agent/registry 认证文件(~/.config/codex|containers/auth.json 等)
   /[\\/]\.config[\\/](?:gh|hub|glab|op|gcloud)\b/i,           // GitHub/GitLab/Op/gcloud CLI 的 OAuth/Token 凭证目录(~/.config/gh/hosts.yml、~/.config/gcloud/credentials.db 等)
-  /\/proc\/[^/\s]*\/environ\b/i,                          // procfs 环境变量(读 /proc/self/environ 即 dump 含凭证的环境)
+  /\/proc\/[^\s]*\/environ\b/i,                           // procfs 环境变量(/proc/self/environ、/proc/<pid>/environ、/proc/<pid>/task/<tid>/environ 都 dump 含凭证的环境)
   /\bid_rsa\b|\bid_ed25519\b|\bid_ecdsa\b|\bid_dsa\b|\.pem\b|\.p12\b/i, // 私钥文件
 ];
 

@@ -41,16 +41,18 @@ const CREDENTIAL_PATH_PATTERNS = [
   /\bapplication_default_credentials\b/i,
   /\bcredentials\.json\b/i,
   /[\\/](?:codex|claude|gcloud)[\\/]auth\.json\b/i,
-  /\/proc\/[^/\s]*\/environ\b/i,
+  /\/proc\/[^\s]*\/environ\b/i,  // /proc/self/environ、/proc/<pid>/environ、/proc/<pid>/task/<tid>/environ
   /\bid_rsa\b|\bid_ed25519\b|\bid_ecdsa\b|\bid_dsa\b|\.pem\b|\.p12\b/i,
 ];
 
-function touchesCredentialPath(input: unknown): boolean {
-  if (!input || typeof input !== 'object') return false;
-  for (const value of Object.values(input as Record<string, unknown>)) {
-    if (typeof value === 'string' && CREDENTIAL_PATH_PATTERNS.some((re) => re.test(value))) {
-      return true;
-    }
+// 递归扫全部字符串叶子(含数组 / 嵌套对象),深度上限防环/超大入参。工具入参把路径
+// 放进 { paths: [...] } 或 { opts: { path } } 时也能命中,不止顶层 string 字段。
+function touchesCredentialPath(input: unknown, depth = 0): boolean {
+  if (depth > 6 || input == null) return false;
+  if (typeof input === 'string') return CREDENTIAL_PATH_PATTERNS.some((re) => re.test(input));
+  if (Array.isArray(input)) return input.some((v) => touchesCredentialPath(v, depth + 1));
+  if (typeof input === 'object') {
+    return Object.values(input as Record<string, unknown>).some((v) => touchesCredentialPath(v, depth + 1));
   }
   return false;
 }

@@ -72,8 +72,28 @@ const PI_SESSION_ID_ENV = 'CINDY_PI_SESSION_ID';
 /** 手动压缩 = 一次完整 LLM 摘要调用(大上下文 + 网关排队),远超默认 30s RPC 超时。 */
 const PI_COMPACT_TIMEOUT_MS = 600_000;
 
-/** digest 分片 body 留点 headroom(硬上限 8192),摘要过长时截断。 */
-const PI_DIGEST_MAX_BODY = 7000;
+/**
+ * digest 分片 body 的**字节**上限(硬上限 8192,留 headroom)。存储层按 UTF-8 字节
+ * 卡 hardShardBytes,故截断必须按字节而非字符 —— 否则中文摘要(每字 3 字节)会在
+ * 字符数远未到阈值时就超字节硬上限,write 抛 shard-too-large 被吞掉,digest 静默丢失。
+ */
+const PI_DIGEST_MAX_BODY_BYTES = 7000;
+
+/** 按 UTF-8 字节预算截断(码点安全,不切断多字节字符);超预算时补省略号。 */
+function truncateToByteBudget(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
+  const ellipsis = '\n…';
+  const budget = maxBytes - Buffer.byteLength(ellipsis, 'utf8');
+  let bytes = 0;
+  let out = '';
+  for (const ch of text) {
+    const chBytes = Buffer.byteLength(ch, 'utf8');
+    if (bytes + chBytes > budget) break;
+    bytes += chBytes;
+    out += ch;
+  }
+  return out + ellipsis;
+}
 
 /** 任意串 → memory slug 片段([a-z0-9-],截断)。 */
 function slugifyForMemory(input: string, maxLen: number): string {
@@ -454,7 +474,7 @@ export class PiAgent extends BaseAgent {
     const writeCompactionDigest = async (summary: string, reason: string): Promise<void> => {
       const manager = this.deps.makerMemory;
       if (!compactionMemoryEnabled || !manager) return;
-      const body = summary.length > PI_DIGEST_MAX_BODY ? summary.slice(0, PI_DIGEST_MAX_BODY) + '\n…' : summary;
+      const body = truncateToByteBudget(summary, PI_DIGEST_MAX_BODY_BYTES);
       const seq = ++digestSeq;
       // slug 唯一:sessionId 片段 + 递增序号;resume/跨会话用 Date.now 防撞名(create 模式撞名会抛)。
       const slug = slugifyForMemory(`digest-${digestSlugBase}-${Date.now()}-${seq}`, 64);
@@ -462,7 +482,8 @@ export class PiAgent extends BaseAgent {
         await manager.write(memoryScopeKey, {
           type: 'digest',
           name: slug,
-          title: `PI compaction digest (${reason})`,
+          // reason 收敛(去换行 + 截断):防某版本 pi 给出长 reason 撑爆 maxTitleLen(100)被吞。
+          title: `PI compaction digest (${oneLineDescription(reason, 40)})`,
           description: oneLineDescription(summary, 180),
           body,
           mode: 'create',

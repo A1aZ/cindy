@@ -43,6 +43,14 @@ const log = createLogger('pi-host');
 const PI_API_KEY_ENV = 'CINDY_PI_API_KEY';
 const PI_PROVIDER_AUTH_PLACEHOLDER_KEY = 'cindy-pi-provider-auth-placeholder';
 
+/**
+ * 订阅 OAuth provider:网关 `cindy` 块经 compat proxy 用安全存储里的 OAuth 服务这些模型,
+ * models.json 的 $CINDY_PI_API_KEY 只需占位(真凭证由 proxy 按 session-id 注入)。
+ * 自定义 BYOM provider **不在此列** —— 它们走各自原生块 + 独立 key,而网关块仍需真网关 key
+ * 以便会话中途切回网关模型可用,故 BYOM 会话不能写占位符毒化网关块。
+ */
+const PI_OAUTH_SUBSCRIPTION_PROVIDERS = new Set(['anthropic', 'openai', 'xai']);
+
 // ── 二进制解析(dev 短路)────────────────────────────────────────────────────
 
 function platformKey(): string {
@@ -113,7 +121,9 @@ class DesktopPiAuthAdapter implements AuthAdapter {
   }
 
   async getAuthEnv(options?: AuthAdapterOptions): Promise<Record<string, string>> {
-    if (options?.providerId && options.providerId !== 'xd') {
+    // 仅订阅 OAuth provider 用占位符(真凭证由 compat proxy 注入)。BYOM / 自定义 provider
+    // 及网关本身都要拿真网关 key,否则网关 cindy 块被毒化(中途切网关模型会 401)。
+    if (options?.providerId && PI_OAUTH_SUBSCRIPTION_PROVIDERS.has(options.providerId)) {
       return { [PI_API_KEY_ENV]: PI_PROVIDER_AUTH_PLACEHOLDER_KEY };
     }
     const key = readClaudeApiKey();
@@ -197,6 +207,24 @@ export function buildPiNativeProvidersFromConfigs(
 ): PiNativeProvidersResult {
   const providers: PiNativeProviderSpec[] = [];
   const env: Record<string, string> = {};
+  // 派生 env 名去重:CINDY_PI_KEY_<ID> 会把 `-`/`_` 归一,不同合法 id(my-vllm / my_vllm)
+  // 可能塌缩到同名 → 后写覆盖 → 一个 provider 的 key 被发往另一个端点(凭证串号)。撞名时
+  // 追加 _2/_3 保证每个 provider 拿到独立 env 名。
+  const usedEnvVars = new Set<string>();
+  const uniqueEnvVar = (id: string): string => {
+    const base = piNativeKeyEnvVar(id);
+    if (!usedEnvVars.has(base)) {
+      usedEnvVars.add(base);
+      return base;
+    }
+    for (let n = 2; ; n++) {
+      const candidate = `${base}_${n}`;
+      if (!usedEnvVars.has(candidate)) {
+        usedEnvVars.add(candidate);
+        return candidate;
+      }
+    }
+  };
   for (const cfg of configs) {
     const rt = cfg.runtimes.pi;
     if (!rt) continue;
@@ -212,7 +240,7 @@ export function buildPiNativeProvidersFromConfigs(
         onSkip?.(cfg.id, 'apiKey provider missing pi key');
         continue;
       }
-      apiKeyEnvVar = piNativeKeyEnvVar(cfg.id);
+      apiKeyEnvVar = uniqueEnvVar(cfg.id);
       env[apiKeyEnvVar] = key;
     }
     providers.push({

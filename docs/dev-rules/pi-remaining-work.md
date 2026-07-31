@@ -34,6 +34,51 @@ auto fail-closed、成本派生链、弹窗正文 harness 无关)。
 
 ---
 
+## ✅ 代码审查轮(2026-07-31,对抗式 review 后修复)
+
+两个对抗式 review agent(BYOM 路由 / 记忆-斜杠-凭证)发现的**真实**问题已修复(均带测试):
+
+- **digest 按字节截断**(index.ts `truncateToByteBudget`):原按字符 `slice(0,7000)`,中文摘要
+  ~2731 字即超存储 8192 **字节**硬上限 → `write` 抛 `shard-too-large` 被吞 → digest 静默丢失。
+  改为码点安全的字节预算截断;title 里的 `reason` 也收敛(去换行 + 截 40)防撑爆 maxTitleLen。
+- **凭证门覆盖 `/proc/<pid>/task/<tid>/environ`**(shared/auto-review.ts + cindy-bridge-source.ts
+  同步):原 `[^/\s]*` 跨不过 `/`,task/tid 变体读同一份进程环境(含注入的 provider key)漏判。
+  正则放宽为 `[^\s]*`。
+- **凭证扫描递归 array / 嵌套 object**(cindy-bridge-source.ts `touchesCredentialPath` +
+  auto-review-policy.ts `findCredentialLeaf`,深度上限 6):原只扫顶层 string 字段,
+  `{paths:[...]}` / `{opts:{path}}` 形态漏判。防御性收口(当前 pi 内置工具用顶层 path,暂无
+  已知利用面,但抗 pi 二进制升级后 tool schema 漂移)。
+- **BYOM env 变量名去重**(pi-host.ts `buildPiNativeProvidersFromConfigs`):`my-vllm` 与
+  `my_vllm` 都归一成 `CINDY_PI_KEY_MY_VLLM` → 后写覆盖 → 一个 provider 的 key 被发往另一端点
+  (凭证串号)。撞名追加 `_2/_3` 保证独立 env 名。
+- **getAuthEnv 占位符只给订阅 OAuth provider**(pi-host.ts `PI_OAUTH_SUBSCRIPTION_PROVIDERS`):
+  原 `providerId && !== 'xd'` 把自定义 BYOM providerId 也塞占位符 → 毒化网关 `cindy` 块 →
+  BYOM 会话中途切回网关模型 401。改为仅 anthropic/openai/xai 用占位符,BYOM/自定义拿真网关 key。
+- **保留 `cindy` provider id**(custom-provider-store.ts RESERVED_IDS):撞 pi 网关 provider id
+  会让其模型既被排除出网关块又不写原生块 → `--model` 校验失败。
+- **两处源码契约测试同步 pi 改动**:`sessionHeaderMenuParity`(导出 HTML / 手动压缩是头部专属
+  live-session 菜单项,不要求侧栏同步)、`automationGeneratedSessions`(自动组头图标改用
+  `agentKindToVendor`,pi 会话显示 π)。
+
+**已评估暂不修(设计权衡 / 边缘,后续按需)**:
+- **#2 BYOM 仍依赖网关 key**:`getState` 对自定义 providerId 走 default 分支校验网关 key;
+  无 Cindy 账号的纯 BYOM 独立使用尚不支持(pi 当前整体基于网关账号)。彻底解耦需让 auth
+  adapter 按 model→provider 解析各自凭证,属较大改动。登录 Cindy 的用户恒有网关 key,不阻塞上线。
+- **#4 resolvePiNativeProviders 失败降级**:抛错 → gateway-only。纯 BYOM 模型此时不在任何 block
+  → pi `--model` 校验失败(fail-closed,会失败而非静默错路由),可接受;已 warn 日志。
+- **#5 `managed` 鉴权自定义 provider**:当前按 keyless 写 dummy key,若指远端会 401。取决于
+  是否真支持 managed 型 pi 自定义 provider,待该形态确认后再定。
+- **#7 catalog id 与原生 model id 一致性**:双路由去重靠 `id` 精确相等;host 两侧 id 生成须一致
+  (纯 BYOM 目录无该项,当前不触发)。可加断言。
+- **B3 多行斜杠命令**:`escapeLeadingSlashCommand` 只护消息开头(pi 命令为 leading-only 解析);
+  若未来确认 pi 按行识别命令,再对换行后的 `/` 转义。
+
+> 注:`makerSendToSessionOrdering.test.ts` 的 3 条 source-contract 失败为 **upstream/main
+> 自带**(needle `const live = maker.getSession(targetSessionId);` 等在 upstream/base/HEAD 均
+> 不存在),非 pi 工作引入;未改动其契约。
+
+---
+
 ## ✅ 已交付:压缩即记忆(2026-07-30,Option 1)
 
 新增 `digest` 记忆类型:pi `compaction_end.result.summary` → `deps.makerMemory.write` 写 digest,

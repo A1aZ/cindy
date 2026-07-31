@@ -40,6 +40,20 @@ describe('classifyPiToolForAutoReview', () => {
     expect(verdict('find', { expression: '~/.ssh/id_ed25519' })).toBe('prompt-each-time');
   });
 
+  it('catches /proc environ variants including task/<tid> (env dump = credentials)', () => {
+    expect(verdict('read', { path: '/proc/self/environ' })).toBe('prompt-each-time');
+    expect(verdict('read', { path: '/proc/1234/environ' })).toBe('prompt-each-time');
+    // task/<tid>/environ 读的是同一份进程环境(含注入的 provider key)—— 曾被 [^/\s]* 漏判
+    expect(verdict('read', { path: '/proc/self/task/1/environ' })).toBe('prompt-each-time');
+    expect(verdict('grep', { path: '/proc/999/task/1000/environ' })).toBe('prompt-each-time');
+  });
+
+  it('recurses into array / nested-object inputs for credential paths', () => {
+    expect(verdict('read', { paths: ['/tmp/ok.txt', '/Users/t/.ssh/id_rsa'] })).toBe('prompt-each-time');
+    expect(verdict('grep', { opts: { path: '/Users/t/.aws/credentials' } })).toBe('prompt-each-time');
+    expect(verdict('read', { paths: [`${WS}/a.ts`, `${WS}/b.ts`] })).toBe('auto-approve');
+  });
+
   it('fails closed for MCP and unknown tools', () => {
     expect(verdict('mcp__cindy_orca__start_team', { anything: 1 })).toBe('prompt');
     expect(verdict('some_future_tool', {})).toBe('prompt');

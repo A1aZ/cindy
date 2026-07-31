@@ -340,6 +340,9 @@ describe('classifyShellCommand — procfs / 短选项绕过 / 反斜杠 / git RC
     expect(classifyShellCommand('cat /proc/self/environ', roots)).toBe('prompt-each-time');
     expect(classifyShellCommand("cat /proc/self/environ | tr '\\0' '\\n'", roots)).toBe('prompt-each-time');
     expect(reviewAction({ kind: 'read', path: '/proc/1234/environ' }, roots)).toBe('prompt-each-time');
+    // task/<tid>/environ 读同一份进程环境 —— [^/\s]* 曾漏判,应同样拦下
+    expect(classifyShellCommand('cat /proc/self/task/1/environ', roots)).toBe('prompt-each-time');
+    expect(reviewAction({ kind: 'read', path: '/proc/1234/task/5678/environ' }, roots)).toBe('prompt-each-time');
   });
   it('curl 贴合/捆绑短选项(上传 -sdsecret、凭证 -uuser:pass/-Kcfg/-bck/-xproxy)→ prompt', () => {
     for (const c of [

@@ -105,7 +105,16 @@ export async function materializeLocalMarkdownImages(
   const maxImageBytes = params.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES;
   const materializedByRealPath = new Map<string, string>();
   for (const existingPath of params.existingAbsPaths ?? []) {
-    materializedByRealPath.set(pathKey(existingPath), existingPath);
+    // 键必须与下面的查询同口径(pathKey(sourceReal),即 realpath 之后)。按原样入表
+    // 会让含符号链接的入参查不中——macOS 的 /var 是 /private/var 的软链,tool_result
+    // 收集到的临时目录路径正是这种形态,于是同一张受管图片被判成新图重复追加。
+    let existingKey = existingPath;
+    try {
+      existingKey = await deps.realpath(existingPath);
+    } catch {
+      // 文件已被回收:退回原样路径,至少让它继续占一个 maxImages 名额。
+    }
+    materializedByRealPath.set(pathKey(existingKey), existingPath);
   }
   const acceptedMatchIndexes = new Set<number>();
   const absPaths: string[] = [];

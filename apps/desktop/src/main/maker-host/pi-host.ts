@@ -36,6 +36,7 @@ import { getClaudeEndpoint } from './anthropic-compat-proxy-host.js';
 import { hasClaudeAiOAuth } from './claude-credentials-store.js';
 import { hasGrokOAuthLogin } from './grok-oauth-login.js';
 import hostSystemPrompt from './host-system-prompt.md?raw';
+import piSystemPrompt from './pi-system-prompt.md?raw';
 import { createLogger } from '../logger.js';
 
 const log = createLogger('pi-host');
@@ -135,10 +136,17 @@ export const desktopPiAuthAdapter: AuthAdapter = new DesktopPiAuthAdapter();
 
 // ── RuntimeConfig ────────────────────────────────────────────────────────────
 
+export function composePiSystemPrompt(hostPrompt: string, agentPrompt: string): string {
+  return [hostPrompt, agentPrompt]
+    .map((section) => section.trim())
+    .filter(Boolean)
+    .join('\n\n');
+}
+
 function buildDesktopPiRuntimeConfig(): AgentRuntimeConfig {
   const config: AgentRuntimeConfig = {
-    // P0 只挂 host 共用产品段;pi 专属段(pi-system-prompt.md)等行为面稳定后再立。
-    systemPrompt: hostSystemPrompt.trim(),
+    // 保留 host 共用身份段,再追加 Pi 专属行为段；maker-core 会整体追加到 Pi 原生 prompt。
+    systemPrompt: composePiSystemPrompt(hostSystemPrompt, piSystemPrompt),
     userDataPath: app.getPath('userData'),
   };
   // 网关 endpoint 随 model-access 凭据同步就绪,用 getter 惰性读(与 claude remoteEndpoint 同理)。

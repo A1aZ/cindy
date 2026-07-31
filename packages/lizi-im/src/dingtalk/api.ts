@@ -282,7 +282,9 @@ export class DingTalkApiClient {
     url.searchParams.set("access_token", token);
     url.searchParams.set("type", "image");
     const form = new FormData();
-    const arrayBuffer = bytes.slice().buffer as ArrayBuffer;
+    // Buffer.slice() keeps sharing its pooled backing store. Copy the visible
+    // view so multipart uploads cannot include bytes outside byteOffset/length.
+    const arrayBuffer = new Uint8Array(bytes).buffer;
     form.append("media", new Blob([arrayBuffer], { type: mimeType }), filename);
     const res = await this.fetchWithTimeout(url, {
       method: "POST",

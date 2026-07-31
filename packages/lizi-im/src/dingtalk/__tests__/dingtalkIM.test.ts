@@ -498,6 +498,42 @@ describe("DingTalkIM", () => {
     });
   });
 
+  it("publishes an error status when manual reconnect fails", async () => {
+    const { host, handlers, broadcasts } = makeHost();
+    const client = new FakeClient();
+    const fetcher = validCredentialFetcher();
+    const im = new DingTalkIM(host, {
+      clientFactory: () => client,
+      fetcher,
+    });
+    im.registerIpc();
+    await im.init();
+    fetcher.mockResolvedValueOnce(
+      new Response(JSON.stringify({ code: "InvalidParameter" }), {
+        status: 401,
+      }),
+    );
+    const reconnect = handlers.get("dingtalkBot:reconnect");
+
+    expect(reconnect).toBeTypeOf("function");
+    await expect(Promise.resolve(reconnect?.())).rejects.toThrow(
+      /DINGTALK_AUTH_FAILED/,
+    );
+    expect(im.getPublicState().status).toEqual({
+      kind: "error",
+      reason: "DINGTALK_AUTH_FAILED",
+    });
+    expect(broadcasts.at(-1)).toEqual({
+      channel: "dingtalkBot:status-change",
+      payload: {
+        status: {
+          kind: "error",
+          reason: "DINGTALK_AUTH_FAILED",
+        },
+      },
+    });
+  });
+
   it("classifies a Stream socket that never opens", async () => {
     const { host } = makeHost();
     const client = new FakeClient();

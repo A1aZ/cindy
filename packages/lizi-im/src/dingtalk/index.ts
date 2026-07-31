@@ -174,7 +174,15 @@ export class DingTalkIM extends BaseIM implements ChannelIM {
       return this.runInAccountScope(async () => {
         const credentials = this.readCredentials();
         if (!credentials) throw new Error("DINGTALK_CREDENTIALS_MISSING");
-        await this.connect(credentials);
+        try {
+          await this.connect(credentials);
+        } catch (error) {
+          this.setStatus({
+            kind: "error",
+            reason: safeConnectionError(error),
+          });
+          throw error;
+        }
         return this.getPublicState();
       });
     });

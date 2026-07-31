@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer";
+
 import { describe, expect, it, vi } from "vitest";
 
 import { DingTalkApiClient } from "../api.js";
@@ -62,6 +64,49 @@ describe("DingTalkApiClient", () => {
       msgKey: "sampleImageMsg",
       msgParam: JSON.stringify({ photoURL: "@media-1" }),
     });
+  });
+
+  it("uploads only the visible bytes from a Node Buffer view", async () => {
+    const backing = Buffer.from([0xde, 0xad, ...PNG_BYTES, 0xbe, 0xef]);
+    const imageView = backing.subarray(2, 2 + PNG_BYTES.byteLength);
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.startsWith("https://oapi.dingtalk.com/gettoken")) {
+        return jsonResponse({
+          errcode: 0,
+          access_token: "oapi-token",
+          expires_in: 7200,
+        });
+      }
+      if (url.startsWith("https://oapi.dingtalk.com/media/upload")) {
+        const form = init?.body as FormData;
+        const media = form.get("media");
+        expect(media).toBeInstanceOf(Blob);
+        expect(
+          Array.from(new Uint8Array(await (media as Blob).arrayBuffer())),
+        ).toEqual(Array.from(PNG_BYTES));
+        return jsonResponse({ errcode: 0, media_id: "@media-1" });
+      }
+      if (url === "https://api.dingtalk.com/v1.0/oauth2/accessToken") {
+        return jsonResponse({ accessToken: "api-token", expireIn: 7200 });
+      }
+      if (url === "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend") {
+        return jsonResponse({});
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const api = new DingTalkApiClient("app-key", "app-secret", fetcher);
+
+    await api.sendImage(
+      {
+        kind: "direct",
+        id: "owner-1",
+        sessionWebhook: null,
+        sessionWebhookExpiresAt: null,
+      },
+      imageView,
+      "picture.png",
+    );
   });
 
   it("rejects non-image outbound bytes before making a request", async () => {

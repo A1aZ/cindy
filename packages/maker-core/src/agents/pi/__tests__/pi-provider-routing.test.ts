@@ -170,6 +170,51 @@ describe('Pi provider-aware model routing', () => {
     expect(captured.args).toEqual([]);
   });
 
+  it('fails closed when setModel selects a BYOM provider added after the session started', async () => {
+    // 启动快照只含 native-a;会话中途选一个启动后才新增的自定义 provider 必须抛(提示重启),
+    // 不能静默回落 cindy 网关(codex review P1)。
+    const agent = new PiAgent(byomDeps(async () => ({
+      providers: [
+        { id: 'native-a', name: 'Native A', baseUrl: 'http://a.test', api: 'openai-completions', models: [{ id: 'local-model' }] },
+      ],
+      env: {},
+    })));
+    const handle = await agent.startSession({
+      sessionId: 'byom-setmodel',
+      workingDir: cwd,
+      model: 'local-model',
+      providerId: 'native-a',
+    });
+    await expect(handle.setModel!('local-model', { providerId: 'added-later' }))
+      .rejects.toThrow(/added after this session started|restart the session/);
+    // 已在快照里的 provider 仍可正常切换。
+    await expect(handle.setModel!('local-model', { providerId: 'native-a' })).resolves.toBeUndefined();
+    await handle.close();
+  });
+
+  it('keeps a leading /skill: command at the prompt start even when Extra Dirs are configured', async () => {
+    const agent = new PiAgent(byomDeps(async () => ({ providers: [], env: {} })));
+    const handle = await agent.startSession({
+      sessionId: 'skill-extradir',
+      workingDir: cwd,
+      model: 'local-model',
+      extraDirs: ['/refs/project-docs'],
+    });
+    captured.requests.length = 0;
+    await handle.send({ type: 'user', content: '/skill:code-review please' });
+    const prompt = captured.requests.find((r) => r.type === 'prompt');
+    // /skill: 必须仍在 prompt 起始(未被 Extra Dir 引用段挤走),否则 Pi 不加载技能。
+    expect(String(prompt?.message).startsWith('/skill:code-review')).toBe(true);
+
+    // 对照:普通消息仍前置 Extra Dir 引用段。
+    captured.requests.length = 0;
+    await handle.send({ type: 'user', content: 'just a normal message' });
+    const normal = captured.requests.find((r) => r.type === 'prompt');
+    expect(String(normal?.message).startsWith('/skill:')).toBe(false);
+    expect(String(normal?.message)).toContain('project-docs');
+    await handle.close();
+  });
+
   it('does not fail closed for a gateway/subscription route when native resolution throws', async () => {
     // openai(订阅直连)在 nativeProviders 缺席是正常的,应照常走网关块,不触发 BYOM 拦截。
     const agent = new PiAgent(byomDeps(async () => {

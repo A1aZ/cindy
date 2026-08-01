@@ -92,6 +92,7 @@ import {
   openBrowserForLogin,
 } from '../mcp-integrations/browser.js';
 import { getActiveCodexBridgeInstanceId, getActiveCodexBridgeServerNames, shutdownCodexEnvironment } from '../mcp-integrations/codexEnvironment.js';
+import { shutdownPiEnvironment } from '../mcp-integrations/piEnvironment.js';
 import { REMOTE_MEMORY_SERVER_NAME } from '../mcp-integrations/codexHttpBridge.js';
 import { getRemoteMcpBridgeToken } from '../mcp-integrations/remoteMcpBridgeToken.js';
 import {
@@ -817,11 +818,22 @@ function memorySettingsWire() {
  * bridge」的顺序约束, 并用翻转守卫包住 (同值调用不白杀 bridge)。失败只记
  * warn — 设置已落盘, 旧 bridge 的失配窗口由下一次 bridge 重建收敛。
  */
-async function shutdownCodexEnvironmentBestEffort(reason: string): Promise<void> {
+async function shutdownAgentMcpEnvironmentsBestEffort(reason: string): Promise<void> {
+  // Codex 与 Pi 各有一个懒启动的 MCP bridge 单例,server 集合在 doStart 时冻结。MCP /
+  // contacts / memory 开关变更后两者都要 invalidate,否则新会话仍连到旧 bridge:被禁用的
+  // 工具没被真正撤销、新启用的工具不可用(Pi 侧 codex review P1)。best-effort:失败只 warn,
+  // 下一次使用 lazy 重建出与新开关一致的 bridge。
   try {
     await shutdownCodexEnvironment();
   } catch (err) {
     log.warn(`shutdownCodexEnvironment on ${reason} failed — cached bridge still stale`, {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  try {
+    await shutdownPiEnvironment();
+  } catch (err) {
+    log.warn(`shutdownPiEnvironment on ${reason} failed — cached bridge still stale`, {
       error: err instanceof Error ? err.message : String(err),
     });
   }
@@ -4507,6 +4519,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             error: err instanceof Error ? err.message : String(err),
           });
         }
+      }
+      // Pi 的 MCP bridge 同样按首个会话冻结 server 集合:自定义 MCP 增删改后必须 invalidate,
+      // 否则新 Pi 会话仍暴露已删/已禁用的工具、拿不到新启用的工具(codex review P1)。
+      // 与 codex 分支独立(不依赖 codexRestarted),下一次 startSession lazy 重建。
+      try {
+        await shutdownPiEnvironment();
+      } catch (err) {
+        log.warn('shutdownPiEnvironment on custom mcp change failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     },
   });
@@ -9202,31 +9224,39 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
       const sess = await getOrResumeSessionTreeSession(sessionId);
       if (!sess || !sess.capabilities.sessionTree?.supported) return null;
-      const result = await sess.navigateSessionTree(entryId, {
-        summarize: parsed.summarize === true,
-        ...(typeof parsed.customInstructions === 'string'
-          ? { customInstructions: parsed.customInstructions }
-          : {}),
-      });
-      const now = Date.now();
-      // hiddenClientIds 由重投影事务原子返回:它是隐藏动作发生那一刻的完整可见集,
-      // 含导航期间(带摘要可等数分钟)并发落库的消息 —— 用导航前的陈旧快照会漏掉这条,
-      // 导致它被 rewind 后仍留在已打开的 Renderer 里直到重载(codex review)。
-      const { hiddenClientIds } = await getDbClient().tx('session.treeRehydrate', {
-        sessionId,
-        now,
-        contextTokens: result.contextTokens,
-        contextWindow: result.contextWindow,
-        messages: result.messages.map((message) => ({
-          id: createId(),
-          clientId: message.clientId,
-          role: message.role,
-          content: JSON.stringify(message.content),
-          toolUseId: message.toolUseId ?? null,
-          agentMeta: message.agentMeta ? JSON.stringify(message.agentMeta) : null,
-          agentKind: 'pi',
-          createdAt: message.createdAt,
-        })),
+      // 整个「原生分支导航 → 捕获 result.messages → session.treeRehydrate 重建 SQLite」窗口
+      // 必须与 maker:send 走同一把 per-session 锁(acquireSendToSessionLock)。否则另一窗口 /
+      // device-link 在 navigate 捕获 result.messages 之后、rehydrate 之前发一个 turn:Pi 把它
+      // 收进活动 JSONL,而 rehydrate 用导航前捕获的旧 result.messages 重建库,这条新 turn 就
+      // 在 JSONL 里有、SQLite 里被旧快照覆盖/隐藏(hiddenClientIds 只修复 Renderer 删除广播,
+      // 修不了 JSONL 与 DB 的这处分叉,codex review P1)。summarize turn 是 Pi 内部 RPC,不经
+      // maker:send IPC,故不与本锁重入。
+      const { result, hiddenClientIds, now } = await withSendToSessionLock(sessionId, async () => {
+        const result = await sess.navigateSessionTree(entryId, {
+          summarize: parsed.summarize === true,
+          ...(typeof parsed.customInstructions === 'string'
+            ? { customInstructions: parsed.customInstructions }
+            : {}),
+        });
+        const now = Date.now();
+        // hiddenClientIds 由重投影事务原子返回:它是隐藏动作发生那一刻的完整可见集。
+        const { hiddenClientIds } = await getDbClient().tx('session.treeRehydrate', {
+          sessionId,
+          now,
+          contextTokens: result.contextTokens,
+          contextWindow: result.contextWindow,
+          messages: result.messages.map((message) => ({
+            id: createId(),
+            clientId: message.clientId,
+            role: message.role,
+            content: JSON.stringify(message.content),
+            toolUseId: message.toolUseId ?? null,
+            agentMeta: message.agentMeta ? JSON.stringify(message.agentMeta) : null,
+            agentKind: 'pi',
+            createdAt: message.createdAt,
+          })),
+        });
+        return { result, hiddenClientIds, now };
       });
       resetTurnPersistState(sessionId);
 
@@ -9431,9 +9461,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           await maker.setAgentMemory('codex', persistedSettings.codex);
         }
         // 开关翻转 ⇒ 重建 codex bridge, 理由与约束见
-        // shutdownCodexEnvironmentBestEffort 文档 (review R1 P2)。
+        // shutdownAgentMcpEnvironmentsBestEffort 文档 (review R1 P2)。
         if (wasEnabled !== enabled) {
-          await shutdownCodexEnvironmentBestEffort('maker-memory toggle');
+          await shutdownAgentMcpEnvironmentsBestEffort('maker-memory toggle');
         }
       },
     });
@@ -9478,9 +9508,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           await maker.setAgentMemory('codex', resetSettings_.codex);
         }
         // maker 开关随 reset 翻转时同样要重建 codex bridge — 见
-        // shutdownCodexEnvironmentBestEffort 文档 (review R1 P2)。
+        // shutdownAgentMcpEnvironmentsBestEffort 文档 (review R1 P2)。
         if (wasMakerEnabled !== resetSettings_.maker) {
-          await shutdownCodexEnvironmentBestEffort('memory settings reset');
+          await shutdownAgentMcpEnvironmentsBestEffort('memory settings reset');
         }
       },
     });

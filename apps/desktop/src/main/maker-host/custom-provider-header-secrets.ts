@@ -17,6 +17,7 @@ import {
   listCustomProviders,
   updateCustomProvider,
 } from './custom-provider-store.js';
+import { getCurrentDbClientUserId } from '../localDb/client/current.js';
 
 export const CUSTOM_PROVIDER_RUNTIME_AGENTS: readonly AgentKind[] = [
   'claude-code',
@@ -90,7 +91,24 @@ function restoreHeaderSnapshots(
  * safeStorage back so the next load can retry without losing credentials.
  */
 export async function listCustomProvidersWithSecureHeaders(): Promise<CustomProviderConfig[]> {
+  // 把整段迁移(读 → 写密文头 → scrub 明文)绑定到发起时的数据 owner。configs 读自 owner A
+  // 的库;若迁移期间用户切到账号 B,storeCustomProviderHeaders / updateCustomProvider 会按
+  // **调用时**的当前 owner 解析,可能把 A 的 Authorization 头写进 B 的 safe-storage 命名空间、
+  // 或改到 B 的库(codex review P1)。故任一写入前复核 owner 未变,变了即 abort 整个流程
+  // (下次在稳定 owner 下重试;已在 A 下写入的密文头位于 A 命名空间、正确且幂等,无需——也
+  // 不能——在 B 上回滚)。
+  const ownerAtStart = getCurrentDbClientUserId();
+  const ownerChanged = (): boolean => getCurrentDbClientUserId() !== ownerAtStart;
+  const assertSameOwner = (stage: string): void => {
+    if (ownerChanged()) {
+      throw new Error(
+        `custom provider header migration aborted: data owner changed during ${stage} ` +
+          `(was ${ownerAtStart ?? 'none'}, now ${getCurrentDbClientUserId() ?? 'none'})`,
+      );
+    }
+  };
   const configs = await listCustomProviders();
+  assertSameOwner('provider load');
   const result: CustomProviderConfig[] = [];
   for (const original of configs) {
     const split = splitCustomProviderHeaders(original);
@@ -101,6 +119,7 @@ export async function listCustomProvidersWithSecureHeaders(): Promise<CustomProv
     if (legacyAgents.length > 0) {
       const snapshots: HeaderSnapshot[] = [];
       try {
+        assertSameOwner('header encryption');
         for (const agent of legacyAgents) {
           const previous = readCustomProviderHeadersForMutation(original.id, agent);
           snapshots.push({ agent, previous });
@@ -108,11 +127,14 @@ export async function listCustomProvidersWithSecureHeaders(): Promise<CustomProv
             throw new Error(`failed to encrypt ${agent} custom provider headers`);
           }
         }
+        assertSameOwner('config scrub');
         const updated = await updateCustomProvider(original.id, split.config);
         if (!updated) throw new Error(`custom provider '${original.id}' disappeared during migration`);
         persisted = updated;
       } catch (err) {
-        if (!restoreHeaderSnapshots(original.id, snapshots)) {
+        // owner 已切换:不能在 B 上回滚(会污染 B 命名空间);A 下已写入的密文头正确且幂等,
+        // 留待下次稳定 owner 重迁。仅在 owner 未变时才回滚部分写入。
+        if (!ownerChanged() && !restoreHeaderSnapshots(original.id, snapshots)) {
           throw new Error(
             `custom provider '${original.id}' header migration failed and could not be rolled back`,
             { cause: err },

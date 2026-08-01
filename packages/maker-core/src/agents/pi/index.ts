@@ -86,6 +86,10 @@ import {
 } from './session-tree.js';
 
 const PI_PROVIDER_ID = 'cindy';
+// 既非 Cindy 网关(cindy/xd)也非订阅直连(openai/anthropic/xai)的 providerId = 显式 BYOM
+// 路由,必须在本会话解析出的 nativeProviders 里;缺席时不得静默回落网关(见 startSession /
+// setModel 的 fail-closed)。
+const NON_BYOM_PROVIDER_IDS = new Set([PI_PROVIDER_ID, 'xd', 'openai', 'anthropic', 'xai']);
 const PI_API_KEY_ENV = 'CINDY_PI_API_KEY';
 const PI_SESSION_ID_ENV = 'CINDY_PI_SESSION_ID';
 const PI_SESSION_TOKEN_ENV = 'CINDY_PI_SESSION_TOKEN';
@@ -163,6 +167,18 @@ function escapeLeadingSlashCommand(text: string): string {
   const trimmed = text.trimStart();
   if (trimmed.startsWith('/') && !trimmed.startsWith('/skill:')) return ' ' + text;
   return text;
+}
+
+/**
+ * 组合发给 Pi 的 prompt 正文:有 Extra Dir 时前置引用目录段。但 Pi 只在 RPC prompt **起始**
+ * 识别扩展命令(仅 /skill: 会真正执行,见 escapeLeadingSlashCommand)。若正文以 /skill: 起始,
+ * 前置 refs 会把命令挤离起始、退化成普通模型文本使技能不加载,故此时**不前置** refs——优先
+ * 保证技能调用生效(该轮省去 Extra Dir 提醒)。send 与 steer 同口径(codex review)。
+ */
+function composePiPromptText(text: string, refs: string): string {
+  if (!refs) return text;
+  if (text.trimStart().startsWith('/skill:')) return text;
+  return `${refs}\n\n${text}`;
 }
 
 /** fork 尾部丢弃 turn 数归一:非有限/负值 → 0。 */
@@ -449,12 +465,19 @@ export class PiAgent extends BaseAgent {
     // resolveProviderForModel 会静默回落到 PI_PROVIDER_ID(网关)——用户又恰好有 Cindy key
     // 时鉴权仍过,提示词就被发往 Cindy 网关而非用户选的本地/自定义端点(计费/凭证错配,
     // codex review P1)。这里对这种「显式 BYOM 却无法解析」的情形直接抛,不换目的地。
-    const NON_BYOM_PROVIDER_IDS = new Set([PI_PROVIDER_ID, 'xd', 'openai', 'anthropic', 'xai']);
-    const explicitByomProviderId =
-      opts.providerId && !NON_BYOM_PROVIDER_IDS.has(opts.providerId) ? opts.providerId : null;
-    if (explicitByomProviderId && (nativeResolveFailed || !nativeProviderById.has(explicitByomProviderId))) {
+    // 显式 BYOM providerId 无法在本会话解析(缺席 nativeProviders)时,是否要 fail closed。
+    // 用于 startSession(nativeResolveFailed 也算不可解析)与 setModel(会话启动后新增的
+    // provider 不在启动快照里 → 需重启会话而非静默走网关)。
+    const explicitByomUnresolvable = (
+      providerId: string | null | undefined,
+      resolveFailed = false,
+    ): providerId is string =>
+      !!providerId
+      && !NON_BYOM_PROVIDER_IDS.has(providerId)
+      && (resolveFailed || !nativeProviderById.has(providerId));
+    if (explicitByomUnresolvable(opts.providerId, nativeResolveFailed)) {
       throw new Error(
-        `pi: BYOM provider '${explicitByomProviderId}' could not be resolved` +
+        `pi: BYOM provider '${opts.providerId}' could not be resolved` +
           `${nativeResolveFailed ? ' (native provider resolution failed)' : ''}; ` +
           'refusing to fall back to the Cindy gateway (would send prompts to the wrong endpoint).',
       );
@@ -926,9 +949,8 @@ export class PiAgent extends BaseAgent {
         const { text, images } = await buildPiPrompt(message);
         rejectIfCancelled(sendOpts, 'send');
         // setExtraDirs 是热更新；Pi 没有独立的 mid-session system-prompt RPC，所以在
-        // 后续 user turn 前附上短引用目录段。初始目录也在稳定 system suffix 中声明。
-        const refs = piExtraDirsPrompt(mutableExtraDirs);
-        const promptText = refs ? `${refs}\n\n${text}` : text;
+        // 后续 user turn 前附上短引用目录段(但 /skill: 起始时不前置,见 composePiPromptText)。
+        const promptText = composePiPromptText(text, piExtraDirsPrompt(mutableExtraDirs));
         const command: Record<string, unknown> = { type: 'prompt', message: escapeLeadingSlashCommand(promptText) };
         if (images.length > 0) command.images = images;
         // send 语义 = 排队开新 turn;pi streaming 中裸 prompt 会被拒,补 followUp。
@@ -945,8 +967,8 @@ export class PiAgent extends BaseAgent {
         setAutoReviewIntent(message.content);
         const { text, images } = await buildPiPrompt(message);
         rejectIfCancelled(sendOpts, 'steer');
-        const refs = piExtraDirsPrompt(mutableExtraDirs);
-        const promptText = refs ? `${refs}\n\n${text}` : text;
+        // /skill: 起始时不前置 Extra Dir 引用段(否则命令退化成文本),与 send 同口径。
+        const promptText = composePiPromptText(text, piExtraDirsPrompt(mutableExtraDirs));
         const command: Record<string, unknown> = { type: 'steer', message: escapeLeadingSlashCommand(promptText) };
         if (images.length > 0) command.images = images;
         const resp = await proc.request(command);
@@ -992,6 +1014,16 @@ export class PiAgent extends BaseAgent {
         const requestedProviderId = setOpts && Object.hasOwn(setOpts, 'providerId')
           ? setOpts.providerId
           : undefined;
+        // 会话启动后新增的自定义 provider 不在启动快照 nativeProviderById 里:显式选它会被
+        // resolveProviderForModel 静默回落到 cindy 网关,若该 model id 也在网关目录里则 set_model
+        // 成功、后续 prompt 发往网关而非用户选的本地/自定义端点(codex review P1)。此处 fail
+        // closed,提示重启会话以让新 provider 进入启动快照,而不是静默换目的地。
+        if (explicitByomUnresolvable(requestedProviderId)) {
+          throw new Error(
+            `pi: BYOM provider '${requestedProviderId}' was added after this session started and is not in ` +
+              'its startup provider set; restart the session to use it (refusing to fall back to the Cindy gateway).',
+          );
+        }
         const provider = resolveProviderForModel(model, requestedProviderId);
         const resp = await proc.request({ type: 'set_model', provider, modelId: model });
         if (!resp.success) throw new Error(`pi set_model failed: ${resp.error ?? 'unknown'}`);

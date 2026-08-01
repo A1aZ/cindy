@@ -167,12 +167,16 @@ describe('provider:list IPC handler', () => {
     expect(result.providers[0].routing.pi?.upstream).toBe('https://custom.example/v1');
   });
 
-  it('keeps runtime headers for the trusted local settings editor', async () => {
+  it('strips runtime header credentials even for the trusted local settings editor', async () => {
+    // codex review:任何 Renderer 注入都能读走 provider:list 明文头凭证,连本机主页面也不例外。
+    // 编辑态改走 readCustomProviderHeaders 窄读取,provider:list 一律不回传 headerOverride。
     const harness = new IpcHarness();
     const provider = {
       ...fakeView('custom', true),
       routing: {
         pi: {
+          upstream: 'https://custom.example/v1',
+          authStrategy: 'api-key-header',
           headerOverride: { Authorization: 'Bearer secret' },
         },
       },
@@ -185,9 +189,9 @@ describe('provider:list IPC handler', () => {
     const result = await harness.invoke(MAKER_INVOKE.PROVIDER_LIST) as {
       providers: ProviderView[];
     };
-    expect(result.providers[0].routing.pi?.headerOverride).toEqual({
-      Authorization: 'Bearer secret',
-    });
+    expect(result.providers[0].routing.pi?.headerOverride).toBeUndefined();
+    // 非密字段仍完整回传,编辑表单据此渲染 endpoint/鉴权策略。
+    expect(result.providers[0].routing.pi?.upstream).toBe('https://custom.example/v1');
   });
 });
 

@@ -35,6 +35,7 @@ import {
   appendDiscoveredCustomProviderModels,
   deleteCustomProvider,
   providerViewToCustomProviderConfig,
+  readCustomProviderHeaders,
   readCustomProviderKey,
   updateCustomProvider,
 } from '@/lib/customProviders';
@@ -1618,6 +1619,9 @@ export function ProvidersSection() {
                 : 'apiKey';
           const apiKey =
             authMethod === 'apiKey' ? await readCustomProviderKey(p.id, agent) : null;
+          // 头凭证已不再随 provider:list 下发,rt.headers 恒空 —— 刷新模型时按需从
+          // 窄接口读回,否则仅靠请求头鉴权的自定义端点会因缺头而 401(codex review)。
+          const headers = await readCustomProviderHeaders(p.id, agent);
           const r = await window.electronAPI.maker.fetchProviderModels({
             agent,
             baseUrl: rt.baseUrl,
@@ -1625,7 +1629,7 @@ export function ProvidersSection() {
             ...(rt.wireProtocol ? { wireProtocol: rt.wireProtocol } : {}),
             modelsUrl: rt.modelsUrl ?? null,
             apiKey,
-            ...(rt.headers ? { headers: rt.headers } : {}),
+            ...(headers && Object.keys(headers).length > 0 ? { headers } : {}),
           });
           if (!r.ok || !r.models) continue;
           anyOk = true;

@@ -36,19 +36,23 @@ function noopLogger(): Logger {
 }
 
 /** 暴露一个回报当前 lizi MCP session ctx 的 sessionId 的工具,用于断言 ctx 是否流通。 */
-function createTestServer(): McpServer {
-  const server = new McpServer({ name: 'cindy_orca', version: '1.0.0' });
+function createTestServer(name: string): McpServer {
+  const server = new McpServer({ name, version: '1.0.0' });
   server.tool('current_session', 'Return the active lizi MCP session id.', {}, async () => ({
     content: [{ type: 'text' as const, text: getLiziMcpSessionContext()?.sessionId ?? 'no-session' }],
   }));
   return server;
 }
 
-/** 每次 toClaudeSdkConfig 返回全新 McpServer(McpServer 实例不可复用 connect)。 */
-function makeProvider(): McpProvider {
+/**
+ * 每次 toClaudeSdkConfig 返回全新 McpServer(McpServer 实例不可复用 connect)。
+ * name 默认 'cindy_orca'(→ collab,首方内置且被策略 gate 覆盖);传非内置名(如
+ * 'custom_probe')可绕过 gate,单测 ctx 流通本身不受策略阻断干扰。
+ */
+function makeProvider(name = 'cindy_orca'): McpProvider {
   return {
-    name: 'cindy_orca',
-    toClaudeSdkConfig: () => ({ type: 'sdk', instance: createTestServer() }),
+    name,
+    toClaudeSdkConfig: () => ({ type: 'sdk', instance: createTestServer(name) }),
   };
 }
 
@@ -126,7 +130,9 @@ describe('piEnvironment per-session identity', () => {
   });
 
   it('omits ?session= and registers nothing for an anonymous session (no sessionId)', async () => {
-    const config = await getPiExtraSpawnConfig([makeProvider()], noopLogger());
+    // 非内置 provider(无 plugin 策略)→ 匿名会话不触发 per-call gate,仍能验证 ctx 流通:
+    // 无 ctx 绑定 → 工具拿到 'no-session'(控制类工具会据此回落 LEAD_NOT_SUPPORTED)。
+    const config = await getPiExtraSpawnConfig([makeProvider('custom_probe')], noopLogger());
     expect(config?.mcpBridge).toBeTruthy();
     const server = config!.mcpBridge!.servers[0]!;
     const token = config!.mcpBridge!.token;
@@ -144,7 +150,6 @@ describe('piEnvironment per-session identity', () => {
     const mcpSessionId = initResp.headers.get('mcp-session-id');
     await initResp.text();
 
-    // 无 ctx 绑定 → 工具拿到 'no-session'(控制类工具会据此回落 LEAD_NOT_SUPPORTED)。
     const callResp = await fetch(server.url, {
       method: 'POST',
       headers: { ...headers, 'mcp-session-id': mcpSessionId ?? '' },
@@ -159,6 +164,38 @@ describe('piEnvironment per-session identity', () => {
     expect(await readRpcText(callResp)).toMatchObject({
       result: { content: [{ type: 'text', text: 'no-session' }] },
     });
+  });
+
+  it('fail-closes policy-controlled builtins for an anonymous session (no workdir-bound policy)', async () => {
+    // codex review:内置工具的项目级启停改由 bridge 按会话 workdir 冻结策略在 tools/call
+    // 复核。匿名会话无 workdir 绑定,无法证明该内置工具在当前项目已启用 →
+    // per-call gate fail-closed(missing_thread_context),不放行策略内置工具。
+    const config = await getPiExtraSpawnConfig([makeProvider('cindy_orca')], noopLogger());
+    const server = config!.mcpBridge!.servers[0]!;
+    const token = config!.mcpBridge!.token;
+    const headers = {
+      authorization: `Bearer ${token}`,
+      accept: 'application/json, text/event-stream',
+      'content-type': 'application/json',
+    };
+    const initResp = await fetch(server.url, { method: 'POST', headers, body: INIT_BODY(1) });
+    const mcpSessionId = initResp.headers.get('mcp-session-id');
+    await initResp.text();
+
+    const callResp = await fetch(server.url, {
+      method: 'POST',
+      headers: { ...headers, 'mcp-session-id': mcpSessionId ?? '' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'current_session', arguments: {} },
+      }),
+    });
+    expect(callResp.status).toBe(200);
+    const result = await readRpcText(callResp) as { result?: { isError?: boolean; content?: { text?: string }[] } };
+    expect(result.result?.isError).toBe(true);
+    expect(result.result?.content?.[0]?.text).toContain('could not verify this session');
   });
 
   it('registers the worker bridge before the Pi session role is available', async () => {

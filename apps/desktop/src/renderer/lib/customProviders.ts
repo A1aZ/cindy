@@ -9,7 +9,7 @@
  *     串行暂存 / 回滚，跨窗口 mutation 不会被较早请求的迟到回滚覆盖。
  */
 
-import { customProviderSecretStorageKey } from '@/../shared/providerSecrets';
+import { customProviderHeaderStorageKey, customProviderSecretStorageKey } from '@/../shared/providerSecrets';
 
 import { DEFAULT_CUSTOM_CONTEXT_WINDOW } from '@cindy/model-providers';
 import type {
@@ -122,6 +122,30 @@ export async function readCustomProviderKey(
       customProviderSecretStorageKey(providerId, agent),
     );
     return v && v.length > 0 ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 读取该自定义供应商**某 runtime** 本机已存的鉴权请求头(Authorization / x-api-key 等)。
+ * 与 API key 同一窄接口(safeStorage 直读),因为 provider:list 已一律剥离头凭证,不再回读
+ * 明文;仅供编辑态回填与「刷新模型」按需复用旧头。无 / 读失败 / 结构非法返回 null。
+ */
+export async function readCustomProviderHeaders(
+  providerId: string,
+  agent: AgentKind,
+): Promise<Record<string, string> | null> {
+  try {
+    const raw = await window.electronAPI.safeStorageRead(
+      customProviderHeaderStorageKey(providerId, agent),
+    );
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const entries = Object.entries(parsed as Record<string, unknown>);
+    if (entries.some(([name, value]) => !name || typeof value !== 'string')) return null;
+    return Object.fromEntries(entries) as Record<string, string>;
   } catch {
     return null;
   }

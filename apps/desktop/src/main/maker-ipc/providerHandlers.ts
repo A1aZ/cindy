@@ -740,8 +740,12 @@ export function registerProviderHandlers(
       // event)和可能不受信的渲染上下文,它们只该拿到只读快照(PR #548 review)。
       const trusted = deps.isTrustedSender?.(event) === true;
       const providers = await deps.listProviders({ allowSideEffects: trusted });
+      // 运行期鉴权请求头(Authorization / x-api-key 等)一律不经 provider:list 下发任何
+      // Renderer——即使本机主页面 trusted:任何 Renderer 注入(XSS)都能读走这些长期凭证
+      // (codex review)。编辑态要回填/复用旧头值时,走 readCustomProviderHeaders 窄读取
+      // (与 API key 的 safeStorageRead 同一先例),而不是从这条只读聚合里回读明文。
       return {
-        providers: trusted ? providers : providers.map(withoutProviderHeaderCredentials),
+        providers: providers.map(withoutProviderHeaderCredentials),
         modelVisibilityOverrides: deps.getModelVisibilityOverrides(),
       };
     },

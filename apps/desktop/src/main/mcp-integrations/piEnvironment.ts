@@ -37,6 +37,11 @@ import { getLiziMcpSessionContext, type LiziMcpSessionContext } from '@cindy/mcp
 import type { Logger as MakerLogger } from '@cindy/maker-core';
 
 import { startCodexHttpBridge, type CodexHttpBridge } from './codexHttpBridge.js';
+import { CODEX_DISABLED_BUILTIN_PLUGIN_IDS_KEY } from './codexBuiltinToolPolicy.js';
+import { pluginIdForKnownProviderName } from '../maker-host/plugins/builtin-plugins.js';
+// 直接取 plugins 模块的 registry 单例,不经 maker-host/index.ts —— 后者 import pi-host,
+// 从 mcp-integrations 反向 import 会成环。
+import { createPluginRegistry } from '../maker-host/plugins/index.js';
 
 interface StartedPiBridge {
   bridge: CodexHttpBridge;
@@ -75,11 +80,20 @@ export async function getPiExtraSpawnConfig(
   }
 
   // 带 sessionId:注册身份 ctx,再给该会话的 server URL 打 `?session=` 路由。
+  // 项目级普通工具策略在此按会话 workdir 冻结进 vendorOptions(与 Codex 的
+  // registerCodexMcpThreadContext 同键同语义):bridge 的 per-call gate 据此阻断本项目
+  // 停用的内置工具,后续 Settings 变更不影响已在跑的会话(codex review)。
+  const disabledPluginIds = createPluginRegistry().getDisabledRuntimePluginIds(
+    sessionCtx?.workingDir ?? '',
+  );
   const liziCtx: LiziMcpSessionContext = {
     agentKind: 'pi',
     sessionId,
     workingDir: sessionCtx?.workingDir ?? '',
-    vendorOptions: sessionCtx?.vendorOptions,
+    vendorOptions: {
+      ...sessionCtx?.vendorOptions,
+      [CODEX_DISABLED_BUILTIN_PLUGIN_IDS_KEY]: disabledPluginIds,
+    },
   };
   // 同 session 重建(resume/reattach)直接覆盖注册,注册表以 sessionId 为 key,
   // 天然不累积。必须在返回(即 spawn)前完成 —— cindy-bridge extension 一起进程
@@ -153,7 +167,11 @@ async function doStart(providers: McpProvider[], logger: MakerLogger): Promise<S
   };
 
   const serverFactories: Record<string, () => McpServer> = Object.create(null);
+  const pluginIdByServerName: Record<string, string> = Object.create(null);
   for (const provider of providers) {
+    // 空 workdir 快照下,普通工具的项目级 gate 已在 mcp-providers 的 isEnabled 里对
+    // pi 延迟(deferOrdinaryGate),此处 isEnabled 只剔掉结构性不可用(如未登录/无 source)
+    // 的 provider;项目级启停改由 bridge 按会话 workdir 冻结策略在每次 tools/call 复核。
     if (provider.isEnabled && !provider.isEnabled(ctx)) continue;
 
     const codexConfig = provider.toCodexMcpConfig?.(ctx);
@@ -193,6 +211,9 @@ async function doStart(providers: McpProvider[], logger: MakerLogger): Promise<S
       }
       return createServer();
     };
+    // 首方内置 provider 才带 plugin 策略;自定义 MCP 不继承(pluginIdForKnownProviderName 返 null)。
+    const pluginId = pluginIdForKnownProviderName(provider.name);
+    if (pluginId) pluginIdByServerName[provider.name] = pluginId;
   }
 
   const names = Object.keys(serverFactories);
@@ -201,7 +222,9 @@ async function doStart(providers: McpProvider[], logger: MakerLogger): Promise<S
     return null;
   }
 
-  const bridge = await startCodexHttpBridge({ serverFactories, logger });
+  // pluginIdByServerName 让 bridge 对策略工具启用 per-call gate:按会话 ctx 里冻结的
+  // disabled 列表(getPiExtraSpawnConfig 注入)阻断项目停用的工具(codex review)。
+  const bridge = await startCodexHttpBridge({ serverFactories, pluginIdByServerName, logger });
   activeBridge = bridge;
   logger.info('pi MCP bridge ready', { port: bridge.port, servers: names.length });
   return { bridge, serverNames: names };

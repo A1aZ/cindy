@@ -155,9 +155,18 @@ function isUsableCache(filePath) {
   }
 }
 
-/** 指定版本下，目标平台的 updates/<version>/<platform>/<binFile> 是否都已是可用缓存。 */
+/**
+ * 指定版本下，目标平台的 updates/<version>/<platform>/ 是否都已是可用缓存。
+ * 目录分发必须连同旁侧资产一并校验:主二进制在、但 theme / native prebuild 等被删时,
+ * 「已是最新」的外层 early-return 会直接 promote 残缺目录(绕过 downloadAsset 的提取期
+ * 清单校验),事后再生成的自洽 manifest 也拦不住(codex review)。此处按提取期写入的清单
+ * 校验整目录,任一平台不完整即返回 false,让 main() 落到 downloadAsset 重下补齐。
+ */
 function targetsExist(version, targets) {
-  return targets.every(({ key, binFile }) => isUsableCache(path.join(UPDATES_DIR, version, key, binFile)));
+  return targets.every(({ key, binFile }) => {
+    const dir = path.join(UPDATES_DIR, version, key);
+    return isUsableCache(path.join(dir, binFile)) && verifyDirDistManifest(dir);
+  });
 }
 
 /** 用 bsdtar 解压归档（tar.gz / zip 皆可识别）到 destDir。 */

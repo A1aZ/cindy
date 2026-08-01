@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { PiAgent } from '../index.js';
-import type { AgentDeps, AgentSessionHandle } from '../../base-agent.js';
+import { TurnPermissionPolicyUnsupportedError, type AgentDeps, type AgentSessionHandle } from '../../base-agent.js';
 import type { AgentEvent } from '../../../types/events.js';
 import type { Logger } from '../../../interfaces/logger.js';
 
@@ -244,6 +244,49 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         // usage:input 42 + output 7(anthropic 流里的 usage 记账)
         const usage = handle.getUsageSnapshot();
         expect(usage.tokenUsage).toBeGreaterThan(0);
+      } finally {
+        await handle?.close();
+        rmSync(workingDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'rejects a turn permission policy (Pi cannot enforce it) and honors steer cancellation before RPC',
+    { timeout: 60_000 },
+    async () => {
+      const agent = new PiAgent(buildDeps());
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-agent-cwd-'));
+      let handle: AgentSessionHandle | null = null;
+      try {
+        handle = await agent.startSession({
+          sessionId: 'itest-policy-cancel',
+          workingDir,
+          model: 'pi-test-model',
+        });
+        const requestsBefore = seenRequests.length;
+
+        // turnPermissionPolicy(IM 群等)是 host 回调,Pi 无法在其独立进程的工具边界执行
+        // → fail-closed 拒绝(任何档位),防止群上下文不经 owner 确认执行破坏性工具。
+        const policy = {
+          origin: { kind: 'im' as const, channel: 'telegram' as const },
+          confirmationSurface: 'channel' as const,
+          forceConfirmToolCall: () => true,
+        };
+        await expect(
+          handle.send({ type: 'user', content: 'destructive?' }, { turnPermissionPolicy: policy }),
+        ).rejects.toBeInstanceOf(TurnPermissionPolicyUnsupportedError);
+
+        // 已 abort 的 signal:steer 必须在投递 RPC 前抛出,Pi 不得消费该消息
+        // (否则协调器按撤下的标记丢弃不落库,模型在不可见 steer 上继续跑)。
+        const aborted = new AbortController();
+        aborted.abort();
+        await expect(
+          handle.steer({ type: 'user', content: 'late steer' }, { signal: aborted.signal }),
+        ).rejects.toThrow(/cancelled before acceptance/);
+
+        // 两次都在到达假网关前被拦下:没有新请求打到 pi。
+        expect(seenRequests.length).toBe(requestsBefore);
       } finally {
         await handle?.close();
         rmSync(workingDir, { recursive: true, force: true });

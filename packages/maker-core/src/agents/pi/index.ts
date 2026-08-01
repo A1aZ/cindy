@@ -27,6 +27,7 @@ import { randomBytes } from 'node:crypto';
 import {
   AgentNotAuthenticatedError,
   BaseAgent,
+  TurnPermissionPolicyUnsupportedError,
   type AgentDeps,
   type AgentSessionHandle,
   type PiExtraSpawnConfig,
@@ -870,15 +871,38 @@ export class PiAgent extends BaseAgent {
     const deps = this.deps;
     const agentKind = this.kind;
 
+    // 取消边界:main 的队列协调器在 Stop/close 抢占时会 abort 传入的 signal 并撤下
+    // steer 标记。send/steer 必须在**构建 prompt(读附件是 async)前后、投递 RPC 前**
+    // 复查该 signal —— 否则 Pi 已消费该消息、协调器却按已撤标记丢弃不落库,模型就在
+    // 一条“不可见 steer”上继续跑(codex review)。
+    const rejectIfCancelled = (sendOpts: SendOptions | undefined, action: string): void => {
+      if (sendOpts?.signal?.aborted) {
+        throw new Error(`pi ${action} cancelled before acceptance`);
+      }
+    };
+
     const handle: AgentSessionHandle = {
       id: sdkSessionId,
       agentKind,
       model: opts.model,
 
+      // 每轮权限策略(IM 群等)是 host 侧的 forceConfirmToolCall 回调,必须在工具执行前的
+      // 审批边界强制执行。Pi 的工具审批在独立进程的 cindy-bridge extension(按 perm 文件
+      // 现读 ask/auto/bypass 档),没有逐 tool_call 回调进 host 的通道,任何档位都无法执行
+      // 该 host 回调;故一旦带策略就 fail-closed 拒绝,避免成员可控的群上下文在 auto/bypass
+      // 下不经 owner 确认执行破坏性工具(codex review P1)。
+      validateSendOptions(sendOpts: SendOptions) {
+        if (sendOpts.turnPermissionPolicy) {
+          throw new TurnPermissionPolicyUnsupportedError('pi', permissionMode);
+        }
+      },
+
       async send(message: UserMessage, sendOpts?: SendOptions): Promise<void> {
-        void sendOpts;
+        rejectIfCancelled(sendOpts, 'send');
+        if (sendOpts) handle.validateSendOptions?.(sendOpts);
         setAutoReviewIntent(message.content);
         const { text, images } = await buildPiPrompt(message);
+        rejectIfCancelled(sendOpts, 'send');
         // setExtraDirs 是热更新；Pi 没有独立的 mid-session system-prompt RPC，所以在
         // 后续 user turn 前附上短引用目录段。初始目录也在稳定 system suffix 中声明。
         const refs = piExtraDirsPrompt(mutableExtraDirs);
@@ -893,9 +917,12 @@ export class PiAgent extends BaseAgent {
         }
       },
 
-      async steer(message: UserMessage): Promise<void> {
+      async steer(message: UserMessage, sendOpts?: SendOptions): Promise<void> {
+        rejectIfCancelled(sendOpts, 'steer');
+        if (sendOpts) handle.validateSendOptions?.(sendOpts);
         setAutoReviewIntent(message.content);
         const { text, images } = await buildPiPrompt(message);
+        rejectIfCancelled(sendOpts, 'steer');
         const refs = piExtraDirsPrompt(mutableExtraDirs);
         const promptText = refs ? `${refs}\n\n${text}` : text;
         const command: Record<string, unknown> = { type: 'steer', message: escapeLeadingSlashCommand(promptText) };

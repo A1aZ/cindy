@@ -640,6 +640,77 @@ const interruptedTurnAutoResumeGuard = new InterruptedTurnAutoResumeGuard({
   },
 });
 
+// Schedule 不另建重试状态机：真正的恢复仍由 AgentInputCoordinator +
+// AutoResumeBookkeeping 独占。这里仅把「这一轮 scheduler run 已被普通自动续跑接管」
+// 和「最终仍失败」桥给 runner，让同一个 run 继续等待或正确失败。
+const pendingSchedulerAutoResumeRunBySession = new Map<string, string>();
+const schedulerAutoResumeFailureListeners = new Map<string, Set<() => void>>();
+
+function schedulerAutoResumeRunKey(sessionId: string, runId: string): string {
+  return JSON.stringify([sessionId, runId]);
+}
+
+function beginSchedulerAutoResume(sessionId: string, runId: string): void {
+  pendingSchedulerAutoResumeRunBySession.set(sessionId, runId);
+}
+
+function clearSchedulerAutoResumePending(sessionId: string, runId: string): void {
+  if (pendingSchedulerAutoResumeRunBySession.get(sessionId) === runId) {
+    pendingSchedulerAutoResumeRunBySession.delete(sessionId);
+  }
+}
+
+function notifySchedulerAutoResumeFailed(sessionId: string, runId: string): void {
+  clearSchedulerAutoResumePending(sessionId, runId);
+  const listeners = schedulerAutoResumeFailureListeners.get(
+    schedulerAutoResumeRunKey(sessionId, runId),
+  );
+  if (!listeners) return;
+  for (const listener of listeners) {
+    try {
+      listener();
+    } catch {
+      // Runner listener failures must not break chat recovery cleanup.
+    }
+  }
+}
+
+function failPendingSchedulerAutoResume(sessionId: string): void {
+  const runId = pendingSchedulerAutoResumeRunBySession.get(sessionId);
+  if (runId) notifySchedulerAutoResumeFailed(sessionId, runId);
+}
+
+export function isSchedulerAutoResumePending(sessionId: string, runId: string): boolean {
+  return pendingSchedulerAutoResumeRunBySession.get(sessionId) === runId;
+}
+
+export function onSchedulerAutoResumeFailed(
+  sessionId: string,
+  runId: string,
+  listener: () => void,
+): () => void {
+  const key = schedulerAutoResumeRunKey(sessionId, runId);
+  let listeners = schedulerAutoResumeFailureListeners.get(key);
+  if (!listeners) {
+    listeners = new Set();
+    schedulerAutoResumeFailureListeners.set(key, listeners);
+  }
+  listeners.add(listener);
+  return () => {
+    listeners!.delete(listener);
+    if (listeners!.size === 0) schedulerAutoResumeFailureListeners.delete(key);
+  };
+}
+
+/** Schedule pause/delete：只撤销仍属于该 run 的普通聊天自动续跑。 */
+export function cancelSchedulerAutoResume(sessionId: string, runId: string): boolean {
+  if (!isSchedulerAutoResumePending(sessionId, runId)) return false;
+  // teardown 是既有唯一生命周期出口：撤退避、清 coordinator 接管与隐藏续跑、
+  // 结算活动行并通知 runner。runId 校验防止迟到的旧 abort 误杀新 run。
+  autoResumeBookkeeping.teardown(sessionId);
+  return true;
+}
+
 /**
  * 中断自愈的每会话簿记(压住的错误详情 / 待确认的重连记录 / 退避排期)。
  *
@@ -659,8 +730,20 @@ const autoResumeBookkeeping = new AutoResumeBookkeeping({
   // holder 是可变绑定,必须懒读(模块初始化时 coordinator 还没建)。
   abandonTakeover: (sessionId, message) =>
     agentInputCoordinatorHolder?.abandonAutoResume(sessionId, message),
+  onAutoResumeFailed: failPendingSchedulerAutoResume,
   log: (message, fields) => log.debug(message, fields),
 });
+
+function settleUndispatchedAutoResumeOutcome(
+  sessionId: string,
+  item: AgentInputQueuedMessage,
+): boolean {
+  if (!autoResumeBookkeeping.isPendingOutcomeClientId(sessionId, item.clientId)) return false;
+  // markOutcome 复用 durable-write 队列；持久化中取消时，failed patch 会排在
+  // 正在进行的 user row insert 后面，不会出现先 patch、后 insert 的窗口。
+  autoResumeBookkeeping.settleOutcome(sessionId, 'failed');
+  return true;
+}
 
 /**
  * 非 renderer 发送路径(scheduler runner / hook runner)调用:给 silent-stop
@@ -7763,7 +7846,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       autoResumeBookkeeping.flushSuppressedError(sessionId);
       getAgentIslandService()?.restoreTaskFailureSound(sessionId);
     },
-    onResumableTurnError: (sessionId: string, signals: InterruptedTurnErrorSignals) => {
+    onResumableTurnError: (
+      sessionId: string,
+      signals: InterruptedTurnErrorSignals,
+      item: AgentInputQueuedMessage,
+    ) => {
       if (!isInterruptedTurnError(signals)) return null;
       const erroredAt = Date.now();
       const decision = interruptedTurnAutoResumeGuard.onInterruptedTurn(sessionId, erroredAt);
@@ -7794,6 +7881,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         sessionTotal: decision.sessionTotal,
         delayMs: decision.delayMs,
       });
+      const schedulerRunId =
+        item.origin?.kind === 'scheduler' && typeof item.origin.runId === 'string'
+          ? item.origin.runId
+          : null;
+      if (schedulerRunId) beginSchedulerAutoResume(sessionId, schedulerRunId);
       // 排期的撤旧、补落与令牌都在 AutoResumeBookkeeping.schedule 里(带单测),这里只给
       // 退避时长和到点要干的事。
       autoResumeBookkeeping.schedule(sessionId, decision.delayMs, () => {
@@ -7818,7 +7910,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               log.debug('interrupted-turn auto-resume not dispatched', { sessionId, outcome });
               return;
             }
-            // 自愈成功:压住的错误就此丢弃,用户看到的是「已自动继续」分隔条。
+            // 入队成功后沿用普通聊天语义丢弃被压住的错误；Schedule 的 run 接管标记
+            // 不能在这里清：resumed 只表示续跑项已经进队。标记会在续跑项即将进入
+            // vendor 前清掉，让同步返回的新 terminal error 只能靠**本 attempt**重新接管；
+            // 派发前被 Stop / clear / ghost block 丢弃时仍由 discard/undispatched 回调
+            // 立即失败同一个 run。
             autoResumeBookkeeping.discardSuppressedError(sessionId);
             log.info('interrupted-turn auto-resume dispatched', { sessionId });
           } catch (err) {
@@ -7899,6 +7995,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       return orcaInterAgentDispatcher.runQueuedOrcaInterAgentAcceptedCallback(sessionId, item);
     },
     onDispatchedUserTurn: async (sessionId, item, preVendorDispatchAt): Promise<void> => {
+      if (
+        item.autoResume &&
+        item.origin?.kind === 'scheduler' &&
+        typeof item.origin.runId === 'string' &&
+        // sendToAgent may synchronously emit the next recoverable terminal error.
+        // In that case the coordinator already owns a renewed auto-resume attempt;
+        // this older dispatch must not clear the same scheduler run's new claim.
+        !inputCoordinator.isAutoResumePending(sessionId)
+      ) {
+        clearSchedulerAutoResumePending(sessionId, item.origin.runId);
+      }
       // 「继续任务」只能在 vendor dispatch 不可逆后 durable ack：
       // - enqueue 时 ack：排队可取消，旧中断横幅回不来；
       // - onAccepted 时 ack：仍可能 cancelled-before-dispatch，且无新 started，
@@ -7916,16 +8023,31 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
     },
     noteSessionClearBoundary,
-    // 用户点了错误横幅的「重试」→ hook 侧把这一轮接回渠道那条已收口的消息。
-    // 这是权威来源: 零产出重试重发的是原文, 从文本认不出重试意图(见 deps 注释)。
-    onUiRetry: publishUiContinuation,
+    // 失败 turn 重试 → hook 侧把这一轮接回渠道那条已收口的消息。source 区分
+    // 人工与自动续跑：只有真人接手才作废 scheduler waiter，自动路径不能取消自己。
+    onUiRetry: (sessionId, clientId, source) => {
+      if (source === 'manual') {
+        // UI continuation can dispatch before the scheduler backoff callback.
+        // Retire that pending waiter first so it cannot consume the manual retry.
+        failPendingSchedulerAutoResume(sessionId);
+      }
+      publishUiContinuation(sessionId, clientId);
+    },
     // 新消息进队 → 作废该会话的待续跑记账(渠道那条旧消息已被别的内容取代)。
     // 用 enqueue 入口而不是消息文本: 零产出重试重发的是原文, 文本上无从区分,
     // 而它走 unshift 不经这里, 于是不会把自己的回流作废掉。
-    onUserEnqueue: publishUiSessionIntervention,
+    onUserEnqueue: (sessionId) => {
+      // The user turn can dispatch before the backoff callback observes that its
+      // recovery was superseded. Fail the scheduler waiter synchronously so it
+      // cannot consume that unrelated turn's text/done as this run's result.
+      failPendingSchedulerAutoResume(sessionId);
+      publishUiSessionIntervention(sessionId);
+    },
     // 队列项未派发即被丢弃(stop/remove/clearSession) → 释放暂存的 accepted 副作用, 防回调表泄漏。
-    onDiscardedQueuedMessage: (_sessionId, item) => {
+    onDiscardedQueuedMessage: (sessionId, item) => {
       orcaInterAgentDispatcher.discardQueuedOrcaInterAgentAcceptedCallback(item.clientId);
+      // 持久化中的项在这里被取消后不会再走 onUndispatchedUserTurn，复用同一结算出口。
+      settleUndispatchedAutoResumeOutcome(sessionId, item);
       // 排队心跳被丢弃 → 通知 runner 按 aborted 收尾对应 run,不让 fire 永久挂起。
       const watcher = schedulerQueuedPromptDiscardWatchers.get(item.clientId);
       if (watcher) {
@@ -7938,6 +8060,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             error: err instanceof Error ? err.message : String(err),
           });
         }
+      }
+      if (
+        item.autoResume &&
+        item.origin?.kind === 'scheduler' &&
+        typeof item.origin.runId === 'string'
+      ) {
+        // 续跑还没跨过持久化边界，不会进入 onUndispatchedUserTurn；把普通聊天守卫
+        // 的 pendingResume 一并回滚，避免本次 Stop / block 让后续中断永远失去自愈。
+        interruptedTurnAutoResumeGuard.noteResumeSendFailed(sessionId);
+        notifySchedulerAutoResumeFailed(sessionId, item.origin.runId);
       }
     },
     hasPendingCredentialSwitch: (sessionId) => {
@@ -7971,6 +8103,18 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     onUserMessageRewritten: (sessionId, item, info) =>
       broadcastGhostMessageRewritten({ sessionId, clientId: item.clientId, ...info }),
     beforeDispatchUserTurn: (sessionId, item) => {
+      if (
+        item.autoResume &&
+        item.origin?.kind === 'scheduler' &&
+        typeof item.origin.runId === 'string'
+      ) {
+        // 旧 attempt 的接管标记不能跨进下一次 vendor dispatch：sendToAgent 可能在
+        // 返回前同步发出新的 terminal error。先清旧标记后，可恢复错误会由同一条
+        // onResumableTurnError 链重新 begin；认证/计费等确定性错误则保持未接管，
+        // runner 会立即失败。若在真正 dispatch 前取消，下面的 undispatched 回调
+        // 仍会按 item.origin 精确通知对应 run，不会静默丢失。
+        clearSchedulerAutoResumePending(sessionId, item.origin.runId);
+      }
       // hook 续跑回流的**权威归属点**: 在 vendor dispatch 之前(本回调被 await), 所以
       // 观察器挂上就不丢正文开头, 而 live session 此刻必然已就绪。clientId 对得上的
       // 才是目标续跑轮 —— 绕过 coordinator 的 turn(silent-stop 自动续跑)不走这里,
@@ -7986,11 +8130,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // 它不会产生任何 turn 事件,新加的终态结算路径够不到它,待确认记录于是悬空,被之后
       // 任何一个无关的 text / tool 事件误标成「已重新连接」(codex P1)。
       // 按 clientId 匹配 —— 别的 turn 未派发不该动这条记录。
-      if (autoResumeBookkeeping.isPendingOutcomeClientId(sessionId, item.clientId)) {
-        autoResumeBookkeeping.settleOutcome(sessionId, 'failed');
+      if (settleUndispatchedAutoResumeOutcome(sessionId, item)) {
         // 同时把守卫的 pendingResume 回滚:不回滚会让该会话之后的中断永远被判成
         // 「上一次还在路上」,再也不自愈(不变量 I5)。
         interruptedTurnAutoResumeGuard.noteResumeSendFailed(sessionId);
+      }
+      if (
+        item.autoResume &&
+        item.origin?.kind === 'scheduler' &&
+        typeof item.origin.runId === 'string'
+      ) {
+        notifySchedulerAutoResumeFailed(sessionId, item.origin.runId);
       }
     },
     // Thread 3 fix: called from drain/dispatchCompact failure paths where the item

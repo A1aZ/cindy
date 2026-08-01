@@ -13,7 +13,7 @@
  *  - 同 schedule 已有排队项 → 顺延(deferred),不重复入队
  *  - 排队项被丢弃(用户删除)→ run 以含 aborted 的错误收尾
  *  - pause/delete abort → removeQueuedPrompt 撤项
- *  - 会话空闲 → 不入队,走原直发路径(行为回归)
+ *  - 会话空闲也走 coordinator，和普通聊天共享恢复生命周期
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
@@ -86,6 +86,12 @@ type SendImpl = (
 ) => Promise<SessionSendResult>;
 
 const SESSION_ID = 'bound-session';
+const SCHEDULER_TURN_ORIGIN = {
+  kind: 'scheduler',
+  scheduleId: 'schedule-hb',
+  scheduleName: 'PR #971 心跳',
+  runId: 'run-q1',
+} as const;
 
 interface FakeSessionHarness {
   session: Session;
@@ -127,7 +133,10 @@ function createSessionHarness(sendImpl: SendImpl): FakeSessionHarness {
     setModel,
     setEffort,
     emit(event: AgentEvent) {
-      for (const listener of [...listeners]) listener(event);
+      // 生产 Session 会给当前 schedule turn 的每个事件补 turnOrigin；fake 默认
+      // 复刻该边界，个别归属测试可在 event 上显式覆盖为 user / 其它 run。
+      const emitted = { turnOrigin: SCHEDULER_TURN_ORIGIN, ...event };
+      for (const listener of [...listeners]) listener(emitted);
     },
     listenerCount() {
       return listeners.length;
@@ -195,10 +204,13 @@ interface QueueHarness {
   deps: SchedulerQueueDeps;
   enqueueCalls: Array<Parameters<SchedulerQueueDeps['enqueuePrompt']>[0]>;
   removeCalls: Array<{ sessionId: string; clientId: string }>;
+  cancelAutoResumeCalls: Array<{ sessionId: string; runId: string }>;
   /** 模拟 drain 派发:触发最近一次入队项的 onAccepted。 */
   accept(): Promise<void>;
   /** 模拟排队项被丢弃(用户删除 / abort 撤项)。 */
   discard(): void;
+  /** 模拟普通自动续跑最终仍失败。 */
+  failAutoResume(): void;
 }
 
 function createQueueHarness(opts: {
@@ -217,12 +229,17 @@ function createQueueHarness(opts: {
    * 复刻「目标会话在入队前的 await 期间恰好空闲」这条既有注释明确允许的顺序。
    */
   acceptBeforeEnqueueResolves?: boolean;
+  /** runner 收到 terminal error 时，普通自动续跑是否已接管。 */
+  autoResumePending?: () => boolean;
 }): QueueHarness {
   const enqueueCalls: QueueHarness['enqueueCalls'] = [];
   const removeCalls: QueueHarness['removeCalls'] = [];
+  const cancelAutoResumeCalls: QueueHarness['cancelAutoResumeCalls'] = [];
+  const autoResumeFailureListeners = new Set<() => void>();
   return {
     enqueueCalls,
     removeCalls,
+    cancelAutoResumeCalls,
     deps: {
       isSessionBusy: () => opts.busy,
       hasQueuedPrompt: () => opts.hasQueued ?? false,
@@ -242,12 +259,23 @@ function createQueueHarness(opts: {
         }
       },
       isPromptTracked: () => (opts.tracked ? opts.tracked() : true),
+      isAutoResumePending: () => opts.autoResumePending?.() ?? false,
+      onAutoResumeFailed: (_sessionId, _runId, listener) => {
+        autoResumeFailureListeners.add(listener);
+        return () => autoResumeFailureListeners.delete(listener);
+      },
+      cancelAutoResume: (sessionId, runId) => {
+        cancelAutoResumeCalls.push({ sessionId, runId });
+      },
     },
     async accept() {
       await enqueueCalls.at(-1)?.onAccepted();
     },
     discard() {
       enqueueCalls.at(-1)?.onDiscarded?.();
+    },
+    failAutoResume() {
+      for (const listener of [...autoResumeFailureListeners]) listener();
     },
   };
 }
@@ -350,6 +378,224 @@ describe('MakerScheduleRunner queued dispatch (busy bound session)', () => {
     expect(isHeadlessGhostSetupTurn(SESSION_ID)).toBe(false);
     // 收尾通知照常(未静默场景)。
     expect(latestNotifiedRun(notifier)).toMatchObject({ status: 'success' });
+  });
+
+  it('ignores events from a user turn or a different scheduler run', async () => {
+    const harness = createSessionHarness(async () => ({ accepted: true }));
+    const queue = createQueueHarness({ busy: true });
+    const { runner } = createRunnerHarness(harness.session, queue.deps);
+
+    const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
+    await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+    await queue.accept();
+
+    harness.emit({
+      type: 'text',
+      data: { text: 'manual compact output', isFinal: true },
+      source: 'claude-code',
+      turnOrigin: { kind: 'user' },
+    });
+    harness.emit({
+      type: 'done',
+      data: {},
+      source: 'claude-code',
+      turnOrigin: { kind: 'user' },
+    });
+    harness.emit({
+      type: 'done',
+      data: {},
+      source: 'claude-code',
+      turnOrigin: {
+        kind: 'scheduler',
+        scheduleId: 'schedule-hb',
+        scheduleName: 'PR #971 心跳',
+        runId: 'other-run',
+      },
+    });
+    // Session 在上一 turn 终态后会清 origin；此时 standalone 用户/compact 事件
+    // 不能被仍在等待的 schedule waiter 误收。
+    harness.emit({
+      type: 'text',
+      data: { text: 'originless standalone output', isFinal: true },
+      source: 'claude-code',
+      turnOrigin: undefined,
+    });
+    harness.emit({
+      type: 'done',
+      data: {},
+      source: 'claude-code',
+      turnOrigin: undefined,
+    });
+    await Promise.resolve();
+    expect(harness.listenerCount()).toBe(1);
+
+    harness.emit({
+      type: 'text',
+      data: { text: 'owned result', isFinal: true },
+      source: 'claude-code',
+    });
+    harness.emit({ type: 'done', data: {}, source: 'claude-code' });
+
+    await expect(firePromise).resolves.toMatchObject({ resultText: 'owned result' });
+  });
+
+  it('keeps the same run open when ordinary auto-resume claims a capacity interruption', async () => {
+    let autoResumePending = true;
+    const harness = createSessionHarness(async () => ({ accepted: true }));
+    const queue = createQueueHarness({ busy: true, autoResumePending: () => autoResumePending });
+    const { runner } = createRunnerHarness(harness.session, queue.deps);
+
+    const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
+    await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+    await queue.accept();
+    harness.emit({
+      type: 'error',
+      data: { message: 'Selected model is at capacity.', isTerminal: true },
+      source: 'claude-code',
+    });
+    // 同一失败 turn 的配对 done 不能把 schedule run 提前收成成功。
+    harness.emit({ type: 'done', data: {}, source: 'claude-code' });
+    await Promise.resolve();
+    expect(harness.listenerCount()).toBe(1);
+
+    autoResumePending = false;
+    harness.emit({ type: 'text', data: { text: 'continued result', isFinal: true }, source: 'claude-code' });
+    harness.emit({ type: 'done', data: {}, source: 'claude-code' });
+
+    await expect(firePromise).resolves.toMatchObject({
+      sessionId: SESSION_ID,
+      resultText: 'continued result',
+    });
+  });
+
+  it('ignores a delayed done while the same run still owns the auto-resume claim', async () => {
+    vi.useFakeTimers();
+    try {
+      let autoResumePending = true;
+      const harness = createSessionHarness(async () => ({ accepted: true }));
+      const queue = createQueueHarness({ busy: true, autoResumePending: () => autoResumePending });
+      const { runner } = createRunnerHarness(harness.session, queue.deps);
+
+      const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
+      await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+      await queue.accept();
+      harness.emit({
+        type: 'error',
+        data: { message: 'Selected model is at capacity.', isTerminal: true },
+        source: 'claude-code',
+      });
+      await Promise.resolve();
+
+      // 配对 done 晚于优化窗口到达时，仍应以 run claim 为准，不得提前 finish。
+      await vi.advanceTimersByTimeAsync(251);
+      harness.emit({ type: 'done', data: {}, source: 'claude-code' });
+      expect(harness.listenerCount()).toBe(1);
+
+      // 生产路径在恢复 turn 的 pre-vendor 边界清除旧 claim。
+      autoResumePending = false;
+      // terminal error 后 Session 已清 origin；旧 attempt 的配对 done 即使迟到到
+      // pre-vendor 窗口，也不能被当成新续跑的完成事件。
+      harness.emit({
+        type: 'done',
+        data: {},
+        source: 'claude-code',
+        turnOrigin: undefined,
+      });
+      expect(harness.listenerCount()).toBe(1);
+      harness.emit({
+        type: 'text',
+        data: { text: 'delayed continuation result', isFinal: true },
+        source: 'claude-code',
+      });
+      harness.emit({ type: 'done', data: {}, source: 'claude-code' });
+
+      await expect(firePromise).resolves.toMatchObject({
+        sessionId: SESSION_ID,
+        resultText: 'delayed continuation result',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails the same run when a claimed auto-resume cannot be dispatched', async () => {
+    const harness = createSessionHarness(async () => ({ accepted: true }));
+    const queue = createQueueHarness({ busy: true, autoResumePending: () => true });
+    const { runner } = createRunnerHarness(harness.session, queue.deps);
+
+    const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
+    await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+    await queue.accept();
+    harness.emit({
+      type: 'error',
+      data: { message: 'Selected model is at capacity.', isTerminal: true },
+      source: 'claude-code',
+    });
+    harness.emit({ type: 'done', data: {}, source: 'claude-code' });
+    await Promise.resolve();
+    queue.failAutoResume();
+
+    await expect(firePromise).rejects.toThrow('scheduled task auto-resume failed');
+    expect(harness.listenerCount()).toBe(0);
+  });
+
+  it('cancels a claimed auto-resume when the schedule is paused or deleted', async () => {
+    const harness = createSessionHarness(async () => ({ accepted: true }));
+    const queue = createQueueHarness({ busy: true, autoResumePending: () => true });
+    const { runner } = createRunnerHarness(harness.session, queue.deps);
+    const ctx = createFireContext();
+
+    const firePromise = runner.fire(heartbeatSchedule(), ctx);
+    await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+    await queue.accept();
+    harness.emit({
+      type: 'error',
+      data: { message: 'Selected model is at capacity.', isTerminal: true },
+      source: 'claude-code',
+    });
+    await Promise.resolve();
+
+    // 退避中没有活动 vendor turn；abort 必须直接撤销接管并结束 waiter。
+    ctx.abortController.abort();
+
+    await expect(firePromise).rejects.toThrow(/abort/i);
+    expect(queue.cancelAutoResumeCalls).toEqual([
+      { sessionId: SESSION_ID, runId: 'run-q1' },
+    ]);
+    expect(harness.listenerCount()).toBe(0);
+  });
+
+  it('does not let the previous auto-resume claim hide a deterministic error from the resumed turn', async () => {
+    let autoResumePending = true;
+    const harness = createSessionHarness(async () => ({ accepted: true }));
+    const queue = createQueueHarness({ busy: true, autoResumePending: () => autoResumePending });
+    const { runner } = createRunnerHarness(harness.session, queue.deps);
+
+    const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
+    await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+    await queue.accept();
+
+    harness.emit({
+      type: 'error',
+      data: { message: 'Selected model is at capacity.', isTerminal: true },
+      source: 'claude-code',
+    });
+    harness.emit({ type: 'done', data: {}, source: 'claude-code' });
+    await Promise.resolve();
+    expect(harness.listenerCount()).toBe(1);
+
+    // Production clears the previous claim at the resumed turn's pre-vendor
+    // boundary. A synchronous deterministic error does not create a new claim.
+    autoResumePending = false;
+    harness.emit({
+      type: 'error',
+      data: { message: 'authentication failed', isTerminal: true },
+      source: 'claude-code',
+    });
+    harness.emit({ type: 'done', data: {}, source: 'claude-code' });
+
+    await expect(firePromise).rejects.toThrow('authentication failed');
+    expect(harness.listenerCount()).toBe(0);
   });
 
   it('defers (no duplicate enqueue) when the schedule already has a queued prompt', async () => {
@@ -764,7 +1010,7 @@ describe('MakerScheduleRunner queued dispatch (busy bound session)', () => {
     await expect(firePromise).resolves.toMatchObject({ sessionId: SESSION_ID });
   });
 
-  it('keeps the direct-send path when the bound session is idle', async () => {
+  it('routes an idle bound session through the same coordinator path', async () => {
     const harness = createSessionHarness(async (_message, opts) => {
       await opts?.onAccepted?.();
       return { accepted: true };
@@ -773,8 +1019,9 @@ describe('MakerScheduleRunner queued dispatch (busy bound session)', () => {
     const { runner } = createRunnerHarness(harness.session, queue.deps);
 
     const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
-    await vi.waitFor(() => expect(harness.send).toHaveBeenCalledTimes(1));
-    expect(queue.enqueueCalls.length).toBe(0);
+    await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+    expect(harness.send).not.toHaveBeenCalled();
+    await queue.accept();
     harness.emit({ type: 'done', data: {}, source: 'claude-code' });
     await expect(firePromise).resolves.toMatchObject({ sessionId: SESSION_ID });
   });
@@ -1096,7 +1343,8 @@ describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', ()
     (ctx as { onProgress?: () => void }).onProgress = onProgress;
 
     const firePromise = runner.fire(heartbeatSchedule(), ctx);
-    await vi.waitFor(() => expect(harness.send).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+    await queue.accept();
     harness.emit({ type: 'text', data: { text: 'thinking' }, source: 'claude-code' });
     await vi.waitFor(() => expect(onProgress).toHaveBeenCalled());
     harness.emit({ type: 'done', data: {}, source: 'claude-code' });

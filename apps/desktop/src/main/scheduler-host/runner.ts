@@ -140,6 +140,8 @@ export const QUEUED_DISPATCH_SUSPEND_GAP_MS = 30_000;
  * 运行中会周期性上报 task_progress,每个事件都刷新计时。
  */
 export const BG_TASK_IDLE_FALLBACK_MS = 10 * 60_000;
+/** terminal error 后紧随的同轮 done 配对窗口；自动续跑的最短退避远大于它。 */
+const INTERRUPTED_ERROR_DONE_FALLBACK_MS = 250;
 
 /**
  * 调度场景的 model / permissionMode 兜底默认 —— schedule 表单允许"留空走默认"，
@@ -193,6 +195,16 @@ export interface SchedulerQueueDeps {
    * active-turn recovery、清会话等),不探测的话 run 会永久挂在等待派发上。
    */
   isPromptTracked(sessionId: string, clientId: string): boolean;
+  /** 普通聊天自动续跑是否已接管当前 scheduler run。 */
+  isAutoResumePending?: (sessionId: string, runId: string) => boolean;
+  /** 已接管的续跑最终仍失败（含补发未 dispatch / Stop / clear）。 */
+  onAutoResumeFailed?: (
+    sessionId: string,
+    runId: string,
+    listener: () => void,
+  ) => () => void;
+  /** Schedule pause/delete：撤销仍属于该 run 的退避或派发前隐藏续跑。 */
+  cancelAutoResume?: (sessionId: string, runId: string) => void;
 }
 
 export interface MakerScheduleRunnerDeps {
@@ -270,6 +282,13 @@ interface TurnCompletionWaiter {
   turnFinished: Promise<void>;
   stopListening: () => void;
   getAssistantText: () => string;
+}
+
+interface TurnCompletionWaiterOptions {
+  onProgress?: () => void;
+  origin: { kind: 'scheduler'; scheduleId: string; scheduleName: string; runId: string };
+  /** Coordinator queue path has authoritative per-turn origins; direct fallback keeps legacy compatibility. */
+  requireTurnOrigin?: boolean;
 }
 
 export class MakerScheduleRunner implements ScheduleRunner {
@@ -912,24 +931,6 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // wireSessionToIpc 内部按 Session 实例幂等；同 id 换实例时会先解绑旧实例。
     wireSessionToIpc(session);
 
-    // 4.5.0 abort listener:scheduler 在 user delete/pause 时会 abort ctx.signal,
-    // runner 这里收到后立刻 session.abort() —— SDK 抛 AbortError → 下面 turnFinished
-    // 的 onEvent 'error' 触发 reject → fire 整体走 catch 路径,engine 那侧识别 wasAborted。
-    // session.abort 幂等;listener 用 { once: true } + 提前 short-circuit aborted 兜底。
-    const onAbort = (): void => {
-      this.deps.logger.info?.(
-        `[runner] ctx.signal aborted, calling session.abort() for ${session.id}`,
-      );
-      void session.abort().catch((err) => {
-        this.deps.logger.warn?.('[runner] session.abort failed', err);
-      });
-    };
-    if (ctx.signal.aborted) {
-      onAbort();
-    } else {
-      ctx.signal.addEventListener('abort', onAbort, { once: true });
-    }
-
     // 4.5.1 修正 sessions 行的 permission_mode + effort/source/workspace_kind 列。
     // 这一步必须早于 session-bound 广播：renderer 收到 session-bound 会立刻刷新
     // sidebar，如果此时 source 仍是 DesktopSessionStorage.create() 写入的 'desktop'，
@@ -988,9 +989,65 @@ export class MakerScheduleRunner implements ScheduleRunner {
       }
     }
 
+    // 生产环境统一把 Schedule 输入交给与普通聊天相同的 coordinator。它已经负责
+    // 单会话串行、Stop/clear、恢复接管与自动续跑；runner 只等待这一逻辑 run 的
+    // 最终结果。测试/启动早期未注入 bridge 时保留下面的直发降级路径。
+    if (this.deps.schedulerQueue) {
+      holder.releaseAgentSwitchLock?.();
+      holder.releaseAgentSwitchLock = undefined;
+      return this.fireHeartbeatViaQueue(
+        schedule,
+        ctx,
+        session.id,
+        {
+          model: session.model ?? model,
+          effort: runtimeReconciledEffort,
+          providerId: getSessionProvider(session.id),
+        },
+        {
+          sessionAlreadyBound: true,
+          onAccepted: !isHeartbeat
+            ? () => {
+                try {
+                  this.deps.onSessionCreated?.(session.id);
+                } catch (err) {
+                  this.deps.logger.warn?.(
+                    '[runner] session created broadcast failed (non-fatal)',
+                    err,
+                  );
+                }
+              }
+            : undefined,
+        },
+      );
+    }
+
+    // 4.5.4 只有直发降级路径需要把取消映射到 session.abort()。生产队列路径由
+    // coordinator 按「仍在排队 / 已派发」分别撤项或中断，不能让这个监听器误杀
+    // 异步入队期间刚好开始的用户 turn。
+    const onAbort = (): void => {
+      this.deps.logger.info?.(
+        `[runner] ctx.signal aborted, calling session.abort() for ${session.id}`,
+      );
+      void session.abort().catch((err) => {
+        this.deps.logger.warn?.('[runner] session.abort failed', err);
+      });
+    };
+    if (ctx.signal.aborted) {
+      onAbort();
+    } else {
+      ctx.signal.addEventListener('abort', onAbort, { once: true });
+    }
+
     // 5. 一次性 listener + 收集 assistant 最终文本(排队派发路径复用,实现与
     // 语义说明见 createTurnCompletionWaiter)。
-    const waiter = this.createTurnCompletionWaiter(session, ctx.onProgress);
+    const origin = {
+      kind: 'scheduler',
+      scheduleId: schedule.id,
+      scheduleName: schedule.name,
+      runId: ctx.runId,
+    } as const;
+    const waiter = this.createTurnCompletionWaiter(session, { onProgress: ctx.onProgress, origin });
     const turnFinished = waiter.turnFinished;
 
     // 6. send 并在 onAccepted 中落库 user prompt（不要 close session）。
@@ -1015,12 +1072,6 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // 自动任务来源:既透传给 session.send(让 maker 把它打到本轮每个
     // AgentEvent.turnOrigin,供 IM 转播识别自动 turn),也落进 user 消息的
     // agentMeta(renderer 据此渲染"由自动化任务发送"标签)。同一份,保持一致。
-    const origin = {
-      kind: 'scheduler',
-      scheduleId: schedule.id,
-      scheduleName: schedule.name,
-      runId: ctx.runId,
-    } as const;
     let baselineStarted = false;
     let turnAccepted = false;
     try {
@@ -1304,6 +1355,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
     sessionId: string,
     /** 绑定会话的当前路由基线(meta.model / meta.effort / sessions.provider_id)。 */
     routingBaseline: { model?: string; effort?: string; providerId: string | null },
+    options?: { sessionAlreadyBound?: boolean; onAccepted?: () => void },
   ): Promise<FireResult> {
     const headlessTurn = {
       closed: false,
@@ -1322,6 +1374,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
           if (headlessTurn.closed || headlessTurn.release) return;
           headlessTurn.release = beginHeadlessGhostSetupTurn(sessionId);
         },
+        options,
       );
     } finally {
       headlessTurn.closed = true;
@@ -1336,6 +1389,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
     sessionId: string,
     routingBaseline: { model?: string; effort?: string; providerId: string | null },
     markHeadlessTurnDispatched: () => void,
+    options?: { sessionAlreadyBound?: boolean; onAccepted?: () => void },
   ): Promise<FireResult> {
     const sq = this.deps.schedulerQueue;
     if (!sq) throw new Error('fireHeartbeatViaQueue requires schedulerQueue dep');
@@ -1350,10 +1404,12 @@ export class MakerScheduleRunner implements ScheduleRunner {
     } as const;
 
     // "Open session" 尽早可用(sessionId 已知,无需等派发)。
-    try {
-      await ctx.onSessionBound?.(sessionId);
-    } catch (err) {
-      this.deps.logger.warn?.('[runner] onSessionBound failed (non-fatal)', err);
+    if (!options?.sessionAlreadyBound) {
+      try {
+        await ctx.onSessionBound?.(sessionId);
+      } catch (err) {
+        this.deps.logger.warn?.('[runner] onSessionBound failed (non-fatal)', err);
+      }
     }
 
     // 派发三通道:accepted(继续等 turn)/ discarded(排队项被删 → aborted)/
@@ -1528,10 +1584,17 @@ export class MakerScheduleRunner implements ScheduleRunner {
             this.deps.logger.warn?.('[runner] queued heartbeat routing sync failed (non-fatal)', err);
           }
         }
-        if (live) waiterSlot.current = this.createTurnCompletionWaiter(live, ctx.onProgress);
+        if (live) {
+          waiterSlot.current = this.createTurnCompletionWaiter(live, {
+            onProgress: ctx.onProgress,
+            origin,
+            requireTurnOrigin: true,
+          });
+        }
         // 与直发路径 onAccepted 的簿记对齐(落库/基线钩子除外,见方法头注释)。
         ctx.onTurnActive?.(sessionId);
         noteSilentStopUserSend(sessionId);
+        options?.onAccepted?.();
         void touchUserSendInDb(sessionId, ctx.firedAt).catch((err) => {
           this.deps.logger.warn?.('[runner] touchUserSend failed', {
             scheduleId: schedule.id,
@@ -1596,10 +1659,16 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // 是 no-op,不会有回调);已派发则中断 live turn(与直发路径语义一致)。
     // failDispatch 对已 settle 的 promise 是 no-op,双通道安全。
     const onAbort = (): void => {
+      const abortError = new Error('queued heartbeat aborted by schedule pause/delete');
       this.deps.logger.info?.(
         `[runner] ctx.signal aborted while heartbeat queued, cleaning up for ${sessionId}`,
       );
       sq.removeQueuedPrompt(sessionId, clientId);
+      sq.cancelAutoResume?.(sessionId, ctx.runId);
+      // 这两个 promise 分别覆盖 accept 前与 accept 后；重复 reject 安全。不能只等
+      // vendor terminal event：退避期没有活动 turn，Session.abort() 不会产生终态。
+      failDispatch(abortError);
+      failAfterAccept(abortError);
       if (dispatched) {
         const live = this.deps.maker.getSession(sessionId);
         if (live) {
@@ -1607,8 +1676,6 @@ export class MakerScheduleRunner implements ScheduleRunner {
             this.deps.logger.warn?.('[runner] session.abort failed', err);
           });
         }
-      } else {
-        failDispatch(new Error('queued heartbeat aborted by schedule pause/delete'));
       }
     };
     if (ctx.signal.aborted) {
@@ -1983,7 +2050,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
    */
   private createTurnCompletionWaiter(
     session: Pick<Awaited<ReturnType<Maker['createSession']>>, 'id' | 'onEvent'>,
-    onProgress?: () => void,
+    options: TurnCompletionWaiterOptions,
   ): TurnCompletionWaiter {
     let assistantText = '';
     let stopped = false;
@@ -1994,20 +2061,50 @@ export class MakerScheduleRunner implements ScheduleRunner {
       /** 已收到过 done 但因在途任务未收尾 —— 此状态下任何事件都会刷新兜底计时。 */
       let waitingForBgTasks = false;
       let bgFallbackTimer: NodeJS.Timeout | undefined;
+      let interruptedDoneTimer: NodeJS.Timeout | undefined;
+      let ignorePairedInterruptedDone = false;
       let pendingSettleUnsub: (() => void) | undefined;
+      let autoResumeFailureUnsub: (() => void) | undefined;
+      let off: () => void = () => undefined;
+      let settled = false;
       const clearBgFallbackTimer = (): void => {
         if (bgFallbackTimer) {
           clearTimeout(bgFallbackTimer);
           bgFallbackTimer = undefined;
         }
       };
-      const finish = (): void => {
+      const clearInterruptedDoneTimer = (): void => {
+        if (interruptedDoneTimer) {
+          clearTimeout(interruptedDoneTimer);
+          interruptedDoneTimer = undefined;
+        }
+      };
+      const isCurrentAutoResumePending = (): boolean =>
+        this.deps.schedulerQueue?.isAutoResumePending?.(
+          session.id,
+          options.origin.runId,
+        ) === true;
+      const cleanup = (): void => {
         clearBgFallbackTimer();
+        clearInterruptedDoneTimer();
         pendingSettleUnsub?.();
         pendingSettleUnsub = undefined;
+        autoResumeFailureUnsub?.();
+        autoResumeFailureUnsub = undefined;
         off();
         stopListeningTurn = undefined;
+      };
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
         resolve();
+      };
+      const fail = (err: Error): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
       };
       const armBgFallbackTimer = (): void => {
         clearBgFallbackTimer();
@@ -2020,11 +2117,28 @@ export class MakerScheduleRunner implements ScheduleRunner {
         }, BG_TASK_IDLE_FALLBACK_MS);
         bgFallbackTimer.unref?.();
       };
-      const off = session.onEvent((ev: AgentEvent) => {
+      off = session.onEvent((ev: AgentEvent) => {
+        // 一个绑定会话可能在自动续跑退避期间被用户接管。waiter 只消费本 run
+        // 的 scheduler turn（初始派发与 autoResume 都保留同一 origin）；其它 run、
+        // 手动消息与 /compact 的事件既不能刷新本 run 的存活时间，也不能改写结果。
+        // 生产 Session 会给本 turn 的事件补全 origin，并在终态后清空。终态之后只有
+        // 已明确进入 background-task 等待态的 standalone 事件仍属于本 run；其它
+        // 无 origin 事件可能是旧 turn 的迟到 done、用户 turn 或 auto-compact，不能
+        // 刷新存活时间、写入结果或提前收口。
+        const eventOrigin = ev.turnOrigin;
+        if (!eventOrigin) {
+          if (options.requireTurnOrigin && !waitingForBgTasks) return;
+        } else if (
+          eventOrigin.kind !== 'scheduler' ||
+          eventOrigin.scheduleId !== options.origin.scheduleId ||
+          eventOrigin.runId !== options.origin.runId
+        ) {
+          return;
+        }
         // 任何事件都是"这一轮还在推进"的证据 —— 上报给引擎的卡死守卫(它判的是
         // "多久没有新反馈",不是"总共跑了多久")。放在最前面:后面每个分支都可能
         // return,漏掉任一路径都会让守卫少收到进展信号。
-        onProgress?.();
+        options.onProgress?.();
         // 等待后台任务期间,任何事件都说明会话还活着 → 刷新兜底计时
         if (waitingForBgTasks) armBgFallbackTimer();
         if (ev.type === 'agent_task_update') {
@@ -2044,6 +2158,15 @@ export class MakerScheduleRunner implements ScheduleRunner {
           return;
         }
         if (ev.type === 'done') {
+          if (ignorePairedInterruptedDone) {
+            ignorePairedInterruptedDone = false;
+            clearInterruptedDoneTimer();
+            return;
+          }
+          // 250ms 只用于快速识别紧邻 terminal error 的配对 done；真正的生命周期
+          // 边界是本 run 的 auto-resume claim。旧 turn 的 done 即使迟到也不能提前
+          // 收口，恢复 turn 跨过 pre-vendor 边界时 claim 会先被清除。
+          if (isCurrentAutoResumePending()) return;
           // silent-stop:上游空内容消息静默收尾,main 守卫会在 1.5s 后自动续跑
           // (或弹耗尽横幅)。不 finish——等续跑 turn 的 done 或守卫 settle 通知。
           // settle 通知覆盖守卫决策为非续跑的所有路径(skip/exhausted/send 失败),
@@ -2058,10 +2181,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
               pendingSettleUnsub?.();
               pendingSettleUnsub = undefined;
               if (reason === 'exhausted') {
-                clearBgFallbackTimer();
-                off();
-                stopListeningTurn = undefined;
-                reject(new Error('silent-stop auto-resume exhausted'));
+                fail(new Error('silent-stop auto-resume exhausted'));
               } else {
                 finish();
               }
@@ -2080,17 +2200,30 @@ export class MakerScheduleRunner implements ScheduleRunner {
           }
           finish();
         } else if (isTerminalAgentErrorEvent(ev)) {
-          clearBgFallbackTimer();
-          off();
-          stopListeningTurn = undefined;
-          reject(new Error(extractErr(ev.data)));
+          const error = extractErr(ev.data);
+          ignorePairedInterruptedDone = true;
+          clearInterruptedDoneTimer();
+          interruptedDoneTimer = setTimeout(() => {
+            ignorePairedInterruptedDone = false;
+            interruptedDoneTimer = undefined;
+          }, INTERRUPTED_ERROR_DONE_FALLBACK_MS);
+          interruptedDoneTimer.unref?.();
+          // Coordinator 的 session listener 也消费同一个 terminal event。推迟到本轮
+          // listener 全跑完再问 bridge，避免订阅注册顺序把已接管的错误抢先判失败。
+          queueMicrotask(() => {
+            if (settled) return;
+            const claimed = isCurrentAutoResumePending();
+            if (!claimed) fail(new Error(error));
+          });
         }
       });
+      autoResumeFailureUnsub = this.deps.schedulerQueue?.onAutoResumeFailed?.(
+        session.id,
+        options.origin.runId,
+        () => fail(new Error('scheduled task auto-resume failed')),
+      );
       stopListeningTurn = (): void => {
-        clearBgFallbackTimer();
-        pendingSettleUnsub?.();
-        pendingSettleUnsub = undefined;
-        off();
+        cleanup();
       };
     });
     void turnFinished.catch(() => undefined);

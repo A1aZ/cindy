@@ -3859,6 +3859,7 @@
     "costBreakdownHeader": "按模型拆分：",
     "modelCostLine": "· {{model}} {{cost}}",
     "suggestionLine": "建议：{{suggestion}}",
+    "noBilledCost": "本轮费用暂不可用，仅显示用量",
     "suggestion": {
       "lowCache": "缓存命中率偏低，本轮较多上下文重新计费"
     }
@@ -5165,6 +5166,9 @@
       "lastTool": "最近工具：{{tool}}",
       "outputFile": "输出：{{path}}"
     },
+    "planPill": {
+      "step": "步骤 {{current}} / {{total}}"
+    },
     "forkOrigin": {
       "label": "基于原任务创建"
     },
@@ -5199,6 +5203,7 @@
       "turnCost": "本轮消耗",
       "turnCostEstimated": "本轮 token 价值(按 API 单价折算)",
       "turnCostEstimatedValue": "价值 {{cost}}",
+      "turnTokens": "{{tokens}} tokens",
       "userTurnCostTotalLine": "本轮累计：{{cost}}",
       "userTurnCostDetailsTitle": "最后一个 SDK 分段"
     },

@@ -1744,6 +1744,32 @@ describe('SSH remote worker model/provider compatibility gate (R23 P2)', () => {
       }),
     ).resolves.toMatchObject({ ok: true });
   });
+
+  it('rejects Pi workers for a remote lead before bootstrap (pi sessions are local-only)', async () => {
+    // codex-connector 回归:PiAgent.startSession 对 remoteHostId 一律 NotSupportedError,
+    // 不在 preflight 拒绝会让远程 Lead + Pi 组合在 bootstrap 期落成笼统 INTERNAL。
+    const { service, deps } = createDeps({
+      getLeadSessionRow: vi.fn(async () => remoteLeadRow),
+      getProviderRoutingContext: vi.fn(async () => providerRoutingContext({
+        'claude-code': [],
+        codex: [{ id: 'xd', name: 'XD Gateway', models: ['gpt-5.5'] }],
+        pi: [{ id: 'xd', name: 'XD Gateway', models: ['claude-sonnet-4-6'] }],
+      })),
+    });
+    await expect(
+      service.createWorker({
+        leadSessionId: 'lead-1',
+        role: 'developer',
+        agent: 'pi',
+        label: 'pi-dev',
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'INVALID_PARAMS',
+      message: expect.stringContaining('local-only'),
+    });
+    expect(deps.bootstrapSession).not.toHaveBeenCalled();
+  });
 });
 
   it('rejects chat-bridged providers resolved through the default route (no explicit providerId)', async () => {

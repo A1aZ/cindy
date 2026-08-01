@@ -65,7 +65,8 @@ export type ReviewableAction =
 
 /**
  * 核心裁决。纯函数、确定性、无副作用(不触文件系统 —— 探文件存在性会变侧信道,且对远端
- * 路径不可行;workspaceRoots 只做字符串前缀判定)。workspaceRoots = cwd + 额外可写目录,绝对路径。
+ * 路径不可行;workspaceRoots 只做字符串前缀判定)。workspaceRoots = cwd + 额外**只读引用**
+ * 目录,绝对路径;仅首元素可写(见下方 file-write 分支),读边界取整个数组。
  */
 export function reviewAction(
   action: ReviewableAction,

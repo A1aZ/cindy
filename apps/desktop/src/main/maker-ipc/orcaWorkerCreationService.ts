@@ -527,6 +527,19 @@ export function createOrcaWorkerCreationService(deps: OrcaWorkerCreationDeps): O
       return { ok: false, errorCode: 'NOT_FOUND', message: `lead session ${params.leadSessionId} not found` };
     }
 
+    // Pi 尚无远程 runtime:PiAgent.startSession 对 remoteHostId 一律 NotSupportedError,
+    // 远端 ensure 又对 pi 跳过,SSH 远程 Lead + Pi worker 必然在 bootstrap 期被包成笼统
+    // INTERNAL —— 在 preflight 就以可操作信息拒绝(codex-connector 报)。lead 侧的
+    // capabilities 层已拒 Pi 远程会话,此闸补上 worker 创建(UI popover / MCP / 批量)路径。
+    if (lead.remoteHostId && params.agent === 'pi') {
+      return {
+        ok: false,
+        errorCode: 'INVALID_PARAMS',
+        message:
+          'Pi workers are not available for SSH remote leads: pi sessions are local-only for now — pick Claude Code or Codex for this worker',
+      };
+    }
+
     const defaults = deps.getWorkerDefaults(params.agent);
     // 标准面板显式选定的来源(非空 string)直接生效,由下方精确 preflight 把关「已连接且
     // 提供该模型」;空串/null/undefined 一律按未显式处理(与 IPC 边界同口径,service 作为

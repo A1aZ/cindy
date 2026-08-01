@@ -124,6 +124,7 @@ async function readResponseText(response: Response): Promise<string> {
 
 export class WecomGroupNotificationService implements WecomGroupNotificationPublisher {
   private publishTail: Promise<void> = Promise.resolve();
+  private configGeneration = 0;
 
   constructor(
     private readonly fetchImpl: FetchLike = (input, init) => net.fetch(input, init),
@@ -148,6 +149,7 @@ export class WecomGroupNotificationService implements WecomGroupNotificationPubl
   }
 
   setEnabled(enabled: boolean): WecomGroupNotificationState {
+    this.configGeneration += 1;
     const state = this.getState();
     if (!state.configured) throw new Error('WECOM_GROUP_WEBHOOK_NOT_CONFIGURED');
     if (!this.secrets.write(ENABLED_SETTING_NAME, String(enabled))) {
@@ -163,12 +165,19 @@ export class WecomGroupNotificationService implements WecomGroupNotificationPubl
   ): Promise<WecomGroupNotificationState> {
     const url = parseWebhookUrl(rawUrl);
     const message = parseTestMessage(testMessage);
+    const configGeneration = (this.configGeneration += 1);
     await this.enqueue(() => {
       if (!isAccountCurrent()) throw new ImAccountScopeClosedError();
+      if (configGeneration !== this.configGeneration) {
+        throw new Error('WECOM_GROUP_CONFIG_CHANGED');
+      }
       return this.send(url, message);
     });
     if (!isAccountCurrent()) {
       throw new ImAccountScopeClosedError();
+    }
+    if (configGeneration !== this.configGeneration) {
+      throw new Error('WECOM_GROUP_CONFIG_CHANGED');
     }
     const previousUrl = this.secrets.read(WEBHOOK_SECRET_NAME);
     const previousEnabled = this.secrets.read(ENABLED_SETTING_NAME);
@@ -193,6 +202,7 @@ export class WecomGroupNotificationService implements WecomGroupNotificationPubl
   }
 
   clear(): WecomGroupNotificationState {
+    this.configGeneration += 1;
     this.secrets.remove(WEBHOOK_SECRET_NAME);
     this.secrets.remove(ENABLED_SETTING_NAME);
     return { configured: false, enabled: false };

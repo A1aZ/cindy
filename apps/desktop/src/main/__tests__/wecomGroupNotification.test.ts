@@ -210,6 +210,32 @@ describe('WeCom group notification security boundary', () => {
     expect(secrets.write).not.toHaveBeenCalled();
   });
 
+  it('does not resurrect a webhook save that was queued before clear', async () => {
+    let releasePublish: (() => void) | undefined;
+    const existingUrl = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=existing';
+    const replacementUrl = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=replacement';
+    const fetchImpl = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        releasePublish = resolve;
+      });
+      return response({ errcode: 0, errmsg: 'ok' });
+    });
+    const secrets = createSecrets(existingUrl, 'true');
+    const service = new WecomGroupNotificationService(fetchImpl, secrets);
+
+    const publishing = service.publishMarkdown('blocking publish');
+    const saving = service.saveAndTest(replacementUrl, 'Localized test message');
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
+
+    expect(service.clear()).toEqual({ configured: false, enabled: false });
+    releasePublish?.();
+
+    await expect(publishing).resolves.toBeUndefined();
+    await expect(saving).rejects.toThrow('WECOM_GROUP_CONFIG_CHANGED');
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(service.getState()).toEqual({ configured: false, enabled: false });
+  });
+
   it('rejects redirects instead of following a changed destination', async () => {
     const fetchImpl = vi.fn(
       async () =>

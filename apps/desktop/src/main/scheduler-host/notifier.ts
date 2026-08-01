@@ -12,7 +12,7 @@
 
 import type { BrowserWindow } from 'electron';
 import type { Notifier, Schedule, ScheduleRun } from '@cindy/maker-scheduler';
-import type { FeishuIM } from '@cindy/im';
+import { stripXdtFileLinks, stripXdtImageLinks, type FeishuIM } from '@cindy/im';
 
 import type { Logger } from '@cindy/maker-scheduler';
 
@@ -139,7 +139,8 @@ function renderExternalMessage(schedule: Schedule, run: ScheduleRun): string {
     // 完整内容用户可点 "Open session" 看。上限 6000:多 PR 审查汇总这类逐行带
     // markdown 链接的正文 1500 会拦腰截断;6000 即使全 CJK(~18KB UTF-8)也在
     // 飞书互动卡片 30KB 体积上限内。
-    lines.push('', truncate(run.resultText, 6000));
+    const safeResultText = stripXdtFileLinks(stripXdtImageLinks(run.resultText)).trim();
+    if (safeResultText) lines.push('', truncate(safeResultText, 6000));
   }
 
   // ── 元信息行（时间 / 耗时 / agent / cwd）────────────────────────────────

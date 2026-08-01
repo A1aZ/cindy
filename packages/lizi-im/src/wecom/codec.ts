@@ -17,10 +17,21 @@ export function decodeWecomLane(userId: string): WecomLane {
     return { kind: "single", targetId: userId };
   }
   const encoded = userId.slice(GROUP_LANE_PREFIX.length);
-  if (!encoded) throw new Error("WECOM_GROUP_LANE_INVALID");
-  const targetId = Buffer.from(encoded, "base64url").toString("utf8");
-  if (!targetId) throw new Error("WECOM_GROUP_LANE_INVALID");
-  return { kind: "group", targetId };
+  if (!encoded || !/^[A-Za-z0-9_-]+$/.test(encoded)) {
+    throw new Error("WECOM_GROUP_LANE_INVALID");
+  }
+  try {
+    const targetId = Buffer.from(encoded, "base64url").toString("utf8");
+    if (
+      !targetId ||
+      Buffer.from(targetId, "utf8").toString("base64url") !== encoded
+    ) {
+      throw new Error("WECOM_GROUP_LANE_INVALID");
+    }
+    return { kind: "group", targetId };
+  } catch {
+    throw new Error("WECOM_GROUP_LANE_INVALID");
+  }
 }
 
 export function chunkWecomMarkdown(source: string): string[] {

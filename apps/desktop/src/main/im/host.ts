@@ -76,18 +76,21 @@ const host: IMHost = {
   // cindy-media 媒体总仓回调(规则 25):IM 入站图片按平台 token
   // 免重下、内容寻址去重、isCache=true 吃缓存回收策略;包侧只摸字节和字符串。
   media: {
-    cacheImage: async ({ integration, token, buffer, mimeType }) => {
+    cacheImage: async ({ integration, token, buffer, mimeType, staging }) => {
       const hit = await integrationCachePut({
         cacheKey: integrationCacheKey(integration, token),
         integration,
         buffer,
         mimeType,
-        // IM 入站图是**用户附件**不是可再生缓存(review P1):discord CDN 地址
-        // 限时签名,被缓存 LRU 逐出后无法重下 = 弄丢用户的图。isCache=false +
-        // 落库挂 session-attachment 引用,与桌面粘贴附件同生命周期。
-        isCache: false,
+        // 常规入站图直接按用户附件保存；需要跨账户竞态保护的 transport 可先
+        // 以可回收 staging 写入，确认归属后由消息落库的 pinBlob 提升为用户附件。
+        isCache: staging === true,
       });
-      return { absPath: hit.absPath, url: hit.url };
+      return {
+        absPath: hit.absPath,
+        url: hit.url,
+        ...(staging ? { discard: hit.rollbackRef } : {}),
+      };
     },
     cacheMedia: async ({ integration, token, buffer, mimeType }) => {
       const hit = await integrationCachePut({

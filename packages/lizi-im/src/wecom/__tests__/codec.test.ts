@@ -23,6 +23,13 @@ describe("WeCom lane codec", () => {
       targetId: "zhangsan",
     });
   });
+
+  it.each(["group/", "group/abc=", "group/abc+", "group/abc/", "group/_w"])(
+    "rejects malformed group lane %s",
+    (lane) => {
+      expect(() => decodeWecomLane(lane)).toThrow("WECOM_GROUP_LANE_INVALID");
+    },
+  );
 });
 
 describe("WeCom markdown chunking", () => {

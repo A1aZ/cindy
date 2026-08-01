@@ -297,7 +297,7 @@ describe("WecomIM routing and ownership", () => {
     );
     await flush();
     await im.beginReply("owner");
-    now += 5 * 60_000;
+    now += 3 * 60_000;
 
     await im.commitFinal({
       userId: "owner",
@@ -465,9 +465,11 @@ describe("WecomIM routing and ownership", () => {
     secrets.set("wecom-owner-user-id", "owner");
     const client = new FakeClient();
     const im = new WecomIM(host, { clientFactory: () => client as never });
-    vi.spyOn(im, "sendFile").mockResolvedValue({
-      ok: false,
-      reason: "UPLOAD_FAIL",
+    const nextFrame = message({ id: "m-next", sender: "owner", text: "next" });
+    vi.spyOn(im, "sendFile").mockImplementation(async () => {
+      client.emit("message.text", nextFrame);
+      await flush();
+      return { ok: false, reason: "UPLOAD_FAIL" };
     });
 
     await im.init();
@@ -486,6 +488,14 @@ describe("WecomIM routing and ownership", () => {
       msgtype: "markdown",
       markdown: { content: "⚠️ 有 1 个附件发送失败，请稍后重试。" },
     });
+
+    await im.sendMarkdownText("owner", "next reply");
+    expect(client.replyStream).toHaveBeenLastCalledWith(
+      nextFrame,
+      expect.any(String),
+      "next reply",
+      true,
+    );
   });
 
   it("deduplicates repeated callback message ids", async () => {
@@ -701,6 +711,60 @@ describe("WecomIM routing and ownership", () => {
     await flush();
 
     expect(cacheImage).not.toHaveBeenCalled();
+  });
+
+  it("discards image staging when the owning account closes during the write", async () => {
+    const { host, secrets } = createHost();
+    secrets.set("wecom-owner-user-id", "owner");
+    const accountToken = { id: 1 };
+    let accountActive = true;
+    host.accountScope = {
+      capture: () => (accountActive ? accountToken : null),
+      isCurrent: (token) => accountActive && token === accountToken,
+      run: async (_token, operation) => operation(),
+    };
+    const client = new FakeClient();
+    const staged = deferred<{
+      absPath: string;
+      url: string;
+      discard: () => Promise<void>;
+    }>();
+    const discard = vi.fn(async () => {});
+    const cacheImage = vi.fn(() => staged.promise);
+    host.media = {
+      getCachedImage: vi.fn(async () => null),
+      cacheImage,
+      resolveMediaUrl: vi.fn(() => null),
+    };
+    const im = new WecomIM(host, { clientFactory: () => client as never });
+    const received: IMMessageEvent[] = [];
+    im.onMessage((event) => received.push(event));
+
+    await im.init();
+    client.emit("message.image", {
+      body: {
+        msgid: "stale-staged-image",
+        aibotid: "bot-1",
+        chattype: "single",
+        from: { userid: "owner" },
+        msgtype: "image",
+        image: { url: "https://example.invalid/image" },
+      },
+    });
+    await vi.waitFor(() => expect(cacheImage).toHaveBeenCalledOnce());
+    expect(cacheImage).toHaveBeenCalledWith(
+      expect.objectContaining({ staging: true }),
+    );
+
+    accountActive = false;
+    staged.resolve({
+      absPath: "C:\\managed\\photo.jpg",
+      url: "cindy-media://image",
+      discard,
+    });
+    await vi.waitFor(() => expect(discard).toHaveBeenCalledOnce());
+
+    expect(received).toEqual([]);
   });
 
   it("does not pin or download a cached image after the owning account boundary closes", async () => {

@@ -49,7 +49,7 @@ const BOT_SECRET_SECRET_KEY = "wecom-bot-secret";
 const OWNER_USER_ID_SECRET_KEY = "wecom-owner-user-id";
 const CALLBACK_TTL_MS = 4 * 60_000;
 const CALLBACK_QUEUE_CAPACITY = 64;
-const STREAM_SAFE_TIMEOUT_MS = 5 * 60_000;
+const STREAM_SAFE_TIMEOUT_MS = 2 * 60_000 + 45_000;
 const DEDUPE_CAPACITY = 2_048;
 const MAX_TERMINAL_ATTACHMENTS = 4;
 const SECRET_WRITE_FAILED_REASON = "无法使用系统安全存储保存企业微信机器人凭证";
@@ -423,9 +423,12 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     }
     if (failedAttachmentCount > 0) {
       try {
-        await this.sendMarkdownText(
+        await this.sendChunks(
           output.userId,
-          `⚠️ 有 ${failedAttachmentCount} 个附件发送失败，请稍后重试。`,
+          chunkWecomMarkdown(
+            `⚠️ 有 ${failedAttachmentCount} 个附件发送失败，请稍后重试。`,
+          ),
+          "none",
         );
       } catch (error) {
         this.log.warn(
@@ -637,6 +640,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
           mediaDir: this.mediaDir,
           buffer: downloaded.buffer,
           filename: downloaded.filename,
+          shouldKeep: () => this.isCurrent(client, generation),
         });
         return {
           text: "",
@@ -828,7 +832,12 @@ export class WecomIM extends BaseIM implements TextChannelIM {
           token,
           buffer: downloaded.buffer,
           mimeType,
+          staging: true,
         });
+        if (!this.isCurrent(client, generation)) {
+          await this.discardStagedMedia(stored.discard);
+          return null;
+        }
         return {
           kind: "image",
           absPath: stored.absPath,
@@ -842,6 +851,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
         buffer: downloaded.buffer,
         filename,
         fallbackExtension: ".jpg",
+        shouldKeep: () => this.isCurrent(client, generation),
       });
       return { kind: "image", ...persisted };
     } catch (error) {
@@ -853,15 +863,17 @@ export class WecomIM extends BaseIM implements TextChannelIM {
   private async sendChunks(
     userId: string,
     chunks: string[],
-    framePreference: "newest" | "oldest" = "newest",
+    framePreference: "newest" | "oldest" | "none" = "newest",
   ): Promise<{ messageId: string }> {
     const client = this.requireConnectedClient();
     const lane = decodeWecomLane(userId);
     const firstId = randomUUID();
     const frame =
-      framePreference === "oldest"
-        ? this.claimOldestFrame(userId)
-        : this.claimNewestFrame(userId);
+      framePreference === "none"
+        ? null
+        : framePreference === "oldest"
+          ? this.claimOldestFrame(userId)
+          : this.claimNewestFrame(userId);
 
     let start = 0;
     if (frame) {

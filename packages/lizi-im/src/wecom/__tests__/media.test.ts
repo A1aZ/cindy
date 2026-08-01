@@ -53,6 +53,23 @@ describe("WeCom media helpers", () => {
     expect(stored.mimeType).toBe("text/plain");
   });
 
+  it("removes a staged download when ownership changes during the write", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cindy-wecom-"));
+    tempDirs.push(dir);
+    let checks = 0;
+
+    await expect(
+      persistWecomDownload({
+        mediaDir: dir,
+        buffer: Buffer.from("stale"),
+        filename: "stale.txt",
+        shouldKeep: () => (checks += 1) === 1,
+      }),
+    ).rejects.toThrow("WECOM_MEDIA_STALE");
+
+    expect(await fs.readdir(dir)).toEqual([]);
+  });
+
   it("selects outbound media types from safe metadata", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cindy-wecom-"));
     tempDirs.push(dir);

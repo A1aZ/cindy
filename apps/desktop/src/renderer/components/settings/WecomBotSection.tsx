@@ -249,6 +249,26 @@ export function WecomBotSection({
                   : t('settings.wecomBot.connect')}
               </button>
             )}
+            {botId.trim() ? (
+              <button
+                type="button"
+                onClick={() => void handleDisconnect()}
+                disabled={isDisconnecting}
+                className={cn(
+                  'flex h-[42px] flex-1 items-center justify-center gap-1.5 rounded-full',
+                  'border border-[var(--settings-btn-secondary-border)] bg-[var(--settings-btn-secondary-bg)]',
+                  'text-13 font-medium text-[var(--settings-btn-secondary-text)]',
+                  isDisconnecting && 'cursor-not-allowed opacity-40',
+                )}
+              >
+                {isDisconnecting ? (
+                  <Loader2 size={13} className="animate-spin" />
+                ) : (
+                  <Trash2 size={13} />
+                )}
+                {t('settings.wecomBot.disconnect')}
+              </button>
+            ) : null}
           </div>
         </div>
       )}

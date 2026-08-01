@@ -90,7 +90,9 @@ export interface IMHostMediaCache {
     token: string;
     buffer: Uint8Array;
     mimeType: string;
-  }): Promise<{ absPath: string; url: string }>;
+    /** Keep the blob reclaimable until the transport confirms account ownership after the write. */
+    staging?: boolean;
+  }): Promise<{ absPath: string; url: string; discard?: () => Promise<void> }>;
   /**
    * 其它 Cindy 托管媒体入总仓。未提供时 transport 必须降级为 unsupported，
    * 不得新增写入冻结的 `cc-agent/*-media` 历史目录。

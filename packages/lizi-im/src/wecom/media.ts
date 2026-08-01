@@ -124,6 +124,7 @@ export async function persistWecomDownload(args: {
   buffer: Buffer;
   filename?: string;
   fallbackExtension?: string;
+  shouldKeep?: () => boolean;
 }): Promise<{ absPath: string; originalName: string; mimeType: string }> {
   if (args.buffer.length === 0) throw new Error("WECOM_MEDIA_EMPTY");
   if (args.buffer.length > MAX_MEDIA_BYTES)
@@ -131,9 +132,14 @@ export async function persistWecomDownload(args: {
 
   const originalName = safeWecomFilename(args.filename, args.fallbackExtension);
   const storageName = `${randomUUID()}-${originalName}`;
+  if (args.shouldKeep?.() === false) throw new Error("WECOM_MEDIA_STALE");
   await fs.mkdir(args.mediaDir, { recursive: true });
   const absPath = path.join(args.mediaDir, storageName);
   await fs.writeFile(absPath, args.buffer, { flag: "wx" });
+  if (args.shouldKeep?.() === false) {
+    await fs.rm(absPath, { force: true });
+    throw new Error("WECOM_MEDIA_STALE");
+  }
   return {
     absPath,
     originalName,

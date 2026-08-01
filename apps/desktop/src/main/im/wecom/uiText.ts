@@ -4,10 +4,10 @@ import type { ImUiTextPack } from '../shared/types';
 
 export const ui = {
   slash: {
-    new: '🌱 新对话已开始，之前的上下文已清空。',
+    new: '🌱 新任务已开始，之前的上下文已清空。',
     help: `🤖 可用命令：
 
-/new         开始新对话
+/new         开始新任务
 /stop        中止当前任务
 /exctr       结束已有接管
 /help        查看帮助
@@ -15,9 +15,9 @@ export const ui = {
 任务运行中可发送 \`!stop\` 中止当前任务并清空排队消息。`,
     unknownCommand: (cmd: string) =>
       `未识别命令 \`${cmd}\`。可用命令：/new、/stop、/exctr、/help`,
-    detachedBySlash: '🚪 已结束接管，后续消息回到企业微信会话。',
-    detachedByRevoke: '⚠️ desktop 端已收回接管，后续消息回到企业微信会话。',
-    notAttached: '当前没有正在接管的会话。',
+    detachedBySlash: '🚪 已结束接管，后续消息回到企业微信对话。',
+    detachedByRevoke: '⚠️ desktop 端已收回接管，后续消息回到企业微信对话。',
+    notAttached: '当前没有正在接管的任务。',
   },
   agent: {
     completedNoText: '✅ 任务已完成（本轮没有文本输出）',
@@ -34,10 +34,10 @@ export const ui = {
             : missing === 'provider-disconnected'
               ? '连接已断开或失效'
               : `需要先登录 ${agentKind}`;
-      const message = `⚠️ 当前企业微信会话使用「${provider}」（${model}），${reason}。`;
+      const message = `⚠️ 当前企业微信对话使用「${provider}」（${model}），${reason}。`;
       return attached
         ? `${message}\n请在 desktop 修复认证后继续发送消息。`
-        : `${message}\n修改后请发送 \`/new\` 开始新会话。`;
+        : `${message}\n修改后请发送 \`/new\` 开始新任务。`;
     },
     controlInProgress: '🎮 接管选择尚未完成，请先处理上一条交互消息。',
     credentialBusy: '⏳ 本地 Agent 正在运行，暂时不能切换凭证模式，请稍后重试。',
@@ -108,30 +108,30 @@ export const ui = {
     },
     control: {
       title: '🎮 选择工作区',
-      emptyBody: '_暂时没有可接管的工作区，请先在 desktop 创建会话。_',
+      emptyBody: '_暂时没有可接管的工作区，请先在 desktop 创建任务。_',
       hint: '选择工作区继续，或退出本次操作。',
       attachedSwitchHint: (sessionTitle: string) => `当前正在接管：**${sessionTitle}**`,
       btnExit: '🚪 退出',
       resolvedExit: '🚪 已退出接管',
-      sessionPickerTitle: (displayName: string) => `🎮 ${displayName} 中的会话`,
-      sessionPickerHint: '选择会话、创建新会话或返回上一步。',
-      sessionPickerEmptyBody: (displayName: string) => `_${displayName} 中暂时没有可用会话。_`,
+      sessionPickerTitle: (displayName: string) => `🎮 ${displayName} 中的任务`,
+      sessionPickerHint: '选择任务、创建新任务或返回上一步。',
+      sessionPickerEmptyBody: (displayName: string) => `_${displayName} 中暂时没有可用任务。_`,
       btnNew: '➕ 新建',
       btnBack: '↩️ 返回',
       resolvedSessionPick: (sessionTitle: string, workspaceName: string) =>
         `🎯 已接管 **${sessionTitle}**（${workspaceName}）`,
-      resolvedNewSession: (workspaceName: string) => `✨ 已在 **${workspaceName}** 新建并接管会话`,
+      resolvedNewSession: (workspaceName: string) => `✨ 已在 **${workspaceName}** 新建并接管任务`,
       attachFailed: (reason: string) => `❌ 接管失败：${reason}`,
-      sessionBusyOldCardPlaceholder: '⏳ 该会话仍在运行，请稍后重试。',
+      sessionBusyOldCardPlaceholder: '⏳ 该任务仍在运行，请稍后重试。',
       sessionBusyPrompts: [
         (sessionTitle: string) => `⏳ **${sessionTitle}** 正在运行，请等待当前回合结束。`,
       ],
       takeoverLoadingPrompts: [(sessionTitle: string) => `⏳ 正在接管 **${sessionTitle}**…`],
       sessionAttachedOneshotPrompts: [
-        '我已从企业微信接管此会话。请简要同步当前进度，并询问下一步指令。',
+        '我已从企业微信接管此任务。请简要同步当前进度，并询问下一步指令。',
       ],
       newSessionWelcomePrompts: [
-        (workspaceName: string) => `✨ 已在 **${workspaceName}** 创建新会话，可以发送第一条指令。`,
+        (workspaceName: string) => `✨ 已在 **${workspaceName}** 创建新任务，可以发送第一条指令。`,
       ],
     },
   },

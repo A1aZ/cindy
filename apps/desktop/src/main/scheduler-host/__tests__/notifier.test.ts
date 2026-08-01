@@ -197,4 +197,27 @@ describe('DesktopNotifier desktop status mapping', () => {
     expect(warn).toHaveBeenCalledWith('WeCom group notify failed', sendError);
     expect(sendMobileSessionNotify).not.toHaveBeenCalled();
   });
+
+  it('does not expose local attachment references in WeCom group notifications', async () => {
+    const { notifier, publishMarkdown } = createNotifier();
+    const groupSchedule = {
+      ...schedule,
+      notify: { desktop: false, feishu: false, wecomGroup: true },
+    } as Schedule;
+
+    await notifier.notify(groupSchedule, {
+      ...run('success'),
+      resultText: [
+        '检查完成',
+        '[报告](xdt-file:///C:/private/report.txt)',
+        '![截图](cindy-media://blobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png)',
+      ].join('\n'),
+    });
+
+    const published = String(publishMarkdown.mock.calls[0]?.[0]);
+    expect(published).toContain('检查完成');
+    expect(published).not.toContain('xdt-file://');
+    expect(published).not.toContain('cindy-media://');
+    expect(published).not.toContain('C:/private/report.txt');
+  });
 });

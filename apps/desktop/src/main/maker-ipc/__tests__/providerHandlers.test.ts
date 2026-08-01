@@ -890,6 +890,23 @@ describe('provider:custom:* CRUD handlers', () => {
     expect(removeCustomProviderHeaders).not.toHaveBeenCalledWith('keep-headers', 'pi');
     expect(storeCustomProviderHeaders).not.toHaveBeenCalled();
     expect(headers.get('pi')).toEqual({ Authorization: 'Bearer keepme' });
+
+    // 切到 auth='none' 且不带头 → 清除残留凭证头(不保留),否则关掉鉴权后旧头仍可能
+    // 被 hydrate 发往新 baseUrl(codex review)。
+    removeCustomProviderHeaders.mockClear();
+    // auth='none' 校验要求 baseUrl 为 loopback(no-auth 只允许本机端点)。
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+      ...base,
+      auth: { method: 'none' },
+      runtimes: {
+        pi: {
+          baseUrl: 'http://127.0.0.1:8080/v1',
+          models: [{ id: 'm', name: 'M' }],
+        },
+      },
+    })).resolves.toEqual({ ok: true });
+    expect(removeCustomProviderHeaders).toHaveBeenCalledWith('keep-headers', 'pi');
+    expect(headers.get('pi')).toBeUndefined();
   });
 
   it('merges stored main-only headers into a saved-provider model fetch', async () => {

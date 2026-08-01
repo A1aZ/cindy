@@ -662,6 +662,9 @@ export function registerProviderHandlers(
     headers: CustomProviderHeaderSecrets,
     mode: 'create' | 'update' | 'delete',
   ): HeaderMutation[] => {
+    // 头凭证在 auth='none'/'oauth' 下不该继续留存(与 planProviderKeyMutations 的
+    // usesApiKey 同口径):这两种模式不经存储的鉴权请求头路由。
+    const usesApiKey = !config.auth || config.auth.method === 'apiKey';
     const mutations: HeaderMutation[] = [];
     for (const agent of CUSTOM_PROVIDER_RUNTIME_AGENTS) {
       const replacement = headers[agent];
@@ -678,12 +681,16 @@ export function registerProviderHandlers(
       // 删除,否则仅改名称/模型也会清掉鉴权头使 provider 失效(codex review)。
       //   - runtime 被移除(config 里没有该 agent)→ 清掉其残留头。
       //   - 显式带了 headers(含用户新填)→ 覆盖为新值。
+      //   - 切到 none/oauth(!usesApiKey)且未带头 → 清除残留凭证头,不保留,否则用户
+      //     显式关掉鉴权后,旧 Authorization 仍会被 hydrate 并可能发往新 baseUrl(codex review)。
       if (!config.runtimes[agent]) {
         mutations.push({ agent, replacement: null });
       } else if (replacement) {
         mutations.push({ agent, replacement });
+      } else if (!usesApiKey) {
+        mutations.push({ agent, replacement: null });
       }
-      // else: runtime 存在但未提供 headers → 保留,跳过。
+      // else: runtime 存在 + apiKey 鉴权 + 未提供 headers → 保留,跳过。
     }
     return mutations;
   };

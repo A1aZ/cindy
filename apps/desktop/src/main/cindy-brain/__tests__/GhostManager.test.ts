@@ -81,6 +81,51 @@ async function makeCindy(
   return out;
 }
 
+/**
+ * 造一份**旧布局**安装(#1080 之前的形态):直接把文件写进 rootDir/<id>/,不经
+ * manager.install() —— 因此状态根里**没有** receipt。用于「从旧状态升级」的迁移回归。
+ * 三份旧事实源:ghost.json(必)、.disabled(停用镜像,可选)、.cindy-trust.json(信任镜像,可选)。
+ */
+async function writeLegacyInstall(
+  id: string,
+  manifest: Record<string, unknown>,
+  opts: {
+    disabled?: boolean;
+    trust?: Record<string, unknown> | 'omit';
+    files?: Record<string, string>;
+  } = {},
+): Promise<string> {
+  const dir = path.join(rootDir, id);
+  await fs.promises.mkdir(dir, { recursive: true });
+  await fs.promises.writeFile(path.join(dir, 'ghost.json'), JSON.stringify(manifest));
+  await fs.promises.writeFile(path.join(dir, 'main.js'), 'console.log("legacy")');
+  for (const [rel, content] of Object.entries(opts.files ?? {})) {
+    const abs = path.join(dir, ...rel.split('/'));
+    await fs.promises.mkdir(path.dirname(abs), { recursive: true });
+    await fs.promises.writeFile(abs, content);
+  }
+  if (opts.disabled) await fs.promises.writeFile(path.join(dir, '.disabled'), '');
+  if (opts.trust !== 'omit') {
+    await fs.promises.writeFile(
+      path.join(dir, '.cindy-trust.json'),
+      JSON.stringify(
+        opts.trust ?? {
+          level: 'unverified',
+          publisherSigned: false,
+          publisherVerified: false,
+          reviewed: false,
+        },
+      ),
+    );
+  }
+  return dir;
+}
+
+/** 迁移台账路径(默认状态根 = <workDir>/ghosts-install-state)。 */
+function migrationLedgerPath(): string {
+  return path.join(workDir, 'ghosts-install-state', '.legacy-migration.json');
+}
+
 async function expectRejection(
   result: unknown,
   code: string,
@@ -149,6 +194,153 @@ describe('hashApprovedSkillContent · item.dir 路径段校验', () => {
     await expect(hashApprovedSkillContent(validated.manifest, base)).rejects.toThrow(
       /path segment is a link/,
     );
+  });
+});
+
+describe('GhostManager · 存量插件一次性迁移(§5 升级无感)', () => {
+  /** 带 skill 槽的旧布局清单 + 配套 SKILL.md(frontmatter 与声明逐字一致)。 */
+  const legacySkillManifest = (id = 'skilled'): Record<string, unknown> => ({
+    ...goodManifest(id),
+    slots: ['tool', 'skill'],
+    skill: { items: [{ dir: 'skills/demo', name: 'demo', description: 'Demo skill' }] },
+  });
+  const legacySkillFiles = (): Record<string, string> => ({
+    'skills/demo/SKILL.md': '---\nname: demo\ndescription: Demo skill\n---\n\nApproved instructions\n',
+  });
+
+  it('市场/本地旧安装无感迁移:升级后仍启用、列 approved、写下迁移台账', async () => {
+    await writeLegacyInstall('hello', goodManifest());
+    // 迁移前:没有 receipt → 一律 fail closed(这正是 #1080 被回滚的现场)。
+    expect(manager.list()[0]).toMatchObject({ enabled: false, approval: { state: 'legacy-unapproved' } });
+
+    const outcome = await manager.migrateLegacyApprovalsOnce();
+    expect(outcome.migrated).toEqual(['hello']);
+    // 迁移后:用户什么都没做,插件照旧可用。
+    expect(manager.list()[0]).toMatchObject({
+      enabled: true,
+      approval: { state: 'approved' },
+    });
+    expect(fs.existsSync(migrationLedgerPath())).toBe(true);
+  });
+
+  it('旧安装的停用态被保留:.disabled 镜像 → receipt.enabled=false', async () => {
+    await writeLegacyInstall('hello', goodManifest(), { disabled: true });
+    await manager.migrateLegacyApprovalsOnce();
+    expect(manager.list()[0]).toMatchObject({
+      enabled: false,
+      approval: { state: 'approved' },
+    });
+  });
+
+  it('信任镜像被保留;缺失时保守降级为 unverified 而不是让迁移失败', async () => {
+    await writeLegacyInstall('trusted', goodManifest('trusted'), {
+      trust: {
+        level: 'verified-publisher',
+        publisherSigned: true,
+        publisherVerified: true,
+        reviewed: false,
+        publisherName: 'Acme',
+      },
+    });
+    await writeLegacyInstall('bare', goodManifest('bare'), { trust: 'omit' });
+    await manager.migrateLegacyApprovalsOnce();
+    const byId = Object.fromEntries(manager.list().map((g) => [g.manifest.id, g]));
+    expect(byId.trusted.trust).toMatchObject({ level: 'verified-publisher', publisherName: 'Acme' });
+    expect(byId.trusted.enabled).toBe(true);
+    // 信任文件缺失不阻断迁移:插件照旧可用,只是展示为 unverified(旧模型读同一文件也如此)。
+    expect(byId.bare.trust).toMatchObject({ level: 'unverified' });
+    expect(byId.bare.enabled).toBe(true);
+  });
+
+  it('skill 槽旧安装迁移后:快照建好、字节指纹钉住、对账认可挂链', async () => {
+    await writeLegacyInstall('skilled', legacySkillManifest(), { files: legacySkillFiles() });
+    const outcome = await manager.migrateLegacyApprovalsOnce();
+    expect(outcome.migrated).toEqual(['skilled']);
+    const ghost = manager.list()[0];
+    expect(ghost).toMatchObject({ enabled: true, approval: { state: 'approved' } });
+    expect(ghost.approvedSkillRoot).toBeTruthy();
+    // 迁移出的快照必须能被技能对账认可(字节与 receipt 指纹逐字节对上),否则技能链断。
+    expect(await manager.verifyApprovedSkillSnapshot(ghost)).toBe(true);
+  });
+
+  it('全局一次性:台账落地后,新出现的无 receipt 目录不再被迁移(fail closed)', async () => {
+    await writeLegacyInstall('first', goodManifest('first'));
+    await manager.migrateLegacyApprovalsOnce();
+    expect(manager.list().find((g) => g.manifest.id === 'first')?.approval.state).toBe('approved');
+
+    // 台账已在。此后再冒出一个没有 receipt 的目录(可能是删了 receipt 想骗迁移,或
+    // 真的新拷进来的旧目录)——迁移不再触发,它保持 fail closed。删 receipt 想"从可变
+    // 安装目录重建授权"这条路被这道门堵死。
+    await writeLegacyInstall('second', goodManifest('second'));
+    const outcome = await manager.migrateLegacyApprovalsOnce();
+    expect(outcome).toEqual({ migrated: [], skipped: [], failed: [] });
+    expect(manager.list().find((g) => g.manifest.id === 'second')?.approval.state).toBe(
+      'legacy-unapproved',
+    );
+  });
+
+  it('迁移绝不改动安装目录三文件(回滚到旧客户端仍按安装目录判定,§5 兜底第 4 条)', async () => {
+    const dir = await writeLegacyInstall('hello', goodManifest(), { disabled: true });
+    const before = {
+      manifest: await fs.promises.readFile(path.join(dir, 'ghost.json'), 'utf8'),
+      disabled: fs.existsSync(path.join(dir, '.disabled')),
+      trust: await fs.promises.readFile(path.join(dir, '.cindy-trust.json'), 'utf8'),
+    };
+    await manager.migrateLegacyApprovalsOnce();
+    expect(await fs.promises.readFile(path.join(dir, 'ghost.json'), 'utf8')).toBe(before.manifest);
+    expect(fs.existsSync(path.join(dir, '.disabled'))).toBe(before.disabled);
+    expect(await fs.promises.readFile(path.join(dir, '.cindy-trust.json'), 'utf8')).toBe(before.trust);
+  });
+
+  it('manifest 不合法的旧目录不迁移,保持 fail closed,不写出坏 receipt', async () => {
+    const dir = path.join(rootDir, 'broken');
+    await fs.promises.mkdir(dir, { recursive: true });
+    await fs.promises.writeFile(path.join(dir, 'ghost.json'), '{ not valid json');
+    const outcome = await manager.migrateLegacyApprovalsOnce();
+    expect(outcome.failed).toEqual(['broken']);
+    expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'broken.json'))).toBe(false);
+  });
+
+  it('随包种子 id 跳过迁移(交给 provisioning 的逐字节对账补批准)', async () => {
+    const seededManager = new GhostManager({
+      getRootDir: () => rootDir,
+      getLocale: () => hostLocale,
+      onChanged,
+      isTrustedBundledId: (id) => id === 'hello',
+    });
+    await writeLegacyInstall('hello', goodManifest());
+    const outcome = await seededManager.migrateLegacyApprovalsOnce();
+    expect(outcome).toEqual({ migrated: [], skipped: ['hello'], failed: [] });
+    // 没有替它写 receipt:provisioning 才是随包插件的批准入口。
+    expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'hello.json'))).toBe(false);
+  });
+
+  it('已有 receipt 的安装不被迁移覆盖(迁移只补,不改既有批准)', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const before = await fs.promises.readFile(
+      path.join(workDir, 'ghosts-install-state', 'hello.json'),
+      'utf8',
+    );
+    const outcome = await manager.migrateLegacyApprovalsOnce();
+    expect(outcome.migrated).toEqual([]);
+    expect(await fs.promises.readFile(path.join(workDir, 'ghosts-install-state', 'hello.json'), 'utf8')).toBe(
+      before,
+    );
+  });
+
+  it('声明的 locale 文件损坏 → fail closed(装入天然不含坏 locale,读到即装入后损坏)', async () => {
+    hostLocale = 'en';
+    await writeLegacyInstall(
+      'hello',
+      { ...goodManifest(), name: 'Base', locales: { en: 'locales/en.json' } },
+      { files: { 'locales/en.json': '{ broken json' } },
+    );
+    const outcome = await manager.migrateLegacyApprovalsOnce();
+    // 装入流程逐个校验声明的 locale、不合格拒装,所以旧安装不会带坏 locale;迁移时
+    // 读到坏 locale 只能是装入后损坏,属 §5 的"自相矛盾 → fail closed",不写坏 receipt。
+    expect(outcome.failed).toEqual(['hello']);
+    expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
+    expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'hello.json'))).toBe(false);
   });
 });
 

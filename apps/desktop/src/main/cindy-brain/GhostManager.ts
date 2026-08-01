@@ -37,6 +37,7 @@ import {
   createGhostInstallReceipt,
   GhostInstallReceiptStore,
   hashApprovedSkillContent,
+  readLegacyInstallTrust,
   type GhostInstallReceipt,
   type GhostInstallReceiptReadResult,
 } from './ghostInstallReceipt.js';
@@ -220,6 +221,148 @@ export class GhostManager {
     } finally {
       release();
     }
+  }
+
+  /**
+   * 一次性 legacy backfill 迁移(docs/dev-rules/plugin-security-and-authoring.md 第 5 节
+   * 红线的落地)。#1080 把授权事实从可变安装目录搬到 Host receipt,升级前装的插件没有
+   * receipt —— 若不迁移,它们会一律落到 `legacy-unapproved`、被列停用、要用户逐个重新
+   * 确认(这正是 #1080 被回滚的原因)。这里从旧的三份事实源(`ghost.json` /
+   * `.cindy-trust.json` / `.disabled`)重建等价 receipt,让存量插件升级后**无感可用**。
+   *
+   * 三条不变量:
+   * - **全局一次性**:状态根有迁移 ledger 即视为已迁过,此后缺 receipt 一律 fail closed,
+   *   不再迁。理由见 `GhostLegacyMigrationLedger` 头注释(否则删 receipt 就能骗一次
+   *   "从可变安装目录重建授权")。
+   * - **不扩权、不等于新确认**:receipt 权限集 = 当前 `ghost.json` 声明,等价于旧模型
+   *   无条件授权的那一组;此后任何 manifest/权限变化照旧走完整确认(update 流程不变)。
+   * - **只写状态根、绝不动安装目录**:三份旧文件原样保留,因此回滚到旧客户端时它照旧
+   *   从安装目录判定启停,不会错位(§5 兜底第 4 条 回滚余地)。
+   *
+   * 随包种子 id 跳过 —— 它们走 provisioning 的 `approveTrustedBundledInstall`(有权威
+   * 字节可比,是更强的迁移形态)。
+   */
+  async migrateLegacyApprovalsOnce(): Promise<{
+    migrated: string[];
+    skipped: string[];
+    failed: string[];
+  }> {
+    return this.runExclusiveMutation(() => this.migrateLegacyApprovalsUnlocked());
+  }
+
+  private async migrateLegacyApprovalsUnlocked(): Promise<{
+    migrated: string[];
+    skipped: string[];
+    failed: string[];
+  }> {
+    const result = { migrated: [] as string[], skipped: [] as string[], failed: [] as string[] };
+    // 全局一次性门:已迁过就再也不迁(读不动 ledger 同样当作"已迁",宁可少迁不可
+    // 把"从可变安装目录重建授权"再放开一次)。
+    if (this.receiptStore.hasMigrationLedger()) return result;
+
+    const root = this.options.getRootDir();
+    let entries: fs.Dirent[] = [];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      // 安装根还不存在 = 没装过任何插件(全新用户)。仍写 ledger 落一道门:让
+      // "ledger 存在 ⟺ 迁移已跑过"这个不变量成立,今后新装的插件走正常装入流程。
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+      const id = entry.name;
+      if (!isValidGhostId(id)) continue;
+      // 随包种子交给 provisioning,不在迁移范围。
+      if (this.options.isTrustedBundledId?.(id)) {
+        result.skipped.push(id);
+        continue;
+      }
+      // 已经有有效 receipt(迁移前理论上不该出现,防御性跳过,绝不覆盖既有批准)。
+      if (this.receiptStore.read(id).state === 'approved') {
+        result.skipped.push(id);
+        continue;
+      }
+      try {
+        const migrated = await this.backfillLegacyApproval(path.join(root, id), id);
+        (migrated ? result.migrated : result.skipped).push(id);
+      } catch (err) {
+        // 核心授权事实读不出(manifest 不合法、技能目录含链接等)才落到这里:该插件
+        // 保持 legacy-unapproved(list() 本就跳过不合法 manifest),走现有恢复 UI。
+        result.failed.push(id);
+        this.options.log?.warn('legacy ghost approval migration failed; kept fail-closed', {
+          id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    await this.receiptStore.writeMigrationLedger({
+      version: 1,
+      migratedAt: new Date().toISOString(),
+      migratedIds: [...result.migrated].sort(),
+    });
+    if (result.migrated.length > 0) this.options.onChanged?.(this.list());
+    return result;
+  }
+
+  /**
+   * 从旧安装目录的三份事实源重建一份等价 receipt。返回是否真的写了 receipt。
+   *
+   * 分级 fail 策略(对齐 §5"读不出核心事实才 fail closed,展示元数据缺失则降级"):
+   * - `ghost.json` 读不出/不合法 → 抛错 → 调用方计入 failed、保持 fail closed;
+   * - `.disabled` 镜像 → 旧模型的启停事实(不存在=启用);
+   * - `.cindy-trust.json` 缺失/损坏 → 保守 `unverified`(展示信号,能力由 slot 授予);
+   * - locale 声明存在但文件损坏 → 抛错 → fail closed。装入流程本就逐个校验声明的
+   *   locale、不合格拒装(见 `install` 里 `locale 文件不合格` 分支),所以旧安装天然不含
+   *   坏 locale;迁移时读到坏 locale 只可能是**装入后被损坏**,属 §5 的"自相矛盾即
+   *   fail closed",也与 receipt「localeResources 键集必须等于 manifest.locales」的
+   *   不变量一致(跳过坏 locale 会写出被 validateReceipt 拒绝的 receipt);
+   * - `packageSha256` **不算**(它是 audit-only、运行期不消费,见 §7);省掉它让迁移更快、
+   *   更不会因安装目录里的异常条目误伤——真正的运行期判据 `skillContentSha256` 仍逐字节算,
+   *   技能目录含链接等异常会在那里如实 fail closed。
+   */
+  private async backfillLegacyApproval(dir: string, id: string): Promise<boolean> {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(fs.readFileSync(path.join(dir, GHOST_MANIFEST_FILE), 'utf-8'));
+    } catch (err) {
+      throw new Error(`unreadable manifest: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const validated = validateGhostManifest(raw);
+    if (!validated.ok) throw new Error(`invalid manifest: ${validated.reason}`);
+    if (validated.manifest.id !== id) throw new Error('manifest id != install dir name');
+
+    const enabled = !fs.existsSync(path.join(dir, DISABLED_MARKER_FILE));
+    const trust: GhostTrustInfo = readLegacyInstallTrust(dir) ?? {
+      level: 'unverified',
+      publisherSigned: false,
+      publisherVerified: false,
+      reviewed: false,
+    };
+    const localeResources = this.readApprovedLocaleResources(dir, validated.manifest);
+    const iconDataUrl = this.readInstalledIconDataUrl(dir, validated.manifest) ?? undefined;
+    // skillContentSha256 是运行期判据,必须现算;技能目录异常(链接等)在此如实抛错。
+    const skillContentSha256 = await hashApprovedSkillContent(validated.manifest, dir);
+
+    await this.receiptStore.write(
+      createGhostInstallReceipt({
+        manifest: validated.manifest,
+        localeResources,
+        enabled,
+        trust,
+        skillContentSha256,
+        ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
+      }),
+      { skillSourceDir: dir },
+    );
+    this.options.log?.info('legacy ghost approval migrated', {
+      id,
+      enabled,
+      trustLevel: trust.level,
+      origin: 'legacy-migration',
+    });
+    return true;
   }
 
   /** 扫描已装意识(同步 —— renderer 首帧 sendSync 拉取,目录极小不卡启动)。 */

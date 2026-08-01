@@ -259,16 +259,21 @@
 
 以下缺口在触及相关链路时必须一并修复，或在 PR 中保留明确的正式跟踪，不得静默丢弃：
 
-- **【未修复｜违反第 5 节红线】存量安装没有 receipt backfill。** 现状（2026-08-01 核对
-  `ghostInstallReceipt.readApproval` 与 `GhostManager`）：receipt 机制上线前装的插件一律
-  落到 `legacy-unapproved`，被列为停用、不许启用、不落技能链，唯一出路是**逐个**完整
-  重新确认；安装目录里的 `.disabled` 镜像也只在重新确认之后才被采用。因此升级到该版本的
-  用户会看到**全部非随包插件同时失效**（随包内置插件由 provisioning 在逐字节对账后走
-  `approveTrustedBundledInstall` 自动补批准，不受影响——那条路有权威字节可比，正是本节
-  要求的迁移形态，缺的是把同样的思路覆盖到市场与本地安装）。缺的是第 5 节要求的一次性迁移：从
-  `ghost.json` / `.cindy-trust.json` / `.disabled` 重建等价 receipt（只在从未有过 receipt
-  时、权限原样不扩权、来源记日志），以及自动迁移不成时的批量恢复入口。改动装入／批准
-  链路时必须一并补上，不得再往上叠新的必填校验。
+- **【已修复｜第 5 节红线迁移】存量安装的 receipt backfill。** receipt 机制上线前装的
+  插件没有 receipt，`GhostManager.migrateLegacyApprovalsOnce()` 在每轮对账前跑一次(首次
+  之后凭迁移 ledger 瞬时 no-op)，从旧的三份事实源(`ghost.json` / `.cindy-trust.json` /
+  `.disabled`)重建等价 receipt，让市场与本地安装升级后无感可用；随包内置插件仍走
+  provisioning 的 `approveTrustedBundledInstall`(有权威字节可比，是更强的迁移形态)，不
+  重复迁移。三条不变量:**全局一次性**(状态根有 `.legacy-migration.json` ledger 即视为已
+  迁过，此后缺 receipt 一律 fail closed，不再迁——否则删 receipt 就能骗一次"从可变安装
+  目录重建授权"；该门是充分守卫，因为能删 ledger 的进程本就能直接写伪造 receipt，见下
+  「批准状态根无写保护」)、**不扩权**(权限集原样取当前 `ghost.json`，等价于旧模型无条件
+  授权的那一组，此后任何 manifest/权限变化照旧走完整确认)、**只写状态根不动安装目录**
+  (三份旧文件原样保留，回滚到旧客户端时仍按安装目录判定，符合第 5 节兜底第 4 条)。核心
+  授权事实读不出(manifest 不合法、技能目录含链接、声明的 locale 装入后损坏)才对该插件
+  fail closed、走恢复 UI；trust 镜像缺失降级为 `unverified`、`packageSha256` audit-only
+  故省略。改动装入／迁移链路时保持这些不变量，尤其不得把迁移改成"每次缺 receipt 就补"
+  (那就是把授权事实重新交给可变安装目录，等于回到 #636)。
 - `networkSlot.ts` 的 `as: 'media'` 不能只信任 Content-Type（GLB 常见
   `application/octet-stream`），需要安全的 magic-byte／扩展名嗅探。
 - SSH 远程场景必须让 `LiziMcpSessionContext` 携带 remote 标识；目录过户不得回退读取本机

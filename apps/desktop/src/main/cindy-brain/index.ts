@@ -714,9 +714,23 @@ function migrateGhostKvOnRename(fromId: string, toId: string): void {
   }
 }
 
-/** 单轮对账:播种 → (有变化时)广播 + 首装停靠 + 常驻点火。 */
+/** 单轮对账:一次性 legacy 迁移 → 播种 → (有变化时)广播 + 首装停靠 + 常驻点火。 */
 async function reconcileBuiltinGhosts(reason: string): Promise<void> {
   const manager = getGhostManager();
+  // 存量插件迁移必须先于播种与授权消费:#1080 之前装的插件没有 receipt,这里从旧安装
+  // 布局 backfill 出等价批准,让它们升级后无感可用(docs §5 红线)。全局一次性 —— 首次
+  // 之后 ledger 存在即瞬时 no-op,所以放在每轮 reconcile 前都安全。它自己取事务锁,因此
+  // 必须在下面 runExclusiveMutation **之外**调用(锁内再取锁会死锁),两次顺序取锁。
+  try {
+    await manager.migrateLegacyApprovalsOnce();
+  } catch (err) {
+    // 迁移整体失败(如状态根不可写)不能挡住播种与后续对账:随包插件仍要能装/更新,
+    // 存量插件保持 fail-closed(列停用、走恢复 UI),下一轮启动再尝试迁移。
+    log.warn('legacy ghost approval migration pass failed', {
+      reason,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
   await manager.runExclusiveMutation(() =>
     reconcileBuiltinGhostsLocked(reason, manager),
   );

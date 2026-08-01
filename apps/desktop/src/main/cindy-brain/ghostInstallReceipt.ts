@@ -73,6 +73,23 @@ export type GhostInstallReceiptReadResult =
   | { state: 'legacy-unapproved' }
   | { state: 'invalid'; reason: string };
 
+/**
+ * 一次性 legacy 迁移的落地台账。存在即表示"本机已跑过一轮从旧安装布局 backfill
+ * receipt 的迁移"——此后任何缺失 receipt 都按删除/损坏 fail closed,不再触发迁移。
+ *
+ * 它是迁移的**全局一次性门**(见 `GhostManager.migrateLegacyApprovalsOnce`):没有
+ * 这道门,删掉某个 receipt 就能骗一次"从当前可变安装目录重建授权",而安装目录可被
+ * 同权限进程改写。ledger 门是充分守卫——能删 ledger 的进程本就能直接往状态根写一份
+ * 结构合法的伪造 receipt(§7 已登记"状态根无写保护"缺口),迁移路径严格弱于它。
+ */
+export interface GhostLegacyMigrationLedger {
+  version: 1;
+  /** 迁移完成时刻(ISO)。仅审计,不参与判定。 */
+  migratedAt: string;
+  /** 实际 backfill 出 receipt 的 id 清单,便于事后分辨"用户确认过"与"迁移来的"。 */
+  migratedIds: string[];
+}
+
 /** Host-owned receipt store：严格读取、同目录临时文件 + rename 原子提交。 */
 export class GhostInstallReceiptStore {
   constructor(private readonly getRootDir: () => string) {}
@@ -165,6 +182,42 @@ export class GhostInstallReceiptStore {
       throw new Error('invalid ghost skill snapshot identity');
     }
     return path.join(this.rootDir(), 'skill-snapshots', id, revision);
+  }
+
+  /** 迁移台账路径。点开头,不会与任何合法 ghost id 的 `<id>.json` receipt 撞名。 */
+  private migrationLedgerPath(): string {
+    return path.join(this.rootDir(), '.legacy-migration.json');
+  }
+
+  /** 是否已跑过一轮 legacy 迁移(全局一次性门;读不动按"存在"处理,宁可不再迁)。 */
+  hasMigrationLedger(): boolean {
+    try {
+      return fs.lstatSync(this.migrationLedgerPath()).isFile();
+    } catch (error) {
+      // ENOENT = 从未迁过,可以迁;其它错误(权限等)= 状态未知,保守当作"已迁",
+      // 绝不因为读不动 ledger 就把迁移(=从可变安装目录重建授权)再放开一次。
+      return (error as NodeJS.ErrnoException).code !== 'ENOENT';
+    }
+  }
+
+  async writeMigrationLedger(ledger: GhostLegacyMigrationLedger): Promise<void> {
+    const root = this.rootDir();
+    await fs.promises.mkdir(root, { recursive: true });
+    const target = this.migrationLedgerPath();
+    const temp = path.join(
+      root,
+      `.legacy-migration-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`,
+    );
+    try {
+      await fs.promises.writeFile(temp, `${JSON.stringify(ledger, null, 2)}\n`, {
+        encoding: 'utf8',
+        flag: 'wx',
+        mode: 0o600,
+      });
+      await fs.promises.rename(temp, target);
+    } finally {
+      await fs.promises.rm(temp, { force: true }).catch(() => undefined);
+    }
   }
 
   private receiptPath(id: string): string {
@@ -345,6 +398,25 @@ export class GhostInstallReceiptStore {
             .catch(() => undefined),
         ),
     );
+  }
+}
+
+/**
+ * 迁移专用:读旧安装目录里的 `.cindy-trust.json` 信任镜像。#1080 之前授权事实就散在
+ * 安装目录三文件里,升级迁移要从它们重建等价 receipt。
+ *
+ * 缺失/损坏/非普通文件一律返回 `null` —— trust 只是**展示与来源信号**(能力由 manifest
+ * slot 授予,不由 trust 等级授予),读不出时调用方用保守默认(`unverified`)而不是让整个
+ * 迁移失败:旧模型读的也是同一个文件,缺了同样显示不出 verified,不比旧模型少展示什么。
+ */
+export function readLegacyInstallTrust(dir: string): GhostTrustInfo | null {
+  const file = path.join(dir, '.cindy-trust.json');
+  try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.size > MAX_RECEIPT_BYTES) return null;
+    return validateTrust(JSON.parse(fs.readFileSync(file, 'utf8')));
+  } catch {
+    return null;
   }
 }
 

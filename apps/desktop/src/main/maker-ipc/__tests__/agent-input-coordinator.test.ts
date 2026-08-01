@@ -154,7 +154,7 @@ function sessionRunningError(): Error & { code: string } {
 function createHarness() {
   let running = false;
   let pendingInteraction = false;
-  let agentKind: 'claude-code' | 'codex' | null = 'claude-code';
+  let agentKind: AgentInputCreateOpts['agentKind'] | null = 'claude-code';
   const projections: AgentInputProjection[] = [];
 
   const sendToAgent = vi.fn<AgentInputCoordinatorDeps['sendToAgent']>(async (sessionId, _message, _createOpts, sendOpts) => {
@@ -276,7 +276,7 @@ function createHarness() {
     setPendingInteraction(value: boolean) {
       pendingInteraction = value;
     },
-    setAgentKind(value: 'claude-code' | 'codex' | null) {
+    setAgentKind(value: AgentInputCreateOpts['agentKind'] | null) {
       agentKind = value;
     },
     setHasPendingCredentialSwitch(fn: (() => boolean) | null) {
@@ -3594,6 +3594,7 @@ describe('AgentInputCoordinator stop and drain boundaries', () => {
   it.each([
     { agentKind: 'claude-code' as const, providerId: 'xd', model: 'claude-opus-5' },
     { agentKind: 'codex' as const, providerId: 'xd', model: 'gpt-5.5' },
+    { agentKind: 'pi' as const, providerId: 'openai', model: 'gpt-5.5' },
   ])('retries abort reconciliation after $agentKind abort settles before the live turn is idle', async ({
     agentKind,
     providerId,

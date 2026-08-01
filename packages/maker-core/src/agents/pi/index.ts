@@ -1524,6 +1524,25 @@ export class PiAgent extends BaseAgent {
             readRoots,
           });
           const decision = await reviewAutoAction(action);
+          // 权限热切换:reviewAutoAction 是 async 的,期间用户可能改档。按**最新**档位收口,
+          // 不能用进入审查前捕获的旧 auto 档直接放行(Pi 明确支持热切换,codex review P1):
+          //   - 已收紧到 ask(或其它非 auto/bypass)→ 破坏性调用即便 verdict=allow 也必须走
+          //     用户确认;
+          //   - 已切到 bypassPermissions(Full access)→ 直接放行(与 bypass 语义一致);
+          //   - 仍是 auto → 按本次审查 verdict 收口(下方原逻辑)。
+          const modeAfterReview = getPermissionCtx().permissionMode;
+          if (modeAfterReview === 'bypassPermissions') {
+            proc.send({ type: 'extension_ui_response', id, confirmed: true });
+            return;
+          }
+          if (modeAfterReview !== 'auto') {
+            proc.send({
+              type: 'extension_ui_response',
+              id,
+              confirmed: await requestUserConfirmation(),
+            });
+            return;
+          }
           if (decision.verdict === 'ask') {
             proc.send({
               type: 'extension_ui_response',

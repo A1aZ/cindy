@@ -1195,6 +1195,8 @@ export function CCAgentSessionView({
     errorRetryText,
     credentialSwitchWait,
     continuationInFlightClientId,
+    continuationTurnClientId,
+    continuationInFlightProjectionCapability,
     loadOlderMessages,
     isLoadingMore,
     hasMoreMessages,
@@ -3019,6 +3021,8 @@ export function CCAgentSessionView({
       messages={messages}
       taskUpdates={taskUpdates}
       isSessionStreaming={isStreaming}
+      continuationTurnClientId={continuationTurnClientId}
+      continuationInFlightProjectionCapability={continuationInFlightProjectionCapability}
       onLoadMore={loadOlderMessages}
       isLoadingMore={isLoadingMore}
       hasMoreMessages={hasMoreMessages}

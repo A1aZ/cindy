@@ -3712,8 +3712,12 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           void rebroadcastTodaySpend();
 
           try {
+            // 自定义(source:'user')provider——本地 Ollama / 用户自付费兼容端点——即便
+            // 模型 id 与 XD 目录重名,也不能套用 XD 网关定价当作 Cindy 消费入账;只记 token
+            // (上方已入库),不写 money(codex review)。仅 xd / 默认网关与订阅路由计费。
+            const isCustomProviderRoute = isUserProviderSession(session.id);
             const pricing =
-              isSubscriptionValue
+              isSubscriptionValue || isCustomProviderRoute
                 ? null
                 : await getModelPricingForModel('xd', pricingModel);
             const price =
@@ -3723,7 +3727,9 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
                 ? getModelPriceQuote(null, effectiveProvider, pricingModel)
                 : isSubscriptionDirectModel(pricingModel)
                   ? getSubscriptionDirectValuePrice(pricingModel)
-                  : getModelPriceQuote(pricing, 'xd', pricingModel);
+                  : isCustomProviderRoute
+                    ? null
+                    : getModelPriceQuote(pricing, 'xd', pricingModel);
             const money = computePriceQuoteTurnMoney(
               tokens,
               price ?? undefined,

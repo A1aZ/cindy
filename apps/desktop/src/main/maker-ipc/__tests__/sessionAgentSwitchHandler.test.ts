@@ -117,6 +117,21 @@ describe('performSessionAgentSwitch', () => {
     expect(boundary.toAgentKind).toBe('cc');
   });
 
+  it('claude-code → pi 不会被参数校验拒绝', async () => {
+    const { deps } = makeDeps();
+    const result = await performSessionAgentSwitch(deps, {
+      sessionId: 's1',
+      targetAgentKind: 'pi',
+      model: 'gpt-5.5',
+      applyNow: true,
+    });
+    expect(result).toMatchObject({ switched: true, agentKind: 'pi' });
+    expect(deps.applyAgentSwitchToDb).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ agentKind: 'pi' }),
+    );
+  });
+
   it('跨引擎 DB 提交后立即覆盖旧 provider route', async () => {
     const { deps } = makeDeps();
 
@@ -312,7 +327,7 @@ describe('deferred switch (turn running)', () => {
     const store = new Map<
       string,
       {
-        targetAgentKind: 'claude-code' | 'codex';
+        targetAgentKind: 'claude-code' | 'codex' | 'pi';
         model: string;
         providerId: string | null | undefined;
         effort?: string;

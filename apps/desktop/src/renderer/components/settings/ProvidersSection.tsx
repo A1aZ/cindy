@@ -252,7 +252,12 @@ function DetailHeader({
   const singleAgentNote =
     provider && provider.agents.length === 1
       ? t('settings.providers.detail.singleAgentNote', {
-          agent: provider.agents[0] === 'claude-code' ? 'Claude Code' : 'Codex',
+          agent:
+            provider.agents[0] === 'claude-code'
+              ? 'Claude Code'
+              : provider.agents[0] === 'pi'
+                ? 'Pi'
+                : 'Codex',
         })
       : null;
 
@@ -1614,6 +1619,8 @@ export function ProvidersSection() {
                 : 'apiKey';
           const apiKey =
             authMethod === 'apiKey' ? await readCustomProviderKey(p.id, agent) : null;
+          // 鉴权请求头是 main-only 密文,renderer 不回读;交由 main 按 savedProviderId
+          // 注入已存请求头(否则仅靠请求头鉴权的端点刷新会因缺头 401,codex review)。
           const r = await window.electronAPI.maker.fetchProviderModels({
             agent,
             baseUrl: rt.baseUrl,
@@ -1621,7 +1628,7 @@ export function ProvidersSection() {
             ...(rt.wireProtocol ? { wireProtocol: rt.wireProtocol } : {}),
             modelsUrl: rt.modelsUrl ?? null,
             apiKey,
-            ...(rt.headers ? { headers: rt.headers } : {}),
+            savedProviderId: p.id,
           });
           if (!r.ok || !r.models) continue;
           anyOk = true;

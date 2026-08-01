@@ -249,7 +249,7 @@ describe('sendToSession ordering', () => {
     );
     const liveBranch = extractBetween(
       block,
-      'const live = maker.getSession(targetSessionId);',
+      'live = maker.getSession(targetSessionId);',
       'try {\n        const createOpts = buildCreateOptsWithStderr({',
     );
     const resumedBranch = extractBetween(
@@ -360,12 +360,12 @@ describe('sendToSession ordering', () => {
     const anySessionInTurnBlock = extractBetween(
       source,
       'export function anySessionInTurn',
-      '/**\n * 把 desktop 版的 interaction listener',
+      'let goalClearObserver:',
     );
     const handlerBlock = extractBetween(
       source,
       'ipcMain.handle(MAKER_INVOKE.ANY_SESSION_IN_TURN',
-      'ipcMain.handle(MAKER_INVOKE.GET_CAPABILITIES',
+      'ipcMain.handle(MAKER_INVOKE.SESSION_IN_TURN',
     );
 
     expect(anySessionInTurnBlock).toContain('maker?.listActiveSessions()');
@@ -488,7 +488,7 @@ describe('sendToSession ordering', () => {
     expectOrder(block, 'await createDbMessage(targetSessionId, {', 'await runAcceptedCallback(onAccepted, targetSessionId, clientId);');
     const liveBranch = extractBetween(
       block,
-      'const live = maker.getSession(targetSessionId);',
+      'live = maker.getSession(targetSessionId);',
       'try {\n        const createOpts = buildCreateOptsWithStderr({',
     );
 
@@ -575,7 +575,12 @@ describe('sendToSession ordering', () => {
     expect(ipcCreateBlock).toContain("if (!label.ok) throwIpcError('INVALID_PARAMS', label.message);");
     expect(ipcCreateBlock).toContain('label: label.value,');
     expect(orcaWorkerCreationServiceSource).toContain('budgetModelRequiresApiKey(params.agent, resolved.model, deps.readClaudeApiKey() != null)');
-    expect(orcaWorkerCreationServiceSource).toContain("(input.agent === 'codex' && input.fast !== undefined)");
+    expect(orcaWorkerCreationServiceSource).toContain(
+      'agentConsumesExplicitFast(input.agent) && input.fast !== undefined',
+    );
+    expect(orcaWorkerCreationServiceSource).toContain(
+      "return agent === 'codex' || agent === 'pi';",
+    );
     expect(orcaLifecycleServiceSource).toContain('createWorkerInTeam({ ...params, teamId: team.id })');
   });
 

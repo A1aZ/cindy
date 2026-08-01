@@ -32,7 +32,14 @@
 import { randomUUID } from 'node:crypto';
 
 import { isTerminalAgentErrorEvent } from '@cindy/maker-core';
-import type { Maker, AgentEvent, AgentKind, Effort, PermissionMode, Session } from '@cindy/maker-core';
+import type {
+  Maker,
+  AgentEvent,
+  AgentKind,
+  Effort,
+  PermissionMode,
+  Session,
+} from '@cindy/maker-core';
 import { clampEffortToSupported } from '@cindy/model-providers';
 import type {
   Schedule,
@@ -52,6 +59,7 @@ import {
   setSessionProvider,
   hydrateSessionProvider,
 } from '../maker-host/session-provider-store.js';
+import { setSessionFastMode } from '../maker-host/session-effort-store.js';
 import {
   CredentialModeSwitchBusyError,
   prepareLocalCodexCredentialModeSwitch,
@@ -60,7 +68,12 @@ import {
 } from '../maker-host/codex-credential-switch.js';
 import { ensureDialogueWorkspaceDir } from '../localDb/dialogueWorkspace';
 import { AcceptedCallbackDispatchCancelled } from '../maker-ipc/acceptedCallbackRunner.js';
-import { wireSessionToIpc, isSessionInTurn, noteSilentStopUserSend, onSilentStopSettled } from '../maker-ipc/register.js';
+import {
+  wireSessionToIpc,
+  isSessionInTurn,
+  noteSilentStopUserSend,
+  onSilentStopSettled,
+} from '../maker-ipc/register.js';
 import { agentHandoffPending } from '../maker-ipc/agentHandoffPendingSingleton.js';
 import { prependHandoffToUserMessage } from '../maker-ipc/agentHandoff.js';
 import {
@@ -235,9 +248,7 @@ export interface MakerScheduleRunnerDeps {
     model: string,
     providerId: string | null,
   ) => Promise<
-    | { kind: 'pass' }
-    | { kind: 'reroute'; providerId: string }
-    | { kind: 'reject'; reason: string }
+    { kind: 'pass' } | { kind: 'reroute'; providerId: string } | { kind: 'reject'; reason: string }
   >;
   /**
    * 某 (来源, 模型, agent) 拷贝的能力(efforts / Fast)。effort 与 Fast 支持都是
@@ -255,6 +266,11 @@ export interface MakerScheduleRunnerDeps {
     defaultEffort: string | null;
     supportsFastMode: boolean;
   } | null>;
+  /** Pi 空模型的实时默认路由；model/providerId 必须来自同一连接来源快照。 */
+  resolveDefaultModelRoute?: (
+    agent: AgentKind,
+    preferredProviderId?: string | null,
+  ) => Promise<{ model: string; providerId: string } | null>;
 }
 
 /**
@@ -263,6 +279,9 @@ export interface MakerScheduleRunnerDeps {
  * (与 fire 主路径的准入拒绝同语义);其它路由同步失败仍按 non-fatal warn 处理。
  */
 class QueuedRouteDisabledError extends Error {}
+
+/** Pi 原生路由热切失败；继续派发会把任务发给旧 provider，必须在 vendor 前站下。 */
+class QueuedPiRouteSyncError extends Error {}
 
 /**
  * 排队等派发超过 QUEUED_DISPATCH_MAX_WAIT_MS。用独立类型让 dispatchGate 的 catch
@@ -534,8 +553,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
         this.deps.maker.getSessionMeta(sessionId).catch(() => null),
         getSessionRowSnapshot(sessionId),
       ]);
-      const archived =
-        !row || row.status === 'archived' || row.status === 'deleted';
+      const archived = !row || row.status === 'archived' || row.status === 'deleted';
       if (archived) {
         holder.releaseAgentSwitchLock?.();
         holder.releaseAgentSwitchLock = undefined;
@@ -603,6 +621,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
           return await this.fireHeartbeatViaQueue(schedule, ctx, sessionId, {
             model: meta?.model,
             effort: meta?.effort,
+            fastMode: meta?.fastMode,
             providerId: row?.providerId ?? null,
           });
         }
@@ -679,18 +698,35 @@ export class MakerScheduleRunner implements ScheduleRunner {
       : isHeartbeat
         ? heartbeatModel
         : undefined;
-    const model = rawModel?.trim() ? rawModel : defaultModelFor(effectiveAgentKind);
+    const explicitProviderId = schedule.providerId?.trim() ? schedule.providerId.trim() : null;
+    const defaultRouteProviderId = explicitProviderId ?? (isHeartbeat ? heartbeatProviderId : null);
+    const dynamicDefaultRoute =
+      !rawModel?.trim() && effectiveAgentKind === 'pi'
+        ? ((await this.deps.resolveDefaultModelRoute?.(
+            effectiveAgentKind,
+            defaultRouteProviderId,
+          )) ?? null)
+        : null;
+    const model = rawModel?.trim()
+      ? rawModel
+      : (dynamicDefaultRoute?.model ?? defaultModelFor(effectiveAgentKind));
+    if (!model) {
+      throw new Error('schedule route unavailable: Pi has no connected model source');
+    }
     const permissionMode = defaultPermissionModeForSchedule();
-    // fastMode 只对 codex 有意义（claude-code agent 忽略此字段）；Claude 恒不传，
+    // fastMode 对 Codex / Pi 生效（claude-code agent 忽略此字段）；Claude 恒不传，
     // 确保「不影响 Claude」。heartbeat 沿用 session meta 里的 fast 态，非 heartbeat 取 schedule。
     let fastMode =
-      effectiveAgentKind === 'codex'
+      effectiveAgentKind === 'codex' || effectiveAgentKind === 'pi'
         ? isHeartbeat
           ? heartbeatFastMode
           : schedule.fastMode
         : undefined;
-    const explicitProviderId = schedule.providerId?.trim() ? schedule.providerId.trim() : null;
-    let createProviderId = explicitProviderId ?? (isHeartbeat ? heartbeatProviderId : null);
+    let createProviderId =
+      explicitProviderId ??
+      (isHeartbeat ? heartbeatProviderId : null) ??
+      dynamicDefaultRoute?.providerId ??
+      null;
     // 停用轴准入(PR #744 review):每次 fire 都是新的付费调用,不属于「运行中的会话
     // 不打断」豁免 —— 保存过的路由被用户停用后,本次 run 必须以明确错误失败(run 历史
     // 可见),不能继续经停用路由扣费;隐式默认落点被停用而有启用替代拷贝时改路由过去。
@@ -823,7 +859,10 @@ export class MakerScheduleRunner implements ScheduleRunner {
         permissionMode,
         title: isHeartbeat ? undefined : `[Schedule] ${schedule.name}`,
         resumeSessionId,
-        providerId: createProviderId ?? undefined,
+        // Pi distinguishes an explicit null (Cindy default route) from undefined
+        // (legacy model-based native-provider fallback). Preserve the scheduler's
+        // default-route null when spawning a fresh Pi session.
+        providerId: createProviderId,
         vendorOptions: { source: 'scheduler' },
       });
     } catch (err) {
@@ -850,12 +889,35 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // 失败时运行时仍是旧值, 必须跳过对应字段落库 —— 否则 meta 与运行时不一致,
     // 且下次 fire 读到 meta == schedule 会判定"无变化"不再重试, 错误被永久固化。
     const heartbeatModelChanged = isHeartbeat && model !== heartbeatModel;
+    // Pi 的 BYOM 来源存在原生进程内，不经过 compat proxy。maker.createSession 复用
+    // active session 时会忽略 opts.providerId，所以即使 model id 没变，也必须把
+    // (provider, model) 作为一个原子路由重新下发；否则 DB/UI 已显示新来源，prompt
+    // 却仍会直连旧来源。未显式覆盖时沿用 live store 的最新来源。
+    const reusedPiRouteProviderId =
+      explicitProviderId ??
+      reroutedProviderId ??
+      getSessionProvider(session.id) ??
+      heartbeatProviderId ??
+      null;
+    const mustSyncReusedPiRoute = reusedLiveSession && effectiveAgentKind === 'pi';
     let modelSwitchApplied = true;
-    if (heartbeatModelChanged) {
+    if (heartbeatModelChanged || mustSyncReusedPiRoute) {
       try {
-        await session.setModel(model);
+        if (mustSyncReusedPiRoute) {
+          await session.setModel(model, { providerId: reusedPiRouteProviderId });
+        } else {
+          await session.setModel(model);
+        }
       } catch (err) {
         if (reusedLiveSession) modelSwitchApplied = false;
+        if (mustSyncReusedPiRoute) {
+          // 对 Pi 而言失败后来源未知；继续 send 可能把内容发给旧 BYOM endpoint，
+          // 不能沿用 Claude/Codex 的 non-fatal 模型切换降级。
+          throw new Error(
+            `schedule Pi route sync failed before dispatch (model "${model}", provider "${reusedPiRouteProviderId ?? 'cindy'}")`,
+            { cause: err },
+          );
+        }
         this.deps.logger.warn?.('[runner] heartbeat setModel failed (non-fatal)', err);
       }
     }
@@ -879,7 +941,12 @@ export class MakerScheduleRunner implements ScheduleRunner {
     const runtimeReconciledEffort =
       runtimeModel === model && desiredEffort === schedule.effort
         ? reconciledEffort
-        : this.reconcileEffortForModel(effectiveAgentKind, runtimeModel, desiredEffort, schedule.id);
+        : this.reconcileEffortForModel(
+            effectiveAgentKind,
+            runtimeModel,
+            desiredEffort,
+            schedule.id,
+          );
     // heartbeatEffort 为对比基线:仅当 clamp 结果与会话当前档不同才 setEffort(follow-effort 且模型
     // 支持当前档 → 相等 → 不动;换到 capped 模型 → clamp 出更低档 → 触发同步)。
     const heartbeatEffortChanged =
@@ -897,7 +964,8 @@ export class MakerScheduleRunner implements ScheduleRunner {
         // 这两种情况失败 = 没生效,必须跳过落库让下次 fire 重试;否则 DB 记了没生效的档、下次判定
         // "已同步"不再重试(PR #479 review「Skip persisting followed effort when fresh sync fails」)。
         // 仅当 fresh 且要落的档 == createSession 已应用的档时,setEffort 只是幂等兜底,失败可照常落库。
-        if (reusedLiveSession || runtimeReconciledEffort !== reconciledEffort) effortSwitchApplied = false;
+        if (reusedLiveSession || runtimeReconciledEffort !== reconciledEffort)
+          effortSwitchApplied = false;
         this.deps.logger.warn?.('[runner] heartbeat setEffort failed (non-fatal)', err);
       }
     }
@@ -921,6 +989,13 @@ export class MakerScheduleRunner implements ScheduleRunner {
       setSessionProvider(session.id, reroutedProviderId);
     } else if (isHeartbeat) {
       hydrateSessionProvider(session.id, heartbeatProviderId);
+    }
+
+    // Pi 的 ChatGPT Fast 由 compat bridge 的 per-session store 读取，Pi handle 本身
+    // 不消费 createSession.fastMode。每次派发前都写 true/false：fresh session 才能
+    // 首轮命中 Fast，复用 session 也不会残留上一次的值。
+    if (effectiveAgentKind === 'pi') {
+      setSessionFastMode(session.id, fastMode === true);
     }
 
     // 4.5 wire 到 IPC 转发链路 —— 让 session 的事件 / 状态 / interaction 请求广播到
@@ -961,7 +1036,9 @@ export class MakerScheduleRunner implements ScheduleRunner {
         // 回退分配了对话工作区的会话按 'dialogue' 落库 —— 侧边栏才会归入
         // "对话"分组(覆盖存量 workspaceKind='project' 但无目录的旧任务)。
         workspaceKind: !isHeartbeat
-          ? (isDialogueTarget ? 'dialogue' : schedule.workspaceKind)
+          ? isDialogueTarget
+            ? 'dialogue'
+            : schedule.workspaceKind
           : undefined,
         source: !isHeartbeat ? 'scheduler' : undefined,
       },
@@ -1131,6 +1208,16 @@ export class MakerScheduleRunner implements ScheduleRunner {
             throw new Error(
               `schedule route rerouted across credential modes after session creation; failing this run so the next fire rebuilds the session (model "${runtimeModel}" → provider "${verdict.providerId}")`,
             );
+          }
+          if (effectiveAgentKind === 'pi') {
+            try {
+              await session.setModel(runtimeModel, { providerId: verdict.providerId });
+            } catch (err) {
+              throw new Error(
+                `schedule Pi route sync failed after pre-dispatch reroute (model "${runtimeModel}", provider "${verdict.providerId}")`,
+                { cause: err },
+              );
+            }
           }
           setSessionProvider(session.id, verdict.providerId);
         }
@@ -1332,8 +1419,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
         .getCapabilities(agentKind)
         .availableModels.find((m) => m.id === model);
       reconciled = (clampEffortToSupported(effort, descriptor?.efforts) ?? undefined) as
-        | Effort
-        | undefined;
+        Effort | undefined;
       if (effort && reconciled !== effort) {
         this.deps.logger.info?.('[runner] effort reconciled to model capability', {
           scheduleId,
@@ -1354,7 +1440,12 @@ export class MakerScheduleRunner implements ScheduleRunner {
     ctx: FireContext,
     sessionId: string,
     /** 绑定会话的当前路由基线(meta.model / meta.effort / sessions.provider_id)。 */
-    routingBaseline: { model?: string; effort?: string; providerId: string | null },
+    routingBaseline: {
+      model?: string;
+      effort?: string;
+      fastMode?: boolean;
+      providerId: string | null;
+    },
     options?: { sessionAlreadyBound?: boolean; onAccepted?: () => void },
   ): Promise<FireResult> {
     const headlessTurn = {
@@ -1387,7 +1478,12 @@ export class MakerScheduleRunner implements ScheduleRunner {
     schedule: Schedule,
     ctx: FireContext,
     sessionId: string,
-    routingBaseline: { model?: string; effort?: string; providerId: string | null },
+    routingBaseline: {
+      model?: string;
+      effort?: string;
+      fastMode?: boolean;
+      providerId: string | null;
+    },
     markHeadlessTurnDispatched: () => void,
     options?: { sessionAlreadyBound?: boolean; onAccepted?: () => void },
   ): Promise<FireResult> {
@@ -1541,11 +1637,14 @@ export class MakerScheduleRunner implements ScheduleRunner {
         // activeTurn 的项是 no-op,coordinator 仍会把 turn 发出去 —— 这里补杀,
         // 免得产生一次没人跟踪、可能与顺延重试重叠的执行。
         if (dispatchCancelled) {
-          this.deps.logger.warn?.('[runner] late accept after queued dispatch was cancelled; killing turn', {
-            scheduleId: schedule.id,
-            runId: ctx.runId,
-            sessionId,
-          });
+          this.deps.logger.warn?.(
+            '[runner] late accept after queued dispatch was cancelled; killing turn',
+            {
+              scheduleId: schedule.id,
+              runId: ctx.runId,
+              sessionId,
+            },
+          );
           endQueueWait(false);
           blockAcceptedDispatch(live, 'queued dispatch cancelled');
           return;
@@ -1563,26 +1662,36 @@ export class MakerScheduleRunner implements ScheduleRunner {
           blockAcceptedDispatch(live, 'slot unavailable');
           return;
         }
+        if (!live) {
+          const unavailable = new Error(
+            'queued heartbeat live session unavailable before route sync and vendor dispatch',
+          );
+          failAfterAccept(unavailable);
+          failDispatch(unavailable);
+          blockAcceptedDispatch(undefined, 'session unavailable for queued route sync');
+          return;
+        }
         // 任务编辑器里选的 model/effort/来源在排队派发时刻热同步到会话(此回调
         // 运行于 vendor dispatch 之前,setModel 对本 turn 生效)—— 对齐直发路径
         // 的 4.4.1/4.4.2 语义,不让"任务改了模型且每轮都撞忙"的用户被静默忽略
         // (PR #972 review P2)。凭证形态需要切换的场景无法热切,跳过并留日志。
-        if (live) {
-          try {
-            await this.applyQueuedHeartbeatRouting(schedule, live, routingBaseline);
-          } catch (err) {
-            if (err instanceof QueuedRouteDisabledError) {
-              // 停用轴准入拒绝(PR #744 review 第六轮):这次排队心跳是新的付费调用,
-              // 目标路由已被停用时不能"保持 live 路由继续派发"。此刻仍在 vendor
-              // dispatch 之前 —— 取消这次派发(同 late-dispatch 路径),run 以明确错误
-              // 失败收口(不含 abort 字样 ⇒ 引擎按 failed 记录)。
-              failAfterAccept(err);
-              failDispatch(err);
-              blockAcceptedDispatch(live, 'route disabled');
-              return;
-            }
-            this.deps.logger.warn?.('[runner] queued heartbeat routing sync failed (non-fatal)', err);
+        try {
+          await this.applyQueuedHeartbeatRouting(schedule, live, routingBaseline);
+        } catch (err) {
+          if (err instanceof QueuedRouteDisabledError || err instanceof QueuedPiRouteSyncError) {
+            // 停用轴准入拒绝(PR #744 review 第六轮):这次排队心跳是新的付费调用,
+            // 目标路由已被停用时不能"保持 live 路由继续派发"。此刻仍在 vendor
+            // dispatch 之前 —— 取消这次派发(同 late-dispatch 路径),run 以明确错误
+            // 失败收口(不含 abort 字样 ⇒ 引擎按 failed 记录)。
+            failAfterAccept(err);
+            failDispatch(err);
+            blockAcceptedDispatch(
+              live,
+              err instanceof QueuedPiRouteSyncError ? 'Pi route sync failed' : 'route disabled',
+            );
+            return;
           }
+          this.deps.logger.warn?.('[runner] queued heartbeat routing sync failed (non-fatal)', err);
         }
         if (live) {
           waiterSlot.current = this.createTurnCompletionWaiter(live, {
@@ -1712,7 +1821,9 @@ export class MakerScheduleRunner implements ScheduleRunner {
       if (dispatched) return;
       if (!sq.isPromptTracked(sessionId, clientId)) {
         failDispatch(
-          new Error('queued heartbeat prompt was dropped before dispatch (queue cleared or recovery abandoned)'),
+          new Error(
+            'queued heartbeat prompt was dropped before dispatch (queue cleared or recovery abandoned)',
+          ),
         );
         return;
       }
@@ -1801,11 +1912,18 @@ export class MakerScheduleRunner implements ScheduleRunner {
   private async applyQueuedHeartbeatRouting(
     schedule: Schedule,
     live: NonNullable<ReturnType<Maker['getSession']>>,
-    baseline: { model?: string; effort?: string; providerId: string | null },
+    baseline: {
+      model?: string;
+      effort?: string;
+      fastMode?: boolean;
+      providerId: string | null;
+    },
   ): Promise<void> {
     const explicitModel = schedule.model?.trim() ? schedule.model : undefined;
     const targetModel =
-      explicitModel ?? (baseline.model?.trim() ? baseline.model : defaultModelFor(schedule.agentKind));
+      explicitModel ??
+      (baseline.model?.trim() ? baseline.model : undefined) ??
+      (live.model?.trim() ? live.model : defaultModelFor(schedule.agentKind));
     const explicitProviderId = schedule.providerId?.trim() ? schedule.providerId.trim() : null;
     const currentProviderId = getSessionProvider(live.id) ?? baseline.providerId;
     // 停用轴准入(PR #744 review 第五、六轮):排队分支在 fire 主路径的准入点之前
@@ -1824,11 +1942,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
       // 误按隐式默认裁决放行,随后照旧沿停用来源派发(PR #744 review 第八轮)。
       // 两者都缺才是真正的隐式默认(reroute 才有意义)。
       const routeProviderId = explicitProviderId ?? currentProviderId;
-      const verdict = await this.deps.checkModelRoute(
-        live.agentKind,
-        targetModel,
-        routeProviderId,
-      );
+      const verdict = await this.deps.checkModelRoute(live.agentKind, targetModel, routeProviderId);
       if (verdict.kind === 'reject') {
         throw new QueuedRouteDisabledError(
           `schedule route unavailable: model "${targetModel}" is disabled in settings (${verdict.reason})`,
@@ -1867,7 +1981,12 @@ export class MakerScheduleRunner implements ScheduleRunner {
       }
       this.deps.logger.info?.(
         '[runner] queued heartbeat routing needs credential mode switch; keeping session routing this round',
-        { scheduleId: schedule.id, sessionId: live.id, fromModel: live.model, toModel: targetModel },
+        {
+          scheduleId: schedule.id,
+          sessionId: live.id,
+          fromModel: live.model,
+          toModel: targetModel,
+        },
       );
       return;
     }
@@ -1876,12 +1995,27 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // 真实运行值为基准判断是否需要覆盖(review P2)。effort 无 live getter,
     // 仍以 baseline 判断(setEffort 幂等,误判多调一次无害)。
     const modelChanged = explicitModel !== undefined && targetModel !== live.model;
+    // 与直发路径一致：Pi 的 provider 是原生进程态。schedule 显式 model/source
+    // 或停用轴改道时，需要把 provider-model 一起重申；只写 provider store 对
+    // Pi BYOM 无效，即使 model 字符串没变也不能跳过。
+    const mustSyncPiNativeRoute =
+      live.agentKind === 'pi' && (explicitModel !== undefined || applyProviderId !== null);
     let modelApplied = true;
-    if (modelChanged) {
+    if (modelChanged || mustSyncPiNativeRoute) {
       try {
-        await live.setModel(targetModel);
+        if (mustSyncPiNativeRoute) {
+          await live.setModel(targetModel, { providerId: nextProviderId });
+        } else {
+          await live.setModel(targetModel);
+        }
       } catch (err) {
         modelApplied = false;
+        if (mustSyncPiNativeRoute) {
+          throw new QueuedPiRouteSyncError(
+            `schedule Pi route sync failed before queued dispatch (model "${targetModel}", provider "${nextProviderId ?? 'cindy'}")`,
+            { cause: err },
+          );
+        }
         this.deps.logger.warn?.('[runner] queued heartbeat setModel failed (non-fatal)', err);
       }
     }
@@ -1943,6 +2077,9 @@ export class MakerScheduleRunner implements ScheduleRunner {
     if (applyProviderId) {
       setSessionProvider(live.id, applyProviderId);
     }
+    if (live.agentKind === 'pi') {
+      setSessionFastMode(live.id, baseline.fastMode === true);
+    }
     if ((modelChanged && modelApplied) || (effortChanged && effortApplied) || applyProviderId) {
       await backfillSessionMeta(
         this.deps.getDb(),
@@ -1983,8 +2120,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
     // scheduler.isRunSilenced 会变回 false,这里照常通知。
     // success 时跳过桌面/飞书通知(引擎落库会同时置 readAt,小红点也不亮)。
     // 失败不豁免 —— 异常必须可见,通知照发(fail-safe)。
-    const silenced =
-      finalRun.status === 'success' && !!this.scheduler?.isRunSilenced(ctx.runId);
+    const silenced = finalRun.status === 'success' && !!this.scheduler?.isRunSilenced(ctx.runId);
     // 已被卡死守卫强制收口的 run:引擎早就把这一轮记成 failed 并按配置投过通知了。
     // 迟到 settle 的我们再投一条,用户会为同一轮收到两条(review #944 第十四轮 P1)。
     // 常见顺序恰好是"引擎先投、runner 几分钟后才 settle",所以只靠引擎侧挡不住。
@@ -2409,10 +2545,7 @@ function normalizeSchedulerSendError(err: unknown): {
   };
 }
 
-function isSessionRunningSendError(
-  err: unknown,
-  error: SanitizedSendOutcomeError,
-): boolean {
+function isSessionRunningSendError(err: unknown, error: SanitizedSendOutcomeError): boolean {
   if (error.errorCode === 'SESSION_RUNNING') return true;
   return err instanceof Error && err.message.startsWith('SESSION_RUNNING:');
 }

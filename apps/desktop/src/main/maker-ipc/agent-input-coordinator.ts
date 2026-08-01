@@ -141,7 +141,7 @@ export interface AgentInputCoordinatorDeps {
    */
   reconcileTurnIdle?: (sessionId: string) => boolean;
   hasPendingInteraction: (sessionId: string) => boolean;
-  getAgentKind: (sessionId: string) => 'claude-code' | 'codex' | null;
+  getAgentKind: (sessionId: string) => AgentInputCreateOpts['agentKind'] | null;
   getSdkSessionId: (sessionId: string) => Promise<string | undefined>;
   /**
    * interrupted-turn-resume:判断某条已派发 user 消息之后 agent 是否已产出内容
@@ -3145,7 +3145,7 @@ export class AgentInputCoordinator {
       return;
     }
 
-    let agentKind: 'claude-code' | 'codex' | null = null;
+    let agentKind: AgentInputCreateOpts['agentKind'] | null = null;
     try {
       agentKind = this.deps.getAgentKind(sessionId);
     } catch (err) {

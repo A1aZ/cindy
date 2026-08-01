@@ -185,6 +185,7 @@ import {
 } from './rsb-browser-bridge';
 import { disposeAndroidAdb } from './mcp-integrations/android.js';
 import { shutdownCodexEnvironment } from './mcp-integrations/codexEnvironment.js';
+import { shutdownPiEnvironment } from './mcp-integrations/piEnvironment.js';
 import { fetchRemoteMediaImageBytes } from './device-link/remoteMediaProtocol';
 import * as imageCacheStore from './imageCacheStore';
 import {
@@ -5838,6 +5839,15 @@ app.on('ready', async () => {
         refreshProviderModels: requestProviderModelAutoRefresh,
         log: accountSwitchLog,
       });
+      // Pi bridge 与 Codex 同源（HTTP bridge + gateway key），账号切换后也必须
+      // 清掉旧账号环境，让下一次 Pi 会话按新账号凭证重建。
+      try {
+        await shutdownPiEnvironment();
+      } catch (err) {
+        accountSwitchLog.warn('shutdownPiEnvironment on account switch failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       void sweepStartupDraftImages({
         dbClient: getDbClient(),
         processStartedAtMs: PROCESS_STARTED_AT_MS,
@@ -6101,6 +6111,7 @@ onQuit('shutdown-maker', shutdownMaker, 'async');
 onQuit('orca-idle-watcher', () => stopOrcaIdleWatcher(), 'sync');
 onQuit('im', () => stopImConnection('quit'), 'async');
 onQuit('codex-env', () => shutdownCodexEnvironment(), 'async');
+onQuit('pi-env', () => shutdownPiEnvironment(), 'async');
 // embedding-host: abort 语义 —— 立刻让出 SQLite 写连接, 不等当前 tick (那批 job 保持
 // pending 下次续跑, 写事务同步原子无中断)。
 onQuit('embedding-host', () => stopEmbeddingHost(), 'async');

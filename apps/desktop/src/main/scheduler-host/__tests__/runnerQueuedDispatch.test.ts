@@ -19,19 +19,8 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 import { AcceptedCallbackDispatchCancelled } from '../../maker-ipc/acceptedCallbackRunner.js';
 
-import type {
-  AgentEvent,
-  Maker,
-  Session,
-  SessionSendResult,
-} from '@cindy/maker-core';
-import type {
-  FireContext,
-  Logger,
-  Notifier,
-  Schedule,
-  ScheduleRun,
-} from '@cindy/maker-scheduler';
+import type { AgentEvent, Maker, Session, SessionSendResult } from '@cindy/maker-core';
+import type { FireContext, Logger, Notifier, Schedule, ScheduleRun } from '@cindy/maker-scheduler';
 
 const mocks = vi.hoisted(() => ({
   createMessage: vi.fn(),
@@ -40,6 +29,20 @@ const mocks = vi.hoisted(() => ({
   wireSessionToIpc: vi.fn(),
   resolveWorkingDir: vi.fn(),
   backfillSessionMeta: vi.fn(),
+  getSessionProvider: vi.fn(),
+  setSessionProvider: vi.fn(),
+  hydrateSessionProvider: vi.fn(),
+  setSessionFastMode: vi.fn(),
+}));
+
+vi.mock('../../maker-host/session-provider-store.js', () => ({
+  getSessionProvider: mocks.getSessionProvider,
+  setSessionProvider: mocks.setSessionProvider,
+  hydrateSessionProvider: mocks.hydrateSessionProvider,
+}));
+
+vi.mock('../../maker-host/session-effort-store.js', () => ({
+  setSessionFastMode: mocks.setSessionFastMode,
 }));
 
 vi.mock('../../localDb/ipc/messages.js', () => ({
@@ -105,7 +108,9 @@ interface FakeSessionHarness {
 function createSessionHarness(sendImpl: SendImpl): FakeSessionHarness {
   const listeners: Array<(event: AgentEvent) => void> = [];
   const send = vi.fn<SendImpl>(sendImpl);
-  const setModel = vi.fn(async () => undefined);
+  const setModel = vi.fn(
+    async (_model: string, _opts?: { providerId?: string | null }) => undefined,
+  );
   const setEffort = vi.fn(async () => undefined);
   const session = {
     id: SESSION_ID,
@@ -284,9 +289,17 @@ function createRunnerHarness(
   session: Session,
   schedulerQueue: SchedulerQueueDeps,
   opts: {
-    availableModels?: Array<{ id: string; efforts?: readonly string[]; defaultEffort?: string | null }>;
+    availableModels?: Array<{
+      id: string;
+      efforts?: readonly string[];
+      defaultEffort?: string | null;
+    }>;
     /** 绑定会话 meta 里的 effort(= 排队路径的 baseline.effort);默认 undefined。 */
     metaEffort?: string;
+    /** 绑定会话 meta 里的 Fast 状态(= Pi bridge 派发前应同步的值)。 */
+    metaFastMode?: boolean;
+    /** 绑定会话 meta 里的 model；默认沿用 Claude fixture。 */
+    metaModel?: string;
     /** 停用轴裁决桩(缺省 = 不裁决,与生产未接线时一致)。 */
     checkModelRoute?: MakerScheduleRunnerDeps['checkModelRoute'];
   } = {},
@@ -302,8 +315,9 @@ function createRunnerHarness(
       id: SESSION_ID,
       agentKind: 'claude-code',
       workDir: '/tmp/bound',
-      model: 'claude-opus-4-6',
+      model: opts.metaModel ?? 'claude-opus-4-6',
       effort: opts.metaEffort,
+      fastMode: opts.metaFastMode,
       sdkSessionId: 'sdk-1',
     })),
     isSessionAlive: vi.fn(() => true),
@@ -333,6 +347,7 @@ beforeEach(() => {
     userSendAt: null,
     providerId: null,
   });
+  mocks.getSessionProvider.mockReturnValue(null);
 });
 
 describe('MakerScheduleRunner queued dispatch (busy bound session)', () => {
@@ -367,7 +382,11 @@ describe('MakerScheduleRunner queued dispatch (busy bound session)', () => {
     await queue.accept();
     await vi.waitFor(() => expect(harness.listenerCount()).toBe(1));
     expect(isHeadlessGhostSetupTurn(SESSION_ID)).toBe(true);
-    harness.emit({ type: 'text', data: { text: 'heartbeat summary', isFinal: true }, source: 'claude-code' });
+    harness.emit({
+      type: 'text',
+      data: { text: 'heartbeat summary', isFinal: true },
+      source: 'claude-code',
+    });
     harness.emit({ type: 'done', data: {}, source: 'claude-code' });
 
     const result = await firePromise;
@@ -598,6 +617,113 @@ describe('MakerScheduleRunner queued dispatch (busy bound session)', () => {
     expect(harness.listenerCount()).toBe(0);
   });
 
+  it('排队 Pi 即使模型不变也同步原生 provider-model，并在派发前写 Fast', async () => {
+    mocks.getSessionRowSnapshot.mockResolvedValue({
+      status: 'active',
+      userSendAt: null,
+      providerId: 'byom-a',
+    });
+    mocks.getSessionProvider.mockReturnValue('byom-a');
+    const harness = createSessionHarness(async () => ({ accepted: true }));
+    (harness.session as { agentKind: string }).agentKind = 'pi';
+    (harness.session as { model: string }).model = 'gpt-5.6-sol';
+    const queue = createQueueHarness({ busy: true });
+    const { runner } = createRunnerHarness(harness.session, queue.deps, {
+      metaModel: 'gpt-5.6-sol',
+      metaFastMode: true,
+    });
+
+    const firePromise = runner.fire(
+      heartbeatSchedule({
+        agentKind: 'pi',
+        model: 'gpt-5.6-sol',
+        providerId: 'byom-b',
+      }),
+      createFireContext(),
+    );
+    await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+    await queue.accept();
+
+    expect(harness.setModel).toHaveBeenCalledWith('gpt-5.6-sol', { providerId: 'byom-b' });
+    expect(mocks.setSessionProvider).toHaveBeenCalledWith(SESSION_ID, 'byom-b');
+    expect(mocks.setSessionFastMode).toHaveBeenCalledWith(SESSION_ID, true);
+    harness.emit({ type: 'done', data: {}, source: 'pi' });
+    await expect(firePromise).resolves.toMatchObject({ sessionId: SESSION_ID });
+  });
+
+  it('排队 Pi 的原生路由同步失败时在 vendor dispatch 前 fail-closed', async () => {
+    mocks.getSessionRowSnapshot.mockResolvedValue({
+      status: 'active',
+      userSendAt: null,
+      providerId: 'byom-a',
+    });
+    mocks.getSessionProvider.mockReturnValue('byom-a');
+    const harness = createSessionHarness(async () => ({ accepted: true }));
+    (harness.session as { agentKind: string }).agentKind = 'pi';
+    (harness.session as { model: string }).model = 'gpt-5.6-sol';
+    harness.setModel.mockRejectedValue(new Error('set_model rejected'));
+    const queue = createQueueHarness({ busy: true });
+    const { runner } = createRunnerHarness(harness.session, queue.deps, {
+      metaModel: 'gpt-5.6-sol',
+    });
+
+    const firePromise = runner.fire(
+      heartbeatSchedule({
+        agentKind: 'pi',
+        model: 'gpt-5.6-sol',
+        providerId: 'byom-b',
+      }),
+      createFireContext(),
+    );
+    await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+    await queue.accept();
+
+    await expect(firePromise).rejects.toThrow(
+      'schedule Pi route sync failed before queued dispatch',
+    );
+    expect(harness.session.abort).toHaveBeenCalled();
+    expect(mocks.setSessionProvider).not.toHaveBeenCalled();
+  });
+
+  it('排队 Pi 每次派发都写 Fast=false，清掉复用会话的旧 bridge 状态', async () => {
+    const harness = createSessionHarness(async () => ({ accepted: true }));
+    (harness.session as { agentKind: string }).agentKind = 'pi';
+    (harness.session as { model: string }).model = 'gpt-5.6-sol';
+    const queue = createQueueHarness({ busy: true });
+    const { runner } = createRunnerHarness(harness.session, queue.deps, {
+      metaModel: 'gpt-5.6-sol',
+      metaFastMode: false,
+    });
+
+    const firePromise = runner.fire(
+      heartbeatSchedule({ agentKind: 'pi', model: undefined, providerId: undefined }),
+      createFireContext(),
+    );
+    await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+    await queue.accept();
+
+    expect(mocks.setSessionFastMode).toHaveBeenCalledWith(SESSION_ID, false);
+    harness.emit({ type: 'done', data: {}, source: 'pi' });
+    await expect(firePromise).resolves.toMatchObject({ sessionId: SESSION_ID });
+  });
+
+  it('正常排队项 accept 时 live session 已消失 → 在路由/Fast 同步前阻止 vendor dispatch', async () => {
+    const harness = createSessionHarness(async () => ({ accepted: true }));
+    const queue = createQueueHarness({ busy: true });
+    const { runner, maker } = createRunnerHarness(harness.session, queue.deps);
+    const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
+    const fireRejected = expect(firePromise).rejects.toThrow(
+      'queued heartbeat live session unavailable before route sync and vendor dispatch',
+    );
+    await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
+
+    (maker.getSession as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
+    await expect(queue.accept()).rejects.toBeInstanceOf(AcceptedCallbackDispatchCancelled);
+    await fireRejected;
+    expect(harness.setModel).not.toHaveBeenCalled();
+    expect(mocks.setSessionFastMode).not.toHaveBeenCalled();
+  });
+
   it('defers (no duplicate enqueue) when the schedule already has a queued prompt', async () => {
     const harness = createSessionHarness(async () => ({ accepted: true }));
     const queue = createQueueHarness({ busy: true, hasQueued: true });
@@ -717,7 +843,9 @@ describe('MakerScheduleRunner queued dispatch (busy bound session)', () => {
     // coordinator 稍后仍完成了派发(accept 晚到)→ 刚起步的 turn 被立即中断。
     await queue.accept();
     expect((maker as unknown as { getSession: () => Session }).getSession).toBeDefined();
-    expect((harness.session as unknown as { abort: ReturnType<typeof vi.fn> }).abort).toHaveBeenCalled();
+    expect(
+      (harness.session as unknown as { abort: ReturnType<typeof vi.fn> }).abort,
+    ).toHaveBeenCalled();
     // 不再挂 turn 监听(run 已收口)。
     expect(harness.listenerCount()).toBe(0);
     expect(isHeadlessGhostSetupTurn(SESSION_ID)).toBe(false);
@@ -810,7 +938,11 @@ describe('MakerScheduleRunner queued dispatch (busy bound session)', () => {
     const queue = createQueueHarness({ busy: true });
     const { runner } = createRunnerHarness(harness.session, queue.deps, {
       availableModels: [
-        { id: 'claude-opus-4-6', efforts: ['low', 'medium', 'high', 'xhigh'], defaultEffort: 'high' },
+        {
+          id: 'claude-opus-4-6',
+          efforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultEffort: 'high',
+        },
       ],
     });
 
@@ -840,7 +972,11 @@ describe('MakerScheduleRunner queued dispatch (busy bound session)', () => {
     const queue = createQueueHarness({ busy: true });
     const { runner } = createRunnerHarness(harness.session, queue.deps, {
       availableModels: [
-        { id: 'claude-opus-4-6', efforts: ['low', 'medium', 'high', 'xhigh'], defaultEffort: 'high' },
+        {
+          id: 'claude-opus-4-6',
+          efforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultEffort: 'high',
+        },
       ],
     });
 
@@ -866,8 +1002,16 @@ describe('MakerScheduleRunner queued dispatch (busy bound session)', () => {
     const queue = createQueueHarness({ busy: true });
     const { runner } = createRunnerHarness(harness.session, queue.deps, {
       availableModels: [
-        { id: 'claude-opus-4-6', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high' },
-        { id: 'capped-xhigh-model', efforts: ['low', 'medium', 'high', 'xhigh'], defaultEffort: 'high' },
+        {
+          id: 'claude-opus-4-6',
+          efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+          defaultEffort: 'high',
+        },
+        {
+          id: 'capped-xhigh-model',
+          efforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultEffort: 'high',
+        },
       ],
     });
 
@@ -930,8 +1074,16 @@ describe('MakerScheduleRunner queued dispatch (busy bound session)', () => {
     const queue = createQueueHarness({ busy: true });
     const { runner } = createRunnerHarness(harness.session, queue.deps, {
       availableModels: [
-        { id: 'claude-opus-4-6', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high' },
-        { id: 'capped-xhigh-model', efforts: ['low', 'medium', 'high', 'xhigh'], defaultEffort: 'high' },
+        {
+          id: 'claude-opus-4-6',
+          efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+          defaultEffort: 'high',
+        },
+        {
+          id: 'capped-xhigh-model',
+          efforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultEffort: 'high',
+        },
       ],
     });
 
@@ -960,8 +1112,16 @@ describe('MakerScheduleRunner queued dispatch (busy bound session)', () => {
     const { runner } = createRunnerHarness(harness.session, queue.deps, {
       metaEffort: 'max', // enqueue 时刻 baseline.effort = max(陈旧)
       availableModels: [
-        { id: 'claude-opus-4-6', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high' },
-        { id: 'capped-xhigh-model', efforts: ['low', 'medium', 'high', 'xhigh'], defaultEffort: 'high' },
+        {
+          id: 'claude-opus-4-6',
+          efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+          defaultEffort: 'high',
+        },
+        {
+          id: 'capped-xhigh-model',
+          efforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultEffort: 'high',
+        },
       ],
     });
 
@@ -990,8 +1150,16 @@ describe('MakerScheduleRunner queued dispatch (busy bound session)', () => {
     const { runner } = createRunnerHarness(harness.session, queue.deps, {
       metaEffort: 'xhigh', // baseline.effort = 上次 fire backfill 的 clamp 值
       availableModels: [
-        { id: 'claude-opus-4-6', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'high' },
-        { id: 'capped-xhigh-model', efforts: ['low', 'medium', 'high', 'xhigh'], defaultEffort: 'high' },
+        {
+          id: 'claude-opus-4-6',
+          efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+          defaultEffort: 'high',
+        },
+        {
+          id: 'capped-xhigh-model',
+          efforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultEffort: 'high',
+        },
       ],
     });
 
@@ -1039,7 +1207,9 @@ describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', ()
     const ctx = createFireContext();
     let started = 0;
     const ends: boolean[] = [];
-    (ctx as { onQueueWaitStart?: () => void }).onQueueWaitStart = () => { started += 1; };
+    (ctx as { onQueueWaitStart?: () => void }).onQueueWaitStart = () => {
+      started += 1;
+    };
     (ctx as { endQueueWait?: (r: boolean) => boolean }).endQueueWait = (r) => {
       ends.push(r);
       return true; // 有空槽
@@ -1091,7 +1261,9 @@ describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', ()
 
       const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
       await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
-      await vi.advanceTimersByTimeAsync(QUEUED_DISPATCH_MAX_WAIT_MS + QUEUED_DISPATCH_TRACK_POLL_MS);
+      await vi.advanceTimersByTimeAsync(
+        QUEUED_DISPATCH_MAX_WAIT_MS + QUEUED_DISPATCH_TRACK_POLL_MS,
+      );
       await expect(firePromise).resolves.toMatchObject({ deferred: true });
 
       // 超时之后 coordinator 才 drain 到它
@@ -1113,7 +1285,9 @@ describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', ()
       const ctx = createFireContext();
       let started = 0;
       const ends: boolean[] = [];
-      (ctx as { onQueueWaitStart?: () => void }).onQueueWaitStart = () => { started += 1; };
+      (ctx as { onQueueWaitStart?: () => void }).onQueueWaitStart = () => {
+        started += 1;
+      };
       (ctx as { endQueueWait?: (r: boolean) => boolean }).endQueueWait = (r) => {
         ends.push(r);
         return true;
@@ -1122,7 +1296,9 @@ describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', ()
       const firePromise = runner.fire(heartbeatSchedule(), ctx);
       await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
       // 走到上限:轮询在下一拍发现超时 → 撤项 + 顺延
-      await vi.advanceTimersByTimeAsync(QUEUED_DISPATCH_MAX_WAIT_MS + QUEUED_DISPATCH_TRACK_POLL_MS);
+      await vi.advanceTimersByTimeAsync(
+        QUEUED_DISPATCH_MAX_WAIT_MS + QUEUED_DISPATCH_TRACK_POLL_MS,
+      );
 
       await expect(firePromise).resolves.toMatchObject({ deferred: true });
       expect(queue.removeCalls).toEqual([{ sessionId: SESSION_ID, clientId: 'client-1' }]);
@@ -1202,7 +1378,9 @@ describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', ()
       await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
 
       // 一路清醒:每拍的真实间隔都等于轮询间隔,额度正常累加
-      await vi.advanceTimersByTimeAsync(QUEUED_DISPATCH_MAX_WAIT_MS + QUEUED_DISPATCH_TRACK_POLL_MS);
+      await vi.advanceTimersByTimeAsync(
+        QUEUED_DISPATCH_MAX_WAIT_MS + QUEUED_DISPATCH_TRACK_POLL_MS,
+      );
       await settled;
       expect(queue.removeCalls).toEqual([{ sessionId: SESSION_ID, clientId: 'client-1' }]);
     } finally {
@@ -1217,15 +1395,14 @@ describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', ()
       const queue = createQueueHarness({ busy: true });
       const { runner, notifier } = createRunnerHarness(harness.session, queue.deps);
 
-      const firePromise = runner.fire(
-        heartbeatSchedule({ recurring: false }),
-        createFireContext(),
-      );
+      const firePromise = runner.fire(heartbeatSchedule({ recurring: false }), createFireContext());
       // 先挂上 rejection handler 再推进假时钟:fire 会在 advance 期间同步 reject,
       // 此时若还没有 handler,Node 会报 unhandled rejection 污染整个测试文件。
       const rejection = expect(firePromise).rejects.toThrow();
       await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
-      await vi.advanceTimersByTimeAsync(QUEUED_DISPATCH_MAX_WAIT_MS + QUEUED_DISPATCH_TRACK_POLL_MS);
+      await vi.advanceTimersByTimeAsync(
+        QUEUED_DISPATCH_MAX_WAIT_MS + QUEUED_DISPATCH_TRACK_POLL_MS,
+      );
 
       await rejection;
       expect(queue.removeCalls).toEqual([{ sessionId: SESSION_ID, clientId: 'client-1' }]);
@@ -1245,7 +1422,9 @@ describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', ()
       const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
       await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
       // 快到上限时派发被接受
-      await vi.advanceTimersByTimeAsync(QUEUED_DISPATCH_MAX_WAIT_MS - QUEUED_DISPATCH_TRACK_POLL_MS);
+      await vi.advanceTimersByTimeAsync(
+        QUEUED_DISPATCH_MAX_WAIT_MS - QUEUED_DISPATCH_TRACK_POLL_MS,
+      );
       await queue.accept();
       // 再跨过上限:已 dispatched,轮询早退,不得撤项
       await vi.advanceTimersByTimeAsync(QUEUED_DISPATCH_MAX_WAIT_MS);
@@ -1271,7 +1450,9 @@ describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', ()
       const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
       const settled = expect(firePromise).resolves.toMatchObject({ deferred: true });
       await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
-      await vi.advanceTimersByTimeAsync(QUEUED_DISPATCH_MAX_WAIT_MS + QUEUED_DISPATCH_TRACK_POLL_MS);
+      await vi.advanceTimersByTimeAsync(
+        QUEUED_DISPATCH_MAX_WAIT_MS + QUEUED_DISPATCH_TRACK_POLL_MS,
+      );
       await settled;
 
       // 迟到的 accept 不抛(coordinator 靠 reservation 取消回滚),但必须取消这次派发
@@ -1295,7 +1476,9 @@ describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', ()
       const firePromise = runner.fire(heartbeatSchedule(), createFireContext());
       const settled = expect(firePromise).resolves.toMatchObject({ deferred: true });
       await vi.waitFor(() => expect(queue.enqueueCalls.length).toBe(1));
-      await vi.advanceTimersByTimeAsync(QUEUED_DISPATCH_MAX_WAIT_MS + QUEUED_DISPATCH_TRACK_POLL_MS);
+      await vi.advanceTimersByTimeAsync(
+        QUEUED_DISPATCH_MAX_WAIT_MS + QUEUED_DISPATCH_TRACK_POLL_MS,
+      );
       await settled;
 
       // 会话此刻已不在内存里(ephemeral 关闭 / 进程重建)
@@ -1319,7 +1502,9 @@ describe('MakerScheduleRunner queued dispatch: slot accounting and wait cap', ()
     const ctx = createFireContext();
     let startCalls = 0;
     const ends: boolean[] = [];
-    (ctx as { onQueueWaitStart?: () => void }).onQueueWaitStart = () => { startCalls += 1; };
+    (ctx as { onQueueWaitStart?: () => void }).onQueueWaitStart = () => {
+      startCalls += 1;
+    };
     (ctx as { endQueueWait?: (r: boolean) => boolean }).endQueueWait = (r) => {
       ends.push(r);
       return true;

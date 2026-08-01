@@ -58,6 +58,7 @@ import type { AgentKind, CatalogModel, ProviderView } from '@cindy/model-provide
 const AGENT_LABEL: Record<AgentKind, string> = {
   'claude-code': 'Claude Code',
   codex: 'Codex',
+  pi: 'Pi',
 };
 
 /**
@@ -656,12 +657,15 @@ export function UnifiedModelList({
                   const capability = isCapabilityRow(row, userProvider);
                   const diverged = !capability && isRowDiverged(provider.id, row);
                   const anyOn = rowAnyEnabled(provider.id, row);
-                  // 能力注记:仅双 agent 供应商 + 单端模型才标(单 agent 供应商头部已说明);
+                  // 能力注记:多 agent 供应商里缺少任一通道就标(单 agent 供应商头部已说明);
                   // 能力模型行不标(它们本来就不参与 agent 维度)。
+                  const missingAgents = provider.agents.filter(
+                    (agent) => !row.avail.includes(agent),
+                  );
                   const capNote =
-                    !capability && multiAgent && row.avail.length === 1
+                    !capability && multiAgent && missingAgents.length > 0
                       ? t('settings.providers.models.capabilityNote', {
-                          agent: AGENT_LABEL[row.avail[0] === 'claude-code' ? 'codex' : 'claude-code'],
+                          agent: missingAgents.map((agent) => AGENT_LABEL[agent]).join(' / '),
                         })
                       : null;
                   // 上下文窗口取代表值;双端不同用原生 title 提示。

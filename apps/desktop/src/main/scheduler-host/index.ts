@@ -23,6 +23,7 @@ import type { FeishuIM } from '@cindy/im';
 
 import { dialogueWorkspaceRootDir } from '../localDb/dialogueWorkspace';
 import {
+  resolveDefaultScheduleRoute,
   resolveRouteCopyCapabilities,
   verdictForModelRoute,
 } from '../maker-host/model-route-guard-live.js';
@@ -90,6 +91,7 @@ export async function startScheduler(deps: StartSchedulerDeps): Promise<Schedule
     checkModelRoute: verdictForModelRoute,
     // 隐式改道后按落地拷贝 reconcile effort/Fast(见 runner deps 注释,R27)。
     resolveRouteCopyCapabilities,
+    resolveDefaultModelRoute: resolveDefaultScheduleRoute,
     // 心跳撞忙排队桥:实现挂在 maker-ipc/register.ts 的 coordinator 装配处
     // (holder 未就绪时 isSessionBusy 返回 false → runner 走原直发路径)。
     schedulerQueue: {
@@ -104,7 +106,9 @@ export async function startScheduler(deps: StartSchedulerDeps): Promise<Schedule
     },
   });
   const scriptRunner = new ScriptScheduleRunner({
-    broker: new SchedulerScriptCapabilityBroker(),
+    broker: new SchedulerScriptCapabilityBroker({
+      resolveDefaultModelRoute: resolveDefaultScheduleRoute,
+    }),
     logger: deps.logger,
     notifier,
     getDb: deps.getDb,

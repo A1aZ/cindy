@@ -515,7 +515,7 @@ interface ChatInputProps {
    * M35: Vendor lock — when provided, ModelSelector only shows models
    * belonging to this vendor ('cc' for Claude, 'codex' for OpenAI Codex).
    */
-  vendorKey?: 'cc' | 'codex';
+  vendorKey?: 'cc' | 'codex' | 'pi';
   /**
    * Optional override for the composerDraftStore key used to persist editor
    * content (and via attachmentState, attachments) across mount/unmount.
@@ -615,9 +615,10 @@ interface ChatInputProps {
   };
 }
 
-function vendorKeyToAgentKind(v?: 'cc' | 'codex'): AgentKind | null {
+function vendorKeyToAgentKind(v?: 'cc' | 'codex' | 'pi'): AgentKind | null {
   if (v === 'cc') return 'claude-code';
   if (v === 'codex') return 'codex';
+  if (v === 'pi') return 'pi';
   return null;
 }
 
@@ -1181,7 +1182,9 @@ export function ChatInput({
   // initialModel/initialEffort 缺失的瞬态(会话快照未加载)兜底:读本地草稿 lastByVendor
   // (localStorage,按 agent 分槽、sanitize 恒有种子值)。默认模型/档位偏好已全量本地化,
   // 不再依赖服务端 UserPreferences(登录态失效/离线时模型与档位选择必须照常工作)。
-  const localVendorDefaults = getDraft().lastByVendor[vendorKey === 'codex' ? 'codex' : 'cc'];
+  const localVendorDefaults = getDraft().lastByVendor[
+    vendorKey === 'pi' ? 'pi' : vendorKey === 'codex' ? 'codex' : 'cc'
+  ];
   // session-agent-switch 意图制:意图期内 chip / 选择器显示用户选择的目标
   // (model/effort/provider/fast),props(镜像 DB)仍是旧引擎值——真切换在下一条
   // 消息发送时刻 apply,patched 回流后意图清除、显示交回 props。意图存放在
@@ -1242,6 +1245,13 @@ export function ChatInput({
   // device-link 远程会话:能力(模型 / fast / effort)从被控端读;本地会话 deviceLinkDeviceId undefined → 本地。
   const ccCaps = useAgentCapabilities('claude-code', deviceLinkDeviceId);
   const codexCaps = useAgentCapabilities('codex', deviceLinkDeviceId);
+  const piCaps = useAgentCapabilities('pi', deviceLinkDeviceId);
+  const activeAgentCapabilities =
+    agentKind === 'codex'
+      ? codexCaps.capabilities
+      : agentKind === 'pi'
+        ? piCaps.capabilities
+        : ccCaps.capabilities;
 
   // session-agent-switch 入口门控。device-link 远程会话读**被控端**的值；除了基础
   // supportsSessionAgentSwitch，还必须有 v2 CAS 能力。同引擎 no-op 的安全收尾依赖 host
@@ -1324,10 +1334,8 @@ export function ChatInput({
   // 默认取 cc。editorProps.handleKeyDown 是稳定闭包, 走 ref 取值。
   const permissionCycleOptions = useMemo(
     () =>
-      ((agentKind ?? 'claude-code') === 'codex'
-        ? codexCaps.capabilities?.permissionModes
-        : ccCaps.capabilities?.permissionModes) ?? [],
-    [agentKind, ccCaps.capabilities, codexCaps.capabilities],
+      activeAgentCapabilities?.permissionModes ?? [],
+    [activeAgentCapabilities],
   );
   const permissionCycleOptionsRef = useRef(permissionCycleOptions);
   permissionCycleOptionsRef.current = permissionCycleOptions;
@@ -1340,7 +1348,7 @@ export function ChatInput({
 
   // 计划模式入口门控:agent capability(device-link 老被控端无此字段 → 隐藏)+ 父组件接线。
   const planModeSupported =
-    (vendorKey === 'codex' ? codexCaps : ccCaps).capabilities?.planMode?.supported === true;
+    activeAgentCapabilities?.planMode?.supported === true;
   const planModeEntry =
     planModeSupported && onPlanModeChange
       ? { enabled: planModeEnabled, onToggle: (next: boolean) => void onPlanModeChange(next) }
@@ -1356,8 +1364,11 @@ export function ChatInput({
     if ((codexCaps.capabilities?.availableModels ?? []).some((m) => m.id === activeModel)) {
       return 'codex';
     }
+    if ((piCaps.capabilities?.availableModels ?? []).some((m) => m.id === activeModel)) {
+      return 'pi';
+    }
     return null;
-  }, [activeModel, agentKind, ccCaps.capabilities, codexCaps.capabilities]);
+  }, [activeModel, agentKind, ccCaps.capabilities, codexCaps.capabilities, piCaps.capabilities]);
   // 供应商连接态。effectiveSourceId / sendProviderId / dispatchSend 预检用它。device-link 远程会话 /
   // 草稿用**被控端**供应商目录(隧道),否则用本机(两 hook 都无条件调用,按 deviceLinkDeviceId 取)。
   const localProviders = useProviders();
@@ -3833,7 +3844,7 @@ export function ChatInput({
       }
       const kinds: readonly AgentKind[] = currentModelAgentKind
         ? [currentModelAgentKind]
-        : ['claude-code', 'codex'];
+        : ['claude-code', 'codex', 'pi'];
       for (const kind of kinds) {
         const found = deriveModelsFromProviders(providers, kind).find((x) => x.id === modelId);
         if (found) return { efforts: found.efforts, defaultEffort: found.defaultEffort ?? null };
@@ -3858,7 +3869,11 @@ export function ChatInput({
         deviceProviders: remoteProviders.providers,
         localProviders: localProviders.providers,
         capabilities:
-          currentModelAgentKind === 'codex' ? codexCaps.capabilities : ccCaps.capabilities,
+          currentModelAgentKind === 'codex'
+            ? codexCaps.capabilities
+            : currentModelAgentKind === 'pi'
+              ? piCaps.capabilities
+              : ccCaps.capabilities,
         providerId,
         modelId: targetModelId,
         agentKind: currentModelAgentKind,
@@ -3870,6 +3885,7 @@ export function ChatInput({
       currentModelAgentKind,
       ccCaps.capabilities,
       codexCaps.capabilities,
+      piCaps.capabilities,
     ],
   );
 
@@ -3902,7 +3918,8 @@ export function ChatInput({
       const remoteDeviceId =
         opts.remoteDeviceId ?? getSessionDeviceId(sessionId) ?? deviceLinkDeviceId;
       if (!remoteDeviceId) {
-        const vendor = currentModelAgentKind === 'codex' ? 'codex' : 'cc';
+        const vendor =
+          currentModelAgentKind === 'codex' ? 'codex' : currentModelAgentKind === 'pi' ? 'pi' : 'cc';
         patchVendorPrefsPreservingModelChoice(vendor, {
           model: modelId,
           providerId: activeProviderId ?? null,
@@ -4100,7 +4117,7 @@ export function ChatInput({
   );
   const performAgentSwitch = useCallback(
     async (
-      targetAgentKind: 'claude-code' | 'codex',
+      targetAgentKind: 'claude-code' | 'codex' | 'pi',
       newModelId: string,
       providerId: string | null = null,
       // 意图期内的档位/Fast 改动经此显式覆盖(用户手选优先于记忆/默认解析)。
@@ -4157,7 +4174,11 @@ export function ChatInput({
                 deviceProviders: remoteProviders.providers,
                 localProviders: localProviders.providers,
                 capabilities:
-                  targetAgentKind === 'codex' ? codexCaps.capabilities : ccCaps.capabilities,
+                  targetAgentKind === 'codex'
+                    ? codexCaps.capabilities
+                    : targetAgentKind === 'pi'
+                      ? piCaps.capabilities
+                      : ccCaps.capabilities,
                 providerId,
                 modelId: newModelId,
                 agentKind: targetAgentKind,
@@ -4218,7 +4239,11 @@ export function ChatInput({
           if (makerChatStore.getSnapshot(sourceSessionId).agentStatus.isRunning) {
             toast.success(
               t('newChat.chatInput.agentSwitch.deferred', {
-                agent: targetAgentKind === 'codex' ? 'Codex' : 'Claude Code',
+                agent: targetAgentKind === 'codex'
+                  ? 'Codex'
+                  : targetAgentKind === 'pi'
+                    ? 'Pi'
+                    : 'Claude Code',
                 model: newModelId,
               }),
               { duration: 4000 },

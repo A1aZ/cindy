@@ -1317,13 +1317,21 @@
           "anthropic": "Anthropic Messages (Cindy bridge)",
           "responsesHelp": "The provider supports the Responses API natively, so Cindy forwards its event stream unchanged.",
           "chatHelp": "For providers that only expose Chat Completions. Cindy converts streaming text and function tool calls; some advanced Responses features are unavailable.",
-          "anthropicHelp": "For providers that expose the Anthropic Messages API. Cindy converts Responses messages, images, tools, reasoning, and streaming events."
+          "anthropicHelp": "For providers that expose the Anthropic Messages API. Cindy converts Responses messages, images, tools, reasoning, and streaming events.",
+          "piResponses": "OpenAI Responses",
+          "piChat": "OpenAI Chat Completions",
+          "piAnthropic": "Anthropic Messages",
+          "piResponsesHelp": "Pi connects directly to the provider's OpenAI Responses API.",
+          "piChatHelp": "Pi connects directly to the provider's OpenAI-compatible Chat Completions API.",
+          "piAnthropicHelp": "Pi connects directly to the provider's Anthropic Messages API."
         },
         "protocol": {
           "claude": "Claude Code",
           "claudeDesc": "Claude Code follows the Anthropic protocol (auth via x-api-key). Enter this source's baseURL, key, and models for Claude Code; leave blank to skip Claude Code for this source.",
           "codex": "Codex",
-          "codexDesc": "Codex speaks the OpenAI Responses protocol. Choose native Responses, or let Cindy bridge Chat Completions or Anthropic Messages. Enter this source's base URL, key, and models for Codex; leave blank to skip Codex for this source."
+          "codexDesc": "Codex speaks the OpenAI Responses protocol. Choose native Responses, or let Cindy bridge Chat Completions or Anthropic Messages. Enter this source's base URL, key, and models for Codex; leave blank to skip Codex for this source.",
+          "pi": "Pi",
+          "piDesc": "Pi is a multi-protocol harness: your custom or local models connect natively (Ollama, vLLM, self-hosted endpoints), without going through Cindy's compatibility proxy. Pick the API type below, then enter this source's base URL, key, and models for Pi; leave blank to skip Pi for this source."
         },
         "errors": {
           "nameRequired": "Display name is required",
@@ -2130,6 +2138,10 @@
         "codex": {
           "label": "Codex",
           "description": "All models used through the Codex entry share the same memory."
+        },
+        "pi": {
+          "label": "Pi",
+          "description": "Saves long-session compression summaries to Cindy memory for future Pi sessions."
         }
       },
       "agent": {
@@ -4812,6 +4824,7 @@
       "add": "Add project",
       "cancel": "Cancel",
       "empty": "Connect a controllable device under Settings → Remote connection, or add an SSH host under Settings → Remote machines first.",
+      "emptyPiSshFiltered": "Pi runs locally only, so SSH hosts aren't shown here. Connect a controllable device under Settings → Remote connection, or switch to Claude or Codex to use an SSH host.",
       "loading": "Loading…",
       "noSubdirs": "No subfolders here",
       "doubleClickHint": "Double-click to enter",
@@ -4870,6 +4883,7 @@
         "agent": {
           "claudeCode": "Claude Code",
           "codex": "Codex",
+          "pi": "Pi",
           "pending": "Next: {{agent}}"
         }
       },
@@ -4949,6 +4963,20 @@
           "bypassPermissions": {
             "label": "Full access",
             "description": "Allows editing any file and running networked commands without another confirmation. Highest risk; use only for trusted tasks."
+          }
+        },
+        "pi": {
+          "ask": {
+            "label": "Default permissions",
+            "description": "Read-only tools run directly; writing files, running commands, and MCP tools ask each time."
+          },
+          "auto": {
+            "label": "Auto-review",
+            "description": "In-workspace writes and safe commands run automatically; out-of-workspace writes, risky commands, and MCP tools still ask."
+          },
+          "bypassPermissions": {
+            "label": "Full access",
+            "description": "Every tool runs without asking. Highest risk; use only for trusted tasks."
           }
         }
       }
@@ -6091,6 +6119,7 @@
     },
     "draft": {
       "createSessionFailed": "Failed to create session, please retry",
+      "piRemoteUnsupported": "Pi runs locally only and can't use SSH remote hosts. Switch to Claude or Codex to use this host.",
       "remoteWorktreeCleanupPending": "The previous remote worktree is still awaiting cleanup. Reconnect the device and try again.",
       "remoteProviderUpdating": "Provider credentials are being updated — retry in a moment",
       "remoteProviderUnsupported": "This provider is not supported in SSH remote sessions — pick another source",
@@ -6338,7 +6367,35 @@
         "moveToProjectRemoteUnsupported": "Moving remote sessions is not supported yet",
         "openInNewWindow": "Open in new window",
         "exportShare": "Export session…",
+        "exportHtml": "Export to HTML…",
+        "exportHtmlSuccess": "Session exported to HTML",
+        "exportHtmlFailed": "HTML export failed",
+        "compact": "Compact context",
+        "compacting": "Compacting…",
+        "compactSuccess": "Context compacted",
+        "compactSuccessWithTokens": "Context compacted: {{before}}k → {{after}}k tokens",
+        "compactFailed": "Compaction failed",
+        "compactNothing": "Nothing to compact yet",
+        "sessionBranches": "Session branches",
         "copySessionLink": "Copy session link"
+      },
+      "sessionBranches": {
+        "title": "Session branches",
+        "close": "Close session branches",
+        "description": "Cindy session forks and Pi's in-session branches live in one tree.",
+        "current": "Current",
+        "empty": "This session has no Pi branches to switch yet.",
+        "emptyEntry": "No visible content",
+        "loadFailed": "Failed to load session branches",
+        "switchFailed": "Failed to switch branch",
+        "switched": "Session branch switched",
+        "switchedWithDraft": "Branch switched and the original prompt was restored to the composer",
+        "runningBlocked": "Wait for the current turn to finish before switching branches.",
+        "remoteBlocked": "Reconnect or upgrade the controlled desktop before switching branches.",
+        "filesWarning": "Switching changes conversation context only; workspace files are not rolled back.",
+        "summarize": "Summarize the branch you leave (uses the model)",
+        "summaryFocus": "Optional summary focus, e.g. preserve error-handling conclusions",
+        "role": { "user": "User", "assistant": "Agent", "tool": "Tool", "summary": "Branch summary", "system": "State" }
       },
       "projectAction": {
         "rename": "Rename project",
@@ -8065,8 +8122,11 @@
       "codexVoiceAuthDescription": "Voice input uses a connected ChatGPT account for GPT realtime speech recognition. The account is not connected or needs an update. Open Model Providers to connect ChatGPT?",
       "codexBinaryMissingTitle": "Codex component not ready",
       "codexBinaryMissingDescription": "The Codex component is not ready yet, so this feature cannot be used. Try again later or check the Codex connection in Settings → Providers.",
+      "piBinaryMissingTitle": "Pi component not ready",
+      "piBinaryMissingDescription": "The Pi component is not ready yet, so this feature cannot be used. Try again later or check the Pi connection in Settings → Providers.",
       "goToSettings": "Open Settings",
       "remoteCodexBinaryMissingTitle": "Codex component not ready on the remote device",
+      "remotePiBinaryMissingTitle": "Pi component not ready on the remote device",
       "remoteAuthDescription": "You need to finish setup on the controlled device \"{{device}}\" before you can start a session here. Configure it on that device and try again.",
       "remoteCodexNoSourceTitle": "No Codex source connected on the remote device",
       "remoteCodexNoSourceDescription": "\"{{device}}\" has no model source connected for Codex, so sessions can't be started from here. Open {{appName}} on that device, sign in to OpenAI or connect another source under Settings → Providers, then try again.",

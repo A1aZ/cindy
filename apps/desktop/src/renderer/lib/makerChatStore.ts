@@ -22,6 +22,7 @@
  */
 
 import type { CindyRegion } from '@cindy/maker-shared/brand-identity';
+import { dbToMakerAgentKind } from '../../shared/agentKindConversion';
 import { redactSensitiveText } from '@cindy/maker-shared/error-redaction';
 import {
   applyCodexPlanSnapshotOnDone,
@@ -462,7 +463,7 @@ export interface ChatMessage {
 export type AgentTaskStatus = 'running' | 'completed' | 'failed' | 'stopped';
 
 export interface AgentTaskUpdate {
-  provider: 'claude-code' | 'codex';
+  provider: 'claude-code' | 'codex' | 'pi';
   taskId: string;
   parentToolUseId?: string;
   status: AgentTaskStatus;
@@ -732,7 +733,7 @@ export type MessageDeliveryMode = 'queue' | 'steer';
 
 /** 仅影响 selector/chip 的乐观展示；agentKind 始终保留真实 reducer 路由。 */
 export interface AgentSwitchIntentRecord {
-  target: 'claude-code' | 'codex';
+  target: 'claude-code' | 'codex' | 'pi';
   model: string;
   providerId: string | null;
   effort?: string;
@@ -748,7 +749,7 @@ export interface SessionChatState {
    * Codex reducer。ensureInitialMessages 从 DB sessions.agent_kind 读出来灌进。
    * 默认 'claude-code' 兼容老路径(老 session row 没有此字段时按 Claude 处理)。
    */
-  agentKind: 'claude-code' | 'codex';
+  agentKind: 'claude-code' | 'codex' | 'pi';
   /** 下一条消息发送时才由 main 应用的跨引擎切换意图。 */
   agentSwitchIntent: AgentSwitchIntentRecord | null;
   /**
@@ -1975,7 +1976,7 @@ function isTerminalErrorData(data: unknown): boolean {
 
 function normalizeAgentTaskUpdate(
   data: unknown,
-  source?: 'claude-code' | 'codex',
+  source?: 'claude-code' | 'codex' | 'pi',
 ): AgentTaskUpdate | null {
   if (!data || typeof data !== 'object') return null;
   const raw = data as Record<string, unknown>;
@@ -1991,10 +1992,12 @@ function normalizeAgentTaskUpdate(
       ? rawStatus
       : 'running';
   const provider =
-    raw.provider === 'codex' || raw.provider === 'claude-code'
+    raw.provider === 'codex' || raw.provider === 'claude-code' || raw.provider === 'pi'
       ? raw.provider
       : source === 'codex'
         ? 'codex'
+        : source === 'pi'
+          ? 'pi'
         : 'claude-code';
   const usageRaw =
     raw.usage && typeof raw.usage === 'object' ? (raw.usage as Record<string, unknown>) : null;
@@ -2180,6 +2183,11 @@ function formatAskUserReply(answers: Record<string, string>): string {
  */
 export function isOmittedThinkingPlaceholder(text: string, durationMs: number): boolean {
   return text === '' && durationMs === 0;
+}
+
+/** pi 旧版 translator 把结构化 redacted 块误存成了这条可见占位文本。 */
+function isLegacyRedactedThinkingPlaceholder(m: Message, text: string): boolean {
+  return m.agentKind === 'pi' && text.trim() === '[Reasoning redacted]';
 }
 
 // F1-a: 所有 agent 消息(assistant/tool_use/tool_result/thinking/ask_user/plan_review)
@@ -2417,7 +2425,9 @@ export function handleStreamEvent(
         };
       }
 
-      // stage === 'redacted' —— 加密推理不进渲染列表。
+      // stage === 'redacted' —— 加密推理不进渲染列表。部分 vendor（如 pi）会先发
+      // thinking start、到 end 才能从 partial block 确认 redacted；因此还要删掉同
+      // blockId 的瞬时占位，不能只阻止新增。
       //
       // 这类块没有任何明文可读,卡片只能显示"无法显示的思考过程";上游(如 Grok 开了
       // 服务端搜索)一轮能产出十几条,会把真实产出淹掉。落库仍由 main(onThinkingEvent)
@@ -2427,7 +2437,19 @@ export function handleStreamEvent(
       // 不展示 ≠ 丢事件:仍按本函数开头的不变量刷新 lastAgentMeta(带 agentMeta 的事件都要刷,
       // mid-turn 抢救 assistant 累积流时拿它当 fallback)。否则这条事件携带的 model /
       // parentUuid 会被静默吞掉。
-      return incomingMeta ? { ...state, lastAgentMeta: incomingMeta } : state;
+      const hasLivePlaceholder = state.messages.some(
+        (m) => m.clientId === data.blockId && m.role === 'thinking',
+      );
+      if (!hasLivePlaceholder) {
+        return incomingMeta ? { ...state, lastAgentMeta: incomingMeta } : state;
+      }
+      return {
+        ...state,
+        messages: state.messages.filter(
+          (m) => !(m.clientId === data.blockId && m.role === 'thinking'),
+        ),
+        ...(incomingMeta ? { lastAgentMeta: incomingMeta } : {}),
+      };
     }
 
     case 'agent_task_update': {
@@ -3322,7 +3344,7 @@ type MakerEventPayload = {
   event?: {
     type: string;
     data: unknown;
-    source?: 'claude-code' | 'codex';
+    source?: 'claude-code' | 'codex' | 'pi';
     agentMeta?: Record<string, unknown>;
   };
   persistId?: string;
@@ -3331,7 +3353,7 @@ type MakerEventPayload = {
 
 type PendingTextDeltaBatch = {
   text: string;
-  source?: 'claude-code' | 'codex';
+  source?: 'claude-code' | 'codex' | 'pi';
   persistId?: string;
   agentMeta?: Record<string, unknown>;
 };
@@ -5152,7 +5174,7 @@ setRemoteTerminalErrorProbe(hasSessionTerminalError);
 
 interface ActiveSessionSnapshot {
   sessionId: string;
-  agentKind: 'claude-code' | 'codex';
+  agentKind: 'claude-code' | 'codex' | 'pi';
   isTurnRunning: boolean;
 }
 
@@ -5161,7 +5183,7 @@ function isActiveSessionSnapshot(value: unknown): value is ActiveSessionSnapshot
   const item = value as Record<string, unknown>;
   return (
     typeof item.sessionId === 'string' &&
-    (item.agentKind === 'claude-code' || item.agentKind === 'codex') &&
+    (item.agentKind === 'claude-code' || item.agentKind === 'codex' || item.agentKind === 'pi') &&
     typeof item.isTurnRunning === 'boolean'
   );
 }
@@ -5522,17 +5544,18 @@ function bumpMessagesEpoch(sessionId: string): void {
 }
 
 /**
- * DB sessions.agent_kind('cc' / 'codex')→ maker-core AgentKind 的唯一映射点。
+ * DB sessions.agent_kind('cc' / 'codex' / 'pi')→ maker-core AgentKind 的唯一映射点。
  * 缺失 / 异常值走 fallback(默认 'claude-code',老 row 兼容)。所有从 session
  * row 派生 agentKind 的地方必须走这里,不要在调用点手写三元(历史上多处各写
  * 一份,遗漏 fallback 语义差异被 review 逐个揪出)。
  */
 function dbAgentKindToMakerKind(
   dbKind: string | null | undefined,
-  fallback: 'claude-code' | 'codex' = 'claude-code',
-): 'claude-code' | 'codex' {
+  fallback: 'claude-code' | 'codex' | 'pi' = 'claude-code',
+): 'claude-code' | 'codex' | 'pi' {
   if (dbKind === 'codex') return 'codex';
   if (dbKind === 'cc') return 'claude-code';
+  if (dbKind === 'pi') return 'pi';
   return fallback;
 }
 
@@ -7318,7 +7341,7 @@ function autoTitleFallbackLabels(): AutoTitleFallbackLabels {
 function scheduleAutoName(
   sessionId: string,
   text: string,
-  agentKind: 'claude-code' | 'codex',
+  agentKind: 'claude-code' | 'codex' | 'pi',
   isUserText = true,
 ): void {
   // 与 main 共用 normalizeAutoTitle,两端算出的占位串逐字一致,回流时不跳变。
@@ -7431,7 +7454,7 @@ function clearAutoTitlePreviewSafely(sessionId: string): void {
 function maybeAutoNameUnnamedSession(
   sessionId: string,
   seed: AutoTitleSeed | null,
-  agentKind: 'claude-code' | 'codex',
+  agentKind: 'claude-code' | 'codex' | 'pi',
 ): void {
   if (!seed?.isUserText) return;
   scheduleAutoName(sessionId, seed.text, agentKind, true);
@@ -7597,7 +7620,7 @@ async function sendMessageCore(
     // 用会话真实 agentKind 起名 — 之前写死 'claude-code',导致 Codex 会话也
     // 用 Claude haiku 起标题:纯 Codex 用户(无 Claude 鉴权)会 oneShot 失败 →
     // fallback 原话,表现为"Codex 会话标题没有智能总结"。current.agentKind 已是
-    // maker 格式('claude-code' | 'codex'),直接透传。起名走立即占位 + 后台覆盖。
+    // maker 格式('claude-code' | 'codex' | 'pi'),直接透传。起名走立即占位 + 后台覆盖。
     if (autoTitleSeed) {
       scheduleAutoName(sessionId, autoTitleSeed.text, current.agentKind, autoTitleSeed.isUserText);
     }
@@ -9319,7 +9342,7 @@ function sendUiTrigger(sessionId: string, prompt: string): Promise<void> {
  * sdkSessionId——否则 buildCreateOpts 会把旧引擎的原生会话 id 当 resume 目标
  * (main 侧 reconcileCreateOptsWithDb 是兜底,这里是第一现场收敛)。
  */
-function noteAgentSwitched(sessionId: string, agentKind: 'claude-code' | 'codex'): void {
+function noteAgentSwitched(sessionId: string, agentKind: 'claude-code' | 'codex' | 'pi'): void {
   if (!sessionId) return;
   setState(sessionId, (s) =>
     s.agentKind === agentKind && s.sdkSessionId === null && s.agentSwitchIntent === null
@@ -9345,7 +9368,7 @@ function noteAgentSwitched(sessionId: string, agentKind: 'claude-code' | 'codex'
  */
 function noteAgentSwitchIntent(
   sessionId: string,
-  target: 'claude-code' | 'codex',
+  target: 'claude-code' | 'codex' | 'pi',
   opts: { model: string; providerId: string | null; effort?: string; fastMode?: boolean },
 ): void {
   if (!sessionId) return;
@@ -9447,7 +9470,7 @@ function mirrorAgentSwitchIntent(sessionId: string, value: unknown): void {
 
 function setSessionRuntime(
   sessionId: string,
-  opts: { agentKind?: 'claude-code' | 'codex'; fastMode?: boolean; planModeEnabled?: boolean },
+  opts: { agentKind?: 'claude-code' | 'codex' | 'pi'; fastMode?: boolean; planModeEnabled?: boolean },
 ): void {
   if (!sessionId) return;
   setState(sessionId, (s) => {
@@ -9524,8 +9547,8 @@ function mirrorSessionFields(
   // 新引擎的事件会被旧引擎 reducer 错误处理(2026-07-20 审计实锤)。随引擎翻转
   // 同步清 sdkSessionId(旧引擎的原生会话 id 对新引擎无意义,与 noteAgentSwitched
   // 口径一致)。幂等:发起窗口已 noteAgentSwitched → 同值 no-op。
-  if (patch.agentKind === 'cc' || patch.agentKind === 'codex') {
-    const nextKind = patch.agentKind === 'codex' ? 'codex' : 'claude-code';
+  if (patch.agentKind === 'cc' || patch.agentKind === 'codex' || patch.agentKind === 'pi') {
+    const nextKind = dbToMakerAgentKind(patch.agentKind);
     setState(sessionId, (s) => {
       const intentApplied = s.agentSwitchIntent?.target === nextKind;
       if (s.agentKind === nextKind && !intentApplied) return s;
@@ -10123,10 +10146,12 @@ function isSyntheticTriggerRow(m: Message): boolean {
 /**
  * 该 thinking 服务端行是否**不进渲染列表**(DB 行照旧保留,只是不展示)。
  *
- * 两类:
+ * 三类:
  *   - `isRedacted` 加密推理:没有任何明文可读,卡片只能显示"无法显示的思考过程",对用户是
  *     纯噪音;上游开服务端工具后一轮能出十几条,会淹掉真实产出。与 live 路径
  *     (handleStreamEvent 的 stage==='redacted')同判定。
+ *   - pi 旧版 translator 丢失 redacted 标记后落下的精确 `[Reasoning redacted]` 占位:
+ *     无需改库,历史恢复时按同一语义隐藏。
  *   - omitted-display 占位行(空文本 + 0 时长,非 redacted):不复原成 "Thought for 1s" 卡片。
  *     上游恢复明文下发后新数据自然不再命中。
  *
@@ -10138,6 +10163,7 @@ function isHiddenThinkingRow(m: Message): boolean {
   const c = m.content as Record<string, unknown>;
   if (c.isRedacted === true) return true;
   const text = typeof c.text === 'string' ? c.text : '';
+  if (isLegacyRedactedThinkingPlaceholder(m, text)) return true;
   const durationMs = typeof c.durationMs === 'number' ? c.durationMs : 0;
   return isOmittedThinkingPlaceholder(text, durationMs);
 }
@@ -10560,7 +10586,8 @@ function mapServerMessages(serverMsgs: Message[]): ChatMessage[] {
       )
         ? { turnCompleted: true }
         : {}),
-      // 本轮 token 明细独立于金额挂载:算不出报价的轮次只有它,UI 据此退回显示 token。
+      // 本轮 token 明细独立于金额挂载:Pi/新模型算不出报价的轮次只有它，
+      // UI 据此退回显示 token，历史加载不能把它绑在 money 分支。
       ...(m.role === 'assistant' && turnUsageDetails ? { turnUsageDetails } : {}),
       // 整轮累计费用同样独立挂载:无价收尾轮只有它,没有 turnCost。
       ...persistedUserTurnCostPatch,

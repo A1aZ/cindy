@@ -601,6 +601,10 @@ export function createMobileMakerTransport({
   return {
     createSession: (opts) => call('maker:create-session', [opts]),
     getCapabilities: (agentKind) => call('maker:get-capabilities', [agentKind]),
+    // 分支(session tree)读取/切换:transport passthrough 已就位,但**移动端会话页尚无
+    // 分支列表/切换 UI 调用它们**——明确标记为 deferred(不是遗漏)。这两个 channel 已在
+    // MOBILE_REMOTE_INVOKE_CHANNELS allowlist 内,供被控桌面端经 device-link 复用及未来
+    // 移动分支 UI 落地时直接接线;在移动 UI 落地前不对用户暴露分支能力,避免不可达承诺。
     getSessionTree: (sessionId) => call('maker:get-session-tree', [sessionId]),
     navigateSessionTree: (sessionId, entryId, options) =>
       call('maker:navigate-session-tree', [sessionId, entryId, options]),

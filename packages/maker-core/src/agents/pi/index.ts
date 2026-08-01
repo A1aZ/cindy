@@ -405,6 +405,7 @@ export class PiAgent extends BaseAgent {
     // 缺省 → 空,只有网关 provider `cindy`(现状不变)。失败不致命,降级为无原生 provider。
     let nativeProviders: PiNativeProviderSpec[] = [];
     let nativeEnv: Record<string, string> = {};
+    let nativeResolveFailed = false;
     if (this.deps.resolvePiNativeProviders) {
       try {
         const resolved = await this.deps.resolvePiNativeProviders({
@@ -414,7 +415,8 @@ export class PiAgent extends BaseAgent {
         nativeProviders = resolved?.providers ?? [];
         nativeEnv = resolved?.env ?? {};
       } catch (err) {
-        this.deps.logger.warn('pi resolvePiNativeProviders failed, continuing gateway-only', {
+        nativeResolveFailed = true;
+        this.deps.logger.warn('pi resolvePiNativeProviders failed', {
           message: err instanceof Error ? err.message : String(err),
         });
       }
@@ -441,6 +443,22 @@ export class PiAgent extends BaseAgent {
           && provider.models.some((candidate) => candidate.id === model),
       )?.id ?? PI_PROVIDER_ID;
     };
+    // 显式 BYOM 路由必须 fail closed:当调用方钉了一个既非 Cindy 网关(cindy/xd)也非
+    // 订阅直连(openai/anthropic/xai)的自定义/本地 provider 时,该来源必须在本次解析出的
+    // nativeProviders 里。若原生解析失败(配置/safeStorage 暂时读不到)或该 provider 缺席,
+    // resolveProviderForModel 会静默回落到 PI_PROVIDER_ID(网关)——用户又恰好有 Cindy key
+    // 时鉴权仍过,提示词就被发往 Cindy 网关而非用户选的本地/自定义端点(计费/凭证错配,
+    // codex review P1)。这里对这种「显式 BYOM 却无法解析」的情形直接抛,不换目的地。
+    const NON_BYOM_PROVIDER_IDS = new Set([PI_PROVIDER_ID, 'xd', 'openai', 'anthropic', 'xai']);
+    const explicitByomProviderId =
+      opts.providerId && !NON_BYOM_PROVIDER_IDS.has(opts.providerId) ? opts.providerId : null;
+    if (explicitByomProviderId && (nativeResolveFailed || !nativeProviderById.has(explicitByomProviderId))) {
+      throw new Error(
+        `pi: BYOM provider '${explicitByomProviderId}' could not be resolved` +
+          `${nativeResolveFailed ? ' (native provider resolution failed)' : ''}; ` +
+          'refusing to fall back to the Cindy gateway (would send prompts to the wrong endpoint).',
+      );
+    }
     const initialProvider = resolveProviderForModel(opts.model, opts.providerId);
 
     // 先解析 native provider 再做 auth：老会话/远端控制端可能没有持久化 providerId，

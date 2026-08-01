@@ -119,4 +119,70 @@ describe('Pi provider-aware model routing', () => {
     expect(authProviderIds).toEqual(['openai', 'native-a']);
     await nativeHandle.close();
   });
+
+  const byomDeps = (resolvePiNativeProviders: AgentDeps['resolvePiNativeProviders']): AgentDeps => ({
+    auth: {
+      getState: async () => ({ authenticated: true, identity: 'test', authSource: 'api-key' as const }),
+      triggerLogin: async () => ({ authenticated: true }),
+      logout: async () => {},
+      getAuthEnv: async () => ({}),
+    },
+    runtimeConfig: { endpoint: 'http://127.0.0.1:9' },
+    binaryPath: path.join(agentHome, 'pi'),
+    logger: noopLogger,
+    capabilityAdditions: {
+      availableModels: [
+        { id: 'local-model', displayName: 'Local', contextWindow: 200_000, efforts: [], defaultEffort: null },
+      ],
+    },
+    resolvePiAgentHome: () => agentHome,
+    resolvePiNativeProviders,
+  });
+
+  it('fails closed for an explicit BYOM route when native provider resolution throws (no silent gateway fallback)', async () => {
+    // 显式选自定义 provider 但配置/safeStorage 暂时读不到:必须抛,不能静默改发 Cindy 网关。
+    const agent = new PiAgent(byomDeps(async () => {
+      throw new Error('safeStorage temporarily unavailable');
+    }));
+    await expect(agent.startSession({
+      sessionId: 'byom-resolve-fail',
+      workingDir: cwd,
+      model: 'local-model',
+      providerId: 'my-local',
+    })).rejects.toThrow(/BYOM provider 'my-local' could not be resolved/);
+    // 未走到 spawn(--provider 参数从未拼装)。
+    expect(captured.args).toEqual([]);
+  });
+
+  it('fails closed for an explicit BYOM route absent from the resolved provider set', async () => {
+    const agent = new PiAgent(byomDeps(async () => ({
+      providers: [
+        { id: 'native-a', name: 'Native A', baseUrl: 'http://a.test', api: 'openai-completions', models: [{ id: 'local-model' }] },
+      ],
+      env: {},
+    })));
+    await expect(agent.startSession({
+      sessionId: 'byom-absent',
+      workingDir: cwd,
+      model: 'local-model',
+      providerId: 'my-local',
+    })).rejects.toThrow(/refusing to fall back to the Cindy gateway/);
+    expect(captured.args).toEqual([]);
+  });
+
+  it('does not fail closed for a gateway/subscription route when native resolution throws', async () => {
+    // openai(订阅直连)在 nativeProviders 缺席是正常的,应照常走网关块,不触发 BYOM 拦截。
+    const agent = new PiAgent(byomDeps(async () => {
+      throw new Error('resolve failed');
+    }));
+    const handle = await agent.startSession({
+      sessionId: 'subscription-ok',
+      workingDir: cwd,
+      model: 'local-model',
+      providerId: 'openai',
+    });
+    expect(captured.args.slice(captured.args.indexOf('--provider'), captured.args.indexOf('--provider') + 2))
+      .toEqual(['--provider', 'cindy']);
+    await handle.close();
+  });
 });

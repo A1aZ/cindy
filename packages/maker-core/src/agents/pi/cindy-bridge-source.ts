@@ -107,7 +107,13 @@ function resolvesToCredentialPath(input: unknown, depth = 0): boolean {
 // spawn 边界虽从子进程 env 删了 Cindy 私密变量,但父 pi 进程仍持有它们,同 UID 下
 // cat /proc/PPID/environ 可直接取回代理 token / 网关 key / BYOM key(codex 报)。
 // 无法从 JS 侧让 /proc 不可读,故在工具边界对这类命令一律硬拦(含 Full access)。
-const PROC_ENVIRON_READ_RE = /\/proc\/[^/\s'"]*\/environ\b/i;
+// 线程视图 /proc/<pid>/task/<tid>/environ(乃至其它中间段)与 /proc/<pid>/environ 等价可读,
+// 同样拦。中间段允许含斜杠(旧正则用 [^/...]* 只认单段,漏了 task/<tid>,codex report),
+// 与 readonly-builtin 硬拦所用的共享 SENSITIVE_CREDENTIAL_PATH 特征(/proc/[^斜杠空白]*/environ)
+// 保持同等覆盖。注:命令文本匹配不是安全边界(变形/间接读取可绕过,详见 pi-harness.md 的
+// Full access 契约),这里只是 defense-in-depth。
+// (本文件是 String.raw 模板,注释里严禁反引号,否则会提前终结模板。)
+const PROC_ENVIRON_READ_RE = /\/proc\/[^\s'"]*\/environ\b/i;
 function commandReadsProcessEnviron(command: unknown): boolean {
   return typeof command === 'string' && PROC_ENVIRON_READ_RE.test(command);
 }

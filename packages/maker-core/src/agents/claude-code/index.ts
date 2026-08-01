@@ -4354,7 +4354,18 @@ export class ClaudeCodeAgent extends BaseAgent {
           && mutablePermissionMode === 'auto'
           && usedNativeAutoReview !== usesNativeClaudeAutoReview()
         ) {
-          await q.setPermissionMode(toSdkPermissionMode('auto'));
+          // 切模(主操作)已生效、mutableModel/mutableProviderId/credentialMode 已同步为新值。
+          // 这里的 auto 审查重配是附带的二次 apply:若它因 transport/SDK 失败仍抛,会把整个
+          // setModel 报成失败、上层保留旧持久配置,而运行态其实已在新模型/路由 → 计费/凭证
+          // 路由错配。与其它 post-hoc setPermissionMode 调用点(plan 审批后 / plan turn 结束)
+          // 同款 best-effort:失败只 warn,不回退已成功的切模,让持久配置与运行态保持一致
+          // (codex review)。
+          await q.setPermissionMode(toSdkPermissionMode('auto')).catch((e) => {
+            log.warn('setModel: auto-review permission-mode reapply failed; model switch kept', {
+              model: newModel,
+              error: String(e),
+            });
+          });
         }
         const newContextWindow = modelContextWindows.get(mutableModel);
         if (newContextWindow === undefined) {

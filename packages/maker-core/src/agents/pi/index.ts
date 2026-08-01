@@ -882,9 +882,13 @@ export class PiAgent extends BaseAgent {
     };
 
     const handle: AgentSessionHandle = {
-      id: sdkSessionId,
+      // getter 而非固定值:setModel / commitRewindFiles 会更新闭包里的 mutableModel /
+      // sdkSessionId,Session.model / Session.sdkSessionId 直读这两个 handle 属性 ——
+      // 固定复制会让切模后 Orca listWorkers 仍报旧模型、rewind 后宿主仍读旧 session 文件
+      // (与 Claude/Codex handle 同款 getter,codex review)。
+      get id() { return sdkSessionId; },
       agentKind,
-      model: opts.model,
+      get model() { return mutableModel; },
 
       // 每轮权限策略(IM 群等)是 host 侧的 forceConfirmToolCall 回调,必须在工具执行前的
       // 审批边界强制执行。Pi 的工具审批在独立进程的 cindy-bridge extension(按 perm 文件

@@ -459,7 +459,9 @@ async function ensureSessionFromMeta(
     agentKind: meta.agentKind,
     workingDir: meta.workingDir,
     model: meta.model,
-    providerId: meta.providerId ?? undefined,
+    // null 表示「清除显式来源，走 Cindy 默认路由」；不能塌缩成 undefined，后者会让
+    // Pi core 反查同名 BYOM provider。
+    providerId: meta.providerId,
     effort: meta.effort,
     permissionMode: meta.permissionMode,
     fastMode: meta.fastMode,

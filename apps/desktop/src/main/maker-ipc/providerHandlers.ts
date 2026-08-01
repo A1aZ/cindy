@@ -874,6 +874,17 @@ export function registerProviderHandlers(
     deps.assertTrustedSender(event);
   }
 
+  // 自定义供应商的 DB 与 key/header 密文都按当前 data owner 选路径。CRUD 虽由
+  // per-provider 队列串行，但排队与 DB 读取均有 await：若 A 发起后切到 B，后续
+  // safeStorage 写会按 B 的 owner 路径落盘。入口捕获 owner，在异步边界和凭证写入前复核。
+  const providerMutationOwnerMatches = (ownerAtIngress: string | null): boolean =>
+    !deps.currentOwnerId || (deps.currentOwnerId() ?? null) === ownerAtIngress;
+  const assertProviderMutationOwner = (ownerAtIngress: string | null): void => {
+    if (!providerMutationOwnerMatches(ownerAtIngress)) {
+      throwIpcError('INTERNAL', 'active account changed during provider mutation');
+    }
+  };
+
   // 「模型 / 供应商停用」override 写入。设置类写操作:仅本机主页面可调(device-link
   // 合成 event 与不受信 frame 一律拒绝 —— 远程改被控端全局设置越权);守卫缺席按拒绝
   // 处理(assertTrustedProviderMutationSender)。写的是 main 侧持久化 override,目录
@@ -1155,10 +1166,14 @@ export function registerProviderHandlers(
     if (!keys) throwIpcError('INVALID_PARAMS', 'invalid provider runtime keys');
     const config = input as CustomProviderConfig;
     const separated = splitCustomProviderHeaders(config);
+    const ownerAtIngress = deps.currentOwnerId?.() ?? null;
     return withProviderConfigMutation(config.id, async () => {
+      assertProviderMutationOwner(ownerAtIngress);
       if (await customProviderExists(config.id)) {
         throwIpcError('ALREADY_EXISTS', `custom provider '${config.id}' already exists`);
       }
+      // 前面的异步存在性查询期间可能换号；写 key/header 前复核。
+      assertProviderMutationOwner(ownerAtIngress);
       const credentialSnapshots = stageProviderCredentials(
         config.id,
         planProviderKeyMutations(config, keys, 'create'),
@@ -1166,7 +1181,10 @@ export function registerProviderHandlers(
       );
       try {
         await createCustomProvider(separated.config);
+        assertProviderMutationOwner(ownerAtIngress);
       } catch (error) {
+        // 换号后不在 B 的 secret store 执行 A 的回滚。
+        assertProviderMutationOwner(ownerAtIngress);
         if (!restoreProviderCredentials(config.id, credentialSnapshots)) {
           throwIpcError(
             'INTERNAL',
@@ -1175,7 +1193,9 @@ export function registerProviderHandlers(
         }
         throw error;
       }
+      assertProviderMutationOwner(ownerAtIngress);
       await afterChange();
+      assertProviderMutationOwner(ownerAtIngress);
       return { ok: true };
     });
   });
@@ -1188,10 +1208,14 @@ export function registerProviderHandlers(
     if (!keys) throwIpcError('INVALID_PARAMS', 'invalid provider runtime keys');
     const config = input as CustomProviderConfig;
     const separated = splitCustomProviderHeaders(config);
+    const ownerAtIngress = deps.currentOwnerId?.() ?? null;
     return withProviderConfigMutation(config.id, async () => {
       let generation: symbol | null = null;
       try {
+        // per-provider 队列等待结束后才读取该 owner 的 DB / secrets。
+        assertProviderMutationOwner(ownerAtIngress);
         const previous = await getCustomProvider(config.id);
+        assertProviderMutationOwner(ownerAtIngress);
         if (!previous) throwIpcError('NOT_FOUND', `custom provider '${config.id}' not found`);
         // 即便 OAuth 描述符没变，runtime / model 编辑也必须让旧登录尾部的自动发现失效，
         // 否则旧 endpoint 的迟到结果可能合并进刚保存的新配置。
@@ -1201,6 +1225,8 @@ export function registerProviderHandlers(
           || oauthDescriptorSignature(previous) !== oauthDescriptorSignature(config);
         // API key 的写 / 删与配置更新处于同一 main 队列；若后续 OAuth 清理或 DB 写失败，
         // 用原值回滚，确保并发窗口不能把另一份配置和密钥拼在一起。
+        // key/header 的 storage key 按当前 owner 动态解析，写入前必须仍是发起方。
+        assertProviderMutationOwner(ownerAtIngress);
         const credentialSnapshots = stageProviderCredentials(
           config.id,
           planProviderKeyMutations(config, keys, 'update'),
@@ -1215,13 +1241,17 @@ export function registerProviderHandlers(
         let updated: CustomProviderConfig | null;
         try {
           if (shouldResetOAuth) {
+            assertProviderMutationOwner(ownerAtIngress);
             restoreOAuthCredentials = deps.removeOAuthCredentials(config.id);
             if (!restoreOAuthCredentials) {
               throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
             }
           }
           updated = await updateCustomProvider(config.id, separated.config);
+          assertProviderMutationOwner(ownerAtIngress);
         } catch (err) {
+          // 若 DB 写入 await 期间换号，不能把 A 的凭证补偿写入 B。
+          assertProviderMutationOwner(ownerAtIngress);
           const oauthRestored = !restoreOAuthCredentials || restoreOAuthCredentials();
           const credentialsRestored = restoreProviderCredentials(config.id, credentialSnapshots);
           if (!oauthRestored || !credentialsRestored) {
@@ -1233,6 +1263,7 @@ export function registerProviderHandlers(
           throw err;
         }
         if (!updated) {
+          assertProviderMutationOwner(ownerAtIngress);
           const oauthRestored = !restoreOAuthCredentials || restoreOAuthCredentials();
           const credentialsRestored = restoreProviderCredentials(config.id, credentialSnapshots);
           if (!oauthRestored || !credentialsRestored) {
@@ -1243,7 +1274,9 @@ export function registerProviderHandlers(
           }
           throwIpcError('NOT_FOUND', `custom provider '${config.id}' not found`);
         }
+        assertProviderMutationOwner(ownerAtIngress);
         await afterChange();
+        assertProviderMutationOwner(ownerAtIngress);
         return { ok: true };
       } finally {
         if (generation !== null) finishOAuthMutation(config.id, generation);
@@ -1256,7 +1289,10 @@ export function registerProviderHandlers(
     if (typeof providerId !== 'string' || providerId.length === 0) {
       throwIpcError('INVALID_PARAMS', 'providerId required');
     }
+    const ownerAtIngress = deps.currentOwnerId?.() ?? null;
     return withProviderConfigMutation(providerId, async () => {
+      // 同类 delete 也会在 per-provider 队列后写 owner-scoped 凭证。
+      assertProviderMutationOwner(ownerAtIngress);
       const generation = beginOAuthMutation(providerId);
       try {
         deps.oauthCancel(providerId);
@@ -1284,6 +1320,8 @@ export function registerProviderHandlers(
         // (PR #744 review 第二十二轮)。队列内不得再调 enqueueDisableWrite(自等死锁),
         // 清理与恢复都直接调用。
         await enqueueDisableWrite(async () => {
+          // 进入 disable 全局队列后可能再次换号；以下会写 owner-scoped override/OAuth blob。
+          assertProviderMutationOwner(ownerAtIngress);
           try {
             // 停用 override 清理进事务(第二十轮):放在配置删除之前,后续任一步失败
             // 由恢复函数把停用状态原样写回;清理自身抛错时事务未产生破坏,删除中止,
@@ -1292,12 +1330,15 @@ export function registerProviderHandlers(
               deps.stageClearProviderDisableOverrides?.(providerId) ?? null;
             restorePriceOverrides =
               deps.stageClearProviderModelPriceOverrides?.(providerId) ?? null;
+            assertProviderMutationOwner(ownerAtIngress);
             restoreOAuthCredentials = deps.removeOAuthCredentials(providerId);
             if (!restoreOAuthCredentials) {
               throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
             }
             await deleteCustomProvider(providerId);
+            assertProviderMutationOwner(ownerAtIngress);
           } catch (err) {
+            assertProviderMutationOwner(ownerAtIngress);
             const overridesRestored = !restoreDisableOverrides || restoreDisableOverrides();
             const pricesRestored = !restorePriceOverrides || restorePriceOverrides();
             const oauthRestored = !restoreOAuthCredentials || restoreOAuthCredentials();
@@ -1316,7 +1357,9 @@ export function registerProviderHandlers(
           // 刷目录也在队列内:队列释放的那一刻 listProviders() 必须已看不到该
           // provider。afterChange 失败时配置已删,凭证/override 不回写(与改动前
           // 语义一致 —— 恢复只覆盖删除本身失败的场景)。
+          assertProviderMutationOwner(ownerAtIngress);
           await afterChange();
+          assertProviderMutationOwner(ownerAtIngress);
           deps.broadcastPricingChanged();
         });
         return { ok: true };

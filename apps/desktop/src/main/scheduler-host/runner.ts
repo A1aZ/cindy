@@ -840,7 +840,10 @@ export class MakerScheduleRunner implements ScheduleRunner {
         permissionMode,
         title: isHeartbeat ? undefined : `[Schedule] ${schedule.name}`,
         resumeSessionId,
-        providerId: createProviderId ?? undefined,
+        // Pi distinguishes an explicit null (Cindy default route) from undefined
+        // (legacy model-based native-provider fallback). Preserve the scheduler's
+        // default-route null when spawning a fresh Pi session.
+        providerId: createProviderId,
         vendorOptions: { source: 'scheduler' },
       });
     } catch (err) {

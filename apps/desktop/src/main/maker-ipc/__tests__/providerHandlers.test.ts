@@ -1179,6 +1179,55 @@ describe('provider:custom:* CRUD handlers', () => {
     ).rejects.toThrow(/NOT_FOUND/);
   });
 
+  it('fails closed when the owner changes after custom update ingress, before staging secrets', async () => {
+    // provider queue / getCustomProvider 都有 await。A 发起更新后切到 B 时，不能把 A 的
+    // Authorization 或 API key 按 B 的 owner-scoped storage key 落盘。
+    mountDb();
+    const harness = new IpcHarness();
+    let owner: string | null = 'owner-a';
+    const storeCustomProviderKey = vi.fn(() => true);
+    const storeCustomProviderHeaders = vi.fn(() => true);
+    const deps = makeDeps({
+      currentOwnerId: () => owner,
+      storeCustomProviderKey,
+      storeCustomProviderHeaders,
+    });
+    registerProviderHandlers(harness, deps);
+    const config: CustomProviderConfig = {
+      id: 'owner-race',
+      name: 'Owner A config',
+      auth: { method: 'apiKey' },
+      runtimes: {
+        pi: {
+          baseUrl: 'https://owner-a.example/v1',
+          models: [{ id: 'm', name: 'M' }],
+          headers: { Authorization: 'Bearer owner-a' },
+        },
+      },
+    };
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, config, { pi: 'owner-a-key' });
+    storeCustomProviderKey.mockClear();
+    storeCustomProviderHeaders.mockClear();
+
+    // invoke 同步执行至 `await getCustomProvider()`；切号发生在该异步边界内。
+    const update = harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+      ...config,
+      name: 'Must not reach owner B',
+      runtimes: {
+        pi: {
+          ...config.runtimes.pi!,
+          headers: { Authorization: 'Bearer owner-a-new' },
+        },
+      },
+    }, { pi: 'owner-a-new-key' });
+    owner = 'owner-b';
+
+    await expect(update).rejects.toThrow(/active account changed during provider mutation/);
+    expect(storeCustomProviderKey).not.toHaveBeenCalled();
+    expect(storeCustomProviderHeaders).not.toHaveBeenCalled();
+    expect((await listCustomProviders())[0]?.name).toBe('Owner A config');
+  });
+
   it('clears an OAuth token when its descriptor changes but preserves it for model-only edits', async () => {
     mountDb();
     const harness = new IpcHarness();

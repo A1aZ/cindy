@@ -1296,6 +1296,22 @@ describe('MakerScheduleRunner model selection', () => {
   });
 
   describe('Pi Fast bridge 状态同步', () => {
+    it('fresh Pi preserves the default-route null instead of enabling BYOM fallback', async () => {
+      const h = createSessionHarness();
+      (h.session as { agentKind: string }).agentKind = 'pi';
+      const harness = createRunnerHarness(h);
+
+      await fireToCompletion(
+        harness,
+        h,
+        baseSchedule({ agentKind: 'pi', model: 'gpt-5.6-sol' }),
+      );
+
+      expect(harness.createSession).toHaveBeenCalledWith(
+        expect.objectContaining({ providerId: null }),
+      );
+    });
+
     it('fresh Pi 首轮在 send 前写入 Fast=true', async () => {
       const h = createSessionHarness();
       (h.session as { agentKind: string }).agentKind = 'pi';

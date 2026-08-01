@@ -4810,8 +4810,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         .from(sessions)
         .where(eq(sessions.id, o.id))
         .limit(1);
-      const providerId = row?.providerId?.trim();
-      if (providerId) o.providerId = providerId;
+      if (row) {
+        // DB null 是显式默认路由，不等于「调用方未指定」。保留该三态才能阻止
+        // Pi 在同名 BYOM 存在时把默认路由误反查成自定义来源。
+        o.providerId = row.providerId?.trim() || null;
+      }
     } catch (err) {
       log.debug('pre-hydrate session provider failed (non-fatal)', {
         sessionId: o.id,
@@ -5425,7 +5428,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // 解释它)。lazy-create 时刻 DB 行是唯一真源,三个字段无条件对齐。
       co.model = row.model ?? undefined;
       co.resumeSessionId = row.sdkSessionId ?? undefined;
-      co.providerId = row.providerId ?? undefined;
+      co.providerId = row.providerId;
     } catch {
       // 校正读库失败按原 opts 继续(与切换功能上线前行为一致)。
     }
@@ -5491,7 +5494,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         agentKind: dbToMakerAgentKind(row.agentKind),
         workingDir: row.workingDir,
         model: row.model ?? undefined,
-        providerId: row.providerId ?? undefined,
+        providerId: row.providerId,
         effort: (row.effort ?? undefined) as CreateOpts['effort'],
         fastMode: !!row.fastMode,
         permissionMode: (row.permissionMode ?? 'ask') as CreateOpts['permissionMode'],
@@ -5842,7 +5845,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             model: meta.model,
             effort: (row?.effort ?? undefined) as SendToSessionCreateDefaults['effort'],
             fastMode: !!row?.fastMode,
-            providerId: row?.providerId ?? undefined,
+            providerId: row?.providerId,
             // working_dir 覆盖时强制继承来源会话的权限档(review 反馈):把新目录
             // 以 Full access 打开是相对 dispatcher 的权限升级,跨项目 handoff
             // 不应隐式发生;未覆盖时保持既有缺省(bypassPermissions)不变。
@@ -5870,7 +5873,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           model: inherited.model,
           effort: inherited.effort as CreateOpts['effort'],
           fastMode: !!inherited.fastMode,
-          providerId: inherited.providerId ?? undefined,
+          providerId: inherited.providerId,
           title: newTitle,
           permissionMode: inherited.permissionMode ?? 'bypassPermissions',
         });
@@ -6559,7 +6562,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       agentKind: meta.agentKind,
       workingDir: meta.workDir,
       model: meta.model,
-      providerId: row.providerId ?? undefined,
+      providerId: row.providerId,
       resumeSessionId: meta.sdkSessionId,
       effort: (row.effort ?? undefined) as CreateOpts['effort'],
       fastMode: !!row.fastMode,
@@ -9167,7 +9170,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       agentKind: 'pi',
       workingDir: meta.workDir,
       model: meta.model,
-      providerId: row.providerId ?? undefined,
+      // providerId=null 是显式的 Cindy 默认路由；undefined 才允许 Pi 按同名模型
+      // 反查原生 BYOM。会话树懒恢复必须原样保留 DB 的三态契约。
+      providerId: row.providerId,
       resumeSessionId: meta.sdkSessionId,
       effort: row.effort as CreateOpts['effort'],
       fastMode: !!row.fastMode,

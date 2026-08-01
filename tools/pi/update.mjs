@@ -42,6 +42,12 @@ const CACHE_FILE = path.join(__dirname, 'latest.json');
 const UPDATES_DIR = path.join(__dirname, 'updates');
 const BIN_DIR = path.join(PROJECT_ROOT, 'apps', 'pi-bin');
 
+// 每个平台缓存目录记录“产出该缓存的归档 digest”(归一 64-hex)。上游若在同一 tag 下替换
+// 资产(digest 变、版本号不变),快速路径与 downloadAsset 跳过分支据此重新核验并重下 ——
+// 否则会 promote 出与随后写入的 digest pin 不一致的旧缓存(codex review)。缺该标记(旧
+// 缓存)按“需重新核验”处理,重下一次即自愈。随 .sha256.bin 一起进目录清单。
+const ASSET_DIGEST_FILE = '.asset-digest.bin';
+
 // 平台 → GitHub Release 资产文件名 + 归档内主执行文件名
 const PLATFORMS = [
   { key: 'darwin-arm64', asset: 'pi-darwin-arm64.tar.gz', binFile: 'pi' },
@@ -136,6 +142,33 @@ function formatMB(bytes) {
   return (bytes / 1024 / 1024).toFixed(1) + ' MB';
 }
 
+/** 读取平台缓存目录记录的归档 digest(归一 64-hex);缺失/非法 → null。 */
+export function readCachedAssetDigest(destDir) {
+  try {
+    return normalizeExpectedSha256(fs.readFileSync(path.join(destDir, ASSET_DIGEST_FILE), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/** 纯比较:缓存记录的归档 digest 是否与上游 release 资产 digest 一致(任一缺失即 false)。 */
+export function assetDigestMatchesUpstream(recordedDigest, asset) {
+  const upstream = normalizeExpectedSha256(asset?.digest);
+  const recorded = normalizeExpectedSha256(recordedDigest);
+  return !!upstream && !!recorded && recorded === upstream;
+}
+
+/** 所有目标平台缓存记录的归档 digest 都与上游一致(同 tag 资产被替换时会不一致)。 */
+function targetsMatchUpstreamDigest(meta, version, targets) {
+  return targets.every(({ key, asset: assetName }) => {
+    const asset = (meta.assets || []).find((candidate) => candidate.name === assetName);
+    return assetDigestMatchesUpstream(
+      readCachedAssetDigest(path.join(UPDATES_DIR, version, key)),
+      asset,
+    );
+  });
+}
+
 const LFS_POINTER_HEADER = 'version https://git-lfs.github.com/spec/v1';
 
 function isUsableCache(filePath) {
@@ -223,14 +256,20 @@ async function downloadAsset(meta, version, platformKey, assetName, finalBinName
     // native prebuild 等旁侧资产(磁盘损坏/被误删),主二进制仍在也不能跳过 —— 否则
     // promote 会把残缺目录打进安装包,且事后从残缺目录生成的 manifest 反而“自洽通过”
     // (codex review)。这里对提取期写入的完整清单校验整目录,任一资产缺失即重下。
-    if (fs.existsSync(sha256Path) && verifyDirDistManifest(destDir)) {
+    // 除主二进制自哈希 + 目录清单外,还须核验缓存记录的归档 digest 与当前上游一致:同 tag
+    // 资产被替换(digest 变、版本号不变)时,缓存对自身自洽却与上游 pin 不符,不能跳过。
+    if (
+      fs.existsSync(sha256Path)
+      && verifyDirDistManifest(destDir)
+      && assetDigestMatchesUpstream(readCachedAssetDigest(destDir), asset)
+    ) {
       const storedHash = fs.readFileSync(sha256Path, 'utf8').trim();
       verifyFileSha256OrRemove(finalBinPath, storedHash, `pi ${platformKey} binary v${version} (cached)`);
       const size = fs.statSync(finalBinPath).size;
-      console.log(`  [${platformKey}] skip (cached, sha256 ok, manifest complete, ${formatMB(size)})`);
+      console.log(`  [${platformKey}] skip (cached, sha256 ok, manifest complete, digest pinned, ${formatMB(size)})`);
       return;
     }
-    console.log(`  [${platformKey}] cache missing sha256 marker or incomplete asset manifest, re-downloading for verification...`);
+    console.log(`  [${platformKey}] cache stale (missing sha256 marker / incomplete manifest / upstream digest changed), re-downloading for verification...`);
   }
 
   // 目录形态：重下前清空平台目录，避免旧版本资产残留混入新版本。
@@ -260,12 +299,18 @@ async function downloadAsset(meta, version, platformKey, assetName, finalBinName
   }
 
   try {
-    verifyFileSha256OrRemove(tmpArchive, expectedDigest, `pi ${platformKey} asset ${assetName}@${version}`);
+    const verifiedDigest = verifyFileSha256OrRemove(
+      tmpArchive,
+      expectedDigest,
+      `pi ${platformKey} asset ${assetName}@${version}`,
+    );
     console.log(`    [${platformKey}] sha256 ok`);
 
     await extractArchive(tmpArchive, destDir);
     flattenExtractedDir(destDir, finalBinName);
     fs.writeFileSync(finalBinPath + '.sha256.bin', sha256File(finalBinPath) + '\n');
+    // 记录产出该缓存的归档 digest,供后续快速路径 / 跳过分支对上游同 tag 资产替换做核验。
+    fs.writeFileSync(path.join(destDir, ASSET_DIGEST_FILE), verifiedDigest + '\n');
     // 提取期(刚从已校验 digest 的归档解出、目录必然完整)写入清单,作为后续“缓存
     // 是否完整”的权威基线;事后 promote 从残缺缓存再生成的清单不能当完整性依据。
     writeDirDistManifest(destDir);
@@ -400,7 +445,15 @@ async function main() {
   console.log(`    Latest: ${latestVersion} (${meta.tag_name})`);
   console.log(`    Cached: ${cachedVersion ?? '(none)'}`);
 
-  if (cachedVersion === latestVersion && !force && targetsExist(latestVersion, targets)) {
+  // 版本号相同还不够:同 tag 资产被替换(digest 变)时,缓存对自身自洽却与上游 pin 不符,
+  // 直接 promote 会打进与随后写入的 digest pin 不一致的旧 runtime。故快速路径额外要求每个
+  // 平台缓存记录的归档 digest 与当前上游一致,否则落到下载分支按新 digest 重下。
+  if (
+    cachedVersion === latestVersion
+    && !force
+    && targetsExist(latestVersion, targets)
+    && targetsMatchUpstreamDigest(meta, latestVersion, targets)
+  ) {
     saveCache(meta, latestVersion);
     promoteToVendorBin(latestVersion, targets);
     console.log('==> Already up to date.');

@@ -4,7 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { assertPinnedRuntimeAsset, flattenExtractedDir } from '../../tools/pi/update.mjs';
+import {
+  assertPinnedRuntimeAsset,
+  assetDigestMatchesUpstream,
+  flattenExtractedDir,
+  readCachedAssetDigest,
+} from '../../tools/pi/update.mjs';
 
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-pi-layout-'));
@@ -42,6 +47,25 @@ test('Pi release pin covers every supported desktop architecture', () => {
     'win32-arm64',
     'win32-x64',
   ]);
+});
+
+test('Pi updater re-verifies same-tag asset digest so a swapped upstream asset is not promoted from stale cache', (t) => {
+  const dir = tempDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const digest = 'c'.repeat(64);
+  fs.writeFileSync(path.join(dir, '.asset-digest.bin'), `sha256:${digest}\n`);
+
+  // 读回归一化(容忍 sha256: 前缀 / 大小写 / 结尾换行)。
+  assert.equal(readCachedAssetDigest(dir), digest);
+  assert.equal(readCachedAssetDigest(tempDir()), null); // 无标记(旧缓存)→ null
+
+  const asset = { digest: `sha256:${digest}` };
+  assert.equal(assetDigestMatchesUpstream(readCachedAssetDigest(dir), asset), true);
+  // 同 tag 资产被替换:上游 digest 变 → 不匹配,快速路径/跳过分支据此重下。
+  assert.equal(assetDigestMatchesUpstream(readCachedAssetDigest(dir), { digest: `sha256:${'d'.repeat(64)}` }), false);
+  // 缓存无标记 或 上游无 digest → 一律 false(fail-closed,重下核验)。
+  assert.equal(assetDigestMatchesUpstream(null, asset), false);
+  assert.equal(assetDigestMatchesUpstream(digest, { digest: undefined }), false);
 });
 
 test('Pi updater rejects mutable release metadata that differs from the reviewed pin', () => {

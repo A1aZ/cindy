@@ -254,13 +254,19 @@ async function getMostRecentSessionAgent(): Promise<AgentKind | null> {
   }
 }
 
-async function pickHelpAgent(
+// help 兜底走 maker.oneShot;目前仅 claude-code / codex 实现了它,PiAgent 继承 BaseAgent
+// 的 not-implemented。选中不支持 oneShot 的 agent 会让 HELP_ASK / 置顶摘要抛错并直接
+// no-answer,即便其它 agent 兜底仍可用。Pi 实现 oneShot 前从候选里剔除(实现后加回即可)。
+const HELP_ONESHOT_CAPABLE_AGENTS: ReadonlySet<AgentKind> = new Set(['claude-code', 'codex']);
+
+export async function pickHelpAgent(
   maker: Maker,
   preferredAgent: AgentKind | null,
 ): Promise<AgentKind | null> {
-  const ordered: AgentKind[] = preferredAgent
+  const candidates: AgentKind[] = preferredAgent
     ? [...new Set<AgentKind>([preferredAgent, 'claude-code', 'codex', 'pi'])]
     : ['claude-code', 'codex', 'pi'];
+  const ordered = candidates.filter((agentKind) => HELP_ONESHOT_CAPABLE_AGENTS.has(agentKind));
   const available = new Set(maker.listAvailableAgents());
   for (const agentKind of ordered) {
     if (!available.has(agentKind)) continue;

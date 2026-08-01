@@ -2702,12 +2702,16 @@ export function CCAgentSessionView({
     if (getSessionDeviceId(sessionId)) return;
     const agent = displayAgentKind;
     if (!shouldFallbackVendorModel(providers, sessionModel, agent)) return;
-    const defaultModel = getDefaultModelForVendor(isCodex ? 'codex' : 'cc');
+    // 用三值化后的 agent 映射选默认模型:Pi 会话必须回退到 Pi 目录默认,而不是被
+    // `isCodex ? 'codex' : 'cc'` 误写成 CC 首选(可能是更贵的 Opus)(codex review)。
+    const defaultModel = getDefaultModelForVendor(
+      agent === 'pi' ? 'pi' : agent === 'codex' ? 'codex' : 'cc',
+    );
     sessionService
       .update(sessionId, { model: defaultModel.id })
       .then(() => refreshServerSession())
       .catch((err) => log.warn('vendor fallback patch failed:', err));
-  }, [isCodex, providers, refreshServerSession, sessionAgentKind, sessionId, sessionModel]);
+  }, [displayAgentKind, providers, refreshServerSession, sessionAgentKind, sessionId, sessionModel]);
 
   // 远程协同交接被 app 关闭打断时的兜底:把上次没能发出去的正文回填到输入框。
   // 只回填、不自动补发(理由见 pendingFirstMessage 的「可恢复副本」注释)。

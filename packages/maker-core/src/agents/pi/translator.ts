@@ -63,6 +63,13 @@ export interface PiTranslateContext {
   thinkingSeq: number;
   /** contentIndex → 当前消息内的 thinking block 状态。 */
   thinkingBlocks: Map<number, PiThinkingBlock>;
+  /**
+   * 本 turn 最后一条 assistant 消息的全文(每次非空 message_end 覆盖;agent_start 重置)。
+   * 用于 agent_settled 的 done.data.result —— 与 CC/Codex 对齐:register.ts 的
+   * will-assistant-message 出口钩子与 Orca worker 终态 finalText 都读 done.data.result,
+   * 不带上就会对 Pi 静默跳过这些钩子(codex review P1)。
+   */
+  finalAssistantText: string;
 }
 
 export function createPiTranslateContext(logger: Logger): PiTranslateContext {
@@ -79,6 +86,7 @@ export function createPiTranslateContext(logger: Logger): PiTranslateContext {
     isStreaming: false,
     thinkingSeq: 0,
     thinkingBlocks: new Map(),
+    finalAssistantText: '',
   };
 }
 
@@ -181,6 +189,7 @@ export function translatePiEvent(
       ctx.turnOutput = 0;
       ctx.turnCacheRead = 0;
       ctx.turnCacheWrite = 0;
+      ctx.finalAssistantText = '';
       pushStatus(queue, ctx, 'Working…', true);
       return;
     }
@@ -206,6 +215,8 @@ export function translatePiEvent(
       applyUsage(ctx, message.usage);
       const fullText = assistantTextOf(message);
       if (fullText.length > 0) {
+        // 覆盖为本 turn 最新一条有文本的 assistant 回复,agent_settled 作 done.result 上报。
+        ctx.finalAssistantText = fullText;
         queue.push({
           type: 'text',
           data: { text: fullText, isFinal: true },
@@ -270,6 +281,10 @@ export function translatePiEvent(
         type: 'done',
         data: {
           type: 'pi/agent_settled',
+          // 本 turn 最终 assistant 回复文本。与 CC/Codex 的 done.data.result 对齐:
+          // register.ts 的 will-assistant-message 出口钩子与 Orca worker 终态 finalText
+          // 都读 done.data.result,不带上就会对 Pi 静默跳过这些钩子(codex review P1)。
+          result: ctx.finalAssistantText,
           // ghost 订阅 did-turn-end 的 usage 上报(subscriptionGateway.normalizeTurnUsage
           // 认 camelCase);与 CC/Codex 的 done.usage 对齐,让插件能显示 pi turn 的用量。
           usage: {

@@ -83,10 +83,46 @@ describe('pi translator', () => {
     expect(usage.cacheCreationTokens).toBe(3);
     // 快照累计 input+output。
     expect(usageSnapshotOf(ctx).tokenUsage).toBe(120);
+    // done.data.result 带上最终回复文本 —— register.ts 的 will-assistant-message 出口钩子
+    // 与 Orca worker 终态 finalText 都读它,不带上就对 Pi 静默跳过(codex review P1)。
+    expect((done!.data as { result?: unknown }).result).toBe('hi');
     expect(events).toContainEqual(expect.objectContaining({
       type: 'status',
       data: expect.objectContaining({ status: 'Done', isRunning: false }),
     }));
+  });
+
+  it('done.result carries the last assistant message text (multi-message turn) and resets per turn', () => {
+    const ctx = createPiTranslateContext(noopLogger);
+    const { queue, events } = makeQueue();
+    translatePiEvent(ev({ type: 'agent_start' }), queue, ctx);
+    // 文本 → 纯 tool_call(无文本)→ 最终文本:result 应取最后一条有文本的回复。
+    translatePiEvent(
+      ev({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'thinking…' }], usage: { input: 10, output: 2 } } }),
+      queue,
+      ctx,
+    );
+    translatePiEvent(
+      ev({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'x', input: {} }], usage: { input: 5, output: 1 } } }),
+      queue,
+      ctx,
+    );
+    translatePiEvent(
+      ev({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'final answer' }], usage: { input: 5, output: 3 } } }),
+      queue,
+      ctx,
+    );
+    translatePiEvent(ev({ type: 'agent_settled' }), queue, ctx);
+    const done = events.find((e) => e.type === 'done');
+    expect((done!.data as { result?: unknown }).result).toBe('final answer');
+
+    // 新 turn:result 归零,不带上一 turn 的回复。
+    translatePiEvent(ev({ type: 'agent_start' }), queue, ctx);
+    expect(ctx.finalAssistantText).toBe('');
+    const events2 = makeQueue();
+    translatePiEvent(ev({ type: 'agent_settled' }), events2.queue, ctx);
+    const done2 = events2.events.find((e) => e.type === 'done');
+    expect((done2!.data as { result?: unknown }).result).toBe('');
   });
 
   it('resets turn usage counters on the next agent_start', () => {

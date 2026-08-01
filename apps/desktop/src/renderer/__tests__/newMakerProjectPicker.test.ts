@@ -263,6 +263,19 @@ describe('Shared create project picker', () => {
     expect(newMakerDraftRouteSource).not.toContain('buildDeviceLinkCreateArgs({');
   });
 
+  // codex review P1:Pi 是本地专属 agent(startSession 拒绝任何 remoteHostId),SSH 目标
+  // 会建出永远起不来的会话。两道防线:dialog 按 agentVendor 过滤掉 SSH 主机(proactive),
+  // handleRemoteProjectAdded 的 SSH 分支再 fail-closed 兜底(防非 UI 路径漏进 Pi+SSH)。
+  it('hides SSH targets for Pi and fail-closed guards Pi+SSH session creation', () => {
+    // dialog:选中 Pi 时把 SSH 主机从可选目标里剔除。
+    expect(addRemoteProjectDialogSource).toContain("agentVendor === 'pi'");
+    expect(addRemoteProjectDialogSource).toMatch(/excludeSsh\s*\?\s*\[\]/);
+    // 父层把当前 draft.vendor 传进 dialog 驱动过滤。
+    expect(newMakerDraftRouteSource).toContain('agentVendor={draft.vendor}');
+    // 兜底:SSH 建会话前拦住 Pi,抛清晰的本地化错误而非建出注定失败的会话。
+    expect(newMakerDraftRouteSource).toContain("t('ccAgent.draft.piRemoteUnsupported')");
+  });
+
   // #807:设备切换 pill。三条产品裁决写进源码断言,防后续重构悄悄改掉。
   it('wires the device switcher pill and keeps it invisible without paired devices', () => {
     expect(newMakerDraftRouteSource).toContain(

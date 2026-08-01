@@ -4666,6 +4666,7 @@
       "add": "プロジェクトを追加",
       "cancel": "キャンセル",
       "empty": "「設定 → リモート接続」で被制御デバイスに接続するか、「設定 → リモートマシン」で SSH ホストを追加してください。",
+      "emptyPiSshFiltered": "Pi はローカルでのみ動作するため、ここに SSH ホストは表示されません。「設定 → リモート接続」で被制御デバイスに接続するか、SSH ホストを使う場合は Claude または Codex に切り替えてください。",
       "loading": "読み込み中…",
       "noSubdirs": "サブフォルダはありません",
       "doubleClickHint": "ダブルクリックで入る",
@@ -5943,6 +5944,7 @@
     },
     "draft": {
       "createSessionFailed": "セッションの作成に失敗しました。再試行してください",
+      "piRemoteUnsupported": "Pi はローカルでのみ動作し、SSH リモートホストは利用できません。このホストを使うには Claude または Codex に切り替えてください。",
       "remoteWorktreeCleanupPending": "前回のリモート worktree はまだクリーンアップ待ちです。デバイスを再接続してから再試行してください。",
       "remoteProviderUpdating": "プロバイダーの認証情報を更新中です。しばらくしてから再試行してください",
       "remoteProviderUnsupported": "このプロバイダーは SSH リモートセッションに対応していません。別のソースを選択してください",

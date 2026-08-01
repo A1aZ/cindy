@@ -1596,6 +1596,14 @@ export function NewMakerDraftRoute() {
         return;
       }
 
+      // fail-closed:Pi 是本地专属 agent,PiAgent.startSession 拒绝任何 remoteHostId
+      // (agents/pi/index.ts)。SSH 目标会带 remoteHostId 建会话 → 首消息必然起不来。
+      // dialog 侧已按 agentVendor 过滤掉 SSH 主机,这里是防非 UI 路径(编程调用 / 未来回归)
+      // 漏进 Pi+SSH 的兜底,抛清晰错误由 dialog 呈现,而不是建出一条注定失败的会话(codex review P1)。
+      if (draftVendor === 'pi') {
+        throw new Error(t('ccAgent.draft.piRemoteUnsupported'));
+      }
+
       // SSH:lazy-create(workspaceKind='project',第一条消息发出时 agent 进程才真正起),
       // 立即建会话记录并 navigate 过去。建会话约定与本文件其它 createSession 路径一致
       // (createSession + makerChatStore.setSessionRuntime + navigate)。
@@ -3719,6 +3727,9 @@ export function NewMakerDraftRoute() {
           open={addRemoteProjectOpen}
           onOpenChange={setAddRemoteProjectOpen}
           initialDeviceId={addRemoteProjectDeviceId}
+          // 选中 Pi 时 dialog 过滤掉 SSH 主机(Pi 不支持 remoteHostId);handleRemoteProjectAdded
+          // 里还有一道 fail-closed 兜底,防非 UI 路径漏进 Pi+SSH。
+          agentVendor={draft.vendor}
           onProjectAdded={handleRemoteProjectAdded}
         />
       </div>

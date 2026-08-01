@@ -15,6 +15,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getLiziMcpSessionContext } from '@cindy/mcps';
+import { createOrcaWorkerBridgeMcpProvider } from '@cindy/orca-workflow';
 
 import type { Logger, McpProvider } from '@cindy/maker-core';
 import { getPiExtraSpawnConfig, shutdownPiEnvironment } from '../piEnvironment.js';
@@ -158,5 +159,30 @@ describe('piEnvironment per-session identity', () => {
     expect(await readRpcText(callResp)).toMatchObject({
       result: { content: [{ type: 'text', text: 'no-session' }] },
     });
+  });
+
+  it('registers the worker bridge before the Pi session role is available', async () => {
+    const logger = noopLogger();
+    const provider = createOrcaWorkerBridgeMcpProvider({
+      logger,
+      getMaker: () => {
+        throw new Error('not called while registering the MCP server');
+      },
+      persistUserMessage: async () => {},
+      wireSession: () => undefined,
+    });
+    const config = await getPiExtraSpawnConfig([provider], logger, {
+      sessionId: 'pi-worker-1',
+      workingDir: '/repo',
+      vendorOptions: {
+        orcaRole: 'worker',
+        orcaWorkerId: 'worker-1',
+        orcaWorkerSessionId: 'pi-worker-1',
+      },
+    });
+
+    expect(config?.mcpBridge?.servers.map((server) => server.name)).toContain(
+      'orca_worker_bridge',
+    );
   });
 });

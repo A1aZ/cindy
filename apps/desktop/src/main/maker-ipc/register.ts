@@ -478,8 +478,11 @@ import {
   updateCustomProviderIfUnchanged,
 } from '../maker-host/custom-provider-store.js';
 import {
+  readCustomProviderHeadersForMutation,
   readCustomProviderKeyForMutation,
+  removeCustomProviderHeaders,
   removeCustomProviderKey,
+  storeCustomProviderHeaders,
   storeCustomProviderKey,
 } from '../secrets/providerSecretStore.js';
 import { setSessionEffort, setSessionFastMode } from '../maker-host/session-effort-store.js';
@@ -4227,6 +4230,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     // 停用写入的归属校验:入口捕获 / 持久化前复核,异步窗口内切账号即拒,防 A 的
     // 点击写进 B 的 owner-scoped 偏好文件(PR #744 review 第七轮)。
     currentOwnerId: () => getCurrentDataOwnerId(),
+    readCustomProviderHeadersForMutation,
+    storeCustomProviderHeaders,
+    removeCustomProviderHeaders,
     // 通用 OAuth（目录 auth.oauth 描述符驱动）：login 成功后 best-effort 拉动态模型发现
     // (additions-only merge 进 active-catalog) 并广播 PROVIDER_CHANGED 让 UI 刷新连接态。
     oauthLogin: async (providerId, isCurrent) => {

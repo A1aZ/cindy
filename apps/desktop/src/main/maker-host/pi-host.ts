@@ -29,7 +29,7 @@ import type {
 import type { ProviderWireProtocol } from '@cindy/model-providers';
 
 import { getPiExtraSpawnConfig } from '../mcp-integrations/piEnvironment.js';
-import { listCustomProviders } from './custom-provider-store.js';
+import { listCustomProvidersWithSecureHeaders } from './custom-provider-header-secrets.js';
 import { readCustomProviderKey } from '../secrets/providerSecretStore.js';
 import { desktopCodexAuthAdapter, readClaudeApiKey } from './auth-adapters.js';
 import { getClaudeEndpoint } from './anthropic-compat-proxy-host.js';
@@ -109,7 +109,7 @@ class DesktopPiAuthAdapter implements AuthAdapter {
     }
     if (providerId) {
       try {
-        const custom = (await listCustomProviders()).find(
+        const custom = (await listCustomProvidersWithSecureHeaders()).find(
           (provider) => provider.id === providerId && provider.runtimes.pi,
         );
         if (custom) {
@@ -120,7 +120,8 @@ class DesktopPiAuthAdapter implements AuthAdapter {
             return { authenticated: true, identity: custom.name, authSource: 'api-key' };
           }
           if (method === 'apiKey') {
-            return readCustomProviderKey(providerId, 'pi')
+            const hasHeaderCredential = Object.keys(custom.runtimes.pi?.headers ?? {}).length > 0;
+            return readCustomProviderKey(providerId, 'pi') || hasHeaderCredential
               ? { authenticated: true, identity: custom.name, authSource: 'api-key' }
               : { authenticated: false, errorReason: 'pi_native_api_key_unavailable' };
           }
@@ -233,7 +234,7 @@ export function piNativeKeyEnvVar(providerId: string): string {
  * key 读取经 `readKey` 注入(便于单测)。规则:
  *  - 无 pi runtime → 跳过;
  *  - oauth 形态 → 跳过(pi models.json 仅支持 radius oauth,不通用);
- *  - apiKey 形态但读不到 key → 跳过(pi 无 key 不显示该模型,避免半可用);
+ *  - apiKey 形态但 key / 自定义 headers 都没有 → 跳过(避免半可用);
  *  - none(keyless,本机 Ollama 等)→ apiKeyEnvVar 留空,models.json 写 dummy key;
  *  - 自定义 header 值全部搬进子进程 env,models.json 只保留 `$ENV` 引用。
  * 直连用户端点,不过 anthropic-compat 代理(设计原则:pi 主导,禁双重转义)。
@@ -283,17 +284,7 @@ export function buildPiNativeProvidersFromConfigs(
       onSkip?.(cfg.id, 'oauth not supported for pi native');
       continue;
     }
-    let apiKeyEnvVar: string | undefined;
-    if (authMethod === 'apiKey') {
-      const key = readKey(cfg.id, 'pi');
-      if (!key) {
-        onSkip?.(cfg.id, 'apiKey provider missing pi key');
-        continue;
-      }
-      apiKeyEnvVar = uniqueEnvVar(cfg.id);
-      env[apiKeyEnvVar] = key;
-    }
-    const headers = rt.headers
+    const headers = rt.headers && Object.keys(rt.headers).length > 0
       ? Object.fromEntries(
           Object.entries(rt.headers).map(([name, value]) => {
             const envVar = uniqueEnvVar(`${cfg.id}_HEADER_${name}`);
@@ -302,6 +293,18 @@ export function buildPiNativeProvidersFromConfigs(
           }),
         )
       : undefined;
+    let apiKeyEnvVar: string | undefined;
+    if (authMethod === 'apiKey') {
+      const key = readKey(cfg.id, 'pi');
+      if (!key && !headers) {
+        onSkip?.(cfg.id, 'apiKey provider missing pi key and custom headers');
+        continue;
+      }
+      if (key) {
+        apiKeyEnvVar = uniqueEnvVar(cfg.id);
+        env[apiKeyEnvVar] = key;
+      }
+    }
     providers.push({
       id: cfg.id,
       name: cfg.name,
@@ -319,7 +322,7 @@ export function buildPiNativeProvidersFromConfigs(
 async function resolvePiNativeProviders(): Promise<PiNativeProvidersResult> {
   let configs;
   try {
-    configs = await listCustomProviders();
+    configs = await listCustomProvidersWithSecureHeaders();
   } catch (err) {
     log.warn('resolvePiNativeProviders: listCustomProviders failed, gateway-only', {
       message: err instanceof Error ? err.message : String(err),

@@ -18,8 +18,8 @@ vi.mock('../auth-adapters.js', () => ({
   readClaudeApiKey: () => 'REAL-GATEWAY-KEY',
   desktopCodexAuthAdapter: { getState: async () => ({ authenticated: false }) },
 }));
-vi.mock('../custom-provider-store.js', () => ({
-  listCustomProviders: async () => [
+vi.mock('../custom-provider-header-secrets.js', () => ({
+  listCustomProvidersWithSecureHeaders: async () => [
     {
       id: 'ollama-local',
       name: 'Local Ollama',

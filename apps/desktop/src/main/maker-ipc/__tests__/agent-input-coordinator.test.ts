@@ -6,6 +6,7 @@ import type {
   AgentInputSendResult,
 } from '../agent-input-coordinator.js';
 import type {
+  AgentInputCreateOpts,
   AgentInputProjection,
   AgentInputQueuedMessage,
 } from '../../../shared/agentInputQueue.js';

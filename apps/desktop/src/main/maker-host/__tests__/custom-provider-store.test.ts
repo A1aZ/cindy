@@ -250,7 +250,7 @@ describe('custom-provider-store CRUD (per-runtime)', () => {
     expect((await getCustomProvider('openrouter'))?.name).toBe('Edited in another window');
   });
 
-  it('round-trips headers + dedupes models on normalize', async () => {
+  it('never persists headers and still dedupes models on normalize', async () => {
     mountDb();
     await createCustomProvider({
       ...valid,
@@ -271,7 +271,7 @@ describe('custom-provider-store CRUD (per-runtime)', () => {
       { id: 'a', name: 'A', contextWindow: 1_000_000 },
       { id: 'hidden', name: 'Hidden', defaultEnabled: false },
     ]);
-    expect(got?.runtimes.codex?.headers).toEqual({ 'X-Org': 'acme' });
+    expect(got?.runtimes.codex?.headers).toBeUndefined();
   });
 
   it('round-trips an explicit Chat Completions protocol', async () => {

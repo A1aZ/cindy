@@ -97,6 +97,9 @@ function makeDeps(over: Partial<ProviderHandlerDeps> = {}): ProviderHandlerDeps 
     readCustomProviderKeyForMutation: vi.fn(() => null),
     storeCustomProviderKey: vi.fn(() => true),
     removeCustomProviderKey: vi.fn(() => ({ success: true })),
+    readCustomProviderHeadersForMutation: vi.fn(() => null),
+    storeCustomProviderHeaders: vi.fn(() => true),
+    removeCustomProviderHeaders: vi.fn(() => ({ success: true })),
     scanLocalCli: vi.fn(async () => []),
     setModelsDisabled: vi.fn(() => {}),
     setProviderDisabled: vi.fn(() => {}),
@@ -138,6 +141,53 @@ describe('provider:list IPC handler', () => {
       }),
     );
     await expect(harness.invoke(MAKER_INVOKE.PROVIDER_LIST)).rejects.toThrow('boom');
+  });
+
+  it('redacts runtime header credentials for untrusted or synthetic callers', async () => {
+    const harness = new IpcHarness();
+    const provider = {
+      ...fakeView('custom', true),
+      routing: {
+        pi: {
+          upstream: 'https://custom.example/v1',
+          authStrategy: 'api-key-header',
+          headerOverride: { Authorization: 'Bearer secret' },
+        },
+      },
+    } as unknown as ProviderView;
+    registerProviderHandlers(harness, makeDeps({
+      listProviders: async () => [provider],
+      isTrustedSender: () => false,
+    }));
+
+    const result = await harness.invoke(MAKER_INVOKE.PROVIDER_LIST) as {
+      providers: ProviderView[];
+    };
+    expect(result.providers[0].routing.pi?.headerOverride).toBeUndefined();
+    expect(result.providers[0].routing.pi?.upstream).toBe('https://custom.example/v1');
+  });
+
+  it('keeps runtime headers for the trusted local settings editor', async () => {
+    const harness = new IpcHarness();
+    const provider = {
+      ...fakeView('custom', true),
+      routing: {
+        pi: {
+          headerOverride: { Authorization: 'Bearer secret' },
+        },
+      },
+    } as unknown as ProviderView;
+    registerProviderHandlers(harness, makeDeps({
+      listProviders: async () => [provider],
+      isTrustedSender: () => true,
+    }));
+
+    const result = await harness.invoke(MAKER_INVOKE.PROVIDER_LIST) as {
+      providers: ProviderView[];
+    };
+    expect(result.providers[0].routing.pi?.headerOverride).toEqual({
+      Authorization: 'Bearer secret',
+    });
   });
 });
 
@@ -698,6 +748,92 @@ describe('provider:custom:* CRUD handlers', () => {
       harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, config, { pi: 'pi-secret' }),
     ).resolves.toEqual({ ok: true });
     expect(storeCustomProviderKey).toHaveBeenCalledWith('pi-native', 'pi', 'pi-secret');
+  });
+
+  it('encrypts runtime headers and never persists their values in SQLite', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    const storeCustomProviderHeaders = vi.fn(() => true);
+    registerProviderHandlers(harness, makeDeps({ storeCustomProviderHeaders }));
+    const config: CustomProviderConfig = {
+      id: 'header-auth',
+      name: 'Header Auth',
+      auth: { method: 'apiKey' },
+      runtimes: {
+        pi: {
+          baseUrl: 'https://header-auth.example/v1',
+          models: [{ id: 'm', name: 'M' }],
+          headers: {
+            Authorization: 'Bearer top-secret',
+            'X-Org': 'also-private',
+          },
+        },
+      },
+    };
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, config),
+    ).resolves.toEqual({ ok: true });
+    expect(storeCustomProviderHeaders).toHaveBeenCalledWith(
+      'header-auth',
+      'pi',
+      config.runtimes.pi?.headers,
+    );
+    const row = raw?.prepare('SELECT runtimes FROM custom_providers WHERE id = ?').get(
+      'header-auth',
+    ) as { runtimes: string };
+    expect(row.runtimes).not.toContain('top-secret');
+    expect(row.runtimes).not.toContain('also-private');
+    expect(JSON.parse(row.runtimes).pi.headers).toBeUndefined();
+  });
+
+  it('restores encrypted runtime headers when the config update fails', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    const headers = new Map<AgentKind, Record<string, string>>();
+    registerProviderHandlers(harness, makeDeps({
+      readCustomProviderHeadersForMutation: vi.fn(
+        (_providerId, agent) => headers.get(agent) ?? null,
+      ),
+      storeCustomProviderHeaders: vi.fn((_providerId, agent, value) => {
+        headers.set(agent, { ...value });
+        return true;
+      }),
+      removeCustomProviderHeaders: vi.fn((_providerId, agent) => {
+        headers.delete(agent);
+        return { success: true };
+      }),
+    }));
+    const config: CustomProviderConfig = {
+      id: 'header-rollback',
+      name: 'Header Rollback',
+      runtimes: {
+        pi: {
+          baseUrl: 'https://header-rollback.example/v1',
+          models: [{ id: 'm', name: 'M' }],
+          headers: { Authorization: 'Bearer old' },
+        },
+      },
+    };
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, config);
+    raw!.exec(`
+      CREATE TRIGGER fail_header_provider_update
+      BEFORE UPDATE ON custom_providers
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated header write failure');
+      END
+    `);
+
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+      ...config,
+      runtimes: {
+        pi: {
+          ...config.runtimes.pi!,
+          headers: { Authorization: 'Bearer replacement' },
+        },
+      },
+    })).rejects.toThrow(/simulated header write failure/);
+    expect(headers.get('pi')).toEqual({ Authorization: 'Bearer old' });
   });
 
   it('rolls back partial create keys before any provider config is committed', async () => {

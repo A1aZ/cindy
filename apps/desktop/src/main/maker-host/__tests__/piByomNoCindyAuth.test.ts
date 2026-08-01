@@ -11,8 +11,8 @@ vi.mock('../auth-adapters.js', () => ({
   readClaudeApiKey: () => null,
   desktopCodexAuthAdapter: { getState: async () => ({ authenticated: false }) },
 }));
-vi.mock('../custom-provider-store.js', () => ({
-  listCustomProviders: async () => [
+vi.mock('../custom-provider-header-secrets.js', () => ({
+  listCustomProvidersWithSecureHeaders: async () => [
     {
       id: 'local-keyless',
       name: 'Local keyless',

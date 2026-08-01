@@ -47,6 +47,11 @@ import {
   updateCustomProvider,
   validateCustomProviderConfig,
 } from '../maker-host/custom-provider-store.js';
+import {
+  CUSTOM_PROVIDER_RUNTIME_AGENTS,
+  splitCustomProviderHeaders,
+  type CustomProviderHeaderSecrets,
+} from '../maker-host/custom-provider-header-secrets.js';
 import type { ProviderProbeSpec, ProviderTestInput, ProviderTestResult } from '../maker-host/provider-diagnostics.js';
 import type {
   ProviderModelsFetchResult,
@@ -163,6 +168,19 @@ function oauthDescriptorSignature(config: CustomProviderConfig | null): string |
       });
 }
 
+/** Never expose runtime header credentials to WebViews or synthetic remote events. */
+function withoutProviderHeaderCredentials(provider: ProviderView): ProviderView {
+  if (!provider.routing) return provider;
+  const routing = Object.fromEntries(
+    Object.entries(provider.routing).map(([agent, descriptor]) => {
+      if (!descriptor) return [agent, descriptor];
+      const { headerOverride: _secretHeaders, ...safeDescriptor } = descriptor;
+      return [agent, safeDescriptor];
+    }),
+  ) as ProviderView['routing'];
+  return { ...provider, routing };
+}
+
 export interface ProviderHandlerDeps {
   /**
    * 当前供应商视图（含实时连接状态）；见 createDesktopProviderService。
@@ -244,6 +262,20 @@ export interface ProviderHandlerDeps {
   readCustomProviderKeyForMutation(providerId: string, agent: AgentKind): string | null;
   storeCustomProviderKey(providerId: string, agent: AgentKind, value: string): boolean;
   removeCustomProviderKey(
+    providerId: string,
+    agent: AgentKind,
+  ): { success: boolean; error?: string };
+  /** Main-only encrypted runtime header blobs, transacted with config + API keys. */
+  readCustomProviderHeadersForMutation(
+    providerId: string,
+    agent: AgentKind,
+  ): Record<string, string> | null;
+  storeCustomProviderHeaders(
+    providerId: string,
+    agent: AgentKind,
+    headers: Record<string, string>,
+  ): boolean;
+  removeCustomProviderHeaders(
     providerId: string,
     agent: AgentKind,
   ): { success: boolean; error?: string };
@@ -599,6 +631,101 @@ export function registerProviderHandlers(
       throw error;
     }
   };
+  type HeaderSnapshot = {
+    agent: AgentKind;
+    previous: Record<string, string> | null;
+  };
+  type HeaderMutation = {
+    agent: AgentKind;
+    replacement: Record<string, string> | null;
+  };
+  const restoreProviderHeaders = (
+    providerId: string,
+    snapshots: readonly HeaderSnapshot[],
+  ): boolean => {
+    let restored = true;
+    for (const { agent, previous } of [...snapshots].reverse()) {
+      if (previous) {
+        if (!deps.storeCustomProviderHeaders(providerId, agent, previous)) restored = false;
+      } else if (!deps.removeCustomProviderHeaders(providerId, agent).success) {
+        restored = false;
+      }
+    }
+    return restored;
+  };
+  const planProviderHeaderMutations = (
+    config: CustomProviderConfig,
+    headers: CustomProviderHeaderSecrets,
+    mode: 'create' | 'update' | 'delete',
+  ): HeaderMutation[] => {
+    const mutations: HeaderMutation[] = [];
+    for (const agent of CUSTOM_PROVIDER_RUNTIME_AGENTS) {
+      const replacement = headers[agent];
+      if (mode === 'create') {
+        if (config.runtimes[agent] && replacement) mutations.push({ agent, replacement });
+      } else {
+        mutations.push({ agent, replacement: mode === 'delete' ? null : replacement ?? null });
+      }
+    }
+    return mutations;
+  };
+  const stageProviderHeaders = (
+    providerId: string,
+    mutations: readonly HeaderMutation[],
+  ): HeaderSnapshot[] => {
+    const snapshots: HeaderSnapshot[] = [];
+    try {
+      for (const { agent, replacement } of mutations) {
+        let previous: Record<string, string> | null;
+        try {
+          previous = deps.readCustomProviderHeadersForMutation(providerId, agent);
+        } catch {
+          throwIpcError('INTERNAL', `failed to read existing ${agent} provider headers`);
+        }
+        snapshots.push({ agent, previous });
+        const succeeded = replacement
+          ? deps.storeCustomProviderHeaders(providerId, agent, replacement)
+          : deps.removeCustomProviderHeaders(providerId, agent).success;
+        if (!succeeded) {
+          throwIpcError('INTERNAL', `failed to update ${agent} provider headers`);
+        }
+      }
+      return snapshots;
+    } catch (error) {
+      if (!restoreProviderHeaders(providerId, snapshots)) {
+        throwIpcError('INTERNAL', 'provider header update failed and could not be rolled back');
+      }
+      throw error;
+    }
+  };
+  const stageProviderCredentials = (
+    providerId: string,
+    keyMutations: readonly KeyMutation[],
+    headerMutations: readonly HeaderMutation[],
+  ): { keySnapshots: KeySnapshot[]; headerSnapshots: HeaderSnapshot[] } => {
+    const keySnapshots = stageProviderKeys(providerId, keyMutations);
+    try {
+      return {
+        keySnapshots,
+        headerSnapshots: stageProviderHeaders(providerId, headerMutations),
+      };
+    } catch (error) {
+      if (!restoreProviderKeys(providerId, keySnapshots)) {
+        throwIpcError('INTERNAL', 'provider credential update failed and could not be rolled back');
+      }
+      throw error;
+    }
+  };
+  const restoreProviderCredentials = (
+    providerId: string,
+    snapshots: { keySnapshots: readonly KeySnapshot[]; headerSnapshots: readonly HeaderSnapshot[] },
+  ): boolean => {
+    // Always attempt both restorations; a failed header rollback must not leave
+    // an API key at its staged replacement (or vice versa).
+    const headersRestored = restoreProviderHeaders(providerId, snapshots.headerSnapshots);
+    const keysRestored = restoreProviderKeys(providerId, snapshots.keySnapshots);
+    return headersRestored && keysRestored;
+  };
 
   // 只读聚合：loadCatalog 永不抛（最差回退内置目录），故无需 throwIpcError 包裹。
   registry.handle(
@@ -611,9 +738,12 @@ export function registerProviderHandlers(
     }> => {
       // 只有本机主页面能顺带触发绑定自愈与清单拉取:这条通道也服务 device-link(合成
       // event)和可能不受信的渲染上下文,它们只该拿到只读快照(PR #548 review)。
-      const allowSideEffects = deps.isTrustedSender?.(event) === true;
-      const providers = await deps.listProviders({ allowSideEffects });
-      return { providers, modelVisibilityOverrides: deps.getModelVisibilityOverrides() };
+      const trusted = deps.isTrustedSender?.(event) === true;
+      const providers = await deps.listProviders({ allowSideEffects: trusted });
+      return {
+        providers: trusted ? providers : providers.map(withoutProviderHeaderCredentials),
+        modelVisibilityOverrides: deps.getModelVisibilityOverrides(),
+      };
     },
   );
 
@@ -809,18 +939,20 @@ export function registerProviderHandlers(
     const keys = parseRuntimeKeys(keyInput);
     if (!keys) throwIpcError('INVALID_PARAMS', 'invalid provider runtime keys');
     const config = input as CustomProviderConfig;
+    const separated = splitCustomProviderHeaders(config);
     return withProviderConfigMutation(config.id, async () => {
       if (await customProviderExists(config.id)) {
         throwIpcError('ALREADY_EXISTS', `custom provider '${config.id}' already exists`);
       }
-      const keySnapshots = stageProviderKeys(
+      const credentialSnapshots = stageProviderCredentials(
         config.id,
         planProviderKeyMutations(config, keys, 'create'),
+        planProviderHeaderMutations(config, separated.headers, 'create'),
       );
       try {
-        await createCustomProvider(config);
+        await createCustomProvider(separated.config);
       } catch (error) {
-        if (!restoreProviderKeys(config.id, keySnapshots)) {
+        if (!restoreProviderCredentials(config.id, credentialSnapshots)) {
           throwIpcError(
             'INTERNAL',
             'provider creation failed and credentials could not be rolled back',
@@ -840,6 +972,7 @@ export function registerProviderHandlers(
     const keys = parseRuntimeKeys(keyInput);
     if (!keys) throwIpcError('INVALID_PARAMS', 'invalid provider runtime keys');
     const config = input as CustomProviderConfig;
+    const separated = splitCustomProviderHeaders(config);
     return withProviderConfigMutation(config.id, async () => {
       let generation: symbol | null = null;
       try {
@@ -853,9 +986,10 @@ export function registerProviderHandlers(
           || oauthDescriptorSignature(previous) !== oauthDescriptorSignature(config);
         // API key 的写 / 删与配置更新处于同一 main 队列；若后续 OAuth 清理或 DB 写失败，
         // 用原值回滚，确保并发窗口不能把另一份配置和密钥拼在一起。
-        const keySnapshots = stageProviderKeys(
+        const credentialSnapshots = stageProviderCredentials(
           config.id,
           planProviderKeyMutations(config, keys, 'update'),
+          planProviderHeaderMutations(config, separated.headers, 'update'),
         );
         // 先阻止在途 flow 写回，再改描述符；否则旧 flow 可能在 clear 后迟到落一枚旧 token。
         if (shouldResetOAuth) deps.oauthCancel(config.id);
@@ -871,11 +1005,11 @@ export function registerProviderHandlers(
               throwIpcError('INTERNAL', 'failed to remove existing OAuth credentials');
             }
           }
-          updated = await updateCustomProvider(config.id, config);
+          updated = await updateCustomProvider(config.id, separated.config);
         } catch (err) {
           const oauthRestored = !restoreOAuthCredentials || restoreOAuthCredentials();
-          const keysRestored = restoreProviderKeys(config.id, keySnapshots);
-          if (!oauthRestored || !keysRestored) {
+          const credentialsRestored = restoreProviderCredentials(config.id, credentialSnapshots);
+          if (!oauthRestored || !credentialsRestored) {
             throwIpcError(
               'INTERNAL',
               'provider update failed and existing credentials could not be restored',
@@ -885,8 +1019,8 @@ export function registerProviderHandlers(
         }
         if (!updated) {
           const oauthRestored = !restoreOAuthCredentials || restoreOAuthCredentials();
-          const keysRestored = restoreProviderKeys(config.id, keySnapshots);
-          if (!oauthRestored || !keysRestored) {
+          const credentialsRestored = restoreProviderCredentials(config.id, credentialSnapshots);
+          if (!oauthRestored || !credentialsRestored) {
             throwIpcError(
               'INTERNAL',
               'provider disappeared during update and existing credentials could not be restored',
@@ -911,12 +1045,17 @@ export function registerProviderHandlers(
       const generation = beginOAuthMutation(providerId);
       try {
         deps.oauthCancel(providerId);
-        const keySnapshots = stageProviderKeys(
+        const credentialSnapshots = stageProviderCredentials(
           providerId,
           (VALID_AGENTS as readonly AgentKind[]).map((agent) => ({
             agent,
             replacement: null,
           })),
+          planProviderHeaderMutations(
+            { id: providerId, name: providerId, runtimes: {} },
+            {},
+            'delete',
+          ),
         );
         // OAuth 形态自定义供应商的凭证 blob 一并清掉（apiKey 形态无 blob，幂等无害）。
         let restoreOAuthCredentials: (() => boolean) | null = null;
@@ -943,8 +1082,11 @@ export function registerProviderHandlers(
           } catch (err) {
             const overridesRestored = !restoreDisableOverrides || restoreDisableOverrides();
             const oauthRestored = !restoreOAuthCredentials || restoreOAuthCredentials();
-            const keysRestored = restoreProviderKeys(providerId, keySnapshots);
-            if (!oauthRestored || !keysRestored || !overridesRestored) {
+            const credentialsRestored = restoreProviderCredentials(
+              providerId,
+              credentialSnapshots,
+            );
+            if (!oauthRestored || !credentialsRestored || !overridesRestored) {
               throwIpcError(
                 'INTERNAL',
                 'provider deletion failed and existing credentials could not be restored',

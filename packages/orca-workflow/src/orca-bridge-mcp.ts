@@ -618,9 +618,19 @@ export function createOrcaWorkerBridgeMcpProvider(deps: OrcaBridgeMcpDeps): McpP
   const leadCaptures = new CapturedSessionRegistry();
   return {
     name: 'orca_worker_bridge',
-    isEnabled: (ctx) => ctx.vendorOptions?.orcaRole === 'worker' || ctx.agentKind === 'codex',
+    // Global HTTP bridges (Codex and Pi) bind the real session only at request time.
+    // Keep the server registered when a dynamic context resolver exists; every tool
+    // call still fails closed in resolveWorkerLink against that runtime identity.
+    isEnabled: (ctx) =>
+      ctx.vendorOptions?.orcaRole === 'worker'
+      || ctx.agentKind === 'codex'
+      || typeof ctx.getSessionContext === 'function',
     toClaudeSdkConfig: (ctx) => {
-      if (ctx.vendorOptions?.orcaRole !== 'worker' && ctx.agentKind !== 'codex') return null;
+      if (
+        ctx.vendorOptions?.orcaRole !== 'worker'
+        && ctx.agentKind !== 'codex'
+        && typeof ctx.getSessionContext !== 'function'
+      ) return null;
       const server = new McpServer({ name: 'orca_worker_bridge', version: '0.1.0' });
 
       async function resolveLead(workerId?: string) {

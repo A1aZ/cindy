@@ -1,9 +1,10 @@
 /**
- * custom-provider-store —— 用户自定义供应商**配置**的 localDb CRUD（不含密钥）。
+ * custom-provider-store —— 用户自定义供应商**非凭证配置**的 localDb CRUD。
  *
  * 存储：localDb `custom_providers` 表。DB 文件本身按 userId 切片
  * （`<userData>/xdt-maker-<userId>.db`，换账号 closeDb 重开），故本表天然账号隔离、
- * 无 owner 列（与 `sessions` 一致）。API key 不在此——按 runtime 单独走 safeStorage（见 routing）。
+ * 无 owner 列（与 `sessions` 一致）。API key 与 runtime headers 均不在此——按 runtime
+ * 单独走 safeStorage（见 custom-provider-header-secrets / routing）。
  *
  * 形状：行 ↔ `@cindy/model-providers` 的 `CustomProviderConfig`（per-runtime）。`runtimes` 列以
  * TEXT 存 JSON，出入口转换、反序列化失败安全兜底（{}），不抛错。
@@ -329,12 +330,9 @@ function normalizeRuntime(rt: CustomProviderRuntimeConfig): CustomProviderRuntim
       seen.add(m.id);
       return true;
     });
-  const headers =
-    rt.headers && Object.keys(rt.headers).length > 0 ? { ...rt.headers } : undefined;
   const out: CustomProviderRuntimeConfig = { baseUrl: rt.baseUrl.trim(), models };
   if (rt.wireProtocol) out.wireProtocol = rt.wireProtocol;
   if (rt.requestPath && rt.requestPath.trim()) out.requestPath = rt.requestPath.trim();
-  if (headers) out.headers = headers;
   if (rt.modelsUrl && rt.modelsUrl.trim()) out.modelsUrl = rt.modelsUrl.trim();
   return out;
 }

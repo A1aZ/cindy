@@ -90,6 +90,25 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     expect(skips).toContain('nokey');
   });
 
+  it('allows apiKey providers authenticated entirely by custom headers', () => {
+    const { providers, env } = buildPiNativeProvidersFromConfigs(
+      [{
+        id: 'header-only',
+        name: 'Header Only',
+        auth: { method: 'apiKey' },
+        runtimes: {
+          pi: piRuntime({ headers: { Authorization: 'Bearer header-secret' } }),
+        },
+      }],
+      () => null,
+    );
+
+    expect(providers).toHaveLength(1);
+    expect(providers[0].apiKeyEnvVar).toBeUndefined();
+    expect(providers[0].headers?.Authorization).toMatch(/^\$CINDY_PI_KEY_/);
+    expect(Object.values(env)).toContain('Bearer header-secret');
+  });
+
   it('oauth custom provider is skipped for pi native', () => {
     const skips: string[] = [];
     const { providers } = buildPiNativeProvidersFromConfigs(

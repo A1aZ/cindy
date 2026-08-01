@@ -51,7 +51,7 @@ import {
 } from './model-discovery/anthropic.js';
 import { createProviderService, type ProviderService } from './provider-service.js';
 import { readModelDisableOverrides } from './model-disable-store.js';
-import { listCustomProviders } from './custom-provider-store.js';
+import { listCustomProvidersWithSecureHeaders } from './custom-provider-header-secrets.js';
 import {
   setCustomProviderKeyReader,
   setOAuthTokenReader,
@@ -395,7 +395,7 @@ export async function refreshDiscoveredCodexModels(
  */
 export async function refreshCustomProvidersIntoCatalog(): Promise<void> {
   try {
-    const configs = await listCustomProviders();
+    const configs = await listCustomProvidersWithSecureHeaders();
     setCustomProviders(configs.map((c) => buildUserProvider(c)));
     log.info('custom providers merged into active catalog', { count: configs.length });
   } catch (err) {

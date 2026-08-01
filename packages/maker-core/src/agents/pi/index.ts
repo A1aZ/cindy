@@ -442,8 +442,13 @@ export class PiAgent extends BaseAgent {
         .filter((provider) => provider.id !== PI_PROVIDER_ID)
         .map((provider) => [provider.id, provider] as const),
     );
-    // providerId 是模型来源的主键；同名模型可同时存在于 Cindy 网关和多个 BYOM
-    // provider。只有旧会话未带 providerId 时才按模型做兼容回退（首个原生来源优先）。
+    // providerId 是模型来源的主键；同名模型可同时存在于 Cindy 网关和多个 BYOM provider。
+    // 三态语义(与 session-provider-store 对齐):
+    //   - 显式 BYOM id → 该 native provider(经上面的 model-combo fail-closed 校验);
+    //   - null(显式清除来源)→ **固定走默认路由 cindy**,绝不按模型自动挑 BYOM ——
+    //     否则默认路由的会话在启动/恢复/切模(Main 传 null)时,若某 BYOM 与网关同名模型,
+    //     提示词会被发往用户并未选择的 BYOM 端点(codex review P1);
+    //   - undefined(旧会话从未持久化 providerId)→ 才按模型做兼容回退(首个原生来源优先)。
     const resolveProviderForModel = (
       model: string,
       providerId?: string | null,
@@ -454,6 +459,7 @@ export class PiAgent extends BaseAgent {
           ? native.id
           : PI_PROVIDER_ID;
       }
+      if (providerId === null) return PI_PROVIDER_ID;
       return nativeProviders.find(
         (provider) => provider.id !== PI_PROVIDER_ID
           && provider.models.some((candidate) => candidate.id === model),
@@ -567,11 +573,22 @@ export class PiAgent extends BaseAgent {
       mode === 'bypassPermissions' ? 'bypassPermissions' : mode === 'auto' ? 'auto' : 'ask';
     let permissionMode = normalizePermissionMode(opts.permissionMode);
     let mutableExtraDirs = [...(opts.extraDirs ?? [])];
-    const writePermissionFile = async (): Promise<void> => {
-      await fs.writeFile(
-        permissionFile,
-        JSON.stringify({ mode: permissionMode, readOnlyRoots: mutableExtraDirs }) + '\n',
-      );
+    // 权限档写入串行化 + 代际跳过。并发/连续切档(本地与远程控制端同时切,或用户快速连点)时,
+    // 无串行的 fs.writeFile 可能让较早的 Full-access 写在较新的 Ask 写之后落盘 —— bridge 每次
+    // tool_call 现读就会读到过期的 bypassPermissions,而 host 闭包/UI 已切到 Ask,后续破坏性工具
+    // 不再确认(codex review P1)。内存态(host 权限门 778/1549/1571 现读)仍即时反映最新意图;
+    // 仅文件写按代际串行,被更晚意图取代的写直接跳过,保证文件最终收敛到最新意图、绝不 stale 覆盖。
+    let permissionWriteChain: Promise<void> = Promise.resolve();
+    let permissionWriteGen = 0;
+    const writePermissionFile = (): Promise<void> => {
+      const gen = ++permissionWriteGen;
+      // 排队时刻捕获意图快照;运行时若已被更晚的写取代则跳过(旧内容不得在新内容之后落盘)。
+      const snapshot = { mode: permissionMode, readOnlyRoots: [...mutableExtraDirs] };
+      permissionWriteChain = permissionWriteChain.then(async () => {
+        if (gen !== permissionWriteGen) return;
+        await fs.writeFile(permissionFile, JSON.stringify(snapshot) + '\n');
+      });
+      return permissionWriteChain;
     };
     await writePermissionFile();
 

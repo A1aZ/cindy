@@ -258,6 +258,43 @@ describe('Pi provider-aware model routing', () => {
     await handle.close();
   });
 
+  it('routes a null providerId to the gateway even when a BYOM offers the same model', async () => {
+    // null = 显式清除来源(session-provider-store 语义);Main 在恢复/setModel 时传它。绝不能
+    // 按模型自动挑同名 BYOM,否则默认路由的会话把提示词发往用户未选的 BYOM 端点(codex review P1)。
+    const agent = new PiAgent(byomDeps(async () => ({
+      providers: [
+        { id: 'native-a', name: 'Native A', baseUrl: 'http://a.test', api: 'openai-completions', models: [{ id: 'local-model' }] },
+      ],
+      env: {},
+    })));
+    const handle = await agent.startSession({
+      sessionId: 'null-provider',
+      workingDir: cwd,
+      model: 'local-model',
+      providerId: null,
+    });
+    expect(captured.args.slice(captured.args.indexOf('--provider'), captured.args.indexOf('--provider') + 2))
+      .toEqual(['--provider', 'cindy']);
+    // setModel 传 null 同样固定走网关(不落到 native-a)。
+    captured.requests.length = 0;
+    await handle.setModel!('local-model', { providerId: null });
+    expect(captured.requests).toContainEqual({ type: 'set_model', provider: 'cindy', modelId: 'local-model' });
+    await handle.close();
+  });
+
+  it('serializes rapid permission-mode switches so the file converges to the latest intent', async () => {
+    // 并发/连续切档:串行化 + 代际跳过保证权限档最终 = 最后一次意图(ask),较早的 bypass 写
+    // 不得在其后 stale 覆盖(否则 bridge 现读到 bypassPermissions,而 host/UI 已是 Ask)。
+    const agent = new PiAgent(byomDeps(async () => ({ providers: [], env: {} })));
+    const handle = await agent.startSession({ sessionId: 'perm-race', workingDir: cwd, model: 'local-model' });
+    const permFile = path.join(agentHome, 'runtime', 'perm-perm-race.json');
+    const a = handle.setPermissionMode!('bypassPermissions');
+    const b = handle.setPermissionMode!('ask');
+    await Promise.all([a, b]);
+    expect(JSON.parse(readFileSync(permFile, 'utf8')).mode).toBe('ask');
+    await handle.close();
+  });
+
   it('does not fail closed for a gateway/subscription route when native resolution throws', async () => {
     // openai(订阅直连)在 nativeProviders 缺席是正常的,应照常走网关块,不触发 BYOM 拦截。
     const agent = new PiAgent(byomDeps(async () => {

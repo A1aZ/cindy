@@ -10,7 +10,7 @@
  */
 
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, existsSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, existsSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -984,6 +984,75 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
         expect(followUp.some((b) => b.includes('Cindy blocks reading credential or key paths'))).toBe(true);
         expect(followUp.some((b) => b.includes('CINDY_PI_SESSION_TOKEN='))).toBe(false);
+      } finally {
+        rmSync(workingDir, { recursive: true, force: true });
+        scriptedResponses.length = 0;
+      }
+    },
+  );
+
+  it(
+    'full access blocks bash reads of process environ (parent /proc holds the secrets)',
+    { timeout: 60_000 },
+    async () => {
+      // codex 回归:spawn 边界只剥子进程 env,父 pi 进程仍持有 token;bash
+      // `cat /proc/self/environ` 同 UID 直取 → 即使 Full access 也硬拦。
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-bash-environ-'));
+      try {
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('bash', { command: 'cat /proc/self/environ' }),
+          anthropicStreamBody('bash environ turn finished'),
+        );
+        const reqBefore = seenRequests.length;
+        const { resolverTools } = await runPermissionTurn({
+          sessionId: 'perm-bash-environ',
+          workingDir,
+          permissionMode: 'bypassPermissions',
+          resolverBehavior: 'allow',
+        });
+        expect(resolverTools).toEqual([]);
+        const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
+        expect(followUp.some((b) => b.includes('Cindy blocks reading process environment'))).toBe(true);
+        expect(followUp.some((b) => b.includes('CINDY_PI_SESSION_TOKEN='))).toBe(false);
+      } finally {
+        rmSync(workingDir, { recursive: true, force: true });
+        scriptedResponses.length = 0;
+      }
+    },
+  );
+
+  it(
+    'full access blocks credential reads reached through a workspace symlink',
+    { timeout: 60_000 },
+    async () => {
+      // greptile 回归:未解析路径命不中特征,但工作区内符号链接可指向敏感目标;
+      // realpath 跟随后再判 → 即使 Full access 也硬拦。
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-symlink-cred-'));
+      try {
+        // 真实敏感文件(路径含 id_rsa,命中凭证特征)+ 工作区内指向它的无害名字符号链接。
+        mkdirSync(path.join(workingDir, 'secrets'), { recursive: true });
+        const secretPath = path.join(workingDir, 'secrets', 'id_rsa');
+        writeFileSync(secretPath, 'FAKE PRIVATE KEY');
+        const linkPath = path.join(workingDir, 'innocent.txt');
+        symlinkSync(secretPath, linkPath);
+
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('read', { path: linkPath }),
+          anthropicStreamBody('symlink cred turn finished'),
+        );
+        const reqBefore = seenRequests.length;
+        const { resolverTools } = await runPermissionTurn({
+          sessionId: 'perm-symlink-cred',
+          workingDir,
+          permissionMode: 'bypassPermissions',
+          resolverBehavior: 'allow',
+        });
+        expect(resolverTools).toEqual([]);
+        const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
+        expect(followUp.some((b) => b.includes('Cindy blocks reading credential or key paths'))).toBe(true);
+        expect(followUp.some((b) => b.includes('FAKE PRIVATE KEY'))).toBe(false);
       } finally {
         rmSync(workingDir, { recursive: true, force: true });
         scriptedResponses.length = 0;

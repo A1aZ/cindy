@@ -457,7 +457,15 @@ export class PiAgent extends BaseAgent {
       resolveAgentCredentialMode({ agentKind: 'pi', providerId: authProviderId, model: opts.model }) ??
       'gateway-key';
     const authState = await this.deps.auth.getState({ credentialMode, providerId: authProviderId });
-    if (!authState.authenticated) throw new AgentNotAuthenticatedError('pi');
+    // 携带具体 reason(与 claude-code / codex 同模板 `<agent> not authenticated: <reason>`),
+    // 否则默认构造只产生 `agent-not-authenticated:pi`,跨端映射(describeAgentAuthError)
+    // 识别不了,手机端只能直出内部错误串、无法按 reason 引导修复(codex review)。
+    if (!authState.authenticated) {
+      throw new AgentNotAuthenticatedError(
+        'pi',
+        `pi not authenticated: ${authState.errorReason ?? 'no_key'}`,
+      );
+    }
     const authEnv = await this.deps.auth.getAuthEnv({ credentialMode, providerId: authProviderId });
 
     const agentHome = this.resolveAgentHome();

@@ -91,6 +91,9 @@ describe('device-link shared contract', () => {
     expect(describeAgentAuthError('claude-code not authenticated: no_key')).toContain('Claude');
     expect(describeAgentAuthError('codex not authenticated: no_credentials'))
       .toContain('尚未登录 Codex');
+    // Pi 也走同一模板与映射(codex review):按 reason 引导,标签显示 Pi。
+    expect(describeAgentAuthError('pi not authenticated: no_key')).toContain('API Key');
+    expect(describeAgentAuthError('pi not authenticated: no_key')).toContain('Pi');
     expect(describeAgentAuthError('claude-code not authenticated: no_oauth')).toContain('账号授权');
     expect(describeAgentAuthError('claude-code not authenticated: no_encryption')).toContain('安全存储');
     expect(describeAgentAuthError('claude-code not authenticated: proxy_not_ready')).toContain('稍候重试');

@@ -3956,6 +3956,63 @@ describe('AgentIslandService native publishing', () => {
     expect(framesById.get(2)).toMatchObject({ width: 360, contentWidth: 320 });
   });
 
+  it('re-publishes native frames when a wake refresh keeps the same screen signature', async () => {
+    const { AgentIslandService } = await import('../service.js');
+    const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {
+      void state;
+      void frameOrFrames;
+      return true;
+    });
+    const service = new AgentIslandService({
+      getMainWindow: () => null,
+      nativeHost: { failed: false, publish },
+    });
+    syncEnabledForTest(service, publish);
+    const setNativeScreenMetrics = (
+      service as unknown as {
+        handleNativeScreenMetrics(metrics: {
+          screens: Array<{
+            displayId: number;
+            frame: { x: number; y: number; width: number; height: number };
+            hasNotch: boolean;
+            notchWidth: number;
+            topBarHeight: number;
+            menuBarHeight: number;
+            safeAreaTop: number;
+            isMain: boolean;
+            signature: string;
+          }>;
+          preferredDisplayId: number | null;
+          forceRefresh?: boolean;
+        }): void;
+      }
+    ).handleNativeScreenMetrics.bind(service);
+    const metrics = {
+      preferredDisplayId: mocks.primaryDisplay.id,
+      screens: [{
+        displayId: mocks.primaryDisplay.id,
+        frame: mocks.primaryDisplay.bounds,
+        hasNotch: false,
+        notchWidth: 0,
+        topBarHeight: 24,
+        menuBarHeight: 24,
+        safeAreaTop: 0,
+        isMain: true,
+        signature: 'primary',
+      }],
+    };
+
+    publish.mockClear();
+    setNativeScreenMetrics(metrics);
+    expect(publish).toHaveBeenCalledTimes(1);
+
+    setNativeScreenMetrics(metrics);
+    expect(publish).toHaveBeenCalledTimes(1);
+
+    setNativeScreenMetrics({ ...metrics, forceRefresh: true });
+    expect(publish).toHaveBeenCalledTimes(2);
+  });
+
   it('uses native notched-display metrics when computing display frames', async () => {
     const { AgentIslandService } = await import('../service.js');
     const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {

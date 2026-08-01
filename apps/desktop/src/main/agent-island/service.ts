@@ -1623,6 +1623,7 @@ export class AgentIslandService {
   private handleNativeScreenMetrics(metrics: {
     screens: AgentIslandNativeScreenMetrics[];
     preferredDisplayId: number | null;
+    forceRefresh: boolean;
   }): void {
     const signature = metrics.screens
       .map((item) => [
@@ -1633,7 +1634,11 @@ export class AgentIslandService {
         Math.round(item.topBarHeight),
       ].join(':'))
       .join('|');
-    if (signature === this.screenMetricsSignature && metrics.preferredDisplayId === this.nativePreferredDisplayId) {
+    if (
+      !metrics.forceRefresh
+      && signature === this.screenMetricsSignature
+      && metrics.preferredDisplayId === this.nativePreferredDisplayId
+    ) {
       return;
     }
     this.screenMetricsByDisplayId.clear();
@@ -2264,4 +2269,3 @@ function isPlaceholderSessionTitle(title: string | null): boolean {
   const normalized = title.trim().toLowerCase();
   return normalized === '' || normalized === 'new maker' || normalized === 'untitled';
 }
-

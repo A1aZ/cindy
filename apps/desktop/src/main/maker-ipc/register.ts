@@ -442,6 +442,7 @@ import {
 import {
   getSessionProvider,
   hydrateSessionProvider,
+  normalizeSessionProviderId,
   setSessionProvider,
 } from '../maker-host/session-provider-store.js';
 import { getActiveCatalog, setDiscoveredProviderModels } from '../maker-host/active-catalog.js';
@@ -533,6 +534,7 @@ import { resolveClearSessionBoundary } from './clearSessionBoundary.js';
 import { tapWindowBroadcast } from '../device-link/broadcast-tap.js';
 import { setBusyProbe as setDeviceLinkBusyProbe } from '../device-link/index.js';
 import {
+  markRemoteSettingPersistedInsideHandler,
   setRemoteWorkingDirGuard as setDeviceLinkRemoteWorkingDirGuard,
   setRemoteSettingsPersist as setDeviceLinkRemoteSettingsPersist,
 } from '../device-link/dispatch.js';
@@ -3927,10 +3929,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // 必须是本机当前可访问的目录,挡掉控制端用任意路径越权起进程或执行 git。
   setDeviceLinkRemoteWorkingDirGuard(checkRemoteWorkingDir);
 
-  // device-link 远程 set-* 持久化回流:控制端远程切 model/effort/permission/fastMode/extraDirs
-  // 时,被控端 set-* 只改运行时不落库;这里注入「写被控端 DB + 广播 patched」,让控制端镜像
-  // 收敛到被控端真相(取代控制端乐观覆盖)。必须 await DB 写入后才回 invoke-result,否则控制端会
-  // 过早同步新聊天草稿默认值,与被控端未来 resume 的真实 row 脱节。
+  // device-link 远程 set-* 持久化回流:effort/permission/fastMode/extraDirs 等
+  // runtime-only handler 经这个注入写被控端 DB + 广播 patched。SET_MODEL 是例外:
+  // 它必须在自己的 session 锁内直接调 persistSessionFields，防队列 drain 夹在
+  // runtime 切换与 DB 落盘之间。两条路径都必须 await 持久化后才回 invoke-result。
   setDeviceLinkRemoteSettingsPersist(async (sessionId, patch) => {
     try {
       await persistSessionFields(sessionId, patch);
@@ -4102,6 +4104,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // host 级 optional 能力；旧 desktop 缺省为 false。两个 agent 查询都带回，
       // 手机读取当前 agent 快照即可决定是否展示切换入口。
       supportsSessionAgentSwitch: true,
+      // v2 因果能力：同引擎 no-op 返回 revision，后续 SET_MODEL 在 session 锁内 CAS。
+      // 新 desktop 控制端据此与只有基础切换能力的旧 host 做安全兼容门控。
+      supportsSessionAgentSwitchCas: true,
     };
   });
 
@@ -5314,6 +5319,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           model: sessions.model,
           sdkSessionId: sessions.sdkSessionId,
           providerId: sessions.providerId,
+          effort: sessions.effort,
+          fastMode: sessions.fastMode,
         })
         .from(sessions)
         .where(eq(sessions.id, sessionId))
@@ -5328,19 +5335,23 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         });
         co.agentKind = dbMakerKind;
       }
-      // 意图制切换下,renderer 的 createOpts 快照构建于 send 事务内 apply 之前
-      // (乐观翻转后 agentKind 可能已一致,但 model/resume/providerId 仍是旧值,
+      // 意图制切换 / 凭证形态切换下,renderer 与排队项的 createOpts 快照构建于 send
+      // 事务内 apply 之前。agentKind 可能已一致,但 model/resume/providerId/effort/fast
+      // 仍是旧值；
       // 尤其 resumeSessionId 可能是**旧引擎**的原生会话 id——resume 会以错误引擎
-      // 解释它)。lazy-create 时刻 DB 行是唯一真源,三个字段无条件对齐。
+      // 解释它)。lazy-create 时刻 DB 行是唯一真源,执行字段无条件对齐。
       co.model = row.model ?? undefined;
       co.resumeSessionId = row.sdkSessionId ?? undefined;
       co.providerId = row.providerId ?? undefined;
+      co.effort = (row.effort ?? undefined) as CreateOpts['effort'];
+      co.fastMode = !!row.fastMode;
     } catch {
       // 校正读库失败按原 opts 继续(与切换功能上线前行为一致)。
     }
   }
 
   const agentSwitchDeps: MakerSessionAgentSwitchHandlerDeps = {
+    withSessionLock: withSendToSessionLock,
     // 停用轴边界裁决:目标路由被停用 → 抛错;隐式默认落点被停用 → 返回启用替代来源。
     assertModelRouteUsable: (agent, model, providerId) =>
       assertModelRouteUsable(agent, model, providerId),
@@ -8915,7 +8926,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // session 不存在(被 close / 还没 send 创建出来)就 no-op 不报错, 让 renderer
   // 可以乐观调用 (UI 更新先行, IPC 失败也不会回滚 UI, 老 agentManager 同语义)。
 
-  ipcMain.handle(MAKER_INVOKE.SET_MODEL, async (_e, sessionId: unknown, model: unknown, providerId?: unknown) => {
+  ipcMain.handle(MAKER_INVOKE.SET_MODEL, async (
+    _e,
+    sessionId: unknown,
+    model: unknown,
+    providerId?: unknown,
+    expectedAgentSwitchRevision?: unknown,
+    selection?: unknown,
+  ) => {
     if (typeof sessionId !== 'string' || typeof model !== 'string') {
       throwIpcError('INVALID_PARAMS', 'sessionId + model required');
     }
@@ -8926,10 +8944,41 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     ) {
       throwIpcError('INVALID_PARAMS', 'providerId must be string, null, or undefined');
     }
+    if (
+      expectedAgentSwitchRevision !== undefined &&
+      (typeof expectedAgentSwitchRevision !== 'number' ||
+        !Number.isSafeInteger(expectedAgentSwitchRevision) ||
+        expectedAgentSwitchRevision < 0)
+    ) {
+      throwIpcError('INVALID_PARAMS', 'expectedAgentSwitchRevision must be a non-negative integer');
+    }
+    if (
+      selection !== undefined &&
+      (
+        selection === null ||
+        typeof selection !== 'object' ||
+        Array.isArray(selection) ||
+        typeof (selection as { effort?: unknown }).effort !== 'string' ||
+        typeof (selection as { fastMode?: unknown }).fastMode !== 'boolean'
+      )
+    ) {
+      throwIpcError('INVALID_PARAMS', 'selection must contain effort + fastMode');
+    }
+    const atomicSelection = selection as
+      | { effort: string; fastMode: boolean }
+      | undefined;
     // 与 send 事务共用 session 锁:发送时刻执行的跨引擎切换必须先落定,
     // 后到的 SET_MODEL 才能写 route。否则切换 DB await 恢复后会用旧 provider
     // 覆盖用户刚选的新 route，形成 DB 与进程内路由分叉。
     return withSendToSessionLock(sessionId, async () => {
+      // 同引擎重选是 switch ack 后的第二段写入。另一控制端若在两段之间更新（含
+      // set→clear ABA），修订号已变化：旧 SET_MODEL 必须在任何 route/DB 副作用前让位。
+      if (
+        typeof expectedAgentSwitchRevision === 'number' &&
+        agentSwitchPending.revision?.(sessionId) !== expectedAgentSwitchRevision
+      ) {
+        return { deferred: false, superseded: true };
+      }
       // 停用轴准入(PR #744 review;第十二轮移入锁内):切换模型是一次新的路由选择,
       // 不得切到用户停用的模型 / 来源(本机选择器已过滤,但本 channel 在 device-link
       // allowlist 内,老控制端可直接点名)。裁决必须在拿到会话锁**之后**执行 ——
@@ -8976,7 +9025,56 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         );
         // deferred = 会话自己在跑,选择已登记、turn 结束自动生效。renderer 据此提示
         // "任务结束后生效"而不是当成已即时切换。
-        return { deferred: result.status === 'deferred' };
+        const response = { deferred: result.status === 'deferred', superseded: false };
+        if (atomicSelection) {
+          // model/provider/effort/fast 是一次选择快照，必须在同一把 session 锁内收敛。
+          // applyRuntimeSetModelChange 可能 close + wake；若 effort/fast 留给 renderer
+          // 后续独立调用，queue drain 会用新 model + 旧偏好重建，跨控制端时还会发生
+          // 旧请求尾写覆盖新选择。
+          setSessionEffort(sessionId, atomicSelection.effort);
+          setSessionFastMode(sessionId, atomicSelection.fastMode);
+          const sess = maker.getSession(sessionId);
+          if (
+            sess &&
+            result.status !== 'deferred' &&
+            !pendingCredentialSwitchHolder?.has(sessionId)
+          ) {
+            await sess.setEffort(
+              atomicSelection.effort as
+                | 'minimal'
+                | 'low'
+                | 'medium'
+                | 'high'
+                | 'xhigh'
+                | 'max'
+                | 'ultra',
+            );
+            if (sess.agentKind === 'codex') {
+              await sess.setFastMode(atomicSelection.fastMode);
+            }
+          }
+        }
+        if (isDeviceLinkInvoke() || atomicSelection) {
+          // device-link 的通用持久化原本发生在 handler 返回、session 锁释放之后；
+          // 本地 renderer 的 sessionService.update 也有同一窗口。凡携带 selection 的
+          // 新调用都由 host 在解锁前一次落定全部字段。
+          const patch: Record<string, unknown> = { model };
+          if (effectiveProviderId !== undefined) {
+            patch.providerId = normalizeSessionProviderId(
+              typeof effectiveProviderId === 'string' ? effectiveProviderId : null,
+            );
+          }
+          if (atomicSelection) {
+            patch.effort = atomicSelection.effort;
+            patch.fastMode = atomicSelection.fastMode;
+          }
+          await persistSessionFields(sessionId, patch);
+          if (isDeviceLinkInvoke()) {
+            // dispatch 继续兼容最小/旧 handler 的锁外回流；标记本结果避免重复写。
+            markRemoteSettingPersistedInsideHandler(response);
+          }
+        }
+        return response;
       } catch (err) {
         if (err instanceof CredentialModeSwitchBusyError) {
           // 兜底(正常路径 busy 已转 deferred):切模型撞上凭证切换忙,独立 code,

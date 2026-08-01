@@ -4436,7 +4436,9 @@ interface ElectronAPI {
       sessionId: string,
       model: string,
       providerId?: string | null,
-    ) => Promise<{ deferred: boolean } | undefined>;
+      expectedAgentSwitchRevision?: number,
+      selection?: { effort: string; fastMode: boolean },
+    ) => Promise<{ deferred: boolean; superseded?: boolean } | undefined>;
     /**
      * session-agent-switch:同一会话切换 agent 引擎(claude-code ↔ codex)。
      * 同引擎换模型走 setModel;跨引擎必须走本方法。意图制:本调用只登记切换
@@ -4451,7 +4453,20 @@ interface ElectronAPI {
       providerId?: string | null,
       effort?: string,
       fastMode?: boolean,
-    ) => Promise<{ switched: boolean; agentKind: 'claude-code' | 'codex'; model: string; engineReady: boolean; deferred?: boolean }>;
+    ) => Promise<{ switched: boolean; agentKind: 'claude-code' | 'codex'; model: string; engineReady: boolean; deferred?: boolean; sameEngineRevision?: number; sameEngineSuperseded?: boolean }>;
+    /**
+     * 读 main 权威的 pending 切换意图(内存态,不落库;无意图 → null)。
+     * 重开视图 / device-link 远程会话重连后恢复乐观显示用。
+     */
+    getSessionAgentSwitchIntent: (
+      sessionId: string,
+    ) => Promise<{
+      targetAgentKind: 'claude-code' | 'codex';
+      model: string;
+      providerId: string | null;
+      effort?: string;
+      fastMode?: boolean;
+    } | null>;
     // effort/mode 透传 string —— 合法值由 maker capabilities 决定, vite-env 不重复枚举
     setEffort: (sessionId: string, effort: string) => Promise<void>;
     setPermissionMode: (sessionId: string, mode: string) => Promise<void>;

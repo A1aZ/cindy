@@ -43,10 +43,13 @@ import {
 import { uniqueCustomProviderId } from '@/lib/customProviderId';
 import {
   areProviderRequestUrlsAllowed,
+  connectionTestCanUseSaved,
+  modelFetchCanReuseSavedCredentials,
   providerConnectionTestRequestSignature,
   providerModelFetchRequestSignature,
   stripCredentialHeaders,
   type CustomProviderAuthMode,
+  type SavedProviderProbeBaseline,
 } from '@/lib/providerModelFetch';
 import {
   CUSTOM_PROVIDER_CODEX_WIRE_PROTOCOLS,
@@ -414,6 +417,44 @@ export function CustomProviderDialog({
     [],
   );
 
+  // 编辑态回填的已存明文 key(按 agent);测试连接据此判定凭证材料是否被改动。
+  const loadedKeyRef = useRef<Record<DialogAgentKind, string>>({
+    'claude-code': '',
+    codex: '',
+    pi: '',
+  });
+
+  // 已存供应商在编辑态的基线快照:端点/协议/鉴权模式取自已存配置,apiKey 取回填值,
+  // headers 取已存非密文头(自定义鉴权头是 main-only 密文,不回读进表单)。测试连接 /
+  // 获取模型列表据此判定能否复用不回读的密文头(经 saved 探测 / savedProviderId 让 main
+  // 并入),而非把密钥回读到 renderer。非编辑态或该 runtime 未配置时返回 null。
+  const savedBaselineFor = useCallback(
+    (agent: DialogAgentKind): SavedProviderProbeBaseline | null => {
+      if (!editing || !initial) return null;
+      const rc = initial.runtimes[agent];
+      if (!rc) return null;
+      const savedAuthMode: CustomProviderAuthMode =
+        initial.auth?.method === 'oauth'
+          ? 'oauth'
+          : initial.auth?.method === 'none'
+            ? 'none'
+            : 'apiKey';
+      return {
+        baseUrl: rc.baseUrl,
+        requestPath: rc.requestPath ?? '',
+        modelsUrl: rc.modelsUrl ?? '',
+        wireProtocol: rc.wireProtocol ?? defaultWireFor(agent),
+        authMode: savedAuthMode,
+        apiKey: loadedKeyRef.current[agent] ?? '',
+        headers:
+          rc.headers && Object.keys(rc.headers).length > 0
+            ? Object.entries(rc.headers).map(([n, v]) => ({ name: n, value: v }))
+            : [],
+      };
+    },
+    [editing, initial],
+  );
+
   // 新建态拉取预设模板（本地 IPC 极快返回；失败静默 —— 没有预设也不影响手填，规则 7 不做 loading）。
   // 区域感知排序：zh-CN 用户国内端点预设靠前、其它语言国际端点靠前（只排序不过滤，
   // 用户不需要理解「地区」概念，可达性由测试连接实测裁决）。
@@ -493,6 +534,9 @@ export function CustomProviderDialog({
       }
       if (cancelled) return;
       setHasKey(nextHas);
+      // 记下回填的已存明文 key 作为基线:测试连接判定「凭证材料是否被改动」时用来决定
+      // 走受控 saved 探测还是 adhoc(headers 是 main-only 密文,基线取自 initial 的非密文头)。
+      for (const a of AGENTS) loadedKeyRef.current[a] = fetched[a] ?? '';
       setRtSynced((prev) => {
         const next = { ...prev };
         for (const a of AGENTS) {
@@ -549,21 +593,32 @@ export function CustomProviderDialog({
     }
     const requestHeaders = authMode === 'none' ? stripCredentialHeaders(headers) : headers;
     const requestSig = providerConnectionTestRequestSignature(rf, authMode);
+    // 编辑态且端点/协议/鉴权模式与凭证材料相对已存配置都未改动时,走受控 saved 探测:
+    // 它整体按已存 spec 发起,能带上不回读进表单的 main-only 密文鉴权头(否则纯密文头
+    // 供应商会因缺头而失败)。任一改动则回落 adhoc,测用户新填的值。
+    const savedBaseline = savedBaselineFor(agent);
+    const useSaved = Boolean(
+      initial?.id && savedBaseline && connectionTestCanUseSaved(rf, savedBaseline, authMode),
+    );
     setTest((prev) => ({ ...prev, [agent]: { status: 'testing' } }));
     try {
-      const result = await window.electronAPI.maker.testProviderConnection({
-        kind: 'adhoc',
-        spec: {
-          agent,
-          baseUrl,
-          modelId: firstModel,
-          authMethod: authMode,
-          wireProtocol: rf.wireProtocol,
-          ...(rf.requestPath.trim() ? { requestPath: rf.requestPath.trim() } : {}),
-          apiKey: authMode === 'apiKey' ? rf.apiKey.trim() || null : null,
-          ...(Object.keys(requestHeaders).length > 0 ? { headers: requestHeaders } : {}),
-        },
-      });
+      const result = await window.electronAPI.maker.testProviderConnection(
+        useSaved
+          ? { kind: 'saved', providerId: initial!.id, agent }
+          : {
+              kind: 'adhoc',
+              spec: {
+                agent,
+                baseUrl,
+                modelId: firstModel,
+                authMethod: authMode,
+                wireProtocol: rf.wireProtocol,
+                ...(rf.requestPath.trim() ? { requestPath: rf.requestPath.trim() } : {}),
+                apiKey: authMode === 'apiKey' ? rf.apiKey.trim() || null : null,
+                ...(Object.keys(requestHeaders).length > 0 ? { headers: requestHeaders } : {}),
+              },
+            },
+      );
       if (
         providerConnectionTestRequestSignature(rtRef.current[agent], authModeRef.current) !==
         requestSig
@@ -585,17 +640,17 @@ export function CustomProviderDialog({
       setTest((prev) => ({ ...prev, [agent]: { status: 'fail', code: 'UNKNOWN' } }));
       if (ipc?.message) toast.error(ipc.message);
     }
-  }, [activeTab, authMode, rt, t]);
+  }, [activeTab, authMode, rt, t, savedBaselineFor, initial]);
 
-  // 拉取单飞：任一 runtime 在途时两个 Tab 的拉取按钮都禁用——两个并发请求会竞争同一个
-  // 勾选弹层（后到的覆盖先开的、确认还会写进另一个 runtime），单飞直接消掉这类竞态。
-  const anyFetching = fetchingModels['claude-code'] || fetchingModels.codex;
+  // 拉取单飞：任一 runtime（含 Pi）在途时所有 Tab 的拉取按钮都禁用——两个并发请求会竞争
+  // 同一个勾选弹层（后到的覆盖先开的、确认还会写进另一个 runtime），单飞直接消掉这类竞态。
+  const anyFetching = fetchingModels['claude-code'] || fetchingModels.codex || fetchingModels.pi;
 
   /** 获取模型列表：用当前 Tab 表单值 GET 列模型端点（key 仅内存透传），成功后开勾选弹层。 */
   const handleFetchModels = useCallback(async () => {
     const agent = activeTab;
     const rf = rt[agent];
-    if (fetchingModels['claude-code'] || fetchingModels.codex) return; // 单飞（按钮已禁用，兜底）
+    if (fetchingModels['claude-code'] || fetchingModels.codex || fetchingModels.pi) return; // 单飞（按钮已禁用，兜底）
     const baseUrl = rf.baseUrl.trim();
     if (!baseUrl) {
       toast.error(t('settings.providers.custom.fetch.needBaseUrl'));
@@ -614,6 +669,13 @@ export function CustomProviderDialog({
     // 请求参数签名：响应回来时若该 runtime 的端点/凭证/请求头已被改动，响应按过期丢弃——
     // 不能把旧端点的模型清单当成新端点的填进表单（成功和失败 toast 都不展示）。
     const requestSig = providerModelFetchRequestSignature(rf, authMode);
+    // 编辑态且请求目标端点(baseUrl/modelsUrl)与鉴权模式相对已存配置未改动时,带上
+    // savedProviderId,让 main 侧并入不回读进 renderer 的 main-only 密文鉴权头(表单显式
+    // 填的头/key 仍由 main 以 renderer 值优先);端点一改就不带,避免把已存凭证外泄给新主机。
+    const savedBaseline = savedBaselineFor(agent);
+    const reuseSaved = Boolean(
+      initial?.id && savedBaseline && modelFetchCanReuseSavedCredentials(rf, savedBaseline, authMode),
+    );
     setFetchingModels((prev) => ({ ...prev, [agent]: true }));
     try {
       const result = await window.electronAPI.maker.fetchProviderModels({
@@ -624,6 +686,7 @@ export function CustomProviderDialog({
         modelsUrl: rf.modelsUrl.trim() || null,
         apiKey: authMode === 'apiKey' ? rf.apiKey.trim() || null : null,
         ...(Object.keys(requestHeaders).length > 0 ? { headers: requestHeaders } : {}),
+        ...(reuseSaved ? { savedProviderId: initial!.id } : {}),
       });
       if (
         providerModelFetchRequestSignature(rtRef.current[agent], authModeRef.current) !== requestSig
@@ -677,7 +740,7 @@ export function CustomProviderDialog({
     } finally {
       setFetchingModels((prev) => ({ ...prev, [agent]: false }));
     }
-  }, [activeTab, authMode, rt, fetchingModels, t]);
+  }, [activeTab, authMode, rt, fetchingModels, t, savedBaselineFor, initial]);
 
   /**
    * 勾选弹层确认：勾选集写回该 runtime 的模型行。基于**确认时的最新表单行**合并，

@@ -393,7 +393,7 @@ function resolveWorkerConfig(params: {
       : (input.agent === lead.agentKind ? lead.providerId : null),
     fastMode: modelCapabilities.supportsFastMode === false
       ? false
-      : ((input.agent === 'codex' && input.fast !== undefined)
+      : ((agentConsumesExplicitFast(input.agent) && input.fast !== undefined)
           ? input.fast
           : (defaults.fastMode ?? !!lead.fastMode)),
   };
@@ -410,6 +410,15 @@ export function budgetModelRequiresApiKeyMessage(model: string): string {
 /** agent 的人类可读名,用于 preflight 失败信息。 */
 function agentDisplayName(agent: AgentKind): string {
   return agent === 'codex' ? 'Codex' : agent === 'pi' ? 'Pi' : 'Claude Code';
+}
+
+/**
+ * 会消费显式 `fast` 输入的 agent:Codex 与 Pi(两者 agent 层都支持 Fast 模式)。
+ * claude-code 的 fast 在 agent 层是 no-op,故不接线。实际是否生效仍由该 (来源, 模型)
+ * 的 `supportsFastMode` 收口 —— 与 Pi 自动任务路径同口径(runner 按模型能力裁决)。
+ */
+function agentConsumesExplicitFast(agent: AgentKind): boolean {
+  return agent === 'codex' || agent === 'pi';
 }
 
 /**
@@ -603,7 +612,7 @@ export function createOrcaWorkerCreationService(deps: OrcaWorkerCreationDeps): O
     // 只有该来源确实带了 Fast 元数据才覆盖;无元数据(旧组装方)保留拍平解析。
     if (routeProvider?.fastModels) {
       const providerSupportsFast = routeProvider.fastModels.includes(resolved.model);
-      const requestedFast = params.agent === 'codex' && params.fast !== undefined
+      const requestedFast = agentConsumesExplicitFast(params.agent) && params.fast !== undefined
         ? params.fast
         : (defaults.fastMode ?? !!lead.fastMode);
       resolved.fastMode = providerSupportsFast && requestedFast === true;

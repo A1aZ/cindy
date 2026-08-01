@@ -854,6 +854,74 @@ describe('OrcaWorkerCreationService', () => {
     }));
   });
 
+  it('honors an explicit fast request for a Pi worker on a fast-capable model', async () => {
+    // Pi 也支持 Fast:显式 fast:true 必须被消费(此前两处判定只认 codex,静默丢弃)。
+    // lead.fastMode 默认 false —— 若 pi 未接线,结果会退回 false,构成有效判别。
+    const { deps, service } = createDeps({
+      getAvailableModels: vi.fn((agent: AgentKind) => (
+        agent === 'pi'
+          ? [{ id: 'pi-fast-model', efforts: ['low', 'medium', 'high'], defaultEffort: 'high', supportsFastMode: true }]
+          : [{ id: 'gpt-5.5', efforts: ['low', 'medium', 'high', 'xhigh'], defaultEffort: 'high', supportsFastMode: true }]
+      )),
+      getProviderRoutingContext: vi.fn(async () => providerRoutingContext({
+        pi: [{ id: 'xd', name: 'XD Gateway', models: ['pi-fast-model'], fastModels: ['pi-fast-model'] }],
+      })),
+    });
+
+    await expect(
+      service.createWorker({
+        leadSessionId: 'lead-1',
+        role: 'reviewer',
+        agent: 'pi',
+        label: 'reviewer',
+        model: 'pi-fast-model',
+        fast: true,
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      resolved: {
+        model: 'pi-fast-model',
+        fastMode: true,
+      },
+    });
+
+    expect(deps.buildCreateOptsWithStderr).toHaveBeenCalledWith(expect.objectContaining({
+      agentKind: 'pi',
+      model: 'pi-fast-model',
+      fastMode: true,
+    }));
+  });
+
+  it('drops an explicit fast request for a Pi worker when the model lacks Fast capability', async () => {
+    const { deps, service } = createDeps({
+      getAvailableModels: vi.fn((agent: AgentKind) => (
+        agent === 'pi'
+          ? [{ id: 'pi-no-fast', efforts: ['low', 'medium', 'high'], defaultEffort: 'high', supportsFastMode: false }]
+          : [{ id: 'gpt-5.5', efforts: ['low', 'medium', 'high', 'xhigh'], defaultEffort: 'high', supportsFastMode: true }]
+      )),
+      getProviderRoutingContext: vi.fn(async () => providerRoutingContext({
+        pi: [{ id: 'xd', name: 'XD Gateway', models: ['pi-no-fast'], fastModels: [] }],
+      })),
+    });
+
+    await expect(
+      service.createWorker({
+        leadSessionId: 'lead-1',
+        role: 'reviewer',
+        agent: 'pi',
+        label: 'reviewer',
+        model: 'pi-no-fast',
+        fast: true,
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      resolved: {
+        model: 'pi-no-fast',
+        fastMode: false,
+      },
+    });
+  });
+
   it('keeps medium effort for a Codex GPT worker', async () => {
     const { deps, service } = createDeps({
       getWorkerDefaults: vi.fn(() => ({ model: 'gpt-5.4-mini', effort: 'medium', fastMode: false })),

@@ -4176,6 +4176,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       modelsUrl?: string | null;
       apiKey?: string | null;
       headers?: Record<string, string>;
+      /**
+       * 编辑已存供应商且端点未改动时传入:main 侧按 (id, agent) 并入 main-only 密文鉴权头
+       * (renderer 不回读明文头);renderer 显式头优先。端点一改就不传,避免凭证外泄给新主机。
+       */
+      savedProviderId?: string;
     }): Promise<{
       ok: boolean;
       models?: { id: string; name: string; contextWindow?: number }[];

@@ -249,7 +249,7 @@ export function CreateWorkerPopover({
   // fast=true 清掉,回退默认来源支持 Fast 也不会恢复(codex review)。收窄后按
   // 「实际会生效的来源」口径判定,不经历 false 窗口。
   const currentModelSupportsFast = Boolean(
-    agent === 'codex' &&
+    (agent === 'codex' || agent === 'pi') &&
       activeCaps?.hasFastMode &&
       providerFastSupported(narrowProviderSource(providerSource, model), model),
   );
@@ -751,11 +751,11 @@ export function CreateWorkerPopover({
                     }
               }
               modelMemory={modelMemory}
-              // worker 创建链的显式 Fast 派发目前仅 Codex(resolveWorkerConfig 只对
-              // codex 消费 input.fast):cc 不接线,面板就不显示 Fast 开关,避免
-              // 「开关能开、提交被丢」的名不副实(codex review)。
-              fastMode={deviceId || agent !== 'codex' ? undefined : fast}
-              onFastModeChange={deviceId || agent !== 'codex' ? undefined : updateFast}
+              // worker 创建链的显式 Fast 派发支持 Codex 与 Pi(resolveWorkerConfig 对二者
+              // 消费 input.fast,并按模型 supportsFastMode 收口):cc 层面为 no-op,不接线,
+              // 面板就不显示 Fast 开关,避免「开关能开、提交被丢」的名不副实(codex review)。
+              fastMode={deviceId || !(agent === 'codex' || agent === 'pi') ? undefined : fast}
+              onFastModeChange={deviceId || !(agent === 'codex' || agent === 'pi') ? undefined : updateFast}
             />
           </div>
           {noAvailableLocalModels ? (

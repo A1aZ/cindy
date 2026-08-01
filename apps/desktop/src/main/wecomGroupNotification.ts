@@ -195,8 +195,12 @@ export class WecomGroupNotificationService implements WecomGroupNotificationPubl
   async test(testMessage: string, isAccountCurrent: () => boolean = () => true): Promise<void> {
     const url = this.requireStoredUrl();
     const message = parseTestMessage(testMessage);
+    const configGeneration = this.configGeneration;
     await this.enqueue(() => {
       if (!isAccountCurrent()) throw new ImAccountScopeClosedError();
+      if (configGeneration !== this.configGeneration) {
+        throw new Error('WECOM_GROUP_CONFIG_CHANGED');
+      }
       return this.send(url, message);
     });
   }

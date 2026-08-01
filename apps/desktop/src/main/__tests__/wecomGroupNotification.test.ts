@@ -171,6 +171,28 @@ describe('WeCom group notification security boundary', () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
+  it('does not send a queued test after the webhook configuration changes', async () => {
+    let releasePublish: (() => void) | undefined;
+    const fetchImpl = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        releasePublish = resolve;
+      });
+      return response({ errcode: 0, errmsg: 'ok' });
+    });
+    const url = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abcdefgh';
+    const service = new WecomGroupNotificationService(fetchImpl, createSecrets(url));
+
+    const publish = service.publishMarkdown('automation result');
+    const testing = service.test('Localized test message');
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
+    service.clear();
+    releasePublish?.();
+
+    await expect(publish).resolves.toBeUndefined();
+    await expect(testing).rejects.toThrow('WECOM_GROUP_CONFIG_CHANGED');
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
   it('does not persist a webhook when the test call fails', async () => {
     const fetchImpl = vi.fn(async () => response({ errcode: 93000, errmsg: 'invalid' }));
     const secrets = createSecrets();

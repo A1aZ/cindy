@@ -767,6 +767,50 @@ describe("WecomIM routing and ownership", () => {
     expect(received).toEqual([]);
   });
 
+  it("carries image staging rollback through the final account ownership check", async () => {
+    const { host, secrets } = createHost();
+    secrets.set("wecom-owner-user-id", "owner");
+    const accountToken = { id: 1 };
+    let accountActive = true;
+    host.accountScope = {
+      capture: () => (accountActive ? accountToken : null),
+      isCurrent: (token) => accountActive && token === accountToken,
+      run: async (_token, operation) => operation(),
+    };
+    const client = new FakeClient();
+    const discard = vi.fn(async () => {});
+    host.media = {
+      getCachedImage: vi.fn(async () => null),
+      cacheImage: vi.fn(async () => ({
+        absPath: "C:\\managed\\photo.jpg",
+        get url() {
+          accountActive = false;
+          return "cindy-media://image";
+        },
+        discard,
+      })),
+      resolveMediaUrl: vi.fn(() => null),
+    };
+    const im = new WecomIM(host, { clientFactory: () => client as never });
+    const received: IMMessageEvent[] = [];
+    im.onMessage((event) => received.push(event));
+
+    await im.init();
+    client.emit("message.image", {
+      body: {
+        msgid: "stale-normalized-image",
+        aibotid: "bot-1",
+        chattype: "single",
+        from: { userid: "owner" },
+        msgtype: "image",
+        image: { url: "https://example.invalid/image" },
+      },
+    });
+
+    await vi.waitFor(() => expect(discard).toHaveBeenCalledOnce());
+    expect(received).toEqual([]);
+  });
+
   it("does not pin or download a cached image after the owning account boundary closes", async () => {
     const { host, secrets } = createHost();
     secrets.set("wecom-owner-user-id", "owner");

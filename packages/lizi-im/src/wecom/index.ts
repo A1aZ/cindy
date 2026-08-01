@@ -55,6 +55,11 @@ const MAX_TERMINAL_ATTACHMENTS = 4;
 const SECRET_WRITE_FAILED_REASON = "无法使用系统安全存储保存企业微信机器人凭证";
 const NO_ACCOUNT_SCOPE = Symbol("no-account-scope");
 
+type StagedImage = {
+  attachment: IMAttachment;
+  discard?: () => Promise<void>;
+};
+
 type MessageHandler = (event: IMMessageEvent) => void;
 type StatusHandler = (status: IMStatus) => void;
 type TextInterceptor = (event: IMMessageEvent) => boolean;
@@ -560,15 +565,20 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     await this.emitInbound(frame, client, generation, async () => {
       const image = frame.body?.image;
       if (!image) return unsupportedPayload("image", "图片内容缺失");
-      const attachment = await this.downloadImage(
+      const staged = await this.downloadImage(
         client,
         generation,
         frame.body!.msgid,
         0,
         image,
       );
-      return attachment
-        ? { text: "", attachments: [attachment], unsupported: [] }
+      return staged
+        ? {
+            text: "",
+            attachments: [staged.attachment],
+            unsupported: [],
+            discard: staged.discard,
+          }
         : unsupportedPayload("image:download-failed", "图片下载失败");
     });
   }
@@ -582,6 +592,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
       const text: string[] = [];
       const attachments: IMAttachment[] = [];
       const unsupported: IMUnsupportedEntry[] = [];
+      const discards: Array<() => Promise<void>> = [];
       for (const [index, item] of (
         frame.body?.mixed.msg_item ?? []
       ).entries()) {
@@ -590,14 +601,17 @@ export class WecomIM extends BaseIM implements TextChannelIM {
           continue;
         }
         if (item.msgtype === "image" && item.image) {
-          const attachment = await this.downloadImage(
+          const staged = await this.downloadImage(
             client,
             generation,
             frame.body!.msgid,
             index,
             item.image,
           );
-          if (attachment) attachments.push(attachment);
+          if (staged) {
+            attachments.push(staged.attachment);
+            if (staged.discard) discards.push(staged.discard);
+          }
           else
             unsupported.push({
               type: "image:download-failed",
@@ -605,7 +619,12 @@ export class WecomIM extends BaseIM implements TextChannelIM {
             });
         }
       }
-      return { text: text.join("\n"), attachments, unsupported };
+      return {
+        text: text.join("\n"),
+        attachments,
+        unsupported,
+        discard: combineDiscards(discards),
+      };
     });
   }
 
@@ -803,7 +822,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     messageId: string,
     index: number,
     image: { url: string; aeskey?: string },
-  ): Promise<IMAttachment | null> {
+  ): Promise<StagedImage | null> {
     const token = `${messageId}:${index}`;
     const cached = await this.host.media?.getCachedImage("wecom", token, {
       shouldReuse: () => this.isCurrent(client, generation),
@@ -811,14 +830,16 @@ export class WecomIM extends BaseIM implements TextChannelIM {
     if (!this.isCurrent(client, generation)) return null;
     if (cached) {
       return {
-        kind: "image",
-        absPath: cached.absPath,
-        originalName: safeWecomFilename(
-          undefined,
-          extensionForMime(cached.mimeType),
-        ),
-        mimeType: cached.mimeType,
-        url: cached.url,
+        attachment: {
+          kind: "image",
+          absPath: cached.absPath,
+          originalName: safeWecomFilename(
+            undefined,
+            extensionForMime(cached.mimeType),
+          ),
+          mimeType: cached.mimeType,
+          url: cached.url,
+        },
       };
     }
     try {
@@ -839,11 +860,14 @@ export class WecomIM extends BaseIM implements TextChannelIM {
           return null;
         }
         return {
-          kind: "image",
-          absPath: stored.absPath,
-          originalName: filename,
-          mimeType,
-          url: stored.url,
+          attachment: {
+            kind: "image",
+            absPath: stored.absPath,
+            originalName: filename,
+            mimeType,
+            url: stored.url,
+          },
+          discard: stored.discard,
         };
       }
       const persisted = await persistWecomDownload({
@@ -853,7 +877,7 @@ export class WecomIM extends BaseIM implements TextChannelIM {
         fallbackExtension: ".jpg",
         shouldKeep: () => this.isCurrent(client, generation),
       });
-      return { kind: "image", ...persisted };
+      return { attachment: { kind: "image", ...persisted } };
     } catch (error) {
       this.log.warn("failed to stage inbound image", safeError(error));
       return null;
@@ -1112,6 +1136,19 @@ function unsupportedPayload(type: string, label: string) {
     text: "",
     attachments: [] as IMAttachment[],
     unsupported: [{ type, label }],
+  };
+}
+
+function combineDiscards(
+  discards: Array<() => Promise<void>>,
+): (() => Promise<void>) | undefined {
+  if (discards.length === 0) return undefined;
+  return async () => {
+    const results = await Promise.allSettled(discards.map((discard) => discard()));
+    const failed = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failed) throw failed.reason;
   };
 }
 

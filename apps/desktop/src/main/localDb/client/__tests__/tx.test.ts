@@ -589,7 +589,12 @@ describe('db worker tx handlers', () => {
             createdAt: 201,
           },
         ],
-      })).resolves.toEqual({ messageCount: 2 });
+      })).resolves.toEqual({
+        messageCount: 2,
+        // 隐藏动作那一刻的完整可见集(只有 shared-client 可见;hidden-client 早已 rewind),
+        // 供调用方作删除广播的权威集 —— 含导航期间并发落库的消息。
+        hiddenClientIds: ['shared-client'],
+      });
 
       await expect(client.query(
         'SELECT id, client_id, content, created_at, rewind_at FROM messages WHERE session_id = ? ORDER BY id',
@@ -614,6 +619,49 @@ describe('db worker tx handlers', () => {
       )).resolves.toEqual({
         cleared_at: null, context_tokens: 69, context_window: 200000, updated_at: 1000,
       });
+    });
+  });
+
+  it('session.treeRehydrate returns every hidden clientId so a concurrently-persisted message is broadcast for removal', async () => {
+    // codex review 回归:导航前的陈旧快照会漏掉导航期间并发落库的消息,使它被 rewind
+    // 后仍留在 Renderer。事务内原子快照可见集,返回集须含这条并发消息的 clientId。
+    await withClient(async (client) => {
+      await seedSession(client, 's1', { contextTokens: 10 });
+      await client.exec(
+        `INSERT INTO messages
+          (id, client_id, session_id, role, content, agent_meta, agent_kind, created_at, rewind_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          'pre-visible', 'client-pre', 's1', 'user', JSON.stringify('before navigation'),
+          null, 'pi', 100, null,
+          // 模拟导航进行中另一个窗口并发落库、导航前快照未见的消息。
+          'concurrent', 'client-concurrent', 's1', 'assistant', JSON.stringify('sent mid-navigation'),
+          null, 'pi', 150, null,
+        ],
+      );
+
+      const result = await client.tx('session.treeRehydrate', {
+        sessionId: 's1',
+        now: 2000,
+        contextTokens: 5,
+        contextWindow: 200000,
+        messages: [
+          {
+            id: 'active', clientId: 'client-active', role: 'assistant',
+            content: JSON.stringify('new active path'), toolUseId: null,
+            agentMeta: null, agentKind: 'pi', createdAt: 300,
+          },
+        ],
+      });
+
+      // 两条导航前可见的消息(含并发落库的 client-concurrent)都要进删除广播集。
+      expect(result.messageCount).toBe(1);
+      expect([...result.hiddenClientIds].sort()).toEqual(['client-concurrent', 'client-pre']);
+      // 并发消息确实被 rewind(不再可见),否则 Renderer 会继续显示 DB 里已隐藏的它。
+      await expect(client.query(
+        'SELECT client_id FROM messages WHERE session_id = ? AND rewind_at IS NULL ORDER BY client_id',
+        ['s1'],
+      )).resolves.toEqual([{ client_id: 'client-active' }]);
     });
   });
 

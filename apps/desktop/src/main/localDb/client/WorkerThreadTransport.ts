@@ -968,22 +968,28 @@ function sessionTreeRehydrate(readyDb, args) {
       createdAt: expectNumber(row.createdAt, 'messages.' + index + '.createdAt'),
     };
   });
+  const selectVisibleClientIds = readyDb.prepare(
+    'SELECT client_id FROM messages WHERE session_id = ? AND rewind_at IS NULL',
+  );
   const hideVisible = readyDb.prepare(
     'UPDATE messages SET rewind_at = ? WHERE session_id = ? AND rewind_at IS NULL',
   );
   const upsert = readyDb.prepare(
     'INSERT INTO messages (id, client_id, session_id, role, content, tool_use_id, agent_meta, agent_kind, created_at, rewind_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL) ON CONFLICT(session_id, client_id) DO UPDATE SET role = excluded.role, content = excluded.content, tool_use_id = excluded.tool_use_id, agent_meta = excluded.agent_meta, agent_kind = excluded.agent_kind, created_at = excluded.created_at, rewind_at = NULL',
   );
-  readyDb.transaction(() => {
+  const hiddenClientIds = readyDb.transaction(() => {
     const session = readyDb.prepare('SELECT id FROM sessions WHERE id = ? LIMIT 1').get(sessionId);
     if (!session) throw Object.assign(new Error('Session 不存在: ' + sessionId), { code: 'NOT_FOUND' });
+    // 与 worker/opHandlers/tx.ts 保持同步:原子快照可见集再隐藏,导航期间并发落库的消息也纳入。
+    const captured = selectVisibleClientIds.all(sessionId).map((row) => row.client_id);
     hideVisible.run(now, sessionId);
     for (const row of rows) {
       upsert.run(row.id, row.clientId, sessionId, row.role, row.content, row.toolUseId, row.agentMeta, row.agentKind, row.createdAt);
     }
     readyDb.prepare('UPDATE sessions SET cleared_at = NULL, context_tokens = ?, context_window = ?, updated_at = ? WHERE id = ?').run(contextTokens, contextWindow, now, sessionId);
+    return captured;
   })();
-  return { messageCount: rows.length };
+  return { messageCount: rows.length, hiddenClientIds };
 }
 
 function selectRewindMessageIds(rows, opts) {

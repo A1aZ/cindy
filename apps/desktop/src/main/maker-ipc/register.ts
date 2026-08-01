@@ -9073,10 +9073,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
       const sess = await getOrResumeSessionTreeSession(sessionId);
       if (!sess || !sess.capabilities.sessionTree?.supported) return null;
-      const oldRows = await getDbClient().drizzle
-        .select({ clientId: messages.clientId })
-        .from(messages)
-        .where(and(eq(messages.sessionId, sessionId), isNull(messages.rewindAt)));
       const result = await sess.navigateSessionTree(entryId, {
         summarize: parsed.summarize === true,
         ...(typeof parsed.customInstructions === 'string'
@@ -9084,7 +9080,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           : {}),
       });
       const now = Date.now();
-      await getDbClient().tx('session.treeRehydrate', {
+      // hiddenClientIds 由重投影事务原子返回:它是隐藏动作发生那一刻的完整可见集,
+      // 含导航期间(带摘要可等数分钟)并发落库的消息 —— 用导航前的陈旧快照会漏掉这条,
+      // 导致它被 rewind 后仍留在已打开的 Renderer 里直到重载(codex review)。
+      const { hiddenClientIds } = await getDbClient().tx('session.treeRehydrate', {
         sessionId,
         now,
         contextTokens: result.contextTokens,
@@ -9103,12 +9102,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       resetTurnPersistState(sessionId);
 
       // 多窗口与 device-link 控制端先清旧投影，再按 DB 真相补当前活动路径。
-      const oldClientIds = oldRows.map((row) => row.clientId);
-      if (oldClientIds.length > 0) {
+      if (hiddenClientIds.length > 0) {
         broadcastMessageDeleted({
           sessionId,
-          clientId: oldClientIds[0],
-          clientIds: oldClientIds,
+          clientId: hiddenClientIds[0],
+          clientIds: hiddenClientIds,
         });
       }
       const visibleRows = await getDbClient().drizzle

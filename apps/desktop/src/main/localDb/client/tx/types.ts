@@ -720,7 +720,7 @@ export type DbTxResultByName = {
   'codex.importMessages': { changed: number };
   'claude.importMessages': { changed: number };
   'rewind.commit': undefined;
-  'session.treeRehydrate': { messageCount: number };
+  'session.treeRehydrate': { messageCount: number; hiddenClientIds: string[] };
   'fork.session': { messageCount: number };
   'embedding.markDone': undefined;
   'embedding.commit': undefined;

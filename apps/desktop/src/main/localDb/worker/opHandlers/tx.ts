@@ -621,7 +621,7 @@ function rewindCommit(db: Database.Database, args: unknown): void {
 function sessionTreeRehydrate(
   db: Database.Database,
   args: unknown,
-): { messageCount: number } {
+): { messageCount: number; hiddenClientIds: string[] } {
   const payload = asRecord(args, 'session.treeRehydrate args');
   const sessionId = expectString(payload.sessionId, 'sessionId');
   const now = expectNumber(payload.now, 'now');
@@ -642,6 +642,9 @@ function sessionTreeRehydrate(
       createdAt: expectNumber(row.createdAt, `messages.${index}.createdAt`),
     };
   });
+  const selectVisibleClientIds = db.prepare(
+    'SELECT client_id FROM messages WHERE session_id = ? AND rewind_at IS NULL',
+  );
   const hideVisible = db.prepare(
     'UPDATE messages SET rewind_at = ? WHERE session_id = ? AND rewind_at IS NULL',
   );
@@ -658,9 +661,13 @@ function sessionTreeRehydrate(
        created_at = excluded.created_at,
        rewind_at = NULL`,
   );
-  const transaction = db.transaction(() => {
+  const transaction = db.transaction((): string[] => {
     const session = db.prepare('SELECT id FROM sessions WHERE id = ? LIMIT 1').get(sessionId);
     if (!session) throw Object.assign(new Error(`Session 不存在: ${sessionId}`), { code: 'NOT_FOUND' });
+    // 原子快照当前可见集,再隐藏:导航期间(带摘要可等数分钟)并发落库的消息也在其中,
+    // 交给调用方作删除广播的权威集 —— 避免用导航前的陈旧快照漏掉这条(codex review)。
+    const hiddenClientIds = (selectVisibleClientIds.all(sessionId) as { client_id: string }[])
+      .map((row) => row.client_id);
     hideVisible.run(now, sessionId);
     for (const row of rows) {
       upsert.run(
@@ -680,9 +687,10 @@ function sessionTreeRehydrate(
           SET cleared_at = NULL, context_tokens = ?, context_window = ?, updated_at = ?
         WHERE id = ?`,
     ).run(contextTokens, contextWindow, now, sessionId);
+    return hiddenClientIds;
   });
-  transaction();
-  return { messageCount: rows.length };
+  const hiddenClientIds = transaction();
+  return { messageCount: rows.length, hiddenClientIds };
 }
 
 interface RewindMessageRow {

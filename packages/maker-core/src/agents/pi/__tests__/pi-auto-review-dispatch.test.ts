@@ -19,6 +19,7 @@ const captured = vi.hoisted(() => ({
   env: {} as Record<string, string | undefined>,
   onEvent: null as ((event: unknown) => void) | null,
   sent: [] as Array<Record<string, unknown>>,
+  proxyRegistration: null as { sessionId: string; token: string } | null,
 }));
 
 vi.mock('../rpc-client.js', () => ({
@@ -70,6 +71,7 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     captured.env = {};
     captured.onEvent = null;
     captured.sent = [];
+    captured.proxyRegistration = null;
     agentHome = mkdtempSync(path.join(tmpdir(), 'pi-dispatch-home-'));
     cwd = mkdtempSync(path.join(tmpdir(), 'pi-dispatch-cwd-'));
     savedNoProxy = process.env.NO_PROXY;
@@ -110,6 +112,9 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
         ],
       },
       resolvePiAgentHome: () => agentHome,
+      registerPiProxySession: (sessionId, token) => {
+        captured.proxyRegistration = { sessionId, token };
+      },
       reviewAutoPermissionAction,
     };
   }
@@ -147,6 +152,11 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     expect(captured.args[idx + 1]).toBe('You are Cindy.');
     expect(captured.env.PI_OFFLINE).toBe('1');
     expect(captured.env.PI_CACHE_RETENTION).toBe('long');
+    expect(captured.proxyRegistration).toEqual({
+      sessionId: 's1',
+      token: captured.env.CINDY_PI_SESSION_TOKEN,
+    });
+    expect(captured.env.CINDY_PI_SESSION_TOKEN).toMatch(/^[A-Za-z0-9_-]{40,}$/);
     const noProxy = (captured.env.NO_PROXY ?? '').split(',');
     for (const entry of ['corp.internal', '127.0.0.1', 'localhost', '::1']) {
       expect(noProxy).toContain(entry);
@@ -158,11 +168,21 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     await start();
     const { readFileSync } = await import('node:fs');
     const config = JSON.parse(readFileSync(path.join(agentHome, 'models.json'), 'utf8')) as {
-      providers: { cindy: { models: Array<{ id: string; maxTokens: number; cost: Record<string, number> }> } };
+      providers: {
+        cindy: {
+          headers: Record<string, string>;
+          models: Array<{ id: string; maxTokens: number; cost: Record<string, number> }>;
+        };
+      };
     };
     const m = config.providers.cindy.models.find((x) => x.id === 'm');
     expect(m?.maxTokens).toBe(64_000);
     expect(m?.cost).toEqual({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 });
+    expect(config.providers.cindy.headers).toEqual({
+      'x-cindy-pi-session-id': '$CINDY_PI_SESSION_ID',
+      'x-cindy-pi-session-token': '$CINDY_PI_SESSION_TOKEN',
+    });
+    expect(JSON.stringify(config)).not.toContain(captured.env.CINDY_PI_SESSION_TOKEN);
   });
 
   it('auto mode silently approves in-workspace writes without consulting the resolver', async () => {
@@ -186,7 +206,7 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
       resolverCalls++;
       return { kind: 'permission', behavior: 'deny' } as never;
     });
-    await handle.send({ role: 'user', content: 'Update the system hosts mapping for this test.' });
+    await handle.send({ type: 'user', content: 'Update the system hosts mapping for this test.' });
     firePermissionRequest('r2', 'write', { path: '/etc/hosts' });
     await flush();
     expect(review).toHaveBeenCalledWith(expect.objectContaining({
@@ -202,7 +222,7 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
   it('auto mode gives the current-model reviewer complete MCP tool evidence', async () => {
     const review = vi.fn(async () => ({ verdict: 'allow' as const }));
     const handle = await start('auto', review);
-    await handle.send({ role: 'user', content: 'Start a review team.' });
+    await handle.send({ type: 'user', content: 'Start a review team.' });
     firePermissionRequest('r3', 'mcp__cindy_orca__start_team', {});
     await flush();
     expect(review).toHaveBeenCalledWith(expect.objectContaining({

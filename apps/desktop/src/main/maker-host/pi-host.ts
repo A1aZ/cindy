@@ -39,6 +39,7 @@ import hostSystemPrompt from './host-system-prompt.md?raw';
 import piSystemPrompt from './pi-system-prompt.md?raw';
 import { createLogger } from '../logger.js';
 import { readMemorySettings } from './memory-settings-store.js';
+import { registerPiProxySession } from './pi-proxy-session-auth.js';
 
 const log = createLogger('pi-host');
 
@@ -233,7 +234,8 @@ export function piNativeKeyEnvVar(providerId: string): string {
  *  - 无 pi runtime → 跳过;
  *  - oauth 形态 → 跳过(pi models.json 仅支持 radius oauth,不通用);
  *  - apiKey 形态但读不到 key → 跳过(pi 无 key 不显示该模型,避免半可用);
- *  - none(keyless,本机 Ollama 等)→ apiKeyEnvVar 留空,models.json 写 dummy key。
+ *  - none(keyless,本机 Ollama 等)→ apiKeyEnvVar 留空,models.json 写 dummy key;
+ *  - 自定义 header 值全部搬进子进程 env,models.json 只保留 `$ENV` 引用。
  * 直连用户端点,不过 anthropic-compat 代理(设计原则:pi 主导,禁双重转义)。
  */
 export function buildPiNativeProvidersFromConfigs(
@@ -291,13 +293,22 @@ export function buildPiNativeProvidersFromConfigs(
       apiKeyEnvVar = uniqueEnvVar(cfg.id);
       env[apiKeyEnvVar] = key;
     }
+    const headers = rt.headers
+      ? Object.fromEntries(
+          Object.entries(rt.headers).map(([name, value]) => {
+            const envVar = uniqueEnvVar(`${cfg.id}_HEADER_${name}`);
+            env[envVar] = value;
+            return [name, `$${envVar}`];
+          }),
+        )
+      : undefined;
     providers.push({
       id: cfg.id,
       name: cfg.name,
       baseUrl: rt.baseUrl,
       api: wireProtocolToPiApi(rt.wireProtocol),
       apiKeyEnvVar,
-      ...(rt.headers && Object.keys(rt.headers).length > 0 ? { headers: rt.headers } : {}),
+      ...(headers && Object.keys(headers).length > 0 ? { headers } : {}),
       models: rt.models.map((m) => ({ id: m.id, name: m.name, contextWindow: m.contextWindow })),
     });
   }
@@ -339,6 +350,7 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
     makerMemory: opts.makerMemory,
     resolvePiAgentHome: () => path.join(app.getPath('userData'), 'pi-agent-home'),
     preparePiExtraSpawnConfig: (providers, ctx) => getPiExtraSpawnConfig(providers, opts.logger, ctx),
+    registerPiProxySession,
     resolvePiNativeProviders: () => resolvePiNativeProviders(),
   });
 }

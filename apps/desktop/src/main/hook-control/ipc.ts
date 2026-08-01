@@ -402,7 +402,9 @@ function ensureInstances(): { store: SlackHookStore; manager: HookControlManager
         deviceId: authManager.getDeviceId(),
         deviceName: os.hostname(),
       }),
-      agents: ['claude-code', 'codex'],
+      // Only advertise runtimes that are actually registered on this build.
+      // Pi is optional on unsupported/unprepared platforms.
+      agents: getMaker().listAvailableAgents(),
       notifyStatus: broadcastStatus,
       onSlackToolProviderEnabledChanged: requestCodexMcpRefreshForSlackAvailability,
       notifyPrefs: broadcastPrefs,
@@ -419,7 +421,7 @@ function ensureInstances(): { store: SlackHookStore; manager: HookControlManager
       // 侧据此渲染权限档下拉(选中值经 dispatch options.permissionMode 回流)
       listAgentModels: async () => {
         const providers = await getDesktopProviderService().listProviders({ allowSideEffects: true });
-        return (['claude-code', 'codex'] as const).map((agentKind) => {
+        return getMaker().listAvailableAgents().map((agentKind) => {
           const models = visibleModelUnion(providers, agentKind, (providerId, m) =>
             isModelVisible(
               getModelVisibilityOverride(agentKind, providerId, m.id),

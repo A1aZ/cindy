@@ -287,6 +287,13 @@ export interface AgentDeps {
   ) => Promise<PiExtraSpawnConfig | null>;
 
   /**
+   * Pi-only: authenticate a child process to the host's loopback model proxy.
+   * PiAgent creates a high-entropy token per session, registers it before spawn,
+   * and disposes the exact registration when startup fails or the session closes.
+   */
+  registerPiProxySession?: (sessionId: string, token: string) => (() => void) | void;
+
+  /**
    * BYOM:host 解析出当前会话可用的 pi **原生 provider**(用户自定义/本地模型)+ 需注入的
    * env(api keys)。PiAgent 把这些写进 models.json 的独立 provider 块(直连用户端点,不过
    * anthropic-compat 代理),并按 model→provider 路由 set_model / 初始 --provider。

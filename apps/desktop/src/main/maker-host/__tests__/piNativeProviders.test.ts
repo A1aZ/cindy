@@ -101,21 +101,29 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     expect(skips).toContain('oauthp');
   });
 
-  it('ignores configs without a pi runtime; passes headers + models through', () => {
-    const { providers } = buildPiNativeProvidersFromConfigs(
+  it('ignores configs without a pi runtime; keeps custom header values out of models.json specs', () => {
+    const { providers, env } = buildPiNativeProvidersFromConfigs(
       [
         { id: 'codexonly', name: 'C', runtimes: {} },
         {
           id: 'withhdr',
           name: 'H',
           auth: { method: 'none' },
-          runtimes: { pi: piRuntime({ headers: { 'x-org': 'acme' }, models: [{ id: 'm1', name: 'M1', contextWindow: 8000 }] }) },
+          runtimes: {
+            pi: piRuntime({
+              headers: { 'x-org': 'acme', authorization: 'Bearer header-secret' },
+              models: [{ id: 'm1', name: 'M1', contextWindow: 8000 }],
+            }),
+          },
         },
       ],
       () => null,
     );
     expect(providers.map((p) => p.id)).toEqual(['withhdr']);
-    expect(providers[0].headers).toEqual({ 'x-org': 'acme' });
+    expect(providers[0].headers?.['x-org']).toMatch(/^\$CINDY_PI_KEY_/);
+    expect(providers[0].headers?.authorization).toMatch(/^\$CINDY_PI_KEY_/);
+    expect(Object.values(providers[0].headers ?? {})).not.toContain('Bearer header-secret');
+    expect(Object.values(env)).toEqual(expect.arrayContaining(['acme', 'Bearer header-secret']));
     expect(providers[0].models[0]).toMatchObject({ id: 'm1', name: 'M1', contextWindow: 8000 });
   });
 });

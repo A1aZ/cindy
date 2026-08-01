@@ -56,12 +56,14 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
   let agentHome = '';
   let cwd = '';
   let disposed = 0;
+  let proxyDisposed = 0;
 
   beforeEach(() => {
     knobs.ctorThrows = false;
     knobs.getStateRejects = false;
     knobs.closeCount = 0;
     disposed = 0;
+    proxyDisposed = 0;
     agentHome = mkdtempSync(path.join(tmpdir(), 'pi-cleanup-home-'));
     cwd = mkdtempSync(path.join(tmpdir(), 'pi-cleanup-cwd-'));
   });
@@ -89,6 +91,7 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
         ],
       },
       resolvePiAgentHome: () => agentHome,
+      registerPiProxySession: () => () => { proxyDisposed++; },
       // 注册身份并回传 disposeSessionCtx 探针(servers 空,无需真桥)。
       preparePiExtraSpawnConfig: async () => ({
         mcpBridge: { token: 'itest', servers: [] },
@@ -104,6 +107,7 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     const agent = new PiAgent(buildDeps());
     await expect(agent.startSession(opts())).rejects.toThrow(/spawn failed/);
     expect(disposed).toBe(1);
+    expect(proxyDisposed).toBe(1);
     expect(knobs.closeCount).toBe(0); // 构造失败没有 proc 可关
   });
 
@@ -112,6 +116,7 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     const agent = new PiAgent(buildDeps());
     await expect(agent.startSession(opts())).rejects.toThrow(/get_state rejected/);
     expect(disposed).toBe(1);
+    expect(proxyDisposed).toBe(1);
     expect(knobs.closeCount).toBe(1); // 已 spawn → 必须关掉,避免僵尸持有 ?session= 路由
   });
 
@@ -119,7 +124,9 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     const agent = new PiAgent(buildDeps());
     const handle = await agent.startSession(opts());
     expect(disposed).toBe(0);
+    expect(proxyDisposed).toBe(0);
     await handle.close();
     expect(disposed).toBe(1); // close() 才注销
+    expect(proxyDisposed).toBe(1);
   });
 });

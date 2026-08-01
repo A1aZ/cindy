@@ -23,6 +23,8 @@
  * 更新方式:PiAgent 每次 startSession 覆写该文件;改这里 = 改下次会话的桥行为。
  */
 
+import { SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS } from '../shared/sensitive-credential-paths.js';
+
 export const CINDY_BRIDGE_EXTENSION_FILENAME = 'cindy-bridge.ts';
 
 export const CINDY_BRIDGE_EXTENSION_SOURCE = String.raw`/**
@@ -35,18 +37,10 @@ const PERMISSION_TITLE = 'cindy:permission';
 const READONLY_BUILTINS = new Set(['read', 'grep', 'find', 'ls']);
 const FILE_WRITE_BUILTINS = new Set(['edit', 'write']);
 
-// 凭证/密钥路径特征 —— 与 maker-core shared/auto-review.ts 的 CREDENTIAL_PATH_PATTERNS
-// 保持同步(bridge 自包含,不能 import;改那边记得改这边)。只读工具入参命中即不再
-// 直通,升级走 Cindy 审批:读 ~/.ssh、~/.aws 等即使是"只读"也是侦察面。
-const CREDENTIAL_PATH_PATTERNS = [
-  /(?:^|[\\/\s'"~])\.(?:ssh|aws|gnupg|kube|docker|claude|codex)\b/i,
-  /(?:^|[\\/\s'"~])\.(?:netrc|npmrc|pgpass|pypirc)\b/i,
-  /\bapplication_default_credentials\b/i,
-  /\bcredentials\.json\b/i,
-  /[\\/](?:codex|claude|gcloud)[\\/]auth\.json\b/i,
-  /\/proc\/[^\s]*\/environ\b/i,  // /proc/self/environ、/proc/<pid>/environ、/proc/<pid>/task/<tid>/environ
-  /\bid_rsa\b|\bid_ed25519\b|\bid_ecdsa\b|\bid_dsa\b|\.pem\b|\.p12\b/i,
-];
+// 凭证/密钥路径特征由 maker-core 的单一来源生成。bridge 自包含、运行时不能 import，
+// 但不再维护第二份手写名单，避免新增凭证目录时 Pi 静默漏拦。
+const CREDENTIAL_PATH_PATTERNS = ${JSON.stringify(SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS)}
+  .map(({ source, flags }) => new RegExp(source, flags));
 
 // 递归扫全部字符串叶子(含数组 / 嵌套对象),深度上限防环/超大入参。工具入参把路径
 // 放进 { paths: [...] } 或 { opts: { path } } 时也能命中,不止顶层 string 字段。

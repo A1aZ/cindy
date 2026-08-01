@@ -57,7 +57,7 @@ import type { IpcHandlerRegistry } from './ipcHandlerRegistry.js';
 
 const log = createLogger('maker-ipc:provider');
 
-const VALID_AGENTS: readonly string[] = ['claude-code', 'codex'];
+const VALID_AGENTS: readonly string[] = ['claude-code', 'codex', 'pi'];
 const VALID_ADHOC_AUTH_METHODS: readonly string[] = ['apiKey', 'oauth', 'none'];
 const PROVIDER_OAUTH_OWNER_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 type RuntimeKeys = Partial<Record<AgentKind, string>>;

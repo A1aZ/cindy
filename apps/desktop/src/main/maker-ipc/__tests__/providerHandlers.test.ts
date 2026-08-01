@@ -676,6 +676,30 @@ describe('provider:custom:* CRUD handlers', () => {
     expect(deps.broadcastChanged).toHaveBeenCalledOnce();
   });
 
+  it('accepts and stages a Pi-native runtime key', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    const storeCustomProviderKey = vi.fn(() => true);
+    registerProviderHandlers(harness, makeDeps({ storeCustomProviderKey }));
+    const config: CustomProviderConfig = {
+      id: 'pi-native',
+      name: 'Pi Native',
+      auth: { method: 'apiKey' },
+      runtimes: {
+        pi: {
+          baseUrl: 'https://pi-native.example/v1',
+          wireProtocol: 'openai-chat',
+          models: [{ id: 'native-model', name: 'Native Model' }],
+        },
+      },
+    };
+
+    await expect(
+      harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, config, { pi: 'pi-secret' }),
+    ).resolves.toEqual({ ok: true });
+    expect(storeCustomProviderKey).toHaveBeenCalledWith('pi-native', 'pi', 'pi-secret');
+  });
+
   it('rolls back partial create keys before any provider config is committed', async () => {
     mountDb();
     const harness = new IpcHarness();
@@ -1408,6 +1432,28 @@ describe('provider:test-connection handler', () => {
         headers: undefined,
       },
     });
+  });
+
+  it('accepts a Pi-native connection probe', async () => {
+    const harness = new IpcHarness();
+    const testConnection = vi.fn(async () => ({ ok: true as const, latencyMs: 2 }));
+    registerProviderHandlers(harness, makeDeps({ testConnection }));
+
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_TEST_CONNECTION, {
+      kind: 'adhoc',
+      spec: {
+        agent: 'pi',
+        wireProtocol: 'openai-chat',
+        baseUrl: 'https://pi.example/v1',
+        modelId: 'pi-model',
+        authMethod: 'apiKey',
+        apiKey: 'k',
+      },
+    })).resolves.toMatchObject({ ok: true });
+    expect(testConnection).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'adhoc',
+      spec: expect.objectContaining({ agent: 'pi', wireProtocol: 'openai-chat' }),
+    }));
   });
 
   it('rejects remote no-auth adhoc probes before invoking the network dependency', async () => {

@@ -60,6 +60,17 @@ describe('classifyPiToolForAutoReview', () => {
     expect(verdict('grep', { path: '/proc/999/task/1000/environ' })).toBe('prompt-each-time');
   });
 
+  it.each([
+    '/Users/t/.azure/accessTokens.json',
+    '/Users/t/.git-credentials',
+    '/Users/t/.cargo/credentials.toml',
+    '/Users/t/.m2/settings.xml',
+    '/Users/t/.config/gh/hosts.yml',
+    '/Users/t/.config/containers/auth.json',
+  ])('keeps Pi readonly access behind approval for canonical credential path %s', (credentialPath) => {
+    expect(verdict('read', { path: credentialPath })).toBe('prompt-each-time');
+  });
+
   it('recurses into array / nested-object inputs for credential paths', () => {
     expect(verdict('read', { paths: ['/tmp/ok.txt', '/Users/t/.ssh/id_rsa'] })).toBe('prompt-each-time');
     expect(verdict('grep', { opts: { path: '/Users/t/.aws/credentials' } })).toBe('prompt-each-time');

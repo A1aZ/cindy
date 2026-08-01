@@ -22,6 +22,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 
 import {
   AgentNotAuthenticatedError,
@@ -86,6 +87,7 @@ import {
 const PI_PROVIDER_ID = 'cindy';
 const PI_API_KEY_ENV = 'CINDY_PI_API_KEY';
 const PI_SESSION_ID_ENV = 'CINDY_PI_SESSION_ID';
+const PI_SESSION_TOKEN_ENV = 'CINDY_PI_SESSION_TOKEN';
 /** 手动压缩 = 一次完整 LLM 摘要调用(大上下文 + 网关排队),远超默认 30s RPC 超时。 */
 const PI_COMPACT_TIMEOUT_MS = 600_000;
 /** 分支摘要同样可能触发一次完整 LLM 调用。 */
@@ -360,6 +362,7 @@ export class PiAgent extends BaseAgent {
         apiKey: `$${PI_API_KEY_ENV}`,
         headers: {
           'x-cindy-pi-session-id': `$${PI_SESSION_ID_ENV}`,
+          'x-cindy-pi-session-token': `$${PI_SESSION_TOKEN_ENV}`,
         },
         models,
       },
@@ -618,13 +621,31 @@ export class PiAgent extends BaseAgent {
     // preparePiExtraSpawnConfig 注册、但 handle 尚未交出,close() 不会跑 → 单独
     // 兜底注销 ctx 再抛(构造失败没有 proc 可关)。catch 必抛,故其后 proc 恒已赋值。
     let proc: PiRpcProcess;
+    const proxySessionToken = randomBytes(32).toString('base64url');
+    let disposeProxySession: (() => void) | undefined;
+    const disposeSessionRegistrations = (): void => {
+      let firstError: unknown;
+      for (const dispose of [disposeProxySession, disposeSessionCtx]) {
+        try {
+          dispose?.();
+        } catch (error) {
+          firstError ??= error;
+        }
+      }
+      if (firstError) throw firstError;
+    };
     try {
+      if (opts.sessionId && this.deps.registerPiProxySession) {
+        const disposer = this.deps.registerPiProxySession(opts.sessionId, proxySessionToken);
+        if (typeof disposer === 'function') disposeProxySession = disposer;
+      }
       const spawnEnv: NodeJS.ProcessEnv = {
         ...process.env,
         ...authEnv,
         // BYOM 原生 provider 的 api keys(键名对应 spec.apiKeyEnvVar,models.json 用 $ENV 引用)。
         ...nativeEnv,
         [PI_SESSION_ID_ENV]: opts.sessionId ?? '',
+        [PI_SESSION_TOKEN_ENV]: proxySessionToken,
         PI_CODING_AGENT_DIR: agentHome,
         CINDY_PI_PERMISSION_FILE: permissionFile,
         // 嵌入式 runtime 不做启动期联网:关掉 pi 的版本检查与安装遥测
@@ -680,7 +701,7 @@ export class PiAgent extends BaseAgent {
       });
     } catch (err) {
       try {
-        disposeSessionCtx?.();
+        disposeSessionRegistrations();
       } catch {
         /* best-effort:注销失败不掩盖原始构造错误 */
       }
@@ -794,7 +815,7 @@ export class PiAgent extends BaseAgent {
       }
     } catch (err) {
       try {
-        disposeSessionCtx?.();
+        disposeSessionRegistrations();
       } catch {
         /* best-effort:注销失败不掩盖原始启动错误 */
       }
@@ -853,9 +874,9 @@ export class PiAgent extends BaseAgent {
         // 先注销 bridge 身份注册(幂等),再关子进程。放前面:即便 proc.close 抛错
         // 也不泄漏 ctx —— 该 sessionId 的 `?session=` 路由必须随会话结束失效。
         try {
-          disposeSessionCtx?.();
+          disposeSessionRegistrations();
         } catch (err) {
-          deps.logger.warn('pi disposeSessionCtx failed (non-fatal)', {
+          deps.logger.warn('pi dispose session registration failed (non-fatal)', {
             message: err instanceof Error ? err.message : String(err),
           });
         }

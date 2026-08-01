@@ -35,6 +35,7 @@ import {
   stripNonAnthropicFields,
   stripToolUseProviderSpecificFields,
   type ProxyHandle,
+  type RoutingDecision,
   type RoutingTransform,
 } from '@cindy/anthropic-compat-proxy';
 
@@ -84,6 +85,7 @@ import {
   createClaudeSessionActivityResponseObserver,
   recordClaudeApiActivity,
 } from './claude-session-background-activity.js';
+import { authenticatePiProxySession } from './pi-proxy-session-auth.js';
 
 // scope = 'cc-proxy' → logger.ts 的 emit() 路由把这条流量并入统一 agent 流
 // (agent-*.ndjson, source=proxy)。child(sub) 会继续保持 'cc-proxy/sub' 前缀, routing 一致。
@@ -154,13 +156,41 @@ function headerValue(headers: Readonly<Record<string, string>>, name: string): s
  * chip 用全局活性状态重算会与 child 真实路由发散。export 仅供单测。
  */
 export function createModelRoutingTransform(): RoutingTransform {
-  return (body, ctx) => {
-    const piSessionId = headerValue(ctx.headers, 'x-cindy-pi-session-id');
+  const route: RoutingTransform = (body, ctx) => {
+    const claimedPiSessionId = headerValue(ctx.headers, 'x-cindy-pi-session-id');
+    if (
+      claimedPiSessionId
+      && !authenticatePiProxySession(
+        claimedPiSessionId,
+        headerValue(ctx.headers, 'x-cindy-pi-session-token'),
+      )
+    ) {
+      // Loopback is not an authentication boundary: another local process can
+      // forge a business session id. Reject before provider routing so it can
+      // never borrow that session's OAuth token or gateway key.
+      return {
+        localHandler: async ({ res }) => {
+          const payload = JSON.stringify({
+            type: 'error',
+            error: {
+              type: 'authentication_error',
+              code: 'invalid_pi_session_token',
+              message: 'Invalid or expired Pi proxy session token.',
+            },
+          });
+          res.writeHead(401, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          });
+          res.end(payload);
+        },
+      };
+    }
+    const piSessionId = claimedPiSessionId;
     const requestAgent = piSessionId ? 'pi' : 'claude-code';
     // 后台活动检测(claude-session-background-activity):凡带 cc 会话标头的请求
-    // 都记一笔活动时刻。注意 routingTransform 只在 JSON POST 上被调用(server.ts
-    // 按 content-type 门控),GET / 非 JSON 请求不经过这里 —— 它们由响应侧的
-    // createClaudeSessionActivityResponseObserver 覆盖(观察器对所有响应生效)。
+    // 都记一笔活动时刻。routingTransform 会处理无 body 控制面请求与 JSON 请求；
+    // 非 JSON 的 POST/PUT/PATCH 不经过这里,由响应侧 observer 兜底观察活动。
     // 开销 = 一次 header 读 + 一次活跃会话表反解 + Map.set,非 per-token 路径。
     const sdkSessionId = ctx.headers['x-claude-code-session-id'];
     const ccSessionId = sdkSessionId && _resolveCcSessionId
@@ -284,6 +314,31 @@ export function createModelRoutingTransform(): RoutingTransform {
       log.warn('claude oauth-spawn but no gateway key; non-anthropic passthrough (可能 401)', { wireModel });
     }
     return null;
+  };
+  return (body, ctx) => {
+    const decision = route(body, ctx);
+    const hasInternalPiHeader =
+      headerValue(ctx.headers, 'x-cindy-pi-session-id') !== null
+      || headerValue(ctx.headers, 'x-cindy-pi-session-token') !== null;
+    if (!hasInternalPiHeader) return decision;
+    const stripInternalPiHeaders = (
+      resolved: RoutingDecision | null,
+    ): RoutingDecision | null => {
+      if (resolved?.localHandler) return resolved;
+      return {
+        ...(resolved ?? {}),
+        headerDelete: [
+          ...new Set([
+            ...(resolved?.headerDelete ?? []),
+            'x-cindy-pi-session-id',
+            'x-cindy-pi-session-token',
+          ]),
+        ],
+      };
+    };
+    return decision instanceof Promise
+      ? decision.then(stripInternalPiHeaders)
+      : stripInternalPiHeaders(decision);
   };
 }
 

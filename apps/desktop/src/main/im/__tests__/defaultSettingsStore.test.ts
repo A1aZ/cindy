@@ -102,6 +102,21 @@ describe('im default settings store', () => {
     expect(persisted.agents).toBeDefined();
   });
 
+  it('persists a Pi-specific default instead of dropping it from sparse overrides', () => {
+    writeImDefaultSettingsPatch({
+      agents: {
+        pi: { providerId: 'openai', model: 'chatgpt/gpt-5.6', effort: 'high' },
+      },
+    });
+
+    const persisted = JSON.parse(fs.readFileSync(settingsFile(), 'utf-8'));
+    expect(persisted.global.agents.pi).toEqual({
+      providerId: 'openai',
+      model: 'chatgpt/gpt-5.6',
+      effort: 'high',
+    });
+  });
+
   it('preserves existing agent overrides when another agent is updated', () => {
     writeImDefaultSettingsPatch({
       agents: {

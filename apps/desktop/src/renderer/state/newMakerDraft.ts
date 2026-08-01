@@ -163,8 +163,8 @@ function defaultVendorPrefs(vendor: MakerVendor): VendorPrefs {
       // 目录未含该 id 时由 ChatInput 的 vendor 回退逻辑纠正。
       model: 'claude-sonnet-5',
       effort: 'high',
-      // pi 当前 capabilities 仅暴露完全访问档(ask 档随 cindy-bridge extension 上线)。
-      permissionMode: 'bypassPermissions',
+      // 新 Pi 草稿默认走 Auto Review；完全访问只能由用户显式选择并持久化。
+      permissionMode: 'auto',
       planMode: false,
       providerId: null,
     };
@@ -341,7 +341,7 @@ function sanitize(raw: unknown): NewMakerDraft {
       ? (r.modelChosenByVendor as Record<string, unknown>)
       : {};
   const modelChosenByVendor: Partial<Record<MakerVendor, boolean>> = {};
-  for (const v of ['cc', 'orca', 'codex'] as const) {
+  for (const v of ['cc', 'orca', 'codex', 'pi'] as const) {
     if (modelChosenRaw[v] === true) modelChosenByVendor[v] = true;
   }
   // 2026-07 已落盘但尚无显式标记的 true，只可能来自用户把当时默认 false 切到 true，

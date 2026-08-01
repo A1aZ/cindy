@@ -371,24 +371,40 @@ describe('maker:event hot path ordering', () => {
     expect(codexDoneSource).toContain('? codexSubscriptionUsageModelKey(pricingModel)');
     expect(codexDoneSource).toContain(': codexApiUsageModelKey(pricingModel)');
     expect(codexDoneSource).toContain('const price = isCodexXaiProviderRoute');
-    expect(codexDoneSource).toContain('? getSubscriptionDirectValuePrice(pricingModel)');
-    expect(codexDoneSource).toContain('? getCodexSubscriptionValuePrice(pricingModel, pricing)');
+    expect(codexDoneSource).toContain(
+      "? getSubscriptionDirectValuePrice(pricingModel, 'codex', pricing)",
+    );
+    // 订阅估值按显式来源取各自 registry 日期定价:内置 anthropic(access.kind=subscription)
+    // 不再被记成 #billing=api;默认/openai 仍走 OpenAI 价表。
+    expect(codexDoneSource).toContain("sessionProviderAccessKind === 'subscription'");
+    expect(codexDoneSource).toContain('isCodexSubscriptionAccessRoute ||');
+    expect(codexDoneSource).toMatch(
+      /\? getCodexProviderSubscriptionValuePrice\(\s*subscriptionValueProviderId,\s*pricingModel,\s*pricing,\s*\)/,
+    );
     expect(codexDoneSource).toContain("? getModelPriceQuote(pricing, 'xd', pricingModel)");
-    expect(codexDoneSource).toContain('const pricing = isSubscriptionValue && !isCodexXaiProviderRoute');
+    expect(codexDoneSource).toContain(
+      "? getModelPriceQuote(pricing, sessionProvider, pricingModel, 'codex')",
+    );
+    expect(codexDoneSource).toContain('const pricing = isSubscriptionValue');
+    expect(codexDoneSource).not.toContain('isSubscriptionValue && !isCodexXaiProviderRoute');
     expect(codexDoneSource).toContain('? await getModelPricing()');
     expect(codexDoneSource).toContain("? await getModelPricingForModel('xd', pricingModel)");
     expect(codexDoneSource).toContain('price ?? undefined');
-    expect(codexDoneSource).toContain('if (!isSubscriptionValue && money)');
+    expect(codexDoneSource).toContain(
+      "if (!isSubscriptionValue && money && price?.source === 'gateway')",
+    );
     expect(codexDoneSource).toContain('void recordTurnSpend(money);');
     expect(codexDoneSource).toContain('void recordSessionTurnSpend(session.id, money);');
     expect(codexDoneSource).toMatch(
-      /await recordModelTurnUsage\(\{\s*agentKind: 'codex',\s*model: modelUsageKey,\s*inputTokensDelta: promptTokens,\s*outputTokensDelta: completionTokens,\s*cacheReadTokensDelta: cachedTokens,\s*cacheCreateTokensDelta: 0,\s*\}\)\.finally\(\(\) => rebroadcastCodexTodayUsage\(\)\);[\s\S]*?const pricing = isSubscriptionValue && !isCodexXaiProviderRoute/,
+      /await recordModelTurnUsage\(\{\s*agentKind: 'codex',\s*model: modelUsageKey,\s*inputTokensDelta: promptTokens,\s*outputTokensDelta: completionTokens,\s*cacheReadTokensDelta: cachedTokens,\s*cacheCreateTokensDelta: 0,\s*\}\)\.finally\(\(\) => rebroadcastCodexTodayUsage\(\)\);[\s\S]*?const pricing = isSubscriptionValue/,
     );
     expect(codexDoneSource).toMatch(
       /await recordModelTurnUsage\(\{\s*agentKind: 'codex',\s*model: modelUsageKey,\s*money,\s*inputTokensDelta: 0,\s*outputTokensDelta: 0,\s*cacheReadTokensDelta: 0,\s*cacheCreateTokensDelta: 0,\s*\}\);/,
     );
     const costRecordIndex = codexDoneSource.indexOf('void recordTurnSpend(money);');
-    const modelCostRecordIndex = codexDoneSource.indexOf('if (!isSubscriptionValue && money)');
+    const modelCostRecordIndex = codexDoneSource.indexOf(
+      "if (!isSubscriptionValue && money && price?.source === 'gateway')",
+    );
     const schedulerCostRecordIndex = codexDoneSource.indexOf('await recordSchedulerTurnCost({');
     expect(costRecordIndex).toBeGreaterThanOrEqual(0);
     expect(modelCostRecordIndex).toBeGreaterThanOrEqual(0);
@@ -420,12 +436,16 @@ describe('maker:event hot path ordering', () => {
     expect(claudeDoneSource).toContain("'xd',");
     expect(claudeDoneSource).toContain('normalizeModelIdForPricing(deltas[0]?.model)');
     expect(claudeDoneSource).toContain(': await getModelPricing();');
-    expect(claudeDoneSource).toContain('const { turnMoney, perModel } = resolveClaudeTurnCostSinks(');
+    expect(claudeDoneSource).toContain(
+      'const { turnMoney, estimatedTurnMoney, perModel } = resolveClaudeTurnCostSinks(',
+    );
     expect(claudeDoneSource).toContain('providerId: sessionProviderForBilling');
     expect(claudeDoneSource).toContain('billingRoute,');
     expect(claudeDoneSource).toContain('recordTurnSpend(turnMoney);');
     expect(claudeDoneSource).toContain('recordSessionTurnSpend(session.id, turnMoney);');
-    expect(claudeDoneSource).toContain('money: m.money,');
+    expect(claudeDoneSource).toContain(
+      "money: m.money?.kind === 'actual-cost' ? m.money : null,",
+    );
     // 订阅轮 (Claude Anthropic 订阅或 bridge 订阅直连) 打 #billing=subscription 标记,
     // 仪表盘按订阅估算价折算; 其余轮仍写归一化裸 id。
     expect(claudeDoneSource).toContain(

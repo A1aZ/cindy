@@ -137,6 +137,7 @@ import {
   findParkedEngineSession,
   getMessageDeletionTarget,
   listMessagesForAgentHandoff,
+  supersedeRetriedUserTurn,
 } from '../localDb/ipc/messages.js';
 import { messageToCamel } from '../localDb/mapper.js';
 import { visibleMessageTextForConversationSearch } from '../localDb/conversationSearch.pure.js';
@@ -297,10 +298,11 @@ import {
 import { recordModelMismatchOnMessage } from '../modelMismatchBroadcaster.js';
 import { detectClaudeModelMismatch } from '../../shared/modelMismatch.js';
 import { triggerClaudeAccountUsageRefresh } from '../usage/claudeAccountUsage.js';
-import { getCodexSubscriptionValuePrice, getGatewayAccountCurrency, getModelPriceQuote, getModelPricing, getModelPricingForModel, getSubscriptionDirectValuePrice } from '../usage/modelPricing.js';
+import { broadcastEffectiveModelPricing, getCodexProviderSubscriptionValuePrice, getGatewayAccountCurrency, getModelPriceQuote, getModelPricing, getModelPricingForModel, getSubscriptionDirectValuePrice } from '../usage/modelPricing.js';
+import { clearModelPriceOverride, stageProviderModelPriceOverridesClear, readModelPriceOverrideView, setModelPriceOverride } from '../usage/modelPriceOverrideStore.js';
 import { computeModelUsageDeltas, type ModelUsageCumulative, type ModelUsageDeltaEntry } from '../usage/modelUsageDelta.js';
 import { claudeSubscriptionUsageModelKey, codexApiUsageModelKey, codexSubscriptionUsageModelKey, piSubscriptionUsageModelKey } from '../usage/usageHistory.js';
-import { buildClaudeTurnUsageDetails, computePriceQuoteTurnMoney, estimateClaudeSubscriptionTurnValue, isAnthropicModel, normalizeModelIdForPricing, resolveClaudeTurnCostSinks, type BillingRoute } from '../usage/turnCostCalculator.js';
+import { billingRouteForExplicitProvider, buildClaudeTurnUsageDetails, computePriceQuoteTurnMoney, estimateClaudeSubscriptionTurnValue, isAnthropicModel, normalizeModelIdForPricing, resolveClaudeTurnCostSinks, type BillingRoute } from '../usage/turnCostCalculator.js';
 import { CHATGPT_MODEL_PREFIX, XAI_MODEL_PREFIX, isSubscriptionDirectModel } from '../../shared/subscriptionModels.js';
 import {
   addRegionalMoney,
@@ -2723,6 +2725,10 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
   // 订阅槽①旁听 tap(独立监听,叠加在主转发之外互不干扰):AgentEvent →
   // did-turn-*。资格(用户主会话)与自动化轮次过滤都在 tap 内部,这里零逻辑。
   const ghostSessionTap = createGhostSessionTap(session.id);
+  // 拆线收口:实例替换(上面的 existing.disposers)与会话关闭(下面 closed 的
+  // finally)两条路径都要给插件补上缺失的 did-turn-end,否则订阅方的「AI 在忙」
+  // 外层状态永久卡在 working。
+  registration.disposers.push(() => ghostSessionTap.dispose());
   registration.disposers.push(session.onEvent((event: AgentEvent) => {
     ghostSessionTap.handleEvent(
       event as { type: string; data?: unknown; source?: string; turnOrigin?: { kind?: string } },
@@ -3252,6 +3258,14 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           const sessionProviderForBilling = getSessionProvider(session.id);
           const observedClaudeRoute =
             sessionProviderForBilling == null ? readClaudeSessionRoute(session.id) : null;
+          const explicitProviderBillingRoute = billingRouteForExplicitProvider(
+            sessionProviderForBilling,
+            sessionProviderForBilling
+              ? getActiveCatalog().providers.find(
+                  (provider) => provider.id === sessionProviderForBilling,
+                )?.access?.kind
+              : null,
+          );
           const isClaudeSubscriptionSession = !session.remoteHostId && (
             sessionProviderForBilling === 'anthropic'
             || (
@@ -3265,11 +3279,8 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             ? 'unknown'
             : isClaudeSubscriptionSession
               ? 'subscription'
-              : sessionProviderForBilling === 'xd' || observedClaudeRoute === 'gateway'
-                ? 'xd-gateway'
-                : sessionProviderForBilling
-                  ? 'provider-api'
-                  : 'unknown';
+              : explicitProviderBillingRoute
+                ?? (observedClaudeRoute === 'gateway' ? 'xd-gateway' : 'unknown');
           const pricing =
             billingRoute === 'xd-gateway'
               ? await getModelPricingForModel(
@@ -3277,7 +3288,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
                   normalizeModelIdForPricing(deltas[0]?.model),
                 )
               : await getModelPricing();
-          const { turnMoney, perModel } = resolveClaudeTurnCostSinks(
+          const { turnMoney, estimatedTurnMoney, perModel } = resolveClaudeTurnCostSinks(
             deltas,
             pricing,
             {
@@ -3301,17 +3312,19 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             modelUsageWrites.push(recordModelTurnUsage({
               agentKind: 'claude-code',
               model: isClaudeSubscriptionValueRow ? claudeSubscriptionUsageModelKey(m.model) : m.model,
-              money: m.money,
+              // daily_model_usage does not persist RegionalMoney.kind. Keep reference estimates
+              // out of this actual-cost row so they cannot be reconstructed as real API spend.
+              money: m.money?.kind === 'actual-cost' ? m.money : null,
               inputTokensDelta: m.deltas.inputTokens,
               outputTokensDelta: m.deltas.outputTokens,
               cacheReadTokensDelta: m.deltas.cacheReadTokens,
               cacheCreateTokensDelta: m.deltas.cacheCreateTokens,
             }));
           }
-          // 纯订阅轮 (turnTotalUsd=0) 不走 recordTurnSpend, 没有任何 usage push ——
-          // 等模型行落库后重广播今日 spend 快照, 通知已打开的首页仪表盘刷新
-          // (对齐 codex 订阅轮的 rebroadcastCodexTodayUsage)。
-          if (hasSubscriptionValueRow && !turnMoney) {
+          // 无真实费用、但产生订阅价值或 provider 参考估值的轮次不走
+          // recordTurnSpend。等模型行落库后重广播今日 spend 快照,通知已打开的首页
+          // 仪表盘刷新(对齐 codex 订阅轮的 rebroadcastCodexTodayUsage)。
+          if ((hasSubscriptionValueRow || estimatedTurnMoney) && !turnMoney) {
             void Promise.allSettled(modelUsageWrites).then(() => rebroadcastTodaySpend());
           }
           if (turnMoney && turnMoney.amount > 0) {
@@ -3331,19 +3344,22 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             });
             if (changedScheduleId) broadcastSchedulerChanged(changedScheduleId);
           } else if (turnAssistantPersistId) {
-            // 纯订阅轮(无真实计费)的「本轮价值」估算,挂到消息(isEstimate:true,chip 的
+            // 无真实计费轮的「本轮价值」估算,挂到消息(isEstimate:true,chip 的
             // "本会话价值"由 useSessionEstimatedValue 汇总),不进 daily_spend /
-            // sessions.total_cost_usd(那些是真实账单)。两类订阅同轮可叠加(如 Claude 订阅
-            // 主会话 + bridge 订阅子 agent):
+            // sessions.total_cost_usd(那些是真实账单)。provider 参考价与两类订阅估值
+            // 可叠加(如 Claude 订阅主会话 + bridge 订阅子 agent):
+            //   - provider-api 参考价:远程目录中的公开参考价,不是供应商真实账单;
             //   - bridge 订阅模型(chatgpt/ / xai/,source==='subscription'):静态参考价折算;
             //   - Claude 订阅会话(显式选 Anthropic,SDK 自报 cost=0):Anthropic 牌价折算
             //     (纯 Anthropic 轮 pricing 为 null → 家族牌价兜底表,不为估值发起网络请求)。
             // 混合轮(真实计费 > 0)走上面的真实分支,订阅部分不另挂估算 —— 一条消息只有一个
             // cost 字段,真实计费优先;订阅 token 明细仍在 turnUsageDetails.perModelCost 里。
-            const estimatedValues: RegionalMoney[] = [];
+            const estimatedValues: RegionalMoney[] = estimatedTurnMoney
+              ? [estimatedTurnMoney]
+              : [];
             for (const m of perModel) {
               if (m.source !== 'subscription') continue;
-              const quote = getSubscriptionDirectValuePrice(m.model);
+              const quote = getSubscriptionDirectValuePrice(m.model, 'claude-code', pricing);
               const value = computePriceQuoteTurnMoney(
                 m.deltas,
                 quote ?? undefined,
@@ -3355,6 +3371,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
               const claudeEstimated = estimateClaudeSubscriptionTurnValue(
                 perModel,
                 currentLedgerCurrency(),
+                await getModelPricing(),
               );
               if (claudeEstimated?.amount) estimatedValues.push(claudeEstimated);
             }
@@ -3409,25 +3426,30 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             await recordUsageOnly();
             return;
           }
-          // 订阅直连轮(chatgpt/ / xai/)走窄兜底时: 真实计费恒 0, 不写 daily_spend /
-          // sessions.total_cost_usd(与主路径 resolveTurnCost 的 subscription gate 同口径,
-          // 避免把订阅 SDK 自报 cost 误记进计费)。
-          if (isSubscriptionDirectModel(resolvedModel)) {
-            await recordUsageOnly();
-            return;
-          }
           const providerId = getSessionProvider(session.id);
           const observedRoute =
             providerId == null ? readClaudeSessionRoute(session.id) : null;
+          const explicitProviderRoute = billingRouteForExplicitProvider(
+            providerId,
+            providerId
+              ? getActiveCatalog().providers.find((provider) => provider.id === providerId)
+                  ?.access?.kind
+              : null,
+          );
           const route: BillingRoute = session.remoteHostId
             ? 'unknown'
             : providerId === 'anthropic' || observedRoute === 'subscription'
               ? 'subscription'
-              : providerId === 'xd' || observedRoute === 'gateway'
-                ? 'xd-gateway'
-                : providerId
-                  ? 'provider-api'
-                  : 'unknown';
+              : explicitProviderRoute
+                ?? (observedRoute === 'gateway' ? 'xd-gateway' : 'unknown');
+          // 订阅直连轮(chatgpt/ / xai/)走窄兜底时: 真实计费恒 0, 不写 daily_spend /
+          // sessions.total_cost_usd(与主路径 resolveTurnCost 的 subscription gate 同口径,
+          // 避免把订阅 SDK 自报 cost 误记进计费)。但显式 provider-api 是权威路由:
+          // 自定义 API 供应商可能供应带订阅前缀的模型 id,不能按前缀把真实费用判掉。
+          if (route !== 'provider-api' && isSubscriptionDirectModel(resolvedModel)) {
+            await recordUsageOnly();
+            return;
+          }
           if (route === 'subscription' || route === 'xd-gateway') {
             await recordUsageOnly();
             return;
@@ -3522,13 +3544,32 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
               isCodexBudgetRoute ||
               (sessionProvider === 'xd' && hasGatewayKey)
             );
+          // 显式来源的订阅判定以目录 access.kind 为权威(内置 anthropic 的 Claude.ai
+          // 订阅同样是订阅价值,不能只认 OpenAI/xAI);目录缺 access 的旧快照仍靠下面
+          // 的 openai oauth 分支兜底。
+          const sessionProviderAccessKind = sessionProvider
+            ? getActiveCatalog().providers.find((provider) => provider.id === sessionProvider)
+                ?.access?.kind
+            : null;
+          const isCodexSubscriptionAccessRoute =
+            !isRemoteCodexSession &&
+            sessionProvider != null &&
+            sessionProvider !== 'xd' &&
+            sessionProviderAccessKind === 'subscription' &&
+            !hasEffectiveGatewayRoute;
           const isSubscriptionValue = isRemoteCodexSession ||
             isCodexXaiProviderRoute ||
+            isCodexSubscriptionAccessRoute ||
             (
               isCodexOpenAiProviderRoute
               && codexAuthInjection === 'oauth-bearer'
               && !hasEffectiveGatewayRoute
             );
+          const usesReferencePriceEstimate =
+            !isSubscriptionValue &&
+            !isRemoteCodexSession &&
+            !hasEffectiveGatewayRoute &&
+            Boolean(sessionProvider && sessionProvider !== 'xd');
           const modelUsageKey = isSubscriptionValue
             ? codexSubscriptionUsageModelKey(pricingModel)
             : codexApiUsageModelKey(pricingModel);
@@ -3566,24 +3607,41 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             });
           };
           try {
-            const pricing = isSubscriptionValue && !isCodexXaiProviderRoute
+            const pricing = isSubscriptionValue
               ? await getModelPricing()
               : hasEffectiveGatewayRoute
                 ? await getModelPricingForModel('xd', pricingModel)
-                : null;
+                : usesReferencePriceEstimate
+                  ? await getModelPricing()
+                  : null;
+            // 订阅估值按显式来源取各自的日期定价路由:内置 anthropic 走 Anthropic
+            // registry 参考价(含 codex 侧价格覆盖),默认/openai 保持 OpenAI 价表。
+            const subscriptionValueProviderId =
+              isCodexSubscriptionAccessRoute && sessionProvider != null
+                ? sessionProvider
+                : 'openai';
             const price = isCodexXaiProviderRoute
-              ? getSubscriptionDirectValuePrice(pricingModel)
+              ? getSubscriptionDirectValuePrice(pricingModel, 'codex', pricing)
               : isSubscriptionValue
-                ? getCodexSubscriptionValuePrice(pricingModel, pricing)
+                ? getCodexProviderSubscriptionValuePrice(
+                    subscriptionValueProviderId,
+                    pricingModel,
+                    pricing,
+                  )
                 : hasEffectiveGatewayRoute
                   ? getModelPriceQuote(pricing, 'xd', pricingModel)
-                  : undefined;
+                  : usesReferencePriceEstimate
+                    ? getModelPriceQuote(pricing, sessionProvider, pricingModel, 'codex')
+                    : undefined;
             const money = computePriceQuoteTurnMoney(
               codexUsageToTokens(u),
               price ?? undefined,
               currentLedgerCurrency(),
             );
-            if (!isSubscriptionValue && money) {
+            // Only Gateway sale prices are actual API spend. Third-party/user reference quotes
+            // are value estimates and daily_model_usage cannot preserve RegionalMoney.kind, so
+            // writing them into #billing=api would later reconstruct an estimate as actual cost.
+            if (!isSubscriptionValue && money && price?.source === 'gateway') {
               await recordModelTurnUsage({
                 agentKind: 'codex',
                 model: modelUsageKey,
@@ -3595,7 +3653,8 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
               });
             }
             if (money && money.amount > 0) {
-              if (!isSubscriptionValue) {
+              const isActualApiCost = !isSubscriptionValue && price?.source === 'gateway';
+              if (isActualApiCost) {
                 void recordTurnSpend(money);
                 void recordSessionTurnSpend(session.id, money);
               }
@@ -4226,6 +4285,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   configureProviderModelAutoRefresh({
     listProviders: (opts) => getDesktopProviderService().listProviders(opts),
     getScopeKey: () => getActiveAppSession().generation,
+    refreshCatalog: async () => {
+      await refreshActiveCatalogFromSource();
+      broadcastToAllWindows(MAKER_PUSH.PROVIDER_CHANGED, {});
+    },
     refreshProvider: (providerId) =>
       refreshBuiltinProviderModels(providerId, {
         refreshXd: options.refreshXdGatewayModels,
@@ -4236,6 +4299,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         ),
         refreshXaiCatalog: async () => {
           await refreshActiveCatalogFromSource();
+          broadcastToAllWindows(MAKER_PUSH.PROVIDER_CHANGED, {});
         },
       }),
   });
@@ -4280,6 +4344,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     readCustomProviderHeadersForMutation,
     storeCustomProviderHeaders,
     removeCustomProviderHeaders,
+    getLedgerCurrency: currentLedgerCurrency,
+    readModelPriceOverride: (target) =>
+      readModelPriceOverrideView(target, getActiveCatalog().modelRegistry),
+    writeModelPriceOverride: (target, desired) =>
+      setModelPriceOverride(target, desired, getActiveCatalog().modelRegistry),
+    clearModelPriceOverride,
+    stageClearProviderModelPriceOverrides: stageProviderModelPriceOverridesClear,
+    broadcastPricingChanged: broadcastEffectiveModelPricing,
     // 通用 OAuth（目录 auth.oauth 描述符驱动）：login 成功后 best-effort 拉动态模型发现
     // (additions-only merge 进 active-catalog) 并广播 PROVIDER_CHANGED 让 UI 刷新连接态。
     oauthLogin: async (providerId, isCurrent) => {
@@ -5421,20 +5493,19 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     setPendingHandoff: (sessionId, handoff, expectedGeneration) =>
       agentHandoffPending.set(sessionId, handoff, expectedGeneration),
     readPendingHandoffGeneration: (sessionId) => agentHandoffPending.readGeneration(sessionId),
-    onCommitted: (
-      { sessionId, deletedClientIds, updatedAt, preview, messageCount },
-      requestedClientId,
-    ) => {
+    onCommitted: ({ sessionId, deletedClientIds, updatedAt, preview }, requestedClientId) => {
       broadcastMessageDeleted({
         sessionId,
         clientId: requestedClientId,
         clientIds: deletedClientIds,
       });
+      // 不带 _count:可见消息数不是列表的权威口径,拿它 patch 的错值会被 shallow merge 一直
+      // 留住;权威口径受删除影响只有 0 或 +1,交给 sessions:list / reseed 收敛就够。
+      // 见 commitMessageDeletion 的注释与 issue #1282。
       broadcastSessionPatched(sessionId, {
         sdkSessionId: null,
         updatedAt: new Date(updatedAt).toISOString(),
         preview,
-        _count: { messages: messageCount },
       });
     },
     withCloseSuppressed: withRehydrateCloseSuppressed,
@@ -7919,6 +7990,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       const sess = getStableSessionForTurnBoundary(sessionId);
       return isSessionTurnDispatchBoundaryBusy(sessionTurnActivityTracker, sessionId, sess);
     },
+    getTurnGeneration: (sessionId) =>
+      getStableSessionForTurnBoundary(sessionId)?.getTurnGeneration() ?? null,
     reconcileTurnIdle: (sessionId) => {
       // steer 拿到 maker-core 权威 NO_ACTIVE_TURN、或 abort 已让 vendor 停止
       // 但终态事件丢失时，都走同一条收口路径。
@@ -7939,6 +8012,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       await drainPersistQueue();
       return hasAssistantProgressAfterMessage(sessionId, userClientId);
     },
+    // retry-supersede:零产出重试的克隆行落库并派发成功后,软删被取代的旧 user 行
+    // 与其后的 error 行(实现与守卫见 localDb/ipc/messages.supersedeRetriedUserTurn)。
+    // 只发 messages:deleted、不额外发 sessions:patched:软删既不改变会话列表的
+    // _count(权威口径不过滤 rewind_at,行本体还在)也不改变 preview(克隆行仍是最新
+    // 可见行),理由与踩过的坑记在 helper 的注释里。
+    supersedeRetriedUserTurn,
     getLastAssistantTranscriptUuid,
     onAcceptedQueuedMessage: (sessionId, item): Promise<void> | undefined => {
       // 已派发 → 该项不会再走 discard,释放 scheduler 的 discard 监听防泄漏。

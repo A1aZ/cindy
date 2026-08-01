@@ -31,6 +31,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { fetchJsonWithTimeout, downloadToFileWithTimeout, createDownloadProgressLogger } from '../shared/fetch-with-timeout.mjs';
 import { normalizeExpectedSha256, verifyFileSha256OrRemove, sha256File } from '../shared/verify-sha256.mjs';
+import { writeDirDistManifest } from '../shared/dir-dist-manifest.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '../..');
@@ -295,6 +296,9 @@ function promoteOnePlatform(version, key, binFile) {
     try { fs.chmodSync(destBin, 0o755); } catch { /* ignore */ }
   }
 
+  // 安装清单先于版本标记写入(标记是提交点):ensure-agent-binaries 的 skip 判定用
+  // 清单校验旁侧资产完整性,只验主执行文件会把 theme/ 等被删的残缺目录当"已就位"。
+  writeDirDistManifest(destDir);
   // 写版本标记，供 scripts/ensure-agent-binaries.mjs 判断是否需要随 pin 升级刷新
   try { fs.writeFileSync(path.join(destDir, '.version'), version + '\n'); } catch { /* ignore */ }
 

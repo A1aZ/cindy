@@ -13,11 +13,13 @@ import { execFileSync } from 'node:child_process';
 import {
   binFileFor,
   isValidBinary,
+  isValidDirDist,
   listSiblingWorktreeRoots,
   readInstalledVersion,
   supportsCdnFallback,
   tryReuseFromSiblingWorktree,
 } from '../ensure-agent-binaries.mjs';
+import { verifyDirDistManifest, writeDirDistManifest } from '../../tools/shared/dir-dist-manifest.mjs';
 
 test('directory distributions never use the single-binary CDN fallback', () => {
   assert.equal(supportsCdnFallback('pi'), false);
@@ -63,6 +65,49 @@ test('isValidBinary: rejects missing, LFS pointer, and tiny placeholder', () => 
 
 test('isValidBinary: accepts a non-pointer file >= 1024 bytes', () => {
   assert.equal(isValidBinary(tmpFile('claude', Buffer.alloc(2048, 1))), true);
+});
+
+// ── dirDist(目录分发)安装清单 ────────────────────────────────────────────────
+// codex review 回归:pi 缺 theme/ 等旁侧资产时 RPC 启动即崩,skip 判定只验主执行
+// 文件会把残缺目录当"已就位"打进安装包 → 就位判定必须整目录对清单校验。
+
+test('isValidDirDist: requires the manifest and every sidecar asset, not just the main binary', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ensure-dirdist-'));
+  const binPath = path.join(dir, 'pi');
+  fs.writeFileSync(binPath, Buffer.alloc(4096, 1));
+  fs.mkdirSync(path.join(dir, 'theme'));
+  fs.writeFileSync(path.join(dir, 'theme', 'default.json'), '{"accent":"pi"}');
+  fs.writeFileSync(path.join(dir, '.version'), '0.82.1\n');
+
+  // 主执行文件合法但无清单(旧安装/半成品)→ 不算就位
+  assert.equal(isValidDirDist(dir, binPath), false);
+
+  assert.equal(writeDirDistManifest(dir) >= 2, true);
+  assert.equal(isValidDirDist(dir, binPath), true);
+
+  // 旁侧资产被删 → 清单校验失败,重新进入下载/promote
+  fs.rmSync(path.join(dir, 'theme'), { recursive: true, force: true });
+  assert.equal(isValidDirDist(dir, binPath), false);
+});
+
+test('verifyDirDistManifest: rejects size drift, empty manifests, and malformed entries', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ensure-dirdist-verify-'));
+  fs.writeFileSync(path.join(dir, 'pi'), Buffer.alloc(4096, 1));
+  fs.writeFileSync(path.join(dir, 'photon.wasm'), Buffer.alloc(512, 2));
+  writeDirDistManifest(dir);
+  assert.equal(verifyDirDistManifest(dir), true);
+
+  // 字节数漂移(截断/损坏)→ 拒绝
+  fs.writeFileSync(path.join(dir, 'photon.wasm'), Buffer.alloc(8, 2));
+  assert.equal(verifyDirDistManifest(dir), false);
+
+  // 空清单 / 非法结构 → 拒绝
+  fs.writeFileSync(path.join(dir, '.manifest'), JSON.stringify({ files: [] }));
+  assert.equal(verifyDirDistManifest(dir), false);
+  fs.writeFileSync(path.join(dir, '.manifest'), '{"files":"nope"}');
+  assert.equal(verifyDirDistManifest(dir), false);
+  fs.writeFileSync(path.join(dir, '.manifest'), 'not json');
+  assert.equal(verifyDirDistManifest(dir), false);
 });
 
 // ── 兄弟 worktree 本地复用 ────────────────────────────────────────────────────

@@ -20,6 +20,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { downloadFromCdn } from './agent-binary-cdn-fallback.mjs';
+import { verifyDirDistManifest } from '../tools/shared/dir-dist-manifest.mjs';
 
 const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const LFS_POINTER_HEADER = 'version https://git-lfs.github.com/spec/v1';
@@ -77,6 +78,15 @@ export function isValidBinary(absPath) {
   }
   if (prefix.startsWith(LFS_POINTER_HEADER)) return false;
   return fs.statSync(absPath).size >= MIN_EXPECTED_BYTES;
+}
+
+/**
+ * dirDist kind 的就位判定:主执行文件合法 **且** 安装清单齐全。pi 这类目录分发缺
+ * theme/ 等旁侧资产时 RPC 启动即崩,只验主执行文件会把残缺目录当"已就位"跳过安装,
+ * 随后被打进安装包(codex 报)。清单缺失(旧安装/半成品)按未就位处理,重新 promote 自愈。
+ */
+export function isValidDirDist(binDirPath, binPath) {
+  return isValidBinary(binPath) && verifyDirDistManifest(binDirPath);
 }
 
 /**
@@ -174,7 +184,9 @@ export async function ensureBinary(kind, platformKey = currentPlatformKey(), { f
   }
 
   // 已就位且版本标记 == pin 才跳过；标记缺失/不匹配则刷新（promoteOnePlatform 写入标记）。
-  if (!force && isValidBinary(binPath) && readInstalledVersion(markerPath) === version) {
+  // dirDist 的"已就位"额外要求安装清单齐全,不能只看主执行文件。
+  const presentAndValid = cfg.dirDist ? isValidDirDist(binDirPath, binPath) : isValidBinary(binPath);
+  if (!force && presentAndValid && readInstalledVersion(markerPath) === version) {
     log(`${kind} ${platformKey}: already present @ ${version}, skip`);
     return binPath;
   }
@@ -233,7 +245,8 @@ export async function ensureBinary(kind, platformKey = currentPlatformKey(), { f
   // 被占用（app 运行中、EBUSY）时只 warn 不抛，会留下旧 binary + 旧标记，这里据此把静默失败
   // 转成显式错误。本地复用路径同样受此终检兜底。
   const installed = readInstalledVersion(markerPath);
-  if (!isValidBinary(binPath) || installed !== version) {
+  const finalValid = cfg.dirDist ? isValidDirDist(binDirPath, binPath) : isValidBinary(binPath);
+  if (!finalValid || installed !== version) {
     throw new Error(
       `${kind} ${platformKey}: ensure failed — expected ${version} at ${binPath} but installed marker is ${installed ?? '(none)'}. ` +
         `The previous binary may be locked (app running); close it and retry, or run "pnpm update:${kind}".`,

@@ -465,20 +465,29 @@ export class PiAgent extends BaseAgent {
     // resolveProviderForModel 会静默回落到 PI_PROVIDER_ID(网关)——用户又恰好有 Cindy key
     // 时鉴权仍过,提示词就被发往 Cindy 网关而非用户选的本地/自定义端点(计费/凭证错配,
     // codex review P1)。这里对这种「显式 BYOM 却无法解析」的情形直接抛,不换目的地。
-    // 显式 BYOM providerId 无法在本会话解析(缺席 nativeProviders)时,是否要 fail closed。
-    // 用于 startSession(nativeResolveFailed 也算不可解析)与 setModel(会话启动后新增的
+    // 显式 BYOM 的 provider-model 组合无法在本会话解析时,是否要 fail closed。用于
+    // startSession(nativeResolveFailed 也算不可解析)与 setModel(会话启动后新增的
     // provider 不在启动快照里 → 需重启会话而非静默走网关)。
+    // 关键:不仅要 provider 存在,还要该 provider **确实提供目标 model** —— 否则用户编辑
+    // 配置后从现有 provider 里删/改了当前 model 时,provider 仍在但 resolveProviderForModel
+    // 的 models.some(...) 为 false,会静默回落 PI_PROVIDER_ID(cindy);若该 model id 也在
+    // 网关目录里,resume/setModel 会“成功”却把请求发往网关而非用户选的 BYOM(codex review P1)。
     const explicitByomUnresolvable = (
       providerId: string | null | undefined,
+      model: string,
       resolveFailed = false,
-    ): providerId is string =>
-      !!providerId
-      && !NON_BYOM_PROVIDER_IDS.has(providerId)
-      && (resolveFailed || !nativeProviderById.has(providerId));
-    if (explicitByomUnresolvable(opts.providerId, nativeResolveFailed)) {
+    ): providerId is string => {
+      if (!providerId || NON_BYOM_PROVIDER_IDS.has(providerId)) return false;
+      if (resolveFailed) return true;
+      const native = nativeProviderById.get(providerId);
+      return !native || !native.models.some((candidate) => candidate.id === model);
+    };
+    if (explicitByomUnresolvable(opts.providerId, opts.model, nativeResolveFailed)) {
       throw new Error(
-        `pi: BYOM provider '${opts.providerId}' could not be resolved` +
-          `${nativeResolveFailed ? ' (native provider resolution failed)' : ''}; ` +
+        `pi: BYOM provider '${opts.providerId}' cannot serve model '${opts.model}'` +
+          `${nativeResolveFailed
+            ? ' (native provider resolution failed)'
+            : ' (provider absent, or it no longer offers this model)'}; ` +
           'refusing to fall back to the Cindy gateway (would send prompts to the wrong endpoint).',
       );
     }
@@ -1035,14 +1044,16 @@ export class PiAgent extends BaseAgent {
         const requestedProviderId = setOpts && Object.hasOwn(setOpts, 'providerId')
           ? setOpts.providerId
           : undefined;
-        // 会话启动后新增的自定义 provider 不在启动快照 nativeProviderById 里:显式选它会被
-        // resolveProviderForModel 静默回落到 cindy 网关,若该 model id 也在网关目录里则 set_model
-        // 成功、后续 prompt 发往网关而非用户选的本地/自定义端点(codex review P1)。此处 fail
-        // closed,提示重启会话以让新 provider 进入启动快照,而不是静默换目的地。
-        if (explicitByomUnresolvable(requestedProviderId)) {
+        // 显式选一个启动快照 nativeProviderById 里“无法服务该 model”的 BYOM provider 时 fail
+        // closed:要么该 provider 是会话启动后才新增的(不在快照),要么它虽在、但用户编辑
+        // 配置后从中删/改了这个 model。两种都会让 resolveProviderForModel 静默回落 cindy 网关;
+        // 若该 model id 也在网关目录里则 set_model “成功”、后续 prompt 发往网关而非用户选的
+        // 本地/自定义端点(codex review P1)。提示重启会话以刷新启动快照,而不是静默换目的地。
+        if (explicitByomUnresolvable(requestedProviderId, model)) {
           throw new Error(
-            `pi: BYOM provider '${requestedProviderId}' was added after this session started and is not in ` +
-              'its startup provider set; restart the session to use it (refusing to fall back to the Cindy gateway).',
+            `pi: BYOM provider '${requestedProviderId}' cannot serve model '${model}' in this session's ` +
+              'startup provider set (provider not present, or it no longer offers this model); restart the ' +
+              'session to use it (refusing to fall back to the Cindy gateway).',
           );
         }
         const provider = resolveProviderForModel(model, requestedProviderId);

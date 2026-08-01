@@ -154,8 +154,27 @@ describe('Pi provider-aware model routing', () => {
       workingDir: cwd,
       model: 'local-model',
       providerId: 'my-local',
-    })).rejects.toThrow(/BYOM provider 'my-local' could not be resolved/);
+    })).rejects.toThrow(/BYOM provider 'my-local' cannot serve model 'local-model'/);
     // 未走到 spawn(--provider 参数从未拼装)。
+    expect(captured.args).toEqual([]);
+  });
+
+  it('fails closed when an explicit BYOM provider exists but no longer offers the model', async () => {
+    // 用户编辑配置后从现有 provider 删/改了当前 model:provider 仍在,但不含该 model。
+    // resolveProviderForModel 会静默回落 cindy(local-model 网关目录里也有 → 会“成功”);
+    // 显式 BYOM 必须 fail closed,不能悄悄把请求发往网关(codex review P1)。
+    const agent = new PiAgent(byomDeps(async () => ({
+      providers: [
+        { id: 'my-local', name: 'My Local', baseUrl: 'http://l.test', api: 'openai-completions', models: [{ id: 'other-model' }] },
+      ],
+      env: {},
+    })));
+    await expect(agent.startSession({
+      sessionId: 'byom-model-removed',
+      workingDir: cwd,
+      model: 'local-model',
+      providerId: 'my-local',
+    })).rejects.toThrow(/cannot serve model 'local-model'.*refusing to fall back/s);
     expect(captured.args).toEqual([]);
   });
 
@@ -191,9 +210,28 @@ describe('Pi provider-aware model routing', () => {
       providerId: 'native-a',
     });
     await expect(handle.setModel!('local-model', { providerId: 'added-later' }))
-      .rejects.toThrow(/added after this session started|restart the session/);
+      .rejects.toThrow(/cannot serve model 'local-model'|restart the session/);
     // 已在快照里的 provider 仍可正常切换。
     await expect(handle.setModel!('local-model', { providerId: 'native-a' })).resolves.toBeUndefined();
+    await handle.close();
+  });
+
+  it('fails closed when setModel picks a model the pinned BYOM provider does not offer', async () => {
+    // provider 在启动快照里,但用户切到一个该 provider 不提供的 model:同样不得静默回落网关。
+    const agent = new PiAgent(byomDeps(async () => ({
+      providers: [
+        { id: 'native-a', name: 'Native A', baseUrl: 'http://a.test', api: 'openai-completions', models: [{ id: 'local-model' }] },
+      ],
+      env: {},
+    })));
+    const handle = await agent.startSession({
+      sessionId: 'byom-setmodel-modelgone',
+      workingDir: cwd,
+      model: 'local-model',
+      providerId: 'native-a',
+    });
+    await expect(handle.setModel!('ghost-model', { providerId: 'native-a' }))
+      .rejects.toThrow(/cannot serve model 'ghost-model'/);
     await handle.close();
   });
 

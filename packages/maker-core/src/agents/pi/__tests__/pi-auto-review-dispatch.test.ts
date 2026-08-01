@@ -174,7 +174,8 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
   it('overrides the Pi bash tool and strips host credentials at its spawn boundary', async () => {
     await start();
     const { readFileSync } = await import('node:fs');
-    const bridge = readFileSync(path.join(agentHome, 'extensions', 'cindy-bridge.ts'), 'utf8');
+    const configHome = captured.env.PI_CODING_AGENT_DIR as string;
+    const bridge = readFileSync(path.join(configHome, 'extensions', 'cindy-bridge.ts'), 'utf8');
     expect(bridge).toContain("import { createBashTool } from '@earendil-works/pi-coding-agent'");
     expect(bridge).toContain('env: withoutPiSecrets(env)');
     expect(bridge).toContain('exposeSessionEnvironment: false');
@@ -184,7 +185,9 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
   it('models.json carries real cost and maxTokens from the model descriptor', async () => {
     await start();
     const { readFileSync } = await import('node:fs');
-    const config = JSON.parse(readFileSync(path.join(agentHome, 'models.json'), 'utf8')) as {
+    const config = JSON.parse(
+      readFileSync(path.join(captured.env.PI_CODING_AGENT_DIR as string, 'models.json'), 'utf8'),
+    ) as {
       providers: {
         cindy: {
           headers: Record<string, string>;

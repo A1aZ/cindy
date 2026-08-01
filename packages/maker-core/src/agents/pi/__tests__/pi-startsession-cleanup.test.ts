@@ -23,14 +23,19 @@ const knobs = vi.hoisted(() => ({
   getStateRejects: false,
   closeCount: 0,
   onExit: null as null | ((info: { code: number | null; signal: string | null }) => void),
+  spawnedEnvs: [] as Array<Record<string, string | undefined>>,
 }));
 
 vi.mock('../rpc-client.js', () => ({
   PiRpcProcess: class {
     isClosed = false;
     constructor(opts: unknown) {
-      // 捕获 onExit 以便单测模拟进程异常退出(crash)。
-      knobs.onExit = (opts as { onExit?: typeof knobs.onExit } | undefined)?.onExit ?? null;
+      // 捕获 onExit 以便单测模拟进程异常退出(crash);捕获 env 以断言每会话隔离 configHome。
+      const o = opts as
+        | { onExit?: typeof knobs.onExit; env?: Record<string, string | undefined> }
+        | undefined;
+      knobs.onExit = o?.onExit ?? null;
+      knobs.spawnedEnvs.push({ ...(o?.env ?? {}) });
       if (knobs.ctorThrows) throw new Error('spawn failed (mock)');
     }
     async request(cmd: { type: string }): Promise<{ success: boolean; data?: unknown; error?: string }> {
@@ -70,6 +75,7 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     knobs.getStateRejects = false;
     knobs.closeCount = 0;
     knobs.onExit = null;
+    knobs.spawnedEnvs = [];
     disposed = 0;
     proxyDisposed = 0;
     agentHome = mkdtempSync(path.join(tmpdir(), 'pi-cleanup-home-'));
@@ -167,4 +173,55 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     expect(disposed).toBe(0);
     expect(proxyDisposed).toBe(0);
   });
+
+  // codex review P2:并发普通会话不得共写 agentHome/models.json —— 第二次写入会在首次写完
+  // 到 spawn 之间截断/覆盖 provider 快照。每 startSession 用隔离的 configHome
+  // (PI_CODING_AGENT_DIR = agentHome/run-tmp/<hex>)承载 models.json,close/退出时清理。
+  it('isolates each session config home under run-tmp and keeps concurrent sessions independent', async () => {
+    const { existsSync } = await import('node:fs');
+    const agent = new PiAgent(buildDeps());
+    const h1 = await agent.startSession({ sessionId: 's1', workingDir: cwd, model: 'm' });
+    const h2 = await agent.startSession({ sessionId: 's2', workingDir: cwd, model: 'm' });
+
+    const home1 = knobs.spawnedEnvs[0].PI_CODING_AGENT_DIR as string;
+    const home2 = knobs.spawnedEnvs[1].PI_CODING_AGENT_DIR as string;
+    const runTmp = path.join(agentHome, 'run-tmp');
+    // 两个会话各自独立的 configHome(都在 run-tmp 下,hex 不同),各有自己的 models.json。
+    expect(home1).not.toBe(home2);
+    expect(home1.startsWith(runTmp)).toBe(true);
+    expect(home2.startsWith(runTmp)).toBe(true);
+    expect(existsSync(path.join(home1, 'models.json'))).toBe(true);
+    expect(existsSync(path.join(home2, 'models.json'))).toBe(true);
+
+    // close 一个会话清理它的 configHome,另一个不受影响(cleanup 是 fire-and-forget,轮询等)。
+    await h1.close();
+    await waitFor(() => !existsSync(home1));
+    expect(existsSync(path.join(home2, 'models.json'))).toBe(true);
+    await h2.close();
+    await waitFor(() => !existsSync(home2));
+  });
+
+  it('cleans up the session config home when the pi process exits unexpectedly (crash)', async () => {
+    const { existsSync } = await import('node:fs');
+    const agent = new PiAgent(buildDeps());
+    const handle = await agent.startSession(opts());
+    const home = knobs.spawnedEnvs[0].PI_CODING_AGENT_DIR as string;
+    expect(existsSync(home)).toBe(true);
+
+    knobs.onExit!({ code: 1, signal: null }); // 模拟进程异常退出
+    await waitFor(() => !existsSync(home));
+    expect(existsSync(home)).toBe(false);
+
+    // 上层随后仍可能调用 close() —— cleanup 幂等,不抛。
+    await handle.close();
+  });
 });
+
+/** 轮询等待条件成立(configHome cleanup 是 void fs.rm fire-and-forget,不阻塞 close)。 */
+async function waitFor(cond: () => boolean, timeoutMs = 2000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out');
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}

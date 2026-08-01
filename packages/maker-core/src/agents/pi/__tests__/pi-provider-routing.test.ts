@@ -5,14 +5,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const captured = vi.hoisted(() => ({
   args: [] as string[],
+  env: {} as Record<string, string | undefined>,
   requests: [] as Array<Record<string, unknown>>,
 }));
 
 vi.mock('../rpc-client.js', () => ({
   PiRpcProcess: class {
     isClosed = false;
-    constructor(opts: { args: string[] }) {
+    constructor(opts: { args: string[]; env?: Record<string, string | undefined> }) {
       captured.args = [...opts.args];
+      captured.env = { ...(opts.env ?? {}) };
     }
     async request(command: Record<string, unknown>) {
       captured.requests.push(command);
@@ -93,7 +95,10 @@ describe('Pi provider-aware model routing', () => {
       .toEqual(['--provider', 'cindy']);
     expect(authProviderIds).toEqual(['openai']);
 
-    const models = JSON.parse(readFileSync(path.join(agentHome, 'models.json'), 'utf8')) as {
+    // models.json 现落在每会话隔离的 configHome(PI_CODING_AGENT_DIR),不再在共享 agentHome 根。
+    const models = JSON.parse(
+      readFileSync(path.join(captured.env.PI_CODING_AGENT_DIR as string, 'models.json'), 'utf8'),
+    ) as {
       providers: Record<string, { models: Array<{ id: string }> }>;
     };
     expect(models.providers.cindy?.models.some((model) => model.id === 'shared-model')).toBe(true);

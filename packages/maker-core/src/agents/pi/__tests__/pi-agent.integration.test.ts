@@ -725,8 +725,12 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
           model: 'byom-model', // 属于原生 provider,不是网关模型
         });
         // models.json 里有独立的 localbyom provider 块,baseUrl 直连原生端点。
-        const { readFileSync } = await import('node:fs');
-        const config = JSON.parse(readFileSync(path.join(agentHome, 'models.json'), 'utf8')) as {
+        // 现落在每会话隔离的 configHome(agentHome/run-tmp/<hex>),不在共享 agentHome 根;
+        // 本 test 只起一个会话,run-tmp 下恰有一个子目录。
+        const { readFileSync, readdirSync } = await import('node:fs');
+        const runTmp = path.join(agentHome, 'run-tmp');
+        const configHome = path.join(runTmp, readdirSync(runTmp)[0]);
+        const config = JSON.parse(readFileSync(path.join(configHome, 'models.json'), 'utf8')) as {
           providers: Record<string, { baseUrl: string; api: string; apiKey: string; models: Array<{ id: string }> }>;
         };
         expect(config.providers.localbyom).toBeDefined();

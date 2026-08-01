@@ -511,12 +511,27 @@ export class PiAgent extends BaseAgent {
     const authEnv = await this.deps.auth.getAuthEnv({ credentialMode, providerId: authProviderId });
 
     const agentHome = this.resolveAgentHome();
-    await this.writeModelsJson(agentHome, nativeProviders);
+    // 每个 startSession 用独立的配置目录承载 models.json + cindy-bridge extension
+    // (经 PI_CODING_AGENT_DIR 交给子进程),隔离并发普通会话:两个会话同写共享的
+    // agentHome/models.json 时,第二次写入会在首次写完到 spawn 之间(多个 await)截断/
+    // 覆盖 provider 快照,让先启动的进程读到半写入内容或另一份 BYOM 路由(codex review P2)。
+    // session 状态仍由 --session-dir 指向共享 sessions;权限档由 CINDY_PI_PERMISSION_FILE
+    // 显式路径提供 —— 两者都与配置目录独立(同 forkSdkSession 的 forkHome 隔离手法),
+    // configHome 在进程退出/close/启动失败时清理。
+    const configHome = path.join(agentHome, 'run-tmp', randomBytes(8).toString('hex'));
+    let configHomeCleaned = false;
+    const cleanupConfigHome = (): void => {
+      if (configHomeCleaned) return;
+      configHomeCleaned = true;
+      void fs.rm(configHome, { recursive: true, force: true }).catch(() => {});
+    };
+    await this.writeModelsJson(configHome, nativeProviders);
     const sessionDir = path.join(agentHome, 'sessions');
     await fs.mkdir(sessionDir, { recursive: true });
 
     // cindy-bridge extension:每次 startSession 覆写,保证桥代码与本版本一致。
-    const extensionsDir = path.join(agentHome, 'extensions');
+    // 与 models.json 同放隔离 configHome(Pi 从 PI_CODING_AGENT_DIR/extensions 扫描)。
+    const extensionsDir = path.join(configHome, 'extensions');
     await fs.mkdir(extensionsDir, { recursive: true });
     await fs.writeFile(
       path.join(extensionsDir, CINDY_BRIDGE_EXTENSION_FILENAME),
@@ -722,7 +737,7 @@ export class PiAgent extends BaseAgent {
         [PI_SESSION_ID_ENV]: opts.sessionId ?? '',
         [PI_SESSION_TOKEN_ENV]: proxySessionToken,
         [PI_SECRET_ENV_NAMES_ENV]: JSON.stringify(piSecretEnvNames),
-        PI_CODING_AGENT_DIR: agentHome,
+        PI_CODING_AGENT_DIR: configHome,
         CINDY_PI_PERMISSION_FILE: permissionFile,
         // 嵌入式 runtime 不做启动期联网:关掉 pi 的版本检查与安装遥测
         // (pi.dev/api/latest-version、report-install)。LLM 请求走 provider 通道不受影响。
@@ -782,6 +797,8 @@ export class PiAgent extends BaseAgent {
               });
             }
           }
+          // 进程已死:隔离的 configHome(models.json + extension)不再被读,清理。
+          cleanupConfigHome();
           queue.end();
         },
       });
@@ -791,6 +808,7 @@ export class PiAgent extends BaseAgent {
       } catch {
         /* best-effort:注销失败不掩盖原始构造错误 */
       }
+      cleanupConfigHome();
       throw err;
     }
 
@@ -906,6 +924,7 @@ export class PiAgent extends BaseAgent {
         /* best-effort:注销失败不掩盖原始启动错误 */
       }
       await proc.close().catch(() => {});
+      cleanupConfigHome();
       throw err;
     }
 
@@ -996,6 +1015,8 @@ export class PiAgent extends BaseAgent {
           });
         }
         await proc.close();
+        // 会话结束:清理隔离的 configHome(onExit 幂等,二者先到先清)。
+        cleanupConfigHome();
       },
 
       events(): AsyncIterable<AgentEvent> {

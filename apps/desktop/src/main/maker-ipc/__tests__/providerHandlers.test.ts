@@ -100,6 +100,7 @@ function makeDeps(over: Partial<ProviderHandlerDeps> = {}): ProviderHandlerDeps 
     readCustomProviderHeadersForMutation: vi.fn(() => null),
     storeCustomProviderHeaders: vi.fn(() => true),
     removeCustomProviderHeaders: vi.fn(() => ({ success: true })),
+    readSavedProviderRoute: vi.fn(() => null),
     scanLocalCli: vi.fn(async () => []),
     setModelsDisabled: vi.fn(() => {}),
     setProviderDisabled: vi.fn(() => {}),
@@ -931,6 +932,11 @@ describe('provider:custom:* CRUD handlers', () => {
     const fetchModels = vi.fn(async () => ({ ok: true, models: [{ id: 'm1', name: 'M1' }] }));
     registerProviderHandlers(harness, makeDeps({
       fetchModels,
+      readSavedProviderRoute: vi.fn((providerId, agent) =>
+        providerId === 'saved-1' && agent === 'pi'
+          ? { baseUrl: 'https://saved.example/v1', modelsUrl: null }
+          : null,
+      ),
       readCustomProviderHeadersForMutation: vi.fn((providerId, agent) =>
         providerId === 'saved-1' && agent === 'pi' ? { Authorization: 'Bearer stored' } : null,
       ),
@@ -943,6 +949,58 @@ describe('provider:custom:* CRUD handlers', () => {
     })).resolves.toMatchObject({ ok: true });
     expect(fetchModels).toHaveBeenCalledWith(
       expect.objectContaining({ headers: { Authorization: 'Bearer stored' } }),
+    );
+  });
+
+  it('pins the request target to the saved endpoint so a spoofed baseUrl cannot exfiltrate the secret header', async () => {
+    // 安全边界在 main:renderer 传的 baseUrl 不可信。带 savedProviderId 时,请求目标必须
+    // 被钉回已存 baseUrl/modelsUrl,密文头只可能发往该供应商自己的端点,而非攻击者地址。
+    mountDb();
+    const harness = new IpcHarness();
+    const fetchModels = vi.fn(async () => ({ ok: true, models: [{ id: 'm1', name: 'M1' }] }));
+    registerProviderHandlers(harness, makeDeps({
+      fetchModels,
+      readSavedProviderRoute: vi.fn(() => ({
+        baseUrl: 'https://saved.example/v1',
+        modelsUrl: 'https://saved.example/v1/models',
+      })),
+      readCustomProviderHeadersForMutation: vi.fn(() => ({ Authorization: 'Bearer stored' })),
+    }));
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_FETCH, {
+      agent: 'pi',
+      baseUrl: 'https://evil.example/v1',
+      modelsUrl: 'https://evil.example/v1/models',
+      authMethod: 'apiKey',
+      savedProviderId: 'saved-1',
+    })).resolves.toMatchObject({ ok: true });
+    // 目标钉回已存端点(不是攻击者的 evil.example),密文头随之只发往已存端点。
+    expect(fetchModels).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl: 'https://saved.example/v1',
+        modelsUrl: 'https://saved.example/v1/models',
+        headers: { Authorization: 'Bearer stored' },
+      }),
+    );
+  });
+
+  it('does not merge the stored header when the saved provider route is unresolved (deleted / no runtime)', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    const fetchModels = vi.fn(async () => ({ ok: true, models: [{ id: 'm1', name: 'M1' }] }));
+    registerProviderHandlers(harness, makeDeps({
+      fetchModels,
+      readSavedProviderRoute: vi.fn(() => null),
+      readCustomProviderHeadersForMutation: vi.fn(() => ({ Authorization: 'Bearer stored' })),
+    }));
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_FETCH, {
+      agent: 'pi',
+      baseUrl: 'https://evil.example/v1',
+      authMethod: 'apiKey',
+      savedProviderId: 'gone-1',
+    })).resolves.toMatchObject({ ok: true });
+    // 路由解析不出 → 不合并密文头(fetchModels 收到的 headers 不含 Authorization)。
+    expect(fetchModels).toHaveBeenCalledWith(
+      expect.not.objectContaining({ headers: expect.objectContaining({ Authorization: expect.anything() }) }),
     );
   });
 

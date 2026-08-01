@@ -4344,6 +4344,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     readCustomProviderHeadersForMutation,
     storeCustomProviderHeaders,
     removeCustomProviderHeaders,
+    // 已存自定义供应商在该 agent 下的请求目标端点(baseUrl + 可选 modelsUrl),取自
+    // active-catalog routing。models-fetch 用它把 savedProviderId 请求钉回已存端点,
+    // 确保 main-only 密文头只发往该供应商自己的端点(安全边界在 main)。
+    readSavedProviderRoute: (providerId, agent) => {
+      const provider = getActiveCatalog().providers.find((p) => p.id === providerId);
+      if (!provider || provider.source !== 'user') return null;
+      const routing = provider.routing[agent];
+      if (!routing || routing.disabled) return null;
+      return { baseUrl: routing.upstream, modelsUrl: routing.modelsUrl ?? null };
+    },
     getLedgerCurrency: currentLedgerCurrency,
     readModelPriceOverride: (target) =>
       readModelPriceOverrideView(target, getActiveCatalog().modelRegistry),

@@ -286,6 +286,16 @@ export interface ProviderHandlerDeps {
     agent: AgentKind,
   ): { success: boolean; error?: string };
   /**
+   * 读取已存自定义供应商在该 agent 下的**请求目标端点**(baseUrl + 可选 modelsUrl),
+   * 来自 active-catalog 的 routing。models-fetch 用它把 savedProviderId 请求的目标钉回
+   * 已存端点,确保 main-only 密文头只可能发往该供应商自己的端点——不存在 / 无该 runtime
+   * 返回 null(此时不合并密文头)。安全边界在 main:renderer 传的 baseUrl/modelsUrl 不可信。
+   */
+  readSavedProviderRoute(
+    providerId: string,
+    agent: AgentKind,
+  ): { baseUrl: string; modelsUrl: string | null } | null;
+  /**
    * 本机 agent CLI 安装 / 登录态扫描(生产 = scanLocalCliAuth(createLocalCliScanDeps());
    * 单测注入 stub 不碰真实 home)。只 stat 不读内容(规则 23)。
    */
@@ -1323,17 +1333,32 @@ export function registerProviderHandlers(
     assertTrustedProviderMutationSender(event);
     const parsed = parseModelsFetchInput(input);
     if (!parsed) throwIpcError('INVALID_PARAMS', 'invalid models-fetch input');
-    // 已保存供应商:main 侧按 (id, agent) 并入 main-only 鉴权请求头，无需 renderer 回读
-    // 明文头。renderer 显式头(现状不传)优先于已存头。读失败按无头降级(刷新是增强)。
+    // 已保存供应商:main 侧按 (id, agent) 并入 main-only 鉴权请求头,无需 renderer 回读
+    // 明文头。安全边界在 main —— renderer 传的 baseUrl/modelsUrl **不可信**(被注入 / 误用
+    // 的顶层 Renderer 只要提交一个已知 savedProviderId + 攻击者控制的 baseUrl,就能把
+    // Authorization 等厂商私密头越过 main-only 边界发到任意地址)。因此先按 savedProviderId
+    // 读已存端点,把请求目标**钉回已存 baseUrl/modelsUrl**(完全从已存配置构造目标),
+    // 再合并密文头;已存路由不存在(供应商已删 / 无该 runtime)则不合并密文头,按无头降级。
     if (parsed.savedProviderId) {
-      let storedHeaders: Record<string, string> | null = null;
+      let savedRoute: { baseUrl: string; modelsUrl: string | null } | null = null;
       try {
-        storedHeaders = deps.readCustomProviderHeadersForMutation(parsed.savedProviderId, parsed.agent);
+        savedRoute = deps.readSavedProviderRoute(parsed.savedProviderId, parsed.agent);
       } catch {
-        storedHeaders = null;
+        savedRoute = null;
       }
-      if (storedHeaders && Object.keys(storedHeaders).length > 0) {
-        parsed.headers = { ...storedHeaders, ...parsed.headers };
+      if (savedRoute) {
+        parsed.baseUrl = savedRoute.baseUrl;
+        parsed.modelsUrl = savedRoute.modelsUrl;
+        let storedHeaders: Record<string, string> | null = null;
+        try {
+          storedHeaders = deps.readCustomProviderHeadersForMutation(parsed.savedProviderId, parsed.agent);
+        } catch {
+          storedHeaders = null;
+        }
+        if (storedHeaders && Object.keys(storedHeaders).length > 0) {
+          // renderer 显式头(现状不传)优先于已存头;目标已钉回已存端点,密文头不会外泄。
+          parsed.headers = { ...storedHeaders, ...parsed.headers };
+        }
       }
     }
     return deps.fetchModels(parsed);

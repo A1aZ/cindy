@@ -673,13 +673,22 @@ describe('db worker tx handlers', () => {
         images: [{ url: 'cindy-media://blobs/image-a.webp', name: 'design.webp' }],
         files: [{ path: '/repo/spec.pdf', name: 'spec.pdf' }],
       };
+      const hostAgentMeta = {
+        origin: { kind: 'scheduler', scheduleId: 'schedule-1', runId: 'run-1' },
+        autoResume: true,
+        autoResumeInfo: { reason: 'capacity', attempt: 2, maxAttempts: 5, sessionTotal: 3 },
+      };
       await client.exec(
         `INSERT INTO messages
           (id, client_id, session_id, role, content, agent_meta, agent_kind, created_at, rewind_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           'original-user', 'original-client', 's1', 'user', JSON.stringify(original),
-          JSON.stringify({ uuid: 'host-message-uuid', piEntryId: 'pi-user-entry' }), 'pi', 123, null,
+          JSON.stringify({
+            uuid: 'host-message-uuid',
+            piEntryId: 'pi-user-entry',
+            ...hostAgentMeta,
+          }), 'pi', 123, null,
         ],
       );
 
@@ -697,10 +706,11 @@ describe('db worker tx handlers', () => {
       });
 
       await expect(client.queryOne(
-        'SELECT content FROM messages WHERE session_id = ? AND client_id = ?',
+        'SELECT content, agent_meta FROM messages WHERE session_id = ? AND client_id = ?',
         ['s1', 'pi-tree-pi-user-entry-user'],
       )).resolves.toEqual({
         content: JSON.stringify({ text: 'Review these assets\n\n[image]', images: original.images, files: original.files }),
+        agent_meta: JSON.stringify({ uuid: 'pi-user-entry', ...hostAgentMeta }),
       });
 
       // 先切到不相关的 B 分支：旧活动分支的附件不能被模糊复制过去。
@@ -714,9 +724,12 @@ describe('db worker tx handlers', () => {
         }],
       });
       await expect(client.queryOne(
-        'SELECT content FROM messages WHERE session_id = ? AND client_id = ?',
+        'SELECT content, agent_meta FROM messages WHERE session_id = ? AND client_id = ?',
         ['s1', 'pi-tree-branch-b-user'],
-      )).resolves.toEqual({ content: JSON.stringify({ text: 'Different branch' }) });
+      )).resolves.toEqual({
+        content: JSON.stringify({ text: 'Different branch' }),
+        agent_meta: JSON.stringify({ uuid: 'branch-b' }),
+      });
 
       // B→A 切回时按 entry uuid 复用 A 的历史投影，附件仍在。
       await client.tx('session.treeRehydrate', {
@@ -729,10 +742,11 @@ describe('db worker tx handlers', () => {
         }],
       });
       await expect(client.queryOne(
-        'SELECT content FROM messages WHERE session_id = ? AND client_id = ?',
+        'SELECT content, agent_meta FROM messages WHERE session_id = ? AND client_id = ?',
         ['s1', 'pi-tree-pi-user-entry-user'],
       )).resolves.toEqual({
         content: JSON.stringify({ text: 'Review these assets\n\n[image]', images: original.images, files: original.files }),
+        agent_meta: JSON.stringify({ uuid: 'pi-user-entry', ...hostAgentMeta }),
       });
     }, { useInlineWorker });
   });

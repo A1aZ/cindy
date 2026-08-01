@@ -989,6 +989,23 @@ function mergeTreeUserAttachments(content, source) {
   return JSON.stringify(merged);
 }
 
+const TREE_HOST_AGENT_META_KEYS = ['origin', 'autoResume', 'autoResumeInfo'];
+
+function mergeTreeUserAgentMeta(agentMeta, source) {
+  if (!source) return agentMeta;
+  const previous = parsedTreeObjectJson(source.agent_meta);
+  if (!previous) return agentMeta;
+  const projected = parsedTreeObjectJson(agentMeta) || {};
+  const merged = { ...projected };
+  let changed = false;
+  for (const key of TREE_HOST_AGENT_META_KEYS) {
+    if (!Object.hasOwn(previous, key)) continue;
+    merged[key] = previous[key];
+    changed = true;
+  }
+  return changed ? JSON.stringify(merged) : agentMeta;
+}
+
 function sessionTreeRehydrate(readyDb, args) {
   const payload = asRecord(args, 'session.treeRehydrate args');
   const sessionId = expectString(payload.sessionId, 'sessionId');
@@ -1045,6 +1062,7 @@ function sessionTreeRehydrate(readyDb, args) {
     hideVisible.run(now, sessionId);
     for (const row of rows) {
       let content = row.content;
+      let agentMeta = row.agentMeta;
       if (row.role === 'user') {
         const uuid = treeEntryUuid(row.agentMeta);
         let source = byClientId.get(row.clientId)
@@ -1063,8 +1081,9 @@ function sessionTreeRehydrate(readyDb, args) {
         }
         visiblePrefixIndex += 1;
         content = mergeTreeUserAttachments(row.content, source);
+        agentMeta = mergeTreeUserAgentMeta(row.agentMeta, source);
       }
-      upsert.run(row.id, row.clientId, sessionId, row.role, content, row.toolUseId, row.agentMeta, row.agentKind, row.createdAt);
+      upsert.run(row.id, row.clientId, sessionId, row.role, content, row.toolUseId, agentMeta, row.agentKind, row.createdAt);
     }
     readyDb.prepare('UPDATE sessions SET cleared_at = NULL, context_tokens = ?, context_window = ?, updated_at = ? WHERE id = ?').run(contextTokens, contextWindow, now, sessionId);
     return captured;

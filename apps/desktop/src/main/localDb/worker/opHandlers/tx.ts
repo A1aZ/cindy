@@ -676,6 +676,28 @@ function mergeTreeUserAttachments(content: string, source: TreeAttachmentSourceR
   return JSON.stringify(merged);
 }
 
+const TREE_HOST_AGENT_META_KEYS = ['origin', 'autoResume', 'autoResumeInfo'] as const;
+
+function mergeTreeUserAgentMeta(
+  agentMeta: string | null,
+  source: TreeAttachmentSourceRow | null,
+): string | null {
+  if (!source) return agentMeta;
+  const previous = parsedObjectJson(source.agent_meta);
+  if (!previous) return agentMeta;
+  const projected = parsedObjectJson(agentMeta) ?? {};
+  const merged: Record<string, unknown> = { ...projected };
+  let changed = false;
+  // Pi owns the projected entry uuid; Cindy remains authoritative for delivery metadata that
+  // controls scheduler/auto-resume rendering and must survive A→B→A branch reprojection.
+  for (const key of TREE_HOST_AGENT_META_KEYS) {
+    if (!Object.hasOwn(previous, key)) continue;
+    merged[key] = previous[key];
+    changed = true;
+  }
+  return changed ? JSON.stringify(merged) : agentMeta;
+}
+
 /** Pi 原生分支切换后，把当前活动路径原子投影成 Cindy 可见消息时间线。 */
 function sessionTreeRehydrate(
   db: Database.Database,
@@ -754,6 +776,7 @@ function sessionTreeRehydrate(
     hideVisible.run(now, sessionId);
     for (const row of rows) {
       let content = row.content;
+      let agentMeta = row.agentMeta;
       if (row.role === 'user') {
         const uuid = treeEntryUuid(row.agentMeta);
         let source = byClientId.get(row.clientId)
@@ -774,6 +797,7 @@ function sessionTreeRehydrate(
         }
         visiblePrefixIndex += 1;
         content = mergeTreeUserAttachments(row.content, source);
+        agentMeta = mergeTreeUserAgentMeta(row.agentMeta, source);
       }
       upsert.run(
         row.id,
@@ -782,7 +806,7 @@ function sessionTreeRehydrate(
         row.role,
         content,
         row.toolUseId,
-        row.agentMeta,
+        agentMeta,
         row.agentKind,
         row.createdAt,
       );

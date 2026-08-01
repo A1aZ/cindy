@@ -5866,8 +5866,8 @@
       "remoteProviderUnsupported": "This provider is not supported in SSH remote sessions — pick another source",
       "remoteNativeOauthUnavailable": "Claude.ai subscription is not connected — connect it first or pick a gateway model",
       "deviceStillLoading": "Remote device is still loading, please wait",
-      "worktreeMissingRepo": "Unable to create worktree: the repository root for the current directory is unavailable",
-      "worktreeRepoHint": "Try selecting the working directory again and wait for the folder indicator in the lower-right corner to refresh",
+      "worktreeMissingRepo": "Can't create a worktree: the current directory's repo root is missing",
+      "worktreeRepoHint": "Try picking the working directory again, and retry once the folder badge at the bottom right refreshes",
       "sessionInactive": "Session is no longer active",
       "remoteProjectBanner": "New session in {{project}} on {{device}}",
       "remoteDialogueBanner": "New chat on {{device}} (no project)"

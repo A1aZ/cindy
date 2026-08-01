@@ -86,7 +86,8 @@ export function formToProjectConfig(
     agentKind: form.agentKind,
     model: form.model.trim() || undefined,
     effort: form.effort || undefined,
-    fastMode: form.agentKind === 'codex' && form.fastMode ? true : undefined,
+    // Codex / Pi 都生效(runner.ts:665);只认 codex 会丢弃 Pi 任务的 Fast(codex review)。
+    fastMode: (form.agentKind === 'codex' || form.agentKind === 'pi') && form.fastMode ? true : undefined,
     useWorktree: form.useWorktree,
     persistentSession: form.persistentSession,
     silentWhenIdle: form.silentWhenIdle,

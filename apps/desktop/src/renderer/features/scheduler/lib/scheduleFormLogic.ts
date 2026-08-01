@@ -464,6 +464,9 @@ export function buildScheduleInput(form: ScheduleFormState): CreateScheduleInput
   if (form.model.trim()) base.model = form.model.trim();
   if (form.providerId.trim()) base.providerId = form.providerId.trim();
   if (form.effort && isEffortValue(form.effort)) base.effort = form.effort;
-  if (form.agentKind === 'codex') base.fastMode = form.fastMode;
+  // fastMode 对 Codex / Pi 都生效(runner.ts:665 明确 claude-code 忽略此字段);只序列化
+  // codex 会让用户在 Pi 任务里开的 Fast 被静默丢弃(codex review)。表单侧 Fast 开关已按
+  // capability × 模型 supportsFastMode 门控,Pi 只有真支持时才可能为 true。
+  if (form.agentKind === 'codex' || form.agentKind === 'pi') base.fastMode = form.fastMode;
   return base;
 }

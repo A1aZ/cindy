@@ -416,7 +416,12 @@ type TelegramBotTransportStatus =
   | { kind: 'connecting' }
   | { kind: 'connected'; appId: string }
   | { kind: 'conflict'; appId: string }
-  | { kind: 'error'; reason: string };
+  /** 凭证保留、用户主动下线(不轮询); 与 idle=未配置 严格区分。 */
+  | { kind: 'offline'; appId: string }
+  | { kind: 'error'; reason: string; code?: TelegramBotErrorCode };
+
+/** 稳定错误分类;renderer 据此取 i18n 文案,不直接展示 main 层 reason。 */
+type TelegramBotErrorCode = 'invalid-token' | 'provider-api' | 'network' | 'secret-unavailable';
 
 type DingTalkBotTransportStatus = DiscordBotTransportStatus;
 type WecomBotTransportStatus =
@@ -1805,6 +1810,10 @@ interface ElectronAPI {
       botUsername: string | null;
     }>;
     disconnect: () => Promise<{
+      status: TelegramBotTransportStatus;
+    }>;
+    /** 上线/下线(保留 token 与绑定信息, 只切轮询)。 */
+    setOnline: (payload: { online: boolean }) => Promise<{
       status: TelegramBotTransportStatus;
     }>;
     checkSessionAuth: () => Promise<DiscordBotSessionAuthCheckResult>;

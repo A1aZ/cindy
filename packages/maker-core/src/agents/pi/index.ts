@@ -1215,9 +1215,15 @@ export class PiAgent extends BaseAgent {
   async forkSdkSession(opts: ForkSdkSessionOptions): Promise<ForkSdkSessionResult> {
     const log = this.deps.logger;
     const agentHome = this.resolveAgentHome();
-    // 保证 models.json 里 provider `cindy` 可解析(pi 启动会校验 --provider)。
-    await this.writeModelsJson(agentHome);
     const sessionDir = path.join(agentHome, 'sessions');
+    // 离线 fork 只需 models.json 里有 `cindy` 供应商供 pi 启动校验 --provider。
+    // 不能写共享的 agentHome/models.json:另一窗口正启动 BYOM 会话时(startSession
+    // 写入 native providers 后到 spawn 之间还有多个 await),本处覆盖会把该 provider
+    // 清掉,导致那个 spawn 携带 --provider <byom> 却找不到而启动失败(codex review)。
+    // 用隔离的 coding-agent 目录承载 fork 专属 models.json(PI_CODING_AGENT_DIR),
+    // --session-dir 仍指向共享 sessions(两者是独立 flag),互不干扰。
+    const forkHome = path.join(agentHome, 'fork-tmp', randomBytes(8).toString('hex'));
+    await this.writeModelsJson(forkHome);
 
     // fork 全程离线(clone/fork 是纯 session 文件操作),真凭证拿不到也不影响;
     // 尽量取真 authEnv(含网关相关变量),失败则占位。
@@ -1248,7 +1254,8 @@ export class PiAgent extends BaseAgent {
         ...process.env,
         ...authEnv,
         [PI_API_KEY_ENV]: authEnv[PI_API_KEY_ENV] ?? 'pi-fork-offline',
-        PI_CODING_AGENT_DIR: agentHome,
+        // 隔离的 models.json 家目录(见上);session 文件仍由 --session-dir 提供。
+        PI_CODING_AGENT_DIR: forkHome,
       },
       logger: log,
       onEvent: () => {},
@@ -1316,6 +1323,8 @@ export class PiAgent extends BaseAgent {
       return { newSdkSessionId: newPath, uuidMap: new Map() };
     } finally {
       await proc.close();
+      // 清理隔离的 fork 家目录(只含 models.json;新分支 session 文件在共享 sessions,不受影响)。
+      await fs.rm(forkHome, { recursive: true, force: true }).catch(() => {});
     }
   }
 

@@ -54,5 +54,5 @@ export function chunkWecomMarkdown(source: string): string[] {
 }
 
 export function escapeWecomMarkdown(source: string): string {
-  return source.replace(/([\\`*_{}\[\]()#+\-.!>])/g, "\\$1");
+  return source.replace(/([\\`*_{}[\]()#+\-.!>])/g, "\\$1");
 }

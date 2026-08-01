@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { i18n } from '@/i18n';
 import {
   DEFAULT_NEW_SESSION_DRAFT,
+  NEW_SESSION_AGENT_OPTIONS,
   buildNewSessionCreatePreview,
   buildRecentWorkspaceOptions,
   buildRemoteCreateSessionOptions,
@@ -436,6 +437,19 @@ describe('new session model', () => {
       permissionMode: 'auto',
       fastMode: false,
     });
+  });
+
+  it('exposes Pi as a first-class agent and preserves Fast for Pi sessions', () => {
+    expect(NEW_SESSION_AGENT_OPTIONS.map((option) => option.kind)).toEqual([
+      'claude-code', 'codex', 'pi',
+    ]);
+    const pi = withAgentDefaults({ ...DEFAULT_NEW_SESSION_DRAFT, fastMode: true }, 'pi');
+    expect(pi).toMatchObject({ agentKind: 'pi', model: 'gpt-5.4', fastMode: true });
+    expect(buildRemoteCreateSessionOptions({
+      ...pi,
+      workingDir: '/repo/xdt-maker',
+      firstMessage: 'hello',
+    })).toMatchObject({ agentKind: 'pi', fastMode: true });
   });
 
   it('uses safe per-agent permission defaults for new interactive sessions', () => {

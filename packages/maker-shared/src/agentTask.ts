@@ -178,10 +178,10 @@ export function normalizeAgentTaskUpdate(
     rawStatus === 'completed' || rawStatus === 'failed' || rawStatus === 'stopped'
       ? rawStatus
       : 'running';
-  const provider = raw.provider === 'codex' || raw.provider === 'claude-code'
+  const provider = raw.provider === 'codex' || raw.provider === 'claude-code' || raw.provider === 'pi'
     ? raw.provider
-    : source === 'codex'
-      ? 'codex'
+    : source === 'codex' || source === 'pi'
+      ? source
       : 'claude-code';
   const usageRaw = raw.usage && typeof raw.usage === 'object' ? raw.usage as Record<string, unknown> : null;
   const usage: AgentTaskUsage | undefined = usageRaw

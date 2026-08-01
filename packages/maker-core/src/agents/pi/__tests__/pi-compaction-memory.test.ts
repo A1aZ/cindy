@@ -46,12 +46,14 @@ describe('PiAgent compaction → memory digest', () => {
   let agentHome = '';
   let cwd = '';
   let writeMock: ReturnType<typeof vi.fn>;
+  let resetDigestsMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     captured.onEvent = null;
     agentHome = mkdtempSync(path.join(tmpdir(), 'pi-cm-home-'));
     cwd = mkdtempSync(path.join(tmpdir(), 'pi-cm-cwd-'));
     writeMock = vi.fn(async () => ({ ok: true, filename: 'digest_x.md' }));
+    resetDigestsMock = vi.fn(async () => ({ removedCount: 2 }));
   });
   afterEach(() => {
     rmSync(agentHome, { recursive: true, force: true });
@@ -73,7 +75,7 @@ describe('PiAgent compaction → memory digest', () => {
         availableModels: [{ id: 'm', displayName: 'M', contextWindow: 200_000, efforts: [], defaultEffort: null }],
       },
       resolvePiAgentHome: () => agentHome,
-      ...(withManager ? { makerMemory: { write: writeMock } as never } : {}),
+      ...(withManager ? { makerMemory: { write: writeMock, resetDigests: resetDigestsMock } as never } : {}),
     };
   }
 
@@ -159,5 +161,11 @@ describe('PiAgent compaction → memory digest', () => {
     expect(() => fireCompaction('summary that fails to persist')).not.toThrow();
     await flush();
     await handle.close();
+  });
+
+  it('resetMemory removes only Pi digests through the narrow manager API', async () => {
+    const agent = new PiAgent(buildDeps(true));
+    await expect(agent.resetMemory()).resolves.toEqual({ removedEntries: 2 });
+    expect(resetDigestsMock).toHaveBeenCalledTimes(1);
   });
 });

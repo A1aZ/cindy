@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   mobileAgentLabel,
+  mobileAgentLabelFromUnknown,
+  mobileAgentVendor,
   normalizeSessionAgentSwitchIntent,
   sessionAgentKind,
   supportsMobileSessionAgentSwitch,
@@ -46,6 +48,10 @@ describe('mobile session Agent switch contract', () => {
     expect(mobileAgentLabel('claude-code')).toBe('Claude Code');
     expect(mobileAgentLabel('codex')).toBe('Codex');
     expect(mobileAgentLabel('pi')).toBe('Pi');
+    expect(mobileAgentLabelFromUnknown('pi')).toBe('Pi');
+    expect(mobileAgentVendor('claude-code')).toBe('cc');
+    expect(mobileAgentVendor('codex')).toBe('codex');
+    expect(mobileAgentVendor('pi')).toBe('pi');
     expect(normalizeSessionAgentSwitchIntent({
       targetAgentKind: 'pi', model: 'gpt-5.5', providerId: 'openai',
     })).toEqual({ targetAgentKind: 'pi', model: 'gpt-5.5', providerId: 'openai' });

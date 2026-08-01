@@ -2313,7 +2313,9 @@ export const remoteSessionStore = {
     }
     if (type === 'agent_task_update') {
       const rawSource = readString(event, 'source');
-      const source = rawSource === 'codex' || rawSource === 'claude-code' ? rawSource : undefined;
+      const source = rawSource === 'codex' || rawSource === 'claude-code' || rawSource === 'pi'
+        ? rawSource
+        : undefined;
       const next = applyAgentTaskUpdateEvent(
         recallParkedTaskUpdates(sessionId, event.data, source, sessionTaskUpdates.get(sessionId)),
         event.data,

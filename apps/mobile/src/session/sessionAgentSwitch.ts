@@ -60,3 +60,11 @@ export function supportsMobileSessionAgentSwitch(
 export function mobileAgentLabel(agentKind: MobileSessionAgentKind): string {
   return agentKind === 'codex' ? 'Codex' : agentKind === 'pi' ? 'Pi' : 'Claude Code';
 }
+
+export function mobileAgentLabelFromUnknown(agentKind: unknown): string {
+  return agentKind === 'codex' ? 'Codex' : agentKind === 'pi' ? 'Pi' : 'Claude Code';
+}
+
+export function mobileAgentVendor(agentKind: MobileSessionAgentKind): 'cc' | 'codex' | 'pi' {
+  return agentKind === 'claude-code' ? 'cc' : agentKind;
+}

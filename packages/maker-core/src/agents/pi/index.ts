@@ -334,11 +334,7 @@ export class PiAgent extends BaseAgent {
     if (!endpoint) {
       this.deps.logger.warn('pi: runtimeConfig.endpoint missing — models.json will have no usable provider');
     }
-    // 原生 provider 的模型只进各自 provider 块,**不进网关 cindy 块** —— 否则 catalog 派生
-    // 出的自定义 pi 模型会同时出现在网关块(指向 compat 代理),造成双重路由/双重转义。
-    const nativeModelIds = new Set(nativeProviders.flatMap((np) => np.models.map((m) => m.id)));
     const models = this.capabilities.availableModels
-      .filter((m: ModelDescriptor) => !nativeModelIds.has(m.id))
       .map((m: ModelDescriptor) => ({
       id: m.id,
       name: m.displayName,
@@ -393,20 +389,6 @@ export class PiAgent extends BaseAgent {
     await fs.writeFile(path.join(agentHome, 'models.json'), JSON.stringify({ providers }, null, 2) + '\n');
   }
 
-  /**
-   * model id → provider id 路由表。网关模型 → `cindy`;BYOM 原生模型 → 各自 provider id
-   * (撞 id 时原生优先——用户显式配置)。setModel / 初始 --provider 据此选对 provider。
-   */
-  private buildModelProviderMap(nativeProviders: PiNativeProviderSpec[]): Map<string, string> {
-    const map = new Map<string, string>();
-    for (const m of this.capabilities.availableModels) map.set(m.id, PI_PROVIDER_ID);
-    for (const np of nativeProviders) {
-      if (np.id === PI_PROVIDER_ID) continue;
-      for (const m of np.models) map.set(m.id, np.id);
-    }
-    return map;
-  }
-
   async startSession(opts: StartSessionOptions): Promise<AgentSessionHandle> {
     if (opts.remoteHostId) {
       throw new NotSupportedError('remoteSession', {
@@ -434,11 +416,29 @@ export class PiAgent extends BaseAgent {
         });
       }
     }
-    const modelProviderMap = this.buildModelProviderMap(nativeProviders);
-    // 选定模型所属 provider(BYOM 模型 → 其原生 provider;其余 → 网关 cindy)。
-    const resolveProviderForModel = (model: string): string =>
-      modelProviderMap.get(model) ?? PI_PROVIDER_ID;
-    const initialProvider = resolveProviderForModel(opts.model);
+    const nativeProviderById = new Map(
+      nativeProviders
+        .filter((provider) => provider.id !== PI_PROVIDER_ID)
+        .map((provider) => [provider.id, provider] as const),
+    );
+    // providerId 是模型来源的主键；同名模型可同时存在于 Cindy 网关和多个 BYOM
+    // provider。只有旧会话未带 providerId 时才按模型做兼容回退（首个原生来源优先）。
+    const resolveProviderForModel = (
+      model: string,
+      providerId?: string | null,
+    ): string => {
+      if (providerId) {
+        const native = nativeProviderById.get(providerId);
+        return native?.models.some((candidate) => candidate.id === model)
+          ? native.id
+          : PI_PROVIDER_ID;
+      }
+      return nativeProviders.find(
+        (provider) => provider.id !== PI_PROVIDER_ID
+          && provider.models.some((candidate) => candidate.id === model),
+      )?.id ?? PI_PROVIDER_ID;
+    };
+    const initialProvider = resolveProviderForModel(opts.model, opts.providerId);
 
     // 先解析 native provider 再做 auth：老会话/远端控制端可能没有持久化 providerId，
     // 仍必须能从 model→provider 映射识别纯 BYOM，不能误落 Cindy gateway 登录门。
@@ -896,8 +896,10 @@ export class PiAgent extends BaseAgent {
       },
 
       async setModel(model: string, setOpts?: { providerId?: string | null }): Promise<void> {
-        // BYOM:按 model→provider 路由(原生模型走其 provider,其余走网关 cindy)。
-        const provider = resolveProviderForModel(model);
+        const requestedProviderId = setOpts && Object.hasOwn(setOpts, 'providerId')
+          ? setOpts.providerId
+          : undefined;
+        const provider = resolveProviderForModel(model, requestedProviderId);
         const resp = await proc.request({ type: 'set_model', provider, modelId: model });
         if (!resp.success) throw new Error(`pi set_model failed: ${resp.error ?? 'unknown'}`);
         mutableModel = model;
@@ -1147,7 +1149,7 @@ export class PiAgent extends BaseAgent {
   }
 
   async resetMemory(): Promise<MemoryResetResult> {
-    const result = await this.deps.makerMemory?.resetAll();
+    const result = await this.deps.makerMemory?.resetDigests();
     return { removedEntries: result?.removedCount ?? 0 };
   }
 

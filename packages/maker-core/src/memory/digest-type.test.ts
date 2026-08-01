@@ -12,7 +12,14 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { MemoryStorage } from './storage.js';
+import { MakerMemoryManager } from './manager.js';
 import { DEFAULT_MEMORY_CONFIG, MEMORY_TYPES, CURATED_MEMORY_TYPES } from './types.js';
+import type { Logger } from '../interfaces/logger.js';
+
+const noopLogger: Logger = {
+  trace: () => {}, debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, fatal: () => {},
+  child: () => noopLogger,
+};
 
 let dir: string;
 
@@ -58,5 +65,28 @@ describe('digest memory type', () => {
     expect(indexRaw).not.toContain('## digest');
     // digest 的文件确实落盘了(digest_<slug>.md)。
     expect(records.some((r) => r.filename === 'digest_pi-compaction-1.md')).toBe(true);
+  });
+
+  it('resetDigests removes only Pi digests and preserves curated memory', async () => {
+    const basePath = dir;
+    const storageDir = path.join(basePath, 'maker-memory', 'repo');
+    const storage = new MemoryStorage(storageDir, DEFAULT_MEMORY_CONFIG);
+    await storage.init('/repo');
+    await storage.write({
+      type: 'project', name: 'keep', title: 'Keep me', description: 'curated', body: 'important',
+    });
+    await storage.write({
+      type: 'digest', name: 'drop', title: 'Drop me', description: 'pi digest', body: 'summary',
+    });
+    const manager = new MakerMemoryManager({
+      basePath,
+      sqliteFactory: () => { throw new Error('unopened stores must not need sqlite'); },
+      agents: {},
+      logger: noopLogger,
+    });
+
+    await expect(manager.resetDigests()).resolves.toEqual({ removedCount: 1 });
+    expect((await storage.list()).map((record) => record.filename)).toEqual(['project_keep.md']);
+    expect(await storage.getIndex()).toContain('Keep me');
   });
 });

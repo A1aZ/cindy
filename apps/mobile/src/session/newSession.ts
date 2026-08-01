@@ -7,6 +7,12 @@ import type { RemoteSession } from './types';
 export type NewSessionAgentKind = 'claude-code' | 'codex' | 'pi';
 export type NewSessionWorkspaceKind = 'project' | 'dialogue';
 
+export const NEW_SESSION_AGENT_OPTIONS: readonly { kind: NewSessionAgentKind; label: string }[] = [
+  { kind: 'claude-code', label: 'Claude' },
+  { kind: 'codex', label: 'Codex' },
+  { kind: 'pi', label: 'Pi' },
+];
+
 export interface NewSessionDraft {
   agentKind: NewSessionAgentKind;
   workspaceKind: NewSessionWorkspaceKind;
@@ -127,7 +133,7 @@ const DEFAULT_MODELS: Record<NewSessionAgentKind, string> = {
   pi: 'gpt-5.4',
 };
 
-/** 新建交互式会话的权限种子默认；两种 agent 都保留 Auto-review。 */
+/** 新建交互式会话的权限种子默认；三个 agent 都保留 Auto-review。 */
 export function defaultPermissionModeForNewSessionAgent(_agentKind: NewSessionAgentKind): string {
   return 'auto';
 }
@@ -144,7 +150,7 @@ export function withAgentDefaults(
     permissionMode: defaultPermissionModeForNewSessionAgent(agentKind),
     // 换 agent → 来源选择作废(各 agent 的供应商集不同),回到默认路由由被控端定。
     providerId: null,
-    fastMode: agentKind === 'codex' ? draft.fastMode : false,
+    fastMode: agentKind === 'claude-code' ? false : draft.fastMode,
   };
 }
 

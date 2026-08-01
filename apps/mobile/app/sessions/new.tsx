@@ -129,6 +129,7 @@ import {
 } from '@/session/composerPalette';
 import {
   DEFAULT_NEW_SESSION_DRAFT,
+  NEW_SESSION_AGENT_OPTIONS,
   defaultPermissionModeForNewSessionAgent,
   buildRemoteCreateSessionOptions,
   buildRecentWorkspaceOptions,
@@ -281,17 +282,13 @@ import {
   worktreeEligibilityFromError,
   type NewSessionWorktreeProbeSnapshot,
 } from '@/session/newSessionWorktree';
+import { mobileAgentLabel, mobileAgentVendor } from '@/session/sessionAgentSwitch';
 import { MobileModelIconMark } from '@/session/MobileProviderMark';
 import { draftModelMemoryFor, hydrateDraftModelMemory } from '@/session/draftModelMemory';
 import { rowFastEditable } from '@/session/modelPickerRows';
 import { useTheme, useThemedStyles, type ThemeColors } from '@/theme';
 import { fontWeight, iconSize, iconStroke, lineHeight, radius, spacing, typeScale } from '@/theme/tokens';
 
-// 一等公民两个 agent(DEFAULT_MODELS 两者都有);无"某 agent 不可用"信号时都展示。
-const AGENT_OPTIONS: readonly { kind: NewSessionAgentKind; label: string }[] = [
-  { kind: 'claude-code', label: 'Claude' },
-  { kind: 'codex', label: 'Codex' },
-];
 const COMPOSER_INPUT_MULTILINE_CONTENT_THRESHOLD = 34;
 const COMPOSER_VOICE_CARET_GAP = 2;
 // composer 除输入区外的 chrome 高度估算（输入行上下 padding + 边框），
@@ -802,7 +799,7 @@ export default function NewRemoteSessionScreen() {
     [draft.workspaceKind, draft.workingDir, t],
   );
   const WorkspaceIcon = draft.workspaceKind === 'dialogue' ? MessageCircle : Folder;
-  const agentLabel = draft.agentKind === 'codex' ? 'Codex' : 'Claude';
+  const agentLabel = mobileAgentLabel(draft.agentKind);
   // effect 在 commit 后才会把旧探测结果重置为 probing；render 期先按设备 + cwd 同步
   // 对齐 target，切项目/设备后立即创建也拿不到上一仓库的 baseRepo/sourceBranch。
   const worktreeEligibility = worktreeEligibilityForTarget(worktreeProbe, {
@@ -2957,13 +2954,13 @@ export default function NewRemoteSessionScreen() {
                   style={({ pressed }) => [styles.selectorRow, pressed && styles.pressed]}
                   testID="newSession.agentSelector"
                 >
-                  <MobileVendorIcon vendor={draft.agentKind === 'codex' ? 'codex' : 'cc'} size={iconSize.lg} />
+                  <MobileVendorIcon vendor={mobileAgentVendor(draft.agentKind)} size={iconSize.lg} />
                   <Text style={styles.selectorText} numberOfLines={1}>{agentLabel}</Text>
                   <ChevronsUpDown color={colors.borderStrong} size={iconSize.sm} strokeWidth={iconStroke.regular} />
                 </Pressable>
                 {agentPickerOpen ? (
                   <View style={styles.agentPickerPanel} testID="newSession.agentPickerPanel">
-                    {AGENT_OPTIONS.map((option) => {
+                    {NEW_SESSION_AGENT_OPTIONS.map((option) => {
                       const selected = draft.agentKind === option.kind;
                       return (
                         <Pressable
@@ -2977,7 +2974,7 @@ export default function NewRemoteSessionScreen() {
                           testID="newSession.agentOption"
                         >
                           <MobileVendorIcon
-                            vendor={option.kind === 'codex' ? 'codex' : 'cc'}
+                            vendor={mobileAgentVendor(option.kind)}
                             size={iconSize.action}
                           />
                           <Text style={styles.agentOptionText} numberOfLines={1}>{option.label}</Text>

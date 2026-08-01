@@ -159,7 +159,7 @@ describe('mobile home desktop-first surface', () => {
     expect(homeSource).toContain('width: iconSize.md');
     expect(homeSource).toContain('size={cindyList ? iconSize.sm : isClaudeCodeAgentKind(item.session.agentKind) ? 19 : iconSize.lg}');
     expect(homeSource).toContain("function isClaudeCodeAgentKind(agentKind: string): boolean");
-    expect(homeSource).toContain("return agentKind !== 'codex';");
+    expect(homeSource).toContain("return agentKind === 'cc' || agentKind === 'claude-code';");
     expect(homeSource).not.toContain('sessionAttentionDot: {\n    backgroundColor: colors.statusAccent,\n    borderColor: colors.surface');
     expect(homeSource).not.toContain('sessionAttentionDot: {\n    backgroundColor: colors.statusAccent,\n    borderRadius: 3,\n    borderWidth: 1');
   });

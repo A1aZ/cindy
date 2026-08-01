@@ -216,10 +216,10 @@ describe('pi routingTransform — xdt session header selects the Pi provider rou
   });
 
   it('never forwards an orphaned internal Pi token header', async () => {
-    const decision = createModelRoutingTransform()(
+    const decision = await Promise.resolve(createModelRoutingTransform()(
       { model: 'claude-opus-5' },
       ctxWith({ 'x-cindy-pi-session-token': 'orphaned-secret' }),
-    );
+    ));
     expect(decision).toMatchObject({
       headerDelete: ['x-cindy-pi-session-id', 'x-cindy-pi-session-token'],
     });

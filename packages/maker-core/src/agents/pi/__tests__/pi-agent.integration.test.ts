@@ -362,9 +362,15 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         await sendAndWait(handle, 'turn two');
         expect(await handle.previewRewindFiles?.('')).toMatchObject({ canRewind: true });
 
+        // 捕获 rewind 前的原始 session 文件:替代文件必须与它不同。handle.id 现在是动态
+        // getter,commitRewindFiles 会把 sdkSessionId 就地更新为替代文件,所以切换后
+        // handle.id === result.sdkSessionId(正是本次修复的目的),要比对捕获的原始值。
+        const originalSessionId = handle.id;
         const result = await handle.commitRewindFiles?.('', '', { tailTurnsToDrop: 1 });
         expect(result?.sdkSessionId).toBeTruthy();
-        expect(result?.sdkSessionId).not.toBe(handle.id);
+        expect(result?.sdkSessionId).not.toBe(originalSessionId);
+        // handle.id getter 跟随闭包,rewind 后指向新的替代 session 文件。
+        expect(handle.id).toBe(result?.sdkSessionId);
         await handle.close();
         handle = null;
 

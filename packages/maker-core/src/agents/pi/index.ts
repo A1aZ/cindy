@@ -476,9 +476,16 @@ export class PiAgent extends BaseAgent {
     // 权限档文件:extension 每次 tool_call 现读(热切换);读不到按 ask fail-closed。
     const runtimeDir = path.join(agentHome, 'runtime');
     await fs.mkdir(runtimeDir, { recursive: true });
+    // 防御:sessionId 会拼进文件名,不能含路径分隔符 / 上级引用 —— 否则可逃出 runtimeDir
+    // 覆盖任意文件(codex review)。IPC 边界已统一校验,这里对所有 startSession 调用方
+    // (scheduler / orca / resume 等)再兜一层 fail-closed,与安全底线一致。
+    const sid = opts.sessionId;
+    if (sid !== undefined && (sid === '.' || sid === '..' || /[\\/\0]/.test(sid))) {
+      throw new Error(`pi: unsafe sessionId for runtime path: ${JSON.stringify(sid)}`);
+    }
     const permissionFile = path.join(
       runtimeDir,
-      `perm-${opts.sessionId ?? `anon-${process.pid}-${Date.now()}`}.json`,
+      `perm-${sid ?? `anon-${process.pid}-${Date.now()}`}.json`,
     );
     // auto 保留(Cindy 侧 dispatcher 用);bridge 只特判 bypassPermissions,auto 在
     // 桥内行为同 ask(非只读全部冒泡)。其余档(default/acceptEdits/plan)归 ask 最严。
@@ -625,7 +632,12 @@ export class PiAgent extends BaseAgent {
     let proc: PiRpcProcess;
     const proxySessionToken = randomBytes(32).toString('base64url');
     let disposeProxySession: (() => void) | undefined;
+    // 幂等:onExit(进程异常退出)与 close()(用户结束)可能都调用它;首次注销后置位,
+    // 后续调用直接返回,避免二次注销(codex review:crash 时须由 onExit 立即释放)。
+    let sessionRegistrationsDisposed = false;
     const disposeSessionRegistrations = (): void => {
+      if (sessionRegistrationsDisposed) return;
+      sessionRegistrationsDisposed = true;
       let firstError: unknown;
       for (const dispose of [disposeProxySession, disposeSessionCtx]) {
         try {
@@ -709,6 +721,16 @@ export class PiAgent extends BaseAgent {
               data: { message: `pi process exited unexpectedly (code=${code}, signal=${signal})`, isTerminal: true },
               source: 'pi',
             });
+            // 崩溃/被杀:上层见迭代器结束即把 session 标 closed,close() 随后短路,
+            // proxy token 与 MCP session ctx 会滞留 Main 内存直到重启 —— 期间任何本地
+            // 进程仍可拿旧 token 经 loopback 代理盗用宿主凭证(codex review)。在此幂等注销。
+            try {
+              disposeSessionRegistrations();
+            } catch (err) {
+              this.deps.logger.warn('pi dispose on unexpected exit failed (non-fatal)', {
+                message: err instanceof Error ? err.message : String(err),
+              });
+            }
           }
           queue.end();
         },

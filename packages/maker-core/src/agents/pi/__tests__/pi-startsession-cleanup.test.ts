@@ -18,12 +18,19 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // hoisted 控制旋钮:vi.mock 工厂被提升到 import 之上,不能闭包引用普通 let。
-const knobs = vi.hoisted(() => ({ ctorThrows: false, getStateRejects: false, closeCount: 0 }));
+const knobs = vi.hoisted(() => ({
+  ctorThrows: false,
+  getStateRejects: false,
+  closeCount: 0,
+  onExit: null as null | ((info: { code: number | null; signal: string | null }) => void),
+}));
 
 vi.mock('../rpc-client.js', () => ({
   PiRpcProcess: class {
     isClosed = false;
-    constructor(_opts: unknown) {
+    constructor(opts: unknown) {
+      // 捕获 onExit 以便单测模拟进程异常退出(crash)。
+      knobs.onExit = (opts as { onExit?: typeof knobs.onExit } | undefined)?.onExit ?? null;
       if (knobs.ctorThrows) throw new Error('spawn failed (mock)');
     }
     async request(cmd: { type: string }): Promise<{ success: boolean; data?: unknown; error?: string }> {
@@ -62,6 +69,7 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     knobs.ctorThrows = false;
     knobs.getStateRejects = false;
     knobs.closeCount = 0;
+    knobs.onExit = null;
     disposed = 0;
     proxyDisposed = 0;
     agentHome = mkdtempSync(path.join(tmpdir(), 'pi-cleanup-home-'));
@@ -128,5 +136,35 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     await handle.close();
     expect(disposed).toBe(1); // close() 才注销
     expect(proxyDisposed).toBe(1);
+  });
+
+  it('disposes proxy token + MCP ctx when the pi process exits unexpectedly (crash), idempotent with close()', async () => {
+    // codex review:崩溃时 onExit 只 end 队列、上层短路 close(),proxy token / MCP ctx
+    // 会滞留内存被本地进程盗用。onExit 必须幂等注销这些注册。
+    const agent = new PiAgent(buildDeps());
+    const handle = await agent.startSession(opts());
+    expect(disposed).toBe(0);
+    expect(proxyDisposed).toBe(0);
+    expect(knobs.onExit).toBeTypeOf('function');
+
+    knobs.onExit!({ code: 1, signal: null }); // 模拟进程异常退出
+    expect(disposed).toBe(1);
+    expect(proxyDisposed).toBe(1);
+
+    // 上层随后仍可能调用 close() —— 幂等,不得二次注销。
+    await handle.close();
+    expect(disposed).toBe(1);
+    expect(proxyDisposed).toBe(1);
+  });
+
+  it('rejects a sessionId that would escape the runtime dir via the permission file path', async () => {
+    // codex review:sessionId 拼进 perm-<id>.json;`../../..` 经 path.join 逃出 runtimeDir。
+    const agent = new PiAgent(buildDeps());
+    await expect(
+      agent.startSession({ sessionId: '../../../../tmp/evil', workingDir: cwd, model: 'm' }),
+    ).rejects.toThrow(/unsafe sessionId/);
+    // 未注册任何东西 → 无泄漏。
+    expect(disposed).toBe(0);
+    expect(proxyDisposed).toBe(0);
   });
 });

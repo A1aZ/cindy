@@ -31,7 +31,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { fetchJsonWithTimeout, downloadToFileWithTimeout, createDownloadProgressLogger } from '../shared/fetch-with-timeout.mjs';
 import { normalizeExpectedSha256, verifyFileSha256OrRemove, sha256File } from '../shared/verify-sha256.mjs';
-import { writeDirDistManifest } from '../shared/dir-dist-manifest.mjs';
+import { writeDirDistManifest, verifyDirDistManifest } from '../shared/dir-dist-manifest.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '../..');
@@ -210,14 +210,18 @@ async function downloadAsset(meta, version, platformKey, assetName, finalBinName
 
   if (!force && isUsableCache(finalBinPath)) {
     const sha256Path = finalBinPath + '.sha256.bin';
-    if (fs.existsSync(sha256Path)) {
+    // 目录分发的“缓存可用”不能只看主二进制 + 其 sha256:缓存目录若丢了 theme /
+    // native prebuild 等旁侧资产(磁盘损坏/被误删),主二进制仍在也不能跳过 —— 否则
+    // promote 会把残缺目录打进安装包,且事后从残缺目录生成的 manifest 反而“自洽通过”
+    // (codex review)。这里对提取期写入的完整清单校验整目录,任一资产缺失即重下。
+    if (fs.existsSync(sha256Path) && verifyDirDistManifest(destDir)) {
       const storedHash = fs.readFileSync(sha256Path, 'utf8').trim();
       verifyFileSha256OrRemove(finalBinPath, storedHash, `pi ${platformKey} binary v${version} (cached)`);
       const size = fs.statSync(finalBinPath).size;
-      console.log(`  [${platformKey}] skip (cached, sha256 ok, ${formatMB(size)})`);
+      console.log(`  [${platformKey}] skip (cached, sha256 ok, manifest complete, ${formatMB(size)})`);
       return;
     }
-    console.log(`  [${platformKey}] cached binary missing sha256 marker, re-downloading for verification...`);
+    console.log(`  [${platformKey}] cache missing sha256 marker or incomplete asset manifest, re-downloading for verification...`);
   }
 
   // 目录形态：重下前清空平台目录，避免旧版本资产残留混入新版本。
@@ -253,6 +257,9 @@ async function downloadAsset(meta, version, platformKey, assetName, finalBinName
     await extractArchive(tmpArchive, destDir);
     flattenExtractedDir(destDir, finalBinName);
     fs.writeFileSync(finalBinPath + '.sha256.bin', sha256File(finalBinPath) + '\n');
+    // 提取期(刚从已校验 digest 的归档解出、目录必然完整)写入清单,作为后续“缓存
+    // 是否完整”的权威基线;事后 promote 从残缺缓存再生成的清单不能当完整性依据。
+    writeDirDistManifest(destDir);
 
     if (!finalBinName.endsWith('.exe')) {
       try { fs.chmodSync(finalBinPath, 0o755); } catch { /* ignore */ }

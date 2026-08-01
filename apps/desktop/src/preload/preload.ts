@@ -4093,7 +4093,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 详见下方 maker 块的 auth / agent / usage 三个子对象。
 
   // ─── Maker Core IPC ─────────────────────────────────────────────────────
-  // renderer 通过统一 maker API 按 agentKind 调用 Claude Code / Codex。
+  // renderer 通过统一 maker API 按 agentKind 调用 Claude Code / Codex / Pi。
   maker: {
     listAvailableAgents: (): Promise<Array<'claude-code' | 'codex' | 'pi'>> =>
       ipcRenderer.invoke('maker:list-available-agents'),
@@ -4125,12 +4125,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // 自定义供应商配置 CRUD（配置与 runtime 密钥均由 main 原子排队）。
     createCustomProvider: (
       config: import('@cindy/model-providers').CustomProviderConfig,
-      keys: Partial<Record<'claude-code' | 'codex', string>>,
+      keys: Partial<Record<'claude-code' | 'codex' | 'pi', string>>,
     ): Promise<{ ok: true }> =>
       ipcRenderer.invoke('maker:provider:custom:create', config, keys),
     updateCustomProvider: (
       config: import('@cindy/model-providers').CustomProviderConfig,
-      keys: Partial<Record<'claude-code' | 'codex', string>>,
+      keys: Partial<Record<'claude-code' | 'codex' | 'pi', string>>,
     ): Promise<{ ok: true }> => ipcRenderer.invoke('maker:provider:custom:update', config, keys),
     deleteCustomProvider: (providerId: string): Promise<{ ok: true }> =>
       ipcRenderer.invoke('maker:provider:custom:delete', providerId),
@@ -4143,11 +4143,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
      */
     testProviderConnection: (
       input:
-        | { kind: 'saved'; providerId: string; agent: 'claude-code' | 'codex' }
+        | { kind: 'saved'; providerId: string; agent: 'claude-code' | 'codex' | 'pi' }
         | {
             kind: 'adhoc';
             spec: {
-              agent: 'claude-code' | 'codex';
+              agent: 'claude-code' | 'codex' | 'pi';
               baseUrl: string;
               modelId: string;
               authMethod: 'apiKey' | 'oauth' | 'none';
@@ -4169,7 +4169,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
      * 结构化结果：ok=true 带 models；失败 code 走 providerError.* i18n。
      */
     fetchProviderModels: (input: {
-      agent: 'claude-code' | 'codex';
+      agent: 'claude-code' | 'codex' | 'pi';
       baseUrl: string;
       authMethod: 'apiKey' | 'oauth' | 'none';
       wireProtocol?: import('@cindy/model-providers').ProviderWireProtocol;

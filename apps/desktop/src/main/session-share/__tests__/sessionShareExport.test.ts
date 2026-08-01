@@ -230,6 +230,46 @@ describe('exportSessionShare', () => {
     expect(state.threads[0].id).toBe('thread-1');
   });
 
+  it('pi export replaces absolute session paths with portable ids', async () => {
+    const piSessionFile = path.join(tmpRoot, 'pi-agent-home', 'sessions', 'source-session.jsonl');
+    await fsp.mkdir(path.dirname(piSessionFile), { recursive: true });
+    await fsp.writeFile(piSessionFile, '{"type":"session"}\n');
+    sessionRowRef.row = {
+      ...baseSession(),
+      agentKind: 'pi',
+      sdkSessionId: piSessionFile,
+    };
+    messagesRef.rows = baseMessages().map((message, index) => ({
+      ...message,
+      agentKind: 'pi',
+      agentMeta: index === 1 ? JSON.stringify({ sdkSessionId: piSessionFile }) : null,
+    }));
+
+    const target = path.join(tmpRoot, 'out-pi.xdtshare');
+    const outcome = await exportSessionShare({ sessionId: 'xdt-session-1', targetPath: target });
+    expect(outcome.status).toBe('ok');
+    if (outcome.status !== 'ok') return;
+    expect(outcome.fidelity).toBe('full');
+
+    const zip = await unzipOf(target);
+    const manifest = validateManifest(JSON.parse(await zip.file('manifest.json')!.async('string')));
+    expect(manifest.agentKind).toBe('pi');
+    expect(manifest.activeSdkSessionId).toMatch(/^pi-[a-f0-9]{32}\.jsonl$/);
+    expect(manifest.activeSdkSessionId).not.toContain(path.sep);
+    expect(manifest.sdkSessionIds).toEqual([manifest.activeSdkSessionId]);
+    const transcriptPath = `transcripts/pi/${manifest.activeSdkSessionId}`;
+    expect(await zip.file(transcriptPath)!.async('string')).toBe('{"type":"session"}\n');
+    expect(zip.file('codex-state/thread.json')).toBeNull();
+
+    const sessionJson = await zip.file('session.json')!.async('string');
+    const messagesJsonl = await zip.file('messages.jsonl')!.async('string');
+    expect(sessionJson).not.toContain(piSessionFile);
+    expect(messagesJsonl).not.toContain(piSessionFile);
+    expect(JSON.parse(messagesJsonl.split('\n')[1]).agentMeta).toContain(
+      manifest.activeSdkSessionId,
+    );
+  });
+
   it('oversize returns structured outcome without writing file', async () => {
     const target = path.join(tmpRoot, 'out-oversize.xdtshare');
     const outcome = await exportSessionShare({

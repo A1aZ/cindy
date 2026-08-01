@@ -1925,10 +1925,12 @@ function normalizeAgentTaskUpdate(
       ? rawStatus
       : 'running';
   const provider =
-    raw.provider === 'codex' || raw.provider === 'claude-code'
+    raw.provider === 'codex' || raw.provider === 'claude-code' || raw.provider === 'pi'
       ? raw.provider
       : source === 'codex'
         ? 'codex'
+        : source === 'pi'
+          ? 'pi'
         : 'claude-code';
   const usageRaw =
     raw.usage && typeof raw.usage === 'object' ? (raw.usage as Record<string, unknown>) : null;
@@ -5074,7 +5076,7 @@ function isActiveSessionSnapshot(value: unknown): value is ActiveSessionSnapshot
   const item = value as Record<string, unknown>;
   return (
     typeof item.sessionId === 'string' &&
-    (item.agentKind === 'claude-code' || item.agentKind === 'codex') &&
+    (item.agentKind === 'claude-code' || item.agentKind === 'codex' || item.agentKind === 'pi') &&
     typeof item.isTurnRunning === 'boolean'
   );
 }
@@ -5271,7 +5273,7 @@ function bumpMessagesEpoch(sessionId: string): void {
 }
 
 /**
- * DB sessions.agent_kind('cc' / 'codex')→ maker-core AgentKind 的唯一映射点。
+ * DB sessions.agent_kind('cc' / 'codex' / 'pi')→ maker-core AgentKind 的唯一映射点。
  * 缺失 / 异常值走 fallback(默认 'claude-code',老 row 兼容)。所有从 session
  * row 派生 agentKind 的地方必须走这里,不要在调用点手写三元(历史上多处各写
  * 一份,遗漏 fallback 语义差异被 review 逐个揪出)。
@@ -5282,6 +5284,7 @@ function dbAgentKindToMakerKind(
 ): 'claude-code' | 'codex' | 'pi' {
   if (dbKind === 'codex') return 'codex';
   if (dbKind === 'cc') return 'claude-code';
+  if (dbKind === 'pi') return 'pi';
   return fallback;
 }
 

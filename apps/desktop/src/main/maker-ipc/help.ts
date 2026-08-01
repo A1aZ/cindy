@@ -246,6 +246,7 @@ async function getMostRecentSessionAgent(): Promise<AgentKind | null> {
     if (!row) return null;
     if (row.agentKind === 'cc' || row.agentKind === 'claude-code') return 'claude-code';
     if (row.agentKind === 'codex') return 'codex';
+    if (row.agentKind === 'pi') return 'pi';
     return null;
   } catch (err) {
     log.debug('help recent-agent probe failed', { error: String(err) });
@@ -258,8 +259,8 @@ async function pickHelpAgent(
   preferredAgent: AgentKind | null,
 ): Promise<AgentKind | null> {
   const ordered: AgentKind[] = preferredAgent
-    ? [...new Set<AgentKind>([preferredAgent, 'claude-code', 'codex'])]
-    : ['claude-code', 'codex'];
+    ? [...new Set<AgentKind>([preferredAgent, 'claude-code', 'codex', 'pi'])]
+    : ['claude-code', 'codex', 'pi'];
   const available = new Set(maker.listAvailableAgents());
   for (const agentKind of ordered) {
     if (!available.has(agentKind)) continue;
@@ -281,6 +282,9 @@ function buildOneShotOptions(agentKind: AgentKind): OneShotOptions {
       timeoutMs: 20_000,
     };
   }
+  // Pi 的可用模型来自动态 provider 目录(BYOM 也可能只有本地模型)，不硬编码
+  // GPT id；让 Maker 按该 Pi agent 的当前能力选择默认模型。
+  if (agentKind === 'pi') return { timeoutMs: 20_000 };
   return {
     model: 'gpt-5.4-mini',
     timeoutMs: 20_000,

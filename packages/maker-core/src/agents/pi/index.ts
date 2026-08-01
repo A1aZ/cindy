@@ -88,6 +88,8 @@ const PI_PROVIDER_ID = 'cindy';
 const PI_API_KEY_ENV = 'CINDY_PI_API_KEY';
 const PI_SESSION_ID_ENV = 'CINDY_PI_SESSION_ID';
 const PI_SESSION_TOKEN_ENV = 'CINDY_PI_SESSION_TOKEN';
+const PI_MCP_BRIDGE_ENV = 'CINDY_PI_MCP_BRIDGE';
+const PI_SECRET_ENV_NAMES_ENV = 'CINDY_PI_SECRET_ENV_NAMES';
 /** 手动压缩 = 一次完整 LLM 摘要调用(大上下文 + 网关排队),远超默认 30s RPC 超时。 */
 const PI_COMPACT_TIMEOUT_MS = 600_000;
 /** 分支摘要同样可能触发一次完整 LLM 调用。 */
@@ -639,6 +641,17 @@ export class PiAgent extends BaseAgent {
         const disposer = this.deps.registerPiProxySession(opts.sessionId, proxySessionToken);
         if (typeof disposer === 'function') disposeProxySession = disposer;
       }
+      // 这些值必须留在 Pi 父进程，供 models.json 的 $ENV 请求期解析及 bridge
+      // client 使用；cindy-bridge 用该**仅含变量名**的清单在 bash spawn 边界剥离
+      // 真值，阻止 LLM shell 绕过工具审批直连 localhost proxy/MCP 或盗用 BYOM key。
+      const piSecretEnvNames = Array.from(new Set([
+        PI_API_KEY_ENV,
+        PI_SESSION_ID_ENV,
+        PI_SESSION_TOKEN_ENV,
+        ...Object.keys(authEnv),
+        ...Object.keys(nativeEnv),
+        ...(mcpBridge && mcpBridge.servers.length > 0 ? [PI_MCP_BRIDGE_ENV] : []),
+      ]));
       const spawnEnv: NodeJS.ProcessEnv = {
         ...process.env,
         ...authEnv,
@@ -646,6 +659,7 @@ export class PiAgent extends BaseAgent {
         ...nativeEnv,
         [PI_SESSION_ID_ENV]: opts.sessionId ?? '',
         [PI_SESSION_TOKEN_ENV]: proxySessionToken,
+        [PI_SECRET_ENV_NAMES_ENV]: JSON.stringify(piSecretEnvNames),
         PI_CODING_AGENT_DIR: agentHome,
         CINDY_PI_PERMISSION_FILE: permissionFile,
         // 嵌入式 runtime 不做启动期联网:关掉 pi 的版本检查与安装遥测
@@ -655,7 +669,7 @@ export class PiAgent extends BaseAgent {
         // 支持者（如 Anthropic）可避免较长会话在短 TTL 后重新计费。
         PI_CACHE_RETENTION: 'long',
         ...(mcpBridge && mcpBridge.servers.length > 0
-          ? { CINDY_PI_MCP_BRIDGE: JSON.stringify(mcpBridge) }
+          ? { [PI_MCP_BRIDGE_ENV]: JSON.stringify(mcpBridge) }
           : {}),
       };
       mergeLoopbackNoProxy(spawnEnv);

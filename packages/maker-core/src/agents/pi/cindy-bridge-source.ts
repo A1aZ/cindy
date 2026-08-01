@@ -32,10 +32,37 @@ export const CINDY_BRIDGE_EXTENSION_SOURCE = String.raw`/**
  */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { createBashTool } from '@earendil-works/pi-coding-agent';
 
 const PERMISSION_TITLE = 'cindy:permission';
 const READONLY_BUILTINS = new Set(['read', 'grep', 'find', 'ls']);
 const FILE_WRITE_BUILTINS = new Set(['edit', 'write']);
+
+// Pi 的模型鉴权、localhost proxy 与 MCP bearer 需要留在父进程 env 供 runtime
+// 按请求解析，但绝不能继承进 LLM 可调用的 bash 子进程。名单由 host 按本次会话
+// 实际注入的动态 BYOM env 生成；permission file 同样隐藏，避免一次获批的 bash
+// 通过改写权限档给后续工具永久提权。
+const SECRET_ENV_NAMES = new Set<string>([
+  'CINDY_PI_SECRET_ENV_NAMES',
+  'CINDY_PI_PERMISSION_FILE',
+  'PI_CODING_AGENT_DIR',
+]);
+try {
+  const names = JSON.parse(process.env.CINDY_PI_SECRET_ENV_NAMES ?? '[]');
+  if (Array.isArray(names)) {
+    for (const name of names) {
+      if (typeof name === 'string' && name.length > 0) SECRET_ENV_NAMES.add(name);
+    }
+  }
+} catch {
+  // host 生成的配置若损坏，仍至少隐藏名单变量与 permission file；权限门继续 fail closed。
+}
+
+function withoutPiSecrets(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  const clean = { ...env };
+  for (const name of SECRET_ENV_NAMES) delete clean[name];
+  return clean;
+}
 
 // 凭证/密钥路径特征由 maker-core 的单一来源生成。bridge 自包含、运行时不能 import，
 // 但不再维护第二份手写名单，避免新增凭证目录时 Pi 静默漏拦。
@@ -228,6 +255,24 @@ async function connectServer(pi: any, server: McpServerRef, token: string): Prom
 }
 
 export default async function cindyBridge(pi: any) {
+  // 覆盖内置 bash：保持 Pi 原生执行/截断/取消语义，只在 spawn 边界剥离 Cindy
+  // 私密变量。模型仍可正常发请求，但它执行的任意命令拿不到 proxy/MCP/BYOM 凭证。
+  const bashTool = createBashTool(process.cwd(), {
+    // PI_SESSION_FILE 会暴露 agentHome，继而让一次获批的 shell 定位并篡改
+    // permission file；其余 PI_SESSION_* 元数据对完成编码任务也不是必需能力。
+    exposeSessionEnvironment: false,
+    spawnHook: ({ command, cwd, env }) => ({
+      command,
+      cwd,
+      env: withoutPiSecrets(env),
+    }),
+  });
+  pi.registerTool({
+    ...bashTool,
+    execute: async (id: string, params: unknown, signal: AbortSignal, onUpdate: unknown) =>
+      bashTool.execute(id, params as any, signal, onUpdate as any),
+  });
+
   // ── 原生会话树桥 ──────────────────────────────────────────────────────────
   // RPC 没有 navigate_tree command；ExtensionCommandContext 才暴露 navigateTree。
   // 参数用 percent-encoded JSON，避免 prompt 命令的空格/斜杠解析污染 payload。

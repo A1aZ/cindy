@@ -157,11 +157,28 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
       token: captured.env.CINDY_PI_SESSION_TOKEN,
     });
     expect(captured.env.CINDY_PI_SESSION_TOKEN).toMatch(/^[A-Za-z0-9_-]{40,}$/);
+    expect(JSON.parse(captured.env.CINDY_PI_SECRET_ENV_NAMES ?? '[]')).toEqual(
+      expect.arrayContaining([
+        'CINDY_PI_API_KEY',
+        'CINDY_PI_SESSION_ID',
+        'CINDY_PI_SESSION_TOKEN',
+      ]),
+    );
     const noProxy = (captured.env.NO_PROXY ?? '').split(',');
     for (const entry of ['corp.internal', '127.0.0.1', 'localhost', '::1']) {
       expect(noProxy).toContain(entry);
     }
     expect(captured.env.no_proxy).toBeUndefined();
+  });
+
+  it('overrides the Pi bash tool and strips host credentials at its spawn boundary', async () => {
+    await start();
+    const { readFileSync } = await import('node:fs');
+    const bridge = readFileSync(path.join(agentHome, 'extensions', 'cindy-bridge.ts'), 'utf8');
+    expect(bridge).toContain("import { createBashTool } from '@earendil-works/pi-coding-agent'");
+    expect(bridge).toContain('env: withoutPiSecrets(env)');
+    expect(bridge).toContain('exposeSessionEnvironment: false');
+    expect(bridge).toContain("'CINDY_PI_PERMISSION_FILE'");
   });
 
   it('models.json carries real cost and maxTokens from the model descriptor', async () => {

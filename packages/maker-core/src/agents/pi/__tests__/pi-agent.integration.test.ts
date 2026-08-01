@@ -859,6 +859,48 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
   );
 
   it(
+    'bash child cannot inherit Pi proxy, MCP, BYOM, or permission-control env',
+    { timeout: 60_000 },
+    async () => {
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-env-isolation-'));
+      try {
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('bash', {
+            command: [
+              'for n in CINDY_PI_API_KEY CINDY_PI_SESSION_ID CINDY_PI_SESSION_TOKEN',
+              'CINDY_PI_MCP_BRIDGE CINDY_PI_KEY_LOCALBYOM CINDY_PI_SECRET_ENV_NAMES',
+              'CINDY_PI_PERMISSION_FILE PI_CODING_AGENT_DIR PI_SESSION_ID PI_SESSION_FILE; do',
+              '  if [ -n "$(printenv "$n")" ]; then printf "PI_ENV_LEAK:%s\\n" "$n"; fi;',
+              'done; printf "PI_ENV_CLEAN\\n"',
+            ].join(' '),
+          }),
+          anthropicStreamBody('env isolation finished'),
+        );
+        const reqBefore = seenRequests.length;
+        await runPermissionTurn({
+          sessionId: 'pi-env-isolation',
+          workingDir,
+          permissionMode: 'ask',
+          resolverBehavior: 'allow',
+        });
+        const lastBody = JSON.parse(seenRequests.slice(reqBefore).at(-1)?.body ?? '{}') as {
+          messages?: Array<{ role?: string; content?: Array<{ type?: string; content?: string }> }>;
+        };
+        const toolResult = lastBody.messages
+          ?.flatMap((message) => message.content ?? [])
+          .find((block) => block.type === 'tool_result')?.content ?? '';
+        expect(toolResult).toContain('PI_ENV_CLEAN');
+        expect(toolResult).not.toContain('PI_ENV_LEAK:');
+        expect(toolResult).not.toContain('test-key-123');
+      } finally {
+        rmSync(workingDir, { recursive: true, force: true });
+        scriptedResponses.length = 0;
+      }
+    },
+  );
+
+  it(
     'auto mode: dangerous bash escalates to the resolver and deny really blocks it',
     { timeout: 60_000 },
     async () => {

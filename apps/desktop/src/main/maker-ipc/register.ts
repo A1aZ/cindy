@@ -2897,7 +2897,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       // EVENT broadcast 后结束逻辑 turn，并保留 terminal grace 给 renderer 收尾；
       // 可重试 error 保持 running。
       shouldMarkTurnTerminalIdleAfterBroadcast = true;
-      if (event.source === 'claude-code' || event.source === 'codex') {
+      if (event.source === 'claude-code' || event.source === 'codex' || event.source === 'pi') {
         turnModelPromiseBySession.delete(session.id);
       }
       const errData = attributedEvent.type === 'error'

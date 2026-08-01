@@ -84,5 +84,39 @@ export function verifyDirDistManifest(destDir) {
     }
     if (actual !== entry.sha256) return false;
   }
+  // 反向精确匹配:目录里不得有清单之外的条目。逐文件哈希只覆盖清单内条目,清单外的
+  // 字节(旧构建残留 / 本地污染)完全不参与校验,却会被 ensure-agent-binaries 跳过刷新、
+  // 被 stagePi 原样打进安装包 —— 成为未验证资产(codex review P1)。故递归枚举实际集合,
+  // 要求与清单精确一致:多出普通文件、或出现任何 symlink/非普通文件(污染向量)即 false。
+  const manifestPaths = new Set(files.map((entry) => entry.path));
+  const actualPaths = [];
+  let sawUnexpectedEntry = false;
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const abs = path.join(dir, entry.name);
+      const rel = path.relative(destDir, abs).split(path.sep).join('/');
+      if (entry.isDirectory()) {
+        walk(abs);
+        continue;
+      }
+      if (MARKER_FILES.has(rel)) continue;
+      // symlink / 设备文件等非普通文件:writeDirDistManifest 从不收录,出现即视为污染。
+      if (!entry.isFile()) {
+        sawUnexpectedEntry = true;
+        continue;
+      }
+      actualPaths.push(rel);
+    }
+  };
+  try {
+    walk(destDir);
+  } catch {
+    return false;
+  }
+  if (sawUnexpectedEntry) return false;
+  if (actualPaths.length !== manifestPaths.size) return false;
+  for (const rel of actualPaths) {
+    if (!manifestPaths.has(rel)) return false;
+  }
   return true;
 }

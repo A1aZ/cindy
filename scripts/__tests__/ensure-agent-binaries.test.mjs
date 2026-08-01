@@ -116,6 +116,20 @@ test('verifyDirDistManifest: rejects size drift, empty manifests, and malformed 
   fs.writeFileSync(path.join(dir, 'photon.wasm'), Buffer.alloc(8, 2));
   assert.equal(verifyDirDistManifest(dir), false);
 
+  // 清单之外的多余文件(旧构建残留 / 本地污染)→ 拒绝(不能作为未验证资产打进安装包)
+  fs.writeFileSync(path.join(dir, 'photon.wasm'), Buffer.alloc(512, 2)); // 复原
+  writeDirDistManifest(dir);
+  assert.equal(verifyDirDistManifest(dir), true);
+  fs.writeFileSync(path.join(dir, 'stray-residue.bin'), Buffer.alloc(16, 3));
+  assert.equal(verifyDirDistManifest(dir), false);
+  fs.rmSync(path.join(dir, 'stray-residue.bin'));
+  assert.equal(verifyDirDistManifest(dir), true); // 移除多余文件后恢复
+  // 嵌套子目录里的多余文件同样拒绝
+  fs.mkdirSync(path.join(dir, 'nested'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'nested', 'extra.json'), '{}');
+  assert.equal(verifyDirDistManifest(dir), false);
+  fs.rmSync(path.join(dir, 'nested'), { recursive: true, force: true });
+
   // 空清单 / 非法结构 → 拒绝
   fs.writeFileSync(path.join(dir, '.manifest'), JSON.stringify({ files: [] }));
   assert.equal(verifyDirDistManifest(dir), false);

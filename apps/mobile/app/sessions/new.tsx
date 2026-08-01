@@ -130,6 +130,7 @@ import {
 import {
   DEFAULT_NEW_SESSION_DRAFT,
   NEW_SESSION_AGENT_OPTIONS,
+  availableNewSessionAgentOptions,
   defaultPermissionModeForNewSessionAgent,
   buildRemoteCreateSessionOptions,
   buildRecentWorkspaceOptions,
@@ -413,6 +414,11 @@ export default function NewRemoteSessionScreen() {
   const [permissionSheetOpen, setPermissionSheetOpen] = useState(false);
   const [permissionSheetSnap, setPermissionSheetSnap] = useState<ContextSheetSnap>('half');
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
+  // 被控端 runtime 已注册的 agent 集合(null = 未拉到 → fail-open 不过滤入口)。据此过滤新建
+  // agent 选项:被控端 Pi 二进制缺失时其 agent map 无 pi,但模型目录仍投影 Pi,不过滤会让用户
+  // 建出最终 requireAgent 报 not-registered 的会话(codex review P2)。
+  const [availableAgentKinds, setAvailableAgentKinds] =
+    useState<ReadonlySet<NewSessionAgentKind> | null>(null);
   // worktree 开关(project 模式 + 已选目录时显示):勾选值存工作端(get-new-maker-defaults
   // 播种 / 显式点击写穿),资格由 worktree:detect-cwd 探测(目录变化即重探,seq 防竞态)。
   const [worktreeProbe, setWorktreeProbe] = useState<NewSessionWorktreeProbeSnapshot | null>(null);
@@ -1188,6 +1194,37 @@ export default function NewRemoteSessionScreen() {
       unsubscribe();
     };
   }, [selectedDeviceId, draft.agentKind, maker, openLink]);
+
+  // 拉被控端 runtime 已注册的 agent 集合(过滤新建 agent 入口)。fail-open:失败/无设备时置 null
+  // (不过滤),真正的兜底是被控端 requireAgent。窗口/设备切换重拉,让按需下载补齐的 Pi 及时出现。
+  useEffect(() => {
+    if (!selectedDeviceId) {
+      setAvailableAgentKinds(null);
+      return;
+    }
+    let cancelled = false;
+    setAvailableAgentKinds(null);
+    void withTransientRemoteRetry(async () => {
+      await openLink(selectedDeviceId);
+      return maker.listAvailableAgents();
+    })
+      .then((agents) => {
+        if (cancelled) return;
+        setAvailableAgentKinds(
+          new Set(
+            (Array.isArray(agents) ? agents : []).filter(
+              (a): a is NewSessionAgentKind => a === 'claude-code' || a === 'codex' || a === 'pi',
+            ),
+          ),
+        );
+      })
+      .catch(() => {
+        /* fail-open:拉取失败不过滤入口(不因一次隧道抖动抹掉合法 agent)。 */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDeviceId, maker, openLink]);
 
   useEffect(() => {
     if (!selectedDeviceId || composerTrigger.kind !== 'slash') {
@@ -2226,6 +2263,15 @@ export default function NewRemoteSessionScreen() {
     });
   }, [draft.agentKind, draft.permissionMode, deviceProviders.providers, deviceProviders.modelVisibilityOverrides, newSessionPreferences, sessions, selectedDeviceId]);
 
+  // 选中的 agent 在被控端未注册(如 Pi 二进制缺失)时,coerce 到首个可用来源,避免用户停在
+  // 被隐藏的选项、并防止创建出注定 requireAgent 报错的会话。仅在已拉到可用集后收敛一次。
+  useEffect(() => {
+    if (!availableAgentKinds) return;
+    if (availableAgentKinds.has(draft.agentKind)) return;
+    const fallback = NEW_SESSION_AGENT_OPTIONS.find((option) => availableAgentKinds.has(option.kind));
+    if (fallback && fallback.kind !== draft.agentKind) switchAgent(fallback.kind);
+  }, [availableAgentKinds, draft.agentKind, switchAgent]);
+
   useEffect(() => {
     if (!selectedDeviceId || draft.workspaceKind !== 'project' || draft.workingDir.trim()) return;
 
@@ -2960,7 +3006,7 @@ export default function NewRemoteSessionScreen() {
                 </Pressable>
                 {agentPickerOpen ? (
                   <View style={styles.agentPickerPanel} testID="newSession.agentPickerPanel">
-                    {NEW_SESSION_AGENT_OPTIONS.map((option) => {
+                    {availableNewSessionAgentOptions(availableAgentKinds).map((option) => {
                       const selected = draft.agentKind === option.kind;
                       return (
                         <Pressable

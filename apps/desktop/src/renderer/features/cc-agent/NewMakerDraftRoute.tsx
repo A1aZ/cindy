@@ -184,6 +184,7 @@ import {
   type AgentCapabilities,
 } from '@/hooks/useAgentCapabilities';
 import { useProviders } from '@/hooks/useProviders';
+import { useAvailableAgents } from '@/hooks/useAvailableAgents';
 import {
   useDeviceProviders,
   evictDeviceProviders,
@@ -656,6 +657,16 @@ export function NewMakerDraftRoute() {
   // 下面 isDeviceLinkDraft 与 create 分支的真值收窄对 undefined 同样成立)。
   const effectiveDeviceLinkDeviceId = draft.deviceLinkDeviceId ?? undefined;
   const effectiveDeviceLinkDeviceName = draft.deviceLinkDeviceName;
+  // 入口门控:只在 runtime 已注册的 agent 上开放创建入口(Pi 二进制缺失时 buildPiAgent 返回
+  // null,agent map 无 pi,但模型目录仍投影 Pi → 需按 maker:list-available-agents 过滤,
+  // 否则一路创建到 requireAgent 的 not-registered 报错,codex review P2)。远程草稿以被控端
+  // 的注册结果为准(hook 传 deviceId 走隧道)。未加载完成时不隐藏任何入口(fail-open)。
+  const { availableVendors, loaded: availableAgentsLoaded } =
+    useAvailableAgents(effectiveDeviceLinkDeviceId);
+  const hiddenSwitcherVendors = useMemo<MakerVendor[]>(() => {
+    if (!availableAgentsLoaded) return [];
+    return (['cc', 'codex', 'pi'] as const).filter((vendor) => !availableVendors.has(vendor));
+  }, [availableAgentsLoaded, availableVendors]);
   /**
    * 「这份草稿要建到对端设备上」—— 只看 deviceId,**不再要求 workingDir**(#807)。
    *
@@ -1747,6 +1758,16 @@ export function NewMakerDraftRoute() {
     },
     [currentPrefs],
   );
+
+  // 当前草稿选中的 vendor 变为不可用(如 Pi 未注册 / 被控端无 Pi)时,coerce 到首个可用来源
+  // (优先 cc),避免 tablist 卡在被隐藏段、且防止创建出注定 requireAgent 报错的会话。
+  // 只在已加载可用性后收敛;fallback 一定可见,收敛一次即稳定(switchVendor 同值早返,不成环)。
+  useEffect(() => {
+    if (!availableAgentsLoaded) return;
+    if (!hiddenSwitcherVendors.includes(draft.vendor)) return;
+    const fallback = (['cc', 'codex', 'pi'] as const).find((vendor) => availableVendors.has(vendor));
+    if (fallback && fallback !== draft.vendor) handleVendorChange(fallback);
+  }, [availableAgentsLoaded, hiddenSwitcherVendors, availableVendors, draft.vendor, handleVendorChange]);
 
   // ─── 用户在 ChatInput 改 model/effort/permission 后,落进当前 vendor 的 prefs ──
   const patchActivePrefs = useCallback((patch: Partial<VendorPrefs>) => {
@@ -3484,6 +3505,7 @@ export function NewMakerDraftRoute() {
                         visualVariant="create-agent"
                         className="shrink-0"
                         disabled={wtCreating}
+                        hiddenVendors={hiddenSwitcherVendors}
                       />
                     }
                     // 协同 toggle(与对话界面同一控件):本地 / SSH 远端 / device-link 项目 draft
@@ -3541,6 +3563,7 @@ export function NewMakerDraftRoute() {
                         visualVariant="create-agent"
                         className="shrink-0"
                         disabled={wtCreating}
+                        hiddenVendors={hiddenSwitcherVendors}
                       />
                     }
                     narrowToolbar={isDraftToolbarNarrow}

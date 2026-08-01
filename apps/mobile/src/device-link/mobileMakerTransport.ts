@@ -350,6 +350,12 @@ export type MobileWorktreeCreateResult =
 export interface MobileMakerTransport {
   createSession(opts: CreateSessionOptions): Promise<CreateSessionResult>;
   getCapabilities(agentKind: MobileAgentKind): Promise<unknown>;
+  /**
+   * 被控端 runtime 已注册的 agent 集合(maker:list-available-agents,在 REMOTE_INVOKE_ALLOWLIST 内)。
+   * 新建会话入口据此过滤:Pi 二进制缺失时被控端 agent map 无 pi,但模型目录仍投影 Pi,不过滤
+   * 会让用户建出最终 requireAgent 报 not-registered 的会话(codex review P2)。
+   */
+  listAvailableAgents(): Promise<MobileAgentKind[]>;
   getSessionTree(sessionId: string): Promise<unknown | null>;
   navigateSessionTree(
     sessionId: string,
@@ -601,6 +607,7 @@ export function createMobileMakerTransport({
   return {
     createSession: (opts) => call('maker:create-session', [opts]),
     getCapabilities: (agentKind) => call('maker:get-capabilities', [agentKind]),
+    listAvailableAgents: () => call('maker:list-available-agents', []),
     // 分支(session tree)读取/切换:transport passthrough 已就位,但**移动端会话页尚无
     // 分支列表/切换 UI 调用它们**——明确标记为 deferred(不是遗漏)。这两个 channel 已在
     // MOBILE_REMOTE_INVOKE_CHANNELS allowlist 内,供被控桌面端经 device-link 复用及未来

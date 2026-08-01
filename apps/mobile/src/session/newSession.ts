@@ -13,6 +13,21 @@ export const NEW_SESSION_AGENT_OPTIONS: readonly { kind: NewSessionAgentKind; la
   { kind: 'pi', label: 'Pi' },
 ];
 
+/**
+ * 按被控端 runtime 已注册的 agent 集合过滤新建入口(maker:list-available-agents)。
+ * `available === null` = 尚未拉到 → fail-open 返回全部(避免异步期间误隐藏合法 agent);
+ * 拉到后只保留已注册的 kind —— Pi 二进制缺失时被控端无 pi,过滤掉可防用户建出最终
+ * requireAgent 报 not-registered 的会话(codex review P2)。
+ */
+export function availableNewSessionAgentOptions(
+  available: ReadonlySet<NewSessionAgentKind> | null,
+): readonly { kind: NewSessionAgentKind; label: string }[] {
+  if (!available) return NEW_SESSION_AGENT_OPTIONS;
+  const filtered = NEW_SESSION_AGENT_OPTIONS.filter((option) => available.has(option.kind));
+  // 防御:被控端异常返回空集时不至于把入口清空到无法创建(至少保留 Claude)。
+  return filtered.length > 0 ? filtered : NEW_SESSION_AGENT_OPTIONS.filter((o) => o.kind === 'claude-code');
+}
+
 export interface NewSessionDraft {
   agentKind: NewSessionAgentKind;
   workspaceKind: NewSessionWorkspaceKind;

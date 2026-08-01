@@ -446,6 +446,7 @@ import {
 import {
   getSessionProvider,
   hydrateSessionProvider,
+  normalizeSessionProviderId,
   setSessionProvider,
 } from '../maker-host/session-provider-store.js';
 import { getActiveCatalog, setDiscoveredProviderModels } from '../maker-host/active-catalog.js';
@@ -540,6 +541,7 @@ import { resolveClearSessionBoundary } from './clearSessionBoundary.js';
 import { tapWindowBroadcast } from '../device-link/broadcast-tap.js';
 import { setBusyProbe as setDeviceLinkBusyProbe } from '../device-link/index.js';
 import {
+  markRemoteSettingPersistedInsideHandler,
   setRemoteWorkingDirGuard as setDeviceLinkRemoteWorkingDirGuard,
   setRemoteSettingsPersist as setDeviceLinkRemoteSettingsPersist,
 } from '../device-link/dispatch.js';
@@ -647,6 +649,77 @@ const interruptedTurnAutoResumeGuard = new InterruptedTurnAutoResumeGuard({
   },
 });
 
+// Schedule 不另建重试状态机：真正的恢复仍由 AgentInputCoordinator +
+// AutoResumeBookkeeping 独占。这里仅把「这一轮 scheduler run 已被普通自动续跑接管」
+// 和「最终仍失败」桥给 runner，让同一个 run 继续等待或正确失败。
+const pendingSchedulerAutoResumeRunBySession = new Map<string, string>();
+const schedulerAutoResumeFailureListeners = new Map<string, Set<() => void>>();
+
+function schedulerAutoResumeRunKey(sessionId: string, runId: string): string {
+  return JSON.stringify([sessionId, runId]);
+}
+
+function beginSchedulerAutoResume(sessionId: string, runId: string): void {
+  pendingSchedulerAutoResumeRunBySession.set(sessionId, runId);
+}
+
+function clearSchedulerAutoResumePending(sessionId: string, runId: string): void {
+  if (pendingSchedulerAutoResumeRunBySession.get(sessionId) === runId) {
+    pendingSchedulerAutoResumeRunBySession.delete(sessionId);
+  }
+}
+
+function notifySchedulerAutoResumeFailed(sessionId: string, runId: string): void {
+  clearSchedulerAutoResumePending(sessionId, runId);
+  const listeners = schedulerAutoResumeFailureListeners.get(
+    schedulerAutoResumeRunKey(sessionId, runId),
+  );
+  if (!listeners) return;
+  for (const listener of listeners) {
+    try {
+      listener();
+    } catch {
+      // Runner listener failures must not break chat recovery cleanup.
+    }
+  }
+}
+
+function failPendingSchedulerAutoResume(sessionId: string): void {
+  const runId = pendingSchedulerAutoResumeRunBySession.get(sessionId);
+  if (runId) notifySchedulerAutoResumeFailed(sessionId, runId);
+}
+
+export function isSchedulerAutoResumePending(sessionId: string, runId: string): boolean {
+  return pendingSchedulerAutoResumeRunBySession.get(sessionId) === runId;
+}
+
+export function onSchedulerAutoResumeFailed(
+  sessionId: string,
+  runId: string,
+  listener: () => void,
+): () => void {
+  const key = schedulerAutoResumeRunKey(sessionId, runId);
+  let listeners = schedulerAutoResumeFailureListeners.get(key);
+  if (!listeners) {
+    listeners = new Set();
+    schedulerAutoResumeFailureListeners.set(key, listeners);
+  }
+  listeners.add(listener);
+  return () => {
+    listeners!.delete(listener);
+    if (listeners!.size === 0) schedulerAutoResumeFailureListeners.delete(key);
+  };
+}
+
+/** Schedule pause/delete：只撤销仍属于该 run 的普通聊天自动续跑。 */
+export function cancelSchedulerAutoResume(sessionId: string, runId: string): boolean {
+  if (!isSchedulerAutoResumePending(sessionId, runId)) return false;
+  // teardown 是既有唯一生命周期出口：撤退避、清 coordinator 接管与隐藏续跑、
+  // 结算活动行并通知 runner。runId 校验防止迟到的旧 abort 误杀新 run。
+  autoResumeBookkeeping.teardown(sessionId);
+  return true;
+}
+
 /**
  * 中断自愈的每会话簿记(压住的错误详情 / 待确认的重连记录 / 退避排期)。
  *
@@ -666,8 +739,20 @@ const autoResumeBookkeeping = new AutoResumeBookkeeping({
   // holder 是可变绑定,必须懒读(模块初始化时 coordinator 还没建)。
   abandonTakeover: (sessionId, message) =>
     agentInputCoordinatorHolder?.abandonAutoResume(sessionId, message),
+  onAutoResumeFailed: failPendingSchedulerAutoResume,
   log: (message, fields) => log.debug(message, fields),
 });
+
+function settleUndispatchedAutoResumeOutcome(
+  sessionId: string,
+  item: AgentInputQueuedMessage,
+): boolean {
+  if (!autoResumeBookkeeping.isPendingOutcomeClientId(sessionId, item.clientId)) return false;
+  // markOutcome 复用 durable-write 队列；持久化中取消时，failed patch 会排在
+  // 正在进行的 user row insert 后面，不会出现先 patch、后 insert 的窗口。
+  autoResumeBookkeeping.settleOutcome(sessionId, 'failed');
+  return true;
+}
 
 /**
  * 非 renderer 发送路径(scheduler runner / hook runner)调用:给 silent-stop
@@ -4002,10 +4087,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // 必须是本机当前可访问的目录,挡掉控制端用任意路径越权起进程或执行 git。
   setDeviceLinkRemoteWorkingDirGuard(checkRemoteWorkingDir);
 
-  // device-link 远程 set-* 持久化回流:控制端远程切 model/effort/permission/fastMode/extraDirs
-  // 时,被控端 set-* 只改运行时不落库;这里注入「写被控端 DB + 广播 patched」,让控制端镜像
-  // 收敛到被控端真相(取代控制端乐观覆盖)。必须 await DB 写入后才回 invoke-result,否则控制端会
-  // 过早同步新聊天草稿默认值,与被控端未来 resume 的真实 row 脱节。
+  // device-link 远程 set-* 持久化回流:effort/permission/fastMode/extraDirs 等
+  // runtime-only handler 经这个注入写被控端 DB + 广播 patched。SET_MODEL 是例外:
+  // 它必须在自己的 session 锁内直接调 persistSessionFields，防队列 drain 夹在
+  // runtime 切换与 DB 落盘之间。两条路径都必须 await 持久化后才回 invoke-result。
   setDeviceLinkRemoteSettingsPersist(async (sessionId, patch) => {
     try {
       await persistSessionFields(sessionId, patch);
@@ -4177,6 +4262,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // host 级 optional 能力；旧 desktop 缺省为 false。两个 agent 查询都带回，
       // 手机读取当前 agent 快照即可决定是否展示切换入口。
       supportsSessionAgentSwitch: true,
+      // v2 因果能力：同引擎 no-op 返回 revision，后续 SET_MODEL 在 session 锁内 CAS。
+      // 新 desktop 控制端据此与只有基础切换能力的旧 host 做安全兼容门控。
+      supportsSessionAgentSwitchCas: true,
     };
   });
 
@@ -5408,6 +5496,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           model: sessions.model,
           sdkSessionId: sessions.sdkSessionId,
           providerId: sessions.providerId,
+          effort: sessions.effort,
+          fastMode: sessions.fastMode,
         })
         .from(sessions)
         .where(eq(sessions.id, sessionId))
@@ -5422,19 +5512,23 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         });
         co.agentKind = dbMakerKind;
       }
-      // 意图制切换下,renderer 的 createOpts 快照构建于 send 事务内 apply 之前
-      // (乐观翻转后 agentKind 可能已一致,但 model/resume/providerId 仍是旧值,
+      // 意图制切换 / 凭证形态切换下,renderer 与排队项的 createOpts 快照构建于 send
+      // 事务内 apply 之前。agentKind 可能已一致,但 model/resume/providerId/effort/fast
+      // 仍是旧值；
       // 尤其 resumeSessionId 可能是**旧引擎**的原生会话 id——resume 会以错误引擎
-      // 解释它)。lazy-create 时刻 DB 行是唯一真源,三个字段无条件对齐。
+      // 解释它)。lazy-create 时刻 DB 行是唯一真源,执行字段无条件对齐。
       co.model = row.model ?? undefined;
       co.resumeSessionId = row.sdkSessionId ?? undefined;
       co.providerId = row.providerId;
+      co.effort = (row.effort ?? undefined) as CreateOpts['effort'];
+      co.fastMode = !!row.fastMode;
     } catch {
       // 校正读库失败按原 opts 继续(与切换功能上线前行为一致)。
     }
   }
 
   const agentSwitchDeps: MakerSessionAgentSwitchHandlerDeps = {
+    withSessionLock: withSendToSessionLock,
     // 停用轴边界裁决:目标路由被停用 → 抛错;隐式默认落点被停用 → 返回启用替代来源。
     assertModelRouteUsable: (agent, model, providerId) =>
       assertModelRouteUsable(agent, model, providerId),
@@ -7950,7 +8044,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       autoResumeBookkeeping.flushSuppressedError(sessionId);
       getAgentIslandService()?.restoreTaskFailureSound(sessionId);
     },
-    onResumableTurnError: (sessionId: string, signals: InterruptedTurnErrorSignals) => {
+    onResumableTurnError: (
+      sessionId: string,
+      signals: InterruptedTurnErrorSignals,
+      item: AgentInputQueuedMessage,
+    ) => {
       if (!isInterruptedTurnError(signals)) return null;
       const erroredAt = Date.now();
       const decision = interruptedTurnAutoResumeGuard.onInterruptedTurn(sessionId, erroredAt);
@@ -7981,6 +8079,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         sessionTotal: decision.sessionTotal,
         delayMs: decision.delayMs,
       });
+      const schedulerRunId =
+        item.origin?.kind === 'scheduler' && typeof item.origin.runId === 'string'
+          ? item.origin.runId
+          : null;
+      if (schedulerRunId) beginSchedulerAutoResume(sessionId, schedulerRunId);
       // 排期的撤旧、补落与令牌都在 AutoResumeBookkeeping.schedule 里(带单测),这里只给
       // 退避时长和到点要干的事。
       autoResumeBookkeeping.schedule(sessionId, decision.delayMs, () => {
@@ -8005,7 +8108,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               log.debug('interrupted-turn auto-resume not dispatched', { sessionId, outcome });
               return;
             }
-            // 自愈成功:压住的错误就此丢弃,用户看到的是「已自动继续」分隔条。
+            // 入队成功后沿用普通聊天语义丢弃被压住的错误；Schedule 的 run 接管标记
+            // 不能在这里清：resumed 只表示续跑项已经进队。标记会在续跑项即将进入
+            // vendor 前清掉，让同步返回的新 terminal error 只能靠**本 attempt**重新接管；
+            // 派发前被 Stop / clear / ghost block 丢弃时仍由 discard/undispatched 回调
+            // 立即失败同一个 run。
             autoResumeBookkeeping.discardSuppressedError(sessionId);
             log.info('interrupted-turn auto-resume dispatched', { sessionId });
           } catch (err) {
@@ -8086,6 +8193,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       return orcaInterAgentDispatcher.runQueuedOrcaInterAgentAcceptedCallback(sessionId, item);
     },
     onDispatchedUserTurn: async (sessionId, item, preVendorDispatchAt): Promise<void> => {
+      if (
+        item.autoResume &&
+        item.origin?.kind === 'scheduler' &&
+        typeof item.origin.runId === 'string' &&
+        // sendToAgent may synchronously emit the next recoverable terminal error.
+        // In that case the coordinator already owns a renewed auto-resume attempt;
+        // this older dispatch must not clear the same scheduler run's new claim.
+        !inputCoordinator.isAutoResumePending(sessionId)
+      ) {
+        clearSchedulerAutoResumePending(sessionId, item.origin.runId);
+      }
       // 「继续任务」只能在 vendor dispatch 不可逆后 durable ack：
       // - enqueue 时 ack：排队可取消，旧中断横幅回不来；
       // - onAccepted 时 ack：仍可能 cancelled-before-dispatch，且无新 started，
@@ -8103,16 +8221,31 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
     },
     noteSessionClearBoundary,
-    // 用户点了错误横幅的「重试」→ hook 侧把这一轮接回渠道那条已收口的消息。
-    // 这是权威来源: 零产出重试重发的是原文, 从文本认不出重试意图(见 deps 注释)。
-    onUiRetry: publishUiContinuation,
+    // 失败 turn 重试 → hook 侧把这一轮接回渠道那条已收口的消息。source 区分
+    // 人工与自动续跑：只有真人接手才作废 scheduler waiter，自动路径不能取消自己。
+    onUiRetry: (sessionId, clientId, source) => {
+      if (source === 'manual') {
+        // UI continuation can dispatch before the scheduler backoff callback.
+        // Retire that pending waiter first so it cannot consume the manual retry.
+        failPendingSchedulerAutoResume(sessionId);
+      }
+      publishUiContinuation(sessionId, clientId);
+    },
     // 新消息进队 → 作废该会话的待续跑记账(渠道那条旧消息已被别的内容取代)。
     // 用 enqueue 入口而不是消息文本: 零产出重试重发的是原文, 文本上无从区分,
     // 而它走 unshift 不经这里, 于是不会把自己的回流作废掉。
-    onUserEnqueue: publishUiSessionIntervention,
+    onUserEnqueue: (sessionId) => {
+      // The user turn can dispatch before the backoff callback observes that its
+      // recovery was superseded. Fail the scheduler waiter synchronously so it
+      // cannot consume that unrelated turn's text/done as this run's result.
+      failPendingSchedulerAutoResume(sessionId);
+      publishUiSessionIntervention(sessionId);
+    },
     // 队列项未派发即被丢弃(stop/remove/clearSession) → 释放暂存的 accepted 副作用, 防回调表泄漏。
-    onDiscardedQueuedMessage: (_sessionId, item) => {
+    onDiscardedQueuedMessage: (sessionId, item) => {
       orcaInterAgentDispatcher.discardQueuedOrcaInterAgentAcceptedCallback(item.clientId);
+      // 持久化中的项在这里被取消后不会再走 onUndispatchedUserTurn，复用同一结算出口。
+      settleUndispatchedAutoResumeOutcome(sessionId, item);
       // 排队心跳被丢弃 → 通知 runner 按 aborted 收尾对应 run,不让 fire 永久挂起。
       const watcher = schedulerQueuedPromptDiscardWatchers.get(item.clientId);
       if (watcher) {
@@ -8125,6 +8258,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             error: err instanceof Error ? err.message : String(err),
           });
         }
+      }
+      if (
+        item.autoResume &&
+        item.origin?.kind === 'scheduler' &&
+        typeof item.origin.runId === 'string'
+      ) {
+        // 续跑还没跨过持久化边界，不会进入 onUndispatchedUserTurn；把普通聊天守卫
+        // 的 pendingResume 一并回滚，避免本次 Stop / block 让后续中断永远失去自愈。
+        interruptedTurnAutoResumeGuard.noteResumeSendFailed(sessionId);
+        notifySchedulerAutoResumeFailed(sessionId, item.origin.runId);
       }
     },
     hasPendingCredentialSwitch: (sessionId) => {
@@ -8158,6 +8301,18 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     onUserMessageRewritten: (sessionId, item, info) =>
       broadcastGhostMessageRewritten({ sessionId, clientId: item.clientId, ...info }),
     beforeDispatchUserTurn: (sessionId, item) => {
+      if (
+        item.autoResume &&
+        item.origin?.kind === 'scheduler' &&
+        typeof item.origin.runId === 'string'
+      ) {
+        // 旧 attempt 的接管标记不能跨进下一次 vendor dispatch：sendToAgent 可能在
+        // 返回前同步发出新的 terminal error。先清旧标记后，可恢复错误会由同一条
+        // onResumableTurnError 链重新 begin；认证/计费等确定性错误则保持未接管，
+        // runner 会立即失败。若在真正 dispatch 前取消，下面的 undispatched 回调
+        // 仍会按 item.origin 精确通知对应 run，不会静默丢失。
+        clearSchedulerAutoResumePending(sessionId, item.origin.runId);
+      }
       // hook 续跑回流的**权威归属点**: 在 vendor dispatch 之前(本回调被 await), 所以
       // 观察器挂上就不丢正文开头, 而 live session 此刻必然已就绪。clientId 对得上的
       // 才是目标续跑轮 —— 绕过 coordinator 的 turn(silent-stop 自动续跑)不走这里,
@@ -8173,11 +8328,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // 它不会产生任何 turn 事件,新加的终态结算路径够不到它,待确认记录于是悬空,被之后
       // 任何一个无关的 text / tool 事件误标成「已重新连接」(codex P1)。
       // 按 clientId 匹配 —— 别的 turn 未派发不该动这条记录。
-      if (autoResumeBookkeeping.isPendingOutcomeClientId(sessionId, item.clientId)) {
-        autoResumeBookkeeping.settleOutcome(sessionId, 'failed');
+      if (settleUndispatchedAutoResumeOutcome(sessionId, item)) {
         // 同时把守卫的 pendingResume 回滚:不回滚会让该会话之后的中断永远被判成
         // 「上一次还在路上」,再也不自愈(不变量 I5)。
         interruptedTurnAutoResumeGuard.noteResumeSendFailed(sessionId);
+      }
+      if (
+        item.autoResume &&
+        item.origin?.kind === 'scheduler' &&
+        typeof item.origin.runId === 'string'
+      ) {
+        notifySchedulerAutoResumeFailed(sessionId, item.origin.runId);
       }
     },
     // Thread 3 fix: called from drain/dispatchCompact failure paths where the item
@@ -8956,7 +9117,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // session 不存在(被 close / 还没 send 创建出来)就 no-op 不报错, 让 renderer
   // 可以乐观调用 (UI 更新先行, IPC 失败也不会回滚 UI, 老 agentManager 同语义)。
 
-  ipcMain.handle(MAKER_INVOKE.SET_MODEL, async (_e, sessionId: unknown, model: unknown, providerId?: unknown) => {
+  ipcMain.handle(MAKER_INVOKE.SET_MODEL, async (
+    _e,
+    sessionId: unknown,
+    model: unknown,
+    providerId?: unknown,
+    expectedAgentSwitchRevision?: unknown,
+    selection?: unknown,
+  ) => {
     if (typeof sessionId !== 'string' || typeof model !== 'string') {
       throwIpcError('INVALID_PARAMS', 'sessionId + model required');
     }
@@ -8967,10 +9135,41 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     ) {
       throwIpcError('INVALID_PARAMS', 'providerId must be string, null, or undefined');
     }
+    if (
+      expectedAgentSwitchRevision !== undefined &&
+      (typeof expectedAgentSwitchRevision !== 'number' ||
+        !Number.isSafeInteger(expectedAgentSwitchRevision) ||
+        expectedAgentSwitchRevision < 0)
+    ) {
+      throwIpcError('INVALID_PARAMS', 'expectedAgentSwitchRevision must be a non-negative integer');
+    }
+    if (
+      selection !== undefined &&
+      (
+        selection === null ||
+        typeof selection !== 'object' ||
+        Array.isArray(selection) ||
+        typeof (selection as { effort?: unknown }).effort !== 'string' ||
+        typeof (selection as { fastMode?: unknown }).fastMode !== 'boolean'
+      )
+    ) {
+      throwIpcError('INVALID_PARAMS', 'selection must contain effort + fastMode');
+    }
+    const atomicSelection = selection as
+      | { effort: string; fastMode: boolean }
+      | undefined;
     // 与 send 事务共用 session 锁:发送时刻执行的跨引擎切换必须先落定,
     // 后到的 SET_MODEL 才能写 route。否则切换 DB await 恢复后会用旧 provider
     // 覆盖用户刚选的新 route，形成 DB 与进程内路由分叉。
     return withSendToSessionLock(sessionId, async () => {
+      // 同引擎重选是 switch ack 后的第二段写入。另一控制端若在两段之间更新（含
+      // set→clear ABA），修订号已变化：旧 SET_MODEL 必须在任何 route/DB 副作用前让位。
+      if (
+        typeof expectedAgentSwitchRevision === 'number' &&
+        agentSwitchPending.revision?.(sessionId) !== expectedAgentSwitchRevision
+      ) {
+        return { deferred: false, superseded: true };
+      }
       // 停用轴准入(PR #744 review;第十二轮移入锁内):切换模型是一次新的路由选择,
       // 不得切到用户停用的模型 / 来源(本机选择器已过滤,但本 channel 在 device-link
       // allowlist 内,老控制端可直接点名)。裁决必须在拿到会话锁**之后**执行 ——
@@ -9017,7 +9216,56 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         );
         // deferred = 会话自己在跑,选择已登记、turn 结束自动生效。renderer 据此提示
         // "任务结束后生效"而不是当成已即时切换。
-        return { deferred: result.status === 'deferred' };
+        const response = { deferred: result.status === 'deferred', superseded: false };
+        if (atomicSelection) {
+          // model/provider/effort/fast 是一次选择快照，必须在同一把 session 锁内收敛。
+          // applyRuntimeSetModelChange 可能 close + wake；若 effort/fast 留给 renderer
+          // 后续独立调用，queue drain 会用新 model + 旧偏好重建，跨控制端时还会发生
+          // 旧请求尾写覆盖新选择。
+          setSessionEffort(sessionId, atomicSelection.effort);
+          setSessionFastMode(sessionId, atomicSelection.fastMode);
+          const sess = maker.getSession(sessionId);
+          if (
+            sess &&
+            result.status !== 'deferred' &&
+            !pendingCredentialSwitchHolder?.has(sessionId)
+          ) {
+            await sess.setEffort(
+              atomicSelection.effort as
+                | 'minimal'
+                | 'low'
+                | 'medium'
+                | 'high'
+                | 'xhigh'
+                | 'max'
+                | 'ultra',
+            );
+            if (sess.agentKind === 'codex') {
+              await sess.setFastMode(atomicSelection.fastMode);
+            }
+          }
+        }
+        if (isDeviceLinkInvoke() || atomicSelection) {
+          // device-link 的通用持久化原本发生在 handler 返回、session 锁释放之后；
+          // 本地 renderer 的 sessionService.update 也有同一窗口。凡携带 selection 的
+          // 新调用都由 host 在解锁前一次落定全部字段。
+          const patch: Record<string, unknown> = { model };
+          if (effectiveProviderId !== undefined) {
+            patch.providerId = normalizeSessionProviderId(
+              typeof effectiveProviderId === 'string' ? effectiveProviderId : null,
+            );
+          }
+          if (atomicSelection) {
+            patch.effort = atomicSelection.effort;
+            patch.fastMode = atomicSelection.fastMode;
+          }
+          await persistSessionFields(sessionId, patch);
+          if (isDeviceLinkInvoke()) {
+            // dispatch 继续兼容最小/旧 handler 的锁外回流；标记本结果避免重复写。
+            markRemoteSettingPersistedInsideHandler(response);
+          }
+        }
+        return response;
       } catch (err) {
         if (err instanceof CredentialModeSwitchBusyError) {
           // 兜底(正常路径 busy 已转 deferred):切模型撞上凭证切换忙,独立 code,

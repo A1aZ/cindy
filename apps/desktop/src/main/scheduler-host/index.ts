@@ -32,10 +32,13 @@ import { getDesktopNotificationsEnabled } from '../notificationService.js';
 import {
   acquirePendingAgentSwitchForDirectSend,
   broadcastSessionCreated,
+  cancelSchedulerAutoResume,
   enqueueSchedulerPrompt,
   hasQueuedSchedulerPrompt,
+  isSchedulerAutoResumePending,
   isSchedulerPromptTracked,
   isSchedulerTargetSessionBusy,
+  onSchedulerAutoResumeFailed,
   removeQueuedSchedulerPrompt,
 } from '../maker-ipc/register.js';
 import { DrizzleScheduleStorage, type SchedulerDrizzleDb } from './storage';
@@ -97,6 +100,9 @@ export async function startScheduler(deps: StartSchedulerDeps): Promise<Schedule
       enqueuePrompt: enqueueSchedulerPrompt,
       removeQueuedPrompt: removeQueuedSchedulerPrompt,
       isPromptTracked: isSchedulerPromptTracked,
+      isAutoResumePending: isSchedulerAutoResumePending,
+      onAutoResumeFailed: onSchedulerAutoResumeFailed,
+      cancelAutoResume: cancelSchedulerAutoResume,
     },
   });
   const scriptRunner = new ScriptScheduleRunner({

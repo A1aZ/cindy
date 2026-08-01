@@ -575,7 +575,12 @@ describe('sendToSession ordering', () => {
     expect(ipcCreateBlock).toContain("if (!label.ok) throwIpcError('INVALID_PARAMS', label.message);");
     expect(ipcCreateBlock).toContain('label: label.value,');
     expect(orcaWorkerCreationServiceSource).toContain('budgetModelRequiresApiKey(params.agent, resolved.model, deps.readClaudeApiKey() != null)');
-    expect(orcaWorkerCreationServiceSource).toContain("(input.agent === 'codex' && input.fast !== undefined)");
+    expect(orcaWorkerCreationServiceSource).toContain(
+      'agentConsumesExplicitFast(input.agent) && input.fast !== undefined',
+    );
+    expect(orcaWorkerCreationServiceSource).toContain(
+      "return agent === 'codex' || agent === 'pi';",
+    );
     expect(orcaLifecycleServiceSource).toContain('createWorkerInTeam({ ...params, teamId: team.id })');
   });
 

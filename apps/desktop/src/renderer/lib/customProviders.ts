@@ -9,7 +9,7 @@
  *     串行暂存 / 回滚，跨窗口 mutation 不会被较早请求的迟到回滚覆盖。
  */
 
-import { customProviderHeaderStorageKey, customProviderSecretStorageKey } from '@/../shared/providerSecrets';
+import { customProviderSecretStorageKey } from '@/../shared/providerSecrets';
 
 import { DEFAULT_CUSTOM_CONTEXT_WINDOW } from '@cindy/model-providers';
 import type {
@@ -127,29 +127,9 @@ export async function readCustomProviderKey(
   }
 }
 
-/**
- * 读取该自定义供应商**某 runtime** 本机已存的鉴权请求头(Authorization / x-api-key 等)。
- * 与 API key 同一窄接口(safeStorage 直读),因为 provider:list 已一律剥离头凭证,不再回读
- * 明文;仅供编辑态回填与「刷新模型」按需复用旧头。无 / 读失败 / 结构非法返回 null。
- */
-export async function readCustomProviderHeaders(
-  providerId: string,
-  agent: AgentKind,
-): Promise<Record<string, string> | null> {
-  try {
-    const raw = await window.electronAPI.safeStorageRead(
-      customProviderHeaderStorageKey(providerId, agent),
-    );
-    if (!raw) return null;
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    const entries = Object.entries(parsed as Record<string, unknown>);
-    if (entries.some(([name, value]) => !name || typeof value !== 'string')) return null;
-    return Object.fromEntries(entries) as Record<string, string>;
-  } catch {
-    return null;
-  }
-}
+// 鉴权请求头是 main-only 密文(isRendererAccessibleSafeStorageKey 明确拒 provider_headers_
+// 前缀,与 API key 不同),renderer 不得回读明文。编辑时不再向 renderer 暴露头值:未在
+// 表单显式改动请求头,update 由 main 侧保留旧值(planProviderHeaderMutations 'update' 分支)。
 
 /** 新建：配置与 runtime 密钥交给 main 的同一 provider mutation queue。 */
 export async function createCustomProvider(

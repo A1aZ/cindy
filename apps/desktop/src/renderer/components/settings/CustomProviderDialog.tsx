@@ -35,7 +35,6 @@ import { PiMark } from '@/components/icons/PiMark';
 import { extractIpcError } from '@/utils/ipcError';
 import {
   createCustomProvider,
-  readCustomProviderHeaders,
   readCustomProviderKey,
   replaceCustomProviderModelId,
   updateCustomProvider,
@@ -475,17 +474,15 @@ export function CustomProviderDialog({
     [setRtSynced],
   );
 
-  // 编辑态：回填各已配置 runtime 的已存明文密钥（用户本机自己的 key）与鉴权请求头——
+  // 编辑态：回填各已配置 runtime 的已存明文密钥（用户本机自己的 key）——
   // 让密钥框「能看」(eye 显形 / 可核对)，而非空白遮罩；据此点亮「已保存」徽标。
-  // 头凭证已不再随 provider:list 下发(见 providerHandlers withoutProviderHeaderCredentials),
-  // 编辑态改从 readCustomProviderHeaders 窄读取回填,否则保存会把旧头静默清空(codex review)。
+  // 鉴权请求头是 main-only 密文,不回读进表单;未显式改动时由 main 侧 update 保留旧值。
   useEffect(() => {
     if (!editing || !initial) return;
     let cancelled = false;
     void (async () => {
       const nextHas: Record<DialogAgentKind, boolean> = { 'claude-code': false, codex: false, pi: false };
       const fetched: Partial<Record<DialogAgentKind, string>> = {};
-      const fetchedHeaders: Partial<Record<DialogAgentKind, Record<string, string>>> = {};
       for (const a of AGENTS) {
         if (!initial.runtimes[a]) continue;
         const k = await readCustomProviderKey(initial.id, a);
@@ -493,8 +490,6 @@ export function CustomProviderDialog({
           nextHas[a] = true;
           fetched[a] = k;
         }
-        const h = await readCustomProviderHeaders(initial.id, a);
-        if (h && Object.keys(h).length > 0) fetchedHeaders[a] = h;
       }
       if (cancelled) return;
       setHasKey(nextHas);
@@ -502,13 +497,6 @@ export function CustomProviderDialog({
         const next = { ...prev };
         for (const a of AGENTS) {
           if (fetched[a] != null) next[a] = { ...next[a], apiKey: fetched[a] as string };
-          const h = fetchedHeaders[a];
-          if (h) {
-            next[a] = {
-              ...next[a],
-              headers: Object.entries(h).map(([name, value]) => ({ name, value })),
-            };
-          }
         }
         return next;
       });

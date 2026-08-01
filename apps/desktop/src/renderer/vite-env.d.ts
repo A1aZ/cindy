@@ -3922,6 +3922,8 @@ interface ElectronAPI {
       modelsUrl?: string | null;
       apiKey?: string | null;
       headers?: Record<string, string>;
+      /** 已保存供应商 id:main 侧据此并入 main-only 鉴权请求头(renderer 不回读明文头)。 */
+      savedProviderId?: string;
     }) => Promise<{
       ok: boolean;
       models?: { id: string; name: string; contextWindow?: number }[];

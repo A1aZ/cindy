@@ -169,7 +169,7 @@ describe('provider:list IPC handler', () => {
 
   it('strips runtime header credentials even for the trusted local settings editor', async () => {
     // codex review:任何 Renderer 注入都能读走 provider:list 明文头凭证,连本机主页面也不例外。
-    // 编辑态改走 readCustomProviderHeaders 窄读取,provider:list 一律不回传 headerOverride。
+    // 头凭证 main-only 不回传;编辑时未改动的头由 main 侧 update 保留,provider:list 一律不回传 headerOverride。
     const harness = new IpcHarness();
     const provider = {
       ...fakeView('custom', true),
@@ -838,6 +838,80 @@ describe('provider:custom:* CRUD handlers', () => {
       },
     })).rejects.toThrow(/simulated header write failure/);
     expect(headers.get('pi')).toEqual({ Authorization: 'Bearer old' });
+  });
+
+  it('preserves stored headers when an update omits them (edit name/model without touching headers)', async () => {
+    // codex review:头凭证 main-only、不回读进表单,所以“runtime 仍在但配置没带 headers”
+    // = 用户没动请求头 → 必须保留旧值,不能当删除,否则仅改名称/模型就清掉鉴权头。
+    mountDb();
+    const harness = new IpcHarness();
+    const headers = new Map<AgentKind, Record<string, string>>();
+    const removeCustomProviderHeaders = vi.fn((_providerId, agent: AgentKind) => {
+      headers.delete(agent);
+      return { success: true };
+    });
+    const storeCustomProviderHeaders = vi.fn((_providerId, agent: AgentKind, value: Record<string, string>) => {
+      headers.set(agent, { ...value });
+      return true;
+    });
+    registerProviderHandlers(harness, makeDeps({
+      readCustomProviderHeadersForMutation: vi.fn((_providerId, agent: AgentKind) => headers.get(agent) ?? null),
+      storeCustomProviderHeaders,
+      removeCustomProviderHeaders,
+    }));
+    const base: CustomProviderConfig = {
+      id: 'keep-headers',
+      name: 'Keep Headers',
+      auth: { method: 'apiKey' },
+      runtimes: {
+        pi: {
+          baseUrl: 'https://keep.example/v1',
+          models: [{ id: 'm', name: 'M' }],
+          headers: { Authorization: 'Bearer keepme' },
+        },
+      },
+    };
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, base)).resolves.toEqual({ ok: true });
+    expect(headers.get('pi')).toEqual({ Authorization: 'Bearer keepme' });
+
+    removeCustomProviderHeaders.mockClear();
+    storeCustomProviderHeaders.mockClear();
+    // 更新只改模型名,runtime 仍在但不带 headers 字段(表单不回读头,故为空)。
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+      ...base,
+      runtimes: {
+        pi: {
+          baseUrl: 'https://keep.example/v1',
+          models: [{ id: 'm', name: 'M renamed' }],
+        },
+      },
+    })).resolves.toEqual({ ok: true });
+    // 未被清除、未被改写 → 保留。
+    expect(removeCustomProviderHeaders).not.toHaveBeenCalledWith('keep-headers', 'pi');
+    expect(storeCustomProviderHeaders).not.toHaveBeenCalled();
+    expect(headers.get('pi')).toEqual({ Authorization: 'Bearer keepme' });
+  });
+
+  it('merges stored main-only headers into a saved-provider model fetch', async () => {
+    // codex review:头凭证不回读进 renderer,刷新模型时 main 按 savedProviderId 并入已存头。
+    mountDb();
+    const harness = new IpcHarness();
+    const fetchModels = vi.fn(async () => ({ ok: true, models: [{ id: 'm1', name: 'M1' }] }));
+    registerProviderHandlers(harness, makeDeps({
+      fetchModels,
+      readCustomProviderHeadersForMutation: vi.fn((providerId, agent) =>
+        providerId === 'saved-1' && agent === 'pi' ? { Authorization: 'Bearer stored' } : null,
+      ),
+    }));
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_MODELS_FETCH, {
+      agent: 'pi',
+      baseUrl: 'https://saved.example/v1',
+      authMethod: 'apiKey',
+      savedProviderId: 'saved-1',
+    })).resolves.toMatchObject({ ok: true });
+    expect(fetchModels).toHaveBeenCalledWith(
+      expect.objectContaining({ headers: { Authorization: 'Bearer stored' } }),
+    );
   });
 
   it('rolls back partial create keys before any provider config is committed', async () => {

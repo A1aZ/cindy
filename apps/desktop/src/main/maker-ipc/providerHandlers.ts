@@ -413,6 +413,9 @@ function parseModelsFetchInput(input: unknown): ProviderModelsFetchSpec | null {
     if (!spec.headers || typeof spec.headers !== 'object' || Array.isArray(spec.headers)) return null;
     if (Object.values(spec.headers as Record<string, unknown>).some((v) => typeof v !== 'string')) return null;
   }
+  if (spec.savedProviderId !== undefined) {
+    if (typeof spec.savedProviderId !== 'string' || !/^[a-z0-9_-]+$/.test(spec.savedProviderId)) return null;
+  }
   return {
     agent: spec.agent as AgentKind,
     baseUrl: spec.baseUrl,
@@ -420,6 +423,7 @@ function parseModelsFetchInput(input: unknown): ProviderModelsFetchSpec | null {
     modelsUrl: (spec.modelsUrl as string | null | undefined) ?? null,
     apiKey: (spec.apiKey as string | null | undefined) ?? null,
     headers: spec.headers as Record<string, string> | undefined,
+    ...(typeof spec.savedProviderId === 'string' ? { savedProviderId: spec.savedProviderId } : {}),
     ...(typeof spec.wireProtocol === 'string'
       ? { wireProtocol: spec.wireProtocol as ProviderModelsFetchSpec['wireProtocol'] }
       : {}),
@@ -663,9 +667,23 @@ export function registerProviderHandlers(
       const replacement = headers[agent];
       if (mode === 'create') {
         if (config.runtimes[agent] && replacement) mutations.push({ agent, replacement });
-      } else {
-        mutations.push({ agent, replacement: mode === 'delete' ? null : replacement ?? null });
+        continue;
       }
+      if (mode === 'delete') {
+        mutations.push({ agent, replacement: null });
+        continue;
+      }
+      // update:头凭证是 main-only 密文,不回读进 renderer 表单。因此“该 runtime 仍在、
+      // 但配置里没带 headers”= 用户没动请求头 → 保留旧值(不生成 mutation),不能当作
+      // 删除,否则仅改名称/模型也会清掉鉴权头使 provider 失效(codex review)。
+      //   - runtime 被移除(config 里没有该 agent)→ 清掉其残留头。
+      //   - 显式带了 headers(含用户新填)→ 覆盖为新值。
+      if (!config.runtimes[agent]) {
+        mutations.push({ agent, replacement: null });
+      } else if (replacement) {
+        mutations.push({ agent, replacement });
+      }
+      // else: runtime 存在但未提供 headers → 保留,跳过。
     }
     return mutations;
   };
@@ -742,8 +760,8 @@ export function registerProviderHandlers(
       const providers = await deps.listProviders({ allowSideEffects: trusted });
       // 运行期鉴权请求头(Authorization / x-api-key 等)一律不经 provider:list 下发任何
       // Renderer——即使本机主页面 trusted:任何 Renderer 注入(XSS)都能读走这些长期凭证
-      // (codex review)。编辑态要回填/复用旧头值时,走 readCustomProviderHeaders 窄读取
-      // (与 API key 的 safeStorageRead 同一先例),而不是从这条只读聚合里回读明文。
+      // (codex review)。头凭证是 main-only 密文,renderer 从不回读:编辑时未显式改动
+      // 请求头,update 由 main 侧保留旧值(planProviderHeaderMutations 'update' 分支)。
       return {
         providers: providers.map(withoutProviderHeaderCredentials),
         modelVisibilityOverrides: deps.getModelVisibilityOverrides(),
@@ -1137,6 +1155,19 @@ export function registerProviderHandlers(
     assertTrustedProviderMutationSender(event);
     const parsed = parseModelsFetchInput(input);
     if (!parsed) throwIpcError('INVALID_PARAMS', 'invalid models-fetch input');
+    // 已保存供应商:main 侧按 (id, agent) 并入 main-only 鉴权请求头，无需 renderer 回读
+    // 明文头。renderer 显式头(现状不传)优先于已存头。读失败按无头降级(刷新是增强)。
+    if (parsed.savedProviderId) {
+      let storedHeaders: Record<string, string> | null = null;
+      try {
+        storedHeaders = deps.readCustomProviderHeadersForMutation(parsed.savedProviderId, parsed.agent);
+      } catch {
+        storedHeaders = null;
+      }
+      if (storedHeaders && Object.keys(storedHeaders).length > 0) {
+        parsed.headers = { ...storedHeaders, ...parsed.headers };
+      }
+    }
     return deps.fetchModels(parsed);
   });
 

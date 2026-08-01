@@ -1552,7 +1552,7 @@ cindy.onHostMessage(async function (msg) {
 \`\`\`json
 "slots": [..., "subscribe"],
 "subscribe": {
-  "topics": ["turn", "session"],                        // did- 旁听(元数据,不含消息内容)
+  "topics": ["turn", "session", "activity"],           // did- 旁听(元数据,不含消息内容)
   "hooks": ["will-user-message", "will-assistant-message"]  // will- 拦截(声明任一必须 launch:"resident")
 },
 "launch": "resident"               // 拦截要求常驻在场(否则每条消息都等你冷启动)
@@ -1573,6 +1573,26 @@ cindy.onHostMessage(function (msg) {
     return;
   }
   // did-turn-start / did-session-created / did-session-archived 同理(见 topics)。
+  // activity topic 只提供内层活动边界元数据:
+  // did-thinking-{start,end}: { sessionId, blockId }(不含 reasoning 正文);
+  // did-approval-{start,end}: { sessionId, requestId };
+  // did-user-input-{start,end}: { sessionId, requestId }。
+  // approval = permission / plan_review; user-input = ask_user_question。
+  // **blockId / requestId 都是主机生成的不透明配对键**,不是 agent 或 provider 侧的
+  // 原始 id:只保证同一段思考 / 同一个请求的 start 与 end 拿到同一个值,同一个上游
+  // 请求在不同会话里也是不同值。它们不承载任何语义(看不出是哪个工具、哪个 MCP
+  // 服务、是不是计划审批),也**关联不到**主机或 provider 的任何其他标识 —— 别拿它
+  // 去和你从别处拿到的 id 对齐,只用来配对。
+  // **按 requestId 配对,不是全局开关**:一轮里并行工具调用可能同时挂着多个审批,
+  // 每个 requestId 各发自己的 start / end。要判断"是否仍在等审批",用 requestId
+  // 集合(收到 start 加入、end 移除),集合非空即仍在等;别用单个布尔位,否则先结束
+  // 的那个请求会把还在等的抹掉。
+  // **审批可能跨过 did-turn-end**:codex 计划模式的 plan_review 就是在计划轮次
+  // 收尾之后才发起的,你会先收到 did-turn-end、再收到 did-approval-start。所以
+  // 别拿 did-turn-end 去清空审批状态——只认对应 requestId 的 did-approval-end。
+  // thinking 不同:它只在轮次内,did-turn-end 前主机必定先补发未收口的
+  // did-thinking-end。审批 / 等待输入则由主机在真实决策落地(批准、拒绝、回答、
+  // 超时、取消)时收口,会话被关闭 / 重建时也会给所有在场 requestId 各补一条 end。
   if (msg.name === 'did-session-switched') {
     // 用户把某个会话切到台前(切换会话 / 从非会话页切回都算)。
     // msg.data = { sessionId, workdir? }。连续停留同一会话不重发。
@@ -1604,12 +1624,26 @@ cindy.onHostMessage(function (msg) {
 硬规则(主机代码强制):
 - **旁听 topic**:\`turn\`(轮次开始/结束,带 agent / 模型 / 耗时 / token 用量)、
   \`session\`(会话创建 / 归档 / 切换——切换 = 用户把哪个会话切到台前,连续停留
-  同一会话不重发)。**只有元数据,永远不含消息内容**(v1 不开正文旁听)。
-  没声明的 topic 主机不投;
-- **只覆盖你自己的主会话**:orca worker、后台自动化会话不投(与你无关的噪音);
+  同一会话不重发)、\`activity\`(思考 / 审批 / 等待用户输入的开始结束边界)。
+  activity 只带 \`sessionId\` + \`blockId\` 或 \`requestId\`;**不会给 reasoning、工具
+  input、命令、文件内容、计划正文、问题内容或答案**。旧插件不声明 activity 时行为
+  完全不变;没声明的 topic 主机不投;
+- **只覆盖你自己的主会话**:orca worker、后台自动化会话不投(与你无关的噪音)。
+  粒度到**轮次**:主会话里由 \`/goal\` 自动续跑、定时任务、hook 渠道发起的轮次不投,
+  **连它们触发的审批与提问也不投**。
+  已知例外:飞书 / Slack 等渠道**接管**(attached)现有主会话代发的轮次,其
+  \`did-turn-*\` 与 thinking 边界仍会投给你(该轮次在主机侧没打来源标记,这是
+  \`turn\` topic 的既有行为,不是 activity 引入的);它触发的审批与提问**不会**投
+  (走渠道卡的确认面,主机按面拦掉)。所以:\`did-approval-*\` /
+  \`did-user-input-*\` 一定是用户本人在 Desktop 上被问到,不会出现没有对应轮次的
+  孤儿审批;但 \`did-turn-*\` / \`did-thinking-*\` 偶尔可能来自渠道代发的轮次,别把
+  "有 thinking"直接等同于"用户本人正在用 Desktop";
 - **旁听是 fire-and-forget**:主机投完即走,你崩了/慢了不影响任何会话;熄灯期事件
   进队列(上限 100,溢出丢最旧,下一条带 \`dropped\` 计数),事件到达会把你按需
-  拉起补投——但订阅型意识**建议 \`launch:"resident"\`**(要秒收就得在场);
+  拉起补投——但订阅型意识**建议 \`launch:"resident"\`**(要秒收就得在场)。
+  **\`dropped\` 非零就必须重置你本地派生的状态**:被丢的可能正是某条
+  \`did-turn-end\` 或 \`did-*-end\`,你要是继续拿旧状态往下推,就会永久停在
+  "在忙 / 在等审批"。收到 \`dropped\` 时把状态清空、以此后到达的事件为准;
 - **钩子超时 = 放行**:\`will-\` 裁决必须 3 秒内回,超时主机按 allow 放行(聊天绝不
   因你卡死);连续 3 次超时/崩溃,主机**熔断**你的钩子能力(降级为只旁听 + 提示
   用户),旁听不受影响。要过外部合规接口就在窗口内 \`await cindy.fetch\`(network

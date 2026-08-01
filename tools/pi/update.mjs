@@ -80,6 +80,31 @@ function readCachedVersion() {
   }
 }
 
+function readCache() {
+  try {
+    return JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/** Fail closed when mutable GitHub release metadata no longer matches the reviewed pin. */
+export function assertPinnedRuntimeAsset(cache, meta, version, platformKey, assetName) {
+  if (!cache || cache.version !== version) {
+    throw new Error(`Pi runtime pin missing for ${platformKey}@${version}`);
+  }
+  const pin = cache.runtimeAssets?.[platformKey];
+  const asset = (meta.assets || []).find((candidate) => candidate.name === assetName);
+  const liveSha256 = normalizeExpectedSha256(asset?.digest);
+  if (!pin || !asset || !liveSha256 || liveSha256 !== pin.sha256) {
+    throw new Error(`Pi runtime asset digest does not match pin for ${platformKey}@${version}`);
+  }
+  if (asset.browser_download_url !== pin.url) {
+    throw new Error(`Pi runtime asset URL does not match pin for ${platformKey}@${version}`);
+  }
+  return asset;
+}
+
 function runtimeAssetPins(meta, version) {
   return Object.fromEntries(PLATFORMS.map(({ key, asset: assetName }) => {
     const asset = (meta.assets || []).find((candidate) => candidate.name === assetName);
@@ -299,6 +324,7 @@ export async function ensurePlatform({ version, platformKey, force = false }) {
   const entry = PLATFORMS.find((p) => p.key === platformKey);
   if (!entry) throw new Error(`Unknown platform key for pi: ${platformKey}`);
   const meta = await fetchReleaseMeta(`v${version}`);
+  assertPinnedRuntimeAsset(readCache(), meta, version, platformKey, entry.asset);
   await downloadAsset(meta, version, platformKey, entry.asset, entry.binFile, { force, throughputGuard: true });
   promoteOnePlatform(version, platformKey, entry.binFile);
 }

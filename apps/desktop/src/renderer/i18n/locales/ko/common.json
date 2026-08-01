@@ -2005,6 +2005,10 @@
         "codex": {
           "label": "Codex",
           "description": "Codex 입구를 통해 사용하는 모든 모델이 같은 메모리를 공유합니다"
+        },
+        "pi": {
+          "label": "Pi",
+          "description": "긴 세션의 압축 요약을 Cindy 메모리에 저장해 이후 Pi 세션에서 사용합니다"
         }
       },
       "agent": {
@@ -5851,6 +5855,8 @@
       "remoteProviderUnsupported": "이 제공자는 SSH 원격 세션을 지원하지 않습니다. 다른 소스를 선택하세요",
       "remoteNativeOauthUnavailable": "Claude.ai 구독이 연결되지 않았습니다. 먼저 연결하거나 게이트웨이 모델을 선택하세요",
       "deviceStillLoading": "원격 기기가 아직 로딩 중입니다. 잠시 기다려 주세요",
+      "worktreeMissingRepo": "worktree를 만들 수 없습니다: 현재 디렉터리의 저장소 루트를 찾을 수 없습니다",
+      "worktreeRepoHint": "작업 디렉터리를 다시 선택하고 오른쪽 아래 폴더 표시가 새로 고쳐진 뒤 다시 시도하세요",
       "sessionInactive": "세션이 더 이상 활성 상태가 아닙니다",
       "remoteProjectBanner": "{{device}}의 {{project}}에서 새 세션 만들기",
       "remoteDialogueBanner": "{{device}}에서 새 대화(프로젝트 없음)"
@@ -7837,8 +7843,11 @@
       "codexVoiceAuthDescription": "음성 입력은 연결된 ChatGPT 계정으로 GPT 실시간 음성 인식을 사용합니다. 계정이 연결되지 않았거나 연결을 업데이트해야 합니다. 모델 제공자를 열어 ChatGPT를 연결하시겠습니까?",
       "codexBinaryMissingTitle": "Codex 구성 요소가 준비되지 않음",
       "codexBinaryMissingDescription": "Codex 구성 요소가 아직 준비되지 않아 이 기능을 사용할 수 없습니다. 잠시 후 다시 시도하거나 설정 → 제공자에서 Codex 연결 상태를 확인하세요.",
+      "piBinaryMissingTitle": "Pi 구성 요소가 준비되지 않음",
+      "piBinaryMissingDescription": "Pi 구성 요소가 아직 준비되지 않아 이 기능을 사용할 수 없습니다. 잠시 후 다시 시도하거나 설정 → 제공자에서 Pi 연결 상태를 확인하세요.",
       "goToSettings": "설정 열기",
       "remoteCodexBinaryMissingTitle": "원격 기기의 Codex 구성 요소가 준비되지 않음",
+      "remotePiBinaryMissingTitle": "원격 기기의 Pi 구성 요소가 준비되지 않음",
       "remoteAuthDescription": "원격 기기 \"{{device}}\"에서 설정을 완료해야 여기에서 세션을 시작할 수 있습니다. 해당 기기에서 설정한 후 다시 시도하세요.",
       "remoteCodexNoSourceTitle": "원격 기기에 연결된 Codex 소스가 없습니다",
       "remoteCodexNoSourceDescription": "원격 기기 \"{{device}}\"에 Codex에서 사용할 수 있는 모델 소스가 연결되어 있지 않아 여기에서 세션을 시작할 수 없습니다. 해당 기기에서 {{appName}}를 열고 설정 → 제공자에서 OpenAI에 로그인하거나 다른 소스를 연결한 후 다시 시도하세요.",

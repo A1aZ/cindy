@@ -15,8 +15,14 @@ import {
   isValidBinary,
   listSiblingWorktreeRoots,
   readInstalledVersion,
+  supportsCdnFallback,
   tryReuseFromSiblingWorktree,
 } from '../ensure-agent-binaries.mjs';
+
+test('directory distributions never use the single-binary CDN fallback', () => {
+  assert.equal(supportsCdnFallback('pi'), false);
+  assert.equal(supportsCdnFallback('codex'), true);
+});
 
 const LFS_POINTER = [
   'version https://git-lfs.github.com/spec/v1',

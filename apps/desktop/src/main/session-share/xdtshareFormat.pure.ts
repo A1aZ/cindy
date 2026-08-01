@@ -212,7 +212,7 @@ export interface XdtshareManifest {
   appVersion: string;
   platform: string;
   exportedAt: string;
-  agentKind: 'cc' | 'codex';
+  agentKind: 'cc' | 'codex' | 'pi';
   title: string;
   workspaceKind: 'project' | 'dialogue';
   originalWorkingDir: string | null;
@@ -275,7 +275,7 @@ export function validateManifest(value: unknown): XdtshareManifest {
     appVersion: expectString(value.appVersion, 'appVersion'),
     platform: expectString(value.platform, 'platform'),
     exportedAt: expectString(value.exportedAt, 'exportedAt'),
-    agentKind: agentKind as 'cc' | 'codex',
+    agentKind: agentKind as 'cc' | 'codex' | 'pi',
     title: expectString(value.title, 'title'),
     workspaceKind: workspaceKind as 'project' | 'dialogue',
     originalWorkingDir:

@@ -161,7 +161,7 @@ export async function createPluginDraftSession(params: {
 export async function createGhostErrandSession(params: {
   ghostId: string;
   title: string | null;
-  agentKind?: 'cc' | 'codex';
+  agentKind?: 'cc' | 'codex' | 'pi';
   model?: string;
   effort?: string;
   fastMode?: boolean;

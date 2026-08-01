@@ -7454,7 +7454,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         throwIpcError('INTERNAL', err instanceof Error ? err.message : 'context usage lazy create failed');
       }
     }
-    if (sess.agentKind !== 'claude-code') {
+    if (sess.agentKind !== 'claude-code' && sess.agentKind !== 'pi') {
       throwIpcError('UNSUPPORTED_CAPABILITY', `Agent ${sess.agentKind} does not support context usage`);
     }
     try {
@@ -8039,7 +8039,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     if (!msg.createOpts || typeof msg.createOpts !== 'object') {
       throwIpcError('INVALID_PARAMS', 'queued.createOpts required');
     }
-    if (msg.createOpts.agentKind !== 'claude-code' && msg.createOpts.agentKind !== 'codex') {
+    if (
+      msg.createOpts.agentKind !== 'claude-code'
+      && msg.createOpts.agentKind !== 'codex'
+      && msg.createOpts.agentKind !== 'pi'
+    ) {
       throwIpcError('INVALID_PARAMS', 'queued.createOpts.agentKind invalid');
     }
     const normalized: AgentInputQueuedMessage = { ...msg };
@@ -8887,15 +8891,15 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // setMemory 后按 result.effective ('immediate' | 'next-session') 决定是否提示
   // "新会话生效"; reset 前必走 confirm dialog (UI 层负责)。
   ipcMain.handle(MAKER_INVOKE.MEMORY_GET, async (_e, agentKind: unknown) => {
-    if (agentKind !== 'claude-code' && agentKind !== 'codex') {
-      throwIpcError('INVALID_PARAMS', `agentKind required (claude-code | codex), got ${String(agentKind)}`);
+    if (agentKind !== 'claude-code' && agentKind !== 'codex' && agentKind !== 'pi') {
+      throwIpcError('INVALID_PARAMS', `agentKind required (claude-code | codex | pi), got ${String(agentKind)}`);
     }
     return maker.getAgentMemoryStatus(agentKind);
   });
 
   ipcMain.handle(MAKER_INVOKE.MEMORY_SET, async (_e, agentKind: unknown, enabled: unknown) => {
-    if (agentKind !== 'claude-code' && agentKind !== 'codex') {
-      throwIpcError('INVALID_PARAMS', `agentKind required (claude-code | codex), got ${String(agentKind)}`);
+    if (agentKind !== 'claude-code' && agentKind !== 'codex' && agentKind !== 'pi') {
+      throwIpcError('INVALID_PARAMS', `agentKind required (claude-code | codex | pi), got ${String(agentKind)}`);
     }
     if (typeof enabled !== 'boolean') {
       throwIpcError('INVALID_PARAMS', 'enabled required (boolean)');
@@ -8906,7 +8910,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     // 写盘失败不阻塞 — 当前 session 已经 setMemory 成功, 只是下次重启会回默认。
     let settingsState = readMemorySettingsState();
     try {
-      settingsState = writeMemorySetting(agentKind === 'codex' ? 'codex' : 'claudeCode', enabled);
+      const settingKey = agentKind === 'claude-code' ? 'claudeCode' : agentKind;
+      settingsState = writeMemorySetting(settingKey, enabled);
     } catch (err) {
       log.warn('memory:set persistence failed (in-session change still applied)', {
         agentKind,
@@ -8923,8 +8928,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   });
 
   ipcMain.handle(MAKER_INVOKE.MEMORY_RESET, async (_e, agentKind: unknown) => {
-    if (agentKind !== 'claude-code' && agentKind !== 'codex') {
-      throwIpcError('INVALID_PARAMS', `agentKind required (claude-code | codex), got ${String(agentKind)}`);
+    if (agentKind !== 'claude-code' && agentKind !== 'codex' && agentKind !== 'pi') {
+      throwIpcError('INVALID_PARAMS', `agentKind required (claude-code | codex | pi), got ${String(agentKind)}`);
     }
     log.info('memory:reset', { agentKind });
     return maker.resetAgentMemory(agentKind);
@@ -9006,6 +9011,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           await maker.makerMemory?.syncNativeAgentsOff(['claude-code']);
         } else {
           await maker.setAgentMemory('claude-code', settings.claudeCode);
+        }
+        // Pi 的自动记忆以 Cindy Memory 为存储层，不参与“启用 Cindy 时关闭原生记忆”联动；
+        // reset 仍要把存活 Pi runtime 的独立开关恢复成默认值。
+        if (maker.listAvailableAgents().includes('pi')) {
+          await maker.setAgentMemory('pi', settings.pi);
         }
         return memorySettingsWire();
       },
@@ -9413,7 +9423,7 @@ async function checkWorkDirExists(
   // 或者 agent 真跑起来时由远端 codex 自己报 ENOENT)。这里直接放行。
   if (remoteHostId) return true;
   if (!workingDir?.trim()) return true;
-  const source: AgentKind = agentKind === 'codex' ? 'codex' : 'claude-code';
+  const source: AgentKind = agentKind === 'codex' || agentKind === 'pi' ? agentKind : 'claude-code';
   // suppressMissingBroadcast: 调用方(SEND 事务)手里还有 DB 权威值可兜底时,
   // 首检失败只记日志不广播错误横幅——兜底成功的话用户不该看到假错误。
   const suppress = opts?.suppressMissingBroadcast === true;

@@ -32,7 +32,7 @@ import type { ImOrchestratorConfig, ImSessionNamespace } from './types';
 const log = createLogger('im:repo');
 
 export function toCoreAgentKind(kind: string): AgentKind {
-  return kind === 'codex' ? 'codex' : 'claude-code';
+  return kind === 'codex' || kind === 'pi' ? kind : 'claude-code';
 }
 
 /** core AgentKind → sessions.agentKind 列的 legacy 存储值。 */

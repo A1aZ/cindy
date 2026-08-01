@@ -16,7 +16,7 @@
  *
  * P0 骨架已支持:流式文本/thinking/工具事件、steer、abort、set_model/set_thinking_level、
  * resume(switch_session)、usage/cost 快照。
- * 尚未支持(capabilities 声明降级):文件级 rewind/后台任务/远端 host。
+ * SSH remote host 尚未支持；跨设备控制走 device-link，在目标设备本地启动 Pi。
  */
 
 import os from 'node:os';
@@ -1054,9 +1054,7 @@ export class PiAgent extends BaseAgent {
           : undefined;
         const contextTokens = typeof contextUsage?.tokens === 'number' && contextUsage.tokens >= 0
           ? contextUsage.tokens
-          : stats.success
-            ? 0
-            : piContextTokensFromTree(after.data, tree);
+          : piContextTokensFromTree(after.data, tree);
         const contextWindow = typeof contextUsage?.contextWindow === 'number' && contextUsage.contextWindow > 0
           ? contextUsage.contextWindow
           : ctx.contextWindow;
@@ -1068,6 +1066,42 @@ export class PiAgent extends BaseAgent {
           contextTokens,
           contextWindow,
           ...(draftText ? { draftText } : {}),
+        };
+      },
+
+      async getContextUsage() {
+        const stats = await proc.request({ type: 'get_session_stats' });
+        if (!stats.success) {
+          throw new Error(`pi get_session_stats failed: ${stats.error ?? 'unknown'}`);
+        }
+        const contextUsage = (stats.data as {
+          contextUsage?: { tokens?: number | null; contextWindow?: number | null };
+        } | undefined)?.contextUsage;
+        const totalTokens = typeof contextUsage?.tokens === 'number' && contextUsage.tokens >= 0
+          ? contextUsage.tokens
+          : ctx.contextTokens;
+        const maxTokens = typeof contextUsage?.contextWindow === 'number' && contextUsage.contextWindow > 0
+          ? contextUsage.contextWindow
+          : ctx.contextWindow;
+        const percentage = maxTokens > 0 ? Math.min(100, (totalTokens / maxTokens) * 100) : 0;
+        return {
+          categories: [{ name: 'Messages', tokens: totalTokens, color: '#8b8b8b' }],
+          totalTokens,
+          maxTokens,
+          rawMaxTokens: maxTokens,
+          percentage,
+          gridRows: [],
+          model: mutableModel,
+          memoryFiles: [],
+          mcpTools: [],
+          agents: [],
+          isAutoCompactEnabled: true,
+          apiUsage: {
+            input_tokens: ctx.turnInput,
+            output_tokens: ctx.turnOutput,
+            cache_creation_input_tokens: ctx.turnCacheWrite,
+            cache_read_input_tokens: ctx.turnCacheRead,
+          },
         };
       },
     };

@@ -1564,7 +1564,9 @@ function ModelSelectorContentView({
         <>
           <VendorSegmentedSwitcher
             value={browseVendor}
-            onChange={(next) => void handleBrowseVendorChange(next === 'codex' ? 'codex' : 'cc')}
+            onChange={(next) => {
+              if (next !== 'orca') void handleBrowseVendorChange(next);
+            }}
             dense
             width={304}
             className="mx-auto"

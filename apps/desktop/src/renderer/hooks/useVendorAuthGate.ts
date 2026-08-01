@@ -50,7 +50,8 @@ type CopyKey =
   | 'voice-api-key-unauth'
   | 'voice-direct-api-key-unauth'
   | 'codex-voice-unauth'
-  | 'codex-binary-missing';
+  | 'codex-binary-missing'
+  | 'pi-binary-missing';
 
 function buildCopy(t: (key: string) => string): Record<CopyKey, DialogCopy> {
   return {
@@ -92,6 +93,13 @@ function buildCopy(t: (key: string) => string): Record<CopyKey, DialogCopy> {
       cancelText: t('logic.confirm.cancel'),
       settingsTab: 'providers',
     },
+    'pi-binary-missing': {
+      title: t('logic.confirm.piBinaryMissingTitle'),
+      description: t('logic.confirm.piBinaryMissingDescription'),
+      confirmText: t('logic.confirm.goToSettings'),
+      cancelText: t('logic.confirm.cancel'),
+      settingsTab: 'providers',
+    },
   };
 }
 
@@ -110,6 +118,7 @@ function pickCopy(
   readiness: Readiness,
 ): DialogCopy | null {
   if (readiness === 'binary-missing' && vendor === 'codex') return copy['codex-binary-missing'];
+  if (readiness === 'binary-missing' && vendor === 'pi') return copy['pi-binary-missing'];
   if (readiness !== 'unauthenticated') return null;
   // 无可用来源:cc / codex 走同一条「连接来源」文案(send 门禁,与 agent 类型无关)。
   return copy['no-source'];
@@ -140,7 +149,7 @@ export function deriveRemoteReadiness(
   },
 ): Readiness {
   if (vendor !== 'cc' && input.binaryReady === false) {
-    return vendor === 'codex' ? 'binary-missing' : 'unauthenticated';
+    return 'binary-missing';
   }
   if (input.sourceReady !== null) return input.sourceReady ? 'ready' : 'unauthenticated';
   if (input.authReady !== null) return input.authReady ? 'ready' : 'unauthenticated';
@@ -262,7 +271,9 @@ export function useVendorAuthGate(): UseVendorAuthGateReturn {
         let title: string;
         let description: string;
         if (remoteReadiness === 'binary-missing') {
-          title = t('logic.confirm.remoteCodexBinaryMissingTitle');
+          title = t(vendor === 'pi'
+            ? 'logic.confirm.remotePiBinaryMissingTitle'
+            : 'logic.confirm.remoteCodexBinaryMissingTitle');
           description = t('logic.confirm.remoteAuthDescription', { device });
         } else if (vendor === 'codex') {
           title = t('logic.confirm.remoteCodexNoSourceTitle');

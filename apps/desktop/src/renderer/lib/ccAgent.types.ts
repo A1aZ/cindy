@@ -311,8 +311,8 @@ export type MessageRole = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'a
  * 不作为对话正文渲染,也绝不回发给 agent(注入走 main 的 wire 前缀通道)。
  */
 export interface AgentSwitchContent {
-  fromAgentKind: 'cc' | 'codex';
-  toAgentKind: 'cc' | 'codex';
+  fromAgentKind: 'cc' | 'codex' | 'pi';
+  toAgentKind: 'cc' | 'codex' | 'pi';
   fromModel: string | null;
   toModel: string | null;
   handoff: string;

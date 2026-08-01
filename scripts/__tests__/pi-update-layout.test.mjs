@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { flattenExtractedDir } from '../../tools/pi/update.mjs';
+import { assertPinnedRuntimeAsset, flattenExtractedDir } from '../../tools/pi/update.mjs';
 
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-pi-layout-'));
@@ -42,4 +42,29 @@ test('Pi release pin covers every supported desktop architecture', () => {
     'win32-arm64',
     'win32-x64',
   ]);
+});
+
+test('Pi updater rejects mutable release metadata that differs from the reviewed pin', () => {
+  const cache = {
+    version: '1.2.3',
+    runtimeAssets: {
+      'darwin-arm64': { url: 'https://example.test/pi.tgz', sha256: 'a'.repeat(64) },
+    },
+  };
+  const matching = {
+    assets: [{
+      name: 'pi-darwin-arm64.tar.gz',
+      browser_download_url: 'https://example.test/pi.tgz',
+      digest: `sha256:${'a'.repeat(64)}`,
+    }],
+  };
+  assert.doesNotThrow(() => assertPinnedRuntimeAsset(
+    cache, matching, '1.2.3', 'darwin-arm64', 'pi-darwin-arm64.tar.gz',
+  ));
+  const changed = structuredClone(matching);
+  changed.assets[0].digest = `sha256:${'b'.repeat(64)}`;
+  assert.throws(
+    () => assertPinnedRuntimeAsset(cache, changed, '1.2.3', 'darwin-arm64', 'pi-darwin-arm64.tar.gz'),
+    /does not match pin/,
+  );
 });

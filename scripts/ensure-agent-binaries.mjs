@@ -37,6 +37,10 @@ const KINDS = {
 const log = (msg) => console.log(`\x1b[36m[ensure-agent-binaries]\x1b[0m ${msg}`);
 const warn = (msg) => console.log(`\x1b[33m[ensure-agent-binaries]\x1b[0m ${msg}`);
 
+export function supportsCdnFallback(kind) {
+  return KINDS[kind]?.dirDist !== true;
+}
+
 export function currentPlatformKey() {
   return `${process.platform}-${process.arch}`;
 }
@@ -200,6 +204,12 @@ export async function ensureBinary(kind, platformKey = currentPlatformKey(), { f
     try {
       await mod.ensurePlatform({ version, platformKey, force });
     } catch (upstreamErr) {
+      if (!supportsCdnFallback(kind)) {
+        throw new Error(
+          `Failed to download ${kind} ${platformKey}@${version} from upstream: ${upstreamErr.message}. ` +
+            'This runtime is a directory distribution, so the single-binary CDN fallback is unsafe.',
+        );
+      }
       // claude / codex / ripgrep：上游慢/失败（含 fetch-with-timeout 的 connect/stall/total/throughput 超时）→
       // 回退公司 CDN（国内快，.gz gunzip 后与上游裸二进制字节一致）。
       warn(`${kind} ${platformKey}: upstream failed/slow (${upstreamErr.message}); falling back to CDN...`);

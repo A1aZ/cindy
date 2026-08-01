@@ -591,7 +591,7 @@ function optionalNumber(value: unknown): boolean {
 }
 
 function optionalAgentKind(value: unknown): boolean {
-  return value === undefined || value === 'claude-code' || value === 'codex';
+  return value === undefined || value === 'claude-code' || value === 'codex' || value === 'pi';
 }
 
 function optionalNotify(value: unknown): boolean {

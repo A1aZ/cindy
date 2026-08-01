@@ -198,7 +198,7 @@ describe('Shared create project picker', () => {
   });
 
   it('keeps remote project drafts out of local workspace probes', () => {
-    expect(newMakerDraftRouteSource).toContain('if (wd && !isRemoteProjectDraft)');
+    expect(newMakerDraftRouteSource).toContain('if (wd && !isRemoteProjectDraft');
     // device-link 草稿的 git 探测经隧道在被控端执行(本机 git 对远程路径必然误报);
     // SSH(worktreeDisabled)仍不探测。
     expect(worktreeChipsSource).toContain('deviceLinkReconnectEpoch,');

@@ -19,6 +19,17 @@ import { connectedProvidersForAgent, type AgentKind, type ProviderView } from '@
 
 export type Readiness = 'ready' | 'unauthenticated' | 'binary-missing' | 'loading';
 
+/**
+ * Codex 与 Pi 都依赖随应用分发的本地运行时。二进制缺失和模型来源未连接是
+ * 两种不同的恢复路径，不能把 Pi 的缺包状态伪装成未授权。
+ */
+export function readinessFromBinaryStatus(
+  vendorKey: 'cc' | 'codex' | 'pi',
+  binaryReady: boolean,
+): Readiness | null {
+  return vendorKey !== 'cc' && !binaryReady ? 'binary-missing' : null;
+}
+
 export function useVendorReadiness(vendorKey: 'cc' | 'codex' | 'pi'): {
   readiness: Readiness;
   revalidate: (opts?: { includeSuspended?: boolean }) => Promise<Readiness>;
@@ -38,8 +49,8 @@ export function useVendorReadiness(vendorKey: 'cc' | 'codex' | 'pi'): {
           binaryReady: boolean;
           authReady: boolean;
         };
-        if (!status.binaryReady) {
-          const missing: Readiness = vendorKey === 'codex' ? 'binary-missing' : 'unauthenticated';
+        const missing = readinessFromBinaryStatus(vendorKey, status.binaryReady);
+        if (missing) {
           setReadiness(missing);
           return missing;
         }

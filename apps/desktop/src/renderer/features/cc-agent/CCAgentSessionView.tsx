@@ -715,7 +715,7 @@ export function CCAgentSessionView({
     const deviceId = remoteDeviceId;
     const scopeKey = remoteModelMemoryScopeKey;
     const agent = dbToMakerAgentKind(session?.agentKind);
-    const vendorSlot = agent === 'codex' ? 'codex' : 'claudeCode';
+    const vendorSlot = agent === 'claude-code' ? 'claudeCode' : agent;
     let cancelled = false;
 
     const applySnapshot = (snapshot: RemoteModelMemorySnapshot | undefined) => {
@@ -2299,7 +2299,7 @@ export function CCAgentSessionView({
       }
       const createOpts = session?.workingDir
         ? {
-            agentKind: 'claude-code' as const,
+            agentKind: session.agentKind === 'pi' ? 'pi' as const : 'claude-code' as const,
             workingDir: session.workingDir,
             model: session.model,
             orcaRole: session.orcaRole ?? null,
@@ -2640,7 +2640,9 @@ export function CCAgentSessionView({
         kind: 'usage-limit-recovery',
         requestId,
         sessionId,
-        agentKind: session?.agentKind === 'codex' ? 'codex' : 'claude-code',
+        agentKind: session?.agentKind === 'codex' || session?.agentKind === 'pi'
+          ? session.agentKind
+          : 'claude-code',
         resetAtMs: usageLimitRecovery.resetAtMs,
       }),
     });

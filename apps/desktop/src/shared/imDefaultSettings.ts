@@ -48,7 +48,7 @@ export const IM_DEFAULT_SETTINGS: ImDefaultSettings = {
       model: 'codex/gpt-5.5',
       effort: 'high',
     },
-    // pi(实验性):IM 渠道设置 UI 尚未暴露 pi,此项仅满足满射类型;走网关中档模型。
+    // Pi 走网关中档模型作为 IM 新会话默认值，可在各渠道设置中覆盖。
     pi: {
       providerId: null,
       model: 'claude-sonnet-5',
@@ -71,7 +71,7 @@ export const IM_DEFAULT_EFFORT_OVERRIDES: Readonly<Partial<Record<string, ImDefa
   'codex/gpt-5.5': 'high',
 };
 
-const AGENT_KINDS = new Set<ImDefaultAgentKind>(['claude-code', 'codex']);
+const AGENT_KINDS = new Set<ImDefaultAgentKind>(['claude-code', 'codex', 'pi']);
 const EFFORTS = new Set<ImDefaultEffort>([
   'minimal',
   'low',

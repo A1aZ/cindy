@@ -390,7 +390,9 @@ export function registerScheduleHandlers(getMaker?: () => Maker | null): void {
     const maker = getMaker?.();
     if (!maker) throwIpcError('INTERNAL', 'maker not ready for hook script generation');
     const workingDir = await resolveHookWorkingDir(body);
-    const requestedAgentKind: AgentKind | undefined = body.agentKind === 'codex' || body.agentKind === 'claude-code'
+    const requestedAgentKind: AgentKind | undefined = body.agentKind === 'codex'
+      || body.agentKind === 'claude-code'
+      || body.agentKind === 'pi'
       ? body.agentKind
       : undefined;
     const targetSessionId = typeof body.targetSessionId === 'string' && body.targetSessionId.trim()

@@ -38,6 +38,7 @@ import { hasGrokOAuthLogin } from './grok-oauth-login.js';
 import hostSystemPrompt from './host-system-prompt.md?raw';
 import piSystemPrompt from './pi-system-prompt.md?raw';
 import { createLogger } from '../logger.js';
+import { readMemorySettings } from './memory-settings-store.js';
 
 const log = createLogger('pi-host');
 
@@ -181,6 +182,16 @@ function buildDesktopPiRuntimeConfig(): AgentRuntimeConfig {
     get: () => getClaudeEndpoint(),
     enumerable: true,
     configurable: false,
+  });
+  Object.defineProperties(config, {
+    memoryEnabled: {
+      get: () => readMemorySettings().pi,
+      enumerable: true,
+    },
+    makerMemoryEnabled: {
+      get: () => readMemorySettings().maker,
+      enumerable: true,
+    },
   });
   return config;
 }

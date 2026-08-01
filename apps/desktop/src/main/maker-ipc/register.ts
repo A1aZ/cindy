@@ -8934,6 +8934,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   });
 
   ipcMain.handle(MAKER_INVOKE.EXPORT_SESSION_HTML, async (e, sessionId: unknown) => {
+    // 会弹原生保存对话框并把会话内容落盘:必须来自受信顶层页面,不能让辅助窗口 /
+    // WebView / 子 frame 经隐藏入口导出敏感会话(codex review)。导出非 device-link
+    // 通道(主机端原生对话框),故无条件校验。
+    assertTrustedAppRendererEvent(e as Parameters<typeof assertTrustedAppRendererEvent>[0]);
     if (typeof sessionId !== 'string' || sessionId.length === 0) {
       throwIpcError('INVALID_PARAMS', 'sessionId required');
     }

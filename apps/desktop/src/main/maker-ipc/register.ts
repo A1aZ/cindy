@@ -92,7 +92,7 @@ import {
   openBrowserForLogin,
 } from '../mcp-integrations/browser.js';
 import { getActiveCodexBridgeInstanceId, getActiveCodexBridgeServerNames, shutdownCodexEnvironment } from '../mcp-integrations/codexEnvironment.js';
-import { shutdownPiEnvironment } from '../mcp-integrations/piEnvironment.js';
+import { invalidatePiEnvironment, shutdownPiEnvironment } from '../mcp-integrations/piEnvironment.js';
 import { REMOTE_MEMORY_SERVER_NAME } from '../mcp-integrations/codexHttpBridge.js';
 import { getRemoteMcpBridgeToken } from '../mcp-integrations/remoteMcpBridgeToken.js';
 import {
@@ -368,7 +368,10 @@ import {
   readOrcaWorkerOutputReadOnly,
 } from './orcaDiagnostics.js';
 import { createMakerSendTransaction } from './makerSendTransaction.js';
-import { installDesktopInteractionHandler } from './interactionRouter.js';
+import {
+  installDesktopInteractionHandler,
+  installInteractionLifecycleObserver,
+} from './interactionRouter.js';
 import { registerMakerMessageDeleteHandler } from './messageDeleteHandler.js';
 import { normalizeUserMessage, materializeQueuedOssAttachments } from './normalizeAttachments.js';
 import { AGENT_ISLAND_DISPLAY_CONFIG } from '../agent-island/displayConfig.js';
@@ -830,13 +833,8 @@ async function shutdownAgentMcpEnvironmentsBestEffort(reason: string): Promise<v
       error: err instanceof Error ? err.message : String(err),
     });
   }
-  try {
-    await shutdownPiEnvironment();
-  } catch (err) {
-    log.warn(`shutdownPiEnvironment on ${reason} failed — cached bridge still stale`, {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
+  // Pi 用 generation lease：活动会话继续使用旧桥，新会话立即重建到新配置。
+  invalidatePiEnvironment();
 }
 
 async function applyMemoryChangeWithCodexRestart<T extends object>(
@@ -2747,9 +2745,12 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
   // did-turn-*。资格(用户主会话)与自动化轮次过滤都在 tap 内部,这里零逻辑。
   const ghostSessionTap = createGhostSessionTap(session.id);
   // 拆线收口:实例替换(上面的 existing.disposers)与会话关闭(下面 closed 的
-  // finally)两条路径都要给插件补上缺失的 did-turn-end,否则订阅方的「AI 在忙」
-  // 外层状态永久卡在 working。
-  registration.disposers.push(() => ghostSessionTap.dispose());
+  // finally)两条路径都要给插件补上缺失的 did-turn-end 与在场审批的 end,否则订阅方
+  // 的「AI 在忙 / 在等审批」外层状态永久卡住。observer 也在这里摘掉。
+  registration.disposers.push(() => {
+    ghostSessionTap.dispose();
+    installInteractionLifecycleObserver(session, null);
+  });
   registration.disposers.push(session.onEvent((event: AgentEvent) => {
     ghostSessionTap.handleEvent(
       event as { type: string; data?: unknown; source?: string; turnOrigin?: { kind?: string } },
@@ -3965,6 +3966,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
 
   // 注入 interaction listener (permission/ask/plan 三合一,renderer 按 kind 弹不同 UI)
   installDesktopInteractionListener(session);
+  installInteractionLifecycleObserver(session, ghostSessionTap.interactionObserver);
 }
 
 /**
@@ -4532,13 +4534,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // Pi 的 MCP bridge 同样按首个会话冻结 server 集合:自定义 MCP 增删改后必须 invalidate,
       // 否则新 Pi 会话仍暴露已删/已禁用的工具、拿不到新启用的工具(codex review P1)。
       // 与 codex 分支独立(不依赖 codexRestarted),下一次 startSession lazy 重建。
-      try {
-        await shutdownPiEnvironment();
-      } catch (err) {
-        log.warn('shutdownPiEnvironment on custom mcp change failed', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
+      invalidatePiEnvironment();
     },
   });
   // Claude 原生 Auto 分类器不可用 → 会话仍保持 Auto，只把后续审批切到 Cindy reviewer。

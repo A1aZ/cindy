@@ -1600,17 +1600,29 @@ export class ClaudeCodeAgent extends BaseAgent {
           workspaceRoots,
           opts.remoteHostId ? 'linux' : process.platform,
         );
-        if (!turnPolicyForcePrompt && autoDecision.verdict === 'allow') {
+        // 热切换收口:reviewAutoAction 是 async,期间 setPermissionMode 可能收紧(Auto→Ask)
+        // 或放宽(→Full)。必须按**最新**档位决策,否则进入审查前的旧 auto 档 allow 会绕过用户
+        // 刚通过 setPermissionMode 要求的确认(codex review P1;与已修复的 Pi 线程同口径)。
+        // cast 破 TS 收窄:TS 不建模 await 期间经 setPermissionMode 闭包的重赋值,会把此处
+        // mutablePermissionMode 仍视为 'auto';运行期它确实可能已变,故按 union 类型现读。
+        const modeAfterReview = mutablePermissionMode as PermissionMode;
+        if (modeAfterReview === 'bypassPermissions') {
           return { behavior: 'allow', updatedInput: input };
         }
-        if (!turnPolicyForcePrompt && autoDecision.verdict === 'block') {
+        if (modeAfterReview !== 'auto') {
+          // 已收紧到 Ask/更严:不吃 auto 裁决,强制走用户确认(下方 forcePrompt 流程)。
+          forcePrompt = true;
+        } else if (!turnPolicyForcePrompt && autoDecision.verdict === 'allow') {
+          return { behavior: 'allow', updatedInput: input };
+        } else if (!turnPolicyForcePrompt && autoDecision.verdict === 'block') {
           return {
             behavior: 'deny',
             message: autoDecision.reason ?? 'Cindy Auto Review blocked this action. Choose a safer alternative.',
           };
+        } else {
+          // AI `ask` and deterministic red-line verdicts are never persisted.
+          forcePrompt = true;
         }
-        // AI `ask` and deterministic red-line verdicts are never persisted.
-        forcePrompt = true;
       } else {
         if (mcpApprovalPolicy === 'auto-approve' && !turnPolicyForcePrompt) {
           return { behavior: 'allow', updatedInput: input };

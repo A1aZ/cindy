@@ -617,6 +617,60 @@ function rewindCommit(db: Database.Database, args: unknown): void {
   transaction();
 }
 
+interface TreeAttachmentSourceRow {
+  client_id: string;
+  content: string;
+  agent_meta: string | null;
+  created_at: number;
+  rewind_at: number | null;
+}
+
+function parsedObjectJson(value: string | null): Record<string, unknown> | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function treeEntryUuid(agentMeta: string | null): string | null {
+  const uuid = parsedObjectJson(agentMeta)?.uuid;
+  return typeof uuid === 'string' && uuid.length > 0 ? uuid : null;
+}
+
+function normalizedTreeUserText(content: string): string | null {
+  const parsed = parsedObjectJson(content);
+  if (!parsed || typeof parsed.text !== 'string') return null;
+  // Pi 树会把原图 block 投影成 [image]；该占位不是 Cindy 文本的一部分。
+  return parsed.text
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== '[image]')
+    .join('\n')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function mergeTreeUserAttachments(content: string, source: TreeAttachmentSourceRow | null): string {
+  if (!source) return content;
+  const next = parsedObjectJson(content);
+  const previous = parsedObjectJson(source.content);
+  if (!next || !previous) return content;
+  const merged: Record<string, unknown> = { ...next };
+  // 只恢复 Cindy 自己持久化的托管引用；不从 Pi base64 猜路径，也不复制其它
+  // 分支的任意 content 字段。传入消息若将来原生带附件，则以它自己的值为准。
+  if (!Object.hasOwn(next, 'images') && Array.isArray(previous.images)) {
+    merged.images = previous.images;
+  }
+  if (!Object.hasOwn(next, 'files') && Array.isArray(previous.files)) {
+    merged.files = previous.files;
+  }
+  return JSON.stringify(merged);
+}
+
 /** Pi 原生分支切换后，把当前活动路径原子投影成 Cindy 可见消息时间线。 */
 function sessionTreeRehydrate(
   db: Database.Database,
@@ -645,6 +699,12 @@ function sessionTreeRehydrate(
   const selectVisibleClientIds = db.prepare(
     'SELECT client_id FROM messages WHERE session_id = ? AND rewind_at IS NULL',
   );
+  const selectUserAttachmentSources = db.prepare(
+    `SELECT client_id, content, agent_meta, created_at, rewind_at
+       FROM messages
+      WHERE session_id = ? AND role = 'user'
+      ORDER BY created_at ASC, id ASC`,
+  );
   const hideVisible = db.prepare(
     'UPDATE messages SET rewind_at = ? WHERE session_id = ? AND rewind_at IS NULL',
   );
@@ -664,18 +724,51 @@ function sessionTreeRehydrate(
   const transaction = db.transaction((): string[] => {
     const session = db.prepare('SELECT id FROM sessions WHERE id = ? LIMIT 1').get(sessionId);
     if (!session) throw Object.assign(new Error(`Session 不存在: ${sessionId}`), { code: 'NOT_FOUND' });
+    // 在隐藏前冻结附件来源。历史投影行(含已 rewind 的其它分支)按稳定 clientId / Pi
+    // entry uuid 精确复用；首次导航的旧 live 行没有稳定 id 时，只允许“可见公共前缀中
+    // 文本和原始时间戳都一致”的保守回退，避免相同文字的另一分支附件串线。
+    const attachmentSources = selectUserAttachmentSources.all(sessionId) as TreeAttachmentSourceRow[];
+    const byClientId = new Map(attachmentSources.map((row) => [row.client_id, row]));
+    const byUuid = new Map<string, TreeAttachmentSourceRow>();
+    for (const source of attachmentSources) {
+      const uuid = treeEntryUuid(source.agent_meta);
+      if (uuid) byUuid.set(uuid, source);
+    }
+    const visibleUserSources = attachmentSources.filter((row) => row.rewind_at === null);
+    let visiblePrefixIndex = 0;
+    let visiblePrefixIntact = true;
+
     // 原子快照当前可见集,再隐藏:导航期间(带摘要可等数分钟)并发落库的消息也在其中,
     // 交给调用方作删除广播的权威集 —— 避免用导航前的陈旧快照漏掉这条(codex review)。
     const hiddenClientIds = (selectVisibleClientIds.all(sessionId) as { client_id: string }[])
       .map((row) => row.client_id);
     hideVisible.run(now, sessionId);
     for (const row of rows) {
+      let content = row.content;
+      if (row.role === 'user') {
+        const uuid = treeEntryUuid(row.agentMeta);
+        let source = byClientId.get(row.clientId) ?? (uuid ? byUuid.get(uuid) : undefined) ?? null;
+        const candidate = visibleUserSources[visiblePrefixIndex] ?? null;
+        if (source && visiblePrefixIntact && source !== candidate) {
+          // 已经精确命中另一个历史分支，说明公共可见前缀在这里结束；后续消息不能
+          // 再退回按文本/时间猜附件，否则会把旧活动分支的附件串到新分支。
+          visiblePrefixIntact = false;
+        } else if (!source && visiblePrefixIntact) {
+          const samePrefix = !!candidate
+            && candidate.created_at === row.createdAt
+            && normalizedTreeUserText(candidate.content) === normalizedTreeUserText(row.content);
+          if (samePrefix) source = candidate;
+          else visiblePrefixIntact = false;
+        }
+        visiblePrefixIndex += 1;
+        content = mergeTreeUserAttachments(row.content, source);
+      }
       upsert.run(
         row.id,
         row.clientId,
         sessionId,
         row.role,
-        row.content,
+        content,
         row.toolUseId,
         row.agentMeta,
         row.agentKind,

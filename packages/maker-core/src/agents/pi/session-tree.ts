@@ -218,7 +218,10 @@ export function activePiHistoryFromTree(
       push({
         clientId: `pi-tree-${entryId}-user`,
         role: 'user',
-        content: { text: textFromContent(message.content), images: [], files: [] },
+        // Pi 的树只保存模型可消费的 content block，不保存 Cindy 托管附件 URL。
+        // 这里不要伪造空数组覆盖 DB 里原用户消息的 images/files；Desktop 的
+        // treeRehydrate 会按 entry uuid/稳定 clientId 合并回原附件元数据。
+        content: { text: textFromContent(message.content) },
         agentMeta: { uuid: entryId },
       }, baseTs);
       continue;

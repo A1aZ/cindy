@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,6 +7,8 @@ const captured = vi.hoisted(() => ({
   args: [] as string[],
   env: {} as Record<string, string | undefined>,
   requests: [] as Array<Record<string, unknown>>,
+  closes: 0,
+  requestHandler: undefined as undefined | ((command: Record<string, unknown>) => Promise<{ success: boolean; data?: unknown; error?: string }>),
 }));
 
 vi.mock('../rpc-client.js', () => ({
@@ -18,13 +20,14 @@ vi.mock('../rpc-client.js', () => ({
     }
     async request(command: Record<string, unknown>) {
       captured.requests.push(command);
+      if (captured.requestHandler) return captured.requestHandler(command);
       if (command.type === 'get_state') {
         return { success: true, data: { sessionFile: '/mock/s.jsonl', model: { contextWindow: 200_000 } } };
       }
       return { success: true, data: {} };
     }
     send(): void {}
-    async close(): Promise<void> { this.isClosed = true; }
+    async close(): Promise<void> { this.isClosed = true; captured.closes += 1; }
   },
 }));
 
@@ -44,6 +47,8 @@ describe('Pi provider-aware model routing', () => {
   beforeEach(() => {
     captured.args = [];
     captured.requests = [];
+    captured.closes = 0;
+    captured.requestHandler = undefined;
     agentHome = mkdtempSync(path.join(tmpdir(), 'pi-provider-home-'));
     cwd = mkdtempSync(path.join(tmpdir(), 'pi-provider-cwd-'));
   });
@@ -143,6 +148,12 @@ describe('Pi provider-aware model routing', () => {
     resolvePiAgentHome: () => agentHome,
     resolvePiNativeProviders,
   });
+
+  function installPlanModeExtension(): void {
+    const extension = path.join(path.dirname(path.join(agentHome, 'pi')), 'examples', 'extensions', 'plan-mode', 'index.ts');
+    mkdirSync(path.dirname(extension), { recursive: true });
+    writeFileSync(extension, '// mocked plan-mode extension');
+  }
 
   it('fails closed for an explicit BYOM route when native provider resolution throws (no silent gateway fallback)', async () => {
     // 显式选自定义 provider 但配置/safeStorage 暂时读不到:必须抛,不能静默改发 Cindy 网关。
@@ -292,6 +303,118 @@ describe('Pi provider-aware model routing', () => {
     const b = handle.setPermissionMode!('ask');
     await Promise.all([a, b]);
     expect(JSON.parse(readFileSync(permFile, 'utf8')).mode).toBe('ask');
+    await handle.close();
+  });
+
+  it('recovers the permission-write chain after a failed write (no permanent poisoning)', async () => {
+    // 瞬时 fs 故障不得永久污染串行链:否则文件系统恢复后的重写也追加不进去,bridge 一直卡在旧档。
+    const fsp = await import('node:fs');
+    const agent = new PiAgent(byomDeps(async () => ({ providers: [], env: {} })));
+    const handle = await agent.startSession({
+      sessionId: 'perm-recover',
+      workingDir: cwd,
+      model: 'local-model',
+      permissionMode: 'ask',
+    });
+    const permFile = path.join(agentHome, 'runtime', 'perm-perm-recover.json');
+    // 下一次写(尝试放宽到 Full)失败一次；旧文件仍是安全的 ask，此后恢复真实写。
+    const spy = vi.spyOn(fsp.promises, 'writeFile').mockRejectedValueOnce(new Error('transient EIO'));
+    await handle.setPermissionMode!('bypassPermissions').catch(() => {});
+    spy.mockRestore();
+    // 若链被污染,这次 auto 写的 .then 永不执行,文件会停在 ask;恢复后应写成 auto。
+    await handle.setPermissionMode!('auto');
+    expect(JSON.parse(readFileSync(permFile, 'utf8')).mode).toBe('auto');
+    await handle.close();
+  });
+
+  it('closes the Pi process if tightening a persisted Full-access file fails', async () => {
+    const fsp = await import('node:fs');
+    const agent = new PiAgent(byomDeps(async () => ({ providers: [], env: {} })));
+    const handle = await agent.startSession({
+      sessionId: 'perm-tighten-fail',
+      workingDir: cwd,
+      model: 'local-model',
+      permissionMode: 'bypassPermissions',
+    });
+    const spy = vi.spyOn(fsp.promises, 'writeFile').mockRejectedValueOnce(new Error('disk unavailable'));
+    await expect(handle.setPermissionMode!('ask')).rejects.toThrow('disk unavailable');
+    spy.mockRestore();
+    // 子进程 bridge 仍会从旧文件读到 Full access；必须终止会话，不能只收紧 host 镜像。
+    expect(captured.closes).toBe(1);
+    await handle.close();
+  });
+
+  it('serializes concurrent plan-mode requests so same-target toggles only once', async () => {
+    installPlanModeExtension();
+    const agent = new PiAgent(byomDeps(async () => ({ providers: [], env: {} })));
+    const handle = await agent.startSession({ sessionId: 'plan-race', workingDir: cwd, model: 'local-model' });
+    expect(handle.getPlanMode!()).toBe(false);
+
+    await Promise.all([handle.setPlanMode!(true), handle.setPlanMode!(true)]);
+    expect(captured.requests.filter((request) => request.type === 'prompt' && request.message === '/plan')).toHaveLength(1);
+    expect(handle.getPlanMode!()).toBe(true);
+    await handle.close();
+  });
+
+  it('keeps plan mode unknown after sync failure and refuses a blind toggle until it can resync', async () => {
+    installPlanModeExtension();
+    let entriesAvailable = false;
+    captured.requestHandler = async (command) => {
+      if (command.type === 'get_state') {
+        return { success: true, data: { sessionFile: '/mock/s.jsonl', model: { contextWindow: 200_000 } } };
+      }
+      if (command.type === 'get_entries') {
+        return entriesAvailable
+          ? { success: true, data: { entries: [{ customType: 'plan-mode', data: { enabled: true } }] } }
+          : { success: false, error: 'temporary rpc failure' };
+      }
+      return { success: true, data: {} };
+    };
+    const agent = new PiAgent(byomDeps(async () => ({ providers: [], env: {} })));
+    const handle = await agent.startSession({ sessionId: 'plan-unknown', workingDir: cwd, model: 'local-model' });
+    expect(handle.getPlanMode!()).toBeNull();
+    await expect(handle.setPlanMode!(false)).rejects.toThrow(/state is unavailable/);
+    expect(captured.requests.some((request) => request.type === 'prompt' && request.message === '/plan')).toBe(false);
+
+    entriesAvailable = true;
+    await handle.setPlanMode!(false);
+    expect(captured.requests.filter((request) => request.type === 'prompt' && request.message === '/plan')).toHaveLength(1);
+    expect(handle.getPlanMode!()).toBe(false);
+    await handle.close();
+  });
+
+  it('marks plan mode unknown when a toggle transport failure may have happened after execution', async () => {
+    installPlanModeExtension();
+    let persistedEnabled = false;
+    let failNextToggle = true;
+    captured.requestHandler = async (command) => {
+      if (command.type === 'get_state') {
+        return { success: true, data: { sessionFile: '/mock/s.jsonl', model: { contextWindow: 200_000 } } };
+      }
+      if (command.type === 'get_entries') {
+        return {
+          success: true,
+          data: { entries: [{ customType: 'plan-mode', data: { enabled: persistedEnabled } }] },
+        };
+      }
+      if (command.type === 'prompt' && command.message === '/plan') {
+        persistedEnabled = !persistedEnabled; // Pi 已执行，但本地 transport 随后超时。
+        if (failNextToggle) {
+          failNextToggle = false;
+          throw new Error('rpc timeout');
+        }
+      }
+      return { success: true, data: {} };
+    };
+    const agent = new PiAgent(byomDeps(async () => ({ providers: [], env: {} })));
+    const handle = await agent.startSession({ sessionId: 'plan-timeout', workingDir: cwd, model: 'local-model' });
+
+    await expect(handle.setPlanMode!(true)).rejects.toThrow('rpc timeout');
+    expect(handle.getPlanMode!()).toBeNull();
+    // 下一次同目标先读回 persisted=true，不能再 toggle 一次把 Pi 反向关掉。
+    await handle.setPlanMode!(true);
+    expect(captured.requests.filter((request) => request.type === 'prompt' && request.message === '/plan')).toHaveLength(1);
+    expect(handle.getPlanMode!()).toBe(true);
     await handle.close();
   });
 

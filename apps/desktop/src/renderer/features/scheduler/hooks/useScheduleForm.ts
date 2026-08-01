@@ -154,8 +154,8 @@ export function getScheduleAgentPrefs(agentKind: ScheduleFormState['agentKind'])
  * 的事故见 2026-06 踩坑:任务里看着选了 Opus 4.8,实际每次跑 4.7)。
  */
 export function schedulerFallbackModel(agentKind: ScheduleFormState['agentKind']): string {
-  // pi 显式列出(与 main 侧 model-defaults.ts 对齐):避免将来改 cc 默认时 pi 静默跟随。
-  return agentKind === 'codex' ? 'gpt-5.5' : agentKind === 'pi' ? 'claude-sonnet-4-6' : 'claude-sonnet-4-6';
+  // Pi 的来源/模型来自动态连接目录；没有能与 providerId 解耦的静态默认。
+  return agentKind === 'codex' ? 'gpt-5.5' : agentKind === 'pi' ? '' : 'claude-sonnet-4-6';
 }
 
 /**

@@ -243,6 +243,11 @@ export interface MakerScheduleRunnerDeps {
     defaultEffort: string | null;
     supportsFastMode: boolean;
   } | null>;
+  /** Pi 空模型的实时默认路由；model/providerId 必须来自同一连接来源快照。 */
+  resolveDefaultModelRoute?: (
+    agent: AgentKind,
+    preferredProviderId?: string | null,
+  ) => Promise<{ model: string; providerId: string } | null>;
 }
 
 /**
@@ -660,7 +665,17 @@ export class MakerScheduleRunner implements ScheduleRunner {
       : isHeartbeat
         ? heartbeatModel
         : undefined;
-    const model = rawModel?.trim() ? rawModel : defaultModelFor(effectiveAgentKind);
+    const explicitProviderId = schedule.providerId?.trim() ? schedule.providerId.trim() : null;
+    const defaultRouteProviderId = explicitProviderId ?? (isHeartbeat ? heartbeatProviderId : null);
+    const dynamicDefaultRoute = !rawModel?.trim() && effectiveAgentKind === 'pi'
+      ? await this.deps.resolveDefaultModelRoute?.(effectiveAgentKind, defaultRouteProviderId) ?? null
+      : null;
+    const model = rawModel?.trim()
+      ? rawModel
+      : dynamicDefaultRoute?.model ?? defaultModelFor(effectiveAgentKind);
+    if (!model) {
+      throw new Error('schedule route unavailable: Pi has no connected model source');
+    }
     const permissionMode = defaultPermissionModeForSchedule();
     // fastMode 对 Codex / Pi 生效（claude-code agent 忽略此字段）；Claude 恒不传，
     // 确保「不影响 Claude」。heartbeat 沿用 session meta 里的 fast 态，非 heartbeat 取 schedule。
@@ -670,8 +685,10 @@ export class MakerScheduleRunner implements ScheduleRunner {
           ? heartbeatFastMode
           : schedule.fastMode
         : undefined;
-    const explicitProviderId = schedule.providerId?.trim() ? schedule.providerId.trim() : null;
-    let createProviderId = explicitProviderId ?? (isHeartbeat ? heartbeatProviderId : null);
+    let createProviderId = explicitProviderId
+      ?? (isHeartbeat ? heartbeatProviderId : null)
+      ?? dynamicDefaultRoute?.providerId
+      ?? null;
     // 停用轴准入(PR #744 review):每次 fire 都是新的付费调用,不属于「运行中的会话
     // 不打断」豁免 —— 保存过的路由被用户停用后,本次 run 必须以明确错误失败(run 历史
     // 可见),不能继续经停用路由扣费;隐式默认落点被停用而有启用替代拷贝时改路由过去。
@@ -1738,7 +1755,9 @@ export class MakerScheduleRunner implements ScheduleRunner {
   ): Promise<void> {
     const explicitModel = schedule.model?.trim() ? schedule.model : undefined;
     const targetModel =
-      explicitModel ?? (baseline.model?.trim() ? baseline.model : defaultModelFor(schedule.agentKind));
+      explicitModel
+      ?? (baseline.model?.trim() ? baseline.model : undefined)
+      ?? (live.model?.trim() ? live.model : defaultModelFor(schedule.agentKind));
     const explicitProviderId = schedule.providerId?.trim() ? schedule.providerId.trim() : null;
     const currentProviderId = getSessionProvider(live.id) ?? baseline.providerId;
     // 停用轴准入(PR #744 review 第五、六轮):排队分支在 fire 主路径的准入点之前

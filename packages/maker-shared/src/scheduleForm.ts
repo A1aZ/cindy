@@ -37,6 +37,7 @@ export interface MobileScheduleDraft {
   intervalMinutes: string;
   agentKind: RemoteScheduleAgentKind;
   model: string;
+  providerId: string;
   effort: string;
   fastMode: boolean;
   workspaceKind: RemoteScheduleWorkspaceKind;
@@ -76,6 +77,7 @@ export function createMobileScheduleDraft(
       intervalMinutes: '',
       agentKind: 'claude-code',
       model: DEFAULT_CLAUDE_MODEL,
+      providerId: '',
       effort: '',
       fastMode: false,
       workspaceKind: workingDir ? 'project' : 'dialogue',
@@ -100,6 +102,7 @@ export function createMobileScheduleDraft(
     intervalMinutes: intervalMsToSupportedMinutes(schedule.intervalMs),
     agentKind: schedule.agentKind ?? 'claude-code',
     model: schedule.model ?? defaultModelFor(schedule.agentKind ?? 'claude-code'),
+    providerId: schedule.providerId ?? '',
     effort: schedule.effort ?? '',
     fastMode: !!schedule.fastMode,
     workspaceKind,
@@ -140,6 +143,9 @@ export function applyTemplateToMobileScheduleDraft(
     intervalMinutes: '',
     agentKind,
     model: template.model ?? (draft.agentKind === agentKind ? draft.model : defaultModelFor(agentKind)),
+    // 模板若固定了 provider，必须随模板一起落到新建任务；否则 Pi 的空模型会在
+    // host 侧按错误的默认来源解析。模板未指定时才保留同 agent 的用户选择。
+    providerId: template.providerId ?? (draft.agentKind === agentKind ? draft.providerId : ''),
     effort: template.effort ?? '',
     fastMode: template.fastMode === true,
     useWorktree: template.useWorktree ?? draft.useWorktree,
@@ -261,7 +267,6 @@ export function buildMobileScheduleInput(draft: MobileScheduleDraft): RemoteSche
       wecomGroup: draft.notifyWecomGroup === true,
     },
   };
-
   if (draft.executionMode === 'script') {
     // 仅运行脚本任务:引擎合并态校验对 script 模式拒绝 worktree/绑定/持续会话/
     // silentWhenIdle 与非 project 工作区——表单残留或误操作的这些 agent-only
@@ -287,6 +292,9 @@ export function buildMobileScheduleInput(draft: MobileScheduleDraft): RemoteSche
     return input;
   }
 
+  const providerId = draft.providerId.trim();
+  if (providerId) input.providerId = providerId;
+
   if (draft.workspaceKind === 'project' && !input.targetSessionId) {
     input.workingDir = draft.workingDir.trim();
   }
@@ -309,6 +317,7 @@ export function updateDraftAgentKind(
     ...draft,
     agentKind,
     model: defaultModelFor(agentKind),
+    providerId: '',
     effort: '',
     fastMode: false,
   };

@@ -23,6 +23,7 @@ export interface RemoteScheduleWriteInput {
   intervalMs?: number;
   agentKind: RemoteScheduleAgentKind;
   model?: string;
+  providerId?: string;
   effort?: string;
   fastMode?: boolean;
   workspaceKind?: RemoteScheduleWorkspaceKind;
@@ -57,6 +58,7 @@ export interface RemoteScheduleTemplate {
   recurring?: boolean;
   agentKind?: RemoteScheduleAgentKind;
   model?: string;
+  providerId?: string;
   effort?: string;
   fastMode?: boolean;
   useWorktree?: boolean;
@@ -91,6 +93,7 @@ export interface RemoteSchedule {
   intervalMs?: number;
   agentKind?: RemoteScheduleAgentKind;
   model?: string;
+  providerId?: string;
   effort?: string;
   fastMode?: boolean;
   workspaceKind?: RemoteScheduleWorkspaceKind;

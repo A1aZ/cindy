@@ -3989,10 +3989,22 @@ export class CodexAgent extends BaseAgent {
         opts?.autoReviewAction
       ) {
         const decision = await reviewAutoAction(opts.autoReviewAction);
-        if (decision.verdict === 'allow') return 'accept';
-        if (decision.verdict === 'block') return 'decline';
-        // Only red-line decisions reach the user and they cannot be remembered.
-        forcePrompt = true;
+        // 热切换收口:reviewAutoAction 是 async,期间 setPermissionMode 可能收紧(Auto→Ask)或
+        // 放宽(→Full)。按**最新**档位决策,否则旧 auto 档 allow 会绕过用户刚要求的确认
+        // (codex review P1;与已修复的 Pi / Claude 线程同口径)。cast 破 TS 收窄:TS 不建模
+        // await 期间经 setPermissionMode 的重赋值,仍视此处为 'auto';运行期确实可能已变。
+        const modeAfterReview = mutablePermissionMode as PermissionMode;
+        if (modeAfterReview === 'bypassPermissions') return 'accept';
+        if (modeAfterReview !== 'auto') {
+          forcePrompt = true;
+        } else if (decision.verdict === 'allow') {
+          return 'accept';
+        } else if (decision.verdict === 'block') {
+          return 'decline';
+        } else {
+          // Only red-line decisions reach the user and they cannot be remembered.
+          forcePrompt = true;
+        }
       }
       const routedRequest =
         forcePrompt && req.kind === 'permission'

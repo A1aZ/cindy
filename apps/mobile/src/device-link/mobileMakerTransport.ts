@@ -151,6 +151,8 @@ export interface MessageListOptions {
   limit?: number;
   before?: string;
   beforeTs?: number;
+  /** 只拉该 host 行之后的新消息；旧被控端会忽略未知可选字段并退化为最新页。 */
+  after?: string;
 }
 
 export interface MessageAroundOptions {
@@ -608,10 +610,8 @@ export function createMobileMakerTransport({
     createSession: (opts) => call('maker:create-session', [opts]),
     getCapabilities: (agentKind) => call('maker:get-capabilities', [agentKind]),
     listAvailableAgents: () => call('maker:list-available-agents', []),
-    // 分支(session tree)读取/切换:transport passthrough 已就位,但**移动端会话页尚无
-    // 分支列表/切换 UI 调用它们**——明确标记为 deferred(不是遗漏)。这两个 channel 已在
-    // MOBILE_REMOTE_INVOKE_CHANNELS allowlist 内,供被控桌面端经 device-link 复用及未来
-    // 移动分支 UI 落地时直接接线;在移动 UI 落地前不对用户暴露分支能力,避免不可达承诺。
+    // Pi 原生分支树通过 device-link 复用桌面端 runtime；移动会话页只在当前会话
+    // 确认为 Pi 时展示入口，并在渲染前校验返回的树形状。
     getSessionTree: (sessionId) => call('maker:get-session-tree', [sessionId]),
     navigateSessionTree: (sessionId, entryId, options) =>
       call('maker:navigate-session-tree', [sessionId, entryId, options]),

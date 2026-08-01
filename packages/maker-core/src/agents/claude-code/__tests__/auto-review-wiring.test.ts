@@ -91,6 +91,7 @@ async function startSession(
     providerId?: string;
     authSource?: 'oauth' | 'api-key';
     reviewVerdict?: 'allow' | 'block' | 'ask';
+    reviewer?: AgentDeps['reviewAutoPermissionAction'];
     attachResolver?: boolean;
   } = {},
 ) {
@@ -100,7 +101,7 @@ async function startSession(
   const fakeQuery = createFakeQuery();
   sdkMock.query.mockReturnValue(fakeQuery);
 
-  const reviewAutoPermissionAction = vi.fn(async () => ({
+  const reviewAutoPermissionAction = options.reviewer ?? vi.fn(async () => ({
     verdict: options.reviewVerdict ?? 'allow',
     reason: 'reviewed',
   }));
@@ -243,6 +244,38 @@ describe('Auto-review wiring: safe builtin tools auto-approve silently', () => {
 });
 
 describe('Auto-review wiring: lightweight reviewer controls gray actions', () => {
+  it('re-checks the latest permission mode after an in-flight review', async () => {
+    let resolveReview: ((value: { verdict: 'allow'; reason: string }) => void) | undefined;
+    const reviewer = vi.fn(() => new Promise<{ verdict: 'allow'; reason: string }>((resolve) => {
+      resolveReview = resolve;
+    }));
+    const { handle, canUseTool, seen } = await startSession('auto', { reviewer });
+
+    const pending = canUseTool('Write', { file_path: '/etc/late-mode.conf' }, { toolUseID: 'late-ask' });
+    await vi.waitFor(() => expect(reviewer).toHaveBeenCalledOnce());
+    await handle.setPermissionMode!('ask');
+    resolveReview!({ verdict: 'allow', reason: 'reviewed' });
+    await expect(pending).resolves.toMatchObject({ behavior: 'allow' });
+    // allow 来自用户确认而非旧 reviewer verdict，且 session grant 已被剥离。
+    expect(permissionRequests(seen)).toHaveLength(1);
+    expect(permissionRequests(seen)[0]?.suggestions).toBeUndefined();
+
+    let resolveFull: ((value: { verdict: 'allow'; reason: string }) => void) | undefined;
+    const fullReviewer = vi.fn(() => new Promise<{ verdict: 'allow'; reason: string }>((resolve) => {
+      resolveFull = resolve;
+    }));
+    // 新建一个 auto 会话，避免上一段 Ask 的本地状态影响断言。
+    await handle.close();
+    const next = await startSession('auto', { reviewer: fullReviewer });
+    const fullPending = next.canUseTool('Write', { file_path: '/etc/late-full.conf' }, { toolUseID: 'late-full' });
+    await vi.waitFor(() => expect(fullReviewer).toHaveBeenCalledOnce());
+    await next.handle.setPermissionMode!('bypassPermissions');
+    resolveFull!({ verdict: 'allow', reason: 'reviewed' });
+    await expect(fullPending).resolves.toMatchObject({ behavior: 'allow' });
+    expect(permissionRequests(next.seen)).toHaveLength(0);
+    await next.handle.close();
+  });
+
   it('reviewer allow → proceeds silently without hitting the resolver', async () => {
     const { handle, canUseTool, reviewAutoPermissionAction, seen } = await startSession('auto', {
       reviewVerdict: 'allow',

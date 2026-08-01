@@ -46,10 +46,36 @@ import { createPluginRegistry } from '../maker-host/plugins/index.js';
 interface StartedPiBridge {
   bridge: CodexHttpBridge;
   serverNames: string[];
+  generation: number;
+  refs: number;
+  retired: boolean;
+  shutdownPromise: Promise<void> | null;
 }
 
 let startPromise: Promise<StartedPiBridge | null> | null = null;
-let activeBridge: CodexHttpBridge | null = null;
+let activeGeneration: StartedPiBridge | null = null;
+let environmentEpoch = 0;
+let nextGeneration = 0;
+const generations = new Set<StartedPiBridge>();
+
+function shutdownGeneration(started: StartedPiBridge): Promise<void> {
+  if (!started.shutdownPromise) {
+    started.shutdownPromise = started.bridge.shutdown().catch(() => {}).finally(() => {
+      generations.delete(started);
+    });
+  }
+  return started.shutdownPromise;
+}
+
+function retireGeneration(started: StartedPiBridge): void {
+  started.retired = true;
+  if (started.refs === 0) void shutdownGeneration(started);
+}
+
+function releaseGeneration(started: StartedPiBridge): void {
+  if (started.refs > 0) started.refs -= 1;
+  if (started.retired && started.refs === 0) void shutdownGeneration(started);
+}
 
 /**
  * 为一次 pi startSession 准备 MCP 桥配置。
@@ -64,9 +90,18 @@ export async function getPiExtraSpawnConfig(
 ): Promise<PiExtraSpawnConfig | null> {
   const started = await ensureBridge(providers, logger);
   if (!started) return null;
+  // JS 同步段内完成“确认未退役 + 加 lease”，invalidate 不会插进中间。
+  if (started.retired) return getPiExtraSpawnConfig(providers, logger, sessionCtx);
+  started.refs += 1;
 
   const { bridge, serverNames } = started;
   const sessionId = sessionCtx?.sessionId?.trim();
+  let disposed = false;
+  const disposeLease = (): void => {
+    if (disposed) return;
+    disposed = true;
+    releaseGeneration(started);
+  };
 
   // 匿名会话:不注册身份、URL 不带 query。工具 handler 拿不到 ctx 时回落业务
   // 错误码(如 LEAD_NOT_SUPPORTED)—— 与改动前一致,不打 401。
@@ -76,6 +111,7 @@ export async function getPiExtraSpawnConfig(
         token: bridge.token,
         servers: serverNames.map((name) => ({ name, url: bridge.url(name) })),
       },
+      disposeSessionCtx: disposeLease,
     };
   }
 
@@ -98,7 +134,12 @@ export async function getPiExtraSpawnConfig(
   // 同 session 重建(resume/reattach)直接覆盖注册,注册表以 sessionId 为 key,
   // 天然不累积。必须在返回(即 spawn)前完成 —— cindy-bridge extension 一起进程
   // 就会带 `?session=` 发 initialize,注册晚于它即 401。
-  bridge.registerSessionCtx(sessionId, liziCtx);
+  try {
+    bridge.registerSessionCtx(sessionId, liziCtx);
+  } catch (error) {
+    disposeLease();
+    throw error;
+  }
   try {
     const servers = serverNames.map((name) => ({
       name,
@@ -108,38 +149,93 @@ export async function getPiExtraSpawnConfig(
       mcpBridge: { token: bridge.token, servers },
       // expectedCtx 代际比较由 bridge.unregisterSessionCtx 内部按引用做:同
       // session 覆盖注册后,旧 close 的迟到 dispose 不误删新 ctx。
-      disposeSessionCtx: () => bridge.unregisterSessionCtx(sessionId, liziCtx),
+      disposeSessionCtx: () => {
+        try {
+          bridge.unregisterSessionCtx(sessionId, liziCtx);
+        } finally {
+          disposeLease();
+        }
+      },
     };
   } catch (err) {
     // 注册后构造失败必须回滚,否则调用方拿不到 dispose,ctx 永久残留(该 id 的
     // `?session=` 路由一直有效)。
     bridge.unregisterSessionCtx(sessionId, liziCtx);
+    disposeLease();
     throw err;
   }
 }
 
-export async function shutdownPiEnvironment(): Promise<void> {
-  const bridge = activeBridge;
-  activeBridge = null;
+/**
+ * 配置变更只让新会话换代：旧 generation 继续服务已持 lease 的 Pi 会话，最后一个
+ * 会话 close 后才关桥。这样撤销/新增工具能作用于新会话，又不会把正在执行的工具
+ * 请求从脚下切断。
+ */
+export function invalidatePiEnvironment(): void {
+  environmentEpoch += 1;
+  const current = activeGeneration;
+  activeGeneration = null;
   startPromise = null;
-  if (bridge) await bridge.shutdown().catch(() => {});
+  if (current) retireGeneration(current);
+}
+
+export async function shutdownPiEnvironment(): Promise<void> {
+  environmentEpoch += 1;
+  const pending = startPromise;
+  const current = activeGeneration;
+  activeGeneration = null;
+  startPromise = null;
+  if (current) current.retired = true;
+  await pending?.catch(() => null);
+  // 退出/换账号是硬边界：Maker 会话也在关闭，强制收掉所有代际，不等 lease。
+  await Promise.all([...generations].map((generation) => {
+    generation.retired = true;
+    return shutdownGeneration(generation);
+  }));
 }
 
 /** bridge 单例懒启动(首个会话触发,失败下次重试)。 */
-function ensureBridge(providers: McpProvider[], logger: MakerLogger): Promise<StartedPiBridge | null> {
-  if (!startPromise) {
-    startPromise = doStart(providers, logger.child('pi-environment')).catch((err) => {
-      logger.error('pi MCP bridge start failed; pi will run with builtin tools only', {
-        message: err instanceof Error ? err.message : String(err),
-      });
-      startPromise = null; // 下次 startSession 重试
-      return null;
-    });
+async function ensureBridge(providers: McpProvider[], logger: MakerLogger): Promise<StartedPiBridge | null> {
+  for (;;) {
+    if (!startPromise) {
+      const epoch = environmentEpoch;
+      let pending!: Promise<StartedPiBridge | null>;
+      pending = doStart(providers, logger.child('pi-environment'))
+        .then((raw) => {
+          if (!raw) return null;
+          const started: StartedPiBridge = {
+            ...raw,
+            generation: ++nextGeneration,
+            refs: 0,
+            retired: epoch !== environmentEpoch,
+            shutdownPromise: null,
+          };
+          generations.add(started);
+          if (started.retired) retireGeneration(started);
+          else activeGeneration = started;
+          return started;
+        })
+        .catch((err) => {
+          logger.error('pi MCP bridge start failed; pi will run with builtin tools only', {
+            message: err instanceof Error ? err.message : String(err),
+          });
+          if (startPromise === pending) startPromise = null;
+          return null;
+        });
+      startPromise = pending;
+    }
+    const pending = startPromise;
+    const started = await pending;
+    if (!started) return null;
+    if (!started.retired) return started;
+    if (startPromise === pending) startPromise = null;
   }
-  return startPromise;
 }
 
-async function doStart(providers: McpProvider[], logger: MakerLogger): Promise<StartedPiBridge | null> {
+async function doStart(
+  providers: McpProvider[],
+  logger: MakerLogger,
+): Promise<Pick<StartedPiBridge, 'bridge' | 'serverNames'> | null> {
   // factory 阶段没有 per-session 信息,控制类工具通过 getSessionContext 在
   // tool-call 时读当前 session ctx —— 该 ctx 由 bridge 的 `?session=` 路由在
   // runWithLiziMcpSessionContext 里注入(见本文件顶部说明)。
@@ -225,7 +321,6 @@ async function doStart(providers: McpProvider[], logger: MakerLogger): Promise<S
   // pluginIdByServerName 让 bridge 对策略工具启用 per-call gate:按会话 ctx 里冻结的
   // disabled 列表(getPiExtraSpawnConfig 注入)阻断项目停用的工具(codex review)。
   const bridge = await startCodexHttpBridge({ serverFactories, pluginIdByServerName, logger });
-  activeBridge = bridge;
   logger.info('pi MCP bridge ready', { port: bridge.port, servers: names.length });
   return { bridge, serverNames: names };
 }

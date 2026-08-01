@@ -12,9 +12,9 @@
 import type { AgentKind } from '@cindy/maker-scheduler';
 
 export function defaultModelFor(agentKind: AgentKind): string {
-  // 显式分支:pi 经网关路由 Claude 系模型,冷启动兜底同样走成本保守的 sonnet
-  // (与 cc 一致但独立声明,避免将来改 cc 默认时 pi 静默跟随)。
   if (agentKind === 'codex') return 'gpt-5.5';
-  if (agentKind === 'pi') return 'claude-sonnet-4-6';
+  // Pi 没有跨来源合法的静态默认。runner 会用实时连接目录解析
+  // {model,providerId}；空字符串可阻止其它调用方制造“看似可用”的 Claude 假路由。
+  if (agentKind === 'pi') return '';
   return 'claude-sonnet-4-6';
 }

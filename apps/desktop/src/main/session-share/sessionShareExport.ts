@@ -138,9 +138,16 @@ function codedError(code: string, message: string): Error {
   return Object.assign(new Error(message), { code });
 }
 
-function portablePiSessionId(absPath: string): string {
-  const digest = createHash('sha256').update(absPath).digest('hex').slice(0, 32);
-  return `pi-${digest}.jsonl`;
+function portablePiSessionId(buffer: Buffer): string {
+  // 纳入**转录内容摘要**而非仅绝对路径:同一 Pi 会话后续产生消息后再导出时,路径不变但内容
+  // 已变。旧实现只散列路径 → id 不变,接收端若曾导入旧包、软删后再导入新包,导入器的
+  // writeIfMissing 会复用磁盘上同名旧转录,新 DB 消息被恢复到过期模型上下文(codex review P2)。
+  // 内容散列使「内容变 → id 变 → 落到新目标文件」,同内容仍同 id(重复导入正常去重)。
+  // ID 与真正打包的同一份冻结字节计算，避免“先 hash、后文件继续写、再 read”
+  // 的 TOCTOU 让清单 id 与包内内容不一致。读失败时不再用绝对路径摘要兜底：
+  // 那会复活 path-only 冲突，并把不可验证的转录伪装成可恢复。
+  const basis = createHash('sha256').update(buffer).digest('hex').slice(0, 32);
+  return `pi-${basis}.jsonl`;
 }
 
 /** Pi 的 agentMeta 不能把源机绝对 sessionFile 路径带进分享包。 */
@@ -262,27 +269,14 @@ export async function exportSessionShare(
         // 历史坏 JSON 与其它 agentMeta 读取路径同口径容忍。
       }
     }
-    const portableIds = new Map<string, string>();
     for (const absPath of absoluteIds) {
-      const portableId = portablePiSessionId(absPath);
-      portableIds.set(absPath, portableId);
-      sdkSessionIds.push(portableId);
       const bytes = await statSize(absPath);
       if (bytes) {
-        const zipPath = `transcripts/pi/${portableId}`;
-        transcriptCandidates.push({ sdkSessionId: portableId, zipPath, absPath, bytes });
-        transcriptRefs.push({ sdkSessionId: portableId, path: zipPath });
-      } else {
-        transcriptRefs.push({ sdkSessionId: portableId, path: null });
+        // Pi 的便携 id 必须由阶段 B 真正打包的冻结 buffer 计算；此处只登记
+        // 尺寸候选，不提前读/散列，也不让绝对路径进入最终 manifest。
+        transcriptCandidates.push({ sdkSessionId: absPath, zipPath: '', absPath, bytes });
       }
     }
-    activeSdkSessionId = session.sdkSessionId
-      ? (portableIds.get(session.sdkSessionId) ?? null)
-      : null;
-    bundleMessages = messages.map((message) => ({
-      ...message,
-      agentMeta: rewritePiAgentMetaForExport(message.agentMeta, portableIds),
-    }));
   } else {
     activeSdkSessionId = session.sdkSessionId;
     sdkSessionIds = session.sdkSessionId ? [session.sdkSessionId] : [];
@@ -375,14 +369,41 @@ export async function exportSessionShare(
   //    不让单文件问题炸掉整次导出;转录读失败同步把 ref 回落 null,保真度按
   //    实际落包结果判。──
   const transcriptFiles: Array<{ zipPath: string; buffer: Buffer }> = [];
+  const piPortableIds = new Map<string, string>();
+  const seenPiPortableIds = new Set<string>();
   for (const candidate of transcriptCandidates) {
     const buffer = await fsp.readFile(candidate.absPath).catch(() => null);
     if (buffer && buffer.length > 0) {
-      transcriptFiles.push({ zipPath: candidate.zipPath, buffer });
+      if (session.agentKind === 'pi') {
+        const portableId = portablePiSessionId(buffer);
+        piPortableIds.set(candidate.absPath, portableId);
+        if (!seenPiPortableIds.has(portableId)) {
+          seenPiPortableIds.add(portableId);
+          const zipPath = `transcripts/pi/${portableId}`;
+          sdkSessionIds.push(portableId);
+          transcriptRefs.push({ sdkSessionId: portableId, path: zipPath });
+          transcriptFiles.push({ zipPath, buffer });
+        }
+      } else {
+        transcriptFiles.push({ zipPath: candidate.zipPath, buffer });
+      }
     } else {
-      const ref = transcriptRefs.find((r) => r.path === candidate.zipPath);
-      if (ref) ref.path = null;
+      // Pi 读失败时没有内容可生成安全便携 id，直接省略该转录并把 message meta
+      // 的 sdkSessionId 清掉；其它 agent 保持既有“ref path=null”降档语义。
+      if (session.agentKind !== 'pi') {
+        const ref = transcriptRefs.find((r) => r.path === candidate.zipPath);
+        if (ref) ref.path = null;
+      }
     }
+  }
+  if (session.agentKind === 'pi') {
+    activeSdkSessionId = session.sdkSessionId
+      ? (piPortableIds.get(session.sdkSessionId) ?? null)
+      : null;
+    bundleMessages = messages.map((message) => ({
+      ...message,
+      agentMeta: rewritePiAgentMetaForExport(message.agentMeta, piPortableIds),
+    }));
   }
   const mediaFiles: Array<{ zipPath: string; buffer: Buffer }> = [];
   let mediaIndex = 0;

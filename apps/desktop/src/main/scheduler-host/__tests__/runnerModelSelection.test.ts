@@ -194,6 +194,9 @@ function createRunnerHarness(
     resolveRouteCopyCapabilities?: ConstructorParameters<
       typeof MakerScheduleRunner
     >[0]['resolveRouteCopyCapabilities'];
+    resolveDefaultModelRoute?: ConstructorParameters<
+      typeof MakerScheduleRunner
+    >[0]['resolveDefaultModelRoute'];
   } = {},
 ): RunnerHarness {
   const createSession = vi.fn(async () => h.session);
@@ -218,6 +221,7 @@ function createRunnerHarness(
     logger: createLogger(),
     checkModelRoute: opts.checkModelRoute,
     resolveRouteCopyCapabilities: opts.resolveRouteCopyCapabilities,
+    resolveDefaultModelRoute: opts.resolveDefaultModelRoute,
   });
   return { runner, createSession, closeSession };
 }
@@ -329,6 +333,41 @@ describe('MakerScheduleRunner model selection', () => {
       );
 
       expect(opts.model).toBe('gpt-5.5');
+    });
+
+    it('Pi 空模型按同一已连接来源解析 model + providerId，不能落到 Cindy 的 Sonnet 路由', async () => {
+      const h = createSessionHarness();
+      const resolveDefaultModelRoute = vi.fn(async () => ({
+        model: 'byom/llama-4',
+        providerId: 'local-byom',
+      }));
+      const harness = createRunnerHarness(h, null, { resolveDefaultModelRoute });
+
+      await fireToCompletion(
+        harness,
+        h,
+        baseSchedule({ agentKind: 'pi', model: undefined, providerId: 'local-byom' }),
+      );
+
+      expect(resolveDefaultModelRoute).toHaveBeenCalledWith('pi', 'local-byom');
+      expect(harness.createSession).toHaveBeenCalledWith(expect.objectContaining({
+        agentKind: 'pi',
+        model: 'byom/llama-4',
+        providerId: 'local-byom',
+      }));
+    });
+
+    it('Pi 空模型且没有已连接来源时在创建会话前明确失败', async () => {
+      const h = createSessionHarness();
+      const resolveDefaultModelRoute = vi.fn(async () => null);
+      const harness = createRunnerHarness(h, null, { resolveDefaultModelRoute });
+
+      await expect(harness.runner.fire(
+        baseSchedule({ agentKind: 'pi', model: undefined, providerId: undefined }),
+        createFireContext(),
+      )).rejects.toThrow('Pi has no connected model source');
+      expect(harness.createSession).not.toHaveBeenCalled();
+      expect(h.send).not.toHaveBeenCalled();
     });
 
     it('schedule.model 显式设置时原样透传', async () => {

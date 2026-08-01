@@ -240,6 +240,7 @@ function buildCreateScheduleInput(
     intervalMs: overrides.intervalMs,
     agentKind: overrides.agentKind ?? template.agentKind ?? 'claude-code',
     model: overrides.model ?? template.model,
+    providerId: overrides.providerId ?? template.providerId,
     effort: overrides.effort ?? template.effort,
     workingDir: overrides.workingDir,
     useWorktree: overrides.useWorktree ?? template.useWorktree ?? false,

@@ -187,6 +187,36 @@ describe('mobile schedule form model', () => {
     expect(withModel).toMatchObject({ agentKind: 'pi', model: 'my-local-model' });
   });
 
+  it('keeps an explicit Pi provider route through edit, templates, and fresh-task serialization', () => {
+    const existing = schedule({
+      agentKind: 'pi',
+      model: '',
+      providerId: 'byom-local',
+    });
+    const edited = createMobileScheduleDraft(existing);
+    expect(edited.providerId).toBe('byom-local');
+    expect(buildMobileScheduleInput({ ...edited, name: 'Pi task', prompt: 'run' }))
+      .toMatchObject({ agentKind: 'pi', providerId: 'byom-local' });
+
+    const template: RemoteScheduleTemplate = {
+      id: 'pi-local',
+      name: 'Pi local',
+      description: 'Use the connected local Pi provider',
+      category: 'developer-tools',
+      source: 'builtin',
+      agentKind: 'pi',
+      providerId: 'byom-template',
+      prompt: 'run',
+    };
+    const fromTemplate = applyTemplateToMobileScheduleDraft(createMobileScheduleDraft(null), template);
+    expect(fromTemplate.providerId).toBe('byom-template');
+    expect(buildMobileScheduleInput({ ...fromTemplate, name: 'Pi template' }))
+      .toMatchObject({ agentKind: 'pi', providerId: 'byom-template' });
+
+    // 切 agent 不得把前一个来源误带到新的 agent 默认路由。
+    expect(updateDraftAgentKind({ ...edited, providerId: 'byom-local' }, 'codex').providerId).toBe('');
+  });
+
   it('validates required fields and supported interval-style cron presets', () => {
     const draft = createMobileScheduleDraft(null);
     expect(validateMobileScheduleDraft(draft)).toMatchObject({ field: 'name' });

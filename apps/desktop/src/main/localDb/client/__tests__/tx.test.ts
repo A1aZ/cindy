@@ -665,6 +665,76 @@ describe('db worker tx handlers', () => {
     });
   });
 
+  it.each([false, true])('session.treeRehydrate preserves Cindy-managed attachments across A→B→A (inline=%s)', async (useInlineWorker) => {
+    await withClient(async (client) => {
+      await seedSession(client, 's1');
+      const original = {
+        text: 'Review these assets',
+        images: [{ url: 'cindy-media://blobs/image-a.webp', name: 'design.webp' }],
+        files: [{ path: '/repo/spec.pdf', name: 'spec.pdf' }],
+      };
+      await client.exec(
+        `INSERT INTO messages
+          (id, client_id, session_id, role, content, agent_meta, agent_kind, created_at, rewind_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          'original-user', 'original-client', 's1', 'user', JSON.stringify(original),
+          JSON.stringify({ uuid: 'pi-user-entry' }), 'pi', 100, null,
+        ],
+      );
+
+      await client.tx('session.treeRehydrate', {
+        sessionId: 's1', now: 200, contextTokens: 1, contextWindow: 200000,
+        messages: [{
+          id: 'pi-reprojected-user', clientId: 'pi-tree-pi-user-entry-user', role: 'user',
+          // Pi's transcript keeps only model-consumable blocks; the native image is a placeholder.
+          content: JSON.stringify({ text: 'Review these assets\n\n[image]' }),
+          toolUseId: null, agentMeta: JSON.stringify({ uuid: 'pi-user-entry' }),
+          agentKind: 'pi', createdAt: 100,
+        }],
+      });
+
+      await expect(client.queryOne(
+        'SELECT content FROM messages WHERE session_id = ? AND client_id = ?',
+        ['s1', 'pi-tree-pi-user-entry-user'],
+      )).resolves.toEqual({
+        content: JSON.stringify({ text: 'Review these assets\n\n[image]', images: original.images, files: original.files }),
+      });
+
+      // 先切到不相关的 B 分支：旧活动分支的附件不能被模糊复制过去。
+      await client.tx('session.treeRehydrate', {
+        sessionId: 's1', now: 250, contextTokens: 1, contextWindow: 200000,
+        messages: [{
+          id: 'branch-b-user', clientId: 'pi-tree-branch-b-user', role: 'user',
+          content: JSON.stringify({ text: 'Different branch' }),
+          toolUseId: null, agentMeta: JSON.stringify({ uuid: 'branch-b' }),
+          agentKind: 'pi', createdAt: 150,
+        }],
+      });
+      await expect(client.queryOne(
+        'SELECT content FROM messages WHERE session_id = ? AND client_id = ?',
+        ['s1', 'pi-tree-branch-b-user'],
+      )).resolves.toEqual({ content: JSON.stringify({ text: 'Different branch' }) });
+
+      // B→A 切回时按 entry uuid 复用 A 的历史投影，附件仍在。
+      await client.tx('session.treeRehydrate', {
+        sessionId: 's1', now: 300, contextTokens: 1, contextWindow: 200000,
+        messages: [{
+          id: 'pi-reprojected-user', clientId: 'pi-tree-pi-user-entry-user', role: 'user',
+          content: JSON.stringify({ text: 'Review these assets\n\n[image]' }),
+          toolUseId: null, agentMeta: JSON.stringify({ uuid: 'pi-user-entry' }),
+          agentKind: 'pi', createdAt: 100,
+        }],
+      });
+      await expect(client.queryOne(
+        'SELECT content FROM messages WHERE session_id = ? AND client_id = ?',
+        ['s1', 'pi-tree-pi-user-entry-user'],
+      )).resolves.toEqual({
+        content: JSON.stringify({ text: 'Review these assets\n\n[image]', images: original.images, files: original.files }),
+      });
+    }, { useInlineWorker });
+  });
+
   it('sessions.renameTitles applies title changes atomically with preconditions', async () => {
     await withClient(async (client) => {
       await seedSession(client, 's1', {
@@ -1721,7 +1791,10 @@ describe('db worker tx handlers', () => {
   });
 });
 
-async function withClient(fn: (client: DbClient) => Promise<void>): Promise<void> {
+async function withClient(
+  fn: (client: DbClient) => Promise<void>,
+  opts: { useInlineWorker?: boolean } = {},
+): Promise<void> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xdt-db-tx-'));
   const drizzleDir = path.join(dir, 'drizzle');
   const dbPath = path.join(dir, 'xdt-maker-test-user.db');
@@ -1735,7 +1808,7 @@ async function withClient(fn: (client: DbClient) => Promise<void>): Promise<void
       dbPath,
       drizzleDir,
       betterSqliteModulePath: require.resolve('better-sqlite3'),
-      workerScriptPath,
+      ...(opts.useInlineWorker ? { useInlineWorker: true } : { workerScriptPath }),
     });
     await fn(client);
   } finally {

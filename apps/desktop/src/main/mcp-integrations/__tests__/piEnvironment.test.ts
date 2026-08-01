@@ -18,7 +18,11 @@ import { getLiziMcpSessionContext } from '@cindy/mcps';
 import { createOrcaWorkerBridgeMcpProvider } from '@cindy/orca-workflow';
 
 import type { Logger, McpProvider } from '@cindy/maker-core';
-import { getPiExtraSpawnConfig, shutdownPiEnvironment } from '../piEnvironment.js';
+import {
+  getPiExtraSpawnConfig,
+  invalidatePiEnvironment,
+  shutdownPiEnvironment,
+} from '../piEnvironment.js';
 
 function noopLogger(): Logger {
   const logger: Logger = {
@@ -136,9 +140,10 @@ describe('piEnvironment per-session identity', () => {
     expect(config?.mcpBridge).toBeTruthy();
     const server = config!.mcpBridge!.servers[0]!;
     const token = config!.mcpBridge!.token;
-    // 匿名会话 URL 不带 query,也没有可注销的注册。
+    // 匿名会话 URL 不带 query、没有身份注册；但仍带 generation lease，供配置换代时
+    // 保持旧 bridge 存活到 Pi 子进程退出。
     expect(server.url).not.toContain('?session=');
-    expect(config!.disposeSessionCtx).toBeUndefined();
+    expect(config!.disposeSessionCtx).toBeTypeOf('function');
 
     const headers = {
       authorization: `Bearer ${token}`,
@@ -164,6 +169,50 @@ describe('piEnvironment per-session identity', () => {
     expect(await readRpcText(callResp)).toMatchObject({
       result: { content: [{ type: 'text', text: 'no-session' }] },
     });
+    config!.disposeSessionCtx!();
+  });
+
+  it('keeps the leased old bridge live through invalidation while new sessions use a new generation', async () => {
+    const oldConfig = await getPiExtraSpawnConfig([makeProvider('old_probe')], noopLogger(), {
+      sessionId: 'pi-old-generation',
+      workingDir: '/repo',
+      vendorOptions: {},
+    });
+    const oldServer = oldConfig!.mcpBridge!.servers[0]!;
+    const oldToken = oldConfig!.mcpBridge!.token;
+
+    // 模拟 MCP / contacts / memory 配置保存：新会话必须换桥，但旧 Pi 子进程保存的
+    // URL/token 仍可继续初始化和调用，直到它自己 close 归还 lease。
+    invalidatePiEnvironment();
+    const newConfig = await getPiExtraSpawnConfig([makeProvider('new_probe')], noopLogger(), {
+      sessionId: 'pi-new-generation',
+      workingDir: '/repo',
+      vendorOptions: {},
+    });
+    const newServer = newConfig!.mcpBridge!.servers[0]!;
+    expect(newServer.url).not.toBe(oldServer.url);
+    expect(newConfig!.mcpBridge!.token).not.toBe(oldToken);
+
+    const oldHeaders = {
+      authorization: `Bearer ${oldToken}`,
+      accept: 'application/json, text/event-stream',
+      'content-type': 'application/json',
+    };
+    const oldInit = await fetch(oldServer.url, { method: 'POST', headers: oldHeaders, body: INIT_BODY(41) });
+    expect(oldInit.status).toBe(200);
+    await oldInit.text();
+
+    const newHeaders = {
+      authorization: `Bearer ${newConfig!.mcpBridge!.token}`,
+      accept: 'application/json, text/event-stream',
+      'content-type': 'application/json',
+    };
+    const newInit = await fetch(newServer.url, { method: 'POST', headers: newHeaders, body: INIT_BODY(42) });
+    expect(newInit.status).toBe(200);
+    await newInit.text();
+
+    oldConfig!.disposeSessionCtx!();
+    newConfig!.disposeSessionCtx!();
   });
 
   it('fail-closes policy-controlled builtins for an anonymous session (no workdir-bound policy)', async () => {

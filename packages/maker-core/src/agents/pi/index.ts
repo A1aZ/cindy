@@ -573,6 +573,20 @@ export class PiAgent extends BaseAgent {
       mode === 'bypassPermissions' ? 'bypassPermissions' : mode === 'auto' ? 'auto' : 'ask';
     let permissionMode = normalizePermissionMode(opts.permissionMode);
     let mutableExtraDirs = [...(opts.extraDirs ?? [])];
+    type PermissionSnapshot = {
+      mode: 'ask' | 'auto' | 'bypassPermissions';
+      readOnlyRoots: string[];
+    };
+    const permissionPrivilege = (mode: PermissionSnapshot['mode']): number =>
+      mode === 'bypassPermissions' ? 2 : mode === 'auto' ? 1 : 0;
+    let requestedPermissionSnapshot: PermissionSnapshot = {
+      mode: permissionMode,
+      readOnlyRoots: [...mutableExtraDirs],
+    };
+    let persistedPermissionSnapshot: PermissionSnapshot = {
+      mode: permissionMode,
+      readOnlyRoots: [...mutableExtraDirs],
+    };
     // 权限档写入串行化 + 代际跳过。并发/连续切档(本地与远程控制端同时切,或用户快速连点)时,
     // 无串行的 fs.writeFile 可能让较早的 Full-access 写在较新的 Ask 写之后落盘 —— bridge 每次
     // tool_call 现读就会读到过期的 bypassPermissions,而 host 闭包/UI 已切到 Ask,后续破坏性工具
@@ -580,17 +594,40 @@ export class PiAgent extends BaseAgent {
     // 仅文件写按代际串行,被更晚意图取代的写直接跳过,保证文件最终收敛到最新意图、绝不 stale 覆盖。
     let permissionWriteChain: Promise<void> = Promise.resolve();
     let permissionWriteGen = 0;
-    const writePermissionFile = (): Promise<void> => {
+    const writePermissionFile = (next: PermissionSnapshot): Promise<void> => {
+      requestedPermissionSnapshot = {
+        mode: next.mode,
+        readOnlyRoots: [...next.readOnlyRoots],
+      };
+      // 收紧必须立刻约束 host 侧审批门；等待磁盘 I/O 才改闭包会留下一个 Full access
+      // 的窗口。放宽反过来只能等对应快照成功落盘，避免 host 已放行而 bridge 仍是旧档。
+      if (permissionPrivilege(requestedPermissionSnapshot.mode) < permissionPrivilege(permissionMode)) {
+        permissionMode = requestedPermissionSnapshot.mode;
+      }
       const gen = ++permissionWriteGen;
       // 排队时刻捕获意图快照;运行时若已被更晚的写取代则跳过(旧内容不得在新内容之后落盘)。
-      const snapshot = { mode: permissionMode, readOnlyRoots: [...mutableExtraDirs] };
-      permissionWriteChain = permissionWriteChain.then(async () => {
+      const snapshot = { ...requestedPermissionSnapshot, readOnlyRoots: [...requestedPermissionSnapshot.readOnlyRoots] };
+      const run = permissionWriteChain.then(async () => {
         if (gen !== permissionWriteGen) return;
         await fs.writeFile(permissionFile, JSON.stringify(snapshot) + '\n');
+        // 只有落盘成功且仍是最新代际，host 才提交放宽/目录变更。失败时调用方
+        // 收到 reject；已提前采取的收紧仍保留（fail-closed），下一次写可沿恢复后的链重试。
+        if (gen === permissionWriteGen) {
+          permissionMode = snapshot.mode;
+          mutableExtraDirs = [...snapshot.readOnlyRoots];
+          persistedPermissionSnapshot = {
+            mode: snapshot.mode,
+            readOnlyRoots: [...snapshot.readOnlyRoots],
+          };
+        }
       });
-      return permissionWriteChain;
+      // 排序链必须永不停在 rejected 上:单次 fs.writeFile 失败若污染链,后续 .then 全部不再执行,
+      // 文件系统恢复后的重写也永远追加不进去,bridge 会一直卡在旧档(codex review P1)。故链只吞错
+      // 保持“已收口”供下一次写继续;真实成败通过 run 返回给调用方(setPermissionMode 据此可上报)。
+      permissionWriteChain = run.catch(() => {});
+      return run;
     };
-    await writePermissionFile();
+    await writePermissionFile(requestedPermissionSnapshot);
 
     // MCP 桥:host 把 in-process MCP providers 暴露成 localhost streamable-HTTP。
     // 传 session 身份(sessionId/workingDir/vendorOptions)让 host 在 bridge 上注册
@@ -715,7 +752,8 @@ export class PiAgent extends BaseAgent {
     // Cindy 侧对 pi plan 模式的镜像态;setPlanMode 经 /plan toggle 驱动,与 pi 内部
     // planModeEnabled 保持一致(RPC 下 Execute/Refine 选择框被 auto-cancel,pi 不会自行
     // 翻转,故镜像不漂移)。
-    let planModeActive = false;
+    let planModeActive: boolean | null = planModeExtAvailable ? null : false;
+    let planModeWriteChain: Promise<void> = Promise.resolve();
 
     // proc 构造即 spawn 子进程 —— spawn 参数非法等会**同步**抛。此刻 ctx 已在
     // preparePiExtraSpawnConfig 注册、但 handle 尚未交出,close() 不会跑 → 单独
@@ -838,6 +876,39 @@ export class PiAgent extends BaseAgent {
       throw err;
     }
 
+    const readPersistedPlanMode = async (): Promise<boolean | null> => {
+      const entriesResp = await proc.request({ type: 'get_entries' });
+      if (!entriesResp.success) return null;
+      const entries =
+        (entriesResp.data as { entries?: Array<{ customType?: string; data?: { enabled?: boolean } }> } | undefined)
+          ?.entries ?? [];
+      for (let i = entries.length - 1; i >= 0; i--) {
+        if (entries[i]?.customType !== 'plan-mode') continue;
+        const enabled = entries[i]?.data?.enabled;
+        return typeof enabled === 'boolean' ? enabled : null;
+      }
+      return false;
+    };
+
+    const writePermissionSnapshotOrFailClosed = async (next: PermissionSnapshot): Promise<void> => {
+      try {
+        await writePermissionFile(next);
+      } catch (error) {
+        // bridge 在 Pi 子进程内现读文件；若磁盘仍是 Full access，单改 host 闭包并不能
+        // 拦住下一次 tool_call。安全收紧或新增 Extra Dir 的只读边界落盘失败时，唯一
+        // 可证明 fail-closed 的动作是关掉该 Pi 进程，要求重启后重新生成权限文件。
+        const staleBypassWouldRemain = persistedPermissionSnapshot.mode === 'bypassPermissions'
+          && (
+            next.mode !== 'bypassPermissions'
+            || next.readOnlyRoots.some((root) => !persistedPermissionSnapshot.readOnlyRoots.includes(root))
+          );
+        if (staleBypassWouldRemain) {
+          await proc.close().catch(() => undefined);
+        }
+        throw error;
+      }
+    };
+
     // startSession 在把 handle 交给调用方之前若失败(resume 硬失败、启动期 RPC
     // 超时/进程夭折等),close() 永远不会被调用。这里 try/catch 兜底:注销 bridge
     // 身份注册(否则 ?session= ctx 泄漏)+ 关掉可能已 spawn 的子进程(否则僵尸 pi
@@ -916,29 +987,13 @@ export class PiAgent extends BaseAgent {
       // 读最后一条 plan-mode custom entry 的 enabled 校正镜像(get_entries 已验证暴露该 entry)。
       if (planModeExtAvailable) {
         try {
-          const entriesResp = await proc.request({ type: 'get_entries' });
-          // request() 对业务失败是 resolve({success:false}) 而非 reject。不查 success
-          // 就会静默落 entries=[]、镜像默认 false —— 若 pi 实际 planModeEnabled=true,
-          // 后续 setPlanMode 的幂等短路会误判、/plan toggle 方向反转。显式查并 warn;
-          // 镜像保持默认 false(宁可不声称保护,也不谎报),与兄弟 RPC 调用的 success 检查一致。
-          if (!entriesResp.success) {
-            this.deps.logger.warn('pi plan-mode state sync: get_entries failed; plan mirror unverified (defaulting off)', {
-              error: entriesResp.error,
-            });
-          } else {
-            const entries =
-              (entriesResp.data as { entries?: Array<{ customType?: string; data?: { enabled?: boolean } }> } | undefined)
-                ?.entries ?? [];
-            for (let i = entries.length - 1; i >= 0; i--) {
-              if (entries[i]?.customType === 'plan-mode') {
-                const enabled = entries[i]?.data?.enabled;
-                if (typeof enabled === 'boolean') planModeActive = enabled;
-                break;
-              }
-            }
+          planModeActive = await readPersistedPlanMode();
+          if (planModeActive === null) {
+            this.deps.logger.warn('pi plan-mode state sync: get_entries failed or returned an invalid state; plan mirror remains unknown');
           }
         } catch (err) {
-          this.deps.logger.warn('pi plan-mode state sync failed (non-fatal)', {
+          planModeActive = null;
+          this.deps.logger.warn('pi plan-mode state sync failed; plan mirror remains unknown', {
             message: err instanceof Error ? err.message : String(err),
           });
         }
@@ -1096,13 +1151,17 @@ export class PiAgent extends BaseAgent {
       async setPermissionMode(mode): Promise<void> {
         // ask/auto/bypass 三档;extension 每次 tool_call 现读,写完即生效。
         // auto 的差异在 Cindy 侧 dispatcher(handleExtensionUiRequest),bridge 无感知。
-        permissionMode = normalizePermissionMode(mode);
-        await writePermissionFile();
+        await writePermissionSnapshotOrFailClosed({
+          ...requestedPermissionSnapshot,
+          mode: normalizePermissionMode(mode),
+        });
       },
 
       async setExtraDirs(dirs: string[]): Promise<void> {
-        mutableExtraDirs = [...dirs];
-        await writePermissionFile();
+        await writePermissionSnapshotOrFailClosed({
+          ...requestedPermissionSnapshot,
+          readOnlyRoots: [...dirs],
+        });
       },
 
       isTurnRunning(): boolean {
@@ -1115,17 +1174,38 @@ export class PiAgent extends BaseAgent {
           deps.logger.warn('pi setPlanMode ignored: plan-mode extension not available');
           return;
         }
-        if (enabled === planModeActive) return; // 幂等:已在目标态不重复 toggle
-        // /plan 是扩展命令,pi 即时执行(扩展命令不受 streaming 拒绝约束);toggle 翻转
-        // pi 内部 planModeEnabled(开→禁 edit/write + 只读 bash;关→恢复全权)。
-        const resp = await proc.request({ type: 'prompt', message: '/plan' });
-        if (!resp.success) {
-          throw new Error(`pi setPlanMode(/plan) rejected: ${resp.error ?? 'unknown'}`);
-        }
-        planModeActive = enabled;
+        // /plan 是 toggle，必须把全部调用串行；否则两个并发“开启”都会看到 false，
+        // 连续 toggle 两次后实际回到关闭。未知镜像先重新读取，无法证明方向就拒绝，
+        // 不能把 sync 失败伪报成 false 后盲切。
+        const run = planModeWriteChain.then(async () => {
+          if (planModeActive === null) {
+            planModeActive = await readPersistedPlanMode();
+            if (planModeActive === null) {
+              throw new Error('pi setPlanMode refused: persisted plan-mode state is unavailable');
+            }
+          }
+          if (enabled === planModeActive) return;
+          let resp: Awaited<ReturnType<typeof proc.request>>;
+          try {
+            resp = await proc.request({ type: 'prompt', message: '/plan' });
+          } catch (error) {
+            // transport 超时/断线不能证明命令未到达 Pi；它可能已经完成 toggle。
+            // 旧 boolean 此后不再可信，下次调用必须先从持久 entry 重同步。
+            planModeActive = null;
+            throw error;
+          }
+          if (!resp.success) {
+            // RPC 失败响应也不拿旧镜像继续猜 toggle 方向，统一回到未知态。
+            planModeActive = null;
+            throw new Error(`pi setPlanMode(/plan) rejected: ${resp.error ?? 'unknown'}`);
+          }
+          planModeActive = enabled;
+        });
+        planModeWriteChain = run.catch(() => {});
+        return run;
       },
 
-      getPlanMode(): boolean {
+      getPlanMode(): boolean | null {
         return planModeActive;
       },
 

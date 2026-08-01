@@ -118,9 +118,8 @@ export interface PiExtraSpawnConfig {
     servers: Array<{ name: string; url: string }>;
   } | null;
   /**
-   * 注销本 session 在 bridge 上注册的身份 ctx。PiAgent 在 close() 时调,幂等。
-   * 仅当本次带 sessionId 且 host 在 bridge 上做了 `?session=` 身份注册时才提供;
-   * 匿名会话 / 无 bridge → undefined(无需注销)。
+   * 释放本 session 的 bridge lease；带 sessionId 时同时注销身份 ctx。PiAgent 在
+   * close() 时调用且要求幂等。只要拿到 bridge（包括匿名会话）就应提供。
    */
   disposeSessionCtx?: () => void;
 }
@@ -1098,7 +1097,7 @@ export interface AgentSessionHandle {
   setPlanMode?(enabled: boolean): Promise<void>;
 
   /** 当前 maker 进程内记录的计划模式状态；不支持的 agent 不实现。 */
-  getPlanMode?(): boolean;
+  getPlanMode?(): boolean | null;
 
   /**
    * 把当前会话导出成 HTML 文件,返回写入的绝对路径。

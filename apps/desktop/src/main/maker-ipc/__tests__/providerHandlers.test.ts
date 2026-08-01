@@ -844,12 +844,14 @@ describe('provider:custom:* CRUD handlers', () => {
       END
     `);
 
+    // 端点改变且 UI 没回传 main-only headers 时会先删除旧端点凭证；随后 DB 更新
+    // 失败，事务补偿必须恢复旧头，不能把安全清理变成凭证丢失。
     await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
       ...config,
       runtimes: {
         pi: {
-          ...config.runtimes.pi!,
-          headers: { Authorization: 'Bearer replacement' },
+          baseUrl: 'https://different-endpoint.example/v1',
+          models: [{ id: 'm', name: 'M' }],
         },
       },
     })).rejects.toThrow(/simulated header write failure/);
@@ -922,6 +924,53 @@ describe('provider:custom:* CRUD handlers', () => {
       },
     })).resolves.toEqual({ ok: true });
     expect(removeCustomProviderHeaders).toHaveBeenCalledWith('keep-headers', 'pi');
+    expect(headers.get('pi')).toBeUndefined();
+  });
+
+  it('clears stored headers when an update moves the runtime to a different endpoint', async () => {
+    mountDb();
+    const harness = new IpcHarness();
+    const headers = new Map<AgentKind, Record<string, string>>();
+    const removeCustomProviderHeaders = vi.fn((_providerId, agent: AgentKind) => {
+      headers.delete(agent);
+      return { success: true };
+    });
+    registerProviderHandlers(harness, makeDeps({
+      readCustomProviderHeadersForMutation: vi.fn((_providerId, agent: AgentKind) => headers.get(agent) ?? null),
+      storeCustomProviderHeaders: vi.fn((_providerId, agent: AgentKind, value: Record<string, string>) => {
+        headers.set(agent, { ...value });
+        return true;
+      }),
+      removeCustomProviderHeaders,
+    }));
+    const config: CustomProviderConfig = {
+      id: 'move-headers',
+      name: 'Move Headers',
+      auth: { method: 'apiKey' },
+      runtimes: {
+        pi: {
+          baseUrl: 'https://old-endpoint.example/v1',
+          modelsUrl: 'https://old-endpoint.example/models',
+          models: [{ id: 'm', name: 'M' }],
+          headers: { Authorization: 'Bearer endpoint-bound' },
+        },
+      },
+    };
+    await harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_CREATE, config);
+    removeCustomProviderHeaders.mockClear();
+
+    await expect(harness.invoke(MAKER_INVOKE.PROVIDER_CUSTOM_UPDATE, {
+      ...config,
+      runtimes: {
+        pi: {
+          baseUrl: 'https://new-endpoint.example/v1',
+          modelsUrl: 'https://new-endpoint.example/models',
+          models: [{ id: 'm', name: 'M' }],
+        },
+      },
+    })).resolves.toEqual({ ok: true });
+
+    expect(removeCustomProviderHeaders).toHaveBeenCalledWith('move-headers', 'pi');
     expect(headers.get('pi')).toBeUndefined();
   });
 

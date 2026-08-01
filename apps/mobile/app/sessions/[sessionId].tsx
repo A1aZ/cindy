@@ -88,6 +88,7 @@ import { BlurBackdrop } from '@/session/BlurBackdrop';
 import { SheetModal } from '@/session/SheetModal';
 import { SheetGrabber, SheetSurface } from '@/session/SheetSurface';
 import { MobilePermissionPickerList } from '@/session/MobilePermissionPickerList';
+import { PiSessionTreeSheet } from '@/session/PiSessionTreeSheet';
 import { computeContextSheetSnapHeights, type ContextSheetSnap } from '@/session/contextSheetModel';
 import { permissionAccentColor, permissionPresentation } from '@/session/permissionPresentation';
 import {
@@ -923,6 +924,8 @@ export default function SessionScreen() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [menuInitialView, setMenuInitialView] = useState<SessionMenuView>('menu');
+  const [sessionTreeOpen, setSessionTreeOpen] = useState(false);
+  const [sessionTreePendingOpen, setSessionTreePendingOpen] = useState(false);
   // inline 排队区:展开操作行的条目(同时只展开一条;null=全收起)。
   const [queueSelectedClientId, setQueueSelectedClientId] = useState<string | null>(null);
   // 排队消息「复用 composer 编辑」态:进入时把队列条目的文本/附件载入 composer,
@@ -2038,6 +2041,15 @@ export default function SessionScreen() {
     setMenuInitialView(view);
     setSettingsOpen(true);
   }, []);
+  const openSessionTreeAfterMenu = useCallback(() => {
+    setSessionTreePendingOpen(true);
+    setSettingsOpen(false);
+  }, []);
+  const handleSessionMenuClosed = useCallback(() => {
+    if (!sessionTreePendingOpen) return;
+    setSessionTreePendingOpen(false);
+    setSessionTreeOpen(true);
+  }, [sessionTreePendingOpen]);
   const renderComposerResizeHandle = () => (
     <ComposerResizeGrabber
       onAdjust={composerResize.adjustByLine}
@@ -2996,7 +3008,7 @@ export default function SessionScreen() {
         });
         // 廉价对账:updatedAt 主信号(任何消息变化都会 bump),_count 仅在两侧都有时作辅助;
         // 另外要求消息窗口已被详情页同步到当前 meta,避免首页先刷新 session preview 后,
-        // 详情页把旧消息缓存误判成最新。任一变化 → 只拉最新小窗对账(store 旧消息保留 + 按 key 合并);
+        // 详情页把旧消息缓存误判成最新。任一变化 → 拉取权威最新窗口并对账;
         // 都没变 → 跳过整窗重拉(内容已是最新,新消息由 live subscribe 推送)。
         const freshCount = sessionMeta._count?.messages;
         const metaChanged = shouldRefreshLatestMessageWindowOnReopen({
@@ -3005,7 +3017,6 @@ export default function SessionScreen() {
           storedSession: storedSessionAtStart,
         });
         if (syncRun.isStale()) return;
-        remoteSessionStore.upsertDeviceSession(deviceId, deviceName, sessionMeta);
         remoteSessionStore.setActiveSessionSnapshots(
           deviceId,
           Array.isArray(activeSessionSnapshot.activeSessions)
@@ -3033,6 +3044,7 @@ export default function SessionScreen() {
           // 真实消息数推断(getSession 没给总数时退化为窗口启发式)。
           setHasOlderMessages(hasOlderMessagesAfterReopen(freshCount, remoteSessionStore.getMessages(sessionId)));
         }
+        remoteSessionStore.upsertDeviceSession(deviceId, deviceName, sessionMeta);
         remoteSessionStore.setPendingInteractions(sessionId, Array.isArray(pendingInteractions) ? pendingInteractions : []);
         remoteSessionStore.setInputProjection(sessionId, projection);
       }
@@ -7584,6 +7596,7 @@ export default function SessionScreen() {
             keyboardAvoidingBehavior={nativeShellLayout.keyboardAvoidingBehavior}
             onArchive={() => patchSessionMeta({ status: 'archived' })}
             onClose={() => setSettingsOpen(false)}
+            onClosed={handleSessionMenuClosed}
             onDelete={() => patchSessionMeta({ status: 'deleted' })}
             onLoadExtraDirPath={(path) => void loadExtraDirBrowsePath(path)}
             onRefreshAccountUsage={() => void refreshAccountUsage()}
@@ -7597,6 +7610,9 @@ export default function SessionScreen() {
                 params: { sessionId, deviceId, deviceName },
               });
             }}
+            onOpenSessionTree={currentSession.agentKind === 'pi'
+              ? openSessionTreeAfterMenu
+              : undefined}
             onRegenerateTitle={() => maker.regenerateSessionTitle(sessionId)}
             onRename={(title) => patchSessionMeta({ title })}
             onRestore={() => patchSessionMeta({ status: 'active' })}
@@ -7614,6 +7630,20 @@ export default function SessionScreen() {
             visible={settingsOpen}
           />
         ) : null}
+        <PiSessionTreeSheet
+          disabledReason={remoteSessionRunning
+            ? t('session.menu.branchRunningBlocked')
+            : collaborationReadOnlyReason}
+          maker={maker}
+          onClose={() => setSessionTreeOpen(false)}
+          onNavigated={async (draftText) => {
+            if (draftText) applyComposerDocument(textComposerDocument(draftText));
+            setSessionTreeOpen(false);
+            await requestSync({ reason: 'session-tree-navigate', replaceMessages: true });
+          }}
+          sessionId={sessionId}
+          visible={sessionTreeOpen && currentSession?.agentKind === 'pi'}
+        />
         <SessionSearchSheet
           activeHit={activeSearchHit}
           activeIndex={activeSearchIndex}

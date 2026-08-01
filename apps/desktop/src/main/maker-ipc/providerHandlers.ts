@@ -683,10 +683,26 @@ export function registerProviderHandlers(
     }
     return restored;
   };
+  // update 时:runtime 仍在、apiKey 鉴权、未带 headers 的“保留”分支只在**端点未变**时成立。
+  // 若 baseUrl/modelsUrl 改到了另一端点,旧密文头绑定的是原端点,保留会把长期凭证 hydrate 到
+  // 新主机(codex review P1)。用**权威的 previous 配置**逐 agent 比对端点,变了就清除、要求重填。
+  const endpointChangedForAgent = (
+    config: CustomProviderConfig,
+    previous: CustomProviderConfig | null | undefined,
+    agent: AgentKind,
+  ): boolean => {
+    const prevRt = previous?.runtimes[agent];
+    const nextRt = config.runtimes[agent];
+    if (!prevRt || !nextRt) return false; // 新增 runtime 无旧端点/旧头可漏;runtime 移除已单独清
+    const norm = (u: string | null | undefined): string => (u ?? '').trim();
+    return norm(prevRt.baseUrl) !== norm(nextRt.baseUrl)
+      || norm(prevRt.modelsUrl) !== norm(nextRt.modelsUrl);
+  };
   const planProviderHeaderMutations = (
     config: CustomProviderConfig,
     headers: CustomProviderHeaderSecrets,
     mode: 'create' | 'update' | 'delete',
+    previous?: CustomProviderConfig | null,
   ): HeaderMutation[] => {
     // 头凭证在 auth='none'/'oauth' 下不该继续留存(与 planProviderKeyMutations 的
     // usesApiKey 同口径):这两种模式不经存储的鉴权请求头路由。
@@ -715,8 +731,12 @@ export function registerProviderHandlers(
         mutations.push({ agent, replacement });
       } else if (!usesApiKey) {
         mutations.push({ agent, replacement: null });
+      } else if (endpointChangedForAgent(config, previous, agent)) {
+        // runtime 存在 + apiKey + 未提供 headers,但端点改到了新主机 → 清除旧密文头,
+        // 不把绑定原端点的长期凭证发往新端点(用户需在新端点显式重填,codex review P1)。
+        mutations.push({ agent, replacement: null });
       }
-      // else: runtime 存在 + apiKey 鉴权 + 未提供 headers → 保留,跳过。
+      // else: runtime 存在 + apiKey 鉴权 + 未提供 headers + 端点未变 → 保留,跳过。
     }
     return mutations;
   };
@@ -1184,7 +1204,7 @@ export function registerProviderHandlers(
         const credentialSnapshots = stageProviderCredentials(
           config.id,
           planProviderKeyMutations(config, keys, 'update'),
-          planProviderHeaderMutations(config, separated.headers, 'update'),
+          planProviderHeaderMutations(config, separated.headers, 'update', previous),
         );
         // 先阻止在途 flow 写回，再改描述符；否则旧 flow 可能在 clear 后迟到落一枚旧 token。
         if (shouldResetOAuth) deps.oauthCancel(config.id);

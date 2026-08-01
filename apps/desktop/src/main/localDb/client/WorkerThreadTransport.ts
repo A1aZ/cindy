@@ -947,6 +947,43 @@ function rewindCommit(readyDb, args) {
   })();
 }
 
+function parsedTreeObjectJson(value) {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function treeEntryUuid(agentMeta) {
+  const parsed = parsedTreeObjectJson(agentMeta);
+  return parsed && typeof parsed.uuid === 'string' && parsed.uuid ? parsed.uuid : null;
+}
+
+function normalizedTreeUserText(content) {
+  const parsed = parsedTreeObjectJson(content);
+  if (!parsed || typeof parsed.text !== 'string') return null;
+  return parsed.text
+    .split(/\\r?\\n/)
+    .filter((line) => line.trim() !== '[image]')
+    .join('\\n')
+    .replace(/\\s+/g, ' ')
+    .trim();
+}
+
+function mergeTreeUserAttachments(content, source) {
+  if (!source) return content;
+  const next = parsedTreeObjectJson(content);
+  const previous = parsedTreeObjectJson(source.content);
+  if (!next || !previous) return content;
+  const merged = { ...next };
+  if (!Object.hasOwn(next, 'images') && Array.isArray(previous.images)) merged.images = previous.images;
+  if (!Object.hasOwn(next, 'files') && Array.isArray(previous.files)) merged.files = previous.files;
+  return JSON.stringify(merged);
+}
+
 function sessionTreeRehydrate(readyDb, args) {
   const payload = asRecord(args, 'session.treeRehydrate args');
   const sessionId = expectString(payload.sessionId, 'sessionId');
@@ -971,6 +1008,9 @@ function sessionTreeRehydrate(readyDb, args) {
   const selectVisibleClientIds = readyDb.prepare(
     'SELECT client_id FROM messages WHERE session_id = ? AND rewind_at IS NULL',
   );
+  const selectUserAttachmentSources = readyDb.prepare(
+    "SELECT client_id, content, agent_meta, created_at, rewind_at FROM messages WHERE session_id = ? AND role = 'user' ORDER BY created_at ASC, id ASC",
+  );
   const hideVisible = readyDb.prepare(
     'UPDATE messages SET rewind_at = ? WHERE session_id = ? AND rewind_at IS NULL',
   );
@@ -980,11 +1020,40 @@ function sessionTreeRehydrate(readyDb, args) {
   const hiddenClientIds = readyDb.transaction(() => {
     const session = readyDb.prepare('SELECT id FROM sessions WHERE id = ? LIMIT 1').get(sessionId);
     if (!session) throw Object.assign(new Error('Session 不存在: ' + sessionId), { code: 'NOT_FOUND' });
+    // Keep this fallback mirror in sync with worker/opHandlers/tx.ts: preserve only
+    // Cindy-managed attachments matched by stable id/uuid or a verified visible prefix.
+    const attachmentSources = selectUserAttachmentSources.all(sessionId);
+    const byClientId = new Map(attachmentSources.map((row) => [row.client_id, row]));
+    const byUuid = new Map();
+    for (const source of attachmentSources) {
+      const uuid = treeEntryUuid(source.agent_meta);
+      if (uuid) byUuid.set(uuid, source);
+    }
+    const visibleUserSources = attachmentSources.filter((row) => row.rewind_at === null);
+    let visiblePrefixIndex = 0;
+    let visiblePrefixIntact = true;
     // 与 worker/opHandlers/tx.ts 保持同步:原子快照可见集再隐藏,导航期间并发落库的消息也纳入。
     const captured = selectVisibleClientIds.all(sessionId).map((row) => row.client_id);
     hideVisible.run(now, sessionId);
     for (const row of rows) {
-      upsert.run(row.id, row.clientId, sessionId, row.role, row.content, row.toolUseId, row.agentMeta, row.agentKind, row.createdAt);
+      let content = row.content;
+      if (row.role === 'user') {
+        const uuid = treeEntryUuid(row.agentMeta);
+        let source = byClientId.get(row.clientId) || (uuid ? byUuid.get(uuid) : null) || null;
+        const candidate = visibleUserSources[visiblePrefixIndex] || null;
+        if (source && visiblePrefixIntact && source !== candidate) {
+          visiblePrefixIntact = false;
+        } else if (!source && visiblePrefixIntact) {
+          const samePrefix = candidate &&
+            candidate.created_at === row.createdAt &&
+            normalizedTreeUserText(candidate.content) === normalizedTreeUserText(row.content);
+          if (samePrefix) source = candidate;
+          else visiblePrefixIntact = false;
+        }
+        visiblePrefixIndex += 1;
+        content = mergeTreeUserAttachments(row.content, source);
+      }
+      upsert.run(row.id, row.clientId, sessionId, row.role, content, row.toolUseId, row.agentMeta, row.agentKind, row.createdAt);
     }
     readyDb.prepare('UPDATE sessions SET cleared_at = NULL, context_tokens = ?, context_window = ?, updated_at = ? WHERE id = ?').run(contextTokens, contextWindow, now, sessionId);
     return captured;

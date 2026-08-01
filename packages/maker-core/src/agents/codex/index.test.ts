@@ -10086,6 +10086,59 @@ describe('CodexAgent MCP thread context hooks', () => {
     await handle.close();
   });
 
+  it('re-checks Ask and Full access after an in-flight Cindy auto-review', async () => {
+    const askReview = deferred<{ verdict: 'allow' }>();
+    const askReviewer = vi.fn(() => askReview.promise);
+    const askAgent = new CodexAgent(createDeps({}, { reviewAutoPermissionAction: askReviewer }));
+    const askHost = installFakeHost(askAgent);
+    const askHandle = await askAgent.startSession({
+      sessionId: 'session-auto-review-late-ask', model: 'gpt-5.5', providerId: 'openai',
+      workingDir: '/repo', permissionMode: 'auto',
+    });
+    const askHandlers = askHost.getThreadHandlers();
+    if (!askHandlers?.commandExecutionApproval) throw new Error('expected commandExecutionApproval handler');
+    const askResolver = vi.fn(async (_request: InteractionRequest): Promise<InteractionDecision> => (
+      { kind: 'permission', behavior: 'allow' }
+    ));
+    askHandle.setInteractionResolver(askResolver);
+    const pendingAsk = askHandlers.commandExecutionApproval({
+      threadId: 'start-thread-id', turnId: 'turn-late-ask', itemId: 'cmd-late-ask', approvalId: 'a-late-ask',
+      command: 'rm -rf build', cwd: '/repo',
+    });
+    await waitForExpectation(() => expect(askReviewer).toHaveBeenCalledOnce());
+    await askHandle.setPermissionMode!('ask');
+    askReview.resolve({ verdict: 'allow' });
+    await expect(pendingAsk).resolves.toEqual({ decision: 'accept' });
+    expect(askResolver).toHaveBeenCalledOnce();
+    expect(askResolver.mock.calls[0]?.[0]).toMatchObject({ kind: 'permission', suggestions: undefined });
+    await askHandle.close();
+
+    const fullReview = deferred<{ verdict: 'allow' }>();
+    const fullReviewer = vi.fn(() => fullReview.promise);
+    const fullAgent = new CodexAgent(createDeps({}, { reviewAutoPermissionAction: fullReviewer }));
+    const fullHost = installFakeHost(fullAgent);
+    const fullHandle = await fullAgent.startSession({
+      sessionId: 'session-auto-review-late-full', model: 'gpt-5.5', providerId: 'openai',
+      workingDir: '/repo', permissionMode: 'auto',
+    });
+    const fullHandlers = fullHost.getThreadHandlers();
+    if (!fullHandlers?.commandExecutionApproval) throw new Error('expected commandExecutionApproval handler');
+    const fullResolver = vi.fn(async (_request: InteractionRequest): Promise<InteractionDecision> => (
+      { kind: 'permission', behavior: 'allow' }
+    ));
+    fullHandle.setInteractionResolver(fullResolver);
+    const pendingFull = fullHandlers.commandExecutionApproval({
+      threadId: 'start-thread-id', turnId: 'turn-late-full', itemId: 'cmd-late-full', approvalId: 'a-late-full',
+      command: 'rm -rf build', cwd: '/repo',
+    });
+    await waitForExpectation(() => expect(fullReviewer).toHaveBeenCalledOnce());
+    await fullHandle.setPermissionMode!('bypassPermissions');
+    fullReview.resolve({ verdict: 'allow' });
+    await expect(pendingFull).resolves.toEqual({ decision: 'accept' });
+    expect(fullResolver).not.toHaveBeenCalled();
+    await fullHandle.close();
+  });
+
   it('auto-approves safe fallback commands via the Cindy auto-review core without prompting', async () => {
     const reviewAutoPermissionAction = vi.fn(async () => ({ verdict: 'allow' as const }));
     const agent = new CodexAgent(createDeps({}, { reviewAutoPermissionAction }));

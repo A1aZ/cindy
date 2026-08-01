@@ -173,6 +173,20 @@ describe('mobile schedule form model', () => {
     expect(buildMobileScheduleInput({ ...claude, name: 'Claude', prompt: 'run' })).not.toHaveProperty('fastMode');
   });
 
+  it('supports Pi automations: blank default model (host-resolved) and explicit fast mode', () => {
+    // Pi 模型来自动态 BYOM 目录:切到 Pi 时 model 留空 → 序列化省略 → host 解析默认。
+    const draft = updateDraftAgentKind(createMobileScheduleDraft(null), 'pi');
+    expect(draft.model).toBe('');
+    const input = buildMobileScheduleInput({ ...draft, name: 'Pi task', prompt: 'run', fastMode: true });
+    expect(input).toMatchObject({ agentKind: 'pi', fastMode: true });
+    // 空模型不写入(host 解析默认),而非发一个空串把默认覆盖掉。
+    expect(hasOwn(input, 'model')).toBe(false);
+
+    // 用户在自由文本框显式指定 Pi 模型时照常带上。
+    const withModel = buildMobileScheduleInput({ ...draft, name: 'Pi task', prompt: 'run', model: 'my-local-model' });
+    expect(withModel).toMatchObject({ agentKind: 'pi', model: 'my-local-model' });
+  });
+
   it('validates required fields and supported interval-style cron presets', () => {
     const draft = createMobileScheduleDraft(null);
     expect(validateMobileScheduleDraft(draft)).toMatchObject({ field: 'name' });

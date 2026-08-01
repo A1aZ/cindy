@@ -8,7 +8,7 @@ import { createLogger } from '../logger.js';
 import { isAgentOneShotRouteDisabled } from '../maker-host/model-route-guard-live.js';
 import { getDbClient } from '../localDb/client/current.js';
 import { sessions } from '../localDb/schema.js';
-import { requestUtilityText } from '../utility-model/oneShotCandidates.js';
+import { agentSupportsOneShot, requestUtilityText } from '../utility-model/oneShotCandidates.js';
 import { MAKER_INVOKE } from './channels.js';
 import { DESKTOP_VISIBLE_SESSION_SOURCES } from '../../shared/sessionSource.js';
 import type {
@@ -254,11 +254,9 @@ async function getMostRecentSessionAgent(): Promise<AgentKind | null> {
   }
 }
 
-// help 兜底走 maker.oneShot;目前仅 claude-code / codex 实现了它,PiAgent 继承 BaseAgent
-// 的 not-implemented。选中不支持 oneShot 的 agent 会让 HELP_ASK / 置顶摘要抛错并直接
-// no-answer,即便其它 agent 兜底仍可用。Pi 实现 oneShot 前从候选里剔除(实现后加回即可)。
-const HELP_ONESHOT_CAPABLE_AGENTS: ReadonlySet<AgentKind> = new Set(['claude-code', 'codex']);
-
+// help 兜底走 maker.oneShot;只有实现了 oneShot 的 agent(agentSupportsOneShot)才可选。
+// PiAgent 继承 BaseAgent 的 not-implemented,选中它会让 HELP_ASK / 置顶摘要抛错并直接
+// no-answer,即便其它 agent 兜底仍可用 —— 故从候选里剔除(与任务摘要兜底共用同一判定)。
 export async function pickHelpAgent(
   maker: Maker,
   preferredAgent: AgentKind | null,
@@ -266,7 +264,7 @@ export async function pickHelpAgent(
   const candidates: AgentKind[] = preferredAgent
     ? [...new Set<AgentKind>([preferredAgent, 'claude-code', 'codex', 'pi'])]
     : ['claude-code', 'codex', 'pi'];
-  const ordered = candidates.filter((agentKind) => HELP_ONESHOT_CAPABLE_AGENTS.has(agentKind));
+  const ordered = candidates.filter((agentKind) => agentSupportsOneShot(agentKind));
   const available = new Set(maker.listAvailableAgents());
   for (const agentKind of ordered) {
     if (!available.has(agentKind)) continue;

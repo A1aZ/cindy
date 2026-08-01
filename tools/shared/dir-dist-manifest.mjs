@@ -8,10 +8,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { sha256File } from './verify-sha256.mjs';
+
 export const DIR_DIST_MANIFEST_FILE = '.manifest';
 const MARKER_FILES = new Set(['.version', DIR_DIST_MANIFEST_FILE]);
 
-/** 递归收集 destDir 下全部普通文件(排序稳定),写 .manifest。symlink/目录不入清单。 */
+/**
+ * 递归收集 destDir 下全部普通文件(排序稳定),写 .manifest。symlink/目录不入清单。
+ * 每条同时记录字节数与 sha256:只比字节数挡不住「同长度被替换/损坏」的资产(供应链
+ * 加固,codex review P1)—— 主执行文件与所有旁侧资产(theme/wasm/prebuild 等)都记哈希。
+ */
 export function writeDirDistManifest(destDir) {
   const files = [];
   const walk = (dir) => {
@@ -27,7 +33,7 @@ export function writeDirDistManifest(destDir) {
       if (!entry.isFile()) continue;
       const rel = path.relative(destDir, abs).split(path.sep).join('/');
       if (MARKER_FILES.has(rel)) continue;
-      files.push({ path: rel, size: fs.statSync(abs).size });
+      files.push({ path: rel, size: fs.statSync(abs).size, sha256: sha256File(abs) });
     }
   };
   walk(destDir);
@@ -38,7 +44,11 @@ export function writeDirDistManifest(destDir) {
   return files.length;
 }
 
-/** 校验 destDir 与清单一致:清单缺失/空/任一文件缺失或字节数不符 → false。 */
+/**
+ * 校验 destDir 与清单一致:清单缺失/空/任一文件缺失、字节数不符或 sha256 不符 → false。
+ * 每条都按记录的 sha256 重算比对(fail-closed):清单缺 sha256(旧版本写的 size-only 清单)
+ * 一律视为不可信 → false,让上层重下/重 promote 生成带哈希的新清单(自愈,一次性)。
+ */
 export function verifyDirDistManifest(destDir) {
   let manifest;
   try {
@@ -49,14 +59,30 @@ export function verifyDirDistManifest(destDir) {
   const files = Array.isArray(manifest?.files) ? manifest.files : null;
   if (!files || files.length === 0) return false;
   for (const entry of files) {
-    if (!entry || typeof entry.path !== 'string' || !Number.isFinite(entry.size)) return false;
+    if (
+      !entry
+      || typeof entry.path !== 'string'
+      || !Number.isFinite(entry.size)
+      || typeof entry.sha256 !== 'string'
+      || !/^[0-9a-f]{64}$/.test(entry.sha256)
+    ) {
+      return false;
+    }
+    const abs = path.join(destDir, ...entry.path.split('/'));
     let stat;
     try {
-      stat = fs.statSync(path.join(destDir, ...entry.path.split('/')));
+      stat = fs.statSync(abs);
     } catch {
       return false;
     }
     if (!stat.isFile() || stat.size !== entry.size) return false;
+    let actual;
+    try {
+      actual = sha256File(abs);
+    } catch {
+      return false;
+    }
+    if (actual !== entry.sha256) return false;
   }
   return true;
 }

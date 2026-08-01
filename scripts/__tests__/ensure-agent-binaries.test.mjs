@@ -97,7 +97,22 @@ test('verifyDirDistManifest: rejects size drift, empty manifests, and malformed 
   writeDirDistManifest(dir);
   assert.equal(verifyDirDistManifest(dir), true);
 
+  // 同长度内容被替换/损坏(字节数不变)→ 现按 sha256 拒绝(供应链加固 P1)
+  writeDirDistManifest(dir);
+  assert.equal(verifyDirDistManifest(dir), true);
+  fs.writeFileSync(path.join(dir, 'photon.wasm'), Buffer.alloc(512, 9)); // 同长度、不同内容
+  assert.equal(verifyDirDistManifest(dir), false);
+
+  // 旧版本写的 size-only 清单(无 sha256)→ 一律不可信,拒绝(自愈重下)
+  fs.writeFileSync(path.join(dir, 'photon.wasm'), Buffer.alloc(512, 2)); // 复原内容
+  fs.writeFileSync(
+    path.join(dir, '.manifest'),
+    JSON.stringify({ files: [{ path: 'photon.wasm', size: 512 }] }),
+  );
+  assert.equal(verifyDirDistManifest(dir), false);
+
   // 字节数漂移(截断/损坏)→ 拒绝
+  writeDirDistManifest(dir);
   fs.writeFileSync(path.join(dir, 'photon.wasm'), Buffer.alloc(8, 2));
   assert.equal(verifyDirDistManifest(dir), false);
 

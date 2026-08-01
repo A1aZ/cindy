@@ -925,9 +925,7 @@ export const scheduleRuns = sqliteTable(
     costAmount: real('cost_amount').notNull().default(0),
     estimatedValueAmount: real('estimated_value_amount').notNull().default(0),
     costCurrency: text('cost_currency', { enum: ['CNY', 'USD'] }),
-    costIsApproximate: integer('cost_is_approximate', { mode: 'boolean' })
-      .notNull()
-      .default(false),
+    costIsApproximate: integer('cost_is_approximate', { mode: 'boolean' }).notNull().default(false),
     /**
      * zero 表示已确认零费用；unavailable 表示 agent run 尚无可靠计价；legacy
      * 表示迁移前数据缺少 runId，不能精确拆分。SQLite 无 CHECK，无需 migration。
@@ -1485,9 +1483,9 @@ export const ghostCards = sqliteTable(
  * 一行 = hook server 实时中继(group.message 帧)的一条群消息。这是
  * 「服务端零内容驻留」架构下群上下文的唯一存储方:窗口长在用户自己的
  * 设备上(与其 Telegram 客户端本地缓存同性质)。派发 hook 任务时按
- * (provider, chatId, threadId) 取最近条目拼进 agent 上下文,并按
+ * (provider principal namespace, chatId, threadId) 取最近条目拼进 agent 上下文,并按
  * source.triggerMessageId 剔除当前消息。行数由插入时的 GC 控制
- * (每个键保最新 N 行 + TTL),thread_id 用空串表示主群流(保证唯一
+ * (官方群每个键保最新 N 行、无 TTL；个人 bot 使用独立命名空间),thread_id 用空串表示主群流(保证唯一
  * 索引对"无 topic"生效,SQLite 的 NULL 互不相等)。
  */
 export const hookGroupMessages = sqliteTable(

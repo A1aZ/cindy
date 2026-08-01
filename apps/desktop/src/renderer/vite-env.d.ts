@@ -3307,6 +3307,25 @@ interface ElectronAPI {
       workspace: string,
       patch: import('../shared/hookControlIpc').HookPrefsPatch,
     ) => Promise<{ prefs: import('../shared/hookControlIpc').ProviderPrefsView }>;
+    getTelegramBehavior: (bindingId: string) => Promise<{
+      behavior: import('../shared/hookControlIpc').TelegramHookBehaviorState;
+    }>;
+    setTelegramBehavior: (
+      bindingId: string,
+      patch: import('../shared/hookControlIpc').TelegramHookBehaviorPatch,
+    ) => Promise<{
+      behavior: import('../shared/hookControlIpc').TelegramHookBehaviorState;
+    }>;
+    listTelegramGroups: (bindingId: string) => Promise<{
+      groups: import('../shared/hookControlIpc').TelegramHookKnownGroup[];
+    }>;
+    setTelegramGroupActivation: (
+      bindingId: string,
+      chatId: string,
+      mode: import('../shared/hookControlIpc').TelegramHookGroupActivationMode,
+    ) => Promise<{
+      behavior: import('../shared/hookControlIpc').TelegramHookBehaviorState;
+    }>;
     getWorkspaceProviderSources: () => Promise<{
       entries: import('../shared/hookControlIpc').HookWorkspaceProviderSourceEntry[];
     }>;
@@ -3328,6 +3347,9 @@ interface ElectronAPI {
     ) => () => void;
     onProviderPrefsChanged: (
       cb: (view: import('../shared/hookControlIpc').ProviderPrefsView) => void,
+    ) => () => void;
+    onTelegramBehaviorChanged: (
+      cb: (view: import('../shared/hookControlIpc').TelegramHookBehaviorState) => void,
     ) => () => void;
     onStatusChanged: (
       cb: (view: import('../shared/hookControlIpc').SlackHookView) => void,

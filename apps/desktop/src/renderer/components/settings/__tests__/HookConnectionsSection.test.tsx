@@ -80,6 +80,21 @@ vi.mock('../HookWorkspacePrefsEditor', () => ({
   },
 }));
 
+vi.mock('../ImDefaultSettingsSection', () => ({
+  ImDefaultSettingsSection: ({ channel }: { channel?: string }) => (
+    <div data-testid={`im-defaults-${channel ?? 'global'}`} />
+  ),
+}));
+
+vi.mock('../TelegramBehaviorSettings', () => ({
+  TelegramBehaviorSettings: ({ bindingId }: { bindingId?: string }) => (
+    <div data-testid="telegram-behavior" data-binding-id={bindingId} />
+  ),
+  TelegramGroupActivationSettings: ({ bindingId }: { bindingId?: string }) => (
+    <div data-testid="telegram-groups" data-binding-id={bindingId} />
+  ),
+}));
+
 import { deriveAlias, HookConnectionsSection, workspaceRowsToMap } from '../HookConnectionsSection';
 
 /** 渠道卡收起时内容卸载(Collapse), 交互前先点开对应卡的头部行。 */
@@ -266,9 +281,7 @@ describe('HookConnectionsSection Telegram binding actions', () => {
     );
 
     await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith(
-        'settings.remoteControl.hook.toast.actionFailed',
-      ),
+      expect(toast.error).toHaveBeenCalledWith('settings.remoteControl.hook.toast.actionFailed'),
     );
   });
 
@@ -799,6 +812,76 @@ describe('HookConnectionsSection Telegram binding actions', () => {
     });
 
     expect(ipc.providerBindRevoke).not.toHaveBeenCalled();
+  });
+
+  it('shows global official Telegram defaults, behavior, and group settings only after linking', async () => {
+    ipc.get.mockResolvedValue({
+      hook: {
+        ...BASE_HOOK,
+        telegram: {
+          ...BASE_HOOK.telegram,
+          behaviorAvailable: true,
+          binding: {
+            provider: 'telegram',
+            state: 'confirmed',
+            attemptId: null,
+            bindingId: 'binding-settings',
+            principalId: '12345',
+            principalName: 'Cindy User',
+            scopeId: 'bot-1',
+            scopeName: 'cindy_example_bot',
+            connectUrl: null,
+            expiresAt: null,
+            reason: null,
+            remediationUrl: 'https://t.me/cindy_example_bot',
+            actions: ['revoke'],
+          },
+        },
+      },
+    });
+
+    render(<HookConnectionsSection />);
+    await expandChannelCard(TELEGRAM_CARD);
+    expect(await screen.findByTestId('im-defaults-global')).toBeTruthy();
+    expect(screen.getByTestId('telegram-behavior').getAttribute('data-binding-id')).toBe(
+      'binding-settings',
+    );
+    expect(screen.getByTestId('telegram-groups').getAttribute('data-binding-id')).toBe(
+      'binding-settings',
+    );
+  });
+
+  it('keeps local Telegram defaults visible when the linked server lacks behavior capability', async () => {
+    ipc.get.mockResolvedValue({
+      hook: {
+        ...BASE_HOOK,
+        telegram: {
+          ...BASE_HOOK.telegram,
+          behaviorAvailable: false,
+          binding: {
+            provider: 'telegram',
+            state: 'confirmed',
+            attemptId: null,
+            bindingId: 'legacy-binding',
+            principalId: '12345',
+            principalName: 'Cindy User',
+            scopeId: 'bot-1',
+            scopeName: 'cindy_example_bot',
+            connectUrl: null,
+            expiresAt: null,
+            reason: null,
+            remediationUrl: 'https://t.me/cindy_example_bot',
+            actions: ['revoke'],
+          },
+        },
+      },
+    });
+
+    render(<HookConnectionsSection />);
+    await expandChannelCard(TELEGRAM_CARD);
+    expect(await screen.findByTestId('im-defaults-global')).toBeTruthy();
+    expect(screen.queryByTestId('telegram-behavior')).toBeNull();
+    expect(screen.queryByTestId('telegram-groups')).toBeNull();
   });
 
   it('does not remove a changed Slack binding from a stale confirmation', async () => {

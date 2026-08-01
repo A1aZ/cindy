@@ -9,13 +9,7 @@ export type ImDefaultEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 
  * 在这个键上 — 两者互不影响。
  */
 export type ImDefaultSettingsChannel =
-  | 'feishu'
-  | 'slack'
-  | 'discord'
-  | 'wechat'
-  | 'telegram'
-  | 'dingtalk'
-  | 'wecom';
+  'feishu' | 'slack' | 'discord' | 'wechat' | 'telegram' | 'dingtalk' | 'wecom';
 
 export interface ImDefaultAgentSettings {
   providerId: string | null;
@@ -98,6 +92,11 @@ const PERMISSION_MODES = new Set<ImDefaultPermissionMode>([
   'bypassPermissions',
 ]);
 
+export const WECHAT_UNSUPPORTED_PERMISSION_MODES: readonly ImDefaultPermissionMode[] = [
+  'acceptEdits',
+  'bypassPermissions',
+];
+
 export function isImDefaultAgentKind(value: unknown): value is ImDefaultAgentKind {
   return typeof value === 'string' && AGENT_KINDS.has(value as ImDefaultAgentKind);
 }
@@ -108,6 +107,12 @@ export function isImDefaultEffort(value: unknown): value is ImDefaultEffort {
 
 export function isImDefaultPermissionMode(value: unknown): value is ImDefaultPermissionMode {
   return typeof value === 'string' && PERMISSION_MODES.has(value as ImDefaultPermissionMode);
+}
+
+export function isWechatUnsupportedPermissionMode(
+  value: unknown,
+): value is ImDefaultPermissionMode {
+  return isImDefaultPermissionMode(value) && WECHAT_UNSUPPORTED_PERMISSION_MODES.includes(value);
 }
 
 export function isImDefaultSettingsChannel(value: unknown): value is ImDefaultSettingsChannel {

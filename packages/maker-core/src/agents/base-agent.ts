@@ -1011,7 +1011,8 @@ export interface AgentSessionHandle {
 
   /**
    * Synchronous provider preflight called by Session after reserving the turn
-   * but before any product `beforeProviderStart` / `onAccepted` side effect.
+   * and the optional `afterTurnReserved` state-preparation hook, but before any
+   * durable `beforeProviderStart` / `onAccepted` side effect.
    * Direct handle callers are still validated again inside send().
    */
   validateSendOptions?(opts: SendOptions): void;

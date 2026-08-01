@@ -5139,6 +5139,9 @@
       "lastTool": "最近工具：{{tool}}",
       "outputFile": "输出：{{path}}"
     },
+    "planPill": {
+      "step": "步骤 {{current}} / {{total}}"
+    },
     "forkOrigin": {
       "label": "基于原任务创建"
     },

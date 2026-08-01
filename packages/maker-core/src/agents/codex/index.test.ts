@@ -9923,7 +9923,7 @@ describe('CodexAgent MCP thread context hooks', () => {
       providerId: 'xd',
       model: 'qwen/qwen3-coder',
       userIntent: 'Check this project for type errors',
-      action: { kind: 'exec', command: 'npx tsc --noEmit' },
+      action: { kind: 'exec', command: 'npx tsc --noEmit', cwd: '/repo' },
       workspaceRoots: ['/repo'],
       platform: process.platform,
     }));

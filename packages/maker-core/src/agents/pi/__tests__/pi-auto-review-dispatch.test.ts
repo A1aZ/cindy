@@ -226,14 +226,14 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
       resolverCalls++;
       return { kind: 'permission', behavior: 'deny' } as never;
     });
-    await handle.send({ type: 'user', content: 'Update the system hosts mapping for this test.' });
-    firePermissionRequest('r2', 'write', { path: '/etc/hosts' });
+    await handle.send({ type: 'user', content: 'Update the shared scratch file for this test.' });
+    firePermissionRequest('r2', 'write', { path: '/tmp/outside.txt' });
     await flush();
     expect(review).toHaveBeenCalledWith(expect.objectContaining({
       agentKind: 'pi',
       model: 'm',
-      userIntent: 'Update the system hosts mapping for this test.',
-      action: { kind: 'file-write', path: '/etc/hosts' },
+      userIntent: 'Update the shared scratch file for this test.',
+      action: { kind: 'file-write', path: '/tmp/outside.txt' },
     }));
     expect(resolverCalls).toBe(0);
     expect(captured.sent).toContainEqual({ type: 'extension_ui_response', id: 'r2', confirmed: true });
@@ -274,7 +274,7 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
       resolverCalls++;
       return { kind: 'permission', behavior: 'allow' } as never;
     });
-    firePermissionRequest('r7', 'write', { path: '/etc/hosts' });
+    firePermissionRequest('r7', 'write', { path: '/tmp/outside.txt' });
     await flush();
     expect(resolverCalls).toBe(0);
     expect(captured.sent).toContainEqual({ type: 'extension_ui_response', id: 'r7', confirmed: false });

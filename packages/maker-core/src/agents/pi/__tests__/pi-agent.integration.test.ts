@@ -788,7 +788,7 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
   async function runPermissionTurn(opts: {
     sessionId: string;
     workingDir: string;
-    permissionMode: 'ask' | 'auto';
+    permissionMode: 'ask' | 'auto' | 'bypassPermissions';
     resolverBehavior: 'allow' | 'deny';
   }): Promise<{ resolverTools: string[]; finalText: string }> {
     const agent = new PiAgent(buildDeps());
@@ -952,6 +952,38 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         expect(resolverTools).toEqual(['read']);
         const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
         expect(followUp.some((b) => b.includes('User denied this tool call via Cindy.'))).toBe(true);
+      } finally {
+        rmSync(workingDir, { recursive: true, force: true });
+        scriptedResponses.length = 0;
+      }
+    },
+  );
+
+  it(
+    'full access still blocks credential reads (parent env holds the proxy session token)',
+    { timeout: 60_000 },
+    async () => {
+      // greptile 回归:bypassPermissions 提前返回不得跳过凭证路径检查,否则内置 read
+      // 可读 /proc/self/environ 之类路径拿到父进程里的代理 token,绕过审批盗刷额度。
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-perm-bypass-cred-'));
+      try {
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('read', { path: '/proc/self/environ' }),
+          anthropicStreamBody('bypass cred turn finished'),
+        );
+        const reqBefore = seenRequests.length;
+        const { resolverTools } = await runPermissionTurn({
+          sessionId: 'perm-bypass-cred',
+          workingDir,
+          permissionMode: 'bypassPermissions',
+          resolverBehavior: 'allow', // 若误弹窗且被 allow,下面的 block 理由断言就会失败
+        });
+        // Full access 不弹窗,直接硬拦
+        expect(resolverTools).toEqual([]);
+        const followUp = seenRequests.slice(reqBefore).map((r) => r.body);
+        expect(followUp.some((b) => b.includes('Cindy blocks reading credential or key paths'))).toBe(true);
+        expect(followUp.some((b) => b.includes('CINDY_PI_SESSION_TOKEN='))).toBe(false);
       } finally {
         rmSync(workingDir, { recursive: true, force: true });
         scriptedResponses.length = 0;

@@ -321,8 +321,17 @@ export default async function cindyBridge(pi: any) {
     ) {
       return { block: true, reason: 'Cindy extra reference directories are read-only.' };
     }
+    // 凭证/密钥路径的内置只读工具(read/grep/find/ls)在 Pi 父进程内执行,而父进程 env
+    // 必须保留代理会话 token 与 BYOM keys($ENV 请求期解析、bridge client 使用)。Full
+    // access 若放行 read /proc/self/environ 这类路径,模型可直接取 token 调回环代理,
+    // 绕过审批盗刷当前会话额度(greptile 报)→ 即使 bypassPermissions 也硬拦。bash 无此
+    // 通道(spawn 边界已按名单剥离真值),维持既有档位约束即可。
+    const credentialRead = READONLY_BUILTINS.has(event.toolName) && touchesCredentialPath(event.input);
+    if (credentialRead && permission.mode === 'bypassPermissions') {
+      return { block: true, reason: 'Cindy blocks reading credential or key paths, even with Full access.' };
+    }
     if (permission.mode === 'bypassPermissions') return;
-    if (READONLY_BUILTINS.has(event.toolName) && !touchesCredentialPath(event.input)) return;
+    if (READONLY_BUILTINS.has(event.toolName) && !credentialRead) return;
     let approved = false;
     try {
       approved = await ctx.ui.confirm(

@@ -889,6 +889,12 @@ export interface SendOptions {
    */
   messageUuid?: string;
   /**
+   * Adapter 回报这条 user prompt 在原生 transcript 中的稳定 entry id。
+   * Host 可把它补到已落库的 Cindy user 行，供后续原生分支重投影精确恢复附件。
+   * 回调失败不得改变已经接受的 provider dispatch 结果。
+   */
+  onTranscriptUserEntry?: (entryId: string) => void | Promise<void>;
+  /**
    * 当前用户的展示名 (host / renderer 在调 send 时提供)。仅用于 turn-start 时
    * push status event 的文案 — agent 拼成 "<userName> Just Wait ..." 让 UI 个人化;
    * 缺省时 fallback "Just Wait ..."。不参与任何业务逻辑。

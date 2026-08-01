@@ -327,6 +327,69 @@ describe('Pi provider-aware model routing', () => {
     await handle.close();
   });
 
+  it('does not replay a failed Full-access intent when Extra Dirs are updated later', async () => {
+    const fsp = await import('node:fs');
+    const agent = new PiAgent(byomDeps(async () => ({ providers: [], env: {} })));
+    const handle = await agent.startSession({
+      sessionId: 'perm-failed-intent',
+      workingDir: cwd,
+      model: 'local-model',
+      permissionMode: 'ask',
+    });
+    const permFile = path.join(agentHome, 'runtime', 'perm-perm-failed-intent.json');
+    const spy = vi.spyOn(fsp.promises, 'writeFile').mockRejectedValueOnce(new Error('transient EIO'));
+    await expect(handle.setPermissionMode!('bypassPermissions')).rejects.toThrow('transient EIO');
+    spy.mockRestore();
+
+    await handle.setExtraDirs!(['/reference-only']);
+    expect(JSON.parse(readFileSync(permFile, 'utf8'))).toEqual({
+      mode: 'ask',
+      readOnlyRoots: ['/reference-only'],
+    });
+    await handle.close();
+  });
+
+  it('reports the stable Pi user entry id after prompt acceptance', async () => {
+    let promptAccepted = false;
+    captured.requestHandler = async (command) => {
+      if (command.type === 'get_state') {
+        return { success: true, data: { sessionFile: '/mock/s.jsonl', model: { contextWindow: 200_000 } } };
+      }
+      if (command.type === 'prompt') {
+        promptAccepted = true;
+        return { success: true, data: {} };
+      }
+      if (command.type === 'get_entries') {
+        return {
+          success: true,
+          data: {
+            entries: [
+              { id: 'old-user', type: 'message', message: { role: 'user', content: 'old' } },
+              ...(promptAccepted
+                ? [{ id: 'new-user', type: 'message', message: { role: 'user', content: 'new' } }]
+                : []),
+            ],
+          },
+        };
+      }
+      return { success: true, data: {} };
+    };
+    const agent = new PiAgent(byomDeps(async () => ({ providers: [], env: {} })));
+    const handle = await agent.startSession({
+      sessionId: 'entry-link',
+      workingDir: cwd,
+      model: 'local-model',
+    });
+    const onTranscriptUserEntry = vi.fn();
+    await handle.send(
+      { type: 'user', content: 'new' },
+      { onTranscriptUserEntry },
+    );
+    expect(onTranscriptUserEntry).toHaveBeenCalledOnce();
+    expect(onTranscriptUserEntry).toHaveBeenCalledWith('new-user');
+    await handle.close();
+  });
+
   it('closes the Pi process if tightening a persisted Full-access file fails', async () => {
     const fsp = await import('node:fs');
     const agent = new PiAgent(byomDeps(async () => ({ providers: [], env: {} })));

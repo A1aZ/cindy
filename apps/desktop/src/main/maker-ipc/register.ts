@@ -138,6 +138,7 @@ import {
   findParkedEngineSession,
   getMessageDeletionTarget,
   listMessagesForAgentHandoff,
+  patchMessageAgentMeta,
   supersedeRetriedUserTurn,
 } from '../localDb/ipc/messages.js';
 import { messageToCamel } from '../localDb/mapper.js';
@@ -7650,6 +7651,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       });
       return result;
     },
+    linkPiUserEntry: (sessionId, clientId, piEntryId) =>
+      enqueueDurableWrite(`pi-entry-link:${sessionId}:${clientId}`, () =>
+        patchMessageAgentMeta(sessionId, clientId, { piEntryId })),
     beforeDispatchDirectUserTurn: (sessionId) => gitSnapshotCoordinator?.onTurnStart(sessionId),
     onUndispatchedDirectUserTurn: (sessionId) => gitSnapshotCoordinator?.onTurnAbort(sessionId),
     ackInterruptedTurnDispatched: async (sessionId, endedAt) => {

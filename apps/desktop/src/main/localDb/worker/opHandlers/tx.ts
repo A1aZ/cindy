@@ -642,6 +642,11 @@ function treeEntryUuid(agentMeta: string | null): string | null {
   return typeof uuid === 'string' && uuid.length > 0 ? uuid : null;
 }
 
+function linkedPiEntryId(agentMeta: string | null): string | null {
+  const piEntryId = parsedObjectJson(agentMeta)?.piEntryId;
+  return typeof piEntryId === 'string' && piEntryId.length > 0 ? piEntryId : null;
+}
+
 function normalizedTreeUserText(content: string): string | null {
   const parsed = parsedObjectJson(content);
   if (!parsed || typeof parsed.text !== 'string') return null;
@@ -725,14 +730,18 @@ function sessionTreeRehydrate(
     const session = db.prepare('SELECT id FROM sessions WHERE id = ? LIMIT 1').get(sessionId);
     if (!session) throw Object.assign(new Error(`Session 不存在: ${sessionId}`), { code: 'NOT_FOUND' });
     // 在隐藏前冻结附件来源。历史投影行(含已 rewind 的其它分支)按稳定 clientId / Pi
-    // entry uuid 精确复用；首次导航的旧 live 行没有稳定 id 时，只允许“可见公共前缀中
+    // entry uuid 精确复用；首次导航按发送时持久化的 piEntryId 关联。旧 live 行没有关联时，
+    // 只允许“可见公共前缀中
     // 文本和原始时间戳都一致”的保守回退，避免相同文字的另一分支附件串线。
     const attachmentSources = selectUserAttachmentSources.all(sessionId) as TreeAttachmentSourceRow[];
     const byClientId = new Map(attachmentSources.map((row) => [row.client_id, row]));
     const byUuid = new Map<string, TreeAttachmentSourceRow>();
+    const byLinkedPiEntryId = new Map<string, TreeAttachmentSourceRow>();
     for (const source of attachmentSources) {
       const uuid = treeEntryUuid(source.agent_meta);
       if (uuid) byUuid.set(uuid, source);
+      const piEntryId = linkedPiEntryId(source.agent_meta);
+      if (piEntryId) byLinkedPiEntryId.set(piEntryId, source);
     }
     const visibleUserSources = attachmentSources.filter((row) => row.rewind_at === null);
     let visiblePrefixIndex = 0;
@@ -747,7 +756,10 @@ function sessionTreeRehydrate(
       let content = row.content;
       if (row.role === 'user') {
         const uuid = treeEntryUuid(row.agentMeta);
-        let source = byClientId.get(row.clientId) ?? (uuid ? byUuid.get(uuid) : undefined) ?? null;
+        let source = byClientId.get(row.clientId)
+          ?? (uuid ? byUuid.get(uuid) : undefined)
+          ?? (uuid ? byLinkedPiEntryId.get(uuid) : undefined)
+          ?? null;
         const candidate = visibleUserSources[visiblePrefixIndex] ?? null;
         if (source && visiblePrefixIntact && source !== candidate) {
           // 已经精确命中另一个历史分支，说明公共可见前缀在这里结束；后续消息不能

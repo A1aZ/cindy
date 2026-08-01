@@ -679,7 +679,7 @@ describe('db worker tx handlers', () => {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           'original-user', 'original-client', 's1', 'user', JSON.stringify(original),
-          JSON.stringify({ uuid: 'pi-user-entry' }), 'pi', 100, null,
+          JSON.stringify({ uuid: 'host-message-uuid', piEntryId: 'pi-user-entry' }), 'pi', 123, null,
         ],
       );
 
@@ -690,6 +690,8 @@ describe('db worker tx handlers', () => {
           // Pi's transcript keeps only model-consumable blocks; the native image is a placeholder.
           content: JSON.stringify({ text: 'Review these assets\n\n[image]' }),
           toolUseId: null, agentMeta: JSON.stringify({ uuid: 'pi-user-entry' }),
+          // DB createdAt=123 and Pi timestamp=100 are intentionally different: first navigation
+          // must restore by the persisted piEntryId, not by timestamp coincidence.
           agentKind: 'pi', createdAt: 100,
         }],
       });

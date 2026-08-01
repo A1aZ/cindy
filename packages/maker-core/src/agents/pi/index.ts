@@ -609,7 +609,22 @@ export class PiAgent extends BaseAgent {
       const snapshot = { ...requestedPermissionSnapshot, readOnlyRoots: [...requestedPermissionSnapshot.readOnlyRoots] };
       const run = permissionWriteChain.then(async () => {
         if (gen !== permissionWriteGen) return;
-        await fs.writeFile(permissionFile, JSON.stringify(snapshot) + '\n');
+        try {
+          await fs.writeFile(permissionFile, JSON.stringify(snapshot) + '\n');
+        } catch (error) {
+          // 失败的最新意图不能留在 requested 里。否则一次 Full-access 写失败后，
+          // 随后的 Extra Dirs 更新会从 requested 继承 bypassPermissions，再把失败的
+          // 放宽意图重放到 bridge 文件。旧代际失败不能回滚较新的并发意图。
+          if (gen === permissionWriteGen) {
+            requestedPermissionSnapshot = {
+              // 收紧在 I/O 前已 fail-closed 提交到 host；保留这个更安全的 mode。
+              // 放宽失败时 permissionMode 仍是旧的已提交 mode，同样达到回滚效果。
+              mode: permissionMode,
+              readOnlyRoots: [...persistedPermissionSnapshot.readOnlyRoots],
+            };
+          }
+          throw error;
+        }
         // 只有落盘成功且仍是最新代际，host 才提交放宽/目录变更。失败时调用方
         // 收到 reject；已提前采取的收紧仍保留（fail-closed），下一次写可沿恢复后的链重试。
         if (gen === permissionWriteGen) {
@@ -890,6 +905,63 @@ export class PiAgent extends BaseAgent {
       return false;
     };
 
+    const readPiUserEntryIds = async (): Promise<Set<string> | null> => {
+      try {
+        const response = await proc.request({ type: 'get_entries' });
+        if (!response.success) return null;
+        const data = typeof response.data === 'object' && response.data !== null
+          ? response.data as Record<string, unknown>
+          : null;
+        // malformed success 不能当“空历史”，否则下一次正常读取会把任意既有 user entry
+        // 误判成刚发送的消息并串错附件。
+        if (!Array.isArray(data?.entries)) return null;
+        const entries = data.entries;
+        const ids = new Set<string>();
+        for (const raw of entries) {
+          if (typeof raw !== 'object' || raw === null) continue;
+          const entry = raw as Record<string, unknown>;
+          if (entry.type !== 'message' || typeof entry.id !== 'string' || entry.id.length === 0) continue;
+          const message = typeof entry.message === 'object' && entry.message !== null
+            ? entry.message as Record<string, unknown>
+            : null;
+          if (message?.role === 'user') ids.add(entry.id);
+        }
+        return ids;
+      } catch (error) {
+        this.deps.logger.warn('pi user-entry snapshot failed (attachment link unavailable)', {
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      }
+    };
+
+    const reportAcceptedPiUserEntry = async (
+      before: Set<string> | null,
+      callback: SendOptions['onTranscriptUserEntry'],
+    ): Promise<void> => {
+      if (!before || !callback) return;
+      // prompt RPC 在 Pi 的 preflight acceptance 点返回，entry 紧接着才 append。短轮询
+      // get_entries，按“此前不存在的 user entry”取稳定 id；捕获失败只影响附件分支恢复，
+      // 不能把已被 Pi 接受的发送伪报成失败。
+      for (let attempt = 0; attempt < 25; attempt += 1) {
+        const current = await readPiUserEntryIds();
+        const entryId = current ? [...current].find((id) => !before.has(id)) : undefined;
+        if (entryId) {
+          try {
+            await callback(entryId);
+          } catch (error) {
+            this.deps.logger.warn('pi user-entry link callback failed (non-fatal)', {
+              entryId,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
+          return;
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 8));
+      }
+      this.deps.logger.warn('pi user-entry id was not observable after prompt acceptance');
+    };
+
     const writePermissionSnapshotOrFailClosed = async (next: PermissionSnapshot): Promise<void> => {
       try {
         await writePermissionFile(next);
@@ -1055,10 +1127,15 @@ export class PiAgent extends BaseAgent {
         if (images.length > 0) command.images = images;
         // send 语义 = 排队开新 turn;pi streaming 中裸 prompt 会被拒,补 followUp。
         if (ctx.isStreaming) command.streamingBehavior = 'followUp';
+        const userEntriesBefore = sendOpts?.onTranscriptUserEntry
+          ? await readPiUserEntryIds()
+          : null;
+        rejectIfCancelled(sendOpts, 'send');
         const resp = await proc.request(command);
         if (!resp.success) {
           throw new Error(`pi prompt rejected: ${resp.error ?? 'unknown'}`);
         }
+        await reportAcceptedPiUserEntry(userEntriesBefore, sendOpts?.onTranscriptUserEntry);
       },
 
       async steer(message: UserMessage, sendOpts?: SendOptions): Promise<void> {

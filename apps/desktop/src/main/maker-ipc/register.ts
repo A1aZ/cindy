@@ -8965,7 +8965,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return written;
   });
 
-  ipcMain.handle(MAKER_INVOKE.COMPACT_SESSION, async (_e, sessionId: unknown, instructions: unknown) => {
+  ipcMain.handle(MAKER_INVOKE.COMPACT_SESSION, async (event, sessionId: unknown, instructions: unknown) => {
+    // 会启动 Agent turn、产生模型费用:非 device-link 的本机调用必须来自受信顶层页面,
+    // 不能让辅助窗口 / WebView / 子 frame 经隐藏入口触发(codex review)。device-link
+    // 走独立鉴权通道,按既有 dual 模式放行。
+    if (!isDeviceLinkInvoke()) {
+      assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]);
+    }
     if (typeof sessionId !== 'string' || sessionId.length === 0) {
       throwIpcError('INVALID_PARAMS', 'sessionId required');
     }
@@ -9045,7 +9051,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return resumed;
   }
 
-  ipcMain.handle(MAKER_INVOKE.GET_SESSION_TREE, async (_e, sessionId: unknown) => {
+  ipcMain.handle(MAKER_INVOKE.GET_SESSION_TREE, async (event, sessionId: unknown) => {
+    // getOrResumeSessionTreeSession 会 lazy resume(spawn Agent)→ 有副作用。非
+    // device-link 本机调用须受信顶层页面(codex review);device-link 独立鉴权,放行。
+    if (!isDeviceLinkInvoke()) {
+      assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]);
+    }
     if (typeof sessionId !== 'string' || sessionId.length === 0) {
       throwIpcError('INVALID_PARAMS', 'sessionId required');
     }
@@ -9056,7 +9067,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
   ipcMain.handle(
     MAKER_INVOKE.NAVIGATE_SESSION_TREE,
-    async (_e, sessionId: unknown, entryId: unknown, options: unknown) => {
+    async (event, sessionId: unknown, entryId: unknown, options: unknown) => {
+      // 改写原生分支 + SQLite 投影、可触发 summarize Agent turn:非 device-link 本机
+      // 调用须受信顶层页面(codex review);device-link 独立鉴权,按既有 dual 模式放行。
+      if (!isDeviceLinkInvoke()) {
+        assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]);
+      }
       if (typeof sessionId !== 'string' || !sessionId || typeof entryId !== 'string' || !entryId) {
         throwIpcError('INVALID_PARAMS', 'sessionId + entryId required');
       }

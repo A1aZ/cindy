@@ -84,8 +84,10 @@ export function ConnectionBanner({
   const styles = useThemedStyles(makeStyles);
   const { t } = useTranslation();
   // 链路已 online 说明 issue 已过期(client 侧 online 会清除,这里兜底不展示)。
+  // 例外:unstable 类型的 issue 在 online 时仍需展示——device-link 层特意在
+  // online 转换时保留 unstable issue(flapping 诊断),banner 必须跟随。
   // issue 优先于请求级 error:链路断因明确时,invoke 失败都是它的下游症状(NOT_CONNECTED)。
-  const activeIssue = status !== 'online' ? issue : null;
+  const activeIssue = status !== 'online' || issue?.kind === 'unstable' ? issue : null;
   // 熔断 open 优先于请求级 error:open 期间的请求失败绝大多数就是熔断快速失败本身,
   // 状态级提示(未响应 + 自动重试中)比单次请求的错误原文更能解释现状。
   const showUnresponsive = !activeIssue && deviceUnresponsive;

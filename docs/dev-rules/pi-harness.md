@@ -94,6 +94,13 @@ Cindy 显式设置:models.json、`--append-system-prompt`、`--session-dir`、�
       字段指向整包 tar.gz(归档根即完整目录分发,SHA256 为 tar.gz 的),启动时按
       manifest 版本下载到 `userData/pi/<version>/` 并清旧版。正式安装包不内置 Pi；
       manifest 缺字段或下载失败时**不阻塞启动**(splash 不进失败态),本次不注册 pi。
+      **不变量(刻意如此,别当 bug 改掉)**:`pi-host.resolvePiBinaryPath` 只读
+      `getReadyBinaryPath('pi')`——即本次启动 prepare 成功回填的路径,**不回落
+      `getCachedBinaryStatus`**,因此不会复用上一次启动下载的旧版本。`prepare()` 先取
+      CDN manifest、取不到就直接失败(不看本地存货),所以离线时 pi 本次不可用。这与
+      Claude Code 一致(同样只读 `getReadyBinaryPath`),但与 **Codex 不同**——codex 读
+      `getCachedBinaryStatus`,会接受早前已 `.verified` 的旧版本,离线仍可用。想让 pi
+      也离线可用属于行为变更,需先确认再改,不要以"和 codex 对齐"为由顺手改回。
       发布入口**不在本仓**:
       二进制发布统一走 cindy 同级目录的独立工程 `cindy-binary-release`
       (`pnpm release:pi -- --region cn|global`,默认 canary 通道;配置与安全机制见

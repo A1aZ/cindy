@@ -99,6 +99,7 @@ const detail: GhostPluginDetail = {
   version: '1.2.3',
   enabled: true,
   canUse: true,
+  tabPanel: false,
   author: 'XD',
   contents: ['code'],
   permissions: [],
@@ -145,6 +146,7 @@ describe('Ghost plugin detail sections', () => {
         onToggle={vi.fn()}
         onUse={vi.fn()}
         onUpdate={vi.fn()}
+        onUpdateFromFile={vi.fn()}
         onUninstall={vi.fn()}
         toggleDisabled={false}
       />,
@@ -193,6 +195,7 @@ describe('Ghost plugin detail sections', () => {
         onToggle={vi.fn()}
         onUse={vi.fn()}
         onUpdate={vi.fn()}
+        onUpdateFromFile={vi.fn()}
         onUninstall={vi.fn()}
         toggleDisabled={false}
         onIconLoadError={onIconLoadError}
@@ -223,6 +226,7 @@ describe('Ghost plugin detail sections', () => {
         onToggle={vi.fn()}
         onUse={vi.fn()}
         onUpdate={onUpdate}
+        onUpdateFromFile={vi.fn()}
         updateVersion={detail.version}
         onUninstall={vi.fn()}
         toggleDisabled={false}
@@ -258,7 +262,7 @@ describe('Ghost plugin detail sections', () => {
         onToggle={vi.fn()}
         onUse={vi.fn()}
         onUpdate={onUpdate}
-        updateLabel="Update from market"
+        onUpdateFromFile={vi.fn()}
         updateVersion="1.2.4"
         updateBusy
         onUninstall={vi.fn()}
@@ -275,7 +279,11 @@ describe('Ghost plugin detail sections', () => {
       screen.getByRole('button', { name: 'settings.ghosts.detail.moreActions' }),
       { button: 0, ctrlKey: false },
     );
-    const menuUpdate = screen.getByRole('menuitem', { name: 'Update from market' });
+    // ⋮ 菜单固定为「从文件更新」兜底路径(市场更新已提级到头部 CTA),
+    // 更新进行中同样置灰。
+    const menuUpdate = screen.getByRole('menuitem', {
+      name: 'settings.ghosts.detail.updateFromFile',
+    });
     expect(menuUpdate.getAttribute('aria-disabled')).toBe('true');
     fireEvent.click(menuUpdate);
     expect(onUpdate).not.toHaveBeenCalled();
@@ -298,6 +306,7 @@ describe('Ghost plugin detail sections', () => {
       onToggle: vi.fn(),
       onUse: vi.fn(),
       onUpdate: vi.fn(),
+      onUpdateFromFile: vi.fn(),
       onUninstall: vi.fn(),
       toggleDisabled: false,
     };

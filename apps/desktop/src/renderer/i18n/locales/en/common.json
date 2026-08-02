@@ -2873,12 +2873,15 @@
         "clearSearch": "Clear Plugin Search",
         "addPlugin": "Add plugin",
         "addPluginAria": "Plugin add options",
+        "installedSection": "Installed",
+        "recommendedSection": "Recommended",
+        "updatesAvailable": "{{count}} plugin updates available",
+        "updateAll": "Update all",
+        "ignoreRound": "Ignore this round",
+        "updateTo": "Update to v{{version}}",
+        "updateAria": "Update {{name}} to v{{version}}",
         "createWithCindy": "Create with Cindy",
         "createPrompt": "I want to create a Cindy plugin. First call ghost_forge_guide to get the handbook's table of contents, read chapter 0 (design alignment) first, then read the relevant chapters via the section parameter (at minimum the sandbox red-lines and packaging chapters) before writing any code; do not start implementing yet. Begin by asking questions: prefer option-based question cards, one key decision per card with your recommended choice marked, and proactively surface design options I may not know about — such as the UI form (docked panel, right-sidebar tab, chat card, or no UI), a $ command word, launch mode, network access, and whether a settings page is needed. Step by step, confirm the problem to solve, target users, interaction flow, required tools and connections, permission boundaries, and acceptance criteria. After I confirm the design, implement and validate it according to the specification, then call ghost_forge_pack to package and install the plugin.",
-        "installedTitle": "Installed Plugins",
-        "installedExpand": "Show {{count}} more installed plugins",
-        "installedCollapse": "Hide additional installed plugins",
-        "allTitle": "All plugins",
         "filterAll": "All",
         "filtersAria": "Filter plugins by source",
         "origin": {
@@ -2887,8 +2890,15 @@
           "local": "Local"
         },
         "emptyFiltered": "No matching plugins",
-        "useAction": "Use",
-        "useAria": "Use {{name}}"
+        "useAria": "Use {{name}}",
+        "usePanelAction": "Use",
+        "chatAction": "Chat",
+        "chatAria": "Chat with {{name}}",
+        "manageAction": "Manage",
+        "manageAria": "Manage {{name}}",
+        "agentInvoked": "Invoked by Agent",
+        "upToDate": "Up to date",
+        "installAria": "Install {{name}}"
       },
       "market": {
         "scopeAria": "Filter plugin sources",
@@ -2902,9 +2912,6 @@
         "install": "Install",
         "details": "Details",
         "update": "Update from market",
-        "updateAvailable": "Update available",
-        "updateAction": "Update",
-        "updateAria": "Update {{name}}",
         "updateTo": "Update to v{{version}}",
         "installed": "Installed",
         "conflict": "Plugin ID conflict",
@@ -3128,6 +3135,7 @@
         "openLocation": "Open install location",
         "panelDocked": "Docked · min width {{min}}px",
         "panelNotDocked": "Not docked (no layout record yet)",
+        "panelPageHosted": "Opens from the Plugin page · closes when you leave",
         "panelNone": "This plugin has no panel",
         "customSlotTitle": "Plugin custom settings area",
         "dangerTitle": "Uninstall plugin",
@@ -3167,6 +3175,9 @@
         "descriptionExpand": "Show more",
         "descriptionCollapse": "Show less",
         "useAction": "Use Plugin",
+        "chatAction": "Chat",
+        "enabledLabel": "Enabled",
+        "disabledLabel": "Disabled",
         "useDisabled": "Enable this Plugin before using it",
         "moreActions": "More Plugin Actions",
         "updateFromFile": "Update from .cindy File…",
@@ -3216,6 +3227,27 @@
       "workspace": {
         "dialogTitle": "Choose a project folder",
         "dialogMessage": "Plugin “{{name}}” is asking you to choose a project folder to create a session in the sidebar"
+      },
+      "panelHost": {
+        "close": "Close panel"
+      },
+      "updateAll": {
+        "title": "Update all · {{count}} plugins",
+        "description": "Updates without permission changes finish automatically; permission expansions need your per-item approval.",
+        "versionRange": "v{{from}} → v{{to}}",
+        "permissionChanged": "Permissions changed",
+        "reviewDiff": "Review & confirm",
+        "collapseDiff": "Collapse",
+        "approve": "Approve & update",
+        "skip": "Skip",
+        "statusPending": "Queued",
+        "statusInstalling": "Updating…",
+        "statusDone": "Updated",
+        "statusSkipped": "Skipped",
+        "statusFailed": "Update failed",
+        "background": "Continue in background",
+        "doneAction": "Done",
+        "doneToast": "Batch update finished: {{done}} updated, {{rest}} not completed"
       }
     },
     "mcp": {
@@ -3885,13 +3917,10 @@
       "addAria": "Add tab",
       "addFailed": "Failed to add tab",
       "tabCloseAria": "Close tab",
-      "pinAria": "Pin — keep in all sessions",
-      "unpinAria": "Unpin — keep only in this session",
       "menu": {
         "addLabel": "Add tab",
         "comingSoon": "Coming soon",
-        "alreadyOpen": "Open",
-        "pluginGroup": "Plugins"
+        "alreadyOpen": "Open"
       },
       "kinds": {
         "fileBrowser": "File browser",
@@ -3912,9 +3941,7 @@
       "contextMenu": {
         "close": "Close",
         "closeOthers": "Close others",
-        "closeAll": "Close all",
-        "pin": "Pin",
-        "unpin": "Unpin"
+        "closeAll": "Close all"
       },
       "empty": {
         "eyebrow": "Right Sidebar",
@@ -3930,9 +3957,6 @@
         "browserSub": "Browser",
         "openTerminal": "Open terminal",
         "terminalSub": "Terminal",
-        "pluginSub": "Plugin",
-        "pluginGroup": "Plugin panels",
-        "pluginGroupSub": "{{count}} plugins",
         "addMoreHint": "Use the + button at the top to choose more panel types"
       },
       "placeholderHint": "{{kind}} — content coming in a later phase"

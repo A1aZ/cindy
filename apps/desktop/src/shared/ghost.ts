@@ -332,7 +332,7 @@ export type GhostLaunchMode = (typeof GHOST_LAUNCH_MODES)[number];
 /**
  * 面板显示形态(相对主聊天窗)。left = 顶层布局树停靠 pane(缺省);
  * 'tab' = 不进布局树,作为右侧栏(right-tabs)里的每会话单例页签
- * (2026-07-24 定案,注册链路见 renderer/cindy-brain/ghostTabPlugins.tsx)。
+ * (2026-08 面板收束:页签面板由插件页 GhostPagePanelHost 独占承载)。
  * right 已退役(2026-07-25 Lizi 定案:右侧是右侧边栏的地盘,插件面板默认
  * 挤过去体验差;用户想放右边用拖拽换位即可)——旧包声明的 right 在校验期
  * 归一化为 left(已装插件每次启动都重过校验,硬拒会把存量插件打没;兼容
@@ -1865,7 +1865,7 @@ export function ghostWebviewEntryPaths(manifest: GhostManifest): string[] {
  * 装入带面板的意识后,把面板停进布局树(main 侧随 install 调用)。
  * - 树上已有同 kind 的 pane(重装)→ 返回 null:不动树,位置记忆保留、原位复活;
  * - 意识没声明面板 → null;
- * - position:'tab' → null:页签形态不进布局树,由右侧栏页签(ghostTabPlugins)承载;
+ * - position:'tab' → null:页签形态不进布局树,由插件页(GhostPagePanelHost)承载;
  * - 否则停在聊天区左侧,宽度占比/最小宽取清单声明。
  * 卸下时**不做**逆操作 —— 树数据保留正是"重装复活"的记忆来源(§6 规则 5)。
  */

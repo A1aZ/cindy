@@ -101,6 +101,7 @@ describe('ghostPluginViewModel', () => {
         version: '1',
         enabled: true,
         canUse: true,
+        tabPanel: false,
       },
       {
         id: 'lizi-mivo',
@@ -109,6 +110,7 @@ describe('ghostPluginViewModel', () => {
         version: '1',
         enabled: true,
         canUse: true,
+        tabPanel: false,
       },
       {
         id: 'slack',
@@ -117,6 +119,7 @@ describe('ghostPluginViewModel', () => {
         version: '1',
         enabled: true,
         canUse: true,
+        tabPanel: false,
       },
     ] satisfies GhostPluginListItem[];
 

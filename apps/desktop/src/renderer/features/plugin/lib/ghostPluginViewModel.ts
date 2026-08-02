@@ -23,8 +23,27 @@ export interface GhostPluginListItem {
   version: string;
   enabled: boolean;
   canUse: boolean;
+  /** 声明了右侧栏页签面板(panel.position:'tab'),主动作为「使用」(打开面板)。 */
+  tabPanel: boolean;
   trust?: GhostTrustInfo;
   iconDataUrl?: string;
+}
+
+/**
+ * 卡片主动作的三分法(与设计稿一致):
+ * - `panel`:有页签面板 → 「使用」直接打开面板;
+ * - `command`:只有 $指令 → 「对话」把指令插进输入框起话题;
+ * - `manage`:纯工具型(Agent 对话中自动调用)→ 无主按钮,点卡片进管理页。
+ * 停靠形态(left/right)的面板由布局树承载,不算 panel 主动作。
+ */
+export type GhostPrimaryAction = 'panel' | 'command' | 'manage';
+
+export function ghostPrimaryAction(
+  item: Pick<GhostPluginListItem, 'tabPanel' | 'canUse'>,
+): GhostPrimaryAction {
+  if (item.tabPanel) return 'panel';
+  if (item.canUse) return 'command';
+  return 'manage';
 }
 export interface GhostPluginDetail extends GhostPluginListItem {
   trust: GhostTrustInfo;
@@ -165,6 +184,7 @@ export function toGhostPluginListItem(
     version: manifest.version,
     enabled: ghost.enabled,
     canUse: Boolean(manifest.command),
+    tabPanel: manifest.panel?.position === 'tab',
     trust: ghost.trust ?? {
       level: 'unverified',
       publisherSigned: false,

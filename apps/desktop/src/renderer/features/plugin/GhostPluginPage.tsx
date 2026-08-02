@@ -85,6 +85,7 @@ import { isBatchFinished, updateRoundKey } from './lib/updateAllModel';
 import {
   approveUpdateExpansion,
   getUpdateAllBatchState,
+  reconcileUpdateAllBatch,
   setUpdateAllBatchHooks,
   skipUpdateExpansion,
   startUpdateAllBatch,
@@ -333,6 +334,17 @@ export function GhostPluginPage() {
     next.delete('ghost');
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
+  // /plugins?panel=<id> 深链:打开该插件的页签面板(装入流程「立即开启并
+  // 打开面板」从其它视图跳转进来)。合法性由 openPanelGhost 统一裁决:
+  // 非 tab 形态或未启用的目标会被下方失效 effect 自动清掉。
+  useEffect(() => {
+    const target = searchParams.get('panel');
+    if (!target) return;
+    setOpenPanelId(target);
+    const next = new URLSearchParams(searchParams);
+    next.delete('panel');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
   const marketItems = marketSnapshot?.items ?? [];
   const customSourceNames = useMemo(
     () => marketSnapshot?.customSourceNames ?? [],
@@ -497,9 +509,6 @@ export function GhostPluginPage() {
     [installedItems],
   );
   const currentRoundKey = useMemo(() => updateRoundKey(marketItems), [marketItems]);
-  const bannerVisible =
-    updatableInstalledItems.length > 0 &&
-    (currentRoundKey === '' || ignoredRound !== currentRoundKey);
   const handleIgnoreRound = useCallback(() => {
     try {
       window.localStorage.setItem(IGNORED_UPDATE_ROUND_KEY, currentRoundKey);
@@ -515,6 +524,18 @@ export function GhostPluginPage() {
   const updateRows = updateBatch.rows;
   const batchRunning = updateBatch.running;
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+  // 与外部事实对账:已装清单变化(单项更新/文件更新/卸载)收束对应批量行,
+  // 账号或模式切换作废整批——旧账号发起的批次绝不落到新账号数据上。
+  useEffect(() => {
+    reconcileUpdateAllBatch();
+  }, [ghosts, mode, dataOwnerId]);
+  // 有未完结批次(含待确认项)时横幅必须在场:它是重开批量弹窗的唯一入口,
+  // 「忽略本轮」不得顺带藏掉待确认项的批准/跳过路径。
+  const hasUnfinishedBatch = updateRows !== null && !isBatchFinished(updateRows);
+  const bannerVisible =
+    hasUnfinishedBatch ||
+    (updatableInstalledItems.length > 0 &&
+      (currentRoundKey === '' || ignoredRound !== currentRoundKey));
   const selectedGhost = selectedId
     ? (ghosts.find((ghost) => ghost.manifest.id === selectedId) ?? null)
     : null;
@@ -687,7 +708,16 @@ export function GhostPluginPage() {
   const handleInstall = useCallback(async () => {
     const picked = await window.electronAPI.ghosts.pickFile().catch(() => null);
     if (!picked || 'canceled' in picked) return;
-    await confirmAndInstallGhost(picked.filePath, { t, confirm, confirmWithCheckbox });
+    await confirmAndInstallGhost(picked.filePath, {
+      t,
+      confirm,
+      confirmWithCheckbox,
+      // 已在插件页:tab 型插件勾选「立即开启并打开面板」后原地开面板。
+      openPluginPanel: (ghostId) => {
+        setSelectedId(null);
+        setOpenPanelId(ghostId);
+      },
+    });
   }, [confirm, confirmWithCheckbox, t]);
 
   const handleRetryLegacyRecovery = useCallback(async () => {

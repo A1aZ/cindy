@@ -15,6 +15,11 @@
 import { i18n } from '@/i18n';
 import { toast } from '@/lib/toast';
 import { readInstalledGhostsSnapshot } from '@/cindy-brain/useInstalledGhosts';
+import {
+  getDataOwnerGeneration,
+  isDataOwnerGenerationCurrent,
+  type DataOwnerGeneration,
+} from '@/contexts/dataOwnerGeneration';
 import { diffGhostPermissionItems, type GhostManifest } from '../../../../shared/ghost';
 import type { PluginMarketItem } from '../../../../shared/pluginMarket';
 import { pluginMarketErrorKey } from './pluginMarketErrorKey';
@@ -40,6 +45,8 @@ interface UpdateAllBatchHooks {
 let state: UpdateAllBatchState = { rows: null, running: false };
 let finishToastShown = false;
 let hooks: UpdateAllBatchHooks = {};
+/** 批次启动时的账号世代:身份切换后旧批次整体作废,绝不跨账号安装。 */
+let batchOwner: DataOwnerGeneration | null = null;
 const listeners = new Set<() => void>();
 
 function emit(next: UpdateAllBatchState): void {
@@ -48,7 +55,20 @@ function emit(next: UpdateAllBatchState): void {
 }
 
 function patchRow(pluginId: string, patch: Partial<UpdateAllRow>): void {
-  emit({ ...state, rows: updateRow(state.rows ?? [], pluginId, patch) });
+  // 批次已被清空(如账号切换作废)时,迟到的行迁移直接丢弃。
+  if (state.rows === null) return;
+  emit({ ...state, rows: updateRow(state.rows, pluginId, patch) });
+}
+
+function batchOwnerCurrent(): boolean {
+  return batchOwner !== null && isDataOwnerGenerationCurrent(batchOwner);
+}
+
+/** 账号/模式切换后作废整个批次(runner 在下一个检查点自行退出)。 */
+function voidStaleBatch(): void {
+  batchOwner = null;
+  finishToastShown = true; // 作废批次不再补发完成 toast。
+  emit({ rows: null, running: false });
 }
 
 export function subscribeUpdateAllBatch(listener: () => void): () => void {
@@ -104,6 +124,7 @@ export function startUpdateAllBatch(marketUpdates: readonly PluginMarketItem[]):
     readInstalledGhostsSnapshot().map((ghost) => [ghost.manifest.id, ghost.manifest.version]),
   );
   finishToastShown = false;
+  batchOwner = getDataOwnerGeneration();
   emit({ rows: buildUpdateAllRows(marketUpdates, installedVersionById), running: false });
   void runQueue();
 }
@@ -114,11 +135,21 @@ async function runQueue(): Promise<void> {
   emit({ ...state, running: true });
   try {
     for (;;) {
+      if (!batchOwnerCurrent()) {
+        voidStaleBatch();
+        break;
+      }
       const next = (state.rows ?? []).find((row) => row.status === 'pending');
       if (!next) break;
       patchRow(next.pluginId, { status: 'installing' });
       try {
         const detail = await window.electronAPI.pluginMarket.detail(next.pluginId);
+        // detail 往返期间可能切换账号:install 会以当前账号执行,旧批次
+        // 绝不能把上一个账号发起的更新落到新账号数据上。
+        if (!batchOwnerCurrent()) {
+          voidStaleBatch();
+          break;
+        }
         const installedManifest = installedManifestOf(next.ghostId);
         if (!installedManifest) {
           // 批量期间插件已被卸载:绝不拿市场 manifest 兜底继续安装
@@ -158,11 +189,22 @@ async function runQueue(): Promise<void> {
 
 /** 用户在弹窗里同意某个扩权项后继续安装。 */
 export async function approveUpdateExpansion(pluginId: string): Promise<void> {
+  if (!batchOwnerCurrent()) {
+    voidStaleBatch();
+    return;
+  }
   const row = state.rows?.find((candidate) => candidate.pluginId === pluginId);
   if (!row || row.status !== 'needs-confirm' || !row.releaseId) return;
-  if (installedManifestOf(row.ghostId) === null) {
+  const installed = installedManifestOf(row.ghostId);
+  if (installed === null) {
     // 待确认期间插件被卸载:同意也不重装,按跳过收束。
     patchRow(pluginId, { status: 'skipped' });
+    maybeFinishToast();
+    return;
+  }
+  if (installed.version === row.toVersion) {
+    // 等待确认期间已通过单项/文件更新装到目标版本:不再重复下载安装。
+    patchRow(pluginId, { status: 'done' });
     maybeFinishToast();
     return;
   }
@@ -183,10 +225,44 @@ export async function approveUpdateExpansion(pluginId: string): Promise<void> {
 
 /** 用户在弹窗里跳过某个扩权项。 */
 export function skipUpdateExpansion(pluginId: string): void {
+  if (!batchOwnerCurrent()) {
+    voidStaleBatch();
+    return;
+  }
   const row = state.rows?.find((candidate) => candidate.pluginId === pluginId);
   if (!row || row.status !== 'needs-confirm') return;
   patchRow(pluginId, { status: 'skipped' });
   maybeFinishToast();
+}
+
+/**
+ * 与外部事实对账:账号切换 → 整批作废;待确认行的插件被卸载 → 跳过、
+ * 已被单项/文件更新装到目标版本 → 记为完成(不再提供重复安装入口)。
+ * 页面在已装清单或身份变化时调用。
+ */
+export function reconcileUpdateAllBatch(): void {
+  if (state.rows === null) return;
+  if (!batchOwnerCurrent()) {
+    voidStaleBatch();
+    return;
+  }
+  let rows = state.rows;
+  let changed = false;
+  for (const row of state.rows) {
+    if (row.status !== 'needs-confirm') continue;
+    const installed = installedManifestOf(row.ghostId);
+    if (installed === null) {
+      rows = updateRow(rows, row.pluginId, { status: 'skipped' });
+      changed = true;
+    } else if (installed.version === row.toVersion) {
+      rows = updateRow(rows, row.pluginId, { status: 'done' });
+      changed = true;
+    }
+  }
+  if (changed) {
+    emit({ ...state, rows });
+    maybeFinishToast();
+  }
 }
 
 /** 仅测试用:清空模块级批次状态与回调注册。 */
@@ -194,5 +270,6 @@ export function __resetUpdateAllBatchForTest(): void {
   state = { rows: null, running: false };
   finishToastShown = false;
   hooks = {};
+  batchOwner = null;
   listeners.clear();
 }

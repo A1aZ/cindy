@@ -9,10 +9,11 @@
 
 import { useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
-import { Check, Loader2, X } from 'lucide-react';
+import { Check, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { WINDOW_NO_DRAG_STYLE } from '@/components/layout/windowDrag';
+import { Spinner } from '@/components/ui/spinner';
 import { GhostPermissionDiffView } from '@/cindy-brain/GhostPermissionList';
 import { cn } from '@/lib/utils';
 import { GhostPluginIcon } from './GhostPluginIcon';
@@ -42,7 +43,7 @@ function RowStatus({ row }: { row: UpdateAllRow }) {
   if (row.status === 'installing') {
     return (
       <span className="flex items-center gap-1.5 text-12 text-[var(--text-secondary)]">
-        <Loader2 size={13} className="animate-spin" aria-hidden="true" />
+        <Spinner size={13} />
         {t('settings.ghosts.updateAll.statusInstalling')}
       </span>
     );

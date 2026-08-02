@@ -16,12 +16,17 @@ vi.mock('@/cindy-brain/useInstalledGhosts', () => ({
   readInstalledGhostsSnapshot: () => installedGhosts,
 }));
 
+import {
+  __testing as dataOwnerTesting,
+  setDataOwnerGeneration,
+} from '@/contexts/dataOwnerGeneration';
 import type { GhostManifest } from '../../../../shared/ghost';
 import type { PluginMarketDetail, PluginMarketItem } from '../../../../shared/pluginMarket';
 import {
   __resetUpdateAllBatchForTest,
   approveUpdateExpansion,
   getUpdateAllBatchState,
+  reconcileUpdateAllBatch,
   startUpdateAllBatch,
 } from '../lib/updateAllController';
 
@@ -81,6 +86,8 @@ async function waitForSettledBatch(): Promise<void> {
 
 beforeEach(() => {
   __resetUpdateAllBatchForTest();
+  dataOwnerTesting.reset();
+  setDataOwnerGeneration('owner-a');
   detailMock.mockReset();
   installMock.mockClear();
   installedGhosts = [{ manifest: manifest({ version: '1.0.0' }) }];
@@ -151,6 +158,54 @@ describe('updateAllController', () => {
 
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('skipped');
     expect(installMock).not.toHaveBeenCalled();
+  });
+
+  it('voids the batch when the data owner changes during the detail round-trip', async () => {
+    let releaseDetail: (() => void) | undefined;
+    detailMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseDetail = () => {
+            setDataOwnerGeneration('owner-b');
+            resolve({
+              ...marketItem({}),
+              manifest: manifest({}),
+              readme: null,
+            } as unknown as PluginMarketDetail);
+          };
+        }),
+    );
+
+    startUpdateAllBatch([marketItem({})]);
+    await vi.waitFor(() => expect(releaseDetail).toBeDefined());
+    releaseDetail?.();
+    await vi.waitFor(() => expect(getUpdateAllBatchState().running).toBe(false));
+
+    // 旧账号发起的批次在身份切换后整体作废,不得写入新账号数据。
+    expect(getUpdateAllBatchState().rows).toBeNull();
+    expect(installMock).not.toHaveBeenCalled();
+  });
+
+  it('reconcile settles held rows updated externally and voids stale-owner batches', async () => {
+    stubDetail({
+      manifest: manifest({ network: { hosts: ['api.example.com'] } }),
+      sourceType: 'server',
+    });
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('needs-confirm');
+
+    // 单项/文件更新把插件装到了目标版本 → 待确认行收束为完成,不再重复安装。
+    installedGhosts = [{ manifest: manifest({ version: '1.1.0' }) }];
+    reconcileUpdateAllBatch();
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
+    expect(installMock).not.toHaveBeenCalled();
+
+    // 账号切换后对账直接作废整批。
+    startUpdateAllBatch([]);
+    setDataOwnerGeneration('owner-b');
+    reconcileUpdateAllBatch();
+    expect(getUpdateAllBatchState().rows).toBeNull();
   });
 
   it('keeps pending confirmations readable after the page unsubscribes (unmount)', async () => {

@@ -409,7 +409,14 @@ async function runApprovalBody(pluginId: string, generation: number): Promise<vo
     //  3. 当前 manifest —— 与已装 manifest 重算权限差异。
     const detail = await window.electronAPI.pluginMarket.detail(pluginId);
     // detail 往返期间批次可能已被作废/接管:此后一律不再写状态、不再安装。
+    // 与 runQueue 同一套**双重**校验:代际管「同账号内换批次」,owner 管
+    // 「账号刚切走但页面的作废 effect 还没跑」那个窗口——只看代际的话,
+    // 这段时间里旧批准会读到新账号的已装 manifest 并安装新账号的同 id 插件。
     if (batchGeneration !== generation) return;
+    if (!batchOwnerCurrent()) {
+      voidStaleBatch();
+      return;
+    }
     // **detail 之后重读已装 manifest**:这段往返里「从文件更新」等路径可能整体
     // 换掉它,拿 await 之前的快照判断 = 拿过期事实做安全决策。
     const installed = installedManifestOf(row.ghostId);
@@ -443,14 +450,22 @@ async function runApprovalBody(pluginId: string, generation: number): Promise<vo
     //    整体替换 manifest**,同版本换入更宽的声明时版本比较完全看不出来;
     //  - 目标 release 变化:市场在等待期间发了新版,审的不是这一版。
     //  - 目标 manifest 变化:自定义市场源可以在**同一 releaseId 下**改 manifest,
-    //    只比 releaseId 看不出来;审阅时留存的 expectedManifest 与当前详情不一致
-    //    就说明审的不是这一份包(server 源无此字段,由 releaseId 兜住)。
+    //    只比 releaseId 看不出来。
+    // 非 server 源**必须**留有 expectedManifest 且与当前详情逐份一致才算有效:
+    // 缺失不能短路成「有效」——那样下一次批准会不带 expectedManifest 去装,
+    // 主进程对这类来源直接 INVALID_PARAMS,行落成 failed(前一轮把被拒的行
+    // 清成 expectedManifest: undefined,正好会踩中)。server 源无此字段,
+    // 由 releaseId 兜住。
+    const manifestStillMatches =
+      detail.sourceType === 'server'
+        ? true
+        : row.expectedManifest !== undefined &&
+          JSON.stringify(row.expectedManifest) === JSON.stringify(detail.manifest);
     const reviewStillValid =
       row.staleReview !== true &&
       ghostPermissionBaselineKey(installed) === row.reviewedBaseline &&
       detail.releaseId === row.releaseId &&
-      (row.expectedManifest === undefined ||
-        JSON.stringify(row.expectedManifest) === JSON.stringify(detail.manifest));
+      manifestStillMatches;
     /**
      * 安装并接住「前置条件失败」。Main 的 PRECONDITION_FAILED 覆盖一组
      * **并发事实变化**:安装锁内的基线复核否决、release 变了、自定义市场源

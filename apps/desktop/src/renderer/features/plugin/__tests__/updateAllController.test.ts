@@ -704,6 +704,68 @@ describe('updateAllController', () => {
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
   });
 
+  it('never treats a missing expectedManifest as a valid review for custom sources', async () => {
+    const reviewed = manifest({ network: { hosts: ['api.example.com'] } });
+    stubDetail({ manifest: reviewed, sourceType: 'git-market' });
+    startUpdateAllBatch([marketItem({ sourceType: 'git-market' })]);
+    await waitForSettledBatch();
+
+    // 第一次批准被 Main 拒 → 行被清成 expectedManifest: undefined + staleReview。
+    installMock.mockRejectedValueOnce(
+      Object.assign(new Error('precondition'), {
+        message: 'Error invoking remote method: Error: [PRECONDITION_FAILED] manifest changed',
+      }),
+    );
+    await approveUpdateExpansion('plugin-a');
+    expect(getUpdateAllBatchState().rows?.[0]?.expectedManifest).toBeUndefined();
+
+    // 重新审阅 → 再批准,全程必须带上当前 expectedManifest。缺失被短路成
+    // 「审阅仍有效」的话,这里会不带该字段安装,主进程直接 INVALID_PARAMS。
+    await approveUpdateExpansion('plugin-a');
+    await approveUpdateExpansion('plugin-a');
+
+    expect(installMock).toHaveBeenLastCalledWith(
+      'plugin-a',
+      expect.objectContaining({ expectedManifest: reviewed }),
+    );
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
+  });
+
+  it('voids an approval whose detail returned after the account switched', async () => {
+    stubDetail({
+      manifest: manifest({ network: { hosts: ['api.example.com'] } }),
+      sourceType: 'server',
+    });
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+
+    // 详情请求停在半空,期间切到账号 B(页面的作废 effect 还没跑,代际未变)。
+    let releaseDetail: (() => void) | undefined;
+    detailMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseDetail = () => {
+            setDataOwnerGeneration('owner-b');
+            resolve({
+              ...marketItem({}),
+              manifest: manifest({ network: { hosts: ['api.example.com'] } }),
+              readme: null,
+            } as unknown as PluginMarketDetail);
+          };
+        }),
+    );
+    const approval = approveUpdateExpansion('plugin-a');
+    await vi.waitFor(() => expect(releaseDetail).toBeDefined());
+
+    // 账号 B 装着同 id 的插件:旧批准绝不能读它的 manifest、更不能装它。
+    installedGhosts = [{ manifest: manifest({ version: '2.0.0' }) }];
+    releaseDetail?.();
+    await approval;
+
+    expect(installMock).not.toHaveBeenCalled();
+    expect(getUpdateAllBatchState().rows).toBeNull();
+  });
+
   it('does not make a new generation approval wait behind the previous one', async () => {
     const expanding = manifest({ network: { hosts: ['api.example.com'] } });
     detailMock.mockImplementation(async (pluginId) =>

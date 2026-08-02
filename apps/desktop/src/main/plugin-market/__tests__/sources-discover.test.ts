@@ -316,7 +316,7 @@ describe('discoverMarketplace', () => {
     expect(result.marketplace.skippedCount).toBe(1);
   });
 
-  it('validates and reads ghost.json through one file handle, never by pathname', async () => {
+  it('validates and reads ghost.json through one file handle', async () => {
     const root = makeRoot();
     writePlugin(root, 'plugins/good', 'good-one');
     writeManifest(root, { name: 'lib', plugins: [{ name: 'good', source: 'plugins/good' }] });
@@ -335,10 +335,12 @@ describe('discoverMarketplace', () => {
     try {
       const result = await discoverMarketplace(root);
       expect(result.ok).toBe(true);
-      expect(pathReads.some((target) => target.endsWith('ghost.json'))).toBe(false);
-      expect(
-        lstatSpy.mock.calls.some((call) => String(call[0]).endsWith('ghost.json')),
-      ).toBe(false);
+      expect(pathReads.some((target) => path.basename(target) === 'ghost.json')).toBe(false);
+      const lstatByPath = lstatSpy.mock.calls.some(
+        (call) => path.basename(String(call[0])) === 'ghost.json',
+      );
+      // Windows 没有 O_NOFOLLOW，安全读取器必须用 lstat + inode 对账回退。
+      expect(lstatByPath).toBe(fs.constants.O_NOFOLLOW == null);
     } finally {
       readSpy.mockRestore();
       lstatSpy.mockRestore();

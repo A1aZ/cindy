@@ -3167,16 +3167,17 @@ export function CCAgentSessionView({
 
         {/* device-link 远程会话状态 banner:断链重连 / 被控离线时提示 + 重新同步(以被控端为准重拉对账)。
           suspect-stall(链路在线但本轮久未更新且核实不到被控端)优先 —— 它可能在 connected 时触发,
-          额外给「结束本轮」手动收尾。connected / local 且无 stall 时不渲染。 */}
+          额外给「结束本轮」手动收尾。unstable(flapping)在 connected 时也需展示——device-link 层
+          特意保留 unstable issue 跨 online 转换,banner 必须跟随。其余 connected / local 不渲染。 */}
         {remoteSync.suspectStall ? (
           <RemoteSessionBanner
             status="suspect-stall"
             onResync={remoteSync.resync}
             onFinalize={remoteSync.forceFinalize}
           />
-        ) : remoteConn === 'reconnecting' || remoteConn === 'host-offline' ? (
+        ) : remoteConn === 'reconnecting' || remoteConn === 'host-offline' || remoteLinkIssue?.kind === 'unstable' ? (
           <RemoteSessionBanner
-            status={remoteConn}
+            status={remoteConn === 'host-offline' ? 'host-offline' : 'reconnecting'}
             issue={remoteLinkIssue}
             onResync={remoteSync.resync}
           />

@@ -10,6 +10,7 @@ import type { PluginMarketItem } from '../../../../shared/pluginMarket';
 import {
   batchSummary,
   buildUpdateAllRows,
+  ignoredRoundStorageKey,
   isBatchFinished,
   isBatchSettled,
   updateRoundKey,
@@ -106,5 +107,19 @@ describe('updateRoundKey', () => {
     expect(
       updateRoundKey([...a, marketItem({ ghostId: 'g9', installState: 'installed' })]),
     ).toBe(updateRoundKey(a));
+  });
+});
+
+describe('ignoredRoundStorageKey', () => {
+  it('isolates the ignore state per data owner and mode', () => {
+    const cloudA = ignoredRoundStorageKey('cloud', 'owner-a');
+    const cloudB = ignoredRoundStorageKey('cloud', 'owner-b');
+    const local = ignoredRoundStorageKey('local', null);
+
+    // 账号 A 忽略本轮,不得静默压掉账号 B 或本地模式的更新横幅。
+    expect(new Set([cloudA, cloudB, local]).size).toBe(3);
+    expect(ignoredRoundStorageKey('cloud', 'owner-a')).toBe(cloudA);
+    // 未登录/本地无 owner 时也有稳定桶,不回落到共享键。
+    expect(local).toContain('anonymous');
   });
 });

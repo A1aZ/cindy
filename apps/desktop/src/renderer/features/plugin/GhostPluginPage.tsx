@@ -81,7 +81,7 @@ import {
   sortGhostPluginItemsByRecentUse,
   type GhostPluginListItem,
 } from './lib/ghostPluginViewModel';
-import { isBatchFinished, updateRoundKey } from './lib/updateAllModel';
+import { ignoredRoundStorageKey, isBatchFinished, updateRoundKey } from './lib/updateAllModel';
 import {
   approveUpdateExpansion,
   getUpdateAllBatchState,
@@ -132,12 +132,10 @@ const RECOMMENDED_FILTERS: readonly PluginPresentationFilter[] = [
   'custom',
 ];
 
-/** 「忽略本轮更新」的持久键(值 = updateRoundKey,版本集合变化后横幅自动回归)。 */
-const IGNORED_UPDATE_ROUND_KEY = 'cindy.pluginUpdates.ignoredRound';
-
-function readIgnoredRound(): string {
+/** 读「忽略本轮更新」的持久值(键按数据归属分桶,见 ignoredRoundStorageKey)。 */
+function readIgnoredRound(storageKey: string): string {
   try {
-    return window.localStorage.getItem(IGNORED_UPDATE_ROUND_KEY) ?? '';
+    return window.localStorage.getItem(storageKey) ?? '';
   } catch {
     return '';
   }
@@ -171,7 +169,12 @@ export function GhostPluginPage() {
   const [query, setQuery] = useState('');
   const [marketSnapshot, setMarketSnapshot] = useState<PluginMarketSnapshot | null>(null);
   const [openPanelId, setOpenPanelId] = useState<string | null>(null);
-  const [ignoredRound, setIgnoredRound] = useState(readIgnoredRound);
+  const ignoredRoundKey = ignoredRoundStorageKey(mode, dataOwnerId);
+  const [ignoredRound, setIgnoredRound] = useState(() => readIgnoredRound(ignoredRoundKey));
+  // 账号 / 本地云模式切换:换桶重读,不把上一个身份的「忽略本轮」带进来。
+  useEffect(() => {
+    setIgnoredRound(readIgnoredRound(ignoredRoundKey));
+  }, [ignoredRoundKey]);
   const [originFilter, setOriginFilter] = useState<PluginPresentationFilter>('all');
   const [marketDetail, setMarketDetail] = useState<PluginMarketDetail | null>(null);
   const [marketBusyId, setMarketBusyId] = useState<string | null>(null);
@@ -345,7 +348,8 @@ export function GhostPluginPage() {
     next.delete('panel');
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
-  const marketItems = marketSnapshot?.items ?? [];
+  // 引用稳定:批次对账 effect 以它为依赖,裸 `?? []` 每次渲染都是新数组会空转。
+  const marketItems = useMemo(() => marketSnapshot?.items ?? [], [marketSnapshot]);
   const customSourceNames = useMemo(
     () => marketSnapshot?.customSourceNames ?? [],
     [marketSnapshot?.customSourceNames],
@@ -511,12 +515,12 @@ export function GhostPluginPage() {
   const currentRoundKey = useMemo(() => updateRoundKey(marketItems), [marketItems]);
   const handleIgnoreRound = useCallback(() => {
     try {
-      window.localStorage.setItem(IGNORED_UPDATE_ROUND_KEY, currentRoundKey);
+      window.localStorage.setItem(ignoredRoundKey, currentRoundKey);
     } catch {
       // localStorage 不可用时仅本次会话内生效。
     }
     setIgnoredRound(currentRoundKey);
-  }, [currentRoundKey]);
+  }, [currentRoundKey, ignoredRoundKey]);
 
   // 批次状态住在模块级控制器里(生命周期长于本页:关弹窗离开 /plugins
   // 后批次继续跑,回来仍保留待确认项的批准/跳过入口),页面只订阅快照。
@@ -524,11 +528,12 @@ export function GhostPluginPage() {
   const updateRows = updateBatch.rows;
   const batchRunning = updateBatch.running;
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
-  // 与外部事实对账:已装清单变化(单项更新/文件更新/卸载)收束对应批量行,
-  // 账号或模式切换作废整批——旧账号发起的批次绝不落到新账号数据上。
+  // 与外部事实对账:已装清单或市场快照变化(单项更新/文件更新/卸载)收束
+  // 对应批量行——完成判据取市场快照的 installState(目标 release 是否落账),
+  // 不用版本号;账号或模式切换作废整批,旧账号的批次绝不落到新账号数据上。
   useEffect(() => {
-    reconcileUpdateAllBatch();
-  }, [ghosts, mode, dataOwnerId]);
+    reconcileUpdateAllBatch(marketItems);
+  }, [ghosts, marketItems, mode, dataOwnerId]);
   // 有未完结批次(含待确认项)时横幅必须在场:它是重开批量弹窗的唯一入口,
   // 「忽略本轮」不得顺带藏掉待确认项的批准/跳过路径。
   const hasUnfinishedBatch = updateRows !== null && !isBatchFinished(updateRows);

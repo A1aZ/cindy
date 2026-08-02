@@ -184,8 +184,12 @@ async function runQueue(): Promise<void> {
       }
     }
   } finally {
-    emit({ ...state, running: false });
+    // running 必须**撑到刷新结束**才落下:刷新期间市场快照还是旧的,若此时
+    // 放开 running,页面拿旧快照就能启动第二批,而本 runner 的收尾还会
+    // patch/emit 到新批次上(旧收尾改写新批次)。先刷新、后放行,
+    // startUpdateAllBatch 的 running 闸门才真正拦得住。
     await refreshMarketIfMounted();
+    emit({ ...state, running: false });
     maybeFinishToast();
   }
 }
@@ -205,27 +209,42 @@ export async function approveUpdateExpansion(pluginId: string): Promise<void> {
     maybeFinishToast();
     return;
   }
-  if (installed.version === row.toVersion) {
-    // 等待确认期间已通过单项/文件更新装到目标版本:不再重复下载安装。
-    patchRow(pluginId, { status: 'done' });
-    maybeFinishToast();
-    return;
-  }
   patchRow(pluginId, { status: 'installing' });
   try {
-    // 用户审阅的是「当前已装权限面 → 目标版本」的差异。等待期间若被
-    // 「从文件更新」等外部路径换掉了已装 manifest,那份 diff 与它换来的
-    // allowPermissionExpansion 就不再对应现实——重新取详情、以当前已装
-    // manifest 重算,权限没扩张就按普通更新装,扩张面变了则退回待确认重审。
-    //
-    // 判据是权限指纹而非版本号:ghosts.update() 允许**同版本整体替换
-    // manifest**(无版本单调性检查),同版本换入更宽的权限声明时版本比较
-    // 完全看不出来,旧的 allowPermissionExpansion 会把未审阅的新权限一并
-    // 放行。staleReview 并联进来覆盖 reconcile 已打标的情形。
-    if (row.staleReview === true || permissionBaselineKey(installed) !== row.reviewedBaseline) {
-      const detail = await window.electronAPI.pluginMarket.detail(pluginId);
+    // 一律重取详情。它同时给出三件事,缺一不可:
+    //  1. installState —— **目标 release 是否真的落账**的权威判据。main 侧
+    //     只有 record.releaseId === 目标 release 且所有权归本插件时才报
+    //     'installed'(plugin-market/service.ts),所以「从文件装了同版本
+    //     但不同 release」不会被误判成完成;版本号比对做不到这点。
+    //  2. 最新 releaseId / manifest —— 并发防护与非 server 源的 reviewed manifest。
+    //  3. 当前 manifest —— 与已装 manifest 重算权限差异。
+    const detail = await window.electronAPI.pluginMarket.detail(pluginId);
+    if (detail.installState === 'installed') {
+      // 目标 release 已由别的路径装上:直接收束,不重复下载安装。
+      patchRow(pluginId, { status: 'done', fromVersion: installed.version });
+      return;
+    }
+    // 用户审阅的是「审阅当时的已装权限面 → 那一刻的目标 release」。三个前提
+    // 任一变了,那份 diff 与它换来的 allowPermissionExpansion 就不再对应现实:
+    //  - staleReview:reconcile 已发现基线被换掉;
+    //  - 权限指纹变化:ghosts.update() 允许**同版本整体替换 manifest**(无版本
+    //    单调性检查),同版本换入更宽的权限声明时版本比较完全看不出来;
+    //  - 目标 release 变化:市场在等待期间发了新版,审的不是这一版。
+    const reviewStillValid =
+      row.staleReview !== true &&
+      permissionBaselineKey(installed) === row.reviewedBaseline &&
+      detail.releaseId === row.releaseId;
+    if (reviewStillValid) {
+      await window.electronAPI.pluginMarket.install(pluginId, {
+        expectedReleaseId: row.releaseId,
+        ...(row.expectedManifest ? { expectedManifest: row.expectedManifest } : {}),
+        allowPermissionExpansion: true,
+      });
+      patchRow(pluginId, { status: 'done' });
+    } else {
       const freshDiff = diffGhostPermissionItems(installed, detail.manifest);
       if (freshDiff.added.length > 0) {
+        // 相对新事实仍是扩权:回到逐项审阅,绝不静默放行未审过的权限。
         patchRow(pluginId, {
           status: 'needs-confirm',
           fromVersion: installed.version,
@@ -243,13 +262,6 @@ export async function approveUpdateExpansion(pluginId: string): Promise<void> {
         ...(detail.sourceType !== 'server' ? { expectedManifest: detail.manifest } : {}),
       });
       patchRow(pluginId, { status: 'done', fromVersion: installed.version });
-    } else {
-      await window.electronAPI.pluginMarket.install(pluginId, {
-        expectedReleaseId: row.releaseId,
-        ...(row.expectedManifest ? { expectedManifest: row.expectedManifest } : {}),
-        allowPermissionExpansion: true,
-      });
-      patchRow(pluginId, { status: 'done' });
     }
   } catch (error) {
     patchRow(pluginId, { status: 'failed', errorText: i18n.t(pluginMarketErrorKey(error)) });
@@ -272,17 +284,23 @@ export function skipUpdateExpansion(pluginId: string): void {
 
 /**
  * 与外部事实对账:账号切换 → 整批作废;待确认行的插件被卸载 → 跳过、
- * 已被单项/文件更新装到目标版本 → 记为完成(不再提供重复安装入口)、
+ * **目标 release 已落账**(市场快照报 'installed')→ 记为完成、
  * 权限基线被换掉(含同版本替换 manifest)→ 旧 permissionDiff 已不对应
  * 现实,清掉并标记待重审(真正的重算在 approve 时做,那里能取详情)。
- * 页面在已装清单或身份变化时调用。
+ *
+ * 完成判据只认市场快照的 installState,不认版本号:同版本不同 release
+ * (从文件装入)在版本比对下无法区分,会把没装上目标 release 的行误收成完成。
+ * 页面在已装清单、市场快照或身份变化时调用,并把当前市场快照传进来。
  */
-export function reconcileUpdateAllBatch(): void {
+export function reconcileUpdateAllBatch(marketItems: readonly PluginMarketItem[] = []): void {
   if (state.rows === null) return;
   if (!batchOwnerCurrent()) {
     voidStaleBatch();
     return;
   }
+  const installStateByPluginId = new Map(
+    marketItems.map((item) => [item.pluginId, item.installState]),
+  );
   let rows = state.rows;
   let changed = false;
   for (const row of state.rows) {
@@ -291,7 +309,8 @@ export function reconcileUpdateAllBatch(): void {
     if (installed === null) {
       rows = updateRow(rows, row.pluginId, { status: 'skipped' });
       changed = true;
-    } else if (installed.version === row.toVersion) {
+    } else if (installStateByPluginId.get(row.pluginId) === 'installed') {
+      // 目标 release 已落账(main 侧 record.releaseId 对上):无需再装。
       rows = updateRow(rows, row.pluginId, { status: 'done' });
       changed = true;
     } else if (permissionBaselineKey(installed) !== row.reviewedBaseline) {

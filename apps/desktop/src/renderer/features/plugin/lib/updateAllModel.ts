@@ -127,6 +127,18 @@ export function batchSummary(rows: readonly UpdateAllRow[]): {
 }
 
 /**
+ * 「忽略本轮更新」的 localStorage 键:按数据归属分桶(云账号各自一桶、
+ * 本地模式一桶)。插件清单与可更新集合本就随账号/模式不同,共用一个键会让
+ * 账号 A 的「忽略本轮」静默压掉账号 B 的更新横幅。
+ */
+export function ignoredRoundStorageKey(
+  mode: 'signed-out' | 'local' | 'cloud',
+  dataOwnerId: string | null,
+): string {
+  return `cindy.pluginUpdates.ignoredRound.${mode}.${dataOwnerId ?? 'anonymous'}`;
+}
+
+/**
  * 「忽略本轮」的身份键:同一批可更新集合(id@目标版本)只被忽略一次,
  * 任何插件出现更新的版本变化都会产生新键,横幅随之重新出现。
  */

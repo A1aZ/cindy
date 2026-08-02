@@ -27,6 +27,7 @@ import {
   approveUpdateExpansion,
   getUpdateAllBatchState,
   reconcileUpdateAllBatch,
+  setUpdateAllBatchHooks,
   startUpdateAllBatch,
 } from '../lib/updateAllController';
 
@@ -308,9 +309,9 @@ describe('updateAllController', () => {
     await waitForSettledBatch();
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('needs-confirm');
 
-    // 单项/文件更新把插件装到了目标版本 → 待确认行收束为完成,不再重复安装。
+    // 目标 release 已落账(市场快照报 installed)→ 待确认行收束为完成。
     installedGhosts = [{ manifest: manifest({ version: '1.1.0' }) }];
-    reconcileUpdateAllBatch();
+    reconcileUpdateAllBatch([marketItem({ installState: 'installed' })]);
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
     expect(installMock).not.toHaveBeenCalled();
 
@@ -319,6 +320,72 @@ describe('updateAllController', () => {
     setDataOwnerGeneration('owner-b');
     reconcileUpdateAllBatch();
     expect(getUpdateAllBatchState().rows).toBeNull();
+  });
+
+  it('does not settle as done when a same-version foreign release was installed', async () => {
+    stubDetail({
+      manifest: manifest({ network: { hosts: ['api.example.com'] } }),
+      sourceType: 'server',
+    });
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+
+    // 「从文件更新」装了同版本但**不是目标 release** 的包:版本号看着到位,
+    // 但 main 侧 record.releaseId 对不上,市场仍报 update-available。
+    installedGhosts = [{ manifest: manifest({ version: '1.1.0' }) }];
+    reconcileUpdateAllBatch([marketItem({ installState: 'update-available' })]);
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('needs-confirm');
+
+    await approveUpdateExpansion('plugin-a');
+    // 目标 release 仍未落账 → 必须真正安装,不得凭版本号收成完成。
+    expect(installMock).toHaveBeenCalledWith('plugin-a', {
+      expectedReleaseId: 'release-2',
+      allowPermissionExpansion: true,
+    });
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
+  });
+
+  it('settles without reinstalling once the target release is actually on record', async () => {
+    stubDetail({
+      manifest: manifest({ network: { hosts: ['api.example.com'] } }),
+      sourceType: 'server',
+    });
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+
+    // 目标 release 已落账:detail 报 installed,批准直接收束不重复下载。
+    installedGhosts = [{ manifest: manifest({ version: '1.1.0' }) }];
+    detailMock.mockResolvedValue({
+      ...marketItem({ installState: 'installed' }),
+      manifest: manifest({ version: '1.1.0', network: { hosts: ['api.example.com'] } }),
+      readme: null,
+    } as unknown as PluginMarketDetail);
+
+    await approveUpdateExpansion('plugin-a');
+    expect(installMock).not.toHaveBeenCalled();
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
+  });
+
+  it('holds running until the post-batch refresh settles so no second batch overlaps', async () => {
+    let releaseRefresh: (() => void) | undefined;
+    setUpdateAllBatchHooks({
+      refreshMarket: () =>
+        new Promise<void>((resolve) => {
+          releaseRefresh = resolve;
+        }),
+    });
+    stubDetail({ manifest: manifest({}), sourceType: 'server' });
+
+    startUpdateAllBatch([marketItem({})]);
+    await vi.waitFor(() => expect(releaseRefresh).toBeDefined());
+
+    // 刷新还没回来:running 必须仍为 true,旧 runner 的收尾不能让第二批插进来。
+    expect(getUpdateAllBatchState().running).toBe(true);
+    startUpdateAllBatch([marketItem({ pluginId: 'plugin-b', ghostId: 'ghost-b' })]);
+    expect(getUpdateAllBatchState().rows?.map((row) => row.pluginId)).toEqual(['plugin-a']);
+
+    releaseRefresh?.();
+    await vi.waitFor(() => expect(getUpdateAllBatchState().running).toBe(false));
   });
 
   it('keeps pending confirmations readable after the page unsubscribes (unmount)', async () => {

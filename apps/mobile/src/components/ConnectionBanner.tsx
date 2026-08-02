@@ -53,6 +53,7 @@ export function useShowConnectionBanner(
     // 否则恢复后 banner 会带着"自动重试中"文案常驻到用户手动同步。
     hasError: Boolean(resolveEffectiveConnectionError(error, deviceUnresponsive)),
     hasIssue: issue !== null,
+    hasUnstableIssue: issue?.kind === 'unstable',
     deviceUnresponsive,
   });
 }

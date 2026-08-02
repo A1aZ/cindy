@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -1123,7 +1124,7 @@ describe('PluginMarketService 自定义市场 detail/install', () => {
     // 已安装目录同样可能被外部进程/同步盘改动,且摘要读取在每次市场快照都会
     // 执行;所有此类读取必须走 readBoundedFileNoFollow 系列(单句柄限量闸)。
     const source = await fs.promises.readFile(
-      path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'service.ts'),
+      path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'service.ts'),
       'utf8',
     );
     expect(source).not.toMatch(/fs\.promises\.readFile\(/);

@@ -36,15 +36,13 @@ describe('CLI_COMMAND_NAME 跟随 edition 品牌', () => {
 
 describe('resolveBundledCliPath', () => {
   it('由 resourcesPath 推出包内 cli/cindy', () => {
-    expect(resolveBundledCliPath('/Applications/Cindy.app/Contents/Resources')).toBe(
-      '/Applications/Cindy.app/Contents/Resources/cli/cindy',
-    );
+    const resourcesPath = '/Applications/Cindy.app/Contents/Resources';
+    expect(resolveBundledCliPath(resourcesPath)).toBe(path.join(resourcesPath, 'cli', 'cindy'));
   });
 
   it('路径含空格也正确', () => {
-    expect(resolveBundledCliPath('/Users/a/My Apps/Cindy.app/Contents/Resources')).toBe(
-      '/Users/a/My Apps/Cindy.app/Contents/Resources/cli/cindy',
-    );
+    const resourcesPath = '/Users/a/My Apps/Cindy.app/Contents/Resources';
+    expect(resolveBundledCliPath(resourcesPath)).toBe(path.join(resourcesPath, 'cli', 'cindy'));
   });
 });
 

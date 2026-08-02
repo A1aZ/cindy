@@ -91,6 +91,17 @@ Cindy 显式设置:models.json、`--append-system-prompt`、`--session-dir`、�
       Windows 根目录平铺 zip。Forge 按目标平台下载、校验并把**完整目录分发**打进
       `resources/pi/<platform>`，Windows `pi.exe` 进入签名扫描。当前 Mac 已完成六资产
       SHA-256 下载验收；非本机 OS 的最终启动 smoke 仍由对应发布 runner 执行。
+      2026-08 起 pi 接入与 cc/codex 相同的 CDN 运行时分发链(`agent-binaries` +
+      splash prepare):CDN manifest 新增可选 `pi` 字段(整包 tar.gz,归档根即完整
+      目录分发,SHA256 为 tar.gz 的),启动时按 manifest 版本下载到
+      `userData/pi/<version>/` 并清旧版。pi 是可选资产:manifest 缺字段/下载失败
+      **不阻塞启动**(splash 不进失败态),`pi-host.resolvePiBinaryPath` 依次回退
+      受管下载版 → `resources/pi/<platform>` 安装包自带分发。发布侧需把整包
+      tar.gz 上传 CDN 并写 manifest `pi` 字段后,该链路才对 packaged 用户生效;
+      在那之前行为与旧版一致(只用安装包自带分发)。发布入口**不在本仓**:
+      二进制发布统一走 cindy 同级目录的独立工程 `cindy-binary-release`
+      (`pnpm release:pi -- --region cn|global`,默认 canary 通道;配置与安全机制见
+      该工程 README)。本仓只保留版本 pin 与暂存(`pnpm update:pi` / `install:pi`)。
 - [x] **协议/模型兼容自动矩阵**:Anthropic Messages、OpenAI Responses、OpenAI Chat 三种
       Pi 原生 BYOM 映射均有契约测试；真实 Pi + fake gateway 覆盖 thinking/tool streaming、
       MCP bridge、redacted/usage 翻译，ChatGPT 订阅已做真实请求与 cacheRead 验收。发布账号的

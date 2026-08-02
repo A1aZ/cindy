@@ -125,7 +125,7 @@ test("help groups copyable desktop, binary, and Mobile workflows", async () => {
 	const rootScripts = Object.keys(readRootScripts());
 	const documentedWorkflowScripts = rootScripts.filter((name) =>
 		/^(mobile:xcode|mobile:sim:|mobile:build:(ios|android))/.test(name) ||
-		/^(install:(agent-binaries|claude|codex|ripgrep)|update:(vendors|claude|codex|ripgrep))$/.test(name) ||
+		/^(install:(agent-binaries|claude|codex|ripgrep|pi)|update:(vendors|claude|codex|ripgrep|pi))$/.test(name) ||
 		/^release:(claude-code|codex|ripgrep)(:arm64|:x64|:win)?$/.test(name),
 	);
 	assert.deepEqual(

@@ -11,6 +11,9 @@ import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
+  // 页面经批量更新控制器引 @/i18n,其 init 链路需要这些导出。
+  initReactI18next: { type: '3rdParty', init: vi.fn() },
+  I18nextProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 vi.mock('@/contexts/AuthContext', () => ({
   useAuth: () => ({ user: null, mode: 'signed-out', dataOwnerId: null }),

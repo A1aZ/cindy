@@ -1,0 +1,198 @@
+/**
+ * Window-level controller for the "update all plugins" batch flow.
+ *
+ * Inputs: the market update snapshot plus user approve/skip actions.
+ * Outputs: a subscribable batch snapshot for the Plugin page and the
+ * serial install IPC calls.
+ *
+ * 为什么在组件外:批次可以在用户关掉弹窗、离开 /plugins 后继续跑
+ * (「后台继续」语义),待确认的扩权项也必须在回到插件页后仍然保留
+ * 批准/跳过入口——状态生命周期必须长于页面组件,所以照
+ * useInstalledGhosts 的先例做成模块级单例 store。
+ * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+ */
+
+import { i18n } from '@/i18n';
+import { toast } from '@/lib/toast';
+import { readInstalledGhostsSnapshot } from '@/cindy-brain/useInstalledGhosts';
+import { diffGhostPermissionItems, type GhostManifest } from '../../../../shared/ghost';
+import type { PluginMarketItem } from '../../../../shared/pluginMarket';
+import { pluginMarketErrorKey } from './pluginMarketErrorKey';
+import {
+  batchSummary,
+  buildUpdateAllRows,
+  isBatchFinished,
+  updateRow,
+  type UpdateAllRow,
+} from './updateAllModel';
+
+export interface UpdateAllBatchState {
+  /** null = 从未启动过批次;数组引用随每次行迁移变化(快照语义)。 */
+  rows: UpdateAllRow[] | null;
+  running: boolean;
+}
+
+interface UpdateAllBatchHooks {
+  /** 批次推进后的市场快照刷新;页面卸载期间缺席,重新进页会全量刷新。 */
+  refreshMarket?: () => Promise<void>;
+}
+
+let state: UpdateAllBatchState = { rows: null, running: false };
+let finishToastShown = false;
+let hooks: UpdateAllBatchHooks = {};
+const listeners = new Set<() => void>();
+
+function emit(next: UpdateAllBatchState): void {
+  state = next;
+  listeners.forEach((listener) => listener());
+}
+
+function patchRow(pluginId: string, patch: Partial<UpdateAllRow>): void {
+  emit({ ...state, rows: updateRow(state.rows ?? [], pluginId, patch) });
+}
+
+export function subscribeUpdateAllBatch(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+export function getUpdateAllBatchState(): UpdateAllBatchState {
+  return state;
+}
+
+/** 页面挂载期注册环境回调;返回的清理函数在卸载时注销。 */
+export function setUpdateAllBatchHooks(next: UpdateAllBatchHooks): () => void {
+  hooks = next;
+  return () => {
+    if (hooks === next) hooks = {};
+  };
+}
+
+function installedManifestOf(ghostId: string): GhostManifest | null {
+  return (
+    readInstalledGhostsSnapshot().find((ghost) => ghost.manifest.id === ghostId)?.manifest ?? null
+  );
+}
+
+async function refreshMarketIfMounted(): Promise<void> {
+  try {
+    await hooks.refreshMarket?.();
+  } catch {
+    // 快照刷新失败不影响批次结果;下次进页会重新拉取。
+  }
+}
+
+function maybeFinishToast(): void {
+  const rows = state.rows;
+  if (!rows || rows.length === 0 || !isBatchFinished(rows) || finishToastShown) return;
+  finishToastShown = true;
+  const summary = batchSummary(rows);
+  toast.success(
+    i18n.t('settings.ghosts.updateAll.doneToast', {
+      done: summary.done,
+      rest: summary.skipped + summary.failed,
+    }),
+  );
+}
+
+/** 启动新批次(运行中调用是 no-op;是否复用未完成批次由页面判断)。 */
+export function startUpdateAllBatch(marketUpdates: readonly PluginMarketItem[]): void {
+  if (state.running) return;
+  const installedVersionById = new Map(
+    readInstalledGhostsSnapshot().map((ghost) => [ghost.manifest.id, ghost.manifest.version]),
+  );
+  finishToastShown = false;
+  emit({ rows: buildUpdateAllRows(marketUpdates, installedVersionById), running: false });
+  void runQueue();
+}
+
+/** 批量 runner:串行走「取详情 → 权限 diff → 无扩权直接装 / 有扩权停待确认」。 */
+async function runQueue(): Promise<void> {
+  if (state.running) return;
+  emit({ ...state, running: true });
+  try {
+    for (;;) {
+      const next = (state.rows ?? []).find((row) => row.status === 'pending');
+      if (!next) break;
+      patchRow(next.pluginId, { status: 'installing' });
+      try {
+        const detail = await window.electronAPI.pluginMarket.detail(next.pluginId);
+        const installedManifest = installedManifestOf(next.ghostId);
+        if (!installedManifest) {
+          // 批量期间插件已被卸载:绝不拿市场 manifest 兜底继续安装
+          // (那会把用户刚卸载的插件重新装回来),该行按跳过收束。
+          patchRow(next.pluginId, { status: 'skipped' });
+          continue;
+        }
+        const diff = diffGhostPermissionItems(installedManifest, detail.manifest);
+        if (diff.added.length > 0) {
+          // 扩权不自动放行:停在待确认,由用户在弹窗里逐项同意或跳过。
+          patchRow(next.pluginId, {
+            status: 'needs-confirm',
+            releaseId: detail.releaseId,
+            permissionDiff: diff,
+            ...(detail.sourceType !== 'server' ? { expectedManifest: detail.manifest } : {}),
+          });
+          continue;
+        }
+        await window.electronAPI.pluginMarket.install(next.pluginId, {
+          expectedReleaseId: detail.releaseId,
+          ...(detail.sourceType !== 'server' ? { expectedManifest: detail.manifest } : {}),
+        });
+        patchRow(next.pluginId, { status: 'done' });
+      } catch (error) {
+        patchRow(next.pluginId, {
+          status: 'failed',
+          errorText: i18n.t(pluginMarketErrorKey(error)),
+        });
+      }
+    }
+  } finally {
+    emit({ ...state, running: false });
+    await refreshMarketIfMounted();
+    maybeFinishToast();
+  }
+}
+
+/** 用户在弹窗里同意某个扩权项后继续安装。 */
+export async function approveUpdateExpansion(pluginId: string): Promise<void> {
+  const row = state.rows?.find((candidate) => candidate.pluginId === pluginId);
+  if (!row || row.status !== 'needs-confirm' || !row.releaseId) return;
+  if (installedManifestOf(row.ghostId) === null) {
+    // 待确认期间插件被卸载:同意也不重装,按跳过收束。
+    patchRow(pluginId, { status: 'skipped' });
+    maybeFinishToast();
+    return;
+  }
+  patchRow(pluginId, { status: 'installing' });
+  try {
+    await window.electronAPI.pluginMarket.install(pluginId, {
+      expectedReleaseId: row.releaseId,
+      ...(row.expectedManifest ? { expectedManifest: row.expectedManifest } : {}),
+      allowPermissionExpansion: true,
+    });
+    patchRow(pluginId, { status: 'done' });
+  } catch (error) {
+    patchRow(pluginId, { status: 'failed', errorText: i18n.t(pluginMarketErrorKey(error)) });
+  }
+  await refreshMarketIfMounted();
+  maybeFinishToast();
+}
+
+/** 用户在弹窗里跳过某个扩权项。 */
+export function skipUpdateExpansion(pluginId: string): void {
+  const row = state.rows?.find((candidate) => candidate.pluginId === pluginId);
+  if (!row || row.status !== 'needs-confirm') return;
+  patchRow(pluginId, { status: 'skipped' });
+  maybeFinishToast();
+}
+
+/** 仅测试用:清空模块级批次状态与回调注册。 */
+export function __resetUpdateAllBatchForTest(): void {
+  state = { rows: null, running: false };
+  finishToastShown = false;
+  hooks = {};
+  listeners.clear();
+}

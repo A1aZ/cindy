@@ -81,14 +81,15 @@ import {
   sortGhostPluginItemsByRecentUse,
   type GhostPluginListItem,
 } from './lib/ghostPluginViewModel';
+import { isBatchFinished, updateRoundKey } from './lib/updateAllModel';
 import {
-  batchSummary,
-  buildUpdateAllRows,
-  isBatchFinished,
-  updateRoundKey,
-  updateRow,
-  type UpdateAllRow,
-} from './lib/updateAllModel';
+  approveUpdateExpansion,
+  getUpdateAllBatchState,
+  setUpdateAllBatchHooks,
+  skipUpdateExpansion,
+  startUpdateAllBatch,
+  subscribeUpdateAllBatch,
+} from './lib/updateAllController';
 import { formatSetupGateDescription } from './lib/ghostSetupGateModel';
 import {
   PLUGIN_MANAGEMENT_CARD_GRID_CLASS,
@@ -157,8 +158,6 @@ export function GhostPluginPage() {
   const { user, mode, dataOwnerId } = useAuth();
   const showEnterprise = user?.membershipKind === 'org';
   const ghosts = useInstalledGhosts();
-  const ghostsRef = useRef(ghosts);
-  ghostsRef.current = ghosts;
   const installedGhostIdsKey = ghosts
     .map((ghost) => ghost.manifest.id)
     .sort()
@@ -510,12 +509,12 @@ export function GhostPluginPage() {
     setIgnoredRound(currentRoundKey);
   }, [currentRoundKey]);
 
-  const [updateRows, setUpdateRows] = useState<UpdateAllRow[] | null>(null);
+  // 批次状态住在模块级控制器里(生命周期长于本页:关弹窗离开 /plugins
+  // 后批次继续跑,回来仍保留待确认项的批准/跳过入口),页面只订阅快照。
+  const updateBatch = useSyncExternalStore(subscribeUpdateAllBatch, getUpdateAllBatchState);
+  const updateRows = updateBatch.rows;
+  const batchRunning = updateBatch.running;
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
-  const updateRowsRef = useRef<UpdateAllRow[]>([]);
-  const batchRunningRef = useRef(false);
-  const [batchRunning, setBatchRunning] = useState(false);
-  const finishToastShownRef = useRef(false);
   const selectedGhost = selectedId
     ? (ghosts.find((ghost) => ghost.manifest.id === selectedId) ?? null)
     : null;
@@ -667,112 +666,23 @@ export function GhostPluginPage() {
     await pickAndUpdateGhost(selectedDetail.id, { t, confirm, confirmWithCheckbox });
   }, [confirm, confirmWithCheckbox, selectedDetail, t]);
 
-  const patchUpdateRow = useCallback((pluginId: string, patch: Partial<UpdateAllRow>) => {
-    updateRowsRef.current = updateRow(updateRowsRef.current, pluginId, patch);
-    setUpdateRows(updateRowsRef.current);
-  }, []);
-  const maybeFinishBatch = useCallback(() => {
-    const rows = updateRowsRef.current;
-    if (rows.length === 0 || !isBatchFinished(rows) || finishToastShownRef.current) return;
-    finishToastShownRef.current = true;
-    const summary = batchSummary(rows);
-    toast.success(
-      t('settings.ghosts.updateAll.doneToast', {
-        done: summary.done,
-        rest: summary.skipped + summary.failed,
-      }),
-    );
-  }, [t]);
-  /** 批量更新 runner:串行走「取详情 → 权限 diff → 无扩权直接装 / 有扩权停待确认」。 */
-  const runBatchQueue = useCallback(async () => {
-    if (batchRunningRef.current) return;
-    batchRunningRef.current = true;
-    setBatchRunning(true);
-    try {
-      for (;;) {
-        const next = updateRowsRef.current.find((row) => row.status === 'pending');
-        if (!next) break;
-        patchUpdateRow(next.pluginId, { status: 'installing' });
-        try {
-          const detail = await window.electronAPI.pluginMarket.detail(next.pluginId);
-          const installedManifest = ghostsRef.current.find(
-            (ghost) => ghost.manifest.id === next.ghostId,
-          )?.manifest;
-          const diff = diffGhostPermissionItems(
-            installedManifest ?? detail.manifest,
-            detail.manifest,
-          );
-          if (diff.added.length > 0) {
-            // 扩权不自动放行:停在待确认,由用户在弹窗里逐项同意或跳过。
-            patchUpdateRow(next.pluginId, {
-              status: 'needs-confirm',
-              releaseId: detail.releaseId,
-              permissionDiff: diff,
-            });
-            continue;
-          }
-          await window.electronAPI.pluginMarket.install(next.pluginId, {
-            expectedReleaseId: detail.releaseId,
-            ...(detail.sourceType !== 'server' ? { expectedManifest: detail.manifest } : {}),
-          });
-          patchUpdateRow(next.pluginId, { status: 'done' });
-        } catch (error) {
-          patchUpdateRow(next.pluginId, {
-            status: 'failed',
-            errorText: t(pluginMarketErrorKey(error)),
-          });
-        }
-      }
-    } finally {
-      batchRunningRef.current = false;
-      setBatchRunning(false);
-      await refreshMarket();
-      maybeFinishBatch();
-    }
-  }, [maybeFinishBatch, patchUpdateRow, refreshMarket, t]);
+  // 控制器在挂载期借用本页的市场刷新;卸载后批次继续跑,重新进页全量刷新。
+  useEffect(
+    () => setUpdateAllBatchHooks({ refreshMarket: () => refreshMarket() }),
+    [refreshMarket],
+  );
   const handleUpdateAll = useCallback(() => {
-    if (batchRunningRef.current) {
+    const current = getUpdateAllBatchState();
+    // 运行中或还有待确认项的批次:重开弹窗接着处理,不重建批次。
+    if (current.running || (current.rows !== null && !isBatchFinished(current.rows))) {
       setUpdateDialogOpen(true);
       return;
     }
-    const installedVersionById = new Map(
-      ghostsRef.current.map((ghost) => [ghost.manifest.id, ghost.manifest.version]),
-    );
-    updateRowsRef.current = buildUpdateAllRows(
+    startUpdateAllBatch(
       updatableInstalledItems.flatMap((item) => (item.marketUpdate ? [item.marketUpdate] : [])),
-      installedVersionById,
     );
-    finishToastShownRef.current = false;
-    setUpdateRows(updateRowsRef.current);
     setUpdateDialogOpen(true);
-    void runBatchQueue();
-  }, [runBatchQueue, updatableInstalledItems]);
-  const handleApproveExpansion = useCallback(
-    async (pluginId: string) => {
-      const row = updateRowsRef.current.find((candidate) => candidate.pluginId === pluginId);
-      if (!row?.releaseId) return;
-      patchUpdateRow(pluginId, { status: 'installing' });
-      try {
-        await window.electronAPI.pluginMarket.install(pluginId, {
-          expectedReleaseId: row.releaseId,
-          allowPermissionExpansion: true,
-        });
-        patchUpdateRow(pluginId, { status: 'done' });
-      } catch (error) {
-        patchUpdateRow(pluginId, { status: 'failed', errorText: t(pluginMarketErrorKey(error)) });
-      }
-      await refreshMarket();
-      maybeFinishBatch();
-    },
-    [maybeFinishBatch, patchUpdateRow, refreshMarket, t],
-  );
-  const handleSkipExpansion = useCallback(
-    (pluginId: string) => {
-      patchUpdateRow(pluginId, { status: 'skipped' });
-      maybeFinishBatch();
-    },
-    [maybeFinishBatch, patchUpdateRow],
-  );
+  }, [updatableInstalledItems]);
 
   const handleInstall = useCallback(async () => {
     const picked = await window.electronAPI.ghosts.pickFile().catch(() => null);
@@ -1304,7 +1214,6 @@ export function GhostPluginPage() {
                 <button
                   type="button"
                   onClick={handleUpdateAll}
-                  disabled={batchRunning && !updateDialogOpen}
                   className="inline-flex h-9 shrink-0 items-center rounded-full bg-[var(--accent-cta-bg)] px-4 text-12 font-medium text-[var(--accent-pure-cta-fg)] transition-transform duration-150 hover:bg-[var(--accent-hover)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
                 >
                   {t('settings.ghosts.page.updateAll')}
@@ -1477,8 +1386,8 @@ export function GhostPluginPage() {
           open={updateDialogOpen}
           rows={updateRows}
           iconByGhostId={new Map(ghosts.map((ghost) => [ghost.manifest.id, ghost.iconDataUrl]))}
-          onApprove={(pluginId) => void handleApproveExpansion(pluginId)}
-          onSkip={handleSkipExpansion}
+          onApprove={(pluginId) => void approveUpdateExpansion(pluginId)}
+          onSkip={skipUpdateExpansion}
           onClose={() => setUpdateDialogOpen(false)}
         />
       ) : null}

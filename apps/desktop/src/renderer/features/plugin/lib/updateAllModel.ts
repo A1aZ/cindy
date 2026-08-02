@@ -7,7 +7,7 @@
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 
-import type { GhostPermissionDiff } from '../../../../shared/ghost';
+import type { GhostManifest, GhostPermissionDiff } from '../../../../shared/ghost';
 import type { PluginMarketItem } from '../../../../shared/pluginMarket';
 
 /**
@@ -33,6 +33,11 @@ export interface UpdateAllRow {
   releaseId?: string;
   /** 扩权详情(status 为 needs-confirm 时由运行器填充)。 */
   permissionDiff?: GhostPermissionDiff;
+  /**
+   * 非 server 源在审阅时取得的 manifest:主进程对这类来源强制要求安装时
+   * 传回同一份 reviewed manifest,approve 必须原样带上,否则 INVALID_PARAMS。
+   */
+  expectedManifest?: GhostManifest;
   /** status 为 failed 时的用户可读错误(已经过 i18n 映射)。 */
   errorText?: string;
 }

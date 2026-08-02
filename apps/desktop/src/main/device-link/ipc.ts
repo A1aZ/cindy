@@ -25,6 +25,7 @@ import {
 import {
   getDeviceLinkStatus,
   getDeviceLinkConnectionIssue,
+  isDeviceLinkStandby,
   setRemoteControlEnabled,
   setKeepAwakeEnabled,
   openRemoteLink,
@@ -118,6 +119,7 @@ export function defaultDeps(): DeviceLinkIpcDeps {
         keepAwake: s.keepAwake,
         linkStatus: getDeviceLinkStatus(),
         connectionIssue: getDeviceLinkConnectionIssue(),
+        standby: isDeviceLinkStandby(),
         controlledBy: getActiveControllers(),
         revokedControllers: s.revokedControllers,
         disabledControlDeviceIds: s.disabledControlDeviceIds,
@@ -222,6 +224,9 @@ export function handleGetState(deps: DeviceLinkIpcDeps): DeviceLinkState {
     keepAwake: state.keepAwake,
     linkStatus: 'stopped',
     connectionIssue: null,
+    // 无 device-link 能力(未登录 / 本地会话)不是"被本机另一实例占用",按 false 上报,
+    // 免得设置页对着一个根本没参与仲裁的实例提示"去关掉另一个 Cindy"。
+    standby: false,
     controlledBy: [],
     revokedControllers: [],
     disabledControlDeviceIds: [],

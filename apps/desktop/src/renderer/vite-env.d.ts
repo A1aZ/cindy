@@ -92,7 +92,7 @@ interface DeviceLinkDeviceView {
 
 /** 设备互联:relay 连接问题(镜像 @cindy/device-link 的 DeviceLinkConnectionIssue) */
 interface DeviceLinkConnectionIssuePayload {
-  kind: 'auth-failed' | 'replaced' | 'too-many-connections' | 'version-mismatch';
+  kind: 'auth-failed' | 'replaced' | 'too-many-connections' | 'version-mismatch' | 'unstable';
   closeCode?: number;
   detail?: string;
   at: number;
@@ -3035,6 +3035,8 @@ interface ElectronAPI {
       keepAwake: boolean;
       linkStatus: 'stopped' | 'connecting' | 'online';
       connectionIssue: DeviceLinkConnectionIssuePayload | null;
+      /** 本机另一个 Cindy 实例正持有 device-link,本实例待命中(变化走 onOwnershipChanged) */
+      standby: boolean;
       controlledBy: Array<{ deviceId: string; name: string }>;
       revokedControllers: string[];
       disabledControlDeviceIds: string[];
@@ -3093,6 +3095,11 @@ interface ElectronAPI {
     ) => () => void;
     /** 「保持电脑唤醒」在其它共享 userData 实例被翻转后推送 */
     onKeepAwakeChanged: (cb: (payload: { keepAwake: boolean }) => void) => () => void;
+    /**
+     * 同机单持有者仲裁角色变化。standby=true = 本机另一个 Cindy 实例正持有 device-link,
+     * 本实例不连 relay(远程设备会全部显示离线,远程调用一律 DEVICE_LINK_STANDBY)。
+     */
+    onOwnershipChanged: (cb: (payload: { standby: boolean }) => void) => () => void;
     /**
      * 控制端:远程会话镜像的本地冷缓存(main 落 userData,见
      * main/device-link/mirrorCacheStore.ts)。只做首屏加速、非权威 —— 缓存里没有 live 态,

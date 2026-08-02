@@ -100,6 +100,7 @@ function makeDeps(overrides?: Partial<DeviceLinkIpcDeps>): DeviceLinkIpcDeps {
       keepAwake: false,
       linkStatus: 'online',
       connectionIssue: null,
+      standby: false,
       controlledBy: [],
       revokedControllers: [],
       disabledControlDeviceIds: [],
@@ -135,10 +136,29 @@ describe('device-link IPC handlers', () => {
       keepAwake: false,
       linkStatus: 'online',
       connectionIssue: null,
+      standby: false,
       controlledBy: [],
       revokedControllers: [],
       disabledControlDeviceIds: [],
     });
+  });
+
+  // 待命(本机另一实例占着 device-link)必须能到 renderer:否则远程设备全灰而界面不解释,
+  // 用户只能以为远程功能坏了(实测曾这样静默近 40 分钟)。
+  it('getState 透传待命状态', () => {
+    const deps = makeDeps({
+      getState: () => ({
+        remoteControlEnabled: true,
+        keepAwake: false,
+        linkStatus: 'stopped',
+        connectionIssue: null,
+        standby: true,
+        controlledBy: [],
+        revokedControllers: [],
+        disabledControlDeviceIds: [],
+      }),
+    });
+    expect(handleGetState(deps).standby).toBe(true);
   });
 
   it('getState: local/signed-out sessions only expose keepAwake', () => {
@@ -154,6 +174,7 @@ describe('device-link IPC handlers', () => {
           detail: 'account state',
           at: 123,
         },
+        standby: false,
         controlledBy: [{ deviceId: 'controller-1', name: 'Other device' }],
         revokedControllers: ['revoked-1'],
         disabledControlDeviceIds: ['disabled-1'],
@@ -165,6 +186,7 @@ describe('device-link IPC handlers', () => {
       keepAwake: true,
       linkStatus: 'stopped',
       connectionIssue: null,
+      standby: false,
       controlledBy: [],
       revokedControllers: [],
       disabledControlDeviceIds: [],
@@ -326,6 +348,7 @@ describe('device-link IPC handlers', () => {
         keepAwake: false,
         linkStatus: 'online',
         connectionIssue: null,
+        standby: false,
         controlledBy: [],
         revokedControllers: [],
         disabledControlDeviceIds: ['dev-1'],
@@ -421,6 +444,7 @@ describe('device-link controller handlers', () => {
         keepAwake: false,
         linkStatus: 'online',
         connectionIssue: null,
+        standby: false,
         controlledBy: [],
         revokedControllers: [],
         disabledControlDeviceIds: ['dev-2'],
@@ -525,6 +549,7 @@ describe('device-link controller handlers', () => {
         keepAwake: false,
         linkStatus: 'online',
         connectionIssue: null,
+        standby: false,
         controlledBy: [],
         revokedControllers: [],
         disabledControlDeviceIds: disabled ? ['dev-2'] : [],

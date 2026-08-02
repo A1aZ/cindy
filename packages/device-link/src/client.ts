@@ -41,6 +41,15 @@ import {
 
 const DUPLICATE_CONNECTION_CLOSE_CODE = 4409;
 const SLOW_REQUEST_WARN_MS = 1_000;
+/**
+ * 连续多少次「握手成功后没撑过稳定期就断开」判定为 `unstable`。
+ *
+ * 取 3 而不是 1:单次短命连接是正常现象(切网、休眠唤醒、relay 滚动重启),报出来就是噪音。
+ * 连续 3 次意味着已经反复循环了一分钟以上(退避上限 30s),此时用户确实需要知道。
+ * 判定口径复用 `reconnectStableResetMs` —— 那本就是「这条连接算不算站稳了」的既有定义,
+ * 另立一个阈值只会让两处语义漂移。
+ */
+const SHORT_LIVED_STREAK_LIMIT = 3;
 const MAX_LEGACY_INBOUND_FRAMES = 128;
 const MAX_LEGACY_INBOUND_BYTES = 16 * 1024 * 1024;
 const MAX_PENDING_INBOUND_LINK_OFFERS = 64;
@@ -192,7 +201,15 @@ export type DeviceLinkConnectionIssueKind =
   /** 4429:同账号连接数超限 */
   | 'too-many-connections'
   /** 协议版本不一致(server 4400 拒绝 / 客户端 hello-ack 校验) */
-  | 'version-mismatch';
+  | 'version-mismatch'
+  /**
+   * 反复「连上就掉」:连续多次握手成功后又在稳定期内断开(见 SHORT_LIVED_STREAK_LIMIT)。
+   * 与上面四种不同,这类断开在 close code 上看不出原因(relay 静默关闭 / 网络中断 /
+   * 对端环境异常都可能),但用户侧后果很明确:presence 反复抖动、隧道调用全部超时,
+   * 而三态 linkStatus 只会显示 connecting —— 于是「电脑明明开着却一直显示离线」整段
+   * 时间里界面一句提示都没有。这条把它命名出来,让用户知道该去查那台机器。
+   */
+  | 'unstable';
 
 export interface DeviceLinkConnectionIssue {
   kind: DeviceLinkConnectionIssueKind;
@@ -319,6 +336,10 @@ export class DeviceLinkClient {
   private lastSocketErrorMessage: string | null = null;
   /** 最近一次分类出的连接问题;online 清除,普通断线保留(重连中 banner 不闪) */
   private connectionIssue: DeviceLinkConnectionIssue | null = null;
+  /** 本轮连接进入 online 的时刻;null = 本轮从未 online(握手前就断)。断开日志与短命判定共用。 */
+  private onlineSinceAt: number | null = null;
+  /** 连续「握手成功却没撑过稳定期」的次数;稳定期计时器兑现即清零。见 SHORT_LIVED_STREAK_LIMIT。 */
+  private shortLivedStreak = 0;
   /** 最近一次 hello-ack 声明的 server 能力集(老 server 无该字段 = 空集) */
   private serverCapabilities: readonly string[] = [];
   /** 最近一次 hello-ack 回的本设备 deviceId(深链等场景需要自我标识) */
@@ -450,6 +471,16 @@ export class DeviceLinkClient {
         ws.terminate?.();
       }
     }
+    // stop() 自增 connEpoch 后才 close,close 事件会被 epoch 校验丢弃 —— 这条路径**不经过
+    // handleDisconnect**,不补日志的话主动停止在日志里完全无痕。而"连接是被本机自己停掉的"
+    // (登出 / 同机仲裁降级)恰恰是排查「那台电脑一直连不上」时最需要先排除的一种。
+    this.log.info(
+      `device-link stopped by host (onlineForMs=${
+        this.onlineSinceAt === null ? 'never-online' : Math.max(0, Date.now() - this.onlineSinceAt)
+      })`,
+    );
+    this.onlineSinceAt = null;
+    this.shortLivedStreak = 0;
     // 主动停止(登出 / 退后台)清掉遗留 issue,避免下次启动前 UI 挂着过期原因
     this.setConnectionIssue(null);
     this.setStatus('stopped');
@@ -890,6 +921,18 @@ export class DeviceLinkClient {
   }
 
   private handleDisconnect(code?: number, reason?: string): void {
+    // 断开原因必须落到 INFO:此前只有可分类失败(4409 / 401 / 4400)记 WARN,普通断开
+    // 全在 debug 级 —— 正式包日志级别是 info,于是"连上就掉"的现场只剩一串 online,
+    // 没有任何线索说明是谁关的、连了多久。stopped 一并打出来,用于区分"本机主动停"
+    // (登出 / 同机仲裁降级)与"被对端 / 网络断开"。
+    const onlineForMs =
+      this.onlineSinceAt === null ? null : Math.max(0, Date.now() - this.onlineSinceAt);
+    this.log.info(
+      `device-link disconnected code=${code ?? 'n/a'} reason=${reason || 'n/a'}`
+        + ` onlineForMs=${onlineForMs ?? 'never-online'} stopped=${this.stopped}`,
+    );
+    this.trackShortLivedConnection(onlineForMs, code, reason);
+    this.onlineSinceAt = null;
     this.clearTimers();
     this.ws = null;
     // hello 会从 host 读取完整最新状态；旧连接上尚未发出的覆盖型 patch 不跨世代重放。
@@ -1183,7 +1226,10 @@ export class DeviceLinkClient {
           this.ws?.close(4400, 'protocol version mismatch');
           return true; // close 事件经 epoch 校验后走 handleDisconnect → 退避重连
         }
-        this.setConnectionIssue(null);
+        // 握手成功清掉「握手/鉴权类」结论。`unstable` 例外:它描述的是"反复连上又掉"这个
+        // 模式,而每一轮循环都必然经过一次成功握手 —— 在这里清掉等于永远显示不出来。
+        // 它的解除条件是真的稳定在线满一个稳定期,见 armReconnectStableReset。
+        if (this.connectionIssue?.kind !== 'unstable') this.setConnectionIssue(null);
         this.serverCapabilities = Array.isArray(ack?.capabilities)
           ? ack.capabilities.filter((c): c is string => typeof c === 'string')
           : [];
@@ -1196,6 +1242,8 @@ export class DeviceLinkClient {
         }
         const wasOnline = this.status === 'online';
         this.setStatus('online');
+        // 重复 hello-ack 不重置起点:那是同一条连接,在线时长要从它真正上线那刻算。
+        if (!wasOnline) this.onlineSinceAt = Date.now();
         this.armReconnectStableReset();
         this.startHeartbeat();
         // 重复 hello-ack(已在线还收到 ack)单独判别:这不是新连接,而是 relay 在同一条
@@ -2116,11 +2164,50 @@ export class DeviceLinkClient {
     }
   }
 
+  /**
+   * 记一次「握手成功却没站稳」。连续 SHORT_LIVED_STREAK_LIMIT 次即判 `unstable`,
+   * 让"反复连上又掉"这个用户完全看不见的状态有个名字。
+   *
+   * 只在**本轮真的 online 过**时计数:握手前就断属于普通连不上,既有 connecting 态已覆盖。
+   * 本机主动停(登出 / 同机仲裁降级)不计数 —— 那不是不稳定。更具体的分类(4409 / 401 /
+   * 4400)由调用方随后的 classifyConnectionIssue 覆盖本条,具体原因优先。
+   */
+  private trackShortLivedConnection(
+    onlineForMs: number | null,
+    code?: number,
+    reason?: string,
+  ): void {
+    if (this.stopped || onlineForMs === null) return;
+    if (onlineForMs >= this.timing.reconnectStableResetMs) {
+      this.shortLivedStreak = 0;
+      return;
+    }
+    this.shortLivedStreak++;
+    if (this.shortLivedStreak < SHORT_LIVED_STREAK_LIMIT) return;
+    this.log.warn(
+      `device-link keeps dropping right after handshake (${this.shortLivedStreak} in a row,`
+        + ` last onlineForMs=${onlineForMs} code=${code ?? 'n/a'})`,
+    );
+    this.setConnectionIssue({
+      kind: 'unstable',
+      closeCode: code,
+      detail: `${this.shortLivedStreak} short-lived connections; last ${onlineForMs}ms${
+        reason ? ` (${reason})` : ''
+      }`,
+      at: Date.now(),
+    });
+  }
+
   private armReconnectStableReset(): void {
     if (this.reconnectStableTimer) clearTimeout(this.reconnectStableTimer);
     this.reconnectStableTimer = setTimeout(() => {
       this.reconnectStableTimer = null;
-      if (!this.stopped && this.status === 'online') this.reconnectAttempt = 0;
+      if (this.stopped || this.status !== 'online') return;
+      this.reconnectAttempt = 0;
+      // 站稳了:清空短命连续计数,并撤掉 `unstable` 结论。它刻意不在 hello-ack 处清除
+      // (那会让结论在每轮重连里闪一下又消失),只有真的稳定在线满一个稳定期才算恢复。
+      this.shortLivedStreak = 0;
+      if (this.connectionIssue?.kind === 'unstable') this.setConnectionIssue(null);
     }, this.timing.reconnectStableResetMs);
   }
 }

@@ -2108,6 +2108,91 @@ describe('DeviceLinkClient', () => {
       expect(issues).toHaveLength(2);
       expect(issues[1]).toBeNull();
     });
+
+    /**
+     * 反复「连上就掉」的自诊断。这是本组用例的现实来源:一台电脑在 relay 眼里每 30 秒
+     * 上线一瞬又掉,控制端所有隧道调用 30s 超时,而 UI 只显示 connecting —— 用户看到的
+     * 就是"电脑明明开着却一直显示离线",近 40 分钟里界面一句提示都没有。
+     * ping 关到很大,避免 harness 默认心跳(10ms×2)把在线期打断,污染在线时长判定。
+     */
+    describe('unstable(反复连上又掉)', () => {
+      const flappy = () =>
+        makeHarness({ timing: { reconnectStableResetMs: 60, pingIntervalMs: 10_000 } });
+
+      /** 走完一轮「连上 → 立刻断」。首轮 start,后续等退避重连后的新 socket。 */
+      async function flap(h: Harness, first = false): Promise<void> {
+        if (first) h.client.start();
+        await tick(first ? 0 : 45);
+        h.current().ack();
+        h.current().emit('close', 1006);
+      }
+
+      it('前两次短命不打扰用户,第三次连续才判 unstable', async () => {
+        const h = flappy();
+        await flap(h, true);
+        expect(h.client.getConnectionIssue()).toBeNull();
+        await flap(h);
+        expect(h.client.getConnectionIssue()).toBeNull();
+        await flap(h);
+        expect(h.client.getConnectionIssue()).toMatchObject({ kind: 'unstable' });
+        h.client.stop();
+      });
+
+      it('判定成立后每轮重连的 hello-ack 不清除结论(否则它永远显示不出来)', async () => {
+        const h = flappy();
+        await flap(h, true);
+        await flap(h);
+        await flap(h);
+        expect(h.client.getConnectionIssue()).toMatchObject({ kind: 'unstable' });
+        // 下一轮握手成功:连接确实 online 了,但"反复掉线"这个结论还没被推翻
+        await tick(45);
+        h.current().ack();
+        expect(h.client.getConnectionIssue()).toMatchObject({ kind: 'unstable' });
+        h.client.stop();
+      });
+
+      it('稳定在线满一个稳定期 → 撤销结论并重新计数', async () => {
+        const h = flappy();
+        await flap(h, true);
+        await flap(h);
+        await flap(h);
+        expect(h.client.getConnectionIssue()).toMatchObject({ kind: 'unstable' });
+
+        await tick(45);
+        h.current().ack();
+        await tick(80); // > reconnectStableResetMs:这条连接站稳了
+        expect(h.client.getConnectionIssue()).toBeNull();
+
+        // 计数已归零:再断一次不会立刻又判 unstable
+        h.current().emit('close', 1006);
+        expect(h.client.getConnectionIssue()).toBeNull();
+        h.client.stop();
+      });
+
+      it('有更具体的原因时让位:短命 + 4409 → replaced,不掩盖真实原因', async () => {
+        const h = flappy();
+        h.client.start();
+        await tick();
+        for (let i = 0; i < 3; i++) {
+          if (i > 0) await tick(45);
+          h.current().ack();
+          h.current().emit('close', 4409, 'replaced by new connection');
+        }
+        expect(h.client.getConnectionIssue()).toMatchObject({ kind: 'replaced', closeCode: 4409 });
+        h.client.stop();
+      });
+
+      it('本机主动 stop 不算不稳定(登出 / 同机仲裁降级不该报错)', async () => {
+        const h = flappy();
+        for (let i = 0; i < 3; i++) {
+          h.client.start();
+          await tick();
+          h.current().ack();
+          h.client.stop();
+        }
+        expect(h.client.getConnectionIssue()).toBeNull();
+      });
+    });
   });
 
   describe('客户端主动重建(connect 重入丢弃在用 socket)', () => {

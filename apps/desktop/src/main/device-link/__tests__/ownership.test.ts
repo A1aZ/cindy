@@ -81,18 +81,20 @@ function memoryStore(): OwnershipStore & {
 function makeArbiter(opts: { store: OwnershipStore | null; id?: string; now: () => number }) {
   const onAcquire = vi.fn();
   const onDemote = vi.fn();
+  const onStandbyChanged = vi.fn();
   const arbiter = new DeviceLinkOwnershipArbiter({
     getStore: () => opts.store,
     instance: { ownerPid: 100, ownerLabel: 'test' },
     newOwnerId: () => opts.id ?? 'self',
     onAcquire,
     onDemote,
+    onStandbyChanged,
     heartbeatMs: 5_000,
     staleMs: 15_000,
     now: opts.now,
   });
   // 测试直接手动驱动 tick,不调 start()(避免 start 的后台首 tick 与手动 tick 竞争防重入锁)
-  return { arbiter, onAcquire, onDemote };
+  return { arbiter, onAcquire, onDemote, onStandbyChanged };
 }
 
 describe('DeviceLinkOwnershipArbiter', () => {
@@ -457,6 +459,76 @@ describe('DeviceLinkOwnershipArbiter', () => {
           now,
         }),
     ).toThrow(/staleMs/);
+  });
+
+  // 待命可见性:此前"本机另一实例占着 device-link"只写日志,界面上远程设备全灰却不解释。
+  // 这些用例锁住宿主拿到的通知语义 —— 只在确知有别的活持有者时为 true,且不抖动。
+  describe('待命状态通知(onStandbyChanged)', () => {
+    it('外部持有者心跳新鲜 → 通知待命', async () => {
+      const store = memoryStore();
+      store.set({ ownerId: 'other', ownerPid: 200, heartbeatAt: clock - 5_000 });
+      const { arbiter, onStandbyChanged } = makeArbiter({ store, now });
+      await arbiter.tick();
+      expect(arbiter.isStandby()).toBe(true);
+      expect(onStandbyChanged).toHaveBeenCalledTimes(1);
+      expect(onStandbyChanged).toHaveBeenCalledWith(true);
+    });
+
+    it('持续被动只通知一次(去重,不随 tick 重复打扰)', async () => {
+      const store = memoryStore();
+      store.set({ ownerId: 'other', ownerPid: 200, heartbeatAt: clock - 5_000 });
+      const { arbiter, onStandbyChanged } = makeArbiter({ store, now });
+      await arbiter.tick();
+      store.set({ ownerId: 'other', ownerPid: 200, heartbeatAt: clock });
+      await arbiter.tick();
+      expect(onStandbyChanged).toHaveBeenCalledTimes(1);
+    });
+
+    it('持有者心跳过期 → 本轮直接接管,不先报一次待命(避免界面闪提示)', async () => {
+      const store = memoryStore();
+      store.set({ ownerId: 'other', ownerPid: 200, heartbeatAt: clock - 16_000 });
+      const { arbiter, onStandbyChanged } = makeArbiter({ store, now });
+      await arbiter.tick();
+      expect(arbiter.isOwner()).toBe(true);
+      expect(arbiter.isStandby()).toBe(false);
+      expect(onStandbyChanged).not.toHaveBeenCalled();
+    });
+
+    it('被同机另一实例顶掉持有权 → 通知待命', async () => {
+      const store = memoryStore();
+      const { arbiter, onStandbyChanged } = makeArbiter({ store, now });
+      await arbiter.tick();
+      expect(onStandbyChanged).not.toHaveBeenCalled(); // 自己就是持有者
+      store.set({ ownerId: 'usurper', ownerPid: 300, heartbeatAt: clock });
+      clock += 5_000;
+      await arbiter.tick();
+      expect(arbiter.isStandby()).toBe(true);
+      expect(onStandbyChanged).toHaveBeenLastCalledWith(true);
+    });
+
+    it('待命中接管成功 → 通知解除', async () => {
+      const store = memoryStore();
+      store.set({ ownerId: 'other', ownerPid: 200, heartbeatAt: clock - 5_000 });
+      const { arbiter, onStandbyChanged } = makeArbiter({ store, now });
+      await arbiter.tick();
+      expect(onStandbyChanged).toHaveBeenLastCalledWith(true);
+      clock += 16_000; // 对方心跳过期
+      await arbiter.tick();
+      expect(arbiter.isOwner()).toBe(true);
+      expect(arbiter.isStandby()).toBe(false);
+      expect(onStandbyChanged).toHaveBeenLastCalledWith(false);
+    });
+
+    it('stop() → 退出仲裁即解除待命(不给用户留一条无从处理的占用提示)', async () => {
+      const store = memoryStore();
+      store.set({ ownerId: 'other', ownerPid: 200, heartbeatAt: clock - 5_000 });
+      const { arbiter, onStandbyChanged } = makeArbiter({ store, now });
+      await arbiter.tick();
+      expect(arbiter.isStandby()).toBe(true);
+      await arbiter.stop();
+      expect(arbiter.isStandby()).toBe(false);
+      expect(onStandbyChanged).toHaveBeenLastCalledWith(false);
+    });
   });
 });
 

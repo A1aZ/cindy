@@ -4,6 +4,7 @@ import {
   canBeControlledPlatform,
   controlToggleState,
   inboundToggleState,
+  resolveActiveConnectionIssue,
 } from '@/components/settings/myDevicesModel';
 
 describe('canBeControlledPlatform（手机不展示「我控制它」）', () => {
@@ -59,5 +60,26 @@ describe('inboundToggleState（允许它控制本机）', () => {
   it('总开关关 → 置灰(黑名单值照旧反映)', () => {
     expect(inboundToggleState(false, false)).toEqual({ checked: true, disabled: true });
     expect(inboundToggleState(false, true)).toEqual({ checked: false, disabled: true });
+  });
+});
+
+describe('resolveActiveConnectionIssue（本机卡片的原因行）', () => {
+  const authFailed = { kind: 'auth-failed' as const };
+  const unstable = { kind: 'unstable' as const };
+
+  it('无 issue → 不显示', () => {
+    expect(resolveActiveConnectionIssue('online', null)).toBeNull();
+    expect(resolveActiveConnectionIssue('connecting', null)).toBeNull();
+  });
+
+  it('普通 issue:连上了就不再显示原因(避免噪音)', () => {
+    expect(resolveActiveConnectionIssue('connecting', authFailed)).toBe(authFailed);
+    expect(resolveActiveConnectionIssue('stopped', authFailed)).toBe(authFailed);
+    expect(resolveActiveConnectionIssue('online', authFailed)).toBeNull();
+  });
+
+  it('unstable:即使此刻恰好 online 也照显示 —— 它描述的是跨多次连接的模式,按 linkStatus 过滤会跟着连接一起闪', () => {
+    expect(resolveActiveConnectionIssue('online', unstable)).toBe(unstable);
+    expect(resolveActiveConnectionIssue('connecting', unstable)).toBe(unstable);
   });
 });

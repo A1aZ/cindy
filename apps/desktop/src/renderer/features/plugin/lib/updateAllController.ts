@@ -442,10 +442,15 @@ async function runApprovalBody(pluginId: string, generation: number): Promise<vo
     //  - 权限指纹变化(以刚重读的 installed 为准):ghosts.update() 允许**同版本
     //    整体替换 manifest**,同版本换入更宽的声明时版本比较完全看不出来;
     //  - 目标 release 变化:市场在等待期间发了新版,审的不是这一版。
+    //  - 目标 manifest 变化:自定义市场源可以在**同一 releaseId 下**改 manifest,
+    //    只比 releaseId 看不出来;审阅时留存的 expectedManifest 与当前详情不一致
+    //    就说明审的不是这一份包(server 源无此字段,由 releaseId 兜住)。
     const reviewStillValid =
       row.staleReview !== true &&
       ghostPermissionBaselineKey(installed) === row.reviewedBaseline &&
-      detail.releaseId === row.releaseId;
+      detail.releaseId === row.releaseId &&
+      (row.expectedManifest === undefined ||
+        JSON.stringify(row.expectedManifest) === JSON.stringify(detail.manifest));
     /**
      * 安装并接住「前置条件失败」。Main 的 PRECONDITION_FAILED 覆盖一组
      * **并发事实变化**:安装锁内的基线复核否决、release 变了、自定义市场源
@@ -463,7 +468,17 @@ async function runApprovalBody(pluginId: string, generation: number): Promise<vo
       } catch (error) {
         if (batchGeneration !== generation) return false;
         if (extractIpcError(error)?.code === 'PRECONDITION_FAILED') {
-          holdForReReview();
+          // 注意**不能**用 holdForReReview():那会拿手里这份 detail 重算差异并
+          // 把 staleReview 置 false。可安装被拒恰恰说明这份 detail 已经不对了
+          // (典型是自定义源在同 releaseId 下换了 manifest),照它生成确认内容,
+          // 下次批准还会提交同一份过期的 expectedManifest,陷入循环失败。
+          // 丢掉旧差异、标记过期,等下次批准重新取详情。
+          holdRowForReReview(generation, pluginId, {
+            releaseId: detail.releaseId,
+            toVersion: detail.version,
+            fromVersion: installed.version,
+            expectedManifest: undefined,
+          });
           return false;
         }
         throw error;

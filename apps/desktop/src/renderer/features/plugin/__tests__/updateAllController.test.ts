@@ -405,8 +405,11 @@ describe('updateAllController', () => {
     await approveUpdateExpansion('plugin-a');
     const row = getUpdateAllBatchState().rows?.[0];
     // 「事实已变,请重新审阅」而不是「更新失败」——终态失败会让用户失去入口。
+    // 手里的 detail 已被 Main 否决,不能拿它出确认内容:丢弃旧差异 + 标记过期,
+    // 下次批准重新取详情。
     expect(row?.status).toBe('needs-confirm');
-    expect(row?.permissionDiff?.added.length).toBeGreaterThan(0);
+    expect(row?.staleReview).toBe(true);
+    expect(row?.permissionDiff).toBeUndefined();
     expect(row?.errorText).toBeUndefined();
   });
 
@@ -645,6 +648,60 @@ describe('updateAllController', () => {
     // 并发事实变化 → 回到重新审阅,不是终态失败(否则用户失去本项入口)。
     expect(row?.status).toBe('needs-confirm');
     expect(row?.errorText).toBeUndefined();
+  });
+
+  it('drops the stale detail when a same-release manifest swap rejects the approval', async () => {
+    const reviewedManifest = manifest({ network: { hosts: ['api.example.com'] } });
+    stubDetail({ manifest: reviewedManifest, sourceType: 'git-market' });
+    startUpdateAllBatch([marketItem({ sourceType: 'git-market' })]);
+    await waitForSettledBatch();
+    expect(getUpdateAllBatchState().rows?.[0]).toMatchObject({
+      status: 'needs-confirm',
+      expectedManifest: reviewedManifest,
+    });
+
+    // 竞态:detail() 返回的仍是审阅时那份(所以 renderer 侧判定审阅有效),
+    // 但在 install 到达 Main 之前,自定义源在**同一 releaseId 下**换了 manifest,
+    // Main 因 expectedManifest 对不上拒绝。此刻手里这份 detail 已经不对了。
+    const swappedManifest = manifest({
+      network: { hosts: ['api.example.com', 'evil.example.com'] },
+    });
+    installMock.mockRejectedValueOnce(
+      Object.assign(new Error('precondition'), {
+        message: 'Error invoking remote method: Error: [PRECONDITION_FAILED] manifest changed',
+      }),
+    );
+
+    await approveUpdateExpansion('plugin-a');
+
+    const held = getUpdateAllBatchState().rows?.[0];
+    // 旧差异与旧 manifest 必须丢弃并标记过期,否则下次批准会再提交同一份
+    // 过期的 expectedManifest,循环失败。
+    expect(held).toMatchObject({ status: 'needs-confirm', staleReview: true });
+    expect(held?.permissionDiff).toBeUndefined();
+    expect(held?.expectedManifest).toBeUndefined();
+
+    // 再次批准:此时详情已能取到源上的新 manifest → 相对当前已装仍是扩权 →
+    // 用**新** manifest 重新出确认内容。
+    detailMock.mockResolvedValue({
+      ...marketItem({ sourceType: 'git-market' }),
+      manifest: swappedManifest,
+      readme: null,
+    } as unknown as PluginMarketDetail);
+    await approveUpdateExpansion('plugin-a');
+    const rereviewed = getUpdateAllBatchState().rows?.[0];
+    expect(rereviewed).toMatchObject({ status: 'needs-confirm', staleReview: false });
+    expect(rereviewed?.expectedManifest).toBe(swappedManifest);
+
+    // 用户同意新差异 → 带新 manifest 装上,推进到完成,不再循环。
+    await approveUpdateExpansion('plugin-a');
+    expect(installMock).toHaveBeenLastCalledWith('plugin-a', {
+      expectedReleaseId: 'release-2',
+      expectedManifest: swappedManifest,
+      allowPermissionExpansion: true,
+      reviewedBaseline: expect.any(String),
+    });
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
   });
 
   it('does not make a new generation approval wait behind the previous one', async () => {

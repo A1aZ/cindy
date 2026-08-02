@@ -2273,6 +2273,13 @@
         "toggleFailed": "切换对话嵌入失败"
       }
     },
+    "messageNavRail": {
+      "cell": {
+        "label": "显示提问导航条",
+        "description": "在对话正文左侧显示一列提问刻度：悬停预览提问和回答开头，点击跳回那一轮。仅在提问较多且窗口足够宽时出现。"
+      },
+      "toggleAria": "切换提问导航条"
+    },
     "collaboration": {
       "loading": "正在加载协同设置…",
       "title": "协同",

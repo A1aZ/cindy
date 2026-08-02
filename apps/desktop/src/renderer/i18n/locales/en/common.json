@@ -2274,6 +2274,13 @@
         "toggleFailed": "Failed to toggle chat embedding"
       }
     },
+    "messageNavRail": {
+      "cell": {
+        "label": "Show question navigation rail",
+        "description": "Shows a column of tick marks beside the chat, one per question: hover to preview the question and the start of its answer, click to jump back to that turn. Appears only when there are enough questions and the window is wide enough."
+      },
+      "toggleAria": "Toggle question navigation rail"
+    },
     "collaboration": {
       "loading": "Loading collaboration settings…",
       "title": "Collaboration",

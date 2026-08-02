@@ -7,11 +7,7 @@
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 
-import {
-  ghostPermissionItems,
-  type GhostManifest,
-  type GhostPermissionDiff,
-} from '../../../../shared/ghost';
+import type { GhostManifest, GhostPermissionDiff } from '../../../../shared/ghost';
 import type { PluginMarketItem } from '../../../../shared/pluginMarket';
 
 /**
@@ -57,20 +53,6 @@ export interface UpdateAllRow {
   expectedManifest?: GhostManifest;
   /** status 为 failed 时的用户可读错误(已经过 i18n 映射)。 */
   errorText?: string;
-}
-
-/**
- * 权限审阅基线指纹:同一份 manifest 推导出的权限条目集合(key + detail)。
- * 与 diffGhostPermissionItems 同口径(它也是按 key 对齐、detail 变化算差异),
- * 所以"指纹相同"等价于"权限面没变",可安全沿用先前的审阅结论。
- */
-export function permissionBaselineKey(manifest: GhostManifest): string {
-  // 每项 JSON 编码后再排序拼接:全可打印(不进 NUL,git diff 才不会把本文件
-  // 判成二进制),且转义天然消除 "a","b" 与 "a,b","" 的拼接歧义。
-  return ghostPermissionItems(manifest)
-    .map((item) => JSON.stringify([item.key, item.detail ?? '']))
-    .sort()
-    .join('\n');
 }
 
 /** 从市场快照萃取可更新行;顺序即执行顺序(与列表快照顺序一致,稳定)。 */

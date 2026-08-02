@@ -20,14 +20,17 @@ import {
   isDataOwnerGenerationCurrent,
   type DataOwnerGeneration,
 } from '@/contexts/dataOwnerGeneration';
-import { diffGhostPermissionItems, type GhostManifest } from '../../../../shared/ghost';
+import {
+  diffGhostPermissionItems,
+  ghostPermissionBaselineKey,
+  type GhostManifest,
+} from '../../../../shared/ghost';
 import type { PluginMarketItem } from '../../../../shared/pluginMarket';
 import { pluginMarketErrorKey } from './pluginMarketErrorKey';
 import {
   batchSummary,
   buildUpdateAllRows,
   isBatchFinished,
-  permissionBaselineKey,
   updateRow,
   type UpdateAllRow,
 } from './updateAllModel';
@@ -197,7 +200,7 @@ async function runQueue(generation: number): Promise<void> {
             releaseId: detail.releaseId,
             permissionDiff: diff,
             // 审阅基线绑定权限指纹而非版本号:同版本换 manifest 也能识别。
-            reviewedBaseline: permissionBaselineKey(installedManifest),
+            reviewedBaseline: ghostPermissionBaselineKey(installedManifest),
             ...(detail.sourceType !== 'server' ? { expectedManifest: detail.manifest } : {}),
           });
           continue;
@@ -280,13 +283,18 @@ export async function approveUpdateExpansion(pluginId: string): Promise<void> {
     //  - 目标 release 变化:市场在等待期间发了新版,审的不是这一版。
     const reviewStillValid =
       row.staleReview !== true &&
-      permissionBaselineKey(installed) === row.reviewedBaseline &&
+      ghostPermissionBaselineKey(installed) === row.reviewedBaseline &&
       detail.releaseId === row.releaseId;
     if (reviewStillValid) {
       await window.electronAPI.pluginMarket.install(pluginId, {
         expectedReleaseId: row.releaseId,
         ...(row.expectedManifest ? { expectedManifest: row.expectedManifest } : {}),
         allowPermissionExpansion: true,
+        // 审阅基线随批准回传:Main 在安装锁内用当时的已装 manifest 复核,
+        // renderer 这边的检查挡不住 IPC 往返窗口内的替换。
+        ...(row.reviewedBaseline !== undefined
+          ? { reviewedBaseline: row.reviewedBaseline }
+          : {}),
       });
       patchRow(generation, pluginId, { status: 'done' });
     } else {
@@ -300,7 +308,7 @@ export async function approveUpdateExpansion(pluginId: string): Promise<void> {
           releaseId: detail.releaseId,
           permissionDiff: freshDiff,
           staleReview: false,
-          reviewedBaseline: permissionBaselineKey(installed),
+          reviewedBaseline: ghostPermissionBaselineKey(installed),
           expectedManifest: detail.sourceType !== 'server' ? detail.manifest : undefined,
         });
         return;
@@ -369,7 +377,7 @@ export function reconcileUpdateAllBatch(marketItems: readonly PluginMarketItem[]
       // 目标 release 已落账(main 侧 record.releaseId 对上):无需再装。
       rows = updateRow(rows, row.pluginId, { status: 'done' });
       changed = true;
-    } else if (permissionBaselineKey(installed) !== row.reviewedBaseline) {
+    } else if (ghostPermissionBaselineKey(installed) !== row.reviewedBaseline) {
       // 权限基线变了(换版本,或同版本换入不同权限声明):旧审阅作废。
       rows = updateRow(rows, row.pluginId, {
         fromVersion: installed.version,

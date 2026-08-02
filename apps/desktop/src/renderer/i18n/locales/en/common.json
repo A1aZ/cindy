@@ -3103,7 +3103,7 @@
         "updateTo": "Update to v{{version}}",
         "updateAria": "Update {{name}} to v{{version}}",
         "createWithCindy": "Create with Cindy",
-        "createPrompt": "I want to create a Cindy plugin. First call ghost_forge_guide to get the handbook's table of contents, read chapter 0 (design alignment) first, then read the relevant chapters via the section parameter (at minimum the sandbox red-lines and packaging chapters) before writing any code; do not start implementing yet. Begin by asking questions: prefer option-based question cards, one key decision per card with your recommended choice marked, and proactively surface design options I may not know about — such as the UI form (docked panel, right-sidebar tab, chat card, or no UI), a $ command word, launch mode, network access, and whether a settings page is needed. Step by step, confirm the problem to solve, target users, interaction flow, required tools and connections, permission boundaries, and acceptance criteria. After I confirm the design, implement and validate it according to the specification, then call ghost_forge_pack to package and install the plugin.",
+        "createPrompt": "I want to create a Cindy plugin. First call ghost_forge_guide to get the handbook's table of contents, read chapter 0 (design alignment) first, then read the relevant chapters via the section parameter (at minimum the sandbox red-lines and packaging chapters) before writing any code; do not start implementing yet. Begin by asking questions: prefer option-based question cards, one key decision per card with your recommended choice marked, and proactively surface design options I may not know about — such as the UI form (docked panel, panel inside the Plugins page, chat card, or no UI), a $ command word, launch mode, network access, and whether a settings page is needed. Step by step, confirm the problem to solve, target users, interaction flow, required tools and connections, permission boundaries, and acceptance criteria. After I confirm the design, implement and validate it according to the specification, then call ghost_forge_pack to package and install the plugin.",
         "filterAll": "All",
         "filtersAria": "Filter plugins by source",
         "origin": {
@@ -3337,7 +3337,7 @@
         "tool": "Tool \"{{name}}\"",
         "command": "Chat command ${{command}}",
         "panelLeft": "Panel \"{{title}}\" · docked left of the chat",
-        "panelTab": "Panel \"{{title}}\" · tab in the right sidebar",
+        "panelTab": "Panel \"{{title}}\" · opens inside the Plugins page",
         "code": "Executable code",
         "codeDetail": "Runs in an isolated sandbox with no access to your files or network.",
         "resident": "Always-on (starts when enabled, keeps a background process even when idle)",

@@ -62,6 +62,7 @@ import { resolveSystemLocale } from '../../../shared/locale';
 import {
   diffGhostPermissionItems,
   ghostPanelKind,
+  ghostPermissionBaselineKey,
   ghostPermissionItems,
   isOfficialGhostId,
   type GhostSetupStatus,
@@ -649,6 +650,11 @@ export function GhostPluginPage() {
           expectedReleaseId: next.releaseId,
           ...(next.sourceType !== 'server' ? { expectedManifest: next.manifest } : {}),
           allowPermissionExpansion: diff.added.length > 0,
+          // 用户看确认框这段时间里已装 manifest 可能被换掉(如从文件更新);
+          // 把审阅基线交给 Main,在安装锁内复核后才放行扩权。
+          ...(installedGhost
+            ? { reviewedBaseline: ghostPermissionBaselineKey(installedGhost.manifest) }
+            : {}),
         });
         if (!isMarketBusyLeaseActive(marketBusyLease)) return;
         toast.success(
@@ -1018,7 +1024,14 @@ export function GhostPluginPage() {
           ? { expectedManifest: marketDetail.manifest }
           : {}),
         ...(isUpdate && diff!.added.length > 0
-          ? { allowPermissionExpansion: true }
+          ? {
+              allowPermissionExpansion: true,
+              // 确认框展示期间已装 manifest 可能被换掉;基线交由 Main 在
+              // 安装锁内复核,不一致就拒绝这次批准而不是沿用旧同意。
+              ...(installedGhost
+                ? { reviewedBaseline: ghostPermissionBaselineKey(installedGhost.manifest) }
+                : {}),
+            }
           : {}),
       });
       if (!isMarketBusyLeaseActive(marketBusyLease)) return;

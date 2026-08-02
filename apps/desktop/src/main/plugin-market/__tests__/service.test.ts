@@ -4,6 +4,8 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { ghostPermissionBaselineKey } from '../../../shared/ghost.js';
+
 const runtime = vi.hoisted(() => ({
   ghosts: [] as Array<{
     manifest: Record<string, unknown>;
@@ -746,6 +748,50 @@ describe('PluginMarketService migration and defaultInstall', () => {
     ).resolves.toMatchObject({
       ghost: { manifest: { version: '2.0.0' } },
     });
+    expect(runtime.install).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-checks the reviewed baseline inside the install lock before honouring an expansion', async () => {
+    const item = summary({
+      currentRelease: { ...summary().currentRelease, id: 'release-2', version: '2.0.0' },
+    });
+    // 用户审阅时的已装 manifest 是 notify+fs(相对目标包没有新增权限);
+    // IPC 往返期间「从文件更新」把它换成了只有 notify 的包——此刻目标包相对
+    // **当前**已装多出 fs,而这条权限用户从没审过。旧批准不得放行它。
+    const reviewedInstalled = manifest('cindy-test', '1.0.0', ['notify', 'fs']);
+    runtime.ghosts = [
+      {
+        manifest: manifest(),
+        dir: '/userData/cindy-brain/cindy-test',
+        enabled: true,
+      },
+    ];
+    runtime.install.mockResolvedValue({
+      manifest: manifest('cindy-test', '2.0.0', ['notify', 'fs']),
+      dir: '/userData/cindy-brain/cindy-test',
+      enabled: true,
+    });
+    const h = harness([item]);
+    h.ledger.upsertInstallation({ ...recordForTest(item), releaseId: 'release-1', version: '1.0.0' });
+    h.api.detail.mockResolvedValue(detail(item, ['notify', 'fs']));
+
+    await expect(
+      h.service.install(item.id, {
+        expectedReleaseId: item.currentRelease.id,
+        allowPermissionExpansion: true,
+        reviewedBaseline: ghostPermissionBaselineKey(reviewedInstalled),
+      }),
+    ).rejects.toThrow('[PRECONDITION_FAILED]');
+    expect(runtime.install).not.toHaveBeenCalled();
+
+    // 基线与当前已装一致时照常放行(正常批准路径不被这道复核破坏)。
+    await expect(
+      h.service.install(item.id, {
+        expectedReleaseId: item.currentRelease.id,
+        allowPermissionExpansion: true,
+        reviewedBaseline: ghostPermissionBaselineKey(manifest()),
+      }),
+    ).resolves.toMatchObject({ ghost: { manifest: { version: '2.0.0' } } });
     expect(runtime.install).toHaveBeenCalledTimes(1);
   });
 

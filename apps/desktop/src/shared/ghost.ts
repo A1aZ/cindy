@@ -1805,6 +1805,22 @@ export interface GhostPermissionDiff {
   unchanged: GhostPermissionItem[];
 }
 
+/**
+ * 权限审阅基线指纹:同一份 manifest 推导出的权限条目集合(key + detail)。
+ * 与 diffGhostPermissionItems 同口径(按 key 对齐、detail 变化算差异),
+ * 所以"指纹相同"等价于"权限面没变",可安全沿用先前的审阅结论。
+ *
+ * renderer 审阅时记录基线并随安装请求回传,main 在安装锁内用**当前**已装
+ * manifest 重算比对——两侧必须用同一个实现,否则复核形同虚设,故住在 shared。
+ * 每项 JSON 编码后排序拼接,全可打印、无拼接歧义。
+ */
+export function ghostPermissionBaselineKey(manifest: GhostManifest): string {
+  return ghostPermissionItems(manifest)
+    .map((item) => JSON.stringify([item.key, item.detail ?? '']))
+    .sort()
+    .join('\n');
+}
+
 export function diffGhostPermissionItems(
   prev: GhostManifest,
   next: GhostManifest,

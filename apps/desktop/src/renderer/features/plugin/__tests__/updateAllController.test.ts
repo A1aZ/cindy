@@ -127,6 +127,7 @@ describe('updateAllController', () => {
       expectedReleaseId: 'release-2',
       expectedManifest: nextManifest,
       allowPermissionExpansion: true,
+      reviewedBaseline: expect.any(String),
     });
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
   });
@@ -144,6 +145,7 @@ describe('updateAllController', () => {
     expect(installMock).toHaveBeenCalledWith('plugin-a', {
       expectedReleaseId: 'release-2',
       allowPermissionExpansion: true,
+      reviewedBaseline: expect.any(String),
     });
   });
 
@@ -273,6 +275,7 @@ describe('updateAllController', () => {
     expect(installMock).toHaveBeenCalledWith('plugin-a', {
       expectedReleaseId: 'release-2',
       allowPermissionExpansion: true,
+      reviewedBaseline: expect.any(String),
     });
   });
 
@@ -343,6 +346,7 @@ describe('updateAllController', () => {
     expect(installMock).toHaveBeenCalledWith('plugin-a', {
       expectedReleaseId: 'release-2',
       allowPermissionExpansion: true,
+      reviewedBaseline: expect.any(String),
     });
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
   });

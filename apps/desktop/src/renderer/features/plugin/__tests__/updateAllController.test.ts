@@ -509,6 +509,51 @@ describe('updateAllController', () => {
     expect(vi.mocked(toast.success)).toHaveBeenCalledTimes(1);
   });
 
+  it('skips a row whose target release was already installed by the single-item flow', async () => {
+    // 用户在批次启动前用卡片的单项更新装了同一个 release;本批次拿的是那之前的
+    // 市场快照,仍标 update-available。runner 取详情后必须发现已落账并跳过。
+    detailMock.mockResolvedValue({
+      ...marketItem({ installState: 'installed' }),
+      manifest: manifest({ version: '1.1.0' }),
+      readme: null,
+    } as unknown as PluginMarketDetail);
+
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
+    expect(installMock).not.toHaveBeenCalled();
+  });
+
+  it('holds a runner row for re-review instead of failing it on PRECONDITION_FAILED', async () => {
+    stubDetail({ manifest: manifest({}), sourceType: 'git-market' });
+    installMock.mockRejectedValueOnce(
+      Object.assign(new Error('precondition'), {
+        message: 'Error invoking remote method: Error: [PRECONDITION_FAILED] release changed',
+      }),
+    );
+
+    startUpdateAllBatch([marketItem({ sourceType: 'git-market' })]);
+    await waitForSettledBatch();
+
+    const row = getUpdateAllBatchState().rows?.[0];
+    // 自动安装路径遇到前置条件变化 → 可恢复的待重审,不是终态失败。
+    expect(row).toMatchObject({ status: 'needs-confirm', staleReview: true });
+    expect(row?.errorText).toBeUndefined();
+    expect(row?.permissionDiff).toBeUndefined();
+  });
+
+  it('still fails the row on non-precondition install errors', async () => {
+    stubDetail({ manifest: manifest({}), sourceType: 'server' });
+    installMock.mockRejectedValueOnce(new Error('network down'));
+
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+
+    // 真失败仍然是失败:不能把所有错误都变成"再审一次"。
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('failed');
+  });
+
   it('re-reviews instead of failing when a custom source swaps the manifest under the plain update path', async () => {
     // 自定义市场源:审阅基线含 network,目标包在此之上多出 fs。
     installedGhosts = [

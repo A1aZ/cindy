@@ -122,6 +122,26 @@ function batchOwnerCurrent(): boolean {
   return batchOwner !== null && isDataOwnerGenerationCurrent(batchOwner);
 }
 
+/**
+ * 把一行退回「待重新审阅」——前置条件变化的统一收敛(runner 与批准共用)。
+ *
+ * 清掉旧的 permissionDiff 并打 staleReview:弹窗据此显示「权限差异已过期 /
+ * 重新审阅」,用户点一下就走 approve 按当前事实重取详情、重算差异,
+ * 无扩权直接装、仍扩权则逐项审。可恢复,不必关弹窗重启整批。
+ */
+function holdRowForReReview(
+  generation: number,
+  pluginId: string,
+  patch: Partial<UpdateAllRow> = {},
+): void {
+  patchRow(generation, pluginId, {
+    status: 'needs-confirm',
+    staleReview: true,
+    permissionDiff: undefined,
+    ...patch,
+  });
+}
+
 /** 账号/模式切换后作废整个批次(旧代际的 runner 在下一个检查点自行退出)。 */
 function voidStaleBatch(): void {
   batchOwner = null;
@@ -219,6 +239,13 @@ async function runQueue(generation: number): Promise<void> {
           voidStaleBatch();
           return;
         }
+        if (detail.installState === 'installed') {
+          // 目标 release 已经落账——典型是用户在批次启动前后用卡片上的单项更新
+          // 装了同一个 release,而本批次拿的是那之前的市场快照。直接收束,
+          // 不重复下载安装同一份包。
+          patchRow(generation, next.pluginId, { status: 'done' });
+          continue;
+        }
         const installedManifest = installedManifestOf(next.ghostId);
         if (!installedManifest) {
           // 批量期间插件已被卸载:绝不拿市场 manifest 兜底继续安装
@@ -245,12 +272,20 @@ async function runQueue(generation: number): Promise<void> {
         });
         patchRow(generation, next.pluginId, { status: 'done' });
       } catch (error) {
+        if (batchGeneration !== generation) return;
+        if (extractIpcError(error)?.code === 'PRECONDITION_FAILED') {
+          // 前置条件变化(基线复核否决 / release 变了 / 自定义源换了 manifest)
+          // 不是「更新失败」而是「事实已变,请重新审阅」。落成终态 failed 会让
+          // 这一项彻底没有入口,用户只能关掉弹窗重启整批。改为可恢复的待重审:
+          // 弹窗显示「权限差异已过期 / 重新审阅」,点一下就按当前事实重算。
+          holdRowForReReview(generation, next.pluginId);
+          continue;
+        }
         // 失败也只写回自己的批次:代际失效时这条错误属于已作废的批次。
         patchRow(generation, next.pluginId, {
           status: 'failed',
           errorText: i18n.t(pluginMarketErrorKey(error)),
         });
-        if (batchGeneration !== generation) return;
       }
     }
   } finally {

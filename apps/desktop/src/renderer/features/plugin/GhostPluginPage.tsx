@@ -172,6 +172,8 @@ export function GhostPluginPage() {
   const [query, setQuery] = useState('');
   const [marketSnapshot, setMarketSnapshot] = useState<PluginMarketSnapshot | null>(null);
   const [openPanelId, setOpenPanelId] = useState<string | null>(null);
+  // 数据归属键:面板宿主与排序快照都按它失效(定义要早于两处消费点)。
+  const panelOwnerKey = ghostPanelOwnerKey(mode, dataOwnerId);
   const ignoredRoundKey = ignoredRoundStorageKey(mode, dataOwnerId);
   const [ignoredRound, setIgnoredRound] = useState(() => readIgnoredRound(ignoredRoundKey));
   // 账号 / 本地云模式切换:换桶重读,不把上一个身份的「忽略本轮」带进来。
@@ -474,6 +476,15 @@ export function GhostPluginPage() {
   // ── 排序快照:进页(市场快照首次就绪)时排一次,页内交互不重排 ──
   // 可更新的排最前,其余按最近使用;停留期间清未读/装更新都不许让卡片跳位。
   const [orderSnapshot, setOrderSnapshot] = useState<string[] | null>(null);
+  // 换账号/模式要丢弃旧顺序:两个 owner 的已装集合、可更新集合与最近使用
+  // 都不同,沿用账号 A 的 id 顺序会把 B 的非更新项排到更新项前面,违背
+  // 「可更新优先」。清空后由下面的 effect 基于**新 owner 的首个市场快照**重排。
+  const orderOwnerKeyRef = useRef(panelOwnerKey);
+  useEffect(() => {
+    if (orderOwnerKeyRef.current === panelOwnerKey) return;
+    orderOwnerKeyRef.current = panelOwnerKey;
+    setOrderSnapshot(null);
+  }, [panelOwnerKey]);
   useEffect(() => {
     if (orderSnapshot !== null) return;
     if (marketSnapshot === null) return;
@@ -584,7 +595,6 @@ export function GhostPluginPage() {
    * 账号 B 面前。这里按 owner 键显式清空;首帧不清,免得把 ?panel= 深链刚设上的
    * 目标一并抹掉(那条 effect 排在本条之前)。
    */
-  const panelOwnerKey = ghostPanelOwnerKey(mode, dataOwnerId);
   const panelOwnerKeyRef = useRef(panelOwnerKey);
   useEffect(() => {
     const previous = panelOwnerKeyRef.current;
@@ -729,6 +739,9 @@ export function GhostPluginPage() {
       setUpdateDialogOpen(true);
       return;
     }
+    // 单项更新持有 market lease 期间不许开新批次:此刻的市场快照还把那个
+    // 插件标成 update-available,批次会把它一并收进去重复装一遍。
+    if (marketBusyLockRef.current !== null) return;
     startUpdateAllBatch(
       updatableInstalledItems.flatMap((item) => (item.marketUpdate ? [item.marketUpdate] : [])),
     );
@@ -1284,10 +1297,12 @@ export function GhostPluginPage() {
                 >
                   {t('settings.ghosts.page.ignoreRound')}
                 </button>
+                {/* 单项更新在飞时禁用:与 handleUpdateAll 的守卫同因,按钮如实变灰。 */}
                 <button
                   type="button"
                   onClick={handleUpdateAll}
-                  className="inline-flex h-9 shrink-0 items-center rounded-full bg-[var(--accent-cta-bg)] px-4 text-12 font-medium text-[var(--accent-pure-cta-fg)] transition-transform duration-150 hover:bg-[var(--accent-hover)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+                  disabled={marketBusyId !== null}
+                  className="inline-flex h-9 shrink-0 items-center rounded-full bg-[var(--accent-cta-bg)] px-4 text-12 font-medium text-[var(--accent-pure-cta-fg)] transition-transform duration-150 hover:bg-[var(--accent-hover)] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
                 >
                   {t('settings.ghosts.page.updateAll')}
                 </button>

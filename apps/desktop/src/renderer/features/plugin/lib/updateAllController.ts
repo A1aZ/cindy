@@ -382,39 +382,55 @@ async function runApprovalBody(pluginId: string, generation: number): Promise<vo
       row.staleReview !== true &&
       ghostPermissionBaselineKey(installed) === row.reviewedBaseline &&
       detail.releaseId === row.releaseId;
-    if (reviewStillValid) {
+    /**
+     * 安装并接住「前置条件失败」。Main 的 PRECONDITION_FAILED 覆盖一组
+     * **并发事实变化**:安装锁内的基线复核否决、release 变了、自定义市场源
+     * 在 detail() 之后以同版本改了 manifest(expectedManifest 对不上)。
+     * 这些都是「事实已变,请重新审阅」而不是「更新失败」——终态 failed 会让
+     * 用户彻底失去这一项的入口,只能重启整批。所以一律回到 needs-confirm。
+     * 返回 true = 真的装上了;false = 已按重审/让位处理完,调用方直接收手。
+     */
+    const installOrHoldForReReview = async (
+      options: Parameters<typeof window.electronAPI.pluginMarket.install>[1],
+    ): Promise<boolean> => {
       try {
-        await window.electronAPI.pluginMarket.install(pluginId, {
-          expectedReleaseId: row.releaseId,
-          ...(row.expectedManifest ? { expectedManifest: row.expectedManifest } : {}),
-          allowPermissionExpansion: true,
-          // 审阅基线随批准回传:Main 在安装锁内用当时的已装 manifest 复核,
-          // renderer 这边的检查挡不住 IPC 往返窗口内的替换。
-          ...(row.reviewedBaseline !== undefined
-            ? { reviewedBaseline: row.reviewedBaseline }
-            : {}),
-        });
+        await window.electronAPI.pluginMarket.install(pluginId, options);
+        return true;
       } catch (error) {
-        if (batchGeneration !== generation) return;
-        // Main 的基线复核在安装锁内否决了这次批准(前置条件失败)——那是
-        // 「事实已变,请重新审阅」而不是「更新失败」。终态失败会让用户彻底
-        // 失去这一项的入口,所以回到 needs-confirm 并展示新的差异/release。
+        if (batchGeneration !== generation) return false;
         if (extractIpcError(error)?.code === 'PRECONDITION_FAILED') {
           holdForReReview();
-          return;
+          return false;
         }
         throw error;
       }
+    };
+    if (reviewStillValid) {
+      const didInstall = await installOrHoldForReReview({
+        expectedReleaseId: row.releaseId,
+        ...(row.expectedManifest ? { expectedManifest: row.expectedManifest } : {}),
+        allowPermissionExpansion: true,
+        // 审阅基线随批准回传:Main 在安装锁内用当时的已装 manifest 复核,
+        // renderer 这边的检查挡不住 IPC 往返窗口内的替换。
+        ...(row.reviewedBaseline !== undefined
+          ? { reviewedBaseline: row.reviewedBaseline }
+          : {}),
+      });
+      if (!didInstall) return;
       patchRow(generation, pluginId, { status: 'done' });
     } else if (diffGhostPermissionItems(installed, detail.manifest).added.length > 0) {
       // 相对新事实仍是扩权:回到逐项审阅,绝不静默放行未审过的权限。
       holdForReReview();
       return;
     } else {
-      await window.electronAPI.pluginMarket.install(pluginId, {
+      // 重算后已无扩权,按普通更新装。这条同样要接住并发变化:自定义市场源
+      // 在 detail() 返回后以同版本改 manifest 时,Main 会因 expectedManifest
+      // 不匹配拒绝,不能把它落成终态失败。
+      const ok = await installOrHoldForReReview({
         expectedReleaseId: detail.releaseId,
         ...(detail.sourceType !== 'server' ? { expectedManifest: detail.manifest } : {}),
       });
+      if (!ok) return;
       patchRow(generation, pluginId, { status: 'done', fromVersion: installed.version });
     }
   } catch (error) {

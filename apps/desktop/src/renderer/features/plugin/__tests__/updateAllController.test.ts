@@ -509,6 +509,51 @@ describe('updateAllController', () => {
     expect(vi.mocked(toast.success)).toHaveBeenCalledTimes(1);
   });
 
+  it('re-reviews instead of failing when a custom source swaps the manifest under the plain update path', async () => {
+    // 自定义市场源:审阅基线含 network,目标包在此之上多出 fs。
+    installedGhosts = [
+      { manifest: manifest({ version: '1.0.0', network: { hosts: ['api.example.com'] } }) },
+    ];
+    stubDetail({
+      manifest: manifest({ network: { hosts: ['api.example.com'] }, slots: ['fs'] }),
+      sourceType: 'git-market',
+    });
+    startUpdateAllBatch([marketItem({ sourceType: 'git-market' })]);
+    await waitForSettledBatch();
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('needs-confirm');
+
+    // 批准时外部把已装换成同样带 fs 的包 → 重算后已无扩权,走普通更新分支;
+    // 但市场源又以同版本改了 manifest,Main 因 expectedManifest 不匹配拒绝。
+    detailMock.mockImplementation(async () => {
+      installedGhosts = [
+        {
+          manifest: manifest({
+            version: '1.0.0',
+            network: { hosts: ['api.example.com'] },
+            slots: ['fs'],
+          }),
+        },
+      ];
+      return {
+        ...marketItem({ sourceType: 'git-market' }),
+        manifest: manifest({ network: { hosts: ['api.example.com'] }, slots: ['fs'] }),
+        readme: null,
+      } as unknown as PluginMarketDetail;
+    });
+    installMock.mockRejectedValueOnce(
+      Object.assign(new Error('precondition'), {
+        message: 'Error invoking remote method: Error: [PRECONDITION_FAILED] manifest changed',
+      }),
+    );
+
+    await approveUpdateExpansion('plugin-a');
+
+    const row = getUpdateAllBatchState().rows?.[0];
+    // 并发事实变化 → 回到重新审阅,不是终态失败(否则用户失去本项入口)。
+    expect(row?.status).toBe('needs-confirm');
+    expect(row?.errorText).toBeUndefined();
+  });
+
   it('never rebinds a queued approval onto the batch that replaced it', async () => {
     const expanding = manifest({ network: { hosts: ['api.example.com'] } });
     detailMock.mockImplementation(async (pluginId) =>

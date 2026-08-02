@@ -60,6 +60,16 @@ let batchOwner: DataOwnerGeneration | null = null;
  * 代际失效的 runner 只能停下,不得改写、不得收尾、不得触发任何副作用。
  */
 let batchGeneration = 0;
+/**
+ * 在途批准的串行队列与计数。用户可以在弹窗里连点多个待确认项的「同意」,
+ * 它们必须**排队执行**而不是并发:
+ *  - 并发安装同一批次的多个 release 会互相踩市场刷新与已装清单快照;
+ *  - 更要命的是收尾——任一单项的 finally 都会把全局 running 清成 false,
+ *    而别的批准还在装,页面此刻拿旧快照就能启动第二批重复安装。
+ * 所以:入队即计数,只有**最后一个**在途批准结束时才走收尾释放 running。
+ */
+let approvalQueue: Promise<unknown> = Promise.resolve();
+let inflightApprovals = 0;
 const listeners = new Set<() => void>();
 
 function emit(next: UpdateAllBatchState): void {
@@ -135,6 +145,9 @@ async function refreshMarketIfMounted(): Promise<void> {
 
 function maybeFinishToast(): void {
   const rows = state.rows;
+  // 还有批准在途时不报完成:它们的行此刻是 installing,提前报会把"没装完"
+  // 说成"已完成"。最后一个在途批准的收尾会再来一次。
+  if (inflightApprovals > 0) return;
   if (!rows || rows.length === 0 || !isBatchFinished(rows) || finishToastShown) return;
   finishToastShown = true;
   const summary = batchSummary(rows);
@@ -241,24 +254,51 @@ async function settleBatchTail(generation: number): Promise<void> {
   maybeFinishToast();
 }
 
-/** 用户在弹窗里同意某个扩权项后继续安装。 */
-export async function approveUpdateExpansion(pluginId: string): Promise<void> {
+/**
+ * 用户在弹窗里同意某个扩权项后继续安装。
+ *
+ * 多个待确认项连点时**串行执行**:后一个排在前一个之后,不并发装。
+ * running 由在途计数统一管理——第一个入队时点亮,最后一个结束时才收尾释放,
+ * 中途任何单项都不许提前把闸门放开(否则页面拿旧快照可重复启动)。
+ */
+export function approveUpdateExpansion(pluginId: string): Promise<void> {
+  inflightApprovals += 1;
+  const run = approvalQueue.then(() => runApproval(pluginId));
+  // 队列本身吞掉失败,后续批准不因前一个抛错而卡死;错误仍由 runApproval
+  // 内部落到对应行的 failed 状态。
+  approvalQueue = run.catch(() => undefined);
+  return run;
+}
+
+async function runApproval(pluginId: string): Promise<void> {
+  // 代际在**排队轮到自己时**捕获(不是入队时):排队期间批次可能已被作废或接管。
+  const generation = batchGeneration;
+  try {
+    await runApprovalBody(pluginId, generation);
+  } finally {
+    inflightApprovals -= 1;
+    // 只有最后一个在途批准才收尾:刷新市场快照 → 释放 running → 补完成提示。
+    // 早于这一刻释放,后续排队中的批准就会在"闸门已开"的状态下继续装。
+    if (inflightApprovals === 0) await settleBatchTail(generation);
+  }
+}
+
+async function runApprovalBody(pluginId: string, generation: number): Promise<void> {
   if (!batchOwnerCurrent()) {
     voidStaleBatch();
     return;
   }
+  if (batchGeneration !== generation) return;
   const row = state.rows?.find((candidate) => candidate.pluginId === pluginId);
+  // 排在前面的批准可能已经把本行推进过(重复点同一项),只处理仍待确认的。
   if (!row || row.status !== 'needs-confirm' || !row.releaseId) return;
-  // 批准作用于**当前**批次:捕获此刻的代际,await 之后一律以它为准。
-  const generation = batchGeneration;
   if (installedManifestOf(row.ghostId) === null) {
     // 待确认期间插件被卸载:同意也不重装,按跳过收束。
     patchRow(generation, pluginId, { status: 'skipped' });
-    maybeFinishToast();
     return;
   }
-  // 批准也是批次在推进:running 从这里一直撑到收尾刷新结束,期间页面拿的是
-  // 旧的 update-available 快照,不能让它启动第二批把同一 release 再装一遍。
+  // 批准也是批次在推进:running 从这里一直撑到**最后一个**在途批准收尾结束,
+  // 期间页面拿的是旧的 update-available 快照,不能让它启动第二批重复安装。
   patchRow(generation, pluginId, { status: 'installing' });
   if (!state.running) emit({ ...state, running: true });
   try {
@@ -348,12 +388,9 @@ export async function approveUpdateExpansion(pluginId: string): Promise<void> {
       status: 'failed',
       errorText: i18n.t(pluginMarketErrorKey(error)),
     });
-  } finally {
-    // 与 queue runner 共用同一套带代际校验的收尾:刷新期间 running 不落下
-    // (页面拿旧快照启动第二批会重复安装),刷新完成后才清 running + 补 toast;
-    // 代际失效时整体跳过,不碰当前批次。
-    await settleBatchTail(generation);
   }
+  // 收尾统一由 runApproval 在**最后一个**在途批准结束时做(见那里的 finally):
+  // 每项各自收尾会让前一项提前释放 running,后面排队的批准就在开着的闸门下跑。
 }
 
 /** 用户在弹窗里跳过某个扩权项。 */
@@ -427,5 +464,7 @@ export function __resetUpdateAllBatchForTest(): void {
   batchOwner = null;
   // 递增而非归零:上个用例遗留的在飞 runner 认的是旧代际,归零会让它复活。
   beginGeneration();
+  approvalQueue = Promise.resolve();
+  inflightApprovals = 0;
   listeners.clear();
 }

@@ -91,7 +91,10 @@ beforeEach(() => {
   dataOwnerTesting.reset();
   setDataOwnerGeneration('owner-a');
   detailMock.mockReset();
-  installMock.mockClear();
+  // mockReset 而非 mockClear:用例可能装过"卡住不 resolve"的实现(并发编排),
+  // 只清调用记录会让它泄漏到后面的用例里把 waitFor 全部拖超时。
+  installMock.mockReset();
+  installMock.mockResolvedValue({ ghost: { manifest: manifest({}) } } as never);
   vi.mocked(toast.success).mockClear();
   installedGhosts = [{ manifest: manifest({ version: '1.0.0' }) }];
   (window as unknown as { electronAPI: unknown }).electronAPI = {
@@ -434,6 +437,76 @@ describe('updateAllController', () => {
     releaseRefresh?.();
     await approving;
     expect(getUpdateAllBatchState().running).toBe(false);
+  });
+
+  it('serialises concurrent approvals and only settles after the last one', async () => {
+    const expanding = manifest({ network: { hosts: ['api.example.com'] } });
+    detailMock.mockImplementation(async (pluginId) =>
+      ({
+        ...marketItem({ pluginId, ghostId: pluginId === 'plugin-a' ? 'ghost-a' : 'ghost-b' }),
+        manifest: expanding,
+        readme: null,
+      }) as unknown as PluginMarketDetail,
+    );
+    installedGhosts = [
+      { manifest: manifest({ version: '1.0.0' }) },
+      { manifest: manifest({ id: 'ghost-b', version: '1.0.0' }) },
+    ];
+    startUpdateAllBatch([
+      marketItem({}),
+      marketItem({ pluginId: 'plugin-b', ghostId: 'ghost-b' }),
+    ]);
+    await waitForSettledBatch();
+    expect(
+      getUpdateAllBatchState().rows?.every((row) => row.status === 'needs-confirm'),
+    ).toBe(true);
+
+    // 两次安装都卡住,用来观察是否并发。
+    const installGate: Array<() => void> = [];
+    let concurrentPeak = 0;
+    let active = 0;
+    installMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          active += 1;
+          concurrentPeak = Math.max(concurrentPeak, active);
+          installGate.push(() => {
+            active -= 1;
+            resolve({ ghost: { manifest: expanding } } as never);
+          });
+        }),
+    );
+    let refreshCalls = 0;
+    setUpdateAllBatchHooks({
+      refreshMarket: async () => {
+        refreshCalls += 1;
+      },
+    });
+
+    // 用户连点两个「同意」。
+    const first = approveUpdateExpansion('plugin-a');
+    const second = approveUpdateExpansion('plugin-b');
+
+    await vi.waitFor(() => expect(installGate.length).toBe(1));
+    // 串行:第二个必须排队,不能与第一个同时在装。
+    expect(concurrentPeak).toBe(1);
+    expect(getUpdateAllBatchState().running).toBe(true);
+
+    installGate[0]?.();
+    await first;
+    // 第一个结束时还有在途批准 → 不许提前释放闸门、不许提前报完成。
+    expect(getUpdateAllBatchState().running).toBe(true);
+    expect(refreshCalls).toBe(0);
+
+    await vi.waitFor(() => expect(installGate.length).toBe(2));
+    installGate[1]?.();
+    await second;
+
+    // 最后一个结束才收尾:刷新一次、释放 running、报一次完成。
+    expect(concurrentPeak).toBe(1);
+    expect(getUpdateAllBatchState().running).toBe(false);
+    expect(refreshCalls).toBe(1);
+    expect(vi.mocked(toast.success)).toHaveBeenCalledTimes(1);
   });
 
   it('never lets a superseded runner write into the batch that replaced it', async () => {

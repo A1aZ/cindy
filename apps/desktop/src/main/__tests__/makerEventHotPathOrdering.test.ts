@@ -159,6 +159,29 @@ describe('maker:event hot path ordering', () => {
     expect(abortContext).toContain('isTerminalTurnErrorEvent(event)');
   });
 
+  it('writes one durable Assistant boundary for both success and terminal error', () => {
+    const wireSessionSource = extractWireSessionSource();
+    const boundaryStart = wireSessionSource.indexOf('let turnAssistantPersistId: string | undefined;');
+    const boundaryEnd = wireSessionSource.indexOf('const autoResumeSuppressesPersist', boundaryStart);
+    const boundaryBlock = wireSessionSource.slice(boundaryStart, boundaryEnd);
+
+    expect(boundaryStart).toBeGreaterThanOrEqual(0);
+    expect(boundaryEnd).toBeGreaterThan(boundaryStart);
+    expectOrder(boundaryBlock, 'flushAssistantBlock(session.id, eventAgentMeta);', 'consumeLastAssistantPersistId(session.id);');
+    expectOrder(boundaryBlock, 'consumeLastAssistantPersistId(session.id);', 'consumeLastTopLevelAssistantPersistId(session.id);');
+    expectOrder(boundaryBlock, 'consumeLastTopLevelAssistantPersistId(session.id);', 'flushOrphanToolResults(session.id, eventAgentMeta);');
+    expect(boundaryBlock).toContain("event.type === 'done'");
+    expect(boundaryBlock).toContain('markAssistantTurnCompleted(session.id, turnBoundaryAssistantPersistId)');
+    expect(boundaryBlock).toContain('markAssistantTurnFailed(session.id, turnBoundaryAssistantPersistId)');
+    expect(boundaryBlock).toContain('pendingFailedTurnAssistantPersistId.get(session.id)');
+    expect(boundaryBlock).toContain('isPairedFailedTurnDone = true');
+    expectOrder(
+      boundaryBlock,
+      'isPairedFailedTurnDone = true',
+      "else if (!isPairedFailedTurnDone)",
+    );
+  });
+
   it('rejects stale Agent Island interactions before renderer delivery', () => {
     const interactionListenerSource = extractInstallDesktopInteractionListenerSource();
     const epochCaptureIndex = interactionListenerSource.indexOf(
@@ -405,6 +428,11 @@ describe('maker:event hot path ordering', () => {
     expect(reconcileSource).toContain('if (!liveSessionIdle) return false;');
     expect(reconcileSource).not.toContain('if (!trackerStale && !hadZombieInteraction) return false;');
     expect(reconcileSource).toContain('confirmed live session idle during turn-boundary reconciliation');
+    expectOrder(reconcileSource, 'flushAssistantBlock(sessionId, null);', 'consumeLastAssistantPersistId(sessionId);');
+    expectOrder(reconcileSource, 'consumeLastAssistantPersistId(sessionId);', 'consumeLastTopLevelAssistantPersistId(sessionId);');
+    expectOrder(reconcileSource, 'consumeLastTopLevelAssistantPersistId(sessionId);', 'markAssistantTurnFailed(sessionId, abortedBoundaryAssistantPersistId)');
+    expectOrder(reconcileSource, 'markAssistantTurnFailed(sessionId, abortedBoundaryAssistantPersistId)', 'markTurnEndedAfterPersistDrain(sessionId);');
+    expectOrder(reconcileSource, 'markTurnEndedAfterPersistDrain(sessionId);', 'resetTurnPersistState(sessionId);');
   });
 
   it('keeps direct abort reconciliation fail-closed across owner replacement and new turns', () => {
@@ -422,6 +450,11 @@ describe('maker:event hot path ordering', () => {
     expect(helperSource).toContain('cancelDirectAbortReconciliation(sessionId, boundary);');
     expect(wireSessionSource).toContain('if (!wasInTurn) advanceSessionTurnBoundaryGeneration(session.id);');
     expect(closedBlock).toContain('cancelDirectAbortReconciliation(session.id);');
+    expectOrder(
+      closedBlock,
+      'cancelDirectAbortReconciliation(session.id);',
+      'pendingFailedTurnAssistantPersistId.delete(session.id);',
+    );
     expect(closedBlock).toContain('sessionTurnBoundaryGenerationById.delete(session.id);');
   });
 

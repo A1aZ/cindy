@@ -63,6 +63,8 @@ const marketPlugin: PluginMarketItem = {
   icon: null,
   installState: 'not-installed',
   enabled: null,
+  sourceType: 'server',
+  sourceMarketName: null,
 };
 
 describe('GhostPluginCard', () => {

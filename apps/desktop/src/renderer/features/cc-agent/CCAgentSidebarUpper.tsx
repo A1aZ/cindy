@@ -73,7 +73,10 @@ import {
   useSessionAttentionKinds,
   useSessionAttentionSnapshot,
 } from '@/lib/sessionAttentionStore';
-import { patchDraft as patchNewMakerDraft } from '@/state/newMakerDraft';
+import {
+  patchDraft as patchNewMakerDraft,
+  resetDraftWorkspaceTargets,
+} from '@/state/newMakerDraft';
 import { consumePendingProjectFocus, usePendingProjectFocus } from '@/state/pendingProjectFocus';
 import { requestConversationSearch } from '@/state/conversationSearchRequest';
 
@@ -819,7 +822,11 @@ function ExpandedView({
       sessionId,
       title,
       kind,
-      channels: { desktop: desktopEnabled, feishu: feishuEnabled, mobile: true },
+      channels: {
+        desktop: desktopEnabled,
+        feishu: feishuEnabled,
+        mobile: true,
+      },
     });
   }, []);
   const handleSessionDone = useCallback(
@@ -1646,7 +1653,7 @@ function ExpandedView({
 
   const handleCreateDialogue = useCallback(() => {
     handleClearSelection();
-    patchNewMakerDraft({ workingDir: null, remoteHostId: null, extraDirs: [] });
+    resetDraftWorkspaceTargets();
     navigate('/cc-agent/new', { state: makeNewMakerRouteState('dialogue') });
   }, [handleClearSelection, navigate]);
 

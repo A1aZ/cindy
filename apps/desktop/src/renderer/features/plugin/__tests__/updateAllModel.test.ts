@@ -32,6 +32,8 @@ function marketItem(overrides: Partial<PluginMarketItem>): PluginMarketItem {
     icon: null,
     installState: 'update-available',
     enabled: true,
+    sourceType: 'server',
+    sourceMarketName: null,
     ...overrides,
   };
 }

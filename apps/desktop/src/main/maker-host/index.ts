@@ -50,6 +50,7 @@ import { tapWindowBroadcast } from '../device-link/broadcast-tap.js';
 import { remoteInvoke } from '../device-link/index.js';
 import { WorktreePool } from '../worktree/index.js';
 import { getReadyBinaryPath, getCachedBinaryStatus } from '../agent-binaries/index.js';
+import { activeOwnerScopeKey, isAppSessionBoundaryPending } from '../appSessionState.js';
 import {
   desktopClaudeAuthAdapter,
   desktopCodexAuthAdapter,
@@ -83,6 +84,7 @@ import {
   refreshCatalogDerivedModels,
   resolveVerifiedContextWindow,
 } from './catalog-to-descriptors.js';
+import { buildPiAgent } from './pi-host.js';
 import { clearChatgptBridgeCredentialCache } from './anthropic-responses-bridge-host.js';
 import {
   getDesktopSelectableCatalog,
@@ -101,7 +103,9 @@ import {
 import { getClaudeEndpoint, setClaudeProxyGatewayKeyReader, setClaudeProxyOAuthSpawnChecker } from './anthropic-compat-proxy-host.js';
 import { resolveRemoteClaudeRoute } from './remote-claude-route.js';
 import { claudeSubagentUsageBridge } from './claude-subagent-usage-bridge.js';
-import { notifyAutoPermissionClassifierUnavailable } from './claude-auto-permission-fallback.js';
+import { createAutoPermissionReviewer } from './auto-permission-reviewer.js';
+import { requestUtilityText } from '../utility-model/oneShotCandidates.js';
+import { accountProviderReadinessBarrier } from './account-provider-readiness-barrier.js';
 import { hasClaudeAiOAuth } from './claude-credentials-store.js';
 import {
   armCodexHttpRecovery,
@@ -117,7 +121,6 @@ import {
   setCodexProxyAuthInjection,
   setCodexProxyGatewayKeyReader,
   registerComposed as registerCodexProxyComposed,
-  registerReviewerRouteContext as registerCodexReviewerRouteContext,
   registerChildThread as registerCodexProxyChildThread,
   unregister as unregisterCodexProxyPrompt,
 } from './codex-proxy-host.js';
@@ -189,6 +192,23 @@ type RemoteCcQuery = Awaited<
 >;
 
 let _maker: Maker | null = null;
+
+const reviewAutoPermissionAction = createAutoPermissionReviewer({
+  logger: desktopMakerLogger,
+  requestText: async (request, prompt) => {
+    const maker = _maker;
+    if (!maker) return null;
+    const result = await requestUtilityText(maker, prompt, {
+      providerId: request.providerId?.trim() || undefined,
+      agentKind: request.agentKind,
+      model: request.model,
+      maxTokens: 384,
+      timeoutMs: 8_000,
+      reasoningEffort: 'low',
+    });
+    return result.ok ? result.text : null;
+  },
+});
 
 /**
  * Codex 模型补拉 coordinator —— 随 maker 一起创建(需要 maker 实例做 live 拉取)、随
@@ -693,6 +713,7 @@ export function getMaker(): Maker {
       runtimeConfig: buildDesktopClaudeRuntimeConfig(getClaudeEndpoint),
       binaryPath: claudePath,
       logger: desktopMakerLogger,
+      reviewAutoPermissionAction,
       // 每个 session 的 cc 子进程 debug 写到 sessions/<id>/cc-debug.raw.log (logger 拼路径
       // + mkdir), tailer 再归一化汇入该 session 的 <date>.ndjson。
       resolveCcDebugFile: resolveSessionCcDebugFile,
@@ -988,7 +1009,7 @@ export function getMaker(): Maker {
         const origin = getCodexThreadUpstreamOrigin(threadId);
         return origin ? getOutboundPathSnapshotFor([origin]) : null;
       },
-      onAutoPermissionClassifierUnavailable: notifyAutoPermissionClassifierUnavailable,
+      reviewAutoPermissionAction,
       prepareCodexLocalCredentialModeSwitch: async (ctx) => {
         const maker = _maker;
         if (!maker) throw new Error('Maker is not initialized for Codex credential mode switch');
@@ -1115,8 +1136,6 @@ export function getMaker(): Maker {
       registerCodexSystemPromptForThread: ({ sessionId, threadId, text }) =>
         registerCodexProxyComposed(sessionId, threadId, text),
       armCodexHttpRecovery,
-      registerCodexReviewerRouteContext: ({ sessionId, threadId, model }) =>
-        registerCodexReviewerRouteContext(sessionId, threadId, model),
       registerCodexChildThreadForParent: ({ parentThreadId, childThreadId }) => {
         registerCodexProxyChildThread(parentThreadId, childThreadId);
       },
@@ -1286,10 +1305,29 @@ export function getMaker(): Maker {
     // codex-home 生成进仓库),现改为装配 maker 时显式预热,import 保持零副作用。
     desktopCodexAuthAdapter.warmUp();
 
+    // pi(实验性,个人分支):二进制在位才注册;缺失时 agents map 不含 pi,
+    // 既有环境零影响。模型清单走目录 pi 投影(xd 网关模型经 active-catalog 按
+    // claude-code 可达面镜像给 pi);登录后目录刷新经 refreshCatalogDerivedModels
+    // 原地 splice 同步进 capabilities(PiAgent 每次 startSession 现读)。
+    const piMcpProviders = [
+      ...createDesktopMcpProviders(makerMemoryProviderDeps),
+      orcaWorkerBridgeProvider,
+    ];
+    const piAgent = buildPiAgent({
+      logger: desktopMakerLogger,
+      reviewAutoPermissionAction,
+      capabilityAdditions: {
+        availableModels: deriveAvailableModels(getDesktopSelectableCatalog(), 'pi'),
+      },
+      mcpProviders: piMcpProviders,
+      makerMemory: makerMemoryManager,
+    });
+
     _maker = new Maker({
       agents: {
         'claude-code': claudeAgent,
         codex: codexAgent,
+        ...(piAgent ? { pi: piAgent } : {}),
       },
       storage: desktopSessionStorage,
       logger: desktopMakerLogger,
@@ -1298,6 +1336,17 @@ export function getMaker(): Maker {
       // 启动前的 Skill 共享与关闭后的清理都由 desktop host 注入。
       lifecycleHooks: {
         prepareStartOptions: async (sessionId, opts) => {
+          const providerScopeKey = activeOwnerScopeKey();
+          const providerReady = await accountProviderReadinessBarrier.waitForScope(providerScopeKey);
+          if (
+            !providerReady ||
+            activeOwnerScopeKey() !== providerScopeKey ||
+            isAppSessionBoundaryPending()
+          ) {
+            throw new Error(
+              'Account provider models are not ready for this app session; retry.',
+            );
+          }
           await preparePersistedOrcaSessionStart(sessionId, opts as MakerSessionCreateOpts);
         },
         onBeforeStart: async ({ agentKind, workingDir, remoteHostId }) => {

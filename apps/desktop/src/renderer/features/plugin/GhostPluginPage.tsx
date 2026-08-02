@@ -27,6 +27,7 @@ import {
   Plus,
   SlidersHorizontal,
   Sparkles,
+  Store,
   Upload,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -50,7 +51,7 @@ import {
   plainTextToTiptapDoc,
   saveDraft as saveComposerDraft,
 } from '@/lib/composerDraftStore';
-import { patchDraft } from '@/state/newMakerDraft';
+import { resetDraftWorkspaceTargets } from '@/state/newMakerDraft';
 import { ghostInstallErrorKey } from '@/cindy-brain/installErrorKey';
 import { confirmAndInstallGhost, pickAndUpdateGhost } from '@/cindy-brain/installFlow';
 import { GhostPermissionList, GhostUpdateReview } from '@/cindy-brain/GhostPermissionList';
@@ -105,6 +106,7 @@ import {
   pluginUpdateForInstalledVersion,
   type PluginPresentationOrigin,
 } from './lib/pluginMarketPresentation';
+import { AddMarketplaceDialog } from './AddMarketplaceDialog';
 import { pluginMarketErrorKey } from './lib/pluginMarketErrorKey';
 import { usePluginIconRefresh } from './lib/usePluginIconRefresh';
 import { usePluginMarketForegroundRefresh } from './lib/usePluginMarketForegroundRefresh';
@@ -125,6 +127,7 @@ const RECOMMENDED_FILTERS: readonly PluginPresentationFilter[] = [
   'all',
   'public',
   'organization',
+  'custom',
 ];
 
 /** 「忽略本轮更新」的持久键(值 = updateRoundKey,版本集合变化后横幅自动回归)。 */
@@ -222,6 +225,7 @@ export function GhostPluginPage() {
           : {
               items: [],
               unavailableReason: error instanceof Error ? error.message : String(error),
+              customSourceNames: [],
             },
       );
       // Background icon renewal keeps the current snapshot visible, but must still report
@@ -331,6 +335,11 @@ export function GhostPluginPage() {
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
   const marketItems = marketSnapshot?.items ?? [];
+  const customSourceNames = useMemo(
+    () => marketSnapshot?.customSourceNames ?? [],
+    [marketSnapshot?.customSourceNames],
+  );
+  const [addMarketplaceOpen, setAddMarketplaceOpen] = useState(false);
   const marketByGhostId = useMemo(() => {
     const map = new Map<string, PluginMarketItem>();
     for (const item of marketItems) {
@@ -386,13 +395,20 @@ export function GhostPluginPage() {
   }, [marketItems, query, showEnterprise]);
   const recommendedFilters = useMemo(
     () =>
-      showEnterprise
-        ? RECOMMENDED_FILTERS
-        : RECOMMENDED_FILTERS.filter((filter) => filter !== 'organization'),
-    [showEnterprise],
+      RECOMMENDED_FILTERS.filter((filter) => {
+        if (filter === 'organization') return showEnterprise;
+        // 未添加任何自定义市场时不显示"自定义"档(与组织档的隐藏模式一致)。
+        if (filter === 'custom') return customSourceNames.length > 0;
+        return true;
+      }),
+    [customSourceNames.length, showEnterprise],
   );
   const effectiveOriginFilter =
-    !showEnterprise && originFilter === 'organization' ? 'all' : originFilter;
+    !showEnterprise && originFilter === 'organization'
+      ? 'all'
+      : originFilter === 'custom' && customSourceNames.length === 0
+        ? 'all'
+        : originFilter;
   const availableMarketItems = useMemo(
     () =>
       effectiveOriginFilter === 'all'
@@ -402,11 +418,34 @@ export function GhostPluginPage() {
           ),
     [effectiveOriginFilter, searchedAvailableMarketItems],
   );
+  // 「自定义」档内按来源市场分组(≥2 个源时展示小标题);组顺序沿用市场添加顺序。
+  const customGroups = useMemo(() => {
+    if (effectiveOriginFilter !== 'custom') return null;
+    const groups = new Map<string, PluginMarketItem[]>();
+    for (const item of availableMarketItems) {
+      const key = item.sourceMarketName ?? '';
+      const list = groups.get(key);
+      if (list) {
+        list.push(item);
+      } else {
+        groups.set(key, [item]);
+      }
+    }
+    return [...groups.entries()].sort((a, b) => {
+      const aIndex = customSourceNames.indexOf(a[0]);
+      const bIndex = customSourceNames.indexOf(b[0]);
+      return (
+        (aIndex === -1 ? Number.MAX_SAFE_INTEGER : aIndex) -
+        (bIndex === -1 ? Number.MAX_SAFE_INTEGER : bIndex)
+      );
+    });
+  }, [availableMarketItems, customSourceNames, effectiveOriginFilter]);
   const recommendedCounts = useMemo(() => {
     const counts: Record<PluginPresentationOrigin, number> = {
       public: 0,
       organization: 0,
       local: 0,
+      custom: 0,
     };
     for (const item of searchedAvailableMarketItems) {
       counts[pluginPresentationOrigin(item)] += 1;
@@ -583,6 +622,7 @@ export function GhostPluginPage() {
         if (!approved || !isMarketBusyLeaseActive(marketBusyLease)) return;
         const result = await window.electronAPI.pluginMarket.install(marketItem.pluginId, {
           expectedReleaseId: next.releaseId,
+          ...(next.sourceType !== 'server' ? { expectedManifest: next.manifest } : {}),
           allowPermissionExpansion: diff.added.length > 0,
         });
         if (!isMarketBusyLeaseActive(marketBusyLease)) return;
@@ -673,6 +713,7 @@ export function GhostPluginPage() {
           }
           await window.electronAPI.pluginMarket.install(next.pluginId, {
             expectedReleaseId: detail.releaseId,
+            ...(detail.sourceType !== 'server' ? { expectedManifest: detail.manifest } : {}),
           });
           patchUpdateRow(next.pluginId, { status: 'done' });
         } catch (error) {
@@ -769,12 +810,7 @@ export function GhostPluginPage() {
       attachments: [],
       focusAtEnd: true,
     });
-    patchDraft({
-      workingDir: null,
-      remoteHostId: null,
-      deviceLinkDeviceId: null,
-      deviceLinkDeviceName: null,
-    });
+    resetDraftWorkspaceTargets();
     navigate('/cc-agent/new');
   }, [navigate, t]);
 
@@ -825,12 +861,7 @@ export function GhostPluginPage() {
         browserComments: existing?.browserComments ?? [],
         pendingGhostId: ghost.manifest.id,
       });
-      patchDraft({
-        workingDir: null,
-        remoteHostId: null,
-        deviceLinkDeviceId: null,
-        deviceLinkDeviceName: null,
-      });
+      resetDraftWorkspaceTargets();
       navigate('/cc-agent/new');
     },
     [confirm, ghosts, navigate, openGhostConfiguration, t],
@@ -1014,7 +1045,10 @@ export function GhostPluginPage() {
             }),
         description: isUpdate
           ? t('settings.ghosts.market.updateConfirmDescription')
-          : t('settings.ghosts.market.installConfirmDescription'),
+          : // 自定义市场未经服务端完整性校验，确认文案必须如实区分。
+            marketDetail.sourceType !== 'server'
+            ? t('settings.ghosts.market.customInstallConfirmDescription')
+            : t('settings.ghosts.market.installConfirmDescription'),
         // 限高与滚动交给共享 ConfirmDialog(max-h-[85vh] + 内部滚动区 + 打开时
         // 闪一下滚动条),这里不再自套一层 min(56vh,520px) —— 两层限高会让
         // "到底了没有"取决于内外层谁先触底(2026-07-27 收口)。
@@ -1035,6 +1069,9 @@ export function GhostPluginPage() {
       if (!confirmed || !isMarketBusyLeaseActive(marketBusyLease)) return;
       const result = await window.electronAPI.pluginMarket.install(marketDetail.pluginId, {
         expectedReleaseId: marketDetail.releaseId,
+        ...(marketDetail.sourceType !== 'server'
+          ? { expectedManifest: marketDetail.manifest }
+          : {}),
         ...(isUpdate && diff!.added.length > 0
           ? { allowPermissionExpansion: true }
           : {}),
@@ -1176,6 +1213,7 @@ export function GhostPluginPage() {
         <GhostPluginActions
           onInstall={() => void handleInstall()}
           onCreateWithCindy={handleCreateWithCindy}
+          onAddMarketplace={() => setAddMarketplaceOpen(true)}
         />
       }
     >
@@ -1373,18 +1411,49 @@ export function GhostPluginPage() {
               ) : null}
 
               {availableMarketItems.length > 0 ? (
-                <div className={cn('plugin-motion-stagger', PLUGIN_MANAGEMENT_CARD_GRID_CLASS)}>
-                  {availableMarketItems.map((item) => (
-                    <MarketPluginCard
-                      key={item.pluginId}
-                      item={item}
-                      busy={marketBusyId !== null}
-                      onSelect={() => void handleSelectMarket(item.pluginId)}
-                      onInstall={() => void handleInstallMarketItem(item.pluginId)}
-                      onIconLoadError={handleMarketIconLoadError}
-                    />
-                  ))}
-                </div>
+                customGroups && customGroups.length > 1 ? (
+                  <div className="flex flex-col gap-6">
+                    {customGroups.map(([marketName, groupItems]) => (
+                      <section key={marketName || 'unknown-source'}>
+                        <header className="mb-3 flex items-baseline gap-2">
+                          <h3 className="text-14 font-medium text-[var(--text-primary)]">
+                            {marketName || t('settings.ghosts.page.origin.custom')}
+                          </h3>
+                          <span className="text-12 tabular-nums text-[var(--text-tertiary)]">
+                            {groupItems.length}
+                          </span>
+                        </header>
+                        <div
+                          className={cn('plugin-motion-stagger', PLUGIN_MANAGEMENT_CARD_GRID_CLASS)}
+                        >
+                          {groupItems.map((item) => (
+                            <MarketPluginCard
+                              key={item.pluginId}
+                              item={item}
+                              busy={marketBusyId !== null}
+                              onSelect={() => void handleSelectMarket(item.pluginId)}
+                              onInstall={() => void handleInstallMarketItem(item.pluginId)}
+                              onIconLoadError={handleMarketIconLoadError}
+                            />
+                          ))}
+                        </div>
+                      </section>
+                    ))}
+                  </div>
+                ) : (
+                  <div className={cn('plugin-motion-stagger', PLUGIN_MANAGEMENT_CARD_GRID_CLASS)}>
+                    {availableMarketItems.map((item) => (
+                      <MarketPluginCard
+                        key={item.pluginId}
+                        item={item}
+                        busy={marketBusyId !== null}
+                        onSelect={() => void handleSelectMarket(item.pluginId)}
+                        onInstall={() => void handleInstallMarketItem(item.pluginId)}
+                        onIconLoadError={handleMarketIconLoadError}
+                      />
+                    ))}
+                  </div>
+                )
               ) : marketSnapshot?.unavailableReason ? null : (
                 <div className="rounded-xl border-[0.5px] border-[var(--border-default)] px-5 py-10 text-center">
                   <p className="text-13 text-[var(--text-secondary)]">
@@ -1398,6 +1467,11 @@ export function GhostPluginPage() {
         </main>
         {panelAside}
       </div>
+      <AddMarketplaceDialog
+        open={addMarketplaceOpen}
+        onOpenChange={setAddMarketplaceOpen}
+        onSourcesChanged={() => void refreshMarket()}
+      />
       {updateRows ? (
         <UpdateAllDialog
           open={updateDialogOpen}
@@ -1575,9 +1649,11 @@ export function MarketPluginCard({
 function GhostPluginActions({
   onInstall,
   onCreateWithCindy,
+  onAddMarketplace,
 }: {
   onInstall: () => void;
   onCreateWithCindy: () => void;
+  onAddMarketplace: () => void;
 }) {
   const { t } = useTranslation();
 
@@ -1637,6 +1713,19 @@ function GhostPluginActions({
             aria-hidden="true"
           />
           {t('settings.ghosts.install')}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator className="mx-2 my-1 h-px bg-[var(--border-default)]" />
+        <DropdownMenuItem
+          onSelect={onAddMarketplace}
+          className="h-10 gap-3 rounded-lg px-3 text-13 focus:bg-[var(--surface-hover-soft)] focus:text-[var(--text-primary)]"
+        >
+          <Store
+            size={16}
+            strokeWidth={1.7}
+            className="text-[var(--text-secondary)]"
+            aria-hidden="true"
+          />
+          {t('settings.ghosts.market.sources.addMarketplace')}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

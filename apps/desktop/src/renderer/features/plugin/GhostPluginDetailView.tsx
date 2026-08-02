@@ -57,7 +57,12 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Switch } from '@/components/ui/switch';
 import { toast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
-import type { GhostPermissionItem, GhostToolDecl, InstalledGhost } from '../../../shared/ghost';
+import {
+  isOfficialGhostId,
+  type GhostPermissionItem,
+  type GhostToolDecl,
+  type InstalledGhost,
+} from '../../../shared/ghost';
 import { type GhostPluginDetail } from './lib/ghostPluginViewModel';
 import { GhostPluginIcon } from './GhostPluginIcon';
 import { ghostPluginSummary } from './lib/ghostPluginDetailModel';
@@ -162,6 +167,18 @@ export function GhostPluginDetailView({
   const hasConfiguration =
     detail.hasSettingsUi || cindyCapabilities.length > 0 || detail.hasErrand;
   const summary = ghostPluginSummary(detail.description, detail.id);
+  /**
+   * 「从 .cindy 文件更新」是否可用。官方保留前缀(cindy- / filo- / xd-)在**非 dev
+   * 构建**上会被 Main 的用户装入通道以 GHOST_ID_RESERVED 直接拒绝(见
+   * main/cindy-brain/index.ts 的 rejectReservedGhostId),把这个必失败的动作摆在
+   * 菜单里只会让用户选文件、等一下、然后吃一个错误。
+   *
+   * 判据用 `import.meta.env.DEV` 而不是新开一条 IPC 去问 app.isPackaged:打包产物
+   * 必然 DEV=false,覆盖 Main 拒绝的全部场景;唯一偏差是「本地 build 但未打包运行」
+   * 会多隐藏一次入口——方向保守(少一个入口 vs 给用户一个必失败按钮),可接受。
+   * 普通第三方插件不受影响。
+   */
+  const localUpdateAvailable = import.meta.env.DEV || !isOfficialGhostId(detail.id);
 
   useLayoutEffect(() => {
     setDescriptionExpanded(false);
@@ -332,13 +349,15 @@ export function GhostPluginDetailView({
                   sideOffset={8}
                   className="w-56 rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-1.5 text-[var(--text-primary)] shadow-[var(--shadow-menu)]"
                 >
-                  <DropdownMenuItem
-                    onSelect={onUpdateFromFile}
-                    disabled={updateBusy}
-                    className="h-10 rounded-lg px-3 text-13 focus:bg-[var(--surface-hover-soft)]"
-                  >
-                    {t('settings.ghosts.detail.updateFromFile')}
-                  </DropdownMenuItem>
+                  {localUpdateAvailable ? (
+                    <DropdownMenuItem
+                      onSelect={onUpdateFromFile}
+                      disabled={updateBusy}
+                      className="h-10 rounded-lg px-3 text-13 focus:bg-[var(--surface-hover-soft)]"
+                    >
+                      {t('settings.ghosts.detail.updateFromFile')}
+                    </DropdownMenuItem>
+                  ) : null}
                   {onExport ? (
                     <DropdownMenuItem
                       onSelect={onExport}

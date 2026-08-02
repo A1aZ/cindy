@@ -14,6 +14,7 @@
 
 import { i18n } from '@/i18n';
 import { toast } from '@/lib/toast';
+import { extractIpcError } from '@/utils/ipcError';
 import { readInstalledGhostsSnapshot } from '@/cindy-brain/useInstalledGhosts';
 import {
   getDataOwnerGeneration,
@@ -250,14 +251,16 @@ export async function approveUpdateExpansion(pluginId: string): Promise<void> {
   if (!row || row.status !== 'needs-confirm' || !row.releaseId) return;
   // 批准作用于**当前**批次:捕获此刻的代际,await 之后一律以它为准。
   const generation = batchGeneration;
-  const installed = installedManifestOf(row.ghostId);
-  if (installed === null) {
+  if (installedManifestOf(row.ghostId) === null) {
     // 待确认期间插件被卸载:同意也不重装,按跳过收束。
     patchRow(generation, pluginId, { status: 'skipped' });
     maybeFinishToast();
     return;
   }
+  // 批准也是批次在推进:running 从这里一直撑到收尾刷新结束,期间页面拿的是
+  // 旧的 update-available 快照,不能让它启动第二批把同一 release 再装一遍。
   patchRow(generation, pluginId, { status: 'installing' });
+  if (!state.running) emit({ ...state, running: true });
   try {
     // 一律重取详情。它同时给出三件事,缺一不可:
     //  1. installState —— **目标 release 是否真的落账**的权威判据。main 侧
@@ -269,50 +272,71 @@ export async function approveUpdateExpansion(pluginId: string): Promise<void> {
     const detail = await window.electronAPI.pluginMarket.detail(pluginId);
     // detail 往返期间批次可能已被作废/接管:此后一律不再写状态、不再安装。
     if (batchGeneration !== generation) return;
+    // **detail 之后重读已装 manifest**:这段往返里「从文件更新」等路径可能整体
+    // 换掉它,拿 await 之前的快照判断 = 拿过期事实做安全决策。
+    const installed = installedManifestOf(row.ghostId);
+    if (installed === null) {
+      patchRow(generation, pluginId, { status: 'skipped' });
+      return;
+    }
     if (detail.installState === 'installed') {
       // 目标 release 已由别的路径装上:直接收束,不重复下载安装。
       // (return 后仍走 finally 的统一收尾——刷新市场快照 + 完成 toast。)
       patchRow(generation, pluginId, { status: 'done', fromVersion: installed.version });
       return;
     }
+    /** 相对**当前**事实回到逐项审阅(不是终态失败:用户还能重新决定)。 */
+    const holdForReReview = (): void => {
+      patchRow(generation, pluginId, {
+        status: 'needs-confirm',
+        fromVersion: installed.version,
+        toVersion: detail.version,
+        releaseId: detail.releaseId,
+        permissionDiff: diffGhostPermissionItems(installed, detail.manifest),
+        staleReview: false,
+        reviewedBaseline: ghostPermissionBaselineKey(installed),
+        expectedManifest: detail.sourceType !== 'server' ? detail.manifest : undefined,
+      });
+    };
     // 用户审阅的是「审阅当时的已装权限面 → 那一刻的目标 release」。三个前提
     // 任一变了,那份 diff 与它换来的 allowPermissionExpansion 就不再对应现实:
     //  - staleReview:reconcile 已发现基线被换掉;
-    //  - 权限指纹变化:ghosts.update() 允许**同版本整体替换 manifest**(无版本
-    //    单调性检查),同版本换入更宽的权限声明时版本比较完全看不出来;
+    //  - 权限指纹变化(以刚重读的 installed 为准):ghosts.update() 允许**同版本
+    //    整体替换 manifest**,同版本换入更宽的声明时版本比较完全看不出来;
     //  - 目标 release 变化:市场在等待期间发了新版,审的不是这一版。
     const reviewStillValid =
       row.staleReview !== true &&
       ghostPermissionBaselineKey(installed) === row.reviewedBaseline &&
       detail.releaseId === row.releaseId;
     if (reviewStillValid) {
-      await window.electronAPI.pluginMarket.install(pluginId, {
-        expectedReleaseId: row.releaseId,
-        ...(row.expectedManifest ? { expectedManifest: row.expectedManifest } : {}),
-        allowPermissionExpansion: true,
-        // 审阅基线随批准回传:Main 在安装锁内用当时的已装 manifest 复核,
-        // renderer 这边的检查挡不住 IPC 往返窗口内的替换。
-        ...(row.reviewedBaseline !== undefined
-          ? { reviewedBaseline: row.reviewedBaseline }
-          : {}),
-      });
-      patchRow(generation, pluginId, { status: 'done' });
-    } else {
-      const freshDiff = diffGhostPermissionItems(installed, detail.manifest);
-      if (freshDiff.added.length > 0) {
-        // 相对新事实仍是扩权:回到逐项审阅,绝不静默放行未审过的权限。
-        patchRow(generation, pluginId, {
-          status: 'needs-confirm',
-          fromVersion: installed.version,
-          toVersion: detail.version,
-          releaseId: detail.releaseId,
-          permissionDiff: freshDiff,
-          staleReview: false,
-          reviewedBaseline: ghostPermissionBaselineKey(installed),
-          expectedManifest: detail.sourceType !== 'server' ? detail.manifest : undefined,
+      try {
+        await window.electronAPI.pluginMarket.install(pluginId, {
+          expectedReleaseId: row.releaseId,
+          ...(row.expectedManifest ? { expectedManifest: row.expectedManifest } : {}),
+          allowPermissionExpansion: true,
+          // 审阅基线随批准回传:Main 在安装锁内用当时的已装 manifest 复核,
+          // renderer 这边的检查挡不住 IPC 往返窗口内的替换。
+          ...(row.reviewedBaseline !== undefined
+            ? { reviewedBaseline: row.reviewedBaseline }
+            : {}),
         });
-        return;
+      } catch (error) {
+        if (batchGeneration !== generation) return;
+        // Main 的基线复核在安装锁内否决了这次批准(前置条件失败)——那是
+        // 「事实已变,请重新审阅」而不是「更新失败」。终态失败会让用户彻底
+        // 失去这一项的入口,所以回到 needs-confirm 并展示新的差异/release。
+        if (extractIpcError(error)?.code === 'PRECONDITION_FAILED') {
+          holdForReReview();
+          return;
+        }
+        throw error;
       }
+      patchRow(generation, pluginId, { status: 'done' });
+    } else if (diffGhostPermissionItems(installed, detail.manifest).added.length > 0) {
+      // 相对新事实仍是扩权:回到逐项审阅,绝不静默放行未审过的权限。
+      holdForReReview();
+      return;
+    } else {
       await window.electronAPI.pluginMarket.install(pluginId, {
         expectedReleaseId: detail.releaseId,
         ...(detail.sourceType !== 'server' ? { expectedManifest: detail.manifest } : {}),
@@ -325,12 +349,10 @@ export async function approveUpdateExpansion(pluginId: string): Promise<void> {
       errorText: i18n.t(pluginMarketErrorKey(error)),
     });
   } finally {
-    // 统一收尾:已落账 / 重审 / 失败 / 正常完成四条返回路径都刷新市场快照并
-    // 补完成提示;代际失效时整体跳过,不碰当前批次。
-    if (batchGeneration === generation) {
-      await refreshMarketIfMounted();
-      if (batchGeneration === generation) maybeFinishToast();
-    }
+    // 与 queue runner 共用同一套带代际校验的收尾:刷新期间 running 不落下
+    // (页面拿旧快照启动第二批会重复安装),刷新完成后才清 running + 补 toast;
+    // 代际失效时整体跳过,不碰当前批次。
+    await settleBatchTail(generation);
   }
 }
 

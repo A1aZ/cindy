@@ -351,6 +351,91 @@ describe('updateAllController', () => {
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
   });
 
+  it('re-reads the installed manifest after detail() instead of trusting the pre-await snapshot', async () => {
+    // 审阅基线:已装带 network,目标包在此之上多出 fs → 用户审的是 fs 这一条。
+    installedGhosts = [
+      { manifest: manifest({ version: '1.0.0', network: { hosts: ['api.example.com'] } }) },
+    ];
+    stubDetail({
+      manifest: manifest({ network: { hosts: ['api.example.com'] }, slots: ['fs'] }),
+      sourceType: 'server',
+    });
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('needs-confirm');
+
+    // detail() 往返期间「从文件更新」把已装换成**不带 network** 的包:此刻目标包
+    // 相对当前已装多出 network + fs,而 network 用户从没审过。批准必须以
+    // detail 之后的事实判断,拿 await 前捕获的快照会直接放行。
+    detailMock.mockImplementation(async () => {
+      installedGhosts = [{ manifest: manifest({ version: '1.0.0' }) }];
+      return {
+        ...marketItem({}),
+        manifest: manifest({ network: { hosts: ['api.example.com'] }, slots: ['fs'] }),
+        readme: null,
+      } as unknown as PluginMarketDetail;
+    });
+
+    await approveUpdateExpansion('plugin-a');
+    expect(installMock).not.toHaveBeenCalled();
+    const row = getUpdateAllBatchState().rows?.[0];
+    expect(row?.status).toBe('needs-confirm');
+    // 新差异按当前事实重算,把没审过的 network 也摆出来。
+    expect(row?.permissionDiff?.added.length).toBeGreaterThan(1);
+  });
+
+  it('returns a Main-side baseline rejection to re-review instead of a terminal failure', async () => {
+    stubDetail({
+      manifest: manifest({ network: { hosts: ['api.example.com'] } }),
+      sourceType: 'server',
+    });
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+
+    // Main 在安装锁内用当前已装 manifest 复核后否决了这次批准。
+    installMock.mockRejectedValueOnce(
+      Object.assign(new Error('[PRECONDITION_FAILED] baseline changed'), {
+        message: 'Error invoking remote method: Error: [PRECONDITION_FAILED] baseline changed',
+      }),
+    );
+
+    await approveUpdateExpansion('plugin-a');
+    const row = getUpdateAllBatchState().rows?.[0];
+    // 「事实已变,请重新审阅」而不是「更新失败」——终态失败会让用户失去入口。
+    expect(row?.status).toBe('needs-confirm');
+    expect(row?.permissionDiff?.added.length).toBeGreaterThan(0);
+    expect(row?.errorText).toBeUndefined();
+  });
+
+  it('holds running through the post-approval refresh so no second batch can start', async () => {
+    stubDetail({
+      manifest: manifest({ network: { hosts: ['api.example.com'] } }),
+      sourceType: 'server',
+    });
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+    expect(getUpdateAllBatchState().running).toBe(false);
+
+    let releaseRefresh: (() => void) | undefined;
+    setUpdateAllBatchHooks({
+      refreshMarket: () =>
+        new Promise<void>((resolve) => {
+          releaseRefresh = resolve;
+        }),
+    });
+
+    const approving = approveUpdateExpansion('plugin-a');
+    await vi.waitFor(() => expect(releaseRefresh).toBeDefined());
+    // 刷新还没回来:页面手里仍是旧的 update-available 快照,必须挡住第二批。
+    expect(getUpdateAllBatchState().running).toBe(true);
+    startUpdateAllBatch([marketItem({ pluginId: 'plugin-b', ghostId: 'ghost-b' })]);
+    expect(getUpdateAllBatchState().rows?.map((row) => row.pluginId)).toEqual(['plugin-a']);
+
+    releaseRefresh?.();
+    await approving;
+    expect(getUpdateAllBatchState().running).toBe(false);
+  });
+
   it('never lets a superseded runner write into the batch that replaced it', async () => {
     // 账号 A 的 detail() 停在半空。
     let releaseDetail: ((value: PluginMarketDetail) => void) | undefined;

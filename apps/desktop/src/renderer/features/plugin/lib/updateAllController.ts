@@ -69,8 +69,28 @@ let batchGeneration = 0;
  * 所以:入队即计数,只有**最后一个**在途批准结束时才走收尾释放 running。
  */
 let approvalQueue: Promise<unknown> = Promise.resolve();
-let inflightApprovals = 0;
+/**
+ * 在途批准计数**按代际分桶**。全局单计数不够:旧代际的在途项会把新批次的
+ * 收尾计数拖住(减到 0 时代际已不匹配、跳过收尾,新批次就永远不释放 running)。
+ * 每个代际只对自己的桶负责。
+ */
+const inflightByGeneration = new Map<number, number>();
 const listeners = new Set<() => void>();
+
+function retainApproval(generation: number): void {
+  inflightByGeneration.set(generation, (inflightByGeneration.get(generation) ?? 0) + 1);
+}
+
+/** 归还一个在途名额;返回该代际是否已无在途(= 轮到收尾)。 */
+function releaseApproval(generation: number): boolean {
+  const next = (inflightByGeneration.get(generation) ?? 1) - 1;
+  if (next <= 0) {
+    inflightByGeneration.delete(generation);
+    return true;
+  }
+  inflightByGeneration.set(generation, next);
+  return false;
+}
 
 function emit(next: UpdateAllBatchState): void {
   state = next;
@@ -147,7 +167,7 @@ function maybeFinishToast(): void {
   const rows = state.rows;
   // 还有批准在途时不报完成:它们的行此刻是 installing,提前报会把"没装完"
   // 说成"已完成"。最后一个在途批准的收尾会再来一次。
-  if (inflightApprovals > 0) return;
+  if ((inflightByGeneration.get(batchGeneration) ?? 0) > 0) return;
   if (!rows || rows.length === 0 || !isBatchFinished(rows) || finishToastShown) return;
   finishToastShown = true;
   const summary = batchSummary(rows);
@@ -262,24 +282,38 @@ async function settleBatchTail(generation: number): Promise<void> {
  * 中途任何单项都不许提前把闸门放开(否则页面拿旧快照可重复启动)。
  */
 export function approveUpdateExpansion(pluginId: string): Promise<void> {
-  inflightApprovals += 1;
-  const run = approvalQueue.then(() => runApproval(pluginId));
+  // **入队时**捕获代际与账号归属:用户点的是"此刻这个批次里的这一项"。
+  // 若等排到自己时才读当前批次,账号切换 / 新批次接管后,这次旧点击就会
+  // 重新绑定到新批次里同 pluginId 的待确认项上——等于未经批准放行新账号
+  // 或新 release 的扩权。代际不符一律丢弃,绝不改绑。
+  const generation = batchGeneration;
+  const owner = batchOwner;
+  retainApproval(generation);
+  const run = approvalQueue.then(() => runApproval(pluginId, generation, owner));
   // 队列本身吞掉失败,后续批准不因前一个抛错而卡死;错误仍由 runApproval
   // 内部落到对应行的 failed 状态。
   approvalQueue = run.catch(() => undefined);
   return run;
 }
 
-async function runApproval(pluginId: string): Promise<void> {
-  // 代际在**排队轮到自己时**捕获(不是入队时):排队期间批次可能已被作废或接管。
-  const generation = batchGeneration;
+async function runApproval(
+  pluginId: string,
+  generation: number,
+  owner: DataOwnerGeneration | null,
+): Promise<void> {
   try {
+    // 排队期间批次被作废/接管,或账号已切换 → 这次批准属于过去,直接作废。
+    if (batchGeneration !== generation) return;
+    if (owner === null || !isDataOwnerGenerationCurrent(owner)) {
+      voidStaleBatch();
+      return;
+    }
     await runApprovalBody(pluginId, generation);
   } finally {
-    inflightApprovals -= 1;
-    // 只有最后一个在途批准才收尾:刷新市场快照 → 释放 running → 补完成提示。
-    // 早于这一刻释放,后续排队中的批准就会在"闸门已开"的状态下继续装。
-    if (inflightApprovals === 0) await settleBatchTail(generation);
+    // 只有**本代际**最后一个在途批准才收尾:刷新市场快照 → 释放 running →
+    // 补完成提示。早于这一刻释放,后续排队中的批准就会在闸门已开的状态下继续装。
+    // settleBatchTail 自己再校验一次代际,失效时不碰当前批次。
+    if (releaseApproval(generation)) await settleBatchTail(generation);
   }
 }
 
@@ -465,6 +499,6 @@ export function __resetUpdateAllBatchForTest(): void {
   // 递增而非归零:上个用例遗留的在飞 runner 认的是旧代际,归零会让它复活。
   beginGeneration();
   approvalQueue = Promise.resolve();
-  inflightApprovals = 0;
+  inflightByGeneration.clear();
   listeners.clear();
 }

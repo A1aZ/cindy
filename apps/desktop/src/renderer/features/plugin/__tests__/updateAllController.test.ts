@@ -509,6 +509,61 @@ describe('updateAllController', () => {
     expect(vi.mocked(toast.success)).toHaveBeenCalledTimes(1);
   });
 
+  it('never rebinds a queued approval onto the batch that replaced it', async () => {
+    const expanding = manifest({ network: { hosts: ['api.example.com'] } });
+    detailMock.mockImplementation(async (pluginId) =>
+      ({
+        ...marketItem({ pluginId, ghostId: pluginId === 'plugin-a' ? 'ghost-a' : 'ghost-b' }),
+        manifest: expanding,
+        readme: null,
+      }) as unknown as PluginMarketDetail,
+    );
+    installedGhosts = [
+      { manifest: manifest({ version: '1.0.0' }) },
+      { manifest: manifest({ id: 'ghost-b', version: '1.0.0' }) },
+    ];
+    startUpdateAllBatch([
+      marketItem({}),
+      marketItem({ pluginId: 'plugin-b', ghostId: 'ghost-b' }),
+    ]);
+    await waitForSettledBatch();
+
+    // 首项安装卡住,第二项的批准排在队列里等。
+    const gate: Array<() => void> = [];
+    installMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          gate.push(() => resolve({ ghost: { manifest: expanding } } as never));
+        }),
+    );
+    const first = approveUpdateExpansion('plugin-a');
+    const queued = approveUpdateExpansion('plugin-b');
+    await vi.waitFor(() => expect(gate.length).toBe(1));
+
+    // 安装进行中切换账号 + 新账号启动自己的批次(同样含 plugin-b 待确认项)。
+    setDataOwnerGeneration('owner-b');
+    reconcileUpdateAllBatch();
+    installedGhosts = [{ manifest: manifest({ id: 'ghost-b', version: '1.0.0' }) }];
+    startUpdateAllBatch([marketItem({ pluginId: 'plugin-b', ghostId: 'ghost-b' })]);
+    await waitForSettledBatch();
+    const newBatchRow = getUpdateAllBatchState().rows?.[0];
+    expect(newBatchRow).toMatchObject({ pluginId: 'plugin-b', status: 'needs-confirm' });
+
+    const installsBeforeDrain = installMock.mock.calls.length;
+    // 旧队列项这时才轮到执行:它属于上一个代际/账号,必须整体作废,
+    // 绝不能改绑到新批次里同 pluginId 的待确认项上并直接安装。
+    gate[0]?.();
+    await first;
+    await queued;
+
+    expect(installMock.mock.calls.length).toBe(installsBeforeDrain);
+    // 新批次的待确认项原封不动,仍等用户在新账号下自己批准。
+    expect(getUpdateAllBatchState().rows?.[0]).toMatchObject({
+      pluginId: 'plugin-b',
+      status: 'needs-confirm',
+    });
+  });
+
   it('never lets a superseded runner write into the batch that replaced it', async () => {
     // 账号 A 的 detail() 停在半空。
     let releaseDetail: ((value: PluginMarketDetail) => void) | undefined;

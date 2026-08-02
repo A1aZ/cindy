@@ -77,8 +77,10 @@ import {
   toGhostPluginDetail,
   toGhostPluginListItem,
   filterGhostPluginItems,
+  ghostPanelOwnerKey,
   ghostPrimaryAction,
   marketPresentationForInstalledGhost,
+  nextOpenPanelIdForOwner,
   sortGhostPluginItemsByRecentUse,
   type GhostPluginListItem,
 } from './lib/ghostPluginViewModel';
@@ -573,6 +575,23 @@ export function GhostPluginPage() {
   useEffect(() => {
     if (openPanelId && !openPanelGhost) setOpenPanelId(null);
   }, [openPanelGhost, openPanelId]);
+  /**
+   * 账号 / 本地云模式切换必须关掉在开的面板。
+   *
+   * 光靠上面那条「解析不到就关」不够:两个账号装了**同 id、同版本、同入口**的
+   * 插件时,openPanelGhost 在新身份下照样解析得到,面板宿主不会重挂载,于是
+   * 账号 A 的 webview DOM、内存态与交互(表单、登录态、已加载数据)原样留在
+   * 账号 B 面前。这里按 owner 键显式清空;首帧不清,免得把 ?panel= 深链刚设上的
+   * 目标一并抹掉(那条 effect 排在本条之前)。
+   */
+  const panelOwnerKey = ghostPanelOwnerKey(mode, dataOwnerId);
+  const panelOwnerKeyRef = useRef(panelOwnerKey);
+  useEffect(() => {
+    const previous = panelOwnerKeyRef.current;
+    if (previous === panelOwnerKey) return;
+    panelOwnerKeyRef.current = panelOwnerKey;
+    setOpenPanelId((current) => nextOpenPanelIdForOwner(previous, panelOwnerKey, current));
+  }, [panelOwnerKey]);
 
   const panelStatus = useMemo(() => {
     if (!selectedDetail || selectedDetail.panelMinWidth === null) return null;
@@ -1096,7 +1115,13 @@ export function GhostPluginPage() {
   // 面板收束:aside 只挂在插件页语境里(列表/详情/市场详情共用),
   // 路由离开本页组件整体卸载 → webview 一并回收,绝不残留到别的界面。
   const panelAside = openPanelGhost ? (
-    <GhostPagePanelHost ghost={openPanelGhost} onClose={() => setOpenPanelId(null)} />
+    // key 纳入 owner 代际:双保险。即便将来某条路径漏了上面的清空,换身份也会
+    // 强制卸载重建宿主(webview 连同它的 DOM/内存态一起丢),不会跨账号复用。
+    <GhostPagePanelHost
+      key={`${panelOwnerKey}:${openPanelGhost.manifest.id}`}
+      ghost={openPanelGhost}
+      onClose={() => setOpenPanelId(null)}
+    />
   ) : null;
 
   if (marketDetail) {

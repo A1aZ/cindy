@@ -225,3 +225,30 @@ export function toGhostPluginDetail(
     installDir: ghost.dir,
   };
 }
+
+/**
+ * 插件页内面板宿主的数据归属键。
+ *
+ * 面板承载的是 webview,里面可能存着账号 A 的登录态、表单、已加载数据。
+ * 两个账号装了**同 id、同版本、同入口**的插件时,只按 ghostId 做宿主 key
+ * 会让 React 复用同一实例——切到账号 B 后 A 的 DOM 与内存态原样留着。
+ * 所以 key 必须含 owner 代际:换身份即卸载重建。
+ */
+export function ghostPanelOwnerKey(
+  mode: 'signed-out' | 'local' | 'cloud',
+  dataOwnerId: string | null,
+): string {
+  return `${mode}:${dataOwnerId ?? ''}`;
+}
+
+/**
+ * owner 变化时在开的面板应保留还是关闭。
+ * 返回下一个 openPanelId:身份变了一律关(返回 null),没变则原样保留。
+ */
+export function nextOpenPanelIdForOwner(
+  previousOwnerKey: string,
+  nextOwnerKey: string,
+  currentOpenPanelId: string | null,
+): string | null {
+  return previousOwnerKey === nextOwnerKey ? currentOpenPanelId : null;
+}

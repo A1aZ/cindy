@@ -1722,8 +1722,22 @@ function ModelSelectorContentView({
             </div>
           )
         ) : sections ? (
-          // 平铺:每行带来源 mark 前缀,无分组标题(同供应商行仍因 buildProviderSections 顺序而相邻)。
-          sections.flatMap((sec) => sec.models.map((m) => renderModelItem(sec.provider, m)))
+          // 按供应商分组:每组一个轻量标题 + 该供应商下的模型行。
+          sections
+            .filter((sec) => sec.models.length > 0)
+            .map((sec, index) => (
+              <div key={sec.provider.id} role="group" aria-label={providerDisplayName(sec.provider, t)}>
+                {index > 0 && (
+                  <div className="mx-1 my-1 h-px bg-[var(--model-dropdown-border)]" />
+                )}
+                <div className="truncate px-3 pb-0.5 pt-1 text-11 font-medium text-[var(--text-tertiary)]">
+                  {providerDisplayName(sec.provider, t)}
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  {sec.models.map((m) => renderModelItem(sec.provider, m))}
+                </div>
+              </div>
+            ))
         ) : (
           (flatModels ?? []).map((m) => renderModelItem(null, m))
         )}

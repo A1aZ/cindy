@@ -16,6 +16,8 @@ const usageSourcePath = resolve(__dirname, '..', 'maker-ipc', 'usage.ts');
 const usageSource = readFileSync(usageSourcePath, 'utf8').replace(/\r\n?/g, '\n');
 const hookControlSourcePath = resolve(__dirname, '..', 'hook-control', 'ipc.ts');
 const hookControlSource = readFileSync(hookControlSourcePath, 'utf8').replace(/\r\n?/g, '\n');
+const goalStorageSourcePath = resolve(__dirname, '..', 'goal-host', 'storage.ts');
+const goalStorageSource = readFileSync(goalStorageSourcePath, 'utf8').replace(/\r\n?/g, '\n');
 
 describe('maker:event hot path ordering', () => {
   it('rewires a replacement Session instance that retains the same business id', () => {
@@ -248,12 +250,12 @@ describe('maker:event hot path ordering', () => {
     expectOrder(
       directAbortSource,
       'const sess = getStableSessionForTurnBoundary(sessionId);',
-      'if (!sess) return;',
+      'if (!sess) {',
     );
     expect(directAbortSource).not.toContain('const sess = maker.getSession(sessionId);');
     expectOrder(
       directAbortSource,
-      'if (!sess) return;',
+      'if (!sess) {',
       'handleAgentIslandSessionStopped(sess);',
     );
     expectOrder(
@@ -299,6 +301,89 @@ describe('maker:event hot path ordering', () => {
       'getAgentIslandService()?.handleSessionStopped(',
       'await session.abort();',
     );
+  });
+
+  it('tears down every automatic recovery path before an explicit Stop aborts the session', () => {
+    const resetStart = source.indexOf('function resetAutomaticRecoveryForExplicitStop(');
+    const resetEnd = source.indexOf('\n}\n\nfunction settleUndispatchedAutoResumeOutcome', resetStart) + 2;
+    const resetSource = source.slice(resetStart, resetEnd);
+    const coordinatorAbortStart = source.indexOf('abortSession: async (sessionId) => {');
+    const coordinatorAbortEnd = source.indexOf('\n    isTurnRunning:', coordinatorAbortStart);
+    const coordinatorAbortSource = source.slice(coordinatorAbortStart, coordinatorAbortEnd);
+    const inputStopStart = source.indexOf('ipcMain.handle(MAKER_INVOKE.INPUT_STOP');
+    const inputStopEnd = source.indexOf('\n  ipcMain.handle(MAKER_INVOKE.INPUT_RESUME', inputStopStart);
+    const inputStopSource = source.slice(inputStopStart, inputStopEnd);
+    const directAbortStart = source.indexOf('ipcMain.handle(MAKER_INVOKE.ABORT_SESSION');
+    const directAbortEnd = source.indexOf('\n  ipcMain.handle(MAKER_INVOKE.CLOSE_SESSION', directAbortStart);
+    const directAbortSource = source.slice(directAbortStart, directAbortEnd);
+    const goalPauseStart = source.indexOf('async function pauseGoalBeforeExplicitStop(');
+    const goalPauseEnd = source.indexOf('\n}\n// (Option B)', goalPauseStart) + 2;
+    const goalPauseSource = source.slice(goalPauseStart, goalPauseEnd);
+
+    expect(resetStart).toBeGreaterThanOrEqual(0);
+    expect(resetSource).toContain('silentStopAutoResumeGuard.noteSessionReset(sessionId);');
+    expect(resetSource).toContain('interruptedTurnAutoResumeGuard.noteSessionReset(sessionId);');
+    expect(resetSource).toContain('autoResumeBookkeeping.teardown(sessionId);');
+    expect(source).toContain('noteSessionReset: resetAutomaticRecoveryForExplicitStop,');
+    expect(source).toContain('resetAutomaticRecoveryForExplicitStop(sid);');
+
+    expectOrder(
+      coordinatorAbortSource,
+      'resetAutomaticRecoveryForExplicitStop(sessionId);',
+      'const sess = getStableSessionForTurnBoundary(sessionId);',
+    );
+    expectOrder(
+      directAbortSource,
+      'resetAutomaticRecoveryForExplicitStop(sessionId);',
+      'const goalPause = pauseGoalBeforeExplicitStop(sessionId);',
+    );
+    expectOrder(
+      directAbortSource,
+      'const goalPause = pauseGoalBeforeExplicitStop(sessionId);',
+      'const sess = getStableSessionForTurnBoundary(sessionId);',
+    );
+    // no-session 分支会先 await goalPause 后返回；有 live session 时真正的 abort 必须
+    // 立即启动，只在 abort/reconcile 之后读取 Goal 持久化结果。
+    expect(directAbortSource.indexOf('const settledGoalPause = await goalPauseResult;')).toBeGreaterThan(
+      directAbortSource.indexOf('await sess.abort();'),
+    );
+    expectOrder(
+      inputStopSource,
+      'resetAutomaticRecoveryForExplicitStop(sid);',
+      'const goalPause = pauseGoalBeforeExplicitStop(sid);',
+    );
+    expectOrder(
+      inputStopSource,
+      'const goalPause = pauseGoalBeforeExplicitStop(sid);',
+      'inputCoordinator.stop(',
+    );
+    expectOrder(inputStopSource, 'inputCoordinator.stop(', 'await goalPause;');
+    expect(goalPauseStart).toBeGreaterThanOrEqual(0);
+    expect(goalPauseSource).toContain('catch (err)');
+    expect(goalPauseSource).toContain('await Promise.resolve(observer(sessionId));');
+    expect(goalPauseSource).toContain("log.error('goal pause persistence failed during explicit stop'");
+    expect(goalPauseSource).toContain(
+      "throwIpcError('INTERNAL', 'Failed to persist the stopped Goal state');",
+    );
+    expect(goalPauseSource).not.toContain('throw err;');
+    expect(goalPauseSource).not.toContain('Promise.race');
+    expect(goalPauseSource).not.toContain('setTimeout');
+    expect(directAbortSource).toContain('const goalPauseResult = goalPause.then(');
+    expectOrder(directAbortSource, 'await sess.abort();', 'const settledGoalPause = await goalPauseResult;');
+    expectOrder(directAbortSource, 'if (abortFailed)', 'if (!settledGoalPause.ok) throw settledGoalPause.error;');
+  });
+
+  it('commits a Goal state update before its post-write readback', () => {
+    const updateStart = goalStorageSource.indexOf('async update(sessionId: string');
+    const updateEnd = goalStorageSource.indexOf('\n  async clear(', updateStart);
+    const updateSource = goalStorageSource.slice(updateStart, updateEnd);
+
+    expect(updateStart).toBeGreaterThanOrEqual(0);
+    expect(updateSource).not.toContain('const existing = await this.get(sessionId);');
+    const writeIndex = updateSource.indexOf('await this.getDb().update(sessionGoals)');
+    const postWriteReadIndex = updateSource.lastIndexOf('return this.get(sessionId);');
+    expect(writeIndex).toBeGreaterThanOrEqual(0);
+    expect(postWriteReadIndex).toBeGreaterThan(writeIndex);
   });
 
   it('uses the wired Session snapshot while reconciling owner-boundary aborts', () => {

@@ -160,7 +160,7 @@ describe('updateAllController', () => {
     expect(installMock).not.toHaveBeenCalled();
   });
 
-  it('recomputes the diff when an external update moved the installed version', async () => {
+  it('recomputes the diff when an external update replaced the permission baseline', async () => {
     stubDetail({
       manifest: manifest({ network: { hosts: ['api.example.com'] } }),
       sourceType: 'server',
@@ -193,8 +193,9 @@ describe('updateAllController', () => {
     startUpdateAllBatch([marketItem({})]);
     await waitForSettledBatch();
 
-    // 外部装成第三个版本,但仍不含目标版本要新增的 network 权限。
-    installedGhosts = [{ manifest: manifest({ version: '1.0.5' }) }];
+    // 外部装成第三个版本且权限面变了(多了 fs),但仍不含目标版本要新增的
+    // network —— 基线失效触发重算,重算结果依旧是扩权。
+    installedGhosts = [{ manifest: manifest({ version: '1.0.5', slots: ['fs'] }) }];
     reconcileUpdateAllBatch();
     await approveUpdateExpansion('plugin-a');
 
@@ -205,7 +206,7 @@ describe('updateAllController', () => {
     expect(installMock).not.toHaveBeenCalled();
   });
 
-  it('recomputes on version drift even before reconcile flagged the row', async () => {
+  it('recomputes on baseline drift even before reconcile flagged the row', async () => {
     stubDetail({
       manifest: manifest({ network: { hosts: ['api.example.com'] } }),
       sourceType: 'server',
@@ -221,6 +222,55 @@ describe('updateAllController', () => {
     await approveUpdateExpansion('plugin-a');
 
     expect(installMock).toHaveBeenCalledWith('plugin-a', { expectedReleaseId: 'release-2' });
+  });
+
+  it('invalidates the review when a same-version manifest swap widened permissions', async () => {
+    stubDetail({
+      manifest: manifest({ network: { hosts: ['api.example.com'] } }),
+      sourceType: 'server',
+    });
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('needs-confirm');
+
+    // 「从文件更新」换入**同版本**但权限更宽的 manifest:版本号完全看不出来,
+    // 沿用旧审阅会把 fs 这条从未审阅的权限一并放行。
+    installedGhosts = [{ manifest: manifest({ version: '1.0.0', slots: ['fs'] }) }];
+    reconcileUpdateAllBatch();
+    const held = getUpdateAllBatchState().rows?.[0];
+    expect(held).toMatchObject({ status: 'needs-confirm', staleReview: true });
+    expect(held?.permissionDiff).toBeUndefined();
+
+    await approveUpdateExpansion('plugin-a');
+    // 相对新基线重算后仍是扩权 → 回到逐项审阅,绝不带 allowPermissionExpansion 放行。
+    expect(installMock).not.toHaveBeenCalled();
+    expect(getUpdateAllBatchState().rows?.[0]).toMatchObject({
+      status: 'needs-confirm',
+      staleReview: false,
+    });
+  });
+
+  it('keeps the review valid when only the version moved but permissions are identical', async () => {
+    stubDetail({
+      manifest: manifest({ network: { hosts: ['api.example.com'] } }),
+      sourceType: 'server',
+    });
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+
+    // 权限面完全没变,只是版本号动了:审阅结论仍然成立,不该逼用户重审。
+    installedGhosts = [{ manifest: manifest({ version: '1.0.4' }) }];
+    reconcileUpdateAllBatch();
+    const kept = getUpdateAllBatchState().rows?.[0];
+    expect(kept).toMatchObject({ status: 'needs-confirm', fromVersion: '1.0.4' });
+    expect(kept?.staleReview).toBeFalsy();
+    expect(kept?.permissionDiff?.added.length).toBeGreaterThan(0);
+
+    await approveUpdateExpansion('plugin-a');
+    expect(installMock).toHaveBeenCalledWith('plugin-a', {
+      expectedReleaseId: 'release-2',
+      allowPermissionExpansion: true,
+    });
   });
 
   it('voids the batch when the data owner changes during the detail round-trip', async () => {

@@ -27,6 +27,7 @@ import {
   batchSummary,
   buildUpdateAllRows,
   isBatchFinished,
+  permissionBaselineKey,
   updateRow,
   type UpdateAllRow,
 } from './updateAllModel';
@@ -164,6 +165,8 @@ async function runQueue(): Promise<void> {
             status: 'needs-confirm',
             releaseId: detail.releaseId,
             permissionDiff: diff,
+            // 审阅基线绑定权限指纹而非版本号:同版本换 manifest 也能识别。
+            reviewedBaseline: permissionBaselineKey(installedManifest),
             ...(detail.sourceType !== 'server' ? { expectedManifest: detail.manifest } : {}),
           });
           continue;
@@ -210,14 +213,16 @@ export async function approveUpdateExpansion(pluginId: string): Promise<void> {
   }
   patchRow(pluginId, { status: 'installing' });
   try {
-    // 用户审阅的是「fromVersion → toVersion」这一段的权限差异。等待期间若被
-    // 「从文件更新」等外部路径装成了别的版本,那份 diff 与它换来的
+    // 用户审阅的是「当前已装权限面 → 目标版本」的差异。等待期间若被
+    // 「从文件更新」等外部路径换掉了已装 manifest,那份 diff 与它换来的
     // allowPermissionExpansion 就不再对应现实——重新取详情、以当前已装
     // manifest 重算,权限没扩张就按普通更新装,扩张面变了则退回待确认重审。
-    // 判据是 staleReview(reconcile 打的标)并联版本比较:reconcile 会把
-    // fromVersion 同步成当前版本供展示,那之后版本比较恒等,靠标志识别;
-    // reconcile 还没来得及跑的竞态窗口里,版本比较兜底。
-    if (row.staleReview === true || installed.version !== row.fromVersion) {
+    //
+    // 判据是权限指纹而非版本号:ghosts.update() 允许**同版本整体替换
+    // manifest**(无版本单调性检查),同版本换入更宽的权限声明时版本比较
+    // 完全看不出来,旧的 allowPermissionExpansion 会把未审阅的新权限一并
+    // 放行。staleReview 并联进来覆盖 reconcile 已打标的情形。
+    if (row.staleReview === true || permissionBaselineKey(installed) !== row.reviewedBaseline) {
       const detail = await window.electronAPI.pluginMarket.detail(pluginId);
       const freshDiff = diffGhostPermissionItems(installed, detail.manifest);
       if (freshDiff.added.length > 0) {
@@ -228,6 +233,7 @@ export async function approveUpdateExpansion(pluginId: string): Promise<void> {
           releaseId: detail.releaseId,
           permissionDiff: freshDiff,
           staleReview: false,
+          reviewedBaseline: permissionBaselineKey(installed),
           expectedManifest: detail.sourceType !== 'server' ? detail.manifest : undefined,
         });
         return;
@@ -267,8 +273,8 @@ export function skipUpdateExpansion(pluginId: string): void {
 /**
  * 与外部事实对账:账号切换 → 整批作废;待确认行的插件被卸载 → 跳过、
  * 已被单项/文件更新装到目标版本 → 记为完成(不再提供重复安装入口)、
- * 被装成别的版本 → 旧 permissionDiff 已不对应现实,清掉并标记待重审
- * (真正的重算在 approve 时做,那里能取详情)。
+ * 权限基线被换掉(含同版本替换 manifest)→ 旧 permissionDiff 已不对应
+ * 现实,清掉并标记待重审(真正的重算在 approve 时做,那里能取详情)。
  * 页面在已装清单或身份变化时调用。
  */
 export function reconcileUpdateAllBatch(): void {
@@ -288,12 +294,17 @@ export function reconcileUpdateAllBatch(): void {
     } else if (installed.version === row.toVersion) {
       rows = updateRow(rows, row.pluginId, { status: 'done' });
       changed = true;
-    } else if (installed.version !== row.fromVersion) {
+    } else if (permissionBaselineKey(installed) !== row.reviewedBaseline) {
+      // 权限基线变了(换版本,或同版本换入不同权限声明):旧审阅作废。
       rows = updateRow(rows, row.pluginId, {
         fromVersion: installed.version,
         permissionDiff: undefined,
         staleReview: true,
       });
+      changed = true;
+    } else if (installed.version !== row.fromVersion) {
+      // 权限面没变、只是版本号变了:审阅结论仍然成立,同步展示用版本即可。
+      rows = updateRow(rows, row.pluginId, { fromVersion: installed.version });
       changed = true;
     }
   }

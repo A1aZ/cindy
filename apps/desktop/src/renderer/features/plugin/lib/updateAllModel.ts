@@ -7,7 +7,11 @@
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 
-import type { GhostManifest, GhostPermissionDiff } from '../../../../shared/ghost';
+import {
+  ghostPermissionItems,
+  type GhostManifest,
+  type GhostPermissionDiff,
+} from '../../../../shared/ghost';
 import type { PluginMarketItem } from '../../../../shared/pluginMarket';
 
 /**
@@ -34,10 +38,18 @@ export interface UpdateAllRow {
   /** 扩权详情(status 为 needs-confirm 时由运行器填充)。 */
   permissionDiff?: GhostPermissionDiff;
   /**
-   * 待确认期间插件被外部路径(从文件更新等)装成了别的版本:审阅过的
+   * 待确认期间插件被外部路径(从文件更新等)换掉了权限基线:审阅过的
    * 权限差异已不对应现实,弹窗提示"需要重新审阅",按钮点下去先重算再决定。
    */
   staleReview?: boolean;
+  /**
+   * 审阅所依据的**已装 manifest 权限指纹**(不是版本号)。
+   * `ghosts.update()` 允许同版本整体替换 manifest,所以版本号不是可靠的
+   * 审阅基线——同版本换入不同权限声明时,旧 diff 与它换来的
+   * allowPermissionExpansion 会把未审阅的新权限一并放行。批准前必须拿
+   * 当前已装 manifest 重算指纹比对,不一致即作废重审。
+   */
+  reviewedBaseline?: string;
   /**
    * 非 server 源在审阅时取得的 manifest:主进程对这类来源强制要求安装时
    * 传回同一份 reviewed manifest,approve 必须原样带上,否则 INVALID_PARAMS。
@@ -45,6 +57,20 @@ export interface UpdateAllRow {
   expectedManifest?: GhostManifest;
   /** status 为 failed 时的用户可读错误(已经过 i18n 映射)。 */
   errorText?: string;
+}
+
+/**
+ * 权限审阅基线指纹:同一份 manifest 推导出的权限条目集合(key + detail)。
+ * 与 diffGhostPermissionItems 同口径(它也是按 key 对齐、detail 变化算差异),
+ * 所以"指纹相同"等价于"权限面没变",可安全沿用先前的审阅结论。
+ */
+export function permissionBaselineKey(manifest: GhostManifest): string {
+  // 每项 JSON 编码后再排序拼接:全可打印(不进 NUL,git diff 才不会把本文件
+  // 判成二进制),且转义天然消除 "a","b" 与 "a,b","" 的拼接歧义。
+  return ghostPermissionItems(manifest)
+    .map((item) => JSON.stringify([item.key, item.detail ?? '']))
+    .sort()
+    .join('\n');
 }
 
 /** 从市场快照萃取可更新行;顺序即执行顺序(与列表快照顺序一致,稳定)。 */

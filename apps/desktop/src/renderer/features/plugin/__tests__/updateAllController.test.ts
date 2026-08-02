@@ -20,6 +20,7 @@ import {
   __testing as dataOwnerTesting,
   setDataOwnerGeneration,
 } from '@/contexts/dataOwnerGeneration';
+import { toast } from '@/lib/toast';
 import type { GhostManifest } from '../../../../shared/ghost';
 import type { PluginMarketDetail, PluginMarketItem } from '../../../../shared/pluginMarket';
 import {
@@ -91,6 +92,7 @@ beforeEach(() => {
   setDataOwnerGeneration('owner-a');
   detailMock.mockReset();
   installMock.mockClear();
+  vi.mocked(toast.success).mockClear();
   installedGhosts = [{ manifest: manifest({ version: '1.0.0' }) }];
   (window as unknown as { electronAPI: unknown }).electronAPI = {
     pluginMarket: { detail: detailMock, install: installMock },
@@ -345,6 +347,41 @@ describe('updateAllController', () => {
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
   });
 
+  it('never lets a superseded runner write into the batch that replaced it', async () => {
+    // 账号 A 的 detail() 停在半空。
+    let releaseDetail: ((value: PluginMarketDetail) => void) | undefined;
+    detailMock.mockImplementation(
+      () =>
+        new Promise<PluginMarketDetail>((resolve) => {
+          releaseDetail = resolve;
+        }),
+    );
+    startUpdateAllBatch([marketItem({})]);
+    await vi.waitFor(() => expect(releaseDetail).toBeDefined());
+
+    // 切到账号 B 并启动 B 自己的批次(旧批次已被作废 + 代际接管)。
+    setDataOwnerGeneration('owner-b');
+    reconcileUpdateAllBatch();
+    expect(getUpdateAllBatchState().rows).toBeNull();
+    detailMock.mockResolvedValue({
+      ...marketItem({ pluginId: 'plugin-b', ghostId: 'ghost-b' }),
+      manifest: manifest({ id: 'ghost-b' }),
+      readme: null,
+    } as unknown as PluginMarketDetail);
+    installedGhosts = [{ manifest: manifest({ id: 'ghost-b', version: '1.0.0' }) }];
+    startUpdateAllBatch([marketItem({ pluginId: 'plugin-b', ghostId: 'ghost-b' })]);
+
+    // A 的请求这时才失败返回:不得把失败写进 B、不得消费 B 的 pending 行、
+    // 不得提前清掉 B 的 running。
+    releaseDetail?.(undefined as unknown as PluginMarketDetail);
+    await waitForSettledBatch();
+
+    const rows = getUpdateAllBatchState().rows ?? [];
+    expect(rows.map((row) => row.pluginId)).toEqual(['plugin-b']);
+    expect(rows[0]?.status).not.toBe('failed');
+    expect(installMock).toHaveBeenCalledWith('plugin-b', expect.objectContaining({}));
+  });
+
   it('settles without reinstalling once the target release is actually on record', async () => {
     stubDetail({
       manifest: manifest({ network: { hosts: ['api.example.com'] } }),
@@ -361,9 +398,16 @@ describe('updateAllController', () => {
       readme: null,
     } as unknown as PluginMarketDetail);
 
+    // 已落账的早退分支同样要走统一收尾:刷新市场快照 + 完成 toast,
+    // 不留旧快照和悬空的未完成提示。
+    const refreshMarket = vi.fn(async () => undefined);
+    setUpdateAllBatchHooks({ refreshMarket });
+
     await approveUpdateExpansion('plugin-a');
     expect(installMock).not.toHaveBeenCalled();
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
+    expect(refreshMarket).toHaveBeenCalledTimes(1);
+    expect(toast.success).toHaveBeenCalledWith('settings.ghosts.updateAll.doneToast');
   });
 
   it('holds running until the post-batch refresh settles so no second batch overlaps', async () => {

@@ -48,6 +48,14 @@ let finishToastShown = false;
 let hooks: UpdateAllBatchHooks = {};
 /** 批次启动时的账号世代:身份切换后旧批次整体作废,绝不跨账号安装。 */
 let batchOwner: DataOwnerGeneration | null = null;
+/**
+ * 批次代际。每次启动新批次或作废旧批次都自增,异步流程在启动时捕获它,
+ * 之后每个写入点都先核对——**光靠账号世代不够**:同一账号内旧批次被作废、
+ * 新批次接管时账号没变,旧 runner 的迟到写入照样会污染新批次(把上一批的
+ * 失败写进新批次、继续消费新批次的 pending 行、提前清掉新批次的 running)。
+ * 代际失效的 runner 只能停下,不得改写、不得收尾、不得触发任何副作用。
+ */
+let batchGeneration = 0;
 const listeners = new Set<() => void>();
 
 function emit(next: UpdateAllBatchState): void {
@@ -55,9 +63,24 @@ function emit(next: UpdateAllBatchState): void {
   listeners.forEach((listener) => listener());
 }
 
-function patchRow(pluginId: string, patch: Partial<UpdateAllRow>): void {
-  // 批次已被清空(如账号切换作废)时,迟到的行迁移直接丢弃。
-  if (state.rows === null) return;
+/** 开启新代际(旧代际的异步流程随即失效),返回新代际号。 */
+function beginGeneration(): number {
+  batchGeneration += 1;
+  return batchGeneration;
+}
+
+/** 该代际是否仍是当前批次(代际未被接管 + 账号未切换)。 */
+function isGenerationCurrent(generation: number): boolean {
+  return (
+    batchGeneration === generation &&
+    batchOwner !== null &&
+    isDataOwnerGenerationCurrent(batchOwner)
+  );
+}
+
+function patchRow(generation: number, pluginId: string, patch: Partial<UpdateAllRow>): void {
+  // 代际已失效(批次被作废或被新批次接管)时,迟到的行迁移直接丢弃。
+  if (!isGenerationCurrent(generation) || state.rows === null) return;
   emit({ ...state, rows: updateRow(state.rows, pluginId, patch) });
 }
 
@@ -65,9 +88,10 @@ function batchOwnerCurrent(): boolean {
   return batchOwner !== null && isDataOwnerGenerationCurrent(batchOwner);
 }
 
-/** 账号/模式切换后作废整个批次(runner 在下一个检查点自行退出)。 */
+/** 账号/模式切换后作废整个批次(旧代际的 runner 在下一个检查点自行退出)。 */
 function voidStaleBatch(): void {
   batchOwner = null;
+  beginGeneration(); // 让在飞的 runner / approve 立即失效。
   finishToastShown = true; // 作废批次不再补发完成 toast。
   emit({ rows: null, running: false });
 }
@@ -126,42 +150,49 @@ export function startUpdateAllBatch(marketUpdates: readonly PluginMarketItem[]):
   );
   finishToastShown = false;
   batchOwner = getDataOwnerGeneration();
+  const generation = beginGeneration();
   emit({ rows: buildUpdateAllRows(marketUpdates, installedVersionById), running: false });
-  void runQueue();
+  void runQueue(generation);
 }
 
-/** 批量 runner:串行走「取详情 → 权限 diff → 无扩权直接装 / 有扩权停待确认」。 */
-async function runQueue(): Promise<void> {
-  if (state.running) return;
+/**
+ * 批量 runner:串行走「取详情 → 权限 diff → 无扩权直接装 / 有扩权停待确认」。
+ * 全程以启动时捕获的 `generation` 为准:任一 await 之后代际若已失效
+ * (批次被作废或被新批次接管),立即停手——不写状态、不消费队列、不收尾。
+ */
+async function runQueue(generation: number): Promise<void> {
+  if (state.running || !isGenerationCurrent(generation)) return;
   emit({ ...state, running: true });
   try {
     for (;;) {
+      if (batchGeneration !== generation) return; // 已被新批次接管:静默让位。
       if (!batchOwnerCurrent()) {
         voidStaleBatch();
-        break;
+        return;
       }
       const next = (state.rows ?? []).find((row) => row.status === 'pending');
       if (!next) break;
-      patchRow(next.pluginId, { status: 'installing' });
+      patchRow(generation, next.pluginId, { status: 'installing' });
       try {
         const detail = await window.electronAPI.pluginMarket.detail(next.pluginId);
-        // detail 往返期间可能切换账号:install 会以当前账号执行,旧批次
-        // 绝不能把上一个账号发起的更新落到新账号数据上。
+        // detail 往返期间可能切换账号或换批次:install 会以当前账号执行,
+        // 旧批次绝不能把上一轮的更新落到新账号/新批次上。
+        if (batchGeneration !== generation) return;
         if (!batchOwnerCurrent()) {
           voidStaleBatch();
-          break;
+          return;
         }
         const installedManifest = installedManifestOf(next.ghostId);
         if (!installedManifest) {
           // 批量期间插件已被卸载:绝不拿市场 manifest 兜底继续安装
           // (那会把用户刚卸载的插件重新装回来),该行按跳过收束。
-          patchRow(next.pluginId, { status: 'skipped' });
+          patchRow(generation, next.pluginId, { status: 'skipped' });
           continue;
         }
         const diff = diffGhostPermissionItems(installedManifest, detail.manifest);
         if (diff.added.length > 0) {
           // 扩权不自动放行:停在待确认,由用户在弹窗里逐项同意或跳过。
-          patchRow(next.pluginId, {
+          patchRow(generation, next.pluginId, {
             status: 'needs-confirm',
             releaseId: detail.releaseId,
             permissionDiff: diff,
@@ -175,23 +206,35 @@ async function runQueue(): Promise<void> {
           expectedReleaseId: detail.releaseId,
           ...(detail.sourceType !== 'server' ? { expectedManifest: detail.manifest } : {}),
         });
-        patchRow(next.pluginId, { status: 'done' });
+        patchRow(generation, next.pluginId, { status: 'done' });
       } catch (error) {
-        patchRow(next.pluginId, {
+        // 失败也只写回自己的批次:代际失效时这条错误属于已作废的批次。
+        patchRow(generation, next.pluginId, {
           status: 'failed',
           errorText: i18n.t(pluginMarketErrorKey(error)),
         });
+        if (batchGeneration !== generation) return;
       }
     }
   } finally {
-    // running 必须**撑到刷新结束**才落下:刷新期间市场快照还是旧的,若此时
-    // 放开 running,页面拿旧快照就能启动第二批,而本 runner 的收尾还会
-    // patch/emit 到新批次上(旧收尾改写新批次)。先刷新、后放行,
-    // startUpdateAllBatch 的 running 闸门才真正拦得住。
-    await refreshMarketIfMounted();
-    emit({ ...state, running: false });
-    maybeFinishToast();
+    await settleBatchTail(generation);
   }
+}
+
+/**
+ * 批次收尾(所有返回路径共用):刷新市场快照 → 放开 running → 补完成 toast。
+ *
+ * running 必须**撑到刷新结束**才落下:刷新期间市场快照还是旧的,若此时放开
+ * running,页面拿旧快照就能启动第二批,而本 runner 的收尾还会写到新批次上。
+ * 代际失效时整个收尾跳过——旧 runner 不得清掉当前批次的 running、也不得
+ * 触发当前批次的完成提示。
+ */
+async function settleBatchTail(generation: number): Promise<void> {
+  if (batchGeneration !== generation) return;
+  await refreshMarketIfMounted();
+  if (batchGeneration !== generation) return;
+  if (state.running) emit({ ...state, running: false });
+  maybeFinishToast();
 }
 
 /** 用户在弹窗里同意某个扩权项后继续安装。 */
@@ -202,14 +245,16 @@ export async function approveUpdateExpansion(pluginId: string): Promise<void> {
   }
   const row = state.rows?.find((candidate) => candidate.pluginId === pluginId);
   if (!row || row.status !== 'needs-confirm' || !row.releaseId) return;
+  // 批准作用于**当前**批次:捕获此刻的代际,await 之后一律以它为准。
+  const generation = batchGeneration;
   const installed = installedManifestOf(row.ghostId);
   if (installed === null) {
     // 待确认期间插件被卸载:同意也不重装,按跳过收束。
-    patchRow(pluginId, { status: 'skipped' });
+    patchRow(generation, pluginId, { status: 'skipped' });
     maybeFinishToast();
     return;
   }
-  patchRow(pluginId, { status: 'installing' });
+  patchRow(generation, pluginId, { status: 'installing' });
   try {
     // 一律重取详情。它同时给出三件事,缺一不可:
     //  1. installState —— **目标 release 是否真的落账**的权威判据。main 侧
@@ -219,9 +264,12 @@ export async function approveUpdateExpansion(pluginId: string): Promise<void> {
     //  2. 最新 releaseId / manifest —— 并发防护与非 server 源的 reviewed manifest。
     //  3. 当前 manifest —— 与已装 manifest 重算权限差异。
     const detail = await window.electronAPI.pluginMarket.detail(pluginId);
+    // detail 往返期间批次可能已被作废/接管:此后一律不再写状态、不再安装。
+    if (batchGeneration !== generation) return;
     if (detail.installState === 'installed') {
       // 目标 release 已由别的路径装上:直接收束,不重复下载安装。
-      patchRow(pluginId, { status: 'done', fromVersion: installed.version });
+      // (return 后仍走 finally 的统一收尾——刷新市场快照 + 完成 toast。)
+      patchRow(generation, pluginId, { status: 'done', fromVersion: installed.version });
       return;
     }
     // 用户审阅的是「审阅当时的已装权限面 → 那一刻的目标 release」。三个前提
@@ -240,12 +288,12 @@ export async function approveUpdateExpansion(pluginId: string): Promise<void> {
         ...(row.expectedManifest ? { expectedManifest: row.expectedManifest } : {}),
         allowPermissionExpansion: true,
       });
-      patchRow(pluginId, { status: 'done' });
+      patchRow(generation, pluginId, { status: 'done' });
     } else {
       const freshDiff = diffGhostPermissionItems(installed, detail.manifest);
       if (freshDiff.added.length > 0) {
         // 相对新事实仍是扩权:回到逐项审阅,绝不静默放行未审过的权限。
-        patchRow(pluginId, {
+        patchRow(generation, pluginId, {
           status: 'needs-confirm',
           fromVersion: installed.version,
           toVersion: detail.version,
@@ -261,13 +309,21 @@ export async function approveUpdateExpansion(pluginId: string): Promise<void> {
         expectedReleaseId: detail.releaseId,
         ...(detail.sourceType !== 'server' ? { expectedManifest: detail.manifest } : {}),
       });
-      patchRow(pluginId, { status: 'done', fromVersion: installed.version });
+      patchRow(generation, pluginId, { status: 'done', fromVersion: installed.version });
     }
   } catch (error) {
-    patchRow(pluginId, { status: 'failed', errorText: i18n.t(pluginMarketErrorKey(error)) });
+    patchRow(generation, pluginId, {
+      status: 'failed',
+      errorText: i18n.t(pluginMarketErrorKey(error)),
+    });
+  } finally {
+    // 统一收尾:已落账 / 重审 / 失败 / 正常完成四条返回路径都刷新市场快照并
+    // 补完成提示;代际失效时整体跳过,不碰当前批次。
+    if (batchGeneration === generation) {
+      await refreshMarketIfMounted();
+      if (batchGeneration === generation) maybeFinishToast();
+    }
   }
-  await refreshMarketIfMounted();
-  maybeFinishToast();
 }
 
 /** 用户在弹窗里跳过某个扩权项。 */
@@ -278,7 +334,7 @@ export function skipUpdateExpansion(pluginId: string): void {
   }
   const row = state.rows?.find((candidate) => candidate.pluginId === pluginId);
   if (!row || row.status !== 'needs-confirm') return;
-  patchRow(pluginId, { status: 'skipped' });
+  patchRow(batchGeneration, pluginId, { status: 'skipped' });
   maybeFinishToast();
 }
 
@@ -339,5 +395,7 @@ export function __resetUpdateAllBatchForTest(): void {
   finishToastShown = false;
   hooks = {};
   batchOwner = null;
+  // 递增而非归零:上个用例遗留的在飞 runner 认的是旧代际,归零会让它复活。
+  beginGeneration();
   listeners.clear();
 }

@@ -647,6 +647,52 @@ describe('updateAllController', () => {
     expect(row?.errorText).toBeUndefined();
   });
 
+  it('does not make a new generation approval wait behind the previous one', async () => {
+    const expanding = manifest({ network: { hosts: ['api.example.com'] } });
+    detailMock.mockImplementation(async (pluginId) =>
+      ({
+        ...marketItem({ pluginId, ghostId: pluginId === 'plugin-a' ? 'ghost-a' : 'ghost-b' }),
+        manifest: expanding,
+        readme: null,
+      }) as unknown as PluginMarketDetail,
+    );
+    installedGhosts = [{ manifest: manifest({ version: '1.0.0' }) }];
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+
+    // 账号 A 的批准卡在安装里(永不 resolve)。
+    const stuck: Array<() => void> = [];
+    installMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          stuck.push(() => resolve({ ghost: { manifest: expanding } } as never));
+        }),
+    );
+    const oldApproval = approveUpdateExpansion('plugin-a');
+    await vi.waitFor(() => expect(stuck.length).toBe(1));
+
+    // 切账号 → 新批次(新代际)。
+    setDataOwnerGeneration('owner-b');
+    reconcileUpdateAllBatch();
+    installedGhosts = [{ manifest: manifest({ id: 'ghost-b', version: '1.0.0' }) }];
+    startUpdateAllBatch([marketItem({ pluginId: 'plugin-b', ghostId: 'ghost-b' })]);
+    await waitForSettledBatch();
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('needs-confirm');
+
+    // 新代际的批准不该排在账号 A 那个仍然卡着的安装后面:它必须立刻开跑。
+    const newApproval = approveUpdateExpansion('plugin-b');
+    await vi.waitFor(() => expect(stuck.length).toBe(2));
+
+    stuck[1]?.();
+    await newApproval;
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
+
+    // 收尾:放行旧代际那个安装,它轮到时因代际失效不会改写当前批次。
+    stuck[0]?.();
+    await oldApproval;
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
+  });
+
   it('never rebinds a queued approval onto the batch that replaced it', async () => {
     const expanding = manifest({ network: { hosts: ['api.example.com'] } });
     detailMock.mockImplementation(async (pluginId) =>

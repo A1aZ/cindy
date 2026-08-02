@@ -61,14 +61,17 @@ let batchOwner: DataOwnerGeneration | null = null;
  */
 let batchGeneration = 0;
 /**
- * 在途批准的串行队列与计数。用户可以在弹窗里连点多个待确认项的「同意」,
- * 它们必须**排队执行**而不是并发:
- *  - 并发安装同一批次的多个 release 会互相踩市场刷新与已装清单快照;
- *  - 更要命的是收尾——任一单项的 finally 都会把全局 running 清成 false,
- *    而别的批准还在装,页面此刻拿旧快照就能启动第二批重复安装。
- * 所以:入队即计数,只有**最后一个**在途批准结束时才走收尾释放 running。
+ * 在途批准的串行队列,**按代际隔离**。
+ *
+ * 同一代际内必须排队而非并发:并发安装同一批次的多个 release 会互相踩市场
+ * 刷新与已装清单快照,收尾也会被任一单项提前释放。
+ *
+ * 但队列不能全局共用一条链:账号/模式切换后新批次的批准会排在旧代际那个
+ * 慢 install() 后面干等——代际校验只能在轮到执行时把旧项丢掉,解不掉前面的
+ * 等待。各代际各排各的,新身份点批准立即开始;旧代际的项轮到时照样因代际
+ * 失效而不执行安装。条目在该代际无在途时回收(见 releaseApproval)。
  */
-let approvalQueue: Promise<unknown> = Promise.resolve();
+const approvalQueueByGeneration = new Map<number, Promise<unknown>>();
 /**
  * 在途批准计数**按代际分桶**。全局单计数不够:旧代际的在途项会把新批次的
  * 收尾计数拖住(减到 0 时代际已不匹配、跳过收尾,新批次就永远不释放 running)。
@@ -86,6 +89,9 @@ function releaseApproval(generation: number): boolean {
   const next = (inflightByGeneration.get(generation) ?? 1) - 1;
   if (next <= 0) {
     inflightByGeneration.delete(generation);
+    // 该代际不再有批准在途,它的队列链也没人接了——一并清掉,免得
+    // 长会话里每换一次账号/批次都留下一条永不回收的 promise 链。
+    approvalQueueByGeneration.delete(generation);
     return true;
   }
   inflightByGeneration.set(generation, next);
@@ -342,10 +348,15 @@ export function approveUpdateExpansion(pluginId: string): Promise<void> {
   const generation = batchGeneration;
   const owner = batchOwner;
   retainApproval(generation);
-  const run = approvalQueue.then(() => runApproval(pluginId, generation, owner));
+  // 队列**按代际隔离**:全局单链下,账号切换后新批次的批准会排在旧代际那个
+  // 慢 install() 后面干等——代际校验只能在轮到执行时把旧项丢掉,解不掉前面的
+  // 等待。各代际各排各的,新账号点批准立即开始;旧代际的项轮到时仍会因代际
+  // 失效而不执行安装。
+  const previous = approvalQueueByGeneration.get(generation) ?? Promise.resolve();
+  const run = previous.then(() => runApproval(pluginId, generation, owner));
   // 队列本身吞掉失败,后续批准不因前一个抛错而卡死;错误仍由 runApproval
   // 内部落到对应行的 failed 状态。
-  approvalQueue = run.catch(() => undefined);
+  approvalQueueByGeneration.set(generation, run.catch(() => undefined));
   return run;
 }
 
@@ -567,7 +578,7 @@ export function __resetUpdateAllBatchForTest(): void {
   batchOwner = null;
   // 递增而非归零:上个用例遗留的在飞 runner 认的是旧代际,归零会让它复活。
   beginGeneration();
-  approvalQueue = Promise.resolve();
+  approvalQueueByGeneration.clear();
   inflightByGeneration.clear();
   listeners.clear();
 }

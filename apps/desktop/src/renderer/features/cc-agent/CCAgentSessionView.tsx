@@ -3177,7 +3177,7 @@ export function CCAgentSessionView({
           />
         ) : remoteConn === 'reconnecting' || remoteConn === 'host-offline' || remoteLinkIssue?.kind === 'unstable' ? (
           <RemoteSessionBanner
-            status={remoteConn === 'host-offline' ? 'host-offline' : 'reconnecting'}
+            status={remoteLinkIssue?.kind === 'unstable' ? 'reconnecting' : remoteConn === 'host-offline' ? 'host-offline' : 'reconnecting'}
             issue={remoteLinkIssue}
             onResync={remoteSync.resync}
           />

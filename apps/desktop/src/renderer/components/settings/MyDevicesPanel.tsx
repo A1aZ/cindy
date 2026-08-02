@@ -155,10 +155,11 @@ export function MyDevicesPanel({
   // 连接问题(鉴权失效/被顶号/超限/版本不符/反复掉线)时不再显示笼统的 connecting 黄点,
   // 直接给断开色 + 下方原因行,让「一直连不上」可解释、可行动。判定见 myDevicesModel。
   const activeConnectionIssue = resolveActiveConnectionIssue(s.linkStatus, s.connectionIssue);
-  const linkStatusColor =
-    s.linkStatus === 'online'
+  const linkStatusColor = activeConnectionIssue
+    ? 'var(--remote-status-disconnected)'
+    : s.linkStatus === 'online'
       ? 'var(--remote-status-ready)'
-      : s.linkStatus === 'connecting' && !activeConnectionIssue
+      : s.linkStatus === 'connecting'
         ? 'var(--remote-status-progress)'
         : 'var(--remote-status-disconnected)';
 

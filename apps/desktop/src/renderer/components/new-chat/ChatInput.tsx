@@ -81,6 +81,7 @@ import {
   type DroppedFileItems,
 } from '@/lib/fileDrop';
 import { shouldOpenTextLightbox } from '@/lib/filePreview';
+import { isDangerousAttachmentName } from '../../../shared/attachmentSafety';
 import {
   getDraft as getComposerDraft,
   saveDraft as saveComposerDraft,
@@ -499,6 +500,7 @@ interface ChatInputProps {
     consumePendingFileMentions: () => Array<{ type: 'file'; relPath: string; name: string }>;
     removeFile: (id: string) => void;
     updateFile: (id: string, patch: Partial<AttachedFile>) => void;
+    discardFiles: () => void;
     clearFiles: () => void;
   };
   /**
@@ -1072,6 +1074,7 @@ export function ChatInput({
     consumePendingFileMentions,
     removeFile,
     updateFile,
+    discardFiles,
     clearFiles,
   } = attachmentState;
   // browser-comment-chip:内置浏览器页面评论(结构化,不进草稿文本),渲染为
@@ -5553,7 +5556,7 @@ export function ChatInput({
                   } finally {
                     isRestoringRef.current = false;
                   }
-                  clearFiles();
+                  discardFiles();
                   // 页面评论走丢弃语义(清 state + 清截图缓存):目标不接管评论截图,
                   // 与发送后清空(消息接管截图,不清缓存)不同,这里不清会留磁盘孤儿。
                   clearBrowserComments();
@@ -6279,6 +6282,7 @@ function ThumbnailItem({
   onRemove: (id: string) => void;
   onUpdate: (id: string, patch: Partial<AttachedFile>) => void;
 }) {
+  const { t } = useTranslation();
   const [isHovered, setIsHovered] = useState(false);
   const thumbRef = useRef<HTMLDivElement>(null);
   const [popoverPos, setPopoverPos] = useState<{ top: number; left: number } | null>(null);
@@ -6290,6 +6294,8 @@ function ThumbnailItem({
   // Lightbox state is local to each item so multiple thumbnails don't fight.
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const [textLightboxOpen, setTextLightboxOpen] = useState(false);
+  const isDownloadOnly =
+    isDangerousAttachmentName(file.name) || isDangerousAttachmentName(file.path);
 
   // 非图片附件仍使用路径 tooltip；图片定位由共享 ImageHoverPreview 自己负责。
   useLayoutEffect(() => {
@@ -6319,12 +6325,16 @@ function ThumbnailItem({
       if (src) setLightboxSrc(src);
       return;
     }
+    // Historical composer drafts may still contain an executable's original
+    // path from before dangerous attachments were staged as `.bin`. Never pass
+    // those paths to the OS default-app opener from the attachment tray.
+    if (isDownloadOnly) return;
     // Non-image text/code/markdown files preview via TextLightbox. Other
     // supported attachment categories (PDF, etc.) open in the system app.
     if (!file.path) return;
     if (!(await shouldOpenTextLightbox(file.path))) return;
     setTextLightboxOpen(true);
-  }, [file]);
+  }, [file, isDownloadOnly]);
 
   // 图片缩略图恒为 56×56 方块;其余附件走横向文件卡,宽度随文件名自适应
   // (上限 220px)。判定条件必须与下面渲染分支一致——缓存写失败、既无 url 也无
@@ -6356,9 +6366,17 @@ function ThumbnailItem({
       {/* image-local-cache: prefer xdt-image:// url; fall back to base64 (F6). */}
       <button
         type="button"
-        className="h-full w-full cursor-pointer border-0 bg-transparent p-0 text-left"
+        className={cn(
+          'h-full w-full border-0 bg-transparent p-0 text-left',
+          isDownloadOnly ? 'cursor-default' : 'cursor-pointer',
+        )}
         onClick={handleOpenPreview}
-        aria-label={`Preview ${file.name}`}
+        disabled={isDownloadOnly}
+        aria-label={
+          isDownloadOnly
+            ? t('chat.userMessage.attachmentAttachedAria', { name: file.name })
+            : `Preview ${file.name}`
+        }
       >
         {file.category === 'image' && (file.url || file.base64) ? (
           <span className="relative block h-full w-full">

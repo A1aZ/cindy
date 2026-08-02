@@ -34,6 +34,11 @@ export interface UpdateAllRow {
   /** 扩权详情(status 为 needs-confirm 时由运行器填充)。 */
   permissionDiff?: GhostPermissionDiff;
   /**
+   * 待确认期间插件被外部路径(从文件更新等)装成了别的版本:审阅过的
+   * 权限差异已不对应现实,弹窗提示"需要重新审阅",按钮点下去先重算再决定。
+   */
+  staleReview?: boolean;
+  /**
    * 非 server 源在审阅时取得的 manifest:主进程对这类来源强制要求安装时
    * 传回同一份 reviewed manifest,approve 必须原样带上,否则 INVALID_PARAMS。
    */

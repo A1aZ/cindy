@@ -3520,6 +3520,8 @@
         "description": "권한 변경이 없는 업데이트는 자동으로 완료됩니다. 권한이 확장되는 업데이트는 항목별 확인이 필요합니다.",
         "versionRange": "v{{from}} → v{{to}}",
         "permissionChanged": "권한 변경됨",
+        "reviewOutdated": "권한 변경 내역이 오래되었습니다",
+        "rereview": "다시 검토",
         "reviewDiff": "확인",
         "collapseDiff": "접기",
         "approve": "동의 후 업데이트",

@@ -210,12 +210,41 @@ export async function approveUpdateExpansion(pluginId: string): Promise<void> {
   }
   patchRow(pluginId, { status: 'installing' });
   try {
-    await window.electronAPI.pluginMarket.install(pluginId, {
-      expectedReleaseId: row.releaseId,
-      ...(row.expectedManifest ? { expectedManifest: row.expectedManifest } : {}),
-      allowPermissionExpansion: true,
-    });
-    patchRow(pluginId, { status: 'done' });
+    // 用户审阅的是「fromVersion → toVersion」这一段的权限差异。等待期间若被
+    // 「从文件更新」等外部路径装成了别的版本,那份 diff 与它换来的
+    // allowPermissionExpansion 就不再对应现实——重新取详情、以当前已装
+    // manifest 重算,权限没扩张就按普通更新装,扩张面变了则退回待确认重审。
+    // 判据是 staleReview(reconcile 打的标)并联版本比较:reconcile 会把
+    // fromVersion 同步成当前版本供展示,那之后版本比较恒等,靠标志识别;
+    // reconcile 还没来得及跑的竞态窗口里,版本比较兜底。
+    if (row.staleReview === true || installed.version !== row.fromVersion) {
+      const detail = await window.electronAPI.pluginMarket.detail(pluginId);
+      const freshDiff = diffGhostPermissionItems(installed, detail.manifest);
+      if (freshDiff.added.length > 0) {
+        patchRow(pluginId, {
+          status: 'needs-confirm',
+          fromVersion: installed.version,
+          toVersion: detail.version,
+          releaseId: detail.releaseId,
+          permissionDiff: freshDiff,
+          staleReview: false,
+          expectedManifest: detail.sourceType !== 'server' ? detail.manifest : undefined,
+        });
+        return;
+      }
+      await window.electronAPI.pluginMarket.install(pluginId, {
+        expectedReleaseId: detail.releaseId,
+        ...(detail.sourceType !== 'server' ? { expectedManifest: detail.manifest } : {}),
+      });
+      patchRow(pluginId, { status: 'done', fromVersion: installed.version });
+    } else {
+      await window.electronAPI.pluginMarket.install(pluginId, {
+        expectedReleaseId: row.releaseId,
+        ...(row.expectedManifest ? { expectedManifest: row.expectedManifest } : {}),
+        allowPermissionExpansion: true,
+      });
+      patchRow(pluginId, { status: 'done' });
+    }
   } catch (error) {
     patchRow(pluginId, { status: 'failed', errorText: i18n.t(pluginMarketErrorKey(error)) });
   }
@@ -237,7 +266,9 @@ export function skipUpdateExpansion(pluginId: string): void {
 
 /**
  * 与外部事实对账:账号切换 → 整批作废;待确认行的插件被卸载 → 跳过、
- * 已被单项/文件更新装到目标版本 → 记为完成(不再提供重复安装入口)。
+ * 已被单项/文件更新装到目标版本 → 记为完成(不再提供重复安装入口)、
+ * 被装成别的版本 → 旧 permissionDiff 已不对应现实,清掉并标记待重审
+ * (真正的重算在 approve 时做,那里能取详情)。
  * 页面在已装清单或身份变化时调用。
  */
 export function reconcileUpdateAllBatch(): void {
@@ -256,6 +287,13 @@ export function reconcileUpdateAllBatch(): void {
       changed = true;
     } else if (installed.version === row.toVersion) {
       rows = updateRow(rows, row.pluginId, { status: 'done' });
+      changed = true;
+    } else if (installed.version !== row.fromVersion) {
+      rows = updateRow(rows, row.pluginId, {
+        fromVersion: installed.version,
+        permissionDiff: undefined,
+        staleReview: true,
+      });
       changed = true;
     }
   }

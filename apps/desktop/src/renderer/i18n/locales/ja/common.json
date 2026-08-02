@@ -3520,6 +3520,8 @@
         "description": "権限に変更がない更新は自動で完了します。権限が拡張される更新は項目ごとに確認が必要です。",
         "versionRange": "v{{from}} → v{{to}}",
         "permissionChanged": "権限に変更あり",
+        "reviewOutdated": "権限の差分が古くなりました",
+        "rereview": "再確認",
         "reviewDiff": "確認する",
         "collapseDiff": "閉じる",
         "approve": "同意して更新",

@@ -160,6 +160,69 @@ describe('updateAllController', () => {
     expect(installMock).not.toHaveBeenCalled();
   });
 
+  it('recomputes the diff when an external update moved the installed version', async () => {
+    stubDetail({
+      manifest: manifest({ network: { hosts: ['api.example.com'] } }),
+      sourceType: 'server',
+    });
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('needs-confirm');
+
+    // 「从文件更新」把插件装成了第三个版本,且它已自带原先要审的 network 权限:
+    // 审阅过的 diff 与 allowPermissionExpansion 都不再对应现实。
+    installedGhosts = [
+      { manifest: manifest({ version: '1.0.5', network: { hosts: ['api.example.com'] } }) },
+    ];
+    reconcileUpdateAllBatch();
+    const held = getUpdateAllBatchState().rows?.[0];
+    expect(held).toMatchObject({ status: 'needs-confirm', staleReview: true, fromVersion: '1.0.5' });
+    expect(held?.permissionDiff).toBeUndefined();
+
+    await approveUpdateExpansion('plugin-a');
+    // 相对当前已装 manifest 已无扩权 → 按普通更新安装,不带 allowPermissionExpansion。
+    expect(installMock).toHaveBeenCalledWith('plugin-a', { expectedReleaseId: 'release-2' });
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
+  });
+
+  it('keeps the row held for re-review when the recomputed diff still expands permissions', async () => {
+    stubDetail({
+      manifest: manifest({ network: { hosts: ['api.example.com'] } }),
+      sourceType: 'server',
+    });
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+
+    // 外部装成第三个版本,但仍不含目标版本要新增的 network 权限。
+    installedGhosts = [{ manifest: manifest({ version: '1.0.5' }) }];
+    reconcileUpdateAllBatch();
+    await approveUpdateExpansion('plugin-a');
+
+    const row = getUpdateAllBatchState().rows?.[0];
+    expect(row).toMatchObject({ status: 'needs-confirm', staleReview: false, fromVersion: '1.0.5' });
+    expect(row?.permissionDiff?.added.length).toBeGreaterThan(0);
+    // 重算后仍是扩权:必须回到用户逐项审阅,绝不静默放行。
+    expect(installMock).not.toHaveBeenCalled();
+  });
+
+  it('recomputes on version drift even before reconcile flagged the row', async () => {
+    stubDetail({
+      manifest: manifest({ network: { hosts: ['api.example.com'] } }),
+      sourceType: 'server',
+    });
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+
+    // 外部更新已落地但 reconcile 还没跑(竞态窗口):版本比较必须兜住,
+    // 不得拿旧 diff 换来的 allowPermissionExpansion 安装。
+    installedGhosts = [
+      { manifest: manifest({ version: '1.0.5', network: { hosts: ['api.example.com'] } }) },
+    ];
+    await approveUpdateExpansion('plugin-a');
+
+    expect(installMock).toHaveBeenCalledWith('plugin-a', { expectedReleaseId: 'release-2' });
+  });
+
   it('voids the batch when the data owner changes during the detail round-trip', async () => {
     let releaseDetail: (() => void) | undefined;
     detailMock.mockImplementation(

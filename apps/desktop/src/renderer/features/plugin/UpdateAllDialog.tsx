@@ -133,14 +133,32 @@ export function UpdateAllDialog({
                           <>
                             {' · '}
                             <span className="text-[var(--text-primary)]">
-                              {t('settings.ghosts.updateAll.permissionChanged')}
+                              {t(
+                                row.staleReview
+                                  ? 'settings.ghosts.updateAll.reviewOutdated'
+                                  : 'settings.ghosts.updateAll.permissionChanged',
+                              )}
                             </span>
                           </>
                         ) : null}
                       </p>
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
-                      {row.status === 'needs-confirm' ? (
+                      {row.status === 'needs-confirm' && row.staleReview ? (
+                        // 旧差异已随外部更新失效:点这里让控制器重新取详情重算,
+                        // 权限没扩张就直接更新,仍有扩张则回到逐项审阅。
+                        <button
+                          type="button"
+                          onClick={() => onApprove(row.pluginId)}
+                          className={cn(
+                            'inline-flex h-7 items-center rounded-full border border-[var(--border-default)] px-3 text-12 font-medium text-[var(--text-primary)]',
+                            'transition-colors duration-150 hover:bg-[var(--surface-hover-soft)]',
+                            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]',
+                          )}
+                        >
+                          {t('settings.ghosts.updateAll.rereview')}
+                        </button>
+                      ) : row.status === 'needs-confirm' ? (
                         <button
                           type="button"
                           aria-expanded={expanded}

@@ -3521,6 +3521,8 @@
         "description": "Updates without permission changes finish automatically; permission expansions need your per-item approval.",
         "versionRange": "v{{from}} → v{{to}}",
         "permissionChanged": "Permissions changed",
+        "reviewOutdated": "Permission diff outdated",
+        "rereview": "Review again",
         "reviewDiff": "Review & confirm",
         "collapseDiff": "Collapse",
         "approve": "Approve & update",

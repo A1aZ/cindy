@@ -15,7 +15,7 @@ import { GHOST_SCHEME, ghostPartition, type GhostManifest } from '../../shared/g
 import { createGhostThemeInjector, observeHostTheme } from './ghostPanelTheme';
 
 /**
- * 意识面板体(webview 供片)—— 顶层停靠 pane(ghostPanels)与右侧栏页签
+ * 意识面板体(webview 供片)—— 顶层停靠 pane(ghostPanels)与插件页内面板
  * (features/plugin/GhostPagePanelHost)共用的渲染内核,从 ghostPanels.tsx 原样抽出:
  * 沙箱 webview 装载、主题注入、崩溃接管、媒体右键菜单,全部与宿主容器无关。
  * 安全边界不变:分区/地址由 main 侧 webview 附加闸验明正身(webview-security),

@@ -346,7 +346,8 @@ export type GhostPanelPosition = (typeof GHOST_PANEL_POSITIONS)[number];
 export interface GhostPanelDecl {
   /** 面板标准头(PanelChrome)标题;缺省用意识 name。 */
   title?: string;
-  /** 显示形态:left 停靠主聊天窗左侧(缺省),或 'tab' 右侧栏页签;
+  /** 显示形态:left 停靠主聊天窗左侧(缺省),或 'tab' 插件页内独占面板
+   *  (2026-08-02 面板收束:只从插件页打开,离开插件页即关闭);
    *  right 已退役并入 left(2026-07-25 Lizi 定案,见 GHOST_PANEL_POSITIONS 注释)。 */
   position?: GhostPanelPosition;
   /** 面板界面入口(安装目录内相对路径,意识自绘)。 */

@@ -23,7 +23,7 @@ export interface GhostPluginListItem {
   version: string;
   enabled: boolean;
   canUse: boolean;
-  /** 声明了右侧栏页签面板(panel.position:'tab'),主动作为「使用」(打开面板)。 */
+  /** 声明了插件页内独占面板(panel.position:'tab'),主动作为「使用」(打开面板)。 */
   tabPanel: boolean;
   trust?: GhostTrustInfo;
   iconDataUrl?: string;

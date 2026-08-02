@@ -1111,15 +1111,23 @@ export class PluginMarketService {
     if (!compatible.ok) {
       throwIpcError('GHOST_FILE_INVALID', 'This Plugin manifest is not supported');
     }
-    if (
-      existing &&
-      diffGhostPermissionItems(existing.manifest, compatible.manifest).added.length > 0
-    ) {
+    /**
+     * 扩权闸门:按**传入时刻的**已装 manifest 判定。下面调用两次——
+     *  1. 锁外一次:快速失败,不为注定被拒的更新白下载几十 MB;
+     *  2. 落位前在 withGhostInstallLock 内再一次(权威):下载可能持续数分钟,
+     *     期间本地 `ghosts:update` 能整体替换已装 manifest。只在锁外判定的话,
+     *     旧的 reviewedBaseline 会放行相对**新** manifest 多出来的权限——
+     *     那些权限用户从没审过。锁内这次才是不可绕过的那道。
+     */
+    const assertExpansionApproved = (installedNow: GhostManifest | null): void => {
+      if (!installedNow) return;
+      if (diffGhostPermissionItems(installedNow, compatible.manifest).added.length === 0) return;
       if (options.allowPermissionExpansion !== true) {
         throwIpcError('PRECONDITION_FAILED', 'Plugin permissions changed and require review');
       }
-      assertReviewedBaselineFresh(existing.manifest, options.reviewedBaseline);
-    }
+      assertReviewedBaselineFresh(installedNow, options.reviewedBaseline);
+    };
+    assertExpansionApproved(existing?.manifest ?? null);
     const download = await this.api.download(plugin.id, plugin.currentRelease.id);
     requireSameMarketOwner(owner);
     if (
@@ -1167,6 +1175,14 @@ export class PluginMarketService {
           // 改动 Ghost 运行时之前的最后一道:跨来源 ghostId 所有权按当前事实重算。
           await options.recheckOwnership?.();
           requireSameMarketOwner(owner);
+          // 权限扩权的**权威**判定点:锁内按当前已装 manifest 重算。锁外那次
+          // 只是快速失败;下载窗口期本地装入/更新若换掉了已装包,旧批准在这里
+          // 被基线比对拦下,并发替换绕不过去(落位就在下面几行)。
+          assertExpansionApproved(
+            getGhostManager()
+              .list()
+              .find((ghost) => ghost.manifest.id === plugin.ghostId)?.manifest ?? null,
+          );
           // 市场首装一律装完即开(2026-07-26 定案,见 installOrUpdateMarketGhostPackage);
           // 已装过则走原位更新,唤醒/沉睡状态延续当前值。
           const installed = await installOrUpdateMarketGhostPackage(tempPath, {

@@ -795,6 +795,45 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(runtime.install).toHaveBeenCalledTimes(1);
   });
 
+  it('re-checks the baseline inside the install lock when the download window is raced', async () => {
+    const item = summary({
+      currentRelease: { ...summary().currentRelease, id: 'release-2', version: '2.0.0' },
+    });
+    // 审阅时已装 notify+fs:相对目标包没有新增权限,批准是"空头"批准。
+    const reviewedInstalled = manifest('cindy-test', '1.0.0', ['notify', 'fs']);
+    runtime.ghosts = [
+      { manifest: reviewedInstalled, dir: '/userData/cindy-brain/cindy-test', enabled: true },
+    ];
+    runtime.install.mockResolvedValue({
+      manifest: manifest('cindy-test', '2.0.0', ['notify', 'fs']),
+      dir: '/userData/cindy-brain/cindy-test',
+      enabled: true,
+    });
+    // 下载窗口期(锁外复核已通过之后)本地 ghosts:update 把已装换成只有 notify
+    // 的包——此刻目标包相对当前已装多出 fs,而这条从没被审阅过。
+    const downloadMock = vi.mocked(
+      (await import('../download.js')).downloadVerifiedPlugin,
+    );
+    downloadMock.mockImplementationOnce(async () => {
+      runtime.ghosts = [
+        { manifest: manifest(), dir: '/userData/cindy-brain/cindy-test', enabled: true },
+      ];
+    });
+    const h = harness([item]);
+    h.ledger.upsertInstallation({ ...recordForTest(item), releaseId: 'release-1', version: '1.0.0' });
+    h.api.detail.mockResolvedValue(detail(item, ['notify', 'fs']));
+
+    await expect(
+      h.service.install(item.id, {
+        expectedReleaseId: item.currentRelease.id,
+        allowPermissionExpansion: true,
+        reviewedBaseline: ghostPermissionBaselineKey(reviewedInstalled),
+      }),
+    ).rejects.toThrow('[PRECONDITION_FAILED]');
+    // 锁内复核发生在落位之前:并发替换绕不过旧批准。
+    expect(runtime.install).not.toHaveBeenCalled();
+  });
+
   it('rejects an update when the installed target disappears during download', async () => {
     const item = summary({ currentRelease: { ...summary().currentRelease, version: '2.0.0' } });
     const h = harness([item]);

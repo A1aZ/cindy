@@ -543,6 +543,54 @@ describe('updateAllController', () => {
     expect(row?.permissionDiff).toBeUndefined();
   });
 
+  it('lets a held runner row be re-reviewed and approved through to completion', async () => {
+    stubDetail({ manifest: manifest({}), sourceType: 'git-market' });
+    installMock.mockRejectedValueOnce(
+      Object.assign(new Error('precondition'), {
+        message: 'Error invoking remote method: Error: [PRECONDITION_FAILED] release changed',
+      }),
+    );
+
+    startUpdateAllBatch([marketItem({ sourceType: 'git-market' })]);
+    await waitForSettledBatch();
+
+    const held = getUpdateAllBatchState().rows?.[0];
+    expect(held).toMatchObject({ status: 'needs-confirm', staleReview: true });
+    // 关键:待重审行必须带着目标 release,否则 approve 的入口守卫会直接返回,
+    // 用户点「重新审阅」毫无反应,该项在本批次里永远走不下去。
+    expect(held?.releaseId).toBe('release-2');
+
+    // 点「重新审阅」→ 重取详情、按当前事实重算(已无扩权)→ 装上收尾。
+    await approveUpdateExpansion('plugin-a');
+
+    expect(installMock).toHaveBeenLastCalledWith('plugin-a', {
+      expectedReleaseId: 'release-2',
+      expectedManifest: expect.anything(),
+    });
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
+  });
+
+  it('fails instead of holding when there is no target release to re-review', async () => {
+    // detail 拿得到、但 install 前置条件失败且行上没有 releaseId 的极端情形:
+    // 用 detail 报 installed 之外的路径构造——这里直接验证 hold 的防御分支,
+    // 保证不会产出「点不动的 needs-confirm 死行」。
+    detailMock.mockResolvedValue({
+      ...marketItem({ releaseId: '' }),
+      manifest: manifest({}),
+      readme: null,
+    } as unknown as PluginMarketDetail);
+    installMock.mockRejectedValueOnce(
+      Object.assign(new Error('precondition'), {
+        message: 'Error invoking remote method: Error: [PRECONDITION_FAILED] gone',
+      }),
+    );
+
+    startUpdateAllBatch([marketItem({ releaseId: '' })]);
+    await waitForSettledBatch();
+
+    expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('failed');
+  });
+
   it('still fails the row on non-precondition install errors', async () => {
     stubDetail({ manifest: manifest({}), sourceType: 'server' });
     installMock.mockRejectedValueOnce(new Error('network down'));

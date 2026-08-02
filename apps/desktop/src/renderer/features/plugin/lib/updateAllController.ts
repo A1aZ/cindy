@@ -134,11 +134,20 @@ function holdRowForReReview(
   pluginId: string,
   patch: Partial<UpdateAllRow> = {},
 ): void {
+  const releaseId = patch.releaseId ?? state.rows?.find((r) => r.pluginId === pluginId)?.releaseId;
+  if (!releaseId) {
+    // 没有目标 release 就没有可重审的对象:approveUpdateExpansion 的入口守卫
+    // 要求 row.releaseId 存在,少了它这行会变成点「重新审阅」也没反应的死行。
+    // 与其静默卡住,不如如实落失败(errorText 留空 = 弹窗显示通用失败文案)。
+    patchRow(generation, pluginId, { status: 'failed' });
+    return;
+  }
   patchRow(generation, pluginId, {
     status: 'needs-confirm',
     staleReview: true,
     permissionDiff: undefined,
     ...patch,
+    releaseId,
   });
 }
 
@@ -230,8 +239,12 @@ async function runQueue(generation: number): Promise<void> {
       const next = (state.rows ?? []).find((row) => row.status === 'pending');
       if (!next) break;
       patchRow(generation, next.pluginId, { status: 'installing' });
+      // detail 提到 try 外:install 抛前置条件失败时,catch 要靠它把目标 release
+      // 写回待重审行——runApprovalBody 的入口守卫要求 row.releaseId 存在,
+      // 缺了它用户点「重新审阅」会直接 return,该项在本批次里静默卡死。
+      let detail: Awaited<ReturnType<typeof window.electronAPI.pluginMarket.detail>> | null = null;
       try {
-        const detail = await window.electronAPI.pluginMarket.detail(next.pluginId);
+        detail = await window.electronAPI.pluginMarket.detail(next.pluginId);
         // detail 往返期间可能切换账号或换批次:install 会以当前账号执行,
         // 旧批次绝不能把上一轮的更新落到新账号/新批次上。
         if (batchGeneration !== generation) return;
@@ -273,12 +286,17 @@ async function runQueue(generation: number): Promise<void> {
         patchRow(generation, next.pluginId, { status: 'done' });
       } catch (error) {
         if (batchGeneration !== generation) return;
-        if (extractIpcError(error)?.code === 'PRECONDITION_FAILED') {
-          // 前置条件变化(基线复核否决 / release 变了 / 自定义源换了 manifest)
-          // 不是「更新失败」而是「事实已变,请重新审阅」。落成终态 failed 会让
-          // 这一项彻底没有入口,用户只能关掉弹窗重启整批。改为可恢复的待重审:
-          // 弹窗显示「权限差异已过期 / 重新审阅」,点一下就按当前事实重算。
-          holdRowForReReview(generation, next.pluginId);
+        // 前置条件变化(基线复核否决 / release 变了 / 自定义源换了 manifest)
+        // 不是「更新失败」而是「事实已变,请重新审阅」。落成终态 failed 会让
+        // 这一项彻底没有入口,用户只能关掉弹窗重启整批。改为可恢复的待重审:
+        // 弹窗显示「权限差异已过期 / 重新审阅」,点一下就按当前事实重算。
+        // detail 为 null 说明连详情都没取到,没有可写回的 release,此时重审也
+        // 无从下手,按失败处理更诚实。
+        if (extractIpcError(error)?.code === 'PRECONDITION_FAILED' && detail !== null) {
+          holdRowForReReview(generation, next.pluginId, {
+            releaseId: detail.releaseId,
+            toVersion: detail.version,
+          });
           continue;
         }
         // 失败也只写回自己的批次:代际失效时这条错误属于已作废的批次。

@@ -38,33 +38,31 @@ export const HTML_PREVIEW_CSP = [
 
 const CSP_META = `<meta http-equiv="Content-Security-Policy" content="${HTML_PREVIEW_CSP}">`;
 
-const HEAD_OPEN_RE = /<head\b[^<>]*>/i;
-const HTML_OPEN_RE = /<html\b[^<>]*>/i;
-const DOCTYPE_RE = /<!doctype[^<>]*>/i;
+/**
+ * 文档开头的 doctype:只认**紧贴开头**(允许 BOM / 空白)的那一个。
+ * 出现在别处的 doctype 是无效标记,浏览器忽略,我们也不据它定位。
+ */
+const LEADING_DOCTYPE_RE = /^(\uFEFF?\s*<!doctype[^<>]*>)/i;
 
 /**
- * 把 CSP meta 插进文档。
+ * 把 CSP meta 插到**任何作者内容之前**(doctype 之后)。
  *
- * 位置要求:meta CSP 只对**它之后**的内容生效,所以必须尽可能靠前 —— 依次尝试
- * `<head>` 之后、`<html>` 之后、doctype 之后,最后才退化为整份文档前置。
- * **不能无条件前置到最开头**:那会把 doctype 挤到 meta 后面,文档掉进 quirks mode,
- * 排版跟着变形。
+ * ⚠️ 这里**刻意不去找 `<head>`**(review P1,Codex 与 Greptile 各报一次):
+ *  - 找 `<head>` 的正则会命中注释里的假标签(`<!-- <head> -->`),CSP 被插进注释、
+ *    策略被整份忽略;
+ *  - 即使命中真的 `<head>`,真实 `<head>` **之前**的内容(浏览器会把前置 `<script>`
+ *    照常执行)仍在策略生效前跑,足够在网络被封锁之前把刚内联的资源正文外传。
+ * meta CSP 只对它之后的内容生效,所以唯一安全的位置就是最前面。
+ *
+ * doctype 必须保持在最前:把 meta 插到它前面会让文档掉进 quirks mode、排版变形。
+ * 插在 doctype 之后、`<html>` 之前是合法的 —— 解析器在 "before html" 模式遇到
+ * 非 html 标签会隐式建出 html/head 并把 meta 放进 head,与显式写在 head 里等效。
  */
 export function withHtmlPreviewCsp(html: string): string {
-  const head = HEAD_OPEN_RE.exec(html);
-  if (head) {
-    const at = head.index + head[0].length;
+  const doctype = LEADING_DOCTYPE_RE.exec(html);
+  if (doctype) {
+    const at = doctype[1].length;
     return html.slice(0, at) + CSP_META + html.slice(at);
   }
-  const htmlTag = HTML_OPEN_RE.exec(html);
-  if (htmlTag) {
-    const at = htmlTag.index + htmlTag[0].length;
-    return `${html.slice(0, at)}<head>${CSP_META}</head>${html.slice(at)}`;
-  }
-  const doctype = DOCTYPE_RE.exec(html);
-  if (doctype) {
-    const at = doctype.index + doctype[0].length;
-    return `${html.slice(0, at)}<head>${CSP_META}</head>${html.slice(at)}`;
-  }
-  return `<head>${CSP_META}</head>${html}`;
+  return CSP_META + html;
 }

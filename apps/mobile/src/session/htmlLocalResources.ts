@@ -101,6 +101,14 @@ export interface HtmlResourceRef {
   absPath: string;
   /** 该资源的 MIME(data: URI 用;未知类型不会进候选)。 */
   mimeType: string;
+  /**
+   * 原引用里的片段标识(含 `#`,无则空串)。
+   *
+   * 取件按无 fragment 的路径走,但**回填时必须补回去**(review P2):
+   * `url(sprite.svg#download)` / `<img src="icons.svg#logo">` 这类 SVG sprite 引用靠
+   * fragment 选中目标 view/symbol,丢掉它浏览器只会渲染 SVG 根文档。
+   */
+  fragment: string;
 }
 
 /**
@@ -169,11 +177,14 @@ export function collectHtmlLocalResourceRefs(
   const push = (start: number, end: number, raw: string): void => {
     const absPath = resolveHtmlResourcePath(baseDirAbsPath, raw);
     if (!absPath) return;
+    // fragment 单独留着:取件不带它,回填要补回去(见 HtmlResourceRef.fragment)。
+    const hashAt = raw.indexOf('#');
+    const fragment = hashAt >= 0 ? raw.slice(hashAt) : '';
     // MIME 未知的不改写:data: URI 的类型由它决定,给错会让样式表/脚本被浏览器拒收,
     // 猜一个反而制造"看起来取到了其实没生效"的假象(fail-closed)。
     const mimeType = htmlResourceMimeFor(absPath);
     if (!mimeType) return;
-    refs.push({ start, end, raw, absPath, mimeType });
+    refs.push({ start, end, raw, absPath, mimeType, fragment });
   };
 
   // ① 标签属性。先定位标签(含标签名判定),再在该标签文本内找目标属性 ——
@@ -237,7 +248,8 @@ export function applyHtmlResourceUrls(
     const ref = refs[i];
     const url = urlByAbsPath.get(ref.absPath);
     if (!url) continue;
-    out = out.slice(0, ref.start) + url + out.slice(ref.end);
+    // fragment 补回 data: URI 之后:SVG sprite 靠它选目标 symbol/view。
+    out = out.slice(0, ref.start) + url + ref.fragment + out.slice(ref.end);
   }
   return out;
 }

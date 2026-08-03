@@ -33,41 +33,50 @@ describe('HTML_PREVIEW_CSP(策略内容)', () => {
 describe('withHtmlPreviewCsp(注入位置)', () => {
   const cspTag = `<meta http-equiv="Content-Security-Policy" content="${HTML_PREVIEW_CSP}">`;
 
-  it('有 <head> 时插在 head 开标签之后(策略只对其后内容生效)', () => {
-    const out = withHtmlPreviewCsp('<!doctype html><html><head><title>x</title></head><body>b</body></html>');
-    expect(out).toBe(`<!doctype html><html><head>${cspTag}<title>x</title></head><body>b</body></html>`);
-    // 必须在任何可加载资源之前。
-    expect(out.indexOf(cspTag)).toBeLessThan(out.indexOf('<title>'));
+  it('插在 doctype 之后、任何作者内容之前', () => {
+    expect(withHtmlPreviewCsp('<!doctype html><html><head><title>x</title></head><body>b</body></html>'))
+      .toBe(`<!doctype html>${cspTag}<html><head><title>x</title></head><body>b</body></html>`);
   });
 
-  it('带属性的 <head> 也认', () => {
-    const out = withHtmlPreviewCsp('<html><head data-x="1"><meta charset="utf-8"></head></html>');
-    expect(out).toContain(`<head data-x="1">${cspTag}`);
+  it('无 doctype 时直接前置', () => {
+    expect(withHtmlPreviewCsp('<html><body>b</body></html>')).toBe(`${cspTag}<html><body>b</body></html>`);
+    expect(withHtmlPreviewCsp('<p>hi</p>')).toBe(`${cspTag}<p>hi</p>`);
   });
 
-  it('无 <head> 时补一个,插在 <html> 之后', () => {
-    const out = withHtmlPreviewCsp('<!doctype html><html><body>b</body></html>');
-    expect(out).toBe(`<!doctype html><html><head>${cspTag}</head><body>b</body></html>`);
+  it('**不去找 <head>** —— 注释里的假标签会把策略插进注释、整份失效', () => {
+    // review P1:`<head>` 正则会命中注释内容,CSP 落在注释里等于没有策略。
+    const html = '<!doctype html><!-- <head> --><html><head></head><body></body></html>';
+    const out = withHtmlPreviewCsp(html);
+    // 策略必须在注释之前,而不是被塞进注释里。
+    expect(out.indexOf(cspTag)).toBeLessThan(out.indexOf('<!-- <head> -->'));
+    expect(out).toBe(`<!doctype html>${cspTag}<!-- <head> --><html><head></head><body></body></html>`);
   });
 
-  it('只有 doctype 时插在 doctype 之后 —— 不能挤到 doctype 之前', () => {
-    const out = withHtmlPreviewCsp('<!DOCTYPE html><body>b</body>');
-    expect(out.startsWith('<!DOCTYPE html>')).toBe(true);
-    expect(out).toBe(`<!DOCTYPE html><head>${cspTag}</head><body>b</body>`);
-  });
-
-  it('片段(无 doctype 无 html)才整份前置', () => {
-    expect(withHtmlPreviewCsp('<p>hi</p>')).toBe(`<head>${cspTag}</head><p>hi</p>`);
+  it('真实 <head> 之前的脚本也必须在策略之后执行', () => {
+    // 前置 script 会被浏览器照常执行;插在 head 里的话它已经在策略生效前跑完了。
+    const html = '<!doctype html><script>fetch("https://evil")</script><html><head></head></html>';
+    const out = withHtmlPreviewCsp(html);
+    expect(out.indexOf(cspTag)).toBeLessThan(out.indexOf('<script>'));
   });
 
   it('doctype 永远保持在最前(否则文档掉进 quirks mode,排版变形)', () => {
     for (const html of [
       '<!doctype html><html><head></head><body></body></html>',
-      '<!doctype html><html><body></body></html>',
+      '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"><body></body>',
       '<!doctype html><body></body>',
     ]) {
-      expect(withHtmlPreviewCsp(html).toLowerCase().startsWith('<!doctype html>')).toBe(true);
+      expect(withHtmlPreviewCsp(html).toLowerCase().startsWith('<!doctype')).toBe(true);
     }
+  });
+
+  it('doctype 前有 BOM / 空白也认', () => {
+    const out = withHtmlPreviewCsp('\uFEFF\n<!doctype html><body>b</body>');
+    expect(out).toBe(`\uFEFF\n<!doctype html>${cspTag}<body>b</body>`);
+  });
+
+  it('非开头位置的 doctype 不作为锚点(无效标记,浏览器忽略)', () => {
+    const out = withHtmlPreviewCsp('<p>x</p><!doctype html>');
+    expect(out.startsWith(cspTag)).toBe(true);
   });
 });
 

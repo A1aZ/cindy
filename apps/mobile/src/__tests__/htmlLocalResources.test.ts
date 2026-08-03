@@ -327,3 +327,37 @@ describe('MIME 未知的引用不进候选(fail-closed)', () => {
     expect(refs[0].mimeType).toBe('image/png');
   });
 });
+
+describe('SVG fragment 必须保留(sprite 靠它选 symbol)', () => {
+  it('属性与 url() 两种形态都把 fragment 补回 data: URI 之后', () => {
+    const html = '<img src="icons.svg#logo"><style>.a{background:url(sprite.svg#download)}</style>';
+    const refs = collectHtmlLocalResourceRefs(html, BASE);
+    expect(refs.map((r) => r.fragment)).toEqual(['#logo', '#download']);
+    // 取件按无 fragment 的路径走(同一个文件只取一次)。
+    expect(refs[0].absPath).toBe('/Users/me/drafts/icons.svg');
+    expect(refs[1].absPath).toBe('/Users/me/drafts/sprite.svg');
+    const urls = new Map([
+      ['/Users/me/drafts/icons.svg', 'data:image/svg+xml;base64,AAA'],
+      ['/Users/me/drafts/sprite.svg', 'data:image/svg+xml;base64,BBB'],
+    ]);
+    expect(applyHtmlResourceUrls(html, refs, urls)).toBe(
+      '<img src="data:image/svg+xml;base64,AAA#logo">'
+      + '<style>.a{background:url(data:image/svg+xml;base64,BBB#download)}</style>',
+    );
+  });
+
+  it('无 fragment 时不多加 `#`', () => {
+    const html = '<img src="a.png">';
+    const refs = collectHtmlLocalResourceRefs(html, BASE);
+    expect(refs[0].fragment).toBe('');
+    expect(applyHtmlResourceUrls(html, refs, new Map([['/Users/me/drafts/a.png', 'data:image/png;base64,X']])))
+      .toBe('<img src="data:image/png;base64,X">');
+  });
+
+  it('同一 SVG 的不同 fragment 只取一次件', () => {
+    const refs = collectHtmlLocalResourceRefs('<img src="s.svg#a"><img src="s.svg#b">', BASE);
+    expect(planHtmlResourceFetches(refs).targets).toEqual([
+      { absPath: '/Users/me/drafts/s.svg', mimeType: 'image/svg+xml' },
+    ]);
+  });
+});

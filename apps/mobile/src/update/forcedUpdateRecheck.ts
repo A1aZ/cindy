@@ -86,6 +86,15 @@ export interface ForcedUpdateRechecker {
    * 未触发时返回 null(便于测试断言),触发时返回本次核对的 Promise(永不 reject)。
    */
   handleAppStateChange: (next: string) => Promise<ForcedUpdateRecheckOutcome> | null;
+  /**
+   * 定时兜底入口(阻断屏挂载期间周期性调用)。只受节流与在途约束,不看 AppState。
+   *
+   * 为什么必须有:光靠 AppState 跳变不够 —— (1) 用户就坐在阻断屏上不动时没有任何跳变;
+   * (2) 阻断态在后台被置位、用户在节流窗口内就回来时,那次 'active' 会被节流丢掉,
+   * 而后再没有事件来重试。两种情况下运维撤回门槛 / 修正安装地址都不会被观察到,
+   * 阻断屏会一直停在旧状态。
+   */
+  handleTick: () => Promise<ForcedUpdateRecheckOutcome> | null;
 }
 
 /** 创建阻断屏核对器(持有节流/在途状态;阻断屏挂载期间一个实例)。 */
@@ -160,6 +169,13 @@ export function createForcedUpdateRechecker(
     }
   }
 
+  /** 节流 + 在途门:两个入口共用,通过则占用本轮并发起。 */
+  function tryRun(): Promise<ForcedUpdateRecheckOutcome> | null {
+    if (inFlight || deps.now() - lastRunAt < minIntervalMs) return null;
+    lastRunAt = deps.now();
+    return run();
+  }
+
   return {
     handleAppStateChange(next: string): Promise<ForcedUpdateRecheckOutcome> | null {
       if (next === 'background') {
@@ -168,9 +184,10 @@ export function createForcedUpdateRechecker(
       }
       if (next !== 'active' || !wasBackground) return null;
       wasBackground = false;
-      if (inFlight || deps.now() - lastRunAt < minIntervalMs) return null;
-      lastRunAt = deps.now();
-      return run();
+      return tryRun();
+    },
+    handleTick(): Promise<ForcedUpdateRecheckOutcome> | null {
+      return tryRun();
     },
   };
 }

@@ -18,6 +18,9 @@ import {
 } from './forcedUpdateStore';
 import { isCanaryChannel } from './canaryChannelStore';
 
+/** 定时敲门间隔;真实请求频率仍由核对器内部节流决定(默认 30s)。 */
+const RECHECK_TICK_MS = 30_000;
+
 export function useForcedUpdateRecheck(isCanary = isCanaryChannel()): void {
   useEffect(() => {
     let current = true;
@@ -47,9 +50,16 @@ export function useForcedUpdateRecheck(isCanary = isCanaryChannel()): void {
     const subscription = AppState.addEventListener('change', (next) => {
       void rechecker.handleAppStateChange(next);
     });
+    // 定时兜底:光靠 AppState 跳变不够 —— 用户就停在阻断屏上不动时没有任何跳变,
+    // 而在后台被置位又在节流窗口内回前台的那次 'active' 也会被节流丢掉。
+    // 实际请求频率由核对器内部节流(默认 30s)决定,这里只负责按时敲门。
+    const timer = setInterval(() => {
+      void rechecker.handleTick();
+    }, RECHECK_TICK_MS);
     return () => {
       current = false;
       subscription.remove();
+      clearInterval(timer);
     };
   }, [isCanary]);
 }

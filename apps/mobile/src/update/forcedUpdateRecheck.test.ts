@@ -101,6 +101,43 @@ describe('createForcedUpdateRechecker 触发条件', () => {
   });
 });
 
+describe('createForcedUpdateRechecker 定时兜底', () => {
+  it('挂载后立刻 tick:间隔不足 → 不检查', () => {
+    const deps = makeDeps();
+    const rechecker = createForcedUpdateRechecker(deps);
+    expect(rechecker.handleTick()).toBeNull();
+    expect(deps.fetchLatest).not.toHaveBeenCalled();
+  });
+
+  it('用户停在阻断屏不动(无任何 AppState 跳变)→ 间隔满足后 tick 会核对', async () => {
+    const deps = makeDeps();
+    const rechecker = createForcedUpdateRechecker(deps, { minIntervalMs: 1000 });
+    deps.advance(1001);
+    const result = rechecker.handleTick();
+    expect(result).not.toBeNull();
+    await result;
+    expect(deps.fetchLatest).toHaveBeenCalledOnce();
+  });
+
+  it('在后台被置位、用户在节流窗口内回来 → 那次 active 被丢掉,但 tick 随后补上', async () => {
+    const deps = makeDeps({ getAppState: () => 'background' });
+    const rechecker = createForcedUpdateRechecker(deps, { minIntervalMs: 1000 });
+    deps.advance(500); // 窗口内回前台
+    expect(rechecker.handleAppStateChange('active')).toBeNull();
+    deps.advance(600); // 窗口过去
+    expect(rechecker.handleTick()).not.toBeNull();
+  });
+
+  it('tick 与 AppState 共用节流:刚查过就 tick → 不重复发起', async () => {
+    const deps = makeDeps();
+    const rechecker = createForcedUpdateRechecker(deps, { minIntervalMs: 1000 });
+    deps.advance(1001);
+    await resume(rechecker);
+    expect(rechecker.handleTick()).toBeNull();
+    expect(deps.fetchLatest).toHaveBeenCalledOnce();
+  });
+});
+
 describe('createForcedUpdateRechecker 解除判定', () => {
   const runOnce = (deps: ReturnType<typeof makeDeps>) => {
     const rechecker = createForcedUpdateRechecker(deps, { minIntervalMs: 0 });

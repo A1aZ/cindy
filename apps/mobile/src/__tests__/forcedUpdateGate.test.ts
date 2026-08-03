@@ -75,6 +75,10 @@ describe('强更阻断闸门', () => {
     const fetchLatest = readCode('src/update/fetchLatestRelease.ts');
     expect(fetchLatest).toContain("'cache-control': 'no-cache'");
     expect(fetchLatest).toContain('&t=${Date.now()}');
+    // 光靠 AppState 跳变不够:用户停在阻断屏上不动时没有任何跳变,必须有定时兜底。
+    const recheckHook = readCode('src/update/useForcedUpdateRecheck.ts');
+    expect(recheckHook).toContain('rechecker.handleTick()');
+    expect(recheckHook).toContain('clearInterval(timer)');
     // 在途期间若有更新的观察写入 store,本次旧结论必须作废(compare-and-set)。
     expect(recheck).toContain('const startRevision = deps.getRevision?.();');
     expect(recheck).toContain('deps.onCleared(startRevision)');

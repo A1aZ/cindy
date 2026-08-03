@@ -131,6 +131,23 @@ describe('responsivenessTracker', () => {
     expect(recoverLink).toHaveBeenCalledWith(DEV);
   });
 
+  it('同一设备的并发超时共享 cohort,一次链路故障只计一次 strike', async () => {
+    const h = harness();
+    const requests = Array.from({ length: BREAKER_FAILURE_THRESHOLD }, () =>
+      h.tracker.guardInvoke(DEV, 'local-db:sessions:list', () => Promise.reject(timeoutError())),
+    );
+    await expect(Promise.all(requests)).rejects.toThrow('no invoke-result');
+    expect(h.tracker.isUnresponsive(DEV)).toBe(false);
+
+    await expect(
+      h.tracker.guardInvoke(DEV, 'local-db:sessions:list', () => Promise.reject(timeoutError())),
+    ).rejects.toThrow();
+    await expect(
+      h.tracker.guardInvoke(DEV, 'local-db:sessions:list', () => Promise.reject(timeoutError())),
+    ).rejects.toThrow();
+    expect(h.tracker.isUnresponsive(DEV)).toBe(true);
+  });
+
   it('探测窗口未到 / 前置条件不满足时 probeTick 不发探测;窗口到且合格才单飞', async () => {
     let eligible = false;
     const h = harness({ isProbeEligible: () => eligible });

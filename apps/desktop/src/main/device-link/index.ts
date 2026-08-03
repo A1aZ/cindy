@@ -889,6 +889,11 @@ export function getUnresponsiveDeviceIds(): string[] {
   return responsivenessTracker?.getUnresponsiveDeviceIds() ?? [];
 }
 
+/** 本机禁用目标设备控制时清除响应性熔断，避免重新启用后继承旧的 open 状态。 */
+export function clearDeviceResponsiveness(deviceId: string): void {
+  responsivenessTracker?.clearDevice(deviceId);
+}
+
 /**
  * 系统睡眠唤醒:立即重建连接而不是干等退避计时器(最坏 30s)+ 心跳判死(~45s)。
  * 状态仍是 online 也要重建 —— 睡眠期间 socket 大概率已半开假活(对端早没了,

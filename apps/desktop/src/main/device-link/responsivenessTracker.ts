@@ -134,6 +134,8 @@ export function createResponsivenessTracker(
   const now = deps.now ?? Date.now;
   const unresponsive = new Set<string>();
   const linkRecoveryInFlight = new Map<string, Promise<unknown>>();
+  /** 同一设备在途业务请求共享一个 timeout cohort，避免一次链路故障重复计 strike。 */
+  const activeCohorts = new Map<string, { cohort: number; count: number }>();
   const breaker = createDeviceResponsivenessBreaker({
     now: deps.now,
     onOpenChanged: (deviceId, open) => {
@@ -150,23 +152,12 @@ export function createResponsivenessTracker(
     breaker.settle(deviceId, slot, outcome);
   };
 
-  // 同一设备短时间窗内的并发请求共享一个熔断批次(cohort):renderer 的 fan-out
-  // 预取(capabilities / providers / git-safety 同 tick 并发)在一次短暂链路中断里
-  // 会同时超时,逐请求独立记账会让单轮并发直接凑满 3 次阈值误开熔断(review P2)。
-  // 窗口取 250ms:真实 fan-out 在同一事件循环 tick 或几十 ms 内发出,250ms 足够
-  // 覆盖;而用户手动发起的独立操作极少落进同一 250ms,不至于把独立超时误并
-  // (review P1 权衡)。更根本地,窗口内"独立"操作若同时超时,反映的也是同一
-  // 时刻的链路状态,证据价值与一次 fan-out 等同——阈值语义要的是时间上分离的
-  // 多次观察。窗口从批首请求起算,不滑动。
-  const COHORT_WINDOW_MS = 250;
-  const activeCohorts = new Map<string, { id: number; startedAt: number }>();
-  const cohortFor = (deviceId: string): number => {
-    const nowMs = now();
-    const entry = activeCohorts.get(deviceId);
-    if (entry && nowMs - entry.startedAt < COHORT_WINDOW_MS) return entry.id;
-    const id = breaker.createCohort(deviceId);
-    activeCohorts.set(deviceId, { id, startedAt: nowMs });
-    return id;
+  const releaseCohort = (deviceId: string, slot: BreakerSendSlot): void => {
+    if (slot.decision !== 'allow') return;
+    const active = activeCohorts.get(deviceId);
+    if (!active || active.cohort !== slot.cohort) return;
+    if (active.count <= 1) activeCohorts.delete(deviceId);
+    else active.count -= 1;
   };
 
   const guardInvoke = async <T>(
@@ -174,16 +165,24 @@ export function createResponsivenessTracker(
     channel: string,
     run: () => Promise<T>,
   ): Promise<T> => {
-    const slot = breaker.acquire(deviceId, cohortFor(deviceId));
+    const cohort = activeCohorts.get(deviceId)?.cohort ?? breaker.createCohort(deviceId);
+    const slot = breaker.acquire(deviceId, cohort);
     if (slot.decision === 'reject') throw createDeviceUnresponsiveError(deviceId);
+    if (slot.decision === 'allow') {
+      const current = activeCohorts.get(deviceId);
+      if (current?.cohort === cohort) current.count += 1;
+      else activeCohorts.set(deviceId, { cohort, count: 1 });
+    }
     const wasProbe = slot.decision === 'probe';
     try {
       const result = await run();
       settle(deviceId, slot, classifyDeviceSendSuccess(channel, wasProbe));
+      releaseCohort(deviceId, slot);
       return result;
     } catch (err) {
       const outcome = classifyDeviceSendFailure(err);
       settle(deviceId, slot, outcome);
+      releaseCohort(deviceId, slot);
       if (outcome === 'timeout' && deps.recoverLink && !linkRecoveryInFlight.has(deviceId)) {
         let recovery: Promise<unknown>;
         try {

@@ -1643,6 +1643,18 @@ export class DeviceLinkClient {
       // 光靠沉默丢弃两边会互等(死锁的另一半)。节流通知 host,由控制端
       // 决定是否主动重新 link-open 让双方 stream 重新对齐。
       this.notifyReliableFrameBeforeLink(env.src);
+      if (!peer.explicitlyClosed) {
+        const now = Date.now();
+        const last = this.staleLinkRepairAt.get(env.src) ?? 0;
+        if (now - last >= 5_000) {
+          this.staleLinkRepairAt.set(env.src, now);
+          try {
+            this.opts.onPeerLinkNeedsReopen?.(env.src);
+          } catch (err) {
+            this.log.debug(`peer link reopen callback failed for ${env.src.slice(0, 8)}`, err);
+          }
+        }
+      }
       return { handled: true };
     }
     if (peer.remoteStreamId && peer.remoteStreamId !== parsed.meta.streamId) {

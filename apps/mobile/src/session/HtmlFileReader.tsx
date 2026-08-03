@@ -20,6 +20,8 @@
  * 其余一切(程序化导航、`file://`、`tel:`、`mailto:`、自定义 scheme)明确拒绝且
  * **不交给 Linking**。
  * 不挂 onMessage:页面里的 postMessage 无人消费,不给任意生成物开一条通向 RN 侧的通道。
+ * Android 另关多窗口:`window.open` / `target="_blank"` 走的是 onCreateWindow,不经过下面
+ * 的导航回调,不关掉等于给策略留一个后门(见 setSupportMultipleWindows 处的说明)。
  *
  * ⚠️ `originWhitelist` 必须是 `['*']`,不能收窄成 `['about:blank']`(review P2 实捉):
  * RNW 的 originWhitelist 在 `onShouldStartLoadWithRequest` **之前**生效,被它拒掉的 URL
@@ -38,6 +40,12 @@ export function HtmlFileReader({ html, testID }: { html: string; testID?: string
         // 见头注:收窄会让 RNW 在回调前把非白名单 URL 交给 Linking,绕过下面的策略。
         originWhitelist={['*']}
         scrollEnabled
+        // Android:关掉多窗口(review P1)。留着默认支持时,`window.open(...)` 与
+        // `target="_blank"` 会走 onCreateWindow 而**不经过** onShouldStartLoadWithRequest,
+        // 于是程序化打开 https 或自定义 scheme 能整个绕过上面的 click 门与 scheme 拒绝。
+        // 与仓内其它本地 HTML WebView 一致(mathWebView / mermaidWebView /
+        // AnnotationBurnInWebView / ComposerRichInput 都设了这一项)。
+        setSupportMultipleWindows={false}
         // baseUrl 显式给 about:blank,**不能省**:两端默认值不一致 —— iOS
         // (RNCWebViewImpl.m)缺省就是 about:blank,Android(RNCWebViewManagerImpl.kt)
         // 缺省传的是空串给 loadDataWithBaseURL。空串下页内锚点(`<a href="#toc">`)

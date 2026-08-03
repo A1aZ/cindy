@@ -22,16 +22,22 @@
  * 注释把这套封锁描述成绝对的,**那是错的**,已改;守卫用例禁止那类措辞回归。
  *
  * 已做的收窄:
- *  - `webrtc 'block'`(CSP3):Chromium 111+ 实现,Android System WebView 走 Chromium 内核、
- *    随 Play 商店更新,实机上基本都覆盖 → 那一侧是真封住的。**iOS 的 WKWebView 是 WebKit,
- *    尚未实现该指令,这条在 iOS 上无效**。未知指令被引擎忽略、不影响策略其余部分,所以加
- *    它没有副作用。
- *  - `mediaCapturePermissionGrantType="deny"`(见 HtmlFileReader):挡掉摄像头 / 麦克风取用。
+ *  - `webrtc 'block'`(CSP3):**实测在任何平台都没有生效,不要把它当成封锁依据**。
+ *    早先这里照着 CSP3 spec 推断它在 Chromium 系已落地、于是断言 Android 那一侧被它封住 ——
+ *    那个推断**没有实测**,是错的。实机验(Chrome 150.0.7871.187,远高于 spec 标注的版本):
+ *    经 `<meta http-equiv>` 与 HTTP `Content-Security-Policy` 响应头**两种下发方式**,
+ *    顶层 `new RTCPeerConnection()` 都照常构造成功 —— 该指令在当前引擎里是装饰品。
+ *    iOS 的 WKWebView(WebKit)本来就不认。**指令保留**(未知/未实现指令被引擎忽略,零副作用,
+ *    将来引擎真落地了自动生效),但当前对 WebRTC 的实际封锁**只来自下面那段 guard 删构造函数**,
+ *    而 guard 只作用于顶层 realm。守卫用例禁止「那一侧真封住」这类措辞回归。
+ *  - `mediaCapturePermissionGrantType="deny"`(见 HtmlFileReader):挡掉摄像头 / 麦克风取用,
+ *    **但只在 iOS 生效** —— Android 的同名 setter 是空函数,详见下面 guard 的注释。
  *    它**不能**关闭 WebRTC 外传 —— 纯数据通道与 STUN 候选收集都不需要媒体权限;这条是
  *    「不可信页面不该弹权限框」本身的正确做法,不要当成 WebRTC 的解。
  *
- * iOS 上要真正封死只有一条路:`javaScriptEnabled={false}`。那会让带交互的产物(标签切换、
- * 折叠、图表)退化成静态页 —— 属产品取舍,已在 PR 描述里显式提给放行人裁决,本层不擅自决定。
+ * 逐平台、逐 realm 的完整残留见下面 guard 注释里的**实测矩阵**;要完整闭合只有
+ * `javaScriptEnabled={false}` 一条路,那会让带交互的产物(标签切换、折叠、图表)退化成静态页
+ * —— 属产品取舍,已在 PR 描述里显式提给放行人裁决,本层不擅自决定。
  *
  * 与「同目录资源透传」的关系(见 htmlLocalResources,栈上一层):资源一律以 `data:` URI
  * 内联、页面里不出现任何 bearer 凭证。那条路把被控端的文件内容带进页面,更需要这里的
@@ -51,8 +57,8 @@ export const HTML_PREVIEW_CSP = [
   "base-uri 'none'",
   "frame-src 'none'",
   "object-src 'none'",
-  // Chromium 111+ 才实现(Android System WebView 覆盖,iOS WKWebView 无效);
-  // 未知指令被忽略、不影响其余策略。残留面见头注的「WebRTC」一节。
+  // **实测未生效**(Chrome 150 上 meta 与 HTTP 头两种下发都不拦),留着是等引擎将来实现;
+  // 未实现的指令被忽略、不影响其余策略。当前 WebRTC 的实际封锁来自 guard,见头注。
   "webrtc 'block'",
 ].join('; ');
 
@@ -98,17 +104,33 @@ const CSP_META = `<meta http-equiv="Content-Security-Policy" content="${HTML_PRE
  * `TypeError: Failed to set an indexed property` —— 无法覆写。而且 iframe 根本不需要脚本创建:
  * 不可信 HTML 里直接写一个 `<iframe>`,解析期就有子上下文了。
  *
+ * ── 实测残留矩阵(逐格都有依据,别再凭 spec 推) ──────────────────────────────
+ * 顶层 realm 由本 guard 覆盖;子 realm 指不可信 HTML 里直接写一个 `<iframe>` 得到的初始
+ * `about:blank` 上下文 —— 它**不需要脚本创建**,解析期就在,`window[0]` 即可取到。
+ *
+ *   能力面              顶层 realm          子 realm(srcless iframe)
+ *   ─────────────────── ─────────────────── ─────────────────────────────────────
+ *   fetch / XHR 外传     CSP connect-src     **封住** —— about:blank 继承父文档 CSP(实测)
+ *   mic / camera · iOS   guard 删属性        **封住** —— 原生 mediaCapturePermissionGrantType
+ *                                            ="deny" 在原生层判定,不分 realm
+ *   mic / camera · Andr  guard 删属性        **可达** —— setter 是空函数,实际由
+ *                                            RNCWebChromeClient.onPermissionRequest 判 app 级
+ *                                            OS 权限;已授权则**同步 grant、零提示**
+ *   WebRTC 外传 · 两端   guard 删构造函数    **可达** —— webrtc 'block' 实测无效(见上),
+ *                                            CSP 各 *-src 管不到 ICE/STUN/DTLS
+ *
  * **结论(如实记录,不要再声称已封死)**:只要 JavaScript 开着,文档层就无法保证「设备能力
- * 与 WebRTC 对不可信 HTML 完全不可达」。要完整闭合只有两条路,都属产品/发布层决定:
- *  1. `javaScriptEnabled={false}` —— 没有作者脚本,这一整类随之消失(带交互的产物退化成静态页);
- *  2. 在原生权限层统一 deny(Android 需 patch react-native-webview → 触发冷更门;iOS 的 WebRTC
- *     仍无对应原生开关)。
+ * 与 WebRTC 对不可信 HTML 完全不可达」—— 上表右列那两个「可达」格子,是**一行代码可达**,
+ * 不是理论残留:`<iframe></iframe><script>window[0].navigator.mediaDevices.getUserMedia(…)</script>`。
+ * 要完整闭合只有两条路,都属产品/发布层决定:
+ *  1. `javaScriptEnabled={false}` —— 没有作者脚本,右列**整列**随之消失(带交互的产物退化成静态页);
+ *  2. 在原生权限层统一 deny —— 能补上 Android 的 mic/camera 那一格(原生层不分 realm),但
+ *     **补不上 WebRTC 那一格**(两端都无对应原生开关),而且改 Android Java 会变动原生构建 →
+ *     触发冷更门,需把关人针对冷更单独确认。
  * 已在 PR 描述里列成待裁决项。
  *
- * 顺带关掉的还有 **iOS 上的 WebRTC 残留信道**:`webrtc 'block'` 只有 Chromium 111+ 实现,
- * WKWebView 不认;`RTCPeerConnection` 一旦不存在,那条不受 CSP 管辖的外传路径也就没有了。
- * **这不改变「预览保留 JavaScript」这个已定的产品取舍** —— 脚本照旧执行,只是没有摄像头、
- * 麦克风与 WebRTC 这三样能力。
+ * **这不改变「预览保留 JavaScript」这个已定的产品取舍** —— 脚本照旧执行,顶层没有摄像头、
+ * 麦克风与 WebRTC 三样能力;上表是这个取舍的完整代价,交给放行人看。
  *
  * ⚠️ 脚本文本里**不得出现 `</script>`**,否则会提前闭合(这里没有,用例钉住)。
  */

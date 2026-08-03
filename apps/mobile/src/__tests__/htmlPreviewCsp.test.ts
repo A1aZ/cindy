@@ -120,7 +120,7 @@ describe('前导段剥离设备与 WebRTC 能力(review P0)', () => {
     expect(guard).not.toMatch(/freeze\(navigator,'/);
   });
 
-  it('剥掉 WebRTC:iOS 上 webrtc 指令无效,删掉构造器才是真封住', () => {
+  it('剥掉 WebRTC:webrtc 指令实测在任何平台都无效,删掉构造器才是唯一实际封锁', () => {
     for (const name of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel']) {
       expect(guard).toContain(`'${name}'`);
     }
@@ -174,6 +174,35 @@ describe('前导段剥离设备与 WebRTC 能力(review P0)', () => {
     // 只删设备与 WebRTC 三样,脚本执行本身照旧放行。
     expect(HTML_PREVIEW_CSP).toContain("script-src 'unsafe-inline' data:");
   });
+
+  it("不得再声称 webrtc 'block' 在 Android/Chromium 那侧封住了 —— 实测两种下发都不拦", () => {
+    // 上一版这里照着 CSP3 spec 推断「Chromium 111+ 实现 → Android System WebView 覆盖 →
+    // 那一侧是真封住的」,**没有实测**。实机验(Chrome 150.0.7871.187):经 meta http-equiv
+    // 与 HTTP Content-Security-Policy 响应头两种下发,顶层 new RTCPeerConnection() 都构造成功。
+    // 这是第四次同类错误(前三次:「不可伪造」「没有任何出网信道」「拿不到干净 realm」),
+    // 都是**照规范推出来的安全声明没有实测**,所以照旧用守卫钉死措辞。
+    expect(cspSource).not.toContain('那一侧是真封住的');
+    expect(cspSource).not.toContain('实机上基本都覆盖');
+    // 不许再用「Chromium 111+ 实现」当作它生效的依据。
+    expect(cspSource).not.toMatch(/Chromium 111\+\s*实现/);
+    // 必须写明实测结论与被验的引擎版本,否则等于删掉错误说法后留白。
+    expect(cspSource).toContain('实测');
+    expect(cspSource).toContain('Chrome 150');
+  });
+
+  it('残留矩阵必须逐平台逐 realm 写明,不许糊成一句「有残留」', () => {
+    // 放行人要靠这张表做取舍(保留 JS 还是 javaScriptEnabled={false}),缺格子就等于
+    // 让他在信息不全的情况下签字。四个能力面 × 两个 realm 都要在注释里出现。
+    expect(cspSource).toContain('实测残留矩阵');
+    for (const cell of ['fetch / XHR 外传', 'mic / camera · iOS', 'mic / camera · Andr', 'WebRTC 外传 · 两端']) {
+      expect(cspSource).toContain(cell);
+    }
+    // Android 的 mic/camera 必须标成可达,且写明根因是空 setter + onPermissionRequest 同步 grant。
+    expect(cspSource).toContain('onPermissionRequest');
+    expect(cspSource).toContain('同步 grant、零提示');
+    // 「一行代码可达」必须显式说出来 —— 它是「理论残留」与「真实漏洞」的分界。
+    expect(cspSource).toContain('一行代码可达');
+  });
 });
 
 describe('渲染载体的安全接线(源码级守卫)', () => {
@@ -197,8 +226,8 @@ describe('渲染载体的安全接线(源码级守卫)', () => {
 
   it('WebRTC 是已知残留面:不得把这套说成「零出网」', () => {
     // RTCPeerConnection 的 ICE / STUN / DTLS 不受 CSP 各 *-src 指令管辖,恶意脚本能把内容
-    // 编码进 STUN 域名外传(review P1)。`webrtc 'block'` 只在 Chromium 111+ 生效
-    // (Android System WebView 覆盖),iOS 的 WKWebView 未实现 —— 所以 iOS 上仍有信道。
+    // 编码进 STUN 域名外传(review P1)。`webrtc 'block'` 保留是为了等引擎将来实现,但
+    // **实测在 Chrome 150 上 meta 与 HTTP 头两种下发都不拦** —— 见下一条守卫。
     expect(HTML_PREVIEW_CSP).toContain("webrtc 'block'");
     // 这三个说法一旦回归,就是在这个值上重建一个不成立的安全假设(同「不可伪造」那次)。
     for (const text of [readerSource, cspSource]) {

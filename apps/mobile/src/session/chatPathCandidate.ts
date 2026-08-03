@@ -659,9 +659,26 @@ export function findBareFileUrlMatch(input: string, from: number): BareFilePathM
   re.lastIndex = Math.max(0, from);
   let m: RegExpExecArray | null;
   while ((m = re.exec(input)) !== null) {
-    const value = m[1];
+    // **按 file URL 语义只取 pathname**(review P1):`file:///tmp/a.html#results` 与
+    // `?view=1` 里的 `#` / `?` 是 URL 语法,不是文件名的一部分。整段收进候选的话,
+    // 下游 resolveChatAbsPath 只做 slice(7) + 解码,会拿 `/tmp/a.html#results` 去 stat
+    // ——本来存在的文件点不亮,断链乐观点亮时还会打开一个不存在的地址。
+    // 命中区间同步收缩,`#results` 留作正文文本(预览页不支持按锚点定位,丢掉无损失);
+    // 字面文件名里的 `#` / `?` 按 URL 规范应写成 %23 / %3F,解码在 resolveChatAbsPath。
+    const value = trimFileUrlQueryAndFragment(m[1]);
+    if (!value) continue;
     if (!classifyChatPathLinkTarget(value)) continue;
     return { index: m.index, end: m.index + value.length, value };
   }
   return null;
+}
+
+/** 剥掉 file URL 的 query 与 fragment(只保留 `file:///` + pathname)。 */
+function trimFileUrlQueryAndFragment(value: string): string | null {
+  const prefix = 'file:///';
+  const rest = value.slice(prefix.length);
+  const cut = rest.search(/[?#]/);
+  if (cut < 0) return value;
+  const pathname = rest.slice(0, cut);
+  return pathname ? `${prefix}${pathname}` : null;
 }

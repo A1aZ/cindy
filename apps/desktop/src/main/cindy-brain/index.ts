@@ -42,6 +42,7 @@ import { getLayoutStore } from '../layout/index.js';
 import { GhostManager, type InstallRejection, type UninstallRejection } from './GhostManager.js';
 import { exportGhostPackage } from './exportGhostPackage.js';
 import { GhostMutationCoordinator } from './ghostMutationCoordinator.js';
+import { createOneShotTicketStore } from './oneShotTickets.js';
 import {
   clearBuiltinTombstone,
   listEligibleBuiltinCommands,
@@ -4200,6 +4201,14 @@ export function registerGhostIpc(): void {
   // 本地包第三条恢复路径第一步:从**已装目录**读出确认卡事实,零副作用。
   // 批准丢失(迁移后 receipt 又损坏/被删)时不用用户翻出原始 .cindy —— 字节从安装
   // 目录读,权限清单全量展示,确认后由 ghosts:reapprove-installed 开 receipt。
+  // inspect 时点的 owner 与事实用一次性票据钉死,confirm 原子消费(P0-2):只回传
+  // manifestSha256 绑不住 owner —— 多账号下确认卡停留期间切号,A 看的确认可以给 B
+  // 的同 id 目录铸批准。票据 Host 进程内持有,renderer 只透传 opaque token。
+  const reapproveTickets = createOneShotTicketStore<{
+    owner: ActiveAppSession;
+    id: string;
+    manifestSha256: string;
+  }>({ ttlMs: 10 * 60 * 1000, maxEntries: 64 });
   ipcMain.handle('ghosts:reapprove-inspect', (event, id: unknown) => {
     assertTrustedAppRendererEvent(event);
     if (typeof id !== 'string' || id.trim().length === 0) {
@@ -4207,9 +4216,16 @@ export function registerGhostIpc(): void {
     }
     requireGhostAvailableForActiveSession(id);
     rejectReservedGhostId(id);
+    // owner 在读事实**之前**捕获(边界期直接抛):票据钉的是"这份事实属于哪个 owner"。
+    const owner = captureGhostMutationOwner();
     const result = manager.inspectInstalledReapproval(id);
     if ('rejection' in result) throwInstallError(result.rejection);
-    return result;
+    const inspectTicket = reapproveTickets.issue({
+      owner,
+      id,
+      manifestSha256: result.manifestSha256,
+    });
+    return { ...result, inspectTicket };
   });
 
   // 第三条恢复路径第二步:用户点过确认卡后开 receipt。expectedManifestSha256 绑定
@@ -4225,7 +4241,12 @@ export function registerGhostIpc(): void {
     // 种子清单检查拒掉,这里拦的是冒充官方前缀的目录)。
     rejectReservedGhostId(id);
     const options = opts as
-      | { enable?: unknown; expectedManifestSha256?: unknown; expectedInstalledApproval?: unknown }
+      | {
+          enable?: unknown;
+          expectedManifestSha256?: unknown;
+          expectedInstalledApproval?: unknown;
+          inspectTicket?: unknown;
+        }
       | undefined;
     if (typeof options?.enable !== 'boolean') {
       throwIpcError('INVALID_PARAMS', 'enable must be a boolean');
@@ -4239,9 +4260,21 @@ export function registerGhostIpc(): void {
     if (!isGhostInstallApprovalToken(options.expectedInstalledApproval)) {
       throwIpcError('INVALID_PARAMS', 'expectedInstalledApproval must come from ghosts:list');
     }
-    // 开 receipt 是 owner 绑定的状态根写路径:确认卡停留期间账号可能已切换,
-    // 与装入/更新同一套租约与边界拒绝(beginGhostMutation 在边界期直接抛)。
-    const releaseMutation = beginGhostMutation(captureGhostMutationOwner());
+    if (typeof options.inspectTicket !== 'string' || options.inspectTicket.length === 0) {
+      throwIpcError('INVALID_PARAMS', 'inspectTicket must come from ghosts:reapprove-inspect');
+    }
+    // 原子消费票据:重放/过期/跨票一律 PRECONDITION_FAILED,让 UI 重开确认卡。
+    const ticket = reapproveTickets.consume(options.inspectTicket);
+    if (
+      !ticket ||
+      ticket.id !== id ||
+      ticket.manifestSha256 !== options.expectedManifestSha256
+    ) {
+      throwIpcError('PRECONDITION_FAILED', '确认卡已过期或与检查时不一致,请重新打开确认');
+    }
+    // 开 receipt 是 owner 绑定的状态根写路径:租约以**票据里 inspect 时点的 owner**
+    // 为期望值 —— 确认卡停留期间切了号,generation 不等直接拒,A 的确认给不了 B。
+    const releaseMutation = beginGhostMutation(ticket.owner);
     let result: Awaited<ReturnType<typeof manager.reapproveInstalled>>;
     try {
       result = await manager.reapproveInstalled(id, {
@@ -4645,7 +4678,14 @@ function scheduleGhostSkillReconcile(): void {
     try {
       while (skillReconcilePending) {
         skillReconcilePending = false;
+        // 每轮 capture owner + 持租约到本轮全部校验/删/建/扇出完成:全局技能根写的是
+        // owner-scoped 受管根的投影,不持租约时账号切换可以落在"A 的快照校验通过后、
+        // 链接创建前",把全局 ~/.agents/skills 指向 A 的批准快照 —— B 生效后主 Agent
+        // 有跨 owner 读取窗口。租约让 session teardown 的 waitForIdle 等本轮收尾;
+        // 边界期开轮直接抛,pending 保留,换号完成后的 ghosts:changed 广播重跑。
+        let releaseLease: (() => void) | null = null;
         try {
+          releaseLease = beginGhostMutation(captureGhostMutationOwner());
           const result = await reconcileGhostSkillLinks({
             ghosts: getGhostManager().list(),
             brainRoot: brainRootDir(),
@@ -4662,9 +4702,16 @@ function scheduleGhostSkillReconcile(): void {
             });
           }
         } catch (err) {
+          if (isAppSessionBoundaryPending()) {
+            // 账号边界期:本轮不动盘,保留 pending 等换号完成后的广播重跑。
+            skillReconcilePending = true;
+            break;
+          }
           log.warn('ghost skill reconcile failed', {
             error: err instanceof Error ? err.message : String(err),
           });
+        } finally {
+          releaseLease?.();
         }
       }
     } finally {

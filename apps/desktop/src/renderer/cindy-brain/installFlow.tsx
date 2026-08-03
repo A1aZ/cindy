@@ -248,12 +248,14 @@ export async function reapproveInstalledGhost(ghostId: string, deps: InstallFlow
   let trust: GhostTrustInfo;
   let manifestSha256: string;
   let previouslyEnabled: boolean;
+  let inspectTicket: string;
   try {
     const inspected = await window.electronAPI.ghosts.reapproveInspect(ghostId);
     manifest = inspected.manifest;
     trust = inspected.trust;
     manifestSha256 = inspected.manifestSha256;
     previouslyEnabled = inspected.previouslyEnabled;
+    inspectTicket = inspected.inspectTicket;
   } catch (err) {
     // 安装目录读不出清单 = 只剩"重新选包"一条路;如实降级,不吞掉恢复机会。
     installFlowLog.warn('reapprove-inspect failed; falling back to file picker', {
@@ -294,6 +296,7 @@ export async function reapproveInstalledGhost(ghostId: string, deps: InstallFlow
       enable,
       expectedManifestSha256: manifestSha256,
       expectedInstalledApproval: ghostInstallApprovalToken(installed.approval),
+      inspectTicket,
     });
     toast.success(t('settings.ghosts.toast.reapproved', { name: ghost.manifest.name }));
   } catch (err) {

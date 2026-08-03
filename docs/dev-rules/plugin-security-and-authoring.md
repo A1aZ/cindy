@@ -104,7 +104,10 @@
   校验 frontmatter 的 name／description，正文与辅助文件不在它的判据里）+
   **批准快照与字节指纹**（确认时把技能目录逐字节拷进
   `<状态根>/skill-snapshots/<id>/<revision>`，只收普通文件，同时把逐 item 的内容
-  指纹钉进 receipt 的 `skillContentSha256`；确认框看到的 SKILL.md 必须就是 Agent 之后
+  指纹钉进 receipt 的 `skillContentSha256`——装入/更新时该指纹取自 **`.cindy` 包的
+  内存投影**(inspect 时已被 `packageSha256` 钉住的那份字节),不从已发布的可变安装
+  目录首读:publish 与首次 hash 之间被换的字节应当在快照对账时被拒,而不是被首读钉成
+  批准基线;确认框看到的 SKILL.md 必须就是 Agent 之后
   读到的那份，所以共享技能根的链接指快照而不是可被改写的 `cindy-brain/<id>/<dir>`。
   快照缺失需要从安装目录重建时，**顺序本身就是安全性质**：先把字节复制进状态根的
   临时目录，再对**临时目录里那份即将成为快照的字节**做全部权威校验（尺寸上限 →

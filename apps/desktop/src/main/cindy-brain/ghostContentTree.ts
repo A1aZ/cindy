@@ -208,6 +208,29 @@ export async function collectGhostContentFiles(
  * 文件仍然流式读取,不整份进内存 —— 插件目录里除 SKILL.md 之外的文件没有尺寸
  * 上限,整份 readFile 会让一个塞进来的超大文件把 Host 撑爆。
  */
+/**
+ * `hashGhostContentFiles` 的内存版:对"路径 + 字节"的内存投影算同一 framing 的
+ * 指纹(逐字节等价,有回归钉住)。用途:装入/更新时从 **.cindy 包本体**(不可变的
+ * JSZip 投影)算批准基线,而不是从已公开的可变安装目录首读 —— 后者在 publish 与
+ * 首次 hash 之间被换过的字节会自洽地成为批准事实(权威判据被污染源初始化)。
+ */
+export function hashGhostContentBuffers(
+  files: readonly { path: string; bytes: Buffer }[],
+): string {
+  const hash = crypto.createHash('sha256');
+  hash.update('cindy-ghost-content-v2 ');
+  const sorted = [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  for (const file of sorted) {
+    const pathBytes = Buffer.from(file.path, 'utf8');
+    const pathLength = Buffer.allocUnsafe(8);
+    pathLength.writeBigUInt64BE(BigInt(pathBytes.byteLength));
+    hash.update(pathLength);
+    hash.update(pathBytes);
+    hash.update(crypto.createHash('sha256').update(file.bytes).digest());
+  }
+  return hash.digest('hex');
+}
+
 export async function hashGhostContentFiles(
   rootDir: string,
   files: readonly string[],

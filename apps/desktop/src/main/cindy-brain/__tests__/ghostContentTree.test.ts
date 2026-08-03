@@ -16,6 +16,7 @@ import {
   classifyGhostDirEntry,
   classifyGhostDirEntrySync,
   collectGhostContentFiles,
+  hashGhostContentBuffers,
   hashGhostContentFiles,
   resolveGhostContentPath,
   resolveGhostContentPathSync,
@@ -206,5 +207,42 @@ describe('hashGhostContentFiles', () => {
     expect(await hashGhostContentFiles(oneFile, oneTree.files)).not.toBe(
       await hashGhostContentFiles(twoFiles, twoTree.files),
     );
+  });
+});
+
+describe('hashGhostContentBuffers', () => {
+  it('与 hashGhostContentFiles 对同一棵文件树逐字节等价(装入基线与快照对账共用判据)', async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-buf-hash-'));
+    try {
+      await fs.promises.mkdir(path.join(root, 'nested'), { recursive: true });
+      const tree: Record<string, string> = {
+        'SKILL.md': '---\nname: x\n---\nbody',
+        '.hidden': 'dot files count',
+        'nested/helper.txt': 'helper',
+      };
+      for (const [rel, content] of Object.entries(tree)) {
+        await fs.promises.writeFile(path.join(root, ...rel.split('/')), content);
+      }
+      const { files } = await collectGhostContentFiles(root, {
+        dotEntries: 'include',
+        nonRegular: 'throw',
+        label: 'test',
+      });
+      const fromDisk = await hashGhostContentFiles(root, files);
+      const fromMemory = hashGhostContentBuffers(
+        Object.entries(tree).map(([p2, c]) => ({ path: p2, bytes: Buffer.from(c) })),
+      );
+      expect(fromMemory).toBe(fromDisk);
+      // 内容差一个字节即不同。
+      const drifted = hashGhostContentBuffers(
+        Object.entries({ ...tree, 'SKILL.md': tree['SKILL.md'] + '!' }).map(([p2, c]) => ({
+          path: p2,
+          bytes: Buffer.from(c),
+        })),
+      );
+      expect(drifted).not.toBe(fromDisk);
+    } finally {
+      await fs.promises.rm(root, { recursive: true, force: true });
+    }
   });
 });

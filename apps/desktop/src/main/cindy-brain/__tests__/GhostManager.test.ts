@@ -1840,6 +1840,83 @@ describe('GhostManager · Host approval receipt', () => {
   });
 });
 
+describe('GhostManager · 技能批准基线取自包投影(publish 后篡改必须拒装)', () => {
+  it('staging→final 发布后、首次校验前换掉 SKILL.md → 拒装,篡改字节不成为批准事实', async () => {
+    const cindy = await makeCindy('skill.cindy', {
+      ...goodManifest('skilled'),
+      slots: ['tool', 'skill'],
+      skill: { items: [{ dir: 'skills/demo', name: 'demo', description: 'Demo skill' }] },
+    }, {
+      'skills/demo/SKILL.md': '---\nname: demo\ndescription: Demo skill\n---\n\nApproved instructions\n',
+    });
+    // 故障注入:staging→final 的 rename 真实执行后,立刻在 finalDir 里改写 SKILL.md
+    // 正文 —— 模拟"发布与首次 hash 之间"的本机进程篡改窗口。
+    const realRename = fs.promises.rename;
+    const finalDir = path.join(rootDir, 'skilled');
+    const spy = vi.spyOn(fs.promises, 'rename').mockImplementation(async (from, to) => {
+      await realRename(from, to);
+      if (String(to) === finalDir) {
+        spy.mockRestore();
+        await fs.promises.writeFile(
+          path.join(finalDir, 'skills', 'demo', 'SKILL.md'),
+          '---\nname: demo\ndescription: Demo skill\n---\n\nrm -rf everything\n',
+        );
+      }
+    });
+    try {
+      const result = await manager.install(cindy);
+      // 修复前:指纹从被篡改的 finalDir 首读,篡改字节自洽地成为 receipt 指纹与
+      // 快照,install 返回 ok。修复后:指纹来自包投影,快照对账发现字节不符 → 拒装。
+      expect('rejection' in result, JSON.stringify(result)).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+    // 拒装收尾:不留半截安装,也没有任何批准事实落盘。
+    expect(manager.list()).toHaveLength(0);
+    expect(
+      fs.existsSync(path.join(workDir, 'ghosts-install-state', 'skilled.json')),
+    ).toBe(false);
+  });
+});
+
+describe('GhostManager · 更新崩溃恢复(两次 rename 之间)', () => {
+  it('final 缺位 + 唯一 backup → 下次启动自动搬回,插件不凭空消失', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    // 模拟崩溃现场:final→backup 已发生,staging→final 没来得及。
+    await fs.promises.rename(
+      path.join(rootDir, 'hello'),
+      path.join(rootDir, '.cindy-updating-hello-abcdef01'),
+    );
+    // 崩溃前 list() 视角:插件消失(点目录被跳过)—— 这正是要修的现场。
+    expect(manager.list()).toHaveLength(0);
+
+    // "重启":新建 manager,构造期恢复扫描搬回。receipt 从未更新过,恢复后
+    // receipt 与内容完全一致,等价于那次更新从未发生。
+    const restarted = new GhostManager({ getRootDir: () => rootDir, getLocale: () => hostLocale });
+    expect(fs.existsSync(path.join(rootDir, 'hello', 'ghost.json'))).toBe(true);
+    expect(restarted.list()[0]).toMatchObject({ enabled: true, approval: { state: 'approved' } });
+    expect(fs.existsSync(path.join(rootDir, '.cindy-updating-hello-abcdef01'))).toBe(false);
+  });
+
+  it('final 在位的陈旧 backup 与 staging 残留 → 回收;同 id 多个 backup 不猜、原样保留', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    await fs.promises.mkdir(path.join(rootDir, '.cindy-updating-hello-abcdef01'), { recursive: true });
+    await fs.promises.mkdir(path.join(rootDir, '.cindy-installing-hello-deadbeef'), { recursive: true });
+    new GhostManager({ getRootDir: () => rootDir, getLocale: () => hostLocale });
+    expect(fs.existsSync(path.join(rootDir, '.cindy-updating-hello-abcdef01'))).toBe(false);
+    expect(fs.existsSync(path.join(rootDir, '.cindy-installing-hello-deadbeef'))).toBe(false);
+    expect(fs.existsSync(path.join(rootDir, 'hello', 'ghost.json'))).toBe(true);
+
+    // 多 backup 且 final 缺位:不猜哪份是对的,原样保留等人工处理。
+    await fs.promises.rename(path.join(rootDir, 'hello'), path.join(rootDir, '.cindy-updating-hello-11111111'));
+    await fs.promises.mkdir(path.join(rootDir, '.cindy-updating-hello-22222222'), { recursive: true });
+    new GhostManager({ getRootDir: () => rootDir, getLocale: () => hostLocale });
+    expect(fs.existsSync(path.join(rootDir, '.cindy-updating-hello-11111111'))).toBe(true);
+    expect(fs.existsSync(path.join(rootDir, '.cindy-updating-hello-22222222'))).toBe(true);
+    expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(false);
+  });
+});
+
 describe('GhostManager · setEnabled(启用/停用)', () => {
   it('停用镜像本身写失败 → 如实报错,不谎报"已停用"(此刻什么都没落盘)', async () => {
     await manager.install(await makeCindy('a.cindy', goodManifest()));

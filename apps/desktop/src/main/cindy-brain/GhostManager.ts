@@ -31,6 +31,7 @@ import { isPathInsideDir } from './dirDeposit.js';
 import {
   classifyGhostDirEntrySync,
   collectGhostContentFiles,
+  hashGhostContentBuffers,
   hashGhostContentFiles,
   resolveGhostContentPathSync,
 } from './ghostContentTree.js';
@@ -171,6 +172,114 @@ export class GhostManager {
     ) {
       throw new Error('ghost install content and approval state roots must be disjoint');
     }
+    this.recoverInterruptedUpdatesSync();
+  }
+
+  /**
+   * 启动一次性:恢复更新的"两次 rename 之间"崩溃现场(§5:插件不得凭空消失)。
+   *
+   * update 的目录交换是 final→backup(.cindy-updating-*)、staging→final 两步;断电/
+   * 进程被杀落在两步之间时,final 缺位、旧版完整字节还在 backup 里 —— 而 list()
+   * 跳过点目录,插件就从 UI 与运行时**消失**了。这里在构造期同步扫一遍(目录极小,
+   * 与 resolveGhostRepoRoot 的启动期迁移同一先例):
+   * - final 缺位且该 id 只有唯一 backup → 原子搬回(receipt 未更新过,恢复后
+   *   receipt/内容完全一致,等价于更新从未发生);
+   * - final 在位(崩溃发生在收尾清理前)→ backup 是已被替换的旧字节,回收;
+   * - 同 id 多个 backup(多次崩溃)→ 不猜,原样保留并记 error 供人工处理;
+   * - `.cindy-installing-*` staging 残留一律回收(从未发布过,不构成任何事实)。
+   */
+  private recoverInterruptedUpdatesSync(): void {
+    const root = this.options.getRootDir();
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      return; // 根目录还不存在 = 没装过任何插件
+    }
+    const backups = entries.filter((entry) => entry.name.startsWith('.cindy-updating-'));
+    for (const entry of backups) {
+      const match = /^\.cindy-updating-(.+)-[0-9a-f]{8}$/.exec(entry.name);
+      if (!match || !isValidGhostId(match[1])) continue;
+      const id = match[1];
+      const backupPath = path.join(root, entry.name);
+      try {
+        if (classifyGhostDirEntrySync(backupPath) !== 'directory') continue;
+      } catch {
+        continue;
+      }
+      const finalDir = path.join(root, id);
+      const siblings = backups.filter((other) =>
+        other.name.startsWith(`.cindy-updating-${id}-`),
+      );
+      if (fs.existsSync(finalDir)) {
+        try {
+          fs.rmSync(backupPath, { recursive: true, force: true });
+        } catch (err) {
+          this.options.log?.warn('stale ghost update backup cleanup failed', {
+            id, backup: entry.name,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        continue;
+      }
+      if (siblings.length !== 1) {
+        (this.options.log?.error ?? this.options.log?.warn)?.call(this.options.log,
+          'multiple interrupted-update backups for one ghost; left untouched for manual recovery', {
+            id, backups: siblings.map((other) => other.name),
+          });
+        continue;
+      }
+      try {
+        fs.renameSync(backupPath, finalDir);
+        this.options.log?.info('ghost restored from interrupted update backup', { id });
+      } catch (err) {
+        (this.options.log?.error ?? this.options.log?.warn)?.call(this.options.log,
+          'ghost interrupted-update recovery failed; plugin stays missing until manual recovery', {
+            id, backup: entry.name,
+            error: err instanceof Error ? err.message : String(err),
+          });
+      }
+    }
+    for (const entry of entries) {
+      if (!entry.name.startsWith('.cindy-installing-')) continue;
+      try {
+        fs.rmSync(path.join(root, entry.name), { recursive: true, force: true });
+      } catch {
+        // staging 残留清不掉只占磁盘,不影响正确性;下次启动再试。
+      }
+    }
+  }
+
+  /**
+   * 从 `.cindy` 包的内存投影算技能字节指纹(P0-8)。
+   *
+   * 批准基线必须取自**用户确认过、且不可再被本机进程改写**的来源。旧写法在
+   * staging→final 发布之后才从 finalDir 首读 —— publish 与首次 hash 之间被换掉的
+   * SKILL.md 正文/辅助文件会同时成为 receipt 指纹与快照,后续校验全自洽,篡改被
+   * 洗成批准事实。包投影(JSZip 内存条目)在 inspect 时已被 packageSha256 钉住、
+   * 与用户确认的是同一份字节;据它算指纹后,发布后的目录漂移会在快照落盘对账时
+   * 如实 fail closed(拒装),而不是被钉进批准。
+   */
+  private async hashSkillContentFromPackage(
+    manifest: GhostManifest,
+    allEntries: JSZip.JSZipObject[],
+    prefix: string,
+  ): Promise<Record<string, string>> {
+    const items = manifest.skill?.items ?? [];
+    if (items.length === 0) return {};
+    const result: Record<string, string> = {};
+    for (const item of items) {
+      const itemPrefix = `${item.dir}/`;
+      const files: { path: string; bytes: Buffer }[] = [];
+      for (const entry of allEntries) {
+        if (entry.dir) continue;
+        const rel = entry.name.slice(prefix.length);
+        if (!rel.startsWith(itemPrefix)) continue;
+        files.push({ path: rel.slice(itemPrefix.length), bytes: await entry.async('nodebuffer') });
+      }
+      result[item.dir] = hashGhostContentBuffers(files);
+    }
+    return result;
   }
 
   /** Forge 等 Host 能力必须排除的受管根（内容根 + 批准状态根）。 */
@@ -1434,7 +1543,13 @@ export class GhostManager {
           localeResources,
           enabled: initiallyEnabled,
           trust,
-          skillContentSha256: await hashApprovedSkillContent(approvedManifest, finalDir),
+          // 指纹取自包投影而不是刚发布的 finalDir:发布后被换的字节应当在快照
+          // 对账时被拒,而不是被首读钉成批准基线(P0-8)。
+          skillContentSha256: await this.hashSkillContentFromPackage(
+            approvedManifest,
+            allEntries,
+            prefix,
+          ),
           packageSha256,
           ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
         });
@@ -1612,7 +1727,12 @@ export class GhostManager {
         localeResources,
         enabled,
         trust,
-        skillContentSha256: await hashApprovedSkillContent(approvedManifest, finalDir),
+        // 同 install:指纹取自包投影,发布后的目录漂移在快照对账时 fail closed(P0-8)。
+        skillContentSha256: await this.hashSkillContentFromPackage(
+          approvedManifest,
+          allEntries,
+          prefix,
+        ),
         packageSha256,
         ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
       });

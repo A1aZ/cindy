@@ -1167,11 +1167,18 @@ interface ElectronAPI {
       manifestSha256: string;
       /** 升级前的启停偏好(.disabled 镜像读数):确认卡勾选默认值。 */
       previouslyEnabled: boolean;
+      /** 一次性票据(Host 进程内钉住 inspect 时点的 owner 与事实,confirm 原子消费)。 */
+      inspectTicket: string;
     }>;
     /** 第三条恢复路径第二步:用户点过确认卡后开 receipt。 */
     reapproveInstalled: (
       id: string,
-      opts: { enable: boolean; expectedManifestSha256: string; expectedInstalledApproval: string },
+      opts: {
+        enable: boolean;
+        expectedManifestSha256: string;
+        expectedInstalledApproval: string;
+        inspectTicket: string;
+      },
     ) => Promise<{ ghost: import('../shared/ghost').InstalledGhost }>;
     uninstall: (id: string) => Promise<{ ok: true }>;
     /** 详情页「导出 .cindy」:打包安装目录 → 保存对话框落盘。 */

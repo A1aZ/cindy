@@ -908,11 +908,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
       trust: unknown;
       manifestSha256: string;
       previouslyEnabled: boolean;
+      inspectTicket: string;
     }> => ipcRenderer.invoke('ghosts:reapprove-inspect', id),
-    /** 确认卡点过同意后开 receipt;sha 绑定确认卡展示时的清单字节。 */
+    /** 确认卡点过同意后开 receipt;sha + 一次性票据绑定确认时的事实与 owner。 */
     reapproveInstalled: (
       id: string,
-      opts: { enable: boolean; expectedManifestSha256: string; expectedInstalledApproval: string },
+      opts: {
+        enable: boolean;
+        expectedManifestSha256: string;
+        expectedInstalledApproval: string;
+        inspectTicket: string;
+      },
     ): Promise<{ ghost: unknown }> =>
       ipcRenderer.invoke('ghosts:reapprove-installed', id, opts),
     uninstall: (id: string): Promise<{ ok: true }> => ipcRenderer.invoke('ghosts:uninstall', id),

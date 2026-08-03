@@ -3773,6 +3773,7 @@ interface ElectronAPI {
       getByLeadSession: (leadSessionId: string) => Promise<OrcaTeamRecord | null>;
       getByWorkerSession: (workerSessionId: string) => Promise<OrcaTeamRecord | null>;
       listWorkersByLead: (leadSessionId: string) => Promise<OrcaWorkerRecord[]>;
+      listWorkersByLeads?: (leadSessionIds: string[]) => Promise<Record<string, OrcaWorkerRecord[]>>;
       updateWorkerStatus: (
         workerId: string,
         status: 'idle' | 'running' | 'done' | 'error',

@@ -1,5 +1,7 @@
 /**
- * 预览文档的 CSP:策略内容、注入位置,以及「签名地址不得进页面」的接线守卫。
+ * 预览文档的 CSP:策略内容、注入位置,以及「策略必须挂在渲染载体上」的接线守卫。
+ *
+ * 资源透传相关的接线守卫(签名地址不得进页面、OSS 对象回收)在本文件末尾单独一段。
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -80,22 +82,36 @@ describe('withHtmlPreviewCsp(注入位置)', () => {
   });
 });
 
-describe('渲染载体与取件的安全接线(源码级守卫)', () => {
+describe('渲染载体的安全接线(源码级守卫)', () => {
   const readerSource = readFileSync(
     resolve(process.cwd(), 'src/session/HtmlFileReader.tsx'),
     'utf8',
-  );
-  const pageSource = readFileSync(
-    resolve(process.cwd(), 'app/files/preview/[sessionId].tsx'),
-    'utf8',
-  );
+  ).replace(/\r\n/g, '\n');
 
   it('CSP 挂在渲染载体上:任何进 WebView 的 HTML 都带策略', () => {
+    // 放在载体这一层而不是取件那一层:不管 HTML 从哪条路来、有没有同目录资源,
+    // 只要进这个 WebView 就必须带策略。
     expect(readerSource).toContain('withHtmlPreviewCsp(html)');
     expect(readerSource).toContain("source={{ baseUrl: 'about:blank', html: guardedHtml }}");
     // 不得把未加固的原文直接喂进去。
     expect(readerSource).not.toMatch(/html:\s*html\s*\}/);
   });
+
+  it('CSP 与导航策略是配套的两半:出网信道必须同时为零', () => {
+    // CSP 关子资源与表单,导航回调关顶层跳转。少任何一半都留着一条外传路径
+    // (review P1:导航回调完全不经过 new Image().src / fetch 这类子资源请求)。
+    expect(readerSource).toContain("url.startsWith('about:')");
+    expect(readerSource).not.toMatch(/\bLinking\.\w/);
+    expect(HTML_PREVIEW_CSP).toContain("default-src 'none'");
+    expect(HTML_PREVIEW_CSP).toContain("connect-src 'none'");
+  });
+});
+
+describe('资源取件的安全接线(源码级守卫)', () => {
+  const pageSource = readFileSync(
+    resolve(process.cwd(), 'app/files/preview/[sessionId].tsx'),
+    'utf8',
+  );
 
   it('预签名地址不得回填进页面:必须先转成 data: URI', () => {
     // 取件返回的是 data: URI,不是 presign URL(review P1)。

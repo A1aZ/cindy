@@ -896,6 +896,30 @@ describe('findBareFileUrlMatch(正文纯文本裸 file:// URL 词法)', () => {
       .toEqual(['file:///tmp/a.html,file:///tmp/b.html']);
   });
 
+  it('不把闭合包裹符吞进末位(方括号 / 花括号)', () => {
+    // 主体字符集允许 `]` `}`(真实文件名里有:本仓就有 `[sessionId].tsx`),末位排除表原先
+    // 漏了它们,于是 `[file:///tmp/a.html]` 切出带 `]` 的候选 —— 在线 stat 判不存在点不亮,
+    // 断链时又因绝对路径形态乐观点亮、打开错地址(review P2)。只挡末位,不动主体。
+    expect(allValues('见 [file:///tmp/a.html]')).toEqual(['file:///tmp/a.html']);
+    expect(allValues('见 {file:///tmp/a.html}')).toEqual(['file:///tmp/a.html']);
+    expect(allValues('见 [file:///tmp/a.html)')).toEqual(['file:///tmp/a.html']);
+    // 内层的方括号必须保住 —— 这正是「只挡末位」而不是「从主体排除」的理由。
+    expect(allValues('见 file:///repo/app/files/[sessionId].tsx'))
+      .toEqual(['file:///repo/app/files/[sessionId].tsx']);
+    expect(allValues('见 [file:///repo/app/[id]/page.html]'))
+      .toEqual(['file:///repo/app/[id]/page.html']);
+  });
+
+  it('末位排除表拼进字符类后仍是合法字符类(未转义的 `]` 会静默闭合它)', () => {
+    // 这条守的是实现细节而不是行为:`]` 若忘了写成 `\]`,正则不报错但语义全变 ——
+    // 字符类在 `]` 处提前闭合,剩下的 `}]` 变字面量,末位排除对**所有**字符失效。
+    // 用一个「若类被提前闭合就必然失败」的输入来钉:`}` 仍必须被挡在末位之外。
+    expect(allValues('见 {file:///tmp/a.html}')).toEqual(['file:///tmp/a.html']);
+    // 且句读挡末位的既有行为不受影响。
+    expect(allValues('见 file:///tmp/a.html。')).toEqual(['file:///tmp/a.html']);
+    expect(allValues('见 file:///tmp/a.html.')).toEqual(['file:///tmp/a.html']);
+  });
+
   it('不含 file:// 的文本走廉价短路', () => {
     expect(findBareFileUrlMatch('这是一句普通的中文,没有任何路径。', 0)).toBeNull();
     expect(findBareFileUrlMatch('见 src/App.tsx 第 20 行', 0)).toBeNull();

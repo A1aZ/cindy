@@ -124,6 +124,26 @@ describe('evaluateBundleUpdate', () => {
     expect(r.needsUpdate).toBe(true); // runtimeVersion 不同 → 仍是可跳过的普通更新
   });
 
+  it('minVersion 高于该记录自己的 version → 不强更(装完仍低于门槛,阻断屏会没有出口)', () => {
+    // 发布链侧 assertMinVersionUsable 已禁止这种记录;客户端兜底手工改过 / 历史遗留的指针。
+    const r = evaluateBundleUpdate({
+      currentRuntimeVersion: 'rtv-old',
+      currentVersion: '1.0.0',
+      latest: { ...VALID, version: '1.1.0', minVersion: '1.2.0' },
+    });
+    expect(r.forced).toBe(false);
+    expect(r.needsUpdate).toBe(true); // 仍是可跳过的普通更新
+  });
+
+  it('minVersion 等于该记录的 version → 正常强更(边界)', () => {
+    const r = evaluateBundleUpdate({
+      currentRuntimeVersion: 'rtv-old',
+      currentVersion: '1.0.0',
+      latest: { ...VALID, version: '1.2.0', minVersion: '1.2.0' },
+    });
+    expect(r.forced).toBe(true);
+  });
+
   it('缺 currentVersion → 不强更(无法比较,fail-open)', () => {
     const r = evaluateBundleUpdate({
       currentRuntimeVersion: 'rtv-new',

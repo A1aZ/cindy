@@ -120,15 +120,19 @@ export function evaluateBundleUpdate({
   const current = String(currentRuntimeVersion ?? '').trim();
   if (!current) return NO_UPDATE;
 
-  // 强更额外要求 record 自己带 version:拿不到目标版本就无法证明"装上它就能解除阻断"
-  // (阻断态的自愈全靠这个可比较的版本:见 forcedUpdateRecheck 的新鲜度门)。
-  // 发布链侧 assertMinVersionUsable 已保证"有 minVersion 必有 version",这里是客户端兜底:
-  // 记录异常时退化成可跳过的普通更新提示,而不是把用户关进一个无法自愈的阻断屏。
+  // 强更要求这条记录本身**能被满足**:
+  // - 带 version:拿不到目标版本就无法证明"装上它就能解除阻断"(阻断态自愈全靠这个
+  //   可比较的版本,见 forcedUpdateRecheck 的新鲜度门);
+  // - minVersion ≤ version:否则唯一提供的安装目标仍低于门槛,用户装完照旧被强更,
+  //   阻断屏成了没有出口的死屋,只能等运维改指针。
+  // 发布链侧 assertMinVersionUsable 已经保证这两条,这里是客户端兜底(手工改过的 / 历史
+  // 遗留的指针也不能把人关死):记录不自洽时退化成可跳过的普通更新提示。
   const forced = Boolean(
     record.minVersion &&
     record.version &&
     currentVersion &&
-    compareVersions(String(currentVersion), record.minVersion) < 0,
+    compareVersions(String(currentVersion), record.minVersion) < 0 &&
+    compareVersions(record.version, record.minVersion) >= 0,
   );
 
   if (!forced && record.runtimeVersion === current) return NO_UPDATE;

@@ -693,6 +693,33 @@ describe('new session model', () => {
     ]);
   });
 
+  it('folds managed worktree sessions into their base repo project', () => {
+    const options = buildRecentWorkspaceOptions([
+      remoteSession('base', {
+        workingDir: '/repo/app',
+        userSendAt: '2026-01-01T00:01:00.000Z',
+      }),
+      remoteSession('current-worktree', {
+        workingDir: '/repo/app/.cindy-worktrees/auto-one',
+        worktreePath: '/repo/app/.cindy-worktrees/auto-one',
+        userSendAt: '2026-01-01T00:03:00.000Z',
+      }),
+      remoteSession('legacy-worktree', {
+        workingDir: '/repo/app/.xdt-worktrees/auto-two',
+        worktreePath: '/repo/app/.xdt-worktrees/auto-two',
+        userSendAt: '2026-01-01T00:02:00.000Z',
+      }),
+    ]);
+
+    expect(options).toEqual([{
+      workingDir: '/repo/app',
+      title: 'app',
+      sessionCount: 3,
+      lastActivityAt: '2026-01-01T00:03:00.000Z',
+    }]);
+    expect(pickInitialNewSessionWorkspace('', options)).toBe('/repo/app');
+  });
+
   it('prefills a blank new session from the most recent workspace only', () => {
     const recentWorkspaces = buildRecentWorkspaceOptions([
       remoteSession('old', {
@@ -1001,7 +1028,10 @@ describe('new session composer surface', () => {
     expect(createSource).toContain('const latestDraftText = await finishVoiceRecording();');
     expect(createSource).toContain('effectiveDraft = { ...draft, firstMessage: latestDraftText };');
     expect(createSource).toContain('creatingRef.current = false;');
-    expect(newSource).toContain('accessibilityState={{ busy: creating || voiceIsProcessing || undefined, disabled: !canCreate || undefined }}');
+    expect(createButtonSource).toContain('busy: creating');
+    expect(createButtonSource).toContain('|| worktreePreferenceSaving');
+    expect(createButtonSource).toContain('|| worktreeBranchPreferenceSaving');
+    expect(newSource).toContain('disabled: !canCreate || undefined,');
     // No start cue on mobile: playing a cue via expo-audio during capture stalls
     // the AVAudioEngine record tap (see mobileVoiceCue.ts). Only the end cue is wired.
     expect(newSource).not.toContain('playMobileVoiceInputStartCue');
@@ -1079,19 +1109,36 @@ describe('new session worktree wiring (source locks)', () => {
     expect(newSource).toContain(
       'useRemoteNewMakerWorktreePreference(selectedDeviceId)',
     );
-    expect(newSource).toMatch(
-      /if \(worktreeEligibilityFromError\(error\)\.status !== 'unsupported'\) return;\s*remoteSessionStore\.setNewMakerWorktreePreference\(selectedDeviceId, false\);/,
+    expect(newSource).toContain('if (enabled === null) return;');
+    expect(newSource).not.toContain(
+      'remoteSessionStore.setNewMakerWorktreePreference(selectedDeviceId, false);',
     );
     expect(newSource).toMatch(
       /\}, \[\s*connectionEpoch,\s*deviceLinkStatus,\s*presenceVersion,\s*selectedDeviceId,\s*maker,\s*openLink,\s*\]\);/,
     );
-    // 显式点击才写穿工作端记忆;写失败吞掉降级。
-    expect(newSource).toContain('void maker.applyNewMakerWorktreePref(next).catch(() => undefined);');
+    // 显式点击才写穿工作端记忆;工作端接受后才更新手机镜像。
+    expect(newSource).toContain('applyWorktreePreferenceOnHost({');
+    expect(newSource).toContain('apply: maker.applyNewMakerWorktreePref,');
+    expect(newSource).not.toContain(
+      'void maker.applyNewMakerWorktreePref(next).catch(() => undefined);',
+    );
+    // host-first 写入期间，适用 worktree 的项目由按钮和 create() 二次门禁阻止读取旧镜像；
+    // 对话工作区不应被一份与当前创建无关的偏好写入卡住。
+    expect(newSource).toContain('&& !worktreeCreateBlocked;');
+    expect(newSource).toContain(
+      "applicable: draft.workspaceKind === 'project' && draft.workingDir.trim().length > 0,",
+    );
+    const createEntry = newSource.indexOf('const create = useCallback(async () => {');
+    const createBody = newSource.slice(createEntry, createEntry + 1_200);
+    expect(createBody).not.toContain('|| worktreePreferenceSaving');
+    expect(createBody).toContain('if (worktreeCreateBlocked) {');
+    expect(newSource).toContain('worktreeBranchPreferenceSaving');
+    expect(newSource).toContain('worktreeCreateBlocked && worktreeCaptionKey');
   });
 
   it('re-probes worktree eligibility when the relay or workstation reconnects', () => {
     expect(newSource).toContain(
-      "if (!selectedDeviceId || !cwd || deviceLinkStatus !== 'online') return;",
+      "if (!selectedDeviceId || !cwd || deviceLinkStatus !== 'online') return undefined;",
     );
     const detectEffect = newSource.indexOf(
       'return maker.worktree.detectCwd(cwd);',
@@ -1192,13 +1239,35 @@ describe('new session worktree wiring (source locks)', () => {
     );
   });
 
-  it('binds eligibility to device/cwd and carries pre-created cleanup metadata into the pipeline', () => {
-    expect(newSource).toContain('const worktreeEligibility = worktreeEligibilityForTarget(worktreeProbe, {');
+  it('binds eligibility and source branch to device/cwd, then carries cleanup metadata into the pipeline', () => {
+    expect(newSource).toContain('const worktreeTarget = {');
     expect(newSource).toContain('deviceId: selectedDeviceId ??');
+    expect(newSource).toContain('worktreeEligibilityForTarget(worktreeProbe, worktreeTarget)');
+    expect(newSource).toContain('worktreeSourceBranchForTarget(');
+    expect(newSource).toContain('shouldAcceptWorktreeBranchListResult({');
+    expect(newSource).toContain('sourceBranch: worktreeSourceBranch,');
     expect(newSource).toContain('precreatedWorktree = {');
     expect(newSource).toContain('recoveryKey,');
     expect(newSource).toContain('originalWorkingDir: effectiveDraft.workingDir,');
     expect(newSource).toContain('precreatedWorktree,');
+  });
+
+  it('keeps branch selection independent from the worktree checkbox', () => {
+    const disabledStart = newSource.indexOf('const worktreeBranchDisabled =');
+    const disabledEnd = newSource.indexOf(';', disabledStart);
+    expect(disabledStart).toBeGreaterThan(-1);
+    expect(newSource.slice(disabledStart, disabledEnd + 1)).not.toContain('worktreeEnabled');
+
+    const selectStart = newSource.indexOf('const selectWorktreeSourceBranch = useCallback(');
+    const selectEnd = newSource.indexOf('// —— worktree 勾选播种', selectStart);
+    const selectBlock = newSource.slice(selectStart, selectEnd);
+    expect(selectBlock).toContain('maker.applyNewMakerWorktreeBranchPref(');
+    expect(selectBlock).not.toContain('toggleWorktree');
+    expect(selectBlock).not.toContain('maker.applyNewMakerWorktreePref(');
+    expect(newSource).toContain('maker.getNewMakerWorktreeBranchPref(baseRepo)');
+    expect(newSource).toContain('useRemoteNewMakerWorktreeBranchPreference(');
+    expect(newSource).toContain('testID="newSession.worktreeBranchPicker"');
+    expect(newSource).toContain('testID="newSession.worktreeToggle"');
   });
 
   it('applies the protocol timeout override map to mobile invokes (worktree:create needs 60s)', () => {

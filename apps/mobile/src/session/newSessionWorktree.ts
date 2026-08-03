@@ -6,13 +6,14 @@
  * 再以该路径 + 同一预生成 sessionId 走 createSession(两步共用 sessionId,工作端
  * close-session 时才能按 worktreeStore 绑定回收 worktree)。
  *
- * 本模块只做纯函数(资格判定 / 播种归并 / create 入参组装 / 错误展示),不碰 React
- * 与 transport 实例,便于 vitest 直接覆盖;接线在 app/sessions/new.tsx。
+ * 本模块只做纯决策和可注入的小编排,不直接依赖 React 与 transport 实例,
+ * 便于 vitest 直接覆盖;接线在 app/sessions/new.tsx。
  */
 import type {
   MobileNewMakerDefaults,
   MobileWorktreeDetectCwdResult,
 } from '@/device-link/mobileMakerTransport';
+import { isTransientRemoteError } from '@/device-link/remoteRetry';
 
 /** 资格不满足的原因(语义对齐桌面 newChat.worktree.{gitMissing,notGitRepo,alreadyInWorktree})。 */
 export type NewSessionWorktreeIneligibleReason =
@@ -23,6 +24,7 @@ export type NewSessionWorktreeIneligibleReason =
 /**
  * worktree 开关的资格状态:
  *  - probing:探测中(目录/设备刚变化,结果未回)→ 开关禁用 + 「检测环境中…」;
+ *  - recovering:瞬时断连/超时，页面会自动重试 → 开关禁用 + 恢复连接 caption;
  *  - eligible:可用,携带 create 所需的 baseRepo(repoRoot)与 sourceBranch(当前分支);
  *  - ineligible:环境不满足 → 开关禁用 + 原因 caption;
  *  - unsupported:老被控端无 worktree 通道(CHANNEL_NOT_ALLOWED)→ 整行隐藏;
@@ -30,6 +32,7 @@ export type NewSessionWorktreeIneligibleReason =
  */
 export type NewSessionWorktreeEligibility =
   | { status: 'probing' }
+  | { status: 'recovering' }
   | { status: 'eligible'; baseRepo: string; sourceBranch: string }
   | { status: 'ineligible'; reason: NewSessionWorktreeIneligibleReason }
   | { status: 'unsupported' }
@@ -44,6 +47,24 @@ export interface NewSessionWorktreeProbeTarget {
 export interface NewSessionWorktreeProbeSnapshot {
   target: NewSessionWorktreeProbeTarget;
   eligibility: NewSessionWorktreeEligibility;
+}
+
+/** 用户显式选择的源分支只属于发起选择时的设备 + 工作目录，不得跨目标复用。 */
+export interface NewSessionWorktreeBranchSelectionSnapshot {
+  target: NewSessionWorktreeProbeTarget;
+  sourceBranch: string;
+}
+
+/** list-branches 回包只有请求序号与设备/cwd 都仍是最新目标时才允许落 state。 */
+export function shouldAcceptWorktreeBranchListResult(input: {
+  requestSeq: number;
+  latestSeq: number;
+  requestTarget: NewSessionWorktreeProbeTarget;
+  latestTarget: NewSessionWorktreeProbeTarget;
+}): boolean {
+  return input.requestSeq === input.latestSeq
+    && input.requestTarget.deviceId === input.latestTarget.deviceId
+    && input.requestTarget.workingDir.trim() === input.latestTarget.workingDir.trim();
 }
 
 /**
@@ -65,10 +86,33 @@ export function worktreeEligibilityForTarget(
 }
 
 /**
+ * 读取当前目标真正应展示 / 创建所用的源分支：同目标的显式选择优先，否则回落
+ * detect-cwd 的当前分支。target fence 与 eligibility fence 双保险，切设备或项目后的
+ * 同步 render 绝不会把上一仓库的同名/异名分支带过去。
+ */
+export function worktreeSourceBranchForTarget(
+  snapshot: NewSessionWorktreeBranchSelectionSnapshot | null,
+  target: NewSessionWorktreeProbeTarget,
+  eligibility: NewSessionWorktreeEligibility,
+): string {
+  if (
+    snapshot
+    && snapshot.target.deviceId === target.deviceId
+    && snapshot.target.workingDir.trim() === target.workingDir.trim()
+    && snapshot.sourceBranch.trim()
+  ) {
+    return snapshot.sourceBranch.trim();
+  }
+  return eligibility.status === 'eligible'
+    ? eligibility.sourceBranch.trim() || 'HEAD'
+    : 'HEAD';
+}
+
+/**
  * 把工作端 detect-cwd 回包归并为资格状态。判定顺序对齐桌面 WorktreeChipsRow:
  * gitInstalled → isGitRepo → isInsideWorktree 逐项短路。
  * baseRepo 取 repoRoot(工作端 git rev-parse --show-toplevel),缺失回落 workingDir;
- * sourceBranch 取当前分支(手机没有分支选择 UI,等价于桌面分支 chip 回填 current),
+ * sourceBranch 先取当前分支，作为移动端分支选择器尚未显式选择时的默认值；
  * detached HEAD 时 currentBranch 缺失，必须回落 'HEAD' 才能从当前 commit 派生；
  * 不能猜 main（仓库未必有 main，也不能静默偏离当前 checkout）。
  *
@@ -93,7 +137,8 @@ export function resolveWorktreeEligibility(
 
 /**
  * detect-cwd 抛错的归并:老被控端 CHANNEL_NOT_ALLOWED → unsupported(整行隐藏,
- * 「worktree 不可用」降级);其余(断连/超时)→ detect-failed(行保留、开关禁用)。
+ * 「worktree 不可用」降级);断连/超时 → recovering(页面自动重试);其余未知错误
+ * → detect-failed(行保留、开关禁用)。
  *
  * 真实 wire 形状:被控端 dispatch 回 { code:'CHANNEL_NOT_ALLOWED', message:"channel
  * 'worktree:detect-cwd' not allowed remotely" },移动端 unwrapInvoke 抛
@@ -106,14 +151,37 @@ export function worktreeEligibilityFromError(error: unknown): NewSessionWorktree
   const message = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
   const text = `${typeof code === 'string' ? code : ''} ${message}`;
   if (text.includes('CHANNEL_NOT_ALLOWED')) return { status: 'unsupported' };
+  // DEVICE_UNRESPONSIVE 是本机熔断器为了阻止原地重试风暴而产出的快速失败，
+  // 对页面生命周期仍是可恢复状态：Context 的代表性探测会自动关熔断，本页定时
+  // 重探即可，不能把它固化成“目录环境错误”。
+  if (text.includes('DEVICE_UNRESPONSIVE')) return { status: 'recovering' };
+  if (isTransientRemoteError(error)) return { status: 'recovering' };
   return { status: 'detect-failed' };
 }
 
-/** 播种归并:工作端 get-new-maker-defaults 的 worktreeEnabled,缺字段/形状异常一律按未勾选。 */
+/**
+ * 读取工作端 get-new-maker-defaults 的明确偏好。缺字段/形状异常返回 null，
+ * 由控制端保留当前镜像；全新设备的镜像自身默认未勾选。
+ */
 export function seedWorktreeEnabled(
   defaults: MobileNewMakerDefaults | null | undefined,
-): boolean {
-  return defaults?.worktreeEnabled === true;
+): boolean | null {
+  return typeof defaults?.worktreeEnabled === 'boolean'
+    ? defaults.worktreeEnabled
+    : null;
+}
+
+/**
+ * 手机只是远程控制器:checkbox 偏好先由工作端接受,再更新手机内存镜像。
+ * apply 失败时 mirror 绝不执行,避免留下一份仅手机生效的假偏好。
+ */
+export async function applyWorktreePreferenceOnHost(input: {
+  enabled: boolean;
+  apply: (enabled: boolean) => Promise<void>;
+  mirror: (enabled: boolean) => void;
+}): Promise<void> {
+  await input.apply(input.enabled);
+  input.mirror(input.enabled);
 }
 
 /** 开关行是否显示:project 模式 + 已选 workingDir,且通道未被判定为不可用。 */
@@ -127,6 +195,27 @@ export function shouldShowWorktreeToggle(input: {
     && input.eligibility.status !== 'unsupported';
 }
 
+/**
+ * checkbox 正在写工作端时不能按旧镜像创建；已勾选且当前目标尚未确认 eligible 时，
+ * 也不能静默退化为普通目录会话。unsupported 是老工作端的兼容降级：控件整行隐藏，
+ * 继续允许创建普通会话，避免用户被一份无法在该工作端关闭的旧镜像永久卡住。
+ */
+export function shouldBlockNewSessionCreateForWorktree(input: {
+  /** 当前草稿是否真的会使用 worktree：仅 project + 已选目录。 */
+  applicable: boolean;
+  enabled: boolean;
+  eligibility: NewSessionWorktreeEligibility;
+  preferenceSaving: boolean;
+}): boolean {
+  // 对话工作区 / 尚未选目录时 worktree 控件本就隐藏，工作端记忆不能反向卡住
+  // 普通会话创建；切回具体项目后再按该项目资格决定是否阻止。
+  if (!input.applicable) return false;
+  if (input.preferenceSaving) return true;
+  return input.enabled
+    && input.eligibility.status !== 'eligible'
+    && input.eligibility.status !== 'unsupported';
+}
+
 /** 资格未通过时的 caption 文案 key(session.json);eligible/unsupported 无 caption。 */
 export function worktreeEligibilityCaptionKey(
   eligibility: NewSessionWorktreeEligibility,
@@ -134,6 +223,8 @@ export function worktreeEligibilityCaptionKey(
   switch (eligibility.status) {
     case 'probing':
       return 'session.new.worktreeDetecting';
+    case 'recovering':
+      return 'session.new.worktreeRecovering';
     case 'ineligible':
       switch (eligibility.reason) {
         case 'gitMissing':
@@ -174,6 +265,8 @@ export interface WorktreeCreateRequest {
 export function buildWorktreeCreateRequest(input: {
   sessionId: string;
   eligibility: Extract<NewSessionWorktreeEligibility, { status: 'eligible' }>;
+  /** 当前目标的显式源分支；省略时兼容旧调用方，回落 detect-cwd 当前分支。 */
+  sourceBranch?: string | null;
   suggestedName: string | null | undefined;
   recoveryKey: string;
   now?: number;
@@ -182,7 +275,7 @@ export function buildWorktreeCreateRequest(input: {
     sessionId: input.sessionId,
     baseRepo: input.eligibility.baseRepo,
     name: normalizeSuggestedWorktreeName(input.suggestedName, input.now),
-    sourceBranch: input.eligibility.sourceBranch,
+    sourceBranch: input.sourceBranch?.trim() || input.eligibility.sourceBranch,
     recoveryKey: input.recoveryKey,
   };
 }

@@ -595,6 +595,9 @@ const fanOutDeviceLinkResponsivenessChanged = createIpcFanOut('device-link:respo
 // 交给 renderer 调它原来的本地 setter。仅被控端进程会收到(控制端从不收 → 监听不误触发)。
 const fanOutMakerDraftPrefApply = createIpcFanOut('maker:draft-pref:apply');
 const fanOutMakerWorktreePrefApply = createIpcFanOut('maker:worktree-pref:apply');
+const fanOutNewMakerWorktreeBranchChanged = createIpcFanOut(
+  'maker:new-maker-worktree-branch:changed',
+);
 const fanOutMakerSessionPrefApply = createIpcFanOut('maker:session-pref:apply');
 
 // 跨 Agent 迁移项的 wire 形态（同 main/cross-agent-convert/types.ts 的 MigrationItem，
@@ -1972,6 +1975,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
    * renderer 收到后 patchDraft 写真实草稿。仅被控端进程消费。
    */
   onMakerWorktreePrefApply: fanOutMakerWorktreePrefApply,
+  /** 读取工作端 canonical baseRepo 对应的 live 源分支选择；未选择返回 null。 */
+  getNewMakerWorktreeBranchPreference: (baseRepo: string): Promise<{
+    baseRepo: string;
+    sourceBranch: string;
+    revision: number;
+  } | null> => ipcRenderer.invoke('maker:get-new-maker-worktree-branch-pref', { baseRepo }),
+  /** 写入工作端 repo-scoped 源分支选择并返回 host 接受后的权威 snapshot。 */
+  applyNewMakerWorktreeBranchPreference: (
+    baseRepo: string,
+    sourceBranch: string,
+  ): Promise<{ baseRepo: string; sourceBranch: string; revision: number }> =>
+    ipcRenderer.invoke('maker:apply-new-maker-worktree-branch-pref', {
+      baseRepo,
+      sourceBranch,
+    }),
+  /** 本机或任一 device-link 控制端改动该工作端分支选择后的权威广播。 */
+  onNewMakerWorktreeBranchChanged: fanOutNewMakerWorktreeBranchChanged,
   onMakerSessionPrefApply: fanOutMakerSessionPrefApply,
 
   binding: {

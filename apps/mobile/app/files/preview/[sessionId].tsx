@@ -437,6 +437,10 @@ export default function RemoteFilePreviewScreen() {
           <View style={{ width: pageWidth }}>
             <FilePreviewPage
               active={Math.abs(index - pageIndex) <= 1}
+              // HTML 渲染态只在真正可见的当前页挂载可执行 WebView(review P1):
+              // active 含相邻页(文本预取要它),但相邻页提前挂 WebView 会让用户还没
+              // 滑到的文件里的脚本 / 计时器 / 网络请求先跑起来,滑走后还继续跑。
+              visible={index === pageIndex}
               exportToUrl={exportToUrl}
               item={item}
               maker={maker}
@@ -551,6 +555,7 @@ function FilePreviewPage({
   readTextFile,
   recoveryEpoch,
   targetLine,
+  visible,
   workdir,
 }: {
   active: boolean;
@@ -564,6 +569,8 @@ function FilePreviewPage({
   readTextFile(relPath: string): Promise<FileBrowserReadFileResult>;
   recoveryEpoch: number;
   targetLine: number | null;
+  /** 是否真正可见的当前页(可执行渲染态的挂载门,见调用处说明)。 */
+  visible: boolean;
   workdir: string;
 }) {
   const { t } = useTranslation();
@@ -587,7 +594,7 @@ function FilePreviewPage({
     return <AvPreviewPage active={active} exportToUrl={exportToUrl} item={item} kind={avKind} onDownload={onDownload} workdir={workdir} />;
   }
   if (item.thumb === 'doc') {
-    return <TextPreviewPage active={active} item={item} onDownload={onDownload} onQuoteSelection={onQuoteSelection} readTextFile={readTextFile} targetLine={targetLine} workdir={workdir} />;
+    return <TextPreviewPage active={active} item={item} onDownload={onDownload} onQuoteSelection={onQuoteSelection} readTextFile={readTextFile} targetLine={targetLine} visible={visible} workdir={workdir} />;
   }
   return <UnsupportedPage item={item} onDownload={onDownload} reason={t('files.preview.unsupportedType')} />;
 }
@@ -743,6 +750,7 @@ function TextPreviewPage({
   onQuoteSelection,
   readTextFile,
   targetLine,
+  visible,
   workdir,
 }: {
   active: boolean;
@@ -753,6 +761,8 @@ function TextPreviewPage({
   /** 屏级注入:readFile 带瞬断重试 + openLink(与列表/搜索/导出同路径)。 */
   readTextFile(relPath: string): Promise<FileBrowserReadFileResult>;
   targetLine: number | null;
+  /** 是否真正可见的当前页:HTML 渲染态只在可见时挂 WebView(文本预取不受限)。 */
+  visible: boolean;
   workdir: string;
 }) {
   const styles = useThemedStyles(makeStyles);
@@ -879,7 +889,17 @@ function TextPreviewPage({
         richKind === 'html' ? (
           // HTML 生成物:已读到的文本直接进 WebView(不走 OSS 导出),同目录相对资源
           // 取不到是已知边界,见 HtmlFileReader 头注。
-          <HtmlFileReader html={state.content ?? ''} testID="filePreview.htmlRendered" />
+          //
+          // **只在真正可见的当前页挂载**(review P1):HTML 里的脚本是可执行的不可信
+          // 内容,相邻预取页提前挂 WebView 会让用户还没打开的文件里的脚本 / 计时器 /
+          // 网络请求先跑起来。离开当前页即卸载 —— 卸载 WebView 是停掉这些东西最彻底
+          // 的方式(比 injectJavaScript 去逐个 clearInterval 可靠)。文本预取不受影响,
+          // 所以滑回来时无需重新取件。
+          visible ? (
+            <HtmlFileReader html={state.content ?? ''} testID="filePreview.htmlRendered" />
+          ) : (
+            <View style={styles.centerFill} testID="filePreview.htmlOffscreen" />
+          )
         ) : (
           <MarkdownFileReader markdown={state.content ?? ''} onQuoteSelection={onQuoteSelection} targetLine={targetLine} testID="filePreview.markdownRendered" />
         )

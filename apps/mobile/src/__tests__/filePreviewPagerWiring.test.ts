@@ -36,14 +36,37 @@ describe('HTML 渲染态的 WebView 约束', () => {
     expect(htmlReaderSource).toContain("source={{ baseUrl: 'about:blank', html }}");
   });
 
-  it('导航一律拦截,且不开向 RN 侧的消息通道', () => {
+  it('回调是唯一导航决策点:originWhitelist 不得收窄', () => {
     expect(htmlReaderSource).toContain('onShouldStartLoadWithRequest={interceptHtmlNavigation}');
-    expect(htmlReaderSource).toContain("originWhitelist={['about:blank']}");
+    // 收窄成 ['about:blank'] 会让 RNW 在回调**之前**拒掉非白名单 URL,并把它交给
+    // RN Linking 让系统处理 —— tel: / mailto: / 自定义 scheme 会拉起外部应用,
+    // 整段策略被绕过(review P2 实捉)。必须放到 '*' 让回调拿到全部请求。
+    expect(htmlReaderSource).toContain("originWhitelist={['*']}");
+    expect(htmlReaderSource).not.toContain("originWhitelist={['about:blank']}");
+  });
+
+  it('三档决策:about 放行、http(s) 外送、其余拒绝且不碰 Linking', () => {
+    // 页内锚点必须放行,否则目录跳转失效。
+    expect(htmlReaderSource).toContain("url.startsWith('about:')");
+    // http(s) 之外不得有任何 Linking 调用 —— 唯一一处必须在 http(s) 判定分支内。
+    const linkingCalls = htmlReaderSource.match(/Linking\.openURL/g) ?? [];
+    expect(linkingCalls).toHaveLength(1);
+    const httpBranch = /if \(\/\^https\?:\\\/\\\/\/i\.test\(url\)\) \{[\s\S]*?\n  \}/.exec(htmlReaderSource);
+    expect(httpBranch, '未找到 http(s) 分支').not.toBeNull();
+    expect(httpBranch![0]).toContain('Linking.openURL');
     // onMessage 缺席是刻意的:不给任意生成物一条通向 RN 的桥。
     // 只匹配 JSX 属性形态 —— 头注里说明「不挂 onMessage」的那句话不算挂上。
     expect(htmlReaderSource).not.toMatch(/onMessage\s*=/);
-    // 页内锚点必须放行,否则目录跳转失效。
-    expect(htmlReaderSource).toContain("url.startsWith('about:')");
+  });
+
+  it('可执行 WebView 只为真正可见的当前页挂载', () => {
+    // 相邻预取页(active)不得提前挂 WebView:里面的脚本 / 计时器 / 网络请求会在
+    // 用户还没打开该文件时就跑起来,滑走后还继续跑(review P1)。
+    expect(source).toContain('visible={index === pageIndex}');
+    expect(source).toContain('visible ? (\n            <HtmlFileReader');
+    expect(source).toContain('testID="filePreview.htmlOffscreen"');
+    // 挂载门必须是 visible 而不是 active。
+    expect(source).not.toMatch(/active\s*\?\s*\(\s*<HtmlFileReader/);
   });
 });
 

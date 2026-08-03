@@ -1169,6 +1169,7 @@ export function closeRemoteLink(deviceId: string): void {
   // 本地主动断开同样必须终止重开循环:否则用户刚点断开,退避重试又把
   // 链路建回来。
   transportTimeoutReopen.cancel(deviceId);
+  cancelPendingPeerLinkReopen(deviceId);
   openLinkInFlight.delete(deviceId);
   client?.closeLink(deviceId, 'user');
 }

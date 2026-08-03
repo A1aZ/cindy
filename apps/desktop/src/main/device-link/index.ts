@@ -156,7 +156,7 @@ const pendingPeerLinkReopens = new Set<string>();
 let pendingPeerLinkReopenRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
 function schedulePendingPeerLinkReopenRetry(): void {
-  if (pendingPeerLinkReopenRetryTimer !== null || linkTornDown) return;
+  if (pendingPeerLinkReopenRetryTimer !== null || linkTornDown || pendingPeerLinkReopens.size === 0) return;
   if (arbiter && !arbiter.isOwner()) return;
   pendingPeerLinkReopenRetryTimer = setTimeout(() => {
     pendingPeerLinkReopenRetryTimer = null;
@@ -182,6 +182,14 @@ function flushPendingPeerLinkReopens(): void {
         schedulePendingPeerLinkReopenRetry();
       },
     );
+  }
+}
+
+function cancelPendingPeerLinkReopen(deviceId: string): void {
+  pendingPeerLinkReopens.delete(deviceId);
+  if (pendingPeerLinkReopens.size === 0 && pendingPeerLinkReopenRetryTimer !== null) {
+    clearTimeout(pendingPeerLinkReopenRetryTimer);
+    pendingPeerLinkReopenRetryTimer = null;
   }
 }
 /**
@@ -531,6 +539,9 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
       // shutdown/revoked/未知新值)都是永久关闭——必须终止已在进行的重开
       // 循环,否则刚被断开的控制链会被退避重试重新建起。
       routeLinkCloseForReopen(reason, transportTimeoutReopen, env.src);
+      if (reason !== 'transport-timeout') {
+        cancelPendingPeerLinkReopen(env.src);
+      }
       if (reason === 'revoked') {
         // 撤权后在途请求会陆续超时——那不是「设备无响应」,是访问被收回。清熔断并
         // 作废在途结果(翻代),避免 unresponsive 状态与撤权状态并存(对齐 mobile 语义)。

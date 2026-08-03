@@ -694,7 +694,7 @@ export function AppearanceSection() {
                 }
               }}
               className={cn(
-                'h-9 w-[72px] rounded-xl border px-3 text-right text-[13px] outline-none',
+                'h-9 w-[72px] rounded-xl border px-3 text-right text-13 outline-none',
                 'border-[var(--settings-input-border)] bg-[var(--settings-input-bg)]',
                 'font-mono text-[var(--settings-input-text)]',
                 'focus:border-[var(--settings-input-border-focus)]',
@@ -778,7 +778,7 @@ export function AppearanceSection() {
                 }
               }}
               className={cn(
-                'h-9 w-[72px] rounded-xl border px-3 text-right text-[13px] outline-none',
+                'h-9 w-[72px] rounded-xl border px-3 text-right text-13 outline-none',
                 'border-[var(--settings-input-border)] bg-[var(--settings-input-bg)]',
                 'font-mono text-[var(--settings-input-text)]',
                 'focus:border-[var(--settings-input-border-focus)]',

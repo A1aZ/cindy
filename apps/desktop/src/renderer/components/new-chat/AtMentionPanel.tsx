@@ -182,7 +182,7 @@ export function AtMentionPanel({
         <Icon size={16} className="shrink-0 text-[var(--cmd-palette-item-icon)]" />
         <span
           className={cn(
-            'min-w-0 truncate text-[14px] font-medium',
+            'min-w-0 truncate text-14 font-medium',
             'text-[var(--cmd-palette-item-text)]',
           )}
         >
@@ -192,7 +192,7 @@ export function AtMentionPanel({
           <Tip text={meta} mono>
             <span
               className={cn(
-                'shrink-0 text-[12px] truncate max-w-[240px]',
+                'shrink-0 text-12 truncate max-w-[240px]',
                 'text-[var(--cmd-palette-item-meta)]',
                 'ml-auto',
               )}
@@ -233,10 +233,10 @@ export function AtMentionPanel({
         )}
         {state.kind === 'error' && (
           <div className="flex flex-col items-center justify-center py-[16px] gap-[10px]">
-            <div className="text-[13px] text-[var(--destructive)]">
+            <div className="text-13 text-[var(--destructive)]">
               {t('newChat.atMention.scanFailed')}
             </div>
-            <div className="text-[12px] text-[var(--cmd-palette-item-meta)] px-[12px] text-center">
+            <div className="text-12 text-[var(--cmd-palette-item-meta)] px-[12px] text-center">
               {state.message}
             </div>
             <button
@@ -246,7 +246,7 @@ export function AtMentionPanel({
                 onRetry();
               }}
               className={cn(
-                'h-[28px] px-[12px] rounded-full text-[12px] font-medium',
+                'h-[28px] px-[12px] rounded-full text-12 font-medium',
                 'bg-[var(--cmd-palette-item-hover)] text-[var(--cmd-palette-item-text)]',
               )}
             >
@@ -258,7 +258,7 @@ export function AtMentionPanel({
           <div
             className={cn(
               'flex items-center justify-center',
-              'h-[40px] text-[13px]',
+              'h-[40px] text-13',
               'text-[var(--cmd-palette-empty)]',
             )}
           >
@@ -271,7 +271,7 @@ export function AtMentionPanel({
             {state.truncated && (
               <div
                 className={cn(
-                  'px-[10px] py-[8px] text-[12px]',
+                  'px-[10px] py-[8px] text-12',
                   'text-[var(--cmd-palette-item-meta)]',
                 )}
               >
@@ -299,10 +299,10 @@ export function AtMentionPanel({
             maxHeight: tooltipPos.maxHeight,
           }}
         >
-          <div className="text-[14px] font-medium text-[var(--cmd-palette-item-text)]">
+          <div className="text-14 font-medium text-[var(--cmd-palette-item-text)]">
             {focusedItem.name}
           </div>
-          <div className="mt-[8px] text-[13px] leading-[1.5] text-[var(--cmd-palette-tooltip-body)]">
+          <div className="mt-[8px] text-13 leading-[1.5] text-[var(--cmd-palette-tooltip-body)]">
             {focusedItem.description}
           </div>
         </div>

@@ -57,8 +57,10 @@ const config: Config = {
       fontFamily: {
         mono: ['var(--app-font-code, var(--app-font-code-default))'],
       },
+      // 字号档 = DESIGN.md §3 桌面 UI 字号白名单的镜像(#1505 PR3 收档):
+      // 增删档位必须同步 globals.css 的 --text-N 与 DESIGN.md 白名单,三处一致。
+      // 禁止改回"9–28 每个整数全开"——梯子每一级都是台阶等于没有梯子。
       fontSize: {
-        9: 'var(--text-9)',
         10: 'var(--text-10)',
         11: 'var(--text-11)',
         12: 'var(--text-12)',
@@ -66,17 +68,9 @@ const config: Config = {
         14: 'var(--text-14)',
         15: 'var(--text-15)',
         16: 'var(--text-16)',
-        17: 'var(--text-17)',
         18: 'var(--text-18)',
-        19: 'var(--text-19)',
         20: 'var(--text-20)',
-        21: 'var(--text-21)',
-        22: 'var(--text-22)',
-        23: 'var(--text-23)',
         24: 'var(--text-24)',
-        25: 'var(--text-25)',
-        26: 'var(--text-26)',
-        27: 'var(--text-27)',
         28: 'var(--text-28)',
       },
       borderRadius: {

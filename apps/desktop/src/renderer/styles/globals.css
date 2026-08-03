@@ -25,7 +25,9 @@
        收敛成统一 compact-delta 机制。 */
     --app-code-font-size: 14px;
     --app-ui-font-size: 14px;
-    --text-9: 9px;
+    /* 字号阶梯 = DESIGN.md §3 桌面 UI 字号白名单的镜像(UI 段 10–16 +
+       标题/内容段 18/20/24/28,#1505 PR3 收档):档位增删必须同步
+       tailwind.config.ts 的 fontSize 表与 DESIGN.md 白名单,三处一致。 */
     --text-10: 10px;
     --text-11: 11px;
     --text-12: 12px;
@@ -33,17 +35,9 @@
     --text-14: 14px;
     --text-15: 15px;
     --text-16: 16px;
-    --text-17: 17px;
     --text-18: 18px;
-    --text-19: 19px;
     --text-20: 20px;
-    --text-21: 21px;
-    --text-22: 22px;
-    --text-23: 23px;
     --text-24: 24px;
-    --text-25: 25px;
-    --text-26: 26px;
-    --text-27: 27px;
     --text-28: 28px;
 
     /* Motion token(全局动效档位,规范见 DESIGN.md §14.4):新增过渡/动画一律
@@ -263,18 +257,10 @@ html:lang(ko) {
   font-size: 17px;
   line-height: 1.5;
 }
-.chat-rail-compact .text-\[12px\] {
-  font-size: 11px;
-}
-.chat-rail-compact .text-\[13px\] {
-  font-size: 12px;
-}
-.chat-rail-compact .text-\[14px\] {
-  font-size: 13px;
-}
-.chat-rail-compact .text-\[15px\] {
-  font-size: 14px;
-}
+/* 2026-08 字号归一(#1505 PR3):任意值类 text-[12px] 等已全量替换为 text-12
+   等 token 类,原先按字面类名逐个追打的 -1px 规则随之退役——统一走下方
+   token 类规则。副作用即修复:过去不在字面枚举里的 text-[11px]/text-[10px]/
+   小数档在紧凑栏静默不缩,归 token 后 12/13/14/15 档一律被正确覆盖。 */
 .chat-rail-compact .text-12 {
   font-size: calc(var(--text-12) - 1px);
 }
@@ -321,17 +307,17 @@ html:lang(ko) {
   font-size: 1.125rem;
   line-height: 1.75rem;
 }
-.chat-rail-compact [data-chat-input-root] .text-\[12px\] {
-  font-size: 12px;
+.chat-rail-compact [data-chat-input-root] .text-12 {
+  font-size: var(--text-12);
 }
-.chat-rail-compact [data-chat-input-root] .text-\[13px\] {
-  font-size: 13px;
+.chat-rail-compact [data-chat-input-root] .text-13 {
+  font-size: var(--text-13);
 }
-.chat-rail-compact [data-chat-input-root] .text-\[14px\] {
-  font-size: 14px;
+.chat-rail-compact [data-chat-input-root] .text-14 {
+  font-size: var(--text-14);
 }
-.chat-rail-compact [data-chat-input-root] .text-\[15px\] {
-  font-size: 15px;
+.chat-rail-compact [data-chat-input-root] .text-15 {
+  font-size: var(--text-15);
 }
 
 /* Tiptap ChatInput — placeholder hook & chip alignment

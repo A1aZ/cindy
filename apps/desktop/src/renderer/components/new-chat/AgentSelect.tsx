@@ -164,7 +164,7 @@ export function AgentSelect({
           {/* 不用 flex-1:撑满会把 chevron 顶到最右,短引擎名后面拖一片空白。
               文字下沉 0.5px —— Inter 在 leading-none 下视觉重心偏上,与 mark 光学居中对齐。 */}
           <span
-            className="min-w-0 truncate text-left text-[12px] font-medium leading-none"
+            className="min-w-0 truncate text-left text-12 font-medium leading-none"
             style={maxLabelWidth ? { maxWidth: maxLabelWidth } : undefined}
           >
             <span className="inline-block translate-y-[0.5px]">{current.label}</span>
@@ -233,7 +233,7 @@ export function AgentSelect({
               )}
             >
               <opt.Mark size={14} className="shrink-0 text-[var(--text-secondary)]" />
-              <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--model-item-text)]">
+              <span className="min-w-0 flex-1 truncate text-13 font-medium text-[var(--model-item-text)]">
                 {opt.label}
               </span>
               {selected && (

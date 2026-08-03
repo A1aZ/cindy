@@ -358,7 +358,7 @@ function FolderChipBig({
           className={cn(
             'inline-flex h-[42px] items-center gap-2.5 rounded-full',
             'border border-border bg-[var(--chat-input-bg)] px-[18px]',
-            'text-[14px] font-medium text-foreground',
+            'text-14 font-medium text-foreground',
             'transition-colors hover:bg-sidebar-item-hover',
             'disabled:cursor-not-allowed disabled:opacity-50',
           )}
@@ -434,8 +434,8 @@ function BranchWorktreeChip({
         // 只读态不弹菜单但也不该像 disabled 一样淡出 —— 分支信息本身是有效展示。
         !branchInteractive && 'cursor-default',
         compact
-          ? 'max-w-[180px] gap-1.5 pl-3 pr-2 text-[12px] font-medium leading-[14px]'
-          : 'max-w-[220px] gap-2.5 pl-[18px] pr-2.5 text-[14px] font-medium',
+          ? 'max-w-[180px] gap-1.5 pl-3 pr-2 text-12 font-medium leading-[14px]'
+          : 'max-w-[220px] gap-2.5 pl-[18px] pr-2.5 text-14 font-medium',
         branchInteractive &&
           (compact
             ? 'hover:bg-[var(--create-agent-control-bg-hover)] active:bg-[var(--create-agent-control-bg-pressed)]'
@@ -482,7 +482,7 @@ function BranchWorktreeChip({
         className="max-h-[280px] min-w-[200px] overflow-y-auto rounded-xl border border-border bg-popover p-1 shadow-lg"
       >
         {branchesLoading ? (
-          <div className="px-3 py-1.5 text-[13px] text-muted-foreground">
+          <div className="px-3 py-1.5 text-13 text-muted-foreground">
             {t('newChat.branchChip.loading')}
           </div>
         ) : branchesFailed || branches.length === 0 ? (
@@ -493,7 +493,7 @@ function BranchWorktreeChip({
               e.preventDefault();
               onRetryBranches();
             }}
-            className="cursor-pointer rounded-[8px] px-3 py-1.5 text-[13px] text-muted-foreground focus:bg-accent focus:text-accent-foreground"
+            className="cursor-pointer rounded-[8px] px-3 py-1.5 text-13 text-muted-foreground focus:bg-accent focus:text-accent-foreground"
           >
             {t('newChat.branchChip.loadFailed')}
           </DropdownMenuItem>
@@ -503,7 +503,7 @@ function BranchWorktreeChip({
               key={b}
               onSelect={() => onPick(b)}
               className={cn(
-                'cursor-pointer rounded-[8px] px-3 py-1.5 text-[13px] text-foreground',
+                'cursor-pointer rounded-[8px] px-3 py-1.5 text-13 text-foreground',
                 'focus:bg-accent focus:text-accent-foreground',
                 b === branchLabel && 'bg-accent/60',
               )}
@@ -514,7 +514,7 @@ function BranchWorktreeChip({
         )}
         {/* 脚注说明双向联动语义:未勾 → 选其他分支将开 worktree;已勾 → 选回
             当前分支将退回直接启动。用户第一次遇到"勾选跟着分支走"时不至于意外。 */}
-        <div className="mt-1 border-t border-border px-3 pb-1 pt-1.5 text-[11px] leading-snug text-muted-foreground">
+        <div className="mt-1 border-t border-border px-3 pb-1 pt-1.5 text-11 leading-snug text-muted-foreground">
           {checked
             ? t('newChat.branchChip.exitWorktreeHint')
             : t('newChat.branchChip.worktreeHint')}
@@ -537,8 +537,8 @@ function BranchWorktreeChip({
         'inline-flex h-full items-center transition-colors',
         'disabled:cursor-not-allowed disabled:opacity-50',
         compact
-          ? 'gap-1.5 pl-2 pr-3 text-[12px] font-medium leading-[14px]'
-          : 'gap-2.5 pl-2.5 pr-[18px] text-[14px] font-medium',
+          ? 'gap-1.5 pl-2 pr-3 text-12 font-medium leading-[14px]'
+          : 'gap-2.5 pl-2.5 pr-[18px] text-14 font-medium',
         !checkboxDisabled &&
           (compact
             ? 'hover:bg-[var(--create-agent-control-bg-hover)] active:bg-[var(--create-agent-control-bg-pressed)]'

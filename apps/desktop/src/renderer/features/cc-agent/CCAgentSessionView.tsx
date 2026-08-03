@@ -3030,7 +3030,7 @@ export function CCAgentSessionView({
           "xdt-maker (feat-button-ui)" —— 单段 basename 只显示 worktree
           名字,看不出是哪个 repo 的 worktree;两段式让用户一眼定位到 repo,
           括号里再补 worktree 标识。完整 worktree 绝对路径仍在 hover tip 里。 */}
-      <span className="block min-w-0 truncate text-[12px] font-medium leading-none text-[var(--workingdir-text)]">
+      <span className="block min-w-0 truncate text-12 font-medium leading-none text-[var(--workingdir-text)]">
         {workingDirLabel}
       </span>
     </>
@@ -3177,7 +3177,7 @@ export function CCAgentSessionView({
         }}
       >
         {showOrcaLeadIdentityBar && (
-          <div className="flex h-8 shrink-0 select-none items-center border-b border-border/40 px-3 text-[11px] font-medium leading-none text-muted-foreground">
+          <div className="flex h-8 shrink-0 select-none items-center border-b border-border/40 px-3 text-11 font-medium leading-none text-muted-foreground">
             <span className="min-w-0 flex flex-1 items-center gap-1.5 truncate">
               <VendorIcon
                 vendor={leadVendor}
@@ -3744,9 +3744,9 @@ export function CCAgentSessionView({
                 {worktreeCreation?.status === 'creating' ? (
                   <div className="flex min-w-0 items-center gap-1.5">
                     <Spinner size={12} className="text-[var(--workingdir-icon)]" />
-                    <span className="block min-w-0 truncate text-[12px] font-medium leading-none text-[var(--workingdir-text)]">
+                    <span className="block min-w-0 truncate text-12 font-medium leading-none text-[var(--workingdir-text)]">
                       {t('ccAgent.layout.worktreeCreating', '正在创建 worktree')}{' '}
-                      <code className="font-mono text-[11px] opacity-80">
+                      <code className="font-mono text-11 opacity-80">
                         {worktreeCreation.name}
                       </code>
                       …
@@ -3756,7 +3756,7 @@ export function CCAgentSessionView({
                   <Tip text={worktreeCreation.error} mono side="top">
                     <div className="flex min-w-0 items-center gap-1.5">
                       <AlertCircle size={12} className="shrink-0 text-red-500 dark:text-red-400" />
-                      <span className="block min-w-0 truncate text-[12px] font-medium leading-none text-red-500 dark:text-red-400">
+                      <span className="block min-w-0 truncate text-12 font-medium leading-none text-red-500 dark:text-red-400">
                         {t('ccAgent.layout.worktreeFailed', 'Worktree 创建失败')}
                         {' — '}
                         {worktreeCreation.error}
@@ -3972,7 +3972,7 @@ function HandoffSourcePill({
     <div
       className={cn(
         'flex h-10 w-full items-center rounded-[12px] border border-[var(--cmd-palette-border)] bg-[hsl(var(--content-area))]',
-        'text-[13px] leading-none text-[#595959]',
+        'text-13 leading-none text-[#595959]',
       )}
     >
       <button
@@ -4214,7 +4214,7 @@ function RunningStatusBar({
           // restores optical alignment with the text baseline.
           <Sparkles size={14} className="shrink-0 -translate-y-px" />
         )}
-        <span className="truncate text-[13px] font-medium">{displayStatus}</span>
+        <span className="truncate text-13 font-medium">{displayStatus}</span>
       </div>
       {/* 中央槽位(几何真居中):被控提示 chip 等。maxWidth 封顶 + max-w-full 让长设备名
           在窄宽时收缩,chip 靠自带 max-w-full + 内部 truncate 截断;不套 fadeStyle
@@ -4241,7 +4241,7 @@ function RunningStatusBar({
             onClick={onStopBackgroundTasks}
             disabled={backgroundStopping || !onStopBackgroundTasks}
             className={cn(
-              'flex shrink-0 items-center gap-1 text-[13px] font-medium',
+              'flex shrink-0 items-center gap-1 text-13 font-medium',
               'text-[var(--text-primary)] hover:opacity-70 transition-opacity',
               'disabled:opacity-50 disabled:cursor-not-allowed',
             )}
@@ -4258,16 +4258,16 @@ function RunningStatusBar({
           </button>
         ) : (
           <>
-            <span className="text-[13px] font-medium text-[var(--status-bar-meta)]">
+            <span className="text-13 font-medium text-[var(--status-bar-meta)]">
               {elapsedText}
             </span>
             {!sideTaskRunning && (
               <>
-                <span className="text-[13px] font-medium text-[var(--status-bar-meta)]">
+                <span className="text-13 font-medium text-[var(--status-bar-meta)]">
                   &middot;
                 </span>
                 <ArrowDown size={13} className="shrink-0 text-[var(--status-bar-meta)]" />
-                <span className="text-[13px] font-medium text-[var(--status-bar-meta)]">
+                <span className="text-13 font-medium text-[var(--status-bar-meta)]">
                   {tokenText}
                 </span>
               </>
@@ -4386,7 +4386,7 @@ function ContextCapacityRing({
           transform={`rotate(-90 ${size / 2} ${size / 2})`}
         />
       </svg>
-      <span className="text-[12px] font-medium leading-none" style={{ color: fillColor }}>
+      <span className="text-12 font-medium leading-none" style={{ color: fillColor }}>
         {pct}%
       </span>
     </>

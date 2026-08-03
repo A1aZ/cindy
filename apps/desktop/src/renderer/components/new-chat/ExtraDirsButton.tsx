@@ -311,7 +311,7 @@ export function ExtraDirsButton({
                 <span
                   className={cn(
                     'font-normal tabular-nums',
-                    dense ? 'text-[12.5px]' : 'text-[13px]',
+                    dense ? 'text-12' : 'text-13',
                   )}
                 >
                   ×{count}
@@ -338,7 +338,7 @@ export function ExtraDirsButton({
             )}
           >
             <Paperclip size={14} className="shrink-0 text-[var(--model-item-text)]" />
-            <span className="text-[13px] text-[var(--model-item-text)]">
+            <span className="text-13 text-[var(--model-item-text)]">
               {t('extraDirs.addFiles')}
             </span>
           </button>
@@ -362,7 +362,7 @@ export function ExtraDirsButton({
             )}
           >
             <Target size={14} className="shrink-0 text-[var(--model-item-text)]" />
-            <span className="text-[13px] text-[var(--model-item-text)]">
+            <span className="text-13 text-[var(--model-item-text)]">
               {t('goal.newGoalMenuItem')}
             </span>
           </button>
@@ -384,7 +384,7 @@ export function ExtraDirsButton({
             )}
           >
             <ClipboardList size={14} className="shrink-0 text-[var(--model-item-text)]" />
-            <span className="min-w-0 flex-1 truncate text-left text-[13px] text-[var(--model-item-text)]">
+            <span className="min-w-0 flex-1 truncate text-left text-13 text-[var(--model-item-text)]">
               {t('planMode.menuItem')}
             </span>
             {planMode.enabled && (
@@ -430,7 +430,7 @@ export function ExtraDirsButton({
                 />
                 <span
                   className={cn(
-                    'min-w-0 flex-1 truncate text-left text-[13px]',
+                    'min-w-0 flex-1 truncate text-left text-13',
                     collaboration.enabled
                       ? 'font-medium text-[var(--warning-accent)]'
                       : 'text-[var(--model-item-text)]',
@@ -451,7 +451,7 @@ export function ExtraDirsButton({
             {(onNewGoal || planMode || collaboration) && (
               <div className="my-1 h-px bg-[var(--model-dropdown-border)]" />
             )}
-            <div className="px-2 pb-1 pt-1 text-[12px] text-[var(--model-trigger-text)] opacity-70">
+            <div className="px-2 pb-1 pt-1 text-12 text-[var(--model-trigger-text)] opacity-70">
               {t('extraDirs.pluginsTitle')}
             </div>
             <div
@@ -487,11 +487,11 @@ export function ExtraDirsButton({
                       iconName={ghost.manifest.name}
                       size="menu"
                     />
-                    <span className="min-w-0 flex-1 truncate text-left text-[13px] text-[var(--model-item-text)]">
+                    <span className="min-w-0 flex-1 truncate text-left text-13 text-[var(--model-item-text)]">
                       {ghost.manifest.name}
                     </span>
                     {!selectable ? (
-                      <span className="shrink-0 text-[12px] text-[var(--model-trigger-text)] opacity-70">
+                      <span className="shrink-0 text-12 text-[var(--model-trigger-text)] opacity-70">
                         {t(
                           ghost.manifest.command
                             ? 'extraDirs.pluginDisabled'
@@ -513,7 +513,7 @@ export function ExtraDirsButton({
               <div className="my-1 h-px bg-[var(--model-dropdown-border)]" />
             )}
 
-            <div className="px-2 pb-1 pt-1 text-[12px] text-[var(--model-trigger-text)] opacity-70">
+            <div className="px-2 pb-1 pt-1 text-12 text-[var(--model-trigger-text)] opacity-70">
               {t('extraDirs.sectionTitle')}
             </div>
 
@@ -532,7 +532,7 @@ export function ExtraDirsButton({
                       className="shrink-0 text-[var(--model-item-text)] opacity-60"
                     />
                     <Tip text={p} mono side="top">
-                      <span className="min-w-0 flex-1 truncate text-left text-[13px] text-[var(--model-item-text)]">
+                      <span className="min-w-0 flex-1 truncate text-left text-13 text-[var(--model-item-text)]">
                         {basename(p)}
                       </span>
                     </Tip>
@@ -552,7 +552,7 @@ export function ExtraDirsButton({
                 ))}
               </div>
             ) : (
-              <div className="px-3 py-2 text-[12px] text-[var(--model-item-text)] opacity-50">
+              <div className="px-3 py-2 text-12 text-[var(--model-item-text)] opacity-50">
                 {t('extraDirs.empty')}
               </div>
             )}
@@ -569,7 +569,7 @@ export function ExtraDirsButton({
               )}
             >
               <FolderPlus size={14} className="shrink-0 text-[var(--model-item-text)]" />
-              <span className="text-[13px] text-[var(--model-item-text)]">
+              <span className="text-13 text-[var(--model-item-text)]">
                 {atLimit ? t('extraDirs.atLimit', { max: MAX_EXTRA_DIRS }) : t('extraDirs.add')}
               </span>
             </button>

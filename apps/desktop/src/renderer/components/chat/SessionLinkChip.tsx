@@ -170,7 +170,7 @@ export function SessionLinkChip({ href, label, referenceMetadata }: SessionLinkC
     const referenceSummary = referenceDetails.length > 0 ? (
       <span
         data-session-reference-summary=""
-        className="ml-1 min-w-0 truncate text-[11px] text-[var(--text-tertiary)]"
+        className="ml-1 min-w-0 truncate text-11 text-[var(--text-tertiary)]"
       >
         {referenceDetails.join(' · ')}
       </span>

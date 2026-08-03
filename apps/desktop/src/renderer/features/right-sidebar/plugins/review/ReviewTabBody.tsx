@@ -965,14 +965,14 @@ export function ReviewTabBody({ state, ctx }: ReviewTabBodyProps) {
             onSelectCommit={selectCommitSource}
             onRefreshCommits={commitsState.refresh}
           />
-          <span className="shrink-0 whitespace-nowrap font-mono text-[11px] tabular-nums">
+          <span className="shrink-0 whitespace-nowrap font-mono text-11 tabular-nums">
             <span className="text-[var(--diff-add-fg)]">+{totalAdd}</span>{' '}
             <span className="text-[var(--diff-del-fg)]">-{totalDel}</span>
           </span>
           {toolbarShowBranch && (
             <>
               <div className="mx-0.5 h-4 w-px shrink-0 bg-[var(--border-default)]" />
-              <div className="flex min-w-0 flex-1 items-center gap-1.5 text-[12px] text-[var(--text-secondary)]">
+              <div className="flex min-w-0 flex-1 items-center gap-1.5 text-12 text-[var(--text-secondary)]">
                 <GitBranch size={13} className="shrink-0 text-[var(--text-tertiary)]" />
                 <span className="min-w-0 truncate font-medium text-[var(--text-primary)]">
                   {branchLabel}
@@ -1056,7 +1056,7 @@ export function ReviewTabBody({ state, ctx }: ReviewTabBodyProps) {
           </div>
         </div>
         {effectiveWriteDisabledReasons.length > 0 && (
-          <div className="mt-2 flex items-start gap-2 rounded-[8px] border border-[var(--border-default)] bg-[var(--warning-bg-soft)] px-2.5 py-2 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+          <div className="mt-2 flex items-start gap-2 rounded-[8px] border border-[var(--border-default)] bg-[var(--warning-bg-soft)] px-2.5 py-2 text-11 leading-relaxed text-[var(--text-secondary)]">
             <AlertTriangle size={13} className="mt-0.5 shrink-0 text-[var(--warning-fg)]" />
             <span>{t('rightSidebar.review.writeDisabledNotice', {
               reasons: writeDisabledReasonText,
@@ -1298,7 +1298,7 @@ function AheadBehindPill({
   return (
     <Tip text={label}>
       <span
-        className="shrink-0 rounded-full bg-[var(--surface-chip)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-secondary)]"
+        className="shrink-0 rounded-full bg-[var(--surface-chip)] px-1.5 py-0.5 font-mono text-10 text-[var(--text-secondary)]"
         aria-label={label}
       >
         ↑{ahead} ↓{behind}
@@ -1448,7 +1448,7 @@ function CommitOrPushDropdown({
               if (!triggerDisabled) setOpen(true);
             }}
             className={cn(
-              'inline-flex h-6 shrink-0 items-center rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] text-[10px] font-medium text-[var(--text-primary)] hover:bg-[var(--surface-hover)]',
+              'inline-flex h-6 shrink-0 items-center rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] text-10 font-medium text-[var(--text-primary)] hover:bg-[var(--surface-hover)]',
               iconOnly ? 'w-6 justify-center px-0' : 'gap-1 px-2.5',
               triggerDisabled && 'cursor-not-allowed opacity-50',
             )}
@@ -1465,10 +1465,10 @@ function CommitOrPushDropdown({
         onKeyDown={handleKeyDown}
         className="w-[min(22rem,calc(100vw-24px))] rounded-[10px] border border-[var(--cmd-palette-border)] bg-[var(--cmd-palette-bg)] p-2 shadow-[var(--shadow-menu)]"
       >
-        <div className="flex min-w-0 items-center gap-2 rounded-[8px] bg-[var(--surface-chip)] px-2.5 py-2 text-[12px]">
+        <div className="flex min-w-0 items-center gap-2 rounded-[8px] bg-[var(--surface-chip)] px-2.5 py-2 text-12">
           <GitBranch size={13} className="shrink-0 text-[var(--text-tertiary)]" />
           <span className="min-w-0 flex-1 truncate font-medium text-[var(--text-primary)]">{branchLabel}</span>
-          <span className="shrink-0 whitespace-nowrap font-mono text-[11px] tabular-nums">
+          <span className="shrink-0 whitespace-nowrap font-mono text-11 tabular-nums">
             <span className="text-[var(--diff-add-fg)]">+{totalAdd}</span>{' '}
             <span className="text-[var(--diff-del-fg)]">-{totalDel}</span>
           </span>
@@ -1484,7 +1484,7 @@ function CommitOrPushDropdown({
             }}
             rows={4}
             placeholder={t('rightSidebar.review.commit.placeholder')}
-            className="min-h-[92px] w-full resize-none rounded-[8px] border border-[var(--border-default)] bg-[var(--surface-elevated)] px-2.5 py-2 text-[12px] leading-relaxed text-[var(--text-primary)] placeholder:text-[var(--text-placeholder)] focus:outline-none focus:ring-2 focus:ring-[var(--focus-ring-soft)]"
+            className="min-h-[92px] w-full resize-none rounded-[8px] border border-[var(--border-default)] bg-[var(--surface-elevated)] px-2.5 py-2 text-12 leading-relaxed text-[var(--text-primary)] placeholder:text-[var(--text-placeholder)] focus:outline-none focus:ring-2 focus:ring-[var(--focus-ring-soft)]"
           />
         </div>
         <DropdownMenuItem
@@ -1492,7 +1492,7 @@ function CommitOrPushDropdown({
             event.preventDefault();
             setIncludeUnstaged((current) => !current);
           }}
-          className="mt-1 flex h-8 items-center gap-2 rounded-[6px] px-2 text-[12px] text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]"
+          className="mt-1 flex h-8 items-center gap-2 rounded-[6px] px-2 text-12 text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]"
         >
           <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[3px] border border-[var(--border-default)] bg-[var(--surface-elevated)] text-[var(--text-primary)]">
             {includeUnstaged && <Check size={10} />}
@@ -1527,7 +1527,7 @@ function CommitOrPushDropdown({
           }}
         >
           {push.ahead > 0 && (
-            <span className="rounded-full bg-[var(--surface-chip)] px-1 font-mono text-[9px] text-[var(--text-secondary)]">
+            <span className="rounded-full bg-[var(--surface-chip)] px-1 font-mono text-10 text-[var(--text-secondary)]">
               ↑{push.ahead}
             </span>
           )}
@@ -1565,7 +1565,7 @@ function CommitDropdownAction({
         onSelect();
       }}
       className={cn(
-        'flex h-8 items-center gap-2 rounded-[6px] px-2 text-[12px] text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]',
+        'flex h-8 items-center gap-2 rounded-[6px] px-2 text-12 text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]',
         disabled && 'cursor-not-allowed opacity-50',
       )}
     >
@@ -1573,7 +1573,7 @@ function CommitDropdownAction({
       <span className="min-w-0 flex-1 truncate">{label}</span>
       {children}
       {shortcut && (
-        <span className="shrink-0 rounded bg-[var(--surface-chip)] px-1 py-0.5 font-mono text-[9px] text-[var(--text-tertiary)]">
+        <span className="shrink-0 rounded bg-[var(--surface-chip)] px-1 py-0.5 font-mono text-10 text-[var(--text-tertiary)]">
           {shortcut}
         </span>
       )}
@@ -1684,7 +1684,7 @@ function FileJumpPopover({
               onChange={(event) => setQuery(event.target.value)}
               placeholder={t('rightSidebar.review.fileJump.placeholder')}
               aria-label={t('rightSidebar.review.fileJump.placeholder')}
-              className="h-7 w-full rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] pl-7 pr-2 text-[12px] text-[var(--text-primary)] placeholder:text-[var(--text-placeholder)] focus:outline-none focus:ring-2 focus:ring-[var(--focus-ring-soft)]"
+              className="h-7 w-full rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] pl-7 pr-2 text-12 text-[var(--text-primary)] placeholder:text-[var(--text-placeholder)] focus:outline-none focus:ring-2 focus:ring-[var(--focus-ring-soft)]"
             />
           </label>
           <div
@@ -1693,7 +1693,7 @@ function FileJumpPopover({
             className="mt-2 max-h-[280px] overflow-y-auto"
           >
             {results.length === 0 ? (
-              <div className="px-2 py-4 text-[11px] text-[var(--text-tertiary)]">
+              <div className="px-2 py-4 text-11 text-[var(--text-tertiary)]">
                 {t('rightSidebar.review.fileJump.empty')}
               </div>
             ) : (
@@ -1710,11 +1710,11 @@ function FileJumpPopover({
                     index === selectedIndex && 'bg-[var(--cmd-palette-item-hover)]',
                   )}
                 >
-                  <span className="truncate text-[12px] font-medium text-[var(--text-primary)]">
+                  <span className="truncate text-12 font-medium text-[var(--text-primary)]">
                     {result.fileName}
                   </span>
                   {result.directory && (
-                    <span className="truncate text-[10px] text-[var(--text-tertiary)]">
+                    <span className="truncate text-10 text-[var(--text-tertiary)]">
                       {result.directory}
                     </span>
                   )}
@@ -1722,7 +1722,7 @@ function FileJumpPopover({
               ))
             )}
             {overflowCount > 0 && (
-              <div className="px-2 py-1.5 text-[10px] text-[var(--text-tertiary)]">
+              <div className="px-2 py-1.5 text-10 text-[var(--text-tertiary)]">
                 {t('rightSidebar.review.fileJump.more', { count: overflowCount })}
               </div>
             )}
@@ -1850,7 +1850,7 @@ export function ReviewMoreMenu({
         onCopyGitApply();
       }}
       className={cn(
-        'flex h-8 items-center gap-2 rounded-[6px] px-2 text-[12px] text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]',
+        'flex h-8 items-center gap-2 rounded-[6px] px-2 text-12 text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]',
         !canCopyGitApply && 'cursor-not-allowed opacity-50',
       )}
     >
@@ -1896,7 +1896,7 @@ export function ReviewMoreMenu({
         )}
         <DropdownMenuItem
           onSelect={() => onWordWrapChange(!wordWrap)}
-          className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-[12px] text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]"
+          className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-12 text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]"
         >
           {wordWrap
             ? <WrapText size={12} className="text-[var(--text-secondary)]" />
@@ -1905,7 +1905,7 @@ export function ReviewMoreMenu({
         </DropdownMenuItem>
         <DropdownMenuItem
           onSelect={() => onWordDiffChange(!wordDiff)}
-          className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-[12px] text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]"
+          className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-12 text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]"
         >
           {wordDiff
             ? <Diff size={12} className="text-[var(--text-secondary)]" />
@@ -1914,7 +1914,7 @@ export function ReviewMoreMenu({
         </DropdownMenuItem>
         <DropdownMenuItem
           onSelect={() => onHideWhitespaceChange(!hideWhitespace)}
-          className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-[12px] text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]"
+          className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-12 text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]"
         >
           {hideWhitespace
             ? <EyeOff size={12} className="text-[var(--text-secondary)]" />
@@ -1954,7 +1954,7 @@ function DiffExpansionMenuItem({
         onToggle();
       }}
       className={cn(
-        'flex h-8 items-center gap-2 rounded-[6px] px-2 text-[12px] text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]',
+        'flex h-8 items-center gap-2 rounded-[6px] px-2 text-12 text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]',
         disabled && 'cursor-not-allowed opacity-50',
       )}
     >
@@ -1985,7 +1985,7 @@ function FileTreeMenuItem({
   return (
     <DropdownMenuItem
       onSelect={onToggle}
-      className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-[12px] text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]"
+      className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-12 text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]"
     >
       {preferenceVisible
         ? <FolderOpen size={12} className="text-[var(--text-secondary)]" />
@@ -2039,7 +2039,7 @@ export function SourceDropdown({
           type="button"
           aria-label={t('rightSidebar.review.sourceDropdownAria')}
           className={cn(
-            'flex h-7 shrink-0 items-center justify-between rounded-full border border-transparent bg-transparent px-1.5 text-left text-[12px] font-medium text-[var(--text-primary)] hover:bg-[var(--surface-hover)]',
+            'flex h-7 shrink-0 items-center justify-between rounded-full border border-transparent bg-transparent px-1.5 text-left text-12 font-medium text-[var(--text-primary)] hover:bg-[var(--surface-hover)]',
             layout === 'wide' ? 'max-w-[11rem]' : 'max-w-[10rem]',
           )}
         >
@@ -2065,7 +2065,7 @@ export function SourceDropdown({
           if (open) onRefreshCommits?.();
         }}
         >
-          <DropdownMenuSubTrigger className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-[12px] text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)] data-[state=open]:bg-[var(--cmd-palette-item-hover)]">
+          <DropdownMenuSubTrigger className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-12 text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)] data-[state=open]:bg-[var(--cmd-palette-item-hover)]">
             <span className="min-w-0 flex-1 truncate">{t('rightSidebar.review.source.commit')}</span>
             <span className="flex h-4 w-4 shrink-0 items-center justify-center text-[var(--text-secondary)]">
               {source === 'commit' && <Check size={12} />}
@@ -2081,7 +2081,7 @@ export function SourceDropdown({
               <>
                 <DropdownMenuItem
                   disabled
-                  className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-[12px] text-[var(--text-secondary)]"
+                  className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-12 text-[var(--text-secondary)]"
                 >
                   <AlertTriangle size={12} />
                   <span>{t('rightSidebar.review.commitMenu.error')}</span>
@@ -2091,7 +2091,7 @@ export function SourceDropdown({
                     event.preventDefault();
                     onRefreshCommits?.();
                   }}
-                  className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-[12px] text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]"
+                  className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-12 text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]"
                 >
                   <Spinner icon={RefreshCw} size={12} spinning={commitsLoading} className="text-[var(--text-secondary)]" />
                   <span>{t('rightSidebar.review.commitMenu.retry')}</span>
@@ -2100,7 +2100,7 @@ export function SourceDropdown({
             ) : !commitMenuLoaded || (commitsLoading && commitList.length === 0) ? (
               <DropdownMenuItem
                 disabled
-                className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-[12px] text-[var(--text-secondary)]"
+                className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-12 text-[var(--text-secondary)]"
               >
                 <Spinner icon={RefreshCw} size={12} />
                 <span>{t('rightSidebar.review.commitMenu.loading')}</span>
@@ -2108,7 +2108,7 @@ export function SourceDropdown({
             ) : commitList.length === 0 ? (
               <DropdownMenuItem
                 disabled
-                className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-[12px] text-[var(--text-secondary)]"
+                className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-12 text-[var(--text-secondary)]"
               >
                 <FileDiffIcon size={12} />
                 <span>{t('rightSidebar.review.commitMenu.empty')}</span>
@@ -2121,12 +2121,12 @@ export function SourceDropdown({
                   <DropdownMenuItem
                     onSelect={() => onSelectCommit?.(commit.oid)}
                     className={cn(
-                      'flex h-8 min-w-0 items-center gap-2 rounded-[6px] px-2 text-[12px] text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]',
+                      'flex h-8 min-w-0 items-center gap-2 rounded-[6px] px-2 text-12 text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]',
                       active && 'bg-[var(--surface-chip)]',
                     )}
                   >
                     <span className="min-w-0 flex-1 truncate">{title}</span>
-                    <span className="shrink-0 text-[10px] text-[var(--text-tertiary)]">
+                    <span className="shrink-0 text-10 text-[var(--text-tertiary)]">
                       {t('rightSidebar.review.commitMenu.relativeTime', {
                         time: formatSidebarTime(new Date(commit.authorTime * 1000).toISOString(), t),
                       })}
@@ -2180,7 +2180,7 @@ function SourceDropdownItem({
   return (
     <DropdownMenuItem
       onSelect={() => onChange(option.source)}
-      className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-[12px] text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]"
+      className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-12 text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]"
     >
       <span className="min-w-0 flex-1 truncate">{option.label}</span>
       <SourceCountBadge count={option.count} />
@@ -2276,18 +2276,18 @@ function OperationNotice({
   const errorDetails = errorLines.slice(1).join('\n').trim();
   if (!error && failed.length === 0) return null;
   return (
-    <div className="mt-2 rounded-[8px] border border-[var(--error-border)] bg-[var(--error-bg)] px-2.5 py-2 text-[11px] leading-relaxed text-[var(--error-fg)]">
+    <div className="mt-2 rounded-[8px] border border-[var(--error-border)] bg-[var(--error-bg)] px-2.5 py-2 text-11 leading-relaxed text-[var(--error-fg)]">
       {errorTitle ?? t('rightSidebar.review.actions.partialFailure', {
         succeeded: summary?.succeeded.length ?? 0,
         failed: failed.length,
       })}
       {errorDetails && (
-        <div className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] text-[var(--error-fg-strong)]">
+        <div className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words font-mono text-10 text-[var(--error-fg-strong)]">
           {errorDetails}
         </div>
       )}
       {failed.length > 0 && (
-        <div className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] text-[var(--error-fg-strong)]">
+        <div className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words font-mono text-10 text-[var(--error-fg-strong)]">
           {failed[0].path}: {failed[0].stderr || failed[0].error}
         </div>
       )}
@@ -2557,7 +2557,7 @@ function DiffList({
         onRichMarkdownPreviewChange={onRichMarkdownPreviewChange}
       />
       {topNotice && (
-        <div className="shrink-0 border-b border-[var(--border-default)] bg-[var(--warning-bg-soft)] px-3 py-2 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+        <div className="shrink-0 border-b border-[var(--border-default)] bg-[var(--warning-bg-soft)] px-3 py-2 text-11 leading-relaxed text-[var(--text-secondary)]">
           {topNotice}
         </div>
       )}
@@ -2744,12 +2744,12 @@ export function ReviewFileTreeSidebar({
             onChange={(event) => setQuery(event.target.value)}
             placeholder={t('rightSidebar.review.fileTree.filterPlaceholder')}
             aria-label={t('rightSidebar.review.fileTree.filterPlaceholder')}
-            className="h-7 w-full rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] pl-7 pr-2 text-[12px] text-[var(--text-primary)] placeholder:text-[var(--text-placeholder)] focus:outline-none focus:ring-2 focus:ring-[var(--focus-ring-soft)]"
+            className="h-7 w-full rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] pl-7 pr-2 text-12 text-[var(--text-primary)] placeholder:text-[var(--text-placeholder)] focus:outline-none focus:ring-2 focus:ring-[var(--focus-ring-soft)]"
           />
         </label>
       </div>
       {flatNodes.length === 0 ? (
-        <div className="px-3 py-4 text-[11px] leading-relaxed text-[var(--text-tertiary)]">
+        <div className="px-3 py-4 text-11 leading-relaxed text-[var(--text-tertiary)]">
           {t('rightSidebar.review.fileTree.empty')}
         </div>
       ) : (
@@ -2810,7 +2810,7 @@ function ReviewFileTreeRow({
         role="treeitem"
         aria-expanded={!collapsed}
         onClick={() => onToggleDirectory(node.id)}
-        className="flex h-7 w-full min-w-0 items-center gap-1 pr-2 text-left text-[12px] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]"
+        className="flex h-7 w-full min-w-0 items-center gap-1 pr-2 text-left text-12 text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]"
         style={{ paddingLeft }}
       >
         {collapsed ? <ChevronRight size={12} className="shrink-0 text-[var(--text-tertiary)]" /> : <ChevronDown size={12} className="shrink-0 text-[var(--text-tertiary)]" />}
@@ -2829,7 +2829,7 @@ function ReviewFileTreeRow({
         aria-selected={active}
         onClick={() => onSelectFile(node.diff)}
         className={cn(
-          'flex h-7 w-full min-w-0 items-center pr-2 text-left text-[12px] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]',
+          'flex h-7 w-full min-w-0 items-center pr-2 text-left text-12 text-[var(--text-secondary)] hover:bg-[var(--surface-hover)]',
           active && 'bg-[var(--surface-chip)] text-[var(--text-primary)]',
         )}
         style={{ paddingLeft: paddingLeft + 18 }}
@@ -2928,12 +2928,12 @@ export function ReviewDiffListHeader({
   }, [rowEl]);
 
   return (
-    <div ref={setRowEl} className="flex h-9 shrink-0 items-center gap-2 border-b border-[var(--border-default)] px-3 text-[12px]">
+    <div ref={setRowEl} className="flex h-9 shrink-0 items-center gap-2 border-b border-[var(--border-default)] px-3 text-12">
       <div data-testid="review-diff-list-header-left" className="flex min-w-0 flex-1 items-center gap-2">
         {branchBaseControl && (
           <>
             {showBranchBaseLabel && (
-              <span data-testid="review-branch-base-label" className="shrink-0 text-[11px] text-[var(--text-tertiary)]">
+              <span data-testid="review-branch-base-label" className="shrink-0 text-11 text-[var(--text-tertiary)]">
                 {t('rightSidebar.review.branch.baseLabel')}
               </span>
             )}
@@ -3034,7 +3034,7 @@ function DiffViewModeToggle({
           type="button"
           onClick={() => onChange(option.mode)}
           className={cn(
-            'rounded-full px-2 text-[10px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
+            'rounded-full px-2 text-10 font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
             option.mode === mode && 'bg-[var(--surface-elevated)] text-[var(--text-primary)] shadow-[var(--shadow-menu)]',
           )}
         >
@@ -3150,7 +3150,7 @@ export function CappedSourceView({
         richMarkdownPreview={richMarkdownPreview}
         onRichMarkdownPreviewChange={onRichMarkdownPreviewChange}
       />
-      <div className="shrink-0 border-b border-[var(--border-default)] bg-[var(--warning-bg-soft)] px-3 py-2 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+      <div className="shrink-0 border-b border-[var(--border-default)] bg-[var(--warning-bg-soft)] px-3 py-2 text-11 leading-relaxed text-[var(--text-secondary)]">
         {notice}
       </div>
       <div ref={contentRef} className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
@@ -3218,12 +3218,12 @@ function CappedFileState({
   desc: string;
 }) {
   return (
-    <div className="m-3 rounded-[8px] border border-[var(--border-default)] bg-[var(--surface)] px-3 py-3 text-[12px] leading-relaxed text-[var(--text-secondary)]">
+    <div className="m-3 rounded-[8px] border border-[var(--border-default)] bg-[var(--surface)] px-3 py-3 text-12 leading-relaxed text-[var(--text-secondary)]">
       <div className="flex items-center gap-2 font-medium text-[var(--text-primary)]">
         <span className="text-[var(--text-tertiary)]">{icon}</span>
         <span>{title}</span>
       </div>
-      <div className="mt-1 break-words text-[11px] text-[var(--text-tertiary)]">{desc}</div>
+      <div className="mt-1 break-words text-11 text-[var(--text-tertiary)]">{desc}</div>
     </div>
   );
 }
@@ -3439,7 +3439,7 @@ export function BranchBaseDropdown({
             type="button"
             disabled={candidates.length === 0}
             aria-label={tooltip}
-            className="flex h-6 min-w-0 max-w-full items-center justify-between rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-2 text-left text-[12px] text-[var(--text-primary)] hover:bg-[var(--surface-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+            className="flex h-6 min-w-0 max-w-full items-center justify-between rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-2 text-left text-12 text-[var(--text-primary)] hover:bg-[var(--surface-hover)] disabled:cursor-not-allowed disabled:opacity-60"
           >
             <span className="min-w-0 truncate">{label}</span>
             <ChevronDown size={13} className="ml-1.5 shrink-0 text-[var(--text-tertiary)]" />
@@ -3455,7 +3455,7 @@ export function BranchBaseDropdown({
           <DropdownMenuItem
             key={candidate.refName}
             onSelect={() => onSelectBase(candidate.refName)}
-            className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-[12px] text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]"
+            className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-12 text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]"
           >
             <span className="flex h-4 w-4 items-center justify-center text-[var(--text-secondary)]">
               {candidate.refName === selectedBaseRef && <Check size={12} />}
@@ -3509,13 +3509,13 @@ function CenteredState({
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
       <div className="text-[var(--text-tertiary)]">{icon}</div>
-      <p className="text-[13px] font-medium text-[var(--text-primary)]">{title}</p>
-      <p className="max-w-[260px] text-[11px] leading-relaxed text-[var(--text-tertiary)]">{desc}</p>
+      <p className="text-13 font-medium text-[var(--text-primary)]">{title}</p>
+      <p className="max-w-[260px] text-11 leading-relaxed text-[var(--text-tertiary)]">{desc}</p>
       {actionLabel && onAction && (
         <button
           type="button"
           onClick={onAction}
-          className="mt-1 rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-3 py-1.5 text-[11px] font-medium text-[var(--text-primary)] hover:bg-[var(--surface-hover)]"
+          className="mt-1 rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-3 py-1.5 text-11 font-medium text-[var(--text-primary)] hover:bg-[var(--surface-hover)]"
         >
           {actionLabel}
         </button>
@@ -3553,7 +3553,7 @@ function ActionButton({
         onClick();
       }}
       className={cn(
-        'inline-flex h-6 items-center justify-center rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] text-[10px] font-medium text-[var(--text-primary)] hover:bg-[var(--surface-hover)] disabled:cursor-not-allowed disabled:opacity-50',
+        'inline-flex h-6 items-center justify-center rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] text-10 font-medium text-[var(--text-primary)] hover:bg-[var(--surface-hover)] disabled:cursor-not-allowed disabled:opacity-50',
         className,
         iconOnly ? 'w-6 px-0' : 'gap-1 px-2',
       )}
@@ -3766,8 +3766,8 @@ function FileRow({
             <ChevronRight size={12} className="shrink-0 text-[var(--text-tertiary)]" />
           )}
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-[13px] font-medium text-[var(--text-primary)]">{fileName}</span>
-            <span className="block truncate text-[10px] text-[var(--text-tertiary)]">
+            <span className="block truncate text-13 font-medium text-[var(--text-primary)]">{fileName}</span>
+            <span className="block truncate text-10 text-[var(--text-tertiary)]">
               {showsPathTransition ? (
                 <>
                   <span className="opacity-70">{diff.oldPath}</span>
@@ -3779,16 +3779,16 @@ function FileRow({
           </span>
         </button>
         {changeChip && (
-          <span className="shrink-0 rounded-full bg-[var(--surface-chip)] px-2 py-0.5 text-[10px] text-[var(--text-secondary)]">
+          <span className="shrink-0 rounded-full bg-[var(--surface-chip)] px-2 py-0.5 text-10 text-[var(--text-secondary)]">
             {changeChip}
           </span>
         )}
         {diff.kind !== 'text' && (
-          <span className="shrink-0 rounded-full bg-[var(--surface-chip)] px-2 py-0.5 text-[10px] text-[var(--text-secondary)]">
+          <span className="shrink-0 rounded-full bg-[var(--surface-chip)] px-2 py-0.5 text-10 text-[var(--text-secondary)]">
             {t(`rightSidebar.review.status.${diff.kind}`, { defaultValue: diff.kind })}
           </span>
         )}
-        <span className="shrink-0 font-mono text-[11px] tabular-nums">
+        <span className="shrink-0 font-mono text-11 tabular-nums">
           <span className="text-[var(--diff-add-fg)]">+{diff.additions}</span>{' '}
           <span className="text-[var(--diff-del-fg)]">-{diff.deletions}</span>
         </span>
@@ -3828,12 +3828,12 @@ function FileRow({
       {expanded && (
         <div className="min-w-0 px-3 pb-3">
           {showRenamePartialNotice && (
-            <div className="mb-2 rounded-[8px] border border-[var(--border-default)] bg-[var(--surface)] px-3 py-2 text-[12px] text-[var(--text-secondary)]">
+            <div className="mb-2 rounded-[8px] border border-[var(--border-default)] bg-[var(--surface)] px-3 py-2 text-12 text-[var(--text-secondary)]">
               {t('rightSidebar.review.renamePartialNotice')}
             </div>
           )}
           {showTypechangePartialNotice && (
-            <div className="mb-2 rounded-[8px] border border-[var(--border-default)] bg-[var(--surface)] px-3 py-2 text-[12px] text-[var(--text-secondary)]">
+            <div className="mb-2 rounded-[8px] border border-[var(--border-default)] bg-[var(--surface)] px-3 py-2 text-12 text-[var(--text-secondary)]">
               {t('rightSidebar.review.typechangePartialNotice')}
             </div>
           )}

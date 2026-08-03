@@ -516,7 +516,7 @@ export function AskUserQuestionPrompt({
       minimizeDisabled={isAnimating}
       headerLeading={
         currentQ?.header ? (
-          <span className="inline-block rounded-[6px] bg-[var(--ask-header-chip-bg)] px-[8px] py-[2px] text-[12px] font-medium text-[var(--ask-badge-text)]">
+          <span className="inline-block rounded-[6px] bg-[var(--ask-header-chip-bg)] px-[8px] py-[2px] text-12 font-medium text-[var(--ask-badge-text)]">
             {currentQ.header}
           </span>
         ) : null
@@ -602,7 +602,7 @@ export function AskUserQuestionPrompt({
                       )}
                     </div>
                   </div>
-                  <div className="ml-3 flex h-[28px] w-[28px] shrink-0 items-center justify-center rounded-[8px] bg-[var(--ask-badge-bg)] text-[13px] font-medium text-[var(--ask-badge-text)]">
+                  <div className="ml-3 flex h-[28px] w-[28px] shrink-0 items-center justify-center rounded-[8px] bg-[var(--ask-badge-bg)] text-13 font-medium text-[var(--ask-badge-text)]">
                     {idx + 1}
                   </div>
                 </button>
@@ -695,7 +695,7 @@ export function AskUserQuestionPrompt({
                     Type something else...
                   </span>
                 </div>
-                <div className="ml-3 flex h-[28px] w-[28px] shrink-0 items-center justify-center rounded-[8px] bg-[var(--ask-badge-bg)] text-[13px] font-medium text-[var(--ask-badge-text)]">
+                <div className="ml-3 flex h-[28px] w-[28px] shrink-0 items-center justify-center rounded-[8px] bg-[var(--ask-badge-bg)] text-13 font-medium text-[var(--ask-badge-text)]">
                   {options.length + 1}
                 </div>
               </button>

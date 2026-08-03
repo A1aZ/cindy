@@ -198,7 +198,7 @@ export function ImDefaultSettingsSection({
     return (
       <div
         className={cn(
-          'text-[13px] text-[var(--text-tertiary)]',
+          'text-13 text-[var(--text-tertiary)]',
           embedded
             ? 'py-2'
             : 'rounded-xl border border-[var(--settings-theme-card-border)] bg-[var(--settings-theme-card-bg)] px-4 py-5',
@@ -259,10 +259,10 @@ export function ImDefaultSettingsSection({
             <MessageSquare size={18} className="text-[var(--settings-section-title)]" />
           </div>
           <div className="min-w-0">
-            <h3 className="text-[14px] font-medium leading-none text-[var(--settings-section-title)]">
+            <h3 className="text-14 font-medium leading-none text-[var(--settings-section-title)]">
               {t('settings.imBot.defaults.title')}
             </h3>
-            <p className="mt-2 text-[12px] leading-[1.45] text-[var(--settings-section-desc)]">
+            <p className="mt-2 text-12 leading-[1.45] text-[var(--settings-section-desc)]">
               {t(`settings.imBot.defaults.channelDescriptions.${descriptionChannel}`)}
             </p>
           </div>
@@ -276,7 +276,7 @@ export function ImDefaultSettingsSection({
 
       <div className="grid gap-4 md:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
         <div className="flex flex-col gap-2">
-          <span className="text-[12px] font-medium text-[var(--text-secondary)]">
+          <span className="text-12 font-medium text-[var(--text-secondary)]">
             {t('settings.imBot.defaults.agentLabel')}
           </span>
           <div
@@ -296,7 +296,7 @@ export function ImDefaultSettingsSection({
                   onClick={() => changeAgent(kind)}
                   className={cn(
                     'flex h-full min-w-0 flex-1 items-center justify-center gap-1.5 rounded-full px-3',
-                    'border text-[13px] leading-none transition-colors',
+                    'border text-13 leading-none transition-colors',
                     active
                       ? 'border-[var(--border-default)] bg-[var(--surface-elevated)] font-medium text-[var(--settings-section-title)]'
                       : 'border-transparent font-normal text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
@@ -312,7 +312,7 @@ export function ImDefaultSettingsSection({
         </div>
 
         <div className="flex flex-col gap-2">
-          <span className="text-[12px] font-medium text-[var(--text-secondary)]">
+          <span className="text-12 font-medium text-[var(--text-secondary)]">
             {t('settings.imBot.defaults.modelLabel')}
           </span>
           <ModelSelector

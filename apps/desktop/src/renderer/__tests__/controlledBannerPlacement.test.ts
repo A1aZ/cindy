@@ -34,7 +34,7 @@ describe('controlled banner placement', () => {
     expect(sessionViewSource).toContain('style={{ maxWidth: centerSlotMaxWidth }}');
     expect(sessionViewSource).toContain('className="flex min-w-0 items-center justify-self-end gap-[6px]"');
     expect(controlledBannerSource).toContain('flex min-w-0 max-w-full select-none items-center gap-2 overflow-hidden');
-    expect(controlledBannerSource).toContain('className="min-w-0 truncate text-[12px] text-[var(--text-primary)]"');
+    expect(controlledBannerSource).toContain('className="min-w-0 truncate text-12 text-[var(--text-primary)]"');
     expect(controlledBannerSource).toContain('className="flex min-w-0 max-w-[45%] shrink items-center gap-1');
     expect(controlledBannerSource).toContain('<span className="min-w-0 truncate">');
     expect(controlledBannerSource).not.toContain("placement === 'statusbar' && 'my-");

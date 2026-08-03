@@ -50,7 +50,7 @@ const htmlReaderSource = readSource('src/session/HtmlFileReader.tsx');
 
 describe('HTML 渲染态的 WebView 约束', () => {
   it('显式给 baseUrl,不吃两端默认值不一致(Android 空串会吞掉页内锚点)', () => {
-    expect(htmlReaderSource).toContain("source={{ baseUrl: 'about:blank', html }}");
+    expect(htmlReaderSource).toContain("source={{ baseUrl: 'about:blank', html: guardedHtml }}");
   });
 
   it('回调是唯一导航决策点:originWhitelist 不得收窄', () => {
@@ -71,23 +71,22 @@ describe('HTML 渲染态的 WebView 约束', () => {
     expect(htmlReaderSource).toContain('allowFileAccess={false}');
   });
 
-  it('只有用户点击的 http(s) 才外送 —— 程序化导航一律拒绝', () => {
-    // JavaScript 在这里是开启的:location.href / 表单自动提交 / meta refresh 都会走进
-    // 回调,不卡 click 的话,用户只要打开生成物就会被脚本强制带出 Cindy(review P1)。
-    expect(htmlReaderSource).toContain("request.navigationType === 'click'");
-    // Android 不上报 navigationType → 判为无法确认 → 拒绝(fail-closed)。
-    expect(htmlReaderSource).toContain('navigationType');
-  });
-
-  it('三档决策:about 放行、http(s) 外送、其余拒绝且不碰 Linking', () => {
-    // 页内锚点必须放行,否则目录跳转失效。
+  it('零出网信道:连用户点击的 http(s) 外链也不外送', () => {
+    // 导航回调**只管导航**,`new Image().src` / `fetch` 这类子资源请求完全不经过它 ——
+    // 出网必须由 CSP 在引擎层关掉(见 htmlPreviewCsp)。这里关的是另一半:顶层跳转。
+    // 连「用户点击的外链」也不放:页面里有从被控端取回的内容,脚本能把它拼进一个真实
+    // <a href> 让用户去点,CSP 管不到顶层导航(navigate-to 已从 CSP3 移除)(review P1)。
+    //
+    // 判据写成「模块既不 import 也不调用 Linking」:比检查某个分支更难绕过。
+    // (注意别写成 /Linking/ —— 头注里本来就在解释「为什么不用 Linking」,会自我命中。)
+    expect(htmlReaderSource).toContain("import { StyleSheet, View } from 'react-native';");
+    expect(htmlReaderSource).not.toMatch(/\bLinking\.\w/);
+    // 放行面只剩 about:(文档自身与页内锚点,否则目录跳转失效)。
     expect(htmlReaderSource).toContain("url.startsWith('about:')");
-    // http(s) 之外不得有任何 Linking 调用 —— 唯一一处必须在 http(s) 判定分支内。
-    const linkingCalls = htmlReaderSource.match(/Linking\.openURL/g) ?? [];
-    expect(linkingCalls).toHaveLength(1);
-    const httpBranch = /if \(\/\^https\?:[\s\S]*?\n  \}/.exec(htmlReaderSource);
-    expect(httpBranch, '未找到 http(s) 分支').not.toBeNull();
-    expect(httpBranch![0]).toContain('Linking.openURL');
+    // 回调必须以无条件拒绝收尾(默认拒绝,不是默认放行)。
+    const decision = /function interceptHtmlNavigation[\s\S]*?\n\}/.exec(htmlReaderSource);
+    expect(decision, '未找到导航决策函数').not.toBeNull();
+    expect(decision![0].trimEnd().endsWith('return false;\n}')).toBe(true);
     // onMessage 缺席是刻意的:不给任意生成物一条通向 RN 的桥。
     // 只匹配 JSX 属性形态 —— 头注里说明「不挂 onMessage」的那句话不算挂上。
     expect(htmlReaderSource).not.toMatch(/onMessage\s*=/);
